@@ -284,7 +284,7 @@ agent 延迟收图：`image_gen` 在 `min(imageTimeoutMs(options, COMFY_TIMEOUT_
 | 映射 | 会话 init 事务写 session 文档 cs.pi.threads；`pi-threads.json` 以临时文件 rename 原子更新，启动从 SQLite 重建。创建/映射短锁，回合按键各自互斥，不同键并行且受派发器 AGENT_CONCURRENCY 限制；旧 owner 保留，旧 shared 永久停用并仅记录一次日志；healthz 仅返回 count/keys |
 | 请求 | 复用 buildCodexPrompt 的来源、引用清洗；submit 前写 cs.pi.request（ticket/access/参考图/content/deadline/calls），工具经 api.snapshot 读取，参数无访问范围入口 |
 | 幂等与恢复 | submit({requestId: ticket, whenBusy: reject})，Submission.wait 与 AssistantEntry 读取对应最终回答；旧票据重投不返回别的回合答案。重启先为恢复回合设置锁和原期限，避免新请求覆盖身份 |
-| 超时 | 默认 300 秒，取消等待后还调用 Conversation.abort(background:true) 并等待实际结束；同线程排队取消不提交请求 |
+| 超时 | 默认 300 秒，用户取消/超时调用 Conversation.abort(background:true)；进程关闭先标记 pi 停止接收，再关票据 harness（只停止等待），最后关闭 pi harness 保留可恢复任务。恢复遇到既有 unanswered/aborted 回执时，先将 `<ticket>#r1` 写入 TicketDoc，再用原输入补提一次；同线程排队取消不提交请求 |
 | 扩展 | defineExtension(`cs-pi`) 注册六种工具、section 与 ToolTask.beforeTool hook；hook 在同事务内按 taskId 去重计数，搜索/抓页各 4、历史合计 4、生图 2 |
 | 历史工具 | 直接复用 callQQContextTool → ContextStore + format，绑定 access；qq_recent/qq_search 总量≤2500 字，qq_message≤1500 字 |
 | 联网工具 | DeepSeek Search/Fetch 固定 API 地址；仅 429 一次退避，响应体有上限，错误不回显服务端正文；公开 URL 校验复用 forbiddenAddress，DNS 全量地址检查。服务端重定向与 DNS 固定不在本机控制范围 |

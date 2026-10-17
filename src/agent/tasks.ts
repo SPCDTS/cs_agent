@@ -435,6 +435,11 @@ export function createTasks(deps: TaskDeps) {
               {
                 signal: runtime.signal,
                 onEvent: (e) => log.debug("agent backend event", { ticket: short(doc.ticket), ...e }),
+                piTurn: doc.piTurn,
+                persistPiTurn: state => runtime.commit(async tx => {
+                  (await tx.doc(TicketDoc, runtime.conversationId)).piTurn = { ...state };
+                  return undefined;
+                }, context),
                 ...(doc.codexTurn ? { turn: doc.codexTurn } : {}),
                 // 启动外部回合之前落盘"回合已开始"（不推进检查点）
                 persistTurn: (state) =>

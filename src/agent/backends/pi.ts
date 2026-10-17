@@ -140,7 +140,7 @@ export class PiBackend implements AgentBackend {
     const joined = AbortSignal.any([timer.signal, ...(signal ? [signal] : [])]);
     try { return await work(withAbortSignal(joined, context)); }
     catch (err) {
-      if (joined.aborted) {
+      if (joined.aborted && !this.closing) {
         await conv.abort(context, { background: true });
         if (timer.signal.aborted) throw new BackendTimeoutError("处理超时，请稍后再试。");
       }
@@ -161,7 +161,8 @@ export class PiBackend implements AgentBackend {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(req.ticket)) throw new Error("非法票据");
     if (!parseAccess(req.access) || (req.threadKey !== "owner" && req.access !== req.scope)) throw new Error("非法访问范围");
     const conv = await this.conversation(req.threadKey);
-    const known = await conv.commit(tx => tx.submissionByRequest(conv.id, req.ticket), context);
+    let requestId = ctx.piTurn?.requestId ?? req.ticket;
+    const known = await conv.commit(tx => tx.submissionByRequest(conv.id, requestId), context);
     let deadline = Date.now() + (this.opts.timeoutMs ?? 300_000);
     if (!known) {
       await conv.waitForIdle(withAbortSignal(ctx.signal, context));
@@ -185,9 +186,20 @@ export class PiBackend implements AgentBackend {
       const bound = await this.harness.snapshot(PiRequestDoc, conv.id, context);
       waitContext.abortSignal?.throwIfAborted();
       // requestId 直接使用 ticket；即使已有回执，也通过 submit 的持久化去重复用。
-      const submission: Submission = await conv.submit({ type: "input", requestId: req.ticket,
+      let submission: Submission = await conv.submit({ type: "input", requestId,
         content: bound?.ticket === req.ticket ? bound.content : req.text, whenBusy: "reject" }, context);
-      const settled = await submission.wait(waitContext);
+      let settled = await submission.wait(waitContext);
+      // 仅恢复既有的 aborted 回执；本次新发生的用户取消/超时不重提。
+      if (known?.status === "unanswered" && settled.status === "unanswered" && settled.reason === "aborted" &&
+          (ctx.piTurn?.retries ?? 0) < 1) {
+        if (bound?.ticket !== req.ticket) throw new Error("pi 恢复请求与绑定不一致");
+        requestId = req.ticket + "#r" + ((ctx.piTurn?.retries ?? 0) + 1);
+        await ctx.persistPiTurn?.({ requestId, retries: (ctx.piTurn?.retries ?? 0) + 1 });
+        await conv.commit(async tx => { (await tx.doc(PiRequestDoc, conv.id)).deadline = deadline; }, context);
+        waitContext.abortSignal?.throwIfAborted();
+        submission = await conv.submit({ type: "input", requestId, content: bound.content, whenBusy: "reject" }, context);
+        settled = await submission.wait(waitContext);
+      }
       if (settled.status !== "done" || settled.type !== "input") throw new Error("pi 未能完成本次请求，请稍后再试。");
       const answer = await conv.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
       const text = answer?.model?.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "text").map(c => c.text) : []).join("").trim();
@@ -198,8 +210,11 @@ export class PiBackend implements AgentBackend {
     });
   }
 
+  /** 必须在关闭票据 harness 前调用，使其 signal 只停止等待、不终结 pi submission。 */
+  beginShutdown(): void { this.closing = true; }
+
   async close(): Promise<void> {
-    this.closing = true;
+    this.beginShutdown();
     await this.harness.close(context);
     await Promise.allSettled([...this.tails.values()]);
   }

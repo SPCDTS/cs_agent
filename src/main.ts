@@ -11,6 +11,7 @@ import { createAgentModels, openHarness, resolveThinkingLevel } from "./agent/ha
 import { createCsAgentExtension } from "./agent/extension.js";
 import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
 import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
+import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
 import { CodexRunner, effectiveWritableRoots, ensureWorkspaceAgentsMd, writeGlobalAgentsMd } from "./agent/codex-runner.js";
 import { createImageBackend } from "./agent/image-gen.js";
@@ -255,8 +256,7 @@ async function main(): Promise<void> {
     server.close();
     aging.stop();
     await bridge!.stop().catch(() => undefined);
-    await harness.close(ctx).catch(() => undefined);
-    await pi.close().catch(() => undefined);
+    await closeAgentHarnesses(harness, pi);
     try {
       store.close();
     } catch {

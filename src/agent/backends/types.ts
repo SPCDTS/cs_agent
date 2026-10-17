@@ -42,6 +42,8 @@ export interface AgentHandleContext {
   onEvent(e: AgentEvent): void;
   /** 上次（崩溃前）记录的回合标记；首次处理时为 undefined */
   turn?: Readonly<TurnState>;
+  piTurn?: Readonly<{ requestId: string; retries: number }>;
+  persistPiTurn?(state: { requestId: string; retries: number }): Promise<void>;
   /** 启动外部回合之前持久化回合标记（durable 任务提供；单独调用后端时可省略） */
   persistTurn?(state: TurnState): Promise<void>;
 }

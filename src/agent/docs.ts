@@ -56,6 +56,8 @@ export type TicketState = {
   agentResult?: AgentResult;
   lateImageJobs?: LateImageJob[];
   /** 后端回合标记：启动外部回合（codex）之前写入，崩溃恢复时据此避免重复询问 */
+  /** pi 关闭恢复的重提编号；提交前落盘，最多补提一次。 */
+  piTurn?: { requestId: string; retries: number };
   codexTurn?: { outFile: string; attempts: number };
   /** 后处理后的回复正文（agent 路径 postprocess 阶段写入） */
   replyDraft?: string;
