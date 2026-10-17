@@ -1,0 +1,24 @@
+services:
+  cs-agent:
+    build: .
+    image: cs-agent:dev
+    container_name: cs-agent
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATA_DIR: /data
+      WORKSPACE_DIR: /workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/data
+      - ./workspace:/workspace
+    user: "node"
+    restart: unless-stopped
+    init: false   # 镜像内已用 tini
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
