@@ -140,7 +140,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const dir = tmp("cs-entry-");
     const data = shPath(path.join(dir, "data"));
     const roots = ["/workspace", " /srv/prompts/ ", "relative", "/", data, `${data}/`, `${data}/codex`, `${data}/codex/sessions`,
-      `${data}/images`, `${data}/qq-messages.sqlite`, "/x/../etc", '/w"x', "/opt/ok"];
+      `${data}/images`, `${data}/tickets`, `${data}/tickets/x`, `${data}/qq-messages.sqlite`, "/x/../etc", '/w"x', "/opt/ok"];
     const r = runEntrypointIn(dir, { CODEX_SANDBOX_NETWORK: "false", CODEX_WRITABLE_ROOTS: roots.join(",") });
     const t = parse(r.toml);
     expect(t["sandbox_workspace_write.network_access"]).toBe("false");
@@ -179,7 +179,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const list = JSON.parse(/deny_read = (\[[\s\S]*?\])/.exec(r.requirements)![1]!.replace(/,\s*\]/, "]")) as string[];
     expect(list).toEqual(expect.arrayContaining([
       `${d}/codex/auth.json`, `${d}/codex/sessions`, `${d}/codex/*.sqlite*`, `${d}/codex/history.jsonl`,
-      `${d}/*.sqlite*`, `${d}/images`, `${d}/codex-session.json*`, `${d}/codex-threads.json`,
+      `${d}/*.sqlite*`, `${d}/images`, `${d}/tickets`, `${d}/codex-session.json*`, `${d}/codex-threads.json`,
     ]));
     // 不能整个禁读 CODEX_HOME（codex 的 arg0 辅助程序在 $CODEX_HOME/tmp）；config.toml / AGENTS.md 可读
     expect(list).not.toContain(`${d}/codex`);

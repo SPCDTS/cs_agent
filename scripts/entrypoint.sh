@@ -16,7 +16,7 @@ for dir in "$DATA_DIR" "$WORKSPACE_DIR"; do
     exit 1
   fi
 done
-mkdir -p "$CODEX_HOME_DIR" "$DATA_DIR/images" "$DATA_DIR/prompts"
+mkdir -p "$CODEX_HOME_DIR" "$DATA_DIR/images" "$DATA_DIR/tickets" "$DATA_DIR/prompts"
 
 # 项目自有、codex 可改的工作流目录：缺失时从镜像内 /app/workflows 复制一份（已存在则绝不覆盖）
 WORKFLOWS_SRC="${WORKFLOWS_SRC:-/app/workflows}"
@@ -112,7 +112,7 @@ for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts,$DATA_DIR/wor
   esac
   _r="$(norm_path "$_raw")"
   case "$_r" in
-    /|"$DATA_N"|"$CODEX_HOME_N"|"$CODEX_HOME_N"/*|"$DATA_N/images"|"$DATA_N/images"/*|*.sqlite|*.sqlite-*) _bad=1 ;;
+    /|"$DATA_N"|"$CODEX_HOME_N"|"$CODEX_HOME_N"/*|"$DATA_N/images"|"$DATA_N/images"/*|"$DATA_N/tickets"|"$DATA_N/tickets"/*|*.sqlite|*.sqlite-*) _bad=1 ;;
   esac
   case "$DATA_N/" in "$_r"/*) _bad=1 ;; esac # DATA_DIR 的上级目录
   if [ "$_bad" = 1 ]; then
@@ -223,7 +223,7 @@ D="$MCP_DATA_DIR"
 C="$D/codex"
 if ! { mkdir -p "$(dirname "$REQUIREMENTS_FILE")" && cat > "$REQUIREMENTS_FILE.tmp" <<TOML && mv -f "$REQUIREMENTS_FILE.tmp" "$REQUIREMENTS_FILE"; } 2>/dev/null; then
 # 受管文件：由 entrypoint.sh 在每次容器启动时重写，不要手工修改。
-# codex 执行的命令（bwrap 沙箱）不可读取下列路径：codex 凭据与会话、各 SQLite 库、生成的图片。
+# codex 执行的命令（bwrap 沙箱）不可读取下列路径：codex 凭据与会话、各 SQLite 库、生成的图片、票据工作目录（各会话的回答）。
 [permissions.filesystem]
 deny_read = [
   "$C/auth.json",
@@ -237,6 +237,7 @@ deny_read = [
   "$C/*.sqlite*",
   "$D/*.sqlite*",
   "$D/images",
+  "$D/tickets",
   "$D/codex-session.json*",
   "$D/codex-threads.json",
 ]
