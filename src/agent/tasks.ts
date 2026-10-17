@@ -20,7 +20,7 @@ import { log } from "../log.js";
 import { threadKeyForSource } from "./codex-runner.js";
 import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
 import { collectNewImages } from "./image-collect.js";
-import { classifyImageError, ticketImageDir, UnknownJobError, type ImageBackend } from "./image-gen.js";
+import { classifyImageError, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend } from "./image-gen.js";
 import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
 import { postprocessReply, sanitizeReply, type ReplyMode } from "./reply-postprocess.js";
 import { IMAGE_USAGE_REPLY } from "./router.js";
@@ -45,7 +45,7 @@ export type AgentCheckpoint = { phase: "handle" } | { phase: "postprocess" } | R
 
 export interface TaskDeps {
   getBridge: () => Pick<QQBridge, "reply" | "getTicket">;
-  imageBackend: Pick<ImageBackend, "submit" | "collect" | "name">;
+  imageBackend: Pick<ImageBackend, "submit" | "collect" | "reconcile" | "name">;
   imagesDir: string;
   /** ${DATA_DIR}/tickets：票据工作目录的根；reply 结束后清理该票据的子目录 */
   ticketsDir?: string;
@@ -173,10 +173,22 @@ export function createTasks(deps: TaskDeps) {
   async function submitJob(runtime: ImageRuntime, context: Context, doc: Readonly<TicketState>, prevSubmits: number): Promise<void> {
     const blocked = await blockedReason(deps, runtime, context, doc.ticket);
     if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "submit");
+    const intent = {
+      attempt: prevSubmits + 1, filenamePrefix: imageFilenamePrefix(doc.ticket, prevSubmits + 1),
+      ...(doc.submitIntent?.count !== undefined ? { count: doc.submitIntent.count } : {}),
+    };
+    // 网络提交前先保存意图，并清除旧 prompt_id；崩溃时即使仍在 collect 检查点也能恢复对账。
+    await runtime.commit(async (tx) => {
+      const d = await tx.doc(TicketDoc, runtime.conversationId);
+      d.submitIntent = intent;
+      delete d.imageJob;
+      return undefined;
+    }, context);
     const started = Date.now();
     let promptId: string;
     try {
-      promptId = await deps.imageBackend.submit(doc.prompt ?? "", runtime.signal);
+      runtime.signal.throwIfAborted();
+      promptId = await deps.imageBackend.submit(doc.prompt ?? "", runtime.signal, intent);
     } catch (err) {
       rethrowIfAborted(runtime.signal, err);
       const failure = classifyImageError(err);
@@ -194,12 +206,57 @@ export function createTasks(deps: TaskDeps) {
     log.info("image job recorded", { ticket: short(doc.ticket), prompt_id: promptId, submits: prevSubmits + 1 });
   }
 
+  async function finishImage(runtime: ImageRuntime, context: Context, result: ImageResult): Promise<void> {
+    await runtime.commit(async (tx) => {
+      (await tx.doc(TicketDoc, runtime.conversationId)).imageResult = result;
+      return { status: "running", checkpoint: { phase: "reply", attempt: 0 } };
+    }, context);
+  }
+
+  /** 提交响应丢失 / unknown 都走同一条对账路径。只有明确查无输出才消耗下一次提交。 */
+  async function reconcileJob(runtime: ImageRuntime, context: Context, doc: Readonly<TicketState>): Promise<void> {
+    const blocked = await blockedReason(deps, runtime, context, doc.ticket);
+    if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "reconcile");
+    const attempt = doc.submitIntent?.attempt ?? doc.imageJob?.submits ?? 1;
+    const intent = doc.submitIntent ?? { attempt, filenamePrefix: imageFilenamePrefix(doc.ticket, attempt) };
+    const dir = ticketImageDir(deps.imagesDir, doc.ticket);
+    try {
+      const recovered = await deps.imageBackend.reconcile(intent, dir, runtime.signal, step =>
+        runtime.commit(async tx => {
+          const d = await tx.doc(TicketDoc, runtime.conversationId);
+          d.imageReconciliation = [...(d.imageReconciliation ?? []), { ...step, attempt }];
+          if (step.prompt_id) d.imageJob = { prompt_id: step.prompt_id, backend: deps.imageBackend.name, submits: attempt };
+          return undefined;
+        }, context),
+      );
+      if (recovered.images.length || recovered.prompt_id) {
+        const images = await collectNewImages(dir, new Set());
+        await finishImage(runtime, context, images.length ? { ok: true, images } : { ok: false, failure: "failed" });
+        return;
+      }
+    } catch (err) {
+      rethrowIfAborted(runtime.signal, err);
+      // 无法查询或下载不等于没有运行；结束为失败，绝不据此重新提交。
+      await finishImage(runtime, context, { ok: false, failure: classifyImageError(err) });
+      return;
+    }
+    if (attempt < MAX_IMAGE_SUBMITS) {
+      await submitJob(runtime, context, doc, attempt);
+    } else {
+      await finishImage(runtime, context, { ok: false, failure: "failed" });
+    }
+  }
+
   async function submitPhase(runtime: ImageRuntime, context: Context): Promise<void> {
     const doc = await ticketDoc(runtime, context);
     if (!doc.imageResult && doc.route === "image" && doc.prompt) {
       if (doc.imageJob) {
         // 已提交过（检查点停在旧阶段）：只收取，不再提交
         await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "collect" } }), context);
+        return;
+      }
+      if (doc.submitIntent) {
+        await reconcileJob(runtime, context, doc);
         return;
       }
       // 旧的单阶段生图在写出图片后、提交前崩溃：直接复用目录里的图片
@@ -230,6 +287,7 @@ export function createTasks(deps: TaskDeps) {
         const doc = await ticketDoc(runtime, context);
         const job = doc.imageJob;
         let result: ImageResult | undefined = doc.imageResult;
+        if (!result && !job) return submitPhase(runtime, context);
         if (!result && job) {
           const dir = ticketImageDir(deps.imagesDir, doc.ticket);
           const started = Date.now();
@@ -248,10 +306,9 @@ export function createTasks(deps: TaskDeps) {
             else log.warn("image job produced no valid images", { ticket: short(doc.ticket), prompt_id: job.prompt_id });
           } catch (err) {
             rethrowIfAborted(runtime.signal, err);
-            if (err instanceof UnknownJobError && job.submits < MAX_IMAGE_SUBMITS && doc.prompt) {
-              // 服务端丢失了该任务（例如 ComfyUI 重启）：重新提交一次，提交次数随 prompt_id 一起落盘
-              log.warn("comfy job unknown to the server, resubmitting once", { ticket: short(doc.ticket), prompt_id: job.prompt_id, submits: job.submits });
-              await submitJob(runtime, context, doc, job.submits);
+            if (err instanceof UnknownJobError && doc.prompt) {
+              log.warn("comfy job unknown; reconciling output prefix before retry", { ticket: short(doc.ticket), prompt_id: job.prompt_id, submits: job.submits });
+              await reconcileJob(runtime, context, doc);
               return;
             }
             const failure = err instanceof UnknownJobError ? "failed" : classifyImageError(err);

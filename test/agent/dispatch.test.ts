@@ -13,7 +13,7 @@ import { CodexBackend } from "../../src/agent/backends/codex.js";
 import { createBackendSelector, PiBackendStub } from "../../src/agent/backends/select.js";
 import type { AgentBackend, BackendName } from "../../src/agent/backends/types.js";
 import { createTasks, MAX_REPLY_ATTEMPTS } from "../../src/agent/tasks.js";
-import { UnknownJobError, type ImageBackend } from "../../src/agent/image-gen.js";
+import { imageFilenamePrefix, UnknownJobError, type ImageBackend, type ImageSubmission, type ReconcileProgress } from "../../src/agent/image-gen.js";
 import { AGENT_FAILURE_REPLIES, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
 import { IMAGE_USAGE_REPLY } from "../../src/agent/router.js";
 import type { ReplyMode } from "../../src/agent/reply-postprocess.js";
@@ -111,7 +111,7 @@ const untilAbort = (signal?: AbortSignal) =>
   new Promise<never>((_r, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
 
 /** 生图桩：submit 记录提示词并返回 prompt_id；collect 按 prompt_id 写一张 PNG。可挂起（模拟崩溃）、失败或报告任务未知。 */
-class ImageStub implements Pick<ImageBackend, "submit" | "collect" | "name"> {
+class ImageStub implements Pick<ImageBackend, "submit" | "collect" | "reconcile" | "name"> {
   readonly name = "stub";
   /** 每次 submit 的提示词（= 提交到 ComfyUI 的次数） */
   calls: string[] = [];
@@ -125,10 +125,35 @@ class ImageStub implements Pick<ImageBackend, "submit" | "collect" | "name"> {
   unknown = new Set<string>();
   /** collect 不写任何文件（或只写非图片文件） */
   writeNothing = false;
-  async submit(prompt: string) {
+  hangSubmit = false;
+  prefixes: (string | undefined)[] = [];
+  reconciliations: ImageSubmission[] = [];
+  recoveredAt: "history" | "queue" | "probe" | undefined;
+  reconcileFail: Error | undefined;
+  async submit(prompt: string, signal?: AbortSignal, options?: ImageSubmission) {
     this.calls.push(prompt);
+    this.prefixes.push(options?.filenamePrefix);
     if (this.fail) throw this.fail;
+    if (this.hangSubmit) await untilAbort(signal);
     return `pid-${this.calls.length}`;
+  }
+  async reconcile(options: ImageSubmission, outDir: string, _signal?: AbortSignal, onStep?: ReconcileProgress) {
+    this.reconciliations.push(options);
+    for (const step of ["history", "queue", "probe"] as const) {
+      await onStep?.({ step, status: "started" });
+      if (this.reconcileFail) throw this.reconcileFail;
+      if (this.recoveredAt === step) {
+        const prompt_id = step === "probe" ? undefined : "pid-1";
+        const filename = `${options.filenamePrefix}_00001_.png`;
+        await onStep?.({ step, status: "matched", ...(prompt_id ? { prompt_id } : {}), filenames: [filename] });
+        mkdirSync(outDir, { recursive: true });
+        const file = path.join(outDir, filename);
+        writeFileSync(file, PNG);
+        return { ...(prompt_id ? { prompt_id } : {}), images: [file] };
+      }
+      await onStep?.({ step, status: "empty" });
+    }
+    return { images: [] };
   }
   async collect(promptId: string, outDir: string, signal?: AbortSignal) {
     this.collects.push(promptId);
@@ -373,7 +398,7 @@ describe("rule router → image path", () => {
     expect(r.bridge.replies[0]!.text).toBe(IMAGE_SUCCESS_REPLY);
   });
 
-  it("server reports the job unknown → resubmitted exactly once; unknown again → failure template (R2)", async () => {
+  it("unknown job with no probed outputs resubmits once; repeated absence reaches the cap (F2)", async () => {
     const r = await makeRig();
     r.image.unknown.add("pid-1");
     await r.dispatcher.dispatch(inbound("奶龙:a", { id: "1" }), "t-unk1");
@@ -384,6 +409,88 @@ describe("rule router → image path", () => {
     await r.dispatcher.dispatch(inbound("奶龙:b", { id: "2" }), "t-unk2");
     expect(r.image.calls).toEqual(["a", "a", "b", "b"]);
     expect(r.bridge.replies[1]!.text).toBe(IMAGE_FAILURE_REPLIES.failed);
+    expect(r.image.reconciliations.map(x => x.filenamePrefix)).toEqual(["cs-t-unk1-1", "cs-t-unk2-1", "cs-t-unk2-2"]);
+  });
+
+  it("history pruned but output files exist: unknown job probes outputs without resubmitting (F2)", async () => {
+    const r = await makeRig();
+    r.image.unknown.add("pid-1");
+    r.image.recoveredAt = "probe";
+    await r.dispatcher.dispatch(inbound("奶龙:保留图片"), "pruned");
+    expect(r.image.calls).toHaveLength(1);
+    expect(r.image.reconciliations).toEqual([{ attempt: 1, filenamePrefix: "cs-pruned-1" }]);
+    expect(r.bridge.replies[0]).toMatchObject({ text: IMAGE_SUCCESS_REPLY, images: [expect.stringMatching(/cs-pruned-1_00001_\.png$/)] });
+  });
+
+  it.each(["history", "queue", "probe"] as const)("crash in submit response window adopts %s evidence without resubmitting (F1)", async recoveredAt => {
+    const r = await makeRig();
+    const ticket = "abcdef123456" + "0".repeat(52);
+    r.image.hangSubmit = true;
+    const first = r.dispatcher.dispatch(inbound("奶龙:提交后崩溃"), ticket);
+    await vi.waitFor(() => expect(r.image.calls).toHaveLength(1));
+    const id = (await pendingIndex(r))[ticket]!.conversationId as never;
+    expect(await r.harness.snapshot(TicketDoc, id, ctx)).toMatchObject({ submitIntent: { attempt: 1, filenamePrefix: "cs-abcdef123456-1" } });
+    expect((await r.harness.snapshot(TicketDoc, id, ctx))?.imageJob).toBeUndefined();
+    await r.harness.close(ctx);
+    await first;
+    r.image.hangSubmit = false;
+    r.image.recoveredAt = recoveredAt;
+    await r.reopen();
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    const doc = await r.harness.snapshot(TicketDoc, id, ctx);
+    expect(doc?.imageReconciliation?.at(-1)).toMatchObject({ attempt: 1, step: recoveredAt, status: "matched" });
+    if (recoveredAt !== "probe") expect(doc?.imageJob).toMatchObject({ prompt_id: "pid-1", submits: 1 });
+    expect(r.image.calls).toHaveLength(1);
+    expect(r.image.prefixes).toEqual(["cs-abcdef123456-1"]);
+    expect(r.bridge.replies[0]!.text).toBe(IMAGE_SUCCESS_REPLY);
+  });
+
+  it("submit intent with no history, queue or output retries with the next prefix and persists each step (F1)", async () => {
+    const r = await makeRig();
+    r.image.hangSubmit = true;
+    const first = r.dispatcher.dispatch(inbound("奶龙:未执行"), "missing");
+    await vi.waitFor(() => expect(r.image.calls).toHaveLength(1));
+    const id = (await pendingIndex(r))["missing"]!.conversationId as never;
+    await r.harness.close(ctx);
+    await first;
+    r.image.hangSubmit = false;
+    await r.reopen();
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(r.image.prefixes).toEqual([imageFilenamePrefix("missing", 1), imageFilenamePrefix("missing", 2)]);
+    const doc = await r.harness.snapshot(TicketDoc, id, ctx);
+    expect(doc?.submitIntent?.attempt).toBe(2);
+    expect(doc?.imageReconciliation?.map(s => `${s.step}:${s.status}`)).toEqual(["history:started", "history:empty", "queue:started", "queue:empty", "probe:started", "probe:empty"]);
+  });
+
+  it("reconciliation unavailable is not evidence to resubmit (F1/F2)", async () => {
+    const r = await makeRig();
+    r.image.unknown.add("pid-1");
+    r.image.reconcileFail = new Error("fetch failed");
+    await r.dispatcher.dispatch(inbound("奶龙:断网"), "offline");
+    expect(r.image.calls).toHaveLength(1);
+    expect(r.bridge.replies[0]!.text).toBe(IMAGE_FAILURE_REPLIES.unavailable);
+  });
+
+  it("two crashes before prompt_id persistence exhaust the submit cap without a third submit (F1)", async () => {
+    const r = await makeRig();
+    r.image.hangSubmit = true;
+    const first = r.dispatcher.dispatch(inbound("奶龙:两次中断"), "twice");
+    await vi.waitFor(() => expect(r.image.calls).toHaveLength(1));
+    await r.harness.close(ctx);
+    await first;
+    await r.reopen();
+    await r.dispatcher.recover();
+    await vi.waitFor(() => expect(r.image.calls).toHaveLength(2));
+    await r.harness.close(ctx);
+    await r.dispatcher.idle();
+    await r.reopen();
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(r.image.prefixes).toEqual(["cs-twice-1", "cs-twice-2"]);
+    expect(r.image.reconciliations.map(s => s.filenamePrefix)).toEqual(["cs-twice-1", "cs-twice-2"]);
+    expect(r.bridge.replies[0]!.text).toBe(IMAGE_FAILURE_REPLIES.failed);
   });
 
   it("no validated image under the ticket dir = generation failure, even if the backend returned paths (R8)", async () => {

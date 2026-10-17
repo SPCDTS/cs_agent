@@ -1,5 +1,5 @@
 import { defineDoc } from "@earendil-works/pi-durable";
-import type { ImageFailure } from "./image-gen.js";
+import type { ImageFailure, ImageSubmission, ReconcileStep } from "./image-gen.js";
 import type { RouteName } from "./router.js";
 
 export type TicketSource = {
@@ -36,6 +36,10 @@ export type TicketState = {
   /** 生图提示词（route=image） */
   prompt?: string;
   imageJob?: ImageJob;
+  /** 提交前落盘；没有 prompt_id 时按前缀对账，不能盲目重新提交。 */
+  submitIntent?: ImageSubmission & { attempt: number };
+  /** 每次对账查询前后的持久化记录；matched 的 prompt_id 同时写入 imageJob。 */
+  imageReconciliation?: (ReconcileStep & { attempt: number })[];
   imageResult?: ImageResult;
   agentResult?: AgentResult;
   /** 后端回合标记：启动外部回合（codex）之前写入，崩溃恢复时据此避免重复询问 */

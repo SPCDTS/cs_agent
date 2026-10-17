@@ -39,7 +39,8 @@ const server = new McpServer({ name: "fake-comfy", version: "0.0.1" });
 server.tool("server_info", {}, async () => text({ running: true, url: process.env.COMFYUI_URL }));
 server.tool(
   "generate_image",
-  { prompt: z.string(), wait: z.boolean().default(true), checkpoint: z.string().nullable().optional(), timeout_seconds: z.number().default(600) },
+  { prompt: z.string(), wait: z.boolean().default(true), checkpoint: z.string().nullable().optional(), timeout_seconds: z.number().default(600),
+    ...(process.env.FAKE_COMFY_NO_PREFIX ? {} : { filename_prefix: z.string().optional() }) },
   async (args) => {
     record("generate_image", args);
     if (args.prompt.includes("FAIL")) return { content: [{ type: "text", text: "boom" }], isError: true };

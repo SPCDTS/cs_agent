@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
-import { HttpImageBackend, McpImageBackend, UnknownJobError, defaultWorkflow, parseToolResult, patchWorkflow } from "../../src/agent/image-gen.js";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import { HttpImageBackend, McpImageBackend, UnknownJobError, defaultWorkflow, parseToolResult, patchWorkflow, type ReconcileStep } from "../../src/agent/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "../../src/agent/loopback-proxy.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
@@ -37,6 +37,24 @@ describe("McpImageBackend (fake comfy-mcp over stdio)", () => {
 
   it("tool error surfaces as an exception", async () => {
     await expect(backend.generate("FAIL please", path.join(tmp(), "x"))).rejects.toThrow(/generate_image/);
+  });
+
+  it.each([false, true])("MCP default submit preserves filename prefix, schema missing prefix=%s (F1)", async missingPrefix => {
+    const dir = tmp();
+    const state = path.join(dir, "state.json");
+    const b = new McpImageBackend({ command: process.execPath, args: [path.join(FIXTURES, "fake-comfy-mcp.mjs")],
+      env: { ...env, FAKE_COMFY_STATE: state, ...(missingPrefix ? { FAKE_COMFY_NO_PREFIX: "1" } : {}) },
+      timeoutMs: 20_000, checkpoint: "fake.safetensors" });
+    try {
+      await b.submit("a fox", undefined, { filenamePrefix: "cs-abcdef123456-1" });
+      const calls = JSON.parse(readFileSync(state, "utf8")).calls;
+      if (missingPrefix) {
+        expect(calls[0][0]).toBe("run_workflow");
+        expect(calls[0][1].workflow["9"].inputs.filename_prefix).toBe("cs-abcdef123456-1");
+      } else {
+        expect(calls[0]).toEqual(["generate_image", expect.objectContaining({ filename_prefix: "cs-abcdef123456-1", wait: false })]);
+      }
+    } finally { await b.close(); }
   });
 
   it("submit and collect split across processes: collect by the persisted prompt_id never resubmits; unknown job → UnknownJobError (R2)", async () => {
@@ -125,6 +143,123 @@ describe("helpers", () => {
   });
 });
 
+describe("filename-prefix reconciliation over HTTP in both modes (F1/F2)", () => {
+  const prefix = "cs-abcdef123456-1";
+  const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+  const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+  const entry = (filename: string) => ({ status: { completed: true }, outputs: { "9": { images: [{ filename, type: "output", subfolder: "" }] } } });
+  const make = (mode: "http" | "mcp") => mode === "http"
+    ? new HttpImageBackend({ baseUrl: "http://comfy.test:8188", timeoutMs: 2000, checkpoint: "fake.safetensors", pollMs: 1 })
+    : new McpImageBackend({ command: process.execPath, args: [path.join(FIXTURES, "fake-comfy-mcp.mjs")], env, timeoutMs: 2000 });
+
+  it.each(["http", "mcp"] as const)("%s adopts prompt_id and outputs from full history, ignoring other attempt prefixes", async mode => {
+    const seen: string[] = [];
+    const steps: ReconcileStep[] = [];
+    const filename = `${prefix}_00007_.png`;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input)); seen.push(url.pathname);
+      if (url.pathname === "/history") return json({ other: entry(`${prefix}0_00001_.png`), adopted: entry(filename) });
+      expect(url.pathname).toBe("/view");
+      expect(url.searchParams.get("filename")).toBe(filename);
+      expect(steps.at(-1)).toMatchObject({ step: "history", status: "matched", prompt_id: "adopted" });
+      return new Response(PNG);
+    });
+    try {
+      const out = path.join(tmp(), "images");
+      expect(await make(mode).reconcile({ filenamePrefix: prefix }, out, undefined, async s => { steps.push(s); })).toEqual({ prompt_id: "adopted", images: [path.join(out, filename)] });
+      expect(seen).toEqual(["/history", "/view"]);
+      expect(readFileSync(path.join(out, filename))).toEqual(PNG);
+    } finally { fetch.mockRestore(); }
+  });
+
+  it.each(["http", "mcp"] as const)("%s adopts a matching queued workflow and waits without submitting", async mode => {
+    const steps: ReconcileStep[] = [];
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      expect(init?.method ?? "GET").toBe("GET");
+      if (url.pathname === "/history") return json({});
+      if (url.pathname === "/queue") return json({ queue_running: [[0, "queued", { "9": { class_type: "SaveImage", inputs: { filename_prefix: prefix } } }, {}, []]], queue_pending: [] });
+      if (url.pathname === "/history/queued") return json({ queued: entry(`${prefix}_00001_.png`) });
+      expect(url.pathname).toBe("/view");
+      return new Response(PNG);
+    });
+    try {
+      const out = tmp();
+      const result = await make(mode).reconcile({ filenamePrefix: prefix }, out, undefined, async s => { steps.push(s); });
+      expect(result.prompt_id).toBe("queued");
+      expect(result.images).toHaveLength(1);
+      expect(steps).toContainEqual({ step: "queue", status: "matched", prompt_id: "queued" });
+      expect(steps.some(s => s.step === "probe")).toBe(false);
+    } finally { fetch.mockRestore(); }
+  });
+
+  it.each(["http", "mcp"] as const)("%s probes all expected filenames after history pruning, even when the first is absent", async mode => {
+    const names: string[] = [];
+    const steps: ReconcileStep[] = [];
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input));
+      if (url.pathname === "/history") return json({});
+      if (url.pathname === "/queue") return json({ queue_running: [], queue_pending: [] });
+      expect(url.pathname).toBe("/view");
+      expect(url.searchParams.get("type")).toBe("output");
+      const filename = url.searchParams.get("filename")!; names.push(filename);
+      return filename.endsWith("00002_.png") ? new Response(PNG) : new Response(null, { status: 404 });
+    });
+    try {
+      const out = tmp();
+      const result = await make(mode).reconcile({ filenamePrefix: prefix, count: 3 }, out, undefined, async s => { steps.push(s); });
+      expect(result).toEqual({ images: [path.join(out, `${prefix}_00002_.png`)] });
+      expect(names).toEqual([1, 2, 3].map(i => `${prefix}_0000${i}_.png`));
+      expect(steps.at(-1)).toEqual({ step: "probe", status: "matched", filenames: [`${prefix}_00002_.png`] });
+    } finally { fetch.mockRestore(); }
+  });
+
+  it.each([404, 503])("probe HTTP %s distinguishes absence from service failure", async status => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input));
+      if (url.pathname === "/history") return json({});
+      if (url.pathname === "/queue") return json({ queue_running: [], queue_pending: [] });
+      return new Response(null, { status });
+    });
+    try {
+      const run = make("http").reconcile({ filenamePrefix: prefix }, tmp());
+      if (status === 404) await expect(run).resolves.toEqual({ images: [] });
+      else await expect(run).rejects.toThrow("HTTP 503");
+    } finally { fetch.mockRestore(); }
+  });
+
+  it("completion between history and queue reads is recovered before probing", async () => {
+    let histories = 0;
+    const filename = `${prefix}_00008_.png`;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input));
+      if (url.pathname === "/history") return json(++histories === 1 ? {} : { late: entry(filename) });
+      if (url.pathname === "/queue") return json({ queue_running: [], queue_pending: [] });
+      expect(url.searchParams.get("filename")).toBe(filename);
+      return new Response(PNG);
+    });
+    try { expect((await make("http").reconcile({ filenamePrefix: prefix }, tmp())).prompt_id).toBe("late"); }
+    finally { fetch.mockRestore(); }
+  });
+
+  it.each([false, true])("HTTP submit patches SaveImage prefix with custom workflow=%s", async custom => {
+    const dir = tmp();
+    const workflowFile = path.join(dir, "workflow.json");
+    writeFileSync(workflowFile, JSON.stringify(defaultWorkflow("old", "fake", 1)), "utf8");
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      expect(new URL(String(input)).pathname).toBe("/prompt");
+      const workflow = JSON.parse(String(init?.body)).prompt;
+      expect(workflow["9"].inputs.filename_prefix).toBe(prefix);
+      expect(workflow["6"].inputs.text).toBe("new");
+      return json({ prompt_id: "submitted" });
+    });
+    try {
+      const b = new HttpImageBackend({ baseUrl: "http://comfy.test", timeoutMs: 2000, checkpoint: "fake", ...(custom ? { workflowFile } : {}) });
+      await expect(b.submit("new", undefined, { filenamePrefix: prefix })).resolves.toBe("submitted");
+    } finally { fetch.mockRestore(); }
+  });
+});
+
 describe("workflow file route", () => {
   const wf = {
     "4": { class_type: "TextEncodeQwenImage21", inputs: { prompt: "old", negative_prompt: "" } },
@@ -156,12 +291,15 @@ describe("workflow file route", () => {
     });
     try {
       const out = path.join(dir, "images", "t2");
-      const files = await b.generate("a blue bird", out);
+      const id = await b.submit("a blue bird", undefined, { filenamePrefix: "cs-abcdef123456-2" });
+      const files = await b.collect(id, out);
       expect(files).toHaveLength(1);
       const calls = JSON.parse(readFileSync(path.join(out, "calls.json"), "utf8")) as [string, any][];
       expect(calls.map((c) => c[0])).toEqual(["run_workflow", "job", "job", "fetch_outputs"]);
       expect(calls[0]![1].wait).toBe(false);
       expect(calls[0]![1].workflow["4"].inputs.prompt).toBe("a blue bird");
+      expect(calls[0]![1].workflow["8"].inputs.filename_prefix).toBe("cs-abcdef123456-2");
+      expect(JSON.parse(readFileSync(file, "utf8"))["8"].inputs.filename_prefix).toBe("x");
     } finally {
       await b.close();
     }
