@@ -1,6 +1,8 @@
 /**
  * 生图实现（生图任务、image_gen MCP 共用）：默认经 comfy-mcp（stdio MCP）调用 generate_image(wait=false) → job(wait) → fetch_outputs；
  * COMFY_MODE=http 时直连 ComfyUI HTTP API（POST /prompt → /history → /view）。
+ * 提交与收取分开（submit 返回 prompt_id；collect 按 prompt_id 等待并下载输出）：生图任务在两步之间提交检查点，
+ * 崩溃恢复时只按已记录的 prompt_id 收取，不重复提交；服务端不认识该任务时 collect 抛 UnknownJobError。
  */
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -13,9 +15,24 @@ import { log } from "../log.js";
 export interface ImageBackend {
   readonly name: string;
   selfCheck(): Promise<Record<string, unknown>>;
+  /** 提交生图任务，返回 prompt_id（不等待完成） */
+  submit(prompt: string, signal?: AbortSignal): Promise<string>;
+  /** 按 prompt_id 等待完成并把输出下载到 outDir；返回其中的图片。服务端不认识该任务 → UnknownJobError */
+  collect(promptId: string, outDir: string, signal?: AbortSignal): Promise<string[]>;
+  /** submit + collect（image_gen MCP 用） */
   generate(prompt: string, outDir: string, signal?: AbortSignal): Promise<string[]>;
   close(): Promise<void>;
 }
+
+/** 服务端报告不认识该 prompt_id（例如 ComfyUI 重启后丢失了队列）：调用方可决定重新提交一次。 */
+export class UnknownJobError extends Error {
+  constructor(readonly promptId: string, detail = "") {
+    super(`ComfyUI 不认识生图任务 ${promptId}${detail ? `: ${detail}` : ""}`);
+  }
+}
+
+/** "任务不存在" 的特征（comfy-cli 的 job_not_found / download_job_not_found 等）；不匹配泛化的 "not found"（如模型文件缺失） */
+const UNKNOWN_JOB_RE = /(job|prompt)[\s_-]?(id[\s_-]?)?not[\s_-]?found|unknown[\s_-](prompt|job)|no such (prompt|job)|^(not[\s_-]?found|unknown)$/i;
 
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
@@ -200,7 +217,10 @@ export class McpImageBackend implements ImageBackend {
   }
 
   async generate(prompt: string, outDir: string, signal?: AbortSignal): Promise<string[]> {
-    const deadline = Date.now() + this.opts.timeoutMs;
+    return this.collect(await this.submit(prompt, signal), outDir, signal);
+  }
+
+  async submit(prompt: string, signal?: AbortSignal): Promise<string> {
     const sig = timeoutSignal(this.opts.timeoutMs, signal);
     await this.connect(); // 先拿到工具 schema，args() 依赖它
     let submitted: Record<string, unknown>;
@@ -233,17 +253,32 @@ export class McpImageBackend implements ImageBackend {
     const promptId = findString(submitted, "prompt_id") ?? findString(submitted, "job_id");
     if (!promptId) throw new Error(`提交生图任务未返回 prompt_id: ${JSON.stringify(submitted).slice(0, 300)}`);
     log.info("comfy job submitted", { prompt_id: promptId });
+    return promptId;
+  }
 
+  /** 调用一个按 prompt_id 操作的工具；服务端报告不认识该任务时转成 UnknownJobError。 */
+  private async callJob(tool: string, args: Record<string, unknown>, promptId: string, signal: AbortSignal): Promise<Record<string, unknown>> {
+    try {
+      return await this.call(tool, args, signal);
+    } catch (err) {
+      if (!signal.aborted && UNKNOWN_JOB_RE.test((err as Error).message)) throw new UnknownJobError(promptId, (err as Error).message.slice(0, 200));
+      throw err;
+    }
+  }
+
+  async collect(promptId: string, outDir: string, signal?: AbortSignal): Promise<string[]> {
+    const deadline = Date.now() + this.opts.timeoutMs;
+    const sig = timeoutSignal(this.opts.timeoutMs, signal);
+    await this.connect();
+    const id = { alts: ["job_id", "id"], value: promptId };
     for (;;) {
       const left = Math.floor((deadline - Date.now()) / 1000);
       if (left <= 0) throw new Error("生图超时");
-      const st = await this.call(
-        "job",
-        this.args("job", { action: "wait", prompt_id: { alts: ["job_id", "id"], value: promptId }, timeout_seconds: Math.min(left, 60) }),
-        sig,
-      );
+      const st = await this.callJob("job", this.args("job", { action: "wait", prompt_id: id, timeout_seconds: Math.min(left, 60) }), promptId, sig);
       if (st.timed_out === true) continue;
       const status = (findString(st, "status") ?? "").toLowerCase();
+      const errText = typeof st.error === "string" ? st.error : st.error ? JSON.stringify(st.error) : "";
+      if (UNKNOWN_JOB_RE.test(status) || UNKNOWN_JOB_RE.test(errText)) throw new UnknownJobError(promptId, (errText || status).slice(0, 200));
       if (/error|fail|cancel/.test(status) || st.error) {
         throw new Error(`生图任务失败: ${JSON.stringify(st.error ?? status).slice(0, 300)}`);
       }
@@ -251,12 +286,10 @@ export class McpImageBackend implements ImageBackend {
     }
 
     await fs.mkdir(outDir, { recursive: true });
-    await this.call(
+    await this.callJob(
       "fetch_outputs",
-      this.args("fetch_outputs", {
-        prompt_id: { alts: ["job_id", "id"], value: promptId },
-        out_dir: { alts: ["output_dir", "dest"], value: outDir },
-      }),
+      this.args("fetch_outputs", { prompt_id: id, out_dir: { alts: ["output_dir", "dest"], value: outDir } }),
+      promptId,
       sig,
     );
     const files = await listImages(outDir);
@@ -326,6 +359,10 @@ export class HttpImageBackend implements ImageBackend {
   }
 
   async generate(prompt: string, outDir: string, signal?: AbortSignal): Promise<string[]> {
+    return this.collect(await this.submit(prompt, signal), outDir, signal);
+  }
+
+  async submit(prompt: string, signal?: AbortSignal): Promise<string> {
     const sig = timeoutSignal(this.opts.timeoutMs, signal);
     const seed = randomSeed();
     const workflow = this.opts.workflowFile
@@ -340,12 +377,31 @@ export class HttpImageBackend implements ImageBackend {
     const id: string | undefined = sub?.prompt_id;
     if (!id) throw new Error(`ComfyUI /prompt 未返回 prompt_id: ${JSON.stringify(sub).slice(0, 300)}`);
     log.info("comfy job submitted (http)", { prompt_id: id });
+    return id;
+  }
 
+  /** /queue 里是否还有该任务（运行中或排队中）。 */
+  private async inQueue(id: string, signal: AbortSignal): Promise<boolean> {
+    const q = await this.json("queue", { signal });
+    const rows = [...(Array.isArray(q?.queue_running) ? q.queue_running : []), ...(Array.isArray(q?.queue_pending) ? q.queue_pending : [])];
+    return rows.some((r: unknown) => Array.isArray(r) && r[1] === id);
+  }
+
+  private async historyEntry(id: string, signal: AbortSignal): Promise<any> {
+    const hist = await this.json(`history/${encodeURIComponent(id)}`, { signal });
+    return hist?.[id];
+  }
+
+  async collect(id: string, outDir: string, signal?: AbortSignal): Promise<string[]> {
+    const sig = timeoutSignal(this.opts.timeoutMs, signal);
     let entry: any;
     for (;;) {
       sig.throwIfAborted();
-      const hist = await this.json(`history/${encodeURIComponent(id)}`, { signal: sig });
-      entry = hist?.[id];
+      entry = await this.historyEntry(id, sig);
+      if (!entry) {
+        // 历史里没有：仍在队列中则继续等；队列里也没有（且再查一次历史仍没有，避免刚完成的竞态）→ 服务端不认识该任务
+        if (!(await this.inQueue(id, sig)) && !(entry = await this.historyEntry(id, sig))) throw new UnknownJobError(id, "not in history or queue");
+      }
       if (entry?.status?.status_str === "error") throw new Error("ComfyUI 任务执行失败");
       if (entry?.status?.completed || (entry?.outputs && Object.keys(entry.outputs).length > 0)) break;
       await new Promise((r) => setTimeout(r, this.opts.pollMs ?? 1000));

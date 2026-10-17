@@ -9,7 +9,10 @@ export type TicketSource = {
   nickname: string;
 };
 
-/** 生图阶段的结果（generate 阶段与检查点同一提交写入；任务重跑时据此跳过生图）。 */
+/** 已提交的 ComfyUI 任务（submit 阶段提交后立即与检查点同一提交写入；恢复时按它收取，不重复提交）。 */
+export type ImageJob = { prompt_id: string; backend: string; /** 已提交次数（服务端丢失任务时最多重新提交 1 次） */ submits: number };
+
+/** 生图阶段的结果（collect 阶段与检查点同一提交写入；任务重跑时据此跳过生图）。 */
 export type ImageResult =
   | { ok: true; images: string[] }
   | { ok: false; failure: ImageFailure };
@@ -32,6 +35,7 @@ export type TicketState = {
   prefix?: string;
   /** 生图提示词（route=image） */
   prompt?: string;
+  imageJob?: ImageJob;
   imageResult?: ImageResult;
   agentResult?: AgentResult;
   /** 后处理后的回复正文（agent 路径 postprocess 阶段写入） */

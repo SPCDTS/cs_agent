@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { McpImageBackend, defaultWorkflow, parseToolResult, patchWorkflow } from "../../src/agent/image-gen.js";
+import { HttpImageBackend, McpImageBackend, UnknownJobError, defaultWorkflow, parseToolResult, patchWorkflow } from "../../src/agent/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "../../src/agent/loopback-proxy.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
@@ -37,6 +37,76 @@ describe("McpImageBackend (fake comfy-mcp over stdio)", () => {
 
   it("tool error surfaces as an exception", async () => {
     await expect(backend.generate("FAIL please", path.join(tmp(), "x"))).rejects.toThrow(/generate_image/);
+  });
+
+  it("submit and collect split across processes: collect by the persisted prompt_id never resubmits; unknown job → UnknownJobError (R2)", async () => {
+    const dir = tmp();
+    const state = path.join(dir, "comfy-state.json");
+    const mk = () => new McpImageBackend({ command: process.execPath, args: [path.join(FIXTURES, "fake-comfy-mcp.mjs")], env: { ...env, FAKE_COMFY_STATE: state }, timeoutMs: 20_000 });
+    const a = mk();
+    const id = await a.submit("crash between submit and collect");
+    await a.close(); // 进程在提交后退出
+    const b = mk();
+    try {
+      const out = path.join(dir, "images", "tk");
+      expect(await b.collect(id, out)).toEqual([path.join(out, "ComfyUI_00001_.png")]);
+      const s = JSON.parse(readFileSync(state, "utf8")) as { submitted: string[]; calls: [string, any][] };
+      expect(s.calls.filter((c) => c[0] === "generate_image")).toHaveLength(1);
+      expect(s.submitted).toEqual([id]);
+      const err = await b.collect("pid-404", out).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnknownJobError);
+    } finally {
+      await b.close();
+    }
+  });
+});
+
+describe("HttpImageBackend submit / collect (fake ComfyUI HTTP)", () => {
+  it("collect by prompt_id after a restart: no second POST /prompt; queued job is waited for; unknown job → UnknownJobError (R2)", async () => {
+    const http = await import("node:http");
+    const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+    let posts = 0;
+    const known = new Map<string, number>(); // prompt_id → 剩余排队轮数
+    const srv = http.createServer((req, res) => {
+      const url = new URL(req.url ?? "/", "http://x");
+      const json = (o: unknown) => res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(o));
+      if (req.method === "POST" && url.pathname === "/prompt") {
+        req.resume();
+        req.on("end", () => {
+          const id = `h${++posts}`;
+          known.set(id, 2);
+          json({ prompt_id: id });
+        });
+        return;
+      }
+      if (url.pathname.startsWith("/history/")) {
+        const id = url.pathname.split("/").pop()!;
+        const left = known.get(id);
+        if (left === undefined || left > 0) return json({});
+        return json({ [id]: { status: { completed: true }, outputs: { "9": { images: [{ filename: `${id}.png`, subfolder: "", type: "output" }] } } } });
+      }
+      if (url.pathname === "/queue") {
+        const pending = [...known].filter(([, n]) => n > 0).map(([id]) => [0, id, {}, {}, []]);
+        for (const [id, n] of known) if (n > 0) known.set(id, n - 1);
+        return json({ queue_running: [], queue_pending: pending });
+      }
+      if (url.pathname === "/view") return res.writeHead(200, { "Content-Type": "image/png" }).end(PNG);
+      res.writeHead(404).end();
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+    const baseUrl = `http://127.0.0.1:${(srv.address() as any).port}`;
+    try {
+      const opts = { baseUrl, timeoutMs: 10_000, checkpoint: "x.safetensors", pollMs: 5 };
+      const id = await new HttpImageBackend(opts).submit("a cat");
+      const out = path.join(tmp(), "images", "tk");
+      const files = await new HttpImageBackend(opts).collect(id, out);
+      expect(files).toEqual([path.join(out, `${id}.png`)]);
+      expect(posts).toBe(1);
+      await expect(new HttpImageBackend(opts).collect("nope", out)).rejects.toBeInstanceOf(UnknownJobError);
+      expect(posts).toBe(1);
+    } finally {
+      srv.close();
+    }
   });
 });
 

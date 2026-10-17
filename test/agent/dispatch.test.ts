@@ -13,7 +13,7 @@ import { CodexBackend } from "../../src/agent/backends/codex.js";
 import { createBackendSelector, PiBackendStub } from "../../src/agent/backends/select.js";
 import type { AgentBackend, BackendName } from "../../src/agent/backends/types.js";
 import { createTasks, MAX_REPLY_ATTEMPTS } from "../../src/agent/tasks.js";
-import type { ImageBackend } from "../../src/agent/image-gen.js";
+import { UnknownJobError, type ImageBackend } from "../../src/agent/image-gen.js";
 import { AGENT_FAILURE_REPLIES, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
 import { IMAGE_USAGE_REPLY } from "../../src/agent/router.js";
 import type { ReplyMode } from "../../src/agent/reply-postprocess.js";
@@ -107,22 +107,44 @@ function inbound(text: string, opts: { id?: string; group?: string; user?: strin
   };
 }
 
-/** 生图桩：写一张 PNG；可挂起（模拟生成中崩溃）或失败。 */
-class ImageStub implements Pick<ImageBackend, "generate" | "name"> {
+const untilAbort = (signal?: AbortSignal) =>
+  new Promise<never>((_r, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+
+/** 生图桩：submit 记录提示词并返回 prompt_id；collect 按 prompt_id 写一张 PNG。可挂起（模拟崩溃）、失败或报告任务未知。 */
+class ImageStub implements Pick<ImageBackend, "submit" | "collect" | "name"> {
   readonly name = "stub";
+  /** 每次 submit 的提示词（= 提交到 ComfyUI 的次数） */
   calls: string[] = [];
+  collects: string[] = [];
   fail: Error | undefined;
   /** 写完文件后挂起，直到 signal 中止 */
   hangAfterWrite = false;
-  async generate(prompt: string, outDir: string, signal?: AbortSignal) {
+  /** 下一次 collect 在写文件前挂起，直到 signal 中止 */
+  hangCollect = false;
+  /** 这些 prompt_id 的 collect 报告服务端不认识 */
+  unknown = new Set<string>();
+  /** collect 不写任何文件（或只写非图片文件） */
+  writeNothing = false;
+  async submit(prompt: string) {
     this.calls.push(prompt);
     if (this.fail) throw this.fail;
+    return `pid-${this.calls.length}`;
+  }
+  async collect(promptId: string, outDir: string, signal?: AbortSignal) {
+    this.collects.push(promptId);
+    if (this.hangCollect) {
+      this.hangCollect = false;
+      await untilAbort(signal);
+    }
+    if (this.unknown.has(promptId)) throw new UnknownJobError(promptId);
     mkdirSync(outDir, { recursive: true });
+    if (this.writeNothing) {
+      writeFileSync(path.join(outDir, "fake.png"), "not really a png, just text padding padding padding");
+      return [path.join(outDir, "fake.png")];
+    }
     const f = path.join(outDir, `out_${this.calls.length}.png`);
     writeFileSync(f, PNG);
-    if (this.hangAfterWrite) {
-      await new Promise((_r, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
-    }
+    if (this.hangAfterWrite) await untilAbort(signal);
     return [f];
   }
 }
@@ -341,6 +363,42 @@ describe("rule router → image path", () => {
     expect(r.bridge.replies).toHaveLength(1);
     expect(r.bridge.replies[0]!.text).toBe(IMAGE_SUCCESS_REPLY);
     expect(await pendingIndex(r)).toEqual({});
+  });
+
+  it("crash between submit and collect → recovery collects the persisted prompt_id, no second submit (R2)", async () => {
+    const r = await makeRig();
+    r.image.hangCollect = true;
+    const first = r.dispatcher.dispatch(inbound("奶龙:灯塔"), "t-sub");
+    while (r.image.collects.length === 0) await new Promise((res) => setTimeout(res, 5));
+    await r.harness.close(ctx);
+    await first.catch(() => undefined);
+    await r.reopen();
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(r.image.calls).toEqual(["灯塔"]);
+    expect(r.image.collects).toEqual(["pid-1", "pid-1"]);
+    expect(r.bridge.replies).toHaveLength(1);
+    expect(r.bridge.replies[0]!.text).toBe(IMAGE_SUCCESS_REPLY);
+  });
+
+  it("server reports the job unknown → resubmitted exactly once; unknown again → failure template (R2)", async () => {
+    const r = await makeRig();
+    r.image.unknown.add("pid-1");
+    await r.dispatcher.dispatch(inbound("奶龙:a", { id: "1" }), "t-unk1");
+    expect(r.image.calls).toEqual(["a", "a"]);
+    expect(r.bridge.replies[0]!.text).toBe(IMAGE_SUCCESS_REPLY);
+
+    r.image.unknown.add("pid-3").add("pid-4");
+    await r.dispatcher.dispatch(inbound("奶龙:b", { id: "2" }), "t-unk2");
+    expect(r.image.calls).toEqual(["a", "a", "b", "b"]);
+    expect(r.bridge.replies[1]!.text).toBe(IMAGE_FAILURE_REPLIES.failed);
+  });
+
+  it("no validated image under the ticket dir = generation failure, even if the backend returned paths (R8)", async () => {
+    const r = await makeRig();
+    r.image.writeNothing = true;
+    await r.dispatcher.dispatch(inbound("奶龙:空"), "t-noimg");
+    expect(r.bridge.replies).toEqual([{ ticket: "t-noimg", text: IMAGE_FAILURE_REPLIES.failed, images: [] }]);
   });
 
   it("uncertain send is never retried: task fails, no fallback (ticket already terminal)", async () => {
