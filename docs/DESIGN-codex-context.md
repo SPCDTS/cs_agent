@@ -1,66 +1,47 @@
-# 设计：codex 执行层的上下文、聊天记录检索、Web 搜索与"先查再画"
+# 设计 v2：聊天记录衰老与检索、意图层会话感知、联网检索、"先查再画"
 
-> 状态：待用户确认，未实现。目标是让 codex 适合长期运行：有自己的语境，但上下文增长有界、不注入冗余信息。
+> 状态：v2，按用户反馈简化。未实现。
+> 相比 v1 的变化：取消 codex 线程分域与轮换；历史记录改为分层衰老而非硬删除；资料查询由意图识别 agent 用 DeepSeek Search/Fetch API 完成，不再借 codex 一次性会话。
 
-## 0. 现状与问题
+## 0. 目标与问题
 
 | 现状 | 问题 |
 |---|---|
-| 所有发送者共用一个固定 codex 线程，无限续聊 | 私聊与群聊串在一个上下文里；rollout 无限增长，每次 resume 都要重放；无法按需清理 |
-| 每轮只给 codex 一行来源标注 + 正文 | codex 看不到任何 QQ 历史，"刚才那条"、"上面说的"无法理解 |
-| `AGENTS.md` 只有安全规则 | 回复格式靠意图层兜底，codex 自己可能先写一大段 Markdown |
-| `web_search` 未配置（默认 cached 索引） | 时效性问题答不准 |
-| 意图层"恰好一个业务工具" | 生图请求涉及现实实体/时事时，没有机会先查资料再组织提示词 |
+| codex 每轮只拿到一行来源标注 + 正文 | 看不到任何 QQ 历史，"刚才那条"、"上面说的"无法理解 |
+| 意图模型每条消息一个无状态会话 | "把刚才那张图改成蓝色"、"继续"无法路由 |
+| `AGENTS.md` 只有安全规则 | 回复格式靠意图层兜底 |
+| `web_search` 未配置 | codex 时效性问题答不准 |
+| 意图层"恰好一个业务工具" | 生图涉及现实实体/时事时无法先查资料 |
 
-## 1. 总体原则
+## 1. 原则
 
-1. **拉取优于推送**：历史记录不随每轮注入，由 codex 在需要时通过工具按需拉取，且返回紧凑格式、有硬上限。
-2. **按会话域隔离**：codex 线程以"私聊某人 / 某个群"为单位，语境天然相关，不串话。
-3. **有界轮换 + 交接摘要**：线程达到阈值即轮换，用一段受控的交接笔记延续记忆，而不是让上下文无限堆积。
-4. **codex 只能看见自己会话域的历史**：权限由中继层按次注入，不由消息内容决定。
-5. **研究与执行分离**：生图前的资料检索用一次性 codex 会话完成，不污染长期线程。
+1. **拉取优于推送**：历史不随每轮注入；需要时通过工具按需拉取，返回紧凑文本、有硬上限。
+2. **衰老优于删除**：原始消息 → 日摘要 → 周摘要，越久远越粗，像上下文压缩一样分层。
+3. **单一 codex 线程，依赖其自带压缩**：不分域、不轮换，只留一个极宽松的安全阀。
+4. **访问过滤**：存储不分域，但群内查询只见本群；owner 私聊可查全部。
+5. **研究在意图层**：DeepSeek 用自家 Search/Fetch API 查资料并组装生图提示词；codex 线程保持干净。
 
-## 2. codex 线程模型：按会话域 + 有界轮换
+## 2. 聊天记录：本地消息库 + 分层衰老
 
-### 2.1 线程键
-- `scope = private:<user_id>` 或 `group:<group_id>`。
-- 映射表 `/data/codex-threads.json`：`{ [scope]: { thread_id, created_at, turns, last_input_tokens, last_used_at, archived: [...] } }`，原子写。
-- 每个 scope 一把互斥锁（同一线程不并发），不同 scope 可并行（受 `AGENT_CONCURRENCY` 约束）。
-- 迁移：现有 `codex-session.json` 的线程归入 `private:<owner>`，保持你的连续性；其他 scope 首次使用时新建。
+### 2.1 存储（QQBridge 新增职责）
+`/data/qq-messages.sqlite`，`node:sqlite`（容器内 SQLite 3.53，FTS5 可用）：
 
-### 2.2 每轮注入内容（最小化）
-```
-[来源] 群 200000001 · 昵称(QQ号) · 2026-10-17 22:41
-[引用] 昵称: 被引用消息正文（≤200 字，仅当消息带 reply 段时出现）
-<正文>
-```
-不再附带任何历史、规则或状态说明；规则全部放在 `AGENTS.md`（一次性加载）。
+| 表 | 内容 |
+|---|---|
+| `messages` | `scope`(group:<id> / private:<qq>)、`message_id`、`time`、`user_id`、`nickname`、`is_self`、`text`、`reply_to_id`。允许范围内**全部**消息入库（含不触发的群消息、机器人自己的回复）。媒体只存 `[image]` 等占位。 |
+| `messages_fts` | FTS5 虚表，`tokenize='trigram'`，支持中文子串检索 |
+| `summaries` | `scope`、`level`(day / week)、`period_start`、`period_end`、`text`(≤400 字)、`msg_count`、`created_at` |
+| `summaries_fts` | 同上 |
 
-### 2.3 轮换（rotation）
-触发条件任一满足即在**下一轮开始前**轮换：
-- 上一轮 `turn.completed.usage.input_tokens` > `CODEX_ROTATE_INPUT_TOKENS`（默认 120000，低于 codex 自身压缩阈值，保证摘要内容受我们控制）；
-- 累计轮数 > `CODEX_ROTATE_TURNS`（默认 150）；
-- 线程年龄 > `CODEX_ROTATE_DAYS`（默认 14）。
+### 2.2 衰老调度（agent 侧每日任务，容器内 03:00）
+1. **日摘要**：对每个 scope 前一天的消息（≥5 条才做），用 `deepseek-flash` 生成 ≤400 字摘要：参与者、讨论主题与结论、待办/承诺、机器人做过的事。写入 `summaries(level=day)`。
+2. **周摘要**：日摘要满 7 天后合并成一条 ≤400 字周摘要，删除对应日摘要。
+3. **原始消息**：超过 `HISTORY_RAW_DAYS`（默认 30）删除。
+4. **周摘要**：超过 `HISTORY_SUMMARY_DAYS`（默认 180）删除。
+5. 撤回事件：删除原始行；已生成的摘要不回溯修改。
+摘要生成是唯一的模型开销，每天每 scope 一次，忽略不计。
 
-轮换流程：
-1. 在旧线程里以 `low` 强度发一条固定指令："写一份交接笔记，≤400 字，纯文本，只包含：对方的长期偏好与事实、未完成的任务、你已承诺的事项。不要复述聊天内容。"
-2. 笔记存 `/data/codex-handoff/<scope>.md`（覆盖）。
-3. 新建线程，首轮 prompt 前置 `[交接笔记]\n<内容>`，随后是正常的本轮消息。
-4. 旧线程 id 进 `archived`，不再 resume。
-5. 失败兜底：交接步骤超时或出错 → 不带笔记直接新建线程，并记录日志。
-
-codex 自身的自动压缩仍然保留作为安全网，但正常情况下不会触发。
-
-## 3. 聊天记录：本地消息库 + MCP 按需检索
-
-### 3.1 消息库（QQBridge 新增职责）
-- 存储：`/data/qq-messages.sqlite`，表 `messages(scope, message_id, time, user_id, nickname, is_self, text, reply_to_id)` + FTS5 虚表（`tokenize='trigram'`，中文子串可检索）。
-- 范围：**仅**允许的群的全部消息 + 允许用户的私聊消息；机器人自己发出的回复也入库（`is_self=1`），codex 才能知道"我上次说了什么"。
-- 媒体只存 `[image]` 等占位，永不下载。
-- 保留 `QQ_HISTORY_RETENTION_DAYS`（默认 30）天，每日清理；撤回事件（`group_recall`）删除对应行。
-- 消息入库与现有触发/票据逻辑解耦：不触发的群消息也入库。
-
-### 3.2 MCP 服务 `qq_context`（容器内，stdio，Node）
+### 2.3 检索服务 `qq_context`（容器内 stdio MCP，Node）
 注册进受管 `config.toml`：
 ```toml
 [mcp_servers.qq_context]
@@ -69,128 +50,124 @@ args = ["/app/dist/mcp/qq-context.js"]
 startup_timeout_sec = 10
 tool_timeout_sec = 15
 ```
-**作用域按次注入**：每次 `codex exec` 追加 `-c mcp_servers.qq_context.env.QQ_SCOPE="group:200000001"`。MCP 进程只能读该 scope；参数里不接受 scope。私聊 scope 永不可见于群，反之亦然。
-
-工具（返回全部为紧凑纯文本，不含 JSON 噪音）：
+**访问范围按次注入**：每次 `codex exec` 追加 `-c mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"` 或 `"all"`（owner 私聊）。MCP 进程只按该范围过滤，参数里不接受范围。
 
 | 工具 | 参数 | 返回 | 上限 |
 |---|---|---|---|
-| `qq_recent` | `limit≤30`, `before_message_id?` | `HH:MM 昵称: 文本` 每行一条，自己发的标 `[我]` | 单条 ≤120 字，总量 ≤2500 字 |
-| `qq_search` | `query`, `days≤30`, `limit≤20` | `MM-DD HH:MM 昵称: 文本`，按时间倒序 | 同上 |
-| `qq_message` | `message_id` | 该条完整正文 + 其引用链（≤3 层） | ≤1500 字 |
+| `qq_recent` | `limit≤30`, `before_message_id?` | `HH:MM 昵称: 文本`，自己发的标 `[我]` | 单条 ≤120 字，总量 ≤2500 字 |
+| `qq_search` | `query`, `days≤180`, `limit≤20` | 原始消息与摘要混排，按时间倒序；摘要行标 `[日摘要 10-15]` / `[周摘要 10-06~10-12]` | 同上 |
+| `qq_message` | `message_id` | 完整正文 + 引用链（≤3 层） | ≤1500 字 |
 
-### 3.3 AGENTS.md 中的使用纪律（防冗余）
-- 只有在消息指代了此前内容（"刚才"、"上面"、"那个"、无先行词的代词、明显的追问）或用户明确要求回顾时才调用 `qq_recent`；一般问题直接回答。
-- 优先 `qq_search` 带具体关键词，而不是大范围 `qq_recent`。
-- 一次请求最多调用历史工具 2 次。
-- 不要把检索到的历史原文复述进回复，只给结论。
+同一个库也供意图层读取（§4），不经 MCP，直接进程内访问。
 
-## 4. 回复规则（写入 `/workspace/AGENTS.md`，热编辑）
+## 3. codex 执行层
 
-- 回答会原样显示在 QQ 里：纯文本，不用 Markdown、代码围栏、表格、标题符号。
-- 中文；默认 ≤300 字，用户明确要长文时再放开（上限由中继层 4000 字截断）。
-- 不复述问题，不解释自己用了什么工具，不输出"作为 AI"类套话。
-- 需要给链接时最多 1 条，不给链接列表。
-- 不确定的事实要明说"不确定/未核实"，不要编造。
-- 群聊中回答面向群内读者，私聊面向本人；不要在群里转述别人私聊内容（权限层本来也不允许）。
-- 安全规则维持现状（不泄露凭据/环境/工作区外文件）。
+### 3.1 单一线程
+- 维持现有固定线程与 `codex-session.json`。
+- 依赖 codex 自带的自动上下文压缩。安全阀：rollout 文件 > `CODEX_ROLLOUT_MAX_MB`（默认 50）或线程 > `CODEX_THREAD_MAX_DAYS`（默认 90）时新建线程（无交接摘要，历史靠 §2 的检索找回）。
+- 全局一把互斥锁（不变）。
 
-## 5. Web 搜索
+### 3.2 每轮注入（最小化）
+```
+[来源] 群 200000001 · 昵称(QQ号) · 2026-10-17 22:41
+[引用] 昵称: 被引用消息正文（≤200 字，仅当带 reply 段）
+<正文>
+```
+规则一律放 `AGENTS.md`，不随轮注入。
 
-受管 `config.toml` 新增：
+### 3.3 `AGENTS.md`（热编辑，`/workspace`）
+回复规则：
+- 回答原样显示在 QQ：纯文本，不用 Markdown、代码围栏、表格、标题符号。
+- 中文；默认 ≤300 字，用户明确要长文再放开（中继层 4000 字截断）。
+- 不复述问题，不解释用了什么工具，不输出"作为 AI"套话。
+- 链接最多 1 条；不确定的事实明说"未核实"，不编造。
+- 群聊面向群内读者，私聊面向本人。
+
+历史工具纪律：
+- 仅当消息指代此前内容（"刚才"、"上面"、"那个"、无先行词代词、明显追问）或用户要求回顾时调用 `qq_recent`。
+- 优先 `qq_search` 带具体关键词；一次请求最多调用历史工具 2 次。
+- 不复述检索到的原文，只给结论。
+
+安全规则维持现状。
+
+### 3.4 Web 搜索
+受管 `config.toml`：
 ```toml
 web_search = "live"            # CODEX_WEB_SEARCH=live|cached|disabled，默认 live
 [tools.web_search]
-context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT=low|medium|high，默认 low：限制搜索结果注入量
+context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制搜索结果注入量
 ```
-`low` 是为了上下文经济：搜索结果摘要进线程越少越好；研究型任务由 §6 的一次性会话承担，可用 `medium`。
 
-## 6. 意图层调整："先查再画"
+## 4. 意图层
 
-### 6.1 新工具 `research`
-- 参数：`question`（要核实什么、为画面服务）、`max_chars`（默认 600，上限 1000）。
-- 实现：`codex exec --ephemeral -c web_search="live" -c tools.web_search.context_size="medium" -c model_reasoning_effort="medium"`，**不**使用任何长期线程，一次性会话，结束即丢。
-- 固定指令：只返回与视觉呈现相关的事实（外观、颜色、标志、场景、人物/队伍身份、时间与结果等），纯文本，≤max_chars，不确定的标注"未核实"。
-- 超时 `RESEARCH_TIMEOUT_SEC`（默认 180）；失败时返回空结果，意图层按"不依赖外部信息"继续生图并在回复里说明。
+### 4.1 会话感知（紧凑推送）
+派发器维护 `interactions` 表（`/data/agent.sqlite` 旁，或并入票据库）：
+`scope, ticket, time, user_text≤200, action ∈ {generate_image, research+generate_image, ask_codex, fallback}, detail, reply_excerpt≤120, image_count, status ∈ {处理中, 已回复, 失败}`。
+`detail`：生图存**最终英文提示词**；codex 存推理强度。
 
-### 6.2 新的动作规则（系统提示 + 代码守卫）
+每条新消息前注入（由派发器生成，不经模型）：
 ```
-纯生图，且画面不涉及需要核实的现实实体/时事  → generate_image → reply_qq
-纯生图，但涉及具体队伍/人物/赛事结果/当日天气/节日等外部事实
-                                              → research → 组装英文提示词 → generate_image → reply_qq
-其他                                          → ask_codex → reply_qq
+[近期交互 · 同一会话 · 最近 120 分钟内最多 5 条，旧→新]
+1. 22:41 De: 画一只狗 → 生图 prompt="a cute dog, photorealistic, ..." → 已发送 1 张图
+2. 22:43 De: 今晚有cs比赛吗 → codex(high) → "今晚有 ESL 决赛……"
+3. 22:44 小明: 把狗换成蓝色的 → 处理中
 ```
-代码守卫 `claimBusinessCall` 改为状态机：`research ≤1 次`，`generate_image ≤1 次`，`ask_codex ≤1 次`，`ask_codex` 与 `generate_image` 互斥，`research` 之后必须接 `generate_image`。
-生图回复文案可用一句话说明参考了哪些信息（如"按今天决赛结果画了 X 队举杯"）。
+上限：`INTENT_CONTEXT_ITEMS=5`、`INTENT_CONTEXT_WINDOW_MIN=120`、`INTENT_CONTEXT_MAX_CHARS=1500`。超窗口则不注入。群按整群为会话，每行标发送者。
 
-### 6.3 意图层的会话感知（新增需求）
+可选拉取工具 `recent_context(limit≤10)` 返回更早记录；`search_history(query, days≤30)` 读 §2 的消息库（按同样访问过滤），供意图层在需要时查"之前让画过什么"。
 
-意图模型每条消息一个会话、无状态，但它必须知道"这条消息接在什么之后"，否则"把刚才那张图改成蓝色"、"再来一张"、"继续"都无法路由。做法仍是**紧凑推送 + 可选拉取**，不是把历史全塞进去。
+**同一会话顺序处理**：派发器按 scope FIFO 串行，不同 scope 并行（受 `AGENT_CONCURRENCY`）。否则追问看不到前一条结果。
 
-**交互记录表**（agent 侧，`/data/agent-interactions.sqlite` 或并入票据库）：每条处理过的票据落一行
-`interactions(scope, ticket, time, user_text≤200, action ∈ {generate_image, ask_codex, research+generate_image, fallback}, detail, reply_excerpt≤120, image_count, status ∈ {处理中, 已回复, 失败})`。
-`detail` 对生图保存**最终使用的英文提示词**（含 research 结果拼装后的版本），对 codex 保存所选推理强度。
+### 4.2 联网检索工具（DeepSeek Search/Fetch API）
+已核实：`POST https://api.deepseek.com/v1/tools/search`（`query` ≤128 字、`count` ≤50、`need_content`、支持 `site:` `lang:` `after:` 操作符）与 `POST /v1/tools/fetch`（`url` → Markdown 正文），同一 API key，5 QPS，$0.75/千次，2026-11-01 前免费。
 
-**每条新消息注入的上下文块**（放在用户消息之前，由派发器生成，不经模型）：
+意图层新增工具：
+| 工具 | 参数 | 返回 | 上限 |
+|---|---|---|---|
+| `web_search` | `query`, `count≤8` | 每条 `标题 / 日期 / 摘要(summary) / url`，按 rerank_score 排序 | 总量 ≤2500 字 |
+| `fetch_page` | `url` | 页面正文 | ≤4000 字，超出截断 |
+
+纪律：每条消息最多 `web_search` 2 次、`fetch_page` 2 次（代码守卫）；只为"组装画面事实"或"判断是否需要 codex"服务，不替代 codex 回答一般问题。
+
+### 4.3 动作规则（系统提示 + 代码状态机）
 ```
-[近期交互 · 同一会话域 · 最近 120 分钟内最多 5 条，旧→新]
-1. 22:41 用户 De: 画一只狗 → 生图 prompt="a cute dog, photorealistic, ..." → 已发送 1 张图
-2. 22:43 用户 De: 今晚有cs比赛吗 → codex(high) → "今晚有 ESL 决赛……"(摘要)
-3. 22:44 用户 小明: @机器人 把狗换成蓝色的 → 处理中
+纯生图，画面不涉及需核实的现实实体/时事          → generate_image → reply_qq
+纯生图，涉及队伍/人物/赛事结果/当日天气/节日等     → web_search(≤2) [→ fetch_page(≤2)] → 组装英文提示词 → generate_image → reply_qq
+对上一条生图结果的调整（换色/风格/再来一张）       → 以记录中的提示词为底稿修改 → generate_image → reply_qq
+对上一条 codex 回答的追问（继续/详细点/那明天呢）  → ask_codex → reply_qq（codex 自带记忆，不复述历史）
+其他                                               → ask_codex → reply_qq
 ```
-上限：`INTENT_CONTEXT_ITEMS`（默认 5）、`INTENT_CONTEXT_WINDOW_MIN`（默认 120 分钟）、`INTENT_CONTEXT_MAX_CHARS`（默认 1500）。超出窗口则不注入任何历史，模型按独立消息处理。群聊中按**整群**为域，但每行标注发送者，模型自行判断"刚才那张图"指的是谁的。
+守卫：`generate_image ≤1`、`ask_codex ≤1`、二者互斥；`web_search/fetch_page` 仅允许出现在 `generate_image` 之前；`reply_qq` 恰好 1 次。
+生图回复可用一句话说明参考了什么（"按今天决赛结果画了 X 队举杯"）。
 
-**系统提示新增规则**：
-- 如果消息是对上一条生图结果的调整（换颜色/风格/再来一张/加点什么），视为纯生图追问：以记录中的英文提示词为底稿做修改后调用 `generate_image`，不要从零重写。
-- 如果消息是对上一条 codex 回答的追问（"继续"、"详细点"、"那明天呢"），直接 `ask_codex`；codex 线程自带记忆，不要把历史复述进 prompt。
-- 如果上一条仍"处理中"而本条是对它的修改，先 `ask_codex`? 不——按本条独立意图处理，并在回复里提一句"上一条仍在处理"。（简单、可预期）
-- 记录仅用于判断意图与构造提示词，不得在回复里复述。
-
-**可选拉取**：意图层增加只读工具 `recent_context(limit≤10)`，返回同格式更早的记录，供模型在注入块不够时使用（预计很少触发）。
-
-**同一会话域内顺序处理**：派发器改为按 scope 的 FIFO 队列，同一 scope 的消息串行，不同 scope 并行（受 `AGENT_CONCURRENCY` 约束）。否则"画一只狗"和"改成蓝色"并发时追问看不到结果。这与 codex 的每 scope 互斥锁是同一个粒度。
-
-**追问生图的实现范围**：本期用"改提示词重画"实现调整；以同一张图做局部编辑（img2img / Qwen Image Edit）留作后续，需要宿主机增加对应模型与工作流。
-
-## 7. 配置项（新增）
+## 5. 配置项（新增）
 
 ```
+HISTORY_RAW_DAYS=30
+HISTORY_SUMMARY_DAYS=180
+HISTORY_SUMMARY_HOUR=3
+QQ_CONTEXT_MAX_CHARS=2500
 CODEX_WEB_SEARCH=live
 CODEX_WEB_SEARCH_CONTEXT=low
-CODEX_ROTATE_INPUT_TOKENS=120000
-CODEX_ROTATE_TURNS=150
-CODEX_ROTATE_DAYS=14
-QQ_HISTORY_RETENTION_DAYS=30
-QQ_CONTEXT_MAX_CHARS=2500
-RESEARCH_MAX_CHARS=600
-RESEARCH_EFFORT=medium
-RESEARCH_TIMEOUT_SEC=180
+CODEX_ROLLOUT_MAX_MB=50
+CODEX_THREAD_MAX_DAYS=90
 INTENT_CONTEXT_ITEMS=5
 INTENT_CONTEXT_WINDOW_MIN=120
 INTENT_CONTEXT_MAX_CHARS=1500
+WEB_SEARCH_MAX_PER_MESSAGE=2
+FETCH_MAX_PER_MESSAGE=2
 ```
 
-## 8. 边界与隐私
+## 6. 边界与隐私
 
-- 群成员能让 codex 检索**该群** 30 天内的消息，这与他们本来就能翻群聊天记录一致；私聊记录只对本人 scope 可见。
-- 消息库是本地聊天记录，`./data` 需按聊天记录保管；撤回同步删除，但无法撤回已发出的 QQ 消息。
-- 交接笔记是 codex 生成的摘要，可能带偏差；它只影响 codex 的"记忆"，不影响权限与路由。
+- 群成员可让 codex 检索**本群** 30 天原始消息与 180 天摘要，与其本来能翻群记录一致；owner 私聊可查全部；私聊内容对群不可见。
+- 摘要由模型生成，可能有偏差，只影响"记忆"，不影响权限与路由。
+- `./data` 含聊天记录与摘要，按聊天记录保管。
 
-## 9. 实施拆分（三个可独立验证的提交组）
+## 7. 实施拆分（各自测试、单独重建部署）
 
-1. **消息库 + `qq_context` MCP + AGENTS.md + web_search 配置**：QQBridge 入库与清理、FTS5、MCP 服务与作用域注入、受管 config.toml；测试：假 OneBot 入库/撤回/清理、MCP 工具上限与越权 scope 拒绝。
-2. **按会话域线程 + 轮换**：`codex-threads.json`、每 scope 互斥、迁移旧会话、交接流程；测试：假 codex 验证 scope 隔离、阈值触发、交接失败兜底、并发。
-3. **research 工具 + 意图规则 + 状态机守卫**：测试：faux 模型三条路径、守卫拒绝非法序列、research 失败降级。
-4. **意图层会话感知**：交互记录表、上下文块注入、按 scope FIFO 派发、`recent_context` 工具、追问生图规则；测试：生图后"改成蓝色"复用提示词、codex 追问直通、超窗口不注入、同 scope 串行/跨 scope 并行。
+1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
+2. **意图层会话感知**：interactions 表、上下文块、按 scope FIFO、`recent_context` / `search_history`、追问规则。测试：生图后"改成蓝色"复用提示词、codex 追问直通、超窗口不注入、同 scope 串行/跨 scope 并行。
+3. **联网检索 + 先查再画**：`web_search` / `fetch_page` 工具、状态机守卫、系统提示。测试：faux 路径、守卫拒绝非法序列、搜索失败降级为直接生图、429 重试与上限。
 
-每组通过后各自重建部署一次，便于定位问题。
-
-## 10. 需要你确认的选项
-
-| 选项 | 推荐 | 备选 |
-|---|---|---|
-| 线程粒度 | 按会话域（私聊/群各一） | 保持单一全局线程（简单，但串话且不可控增长） |
-| 群内粒度 | 整群一个线程 | 群内按发送者分线程（隔离更强，但群聊语境割裂、线程数多） |
-| 轮换阈值 | 120k 输入 tokens / 150 轮 / 14 天 | 更激进（60k）以压成本，或更宽松 |
-| 历史保留 | 30 天 | 7 天 / 90 天 |
-| research 执行者 | codex 一次性会话 + web_search | 给 DeepSeek 单独接搜索 API（当前无可用 key） |
+每组完成后由 Codex 做一轮独立评审。
