@@ -25,6 +25,18 @@ describe("fitText (UTF-16 code units, same rule as QQBridge)", () => {
       expect(r.text).not.toMatch(LONE_LOW);
     }
   });
+  it("lone high / low surrogates become U+FFFD before the cap (R11)", () => {
+    expect(fitText("a\uD800b").text).toBe("a�b");
+    expect(fitText("a\uDC00b").text).toBe("a�b");
+    expect(fitText("\uDBFF").text).toBe("�");
+    expect(fitText("😀\uDC00😀").text).toBe("😀�😀");
+    const long = fitText("\uD800".repeat(5000));
+    expect(long.truncated).toBe(true);
+    expect(long.text.length).toBeLessThanOrEqual(QQ_TEXT_LIMIT);
+    expect(long.text).not.toMatch(LONE_HIGH);
+    expect(long.text).not.toMatch(LONE_LOW);
+    expect(sanitizeReply("x\uDC01 @y")).toBe("x� ＠y");
+  });
   it("empty text gets a placeholder", () => {
     expect(fitText("   ").text).toBe("（无内容）");
   });

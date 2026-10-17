@@ -1,7 +1,8 @@
 /**
  * 回复后处理（设计 §4.3，两后端统一）：
  * - sanitize（代码清洗）：去 Markdown 代码围栏行、标题符号、表格竖线与分隔行、加粗/行内代码标记；
- *   `@` 换成全角 `＠`（QQ 里不会被当成 @ 提及）；压缩多余空行；UTF-16 ≤4000 截断且不拆代理对（fitText）。
+ *   `@` 换成全角 `＠`（QQ 里不会被当成 @ 提及）；压缩多余空行；孤立代理项换成 U+FFFD，
+ *   UTF-16 ≤4000 截断且不拆代理对（fitText）。
  * - codex 后端额外：CODEX_REPLY_MODE=relay（默认）时先用意图模型做一次 ≤5 行提示的格式整理（20 s 超时），
  *   结果再清洗一遍；失败、超时或空结果回退到只清洗原文。direct：只清洗。
  */
@@ -14,9 +15,14 @@ const TRUNC_NOTE = "\n…（内容过长，已截断）";
 
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
 
-/** 截断到 ≤ limit 个 UTF-16 code unit（不拆开代理对），超长时附加提示。 */
+/** 把孤立的代理项（非法 UTF-16）替换为 U+FFFD（Node 24 的 String.prototype.toWellFormed）。 */
+export function wellFormed(text: string): string {
+  return (text as string & { toWellFormed(): string }).toWellFormed();
+}
+
+/** 先修正非法 UTF-16，再截断到 ≤ limit 个 UTF-16 code unit（不拆开代理对），超长时附加提示。 */
 export function fitText(text: string, limit = QQ_TEXT_LIMIT): { text: string; truncated: boolean } {
-  const trimmed = text.trim() || "（无内容）";
+  const trimmed = wellFormed(text).trim() || "（无内容）";
   if (trimmed.length <= limit) return { text: trimmed, truncated: false };
   let cut = trimmed.slice(0, Math.max(0, limit - TRUNC_NOTE.length));
   if (cut.length && isHighSurrogate(cut.charCodeAt(cut.length - 1))) cut = cut.slice(0, -1);
