@@ -366,7 +366,7 @@ describe("pi durable backend", () => {
     expect(restarted.faux.state.callCount).toBe(1);
   });
 
-  it("persists a fresh request id before retrying an existing aborted receipt exactly once", async () => {
+  it.each([false, true])("persists a fresh request id before retrying an existing aborted receipt exactly once; crash before submit=%s", async crash => {
     let started = false;
     const s = await setup([async (_ctx, opts) => {
       started = true;
@@ -377,7 +377,9 @@ describe("pi durable backend", () => {
     const pending = s.pi.handle({ ...request("legacy-abort"), text: "原始输入" }, { ...handleContext(), signal: cancel.signal }).catch(() => undefined);
     await vi.waitFor(() => expect(started).toBe(true)); cancel.abort(); await pending;
     const conv = (await s.pi.harness.conversation((await s.pi.readThreadIds())["group:7"] as ConversationId, context))!;
-    await conv.waitForIdle(context); await s.pi.close();
+    await conv.waitForIdle(context);
+    await conv.commit(async tx => { (await tx.doc(PiRequestDoc, conv.id)).deadline = Date.now() - 1000; }, context);
+    await s.pi.close();
     const restarted = await setup([ctx => { expect(JSON.stringify(ctx.messages)).toContain("原始输入"); return reply("恢复完成"); }], { disk: true, dir: s.dir });
     const ticketHarness = await openHarness({ models: restarted.models, extension: createCsAgentExtension(createTasks({
       getBridge: () => { throw new Error("unused"); }, imageBackend: restarted.imageBackend, imagesDir: path.join(s.dir, "images"),
@@ -388,8 +390,11 @@ describe("pi durable backend", () => {
     const persistPiTurn = async (state: { requestId: string; retries: number }) => {
       expect(restarted.faux.state.callCount).toBe(0);
       await ticket.commit(async tx => { (await tx.doc(TicketDoc, ticket.id)).piTurn = state; }, context);
+      if (crash) throw new Error("crash before submit");
     };
-    expect((await restarted.pi.handle(request("legacy-abort"), { ...handleContext(), persistPiTurn })).text).toBe("恢复完成");
+    const retry = restarted.pi.handle(request("legacy-abort"), { ...handleContext(), persistPiTurn });
+    if (crash) await expect(retry).rejects.toThrow("crash before submit");
+    else expect((await retry).text).toBe("恢复完成");
     const piTurn = (await ticketHarness.snapshot(TicketDoc, ticket.id, context))!.piTurn!;
     expect(piTurn).toEqual({ requestId: "legacy-abort#r1", retries: 1 });
     expect((await restarted.pi.handle(request("legacy-abort"), { ...handleContext(), piTurn, persistPiTurn })).text).toBe("恢复完成");

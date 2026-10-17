@@ -194,8 +194,9 @@ export class PiBackend implements AgentBackend {
           (ctx.piTurn?.retries ?? 0) < 1) {
         if (bound?.ticket !== req.ticket) throw new Error("pi 恢复请求与绑定不一致");
         requestId = req.ticket + "#r" + ((ctx.piTurn?.retries ?? 0) + 1);
-        await ctx.persistPiTurn?.({ requestId, retries: (ctx.piTurn?.retries ?? 0) + 1 });
+        // 先续期再保存后缀；后缀已落盘但 submit 前再次退出时，不能沿用旧的过期期限。
         await conv.commit(async tx => { (await tx.doc(PiRequestDoc, conv.id)).deadline = deadline; }, context);
+        await ctx.persistPiTurn?.({ requestId, retries: (ctx.piTurn?.retries ?? 0) + 1 });
         waitContext.abortSignal?.throwIfAborted();
         submission = await conv.submit({ type: "input", requestId, content: bound.content, whenBusy: "reject" }, context);
         settled = await submission.wait(waitContext);
