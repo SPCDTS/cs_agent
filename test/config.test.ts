@@ -14,7 +14,7 @@ describe("model config defaults", () => {
   it("history / codex context defaults and owner resolution", () => {
     const c = loadConfig({ QQ_ALLOW_USERS: "111,222" });
     expect(c).toMatchObject({
-      HISTORY_RAW_DAYS: 30, HISTORY_SUMMARY_DAYS: 180, HISTORY_SUMMARY_HOUR: 3, QQ_CONTEXT_MAX_CHARS: 2500,
+      HISTORY_RAW_DAYS: 30, HISTORY_SUMMARY_DAYS: 180, HISTORY_RAW_HARD_MAX_DAYS: 90, HISTORY_SUMMARY_HOUR: 3, QQ_CONTEXT_MAX_CHARS: 2500,
       CODEX_WEB_SEARCH: "live", CODEX_WEB_SEARCH_CONTEXT: "low", CODEX_ROLLOUT_MAX_MB: 50, CODEX_THREAD_MAX_DAYS: 90,
       CODEX_BROWSER: "playwright", owner: "111",
     });

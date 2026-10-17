@@ -84,10 +84,37 @@ describe("runAging", () => {
     const r = rig([fauxAssistantMessage([], { stopReason: "error", errorMessage: "boom" })]);
     const d20 = dayStart(2026, 10, 20);
     for (let i = 0; i < 5; i++) r.store.ingest(msg(d20 + i, `x${i}`));
-    r.store.ingest(msg(NOW / 1000 - 40 * DAY, "很久以前"));
+    r.store.ingest(msg(NOW / 1000 - 100 * DAY, "很久以前")); // 超过兜底上限 90 天
     const rep = await runAging(r.opts);
     expect(rep).toMatchObject({ day_summaries: 0, failed: 1, purged_messages: 1 });
     expect(r.store.pendingDaySummaries(NOW / 1000)).toHaveLength(1); // 下次再试
+  });
+
+  it("never purges raw messages of a day whose summary failed; purges them after a later successful retry", async () => {
+    const r = rig([
+      fauxAssistantMessage([], { stopReason: "error", errorMessage: "boom" }),
+      fauxAssistantMessage(fauxText("补做的日摘要")),
+    ]);
+    const old = dayStart(2026, 9, 10); // 41 天前，超过 rawDays=30
+    for (let i = 0; i < 5; i++) r.store.ingest(msg(old + 3600 + i, `旧日 ${i}`));
+    const first = await runAging(r.opts);
+    expect(first).toMatchObject({ day_summaries: 0, failed: 1, purged_messages: 0 });
+    expect(r.store.messagesBetween(G, old, old + DAY)).toHaveLength(5);
+
+    const second = await runAging(r.opts);
+    expect(second).toMatchObject({ day_summaries: 1, failed: 0, purged_messages: 5 });
+    expect(r.store.messagesBetween(G, old, old + DAY)).toHaveLength(0);
+    expect(r.store.search({ kind: "all" }, { query: "补做", days: 365, limit: 10, now: NOW / 1000 })).toHaveLength(1);
+  });
+
+  it("purges uncovered raw messages once they pass HISTORY_RAW_HARD_MAX_DAYS", async () => {
+    const r = rig([]);
+    const nowSec = NOW / 1000;
+    r.store.ingest(msg(nowSec - 40 * DAY, "未覆盖 40 天")); // 不足 5 条，永远不会有日摘要
+    r.store.ingest(msg(nowSec - 91 * DAY, "未覆盖 91 天"));
+    const rep = await runAging({ ...r.opts, rawHardMaxDays: 90 });
+    expect(rep.purged_messages).toBe(1);
+    expect(r.store.recent({ kind: "all" }, { limit: 10 }).map((m) => m.text)).toEqual(["未覆盖 40 天"]);
   });
 });
 

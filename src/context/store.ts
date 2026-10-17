@@ -391,9 +391,17 @@ export class ContextStore {
     }
   }
 
-  /** 清理：原始消息超过 rawDays、摘要超过 summaryDays。 */
-  purge(now: number, rawDays: number, summaryDays: number): { messages: number; summaries: number } {
-    const m = this.db.prepare("DELETE FROM messages WHERE time < ?").run(now - rawDays * DAY);
+  /**
+   * 清理：原始消息超过 rawDays 且其时间已被同 scope 的日/周摘要覆盖时删除；未被覆盖（摘要失败、
+   * 条数不足未做摘要）的原始消息保留到 hardMaxDays 为止（兜底上限，默认 90）。摘要超过 summaryDays 删除。
+   */
+  purge(now: number, rawDays: number, summaryDays: number, hardMaxDays = 90): { messages: number; summaries: number } {
+    const m = this.db
+      .prepare(
+        `DELETE FROM messages WHERE time < ? AND (time < ? OR EXISTS (
+           SELECT 1 FROM summaries s WHERE s.scope = messages.scope AND s.period_start <= messages.time AND s.period_end > messages.time))`,
+      )
+      .run(now - rawDays * DAY, now - Math.max(hardMaxDays, rawDays) * DAY);
     const s = this.db.prepare("DELETE FROM summaries WHERE period_end < ?").run(now - summaryDays * DAY);
     return { messages: Number(m.changes), summaries: Number(s.changes) };
   }

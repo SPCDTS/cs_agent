@@ -61,6 +61,8 @@ const EnvSchema = z.object({
   /** 统一上下文消息库：原始消息保留天数、摘要保留天数、每日衰老任务的本地小时（容器默认 UTC） */
   HISTORY_RAW_DAYS: int(30),
   HISTORY_SUMMARY_DAYS: int(180),
+  /** 未被日/周摘要覆盖（摘要失败或条数不足）的原始消息最长保留天数 */
+  HISTORY_RAW_HARD_MAX_DAYS: int(90),
   HISTORY_SUMMARY_HOUR: z.coerce.number().int().min(0).max(23).default(3),
   /** recent/search 返回文本的总字数上限（意图层与 qq_context MCP 共用） */
   QQ_CONTEXT_MAX_CHARS: int(2500),

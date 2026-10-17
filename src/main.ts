@@ -138,6 +138,7 @@ async function main(): Promise<void> {
     model: agentModel,
     rawDays: cfg.HISTORY_RAW_DAYS,
     summaryDays: cfg.HISTORY_SUMMARY_DAYS,
+    rawHardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,
     hour: cfg.HISTORY_SUMMARY_HOUR,
   });
 

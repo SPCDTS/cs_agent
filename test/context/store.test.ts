@@ -129,14 +129,21 @@ describe("ContextStore", () => {
     expect(formatMessage(s.recent(grp, { limit: 1 })[0]!, { now: T0 })).toMatch(/\[我\] → 失败$/);
   });
 
-  it("purge drops raw rows older than rawDays and summaries older than summaryDays", () => {
+  it("purge drops covered raw rows older than rawDays and summaries older than summaryDays", () => {
     const s = open();
     s.ingest(msg("old", { message_id: "50", time: T0 - 31 * 86400 }));
     s.ingest(msg("new", { message_id: "51", time: T0 - 29 * 86400 }));
+    s.ingest(msg("uncovered", { message_id: "52", time: T0 - 35 * 86400 }));
+    s.ingest(msg("other scope", { message_id: "53", time: T0 - 31 * 86400, group_id: OTHER }));
+    s.writeSummary({ scope: `group:${G}`, level: "day", period_start: T0 - 32 * 86400, period_end: T0 - 30 * 86400, text: "覆盖", msg_count: 5 });
     s.writeSummary({ scope: `group:${G}`, level: "week", period_start: T0 - 200 * 86400, period_end: T0 - 193 * 86400, text: "古老", msg_count: 9 });
     s.writeSummary({ scope: `group:${G}`, level: "week", period_start: T0 - 20 * 86400, period_end: T0 - 13 * 86400, text: "较新", msg_count: 9 });
     expect(s.purge(T0, 30, 180)).toEqual({ messages: 1, summaries: 1 });
-    expect(s.recent(grp, { limit: 10 }).map((r) => r.text)).toEqual(["new"]);
+    expect(s.recent(grp, { limit: 10 }).map((r) => r.text)).toEqual(["uncovered", "new"]);
+    expect(s.recent(all, { scope: `group:${OTHER}`, limit: 10 }).map((r) => r.text)).toEqual(["other scope"]);
+    // 兜底上限：未覆盖的原始消息超过 hardMaxDays 也删除
+    expect(s.purge(T0, 30, 180, 34)).toEqual({ messages: 1, summaries: 0 });
+    expect(s.recent(all, { limit: 10 }).map((r) => r.text)).toEqual(["other scope", "new"]);
     expect(s.search(grp, { query: "古老", days: 365, limit: 10, now: T0 })).toEqual([]);
   });
 
