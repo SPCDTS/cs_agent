@@ -22,7 +22,9 @@ describe("model config defaults", () => {
     expect(loadConfig({ QQ_ALLOW_USERS: "*" }).owner).toBeUndefined();
     expect(() => loadConfig({ CODEX_WEB_SEARCH: "always" })).toThrow(/CODEX_WEB_SEARCH/);
     expect(() => loadConfig({ HISTORY_SUMMARY_HOUR: "24" })).toThrow(/HISTORY_SUMMARY_HOUR/);
-    expect(c.COMFY_WORKFLOW_FILE).toBe("/data/workflows/qwen-image-2.1-turbo-api.json");
+    expect(c.COMFY_WORKFLOW_FILE).toBe("");
+    expect(c.COMFY_QWEN_CACHE).toBe(false);
+    expect(loadConfig({ COMFY_QWEN_CACHE: "true" }).COMFY_QWEN_CACHE).toBe(true);
     expect(loadConfig({ COMFY_WORKFLOW_FILE: "/app/workflows/qwen-image-2.1-turbo-api.json" }).COMFY_WORKFLOW_FILE).toBe(
       "/app/workflows/qwen-image-2.1-turbo-api.json",
     );

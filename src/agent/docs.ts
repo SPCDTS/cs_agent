@@ -1,3 +1,4 @@
+import type { ImageOptions } from "./image-options.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { ImageFailure, ImageSubmission, ReconcileStep } from "./image-gen.js";
 import type { RouteName } from "./router.js";
@@ -15,7 +16,7 @@ export type ImageJob = { prompt_id: string; backend: string; /** 已提交次数
 /** 生图阶段的结果（collect 阶段与检查点同一提交写入；任务重跑时据此跳过生图）。 */
 export type ImageResult =
   | { ok: true; images: string[] }
-  | { ok: false; failure: ImageFailure };
+  | { ok: false; failure: ImageFailure; message?: string };
 
 /** 执行 agent 的结果（handle 阶段与检查点同一提交写入；任务重跑时据此不再调用后端）。 */
 export type AgentResult =
@@ -35,6 +36,9 @@ export type TicketState = {
   prefix?: string;
   /** 生图提示词（route=image） */
   prompt?: string;
+  imageOptions?: ImageOptions;
+  source_images?: string[];
+  image_error?: string;
   imageJob?: ImageJob;
   /** 提交前落盘；没有 prompt_id 时按前缀对账，不能盲目重新提交。 */
   submitIntent?: ImageSubmission & { attempt: number };

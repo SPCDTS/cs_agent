@@ -1,3 +1,4 @@
+import { imageRefsValue, validateReferences } from "../image-references.js";
 /**
  * codex 后端（设计 §4.4）：现有 CodexRunner 的适配。
  * - 线程：owner / shared（由请求的 threadKey 决定，同键串行）；
@@ -85,6 +86,8 @@ export class CodexBackend implements AgentBackend {
       if (attempts >= MAX_CODEX_TURNS) throw new Error(`codex turn interrupted ${attempts} times; not asking again`);
     }
     const before = await listFiles(dir);
+    const refs = await validateReferences(req.images ?? [], req.images ?? [], path.join(path.dirname(this.opts.imagesDir), "incoming", req.ticket));
+    imageRefsValue(refs);
     const prompt = buildCodexPrompt(req.source, req.text, {
       ...(req.time ? { time: req.time } : {}),
       ...(req.quote ? { quote: req.quote } : {}),
@@ -92,12 +95,13 @@ export class CodexBackend implements AgentBackend {
     const started = Date.now();
     let text: string;
     try {
-      text = await this.opts.runner.ask(prompt, {
+      text = await this.opts.runner.ask(prompt + (refs.length ? "\n[本轮参考图]\n" + refs.join("\n") : ""), {
         threadKey: req.threadKey,
         signal: ctx.signal,
         ...(this.effort ? { reasoningEffort: this.effort } : {}),
         qqAccess: req.access,
         imageTicketDir: dir,
+        imageRefs: refs,
         outputFile: outFile,
         onAcquired: async () => {
           ctx.signal.throwIfAborted();

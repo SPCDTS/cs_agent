@@ -1,3 +1,5 @@
+import path from "node:path";
+import { validateReferences } from "./image-references.js";
 /**
  * 每条 QQ 消息的 durable 任务（pi-durable defineTask，设计 §4.2 / §4.3）：
  * - 生图任务 `cs.image`：submit（提交 ComfyUI，prompt_id 立即落盘）→ collect（按 prompt_id 等待并下载）→ reply
@@ -175,7 +177,9 @@ export function createTasks(deps: TaskDeps) {
     if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "submit");
     const intent = {
       attempt: prevSubmits + 1, filenamePrefix: imageFilenamePrefix(doc.ticket, prevSubmits + 1),
-      ...(doc.submitIntent?.count !== undefined ? { count: doc.submitIntent.count } : {}),
+      count: doc.imageOptions?.count ?? doc.submitIntent?.count ?? 1,
+      imageOptions: doc.imageOptions ?? { prompt: doc.prompt ?? "" },
+      referenceSubfolder: doc.ticket,
     };
     // 网络提交前先保存意图，并清除旧 prompt_id；崩溃时即使仍在 collect 检查点也能恢复对账。
     await runtime.commit(async (tx) => {
@@ -188,13 +192,17 @@ export function createTasks(deps: TaskDeps) {
     let promptId: string;
     try {
       runtime.signal.throwIfAborted();
-      promptId = await deps.imageBackend.submit(doc.prompt ?? "", runtime.signal, intent);
+      if (doc.image_error) throw new Error(doc.image_error);
+      const opts = doc.imageOptions ?? { prompt: doc.prompt ?? '' };
+      const refs = await validateReferences(opts.reference_images ?? [], doc.source_images ?? [],
+        path.join(path.dirname(deps.imagesDir), 'incoming', doc.ticket));
+      promptId = await deps.imageBackend.submit({ ...opts, reference_images: refs }, intent, runtime.signal);
     } catch (err) {
       rethrowIfAborted(runtime.signal, err);
       const failure = classifyImageError(err);
       log.warn("image submit failed", { ticket: short(doc.ticket), ms: Date.now() - started, failure, error: (err as Error).message });
       await runtime.commit(async (tx) => {
-        (await tx.doc(TicketDoc, runtime.conversationId)).imageResult = { ok: false, failure };
+        (await tx.doc(TicketDoc, runtime.conversationId)).imageResult = { ok: false, failure, ...((err as Error).message.startsWith("透明输出未启用：") ? { message: (err as Error).message } : {}) };
         return { status: "running", checkpoint: { phase: "reply", attempt: 0 } };
       }, context);
       return;
@@ -297,7 +305,7 @@ export function createTasks(deps: TaskDeps) {
             if (images.length) {
               log.warn("reusing images already in the ticket dir", { ticket: short(doc.ticket), images: images.length });
             } else {
-              await deps.imageBackend.collect(job.prompt_id, dir, runtime.signal);
+              await deps.imageBackend.collect(job.prompt_id, dir, runtime.signal, doc.imageOptions);
               images = await collectNewImages(dir, new Set());
             }
             // 只认票据目录里通过校验（大小、魔数）的新图片；一张都没有即生图失败
@@ -326,7 +334,7 @@ export function createTasks(deps: TaskDeps) {
           if (doc.route !== "image" || !doc.prompt) return { text: IMAGE_USAGE_REPLY, images: [] };
           const r = doc.imageResult;
           if (r?.ok) return { text: IMAGE_SUCCESS_REPLY, images: [...r.images] };
-          return { text: r ? IMAGE_FAILURE_REPLIES[r.failure] : IMAGE_FAILURE_REPLIES.failed, images: [] };
+          return { text: r ? r.message ?? IMAGE_FAILURE_REPLIES[r.failure] : IMAGE_FAILURE_REPLIES.failed, images: [] };
         }),
     },
     abort: (_task, runtime, context) => abortTask(runtime, context),
@@ -357,6 +365,7 @@ export function createTasks(deps: TaskDeps) {
           let backendName = "unknown";
           const started = Date.now();
           try {
+            if (doc.image_error) throw new Error(doc.image_error);
             const backend = deps.backends.select(scope);
             backendName = backend.name;
             const res = await backend.handle(
@@ -367,6 +376,7 @@ export function createTasks(deps: TaskDeps) {
                 threadKey: threadKeyForSource(source, deps.owner),
                 source: { ...source },
                 text: doc.text,
+                images: doc.source_images ?? [],
                 ...(doc.time ? { time: doc.time } : {}),
                 ...(quote ? { quote } : {}),
               },

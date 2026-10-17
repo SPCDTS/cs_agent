@@ -29,7 +29,7 @@ function msg(text: string, o: Partial<InboundMessage> = {}): InboundMessage {
   return {
     message_id: String(seq++), time: Math.floor(Date.now() / 1000), message_type: "group", user_id: "20001",
     group_id: G, self_id: "10001", nickname: "De", text, route_text: text, truncated: false, mentioned_self: false,
-    segments: [{ type: "text", data: { text } }], ...o,
+    images: [], segments: [{ type: "text", data: { text } }], ...o,
   };
 }
 
@@ -59,7 +59,7 @@ describe("qq_context MCP over stdio (built dist)", () => {
     writer = new ContextStore(dir);
     const quoted = msg("今晚有cs比赛吗", { message_id: "500" });
     writer.ingest(quoted);
-    writer.ingest(msg("那明天呢", { message_id: "501", nickname: "小明", segments: [{ type: "reply", data: { id: "500" } }, { type: "text", data: { text: "那明天呢" } }] }));
+    writer.ingest(msg("那明天呢", { message_id: "501", nickname: "小明", images: [], segments: [{ type: "reply", data: { id: "500" } }, { type: "text", data: { text: "那明天呢" } }] }));
     writer.ingest(msg("别的群也在聊比赛", { message_id: "502", group_id: "39999" }));
 
     const c = await connect(dir, `group:${G}`);

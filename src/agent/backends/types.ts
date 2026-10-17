@@ -19,6 +19,7 @@ export interface AgentRequest {
   source: TicketSource;
   /** 用户原文 */
   text: string;
+  images?: string[];
   /** 入站消息时间（unix 秒） */
   time?: number;
   /** 被引用消息（≤200 字，由调用方从消息库查得） */

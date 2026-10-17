@@ -66,6 +66,8 @@ export function inboundFromTicket(rec: ReplyTicketRecord): InboundMessage {
     truncated: false,
     mentioned_self: rec.message_type === "group",
     segments: [],
+    images: rec.source_images ?? [],
+    ...(rec.source_image_error ? { image_error: rec.source_image_error } : {}),
   };
 }
 
@@ -264,7 +266,7 @@ export class Dispatcher {
       nickname: msg.nickname,
     };
     const reply = msg.segments.find((s) => s.type === "reply") as { data: { id?: string } } | undefined;
-    const route = routeMessage(msg.route_text, this.prefixes);
+    const route = routeMessage(msg.route_text, this.prefixes, msg.images);
     // 唯一排序键：bridge admit 时分配的票据 seq（崩溃恢复时与孤儿票据统一排序）
     const ticketSeq = (await this.opts.bridge.getTicket(ticket).catch(() => undefined))?.seq;
     const conv = await harness.createConversation(
@@ -273,9 +275,10 @@ export class Dispatcher {
         init: async (tx, conversationId) => {
           Object.assign(await tx.doc(TicketDoc, conversationId), {
             ticket, source, text: msg.text, time: msg.time, messageId: msg.message_id,
+            source_images: msg.images, ...(msg.image_error ? { image_error: msg.image_error } : {}),
             route: route.route,
             ...(route.route !== "agent" ? { prefix: route.prefix } : {}),
-            ...(route.route === "image" ? { prompt: route.prompt } : {}),
+            ...(route.route === "image" ? { prompt: route.prompt, imageOptions: route.options } : {}),
             ...(reply?.data.id ? { replyTo: reply.data.id } : {}),
           });
           const dispatch = await tx.doc(DispatchDoc);
@@ -316,10 +319,10 @@ export class Dispatcher {
       const doc = await tx.doc(TicketDoc, conversationId);
       if (!doc.route) {
         // v2 遗留票据：按原文重新分流
-        const r = routeMessage(legacyRouteText(doc.text), this.prefixes);
+        const r = routeMessage(legacyRouteText(doc.text), this.prefixes, doc.source_images);
         doc.route = r.route;
         if (r.route !== "agent") doc.prefix = r.prefix;
-        if (r.route === "image") doc.prompt = r.prompt;
+        if (r.route === "image") { doc.prompt = r.prompt; doc.imageOptions = r.options; }
       }
       const options = { ownership: { kind: "conversation" }, conversationId } as const;
       const id =

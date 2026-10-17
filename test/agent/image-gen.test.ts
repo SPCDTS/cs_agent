@@ -25,18 +25,18 @@ describe("McpImageBackend (fake comfy-mcp over stdio)", () => {
 
   it("generate_image(wait=false) → job(wait) until done → fetch_outputs into out dir", async () => {
     const out = path.join(tmp(), "images", "ticket1");
-    const files = await backend.generate("a red fox in snow", out);
+    const files = await backend.generate({ prompt: "a red fox in snow" }, out);
     expect(files).toEqual([path.join(out, "ComfyUI_00001_.png")]);
     expect(existsSync(files[0]!)).toBe(true);
     const calls = JSON.parse(readFileSync(path.join(out, "calls.json"), "utf8")) as [string, any][];
-    expect(calls.map((c) => c[0])).toEqual(["generate_image", "job", "job", "fetch_outputs"]);
-    expect(calls[0]![1]).toMatchObject({ prompt: "a red fox in snow", wait: false });
+    expect(calls.map((c) => c[0])).toEqual(["run_workflow", "job", "job", "fetch_outputs"]);
+    expect(calls[0]![1].workflow["4"].inputs.prompt).toBe("a red fox in snow");
     expect(calls[1]![1]).toMatchObject({ action: "wait", prompt_id: "pid-1" });
     expect(calls[3]![1]).toMatchObject({ prompt_id: "pid-1", out_dir: out });
   });
 
   it("tool error surfaces as an exception", async () => {
-    await expect(backend.generate("FAIL please", path.join(tmp(), "x"))).rejects.toThrow(/generate_image/);
+    await expect(backend.generate({ prompt: "FAIL please" }, path.join(tmp(), "x"))).rejects.toThrow(/run_workflow/);
   });
 
   it.each([false, true])("MCP default submit preserves filename prefix, schema missing prefix=%s (F1)", async missingPrefix => {
@@ -46,14 +46,10 @@ describe("McpImageBackend (fake comfy-mcp over stdio)", () => {
       env: { ...env, FAKE_COMFY_STATE: state, ...(missingPrefix ? { FAKE_COMFY_NO_PREFIX: "1" } : {}) },
       timeoutMs: 20_000, checkpoint: "fake.safetensors" });
     try {
-      await b.submit("a fox", undefined, { filenamePrefix: "cs-abcdef123456-1" });
+      await b.submit({ prompt: "a fox" }, { filenamePrefix: "cs-abcdef123456-1" });
       const calls = JSON.parse(readFileSync(state, "utf8")).calls;
-      if (missingPrefix) {
-        expect(calls[0][0]).toBe("run_workflow");
-        expect(calls[0][1].workflow["9"].inputs.filename_prefix).toBe("cs-abcdef123456-1");
-      } else {
-        expect(calls[0]).toEqual(["generate_image", expect.objectContaining({ filename_prefix: "cs-abcdef123456-1", wait: false })]);
-      }
+      expect(calls[0][0]).toBe("run_workflow");
+      expect(calls[0][1].workflow["8"].inputs.filename_prefix).toBe("cs-abcdef123456-1");
     } finally { await b.close(); }
   });
 
@@ -62,14 +58,14 @@ describe("McpImageBackend (fake comfy-mcp over stdio)", () => {
     const state = path.join(dir, "comfy-state.json");
     const mk = () => new McpImageBackend({ command: process.execPath, args: [path.join(FIXTURES, "fake-comfy-mcp.mjs")], env: { ...env, FAKE_COMFY_STATE: state }, timeoutMs: 20_000 });
     const a = mk();
-    const id = await a.submit("crash between submit and collect");
+    const id = await a.submit({ prompt: "crash between submit and collect" });
     await a.close(); // 进程在提交后退出
     const b = mk();
     try {
       const out = path.join(dir, "images", "tk");
       expect(await b.collect(id, out)).toEqual([path.join(out, "ComfyUI_00001_.png")]);
       const s = JSON.parse(readFileSync(state, "utf8")) as { submitted: string[]; calls: [string, any][] };
-      expect(s.calls.filter((c) => c[0] === "generate_image")).toHaveLength(1);
+      expect(s.calls.filter((c) => c[0] === "run_workflow")).toHaveLength(1);
       expect(s.submitted).toEqual([id]);
       const err = await b.collect("pid-404", out).catch((e: unknown) => e);
       expect(err).toBeInstanceOf(UnknownJobError);
@@ -115,7 +111,7 @@ describe("HttpImageBackend submit / collect (fake ComfyUI HTTP)", () => {
     const baseUrl = `http://127.0.0.1:${(srv.address() as any).port}`;
     try {
       const opts = { baseUrl, timeoutMs: 10_000, checkpoint: "x.safetensors", pollMs: 5 };
-      const id = await new HttpImageBackend(opts).submit("a cat");
+      const id = await new HttpImageBackend(opts).submit({ prompt: "a cat" });
       const out = path.join(tmp(), "images", "tk");
       const files = await new HttpImageBackend(opts).collect(id, out);
       expect(files).toEqual([path.join(out, `${id}.png`)]);
@@ -214,6 +210,19 @@ describe("filename-prefix reconciliation over HTTP in both modes (F1/F2)", () =>
     } finally { fetch.mockRestore(); }
   });
 
+  it("probes SaveImageAdvanced RGBA filenames after history pruning", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input));
+      if (url.pathname === "/history") return json({});
+      if (url.pathname === "/queue") return json({ queue_running: [], queue_pending: [] });
+      expect(url.searchParams.get("filename")).toBe(prefix + "_00001.png");
+      return new Response(PNG);
+    });
+    try {
+      expect((await make("http").reconcile({ filenamePrefix: prefix, imageOptions: { prompt: "cat", transparent: true } }, tmp())).images).toHaveLength(1);
+    } finally { fetch.mockRestore(); }
+  });
+
   it.each([404, 503])("probe HTTP %s distinguishes absence from service failure", async status => {
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
       const url = new URL(String(input));
@@ -249,13 +258,13 @@ describe("filename-prefix reconciliation over HTTP in both modes (F1/F2)", () =>
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       expect(new URL(String(input)).pathname).toBe("/prompt");
       const workflow = JSON.parse(String(init?.body)).prompt;
-      expect(workflow["9"].inputs.filename_prefix).toBe(prefix);
-      expect(workflow["6"].inputs.text).toBe("new");
+      expect(workflow[custom ? "9" : "8"].inputs.filename_prefix).toBe(prefix);
+      expect(custom ? workflow["6"].inputs.text : workflow["4"].inputs.prompt).toBe("new");
       return json({ prompt_id: "submitted" });
     });
     try {
       const b = new HttpImageBackend({ baseUrl: "http://comfy.test", timeoutMs: 2000, checkpoint: "fake", ...(custom ? { workflowFile } : {}) });
-      await expect(b.submit("new", undefined, { filenamePrefix: prefix })).resolves.toBe("submitted");
+      await expect(b.submit({ prompt: "new" }, { filenamePrefix: prefix })).resolves.toBe("submitted");
     } finally { fetch.mockRestore(); }
   });
 });
@@ -291,7 +300,7 @@ describe("workflow file route", () => {
     });
     try {
       const out = path.join(dir, "images", "t2");
-      const id = await b.submit("a blue bird", undefined, { filenamePrefix: "cs-abcdef123456-2" });
+      const id = await b.submit({ prompt: "a blue bird" }, { filenamePrefix: "cs-abcdef123456-2" });
       const files = await b.collect(id, out);
       expect(files).toHaveLength(1);
       const calls = JSON.parse(readFileSync(path.join(out, "calls.json"), "utf8")) as [string, any][];

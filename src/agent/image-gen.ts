@@ -1,5 +1,5 @@
 /**
- * 生图实现（生图任务、image_gen MCP 共用）：默认经 comfy-mcp（stdio MCP）调用 generate_image(wait=false) → job(wait) → fetch_outputs；
+ * 生图实现（生图任务、image_gen MCP 共用）：默认经 comfy-mcp（stdio MCP）调用 run_workflow(wait=false) → job(wait) → fetch_outputs；
  * COMFY_MODE=http 时直连 ComfyUI HTTP API（POST /prompt → /history → /view）。
  * 提交与收取分开（submit 返回 prompt_id；collect 按 prompt_id 等待并下载输出）：生图任务在两步之间提交检查点，
  * 崩溃恢复时只按已记录的 prompt_id 收取，不重复提交；服务端不认识该任务时 collect 抛 UnknownJobError。
@@ -10,23 +10,26 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { imageTimeoutMs, validateImageOptions, type ImageOptions } from "./image-options.js";
+import { buildQwenWorkflow, QWEN_MODELS, type QwenModels } from "./qwen-workflow.js";
+import { loadImage } from "../qq/image.js";
 import { log } from "../log.js";
 
 export interface ImageBackend {
   readonly name: string;
   selfCheck(): Promise<Record<string, unknown>>;
   /** 提交生图任务，返回 prompt_id（不等待完成） */
-  submit(prompt: string, signal?: AbortSignal, options?: ImageSubmission): Promise<string>;
+  submit(input: ImageOptions, options?: ImageSubmission, signal?: AbortSignal): Promise<string>;
   /** 按 prompt_id 等待完成并把输出下载到 outDir；返回其中的图片。服务端不认识该任务 → UnknownJobError */
-  collect(promptId: string, outDir: string, signal?: AbortSignal): Promise<string[]>;
+  collect(promptId: string, outDir: string, signal?: AbortSignal, input?: ImageOptions): Promise<string[]>;
   /** 用输出前缀经 HTTP 对账；每个查询前后都通知调用方持久化进度。 */
   reconcile(options: ImageSubmission, outDir: string, signal?: AbortSignal, onStep?: ReconcileProgress): Promise<ReconciledImage>;
   /** submit + collect（image_gen MCP 用） */
-  generate(prompt: string, outDir: string, signal?: AbortSignal): Promise<string[]>;
+  generate(input: ImageOptions, outDir: string, signal?: AbortSignal): Promise<string[]>;
   close(): Promise<void>;
 }
 
-export type ImageSubmission = { filenamePrefix: string; /** 当前接口默认一张 */ count?: number };
+export type ImageSubmission = { filenamePrefix: string; count?: number; imageOptions?: ImageOptions; referenceSubfolder?: string };
 export type ReconcileStep = {
   step: "history" | "queue" | "probe";
   status: "started" | "matched" | "empty";
@@ -99,7 +102,7 @@ export function patchWorkflow(wf: ApiWorkflow, prompt: string, seed: number, pro
 
 function patchFilenamePrefix(wf: ApiWorkflow, prefix: string): void {
   if (!/^[A-Za-z0-9_-]+$/.test(prefix)) throw new Error("非法的图片文件名前缀");
-  const saves = Object.values(wf).filter(n => n.class_type === "SaveImage" && n.inputs);
+  const saves = Object.values(wf).filter(n => /^(SaveImage|SaveImageAdvanced)$/.test(n.class_type ?? "") && n.inputs);
   if (!saves.length) throw new Error("工作流中找不到 SaveImage 节点，无法记录输出前缀");
   for (const n of saves) n.inputs!.filename_prefix = prefix;
 }
@@ -164,6 +167,8 @@ export interface McpBackendOptions {
   env: Record<string, string>;
   timeoutMs: number;
   checkpoint?: string;
+  models?: QwenModels;
+  cache?: boolean;
   /** API 格式工作流；设置后用 run_workflow 代替 generate_image 的默认模板 */
   workflowFile?: string;
   promptNode?: string;
@@ -171,6 +176,7 @@ export interface McpBackendOptions {
 
 export class McpImageBackend implements ImageBackend {
   readonly name = "mcp";
+  private readonly jobs = new Map<string, ImageOptions>();
   private client?: Client;
   private schemas = new Map<string, Set<string>>();
   private connecting?: Promise<Client>;
@@ -235,11 +241,14 @@ export class McpImageBackend implements ImageBackend {
 
   async selfCheck(): Promise<Record<string, unknown>> {
     const info = await this.call("server_info", {});
-    return { backend: this.name, tools: [...this.schemas.keys()].length, ...info };
+    const check = await this.http().selfCheck().catch(() => ({ transparent: "透明输出依赖检测失败：ComfyUI 不可用" }));
+    return { ...check, backend: this.name, tools: [...this.schemas.keys()].length, ...info };
   }
 
-  async generate(prompt: string, outDir: string, signal?: AbortSignal): Promise<string[]> {
-    return this.collect(await this.submit(prompt, signal), outDir, signal);
+  async generate(input: ImageOptions, outDir: string, signal?: AbortSignal): Promise<string[]> {
+    const opts = validateImageOptions(input);
+    const submission = { filenamePrefix: 'cs-' + randomUUID(), referenceSubfolder: path.basename(path.dirname(outDir)) + '-' + path.basename(outDir) };
+    return this.collect(await this.submit(opts, submission, signal), outDir, signal, opts);
   }
 
   private http(): HttpImageBackend {
@@ -252,40 +261,35 @@ export class McpImageBackend implements ImageBackend {
     return this.http().reconcile(options, outDir, signal, onStep);
   }
 
-  async submit(prompt: string, signal?: AbortSignal, options?: ImageSubmission): Promise<string> {
-    const sig = timeoutSignal(this.opts.timeoutMs, signal);
-    await this.connect(); // 先拿到工具 schema，args() 依赖它
+  async submit(input: ImageOptions, options?: ImageSubmission, signal?: AbortSignal): Promise<string> {
+    const opts = validateImageOptions(input);
+    const sig = timeoutSignal(imageTimeoutMs(opts, this.opts.timeoutMs), signal);
+    await this.connect();
+    const http = this.http();
+    // upload_file 的 paths-only 版本不能指定票据子目录，此时用同 URL 的 HTTP 上传。
+    const uploader = this.schemas.get('upload_file');
+    const upload = uploader?.has('paths') && uploader.has('subfolder')
+      ? async (file: string, subfolder: string) => {
+          loadImage(file, path.dirname(file));
+          const result = await this.call('upload_file', { paths: [file], subfolder, overwrite: true }, sig);
+          return uploadedName(result, subfolder);
+        }
+      : undefined;
+    const wf = await http.submissionWorkflow(opts, sig, options, upload);
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cs-wf-'));
     let submitted: Record<string, unknown>;
-    let tmpDir: string | undefined;
-    // 不能让 args() 静默丢弃前缀：默认 generate_image 不支持该参数时改用可控的 API 工作流。
-    if (this.opts.workflowFile || (options && !this.schemas.get("generate_image")?.has("filename_prefix"))) {
-      const wf = await this.http().submissionWorkflow(prompt, sig, options?.filenamePrefix);
-      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cs-wf-"));
-      const wfPath = path.join(tmpDir, "workflow.json");
-      await fs.writeFile(wfPath, JSON.stringify(wf));
-      try {
-        submitted = await this.call(
-          "run_workflow",
-          this.args("run_workflow", { workflow_path: { alts: ["path", "workflow"], value: wfPath }, wait: false }),
-          sig,
-        );
-      } finally {
-        await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-      }
-    } else {
-      submitted = await this.call(
-        "generate_image",
-        this.args("generate_image", {
-          prompt,
-          wait: false,
-          ...(options ? { filename_prefix: options.filenamePrefix } : {}),
-          ...(this.opts.checkpoint ? { checkpoint: this.opts.checkpoint } : {}),
-        }),
-        sig,
-      );
+    try {
+      const wfPath = path.join(tmpDir, 'workflow.json');
+      await fs.writeFile(wfPath, JSON.stringify(wf), 'utf8');
+      submitted = await this.call('run_workflow', this.args('run_workflow', {
+        workflow_path: { alts: ['path', 'workflow'], value: wfPath }, wait: false,
+      }), sig);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
     }
     const promptId = findString(submitted, "prompt_id") ?? findString(submitted, "job_id");
     if (!promptId) throw new Error(`提交生图任务未返回 prompt_id: ${JSON.stringify(submitted).slice(0, 300)}`);
+    this.jobs.set(promptId, opts);
     log.info("comfy job submitted", { prompt_id: promptId });
     return promptId;
   }
@@ -300,9 +304,11 @@ export class McpImageBackend implements ImageBackend {
     }
   }
 
-  async collect(promptId: string, outDir: string, signal?: AbortSignal): Promise<string[]> {
-    const deadline = Date.now() + this.opts.timeoutMs;
-    const sig = timeoutSignal(this.opts.timeoutMs, signal);
+  async collect(promptId: string, outDir: string, signal?: AbortSignal, input?: ImageOptions): Promise<string[]> {
+    const budget = imageTimeoutMs(input ?? this.jobs.get(promptId) ?? { prompt: "recovery" }, this.opts.timeoutMs);
+    this.jobs.delete(promptId);
+    const deadline = Date.now() + budget;
+    const sig = timeoutSignal(budget, signal);
     await this.connect();
     const id = { alts: ["job_id", "id"], value: promptId };
     for (;;) {
@@ -328,12 +334,14 @@ export class McpImageBackend implements ImageBackend {
     );
     const files = await listImages(outDir);
     if (files.length === 0) throw new Error("fetch_outputs 没有产出图片");
+    this.jobs.delete(promptId);
     return files.slice(0, 4);
   }
 
   async close(): Promise<void> {
     await this.client?.close().catch(() => undefined);
     this.client = undefined;
+    this.jobs.clear();
   }
 }
 
@@ -359,6 +367,8 @@ export interface HttpBackendOptions {
   baseUrl: string;
   timeoutMs: number;
   checkpoint?: string;
+  models?: QwenModels;
+  cache?: boolean;
   pollMs?: number;
   workflowFile?: string;
   promptNode?: string;
@@ -366,6 +376,7 @@ export interface HttpBackendOptions {
 
 export class HttpImageBackend implements ImageBackend {
   readonly name = "http";
+  private readonly jobs = new Map<string, ImageOptions>();
   constructor(private readonly opts: HttpBackendOptions) {}
 
   private url(p: string): string {
@@ -380,34 +391,52 @@ export class HttpImageBackend implements ImageBackend {
 
   async selfCheck(): Promise<Record<string, unknown>> {
     const stats = await this.json("system_stats", { signal: AbortSignal.timeout(5000) });
-    return { backend: this.name, comfyui_version: stats?.system?.comfyui_version, devices: stats?.devices?.length };
+    let transparent: string | true = true;
+    try { await this.checkTransparent(AbortSignal.timeout(5000)); } catch (err) { transparent = (err as Error).message; }
+    return { backend: this.name, comfyui_version: stats?.system?.comfyui_version, devices: stats?.devices?.length, transparent };
   }
 
-  private async checkpoint(signal: AbortSignal): Promise<string> {
-    if (this.opts.checkpoint) return this.opts.checkpoint;
-    const info = await this.json("object_info/CheckpointLoaderSimple", { signal });
-    const list: unknown = info?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0];
-    const first = Array.isArray(list) ? list.find((x) => typeof x === "string") : undefined;
-    if (!first) throw new Error("ComfyUI 没有可用的 checkpoint");
-    return first;
+  async generate(input: ImageOptions, outDir: string, signal?: AbortSignal): Promise<string[]> {
+    const opts = validateImageOptions(input);
+    const submission = { filenamePrefix: 'cs-' + randomUUID(), referenceSubfolder: path.basename(path.dirname(outDir)) + '-' + path.basename(outDir) };
+    return this.collect(await this.submit(opts, submission, signal), outDir, signal, opts);
   }
 
-  async generate(prompt: string, outDir: string, signal?: AbortSignal): Promise<string[]> {
-    return this.collect(await this.submit(prompt, signal), outDir, signal);
+  async uploadReference(file: string, subfolder: string, signal: AbortSignal): Promise<string> {
+    const bytes = loadImage(file, path.dirname(file));
+    const form = new FormData();
+    form.set('image', new Blob([new Uint8Array(bytes)]), path.basename(file));
+    form.set('subfolder', subfolder);
+    form.set('type', 'input');
+    form.set('overwrite', 'true');
+    return uploadedName(await this.json('upload/image', { method: 'POST', body: form, signal }), subfolder);
   }
 
-  async submissionWorkflow(prompt: string, signal: AbortSignal, filenamePrefix?: string): Promise<ApiWorkflow> {
-    const seed = randomSeed();
-    const workflow = this.opts.workflowFile
-      ? patchWorkflow(await loadWorkflow(this.opts.workflowFile), prompt, seed, this.opts.promptNode)
-      : defaultWorkflow(prompt, await this.checkpoint(signal), seed);
-    if (filenamePrefix) patchFilenamePrefix(workflow, filenamePrefix);
-    return workflow;
+  async submissionWorkflow(input: ImageOptions, signal: AbortSignal, submission?: ImageSubmission,
+    upload?: (file: string, subfolder: string) => Promise<string>): Promise<ApiWorkflow> {
+    const opts = validateImageOptions(input);
+    const prefix = submission?.filenamePrefix ?? 'cs-' + randomUUID();
+    if (this.opts.workflowFile) return patchWorkflow(await loadWorkflow(this.opts.workflowFile), opts.prompt,
+      opts.seed ?? randomSeed(), this.opts.promptNode, submission?.filenamePrefix);
+    const subfolder = submission?.referenceSubfolder ?? prefix;
+    if (!/^[A-Za-z0-9_-]+$/.test(subfolder)) throw new Error('非法的参考图子目录');
+    const refs: string[] = [];
+    for (const file of opts.reference_images ?? []) refs.push(await (upload ? upload(file, subfolder) : this.uploadReference(file, subfolder, signal)));
+    if (opts.transparent) await this.checkTransparent(signal);
+    return buildQwenWorkflow({ ...opts, reference_images: refs }, { filenamePrefix: prefix, models: this.opts.models, cache: this.opts.cache });
   }
 
-  async submit(prompt: string, signal?: AbortSignal, options?: ImageSubmission): Promise<string> {
-    const sig = timeoutSignal(this.opts.timeoutMs, signal);
-    const workflow = await this.submissionWorkflow(prompt, sig, options?.filenamePrefix);
+  private async checkTransparent(signal: AbortSignal): Promise<void> {
+    const models = this.opts.models ?? QWEN_MODELS;
+    const info = await this.json('object_info/VAELoader', { signal });
+    const names = info?.VAELoader?.input?.required?.vae_name?.[0];
+    if (!Array.isArray(names) || !names.includes(models.vae)) throw new Error('透明输出未启用：缺少 ' + models.vae);
+  }
+
+  async submit(input: ImageOptions, options?: ImageSubmission, signal?: AbortSignal): Promise<string> {
+    const opts = validateImageOptions(input);
+    const sig = timeoutSignal(imageTimeoutMs(opts, this.opts.timeoutMs), signal);
+    const workflow = await this.submissionWorkflow(opts, sig, options);
     const sub = await this.json("prompt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -416,6 +445,7 @@ export class HttpImageBackend implements ImageBackend {
     });
     const id: string | undefined = sub?.prompt_id;
     if (!id) throw new Error(`ComfyUI /prompt 未返回 prompt_id: ${JSON.stringify(sub).slice(0, 300)}`);
+    this.jobs.set(id, opts);
     log.info("comfy job submitted (http)", { prompt_id: id });
     return id;
   }
@@ -432,8 +462,9 @@ export class HttpImageBackend implements ImageBackend {
     return hist?.[id];
   }
 
-  async collect(id: string, outDir: string, signal?: AbortSignal): Promise<string[]> {
-    const sig = timeoutSignal(this.opts.timeoutMs, signal);
+  async collect(id: string, outDir: string, signal?: AbortSignal, input?: ImageOptions): Promise<string[]> {
+    const sig = timeoutSignal(imageTimeoutMs(input ?? this.jobs.get(id) ?? { prompt: "recovery" }, this.opts.timeoutMs), signal);
+    this.jobs.delete(id);
     let entry: any;
     for (;;) {
       sig.throwIfAborted();
@@ -449,6 +480,7 @@ export class HttpImageBackend implements ImageBackend {
 
     const files = await this.download(outputImages(entry), outDir, sig);
     if (files.length === 0) throw new Error("ComfyUI 没有产出图片");
+    this.jobs.delete(id);
     return files;
   }
 
@@ -471,7 +503,7 @@ export class HttpImageBackend implements ImageBackend {
   async reconcile(options: ImageSubmission, outDir: string, signal?: AbortSignal, onStep?: ReconcileProgress): Promise<ReconciledImage> {
     const { filenamePrefix, count = 1 } = options;
     if (!/^[A-Za-z0-9_-]+$/.test(filenamePrefix) || !Number.isInteger(count) || count < 1 || count > 4) throw new Error("非法的生图对账参数");
-    const sig = timeoutSignal(this.opts.timeoutMs, signal);
+    const sig = timeoutSignal(imageTimeoutMs(options.imageOptions ?? { prompt: "recovery", count }, this.opts.timeoutMs), signal);
     const history = async (): Promise<ReconciledImage | undefined> => {
       await onStep?.({ step: "history", status: "started" });
       const entries = await this.json("history", { signal: sig });
@@ -491,11 +523,11 @@ export class HttpImageBackend implements ImageBackend {
     const q = await this.json("queue", { signal: sig });
     const rows = [...(q.queue_running ?? []), ...(q.queue_pending ?? [])];
     const queued = rows.find((row: unknown) => Array.isArray(row) && typeof row[1] === "string" && row[2] &&
-      Object.values(row[2] as ApiWorkflow).some(n => n.class_type === "SaveImage" && n.inputs?.filename_prefix === filenamePrefix));
+      Object.values(row[2] as ApiWorkflow).some(n => /^(SaveImage|SaveImageAdvanced)$/.test(n.class_type ?? "") && n.inputs?.filename_prefix === filenamePrefix));
     if (queued) {
       await onStep?.({ step: "queue", status: "matched", prompt_id: queued[1] });
       try {
-        return { prompt_id: queued[1], images: await this.collect(queued[1], outDir, sig) };
+        return { prompt_id: queued[1], images: await this.collect(queued[1], outDir, sig, options.imageOptions) };
       } catch (err) {
         // 等待期间队列/历史被清空，也必须探测输出，不能把 unknown 当成未运行。
         if (!(err instanceof UnknownJobError)) throw err;
@@ -507,13 +539,13 @@ export class HttpImageBackend implements ImageBackend {
     const completed = await history();
     if (completed) return completed;
     await onStep?.({ step: "probe", status: "started" });
-    const expected = Array.from({ length: count }, (_, i) => ({ filename: `${filenamePrefix}_${String(i + 1).padStart(5, "0")}_.png`, type: "output" }));
+    const expected = Array.from({ length: count }, (_, i) => ({ filename: `${filenamePrefix}_${String(i + 1).padStart(5, "0")}${options.imageOptions?.transparent ? "" : "_"}.png`, type: "output" }));
     const images = await this.download(expected, outDir, sig, true);
     await onStep?.({ step: "probe", status: images.length ? "matched" : "empty", filenames: images.map(file => path.basename(file)) });
     return { images };
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> { this.jobs.clear(); }
 }
 
 type ComfyImage = { filename: string; subfolder?: string; type?: string };
@@ -549,6 +581,8 @@ export interface ImageBackendConfig {
   comfyBin: string;
   timeoutMs: number;
   checkpoint?: string;
+  models?: QwenModels;
+  cache?: boolean;
   workflowFile?: string;
   promptNode?: string;
   /** comfy-mcp 子进程环境的基础（默认 process.env） */
@@ -556,10 +590,18 @@ export interface ImageBackendConfig {
 }
 
 export function createImageBackend(c: ImageBackendConfig): ImageBackend {
-  const common = { timeoutMs: c.timeoutMs, checkpoint: c.checkpoint, workflowFile: c.workflowFile, promptNode: c.promptNode };
+  const common = { models: c.models, cache: c.cache ?? /^(1|true|yes|on)$/i.test((c.baseEnv ?? process.env).COMFY_QWEN_CACHE ?? ""), timeoutMs: c.timeoutMs, checkpoint: c.checkpoint, workflowFile: c.workflowFile, promptNode: c.promptNode };
   if (c.mode === "http") return new HttpImageBackend({ baseUrl: c.comfyUrl, ...common });
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(c.baseEnv ?? process.env)) if (v !== undefined) env[k] = v;
   Object.assign(env, { COMFYUI_URL: c.comfyUrl, COMFY_BIN: c.comfyBin });
   return new McpImageBackend({ command: c.mcpBin, env, ...common });
+}
+
+/** 上传返回值必须仍在本票据子目录内，禁止把服务端路径直接当本机路径使用。 */
+function uploadedName(result: unknown, subfolder: string): string {
+  const name = findString(result, 'name');
+  const folder = findString(result, 'subfolder');
+  if (!name || /[\\/]/.test(name) || name === '..' || folder !== subfolder) throw new Error('ComfyUI 上传未返回票据子目录内的文件名');
+  return subfolder + '/' + name;
 }

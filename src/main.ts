@@ -1,3 +1,4 @@
+import { cleanupIncoming } from "./qq/incoming.js";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -8,7 +9,7 @@ import { createQQBridge } from "./qq/index.js";
 import type { QQBridge } from "./qq/types.js";
 import { createAgentModels, openHarness, resolveThinkingLevel } from "./agent/harness.js";
 import { createCsAgentExtension } from "./agent/extension.js";
-import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
+import { ensureAgentPrompt, warnDeprecatedSystemPrompt } from "./agent/prompt.js";
 import { Dispatcher } from "./agent/dispatch.js";
 import { CodexRunner, effectiveWritableRoots, ensureWorkspaceAgentsMd, writeGlobalAgentsMd } from "./agent/codex-runner.js";
 import { createImageBackend } from "./agent/image-gen.js";
@@ -59,6 +60,7 @@ async function main(): Promise<void> {
   if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md stub", { dir: cfg.WORKSPACE_DIR });
   // v2 的系统提示 ${DATA_DIR}/prompts/system.md 已弃用（规则分流不经模型）：存在时记一行弃用日志，不删除
   warnDeprecatedSystemPrompt(cfg.DATA_DIR);
+  await ensureAgentPrompt(cfg.DATA_DIR);
 
   // 统一上下文消息库（${DATA_DIR}/qq-messages.sqlite）：意图层与 codex 的 qq_context MCP 共用
   const store = new ContextStore(cfg.DATA_DIR);
@@ -165,6 +167,7 @@ async function main(): Promise<void> {
     summaryDays: cfg.HISTORY_SUMMARY_DAYS,
     rawHardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,
     hour: cfg.HISTORY_SUMMARY_HOUR,
+    cleanup: () => cleanupIncoming(cfg.DATA_DIR),
   });
 
   // 继续上次未完成的工作：先由派发器按 scope FIFO 接管索引中的票据（v2 遗留会话先中止），再开启任务调度。
@@ -198,7 +201,7 @@ async function main(): Promise<void> {
   imageBackend
     .selfCheck()
     .then((info) => {
-      checks.comfy = { ok: true, backend: info.backend, server: info.server, comfy_target: info.comfy_target, comfyui_version: info.comfyui_version };
+      checks.comfy = { ok: true, backend: info.backend, server: info.server, comfy_target: info.comfy_target, comfyui_version: info.comfyui_version, transparent: info.transparent };
       log.info("comfy self-check ok", { info });
     })
     .catch((err) => {

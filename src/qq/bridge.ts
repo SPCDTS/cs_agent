@@ -2,6 +2,7 @@
  * createQQBridge：NapCat OneBot v11 —— WebSocket 收事件，HTTP 调 API。
  * 负责：重连与心跳、自回声过滤、去重、授权 / 触发、票据持久化、按票据幂等回复。
  */
+import { downloadIncoming } from "./incoming.js";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import type {
@@ -11,7 +12,7 @@ import type {
 import { createOneBotClient, isRecord, numericId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
 import { isAllowed, isTriggered, normalizeMessage, validatePolicy } from "./policy.js";
 import { prepareImages, type ImageSegment } from "./image.js";
-import { dedupeKey, isTicketId, ReplyStore } from "./reply-store.js";
+import { dedupeKey, isTicketId, ticketIdFor, ReplyStore } from "./reply-store.js";
 
 export const DEFAULT_TIMEOUT_MS = 15000;
 export const IMAGE_TIMEOUT_MS = 30000;
@@ -81,6 +82,7 @@ class Bridge extends EventEmitter implements QQBridge {
   private lastEventAt: string | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private inboundChain: Promise<void> = Promise.resolve();
   private readonly seen = new Set<string>();
   private readonly locks = new Set<string>();
 
@@ -131,6 +133,7 @@ class Bridge extends EventEmitter implements QQBridge {
       this.disconnectCount++;
       this.emit("disconnect", "stopped");
     }
+    await this.inboundChain;
     this.store?.close();
     this.store = null;
   }
@@ -268,9 +271,18 @@ class Bridge extends EventEmitter implements QQBridge {
 
     const store = this.store;
     if (!store) return;
-    const ticket = store.admit(message);
-    if (ticket === null) return; // 持久化去重：已见过，或票据早已存在（去重键被淘汰后重到）
-    this.emit("message", message, ticket);
+    const id = ticketIdFor(message);
+    if (store.get(id)) return;
+    // 下载完成后一次写入票据与 source_images；串行 admit 保持入站顺序。
+    this.inboundChain = this.inboundChain.then(async () => {
+      try { message.images = await downloadIncoming(event, id, this.config.dataDir, this.client); }
+      catch (err) {
+        message.image_error = '参考图处理失败：' + toError(err).message;
+        this.emitError(new Error(message.image_error));
+      }
+      const ticket = store.admit(message);
+      if (ticket !== null && this.running) this.emit('message', message, ticket);
+    }).catch(err => this.emitError(toError(err)));
   }
 
   /** 撤回通知：group_recall / friend_recall（仅允许范围内）。 */

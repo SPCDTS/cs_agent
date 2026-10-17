@@ -37,6 +37,13 @@ const prompts: unknown[] = [];
 beforeAll(async () => {
   comfy = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
+    if (req.method === 'POST' && url.pathname === '/upload/image') {
+      const chunks: Buffer[] = []; req.on('data', c => chunks.push(c));
+      req.on('end', async () => {
+        const form = await new Response(Buffer.concat(chunks), { headers: { 'content-type': req.headers['content-type']! } }).formData();
+        res.end(JSON.stringify({ name: (form.get('image') as File).name, subfolder: form.get('subfolder'), type: 'input' }));
+      }); return;
+    }
     if (req.method === "POST" && url.pathname === "/prompt") {
       let body = "";
       req.on("data", (c) => (body += c));
@@ -70,14 +77,14 @@ afterEach(async () => {
 
 function workflowFile(dir: string): string {
   const f = path.join(dir, "wf.json");
-  writeFileSync(f, JSON.stringify({ "3": { class_type: "KSampler", inputs: { seed: 1 } }, "4": { class_type: "CLIPTextEncode", inputs: { text: "x" } } }));
+  writeFileSync(f, JSON.stringify({ "3": { class_type: "KSampler", inputs: { seed: 1 } }, "4": { class_type: "CLIPTextEncode", inputs: { text: "x" } }, "9": { class_type: "SaveImage", inputs: { filename_prefix: "test" } } }));
   return f;
 }
 
 async function stdioClient(env: Record<string, string | undefined>): Promise<Client> {
   const base: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) base[k] = v;
-  for (const k of Object.keys(base)) if (k.startsWith("COMFY") || k === "IMAGE_TICKET_DIR") delete base[k];
+  for (const k of Object.keys(base)) if (k.startsWith("COMFY") || k === "IMAGE_TICKET_DIR" || k === "IMAGE_REFS") delete base[k];
   for (const [k, v] of Object.entries(env)) if (v !== undefined) base[k] = v;
   const client = new Client({ name: "test", version: "0" });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [ENTRY], env: base, stderr: "pipe" }));
@@ -94,6 +101,8 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     const { tools } = await c.listTools();
     expect(tools.map((t) => t.name)).toEqual(["generate_image"]);
     expect(tools[0]!.annotations).toMatchObject({ readOnlyHint: false });
+    expect(Object.keys(tools[0]!.inputSchema.properties!)).toEqual(['prompt','negative_prompt','aspect','size','count','seed','reference_images','transparent']);
+    expect(tools[0]!.inputSchema.additionalProperties).toBe(false);
   });
 
   it("generates into IMAGE_TICKET_DIR and returns the file names", async () => {
@@ -112,6 +121,24 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     expect(readdirSync(ticketDir)).toEqual(["call-1"]);
     expect(readFileSync(path.join(ticketDir, files[0]!)).subarray(0, 8)).toEqual(PNG.subarray(0, 8));
     expect((prompts[before] as Record<string, { inputs: { text?: string } }>)["4"]!.inputs.text).toBe("一只橘猫");
+  });
+
+  it('stdio IMAGE_REFS 允许列表仅能选择本票据文件，合法图片上传后进入编辑图', async () => {
+    const dir = tmp('cs-imggen-'); const ticket = 'refs'; const refsDir = path.join(dir, 'incoming', ticket);
+    mkdirSync(refsDir, { recursive: true }); const allowed = path.join(refsDir, '1.png'); const denied = path.join(refsDir, '2.png');
+    writeFileSync(allowed, PNG); writeFileSync(denied, PNG);
+    const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: path.join(dir, 'images', ticket), IMAGE_REFS: allowed,
+      COMFY_MODE: 'http', COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: '20' });
+    for (const args of [{ prompt: '猫', reference_images: [denied] }, { prompt: '猫', count: 5 }, { prompt: '猫', unlisted: true }]) {
+      expect((await c.callTool({ name: 'generate_image', arguments: args })).isError).toBe(true);
+    }
+    const before = prompts.length;
+    const ok = await c.callTool({ name: 'generate_image', arguments: { prompt: '改红色', reference_images: [allowed], aspect: '16:9', count: 2, seed: 7 } });
+    expect(ok.isError, textOf(ok)).toBeFalsy();
+    const graph = prompts[before] as any;
+    expect(graph['20'].inputs.image).toBe('refs-call-1/1.png');
+    expect(graph['5'].inputs).toEqual({ samples: ['4',2], amount: 2 });
+    expect(graph['6'].inputs.seed).toBe(7);
   });
 
   it("refuses without IMAGE_TICKET_DIR", async () => {
@@ -140,7 +167,7 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
     const { server, dispose } = createImageGenServer({
       ticketDir,
       dataDir,
-      createBackend: () => new McpImageBackend({ command: process.execPath, args: [path.join(FIXTURES, "fake-comfy-mcp.mjs")], env, timeoutMs: 20_000 }),
+      createBackend: () => new McpImageBackend({ command: process.execPath, args: [path.join(FIXTURES, "fake-comfy-mcp.mjs")], env: { ...env, COMFYUI_URL: "http://comfy.test" }, timeoutMs: 20_000 }),
     });
     const [a, b] = InMemoryTransport.createLinkedPair();
     await server.connect(a);
@@ -210,6 +237,6 @@ describe("resolveTicketDir / backendConfigFromEnv", () => {
     expect(backendConfigFromEnv({ COMFY_MODE: "http", COMFYUI_URL: "http://host.docker.internal:8188" }).comfyUrl)
       .toBe("http://host.docker.internal:8188");
     const c = backendConfigFromEnv({ DATA_DIR: "/data", COMFY_TIMEOUT_SEC: "120" });
-    expect(c).toMatchObject({ mode: "mcp", timeoutMs: 120_000, workflowFile: "/data/workflows/qwen-image-2.1-turbo-api.json" });
+    expect(c).toMatchObject({ mode: "mcp", timeoutMs: 120_000, workflowFile: undefined });
   });
 });

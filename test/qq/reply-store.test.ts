@@ -12,7 +12,7 @@ let store: ReplyStore | null;
 function msg(id: string, text = "hi " + id): InboundMessage {
   return {
     message_id: id, time: 1, message_type: "private", user_id: "20001", group_id: null, self_id: "10001",
-    nickname: "n", text, route_text: text, truncated: false, mentioned_self: false, segments: [],
+    nickname: "n", text, route_text: text, truncated: false, mentioned_self: false, images: [], segments: [],
   };
 }
 

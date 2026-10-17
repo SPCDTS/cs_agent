@@ -140,7 +140,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const dir = tmp("cs-entry-");
     const data = shPath(path.join(dir, "data"));
     const roots = ["/workspace", " /srv/prompts/ ", "relative", "/", data, `${data}/`, `${data}/codex`, `${data}/codex/sessions`,
-      `${data}/images`, `${data}/tickets`, `${data}/tickets/x`, `${data}/qq-messages.sqlite`, "/x/../etc", '/w"x', "/opt/ok"];
+      `${data}/images`, `${data}/incoming`, `${data}/incoming/x`, `${data}/tickets`, `${data}/tickets/x`, `${data}/qq-messages.sqlite`, "/x/../etc", '/w"x', "/opt/ok"];
     const r = runEntrypointIn(dir, { CODEX_SANDBOX_NETWORK: "false", CODEX_WRITABLE_ROOTS: roots.join(",") });
     const t = parse(r.toml);
     expect(t["sandbox_workspace_write.network_access"]).toBe("false");
@@ -179,7 +179,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const list = JSON.parse(/deny_read = (\[[\s\S]*?\])/.exec(r.requirements)![1]!.replace(/,\s*\]/, "]")) as string[];
     expect(list).toEqual(expect.arrayContaining([
       `${d}/codex/auth.json`, `${d}/codex/sessions`, `${d}/codex/*.sqlite*`, `${d}/codex/history.jsonl`,
-      `${d}/*.sqlite*`, `${d}/images`, `${d}/tickets`, `${d}/codex-session.json*`, `${d}/codex-threads.json`,
+      `${d}/*.sqlite*`, `${d}/images`, `${d}/incoming`, `${d}/tickets`, `${d}/codex-session.json*`, `${d}/codex-threads.json`,
     ]));
     // 不能整个禁读 CODEX_HOME（codex 的 arg0 辅助程序在 $CODEX_HOME/tmp）；config.toml / AGENTS.md 可读
     expect(list).not.toContain(`${d}/codex`);
@@ -249,7 +249,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
 
   it("writes the image_gen MCP section with COMFY_* passthrough, timeout and approval mode", () => {
     const r = runEntrypoint({
-      COMFY_MODE: "mcp", COMFYUI_URL: "http://host.docker.internal:8188", COMFY_TIMEOUT_SEC: "240",
+      COMFY_QWEN_CACHE: "true", COMFY_MODE: "mcp", COMFYUI_URL: "http://host.docker.internal:8188", COMFY_TIMEOUT_SEC: "240",
       COMFY_WORKFLOW_FILE: "/data/workflows/qwen-image-2.1-turbo-api.json", COMFY_PROMPT_NODE: "4",
       COMFY_MCP_BIN: "/opt/comfy/bin/comfy-mcp", COMFY_CHECKPOINT: 'bad"value', CODEX_MCP_APPROVAL_MODE: "auto",
     });
@@ -263,6 +263,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
       "mcp_servers.image_gen.tool_timeout_sec": "270",
       "mcp_servers.image_gen.default_tools_approval_mode": '"auto"',
       "mcp_servers.image_gen.env.DATA_DIR": `"${r.dataDir}"`,
+      "mcp_servers.image_gen.env.COMFY_QWEN_CACHE": '"true"',
       "mcp_servers.image_gen.env.COMFY_MODE": '"mcp"',
       "mcp_servers.image_gen.env.COMFYUI_URL": '"http://host.docker.internal:8188"',
       "mcp_servers.image_gen.env.COMFY_TIMEOUT_SEC": '"240"',
@@ -272,6 +273,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     });
     // IMAGE_TICKET_DIR 每轮以 -c 注入，不写进受管文件；带引号的值不写入 TOML
     expect(r.toml).not.toMatch(/^IMAGE_TICKET_DIR/m);
+    expect(r.toml).not.toMatch(/^IMAGE_REFS/m);
     expect(t["mcp_servers.image_gen.env.COMFY_CHECKPOINT"]).toBeUndefined();
     expect(r.stderr).toContain("COMFY_CHECKPOINT contains quotes or backslashes");
   });

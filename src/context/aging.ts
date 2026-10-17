@@ -41,6 +41,7 @@ export interface AgingOptions {
   minMessages?: number;
   /** 当前时间（毫秒），测试可注入 */
   now?: () => number;
+  cleanup?: () => Promise<unknown>;
 }
 
 export interface AgingReport {
@@ -150,7 +151,7 @@ export function startAgingScheduler(opts: AgingOptions): { stop(): void; runNow(
 
   const runSafe = (): Promise<AgingReport | undefined> => {
     if (running) return running;
-    running = runAging(opts)
+    running = Promise.resolve().then(() => opts.cleanup?.()).then(() => runAging(opts))
       .then((r) => {
         log.info("history aging done", { ...r });
         return r;

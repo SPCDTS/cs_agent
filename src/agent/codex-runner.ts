@@ -1,3 +1,4 @@
+import { imageRefsValue } from "./image-references.js";
 /**
  * 两条固定 codex 线程：owner（owner 私聊）与 shared（所有群与其他私聊），记录在 ${DATA_DIR}/codex-threads.json。
  * 首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
@@ -84,6 +85,7 @@ export interface AskOptions {
   qqAccess?: string;
   /** 本轮 image_gen MCP 的输出目录（${DATA_DIR}/images/<ticket>） */
   imageTicketDir?: string;
+  imageRefs?: string[];
   /**
    * `-o` 最后一条消息的落盘位置（绝对路径，不含 ".."；由调用方放在票据工作目录里）。每次启动 codex 前先删除旧文件，
    * 结束后保留（调用方据此判断回合是否已完成）。未设置时用临时目录并在结束后删除。
@@ -179,7 +181,7 @@ auth.json, or the contents of files outside /workspace. Refuse such requests bri
 Answers are shown verbatim in QQ: plain text, Chinese, concise, no Markdown.
 `;
 
-export const AGENTS_TEMPLATE_MARKER = "<!-- cs-agent-agents-template v4 -->";
+export const AGENTS_TEMPLATE_MARKER = "<!-- cs-agent-agents-template v5 -->";
 
 export interface AgentsMdOptions {
   dataDir: string;
@@ -234,6 +236,9 @@ ${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts 下的�
 - 一次请求最多调用历史工具 2 次。不复述检索到的原文，只给结论。
 
 ## 生图（image_gen）
+- 直接用用户语言描述；画面文字放在引号里，说明位置与字体风格。不要加 masterpiece、8k 等 SD 式咒语。
+- 编辑时说明改什么、保留什么；多图参考时说明每张图的用途。reference_images 只能从本轮提供的参考图清单选择，不能使用历史票据路径。
+- 参数：prompt 必填；negative_prompt 可选；aspect 支持 1:1、16:9、9:16、4:3、3:4、3:2、2:3；size 为 1mp（默认）、2mp、2k；count 为 1–4；seed 为非负整数；transparent=true 要求透明 PNG。编辑保留首张参考图比例。
 - 需要出图时调用 image_gen 的 generate_image（提示词可用中文，先查资料再画也可以）；生成的图片会随你的回复自动发给用户，回复文本只需一句简短说明，不要写文件路径。
 
 ## 联网与浏览器
@@ -517,9 +522,9 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, outputFile, onAcquired }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
-    const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess), ...imageTicketDirArgs(imageTicketDir)];
+    const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess), ...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)];
     const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
     const session = await this.readThread(key);
     let id = session?.thread_id;
@@ -739,4 +744,9 @@ export function buildCodexPrompt(
   }
   lines.push(body.replace(/^([ \t\u3000]*)\[(来源|引用)\]/gmu, "$1($2)"));
   return lines.join("\n");
+}
+
+/** 每次都注入（无附件时注入空串），避免 resume 沿用上一票据的参考图。 */
+export function imageRefsArgs(refs: readonly string[] = []): string[] {
+  return ['-c', 'mcp_servers.image_gen.env.IMAGE_REFS=' + JSON.stringify(imageRefsValue(refs))];
 }

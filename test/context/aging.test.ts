@@ -18,7 +18,7 @@ let seq = 1;
 function msg(time: number, text: string, group = "200000001"): InboundMessage {
   return {
     message_id: String(seq++), time, message_type: "group", user_id: "20001", group_id: group, self_id: "10001",
-    nickname: "De", text, route_text: text, truncated: false, mentioned_self: false, segments: [{ type: "text", data: { text } }],
+    nickname: "De", text, route_text: text, truncated: false, mentioned_self: false, images: [], segments: [{ type: "text", data: { text } }],
   };
 }
 

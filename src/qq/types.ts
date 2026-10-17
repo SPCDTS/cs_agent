@@ -5,7 +5,7 @@
 
 export type ChatType = "private" | "group";
 
-/** 仅保留 text / at / reply 三类段的数据，其余段只保留 type，媒体永不下载。 */
+/** 仅保留 text / at / reply 三类段的数据，其余段只保留 type；触发消息的图片由 bridge 从原始事件单独下载。 */
 export type MessageSegment =
   | { type: "text"; data: { text: string } }
   | { type: "at"; data: { qq: string } }
@@ -23,7 +23,7 @@ export interface InboundMessage {
   /** text 段拼接，其它段以 "[type]" 占位，最长 16000 字符 */
   text: string;
   /**
-   * 规则分流用的文本：跳过开头的 at（任意目标）/ reply 段（及其间的纯空白 text 段）后，按 text 同一规则渲染，
+   * 规则分流用的文本：跳过开头的 at（任意目标）/ reply 段（及其间的纯空白 text 段）后，图片段跳过，其余按 text 同一规则渲染，
    * 最长 16000 字符。用户亲手输入的 "[at]" 字样不会被跳过（只看真实段）。
    */
   route_text: string;
@@ -31,6 +31,9 @@ export interface InboundMessage {
   /** 群聊中是否用真实 at 段 @ 了机器人（永不做文本匹配） */
   mentioned_self: boolean;
   segments: MessageSegment[];
+  /** 本票据已下载并校验的参考图绝对路径。 */
+  images: string[];
+  image_error?: string;
 }
 
 export interface QQBridgeConfig {
@@ -68,6 +71,8 @@ export interface ReplyTicketRecord {
   source_text: string;
   /** 原消息的分流文本（InboundMessage.route_text）；旧库的行没有该列时为 undefined */
   source_route_text?: string;
+  source_images?: string[];
+  source_image_error?: string;
   created_at: string;
   /** admit 顺序号（票据表 rowid，与 created_at 同一事务分配，单调递增）：派发与崩溃恢复的唯一排序键 */
   seq: number;

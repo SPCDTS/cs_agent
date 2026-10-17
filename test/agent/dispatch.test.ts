@@ -1,3 +1,4 @@
+import type { ImageOptions } from "../../src/agent/image-options.js";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -103,7 +104,7 @@ function inbound(text: string, opts: { id?: string; group?: string; user?: strin
     text,
     truncated: false,
     mentioned_self: !!opts.group,
-    segments: [{ type: "text", data: { text } }],
+    images: [], segments: [{ type: "text", data: { text } }],
   };
 }
 
@@ -115,6 +116,7 @@ class ImageStub implements Pick<ImageBackend, "submit" | "collect" | "reconcile"
   readonly name = "stub";
   /** 每次 submit 的提示词（= 提交到 ComfyUI 的次数） */
   calls: string[] = [];
+  options: ImageOptions[] = [];
   collects: string[] = [];
   fail: Error | undefined;
   /** 写完文件后挂起，直到 signal 中止 */
@@ -130,8 +132,9 @@ class ImageStub implements Pick<ImageBackend, "submit" | "collect" | "reconcile"
   reconciliations: ImageSubmission[] = [];
   recoveredAt: "history" | "queue" | "probe" | undefined;
   reconcileFail: Error | undefined;
-  async submit(prompt: string, signal?: AbortSignal, options?: ImageSubmission) {
-    this.calls.push(prompt);
+  async submit(opts: ImageOptions, options?: ImageSubmission, signal?: AbortSignal) {
+    this.calls.push(opts.prompt);
+    this.options.push(opts);
     this.prefixes.push(options?.filenamePrefix);
     if (this.fail) throw this.fail;
     if (this.hangSubmit) await untilAbort(signal);
@@ -269,6 +272,18 @@ const imgDir = (r: Rig, ticket: string) => path.join(r.dir, "images", ticket);
 const bot = (r: Rig) => r.store.recent({ kind: "all" }, { limit: 20 }).filter((row) => row.is_self === 1);
 
 describe("rule router → image path", () => {
+  it('v2 参数随任务传入，孤儿票据恢复后仍带本票据参考图', async () => {
+    const r = await makeRig(); const ticket = 'v2-recovered';
+    const incoming = path.join(r.dir, 'incoming', ticket);
+    mkdirSync(incoming, { recursive: true }); const ref = path.join(incoming, '1.png'); writeFileSync(ref, PNG);
+    r.bridge.pending = [{ ticket_id: ticket, seq: 1, self_id: '1', user_id: OWNER, group_id: null, message_type: 'private',
+      source_message_id: '900', source_nickname: 'tester', source_text: '奶龙: 横 2mp x3 改红色[image]',
+      source_route_text: '奶龙: 横 2mp x3 改红色', source_images: [ref], created_at: '2026-10-17T00:00:00.000Z', status: 'pending' }];
+    await r.dispatcher.recover(); await r.dispatcher.idle();
+    expect(r.image.options).toEqual([{ prompt: '改红色', aspect: '16:9', size: '2mp', count: 3, reference_images: [realpathSync(ref)] }]);
+    expect(r.image.prefixes).toEqual(['cs-v2-recovered-1']);
+  });
+
   it("奶龙: prefix → one generation with the raw prompt, fixed success reply with the image, route stored", async () => {
     const r = await makeRig();
     await r.dispatcher.dispatch(inbound("  奶龙：一只戴墨镜的柴犬，赛博朋克", { id: "300" }), "t-img");
@@ -418,7 +433,7 @@ describe("rule router → image path", () => {
     r.image.recoveredAt = "probe";
     await r.dispatcher.dispatch(inbound("奶龙:保留图片"), "pruned");
     expect(r.image.calls).toHaveLength(1);
-    expect(r.image.reconciliations).toEqual([{ attempt: 1, filenamePrefix: "cs-pruned-1" }]);
+    expect(r.image.reconciliations).toEqual([expect.objectContaining({ attempt: 1, filenamePrefix: "cs-pruned-1", count: 1 })]);
     expect(r.bridge.replies[0]).toMatchObject({ text: IMAGE_SUCCESS_REPLY, images: [expect.stringMatching(/cs-pruned-1_00001_\.png$/)] });
   });
 

@@ -39,9 +39,9 @@ const EnvSchema = z.object({
   COMFY_MCP_BIN: z.string().default("/opt/comfy/bin/comfy-mcp"),
   COMFY_BIN: z.string().default("/opt/comfy/bin/comfy"),
   COMFY_CHECKPOINT: z.string().default(""),
-  /** API 格式工作流文件；为空时 mcp 用 generate_image 默认模板，http 用内置 SD1.5 工作流 */
-  /** 未设置时为 ${DATA_DIR}/workflows/qwen-image-2.1-turbo-api.json（entrypoint 从 /app/workflows 播种，codex 可改）；旧的 /app/... 路径仍可显式设置 */
+  /** 显式设置时覆盖生成器；空值使用参数化 Qwen Image 2.1 Turbo 图。 */
   COMFY_WORKFLOW_FILE: z.string().default(""),
+  COMFY_QWEN_CACHE: bool(false),
   COMFY_PROMPT_NODE: z.string().default(""),
   /** mcp 模式下容器内 loopback 转发端口（comfy-cli 仅对 loopback 获取 object_info） */
   COMFY_LOOPBACK_PORT: int(8188),
@@ -172,7 +172,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     codexHome: path.join(e.DATA_DIR, "codex"),
     imagesDir: path.join(e.DATA_DIR, "images"),
     ticketsDir: path.join(e.DATA_DIR, "tickets"),
-    COMFY_WORKFLOW_FILE: e.COMFY_WORKFLOW_FILE || path.posix.join(e.DATA_DIR, "workflows", DEFAULT_WORKFLOW),
     owner: resolveOwner(e.QQ_OWNER, allowUsers),
     imagePrefixes: parseImagePrefixes(e.IMAGE_PREFIXES),
     backendOverrides,

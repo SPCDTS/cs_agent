@@ -3,7 +3,7 @@ import { ASPECTS, type ImageOptions } from "./image-options.js";
  * 规则分流器（设计 §4.1，无模型）：
  * - 输入是 bridge 计算的分流文本 route_text（已跳过开头真实的 at / reply 段，见 qq/policy.ts），这里只去首尾空白；
  *   用户亲手输入的 "[at]" 字样不做任何特殊处理；
- * - 以 IMAGE_PREFIXES 中任一前缀开头（逐字匹配，大小写与全/半角按配置原样）→ 生图，前缀之后的全部文本即提示词；
+ * - 以 IMAGE_PREFIXES 中任一前缀开头（逐字匹配，大小写与全/半角按配置原样）→ 生图，解析前导内联选项，余下原文作为提示词；
  *   提示词为空 → 固定用法提示；
  * - 否则整条原文交给执行 agent。
  */

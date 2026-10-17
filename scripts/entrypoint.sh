@@ -16,7 +16,7 @@ for dir in "$DATA_DIR" "$WORKSPACE_DIR"; do
     exit 1
   fi
 done
-mkdir -p "$CODEX_HOME_DIR" "$DATA_DIR/images" "$DATA_DIR/tickets" "$DATA_DIR/prompts"
+mkdir -p "$CODEX_HOME_DIR" "$DATA_DIR/images" "$DATA_DIR/tickets" "$DATA_DIR/prompts" "$DATA_DIR/incoming"
 
 # 项目自有、codex 可改的工作流目录：缺失时从镜像内 /app/workflows 复制一份（已存在则绝不覆盖）
 WORKFLOWS_SRC="${WORKFLOWS_SRC:-/app/workflows}"
@@ -84,7 +84,7 @@ toml_env_line() {
   printf '%s = "%s"\n' "$1" "$_v"
 }
 IMAGE_GEN_ENV=""
-for _n in COMFY_MODE COMFYUI_URL COMFY_MCP_BIN COMFY_BIN COMFY_CHECKPOINT COMFY_WORKFLOW_FILE COMFY_PROMPT_NODE COMFY_TIMEOUT_SEC COMFY_LOOPBACK_PORT LOG_LEVEL; do
+for _n in COMFY_MODE COMFYUI_URL COMFY_MCP_BIN COMFY_BIN COMFY_CHECKPOINT COMFY_WORKFLOW_FILE COMFY_PROMPT_NODE COMFY_QWEN_CACHE COMFY_TIMEOUT_SEC COMFY_LOOPBACK_PORT LOG_LEVEL; do
   _line="$(toml_env_line "$_n")"
   [ -n "$_line" ] && IMAGE_GEN_ENV="$IMAGE_GEN_ENV
 $_line"
@@ -112,7 +112,7 @@ for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts,$DATA_DIR/wor
   esac
   _r="$(norm_path "$_raw")"
   case "$_r" in
-    /|"$DATA_N"|"$CODEX_HOME_N"|"$CODEX_HOME_N"/*|"$DATA_N/images"|"$DATA_N/images"/*|"$DATA_N/tickets"|"$DATA_N/tickets"/*|*.sqlite|*.sqlite-*) _bad=1 ;;
+    /|"$DATA_N"|"$CODEX_HOME_N"|"$CODEX_HOME_N"/*|"$DATA_N/images"|"$DATA_N/images"/*|"$DATA_N/incoming"|"$DATA_N/incoming"/*|"$DATA_N/tickets"|"$DATA_N/tickets"/*|*.sqlite|*.sqlite-*) _bad=1 ;;
   esac
   case "$DATA_N/" in "$_r"/*) _bad=1 ;; esac # DATA_DIR 的上级目录
   if [ "$_bad" = 1 ]; then
@@ -237,6 +237,7 @@ deny_read = [
   "$C/*.sqlite*",
   "$D/*.sqlite*",
   "$D/images",
+  "$D/incoming",
   "$D/tickets",
   "$D/codex-session.json*",
   "$D/codex-threads.json",

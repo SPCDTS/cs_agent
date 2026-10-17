@@ -12,6 +12,7 @@ import { backendConfigFromEnv, createImageGenServer } from "./image-gen-server.j
 
 const { server, dispose } = createImageGenServer({
   ticketDir: process.env.IMAGE_TICKET_DIR,
+  imageRefs: process.env.IMAGE_REFS,
   dataDir: process.env.DATA_DIR || "/data",
   createBackend: () => createImageBackend(backendConfigFromEnv(process.env)),
 });

@@ -1,7 +1,9 @@
+import { IMAGE_OPTIONS_JSON_SCHEMA, validateImageOptions, type ImageOptions } from "../agent/image-options.js";
+import { imageRefsValue, validateReferences } from "../agent/image-references.js";
 /**
  * image_gen MCP 服务（设计 §4.4）：供容器内 codex 生图，复用 src/agent/image-gen.ts 的同一实现。
  * 输出目录只来自环境变量 IMAGE_TICKET_DIR（cs-agent 每次 codex exec 以 -c 注入 ${DATA_DIR}/images/<ticket>），
- * 工具参数里不接受路径；缺失、非法或不在 ${DATA_DIR}/images/ 的直接子目录时所有调用都拒绝。
+ * 工具参数里不接受输出路径（参考图仅接受 IMAGE_REFS 允许列表）；缺失、非法或不在 ${DATA_DIR}/images/ 的直接子目录时所有调用都拒绝。
  * 每次调用输出到新的子目录 <IMAGE_TICKET_DIR>/call-<n>/（同名输出不会互相覆盖），返回 call-<n>/<文件名>；
  * 图片由 cs-agent 在回合结束后从票据目录递归收集并随回复发送。
  */
@@ -85,6 +87,7 @@ export interface ImageGenDeps {
   /** 原始 IMAGE_TICKET_DIR */
   ticketDir: string | undefined;
   dataDir: string;
+  imageRefs?: string;
   /** 惰性创建生图后端（首次调用时） */
   createBackend: () => ImageBackend;
 }
@@ -93,13 +96,8 @@ const TOOLS = [
   {
     name: "generate_image",
     description:
-      "用本地 ComfyUI 根据画面描述生成一张图片。生成的图片会随你的回复自动发给 QQ 用户，你只需在回复里用一句话说明，不要写文件路径。提示词可以用中文。",
-    inputSchema: {
-      type: "object",
-      properties: { prompt: { type: "string", description: `画面描述，≤${PROMPT_MAX} 字` } },
-      required: ["prompt"],
-      additionalProperties: false,
-    },
+      "用本地 ComfyUI 根据描述生成或编辑图片（最多 4 张），可设比例、尺寸、seed、负面提示词、参考图和透明背景。生成的图片会随你的回复自动发给 QQ 用户，你只需在回复里用一句话说明，不要写文件路径。提示词可以用中文。",
+    inputSchema: IMAGE_OPTIONS_JSON_SCHEMA,
     // 会写文件、调用外部服务：非只读
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -119,7 +117,7 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
   let calls = 0;
   let chain: Promise<unknown> = Promise.resolve();
   const server = new Server(
-    { name: "image_gen", version: "1.0.0" },
+    { name: "image_gen", version: "2.0.0" },
     { capabilities: { tools: {} }, instructions: "generate_image 生成的图片会随回复自动发给用户；回复只需一句说明。" },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS.map((t) => ({ ...t })) as never }));
@@ -131,20 +129,25 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
     } catch (err) {
       return text(`image_gen 不可用：${(err as Error).message}。`, true);
     }
-    const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
-    if (!prompt) return text("prompt 不能为空。", true);
-    if (prompt.length > PROMPT_MAX) return text(`prompt 过长（>${PROMPT_MAX} 字）。`, true);
+    let options: ImageOptions;
+    try {
+      options = validateImageOptions(args);
+      const allowed = (deps.imageRefs ?? '').split(',').filter(Boolean);
+      imageRefsValue(allowed);
+      options.reference_images = await validateReferences(options.reference_images ?? [], allowed,
+        path.join(deps.dataDir, 'incoming', path.basename(dir)));
+    } catch (err) { return text('生图参数无效：' + (err as Error).message, true); }
     if (calls >= MAX_CALLS) return text(`本次回复最多生成 ${MAX_CALLS} 次图片，已达上限。`, true);
     calls++;
     // 每次调用一个新子目录 call-<n>：同名输出（如 ComfyUI_00001_.png）不会覆盖上一次的结果
     const callDir = await nextCallDir(dir);
     try {
       backend ??= deps.createBackend();
-      await backend.generate(prompt, callDir);
+      await backend.generate(options, callDir);
     } catch (err) {
       const kind = classifyImageError(err);
       process.stderr.write(`image_gen: generate failed (${kind}): ${(err as Error).message.slice(0, 300)}\n`);
-      return text(`${FAILURE_TEXT[kind] ?? "生图失败"}，请如实告知用户。`, true);
+      return text((err as Error).message.startsWith("透明输出未启用：") ? (err as Error).message : `${FAILURE_TEXT[kind] ?? "生图失败"}，请如实告知用户。`, true);
     }
     const files = (await collectNewImages(callDir, new Set())).map((f) => `${path.basename(callDir)}/${path.basename(f)}`);
     if (!files.length) return text("生图没有产出有效图片。", true);

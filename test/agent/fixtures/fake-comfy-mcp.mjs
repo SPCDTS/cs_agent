@@ -51,10 +51,16 @@ server.tool(
   "run_workflow",
   { workflow_path: z.string(), wait: z.boolean().default(true), timeout_seconds: z.number().default(110), confirm_spend: z.boolean().default(false) },
   async (args) => {
-    record("run_workflow", { ...args, workflow: JSON.parse(readFileSync(args.workflow_path, "utf8")) });
+    const workflow = JSON.parse(readFileSync(args.workflow_path, "utf8"));
+    record("run_workflow", { ...args, workflow });
+    if (JSON.stringify(workflow).includes("FAIL")) return { content: [{ type: "text", text: "boom" }], isError: true };
     return text({ prompt_id: submit(), status: "queued" });
   },
 );
+if (process.env.FAKE_COMFY_UPLOAD) server.tool('upload_file', {
+  paths: z.array(z.string()), overwrite: z.boolean(),
+  ...(process.env.FAKE_COMFY_UPLOAD === 'subfolder' ? { subfolder: z.string() } : {}),
+}, async args => { record('upload_file', args); return text({ name: path.basename(args.paths[0]), subfolder: args.subfolder }); });
 let waits = 0;
 server.tool(
   "job",

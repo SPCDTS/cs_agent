@@ -35,8 +35,9 @@ function renderText(segments: Record<string, unknown>[]): string {
   return segments.map(s => (segmentType(s) === "text" ? segmentText(s) : "[" + segmentType(s) + "]")).join("");
 }
 
-/** 分流文本：跳过开头的 at / reply 段（以及夹在其间的纯空白 text 段），其余按 renderText 渲染。 */
+/** 分流文本：跳过开头的 at / reply 段（以及夹在其间的纯空白 text 段），跳过图片占位，其余按 renderText 渲染。 */
 function renderRouteText(segments: Record<string, unknown>[]): string {
+  segments = segments.filter(s => segmentType(s) !== "image");
   let i = 0;
   for (; i < segments.length; i++) {
     const s = segments[i]!;
@@ -104,6 +105,7 @@ export function normalizeMessage(event: unknown): InboundMessage | null {
     route_text: renderRouteText(segments).slice(0, MAX_TEXT),
     mentioned_self: segments.some(s => segmentType(s) === "at" && idString(segmentData(s).qq) === self_id),
     segments: compactSegments(segments),
+    images: [],
   };
 }
 
