@@ -1,10 +1,8 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { callQQContextTool } from "../../src/mcp/qq-context-server.js";
 import { ContextStore } from "../../src/context/store.js";
 import type { InboundMessage } from "../../src/qq/types.js";
@@ -13,17 +11,6 @@ import { tmp } from "../agent/helpers.js";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ENTRY = path.join(ROOT, "dist", "mcp", "qq-context.js");
 const G = "200000001";
-
-/** dist 缺失或比源码旧时先编译（stdio 测试跑的是构建产物，与容器内一致）。 */
-beforeAll(() => {
-  const srcs = ["src/mcp/qq-context.ts", "src/mcp/qq-context-server.ts", "src/context/store.ts", "src/context/format.ts", "src/context/access.ts"];
-  const newest = Math.max(...srcs.map((f) => statSync(path.join(ROOT, f)).mtimeMs));
-  if (existsSync(ENTRY) && statSync(ENTRY).mtimeMs >= newest) return;
-  const tsc = path.join(ROOT, "node_modules", "typescript", "bin", "tsc");
-  const r = spawnSync(process.execPath, [tsc, "-p", "tsconfig.json"], { cwd: ROOT, encoding: "utf8" });
-  if (r.status !== 0) throw new Error(`build failed: ${r.stdout}${r.stderr}`);
-}, 120_000);
-
 let seq = 1;
 function msg(text: string, o: Partial<InboundMessage> = {}): InboundMessage {
   return {

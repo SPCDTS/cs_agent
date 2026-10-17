@@ -1,5 +1,4 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -19,17 +18,6 @@ const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
   "base64",
 );
-
-/** dist 缺失或比源码旧时先编译（stdio 测试跑的是构建产物，与容器内一致）。 */
-beforeAll(() => {
-  const srcs = ["src/mcp/image-gen.ts", "src/mcp/image-gen-server.ts", "src/agent/image-gen.ts", "src/agent/image-collect.ts", "src/config.ts"];
-  const newest = Math.max(...srcs.map((f) => statSync(path.join(ROOT, f)).mtimeMs));
-  if (existsSync(ENTRY) && statSync(ENTRY).mtimeMs >= newest) return;
-  const tsc = path.join(ROOT, "node_modules", "typescript", "bin", "tsc");
-  const r = spawnSync(process.execPath, [tsc, "-p", "tsconfig.json"], { cwd: ROOT, encoding: "utf8" });
-  if (r.status !== 0) throw new Error(`build failed: ${r.stdout}${r.stderr}`);
-}, 120_000);
-
 /** 假 ComfyUI HTTP：/prompt → /history → /view。 */
 let comfy: HttpServer;
 let comfyUrl = "";
