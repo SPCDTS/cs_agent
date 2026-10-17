@@ -138,7 +138,7 @@ async function makeRig(getPrompt?: () => string): Promise<Rig> {
   });
   const extension = createCsAgentExtension([
     createGenerateImageTool(backend, path.join(dir, "images")),
-    createAskCodexTool(codex),
+    createAskCodexTool(codex, { owner: "10000001", store }),
     createReplyQQTool(() => bridge, path.join(dir, "images")),
   ], getPrompt);
   const harness = await openHarness({ models, extension, storage: new MemoryStorage() }, ctx);
@@ -431,5 +431,45 @@ describe("context store hooks", () => {
     r.faux.setResponses([fauxAssistantMessage(fauxToolCall("reply_qq", { text: "好" }), { stopReason: "toolUse" })]);
     await r.dispatcher.dispatch(inbound("hi", "304"), "ticket-h5");
     expect(r.bridge.replies).toEqual([{ ticket: "ticket-h5", text: "好", images: [] }]);
+  });
+});
+
+describe("ask_codex context injection", () => {
+  const codexStarts = (r: Rig) =>
+    readFileSync(path.join(r.dir, "codex-calls.jsonl"), "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l)).filter((c) => c.phase === "start");
+  const askThenReply = (r: Rig) => [
+    () => fauxAssistantMessage(fauxToolCall("ask_codex", { prompt: "那明天呢", reasoning_effort: "low" }), { stopReason: "toolUse" }),
+    (context: { messages: Message[] }) =>
+      fauxAssistantMessage(fauxToolCall("reply_qq", { text: lastToolResult(context.messages) }), { stopReason: "toolUse" }),
+  ];
+
+  it("group message: QQ_ACCESS=group:<id>, §3.2 header with the quoted message looked up from the store", async () => {
+    rig = await makeRig();
+    const r = rig;
+    const quoted = { ...inbound("今晚有cs比赛吗", "400"), message_type: "group" as const, group_id: "200000001", user_id: "20001", nickname: "小明" };
+    r.store.ingest(quoted);
+    const msg: InboundMessage = {
+      ...inbound("那明天呢", "401"), message_type: "group", group_id: "200000001", user_id: "20002", nickname: "De",
+      time: Math.floor(new Date(2026, 9, 17, 22, 41).getTime() / 1000),
+      segments: [{ type: "reply", data: { id: "400" } }, { type: "text", data: { text: "那明天呢" } }],
+    };
+    r.store.ingest(msg);
+    r.faux.setResponses(askThenReply(r) as never);
+    await r.dispatcher.dispatch(msg, "ticket-q1");
+    const [start] = codexStarts(r);
+    expect(start.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"']));
+    expect(start.stdin).toBe("[来源] 群 200000001 · De(20002) · 2026-10-17 22:41\n[引用] 小明: 今晚有cs比赛吗\n那明天呢");
+  });
+
+  it("owner private → QQ_ACCESS=all; other private → private:<qq>; no quote line without a reply segment", async () => {
+    rig = await makeRig();
+    const r = rig;
+    r.faux.setResponses([...askThenReply(r), ...askThenReply(r)] as never);
+    await r.dispatcher.dispatch(inbound("那明天呢", "402"), "ticket-q2");
+    await r.dispatcher.dispatch({ ...inbound("那明天呢", "403"), user_id: "555666" }, "ticket-q3");
+    const [owner, other] = codexStarts(r);
+    expect(owner.argv).toEqual(expect.arrayContaining(['mcp_servers.qq_context.env.QQ_ACCESS="all"']));
+    expect(other.argv).toEqual(expect.arrayContaining(['mcp_servers.qq_context.env.QQ_ACCESS="private:555666"']));
+    expect(owner.stdin).toMatch(/^\[来源\] 私聊 · tester\(10000001\) · \d{4}-\d\d-\d\d \d\d:\d\d\n那明天呢$/);
   });
 });

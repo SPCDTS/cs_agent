@@ -86,11 +86,13 @@ async function main(): Promise<void> {
     sessionFile: path.join(cfg.DATA_DIR, "codex-session.json"),
     sandbox: cfg.CODEX_SANDBOX,
     timeoutMs: cfg.CODEX_TIMEOUT_SEC * 1000,
+    rolloutMaxMb: cfg.CODEX_ROLLOUT_MAX_MB,
+    threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,
   });
 
   const extension = createCsAgentExtension([
     createGenerateImageTool(imageBackend, cfg.imagesDir),
-    createAskCodexTool(codex),
+    createAskCodexTool(codex, { owner: cfg.owner, store }),
     createReplyQQTool(getBridge, cfg.imagesDir),
   ], () => loadSystemPrompt(cfg.DATA_DIR));
   const models = createAgentModels(cfg.codexHome);
