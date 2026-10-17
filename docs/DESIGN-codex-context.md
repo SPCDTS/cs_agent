@@ -142,7 +142,7 @@ interface AgentBackend {
 - `AGENTS.md`（全局受管）补一条：需要出图时调用 image_gen，图片会随回复自动发给用户，回复文本只需一句说明。
 
 ### 4.5 pi-durable 后端（新）
-- 每个线程键一个 **长期 durable conversation**（`harness` 中按 `owner`/`shared` 查找或创建，id 持久化在 `/data/pi-threads.json`），自动 compaction 开启（`reserveTokens` / `backgroundTokens` 取 pi-durable 默认或配置），记忆靠 compaction 摘要，不做轮换。
+- **每个会话域一条长期 durable conversation**（2026-10-18 评审后决定：owner 私聊一条；每个群一条；每个其他私聊用户一条；键 = `owner` | `<scope>`），id 持久化在 `/data/pi-threads.json`。与 codex 的 owner/shared 两分不同：pi 会话成本低，按域隔离可彻底避免非 owner 私聊与群聊共享记忆与压缩摘要。自动 compaction 开启（`reserveTokens` / `backgroundTokens` 取 pi-durable 默认或配置），记忆靠 compaction 摘要，不做轮换。
 - 模型：`AGENT_MODEL_PROVIDER`/`AGENT_MODEL_ID`（现为 deepseek / deepseek-flash）、`AGENT_THINKING_LEVEL`。
 - 工具（进程内，复用同一实现）：`web_search(query, count≤8)`、`fetch_page(url)`（§4.6）、`qq_recent` / `qq_search` / `qq_message`（统一上下文存储，**访问范围绑定到当前请求**：由适配层在 submit 时把 access 写入会话文档，工具执行时读取；shared 线程内不同 scope 的请求串行，因此不会串用）、`generate_image(prompt)`（写 `/data/images/<ticket>/`）。不接浏览器。
 - 系统提示：`/data/prompts/agent.md` 热加载（与 codex 的 AGENTS.md 规则对齐：纯文本中文简短、不可信内容声明、历史工具纪律、需要事实先搜索、需要出图调用 generate_image 并一句话说明）。内置默认值在代码中。
