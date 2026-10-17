@@ -9,6 +9,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { McpImageBackend } from "../../src/agent/image-gen.js";
+import { collectNewImages } from "../../src/agent/image-collect.js";
 import { backendConfigFromEnv, createImageGenServer, MAX_CALLS, resolveTicketDir } from "../../src/mcp/image-gen-server.js";
 import { FIXTURES, tmp } from "../agent/helpers.js";
 
@@ -107,7 +108,8 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     expect(r.isError).toBeFalsy();
     const files = JSON.parse(textOf(r)).files as string[];
     expect(files).toHaveLength(1);
-    expect(readdirSync(ticketDir)).toEqual(files);
+    expect(files[0]).toMatch(/^call-1\/[^/]+\.png$/);
+    expect(readdirSync(ticketDir)).toEqual(["call-1"]);
     expect(readFileSync(path.join(ticketDir, files[0]!)).subarray(0, 8)).toEqual(PNG.subarray(0, 8));
     expect((prompts[before] as Record<string, { inputs: { text?: string } }>)["4"]!.inputs.text).toBe("一只橘猫");
   });
@@ -148,7 +150,7 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
     return { client, dispose };
   }
 
-  it("generate_image via comfy-mcp returns only the files produced by this call; MAX_CALLS enforced", async () => {
+  it("each call writes into its own call-<n> subdir: same-named outputs are all kept and counted; MAX_CALLS enforced (R9)", async () => {
     const dir = tmp("cs-imggen-");
     const ticketDir = path.join(dir, "images", "t9");
     mkdirSync(ticketDir, { recursive: true });
@@ -156,9 +158,15 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
     const { client, dispose } = await connect(dir, ticketDir);
     try {
       const r = await client.callTool({ name: "generate_image", arguments: { prompt: "a dog" } });
-      expect(JSON.parse(textOf(r)).files).toEqual(["ComfyUI_00001_.png"]);
-      // 同名文件再生成不算新文件：之后的调用报"没有产出"，但调用次数照常累计
-      for (let i = 1; i < MAX_CALLS; i++) await client.callTool({ name: "generate_image", arguments: { prompt: "again" } });
+      expect(JSON.parse(textOf(r)).files).toEqual(["call-1/ComfyUI_00001_.png"]);
+      // 假 comfy-mcp 每次都输出同名 ComfyUI_00001_.png：分目录后每次都是新文件
+      for (let i = 2; i <= MAX_CALLS; i++) {
+        const again = await client.callTool({ name: "generate_image", arguments: { prompt: "again" } });
+        expect(again.isError).toBeFalsy();
+        expect(JSON.parse(textOf(again)).files).toEqual([`call-${i}/ComfyUI_00001_.png`]);
+      }
+      const all = await collectNewImages(ticketDir, new Set(["old.png"]), 10);
+      expect(all).toHaveLength(MAX_CALLS);
       const over = await client.callTool({ name: "generate_image", arguments: { prompt: "too many" } });
       expect(over.isError).toBe(true);
       expect(textOf(over)).toMatch(/上限/);

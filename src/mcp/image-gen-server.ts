@@ -2,7 +2,8 @@
  * image_gen MCP 服务（设计 §4.4）：供容器内 codex 生图，复用 src/agent/image-gen.ts 的同一实现。
  * 输出目录只来自环境变量 IMAGE_TICKET_DIR（cs-agent 每次 codex exec 以 -c 注入 ${DATA_DIR}/images/<ticket>），
  * 工具参数里不接受路径；缺失、非法或不在 ${DATA_DIR}/images/ 的直接子目录时所有调用都拒绝。
- * 返回生成的文件名；图片由 cs-agent 在回合结束后从该目录收集并随回复发送。
+ * 每次调用输出到新的子目录 <IMAGE_TICKET_DIR>/call-<n>/（同名输出不会互相覆盖），返回 call-<n>/<文件名>；
+ * 图片由 cs-agent 在回合结束后从票据目录递归收集并随回复发送。
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -11,7 +12,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } fr
 import { classifyImageError, type ImageBackend, type ImageBackendConfig } from "../agent/image-gen.js";
 import { isLoopbackUrl } from "../agent/loopback-proxy.js";
 import { loadConfig } from "../config.js";
-import { collectNewImages, listFiles } from "../agent/image-collect.js";
+import { collectNewImages } from "../agent/image-collect.js";
 
 export const PROMPT_MAX = 2000;
 /** 每个 MCP 进程（即每个 codex 回合）最多生图次数；回复最多附带 4 张 */
@@ -60,6 +61,24 @@ export function backendConfigFromEnv(env: NodeJS.ProcessEnv): ImageBackendConfig
     promptNode: cfg.COMFY_PROMPT_NODE || undefined,
     baseEnv: env,
   };
+}
+
+const CALL_DIR_RE = /^call-\d+$/;
+
+/** 新建 <dir>/call-<n>（n = 已有 call-* 目录数 + 1；已存在时继续递增），返回其路径。 */
+export async function nextCallDir(dir: string): Promise<string> {
+  const ents = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  let n = ents.filter((e) => e.isDirectory() && CALL_DIR_RE.test(e.name)).length + 1;
+  for (;;) {
+    const p = path.join(dir, `call-${n}`);
+    try {
+      await fs.mkdir(p);
+      return p;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      n++;
+    }
+  }
 }
 
 export interface ImageGenDeps {
@@ -117,16 +136,17 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
     if (prompt.length > PROMPT_MAX) return text(`prompt 过长（>${PROMPT_MAX} 字）。`, true);
     if (calls >= MAX_CALLS) return text(`本次回复最多生成 ${MAX_CALLS} 次图片，已达上限。`, true);
     calls++;
-    const before = await listFiles(dir);
+    // 每次调用一个新子目录 call-<n>：同名输出（如 ComfyUI_00001_.png）不会覆盖上一次的结果
+    const callDir = await nextCallDir(dir);
     try {
       backend ??= deps.createBackend();
-      await backend.generate(prompt, dir);
+      await backend.generate(prompt, callDir);
     } catch (err) {
       const kind = classifyImageError(err);
       process.stderr.write(`image_gen: generate failed (${kind}): ${(err as Error).message.slice(0, 300)}\n`);
       return text(`${FAILURE_TEXT[kind] ?? "生图失败"}，请如实告知用户。`, true);
     }
-    const files = (await collectNewImages(dir, before)).map((f) => path.basename(f));
+    const files = (await collectNewImages(callDir, new Set())).map((f) => `${path.basename(callDir)}/${path.basename(f)}`);
     if (!files.length) return text("生图没有产出有效图片。", true);
     return text(JSON.stringify({ files, note: "图片会随你的回复自动发送给用户" }));
   };
