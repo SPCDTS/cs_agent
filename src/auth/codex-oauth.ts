@@ -5,6 +5,8 @@
  * pi-ai 格式: { type: "oauth", access, refresh, expires(ms), accountId }
  *
  * 每次 read/modify 都重新读文件（codex 子进程也可能刷新并写回），pi-ai 刷新后按 Codex 格式写回同一文件。
+ * 写回前再读一次：若文件中的 refresh_token 已不是本次刷新所依据的那个（codex 在此期间刷新过），
+ * 采用磁盘上的新 token、丢弃本次刷新结果，避免用已作废的轮换结果覆盖 codex 的写入。
  * 任何日志都不得包含 token 值。
  */
 import { promises as fs } from "node:fs";
@@ -82,7 +84,7 @@ export class CodexAuthFileStore implements CredentialStore {
 
   private async writeFile(content: CodexAuthFile): Promise<void> {
     await fs.mkdir(path.dirname(this.authFile), { recursive: true });
-    const tmp = `${this.authFile}.${process.pid}.tmp`;
+    const tmp = `${this.authFile}.${process.pid}.${Date.now()}.tmp`;
     await fs.writeFile(tmp, `${JSON.stringify(content, null, 2)}\n`, { mode: 0o600 });
     await fs.rename(tmp, this.authFile);
   }
@@ -111,7 +113,13 @@ export class CodexAuthFileStore implements CredentialStore {
       const current = codexFileToCredential(file);
       const next = await fn(current);
       if (next === undefined) return current;
-      await this.writeFile(mergeCredentialIntoFile(file, next));
+      // 刷新期间 codex 可能已轮换并写回：以磁盘为准，不覆盖
+      const latest = (await this.readFile()) ?? {};
+      if (latest.tokens?.refresh_token !== file.tokens?.refresh_token) {
+        const adopted = codexFileToCredential(latest);
+        if (adopted) return adopted;
+      }
+      await this.writeFile(mergeCredentialIntoFile(latest, next));
       return next;
     });
     this.chain = run.catch(() => undefined);

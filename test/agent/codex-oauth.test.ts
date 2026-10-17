@@ -44,6 +44,22 @@ describe("codex auth.json ↔ pi-ai openai-codex credential", () => {
     expect((await store.read("openai-codex"))?.type).toBe("oauth");
     expect(await store.read("anthropic")).toBeUndefined();
   });
+
+  it("modify() adopts tokens codex wrote during our refresh instead of overwriting them", async () => {
+    const p = path.join(tmp(), "auth.json");
+    writeFileSync(p, JSON.stringify(file));
+    const store = new CodexAuthFileStore(p);
+    const codexAccess = jwt({ exp: exp + 20 });
+    const result = await store.modify("openai-codex", async () => {
+      // 模拟容器内 codex 在我们刷新期间完成了自己的刷新并写回
+      writeFileSync(p, JSON.stringify({ ...file, tokens: { ...file.tokens, access_token: codexAccess, refresh_token: "r-codex" } }));
+      return { type: "oauth", access: jwt({ exp: exp + 10 }), refresh: "r2", expires: (exp + 10) * 1000, accountId: "acc" };
+    });
+    expect(result).toMatchObject({ type: "oauth", access: codexAccess, refresh: "r-codex" });
+    const saved = JSON.parse(readFileSync(p, "utf8"));
+    expect(saved.tokens.refresh_token).toBe("r-codex");
+    expect(saved.tokens.access_token).toBe(codexAccess);
+  });
 });
 
 describe("config", () => {
