@@ -1,0 +1,70 @@
+import type { ObsEvent, ObsStore } from './store.js';
+export type Gauge = { name: string; labels?: Record<string, string>; value: number };
+type Aggregate = { count: number; success: number; durations: number[]; labels: Record<string, string> };
+/** 每个 60 秒窗口独立聚合；从事件游标读取，包含独立 image_gen MCP 进程的事件。 */
+export class Metrics {
+  private cursor: number;
+  private timer?: NodeJS.Timeout;
+  private purgedAt = 0;
+  private running?: Promise<void>;
+  constructor(private store: ObsStore, private options: {
+    retentionDays: number; inputPrice?: number; outputPrice?: number; gauges?: () => Promise<Gauge[]>;
+  }) { this.cursor = Number((store.db.prepare("SELECT value FROM obs_state WHERE key='metrics_cursor'").get() as { value: number } | undefined)?.value ?? 0); }
+  start(): void { this.timer = setInterval(() => { void this.flush().catch(() => undefined); }, 60_000); this.timer.unref(); }
+  flush(now = Date.now()): Promise<void> {
+    if (this.running) return this.running;
+    this.running = this.collect(now).finally(() => { this.running = undefined; });
+    return this.running;
+  }
+  private async collect(now: number): Promise<void> {
+    const gauges: Gauge[] = await this.options.gauges?.().catch((): Gauge[] => [{ name: 'gauge_sampling_failed', value: 1 }]) ?? [];
+    const aggregates = new Map<string, Aggregate>();
+    const usage = { input: 0, output: 0 };
+    let cursor = this.cursor;
+    for (;;) {
+      const rows = this.store.db.prepare('SELECT * FROM events WHERE id>? ORDER BY id LIMIT 1000').all(cursor) as unknown as ObsEvent[];
+      for (const e of rows) {
+        cursor = e.id;
+        if (e.status === 'started') continue;
+        const d = JSON.parse(e.detail_json);
+        if (e.stage === 'model_turn' && d.provider === 'deepseek') {
+          usage.input += Number(d.input_tokens ?? 0) + Number(d.cache_read_tokens ?? 0) + Number(d.cache_write_tokens ?? 0);
+          usage.output += Number(d.output_tokens ?? 0);
+        }
+        if (e.stage === 'image:collect' && e.status === 'ok' && d.prompt_id) {
+          const submitted = this.store.db.prepare("SELECT MIN(ts) ts FROM events WHERE ticket=? AND stage='image:submit' AND status='ok' AND json_extract(detail_json,'$.prompt_id')=?")
+            .get(e.ticket, String(d.prompt_id)) as { ts: number | null };
+          if (submitted.ts !== null) gauges.push({ name: 'comfy_job_duration_ms', labels: { ticket: e.ticket, prompt_id: String(d.prompt_id) }, value: e.ts - submitted.ts });
+        }
+        if (!/^(tool:|backend:|image:|model_turn$)/.test(e.stage) || e.duration_ms === null) continue;
+        const labels = { stage: e.stage, backend: String(d.backend ?? ''), model: String(d.model ?? '') };
+        const key = JSON.stringify(labels);
+        let a = aggregates.get(key);
+        if (!a) aggregates.set(key, a = { count: 0, success: 0, durations: [], labels });
+        a.count++; if (e.status === 'ok') a.success++;
+        // 固定内存上限；高流量窗口采用等概率 reservoir，避免只保留最后一批。
+        if (a.durations.length < 10_000) a.durations.push(e.duration_ms);
+        else { const i = Math.floor(Math.random() * a.count); if (i < 10_000) a.durations[i] = e.duration_ms; }
+      }
+      if (rows.length < 1000) break;
+    }
+    this.store.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const a of aggregates.values()) {
+        a.durations.sort((a,b) => a-b);
+        for (const [name, value] of Object.entries({ calls: a.count, successes: a.success, success_rate: a.success/a.count,
+          duration_p50_ms: a.durations[Math.ceil(a.durations.length * .5)-1]!, duration_p95_ms: a.durations[Math.ceil(a.durations.length * .95)-1]! }))
+          this.store.metric(now, name, a.labels, value);
+      }
+      this.store.metric(now, 'deepseek_input_tokens', {}, usage.input);
+      this.store.metric(now, 'deepseek_output_tokens', {}, usage.output);
+      this.store.metric(now, 'deepseek_estimated_cost', {}, (usage.input*(this.options.inputPrice ?? 0)+usage.output*(this.options.outputPrice ?? 0))/1e6);
+      for (const g of gauges) this.store.metric(now, g.name, g.labels ?? {}, g.value);
+      this.store.db.prepare("INSERT INTO obs_state VALUES('metrics_cursor',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(cursor);
+      this.store.db.exec('COMMIT');
+      this.cursor = cursor;
+    } catch (error) { this.store.db.exec('ROLLBACK'); throw error; }
+    if (now - this.purgedAt >= 86400_000) { this.store.purge(this.options.retentionDays, now); this.purgedAt = now; }
+  }
+  async stop(): Promise<void> { if (this.timer) clearInterval(this.timer); await this.flush(); }
+}
