@@ -15,6 +15,7 @@ import { createGenerateImageTool, HttpImageBackend, McpImageBackend, type ImageB
 import { createReplyQQTool } from "./agent/tools/reply-qq.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
 import { ContextStore } from "./context/store.js";
+import { startAgingScheduler } from "./context/aging.js";
 
 function createImageBackend(cfg: Config, comfyUrlForMcp: string): ImageBackend {
   const timeoutMs = cfg.COMFY_TIMEOUT_SEC * 1000;
@@ -128,6 +129,16 @@ async function main(): Promise<void> {
     history: store,
   });
 
+  // 聊天记录衰老（日/周摘要 + 清理）：每天 HISTORY_SUMMARY_HOUR 点（容器本地时区，默认 UTC）；启动时补跑
+  const aging = startAgingScheduler({
+    store,
+    models,
+    model: agentModel,
+    rawDays: cfg.HISTORY_RAW_DAYS,
+    summaryDays: cfg.HISTORY_SUMMARY_DAYS,
+    hour: cfg.HISTORY_SUMMARY_HOUR,
+  });
+
   // 继续上次未完成的工作（工具非 replay-safe：中断的调用以 interrupted 结果交给模型）
   harness.resume();
   await dispatcher.recover();
@@ -193,6 +204,7 @@ async function main(): Promise<void> {
     const force = setTimeout(() => process.exit(1), 20_000);
     force.unref();
     server.close();
+    aging.stop();
     await bridge!.stop().catch(() => undefined);
     await harness.close(ctx).catch(() => undefined);
     try {

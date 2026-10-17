@@ -1,5 +1,6 @@
 import path from "node:path";
 import { z } from "zod";
+import { resolveOwner } from "./context/access.js";
 
 /** 逗号分隔列表；空串 → []。 */
 const list = z
@@ -52,6 +53,23 @@ const EnvSchema = z.object({
   AGENT_THINKING_LEVEL: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).default("low"),
   AGENT_CONCURRENCY: int(2),
 
+  /** owner QQ 号（私聊可检索全部会话历史）；留空 = QQ_ALLOW_USERS 的第一项 */
+  QQ_OWNER: z.string().regex(/^\d*$/, "QQ_OWNER 必须是 QQ 号").default(""),
+  /** 统一上下文消息库：原始消息保留天数、摘要保留天数、每日衰老任务的本地小时（容器默认 UTC） */
+  HISTORY_RAW_DAYS: int(30),
+  HISTORY_SUMMARY_DAYS: int(180),
+  HISTORY_SUMMARY_HOUR: z.coerce.number().int().min(0).max(23).default(3),
+  /** recent/search 返回文本的总字数上限（意图层与 qq_context MCP 共用） */
+  QQ_CONTEXT_MAX_CHARS: int(2500),
+  /** codex web_search：live | cached | disabled；结果注入量 low | medium | high（由 entrypoint 写入 config.toml） */
+  CODEX_WEB_SEARCH: z.enum(["live", "cached", "disabled"]).default("live"),
+  CODEX_WEB_SEARCH_CONTEXT: z.enum(["low", "medium", "high"]).default("low"),
+  /** codex 单线程安全阀：rollout 文件超过 N MB 或线程超过 N 天则新建线程 */
+  CODEX_ROLLOUT_MAX_MB: int(50),
+  CODEX_THREAD_MAX_DAYS: int(90),
+  /** codex 浏览器 MCP：playwright（headless Chromium）| none */
+  CODEX_BROWSER: z.enum(["playwright", "none"]).default("playwright"),
+
   DATA_DIR: z.string().default("/data"),
   WORKSPACE_DIR: z.string().default("/workspace"),
   HEALTH_PORT: int(8787),
@@ -66,6 +84,8 @@ export interface Config extends Env {
   /** ${DATA_DIR}/codex，容器内 codex 与 pi-ai 共用的 CODEX_HOME */
   codexHome: string;
   imagesDir: string;
+  /** QQ_OWNER，否则 QQ_ALLOW_USERS 第一项；QQ_ALLOW_USERS=* 且未设 QQ_OWNER 时无 owner */
+  owner: string | undefined;
 }
 
 /** 环境变量别名 → pi-ai 读取的标准名（.env 中常见的写法差异）。 */
@@ -122,5 +142,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowUsers,
     codexHome: path.join(e.DATA_DIR, "codex"),
     imagesDir: path.join(e.DATA_DIR, "images"),
+    owner: resolveOwner(e.QQ_OWNER, allowUsers),
   };
 }

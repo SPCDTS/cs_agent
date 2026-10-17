@@ -10,6 +10,19 @@ describe("model config defaults", () => {
     expect(c.AGENT_MODEL_ID).toBe("deepseek-flash");
     expect(c.CODEX_MODEL).toBe("gpt-6.1-sol");
   });
+
+  it("history / codex context defaults and owner resolution", () => {
+    const c = loadConfig({ QQ_ALLOW_USERS: "111,222" });
+    expect(c).toMatchObject({
+      HISTORY_RAW_DAYS: 30, HISTORY_SUMMARY_DAYS: 180, HISTORY_SUMMARY_HOUR: 3, QQ_CONTEXT_MAX_CHARS: 2500,
+      CODEX_WEB_SEARCH: "live", CODEX_WEB_SEARCH_CONTEXT: "low", CODEX_ROLLOUT_MAX_MB: 50, CODEX_THREAD_MAX_DAYS: 90,
+      CODEX_BROWSER: "playwright", owner: "111",
+    });
+    expect(loadConfig({ QQ_ALLOW_USERS: "111", QQ_OWNER: "999" }).owner).toBe("999");
+    expect(loadConfig({ QQ_ALLOW_USERS: "*" }).owner).toBeUndefined();
+    expect(() => loadConfig({ CODEX_WEB_SEARCH: "always" })).toThrow(/CODEX_WEB_SEARCH/);
+    expect(() => loadConfig({ HISTORY_SUMMARY_HOUR: "24" })).toThrow(/HISTORY_SUMMARY_HOUR/);
+  });
 });
 
 describe("DEEPSEEK_APIKEY alias", () => {
