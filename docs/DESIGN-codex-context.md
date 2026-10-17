@@ -109,60 +109,60 @@ web_search = "live"            # CODEX_WEB_SEARCH=live|cached|disabled，默认 
 context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制搜索结果注入量
 ```
 
-## 4. 意图层重构：路由器只分类，流程由代码驱动（2026-10-18 用户确认）
+## 4. 分流与执行（v3，2026-10-18 用户决定：规则分流器 + 可切换后端的执行 agent）
 
-> 背景：原设计把分类、选强度、提取提示词、转发整理、追问判断、联网研究全放在一个带工具的"意图识别 agent"里，靠"恰好一次业务工具、恰好一次 reply_qq"的提示约束加代码守卫维持纪律。用户认为它干的事太多。重构为：**路由器**做一次结构化分类，**执行器**按分类走代码定义的固定流程，**研究器**只在需要时启动。
+> 取代 v2 的"意图识别 agent / 路由器"。分流不用模型：消息以 `奶龙:` 开头 → 前缀之后全部作为提示词直接生图；否则整条消息交给**执行 agent**。执行 agent 有两个可互相切换的后端：**pi-durable**（进程内 durable 会话 + 工具）与 **codex**（容器内 CLI 固定线程）。
 
-### 4.1 路由器（Router）
-- 一次模型调用，无工具、无多轮：输入 = `[近期交互]` 上下文块（§4.4）+ 本条消息（含来源标注），输出固定结构：
-```json
-{
-  "intent": "image" | "codex",
-  "codex_effort": "low" | "medium" | "high" | "xhigh" | "max",   // 仅 intent=codex
-  "image_prompt": "…",                                            // 仅 intent=image：最终提示词，保留用户原语言；追问改图时已把上一张的提示词合并进来
-  "research_question": "…" | null                                 // 仅 intent=image：画面依赖需核实的外部事实时填写，否则 null
+### 4.1 规则分流器（无模型）
+- 取 normalize 后的 `text`（群聊的真实 at 段已由 bridge 剥离）去首尾空白；前缀匹配 `IMAGE_PREFIXES`（默认 `奶龙:,奶龙：`，逗号分隔，大小写与全/半角按配置原样匹配）。
+- 命中：`prompt = 前缀之后的全部文本`（保留原文，不翻译不改写）；为空 → 回复固定用法提示"奶龙: 后面写要画的内容"。
+- 未命中：整条原文交给执行 agent。
+- 分流结果与原因写入票据文档（`route: image|agent`，`prefix`），供观测。
+
+### 4.2 生图路径（无模型）
+pi-durable 任务两阶段：`generate`（现有 generate-image 实现，走 comfy-mcp / http）→ `reply`（固定模板：成功"图片生成好了"+ 图；失败按类别：服务不可用 / 超时 / 内容被拒 / 其他）。检查点保证崩溃后不重复生图、不重复发送。统一上下文 `completeReply(action=generate_image, detail=prompt)`。
+
+### 4.3 执行 agent 与后端抽象
+```ts
+interface AgentBackend {
+  name: "codex" | "pi";
+  handle(req: { ticket; scope; access; threadKey: "owner"|"shared"; source; text; quote? },
+         ctx: { signal; onEvent(e) }): Promise<{ text: string }>;
 }
 ```
-- 实现：pi-durable 会话里模型恰好调用一个工具 `route(...)`，其参数 schema 即上述结构（工具调用即结构化输出，DeepSeek 支持 function calling）；`route` 把决策写入票据文档并 `terminate`。模型若未调用 `route` 或参数不合法 → 代码兜底为 `{intent:"codex", codex_effort:"low"}` 并记日志。
-- 系统提示只保留：角色一句话、两类的判定规则、四个字段的填写说明、"不自己回答、不扩写、照抄原文"、不可信内容声明。目标 ≤15 行。仍从 `/data/prompts/system.md` 热加载。
-- 不设 `unknown`：拿不准一律 `codex`。不再有"恰好一次工具"的提示约束，纪律由代码保证。
+- 选择：`AGENT_BACKEND=codex|pi`（全局默认 `codex`，保持现状），可选 `AGENT_BACKEND_OVERRIDES=group:200000001=pi,private:10000001=codex` 按 scope 覆盖。切换只影响后续消息，两后端的记忆各自独立。
+- **线程键**沿用 owner / shared 两分（§3.1），两后端都按此隔离记忆；同一线程键串行，不同并行。
+- **图片附带（两后端统一）**：后端在回合中若调用了生图（pi 的进程内工具 / codex 的 `image_gen` MCP），图片写入 `/data/images/<ticket>/`；适配层在回合结束后收集该目录内本回合产生的文件（≤4 张）随文本一并发出。后端不需要也不能指定回复目标。
+- **回复后处理（两后端统一）**：代码清洗（去 Markdown 代码围栏/标题/表格符号，不出现 `@`，UTF-16 ≤4000 截断）。codex 后端额外保留 `CODEX_REPLY_MODE=relay|direct`（默认 `relay`：用意图模型做一次 ≤5 行提示的格式整理，失败回退清洗；`direct`：仅清洗）。pi 后端由其系统提示直接产出合规文本，仅清洗。
 
-### 4.2 执行器（Executors，pi-durable `defineTask` 分阶段、带检查点）
-按 `intent` 由派发器选择，流程写死在代码里，崩溃后从阶段恢复：
+### 4.4 codex 后端（现有能力的适配）
+- 现有 ask-codex：owner/shared 线程、`CODEX_HOME` 受管配置、`qq_context`（`QQ_ACCESS` 按次注入）、浏览器 MCP、`web_search = "live"`、沙箱与 deny_read。
+- 推理强度：不再由模型选择，取 `CODEX_REASONING_EFFORT`（默认 high）；允许消息内显式指令如 `#low` / `#xhigh` 前缀？——**不做**，保持简单。
+- 新增 **`image_gen` MCP**（容器内 stdio，复用 generate-image 实现）：工具 `generate_image(prompt)`，输出目录由每次 `-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR=/data/images/<ticket>` 注入，返回生成文件名；工具注解非只读，审批模式同 `approve`。于是 codex 可以先 web_search 再生图（"先查再画"由执行 agent 自行决定，不再有专门研究器）。
+- `AGENTS.md`（全局受管）补一条：需要出图时调用 image_gen，图片会随回复自动发给用户，回复文本只需一句说明。
 
-| intent | 阶段 | 回复 |
-|---|---|---|
-| `image` | `[research]`（仅 `research_question` 非空，§4.3）→ `generate`（`image_prompt`，研究结果以"参考事实：…"追加到提示词后）→ `reply` | 成功：固定模板"图片生成好了"+ 图；失败：固定模板按错误类别（服务不可用 / 超时 / 内容被拒） |
-| `codex` | `ask`（线程 owner/shared，`codex_effort`）→ `relay` → `reply` | `relay`：`CODEX_REPLY_MODE=relay`（默认）时用一次**独立的小模型调用**做格式整理（提示 ≤5 行：纯文本、中文、不改含义、去 Markdown、≤4000 字）；`direct` 时仅代码清洗。失败：固定模板"处理超时/失败" |
+### 4.5 pi-durable 后端（新）
+- 每个线程键一个 **长期 durable conversation**（`harness` 中按 `owner`/`shared` 查找或创建，id 持久化在 `/data/pi-threads.json`），自动 compaction 开启（`reserveTokens` / `backgroundTokens` 取 pi-durable 默认或配置），记忆靠 compaction 摘要，不做轮换。
+- 模型：`AGENT_MODEL_PROVIDER`/`AGENT_MODEL_ID`（现为 deepseek / deepseek-flash）、`AGENT_THINKING_LEVEL`。
+- 工具（进程内，复用同一实现）：`web_search(query, count≤8)`、`fetch_page(url)`（§4.6）、`qq_recent` / `qq_search` / `qq_message`（统一上下文存储，**访问范围绑定到当前请求**：由适配层在 submit 时把 access 写入会话文档，工具执行时读取；shared 线程内不同 scope 的请求串行，因此不会串用）、`generate_image(prompt)`（写 `/data/images/<ticket>/`）。不接浏览器。
+- 系统提示：`/data/prompts/agent.md` 热加载（与 codex 的 AGENTS.md 规则对齐：纯文本中文简短、不可信内容声明、历史工具纪律、需要事实先搜索、需要出图调用 generate_image 并一句话说明）。内置默认值在代码中。
+- 每轮输入格式与 codex 相同：`[来源] … / [引用] … / 正文`。
+- 工具调用上限（代码守卫）：每回合 `web_search ≤4`、`fetch_page ≤4`、`generate_image ≤2`、历史工具 ≤4；超限工具返回错误文本。回合超时 `PI_TURN_TIMEOUT_SEC`（300）。
 
-- 票据状态与统一上下文（§2.4）的 `completeReply` 由执行器在 `reply` 阶段写入，`detail` 记最终提示词 / 推理强度。
-- 执行器是纯代码 + 工具函数（现有 `generate-image.ts`、`ask-codex.ts`、`reply-qq.ts` 的实现保留，去掉"模型可调用的工具"外壳，改为任务阶段直接调用）。
-
-### 4.3 研究器（Researcher，仅 image 且 `research_question` 非空）
-- 一个小型带工具的 pi-durable 会话（或子任务）：工具 `web_search(query, count≤8)`、`fetch_page(url)`（DeepSeek Search/Fetch API，§4.5），模型为意图模型；系统提示：只收集与画面呈现相关的事实（外观、颜色、标志、场景、人物/队伍身份、时间与结果），纯文本 ≤`RESEARCH_MAX_CHARS`（600），不确定标"未核实"；工具调用上限由代码守卫（`web_search ≤2`、`fetch_page ≤2`）。
-- 超时 `RESEARCH_TIMEOUT_SEC`（180）或失败 → 返回空，执行器按无研究结果继续生图，回复模板附一句"未能核实外部信息"。
-- 研究器不接触长期 codex 线程，也不写聊天记录库。
-
-### 4.4 会话感知（只喂给路由器）
-派发器在路由前从统一上下文存储取 `recent(scope, 120min, 5)` 生成上下文块（格式见 §2.4），放在消息之前。上限 `INTENT_CONTEXT_ITEMS=5`、`INTENT_CONTEXT_WINDOW_MIN=120`、`INTENT_CONTEXT_MAX_CHARS=1500`；超窗口不注入。
-- 追问改图：路由器直接输出合并后的 `image_prompt`（上一张的提示词 + 本次修改），执行器不需要知道"这是追问"。
-- 追问 codex：与新问题同路径，codex 线程自带记忆。
-- 上一条仍"处理中"而本条修改它：按本条独立意图处理，回复模板附"上一条仍在处理"。
-- **同一会话顺序处理**：派发器按 scope FIFO 串行，不同 scope 并行（受 `AGENT_CONCURRENCY`）。
-- 路由器不再有拉取工具（`recent_context` / `search_history` 取消）：需要更多历史的是 codex，它有 `qq_context`。
-
-### 4.5 联网检索工具（DeepSeek Search/Fetch API，仅研究器使用）
+### 4.6 联网检索工具（DeepSeek Search/Fetch API，pi 后端使用）
 已核实：`POST https://api.deepseek.com/v1/tools/search`（`query` ≤128 字、`count` ≤50、`need_content`、支持 `site:` `lang:` `after:` 操作符）与 `POST /v1/tools/fetch`（`url` → Markdown 正文），同一 API key，5 QPS，$0.75/千次，2026-11-01 前免费。
 | 工具 | 参数 | 返回 | 上限 |
 |---|---|---|---|
 | `web_search` | `query`, `count≤8` | 每条 `标题 / 日期 / 摘要(summary) / url`，按 rerank_score 排序 | 总量 ≤2500 字 |
 | `fetch_page` | `url` | 页面正文 | ≤4000 字，超出截断 |
-429 时退避重试一次；其他 4xx 不重试。
+429 时退避重试一次；其他 4xx 不重试。codex 后端用 codex 自带的 web_search，不走这组。
 
-### 4.6 codex 回答的转发与直通
-`CODEX_REPLY_MODE=relay|direct`，默认 `relay`（用户 2026-10-17 决定保持转发）。见 §4.2 的 `relay` 阶段。观测面板的票据时间线同时保存 codex 原文与实际发出的文本。
+### 4.7 会话感知与顺序
+- 两后端都有自己的记忆（codex 线程 / pi 会话 compaction），再加 `qq_context` 工具按需拉取历史；不再向任何模型注入"近期交互"上下文块。
+- 派发器按 scope FIFO 串行，不同 scope 并行（受 `AGENT_CONCURRENCY`）：保证同一会话里回复顺序与消息顺序一致。
+- 生图路径不经过任何 agent，追问改图（"把刚才那张改成蓝色"）会进入执行 agent，由它用 qq_context 看到上一条 `[我] → 生图 prompt="…"` 后调用生图工具完成。
 
-### 4.7 容器内浏览器（替代 egolite）
+### 4.8 容器内浏览器（codex 后端）（替代 egolite）
 已核实：ego (lite) 目前仅有 macOS 桌面版，Windows 为未开放的 closed beta，Linux 在路线图；没有 headless / 独立 CLI / Docker 模式，agent 通过 `ego-browser` 技能驱动桌面应用内的页面 JS 工具，协议未公开。它无法在 Linux 容器内运行，本机也未发现安装。
 
 本期方案：
@@ -171,6 +171,7 @@ context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制�
 - egolite 推出 Linux/headless 版本后，可用同一个 `[mcp_servers.browser]` 槽位替换，AGENTS.md 中的浏览器使用纪律不变。
 - 开关：`CODEX_BROWSER=playwright|none`，用户已确认本期默认 `playwright`。
 - 可写目录（用户 2026-10-18 决定）：`/workspace`、`/data/prompts`、`/data/workflows`。其中 `/data/prompts` 可写意味着任何能触发 codex 的发送者理论上可经 codex 修改热加载的系统提示；用户知悉并接受，仅以 AGENTS.md 软规则限制为"owner 私聊明确要求时才改"。
+
 
 
 ## 5. 配置项（新增）
@@ -229,8 +230,8 @@ CODEX_REPLY_SANITIZE=true
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
-2. **路由器 + 执行器重构 + 会话感知**（§4.1、4.2、4.4、4.6）：`route` 结构化输出、系统提示精简、`defineTask` 执行器（image / codex）、relay 整理步骤、上下文块注入、按 scope FIFO。测试：faux 模型两类路径与兜底；生图后"改成蓝色"输出合并提示词；codex 追问直通；超窗口不注入；同 scope 串行/跨 scope 并行；任务阶段崩溃恢复不重复生图/不重复发送。
-3. **研究器 + 联网检索**（§4.3、4.5）：`web_search` / `fetch_page` 工具、研究器会话与调用上限、`research_question` 接入 image 执行器。测试：faux 路径、上限守卫、搜索失败降级为直接生图、429 退避。
+2. **规则分流 + 生图路径 + 后端抽象 + codex 适配**（§4.1–4.4）：`IMAGE_PREFIXES` 分流、两阶段生图任务、`AgentBackend` 接口与 `AGENT_BACKEND` 切换、codex 适配（固定 effort、`image_gen` MCP、图片收集、relay/direct 后处理）、按 scope FIFO。意图模型的 `route` 会话与系统提示退场（`system.md` 不再使用，保留文件但记录弃用）。测试：前缀匹配（半/全角、空提示）、生图崩溃恢复不重复、codex 适配经 fake codex、image_gen MCP 经 stdio、图片收集上限、后处理清洗。
+3. **pi-durable 后端**（§4.5、4.6）：长期 durable 会话（owner/shared）与 compaction、进程内工具（web_search / fetch_page / qq_* / generate_image）、访问范围绑定、`agent.md` 热加载提示、调用上限与超时、`AGENT_BACKEND=pi` 切换与 overrides。测试：faux 模型工具调用链、访问范围隔离、上限守卫、429 退避、切换后端互不影响。
 4. **观测系统**（§8）：事件表与埋点、指标、面板、可选告警。测试：埋点覆盖每个阶段、面板页面渲染、SSE、脱敏。
 
 决策（2026-10-17 用户确认）：设计 v2 通过；`CODEX_BROWSER=playwright` 本期开启。
