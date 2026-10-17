@@ -36,8 +36,9 @@ COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY workflows ./workflows
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+# /etc/codex 归 node：入口脚本每次启动写入 requirements.toml（codex 命令沙箱的 deny_read 列表）
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh \
- && mkdir -p /data /workspace && chown node:node /data /workspace
+ && mkdir -p /data /workspace /etc/codex && chown node:node /data /workspace /etc/codex
 
 USER node
 # 关闭 comfy-cli 首次运行的交互式统计询问（否则会阻塞 MCP 子进程）

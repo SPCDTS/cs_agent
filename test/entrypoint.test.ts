@@ -17,13 +17,19 @@ function runEntrypoint(env: Record<string, string>) {
   return runEntrypointIn(tmp("cs-entry-"), env);
 }
 
-function runEntrypointIn(dir: string, env: Record<string, string>): { toml: string; stderr: string; status: number | null; dataDir: string } {
+function runEntrypointIn(
+  dir: string,
+  env: Record<string, string>,
+): { toml: string; requirements: string; stderr: string; status: number | null; dataDir: string } {
   const script = path.join(dir, "entrypoint.sh");
   writeFileSync(script, readFileSync(path.join(ROOT, "scripts", "entrypoint.sh"), "utf8").replace(/\r/g, ""));
   const data = path.join(dir, "data");
   const ws = path.join(dir, "ws");
   const r = spawnSync("sh", [posix(script), "true"], {
-    env: { ...process.env, DATA_DIR: shPath(data), WORKSPACE_DIR: shPath(ws), WORKFLOWS_SRC: "/nonexistent", ...env },
+    env: {
+      ...process.env, DATA_DIR: shPath(data), WORKSPACE_DIR: shPath(ws), WORKFLOWS_SRC: "/nonexistent",
+      CODEX_REQUIREMENTS_FILE: shPath(path.join(dir, "etc-codex", "requirements.toml")), ...env,
+    },
     encoding: "utf8",
   });
   let toml = "";
@@ -32,7 +38,13 @@ function runEntrypointIn(dir: string, env: Record<string, string>): { toml: stri
   } catch {
     /* status 断言会报出问题 */
   }
-  return { toml, stderr: r.stderr, status: r.status, dataDir: shPath(data) };
+  let requirements = "";
+  try {
+    requirements = readFileSync(path.join(dir, "etc-codex", "requirements.toml"), "utf8");
+  } catch {
+    /* 同上 */
+  }
+  return { toml, requirements, stderr: r.stderr, status: r.status, dataDir: shPath(data) };
 }
 
 /** 极简 TOML 读取：返回 { "section.key": value }，只覆盖本文件用到的语法。 */
@@ -128,6 +140,30 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(r.status).toBe(0);
     expect(parse(r.toml)["sandbox_workspace_write.writable_roots"]).toBe(`["/srv/prompts", "/srv/wf", "${data}/workflows"]`);
     for (const b of bad) expect(r.stderr).toContain(`rejected CODEX_WRITABLE_ROOTS entry '${b}'`);
+  });
+
+  it("writes the managed requirements.toml deny_read list for the codex command sandbox", () => {
+    const r = runEntrypoint({});
+    expect(r.status).toBe(0);
+    const d = r.dataDir;
+    expect(r.requirements).toContain("[permissions.filesystem]");
+    const list = JSON.parse(/deny_read = (\[[\s\S]*?\])/.exec(r.requirements)![1]!.replace(/,\s*\]/, "]")) as string[];
+    expect(list).toEqual(expect.arrayContaining([
+      `${d}/codex/auth.json`, `${d}/codex/sessions`, `${d}/codex/*.sqlite*`, `${d}/codex/history.jsonl`,
+      `${d}/*.sqlite*`, `${d}/images`, `${d}/codex-session.json`,
+    ]));
+    // 不能整个禁读 CODEX_HOME（codex 的 arg0 辅助程序在 $CODEX_HOME/tmp）；config.toml / AGENTS.md 可读
+    expect(list).not.toContain(`${d}/codex`);
+    expect(list.some((p) => p.endsWith("/tmp") || p.endsWith("config.toml") || p.endsWith("AGENTS.md"))).toBe(false);
+  });
+
+  it("refuses to start when requirements.toml cannot be written", () => {
+    const dir = tmp("cs-entry-");
+    const blocker = path.join(dir, "not-a-dir");
+    writeFileSync(blocker, "x");
+    const r = runEntrypointIn(dir, { CODEX_REQUIREMENTS_FILE: shPath(path.join(blocker, "requirements.toml")) });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("cannot write");
   });
 
   it("seeds DATA_DIR/workflows from WORKFLOWS_SRC once and never overwrites", () => {

@@ -161,6 +161,36 @@ TOML
 fi
 mv -f "$CONFIG.tmp" "$CONFIG"
 
+# codex 命令沙箱的禁读列表（受管，每次启动重写）。codex 0.163 只从系统级 requirements.toml
+# （/etc/codex/requirements.toml，镜像内归 node 所有）读取 [permissions.filesystem] deny_read；
+# $CODEX_HOME/requirements.toml 不生效。不能整个禁读 CODEX_HOME：codex 的 arg0 辅助程序在 $CODEX_HOME/tmp 下。
+# 实测（bwrap，workspace-write / read-only）：命中的路径在沙箱内被空文件/空目录覆盖，cat/cp/软链接都读不到。
+REQUIREMENTS_FILE="${CODEX_REQUIREMENTS_FILE:-/etc/codex/requirements.toml}"
+D="$MCP_DATA_DIR"
+C="$D/codex"
+if ! { mkdir -p "$(dirname "$REQUIREMENTS_FILE")" && cat > "$REQUIREMENTS_FILE.tmp" <<TOML && mv -f "$REQUIREMENTS_FILE.tmp" "$REQUIREMENTS_FILE"; } 2>/dev/null; then
+# 受管文件：由 entrypoint.sh 在每次容器启动时重写，不要手工修改。
+# codex 执行的命令（bwrap 沙箱）不可读取下列路径：codex 凭据与会话、各 SQLite 库、生成的图片。
+[permissions.filesystem]
+deny_read = [
+  "$C/auth.json",
+  "$C/.credentials.json",
+  "$C/sessions",
+  "$C/archived_sessions",
+  "$C/history.jsonl",
+  "$C/log",
+  "$C/shell_snapshots",
+  "$C/memories",
+  "$C/*.sqlite*",
+  "$D/*.sqlite*",
+  "$D/images",
+  "$D/codex-session.json",
+]
+TOML
+  echo "entrypoint: ERROR cannot write $REQUIREMENTS_FILE (codex deny_read list); refusing to start without it. The image must own $(dirname "$REQUIREMENTS_FILE") by uid $(id -u)." >&2
+  exit 1
+fi
+
 if [ ! -f "$CODEX_HOME_DIR/auth.json" ]; then
   echo "entrypoint: WARNING $CODEX_HOME_DIR/auth.json missing — run scripts/init-auth.ps1 on the host or 'docker compose run --rm cs-agent codex login --device-auth'" >&2
 fi
