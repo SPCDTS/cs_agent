@@ -19,8 +19,8 @@
 | `@earendil-works/pi-ai` | 内置 provider `openai-codex`（ChatGPT 订阅 OAuth，baseUrl `https://chatgpt.com/backend-api`）、`openai`、`anthropic` 等；`providers/faux` 可用于测试 |
 | `@openai/codex` | npm 0.163.0（本机 0.160.1）。`codex exec [PROMPT] --json -o <file> -C <dir> --skip-git-repo-check -s workspace-write`；`codex exec resume <SESSION_ID> [PROMPT]` 固定会话续聊；`CODEX_HOME` 决定 auth.json/config.toml/sessions 位置 |
 | `comfy-mcp` | PyPI 0.10.0，依赖 `mcp>=2,<3`、`pydantic>=2`、`anyio>=4.9`；入口 `comfy-mcp`（stdio MCP）。读取 `COMFYUI_URL` / `COMFYUI_HOST` / `COMFYUI_PORT` 指向远端 ComfyUI；`generate_image(prompt)` 内部走 `comfy run-template`（需要 `comfy-cli`，`COMFY_BIN`） |
-| NapCat（宿主机） | HTTP `agent-http` 127.0.0.1:3000、WS `agent-ws` 127.0.0.1:3001，Bearer token，`messagePostFormat: array`。**当前仅绑定 loopback，容器不可达，部署时需新增/改为 0.0.0.0 绑定**（见 §8） |
-| ComfyUI（宿主机） | 默认 127.0.0.1:8188，**需以 `--listen 0.0.0.0` 启动**（见 §8） |
+| NapCat（宿主机） | HTTP `agent-http` 127.0.0.1:3000、WS `agent-ws` 127.0.0.1:3001，Bearer token，`messagePostFormat: array`。**已实测：Docker Desktop 容器经 `host.docker.internal:3000/3001` 可直达宿主机 loopback 端口（返回 403/426），无需改绑定** |
+| ComfyUI（宿主机） | `D:\Tools\ComfyLocal\start.ps1` 以 `--listen 127.0.0.1 --port 8188` 后台启动；容器经 `host.docker.internal:8188` 可达，无需改为 0.0.0.0 |
 | 本机凭据 | 无 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`；`~/.codex/auth.json` 为 `auth_mode=chatgpt`（含 tokens）。因此 agent 的意图模型默认走 `openai-codex` provider 复用 ChatGPT OAuth |
 
 ## 3. 总体结构
@@ -145,8 +145,8 @@ LOG_LEVEL=info
 
 ## 8. 宿主机前置条件（写入 docs/DEPLOY.md）
 
-1. NapCat：为 `onebot11_<bot>.json` 的 `httpServers` / `websocketServers` 新增（或修改）绑定 `0.0.0.0` 的条目并设置 token，Windows 防火墙仅放行 Docker 网段；或改用 `host.docker.internal` 可达的地址。
-2. ComfyUI：以 `--listen 0.0.0.0`（或 Docker 网段地址）启动。
+1. NapCat 保持现状（127.0.0.1:3000/3001 + token）；Docker Desktop 的 `host.docker.internal` 可直达宿主机 loopback 服务，已实测。`.env` 的 `NAPCAT_TOKEN` 取自 `D:\Tools\NapCat\config\onebot11_1670528780.json` 中 `agent-http` 条目的 token。
+2. ComfyUI 用 `D:\Tools\ComfyLocal\start.ps1` 启动即可（127.0.0.1:8188），无需改监听地址。
 3. 运行 `scripts/init-auth.ps1` 把 `~/.codex/auth.json` 复制到 `./data/codex/auth.json`；或在容器内执行 `codex login --device-auth`。
 4. `docker compose up -d --build`；查看 `docker compose logs -f`。
 
