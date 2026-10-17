@@ -63,6 +63,32 @@ case "${QQ_CONTEXT_MAX_CHARS:-}" in
   ""|*[!0-9]*) CONTEXT_MAX_CHARS=2500 ;;
   *) CONTEXT_MAX_CHARS="$QQ_CONTEXT_MAX_CHARS" ;;
 esac
+# image_gen MCP：工具超时 = COMFY_TIMEOUT_SEC + 30（非数字回退 300）
+_ct="$(printf '%s' "${COMFY_TIMEOUT_SEC:-}" | sed 's/^0*//')"
+case "$_ct" in
+  ""|*[!0-9]*) _ct=300 ;;
+esac
+IMAGE_GEN_TOOL_TIMEOUT=$((_ct + 30))
+# 透传给 image_gen MCP 的环境变量（与 agent 主进程同一套 COMFY_* 配置）：只写已设置的；
+# 含双引号、反斜杠或非可打印字符的值不写入 TOML（告警跳过）
+toml_env_line() {
+  eval "_v=\${$1:-}"
+  [ -n "$_v" ] || return 0
+  case "$_v" in
+    *'"'*|*'\'*) echo "entrypoint: WARNING $1 contains quotes or backslashes; not passed to image_gen" >&2; return 0 ;;
+  esac
+  if [ -n "$(printf '%s' "$_v" | LC_ALL=C tr -d '[:print:]')" ]; then
+    echo "entrypoint: WARNING $1 contains non-printable characters; not passed to image_gen" >&2
+    return 0
+  fi
+  printf '%s = "%s"\n' "$1" "$_v"
+}
+IMAGE_GEN_ENV=""
+for _n in COMFY_MODE COMFYUI_URL COMFY_MCP_BIN COMFY_BIN COMFY_CHECKPOINT COMFY_WORKFLOW_FILE COMFY_PROMPT_NODE COMFY_TIMEOUT_SEC COMFY_LOOPBACK_PORT LOG_LEVEL; do
+  _line="$(toml_env_line "$_n")"
+  [ -n "$_line" ] && IMAGE_GEN_ENV="$IMAGE_GEN_ENV
+$_line"
+done
 SANDBOX_NETWORK="$(toml_enum "${CODEX_SANDBOX_NETWORK:-true}" true CODEX_SANDBOX_NETWORK true false)"
 # 路径规范化：合并重复的 /，去掉 "/./" 段、末尾的 "/." 与 "/"（根目录保持 "/"）。".." 不在这里处理（调用方直接拒绝）。
 norm_path() {
@@ -129,7 +155,8 @@ cat > "$CONFIG.tmp" <<TOML
 # CODEX_WEB_SEARCH / CODEX_WEB_SEARCH_CONTEXT / CODEX_BROWSER / CODEX_MCP_APPROVAL_MODE / QQ_CONTEXT_MAX_CHARS）。
 # 不要手工修改——改动会在下次启动时被覆盖；请改 .env 后重启容器。不继承宿主机配置。
 # model_reasoning_effort 只是默认值：cs-agent 每轮按请求以 -c model_reasoning_effort=... 覆盖。
-# qq_context 的访问范围 QQ_ACCESS 不写在这里：cs-agent 每轮以 -c mcp_servers.qq_context.env.QQ_ACCESS=... 注入。
+# qq_context 的访问范围 QQ_ACCESS 不写在这里：cs-agent 每轮以 -c mcp_servers.qq_context.env.QQ_ACCESS=... 注入；
+# image_gen 的输出目录 IMAGE_TICKET_DIR 同样每轮以 -c mcp_servers.image_gen.env.IMAGE_TICKET_DIR=... 注入。
 model = "$MODEL"
 model_reasoning_effort = "$EFFORT"
 web_search = "$WEB_SEARCH"
@@ -153,6 +180,17 @@ default_tools_approval_mode = "$MCP_APPROVAL_MODE"
 [mcp_servers.qq_context.env]
 DATA_DIR = "$MCP_DATA_DIR"
 QQ_CONTEXT_MAX_CHARS = "$CONTEXT_MAX_CHARS"
+
+# 生图（复用 agent 的生图实现）；mcp 模式经 agent 主进程的 127.0.0.1 loopback 转发访问 ComfyUI
+[mcp_servers.image_gen]
+command = "node"
+args = ["/app/dist/mcp/image-gen.js"]
+startup_timeout_sec = 10
+tool_timeout_sec = $IMAGE_GEN_TOOL_TIMEOUT
+default_tools_approval_mode = "$MCP_APPROVAL_MODE"
+
+[mcp_servers.image_gen.env]
+DATA_DIR = "$MCP_DATA_DIR"$IMAGE_GEN_ENV
 TOML
 if [ "$BROWSER" = "playwright" ]; then
   if [ -x "$PLAYWRIGHT_MCP_BIN" ]; then

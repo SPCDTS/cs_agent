@@ -1,0 +1,29 @@
+#!/usr/bin/env node
+/**
+ * image_gen MCP 入口（stdio）。由 codex 按受管 config.toml 启动：
+ *   command = "node", args = ["/app/dist/mcp/image-gen.js"]
+ * 环境：DATA_DIR、IMAGE_TICKET_DIR（每轮 -c 注入）、COMFY_*（entrypoint 从容器环境透传，与 agent 主进程同一套配置；
+ * mcp 模式经主进程的 127.0.0.1 loopback 转发访问 ComfyUI，见 backendConfigFromEnv）。
+ * stdout 专用于 MCP 协议；诊断写 stderr。
+ */
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createImageBackend } from "../agent/image-gen.js";
+import { backendConfigFromEnv, createImageGenServer } from "./image-gen-server.js";
+
+const { server, dispose } = createImageGenServer({
+  ticketDir: process.env.IMAGE_TICKET_DIR,
+  dataDir: process.env.DATA_DIR || "/data",
+  createBackend: () => createImageBackend(backendConfigFromEnv(process.env)),
+});
+
+const shutdown = () => {
+  void dispose().finally(() => process.exit(0));
+};
+process.stdin.on("end", shutdown);
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+
+server.connect(new StdioServerTransport()).catch((err: unknown) => {
+  process.stderr.write(`image_gen: ${(err as Error).message}\n`);
+  process.exit(1);
+});

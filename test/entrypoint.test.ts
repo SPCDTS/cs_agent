@@ -246,4 +246,38 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(b["mcp_servers.browser.default_tools_approval_mode"]).toBe('"approve"');
     expect(bad.stderr).toContain("invalid value 'never' for CODEX_MCP_APPROVAL_MODE");
   });
+
+  it("writes the image_gen MCP section with COMFY_* passthrough, timeout and approval mode", () => {
+    const r = runEntrypoint({
+      COMFY_MODE: "mcp", COMFYUI_URL: "http://host.docker.internal:8188", COMFY_TIMEOUT_SEC: "240",
+      COMFY_WORKFLOW_FILE: "/data/workflows/qwen-image-2.1-turbo-api.json", COMFY_PROMPT_NODE: "4",
+      COMFY_MCP_BIN: "/opt/comfy/bin/comfy-mcp", COMFY_CHECKPOINT: 'bad"value', CODEX_MCP_APPROVAL_MODE: "auto",
+    });
+    expect(r.status).toBe(0);
+    const t = parse(r.toml);
+    expect(t).toMatchObject({
+      "[mcp_servers.image_gen]": "",
+      "mcp_servers.image_gen.command": '"node"',
+      "mcp_servers.image_gen.args": '["/app/dist/mcp/image-gen.js"]',
+      "mcp_servers.image_gen.startup_timeout_sec": "10",
+      "mcp_servers.image_gen.tool_timeout_sec": "270",
+      "mcp_servers.image_gen.default_tools_approval_mode": '"auto"',
+      "mcp_servers.image_gen.env.DATA_DIR": `"${r.dataDir}"`,
+      "mcp_servers.image_gen.env.COMFY_MODE": '"mcp"',
+      "mcp_servers.image_gen.env.COMFYUI_URL": '"http://host.docker.internal:8188"',
+      "mcp_servers.image_gen.env.COMFY_TIMEOUT_SEC": '"240"',
+      "mcp_servers.image_gen.env.COMFY_WORKFLOW_FILE": '"/data/workflows/qwen-image-2.1-turbo-api.json"',
+      "mcp_servers.image_gen.env.COMFY_PROMPT_NODE": '"4"',
+      "mcp_servers.image_gen.env.COMFY_MCP_BIN": '"/opt/comfy/bin/comfy-mcp"',
+    });
+    // IMAGE_TICKET_DIR 每轮以 -c 注入，不写进受管文件；带引号的值不写入 TOML
+    expect(r.toml).not.toMatch(/^IMAGE_TICKET_DIR/m);
+    expect(t["mcp_servers.image_gen.env.COMFY_CHECKPOINT"]).toBeUndefined();
+    expect(r.stderr).toContain("COMFY_CHECKPOINT contains quotes or backslashes");
+  });
+
+  it("image_gen tool timeout falls back to 300+30 for a non-numeric COMFY_TIMEOUT_SEC", () => {
+    const t = parse(runEntrypoint({ COMFY_TIMEOUT_SEC: "abc" }).toml);
+    expect(t["mcp_servers.image_gen.tool_timeout_sec"]).toBe("330");
+  });
 });
