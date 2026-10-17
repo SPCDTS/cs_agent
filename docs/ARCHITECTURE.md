@@ -7,7 +7,7 @@
 一个基于 **pi-durable** 的最小 agent，Docker 单容器部署，只做一件事：
 
 1. 通过内置 **QQBridge** 工具从 QQ（NapCat OneBot v11）接收消息；
-2. **规则分流**（无模型，v3）：消息以 `IMAGE_PREFIXES`（默认 `奶龙:` / `奶龙：`）开头 → 前缀之后的全部文本作为提示词；
+2. **规则分流**（无模型，v3）：消息以 `IMAGE_PREFIXES`（默认 `奶龙:` / `奶龙：`）开头 → 前缀之后解析内联选项，其余文本作为提示词；
 3. **生图路径** → 调用 **ComfyUI 的 MCP**（`comfy-mcp`）生成图片，以固定模板把图片回到原 QQ 会话；
 4. **其他消息** → 交给**执行 agent**：后端可切换（`AGENT_BACKEND=codex|pi`，可按会话覆盖），默认是**同一容器内**的 `codex` CLI 固定线程（owner / shared），其回答经后处理后回到原 QQ 会话；codex 可经 `image_gen` MCP 自行生图，图片随回复发送。
 
@@ -100,7 +100,7 @@ cs_agent/
 
 ### 5.2 规则分流（v3，取代意图识别模型）
 - `src/agent/router.ts`：去掉群消息开头由 bridge 渲染出的 `[at]` / `[reply]` 段占位与首尾空白后，逐字匹配 `IMAGE_PREFIXES`（逗号分隔，默认 `奶龙:,奶龙：`，较长前缀优先）。
-- 命中：前缀之后的全部文本（去首尾空白，不翻译不改写）作为生图提示词；为空 → 固定用法提示"奶龙: 后面写要画的内容"。未命中：整条原文交给执行 agent。
+- 命中：前缀之后解析比例、尺寸、张数与透明选项，其余文本（去首尾空白，不翻译不改写）作为生图提示词；为空 → 固定用法提示"奶龙: 后面写要画的内容"。未命中：整条原文交给执行 agent。
 - 分流结果（`route: image | image_usage | agent`、`prefix`、`prompt`）在 admit 的同一 commit 写入 TicketDoc，日志 `message routed`。
 - 不经任何模型，没有系统提示；v2 的 `${DATA_DIR}/prompts/system.md` 不再读取，存在时启动记一行弃用 warn（文件保留）。
 - 执行 agent 的后端选择：`AGENT_BACKEND`（默认 codex）+ `AGENT_BACKEND_OVERRIDES`（`scope=backend`，非法项启动失败）。
@@ -227,6 +227,33 @@ LOG_LEVEL=info
 | 新增环境变量 | `IMAGE_PREFIXES`、`AGENT_BACKEND`、`AGENT_BACKEND_OVERRIDES`、`CODEX_REPLY_MODE` | 见 `.env.example` |
 
 已实测：容器内 `codex exec`（OAuth + workspace-write 沙箱）正常；容器内经 mcp 与 http 两条路径均生成真实 PNG（约 10–17 s）。
+
+### 10.2 生图工具 v2（2026-10-18，设计 §4.9）
+
+本节覆盖前文旧版静态工作流与 generate_image(prompt) 的说明。统一契约位于 `image-options.ts`；前缀路径与 image_gen MCP 共用校验、尺寸表及 `qwen-workflow.ts` 生成器。pi 后端仍为第 3 组占位，已提供可复用契约及 agent.md 模板，本期没有新增真实 pi 模型执行。
+
+| 环节 | 实现 |
+|---|---|
+| 参数 | prompt、negative_prompt、aspect（7 种）、size（1mp/2mp/2k）、count（1–4）、seed、reference_images（≤3）、transparent；2mp 为 1mp 每边乘 √2 后取最近的 32 倍数 |
+| 分流 | 提示词之前空格分隔的比例、横/竖/方、2k/2mp、x2–x4、透明，任意顺序；未知词起的后续文本保留，重复选项后者覆盖；附件自动作参考图 |
+| 生成 | UNETLoader → 可选 QwenImage21Cache → KSampler；CLIPLoader → TextEncodeQwenImage21 正/负 conditioning → KSampler；t2i 使用 EmptyLatentImage；固定 8 步、CFG 1、euler/simple |
+| 编辑 | LoadImage.IMAGE → 编码器 images.image_N；VAELoader → 编码器 vae；编码器 LATENT（slot 2）→ KSampler.latent_image；count>1 经 RepeatLatentBatch；保持首图比例，resolution 为目标面积平方根取 32 倍数 |
+| 透明（偏离原 §4.9） | 使用 2.1 原生 RGBA；KSampler → VAEDecode（2.1 VAE）→ SaveImageAdvanced(png/8-bit/sRGB)，不使用 EmptyQwenImageLayeredLatentImage。layered latent 为 5D/16 通道，2.1 是 4D/64 通道，不能混用。依用户后续决定实施，本机无需额外模型 |
+| 自检 | 启动及透明提交检查 VAELoader 模型列表；缺失时明确返回“透明输出未启用：缺少 <文件名>”，不下载依赖 |
+| 后端 | submit(ImageOptions, submission)、collect、reconcile；mcp 总是 run_workflow(临时 API JSON)，http POST /prompt；自定义 COMFY_WORKFLOW_FILE 优先，仅 patch prompt/seed 与对账前缀；默认改为空 |
+| 超时与恢复 | 60 秒 × 实际预设像素/1024² × count，受 COMFY_TIMEOUT_SEC 上限约束；submitIntent 保存 options/count/参考图子目录，恢复依次查 history、queue、预计文件名（含透明 SaveImageAdvanced 命名） |
+| 参考图入站 | QQBridge 授权、触发、去重后才下载 array 图片段，url 优先、get_image 刷新；≤3×10 MiB、流式上限与魔数检查；落盘 incoming/<ticket>/ 后与 source_images 一起 admit；失败原因入票据，恢复不会默默丢参考图 |
+| 参考图访问 | codex 每轮以 -c 注入 IMAGE_REFS（没图时清空），MCP 仅允许清单中且 realpath 位于本票据 incoming 的文件；incoming 对命令沙箱 deny_read，禁止加入 writable_roots |
+| 上传 | HTTP /upload/image 使用每票据 subfolder；comfy-mcp upload_file 需同时支持 paths 与 subfolder，否则回退同 URL 的 HTTP。本机版本只有 paths/overwrite，故走回退；不把本机绝对路径直接传 LoadImage |
+| 清理与提示词 | 每日衰老任务清理超过 7 天的 incoming 票据目录；AGENTS.md 模板 v5、agent.md：文字加引号和位置字体、编辑说明改什么保留什么、不用 SD 咒语、参数范围 |
+
+官方接线依据（本机 `comfyui_workflow_templates_json/templates/`）：
+
+- `image_qwen_image_2_1_turbo_image_edit.json`：编码器节点 474（行 1251），ComfySwitchNode 468（行 1130）默认 false；link 724（行 2227）把 474 slot 2 接 false，link 913（行 2339）把开关输出接采样 latent；link 710（行 2443）输入参考图，link 720（行 2451）输入 VAE。因此生成器直接使用编码器 LATENT，不能在编辑时换回 EmptyLatentImage。官方最新模板的高级采样器等价连接在此按用户要求落实为固定 KSampler 参数。
+- `image_qwen_image_2_1_background_removal.json`：VAEDecode 457（行 1011），SaveImageAdvanced 461（行 197）；link 651（行 1539）采样输出接 decode，649（行 1523）接 VAE，650（行 1531）接子图输出，顶层 672（行 390）接保存。使用同一 2.1 VAE，无单独 RGBA VAE。
+- `image_qwen_image_layered.json` 的 EmptyQwenImageLayeredLatentImage 128（行 2731）搭配另一 UNET/VAE 及 LatentCut/LatentCutToBatch；本实现不混用它。
+
+真实冒烟共 5 次，未访问真实 Codex、模型代理或 QQ；未改运行容器。透明 PNG 的 alpha 实测有 0–255。2K 冷启动超过一次 240 秒收取预算，重跑收取同一 prompt_id 成功，未重新提交；16 GiB 显存下不能承诺 2K 总在预算内完成。完整文件、耗时与验证尾部见 [验收记录](IMAGE-GEN-V2-ACCEPTANCE.md)。
 
 ## 11. 非目标（本期不做）
 
