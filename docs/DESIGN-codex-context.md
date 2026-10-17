@@ -155,8 +155,8 @@ context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制�
 - egolite 推出 Linux/headless 版本后，可用同一个 `[mcp_servers.browser]` 槽位替换，AGENTS.md 中的浏览器使用纪律不变。
 - 开关：`CODEX_BROWSER=playwright|none`，用户已确认本期默认 `playwright`。
 
-### 4.5 codex 回答直通（用户决策：默认 direct）
-`CODEX_REPLY_MODE=direct|relay`，默认 `direct`。
+### 4.5 codex 回答直通（用户决策：默认 relay，direct 仅作可选开关）
+`CODEX_REPLY_MODE=relay|direct`，默认 `relay`（用户 2026-10-17 最终决定保持转发：DeepSeek 经手正文，可做格式兜底与最小整理）。
 - `direct`：`ask_codex` 成功后，工具层直接把 codex 的最终回答交给 `reply_qq` 的发送逻辑（同一票据、同一截断与图片规则），然后以 `control:{terminate:true}` 结束会话；DeepSeek 不再经手正文，只负责路由与推理强度选择。`ask_codex` 失败/超时时仍由 DeepSeek 调用 `reply_qq` 发一句失败提示。
 - `relay`：现状，DeepSeek 最小整理后调用 `reply_qq`。
 - 格式责任随之转移到 `AGENTS.md`（§3.3 的回复规则必须足够明确）；中继层只做 4000 字截断与纯文本兜底（去掉 Markdown 代码围栏符号与标题符号的最小清洗，可用 `CODEX_REPLY_SANITIZE=true` 控制，默认开）。
@@ -179,7 +179,7 @@ INTENT_CONTEXT_MAX_CHARS=1500
 WEB_SEARCH_MAX_PER_MESSAGE=2
 FETCH_MAX_PER_MESSAGE=2
 CODEX_BROWSER=playwright
-CODEX_REPLY_MODE=direct
+CODEX_REPLY_MODE=relay
 CODEX_REPLY_SANITIZE=true
 ```
 
@@ -218,7 +218,7 @@ CODEX_REPLY_SANITIZE=true
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
-2. **意图层会话感知 + codex 直通**：统一上下文模块（§2.4）接入派发器、上下文块、按 scope FIFO、`recent_context` / `search_history`、追问规则；`CODEX_REPLY_MODE`（§4.5，默认 direct）。测试：生图后"改成蓝色"复用提示词、codex 追问直通、超窗口不注入、同 scope 串行/跨 scope 并行。
+2. **意图层会话感知 + codex 直通**：统一上下文模块（§2.4）接入派发器、上下文块、按 scope FIFO、`recent_context` / `search_history`、追问规则；`CODEX_REPLY_MODE`（§4.5，默认 relay）。测试：生图后"改成蓝色"复用提示词、codex 追问直通、超窗口不注入、同 scope 串行/跨 scope 并行。
 3. **联网检索 + 先查再画**：`web_search` / `fetch_page` 工具、状态机守卫、系统提示。测试：faux 路径、守卫拒绝非法序列、搜索失败降级为直接生图、429 重试与上限。
 4. **观测系统**（§8）：事件表与埋点、指标、面板、可选告警。测试：埋点覆盖每个阶段、面板页面渲染、SSE、脱敏。
 
