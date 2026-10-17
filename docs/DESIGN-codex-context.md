@@ -109,45 +109,60 @@ web_search = "live"            # CODEX_WEB_SEARCH=live|cached|disabled，默认 
 context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制搜索结果注入量
 ```
 
-## 4. 意图层
+## 4. 意图层重构：路由器只分类，流程由代码驱动（2026-10-18 用户确认）
 
-### 4.1 会话感知（紧凑推送，数据与格式见 §2.4）
-派发器在每条新消息前从统一上下文存储取 `recent(scope, 120min, 5)` 注入（不经模型）：
+> 背景：原设计把分类、选强度、提取提示词、转发整理、追问判断、联网研究全放在一个带工具的"意图识别 agent"里，靠"恰好一次业务工具、恰好一次 reply_qq"的提示约束加代码守卫维持纪律。用户认为它干的事太多。重构为：**路由器**做一次结构化分类，**执行器**按分类走代码定义的固定流程，**研究器**只在需要时启动。
+
+### 4.1 路由器（Router）
+- 一次模型调用，无工具、无多轮：输入 = `[近期交互]` 上下文块（§4.4）+ 本条消息（含来源标注），输出固定结构：
+```json
+{
+  "intent": "image" | "codex",
+  "codex_effort": "low" | "medium" | "high" | "xhigh" | "max",   // 仅 intent=codex
+  "image_prompt": "…",                                            // 仅 intent=image：最终提示词，保留用户原语言；追问改图时已把上一张的提示词合并进来
+  "research_question": "…" | null                                 // 仅 intent=image：画面依赖需核实的外部事实时填写，否则 null
+}
 ```
-[近期交互 · 同一会话 · 最近 120 分钟内最多 5 条，旧→新]
-1. 22:41 De: 画一只狗 → 生图 prompt="a cute dog, photorealistic, ..." → 已发送 1 张图
-2. 22:43 De: 今晚有cs比赛吗 → codex(high) → "今晚有 ESL 决赛……"
-3. 22:44 小明: 把狗换成蓝色的 → 处理中
-```
-上限：`INTENT_CONTEXT_ITEMS=5`、`INTENT_CONTEXT_WINDOW_MIN=120`、`INTENT_CONTEXT_MAX_CHARS=1500`。超窗口则不注入。群按整群为会话，每行标发送者。
+- 实现：pi-durable 会话里模型恰好调用一个工具 `route(...)`，其参数 schema 即上述结构（工具调用即结构化输出，DeepSeek 支持 function calling）；`route` 把决策写入票据文档并 `terminate`。模型若未调用 `route` 或参数不合法 → 代码兜底为 `{intent:"codex", codex_effort:"low"}` 并记日志。
+- 系统提示只保留：角色一句话、两类的判定规则、四个字段的填写说明、"不自己回答、不扩写、照抄原文"、不可信内容声明。目标 ≤15 行。仍从 `/data/prompts/system.md` 热加载。
+- 不设 `unknown`：拿不准一律 `codex`。不再有"恰好一次工具"的提示约束，纪律由代码保证。
 
-可选拉取工具 `recent_context(limit≤10)` 返回更早记录；`search_history(query, days≤30)` 读 §2 的消息库（按同样访问过滤），供意图层在需要时查"之前让画过什么"。
+### 4.2 执行器（Executors，pi-durable `defineTask` 分阶段、带检查点）
+按 `intent` 由派发器选择，流程写死在代码里，崩溃后从阶段恢复：
 
-**同一会话顺序处理**：派发器按 scope FIFO 串行，不同 scope 并行（受 `AGENT_CONCURRENCY`）。否则追问看不到前一条结果。
+| intent | 阶段 | 回复 |
+|---|---|---|
+| `image` | `[research]`（仅 `research_question` 非空，§4.3）→ `generate`（`image_prompt`，研究结果以"参考事实：…"追加到提示词后）→ `reply` | 成功：固定模板"图片生成好了"+ 图；失败：固定模板按错误类别（服务不可用 / 超时 / 内容被拒） |
+| `codex` | `ask`（线程 owner/shared，`codex_effort`）→ `relay` → `reply` | `relay`：`CODEX_REPLY_MODE=relay`（默认）时用一次**独立的小模型调用**做格式整理（提示 ≤5 行：纯文本、中文、不改含义、去 Markdown、≤4000 字）；`direct` 时仅代码清洗。失败：固定模板"处理超时/失败" |
 
-### 4.2 联网检索工具（DeepSeek Search/Fetch API）
+- 票据状态与统一上下文（§2.4）的 `completeReply` 由执行器在 `reply` 阶段写入，`detail` 记最终提示词 / 推理强度。
+- 执行器是纯代码 + 工具函数（现有 `generate-image.ts`、`ask-codex.ts`、`reply-qq.ts` 的实现保留，去掉"模型可调用的工具"外壳，改为任务阶段直接调用）。
+
+### 4.3 研究器（Researcher，仅 image 且 `research_question` 非空）
+- 一个小型带工具的 pi-durable 会话（或子任务）：工具 `web_search(query, count≤8)`、`fetch_page(url)`（DeepSeek Search/Fetch API，§4.5），模型为意图模型；系统提示：只收集与画面呈现相关的事实（外观、颜色、标志、场景、人物/队伍身份、时间与结果），纯文本 ≤`RESEARCH_MAX_CHARS`（600），不确定标"未核实"；工具调用上限由代码守卫（`web_search ≤2`、`fetch_page ≤2`）。
+- 超时 `RESEARCH_TIMEOUT_SEC`（180）或失败 → 返回空，执行器按无研究结果继续生图，回复模板附一句"未能核实外部信息"。
+- 研究器不接触长期 codex 线程，也不写聊天记录库。
+
+### 4.4 会话感知（只喂给路由器）
+派发器在路由前从统一上下文存储取 `recent(scope, 120min, 5)` 生成上下文块（格式见 §2.4），放在消息之前。上限 `INTENT_CONTEXT_ITEMS=5`、`INTENT_CONTEXT_WINDOW_MIN=120`、`INTENT_CONTEXT_MAX_CHARS=1500`；超窗口不注入。
+- 追问改图：路由器直接输出合并后的 `image_prompt`（上一张的提示词 + 本次修改），执行器不需要知道"这是追问"。
+- 追问 codex：与新问题同路径，codex 线程自带记忆。
+- 上一条仍"处理中"而本条修改它：按本条独立意图处理，回复模板附"上一条仍在处理"。
+- **同一会话顺序处理**：派发器按 scope FIFO 串行，不同 scope 并行（受 `AGENT_CONCURRENCY`）。
+- 路由器不再有拉取工具（`recent_context` / `search_history` 取消）：需要更多历史的是 codex，它有 `qq_context`。
+
+### 4.5 联网检索工具（DeepSeek Search/Fetch API，仅研究器使用）
 已核实：`POST https://api.deepseek.com/v1/tools/search`（`query` ≤128 字、`count` ≤50、`need_content`、支持 `site:` `lang:` `after:` 操作符）与 `POST /v1/tools/fetch`（`url` → Markdown 正文），同一 API key，5 QPS，$0.75/千次，2026-11-01 前免费。
-
-意图层新增工具：
 | 工具 | 参数 | 返回 | 上限 |
 |---|---|---|---|
 | `web_search` | `query`, `count≤8` | 每条 `标题 / 日期 / 摘要(summary) / url`，按 rerank_score 排序 | 总量 ≤2500 字 |
 | `fetch_page` | `url` | 页面正文 | ≤4000 字，超出截断 |
+429 时退避重试一次；其他 4xx 不重试。
 
-纪律：每条消息最多 `web_search` 2 次、`fetch_page` 2 次（代码守卫）；只为"组装画面事实"或"判断是否需要 codex"服务，不替代 codex 回答一般问题。
+### 4.6 codex 回答的转发与直通
+`CODEX_REPLY_MODE=relay|direct`，默认 `relay`（用户 2026-10-17 决定保持转发）。见 §4.2 的 `relay` 阶段。观测面板的票据时间线同时保存 codex 原文与实际发出的文本。
 
-### 4.3 动作规则（系统提示 + 代码状态机）
-```
-纯生图，画面不涉及需核实的现实实体/时事          → generate_image → reply_qq
-纯生图，涉及队伍/人物/赛事结果/当日天气/节日等     → web_search(≤2) [→ fetch_page(≤2)] → 组装英文提示词 → generate_image → reply_qq
-对上一条生图结果的调整（换色/风格/再来一张）       → 以记录中的提示词为底稿修改 → generate_image → reply_qq
-对上一条 codex 回答的追问（继续/详细点/那明天呢）  → ask_codex → reply_qq（codex 自带记忆，不复述历史）
-其他                                               → ask_codex → reply_qq
-```
-守卫：`generate_image ≤1`、`ask_codex ≤1`、二者互斥；`web_search/fetch_page` 仅允许出现在 `generate_image` 之前；`reply_qq` 恰好 1 次。
-生图回复可用一句话说明参考了什么（"按今天决赛结果画了 X 队举杯"）。
-
-### 4.4 容器内浏览器（替代 egolite）
+### 4.7 容器内浏览器（替代 egolite）
 已核实：ego (lite) 目前仅有 macOS 桌面版，Windows 为未开放的 closed beta，Linux 在路线图；没有 headless / 独立 CLI / Docker 模式，agent 通过 `ego-browser` 技能驱动桌面应用内的页面 JS 工具，协议未公开。它无法在 Linux 容器内运行，本机也未发现安装。
 
 本期方案：
@@ -157,12 +172,6 @@ context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制�
 - 开关：`CODEX_BROWSER=playwright|none`，用户已确认本期默认 `playwright`。
 - 可写目录（用户 2026-10-18 决定）：`/workspace`、`/data/prompts`、`/data/workflows`。其中 `/data/prompts` 可写意味着任何能触发 codex 的发送者理论上可经 codex 修改热加载的系统提示；用户知悉并接受，仅以 AGENTS.md 软规则限制为"owner 私聊明确要求时才改"。
 
-### 4.5 codex 回答直通（用户决策：默认 relay，direct 仅作可选开关）
-`CODEX_REPLY_MODE=relay|direct`，默认 `relay`（用户 2026-10-17 最终决定保持转发：DeepSeek 经手正文，可做格式兜底与最小整理）。
-- `direct`：`ask_codex` 成功后，工具层直接把 codex 的最终回答交给 `reply_qq` 的发送逻辑（同一票据、同一截断与图片规则），然后以 `control:{terminate:true}` 结束会话；DeepSeek 不再经手正文，只负责路由与推理强度选择。`ask_codex` 失败/超时时仍由 DeepSeek 调用 `reply_qq` 发一句失败提示。
-- `relay`：现状，DeepSeek 最小整理后调用 `reply_qq`。
-- 格式责任随之转移到 `AGENTS.md`（§3.3 的回复规则必须足够明确）；中继层只做 4000 字截断与纯文本兜底（去掉 Markdown 代码围栏符号与标题符号的最小清洗，可用 `CODEX_REPLY_SANITIZE=true` 控制，默认开）。
-- 观测面板的票据时间线同时保存 codex 原文与实际发出的文本。
 
 ## 5. 配置项（新增）
 
@@ -220,8 +229,8 @@ CODEX_REPLY_SANITIZE=true
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
-2. **意图层会话感知 + codex 直通**：统一上下文模块（§2.4）接入派发器、上下文块、按 scope FIFO、`recent_context` / `search_history`、追问规则；`CODEX_REPLY_MODE`（§4.5，默认 relay）。测试：生图后"改成蓝色"复用提示词、codex 追问直通、超窗口不注入、同 scope 串行/跨 scope 并行。
-3. **联网检索 + 先查再画**：`web_search` / `fetch_page` 工具、状态机守卫、系统提示。测试：faux 路径、守卫拒绝非法序列、搜索失败降级为直接生图、429 重试与上限。
+2. **路由器 + 执行器重构 + 会话感知**（§4.1、4.2、4.4、4.6）：`route` 结构化输出、系统提示精简、`defineTask` 执行器（image / codex）、relay 整理步骤、上下文块注入、按 scope FIFO。测试：faux 模型两类路径与兜底；生图后"改成蓝色"输出合并提示词；codex 追问直通；超窗口不注入；同 scope 串行/跨 scope 并行；任务阶段崩溃恢复不重复生图/不重复发送。
+3. **研究器 + 联网检索**（§4.3、4.5）：`web_search` / `fetch_page` 工具、研究器会话与调用上限、`research_question` 接入 image 执行器。测试：faux 路径、上限守卫、搜索失败降级为直接生图、429 退避。
 4. **观测系统**（§8）：事件表与埋点、指标、面板、可选告警。测试：埋点覆盖每个阶段、面板页面渲染、SSE、脱敏。
 
 决策（2026-10-17 用户确认）：设计 v2 通过；`CODEX_BROWSER=playwright` 本期开启。
