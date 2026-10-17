@@ -161,7 +161,7 @@ export class ReplyStore {
   /** 仍为 pending 的票据，按 created_at 升序。 */
   listPending(limit = 200): ReplyTicketRecord[] {
     const n = Number.isInteger(limit) && limit > 0 ? limit : 200;
-    const rows = this.db.prepare("SELECT * FROM tickets WHERE status = 'pending' ORDER BY created_at ASC, ticket_id ASC LIMIT ?")
+    const rows = this.db.prepare("SELECT * FROM tickets WHERE status = 'pending' ORDER BY created_at ASC, rowid ASC LIMIT ?")
       .all(n) as unknown as TicketRow[];
     return rows.map(toRecord);
   }
