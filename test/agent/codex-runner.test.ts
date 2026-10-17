@@ -124,7 +124,7 @@ describe("AGENTS.md", () => {
     const md = renderAgentsMd(opts);
     expect(md.startsWith(`${AGENTS_TEMPLATE_MARKER}\n`)).toBe(true);
     expect(AGENTS_TEMPLATE_MARKER).toBe("<!-- cs-agent-agents-template v5 -->");
-    for (const s of ["image_gen", "随你的回复自动发给用户", "一句简短说明", "不用 Markdown", "300 字", "未核实", "qq_recent", "qq_search", "最多调用历史工具 2 次", "绝不登录任何账号", "关闭页面",
+    for (const s of ["仍在生成", "不要重试或再次调用", "image_gen", "随你的回复自动发给用户", "一句简短说明", "不用 Markdown", "300 字", "未核实", "qq_recent", "qq_search", "最多调用历史工具 2 次", "绝不登录任何账号", "关闭页面",
       "auth.json", "绝不透露环境变量", "/data/codex"]) {
       expect(md).toContain(s);
     }

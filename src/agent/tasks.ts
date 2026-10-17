@@ -4,7 +4,7 @@ import { validateReferences } from "./image-references.js";
 /**
  * 每条 QQ 消息的 durable 任务（pi-durable defineTask，设计 §4.2 / §4.3）：
  * - 生图任务 `cs.image`：submit（提交 ComfyUI，prompt_id 立即落盘）→ collect（按 prompt_id 等待并下载）→ reply
- * - agent 任务 `cs.agent`：handle → postprocess → reply
+ * - agent 任务 `cs.agent`：handle → lateImages → postprocess → reply
  *
  * 检查点语义：每个阶段把结果写进会话文档 TicketDoc，并在**同一次 runtime.commit** 里把检查点推进到下一阶段。
  * 进程在阶段之间崩溃时，任务从已提交的检查点继续：已完成的生图 / 后端调用不会重跑；
@@ -23,6 +23,7 @@ import { log } from "../log.js";
 import { threadKeyForSource } from "./codex-runner.js";
 import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
 import { collectNewImages } from "./image-collect.js";
+import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages } from "./image-pending.js";
 import { classifyImageError, referenceUploads, recoverRemoteUploads, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend, type RemoteUpload } from "./image-gen.js";
 import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
 import { postprocessReply, sanitizeReply, type ReplyMode } from "./reply-postprocess.js";
@@ -44,7 +45,7 @@ type ReplyCheckpoint = { phase: "reply"; attempt: number };
 export type ImageCheckpoint = { phase: "submit" } | { phase: "generate" } | { phase: "collect"; submits?: number; extensions?: number } | ReplyCheckpoint;
 /** 同一票据最多提交 ComfyUI 任务的次数（服务端丢失任务时重新提交 1 次） */
 export const MAX_IMAGE_SUBMITS = 2;
-export type AgentCheckpoint = { phase: "handle" } | { phase: "postprocess" } | ReplyCheckpoint;
+export type AgentCheckpoint = { phase: "handle" } | { phase: "lateImages"; job?: number; extensions?: number } | { phase: "postprocess" } | ReplyCheckpoint;
 
 export interface TaskDeps {
   getBridge: () => Pick<QQBridge, "reply" | "getTicket">;
@@ -180,6 +181,14 @@ async function abortTask(runtime: AnyRuntime, context: Context): Promise<void> {
 export function createTasks(deps: TaskDeps) {
   type ImageRuntime = Runtime<ImageCheckpoint>;
 
+  /** 两条路径共用收取延期上限、退避和按参数计算的预算。 */
+  function nextCollectWindow(now: number, used: number, options: Parameters<typeof imageTimeoutMs>[0], err: unknown) {
+    if (classifyImageError(err) !== 'timeout' || used >= (deps.imageCollectExtensions ?? 2)) return undefined;
+    const nextCollectAt = now + (deps.imageCollectDelayMs ?? 1000);
+    return { extensions: used + 1, nextCollectAt,
+      deadline: nextCollectAt + imageTimeoutMs(options, deps.imageTimeoutCapMs ?? 300_000) };
+  }
+
   /** 提交 ComfyUI 任务；成功后立即把 {prompt_id, backend, submits} 与 collect 检查点同一提交写入。 */
   async function submitJob(runtime: ImageRuntime, context: Context, doc: Readonly<TicketState>, prevSubmits: number): Promise<void> {
     const blocked = await blockedReason(deps, runtime, context, doc.ticket);
@@ -234,15 +243,13 @@ export function createTasks(deps: TaskDeps) {
   }
 
   async function extendCollect(runtime: ImageRuntime, context: Context, doc: Readonly<TicketState>, err: unknown): Promise<boolean> {
-    if (classifyImageError(err) !== 'timeout' || !doc.imageJob) return false;
-    const used = doc.imageJob.extensions ?? 0;
-    if (used >= (deps.imageCollectExtensions ?? 2)) return false;
-    const next = runtime.now() + (deps.imageCollectDelayMs ?? 1000);
+    if (!doc.imageJob) return false;
+    const window = nextCollectWindow(runtime.now(), doc.imageJob.extensions ?? 0, doc.imageOptions ?? { prompt: doc.prompt ?? 'recovery' }, err);
+    if (!window) return false;
     await runtime.commit(async tx => {
       const d = await tx.doc(TicketDoc, runtime.conversationId);
-      d.imageJob = { ...doc.imageJob!, status: 'running', extensions: used + 1, nextCollectAt: next,
-        deadline: next + imageTimeoutMs(doc.imageOptions ?? { prompt: doc.prompt ?? 'recovery' }, deps.imageTimeoutCapMs ?? 300_000) };
-      return { status: 'running', checkpoint: { phase: 'collect', extensions: used + 1 } };
+      d.imageJob = { ...doc.imageJob!, status: 'running', ...window };
+      return { status: 'running', checkpoint: { phase: 'collect', extensions: window.extensions } };
     }, context);
     return true;
   }
@@ -444,11 +451,79 @@ export function createTasks(deps: TaskDeps) {
             result = { ok: false, backend: backendName, failure };
           }
         }
-        const next = result.ok ? ({ phase: "postprocess" } as const) : ({ phase: "reply", attempt: 0 } as const);
         await runtime.commit(async (tx) => {
           (await tx.doc(TicketDoc, runtime.conversationId)).agentResult = result;
-          return { status: "running", checkpoint: next };
+          return { status: "running", checkpoint: { phase: "lateImages" } };
         }, context);
+      },
+      lateImages: async (_task, runtime, context) => {
+        let doc = await ticketDoc(runtime, context);
+        const blocked = await blockedReason(deps, runtime, context, doc.ticket);
+        if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "lateImages");
+        const dir = ticketImageDir(deps.imagesDir, doc.ticket);
+        if (doc.lateImageJobs === undefined) {
+          const jobs = await readPendingImages(dir);
+          await runtime.commit(async tx => {
+            (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs = jobs.map(job => ({ ...job, extensions: 0 }));
+            return undefined;
+          }, context);
+          doc = await ticketDoc(runtime, context);
+        }
+        for (const [index, job] of doc.lateImageJobs!.entries()) {
+          if (job.result) continue;
+          const deadline = job.deadline ?? runtime.now() + imageTimeoutMs(job.options, deps.imageTimeoutCapMs ?? 300_000);
+          if (job.deadline === undefined) await runtime.commit(async tx => {
+            (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!.deadline = deadline;
+            return undefined;
+          }, context);
+          if (job.nextCollectAt) await runtime.sleep(job.nextCollectAt, context);
+          let result: ImageResult;
+          try {
+            runtime.signal.throwIfAborted();
+            const callDir = await pendingCallDir(dir, job.callDir);
+            let images = await collectNewImages(callDir, new Set());
+            if (!images.length) {
+              const remaining = deadline - runtime.now();
+              if (remaining <= 0) throw new Error("生图超时");
+              const signal = AbortSignal.any([runtime.signal, AbortSignal.timeout(Math.ceil(remaining))]);
+              try {
+                await deps.imageBackend.collect(job.prompt_id, callDir, signal, job.options);
+              } catch (err) {
+                rethrowIfAborted(runtime.signal, err);
+                if (!(err instanceof UnknownJobError)) throw err;
+                await deps.imageBackend.reconcile({ filenamePrefix: job.filenamePrefix,
+                  count: job.options.count ?? 1, imageOptions: job.options }, callDir, signal, step =>
+                  runtime.commit(async tx => {
+                    const j = (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!;
+                    j.reconciliation = [...(j.reconciliation ?? []), step];
+                    if (step.prompt_id) j.prompt_id = step.prompt_id;
+                    return undefined;
+                  }, context));
+              }
+              images = await collectNewImages(callDir, new Set());
+            }
+            result = images.length ? { ok: true, images } : { ok: false, failure: "failed" };
+          } catch (err) {
+            rethrowIfAborted(runtime.signal, err);
+            const window = nextCollectWindow(runtime.now(), job.extensions, job.options, err);
+            if (window) {
+              await runtime.commit(async tx => {
+                Object.assign((await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!, window);
+                return { status: "running", checkpoint: { phase: "lateImages", job: index, extensions: window.extensions } };
+              }, context);
+              return;
+            }
+            result = { ok: false, failure: classifyImageError(err) };
+          }
+          await runtime.commit(async tx => {
+            (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!.result = result;
+            return undefined;
+          }, context);
+        }
+        // 所有结果先落盘，再删清单；此处崩溃后只补清理，不重复 collect/download。
+        await fs.rm(path.join(dir, PENDING_IMAGE_JOBS), { force: true });
+        await recoverRemoteUploads(dir, deps.imageBackend);
+        await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "postprocess" } }), context);
       },
       postprocess: async (_task, runtime, context) => {
         const doc = await ticketDoc(runtime, context);
@@ -472,8 +547,11 @@ export function createTasks(deps: TaskDeps) {
       reply: (task, runtime, context) =>
         replyPhase(deps, task, runtime, context, (doc) => {
           const r = doc.agentResult;
-          if (r?.ok) return { text: doc.replyDraft ?? sanitizeReply(r.text), images: [...r.images] };
-          return { text: r ? AGENT_FAILURE_REPLIES[r.failure] : FALLBACK_REPLY, images: [] };
+          let text = r?.ok ? doc.replyDraft ?? sanitizeReply(r.text) : r ? AGENT_FAILURE_REPLIES[r.failure] : FALLBACK_REPLY;
+          const late = doc.lateImageJobs ?? [];
+          if (late.some(job => job.result && !job.result.ok)) text = sanitizeReply(text.slice(0, 3900) + "\n有一张图生成超时未能发送");
+          const images = [...new Set([...(r?.ok ? r.images : []), ...late.flatMap(job => job.result?.ok ? job.result.images : [])])].slice(0, 4);
+          return { text, images };
         }),
     },
     abort: (_task, runtime, context) => abortTask(runtime, context),

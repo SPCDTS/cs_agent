@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { McpImageBackend } from "../../src/agent/image-gen.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { McpImageBackend, type ImageBackend } from "../../src/agent/image-gen.js";
 import { collectNewImages } from "../../src/agent/image-collect.js";
 import { backendConfigFromEnv, createImageGenServer, MAX_CALLS, resolveTicketDir } from "../../src/mcp/image-gen-server.js";
 import { FIXTURES, tmp } from "../agent/helpers.js";
@@ -22,6 +22,7 @@ const PNG = Buffer.from(
 let comfy: HttpServer;
 let comfyUrl = "";
 const prompts: unknown[] = [];
+const slowIds = new Set<string>();
 beforeAll(async () => {
   comfy = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
@@ -37,15 +38,20 @@ beforeAll(async () => {
       req.on("data", (c) => (body += c));
       req.on("end", () => {
         prompts.push(JSON.parse(body).prompt);
+        if (body.includes("SLOW")) slowIds.add(`p${prompts.length}`);
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ prompt_id: `p${prompts.length}` }));
       });
       return;
     }
     if (url.pathname.startsWith("/history/")) {
       const id = url.pathname.split("/").pop()!;
+      if (slowIds.has(id)) { res.end("{}"); return; }
       const out = { [id]: { status: { completed: true }, outputs: { "9": { images: [{ filename: `${id}.png`, subfolder: "", type: "output" }] } } } };
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(out));
       return;
+    }
+    if (url.pathname === "/queue") {
+      res.end(JSON.stringify({ queue_pending: [...slowIds].map(id => [0, id]), queue_running: [] })); return;
     }
     if (url.pathname === "/view") {
       res.writeHead(200, { "Content-Type": "image/png" }).end(PNG);
@@ -83,6 +89,26 @@ async function stdioClient(env: Record<string, string | undefined>): Promise<Cli
 const textOf = (r: unknown) => ((r as { content: { text: string }[] }).content[0]!.text);
 
 describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () => {
+  it("慢 Comfy 任务在 MCP 等待上限后返回仍在生成，并追加 pending-jobs 清单", async () => {
+    const dir = tmp("cs-imggen-");
+    const ticketDir = path.join(dir, "images", "slow");
+    const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: ticketDir, IMAGE_GEN_MCP_WAIT_SEC: "1",
+      COMFY_MODE: "http", COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: "20" });
+    const before = prompts.length;
+    for (let i = 1; i <= 2; i++) {
+      const r = await c.callTool({ name: "generate_image", arguments: { prompt: "SLOW 猫", aspect: "16:9", size: "1mp" } });
+      expect(r.isError).toBe(false);
+      expect(textOf(r)).toContain(`图片仍在生成（任务 p${before + i} 已提交）`);
+      expect(textOf(r)).toContain("无需重试");
+    }
+    const jobs = JSON.parse(readFileSync(path.join(ticketDir, "pending-jobs.json"), "utf8"));
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0]).toMatchObject({ prompt_id: `p${before + 1}`, backend: "http", callDir: path.join(ticketDir, "call-1"),
+      options: { prompt: "SLOW 猫", aspect: "16:9", size: "1mp" }, submittedAt: expect.any(Number) });
+    expect(jobs[0].filenamePrefix).toMatch(/^cs-/);
+    expect(jobs[1].filenamePrefix).not.toBe(jobs[0].filenamePrefix);
+    expect(prompts.length - before).toBe(2);
+  });
   it("lists generate_image as a non-read-only tool", async () => {
     const dir = tmp("cs-imggen-");
     const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: path.join(dir, "images", "t1") });
@@ -149,6 +175,27 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
 });
 
 describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)", () => {
+  it.each([
+    { waitMs: undefined, cap: undefined, size: "1mp", expected: 90_000 },
+    { waitMs: 200_000, cap: undefined, size: "1mp", expected: 120_000 },
+    { waitMs: 200_000, cap: 20_000, size: "2mp", expected: 20_000 },
+  ] as const)("MCP 等待采用参数、后端和 MCP 上限的最小值 $expected ms", async ({ waitMs, cap, size, expected }) => {
+    const dir = tmp("cs-imggen-");
+    const timer = vi.spyOn(AbortSignal, "timeout");
+    const backend: ImageBackend = { name: "fake", selfCheck: async () => ({}), submit: async () => "slow",
+      collect: async () => { throw new Error("生图超时"); }, reconcile: async () => ({ images: [] }),
+      generate: async () => [], close: async () => {} };
+    const { server, dispose } = createImageGenServer({ dataDir: dir, ticketDir: path.join(dir, "images", "budget"),
+      waitMs, imageTimeoutCapMs: cap, createBackend: () => backend });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "t", version: "0" });
+    await server.connect(a); await client.connect(b);
+    try {
+      expect((await client.callTool({ name: "generate_image", arguments: { prompt: "慢图", size } })).isError).toBe(false);
+      expect(timer).toHaveBeenCalledWith(expected);
+    } finally { timer.mockRestore(); await client.close(); await dispose(); }
+  });
+
   async function connect(dataDir: string, ticketDir: string | undefined) {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
@@ -197,6 +244,7 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
       const r = await client.callTool({ name: "generate_image", arguments: { prompt: "FAIL please" } });
       expect(r.isError).toBe(true);
       expect(textOf(r)).toMatch(/生图失败/);
+      expect(existsSync(path.join(dir, "images", "t2", "pending-jobs.json"))).toBe(false);
     } finally {
       await dispose();
     }

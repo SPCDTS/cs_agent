@@ -9,11 +9,14 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createImageBackend } from "../agent/image-gen.js";
 import { backendConfigFromEnv, createImageGenServer } from "./image-gen-server.js";
+import { loadConfig } from "../config.js";
 
 const { server, dispose } = createImageGenServer({
   ticketDir: process.env.IMAGE_TICKET_DIR,
   imageRefs: process.env.IMAGE_REFS,
   dataDir: process.env.DATA_DIR || "/data",
+  waitMs: loadConfig(process.env).IMAGE_GEN_MCP_WAIT_SEC * 1000,
+  imageTimeoutCapMs: loadConfig(process.env).COMFY_TIMEOUT_SEC * 1000,
   createBackend: () => createImageBackend(backendConfigFromEnv(process.env)),
 });
 

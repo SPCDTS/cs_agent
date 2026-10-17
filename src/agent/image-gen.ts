@@ -5,6 +5,7 @@
  * 崩溃恢复时只按已记录的 prompt_id 收取，不重复提交；服务端不认识该任务时 collect 抛 UnknownJobError。
  */
 import { randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -524,7 +525,7 @@ export class HttpImageBackend implements ImageBackend {
       }
       if (entry?.status?.status_str === "error") throw new Error("ComfyUI 任务执行失败");
       if (entry?.status?.completed || (entry?.outputs && Object.keys(entry.outputs).length > 0)) break;
-      await new Promise((r) => setTimeout(r, this.opts.pollMs ?? 1000));
+      await sleep(this.opts.pollMs ?? 1000, undefined, { signal: sig });
     }
 
     const files = await this.download(outputImages(entry), outDir, sig);

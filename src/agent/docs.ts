@@ -1,4 +1,5 @@
 import type { ImageOptions } from "./image-options.js";
+import type { PendingImageJob } from "./image-pending.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { ImageFailure, ImageSubmission, ReconcileStep, RemoteUpload } from "./image-gen.js";
 import type { RouteName } from "./router.js";
@@ -17,6 +18,12 @@ export type ImageJob = { prompt_id: string; backend: string; /** 已提交次数
 export type ImageResult =
   | { ok: true; images: string[] }
   | { ok: false; failure: ImageFailure; message?: string };
+
+/** MCP 超时后的逐任务收取进度；结果落盘后不再下载。 */
+export type LateImageJob = PendingImageJob & {
+  deadline?: number; extensions: number; nextCollectAt?: number;
+  reconciliation?: ReconcileStep[]; result?: ImageResult;
+};
 
 /** 执行 agent 的结果（handle 阶段与检查点同一提交写入；任务重跑时据此不再调用后端）。 */
 export type AgentResult =
@@ -47,6 +54,7 @@ export type TicketState = {
   imageReconciliation?: (ReconcileStep & { attempt: number })[];
   imageResult?: ImageResult;
   agentResult?: AgentResult;
+  lateImageJobs?: LateImageJob[];
   /** 后端回合标记：启动外部回合（codex）之前写入，崩溃恢复时据此避免重复询问 */
   codexTurn?: { outFile: string; attempts: number };
   /** 后处理后的回复正文（agent 路径 postprocess 阶段写入） */

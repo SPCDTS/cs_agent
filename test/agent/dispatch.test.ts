@@ -1,4 +1,8 @@
 import type { ImageOptions } from "../../src/agent/image-options.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createImageGenServer } from "../../src/mcp/image-gen-server.js";
+import { HttpImageBackend } from "../../src/agent/image-gen.js";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -279,6 +283,146 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
 const pendingIndex = async (r: Rig) => (await r.harness.snapshot(DispatchDoc, ctx))?.pending ?? {};
 const imgDir = (r: Rig, ticket: string) => path.join(r.dir, "images", ticket);
 const bot = (r: Rig) => r.store.recent({ kind: "all" }, { limit: 20 }).filter((row) => row.is_self === 1);
+
+/** 模拟 Codex 回合留下的 MCP 清单，图片只在 lateImages 阶段写入。 */
+function leavePendingImages(r: Rig, ticket: string, count = 1) {
+  const handle = r.backend.handle.bind(r.backend);
+  r.backend.handle = async (...args) => {
+    const jobs = Array.from({ length: count }, (_, i) => {
+      const callDir = path.join(imgDir(r, ticket), `call-${i + 1}`);
+      mkdirSync(callDir, { recursive: true });
+      return { prompt_id: `late-${i + 1}`, backend: "stub", filenamePrefix: `cs-${ticket}-${i + 1}`,
+        options: { prompt: "慢图", size: "2mp", aspect: "16:9" }, callDir, submittedAt: Date.now() };
+    });
+    writeFileSync(path.join(imgDir(r, ticket), "pending-jobs.json"), JSON.stringify(jobs), "utf8");
+    return handle(...args);
+  };
+}
+
+describe("agent lateImages", () => {
+  it("慢 Comfy 经 MCP 交接后由 lateImages 收取，回复带上回合后下载的图片", async () => {
+    const r = await makeRig(), ticket = "mcp-late";
+    let ready = false, posts = 0, downloads = 0;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      expect(url.origin).toBe("http://comfy.test");
+      const json = (v: unknown) => new Response(JSON.stringify(v));
+      if (url.pathname === "/prompt") { expect(init?.method).toBe("POST"); posts++; return json({ prompt_id: "slow" }); }
+      if (url.pathname === "/history/slow") return json(ready ? { slow: { status: { completed: true }, outputs: {
+        "9": { images: [{ filename: "late.png" }] } } } } : {});
+      if (url.pathname === "/queue") return json({ queue_running: [[0, "slow"]] });
+      expect(url.pathname).toBe("/view"); downloads++; return new Response(PNG);
+    });
+    const backend = new HttpImageBackend({ baseUrl: "http://comfy.test", timeoutMs: 1000, pollMs: 1 });
+    const { server, dispose } = createImageGenServer({ dataDir: r.dir, ticketDir: imgDir(r, ticket), waitMs: 50, createBackend: () => backend });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "test", version: "0" });
+    await server.connect(a); await client.connect(b);
+    r.backend.handle = async () => {
+      const result = await client.callTool({ name: "generate_image", arguments: { prompt: "慢图", aspect: "16:9" } });
+      expect(result.isError).toBe(false);
+      expect(JSON.stringify(result.content)).toContain("仍在生成");
+      expect(downloads).toBe(0);
+      ready = true;
+      return { text: "图片稍后发送" };
+    };
+    r.image.collect = backend.collect.bind(backend);
+    try {
+      await r.dispatcher.dispatch(inbound("画图"), ticket);
+      expect(posts).toBe(1); expect(downloads).toBe(1);
+      expect(r.bridge.replies[0]).toMatchObject({ text: "图片稍后发送", images: [realpathSync(path.join(imgDir(r, ticket), "call-1", "late.png"))] });
+      expect(existsSync(path.join(imgDir(r, ticket), "pending-jobs.json"))).toBe(false);
+    } finally { await client.close(); await dispose(); fetch.mockRestore(); }
+  });
+
+  it("延期保留 options 和每任务进度，两个 call 目录图片都加入回复", async () => {
+    const r = await makeRig(), ticket = "late-extensions";
+    leavePendingImages(r, ticket, 2); r.image.collectTimeouts = 1;
+    const collect = r.image.collect.bind(r.image);
+    r.image.collect = async (id, dir, signal, options?: ImageOptions) => {
+      expect(options).toMatchObject({ size: "2mp", aspect: "16:9" });
+      const entry = (await pendingIndex(r))[ticket]!;
+      const doc = await r.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, ctx);
+      expect((await r.harness.getTask(entry.taskId as never, ctx))?.state).toMatchObject({ checkpoint: { phase: "lateImages" } });
+      expect(doc?.lateImageJobs?.find(j => j.prompt_id === id)?.deadline).toBeGreaterThan(Date.now());
+      if (id === "late-2") expect(doc?.lateImageJobs?.[0]).toMatchObject({ extensions: 1, result: { ok: true } });
+      return collect(id, dir, signal);
+    };
+    await r.dispatcher.dispatch(inbound("画图"), ticket);
+    expect(r.image.collects).toEqual(["late-1", "late-1", "late-2"]);
+    expect(r.image.calls).toEqual([]);
+    expect(r.bridge.replies[0]?.images).toHaveLength(2);
+  });
+
+  it("lateImages 完成后回复前崩溃，重启不再 collect 或下载", async () => {
+    const r = await makeRig(), ticket = "late-restart";
+    leavePendingImages(r, ticket);
+    const reply = r.bridge.reply.bind(r.bridge);
+    let waiting = false;
+    r.bridge.reply = async (_id, _text, _images, opts?: { signal?: AbortSignal }) => {
+      waiting = true; return untilAbort(opts?.signal);
+    };
+    const run = r.dispatcher.dispatch(inbound("画图"), ticket);
+    await vi.waitFor(() => expect(waiting).toBe(true));
+    expect(existsSync(path.join(imgDir(r, ticket), "pending-jobs.json"))).toBe(false);
+    const entry = (await pendingIndex(r))[ticket]!;
+    expect((await r.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, ctx))?.lateImageJobs?.[0]?.result?.ok).toBe(true);
+    await r.harness.close(ctx); await run;
+    r.bridge.reply = reply;
+    await r.reopen(); await r.dispatcher.recover(); await r.dispatcher.idle();
+    expect(r.image.collects).toEqual(["late-1"]);
+    expect(r.backend.requests).toHaveLength(1);
+    expect(r.bridge.replies[0]?.images).toHaveLength(1);
+  });
+
+  it.each([false, true])("unknown 任务先对账、不重提，找到输出=%s", async recovered => {
+    const r = await makeRig(), ticket = "late-unknown";
+    leavePendingImages(r, ticket); r.image.unknown.add("late-1");
+    if (recovered) r.image.recoveredAt = "history";
+    await r.dispatcher.dispatch(inbound("画图"), ticket);
+    expect(r.image.calls).toEqual([]);
+    expect(r.image.reconciliations).toEqual([expect.objectContaining({ filenamePrefix: `cs-${ticket}-1`, imageOptions: expect.objectContaining({ size: "2mp" }) })]);
+    expect(r.bridge.replies[0]?.images).toHaveLength(recovered ? 1 : 0);
+    expect(r.bridge.replies[0]?.text.includes("有一张图生成超时未能发送")).toBe(!recovered);
+    expect(existsSync(path.join(imgDir(r, ticket), "pending-jobs.json"))).toBe(false);
+  });
+
+  it.each([false, true])("lateImages 中断后继续原任务，下载已完成=%s，参考图留到收取结束", async written => {
+    const r = await makeRig(), ticket = "late-interrupted";
+    leavePendingImages(r, ticket);
+    const handle = r.backend.handle.bind(r.backend);
+    const manifest = path.join(imgDir(r, ticket), "call-1", "remote-uploads.json");
+    r.backend.handle = async (...args) => {
+      const result = await handle(...args);
+      writeFileSync(manifest, JSON.stringify([{ name: "ref.png", subfolder: ticket + "-call-1" }]), "utf8");
+      return result;
+    };
+    r.image.hangAfterWrite = written; r.image.hangCollect = !written;
+    const run = r.dispatcher.dispatch(inbound("画图"), ticket);
+    await vi.waitFor(() => {
+      expect(r.image.collects).toHaveLength(1);
+      if (written) expect(existsSync(path.join(imgDir(r, ticket), "call-1", "out_0.png"))).toBe(true);
+    });
+    expect(r.image.cleared).toEqual([]); expect(existsSync(manifest)).toBe(true);
+    await r.harness.close(ctx); await run;
+    r.image.hangAfterWrite = false;
+    await r.reopen(); await r.dispatcher.recover(); await r.dispatcher.idle();
+    expect(r.image.collects).toHaveLength(written ? 1 : 2);
+    expect(r.image.calls).toEqual([]);
+    expect(r.bridge.replies[0]?.images).toHaveLength(1);
+    expect(r.image.cleared).toEqual([[{ name: "ref.png", subfolder: ticket + "-call-1" }]]);
+    expect(existsSync(manifest)).toBe(false);
+  });
+
+  it("延期耗尽只追加一次失败说明，其他任务的图片仍发送", async () => {
+    const r = await makeRig(), ticket = "late-exhausted";
+    leavePendingImages(r, ticket, 2); r.image.collectTimeouts = 3;
+    await r.dispatcher.dispatch(inbound("画图"), ticket);
+    expect(r.image.collects).toEqual(["late-1", "late-1", "late-1", "late-2"]);
+    expect(r.bridge.replies[0]?.images).toHaveLength(1);
+    expect(r.bridge.replies[0]?.text.match(/有一张图生成超时未能发送/g)).toHaveLength(1);
+  });
+});
 
 describe("rule router → image path", () => {
   it('上传前 TicketDoc 清单已落盘，终态票据重启仍重做覆盖', async () => {

@@ -8,10 +8,13 @@ import { imageRefsValue, validateReferences } from "../agent/image-references.js
  * 图片由 cs-agent 在回合结束后从票据目录递归收集并随回复发送。
  */
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { classifyImageError, type ImageBackend, type ImageBackendConfig } from "../agent/image-gen.js";
+import { classifyImageError, referenceUploads, type ImageBackend, type ImageBackendConfig } from "../agent/image-gen.js";
+import { imageTimeoutMs } from "../agent/image-options.js";
+import { appendPendingImage } from "../agent/image-pending.js";
 import { isLoopbackUrl } from "../agent/loopback-proxy.js";
 import { loadConfig } from "../config.js";
 import { collectNewImages } from "../agent/image-collect.js";
@@ -88,6 +91,8 @@ export interface ImageGenDeps {
   ticketDir: string | undefined;
   dataDir: string;
   imageRefs?: string;
+  waitMs?: number;
+  imageTimeoutCapMs?: number;
   /** 惰性创建生图后端（首次调用时） */
   createBackend: () => ImageBackend;
 }
@@ -141,13 +146,34 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
     calls++;
     // 每次调用一个新子目录 call-<n>：同名输出（如 ComfyUI_00001_.png）不会覆盖上一次的结果
     const callDir = await nextCallDir(dir);
+    const submission = { filenamePrefix: "cs-" + randomUUID(), referenceSubfolder: path.basename(dir) + "-" + path.basename(callDir) };
+    const uploads = referenceUploads(options, submission.referenceSubfolder);
+    const manifest = path.join(callDir, "remote-uploads.json");
+    let pending = false;
+    let promptId: string | undefined;
+    const submittedAt = Date.now();
     try {
       backend ??= deps.createBackend();
-      await backend.generate(options, callDir);
+      if (uploads.length) await fs.writeFile(manifest, JSON.stringify(uploads), "utf8");
+      const signal = AbortSignal.timeout(Math.ceil(imageTimeoutMs(options, Math.min(deps.imageTimeoutCapMs ?? 300_000, deps.waitMs ?? 90_000))));
+      promptId = await backend.submit(options, submission, signal);
+      await backend.collect(promptId, callDir, signal, options);
     } catch (err) {
       const kind = classifyImageError(err);
+      if (kind === "timeout" && promptId && backend) {
+        // 保存成功后才告知模型无需重试；参考图由主进程在最终收取后清理。
+        pending = true;
+        await appendPendingImage(dir, { prompt_id: promptId, backend: backend.name,
+          filenamePrefix: submission.filenamePrefix, options, callDir, submittedAt });
+        return { ...text(`图片仍在生成（任务 ${promptId} 已提交），完成后会随回复自动发送；无需重试。`), isError: false };
+      }
       process.stderr.write(`image_gen: generate failed (${kind}): ${(err as Error).message.slice(0, 300)}\n`);
       return text((err as Error).message.startsWith("透明输出未启用：") ? (err as Error).message : `${FAILURE_TEXT[kind] ?? "生图失败"}，请如实告知用户。`, true);
+    } finally {
+      if (!pending && uploads.length && backend?.clearReferences) {
+        await backend.clearReferences(uploads);
+        await fs.unlink(manifest);
+      }
     }
     const files = (await collectNewImages(callDir, new Set())).map((f) => `${path.basename(callDir)}/${path.basename(f)}`);
     if (!files.length) return text("生图没有产出有效图片。", true);

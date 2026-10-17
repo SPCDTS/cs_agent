@@ -249,7 +249,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
 
   it("writes the image_gen MCP section with COMFY_* passthrough, timeout and approval mode", () => {
     const r = runEntrypoint({
-      COMFY_QWEN_CACHE: "true", COMFY_MODE: "mcp", COMFYUI_URL: "http://host.docker.internal:8188", COMFY_TIMEOUT_SEC: "240",
+      COMFY_QWEN_CACHE: "true", COMFY_MODE: "mcp", COMFYUI_URL: "http://host.docker.internal:8188", COMFY_TIMEOUT_SEC: "240", IMAGE_GEN_MCP_WAIT_SEC: "45",
       COMFY_WORKFLOW_FILE: "/data/workflows/qwen-image-2.1-turbo-api.json", COMFY_PROMPT_NODE: "4",
       COMFY_MCP_BIN: "/opt/comfy/bin/comfy-mcp", COMFY_CHECKPOINT: 'bad"value', CODEX_MCP_APPROVAL_MODE: "auto",
     });
@@ -267,6 +267,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
       "mcp_servers.image_gen.env.COMFY_MODE": '"mcp"',
       "mcp_servers.image_gen.env.COMFYUI_URL": '"http://host.docker.internal:8188"',
       "mcp_servers.image_gen.env.COMFY_TIMEOUT_SEC": '"240"',
+      "mcp_servers.image_gen.env.IMAGE_GEN_MCP_WAIT_SEC": '"45"',
       "mcp_servers.image_gen.env.COMFY_WORKFLOW_FILE": '"/data/workflows/qwen-image-2.1-turbo-api.json"',
       "mcp_servers.image_gen.env.COMFY_PROMPT_NODE": '"4"',
       "mcp_servers.image_gen.env.COMFY_MCP_BIN": '"/opt/comfy/bin/comfy-mcp"',
