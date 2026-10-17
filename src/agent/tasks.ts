@@ -1,4 +1,5 @@
 import path from "node:path";
+import { imageTimeoutMs } from "./image-options.js";
 import { validateReferences } from "./image-references.js";
 /**
  * 每条 QQ 消息的 durable 任务（pi-durable defineTask，设计 §4.2 / §4.3）：
@@ -22,7 +23,7 @@ import { log } from "../log.js";
 import { threadKeyForSource } from "./codex-runner.js";
 import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
 import { collectNewImages } from "./image-collect.js";
-import { classifyImageError, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend } from "./image-gen.js";
+import { classifyImageError, referenceUploads, recoverRemoteUploads, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend, type RemoteUpload } from "./image-gen.js";
 import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
 import { postprocessReply, sanitizeReply, type ReplyMode } from "./reply-postprocess.js";
 import { IMAGE_USAGE_REPLY } from "./router.js";
@@ -40,15 +41,18 @@ export type TaskInput = { ticket: string };
 export type TaskResult = { sent: boolean; already_sent?: boolean };
 type ReplyCheckpoint = { phase: "reply"; attempt: number };
 /** generate 为 v3 初版的单阶段生图（仅为兼容已落盘的旧任务），按 submit 处理 */
-export type ImageCheckpoint = { phase: "submit" } | { phase: "generate" } | { phase: "collect"; submits?: number } | ReplyCheckpoint;
+export type ImageCheckpoint = { phase: "submit" } | { phase: "generate" } | { phase: "collect"; submits?: number; extensions?: number } | ReplyCheckpoint;
 /** 同一票据最多提交 ComfyUI 任务的次数（服务端丢失任务时重新提交 1 次） */
 export const MAX_IMAGE_SUBMITS = 2;
 export type AgentCheckpoint = { phase: "handle" } | { phase: "postprocess" } | ReplyCheckpoint;
 
 export interface TaskDeps {
   getBridge: () => Pick<QQBridge, "reply" | "getTicket">;
-  imageBackend: Pick<ImageBackend, "submit" | "collect" | "reconcile" | "name">;
+  imageBackend: Pick<ImageBackend, "submit" | "collect" | "reconcile" | "name" | "clearReferences">;
   imagesDir: string;
+  imageTimeoutCapMs?: number;
+  imageCollectExtensions?: number;
+  imageCollectDelayMs?: number;
   /** ${DATA_DIR}/tickets：票据工作目录的根；reply 结束后清理该票据的子目录 */
   ticketsDir?: string;
   backends: BackendSelector;
@@ -133,7 +137,12 @@ async function replyPhase<S extends { phase: string }>(
  * 回复阶段结束（发出或放弃）后删除票据工作目录 ${ticketsDir}/<ticket>（codex-last.txt 等）。
  * 此时后端结果已在 TicketDoc 里，重跑不会再用到它；图片目录另行管理，不在这里删除。
  */
-async function cleanupTicketWorkdir(deps: TaskDeps, ticket: string): Promise<void> {
+async function cleanupTicketWorkdir(deps: TaskDeps, ticket: string, uploads: readonly RemoteUpload[] = []): Promise<void> {
+  if (uploads.length) {
+    if (!deps.imageBackend.clearReferences) throw new Error('生图后端不支持参考图覆盖');
+    await deps.imageBackend.clearReferences(uploads);
+  }
+  await recoverRemoteUploads(ticketImageDir(deps.imagesDir, ticket), deps.imageBackend);
   if (!deps.ticketsDir) return;
   try {
     await fs.rm(ticketWorkDir(deps.ticketsDir, ticket), { recursive: true, force: true });
@@ -185,6 +194,7 @@ export function createTasks(deps: TaskDeps) {
     await runtime.commit(async (tx) => {
       const d = await tx.doc(TicketDoc, runtime.conversationId);
       d.submitIntent = intent;
+      d.remoteUploads = referenceUploads(intent.imageOptions, intent.referenceSubfolder);
       delete d.imageJob;
       return undefined;
     }, context);
@@ -208,15 +218,42 @@ export function createTasks(deps: TaskDeps) {
       return;
     }
     await runtime.commit(async (tx) => {
-      (await tx.doc(TicketDoc, runtime.conversationId)).imageJob = { prompt_id: promptId, backend: deps.imageBackend.name, submits: prevSubmits + 1 };
+      (await tx.doc(TicketDoc, runtime.conversationId)).imageJob = { prompt_id: promptId, backend: deps.imageBackend.name, submits: prevSubmits + 1, status: "running", deadline: runtime.now() + imageTimeoutMs(intent.imageOptions, deps.imageTimeoutCapMs ?? 300_000), extensions: 0 };
       return { status: "running", checkpoint: { phase: "collect", submits: prevSubmits + 1 } };
     }, context);
     log.info("image job recorded", { ticket: short(doc.ticket), prompt_id: promptId, submits: prevSubmits + 1 });
   }
 
+  async function clearRemote(runtime: ImageRuntime, context: Context): Promise<void> {
+    const doc = await ticketDoc(runtime, context);
+    if (doc.remoteUploads?.length) {
+      if (!deps.imageBackend.clearReferences) throw new Error('生图后端不支持参考图覆盖');
+      await deps.imageBackend.clearReferences(doc.remoteUploads);
+      await runtime.commit(async tx => { (await tx.doc(TicketDoc, runtime.conversationId)).remoteUploads = []; return undefined; }, context);
+    }
+  }
+
+  async function extendCollect(runtime: ImageRuntime, context: Context, doc: Readonly<TicketState>, err: unknown): Promise<boolean> {
+    if (classifyImageError(err) !== 'timeout' || !doc.imageJob) return false;
+    const used = doc.imageJob.extensions ?? 0;
+    if (used >= (deps.imageCollectExtensions ?? 2)) return false;
+    const next = runtime.now() + (deps.imageCollectDelayMs ?? 1000);
+    await runtime.commit(async tx => {
+      const d = await tx.doc(TicketDoc, runtime.conversationId);
+      d.imageJob = { ...doc.imageJob!, status: 'running', extensions: used + 1, nextCollectAt: next,
+        deadline: next + imageTimeoutMs(doc.imageOptions ?? { prompt: doc.prompt ?? 'recovery' }, deps.imageTimeoutCapMs ?? 300_000) };
+      return { status: 'running', checkpoint: { phase: 'collect', extensions: used + 1 } };
+    }, context);
+    return true;
+  }
+
   async function finishImage(runtime: ImageRuntime, context: Context, result: ImageResult): Promise<void> {
     await runtime.commit(async (tx) => {
       (await tx.doc(TicketDoc, runtime.conversationId)).imageResult = result;
+      return undefined;
+    }, context);
+    await clearRemote(runtime, context);
+    await runtime.commit(async () => {
       return { status: "running", checkpoint: { phase: "reply", attempt: 0 } };
     }, context);
   }
@@ -233,7 +270,10 @@ export function createTasks(deps: TaskDeps) {
         runtime.commit(async tx => {
           const d = await tx.doc(TicketDoc, runtime.conversationId);
           d.imageReconciliation = [...(d.imageReconciliation ?? []), { ...step, attempt }];
-          if (step.prompt_id) d.imageJob = { prompt_id: step.prompt_id, backend: deps.imageBackend.name, submits: attempt };
+          if (step.prompt_id) d.imageJob = {
+            ...(d.imageJob?.prompt_id === step.prompt_id ? d.imageJob : {}),
+            prompt_id: step.prompt_id, backend: deps.imageBackend.name, submits: attempt, status: 'running',
+          };
           return undefined;
         }, context),
       );
@@ -244,6 +284,7 @@ export function createTasks(deps: TaskDeps) {
       }
     } catch (err) {
       rethrowIfAborted(runtime.signal, err);
+      if (await extendCollect(runtime, context, await ticketDoc(runtime, context), err)) return;
       // 无法查询或下载不等于没有运行；结束为失败，绝不据此重新提交。
       await finishImage(runtime, context, { ok: false, failure: classifyImageError(err) });
       return;
@@ -294,6 +335,7 @@ export function createTasks(deps: TaskDeps) {
       collect: async (_task, runtime, context) => {
         const doc = await ticketDoc(runtime, context);
         const job = doc.imageJob;
+        if (job?.nextCollectAt) await runtime.sleep(job.nextCollectAt, context);
         let result: ImageResult | undefined = doc.imageResult;
         if (!result && !job) return submitPhase(runtime, context);
         if (!result && job) {
@@ -305,7 +347,9 @@ export function createTasks(deps: TaskDeps) {
             if (images.length) {
               log.warn("reusing images already in the ticket dir", { ticket: short(doc.ticket), images: images.length });
             } else {
-              await deps.imageBackend.collect(job.prompt_id, dir, runtime.signal, doc.imageOptions);
+              const remaining = (job.deadline ?? runtime.now() + imageTimeoutMs(doc.imageOptions ?? { prompt: doc.prompt ?? 'recovery' }, deps.imageTimeoutCapMs ?? 300_000)) - runtime.now();
+              if (remaining <= 0) throw new Error('生图超时');
+              await deps.imageBackend.collect(job.prompt_id, dir, AbortSignal.any([runtime.signal, AbortSignal.timeout(Math.ceil(remaining))]), doc.imageOptions);
               images = await collectNewImages(dir, new Set());
             }
             // 只认票据目录里通过校验（大小、魔数）的新图片；一张都没有即生图失败
@@ -319,23 +363,23 @@ export function createTasks(deps: TaskDeps) {
               await reconcileJob(runtime, context, doc);
               return;
             }
+            if (await extendCollect(runtime, context, doc, err)) return;
             const failure = err instanceof UnknownJobError ? "failed" : classifyImageError(err);
             log.warn("image generation failed", { ticket: short(doc.ticket), prompt_id: job.prompt_id, ms: Date.now() - started, failure, error: (err as Error).message });
             result = { ok: false, failure };
           }
         }
-        await runtime.commit(async (tx) => {
-          if (result) (await tx.doc(TicketDoc, runtime.conversationId)).imageResult = result;
-          return { status: "running", checkpoint: { phase: "reply", attempt: 0 } };
-        }, context);
+        await finishImage(runtime, context, result ?? { ok: false, failure: "failed" });
       },
-      reply: (task, runtime, context) =>
-        replyPhase(deps, task, runtime, context, (doc) => {
+      reply: async (task, runtime, context) => {
+        await clearRemote(runtime, context);
+        return replyPhase(deps, task, runtime, context, (doc) => {
           if (doc.route !== "image" || !doc.prompt) return { text: IMAGE_USAGE_REPLY, images: [] };
           const r = doc.imageResult;
           if (r?.ok) return { text: IMAGE_SUCCESS_REPLY, images: [...r.images] };
           return { text: r ? r.message ?? IMAGE_FAILURE_REPLIES[r.failure] : IMAGE_FAILURE_REPLIES.failed, images: [] };
-        }),
+        });
+      },
     },
     abort: (_task, runtime, context) => abortTask(runtime, context),
   });
@@ -435,7 +479,7 @@ export function createTasks(deps: TaskDeps) {
     abort: (_task, runtime, context) => abortTask(runtime, context),
   });
 
-  return { ImageTask, AgentTask, cleanupTicketWorkdir: (ticket: string) => cleanupTicketWorkdir(deps, ticket) };
+  return { ImageTask, AgentTask, cleanupTicketWorkdir: (ticket: string, uploads?: readonly RemoteUpload[]) => cleanupTicketWorkdir(deps, ticket, uploads) };
 }
 
 export type CsTasks = ReturnType<typeof createTasks>;

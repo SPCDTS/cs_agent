@@ -127,6 +127,8 @@ async function main(): Promise<void> {
     imageBackend,
     imagesDir: cfg.imagesDir,
     ticketsDir: cfg.ticketsDir,
+    imageTimeoutCapMs: cfg.COMFY_TIMEOUT_SEC * 1000,
+    imageCollectExtensions: cfg.IMAGE_COLLECT_EXTENSIONS,
     backends,
     owner: cfg.owner,
     store,

@@ -32,6 +32,6 @@ export const SIZE_PRESETS: Record<NonNullable<ImageOptions["size"]>, Presets> = 
 export const imageDimensions = (opts: ImageOptions): Dimensions => SIZE_PRESETS[opts.size ?? "1mp"][opts.aspect ?? "1:1"];
 /** 与票据一起保存参数，重启后仍能按相同像素预算计算收取超时。 */
 export function imageTimeoutMs(opts: ImageOptions, cap: number): number {
-  const [w, h] = imageDimensions(opts);
-  return Math.min(cap, Math.ceil(60_000 * w * h / (1024 * 1024) * (opts.count ?? 1)));
+  const base = { "1mp": 120_000, "2mp": 240_000, "2k": 600_000 };
+  return Math.min(cap, base[opts.size ?? "1mp"] * (opts.count ?? 1));
 }

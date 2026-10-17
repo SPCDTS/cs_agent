@@ -1,6 +1,6 @@
 import type { ImageOptions } from "./image-options.js";
 import { defineDoc } from "@earendil-works/pi-durable";
-import type { ImageFailure, ImageSubmission, ReconcileStep } from "./image-gen.js";
+import type { ImageFailure, ImageSubmission, ReconcileStep, RemoteUpload } from "./image-gen.js";
 import type { RouteName } from "./router.js";
 
 export type TicketSource = {
@@ -11,7 +11,7 @@ export type TicketSource = {
 };
 
 /** 已提交的 ComfyUI 任务（submit 阶段提交后立即与检查点同一提交写入；恢复时按它收取，不重复提交）。 */
-export type ImageJob = { prompt_id: string; backend: string; /** 已提交次数（服务端丢失任务时最多重新提交 1 次） */ submits: number };
+export type ImageJob = { prompt_id: string; backend: string; /** 已提交次数（服务端丢失任务时最多重新提交 1 次） */ submits: number; status?: "running"; deadline?: number; extensions?: number; nextCollectAt?: number };
 
 /** 生图阶段的结果（collect 阶段与检查点同一提交写入；任务重跑时据此跳过生图）。 */
 export type ImageResult =
@@ -40,6 +40,7 @@ export type TicketState = {
   source_images?: string[];
   image_error?: string;
   imageJob?: ImageJob;
+  remoteUploads?: RemoteUpload[];
   /** 提交前落盘；没有 prompt_id 时按前缀对账，不能盲目重新提交。 */
   submitIntent?: ImageSubmission & { attempt: number };
   /** 每次对账查询前后的持久化记录；matched 的 prompt_id 同时写入 imageJob。 */

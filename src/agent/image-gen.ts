@@ -12,6 +12,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { imageTimeoutMs, validateImageOptions, type ImageOptions } from "./image-options.js";
 import { buildQwenWorkflow, QWEN_MODELS, type QwenModels } from "./qwen-workflow.js";
+import { validateImageHeader } from '../qq/image-header.js';
 import { loadImage } from "../qq/image.js";
 import { log } from "../log.js";
 
@@ -26,7 +27,40 @@ export interface ImageBackend {
   reconcile(options: ImageSubmission, outDir: string, signal?: AbortSignal, onStep?: ReconcileProgress): Promise<ReconciledImage>;
   /** submit + collect（image_gen MCP 用） */
   generate(input: ImageOptions, outDir: string, signal?: AbortSignal): Promise<string[]>;
+  clearReferences?(uploads: readonly RemoteUpload[]): Promise<void>;
   close(): Promise<void>;
+}
+
+export type RemoteUpload = { name: string; subfolder: string };
+export const TRANSPARENT_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=', 'base64');
+export function referenceUploads(input: ImageOptions, subfolder: string): RemoteUpload[] {
+  return (input.reference_images ?? []).map(file => ({ name: path.basename(file), subfolder }));
+}
+
+/** MCP 独立进程的 write-ahead 清单；主进程恢复时也会重做覆盖。 */
+export async function recoverRemoteUploads(root: string, backend: Pick<ImageBackend, 'clearReferences'>): Promise<void> {
+  if (!backend.clearReferences) return;
+  for (const ent of await fs.readdir(root, { withFileTypes: true }).catch(() => [])) {
+    const file = path.join(root, ent.name);
+    if (ent.isDirectory() && !ent.isSymbolicLink()) await recoverRemoteUploads(file, backend);
+    else if (ent.isFile() && ent.name === 'remote-uploads.json') {
+      await backend.clearReferences(JSON.parse(await fs.readFile(file, 'utf8')));
+      await fs.unlink(file);
+    }
+  }
+}
+
+async function generateWithCleanup(backend: ImageBackend, input: ImageOptions, outDir: string, signal?: AbortSignal): Promise<string[]> {
+  const opts = validateImageOptions(input);
+  const submission = { filenamePrefix: 'cs-' + randomUUID(), referenceSubfolder: path.basename(path.dirname(outDir)) + '-' + path.basename(outDir) };
+  const uploads = referenceUploads(opts, submission.referenceSubfolder);
+  await fs.mkdir(outDir, { recursive: true });
+  const manifest = path.join(outDir, 'remote-uploads.json');
+  if (uploads.length) await fs.writeFile(manifest, JSON.stringify(uploads), 'utf8');
+  try { return await backend.collect(await backend.submit(opts, submission, signal), outDir, signal, opts); }
+  finally {
+    if (uploads.length) { await backend.clearReferences!(uploads); await fs.unlink(manifest); }
+  }
 }
 
 export type ImageSubmission = { filenamePrefix: string; count?: number; imageOptions?: ImageOptions; referenceSubfolder?: string };
@@ -246,10 +280,10 @@ export class McpImageBackend implements ImageBackend {
   }
 
   async generate(input: ImageOptions, outDir: string, signal?: AbortSignal): Promise<string[]> {
-    const opts = validateImageOptions(input);
-    const submission = { filenamePrefix: 'cs-' + randomUUID(), referenceSubfolder: path.basename(path.dirname(outDir)) + '-' + path.basename(outDir) };
-    return this.collect(await this.submit(opts, submission, signal), outDir, signal, opts);
+    return generateWithCleanup(this, input, outDir, signal);
   }
+
+  async clearReferences(uploads: readonly RemoteUpload[]): Promise<void> { await this.http().clearReferences(uploads); }
 
   private http(): HttpImageBackend {
     const baseUrl = this.opts.env.COMFYUI_URL;
@@ -270,7 +304,7 @@ export class McpImageBackend implements ImageBackend {
     const uploader = this.schemas.get('upload_file');
     const upload = uploader?.has('paths') && uploader.has('subfolder')
       ? async (file: string, subfolder: string) => {
-          loadImage(file, path.dirname(file));
+          validateImageHeader(loadImage(file, path.dirname(file)));
           const result = await this.call('upload_file', { paths: [file], subfolder, overwrite: true }, sig);
           return uploadedName(result, subfolder);
         }
@@ -397,13 +431,23 @@ export class HttpImageBackend implements ImageBackend {
   }
 
   async generate(input: ImageOptions, outDir: string, signal?: AbortSignal): Promise<string[]> {
-    const opts = validateImageOptions(input);
-    const submission = { filenamePrefix: 'cs-' + randomUUID(), referenceSubfolder: path.basename(path.dirname(outDir)) + '-' + path.basename(outDir) };
-    return this.collect(await this.submit(opts, submission, signal), outDir, signal, opts);
+    return generateWithCleanup(this, input, outDir, signal);
+  }
+
+  async clearReferences(uploads: readonly RemoteUpload[]): Promise<void> {
+    for (const { name, subfolder } of uploads) {
+      if (!/^[A-Za-z0-9_-]+$/.test(subfolder) || !name || /[\\/]/.test(name) || name === '..') throw new Error('非法的远端参考图清单');
+      const form = new FormData();
+      form.set('image', new Blob([new Uint8Array(TRANSPARENT_PNG)]), name);
+      form.set('subfolder', subfolder); form.set('type', 'input'); form.set('overwrite', 'true');
+      const result = await this.json('upload/image', { method: 'POST', body: form, signal: AbortSignal.timeout(15_000) });
+      if (uploadedName(result, subfolder) !== subfolder + '/' + name) throw new Error('远端参考图覆盖文件名不一致');
+    }
   }
 
   async uploadReference(file: string, subfolder: string, signal: AbortSignal): Promise<string> {
     const bytes = loadImage(file, path.dirname(file));
+    validateImageHeader(bytes);
     const form = new FormData();
     form.set('image', new Blob([new Uint8Array(bytes)]), path.basename(file));
     form.set('subfolder', subfolder);
@@ -421,7 +465,12 @@ export class HttpImageBackend implements ImageBackend {
     const subfolder = submission?.referenceSubfolder ?? prefix;
     if (!/^[A-Za-z0-9_-]+$/.test(subfolder)) throw new Error('非法的参考图子目录');
     const refs: string[] = [];
-    for (const file of opts.reference_images ?? []) refs.push(await (upload ? upload(file, subfolder) : this.uploadReference(file, subfolder, signal)));
+    for (const file of opts.reference_images ?? []) {
+      validateImageHeader(loadImage(file, path.dirname(file)));
+      const name = await (upload ? upload(file, subfolder) : this.uploadReference(file, subfolder, signal));
+      if (name !== subfolder + '/' + path.basename(file)) throw new Error('ComfyUI 上传文件名不一致');
+      refs.push(name);
+    }
     if (opts.transparent) await this.checkTransparent(signal);
     return buildQwenWorkflow({ ...opts, reference_images: refs }, { filenamePrefix: prefix, models: this.opts.models, cache: this.opts.cache });
   }

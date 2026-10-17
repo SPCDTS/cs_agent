@@ -21,11 +21,13 @@ describe("生图 v2 参数与预设", () => {
     { seed: -1 }, { seed: NaN }, { seed: Infinity }, { seed: Number.MAX_SAFE_INTEGER + 1 },
     { reference_images: ["a","b","c","d"] }, { reference_images: [""] }, { transparent: "true" }, { width: 4096 },
   ])("拒绝非法参数 %j", value => expect(() => validateImageOptions({ prompt: "猫", ...value })).toThrow());
-  it("按像素与数量线性放大，且上限截断", () => {
-    expect(imageTimeoutMs({ prompt: "猫" }, 300000)).toBe(60000);
-    expect(imageTimeoutMs({ prompt: "猫", size: "2k" }, 300000)).toBe(240000);
+  it('按尺寸基础预算乘数量，并受 COMFY_TIMEOUT_SEC 截断', () => {
+    expect(imageTimeoutMs({ prompt: '猫', size: '2mp', count: 3 }, 2_000_000)).toBe(720_000);
+    expect(imageTimeoutMs({ prompt: '猫', size: '2k', count: 2 }, 2_000_000)).toBe(1_200_000);
+    expect(imageTimeoutMs({ prompt: "猫" }, 300000)).toBe(120000);
+    expect(imageTimeoutMs({ prompt: "猫", size: "2k" }, 300000)).toBe(300000);
     expect(imageTimeoutMs({ prompt: "猫", size: "2k", count: 4 }, 300000)).toBe(300000);
-    expect(imageTimeoutMs({ prompt: "猫", count: 2 }, 300000)).toBe(120000);
+    expect(imageTimeoutMs({ prompt: "猫", count: 2 }, 300000)).toBe(240000);
   });
 });
 

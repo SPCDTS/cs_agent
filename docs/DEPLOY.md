@@ -23,7 +23,7 @@
 
 例：`奶龙: 横 2k 一只在雪地里的橘猫`；`奶龙: 透明 x2 一只猫的贴纸`。附图编辑例：附上原图，再写 `奶龙: 把杯子改为红色，保留猫的姿态和背景`。图中文字加引号并说明位置、字体，不需要 SD 式咒语。
 
-只下载已授权且触发机器人的本条消息图片，最多 3 张、每张 10 MiB，并检查 PNG/JPEG/WebP/GIF 魔数。优先使用 OneBot array 图片段的 HTTP(S) `data.url`；缺失或失效时用 `data.file` 调 `get_image` 获取新 URL；不读 NapCat 返回的宿主机路径。下载失败时明确报错，不悄悄改成无参考图生成。正常 URL 字段见 [NapCat 图片段实现](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/api/msg.ts)，URL 过期刷新见 [文件文档](https://napneko.github.io/develop/file)。本次只用假 OneBot 验证，未调用真实 QQ；本机是否关闭图片 URL 上报仍需实际部署后确认。
+只下载已授权且触发机器人的本条消息图片，最多 3 张、每张 10 MiB，并检查 PNG/JPEG/WebP/GIF 魔数。优先使用 OneBot array 图片段的 HTTP(S) `data.url`；缺失或失效时用 `data.file` 调 `get_image` 获取新 URL；不读 NapCat 返回的宿主机路径。校验或下载失败时明确报错；发送者超额及截止时间耗尽按 skipped 无图继续。正常 URL 字段见 [NapCat 图片段实现](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/api/msg.ts)，URL 过期刷新见 [文件文档](https://napneko.github.io/develop/file)。本次只用假 OneBot 验证，未调用真实 QQ；本机是否关闭图片 URL 上报仍需实际部署后确认。
 
 编辑遵循官方模板：编码器的 LATENT 接采样器，因此输出比例取首张参考图；size 控制像素预算，aspect 不会强行裁切参考图。前缀自动附上本票据全部图片；codex 可从 `IMAGE_REFS` 中选择，最多 3 张。图片原始 URL 不存入聊天历史，下载文件保留在 `DATA_DIR/incoming/<ticket>/`，目录超过 7 天由每日衰老任务清理（按目录 mtime，不跟随软链接）。
 
@@ -70,7 +70,7 @@ Copy-Item .env.example .env
 | `COMFY_CHECKPOINT` | 空 | 旧接口兼容项，内置 Qwen 生成器不使用 |
 | `COMFY_QWEN_CACHE` | `false` | `true` 时在 UNETLoader 后插入 QwenImage21Cache，需本机安装对应节点 |
 | `CODEX_SANDBOX` | `workspace-write` | 如果容器内 codex 报 sandbox/landlock 错误，改为 `danger-full-access`（这时容器本身就是沙箱） |
-| `CODEX_TIMEOUT_SEC` / `COMFY_TIMEOUT_SEC` | 600 / 300 | codex 单轮超时；生图收取预算为 60 秒 × 像素数/1024² × count，上限 COMFY_TIMEOUT_SEC。2K 冷启动可能超过 240 秒；超时不取消服务器生成，恢复仍使用原 prompt_id |
+| `CODEX_TIMEOUT_SEC` / `COMFY_TIMEOUT_SEC` | 600 / 300 | codex 单轮超时；生图收取预算按 1mp/2mp/2k 分别为 120/240/600 秒 × count，上限 COMFY_TIMEOUT_SEC；默认额外收取 2 次，始终使用原 prompt_id |
 | `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `gpt-6.1-sol` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节）。`CODEX_REASONING_EFFORT`（`low/medium/high/xhigh/max`）固定使用，每轮也以 `-c model_reasoning_effort="…"` 显式传入（日志 `codex backend done` 的 `effort` 字段）；v3 不再按请求选择 |
 
 > codex 子进程只拿到最小环境变量：`PATH`、`HOME`、`LANG`/`LC_ALL`、`TERM`、`CODEX_HOME`、`NO_COLOR=1`，以及设置了的 `HTTP(S)_PROXY`/`NO_PROXY`。`NAPCAT_TOKEN`、`*_API_KEY` 等配置不会传给 codex。
@@ -210,3 +210,19 @@ writable_roots = ["/workspace", "/data/prompts", "/data/workflows"] # CODEX_WRIT
 - **实测**（`cs-agent:g1`，`codex sandbox -c sandbox_mode="workspace-write"`，seccomp=docker/seccomp-codex.json；unconfined 结果相同）：uid 1000；`/workspace`、`/data/prompts`、`/data/workflows`、`/tmp` 可写；`/data`、`/data/codex`、`/data/images`、`/data/qq-messages.sqlite` 写入被拒；`host.docker.internal:8188/system_stats` 返回 200，NapCat `:3000` 无 token 返回 403，公网 200；`CODEX_SANDBOX_NETWORK=false` 时三者都失败（EPERM / EAI_AGAIN）；沙箱内环境变量中没有 token / API key。默认 seccomp 下 bwrap 报 `No permissions to create a new namespace`。
 - **实测 deny_read**（`cs-agent:g1fix`，`--security-opt seccomp=./docker/seccomp-codex.json --user node -w /workspace`，假数据卷）：`codex sandbox -c sandbox_mode="workspace-write" -- cat <路径>` 对 `/data/codex/auth.json`、`sessions/**`、`/data/codex/state_5.sqlite(-wal)`、`/data/agent.sqlite`、`qq-bridge.sqlite`、`qq-messages.sqlite(-wal)`、`observability.sqlite`、`/data/images/**`、`/data/codex-session.json` 均为 `Permission denied`；`cp` 到工作区、软链接后读取同样被拒，硬链接到 `/data/workflows` 报 `Invalid cross-device link`；`python3 open()` 报 `PermissionError`；`read-only` 模式同样被拒；`/data/codex/config.toml` 可读；`/workspace`、`/data/workflows`、`/data/prompts` 可写，`/data/codex`、`/etc/codex` 只读。
 - 关闭联网：`.env` 中设 `CODEX_SANDBOX_NETWORK=false` 后重启（web_search 是 codex 服务端的工具，不受影响）。
+
+## 生图 v2 审查修复（2026-10-18）
+
+入站先在 SQLite 同步保存去重、pending 票据及附件的 URL/file id，再启动下载。URL 只用于票据恢复，不写入日志或消息历史；应按聊天附件敏感信息保管票据库。附件终态为 ok、skipped、failed，达到终态才派发；超额或超时标为 skipped，继续无图处理原文，校验失败为 failed 并保留原因。
+
+下载只允许 HTTP/HTTPS，无凭据 URL。每跳先解析全部 DNS 地址，任一地址属于回环、私网、链路本地、未指定或多播（含 IPv4-mapped IPv6）即拒绝；localhost、*.localhost、host.docker.internal、*.internal 及 *.docker.internal 禁止。连接固定到本次校验过的 IP，同时保留原 Host 和 HTTPS SNI/证书验证，避免 DNS rebinding。手动重定向最多 3 跳，每跳重新执行同一策略；NapCat get_image 刷新的地址也不例外。
+
+每个 scope 最多 1 个下载任务，全局由 INCOMING_DOWNLOAD_CONCURRENCY 控制（默认 2）；每位发送者最多 2 张在途票据，超额跳过图片。INCOMING_DOWNLOAD_DEADLINE_SEC 默认 60 秒，包含 scope/global 排队、DNS、刷新与流式下载；截止时间随附件落盘，重启不重新计时，截止后释放 worker。同 scope 消息保序，其他 scope 的接纳及纯文本派发不等待图片下载。重启后按票据元数据恢复 pending 附件，必要时用 file id 向 NapCat 刷新 URL，再进入派发。
+
+参考图最多 3 张，每张 12 B～10 MiB，流式计数不依赖 Content-Length。下载及上传前只解析 PNG IHDR、JPEG SOF、WebP VP8/VP8L/VP8X、GIF LSD 与 GIF 块结构，不解码像素；边长不得超过 4096，像素不得超过 20 MP。拒绝多帧 GIF、NETSCAPE 循环块、带动画标志的 WebP。创建票据目录前先确认 incoming 父目录 realpath 位于 DATA_DIR，创建后复查；已有文件恢复前 lstat 检查普通文件与大小。
+
+生图基础收取预算：1mp 120 秒、2mp 240 秒、2k 600 秒，乘 count 后由 COMFY_TIMEOUT_SEC 截断。首次收取超时保留 imageJob.status=running、deadline、延期次数和下一次收取时间，使用 durable sleep 再次收取同一 prompt_id；IMAGE_COLLECT_EXTENSIONS 默认 2，即最多 3 次收取窗口。延期耗尽才回复“生图超时”。未知或丢失 id 仍按输出前缀查询 history/queue/view，不据超时重新提交。
+
+参考图上传前把远端 name/subfolder 清单写入 TicketDoc；独立 image_gen MCP 同时使用票据输出目录下的 remote-uploads.json 写前清单。整个收取过程结束（成功或最终失败）后，通过 /upload/image、type=input、overwrite=true，以同名同子目录的 1×1 透明 PNG 覆盖。清理失败保留清单，恢复或票据终态清理时重做；延期等待期间保留图片供排队任务读取。此操作覆盖 input 文件内容，但 ComfyUI history/queue 仍会列出文件名，已生成输出、服务端缓存和管理员备份也不受此覆盖操作清除；它不是删除历史记录或安全擦除。
+
+stdio 测试由 Vitest globalSetup 每次统一执行一次 npm run build，确保 image_gen 和 qq_context 都使用本次源码的 dist，不再维护手写依赖时间戳列表。

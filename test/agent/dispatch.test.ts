@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
-import type { Harness } from "@earendil-works/pi-durable";
+import type { Harness, ConversationId } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Dispatcher, FALLBACK_REPLY, MAX_ATTEMPTS } from "../../src/agent/dispatch.js";
 import { DispatchDoc, TicketDoc } from "../../src/agent/docs.js";
@@ -42,6 +42,7 @@ class BridgeStub {
   status = new Map<string, ReplyTicketRecord["status"]>();
   pending: ReplyTicketRecord[] = [];
   getTicketFailures = 0;
+  prepareIncoming?: (ticket: string) => Promise<ReplyTicketRecord | null>;
   /** true 时 reply 在发送前失败（票据保持 pending） */
   replyDown = false;
   /** >0 时接下来的 reply 在发送前失败，每次减 1 */
@@ -109,7 +110,10 @@ function inbound(text: string, opts: { id?: string; group?: string; user?: strin
 }
 
 const untilAbort = (signal?: AbortSignal) =>
-  new Promise<never>((_r, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+  new Promise<never>((_r, reject) => {
+    if (signal?.aborted) { reject(new Error('aborted')); return; }
+    signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+  });
 
 /** 生图桩：submit 记录提示词并返回 prompt_id；collect 按 prompt_id 写一张 PNG。可挂起（模拟崩溃）、失败或报告任务未知。 */
 class ImageStub implements Pick<ImageBackend, "submit" | "collect" | "reconcile" | "name"> {
@@ -118,6 +122,9 @@ class ImageStub implements Pick<ImageBackend, "submit" | "collect" | "reconcile"
   calls: string[] = [];
   options: ImageOptions[] = [];
   collects: string[] = [];
+  collectTimeouts = 0;
+  cleared: unknown[] = [];
+  async clearReferences(uploads: unknown) { this.cleared.push(uploads); }
   fail: Error | undefined;
   /** 写完文件后挂起，直到 signal 中止 */
   hangAfterWrite = false;
@@ -160,6 +167,7 @@ class ImageStub implements Pick<ImageBackend, "submit" | "collect" | "reconcile"
   }
   async collect(promptId: string, outDir: string, signal?: AbortSignal) {
     this.collects.push(promptId);
+    if (this.collectTimeouts-- > 0) throw new Error("生图超时");
     if (this.hangCollect) {
       this.hangCollect = false;
       await untilAbort(signal);
@@ -250,6 +258,7 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
     models,
     relayModel: faux.getModel(),
     replyRetryDelayMs: 10,
+    imageCollectDelayMs: 10,
   });
   const harness = await openHarness({ models, extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "agent.sqlite") }, ctx);
   const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: o.concurrency ?? 2, history: store, codexEffort: "high", retryDelayMs: 10 });
@@ -272,6 +281,70 @@ const imgDir = (r: Rig, ticket: string) => path.join(r.dir, "images", ticket);
 const bot = (r: Rig) => r.store.recent({ kind: "all" }, { limit: 20 }).filter((row) => row.is_self === 1);
 
 describe("rule router → image path", () => {
+  it('上传前 TicketDoc 清单已落盘，终态票据重启仍重做覆盖', async () => {
+    const r = await makeRig(), ticket = 'cleanup-restart';
+    const incoming = path.join(r.dir, 'incoming', ticket); mkdirSync(incoming, { recursive: true });
+    const ref = path.join(incoming, '1.png'); writeFileSync(ref, PNG);
+    const message = inbound('奶龙: 改色'); message.images = [ref];
+    const submit = r.image.submit.bind(r.image);
+    r.image.submit = async (...args) => {
+      const entry = (await pendingIndex(r))[ticket]!;
+      expect((await r.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, ctx))?.remoteUploads)
+        .toEqual([{ name: '1.png', subfolder: ticket }]);
+      return submit(...args);
+    };
+    r.image.hangCollect = true;
+    const run = r.dispatcher.dispatch(message, ticket);
+    await vi.waitFor(() => expect(r.image.collects).toHaveLength(1));
+    await r.harness.close(ctx); await run;
+    r.bridge.status.set(ticket, 'sent'); await r.reopen();
+    await r.dispatcher.recover(); await r.dispatcher.idle();
+    expect(r.image.cleared).toEqual([[{ name: '1.png', subfolder: ticket }]]);
+    expect(r.image.calls).toHaveLength(1); expect(await pendingIndex(r)).toEqual({});
+  });
+  it('恢复等待 A 附件时 B 可派发，A 同 scope 后续仍保序', async () => {
+    const r = await makeRig(), gate = deferred<ReplyTicketRecord | null>();
+    const make = (id: string, user: string, seq: number): ReplyTicketRecord => ({ ticket_id: id, seq,
+      self_id: '1', user_id: user, group_id: null, message_type: 'private', source_message_id: id,
+      source_nickname: 'tester', source_text: id, source_route_text: id, created_at: new Date().toISOString(), status: 'pending',
+      ...(id === 'A1' ? { attachments: [{ status: 'pending', file: 'one' }] } : {}) });
+    r.bridge.pending = [make('A1','10',1),make('A2','10',2),make('B1','20',3)];
+    r.bridge.prepareIncoming = async ticket => ticket === 'A1' ? gate.promise : r.bridge.pending.find(x => x.ticket_id === ticket)!;
+    await r.dispatcher.recover();
+    await vi.waitFor(() => expect(r.bridge.replies.map(x => x.ticket)).toEqual(['B1']));
+    gate.resolve({ ...r.bridge.pending[0]!, attachments: [{ status: 'skipped', file: 'one' }] });
+    await r.dispatcher.idle(); expect(r.bridge.replies.map(x => x.ticket)).toEqual(['B1','A1','A2']);
+  });
+  it('假 Comfy 慢任务第二次 collect 成功，不重新 submit', async () => {
+    const r = await makeRig(); r.image.collectTimeouts = 1;
+    await r.dispatcher.dispatch(inbound('奶龙: 慢图'), 'late-image');
+    expect(r.image.calls).toHaveLength(1); expect(r.image.collects).toEqual(['pid-1','pid-1']);
+    expect(r.bridge.replies[0]?.text).toBe(IMAGE_SUCCESS_REPLY);
+  });
+  it('假 Comfy 延期两次后仍运行，才返回超时失败', async () => {
+    const r = await makeRig(); r.image.collectTimeouts = 9;
+    await r.dispatcher.dispatch(inbound('奶龙: 超慢图'), 'too-late-image');
+    expect(r.image.calls).toHaveLength(1); expect(r.image.collects).toHaveLength(3);
+    expect(r.bridge.replies[0]?.text).toBe(IMAGE_FAILURE_REPLIES.timeout);
+  });
+  it('延期检查点保存 running/deadline，重启后继续原 prompt_id', async () => {
+    const r = await makeRig(); r.image.collectTimeouts = 1;
+    const original = r.image.collect.bind(r.image);
+    let waiting = false;
+    r.image.collect = async (...args) => {
+      if (!r.image.collectTimeouts) { waiting = true; await untilAbort(args[2]); }
+      return original(...args);
+    };
+    const run = r.dispatcher.dispatch(inbound('奶龙: 重启慢图'), 'late-restart');
+    await vi.waitFor(() => expect(waiting).toBe(true));
+    const entry = (await pendingIndex(r))['late-restart']!;
+    const doc = await r.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, ctx);
+    expect(doc?.imageJob).toMatchObject({ status: 'running', extensions: 1, prompt_id: 'pid-1' });
+    expect(doc?.imageJob?.deadline).toBeGreaterThan(Date.now());
+    await r.harness.close(ctx); await run;
+    r.image.collect = original; await r.reopen(); await r.dispatcher.recover(); await r.dispatcher.idle();
+    expect(r.image.calls).toHaveLength(1); expect(r.bridge.replies[0]?.text).toBe(IMAGE_SUCCESS_REPLY);
+  });
   it('v2 参数随任务传入，孤儿票据恢复后仍带本票据参考图', async () => {
     const r = await makeRig(); const ticket = 'v2-recovered';
     const incoming = path.join(r.dir, 'incoming', ticket);

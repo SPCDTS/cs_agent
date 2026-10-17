@@ -174,7 +174,22 @@ LOG_LEVEL=info
 - `docker build` 必须成功；`docker compose config` 校验通过。
 - 不向真实群发测试消息。
 
-## 10. 实现阶段确认的偏离与补充（2026-10-17）
+## 10. 实现阶段确认的偏离与补充（2026-10-18）
+
+生图 v2 审查后的执行边界：
+
+| 阶段 | 持久化与约束 |
+|---|---|
+| 入站接纳 | 同步 SQLite 事务保存去重、pending 票据与附件 URL/file id；下载不阻塞接纳 |
+| 附件准备 | 每 scope 单 worker，全局默认 2；发送者在途上限 2，票据默认 60 秒（含排队）；终态 ok/skipped/failed 后才派发，同 scope 保序 |
+| 下载网络 | HTTP(S)、全部 DNS 地址校验、固定 IP 连接；手动最多 3 次重定向，每跳及 get_image 刷新地址重验 |
+| 图片与目录 | 10 MiB 流上限；不解码解析尺寸，4096 边长/20 MP，拒绝动画 GIF/WebP；mkdir 前后校验 realpath，恢复前 lstat |
+| 启动恢复 | Dispatcher 排队时等待 bridge.prepareIncoming，用持久化元数据补齐 pending 附件，跨 scope 独立准备 |
+| 生图等待 | 1mp/2mp/2k 基础 120/240/600 秒乘数量，受 COMFY_TIMEOUT_SEC 截断；超时保存 running/deadline/extensions，durable sleep 后最多额外收取 2 次 |
+| 远端参考图 | 上传前写 TicketDoc 清单；独立 MCP 使用 remote-uploads.json；最终收取后同名透明 PNG 覆盖，失败保留清单供恢复重做，history/queue 文件名残留 |
+| 参数与测试 | 别名只查对象自身键；两个 stdio 测试共用每次构建的 globalSetup |
+
+以上约束优先于本节早期实现记录；完整下载策略、环境变量及残留说明见 [DEPLOY.md](DEPLOY.md)。
 
 | 项 | 实际做法 | 原因 |
 |---|---|---|
@@ -241,8 +256,8 @@ LOG_LEVEL=info
 | 透明（偏离原 §4.9） | 使用 2.1 原生 RGBA；KSampler → VAEDecode（2.1 VAE）→ SaveImageAdvanced(png/8-bit/sRGB)，不使用 EmptyQwenImageLayeredLatentImage。layered latent 为 5D/16 通道，2.1 是 4D/64 通道，不能混用。依用户后续决定实施，本机无需额外模型 |
 | 自检 | 启动及透明提交检查 VAELoader 模型列表；缺失时明确返回“透明输出未启用：缺少 <文件名>”，不下载依赖 |
 | 后端 | submit(ImageOptions, submission)、collect、reconcile；mcp 总是 run_workflow(临时 API JSON)，http POST /prompt；自定义 COMFY_WORKFLOW_FILE 优先，仅 patch prompt/seed 与对账前缀；默认改为空 |
-| 超时与恢复 | 60 秒 × 实际预设像素/1024² × count，受 COMFY_TIMEOUT_SEC 上限约束；submitIntent 保存 options/count/参考图子目录，恢复依次查 history、queue、预计文件名（含透明 SaveImageAdvanced 命名） |
-| 参考图入站 | QQBridge 授权、触发、去重后才下载 array 图片段，url 优先、get_image 刷新；≤3×10 MiB、流式上限与魔数检查；落盘 incoming/<ticket>/ 后与 source_images 一起 admit；失败原因入票据，恢复不会默默丢参考图 |
+| 超时与恢复 | 1mp/2mp/2k 分别为 120/240/600 秒 × count，受 COMFY_TIMEOUT_SEC 上限约束，默认额外收取 2 次；submitIntent 保存 options/count/参考图子目录，恢复依次查 history、queue、预计文件名（含透明 SaveImageAdvanced 命名） |
+| 参考图入站 | QQBridge 授权、触发后同步 admit 去重与 pending 附件元数据，再分 scope 有界下载；url 优先、get_image 刷新，同一 SSRF 策略；≤3×10 MiB、头部尺寸与动画检查；终态后才派发，重启恢复 pending 下载 |
 | 参考图访问 | codex 每轮以 -c 注入 IMAGE_REFS（没图时清空），MCP 仅允许清单中且 realpath 位于本票据 incoming 的文件；incoming 对命令沙箱 deny_read，禁止加入 writable_roots |
 | 上传 | HTTP /upload/image 使用每票据 subfolder；comfy-mcp upload_file 需同时支持 paths 与 subfolder，否则回退同 URL 的 HTTP。本机版本只有 paths/overwrite，故走回退；不把本机绝对路径直接传 LoadImage |
 | 清理与提示词 | 每日衰老任务清理超过 7 天的 incoming 票据目录；AGENTS.md 模板 v5、agent.md：文字加引号和位置字体、编辑说明改什么保留什么、不用 SD 咒语、参数范围 |

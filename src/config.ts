@@ -48,6 +48,7 @@ const EnvSchema = z.object({
   COMFY_TIMEOUT_SEC: int(300),
   INCOMING_DOWNLOAD_CONCURRENCY: int(2),
   INCOMING_DOWNLOAD_DEADLINE_SEC: int(60),
+  IMAGE_COLLECT_EXTENSIONS: z.coerce.number().int().min(0).max(10).default(2),
 
   CODEX_BIN: z.string().default("codex"),
   CODEX_MODEL: z.string().default("gpt-6.1-sol"),

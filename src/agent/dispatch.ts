@@ -122,7 +122,7 @@ export class Dispatcher {
     for (const [ticket, entry] of Object.entries(indexed)) {
       if (this.inflight.has(ticket)) continue;
       if (entry.state === "failed") {
-        await this.opts.tasks.cleanupTicketWorkdir(ticket);
+        await this.cleanupTicket(ticket);
         failed++; // 已终态（兜底也发不出）：不再处理，留作审计
         continue;
       }
@@ -433,7 +433,7 @@ export class Dispatcher {
       const e = (await tx.doc(DispatchDoc)).pending[ticket];
       if (e) e.state = "failed";
     }, this.ctx);
-    await this.opts.tasks.cleanupTicketWorkdir(ticket);
+    await this.cleanupTicket(ticket);
     this.withHistory("record failure failed", ticket, (h) =>
       h.completeReply(ticket, { action: "fallback", excerpt: "", status: "失败" }),
     );
@@ -494,9 +494,18 @@ export class Dispatcher {
     );
   }
 
+  private async cleanupTicket(ticket: string): Promise<void> {
+    const entry = (await this.opts.harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket];
+    const doc = entry ? await this.opts.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, this.ctx) : undefined;
+    await this.opts.tasks.cleanupTicketWorkdir(ticket, doc?.remoteUploads);
+    if (entry && doc?.remoteUploads?.length) await this.opts.harness.commit(async tx => {
+      (await tx.doc(TicketDoc, entry.conversationId as ConversationId)).remoteUploads = [];
+    }, this.ctx);
+  }
+
   private async clearIndex(ticket: string): Promise<void> {
     // 先清理再删索引：发送已成功、但 reply 阶段清理前崩溃的票据也会走到这里。
-    await this.opts.tasks.cleanupTicketWorkdir(ticket);
+    await this.cleanupTicket(ticket);
     await this.opts.harness
       .commit(async (tx) => {
         delete (await tx.doc(DispatchDoc)).pending[ticket];
