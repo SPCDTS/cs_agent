@@ -274,6 +274,25 @@ agent 延迟收图：`image_gen` 在 `min(imageTimeoutMs(options, COMFY_TIMEOUT_
 
 真实冒烟共 5 次，未访问真实 Codex、模型代理或 QQ；未改运行容器。透明 PNG 的 alpha 实测有 0–255。2K 冷启动超过一次 240 秒收取预算，重跑收取同一 prompt_id 成功，未重新提交；16 GiB 显存下不能承诺 2K 总在预算内完成。完整文件、耗时与验证尾部见 [验收记录](IMAGE-GEN-V2-ACCEPTANCE.md)。
 
+### 10.3 pi-durable 执行后端（第 3 组）
+
+`backends/pi.ts` 实现 AgentBackend；main 注册真实 pi 后端，select 保留 scope 覆盖选择。旧 PiBackendStub 导出只供旧测试兼容，不参与生产选择。dispatch 和票据任务沿用既有分流、FIFO、后处理与回复路径。
+
+| 机制 | 实现 |
+|---|---|
+| 长期会话 | 独立 Harness.open + SQLite `pi.sqlite`，createConversation(ownerless) 创建 owner/shared，conversation(id) 复用；模型与 thinkingLevel 由主进程配置。独立 harness 因 pi-durable 1.3.0 的 compaction 为 harness 级设置，票据 harness 原配置关闭压缩 |
+| 映射 | 会话 init 事务写 session 文档 cs.pi.threads；`pi-threads.json` 以临时文件 rename 原子更新，启动从 SQLite 重建。创建/映射短锁，回合按线程各自互斥 |
+| 请求 | 复用 buildCodexPrompt 的来源、引用清洗；submit 前写 cs.pi.request（ticket/access/参考图/content/deadline/calls），工具经 api.snapshot 读取，参数无访问范围入口 |
+| 幂等与恢复 | submit({requestId: ticket, whenBusy: reject})，Submission.wait 与 AssistantEntry 读取对应最终回答；旧票据重投不返回别的回合答案。重启先为恢复回合设置锁和原期限，避免新请求覆盖身份 |
+| 超时 | 默认 300 秒，取消等待后还调用 Conversation.abort(background:true) 并等待实际结束；同线程排队取消不提交请求 |
+| 扩展 | defineExtension(`cs-pi`) 注册六种工具、section 与 ToolTask.beforeTool hook；hook 在同事务内按 taskId 去重计数，搜索/抓页各 4、历史合计 4、生图 2 |
+| 历史工具 | 直接复用 callQQContextTool → ContextStore + format，绑定 access；qq_recent/qq_search 总量≤2500 字，qq_message≤1500 字 |
+| 联网工具 | DeepSeek Search/Fetch 固定 API 地址；仅 429 一次退避，响应体有上限，错误不回显服务端正文；公开 URL 校验复用 forbiddenAddress，DNS 全量地址检查。服务端重定向与 DNS 固定不在本机控制范围 |
+| 图片 | 共用 ImageOptions、ImageBackend.submit/collect、参考图验证与图片收集，目录限于 ticket/call-n；上传前保存清理清单。unsafe 工具中断不盲目重提，requestId 只保证输入幂等 |
+| 压缩 | enabled=true；reserve/background 使用库默认 16384/32768 或 PI_COMPACTION_*；keepRecentTokens 保持默认 20000，无轮换 |
+| 提示词 | 新文件缺失播种；agent.md 按 mtime/size 缓存读取，section 每次模型请求重建；既有文件不覆盖 |
+| 健康与验证 | healthz 增加 pi.threads；faux provider 覆盖工具链、权限、上限、图片回复、隔离/串行、SQLite 恢复与重复提交、热加载、超时和自动压缩；不调用真实模型、QQ、ComfyUI 或 DeepSeek |
+
 ## 11. 非目标（本期不做）
 
 多轮上下文记忆、群聊上下文摘要、成员工作区、主动推送、Web 管理界面、多 codex 会话。

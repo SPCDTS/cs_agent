@@ -58,10 +58,10 @@ Copy-Item .env.example .env
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `IMAGE_PREFIXES` | `奶龙:,奶龙：` | 生图前缀，逗号分隔，逐字匹配（大小写与全/半角按原样），较长的优先；留空用默认 |
-| `AGENT_BACKEND` | `codex` | 执行 agent 后端：`codex`（容器内 codex 固定线程）或 `pi`（第 3 组实现；当前选中时回复失败模板，日志 `pi backend not implemented yet (group 3)`） |
+| `AGENT_BACKEND` | `codex` | 执行 agent 后端：`codex`（容器内 codex 固定线程）或 `pi`（进程内 pi-durable 长期会话，工具可联网检索、查历史、生图） |
 | `AGENT_BACKEND_OVERRIDES` | 空 | 按会话覆盖后端：`group:200000001=pi,private:10000001=codex`。格式错误时启动失败。切换只影响之后的消息，两个后端的记忆互相独立 |
 | `CODEX_REPLY_MODE` | `relay` | codex 回复的后处理：`relay` 先用意图模型（下一行）把回答整理成 QQ 纯文本（20 s 超时，失败回退），再做代码清洗；`direct` 只做代码清洗（去代码围栏、标题符号、表格竖线，`@` 换成全角 `＠`，截断到 4000 字） |
-| `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` | `deepseek` / `deepseek-flash` | 意图模型：v3 只用于 codex 回复的 relay 整理与聊天记录日/周摘要（pi 后端将来也用它）（DeepSeek OpenAI 兼容接口 `https://api.deepseek.com`）。也可切换到 `openai-codex`（复用 `auth.json` 的 ChatGPT OAuth，如 `gpt-6-luna`）、`openai`、`anthropic` 等，后两者需设置对应的 `*_API_KEY` |
+| `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` | `deepseek` / `deepseek-flash` | 执行模型：用于 pi 后端、codex 回复的 relay 整理与聊天记录日/周摘要（DeepSeek OpenAI 兼容接口 `https://api.deepseek.com`）。也可切换到 `openai-codex`（复用 `auth.json` 的 ChatGPT OAuth，如 `gpt-6-luna`）、`openai`、`anthropic` 等，后两者需设置对应的 `*_API_KEY` |
 | `DEEPSEEK_API_KEY` | 空 | DeepSeek API key；写作 `DEEPSEEK_APIKEY` 也可（启动时自动映射）。provider 为 `deepseek` 时缺少密钥，agent 启动即退出 |
 | `AGENT_THINKING_LEVEL` | `low` | 意图模型思考档位。deepseek-flash 支持 off/low/high/max，其他值就近调整（如 medium → high）并记 warn 日志 |
 | `AGENT_CONCURRENCY` | 2 | 同时处理的 QQ 消息数，多出来的排队（排队状态已持久化） |
@@ -89,6 +89,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 - `ws_connected`：NapCat WS 是否在线（离线时 HTTP 503，容器显示 unhealthy）
 - `comfy`：启动时 comfy 的自检结果（mcp：`server_info`；http：`/system_stats`）
 - `codex`：`auth.json` 是否存在，以及当前固定会话 id
+- `pi.threads`：`{owner, shared}`，值为长期会话 id，尚未创建时为 null
 
 > comfy-cli 1.22 在 local 模式下拒绝从非 loopback 主机获取 `/object_info`（SSRF 防护），所以 mcp 模式下 agent 会在容器内的 `127.0.0.1:${COMFY_LOOPBACK_PORT:-8188}` 启动一个 TCP 转发，指向 `COMFYUI_URL`，再把 comfy-mcp 指向这个 loopback 地址。日志中出现 `comfy loopback proxy listening` 即表示转发已启动。
 
@@ -144,7 +145,7 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
   - 按 URL 主机名匹配，不看解析结果：解析到内网 IP 的公网域名（如 `127.0.0.1.nip.io` 之类、DNS rebinding）不会被阻止；
   - 只覆盖浏览器发出的请求，与 codex 自身的 web_search 无关。
   如需真正隔离，可设 `CODEX_BROWSER=none`；或在宿主机侧让 ComfyUI/NapCat 只接受鉴权请求、用防火墙限制 Docker 网段访问。
-- **`/data/prompts` 可写**（用户接受的风险）：codex 命令可以改写 `/data/prompts` 下的文件。v3 中 `system.md` 已不再被读取，影响暂时为零；第 3 组的 pi 后端将从这里热加载 `agent.md`，届时风险恢复。全局 AGENTS.md 规定只在 owner 私聊明确要求时才修改、群聊请求一律拒绝，但这**只靠模型遵守**。想彻底禁止，把 `/data/prompts` 从 `CODEX_WRITABLE_ROOTS` 去掉。
+- **`/data/prompts` 可写**（用户接受的风险）：codex 命令可以改写 `/data/prompts` 下的文件。v3 中 `system.md` 已不再被读取；pi 后端从这里热加载 `agent.md`，修改会在下一次模型请求生效。全局 AGENTS.md 规定只在 owner 私聊明确要求时才修改、群聊请求一律拒绝，但这**只靠模型遵守**。想彻底禁止，把 `/data/prompts` 从 `CODEX_WRITABLE_ROOTS` 去掉。
 - **image_gen 可被群成员触发**：任何能让 codex 处理消息的发送者都可以间接让它生图（每回合最多 4 次，图片只写到本票据目录、只随本条回复发出）。
 - **聊天记录**：群成员可以让 codex 检索本群 30 天内的原始消息和 180 天内的摘要（与能翻群记录一致）；owner 私聊可以检索全部会话。`./data/qq-messages.sqlite` 按聊天记录保管。
 
@@ -229,3 +230,24 @@ writable_roots = ["/workspace", "/data/prompts", "/data/workflows"] # CODEX_WRIT
 参考图上传前把远端 name/subfolder 清单写入 TicketDoc；独立 image_gen MCP 同时使用票据输出目录下的 remote-uploads.json 写前清单。整个收取过程结束（成功或最终失败）后，通过 /upload/image、type=input、overwrite=true，以同名同子目录的 1×1 透明 PNG 覆盖。清理失败保留清单，恢复或票据终态清理时重做；延期等待期间保留图片供排队任务读取。此操作覆盖 input 文件内容，但 ComfyUI history/queue 仍会列出文件名，已生成输出、服务端缓存和管理员备份也不受此覆盖操作清除；它不是删除历史记录或安全擦除。
 
 stdio 测试由 Vitest globalSetup 每次统一执行一次 npm run build，确保 image_gen 和 qq_context 都使用本次源码的 dist，不再维护手写依赖时间戳列表。
+
+## pi 执行后端（第 3 组）
+
+部署配置设为 `AGENT_BACKEND=pi`，或用 `AGENT_BACKEND_OVERRIDES=group:200000001=pi` 仅覆盖指定会话；改回 codex 使用原 codex 线程。配置在进程启动时读取，切换只影响新处理的消息，两后端记忆各自独立。本次验收只构建镜像，没有重启运行容器。
+
+| 配置 | 默认 | 作用 |
+|---|---|---|
+| `PI_TURN_TIMEOUT_SEC` | 300 | 取得线程锁后的回合期限，覆盖模型与工具；到期中止实际回合并等待退出，再释放锁。排队不消耗预算，重启沿用保存的截止时间 |
+| `PI_COMPACTION_RESERVE_TOKENS` | 16384 | 上下文超过模型窗口减此值时阻塞压缩 |
+| `PI_COMPACTION_BACKGROUND_TOKENS` | 32768 | 距阻塞阈值此 token 数时开始后台压缩；0 关闭后台压缩 |
+| `AGENT_MODEL_PROVIDER/AGENT_MODEL_ID` | deepseek / deepseek-flash | pi 模型；`AGENT_THINKING_LEVEL=low` 由现有模型能力解析器收敛 |
+
+长期会话和工具检查点存 `DATA_DIR/pi.sqlite`（及 WAL/SHM），与票据任务的 `agent.sqlite` 分开。`pi-threads.json` 原子保存 `{owner, shared}`；SQLite 的会话创建事务同时保存映射，JSON 丢失或写回前崩溃时启动重建，勿单独删除 JSON 当作清空记忆。备份应包含数据库、相关 WAL 和映射。每个线程独立串行，owner 与 shared 可并行；恢复中的请求先占据线程锁，后来的请求不能覆盖其 access。压缩保留最近 20000 tokens（pi-durable 默认），不按天或大小轮换；压缩缩小模型上下文，不删除数据库原文。
+
+`DATA_DIR/prompts/agent.md` 缺失时写入代码内的默认中文提示词，已有文件绝不覆盖；每次模型请求按 mtime/size 热加载，改完无需重启。旧 `system.md` 仍弃用。默认全文位于 `src/agent/pi-tools/prompt.ts`，涵盖 QQ 纯文本、事实搜索、历史工具纪律及生图文字/编辑指引。
+
+DeepSeek Search/Fetch 使用 `DEEPSEEK_API_KEY`（兼容 `DEEPSEEK_APIKEY`），即使执行模型是其他 provider，联网工具仍需要此密钥。未配置时仅联网工具返回不可用。Search 最多 8 条、2500 字，Fetch 最多 4000 字；仅 429 退避一次，其余 HTTP 错误不重试。每回合 web_search/fetch_page 各最多 4 次、三种 qq 工具合计 4 次、generate_image 最多 2 次，上限通过 ToolTask hook 持久化计数，模型不能修改。
+
+fetch_page 只接收无凭据的公开 HTTP(S) URL，复用入站下载的 IP 判定，解析全部 DNS 地址并拒绝任何内网地址。实际抓取发生在 DeepSeek 服务器，无法在本机固定其 DNS 结果或检查服务端重定向链；该部分依赖 DeepSeek 服务端策略，本次未执行真实 API 请求。
+
+图片写到 `DATA_DIR/images/<ticket>/call-<n>/`，最终由既有回复任务附带最多 4 张；参考图只能取本票据 incoming 清单。远端参考图清单在上传前保存，完成或失败时覆盖清理，清理失败保留供既有终态清理恢复。生图工具使用 pi-durable 的 unsafe 重放策略：崩溃中断的外部生图调用不自动重提，模型收到 interrupted；已保存图片仍可随完成的回复附带。`requestId=ticket` 保证提交幂等，不等于外部生图服务的事务性 exactly-once。慢图受 pi 总回合期限限制；此次没有改动并行任务负责的 image_gen MCP 延迟收图逻辑。
