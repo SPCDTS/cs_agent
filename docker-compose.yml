@@ -15,6 +15,11 @@ services:
       - ./data:/data
       - ./workspace:/workspace
     user: "node"
+    # codex 的 bwrap 命令沙箱需要非特权用户命名空间，而 Docker 默认 seccomp 配置阻止 CLONE_NEWUSER，
+    # 导致 codex 在容器内无法执行任何命令。这里使用"默认配置 + 仅放开命名空间/挂载相关系统调用"的
+    # 自定义 profile（docker/seccomp-codex.json），其余与 Docker 默认完全一致。用户 2026-10-18 选定方案。
+    security_opt:
+      - seccomp=./docker/seccomp-codex.json
     restart: unless-stopped
     init: false   # 镜像内已用 tini
     logging:
