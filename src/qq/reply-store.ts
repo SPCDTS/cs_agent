@@ -40,6 +40,7 @@ interface TicketRow {
   source_text: string | null;
   source_route_text: string | null;
   source_images: string | null;
+  attachments: string | null;
   source_image_error: string | null;
   created_at: string;
   seq: number;
@@ -59,6 +60,7 @@ function toRecord(row: TicketRow): ReplyTicketRecord {
     source_message_id: row.source_message_id,
     source_nickname: row.source_nickname,
     source_text: row.source_text ?? "",
+    attachments: row.attachments ? JSON.parse(row.attachments) : [],
     source_images: row.source_images ? JSON.parse(row.source_images) : [],
     ...(row.source_image_error ? { source_image_error: row.source_image_error } : {}),
     created_at: row.created_at,
@@ -110,6 +112,7 @@ export class ReplyStore {
   /** 旧库补列：source_text（崩溃对账需要原文）、source_route_text（分流文本；旧行保持 NULL）。 */
   private migrate(): void {
     const columns = this.db.prepare("PRAGMA table_info(tickets)").all() as { name: string }[];
+    if (!columns.some(c => c.name === "attachments")) this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT");
     if (!columns.some(c => c.name === "source_images")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_images TEXT");
     if (!columns.some(c => c.name === "source_image_error")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_image_error TEXT");
     if (!columns.some(c => c.name === "source_text")) {
@@ -159,11 +162,16 @@ export class ReplyStore {
   /** 返回 true 表示新建了票据行；false 表示已存在（保留原记录）。 */
   private insertTicket(ticket: string, m: InboundMessage, now: string): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO tickets
-      (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, source_text, source_route_text, source_images, source_image_error, created_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
+      (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, source_text, source_route_text, source_images, source_image_error, attachments, created_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
       .run(ticket, m.self_id, m.user_id, m.message_type === "group" ? m.group_id : null,
-        m.message_type, m.message_id, m.nickname, m.text, m.route_text, JSON.stringify(m.images), m.image_error ?? null, now);
+        m.message_type, m.message_id, m.nickname, m.text, m.route_text, JSON.stringify(m.images), m.image_error ?? null, JSON.stringify(m.attachments ?? []), now);
     return Number(result.changes) === 1;
+  }
+
+  finishAttachments(ticket: string, attachments: NonNullable<InboundMessage['attachments']>, error?: string): void {
+    this.db.prepare('UPDATE tickets SET attachments = ?, source_images = ?, source_image_error = ? WHERE ticket_id = ?')
+      .run(JSON.stringify(attachments), JSON.stringify(attachments.flatMap(a => a.path ? [a.path] : [])), error ?? null, ticket);
   }
 
   get(ticket: string): ReplyTicketRecord | null {

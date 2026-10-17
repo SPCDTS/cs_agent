@@ -46,6 +46,8 @@ const EnvSchema = z.object({
   /** mcp 模式下容器内 loopback 转发端口（comfy-cli 仅对 loopback 获取 object_info） */
   COMFY_LOOPBACK_PORT: int(8188),
   COMFY_TIMEOUT_SEC: int(300),
+  INCOMING_DOWNLOAD_CONCURRENCY: int(2),
+  INCOMING_DOWNLOAD_DEADLINE_SEC: int(60),
 
   CODEX_BIN: z.string().default("codex"),
   CODEX_MODEL: z.string().default("gpt-6.1-sol"),

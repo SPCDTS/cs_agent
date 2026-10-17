@@ -3,6 +3,8 @@
  * 传输层：NapCat OneBot v11（WebSocket 收事件 + HTTP 调 API），消息格式 array 段。
  */
 
+export type IncomingAttachment = { status: 'pending' | 'ok' | 'skipped' | 'failed'; url?: string; file?: string; path?: string; reason?: string; deadline?: number };
+
 export type ChatType = "private" | "group";
 
 /** 仅保留 text / at / reply 三类段的数据，其余段只保留 type；触发消息的图片由 bridge 从原始事件单独下载。 */
@@ -34,6 +36,7 @@ export interface InboundMessage {
   /** 本票据已下载并校验的参考图绝对路径。 */
   images: string[];
   image_error?: string;
+  attachments?: IncomingAttachment[];
 }
 
 export interface QQBridgeConfig {
@@ -51,6 +54,8 @@ export interface QQBridgeConfig {
   groupMentions: boolean;
   /** HTTP 调用超时，默认 15000；带图发送可放宽到 30000 */
   timeoutMs?: number;
+  incomingDownloadConcurrency?: number;
+  incomingDownloadDeadlineMs?: number;
   /** 回复票据 / 去重状态持久化目录（SQLite 文件放在此处） */
   dataDir: string;
   /** 允许作为回复附件的图片根目录；路径必须 realpath 后落在其下 */
@@ -72,6 +77,7 @@ export interface ReplyTicketRecord {
   /** 原消息的分流文本（InboundMessage.route_text）；旧库的行没有该列时为 undefined */
   source_route_text?: string;
   source_images?: string[];
+  attachments?: IncomingAttachment[];
   source_image_error?: string;
   created_at: string;
   /** admit 顺序号（票据表 rowid，与 created_at 同一事务分配，单调递增）：派发与崩溃恢复的唯一排序键 */
@@ -123,6 +129,7 @@ export interface QQBridge {
    * text 1-4000 字符，纯文本（QQ 不渲染 Markdown）；images 0-4 张，base64:// 发送。
    */
   reply(ticket: string, text: string, imagePaths?: string[], opts?: { signal?: AbortSignal }): Promise<ReplyResult>;
+  prepareIncoming?(ticket: string): Promise<ReplyTicketRecord | null>;
   getTicket(ticket: string): Promise<ReplyTicketRecord | null>;
   /** 列出仍为 pending 的票据（按 seq 升序，最多 limit 条，默认 200）；afterSeq 为分页游标（只取 seq 更大的），供启动时与派发索引对账 */
   listPendingTickets(limit?: number, afterSeq?: number): Promise<ReplyTicketRecord[]>;

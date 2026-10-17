@@ -32,7 +32,7 @@ export const MAX_ATTEMPTS = 3;
 /** 启动对账时每页读取的 pending 票据数（分页直到取尽） */
 export const PENDING_PAGE = 200;
 
-export type DispatchBridge = Pick<QQBridge, "reply" | "getTicket" | "listPendingTickets">;
+export type DispatchBridge = Pick<QQBridge, "reply" | "getTicket" | "listPendingTickets" | "prepareIncoming">;
 /** 统一上下文存储中派发器用到的写入口 */
 export type DispatchHistory = Pick<ContextStore, "recordPending" | "completeReply">;
 
@@ -67,6 +67,7 @@ export function inboundFromTicket(rec: ReplyTicketRecord): InboundMessage {
     mentioned_self: rec.message_type === "group",
     segments: [],
     images: rec.source_images ?? [],
+    attachments: rec.attachments ?? [],
     ...(rec.source_image_error ? { image_error: rec.source_image_error } : {}),
   };
 }
@@ -99,7 +100,9 @@ export class Dispatcher {
       h.recordPending(scope, ticket, msg.time, { replyTo: msg.message_id, selfId: msg.self_id }),
     );
     return this.track(ticket, "dispatch failed", () => {
-      const registered = this.register(msg, ticket, scope);
+      const registered = this.opts.bridge.prepareIncoming
+        ? this.opts.bridge.prepareIncoming(ticket).then(rec => this.register(msg.attachments?.some(a => a.status === 'pending') && rec ? inboundFromTicket(rec) : msg, ticket, scope))
+        : this.register(msg, ticket, scope);
       return this.enqueue(scope, async () => this.run(ticket, await registered));
     });
   }

@@ -2,6 +2,8 @@
  * createQQBridge：NapCat OneBot v11 —— WebSocket 收事件，HTTP 调 API。
  * 负责：重连与心跳、自回声过滤、去重、授权 / 触发、票据持久化、按票据幂等回复。
  */
+import type { DownloadHooks } from './incoming-http.js';
+import { inboundFromTicket } from '../agent/dispatch.js';
 import { downloadIncoming } from "./incoming.js";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
@@ -23,6 +25,7 @@ export const DOWN_REPORT_INTERVAL_MS = 5 * 60 * 1000;
 
 /** 测试 / 运维用的内部参数，不属于对外契约。 */
 export interface BridgeInternals {
+  downloadHooks?: DownloadHooks;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
   heartbeatMs?: number;
@@ -82,7 +85,14 @@ class Bridge extends EventEmitter implements QQBridge {
   private lastEventAt: string | null = null;
   private retryTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
-  private inboundChain: Promise<void> = Promise.resolve();
+  private readonly scopeChains = new Map<string, Promise<void>>();
+  private readonly incomingJobs = new Map<string, Promise<void>>();
+  private readonly senderInflight = new Map<string, number>();
+  private activeDownloads = 0;
+  private readonly downloadWaiting: (() => void)[] = [];
+  private readonly downloadHooks: DownloadHooks;
+  private readonly downloadConcurrency: number;
+  private readonly downloadDeadlineMs: number;
   private readonly seen = new Set<string>();
   private readonly locks = new Set<string>();
 
@@ -92,6 +102,9 @@ class Bridge extends EventEmitter implements QQBridge {
     if (!config.httpUrl || !config.wsUrl) throw new Error("必须配置 NapCat httpUrl 与 wsUrl。");
     if (!config.dataDir || !config.imageRoot) throw new Error("必须配置 dataDir 与 imageRoot。");
     this.config = config;
+    this.downloadHooks = internals.downloadHooks ?? {};
+    this.downloadConcurrency = config.incomingDownloadConcurrency ?? 2;
+    this.downloadDeadlineMs = config.incomingDownloadDeadlineMs ?? 60_000;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.client = createOneBotClient(config.httpUrl, config.token, this.timeoutMs);
     this.reconnectBaseMs = internals.reconnectBaseMs ?? 1000;
@@ -133,7 +146,7 @@ class Bridge extends EventEmitter implements QQBridge {
       this.disconnectCount++;
       this.emit("disconnect", "stopped");
     }
-    await this.inboundChain;
+    await Promise.allSettled([...this.incomingJobs.values()]);
     this.store?.close();
     this.store = null;
   }
@@ -273,16 +286,82 @@ class Bridge extends EventEmitter implements QQBridge {
     if (!store) return;
     const id = ticketIdFor(message);
     if (store.get(id)) return;
-    // 下载完成后一次写入票据与 source_images；串行 admit 保持入站顺序。
-    this.inboundChain = this.inboundChain.then(async () => {
-      try { message.images = await downloadIncoming(event, id, this.config.dataDir, this.client); }
-      catch (err) {
-        message.image_error = '参考图处理失败：' + toError(err).message;
-        this.emitError(new Error(message.image_error));
+    const attachments = (Array.isArray(event.message) ? event.message : [])
+      .filter(s => isRecord(s) && s.type === 'image')
+      .map(s => ({ status: 'pending' as const, deadline: Date.now() + this.downloadDeadlineMs, url: stringField(isRecord(s.data) ? s.data : {}, 'url'), file: stringField(isRecord(s.data) ? s.data : {}, 'file') }));
+    message.attachments = attachments;
+    const inflight = this.senderInflight.get(message.user_id) ?? 0;
+    if (attachments.length && inflight >= 2) {
+      message.attachments = attachments.map(a => ({ ...a, status: 'skipped', reason: '发送者下载并发超过 2' }));
+    }
+    const ticket = store.admit(message); // 同步事务先保存 dedupe、pending 及恢复元数据。
+    if (ticket) this.enqueueIncoming(message, ticket, true);
+  }
+
+  private enqueueIncoming(message: InboundMessage, ticket: string, emit: boolean): Promise<void> {
+    const existing = this.incomingJobs.get(ticket);
+    if (existing) return existing;
+    const scope = message.message_type === 'group' ? 'group:' + message.group_id : 'private:' + message.user_id;
+    const pending = message.attachments?.some(a => a.status === 'pending');
+    if (pending) this.senderInflight.set(message.user_id, (this.senderInflight.get(message.user_id) ?? 0) + 1);
+    // deadline 从入队开始，包含等待 scope / 全局槽位的时间。
+    const deadline = Math.min(...(message.attachments ?? []).map(a => a.deadline ?? Date.now() + this.downloadDeadlineMs), Date.now() + this.downloadDeadlineMs);
+    const remaining = deadline - Date.now();
+    const signal = remaining > 0 ? AbortSignal.timeout(remaining) : AbortSignal.abort(new Error('参考图下载超时'));
+    const run = (this.scopeChains.get(scope) ?? Promise.resolve()).then(async () => {
+      const store = this.requireStore();
+      if (pending) {
+        let acquired = false;
+        try {
+          signal.throwIfAborted();
+          if (this.activeDownloads >= this.downloadConcurrency) {
+            await new Promise<void>((resolve, reject) => {
+              const ready = () => { signal.removeEventListener('abort', abort); acquired = true; resolve(); };
+              const abort = () => { const i = this.downloadWaiting.indexOf(ready); if (i >= 0) this.downloadWaiting.splice(i, 1); reject(signal.reason); };
+              signal.throwIfAborted(); this.downloadWaiting.push(ready); signal.addEventListener('abort', abort, { once: true });
+            });
+          } else { this.activeDownloads++; acquired = true; }
+          signal.throwIfAborted();
+          const event = { message: message.attachments!.map(a => ({ type: 'image', data: { url: a.url, file: a.file } })) };
+          // 即使 DNS / NapCat 不响应也必须按票据截止时间释放 worker。
+          const paths = await new Promise<string[]>((resolve, reject) => {
+            const abort = () => reject(signal.reason);
+            signal.addEventListener('abort', abort, { once: true });
+            downloadIncoming(event, ticket, this.config.dataDir, this.client, signal, this.downloadHooks)
+              .then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+          });
+          message.images = paths;
+          message.attachments = message.attachments!.map((a, i) => ({ ...a, status: 'ok', path: paths[i] }));
+        } catch (err) {
+          const reason = signal.aborted ? '参考图下载超时，已跳过' : '参考图处理失败：' + toError(err).message;
+          message.attachments = message.attachments!.map(a => ({ ...a, status: signal.aborted ? 'skipped' : 'failed', reason }));
+          if (!signal.aborted) message.image_error = reason;
+          message.images = [];
+        } finally {
+          if (acquired) { const next = this.downloadWaiting.shift(); if (next) next(); else this.activeDownloads--; }
+          const left = (this.senderInflight.get(message.user_id) ?? 1) - 1;
+          if (left > 0) this.senderInflight.set(message.user_id, left); else this.senderInflight.delete(message.user_id);
+        }
+        store.finishAttachments(ticket, message.attachments!, message.image_error);
       }
-      const ticket = store.admit(message);
-      if (ticket !== null && this.running) this.emit('message', message, ticket);
+      if (emit && this.running) this.emit('message', message, ticket);
     }).catch(err => this.emitError(toError(err)));
+    this.incomingJobs.set(ticket, run); this.scopeChains.set(scope, run);
+    void run.finally(() => {
+      this.incomingJobs.delete(ticket);
+      if (this.scopeChains.get(scope) === run) this.scopeChains.delete(scope);
+    });
+    return run;
+  }
+
+  async prepareIncoming(ticket: string): Promise<ReplyTicketRecord | null> {
+    const rec = this.requireStore().get(ticket);
+    if (rec?.attachments?.some(a => a.status === 'pending')) {
+      await this.enqueueIncoming(inboundFromTicket(rec), ticket, false);
+    } else await this.incomingJobs.get(ticket);
+    const ready = this.requireStore().get(ticket);
+    if (ready?.attachments?.some(a => a.status === 'pending')) throw new Error('参考图仍未完成，暂缓派发');
+    return ready;
   }
 
   /** 撤回通知：group_recall / friend_recall（仅允许范围内）。 */

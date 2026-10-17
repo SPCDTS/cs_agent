@@ -1,8 +1,9 @@
 import { promises as fs } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { request, createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DownloadHooks } from '../../src/qq/incoming-http.js';
 import { cleanupIncoming, downloadIncoming, INCOMING_RETENTION_MS } from "../../src/qq/incoming.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import { inboundFromTicket } from "../../src/agent/dispatch.js";
@@ -17,14 +18,18 @@ let downloads: (string | undefined)[];
 let napcat: FakeOneBot;
 let bridge: QQBridge;
 let dir: string;
+const hooks: DownloadHooks = {
+  resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+  request: (target, options, cb) => request(new URL(target.pathname + target.search, url.replace('public.test', '127.0.0.1')), { ...options, lookup: undefined }, cb),
+};
 let received: { message: InboundMessage; ticket: string }[];
 beforeEach(async () => {
   dir = tmp("incoming-"); downloads = []; received = [];
   cdn = createServer((req, res) => { downloads.push(req.headers.authorization); res.end(PNG); });
   await new Promise<void>(resolve => cdn.listen(0, "127.0.0.1", resolve));
-  url = `http://127.0.0.1:${(cdn.address() as AddressInfo).port}/image`;
+  url = `http://public.test:${(cdn.address() as AddressInfo).port}/image`;
   napcat = new FakeOneBot(); await napcat.start();
-  bridge = createQQBridge({ httpUrl: napcat.httpUrl, wsUrl: napcat.wsUrl, token: TOKEN, allowUsers: ["20001"], allowGroups: ["30001"], groupMentions: true, dataDir: dir, imageRoot: path.join(dir, "images") });
+  bridge = createQQBridge({ httpUrl: napcat.httpUrl, wsUrl: napcat.wsUrl, token: TOKEN, allowUsers: ["20001"], allowGroups: ["30001"], groupMentions: true, dataDir: dir, imageRoot: path.join(dir, "images") }, { downloadHooks: hooks });
   bridge.on("message", (message, ticket) => received.push({ message, ticket }));
   await bridge.start(); await waitFor(() => bridge.status().ws_connected);
 });
@@ -78,15 +83,13 @@ describe("触发消息参考图", () => {
     expect((await bridge.getTicket(received[0]!.ticket))?.source_image_error).toContain("最多 3 张");
   });
   it.each(["length", "stream", "magic", "local"])("拒绝 %s，流大小限制不能靠 Content-Length 绕过", async mode => {
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
-      if (mode === "length") return new Response(PNG, { headers: { "content-length": String(11 * 1024 * 1024) } });
-      if (mode === "stream") return new Response(new Uint8Array(10 * 1024 * 1024 + 1));
-      return new Response("this is not an image");
+    cdn.removeAllListeners('request');
+    cdn.on('request', (_req, res) => {
+      if (mode === 'length') { res.setHeader('content-length', 11 * 1024 * 1024); res.end(PNG); }
+      else if (mode === 'stream') res.end(Buffer.alloc(10 * 1024 * 1024 + 1));
+      else res.end('this is not an image');
     });
-    try {
-      await expect(downloadIncoming({ message: [segment({ url: mode === "local" ? "file:///etc/passwd" : url })] }, "a".repeat(64), dir, { call: async () => ({}) })).rejects.toThrow(/10 MiB|魔数|HTTP URL/);
-      if (mode === "local") expect(fetch).not.toHaveBeenCalled();
-    } finally { fetch.mockRestore(); }
+    await expect(downloadIncoming({ message: [segment({ url: mode === 'local' ? 'file:///etc/passwd' : url })] }, 'a'.repeat(64), dir, { call: async () => ({}) }, AbortSignal.timeout(1000), hooks)).rejects.toThrow(/10 MiB|魔数|HTTP URL/);
   });
   it("7 天清理只删除过期票据目录，保留新文件、非票据目录与符号链接目标", async () => {
     const root = path.join(dir, "incoming");

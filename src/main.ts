@@ -146,6 +146,8 @@ async function main(): Promise<void> {
     groupMentions: cfg.QQ_GROUP_MENTIONS,
     dataDir: cfg.DATA_DIR,
     imageRoot: cfg.imagesDir,
+    incomingDownloadConcurrency: cfg.INCOMING_DOWNLOAD_CONCURRENCY,
+    incomingDownloadDeadlineMs: cfg.INCOMING_DOWNLOAD_DEADLINE_SEC * 1000,
   });
 
   const dispatcher = new Dispatcher({
