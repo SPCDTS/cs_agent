@@ -60,24 +60,36 @@ case "${QQ_CONTEXT_MAX_CHARS:-}" in
   *) CONTEXT_MAX_CHARS="$QQ_CONTEXT_MAX_CHARS" ;;
 esac
 SANDBOX_NETWORK="$(toml_enum "${CODEX_SANDBOX_NETWORK:-true}" true CODEX_SANDBOX_NETWORK true false)"
-# codex workspace-write 沙箱可写目录：逗号分隔的绝对路径；/data 本身、CODEX_HOME、图片目录、*.sqlite 一律拒绝
+# 路径规范化：合并重复的 /，去掉 "/./" 段、末尾的 "/." 与 "/"（根目录保持 "/"）。".." 不在这里处理（调用方直接拒绝）。
+norm_path() {
+  _p="$(printf '%s' "$1" | sed -e 's#//*#/#g' -e ':a' -e 's#/\./#/#g' -e 'ta' -e 's#/\.$##' -e 's#/$##')"
+  printf '%s' "${_p:-/}"
+}
+DATA_N="$(norm_path "$DATA_DIR")"
+CODEX_HOME_N="$(norm_path "$CODEX_HOME_DIR")"
+# codex workspace-write 沙箱可写目录：逗号分隔的绝对路径，先规范化再检查；
+# /、DATA_DIR 本身及其上级、CODEX_HOME 及其子目录、图片目录、*.sqlite、含 ".." 或非法字符的一律拒绝
 WRITABLE_ROOTS=""
+WRITABLE_ROOTS_CSV=""
 _old_ifs="$IFS"; IFS=','
 for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts,$DATA_DIR/workflows}; do
   IFS="$_old_ifs"
-  _r="$(printf '%s' "$_r" | tr -d ' ')"; _r="${_r%/}"
-  [ -n "$_r" ] || continue
-  case "$_r" in
-    /*) case "$_r" in *[!A-Za-z0-9._/-]*|*..*) _bad=1 ;; *) _bad=0 ;; esac ;;
+  _raw="$(printf '%s' "$_r" | tr -d ' ')"
+  [ -n "$_raw" ] || { IFS=','; continue; }
+  case "$_raw" in
+    /*) case "$_raw" in *[!A-Za-z0-9._/-]*|*..*) _bad=1 ;; *) _bad=0 ;; esac ;;
     *) _bad=1 ;;
   esac
+  _r="$(norm_path "$_raw")"
   case "$_r" in
-    ""|/|"$DATA_DIR"|"$CODEX_HOME_DIR"|"$CODEX_HOME_DIR"/*|"$DATA_DIR/images"|"$DATA_DIR/images"/*|*.sqlite|*.sqlite-*) _bad=1 ;;
+    /|"$DATA_N"|"$CODEX_HOME_N"|"$CODEX_HOME_N"/*|"$DATA_N/images"|"$DATA_N/images"/*|*.sqlite|*.sqlite-*) _bad=1 ;;
   esac
+  case "$DATA_N/" in "$_r"/*) _bad=1 ;; esac # DATA_DIR 的上级目录
   if [ "$_bad" = 1 ]; then
-    echo "entrypoint: WARNING rejected CODEX_WRITABLE_ROOTS entry '$_r'" >&2
+    echo "entrypoint: WARNING rejected CODEX_WRITABLE_ROOTS entry '$_raw'" >&2
   else
     WRITABLE_ROOTS="${WRITABLE_ROOTS:+$WRITABLE_ROOTS, }\"$_r\""
+    WRITABLE_ROOTS_CSV="${WRITABLE_ROOTS_CSV:+$WRITABLE_ROOTS_CSV,}$_r"
   fi
   IFS=','
 done

@@ -140,7 +140,7 @@ writable_roots = ["/workspace", "/data/prompts", "/data/workflows"] # CODEX_WRIT
 
 - **前提**：bwrap 需要非特权用户命名空间。Docker 默认的 seccomp 配置阻止 `CLONE_NEWUSER`，所以在 `docker-compose.yml` 加 `security_opt: [seccomp=./docker/seccomp-codex.json]`（Docker 默认 profile + 仅放开命名空间/挂载相关系统调用）之前，codex 在容器里**任何命令都无法执行**。
 - **身份**：容器进程与 codex 命令都以 `node`（uid 1000）运行。
-- **写入**：只能写 `/workspace`、`/data/prompts`（热加载的系统提示 `system.md`）、`/data/workflows`（生图工作流），以及 codex 默认可写的 `/tmp`。`/data` 本身、`/data/codex`（auth.json、sessions）、`/data/*.sqlite`、`/data/images` 都不可写；入口脚本会拒绝把这些路径写进 `CODEX_WRITABLE_ROOTS`，并打印 `rejected CODEX_WRITABLE_ROOTS entry`。
+- **写入**：只能写 `/workspace`、`/data/prompts`（热加载的系统提示 `system.md`）、`/data/workflows`（生图工作流），以及 codex 默认可写的 `/tmp`。`/data` 本身、`/data/codex`（auth.json、sessions）、`/data/*.sqlite`、`/data/images` 都不可写；入口脚本先规范化每一项（合并重复的 `/`，去掉 `/./`、末尾的 `/.` 与 `/`），再与规范化后的 `DATA_DIR` / `CODEX_HOME` 比较，拒绝 `/`、`/data` 本身及其上级目录、`/data/codex` 及其子目录、`/data/images` 及其子目录、`*.sqlite`、任何含 `..` 或非法字符的项，并打印 `rejected CODEX_WRITABLE_ROOTS entry`（例如 `/data//`、`/data/.`、`/data/codex/.`、`/data/images//x` 都会被拒绝）。
 - **工作流**：`/data/workflows/` 不存在时，启动会从镜像的 `/app/workflows/` 复制一份（已存在则绝不覆盖）。默认 `COMFY_WORKFLOW_FILE=/data/workflows/qwen-image-2.1-turbo-api.json`。旧值 `/app/workflows/…` 仍然有效，只是 codex 改不了那份。
 - **网络**：命令可以联网（`network_access = true`），因此能直接访问宿主机的 ComfyUI `host.docker.internal:8188`（无鉴权，可以提交任务、读取输出）。NapCat（3000/3001）需要 Bearer token，codex 拿不到。
 - **凭据**：codex 子进程的环境变量走白名单（PATH/HOME/LANG/TERM/TZ/代理变量），不含 NapCat token、API key 等任何秘密。codex 仍能读取自己的 `/data/codex/auth.json`（见「残余风险」）。

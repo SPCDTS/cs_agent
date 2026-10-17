@@ -117,6 +117,19 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(parse(runEntrypoint({ CODEX_SANDBOX_NETWORK: "maybe" }).toml)["sandbox_workspace_write.network_access"]).toBe("true");
   });
 
+  it("normalizes writable roots before the forbidden-path check", () => {
+    const dir = tmp("cs-entry-");
+    const data = shPath(path.join(dir, "data"));
+    const parent = data.replace(/\/data$/, "");
+    const bad = [`${data}//`, `${data}/.`, `${data}/./`, `${data}/codex/.`, `${data}//codex`, `${data}/images//x`, `${data}/./images`,
+      `${data}/x.sqlite/.`, "//", "/.", `${parent}`, `${parent}/`, `${data}/prompts/../codex`];
+    const good = ["/srv//prompts/", "/srv/./wf/.", `${data}//workflows/`];
+    const r = runEntrypointIn(dir, { CODEX_WRITABLE_ROOTS: [...bad, ...good].join(",") });
+    expect(r.status).toBe(0);
+    expect(parse(r.toml)["sandbox_workspace_write.writable_roots"]).toBe(`["/srv/prompts", "/srv/wf", "${data}/workflows"]`);
+    for (const b of bad) expect(r.stderr).toContain(`rejected CODEX_WRITABLE_ROOTS entry '${b}'`);
+  });
+
   it("seeds DATA_DIR/workflows from WORKFLOWS_SRC once and never overwrites", () => {
     const src = tmp("cs-wf-");
     writeFileSync(path.join(src, "wf.json"), "{\"v\":1}");
