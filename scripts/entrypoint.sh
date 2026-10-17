@@ -109,6 +109,14 @@ case "${PLAYWRIGHT_NO_SANDBOX:-0}" in
   *) PW_SANDBOX_ARG=', "--sandbox"' ;;
 esac
 PW_BROWSERS="$(toml_path "${PLAYWRIGHT_BROWSERS_PATH:-/opt/pw-browsers}" /opt/pw-browsers PLAYWRIGHT_BROWSERS_PATH)"
+# 浏览器 MCP 工具白名单（codex 的 enabled_tools：未列出的工具 codex 既不暴露也拒绝调用，新版本新增的工具默认关闭）。
+# 排除：browser_run_code_unsafe（在 playwright-mcp 进程里执行任意 JS，可借 page.constructor.constructor 逃出 vm 拿到
+#   Node 的 process/fs——实测可读 /data/codex/auth.json，也能 page.goto('file://…') 绕过 file: 限制；
+#   该进程以 node 运行、不受 codex 命令沙箱约束）、browser_file_upload / browser_drop（把本地文件交给网页）。
+# file: 协议：playwright-mcp 0.0.83 对 browser_navigate / browser_tabs 的 URL 自带拦截（"Access to "file:" protocol
+#   is blocked"），页面 JS 的 location/fetch 到 file: 由 Chromium 拒绝；--blocked-origins 无法表达 file:
+#   （file URL 的 origin 为 "null"，模式会退化成 "*://file:///…/**"），Chromium 托管策略在 headless shell 中不生效。
+PW_ENABLED_TOOLS='"browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_take_screenshot", "browser_click", "browser_hover", "browser_type", "browser_press_key", "browser_select_option", "browser_fill_form", "browser_drag", "browser_find", "browser_wait_for", "browser_evaluate", "browser_handle_dialog", "browser_tabs", "browser_close", "browser_resize", "browser_emulate_media", "browser_console_messages", "browser_network_requests", "browser_network_request"'
 
 # config.toml 是受管文件：每次启动都按环境变量重写（先写临时文件再 mv，避免半截文件）
 CONFIG="$CODEX_HOME_DIR/config.toml"
@@ -151,6 +159,7 @@ command = "$(toml_path "$PLAYWRIGHT_MCP_BIN" /usr/local/bin/playwright-mcp PLAYW
 args = ["--headless", "--isolated", "--browser", "chromium", "--blocked-origins", "$PW_BLOCKED"$PW_SANDBOX_ARG]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
+enabled_tools = [$PW_ENABLED_TOOLS]
 
 [mcp_servers.browser.env]
 PLAYWRIGHT_BROWSERS_PATH = "$PW_BROWSERS"

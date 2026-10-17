@@ -105,6 +105,23 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(t["mcp_servers.browser.command"]).toMatch(/playwright-mcp"$/);
   });
 
+  it("restricts the browser MCP to an enabled_tools allowlist without the RCE / local-file tools", () => {
+    const binDir = tmp("cs-pwbin-");
+    const bin = path.join(binDir, "playwright-mcp");
+    writeFileSync(bin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const t = parse(runEntrypoint({ PLAYWRIGHT_MCP_BIN: posix(bin) }).toml);
+    const enabled = JSON.parse(t["mcp_servers.browser.enabled_tools"]!) as string[];
+    for (const must of ["browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_evaluate", "browser_tabs", "browser_close"]) {
+      expect(enabled).toContain(must);
+    }
+    for (const banned of ["browser_run_code_unsafe", "browser_run_code", "browser_file_upload", "browser_drop"]) expect(enabled).not.toContain(banned);
+    expect(enabled.every((n) => /^browser_[a-z_]+$/.test(n))).toBe(true);
+    // file: 不靠 --blocked-origins（无法表达）；阻止列表里不应出现无效的 file 模式
+    const args = JSON.parse(t["mcp_servers.browser.args"]!) as string[];
+    expect(args).not.toContain("--allow-unrestricted-file-access");
+    expect(args[args.indexOf("--blocked-origins") + 1]).not.toMatch(/file:/);
+  });
+
   it("writes [sandbox_workspace_write] with network and validated writable roots", () => {
     const def = parse(runEntrypoint({ CODEX_WRITABLE_ROOTS: "/workspace,/data/prompts,/data/workflows" }).toml);
     expect(def).toMatchObject({
