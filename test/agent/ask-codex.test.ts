@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildCodexEnv,
   buildCodexPrompt,
@@ -12,8 +12,13 @@ import {
   isMissingSessionError,
   isReplaceableAgentsMd,
   qqAccessArgs,
-  WORKSPACE_AGENTS_MD,
+  AGENTS_TEMPLATE_MARKER,
+  effectiveWritableRoots,
+  renderAgentsMd,
   WORKSPACE_AGENTS_MD_V1,
+  WORKSPACE_AGENTS_MD_V2,
+  WORKSPACE_AGENTS_STUB,
+  writeGlobalAgentsMd,
 } from "../../src/agent/tools/ask-codex.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
@@ -101,51 +106,96 @@ describe("isMissingSessionError", () => {
   });
 });
 
-describe("ensureWorkspaceAgentsMd", () => {
-  it("writes AGENTS.md once and never overwrites operator edits", async () => {
+describe("AGENTS.md", () => {
+  const opts = { dataDir: "/data", workspaceDir: "/workspace", writableRoots: ["/workspace", "/data/prompts", "/data/workflows"] };
+
+  it("global v3 template carries the marker, secrecy/reply rules, history and browser discipline", () => {
+    const md = renderAgentsMd(opts);
+    expect(md.startsWith(`${AGENTS_TEMPLATE_MARKER}\n`)).toBe(true);
+    expect(AGENTS_TEMPLATE_MARKER).toBe("<!-- cs-agent-agents-template v3 -->");
+    for (const s of ["不用 Markdown", "300 字", "未核实", "qq_recent", "qq_search", "最多调用历史工具 2 次", "绝不登录任何账号", "关闭页面",
+      "auth.json", "绝不透露环境变量", "/data/codex"]) {
+      expect(md).toContain(s);
+    }
+  });
+
+  it("renders the readable/writable directories from the effective writable roots", () => {
+    const md = renderAgentsMd(opts);
+    expect(md).toContain("  - /workspace：你的工作区");
+    expect(md).toContain("  - /data/workflows：ComfyUI 生图工作流 JSON");
+    expect(md).toContain("  - /data/prompts：意图模型的系统提示 system.md");
+    // CODEX_WRITABLE_ROOTS 不含 prompts 时不提 prompts；工作区总在列表里
+    const noPrompts = renderAgentsMd({ ...opts, writableRoots: ["/data/workflows"] });
+    expect(noPrompts).not.toContain("/data/prompts");
+    expect(noPrompts).toContain("  - /workspace：你的工作区");
+    expect(noPrompts).toContain("Only read/write: /workspace, /data/workflows.");
+    expect(renderAgentsMd({ ...opts, writableRoots: ["/srv/extra/"] })).toContain("  - /srv/extra：运维开放的可写目录");
+  });
+
+  it("effectiveWritableRoots prefers the entrypoint-validated list", () => {
+    expect(effectiveWritableRoots({ CODEX_EFFECTIVE_WRITABLE_ROOTS: "/workspace,/data/workflows" }, "/workspace,/data/prompts")).toEqual(["/workspace", "/data/workflows"]);
+    expect(effectiveWritableRoots({ CODEX_EFFECTIVE_WRITABLE_ROOTS: "" }, "/workspace,/data/prompts")).toEqual([]);
+    expect(effectiveWritableRoots({}, " /workspace , relative,/data/prompts")).toEqual(["/workspace", "/data/prompts"]);
+  });
+
+  it("writeGlobalAgentsMd rewrites $CODEX_HOME/AGENTS.md on every start", async () => {
+    const home = path.join(tmp(), "codex");
+    const file = await writeGlobalAgentsMd(home, opts);
+    expect(file).toBe(path.join(home, "AGENTS.md"));
+    writeFileSync(file, "tampered");
+    await writeGlobalAgentsMd(home, opts);
+    expect(readFileSync(file, "utf8")).toBe(renderAgentsMd(opts));
+  });
+
+  it("workspace: writes a stub once and never overwrites operator files", async () => {
     const dir = path.join(tmp(), "ws");
     expect(await ensureWorkspaceAgentsMd(dir)).toBe(true);
-    expect(readFileSync(path.join(dir, "AGENTS.md"), "utf8")).toBe(WORKSPACE_AGENTS_MD);
-    expect(WORKSPACE_AGENTS_MD).toMatch(/auth\.json/);
+    expect(readFileSync(path.join(dir, "AGENTS.md"), "utf8")).toBe(WORKSPACE_AGENTS_STUB);
+    expect(WORKSPACE_AGENTS_STUB).toContain("规则见全局 AGENTS.md；本目录是你的工作区");
+    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
     writeFileSync(path.join(dir, "AGENTS.md"), "custom");
     expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
     expect(readFileSync(path.join(dir, "AGENTS.md"), "utf8")).toBe("custom");
   });
 
-  it("v2 template carries the marker, reply rules, history and browser discipline", () => {
-    expect(WORKSPACE_AGENTS_MD.startsWith("<!-- cs-agent-agents-template v2 -->\n")).toBe(true);
-    for (const s of ["不用 Markdown", "300 字", "未核实", "qq_recent", "qq_search", "最多调用历史工具 2 次", "绝不登录任何账号", "关闭页面", "auth.json"]) {
-      expect(WORKSPACE_AGENTS_MD).toContain(s);
-    }
-  });
-
-  it("upgrades an untouched v1 file (also with CRLF) or an older marker; keeps edited and current files", async () => {
+  it("workspace: replaces a file exactly equal to the v1 or v2 template (CRLF ok) with the stub", async () => {
     const dir = path.join(tmp(), "ws");
     mkdirSync(dir, { recursive: true });
     const file = path.join(dir, "AGENTS.md");
-    writeFileSync(file, WORKSPACE_AGENTS_MD_V1.replace(/\n/g, "\r\n"));
-    expect(await ensureWorkspaceAgentsMd(dir)).toBe(true);
-    expect(readFileSync(file, "utf8")).toBe(WORKSPACE_AGENTS_MD);
-    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false); // 已是 v2
-
-    writeFileSync(file, "<!-- cs-agent-agents-template v1 -->\n旧模板");
-    expect(await ensureWorkspaceAgentsMd(dir)).toBe(true);
-    expect(readFileSync(file, "utf8")).toBe(WORKSPACE_AGENTS_MD);
-
-    const edited = WORKSPACE_AGENTS_MD_V1 + "\n- 运维加的一条规则\n";
-    writeFileSync(file, edited);
-    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
-    expect(readFileSync(file, "utf8")).toBe(edited);
-
-    const editedV2 = WORKSPACE_AGENTS_MD + "\n- 运维改过的 v2\n";
-    writeFileSync(file, editedV2);
-    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
-    expect(readFileSync(file, "utf8")).toBe(editedV2);
+    for (const old of [WORKSPACE_AGENTS_MD_V1, WORKSPACE_AGENTS_MD_V2, WORKSPACE_AGENTS_MD_V1.replace(/\n/g, "\r\n"), `${WORKSPACE_AGENTS_MD_V2}\n\n`]) {
+      writeFileSync(file, old);
+      expect(await ensureWorkspaceAgentsMd(dir)).toBe(true);
+      expect(readFileSync(file, "utf8")).toBe(WORKSPACE_AGENTS_STUB);
+    }
   });
 
-  it("the live workspace AGENTS.md (no marker) is recognised as the v1 template", () => {
+  it("workspace: keeps a modified old template (marker present but text differs) and logs a warning", async () => {
+    const dir = path.join(tmp(), "ws");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "AGENTS.md");
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      for (const edited of [
+        `${WORKSPACE_AGENTS_MD_V2}\n- 运维改过的 v2\n`,
+        "<!-- cs-agent-agents-template v1 -->\n旧模板但改过",
+        `${WORKSPACE_AGENTS_MD_V1}\n- 运维加的一条规则\n`,
+      ]) {
+        writeFileSync(file, edited);
+        expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
+        expect(readFileSync(file, "utf8")).toBe(edited);
+      }
+      const warns = err.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("modified old cs-agent template"));
+      expect(warns).toHaveLength(3);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("the live workspace AGENTS.md, if present, is an old template or a stub", () => {
     const live = path.resolve(FIXTURES, "../../../workspace/AGENTS.md");
-    if (existsSync(live)) expect(isReplaceableAgentsMd(readFileSync(live, "utf8"))).toBe(true);
+    if (!existsSync(live)) return;
+    const text = readFileSync(live, "utf8");
+    expect(isReplaceableAgentsMd(text) || text.replace(/\r\n/g, "\n") === WORKSPACE_AGENTS_STUB).toBe(true);
   });
 });
 

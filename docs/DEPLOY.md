@@ -68,7 +68,8 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 | `./data/codex-session.json` | 固定 codex 会话 id；删掉它，下一条请求就会新建会话 |
 | `./data/images/<ticket>/` | 生成的图片 |
 | `./data/*`（QQBridge） | 票据与去重 SQLite |
-| `./workspace/` | codex 工作目录。启动时若没有 `AGENTS.md` 会写入一份（安全规则、QQ 回复格式、聊天记录工具与浏览器使用纪律）。模板带版本标记 `<!-- cs-agent-agents-template v2 -->`：旧版模板（带更早的标记，或与 v1 模板全文相同）会自动升级（日志 `upgraded workspace AGENTS.md template`）；你修改过的文件保持不动 |
+| `./data/codex/AGENTS.md` | codex 的全局规则（安全规则、QQ 回复格式、聊天记录工具与浏览器使用纪律），**受管文件**：agent 每次启动按实际生效的可写目录重写（版本标记 `<!-- cs-agent-agents-template v3 -->`，日志 `wrote codex global AGENTS.md`）。codex 执行的命令对 `/data/codex` 只读，改不了它；要改规则请改代码里的模板 |
+| `./workspace/` | codex 工作目录（可写）。没有 `AGENTS.md` 时写入一份占位说明（“规则见全局 AGENTS.md；本目录是你的工作区”）。与旧版 v1 / v2 模板**全文相同**（忽略 CRLF）的文件会替换为占位说明（日志 `replaced old workspace AGENTS.md template with a stub`）；带旧模板标记但被改过的文件保持不动，并记 warn `workspace AGENTS.md is a modified old cs-agent template`。codex 会同时读取全局与工作区的 `AGENTS.md`（全局在前）；工作区这份 codex 自己能改，所以规则不放这里 |
 
 ### 聊天记录（统一上下文）
 
@@ -143,6 +144,7 @@ writable_roots = ["/workspace", "/data/prompts", "/data/workflows"] # CODEX_WRIT
 - **写入**：只能写 `/workspace`、`/data/prompts`（热加载的系统提示 `system.md`）、`/data/workflows`（生图工作流），以及 codex 默认可写的 `/tmp`。`/data` 本身、`/data/codex`（auth.json、sessions）、`/data/*.sqlite`、`/data/images` 都不可写；入口脚本先规范化每一项（合并重复的 `/`，去掉 `/./`、末尾的 `/.` 与 `/`），再与规范化后的 `DATA_DIR` / `CODEX_HOME` 比较，拒绝 `/`、`/data` 本身及其上级目录、`/data/codex` 及其子目录、`/data/images` 及其子目录、`*.sqlite`、任何含 `..` 或非法字符的项，并打印 `rejected CODEX_WRITABLE_ROOTS entry`（例如 `/data//`、`/data/.`、`/data/codex/.`、`/data/images//x` 都会被拒绝）。
 - **工作流**：`/data/workflows/` 不存在时，启动会从镜像的 `/app/workflows/` 复制一份（已存在则绝不覆盖）。默认 `COMFY_WORKFLOW_FILE=/data/workflows/qwen-image-2.1-turbo-api.json`。旧值 `/app/workflows/…` 仍然有效，只是 codex 改不了那份。
 - **网络**：命令可以联网（`network_access = true`），因此能直接访问宿主机的 ComfyUI `host.docker.internal:8188`（无鉴权，可以提交任务、读取输出）。NapCat（3000/3001）需要 Bearer token，codex 拿不到。
+- **规则文件**：codex 从 `$CODEX_HOME/AGENTS.md`（`/data/codex/AGENTS.md`，受管、命令只读）读取全局规则，再叠加工作区的 `/workspace/AGENTS.md`。全局规则里的“只读写下列目录”按入口脚本导出的 `CODEX_EFFECTIVE_WRITABLE_ROOTS`（规范化、校验后的 `CODEX_WRITABLE_ROOTS`）渲染：默认列出 `/workspace`、`/data/prompts`（system.md）、`/data/workflows`（ComfyUI 工作流 JSON）；`CODEX_WRITABLE_ROOTS` 去掉 prompts 后规则里也不再提它。
 - **读取（deny_read）**：入口脚本每次启动重写 `/etc/codex/requirements.toml`（镜像内 `/etc/codex` 归 node 所有；写不进去时容器以退出码 1 退出）：
 
   ```toml

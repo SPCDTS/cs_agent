@@ -196,6 +196,8 @@ if [ ! -f "$CODEX_HOME_DIR/auth.json" ]; then
 fi
 
 export CODEX_HOME="$CODEX_HOME_DIR"
+# 实际生效的可写目录（规范化、校验后）：agent 据此渲染 $CODEX_HOME/AGENTS.md 中的可读写目录
+export CODEX_EFFECTIVE_WRITABLE_ROOTS="$WRITABLE_ROOTS_CSV"
 
 if [ "$#" -gt 0 ]; then
   exec "$@"

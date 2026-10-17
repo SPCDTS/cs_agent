@@ -10,7 +10,7 @@ import { createAgentModels, openHarness, resolveThinkingLevel } from "./agent/ha
 import { createCsAgentExtension } from "./agent/extension.js";
 import { ensureDefaultSystemPrompt, loadSystemPrompt, systemPromptFile } from "./agent/prompt.js";
 import { Dispatcher } from "./agent/dispatch.js";
-import { CodexRunner, createAskCodexTool, ensureWorkspaceAgentsMd } from "./agent/tools/ask-codex.js";
+import { CodexRunner, createAskCodexTool, effectiveWritableRoots, ensureWorkspaceAgentsMd, writeGlobalAgentsMd } from "./agent/tools/ask-codex.js";
 import { createGenerateImageTool, HttpImageBackend, McpImageBackend, type ImageBackend } from "./agent/tools/generate-image.js";
 import { createReplyQQTool } from "./agent/tools/reply-qq.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
@@ -59,8 +59,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // codex 读取的工作区规则（不泄露凭据/环境变量）；已存在则不覆盖
-  if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md", { dir: cfg.WORKSPACE_DIR });
+  // codex 规则：受管的全局 $CODEX_HOME/AGENTS.md（对 codex 命令只读，每次启动按实际可写目录重写）；
+  // 工作区只放一份占位说明（不存在或是未修改的旧模板时写入）
+  const writableRoots = effectiveWritableRoots(process.env, cfg.CODEX_WRITABLE_ROOTS);
+  const agentsFile = await writeGlobalAgentsMd(cfg.codexHome, { dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, writableRoots });
+  log.info("wrote codex global AGENTS.md", { file: agentsFile, writable_roots: writableRoots });
+  if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md stub", { dir: cfg.WORKSPACE_DIR });
   // 可热改的系统提示（${DATA_DIR}/prompts/system.md）；已存在则不覆盖
   if (await ensureDefaultSystemPrompt(cfg.DATA_DIR)) log.info("wrote default system prompt", { file: systemPromptFile(cfg.DATA_DIR) });
 

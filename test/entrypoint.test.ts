@@ -20,12 +20,13 @@ function runEntrypoint(env: Record<string, string>) {
 function runEntrypointIn(
   dir: string,
   env: Record<string, string>,
-): { toml: string; requirements: string; stderr: string; status: number | null; dataDir: string } {
+  args: string[] = ["true"],
+): { toml: string; requirements: string; stdout: string; stderr: string; status: number | null; dataDir: string } {
   const script = path.join(dir, "entrypoint.sh");
   writeFileSync(script, readFileSync(path.join(ROOT, "scripts", "entrypoint.sh"), "utf8").replace(/\r/g, ""));
   const data = path.join(dir, "data");
   const ws = path.join(dir, "ws");
-  const r = spawnSync("sh", [posix(script), "true"], {
+  const r = spawnSync("sh", [posix(script), ...args], {
     env: {
       ...process.env, DATA_DIR: shPath(data), WORKSPACE_DIR: shPath(ws), WORKFLOWS_SRC: "/nonexistent",
       CODEX_REQUIREMENTS_FILE: shPath(path.join(dir, "etc-codex", "requirements.toml")), ...env,
@@ -44,7 +45,7 @@ function runEntrypointIn(
   } catch {
     /* 同上 */
   }
-  return { toml, requirements, stderr: r.stderr, status: r.status, dataDir: shPath(data) };
+  return { toml, requirements, stdout: r.stdout, stderr: r.stderr, status: r.status, dataDir: shPath(data) };
 }
 
 /** 极简 TOML 读取：返回 { "section.key": value }，只覆盖本文件用到的语法。 */
@@ -140,6 +141,14 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(r.status).toBe(0);
     expect(parse(r.toml)["sandbox_workspace_write.writable_roots"]).toBe(`["/srv/prompts", "/srv/wf", "${data}/workflows"]`);
     for (const b of bad) expect(r.stderr).toContain(`rejected CODEX_WRITABLE_ROOTS entry '${b}'`);
+  });
+
+  it("exports the normalized, validated writable roots for rendering AGENTS.md", () => {
+    const dir = tmp("cs-entry-");
+    const data = shPath(path.join(dir, "data"));
+    const r = runEntrypointIn(dir, { CODEX_WRITABLE_ROOTS: `/workspace/,${data}//workflows,${data}/codex` }, ["sh", "-c", 'printf %s "$CODEX_EFFECTIVE_WRITABLE_ROOTS"']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe(`/workspace,${data}/workflows`);
   });
 
   it("writes the managed requirements.toml deny_read list for the codex command sandbox", () => {
