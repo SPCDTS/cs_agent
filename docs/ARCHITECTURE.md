@@ -7,9 +7,11 @@
 一个基于 **pi-durable** 的最小 agent，Docker 单容器部署，只做一件事：
 
 1. 通过内置 **QQBridge** 工具从 QQ（NapCat OneBot v11）接收消息；
-2. 对消息做**意图识别**；
-3. **纯粹生图请求** → 调用 **ComfyUI 的 MCP**（`comfy-mcp`）生成图片，把图片回到原 QQ 会话；
-4. **其他请求** → 转发给**同一容器内**的 `codex` CLI 的一个**固定会话**，把 codex 的最终回答回到原 QQ 会话。
+2. **规则分流**（无模型，v3）：消息以 `IMAGE_PREFIXES`（默认 `奶龙:` / `奶龙：`）开头 → 前缀之后的全部文本作为提示词；
+3. **生图路径** → 调用 **ComfyUI 的 MCP**（`comfy-mcp`）生成图片，以固定模板把图片回到原 QQ 会话；
+4. **其他消息** → 交给**执行 agent**：后端可切换（`AGENT_BACKEND=codex|pi`，可按会话覆盖），默认是**同一容器内**的 `codex` CLI 固定线程（owner / shared），其回答经后处理后回到原 QQ 会话；codex 可经 `image_gen` MCP 自行生图，图片随回复发送。
+
+> v2 的"意图识别模型选工具"（`generate_image` / `ask_codex` / `reply_qq` 三个模型工具与热加载 `system.md`）已在 v3 移除，见 §5.2 与 §10。
 
 ## 2. 外部依赖与事实（已核实，2026-10-17）
 
@@ -23,29 +25,35 @@
 | ComfyUI（宿主机） | `D:\Tools\ComfyLocal\start.ps1` 以 `--listen 127.0.0.1 --port 8188` 后台启动；容器经 `host.docker.internal:8188` 可达，无需改为 0.0.0.0 |
 | 本机凭据 | 无 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`；`~/.codex/auth.json` 为 `auth_mode=chatgpt`（含 tokens）。因此 agent 的意图模型默认走 `openai-codex` provider 复用 ChatGPT OAuth |
 
-## 3. 总体结构
+## 3. 总体结构（v3）
 
 ```
 QQ 用户 ──NapCat(OneBot v11)──► QQBridge(ws 收 / http 发)
-                                     │ 授权 + @检测 + 去重 + 票据(pending)
+                                     │ 授权 + @检测 + 去重 + 票据(pending) + 消息库入库
                                      ▼
-                        pi-durable Harness (SQLite 持久化, /data/agent.sqlite)
-                        每条 QQ 消息 = 一个独立 durable conversation
-                        requestId = ticket  →  exactly-once
-                                     │
-                     模型 (openai-codex provider) 按系统提示选择唯一动作
-                 ┌───────────────────┴────────────────────┐
-         generate_image(prompt)                      ask_codex(prompt)
-         ──► comfy-mcp(stdio MCP 子进程)              ──► codex exec [resume <id>] --json
-             COMFYUI_URL=host.docker.internal:8188        CODEX_HOME=/data/codex, cwd=/workspace
-             fetch_outputs → /data/images/<ticket>/       互斥队列(固定会话一次一轮)
-                 └───────────────────┬────────────────────┘
+                     Dispatcher：规则分流（router.ts，无模型）→ 写 TicketDoc(route/prefix/prompt)
+                     同一 scope 严格 FIFO，不同 scope 并行（≤ AGENT_CONCURRENCY）
+                     pi-durable Harness（SQLite /data/agent.sqlite）：每条消息一个 ownerless 会话 + 一个 durable 任务
+                 ┌───────────────────┴──────────────────────────────┐
+        route=image / image_usage                              route=agent
+        任务 cs.image：generate → reply                        任务 cs.agent：handle → postprocess → reply
+        generate：comfy-mcp(stdio) 或 HTTP                     handle：AgentBackend（AGENT_BACKEND / OVERRIDES）
+          COMFYUI_URL 经 127.0.0.1 loopback 转发                  codex：codex exec [resume] 固定线程 owner/shared
+          → /data/images/<ticket>/                                  -c QQ_ACCESS / IMAGE_TICKET_DIR，effort=CODEX_REASONING_EFFORT
+        reply：固定模板（成功 / 服务不可用 / 超时 /              MCP：qq_context、image_gen（→ /data/images/<ticket>/）、browser
+               内容被拒 / 其他）+ 图                              回合后收集新图片（≤4，魔数校验）
+                                                                  pi：第 3 组（当前占位，选中即回复失败模板）
+                                                                postprocess：代码清洗；codex 且 CODEX_REPLY_MODE=relay 时
+                                                                  先经意图模型整理（20 s，失败回退清洗）
+                 └───────────────────┬──────────────────────────────┘
                                      ▼
-                        reply_qq(text, image_paths?)  （ticket 绑定在会话内，模型不可改目标）
-                                     │ control: { terminate: true }
+                  QQBridge.reply(ticket, text, images)（票据幂等：sent 不重发，uncertain 不自动重试）
                                      ▼
                               QQ 原私聊 / 原群(@原发送者)
 ```
+
+每个阶段把结果写进 TicketDoc，并在同一次 `runtime.commit` 内推进任务检查点：进程在阶段之间崩溃时任务从检查点继续，
+已完成的生图 / 后端调用不会重跑，回复不会重发。
 
 ## 4. 目录与模块归属
 
@@ -67,11 +75,16 @@ cs_agent/
 │  │  └─ index.ts                导出 createQQBridge
 │  ├─ agent/                     ★ Agent A
 │  │  ├─ harness.ts              createModels + openai-codex provider + 注册表 + SQLite storage
-│  │  ├─ extension.ts            defineExtension("cs-agent")：section(系统提示) + 三个工具
-│  │  ├─ tools/generate-image.ts  MCP client(stdio) → comfy-mcp: generate_image / job / fetch_outputs
-│  │  ├─ tools/ask-codex.ts       固定 codex 会话；互斥队列；JSONL 解析；会话 id 持久化
-│  │  ├─ tools/reply-qq.ts        从会话文档读 ticket → QQBridge.reply → terminate
-│  │  └─ dispatch.ts             QQ message → 新建 durable conversation → submit(requestId=ticket)
+│  │  ├─ extension.ts            defineExtension("cs-agent")：注册两个 durable 任务（v3 无模型工具）
+│  │  ├─ router.ts               规则分流（IMAGE_PREFIXES）
+│  │  ├─ tasks.ts                defineTask：cs.image（generate → reply）、cs.agent（handle → postprocess → reply）
+│  │  ├─ backends/               AgentBackend 接口、AGENT_BACKEND 选择、codex 适配、pi 占位
+│  │  ├─ codex-runner.ts         固定 codex 线程 owner/shared；互斥队列；JSONL 解析；线程 id 持久化；AGENTS.md
+│  │  ├─ image-gen.ts            生图实现：comfy-mcp(stdio) / HTTP，失败分类（任务与 image_gen MCP 共用）
+│  │  ├─ image-collect.ts        回合内新图片收集（≤4，魔数校验）
+│  │  ├─ reply-postprocess.ts    代码清洗 + relay 整理
+│  │  └─ dispatch.ts             admit（会话 + TicketDoc + 索引）→ scope FIFO → 建任务 → waitForTask → 兜底
+│  ├─ mcp/                       codex 的 stdio MCP：qq-context.ts（聊天记录）、image-gen.ts（生图）
 │  └─ auth/codex-oauth.ts        把 /data/codex/auth.json 的 ChatGPT tokens 映射为 pi-ai 凭据
 ├─ test/                         vitest；qq/ 下的测试归 Agent B，其余归 Agent A
 └─ scripts/                      init-auth.ps1（把宿主机 ~/.codex/auth.json 复制进 ./data/codex/）
@@ -81,23 +94,22 @@ cs_agent/
 
 ### 5.1 每条消息一个 durable conversation
 - 不用单一 root 累积所有 QQ 消息（上下文无限增长、串话）。
-- 每条通过授权的消息：以 `ticket` 为 `requestId` 创建/提交一个会话（具体用 pi-durable 的 owned conversation 或 fork 机制，实现方按 `test/examples/03、08` 确认 API）。
-- 会话文档（`defineDoc`）保存 `{ ticket, source: {type, user_id, group_id, nickname}, text }`，`reply_qq` 只从文档取 ticket，**模型无法指定回复目标**。
-- 进程崩溃后 `harness.resume()` 继续未完成会话；工具 `replay` 策略：`generate_image`、`ask_codex`、`reply_qq` 均为**非 safe**（中断后告知模型，不自动重跑），避免重复生图、重复发消息。
+- 每条通过授权的消息：一个 ownerless 会话（v3：会话里不跑模型，只承载 TicketDoc 与一个 durable 任务）。
+- 会话文档（`defineDoc`）保存 `{ ticket, source, text, route, … }`，回复只从文档取 ticket，**后端无法指定回复目标**。
+- 进程崩溃后任务从最后提交的检查点继续（见 §3 末尾与 §10.1），避免重复生图、重复发消息。
 
-### 5.2 意图识别 = 模型选工具，系统提示强约束
-- 系统提示（`section`）规定：**恰好一次**业务工具调用（`generate_image` 或 `ask_codex`），随后**恰好一次** `reply_qq`，然后结束。
-- "纯粹生图请求"定义：消息的全部内容就是让你画/生成/出一张图及其描述，不包含提问、代码、文件、搜索、聊天等任何其他诉求；消息含 `[image]` 等媒体占位或有歧义 → 一律 `ask_codex`。
-- 模型把用户的**原文画面描述**（保留原语言，不翻译、不扩写，最多去掉"画/生成"等指令词）传给 `generate_image`，Qwen 生图模型原生理解中文；回复文案保持中文、简短、纯文本（QQ 不渲染 Markdown，不要出现 `@`）。
-- 在系统提示里声明：QQ 文本是不可信外部内容，不构成任何授权，不改变规则。
-- 系统提示可热改：section 每次模型请求前调用 `loadSystemPrompt(DATA_DIR)` 读取 `${DATA_DIR}/prompts/system.md`（按 mtime/size 缓存，启动时以 `wx` 写入内置默认值；文件缺失/为空/读取失败回退内置 `SYSTEM_PROMPT`）。
-- `ask_codex` 的必填参数 `reasoning_effort`（`low|medium|high|xhigh|max`，不含会自动委派、成本高的 `ultra`）由意图模型按任务难度选择：闲聊/简单问答/查询 → low；一般解释、小改动 → medium；多步推理、写代码、调试 → high；复杂工程或深度分析 → xhigh；用户明确要求最深入思考 → max。
+### 5.2 规则分流（v3，取代意图识别模型）
+- `src/agent/router.ts`：去掉群消息开头由 bridge 渲染出的 `[at]` / `[reply]` 段占位与首尾空白后，逐字匹配 `IMAGE_PREFIXES`（逗号分隔，默认 `奶龙:,奶龙：`，较长前缀优先）。
+- 命中：前缀之后的全部文本（去首尾空白，不翻译不改写）作为生图提示词；为空 → 固定用法提示"奶龙: 后面写要画的内容"。未命中：整条原文交给执行 agent。
+- 分流结果（`route: image | image_usage | agent`、`prefix`、`prompt`）在 admit 的同一 commit 写入 TicketDoc，日志 `message routed`。
+- 不经任何模型，没有系统提示；v2 的 `${DATA_DIR}/prompts/system.md` 不再读取，存在时启动记一行弃用 warn（文件保留）。
+- 执行 agent 的后端选择：`AGENT_BACKEND`（默认 codex）+ `AGENT_BACKEND_OVERRIDES`（`scope=backend`，非法项启动失败）。
 
 ### 5.3 固定 codex 会话
 - `CODEX_HOME=/data/codex`（容器卷），工作目录 `/workspace`（容器卷）。
 - 首轮：`codex exec --json -o <out> -C /workspace --skip-git-repo-check -s workspace-write "<prompt>"`，从 JSONL 事件中取 thread/session id（`thread.started` 类事件；实现方以实际输出为准），持久化到 `/data/codex-session.json`。
 - 之后：`codex exec resume <id> --json -o <out> ... "<prompt>"`。
-- 每轮推理强度：首轮与 resume 均追加 `-c model_reasoning_effort="<reasoning_effort>"`（由意图模型按请求选择，见 5.2），覆盖 `config.toml` 中的默认值；`ask_codex done` 日志记录所选档位。若 resume 因会话丢失失败 → 新建会话并覆盖记录，回复中不暴露内部错误细节。
+- 每轮推理强度：v3 固定取 `CODEX_REASONING_EFFORT`，首轮与 resume 均追加 `-c model_reasoning_effort="<档位>"`（v2 曾由意图模型按请求选择）。若 resume 因会话丢失失败 → 新建会话并覆盖记录，回复中不暴露内部错误细节。
 - **互斥队列**：固定会话一次只跑一轮，其余排队；单轮超时可配（默认 600 s），超时后 kill 进程树并回复用户"处理超时"。
 - 容器内 `config.toml` 为受管文件，入口脚本每次启动按环境变量重写最小版本（`model`、`model_reasoning_effort` 来自环境变量，默认 `gpt-6.1-sol` / `high`；后者只是缺省值，每轮被上面的 `-c` 覆盖），**不**继承宿主机的 Windows 路径配置。
 - 传给 codex 的 prompt 带来源标注（私聊/群、昵称），不带 QQ 号之外的任何授权语义。
@@ -106,7 +118,7 @@ cs_agent/
 - 容器内以 stdio 启动 `comfy-mcp`（Python venv），`COMFYUI_URL=http://host.docker.internal:8188`，`COMFY_BIN=/opt/comfy/bin/comfy`。
 - 用 `@modelcontextprotocol/sdk` Client 调用：`server_info`（启动自检）→ `generate_image(prompt, wait=False)` → `job(action="wait")` → `fetch_outputs` 到 `/data/images/<ticket>/`。
 - 风险：`comfy run-template` 对远端目标是否需要本地 ComfyUI 工程目录（`COMFY_PROJECT`）**需实测**。若 MCP 路径在容器内不可行，实现 **fallback**：直接调 ComfyUI HTTP（`POST /prompt` 默认 t2i 工作流 → 轮询 `/history/<id>` → `GET /view`），并在报告中明确说明走了 fallback。
-- 生图超时默认 300 s；失败时 `reply_qq` 一句话告知失败原因类别。
+- 生图超时默认 300 s；失败时按类别回复固定模板（服务不可用 / 超时 / 内容被拒 / 其他）。
 
 ### 5.5 QQBridge（相对 D:\Tools\QQBridge 的取舍）
 保留：真实 `at` 段检测、自回声过滤、`self_id:type:group_id:user_id:message_id` 去重、授权模型（`allowUsers` 任意处可触发；`allowGroups` 内成员需真实 @）、票据决定性 ID 与 `pending→sending→sent|uncertain` 幂等机制、群回复 `[at][text "\n"+正文]`、图片 `base64://` 发送与魔数校验、"结果不确定不自动重试"。
@@ -158,7 +170,7 @@ LOG_LEVEL=info
 ## 9. 测试要求
 
 - **qq/**：用本地假 OneBot 服务器（`ws` + `node:http`）测试：授权规则、@ 检测、去重、重连、票据幂等（sent / uncertain / 并发锁）、群回复段格式、图片校验。
-- **agent/**：用 pi-ai `faux` provider 驱动路由测试：生图消息 → 只调用 `generate_image` 后 `reply_qq`；普通消息 → 只调用 `ask_codex` 后 `reply_qq`；`ask_codex` 用 PATH 上的假 `codex` 脚本（输出固定 JSONL）测首轮取 id、resume、超时、互斥；`generate_image` 用假 MCP server 测。
+- **agent/**（v3）：规则分流（半/全角、前导空白与 `[at]`、空提示、未命中）；生图任务崩溃恢复（阶段间关闭 harness 后重开：一次生图、一次发送）；任务失败后重跑跳过已完成阶段；scope FIFO 与跨 scope 并行；codex 后端经假 `codex` 脚本（`QQ_ACCESS` / `IMAGE_TICKET_DIR` / 固定 effort、图片收集 ≤4）；`image_gen` MCP 经 stdio（假 ComfyUI HTTP）与假 comfy-mcp；后处理清洗与 relay 回退（faux provider）；后端选择与 pi 占位。
 - `docker build` 必须成功；`docker compose config` 校验通过。
 - 不向真实群发测试消息。
 
@@ -188,6 +200,26 @@ LOG_LEVEL=info
 | codex 命令禁读 | 入口脚本每次启动重写 `/etc/codex/requirements.toml` 的 `[permissions.filesystem] deny_read`（`/data/codex/auth.json`、`sessions`、`history.jsonl`、`log`、`shell_snapshots`、`memories`、`/data/codex/*.sqlite*`、`/data/*.sqlite*`、`/data/images`、`/data/codex-session.json*`、`/data/codex-threads.json`）；镜像内 `/etc/codex` 归 node；写入失败则拒绝启动 | 评审 R2：沙箱原本可读凭据与数据库。codex 0.163 只认系统级 requirements（`$CODEX_HOME/requirements.toml` 无效，`default_permissions` 与 `sandbox_mode` 互斥）；不能禁读整个 CODEX_HOME（arg0 辅助程序在 `tmp/`）。实测见 DEPLOY §7 |
 | AGENTS.md 位置与版本 | 规则模板 v3（首行 `<!-- cs-agent-agents-template v3 -->`）写到 `$CODEX_HOME/AGENTS.md`，agent 每次启动按 `CODEX_EFFECTIVE_WRITABLE_ROOTS`（entrypoint 导出）渲染可读写目录后重写；`/workspace/AGENTS.md` 只在缺失或与 v1/v2 模板全文相同（忽略 CRLF）时写入占位说明，带旧标记但被改过的保留并记 warn | 评审 L1：工作区可写，规则放那里 codex 自己能改；`/data/codex` 对命令只读。`codex debug prompt-input` 实测全局与工作区 AGENTS.md 都会注入 |
 | 新增环境变量 | `COMFY_MODE`、`COMFY_MCP_BIN`、`COMFY_BIN`、`COMFY_CHECKPOINT`、`COMFY_WORKFLOW_FILE`、`COMFY_PROMPT_NODE`、`COMFY_LOOPBACK_PORT`、`CODEX_BIN`、`CODEX_SANDBOX`、`AGENT_THINKING_LEVEL`、`AGENT_CONCURRENCY`、`HEALTH_PORT`、`HEALTH_HOST`；设计 v2 第 1 组：`QQ_OWNER`、`HISTORY_RAW_DAYS`、`HISTORY_RAW_HARD_MAX_DAYS`、`HISTORY_SUMMARY_DAYS`、`HISTORY_SUMMARY_HOUR`、`QQ_CONTEXT_MAX_CHARS`、`CODEX_WEB_SEARCH`、`CODEX_WEB_SEARCH_CONTEXT`、`CODEX_ROLLOUT_MAX_MB`、`CODEX_THREAD_MAX_DAYS`、`CODEX_BROWSER` | 见 `.env.example` |
+
+### 10.1 v3（设计稿 §4.1–4.4、§4.7，第 2 组）
+
+| 项 | 实际做法 | 原因 |
+|---|---|---|
+| 分流 | `router.ts` 规则分流，取代意图模型；匹配前先去掉开头的 `[at]` / `[reply]` 占位（bridge 并不剥离真实 at 段，而是渲染为 `[at]`） | 设计稿 §4.1；群消息开头总有 `[at]` |
+| durable 任务 | `tasks.ts`：`defineTask` 定义 `cs.image`（generate → reply）与 `cs.agent`（handle → postprocess → reply），经扩展的 `tasks` 注册；派发器轮到某票据时 `tx.createTask(…, {ownership:{kind:"conversation"}, conversationId})`，任务 id 记入 DispatchDoc，`harness.waitForTask` 等待 | 设计稿 §4.2 / §4.3 |
+| 检查点 | 每阶段把结果（`imageResult` / `agentResult` / `replyDraft` / `replyText`）写进 TicketDoc，并在同一 `runtime.commit` 里返回下一阶段的检查点；新任务（上一个任务失败后重跑）也先读 TicketDoc 跳过已完成阶段；generate 阶段若票据目录里已有有效图片（写完图片、提交前崩溃）直接复用；进程关闭时阶段抛出而不提交 | 崩溃不重复生图 / 不重复发送 |
+| reply 阶段 | 发送前就失败（票据仍 pending）时任务内退避重试（≤3 次，次数在检查点）；sending/uncertain 一律不重发，任务以 failed 结束；任务失败且票据仍 pending → 派发器发兜底回复 | 沿用票据幂等 |
+| 顺序 | 派发器每个 scope 一条 promise 链（FIFO），轮到时再占全局并发槽位（`AGENT_CONCURRENCY`）；DispatchDoc 条目带 `scope` 与递增 `seq`，`recover()` 按 seq 重新入队；启动时先 `recover()` 再 `harness.resume()` | 设计稿 §4.7 |
+| v2 遗留 | 无 `taskId` 的旧索引条目：先 `conversation.abort()` 中止旧模型会话，再按原文重新分流建任务 | 升级时在途消息 |
+| 后端 | `backends/types.ts`（`AgentBackend`，结果可带 `images`）、`select.ts`（`AGENT_BACKEND` / `AGENT_BACKEND_OVERRIDES`，`PiBackendStub` 抛 `pi backend not implemented yet (group 3)`）、`codex.ts`（适配 `CodexRunner`） | 设计稿 §4.3 / §4.4 |
+| codex 适配 | `-c model_reasoning_effort`（`CODEX_REASONING_EFFORT`）、`-c mcp_servers.qq_context.env.QQ_ACCESS`、`-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="<DATA_DIR>/images/<ticket>"`（路径只允许 `[A-Za-z0-9._/-]`、不含 `..`）；回合前记下票据目录已有文件，回合后取新增的普通文件（不跟随软链接），按 QQBridge 口径校验大小与魔数，按 mtime 取前 4 张 | 设计稿 §4.4 |
+| image_gen MCP | `src/mcp/image-gen.ts`（stdio，低层 `Server`）：工具 `generate_image(prompt)`，非只读注解；输出目录只来自 `IMAGE_TICKET_DIR`，必须是 `${DATA_DIR}/images/` 的直接子目录（realpath 复核），否则拒绝；每进程（每回合）≤4 次；返回本次新增的文件名；后端配置用 `loadConfig` 解析透传的 `COMFY_*`，mcp 模式下非 loopback 的 `COMFYUI_URL` 改走 `http://127.0.0.1:COMFY_LOOPBACK_PORT`（agent 主进程的 loopback 转发；codex 及其 MCP 子进程与主进程同一网络命名空间） | 复用同一生图实现 |
+| 受管 config.toml | 新增 `[mcp_servers.image_gen]`（`tool_timeout_sec = COMFY_TIMEOUT_SEC + 30`，审批模式同 `CODEX_MCP_APPROVAL_MODE`）与 `[mcp_servers.image_gen.env]`（`DATA_DIR` + 已设置的 `COMFY_MODE`/`COMFYUI_URL`/`COMFY_MCP_BIN`/`COMFY_BIN`/`COMFY_CHECKPOINT`/`COMFY_WORKFLOW_FILE`/`COMFY_PROMPT_NODE`/`COMFY_TIMEOUT_SEC`/`COMFY_LOOPBACK_PORT`/`LOG_LEVEL`；含引号、反斜杠或非可打印字符的值告警跳过） | codex 给 MCP 子进程的环境只有少量默认变量 + env 表 |
+| AGENTS.md | 模板 v4：新增"生图（image_gen）"一条（图片随回复自动发送，回复只需一句说明）；`/data/prompts` 说明改为 system.md 已弃用 | 设计稿 §4.4 |
+| 后处理 | `reply-postprocess.ts`：去代码围栏行（保留内容）、标题符号、表格竖线/分隔行、加粗与行内代码标记；`@` 换为全角 `＠`；压缩空行；`fitText` ≤4000 UTF-16。codex 后端 `CODEX_REPLY_MODE=relay`（默认）先用意图模型（5 行提示，20 s 超时）整理再清洗，失败回退清洗；`direct` 只清洗。`CODEX_REPLY_SANITIZE` 未引入：清洗在 v3 中总是开启 | 设计稿 §4.3 |
+| 模型工具退场 | 删除 `generate_image` / `ask_codex` / `reply_qq` 工具、`claimBusinessCall` 与意图系统提示；`CodexRunner` 移至 `src/agent/codex-runner.ts`，生图实现移至 `src/agent/image-gen.ts` | 设计稿 §7 第 2 组 |
+| 消息库机器人行 | 生图：`completeReply(action=generate_image, detail=prompt)`；codex 后端：`ask_codex`（detail = `CODEX_REASONING_EFFORT`）；用法提示与 pi：`reply`；业务失败或兜底记 `失败` | 统一上下文 §2.4 |
+| 新增环境变量 | `IMAGE_PREFIXES`、`AGENT_BACKEND`、`AGENT_BACKEND_OVERRIDES`、`CODEX_REPLY_MODE` | 见 `.env.example` |
 
 已实测：容器内 `codex exec`（OAuth + workspace-write 沙箱）正常；容器内经 mcp 与 http 两条路径均生成真实 PNG（约 10–17 s）。
 
