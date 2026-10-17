@@ -3,12 +3,12 @@ import { DEFAULT_IMAGE_PREFIXES, IMAGE_USAGE_REPLY, legacyRouteText, parseImageP
 
 describe("rule router (§4.1)", () => {
   it("half-width and full-width colon prefixes route to image with the raw remainder as prompt", () => {
-    expect(routeMessage("奶龙:一只猫")).toEqual({ route: "image", prefix: "奶龙:", prompt: "一只猫" });
-    expect(routeMessage("奶龙：A cat, Watercolor")).toEqual({ route: "image", prefix: "奶龙：", prompt: "A cat, Watercolor" });
+    expect(routeMessage("奶龙:一只猫")).toMatchObject({ route: "image", prefix: "奶龙:", prompt: "一只猫" });
+    expect(routeMessage("奶龙：A cat, Watercolor")).toMatchObject({ route: "image", prefix: "奶龙：", prompt: "A cat, Watercolor" });
   });
 
   it("only leading/trailing whitespace is ignored; a literal [at] in route_text is not special (R10)", () => {
-    expect(routeMessage("   奶龙: 夕阳下的海  ")).toEqual({ route: "image", prefix: "奶龙:", prompt: "夕阳下的海" });
+    expect(routeMessage("   奶龙: 夕阳下的海  ")).toMatchObject({ route: "image", prefix: "奶龙:", prompt: "夕阳下的海" });
     expect(routeMessage("[at] 奶龙:猫").route).toBe("agent");
     expect(routeMessage("[reply][at] 奶龙：狗").route).toBe("agent");
   });

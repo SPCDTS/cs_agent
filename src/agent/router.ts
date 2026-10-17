@@ -1,3 +1,4 @@
+import { ASPECTS, type ImageOptions } from "./image-options.js";
 /**
  * 规则分流器（设计 §4.1，无模型）：
  * - 输入是 bridge 计算的分流文本 route_text（已跳过开头真实的 at / reply 段，见 qq/policy.ts），这里只去首尾空白；
@@ -11,7 +12,7 @@ export const DEFAULT_IMAGE_PREFIXES = ["奶龙:", "奶龙："];
 export const IMAGE_USAGE_REPLY = "奶龙: 后面写要画的内容";
 
 export type RouteResult =
-  | { route: "image"; prefix: string; prompt: string }
+  | { route: "image"; prefix: string; prompt: string; options: ImageOptions }
   | { route: "image_usage"; prefix: string }
   | { route: "agent"; text: string };
 
@@ -35,11 +36,31 @@ export function legacyRouteText(text: string): string {
 }
 
 /** routeText：InboundMessage.route_text（只去首尾空白后逐字匹配前缀）。 */
-export function routeMessage(routeText: string, prefixes: readonly string[] = DEFAULT_IMAGE_PREFIXES): RouteResult {
+export function routeMessage(routeText: string, prefixes: readonly string[] = DEFAULT_IMAGE_PREFIXES, images: readonly string[] = []): RouteResult {
   const t = routeText.trim();
   // 较长的前缀优先（避免一个前缀是另一个的前缀时截错）
   const prefix = [...prefixes].sort((a, b) => b.length - a.length).find((p) => p && t.startsWith(p));
   if (prefix === undefined) return { route: "agent", text: routeText };
-  const prompt = t.slice(prefix.length).trim();
-  return prompt ? { route: "image", prefix, prompt } : { route: "image_usage", prefix };
+  const options = parseInlineImageOptions(t.slice(prefix.length));
+  if (images.length) options.reference_images = [...images];
+  return options.prompt ? { route: 'image', prefix, prompt: options.prompt, options } : { route: 'image_usage', prefix };
+}
+
+/** 只消费提示词前连续的已知选项；首个未知词起完整保留，正文里的参数字样不再解析。 */
+export function parseInlineImageOptions(text: string): ImageOptions {
+  let prompt = text.trim();
+  const opts: ImageOptions = { prompt: '' };
+  const aliases: Record<string, ImageOptions['aspect']> = { 横: '16:9', 竖: '9:16', 方: '1:1' };
+  for (;;) {
+    const token = /^\S+/.exec(prompt)?.[0];
+    if (!token) break;
+    if ((ASPECTS as readonly string[]).includes(token)) opts.aspect = token as ImageOptions['aspect'];
+    else if (aliases[token]) opts.aspect = aliases[token];
+    else if (token === '2k' || token === '2mp') opts.size = token;
+    else if (/^x[2-4]$/.test(token)) opts.count = Number(token[1]);
+    else if (token === '透明') opts.transparent = true;
+    else break;
+    prompt = prompt.slice(token.length).trimStart();
+  }
+  return { ...opts, prompt };
 }

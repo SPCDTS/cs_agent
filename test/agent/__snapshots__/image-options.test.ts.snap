@@ -1,0 +1,309 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`官方模板接线快照 > 文生图 1`] = `
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+      "weight_dtype": "default",
+    },
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_w4a8.safetensors",
+      "device": "default",
+      "type": "qwen_image",
+    },
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors",
+    },
+  },
+  "4": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "2",
+        0,
+      ],
+      "negative_prompt": "",
+      "prompt": "一只猫",
+      "resolution": 1024,
+    },
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "batch_size": 2,
+      "height": 768,
+      "width": 1344,
+    },
+  },
+  "6": {
+    "class_type": "KSampler",
+    "inputs": {
+      "cfg": 1,
+      "denoise": 1,
+      "latent_image": [
+        "5",
+        0,
+      ],
+      "model": [
+        "1",
+        0,
+      ],
+      "negative": [
+        "4",
+        1,
+      ],
+      "positive": [
+        "4",
+        0,
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "seed": 42,
+      "steps": 8,
+    },
+  },
+  "7": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "6",
+        0,
+      ],
+      "vae": [
+        "3",
+        0,
+      ],
+    },
+  },
+  "8": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "snapshot",
+      "images": [
+        "7",
+        0,
+      ],
+    },
+  },
+}
+`;
+
+exports[`官方模板接线快照 > 编辑：采样 latent 来自 TextEncode 第三个输出，图片连接 autogrow 输入 1`] = `
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+      "weight_dtype": "default",
+    },
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_w4a8.safetensors",
+      "device": "default",
+      "type": "qwen_image",
+    },
+  },
+  "20": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "ticket/1.png",
+    },
+  },
+  "21": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "ticket/2.png",
+    },
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors",
+    },
+  },
+  "4": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "2",
+        0,
+      ],
+      "images.image_1": [
+        "20",
+        0,
+      ],
+      "images.image_2": [
+        "21",
+        0,
+      ],
+      "negative_prompt": "模糊",
+      "prompt": "换蓝色，保留构图",
+      "resolution": 1024,
+      "vae": [
+        "3",
+        0,
+      ],
+    },
+  },
+  "6": {
+    "class_type": "KSampler",
+    "inputs": {
+      "cfg": 1,
+      "denoise": 1,
+      "latent_image": [
+        "4",
+        2,
+      ],
+      "model": [
+        "1",
+        0,
+      ],
+      "negative": [
+        "4",
+        1,
+      ],
+      "positive": [
+        "4",
+        0,
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "seed": 42,
+      "steps": 8,
+    },
+  },
+  "7": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "6",
+        0,
+      ],
+      "vae": [
+        "3",
+        0,
+      ],
+    },
+  },
+  "8": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "snapshot",
+      "images": [
+        "7",
+        0,
+      ],
+    },
+  },
+}
+`;
+
+exports[`官方模板接线快照 > 透明：2.1 原生 RGBA 解码，不能使用另一模型的 layered latent 1`] = `
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+      "weight_dtype": "default",
+    },
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_w4a8.safetensors",
+      "device": "default",
+      "type": "qwen_image",
+    },
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors",
+    },
+  },
+  "4": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "clip": [
+        "2",
+        0,
+      ],
+      "negative_prompt": "",
+      "prompt": "猫贴纸
+透明背景，输出带 alpha 通道的 PNG。",
+      "resolution": 1024,
+    },
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "batch_size": 1,
+      "height": 1024,
+      "width": 1024,
+    },
+  },
+  "6": {
+    "class_type": "KSampler",
+    "inputs": {
+      "cfg": 1,
+      "denoise": 1,
+      "latent_image": [
+        "5",
+        0,
+      ],
+      "model": [
+        "1",
+        0,
+      ],
+      "negative": [
+        "4",
+        1,
+      ],
+      "positive": [
+        "4",
+        0,
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "seed": 42,
+      "steps": 8,
+    },
+  },
+  "7": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "6",
+        0,
+      ],
+      "vae": [
+        "3",
+        0,
+      ],
+    },
+  },
+  "8": {
+    "class_type": "SaveImageAdvanced",
+    "inputs": {
+      "filename_prefix": "snapshot",
+      "format": "png",
+      "format.bit_depth": "8-bit",
+      "format.input_color_space": "sRGB",
+      "images": [
+        "7",
+        0,
+      ],
+    },
+  },
+}
+`;
