@@ -63,6 +63,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 |---|---|
 | `./data/agent.sqlite` | pi-durable 会话、任务和派发索引（崩溃后自动续跑） |
 | `./data/codex/` | `CODEX_HOME`：`auth.json`、`config.toml`、sessions。**`config.toml` 是受管文件**：入口脚本每次启动都按 `CODEX_MODEL` / `CODEX_REASONING_EFFORT` 重写，手工修改会被覆盖；要改请改 `.env` 后重启 |
+| `./data/prompts/system.md` | 意图模型的系统提示（可热改，见下文「修改系统提示」） |
 | `./data/codex-session.json` | 固定 codex 会话 id；删掉它，下一条请求就会新建会话 |
 | `./data/images/<ticket>/` | 生成的图片 |
 | `./data/*`（QQBridge） | 票据与去重 SQLite |
@@ -73,6 +74,12 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 ### 残余风险
 
 - codex 运行在容器里，能读到自己的 `/data/codex/auth.json`（它需要这份凭据才能工作）。`AGENTS.md` 只是约束模型行为，不是访问控制：恶意构造的提示词仍有可能让 codex 泄露这份 ChatGPT 凭据，或读取 `/data` 下的其他文件。codex 沙箱（包括 `read-only`）限制的是写入和网络，并不阻止读取这些文件。**只把能信任使用这个工作区和这份凭据的人加入 `QQ_ALLOW_USERS` / `QQ_ALLOW_GROUPS`**。
+
+### 修改系统提示
+
+- 直接编辑 `./data/prompts/system.md`（UTF-8）。保存后**下一条消息即生效**，无需重建镜像或重启容器；日志出现 `system prompt reloaded`（带 size、mtime）表示新内容已加载。
+- 文件不存在时，agent 启动会写入内置默认提示（`wrote default system prompt`），已存在则不覆盖。
+- 恢复默认：删除该文件（删除后立即回退到内置提示，下次启动重新写入默认内容）。文件为空或读取失败时同样回退内置提示。
 
 ## 5. 测试
 

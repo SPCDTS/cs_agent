@@ -37,10 +37,14 @@ reply_qq 的 text 使用中文、纯文本：QQ 不渲染 Markdown，不要使�
 
 export const EXTENSION_NAME = "cs-agent";
 
-export function createCsAgentExtension(tools: ToolRegistration[]) {
+/**
+ * getPrompt 在每次模型请求前被调用（pi-durable 每次请求重建 section），
+ * main 传入 loadSystemPrompt 实现热加载；默认使用内置 SYSTEM_PROMPT。
+ */
+export function createCsAgentExtension(tools: ToolRegistration[], getPrompt: () => string = () => SYSTEM_PROMPT) {
   return defineExtension({
     name: EXTENSION_NAME,
-    sections: [section("cs-agent-rules", () => SYSTEM_PROMPT, { tag: false })],
+    sections: [section("cs-agent-rules", () => getPrompt(), { tag: false })],
     tools,
   });
 }

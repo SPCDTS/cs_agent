@@ -103,7 +103,7 @@ afterEach(async () => {
   rig = undefined;
 });
 
-async function makeRig(): Promise<Rig> {
+async function makeRig(getPrompt?: () => string): Promise<Rig> {
   const dir = tmp();
   const bridge = new BridgeStub();
   const faux = fauxProvider();
@@ -136,7 +136,7 @@ async function makeRig(): Promise<Rig> {
     createGenerateImageTool(backend, path.join(dir, "images")),
     createAskCodexTool(codex),
     createReplyQQTool(() => bridge, path.join(dir, "images")),
-  ]);
+  ], getPrompt);
   const harness = await openHarness({ models, extension, storage: new MemoryStorage() }, ctx);
   harness.resume();
   const dispatcher = new Dispatcher({
@@ -337,6 +337,24 @@ describe("routing via faux provider", () => {
     expect(r.bridge.replies).toContainEqual({ ticket: "ticket-old", text: FALLBACK_REPLY, images: undefined });
     expect(r.faux.state.callCount).toBe(1);
     expect(await r.dispatcher.recover()).toBe(0);
+  });
+
+  it("system prompt getter is consulted on every model request (hot reload)", async () => {
+    let current = "PROMPT-MARKER-ONE";
+    rig = await makeRig(() => current);
+    const r = rig;
+    const seen: string[] = [];
+    const reply = (text: string): FauxResponseFactory => (context) => {
+      seen.push(JSON.stringify(context));
+      return fauxAssistantMessage(fauxToolCall("reply_qq", { text }), { stopReason: "toolUse" });
+    };
+    r.faux.setResponses([reply("一"), reply("二")]);
+    await r.dispatcher.dispatch(inbound("a", "201"), "ticket-p1");
+    current = "PROMPT-MARKER-TWO";
+    await r.dispatcher.dispatch(inbound("b", "202"), "ticket-p2");
+    expect(seen[0]).toContain("PROMPT-MARKER-ONE");
+    expect(seen[1]).toContain("PROMPT-MARKER-TWO");
+    expect(seen[1]).not.toContain("PROMPT-MARKER-ONE");
   });
 
   it("system prompt states the untrusted-content and one-tool rules", () => {

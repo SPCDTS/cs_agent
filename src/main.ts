@@ -8,6 +8,7 @@ import { createQQBridge } from "./qq/index.js";
 import type { QQBridge } from "./qq/types.js";
 import { createAgentModels, openHarness, resolveThinkingLevel } from "./agent/harness.js";
 import { createCsAgentExtension } from "./agent/extension.js";
+import { ensureDefaultSystemPrompt, loadSystemPrompt, systemPromptFile } from "./agent/prompt.js";
 import { Dispatcher } from "./agent/dispatch.js";
 import { CodexRunner, createAskCodexTool, ensureWorkspaceAgentsMd } from "./agent/tools/ask-codex.js";
 import { createGenerateImageTool, HttpImageBackend, McpImageBackend, type ImageBackend } from "./agent/tools/generate-image.js";
@@ -58,6 +59,8 @@ async function main(): Promise<void> {
 
   // codex 读取的工作区规则（不泄露凭据/环境变量）；已存在则不覆盖
   if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md", { dir: cfg.WORKSPACE_DIR });
+  // 可热改的系统提示（${DATA_DIR}/prompts/system.md）；已存在则不覆盖
+  if (await ensureDefaultSystemPrompt(cfg.DATA_DIR)) log.info("wrote default system prompt", { file: systemPromptFile(cfg.DATA_DIR) });
 
   let bridge: QQBridge | undefined;
   const getBridge = () => {
@@ -84,7 +87,7 @@ async function main(): Promise<void> {
     createGenerateImageTool(imageBackend, cfg.imagesDir),
     createAskCodexTool(codex),
     createReplyQQTool(getBridge, cfg.imagesDir),
-  ]);
+  ], () => loadSystemPrompt(cfg.DATA_DIR));
   const models = createAgentModels(cfg.codexHome);
   const agentModel = models.getModel(cfg.AGENT_MODEL_PROVIDER, cfg.AGENT_MODEL_ID);
   if (!agentModel) {
