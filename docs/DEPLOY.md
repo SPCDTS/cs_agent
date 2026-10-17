@@ -78,7 +78,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 | `./data/prompts/system.md` | **已弃用**：v2 意图模型的系统提示。v3 规则分流不经模型，不再读取它；文件保留不删，存在时启动日志记一行 `system.md is deprecated and no longer used` |
 | `./data/codex-threads.json` | 两条固定 codex 线程：`{"owner": {thread_id, created_at, updated_at}, "shared": {…}}`。owner 私聊（`QQ_OWNER`）用 `owner`，所有群和其他私聊共用 `shared`；删掉某个键（或整个文件），对应线程下一条请求就新建。旧版的单线程 `codex-session.json` 在新文件不存在时自动迁移为 `owner`（日志 `codex thread migrated`），旧文件改名为 `codex-session.json.migrated` |
 | `./data/images/<ticket>/` | 生成的图片。codex 回合里 image_gen 的每次调用写入独立子目录 `call-<n>/`（同名输出不会互相覆盖） |
-| `./data/tickets/<ticket>/` | 票据工作目录：codex 回合的最后一条消息 `codex-last.txt`（崩溃恢复时据此不重复询问 codex）。回复发出或放弃时自动删除；入口脚本启动时创建。对 codex 命令沙箱禁读、不可设为可写目录 |
+| `./data/tickets/<ticket>/` | 票据工作目录：codex 回合的最后一条消息 `codex-last.txt`（崩溃恢复时据此不重复询问 codex）。reply 与派发终态对账均幂等清理；发送后、清理前崩溃会在恢复时补删，图片目录不动。入口脚本启动时创建。对 codex 命令沙箱禁读、不可设为可写目录 |
 | `./data/*`（QQBridge） | 票据与去重 SQLite |
 | `./data/codex/AGENTS.md` | codex 的全局规则（安全规则、QQ 回复格式、聊天记录工具与浏览器使用纪律），**受管文件**：agent 每次启动按实际生效的可写目录重写（版本标记 `<!-- cs-agent-agents-template v3 -->`，日志 `wrote codex global AGENTS.md`）。codex 执行的命令对 `/data/codex` 只读，改不了它；要改规则请改代码里的模板 |
 | `./workspace/` | codex 工作目录（可写）。没有 `AGENTS.md` 时写入一份占位说明（“规则见全局 AGENTS.md；本目录是你的工作区”）。与旧版 v1 / v2 模板**全文相同**（忽略 CRLF）的文件会替换为占位说明（日志 `replaced old workspace AGENTS.md template with a stub`）；带旧模板标记但被改过的文件保持不动，并记 warn `workspace AGENTS.md is a modified old cs-agent template`。codex 会同时读取全局与工作区的 `AGENTS.md`（全局在前）；工作区这份 codex 自己能改，所以规则不放这里 |
@@ -146,7 +146,9 @@ docker compose config
 - **comfy 自检失败 / 生图一直失败**：在 `.env` 设置 `COMFY_MODE=http` 后重启。这个模式直接调用 ComfyUI 的 `/prompt`、`/history`、`/view`。
 - **codex 一直失败**：`docker compose exec cs-agent codex exec --skip-git-repo-check -s read-only "hi"`，看具体报错（auth、sandbox、网络）。
 - **会话卡住 / 顺序**：同一会话（群或私聊）的消息严格按收到顺序处理：一条消息占据队首，直到进入终态——回复已发出（sent，含兜底）、发送结果不确定（uncertain），或失败（failed：重试 3 次后兜底也发不出）——下一条才开始。任务失败且兜底在发送前就失败（例如 NapCat 暂时不可用）时，这条消息留在队首、退避后重试（日志 `ticket still pending after attempt; retrying at the head of its scope`）；超过 3 次后先中止它的任务再发兜底（`ticket reached max attempts, giving up` → `ticket task aborted before fallback`），兜底仍发不出则标记 failed 并继续下一条（`ticket failed: fallback could not be sent after max attempts; moving on`；failed 条目留在 `agent.sqlite` 的派发索引里，重启不会重跑）。
-- **重启后的恢复**：未完成的消息会从 `agent.sqlite` 与票据库按收到顺序（票据 seq）继续处理，没有派发索引的 pending 票据全部补派发（分页读取，不限 200 条）。任务从最后完成的阶段继续：已提交的 ComfyUI 任务按 prompt_id 继续收取、不重复提交（ComfyUI 报告不认识该任务时才重新提交一次，日志 `comfy job unknown to the server, resubmitting once`）；codex 回合已写出结果的直接复用（`codex turn already completed before restart`），中途被打断的最多再问一次（`codex turn interrupted`）。已发出的回复不会重发；uncertain 的票据不会自动重发。日志关键字：`message routed`、`ticket task settled`、`reply sent`。
+- **重启后的恢复**：未完成消息由派发索引与票据库按 seq 恢复（pending 分页取尽）；空原文孤儿票据登记 `fallbackOnly`，同样在 scope 队首重试至终态。codex 仅在取得线程锁、复查取消信号后才记录次数并启动；排队时重启不消耗回合次数。已有输出直接复用，中途被打断最多再问一次。已发送或 uncertain 的回复不重发。
+- **生图提交对账**：提交前在 TicketDoc 保存 `submitIntent={attempt,filenamePrefix}`，SaveImage 前缀为 `cs-<票据前12位hex>-<attempt>`。HTTP 与 MCP 自定义工作流都写入该前缀；默认 MCP 的 `generate_image` 若不支持 `filename_prefix`，改走可控的 `run_workflow`。意图已落盘但 prompt_id 丢失，或收取时报 unknown 时，两种模式均经 HTTP 查 `/history`、`/queue`，命中则认领；否则探测 `/view?filename=<前缀>_00001_.png&type=output`（多张按 count 递增，最多 4 张）。查询前后记录 `imageReconciliation`，只有确认无输出才用 attempt+1 重交，总提交上限 2 次；服务不可达不能证明未运行。mcp 模式对账也依赖同一 loopback 转发可达。
+- **取消与发送**：任务在副作用前先检查 abort；QQBridge 在 `get_login_info` 前及 `markSending` 前再次检查。此前取消时票据保持 pending；一旦 `markSending` 成功便继续实际发送，发送失败仍记 uncertain，不因取消而重发。
 - **生图前缀没生效**：确认消息开头就是前缀（前面只能有空白、真实的 @ 或引用），全/半角与 `IMAGE_PREFIXES` 完全一致；手打的 "[at]" 字样不算 @；日志 `message routed` 的 `route` 字段显示分流结果。
 
 ## 7. codex 权限
