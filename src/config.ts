@@ -103,6 +103,8 @@ export interface Config extends Env {
   /** ${DATA_DIR}/codex，容器内 codex 与 pi-ai 共用的 CODEX_HOME */
   codexHome: string;
   imagesDir: string;
+  /** ${DATA_DIR}/tickets：每张票据的工作目录（codex 回合的 codex-last.txt），回复后清理 */
+  ticketsDir: string;
   /** QQ_OWNER，否则 QQ_ALLOW_USERS 第一项；QQ_ALLOW_USERS=* 且未设 QQ_OWNER 时无 owner */
   owner: string | undefined;
   imagePrefixes: string[];
@@ -169,6 +171,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowUsers,
     codexHome: path.join(e.DATA_DIR, "codex"),
     imagesDir: path.join(e.DATA_DIR, "images"),
+    ticketsDir: path.join(e.DATA_DIR, "tickets"),
     COMFY_WORKFLOW_FILE: e.COMFY_WORKFLOW_FILE || path.posix.join(e.DATA_DIR, "workflows", DEFAULT_WORKFLOW),
     owner: resolveOwner(e.QQ_OWNER, allowUsers),
     imagePrefixes: parseImagePrefixes(e.IMAGE_PREFIXES),

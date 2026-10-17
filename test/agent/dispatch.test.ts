@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
@@ -214,6 +214,7 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
     getBridge: () => bridge,
     imageBackend: image,
     imagesDir: path.join(dir, "images"),
+    ticketsDir: path.join(dir, "tickets"),
     backends,
     owner: OWNER,
     store,
@@ -471,7 +472,7 @@ describe("agent path", () => {
       timeoutMs: 10_000,
       env: { FAKE_CODEX_LOG: logFile, FAKE_CODEX_IMAGES: "5", FAKE_CODEX_TEXT: "```\n画好了\n```" },
     });
-    const codex = new CodexBackend({ runner, imagesDir: path.join(dir, "images"), reasoningEffort: "medium" });
+    const codex = new CodexBackend({ runner, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"), reasoningEffort: "medium" });
     const r = await makeRig({ codex }, { dir, bridge: new BridgeStub(), image: new ImageStub(), backend: new BackendStub(), store: new ContextStore(dir) });
     await r.dispatcher.dispatch(inbound("画一张图并配一句话", { group: "200000001", user: "42" }), "t-codex-e2e");
     const start = readFileSync(logFile, "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l)).find((c) => c.phase === "start");
@@ -483,6 +484,60 @@ describe("agent path", () => {
     expect(reply.text).toBe("画好了");
     expect(reply.images).toHaveLength(4);
     expect(reply.images!.every((f) => f.endsWith(".png"))).toBe(true);
+  });
+
+  /** 真实 CodexBackend + 假 codex；env 对象在每次启动 codex 时读取，测试中可修改。 */
+  function codexRig(dir: string, env: Record<string, string>) {
+    const runner = new CodexRunner({
+      command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
+      codexHome: path.join(dir, "codex"),
+      workspaceDir: path.join(dir, "ws"),
+      threadsFile: path.join(dir, "codex-threads.json"),
+      sandbox: "workspace-write",
+      timeoutMs: 120_000,
+      env,
+    });
+    return new CodexBackend({ runner, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"), reasoningEffort: "medium" });
+  }
+  const codexStarts = (logFile: string) =>
+    readFileSync(logFile, "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l)).filter((c) => c.phase === "start").length;
+
+  it("crash after codex wrote its output but before the agentResult commit → recovery reuses the file; codex runs exactly once (R1)", async () => {
+    const dir = tmp("cs-dispatch-r1-");
+    const logFile = path.join(dir, "codex-calls.jsonl");
+    const env: Record<string, string> = { FAKE_CODEX_LOG: logFile, FAKE_CODEX_TEXT: "已完成的回答", FAKE_CODEX_SLEEP_AFTER_OUT_MS: "60000" };
+    const codex = codexRig(dir, env);
+    const r = await makeRig({ codex }, { dir, bridge: new BridgeStub(), image: new ImageStub(), backend: new BackendStub(), store: new ContextStore(dir) });
+    const outFile = path.join(dir, "tickets", "t-r1", "codex-last.txt");
+    const first = r.dispatcher.dispatch(inbound("问一下"), "t-r1");
+    while (!existsSync(outFile)) await new Promise((res) => setTimeout(res, 10));
+    await r.harness.close(ctx); // codex 回合已写出结果，但任务还没提交 agentResult
+    await first.catch(() => undefined);
+    env.FAKE_CODEX_SLEEP_AFTER_OUT_MS = "0";
+    await r.reopen();
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(codexStarts(logFile)).toBe(1);
+    expect(r.bridge.replies).toEqual([{ ticket: "t-r1", text: "已完成的回答", images: [] }]);
+    expect(existsSync(path.join(dir, "tickets", "t-r1"))).toBe(false); // 回复后清理票据工作目录
+  });
+
+  it("crash mid-turn (marker, no output) → logged as interrupted and re-asked exactly once (R1)", async () => {
+    const dir = tmp("cs-dispatch-r1b-");
+    const logFile = path.join(dir, "codex-calls.jsonl");
+    const env: Record<string, string> = { FAKE_CODEX_LOG: logFile, FAKE_CODEX_TEXT: "第二次的回答", FAKE_CODEX_SLEEP_MS: "60000" };
+    const codex = codexRig(dir, env);
+    const r = await makeRig({ codex }, { dir, bridge: new BridgeStub(), image: new ImageStub(), backend: new BackendStub(), store: new ContextStore(dir) });
+    const first = r.dispatcher.dispatch(inbound("问二"), "t-r1b");
+    while (!existsSync(logFile)) await new Promise((res) => setTimeout(res, 10));
+    await r.harness.close(ctx);
+    await first.catch(() => undefined);
+    env.FAKE_CODEX_SLEEP_MS = "0";
+    await r.reopen();
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(codexStarts(logFile)).toBe(2);
+    expect(r.bridge.replies).toEqual([{ ticket: "t-r1b", text: "第二次的回答", images: [] }]);
   });
 
   it("backend timeout → timeout template", async () => {

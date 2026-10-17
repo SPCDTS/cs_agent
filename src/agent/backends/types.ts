@@ -30,9 +30,19 @@ export interface AgentEvent {
   [key: string]: unknown;
 }
 
+/** 后端回合的持久化标记（写在 TicketDoc，跨崩溃保留）：回合已开始的次数与回合输出文件。 */
+export interface TurnState {
+  outFile: string;
+  attempts: number;
+}
+
 export interface AgentHandleContext {
   signal: AbortSignal;
   onEvent(e: AgentEvent): void;
+  /** 上次（崩溃前）记录的回合标记；首次处理时为 undefined */
+  turn?: Readonly<TurnState>;
+  /** 启动外部回合之前持久化回合标记（durable 任务提供；单独调用后端时可省略） */
+  persistTurn?(state: TurnState): Promise<void>;
 }
 
 export interface AgentResponse {

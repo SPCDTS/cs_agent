@@ -492,3 +492,22 @@ describe("single-thread safety valve", () => {
     expect(Date.parse(threadOf(dir)!.created_at!)).toBeGreaterThan(Date.now() - 60_000);
   });
 });
+
+describe("outputFile (per-ticket -o path, R1)", () => {
+  it("writes -o to the given file, removes a stale one first, and keeps it after the turn", async () => {
+    const { dir, runner, calls } = setup();
+    const out = path.join(dir, "tickets", "t1", "codex-last.txt");
+    mkdirSync(path.dirname(out), { recursive: true });
+    writeFileSync(out, "stale");
+    const text = await runner.ask("hello", { outputFile: out });
+    expect(readFileSync(out, "utf8")).toBe(text);
+    const start = calls().find((c) => c.phase === "start");
+    expect(start.argv[start.argv.indexOf("-o") + 1]).toBe(out);
+  });
+
+  it("rejects relative paths and '..' segments", async () => {
+    const { runner } = setup();
+    await expect(runner.ask("x", { outputFile: "rel/out.txt" })).rejects.toThrow(/输出文件路径/);
+    await expect(runner.ask("x", { outputFile: `${tmp()}/../out.txt` })).rejects.toThrow(/输出文件路径/);
+  });
+});

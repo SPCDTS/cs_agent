@@ -116,7 +116,7 @@ async function main(): Promise<void> {
     defaultBackend: cfg.AGENT_BACKEND,
     overrides: cfg.backendOverrides,
     backends: {
-      codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT }),
+      codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, ticketsDir: cfg.ticketsDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT }),
       pi: new PiBackendStub(),
     },
   });
@@ -124,6 +124,7 @@ async function main(): Promise<void> {
     getBridge,
     imageBackend,
     imagesDir: cfg.imagesDir,
+    ticketsDir: cfg.ticketsDir,
     backends,
     owner: cfg.owner,
     store,

@@ -84,6 +84,17 @@ export interface AskOptions {
   qqAccess?: string;
   /** 本轮 image_gen MCP 的输出目录（${DATA_DIR}/images/<ticket>） */
   imageTicketDir?: string;
+  /**
+   * `-o` 最后一条消息的落盘位置（绝对路径，不含 ".."；由调用方放在票据工作目录里）。每次启动 codex 前先删除旧文件，
+   * 结束后保留（调用方据此判断回合是否已完成）。未设置时用临时目录并在结束后删除。
+   */
+  outputFile?: string;
+}
+
+/** 校验 outputFile：绝对路径且不含 ".." 段。 */
+export function validateOutputFile(file: string): string {
+  if (!path.isAbsolute(file) || file.split(/[\\/]/).includes("..")) throw new Error(`非法的 codex 输出文件路径: ${file}`);
+  return file;
 }
 
 /** 传给 codex 子进程的环境变量白名单（其余一律不传，尤其是 NAPCAT_TOKEN、*_API_KEY 等配置） */
@@ -504,9 +515,10 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, outputFile }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
     const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess), ...imageTicketDirArgs(imageTicketDir)];
+    const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
     const session = await this.readThread(key);
     let id = session?.thread_id;
     if (session) {
@@ -522,6 +534,8 @@ export class CodexRunner {
         ["exec", "resume", ...this.commonArgs(), "-c", `sandbox_mode="${this.opts.sandbox}"`, ...effort, id, "-"],
         prompt,
         signal,
+        undefined,
+        outFile,
       );
       if (r.code === 0) return this.result(r);
       if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
@@ -543,6 +557,7 @@ export class CodexRunner {
         await this.writeThread(key, threadId);
         log.info("codex thread created", { key, thread_id: threadId });
       },
+      outFile,
     );
     if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
     return this.result(r);
@@ -563,9 +578,12 @@ export class CodexRunner {
     prompt: string,
     signal?: AbortSignal,
     onThreadId?: (threadId: string) => Promise<void>,
+    outputFile?: string,
   ): Promise<RunOutcome> {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cs-codex-"));
-    const outFile = path.join(tmpDir, "last.txt");
+    const tmpDir = outputFile ? undefined : await fs.mkdtemp(path.join(os.tmpdir(), "cs-codex-"));
+    const outFile = outputFile ?? path.join(tmpDir!, "last.txt");
+    // 调用方指定的输出文件：先删掉旧内容，结束后保留（它是"回合已完成"的标志）
+    if (outputFile) await fs.rm(outputFile, { force: true });
     const finalArgs = args.map((a) => (a === "__OUT__" ? outFile : a));
     const [bin, ...prefix] = this.opts.command;
     if (!bin) throw new Error("CODEX_BIN 未配置");
@@ -632,7 +650,7 @@ export class CodexRunner {
     if (timedOut) throw new CodexTimeoutError(this.opts.timeoutMs);
     if (aborted) throw new Error("aborted");
     outcome.outFileText = await fs.readFile(outFile, "utf8").catch(() => undefined);
-    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
     return outcome;
   }
 

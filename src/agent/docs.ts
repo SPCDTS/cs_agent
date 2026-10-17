@@ -38,6 +38,8 @@ export type TicketState = {
   imageJob?: ImageJob;
   imageResult?: ImageResult;
   agentResult?: AgentResult;
+  /** 后端回合标记：启动外部回合（codex）之前写入，崩溃恢复时据此避免重复询问 */
+  codexTurn?: { outFile: string; attempts: number };
   /** 后处理后的回复正文（agent 路径 postprocess 阶段写入） */
   replyDraft?: string;
   /** 实际发出的正文、图片数与 QQ 消息 id */

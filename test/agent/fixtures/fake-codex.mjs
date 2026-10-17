@@ -49,5 +49,8 @@ process.stdin.on("end", async () => {
   emit({ type: "item.completed", item: { id: "item_1", type: "agent_message", text } });
   emit({ type: "turn.completed", usage: {} });
   writeFileSync(out, text);
+  // FAKE_CODEX_SLEEP_AFTER_OUT_MS：写完 -o 文件后再挂起（模拟回合已完成、进程在结果提交前被杀）
+  const after = Number(process.env.FAKE_CODEX_SLEEP_AFTER_OUT_MS ?? 0);
+  if (after) await new Promise((r) => setTimeout(r, after));
   log({ phase: "end", pid: process.pid, t: Date.now() });
 });

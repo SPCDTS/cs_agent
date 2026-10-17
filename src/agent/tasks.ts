@@ -26,6 +26,8 @@ import { postprocessReply, sanitizeReply, type ReplyMode } from "./reply-postpro
 import { IMAGE_USAGE_REPLY } from "./router.js";
 import { BackendTimeoutError } from "./backends/types.js";
 import type { BackendSelector } from "./backends/select.js";
+import { ticketWorkDir } from "./backends/codex.js";
+import { promises as fs } from "node:fs";
 
 export const IMAGE_TASK = "cs.image";
 export const AGENT_TASK = "cs.agent";
@@ -45,6 +47,8 @@ export interface TaskDeps {
   getBridge: () => Pick<QQBridge, "reply" | "getTicket">;
   imageBackend: Pick<ImageBackend, "submit" | "collect" | "name">;
   imagesDir: string;
+  /** ${DATA_DIR}/tickets：票据工作目录的根；reply 结束后清理该票据的子目录 */
+  ticketsDir?: string;
   backends: BackendSelector;
   owner?: string;
   /** 统一上下文存储：查找 [引用] 正文 */
@@ -92,6 +96,7 @@ async function replyPhase<S extends { phase: string }>(
   const { text, images } = compose(doc);
   try {
     const res = await deps.getBridge().reply(doc.ticket, text, images);
+    await cleanupTicketDir(deps, doc.ticket);
     await runtime.commit(async (tx) => {
       const d = await tx.doc(TicketDoc, runtime.conversationId);
       d.replyText = text;
@@ -110,11 +115,25 @@ async function replyPhase<S extends { phase: string }>(
       ticket_status: rec?.status ?? "unknown",
       error: (err as Error).message,
     });
+    if (!retry) await cleanupTicketDir(deps, doc.ticket);
     await runtime.commit(async () =>
       retry
         ? { status: "running", checkpoint: { phase: "reply", attempt: attempt + 1 } as S & ReplyCheckpoint }
         : { status: "terminal", outcome: { status: "failed", error: { message: `reply failed: ${(err as Error).message.slice(0, 200)}` } } },
     context);
+  }
+}
+
+/**
+ * 回复阶段结束（发出或放弃）后删除票据工作目录 ${ticketsDir}/<ticket>（codex-last.txt 等）。
+ * 此时后端结果已在 TicketDoc 里，重跑不会再用到它；图片目录另行管理，不在这里删除。
+ */
+async function cleanupTicketDir(deps: TaskDeps, ticket: string): Promise<void> {
+  if (!deps.ticketsDir) return;
+  try {
+    await fs.rm(ticketWorkDir(deps.ticketsDir, ticket), { recursive: true, force: true });
+  } catch (err) {
+    log.warn("ticket dir cleanup failed", { ticket: short(ticket), error: (err as Error).message });
   }
 }
 
@@ -265,7 +284,17 @@ export function createTasks(deps: TaskDeps) {
                 ...(doc.time ? { time: doc.time } : {}),
                 ...(quote ? { quote } : {}),
               },
-              { signal: runtime.signal, onEvent: (e) => log.debug("agent backend event", { ticket: short(doc.ticket), ...e }) },
+              {
+                signal: runtime.signal,
+                onEvent: (e) => log.debug("agent backend event", { ticket: short(doc.ticket), ...e }),
+                ...(doc.codexTurn ? { turn: doc.codexTurn } : {}),
+                // 启动外部回合之前落盘"回合已开始"（不推进检查点）
+                persistTurn: (state) =>
+                  runtime.commit(async (tx) => {
+                    (await tx.doc(TicketDoc, runtime.conversationId)).codexTurn = { ...state };
+                    return undefined;
+                  }, context),
+              },
             );
             result = { ok: true, backend: backendName, text: res.text, images: [...(res.images ?? [])].slice(0, 4) };
           } catch (err) {
