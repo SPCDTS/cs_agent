@@ -95,6 +95,35 @@ describe("connection", () => {
     expect(got.map(m => m.text)).toEqual(["after reconnect"]);
   });
 
+  it("throttles reconnect errors: one per outage, then at most one per interval", async () => {
+    const quietErrors: Error[] = [];
+    const quiet = createQQBridge(config({ token: "bad-token" }), { reconnectBaseMs: 5, reconnectMaxMs: 5, heartbeatMs: 60000 });
+    quiet.on("error", e => quietErrors.push(e));
+    const before = server.wsAuthFailures;
+    await quiet.start();
+    await waitFor(() => server.wsAuthFailures - before >= 6, 5000, "reconnect attempts");
+    await quiet.stop();
+    expect(quietErrors.filter(e => e.message.includes("WebSocket")).length).toBe(1);
+
+    const noisyErrors: Error[] = [];
+    const noisy = createQQBridge(config({ token: "bad-token" }),
+      { reconnectBaseMs: 5, reconnectMaxMs: 5, heartbeatMs: 60000, downReportIntervalMs: 0 });
+    noisy.on("error", e => noisyErrors.push(e));
+    const mark = server.wsAuthFailures;
+    await noisy.start();
+    await waitFor(() => server.wsAuthFailures - mark >= 3, 5000, "reconnect attempts");
+    await noisy.stop();
+    expect(noisyErrors.filter(e => e.message.includes("WebSocket")).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("reports connected→down once, not on every retry", async () => {
+    const reasons: string[] = [];
+    bridge.on("disconnect", r => reasons.push(r));
+    server.dropAll();
+    await waitFor(() => reasons.length === 1, 5000, "disconnect");
+    expect(errors.filter(e => e.message.includes("连接断开")).length).toBe(1);
+  });
+
   it("survives malformed frames", async () => {
     const got = await pushAndFlush("not json{", "[]", JSON.stringify({ post_type: "meta_event" }));
     expect(got).toEqual([]);
@@ -158,8 +187,19 @@ describe("dedupe and tickets", () => {
     const record = await bridge.getTicket(ticket);
     expect(record).toMatchObject({
       ticket_id: ticket, self_id: SELF_ID, user_id: OWNER, group_id: null,
-      message_type: "private", source_message_id: message.message_id, status: "pending",
+      message_type: "private", source_message_id: message.message_id, source_text: "hello", status: "pending",
     });
+  });
+
+  it("lists pending tickets in creation order and drops them once sent", async () => {
+    const a = await triggerPrivate("first");
+    const b = await triggerPrivate("second");
+    let pending = await bridge.listPendingTickets();
+    expect(pending.map(p => [p.ticket_id, p.source_text])).toEqual([[a.ticket, "first"], [b.ticket, "second"]]);
+    expect((await bridge.listPendingTickets(1)).length).toBe(1);
+    await bridge.reply(a.ticket, "ok");
+    pending = await bridge.listPendingTickets();
+    expect(pending.map(p => p.ticket_id)).toEqual([b.ticket]);
   });
 });
 

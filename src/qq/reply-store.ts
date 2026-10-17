@@ -37,6 +37,7 @@ interface TicketRow {
   message_type: string;
   source_message_id: string;
   source_nickname: string;
+  source_text: string | null;
   created_at: string;
   status: string;
   attempted_at: string | null;
@@ -53,6 +54,7 @@ function toRecord(row: TicketRow): ReplyTicketRecord {
     message_type: row.message_type === "group" ? "group" : "private",
     source_message_id: row.source_message_id,
     source_nickname: row.source_nickname,
+    source_text: row.source_text ?? "",
     created_at: row.created_at,
     status: row.status as TicketStatus,
   };
@@ -71,6 +73,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   message_type TEXT NOT NULL CHECK (message_type IN ('private','group')),
   source_message_id TEXT NOT NULL,
   source_nickname TEXT NOT NULL,
+  source_text TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('pending','sending','sent','uncertain')),
   attempted_at TEXT,
@@ -92,6 +95,15 @@ export class ReplyStore {
     this.db = new DatabaseSync(join(dataDir, DB_FILE));
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /** 旧库补列：source_text（崩溃对账需要原文）。 */
+  private migrate(): void {
+    const columns = this.db.prepare("PRAGMA table_info(tickets)").all() as { name: string }[];
+    if (!columns.some(c => c.name === "source_text")) {
+      this.db.exec("ALTER TABLE tickets ADD COLUMN source_text TEXT NOT NULL DEFAULT ''");
+    }
   }
 
   close(): void {
@@ -100,7 +112,8 @@ export class ReplyStore {
 
   /**
    * 原子地登记一条已触发消息：去重 + 建票据（已存在则保留原记录）。
-   * 返回 null 表示重复消息（已见过）。
+   * 返回 null 表示重复消息：去重键已见过，或票据行早已存在（去重键被淘汰后再次到达），
+   * 两种情况都不得再次派发。
    */
   admit(m: InboundMessage): string | null {
     const ticket = ticketIdFor(m);
@@ -113,9 +126,9 @@ export class ReplyStore {
         return null;
       }
       this.db.prepare("DELETE FROM seen_messages WHERE id <= (SELECT MAX(id) FROM seen_messages) - ?").run(SEEN_LIMIT);
-      this.insertTicket(ticket, m, now);
+      const created = this.insertTicket(ticket, m, now);
       this.db.exec("COMMIT");
-      return ticket;
+      return created ? ticket : null;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -129,18 +142,28 @@ export class ReplyStore {
     return ticket;
   }
 
-  private insertTicket(ticket: string, m: InboundMessage, now: string): void {
-    this.db.prepare(`INSERT OR IGNORE INTO tickets
-      (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, created_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
+  /** 返回 true 表示新建了票据行；false 表示已存在（保留原记录）。 */
+  private insertTicket(ticket: string, m: InboundMessage, now: string): boolean {
+    const result = this.db.prepare(`INSERT OR IGNORE INTO tickets
+      (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, source_text, created_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
       .run(ticket, m.self_id, m.user_id, m.message_type === "group" ? m.group_id : null,
-        m.message_type, m.message_id, m.nickname, now);
+        m.message_type, m.message_id, m.nickname, m.text, now);
+    return Number(result.changes) === 1;
   }
 
   get(ticket: string): ReplyTicketRecord | null {
     if (!isTicketId(ticket)) return null;
     const row = this.db.prepare("SELECT * FROM tickets WHERE ticket_id = ?").get(ticket) as TicketRow | undefined;
     return row ? toRecord(row) : null;
+  }
+
+  /** 仍为 pending 的票据，按 created_at 升序。 */
+  listPending(limit = 200): ReplyTicketRecord[] {
+    const n = Number.isInteger(limit) && limit > 0 ? limit : 200;
+    const rows = this.db.prepare("SELECT * FROM tickets WHERE status = 'pending' ORDER BY created_at ASC, ticket_id ASC LIMIT ?")
+      .all(n) as unknown as TicketRow[];
+    return rows.map(toRecord);
   }
 
   /** pending → sending；返回 false 表示状态已被改变（不可发送）。 */

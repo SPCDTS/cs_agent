@@ -59,6 +59,8 @@ export interface ReplyTicketRecord {
   message_type: ChatType;
   source_message_id: string;
   source_nickname: string;
+  /** 原消息正文（normalize 后的 text），用于崩溃后无派发索引时重建处理 */
+  source_text: string;
   created_at: string;
   status: TicketStatus;
   attempted_at?: string;
@@ -101,6 +103,8 @@ export interface QQBridge {
    */
   reply(ticket: string, text: string, imagePaths?: string[]): Promise<ReplyResult>;
   getTicket(ticket: string): Promise<ReplyTicketRecord | null>;
+  /** 列出仍为 pending 的票据（按 created_at 升序），供启动时与派发索引对账 */
+  listPendingTickets(limit?: number): Promise<ReplyTicketRecord[]>;
   /** 主动发送，仅供运维/测试使用，agent 工具层不暴露 */
   send(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }>;
 }

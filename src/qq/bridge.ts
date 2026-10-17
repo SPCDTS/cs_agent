@@ -17,12 +17,16 @@ export const DEFAULT_TIMEOUT_MS = 15000;
 export const IMAGE_TIMEOUT_MS = 30000;
 export const MAX_REPLY_TEXT = 4000;
 const MEMORY_SEEN_LIMIT = 2000;
+/** 连接持续不可用时，error 事件最多每 5 分钟报一次 */
+export const DOWN_REPORT_INTERVAL_MS = 5 * 60 * 1000;
 
 /** 测试 / 运维用的内部参数，不属于对外契约。 */
 export interface BridgeInternals {
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
   heartbeatMs?: number;
+  /** 连接持续不可用时 error 事件的最小间隔，默认 5 分钟 */
+  downReportIntervalMs?: number;
 }
 
 type OutSegment = { type: string; data: Record<string, unknown> };
@@ -51,12 +55,16 @@ class Bridge extends EventEmitter implements QQBridge {
   private readonly reconnectBaseMs: number;
   private readonly reconnectMaxMs: number;
   private readonly heartbeatMs: number;
+  private readonly downReportIntervalMs: number;
 
   private store: ReplyStore | null = null;
   private socket: WebSocket | null = null;
   private running = false;
   private connected = false;
   private failures = 0;
+  /** 本轮"不可用"期间是否已报过 error，以及上次报的时间 */
+  private downReported = false;
+  private lastDownReportAt = 0;
   private disconnectCount = 0;
   private selfId: string | null = null;
   private lastEventAt: string | null = null;
@@ -76,6 +84,7 @@ class Bridge extends EventEmitter implements QQBridge {
     this.reconnectBaseMs = internals.reconnectBaseMs ?? 1000;
     this.reconnectMaxMs = internals.reconnectMaxMs ?? 30000;
     this.heartbeatMs = internals.heartbeatMs ?? 25000;
+    this.downReportIntervalMs = internals.downReportIntervalMs ?? DOWN_REPORT_INTERVAL_MS;
   }
 
   // ---------- 生命周期 ----------
@@ -139,6 +148,18 @@ class Bridge extends EventEmitter implements QQBridge {
     if (this.listenerCount("error") > 0) this.emit("error", error);
   }
 
+  /**
+   * 连接类错误节流：每次"可用→不可用"只报第一次失败，持续不可用期间最多每 downReportIntervalMs 报一次，
+   * 避免每次重连尝试都刷 error。
+   */
+  private reportConnectionError(error: Error): void {
+    const now = Date.now();
+    if (this.downReported && now - this.lastDownReportAt < this.downReportIntervalMs) return;
+    this.downReported = true;
+    this.lastDownReportAt = now;
+    this.emitError(error);
+  }
+
   // ---------- WebSocket ----------
 
   private connect(): void {
@@ -149,20 +170,21 @@ class Bridge extends EventEmitter implements QQBridge {
       if (this.config.token) headers.Authorization = "Bearer " + this.config.token;
       socket = new WebSocket(this.config.wsUrl, { headers, handshakeTimeout: 10000, maxPayload: 1024 * 1024 });
     } catch (error) {
-      this.emitError(toError(error));
+      this.reportConnectionError(toError(error));
       this.scheduleReconnect();
       return;
     }
     this.socket = socket;
     socket.on("open", () => this.onOpen(socket));
     socket.on("message", raw => this.onFrame(raw));
-    socket.on("error", error => this.emitError(new Error("NapCat WebSocket 错误：" + error.message)));
+    socket.on("error", error => this.reportConnectionError(new Error("NapCat WebSocket 错误：" + error.message)));
     socket.on("close", (code, reason) => this.onClose(socket, code, reason.toString()));
   }
 
   private onOpen(socket: WebSocket): void {
     this.connected = true;
     this.failures = 0;
+    this.downReported = false;
     let alive = true;
     socket.on("pong", () => { alive = true; });
     this.clearHeartbeat();
@@ -182,7 +204,11 @@ class Bridge extends EventEmitter implements QQBridge {
     if (this.connected) {
       this.connected = false;
       this.disconnectCount++;
-      this.emit("disconnect", reason || "code " + code);
+      const why = reason || "code " + code;
+      this.emit("disconnect", why);
+      // 状态变化（已连接→断开）总是报一次，开启新一轮节流
+      this.downReported = false;
+      this.reportConnectionError(new Error("NapCat WebSocket 连接断开：" + why));
     }
     this.scheduleReconnect();
   }
@@ -227,7 +253,7 @@ class Bridge extends EventEmitter implements QQBridge {
     const store = this.store;
     if (!store) return;
     const ticket = store.admit(message);
-    if (ticket === null) return; // 持久化去重：重启前已见过
+    if (ticket === null) return; // 持久化去重：已见过，或票据早已存在（去重键被淘汰后重到）
     this.emit("message", message, ticket);
   }
 
@@ -243,6 +269,10 @@ class Bridge extends EventEmitter implements QQBridge {
 
   async getTicket(ticket: string): Promise<ReplyTicketRecord | null> {
     return this.requireStore().get(ticket);
+  }
+
+  async listPendingTickets(limit = 200): Promise<ReplyTicketRecord[]> {
+    return this.requireStore().listPending(limit);
   }
 
   async reply(ticket: string, text: string, imagePaths: string[] = []): Promise<ReplyResult> {
