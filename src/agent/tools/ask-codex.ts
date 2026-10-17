@@ -2,12 +2,14 @@
  * 固定 codex 会话：首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
  * 之后 `codex exec resume <id>`；只有确认"会话不存在"的 resume 失败才新建会话。
  * 互斥队列保证同一时刻只有一轮；超时 kill 进程树。子进程只拿到最小环境变量（不含 token / API key）。
+ * 推理强度由意图模型按请求选择，每轮以 `-c model_reasoning_effort="<档位>"` 覆盖受管 config.toml 的默认值。
  */
 import { spawn, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai/utils/typebox-helpers";
 import { defineTool } from "@earendil-works/pi-durable";
 import { BUSINESS_ALREADY_USED, claimBusinessCall, TicketDoc, type TicketSource } from "../docs.js";
 import { log } from "../../log.js";
@@ -22,6 +24,26 @@ export interface CodexRunnerOptions {
   timeoutMs: number;
   /** 额外环境变量（测试用） */
   env?: NodeJS.ProcessEnv;
+}
+
+/** 意图模型可选的推理强度（不含 ultra：会自动委派子任务，成本高）。 */
+export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export function isReasoningEffort(v: unknown): v is ReasoningEffort {
+  return typeof v === "string" && (REASONING_EFFORTS as readonly string[]).includes(v);
+}
+
+/** 单轮的 codex 配置覆盖参数；未指定时沿用 config.toml 中的 CODEX_REASONING_EFFORT。 */
+export function reasoningEffortArgs(effort: ReasoningEffort | undefined): string[] {
+  if (effort === undefined) return [];
+  if (!isReasoningEffort(effort)) throw new Error(`不支持的推理强度: ${String(effort)}`);
+  return ["-c", `model_reasoning_effort="${effort}"`];
+}
+
+export interface AskOptions {
+  signal?: AbortSignal;
+  reasoningEffort?: ReasoningEffort;
 }
 
 /** 传给 codex 子进程的环境变量白名单（其余一律不传，尤其是 NAPCAT_TOKEN、*_API_KEY 等配置） */
@@ -133,8 +155,8 @@ export class CodexRunner {
   constructor(readonly opts: CodexRunnerOptions) {}
 
   /** 串行执行一轮；返回 codex 最后一条消息文本。 */
-  ask(prompt: string, signal?: AbortSignal): Promise<string> {
-    const run = this.queue.then(() => this.turn(prompt, signal));
+  ask(prompt: string, opts: AskOptions = {}): Promise<string> {
+    const run = this.queue.then(() => this.turn(prompt, opts));
     this.queue = run.catch(() => undefined);
     return run;
   }
@@ -162,11 +184,16 @@ export class CodexRunner {
     }
   }
 
-  private async turn(prompt: string, signal?: AbortSignal): Promise<string> {
+  private async turn(prompt: string, { signal, reasoningEffort }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
+    const effort = reasoningEffortArgs(reasoningEffort);
     const id = await this.readSessionId();
     if (id) {
-      const r = await this.exec(["exec", "resume", ...this.commonArgs(), "-c", `sandbox_mode="${this.opts.sandbox}"`, id, "-"], prompt, signal);
+      const r = await this.exec(
+        ["exec", "resume", ...this.commonArgs(), "-c", `sandbox_mode="${this.opts.sandbox}"`, ...effort, id, "-"],
+        prompt,
+        signal,
+      );
       if (r.code === 0) return this.result(r);
       if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
         // 已确认会话不存在：新建会话并覆盖记录
@@ -179,7 +206,7 @@ export class CodexRunner {
       }
     }
     const r = await this.exec(
-      ["exec", ...this.commonArgs(), "-C", this.opts.workspaceDir, "-s", this.opts.sandbox, "-"],
+      ["exec", ...this.commonArgs(), ...effort, "-C", this.opts.workspaceDir, "-s", this.opts.sandbox, "-"],
       prompt,
       signal,
       async (threadId) => {
@@ -313,6 +340,10 @@ export function createAskCodexTool(runner: CodexRunner) {
       "把用户的请求转交给 Codex（一个能读写工作区、执行命令、联网检索的编程/通用助手）并返回它的最终回答。用于所有非纯生图请求。",
     parameters: Type.Object({
       prompt: Type.String({ description: "转交给 Codex 的完整请求，保留用户原意与原文要点" }),
+      reasoning_effort: StringEnum(REASONING_EFFORTS, {
+        description:
+          "Codex 本轮推理强度：low 闲聊/简单问答/查询；medium 一般解释、小改动；high 多步推理、写代码、调试；xhigh 复杂工程或深度分析；max 仅当用户明确要求最深入思考",
+      }),
     }),
     replay: "unsafe",
     execute: async (args, api, context) => {
@@ -325,11 +356,20 @@ export function createAskCodexTool(runner: CodexRunner) {
         : "";
       const started = Date.now();
       try {
-        const answer = await runner.ask(header + args.prompt, context.abortSignal);
-        log.info("ask_codex done", { ms: Date.now() - started, chars: answer.length });
+        const reasoningEffort = isReasoningEffort(args.reasoning_effort) ? args.reasoning_effort : undefined;
+        const answer = await runner.ask(header + args.prompt, { signal: context.abortSignal, reasoningEffort });
+        log.info("ask_codex done", {
+          ms: Date.now() - started,
+          chars: answer.length,
+          reasoning_effort: reasoningEffort ?? "default",
+        });
         return { output: [{ type: "text", text: answer }] };
       } catch (err) {
-        log.warn("ask_codex failed", { ms: Date.now() - started, error: (err as Error).message });
+        log.warn("ask_codex failed", {
+          ms: Date.now() - started,
+          reasoning_effort: args.reasoning_effort,
+          error: (err as Error).message,
+        });
         const kind = err instanceof CodexTimeoutError ? "处理超时" : "Codex 处理失败";
         return { output: [{ type: "text", text: `${kind}，请告知用户稍后再试。` }], isError: true };
       }

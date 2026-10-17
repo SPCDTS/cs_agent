@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
@@ -130,6 +130,7 @@ async function makeRig(): Promise<Rig> {
     sessionFile: path.join(dir, "codex-session.json"),
     sandbox: "workspace-write",
     timeoutMs: 10_000,
+    env: { FAKE_CODEX_LOG: path.join(dir, "codex-calls.jsonl") },
   });
   const extension = createCsAgentExtension([
     createGenerateImageTool(backend, path.join(dir, "images")),
@@ -190,7 +191,7 @@ describe("routing via faux provider", () => {
     const r = rig;
     r.faux.setResponses([
       recording(r, () =>
-        fauxAssistantMessage(fauxToolCall("ask_codex", { prompt: "解释一下 TCP 三次握手" }), { stopReason: "toolUse" }),
+        fauxAssistantMessage(fauxToolCall("ask_codex", { prompt: "解释一下 TCP 三次握手", reasoning_effort: "medium" }), { stopReason: "toolUse" }),
       ),
       recording(r, (context) =>
         fauxAssistantMessage(fauxToolCall("reply_qq", { text: lastToolResult(context.messages) }), { stopReason: "toolUse" }),
@@ -201,6 +202,10 @@ describe("routing via faux provider", () => {
     expect(r.imageCalls).toEqual([]);
     expect(r.bridge.replies).toEqual([{ ticket: "ticket-gen", text: "answer to: 解释一下 TCP 三次握手", images: [] }]);
     expect(r.faux.state.callCount).toBe(2);
+    // 意图模型选择的推理强度原样传给 codex
+    const codexCalls = readFileSync(path.join(r.dir, "codex-calls.jsonl"), "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l));
+    const start = codexCalls.find((c) => c.phase === "start");
+    expect(start.argv).toEqual(expect.arrayContaining(["-c", 'model_reasoning_effort="medium"']));
   });
 
   it("user message content carries QQ source header; same ticket dispatched twice runs once", async () => {
@@ -337,5 +342,6 @@ describe("routing via faux provider", () => {
   it("system prompt states the untrusted-content and one-tool rules", () => {
     expect(SYSTEM_PROMPT).toContain("不可信");
     expect(SYSTEM_PROMPT).toContain("恰好调用一次 reply_qq");
+    expect(SYSTEM_PROMPT).toContain("reasoning_effort");
   });
 });

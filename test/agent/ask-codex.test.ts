@@ -184,6 +184,26 @@ describe("CodexRunner", () => {
     expect(calls().some((c) => c.phase === "end")).toBe(false);
   });
 
+  it("passes the chosen reasoning effort as a per-call -c override on first turn and on resume", async () => {
+    const { runner, calls } = setup();
+    await runner.ask("one", { reasoningEffort: "low" });
+    await runner.ask("two", { reasoningEffort: "xhigh" });
+    const [first, second] = calls().filter((c) => c.phase === "start");
+    const effortOf = (argv: string[]) => argv[argv.findIndex((a, i) => a === "-c" && argv[i + 1]?.startsWith("model_reasoning_effort=")) + 1];
+    expect(first.argv[1]).toBe("--json");
+    expect(effortOf(first.argv)).toBe('model_reasoning_effort="low"');
+    expect(second.argv.slice(0, 2)).toEqual(["exec", "resume"]);
+    expect(effortOf(second.argv)).toBe('model_reasoning_effort="xhigh"');
+    expect(second.argv.slice(-2)).toEqual(["thread-123", "-"]);
+  });
+
+  it("omits the override when no effort is given and rejects unknown efforts", async () => {
+    const { runner, calls } = setup();
+    await runner.ask("plain");
+    expect(calls()[0].argv.join(" ")).not.toContain("model_reasoning_effort");
+    await expect(runner.ask("x", { reasoningEffort: "ultra" as never })).rejects.toThrow(/不支持的推理强度/);
+  });
+
   it("mutex: concurrent asks run one at a time in submission order", async () => {
     const { runner, calls } = setup({ sleepMs: 300 });
     const results = await Promise.all([runner.ask("A"), runner.ask("B"), runner.ask("C")]);

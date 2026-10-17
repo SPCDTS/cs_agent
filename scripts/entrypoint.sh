@@ -25,7 +25,7 @@ toml_value() {
     *) printf '%s' "$1" ;;
   esac
 }
-MODEL="$(toml_value "${CODEX_MODEL:-gpt-6-astra}" gpt-6-astra CODEX_MODEL)"
+MODEL="$(toml_value "${CODEX_MODEL:-gpt-6.1-sol}" gpt-6.1-sol CODEX_MODEL)"
 EFFORT="$(toml_value "${CODEX_REASONING_EFFORT:-high}" high CODEX_REASONING_EFFORT)"
 
 # config.toml 是受管文件：每次启动都按环境变量重写（先写临时文件再 mv，避免半截文件）
@@ -33,6 +33,7 @@ CONFIG="$CODEX_HOME_DIR/config.toml"
 cat > "$CONFIG.tmp" <<TOML
 # 受管文件：由 entrypoint.sh 在每次容器启动时按环境变量（CODEX_MODEL / CODEX_REASONING_EFFORT）重写。
 # 不要手工修改——改动会在下次启动时被覆盖；请改 .env 后重启容器。不继承宿主机配置。
+# model_reasoning_effort 只是默认值：cs-agent 每轮按请求以 -c model_reasoning_effort=... 覆盖。
 model = "$MODEL"
 model_reasoning_effort = "$EFFORT"
 

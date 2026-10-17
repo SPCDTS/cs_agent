@@ -8,6 +8,7 @@ describe("model config defaults", () => {
     const c = loadConfig({});
     expect(c.AGENT_MODEL_PROVIDER).toBe("deepseek");
     expect(c.AGENT_MODEL_ID).toBe("deepseek-flash");
+    expect(c.CODEX_MODEL).toBe("gpt-6.1-sol");
   });
 });
 

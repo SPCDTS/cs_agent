@@ -41,7 +41,8 @@ const EnvSchema = z.object({
   COMFY_TIMEOUT_SEC: int(300),
 
   CODEX_BIN: z.string().default("codex"),
-  CODEX_MODEL: z.string().default("gpt-6-astra"),
+  CODEX_MODEL: z.string().default("gpt-6.1-sol"),
+  /** config.toml 中的默认推理强度；ask_codex 每轮由意图模型选择的档位会覆盖它 */
   CODEX_REASONING_EFFORT: z.string().default("high"),
   CODEX_SANDBOX: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("workspace-write"),
   CODEX_TIMEOUT_SEC: int(600),
