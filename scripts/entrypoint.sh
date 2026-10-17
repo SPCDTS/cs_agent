@@ -90,7 +90,7 @@ PLAYWRIGHT_MCP_BIN="${PLAYWRIGHT_MCP_BIN:-/usr/local/bin/playwright-mcp}"
 PW_BLOCKED="localhost;localhost:*;*.localhost;*.localhost:*;host.docker.internal;host.docker.internal:*;*.docker.internal;*.docker.internal:*;*.internal;*.internal:*;[::1];[::1]:*;[::];[::]:*;[fc*;[fd*;[fe80*;[::ffff*;0.0.0.0;0.0.0.0:*;127.*;10.*;192.168.*;169.254.*"
 for _n in 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31; do PW_BLOCKED="$PW_BLOCKED;172.$_n.*"; done
 # Chromium 沙箱：Playwright 默认以 --no-sandbox 启动 Chromium，这里显式 --sandbox 开启。
-# 实测（cs-agent:g1，node 用户）：需要 compose 的 seccomp=unconfined（与 codex 的 bwrap 相同前提）；
+# 实测（cs-agent:g1，node 用户）：需要 compose 的 seccomp=./docker/seccomp-codex.json（与 codex 的 bwrap 相同前提）；
 # 默认 seccomp 下 "Chromium sandboxing failed"，此时设 PLAYWRIGHT_NO_SANDBOX=1 退回无沙箱。
 case "${PLAYWRIGHT_NO_SANDBOX:-0}" in
   1|true|yes) PW_SANDBOX_ARG='' ;;
