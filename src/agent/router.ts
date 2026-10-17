@@ -55,7 +55,7 @@ export function parseInlineImageOptions(text: string): ImageOptions {
     const token = /^\S+/.exec(prompt)?.[0];
     if (!token) break;
     if ((ASPECTS as readonly string[]).includes(token)) opts.aspect = token as ImageOptions['aspect'];
-    else if (aliases[token]) opts.aspect = aliases[token];
+    else if (Object.hasOwn(aliases, token)) opts.aspect = aliases[token];
     else if (token === '2k' || token === '2mp') opts.size = token;
     else if (/^x[2-4]$/.test(token)) opts.count = Number(token[1]);
     else if (token === '透明') opts.transparent = true;

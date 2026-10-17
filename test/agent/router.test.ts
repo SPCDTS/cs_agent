@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_IMAGE_PREFIXES, IMAGE_USAGE_REPLY, legacyRouteText, parseImagePrefixes, routeMessage } from "../../src/agent/router.js";
+import { DEFAULT_IMAGE_PREFIXES, IMAGE_USAGE_REPLY, legacyRouteText, parseInlineImageOptions, parseImagePrefixes, routeMessage } from "../../src/agent/router.js";
 
 describe("rule router (§4.1)", () => {
+  it.each(['__proto__', 'constructor', 'toString'])('原型键 %s 留在提示词中', token => {
+    expect(parseInlineImageOptions(token + ' 横 猫')).toEqual({ prompt: token + ' 横 猫' });
+  });
   it("half-width and full-width colon prefixes route to image with the raw remainder as prompt", () => {
     expect(routeMessage("奶龙:一只猫")).toMatchObject({ route: "image", prefix: "奶龙:", prompt: "一只猫" });
     expect(routeMessage("奶龙：A cat, Watercolor")).toMatchObject({ route: "image", prefix: "奶龙：", prompt: "A cat, Watercolor" });
