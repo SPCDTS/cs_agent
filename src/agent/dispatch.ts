@@ -2,13 +2,15 @@
  * QQ 消息 → 规则分流 → durable 任务（设计 §4.1 / §4.7）：
  * 1. admit：createConversation(ownerless) 的同一 commit 内写入 TicketDoc（含分流结果 route/prefix/prompt）
  *    与 Session 级 DispatchDoc 条目（scope、bridge 票据 seq = admit 顺序）。
- * 2. 顺序：同一 scope 严格 FIFO（上一条处理完、回复发出后才开始下一条），不同 scope 并行，
- *    同时运行的总数 ≤ concurrency。任务在轮到它时才创建（pi-durable 一创建就会调度）。
+ * 2. 顺序：同一 scope 严格 FIFO——一张票据占据其 scope 队首直到终态：sent | uncertain（任务回复或兜底已发出 / 结果不确定）
+ *    | failed（attempts 超过上限、兜底也发不出）；不同 scope 并行，同时运行的总数 ≤ concurrency。
+ *    任务在轮到它时才创建（pi-durable 一创建就会调度）。
  * 3. 运行：按 route 创建生图任务或 agent 任务（任务 id 记入 DispatchDoc），waitForTask 等待终态。
- * 4. 只有票据进入终态（sent/uncertain，含兜底回复已发出）才从 DispatchDoc 删除；基础设施错误时保留索引，
- *    attempts 累计，重启后 recover() 把索引条目与孤儿票据按票据 seq 统一排序继续（仍受 scope FIFO 与并发上限约束）；
- *    attempts ≥ MAX_ATTEMPTS 时直接发兜底回复并清除。
- * 5. 任务结束而票据仍 pending（任务失败）→ 发一次兜底回复。
+ * 4. 任务结束而票据仍 pending（任务失败）→ 发一次兜底；兜底在发送前就失败 → 退避后在队首重试（attempts 累计落盘）。
+ *    attempts 超过 MAX_ATTEMPTS → giveUp（同一队列与并发槽位）：标记 givenUp、中止任务并等待终态，再发兜底；
+ *    仍发不出 → 条目标记 failed 并继续下一条。终态（sent/uncertain）才从 DispatchDoc 删除；
+ *    进程退出时保留索引，重启后 recover() 把索引条目与孤儿票据按票据 seq 统一排序继续。
+ * 5. 任务的外部副作用阶段（提交生图、codex 回合、回复）开始前检查票据仍 pending 且条目未 givenUp，否则以 failed 结束。
  * 6. recover() 还与 QQBridge 的 pending 票据对账：admit 已落盘但派发索引未写入的票据，用票据里保存的来源与原文
  *    重建消息重新派发（分页取尽全部 pending 票据）。v2 遗留条目（无任务）先中止其旧的模型会话，再按原文重新分流。
  * 7. 统一上下文（可选 history）：收到消息即写入机器人"处理中"行；终态后按 TicketDoc 更新为"已回复"/"失败"。
@@ -44,6 +46,8 @@ export interface DispatcherOptions {
   codexEffort?: string;
   context?: Context;
   history?: DispatchHistory;
+  /** 票据仍 pending 时队首重试的退避基数（毫秒，第 n 次重试等待 n 倍），默认 5000 */
+  retryDelayMs?: number;
 }
 
 /** 从持久化票据重建入站消息（仅用于崩溃对账；段信息不保存，置空）。 */
@@ -109,8 +113,13 @@ export class Dispatcher {
       | { kind: "indexed"; ticket: string; key: number; tie: number; entry: DispatchEntry }
       | { kind: "orphan"; ticket: string; key: number; tie: number; rec: ReplyTicketRecord };
     const items: Item[] = [];
+    let failed = 0;
     for (const [ticket, entry] of Object.entries(indexed)) {
       if (this.inflight.has(ticket)) continue;
+      if (entry.state === "failed") {
+        failed++; // 已终态（兜底也发不出）：不再处理，留作审计
+        continue;
+      }
       // pi-durable 一开启调度就会继续上次的活任务，绕过 scope FIFO：先给它们打中止标记（此时尚未调度），
       // 轮到该票据时等它以 aborted 结束，再新建任务（新任务跳过 TicketDoc 中已完成的阶段）。
       if (entry.taskId !== undefined) {
@@ -153,11 +162,7 @@ export class Dispatcher {
       const { ticket } = item;
       if (item.kind === "indexed") {
         const entry = item.entry;
-        if ((entry.attempts ?? 0) >= MAX_ATTEMPTS) {
-          log.warn("ticket exceeded max attempts, giving up", { ticket: short(ticket), attempts: entry.attempts });
-          void this.track(ticket, "give-up failed", () => this.giveUp(ticket));
-          continue;
-        }
+        // 达到上限的条目同样入队：run() 在队首走 giveUp（中止活任务 → 兜底），不在队外插队
         const scope = entry.scope ?? (await this.legacyScope(ticket, entry));
         void this.track(ticket, "recover failed", () =>
           this.enqueue(scope, () => this.run(ticket, entry.conversationId as ConversationId)),
@@ -166,17 +171,20 @@ export class Dispatcher {
       }
       const rec = item.rec;
       if (!rec.source_text.trim()) {
-        // 迁移前的旧票据没有保存原文，无法重建：只发兜底回复
+        // 迁移前的旧票据没有保存原文，无法重建：只发兜底回复（同样在其 scope 队列里）
         log.warn("orphan ticket without source text, sending fallback", { ticket: short(rec.ticket_id) });
-        void this.track(rec.ticket_id, "orphan fallback failed", async () => {
-          await this.fallbackIfUnreplied(rec.ticket_id);
-        });
+        const scope = rec.message_type === "group" ? `group:${rec.group_id}` : `private:${rec.user_id}`;
+        void this.track(rec.ticket_id, "orphan fallback failed", () =>
+          this.enqueue(scope, async () => {
+            await this.fallbackIfUnreplied(rec.ticket_id);
+          }),
+        );
       } else {
         log.warn("orphan pending ticket without dispatch index, re-dispatching", { ticket: short(rec.ticket_id) });
         void this.dispatch(inboundFromTicket(rec), rec.ticket_id);
       }
     }
-    if (count) log.info("recovering pending tickets", { indexed: count - orphanCount, orphans: orphanCount });
+    if (count || failed) log.info("recovering pending tickets", { indexed: count - orphanCount, orphans: orphanCount, failed_kept: failed });
     return count;
   }
 
@@ -323,52 +331,105 @@ export class Dispatcher {
     }, this.ctx);
   }
 
+  /**
+   * 在 scope 队首处理一张票据，直到它进入终态才返回（之后同 scope 的下一条才开始）：
+   * - sent / uncertain：任务发出回复，或任务失败后兜底回复已发出 / 结果不确定 → 清除索引；
+   * - failed：attempts 超过上限（giveUp：中止活任务、发兜底），兜底仍发不出（bridge 不可用）→ 条目标记 failed，不再阻塞 scope。
+   * 每次尝试开始时 attempts +1（落盘）；票据仍 pending 时退避后在队首重试。harness 关闭（进程退出）时 attempts 提交失败、
+   * 直接抛出并保留索引，重启后 recover() 继续。
+   */
   private async run(ticket: string, conversationId: ConversationId): Promise<void> {
-    const { harness } = this.opts;
-    let done = false;
-    try {
-      const attempts = await harness.commit(async (tx) => {
-        const entry = (await tx.doc(DispatchDoc)).pending[ticket];
-        if (!entry) return -1;
-        entry.attempts = (entry.attempts ?? 0) + 1;
-        return entry.attempts;
+    for (let local = 0; ; local++) {
+      const entry = await this.opts.harness.commit(async (tx) => {
+        const e = (await tx.doc(DispatchDoc)).pending[ticket];
+        if (!e || e.state === "failed") return undefined;
+        e.attempts = (e.attempts ?? 0) + 1;
+        return { attempts: e.attempts, givenUp: e.givenUp === true };
       }, this.ctx);
-      if (attempts < 0) return; // 索引已被清除：已由其他路径完成
-      // 已回复过的票据（重复投递）：不再运行任务
-      const pre = await this.opts.bridge.getTicket(ticket).catch(() => undefined);
-      if (pre === null || isTerminal(pre?.status)) {
-        log.info("ticket already terminal, skipping", { ticket: short(ticket), status: pre?.status ?? "missing" });
-        done = true;
+      if (!entry) return; // 索引已清除（其他路径已完成）或已标记 failed
+      if (entry.givenUp || entry.attempts > MAX_ATTEMPTS) {
+        log.warn("ticket reached max attempts, giving up", { ticket: short(ticket), attempts: entry.attempts - 1 });
+        await this.giveUp(ticket);
         return;
       }
-      const taskId = await this.ensureTask(ticket);
-      if (taskId !== undefined) {
-        const settled = await harness.waitForTask(taskId, this.ctx);
-        const outcome = settled.state.outcome;
-        log.info("ticket task settled", {
-          ticket: short(ticket),
-          task: settled.kind,
-          status: outcome.status,
-          attempts,
-          ...(outcome.status === "failed" || outcome.status === "faulted" ? { error: outcome.error.message } : {}),
-        });
+      if (local > 0) await new Promise((r) => setTimeout(r, (this.opts.retryDelayMs ?? 5000) * local));
+      try {
+        if ((await this.attempt(ticket, conversationId, entry.attempts)) !== "pending") {
+          await this.clearIndex(ticket);
+          return;
+        }
+        log.warn("ticket still pending after attempt; retrying at the head of its scope", { ticket: short(ticket), attempts: entry.attempts });
+      } catch (err) {
+        // 基础设施错误：下一轮的 attempts 提交若也失败（harness 已关闭）则抛出、保留索引
+        log.warn("ticket attempt failed", { ticket: short(ticket), attempts: entry.attempts, error: err });
       }
-      const outcome = await this.fallbackIfUnreplied(ticket);
-      done = outcome !== "pending";
-      if (outcome === "terminal") await this.recordOutcome(ticket, conversationId);
-      if (!done) log.warn("ticket still pending after run; keeping dispatch index", { ticket: short(ticket), attempts });
-    } finally {
-      // 基础设施错误（抛出）或票据仍 pending：保留索引，重启后 recover() 继续
-      if (done) await this.clearIndex(ticket);
     }
   }
 
+  /** 一次尝试：运行（或继续）任务并等待终态，票据仍 pending 时发一次兜底。返回 fallbackIfUnreplied 的结果。 */
+  private async attempt(ticket: string, conversationId: ConversationId, attempts: number): Promise<"terminal" | "fallback" | "pending"> {
+    // 已回复过的票据（重复投递）：不再运行任务
+    const pre = await this.opts.bridge.getTicket(ticket).catch(() => undefined);
+    if (pre === null || isTerminal(pre?.status)) {
+      log.info("ticket already terminal, skipping", { ticket: short(ticket), status: pre?.status ?? "missing" });
+      return "terminal";
+    }
+    const taskId = await this.ensureTask(ticket);
+    if (taskId !== undefined) {
+      const settled = await this.opts.harness.waitForTask(taskId, this.ctx);
+      const outcome = settled.state.outcome;
+      log.info("ticket task settled", {
+        ticket: short(ticket),
+        task: settled.kind,
+        status: outcome.status,
+        attempts,
+        ...(outcome.status === "failed" || outcome.status === "faulted" ? { error: outcome.error.message } : {}),
+      });
+    }
+    const outcome = await this.fallbackIfUnreplied(ticket);
+    if (outcome === "terminal") await this.recordOutcome(ticket, conversationId);
+    return outcome;
+  }
+
   /**
-   * attempts 达上限：不再运行任务，发兜底回复后清除索引。
-   * 若兜底在发送前就失败（票据仍 pending），保留索引，下次启动再试兜底。
+   * 放弃运行（在该票据的 scope 队首、占用并发槽位执行，与正常运行同一路径）：
+   * 1. 条目标记 givenUp（任务的每个外部副作用阶段先检查它，标记后不再产生副作用）；
+   * 2. 经 harness 中止票据的任务并等待其终态；
+   * 3. 发兜底回复。兜底仍发不出（bridge 不可用）→ 条目标记 failed（保留在索引里，重启对账不会把它当孤儿重跑），继续下一条。
    */
   private async giveUp(ticket: string): Promise<void> {
-    if ((await this.fallbackIfUnreplied(ticket)) !== "pending") await this.clearIndex(ticket);
+    const { harness } = this.opts;
+    const taskId = await harness.commit(async (tx) => {
+      const e = (await tx.doc(DispatchDoc)).pending[ticket];
+      if (!e) return null;
+      e.givenUp = true;
+      return e.taskId ?? undefined;
+    }, this.ctx);
+    if (taskId === null) return;
+    if (taskId !== undefined) {
+      try {
+        await harness.abortTask(taskId as TaskId, this.ctx);
+        const settled = await harness.waitForTask(taskId as TaskId, this.ctx);
+        this.abortedAtRecovery.delete(taskId);
+        log.info("ticket task aborted before fallback", { ticket: short(ticket), task: taskId, status: settled.state.outcome.status });
+      } catch (err) {
+        // 无法确认任务已终态：不发兜底（条目保留 givenUp，下次再走 giveUp）
+        log.warn("abort task before fallback failed; fallback deferred", { ticket: short(ticket), task: taskId, error: err });
+        throw err;
+      }
+    }
+    if ((await this.fallbackIfUnreplied(ticket)) !== "pending") {
+      await this.clearIndex(ticket);
+      return;
+    }
+    log.error("ticket failed: fallback could not be sent after max attempts; moving on", { ticket: short(ticket) });
+    await harness.commit(async (tx) => {
+      const e = (await tx.doc(DispatchDoc)).pending[ticket];
+      if (e) e.state = "failed";
+    }, this.ctx);
+    this.withHistory("record failure failed", ticket, (h) =>
+      h.completeReply(ticket, { action: "fallback", excerpt: "", status: "失败" }),
+    );
   }
 
   private withHistory(label: string, ticket: string, fn: (h: DispatchHistory) => unknown): void {

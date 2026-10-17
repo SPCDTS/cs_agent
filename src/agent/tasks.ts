@@ -18,7 +18,7 @@ import type { ContextStore } from "../context/store.js";
 import type { QQBridge } from "../qq/types.js";
 import { log } from "../log.js";
 import { threadKeyForSource } from "./codex-runner.js";
-import { TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
+import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
 import { collectNewImages } from "./image-collect.js";
 import { classifyImageError, ticketImageDir, UnknownJobError, type ImageBackend } from "./image-gen.js";
 import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
@@ -94,6 +94,9 @@ async function replyPhase<S extends { phase: string }>(
   if (attempt > 0) await runtime.sleep(runtime.now() + (deps.replyRetryDelayMs ?? 2000) * attempt, context);
   const doc = await ticketDoc(runtime, context);
   const { text, images } = compose(doc);
+  // 已 sent 的票据仍可调用 reply（幂等返回 already_sent，不会再发）；其余非 pending / 已放弃 → 不发送
+  const blocked = await blockedReason(deps, runtime, context, doc.ticket);
+  if (blocked && blocked !== "ticket sent") return failBlocked(runtime, context, doc.ticket, blocked, "reply");
   try {
     const res = await deps.getBridge().reply(doc.ticket, text, images);
     await cleanupTicketDir(deps, doc.ticket);
@@ -137,6 +140,27 @@ async function cleanupTicketDir(deps: TaskDeps, ticket: string): Promise<void> {
   }
 }
 
+/**
+ * 外部副作用（提交生图、codex 回合、发送回复）之前的检查：派发条目存在且未 givenUp / failed，票据仍 pending。
+ * 返回不能继续的原因；undefined 表示可以继续。
+ */
+async function blockedReason(deps: TaskDeps, runtime: AnyRuntime, context: Context, ticket: string): Promise<string | undefined> {
+  const entry = (await runtime.snapshot(DispatchDoc, context))?.pending[ticket];
+  if (!entry) return "dispatch entry missing";
+  if (entry.givenUp) return "dispatch gave up";
+  if (entry.state === "failed") return "dispatch marked failed";
+  const rec = await deps.getBridge().getTicket(ticket).catch(() => undefined);
+  if (rec === undefined) return "ticket unreadable";
+  if (rec === null) return "ticket missing";
+  return rec.status === "pending" ? undefined : `ticket ${rec.status}`;
+}
+
+/** 不能继续：不产生任何副作用，以 failed 结束。 */
+async function failBlocked(runtime: AnyRuntime, context: Context, ticket: string, reason: string, phase: string): Promise<void> {
+  log.warn("task phase skipped: ticket no longer live", { ticket: short(ticket), phase, reason });
+  await runtime.commit(async () => ({ status: "terminal", outcome: { status: "failed", error: { message: `skipped ${phase}: ${reason}` } } }), context);
+}
+
 async function abortTask(runtime: AnyRuntime, context: Context): Promise<void> {
   await runtime.commit(async () => ({ status: "terminal", outcome: { status: "aborted" } }), context);
 }
@@ -146,6 +170,8 @@ export function createTasks(deps: TaskDeps) {
 
   /** 提交 ComfyUI 任务；成功后立即把 {prompt_id, backend, submits} 与 collect 检查点同一提交写入。 */
   async function submitJob(runtime: ImageRuntime, context: Context, doc: Readonly<TicketState>, prevSubmits: number): Promise<void> {
+    const blocked = await blockedReason(deps, runtime, context, doc.ticket);
+    if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "submit");
     const started = Date.now();
     let promptId: string;
     try {
@@ -268,6 +294,8 @@ export function createTasks(deps: TaskDeps) {
               log.warn("quote lookup failed", { ticket: short(doc.ticket), error: err });
             }
           }
+          const blocked = await blockedReason(deps, runtime, context, doc.ticket);
+          if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "handle");
           let backendName = "unknown";
           const started = Date.now();
           try {

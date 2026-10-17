@@ -224,7 +224,7 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
     replyRetryDelayMs: 10,
   });
   const harness = await openHarness({ models, extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "agent.sqlite") }, ctx);
-  const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: o.concurrency ?? 2, history: store, codexEffort: "high" });
+  const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: o.concurrency ?? 2, history: store, codexEffort: "high", retryDelayMs: 10 });
   // 与 main.ts 一致：重开时先 recover() 再开启调度（测试里由 recover 后的 waitForTask 开启）
   if (!shared) harness.resume();
   const rig: Rig = {
@@ -347,22 +347,13 @@ describe("rule router → image path", () => {
     expect(r.bridge.replies[0]!.images).toEqual([realpathSync(path.join(imgDir(r, "t-mid"), "out_1.png"))]);
   });
 
-  it("task fails (reply down) and fallback fails → index kept; rerun after restart skips generation and sends once", async () => {
+  it("task fails and the fallback fails before sending → retried at the head of the scope; generation not repeated (R4)", async () => {
     const r = await makeRig();
-    r.bridge.replyDown = true;
+    r.bridge.failBeforeSend = MAX_REPLY_ATTEMPTS + 1; // 第 1 次尝试：任务内 3 次 + 兜底 1 次，全部在发送前失败
     await r.dispatcher.dispatch(inbound("奶龙:森林"), "t-rerun");
-    expect(r.bridge.calls).toBe(MAX_REPLY_ATTEMPTS + 1); // 任务内 3 次 + 兜底 1 次，全部在发送前失败
-    expect(r.bridge.replies).toEqual([]);
-    expect((await pendingIndex(r))["t-rerun"]?.attempts).toBe(1);
-
-    r.bridge.replyDown = false;
-    await r.harness.close(ctx);
-    await r.reopen();
-    await r.dispatcher.recover();
-    await r.dispatcher.idle();
+    expect(r.bridge.calls).toBe(MAX_REPLY_ATTEMPTS + 2);
     expect(r.image.calls).toEqual(["森林"]);
-    expect(r.bridge.replies).toHaveLength(1);
-    expect(r.bridge.replies[0]!.text).toBe(IMAGE_SUCCESS_REPLY);
+    expect(r.bridge.replies).toEqual([{ ticket: "t-rerun", text: IMAGE_SUCCESS_REPLY, images: [expect.stringMatching(/out_1\.png$/)] }]);
     expect(await pendingIndex(r)).toEqual({});
   });
 
@@ -587,20 +578,43 @@ describe("ordering (§4.7)", () => {
     expect(r.backend.events).toEqual(["start:A", "end:A", "start:B", "end:B"]);
   });
 
-  it("recovery respects scope FIFO (seq order)", async () => {
+  it("a ticket holds its scope head until terminal: the next one waits while the head is retried (R4/R5)", async () => {
+    const r = await makeRig({ concurrency: 2 });
+    r.bridge.failBeforeSend = MAX_REPLY_ATTEMPTS + 1; // R1 第 1 次尝试的回复与兜底都在发送前失败
+    await Promise.all([
+      r.dispatcher.dispatch(inbound("R1", { group: "1", user: "42", id: "1" }), "t-r1"),
+      r.dispatcher.dispatch(inbound("R2", { group: "1", user: "42", id: "2" }), "t-r2"),
+    ]);
+    expect(r.bridge.replies.map((x) => x.ticket)).toEqual(["t-r1", "t-r2"]);
+    // R1 的后端只调用一次（重试复用 agentResult）；R2 在 R1 回复发出之后才开始
+    expect(r.backend.events).toEqual(["start:R1", "end:R1", "start:R2", "end:R2"]);
+    expect(await pendingIndex(r)).toEqual({});
+  });
+
+  it("bridge down: head is marked failed after the cap (fallback attempted) and the scope moves on; restart does not re-run it (R4/R5)", async () => {
     const r = await makeRig({ concurrency: 2 });
     r.bridge.replyDown = true;
-    // 三条都失败（回复不可用）且兜底失败 → 索引保留
-    await r.dispatcher.dispatch(inbound("R1", { group: "1", user: "42", id: "1" }), "t-r1");
-    await r.dispatcher.dispatch(inbound("R2", { group: "1", user: "42", id: "2" }), "t-r2");
-    expect(Object.keys(await pendingIndex(r)).sort()).toEqual(["t-r1", "t-r2"]);
+    await Promise.all([
+      r.dispatcher.dispatch(inbound("F1", { group: "1", user: "42", id: "1" }), "t-f1"),
+      r.dispatcher.dispatch(inbound("F2", { group: "1", user: "42", id: "2" }), "t-f2"),
+    ]);
+    expect(r.backend.events).toEqual(["start:F1", "end:F1", "start:F2", "end:F2"]);
+    const idx = await pendingIndex(r);
+    expect(idx["t-f1"]).toMatchObject({ state: "failed", givenUp: true, attempts: MAX_ATTEMPTS + 1 });
+    expect(idx["t-f2"]).toMatchObject({ state: "failed" });
+    expect(bot(r).find((b) => b.ticket === "t-f1")).toMatchObject({ status: "失败" });
+
+    // 重启：failed 条目不再处理，也不会被对账当作孤儿重跑
     r.bridge.replyDown = false;
-    r.backend.events = [];
-    await r.dispatcher.recover();
+    r.bridge.pending = (["t-f1", "t-f2"] as const).map((t, i) => ({
+      ticket_id: t, seq: r.bridge.seqOf(t), self_id: "1", user_id: "42", group_id: "1", message_type: "group" as const,
+      source_message_id: String(i + 1), source_nickname: "tester", source_text: `F${i + 1}`, created_at: "2026-10-17T00:00:00.000Z", status: "pending" as const,
+    }));
+    await r.harness.close(ctx);
+    await r.reopen();
+    expect(await r.dispatcher.recover()).toBe(0);
     await r.dispatcher.idle();
-    expect(r.bridge.replies.map((x) => x.ticket)).toEqual(["t-r1", "t-r2"]);
-    // 已有 agentResult：重跑不再调用后端
-    expect(r.backend.events).toEqual([]);
+    expect(r.bridge.replies).toEqual([]);
   });
 });
 
@@ -613,23 +627,54 @@ describe("dispatcher bookkeeping", () => {
     expect(r.bridge.replies).toHaveLength(1);
   });
 
-  it("infra error keeps the index with attempts; recover gives up at the limit with one fallback", async () => {
+  it("at the attempt cap the live task is aborted and settled before the single fallback; no further side effects (R3)", async () => {
     const r = await makeRig();
-    r.bridge.getTicketFailures = 2; // 任务后 fallbackIfUnreplied 读不到票据
-    r.bridge.replyDown = true;
-    await r.dispatcher.dispatch(inbound("hi"), "t-infra");
-    expect((await pendingIndex(r))["t-infra"]?.attempts).toBe(1);
+    r.backend.delays.set("hi", 60_000);
+    const first = r.dispatcher.dispatch(inbound("hi"), "t-cap");
+    while (r.backend.requests.length === 0) await new Promise((res) => setTimeout(res, 5));
+    await r.harness.close(ctx); // 进程在后端运行中退出：任务仍为活任务
+    await first.catch(() => undefined);
+    await r.reopen();
     await r.harness.commit(async (tx) => {
-      (await tx.doc(DispatchDoc)).pending["t-infra"]!.attempts = MAX_ATTEMPTS;
+      (await tx.doc(DispatchDoc)).pending["t-cap"]!.attempts = MAX_ATTEMPTS;
     }, ctx);
-    r.bridge.replyDown = false;
+    const taskId = (await pendingIndex(r))["t-cap"]!.taskId!;
+    const statusAtFallback: string[] = [];
+    const orig = r.bridge.reply.bind(r.bridge);
+    r.bridge.reply = async (ticket: string, text: string, images?: string[]) => {
+      statusAtFallback.push((await r.harness.getTask(taskId as never, ctx))!.state.status);
+      return orig(ticket, text, images);
+    };
+    r.backend.delays.delete("hi");
     const before = r.backend.requests.length;
     await r.dispatcher.recover();
     await r.dispatcher.idle();
     expect(r.backend.requests.length).toBe(before);
-    expect(r.bridge.replies).toEqual([{ ticket: "t-infra", text: FALLBACK_REPLY, images: undefined }]);
+    expect(statusAtFallback).toEqual(["terminal"]);
+    expect(r.bridge.replies).toEqual([{ ticket: "t-cap", text: FALLBACK_REPLY, images: undefined }]);
     expect(await pendingIndex(r)).toEqual({});
-    expect(bot(r).find((b) => b.ticket === "t-infra")).toMatchObject({ action: "fallback", status: "失败" });
+    expect(bot(r).find((b) => b.ticket === "t-cap")).toMatchObject({ action: "fallback", status: "失败" });
+  });
+
+  it("a task phase that finds the dispatch entry given up ends failed without side effects (R3)", async () => {
+    const r = await makeRig();
+    const gate = deferred();
+    r.image.unknown.add("pid-1");
+    const origCollect = r.image.collect.bind(r.image);
+    r.image.collect = async (id: string, out: string, signal?: AbortSignal) => {
+      await gate.promise;
+      return origCollect(id, out, signal);
+    };
+    const run = r.dispatcher.dispatch(inbound("奶龙:船"), "t-gone");
+    while (r.image.calls.length === 0) await new Promise((res) => setTimeout(res, 5));
+    // 并发的 giveUp 已标记条目；collect 随后报告任务未知 → 重新提交前的检查拦下
+    await r.harness.commit(async (tx) => {
+      (await tx.doc(DispatchDoc)).pending["t-gone"]!.givenUp = true;
+    }, ctx);
+    gate.resolve();
+    await run;
+    expect(r.image.calls).toEqual(["船"]); // 没有第二次提交
+    expect(r.bridge.replies.map((x) => x.text)).toEqual([FALLBACK_REPLY]); // 只有兜底，任务本身没有发送
   });
 
   it("recover re-dispatches a pending ticket that has no dispatch index (crash after admit)", async () => {

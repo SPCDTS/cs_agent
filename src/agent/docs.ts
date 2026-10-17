@@ -81,6 +81,10 @@ export type DispatchEntry = {
   seq?: number;
   taskId?: number;
   attempts?: number;
+  /** 已放弃运行（giveUp 开始时写入）：任务的外部副作用阶段见到它即以 failed 结束，不再产生副作用 */
+  givenUp?: boolean;
+  /** failed：达到上限且兜底也发不出（bridge 不可用）；保留在索引里供审计，recover 跳过、对账不当作孤儿 */
+  state?: "failed";
   /** v2 旧条目的提交内容（仅用于识别旧条目） */
   content?: string;
 };
