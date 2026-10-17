@@ -65,15 +65,28 @@ class BridgeStub {
     this.status.set(ticket, "sent");
     return { already_sent: already, message_id: `m-${ticket}`, message_type: "private" as const, target_id: "1" };
   }
+  /** 票据 seq（admit 顺序）：可预设；未预设的在首次读取时按递增顺序分配 */
+  seqs = new Map<string, number>();
+  nextSeq = 1000;
+  listCalls: { limit?: number; after?: number }[] = [];
+  seqOf(ticket: string): number {
+    let s = this.seqs.get(ticket) ?? this.pending.find((r) => r.ticket_id === ticket)?.seq;
+    if (s === undefined) this.seqs.set(ticket, (s = this.nextSeq++));
+    return s;
+  }
   async getTicket(ticket: string) {
     if (this.getTicketFailures > 0) {
       this.getTicketFailures--;
       throw new Error("db locked");
     }
-    return { ticket_id: ticket, status: this.status.get(ticket) ?? "pending" } as ReplyTicketRecord;
+    return { ticket_id: ticket, seq: this.seqOf(ticket), status: this.status.get(ticket) ?? "pending" } as ReplyTicketRecord;
   }
-  async listPendingTickets() {
-    return this.pending.filter((r) => (this.status.get(r.ticket_id) ?? "pending") === "pending");
+  async listPendingTickets(limit = 200, after = 0) {
+    this.listCalls.push({ limit, after });
+    return this.pending
+      .filter((r) => (this.status.get(r.ticket_id) ?? "pending") === "pending" && r.seq > after)
+      .sort((a, b) => a.seq - b.seq)
+      .slice(0, limit);
   }
 }
 
@@ -120,10 +133,13 @@ class BackendStub implements AgentBackend {
   events: string[] = [];
   requests: Parameters<AgentBackend["handle"]>[0][] = [];
   delays = new Map<string, number>();
-  async handle(req: Parameters<AgentBackend["handle"]>[0]) {
+  async handle(req: Parameters<AgentBackend["handle"]>[0], ctx?: Parameters<AgentBackend["handle"]>[1]) {
     this.requests.push(req);
     this.events.push(`start:${req.text}`);
-    await new Promise((r) => setTimeout(r, this.delays.get(req.text) ?? 5));
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(resolve, this.delays.get(req.text) ?? 5);
+      ctx?.signal.addEventListener("abort", () => (clearTimeout(t), reject(new Error("aborted"))), { once: true });
+    });
     this.events.push(`end:${req.text}`);
     return { text: `## 答复\n**${req.text}** ok @all` };
   }
@@ -186,7 +202,8 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
   });
   const harness = await openHarness({ models, extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "agent.sqlite") }, ctx);
   const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: o.concurrency ?? 2, history: store, codexEffort: "high" });
-  harness.resume();
+  // 与 main.ts 一致：重开时先 recover() 再开启调度（测试里由 recover 后的 waitForTask 开启）
+  if (!shared) harness.resume();
   const rig: Rig = {
     dir, harness, dispatcher, bridge, image, backend, store, faux,
     async reopen() {
@@ -213,8 +230,6 @@ describe("rule router → image path", () => {
       { ticket: "t-img", text: IMAGE_SUCCESS_REPLY, images: [realpathSync(path.join(imgDir(r, "t-img"), "out_1.png"))] },
     ]);
     expect(await pendingIndex(r)).toEqual({});
-    const state = await r.harness.snapshot(DispatchDoc, ctx);
-    expect(state?.nextSeq).toBe(1);
     // completeReply(action=generate_image, detail=prompt)
     expect(bot(r)[0]).toMatchObject({
       ticket: "t-img", action: "generate_image", detail: "一只戴墨镜的柴犬，赛博朋克", image_count: 1, status: "已回复", text: IMAGE_SUCCESS_REPLY,
@@ -507,7 +522,7 @@ describe("dispatcher bookkeeping", () => {
   it("recover re-dispatches a pending ticket that has no dispatch index (crash after admit)", async () => {
     const r = await makeRig();
     r.bridge.pending = [{
-      ticket_id: "t-orphan", self_id: "1", user_id: OWNER, group_id: null, message_type: "private",
+      ticket_id: "t-orphan", seq: 1, self_id: "1", user_id: OWNER, group_id: null, message_type: "private",
       source_message_id: "900", source_nickname: "tester", source_text: "奶龙:补派发",
       created_at: "2026-10-17T00:00:00.000Z", status: "pending",
     }];
@@ -515,6 +530,43 @@ describe("dispatcher bookkeeping", () => {
     await r.dispatcher.idle();
     expect(r.image.calls).toEqual(["补派发"]);
     expect(r.bridge.replies).toHaveLength(1);
+  });
+
+  it("recovery merge-sorts indexed and orphan tickets by bridge seq: an older orphan runs before a newer indexed ticket (R6)", async () => {
+    const r = await makeRig({ concurrency: 2 });
+    r.bridge.seqs.set("t-indexed", 50);
+    r.backend.delays.set("新消息", 60_000);
+    const first = r.dispatcher.dispatch(inbound("新消息", { id: "2" }), "t-indexed");
+    while (r.backend.requests.length === 0) await new Promise((res) => setTimeout(res, 5));
+    await r.harness.close(ctx); // 进程在后端运行中退出：索引保留
+    await first.catch(() => undefined);
+
+    r.backend.delays.delete("新消息");
+    r.bridge.pending = [{
+      ticket_id: "t-old-orphan", seq: 10, self_id: "1", user_id: OWNER, group_id: null, message_type: "private",
+      source_message_id: "1", source_nickname: "tester", source_text: "老消息", source_route_text: "老消息",
+      created_at: "2026-10-17T00:00:00.000Z", status: "pending",
+    }];
+    await r.reopen();
+    expect((await pendingIndex(r))["t-indexed"]).toMatchObject({ ticketSeq: 50 });
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(r.bridge.replies.map((x) => x.ticket)).toEqual(["t-old-orphan", "t-indexed"]);
+    const starts = r.backend.events.filter((e) => e.startsWith("start:"));
+    expect(starts.slice(-2)).toEqual(["start:老消息", "start:新消息"]);
+  });
+
+  it("recovery pages listPendingTickets until exhausted (>200 orphans) (R7)", async () => {
+    const r = await makeRig({ concurrency: 4 });
+    r.bridge.pending = Array.from({ length: 250 }, (_, i) => ({
+      ticket_id: `t-o${i}`, seq: i + 1, self_id: "1", user_id: String(10_000 + i), group_id: null, message_type: "private" as const,
+      source_message_id: String(i), source_nickname: "n", source_text: "", created_at: "2026-10-17T00:00:00.000Z", status: "pending" as const,
+    }));
+    expect(await r.dispatcher.recover()).toBe(250);
+    await r.dispatcher.idle();
+    expect(r.bridge.replies).toHaveLength(250);
+    expect(new Set(r.bridge.replies.map((x) => x.ticket)).size).toBe(250);
+    expect(r.bridge.listCalls.map((c) => c.after)).toEqual([0, 200]);
   });
 
   it("history errors never break dispatch", async () => {

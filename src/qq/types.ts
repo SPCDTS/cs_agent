@@ -69,6 +69,8 @@ export interface ReplyTicketRecord {
   /** 原消息的分流文本（InboundMessage.route_text）；旧库的行没有该列时为 undefined */
   source_route_text?: string;
   created_at: string;
+  /** admit 顺序号（票据表 rowid，与 created_at 同一事务分配，单调递增）：派发与崩溃恢复的唯一排序键 */
+  seq: number;
   status: TicketStatus;
   attempted_at?: string;
   sent_at?: string;
@@ -117,8 +119,8 @@ export interface QQBridge {
    */
   reply(ticket: string, text: string, imagePaths?: string[]): Promise<ReplyResult>;
   getTicket(ticket: string): Promise<ReplyTicketRecord | null>;
-  /** 列出仍为 pending 的票据（按 created_at 升序），供启动时与派发索引对账 */
-  listPendingTickets(limit?: number): Promise<ReplyTicketRecord[]>;
+  /** 列出仍为 pending 的票据（按 seq 升序，最多 limit 条，默认 200）；afterSeq 为分页游标（只取 seq 更大的），供启动时与派发索引对账 */
+  listPendingTickets(limit?: number, afterSeq?: number): Promise<ReplyTicketRecord[]>;
   /** 主动发送，仅供运维/测试使用，agent 工具层不暴露 */
   send(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }>;
 }

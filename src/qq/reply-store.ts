@@ -40,6 +40,7 @@ interface TicketRow {
   source_text: string | null;
   source_route_text: string | null;
   created_at: string;
+  seq: number;
   status: string;
   attempted_at: string | null;
   sent_at: string | null;
@@ -57,6 +58,7 @@ function toRecord(row: TicketRow): ReplyTicketRecord {
     source_nickname: row.source_nickname,
     source_text: row.source_text ?? "",
     created_at: row.created_at,
+    seq: Number(row.seq),
     status: row.status as TicketStatus,
   };
   if (row.source_route_text !== null && row.source_route_text !== undefined) record.source_route_text = row.source_route_text;
@@ -160,15 +162,19 @@ export class ReplyStore {
 
   get(ticket: string): ReplyTicketRecord | null {
     if (!isTicketId(ticket)) return null;
-    const row = this.db.prepare("SELECT * FROM tickets WHERE ticket_id = ?").get(ticket) as TicketRow | undefined;
+    const row = this.db.prepare("SELECT rowid AS seq, * FROM tickets WHERE ticket_id = ?").get(ticket) as TicketRow | undefined;
     return row ? toRecord(row) : null;
   }
 
-  /** 仍为 pending 的票据，按 created_at 升序。 */
-  listPending(limit = 200): ReplyTicketRecord[] {
+  /**
+   * 仍为 pending 的票据，按 admit 顺序（seq = rowid 升序；与 created_at 在同一事务内分配）。
+   * afterSeq 为游标：只返回 seq 大于它的行，用于分页直到取尽。
+   */
+  listPending(limit = 200, afterSeq = 0): ReplyTicketRecord[] {
     const n = Number.isInteger(limit) && limit > 0 ? limit : 200;
-    const rows = this.db.prepare("SELECT * FROM tickets WHERE status = 'pending' ORDER BY created_at ASC, rowid ASC LIMIT ?")
-      .all(n) as unknown as TicketRow[];
+    const after = Number.isInteger(afterSeq) && afterSeq > 0 ? afterSeq : 0;
+    const rows = this.db.prepare("SELECT rowid AS seq, * FROM tickets WHERE status = 'pending' AND rowid > ? ORDER BY rowid ASC LIMIT ?")
+      .all(after, n) as unknown as TicketRow[];
     return rows.map(toRecord);
   }
 

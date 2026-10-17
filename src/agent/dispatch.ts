@@ -1,16 +1,16 @@
 /**
  * QQ 消息 → 规则分流 → durable 任务（设计 §4.1 / §4.7）：
  * 1. admit：createConversation(ownerless) 的同一 commit 内写入 TicketDoc（含分流结果 route/prefix/prompt）
- *    与 Session 级 DispatchDoc 条目（scope、递增 seq）。
+ *    与 Session 级 DispatchDoc 条目（scope、bridge 票据 seq = admit 顺序）。
  * 2. 顺序：同一 scope 严格 FIFO（上一条处理完、回复发出后才开始下一条），不同 scope 并行，
  *    同时运行的总数 ≤ concurrency。任务在轮到它时才创建（pi-durable 一创建就会调度）。
  * 3. 运行：按 route 创建生图任务或 agent 任务（任务 id 记入 DispatchDoc），waitForTask 等待终态。
  * 4. 只有票据进入终态（sent/uncertain，含兜底回复已发出）才从 DispatchDoc 删除；基础设施错误时保留索引，
- *    attempts 累计，重启后 recover() 按 seq 顺序继续（仍受 scope FIFO 与并发上限约束）；
+ *    attempts 累计，重启后 recover() 把索引条目与孤儿票据按票据 seq 统一排序继续（仍受 scope FIFO 与并发上限约束）；
  *    attempts ≥ MAX_ATTEMPTS 时直接发兜底回复并清除。
  * 5. 任务结束而票据仍 pending（任务失败）→ 发一次兜底回复。
  * 6. recover() 还与 QQBridge 的 pending 票据对账：admit 已落盘但派发索引未写入的票据，用票据里保存的来源与原文
- *    重建消息重新派发。v2 遗留条目（无任务）先中止其旧的模型会话，再按原文重新分流。
+ *    重建消息重新派发（分页取尽全部 pending 票据）。v2 遗留条目（无任务）先中止其旧的模型会话，再按原文重新分流。
  * 7. 统一上下文（可选 history）：收到消息即写入机器人"处理中"行；终态后按 TicketDoc 更新为"已回复"/"失败"。
  */
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
@@ -27,6 +27,8 @@ import type { CsTasks, TaskResult } from "./tasks.js";
 export { FALLBACK_REPLY } from "./replies.js";
 /** 同一票据最多运行次数；达到即放弃运行，改发兜底回复 */
 export const MAX_ATTEMPTS = 3;
+/** 启动对账时每页读取的 pending 票据数（分页直到取尽） */
+export const PENDING_PAGE = 200;
 
 export type DispatchBridge = Pick<QQBridge, "reply" | "getTicket" | "listPendingTickets">;
 /** 统一上下文存储中派发器用到的写入口 */
@@ -76,6 +78,8 @@ export class Dispatcher {
   private readonly chains = new Map<string, Promise<void>>();
   private readonly ctx: Context;
   private readonly prefixes: readonly string[];
+  /** recover() 时打了中止标记的上次活任务：轮到其票据时先等它结束，再新建任务 */
+  private readonly abortedAtRecovery = new Set<number>();
 
   constructor(private readonly opts: DispatcherOptions) {
     this.ctx = opts.context ?? BACKGROUND_CONTEXT;
@@ -95,38 +99,72 @@ export class Dispatcher {
   }
 
   /**
-   * 启动时：按 seq 顺序继续 DispatchDoc 中所有未完成的票据（attempts 达上限的直接兜底），
-   * 再与 QQBridge 的 pending 票据对账，补派发没有索引的票据。返回处理的票据数。
+   * 启动时：DispatchDoc 中未完成的票据（attempts 达上限的直接兜底）与 QQBridge 中没有索引的 pending 票据（分页取尽）
+   * 按票据 seq（bridge admit 顺序）统一排序后依次入队。返回处理的票据数。
    */
   async recover(): Promise<number> {
     const state = await this.opts.harness.snapshot(DispatchDoc, this.ctx);
     const indexed = state?.pending ?? {};
-    const entries = Object.entries(indexed).sort(([, a], [, b]) => (a.seq ?? -1) - (b.seq ?? -1));
-    let count = 0;
-    for (const [ticket, entry] of entries) {
+    type Item =
+      | { kind: "indexed"; ticket: string; key: number; tie: number; entry: DispatchEntry }
+      | { kind: "orphan"; ticket: string; key: number; tie: number; rec: ReplyTicketRecord };
+    const items: Item[] = [];
+    for (const [ticket, entry] of Object.entries(indexed)) {
       if (this.inflight.has(ticket)) continue;
-      count++;
-      if ((entry.attempts ?? 0) >= MAX_ATTEMPTS) {
-        log.warn("ticket exceeded max attempts, giving up", { ticket: short(ticket), attempts: entry.attempts });
-        void this.track(ticket, "give-up failed", () => this.giveUp(ticket));
-        continue;
+      // pi-durable 一开启调度就会继续上次的活任务，绕过 scope FIFO：先给它们打中止标记（此时尚未调度），
+      // 轮到该票据时等它以 aborted 结束，再新建任务（新任务跳过 TicketDoc 中已完成的阶段）。
+      if (entry.taskId !== undefined) {
+        try {
+          if ((await this.opts.harness.abortTask(entry.taskId as TaskId, this.ctx)) === "marked") {
+            this.abortedAtRecovery.add(entry.taskId);
+          }
+        } catch (err) {
+          log.warn("abort live task at recovery failed", { ticket: short(ticket), task: entry.taskId, error: err });
+        }
       }
-      const scope = entry.scope ?? (await this.legacyScope(ticket, entry));
-      void this.track(ticket, "recover failed", () =>
-        this.enqueue(scope, () => this.run(ticket, entry.conversationId as ConversationId)),
-      );
+      // 旧条目（本字段加入前写入）没有 ticketSeq：从票据表取；取不到时排在最后（同组内按旧的派发序号）
+      const key = entry.ticketSeq ?? (await this.opts.bridge.getTicket(ticket).catch(() => undefined))?.seq ?? Number.MAX_SAFE_INTEGER;
+      items.push({ kind: "indexed", ticket, key, tie: entry.seq ?? 0, entry });
     }
-
-    let orphans: ReplyTicketRecord[] = [];
+    let orphanCount = 0;
     try {
-      orphans = (await this.opts.bridge.listPendingTickets()).filter(
-        (r) => !indexed[r.ticket_id] && !this.inflight.has(r.ticket_id),
-      );
+      // 分页取尽全部 pending 票据（游标 = 上一页最后一条的 seq）
+      for (let after = 0; ; ) {
+        const page = await this.opts.bridge.listPendingTickets(PENDING_PAGE, after);
+        for (const rec of page) {
+          if (indexed[rec.ticket_id] || this.inflight.has(rec.ticket_id)) continue;
+          items.push({ kind: "orphan", ticket: rec.ticket_id, key: rec.seq, tie: 0, rec });
+          orphanCount++;
+        }
+        if (page.length < PENDING_PAGE) break;
+        const last = page[page.length - 1]!.seq;
+        if (!(last > after)) break; // 防御：游标不前进时停止
+        after = last;
+      }
     } catch (err) {
       log.error("list pending tickets failed", { error: err });
     }
-    for (const rec of orphans) {
+    // 索引中的票据与孤儿票据按 bridge admit 顺序（seq）统一排序后依次入队：scope 内 FIFO 由入队顺序保证
+    items.sort((a, b) => a.key - b.key || a.tie - b.tie);
+
+    let count = 0;
+    for (const item of items) {
       count++;
+      const { ticket } = item;
+      if (item.kind === "indexed") {
+        const entry = item.entry;
+        if ((entry.attempts ?? 0) >= MAX_ATTEMPTS) {
+          log.warn("ticket exceeded max attempts, giving up", { ticket: short(ticket), attempts: entry.attempts });
+          void this.track(ticket, "give-up failed", () => this.giveUp(ticket));
+          continue;
+        }
+        const scope = entry.scope ?? (await this.legacyScope(ticket, entry));
+        void this.track(ticket, "recover failed", () =>
+          this.enqueue(scope, () => this.run(ticket, entry.conversationId as ConversationId)),
+        );
+        continue;
+      }
+      const rec = item.rec;
       if (!rec.source_text.trim()) {
         // 迁移前的旧票据没有保存原文，无法重建：只发兜底回复
         log.warn("orphan ticket without source text, sending fallback", { ticket: short(rec.ticket_id) });
@@ -138,7 +176,7 @@ export class Dispatcher {
         void this.dispatch(inboundFromTicket(rec), rec.ticket_id);
       }
     }
-    if (count) log.info("recovering pending tickets", { indexed: entries.length, orphans: orphans.length });
+    if (count) log.info("recovering pending tickets", { indexed: count - orphanCount, orphans: orphanCount });
     return count;
   }
 
@@ -219,6 +257,8 @@ export class Dispatcher {
     };
     const reply = msg.segments.find((s) => s.type === "reply") as { data: { id?: string } } | undefined;
     const route = routeMessage(msg.route_text, this.prefixes);
+    // 唯一排序键：bridge admit 时分配的票据 seq（崩溃恢复时与孤儿票据统一排序）
+    const ticketSeq = (await this.opts.bridge.getTicket(ticket).catch(() => undefined))?.seq;
     const conv = await harness.createConversation(
       {
         ownership: { kind: "ownerless" },
@@ -231,9 +271,7 @@ export class Dispatcher {
             ...(reply?.data.id ? { replyTo: reply.data.id } : {}),
           });
           const dispatch = await tx.doc(DispatchDoc);
-          const seq = dispatch.nextSeq ?? 0;
-          dispatch.nextSeq = seq + 1;
-          dispatch.pending[ticket] = { conversationId, scope, seq, attempts: 0 };
+          dispatch.pending[ticket] = { conversationId, scope, attempts: 0, ...(ticketSeq !== undefined ? { ticketSeq } : {}) };
         },
       },
       this.ctx,
@@ -252,8 +290,13 @@ export class Dispatcher {
    * 票据当前的任务：DispatchDoc 记录的任务仍在运行则沿用（重启后继续），否则按 route 新建
    * （上一个任务已失败时也新建：新任务会跳过 TicketDoc 中已有结果的阶段）。条目已删除时返回 undefined。
    */
-  private ensureTask(ticket: string): Promise<TaskId<TaskResult> | undefined> {
+  private async ensureTask(ticket: string): Promise<TaskId<TaskResult> | undefined> {
     const { ImageTask, AgentTask } = this.opts.tasks;
+    const known = (await this.opts.harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket]?.taskId;
+    if (known !== undefined && this.abortedAtRecovery.has(known)) {
+      await this.opts.harness.waitForTask(known as TaskId, this.ctx);
+      this.abortedAtRecovery.delete(known);
+    }
     return this.opts.harness.commit(async (tx) => {
       const entry = (await tx.doc(DispatchDoc)).pending[ticket];
       if (!entry) return undefined;

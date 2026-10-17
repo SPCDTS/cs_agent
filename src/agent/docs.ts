@@ -62,13 +62,16 @@ export const TicketDoc = defineDoc<TicketState>({
 
 /**
  * Session 级派发索引：ticket → conversationId / 当前任务。
- * 仅保存未完成的票据；票据进入终态（sent/uncertain）后才删除，基础设施错误时保留，重启后 recover() 按
- * scope 内 seq 顺序继续。attempts 为已开始运行的次数。
- * v2 的旧条目没有 scope/seq/taskId（其会话里可能还有旧的模型会话任务，recover 时先中止）。
+ * 仅保存未完成的票据；票据进入终态后才删除，基础设施错误时保留，重启后 recover() 按 ticketSeq
+ * （bridge admit 顺序）与孤儿票据统一排序继续。attempts 为已开始运行的次数。
+ * v2 的旧条目没有 scope/taskId（其会话里可能还有旧的模型会话任务，recover 时先中止）。
  */
 export type DispatchEntry = {
   conversationId: number;
   scope?: string;
+  /** bridge 票据的 seq（admit 顺序，唯一排序键） */
+  ticketSeq?: number;
+  /** 旧的派发器自增序号（仅旧条目；排序时作次级键） */
   seq?: number;
   taskId?: number;
   attempts?: number;

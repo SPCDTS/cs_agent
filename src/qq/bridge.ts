@@ -311,8 +311,8 @@ class Bridge extends EventEmitter implements QQBridge {
     return this.requireStore().get(ticket);
   }
 
-  async listPendingTickets(limit = 200): Promise<ReplyTicketRecord[]> {
-    return this.requireStore().listPending(limit);
+  async listPendingTickets(limit = 200, afterSeq = 0): Promise<ReplyTicketRecord[]> {
+    return this.requireStore().listPending(limit, afterSeq);
   }
 
   async reply(ticket: string, text: string, imagePaths: string[] = []): Promise<ReplyResult> {

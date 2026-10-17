@@ -50,6 +50,20 @@ describe("ReplyStore", () => {
     expect(store.listPending(1).map(r => r.ticket_id)).toEqual([a]);
   });
 
+  it("exposes seq (admit order) and pages listPending with an afterSeq cursor (R6/R7)", () => {
+    store = new ReplyStore(dir);
+    const ids = Array.from({ length: 5 }, (_, i) => store!.admit(msg(`p${i}`))!);
+    const seqs = ids.map(t => store!.get(t)!.seq);
+    expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
+    expect(new Set(seqs).size).toBe(5);
+    store.markSending(ids[1]!);
+    const page1 = store.listPending(2);
+    expect(page1.map(r => r.ticket_id)).toEqual([ids[0], ids[2]]);
+    const page2 = store.listPending(2, page1[1]!.seq);
+    expect(page2.map(r => r.ticket_id)).toEqual([ids[3], ids[4]]);
+    expect(store.listPending(2, page2[1]!.seq)).toEqual([]);
+  });
+
   it("migrates an old database without source_text", () => {
     const raw = new DatabaseSync(join(dir, DB_FILE));
     raw.exec(`CREATE TABLE tickets (
