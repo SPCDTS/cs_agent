@@ -280,8 +280,8 @@ agent 延迟收图：`image_gen` 在 `min(imageTimeoutMs(options, COMFY_TIMEOUT_
 
 | 机制 | 实现 |
 |---|---|
-| 长期会话 | 独立 Harness.open + SQLite `pi.sqlite`，createConversation(ownerless) 创建 owner/shared，conversation(id) 复用；模型与 thinkingLevel 由主进程配置。独立 harness 因 pi-durable 1.3.0 的 compaction 为 harness 级设置，票据 harness 原配置关闭压缩 |
-| 映射 | 会话 init 事务写 session 文档 cs.pi.threads；`pi-threads.json` 以临时文件 rename 原子更新，启动从 SQLite 重建。创建/映射短锁，回合按线程各自互斥 |
+| 长期会话 | 独立 Harness.open + SQLite `pi.sqlite`，createConversation(ownerless) 按 owner 私聊的 `owner` 或其他会话的 `scope` 创建独立会话，conversation(id) 复用；模型与 thinkingLevel 由主进程配置。独立 harness 因 pi-durable 1.3.0 的 compaction 为 harness 级设置，票据 harness 原配置关闭压缩 |
+| 映射 | 会话 init 事务写 session 文档 cs.pi.threads；`pi-threads.json` 以临时文件 rename 原子更新，启动从 SQLite 重建。创建/映射短锁，回合按键各自互斥，不同键并行且受派发器 AGENT_CONCURRENCY 限制；旧 owner 保留，旧 shared 永久停用并仅记录一次日志；healthz 仅返回 count/keys |
 | 请求 | 复用 buildCodexPrompt 的来源、引用清洗；submit 前写 cs.pi.request（ticket/access/参考图/content/deadline/calls），工具经 api.snapshot 读取，参数无访问范围入口 |
 | 幂等与恢复 | submit({requestId: ticket, whenBusy: reject})，Submission.wait 与 AssistantEntry 读取对应最终回答；旧票据重投不返回别的回合答案。重启先为恢复回合设置锁和原期限，避免新请求覆盖身份 |
 | 超时 | 默认 300 秒，取消等待后还调用 Conversation.abort(background:true) 并等待实际结束；同线程排队取消不提交请求 |

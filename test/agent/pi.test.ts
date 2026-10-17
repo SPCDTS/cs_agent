@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
-import { MemoryStorage, type Harness, type JsonObject, type ConversationId } from "@earendil-works/pi-durable";
+import { defineDoc, MemoryStorage, type Harness, type JsonObject, type ConversationId } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiBackend } from "../../src/agent/backends/pi.js";
 import { createBackendSelector } from "../../src/agent/backends/select.js";
@@ -25,7 +25,7 @@ const cleanup: (() => Promise<unknown> | void)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 const handleContext = () => ({ signal: new AbortController().signal, onEvent: vi.fn() });
 const request = (ticket: string, owner = false): AgentRequest => ({
-  ticket, scope: owner ? "private:1" : "group:7", access: owner ? "all" : "group:7", threadKey: owner ? "owner" : "shared",
+  ticket, scope: owner ? "private:1" : "group:7", access: owner ? "all" : "group:7", threadKey: owner ? "owner" : "group:7",
   source: { type: owner ? "private" : "group", user_id: "1", group_id: owner ? null : "7", nickname: "测试者" }, text: "查一下", time: 1_760_000_000,
 });
 const inbound = (id: string, group: string | null, text: string): InboundMessage => ({
@@ -75,7 +75,7 @@ describe("pi durable backend", () => {
     expect(JSON.parse(String(init.body))).toEqual({ query: "CS2", count: 3, need_content: false });
   });
 
-  it("binds history access for each shared request; groups never read private rows", async () => {
+  it("binds history access for each scope request; groups never read private rows", async () => {
     const seen: string[] = [];
     const final = (ctx: TranscriptContext) => { seen.push(results(ctx)); return reply(); };
     const s = await setup([call("qq_recent"), final, call("qq_search", { query: "另群" }), final,
@@ -132,7 +132,7 @@ describe("pi durable backend", () => {
     if (kind === "generate_image") expect(s.imageBackend.submit).toHaveBeenCalledTimes(cap + 1);
   });
 
-  it("isolates owner/shared memories while same-thread turns serialize", async () => {
+  it("isolates owner/scope memories while same-thread turns serialize", async () => {
     let release!: () => void;
     const gate = new Promise<void>(r => { release = r; });
     let started = false;
@@ -147,8 +147,46 @@ describe("pi durable backend", () => {
     expect(seen[1]).not.toContain("OWNER_ONLY");
     release(); await first; await second;
     expect(seen[2]).toContain("OWNER_ONLY"); expect(seen[2]).not.toContain("SHARED_ONLY");
-    const ids = await s.pi.readThreadIds(); expect(ids.owner).not.toBe(ids.shared);
+    const ids = await s.pi.readThreadIds(); expect(ids.owner).not.toBe(ids["group:7"]);
     expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).toEqual(ids);
+  });
+
+  it("isolates two groups and owner transcripts with durable per-scope conversations", async () => {
+    const seen: string[] = [];
+    const inspect = (ctx: TranscriptContext) => { seen.push(JSON.stringify(ctx.messages)); return reply(); };
+    const s = await setup([inspect, inspect, inspect, inspect]);
+    await s.pi.handle({ ...request("g7"), text: "GROUP_SEVEN_SECRET" }, handleContext());
+    await s.pi.handle({ ...request("g8"), scope: "group:8", access: "group:8", text: "GROUP_EIGHT_SECRET" }, handleContext());
+    await s.pi.handle({ ...request("o1", true), text: "OWNER_SECRET" }, handleContext());
+    await s.pi.handle(request("g7-again"), handleContext());
+    expect(seen[1]).not.toContain("GROUP_SEVEN_SECRET");
+    expect(seen[2]).not.toMatch(/GROUP_SEVEN_SECRET|GROUP_EIGHT_SECRET/);
+    expect(seen[3]).toContain("GROUP_SEVEN_SECRET");
+    expect(seen[3]).not.toMatch(/GROUP_EIGHT_SECRET|OWNER_SECRET/);
+    expect(new Set(Object.values(await s.pi.readThreadIds())).size).toBe(3);
+    expect(await s.pi.threadHealth()).toEqual({ count: 3, keys: ["group:7", "group:8", "owner"] });
+    await expect(s.pi.handle({ ...request("bad-access"), access: "all" }, handleContext())).rejects.toThrow("非法访问范围");
+  });
+
+  it("retires the legacy shared mapping once and preserves owner on migration", async () => {
+    const s = await setup([reply(), reply()], { disk: true });
+    await s.pi.handle(request("legacy-owner", true), handleContext());
+    await s.pi.handle(request("legacy-group"), handleContext());
+    const ids = await s.pi.readThreadIds();
+    const legacy = defineDoc<{ owner: number | null; shared: number | null }>({
+      kind: "cs.pi.threads", version: 1, scope: "session", initial: () => ({ owner: null, shared: null }),
+    });
+    await s.pi.harness.commit(async tx => {
+      const doc = await tx.doc(legacy);
+      Object.assign(doc, { owner: ids.owner, shared: ids["group:7"] });
+      delete (doc as Record<string, unknown>)["group:7"];
+    }, context);
+    await s.pi.close();
+    const reopened = await setup([reply()], { dir: s.dir, disk: true });
+    expect(await reopened.pi.readThreadIds()).toEqual({ owner: ids.owner });
+    await reopened.pi.handle(request("new-group"), handleContext());
+    expect((await reopened.pi.readThreadIds())["group:7"]).not.toBe(ids["group:7"]);
+    expect((await reopened.pi.readThreadIds()).shared).toBeUndefined();
   });
 
   it("reuses requestId receipts after another request and after SQLite reopen", async () => {
@@ -179,7 +217,7 @@ describe("pi durable backend", () => {
     expect(await new PiPromptLoader(s.dir).read()).toBe("新系统提示：简短中文。");
   });
 
-  it("resumes an interrupted safe tool with its original request binding before a new shared turn", async () => {
+  it("resumes an interrupted safe tool with its original request binding before a new same-scope turn", async () => {
     let started = false;
     const http: typeof fetch = async (_url, init) => {
       started = true;
@@ -189,16 +227,16 @@ describe("pi durable backend", () => {
     const s = await setup([call("web_search", { query: "旧请求" })], { disk: true, fetch: http });
     const pending = s.pi.handle(request("interrupted"), handleContext()).catch(() => undefined);
     await vi.waitFor(() => expect(started).toBe(true));
-    const id = (await s.pi.readThreadIds()).shared as ConversationId;
+    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
     expect((await s.pi.harness.snapshot(PiRequestDoc, id, context))?.access).toBe("group:7");
     await s.pi.close(); await pending;
     let resumed: TranscriptContext | undefined;
     const r = await setup([ctx => { resumed = ctx; return reply("旧请求完成"); }, reply("新请求完成")], { disk: true, dir: s.dir });
-    const next = r.pi.handle({ ...request("new"), scope: "group:8", access: "group:8" }, handleContext());
+    const next = r.pi.handle(request("new"), handleContext());
     expect((await r.pi.handle(request("interrupted"), handleContext())).text).toBe("旧请求完成");
     expect((await next).text).toBe("新请求完成");
     expect(results(resumed!)).toContain("资料"); expect(r.http).toHaveBeenCalledOnce();
-    expect((await r.pi.harness.snapshot(PiRequestDoc, id, context))?.access).toBe("group:8");
+    expect((await r.pi.harness.snapshot(PiRequestDoc, id, context))?.access).toBe("group:7");
   });
 
   it("automatically compacts long-lived history with configured thresholds", async () => {
@@ -211,7 +249,7 @@ describe("pi durable backend", () => {
     // 第一轮后累计超过 50k tokens；保留最近 20k tokens，第二轮自动阻塞压缩。
     await s.pi.handle({ ...request("long1"), text: "历史事实。".repeat(50_000) }, handleContext());
     await s.pi.handle({ ...request("long2"), text: "近期材料。".repeat(20_000) }, handleContext());
-    const id = (await s.pi.readThreadIds()).shared as ConversationId;
+    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
     const conv = (await s.pi.harness.conversation(id, context))!;
     await conv.waitForIdle(context);
     const view = await conv.context(context);

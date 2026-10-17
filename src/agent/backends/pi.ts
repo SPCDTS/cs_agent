@@ -5,7 +5,7 @@ import { BACKGROUND_CONTEXT, withAbortSignal, awaitWithContext } from "@earendil
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { AssistantEntry, createRegistry, defineDoc, Harness, type Conversation, type ConversationId, type ModelRef, type Storage, type Submission } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { buildCodexPrompt, type ThreadKey } from "../codex-runner.js";
+import { buildCodexPrompt } from "../codex-runner.js";
 import { collectNewImages } from "../image-collect.js";
 import { ticketImageDir } from "../image-gen.js";
 import { validateReferences } from "../image-references.js";
@@ -18,8 +18,12 @@ import { BackendTimeoutError, type AgentBackend, type AgentRequest, type AgentHa
 
 const context = BACKGROUND_CONTEXT;
 /** 与会话创建同事务提交，JSON 映射是原子写出的运维镜像，丢失时可从 SQLite 重建。 */
-const PiThreadsDoc = defineDoc<{ owner: number | null; shared: number | null }>({
-  kind: "cs.pi.threads", version: 1, scope: "session", initial: () => ({ owner: null, shared: null }),
+const PiThreadsDoc = defineDoc<Record<string, number | null>>({
+  kind: "cs.pi.threads", version: 1, scope: "session", initial: () => ({}),
+});
+
+const PiMigrationDoc = defineDoc<{ sharedRetired: boolean }>({
+  kind: "cs.pi.migration", version: 1, scope: "session", initial: () => ({ sharedRetired: false }),
 });
 
 export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness"> {
@@ -55,11 +59,17 @@ export class PiBackend implements AgentBackend {
     }, context);
     const backend = new PiBackend(harness, opts);
     try {
+      const retired = await harness.commit(async tx => {
+        const threads = await tx.doc(PiThreadsDoc);
+        const migration = await tx.doc(PiMigrationDoc);
+        if (threads.shared == null || migration.sharedRetired) return false;
+        migration.sharedRetired = true;
+        return true;
+      }, context);
+      if (retired) log.warn("pi shared conversation retired; mixed history will never be reused");
       await backend.persistThreads();
       // 先把恢复中的回合纳入对应线程锁，再允许新请求；沿用已落盘截止时间。
-      for (const key of ["owner", "shared"] as const) {
-        const id = (await backend.readThreadIds())[key];
-        if (id === null) continue;
+      for (const [key, id] of Object.entries(await backend.readThreadIds())) {
         const conv = await harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 线程映射指向不存在的会话");
         const request = await harness.snapshot(PiRequestDoc, conv.id, context);
@@ -82,9 +92,15 @@ export class PiBackend implements AgentBackend {
     return run;
   }
 
-  async readThreadIds(): Promise<{ owner: number | null; shared: number | null }> {
+  async readThreadIds(): Promise<Record<string, number>> {
     const doc = await this.harness.snapshot(PiThreadsDoc, context);
-    return { owner: doc?.owner ?? null, shared: doc?.shared ?? null };
+    return Object.fromEntries(Object.entries(doc ?? {}).filter((entry): entry is [string, number] =>
+      entry[0] !== "shared" && entry[1] !== null));
+  }
+
+  async threadHealth(): Promise<{ count: number; keys: string[] }> {
+    const keys = Object.keys(await this.readThreadIds()).sort();
+    return { count: keys.length, keys };
   }
 
   private async persistThreads(): Promise<void> {
@@ -96,12 +112,12 @@ export class PiBackend implements AgentBackend {
     } finally { await fs.unlink(tmp).catch(() => undefined); }
   }
 
-  private async conversation(key: ThreadKey): Promise<Conversation> {
-    // 仅创建和 JSON 写回用短全局锁，模型回合按 owner/shared 分别串行。
+  private async conversation(key: string): Promise<Conversation> {
+    // 仅创建和 JSON 写回用短全局锁，模型回合按 owner 或 scope 分别串行。
     return this.lock("mapping", async () => {
       const id = (await this.readThreadIds())[key];
       const agent = { model: this.opts.model, thinkingLevel: this.opts.thinkingLevel };
-      if (id !== null) {
+      if (id !== undefined) {
         const conv = await this.harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 会话不存在");
         await conv.configure(agent, context);
@@ -135,14 +151,15 @@ export class PiBackend implements AgentBackend {
   handle(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {
     if (this.closing) return Promise.reject(new Error("pi 后端正在关闭"));
     // 排队取消只取消此等待；队列槽位仍保留，轮到后检查 signal，不启动新回合。
-    return awaitWithContext(this.lock(req.threadKey, () => this.turn(req, ctx)), withAbortSignal(ctx.signal, context));
+    const key = req.threadKey === "owner" ? "owner" : req.scope;
+    return awaitWithContext(this.lock(key, () => this.turn({ ...req, threadKey: key as AgentRequest["threadKey"] }, ctx)), withAbortSignal(ctx.signal, context));
   }
 
   private async turn(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {
     ctx.signal.throwIfAborted();
     if (this.closing) throw new Error("pi 后端正在关闭");
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(req.ticket)) throw new Error("非法票据");
-    if (!parseAccess(req.access) || (req.threadKey === "shared" && req.access !== req.scope)) throw new Error("非法访问范围");
+    if (!parseAccess(req.access) || (req.threadKey !== "owner" && req.access !== req.scope)) throw new Error("非法访问范围");
     const conv = await this.conversation(req.threadKey);
     const known = await conv.commit(tx => tx.submissionByRequest(conv.id, req.ticket), context);
     let deadline = Date.now() + (this.opts.timeoutMs ?? 300_000);

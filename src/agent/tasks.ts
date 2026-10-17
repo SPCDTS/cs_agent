@@ -424,7 +424,8 @@ export function createTasks(deps: TaskDeps) {
                 ticket: doc.ticket,
                 scope,
                 access: accessToString(accessForSource(source, deps.owner)),
-                threadKey: threadKeyForSource(source, deps.owner),
+                threadKey: backend.name === "pi" && threadKeyForSource(source, deps.owner) !== "owner"
+                  ? scope as `group:${string}` | `private:${string}` : threadKeyForSource(source, deps.owner),
                 source: { ...source },
                 text: doc.text,
                 images: doc.source_images ?? [],

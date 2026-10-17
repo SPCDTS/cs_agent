@@ -96,7 +96,7 @@ export class CodexBackend implements AgentBackend {
     let text: string;
     try {
       text = await this.opts.runner.ask(prompt + (refs.length ? "\n[本轮参考图]\n" + refs.join("\n") : ""), {
-        threadKey: req.threadKey,
+        threadKey: req.threadKey === "owner" ? "owner" : "shared",
         signal: ctx.signal,
         ...(this.effort ? { reasoningEffort: this.effort } : {}),
         qqAccess: req.access,

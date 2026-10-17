@@ -240,7 +240,7 @@ async function main(): Promise<void> {
         ? { ...checks.codex, threads: await codex.readThreadIds().catch(() => null) }
         : checks.codex;
     const body = { ok: st.ws_connected, ws_connected: st.ws_connected, bridge: st, ...checks, codex: codexCheck,
-      pi: { threads: await pi.readThreadIds().catch(() => null) } };
+      pi: { threads: await pi.threadHealth().catch(() => null) } };
     res.writeHead(st.ws_connected ? 200 : 503, { "Content-Type": "application/json" }).end(JSON.stringify(body));
   });
   server.listen(cfg.HEALTH_PORT, cfg.HEALTH_HOST, () => log.info("healthz listening", { port: cfg.HEALTH_PORT }));
