@@ -358,6 +358,9 @@ export function createAskCodexTool(runner: CodexRunner) {
       try {
         const reasoningEffort = isReasoningEffort(args.reasoning_effort) ? args.reasoning_effort : undefined;
         const answer = await runner.ask(header + args.prompt, { signal: context.abortSignal, reasoningEffort });
+        await api.commit(async (tx) => {
+          (await tx.doc(TicketDoc, api.conversationId)).codexEffort = reasoningEffort ?? "default";
+        }, context);
         log.info("ask_codex done", {
           ms: Date.now() - started,
           chars: answer.length,

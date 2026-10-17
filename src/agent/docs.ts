@@ -16,6 +16,18 @@ export type TicketState = {
   business: string;
   /** generate_image 成功产出的图片 realpath；reply_qq 只接受其中的路径（旧文档可能没有此字段） */
   images?: string[];
+  /** generate_image 成功时的最终英文提示词（写入消息库机器人行的 detail） */
+  imagePrompt?: string;
+  /** ask_codex 本轮推理强度（"default" 表示沿用 config.toml） */
+  codexEffort?: string;
+  /** reply_qq 成功发送的正文与图片数 */
+  replyText?: string;
+  replyImages?: number;
+  /** 入站消息时间（unix 秒）与 message_id（ask_codex 头部 / 引用查找用） */
+  time?: number;
+  messageId?: string;
+  /** 入站消息 reply 段引用的 message_id */
+  replyTo?: string;
 };
 
 export const TicketDoc = defineDoc<TicketState>({

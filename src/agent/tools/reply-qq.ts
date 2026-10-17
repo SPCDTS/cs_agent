@@ -91,6 +91,16 @@ export function createReplyQQTool(getBridge: () => ReplyBridge, imagesDir: strin
           control: { terminate: true },
         };
       }
+      // 记录回复正文与图片数（派发器据此更新消息库的机器人行）；记录失败不影响已发送的结果
+      try {
+        await api.commit(async (tx) => {
+          const d = await tx.doc(TicketDoc, api.conversationId);
+          d.replyText = text;
+          d.replyImages = images.length;
+        }, context);
+      } catch (err) {
+        log.warn("reply_qq record failed", { ticket: doc.ticket.slice(0, 12), error: err });
+      }
       log.info("reply_qq sent", {
         ticket: doc.ticket.slice(0, 12),
         message_id: result.message_id,

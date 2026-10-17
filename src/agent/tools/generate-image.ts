@@ -403,7 +403,9 @@ export function createGenerateImageTool(backend: ImageBackend, imagesDir: string
         // 记录本会话产出的图片（realpath），reply_qq 只允许发送这些文件
         const real = await Promise.all(files.map((f) => fs.realpath(f)));
         await api.commit(async (tx) => {
-          (await tx.doc(TicketDoc, api.conversationId)).images = real;
+          const d = await tx.doc(TicketDoc, api.conversationId);
+          d.images = real;
+          d.imagePrompt = args.prompt;
         }, context);
         return { output: [{ type: "text", text: JSON.stringify({ image_paths: files }) }] };
       } catch (err) {

@@ -21,6 +21,7 @@ import { createGenerateImageTool, type ImageBackend } from "../../src/agent/tool
 import { createReplyQQTool } from "../../src/agent/tools/reply-qq.js";
 import type { InboundMessage, ReplyTicketRecord } from "../../src/qq/types.js";
 import { FIXTURES, tmp } from "./helpers.js";
+import { ContextStore } from "../../src/context/store.js";
 
 const ctx = BACKGROUND_CONTEXT;
 
@@ -95,16 +96,19 @@ interface Rig {
   toolCalls: string[];
   imageCalls: string[];
   dir: string;
+  store: ContextStore;
 }
 
 let rig: Rig | undefined;
 afterEach(async () => {
   await rig?.harness.close(ctx);
+  rig?.store.close();
   rig = undefined;
 });
 
 async function makeRig(getPrompt?: () => string): Promise<Rig> {
   const dir = tmp();
+  const store = new ContextStore(dir);
   const bridge = new BridgeStub();
   const faux = fauxProvider();
   const models = createModels();
@@ -144,9 +148,10 @@ async function makeRig(getPrompt?: () => string): Promise<Rig> {
     bridge,
     model: { provider: "faux", modelId: faux.getModel().id },
     concurrency: 2,
+    history: store,
   });
   const toolCalls: string[] = [];
-  return { harness, dispatcher, bridge, faux, toolCalls, imageCalls, dir };
+  return { harness, dispatcher, bridge, faux, toolCalls, imageCalls, dir, store };
 }
 
 /** 包装 factory：记录本轮模型发起的工具调用。 */
@@ -361,5 +366,70 @@ describe("routing via faux provider", () => {
     expect(SYSTEM_PROMPT).toContain("不可信");
     expect(SYSTEM_PROMPT).toContain("恰好调用一次 reply_qq");
     expect(SYSTEM_PROMPT).toContain("reasoning_effort");
+  });
+});
+
+describe("context store hooks", () => {
+  const all = { kind: "all" } as const;
+  const bot = (r: Rig) => r.store.recent(all, { limit: 10 }).filter((row) => row.is_self === 1);
+
+  it("image request: pending row on admit, then prompt + image count + excerpt on reply", async () => {
+    rig = await makeRig();
+    const r = rig;
+    let pendingSeen: string | null = null;
+    r.faux.setResponses([
+      () => {
+        pendingSeen = bot(r)[0]?.status ?? null;
+        return fauxAssistantMessage(fauxToolCall("generate_image", { prompt: "a cute dog, photorealistic" }), { stopReason: "toolUse" });
+      },
+      (context) => {
+        const { image_paths } = JSON.parse(lastToolResult(context.messages));
+        return fauxAssistantMessage(fauxToolCall("reply_qq", { text: "图片生成好了", image_paths }), { stopReason: "toolUse" });
+      },
+    ]);
+    await r.dispatcher.dispatch(inbound("画一只狗", "300"), "ticket-h1");
+    expect(pendingSeen).toBe("处理中");
+    expect(bot(r)).toEqual([
+      expect.objectContaining({
+        scope: "private:10000001", ticket: "ticket-h1", action: "generate_image", detail: "a cute dog, photorealistic",
+        text: "图片生成好了", image_count: 1, status: "已回复", reply_to_id: "300",
+      }),
+    ]);
+  });
+
+  it("codex request records the reasoning effort", async () => {
+    rig = await makeRig();
+    const r = rig;
+    r.faux.setResponses([
+      () => fauxAssistantMessage(fauxToolCall("ask_codex", { prompt: "今晚有cs比赛吗", reasoning_effort: "high" }), { stopReason: "toolUse" }),
+      (context) => fauxAssistantMessage(fauxToolCall("reply_qq", { text: lastToolResult(context.messages) }), { stopReason: "toolUse" }),
+    ]);
+    await r.dispatcher.dispatch(inbound("今晚有cs比赛吗", "301"), "ticket-h2");
+    expect(bot(r)[0]).toMatchObject({ action: "ask_codex", detail: "high", status: "已回复" });
+  });
+
+  it("fallback marks the row 失败; a failed business tool marks it 失败 even if a reply was sent", async () => {
+    rig = await makeRig();
+    const r = rig;
+    r.faux.setResponses([fauxAssistantMessage(fauxText("没调用工具"))]);
+    await r.dispatcher.dispatch(inbound("hi", "302"), "ticket-h3");
+    expect(bot(r).find((b) => b.ticket === "ticket-h3")).toMatchObject({ action: "fallback", status: "失败", text: FALLBACK_REPLY });
+
+    r.faux.setResponses([
+      () => fauxAssistantMessage(fauxToolCall("ask_codex", { prompt: "x", reasoning_effort: "low" }), { stopReason: "toolUse" }),
+      () => fauxAssistantMessage(fauxToolCall("reply_qq", { text: "处理失败了" }), { stopReason: "toolUse" }),
+    ]);
+    writeFileSync(path.join(r.dir, "codex-session.json"), JSON.stringify({ thread_id: "flaky-1" }));
+    await r.dispatcher.dispatch(inbound("问个问题", "303"), "ticket-h4");
+    expect(bot(r).find((b) => b.ticket === "ticket-h4")).toMatchObject({ action: "ask_codex", status: "失败", text: "处理失败了" });
+  });
+
+  it("history errors never break dispatch", async () => {
+    rig = await makeRig();
+    const r = rig;
+    r.store.close(); // 之后所有写入都会抛错
+    r.faux.setResponses([fauxAssistantMessage(fauxToolCall("reply_qq", { text: "好" }), { stopReason: "toolUse" })]);
+    await r.dispatcher.dispatch(inbound("hi", "304"), "ticket-h5");
+    expect(r.bridge.replies).toEqual([{ ticket: "ticket-h5", text: "好", images: [] }]);
   });
 });

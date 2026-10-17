@@ -14,6 +14,7 @@ import { CodexRunner, createAskCodexTool, ensureWorkspaceAgentsMd } from "./agen
 import { createGenerateImageTool, HttpImageBackend, McpImageBackend, type ImageBackend } from "./agent/tools/generate-image.js";
 import { createReplyQQTool } from "./agent/tools/reply-qq.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
+import { ContextStore } from "./context/store.js";
 
 function createImageBackend(cfg: Config, comfyUrlForMcp: string): ImageBackend {
   const timeoutMs = cfg.COMFY_TIMEOUT_SEC * 1000;
@@ -61,6 +62,9 @@ async function main(): Promise<void> {
   if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md", { dir: cfg.WORKSPACE_DIR });
   // 可热改的系统提示（${DATA_DIR}/prompts/system.md）；已存在则不覆盖
   if (await ensureDefaultSystemPrompt(cfg.DATA_DIR)) log.info("wrote default system prompt", { file: systemPromptFile(cfg.DATA_DIR) });
+
+  // 统一上下文消息库（${DATA_DIR}/qq-messages.sqlite）：意图层与 codex 的 qq_context MCP 共用
+  const store = new ContextStore(cfg.DATA_DIR);
 
   let bridge: QQBridge | undefined;
   const getBridge = () => {
@@ -121,12 +125,28 @@ async function main(): Promise<void> {
     model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     thinkingLevel,
     concurrency: cfg.AGENT_CONCURRENCY,
+    history: store,
   });
 
   // 继续上次未完成的工作（工具非 replay-safe：中断的调用以 interrupted 结果交给模型）
   harness.resume();
   await dispatcher.recover();
 
+  // raw 先于 message 发出：入站消息先入库，派发器再写机器人"处理中"行
+  bridge.on("raw", (msg) => {
+    try {
+      store.ingest(msg);
+    } catch (err) {
+      log.warn("context ingest failed", { error: err });
+    }
+  });
+  bridge.on("recall", (scope, messageId) => {
+    try {
+      store.recall(scope, messageId);
+    } catch (err) {
+      log.warn("context recall failed", { error: err });
+    }
+  });
   bridge.on("message", (msg, ticket) => void dispatcher.dispatch(msg, ticket));
   bridge.on("connection", () => log.info("napcat connected"));
   bridge.on("disconnect", (reason) => log.warn("napcat disconnected", { reason }));
@@ -175,6 +195,11 @@ async function main(): Promise<void> {
     server.close();
     await bridge!.stop().catch(() => undefined);
     await harness.close(ctx).catch(() => undefined);
+    try {
+      store.close();
+    } catch {
+      /* ignore */
+    }
     await imageBackend.close().catch(() => undefined);
     await comfyProxy?.close().catch(() => undefined);
     process.exit(0);

@@ -8,18 +8,24 @@
  * 5. 若会话结束但票据仍是 pending（模型没回复/失败），发送一次兜底回复。
  * 6. recover() 还会与 QQBridge 的 pending 票据对账：admit 已落盘但派发索引未写入（两者之间崩溃）的票据，
  *    用票据里保存的来源与原文重建消息重新派发。
+ * 7. 统一上下文（可选 history）：收到消息即写入机器人"处理中"行；票据进入终态后按 TicketDoc 记录的
+ *    动作 / 提示词 / 推理强度 / 回复摘要更新为"已回复"，兜底或不确定为"失败"。消息库错误只记日志。
  */
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ConversationId, Harness, ModelRef } from "@earendil-works/pi-durable";
 import type { InboundMessage, QQBridge, ReplyTicketRecord } from "../qq/types.js";
 import { DispatchDoc, TicketDoc, type TicketSource } from "./docs.js";
 import { log } from "../log.js";
+import { scopeOf } from "../context/access.js";
+import type { BotAction, ContextStore } from "../context/store.js";
 
 export const FALLBACK_REPLY = "抱歉，这条消息处理失败了，请稍后再试。";
 /** 同一票据最多运行次数；recover 时达到即放弃运行，改发兜底回复 */
 export const MAX_ATTEMPTS = 3;
 
 export type DispatchBridge = Pick<QQBridge, "reply" | "getTicket" | "listPendingTickets">;
+/** 统一上下文存储中派发器用到的写入口 */
+export type DispatchHistory = Pick<ContextStore, "recordPending" | "completeReply">;
 
 export interface DispatcherOptions {
   harness: Harness;
@@ -28,6 +34,7 @@ export interface DispatcherOptions {
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   concurrency: number;
   context?: Context;
+  history?: DispatchHistory;
 }
 
 export function buildUserContent(msg: InboundMessage): string {
@@ -69,6 +76,9 @@ export class Dispatcher {
 
   /** 收到授权消息：持久化后排队执行；同一 ticket 重复投递时复用。 */
   dispatch(msg: InboundMessage, ticket: string): Promise<void> {
+    this.withHistory("record pending failed", ticket, (h) =>
+      h.recordPending(scopeOf(msg), ticket, msg.time, { replyTo: msg.message_id, selfId: msg.self_id }),
+    );
     return this.track(ticket, "dispatch failed", () =>
       this.register(msg, ticket).then((conversationId) => this.run(ticket, conversationId)),
     );
@@ -142,13 +152,17 @@ export class Dispatcher {
       group_id: msg.group_id,
       nickname: msg.nickname,
     };
+    const reply = msg.segments.find((s) => s.type === "reply") as { data: { id?: string } } | undefined;
     const content = buildUserContent(msg);
     const conv = await harness.createConversation(
       {
         ownership: { kind: "ownerless" },
         agent: { model: this.opts.model, thinkingLevel: this.opts.thinkingLevel ?? "low" },
         init: async (tx, conversationId) => {
-          Object.assign(await tx.doc(TicketDoc, conversationId), { ticket, source, text: msg.text });
+          Object.assign(await tx.doc(TicketDoc, conversationId), {
+            ticket, source, text: msg.text, time: msg.time, messageId: msg.message_id,
+            ...(reply?.data.id ? { replyTo: reply.data.id } : {}),
+          });
           (await tx.doc(DispatchDoc)).pending[ticket] = { conversationId, content, attempts: 0 };
         },
       },
@@ -196,7 +210,9 @@ export class Dispatcher {
           ...(settled.status === "unanswered" ? { reason: (settled as { reason?: unknown }).reason } : {}),
         });
       }
-      done = await this.fallbackIfUnreplied(ticket);
+      const outcome = await this.fallbackIfUnreplied(ticket);
+      done = outcome !== "pending";
+      if (outcome === "terminal") await this.recordOutcome(ticket, conversationId);
       if (!done) log.warn("ticket still pending after run; keeping dispatch index", { ticket: ticket.slice(0, 12), attempts });
     } finally {
       // 基础设施错误（抛出）或票据仍 pending：保留索引，重启后 recover() 继续
@@ -211,7 +227,53 @@ export class Dispatcher {
    * 否则 pending 票据会在对账时被当作孤儿重新派发。
    */
   private async giveUp(ticket: string): Promise<void> {
-    if (await this.fallbackIfUnreplied(ticket)) await this.clearIndex(ticket);
+    if ((await this.fallbackIfUnreplied(ticket)) !== "pending") await this.clearIndex(ticket);
+  }
+
+  private withHistory(label: string, ticket: string, fn: (h: DispatchHistory) => unknown): void {
+    if (!this.opts.history) return;
+    try {
+      fn(this.opts.history);
+    } catch (err) {
+      log.warn(label, { ticket: ticket.slice(0, 12), error: err });
+    }
+  }
+
+  /** 票据已终态（非本次兜底）：按会话文档更新消息库中的机器人行。 */
+  private async recordOutcome(ticket: string, conversationId: ConversationId): Promise<void> {
+    if (!this.opts.history) return;
+    try {
+      const doc = await this.opts.harness.snapshot(TicketDoc, conversationId, this.ctx);
+      const rec = await this.opts.bridge.getTicket(ticket);
+      const business = doc?.business;
+      const action: BotAction = business === "generate_image" || business === "ask_codex" ? business : "reply";
+      // 业务工具调用了但没成功（无提示词 / 无强度记录）→ 失败，即使已回复了一句说明
+      const businessOk = action === "generate_image" ? !!doc?.imagePrompt : action === "ask_codex" ? !!doc?.codexEffort : true;
+      const detail = action === "generate_image" ? doc?.imagePrompt : action === "ask_codex" ? doc?.codexEffort : undefined;
+      this.withHistory("record reply failed", ticket, (h) =>
+        h.completeReply(ticket, {
+          action,
+          ...(detail ? { detail } : {}),
+          excerpt: doc?.replyText ?? "",
+          image_count: doc?.replyImages ?? 0,
+          status: rec?.status === "sent" && businessOk ? "已回复" : "失败",
+          ...(rec?.reply_message_id ? { reply_message_id: rec.reply_message_id } : {}),
+        }),
+      );
+    } catch (err) {
+      log.warn("record reply failed", { ticket: ticket.slice(0, 12), error: err });
+    }
+  }
+
+  private recordFallback(ticket: string, replyMessageId?: string): void {
+    this.withHistory("record fallback failed", ticket, (h) =>
+      h.completeReply(ticket, {
+        action: "fallback",
+        excerpt: FALLBACK_REPLY,
+        status: "失败",
+        ...(replyMessageId ? { reply_message_id: replyMessageId } : {}),
+      }),
+    );
   }
 
   private async clearIndex(ticket: string): Promise<void> {
@@ -223,25 +285,28 @@ export class Dispatcher {
   }
 
   /**
-   * 票据仍 pending 时发一次兜底回复。返回票据是否已处于终态（sent/uncertain）——
-   * 只有终态才允许清除派发索引；读不到票据、或兜底在发送前就失败（仍 pending）都返回 false。
+   * 票据仍 pending 时发一次兜底回复。返回 "terminal"（此前已终态）/ "fallback"（本次兜底后终态）/
+   * "pending"（读不到票据、或兜底在发送前就失败）——只有非 pending 才允许清除派发索引。
    */
-  private async fallbackIfUnreplied(ticket: string): Promise<boolean> {
+  private async fallbackIfUnreplied(ticket: string): Promise<"terminal" | "fallback" | "pending"> {
     const rec = await this.opts.bridge.getTicket(ticket).catch((err: unknown) => {
       log.error("get ticket failed", { ticket: ticket.slice(0, 12), error: err });
       return undefined;
     });
-    if (rec === undefined) return false;
-    if (rec === null) return true; // 票据不存在：没有可回复的目标，不再保留索引
-    if (isTerminal(rec.status)) return true;
+    if (rec === undefined) return "pending";
+    if (rec === null) return "terminal"; // 票据不存在：没有可回复的目标，不再保留索引
+    if (isTerminal(rec.status)) return "terminal";
     try {
-      await this.opts.bridge.reply(ticket, FALLBACK_REPLY);
+      const sent = await this.opts.bridge.reply(ticket, FALLBACK_REPLY);
       log.warn("fallback reply sent", { ticket: ticket.slice(0, 12) });
-      return true;
+      this.recordFallback(ticket, sent.message_id);
+      return "fallback";
     } catch (err) {
       log.error("fallback reply failed", { ticket: ticket.slice(0, 12), error: err });
       const after = await this.opts.bridge.getTicket(ticket).catch(() => undefined);
-      return isTerminal(after?.status);
+      if (!isTerminal(after?.status)) return "pending";
+      this.recordFallback(ticket);
+      return "fallback";
     }
   }
 }
