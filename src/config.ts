@@ -1,6 +1,9 @@
 import path from "node:path";
 import { z } from "zod";
 import { resolveOwner } from "./context/access.js";
+import { parseImagePrefixes } from "./agent/router.js";
+import { parseBackendOverrides } from "./agent/backends/select.js";
+import type { BackendName } from "./agent/backends/types.js";
 
 /** 逗号分隔列表；空串 → []。 */
 const list = z
@@ -46,8 +49,10 @@ const EnvSchema = z.object({
 
   CODEX_BIN: z.string().default("codex"),
   CODEX_MODEL: z.string().default("gpt-6.1-sol"),
-  /** config.toml 中的默认推理强度；ask_codex 每轮由意图模型选择的档位会覆盖它 */
+  /** codex 推理强度（写入 config.toml，codex 后端每轮也以 -c 显式传入；不再按请求选择） */
   CODEX_REASONING_EFFORT: z.string().default("high"),
+  /** codex 后端回复后处理：relay（意图模型整理格式，失败回退清洗）| direct（仅代码清洗） */
+  CODEX_REPLY_MODE: z.enum(["relay", "direct"]).default("relay"),
   CODEX_SANDBOX: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("workspace-write"),
   CODEX_TIMEOUT_SEC: int(600),
 
@@ -55,6 +60,12 @@ const EnvSchema = z.object({
   AGENT_MODEL_ID: z.string().default("deepseek-flash"),
   AGENT_THINKING_LEVEL: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).default("low"),
   AGENT_CONCURRENCY: int(2),
+  /** 规则分流的生图前缀（逗号分隔，逐字匹配）；命中后前缀之后的全部文本作为提示词 */
+  IMAGE_PREFIXES: z.string().default("奶龙:,奶龙："),
+  /** 执行 agent 后端：codex | pi（pi 为第 3 组，当前占位） */
+  AGENT_BACKEND: z.enum(["codex", "pi"]).default("codex"),
+  /** 按 scope 覆盖后端：group:<群号>=pi,private:<QQ号>=codex */
+  AGENT_BACKEND_OVERRIDES: z.string().default(""),
 
   /** owner QQ 号（私聊可检索全部会话历史）；留空 = QQ_ALLOW_USERS 的第一项 */
   QQ_OWNER: z.string().regex(/^\d*$/, "QQ_OWNER 必须是 QQ 号").default(""),
@@ -94,6 +105,8 @@ export interface Config extends Env {
   imagesDir: string;
   /** QQ_OWNER，否则 QQ_ALLOW_USERS 第一项；QQ_ALLOW_USERS=* 且未设 QQ_OWNER 时无 owner */
   owner: string | undefined;
+  imagePrefixes: string[];
+  backendOverrides: Record<string, BackendName>;
 }
 
 /** 环境变量别名 → pi-ai 读取的标准名（.env 中常见的写法差异）。 */
@@ -137,6 +150,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`配置无效: ${issues}`);
   }
   const e = parsed.data;
+  let backendOverrides: Record<string, BackendName>;
+  try {
+    backendOverrides = parseBackendOverrides(e.AGENT_BACKEND_OVERRIDES);
+  } catch (err) {
+    throw new Error(`配置无效: ${(err as Error).message}`);
+  }
   const users = e.QQ_ALLOW_USERS.trim();
   const allowUsers: string[] | "*" =
     users === "*"
@@ -152,5 +171,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     imagesDir: path.join(e.DATA_DIR, "images"),
     COMFY_WORKFLOW_FILE: e.COMFY_WORKFLOW_FILE || path.posix.join(e.DATA_DIR, "workflows", DEFAULT_WORKFLOW),
     owner: resolveOwner(e.QQ_OWNER, allowUsers),
+    imagePrefixes: parseImagePrefixes(e.IMAGE_PREFIXES),
+    backendOverrides,
   };
 }

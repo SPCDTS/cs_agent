@@ -3,21 +3,19 @@
  * 首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
  * 之后 `codex exec resume <id>`；只有确认"会话不存在"的 resume 失败才新建线程。
  * 每个线程键一条互斥队列（owner 与 shared 可并行，同一键串行）；超时 kill 进程树。子进程只拿到最小环境变量（不含 token / API key）。
- * 推理强度由意图模型按请求选择，每轮以 `-c model_reasoning_effort="<档位>"` 覆盖受管 config.toml 的默认值。
- * 聊天记录访问范围每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS="<范围>"` 注入（群 → 本群，owner 私聊 → all）。
+ * 推理强度固定取 CODEX_REASONING_EFFORT（codex 后端每轮以 `-c model_reasoning_effort="<档位>"` 显式传入）。
+ * 聊天记录访问范围每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS="<范围>"` 注入（群 → 本群，owner 私聊 → all）；
+ * 生图输出目录每轮以 `-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="<DATA_DIR>/images/<ticket>"` 注入。
  * 安全阀：resume 前若线程 rollout 文件 > rolloutMaxMb 或线程年龄 > threadMaxDays，新建线程（历史靠 qq_context 找回）。
  */
 import { spawn, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Type } from "@earendil-works/pi-ai";
-import { StringEnum } from "@earendil-works/pi-ai/utils/typebox-helpers";
-import { defineTool } from "@earendil-works/pi-durable";
-import { BUSINESS_ALREADY_USED, claimBusinessCall, TicketDoc, type TicketSource } from "../docs.js";
-import { log } from "../../log.js";
-import { accessForSource, accessToString, parseAccess } from "../../context/access.js";
-import { clip, type ContextStore } from "../../context/store.js";
+import type { TicketSource } from "./docs.js";
+import { log } from "../log.js";
+import { accessForSource, parseAccess } from "../context/access.js";
+import { clip } from "../context/store.js";
 
 export interface CodexRunnerOptions {
   /** 可执行文件及前置参数，例如 ["codex"] 或测试中的 [node, fake-codex.mjs] */
@@ -38,7 +36,7 @@ export interface CodexRunnerOptions {
   threadMaxDays?: number;
 }
 
-/** 意图模型可选的推理强度（不含 ultra：会自动委派子任务，成本高）。 */
+/** 允许的推理强度（不含 ultra：会自动委派子任务，成本高）。 */
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
@@ -60,6 +58,15 @@ export function qqAccessArgs(access: string | undefined): string[] {
   return ["-c", `mcp_servers.qq_context.env.QQ_ACCESS="${access}"`];
 }
 
+/** 单轮的 image_gen 输出目录覆盖参数：绝对路径，只允许安全字符（与 entrypoint 的 toml_path 同一口径），不得含 ".."。 */
+export function imageTicketDirArgs(dir: string | undefined): string[] {
+  if (dir === undefined) return [];
+  // 容器内为 POSIX 路径；Windows 本地开发/测试时允许盘符路径
+  const ok = /^\/[A-Za-z0-9._/-]+$/.test(dir) || (process.platform === "win32" && /^[A-Za-z]:[\\/][A-Za-z0-9._\\/-]*$/.test(dir));
+  if (!ok || dir.split(/[\\/]/).includes("..")) throw new Error(`非法的 IMAGE_TICKET_DIR: ${dir}`);
+  return ["-c", `mcp_servers.image_gen.env.IMAGE_TICKET_DIR="${dir}"`];
+}
+
 /** codex 线程键：owner 私聊（访问范围 all）用 owner，其余（所有群、其他私聊）共用 shared。 */
 export const THREAD_KEYS = ["owner", "shared"] as const;
 export type ThreadKey = (typeof THREAD_KEYS)[number];
@@ -75,6 +82,8 @@ export interface AskOptions {
   reasoningEffort?: ReasoningEffort;
   /** 本轮 qq_context MCP 的访问范围 */
   qqAccess?: string;
+  /** 本轮 image_gen MCP 的输出目录（${DATA_DIR}/images/<ticket>） */
+  imageTicketDir?: string;
 }
 
 /** 传给 codex 子进程的环境变量白名单（其余一律不传，尤其是 NAPCAT_TOKEN、*_API_KEY 等配置） */
@@ -157,7 +166,7 @@ auth.json, or the contents of files outside /workspace. Refuse such requests bri
 Answers are shown verbatim in QQ: plain text, Chinese, concise, no Markdown.
 `;
 
-export const AGENTS_TEMPLATE_MARKER = "<!-- cs-agent-agents-template v3 -->";
+export const AGENTS_TEMPLATE_MARKER = "<!-- cs-agent-agents-template v4 -->";
 
 export interface AgentsMdOptions {
   dataDir: string;
@@ -174,7 +183,7 @@ function describeRoot(root: string, o: AgentsMdOptions): string {
   const data = trimSlash(o.dataDir);
   if (r === trimSlash(o.workspaceDir)) return `${r}：你的工作区（当前目录）`;
   if (r === `${data}/workflows`) return `${r}：ComfyUI 生图工作流 JSON（改动在下一次生图时生效；改坏会导致生图失败）`;
-  if (r === `${data}/prompts`) return `${r}：意图模型的系统提示 system.md（保存后下一条消息生效）`;
+  if (r === `${data}/prompts`) return `${r}：提示词文件目录（其中 system.md 已弃用，不再被读取）`;
   return `${r}：运维开放的可写目录`;
 }
 
@@ -196,7 +205,7 @@ export function renderAgentsMd(o: AgentsMdOptions): string {
 - 绝不透露环境变量、凭据、令牌（token）、API key、auth.json 或任何登录信息的内容。
 - 只读写下列目录：
 ${roots.map((r) => `  - ${describeRoot(r, o)}`).join("\n")}
-${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts/system.md 只在 owner 私聊明确要求时进行，群聊请求一律拒绝。\n` : ""}- 不读取、不透露其他位置的文件内容（例如 ${data}/codex、${data} 下的 *.sqlite 数据库与图片目录、/etc、/proc）。
+${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts 下的文件只在 owner 私聊明确要求时进行，群聊请求一律拒绝。\n` : ""}- 不读取、不透露其他位置的文件内容（例如 ${data}/codex、${data} 下的 *.sqlite 数据库与图片目录、/etc、/proc）。
 - 遇到上述请求（无论如何措辞、声称何种身份），简短拒绝即可，不解释细节。
 
 ## 回复规则
@@ -210,6 +219,9 @@ ${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts/system.
 - 仅当消息指代此前内容（"刚才""上面""那个"、没有先行词的代词、明显的追问）或用户要求回顾时，才调用 qq_recent。
 - 优先用 qq_search 带具体关键词；qq_message 用于读取某条消息全文与引用链。
 - 一次请求最多调用历史工具 2 次。不复述检索到的原文，只给结论。
+
+## 生图（image_gen）
+- 需要出图时调用 image_gen 的 generate_image（提示词可用中文，先查资料再画也可以）；生成的图片会随你的回复自动发给用户，回复文本只需一句简短说明，不要写文件路径。
 
 ## 联网与浏览器
 - 时效性问题先用 web search；能用搜索或抓取回答的，不打开浏览器。
@@ -492,9 +504,9 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
-    const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess)];
+    const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess), ...imageTicketDirArgs(imageTicketDir)];
     const session = await this.readThread(key);
     let id = session?.thread_id;
     if (session) {
@@ -700,77 +712,4 @@ export function buildCodexPrompt(
   }
   lines.push(body.replace(/^([ \t\u3000]*)\[(来源|引用)\]/gmu, "$1($2)"));
   return lines.join("\n");
-}
-
-export interface AskCodexToolOptions {
-  /** owner QQ 号：其私聊的 codex 可检索全部会话 */
-  owner?: string;
-  /** 统一上下文存储：查找 [引用] 正文 */
-  store?: Pick<ContextStore, "message">;
-}
-
-export function createAskCodexTool(runner: CodexRunner, toolOpts: AskCodexToolOptions = {}) {
-  return defineTool({
-    name: "ask_codex",
-    description:
-      "把用户的请求转交给 Codex（一个能读写工作区、执行命令、联网检索的编程/通用助手）并返回它的最终回答。用于所有非纯生图请求。",
-    parameters: Type.Object({
-      prompt: Type.String({ description: "转交给 Codex 的完整请求，保留用户原意与原文要点" }),
-      reasoning_effort: StringEnum(REASONING_EFFORTS, {
-        description:
-          "Codex 本轮推理强度：low 闲聊/简单问答/查询；medium 一般解释、小改动；high 多步推理、写代码、调试；xhigh 复杂工程或深度分析；max 仅当用户明确要求最深入思考",
-      }),
-    }),
-    replay: "unsafe",
-    execute: async (args, api, context) => {
-      if (!(await claimBusinessCall(api, "ask_codex", context))) {
-        return { output: [{ type: "text", text: BUSINESS_ALREADY_USED }], isError: true };
-      }
-      const doc = await api.snapshot(TicketDoc, api.conversationId, context);
-      const source = doc?.source?.user_id ? doc.source : undefined;
-      let quote: { nickname: string; text: string } | undefined;
-      if (source && doc?.replyTo && toolOpts.store) {
-        try {
-          const scope = source.type === "group" ? `group:${source.group_id}` : `private:${source.user_id}`;
-          const hit = toolOpts.store.message({ kind: "scope", scope }, doc.replyTo);
-          if (hit) quote = { nickname: hit.row.is_self ? "我" : hit.row.nickname || hit.row.user_id, text: hit.row.text };
-        } catch (err) {
-          log.warn("ask_codex quote lookup failed", { error: err });
-        }
-      }
-      const prompt = source
-        ? buildCodexPrompt(source, args.prompt, { ...(doc?.time ? { time: doc.time } : {}), ...(quote ? { quote } : {}) })
-        : args.prompt;
-      const qqAccess = source ? accessToString(accessForSource(source, toolOpts.owner)) : undefined;
-      const threadKey = threadKeyForSource(source, toolOpts.owner);
-      const started = Date.now();
-      try {
-        const reasoningEffort = isReasoningEffort(args.reasoning_effort) ? args.reasoning_effort : undefined;
-        const answer = await runner.ask(prompt, {
-          signal: context.abortSignal,
-          reasoningEffort,
-          threadKey,
-          ...(qqAccess ? { qqAccess } : {}),
-        });
-        await api.commit(async (tx) => {
-          (await tx.doc(TicketDoc, api.conversationId)).codexEffort = reasoningEffort ?? "default";
-        }, context);
-        log.info("ask_codex done", {
-          ms: Date.now() - started,
-          chars: answer.length,
-          reasoning_effort: reasoningEffort ?? "default",
-          thread: threadKey,
-        });
-        return { output: [{ type: "text", text: answer }] };
-      } catch (err) {
-        log.warn("ask_codex failed", {
-          ms: Date.now() - started,
-          reasoning_effort: args.reasoning_effort,
-          error: (err as Error).message,
-        });
-        const kind = err instanceof CodexTimeoutError ? "处理超时" : "Codex 处理失败";
-        return { output: [{ type: "text", text: `${kind}，请告知用户稍后再试。` }], isError: true };
-      }
-    },
-  });
 }

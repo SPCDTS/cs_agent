@@ -8,28 +8,16 @@ import { createQQBridge } from "./qq/index.js";
 import type { QQBridge } from "./qq/types.js";
 import { createAgentModels, openHarness, resolveThinkingLevel } from "./agent/harness.js";
 import { createCsAgentExtension } from "./agent/extension.js";
-import { ensureDefaultSystemPrompt, loadSystemPrompt, systemPromptFile } from "./agent/prompt.js";
+import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
 import { Dispatcher } from "./agent/dispatch.js";
-import { CodexRunner, createAskCodexTool, effectiveWritableRoots, ensureWorkspaceAgentsMd, writeGlobalAgentsMd } from "./agent/tools/ask-codex.js";
-import { createGenerateImageTool, HttpImageBackend, McpImageBackend, type ImageBackend } from "./agent/tools/generate-image.js";
-import { createReplyQQTool } from "./agent/tools/reply-qq.js";
+import { CodexRunner, effectiveWritableRoots, ensureWorkspaceAgentsMd, writeGlobalAgentsMd } from "./agent/codex-runner.js";
+import { createImageBackend } from "./agent/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
+import { createTasks } from "./agent/tasks.js";
+import { CodexBackend } from "./agent/backends/codex.js";
+import { createBackendSelector, PiBackendStub } from "./agent/backends/select.js";
 import { ContextStore } from "./context/store.js";
 import { startAgingScheduler } from "./context/aging.js";
-
-function createImageBackend(cfg: Config, comfyUrlForMcp: string): ImageBackend {
-  const timeoutMs = cfg.COMFY_TIMEOUT_SEC * 1000;
-  const checkpoint = cfg.COMFY_CHECKPOINT || undefined;
-  const workflowFile = cfg.COMFY_WORKFLOW_FILE || undefined;
-  const promptNode = cfg.COMFY_PROMPT_NODE || undefined;
-  if (cfg.COMFY_MODE === "http") {
-    return new HttpImageBackend({ baseUrl: cfg.COMFYUI_URL, timeoutMs, checkpoint, workflowFile, promptNode });
-  }
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
-  Object.assign(env, { COMFYUI_URL: comfyUrlForMcp, COMFY_BIN: cfg.COMFY_BIN });
-  return new McpImageBackend({ command: cfg.COMFY_MCP_BIN, env, timeoutMs, checkpoint, workflowFile, promptNode });
-}
 
 async function main(): Promise<void> {
   // DEEPSEEK_APIKEY 等别名 → pi-ai 读取的标准变量名（须在创建 models 之前）
@@ -43,6 +31,10 @@ async function main(): Promise<void> {
     model: cfg.AGENT_MODEL_ID,
     comfy_mode: cfg.COMFY_MODE,
     data_dir: cfg.DATA_DIR,
+    agent_backend: cfg.AGENT_BACKEND,
+    backend_overrides: cfg.backendOverrides,
+    codex_reply_mode: cfg.CODEX_REPLY_MODE,
+    image_prefixes: cfg.imagePrefixes,
   });
 
   // 数据卷必须可写（容器以 node 用户运行，宿主机目录权限不对时尽早给出明确错误）
@@ -65,8 +57,8 @@ async function main(): Promise<void> {
   const agentsFile = await writeGlobalAgentsMd(cfg.codexHome, { dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, writableRoots });
   log.info("wrote codex global AGENTS.md", { file: agentsFile, writable_roots: writableRoots });
   if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md stub", { dir: cfg.WORKSPACE_DIR });
-  // 可热改的系统提示（${DATA_DIR}/prompts/system.md）；已存在则不覆盖
-  if (await ensureDefaultSystemPrompt(cfg.DATA_DIR)) log.info("wrote default system prompt", { file: systemPromptFile(cfg.DATA_DIR) });
+  // v2 的系统提示 ${DATA_DIR}/prompts/system.md 已弃用（规则分流不经模型）：存在时记一行弃用日志，不删除
+  warnDeprecatedSystemPrompt(cfg.DATA_DIR);
 
   // 统一上下文消息库（${DATA_DIR}/qq-messages.sqlite）：意图层与 codex 的 qq_context MCP 共用
   const store = new ContextStore(cfg.DATA_DIR);
@@ -82,7 +74,16 @@ async function main(): Promise<void> {
     cfg.COMFY_MODE === "mcp" && !isLoopbackUrl(cfg.COMFYUI_URL)
       ? await startLoopbackProxy(cfg.COMFYUI_URL, cfg.COMFY_LOOPBACK_PORT)
       : undefined;
-  const imageBackend = createImageBackend(cfg, comfyProxy?.url ?? cfg.COMFYUI_URL);
+  const imageBackend = createImageBackend({
+    mode: cfg.COMFY_MODE,
+    comfyUrl: cfg.COMFY_MODE === "mcp" ? (comfyProxy?.url ?? cfg.COMFYUI_URL) : cfg.COMFYUI_URL,
+    mcpBin: cfg.COMFY_MCP_BIN,
+    comfyBin: cfg.COMFY_BIN,
+    timeoutMs: cfg.COMFY_TIMEOUT_SEC * 1000,
+    checkpoint: cfg.COMFY_CHECKPOINT || undefined,
+    workflowFile: cfg.COMFY_WORKFLOW_FILE || undefined,
+    promptNode: cfg.COMFY_PROMPT_NODE || undefined,
+  });
   const codex = new CodexRunner({
     command: [cfg.CODEX_BIN],
     codexHome: cfg.codexHome,
@@ -95,17 +96,12 @@ async function main(): Promise<void> {
     threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,
   });
 
-  const extension = createCsAgentExtension([
-    createGenerateImageTool(imageBackend, cfg.imagesDir),
-    createAskCodexTool(codex, { owner: cfg.owner, store }),
-    createReplyQQTool(getBridge, cfg.imagesDir),
-  ], () => loadSystemPrompt(cfg.DATA_DIR));
   const models = createAgentModels(cfg.codexHome);
   const agentModel = models.getModel(cfg.AGENT_MODEL_PROVIDER, cfg.AGENT_MODEL_ID);
   if (!agentModel) {
     throw new Error(`未知模型 ${cfg.AGENT_MODEL_PROVIDER}/${cfg.AGENT_MODEL_ID}`);
   }
-  // 模型不支持所配置的思考档位时就近取支持的档位（例如 deepseek-flash 无 medium → high），而不是请求失败
+  // 模型不支持所配置的思考档位时就近取支持的档位（衰老任务与 pi 后端用）
   const thinkingLevel = resolveThinkingLevel(agentModel, cfg.AGENT_THINKING_LEVEL);
   if (thinkingLevel !== cfg.AGENT_THINKING_LEVEL) {
     log.warn("AGENT_THINKING_LEVEL not supported by model, adjusted", {
@@ -114,6 +110,28 @@ async function main(): Promise<void> {
       effective: thinkingLevel,
     });
   }
+
+  // 执行 agent 后端（§4.3）：codex（默认）与 pi（第 3 组，占位）
+  const backends = createBackendSelector({
+    defaultBackend: cfg.AGENT_BACKEND,
+    overrides: cfg.backendOverrides,
+    backends: {
+      codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT }),
+      pi: new PiBackendStub(),
+    },
+  });
+  const tasks = createTasks({
+    getBridge,
+    imageBackend,
+    imagesDir: cfg.imagesDir,
+    backends,
+    owner: cfg.owner,
+    store,
+    codexReplyMode: cfg.CODEX_REPLY_MODE,
+    models,
+    relayModel: agentModel,
+  });
+  const extension = createCsAgentExtension(tasks);
   const harness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
 
   bridge = createQQBridge({
@@ -130,9 +148,10 @@ async function main(): Promise<void> {
   const dispatcher = new Dispatcher({
     harness,
     bridge,
-    model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
-    thinkingLevel,
+    tasks,
     concurrency: cfg.AGENT_CONCURRENCY,
+    imagePrefixes: cfg.imagePrefixes,
+    codexEffort: cfg.CODEX_REASONING_EFFORT,
     history: store,
   });
 
@@ -147,9 +166,10 @@ async function main(): Promise<void> {
     hour: cfg.HISTORY_SUMMARY_HOUR,
   });
 
-  // 继续上次未完成的工作（工具非 replay-safe：中断的调用以 interrupted 结果交给模型）
-  harness.resume();
+  // 继续上次未完成的工作：先由派发器按 scope FIFO 接管索引中的票据（v2 遗留会话先中止），再开启任务调度。
+  // 运行中的任务从最后提交的检查点继续（已完成的阶段不重跑）。
   await dispatcher.recover();
+  harness.resume();
 
   // raw 先于 message 发出：入站消息先入库，派发器再写机器人"处理中"行
   bridge.on("raw", (msg) => {

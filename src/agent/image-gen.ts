@@ -1,5 +1,5 @@
 /**
- * 生图：默认经 comfy-mcp（stdio MCP）调用 generate_image(wait=false) → job(wait) → fetch_outputs；
+ * 生图实现（生图任务、image_gen MCP 共用）：默认经 comfy-mcp（stdio MCP）调用 generate_image(wait=false) → job(wait) → fetch_outputs；
  * COMFY_MODE=http 时直连 ComfyUI HTTP API（POST /prompt → /history → /view）。
  */
 import { randomUUID } from "node:crypto";
@@ -8,10 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { Type } from "@earendil-works/pi-ai";
-import { defineTool } from "@earendil-works/pi-durable";
-import { BUSINESS_ALREADY_USED, claimBusinessCall, TicketDoc } from "../docs.js";
-import { log } from "../../log.js";
+import { log } from "../log.js";
 
 export interface ImageBackend {
   readonly name: string;
@@ -374,46 +371,44 @@ export class HttpImageBackend implements ImageBackend {
   async close(): Promise<void> {}
 }
 
-// ---------------------------------------------------------------- tool
+// ---------------------------------------------------------------- 票据目录与失败分类
 
-/** 票据对应的图片输出目录：<imagesDir>/<ticket>（非法字符替换为 _）。reply_qq 用同一规则校验。 */
+/** 票据对应的图片输出目录：<imagesDir>/<ticket>（非法字符替换为 _）。 */
 export function ticketImageDir(imagesDir: string, ticket: string): string {
   return path.join(imagesDir, ticket.replace(/[^a-zA-Z0-9_-]/g, "_"));
 }
 
-export function createGenerateImageTool(backend: ImageBackend, imagesDir: string) {
-  return defineTool({
-    name: "generate_image",
-    description: "用本地 ComfyUI 根据画面描述生成图片，返回图片本地路径（随后交给 reply_qq 的 image_paths）。仅用于纯生图请求。",
-    parameters: Type.Object({
-      prompt: Type.String({ description: "用户的原文画面描述（保留原语言，不翻译、不扩写；生图模型原生理解中文）" }),
-    }),
-    replay: "unsafe",
-    execute: async (args, api, context) => {
-      if (!(await claimBusinessCall(api, "generate_image", context))) {
-        return { output: [{ type: "text", text: BUSINESS_ALREADY_USED }], isError: true };
-      }
-      const doc = await api.snapshot(TicketDoc, api.conversationId, context);
-      const ticket = doc?.ticket || `adhoc-${Date.now()}`;
-      const outDir = ticketImageDir(imagesDir, ticket);
-      const started = Date.now();
-      try {
-        const files = await backend.generate(args.prompt, outDir, context.abortSignal);
-        log.info("generate_image done", { backend: backend.name, ms: Date.now() - started, files: files.length });
-        // 记录本会话产出的图片（realpath），reply_qq 只允许发送这些文件
-        const real = await Promise.all(files.map((f) => fs.realpath(f)));
-        await api.commit(async (tx) => {
-          const d = await tx.doc(TicketDoc, api.conversationId);
-          d.images = real;
-          d.imagePrompt = args.prompt;
-        }, context);
-        return { output: [{ type: "text", text: JSON.stringify({ image_paths: files }) }] };
-      } catch (err) {
-        const msg = (err as Error).message;
-        log.warn("generate_image failed", { backend: backend.name, ms: Date.now() - started, error: msg });
-        const kind = /超时|timeout|abort/i.test(msg) ? "生图超时" : /ECONNREFUSED|fetch failed|ENOTFOUND|connect/i.test(msg) ? "生图服务不可用" : "生图失败";
-        return { output: [{ type: "text", text: `${kind}，请用一句话告知用户。` }], isError: true };
-      }
-    },
-  });
+/** 生图失败类别（决定固定回复模板）。 */
+export type ImageFailure = "unavailable" | "timeout" | "refused" | "failed";
+
+export function classifyImageError(err: unknown): ImageFailure {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/超时|timeout|timed out|abort/i.test(msg)) return "timeout";
+  if (/ECONNREFUSED|ECONNRESET|fetch failed|ENOTFOUND|EHOSTUNREACH|connect|不可用|unavailable|ENOENT|spawn/i.test(msg)) return "unavailable";
+  if (/nsfw|safety|content.?(policy|filter|blocked)|refus|拒绝|违规|敏感/i.test(msg)) return "refused";
+  return "failed";
+}
+
+/** 按环境变量构造生图后端（agent 主进程与 image_gen MCP 共用同一规则）。 */
+export interface ImageBackendConfig {
+  mode: "mcp" | "http";
+  /** http 模式直连的 ComfyUI；mcp 模式传给 comfy-mcp 的 COMFYUI_URL（须为 loopback，见 loopback-proxy.ts） */
+  comfyUrl: string;
+  mcpBin: string;
+  comfyBin: string;
+  timeoutMs: number;
+  checkpoint?: string;
+  workflowFile?: string;
+  promptNode?: string;
+  /** comfy-mcp 子进程环境的基础（默认 process.env） */
+  baseEnv?: NodeJS.ProcessEnv;
+}
+
+export function createImageBackend(c: ImageBackendConfig): ImageBackend {
+  const common = { timeoutMs: c.timeoutMs, checkpoint: c.checkpoint, workflowFile: c.workflowFile, promptNode: c.promptNode };
+  if (c.mode === "http") return new HttpImageBackend({ baseUrl: c.comfyUrl, ...common });
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(c.baseEnv ?? process.env)) if (v !== undefined) env[k] = v;
+  Object.assign(env, { COMFYUI_URL: c.comfyUrl, COMFY_BIN: c.comfyBin });
+  return new McpImageBackend({ command: c.mcpBin, env, ...common });
 }

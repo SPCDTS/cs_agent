@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { McpImageBackend, defaultWorkflow, parseToolResult, patchWorkflow } from "../../src/agent/tools/generate-image.js";
+import { McpImageBackend, defaultWorkflow, parseToolResult, patchWorkflow } from "../../src/agent/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "../../src/agent/loopback-proxy.js";
 import { FIXTURES, tmp } from "./helpers.js";
 

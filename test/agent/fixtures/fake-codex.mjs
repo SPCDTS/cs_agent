@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 // 假 codex：记录 argv/stdin 到 FAKE_CODEX_LOG，输出 JSONL，写 -o 文件。
-import { appendFileSync, writeFileSync } from "node:fs";
+// FAKE_CODEX_IMAGES=N：模拟 image_gen MCP，向 -c 注入的 IMAGE_TICKET_DIR 写 N 张 PNG 和一个非图片文件。
+// FAKE_CODEX_TEXT：覆盖回答正文。
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
+const PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64",
+);
 
 const argv = process.argv.slice(2);
 const out = argv[argv.indexOf("-o") + 1];
@@ -29,7 +37,15 @@ process.stdin.on("end", async () => {
   }
   emit({ type: "turn.started" });
   if (sleepMs) await new Promise((r) => setTimeout(r, sleepMs));
-  const text = `answer to: ${stdin.trim().split("\n").pop()}`;
+  const images = Number(process.env.FAKE_CODEX_IMAGES ?? 0);
+  const dirArg = argv.find((a) => a.startsWith("mcp_servers.image_gen.env.IMAGE_TICKET_DIR="));
+  if (images && dirArg) {
+    const dir = dirArg.slice(dirArg.indexOf("=") + 1).replace(/^"|"$/g, "");
+    mkdirSync(dir, { recursive: true });
+    for (let i = 0; i < images; i++) writeFileSync(path.join(dir, `img_${i}.png`), PNG);
+    writeFileSync(path.join(dir, "notes.txt"), "not an image file");
+  }
+  const text = process.env.FAKE_CODEX_TEXT ?? `answer to: ${stdin.trim().split("\n").pop()}`;
   emit({ type: "item.completed", item: { id: "item_1", type: "agent_message", text } });
   emit({ type: "turn.completed", usage: {} });
   writeFileSync(out, text);
