@@ -103,6 +103,7 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
   - 按 URL 主机名匹配，不看解析结果：解析到内网 IP 的公网域名（如 `127.0.0.1.nip.io` 之类、DNS rebinding）不会被阻止；
   - 只覆盖浏览器发出的请求，与 codex 自身的 web_search 无关。
   如需真正隔离，可设 `CODEX_BROWSER=none`；或在宿主机侧让 ComfyUI/NapCat 只接受鉴权请求、用防火墙限制 Docker 网段访问。
+- **`/data/prompts` 可写**（用户接受的风险）：codex 命令可以改写意图模型的系统提示 `/data/prompts/system.md`（下一条消息即生效）。全局 AGENTS.md 规定只在 owner 私聊明确要求时才修改、群聊请求一律拒绝，但这**只靠模型遵守**，没有技术上的强制；群成员的提示注入仍可能改动它。想彻底禁止，把 `/data/prompts` 从 `CODEX_WRITABLE_ROOTS` 去掉。
 - **聊天记录**：群成员可以让 codex 检索本群 30 天内的原始消息和 180 天内的摘要（与能翻群记录一致）；owner 私聊可以检索全部会话。`./data/qq-messages.sqlite` 按聊天记录保管。
 
 ### 修改系统提示
