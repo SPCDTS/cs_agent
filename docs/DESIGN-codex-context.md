@@ -60,6 +60,16 @@ tool_timeout_sec = 15
 
 同一个库也供意图层读取（§4），不经 MCP，直接进程内访问。
 
+### 2.4 统一上下文（意图层与 codex 共用同一套）
+意图层与 codex 的"会话感知"来自**同一个存储、同一个格式化模块**，不再单独维护 interactions 表：
+- 机器人自己的回复作为 `is_self=1` 的消息行入库，并附带元数据列 `action`（generate_image / research+generate_image / ask_codex / fallback）、`detail`（生图最终英文提示词 / codex 推理强度）、`ticket`、`status`（处理中 / 已回复 / 失败）。"处理中"行在收到消息时就写入，回复后更新为已回复并补上正文摘要。
+- `src/context/store.ts`：唯一的读写入口（入库、撤回、衰老、`recent()`、`search()`、`message()`、访问过滤）。
+- `src/context/format.ts`：唯一的紧凑格式化器，输出 `HH:MM 昵称: 文本`，机器人行渲染为 `HH:MM [我] → 生图 prompt="..." → 已发送 1 张图` 或 `[我] → codex(high) → "摘要"`。
+- 消费方：
+  - 意图层：派发器在每条消息前调用 `recent(scope, window=120min, limit=5)` 注入上下文块；工具 `recent_context` / `search_history` 直接进程内调用同一模块。
+  - codex：`qq_context` MCP 服务是同一模块的 stdio 外壳，工具 `qq_recent` / `qq_search` / `qq_message` 一一对应，访问范围由 `QQ_ACCESS` 注入。
+- 效果：两层看到的历史内容、裁剪规则、字数上限完全一致；追问"把刚才那张图改成蓝色"时，意图层与 codex 看到的都是同一行 `[我] → 生图 prompt="..."`。
+
 ## 3. codex 执行层
 
 ### 3.1 单一线程
@@ -100,12 +110,8 @@ context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制�
 
 ## 4. 意图层
 
-### 4.1 会话感知（紧凑推送）
-派发器维护 `interactions` 表（`/data/agent.sqlite` 旁，或并入票据库）：
-`scope, ticket, time, user_text≤200, action ∈ {generate_image, research+generate_image, ask_codex, fallback}, detail, reply_excerpt≤120, image_count, status ∈ {处理中, 已回复, 失败}`。
-`detail`：生图存**最终英文提示词**；codex 存推理强度。
-
-每条新消息前注入（由派发器生成，不经模型）：
+### 4.1 会话感知（紧凑推送，数据与格式见 §2.4）
+派发器在每条新消息前从统一上下文存储取 `recent(scope, 120min, 5)` 注入（不经模型）：
 ```
 [近期交互 · 同一会话 · 最近 120 分钟内最多 5 条，旧→新]
 1. 22:41 De: 画一只狗 → 生图 prompt="a cute dog, photorealistic, ..." → 已发送 1 张图
@@ -140,6 +146,15 @@ context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制�
 守卫：`generate_image ≤1`、`ask_codex ≤1`、二者互斥；`web_search/fetch_page` 仅允许出现在 `generate_image` 之前；`reply_qq` 恰好 1 次。
 生图回复可用一句话说明参考了什么（"按今天决赛结果画了 X 队举杯"）。
 
+### 4.4 容器内浏览器（替代 egolite）
+已核实：ego (lite) 目前仅有 macOS 桌面版，Windows 为未开放的 closed beta，Linux 在路线图；没有 headless / 独立 CLI / Docker 模式，agent 通过 `ego-browser` 技能驱动桌面应用内的页面 JS 工具，协议未公开。它无法在 Linux 容器内运行，本机也未发现安装。
+
+本期方案：
+- **阅读型需求**（绝大多数）：意图层用 DeepSeek `fetch_page`（页面 → Markdown），codex 用 `web_search = "live"`。不需要浏览器。
+- **交互型需求**（JS 渲染页、点击、登录态）：给 codex 配 `@playwright/mcp`（headless Chromium，容器内安装，镜像约增 400 MB），注册为 `[mcp_servers.browser]`，`--headless --isolated`，无宿主机登录态。意图层不接浏览器。
+- egolite 推出 Linux/headless 版本后，可用同一个 `[mcp_servers.browser]` 槽位替换，AGENTS.md 中的浏览器使用纪律不变。
+- 开关：`CODEX_BROWSER=playwright|none`（默认 `none`，待你确认再开，避免无谓增大镜像）。
+
 ## 5. 配置项（新增）
 
 ```
@@ -156,6 +171,7 @@ INTENT_CONTEXT_WINDOW_MIN=120
 INTENT_CONTEXT_MAX_CHARS=1500
 WEB_SEARCH_MAX_PER_MESSAGE=2
 FETCH_MAX_PER_MESSAGE=2
+CODEX_BROWSER=none
 ```
 
 ## 6. 边界与隐私
@@ -167,7 +183,7 @@ FETCH_MAX_PER_MESSAGE=2
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
-2. **意图层会话感知**：interactions 表、上下文块、按 scope FIFO、`recent_context` / `search_history`、追问规则。测试：生图后"改成蓝色"复用提示词、codex 追问直通、超窗口不注入、同 scope 串行/跨 scope 并行。
+2. **意图层会话感知**：统一上下文模块（§2.4）接入派发器、上下文块、按 scope FIFO、`recent_context` / `search_history`、追问规则。测试：生图后"改成蓝色"复用提示词、codex 追问直通、超窗口不注入、同 scope 串行/跨 scope 并行。
 3. **联网检索 + 先查再画**：`web_search` / `fetch_page` 工具、状态机守卫、系统提示。测试：faux 路径、守卫拒绝非法序列、搜索失败降级为直接生图、429 重试与上限。
 
 每组完成后由 Codex 做一轮独立评审。
