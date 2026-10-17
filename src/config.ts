@@ -21,6 +21,8 @@ const bool = (def: boolean) =>
 
 const int = (def: number) => z.coerce.number().int().positive().default(def);
 
+export const DEFAULT_WORKFLOW = "qwen-image-2.1-turbo-api.json";
+
 const EnvSchema = z.object({
   NAPCAT_HTTP_URL: z.string().url().default("http://host.docker.internal:3000"),
   NAPCAT_WS_URL: z.string().url().default("ws://host.docker.internal:3001"),
@@ -35,6 +37,7 @@ const EnvSchema = z.object({
   COMFY_BIN: z.string().default("/opt/comfy/bin/comfy"),
   COMFY_CHECKPOINT: z.string().default(""),
   /** API 格式工作流文件；为空时 mcp 用 generate_image 默认模板，http 用内置 SD1.5 工作流 */
+  /** 未设置时为 ${DATA_DIR}/workflows/qwen-image-2.1-turbo-api.json（entrypoint 从 /app/workflows 播种，codex 可改）；旧的 /app/... 路径仍可显式设置 */
   COMFY_WORKFLOW_FILE: z.string().default(""),
   COMFY_PROMPT_NODE: z.string().default(""),
   /** mcp 模式下容器内 loopback 转发端口（comfy-cli 仅对 loopback 获取 object_info） */
@@ -69,6 +72,9 @@ const EnvSchema = z.object({
   CODEX_THREAD_MAX_DAYS: int(90),
   /** codex 浏览器 MCP：playwright（headless Chromium）| none */
   CODEX_BROWSER: z.enum(["playwright", "none"]).default("playwright"),
+  /** 由 entrypoint 写入 config.toml 的 [sandbox_workspace_write]：命令是否可联网、可写目录（逗号分隔绝对路径） */
+  CODEX_SANDBOX_NETWORK: bool(true),
+  CODEX_WRITABLE_ROOTS: z.string().default("/workspace,/data/prompts,/data/workflows"),
 
   DATA_DIR: z.string().default("/data"),
   WORKSPACE_DIR: z.string().default("/workspace"),
@@ -142,6 +148,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowUsers,
     codexHome: path.join(e.DATA_DIR, "codex"),
     imagesDir: path.join(e.DATA_DIR, "images"),
+    COMFY_WORKFLOW_FILE: e.COMFY_WORKFLOW_FILE || path.posix.join(e.DATA_DIR, "workflows", DEFAULT_WORKFLOW),
     owner: resolveOwner(e.QQ_OWNER, allowUsers),
   };
 }

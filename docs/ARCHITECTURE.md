@@ -174,7 +174,18 @@ LOG_LEVEL=info
 | 凭据 | pi-ai openai-codex 凭据 `{type:"oauth", access, refresh, expires, accountId}` ← Codex `auth.json` 的 `tokens.*`；刷新后按 Codex 格式写回同一文件 | 容器内 codex 与 agent 共用一份 |
 | 默认意图模型 | `deepseek/deepseek-flash`（DEEPSEEK_API_KEY 或别名 DEEPSEEK_APIKEY）；`openai-codex/gpt-6-luna` 仍可选 | 意图识别任务简单，改用 DeepSeek API key，不占 ChatGPT 额度 |
 | codex 模型与推理强度 | 默认 `gpt-6.1-sol`；`ask_codex.reasoning_effort` 由意图模型按请求选 `low…max`，以 `-c model_reasoning_effort=…` 逐轮覆盖 | 简单问题不必用高推理强度，复杂任务按需提高 |
-| 新增环境变量 | `COMFY_MODE`、`COMFY_MCP_BIN`、`COMFY_BIN`、`COMFY_CHECKPOINT`、`COMFY_WORKFLOW_FILE`、`COMFY_PROMPT_NODE`、`COMFY_LOOPBACK_PORT`、`CODEX_BIN`、`CODEX_SANDBOX`、`AGENT_THINKING_LEVEL`、`AGENT_CONCURRENCY`、`HEALTH_PORT`、`HEALTH_HOST` | 见 `.env.example` |
+| 统一上下文消息库（设计 v2 §2.1/§2.4） | `src/context/store.ts`：`/data/qq-messages.sqlite`（WAL），`messages` / `summaries` + trigram FTS5（触发器同步）；2 字中文词用 `LIKE` 回退全表扫描，≥3 字走 trigram 索引；所有读取带 `Access` 过滤；`format.ts` 为意图层与 MCP 共用的唯一格式化器（非今天的行加 `MM-DD`，MCP 输出加 `#message_id`） | 设计稿 §2；trigram 对 <3 字的 MATCH 无结果 |
+| QQBridge 入库事件 | `types.ts` 新增 `raw`（允许群全部消息 + 允许用户私聊，先于 `message`）与 `recall`（`group_recall` / `friend_recall`）事件；监听器异常转为 `error` 事件不影响触发 | 消息库需要不触发的群消息 |
+| 机器人回复行 | 派发器 admit 时 `recordPending`（`处理中`），终态后按 `TicketDoc.imagePrompt` / `codexEffort` / `replyText` / `replyImages` 调 `completeReply`；兜底、uncertain 或业务工具失败记 `失败`；QQ 回复的 message_id 替换占位 id | 意图层与 codex 看到同一行 `[我] → …` |
+| 衰老任务 | `src/context/aging.ts`：每日本地 `HISTORY_SUMMARY_HOUR` 点；`models.completeSimple` 直调意图模型生成日摘要；已结束自然周折叠为周摘要（仅 1 天时直接复用）；`meta.aging_last_run` 早于 24h 时启动补跑 | 设计稿 §2.2；"满 7 天"实现为"自然周结束" |
+| qq_context MCP | `src/mcp/qq-context.ts`（低层 `Server` + stdio），只读连接；范围只来自 `QQ_ACCESS`，缺失/非法时所有工具返回错误文本 | 设计稿 §2.3 |
+| ask_codex 注入 | 每轮 `-c mcp_servers.qq_context.env.QQ_ACCESS="…"`（群→本群、owner 私聊→`all`、其他私聊→本人）；头部改为 §3.2 的 `[来源]` / `[引用]` 两行；`TZ` 加入 codex 子进程环境白名单 | 设计稿 §3.2 |
+| codex 线程安全阀 | resume 前检查 rollout 文件大小与线程年龄（`codex-session.json` 新增 `created_at`，旧记录用 `updated_at`），超限新建线程并记 `codex thread rotated` | 设计稿 §3.1 |
+| 受管 config.toml | entrypoint 写入 `web_search`、`[tools.web_search]`、`[mcp_servers.qq_context]`（env `DATA_DIR`、`QQ_CONTEXT_MAX_CHARS`）与可选 `[mcp_servers.browser]`；枚举/路径值经 `toml_enum` / `toml_path` 校验 | 设计稿 §3.4、§4.4 |
+| 容器内浏览器 | 镜像全局安装 `@playwright/mcp@0.0.83` + Chromium（`/opt/pw-browsers`，`--with-deps`）；codex 以 `--headless --isolated --browser chromium --blocked-origins <宿主机/内网阻止列表>` 启动，显式 `--sandbox` 开启 Chromium 沙箱（需 seccomp=unconfined；`PLAYWRIGHT_NO_SANDBOX=1` 关闭） | egolite 不可容器化（设计稿 §4.4）；浏览器 MCP 不受 codex 沙箱约束，阻止列表不拦重定向/DNS 指向内网（DEPLOY 残余风险） |
+| codex 命令沙箱 | 受管 config.toml 写 `[sandbox_workspace_write] network_access`（`CODEX_SANDBOX_NETWORK`，默认 true）与 `writable_roots`（`CODEX_WRITABLE_ROOTS`，默认 `/workspace,/data/prompts,/data/workflows`，拒绝 `/data`、`/data/codex*`、`/data/images*`、`*.sqlite`）；entrypoint 缺失时从 `/app/workflows` 播种 `/data/workflows`；`COMFY_WORKFLOW_FILE` 默认改为 `/data/workflows/…` | 用户 2026-10-18 决定：命令需联网，codex 可改项目自有内容；compose `seccomp=unconfined` 才能运行 bwrap |
+| AGENTS.md 版本化 | 模板首行 `<!-- cs-agent-agents-template v2 -->`；无文件、旧版标记或与 v1 全文相同（忽略 CRLF）时写入，其余保持不动 | 升级旧模板而不覆盖运维修改 |
+| 新增环境变量 | `COMFY_MODE`、`COMFY_MCP_BIN`、`COMFY_BIN`、`COMFY_CHECKPOINT`、`COMFY_WORKFLOW_FILE`、`COMFY_PROMPT_NODE`、`COMFY_LOOPBACK_PORT`、`CODEX_BIN`、`CODEX_SANDBOX`、`AGENT_THINKING_LEVEL`、`AGENT_CONCURRENCY`、`HEALTH_PORT`、`HEALTH_HOST`；设计 v2 第 1 组：`QQ_OWNER`、`HISTORY_RAW_DAYS`、`HISTORY_SUMMARY_DAYS`、`HISTORY_SUMMARY_HOUR`、`QQ_CONTEXT_MAX_CHARS`、`CODEX_WEB_SEARCH`、`CODEX_WEB_SEARCH_CONTEXT`、`CODEX_ROLLOUT_MAX_MB`、`CODEX_THREAD_MAX_DAYS`、`CODEX_BROWSER` | 见 `.env.example` |
 
 已实测：容器内 `codex exec`（OAuth + workspace-write 沙箱）正常；容器内经 mcp 与 http 两条路径均生成真实 PNG（约 10–17 s）。
 
