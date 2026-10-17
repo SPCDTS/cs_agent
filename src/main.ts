@@ -9,14 +9,15 @@ import { createQQBridge } from "./qq/index.js";
 import type { QQBridge } from "./qq/types.js";
 import { createAgentModels, openHarness, resolveThinkingLevel } from "./agent/harness.js";
 import { createCsAgentExtension } from "./agent/extension.js";
-import { ensureAgentPrompt, warnDeprecatedSystemPrompt } from "./agent/prompt.js";
+import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
+import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
 import { Dispatcher } from "./agent/dispatch.js";
 import { CodexRunner, effectiveWritableRoots, ensureWorkspaceAgentsMd, writeGlobalAgentsMd } from "./agent/codex-runner.js";
 import { createImageBackend } from "./agent/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
 import { createTasks } from "./agent/tasks.js";
 import { CodexBackend } from "./agent/backends/codex.js";
-import { createBackendSelector, PiBackendStub } from "./agent/backends/select.js";
+import { createBackendSelector, PiBackend } from "./agent/backends/select.js";
 import { ContextStore } from "./context/store.js";
 import { startAgingScheduler } from "./context/aging.js";
 
@@ -60,7 +61,7 @@ async function main(): Promise<void> {
   if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md stub", { dir: cfg.WORKSPACE_DIR });
   // v2 的系统提示 ${DATA_DIR}/prompts/system.md 已弃用（规则分流不经模型）：存在时记一行弃用日志，不删除
   warnDeprecatedSystemPrompt(cfg.DATA_DIR);
-  await ensureAgentPrompt(cfg.DATA_DIR);
+  await new PiPromptLoader(cfg.DATA_DIR).read();
 
   // 统一上下文消息库（${DATA_DIR}/qq-messages.sqlite）：意图层与 codex 的 qq_context MCP 共用
   const store = new ContextStore(cfg.DATA_DIR);
@@ -113,13 +114,19 @@ async function main(): Promise<void> {
     });
   }
 
-  // 执行 agent 后端（§4.3）：codex（默认）与 pi（第 3 组，占位）
+  const pi = await PiBackend.open({
+    dataDir: cfg.DATA_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
+    thinkingLevel, store, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
+    reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
+    maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
+  });
+  // 执行 agent 后端（§4.3）：codex（默认）与 pi 长期会话。
   const backends = createBackendSelector({
     defaultBackend: cfg.AGENT_BACKEND,
     overrides: cfg.backendOverrides,
     backends: {
       codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, ticketsDir: cfg.ticketsDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT }),
-      pi: new PiBackendStub(),
+      pi,
     },
   });
   const tasks = createTasks({
@@ -232,7 +239,8 @@ async function main(): Promise<void> {
       checks.codex && typeof checks.codex === "object" && "threads" in checks.codex
         ? { ...checks.codex, threads: await codex.readThreadIds().catch(() => null) }
         : checks.codex;
-    const body = { ok: st.ws_connected, ws_connected: st.ws_connected, bridge: st, ...checks, codex: codexCheck };
+    const body = { ok: st.ws_connected, ws_connected: st.ws_connected, bridge: st, ...checks, codex: codexCheck,
+      pi: { threads: await pi.readThreadIds().catch(() => null) } };
     res.writeHead(st.ws_connected ? 200 : 503, { "Content-Type": "application/json" }).end(JSON.stringify(body));
   });
   server.listen(cfg.HEALTH_PORT, cfg.HEALTH_HOST, () => log.info("healthz listening", { port: cfg.HEALTH_PORT }));
@@ -248,6 +256,7 @@ async function main(): Promise<void> {
     aging.stop();
     await bridge!.stop().catch(() => undefined);
     await harness.close(ctx).catch(() => undefined);
+    await pi.close().catch(() => undefined);
     try {
       store.close();
     } catch {

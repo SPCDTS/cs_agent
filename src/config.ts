@@ -4,6 +4,7 @@ import { resolveOwner } from "./context/access.js";
 import { parseImagePrefixes } from "./agent/router.js";
 import { parseBackendOverrides } from "./agent/backends/select.js";
 import type { BackendName } from "./agent/backends/types.js";
+import { DEFAULT_COMPACTION_POLICY } from "@earendil-works/pi-durable";
 
 /** 逗号分隔列表；空串 → []。 */
 const list = z
@@ -66,10 +67,13 @@ const EnvSchema = z.object({
   AGENT_CONCURRENCY: int(2),
   /** 规则分流的生图前缀（逗号分隔，逐字匹配）；命中后前缀之后的全部文本作为提示词 */
   IMAGE_PREFIXES: z.string().default("奶龙:,奶龙："),
-  /** 执行 agent 后端：codex | pi（pi 为第 3 组，当前占位） */
+  /** 执行 agent 后端：codex | pi */
   AGENT_BACKEND: z.enum(["codex", "pi"]).default("codex"),
   /** 按 scope 覆盖后端：group:<群号>=pi,private:<QQ号>=codex */
   AGENT_BACKEND_OVERRIDES: z.string().default(""),
+  PI_TURN_TIMEOUT_SEC: int(300),
+  PI_COMPACTION_RESERVE_TOKENS: int(DEFAULT_COMPACTION_POLICY.reserveTokens),
+  PI_COMPACTION_BACKGROUND_TOKENS: z.coerce.number().int().min(0).default(DEFAULT_COMPACTION_POLICY.backgroundTokens),
 
   /** owner QQ 号（私聊可检索全部会话历史）；留空 = QQ_ALLOW_USERS 的第一项 */
   QQ_OWNER: z.string().regex(/^\d*$/, "QQ_OWNER 必须是 QQ 号").default(""),

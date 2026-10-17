@@ -4,6 +4,7 @@
  */
 import { isScope } from "../../context/access.js";
 import { BACKEND_NAMES, type AgentBackend, type BackendName } from "./types.js";
+export { PiBackend } from "./pi.js";
 
 export function isBackendName(v: unknown): v is BackendName {
   return typeof v === "string" && (BACKEND_NAMES as readonly string[]).includes(v);
@@ -29,7 +30,7 @@ export function backendNameFor(scope: string, defaultBackend: BackendName, overr
 
 export const PI_NOT_IMPLEMENTED = "pi backend not implemented yet (group 3)";
 
-/** pi 后端占位（第 3 组实现）：选中时每次调用都抛错，agent 任务回复失败模板。 */
+/** @deprecated 仅保留旧版测试兼容；生产入口注册真正的 PiBackend。 */
 export class PiBackendStub implements AgentBackend {
   readonly name = "pi" as const;
   async handle(): Promise<never> {
