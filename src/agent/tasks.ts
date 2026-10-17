@@ -98,7 +98,7 @@ async function replyPhase<S extends { phase: string }>(
   const blocked = await blockedReason(deps, runtime, context, doc.ticket);
   if (blocked && blocked !== "ticket sent") return failBlocked(runtime, context, doc.ticket, blocked, "reply");
   try {
-    const res = await deps.getBridge().reply(doc.ticket, text, images);
+    const res = await deps.getBridge().reply(doc.ticket, text, images, { signal: runtime.signal });
     await cleanupTicketDir(deps, doc.ticket);
     await runtime.commit(async (tx) => {
       const d = await tx.doc(TicketDoc, runtime.conversationId);
@@ -145,6 +145,7 @@ async function cleanupTicketDir(deps: TaskDeps, ticket: string): Promise<void> {
  * 返回不能继续的原因；undefined 表示可以继续。
  */
 async function blockedReason(deps: TaskDeps, runtime: AnyRuntime, context: Context, ticket: string): Promise<string | undefined> {
+  runtime.signal.throwIfAborted();
   const entry = (await runtime.snapshot(DispatchDoc, context))?.pending[ticket];
   if (!entry) return "dispatch entry missing";
   if (entry.givenUp) return "dispatch gave up";

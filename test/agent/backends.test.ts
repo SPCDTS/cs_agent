@@ -1,8 +1,9 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CODEX_LAST_FILE, CodexBackend, MAX_CODEX_TURNS, ticketWorkDir } from "../../src/agent/backends/codex.js";
-import { tmp } from "./helpers.js";
-import { describe, expect, it } from "vitest";
+import { FIXTURES, tmp } from "./helpers.js";
+import { describe, expect, it, vi } from "vitest";
+import { CodexRunner, type AskOptions } from "../../src/agent/codex-runner.js";
 import { backendNameFor, createBackendSelector, parseBackendOverrides, PI_NOT_IMPLEMENTED, PiBackendStub } from "../../src/agent/backends/select.js";
 import type { AgentBackend } from "../../src/agent/backends/types.js";
 
@@ -38,7 +39,8 @@ describe("backend selection (§4.3)", () => {
       const asks: { outputFile?: string }[] = [];
       const order: string[] = [];
       const runner = {
-        ask: async (_p: string, o: { outputFile?: string }) => {
+        ask: async (_p: string, o: AskOptions) => {
+          await o.onAcquired?.();
           order.push("ask");
           asks.push(o);
           return "fresh answer";
@@ -91,6 +93,44 @@ describe("backend selection (§4.3)", () => {
       const root = path.resolve("/data/tickets");
       expect(ticketWorkDir(root, "a/../b")).toBe(path.join(root, "a____b"));
       expect(() => ticketWorkDir(root, "")).toThrow();
+    });
+
+    it("two restarts while queued keep attempts at zero, then the ticket runs once (F5)", async () => {
+      const dir = tmp("cs-codex-queued-");
+      const logFile = path.join(dir, "calls.jsonl");
+      let turn: { outFile: string; attempts: number } | undefined;
+      const persistTurn = vi.fn(async (state: { outFile: string; attempts: number }) => { turn = state; });
+      const makeRunner = (sleep: string) => new CodexRunner({
+        command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
+        codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "ws"),
+        threadsFile: path.join(dir, "threads.json"), sandbox: "workspace-write", timeoutMs: 120_000,
+        env: { FAKE_CODEX_LOG: logFile, FAKE_CODEX_SLEEP_MS: sleep },
+      });
+      for (let restart = 0; restart < 2; restart++) {
+        const runner = makeRunner("60000");
+        const head = new AbortController();
+        const waiting = new AbortController();
+        const long = runner.ask("long turn", { threadKey: "owner", signal: head.signal }).catch(() => undefined);
+        await vi.waitFor(() => {
+          expect(existsSync(logFile)).toBe(true);
+          expect(readFileSync(logFile, "utf8").trim().split("\n")).toHaveLength(restart + 1);
+        });
+        const ask = vi.spyOn(runner, "ask");
+        const backend = new CodexBackend({ runner, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets") });
+        const queued = backend.handle(req, { signal: waiting.signal, onEvent: () => undefined, turn, persistTurn }).catch(() => undefined);
+        await vi.waitFor(() => expect(ask).toHaveBeenCalledOnce());
+        expect(turn?.attempts ?? 0).toBe(0);
+        waiting.abort();
+        head.abort();
+        await Promise.all([long, queued]);
+        expect(persistTurn).not.toHaveBeenCalled();
+      }
+      const backend = new CodexBackend({ runner: makeRunner("0"), imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets") });
+      await backend.handle(req, { signal: new AbortController().signal, onEvent: () => undefined, turn, persistTurn });
+      expect(turn?.attempts).toBe(1);
+      expect(persistTurn).toHaveBeenCalledOnce();
+      const starts = readFileSync(logFile, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(c => c.phase === "start");
+      expect(starts.filter(c => c.stdin.endsWith("\nhi"))).toHaveLength(1);
     });
   });
 

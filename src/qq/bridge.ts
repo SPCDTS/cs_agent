@@ -315,19 +315,19 @@ class Bridge extends EventEmitter implements QQBridge {
     return this.requireStore().listPending(limit, afterSeq);
   }
 
-  async reply(ticket: string, text: string, imagePaths: string[] = []): Promise<ReplyResult> {
+  async reply(ticket: string, text: string, imagePaths: string[] = [], opts?: { signal?: AbortSignal }): Promise<ReplyResult> {
     validateText(text);
     if (!isTicketId(ticket)) throw new Error("回复凭据无效。");
     if (this.locks.has(ticket)) throw new Error("此票据正在回复中，请勿重复发送。");
     this.locks.add(ticket);
     try {
-      return await this.replyLocked(ticket, text, imagePaths);
+      return await this.replyLocked(ticket, text, imagePaths, opts?.signal);
     } finally {
       this.locks.delete(ticket);
     }
   }
 
-  private async replyLocked(ticket: string, text: string, imagePaths: string[]): Promise<ReplyResult> {
+  private async replyLocked(ticket: string, text: string, imagePaths: string[], signal?: AbortSignal): Promise<ReplyResult> {
     const store = this.requireStore();
     const record = store.get(ticket);
     if (!record) throw new Error("回复凭据不存在。");
@@ -343,10 +343,13 @@ class Bridge extends EventEmitter implements QQBridge {
     numericId(record.user_id);
     const images = prepareImages(imagePaths, this.config.imageRoot);
 
+    signal?.throwIfAborted();
     const login = await this.client.call("get_login_info");
     if (stringField(login, "user_id") !== record.self_id) throw new Error("NapCat 当前登录账号与收到消息的账号不一致。");
 
+    signal?.throwIfAborted();
     if (!store.markSending(ticket)) throw new Error("票据状态已改变，可能已在其他进程发送，请勿重发。");
+    // sending 已落盘后必须完成发送；此后不传 signal，失败仍按 uncertain 处理。
     let data: unknown;
     try {
       data = await this.client.call(type === "group" ? "send_group_msg" : "send_private_msg", {
@@ -384,4 +387,3 @@ class Bridge extends EventEmitter implements QQBridge {
 export function createQQBridge(config: QQBridgeConfig, internals?: BridgeInternals): QQBridge {
   return new Bridge(config, internals);
 }
-

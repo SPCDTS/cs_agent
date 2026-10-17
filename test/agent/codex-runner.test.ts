@@ -327,6 +327,17 @@ describe("CodexRunner", () => {
     expect(recs.map((r) => r.phase)).toEqual(["start", "end", "start", "end", "start", "end"]);
     expect(recs.filter((r) => r.phase === "start").map((r) => r.stdin)).toEqual(["A", "B", "C"]);
   });
+
+  it("onAcquired failure prevents spawn; missing-session fallback invokes it once (F5)", async () => {
+    const { dir, runner, calls } = setup();
+    await expect(runner.ask("blocked", { onAcquired: async () => { throw new Error("commit failed"); } })).rejects.toThrow("commit failed");
+    expect(calls()).toEqual([]);
+    seedShared(dir, { thread_id: "missing-1" });
+    const onAcquired = vi.fn(async () => undefined);
+    await runner.ask("retry missing session", { onAcquired });
+    expect(onAcquired).toHaveBeenCalledOnce();
+    expect(calls().filter(c => c.phase === "start")).toHaveLength(2);
+  });
 });
 
 describe("owner / shared threads", () => {

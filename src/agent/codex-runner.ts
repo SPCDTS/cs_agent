@@ -89,6 +89,8 @@ export interface AskOptions {
    * 结束后保留（调用方据此判断回合是否已完成）。未设置时用临时目录并在结束后删除。
    */
   outputFile?: string;
+  /** 线程锁已获取且 signal 已检查，即将首次 spawn 时调用；排队不会消耗回合次数。 */
+  onAcquired?: () => Promise<void>;
 }
 
 /** 校验 outputFile：绝对路径且不含 ".." 段。 */
@@ -515,7 +517,7 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, outputFile }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, outputFile, onAcquired }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
     const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess), ...imageTicketDirArgs(imageTicketDir)];
     const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
@@ -536,12 +538,14 @@ export class CodexRunner {
         signal,
         undefined,
         outFile,
+        onAcquired,
       );
       if (r.code === 0) return this.result(r);
       if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
         // 已确认会话不存在：新建会话并覆盖记录
         log.warn("codex thread missing, starting fresh thread", { key, thread_id: id, stderr: r.stderrTail.slice(-300) });
         await this.writeThread(key, undefined);
+        onAcquired = undefined; // 同一次回合的失效线程回退不重复计数
       } else {
         // 其他失败（网络、鉴权、限流……）：保留会话 id，下次继续 resume
         log.warn("codex thread resume failed, keeping thread", { key, thread_id: id, code: r.code, stderr: r.stderrTail.slice(-300) });
@@ -558,6 +562,7 @@ export class CodexRunner {
         log.info("codex thread created", { key, thread_id: threadId });
       },
       outFile,
+      onAcquired,
     );
     if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
     return this.result(r);
@@ -579,6 +584,7 @@ export class CodexRunner {
     signal?: AbortSignal,
     onThreadId?: (threadId: string) => Promise<void>,
     outputFile?: string,
+    onAcquired?: () => Promise<void>,
   ): Promise<RunOutcome> {
     const tmpDir = outputFile ? undefined : await fs.mkdtemp(path.join(os.tmpdir(), "cs-codex-"));
     const outFile = outputFile ?? path.join(tmpDir!, "last.txt");
@@ -589,6 +595,9 @@ export class CodexRunner {
     if (!bin) throw new Error("CODEX_BIN 未配置");
     await fs.mkdir(this.opts.workspaceDir, { recursive: true });
 
+    signal?.throwIfAborted();
+    await onAcquired?.();
+    signal?.throwIfAborted();
     const child = spawn(bin, [...prefix, ...finalArgs], {
       cwd: this.opts.workspaceDir,
       env: { ...buildCodexEnv(this.opts.codexHome), ...this.opts.env },

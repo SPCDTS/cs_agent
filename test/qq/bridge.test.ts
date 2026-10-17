@@ -1,7 +1,8 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ReplyStore } from "../../src/qq/reply-store.js";
 import { createQQBridge, ticketIdFor, type InboundMessage, type QQBridge, type QQBridgeConfig } from "../../src/qq/index.js";
 import { FakeOneBot, groupEvent, privateEvent, SELF_ID, TOKEN, waitFor } from "./fake-onebot.js";
 
@@ -204,6 +205,53 @@ describe("dedupe and tickets", () => {
 });
 
 describe("reply", () => {
+  it("abort before login skips get_login_info and leaves the ticket pending (F4)", async () => {
+    const { ticket } = await triggerPrivate();
+    const before = server.calls.length;
+    const signal = AbortSignal.abort(new Error("aborted"));
+    await expect(bridge.reply(ticket, "answer", [], { signal })).rejects.toThrow("aborted");
+    expect(server.calls).toHaveLength(before);
+    expect(await bridge.getTicket(ticket)).toMatchObject({ status: "pending" });
+    expect((await bridge.getTicket(ticket))?.attempted_at).toBeUndefined();
+  });
+
+  it("abort during reply prep never marks sending; ticket stays pending (F4)", async () => {
+    const { ticket } = await triggerPrivate();
+    const controller = new AbortController();
+    server.override = c => {
+      if (c.action === "get_login_info") controller.abort(new Error("aborted"));
+      return undefined;
+    };
+    const mark = vi.spyOn(ReplyStore.prototype, "markSending");
+    try {
+      await expect(bridge.reply(ticket, "answer", [], { signal: controller.signal })).rejects.toThrow("aborted");
+      expect(mark).not.toHaveBeenCalled();
+      expect(await bridge.getTicket(ticket)).toMatchObject({ status: "pending" });
+      expect((await bridge.getTicket(ticket))?.attempted_at).toBeUndefined();
+      expect(server.sendCalls()).toHaveLength(0);
+    } finally {
+      mark.mockRestore();
+    }
+  });
+
+  it("abort immediately after markSending still sends and records sent (F4)", async () => {
+    const { ticket } = await triggerPrivate();
+    const controller = new AbortController();
+    const original = ReplyStore.prototype.markSending;
+    const mark = vi.spyOn(ReplyStore.prototype, "markSending").mockImplementation(function (this: ReplyStore, id) {
+      const marked = original.call(this, id);
+      controller.abort();
+      return marked;
+    });
+    try {
+      await expect(bridge.reply(ticket, "answer", [], { signal: controller.signal })).resolves.toMatchObject({ already_sent: false });
+      expect(server.sendCalls()).toHaveLength(1);
+      expect((await bridge.getTicket(ticket))?.status).toBe("sent");
+    } finally {
+      mark.mockRestore();
+    }
+  });
+
   it("sends private reply, then returns already_sent on repeat", async () => {
     const { ticket } = await triggerPrivate();
     const result = await bridge.reply(ticket, "answer");

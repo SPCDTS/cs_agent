@@ -117,7 +117,7 @@ export interface QQBridge {
    * 幂等：sent 返回 already_sent=true；sending/uncertain 抛错且永不自动重试。
    * text 1-4000 字符，纯文本（QQ 不渲染 Markdown）；images 0-4 张，base64:// 发送。
    */
-  reply(ticket: string, text: string, imagePaths?: string[]): Promise<ReplyResult>;
+  reply(ticket: string, text: string, imagePaths?: string[], opts?: { signal?: AbortSignal }): Promise<ReplyResult>;
   getTicket(ticket: string): Promise<ReplyTicketRecord | null>;
   /** 列出仍为 pending 的票据（按 seq 升序，最多 limit 条，默认 200）；afterSeq 为分页游标（只取 seq 更大的），供启动时与派发索引对账 */
   listPendingTickets(limit?: number, afterSeq?: number): Promise<ReplyTicketRecord[]>;

@@ -84,16 +84,12 @@ export class CodexBackend implements AgentBackend {
       log.warn("codex turn interrupted", { ticket, attempts, will_retry: attempts < MAX_CODEX_TURNS });
       if (attempts >= MAX_CODEX_TURNS) throw new Error(`codex turn interrupted ${attempts} times; not asking again`);
     }
-    // 启动 codex 之前先持久化"回合已开始"
-    await ctx.persistTurn?.({ outFile, attempts: attempts + 1 });
-
     const before = await listFiles(dir);
     const prompt = buildCodexPrompt(req.source, req.text, {
       ...(req.time ? { time: req.time } : {}),
       ...(req.quote ? { quote: req.quote } : {}),
     });
     const started = Date.now();
-    ctx.onEvent({ type: "codex_start", thread: req.threadKey, effort: this.effort ?? "default", attempt: attempts + 1 });
     let text: string;
     try {
       text = await this.opts.runner.ask(prompt, {
@@ -103,6 +99,11 @@ export class CodexBackend implements AgentBackend {
         qqAccess: req.access,
         imageTicketDir: dir,
         outputFile: outFile,
+        onAcquired: async () => {
+          ctx.signal.throwIfAborted();
+          await ctx.persistTurn?.({ outFile, attempts: attempts + 1 });
+          ctx.onEvent({ type: "codex_start", thread: req.threadKey, effort: this.effort ?? "default", attempt: attempts + 1 });
+        },
       });
     } catch (err) {
       if (err instanceof CodexTimeoutError) throw new BackendTimeoutError(err.message);
