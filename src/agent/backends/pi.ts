@@ -1,3 +1,4 @@
+import { trace } from "../../obs/trace.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -181,6 +182,8 @@ export class PiBackend implements AgentBackend {
       if (bound?.ticket !== req.ticket) throw new Error("pi 在途请求与绑定不一致");
       deadline = bound.deadline;
     }
+    trace.event(req.ticket, "dispatched", { detail: { backend: "pi", conversation_key: req.threadKey, conversation: conv.id, recovered: !!known } });
+    if (known) trace.event(req.ticket, "recovered", { detail: { backend: "pi", request_id: requestId } });
     ctx.onEvent({ type: "pi_start", thread: req.threadKey, conversation: conv.id });
     return this.bounded(conv, deadline, ctx.signal, async waitContext => {
       const bound = await this.harness.snapshot(PiRequestDoc, conv.id, context);

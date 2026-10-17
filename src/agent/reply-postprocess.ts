@@ -1,3 +1,4 @@
+import { trace } from "../obs/trace.js";
 /**
  * 回复后处理（设计 §4.3，两后端统一）：
  * - sanitize（代码清洗）：去 Markdown 代码围栏行、标题符号、表格竖线与分隔行、加粗/行内代码标记；
@@ -75,6 +76,7 @@ export const RELAY_TIMEOUT_MS = 20_000;
 export type ReplyMode = "relay" | "direct";
 
 export interface PostprocessOptions {
+  ticket?: string;
   mode: ReplyMode;
   models?: Models;
   model?: Model<Api>;
@@ -90,13 +92,18 @@ export async function relayFormat(
   model: Model<Api>,
   timeoutMs = RELAY_TIMEOUT_MS,
   signal?: AbortSignal,
+  ticket?: string,
 ): Promise<string> {
+  const started = Date.now();
+  if (ticket) trace.event(ticket, "model_turn", { status: "started", detail: { operation: "relay", provider: model.provider, model: model.id } });
   const timeout = AbortSignal.timeout(timeoutMs);
   const msg = await models.completeSimple(
     model,
     { systemPrompt: RELAY_PROMPT, messages: [{ role: "user", content: text, timestamp: Date.now() }] },
     { signal: signal ? AbortSignal.any([timeout, signal]) : timeout, maxTokens: 8000 },
   );
+  if (ticket) trace.event(ticket, "model_turn", { status: ["error", "aborted"].includes(msg.stopReason) ? "failed" : "ok", durationMs: Date.now()-started,
+    detail: { operation: "relay", provider: msg.provider, model: msg.model, input_tokens: msg.usage?.input, output_tokens: msg.usage?.output, error: msg.errorMessage } });
   if (msg.stopReason === "error" || msg.stopReason === "aborted") throw new Error(msg.errorMessage || `relay ${msg.stopReason}`);
   const out = msg.content
     .map((c) => (c.type === "text" ? c.text : ""))
@@ -114,10 +121,11 @@ export async function postprocessReply(text: string, opts: PostprocessOptions): 
   if (opts.mode === "relay" && opts.models && opts.model) {
     const started = Date.now();
     try {
-      const formatted = await relayFormat(text, opts.models, opts.model, opts.timeoutMs, opts.signal);
+      const formatted = await relayFormat(text, opts.models, opts.model, opts.timeoutMs, opts.signal, opts.ticket);
       log.info("reply relay done", { ms: Date.now() - started, chars: formatted.length });
       return { text: sanitizeReply(formatted), relayed: true };
     } catch (err) {
+      if (opts.ticket) trace.event(opts.ticket, "fallback", { status: "failed", durationMs: Date.now()-started, detail: { operation: "relay", error: err, terminal: false } });
       log.warn("reply relay failed, sanitizing only", { ms: Date.now() - started, error: (err as Error).message });
     }
   }

@@ -1,3 +1,4 @@
+import { trace } from "../../obs/trace.js";
 import { imageRefsValue, validateReferences } from "../image-references.js";
 /**
  * codex 后端（设计 §4.4）：现有 CodexRunner 的适配。
@@ -78,6 +79,7 @@ export class CodexBackend implements AgentBackend {
     if (done !== undefined) {
       const images = await collectNewImages(dir, new Set());
       log.warn("codex turn already completed before restart; reusing its output", { ticket, chars: done.length, images: images.length });
+      trace.event(req.ticket, "recovered", { detail: { backend: "codex", reason: "saved_output" } });
       return { text: done, images };
     }
     const attempts = ctx.turn?.attempts ?? 0;
@@ -96,6 +98,7 @@ export class CodexBackend implements AgentBackend {
     let text: string;
     try {
       text = await this.opts.runner.ask(prompt + (refs.length ? "\n[本轮参考图]\n" + refs.join("\n") : ""), {
+        onJsonEvent: codexObserver(req.ticket),
         threadKey: req.threadKey === "owner" ? "owner" : "shared",
         signal: ctx.signal,
         ...(this.effort ? { reasoningEffort: this.effort } : {}),
@@ -106,13 +109,16 @@ export class CodexBackend implements AgentBackend {
         onAcquired: async () => {
           ctx.signal.throwIfAborted();
           await ctx.persistTurn?.({ outFile, attempts: attempts + 1 });
+          trace.event(req.ticket, "model_turn", { status: "started", detail: { backend: "codex", thread_key: req.threadKey, effort: this.effort, attempt: attempts + 1 } });
           ctx.onEvent({ type: "codex_start", thread: req.threadKey, effort: this.effort ?? "default", attempt: attempts + 1 });
         },
       });
     } catch (err) {
+      trace.event(req.ticket, "model_turn", { status: "failed", durationMs: Date.now() - started, detail: { backend: "codex", error: err } });
       if (err instanceof CodexTimeoutError) throw new BackendTimeoutError(err.message);
       throw err;
     }
+    trace.event(req.ticket, "model_turn", { durationMs: Date.now() - started, detail: { backend: "codex", thread_key: req.threadKey, effort: this.effort, raw_reply: text } });
     // codex 没写 -o 文件（只从 JSONL 拿到文本）时补写：输出文件是"回合已完成"的唯一标志
     if ((await readNonEmpty(outFile)) === undefined) {
       const tmp = `${outFile}.${process.pid}.tmp`;
@@ -130,4 +136,22 @@ export class CodexBackend implements AgentBackend {
     });
     return { text, images };
   }
+}
+
+/** JSONL 只提取白名单字段，不把原始事件（可能含凭据）存入观测库。 */
+export function codexObserver(ticket: string): (event: Record<string, unknown>) => void {
+  const starts = new Map<string, number>();
+  return event => {
+    const item = event.item as Record<string, unknown> | undefined;
+    if (event.type === "thread.started") trace.event(ticket, "dispatched", { detail: { backend: "codex", thread_id: event.thread_id } });
+    if (event.type === "turn.completed") trace.event(ticket, "model_usage", { detail: { backend: "codex", usage: event.usage } });
+    if (item?.type !== "mcp_tool_call") return;
+    const id = String(item.id ?? item.tool);
+    if (event.type === "item.started") starts.set(id, Date.now());
+    const done = event.type === "item.completed";
+    const duration = typeof item.duration_ms === "number" ? item.duration_ms : starts.has(id) ? Date.now() - starts.get(id)! : undefined;
+    trace.event(ticket, "tool:" + String(item.tool ?? item.name ?? "unknown"), { status: done ? (item.status === "failed" || item.error ? "failed" : "ok") : "started",
+      durationMs: done ? duration : undefined, detail: { backend: "codex", server: item.server, call_id: id, input: item.arguments, output: item.result, error: item.error } });
+    if (done) starts.delete(id);
+  };
 }

@@ -1,3 +1,5 @@
+import { trace } from "../obs/trace.js";
+import { observeImages } from "../obs/image.js";
 import path from "node:path";
 import { imageTimeoutMs } from "./image-options.js";
 import { validateReferences } from "./image-references.js";
@@ -15,7 +17,7 @@ import { validateReferences } from "./image-references.js";
  */
 import type { Context } from "@earendil-works/chord";
 import type { Api, Model, Models } from "@earendil-works/pi-ai";
-import { defineTask, type RunningTask, type TaskRuntime } from "@earendil-works/pi-durable";
+import { defineTask, type RunningTask, type TaskRuntime, type TaskDefinition } from "@earendil-works/pi-durable";
 import { accessForSource, accessToString } from "../context/access.js";
 import type { ContextStore } from "../context/store.js";
 import type { QQBridge } from "../qq/types.js";
@@ -115,6 +117,8 @@ async function replyPhase<S extends { phase: string }>(
       d.replyMessageId = res.message_id;
       return { status: "terminal", outcome: { status: "completed", result: { sent: true, already_sent: res.already_sent } } };
     }, context);
+    trace.event(doc.ticket, "reply_sent", { detail: { message_id: res.message_id, images: images.length, reply: text,
+      already_sent: res.already_sent, truncated: text.includes("…（内容过长，已截断）"), terminal: false } });
     log.info("reply sent", { ticket: short(doc.ticket), message_id: res.message_id, already_sent: res.already_sent, images: images.length });
   } catch (err) {
     rethrowIfAborted(runtime.signal, err);
@@ -179,6 +183,16 @@ async function abortTask(runtime: AnyRuntime, context: Context): Promise<void> {
   await runtime.commit(async () => ({ status: "terminal", outcome: { status: "aborted" } }), context);
 }
 
+/** 每次实际恢复/尝试均有独立阶段起止；检查点自身保持原事务。 */
+function phases<S extends { phase: string }>(handlers: TaskDefinition<TaskInput, S, TaskResult, object>["phases"]): typeof handlers {
+  return Object.fromEntries(Object.entries(handlers).map(([phase, handler]) => [phase, async (task: RunningTask<TaskInput, S, TaskResult>, runtime: Runtime<S>, context: Context) => {
+    const fn = handler as (task: RunningTask<TaskInput, S, TaskResult>, runtime: Runtime<S>, context: Context) => Promise<void>;
+    const doc = await ticketDoc(runtime, context);
+    const stage = phase === "lateImages" ? "late_images" : phase === "postprocess" ? "postprocess" : "phase:" + phase;
+    return trace.span(doc.ticket, stage, () => fn(task, runtime, context), { checkpoint: task.state.checkpoint });
+  }])) as typeof handlers;
+}
+
 export function createTasks(deps: TaskDeps) {
   type ImageRuntime = Runtime<ImageCheckpoint>;
 
@@ -216,7 +230,7 @@ export function createTasks(deps: TaskDeps) {
       const opts = doc.imageOptions ?? { prompt: doc.prompt ?? '' };
       const refs = await validateReferences(opts.reference_images ?? [], doc.source_images ?? [],
         path.join(path.dirname(deps.imagesDir), 'incoming', doc.ticket));
-      promptId = await deps.imageBackend.submit({ ...opts, reference_images: refs }, intent, runtime.signal);
+      promptId = await observeImages(deps.imageBackend, doc.ticket).submit({ ...opts, reference_images: refs }, intent, runtime.signal);
     } catch (err) {
       rethrowIfAborted(runtime.signal, err);
       const failure = classifyImageError(err);
@@ -274,7 +288,7 @@ export function createTasks(deps: TaskDeps) {
     const intent = doc.submitIntent ?? { attempt, filenamePrefix: imageFilenamePrefix(doc.ticket, attempt) };
     const dir = ticketImageDir(deps.imagesDir, doc.ticket);
     try {
-      const recovered = await deps.imageBackend.reconcile(intent, dir, runtime.signal, step =>
+      const recovered = await observeImages(deps.imageBackend, doc.ticket).reconcile(intent, dir, runtime.signal, step =>
         runtime.commit(async tx => {
           const d = await tx.doc(TicketDoc, runtime.conversationId);
           d.imageReconciliation = [...(d.imageReconciliation ?? []), { ...step, attempt }];
@@ -336,7 +350,7 @@ export function createTasks(deps: TaskDeps) {
     name: IMAGE_TASK,
     version: 1,
     initial: () => ({ phase: "submit" }),
-    phases: {
+    phases: phases<ImageCheckpoint>({
       submit: (task, runtime, context) => submitPhase(runtime, context),
       // v3 初版的单阶段生图（已落盘的旧任务可能停在这里）：按 submit 处理
       generate: (task, runtime, context) => submitPhase(runtime, context),
@@ -357,7 +371,7 @@ export function createTasks(deps: TaskDeps) {
             } else {
               const remaining = (job.deadline ?? runtime.now() + imageTimeoutMs(doc.imageOptions ?? { prompt: doc.prompt ?? 'recovery' }, deps.imageTimeoutCapMs ?? 300_000)) - runtime.now();
               if (remaining <= 0) throw new Error('生图超时');
-              await deps.imageBackend.collect(job.prompt_id, dir, AbortSignal.any([runtime.signal, AbortSignal.timeout(Math.ceil(remaining))]), doc.imageOptions);
+              await observeImages(deps.imageBackend, doc.ticket).collect(job.prompt_id, dir, AbortSignal.any([runtime.signal, AbortSignal.timeout(Math.ceil(remaining))]), doc.imageOptions);
               images = await collectNewImages(dir, new Set());
             }
             // 只认票据目录里通过校验（大小、魔数）的新图片；一张都没有即生图失败
@@ -388,7 +402,7 @@ export function createTasks(deps: TaskDeps) {
           return { text: r ? r.message ?? IMAGE_FAILURE_REPLIES[r.failure] : IMAGE_FAILURE_REPLIES.failed, images: [] };
         });
       },
-    },
+    }),
     abort: (_task, runtime, context) => abortTask(runtime, context),
   });
 
@@ -396,7 +410,7 @@ export function createTasks(deps: TaskDeps) {
     name: AGENT_TASK,
     version: 1,
     initial: () => ({ phase: "handle" }),
-    phases: {
+    phases: phases<AgentCheckpoint>({
       handle: async (_task, runtime, context) => {
         const doc = await ticketDoc(runtime, context);
         let result: AgentResult | undefined = doc.agentResult;
@@ -420,7 +434,7 @@ export function createTasks(deps: TaskDeps) {
             if (doc.image_error) throw new Error(doc.image_error);
             const backend = deps.backends.select(scope);
             backendName = backend.name;
-            const res = await backend.handle(
+            const res = await trace.span(doc.ticket, "backend:" + backend.name, () => backend.handle(
               {
                 ticket: doc.ticket,
                 scope,
@@ -449,7 +463,7 @@ export function createTasks(deps: TaskDeps) {
                     return undefined;
                   }, context),
               },
-            );
+            ), { backend: backend.name }, res => ({ raw_reply: res.text, images: res.images }));
             result = { ok: true, backend: backendName, text: res.text, images: [...(res.images ?? [])].slice(0, 4) };
           } catch (err) {
             rethrowIfAborted(runtime.signal, err);
@@ -507,11 +521,11 @@ export function createTasks(deps: TaskDeps) {
               const signal = AbortSignal.any([runtime.signal, AbortSignal.timeout(Math.ceil(remaining))]);
               try {
                 if (!job.prompt_id) throw new UnknownJobError("intent");
-                await deps.imageBackend.collect(job.prompt_id, callDir, signal, job.options);
+                await observeImages(deps.imageBackend, doc.ticket).collect(job.prompt_id, callDir, signal, job.options);
               } catch (err) {
                 rethrowIfAborted(runtime.signal, err);
                 if (!(err instanceof UnknownJobError)) throw err;
-                await deps.imageBackend.reconcile({ filenamePrefix: job.filenamePrefix,
+                await observeImages(deps.imageBackend, doc.ticket).reconcile({ filenamePrefix: job.filenamePrefix,
                   count: job.options.count ?? 1, imageOptions: job.options }, callDir, signal, step =>
                   runtime.commit(async tx => {
                     const j = (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!;
@@ -568,12 +582,15 @@ export function createTasks(deps: TaskDeps) {
         if (draft === undefined && doc.agentResult?.ok) {
           const mode: ReplyMode = doc.agentResult.backend === "codex" ? deps.codexReplyMode : "direct";
           const out = await postprocessReply(doc.agentResult.text, {
+            ticket: doc.ticket,
             mode,
             ...(deps.models ? { models: deps.models } : {}),
             ...(deps.relayModel ? { model: deps.relayModel } : {}),
             signal: runtime.signal,
           });
           rethrowIfAborted(runtime.signal, new Error("aborted"));
+          trace.event(doc.ticket, "postprocess", { detail: { raw_reply: doc.agentResult.text, sent_text: out.text, relayed: out.relayed,
+            truncated: out.text.includes("…（内容过长，已截断）") } });
           draft = out.text;
         }
         await runtime.commit(async (tx) => {
@@ -591,7 +608,7 @@ export function createTasks(deps: TaskDeps) {
           const images = [...new Set([...(r?.ok ? r.images : []), ...late.flatMap(job => job.result?.ok ? job.result.images : [])])].slice(0, 4);
           return { text, images };
         }),
-    },
+    }),
     abort: (_task, runtime, context) => abortTask(runtime, context),
   });
 

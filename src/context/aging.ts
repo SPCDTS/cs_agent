@@ -1,3 +1,4 @@
+import { trace } from "../obs/trace.js";
 /**
  * 聊天记录衰老任务（设计 §2.2）：每天本地 HISTORY_SUMMARY_HOUR 点（容器默认 UTC，设 TZ 可改）执行：
  * 1. 日摘要：每个 scope 今天之前、≥5 条且未被摘要覆盖的日子 → ≤400 字摘要（意图模型，pi-ai 直调）；
@@ -69,6 +70,8 @@ async function summarize(opts: AgingOptions, systemPrompt: string, input: string
     { systemPrompt, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
     { signal: AbortSignal.timeout(MODEL_TIMEOUT_MS), maxTokens: 2000 },
   );
+  trace.event("@aging", "model_turn", { status: msg.stopReason === "error" ? "failed" : "ok", detail: {
+    provider: msg.provider, model: msg.model, input_tokens: msg.usage?.input, output_tokens: msg.usage?.output } });
   return textOf(msg).slice(0, SUMMARY_MAX + 100);
 }
 
@@ -153,10 +156,12 @@ export function startAgingScheduler(opts: AgingOptions): { stop(): void; runNow(
     if (running) return running;
     running = Promise.resolve().then(() => opts.cleanup?.()).then(() => runAging(opts))
       .then((r) => {
+        trace.event("@aging", "aging", { status: r.failed ? "failed" : "ok", durationMs: r.ms, detail: r });
         log.info("history aging done", { ...r });
         return r;
       })
       .catch((err: unknown) => {
+        trace.event("@aging", "aging", { status: "failed", detail: { error: err } });
         log.error("history aging failed", { error: err });
         return undefined;
       })

@@ -77,6 +77,7 @@ export function threadKeyForSource(source: TicketSource | undefined, owner: stri
 }
 
 export interface AskOptions {
+  onJsonEvent?: (event: Record<string, unknown>) => void;
   /** 使用哪个 codex 线程，默认 shared */
   threadKey?: ThreadKey;
   signal?: AbortSignal;
@@ -523,7 +524,7 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
     const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess), ...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)];
     const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
@@ -545,6 +546,7 @@ export class CodexRunner {
         undefined,
         outFile,
         onAcquired,
+        onJsonEvent,
       );
       if (r.code === 0) return this.result(r);
       if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
@@ -569,6 +571,7 @@ export class CodexRunner {
       },
       outFile,
       onAcquired,
+      onJsonEvent,
     );
     if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
     return this.result(r);
@@ -591,6 +594,7 @@ export class CodexRunner {
     onThreadId?: (threadId: string) => Promise<void>,
     outputFile?: string,
     onAcquired?: () => Promise<void>,
+    onJsonEvent?: (event: Record<string, unknown>) => void,
   ): Promise<RunOutcome> {
     const tmpDir = outputFile ? undefined : await fs.mkdtemp(path.join(os.tmpdir(), "cs-codex-"));
     const outFile = outputFile ?? path.join(tmpDir!, "last.txt");
@@ -617,6 +621,7 @@ export class CodexRunner {
     const handle = (line: string) => {
       const had = outcome.threadId;
       this.onEvent(line, outcome);
+      try { onJsonEvent?.(JSON.parse(line)); } catch { /* 观测不影响 JSONL 执行 */ }
       if (!had && outcome.threadId && onThreadId && !persisted) {
         persisted = onThreadId(outcome.threadId).catch((err) => log.error("persist codex session id failed", { error: err }));
       }

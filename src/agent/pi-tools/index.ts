@@ -1,5 +1,6 @@
+import { trace } from "../../obs/trace.js";
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, hook, section, ToolTask, type Harness } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, hook, section, ToolTask, GenerationTask, CompactionTask, type Harness } from "@earendil-works/pi-durable";
 import { parseAccess } from "../../context/access.js";
 import type { ContextStore } from "../../context/store.js";
 import { callQQContextTool } from "../../mcp/qq-context-server.js";
@@ -20,6 +21,11 @@ export interface PiToolsOptions {
 const output = (text: string) => ({ output: [{ type: "text" as const, text }] });
 
 export function createPiExtension(opts: PiToolsOptions) {
+  const started = new Map<number, number>();
+  const start = (id: number) => {
+    if (started.size >= 2048) started.delete(started.keys().next().value!);
+    started.set(id, Date.now());
+  };
   const web = opts.web ?? new DeepSeekWeb();
   const prompt = new PiPromptLoader(opts.dataDir);
   const history = (name: string, description: string, parameters: ReturnType<typeof Type.Object>) => defineTool({
@@ -35,10 +41,37 @@ export function createPiExtension(opts: PiToolsOptions) {
     name: "cs-pi",
     sections: [section("cs-pi", () => prompt.read(), { tag: false })],
     hooks: [
+      hook(CompactionTask, { beforeCompact: async (compact, api, context) => {
+        const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);
+        trace.event(bound?.ticket || "@pi", "compaction", { detail: { conversation: api.conversationId, reason: compact.reason, entries: compact.entries.length } });
+      } }),
+      hook(GenerationTask, {
+        beforeRequest: async (_request, api, context) => {
+          const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);
+          start(api.taskId);
+          if (bound?.ticket) trace.event(bound.ticket, "model_turn", { status: "started", detail: { backend: "pi", conversation: api.conversationId } });
+        },
+        afterResponse: async (message, api, context) => {
+          const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);
+          if (bound?.ticket) trace.event(bound.ticket, "model_turn", { status: ["error", "aborted"].includes(message.stopReason) ? "failed" : "ok",
+            durationMs: started.has(api.taskId) ? Date.now() - started.get(api.taskId)! : undefined,
+            detail: { backend: "pi", provider: message.provider, model: message.model, input_tokens: message.usage?.input,
+              output_tokens: message.usage?.output, cache_read_tokens: message.usage?.cacheRead, cache_write_tokens: message.usage?.cacheWrite,
+              error: message.errorMessage, reply: message.content.filter(c => c.type === "text").map(c => c.text).join("") } });
+          started.delete(api.taskId);
+        },
+      }),
       hook(ToolTask, { beforeTool: async (call, api, context) => {
         const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);
         if (!bound?.ticket || !parseAccess(bound.access)) return { block: "工具请求未绑定有效访问范围" };
-        if (Date.now() >= bound.deadline) return { block: "pi 请求已超时" };
+        start(api.taskId);
+        trace.event(bound.ticket, "tool:" + call.name, { status: "started", detail: { backend: "pi", input: call.arguments } });
+        const block = (reason: string) => {
+          trace.event(bound.ticket, "tool:" + call.name, { status: "failed", durationMs: Date.now() - started.get(api.taskId)!, detail: { backend: "pi", error: reason } });
+          started.delete(api.taskId);
+          return { block: reason };
+        };
+        if (Date.now() >= bound.deadline) return block("pi 请求已超时");
         const kind = call.name.startsWith("qq_") ? "history" : call.name;
         const limit = kind === "generate_image" ? 2 : 4;
         const allowed = await opts.getHarness().commit(async tx => {
@@ -52,7 +85,14 @@ export function createPiExtension(opts: PiToolsOptions) {
           doc.calls[String(api.taskId)] = { kind, ordinal: used + 1 };
           return true;
         }, context);
-        return allowed ? undefined : { block: `${call.name} 已达到本轮调用上限（${limit} 次）` };
+        return allowed ? undefined : block(`${call.name} 已达到本轮调用上限（${limit} 次）`);
+      }, afterTool: async (call, result, api, context) => {
+        const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);
+        if (bound?.ticket) trace.event(bound.ticket, "tool:" + call.name, { status: result.isError ? "failed" : "ok",
+          durationMs: started.has(api.taskId) ? Date.now() - started.get(api.taskId)! : undefined,
+          detail: { backend: "pi", output: result, error: result.isError ? result.output?.map(c => c.type === "text" ? c.text : "").join("\n") : undefined } });
+        started.delete(api.taskId);
+        return undefined;
       } }),
     ],
     tools: [

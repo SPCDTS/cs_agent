@@ -1,3 +1,4 @@
+import { trace } from "../obs/trace.js";
 /**
  * QQ 消息 → 规则分流 → durable 任务（设计 §4.1 / §4.7）：
  * 1. admit：createConversation(ownerless) 的同一 commit 内写入 TicketDoc（含分流结果 route/prefix/prompt）
@@ -79,6 +80,11 @@ const sourceScope = (s: TicketSource) => (s.type === "group" ? `group:${s.group_
 
 export class Dispatcher {
   private active = 0;
+  private readonly scopeDepth = new Map<string, number>();
+  private readonly runningScopes = new Set<string>();
+  status() { return { active: this.active, slots: this.opts.concurrency, waiting: [...this.scopeDepth.values()].reduce((a,b) => a+b,0) - this.active,
+    scopes: Object.fromEntries([...this.scopeDepth].map(([scope,n])=>[scope, n - Number(this.runningScopes.has(scope))])),
+    running_scopes: [...this.runningScopes], tickets: [...this.inflight.keys()] }; }
   private readonly waiting: (() => void)[] = [];
   private readonly inflight = new Map<string, Promise<void>>();
   /** 每个 scope 的队尾：新消息排在它后面（FIFO） */
@@ -95,7 +101,9 @@ export class Dispatcher {
 
   /** 收到授权消息：立即持久化，按 scope 排队执行；同一 ticket 重复投递时复用。 */
   dispatch(msg: InboundMessage, ticket: string): Promise<void> {
+    if (this.inflight.has(ticket)) return this.inflight.get(ticket)!;
     const scope = scopeOf(msg);
+    trace.event(ticket, "received", { scope, detail: { text: msg.text, sender: msg.nickname, message_id: msg.message_id } });
     this.withHistory("record pending failed", ticket, (h) =>
       h.recordPending(scope, ticket, msg.time, { replyTo: msg.message_id, selfId: msg.self_id }),
     );
@@ -170,12 +178,15 @@ export class Dispatcher {
         const entry = item.entry;
         // 达到上限的条目同样入队：run() 在队首走 giveUp（中止活任务 → 兜底），不在队外插队
         const scope = entry.scope ?? (await this.legacyScope(ticket, entry));
+        const doc = await this.opts.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, this.ctx).catch(() => undefined);
+        trace.event(ticket, "recovered", { scope, detail: { kind: item.kind, text: doc?.text, route: doc?.route, sender: doc?.source.nickname } });
         void this.track(ticket, "recover failed", () =>
           this.enqueue(scope, () => this.run(ticket, entry.conversationId as ConversationId)),
         );
         continue;
       }
       const rec = item.rec;
+      trace.event(ticket, "recovered", { scope: rec.message_type === "group" ? `group:${rec.group_id}` : `private:${rec.user_id}`, detail: { kind: item.kind } });
       if (!rec.source_text.trim()) {
         // 原文缺失也持久化派发条目；兜底未终态前一直占据 scope 队首。
         log.warn("orphan ticket without source text, registering fallback", { ticket: short(rec.ticket_id) });
@@ -217,7 +228,7 @@ export class Dispatcher {
     const existing = this.inflight.get(ticket);
     if (existing) return existing;
     const p = work()
-      .catch((err) => log.error(label, { ticket: short(ticket), error: err }))
+      .catch((err) => { trace.event(ticket, "failed", { status: "failed", detail: { error: err, terminal: false, recoverable: true } }); log.error(label, { ticket: short(ticket), error: err }); })
       .finally(() => this.inflight.delete(ticket));
     this.inflight.set(ticket, p);
     return p;
@@ -225,11 +236,17 @@ export class Dispatcher {
 
   /** 排到 scope 队尾；轮到时再占用一个全局并发槽位。 */
   private enqueue(scope: string, work: () => Promise<void>): Promise<void> {
+    this.scopeDepth.set(scope, (this.scopeDepth.get(scope) ?? 0) + 1);
     const prev = this.chains.get(scope) ?? Promise.resolve();
-    const run = prev.then(() => this.withSlot(work));
+    const run = prev.then(() => this.withSlot(async () => {
+      this.runningScopes.add(scope);
+      try { await work(); } finally { this.runningScopes.delete(scope); }
+    }));
     const tail = run.catch(() => undefined);
     this.chains.set(scope, tail);
     void tail.then(() => {
+      const depth = (this.scopeDepth.get(scope) ?? 1) - 1;
+      if (depth) this.scopeDepth.set(scope, depth); else this.scopeDepth.delete(scope);
       if (this.chains.get(scope) === tail) this.chains.delete(scope);
     });
     return run;
@@ -290,6 +307,8 @@ export class Dispatcher {
       },
       this.ctx,
     );
+    trace.event(ticket, "admitted", { scope, detail: { conversation: conv.id } });
+    trace.event(ticket, "routed", { scope, detail: route });
     log.info("message routed", {
       ticket: short(ticket),
       conversation: conv.id,
@@ -377,9 +396,11 @@ export class Dispatcher {
     // 已回复过的票据（重复投递）：不再运行任务
     const pre = await this.opts.bridge.getTicket(ticket).catch(() => undefined);
     if (pre === null || isTerminal(pre?.status)) {
+      if (pre) await this.recordOutcome(ticket, conversationId);
       log.info("ticket already terminal, skipping", { ticket: short(ticket), status: pre?.status ?? "missing" });
       return "terminal";
     }
+    trace.event(ticket, "dispatched", { detail: { attempts } });
     const taskId = await this.ensureTask(ticket);
     if (taskId !== undefined) {
       const settled = await this.opts.harness.waitForTask(taskId, this.ctx);
@@ -424,10 +445,16 @@ export class Dispatcher {
         throw err;
       }
     }
-    if ((await this.fallbackIfUnreplied(ticket)) !== "pending") {
+    const fallback = await this.fallbackIfUnreplied(ticket);
+    if (fallback !== "pending") {
+      if (fallback === "terminal") {
+        const entry = (await harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket];
+        if (entry) await this.recordOutcome(ticket, entry.conversationId as ConversationId);
+      }
       await this.clearIndex(ticket);
       return;
     }
+    trace.event(ticket, "failed", { status: "failed", detail: { terminal: true, reason: "max_attempts" } });
     log.error("ticket failed: fallback could not be sent after max attempts; moving on", { ticket: short(ticket) });
     await harness.commit(async (tx) => {
       const e = (await tx.doc(DispatchDoc)).pending[ticket];
@@ -450,7 +477,6 @@ export class Dispatcher {
 
   /** 票据已终态（非本次兜底）：按会话文档更新消息库中的机器人行。 */
   private async recordOutcome(ticket: string, conversationId: ConversationId): Promise<void> {
-    if (!this.opts.history) return;
     try {
       const doc = await this.opts.harness.snapshot(TicketDoc, conversationId, this.ctx);
       const rec = await this.opts.bridge.getTicket(ticket);
@@ -468,6 +494,10 @@ export class Dispatcher {
           detail = this.opts.codexEffort;
         }
       }
+      trace.event(ticket, rec?.status === "sent" && ok ? "reply_sent" : "failed", { status: rec?.status === "sent" && ok ? "ok" : "failed",
+        detail: { terminal: true, ticket_status: rec?.status, route: doc?.route, backend: doc?.agentResult?.backend,
+          failure: doc?.agentResult && !doc.agentResult.ok ? doc.agentResult.failure : doc?.imageResult && !doc.imageResult.ok ? doc.imageResult.failure : undefined,
+          message_id: rec?.reply_message_id, reply: doc?.replyText, images: doc?.replyImages } });
       this.withHistory("record reply failed", ticket, (h) =>
         h.completeReply(ticket, {
           action,
@@ -484,6 +514,7 @@ export class Dispatcher {
   }
 
   private recordFallback(ticket: string, replyMessageId?: string): void {
+    trace.event(ticket, "fallback", { status: "failed", detail: { terminal: true, message_id: replyMessageId, reply: FALLBACK_REPLY } });
     this.withHistory("record fallback failed", ticket, (h) =>
       h.completeReply(ticket, {
         action: "fallback",

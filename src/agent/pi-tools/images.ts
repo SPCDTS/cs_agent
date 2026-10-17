@@ -1,3 +1,4 @@
+import { observeImages } from "../../obs/image.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -76,17 +77,17 @@ export function imageTool(dataDir: string, backend: PiImageBackend, getHarness: 
       if (fresh) {
         await persist();
         if (uploads.length) await fs.writeFile(manifest, JSON.stringify(uploads), { encoding: "utf8", flag: "wx" });
-        job.prompt_id = await backend.submit(opts, { filenamePrefix: subfolder, referenceSubfolder: subfolder, count: opts.count ?? 1, imageOptions: opts }, signal);
+        job.prompt_id = await observeImages(backend, request.ticket).submit(opts, { filenamePrefix: subfolder, referenceSubfolder: subfolder, count: opts.count ?? 1, imageOptions: opts }, signal);
         job.status = "submitted";
         await persist();
       }
       if (job.status !== "done") {
         try {
           if (!job.prompt_id) throw new UnknownJobError("intent");
-          await backend.collect(job.prompt_id, dir, signal, opts);
+          await observeImages(backend, request.ticket).collect(job.prompt_id, dir, signal, opts);
         } catch (err) {
           if (!(err instanceof UnknownJobError)) throw err;
-          await backend.reconcile({ filenamePrefix: subfolder, count: opts.count ?? 1, imageOptions: opts }, dir, signal, async step => {
+          await observeImages(backend, request.ticket).reconcile({ filenamePrefix: subfolder, count: opts.count ?? 1, imageOptions: opts }, dir, signal, async step => {
             if (step.prompt_id) { job.prompt_id = step.prompt_id; job.status = "submitted"; await persist(); }
           });
         }

@@ -1,3 +1,4 @@
+import { observeImages } from "../obs/image.js";
 import { IMAGE_OPTIONS_JSON_SCHEMA, validateImageOptions, type ImageOptions } from "../agent/image-options.js";
 import { imageRefsValue, validateReferences } from "../agent/image-references.js";
 /**
@@ -155,7 +156,7 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
     let promptId: string | undefined;
     const submittedAt = Date.now();
     try {
-      backend ??= deps.createBackend();
+      backend ??= observeImages(deps.createBackend(), path.basename(dir));
       job = { backend: backend.name, filenamePrefix: submission.filenamePrefix, options, callDir, submittedAt, status: "intent" };
       await savePendingImage(dir, job);
       if (uploads.length) await fs.writeFile(manifest, JSON.stringify(uploads), "utf8");
