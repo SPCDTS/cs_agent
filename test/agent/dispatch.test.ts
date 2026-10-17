@@ -3,7 +3,7 @@ import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Dispatcher, FALLBACK_REPLY, MAX_ATTEMPTS } from "../../src/agent/dispatch.js";
 import { DispatchDoc, TicketDoc } from "../../src/agent/docs.js";
 import { createCsAgentExtension } from "../../src/agent/extension.js";
@@ -619,6 +619,103 @@ describe("ordering (§4.7)", () => {
 });
 
 describe("dispatcher bookkeeping", () => {
+  it("empty-source orphan holds FIFO while the bridge is down, then replies old before new (F3)", async () => {
+    const r = await makeRig();
+    r.bridge.pending = [{
+      ticket_id: "old-empty", seq: 1, self_id: "1", user_id: OWNER, group_id: null, message_type: "private",
+      source_message_id: "1", source_nickname: "tester", source_text: "", created_at: "2026-10-17T00:00:00.000Z", status: "pending",
+    }];
+    await r.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+      Object.assign(await tx.doc(TicketDoc, id), { ticket: "new-indexed", text: "新消息", route: "agent", source: { type: "private", user_id: OWNER, group_id: null, nickname: "tester" } });
+      (await tx.doc(DispatchDoc)).pending["new-indexed"] = { conversationId: id, scope: `private:${OWNER}`, ticketSeq: 2, attempts: 0 };
+    } }, ctx);
+    r.bridge.replyDown = true;
+    const orig = r.bridge.reply.bind(r.bridge);
+    let firstEntry: unknown;
+    r.bridge.reply = async (ticket, text, images) => {
+      if (r.bridge.replyDown) {
+        firstEntry = (await pendingIndex(r))[ticket];
+        expect(r.backend.requests).toHaveLength(0);
+        try { return await orig(ticket, text, images); }
+        finally { r.bridge.replyDown = false; }
+      }
+      return orig(ticket, text, images);
+    };
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(firstEntry).toMatchObject({ fallbackOnly: true, attempts: 1, ticketSeq: 1 });
+    expect(r.bridge.replies.map(x => x.ticket)).toEqual(["old-empty", "new-indexed"]);
+    expect(r.backend.requests.map(x => x.ticket)).toEqual(["new-indexed"]);
+    expect(await pendingIndex(r)).toEqual({});
+  });
+
+  it("empty-source fallback persists its retry cap and is not retried after restart (F3)", async () => {
+    const r = await makeRig();
+    r.bridge.pending = [{
+      ticket_id: "empty-cap", seq: 1, self_id: "1", user_id: OWNER, group_id: null, message_type: "private",
+      source_message_id: "1", source_nickname: "tester", source_text: "", created_at: "2026-10-17T00:00:00.000Z", status: "pending",
+    }];
+    r.bridge.replyDown = true;
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect((await pendingIndex(r))["empty-cap"]).toMatchObject({ fallbackOnly: true, givenUp: true, state: "failed", attempts: MAX_ATTEMPTS + 1 });
+    expect(r.bridge.calls).toBe(MAX_ATTEMPTS + 1);
+    expect(r.backend.requests).toHaveLength(0);
+    await r.harness.close(ctx);
+    await r.reopen();
+    r.bridge.replyDown = false;
+    expect(await r.dispatcher.recover()).toBe(0);
+    expect(r.bridge.replies).toHaveLength(0);
+  });
+
+  it("crash after send before cleanup: recovery removes ticket workdir and keeps images (F6)", async () => {
+    const r = await makeRig();
+    const ticket = "sent-before-cleanup";
+    const workdir = path.join(r.dir, "tickets", ticket);
+    mkdirSync(workdir, { recursive: true });
+    writeFileSync(path.join(workdir, "codex-last.txt"), "answer");
+    mkdirSync(imgDir(r, ticket), { recursive: true });
+    writeFileSync(path.join(imgDir(r, ticket), "keep.png"), PNG);
+    const orig = r.bridge.reply.bind(r.bridge);
+    r.bridge.reply = async (id, text, images, opts?: { signal?: AbortSignal }) => {
+      await orig(id, text, images);
+      return untilAbort(opts?.signal); // 已发送但 replyPhase 尚未清理 / 提交
+    };
+    const first = r.dispatcher.dispatch(inbound("hi"), ticket);
+    await vi.waitFor(() => expect(r.bridge.status.get(ticket)).toBe("sent"));
+    await r.harness.close(ctx);
+    await first;
+    expect(existsSync(workdir)).toBe(true);
+    r.bridge.reply = orig;
+    await r.reopen();
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(existsSync(workdir)).toBe(false);
+    expect(existsSync(path.join(imgDir(r, ticket), "keep.png"))).toBe(true);
+    expect(r.bridge.replies).toHaveLength(1);
+    expect(await pendingIndex(r)).toEqual({});
+  });
+
+  it.each(["uncertain", "sending", "failed", "given-up"])("terminal reconciliation cleans %s workdir idempotently (F6)", async status => {
+    const r = await makeRig();
+    const ticket = "cleanup-" + status;
+    const workdir = path.join(r.dir, "tickets", ticket);
+    mkdirSync(workdir, { recursive: true });
+    writeFileSync(path.join(workdir, "codex-last.txt"), "answer");
+    if (status === "uncertain" || status === "sending") r.bridge.status.set(ticket, status);
+    else r.bridge.replyDown = true;
+    await r.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+      (await tx.doc(DispatchDoc)).pending[ticket] = { conversationId: id, scope: `private:${OWNER}`, attempts: 0,
+        ...(status === "failed" ? { state: "failed" as const } : {}), ...(status === "given-up" ? { givenUp: true } : {}) };
+    } }, ctx);
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(existsSync(workdir)).toBe(false);
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(existsSync(workdir)).toBe(false);
+  });
+
   it("same ticket dispatched twice runs once", async () => {
     const r = await makeRig();
     await Promise.all([r.dispatcher.dispatch(inbound("hi"), "t-dup"), r.dispatcher.dispatch(inbound("hi"), "t-dup")]);

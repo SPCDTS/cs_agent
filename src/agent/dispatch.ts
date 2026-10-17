@@ -117,6 +117,7 @@ export class Dispatcher {
     for (const [ticket, entry] of Object.entries(indexed)) {
       if (this.inflight.has(ticket)) continue;
       if (entry.state === "failed") {
+        await this.opts.tasks.cleanupTicketWorkdir(ticket);
         failed++; // 已终态（兜底也发不出）：不再处理，留作审计
         continue;
       }
@@ -171,14 +172,13 @@ export class Dispatcher {
       }
       const rec = item.rec;
       if (!rec.source_text.trim()) {
-        // 迁移前的旧票据没有保存原文，无法重建：只发兜底回复（同样在其 scope 队列里）
-        log.warn("orphan ticket without source text, sending fallback", { ticket: short(rec.ticket_id) });
+        // 原文缺失也持久化派发条目；兜底未终态前一直占据 scope 队首。
+        log.warn("orphan ticket without source text, registering fallback", { ticket: short(rec.ticket_id) });
         const scope = rec.message_type === "group" ? `group:${rec.group_id}` : `private:${rec.user_id}`;
-        void this.track(rec.ticket_id, "orphan fallback failed", () =>
-          this.enqueue(scope, async () => {
-            await this.fallbackIfUnreplied(rec.ticket_id);
-          }),
-        );
+        void this.track(ticket, "orphan fallback failed", () => {
+          const registered = this.register(inboundFromTicket(rec), ticket, scope, true);
+          return this.enqueue(scope, async () => this.run(ticket, await registered));
+        });
       } else {
         log.warn("orphan pending ticket without dispatch index, re-dispatching", { ticket: short(rec.ticket_id) });
         void this.dispatch(inboundFromTicket(rec), rec.ticket_id);
@@ -253,7 +253,7 @@ export class Dispatcher {
     else this.active--;
   }
 
-  private async register(msg: InboundMessage, ticket: string, scope: string): Promise<ConversationId> {
+  private async register(msg: InboundMessage, ticket: string, scope: string, fallbackOnly = false): Promise<ConversationId> {
     const { harness } = this.opts;
     const known = (await harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket];
     if (known) return known.conversationId as ConversationId;
@@ -279,7 +279,7 @@ export class Dispatcher {
             ...(reply?.data.id ? { replyTo: reply.data.id } : {}),
           });
           const dispatch = await tx.doc(DispatchDoc);
-          dispatch.pending[ticket] = { conversationId, scope, attempts: 0, ...(ticketSeq !== undefined ? { ticketSeq } : {}) };
+          dispatch.pending[ticket] = { conversationId, scope, attempts: 0, ...(fallbackOnly ? { fallbackOnly } : {}), ...(ticketSeq !== undefined ? { ticketSeq } : {}) };
         },
       },
       this.ctx,
@@ -307,7 +307,7 @@ export class Dispatcher {
     }
     return this.opts.harness.commit(async (tx) => {
       const entry = (await tx.doc(DispatchDoc)).pending[ticket];
-      if (!entry) return undefined;
+      if (!entry || entry.fallbackOnly) return undefined;
       if (entry.taskId !== undefined) {
         const rec = await tx.task(entry.taskId as TaskId);
         if (rec && rec.state.status !== "terminal") return rec.id as TaskId<TaskResult>;
@@ -427,6 +427,7 @@ export class Dispatcher {
       const e = (await tx.doc(DispatchDoc)).pending[ticket];
       if (e) e.state = "failed";
     }, this.ctx);
+    await this.opts.tasks.cleanupTicketWorkdir(ticket);
     this.withHistory("record failure failed", ticket, (h) =>
       h.completeReply(ticket, { action: "fallback", excerpt: "", status: "失败" }),
     );
@@ -488,6 +489,8 @@ export class Dispatcher {
   }
 
   private async clearIndex(ticket: string): Promise<void> {
+    // 先清理再删索引：发送已成功、但 reply 阶段清理前崩溃的票据也会走到这里。
+    await this.opts.tasks.cleanupTicketWorkdir(ticket);
     await this.opts.harness
       .commit(async (tx) => {
         delete (await tx.doc(DispatchDoc)).pending[ticket];

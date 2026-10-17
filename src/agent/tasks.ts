@@ -99,7 +99,7 @@ async function replyPhase<S extends { phase: string }>(
   if (blocked && blocked !== "ticket sent") return failBlocked(runtime, context, doc.ticket, blocked, "reply");
   try {
     const res = await deps.getBridge().reply(doc.ticket, text, images, { signal: runtime.signal });
-    await cleanupTicketDir(deps, doc.ticket);
+    await cleanupTicketWorkdir(deps, doc.ticket);
     await runtime.commit(async (tx) => {
       const d = await tx.doc(TicketDoc, runtime.conversationId);
       d.replyText = text;
@@ -118,7 +118,7 @@ async function replyPhase<S extends { phase: string }>(
       ticket_status: rec?.status ?? "unknown",
       error: (err as Error).message,
     });
-    if (!retry) await cleanupTicketDir(deps, doc.ticket);
+    if (!retry) await cleanupTicketWorkdir(deps, doc.ticket);
     await runtime.commit(async () =>
       retry
         ? { status: "running", checkpoint: { phase: "reply", attempt: attempt + 1 } as S & ReplyCheckpoint }
@@ -131,7 +131,7 @@ async function replyPhase<S extends { phase: string }>(
  * 回复阶段结束（发出或放弃）后删除票据工作目录 ${ticketsDir}/<ticket>（codex-last.txt 等）。
  * 此时后端结果已在 TicketDoc 里，重跑不会再用到它；图片目录另行管理，不在这里删除。
  */
-async function cleanupTicketDir(deps: TaskDeps, ticket: string): Promise<void> {
+async function cleanupTicketWorkdir(deps: TaskDeps, ticket: string): Promise<void> {
   if (!deps.ticketsDir) return;
   try {
     await fs.rm(ticketWorkDir(deps.ticketsDir, ticket), { recursive: true, force: true });
@@ -368,7 +368,7 @@ export function createTasks(deps: TaskDeps) {
     abort: (_task, runtime, context) => abortTask(runtime, context),
   });
 
-  return { ImageTask, AgentTask };
+  return { ImageTask, AgentTask, cleanupTicketWorkdir: (ticket: string) => cleanupTicketWorkdir(deps, ticket) };
 }
 
 export type CsTasks = ReturnType<typeof createTasks>;
