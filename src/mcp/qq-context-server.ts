@@ -21,6 +21,9 @@ export interface QQContextDeps {
   maxChars?: number;
 }
 
+// 三个工具都只读当前会话的上下文库：声明只读注解（与审批模式无关，供客户端按注解判断）。
+const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
+
 const TOOLS = [
   {
     name: "qq_recent",
@@ -34,6 +37,7 @@ const TOOLS = [
       },
       additionalProperties: false,
     },
+    annotations: READ_ONLY,
   },
   {
     name: "qq_search",
@@ -48,6 +52,7 @@ const TOOLS = [
       required: ["query"],
       additionalProperties: false,
     },
+    annotations: READ_ONLY,
   },
   {
     name: "qq_message",
@@ -58,6 +63,7 @@ const TOOLS = [
       required: ["message_id"],
       additionalProperties: false,
     },
+    annotations: READ_ONLY,
   },
 ] as const;
 

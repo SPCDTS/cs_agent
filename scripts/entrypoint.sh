@@ -54,9 +54,10 @@ EFFORT="$(toml_value "${CODEX_REASONING_EFFORT:-high}" high CODEX_REASONING_EFFO
 WEB_SEARCH="$(toml_enum "${CODEX_WEB_SEARCH:-live}" live CODEX_WEB_SEARCH live cached disabled)"
 WEB_SEARCH_CONTEXT="$(toml_enum "${CODEX_WEB_SEARCH_CONTEXT:-low}" low CODEX_WEB_SEARCH_CONTEXT low medium high)"
 BROWSER="$(toml_enum "${CODEX_BROWSER:-playwright}" playwright CODEX_BROWSER playwright none)"
-# MCP 工具调用审批：cs-agent 以非交互 codex exec（approval policy never）运行，需要审批的 MCP 调用会直接失败，
-# 所以默认 auto（自动批准）。浏览器能调用哪些工具仍由 enabled_tools 白名单限定。
-MCP_APPROVAL_MODE="$(toml_enum "${CODEX_MCP_APPROVAL_MODE:-auto}" auto CODEX_MCP_APPROVAL_MODE auto prompt writes approve)"
+# MCP 工具调用审批：cs-agent 以非交互 codex exec（approval policy never）运行，需要审批的 MCP 调用会直接失败。
+# auto 按工具 annotations 决定，非只读（或未声明 readOnlyHint）的工具仍要求审批，非交互 exec 无法批准，
+# 所以默认 approve（一律自动批准）。浏览器能调用哪些工具仍由 enabled_tools 白名单限定。
+MCP_APPROVAL_MODE="$(toml_enum "${CODEX_MCP_APPROVAL_MODE:-approve}" approve CODEX_MCP_APPROVAL_MODE auto prompt writes approve)"
 MCP_DATA_DIR="$(toml_path "$DATA_DIR" /data DATA_DIR)"
 case "${QQ_CONTEXT_MAX_CHARS:-}" in
   ""|*[!0-9]*) CONTEXT_MAX_CHARS=2500 ;;

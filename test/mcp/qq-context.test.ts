@@ -65,6 +65,7 @@ describe("qq_context MCP over stdio (built dist)", () => {
     const c = await connect(dir, `group:${G}`);
     const tools = await c.listTools();
     expect(tools.tools.map((t) => t.name).sort()).toEqual(["qq_message", "qq_recent", "qq_search"]);
+    for (const t of tools.tools) expect(t.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 
     const recent = textOf(await c.callTool({ name: "qq_recent", arguments: { limit: 30 } }));
     expect(recent.split("\n")).toEqual([expect.stringMatching(/^#500 \d\d:\d\d De: 今晚有cs比赛吗$/), expect.stringMatching(/^#501 \d\d:\d\d 小明: 那明天呢$/)]);

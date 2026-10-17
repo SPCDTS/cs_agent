@@ -88,8 +88,8 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
       "mcp_servers.qq_context.env.QQ_CONTEXT_MAX_CHARS": '"2500"',
       "mcp_servers.browser.env.PLAYWRIGHT_BROWSERS_PATH": '"/opt/pw-browsers"',
       // 非交互 codex exec（approval never）下 MCP 调用必须自动批准
-      "mcp_servers.qq_context.default_tools_approval_mode": '"auto"',
-      "mcp_servers.browser.default_tools_approval_mode": '"auto"',
+      "mcp_servers.qq_context.default_tools_approval_mode": '"approve"',
+      "mcp_servers.browser.default_tools_approval_mode": '"approve"',
     });
     const args = JSON.parse(t["mcp_servers.browser.args"]!) as string[];
     expect(args.slice(0, 4)).toEqual(["--headless", "--isolated", "--browser", "chromium"]);
@@ -237,13 +237,13 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const binDir = tmp("cs-pwbin-");
     const bin = path.join(binDir, "playwright-mcp");
     writeFileSync(bin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    const ok = parse(runEntrypoint({ PLAYWRIGHT_MCP_BIN: posix(bin), CODEX_MCP_APPROVAL_MODE: "writes" }).toml);
-    expect(ok["mcp_servers.qq_context.default_tools_approval_mode"]).toBe('"writes"');
-    expect(ok["mcp_servers.browser.default_tools_approval_mode"]).toBe('"writes"');
+    const ok = parse(runEntrypoint({ PLAYWRIGHT_MCP_BIN: posix(bin), CODEX_MCP_APPROVAL_MODE: "auto" }).toml);
+    expect(ok["mcp_servers.qq_context.default_tools_approval_mode"]).toBe('"auto"');
+    expect(ok["mcp_servers.browser.default_tools_approval_mode"]).toBe('"auto"');
     const bad = runEntrypoint({ PLAYWRIGHT_MCP_BIN: posix(bin), CODEX_MCP_APPROVAL_MODE: "never" });
     const b = parse(bad.toml);
-    expect(b["mcp_servers.qq_context.default_tools_approval_mode"]).toBe('"auto"');
-    expect(b["mcp_servers.browser.default_tools_approval_mode"]).toBe('"auto"');
+    expect(b["mcp_servers.qq_context.default_tools_approval_mode"]).toBe('"approve"');
+    expect(b["mcp_servers.browser.default_tools_approval_mode"]).toBe('"approve"');
     expect(bad.stderr).toContain("invalid value 'never' for CODEX_MCP_APPROVAL_MODE");
   });
 });
