@@ -8,7 +8,7 @@ import type { QQBridge } from "./qq/types.js";
 import { createAgentModels, openHarness } from "./agent/harness.js";
 import { createCsAgentExtension } from "./agent/extension.js";
 import { Dispatcher } from "./agent/dispatch.js";
-import { CodexRunner, createAskCodexTool } from "./agent/tools/ask-codex.js";
+import { CodexRunner, createAskCodexTool, ensureWorkspaceAgentsMd } from "./agent/tools/ask-codex.js";
 import { createGenerateImageTool, HttpImageBackend, McpImageBackend, type ImageBackend } from "./agent/tools/generate-image.js";
 import { createReplyQQTool } from "./agent/tools/reply-qq.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
@@ -37,6 +37,9 @@ async function main(): Promise<void> {
     comfy_mode: cfg.COMFY_MODE,
     data_dir: cfg.DATA_DIR,
   });
+
+  // codex 读取的工作区规则（不泄露凭据/环境变量）；已存在则不覆盖
+  if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md", { dir: cfg.WORKSPACE_DIR });
 
   let bridge: QQBridge | undefined;
   const getBridge = () => {

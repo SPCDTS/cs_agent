@@ -1,7 +1,15 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
-import { CodexRunner, CodexTimeoutError, extractThreadId } from "../../src/agent/tools/ask-codex.js";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  buildCodexEnv,
+  CodexRunner,
+  CodexTimeoutError,
+  ensureWorkspaceAgentsMd,
+  extractThreadId,
+  isMissingSessionError,
+  WORKSPACE_AGENTS_MD,
+} from "../../src/agent/tools/ask-codex.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
 function setup(extra: { sleepMs?: number; timeoutMs?: number; thread?: string } = {}) {
@@ -39,7 +47,95 @@ describe("extractThreadId", () => {
   });
 });
 
+describe("buildCodexEnv", () => {
+  it("keeps only the allow-list plus CODEX_HOME and NO_COLOR", () => {
+    const env = buildCodexEnv("/data/codex", {
+      PATH: "/usr/bin",
+      HOME: "/home/node",
+      LANG: "C.UTF-8",
+      TERM: "xterm",
+      HTTPS_PROXY: "http://proxy:3128",
+      NAPCAT_TOKEN: "secret",
+      OPENAI_API_KEY: "sk-x",
+      ANTHROPIC_API_KEY: "sk-y",
+      QQ_ALLOW_USERS: "1",
+      CODEX_HOME: "/elsewhere",
+    });
+    expect(env).toMatchObject({
+      PATH: "/usr/bin",
+      HOME: "/home/node",
+      LANG: "C.UTF-8",
+      TERM: "xterm",
+      HTTPS_PROXY: "http://proxy:3128",
+      CODEX_HOME: "/data/codex",
+      NO_COLOR: "1",
+    });
+    for (const k of ["NAPCAT_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "QQ_ALLOW_USERS"]) expect(env[k]).toBeUndefined();
+  });
+});
+
+describe("isMissingSessionError", () => {
+  it("matches confirmed missing-session messages only", () => {
+    expect(isMissingSessionError("Error: thread/resume: thread/resume failed: no rollout found for thread id x")).toBe(true);
+    expect(isMissingSessionError("Error: session not found")).toBe(true);
+    expect(isMissingSessionError("stream disconnected before completion")).toBe(false);
+    expect(isMissingSessionError("401 Unauthorized")).toBe(false);
+  });
+});
+
+describe("ensureWorkspaceAgentsMd", () => {
+  it("writes AGENTS.md once and never overwrites operator edits", async () => {
+    const dir = path.join(tmp(), "ws");
+    expect(await ensureWorkspaceAgentsMd(dir)).toBe(true);
+    expect(readFileSync(path.join(dir, "AGENTS.md"), "utf8")).toBe(WORKSPACE_AGENTS_MD);
+    expect(WORKSPACE_AGENTS_MD).toMatch(/auth\.json/);
+    writeFileSync(path.join(dir, "AGENTS.md"), "custom");
+    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
+    expect(readFileSync(path.join(dir, "AGENTS.md"), "utf8")).toBe("custom");
+  });
+});
+
 describe("CodexRunner", () => {
+  const saved = { NAPCAT_TOKEN: process.env.NAPCAT_TOKEN, OPENAI_API_KEY: process.env.OPENAI_API_KEY };
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it("child process does not inherit secrets from the parent env", async () => {
+    process.env.NAPCAT_TOKEN = "napcat-secret";
+    process.env.OPENAI_API_KEY = "sk-secret";
+    const { runner, calls } = setup();
+    await runner.ask("hi");
+    const env = calls()[0].env as Record<string, string>;
+    expect(env.NAPCAT_TOKEN).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.NO_COLOR).toBe("1");
+    expect(JSON.stringify(env)).not.toContain("secret");
+  });
+
+  it("persists thread id as soon as thread.started arrives, even if the turn then times out", async () => {
+    const { dir, runner } = setup({ sleepMs: 20_000, timeoutMs: 1500, thread: "thread-early" });
+    const sessionFile = path.join(dir, "codex-session.json");
+    const pending = runner.ask("slow");
+    const t0 = Date.now();
+    while (!existsSync(sessionFile) && Date.now() - t0 < 1400) await new Promise((r) => setTimeout(r, 20));
+    expect(JSON.parse(readFileSync(sessionFile, "utf8")).thread_id).toBe("thread-early"); // 进程仍在运行
+    await expect(pending).rejects.toBeInstanceOf(CodexTimeoutError);
+    expect(JSON.parse(readFileSync(sessionFile, "utf8")).thread_id).toBe("thread-early");
+  });
+
+  it("resume failure that is not a missing session keeps the saved id and returns an error", async () => {
+    const { dir, runner, calls } = setup({ thread: "thread-new" });
+    const sessionFile = path.join(dir, "codex-session.json");
+    writeFileSync(sessionFile, JSON.stringify({ thread_id: "flaky-1" }));
+    await expect(runner.ask("again")).rejects.toThrow(/codex 执行失败/);
+    expect(calls().filter((c) => c.phase === "start")).toHaveLength(1);
+    expect(JSON.parse(readFileSync(sessionFile, "utf8")).thread_id).toBe("flaky-1");
+  });
+
   it("first turn captures thread id, persists it, returns -o text; passes CODEX_HOME and stdin prompt", async () => {
     const { dir, runner, calls } = setup();
     const answer = await runner.ask("hello there");
