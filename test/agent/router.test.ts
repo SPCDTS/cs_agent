@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_IMAGE_PREFIXES, IMAGE_USAGE_REPLY, parseImagePrefixes, routeMessage, routingText } from "../../src/agent/router.js";
+import { DEFAULT_IMAGE_PREFIXES, IMAGE_USAGE_REPLY, legacyRouteText, parseImagePrefixes, routeMessage } from "../../src/agent/router.js";
 
 describe("rule router (§4.1)", () => {
   it("half-width and full-width colon prefixes route to image with the raw remainder as prompt", () => {
@@ -7,11 +7,15 @@ describe("rule router (§4.1)", () => {
     expect(routeMessage("奶龙：A cat, Watercolor")).toEqual({ route: "image", prefix: "奶龙：", prompt: "A cat, Watercolor" });
   });
 
-  it("leading/trailing spaces and the group [at]/[reply] placeholders are ignored for matching", () => {
+  it("only leading/trailing whitespace is ignored; a literal [at] in route_text is not special (R10)", () => {
     expect(routeMessage("   奶龙: 夕阳下的海  ")).toEqual({ route: "image", prefix: "奶龙:", prompt: "夕阳下的海" });
-    expect(routeMessage("[at] 奶龙:猫")).toMatchObject({ route: "image", prompt: "猫" });
-    expect(routeMessage("[reply][at] 奶龙：狗")).toMatchObject({ route: "image", prompt: "狗" });
-    expect(routingText("　[at]  hi ")).toBe("hi");
+    expect(routeMessage("[at] 奶龙:猫").route).toBe("agent");
+    expect(routeMessage("[reply][at] 奶龙：狗").route).toBe("agent");
+  });
+
+  it("legacyRouteText strips rendered placeholders (old data without route_text only)", () => {
+    expect(legacyRouteText("[reply][at] 奶龙：狗")).toBe(" 奶龙：狗");
+    expect(routeMessage(legacyRouteText("[at] 奶龙:猫"))).toMatchObject({ route: "image", prompt: "猫" });
   });
 
   it("empty prompt → usage route; the usage text is fixed", () => {

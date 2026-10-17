@@ -25,7 +25,7 @@ function msg(text: string, o: Partial<InboundMessage> & { replyTo?: string } = {
   return {
     message_id: id, time: o.time ?? T0, message_type: o.message_type ?? "group", user_id: o.user_id ?? "20001",
     group_id: o.message_type === "private" ? null : (o.group_id ?? G), self_id: "10001", nickname: o.nickname ?? "De",
-    text, truncated: false, mentioned_self: false,
+    text, route_text: text, truncated: false, mentioned_self: false,
     segments: o.replyTo ? [{ type: "reply", data: { id: o.replyTo } }, { type: "text", data: { text } }] : [{ type: "text", data: { text } }],
   };
 }

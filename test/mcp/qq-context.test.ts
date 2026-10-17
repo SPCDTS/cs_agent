@@ -28,7 +28,7 @@ let seq = 1;
 function msg(text: string, o: Partial<InboundMessage> = {}): InboundMessage {
   return {
     message_id: String(seq++), time: Math.floor(Date.now() / 1000), message_type: "group", user_id: "20001",
-    group_id: G, self_id: "10001", nickname: "De", text, truncated: false, mentioned_self: false,
+    group_id: G, self_id: "10001", nickname: "De", text, route_text: text, truncated: false, mentioned_self: false,
     segments: [{ type: "text", data: { text } }], ...o,
   };
 }

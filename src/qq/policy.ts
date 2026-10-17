@@ -35,6 +35,19 @@ function renderText(segments: Record<string, unknown>[]): string {
   return segments.map(s => (segmentType(s) === "text" ? segmentText(s) : "[" + segmentType(s) + "]")).join("");
 }
 
+/** 分流文本：跳过开头的 at / reply 段（以及夹在其间的纯空白 text 段），其余按 renderText 渲染。 */
+function renderRouteText(segments: Record<string, unknown>[]): string {
+  let i = 0;
+  for (; i < segments.length; i++) {
+    const s = segments[i]!;
+    const type = segmentType(s);
+    if (type === "at" || type === "reply") continue;
+    if (type === "text" && !segmentText(s).trim()) continue;
+    break;
+  }
+  return renderText(segments.slice(i));
+}
+
 function compactSegments(segments: Record<string, unknown>[]): MessageSegment[] {
   let budget = MAX_TEXT;
   return segments.slice(0, MAX_SEGMENTS).map((s): MessageSegment => {
@@ -88,6 +101,7 @@ export function normalizeMessage(event: unknown): InboundMessage | null {
     nickname: nickname(event),
     text: text.slice(0, MAX_TEXT),
     truncated: text.length > MAX_TEXT,
+    route_text: renderRouteText(segments).slice(0, MAX_TEXT),
     mentioned_self: segments.some(s => segmentType(s) === "at" && idString(segmentData(s).qq) === self_id),
     segments: compactSegments(segments),
   };

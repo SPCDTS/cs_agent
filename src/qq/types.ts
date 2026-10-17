@@ -22,6 +22,11 @@ export interface InboundMessage {
   nickname: string;
   /** text 段拼接，其它段以 "[type]" 占位，最长 16000 字符 */
   text: string;
+  /**
+   * 规则分流用的文本：跳过开头的 at（任意目标）/ reply 段（及其间的纯空白 text 段）后，按 text 同一规则渲染，
+   * 最长 16000 字符。用户亲手输入的 "[at]" 字样不会被跳过（只看真实段）。
+   */
+  route_text: string;
   truncated: boolean;
   /** 群聊中是否用真实 at 段 @ 了机器人（永不做文本匹配） */
   mentioned_self: boolean;
@@ -61,6 +66,8 @@ export interface ReplyTicketRecord {
   source_nickname: string;
   /** 原消息正文（normalize 后的 text），用于崩溃后无派发索引时重建处理 */
   source_text: string;
+  /** 原消息的分流文本（InboundMessage.route_text）；旧库的行没有该列时为 undefined */
+  source_route_text?: string;
   created_at: string;
   status: TicketStatus;
   attempted_at?: string;

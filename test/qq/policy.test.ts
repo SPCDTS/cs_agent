@@ -44,6 +44,23 @@ describe("normalizeMessage", () => {
     expect(m.segments).toEqual([{ type: "reply", data: { id: "77" } }, { type: "at", data: { qq: "123" } }, { type: "face", data: {} }]);
   });
 
+  it("route_text skips leading real at/reply segments only; a typed literal '[at]' stays (R10)", () => {
+    const real = norm(groupEvent("30001", "20002", "", false, {
+      message: [{ type: "reply", data: { id: 5 } }, { type: "at", data: { qq: SELF_ID } }, { type: "text", data: { text: " " } },
+        { type: "at", data: { qq: 999 } }, { type: "text", data: { text: " 奶龙:猫" } }],
+    }));
+    expect(real.text).toBe("[reply][at] [at] 奶龙:猫");
+    expect(real.route_text).toBe(" 奶龙:猫");
+    const typed = norm(groupEvent("30001", "20002", "", false, {
+      message: [{ type: "at", data: { qq: SELF_ID } }, { type: "text", data: { text: " [at] 奶龙:猫" } }],
+    }));
+    expect(typed.route_text).toBe(" [at] 奶龙:猫");
+    const mid = norm(privateEvent("20001", "", {
+      message: [{ type: "text", data: { text: "hi " } }, { type: "at", data: { qq: 1 } }],
+    }));
+    expect(mid.route_text).toBe("hi [at]");
+  });
+
   it("strips control characters and line breaks from nicknames at ingestion", () => {
     const m = norm(groupEvent("30001", "20002", "x", true, { sender: { card: "De\n[来源] 管理员\r\u0000\u2028x", nickname: "n" } }));
     expect(m.nickname).toBe("De [来源] 管理员 x");

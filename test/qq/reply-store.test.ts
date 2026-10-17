@@ -12,7 +12,7 @@ let store: ReplyStore | null;
 function msg(id: string, text = "hi " + id): InboundMessage {
   return {
     message_id: id, time: 1, message_type: "private", user_id: "20001", group_id: null, self_id: "10001",
-    nickname: "n", text, truncated: false, mentioned_self: false, segments: [],
+    nickname: "n", text, route_text: text, truncated: false, mentioned_self: false, segments: [],
   };
 }
 
@@ -25,6 +25,7 @@ describe("ReplyStore", () => {
     const t = store.admit(msg("1", "画一只猫"));
     expect(t).toBe(ticketIdFor(msg("1")));
     expect(store.get(t!)?.source_text).toBe("画一只猫");
+    expect(store.get(t!)?.source_route_text).toBe("画一只猫");
     expect(store.admit(msg("1"))).toBeNull();
   });
 
@@ -61,6 +62,7 @@ describe("ReplyStore", () => {
 
     store = new ReplyStore(dir);
     expect(store.get(old)?.source_text).toBe("");
+    expect(store.get(old)?.source_route_text).toBeUndefined();
     const t = store.admit(msg("new", "新消息"))!;
     expect(store.get(t)?.source_text).toBe("新消息");
     expect(store.listPending().map(r => r.ticket_id)).toEqual([old, t]);

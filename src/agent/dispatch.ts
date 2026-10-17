@@ -21,7 +21,7 @@ import { log } from "../log.js";
 import { scopeOf } from "../context/access.js";
 import type { BotAction, ContextStore } from "../context/store.js";
 import { FALLBACK_REPLY } from "./replies.js";
-import { DEFAULT_IMAGE_PREFIXES, routeMessage } from "./router.js";
+import { DEFAULT_IMAGE_PREFIXES, legacyRouteText, routeMessage } from "./router.js";
 import type { CsTasks, TaskResult } from "./tasks.js";
 
 export { FALLBACK_REPLY } from "./replies.js";
@@ -55,6 +55,8 @@ export function inboundFromTicket(rec: ReplyTicketRecord): InboundMessage {
     self_id: rec.self_id,
     nickname: rec.source_nickname,
     text: rec.source_text,
+    // 旧行没有保存分流文本：按旧规则从渲染文本推导（仅限迁移前的票据）
+    route_text: rec.source_route_text ?? legacyRouteText(rec.source_text),
     truncated: false,
     mentioned_self: rec.message_type === "group",
     segments: [],
@@ -216,7 +218,7 @@ export class Dispatcher {
       nickname: msg.nickname,
     };
     const reply = msg.segments.find((s) => s.type === "reply") as { data: { id?: string } } | undefined;
-    const route = routeMessage(msg.text, this.prefixes);
+    const route = routeMessage(msg.route_text, this.prefixes);
     const conv = await harness.createConversation(
       {
         ownership: { kind: "ownerless" },
@@ -263,7 +265,7 @@ export class Dispatcher {
       const doc = await tx.doc(TicketDoc, conversationId);
       if (!doc.route) {
         // v2 遗留票据：按原文重新分流
-        const r = routeMessage(doc.text, this.prefixes);
+        const r = routeMessage(legacyRouteText(doc.text), this.prefixes);
         doc.route = r.route;
         if (r.route !== "agent") doc.prefix = r.prefix;
         if (r.route === "image") doc.prompt = r.prompt;

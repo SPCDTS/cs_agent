@@ -38,6 +38,7 @@ interface TicketRow {
   source_message_id: string;
   source_nickname: string;
   source_text: string | null;
+  source_route_text: string | null;
   created_at: string;
   status: string;
   attempted_at: string | null;
@@ -58,6 +59,7 @@ function toRecord(row: TicketRow): ReplyTicketRecord {
     created_at: row.created_at,
     status: row.status as TicketStatus,
   };
+  if (row.source_route_text !== null && row.source_route_text !== undefined) record.source_route_text = row.source_route_text;
   if (row.attempted_at !== null) record.attempted_at = row.attempted_at;
   if (row.sent_at !== null) record.sent_at = row.sent_at;
   if (row.reply_message_id !== null) record.reply_message_id = row.reply_message_id;
@@ -74,6 +76,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   source_message_id TEXT NOT NULL,
   source_nickname TEXT NOT NULL,
   source_text TEXT NOT NULL DEFAULT '',
+  source_route_text TEXT,
   created_at TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('pending','sending','sent','uncertain')),
   attempted_at TEXT,
@@ -98,11 +101,14 @@ export class ReplyStore {
     this.migrate();
   }
 
-  /** 旧库补列：source_text（崩溃对账需要原文）。 */
+  /** 旧库补列：source_text（崩溃对账需要原文）、source_route_text（分流文本；旧行保持 NULL）。 */
   private migrate(): void {
     const columns = this.db.prepare("PRAGMA table_info(tickets)").all() as { name: string }[];
     if (!columns.some(c => c.name === "source_text")) {
       this.db.exec("ALTER TABLE tickets ADD COLUMN source_text TEXT NOT NULL DEFAULT ''");
+    }
+    if (!columns.some(c => c.name === "source_route_text")) {
+      this.db.exec("ALTER TABLE tickets ADD COLUMN source_route_text TEXT");
     }
   }
 
@@ -145,10 +151,10 @@ export class ReplyStore {
   /** 返回 true 表示新建了票据行；false 表示已存在（保留原记录）。 */
   private insertTicket(ticket: string, m: InboundMessage, now: string): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO tickets
-      (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, source_text, created_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
+      (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, source_text, source_route_text, created_at, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
       .run(ticket, m.self_id, m.user_id, m.message_type === "group" ? m.group_id : null,
-        m.message_type, m.message_id, m.nickname, m.text, now);
+        m.message_type, m.message_id, m.nickname, m.text, m.route_text, now);
     return Number(result.changes) === 1;
   }
 

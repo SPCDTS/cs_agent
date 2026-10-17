@@ -77,8 +77,9 @@ class BridgeStub {
   }
 }
 
-function inbound(text: string, opts: { id?: string; group?: string; user?: string } = {}): InboundMessage {
+function inbound(text: string, opts: { id?: string; group?: string; user?: string; routeText?: string } = {}): InboundMessage {
   return {
+    route_text: opts.routeText ?? text,
     message_id: opts.id ?? "100",
     time: 1_760_000_000,
     message_type: opts.group ? "group" : "private",
@@ -220,18 +221,25 @@ describe("rule router → image path", () => {
     });
   });
 
-  it("group message with leading [at] placeholder still routes; TicketDoc records route and prefix", async () => {
+  it("group message routes on the bridge's route_text (leading at segment skipped); TicketDoc keeps text, records route and prefix", async () => {
     const r = await makeRig();
     let conversation = 0;
-    await r.dispatcher.dispatch(inbound("[at] 奶龙:画一只猫", { group: "200000001", user: "42" }), "t-grp");
+    await r.dispatcher.dispatch(inbound("[at] 奶龙:画一只猫", { group: "200000001", user: "42", routeText: " 奶龙:画一只猫" }), "t-grp");
     const convs = await r.harness.commit((tx) => tx.scanConversations({}, 10), ctx);
     for (const c of convs.items) {
       const doc = await r.harness.snapshot(TicketDoc, c.id, ctx);
       if (doc?.ticket === "t-grp") conversation = c.id;
     }
     const doc = await r.harness.snapshot(TicketDoc, conversation as never, ctx);
-    expect(doc).toMatchObject({ route: "image", prefix: "奶龙:", prompt: "画一只猫" });
+    expect(doc).toMatchObject({ text: "[at] 奶龙:画一只猫", route: "image", prefix: "奶龙:", prompt: "画一只猫" });
     expect(r.image.calls).toEqual(["画一只猫"]);
+  });
+
+  it("a literal '[at]' typed by the user is not skipped: routes to the agent (R10)", async () => {
+    const r = await makeRig();
+    await r.dispatcher.dispatch(inbound("[at] 奶龙:猫", { group: "200000001", user: "42", routeText: "[at] 奶龙:猫" }), "t-literal");
+    expect(r.image.calls).toEqual([]);
+    expect(r.backend.requests.map((q) => q.text)).toEqual(["[at] 奶龙:猫"]);
   });
 
   it("empty prompt → fixed usage reply, no generation", async () => {
