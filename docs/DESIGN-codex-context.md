@@ -123,6 +123,35 @@ context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT=low|medium|high，默�
 代码守卫 `claimBusinessCall` 改为状态机：`research ≤1 次`，`generate_image ≤1 次`，`ask_codex ≤1 次`，`ask_codex` 与 `generate_image` 互斥，`research` 之后必须接 `generate_image`。
 生图回复文案可用一句话说明参考了哪些信息（如"按今天决赛结果画了 X 队举杯"）。
 
+### 6.3 意图层的会话感知（新增需求）
+
+意图模型每条消息一个会话、无状态，但它必须知道"这条消息接在什么之后"，否则"把刚才那张图改成蓝色"、"再来一张"、"继续"都无法路由。做法仍是**紧凑推送 + 可选拉取**，不是把历史全塞进去。
+
+**交互记录表**（agent 侧，`/data/agent-interactions.sqlite` 或并入票据库）：每条处理过的票据落一行
+`interactions(scope, ticket, time, user_text≤200, action ∈ {generate_image, ask_codex, research+generate_image, fallback}, detail, reply_excerpt≤120, image_count, status ∈ {处理中, 已回复, 失败})`。
+`detail` 对生图保存**最终使用的英文提示词**（含 research 结果拼装后的版本），对 codex 保存所选推理强度。
+
+**每条新消息注入的上下文块**（放在用户消息之前，由派发器生成，不经模型）：
+```
+[近期交互 · 同一会话域 · 最近 120 分钟内最多 5 条，旧→新]
+1. 22:41 用户 De: 画一只狗 → 生图 prompt="a cute dog, photorealistic, ..." → 已发送 1 张图
+2. 22:43 用户 De: 今晚有cs比赛吗 → codex(high) → "今晚有 ESL 决赛……"(摘要)
+3. 22:44 用户 小明: @机器人 把狗换成蓝色的 → 处理中
+```
+上限：`INTENT_CONTEXT_ITEMS`（默认 5）、`INTENT_CONTEXT_WINDOW_MIN`（默认 120 分钟）、`INTENT_CONTEXT_MAX_CHARS`（默认 1500）。超出窗口则不注入任何历史，模型按独立消息处理。群聊中按**整群**为域，但每行标注发送者，模型自行判断"刚才那张图"指的是谁的。
+
+**系统提示新增规则**：
+- 如果消息是对上一条生图结果的调整（换颜色/风格/再来一张/加点什么），视为纯生图追问：以记录中的英文提示词为底稿做修改后调用 `generate_image`，不要从零重写。
+- 如果消息是对上一条 codex 回答的追问（"继续"、"详细点"、"那明天呢"），直接 `ask_codex`；codex 线程自带记忆，不要把历史复述进 prompt。
+- 如果上一条仍"处理中"而本条是对它的修改，先 `ask_codex`? 不——按本条独立意图处理，并在回复里提一句"上一条仍在处理"。（简单、可预期）
+- 记录仅用于判断意图与构造提示词，不得在回复里复述。
+
+**可选拉取**：意图层增加只读工具 `recent_context(limit≤10)`，返回同格式更早的记录，供模型在注入块不够时使用（预计很少触发）。
+
+**同一会话域内顺序处理**：派发器改为按 scope 的 FIFO 队列，同一 scope 的消息串行，不同 scope 并行（受 `AGENT_CONCURRENCY` 约束）。否则"画一只狗"和"改成蓝色"并发时追问看不到结果。这与 codex 的每 scope 互斥锁是同一个粒度。
+
+**追问生图的实现范围**：本期用"改提示词重画"实现调整；以同一张图做局部编辑（img2img / Qwen Image Edit）留作后续，需要宿主机增加对应模型与工作流。
+
 ## 7. 配置项（新增）
 
 ```
@@ -136,6 +165,9 @@ QQ_CONTEXT_MAX_CHARS=2500
 RESEARCH_MAX_CHARS=600
 RESEARCH_EFFORT=medium
 RESEARCH_TIMEOUT_SEC=180
+INTENT_CONTEXT_ITEMS=5
+INTENT_CONTEXT_WINDOW_MIN=120
+INTENT_CONTEXT_MAX_CHARS=1500
 ```
 
 ## 8. 边界与隐私
@@ -149,6 +181,7 @@ RESEARCH_TIMEOUT_SEC=180
 1. **消息库 + `qq_context` MCP + AGENTS.md + web_search 配置**：QQBridge 入库与清理、FTS5、MCP 服务与作用域注入、受管 config.toml；测试：假 OneBot 入库/撤回/清理、MCP 工具上限与越权 scope 拒绝。
 2. **按会话域线程 + 轮换**：`codex-threads.json`、每 scope 互斥、迁移旧会话、交接流程；测试：假 codex 验证 scope 隔离、阈值触发、交接失败兜底、并发。
 3. **research 工具 + 意图规则 + 状态机守卫**：测试：faux 模型三条路径、守卫拒绝非法序列、research 失败降级。
+4. **意图层会话感知**：交互记录表、上下文块注入、按 scope FIFO 派发、`recent_context` 工具、追问生图规则；测试：生图后"改成蓝色"复用提示词、codex 追问直通、超窗口不注入、同 scope 串行/跨 scope 并行。
 
 每组通过后各自重建部署一次，便于定位问题。
 
