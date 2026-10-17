@@ -174,6 +174,47 @@ interface AgentBackend {
 
 
 
+### 4.9 生图工具 v2：发挥 Qwen Image 2.1 Turbo 的能力（2026-10-18 用户需求）
+
+已核实（宿主机 ComfyUI、RTX 4070 Ti SUPER 16 GiB、INT8 Turbo + W4A8 文本编码器）：
+- Turbo 固定 8 步、CFG 1、euler/simple（调度写在权重里，改步数无效）。
+- 原生 2K（2048×2048）输出；默认 1MP；尺寸取 32 的倍数；预设最大到 2752×1536（16:9）及对应竖版。
+- 生成与编辑是同一模型：`TextEncodeQwenImage21(prompt, negative_prompt, resolution, images[], vae)` 接受多张参考图（看图编辑、多图参考），输出正/负 conditioning 与 LATENT。
+- `EmptyQwenImageLayeredLatentImage(width, height, layers)` 支持透明（RGBA/分层）输出；`QwenImage21Cache` 为 KV 缓存提速；官方模板还带 Qwen 3.5 提示词增强器（需额外模型，本期不做）。
+- 文本渲染是 Qwen Image 的强项（中英文海报、UI、招牌）。
+
+**工具接口（统一供三处使用：前缀路径、pi 后端进程内工具、codex 的 image_gen MCP）**
+```ts
+generate_image({
+  prompt: string,                 // 原文，不翻译
+  negative_prompt?: string,
+  aspect?: "1:1"|"16:9"|"9:16"|"4:3"|"3:4"|"3:2"|"2:3",   // 默认 1:1
+  size?: "1mp"|"2mp"|"2k",        // 默认 1mp；2k 仅 1:1 为 2048² ，其他比例按预设表
+  count?: 1|2|3|4,                // batch_size，默认 1
+  seed?: number,                  // 默认随机
+  reference_images?: string[],    // ≤3，仅允许本票据的 incoming 目录内文件（看图编辑/参考）
+  transparent?: boolean           // 分层潜变量，输出 PNG 带 alpha
+})
+```
+- 工作流不再用静态 JSON 文件，改为代码按参数**生成 API 图**：UNETLoader → [QwenImage21Cache] → TextEncodeQwenImage21 → EmptyLatentImage / EmptyQwenImageLayeredLatentImage → KSampler(8, 1.0, euler, simple) → VAEDecode → SaveImage。编辑图的接线（参考图经 LoadImage 送入 `images`，`resolution` 取目标尺寸的边长）须以宿主机 `comfyui_workflow_templates` 包内的官方 Qwen Image 2.1 编辑模板为准核对，不凭猜测。
+- 尺寸预设表（32 的倍数）：1mp：1:1 1024², 16:9 1344×768, 9:16 768×1344, 4:3 1152×864, 3:4 864×1152, 3:2 1216×832, 2:3 832×1216；2mp：按 1.414 倍取整到 32；2k：1:1 2048², 16:9 2752×1536, 9:16 1536×2752, 3:2 2528×1696, 2:3 1696×2528, 4:3 2368×1792, 3:4 1792×2368。超时按像素数与 count 线性放大（基准 1MP×1 = 60 s，上限 `COMFY_TIMEOUT_SEC`）。
+- 旧 `COMFY_WORKFLOW_FILE` 保留为"自定义工作流覆盖"：设置时仍走文件（只替换提示词与 seed），不设置时走生成器。`/data/workflows/` 内可放用户自定义图。
+
+**参考图来源（QQ 看图编辑）**
+- QQBridge 对**触发**的消息下载图片段（OneBot `image` 段的 `url`/`file`，≤3 张、每张 ≤10 MiB、魔数校验）到 `/data/incoming/<ticket>/`，`InboundMessage.images: string[]`；未触发的消息不下载（历史库仍只存 `[image]` 占位）。保留 7 天后清理。
+- 前缀路径：`奶龙:` 消息自带图片 → 自动作为 `reference_images`（编辑模式）。
+- 后端：pi 工具参数 `reference_images` 只接受本票据 incoming 目录内的路径；codex 的 image_gen MCP 以 `-c mcp_servers.image_gen.env.IMAGE_REFS="<逗号分隔路径>"` 注入可用参考图清单，工具参数只能从中选择。
+
+**前缀路径的内联选项**（`奶龙:` 之后、提示词之前，可多个，顺序任意，未识别的词算提示词）
+`16:9` `9:16` `4:3` `3:4` `3:2` `2:3` `1:1` / `横`(16:9) `竖`(9:16) `方`(1:1) / `2k` `2mp` / `x2` `x3` `x4` / `透明`。例：`奶龙: 横 2k 一只在雪地里的橘猫`。
+
+**提示词指引（写入 AGENTS.md 与 agent.md）**
+- 直接用用户语言描述；要在图中出现文字时，把文字放在引号里并说明位置与字体风格（Qwen 对中英文文字渲染准确）。
+- 编辑时描述"改什么、保留什么"；多图参考时说明每张图的用途。
+- 不要加 "masterpiece, 8k" 之类的 SD 式咒语。
+
+**不做**：提示词增强器、ControlNet、LoRA 管理、超过 2K 的分辨率。
+
 ## 5. 配置项（新增）
 
 ```
@@ -231,7 +272,9 @@ CODEX_REPLY_SANITIZE=true
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
 2. **规则分流 + 生图路径 + 后端抽象 + codex 适配**（§4.1–4.4）：`IMAGE_PREFIXES` 分流、两阶段生图任务、`AgentBackend` 接口与 `AGENT_BACKEND` 切换、codex 适配（固定 effort、`image_gen` MCP、图片收集、relay/direct 后处理）、按 scope FIFO。意图模型的 `route` 会话与系统提示退场（`system.md` 不再使用，保留文件但记录弃用）。测试：前缀匹配（半/全角、空提示）、生图崩溃恢复不重复、codex 适配经 fake codex、image_gen MCP 经 stdio、图片收集上限、后处理清洗。
-3. **pi-durable 后端**（§4.5、4.6）：长期 durable 会话（owner/shared）与 compaction、进程内工具（web_search / fetch_page / qq_* / generate_image）、访问范围绑定、`agent.md` 热加载提示、调用上限与超时、`AGENT_BACKEND=pi` 切换与 overrides。测试：faux 模型工具调用链、访问范围隔离、上限守卫、429 退避、切换后端互不影响。
+3. **pi-durable 后端**（§4.5、4.6）
+3b. **生图工具 v2**（§4.9）：参数化工作流生成器、尺寸预设、透明输出、参考图编辑（bridge 下载触发消息的图片）、前缀内联选项、三处接入（前缀路径 / pi 工具 / image_gen MCP）。测试：工作流生成器快照、预设表、内联选项解析、参考图路径限制、bridge 图片下载与清理；真实 ComfyUI 冒烟（1MP 文生图、16:9、透明、单图编辑）。
+（原 3）：长期 durable 会话（owner/shared）与 compaction、进程内工具（web_search / fetch_page / qq_* / generate_image）、访问范围绑定、`agent.md` 热加载提示、调用上限与超时、`AGENT_BACKEND=pi` 切换与 overrides。测试：faux 模型工具调用链、访问范围隔离、上限守卫、429 退避、切换后端互不影响。
 4. **观测系统**（§8）：事件表与埋点、指标、面板、可选告警。测试：埋点覆盖每个阶段、面板页面渲染、SSE、脱敏。
 
 决策（2026-10-17 用户确认）：设计 v2 通过；`CODEX_BROWSER=playwright` 本期开启。
