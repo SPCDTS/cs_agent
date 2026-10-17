@@ -305,3 +305,10 @@ CODEX_REPLY_SANITIZE=true
 - gpt-6-astra 评审 9 条全部修复：参考图下载 SSRF 防护（内部主机名拦截、全部 DNS 地址校验、固定 IP 连接、≤3 跳逐跳重验）；先接纳落盘再下载、按会话有界并发、重启续传；图片头尺寸/动图校验；上传副本用完覆盖为 1×1 透明 PNG；2K 预算按实测调整、超时后延期收取；目录 confinement 顺序；别名查找原型键；stdio 测试统一构建。
 - 运维变更：`.env` 清空 `COMFY_WORKFLOW_FILE` 以启用参数化工作流，`COMFY_TIMEOUT_SEC=600`。
 - 接受的残余：ComfyUI history/queue 仍残留上传文件名；七天清理只覆盖本机 incoming。
+
+### 第 3 组 pi 后端 + agent 路径延迟收图（2026-10-18，主会话验收通过）
+- 独立复跑：typecheck、431 测试、build、镜像构建通过（`test/qq/bridge.test.ts` 的一个发送用例偶发失败，已单独立项根治）；部署后容器 healthy，healthz 新增 `pi.threads`。
+- 代码审读：pi 请求绑定（票据/访问范围写入会话文档、非 owner 键的访问范围必须等于当前会话域）、工具调用上限、DeepSeek 搜索/抓取的 SSRF 复用。
+- gpt-6-astra 评审 1 阻断 + 4 major + 1 minor 全部修复：pi 会话改为按会话域隔离（阻断，设计稿 §4.5 已更新；原 shared 会话停用不复用）；优雅停机不再永久中止 pi 回合（协调两 harness 关闭顺序 + 持久化一次重提）；pi 生图持久化意图与 prompt_id 账本、重试复用未决任务；image_gen MCP 在提交前后即时落盘清单、lateImages 处理所有未完成项；延迟收图逐文件清单与原子写入；损坏清单隔离并保留正文。
+- 默认后端仍为 codex；pi 后端通过 `AGENT_BACKEND=pi` 或 `AGENT_BACKEND_OVERRIDES` 切换，尚未在真实 QQ 流量上验证。
+- 附带变更：vitest 在 Windows 上限制为 2 个 worker。
