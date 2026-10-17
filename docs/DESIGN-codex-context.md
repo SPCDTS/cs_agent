@@ -297,3 +297,11 @@ CODEX_REPLY_SANITIZE=true
 - 两轮对抗评审（gpt-6-sol 11 条、gpt-6-astra 6 条）全部修复：codex 回合按票据输出文件幂等；生图 submit/collect 拆分 + 提交意图 + 文件名前缀对账（历史 → 队列 → 探测输出）；scope 队首到终态语义、达到上限先中止任务；恢复按 bridge seq 排序并分页；取消信号贯穿回复准备；排队不消耗重试次数；票据工作目录终态清理并对 codex 沙箱禁读。
 - 实测：真实 codex 回合经 image_gen MCP 在宿主机 ComfyUI 生成 PNG（约 1.8 MB，写入 `call-1/`）。
 - 接受的残余：ComfyUI 接受提交与返回之间崩溃仍可能重提一次（comfy-mcp 不支持客户端指定 id）；`failed` 派发条目不清理（第四组保留策略处理）。
+
+### 生图工具 v2（2026-10-18，主会话验收通过）
+- 独立复跑：typecheck、364 测试、build、镜像构建通过；部署后容器 healthy。
+- 实现与设计 §4.9 的偏差（已确认）：透明输出不用 `EmptyQwenImageLayeredLatentImage`（属另一套 layered 模型，latent 维度不匹配），改按官方 background_removal 模板的解码链输出 RGBA，本机依赖齐全。
+- 真实 ComfyUI 结果（实现方）：1MP 15 s、16:9 40 s、2K 388 s、透明 17 s（alpha 有效）、单图编辑 14 s。
+- gpt-6-astra 评审 9 条全部修复：参考图下载 SSRF 防护（内部主机名拦截、全部 DNS 地址校验、固定 IP 连接、≤3 跳逐跳重验）；先接纳落盘再下载、按会话有界并发、重启续传；图片头尺寸/动图校验；上传副本用完覆盖为 1×1 透明 PNG；2K 预算按实测调整、超时后延期收取；目录 confinement 顺序；别名查找原型键；stdio 测试统一构建。
+- 运维变更：`.env` 清空 `COMFY_WORKFLOW_FILE` 以启用参数化工作流，`COMFY_TIMEOUT_SEC=600`。
+- 接受的残余：ComfyUI history/queue 仍残留上传文件名；七天清理只覆盖本机 incoming。
