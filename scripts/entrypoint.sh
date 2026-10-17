@@ -54,6 +54,9 @@ EFFORT="$(toml_value "${CODEX_REASONING_EFFORT:-high}" high CODEX_REASONING_EFFO
 WEB_SEARCH="$(toml_enum "${CODEX_WEB_SEARCH:-live}" live CODEX_WEB_SEARCH live cached disabled)"
 WEB_SEARCH_CONTEXT="$(toml_enum "${CODEX_WEB_SEARCH_CONTEXT:-low}" low CODEX_WEB_SEARCH_CONTEXT low medium high)"
 BROWSER="$(toml_enum "${CODEX_BROWSER:-playwright}" playwright CODEX_BROWSER playwright none)"
+# MCP 工具调用审批：cs-agent 以非交互 codex exec（approval policy never）运行，需要审批的 MCP 调用会直接失败，
+# 所以默认 auto（自动批准）。浏览器能调用哪些工具仍由 enabled_tools 白名单限定。
+MCP_APPROVAL_MODE="$(toml_enum "${CODEX_MCP_APPROVAL_MODE:-auto}" auto CODEX_MCP_APPROVAL_MODE auto prompt writes approve)"
 MCP_DATA_DIR="$(toml_path "$DATA_DIR" /data DATA_DIR)"
 case "${QQ_CONTEXT_MAX_CHARS:-}" in
   ""|*[!0-9]*) CONTEXT_MAX_CHARS=2500 ;;
@@ -122,7 +125,7 @@ PW_ENABLED_TOOLS='"browser_navigate", "browser_navigate_back", "browser_snapshot
 CONFIG="$CODEX_HOME_DIR/config.toml"
 cat > "$CONFIG.tmp" <<TOML
 # 受管文件：由 entrypoint.sh 在每次容器启动时按环境变量重写（CODEX_MODEL / CODEX_REASONING_EFFORT /
-# CODEX_WEB_SEARCH / CODEX_WEB_SEARCH_CONTEXT / CODEX_BROWSER / QQ_CONTEXT_MAX_CHARS）。
+# CODEX_WEB_SEARCH / CODEX_WEB_SEARCH_CONTEXT / CODEX_BROWSER / CODEX_MCP_APPROVAL_MODE / QQ_CONTEXT_MAX_CHARS）。
 # 不要手工修改——改动会在下次启动时被覆盖；请改 .env 后重启容器。不继承宿主机配置。
 # model_reasoning_effort 只是默认值：cs-agent 每轮按请求以 -c model_reasoning_effort=... 覆盖。
 # qq_context 的访问范围 QQ_ACCESS 不写在这里：cs-agent 每轮以 -c mcp_servers.qq_context.env.QQ_ACCESS=... 注入。
@@ -144,6 +147,7 @@ command = "node"
 args = ["/app/dist/mcp/qq-context.js"]
 startup_timeout_sec = 10
 tool_timeout_sec = 15
+default_tools_approval_mode = "$MCP_APPROVAL_MODE"
 
 [mcp_servers.qq_context.env]
 DATA_DIR = "$MCP_DATA_DIR"
@@ -160,6 +164,7 @@ args = ["--headless", "--isolated", "--browser", "chromium", "--blocked-origins"
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 enabled_tools = [$PW_ENABLED_TOOLS]
+default_tools_approval_mode = "$MCP_APPROVAL_MODE"
 
 [mcp_servers.browser.env]
 PLAYWRIGHT_BROWSERS_PATH = "$PW_BROWSERS"
