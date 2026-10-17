@@ -5,7 +5,7 @@
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import type {
-  BridgeStatus, ChatType, QQBridge, QQBridgeConfig, QQBridgeEvents,
+  BridgeStatus, ChatType, InboundMessage, QQBridge, QQBridgeConfig, QQBridgeEvents,
   ReplyResult, ReplyTicketRecord,
 } from "./types.js";
 import { createOneBotClient, isRecord, numericId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
@@ -36,6 +36,16 @@ function validateText(text: string): void {
   if (typeof text !== "string" || !text.trim() || text.length > MAX_REPLY_TEXT) {
     throw new Error("消息必须是 1～4000 字符的非空文字。");
   }
+}
+
+function idOf(value: unknown): string {
+  return typeof value === "number" || (typeof value === "string" && value) ? String(value) : "";
+}
+
+/** 消息库入库范围：允许群的全部消息 + 允许用户的私聊（与是否触发无关）。 */
+export function inFeedScope(config: Pick<QQBridgeConfig, "allowUsers" | "allowGroups">, m: InboundMessage): boolean {
+  if (m.message_type === "group") return m.group_id !== null && config.allowGroups.includes(m.group_id);
+  return config.allowUsers === "*" || config.allowUsers.includes(m.user_id);
 }
 
 function toError(value: unknown): Error {
@@ -243,8 +253,13 @@ class Bridge extends EventEmitter implements QQBridge {
     const eventSelf = event.self_id;
     if (typeof eventSelf === "number" || (typeof eventSelf === "string" && eventSelf)) this.selfId = String(eventSelf);
 
+    if (event.post_type === "notice") {
+      this.handleNotice(event);
+      return;
+    }
     const message = normalizeMessage(event);
     if (!message || message.user_id === message.self_id) return; // 非消息 / 非法 / 自回声
+    if (inFeedScope(this.config, message)) this.emitSafe("raw", message);
     if (!isTriggered(this.config, message)) return;
 
     const key = dedupeKey(message);
@@ -256,6 +271,30 @@ class Bridge extends EventEmitter implements QQBridge {
     const ticket = store.admit(message);
     if (ticket === null) return; // 持久化去重：已见过，或票据早已存在（去重键被淘汰后重到）
     this.emit("message", message, ticket);
+  }
+
+  /** 撤回通知：group_recall / friend_recall（仅允许范围内）。 */
+  private handleNotice(event: Record<string, unknown>): void {
+    const messageId = idOf(event.message_id);
+    if (!messageId) return;
+    if (event.notice_type === "group_recall") {
+      const group = idOf(event.group_id);
+      if (group && this.config.allowGroups.includes(group)) this.emitSafe("recall", "group:" + group, messageId);
+    } else if (event.notice_type === "friend_recall") {
+      const user = idOf(event.user_id);
+      if (user && (this.config.allowUsers === "*" || this.config.allowUsers.includes(user))) {
+        this.emitSafe("recall", "private:" + user, messageId);
+      }
+    }
+  }
+
+  /** 消息库监听器出错不得影响触发与回复流程。 */
+  private emitSafe(event: "raw" | "recall", ...args: unknown[]): void {
+    try {
+      this.emit(event, ...args);
+    } catch (error) {
+      this.emitError(new Error("处理 " + event + " 事件失败：" + toError(error).message));
+    }
   }
 
   private rememberSeen(key: string): void {

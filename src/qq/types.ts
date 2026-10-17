@@ -85,6 +85,13 @@ export interface BridgeStatus {
 export interface QQBridgeEvents {
   /** 仅投递已通过授权与触发规则的消息；ticket 已持久化为 pending */
   message: (message: InboundMessage, ticket: string) => void;
+  /**
+   * 允许范围内的每条入站消息（允许群的全部消息 + 允许用户的私聊），不论是否触发；
+   * 不含机器人自回声。先于同一条消息的 message 事件发出。供本地消息库入库。
+   */
+  raw: (message: InboundMessage) => void;
+  /** 允许范围内的撤回通知（OneBot notice/group_recall、friend_recall）；scope 为 group:<id> / private:<qq> */
+  recall: (scope: string, message_id: string) => void;
   connection: () => void;
   disconnect: (reason: string) => void;
   error: (error: Error) => void;

@@ -327,3 +327,45 @@ describe("send", () => {
     await expect(bridge.send("private", OWNER, "x")).rejects.toMatchObject({ uncertain: true });
   });
 });
+
+describe("raw / recall feed", () => {
+  it("emits raw for every allowed-scope message (triggered or not) before message; skips other scopes and self echo", async () => {
+    const raws: InboundMessage[] = [];
+    const order: string[] = [];
+    bridge.on("raw", m => { raws.push(m); order.push("raw:" + m.message_id); });
+    bridge.on("message", m => order.push("msg:" + m.message_id));
+    const plain = groupEvent(GROUP, STRANGER, "随便聊聊", false);
+    const mention = groupEvent(GROUP, STRANGER, "画只猫", true);
+    const otherGroup = groupEvent(OTHER_GROUP, OWNER, "别的群", true);
+    const stranger = privateEvent(STRANGER, "陌生人私聊");
+    const echo = groupEvent(GROUP, SELF_ID, "自回声", false);
+    await pushAndFlush(plain, mention, otherGroup, stranger, echo);
+    const ids = raws.map(m => m.message_id);
+    expect(ids).toContain(String(plain.message_id));
+    expect(ids).toContain(String(mention.message_id));
+    expect(ids).not.toContain(String(otherGroup.message_id));
+    expect(ids).not.toContain(String(stranger.message_id));
+    expect(ids).not.toContain(String(echo.message_id));
+    const m = String(mention.message_id);
+    expect(order.indexOf("raw:" + m)).toBeLessThan(order.indexOf("msg:" + m));
+  });
+
+  it("emits recall for group_recall / friend_recall in allowed scope only", async () => {
+    const recalls: [string, string][] = [];
+    bridge.on("recall", (scope, id) => recalls.push([scope, id]));
+    await pushAndFlush(
+      { post_type: "notice", notice_type: "group_recall", group_id: Number(GROUP), user_id: Number(STRANGER), operator_id: Number(STRANGER), message_id: 777, self_id: Number(SELF_ID) },
+      { post_type: "notice", notice_type: "group_recall", group_id: Number(OTHER_GROUP), user_id: 1, message_id: 778, self_id: Number(SELF_ID) },
+      { post_type: "notice", notice_type: "friend_recall", user_id: Number(OWNER), message_id: 779, self_id: Number(SELF_ID) },
+      { post_type: "notice", notice_type: "friend_recall", user_id: Number(STRANGER), message_id: 780, self_id: Number(SELF_ID) },
+    );
+    expect(recalls).toEqual([["group:" + GROUP, "777"], ["private:" + OWNER, "779"]]);
+  });
+
+  it("a throwing raw listener does not block triggering", async () => {
+    bridge.on("raw", () => { throw new Error("db down"); });
+    const got = await pushAndFlush(privateEvent(OWNER, "still works"));
+    expect(got.map(m => m.text)).toEqual(["still works"]);
+    expect(errors.some(e => e.message.includes("db down"))).toBe(true);
+  });
+});
