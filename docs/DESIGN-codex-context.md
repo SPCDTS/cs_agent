@@ -236,3 +236,13 @@ CODEX_REPLY_SANITIZE=true
 决策（2026-10-17 用户确认）：设计 v2 通过；`CODEX_BROWSER=playwright` 本期开启。
 
 每组完成后由 Codex 做一轮独立评审。
+
+## 9. 验收记录
+
+### 第 1 组（2026-10-18，主会话验收通过）
+- 独立复跑：typecheck、178 测试、build、镜像构建通过；`docker compose up -d --build` 部署，容器 healthy。
+- 代码审读：访问范围只来自票据/环境变量，`all` 仅 owner 私聊，所有读取带访问子句；entrypoint 对路径、枚举、可写目录白名单校验并规范化。
+- Codex 对抗评审 8 条：7 条修复（含 2 条阻断：codex 命令可读 `/data` 凭据与库 → `/etc/codex/requirements.toml` 的 `deny_read`；单线程跨会话泄露 → owner/shared 双线程），1 条接受（浏览器黑名单非安全边界，用户已允许命令联网）。
+- 主会话发现并修复：规则文件可被 codex 改写 → 移到只读的 `$CODEX_HOME/AGENTS.md`；头部昵称/引用可伪造行 → 清洗；浏览器 `browser_run_code_unsafe` 可在 MCP 进程内读凭据 → `enabled_tools` 白名单；非交互 exec 下 MCP 调用需审批 → `default_tools_approval_mode = "approve"`（`auto` 实测无效）。
+- 实测（新镜像）：沙箱内凭据/库/图片不可读，仅三个目录可写，命令可访问宿主机 ComfyUI，环境无密钥；`scripts/verify-browser-mcp.mjs` 12/12 通过；真实 codex 回合经生成配置成功调用 `qq_recent`。
+- 已知残余风险见 DEPLOY.md：`/data/prompts` 可写仅靠软规则；浏览器黑名单不拦重定向；`auto` 审批模式在工具加 readOnly 注解后或可用但未验证。
