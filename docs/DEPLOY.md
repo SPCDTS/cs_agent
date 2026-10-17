@@ -21,21 +21,23 @@
 
 ```powershell
 Copy-Item .env.example .env
-# 编辑 .env：至少填写 NAPCAT_TOKEN，确认 QQ_ALLOW_USERS / QQ_ALLOW_GROUPS
+# 编辑 .env：至少填写 NAPCAT_TOKEN、DEEPSEEK_API_KEY（或 DEEPSEEK_APIKEY），确认 QQ_ALLOW_USERS / QQ_ALLOW_GROUPS
 ```
 
 关键变量（完整列表见 `.env.example`）：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` | `openai-codex` / `gpt-6-luna` | 意图识别模型（openai-codex 目录中最便宜的）。可以切换到 `openai`、`anthropic` 等 provider，同时设置对应的 `*_API_KEY` |
+| `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` | `deepseek` / `deepseek-flash` | 意图识别模型（DeepSeek OpenAI 兼容接口 `https://api.deepseek.com`）。也可切换到 `openai-codex`（复用 `auth.json` 的 ChatGPT OAuth，如 `gpt-6-luna`）、`openai`、`anthropic` 等，后两者需设置对应的 `*_API_KEY` |
+| `DEEPSEEK_API_KEY` | 空 | DeepSeek API key；写作 `DEEPSEEK_APIKEY` 也可（启动时自动映射）。provider 为 `deepseek` 时缺少密钥，agent 启动即退出 |
+| `AGENT_THINKING_LEVEL` | `low` | 意图模型思考档位。deepseek-flash 支持 off/low/high/max，其他值就近调整（如 medium → high）并记 warn 日志 |
 | `AGENT_CONCURRENCY` | 2 | 同时处理的 QQ 消息数，多出来的排队（排队状态已持久化） |
 | `COMFY_MODE` | `mcp` | `mcp`：经 comfy-mcp；`http`：直连 ComfyUI HTTP API（默认 SD1.5 文生图工作流） |
 | `COMFY_WORKFLOW_FILE` / `COMFY_PROMPT_NODE` | `.env.example`：`/app/workflows/qwen-image-2.1-turbo-api.json` / `4` | API 格式工作流（镜像内自带本机 Qwen Image 2.1 Turbo 版本）。设置后 mcp 走 `run_workflow`，http 直接提交它。程序把提示词写入提示词节点，并随机化 seed。**本机 ComfyUI 没有 SD1.5 checkpoint，留空时默认模板会失败** |
 | `COMFY_CHECKPOINT` | 空 | 指定 checkpoint；留空时用模板默认（mcp）或第一个可用的 checkpoint（http） |
 | `CODEX_SANDBOX` | `workspace-write` | 如果容器内 codex 报 sandbox/landlock 错误，改为 `danger-full-access`（这时容器本身就是沙箱） |
 | `CODEX_TIMEOUT_SEC` / `COMFY_TIMEOUT_SEC` | 600 / 300 | 单轮超时；codex 超时后会 kill 整个进程树 |
-| `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `gpt-6-astra` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节） |
+| `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `gpt-6.1-sol` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节）。`CODEX_REASONING_EFFORT` 只是缺省值：每次 `ask_codex` 由意图模型按请求难度选 `low/medium/high/xhigh/max`，以 `-c model_reasoning_effort="…"` 覆盖（日志 `ask_codex done` 的 `reasoning_effort` 字段） |
 
 > codex 子进程只拿到最小环境变量：`PATH`、`HOME`、`LANG`/`LC_ALL`、`TERM`、`CODEX_HOME`、`NO_COLOR=1`，以及设置了的 `HTTP(S)_PROXY`/`NO_PROXY`。`NAPCAT_TOKEN`、`*_API_KEY` 等配置不会传给 codex。
 
