@@ -384,9 +384,9 @@ export function ticketImageDir(imagesDir: string, ticket: string): string {
 export function createGenerateImageTool(backend: ImageBackend, imagesDir: string) {
   return defineTool({
     name: "generate_image",
-    description: "用本地 ComfyUI 根据英文正向提示词生成图片，返回图片本地路径（随后交给 reply_qq 的 image_paths）。仅用于纯生图请求。",
+    description: "用本地 ComfyUI 根据画面描述生成图片，返回图片本地路径（随后交给 reply_qq 的 image_paths）。仅用于纯生图请求。",
     parameters: Type.Object({
-      prompt: Type.String({ description: "英文正向提示词（English positive prompt）" }),
+      prompt: Type.String({ description: "用户的原文画面描述（保留原语言，不翻译、不扩写；生图模型原生理解中文）" }),
     }),
     replay: "unsafe",
     execute: async (args, api, context) => {
