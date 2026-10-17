@@ -174,7 +174,7 @@ export class PiBackend implements AgentBackend {
         const doc = await tx.doc(PiRequestDoc, conv.id);
         // 崩溃可能发生在绑定与 submit 之间，同票据继续沿用计数、截止时间与原文。
         if (doc.ticket === req.ticket) { deadline = doc.deadline; return; }
-        Object.assign(doc, { ticket: req.ticket, access: req.access, images, content, deadline, calls: {} });
+        Object.assign(doc, { ticket: req.ticket, access: req.access, images, content, deadline, calls: {}, imageJobs: [] });
       }, context);
     } else if (known.status !== "done" && known.status !== "unanswered") {
       const bound = await this.harness.snapshot(PiRequestDoc, conv.id, context);

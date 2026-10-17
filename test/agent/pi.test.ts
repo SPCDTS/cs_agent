@@ -102,6 +102,48 @@ describe("pi durable backend", () => {
     expect(s.imageBackend.collect).toHaveBeenCalledOnce();
   });
 
+  it("interrupted image tool retries collect the persisted job with exactly one submit", async () => {
+    const s = await setup([], { disk: true });
+    const ref = path.join(s.dir, "incoming", "image-retry", "ref.png");
+    await fs.mkdir(path.dirname(ref), { recursive: true }); await fs.writeFile(ref, TRANSPARENT_PNG);
+    let collecting = false;
+    s.imageBackend.collect.mockImplementation(async (_id, _dir, ...extra: unknown[]) => {
+      collecting = true;
+      const signal = extra[0] as AbortSignal;
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+      throw new Error("interrupted");
+    });
+    s.faux.setResponses([call("generate_image", { prompt: "编辑", reference_images: [ref] })]);
+    const pending = s.pi.handle({ ...request("image-retry"), images: [ref] }, handleContext()).catch(() => undefined);
+    await vi.waitFor(() => expect(collecting).toBe(true));
+    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+    expect((await s.pi.harness.snapshot(PiRequestDoc, id, context))?.imageJobs?.[0]).toMatchObject({ ordinal: 1, prompt_id: "image-job", status: "submitted" });
+    await s.pi.close(); await pending;
+    expect(s.imageBackend.clearReferences).not.toHaveBeenCalled();
+    const restarted = await setup([call("generate_image", { prompt: "模型重试" }), reply("完成")], { disk: true, dir: s.dir });
+    const result = await restarted.pi.handle({ ...request("image-retry"), images: [ref] }, handleContext());
+    expect(result.images).toHaveLength(1);
+    expect(s.imageBackend.submit).toHaveBeenCalledOnce(); expect(restarted.imageBackend.submit).not.toHaveBeenCalled();
+    expect(restarted.imageBackend.collect).toHaveBeenCalledWith("image-job", expect.stringContaining("call-1"), expect.any(AbortSignal), expect.objectContaining({ prompt: "编辑" }));
+    expect(restarted.imageBackend.clearReferences).toHaveBeenCalledOnce();
+  });
+
+  it("reconciles an image intent when the submit response was lost instead of submitting again", async () => {
+    const s = await setup([call("generate_image", { prompt: "猫" }), call("generate_image", { prompt: "重试" }), reply()]);
+    s.imageBackend.submit.mockImplementation(async () => {
+      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+      expect((await s.pi.harness.snapshot(PiRequestDoc, id, context))?.imageJobs?.[0]).toMatchObject({ ordinal: 1, status: "intent", options: { prompt: "猫" } });
+      throw new Error("response lost after remote accept");
+    });
+    s.imageBackend.reconcile.mockImplementation(async (...args: unknown[]) => {
+      const dir = args[1] as string;
+      const file = path.join(dir, "reconciled.png"); await fs.writeFile(file, TRANSPARENT_PNG);
+      return { images: [file] };
+    });
+    expect((await s.pi.handle(request("image-intent"), handleContext())).images).toHaveLength(1);
+    expect(s.imageBackend.submit).toHaveBeenCalledOnce(); expect(s.imageBackend.reconcile).toHaveBeenCalledOnce();
+  });
+
   it("accepts only the current ticket incoming references and cleans uploads", async () => {
     let seen = "";
     const s = await setup([]);

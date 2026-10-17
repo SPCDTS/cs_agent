@@ -23,7 +23,8 @@ import { log } from "../log.js";
 import { threadKeyForSource } from "./codex-runner.js";
 import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
 import { collectNewImages } from "./image-collect.js";
-import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages } from "./image-pending.js";
+import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendingImages, savePendingImage, PendingImageMarkerError } from "./image-pending.js";
+import { readImageFiles, prepareImageFiles, validImageFile } from "./image-files.js";
 import { classifyImageError, referenceUploads, recoverRemoteUploads, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend, type RemoteUpload } from "./image-gen.js";
 import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
 import { postprocessReply, sanitizeReply, type ReplyMode } from "./reply-postprocess.js";
@@ -468,7 +469,17 @@ export function createTasks(deps: TaskDeps) {
         if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "lateImages");
         const dir = ticketImageDir(deps.imagesDir, doc.ticket);
         if (doc.lateImageJobs === undefined) {
-          const jobs = await readPendingImages(dir);
+          let jobs: Awaited<ReturnType<typeof readPendingImages>>;
+          try { jobs = await readPendingImages(dir); }
+          catch (err) {
+            if (!(err instanceof PendingImageMarkerError)) throw err;
+            await runtime.commit(async tx => {
+              (await tx.doc(TicketDoc, runtime.conversationId)).attachmentFailure = true;
+              return undefined;
+            }, context);
+            await quarantinePendingImages(dir);
+            jobs = [];
+          }
           await runtime.commit(async tx => {
             (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs = jobs.map(job => ({ ...job, extensions: 0 }));
             return undefined;
@@ -487,12 +498,15 @@ export function createTasks(deps: TaskDeps) {
           try {
             runtime.signal.throwIfAborted();
             const callDir = await pendingCallDir(dir, job.callDir);
-            let images = await collectNewImages(callDir, new Set());
-            if (!images.length) {
+            let manifest = await readImageFiles(callDir);
+            const complete = manifest?.length && (await Promise.all(manifest.map(f =>
+              f.downloaded && validImageFile(path.join(callDir, f.filename))))).every(Boolean);
+            if (job.status !== "done" && !complete) {
               const remaining = deadline - runtime.now();
               if (remaining <= 0) throw new Error("生图超时");
               const signal = AbortSignal.any([runtime.signal, AbortSignal.timeout(Math.ceil(remaining))]);
               try {
+                if (!job.prompt_id) throw new UnknownJobError("intent");
                 await deps.imageBackend.collect(job.prompt_id, callDir, signal, job.options);
               } catch (err) {
                 rethrowIfAborted(runtime.signal, err);
@@ -506,9 +520,19 @@ export function createTasks(deps: TaskDeps) {
                     return undefined;
                   }, context));
               }
-              images = await collectNewImages(callDir, new Set());
             }
-            result = images.length ? { ok: true, images } : { ok: false, failure: "failed" };
+            const images = await collectNewImages(callDir, new Set());
+            manifest = await readImageFiles(callDir) ?? await prepareImageFiles(callDir, images.map(f => path.basename(f)));
+            if (!manifest.length || manifest.some(f => !f.downloaded) ||
+                !(await Promise.all(manifest.map(f => validImageFile(path.join(callDir, f.filename))))).every(Boolean)) {
+              throw new Error("图片批次尚未完整收取");
+            }
+            result = { ok: true, images: await Promise.all(manifest.map(f => fs.realpath(path.join(callDir, f.filename)))) };
+            await runtime.commit(async tx => {
+              const j = (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!;
+              j.files = manifest; j.remoteTerminal = true; j.status = "done";
+              return undefined;
+            }, context);
           } catch (err) {
             rethrowIfAborted(runtime.signal, err);
             const window = nextCollectWindow(runtime.now(), job.extensions, job.options, err);
@@ -526,9 +550,16 @@ export function createTasks(deps: TaskDeps) {
             return undefined;
           }, context);
         }
-        // 所有结果先落盘，再删清单；此处崩溃后只补清理，不重复 collect/download。
-        await fs.rm(path.join(dir, PENDING_IMAGE_JOBS), { force: true });
-        await recoverRemoteUploads(dir, deps.imageBackend);
+        // 保留未确认远端终态的条目，票据清理也不得提前覆盖参考图。
+        doc = await ticketDoc(runtime, context);
+        if (!doc.attachmentFailure) {
+          for (const job of doc.lateImageJobs ?? []) {
+            const { deadline: _deadline, extensions: _extensions, nextCollectAt: _next, reconciliation: _steps, result: _result, files: _files, ...marker } = job;
+            await savePendingImage(dir, marker);
+          }
+          await recoverRemoteUploads(dir, deps.imageBackend);
+          if (doc.lateImageJobs?.every(j => j.status === "done")) await fs.rm(path.join(dir, PENDING_IMAGE_JOBS), { force: true });
+        }
         await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "postprocess" } }), context);
       },
       postprocess: async (_task, runtime, context) => {
@@ -555,6 +586,7 @@ export function createTasks(deps: TaskDeps) {
           const r = doc.agentResult;
           let text = r?.ok ? doc.replyDraft ?? sanitizeReply(r.text) : r ? AGENT_FAILURE_REPLIES[r.failure] : FALLBACK_REPLY;
           const late = doc.lateImageJobs ?? [];
+          if (doc.attachmentFailure) text = sanitizeReply(text.slice(0, 3900) + "\n附件收取失败，部分图片未能发送。");
           if (late.some(job => job.result && !job.result.ok)) text = sanitizeReply(text.slice(0, 3900) + "\n有一张图生成超时未能发送");
           const images = [...new Set([...(r?.ok ? r.images : []), ...late.flatMap(job => job.result?.ok ? job.result.images : [])])].slice(0, 4);
           return { text, images };

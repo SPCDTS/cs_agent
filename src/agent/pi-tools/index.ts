@@ -45,7 +45,9 @@ export function createPiExtension(opts: PiToolsOptions) {
           const doc = await tx.doc(PiRequestDoc, api.conversationId);
           if (doc.ticket !== bound.ticket) return false;
           if (doc.calls[String(api.taskId)]) return true;
-          const used = Object.values(doc.calls).filter(c => c.kind === kind).length;
+          const pending = kind === "generate_image" ? doc.imageJobs?.find(j => j.status !== "done") : undefined;
+          if (pending) { doc.calls[String(api.taskId)] = { kind, ordinal: pending.ordinal }; return true; }
+          const used = new Set(Object.values(doc.calls).filter(c => c.kind === kind).map(c => c.ordinal)).size;
           if (used >= limit) return false;
           doc.calls[String(api.taskId)] = { kind, ordinal: used + 1 };
           return true;
@@ -69,7 +71,7 @@ export function createPiExtension(opts: PiToolsOptions) {
         query: Type.String(), days: Type.Optional(Type.Integer({ minimum: 1, maximum: 180 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
       }, { additionalProperties: false })),
       history("qq_message", "读取本次授权范围的一条消息全文及最多三层引用链。", Type.Object({ message_id: Type.String() }, { additionalProperties: false })),
-      imageTool(opts.dataDir, opts.imageBackend),
+      imageTool(opts.dataDir, opts.imageBackend, opts.getHarness),
     ],
   });
 }

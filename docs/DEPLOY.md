@@ -105,7 +105,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 | `./data/codex-threads.json` | 两条固定 codex 线程：`{"owner": {thread_id, created_at, updated_at}, "shared": {…}}`。owner 私聊（`QQ_OWNER`）用 `owner`，所有群和其他私聊共用 `shared`；删掉某个键（或整个文件），对应线程下一条请求就新建。旧版的单线程 `codex-session.json` 在新文件不存在时自动迁移为 `owner`（日志 `codex thread migrated`），旧文件改名为 `codex-session.json.migrated` |
 | `./data/incoming/<ticket>/` | 本票据参考图（≤3×10 MiB），票据 source_images 保存绝对路径供恢复；7 天清理，对 codex 命令沙箱禁读、不可写 |
 | `./data/prompts/agent.md` | 启动时只播种缺失的模板，包含生图参数与提示词指引；pi 每次模型请求热加载，保留不跨会话转述私人内容的规则 |
-| `./data/images/<ticket>/` | 生成的图片。codex 回合里 image_gen 的每次调用写入独立子目录 `call-<n>/`（同名输出不会互相覆盖） |
+| `./data/images/<ticket>/` | 生成的图片。pi / image_gen 每次生图写独立 `call-<n>/`；pending-jobs.json 在提交前记录意图、提交后记录 prompt_id，image-files.json 逐张记录下载状态。重启只收取/对账，不重提；坏 marker 隔离为 .bad-<时间戳>，回复保留正文并提示附件失败。未确认远端完成时保留参考图清理清单 |
 | `./data/tickets/<ticket>/` | 票据工作目录：codex 回合的最后一条消息 `codex-last.txt`（崩溃恢复时据此不重复询问 codex）。reply 与派发终态对账均幂等清理；发送后、清理前崩溃会在恢复时补删，图片目录不动。入口脚本启动时创建。对 codex 命令沙箱禁读、不可设为可写目录 |
 | `./data/*`（QQBridge） | 票据与去重 SQLite |
 | `./data/codex/AGENTS.md` | codex 的全局规则（安全规则、QQ 回复格式、聊天记录工具与浏览器使用纪律），**受管文件**：agent 每次启动按实际生效的可写目录重写（版本标记 `<!-- cs-agent-agents-template v5 -->`，日志 `wrote codex global AGENTS.md`）。codex 执行的命令对 `/data/codex` 只读，改不了它；要改规则请改代码里的模板 |

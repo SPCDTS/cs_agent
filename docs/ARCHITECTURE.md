@@ -176,7 +176,7 @@ LOG_LEVEL=info
 
 ## 10. 实现阶段确认的偏离与补充（2026-10-18）
 
-agent 延迟收图：`image_gen` 在 `min(imageTimeoutMs(options, COMFY_TIMEOUT_SEC), IMAGE_GEN_MCP_WAIT_SEC)`（默认 MCP 上限 90 秒）超时且已拿到 prompt_id 时，将 `{prompt_id, backend, filenamePrefix, options, callDir, submittedAt}` 追加到票据目录的 `pending-jobs.json`，返回非错误的“仍在生成／无需重试”。
+agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图，收到 prompt_id 立即更新，完整收取后标 done；lateImages 接管所有非 done 条目，按原前缀对账，绝不重新 submit。每个 call 目录的 image-files.json 保存预期文件名和 downloaded 状态；HTTP 逐张临时写入后 rename，恢复只下载缺失文件；MCP fetch_outputs 写入按 prompt_id 隔离的隐藏暂存目录，完整返回后才逐张原子发布。只有所有预期文件验证通过才完成任务。清单使用 lstat、64 KiB/8 任务上限和严格字段校验，坏清单重命名为 .bad-<时间戳>，正文保留并附上附件失败说明。未确认远端终态的参考图保留，不因票据回复或收取超时而提前覆盖。
 
 `cs.agent` 新增 `handle → lateImages → postprocess → reply` 检查点；逐任务按保存的参数复用 collect/reconcile，unknown 按前缀对账、不重新提交，超时用与 cs.image 相同的延期策略（IMAGE_COLLECT_EXTENSIONS 默认 2）。TicketDoc 保存期限、延期次数、对账步骤和最终结果；结果先落盘、清单后删除，恢复不重复收取已完成任务。晚到图片显式合并进回复，失败说明在后处理之后追加“有一张图生成超时未能发送”，参考图保留到最终收取结束。
 
@@ -249,7 +249,7 @@ agent 延迟收图：`image_gen` 在 `min(imageTimeoutMs(options, COMFY_TIMEOUT_
 
 ### 10.2 生图工具 v2（2026-10-18，设计 §4.9）
 
-本节覆盖前文旧版静态工作流与 generate_image(prompt) 的说明。统一契约位于 `image-options.ts`；前缀路径与 image_gen MCP 共用校验、尺寸表及 `qwen-workflow.ts` 生成器。pi 后端仍为第 3 组占位，已提供可复用契约及 agent.md 模板，本期没有新增真实 pi 模型执行。
+本节覆盖前文旧版静态工作流与 generate_image(prompt) 的说明。统一契约位于 `image-options.ts`；前缀路径与 image_gen MCP 共用校验、尺寸表及 `qwen-workflow.ts` 生成器。pi 后端的执行与恢复机制见 10.3；两条工具路径共用参数契约及图片恢复逻辑。
 
 | 环节 | 实现 |
 |---|---|
@@ -288,7 +288,7 @@ agent 延迟收图：`image_gen` 在 `min(imageTimeoutMs(options, COMFY_TIMEOUT_
 | 扩展 | defineExtension(`cs-pi`) 注册六种工具、section 与 ToolTask.beforeTool hook；hook 在同事务内按 taskId 去重计数，搜索/抓页各 4、历史合计 4、生图 2 |
 | 历史工具 | 直接复用 callQQContextTool → ContextStore + format，绑定 access；qq_recent/qq_search 总量≤2500 字，qq_message≤1500 字 |
 | 联网工具 | DeepSeek Search/Fetch 固定 API 地址；仅 429 一次退避，响应体有上限，错误不回显服务端正文；公开 URL 校验复用 forbiddenAddress，DNS 全量地址检查。服务端重定向与 DNS 固定不在本机控制范围 |
-| 图片 | 共用 ImageOptions、ImageBackend.submit/collect、参考图验证与图片收集，目录限于 ticket/call-n；上传前保存清理清单。unsafe 工具中断不盲目重提，requestId 只保证输入幂等 |
+| 图片 | 共用 ImageOptions、ImageBackend.submit/collect、参考图验证与图片收集，目录限于 ticket/call-n；提交前在 cs.pi.request.imageJobs 保存 ordinal/filenamePrefix/options，并写 pending-jobs.json 镜像；提交后立即保存 prompt_id。unsafe 工具中断后模型重试优先收取/对账未完成任务，不另占次数、不重复 submit；仅远端终态后覆盖参考图 |
 | 压缩 | enabled=true；reserve/background 使用库默认 16384/32768 或 PI_COMPACTION_*；keepRecentTokens 保持默认 20000，无轮换 |
 | 提示词 | 新文件缺失播种；agent.md 按 mtime/size 缓存读取，section 每次模型请求重建；既有文件不覆盖 |
 | 健康与验证 | healthz 增加 pi.threads；faux provider 覆盖工具链、权限、上限、图片回复、隔离/串行、SQLite 恢复与重复提交、热加载、超时和自动压缩；不调用真实模型、QQ、ComfyUI 或 DeepSeek |

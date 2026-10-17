@@ -7,7 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { McpImageBackend, type ImageBackend } from "../../src/agent/image-gen.js";
+import { HttpImageBackend, McpImageBackend, type ImageBackend } from "../../src/agent/image-gen.js";
 import { collectNewImages } from "../../src/agent/image-collect.js";
 import { backendConfigFromEnv, createImageGenServer, MAX_CALLS, resolveTicketDir } from "../../src/mcp/image-gen-server.js";
 import { FIXTURES, tmp } from "../agent/helpers.js";
@@ -109,6 +109,22 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     expect(jobs[1].filenamePrefix).not.toBe(jobs[0].filenamePrefix);
     expect(prompts.length - before).toBe(2);
   });
+  it("killing the MCP process after submit leaves a collectable marker without resubmission", async () => {
+    const dir = tmp("cs-imggen-kill-"), ticketDir = path.join(dir, "images", "killed");
+    const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: ticketDir, IMAGE_GEN_MCP_WAIT_SEC: "30",
+      COMFY_MODE: "http", COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: "30" });
+    const before = prompts.length;
+    const pending = c.callTool({ name: "generate_image", arguments: { prompt: "SLOW process-kill" } }).catch(() => undefined);
+    const marker = path.join(ticketDir, "pending-jobs.json");
+    await vi.waitFor(() => expect(JSON.parse(readFileSync(marker, "utf8"))[0]).toMatchObject({ status: "submitted", prompt_id: expect.any(String) }));
+    const job = JSON.parse(readFileSync(marker, "utf8"))[0];
+    await c.close(); await pending;
+    expect(JSON.parse(readFileSync(marker, "utf8"))[0].status).toBe("submitted");
+    slowIds.delete(job.prompt_id);
+    const files = await new HttpImageBackend({ baseUrl: comfyUrl, timeoutMs: 1000 }).collect(job.prompt_id, job.callDir, undefined, job.options);
+    expect(files).toHaveLength(1); expect(prompts.length - before).toBe(1);
+  });
+
   it("lists generate_image as a non-read-only tool", async () => {
     const dir = tmp("cs-imggen-");
     const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: path.join(dir, "images", "t1") });
@@ -132,7 +148,8 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     const files = JSON.parse(textOf(r)).files as string[];
     expect(files).toHaveLength(1);
     expect(files[0]).toMatch(/^call-1\/[^/]+\.png$/);
-    expect(readdirSync(ticketDir)).toEqual(["call-1"]);
+    expect(readdirSync(ticketDir)).toEqual(["call-1", "pending-jobs.json"]);
+    expect(JSON.parse(readFileSync(path.join(ticketDir, "pending-jobs.json"), "utf8"))[0].status).toBe("done");
     expect(readFileSync(path.join(ticketDir, files[0]!)).subarray(0, 8)).toEqual(PNG.subarray(0, 8));
     expect((prompts[before] as Record<string, { inputs: { text?: string } }>)["4"]!.inputs.text).toBe("一只橘猫");
   });
@@ -244,7 +261,7 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
       const r = await client.callTool({ name: "generate_image", arguments: { prompt: "FAIL please" } });
       expect(r.isError).toBe(true);
       expect(textOf(r)).toMatch(/生图失败/);
-      expect(existsSync(path.join(dir, "images", "t2", "pending-jobs.json"))).toBe(false);
+      expect(JSON.parse(readFileSync(path.join(dir, "images", "t2", "pending-jobs.json"), "utf8"))[0].status).toBe("intent");
     } finally {
       await dispose();
     }

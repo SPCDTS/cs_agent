@@ -14,9 +14,10 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { classifyImageError, referenceUploads, type ImageBackend, type ImageBackendConfig } from "../agent/image-gen.js";
 import { imageTimeoutMs } from "../agent/image-options.js";
-import { appendPendingImage } from "../agent/image-pending.js";
+import { savePendingImage, type PendingImageJob } from "../agent/image-pending.js";
 import { isLoopbackUrl } from "../agent/loopback-proxy.js";
 import { loadConfig } from "../config.js";
+import { readImageFiles, validImageFile } from "../agent/image-files.js";
 import { collectNewImages } from "../agent/image-collect.js";
 
 export const PROMPT_MAX = 2000;
@@ -149,28 +150,37 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
     const submission = { filenamePrefix: "cs-" + randomUUID(), referenceSubfolder: path.basename(dir) + "-" + path.basename(callDir) };
     const uploads = referenceUploads(options, submission.referenceSubfolder);
     const manifest = path.join(callDir, "remote-uploads.json");
-    let pending = false;
+    let done = false;
+    let job: PendingImageJob | undefined;
     let promptId: string | undefined;
     const submittedAt = Date.now();
     try {
       backend ??= deps.createBackend();
+      job = { backend: backend.name, filenamePrefix: submission.filenamePrefix, options, callDir, submittedAt, status: "intent" };
+      await savePendingImage(dir, job);
       if (uploads.length) await fs.writeFile(manifest, JSON.stringify(uploads), "utf8");
       const signal = AbortSignal.timeout(Math.ceil(imageTimeoutMs(options, Math.min(deps.imageTimeoutCapMs ?? 300_000, deps.waitMs ?? 90_000))));
       promptId = await backend.submit(options, submission, signal);
+      job.prompt_id = promptId; job.status = "submitted";
+      await savePendingImage(dir, job);
       await backend.collect(promptId, callDir, signal, options);
+      const files = await readImageFiles(callDir);
+      if (!(await collectNewImages(callDir, new Set())).length || (files && (files.some(f => !f.downloaded) ||
+          !(await Promise.all(files.map(f => validImageFile(path.join(callDir, f.filename))))).every(Boolean)))) throw new Error("未完整收取有效图片");
+      job.status = "done"; job.remoteTerminal = true;
+      await savePendingImage(dir, job);
+      done = true;
     } catch (err) {
       const kind = classifyImageError(err);
       if (kind === "timeout" && promptId && backend) {
         // 保存成功后才告知模型无需重试；参考图由主进程在最终收取后清理。
-        pending = true;
-        await appendPendingImage(dir, { prompt_id: promptId, backend: backend.name,
-          filenamePrefix: submission.filenamePrefix, options, callDir, submittedAt });
+        // 意图及 prompt_id 已落盘，所有非 done 条目由 lateImages 接管。
         return { ...text(`图片仍在生成（任务 ${promptId} 已提交），完成后会随回复自动发送；无需重试。`), isError: false };
       }
       process.stderr.write(`image_gen: generate failed (${kind}): ${(err as Error).message.slice(0, 300)}\n`);
       return text((err as Error).message.startsWith("透明输出未启用：") ? (err as Error).message : `${FAILURE_TEXT[kind] ?? "生图失败"}，请如实告知用户。`, true);
     } finally {
-      if (!pending && uploads.length && backend?.clearReferences) {
+      if (done && uploads.length && backend?.clearReferences) {
         await backend.clearReferences(uploads);
         await fs.unlink(manifest);
       }

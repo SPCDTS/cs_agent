@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -28,11 +29,11 @@ describe("McpImageBackend (fake comfy-mcp over stdio)", () => {
     const files = await backend.generate({ prompt: "a red fox in snow" }, out);
     expect(files).toEqual([path.join(out, "ComfyUI_00001_.png")]);
     expect(existsSync(files[0]!)).toBe(true);
-    const calls = JSON.parse(readFileSync(path.join(out, "calls.json"), "utf8")) as [string, any][];
+    const calls = JSON.parse(readFileSync(path.join(out, ".download", createHash("sha256").update("pid-1").digest("hex"), "calls.json"), "utf8")) as [string, any][];
     expect(calls.map((c) => c[0])).toEqual(["run_workflow", "job", "job", "fetch_outputs"]);
     expect(calls[0]![1].workflow["4"].inputs.prompt).toBe("a red fox in snow");
     expect(calls[1]![1]).toMatchObject({ action: "wait", prompt_id: "pid-1" });
-    expect(calls[3]![1]).toMatchObject({ prompt_id: "pid-1", out_dir: out });
+    expect(calls[3]![1]).toMatchObject({ prompt_id: "pid-1", out_dir: path.join(out, ".download", createHash("sha256").update("pid-1").digest("hex")) });
   });
 
   it("tool error surfaces as an exception", async () => {
@@ -76,6 +77,18 @@ describe("McpImageBackend (fake comfy-mcp over stdio)", () => {
 });
 
 describe("HttpImageBackend submit / collect (fake ComfyUI HTTP)", () => {
+  it("不会把带部分输出的非终态任务当成完成", async () => {
+    let polls = 0;
+    const fake = vi.spyOn(globalThis, "fetch").mockImplementation(async input => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/history/")) return Response.json({ active: { status: { completed: ++polls >= 2 }, outputs: { "9": { images: [{ filename: "one.png" }] } } } });
+      expect(polls).toBe(2);
+      return new Response(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64"));
+    });
+    try { expect(await new HttpImageBackend({ baseUrl: "http://comfy.test", timeoutMs: 1000, pollMs: 1 }).collect("active", tmp())).toHaveLength(1); }
+    finally { fake.mockRestore(); }
+  });
+
   it("collect by prompt_id after a restart: no second POST /prompt; queued job is waited for; unknown job → UnknownJobError (R2)", async () => {
     const http = await import("node:http");
     const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -303,7 +316,7 @@ describe("workflow file route", () => {
       const id = await b.submit({ prompt: "a blue bird" }, { filenamePrefix: "cs-abcdef123456-2" });
       const files = await b.collect(id, out);
       expect(files).toHaveLength(1);
-      const calls = JSON.parse(readFileSync(path.join(out, "calls.json"), "utf8")) as [string, any][];
+      const calls = JSON.parse(readFileSync(path.join(out, ".download", createHash("sha256").update("pid-1").digest("hex"), "calls.json"), "utf8")) as [string, any][];
       expect(calls.map((c) => c[0])).toEqual(["run_workflow", "job", "job", "fetch_outputs"]);
       expect(calls[0]![1].wait).toBe(false);
       expect(calls[0]![1].workflow["4"].inputs.prompt).toBe("a blue bird");

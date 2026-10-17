@@ -4,7 +4,7 @@
  * 提交与收取分开（submit 返回 prompt_id；collect 按 prompt_id 等待并下载输出）：生图任务在两步之间提交检查点，
  * 崩溃恢复时只按已记录的 prompt_id 收取，不重复提交；服务端不认识该任务时 collect 抛 UnknownJobError。
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -15,6 +15,8 @@ import { imageTimeoutMs, validateImageOptions, type ImageOptions } from "./image
 import { buildQwenWorkflow, QWEN_MODELS, type QwenModels } from "./qwen-workflow.js";
 import { validateImageHeader } from '../qq/image-header.js';
 import { loadImage } from "../qq/image.js";
+import { prepareImageFiles, saveImageFile, atomicJson } from "./image-files.js";
+import { readPendingImages } from "./image-pending.js";
 import { log } from "../log.js";
 
 export interface ImageBackend {
@@ -41,9 +43,13 @@ export function referenceUploads(input: ImageOptions, subfolder: string): Remote
 /** MCP 独立进程的 write-ahead 清单；主进程恢复时也会重做覆盖。 */
 export async function recoverRemoteUploads(root: string, backend: Pick<ImageBackend, 'clearReferences'>): Promise<void> {
   if (!backend.clearReferences) return;
+  // 未确认远端终态的参考图不得被票据清理覆盖；坏清单同样保守保留。
+  const pending = await readPendingImages(root).catch(() => undefined);
+  if (!pending || (await fs.readdir(root).catch(() => [] as string[])).some(name => name.startsWith("pending-jobs.json.bad-"))) return;
+  const protectedDirs = new Set(pending.filter(j => !j.remoteTerminal && j.status !== "done").map(j => path.resolve(j.callDir)));
   for (const ent of await fs.readdir(root, { withFileTypes: true }).catch(() => [])) {
     const file = path.join(root, ent.name);
-    if (ent.isDirectory() && !ent.isSymbolicLink()) await recoverRemoteUploads(file, backend);
+    if (ent.isDirectory() && !ent.isSymbolicLink() && !protectedDirs.has(path.resolve(file))) await recoverRemoteUploads(file, backend);
     else if (ent.isFile() && ent.name === 'remote-uploads.json') {
       await backend.clearReferences(JSON.parse(await fs.readFile(file, 'utf8')));
       await fs.unlink(file);
@@ -360,17 +366,27 @@ export class McpImageBackend implements ImageBackend {
       break;
     }
 
-    await fs.mkdir(outDir, { recursive: true });
-    await this.callJob(
-      "fetch_outputs",
-      this.args("fetch_outputs", { prompt_id: id, out_dir: { alts: ["output_dir", "dest"], value: outDir } }),
-      promptId,
-      sig,
-    );
-    const files = await listImages(outDir);
-    if (files.length === 0) throw new Error("fetch_outputs 没有产出图片");
+    const stage = path.join(outDir, ".download", createHash("sha256").update(promptId).digest("hex"));
+    const complete = path.join(stage, "complete.json");
+    await fs.mkdir(stage, { recursive: true });
+    let names: string[];
+    if (await fs.access(complete).then(() => true, () => false)) {
+      names = JSON.parse(await fs.readFile(complete, "utf8"));
+    } else {
+      await this.callJob("fetch_outputs", this.args("fetch_outputs", {
+        prompt_id: id, out_dir: { alts: ["output_dir", "dest"], value: stage },
+      }), promptId, sig);
+      names = (await listImages(stage)).map(file => path.basename(file)).slice(0, 4);
+      if (!names.length) throw new Error("fetch_outputs 没有产出图片");
+      await atomicJson(complete, names);
+    }
+    const manifest = await prepareImageFiles(outDir, names);
+    for (const [index, item] of manifest.entries()) {
+      sig.throwIfAborted();
+      if (!item.downloaded) await saveImageFile(outDir, manifest, index, await fs.readFile(path.join(stage, item.filename)));
+    }
     this.jobs.delete(promptId);
-    return files.slice(0, 4);
+    return manifest.map(item => path.join(outDir, item.filename));
   }
 
   async close(): Promise<void> {
@@ -524,7 +540,7 @@ export class HttpImageBackend implements ImageBackend {
         if (!(await this.inQueue(id, sig)) && !(entry = await this.historyEntry(id, sig))) throw new UnknownJobError(id, "not in history or queue");
       }
       if (entry?.status?.status_str === "error") throw new Error("ComfyUI 任务执行失败");
-      if (entry?.status?.completed || (entry?.outputs && Object.keys(entry.outputs).length > 0)) break;
+      if (entry?.status?.completed === true || (entry?.status?.completed !== false && entry?.outputs && Object.keys(entry.outputs).length > 0)) break;
       await sleep(this.opts.pollMs ?? 1000, undefined, { signal: sig });
     }
 
@@ -535,16 +551,18 @@ export class HttpImageBackend implements ImageBackend {
   }
 
   private async download(images: ComfyImage[], outDir: string, signal: AbortSignal, probe = false): Promise<string[]> {
+    const outputs = images.slice(0, 4);
+    const manifest = await prepareImageFiles(outDir, outputs.map(img => path.basename(img.filename)));
     const files: string[] = [];
-    for (const img of images.slice(0, 4)) {
+    for (const [index, img] of outputs.entries()) {
+      const dest = path.join(outDir, manifest[index]!.filename);
+      if (manifest[index]!.downloaded) { files.push(dest); continue; }
       const q = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder ?? "", type: img.type ?? "output" });
       const res = await fetch(this.url(`view?${q}`), { signal });
       if (probe && res.status === 404) continue;
       if (!res.ok) throw new Error(`ComfyUI /view HTTP ${res.status}`);
       const bytes = Buffer.from(await res.arrayBuffer());
-      await fs.mkdir(outDir, { recursive: true });
-      const dest = path.join(outDir, path.basename(img.filename));
-      await fs.writeFile(dest, bytes);
+      await saveImageFile(outDir, manifest, index, bytes);
       files.push(dest);
     }
     return files;
@@ -562,7 +580,8 @@ export class HttpImageBackend implements ImageBackend {
         const images = outputImages(entry).filter(img => img.filename.startsWith(`${filenamePrefix}_`));
         if (!images.length) continue;
         await onStep?.({ step: "history", status: "matched", prompt_id: id, filenames: images.map(img => img.filename) });
-        return { prompt_id: id, images: await this.download(images, outDir, sig) };
+        return { prompt_id: id, images: (entry as any)?.status?.completed === false
+          ? await this.collect(id, outDir, sig, options.imageOptions) : await this.download(images, outDir, sig) };
       }
       await onStep?.({ step: "history", status: "empty" });
       return undefined;
