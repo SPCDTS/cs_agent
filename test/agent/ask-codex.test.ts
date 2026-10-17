@@ -5,6 +5,7 @@ import {
   buildCodexEnv,
   buildCodexPrompt,
   sourceLabel,
+  threadKeyForSource,
   CodexRunner,
   CodexTimeoutError,
   ensureWorkspaceAgentsMd,
@@ -22,13 +23,21 @@ import {
 } from "../../src/agent/tools/ask-codex.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
+/** codex-threads.json 中某个键的记录 */
+const threadOf = (dir: string, key: "owner" | "shared" = "shared") =>
+  JSON.parse(readFileSync(path.join(dir, "codex-threads.json"), "utf8"))[key] as { thread_id: string; created_at?: string } | undefined;
+/** 预置 shared 线程记录 */
+const seedShared = (dir: string, rec: Record<string, string>) =>
+  writeFileSync(path.join(dir, "codex-threads.json"), JSON.stringify({ shared: rec }));
+
 /** 与 setup() 相同的 runner 参数（同一目录，复用日志文件）。 */
 function setupOpts(dir: string) {
   return {
     command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
     codexHome: path.join(dir, "codex"),
     workspaceDir: path.join(dir, "ws"),
-    sessionFile: path.join(dir, "codex-session.json"),
+    threadsFile: path.join(dir, "codex-threads.json"),
+    legacySessionFile: path.join(dir, "codex-session.json"),
     sandbox: "workspace-write" as const,
     timeoutMs: 10_000,
     env: { FAKE_CODEX_LOG: path.join(dir, "calls.jsonl"), FAKE_CODEX_THREAD: "thread-fresh" },
@@ -42,7 +51,8 @@ function setup(extra: { sleepMs?: number; timeoutMs?: number; thread?: string } 
     command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
     codexHome: path.join(dir, "codex"),
     workspaceDir: path.join(dir, "ws"),
-    sessionFile: path.join(dir, "codex-session.json"),
+    threadsFile: path.join(dir, "codex-threads.json"),
+    legacySessionFile: path.join(dir, "codex-session.json"),
     sandbox: "workspace-write",
     timeoutMs: extra.timeoutMs ?? 10_000,
     env: {
@@ -222,30 +232,29 @@ describe("CodexRunner", () => {
 
   it("persists thread id as soon as thread.started arrives, even if the turn then times out", async () => {
     const { dir, runner } = setup({ sleepMs: 20_000, timeoutMs: 1500, thread: "thread-early" });
-    const sessionFile = path.join(dir, "codex-session.json");
+    const sessionFile = path.join(dir, "codex-threads.json");
     const pending = runner.ask("slow");
     const t0 = Date.now();
     while (!existsSync(sessionFile) && Date.now() - t0 < 1400) await new Promise((r) => setTimeout(r, 20));
-    expect(JSON.parse(readFileSync(sessionFile, "utf8")).thread_id).toBe("thread-early"); // 进程仍在运行
+    expect(threadOf(dir)?.thread_id).toBe("thread-early"); // 进程仍在运行
     await expect(pending).rejects.toBeInstanceOf(CodexTimeoutError);
-    expect(JSON.parse(readFileSync(sessionFile, "utf8")).thread_id).toBe("thread-early");
+    expect(threadOf(dir)?.thread_id).toBe("thread-early");
   });
 
   it("resume failure that is not a missing session keeps the saved id and returns an error", async () => {
     const { dir, runner, calls } = setup({ thread: "thread-new" });
-    const sessionFile = path.join(dir, "codex-session.json");
-    writeFileSync(sessionFile, JSON.stringify({ thread_id: "flaky-1" }));
+    seedShared(dir, { thread_id: "flaky-1" });
     await expect(runner.ask("again")).rejects.toThrow(/codex 执行失败/);
     expect(calls().filter((c) => c.phase === "start")).toHaveLength(1);
-    expect(JSON.parse(readFileSync(sessionFile, "utf8")).thread_id).toBe("flaky-1");
+    expect(threadOf(dir)?.thread_id).toBe("flaky-1");
   });
 
   it("first turn captures thread id, persists it, returns -o text; passes CODEX_HOME and stdin prompt", async () => {
     const { dir, runner, calls } = setup();
     const answer = await runner.ask("hello there");
     expect(answer).toBe("answer to: hello there");
-    const saved = JSON.parse(readFileSync(path.join(dir, "codex-session.json"), "utf8"));
-    expect(saved.thread_id).toBe("thread-123");
+    expect(threadOf(dir)?.thread_id).toBe("thread-123");
+    expect(threadOf(dir, "owner")).toBeUndefined();
     const [start] = calls();
     expect(start.argv[0]).toBe("exec");
     expect(start.argv).toEqual(
@@ -269,12 +278,12 @@ describe("CodexRunner", () => {
 
   it("resume failure (lost session) starts a fresh session and overwrites the record", async () => {
     const { dir, runner, calls } = setup({ thread: "thread-new" });
-    writeFileSync(path.join(dir, "codex-session.json"), JSON.stringify({ thread_id: "missing-1" }));
+    seedShared(dir, { thread_id: "missing-1" });
     const answer = await runner.ask("again");
     expect(answer).toBe("answer to: again");
     const starts = calls().filter((c) => c.phase === "start");
     expect(starts.map((s) => s.argv[1])).toEqual(["resume", "--json"]);
-    expect(JSON.parse(readFileSync(path.join(dir, "codex-session.json"), "utf8")).thread_id).toBe("thread-new");
+    expect(threadOf(dir)?.thread_id).toBe("thread-new");
   });
 
   it("timeout kills the process tree and throws CodexTimeoutError", async () => {
@@ -315,6 +324,69 @@ describe("CodexRunner", () => {
     const recs = calls();
     expect(recs.map((r) => r.phase)).toEqual(["start", "end", "start", "end", "start", "end"]);
     expect(recs.filter((r) => r.phase === "start").map((r) => r.stdin)).toEqual(["A", "B", "C"]);
+  });
+});
+
+describe("owner / shared threads", () => {
+  it("threadKeyForSource: owner private → owner; groups and other private users → shared", () => {
+    const owner = "10000001";
+    expect(threadKeyForSource({ type: "private", user_id: owner, group_id: null, nickname: "" }, owner)).toBe("owner");
+    expect(threadKeyForSource({ type: "group", user_id: owner, group_id: "200000001", nickname: "" }, owner)).toBe("shared");
+    expect(threadKeyForSource({ type: "private", user_id: "555666", group_id: null, nickname: "" }, owner)).toBe("shared");
+    expect(threadKeyForSource({ type: "private", user_id: owner, group_id: null, nickname: "" }, undefined)).toBe("shared");
+    expect(threadKeyForSource(undefined, owner)).toBe("shared");
+  });
+
+  it("keeps a separate thread per key and resumes each one", async () => {
+    const { dir, runner, calls } = setup({ thread: "thread-a" });
+    await runner.ask("owner 1", { threadKey: "owner" });
+    expect(threadOf(dir, "owner")?.thread_id).toBe("thread-a");
+    expect(threadOf(dir, "shared")).toBeUndefined();
+    const r2 = new CodexRunner({ ...setupOpts(dir), env: { ...setupOpts(dir).env, FAKE_CODEX_THREAD: "thread-b" } });
+    await r2.ask("shared 1", { threadKey: "shared" });
+    await r2.ask("owner 2", { threadKey: "owner" });
+    await r2.ask("shared 2");
+    expect(threadOf(dir, "owner")?.thread_id).toBe("thread-a");
+    expect(threadOf(dir, "shared")?.thread_id).toBe("thread-b");
+    expect(await r2.readThreadIds()).toEqual({ owner: "thread-a", shared: "thread-b" });
+    const starts = calls().filter((c) => c.phase === "start");
+    expect(starts.map((c) => (c.argv[1] === "resume" ? `resume ${c.argv.at(-2)}` : "new"))).toEqual([
+      "new", "new", "resume thread-a", "resume thread-b",
+    ]);
+  });
+
+  it("owner and shared turns run concurrently; two shared turns serialize", async () => {
+    const { runner, calls } = setup({ sleepMs: 400 });
+    await Promise.all([
+      runner.ask("S1", { threadKey: "shared" }),
+      runner.ask("O1", { threadKey: "owner" }),
+      runner.ask("S2", { threadKey: "shared" }),
+    ]);
+    const recs = calls();
+    const span = (stdin: string) => {
+      const st = recs.find((r) => r.phase === "start" && r.stdin === stdin)!;
+      return { start: st.t as number, end: recs.find((r) => r.phase === "end" && r.pid === st.pid)!.t as number };
+    };
+    const s1 = span("S1"), s2 = span("S2"), o1 = span("O1");
+    expect(o1.start).toBeLessThan(s1.end); // owner 与 shared 重叠
+    expect(s1.start).toBeLessThan(o1.end);
+    expect(s2.start).toBeGreaterThanOrEqual(s1.end); // 同一键串行
+  });
+
+  it("migrates the legacy codex-session.json into the owner thread once", async () => {
+    const { dir, runner, calls } = setup();
+    writeFileSync(path.join(dir, "codex-session.json"), JSON.stringify({ thread_id: "legacy-1", updated_at: new Date().toISOString() }));
+    expect(await runner.readThreadIds()).toEqual({ owner: "legacy-1", shared: null });
+    expect(existsSync(path.join(dir, "codex-session.json"))).toBe(false);
+    expect(existsSync(path.join(dir, "codex-session.json.migrated"))).toBe(true);
+    await runner.ask("hi", { threadKey: "owner" });
+    expect(calls()[0].argv.slice(0, 2)).toEqual(["exec", "resume"]);
+    expect(calls()[0].argv.at(-2)).toBe("legacy-1");
+    // 新文件已存在时不再迁移
+    writeFileSync(path.join(dir, "codex-session.json"), JSON.stringify({ thread_id: "legacy-2" }));
+    const again = new CodexRunner(setupOpts(dir));
+    expect((await again.readThreadIds()).owner).toBe("legacy-1");
+    expect(existsSync(path.join(dir, "codex-session.json"))).toBe(true);
   });
 });
 
@@ -375,7 +447,7 @@ describe("single-thread safety valve", () => {
   it("rotates to a new thread when the rollout file exceeds the size limit", async () => {
     const { dir, calls } = setup({ thread: "thread-fresh" });
     const runner = new CodexRunner({ ...setupOpts(dir), rolloutMaxMb: 0.001 });
-    writeFileSync(path.join(dir, "codex-session.json"), JSON.stringify({ thread_id: "thread-big", created_at: new Date().toISOString() }));
+    seedShared(dir, { thread_id: "thread-big", created_at: new Date().toISOString() });
     const day = path.join(dir, "codex", "sessions", "2026", "10", "17");
     mkdirSync(day, { recursive: true });
     writeFileSync(path.join(day, "rollout-2026-10-17T00-00-00-thread-big.jsonl"), "x".repeat(4096));
@@ -384,20 +456,19 @@ describe("single-thread safety valve", () => {
     const starts = calls().filter((c) => c.phase === "start");
     expect(starts).toHaveLength(1);
     expect(starts[0].argv[1]).toBe("--json"); // 新建而非 resume
-    expect(JSON.parse(readFileSync(path.join(dir, "codex-session.json"), "utf8")).thread_id).toBe("thread-fresh");
+    expect(threadOf(dir)?.thread_id).toBe("thread-fresh");
   });
 
   it("rotates when the thread is older than the age limit; keeps resuming otherwise", async () => {
     const { dir, calls } = setup({ thread: "thread-fresh" });
     const runner = new CodexRunner({ ...setupOpts(dir), threadMaxDays: 90 });
     const old = new Date(Date.now() - 91 * 86400_000).toISOString();
-    writeFileSync(path.join(dir, "codex-session.json"), JSON.stringify({ thread_id: "thread-old", updated_at: old }));
+    seedShared(dir, { thread_id: "thread-old", updated_at: old });
     await runner.ask("a");
     await runner.ask("b");
     const starts = calls().filter((c) => c.phase === "start");
     expect(starts.map((s) => s.argv[1])).toEqual(["--json", "resume"]);
     expect(starts[1].argv.slice(-2)).toEqual(["thread-fresh", "-"]);
-    const saved = JSON.parse(readFileSync(path.join(dir, "codex-session.json"), "utf8"));
-    expect(Date.parse(saved.created_at)).toBeGreaterThan(Date.now() - 60_000);
+    expect(Date.parse(threadOf(dir)!.created_at!)).toBeGreaterThan(Date.now() - 60_000);
   });
 });

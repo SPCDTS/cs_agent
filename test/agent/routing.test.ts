@@ -131,7 +131,7 @@ async function makeRig(getPrompt?: () => string): Promise<Rig> {
     command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
     codexHome: path.join(dir, "codex"),
     workspaceDir: path.join(dir, "ws"),
-    sessionFile: path.join(dir, "codex-session.json"),
+    threadsFile: path.join(dir, "codex-threads.json"),
     sandbox: "workspace-write",
     timeoutMs: 10_000,
     env: { FAKE_CODEX_LOG: path.join(dir, "codex-calls.jsonl") },
@@ -419,7 +419,7 @@ describe("context store hooks", () => {
       () => fauxAssistantMessage(fauxToolCall("ask_codex", { prompt: "x", reasoning_effort: "low" }), { stopReason: "toolUse" }),
       () => fauxAssistantMessage(fauxToolCall("reply_qq", { text: "处理失败了" }), { stopReason: "toolUse" }),
     ]);
-    writeFileSync(path.join(r.dir, "codex-session.json"), JSON.stringify({ thread_id: "flaky-1" }));
+    writeFileSync(path.join(r.dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "flaky-1" } })); // inbound() 来自 owner 私聊
     await r.dispatcher.dispatch(inbound("问个问题", "303"), "ticket-h4");
     expect(bot(r).find((b) => b.ticket === "ticket-h4")).toMatchObject({ action: "ask_codex", status: "失败", text: "处理失败了" });
   });
@@ -459,6 +459,7 @@ describe("ask_codex context injection", () => {
     const [start] = codexStarts(r);
     expect(start.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"']));
     expect(start.stdin).toBe("[来源] 群 200000001 · De(20002) · 2026-10-17 22:41\n[引用] 小明: 今晚有cs比赛吗\n那明天呢");
+    expect(Object.keys(JSON.parse(readFileSync(path.join(r.dir, "codex-threads.json"), "utf8")))).toEqual(["shared"]);
   });
 
   it("owner private → QQ_ACCESS=all; other private → private:<qq>; no quote line without a reply segment", async () => {
@@ -471,5 +472,9 @@ describe("ask_codex context injection", () => {
     expect(owner.argv).toEqual(expect.arrayContaining(['mcp_servers.qq_context.env.QQ_ACCESS="all"']));
     expect(other.argv).toEqual(expect.arrayContaining(['mcp_servers.qq_context.env.QQ_ACCESS="private:555666"']));
     expect(owner.stdin).toMatch(/^\[来源\] 私聊 · tester\(10000001\) · \d{4}-\d\d-\d\d \d\d:\d\d\n那明天呢$/);
+    // owner 私聊 → owner 线程；其他私聊 → shared 线程（两者都是新建）
+    expect([owner.argv[1], other.argv[1]]).toEqual(["--json", "--json"]);
+    const threads = JSON.parse(readFileSync(path.join(r.dir, "codex-threads.json"), "utf8"));
+    expect(Object.keys(threads).sort()).toEqual(["owner", "shared"]);
   });
 });

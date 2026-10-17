@@ -184,7 +184,8 @@ deny_read = [
   "$C/*.sqlite*",
   "$D/*.sqlite*",
   "$D/images",
-  "$D/codex-session.json",
+  "$D/codex-session.json*",
+  "$D/codex-threads.json",
 ]
 TOML
   echo "entrypoint: ERROR cannot write $REQUIREMENTS_FILE (codex deny_read list); refusing to start without it. The image must own $(dirname "$REQUIREMENTS_FILE") by uid $(id -u)." >&2

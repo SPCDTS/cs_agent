@@ -87,7 +87,8 @@ async function main(): Promise<void> {
     command: [cfg.CODEX_BIN],
     codexHome: cfg.codexHome,
     workspaceDir: cfg.WORKSPACE_DIR,
-    sessionFile: path.join(cfg.DATA_DIR, "codex-session.json"),
+    threadsFile: path.join(cfg.DATA_DIR, "codex-threads.json"),
+    legacySessionFile: path.join(cfg.DATA_DIR, "codex-session.json"),
     sandbox: cfg.CODEX_SANDBOX,
     timeoutMs: cfg.CODEX_TIMEOUT_SEC * 1000,
     rolloutMaxMb: cfg.CODEX_ROLLOUT_MAX_MB,
@@ -184,21 +185,26 @@ async function main(): Promise<void> {
       log.warn("comfy self-check failed", { error: err });
     });
   codex
-    .readSessionId()
-    .then(async (id) => {
+    .readThreadIds()
+    .then(async (threads) => {
       const { access } = await import("node:fs/promises");
       const authOk = await access(path.join(cfg.codexHome, "auth.json")).then(() => true, () => false);
-      checks.codex = { ok: authOk, auth_json: authOk, session: id ?? null };
+      checks.codex = { ok: authOk, auth_json: authOk, threads };
     })
     .catch((err) => (checks.codex = { ok: false, error: (err as Error).message }));
 
-  const server: Server = createServer((req, res) => {
+  const server: Server = createServer(async (req, res) => {
     if (req.url !== "/healthz") {
       res.writeHead(404).end();
       return;
     }
     const st = bridge!.status();
-    const body = { ok: st.ws_connected, ws_connected: st.ws_connected, bridge: st, ...checks };
+    // 线程 id 会在运行中新建/轮换：每次请求现读 codex-threads.json
+    const codexCheck =
+      checks.codex && typeof checks.codex === "object" && "threads" in checks.codex
+        ? { ...checks.codex, threads: await codex.readThreadIds().catch(() => null) }
+        : checks.codex;
+    const body = { ok: st.ws_connected, ws_connected: st.ws_connected, bridge: st, ...checks, codex: codexCheck };
     res.writeHead(st.ws_connected ? 200 : 503, { "Content-Type": "application/json" }).end(JSON.stringify(body));
   });
   server.listen(cfg.HEALTH_PORT, cfg.HEALTH_HOST, () => log.info("healthz listening", { port: cfg.HEALTH_PORT }));

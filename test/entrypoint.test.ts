@@ -159,7 +159,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const list = JSON.parse(/deny_read = (\[[\s\S]*?\])/.exec(r.requirements)![1]!.replace(/,\s*\]/, "]")) as string[];
     expect(list).toEqual(expect.arrayContaining([
       `${d}/codex/auth.json`, `${d}/codex/sessions`, `${d}/codex/*.sqlite*`, `${d}/codex/history.jsonl`,
-      `${d}/*.sqlite*`, `${d}/images`, `${d}/codex-session.json`,
+      `${d}/*.sqlite*`, `${d}/images`, `${d}/codex-session.json*`, `${d}/codex-threads.json`,
     ]));
     // 不能整个禁读 CODEX_HOME（codex 的 arg0 辅助程序在 $CODEX_HOME/tmp）；config.toml / AGENTS.md 可读
     expect(list).not.toContain(`${d}/codex`);

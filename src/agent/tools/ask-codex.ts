@@ -1,7 +1,8 @@
 /**
- * 固定 codex 会话：首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
- * 之后 `codex exec resume <id>`；只有确认"会话不存在"的 resume 失败才新建会话。
- * 互斥队列保证同一时刻只有一轮；超时 kill 进程树。子进程只拿到最小环境变量（不含 token / API key）。
+ * 两条固定 codex 线程：owner（owner 私聊）与 shared（所有群与其他私聊），记录在 ${DATA_DIR}/codex-threads.json。
+ * 首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
+ * 之后 `codex exec resume <id>`；只有确认"会话不存在"的 resume 失败才新建线程。
+ * 每个线程键一条互斥队列（owner 与 shared 可并行，同一键串行）；超时 kill 进程树。子进程只拿到最小环境变量（不含 token / API key）。
  * 推理强度由意图模型按请求选择，每轮以 `-c model_reasoning_effort="<档位>"` 覆盖受管 config.toml 的默认值。
  * 聊天记录访问范围每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS="<范围>"` 注入（群 → 本群，owner 私聊 → all）。
  * 安全阀：resume 前若线程 rollout 文件 > rolloutMaxMb 或线程年龄 > threadMaxDays，新建线程（历史靠 qq_context 找回）。
@@ -23,7 +24,10 @@ export interface CodexRunnerOptions {
   command: string[];
   codexHome: string;
   workspaceDir: string;
-  sessionFile: string;
+  /** ${DATA_DIR}/codex-threads.json：{ owner: {thread_id, created_at, updated_at}, shared: {...} } */
+  threadsFile: string;
+  /** 旧的单线程记录 ${DATA_DIR}/codex-session.json：新文件不存在时迁移到 owner 并改名为 *.migrated */
+  legacySessionFile?: string;
   sandbox: "read-only" | "workspace-write" | "danger-full-access";
   timeoutMs: number;
   /** 额外环境变量（测试用） */
@@ -56,7 +60,17 @@ export function qqAccessArgs(access: string | undefined): string[] {
   return ["-c", `mcp_servers.qq_context.env.QQ_ACCESS="${access}"`];
 }
 
+/** codex 线程键：owner 私聊（访问范围 all）用 owner，其余（所有群、其他私聊）共用 shared。 */
+export const THREAD_KEYS = ["owner", "shared"] as const;
+export type ThreadKey = (typeof THREAD_KEYS)[number];
+
+export function threadKeyForSource(source: TicketSource | undefined, owner: string | undefined): ThreadKey {
+  return source && accessForSource(source, owner).kind === "all" ? "owner" : "shared";
+}
+
 export interface AskOptions {
+  /** 使用哪个 codex 线程，默认 shared */
+  threadKey?: ThreadKey;
   signal?: AbortSignal;
   reasoningEffort?: ReasoningEffort;
   /** 本轮 qq_context MCP 的访问范围 */
@@ -316,31 +330,133 @@ export function killTree(pid: number | undefined): void {
   }
 }
 
+interface ThreadRecord {
+  thread_id: string;
+  created_at?: string;
+  updated_at?: string;
+}
+type ThreadsDoc = Partial<Record<ThreadKey, ThreadRecord>>;
+
+/** 解析一条线程记录；旧记录没有 created_at 时用 updated_at（只在新建线程时写入，等价于创建时间）。 */
+function parseThread(j: unknown): ThreadRecord | undefined {
+  if (!j || typeof j !== "object") return undefined;
+  const r = j as Record<string, unknown>;
+  if (typeof r.thread_id !== "string" || !r.thread_id) return undefined;
+  const created = typeof r.created_at === "string" ? r.created_at : typeof r.updated_at === "string" ? r.updated_at : undefined;
+  return {
+    thread_id: r.thread_id,
+    ...(created ? { created_at: created } : {}),
+    ...(typeof r.updated_at === "string" ? { updated_at: r.updated_at } : {}),
+  };
+}
+
 export class CodexRunner {
-  private queue: Promise<unknown> = Promise.resolve();
+  /** 每个线程键一条互斥队列：owner 与 shared 可并行，同一键串行 */
+  private readonly queues = new Map<ThreadKey, Promise<unknown>>();
+  /** 线程文件的读-改-写串行化（两个键共用一个文件） */
+  private fileChain: Promise<unknown> = Promise.resolve();
+  private migrated: Promise<void> | undefined;
 
   constructor(readonly opts: CodexRunnerOptions) {}
 
-  /** 串行执行一轮；返回 codex 最后一条消息文本。 */
+  /** 在 threadKey（默认 shared）对应的线程上执行一轮；同一键串行。返回 codex 最后一条消息文本。 */
   ask(prompt: string, opts: AskOptions = {}): Promise<string> {
-    const run = this.queue.then(() => this.turn(prompt, opts));
-    this.queue = run.catch(() => undefined);
+    const key = opts.threadKey ?? "shared";
+    const run = (this.queues.get(key) ?? Promise.resolve()).then(() => this.turn(key, prompt, opts));
+    this.queues.set(key, run.catch(() => undefined));
     return run;
   }
 
-  async readSessionId(): Promise<string | undefined> {
-    return (await this.readSession())?.thread_id;
+  /** 两个线程当前的 id（healthz 用）。 */
+  async readThreadIds(): Promise<Record<ThreadKey, string | null>> {
+    const doc = await this.readThreads();
+    return { owner: doc.owner?.thread_id ?? null, shared: doc.shared?.thread_id ?? null };
   }
 
-  private async readSession(): Promise<{ thread_id: string; created_at?: string } | undefined> {
+  private async readThreads(): Promise<ThreadsDoc> {
+    await this.migrate();
     try {
-      const j = JSON.parse(await fs.readFile(this.opts.sessionFile, "utf8"));
-      if (typeof j.thread_id !== "string" || !j.thread_id) return undefined;
-      // 旧记录没有 created_at：updated_at 只在新建线程时写入，等价于创建时间
-      const created = typeof j.created_at === "string" ? j.created_at : typeof j.updated_at === "string" ? j.updated_at : undefined;
-      return { thread_id: j.thread_id, ...(created ? { created_at: created } : {}) };
+      const j = JSON.parse(await fs.readFile(this.opts.threadsFile, "utf8")) as Record<string, unknown>;
+      const doc: ThreadsDoc = {};
+      for (const key of THREAD_KEYS) {
+        const t = parseThread(j[key]);
+        if (t) doc[key] = t;
+      }
+      return doc;
     } catch {
-      return undefined;
+      return {};
+    }
+  }
+
+  private async readThread(key: ThreadKey): Promise<ThreadRecord | undefined> {
+    return (await this.readThreads())[key];
+  }
+
+  /**
+   * 迁移（只做一次）：新文件不存在而旧的单线程 codex-session.json 存在时，把旧线程放进 owner
+   * （现有线程由 owner 创建），旧文件改名为 *.migrated。
+   */
+  private migrate(): Promise<void> {
+    this.migrated ??= this.serialized(async () => {
+      const legacy = this.opts.legacySessionFile;
+      if (!legacy) return;
+      if (await fs.access(this.opts.threadsFile).then(() => true, () => false)) return;
+      let text: string;
+      try {
+        text = await fs.readFile(legacy, "utf8");
+      } catch {
+        return;
+      }
+      let old: ThreadRecord | undefined;
+      try {
+        old = parseThread(JSON.parse(text));
+      } catch {
+        old = undefined;
+      }
+      await this.writeThreadsFile(old ? { owner: old } : {});
+      await fs.rename(legacy, `${legacy}.migrated`);
+      log.info("codex thread migrated", { key: "owner", thread_id: old?.thread_id ?? null, from: legacy, to: this.opts.threadsFile });
+    });
+    return this.migrated;
+  }
+
+  private serialized<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.fileChain.then(fn);
+    this.fileChain = run.catch(() => undefined);
+    return run;
+  }
+
+  /** 原子写入（tmp + rename），崩溃时不会留下半截文件。 */
+  private async writeThreadsFile(doc: ThreadsDoc): Promise<void> {
+    const file = this.opts.threadsFile;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    await fs.writeFile(tmp, `${JSON.stringify(doc, null, 2)}\n`);
+    try {
+      await fs.rename(tmp, file);
+    } catch (err) {
+      await fs.rm(tmp, { force: true }).catch(() => undefined);
+      throw err;
+    }
+  }
+
+  /** 设置/清除某个键的线程记录（读-改-写，串行化）。 */
+  private async writeThread(key: ThreadKey, threadId: string | undefined): Promise<void> {
+    await this.migrate();
+    await this.serialized(async () => {
+      const doc = await this.readThreadsRaw();
+      const now = new Date().toISOString();
+      if (threadId) doc[key] = { thread_id: threadId, created_at: now, updated_at: now };
+      else delete doc[key];
+      await this.writeThreadsFile(doc);
+    });
+  }
+
+  private async readThreadsRaw(): Promise<ThreadsDoc> {
+    try {
+      return JSON.parse(await fs.readFile(this.opts.threadsFile, "utf8")) as ThreadsDoc;
+    } catch {
+      return {};
     }
   }
 
@@ -376,31 +492,16 @@ export class CodexRunner {
     return undefined;
   }
 
-  /** 原子写入（tmp + rename），崩溃时不会留下半截文件。 */
-  private async writeSessionId(threadId: string | undefined): Promise<void> {
-    await fs.mkdir(path.dirname(this.opts.sessionFile), { recursive: true });
-    const now = new Date().toISOString();
-    const content = threadId ? { thread_id: threadId, created_at: now, updated_at: now } : {};
-    const tmp = `${this.opts.sessionFile}.${process.pid}.${Date.now()}.tmp`;
-    await fs.writeFile(tmp, `${JSON.stringify(content, null, 2)}\n`);
-    try {
-      await fs.rename(tmp, this.opts.sessionFile);
-    } catch (err) {
-      await fs.rm(tmp, { force: true }).catch(() => undefined);
-      throw err;
-    }
-  }
-
-  private async turn(prompt: string, { signal, reasoningEffort, qqAccess }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
     const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess)];
-    const session = await this.readSession();
+    const session = await this.readThread(key);
     let id = session?.thread_id;
     if (session) {
       const reason = await this.rotationReason(session);
       if (reason) {
-        log.warn("codex thread rotated", { thread_id: session.thread_id, reason });
-        await this.writeSessionId(undefined);
+        log.warn("codex thread rotated", { key, thread_id: session.thread_id, reason });
+        await this.writeThread(key, undefined);
         id = undefined;
       }
     }
@@ -413,11 +514,11 @@ export class CodexRunner {
       if (r.code === 0) return this.result(r);
       if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
         // 已确认会话不存在：新建会话并覆盖记录
-        log.warn("codex session missing, starting fresh session", { thread_id: id, stderr: r.stderrTail.slice(-300) });
-        await this.writeSessionId(undefined);
+        log.warn("codex thread missing, starting fresh thread", { key, thread_id: id, stderr: r.stderrTail.slice(-300) });
+        await this.writeThread(key, undefined);
       } else {
         // 其他失败（网络、鉴权、限流……）：保留会话 id，下次继续 resume
-        log.warn("codex resume failed, keeping session", { thread_id: id, code: r.code, stderr: r.stderrTail.slice(-300) });
+        log.warn("codex thread resume failed, keeping thread", { key, thread_id: id, code: r.code, stderr: r.stderrTail.slice(-300) });
         throw new Error(`codex 执行失败: ${r.failure ?? `exit ${r.code}`}`);
       }
     }
@@ -427,8 +528,8 @@ export class CodexRunner {
       signal,
       async (threadId) => {
         // 一收到 thread.started 就落盘：即使本轮随后超时或进程崩溃，下一轮也能 resume 同一会话
-        await this.writeSessionId(threadId);
-        log.info("codex session created", { thread_id: threadId });
+        await this.writeThread(key, threadId);
+        log.info("codex thread created", { key, thread_id: threadId });
       },
     );
     if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
@@ -641,12 +742,14 @@ export function createAskCodexTool(runner: CodexRunner, toolOpts: AskCodexToolOp
         ? buildCodexPrompt(source, args.prompt, { ...(doc?.time ? { time: doc.time } : {}), ...(quote ? { quote } : {}) })
         : args.prompt;
       const qqAccess = source ? accessToString(accessForSource(source, toolOpts.owner)) : undefined;
+      const threadKey = threadKeyForSource(source, toolOpts.owner);
       const started = Date.now();
       try {
         const reasoningEffort = isReasoningEffort(args.reasoning_effort) ? args.reasoning_effort : undefined;
         const answer = await runner.ask(prompt, {
           signal: context.abortSignal,
           reasoningEffort,
+          threadKey,
           ...(qqAccess ? { qqAccess } : {}),
         });
         await api.commit(async (tx) => {
@@ -656,6 +759,7 @@ export function createAskCodexTool(runner: CodexRunner, toolOpts: AskCodexToolOp
           ms: Date.now() - started,
           chars: answer.length,
           reasoning_effort: reasoningEffort ?? "default",
+          thread: threadKey,
         });
         return { output: [{ type: "text", text: answer }] };
       } catch (err) {
