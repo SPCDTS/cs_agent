@@ -1,3 +1,9 @@
+import { ObsStore } from "./obs/store.js";
+import { trace } from "./obs/trace.js";
+import { Metrics, type Gauge } from "./obs/metrics.js";
+import { createDashboard } from "./obs/http.js";
+import { startAlerts } from "./obs/alerts.js";
+import { registerSecrets } from "./obs/redact.js";
 import { cleanupIncoming } from "./qq/incoming.js";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -28,6 +34,7 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   requireProviderApiKey(cfg.AGENT_MODEL_PROVIDER);
   setLogLevel(cfg.LOG_LEVEL);
+  registerSecrets([cfg.OBS_TOKEN, cfg.NAPCAT_TOKEN]);
   const ctx = BACKGROUND_CONTEXT;
   log.info("starting cs-agent", {
     provider: cfg.AGENT_MODEL_PROVIDER,
@@ -66,6 +73,8 @@ async function main(): Promise<void> {
 
   // 统一上下文消息库（${DATA_DIR}/qq-messages.sqlite）：意图层与 codex 的 qq_context MCP 共用
   const store = new ContextStore(cfg.DATA_DIR);
+  const obs = new ObsStore(cfg.DATA_DIR);
+  trace.attach(obs);
 
   let bridge: QQBridge | undefined;
   const getBridge = () => {
@@ -229,9 +238,40 @@ async function main(): Promise<void> {
     })
     .catch((err) => (checks.codex = { ok: false, error: (err as Error).message }));
 
+  const codexStatus = async () => {
+    const threads = await codex.readThreadIds();
+    return Promise.all(Object.entries(threads).map(async ([key, id]) => ({ thread_key: key, thread_id: id,
+      rollout_bytes: id ? await codex.rolloutSize(id) ?? null : null,
+      observed_turns: (obs.db.prepare("SELECT COUNT(*) n FROM events WHERE stage='model_turn' AND status='ok' AND json_extract(detail_json,'$.backend')='codex' AND json_extract(detail_json,'$.thread_key')=?").get(key) as {n:number}).n })));
+  };
+  const piStatus = async () => ({ threads: await pi.readThreadIds(), ...await pi.threadHealth(),
+    compaction: obs.db.prepare("SELECT json_extract(detail_json,'$.conversation') conversation, COUNT(*) attempts, MAX(ts) last_at FROM events WHERE stage='compaction' GROUP BY conversation").all(),
+    usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
+  const dashboard = createDashboard({ config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
+    health: () => ({ bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
+      aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
+    codex: codexStatus, pi: piStatus });
+  const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
+    gauges: async () => {
+      const q = dispatcher.status(), ws = bridge!.status();
+      const gauges: Gauge[] = [ { name: "queue_depth", value: q.waiting }, { name: "global_slots_used", value: q.active },
+        { name: "global_slots", value: q.slots }, { name: "ws_connected", value: Number(ws.ws_connected) },
+        { name: "ws_disconnect_count", value: ws.disconnect_count }, { name: "pi_conversations", value: (await pi.threadHealth()).count } ];
+      for (const [scope, depth] of Object.entries(q.scopes)) gauges.push({ name: "scope_queue_depth", labels: { scope }, value: depth });
+      for (const t of await codexStatus()) {
+        gauges.push({ name: "codex_thread_present", labels: { thread_key: t.thread_key }, value: Number(!!t.thread_id) });
+        gauges.push({ name: "codex_observed_turns", labels: { thread_key: t.thread_key }, value: t.observed_turns });
+        if(t.rollout_bytes !== null) gauges.push({ name: "codex_rollout_bytes", labels: { thread_key: t.thread_key }, value: t.rollout_bytes });
+      }
+      const aging = obs.latest("aging");
+      if (aging) gauges.push({ name: "aging_last_success", value: Number(aging.status === "ok") }, { name: "aging_last_run_ms", value: aging.ts });
+      return gauges;
+    } });
+  metrics.start();
+  const alerts = startAlerts({ enabled: cfg.ALERT_OWNER, owner: cfg.owner, bridge, trace });
   const server: Server = createServer(async (req, res) => {
     if (req.url !== "/healthz") {
-      res.writeHead(404).end();
+      await dashboard.handle(req, res);
       return;
     }
     const st = bridge!.status();
@@ -253,7 +293,9 @@ async function main(): Promise<void> {
     log.info("shutting down", { signal });
     const force = setTimeout(() => process.exit(1), 20_000);
     force.unref();
+    dashboard.close();
     server.close();
+    alerts.stop();
     aging.stop();
     await bridge!.stop().catch(() => undefined);
     await closeAgentHarnesses(harness, pi);
@@ -262,6 +304,9 @@ async function main(): Promise<void> {
     } catch {
       /* ignore */
     }
+    await metrics.stop().catch(() => undefined);
+    trace.attach(undefined);
+    obs.close();
     await imageBackend.close().catch(() => undefined);
     await comfyProxy?.close().catch(() => undefined);
     process.exit(0);

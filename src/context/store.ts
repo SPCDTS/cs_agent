@@ -446,6 +446,11 @@ export class ContextStore {
     this.db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 
+  /** 面板 scope 选择器：包括只有摘要、已无原文的域。 */
+  scopes(): string[] {
+    return (this.db.prepare("SELECT scope FROM messages UNION SELECT scope FROM summaries ORDER BY scope").all() as {scope:string}[]).map(r=>r.scope);
+  }
+
   /** 运维统计（DEPLOY 文档 / 日志用）。 */
   stats(): { messages: number; summaries: number } {
     const m = this.db.prepare("SELECT COUNT(*) AS n FROM messages").get() as { n: number };

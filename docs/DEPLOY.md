@@ -85,7 +85,7 @@ docker compose ps                 # HEALTH 列
 docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').then(r=>r.text()).then(console.log)"
 ```
 
-`/healthz` 只监听容器内的 127.0.0.1:8787，返回：
+Compose 将容器 HTTP 监听设为 0.0.0.0:8787，宿主机仅发布 127.0.0.1:8787；本地直接运行仍默认监听 127.0.0.1。`/healthz` 的 JSON 和状态码不变，返回：
 - `ws_connected`：NapCat WS 是否在线（离线时 HTTP 503，容器显示 unhealthy）
 - `comfy`：启动时 comfy 的自检结果（mcp：`server_info`；http：`/system_stats`）
 - `codex`：`auth.json` 是否存在，以及当前固定会话 id
@@ -252,3 +252,32 @@ DeepSeek Search/Fetch 使用 `DEEPSEEK_API_KEY`（兼容 `DEEPSEEK_APIKEY`），
 fetch_page 只接收无凭据的公开 HTTP(S) URL，复用入站下载的 IP 判定，解析全部 DNS 地址并拒绝任何内网地址。实际抓取发生在 DeepSeek 服务器，无法在本机固定其 DNS 结果或检查服务端重定向链；该部分依赖 DeepSeek 服务端策略，本次未执行真实 API 请求。
 
 图片写到 `DATA_DIR/images/<ticket>/call-<n>/`，最终由既有回复任务附带最多 4 张；参考图只能取本票据 incoming 清单。远端参考图清单在上传前保存，完成或失败时覆盖清理，清理失败保留供既有终态清理恢复。生图工具使用 pi-durable 的 unsafe 重放策略：崩溃中断的外部生图调用不自动重提，模型收到 interrupted；已保存图片仍可随完成的回复附带。`requestId=ticket` 保证提交幂等，不等于外部生图服务的事务性 exactly-once。慢图受 pi 总回合期限限制；此次没有改动并行任务负责的 image_gen MCP 延迟收图逻辑。
+
+## 观测面板
+
+部署新版本后访问 http://localhost:8787 。Compose 只发布宿主机 loopback 的 8787 端口，容器内通过 HEALTH_HOST=0.0.0.0 接收端口转发；无需 CDN 或额外前端服务。本次实现只构建验收镜像，不重启现用容器。
+
+| 页面 | 内容 |
+|---|---|
+| / | WS 与断线数、ComfyUI / Codex 启动检查、DeepSeek 密钥存在性、衰老最近结果、1h / 24h 完成量和错误率、队列、在途票据及最近一分钟指标 |
+| /tickets | 每页 50 条；status、scope、route、backend 筛选；状态为 processing / sent / failed / timeout / fallback |
+| /tickets/&lt;ticket&gt; | 原文摘要、路由、后端、阶段与重试、模型用量、工具调用、生图 prompt_id、原始/发送回复、票据终态和图片缩略图 |
+| /logs | 进程内最近 1000 行结构化日志，SSE 实时追加；ticket / level 筛选，浏览器最多保留 500 行 |
+| /context | 选择会话域，留空关键词看 recent，填写关键词看 search；直接复用 qq_context 与共享格式化器，包含原文和摘要 |
+| /codex | owner / shared 当前线程、rollout 字节数、保留期内观察到的回合数、全局 AGENTS.md |
+| /pi | 会话数量、键与 id、累计用量、压缩尝试数和最后时间、压缩配置 |
+| /config | 脱敏后的生效配置、agent.md 内容与修改时间 |
+
+OBS_TOKEN 默认留空；设定后首次访问 /?token=你的口令。认证成功跳转到移除口令的 URL，并设置 HttpOnly、SameSite=Strict cookie。页面、图片和 SSE 都受保护；/healthz 保持原 JSON，不要求口令。不要把带口令的 URL 分享给他人。面板只接受 localhost、127.0.0.1、[::1] Host。
+
+事件和指标存 DATA_DIR/observability.sqlite（WAL）。默认 OBS_RETENTION_DAYS=30，启动后第一次指标刷新及之后每天清理过期 events / metrics；关闭时刷新最后窗口。备份需使用 SQLite 一致性备份或包含 WAL。日志环形缓冲不落盘，重启会清空；原有 stderr 日志仍可由 Docker 采集。
+
+观测事件先脱敏再保存：已配置凭据、敏感字段、Bearer / 常见 API key / JWT、带凭据 URL 都会隐藏；原文、prompt、reply 等字符串最多 500 字。票据详情保留摘要用于诊断，不是完整聊天归档。上下文页面通过既有消息库读取，其存储保留策略不受 OBS_RETENTION_DAYS 影响。
+
+指标每 60 秒按独立窗口记录调用数、成功数、成功率、耗时 p50 / p95；超过一万次采样的类别用有界随机抽样计算分位数。窗口从共享事件库读取，因此包含 Codex 独立 image_gen MCP 的提交与收取。队列深度不含正在运行的请求；全局使用槽位、各 scope 等待数分别展示。ComfyUI 同时记录各次 submit / collect / reconcile 调用耗时，以及能匹配 prompt_id 时从提交成功到收取成功的任务总耗时（comfy_job_duration_ms），均不等同 GPU 纯计算时间。
+
+DEEPSEEK_PRICE_IN_PER_M / DEEPSEEK_PRICE_OUT_PER_M 默认 0；填入 deepseek-flash 的每百万 token 单价后估算费用，两项使用相同币种。输入包括可获得的 cache read / write；该估算不区分缓存优惠，也不包含搜索/抓页费用。用量来自 pi-ai 返回的 usage（pi、relay、衰老），未提供的用量不会猜测。观测为尽力记录，崩溃边界可能重记响应，已写入的事件通过持久化游标恢复聚合，尚未写入的事件仍可能丢失；durable 业务检查点独立，不受观测写入失败影响。
+
+ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUsers 的首项）时，WS 连续离线超过五分钟、模型鉴权失败、连续三条票据失败会经 bridge.send 向 owner 私聊告警；所有原因共用每 30 分钟一次限频。告警只带固定原因，不带用户原文或服务端错误正文。此功能仅使用 fake bridge 验证。
+
+健康含义：ComfyUI / Codex 是启动检查快照，不能证明当前网络或鉴权仍有效；DeepSeek 仅显示是否配置密钥。Pi 压缩统计表示 hook 观察到的尝试，不声明压缩成功；Codex 回合数仅覆盖观测保留期。现有 failed 派发索引必须保留以阻止 pending 票据在恢复时成为孤儿重跑，不随观测日志过期删除。

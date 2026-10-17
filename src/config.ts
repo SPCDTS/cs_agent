@@ -99,6 +99,11 @@ const EnvSchema = z.object({
 
   DATA_DIR: z.string().default("/data"),
   WORKSPACE_DIR: z.string().default("/workspace"),
+  OBS_RETENTION_DAYS: int(30),
+  OBS_TOKEN: z.string().default(""),
+  ALERT_OWNER: bool(false),
+  DEEPSEEK_PRICE_IN_PER_M: z.coerce.number().finite().nonnegative().default(0),
+  DEEPSEEK_PRICE_OUT_PER_M: z.coerce.number().finite().nonnegative().default(0),
   HEALTH_PORT: int(8787),
   HEALTH_HOST: z.string().default("127.0.0.1"),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),

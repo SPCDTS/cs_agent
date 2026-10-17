@@ -293,6 +293,25 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | 提示词 | 新文件缺失播种；agent.md 按 mtime/size 缓存读取，section 每次模型请求重建；既有文件不覆盖 |
 | 健康与验证 | healthz 增加 pi.threads；faux provider 覆盖工具链、权限、上限、图片回复、隔离/串行、SQLite 恢复与重复提交、热加载、超时和自动压缩；不调用真实模型、QQ、ComfyUI 或 DeepSeek |
 
+### 10.4 观测系统（第 4 组）
+
+观测路径不参与业务事务和检查点决策。trace.event / trace.span 写入独立 WAL 数据库 observability.sqlite；写入或订阅者失败只增加 dropped_events，不重试业务操作。主进程先初始化 trace；独立 image_gen MCP 也写同一库，SQLite busy_timeout 协调短写事务。事件按 ticket 关联，scope 从接收事件继承；所有 detail 经共享脱敏器后才进入 SQLite 或日志环形缓冲。
+
+| 层 | 实际事件与职责 |
+|---|---|
+| dispatcher | received、admitted、routed、dispatched、recovered；按业务结果和 bridge 票据终态发 reply_sent / failed / fallback，terminal=true 标记终态；错误回复成功发出仍按业务失败统计 |
+| durable tasks | phase:submit / generate / collect / handle / reply，late_images、postprocess；每次执行或恢复记录开始与结束，checkpoint 含尝试次数 |
+| backend | backend:codex / pi 包围整个 handle；Codex model_turn 含线程键、effort、原始回复；JSONL mcp_tool_call 映射 tool:&lt;name&gt;，记录输入/输出摘要与耗时 |
+| pi hook | GenerationTask 的每次请求与响应记录 model_turn 和 usage；ToolTask 的 before/after 记录 tool:&lt;name&gt;；CompactionTask 记录 compaction 尝试 |
+| 图片 | 公共接口包装记录 image:submit / image:collect；对账归 image:collect(operation=reconcile)，查询步骤发 recovered，包含 prompt_id；三条生图入口共用 |
+| 回复 | postprocess 保留原始与最终文字摘要；reply_sent 含 message_id、图片数、truncated、already_sent；relay 失败发非终态 fallback |
+
+Metrics 每 60 秒从持久化游标读取新事件（包括 MCP 进程），内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样 dispatcher 队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理两张观测表。DeepSeek 用量用真实 usage 估算，不发额外模型请求。
+
+HTTP 面板由原健康服务器承载：/healthz 分支保持 JSON 原样，其余路由交给 obs/http.ts。SSR 中文 HTML + 内联 CSS / JS、SSE，无 CDN、框架或新增依赖；上下文直接调用共享工具格式化逻辑。图片经过段校验、真实路径约束、链接拒绝与位图魔数检查；HTML 统一转义并设置 CSP。可选口令覆盖所有面板出口，Compose 只向宿主机 loopback 发布端口。
+
+告警默认关闭；开启时通过 bridge 的公共 send 接口私聊 owner，所有原因共用 30 分钟限频。未改动 QQBridge 内部实现。观测保留期不删除业务 failed 索引，避免重新认领尚为 pending 的旧票据。部署、指标语义及限制见 DEPLOY.md 的“观测面板”。
+
 ## 11. 非目标（本期不做）
 
-多轮上下文记忆、群聊上下文摘要、成员工作区、主动推送、Web 管理界面、多 codex 会话。
+成员独立工作区、通用主动推送、可写的 Web 管理界面和多用户面板权限。只读观测面板、可选运维告警、上下文摘要与隔离会话已在前述分组实现。

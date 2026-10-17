@@ -7,8 +7,10 @@ services:
       - path: .env
         required: false
     environment:
+      HEALTH_HOST: 0.0.0.0
       DATA_DIR: /data
       WORKSPACE_DIR: /workspace
+    ports: ["127.0.0.1:8787:8787"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
