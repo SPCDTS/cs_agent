@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { accessForSource, parseAccess, resolveOwner, type Access } from "../../src/context/access.js";
 import { formatMessage, formatRecent, formatSearch, formatSummary, joinCapped } from "../../src/context/format.js";
 import { ContextStore } from "../../src/context/store.js";
@@ -127,6 +127,49 @@ describe("ContextStore", () => {
     s.recordPending(`group:${G}`, "tk3", T0 + 2);
     s.completeReply("tk3", { action: "fallback", excerpt: "抱歉", status: "失败" });
     expect(formatMessage(s.recent(grp, { limit: 1 })[0]!, { now: T0 })).toMatch(/\[我\] → 失败$/);
+  });
+
+  it("completeReply renames self:<ticket> atomically and logs (not throws) on rename conflicts", () => {
+    const s = open();
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      s.recordPending(`group:${G}`, "tkA", T0);
+      expect(s.completeReply("tkA", { action: "reply", excerpt: "好", status: "已回复", reply_message_id: "7001" })).toBe(true);
+      // 重放同一结果：幂等，不报冲突
+      expect(s.completeReply("tkA", { action: "reply", excerpt: "好", status: "已回复", reply_message_id: "7001" })).toBe(true);
+      // 冲突：同 scope 已有 message_id=7002 的入站消息 → 内容照常更新，占位 id 保留，记一条 warn
+      s.ingest(msg("别人的消息", { message_id: "7002" }));
+      s.recordPending(`group:${G}`, "tkB", T0 + 1);
+      expect(s.completeReply("tkB", { action: "reply", excerpt: "第二条", status: "已回复", reply_message_id: "7002" })).toBe(true);
+      const rows = s.recent(grp, { limit: 10 });
+      expect(rows.map((r) => [r.message_id, r.text])).toEqual([
+        ["7001", "好"], ["7002", "别人的消息"], ["self:tkB", "第二条"],
+      ]);
+      const logged = err.mock.calls.map((c) => String(c[0]));
+      expect(logged.filter((l) => l.includes("rename conflict"))).toHaveLength(1);
+      // 找不到机器人行：返回 false 并记日志
+      expect(s.completeReply("nope", { action: "reply", status: "失败", reply_message_id: "7003" })).toBe(false);
+      expect(err.mock.calls.map((c) => String(c[0])).some((l) => l.includes("no bot row"))).toBe(true);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("completeReply rolls back the content update when the rename fails", () => {
+    const s = open();
+    s.recordPending(`group:${G}`, "tkC", T0);
+    const db = (s as unknown as { db: { prepare(sql: string): unknown } }).db;
+    const realPrepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      if (sql.startsWith("UPDATE messages SET message_id")) throw new Error("disk I/O error");
+      return realPrepare(sql);
+    });
+    try {
+      expect(() => s.completeReply("tkC", { action: "reply", excerpt: "不应留下", status: "已回复", reply_message_id: "7100" })).toThrow(/disk I\/O/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(s.recent(grp, { limit: 1 })[0]).toMatchObject({ message_id: "self:tkC", text: "", status: "处理中" });
   });
 
   it("purge drops covered raw rows older than rawDays and summaries older than summaryDays", () => {

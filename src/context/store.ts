@@ -8,6 +8,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { InboundMessage } from "../qq/types.js";
+import { log } from "../log.js";
 import { scopeOf, type Access } from "./access.js";
 
 export const CONTEXT_DB_FILE = "qq-messages.sqlite";
@@ -205,14 +206,44 @@ export class ContextStore {
   }
 
   /** 回复后更新机器人行：动作、细节（生图提示词 / codex 强度）、正文摘要、图片数、状态。 */
+  /**
+   * 占位 id `self:<ticket>` 换成真实 message_id 与内容更新在同一事务内完成；改名冲突（同 scope 已有该
+   * message_id）或找不到行时记日志并保留占位 id，内容更新照常提交。
+   */
   completeReply(ticket: string, r: CompleteReply): boolean {
-    const res = this.db
-      .prepare("UPDATE messages SET action = ?, detail = ?, text = ?, image_count = ?, status = ? WHERE ticket = ?")
-      .run(r.action, r.detail ?? null, clip(r.excerpt ?? "", EXCERPT_MAX), r.image_count ?? 0, r.status, ticket);
-    if (r.reply_message_id) {
-      this.db.prepare("UPDATE OR IGNORE messages SET message_id = ? WHERE ticket = ?").run(r.reply_message_id, ticket);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const res = this.db
+        .prepare("UPDATE messages SET action = ?, detail = ?, text = ?, image_count = ?, status = ? WHERE ticket = ?")
+        .run(r.action, r.detail ?? null, clip(r.excerpt ?? "", EXCERPT_MAX), r.image_count ?? 0, r.status, ticket);
+      if (r.reply_message_id) this.renameSelfRow(ticket, r.reply_message_id);
+      this.db.exec("COMMIT");
+      return Number(res.changes) > 0;
+    } catch (err) {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      throw err;
     }
-    return Number(res.changes) > 0;
+  }
+
+  /** 事务内调用：把机器人行的占位 id 换成真实 message_id，结果写日志。 */
+  private renameSelfRow(ticket: string, messageId: string): void {
+    const row = this.db.prepare("SELECT scope, message_id FROM messages WHERE ticket = ?").get(ticket) as
+      | { scope: string; message_id: string }
+      | undefined;
+    if (!row) {
+      log.warn("context reply rename: no bot row for ticket", { ticket, message_id: messageId });
+      return;
+    }
+    if (row.message_id === messageId) return; // 重放：已改名
+    const taken = this.db
+      .prepare("SELECT ticket FROM messages WHERE scope = ? AND message_id = ?")
+      .get(row.scope, messageId) as { ticket: string | null } | undefined;
+    if (taken) {
+      log.warn("context reply rename conflict: message_id already stored", { ticket, scope: row.scope, message_id: messageId, owner_ticket: taken.ticket });
+      return;
+    }
+    const res = this.db.prepare("UPDATE messages SET message_id = ? WHERE ticket = ?").run(messageId, ticket);
+    if (Number(res.changes) !== 1) log.warn("context reply rename updated no row", { ticket, message_id: messageId });
   }
 
   // ------------------------------------------------------------------ 读取（带访问过滤）
