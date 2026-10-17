@@ -72,8 +72,9 @@ tool_timeout_sec = 15
 
 ## 3. codex 执行层
 
-### 3.1 单一线程
-- 维持现有固定线程与 `codex-session.json`。
+### 3.1 两条线程：owner 与 shared（2026-10-18 用户决定）
+- 评审指出单一线程会让 owner 私聊内容经 codex 记忆泄露到群聊。改为两条线程：`owner`（owner 私聊）与 `shared`（所有群与其他用户），映射存 `codex-threads.json`，旧 `codex-session.json` 迁移为 `owner`。每条线程一把互斥锁，两条可并行。
+- 历史检索仍不按线程分域，访问过滤见 §2.3。
 - 依赖 codex 自带的自动上下文压缩。安全阀：rollout 文件 > `CODEX_ROLLOUT_MAX_MB`（默认 50）或线程 > `CODEX_THREAD_MAX_DAYS`（默认 90）时新建线程（无交接摘要，历史靠 §2 的检索找回）。
 - 全局一把互斥锁（不变）。
 
@@ -154,6 +155,7 @@ context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制�
 - **交互型需求**（JS 渲染页、点击、登录态）：给 codex 配 `@playwright/mcp`（headless Chromium，容器内安装，镜像约增 400 MB），注册为 `[mcp_servers.browser]`，`--headless --isolated`，无宿主机登录态。意图层不接浏览器。
 - egolite 推出 Linux/headless 版本后，可用同一个 `[mcp_servers.browser]` 槽位替换，AGENTS.md 中的浏览器使用纪律不变。
 - 开关：`CODEX_BROWSER=playwright|none`，用户已确认本期默认 `playwright`。
+- 可写目录（用户 2026-10-18 决定）：`/workspace`、`/data/prompts`、`/data/workflows`。其中 `/data/prompts` 可写意味着任何能触发 codex 的发送者理论上可经 codex 修改热加载的系统提示；用户知悉并接受，仅以 AGENTS.md 软规则限制为"owner 私聊明确要求时才改"。
 
 ### 4.5 codex 回答直通（用户决策：默认 relay，direct 仅作可选开关）
 `CODEX_REPLY_MODE=relay|direct`，默认 `relay`（用户 2026-10-17 最终决定保持转发：DeepSeek 经手正文，可做格式兜底与最小整理）。
