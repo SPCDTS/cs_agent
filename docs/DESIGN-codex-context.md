@@ -290,3 +290,10 @@ CODEX_REPLY_SANITIZE=true
 - 主会话发现并修复：规则文件可被 codex 改写 → 移到只读的 `$CODEX_HOME/AGENTS.md`；头部昵称/引用可伪造行 → 清洗；浏览器 `browser_run_code_unsafe` 可在 MCP 进程内读凭据 → `enabled_tools` 白名单；非交互 exec 下 MCP 调用需审批 → `default_tools_approval_mode = "approve"`（`auto` 实测无效）。
 - 实测（新镜像）：沙箱内凭据/库/图片不可读，仅三个目录可写，命令可访问宿主机 ComfyUI，环境无密钥；`scripts/verify-browser-mcp.mjs` 12/12 通过；真实 codex 回合经生成配置成功调用 `qq_recent`。
 - 已知残余风险见 DEPLOY.md：`/data/prompts` 可写仅靠软规则；浏览器黑名单不拦重定向；`auto` 审批模式在工具加 readOnly 注解后或可用但未验证。
+
+### 第 2 组 v3（2026-10-18，主会话验收通过）
+- 独立复跑：typecheck、262 测试、build、镜像构建通过；`docker compose up -d --build` 部署，容器 healthy，受管 config.toml 含 qq_context / image_gen / browser 三个 MCP。
+- 代码审读：规则分流器（route_text 由 bridge 按真实段计算、最长前缀匹配）、后端选择（严格校验 overrides）、图片收集（跳过软链接、魔数、≤4）、任务阶段守卫与检查点、提交意图与文件名前缀对账。
+- 两轮对抗评审（gpt-6-sol 11 条、gpt-6-astra 6 条）全部修复：codex 回合按票据输出文件幂等；生图 submit/collect 拆分 + 提交意图 + 文件名前缀对账（历史 → 队列 → 探测输出）；scope 队首到终态语义、达到上限先中止任务；恢复按 bridge seq 排序并分页；取消信号贯穿回复准备；排队不消耗重试次数；票据工作目录终态清理并对 codex 沙箱禁读。
+- 实测：真实 codex 回合经 image_gen MCP 在宿主机 ComfyUI 生成 PNG（约 1.8 MB，写入 `call-1/`）。
+- 接受的残余：ComfyUI 接受提交与返回之间崩溃仍可能重提一次（comfy-mcp 不支持客户端指定 id）；`failed` 派发条目不清理（第四组保留策略处理）。
