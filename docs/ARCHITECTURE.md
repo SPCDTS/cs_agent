@@ -96,7 +96,7 @@ cs_agent/
 - 首轮：`codex exec --json -o <out> -C /workspace --skip-git-repo-check -s workspace-write "<prompt>"`，从 JSONL 事件中取 thread/session id（`thread.started` 类事件；实现方以实际输出为准），持久化到 `/data/codex-session.json`。
 - 之后：`codex exec resume <id> --json -o <out> ... "<prompt>"`。若 resume 因会话丢失失败 → 新建会话并覆盖记录，回复中不暴露内部错误细节。
 - **互斥队列**：固定会话一次只跑一轮，其余排队；单轮超时可配（默认 600 s），超时后 kill 进程树并回复用户"处理超时"。
-- 容器内 `config.toml` 由入口脚本在缺失时生成最小版本（`model`、`model_reasoning_effort` 来自环境变量，默认 `gpt-6-astra` / `high`），**不**继承宿主机的 Windows 路径配置。
+- 容器内 `config.toml` 为受管文件，入口脚本每次启动按环境变量重写最小版本（`model`、`model_reasoning_effort` 来自环境变量，默认 `gpt-6-astra` / `high`），**不**继承宿主机的 Windows 路径配置。
 - 传给 codex 的 prompt 带来源标注（私聊/群、昵称），不带 QQ 号之外的任何授权语义。
 
 ### 5.4 ComfyUI 经 MCP

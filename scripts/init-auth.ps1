@@ -1,4 +1,4 @@
-# 把宿主机 ~/.codex/auth.json 复制到 ./data/codex/auth.json（容器内 codex 与 agent 共用）。
+﻿# 把宿主机 ~/.codex/auth.json 复制到 ./data/codex/auth.json（容器内 codex 与 agent 共用）。
 # 只复制文件，不输出任何 token 内容。
 param(
   [string]$Source = (Join-Path $env:USERPROFILE ".codex\auth.json"),

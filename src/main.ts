@@ -3,6 +3,7 @@ import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { loadConfig, type Config } from "./config.js";
 import { log, setLogLevel } from "./log.js";
+import { findUnwritable, processIdentity } from "./fs-check.js";
 import { createQQBridge } from "./qq/index.js";
 import type { QQBridge } from "./qq/types.js";
 import { createAgentModels, openHarness } from "./agent/harness.js";
@@ -37,6 +38,20 @@ async function main(): Promise<void> {
     comfy_mode: cfg.COMFY_MODE,
     data_dir: cfg.DATA_DIR,
   });
+
+  // 数据卷必须可写（容器以 node 用户运行，宿主机目录权限不对时尽早给出明确错误）
+  const unwritable = await findUnwritable([cfg.DATA_DIR, cfg.WORKSPACE_DIR]);
+  if (unwritable.length) {
+    for (const { dir, reason } of unwritable) {
+      log.error("directory not writable", {
+        dir,
+        reason,
+        user: processIdentity(),
+        hint: "fix ownership/permissions of the mounted volume on the host (container runs as the node user)",
+      });
+    }
+    process.exit(1);
+  }
 
   // codex 读取的工作区规则（不泄露凭据/环境变量）；已存在则不覆盖
   if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md", { dir: cfg.WORKSPACE_DIR });
