@@ -157,6 +157,21 @@ LOG_LEVEL=info
 - `docker build` 必须成功；`docker compose config` 校验通过。
 - 不向真实群发测试消息。
 
-## 10. 非目标（本期不做）
+## 10. 实现阶段确认的偏离与补充（2026-10-17）
+
+| 项 | 实际做法 | 原因 |
+|---|---|---|
+| ComfyUI 访问 | 容器内 `loopback-proxy.ts` 把 `127.0.0.1:8188` 转发到 `COMFYUI_URL`，comfy-mcp 指向 loopback | comfy-cli 1.22 拒绝从非 loopback 主机读取 `/object_info`（SSRF 防护） |
+| 生图工作流 | 默认 `COMFY_WORKFLOW_FILE=/app/workflows/qwen-image-2.1-turbo-api.json` + `COMFY_PROMPT_NODE=4`，mcp 走 `run_workflow`，http 直接 `POST /prompt`；程序写入提示词并随机化 seed | 宿主机 ComfyUI 没有 SD1.5 checkpoint，只有 Qwen Image 2.1 Turbo，comfy-mcp 默认 `generate_image` 模板校验失败 |
+| codex resume | `codex exec resume` 无 `-C/-s`；cwd 由 spawn 决定，沙箱用 `-c sandbox_mode=…` | CLI 0.160/0.163 的参数限制 |
+| 每会话工具纪律 | 代码层 `claimBusinessCall` 守卫：第二次业务工具调用直接报错并提示调用 `reply_qq`；`reply_qq` 失败返回带 terminate 的错误；会话结束而票据仍 pending 时派发器补发一条兜底回复 | 不依赖模型完全遵守系统提示 |
+| 会话 | `harness.createConversation({ownership:{kind:"ownerless"}, init})`，`init` 同一提交内写入 `cs.ticket` 文档与 `cs.dispatch` 索引；启动时 `Dispatcher.recover()` 按索引重提交（requestId=ticket 去重）；自动 compaction 关闭 | 单消息会话无需压缩 |
+| 凭据 | pi-ai openai-codex 凭据 `{type:"oauth", access, refresh, expires, accountId}` ← Codex `auth.json` 的 `tokens.*`；刷新后按 Codex 格式写回同一文件 | 容器内 codex 与 agent 共用一份 |
+| 默认意图模型 | `gpt-6-luna`（openai-codex 目录中最便宜） | 意图识别任务简单 |
+| 新增环境变量 | `COMFY_MODE`、`COMFY_MCP_BIN`、`COMFY_BIN`、`COMFY_CHECKPOINT`、`COMFY_WORKFLOW_FILE`、`COMFY_PROMPT_NODE`、`COMFY_LOOPBACK_PORT`、`CODEX_BIN`、`CODEX_SANDBOX`、`AGENT_THINKING_LEVEL`、`AGENT_CONCURRENCY`、`HEALTH_PORT`、`HEALTH_HOST` | 见 `.env.example` |
+
+已实测：容器内 `codex exec`（OAuth + workspace-write 沙箱）正常；容器内经 mcp 与 http 两条路径均生成真实 PNG（约 10–17 s）。
+
+## 11. 非目标（本期不做）
 
 多轮上下文记忆、群聊上下文摘要、成员工作区、主动推送、Web 管理界面、多 codex 会话。
