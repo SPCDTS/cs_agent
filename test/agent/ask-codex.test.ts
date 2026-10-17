@@ -9,8 +9,10 @@ import {
   ensureWorkspaceAgentsMd,
   extractThreadId,
   isMissingSessionError,
+  isReplaceableAgentsMd,
   qqAccessArgs,
   WORKSPACE_AGENTS_MD,
+  WORKSPACE_AGENTS_MD_V1,
 } from "../../src/agent/tools/ask-codex.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
@@ -107,6 +109,42 @@ describe("ensureWorkspaceAgentsMd", () => {
     writeFileSync(path.join(dir, "AGENTS.md"), "custom");
     expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
     expect(readFileSync(path.join(dir, "AGENTS.md"), "utf8")).toBe("custom");
+  });
+
+  it("v2 template carries the marker, reply rules, history and browser discipline", () => {
+    expect(WORKSPACE_AGENTS_MD.startsWith("<!-- cs-agent-agents-template v2 -->\n")).toBe(true);
+    for (const s of ["不用 Markdown", "300 字", "未核实", "qq_recent", "qq_search", "最多调用历史工具 2 次", "绝不登录任何账号", "关闭页面", "auth.json"]) {
+      expect(WORKSPACE_AGENTS_MD).toContain(s);
+    }
+  });
+
+  it("upgrades an untouched v1 file (also with CRLF) or an older marker; keeps edited and current files", async () => {
+    const dir = path.join(tmp(), "ws");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "AGENTS.md");
+    writeFileSync(file, WORKSPACE_AGENTS_MD_V1.replace(/\n/g, "\r\n"));
+    expect(await ensureWorkspaceAgentsMd(dir)).toBe(true);
+    expect(readFileSync(file, "utf8")).toBe(WORKSPACE_AGENTS_MD);
+    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false); // 已是 v2
+
+    writeFileSync(file, "<!-- cs-agent-agents-template v1 -->\n旧模板");
+    expect(await ensureWorkspaceAgentsMd(dir)).toBe(true);
+    expect(readFileSync(file, "utf8")).toBe(WORKSPACE_AGENTS_MD);
+
+    const edited = WORKSPACE_AGENTS_MD_V1 + "\n- 运维加的一条规则\n";
+    writeFileSync(file, edited);
+    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
+    expect(readFileSync(file, "utf8")).toBe(edited);
+
+    const editedV2 = WORKSPACE_AGENTS_MD + "\n- 运维改过的 v2\n";
+    writeFileSync(file, editedV2);
+    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
+    expect(readFileSync(file, "utf8")).toBe(editedV2);
+  });
+
+  it("the live workspace AGENTS.md (no marker) is recognised as the v1 template", () => {
+    const live = path.resolve(FIXTURES, "../../../workspace/AGENTS.md");
+    if (existsSync(live)) expect(isReplaceableAgentsMd(readFileSync(live, "utf8"))).toBe(true);
   });
 });
 

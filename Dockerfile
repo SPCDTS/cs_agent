@@ -22,6 +22,14 @@ RUN python3 -m venv /opt/comfy \
 # codex CLI（固定版本）
 RUN npm i -g @openai/codex@0.163.0 && npm cache clean --force
 
+# codex 的浏览器 MCP：@playwright/mcp + headless Chromium（含系统依赖，需 root 安装；node 用户可读）
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN npm i -g @playwright/mcp@0.0.83 \
+ && node /usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright/cli.js install --with-deps chromium \
+ && chmod -R a+rX /opt/pw-browsers \
+ && npm cache clean --force \
+ && rm -rf /var/lib/apt/lists/* /tmp/*
+
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
