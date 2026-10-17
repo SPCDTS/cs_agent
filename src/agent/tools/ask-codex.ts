@@ -449,8 +449,27 @@ export class CodexRunner {
   }
 }
 
+export const HEADER_NICKNAME_MAX = 40;
+const HEADER_LABEL_RE = /\[(来源|引用)\]/g;
+
+/** 折成单行：控制字符、行/段分隔符一律换成空格并合并空白。 */
+export function oneLine(text: string): string {
+  return text.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
+/** 头部里的不可信字段（昵称、引用正文）：单行，且不含我们的 [来源]/[引用] 标签。 */
+function headerField(text: string, max: number): string {
+  return clip(oneLine(text).replace(HEADER_LABEL_RE, "($1)"), max);
+}
+
+/** 头部用的昵称：单行、去标签、≤40 字。 */
+export function headerNickname(nickname: string): string {
+  return headerField(nickname, HEADER_NICKNAME_MAX);
+}
+
 export function sourceLabel(s: TicketSource): string {
-  const who = s.nickname ? `${s.nickname}(${s.user_id})` : s.user_id;
+  const nick = s.nickname ? headerNickname(s.nickname) : "";
+  const who = nick ? `${nick}(${s.user_id})` : s.user_id;
   return s.type === "group" ? `QQ 群 ${s.group_id} 成员 ${who}` : `QQ 私聊用户 ${who}`;
 }
 
@@ -467,18 +486,23 @@ export const QUOTE_MAX = 200;
  *   [来源] 群 200000001 · 昵称(QQ号) · 2026-10-17 22:41
  *   [引用] 昵称: 被引用消息正文（≤200 字，仅当带 reply 段且库中找得到）
  *   <正文>
+ * 防伪造：昵称（≤40 字）与引用正文折成单行，并把其中的 [来源]/[引用] 改写为 (来源)/(引用)；
+ * 正文里位于行首的 [来源]/[引用] 同样改写——这两个标签只出现在本函数生成的行首。
  */
 export function buildCodexPrompt(
   source: TicketSource,
   body: string,
   opts: { time?: number; quote?: { nickname: string; text: string } } = {},
 ): string {
-  const who = source.nickname ? `${source.nickname}(${source.user_id})` : source.user_id;
+  const nick = source.nickname ? headerNickname(source.nickname) : "";
+  const who = nick ? `${nick}(${source.user_id})` : source.user_id;
   const where = source.type === "group" ? `群 ${source.group_id}` : "私聊";
   const time = localStamp(opts.time && opts.time > 0 ? opts.time : Math.floor(Date.now() / 1000));
   const lines = [`[来源] ${where} · ${who} · ${time}`];
-  if (opts.quote) lines.push(`[引用] ${opts.quote.nickname}: ${clip(opts.quote.text, QUOTE_MAX)}`);
-  lines.push(body);
+  if (opts.quote) {
+    lines.push(`[引用] ${headerNickname(opts.quote.nickname) || "?"}: ${headerField(opts.quote.text, QUOTE_MAX)}`);
+  }
+  lines.push(body.replace(/^([ \t\u3000]*)\[(来源|引用)\]/gmu, "$1($2)"));
   return lines.join("\n");
 }
 

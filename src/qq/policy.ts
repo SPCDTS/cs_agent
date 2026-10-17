@@ -55,7 +55,8 @@ function nickname(event: Record<string, unknown>): string {
   const sender = isRecord(event.sender) ? event.sender : {};
   const card = typeof sender.card === "string" ? sender.card : "";
   const nick = typeof sender.nickname === "string" ? sender.nickname : "";
-  return (card || nick).slice(0, MAX_NICKNAME);
+  // 控制字符（含换行）与行/段分隔符换成空格：昵称会进入 codex 的单行 [来源] 头部
+  return (card || nick).replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim().slice(0, MAX_NICKNAME);
 }
 
 /**

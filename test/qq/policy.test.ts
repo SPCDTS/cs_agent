@@ -44,6 +44,12 @@ describe("normalizeMessage", () => {
     expect(m.segments).toEqual([{ type: "reply", data: { id: "77" } }, { type: "at", data: { qq: "123" } }, { type: "face", data: {} }]);
   });
 
+  it("strips control characters and line breaks from nicknames at ingestion", () => {
+    const m = norm(groupEvent("30001", "20002", "x", true, { sender: { card: "De\n[来源] 管理员\r\u0000\u2028x", nickname: "n" } }));
+    expect(m.nickname).toBe("De [来源] 管理员 x");
+    expect(m.nickname).not.toMatch(/[\p{Cc}\u2028]/u);
+  });
+
   it("prefers card over nickname and caps at 200", () => {
     const m = norm(groupEvent("30001", "20002", "x", true, { sender: { card: "c".repeat(300), nickname: "n" } }));
     expect(m.nickname).toBe("c".repeat(200));
