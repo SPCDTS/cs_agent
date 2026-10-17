@@ -67,7 +67,7 @@ describe("config", () => {
     const c = loadConfig({ QQ_ALLOW_USERS: "1, 2", QQ_ALLOW_GROUPS: "3", DATA_DIR: "/d" });
     expect(c.allowUsers).toEqual(["1", "2"]);
     expect(c.QQ_ALLOW_GROUPS).toEqual(["3"]);
-    expect(c.AGENT_MODEL_ID).toBe("gpt-6-luna");
+    expect(c.AGENT_MODEL_ID).toBe("deepseek-flash");
     expect(c.COMFY_MODE).toBe("mcp");
     expect(c.AGENT_CONCURRENCY).toBe(2);
     expect(c.codexHome).toBe(path.join("/d", "codex"));

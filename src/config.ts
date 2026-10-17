@@ -46,8 +46,8 @@ const EnvSchema = z.object({
   CODEX_SANDBOX: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("workspace-write"),
   CODEX_TIMEOUT_SEC: int(600),
 
-  AGENT_MODEL_PROVIDER: z.string().default("openai-codex"),
-  AGENT_MODEL_ID: z.string().default("gpt-6-luna"),
+  AGENT_MODEL_PROVIDER: z.string().default("deepseek"),
+  AGENT_MODEL_ID: z.string().default("deepseek-flash"),
   AGENT_THINKING_LEVEL: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).default("low"),
   AGENT_CONCURRENCY: int(2),
 
@@ -65,6 +65,38 @@ export interface Config extends Env {
   /** ${DATA_DIR}/codex，容器内 codex 与 pi-ai 共用的 CODEX_HOME */
   codexHome: string;
   imagesDir: string;
+}
+
+/** 环境变量别名 → pi-ai 读取的标准名（.env 中常见的写法差异）。 */
+export const ENV_ALIASES: Readonly<Record<string, string>> = {
+  DEEPSEEK_APIKEY: "DEEPSEEK_API_KEY",
+};
+
+/** API key provider 需要的环境变量（pi-ai 按标准名读取）。 */
+export const PROVIDER_API_KEY_ENV: Readonly<Record<string, string>> = {
+  deepseek: "DEEPSEEK_API_KEY",
+  openai: "OPENAI_API_KEY",
+  anthropic: "ANTHROPIC_API_KEY",
+};
+
+/** 标准名未设置（或为空）而别名已设置时，把别名的值复制到标准名；原地修改 env。 */
+export function applyEnvAliases(env: NodeJS.ProcessEnv = process.env): void {
+  for (const [alias, canonical] of Object.entries(ENV_ALIASES)) {
+    if (!env[canonical] && env[alias]) env[canonical] = env[alias];
+  }
+}
+
+/**
+ * API key provider 缺少密钥时抛错（启动即失败，而不是等第一条消息才报鉴权错误）。
+ * 应在 applyEnvAliases 之后调用；只检查是否存在，不读取/输出值。
+ */
+export function requireProviderApiKey(provider: string, env: NodeJS.ProcessEnv = process.env): void {
+  const keyEnv = PROVIDER_API_KEY_ENV[provider];
+  if (!keyEnv || env[keyEnv]) return;
+  const aliases = Object.entries(ENV_ALIASES)
+    .filter(([, c]) => c === keyEnv)
+    .map(([a]) => a);
+  throw new Error(`配置无效: AGENT_MODEL_PROVIDER=${provider} 需要设置 ${[keyEnv, ...aliases].join(" 或 ")}`);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {

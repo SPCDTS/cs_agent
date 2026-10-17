@@ -1,12 +1,12 @@
 import { createServer, type Server } from "node:http";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { loadConfig, type Config } from "./config.js";
+import { applyEnvAliases, loadConfig, requireProviderApiKey, type Config } from "./config.js";
 import { log, setLogLevel } from "./log.js";
 import { findUnwritable, processIdentity } from "./fs-check.js";
 import { createQQBridge } from "./qq/index.js";
 import type { QQBridge } from "./qq/types.js";
-import { createAgentModels, openHarness } from "./agent/harness.js";
+import { createAgentModels, openHarness, resolveThinkingLevel } from "./agent/harness.js";
 import { createCsAgentExtension } from "./agent/extension.js";
 import { Dispatcher } from "./agent/dispatch.js";
 import { CodexRunner, createAskCodexTool, ensureWorkspaceAgentsMd } from "./agent/tools/ask-codex.js";
@@ -29,7 +29,10 @@ function createImageBackend(cfg: Config, comfyUrlForMcp: string): ImageBackend {
 }
 
 async function main(): Promise<void> {
+  // DEEPSEEK_APIKEY 等别名 → pi-ai 读取的标准变量名（须在创建 models 之前）
+  applyEnvAliases(process.env);
   const cfg = loadConfig();
+  requireProviderApiKey(cfg.AGENT_MODEL_PROVIDER);
   setLogLevel(cfg.LOG_LEVEL);
   const ctx = BACKGROUND_CONTEXT;
   log.info("starting cs-agent", {
@@ -83,8 +86,18 @@ async function main(): Promise<void> {
     createReplyQQTool(getBridge, cfg.imagesDir),
   ]);
   const models = createAgentModels(cfg.codexHome);
-  if (!models.getModel(cfg.AGENT_MODEL_PROVIDER, cfg.AGENT_MODEL_ID)) {
+  const agentModel = models.getModel(cfg.AGENT_MODEL_PROVIDER, cfg.AGENT_MODEL_ID);
+  if (!agentModel) {
     throw new Error(`未知模型 ${cfg.AGENT_MODEL_PROVIDER}/${cfg.AGENT_MODEL_ID}`);
+  }
+  // 模型不支持所配置的思考档位时就近取支持的档位（例如 deepseek-flash 无 medium → high），而不是请求失败
+  const thinkingLevel = resolveThinkingLevel(agentModel, cfg.AGENT_THINKING_LEVEL);
+  if (thinkingLevel !== cfg.AGENT_THINKING_LEVEL) {
+    log.warn("AGENT_THINKING_LEVEL not supported by model, adjusted", {
+      model: `${cfg.AGENT_MODEL_PROVIDER}/${cfg.AGENT_MODEL_ID}`,
+      configured: cfg.AGENT_THINKING_LEVEL,
+      effective: thinkingLevel,
+    });
   }
   const harness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
 
@@ -103,7 +116,7 @@ async function main(): Promise<void> {
     harness,
     bridge,
     model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
-    thinkingLevel: cfg.AGENT_THINKING_LEVEL,
+    thinkingLevel,
     concurrency: cfg.AGENT_CONCURRENCY,
   });
 

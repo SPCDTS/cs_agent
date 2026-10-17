@@ -1,16 +1,24 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import type { Context } from "@earendil-works/chord";
-import type { Models } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, type Api, type Model, type Models, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { createRegistry, Harness, type Extension, type Storage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodexAuthFileStore } from "../auth/codex-oauth.js";
 import { log } from "../log.js";
 
-/** 内置 provider 全部注册；openai-codex 的凭据来自 ${codexHome}/auth.json，API key provider 读环境变量。 */
+/**
+ * 内置 provider 全部注册（deepseek / openai-codex / openai / anthropic …，由 AGENT_MODEL_PROVIDER 选择）。
+ * openai-codex 的凭据来自 ${codexHome}/auth.json；API key provider（deepseek 读 DEEPSEEK_API_KEY 等）读环境变量。
+ */
 export function createAgentModels(codexHome: string): Models {
   return builtinModels({ credentials: new CodexAuthFileStore(path.join(codexHome, "auth.json")) });
+}
+
+/** 把配置的思考档位收敛到模型支持的档位（不支持时就近取值；无推理能力的模型为 off）。 */
+export function resolveThinkingLevel(model: Model<Api>, level: ModelThinkingLevel): ModelThinkingLevel {
+  return clampThinkingLevel(model, level);
 }
 
 export interface OpenHarnessOptions {
