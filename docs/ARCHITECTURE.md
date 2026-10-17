@@ -176,6 +176,10 @@ LOG_LEVEL=info
 
 ## 10. 实现阶段确认的偏离与补充（2026-10-18）
 
+agent 延迟收图：`image_gen` 在 `min(imageTimeoutMs(options, COMFY_TIMEOUT_SEC), IMAGE_GEN_MCP_WAIT_SEC)`（默认 MCP 上限 90 秒）超时且已拿到 prompt_id 时，将 `{prompt_id, backend, filenamePrefix, options, callDir, submittedAt}` 追加到票据目录的 `pending-jobs.json`，返回非错误的“仍在生成／无需重试”。
+
+`cs.agent` 新增 `handle → lateImages → postprocess → reply` 检查点；逐任务按保存的参数复用 collect/reconcile，unknown 按前缀对账、不重新提交，超时用与 cs.image 相同的延期策略（IMAGE_COLLECT_EXTENSIONS 默认 2）。TicketDoc 保存期限、延期次数、对账步骤和最终结果；结果先落盘、清单后删除，恢复不重复收取已完成任务。晚到图片显式合并进回复，失败说明在后处理之后追加“有一张图生成超时未能发送”，参考图保留到最终收取结束。
+
 生图 v2 审查后的执行边界：
 
 | 阶段 | 持久化与约束 |

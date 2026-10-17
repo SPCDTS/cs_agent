@@ -71,6 +71,7 @@ Copy-Item .env.example .env
 | `COMFY_QWEN_CACHE` | `false` | `true` 时在 UNETLoader 后插入 QwenImage21Cache，需本机安装对应节点 |
 | `CODEX_SANDBOX` | `workspace-write` | 如果容器内 codex 报 sandbox/landlock 错误，改为 `danger-full-access`（这时容器本身就是沙箱） |
 | `CODEX_TIMEOUT_SEC` / `COMFY_TIMEOUT_SEC` | 600 / 300 | codex 单轮超时；生图收取预算按 1mp/2mp/2k 分别为 120/240/600 秒 × count，上限 COMFY_TIMEOUT_SEC；默认额外收取 2 次，始终使用原 prompt_id |
+| `IMAGE_GEN_MCP_WAIT_SEC` / `IMAGE_COLLECT_EXTENSIONS` | 90 / 2 | MCP 最多等待参数预算与前者的较小值；超时交给 agent 的 lateImages 阶段，后者控制两条生图路径的额外收取窗口数 |
 | `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `gpt-6.1-sol` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节）。`CODEX_REASONING_EFFORT`（`low/medium/high/xhigh/max`）固定使用，每轮也以 `-c model_reasoning_effort="…"` 显式传入（日志 `codex backend done` 的 `effort` 字段）；v3 不再按请求选择 |
 
 > codex 子进程只拿到最小环境变量：`PATH`、`HOME`、`LANG`/`LC_ALL`、`TERM`、`CODEX_HOME`、`NO_COLOR=1`，以及设置了的 `HTTP(S)_PROXY`/`NO_PROXY`。`NAPCAT_TOKEN`、`*_API_KEY` 等配置不会传给 codex。
@@ -149,6 +150,8 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 
 ### 生图 MCP（image_gen）
 
+- 慢任务在 MCP 等待上限后返回“图片仍在生成……无需重试”，仅此时写入票据目录的 `pending-jobs.json`。agent 在 `handle → lateImages → postprocess → reply` 中按原 prompt_id 收取到原 `call-<n>/`，结果并入同一条回复（最多 4 张）；这期间同 scope 的后续消息继续排队。最终失败追加“有一张图生成超时未能发送”。
+- `lateImages` 将各任务的参数、期限、延期次数、对账步骤和结果保存到 TicketDoc；unknown 先按前缀对账，绝不重新提交。全部结果落盘后删除清单，恢复时复用已下载的有效图片或已保存的结果。参考图清单保留至最终收取结束再覆盖清理。`IMAGE_GEN_MCP_WAIT_SEC` 由启动脚本透传给 MCP；部署时需将该变量传入容器，未设置默认 90 秒。
 - 工具参数与前缀共用 ImageOptions：prompt、negative_prompt、aspect、size、count、seed、reference_images、transparent。每轮（含 resume）注入 IMAGE_REFS，没图时显式注入空串，防止旧轮次路径继承；只允许本票据 incoming 下的允许列表文件，校验绝对路径、字符、realpath、大小、魔数。
 - 参考图上传到 ComfyUI input 的每票据子目录。若 comfy-mcp 的 upload_file 支持 paths 和 subfolder 则使用它；本机安装版本只有 paths/overwrite，不能指定子目录，因而回退到同 COMFYUI_URL 的 HTTP /upload/image。真实冒烟覆盖 HTTP 上传，MCP 两种能力分支由假服务测试。
 
