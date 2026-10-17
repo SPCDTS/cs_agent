@@ -31,6 +31,7 @@ export interface BridgeInternals {
 
 type OutSegment = { type: string; data: Record<string, unknown> };
 
+/** 文本上限按 UTF-16 code unit（String.length）计；agent 侧 reply_qq 的截断用同一口径。 */
 function validateText(text: string): void {
   if (typeof text !== "string" || !text.trim() || text.length > MAX_REPLY_TEXT) {
     throw new Error("消息必须是 1～4000 字符的非空文字。");

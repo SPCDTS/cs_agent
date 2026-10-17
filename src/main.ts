@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   const extension = createCsAgentExtension([
     createGenerateImageTool(imageBackend, cfg.imagesDir),
     createAskCodexTool(codex),
-    createReplyQQTool(getBridge),
+    createReplyQQTool(getBridge, cfg.imagesDir),
   ]);
   const models = createAgentModels(cfg.codexHome);
   if (!models.getModel(cfg.AGENT_MODEL_PROVIDER, cfg.AGENT_MODEL_ID)) {

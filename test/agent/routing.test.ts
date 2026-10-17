@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
@@ -12,7 +12,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { MemoryStorage, type Harness } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it } from "vitest";
-import { Dispatcher, FALLBACK_REPLY } from "../../src/agent/dispatch.js";
+import { Dispatcher, FALLBACK_REPLY, MAX_ATTEMPTS } from "../../src/agent/dispatch.js";
+import { DispatchDoc } from "../../src/agent/docs.js";
 import { createCsAgentExtension, SYSTEM_PROMPT } from "../../src/agent/extension.js";
 import { openHarness } from "../../src/agent/harness.js";
 import { CodexRunner, createAskCodexTool } from "../../src/agent/tools/ask-codex.js";
@@ -27,15 +28,36 @@ const ctx = BACKGROUND_CONTEXT;
 class BridgeStub {
   replies: { ticket: string; text: string; images?: string[] }[] = [];
   status = new Map<string, ReplyTicketRecord["status"]>();
+  pending: ReplyTicketRecord[] = [];
+  /** >0 时 getTicket 抛错（模拟 SQLite 等基础设施故障），每次调用减 1 */
+  getTicketFailures = 0;
+  /** true 时 reply 在发送前失败（票据保持 pending） */
+  replyDown = false;
   async reply(ticket: string, text: string, images?: string[]) {
+    if (this.replyDown) throw new Error("NapCat unreachable");
     const already = this.status.get(ticket) === "sent";
     if (!already) this.replies.push({ ticket, text, images });
     this.status.set(ticket, "sent");
     return { already_sent: already, message_id: "m1", message_type: "private" as const, target_id: "1" };
   }
   async getTicket(ticket: string) {
+    if (this.getTicketFailures > 0) {
+      this.getTicketFailures--;
+      throw new Error("db locked");
+    }
     return { ticket_id: ticket, status: this.status.get(ticket) ?? "pending" } as ReplyTicketRecord;
   }
+  async listPendingTickets() {
+    return this.pending.filter((r) => (this.status.get(r.ticket_id) ?? "pending") === "pending");
+  }
+}
+
+function ticketRecord(ticket: string, text: string): ReplyTicketRecord {
+  return {
+    ticket_id: ticket, self_id: "1", user_id: "10000001", group_id: null, message_type: "private",
+    source_message_id: "900", source_nickname: "tester", source_text: text,
+    created_at: "2026-10-17T00:00:00.000Z", status: "pending",
+  };
 }
 
 function inbound(text: string, id = "100"): InboundMessage {
@@ -112,7 +134,7 @@ async function makeRig(): Promise<Rig> {
   const extension = createCsAgentExtension([
     createGenerateImageTool(backend, path.join(dir, "images")),
     createAskCodexTool(codex),
-    createReplyQQTool(() => bridge),
+    createReplyQQTool(() => bridge, path.join(dir, "images")),
   ]);
   const harness = await openHarness({ models, extension, storage: new MemoryStorage() }, ctx);
   harness.resume();
@@ -156,7 +178,7 @@ describe("routing via faux provider", () => {
     expect(r.imageCalls).toEqual(["a cute cat, watercolor"]);
     expect(r.bridge.replies).toHaveLength(1);
     expect(r.bridge.replies[0]).toMatchObject({ ticket: "ticket-img", text: "图片生成好了" });
-    expect(r.bridge.replies[0]!.images).toEqual([path.join(r.dir, "images", "ticket-img", "out.png")]);
+    expect(r.bridge.replies[0]!.images).toEqual([realpathSync(path.join(r.dir, "images", "ticket-img", "out.png"))]);
     // terminate: 不再发起第三次模型请求
     expect(r.faux.state.callCount).toBe(2);
     expect(r.faux.getPendingResponseCount()).toBe(0);
@@ -227,6 +249,89 @@ describe("routing via faux provider", () => {
     r.faux.setResponses([fauxAssistantMessage(fauxText("我直接回答了"))]);
     await r.dispatcher.dispatch(inbound("hi"), "ticket-fb");
     expect(r.bridge.replies).toEqual([{ ticket: "ticket-fb", text: FALLBACK_REPLY, images: undefined }]);
+  });
+
+  it("reply_qq rejects an image path not produced by this conversation; model can retry", async () => {
+    rig = await makeRig();
+    const r = rig;
+    const foreignDir = path.join(r.dir, "images", "other-ticket");
+    mkdirSync(foreignDir, { recursive: true });
+    const foreign = path.join(foreignDir, "x.png");
+    writeFileSync(foreign, "png");
+    let firstResult = "";
+    r.faux.setResponses([
+      recording(r, () => fauxAssistantMessage(fauxToolCall("generate_image", { prompt: "a cat" }), { stopReason: "toolUse" })),
+      recording(r, () =>
+        fauxAssistantMessage(fauxToolCall("reply_qq", { text: "给你", image_paths: [foreign] }), { stopReason: "toolUse" }),
+      ),
+      recording(r, (context) => {
+        firstResult = lastToolResult(context.messages);
+        return fauxAssistantMessage(fauxToolCall("reply_qq", { text: "图片生成好了" }), { stopReason: "toolUse" });
+      }),
+    ]);
+    await r.dispatcher.dispatch(inbound("画猫"), "ticket-foreign");
+    expect(firstResult).toContain("图片路径不合法");
+    expect(r.bridge.replies).toEqual([{ ticket: "ticket-foreign", text: "图片生成好了", images: [] }]);
+  });
+
+  it("clears the dispatch index once the ticket is replied", async () => {
+    rig = await makeRig();
+    const r = rig;
+    r.faux.setResponses([fauxAssistantMessage(fauxToolCall("reply_qq", { text: "好" }), { stopReason: "toolUse" })]);
+    await r.dispatcher.dispatch(inbound("hi"), "ticket-clear");
+    expect((await r.harness.snapshot(DispatchDoc, ctx))?.pending).toEqual({});
+  });
+
+  it("infra error keeps the dispatch index with attempts; recover gives up at the limit with one fallback", async () => {
+    rig = await makeRig();
+    const r = rig;
+    r.faux.setResponses([fauxAssistantMessage(fauxText("没有回复"))]);
+    r.bridge.getTicketFailures = 1;
+    await r.dispatcher.dispatch(inbound("hi"), "ticket-infra");
+    let pending = (await r.harness.snapshot(DispatchDoc, ctx))?.pending ?? {};
+    expect(pending["ticket-infra"]?.attempts).toBe(1);
+    expect(r.bridge.replies).toEqual([]);
+
+    await r.harness.commit(async (tx) => {
+      (await tx.doc(DispatchDoc)).pending["ticket-infra"]!.attempts = MAX_ATTEMPTS;
+    }, ctx);
+    // 兜底在发送前失败：票据仍 pending，索引保留（下次启动再试）
+    r.bridge.replyDown = true;
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    pending = (await r.harness.snapshot(DispatchDoc, ctx))?.pending ?? {};
+    expect(pending["ticket-infra"]).toBeDefined();
+
+    r.bridge.replyDown = false;
+    const calls = r.faux.state.callCount;
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(r.faux.state.callCount).toBe(calls); // 不再运行模型
+    expect(r.bridge.replies).toEqual([{ ticket: "ticket-infra", text: FALLBACK_REPLY, images: undefined }]);
+    expect((await r.harness.snapshot(DispatchDoc, ctx))?.pending).toEqual({});
+  });
+
+  it("recover re-dispatches a pending ticket that has no dispatch index (crash after admit)", async () => {
+    rig = await makeRig();
+    const r = rig;
+    let userText = "";
+    r.faux.setResponses([
+      recording(r, (context) => {
+        const u = context.messages.find((m) => m.role === "user")!;
+        userText = typeof u.content === "string" ? u.content : u.content.map((c: any) => c.text ?? "").join("");
+        return fauxAssistantMessage(fauxToolCall("reply_qq", { text: "收到" }), { stopReason: "toolUse" });
+      }),
+    ]);
+    r.bridge.pending = [ticketRecord("ticket-orphan", "帮我看看这段代码"), ticketRecord("ticket-old", "")];
+    expect(await r.dispatcher.recover()).toBe(2);
+    await r.dispatcher.idle();
+    expect(userText).toContain("[QQ 私聊，发送者 tester(10000001)]");
+    expect(userText).toContain("帮我看看这段代码");
+    expect(r.bridge.replies).toContainEqual({ ticket: "ticket-orphan", text: "收到", images: [] });
+    // 迁移前无原文的旧票据只发兜底
+    expect(r.bridge.replies).toContainEqual({ ticket: "ticket-old", text: FALLBACK_REPLY, images: undefined });
+    expect(r.faux.state.callCount).toBe(1);
+    expect(await r.dispatcher.recover()).toBe(0);
   });
 
   it("system prompt states the untrusted-content and one-tool rules", () => {

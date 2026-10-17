@@ -376,6 +376,11 @@ export class HttpImageBackend implements ImageBackend {
 
 // ---------------------------------------------------------------- tool
 
+/** 票据对应的图片输出目录：<imagesDir>/<ticket>（非法字符替换为 _）。reply_qq 用同一规则校验。 */
+export function ticketImageDir(imagesDir: string, ticket: string): string {
+  return path.join(imagesDir, ticket.replace(/[^a-zA-Z0-9_-]/g, "_"));
+}
+
 export function createGenerateImageTool(backend: ImageBackend, imagesDir: string) {
   return defineTool({
     name: "generate_image",
@@ -390,11 +395,16 @@ export function createGenerateImageTool(backend: ImageBackend, imagesDir: string
       }
       const doc = await api.snapshot(TicketDoc, api.conversationId, context);
       const ticket = doc?.ticket || `adhoc-${Date.now()}`;
-      const outDir = path.join(imagesDir, ticket.replace(/[^a-zA-Z0-9_-]/g, "_"));
+      const outDir = ticketImageDir(imagesDir, ticket);
       const started = Date.now();
       try {
         const files = await backend.generate(args.prompt, outDir, context.abortSignal);
         log.info("generate_image done", { backend: backend.name, ms: Date.now() - started, files: files.length });
+        // 记录本会话产出的图片（realpath），reply_qq 只允许发送这些文件
+        const real = await Promise.all(files.map((f) => fs.realpath(f)));
+        await api.commit(async (tx) => {
+          (await tx.doc(TicketDoc, api.conversationId)).images = real;
+        }, context);
         return { output: [{ type: "text", text: JSON.stringify({ image_paths: files }) }] };
       } catch (err) {
         const msg = (err as Error).message;

@@ -14,6 +14,8 @@ export type TicketState = {
   text: string;
   /** 已调用的业务工具名（generate_image / ask_codex），空串表示尚未调用 */
   business: string;
+  /** generate_image 成功产出的图片 realpath；reply_qq 只接受其中的路径（旧文档可能没有此字段） */
+  images?: string[];
 };
 
 export const TicketDoc = defineDoc<TicketState>({
@@ -32,9 +34,10 @@ export const TicketDoc = defineDoc<TicketState>({
 
 /**
  * Session 级派发索引：ticket → conversationId（以及原始提交内容）。
- * 仅保存未完成的票据；会话结束后删除。重启后据此重新 submit（requestId=ticket 去重）。
+ * 仅保存未完成的票据；票据进入终态（sent/uncertain）后才删除，基础设施错误时保留，
+ * 重启后据此重新 submit（requestId=ticket 去重）。attempts 为已开始运行的次数。
  */
-export type DispatchEntry = { conversationId: number; content: string };
+export type DispatchEntry = { conversationId: number; content: string; attempts?: number };
 export type DispatchState = { pending: Record<string, DispatchEntry> };
 
 export const DispatchDoc = defineDoc<DispatchState>({
