@@ -4,4 +4,5 @@ data/
 workspace/
 .env
 *.log
-.vscode.env.bak*
+.vscode/
+.env.bak*
