@@ -153,7 +153,7 @@ context_size = "low"           # CODEX_WEB_SEARCH_CONTEXT，默认 low，限制�
 - **阅读型需求**（绝大多数）：意图层用 DeepSeek `fetch_page`（页面 → Markdown），codex 用 `web_search = "live"`。不需要浏览器。
 - **交互型需求**（JS 渲染页、点击、登录态）：给 codex 配 `@playwright/mcp`（headless Chromium，容器内安装，镜像约增 400 MB），注册为 `[mcp_servers.browser]`，`--headless --isolated`，无宿主机登录态。意图层不接浏览器。
 - egolite 推出 Linux/headless 版本后，可用同一个 `[mcp_servers.browser]` 槽位替换，AGENTS.md 中的浏览器使用纪律不变。
-- 开关：`CODEX_BROWSER=playwright|none`（默认 `none`，待你确认再开，避免无谓增大镜像）。
+- 开关：`CODEX_BROWSER=playwright|none`，用户已确认本期默认 `playwright`。
 
 ## 5. 配置项（新增）
 
@@ -171,7 +171,7 @@ INTENT_CONTEXT_WINDOW_MIN=120
 INTENT_CONTEXT_MAX_CHARS=1500
 WEB_SEARCH_MAX_PER_MESSAGE=2
 FETCH_MAX_PER_MESSAGE=2
-CODEX_BROWSER=none
+CODEX_BROWSER=playwright
 ```
 
 ## 6. 边界与隐私
@@ -180,10 +180,39 @@ CODEX_BROWSER=none
 - 摘要由模型生成，可能有偏差，只影响"记忆"，不影响权限与路由。
 - `./data` 含聊天记录与摘要，按聊天记录保管。
 
+## 8. 观测系统（用户新增需求）
+
+目标：直观看到整体运行状态，出问题时能顺着一条消息的全链路排查。本地使用，不做多用户权限。
+
+### 8.1 数据
+- **事件表** `/data/observability.sqlite` → `events(ticket, scope, ts, stage, status, duration_ms, detail_json)`。`ticket` 是全链路关联 id。阶段：`received → admitted → dispatched → model_turn → tool:<name> → reply_sent | failed | fallback`。工具事件记录输入摘要（提示词、查询词、推理强度）、输出摘要、耗时、错误类别；模型事件记录 provider/model、输入输出 tokens。敏感值（token、key）永不入库。
+- **统一埋点 API** `src/obs/trace.ts`：`trace.event(ticket, stage, {...})`，派发器与每个工具调用。日志行同时带 `ticket` 字段，便于 `docker compose logs | grep`。
+- **指标**（内存聚合 + 周期落盘到 `metrics` 表）：按工具/模型的调用数、成功率、p50/p95 耗时；队列深度与各 scope 排队数；NapCat WS 状态与断线次数；codex 线程 rollout 大小与轮数；DeepSeek 用量与估算费用；ComfyUI 任务耗时；衰老任务上次运行结果。
+- 保留 `OBS_RETENTION_DAYS`（默认 30）。
+
+### 8.2 面板（容器内 HTTP，`127.0.0.1:8787` 发布到宿主机 localhost）
+服务端渲染 HTML + 少量原生 JS + SSE，不引入前端框架，不增大镜像。页面：
+| 页面 | 内容 |
+|---|---|
+| `/` 总览 | 健康状态（WS、comfy、codex、DeepSeek key、衰老任务）、最近 1h/24h 吞吐与错误率、队列、当前处理中的票据 |
+| `/tickets` | 票据列表（时间、scope、发送者、意图动作、状态、总耗时），筛选失败/超时 |
+| `/tickets/<id>` | 单条全链路时间线：原文 → 注入的上下文块 → 模型每轮（tokens）→ 工具调用（提示词/查询/强度、耗时、结果摘要、生成图缩略图）→ 回复正文 → 票据状态流转 |
+| `/logs` | SSE 实时日志尾随，按 ticket / level 过滤 |
+| `/context` | 按 scope 浏览消息库与摘要，试跑 `recent` / `search` 看 codex 会看到什么 |
+| `/codex` | 线程 id、轮数、rollout 大小、最近交接/新建记录、AGENTS.md 当前内容 |
+| `/config` | 生效配置（脱敏）、系统提示当前内容与 mtime |
+`docker-compose.yml` 增加 `ports: ["127.0.0.1:8787:8787"]`；可选 `OBS_TOKEN` 作为简单访问口令（默认空，仅本机）。
+
+### 8.3 告警（可选）
+`ALERT_OWNER=true` 时，WS 断线超 5 分钟、codex/DeepSeek 鉴权失败、连续 3 条票据失败，向 owner 私聊发一条告警（限频 1 次/30 分钟，走 `send()` 而非票据）。默认关闭。
+
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
 2. **意图层会话感知**：统一上下文模块（§2.4）接入派发器、上下文块、按 scope FIFO、`recent_context` / `search_history`、追问规则。测试：生图后"改成蓝色"复用提示词、codex 追问直通、超窗口不注入、同 scope 串行/跨 scope 并行。
 3. **联网检索 + 先查再画**：`web_search` / `fetch_page` 工具、状态机守卫、系统提示。测试：faux 路径、守卫拒绝非法序列、搜索失败降级为直接生图、429 重试与上限。
+4. **观测系统**（§8）：事件表与埋点、指标、面板、可选告警。测试：埋点覆盖每个阶段、面板页面渲染、SSE、脱敏。
+
+决策（2026-10-17 用户确认）：设计 v2 通过；`CODEX_BROWSER=playwright` 本期开启。
 
 每组完成后由 Codex 做一轮独立评审。
