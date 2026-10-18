@@ -312,3 +312,11 @@ CODEX_REPLY_SANITIZE=true
 - gpt-6-astra 评审 1 阻断 + 4 major + 1 minor 全部修复：pi 会话改为按会话域隔离（阻断，设计稿 §4.5 已更新；原 shared 会话停用不复用）；优雅停机不再永久中止 pi 回合（协调两 harness 关闭顺序 + 持久化一次重提）；pi 生图持久化意图与 prompt_id 账本、重试复用未决任务；image_gen MCP 在提交前后即时落盘清单、lateImages 处理所有未完成项；延迟收图逐文件清单与原子写入；损坏清单隔离并保留正文。
 - 默认后端仍为 codex；pi 后端通过 `AGENT_BACKEND=pi` 或 `AGENT_BACKEND_OVERRIDES` 切换，尚未在真实 QQ 流量上验证。
 - 附带变更：vitest 在 Windows 上限制为 2 个 worker。
+
+### 第 4 组观测系统（2026-10-18，主会话验收通过）
+- 独立复跑：typecheck、466 测试、build、镜像构建、compose 校验通过；部署后容器 healthy，面板发布于宿主机 `127.0.0.1:8787`。
+- 代码审读：CSP nonce、HTML 转义、图片路径段与 realpath 双重限制、SSE 连接上限、参数化查询。
+- gpt-6-astra 评审 1 阻断 + 6 major + 3 minor 全部修复：面板默认无口令可被 codex 沙箱命令访问（阻断）→ 始终要求口令，首启自动生成 `/data/obs-token`（0600、对沙箱禁读、不进子进程环境）；`/context` 等字符串渲染先脱敏；image_gen MCP 子进程改写票据目录内有界事件文件由主进程脱敏入库；任意协议 URL userinfo 脱敏并拒绝 NapCat URL 内嵌凭据；观测初始化故障降级为 no-op 并在 healthz/首页标 degraded；每票据事件/字节预算、终态保留、游标分页；结构化错误分类触发鉴权告警；统一用量换算含缓存；codex 排队与执行计时分离；内置工具事件白名单记录。
+- 实测：宿主机无口令访问 401、`/healthz` 200、带口令登录后各页 200；codex 沙箱内读取 `/data/obs-token` 被拒且访问面板得 401（见下方实测）。
+- 运维：`.env` 开启 `ALERT_OWNER=true`（WS 断线、鉴权失败、连续失败 → owner 私聊，30 分钟限频）。
+- 附带：实现方把 Comfy MCP 启动环境改为显式白名单。
