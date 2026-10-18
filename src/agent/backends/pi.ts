@@ -13,6 +13,7 @@ import { buildCodexPrompt } from "../codex-runner.js";
 import { collectNewImages } from "../image-collect.js";
 import { ticketImageDir } from "../image-gen.js";
 import { validateReferences } from "../image-references.js";
+import { codingEnvironment, codingTools } from "../pi-tools/coding.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
 import { PiRequestDoc } from "../pi-tools/request.js";
 import { PiPromptLoader } from "../pi-tools/prompt.js";
@@ -60,9 +61,15 @@ export class PiBackend implements AgentBackend {
     await new PiPromptLoader(opts.dataDir).read();
     const registry = createRegistry();
     let harness!: Harness;
+    registry.install(await codingTools());
     registry.install(createPiExtension({ ...opts, getHarness: () => harness }));
     harness = await Harness.open(opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite")), {
       models: opts.models, registry,
+      env: async (target, ctx) => {
+        const threads = await target.read.snapshot(PiThreadsDoc, ctx);
+        const key = Object.entries(threads ?? {}).find(([, id]) => id === target.conversationId)?.[0];
+        return key && key !== "shared" ? codingEnvironment(opts.dataDir, key) : undefined;
+      },
       settings: { toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
         enabled: true,
         ...(opts.reserveTokens !== undefined ? { reserveTokens: opts.reserveTokens } : {}),

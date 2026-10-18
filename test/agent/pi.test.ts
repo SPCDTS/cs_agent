@@ -1,3 +1,4 @@
+import { ObsStore } from "../../src/obs/store.js";
 import { mediaFixture } from "../context/media-fixture.js";
 import type { MediaRecall } from "../../src/context/media.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
@@ -44,13 +45,13 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   const contextUsage = new ContextUsageStore(dir);
   cleanup.push(() => contextUsage.close());
   const store = new ContextStore(dir);
   cleanup.push(() => store.close());
-  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200_000 }], tokensPerSecond: Infinity });
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200_000, input: opts.vision ? ["text", "image"] : ["text"] }], tokensPerSecond: Infinity });
   faux.setResponses(steps);
   const models = createModels(); models.setProvider(faux.provider);
   const imageBackend = {
@@ -75,6 +76,80 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
 }
 
 describe("pi durable backend", () => {
+  it.each(["group", "owner", "private"])("所有 %s 会话注册四个内置工具并在独立工作目录执行", async kind => {
+    let seen: TranscriptContext | undefined;
+    const s = await setup([call("write", { path: "note.txt", content: "原文" }),
+      call("edit", { path: "note.txt", edits: [{ oldText: "原文", newText: "改后" }] }),
+      call("read", { path: "note.txt" }), call("bash", { command: "printf builtin-ok" }),
+      ctx => { seen = ctx; return reply(); }]);
+    await expect(fs.access(path.join(s.dir, "pi-work"))).rejects.toThrow();
+    const req = request("coding-" + kind, kind === "owner");
+    if (kind === "private") Object.assign(req, { scope: "private:9", access: "private:9", threadKey: "private:9",
+      source: { type: "private", user_id: "9", group_id: null, nickname: "测试者" } });
+    await s.pi.handle(req, handleContext());
+    expect(await fs.readFile(path.join(s.dir, "pi-work", req.threadKey.replace(":", "_"), "note.txt"), "utf8")).toBe("改后");
+    const tools = seen!.messages.filter(m => m.role === "toolResult");
+    expect(tools.map(m => m.toolName)).toEqual(["write", "edit", "read", "bash"]);
+    expect(tools.every(m => !m.isError)).toBe(true);
+    expect(results(seen!)).toContain("builtin-ok");
+    expect(DEFAULT_PI_PROMPT).toContain("用 read 打开");
+  });
+
+  it("read 打开召回路径返回图片内容，qq_image 自身仍只返回文本", async () => {
+    let seen: TranscriptContext | undefined;
+    const s = await setup([], { vision: true });
+    const media = await mediaFixture(s.store, s.dir);
+    s.faux.setResponses([call("read", { path: media }), ctx => { seen = ctx; return reply(); }]);
+    await s.pi.handle(request("read-image"), handleContext());
+    const result = seen!.messages.find(m => m.role === "toolResult" && m.toolName === "read");
+    expect(result?.role === "toolResult" && result.content.some(c => c.type === "image" && c.mimeType === "image/png" && c.data.length > 0)).toBe(true);
+    expect(result?.role === "toolResult" && result.isError).toBe(false);
+  });
+
+  it("四个内置工具共享二十次额度，与历史检索分开且新票据重置", async () => {
+    let seen: TranscriptContext | undefined;
+    const cycle = () => [call("write", { path: "cap.txt", content: "a" }),
+      call("edit", { path: "cap.txt", edits: [{ oldText: "a", newText: "b" }] }),
+      call("read", { path: "cap.txt" }), call("bash", { command: "true" })];
+    const s = await setup([...Array.from({ length: 5 }, cycle).flat(),
+      call("write", { path: "blocked.txt", content: "blocked" }), call("qq_recent"),
+      ctx => { seen = ctx; return reply(); },
+      call("write", { path: "next.txt", content: "next" }), reply()]);
+    const obs = new ObsStore(s.dir, 30); trace.attach(obs);
+    try {
+      await s.pi.handle(request("coding-cap"), handleContext());
+      expect(results(seen!)).toContain("本轮调用上限（20 次）");
+      expect(results(seen!)).toContain("没有记录");
+      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+      const doc = await s.pi.harness.snapshot(PiRequestDoc, id, context);
+      expect(Object.values(doc!.calls).filter(c => c.kind === "builtin")).toHaveLength(20);
+      await expect(fs.access(path.join(s.dir, "pi-work", "group_7", "blocked.txt"))).rejects.toThrow();
+      expect(obs.events("coding-cap").length).toBeLessThanOrEqual(30);
+      expect(obs.events("coding-cap").some(e => e.stage === "events_dropped")).toBe(true);
+      await s.pi.handle(request("coding-next"), handleContext());
+      expect(await fs.readFile(path.join(s.dir, "pi-work", "group_7", "next.txt"), "utf8")).toBe("next");
+    } finally { trace.attach(); obs.close(); }
+  });
+
+  it("内置调用只记录工具、前二百字的命令或路径、退出码和耗时", async () => {
+    const events: import("../../src/obs/trace.js").LiveEvent[] = [];
+    const untap = trace.tap(e => { if (e.ticket === "coding-trace" && e.stage.startsWith("tool:")) events.push(e); });
+    const s = await setup([call("write", { path: "trace.txt", content: "do-not-log-file-content" }),
+      call("read", { path: "trace.txt" }), call("bash", { command: "printf do-not-log-stdout; #" + "x".repeat(300) }),
+      call("bash", { command: "exit 7" }), reply()]);
+    try {
+      await s.pi.handle(request("coding-trace"), handleContext());
+      const done = events.filter(e => e.status !== "started");
+      expect(done).toHaveLength(4);
+      expect(done.every(e => typeof e.duration_ms === "number" && !("output" in e.detail) && !("input" in e.detail))).toBe(true);
+      expect(done[0]!.detail).toMatchObject({ tool: "write", path: "trace.txt", exit_code: null });
+      expect(String(done[2]!.detail.command)).toHaveLength(200);
+      expect(done[2]!.detail.exit_code).toBe(0);
+      expect(done[3]!).toMatchObject({ status: "failed", detail: { tool: "bash", exit_code: 7 } });
+      expect(JSON.stringify(events)).not.toContain("do-not-log-file-content");
+    } finally { untap(); }
+  });
+
   it("qq_image 绑定请求范围，独立五次限额，结果仅有路径文本", async () => {
     let seen: TranscriptContext | undefined;
     const recall = vi.fn(async () => ({ text: "图1: /data/media/ab/test.png（1×1）", images: [{ path: "/data/media/ab/test.png", width: 1, height: 1 }] }));
