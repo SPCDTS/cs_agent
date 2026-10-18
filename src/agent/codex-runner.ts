@@ -45,6 +45,8 @@ export interface CodexRunnerOptions {
   rolloutMaxMb?: number;
   /** 安全阀：线程创建超过该天数则新建线程，默认 90 */
   threadMaxDays?: number;
+  /** 官方 rollout trace 保留天数；默认 14，0 禁用。 */
+  traceRetentionDays?: number;
 }
 
 /** 允许的推理强度（不含 ultra：会自动委派子任务，成本高）。 */
@@ -413,7 +415,16 @@ export class CodexRunner {
   constructor(readonly opts: CodexRunnerOptions) {}
 
   private childEnv(): NodeJS.ProcessEnv {
-    return { ...buildCodexEnv(this.opts.codexHome), ...Object.fromEntries(Object.entries(this.opts.env ?? {}).filter(([key]) => key.toUpperCase() !== "OBS_TOKEN")) };
+    const env = { ...buildCodexEnv(this.opts.codexHome), ...Object.fromEntries(Object.entries(this.opts.env ?? {}).filter(([key]) => key.toUpperCase() !== "OBS_TOKEN")) };
+    // Codex 0.163.0 官方开关，来源见 docs/research/observability-viewer-research.md §3。
+    // 不接受继承的路径；Windows 环境变量不区分大小写，关闭时也必须移除别名。
+    for (const key of Object.keys(env)) if (key.toUpperCase() === "CODEX_ROLLOUT_TRACE_ROOT") delete env[key];
+    if ((this.opts.traceRetentionDays ?? 14) > 0) env.CODEX_ROLLOUT_TRACE_ROOT = path.join(this.opts.codexHome, "trace");
+    return env;
+  }
+
+  private async prepareTraceDirectory(): Promise<void> {
+    if ((this.opts.traceRetentionDays ?? 14) > 0) await fs.mkdir(path.join(this.opts.codexHome, "trace"), { recursive: true });
   }
 
   /** main 启动时调用；后续回合复用同一份目录结果。 */
@@ -422,6 +433,7 @@ export class CodexRunner {
   }
 
   private async loadContextUsage(): Promise<number> {
+    await this.prepareTraceDirectory();
     const windowTokens = await loadCodexContextWindow({ command: this.opts.command, model: this.opts.model ?? "gpt-6.1-sol",
       env: this.childEnv(), fallback: this.opts.contextWindow });
     await this.backfillContextUsage(windowTokens);
@@ -722,6 +734,7 @@ export class CodexRunner {
     const [bin, ...prefix] = this.opts.command;
     if (!bin) throw new Error("CODEX_BIN 未配置");
     await fs.mkdir(this.opts.workspaceDir, { recursive: true });
+    await this.prepareTraceDirectory();
 
     signal?.throwIfAborted();
     await onAcquired?.();

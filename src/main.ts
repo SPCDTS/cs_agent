@@ -26,6 +26,7 @@ import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
 import { CodexRunner, effectiveWritableRoots, ensureWorkspaceAgentsMd } from "./agent/codex-runner.js";
+import { purgeCodexTrace } from "./agent/codex-trace.js";
 import { CodexPromptStore } from "./agent/codex-prompt.js";
 import { createImageBackend } from "./agent/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
@@ -134,6 +135,7 @@ async function main(): Promise<void> {
     timeoutMs: cfg.CODEX_TIMEOUT_SEC * 1000,
     rolloutMaxMb: cfg.CODEX_ROLLOUT_MAX_MB,
     threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,
+    traceRetentionDays: cfg.CODEX_TRACE_RETENTION_DAYS,
   });
 
   // 存储加载后先恢复历史占用；codex 初始化与 PiBackend.open 均完成后才开放面板。
@@ -283,6 +285,8 @@ async function main(): Promise<void> {
     codex: codexStatus, pi: piStatus, settings, live,
     resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
+    onPurge: now => purgeCodexTrace(cfg.codexHome, cfg.CODEX_TRACE_RETENTION_DAYS, now).then(() => undefined,
+      error => { log.warn("codex trace purge failed", { error }); }),
     gauges: async () => {
       const q = dispatcher.status(), ws = bridge!.status();
       const gauges: Gauge[] = [ { name: "queue_depth", value: q.waiting }, { name: "global_slots_used", value: q.active },

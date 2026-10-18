@@ -65,6 +65,8 @@ const EnvSchema = z.object({
   CODEX_REPLY_MODE: z.enum(["relay", "direct"]).default("relay"),
   CODEX_SANDBOX: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("workspace-write"),
   CODEX_TIMEOUT_SEC: int(600),
+  /** 官方 rollout trace 保留天数；0 禁用请求负载记录。 */
+  CODEX_TRACE_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(14),
 
   AGENT_MODEL_PROVIDER: z.string().default("deepseek"),
   AGENT_MODEL_ID: z.string().default("deepseek-flash"),

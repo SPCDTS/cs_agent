@@ -10,6 +10,8 @@ export class Metrics {
   private running?: Promise<void>;
   constructor(private store: ObsStore, private options: {
     retentionDays: number; inputPrice?: number; outputPrice?: number; gauges?: () => Promise<Gauge[]>;
+    /** 与观测库每日清理同时运行；辅助文件清理失败不让观测库降级。 */
+    onPurge?: (now: number) => Promise<void>;
   }) { try { this.cursor = Number((store.db.prepare("SELECT value FROM obs_state WHERE key='metrics_cursor'").get() as { value: number } | undefined)?.value ?? 0); } catch { store.degrade(); } }
   start(): void { this.timer = setInterval(() => { void this.flush().catch(() => undefined); }, 60_000); this.timer.unref(); }
   flush(now = Date.now()): Promise<void> {
@@ -66,7 +68,11 @@ export class Metrics {
       this.store.db.exec('COMMIT');
       this.cursor = cursor;
     } catch (error) { this.store.db.exec('ROLLBACK'); throw error; }
-    if (now - this.purgedAt >= 86400_000) { this.store.purge(this.options.retentionDays, now); this.purgedAt = now; }
+    if (now - this.purgedAt >= 86400_000) {
+      this.store.purge(this.options.retentionDays, now);
+      await this.options.onPurge?.(now).catch(() => undefined);
+      this.purgedAt = now;
+    }
   }
   async stop(): Promise<void> { if (this.timer) clearInterval(this.timer); await this.flush(); }
 }
