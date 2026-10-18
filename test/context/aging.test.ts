@@ -136,7 +136,9 @@ describe("scheduler", () => {
     const r = rig([]);
     expect(needsCatchUp(r.store, NOW)).toBe(true);
     const s = startAgingScheduler(r.opts);
+    expect(s.running()).toBe(true);
     const rep = await s.runNow(); // 复用启动时触发的那次运行
+    expect(s.running()).toBe(false);
     s.stop();
     expect(rep).toMatchObject({ day_summaries: 0, failed: 0 });
     expect(needsCatchUp(r.store, NOW + 3600_000)).toBe(false);
@@ -147,7 +149,11 @@ describe("scheduler", () => {
     const r = rig([]);
     r.store.close();
     const s = startAgingScheduler(r.opts);
-    expect(await s.runNow()).toBeUndefined();
+    expect(s.running()).toBe(false);
+    const pending = s.runNow();
+    expect(s.running()).toBe(true);
+    expect(await pending).toBeUndefined();
+    expect(s.running()).toBe(false);
     s.stop();
   });
 });

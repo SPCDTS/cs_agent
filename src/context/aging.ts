@@ -150,7 +150,7 @@ export function needsCatchUp(store: ContextStore, nowMs: number): boolean {
 }
 
 /** 启动调度：上次运行早于 24h 时立即补跑，之后每天 hour 点运行。返回 stop()。 */
-export function startAgingScheduler(opts: AgingOptions): { stop(): void; runNow(): Promise<AgingReport | undefined> } {
+export function startAgingScheduler(opts: AgingOptions): { stop(): void; runNow(): Promise<AgingReport | undefined>; running(): boolean } {
   let timer: NodeJS.Timeout | undefined;
   let running: Promise<AgingReport | undefined> | undefined;
   let stopped = false;
@@ -192,5 +192,6 @@ export function startAgingScheduler(opts: AgingOptions): { stop(): void; runNow(
       if (timer) clearTimeout(timer);
     },
     runNow: runSafe,
+    running: () => running !== undefined,
   };
 }
