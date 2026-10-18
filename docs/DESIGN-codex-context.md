@@ -470,3 +470,9 @@ interface ContextUsage {
 - 修复（astra，`ca62564`）：响应头改为 `Referrer-Policy: same-origin`；同源检查仅在 `Sec-Fetch-Site: same-origin` 时接受 `Origin: null`，其余不变，CSRF 令牌校验保留。新增 4 个回归测试。
 - 独立复跑：typecheck、560 测试通过；部署后浏览器复现脚本返回 303 并跳回 `?ok=codexPrompt`，响应头为 `same-origin`。
 - 排查事故：排查中经带 TTY 的 `docker compose exec` 读写提示文件，Windows 终端把 UTF-8 中文转码，codex.md / agent.md 短暂损坏；两文件当时仍为种子默认值，已按源码模板原样恢复（SHA-256 一致）。规则：容器内文件进出一律 `docker compose exec -T` 并以管道传递。
+
+### 8.8 上下文占用条显示 645%（2026-10-18，缺陷修复，主会话验收通过）
+- 现象：总览页 codex 共享线程显示 3,226,173 / 500,000 tokens（645%），owner 线程 110%。
+- 根因：`codex exec --json` 的 `turn.completed.usage` 是线程累计计费量（等于 rollout `token_count.info.total_token_usage`），实时路径把它当成本次请求上下文写入占用条；启动回填用的 `last_token_usage` 是对的，于是重启后短暂正确、下一回合又被覆盖。同一时刻真实值为 115,947。
+- 修复（astra，`8d26af1`）：回合结束、codex 进程退出后，从该线程 rollout 尾部读取最新 `token_count.last_token_usage` 写入占用条；读不到或比本轮开始更旧时保留旧值、只计一次回合并告警一次；`readRolloutContextUsage` 不再接受 `turn.completed.usage`；观测事件 `model_usage` 字段改名 `total_*`，实时页标注"线程累计"。
+- 主会话验收：在 O1 之上变基并解决 `codex-context-usage.ts` 冲突（只取 `token_count`）；typecheck 通过，全量 718 项通过（一次 Windows worker 崩溃为既有抖动，新增用例单独复跑三次稳定）。部署时清掉 `data/context-usage.json` 中标记为实测的错误 codex 记录，启动回填两条成功：shared 115,947 / 500,000（23%），owner 53,864（11%）。副作用：shared 回合计数由 rollout 尾部 2 MiB 可见范围重算为 3（真实 18 回合见 `/api/agents` 会话索引），下一回合起继续累加。
