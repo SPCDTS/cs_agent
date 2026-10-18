@@ -6,15 +6,16 @@ import type { ShellExecOptions } from "@earendil-works/pi-durable/env";
 import { createCodingTools, DEFAULT_IMAGE_LIMITS } from "@earendil-works/pi-durable/tools";
 import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import { isScope } from "../../context/access.js";
-import { withoutSecretEnv } from "../../obs/redact.js";
 
 export const BUILTIN_TOOLS = new Set(["read", "write", "edit", "bash"]);
+const SHELL_ENV = /^(?:PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_.*|TZ|TERM|TMPDIR)$/;
 
 /** 文件工具不设路径沙箱；只约束子进程的凭据继承与单次运行时间。 */
 export class PiExecutionEnv extends NodeExecutionEnv {
   override exec(command: string | readonly string[], options: ShellExecOptions | undefined, context: Context) {
     return super.exec(command, { ...options, inheritEnv: false,
-      env: withoutSecretEnv({ ...process.env, ...options?.env }),
+      env: { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] =>
+        SHELL_ENV.test(entry[0]) && entry[1] !== undefined)), ...options?.env },
       timeout: Math.min(60, options?.timeout ?? 60),
     }, context);
   }
