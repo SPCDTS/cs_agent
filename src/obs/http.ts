@@ -194,8 +194,9 @@ export function createDashboard(opts: DashboardOptions) {
     const c = asObj(change);
     const before = codexBytes;
     codexBytes = (async () => {
-      const prev = await before;
-      const after = typeof c.custom === 'string' ? Buffer.byteLength(c.custom) : await opts.codexPrompt!.read().then(s => Buffer.byteLength(s.custom), () => null);
+      // 存储的通知自带前后字节数时直接用；否则用上次缓存的大小与重新读取的结果。
+      const prev = typeof c.bytes_before === 'number' ? c.bytes_before : await before;
+      const after = typeof c.bytes_after === 'number' ? c.bytes_after : typeof c.custom === 'string' ? Buffer.byteLength(c.custom) : await opts.codexPrompt!.read().then(s => Buffer.byteLength(s.custom), () => null);
       tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { target: 'codex', source: typeof c.source === 'string' ? c.source : 'dashboard', file: 'prompts/codex.md', bytes_before: prev, bytes_after: after } });
       return after;
     })().catch(() => null);

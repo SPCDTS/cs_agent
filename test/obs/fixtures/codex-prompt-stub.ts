@@ -27,5 +27,6 @@ export class CodexPromptStub implements CodexPromptView {
     return { revision: this.revision };
   }
   subscribe(fn: (change?: unknown) => void): () => void { this.subs.add(fn); return () => { this.subs.delete(fn); }; }
+  notify(change: unknown): void { for (const fn of this.subs) fn(change); }
   get listeners(): number { return this.subs.size; }
 }

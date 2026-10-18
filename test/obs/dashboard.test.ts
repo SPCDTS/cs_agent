@@ -441,6 +441,13 @@ describe('codex 系统提示 codex.md', () => {
     r.close(); expect(stub.listeners).toBe(0);
   });
 
+  it('存储通知自带 bytes_before / bytes_after 时直接记录', async () => {
+    const r = await rig(); const stub = r.codexPrompt!;
+    stub.notify({ target: 'codex', file: '/data/prompts/codex.md', revision: 'rev-9', bytes_before: 11, bytes_after: 22 });
+    await vi.waitFor(() => expect(r.store.events(SETTINGS_TICKET).filter(e => e.stage === 'prompt_changed')).toHaveLength(1));
+    expect(JSON.parse(r.store.events(SETTINGS_TICKET).find(e => e.stage === 'prompt_changed')!.detail_json)).toMatchObject({ target: 'codex', bytes_before: 11, bytes_after: 22 });
+  });
+
   it('版本过期返回 409 并提示刷新；存储拒绝（空 / 超限 / 秘密）返回 409 带原因', async () => {
     const r = await rig(); const stub = r.codexPrompt!;
     const stale = await r.post('/settings/codex-prompt', { _csrf: r.csrf, revision: 'rev-0', content: '覆盖' });
