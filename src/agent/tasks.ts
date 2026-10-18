@@ -65,7 +65,7 @@ export interface TaskDeps {
   /** 统一上下文存储：查找 [引用] 正文 */
   store?: Pick<ContextStore, "message">;
   /** codex 后端的回复模式（pi 后端恒为 direct）；relay 需要 models + model */
-  codexReplyMode: ReplyMode;
+  codexReplyMode: ReplyMode | (() => ReplyMode);
   models?: Models;
   relayModel?: Model<Api>;
   /** reply 重试退避基数（毫秒），默认 2000 */
@@ -583,7 +583,8 @@ export function createTasks(deps: TaskDeps) {
         const doc = await ticketDoc(runtime, context);
         let draft = doc.replyDraft;
         if (draft === undefined && doc.agentResult?.ok) {
-          const mode: ReplyMode = doc.agentResult.backend === "codex" ? deps.codexReplyMode : "direct";
+          const codexMode = typeof deps.codexReplyMode === "function" ? deps.codexReplyMode() : deps.codexReplyMode;
+          const mode: ReplyMode = doc.agentResult.backend === "codex" ? codexMode : "direct";
           const out = await postprocessReply(doc.agentResult.text, {
             ticket: doc.ticket,
             mode,

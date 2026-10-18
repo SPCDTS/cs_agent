@@ -27,6 +27,7 @@ import { createTasks } from "./agent/tasks.js";
 import { CodexBackend } from "./agent/backends/codex.js";
 import { createBackendSelector, PiBackend } from "./agent/backends/select.js";
 import { ContextStore } from "./context/store.js";
+import { SettingsStore, settingsDefaults } from "./agent/settings.js";
 import { startAgingScheduler } from "./context/aging.js";
 
 async function main(): Promise<void> {
@@ -79,6 +80,9 @@ async function main(): Promise<void> {
   const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP);
   trace.attach(obs);
   if (obs.degraded) log.warn("observability storage degraded; agent continues");
+  // 面板可改的运行时设置：.env 为初始默认，${DATA_DIR}/settings.json 覆盖；每条消息现读
+  const settings = await SettingsStore.open(cfg.DATA_DIR, settingsDefaults(cfg));
+  log.info("runtime settings loaded", { ...settings.current() });
 
   let bridge: QQBridge | undefined;
   const getBridge = () => {
@@ -136,10 +140,9 @@ async function main(): Promise<void> {
   });
   // 执行 agent 后端（§4.3）：codex（默认）与 pi 长期会话。
   const backends = createBackendSelector({
-    defaultBackend: cfg.AGENT_BACKEND,
-    overrides: cfg.backendOverrides,
+    current: () => settings.current(),
     backends: {
-      codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, ticketsDir: cfg.ticketsDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT }),
+      codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, ticketsDir: cfg.ticketsDir, reasoningEffort: () => settings.current().codexReasoningEffort }),
       pi,
     },
   });
@@ -153,7 +156,7 @@ async function main(): Promise<void> {
     backends,
     owner: cfg.owner,
     store,
-    codexReplyMode: cfg.CODEX_REPLY_MODE,
+    codexReplyMode: () => settings.current().codexReplyMode,
     models,
     relayModel: agentModel,
   });
@@ -179,7 +182,7 @@ async function main(): Promise<void> {
     tasks,
     concurrency: cfg.AGENT_CONCURRENCY,
     imagePrefixes: cfg.imagePrefixes,
-    codexEffort: cfg.CODEX_REASONING_EFFORT,
+    codexEffort: () => settings.current().codexReasoningEffort,
     history: store,
   });
 
@@ -272,7 +275,7 @@ async function main(): Promise<void> {
       return gauges;
     } });
   metrics.start();
-  const alerts = startAlerts({ enabled: cfg.ALERT_OWNER, owner: cfg.owner, bridge, trace });
+  const alerts = startAlerts({ enabled: () => settings.current().alertOwner, owner: cfg.owner, bridge, trace });
   const server: Server = createServer(async (req, res) => {
     if (req.url !== "/healthz") {
       await dashboard.handle(req, res);

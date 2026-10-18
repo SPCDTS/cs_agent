@@ -1,16 +1,20 @@
 import type { QQBridge } from '../qq/types.js';
 import type { Trace } from './trace.js';
 import { log } from '../log.js';
-/** 开关关闭时不订阅、不发送；所有告警共用 30 分钟限频，内容不含原文或服务端错误。 */
-export function startAlerts(opts: { enabled: boolean; owner?: string; bridge: Pick<QQBridge, 'status' | 'send'>; trace: Trace; now?: () => number }) {
-  if (!opts.enabled || !opts.owner) return { stop() {} };
+/**
+ * 静态开关关闭时不订阅、不发送；函数开关（运行时设置）每次发送前现读，关闭期间不发送也不计入限频。
+ * 所有告警共用 30 分钟限频，内容不含原文或服务端错误。
+ */
+export function startAlerts(opts: { enabled: boolean | (() => boolean); owner?: string; bridge: Pick<QQBridge, 'status' | 'send'>; trace: Trace; now?: () => number }) {
+  if (opts.enabled === false || !opts.owner) return { stop() {} };
+  const enabled = typeof opts.enabled === 'function' ? opts.enabled : () => true;
   const now = opts.now ?? Date.now;
   let downAt: number | undefined;
   let last = -Infinity;
   let failed = 0;
   const terminal = new Map<string, number>();
   const send = (reason: string) => {
-    if (now() - last < 30 * 60_000) return;
+    if (!enabled() || now() - last < 30 * 60_000) return;
     last = now();
     void opts.bridge.send('private', opts.owner!, 'cs-agent 告警：' + reason).catch(() => log.warn('owner alert delivery failed'));
   };

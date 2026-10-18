@@ -130,7 +130,7 @@ it('Codex 排队时间与模型时间分别记录，backend span 保留总耗时
     now=1400;await opts?.onAcquired?.();now=1500;return '假答复';
   }}});
   await trace.span('timing','backend:codex',()=>backend.handle({ticket:'timing',scope:'private:1',threadKey:'shared',access:'private:1',text:'hello',source:{type:'private',user_id:'1',group_id:null,nickname:'test'}},{signal:new AbortController().signal,onEvent:()=>{}}));
-  const rows=r.store.events('timing');expect(rows.find(e=>e.stage==='thread_wait')?.duration_ms).toBe(400);
+  const rows=r.store.events('timing');expect(rows.find(e=>e.stage==='thread_wait'&&e.status==='started')).toBeTruthy();expect(rows.find(e=>e.stage==='thread_wait'&&e.status==='ok')?.duration_ms).toBe(400);
   const model=rows.find(e=>e.stage==='model_turn'&&e.status==='ok')!;expect(model.duration_ms).toBe(100);
   expect(JSON.parse(model.detail_json)).toMatchObject({thread_wait_ms:400,model_ms:100});expect(rows.at(-1)?.duration_ms).toBe(500);
 });
@@ -139,7 +139,9 @@ it('Codex 内置命令和搜索只保存白名单摘要，每轮最多 100 条�
   observe({type:'item.started',item:{id:'cmd',type:'command_execution'}});
   observe({type:'item.completed',raw:'forbidden-raw',item:{id:'cmd',type:'command_execution',command:'c'.repeat(300),exit_code:2,duration_ms:25,aggregated_output:'forbidden-output'}});
   for(let i=0;i<130;i++)observe({type:'item.completed',item:{id:'search'+i,type:'web_search',query:'q'.repeat(300),results:'forbidden-results'}});
-  const rows=r.store.events('builtin');expect(rows).toHaveLength(100);expect(rows[0]).toMatchObject({stage:'tool:command_execution',status:'failed',duration_ms:25});
+  // 开始事件（实时视图用）单独一行，完成事件仍最多 100 条
+  const all=r.store.events('builtin');expect(all[0]).toMatchObject({stage:'tool:command_execution',status:'started'});
+  const rows=all.filter(e=>e.status!=='started');expect(rows).toHaveLength(100);expect(rows[0]).toMatchObject({stage:'tool:command_execution',status:'failed',duration_ms:25});
   expect(JSON.parse(rows[0]!.detail_json).command.length).toBe(200);expect(JSON.parse(rows[1]!.detail_json).query.length).toBe(200);
   expect(rows.map(e=>e.detail_json).join('')).not.toContain('forbidden-');
 });

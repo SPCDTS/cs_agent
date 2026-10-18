@@ -53,19 +53,23 @@ export interface CodexBackendOptions {
   imagesDir: string;
   /** ${DATA_DIR}/tickets：票据工作目录的根（codex-last.txt） */
   ticketsDir: string;
-  /** CODEX_REASONING_EFFORT；不在允许列表内时不传覆盖参数（沿用 config.toml） */
-  reasoningEffort?: string;
+  /** CODEX_REASONING_EFFORT；不在允许列表内时不传覆盖参数（沿用 config.toml）。函数形式每回合现读（运行时设置）。 */
+  reasoningEffort?: string | (() => string | undefined);
 }
 
 export class CodexBackend implements AgentBackend {
   readonly name = "codex" as const;
-  private readonly effort: ReasoningEffort | undefined;
-
   constructor(private readonly opts: CodexBackendOptions) {
-    this.effort = isReasoningEffort(opts.reasoningEffort) ? opts.reasoningEffort : undefined;
-    if (opts.reasoningEffort && !this.effort) {
-      log.warn("CODEX_REASONING_EFFORT not in the allowed list; per-call override omitted", { value: opts.reasoningEffort });
+    const initial = typeof opts.reasoningEffort === "function" ? opts.reasoningEffort() : opts.reasoningEffort;
+    if (initial && !isReasoningEffort(initial)) {
+      log.warn("CODEX_REASONING_EFFORT not in the allowed list; per-call override omitted", { value: initial });
     }
+  }
+
+  /** 本回合的推理强度（运行时设置可在两回合之间修改）。 */
+  private get effort(): ReasoningEffort | undefined {
+    const value = typeof this.opts.reasoningEffort === "function" ? this.opts.reasoningEffort() : this.opts.reasoningEffort;
+    return isReasoningEffort(value) ? value : undefined;
   }
 
   async handle(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {
@@ -96,7 +100,9 @@ export class CodexBackend implements AgentBackend {
       ...(req.time ? { time: req.time } : {}),
       ...(req.quote ? { quote: req.quote } : {}),
     });
+    const effort = this.effort;
     const started = Date.now();
+    trace.event(req.ticket, "thread_wait", { status: "started", detail: { backend: "codex", thread_key: req.threadKey } });
     let modelStarted: number | undefined;
     let threadWaitMs: number | undefined;
     let text: string;
@@ -105,7 +111,7 @@ export class CodexBackend implements AgentBackend {
         onJsonEvent: codexObserver(req.ticket),
         threadKey: req.threadKey === "owner" ? "owner" : "shared",
         signal: ctx.signal,
-        ...(this.effort ? { reasoningEffort: this.effort } : {}),
+        ...(effort ? { reasoningEffort: effort } : {}),
         qqAccess: req.access,
         imageTicketDir: dir,
         imageRefs: refs,
@@ -115,16 +121,16 @@ export class CodexBackend implements AgentBackend {
           trace.event(req.ticket,"thread_wait",{durationMs:threadWaitMs,detail:{backend:"codex",thread_wait_ms:threadWaitMs}});
           ctx.signal.throwIfAborted();
           await ctx.persistTurn?.({ outFile, attempts: attempts + 1 });
-          trace.event(req.ticket, "model_turn", { status: "started", detail: { backend: "codex", thread_key: req.threadKey, effort: this.effort, attempt: attempts + 1 } });
-          ctx.onEvent({ type: "codex_start", thread: req.threadKey, effort: this.effort ?? "default", attempt: attempts + 1 });
+          trace.event(req.ticket, "model_turn", { status: "started", detail: { backend: "codex", thread_key: req.threadKey, effort, attempt: attempts + 1 } });
+          ctx.onEvent({ type: "codex_start", thread: req.threadKey, effort: effort ?? "default", attempt: attempts + 1 });
         },
       });
     } catch (err) {
-      trace.event(req.ticket, "model_turn", { status: "failed", durationMs: modelStarted === undefined ? undefined : Date.now()-modelStarted, detail: { backend: "codex", thread_wait_ms: threadWaitMs ?? Date.now()-started, model_ms: modelStarted === undefined ? 0 : Date.now()-modelStarted, failure: classifyFailure(err,"codex"), error: err } });
+      trace.event(req.ticket, "model_turn", { status: "failed", durationMs: modelStarted === undefined ? undefined : Date.now()-modelStarted, detail: { backend: "codex", thread_key: req.threadKey, effort, thread_wait_ms: threadWaitMs ?? Date.now()-started, model_ms: modelStarted === undefined ? 0 : Date.now()-modelStarted, failure: classifyFailure(err,"codex"), error: err } });
       if (err instanceof CodexTimeoutError) throw new BackendTimeoutError(err.message);
       throw err;
     }
-    trace.event(req.ticket, "model_turn", { durationMs: modelStarted === undefined ? undefined : Date.now()-modelStarted, detail: { backend: "codex", thread_wait_ms: threadWaitMs, model_ms: modelStarted === undefined ? 0 : Date.now()-modelStarted, thread_key: req.threadKey, effort: this.effort, raw_reply: text } });
+    trace.event(req.ticket, "model_turn", { durationMs: modelStarted === undefined ? undefined : Date.now()-modelStarted, detail: { backend: "codex", thread_wait_ms: threadWaitMs, model_ms: modelStarted === undefined ? 0 : Date.now()-modelStarted, thread_key: req.threadKey, effort, raw_reply: text } });
     // codex 没写 -o 文件（只从 JSONL 拿到文本）时补写：输出文件是"回合已完成"的唯一标志
     if ((await readNonEmpty(outFile)) === undefined) {
       const tmp = `${outFile}.${process.pid}.tmp`;
@@ -135,7 +141,7 @@ export class CodexBackend implements AgentBackend {
     log.info("codex backend done", {
       ticket,
       thread: req.threadKey,
-      effort: this.effort ?? "default",
+      effort: effort ?? "default",
       ms: Date.now() - started,
       chars: text.length,
       images: images.length,
@@ -162,13 +168,19 @@ export function codexObserver(ticket: string): (event: Record<string, unknown>) 
     const done = event.type === "item.completed";
     const duration = typeof item.duration_ms === "number" ? item.duration_ms : starts.has(id) ? Date.now() - starts.get(id)! : undefined;
     if (item.type !== 'mcp_tool_call') {
+      const command = item.type === 'command_execution';
+      const action = item.action as Record<string,unknown> | undefined;
+      const summary = command ? {command:redactText(String(item.command ?? ''),200)} : {query:redactText(String(item.query ?? action?.query ?? ''),200)};
+      if (event.type === 'item.started') {
+        // 开始事件只给实时视图看"正在执行什么"；与完成事件共用 100 条上限。
+        if (builtinCount < 100) trace.event(ticket,command ? 'tool:command_execution' : 'tool:web_search',{status:'started',detail:{backend:'codex',call_id:id,...summary}});
+        return;
+      }
       if (!done) return;
       starts.delete(id);
       if (builtinCount++ >= 100) return;
-      const command = item.type === 'command_execution';
-      const action = item.action as Record<string,unknown> | undefined;
       trace.event(ticket,command ? 'tool:command_execution' : 'tool:web_search',{status:item.status==='failed' || (command && typeof item.exit_code==='number' && item.exit_code!==0) ? 'failed':'ok',durationMs:duration,
-        detail:{backend:'codex',call_id:id,...(command ? {command:redactText(String(item.command ?? ''),200),exit_code:typeof item.exit_code==='number' ? item.exit_code : null} : {query:redactText(String(item.query ?? action?.query ?? ''),200)})}});
+        detail:{backend:'codex',call_id:id,...summary,...(command ? {exit_code:typeof item.exit_code==='number' ? item.exit_code : null} : {})}});
       return;
     }
     if (!['item.started','item.updated','item.completed'].includes(String(event.type))) return;

@@ -43,8 +43,8 @@ export interface DispatcherOptions {
   tasks: CsTasks;
   concurrency: number;
   imagePrefixes?: readonly string[];
-  /** 写入消息库机器人行的 codex 推理强度（CODEX_REASONING_EFFORT） */
-  codexEffort?: string;
+  /** 写入消息库机器人行的 codex 推理强度（CODEX_REASONING_EFFORT；函数形式现读运行时设置） */
+  codexEffort?: string | (() => string);
   context?: Context;
   history?: DispatchHistory;
   /** 票据仍 pending 时队首重试的退避基数（毫秒，第 n 次重试等待 n 倍），默认 5000 */
@@ -491,7 +491,7 @@ export class Dispatcher {
         ok = doc.agentResult?.ok === true;
         if (doc.agentResult?.backend === "codex") {
           action = "ask_codex";
-          detail = this.opts.codexEffort;
+          detail = typeof this.opts.codexEffort === "function" ? this.opts.codexEffort() : this.opts.codexEffort;
         }
       }
       trace.event(ticket, rec?.status === "sent" && ok ? "reply_sent" : "failed", { status: rec?.status === "sent" && ok ? "ok" : "failed",

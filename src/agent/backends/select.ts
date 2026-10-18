@@ -42,14 +42,20 @@ export interface BackendSelector {
   select(scope: string): AgentBackend;
 }
 
+/**
+ * 静态 defaultBackend/overrides（测试与旧调用）或 `current()`（运行时设置，每次 select 现读，面板修改立即生效）。
+ */
 export function createBackendSelector(opts: {
-  defaultBackend: BackendName;
-  overrides: Readonly<Record<string, BackendName>>;
   backends: Partial<Record<BackendName, AgentBackend>>;
-}): BackendSelector {
+} & (
+  | { defaultBackend: BackendName; overrides: Readonly<Record<string, BackendName>> }
+  | { current: () => { agentBackend: BackendName; backendOverrides: Readonly<Record<string, BackendName>> } }
+)): BackendSelector {
+  const live = () => "current" in opts ? opts.current() : { agentBackend: opts.defaultBackend, backendOverrides: opts.overrides };
   return {
     select(scope) {
-      const name = backendNameFor(scope, opts.defaultBackend, opts.overrides);
+      const { agentBackend, backendOverrides } = live();
+      const name = backendNameFor(scope, agentBackend, backendOverrides);
       const backend = opts.backends[name];
       if (!backend) throw new Error(`agent backend "${name}" is not registered`);
       return backend;
