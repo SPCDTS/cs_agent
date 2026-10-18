@@ -3,6 +3,7 @@ import { ObsStore } from "./obs/store.js";
 import { trace } from "./obs/trace.js";
 import { Metrics, type Gauge } from "./obs/metrics.js";
 import { createDashboard } from "./obs/http.js";
+import { LiveBus } from "./obs/live.js";
 import { startAlerts } from "./obs/alerts.js";
 import { registerSecrets, redact } from "./obs/redact.js";
 import { cleanupIncoming } from "./qq/incoming.js";
@@ -79,6 +80,8 @@ async function main(): Promise<void> {
   const store = new ContextStore(cfg.DATA_DIR);
   const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP);
   trace.attach(obs);
+  // 进行中会话的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）
+  const live = new LiveBus(trace);
   if (obs.degraded) log.warn("observability storage degraded; agent continues");
   // 面板可改的运行时设置：.env 为初始默认，${DATA_DIR}/settings.json 覆盖；每条消息现读
   const settings = await SettingsStore.open(cfg.DATA_DIR, settingsDefaults(cfg));
@@ -257,7 +260,8 @@ async function main(): Promise<void> {
   const dashboard = createDashboard({ config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
-    codex: codexStatus, pi: piStatus });
+    codex: codexStatus, pi: piStatus, settings, live,
+    resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
     gauges: async () => {
       const q = dispatcher.status(), ws = bridge!.status();
@@ -302,6 +306,7 @@ async function main(): Promise<void> {
     const force = setTimeout(() => process.exit(1), 20_000);
     force.unref();
     dashboard.close();
+    live.close();
     server.close();
     alerts.stop();
     aging.stop();

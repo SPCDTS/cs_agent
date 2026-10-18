@@ -5,6 +5,7 @@ import { redact, redactText } from './redact.js';
 
 export interface ObsEvent { id: number; ticket: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail_json: string }
 export interface TicketRow { ticket: string; scope: string; ts: number; updated: number; route: string | null; backend: string | null; status: string; sender: string | null; duration_ms: number }
+export interface ThreadTurn { ticket: string; ts: number; started: number; text: string; reply: string; status: string; duration_ms: number; tools: number; input_tokens: number; output_tokens: number }
 export class ObsStore {
   private database?: DatabaseSync;
   degraded = false;
@@ -102,6 +103,38 @@ export class ObsStore {
   }
   metric(ts: number, name: string, labels: object, value: number): void {
     if (!this.degraded && Number.isFinite(value)) this.db.prepare('INSERT INTO metrics VALUES(?,?,?,?)').run(ts, name, JSON.stringify(redact(labels)), value);
+  }
+  /**
+   * 某个 codex 线程 / pi 会话最近 N 轮的摘要，只来自观测事件（不读 rollout 原文）：
+   * codex 以 model_turn.thread_key 归属，pi 以 dispatched.conversation_key 归属。
+   */
+  threadTurns(backend: 'codex' | 'pi', key: string, limit = 10): ThreadTurn[] {
+    if (this.degraded) return [];
+    const [stage, field] = backend === 'codex' ? ['model_turn', '$.thread_key'] : ['dispatched', '$.conversation_key'];
+    const rows = this.db.prepare(`SELECT ticket, MAX(ts) ts FROM events WHERE stage=? AND status<>'started' AND json_extract(detail_json,'$.backend')=?
+      AND json_extract(detail_json,'${field}')=? GROUP BY ticket ORDER BY ts DESC LIMIT ?`).all(stage, backend, key, Math.max(1, Math.min(50, Math.floor(limit)))) as { ticket: string; ts: number }[];
+    return rows.map(({ ticket, ts }) => {
+      const events = this.events(ticket, { limit: 2000 });
+      const detail = (e: ObsEvent) => JSON.parse(e.detail_json) as Record<string, unknown>;
+      const received = events.find(e => e.stage === 'received' || (e.stage === 'recovered' && detail(e).text !== undefined));
+      const terminal = events.filter(e => ['reply_sent', 'failed', 'fallback'].includes(e.stage) && detail(e).terminal === true).at(-1);
+      const sent = events.filter(e => e.stage === 'postprocess' && e.status !== 'started').at(-1);
+      const turn = events.filter(e => e.stage === 'model_turn' && e.status !== 'started').at(-1);
+      let input = 0, output = 0;
+      for (const e of events) if ((e.stage === 'model_turn' || e.stage === 'model_usage') && e.status !== 'started') {
+        const d = detail(e); input += Number(d.input_tokens) || 0; output += Number(d.output_tokens) || 0;
+      }
+      const reply = terminal && typeof detail(terminal).reply === 'string' ? detail(terminal).reply : sent ? detail(sent).sent_text : turn ? detail(turn).raw_reply ?? detail(turn).reply : undefined;
+      return { ticket, ts, started: events[0]?.ts ?? ts, text: received ? String(detail(received).text ?? '') : '',
+        reply: typeof reply === 'string' ? reply : '', status: terminal ? (terminal.stage === 'reply_sent' ? 'sent' : terminal.stage) : 'processing',
+        duration_ms: (terminal?.ts ?? ts) - (events[0]?.ts ?? ts), tools: events.filter(e => e.stage.startsWith('tool:') && e.status !== 'started').length,
+        input_tokens: input, output_tokens: output };
+    });
+  }
+  /** 最近的系统事件（@ 开头的票据，例如 @settings）。 */
+  systemEvents(ticket: string, limit = 20): ObsEvent[] {
+    if (this.degraded) return [];
+    return this.db.prepare('SELECT * FROM events WHERE ticket=? ORDER BY id DESC LIMIT ?').all(ticket, Math.max(1, Math.min(200, limit))) as unknown as ObsEvent[];
   }
   latest(stage: string): ObsEvent | undefined { if (this.degraded) return; return this.db.prepare('SELECT * FROM events WHERE stage=? ORDER BY id DESC LIMIT 1').get(stage) as ObsEvent | undefined; }
   purge(days: number, now = Date.now()): { events: number; metrics: number } {

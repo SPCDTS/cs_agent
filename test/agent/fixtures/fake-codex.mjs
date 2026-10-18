@@ -36,7 +36,13 @@ process.stdin.on("end", async () => {
     emit({ type: "thread.started", thread_id: process.env.FAKE_CODEX_THREAD ?? "thread-123" });
   }
   emit({ type: "turn.started" });
+  // FAKE_CODEX_TOOL_EVENTS=1：在挂起前发出 MCP 工具与命令的 started 事件，挂起后再发 completed（模拟进行中的回合）
+  const tools = process.env.FAKE_CODEX_TOOL_EVENTS === "1";
+  const mcp = { id: "call_1", type: "mcp_tool_call", server: "qq_context", tool: "qq_recent", arguments: { limit: 3 } };
+  const cmd = { id: "cmd_1", type: "command_execution", command: "ls /workspace" };
+  if (tools) { emit({ type: "item.started", item: { ...mcp, status: "in_progress" } }); emit({ type: "item.started", item: { ...cmd, status: "in_progress" } }); }
   if (sleepMs) await new Promise((r) => setTimeout(r, sleepMs));
+  if (tools) { emit({ type: "item.completed", item: { ...cmd, status: "completed", exit_code: 0 } }); emit({ type: "item.completed", item: { ...mcp, status: "completed", result: { content: [] } } }); }
   const images = Number(process.env.FAKE_CODEX_IMAGES ?? 0);
   const dirArg = argv.find((a) => a.startsWith("mcp_servers.image_gen.env.IMAGE_TICKET_DIR="));
   if (images && dirArg) {
