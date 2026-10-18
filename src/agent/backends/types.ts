@@ -24,7 +24,7 @@ export interface AgentRequest {
   /** 入站消息时间（unix 秒） */
   time?: number;
   /** 被引用消息（≤200 字，由调用方从消息库查得） */
-  quote?: { nickname: string; text: string };
+  quote?: { message_id: string; nickname: string; text: string };
 }
 
 export interface AgentEvent {

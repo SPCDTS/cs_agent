@@ -806,7 +806,7 @@ export class CodexRunner {
 }
 
 const HEADER_NICKNAME_MAX = 40;
-const HEADER_LABEL_RE = /\[(来源|引用)\]/g;
+const HEADER_LABEL_RE = /\[(来源|引用(?:\s+#[^\]\r\n]*)?)\]/g;
 
 /** 折成单行：控制字符、行/段分隔符一律换成空格并合并空白。 */
 function oneLine(text: string): string {
@@ -848,7 +848,7 @@ const QUOTE_MAX = 200;
 export function buildCodexPrompt(
   source: TicketSource,
   body: string,
-  opts: { time?: number; quote?: { nickname: string; text: string } } = {},
+  opts: { time?: number; quote?: { message_id: string; nickname: string; text: string } } = {},
 ): string {
   const nick = source.nickname ? headerNickname(source.nickname) : "";
   const who = nick ? `${nick}(${source.user_id})` : source.user_id;
@@ -856,9 +856,9 @@ export function buildCodexPrompt(
   const time = localStamp(opts.time && opts.time > 0 ? opts.time : Math.floor(Date.now() / 1000));
   const lines = [`[来源] ${where} · ${who} · ${time}`];
   if (opts.quote) {
-    lines.push(`[引用] ${headerNickname(opts.quote.nickname) || "?"}: ${headerField(opts.quote.text, QUOTE_MAX)}`);
+    lines.push(`[引用 #${headerField(opts.quote.message_id, 80).replace(/[\[\]]/g, "")}] ${headerNickname(opts.quote.nickname) || "?"}: ${headerField(opts.quote.text, QUOTE_MAX)}`);
   }
-  lines.push(body.replace(/^([ \t\u3000]*)\[(来源|引用)\]/gmu, "$1($2)"));
+  lines.push(body.replace(/^([ \t\u3000]*)\[(来源|引用(?:\s+#[^\]\r\n]*)?)\]/gmu, "$1($2)"));
   return lines.join("\n");
 }
 

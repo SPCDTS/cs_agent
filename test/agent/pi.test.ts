@@ -75,10 +75,10 @@ describe("pi durable backend", () => {
   it("calls web_search through the faux model, then returns the final answer and source header", async () => {
     let seen: TranscriptContext | undefined;
     const s = await setup([call("web_search", { query: "CS2", count: 3 }), ctx => { seen = ctx; return reply("查到了"); }]);
-    expect(await s.pi.handle({ ...request("search"), quote: { nickname: "友人", text: "此前的问题" } }, handleContext())).toEqual({ text: "查到了", images: [] });
+    expect(await s.pi.handle({ ...request("search"), quote: { message_id: "123", nickname: "友人", text: "此前的问题" } }, handleContext())).toEqual({ text: "查到了", images: [] });
     expect(results(seen!)).toContain("资料 / 2026-10-18 / 摘要 / https://example.com");
     expect(JSON.stringify(seen!.messages)).toContain("[来源] 群 7");
-    expect(JSON.stringify(seen!.messages)).toContain("[引用] 友人: 此前的问题");
+    expect(JSON.stringify(seen!.messages)).toContain("[引用 #123] 友人: 此前的问题");
     const init = vi.mocked(s.http).mock.calls[0]![1]!;
     expect(JSON.parse(String(init.body))).toEqual({ query: "CS2", count: 3, need_content: false });
   });

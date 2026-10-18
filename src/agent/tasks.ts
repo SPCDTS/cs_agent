@@ -432,11 +432,11 @@ export function createTasks(deps: TaskDeps) {
         if (!result) {
           const source = doc.source;
           const scope = source.type === "group" ? `group:${source.group_id}` : `private:${source.user_id}`;
-          let quote: { nickname: string; text: string } | undefined;
+          let quote: { message_id: string; nickname: string; text: string } | undefined;
           if (doc.replyTo && deps.store) {
             try {
               const hit = deps.store.message({ kind: "scope", scope }, doc.replyTo);
-              if (hit) quote = { nickname: hit.row.is_self ? "我" : hit.row.nickname || hit.row.user_id, text: hit.row.text };
+              if (hit) quote = { message_id: hit.row.message_id, nickname: hit.row.is_self ? "我" : hit.row.nickname || hit.row.user_id, text: hit.row.text };
             } catch (err) {
               log.warn("quote lookup failed", { ticket: short(doc.ticket), error: err });
             }

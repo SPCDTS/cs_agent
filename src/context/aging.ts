@@ -1,3 +1,5 @@
+import { cleanupMedia } from "./media.js";
+import path from "node:path";
 import { usageFields } from "../obs/usage.js";
 import { trace } from "../obs/trace.js";
 /**
@@ -10,7 +12,7 @@ import { trace } from "../obs/trace.js";
  */
 import type { Api, AssistantMessage, Model, Models } from "@earendil-works/pi-ai";
 import { log } from "../log.js";
-import { formatMessage, formatSummary, joinCapped } from "./format.js";
+import { formatMessage, formatSummary, joinCapped, withoutImagePaths } from "./format.js";
 import { SUMMARY_MAX, type ContextStore, type SummaryRow } from "./store.js";
 
 export const AGING_LAST_RUN_KEY = "aging_last_run";
@@ -92,7 +94,7 @@ export async function runAging(opts: AgingOptions): Promise<AgingReport> {
   for (const day of store.pendingDaySummaries(nowSec, opts.minMessages ?? 5)) {
     try {
       const rows = store.messagesBetween(day.scope, day.period_start, day.period_end);
-      const lines = rows.map((r) => formatMessage(r, { now: day.period_start }));
+      const lines = rows.map((r) => formatMessage({ ...r, text: withoutImagePaths(r.text), detail: r.detail ? withoutImagePaths(r.detail) : r.detail }, { now: day.period_start }));
       const input = `会话：${day.scope}\n日期：${md(day.period_start)}\n\n${joinCapped(lines, INPUT_MAX_CHARS, "last")}`;
       const text = await summarize(opts, DAY_SUMMARY_PROMPT, input);
       store.writeSummary({ scope: day.scope, level: "day", period_start: day.period_start, period_end: day.period_end, text, msg_count: rows.length });
@@ -128,6 +130,7 @@ export async function runAging(opts: AgingOptions): Promise<AgingReport> {
   const purged = store.purge(nowSec, opts.rawDays, opts.summaryDays, opts.rawHardMaxDays ?? 90);
   report.purged_messages = purged.messages;
   report.purged_summaries = purged.summaries;
+  await cleanupMedia(path.dirname(store.file), store, nowSec * 1000);
   store.setMeta(AGING_LAST_RUN_KEY, String(nowSec));
   report.ms = Date.now() - started;
   return report;
