@@ -9,7 +9,7 @@ import { callQQContextTool } from '../../src/mcp/qq-context-server.js';
 import type { InboundMessage } from '../../src/qq/types.js';
 import { createDashboard } from '../../src/obs/http.js';
 import { createMemoryRoutes } from '../../src/obs/memory/http.js';
-import type { MemoryDeps } from '../../src/obs/memory/types.js';
+import type { MemoryDeps, MessageItem, MessagePage } from '../../src/obs/memory/types.js';
 import { redactText, registerTemporarySecrets } from '../../src/obs/redact.js';
 import { RESPONSE_BYTES } from '../../src/obs/sessions/content.js';
 import { ObsStore } from '../../src/obs/store.js';
@@ -51,6 +51,18 @@ async function rig(options: Partial<MemoryDeps> = {}, empty = false) {
     return { status, body: JSON.parse(text), text };
   };
   return { dir, context, store, add, deps, get };
+}
+
+async function sameSecondRig() {
+  const r = await rig({}, true), messageIds = ['z', 'a', 'y', 'b', 'x', 'c', 'w'];
+  r.add('lower', NOW, '其他域的下界', P);
+  for (const id of messageIds) {
+    r.add(id, NOW, id);
+    r.add(`other-${id}`, NOW, '其他域', P);
+  }
+  const ids = messageIds.map(id => r.context.message({ kind: 'scope', scope: G }, id)!.row.id);
+  const lowerId = r.context.message({ kind: 'scope', scope: P }, 'lower')!.row.id;
+  return { ...r, messageIds, ids, lowerId };
 }
 
 describe('记忆只读 API', () => {
@@ -142,9 +154,11 @@ describe('记忆只读 API', () => {
     const first = await r.get(`/api/memory/scopes/${G}/messages?limit=2`);
     expect(first.body.items.map((m: { message_id: string }) => m.message_id)).toEqual(['pending4', 'pending3']);
     expect(first.body.next_before).toBe(NOW - DAY + 3000);
+    expect(first.body.next_before_id).toBe(r.context.message({ kind: 'scope', scope: G }, 'pending3')!.row.id);
     const next = await r.get(`/api/memory/scopes/${G}/messages?limit=2&before=${first.body.next_before}`);
     expect(next.body.items.map((m: { message_id: string }) => m.message_id)).toEqual(['pending2', 'pending1']);
     const last = await r.get(`/api/memory/scopes/${G}/messages?before=${NOW - 2 * DAY}`);
+    expect(last.body.next_before_id).toBeUndefined();
     expect(last.body.next_before).toBeUndefined(); expect(last.body.items[0]).toMatchObject({ message_id: 'm1', media: 1, text: 'match 第一日 token=[已隐藏]' });
     r.context.recordPending(G, 'bot1', NOW / 1000, { replyTo: 'm1' });
     r.context.completeReply('bot1', { action: 'reply', status: '已回复', excerpt: '匿名回复' });
@@ -164,10 +178,88 @@ describe('记忆只读 API', () => {
     expect((await r.get('/api/memory/summaries/1')).body.text).toBe('match 日摘要 token=[已隐藏]');
   });
 
-  it('同秒分页边界明确报错，增大 limit 可取全且不会暗中丢失', async () => {
-    const r = await rig({}, true); r.add('a', NOW, '甲'); r.add('b', NOW, '乙');
-    expect((await r.get(`/api/memory/scopes/${G}/messages?limit=1`)).status).toBe(400);
-    expect((await r.get(`/api/memory/scopes/${G}/messages?limit=2`)).body.items.map((m: { message_id: string }) => m.message_id)).toEqual(['b', 'a']);
+  it.each([false, true])('同秒 7 条以 limit=3 连续三页不重不漏，保留 after_id 下界=%s', async bounded => {
+    const r = await sameSecondRig(), seen: string[] = [];
+    const base = `/api/memory/scopes/${G}/messages?limit=3` + (bounded ? `&after=${NOW}&after_id=${r.lowerId}` : '');
+    let url = base;
+    for (const [page, size] of [3, 3, 1].entries()) {
+      const res = await r.get(url);
+      expect(res.status).toBe(200);
+      const body = res.body as MessagePage;
+      expect(body.items).toHaveLength(size);
+      expect(body.items.every(m => m.ts === NOW)).toBe(true);
+      seen.push(...body.items.map(m => m.message_id));
+      if (page < 2) {
+        expect(body.next_before).toBe(NOW);
+        expect(body.next_before_id).toBe(r.ids[6 - page * 3 - 2]);
+        url = base + `&before=${body.next_before}&before_id=${body.next_before_id}`;
+      } else {
+        expect(body).not.toHaveProperty('next_before');
+        expect(body).not.toHaveProperty('next_before_id');
+      }
+    }
+    expect(seen).toEqual([...r.messageIds].reverse());
+    expect(new Set(seen).size).toBe(7);
+    const exhausted = await r.get(base + `&before=${NOW}&before_id=${r.ids[0]}`);
+    expect(exhausted.status).toBe(200); expect(exhausted.body).toEqual({ items: [] });
+  });
+
+  it('after_id 严格排除同秒游标及更小 ID，并保留较新时间的消息', async () => {
+    const r = await sameSecondRig();
+    // 先插入较新消息，再插入较旧消息，验证时间优先于主键。
+    r.add('newer', NOW + 1000, '较新'); r.add('older', NOW - 1000, '较旧');
+    for (const [index, id] of r.ids.entries()) {
+      const res = await r.get(`/api/memory/scopes/${G}/messages?after=${new Date(NOW).toISOString()}&after_id=${id}`);
+      expect(res.status).toBe(200);
+      expect(res.body.items.map((m: MessageItem) => m.message_id)).toEqual(['newer', ...r.messageIds.slice(index + 1).reverse()]);
+      expect(res.body).not.toHaveProperty('next_before'); expect(res.body).not.toHaveProperty('next_before_id');
+    }
+    const before = await r.get(`/api/memory/scopes/${G}/messages?before=${NOW}&before_id=${r.ids[2]}`);
+    expect(before.status).toBe(200);
+    expect(before.body.items.map((m: MessageItem) => m.message_id)).toEqual([...r.messageIds.slice(0, 2).reverse(), 'older']);
+  });
+
+  it('旧式时间游标仍严格过滤，同秒余项跳过但请求成功', async () => {
+    const r = await sameSecondRig();
+    r.add('older', NOW - 1000, '较旧');
+    const first = await r.get(`/api/memory/scopes/${G}/messages?limit=3`);
+    expect(first.status).toBe(200); expect(first.body.next_before).toBe(NOW);
+    const next = await r.get(`/api/memory/scopes/${G}/messages?limit=3&before=${first.body.next_before}`);
+    expect(next.status).toBe(200);
+    expect(next.body.items.map((m: MessageItem) => m.message_id)).toEqual(['older']);
+    expect(next.body).not.toHaveProperty('next_before'); expect(next.body).not.toHaveProperty('next_before_id');
+    const after = await r.get(`/api/memory/scopes/${G}/messages?after=${NOW}`);
+    expect(after.status).toBe(200); expect(after.body).toEqual({ items: [] });
+  });
+
+  it.each(['before', 'after'])('%s 的毫秒边界不取整，ID 不改变时间比较', async direction => {
+    const r = await sameSecondRig();
+    const ts = NOW + (direction === 'before' ? 1 : -1);
+    for (const idQuery of ['', `&${direction}_id=${r.ids[3]}`]) {
+      const res = await r.get(`/api/memory/scopes/${G}/messages?${direction}=${ts}${idQuery}`);
+      expect(res.status).toBe(200);
+      expect(res.body.items.map((m: MessageItem) => m.message_id)).toEqual([...r.messageIds].reverse());
+    }
+  });
+
+  it.each(['before', 'after'].flatMap(direction => ['', '0', '-1', '1.5', 'abc', '1e3', '9007199254740992']
+    .map(value => [direction, value])))('%s_id 非法值 %s 返回 400', async (direction, value) => {
+    const r = await rig();
+    const res = await r.get(`/api/memory/scopes/${G}/messages?${direction}=${NOW}&${direction}_id=${value}`);
+    expect(res.status).toBe(400); expect(res.body.error).toContain(`${direction}_id`);
+  });
+
+  it.each([
+    'before_id=1', 'after_id=1', `before_id=1&after=${NOW}`, `after_id=1&before=${NOW}`,
+    `before=${NOW}&before_id=1&before_id=2`, `after=${NOW}&after_id=1&after_id=2`,
+    `before=${NOW}&after=${NOW}`, `before=${NOW}&after=${NOW}&before_id=2`,
+    `before=${NOW}&after=${NOW}&after_id=1`,
+    `before=${NOW}&after=${NOW}&before_id=1&after_id=1`,
+    `before=${NOW}&after=${NOW}&before_id=1&after_id=2`,
+  ])('游标缺少配对、重复或上下界非法时返回 400：%s', async query => {
+    const r = await rig();
+    const res = await r.get(`/api/memory/scopes/${G}/messages?${query}`);
+    expect(res.status).toBe(400); expect(typeof res.body.error).toBe('string');
   });
 
   it('摘要详情返回区间内现存原文数量和明确的未知血缘', async () => {

@@ -3,7 +3,7 @@ import type { ContextStore, MessageRow, SummaryRow } from '../../context/store.j
 import { redactText } from '../redact.js';
 import { SessionError } from '../sessions/types.js';
 import { scopeLabel } from '../ui/html.js';
-import type { MessageItem, Retention, ScopeSummary, ScopeTimeline, SummaryItem, TrackBucket } from './types.js';
+import type { MessagePage, Retention, ScopeSummary, ScopeTimeline, SummaryItem, TrackBucket } from './types.js';
 
 const DAY = 86400;
 const ROW_LIMIT = 10_000;
@@ -90,10 +90,14 @@ export class MemoryReader {
       tracks: { raw, day: items.filter(s => s.kind === 'day'), week: items.filter(s => s.kind === 'week') }, gaps };
   }
 
-  messages(scope: string, before: number | undefined, after: number | undefined, limit: number): { items: MessageItem[]; next_before?: number } {
+  messages(scope: string, before: number | undefined, after: number | undefined, limit: number,
+    beforeId?: number, afterId?: number): MessagePage {
+    const beforeSec = (before ?? 8.64e15) / 1000, afterSec = (after ?? -1) / 1000;
     const rows = this.db.prepare(`SELECT m.*, (SELECT COUNT(*) FROM message_media x WHERE x.scope=m.scope AND x.message_id=m.message_id) media
-      FROM messages m WHERE scope=? AND time<? AND time>? ORDER BY time DESC,id DESC LIMIT ?`)
-      .all(scope, (before ?? 8.64e15) / 1000, (after ?? -1) / 1000, limit + 1) as unknown as (MessageRow & { media: number })[];
+      FROM messages m WHERE scope=? AND (time<? OR (time=? AND id<?)) AND (time>? OR (time=? AND id>?))
+      ORDER BY time DESC,id DESC LIMIT ?`)
+      .all(scope, beforeSec, beforeSec, beforeId ?? null, afterSec, afterSec, afterId ?? null, limit + 1) as unknown as
+      (MessageRow & { media: number })[];
     const items = rows.slice(0, limit).map(r => {
       const text = safeText(r.text);
       return { message_id: r.message_id, ts: r.time * 1000, sender: r.user_id, sender_name: r.nickname,
@@ -101,10 +105,7 @@ export class MemoryReader {
         ...(r.reply_to_id !== null ? { reply_to: r.reply_to_id } : {}), ...(r.status !== null ? { bot_status: r.status } : {}),
         ...(r.action !== null ? { bot_action: r.action } : {}), media: r.media };
     });
-    // 毫秒时间游标无法表达同秒内的位置；遇到跨页同秒时明确拒绝，避免悄悄丢消息。
-    if (rows.length > limit && rows[limit].time === rows[limit - 1].time)
-      throw new SessionError(400, '分页边界有同秒消息，请增大 limit 或缩小 after/before 区间');
-    return { items, ...(rows.length > limit ? { next_before: items.at(-1)!.ts } : {}) };
+    return { items, ...(rows.length > limit ? { next_before: items.at(-1)!.ts, next_before_id: rows[limit - 1].id } : {}) };
   }
 
   summary(id: number) {

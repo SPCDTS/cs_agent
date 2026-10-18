@@ -57,19 +57,21 @@ type SummaryItem = {
 
 每次最多 10,000 个 scope、10,000 个非空原文桶或 10,000 条摘要，读取 LIMIT 为上限加一；超出返回 413。分桶使用 SQL GROUP BY。
 
-## 消息：`GET /api/memory/scopes/:scope/messages?before=&after=&limit=`
+## 消息：`GET /api/memory/scopes/:scope/messages?before=&before_id=&after=&after_id=&limit=`
 
 ```ts
-{ items: MessageItem[], next_before?: number }
+{ items: MessageItem[], next_before?: number, next_before_id?: number }
 type MessageItem = {
   message_id: string, ts: number, sender: string, sender_name: string, text: string,
   truncated?: true, reply_to?: string, bot_status?: string, bot_action?: string, media: number
 }
 ```
 
-`before/after` 接受与 from/to 相同的时间格式，均为严格界限；同时提供时 `after < before`。limit 默认 50，范围 1–200。按 `(time DESC, id DESC)` 排序，正文先整体脱敏再裁剪到 2000 字，超出附 `truncated: true`。可选字段无值时省略。`media` 为该消息的媒体行数。
+`before/after` 接受与 from/to 相同的时间格式，换算为秒时保留小数；不带对应 ID 时保持严格时间界限：`time < before / 1000`、`time > after / 1000`。可选 `before_id/after_id` 为 messages 表主键 `id`（数字，不是字符串 `message_id`），必须是 1 至 `Number.MAX_SAFE_INTEGER` 的十进制整数；非法值或缺少对应 `before/after` 时返回 400。带 ID 时分别使用 `time < before_sec OR (time = before_sec AND id < before_id)` 和 `time > after_sec OR (time = after_sec AND id > after_id)`。同时提供上下界时须 `after < before`；若时间相等，必须同时提供两个 ID 且 `after_id < before_id`。
 
-存在下一页时 `next_before` 是本页最后一条消息的毫秒时间戳，传回 before。**契约限制**：库只有秒级时间，纯时间游标无法定位同秒内记录；如果边界两侧出现同秒消息，返回 400 并提示增大 limit / 缩小区间，避免静默跳过。若同秒超过 200 条，当前契约无法分页遍历该秒，需要后续新增复合游标；这里没有擅自改变字段或时间单位。
+limit 默认 50，范围 1–200。始终按 `(time DESC, id DESC)` 排序，`after_id` 仅收窄下界，不改变排序。正文先整体脱敏再裁剪到 2000 字，超出附 `truncated: true`。可选字段无值时省略。`media` 为该消息的媒体行数。
+
+存在下一页时同时返回 `next_before`（本页最后一条消息的毫秒时间戳 `ts`）与 `next_before_id`（该条消息的 messages 表主键 `id`）。客户端将两者原样传为 `before` 和 `before_id`，即可精确续页，跨页同秒消息不会重复或遗漏。没有下一页时两个字段均省略。旧客户端只传 `next_before` 仍按严格时间界限查询，因此会跳过该秒内尚未返回的消息。
 
 ## 摘要：`GET /api/memory/summaries/:id`
 
@@ -134,4 +136,6 @@ curl -sS -b "obs_token=$OBS_TOKEN" http://127.0.0.1:3000/api/memory/archives
 
 仅新增 `src/obs/memory/`、dashboard 接入、main 依赖注入和调度器 `running()`。未改 O1 会话接口、O3 上下文模块和 UI，未新增运行时依赖。所有 fixture 在临时目录匿名构造，不读取真实聊天，不写任何运行数据目录；测试覆盖各路由、参数和不存在分支、三档桶、保留边界、工具路径逐字一致、脱敏、响应上限与 dashboard 鉴权。完整验证计数在交付报告中列出。
 
-2026-10-18 验收：Windows / Node v24.15.0，`npm.cmd run typecheck`、`npm.cmd test`、`npm.cmd run build` 全部通过，**63 个测试文件 / 867 项测试，0 失败、0 跳过**，相对基线新增 62 项记忆接口测试，并扩充整理器状态断言。首次完整运行受既有 entrypoint 临时目录权限与 Windows 进程树沙箱限制影响；在沙箱外重新执行三个完整命令通过，未放宽测试条件。未部署 Docker、修改 `.env` 或操作真实聊天数据；未进行生产库冒烟。与任务书存在解释空间的事项是纯时间游标的同秒边界、面板脱敏对逐字复现的优先级、`purged` 的策略推算语义，具体行为均已在上文固定。
+2026-10-18 初次验收：Windows / Node v24.15.0，`npm.cmd run typecheck`、`npm.cmd test`、`npm.cmd run build` 全部通过，**63 个测试文件 / 867 项测试，0 失败、0 跳过**，相对基线新增 62 项记忆接口测试，并扩充整理器状态断言。首次完整运行受既有 entrypoint 临时目录权限与 Windows 进程树沙箱限制影响；在沙箱外重新执行三个完整命令通过，未放宽测试条件。未部署 Docker、修改 `.env` 或操作真实聊天数据；未进行生产库冒烟。面板脱敏对逐字复现的优先级与 `purged` 的策略推算语义已在上文固定；消息分页现支持时间与主键组成的复合游标，兼容旧客户端的严格时间界限。
+
+2026-10-18 复合游标修补验收：`npm.cmd run typecheck`、`npm.cmd test`、`npm.cmd run build` 全部通过，**63 个测试文件 / 897 项测试，0 失败、0 跳过**；记忆接口测试为 92 项，相对初次验收净增 30 项。覆盖同秒 7 条消息以 limit=3 连续三页取全、保留 after_id 下界的续页、双向严格边界、旧客户端行为及非法游标。完整验证因上述 Windows 沙箱权限限制在沙箱外执行，测试条件未改动。

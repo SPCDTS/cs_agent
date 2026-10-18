@@ -29,6 +29,12 @@ function timestamp(raw: string | null, name: string): number | undefined {
   return n;
 }
 
+function cursorId(raw: string | null, name: string, time: number | undefined): number | undefined {
+  if (raw === null) return undefined;
+  if (time === undefined) throw new SessionError(400, `${name} 必须与 ${name.slice(0, -3)} 同时提供`);
+  return integer(raw, name, 0, Number.MAX_SAFE_INTEGER);
+}
+
 function scopeValue(raw: string): string {
   if (!raw || raw.length > 256 || raw === '.' || raw === '..' || /[\\/\x00-\x1f\x7f]/.test(raw))
     throw new SessionError(400, 'scope 无效');
@@ -131,10 +137,13 @@ export function createMemoryRoutes(deps: MemoryDeps) {
       }
       const scope = segment(parts[4]), extent = reader.extent(scope);
       if (parts[5] === 'messages') {
-        parameters(q, ['before', 'after', 'limit']);
+        parameters(q, ['before', 'before_id', 'after', 'after_id', 'limit']);
         const before = timestamp(q.get('before'), 'before'), after = timestamp(q.get('after'), 'after');
-        if (before !== undefined && after !== undefined && before <= after) throw new SessionError(400, 'before 必须晚于 after');
-        sessionJson(res, 200, reader.messages(scope, before, after, integer(q.get('limit'), 'limit', 50, 200))); return;
+        const beforeId = cursorId(q.get('before_id'), 'before_id', before), afterId = cursorId(q.get('after_id'), 'after_id', after);
+        if (before !== undefined && after !== undefined && (before < after ||
+          (before === after && (beforeId === undefined || afterId === undefined || beforeId <= afterId))))
+          throw new SessionError(400, 'before 游标必须晚于 after 游标');
+        sessionJson(res, 200, reader.messages(scope, before, after, integer(q.get('limit'), 'limit', 50, 200), beforeId, afterId)); return;
       }
       parameters(q, ['from', 'to']);
       const from = timestamp(q.get('from'), 'from') ?? extent.first_ts;

@@ -40,6 +40,9 @@ export interface MessageItem {
   message_id: string; ts: number; sender: string; sender_name: string; text: string; truncated?: true;
   reply_to?: string; bot_status?: string; bot_action?: string; media: number;
 }
+export interface MessagePage {
+  items: MessageItem[]; next_before?: number; next_before_id?: number;
+}
 export interface Hit {
   kind: 'message' | 'summary'; id: string | number; ts: number; scope: string; excerpt: string; matched_fields: string[];
 }
