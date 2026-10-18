@@ -1,3 +1,5 @@
+import { parseAccess } from "../../context/access.js";
+import type { RecallHit } from "./instrumentation.js";
 import { DatabaseSync } from 'node:sqlite';
 import type { ContextStore, MessageRow, SummaryRow } from '../../context/store.js';
 import { redactText } from '../redact.js';
@@ -108,12 +110,25 @@ export class MemoryReader {
     return { items, ...(rows.length > limit ? { next_before: items.at(-1)!.ts, next_before_id: rows[limit - 1].id } : {}) };
   }
 
-  summary(id: number) {
-    const row = this.db.prepare('SELECT * FROM summaries WHERE id=? LIMIT 1').get(id) as SummaryRow | undefined;
+  summary(id: number, snapshot?: SummaryRow) {
+    const current = this.db.prepare('SELECT * FROM summaries WHERE id=? LIMIT 1').get(id) as SummaryRow | undefined;
+    const row = current ?? snapshot;
     if (!row) throw new SessionError(404, '摘要不存在');
     const { n } = this.db.prepare('SELECT COUNT(*) n FROM messages WHERE scope=? AND time>=? AND time<? LIMIT 1')
       .get(row.scope, row.period_start, row.period_end) as { n: number };
     return { id, scope: row.scope, kind: row.level, period_start: row.period_start * 1000, period_end: row.period_end * 1000,
-      created_at: row.created_at * 1000, text: row.text, surviving_raw: n, lineage: null };
+      created_at: row.created_at * 1000, text: row.text, surviving_raw: n, lineage: null, ...(!current ? { deleted: true } : {}) };
   }
+  recallHit(hit: RecallHit, accessText: string) {
+    const access = parseAccess(accessText);
+    if (!access) return { ...hit, deleted: true as const };
+    const scope = access.kind === 'scope' ? access.scope : undefined;
+    const clause = scope ? ' AND scope=?' : '';
+    const args = scope ? [scope] : [];
+    const row = hit.kind === 'message'
+      ? this.db.prepare(`SELECT time*1000 ts,text FROM messages WHERE message_id=?${clause} ORDER BY time DESC,id DESC LIMIT 1`).get(hit.id, ...args)
+      : this.db.prepare(`SELECT period_end*1000 ts,text FROM summaries WHERE id=?${clause}`).get(hit.id, ...args);
+    return row ? { ...hit, ts: Number(row.ts), preview: preview(String(row.text), 240) } : { ...hit, deleted: true as const };
+  }
+
 }

@@ -708,7 +708,7 @@ export class CodexRunner {
       }
       if (id) {
         const r = await this.exec(
-          ["exec", "-C", policy.workspaceDir, "resume", ...this.commonArgs(), ...effort, id, "-"],
+          ["exec", "-C", policy.workspaceDir, "resume", ...this.commonArgs(), ...effort, ...qqRecallContextArgs(ticket, id), id, "-"],
           prompt,
           signal,
           undefined,
@@ -732,7 +732,7 @@ export class CodexRunner {
         }
       }
       const r = await this.exec(
-        ["exec", ...this.commonArgs(), ...effort, "-C", policy.workspaceDir, "-"],
+        ["exec", ...this.commonArgs(), ...effort, ...qqRecallContextArgs(ticket), "-C", policy.workspaceDir, "-"],
         prompt,
         signal,
         async (threadId) => {
@@ -961,4 +961,10 @@ export function recallArgs(token: string, port: number): string[] {
   return ["-c", 'mcp_servers.qq_context.env.QQ_RECALL_TOKEN="' + token + '"',
     "-c", 'mcp_servers.qq_context.env.MEDIA_RECALL_PORT="' + port + '"',
     "-c", "mcp_servers.qq_context.tool_timeout_sec=70"];
+}
+
+/** 每次启动覆盖归属；新线程显式清空 session，避免继承旧环境。值按 TOML 基本字符串转义。 */
+export function qqRecallContextArgs(ticket?: string, session?: string): string[] {
+  return Object.entries({ QQ_TICKET: ticket ?? '', QQ_BACKEND: 'codex', QQ_SESSION: session ?? '' })
+    .flatMap(([key, value]) => ['-c', `mcp_servers.qq_context.env.${key}=${JSON.stringify(value)}`]);
 }

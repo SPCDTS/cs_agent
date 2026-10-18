@@ -1,3 +1,4 @@
+import type { MemoryInstrumentation } from "../../obs/memory/instrumentation.js";
 import { BUILTIN_TOOLS } from "./coding.js";
 import { redactText } from "../../obs/redact.js";
 import { recallTool } from "./recall.js";
@@ -23,6 +24,7 @@ export interface PiToolsOptions {
   getHarness: () => Harness;
   web?: DeepSeekWeb;
   maxContextChars?: number;
+  instrumentation?: MemoryInstrumentation;
   mediaRecall?: Pick<MediaRecall, "recall">;
   mediaRecallMaxPerTicket?: number;
 }
@@ -55,9 +57,15 @@ export function createPiExtension(opts: PiToolsOptions) {
     name, description, parameters, replay: "safe",
     async execute(args, api, context) {
       return boundary(api.taskId,"qq_context",async () => {
-      const request = await api.snapshot(PiRequestDoc, api.conversationId, context);
-      const result = callQQContextTool({ access: parseAccess(request?.access), openStore: () => opts.store,
-        maxChars: Math.min(2500, opts.maxContextChars ?? 2500) }, name, args);
+      const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);
+      const result = callQQContextTool({ access: parseAccess(bound?.access), openStore: () => opts.store,
+        maxChars: Math.min(2500, opts.maxContextChars ?? 2500), onRecall: event => {
+          const attribution = { backend: 'pi', ticket: bound?.ticket, session: String(api.conversationId), task_id: String(api.taskId) };
+          const id = opts.instrumentation?.recordRecall({ ...event, ...attribution });
+          trace.event(bound?.ticket || '@pi', 'memory_recall', { status: event.is_error ? 'failed' : 'ok', durationMs: event.duration_ms,
+            detail: { ...attribution, recall_id: id, tool: event.tool, returned_count: event.returned_count,
+              dropped_count: event.dropped_count, chars: event.chars, max_chars: event.max_chars } });
+        } }, name, args);
       return { ...output(result.content.filter(c => c.type === "text").map(c => c.text).join("\n")), isError: result.isError === true };
       });
     },

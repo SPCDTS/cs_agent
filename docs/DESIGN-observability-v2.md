@@ -177,3 +177,9 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 - 提交 `5edbbfd`（vis-timeline 8.5.4 随镜像本地分发：`/assets/vendor/` 固定两项白名单，启动读入内存；CSP `style-src` 加 `'self'` 以允许同源样式表；standalone 包内无 nonce 的 styleInject 被精确停用）、`d6e75f7`（`/memory` 总览与整理卡、`/memory/scopes/:scope` 三轨时间线 + 空白背景 + 保留边界 + 范围控件 + 消息列表、`/memory/summaries/:id`、`/memory/search` 命中与工具实际返回对照、`/memory/archives`；`/memory/recalls`、`/memory/images` 为 O5/O6 占位）、`67865dd`（翻页带 `before_id` 决胜游标）、`9254c36`（测试）、主会话 `c4e9d10`（去掉我误导加入的"少于 3 字不命中"提示：`ContextStore.search` 走 LIKE，两字词可命中，真实库"苹果"命中 5 条）。
 - 主会话复跑：typecheck、66 文件 / 917 项、build 通过；部署后容器内无头 Chromium 真实数据冒烟：总览 2 个 scope 与整理状态（上次 02:59、下次 03:00、补跑正常、保留 30/90/180 天）；私聊时间线 6 个条目、3 条轨、2 段空白背景，点击原文桶后消息列表切到该桶 32 条并提示已到最早；日摘要页正常；检索"苹果图"3 条命中、6 处高亮、右侧工具实际返回逐字对照；归档页、旧 `/context` 页顶栏"记忆"高亮；vendor JS/CSS 200，路径穿越 404；浏览器零错误。
 - 已知口径：`purged` 空白是按保留策略推算，不是删除证明；`lineage` 待 O5。
+
+### O5（后端）：记忆埋点、摘要血缘与召回事件（2026-10-19，astra 实现，主会话验收通过）
+
+- 提交 `32fb8e8`→变基后 4 个提交（表与容错写入器、aging 血缘、pi / Codex MCP 召回埋点、只读 API 与三级证据契约，契约见 `docs/O5-recall-api.md`）。`summary_versions`、`recall_events` 建在 `observability.sqlite`，`OBS_MEMORY_RETENTION_DAYS` 默认 90，接入每日 purge。codex 每轮注入 `QQ_TICKET / QQ_BACKEND / QQ_SESSION`，MCP 子进程用独立 WAL 连接写入，写失败只告警不影响工具返回。
+- 主会话复跑：typecheck、70 文件 / 972 项、build 通过；主分支期间被另一会话推进（`d3d84b4` 仅文档），O5 变基后 ff 合并、部署。真实验证：容器内以 stdio 启动 `dist/mcp/qq-context.js`（env 带 ticket/session）调用 qq_search，`/api/memory/recalls` 立即出现该事件（返回 3 条、dropped 0、117 字），`/api/memory/recalls/:id` 给出命中预览与三级证据（此冒烟事件无对应回合，第三级为 unavailable，判定正确）；冒烟行随后删除。`summary_versions` 待下次整理（每日 03:00 UTC）后产生，`/api/memory/summaries/1` 当前 `lineage: null`。
+- 页面（召回记录页、摘要血缘区、回合页"记忆调用"、检索页第三级）由 Opus 在 `feat/obs-v2-recall-ui` 实现，合入后单独记录。

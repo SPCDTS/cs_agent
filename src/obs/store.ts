@@ -1,3 +1,4 @@
+import { ensureMemoryTables } from './memory/instrumentation.js';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
@@ -25,6 +26,7 @@ export class ObsStore {
       CREATE TABLE IF NOT EXISTS metrics(ts INTEGER NOT NULL, name TEXT NOT NULL, labels_json TEXT NOT NULL, value REAL NOT NULL);
       CREATE TABLE IF NOT EXISTS obs_state(key TEXT PRIMARY KEY, value INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS metrics_ts ON metrics(ts);`);
+      ensureMemoryTables(this.db);
       this.db.prepare('SELECT id,ticket,scope,ts,stage,status,duration_ms,detail_json FROM events LIMIT 0');
       this.db.prepare('SELECT ts,name,labels_json,value FROM metrics LIMIT 0');
       this.db.prepare('SELECT key,value FROM obs_state LIMIT 0');

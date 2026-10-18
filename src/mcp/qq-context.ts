@@ -8,15 +8,22 @@
 import { recallViaLoopback, viewViaLoopback } from "./media-recall-client.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { parseAccess } from "../context/access.js";
+import { MemoryInstrumentation } from "../obs/memory/instrumentation.js";
 import { ContextStore } from "../context/store.js";
 import { createQQContextServer } from "./qq-context-server.js";
 
 const dataDir = process.env.DATA_DIR || "/data";
 const maxChars = Number(process.env.QQ_CONTEXT_MAX_CHARS);
 let store: ContextStore | undefined;
+let instrumentation: MemoryInstrumentation | undefined;
 
 const server = createQQContextServer({
   access: parseAccess(process.env.QQ_ACCESS),
+  onRecall: event => {
+    (instrumentation ??= MemoryInstrumentation.openOwn(dataDir)).recordRecall({ ...event,
+      backend: process.env.QQ_BACKEND || 'codex', ticket: process.env.QQ_TICKET || null,
+      session: process.env.QQ_SESSION || null });
+  },
   recall: id => recallViaLoopback(id, process.env.QQ_RECALL_TOKEN, Number(process.env.MEDIA_RECALL_PORT || 8790)),
   view: file => viewViaLoopback(file, process.env.QQ_RECALL_TOKEN, Number(process.env.MEDIA_RECALL_PORT || 8790)),
   openStore: () => (store ??= new ContextStore(dataDir, { readOnly: true })),
@@ -26,6 +33,7 @@ const server = createQQContextServer({
 const shutdown = () => {
   try {
     store?.close();
+    instrumentation?.close();
   } catch {
     /* ignore */
   }

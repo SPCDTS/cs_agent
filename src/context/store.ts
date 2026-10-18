@@ -428,14 +428,14 @@ export class ContextStore {
       .all(scope, start, end) as unknown as MessageRow[];
   }
 
-  writeSummary(s: Omit<SummaryRow, "id" | "created_at"> & { created_at?: number }): void {
-    this.db
+  writeSummary(s: Omit<SummaryRow, "id" | "created_at"> & { created_at?: number }): SummaryRow {
+    return this.db
       .prepare(
         `INSERT INTO summaries (scope, level, period_start, period_end, text, msg_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (scope, level, period_start) DO UPDATE SET period_end = excluded.period_end, text = excluded.text,
-           msg_count = excluded.msg_count, created_at = excluded.created_at`,
+           msg_count = excluded.msg_count, created_at = excluded.created_at RETURNING *`,
       )
-      .run(s.scope, s.level, s.period_start, s.period_end, clip(s.text, SUMMARY_MAX), s.msg_count, s.created_at ?? nowSec());
+      .get(s.scope, s.level, s.period_start, s.period_end, clip(s.text, SUMMARY_MAX), s.msg_count, s.created_at ?? nowSec()) as unknown as SummaryRow;
   }
 
   /** 已结束的自然周（周一起）内的日摘要，按 scope+周 分组；用于折叠为周摘要。 */
@@ -458,16 +458,17 @@ export class ContextStore {
   }
 
   /** 写入周摘要并删除对应日摘要（同一事务）。 */
-  replaceWithWeek(week: { scope: string; period_start: number; period_end: number; days: SummaryRow[] }, text: string): void {
+  replaceWithWeek(week: { scope: string; period_start: number; period_end: number; days: SummaryRow[] }, text: string): SummaryRow {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.writeSummary({
+      const written = this.writeSummary({
         scope: week.scope, level: "week", period_start: week.period_start, period_end: week.period_end, text,
         msg_count: week.days.reduce((n, d) => n + d.msg_count, 0),
       });
       const del = this.db.prepare("DELETE FROM summaries WHERE id = ? AND level = 'day'");
       for (const d of week.days) del.run(d.id);
       this.db.exec("COMMIT");
+      return written;
     } catch (err) {
       this.db.exec("ROLLBACK");
       throw err;

@@ -216,7 +216,7 @@ export function createDashboard(opts: DashboardOptions) {
     ...(opts.piSessions ? { pi: new PiSessionAdapter({ store: opts.store, source: opts.piSessions }) } : {}),
   });
   const sessionRoute = createSessionRoutes(adapters, sse, { codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR, contextUsage: opts.contextUsage });
-  const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, aging: opts.aging, archives: opts.archives,
+  const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, sessionAdapters: adapters, aging: opts.aging, archives: opts.archives,
     maxChars: opts.config.QQ_CONTEXT_MAX_CHARS, retention: { rawDays: opts.config.HISTORY_RAW_DAYS,
       summaryDays: opts.config.HISTORY_SUMMARY_DAYS, hardMaxDays: opts.config.HISTORY_RAW_HARD_MAX_DAYS,
       dailyHour: opts.config.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });

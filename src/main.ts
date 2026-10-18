@@ -3,6 +3,7 @@ import { RecallTokens, startMediaRecallServer } from "./context/media-recall-ser
 import { createOneBotClient } from "./qq/onebot.js";
 import { ContextUsageStore } from "./agent/context-usage.js";
 import { loadObsToken, publicHealth } from "./obs/token.js";
+import { MemoryInstrumentation, purgeMemoryInstrumentation } from "./obs/memory/instrumentation.js";
 import { ObsStore } from "./obs/store.js";
 import { trace } from "./obs/trace.js";
 import { Metrics, type Gauge } from "./obs/metrics.js";
@@ -89,6 +90,7 @@ async function main(): Promise<void> {
   const store = new ContextStore(cfg.DATA_DIR);
   const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP, cfg.OBS_ADMIN_RETENTION_DAYS);
   trace.attach(obs);
+  const instrumentation = obs.degraded ? undefined : MemoryInstrumentation.fromDb(obs.db);
   const contextUsage = new ContextUsageStore(cfg.DATA_DIR);
   // 进行中会话的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）
   const live = new LiveBus(trace);
@@ -160,7 +162,7 @@ async function main(): Promise<void> {
   const pi = await PiBackend.open({
     dataDir: cfg.DATA_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
-    thinkingLevel, store, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
+    thinkingLevel, store, instrumentation, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
   });
@@ -214,7 +216,7 @@ async function main(): Promise<void> {
 
   // 聊天记录衰老（日/周摘要 + 清理）：每天 HISTORY_SUMMARY_HOUR 点（容器本地时区，默认 UTC）；启动时补跑
   const aging = startAgingScheduler({
-    store,
+    store, instrumentation,
     models,
     model: agentModel,
     rawDays: cfg.HISTORY_RAW_DAYS,
@@ -291,8 +293,12 @@ async function main(): Promise<void> {
     archives: { codex: path.join(cfg.DATA_DIR, 'codex-threads-archive.jsonl'), pi: path.join(cfg.DATA_DIR, 'pi-threads-archive.jsonl') },
     resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
-    onPurge: now => purgeCodexTrace(cfg.codexHome, cfg.CODEX_TRACE_RETENTION_DAYS, now, cfg.CODEX_TRACE_MAX_MB).then(() => undefined,
-      error => { log.warn("codex trace purge failed", { error }); }),
+    onPurge: async now => {
+      try { if (!obs.degraded) purgeMemoryInstrumentation(obs.db, cfg.OBS_MEMORY_RETENTION_DAYS, now); }
+      catch (error) { log.warn("memory instrumentation purge failed", { error }); }
+      await purgeCodexTrace(cfg.codexHome, cfg.CODEX_TRACE_RETENTION_DAYS, now, cfg.CODEX_TRACE_MAX_MB)
+        .catch(error => { log.warn("codex trace purge failed", { error }); });
+    },
     gauges: async () => {
       const q = dispatcher.status(), ws = bridge!.status();
       const gauges: Gauge[] = [ { name: "queue_depth", value: q.waiting }, { name: "global_slots_used", value: q.active },
