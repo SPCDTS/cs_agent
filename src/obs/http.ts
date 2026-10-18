@@ -21,6 +21,7 @@ import { formatBackendOverrides, SETTINGS_TICKET } from '../agent/settings.js';
 import { parseBackendOverrides } from '../agent/backends/select.js';
 import { REASONING_EFFORTS } from '../agent/codex-runner.js';
 import { ASSETS } from './ui/client.js';
+import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
 import { contextBar, sortUsage, type ContextUsage, type ContextUsageView } from './ui/context-bar.js';
 import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri } from './ui/html.js';
 import { PRELOAD_TURNS, agentsBody, byNewest, crumbs, dataScript, isBackend, memoryBody, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './ui/agents-pages.js';
@@ -249,7 +250,7 @@ export function createDashboard(opts: DashboardOptions) {
     if (closed) { res.writeHead(503).end(); return; }
     const nonce = randomBytes(18).toString('base64');
     res.setHeader('Cache-Control','no-store'); res.setHeader('Referrer-Policy','same-origin'); res.setHeader('X-Content-Type-Options','nosniff');
-    res.setHeader('Content-Security-Policy', `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+    res.setHeader('Content-Security-Policy', `default-src 'none'; style-src 'self' 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
     let url: URL;
     try { url = new URL(req.url ?? '/', 'http://localhost'); } catch { res.writeHead(400).end(); return; }
     // loopback 面板拒绝任意 Host，防止本地浏览器的 DNS rebinding 读取聊天数据。
@@ -287,8 +288,14 @@ export function createDashboard(opts: DashboardOptions) {
     }
     if (post) { await handlePost(req, res, url, nonce, host); return; }
     const q = url.searchParams;
+    if (url.pathname.startsWith('/assets/vendor/')) {
+      // 固定白名单（vis-timeline 的 JS 与 CSS），启动时读入内存；其它名字一律 404。
+      const asset = vendorAsset(url.pathname.slice(15));
+      if (!asset) { res.writeHead(404).end(); return; }
+      res.writeHead(200, { 'Content-Type': asset.type, 'Cache-Control': VENDOR_CACHE }).end(asset.body); return;
+    }
     if (url.pathname.startsWith('/assets/')) {
-      const body = ASSETS[url.pathname.slice(8)];
+      const body = Object.hasOwn(ASSETS, url.pathname.slice(8)) ? ASSETS[url.pathname.slice(8)] : undefined;
       if (!body) { res.writeHead(404).end(); return; }
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }).end(body); return;
     }
