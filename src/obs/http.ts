@@ -17,14 +17,13 @@ import { parseBackendOverrides } from '../agent/backends/select.js';
 import { REASONING_EFFORTS } from '../agent/codex-runner.js';
 import { ASSETS } from './ui/client.js';
 import { contextBar, sortUsage, type ContextUsage, type ContextUsageView } from './ui/context-bar.js';
-import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri, type Tone } from './ui/html.js';
+import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri } from './ui/html.js';
 
-export { esc };
 const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
 const MAX_SSE = 20;
 /** SSE 写队列：未写出字节（队列 + socket 缓冲）超过上限，或一次 drain 等待超过时限才断开慢客户端。 */
-export const SSE_MAX_PENDING = 2 * 1024 * 1024;
-export const SSE_DRAIN_TIMEOUT_MS = 10_000;
+const SSE_MAX_PENDING = 2 * 1024 * 1024;
+const SSE_DRAIN_TIMEOUT_MS = 10_000;
 
 export interface SseWriter { send(frame: string): void }
 /** 按序写出 SSE 帧；write 返回 false 是正常背压，等待 drain 而不是断开。 */
@@ -58,7 +57,7 @@ export function sseWriter(res: ServerResponse, maxPending = SSE_MAX_PENDING, dra
   };
 }
 const MAX_BODY = 512 * 1024;
-export const AGENT_MD_MAX_BYTES = 64 * 1024;
+const AGENT_MD_MAX_BYTES = 64 * 1024;
 
 export interface DashboardOptions {
   config: Config; store: ObsStore; context: ContextStore;
@@ -90,7 +89,7 @@ function equal(a: string, b: string): boolean { const x=Buffer.from(a),y=Buffer.
 export function csrfToken(obsToken: string): string { return createHmac('sha256', obsToken).update('cs-agent-dashboard-csrf-v1').digest('base64url'); }
 
 /** URL 每段与 realpath 双重限制，拒绝软链接和跨票据读取；只允许校验过的位图。 */
-export async function imageFile(root: string, segments: string[]): Promise<string> {
+async function imageFile(root: string, segments: string[]): Promise<string> {
   if (segments.length < 2 || segments.length > 5 || !/^[A-Za-z0-9_-]{1,128}$/.test(segments[0]!) ||
       segments.some(s => !s || s === '.' || s === '..' || /[\\/:\0]/.test(s))) throw new Error('非法图片路径');
   if (!/\.(png|jpe?g|webp|gif)$/i.test(segments.at(-1)!)) throw new Error('不支持的图片');
@@ -648,4 +647,3 @@ export function createDashboard(opts: DashboardOptions) {
   return { handle: (req: IncomingMessage,res: ServerResponse) => handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(500);res.end('观测页面暂不可用');}),
     close: () => {for(const res of clients)res.end();clients.clear();if(typeof offCodexPrompt==='function')offCodexPrompt();} };
 }
-export type { Tone };

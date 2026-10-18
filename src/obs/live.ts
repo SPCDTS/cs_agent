@@ -10,8 +10,8 @@ import { redact, redactText } from './redact.js';
 import type { LiveEvent, Trace } from './trace.js';
 import { fmtPct, fmtShort, ratio, toContextUsage, type ContextUsage } from './ui/context-bar.js';
 
-export type CardState = 'queued' | 'running' | 'done' | 'failed';
-export interface LiveItem { seq: number; ts: number; stage: string; status: string; duration_ms: number | null; summary: string }
+type CardState = 'queued' | 'running' | 'done' | 'failed';
+interface LiveItem { seq: number; ts: number; stage: string; status: string; duration_ms: number | null; summary: string }
 export interface LiveCard {
   ticket: string; scope: string; text: string; sender: string; route: string; backend: string;
   /** 线程键：codex 为 owner | shared，pi 为 owner | 会话域；来自 thread_wait / dispatched / model_turn 事件 */

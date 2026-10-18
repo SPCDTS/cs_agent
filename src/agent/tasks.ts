@@ -37,8 +37,8 @@ import { backendNameFor, type BackendSelector } from "./backends/select.js";
 import { ticketWorkDir } from "./backends/codex.js";
 import { promises as fs } from "node:fs";
 
-export const IMAGE_TASK = "cs.image";
-export const AGENT_TASK = "cs.agent";
+const IMAGE_TASK = "cs.image";
+const AGENT_TASK = "cs.agent";
 /** reply 阶段在票据仍 pending 时的最多尝试次数 */
 export const MAX_REPLY_ATTEMPTS = 3;
 
@@ -48,7 +48,7 @@ type ReplyCheckpoint = { phase: "reply"; attempt: number };
 /** generate 为 v3 初版的单阶段生图（仅为兼容已落盘的旧任务），按 submit 处理 */
 export type ImageCheckpoint = { phase: "submit" } | { phase: "generate" } | { phase: "collect"; submits?: number; extensions?: number } | ReplyCheckpoint;
 /** 同一票据最多提交 ComfyUI 任务的次数（服务端丢失任务时重新提交 1 次） */
-export const MAX_IMAGE_SUBMITS = 2;
+const MAX_IMAGE_SUBMITS = 2;
 export type AgentCheckpoint = { phase: "handle" } | { phase: "lateImages"; job?: number; extensions?: number } | { phase: "postprocess" } | ReplyCheckpoint;
 
 export interface TaskDeps {

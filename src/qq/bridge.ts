@@ -16,15 +16,15 @@ import { isAllowed, isTriggered, normalizeMessage, validatePolicy } from "./poli
 import { prepareImages, type ImageSegment } from "./image.js";
 import { dedupeKey, isTicketId, ticketIdFor, ReplyStore } from "./reply-store.js";
 
-export const DEFAULT_TIMEOUT_MS = 15000;
-export const IMAGE_TIMEOUT_MS = 30000;
-export const MAX_REPLY_TEXT = 4000;
+const DEFAULT_TIMEOUT_MS = 15000;
+const IMAGE_TIMEOUT_MS = 30000;
+const MAX_REPLY_TEXT = 4000;
 const MEMORY_SEEN_LIMIT = 2000;
 /** 连接持续不可用时，error 事件最多每 5 分钟报一次 */
-export const DOWN_REPORT_INTERVAL_MS = 5 * 60 * 1000;
+const DOWN_REPORT_INTERVAL_MS = 5 * 60 * 1000;
 
 /** 测试 / 运维用的内部参数，不属于对外契约。 */
-export interface BridgeInternals {
+interface BridgeInternals {
   downloadHooks?: DownloadHooks;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
@@ -47,7 +47,7 @@ function idOf(value: unknown): string {
 }
 
 /** 消息库入库范围：允许群的全部消息 + 允许用户的私聊（与是否触发无关）。 */
-export function inFeedScope(config: Pick<QQBridgeConfig, "allowUsers" | "allowGroups">, m: InboundMessage): boolean {
+function inFeedScope(config: Pick<QQBridgeConfig, "allowUsers" | "allowGroups">, m: InboundMessage): boolean {
   if (m.message_type === "group") return m.group_id !== null && config.allowGroups.includes(m.group_id);
   return config.allowUsers === "*" || config.allowUsers.includes(m.user_id);
 }

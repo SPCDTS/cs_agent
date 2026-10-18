@@ -94,7 +94,7 @@ const UNKNOWN_JOB_RE = /(job|prompt)[\s_-]?(id[\s_-]?)?not[\s_-]?found|unknown[\
 
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
-export async function listImages(dir: string): Promise<string[]> {
+async function listImages(dir: string): Promise<string[]> {
   const out: string[] = [];
   const walk = async (d: string) => {
     for (const ent of await fs.readdir(d, { withFileTypes: true }).catch(() => [])) {
@@ -148,7 +148,7 @@ function patchFilenamePrefix(wf: ApiWorkflow, prefix: string): void {
   for (const n of saves) n.inputs!.filename_prefix = prefix;
 }
 
-export async function loadWorkflow(file: string): Promise<ApiWorkflow> {
+async function loadWorkflow(file: string): Promise<ApiWorkflow> {
   const wf = JSON.parse(await fs.readFile(file, "utf8"));
   if (!wf || typeof wf !== "object" || Array.isArray(wf.nodes)) throw new Error(`${file} 不是 API 格式工作流`);
   return wf as ApiWorkflow;
@@ -182,7 +182,7 @@ export function parseToolResult(r: ToolResult): Record<string, unknown> {
 }
 
 /** 在嵌套对象里找第一个名为 key 的字符串值。 */
-export function findString(v: unknown, key: string, depth = 0): string | undefined {
+function findString(v: unknown, key: string, depth = 0): string | undefined {
   if (!v || typeof v !== "object" || depth > 6) return undefined;
   const o = v as Record<string, unknown>;
   if (typeof o[key] === "string" && o[key]) return o[key] as string;

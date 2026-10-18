@@ -28,7 +28,7 @@ export class OneBotError extends Error {
   }
 }
 
-export interface CallOptions {
+interface CallOptions {
   /** 是否为发送消息类调用（失败即 uncertain） */
   sending?: boolean;
   /** 覆盖默认超时 */

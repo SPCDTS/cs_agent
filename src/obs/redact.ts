@@ -9,7 +9,7 @@ const safeMetadata = (key: string, value: unknown) =>
 export function registerSecrets(values: Iterable<string | undefined>): void {
   for (const value of values) if (value && value.length <= 16384 && secrets.size < 2048) secrets.add(value);
 }
-export function registerEnvSecrets(env: NodeJS.ProcessEnv = process.env): void {
+function registerEnvSecrets(env: NodeJS.ProcessEnv = process.env): void {
   registerSecrets(Object.entries(env).filter(([k]) => sensitive.test(k)).map(([, v]) => v));
 }
 export function redactText(text: string, limit = 500): string {

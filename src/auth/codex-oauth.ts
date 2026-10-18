@@ -14,7 +14,7 @@ import path from "node:path";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 
-export const CODEX_PROVIDER_ID = "openai-codex";
+const CODEX_PROVIDER_ID = "openai-codex";
 
 interface CodexAuthFile {
   auth_mode?: string;
@@ -51,7 +51,7 @@ export function codexFileToCredential(file: CodexAuthFile): Credential | undefin
   };
 }
 
-export function mergeCredentialIntoFile(file: CodexAuthFile, cred: Credential): CodexAuthFile {
+function mergeCredentialIntoFile(file: CodexAuthFile, cred: Credential): CodexAuthFile {
   if (cred.type !== "oauth") return file;
   return {
     ...file,

@@ -11,9 +11,9 @@ import type { InboundMessage } from "../qq/types.js";
 import { log } from "../log.js";
 import { scopeOf, type Access } from "./access.js";
 
-export const CONTEXT_DB_FILE = "qq-messages.sqlite";
+const CONTEXT_DB_FILE = "qq-messages.sqlite";
 export const BOT_STATUS = { pending: "处理中", replied: "已回复", failed: "失败" } as const;
-export type BotStatus = (typeof BOT_STATUS)[keyof typeof BOT_STATUS];
+type BotStatus = (typeof BOT_STATUS)[keyof typeof BOT_STATUS];
 export type BotAction = "generate_image" | "research+generate_image" | "ask_codex" | "fallback" | "reply";
 
 export interface MessageRow {
@@ -141,7 +141,7 @@ export function clip(text: string, max: number): string {
 }
 
 /** 检索词：按空白切分，去掉 LIKE 通配符，最多 5 个词。 */
-export function searchTerms(query: string): string[] {
+function searchTerms(query: string): string[] {
   return query
     .split(/\s+/)
     .map((t) => t.replace(/[%_\\]/g, "").trim())

@@ -4,7 +4,7 @@ import { redact } from './redact.js';
 export interface LiveEvent { ticket: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail: Record<string, unknown> }
 export interface EventOptions { ts?: number; status?: string; durationMs?: number; detail?: unknown; scope?: string }
 type Listener = (e: ObsEvent) => void;
-export function errorCategory(error: unknown): string {
+function errorCategory(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error ?? '');
   if (/401|403|unauthorized|authentication|invalid.api.key|鉴权|认证/i.test(text)) return 'auth';
   if (/timeout|timed out|超时|abort/i.test(text)) return 'timeout';

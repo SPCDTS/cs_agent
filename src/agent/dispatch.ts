@@ -31,9 +31,9 @@ export { FALLBACK_REPLY } from "./replies.js";
 /** 同一票据最多运行次数；达到即放弃运行，改发兜底回复 */
 export const MAX_ATTEMPTS = 3;
 /** 启动对账时每页读取的 pending 票据数（分页直到取尽） */
-export const PENDING_PAGE = 200;
+const PENDING_PAGE = 200;
 
-export type DispatchBridge = Pick<QQBridge, "reply" | "getTicket" | "listPendingTickets" | "prepareIncoming">;
+type DispatchBridge = Pick<QQBridge, "reply" | "getTicket" | "listPendingTickets" | "prepareIncoming">;
 /** 统一上下文存储中派发器用到的写入口 */
 export type DispatchHistory = Pick<ContextStore, "recordPending" | "completeReply">;
 

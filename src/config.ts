@@ -25,8 +25,6 @@ const bool = (def: boolean) =>
 
 const int = (def: number) => z.coerce.number().int().positive().default(def);
 
-export const DEFAULT_WORKFLOW = "qwen-image-2.1-turbo-api.json";
-
 const serviceUrl = z.string().url().refine(value => {
   const url = new URL(value); return !url.username && !url.password;
 }, '服务 URL 不得包含用户名或密码');
@@ -117,7 +115,7 @@ const EnvSchema = z.object({
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
-export type Env = z.infer<typeof EnvSchema>;
+type Env = z.infer<typeof EnvSchema>;
 
 export interface Config extends Env {
   allowUsers: string[] | "*";
@@ -133,12 +131,12 @@ export interface Config extends Env {
 }
 
 /** 环境变量别名 → pi-ai 读取的标准名（.env 中常见的写法差异）。 */
-export const ENV_ALIASES: Readonly<Record<string, string>> = {
+const ENV_ALIASES: Readonly<Record<string, string>> = {
   DEEPSEEK_APIKEY: "DEEPSEEK_API_KEY",
 };
 
 /** API key provider 需要的环境变量（pi-ai 按标准名读取）。 */
-export const PROVIDER_API_KEY_ENV: Readonly<Record<string, string>> = {
+const PROVIDER_API_KEY_ENV: Readonly<Record<string, string>> = {
   deepseek: "DEEPSEEK_API_KEY",
   openai: "OPENAI_API_KEY",
   anthropic: "ANTHROPIC_API_KEY",

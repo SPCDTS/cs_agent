@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { validateImageHeader } from "../qq/image-header.js";
 
-export const IMAGE_FILE_MANIFEST = "image-files.json";
+const IMAGE_FILE_MANIFEST = "image-files.json";
 const filename = z.string().min(1).max(255).refine(s => !/[\\/:]/.test(s) && s !== "." && s !== "..");
 const schema = z.array(z.object({ filename, downloaded: z.boolean() }).strict()).max(4);
 export type ImageFileManifest = z.infer<typeof schema>;

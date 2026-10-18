@@ -21,7 +21,6 @@ import { loadConfig } from "../config.js";
 import { readImageFiles, validImageFile } from "../agent/image-files.js";
 import { collectNewImages } from "../agent/image-collect.js";
 
-export const PROMPT_MAX = 2000;
 /** 每个 MCP 进程（即每个 codex 回合）最多生图次数；回复最多附带 4 张 */
 export const MAX_CALLS = 4;
 
@@ -73,7 +72,7 @@ export function backendConfigFromEnv(env: NodeJS.ProcessEnv): ImageBackendConfig
 const CALL_DIR_RE = /^call-\d+$/;
 
 /** 新建 <dir>/call-<n>（n = 已有 call-* 目录数 + 1；已存在时继续递增），返回其路径。 */
-export async function nextCallDir(dir: string): Promise<string> {
+async function nextCallDir(dir: string): Promise<string> {
   const ents = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
   let n = ents.filter((e) => e.isDirectory() && CALL_DIR_RE.test(e.name)).length + 1;
   for (;;) {

@@ -23,7 +23,7 @@ export interface RuntimeSettings {
 }
 
 const backend = z.enum(BACKEND_NAMES);
-export const SettingsSchema = z.object({
+const SettingsSchema = z.object({
   agentBackend: backend,
   backendOverrides: z.record(z.string().refine(isScope, "scope 必须是 group:<群号> 或 private:<QQ号>"), backend)
     .refine(v => Object.keys(v).length <= 500, "覆盖表最多 500 项"),
@@ -33,7 +33,7 @@ export const SettingsSchema = z.object({
 }).strict();
 const FileSchema = z.object({ version: z.literal(1), settings: SettingsSchema.partial() }).strict();
 
-export const SETTINGS_FILE = "settings.json";
+const SETTINGS_FILE = "settings.json";
 /** 记录设置变更的观测票据（以 @ 开头：不进票据列表） */
 export const SETTINGS_TICKET = "@settings";
 
@@ -116,7 +116,5 @@ export class SettingsStore {
   }
 }
 
-/** 解析面板提交的覆盖表文本（每行或逗号分隔 `scope=backend`），复用 .env 的语法。 */
-export { parseBackendOverrides } from "./backends/select.js";
 export const formatBackendOverrides = (o: Readonly<Record<string, BackendName>>) =>
   Object.entries(o).map(([k, v]) => `${k}=${v}`).join("\n");

@@ -20,7 +20,7 @@ export type TicketSource = {
 };
 
 /** 已提交的 ComfyUI 任务（submit 阶段提交后立即与检查点同一提交写入；恢复时按它收取，不重复提交）。 */
-export type ImageJob = { prompt_id: string; backend: string; /** 已提交次数（服务端丢失任务时最多重新提交 1 次） */ submits: number; status?: "running"; deadline?: number; extensions?: number; nextCollectAt?: number };
+type ImageJob = { prompt_id: string; backend: string; /** 已提交次数（服务端丢失任务时最多重新提交 1 次） */ submits: number; status?: "running"; deadline?: number; extensions?: number; nextCollectAt?: number };
 
 /** 生图阶段的结果（collect 阶段与检查点同一提交写入；任务重跑时据此跳过生图）。 */
 export type ImageResult =
@@ -28,7 +28,7 @@ export type ImageResult =
   | { ok: false; failure: ImageFailure; message?: string };
 
 /** MCP 超时后的逐任务收取进度；结果落盘后不再下载。 */
-export type LateImageJob = PendingImageJob & {
+type LateImageJob = PendingImageJob & {
   deadline?: number; extensions: number; nextCollectAt?: number;
   reconciliation?: ReconcileStep[]; result?: ImageResult; files?: ImageFileManifest;
 };

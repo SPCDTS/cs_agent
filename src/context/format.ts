@@ -13,7 +13,7 @@
 import { BOT_STATUS, clip, EXCERPT_MAX, SUMMARY_MAX, type ContextItem, type MessageRow, type SummaryRow } from "./store.js";
 
 export const DEFAULT_CONTEXT_MAX_CHARS = 2500;
-export const MESSAGE_FULL_MAX = 1500;
+const MESSAGE_FULL_MAX = 1500;
 
 export interface FormatOptions {
   /** 行首加 #message_id（机器人占位行除外） */
@@ -28,13 +28,13 @@ const pad = (n: number) => String(n).padStart(2, "0");
 const md = (d: Date) => `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const sameDay = (a: Date, b: Date) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 
-export function formatTime(ts: number, now = Math.floor(Date.now() / 1000)): string {
+function formatTime(ts: number, now = Math.floor(Date.now() / 1000)): string {
   const d = new Date(ts * 1000);
   const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   return sameDay(d, new Date(now * 1000)) ? hm : `${md(d)} ${hm}`;
 }
 
-export function scopeLabel(scope: string): string {
+function scopeLabel(scope: string): string {
   const [kind, id] = scope.split(":");
   return kind === "group" ? `[群${id}]` : `[私聊${id}]`;
 }
@@ -79,7 +79,7 @@ export function formatSummary(row: SummaryRow, o: Pick<FormatOptions, "showScope
   return `${scope}${label} ${clip(row.text, SUMMARY_MAX)}`;
 }
 
-export function formatItem(item: ContextItem, o: FormatOptions = {}): string {
+function formatItem(item: ContextItem, o: FormatOptions = {}): string {
   return item.kind === "message" ? formatMessage(item.row, o) : formatSummary(item.row, o);
 }
 

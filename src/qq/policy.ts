@@ -6,9 +6,9 @@
 import type { ChatType, InboundMessage, MessageSegment, QQBridgeConfig } from "./types.js";
 import { isRecord, isValidId } from "./onebot.js";
 
-export const MAX_TEXT = 16000;
-export const MAX_SEGMENTS = 100;
-export const MAX_NICKNAME = 200;
+const MAX_TEXT = 16000;
+const MAX_SEGMENTS = 100;
+const MAX_NICKNAME = 200;
 
 function idString(value: unknown): string {
   return typeof value === "string" || typeof value === "number" ? String(value) : "";

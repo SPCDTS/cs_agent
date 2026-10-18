@@ -1,7 +1,7 @@
 import { defineExtension } from "@earendil-works/pi-durable";
 import type { CsTasks } from "./tasks.js";
 
-export const EXTENSION_NAME = "cs-agent";
+const EXTENSION_NAME = "cs-agent";
 
 /**
  * v3：不再有面向模型的工具与系统提示（意图模型的 route 会话已退场）。

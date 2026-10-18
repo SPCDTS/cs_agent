@@ -53,7 +53,7 @@ export function isReasoningEffort(v: unknown): v is ReasoningEffort {
 }
 
 /** 单轮的 codex 配置覆盖参数；未指定时沿用 config.toml 中的 CODEX_REASONING_EFFORT。 */
-export function reasoningEffortArgs(effort: ReasoningEffort | undefined): string[] {
+function reasoningEffortArgs(effort: ReasoningEffort | undefined): string[] {
   if (effort === undefined) return [];
   if (!isReasoningEffort(effort)) throw new Error(`不支持的推理强度: ${String(effort)}`);
   return ["-c", `model_reasoning_effort="${effort}"`];
@@ -76,7 +76,7 @@ export function imageTicketDirArgs(dir: string | undefined): string[] {
 }
 
 /** codex 线程键：owner 私聊（访问范围 all）用 owner，其余（所有群、其他私聊）共用 shared。 */
-export const THREAD_KEYS = ["owner", "shared"] as const;
+const THREAD_KEYS = ["owner", "shared"] as const;
 export type ThreadKey = (typeof THREAD_KEYS)[number];
 
 export function threadKeyForSource(source: TicketSource | undefined, owner: string | undefined): ThreadKey {
@@ -105,7 +105,7 @@ export interface AskOptions {
 }
 
 /** 校验 outputFile：绝对路径且不含 ".." 段。 */
-export function validateOutputFile(file: string): string {
+function validateOutputFile(file: string): string {
   if (!path.isAbsolute(file) || file.split(/[\\/]/).includes("..")) throw new Error(`非法的 codex 输出文件路径: ${file}`);
   return file;
 }
@@ -131,7 +131,7 @@ export function buildCodexEnv(codexHome: string, source: NodeJS.ProcessEnv = pro
 }
 
 /** resume 失败时，确认"会话不存在"的 stderr / 错误消息特征；只有匹配才新建会话。 */
-export const MISSING_SESSION_PATTERNS: RegExp[] = [
+const MISSING_SESSION_PATTERNS: RegExp[] = [
   /no rollout found/i,
   /thread\/resume failed/i,
   /no (thread|session|conversation) found/i,
@@ -360,7 +360,7 @@ export function extractThreadId(event: unknown): string | undefined {
   return undefined;
 }
 
-export function killTree(pid: number | undefined): void {
+function killTree(pid: number | undefined): void {
   if (!pid) return;
   try {
     if (process.platform === "win32") {
@@ -805,11 +805,11 @@ export class CodexRunner {
   }
 }
 
-export const HEADER_NICKNAME_MAX = 40;
+const HEADER_NICKNAME_MAX = 40;
 const HEADER_LABEL_RE = /\[(来源|引用)\]/g;
 
 /** 折成单行：控制字符、行/段分隔符一律换成空格并合并空白。 */
-export function oneLine(text: string): string {
+function oneLine(text: string): string {
   return text.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
 }
 
@@ -819,7 +819,7 @@ function headerField(text: string, max: number): string {
 }
 
 /** 头部用的昵称：单行、去标签、≤40 字。 */
-export function headerNickname(nickname: string): string {
+function headerNickname(nickname: string): string {
   return headerField(nickname, HEADER_NICKNAME_MAX);
 }
 
@@ -835,7 +835,7 @@ function localStamp(sec: number): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-export const QUOTE_MAX = 200;
+const QUOTE_MAX = 200;
 
 /**
  * 每轮注入的最小头部（设计 §3.2）：

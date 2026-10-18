@@ -18,7 +18,7 @@ const TRUNC_NOTE = "\n…（内容过长，已截断）";
 const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
 
 /** 把孤立的代理项（非法 UTF-16）替换为 U+FFFD（Node 24 的 String.prototype.toWellFormed）。 */
-export function wellFormed(text: string): string {
+function wellFormed(text: string): string {
   return (text as string & { toWellFormed(): string }).toWellFormed();
 }
 
@@ -72,7 +72,7 @@ export const RELAY_PROMPT = `把用户给你的文本整理成适合在 QQ 里�
 - 总长度不超过 4000 字。
 - 只输出整理后的文本，不要任何解释或前后缀。`;
 
-export const RELAY_TIMEOUT_MS = 20_000;
+const RELAY_TIMEOUT_MS = 20_000;
 
 export type ReplyMode = "relay" | "direct";
 

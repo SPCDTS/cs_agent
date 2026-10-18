@@ -9,9 +9,9 @@ import { accessToString, type Access } from "../context/access.js";
 import { DEFAULT_CONTEXT_MAX_CHARS, formatMessageFull, formatRecent, formatSearch, type FormatOptions } from "../context/format.js";
 import type { ContextStore } from "../context/store.js";
 
-export const RECENT_MAX = 30;
-export const SEARCH_LIMIT_MAX = 20;
-export const SEARCH_DAYS_MAX = 180;
+const RECENT_MAX = 30;
+const SEARCH_LIMIT_MAX = 20;
+const SEARCH_DAYS_MAX = 180;
 
 export interface QQContextDeps {
   /** QQ_ACCESS 解析结果；undefined 表示缺失/非法 */

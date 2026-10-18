@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { InboundMessage, ReplyTicketRecord, TicketStatus } from "./types.js";
 
-export const SEEN_LIMIT = 2000;
+const SEEN_LIMIT = 2000;
 export const DB_FILE = "qq-bridge.sqlite";
 const TICKET_PATTERN = /^[a-f0-9]{64}$/;
 

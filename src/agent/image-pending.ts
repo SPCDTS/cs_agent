@@ -52,8 +52,6 @@ export async function savePendingImage(dir: string, job: PendingImageJob): Promi
   await atomicJson(path.join(dir, PENDING_IMAGE_JOBS), validated);
 }
 
-export const appendPendingImage = savePendingImage;
-
 /** 收取只允许写入当前票据的 call-N 目录，恢复时再次检查软链接。 */
 export async function pendingCallDir(dir: string, callDir: string): Promise<string> {
   const root = await fs.realpath(dir);

@@ -55,11 +55,11 @@ export function fmtShort(n: number): string {
 }
 export const ratio = (used: number, window: number) => window > 0 ? used / window * 100 : 0;
 /** 进度条宽度/位置用的整数百分比（0–100）。 */
-export const clampPct = (p: number) => Math.max(0, Math.min(100, Math.round(p)));
+const clampPct = (p: number) => Math.max(0, Math.min(100, Math.round(p)));
 export const fmtPct = (p: number) => (p > 0 && p < 1 ? '<1' : String(Math.round(p))) + '%';
-export const tier = (p: number) => p > 85 ? 'hot' : p >= 60 ? 'warn' : 'ok';
+const tier = (p: number) => p > 85 ? 'hot' : p >= 60 ? 'warn' : 'ok';
 
-export function ctxLabel(backend: string, key: string): string {
+function ctxLabel(backend: string, key: string): string {
   const b = BACKENDS[backend] ?? backend;
   if (backend === 'codex') return `${b} · ${key === 'owner' ? 'owner 线程' : key === 'shared' ? '共享线程' : key}`;
   return `${b} · ${scopeLabel(key)}`;
@@ -71,7 +71,7 @@ export function sortUsage(list: ContextUsage[]): ContextUsage[] {
   return [...list].sort((a, b) => order(a) - order(b) || ratio(b.usedTokens, b.windowTokens) - ratio(a.usedTokens, a.windowTokens) || a.key.localeCompare(b.key));
 }
 
-export const tickTitle = (kind: 'bg' | 'rs', at: number, window: number) =>
+const tickTitle = (kind: 'bg' | 'rs', at: number, window: number) =>
   `${kind === 'bg' ? '后台压缩阈值' : '阻塞压缩阈值'}：${fmtInt(at)} tokens（${fmtPct(ratio(at, window))}）。` +
   (kind === 'bg' ? '越过后在回合结束时于后台压缩上下文，不阻塞回复。' : '越过后下一回合开始前必须先压缩，回复会等待压缩完成。');
 

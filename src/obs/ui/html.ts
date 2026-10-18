@@ -6,7 +6,7 @@ export const esc = (v: unknown) => redactText(String(v ?? ''), 100_000).replace(
 export const uri = (v: string) => encodeURIComponent(redactText(v, 100_000));
 export const json = (v: unknown, limit = 20_000) => `<pre>${esc(typeof v === 'string' ? v : JSON.stringify(redact(v, limit), null, 2))}</pre>`;
 
-export const NAV: [string, string][] = [['/', '总览'], ['/live', '实时'], ['/tickets', '票据'], ['/logs', '日志'], ['/context', '上下文'],
+const NAV: [string, string][] = [['/', '总览'], ['/live', '实时'], ['/tickets', '票据'], ['/logs', '日志'], ['/context', '上下文'],
   ['/codex', 'Codex'], ['/pi', 'Pi'], ['/settings', '设置'], ['/config', '配置']];
 
 export interface PageOptions { title: string; path: string; lead?: string; actions?: string; body: string; nonce: string; scripts?: string[]; flash?: { text: string; error?: boolean } }
@@ -76,7 +76,7 @@ export function fmtBytes(n: number | null | undefined): string {
 export function fmtTime(ts: number): string {
   return new Date(ts).toLocaleString('zh-CN', { hour12: false, timeZone: process.env.TZ || undefined });
 }
-export function fmtAgo(ts: number, now = Date.now()): string {
+function fmtAgo(ts: number, now = Date.now()): string {
   const d = Math.max(0, now - ts);
   if (d < 60_000) return '刚刚';
   if (d < 3600_000) return `${Math.floor(d / 60_000)} 分钟前`;
