@@ -1,3 +1,5 @@
+import type { ContextUsageStore } from "./context-usage.js";
+import { loadCodexContextWindow } from "./codex-model-catalog.js";
 import { readThreadArchive, writeThreadArchive } from "./thread-archive.js";
 import { imageRefsValue } from "./image-references.js";
 /**
@@ -22,6 +24,9 @@ import { clip } from "../context/store.js";
 export interface CodexRunnerOptions {
   /** 可执行文件及前置参数，例如 ["codex"] 或测试中的 [node, fake-codex.mjs] */
   command: string[];
+  contextUsage?: ContextUsageStore;
+  model?: string;
+  contextWindow?: number;
   codexHome: string;
   workspaceDir: string;
   /** ${DATA_DIR}/codex-threads.json：{ owner: {thread_id, created_at, updated_at}, shared: {...} } */
@@ -78,6 +83,7 @@ export function threadKeyForSource(source: TicketSource | undefined, owner: stri
 }
 
 export interface AskOptions {
+  ticket?: string;
   onJsonEvent?: (event: Record<string, unknown>) => void;
   /** 使用哪个 codex 线程，默认 shared */
   threadKey?: ThreadKey;
@@ -390,7 +396,31 @@ export class CodexRunner {
   private fileChain: Promise<unknown> = Promise.resolve();
   private migrated: Promise<void> | undefined;
 
+  private contextInitialization?: Promise<number>;
   constructor(readonly opts: CodexRunnerOptions) {}
+
+  private childEnv(): NodeJS.ProcessEnv {
+    return { ...buildCodexEnv(this.opts.codexHome), ...Object.fromEntries(Object.entries(this.opts.env ?? {}).filter(([key]) => key.toUpperCase() !== "OBS_TOKEN")) };
+  }
+
+  /** main 启动时调用；后续回合复用同一份目录结果。 */
+  initializeContextUsage(): Promise<number> {
+    return this.contextInitialization ??= this.loadContextUsage();
+  }
+
+  private async loadContextUsage(): Promise<number> {
+    const windowTokens = await loadCodexContextWindow({ command: this.opts.command, model: this.opts.model ?? "gpt-6.1-sol",
+      env: this.childEnv(), fallback: this.opts.contextWindow });
+    const threads = await this.readThreadIds();
+    for (const key of THREAD_KEYS) {
+      if (threads[key]) this.opts.contextUsage?.ensure("codex", key, { windowTokens });
+      else {
+        const old = this.opts.contextUsage?.get("codex", key);
+        if (old && (old.turns || old.usedTokens || old.cachedTokens)) this.opts.contextUsage?.reset("codex", key);
+      }
+    }
+    return windowTokens;
+  }
 
   /** 在 threadKey（默认 shared）对应的线程上执行一轮；同一键串行。返回 codex 最后一条消息文本。 */
   ask(prompt: string, opts: AskOptions = {}): Promise<string> {
@@ -417,6 +447,7 @@ export class CodexRunner {
         }
         delete doc[key];
         await this.writeThreadsFile(doc);
+        this.opts.contextUsage?.reset("codex", key);
         log.info("codex thread reset", { thread_key: key, thread_id: old?.thread_id ?? null, reason });
         return old?.thread_id ?? null;
       });
@@ -550,10 +581,22 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, ticket }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
     const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess), ...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)];
     const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
+    const windowTokens = this.opts.contextUsage ? await this.initializeContextUsage() : 0;
+    const observe = (event: Record<string, unknown>) => {
+      if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
+        const usage = event.usage as Record<string, unknown>;
+        if (typeof usage.input_tokens === "number" && Number.isFinite(usage.input_tokens) && usage.input_tokens >= 0) {
+          const cached = usage.cached_input_tokens;
+          this.opts.contextUsage?.recordTurn("codex", key, { windowTokens, usedTokens: usage.input_tokens,
+            cachedTokens: typeof cached === "number" && Number.isFinite(cached) && cached >= 0 ? cached : undefined }, ticket);
+        }
+      }
+      onJsonEvent?.(event);
+    };
     const session = await this.readThread(key);
     let id = session?.thread_id;
     if (session) {
@@ -561,6 +604,7 @@ export class CodexRunner {
       if (reason) {
         log.warn("codex thread rotated", { key, thread_id: session.thread_id, reason });
         await this.writeThread(key, undefined);
+        this.opts.contextUsage?.reset("codex", key, ticket);
         id = undefined;
       }
     }
@@ -572,13 +616,14 @@ export class CodexRunner {
         undefined,
         outFile,
         onAcquired,
-        onJsonEvent,
+        observe,
       );
       if (r.code === 0) return this.result(r);
       if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
         // 已确认会话不存在：新建会话并覆盖记录
         log.warn("codex thread missing, starting fresh thread", { key, thread_id: id, stderr: r.stderrTail.slice(-300) });
         await this.writeThread(key, undefined);
+        this.opts.contextUsage?.reset("codex", key, ticket);
         onAcquired = undefined; // 同一次回合的失效线程回退不重复计数
       } else {
         // 其他失败（网络、鉴权、限流……）：保留会话 id，下次继续 resume
@@ -593,11 +638,12 @@ export class CodexRunner {
       async (threadId) => {
         // 一收到 thread.started 就落盘：即使本轮随后超时或进程崩溃，下一轮也能 resume 同一会话
         await this.writeThread(key, threadId);
+        this.opts.contextUsage?.ensure("codex", key, { windowTokens }, ticket);
         log.info("codex thread created", { key, thread_id: threadId });
       },
       outFile,
       onAcquired,
-      onJsonEvent,
+      observe,
     );
     if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
     return this.result(r);
@@ -636,7 +682,7 @@ export class CodexRunner {
     signal?.throwIfAborted();
     const child = spawn(bin, [...prefix, ...finalArgs], {
       cwd: this.opts.workspaceDir,
-      env: { ...buildCodexEnv(this.opts.codexHome), ...Object.fromEntries(Object.entries(this.opts.env ?? {}).filter(([key]) => key.toUpperCase() !== "OBS_TOKEN")) },
+      env: this.childEnv(),
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true,

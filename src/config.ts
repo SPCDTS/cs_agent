@@ -58,6 +58,7 @@ const EnvSchema = z.object({
 
   CODEX_BIN: z.string().default("codex"),
   CODEX_MODEL: z.string().default("gpt-6.1-sol"),
+  CODEX_CONTEXT_WINDOW: int(400000),
   /** codex 推理强度（写入 config.toml，codex 后端每轮也以 -c 显式传入；不再按请求选择） */
   CODEX_REASONING_EFFORT: z.string().default("high"),
   /** codex 后端回复后处理：relay（意图模型整理格式，失败回退清洗）| direct（仅代码清洗） */

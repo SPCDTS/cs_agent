@@ -108,6 +108,7 @@ export class CodexBackend implements AgentBackend {
     let text: string;
     try {
       text = await this.opts.runner.ask(prompt + (refs.length ? "\n[本轮参考图]\n" + refs.join("\n") : ""), {
+        ticket: req.ticket,
         onJsonEvent: codexObserver(req.ticket),
         threadKey: req.threadKey === "owner" ? "owner" : "shared",
         signal: ctx.signal,
