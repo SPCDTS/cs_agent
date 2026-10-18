@@ -52,6 +52,7 @@ beforeEach(async () => {
       request: (url, opts, cb) => request(new URL(url.pathname, base), { ...opts, lookup: undefined }, cb) } });
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   store.close(); cdn.closeAllConnections();
   await new Promise<void>(r => cdn.close(() => r()));
   vi.useRealTimers();
@@ -144,6 +145,60 @@ describe("按需图片召回", () => {
     remote.message = [text("不同"), image];
     const r = await media.recall(access, "1");
     expect(store.message(access, "1")!.row.text).toBe("原文[image] [image:" + r.images[0]!.path + "]");
+  });
+  it("并发同内容写者只发布已校验的完整文件，最终只留一份", async () => {
+    ingest("1"); ingest("2");
+    call.mockImplementation(async (_action, params) => event(params.message_id));
+    const link = fs.link.bind(fs), staged: string[] = [];
+    let release!: () => void;
+    const barrier = new Promise<void>(r => { release = r; });
+    vi.spyOn(fs, "link").mockImplementation(async (source, target) => {
+      staged.push(String(source));
+      expect(String(source)).toMatch(/\.[a-f0-9]{64}\.[a-f0-9]+\.tmp$/);
+      expect(await fs.readFile(source)).toEqual(PNG);
+      if (staged.length === 2) release();
+      await barrier; await link(source, target);
+    });
+    const [a, b] = await Promise.all([media.recall(access, "1"), media.recall(access, "2")]);
+    expect(new Set(staged).size).toBe(2);
+    expect(a.images).toEqual(b.images); expect(a.images).toHaveLength(1);
+    expect(await fs.readdir(path.dirname(a.images[0]!.path))).toEqual([path.basename(a.images[0]!.path)]);
+  });
+  it("复用旧文件但提交中断时，GC 仍保留一天宽限", async () => {
+    ingest(); const file = (await media.recall(access, "1")).images[0]!.path;
+    store.recall("group:30001", "1");
+    const old = new Date(Date.now() - 2 * 86400_000); await fs.utimes(file, old, old);
+    ingest("2");
+    const save = vi.spyOn(store, "saveMedia").mockImplementationOnce(() => { throw new Error("模拟提交中断"); });
+    await expect(media.recall(access, "2")).rejects.toThrow("提交中断");
+    expect(store.mediaPathReferenced(file)).toBe(false);
+    expect(await cleanupMedia(dir, store)).toBe(0);
+    expect(await fs.readFile(file)).toEqual(PNG);
+    save.mockRestore();
+    expect((await media.recall(access, "2")).images[0]!.path).toBe(file);
+  });
+  it("损坏的已有文件由 rename 原子替换；未校验临时文件不能发布", async () => {
+    ingest(); const file = (await media.recall(access, "1")).images[0]!.path;
+    await fs.writeFile(file, "broken");
+    const rename = vi.spyOn(fs, "rename");
+    ingest("2"); expect((await media.recall(access, "2")).images[0]!.path).toBe(file);
+    expect(rename).toHaveBeenCalledOnce(); expect(await fs.readFile(file)).toEqual(PNG);
+    const write = fs.writeFile.bind(fs);
+    vi.spyOn(fs, "writeFile").mockImplementation(async (name, data, options) => write(name, String(name).endsWith(".tmp") ? "partial" : data, options));
+    ingest("3"); expect((await media.recall(access, "3")).images).toEqual([]);
+    expect(await fs.readFile(file)).toEqual(PNG);
+    expect(await fs.readdir(path.dirname(file))).toHaveLength(1);
+  });
+  it("GC 跳过新临时文件，只清理超过一天的残留", async () => {
+    ingest(); const file = (await media.recall(access, "1")).images[0]!.path;
+    const prefix = path.join(path.dirname(file), "." + path.basename(file).split(".")[0]);
+    const fresh = prefix + ".abc.tmp", stale = prefix + ".def.tmp";
+    await fs.writeFile(fresh, PNG); await fs.writeFile(stale, PNG);
+    const old = new Date(Date.now() - 2 * 86400_000); await fs.utimes(stale, old, old);
+    expect(await cleanupMedia(dir, store)).toBe(1);
+    expect(await fs.readFile(fresh)).toEqual(PNG);
+    expect(await fs.readFile(file)).toEqual(PNG);
+    await expect(fs.stat(stale)).rejects.toMatchObject({ code: "ENOENT" });
   });
   it("没有图片不访问网络；不沿引用链召回", async () => {
     ingest("2");

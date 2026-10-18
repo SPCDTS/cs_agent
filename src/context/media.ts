@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { log } from "../log.js";
@@ -70,10 +70,31 @@ async function saveFile(dataDir: string, bytes: Buffer, signal: AbortSignal): Pr
   const ext = bytes[0] === 0x89 ? "png" : bytes[0] === 0xff ? "jpg" : bytes.toString("ascii", 0, 4) === "RIFF" ? "webp" : "gif";
   const file = path.join(dir, sha256 + "." + ext);
   signal.throwIfAborted();
-  await fs.writeFile(file, bytes, { flag: "wx" }).catch(async (err: NodeJS.ErrnoException) => {
-    if (err.code !== "EEXIST") throw err;
-    if (!(await readMediaFile(dataDir, file)).equals(bytes)) throw new Error("媒体文件内容不一致");
-  });
+  const temp = path.join(dir, "." + sha256 + "." + randomBytes(16).toString("hex") + ".tmp");
+  try {
+    await fs.writeFile(temp, bytes, { flag: "wx", mode: 0o600 });
+    const written = await fs.readFile(temp);
+    validateImageHeader(written);
+    if (!written.equals(bytes)) throw new Error("媒体临时文件内容不一致");
+    signal.throwIfAborted();
+    try { await fs.link(temp, file); }
+    catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // 已有路径仍必须是安全的普通文件；只替换损坏内容，不替换链接或目录。
+      const stat = await fs.lstat(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || await fs.realpath(file) !== file) throw new Error("媒体文件不安全");
+      let intact = false;
+      try { intact = (await readMediaFile(dataDir, file)).equals(bytes); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code) throw error; }
+      signal.throwIfAborted();
+      if (intact) {
+        const now = new Date();
+        await fs.utimes(file, now, now);
+      } else await fs.rename(temp, file);
+    }
+  } finally {
+    await fs.unlink(temp).catch((err: NodeJS.ErrnoException) => { if (err.code !== "ENOENT") throw err; });
+  }
   return { path: file, sha256 };
 }
 
@@ -248,11 +269,13 @@ export async function cleanupMedia(dataDir: string, store: ContextStore, now = D
     const dir = path.join(root, shard.name);
     await safeDirectory(dir, false);
     for (const ent of await fs.readdir(dir, { withFileTypes: true })) {
-      if (!ent.isFile() || ent.isSymbolicLink() || !/^[a-f0-9]{64}\.(png|jpg|webp|gif)$/.test(ent.name)) continue;
+      const temporary = /^\.[a-f0-9]{64}\.[a-f0-9]+\.tmp$/.test(ent.name);
+      if (!ent.isFile() || ent.isSymbolicLink() || (!temporary && !/^[a-f0-9]{64}\.(png|jpg|webp|gif)$/.test(ent.name))) continue;
       const file = path.join(dir, ent.name);
-      const stat = await fs.lstat(file);
-      if (stat.isFile() && !stat.isSymbolicLink() && stat.mtimeMs < now - 86400_000 && !store.mediaPathReferenced(file)) {
-        await fs.unlink(file); removed++;
+      const stat = await fs.lstat(file).catch((err: NodeJS.ErrnoException) => { if (err.code !== "ENOENT") throw err; });
+      if (stat?.isFile() && !stat.isSymbolicLink() && stat.mtimeMs < now - 86400_000 && (temporary || !store.mediaPathReferenced(file))) {
+        const deleted = await fs.unlink(file).then(() => true, (err: NodeJS.ErrnoException) => { if (err.code !== "ENOENT") throw err; return false; });
+        if (deleted) removed++;
       }
     }
   }
