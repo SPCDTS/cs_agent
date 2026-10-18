@@ -64,5 +64,18 @@ process.stdin.on("end", async () => {
   // FAKE_CODEX_SLEEP_AFTER_OUT_MS：写完 -o 文件后再挂起（模拟回合已完成、进程在结果提交前被杀）
   const after = Number(process.env.FAKE_CODEX_SLEEP_AFTER_OUT_MS ?? 0);
   if (after) await new Promise((r) => setTimeout(r, after));
+  // 模拟 turn.completed 已发出，但 rollout 要等进程退出才完成落盘。
+  if (process.env.FAKE_CODEX_ROLLOUT_USAGE) process.on("exit", () => {
+    const threadId = isResume ? argv[argv.length - 2] : process.env.FAKE_CODEX_THREAD ?? "thread-123";
+    const dir = path.join(process.env.CODEX_HOME, "sessions", "2026", "10", "18");
+    mkdirSync(dir, { recursive: true });
+    const timestamp = new Date().toISOString();
+    const rows = [
+      { type: "task_started" },
+      { type: "token_count", info: { last_token_usage: JSON.parse(process.env.FAKE_CODEX_ROLLOUT_USAGE), total_token_usage: JSON.parse(process.env.FAKE_CODEX_USAGE ?? "{}") } },
+      { type: "task_complete" },
+    ].map(payload => JSON.stringify({ timestamp, type: "event_msg", payload }));
+    appendFileSync(path.join(dir, "rollout-" + threadId + ".jsonl"), rows.join("\n") + "\n", "utf8");
+  });
   log({ phase: "end", pid: process.pid, t: Date.now() });
 });

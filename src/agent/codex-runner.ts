@@ -447,12 +447,7 @@ export class CodexRunner {
       if (threads[key]) {
         this.opts.contextUsage?.ensure("codex", key, { windowTokens });
         if (!this.opts.contextUsage) continue;
-        const files = await this.rolloutFiles(threads[key]);
-        let latest: Awaited<ReturnType<typeof readRolloutContextUsage>>;
-        for (const file of files) {
-          const history = await readRolloutContextUsage(file.file);
-          if (history && (!latest || history.updatedAt > latest.updatedAt)) latest = history;
-        }
+        const latest = await this.latestRolloutContextUsage(threads[key]);
         if (latest) {
           const { truncated: partial, ...history } = latest;
           if (partial) {
@@ -623,6 +618,17 @@ export class CodexRunner {
     return files;
   }
 
+  /** 按用量时间选最新快照；时间相同时优先较大的 rollout，与启动回填共用。 */
+  private async latestRolloutContextUsage(threadId: string): ReturnType<typeof readRolloutContextUsage> {
+    const files = await this.rolloutFiles(threadId);
+    let latest: Awaited<ReturnType<typeof readRolloutContextUsage>>;
+    for (const { file } of files.sort((a, b) => b.size - a.size)) {
+      const history = await readRolloutContextUsage(file);
+      if (history && (!latest || history.updatedAt > latest.updatedAt)) latest = history;
+    }
+    return latest;
+  }
+
   /** 安全阀：返回需要轮换的原因，否则 undefined。 */
   private async rotationReason(session: { thread_id: string; created_at?: string }): Promise<string | undefined> {
     const maxMb = this.opts.rolloutMaxMb ?? 50;
@@ -641,69 +647,81 @@ export class CodexRunner {
     const effort = [...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess), ...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)];
     const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
     const windowTokens = this.opts.contextUsage ? await this.initializeContextUsage() : 0;
+    let completed = false;
     const observe = (event: Record<string, unknown>) => {
-      if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
-        const usage = event.usage as Record<string, unknown>;
-        if (typeof usage.input_tokens === "number" && Number.isFinite(usage.input_tokens) && usage.input_tokens >= 0) {
-          const cached = usage.cached_input_tokens;
-          this.opts.contextUsage?.recordTurn("codex", key, { windowTokens, usedTokens: usage.input_tokens,
-            cachedTokens: typeof cached === "number" && Number.isFinite(cached) && cached >= 0 ? cached : undefined }, ticket);
-        }
-      }
+      if (event.type === "turn.completed") completed = true;
       onJsonEvent?.(event);
     };
     const session = await this.readThread(key);
     let id = session?.thread_id;
-    if (session) {
-      const reason = await this.rotationReason(session);
-      if (reason) {
-        log.warn("codex thread rotated", { key, thread_id: session.thread_id, reason });
-        await this.writeThread(key, undefined);
-        this.opts.contextUsage?.reset("codex", key, ticket);
-        id = undefined;
+    const startedAt = Date.now();
+    try {
+      if (session) {
+        const reason = await this.rotationReason(session);
+        if (reason) {
+          log.warn("codex thread rotated", { key, thread_id: session.thread_id, reason });
+          await this.writeThread(key, undefined);
+          this.opts.contextUsage?.reset("codex", key, ticket);
+          id = undefined;
+        }
       }
-    }
-    if (id) {
+      if (id) {
+        const r = await this.exec(
+          ["exec", "resume", ...this.commonArgs(), "-c", `sandbox_mode="${this.opts.sandbox}"`, ...effort, id, "-"],
+          prompt,
+          signal,
+          undefined,
+          outFile,
+          onAcquired,
+          observe,
+          { access: qqAccess, ticket },
+        );
+        if (r.code === 0) return this.result(r);
+        if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
+          // 已确认会话不存在：新建会话并覆盖记录
+          log.warn("codex thread missing, starting fresh thread", { key, thread_id: id, stderr: r.stderrTail.slice(-300) });
+          await this.writeThread(key, undefined);
+          this.opts.contextUsage?.reset("codex", key, ticket);
+          id = undefined;
+          onAcquired = undefined; // 同一次回合的失效线程回退不重复计数
+        } else {
+          // 其他失败（网络、鉴权、限流……）：保留会话 id，下次继续 resume
+          log.warn("codex thread resume failed, keeping thread", { key, thread_id: id, code: r.code, stderr: r.stderrTail.slice(-300) });
+          throw new Error(`codex 执行失败: ${r.failure ?? `exit ${r.code}`}`);
+        }
+      }
       const r = await this.exec(
-        ["exec", "resume", ...this.commonArgs(), "-c", `sandbox_mode="${this.opts.sandbox}"`, ...effort, id, "-"],
+        ["exec", ...this.commonArgs(), ...effort, "-C", this.opts.workspaceDir, "-s", this.opts.sandbox, "-"],
         prompt,
         signal,
-        undefined,
+        async (threadId) => {
+          id = threadId;
+          // 一收到 thread.started 就落盘：即使本轮随后超时或进程崩溃，下一轮也能 resume 同一会话
+          await this.writeThread(key, threadId);
+          this.opts.contextUsage?.ensure("codex", key, { windowTokens }, ticket);
+          log.info("codex thread created", { key, thread_id: threadId });
+        },
         outFile,
         onAcquired,
         observe,
         { access: qqAccess, ticket },
       );
-      if (r.code === 0) return this.result(r);
-      if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
-        // 已确认会话不存在：新建会话并覆盖记录
-        log.warn("codex thread missing, starting fresh thread", { key, thread_id: id, stderr: r.stderrTail.slice(-300) });
-        await this.writeThread(key, undefined);
-        this.opts.contextUsage?.reset("codex", key, ticket);
-        onAcquired = undefined; // 同一次回合的失效线程回退不重复计数
-      } else {
-        // 其他失败（网络、鉴权、限流……）：保留会话 id，下次继续 resume
-        log.warn("codex thread resume failed, keeping thread", { key, thread_id: id, code: r.code, stderr: r.stderrTail.slice(-300) });
-        throw new Error(`codex 执行失败: ${r.failure ?? `exit ${r.code}`}`);
+      if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
+      return this.result(r);
+    } finally {
+      // exec 已等待进程 close；此时 rollout 已刷新，不能在 JSONL 事件回调中抢先读取。
+      if (completed && this.opts.contextUsage) {
+        const usage = id ? await this.latestRolloutContextUsage(id) : undefined;
+        if (usage && usage.updatedAt >= startedAt) {
+          this.opts.contextUsage.recordTurn("codex", key, { windowTokens, usedTokens: usage.usedTokens, cachedTokens: usage.cachedTokens }, ticket);
+        } else {
+          this.opts.contextUsage.recordTurn("codex", key, { windowTokens }, ticket);
+          log.warn("codex context usage unavailable after turn; keeping previous usage", {
+            key, thread_id: id, ticket, reason: usage ? "stale rollout usage" : "missing rollout usage",
+          });
+        }
       }
     }
-    const r = await this.exec(
-      ["exec", ...this.commonArgs(), ...effort, "-C", this.opts.workspaceDir, "-s", this.opts.sandbox, "-"],
-      prompt,
-      signal,
-      async (threadId) => {
-        // 一收到 thread.started 就落盘：即使本轮随后超时或进程崩溃，下一轮也能 resume 同一会话
-        await this.writeThread(key, threadId);
-        this.opts.contextUsage?.ensure("codex", key, { windowTokens }, ticket);
-        log.info("codex thread created", { key, thread_id: threadId });
-      },
-      outFile,
-      onAcquired,
-      observe,
-      { access: qqAccess, ticket },
-    );
-    if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
-    return this.result(r);
   }
 
   private commonArgs(): string[] {

@@ -93,6 +93,12 @@ it('真实 runner 读取假子进程 JSONL，解析 MCP 工具状态和耗时',a
   expect(await runner.ask('仅假 CLI',{onJsonEvent:codexObserver('jsonl')})).toBe('假答案');
   expect(r.store.events('jsonl').at(-1)).toMatchObject({stage:'tool:test_tool',status:'failed',duration_ms:42});
 });
+it('Codex 用量观测保留线程累计量，不混入单次请求的 token 字段',async()=>{
+  const r=await rig();
+  codexObserver('total-usage')({type:'turn.completed',usage:{input_tokens:3000000,cached_input_tokens:2000000,output_tokens:10000}});
+  const event=r.store.events('total-usage').find(e=>e.stage==='model_usage')!;
+  expect(JSON.parse(event.detail_json)).toEqual({backend:'codex',total_input_tokens:3000000,total_cached_input_tokens:2000000,total_output_tokens:10000});
+});
 it('pi 每轮模型与工具 hook 记录用量、输入和结果，不需真实 API',async()=>{
   const r=await rig();r.faux.setResponses([fauxAssistantMessage(fauxToolCall('qq_recent',{}),{stopReason:'toolUse'}),fauxAssistantMessage('假模型完成')]);
   const model=r.faux.getModel();const pi=await PiBackend.open({dataDir:r.dir,models:r.models,model:{provider:model.provider,modelId:model.id},thinkingLevel:'off',store:r.context,imageBackend:r.image,storage:new MemoryStorage()});clean.push(()=>pi.close());

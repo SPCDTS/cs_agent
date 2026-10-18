@@ -75,9 +75,13 @@ export class ContextUsageStore {
     this.update({ backend, key, usedTokens: 0, turns: 0, source: "estimate", ...old, ...capacity, updatedAt: old?.updatedAt ?? Date.now() }, ticket);
   }
 
-  recordTurn(backend: Backend, key: string, usage: Capacity & Pick<ContextUsage, "usedTokens" | "cachedTokens">, ticket = "@context"): void {
+  /** 每个完成回合只计数一次；缺少用量时保留原占用、来源和采样时间。 */
+  recordTurn(backend: Backend, key: string, usage: Capacity & Partial<Pick<ContextUsage, "usedTokens" | "cachedTokens">>, ticket = "@context"): void {
     const old = this.get(backend, key);
-    this.update({ ...old, backend, key, ...usage, turns: (old?.turns ?? 0) + 1, source: "turn", updatedAt: Date.now() }, ticket);
+    const sampled = usage.usedTokens !== undefined;
+    this.update({ ...old, backend, key, ...usage, usedTokens: sampled ? usage.usedTokens! : old?.usedTokens ?? 0,
+      cachedTokens: sampled ? usage.cachedTokens : old?.cachedTokens, turns: (old?.turns ?? 0) + 1,
+      source: sampled ? "turn" : old?.source ?? "estimate", updatedAt: sampled ? Date.now() : old?.updatedAt ?? Date.now() }, ticket);
   }
 
   recordCompaction(backend: Backend, key: string, ticket = "@context"): void {

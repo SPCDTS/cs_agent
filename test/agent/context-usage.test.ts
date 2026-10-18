@@ -69,6 +69,19 @@ describe("上下文占用存储", () => {
     expect((await fs.readdir(dir)).filter(name => name.endsWith(".tmp"))).toEqual([]);
   });
 
+  it("只计数时保留用量快照，新键保持零占用估算，后续采样不重复计数", () => {
+    const store = open();
+    store.recordTurn("codex", "shared", { windowTokens: 500000 });
+    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 0, turns: 1, source: "estimate" });
+    store.recordTurn("codex", "shared", usage);
+    const prior = store.get("codex", "shared")!;
+    store.recordTurn("codex", "shared", { windowTokens: 500000 });
+    expect(store.get("codex", "shared")).toEqual({ ...prior, turns: 3 });
+    store.recordTurn("codex", "shared", { windowTokens: 500000, usedTokens: 0 });
+    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 0, turns: 4, source: "turn" });
+    expect(store.get("codex", "shared")!.cachedTokens).toBeUndefined();
+  });
+
   it("忽略损坏文件与非法记录，不将非有限 token 写为 null", async () => {
     const dir = tmp("context-invalid-");
     await fs.writeFile(path.join(dir, "context-usage.json"), "{broken", "utf8");
@@ -85,7 +98,7 @@ function runnerSetup(env: NodeJS.ProcessEnv = {}, fallback?: number) {
   const runner = new CodexRunner({ command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
     codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "ws"), threadsFile: path.join(dir, "codex-threads.json"),
     sandbox: "workspace-write", timeoutMs: 10000, contextUsage: store, model: "gpt-6.1-sol", contextWindow: fallback,
-    env: { FAKE_CODEX_CATALOG_LOG: catalogLog, FAKE_CODEX_USAGE: JSON.stringify({ input_tokens: 1000, cached_input_tokens: 750, output_tokens: 200 }), ...env } });
+    env: { FAKE_CODEX_ROLLOUT_USAGE: JSON.stringify({ input_tokens: 1000, cached_input_tokens: 750 }), FAKE_CODEX_CATALOG_LOG: catalogLog, FAKE_CODEX_USAGE: JSON.stringify({ input_tokens: 1000, cached_input_tokens: 750, output_tokens: 200 }), ...env } });
   return { dir, store, runner, catalogLog };
 }
 
@@ -136,13 +149,13 @@ describe("codex 上下文采集", () => {
     expect(readBytes).toBe(ROLLOUT_USAGE_MAX_BYTES);
   });
 
-  it("兼容 turn.completed，损坏的最新用量回退旧完成回合", async () => {
+  it("turn.completed 只计数，缺少 last_token_usage 时不能采用累计量", async () => {
     const file = path.join(tmp("rollout-events-"), "events.jsonl");
     await fs.writeFile(file, [
       { timestamp: "2026-10-17T00:00:00Z", type: "turn.completed", usage: { input_tokens: 42, cached_input_tokens: 12 } },
       { timestamp: "2026-10-18T00:00:00Z", type: "turn.completed", usage: { input_tokens: "invalid" } },
     ].map(row => JSON.stringify(row)).join("\n"), "utf8");
-    expect(await readRolloutContextUsage(file)).toMatchObject({ usedTokens: 42, cachedTokens: 12, turns: 2, updatedAt: Date.parse("2026-10-17T00:00:00Z") });
+    expect(await readRolloutContextUsage(file)).toBeUndefined();
   });
 
   it("历史回填不覆盖更新的已落盘用量，容量刷新不改变历史时间", () => {
@@ -210,13 +223,13 @@ describe("codex 上下文采集", () => {
     expect(store.get("codex", "shared")!.windowTokens).toBe(654321);
   });
 
-  it("没有目录与覆盖值时默认 400000，缺失 usage 不编造真实回合", async () => {
-    const { runner, store } = runnerSetup({ FAKE_CODEX_CATALOG_FAIL: "1", FAKE_CODEX_USAGE: "{}" });
+  it("没有目录与覆盖值时默认 400000，缺失用量仍统计已完成回合", async () => {
+    const { runner, store } = runnerSetup({ FAKE_CODEX_CATALOG_FAIL: "1", FAKE_CODEX_USAGE: "{}", FAKE_CODEX_ROLLOUT_USAGE: "" });
     expect(await runner.initializeContextUsage()).toBe(400000);
     await runner.ask("no-usage");
-    expect(store.get("codex", "shared")).toMatchObject({ source: "estimate", turns: 0 });
+    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 0, source: "estimate", turns: 1 });
     await runner.initializeContextUsage();
-    expect(store.get("codex", "shared")).toMatchObject({ windowTokens: 400000, source: "estimate", turns: 0 });
+    expect(store.get("codex", "shared")).toMatchObject({ windowTokens: 400000, source: "estimate", turns: 1 });
     expect(loadConfig({}).CODEX_CONTEXT_WINDOW).toBe(400000);
     expect(() => loadConfig({ CODEX_CONTEXT_WINDOW: "0" })).toThrow();
   });

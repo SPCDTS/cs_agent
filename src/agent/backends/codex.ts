@@ -160,7 +160,8 @@ export function codexObserver(ticket: string): (event: Record<string, unknown>) 
     if (event.type === "thread.started") trace.event(ticket, "dispatched", { detail: { backend: "codex", thread_id: event.thread_id } });
     if (event.type === "turn.completed") {
       const usage = event.usage as Record<string,unknown> | undefined;
-      trace.event(ticket,"model_usage",{detail:{backend:"codex",input_tokens:usage?.input_tokens,output_tokens:usage?.output_tokens,cached_input_tokens:usage?.cached_input_tokens}});
+      // exec 的 usage 是线程累计计费量，不是本次请求的上下文占用。
+      trace.event(ticket,"model_usage",{detail:{backend:"codex",total_input_tokens:usage?.input_tokens,total_output_tokens:usage?.output_tokens,total_cached_input_tokens:usage?.cached_input_tokens}});
     }
     if (event.type === "turn.failed" || event.type === "error") trace.event(ticket,"model_error",{status:"failed",detail:{backend:"codex",failure:classifyFailure(event.error ?? event.message,"codex")}});
     if (!item || !['mcp_tool_call','command_execution','web_search','web_search_call'].includes(String(item.type))) return;

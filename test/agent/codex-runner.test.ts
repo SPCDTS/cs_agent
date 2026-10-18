@@ -1,4 +1,6 @@
 import { redactText } from "../../src/obs/redact.js";
+import { ContextUsageStore } from "../../src/agent/context-usage.js";
+import { log } from "../../src/log.js";
 import { RecallTokens } from "../../src/context/media-recall-server.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -599,5 +601,85 @@ describe("codex 召回令牌生命周期", () => {
       expect(argv).toContain('mcp_servers.qq_context.env.MEDIA_RECALL_PORT="8791"');
     }
     tokens.close();
+  });
+});
+
+
+describe("codex 回合结束后的上下文用量", () => {
+  const stores: ContextUsageStore[] = [];
+  afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close(); });
+  const warning = "codex context usage unavailable after turn; keeping previous usage";
+  const lastUsage = { input_tokens: 115947, cached_input_tokens: 100000, output_tokens: 321 };
+  function contextSetup(env: NodeJS.ProcessEnv = {}) {
+    const dir = tmp(), opts = setupOpts(dir), store = new ContextUsageStore(dir);
+    stores.push(store);
+    const runner = new CodexRunner({ ...opts, contextUsage: store, env: { ...opts.env,
+      FAKE_CODEX_USAGE: JSON.stringify({ input_tokens: 3000000, cached_input_tokens: 2000000, output_tokens: 10000 }), ...env } });
+    return { dir, runner, store };
+  }
+  function writeRollout(dir: string, name: string, timestamp: string, inputTokens = 777777) {
+    const sessions = path.join(dir, "codex", "sessions", "2026", "10", "17");
+    mkdirSync(sessions, { recursive: true });
+    const rows = [
+      { type: "task_started" },
+      { type: "token_count", info: { last_token_usage: { input_tokens: inputTokens, cached_input_tokens: 600000 } } },
+      { type: "task_complete" },
+    ].map(payload => JSON.stringify({ timestamp, type: "event_msg", payload }));
+    writeFileSync(path.join(sessions, name), rows.join("\n") + "\n", "utf8");
+  }
+
+  it.each([false, true])("进程退出后用 rollout 的最后请求替换累计量，恢复线程=%s", async resume => {
+    const { dir, runner, store } = contextSetup({ FAKE_CODEX_ROLLOUT_USAGE: JSON.stringify(lastUsage) });
+    const threadId = resume ? "thread-resumed" : "thread-fresh";
+    if (resume) seedShared(dir, { thread_id: threadId });
+    await runner.initializeContextUsage();
+    if (resume) store.recordTurn("codex", "shared", { windowTokens: 500000, usedTokens: 42000, cachedTokens: 12000 });
+    // 同线程有较旧的副本，不能仅按文件名或文件大小选中它。
+    writeRollout(dir, "rollout-old-" + threadId + ".jsonl", "2000-01-01T00:00:00Z");
+    const before = store.get("codex", "shared"), during: (number | undefined)[] = [];
+    const warn = vi.spyOn(log, "warn");
+    await runner.ask("读取最后请求", { onJsonEvent: event => {
+      if (event.type === "turn.completed") during.push(store.get("codex", "shared")?.usedTokens ?? 0);
+    } });
+    expect(during).toEqual([before?.usedTokens ?? 0]);
+    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 115947, cachedTokens: 100000,
+      windowTokens: 500000, turns: (before?.turns ?? 0) + 1, source: "turn" });
+    expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(0);
+    // rollout 已有多个 task_complete，也只能给本轮加一。
+    await runner.ask("再来一轮");
+    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 115947, cachedTokens: 100000, turns: (before?.turns ?? 0) + 2 });
+  });
+
+  it.each(["missing", "invalid", "stale"])("rollout 用量 %s 时保留旧快照，计数一次并告警一次", async mode => {
+    const { dir, runner, store } = contextSetup(mode === "invalid" ? { FAKE_CODEX_ROLLOUT_USAGE: '{"input_tokens":-1}' } : {});
+    seedShared(dir, { thread_id: "thread-resumed" });
+    await runner.initializeContextUsage();
+    store.recordTurn("codex", "shared", { windowTokens: 500000, usedTokens: 42000, cachedTokens: 12000 });
+    if (mode === "stale") writeRollout(dir, "rollout-thread-resumed.jsonl", "2000-01-01T00:00:00Z");
+    const before = store.get("codex", "shared")!, warn = vi.spyOn(log, "warn");
+    await runner.ask("没有新用量", { ticket: "usage-fallback" });
+    expect(store.get("codex", "shared")).toEqual({ ...before, turns: before.turns + 1 });
+    expect(warn.mock.calls.filter(([message]) => message === warning)).toEqual([[warning, {
+      key: "shared", thread_id: "thread-resumed", ticket: "usage-fallback",
+      reason: mode === "stale" ? "stale rollout usage" : "missing rollout usage",
+    }]]);
+  });
+
+  it("新线程没有 rollout 时仍记录完成回合，以零占用估算", async () => {
+    const { runner, store } = contextSetup(), warn = vi.spyOn(log, "warn");
+    await runner.ask("无 rollout");
+    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 0, turns: 1, windowTokens: 500000, source: "estimate" });
+    expect(store.get("codex", "shared")!.cachedTokens).toBeUndefined();
+    expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(1);
+  });
+
+  it("没有 turn.completed 的失败回合不增加计数或告警缺失用量", async () => {
+    const { dir, runner, store } = contextSetup();
+    seedShared(dir, { thread_id: "flaky-usage" });
+    await runner.initializeContextUsage();
+    const before = store.get("codex", "shared"), warn = vi.spyOn(log, "warn");
+    await expect(runner.ask("失败")).rejects.toThrow(/codex 执行失败/);
+    expect(store.get("codex", "shared")).toEqual(before);
+    expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(0);
   });
 });

@@ -94,3 +94,10 @@ describe('LiveBus 的 context 增量', () => {
     bus.close();
   });
 });
+
+it('用量摘要明确标注线程累计量，并兼容旧观测字段', () => {
+  expect(summarize({ stage: 'model_usage', status: 'ok', detail: { backend: 'codex', total_input_tokens: 3000000, total_output_tokens: 10000 } }))
+    .toBe('线程累计输入 3000000 / 输出 10000 tokens');
+  expect(summarize({ stage: 'model_usage', status: 'ok', detail: { input_tokens: 1000, output_tokens: 50 } }))
+    .toBe('输入 1000 / 输出 50 tokens');
+});

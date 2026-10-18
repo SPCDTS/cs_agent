@@ -43,7 +43,8 @@ export async function readRolloutContextUsage(file: string): Promise<(ContextUsa
         }
         if (type === "task_started" || type === "turn.started") waitingForUsage = false;
         if (latest || !waitingForUsage) return;
-        const parsed = parseRolloutTokenUsage(record);
+        // turn.completed.usage 是线程累计量，只能用于识别回合结束，不能作为上下文占用；只取 token_count.last_token_usage。
+        const parsed = type === "token_count" ? parseRolloutTokenUsage(record) : undefined;
         const tokens = parsed ? { usedTokens: parsed.input, cachedTokens: parsed.cached } : undefined;
         const updatedAt = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : NaN;
         if (tokens && count(updatedAt)) latest = { ...tokens, updatedAt };
