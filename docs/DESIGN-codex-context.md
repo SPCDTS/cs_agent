@@ -332,3 +332,22 @@ CODEX_REPLY_SANITIZE=true
 - 独立复跑：typecheck、498 测试、build、镜像构建通过；部署后容器 healthy，登录后各页 200，`/live/stream` 正常推送快照帧。
 - gpt-6-astra 评审 10 条（无阻断）全部修复：SSE 快照分帧与背压、客户端 80 条后冻结、卡片页头刷新、卡片逐个脱敏、完成卡片定时淘汰、agent.md 服务端密文与 revision 守卫、时间列折行；热更新不改变在途消息（派发时固化设置快照）、管理审计事件独立保留策略、pi 重置原子化、线程归档限 200 条。
 - 已知限制：pi-durable 1.3.0 无删除会话 API，退休的 pi 会话仅从映射移除、数据留在 `pi.sqlite`；`PI_ARCHIVE_RETENTION_DAYS` 暂只校验。
+
+### 8.5 两个后端的上下文占用进度条（2026-10-18 用户需求）
+- **数据**：每个线程一条记录，`src/agent/context-usage.ts` 维护并持久化到 `${DATA_DIR}/context-usage.json`（原子写），同时写观测事件 `context_usage`：
+```ts
+interface ContextUsage {
+  backend: "codex" | "pi";
+  key: string;                 // codex: owner | shared；pi: owner | <scope>
+  usedTokens: number;          // 当前上下文占用：上一回合的输入 tokens（含缓存命中）
+  cachedTokens?: number;       // 其中缓存命中部分
+  windowTokens: number;        // 模型上下文窗口
+  compaction?: { background: number; reserve: number };   // pi：后台压缩与阻塞压缩阈值（绝对 tokens）
+  turns: number;               // 本线程累计回合
+  lastCompactionAt?: number;   // pi：最近一次压缩时间（若可得）
+  updatedAt: number;
+  source: "turn" | "estimate"; // turn=来自真实回合用量；estimate=无回合时估算
+}
+```
+- **采集**：codex 后端从 `turn.completed.usage`（`input_tokens` + `cached_input_tokens`）取值，窗口来自 `codex debug models` 的模型目录（启动时读取一次并缓存；失败回退 `CODEX_CONTEXT_WINDOW`，默认 400000）；pi 后端从回合 usage 取值，窗口与 compaction 阈值来自 pi-ai 模型定义与 harness 设置；线程重置后记录归零。
+- **展示**（Opus）：总览页"上下文占用"区块与 `/codex`、`/pi` 页每线程一条进度条：已用/窗口与百分比，pi 条上标出后台压缩与阻塞压缩两条阈值线；颜色按占比分级（<60% 常态、60–85% 提醒、>85% 警示）；实时页卡片头部显示该线程的小型占用条；SSE 推送 `context_usage` 更新，不轮询。
