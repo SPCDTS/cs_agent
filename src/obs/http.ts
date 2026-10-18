@@ -73,6 +73,17 @@ export interface DashboardOptions {
   trace?: Pick<Trace, 'event'>;
   /** 每线程上下文占用（src/agent/context-usage.ts 的 ContextUsageStore；面板只读 all/get） */
   contextUsage?: ContextUsageView;
+  /** codex 系统提示（src/agent/codex-prompt.ts 的 CodexPromptStore）：受管段只读，自定义段 codex.md 可编辑 */
+  codexPrompt?: CodexPromptView;
+}
+
+/** CodexPromptStore 的结构类型：面板只依赖这三个方法。 */
+export interface CodexPromptSnapshot { managed: string; custom: string; revision: string; file: string; updatedAt: number | null }
+export interface CodexPromptView {
+  read(): Promise<CodexPromptSnapshot>;
+  /** 版本不符抛 name === 'StaleRevisionError'；含秘密 / 超限 / 为空抛带中文说明的普通错误 */
+  save(custom: string, expectedRevision: string): Promise<{ revision: string }>;
+  subscribe(fn: (change?: unknown) => void): (() => void) | void;
 }
 function equal(a: string, b: string): boolean { const x=Buffer.from(a),y=Buffer.from(b); return x.length===y.length && timingSafeEqual(x,y); }
 /** 由访问口令派生的 CSRF 令牌：表单隐藏字段 + 服务端比对；不知道口令无法伪造。 */
@@ -156,6 +167,7 @@ async function writeAgentMd(file: string, content: string): Promise<{ before: nu
 
 const FLASH: Record<string, string> = {
   saved: '设置已保存，之后收到的消息按新设置处理。', prompt: 'agent.md 已保存，pi 下一轮对话即读取新内容。',
+  codexPrompt: 'codex.md 已保存，AGENTS.md 已重写，codex 下一条消息即使用新内容。',
   reset: '已重置：旧会话已归档，下一条消息会新建会话。', queued: '已排队：当前回合结束后立即重置，旧会话会归档。', unchanged: '没有可重置的会话。',
 };
 
@@ -175,6 +187,19 @@ export function createDashboard(opts: DashboardOptions) {
   const csrf = token ? csrfToken(token) : '';
   const tracer = opts.trace ?? defaultTrace;
   const agentMd = path.join(opts.config.DATA_DIR, 'prompts', 'agent.md');
+  const agentsMd = path.join(opts.config.codexHome, 'AGENTS.md');
+  // codex.md 变更由存储通知，面板只在此处记一次 prompt_changed（处理器本身不记，避免重复）。
+  let codexBytes: Promise<number | null> = opts.codexPrompt ? opts.codexPrompt.read().then(s => Buffer.byteLength(s.custom), () => null) : Promise.resolve(null);
+  const offCodexPrompt = opts.codexPrompt?.subscribe(change => {
+    const c = asObj(change);
+    const before = codexBytes;
+    codexBytes = (async () => {
+      const prev = await before;
+      const after = typeof c.custom === 'string' ? Buffer.byteLength(c.custom) : await opts.codexPrompt!.read().then(s => Buffer.byteLength(s.custom), () => null);
+      tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { target: 'codex', source: typeof c.source === 'string' ? c.source : 'dashboard', file: 'prompts/codex.md', bytes_before: prev, bytes_after: after } });
+      return after;
+    })().catch(() => null);
+  });
 
   function sse(res: ServerResponse): SseWriter | null {
     if (clients.size >= MAX_SSE) { res.writeHead(503).end(); return null; }
@@ -301,8 +326,17 @@ export function createDashboard(opts: DashboardOptions) {
       if (url.pathname === '/settings/agent-md') {
         await guardAgentMd(agentMd, form.get('revision') ?? '');
         const r = await writeAgentMd(agentMd, form.get('content') ?? '');
-        tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { source: 'dashboard', file: 'prompts/agent.md', bytes_before: r.before, bytes_after: r.after } });
+        tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { target: 'pi', source: 'dashboard', file: 'prompts/agent.md', bytes_before: r.before, bytes_after: r.after } });
         back('/settings?ok=prompt#prompt'); return;
+      }
+      if (url.pathname === '/settings/codex-prompt') {
+        if (!opts.codexPrompt) throw new HttpError(404, 'codex 系统提示不可用');
+        try { await opts.codexPrompt.save((form.get('content') ?? '').replace(/\r\n?/g, '\n'), form.get('revision') ?? ''); }
+        catch (e) {
+          if ((e as Error)?.name === 'StaleRevisionError') throw new HttpError(409, 'codex.md 已在别处被修改，请刷新后再保存');
+          throw new HttpError(409, redactText(e instanceof Error && e.message ? e.message : 'codex.md 未保存', 2_000));
+        }
+        back('/settings?ok=codexPrompt#codex-prompt'); return;
       }
       if (url.pathname === '/codex/reset' || url.pathname === '/pi/reset') {
         const codex = url.pathname === '/codex/reset';
@@ -356,6 +390,11 @@ export function createDashboard(opts: DashboardOptions) {
     if (p === '/pi') return shell('Pi 会话', await piBody(), { lead: 'pi 后端按 owner 与每个会话域各保持一个长期会话。', scripts: ['/assets/forms.js', '/assets/usage.js'] });
     if (p === '/settings') return shell('设置', await settingsBody(), { lead: '修改立即对之后收到的消息生效，无需重启；.env 中的值只是初始默认。', scripts: ['/assets/forms.js'] });
     if (p === '/config') return shell('生效配置', await configBody(), { lead: '启动时从环境变量解析的配置（已脱敏）。运行中可改的项见<a href="/settings">设置</a>。' });
+    if (p === '/codex/agents-md') {
+      const st = await fs.stat(agentsMd).catch(() => null);
+      return shell('全局 AGENTS.md', `<section class="flush"><h2>${esc(agentsMd)} <small>${st ? `修改于 ${esc(fmtTime(st.mtime.getTime()))}` : '文件不存在'}</small></h2>${json(await readText(agentsMd))}<p class="hint">受管规则 + codex.md，保存 codex.md 后重写。在<a href="/settings#codex-prompt">设置页</a>编辑自定义段。</p></section>`,
+        { lead: 'codex 每次调用读取的全局规则（只读，已脱敏）。' });
+    }
     return null;
   }
 
@@ -511,7 +550,7 @@ export function createDashboard(opts: DashboardOptions) {
     }
     body += '</div>';
     for (const t of threads) body += `<section><h2>${String(t.thread_key) === 'owner' ? 'owner 线程' : '共享线程'}最近 10 轮</h2><div class="sheet">${turnsTable(opts.store.threadTurns('codex', String(t.thread_key), 10))}</div></section>`;
-    body += `<section><details><summary>全局 AGENTS.md（受管文件，启动时重写，只读）</summary>${json(await readText(path.join(opts.config.codexHome,'AGENTS.md')))}</details></section>`;
+    body += `<section><details><summary>全局 AGENTS.md（受管文件，启动时重写，只读）</summary>${json(await readText(agentsMd))}</details><p class="hint"><a href="/codex/agents-md">单独查看</a>　在<a href="/settings#codex-prompt">设置页</a>编辑 codex.md</p></section>`;
     return body;
   }
 
@@ -556,6 +595,7 @@ export function createDashboard(opts: DashboardOptions) {
 <fieldset><legend>owner 告警${diff('alertOwner')}</legend><label class="choice"><input type="checkbox" name="alertOwner"${s.alertOwner ? ' checked' : ''}><span>向 owner 私聊发送告警<small>QQ 离线超过五分钟、模型鉴权失败、连续三条失败时发送，30 分钟内最多一条。${opts.config.owner ? '' : '（当前没有配置 owner，开关不会生效）'}</small></span></label></fieldset>
 <button>保存设置</button></form></section>`;
     }
+    body += await codexPromptCard();
     let prompt = '';
     try { const st = await fs.lstat(agentMd); prompt = st.isFile() && !st.isSymbolicLink() && st.size <= 256_000 ? await fs.readFile(agentMd, 'utf8') : ''; } catch { /* 不存在：pi 启动时会播种 */ }
     const promptStat = await fs.lstat(agentMd).catch(() => null);
@@ -568,10 +608,24 @@ export function createDashboard(opts: DashboardOptions) {
     body += `<section><h2>线程</h2><div class="sheet pad"><p>重置会归档当前会话并在下一条消息时新建，用于清掉跑偏的长期记忆。</p><p><a href="/codex">Codex 线程（owner / 共享）</a>　<a href="/pi">Pi 会话（按会话域）</a></p></div></section>`;
     const changes = opts.store.systemEvents(SETTINGS_TICKET, 15);
     body += `<section><h2>最近变更</h2>${changes.length ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>时间</th><th>内容</th><th>来源</th></tr></thead><tbody>${changes.map(e => { const dd = asObj(JSON.parse(e.detail_json));
-      const what = e.stage === 'prompt_changed' ? `agent.md ${fmtBytes(Number(dd.bytes_before))} → ${fmtBytes(Number(dd.bytes_after))}` : Object.keys(asObj(dd.after)).map(k => `${SETTING_LABELS[k] ?? k}：${showSetting(asObj(dd.before)[k])} → ${showSetting(asObj(dd.after)[k])}`).join('；');
+      const bytes = (v: unknown) => typeof v === 'number' ? fmtBytes(v) : '—';
+      const what = e.stage === 'prompt_changed' ? `${dd.target === 'codex' ? 'codex.md' : 'agent.md'} ${bytes(dd.bytes_before)} → ${bytes(dd.bytes_after)}` : Object.keys(asObj(dd.after)).map(k => `${SETTING_LABELS[k] ?? k}：${showSetting(asObj(dd.before)[k])} → ${showSetting(asObj(dd.after)[k])}`).join('；');
       return `<tr><td>${time(e.ts)}</td><td>${esc(what)}</td><td>${esc(dd.source === 'dashboard' ? '面板' : dd.source ?? '')}</td></tr>`; }).join('')}</tbody></table></div></div>` : empty('还没有通过面板修改过设置。')}</section>`;
-    body += `<section><details><summary>全局 AGENTS.md（受管文件，只读）</summary>${json(await readText(path.join(opts.config.codexHome,'AGENTS.md')))}</details><p class="hint">完整的生效配置见<a href="/config">配置页</a>。</p></section>`;
+    body += `<section><p class="hint">完整的生效配置见<a href="/config">配置页</a>。</p></section>`;
     return body;
+  }
+
+  async function codexPromptCard(): Promise<string> {
+    const head = (note: string) => `<section id="codex-prompt"><h2>codex 系统提示 codex.md <small>${note}</small></h2>`;
+    const link = '<p class="hint"><a href="/codex/agents-md">查看完整 AGENTS.md</a>（受管规则 + codex.md，只读）</p>';
+    if (!opts.codexPrompt) return `${head('')}${empty('codex 系统提示存储未接入。')}${link}</section>`;
+    let snap: CodexPromptSnapshot;
+    try { snap = await opts.codexPrompt.read(); } catch { return `${head('')}<div class="flash err">读取 codex.md 失败，详见日志。</div>${link}</section>`; }
+    const secretInside = redactText(snap.custom, 1_000_000) !== snap.custom;
+    const editor = secretInside
+      ? `<div class="flash err">codex.md 中包含凭据样式的内容，面板只读展示脱敏版本；请在容器内直接编辑。</div>${json(redactText(snap.custom, 1_000_000))}`
+      : `<form method="post" action="/settings/codex-prompt" class="sheet pad">${csrfField(csrf)}<input type="hidden" name="revision" value="${esc(snap.revision)}"><label>拼接在受管规则之后写入全局 AGENTS.md，codex 下一条消息即使用新内容。<textarea name="content" rows="18" spellcheck="false" data-count="codex-md-count">${esc(snap.custom)}</textarea></label><div class="hint"><span id="codex-md-count"></span>，上限 ${AGENT_MD_MAX_BYTES / 1024} KB</div><p class="mt"><button>保存 codex.md</button></p></form>`;
+    return `${head(snap.updatedAt ? `修改于 ${esc(fmtTime(snap.updatedAt))}` : '尚未修改')}${editor}<details class="mt"><summary>受管规则（程序生成，不可编辑）</summary>${json(redactText(snap.managed, 1_000_000))}</details>${link}</section>`;
   }
 
   async function configBody(): Promise<string> {
@@ -584,6 +638,6 @@ export function createDashboard(opts: DashboardOptions) {
   }
 
   return { handle: (req: IncomingMessage,res: ServerResponse) => handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(500);res.end('观测页面暂不可用');}),
-    close: () => {for(const res of clients)res.end();clients.clear();} };
+    close: () => {for(const res of clients)res.end();clients.clear();if(typeof offCodexPrompt==='function')offCodexPrompt();} };
 }
 export type { Tone };

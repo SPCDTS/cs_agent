@@ -15,13 +15,14 @@ import { CodexRunner } from '../../src/agent/codex-runner.js';
 import { CodexBackend } from '../../src/agent/backends/codex.js';
 import { FIXTURES } from '../agent/helpers.js';
 import { ContextUsageStub } from './fixtures/context-usage-stub.js';
+import { CodexPromptStub } from './fixtures/codex-prompt-stub.js';
 
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
 const defaults: RuntimeSettings = { agentBackend: 'codex', backendOverrides: {}, codexReplyMode: 'relay', codexReasoningEffort: 'high', alertOwner: false };
 
-async function rig(extra: { contextUsage?: ContextUsageStub } = {}) {
+async function rig(extra: { contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
   const store = new ObsStore(dir), context = new ContextStore(dir);
   trace.attach(store);
@@ -32,7 +33,8 @@ async function rig(extra: { contextUsage?: ContextUsageStub } = {}) {
   const resetCodex = vi.fn(async (key: string): Promise<string | null> => key === 'shared' ? 'thread-old' : null);
   const resetPi = vi.fn(async () => 42);
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
-  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, ...extra,
+  const codexPrompt = extra.codexPrompt === null ? undefined : extra.codexPrompt ?? new CodexPromptStub();
+  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, contextUsage: extra.contextUsage, codexPrompt,
     health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, comfy: { ok: true }, codex: { ok: false }, deepseek_key_present: true }),
     queue: () => ({ active: 1, slots: 2, waiting: 1, scopes: { 'group:7': 1 } }),
     codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'shared', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
@@ -46,7 +48,7 @@ async function rig(extra: { contextUsage?: ContextUsageStub } = {}) {
   const get = (url: string, init: RequestInit = {}) => fetch(base + url, { ...init, headers: { Cookie: cookie, ...init.headers } });
   const post = (url: string, fields: Record<string, string>, headers: Record<string, string> = {}) => fetch(base + url, { method: 'POST', redirect: 'manual',
     headers: { Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded', ...headers }, body: new URLSearchParams(fields).toString() });
-  return { dir, store, live, settings, base, get, post, resetCodex, resetPi, csrf: csrfToken(TOKEN) };
+  return { dir, store, live, settings, base, get, post, resetCodex, resetPi, codexPrompt, close: () => dashboard.close(), csrf: csrfToken(TOKEN) };
 }
 
 /** 读 SSE 直到 predicate 满足（或超时）。 */
@@ -65,7 +67,7 @@ async function readUntil(res: Response, done: (text: string) => boolean, ms = 80
   return text;
 }
 const revisionOf = async (r: { get: (url: string) => Promise<Response> }) =>
-  /name="revision" value="([^"]+)"/.exec(await (await r.get('/settings')).text())![1]!;
+  /action="\/settings\/agent-md"[^]*?name="revision" value="([^"]+)"/.exec(await (await r.get('/settings')).text())![1]!;
 const frames = (text: string, event: string) => text.split('\n\n').filter(f => f.startsWith(`event: ${event}\n`)).map(f => JSON.parse(f.slice(f.indexOf('data: ') + 6)));
 
 describe('面板二期页面', () => {
@@ -366,5 +368,109 @@ describe('上下文占用条（§8.5）', () => {
     expect(frames(live, 'context').find(f => f.usage.usedTokens === 20_000).usage).toMatchObject({ backend: 'pi', key: 'group:7', windowTokens: 128_000 });
     const u = await usageSse.until(t => frames(t, 'context').some(f => f.usage.usedTokens === 20_000));
     expect(frames(u, 'context')).toHaveLength(5);
+  });
+});
+
+describe('codex 系统提示 codex.md', () => {
+  const codexRevision = async (r: { get: (url: string) => Promise<Response> }) =>
+    /action="\/settings\/codex-prompt"[^]*?name="revision" value="([^"]+)"/.exec(await (await r.get('/settings')).text())![1]!;
+
+  it('设置页在 agent.md 之上渲染 codex.md 编辑框与折叠的受管规则；旧的 AGENTS.md 只读块改为链接', async () => {
+    const r = await rig({ codexPrompt: new CodexPromptStub('自定义 <b>规则</b>') });
+    const html = await (await r.get('/settings')).text();
+    expect(html).toContain('codex 系统提示 codex.md');
+    expect(html).toContain('action="/settings/codex-prompt"');
+    expect(html).toContain('保存 codex.md'); expect(html).toContain('data-count="codex-md-count"');
+    expect(html).toContain('value="rev-1"');
+    expect(html).toContain('自定义 &lt;b&gt;规则&lt;/b&gt;');
+    expect(html).toMatch(/<details[^>]*><summary>受管规则（程序生成，不可编辑）<\/summary><pre># 受管规则\n- 只写 \/workspace<\/pre>/);
+    expect(html.indexOf('id="codex-prompt"')).toBeLessThan(html.indexOf('id="prompt"'));
+    expect(html).toContain('href="/codex/agents-md"'); expect(html).toContain('查看完整 AGENTS.md');
+    expect(html).not.toContain('全局 AGENTS.md（受管文件，只读）');
+    expect(html).not.toMatch(/\sstyle="/);
+  });
+
+  it('codex.md 中混入已注册秘密时只读展示脱敏版，不给表单', async () => {
+    const secret = 'codex-md-secret-11223344'; registerSecrets([secret]);
+    const r = await rig({ codexPrompt: new CodexPromptStub(`规则 ${secret}`) });
+    const html = await (await r.get('/settings')).text();
+    expect(html).not.toContain('action="/settings/codex-prompt"'); expect(html).not.toContain(secret);
+    expect(html).toContain('凭据样式');
+  });
+
+  it('没有接入存储时显示提示，POST 返回 404', async () => {
+    const r = await rig({ codexPrompt: null });
+    const html = await (await r.get('/settings')).text();
+    expect(html).toContain('codex 系统提示存储未接入'); expect(html).not.toContain('action="/settings/codex-prompt"');
+    expect((await r.post('/settings/codex-prompt', { _csrf: r.csrf, revision: 'none', content: 'x' })).status).toBe(404);
+  });
+
+  it('写操作要求 cookie、CSRF 与同源；被拒时不调用 save', async () => {
+    const r = await rig(); const stub = r.codexPrompt!;
+    const ok = { _csrf: r.csrf, revision: 'rev-1', content: '新规则' };
+    expect((await r.post('/settings/codex-prompt', { ...ok, _csrf: '' })).status).toBe(403);
+    expect((await r.post('/settings/codex-prompt', { ...ok, _csrf: r.csrf.slice(0, -1) + 'x' })).status).toBe(403);
+    expect((await r.post('/settings/codex-prompt', ok, { Origin: 'http://evil.example' })).status).toBe(403);
+    expect((await r.post('/settings/codex-prompt', ok, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
+    const noCookie = await fetch(r.base + '/settings/codex-prompt?token=' + TOKEN, { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(ok).toString() });
+    expect(noCookie.status).toBe(401);
+    expect(stub.saves).toEqual([]); expect(stub.custom).toBe('自定义规则');
+  });
+
+  it('保存成功：CRLF 规范为 LF、带 revision 调用 save、跳回并提示，最近变更出现 codex.md 一条', async () => {
+    const r = await rig(); const stub = r.codexPrompt!;
+    const res = await r.post('/settings/codex-prompt', { _csrf: r.csrf, revision: await codexRevision(r), content: '第一行\r\n第二行\r第三行' },
+      { Origin: r.base, 'Sec-Fetch-Site': 'same-origin' });
+    expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/settings?ok=codexPrompt#codex-prompt');
+    expect(stub.saves).toEqual([{ custom: '第一行\n第二行\n第三行', expectedRevision: 'rev-1' }]);
+    await vi.waitFor(() => expect(r.store.events(SETTINGS_TICKET).filter(e => e.stage === 'prompt_changed')).toHaveLength(1));
+    const ev = r.store.events(SETTINGS_TICKET).find(e => e.stage === 'prompt_changed')!;
+    expect(JSON.parse(ev.detail_json)).toMatchObject({ target: 'codex', source: 'dashboard', file: 'prompts/codex.md',
+      bytes_before: Buffer.byteLength('自定义规则'), bytes_after: Buffer.byteLength('第一行\n第二行\n第三行') });
+    const html = await (await r.get('/settings?ok=codexPrompt')).text();
+    expect(html).toContain('codex.md 已保存'); expect(html).toContain('value="rev-2"');
+    expect(html).toMatch(/<td>codex\.md \d+ B → \d+ B<\/td>/);
+  });
+
+  it('agent.md 保存在最近变更中仍显示为 agent.md；codex 订阅只有一个，关闭面板时退订', async () => {
+    const r = await rig(); const stub = r.codexPrompt!;
+    expect(stub.listeners).toBe(1);
+    expect((await r.post('/settings/agent-md', { _csrf: r.csrf, revision: await revisionOf(r), content: 'pi 提示' })).status).toBe(303);
+    expect(await (await r.get('/settings')).text()).toMatch(/<td>agent\.md [^<]*→ \d+ B<\/td>/);
+    expect(r.store.events(SETTINGS_TICKET).filter(e => e.stage === 'prompt_changed').map(e => JSON.parse(e.detail_json).target)).toEqual(['pi']);
+    r.close(); expect(stub.listeners).toBe(0);
+  });
+
+  it('版本过期返回 409 并提示刷新；存储拒绝（空 / 超限 / 秘密）返回 409 带原因', async () => {
+    const r = await rig(); const stub = r.codexPrompt!;
+    const stale = await r.post('/settings/codex-prompt', { _csrf: r.csrf, revision: 'rev-0', content: '覆盖' });
+    expect(stale.status).toBe(409);
+    const text = await stale.text();
+    expect(text).toContain('codex.md 已在别处被修改，请刷新后再保存'); expect(text).toContain('action="/settings/codex-prompt"');
+    expect((await r.post('/settings/codex-prompt', { _csrf: r.csrf, content: '覆盖' })).status).toBe(409);
+    const blank = await r.post('/settings/codex-prompt', { _csrf: r.csrf, revision: 'rev-1', content: '  \r\n ' });
+    expect(blank.status).toBe(409); expect(await blank.text()).toContain('codex.md 不能为空');
+    const big = await r.post('/settings/codex-prompt', { _csrf: r.csrf, revision: 'rev-1', content: 'x'.repeat(70_000) });
+    expect(big.status).toBe(409); expect(await big.text()).toContain('64 KB');
+    const secret = 'codex-save-secret-55667788'; registerSecrets([secret]); stub.secrets.push(secret);
+    const leak = await r.post('/settings/codex-prompt', { _csrf: r.csrf, revision: 'rev-1', content: `规则 ${secret}` });
+    expect(leak.status).toBe(409);
+    const leakText = await leak.text(); expect(leakText).toContain('凭据样式'); expect(leakText).not.toContain(secret);
+    expect(stub.custom).toBe('自定义规则');
+    expect(r.store.events(SETTINGS_TICKET).some(e => e.stage === 'prompt_changed')).toBe(false);
+  });
+
+  it('/codex/agents-md 需要会话，渲染当前 AGENTS.md 的脱敏内容', async () => {
+    const r = await rig();
+    const secret = 'agents-md-secret-99001122'; registerSecrets([secret]);
+    writeFileSync(path.join(r.dir, 'codex', 'AGENTS.md'), `# 受管规则\n令牌 ${secret}\n# 自定义 <i>段</i>`);
+    expect((await fetch(r.base + '/codex/agents-md')).status).toBe(401);
+    const res = await r.get('/codex/agents-md'); const html = await res.text();
+    expect(res.status).toBe(200);
+    expect(html).toContain('全局 AGENTS.md'); expect(html).toContain('# 受管规则');
+    expect(html).toContain('# 自定义 &lt;i&gt;段&lt;/i&gt;');
+    expect(html).not.toContain(secret); expect(html).not.toContain(TOKEN);
+    expect(html).not.toMatch(/\sstyle="/);
+    expect(html).toContain('href="/settings#codex-prompt"');
   });
 });

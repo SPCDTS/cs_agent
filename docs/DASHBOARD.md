@@ -14,7 +14,8 @@
 | `/context` | 用 qq_context 工具浏览/检索消息库 | — |
 | `/codex` | owner / 共享线程：上下文占用条、id、rollout 大小、已观测回合、最近 10 轮摘要、全局 AGENTS.md | `POST /codex/reset` |
 | `/pi` | 每个会话键的上下文占用条（含两道压缩阈值）、会话 id、最近活动、最近 10 轮摘要、压缩记录 | `POST /pi/reset` |
-| `/settings` | 运行时设置、编辑 agent.md、线程入口、最近变更、只读 AGENTS.md | `POST /settings`、`POST /settings/agent-md` |
+| `/codex/agents-md` | 当前全局 `$CODEX_HOME/AGENTS.md`（受管规则 + codex.md）的只读脱敏全文 | — |
+| `/settings` | 运行时设置、编辑 codex.md（含只读受管规则）与 agent.md、线程入口、最近变更 | `POST /settings`、`POST /settings/codex-prompt`、`POST /settings/agent-md` |
 | `/config` | 启动时生效配置（脱敏）与 agent.md 当前内容 | — |
 
 ### 布局草图
@@ -87,9 +88,12 @@
    │ Codex 推理强度 [high ▾]   owner 告警 [ ] 开启   │
    │ [保存设置]                                     │
    └───────────────────────────────────────────────┘
+   codex 系统提示 codex.md  修改于 …
+   [ 多行编辑框                                  ]  12 字，上限 64 KB  [保存 codex.md]
+   ▸ 受管规则（程序生成，不可编辑）    查看完整 AGENTS.md（→ /codex/agents-md）
    pi 系统提示 agent.md  修改于 …
    [ 多行编辑框                                  ]  27 字，上限 64 KB  [保存 agent.md]
-   线程（→ /codex、/pi）   最近变更（表格）   ▸ 全局 AGENTS.md（只读）
+   线程（→ /codex、/pi）   最近变更（表格，含 codex.md / agent.md 字节变化）
 
 /codex  Codex 线程
    ┌ owner 线程 ───────────┐ ┌ 共享线程 ─────────────┐
@@ -170,11 +174,12 @@ Trace ──tap──▶ LiveBus（内存卡片：阶段栈、事件流，已脱
 
 ## 运行时设置
 
-`${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexReplyMode`、`codexReasoningEffort`、`alertOwner`。后端选择器、codex 推理强度、回复后处理、owner 告警与消息库机器人行都在每条消息时现读 `settings.current()`。每次变更写观测事件 `settings_changed`（票据 `@settings`，含变更前后值与来源 `dashboard`）；agent.md 保存记 `prompt_changed`；线程重置记 `thread_reset`（`@codex` / `@pi`）。
+`${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexReplyMode`、`codexReasoningEffort`、`alertOwner`。后端选择器、codex 推理强度、回复后处理、owner 告警与消息库机器人行都在每条消息时现读 `settings.current()`。每次变更写观测事件 `settings_changed`（票据 `@settings`，含变更前后值与来源 `dashboard`）；agent.md 保存记 `prompt_changed`（`target: "pi"`）；codex.md 保存记 `prompt_changed`（`target: "codex"`，`file: prompts/codex.md`，前后字节数）——由面板启动时对 `codexPrompt.subscribe` 的唯一订阅写入，POST 处理器本身不记，避免重复；线程重置记 `thread_reset`（`@codex` / `@pi`）。
 
 ## 安全
 
 - 所有写操作：仅 POST；只认 cookie 会话（URL 口令不可用于写）；表单隐藏字段 `_csrf` = HMAC-SHA256(口令, 固定标签)，常数时间比较；有 `Origin` 时必须同源，有 `Sec-Fetch-Site` 时必须 `same-origin`；只接受 `application/x-www-form-urlencoded`，正文 ≤ 512 KB。
 - agent.md：固定路径、目录与文件均拒绝软链接、LF 规范化、≤ 64 KB、临时文件 + rename；若内容含已注册的秘密则只读展示脱敏版，且服务端同样拒绝覆盖（409）。表单带隐藏字段 `revision`（当前文件 mtime + 大小的摘要，不存在为 `none`），与提交时的文件不符或缺失即返回 409，防止覆盖容器内或其他标签页的修改。
+- codex.md（DESIGN-codex-context §8.6）：面板通过 `DashboardOptions.codexPrompt`（`CodexPromptStore` 的结构类型：`read()` / `save(custom, expectedRevision)` / `subscribe(fn)`）读写，不直接碰文件。表单带隐藏字段 `revision`（取自 `read()`），提交内容先把 CRLF / CR 规范为 LF 再交给 `save`；`StaleRevisionError` → 409"codex.md 已在别处被修改，请刷新后再保存"，存储的其他拒绝（为空、超过 64 KB、含凭据样式内容）→ 409 并显示存储给出的中文原因（先脱敏）；成功后 303 跳回 `/settings?ok=codexPrompt#codex-prompt`。当前自定义段含已注册秘密时只读展示脱敏版、不给表单。受管段只读折叠展示；完整 AGENTS.md 在 `/codex/agents-md` 只读脱敏查看。未接入存储时显示提示，POST 返回 404。
 - 渲染：服务端文本一律先脱敏再转义；客户端只用 `textContent`。CSP 为 nonce（样式与脚本），无内联 `style=` 属性；Host 白名单、图片路径段与 realpath 双重限制保持不变。
 - 线程重置排在该线程的回合队列之后，不打断进行中的回合；请求最多等 1.5 秒，否则提示"已排队"。
