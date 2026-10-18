@@ -1,9 +1,9 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import { createModels, createProvider, createAssistantMessageEventStream, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { MemoryStorage } from '@earendil-works/pi-durable';
 import { ObsStore } from '../../src/obs/store.js';
 import { trace } from '../../src/obs/trace.js';
@@ -21,6 +21,14 @@ import { codexObserver } from '../../src/agent/backends/codex.js';
 import { savePendingImage } from '../../src/agent/image-pending.js';
 import { observeImages } from '../../src/obs/image.js';
 import type { InboundMessage, ReplyTicketRecord } from '../../src/qq/types.js';
+import { DeepSeekWeb } from '../../src/agent/pi-tools/web.js';
+import { startAlerts } from '../../src/obs/alerts.js';
+import { relayFormat } from '../../src/agent/reply-postprocess.js';
+import { runAging } from '../../src/context/aging.js';
+import { Metrics } from '../../src/obs/metrics.js';
+import { usageCost } from '../../src/obs/usage.js';
+import { ImageEventSpool } from '../../src/obs/image-events.js';
+import { Trace } from '../../src/obs/trace.js';
 const clean:(()=>Promise<unknown>|void)[]=[];
 afterEach(async()=>{trace.attach(undefined);for(const fn of clean.splice(0).reverse())await fn();});
 async function rig(){
@@ -46,7 +54,7 @@ it('前缀图片票据和 Codex agent 票据通过真实 dispatcher/任务，记
   const r=await rig();await r.dispatcher.dispatch(r.msg('奶龙: 猫'),'image');await r.dispatcher.dispatch(r.msg('你好'),'agent');
   const stages=(t:string)=>r.store.events(t).map(e=>e.stage).filter((s,i,a)=>i===0||a[i-1]!==s);
   expect(stages('image')).toEqual(['received','admitted','routed','dispatched','phase:submit','image:submit','phase:submit','phase:collect','image:collect','phase:collect','phase:reply','reply_sent','phase:reply','reply_sent']);
-  expect(stages('agent')).toEqual(['received','admitted','routed','dispatched','phase:handle','backend:codex','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','postprocess','phase:reply','reply_sent','phase:reply','reply_sent']);
+  expect(stages('agent')).toEqual(['received','admitted','routed','dispatched','phase:handle','backend:codex','thread_wait','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','postprocess','phase:reply','reply_sent','phase:reply','reply_sent']);
   expect(r.store.events('image').find(e=>e.stage==='image:submit'&&e.status==='ok')?.detail_json).toContain('prompt-fake');
   expect(r.store.events('agent').find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')?.duration_ms).toBe(12);
   expect(r.store.tickets().every(t=>t.status==='sent')).toBe(true);
@@ -94,4 +102,77 @@ it('pi 每轮模型与工具 hook 记录用量、输入和结果，不需真实 
   expect(rows.filter(e=>e.stage==='model_turn'&&e.status==='ok')).toHaveLength(2);
   expect(rows.find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')).toMatchObject({duration_ms:expect.any(Number)});
   expect(rows.filter(e=>e.stage==='model_turn'&&e.status==='ok').every(e=>'input_tokens' in JSON.parse(e.detail_json))).toBe(true);
+});
+
+it('真实 pi-durable 工具抛错 diagnostics 触发结构化鉴权告警，正文匹配不触发且告警限频',async()=>{
+  const r=await rig();const send=vi.fn(async()=>({message_id:'alert'}));
+  const alerts=startAlerts({enabled:true,owner:'1',trace,bridge:{status:()=>({ws_connected:true,disconnect_count:0,self_id:null,last_event_at:null}),send}});clean.push(()=>alerts.stop());
+  trace.event('noise','tool:web_search',{status:'failed',detail:{error:'HTTP 401'}});expect(send).not.toHaveBeenCalled();
+  const web=new DeepSeekWeb();web.search=async()=>{throw Object.assign(new Error('HTTP 401 fake provider'),{status:401});};
+  r.faux.setResponses([fauxAssistantMessage(fauxToolCall('web_search',{query:'test'}),{stopReason:'toolUse'}),fauxAssistantMessage('检索失败')]);
+  const model=r.faux.getModel(),pi=await PiBackend.open({dataDir:r.dir,models:r.models,model:{provider:model.provider,modelId:model.id},thinkingLevel:'off',store:r.context,imageBackend:r.image,web,storage:new MemoryStorage()});clean.push(()=>pi.close());
+  await pi.handle({ticket:'auth-tool',scope:'private:1',threadKey:'private:1',access:'private:1',text:'检索',source:{type:'private',user_id:'1',group_id:null,nickname:'测试'}},{signal:new AbortController().signal,onEvent:()=>{}});
+  const failed=r.store.events('auth-tool').find(e=>e.stage==='tool:web_search'&&e.status==='failed')!;
+  const detail=JSON.parse(failed.detail_json);expect(detail.failure).toEqual({kind:'auth',provider:'deepseek',status:401});
+  expect(detail.output.diagnostics[0]).toMatchObject({code:'tool_error',message:'HTTP 401 fake provider'});
+  expect(send).toHaveBeenCalledTimes(1);
+  codexObserver('auth-codex')({type:'item.completed',item:{type:'mcp_tool_call',tool:'search',server:'web',status:'failed',error:{message:'opaque',status:403}}});
+  expect(JSON.parse(r.store.events('auth-codex')[0]!.detail_json).failure.kind).toBe('auth');expect(send).toHaveBeenCalledTimes(1);
+  r.image.submit=async()=>{throw Object.assign(new Error('opaque image error'),{status:403});};
+  r.faux.setResponses([fauxAssistantMessage(fauxToolCall('generate_image',{prompt:'fake'}),{stopReason:'toolUse'}),fauxAssistantMessage('生图失败')]);
+  await pi.handle({ticket:'auth-image',scope:'private:1',threadKey:'private:1',access:'private:1',text:'画图',source:{type:'private',user_id:'1',group_id:null,nickname:'测试'}},{signal:new AbortController().signal,onEvent:()=>{}});
+  const imageFailure=r.store.events('auth-image').find(e=>e.stage==='tool:generate_image'&&e.status==='failed')!;
+  expect(JSON.parse(imageFailure.detail_json).failure).toEqual({kind:'auth',provider:'comfy',status:403});expect(send).toHaveBeenCalledTimes(1);
+});
+it('Codex 排队时间与模型时间分别记录，backend span 保留总耗时',async()=>{
+  const r=await rig();let now=1000;const clock=vi.spyOn(Date,'now').mockImplementation(()=>now);clean.push(()=>clock.mockRestore());
+  const backend=new CodexBackend({imagesDir:path.join(r.dir,'images'),ticketsDir:path.join(r.dir,'tickets'),runner:{ask:async(_prompt,opts)=>{
+    now=1400;await opts?.onAcquired?.();now=1500;return '假答复';
+  }}});
+  await trace.span('timing','backend:codex',()=>backend.handle({ticket:'timing',scope:'private:1',threadKey:'shared',access:'private:1',text:'hello',source:{type:'private',user_id:'1',group_id:null,nickname:'test'}},{signal:new AbortController().signal,onEvent:()=>{}}));
+  const rows=r.store.events('timing');expect(rows.find(e=>e.stage==='thread_wait')?.duration_ms).toBe(400);
+  const model=rows.find(e=>e.stage==='model_turn'&&e.status==='ok')!;expect(model.duration_ms).toBe(100);
+  expect(JSON.parse(model.detail_json)).toMatchObject({thread_wait_ms:400,model_ms:100});expect(rows.at(-1)?.duration_ms).toBe(500);
+});
+it('Codex 内置命令和搜索只保存白名单摘要，每轮最多 100 条且不存原始 JSONL',async()=>{
+  const r=await rig(),observe=codexObserver('builtin');
+  observe({type:'item.started',item:{id:'cmd',type:'command_execution'}});
+  observe({type:'item.completed',raw:'forbidden-raw',item:{id:'cmd',type:'command_execution',command:'c'.repeat(300),exit_code:2,duration_ms:25,aggregated_output:'forbidden-output'}});
+  for(let i=0;i<130;i++)observe({type:'item.completed',item:{id:'search'+i,type:'web_search',query:'q'.repeat(300),results:'forbidden-results'}});
+  const rows=r.store.events('builtin');expect(rows).toHaveLength(100);expect(rows[0]).toMatchObject({stage:'tool:command_execution',status:'failed',duration_ms:25});
+  expect(JSON.parse(rows[0]!.detail_json).command.length).toBe(200);expect(JSON.parse(rows[1]!.detail_json).query.length).toBe(200);
+  expect(rows.map(e=>e.detail_json).join('')).not.toContain('forbidden-');
+});
+it('pi、relay、衰老使用同一非零缓存 usage fixture，费用口径一致',async()=>{
+  const r=await rig();const usage={input:100,output:20,cacheRead:30,cacheWrite:10,totalTokens:160,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}};
+  const model={...r.faux.getModel(),provider:"deepseek"};
+  const stream=()=>{
+    const events=createAssistantMessageEventStream();
+    const message={...fauxAssistantMessage('假回答'),provider:model.provider,model:model.id,usage};
+    events.push({type:'done',reason:'stop',message});events.end(message);return events;
+  };
+  r.models.setProvider(createProvider({id:model.provider,models:[model],auth:{apiKey:{name:'fixture',resolve:async()=>({auth:{}})}},api:{stream,streamSimple:stream}}));
+  const pi=await PiBackend.open({dataDir:r.dir,models:r.models,model:{provider:model.provider,modelId:model.id},thinkingLevel:'off',store:r.context,imageBackend:r.image,storage:new MemoryStorage()});clean.push(()=>pi.close());
+  await pi.handle({ticket:'usage-pi',scope:'private:1',threadKey:'private:1',access:'private:1',text:'hello',source:{type:'private',user_id:'1',group_id:null,nickname:'test'}},{signal:new AbortController().signal,onEvent:()=>{}});
+  await relayFormat('text',r.models,model,1000,undefined,'usage-relay');
+  const now=Date.UTC(2026,9,21,3),day=Date.UTC(2026,9,20)/1000;
+  for(let i=0;i<5;i++)r.context.ingest({...r.msg('历史'+i),message_id:'history'+i,time:day+i});
+  const report=await runAging({store:r.context,models:r.models,model,rawDays:30,summaryDays:180,hour:3,now:()=>now});expect(report.day_summaries).toBe(1);
+  const metrics=new Metrics(r.store,{retentionDays:365,inputPrice:2,outputPrice:4});await metrics.flush();
+  expect(r.store.db.prepare("SELECT value FROM metrics WHERE name='deepseek_estimated_cost'").get()?.value).toBeCloseTo(.00108);
+  for(const ticket of ['usage-pi','usage-relay','@aging']){
+    const d=JSON.parse(r.store.events(ticket).find(e=>e.stage==='model_turn'&&e.status==='ok')!.detail_json);
+    expect(d).toMatchObject({input_tokens:100,output_tokens:20,cache_read_tokens:30,cache_write_tokens:10});
+    expect(usageCost({input:d.input_tokens,output:d.output_tokens,cacheRead:d.cache_read_tokens,cacheWrite:d.cache_write_tokens},2,4).cost).toBe(.00036);
+  }
+});
+it('lateImages 与终态回收都会摄取 MCP 旁路事件',async()=>{
+  const r=await rig();
+  r.codex.handle=async req=>{
+    const dir=path.join(r.dir,'images',req.ticket);mkdirSync(dir,{recursive:true});
+    new Trace(new ImageEventSpool(dir)).event(req.ticket,'image:submit',{detail:{prompt_id:'late-spool'}});
+    return {text:'完成'};
+  };
+  await r.dispatcher.dispatch(r.msg('hello'),'spool-flow');
+  expect(r.store.events('spool-flow').some(e=>e.stage==='image:submit'&&e.detail_json.includes('late-spool'))).toBe(true);
 });

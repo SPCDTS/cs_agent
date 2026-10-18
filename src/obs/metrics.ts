@@ -1,3 +1,4 @@
+import { usageCost } from "./usage.js";
 import type { ObsEvent, ObsStore } from './store.js';
 export type Gauge = { name: string; labels?: Record<string, string>; value: number };
 type Aggregate = { count: number; success: number; durations: number[]; labels: Record<string, string> };
@@ -20,7 +21,7 @@ export class Metrics {
   private async collect(now: number): Promise<void> {
     const gauges: Gauge[] = await this.options.gauges?.().catch((): Gauge[] => [{ name: 'gauge_sampling_failed', value: 1 }]) ?? [];
     const aggregates = new Map<string, Aggregate>();
-    const usage = { input: 0, output: 0 };
+    const usage = { input: 0, output: 0, cost: 0 };
     let cursor = this.cursor;
     for (;;) {
       const rows = this.store.db.prepare('SELECT * FROM events WHERE id>? ORDER BY id LIMIT 1000').all(cursor) as unknown as ObsEvent[];
@@ -29,8 +30,8 @@ export class Metrics {
         if (e.status === 'started') continue;
         const d = JSON.parse(e.detail_json);
         if (e.stage === 'model_turn' && d.provider === 'deepseek') {
-          usage.input += Number(d.input_tokens ?? 0) + Number(d.cache_read_tokens ?? 0) + Number(d.cache_write_tokens ?? 0);
-          usage.output += Number(d.output_tokens ?? 0);
+          const converted = usageCost({input:d.input_tokens,output:d.output_tokens,cacheRead:d.cache_read_tokens,cacheWrite:d.cache_write_tokens},this.options.inputPrice,this.options.outputPrice);
+          usage.input += converted.input; usage.output += converted.output; usage.cost += converted.cost;
         }
         if (e.stage === 'image:collect' && e.status === 'ok' && d.prompt_id) {
           const submitted = this.store.db.prepare("SELECT MIN(ts) ts FROM events WHERE ticket=? AND stage='image:submit' AND status='ok' AND json_extract(detail_json,'$.prompt_id')=?")
@@ -59,7 +60,7 @@ export class Metrics {
       }
       this.store.metric(now, 'deepseek_input_tokens', {}, usage.input);
       this.store.metric(now, 'deepseek_output_tokens', {}, usage.output);
-      this.store.metric(now, 'deepseek_estimated_cost', {}, (usage.input*(this.options.inputPrice ?? 0)+usage.output*(this.options.outputPrice ?? 0))/1e6);
+      this.store.metric(now, 'deepseek_estimated_cost', {}, usage.cost);
       for (const g of gauges) this.store.metric(now, g.name, g.labels ?? {}, g.value);
       this.store.db.prepare("INSERT INTO obs_state VALUES('metrics_cursor',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(cursor);
       this.store.db.exec('COMMIT');

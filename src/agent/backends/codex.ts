@@ -1,3 +1,5 @@
+import { classifyFailure } from "../../obs/errors.js";
+import { redactText } from "../../obs/redact.js";
 import { trace } from "../../obs/trace.js";
 import { imageRefsValue, validateReferences } from "../image-references.js";
 /**
@@ -95,6 +97,8 @@ export class CodexBackend implements AgentBackend {
       ...(req.quote ? { quote: req.quote } : {}),
     });
     const started = Date.now();
+    let modelStarted: number | undefined;
+    let threadWaitMs: number | undefined;
     let text: string;
     try {
       text = await this.opts.runner.ask(prompt + (refs.length ? "\n[本轮参考图]\n" + refs.join("\n") : ""), {
@@ -107,6 +111,8 @@ export class CodexBackend implements AgentBackend {
         imageRefs: refs,
         outputFile: outFile,
         onAcquired: async () => {
+          modelStarted = Date.now(); threadWaitMs = modelStarted-started;
+          trace.event(req.ticket,"thread_wait",{durationMs:threadWaitMs,detail:{backend:"codex",thread_wait_ms:threadWaitMs}});
           ctx.signal.throwIfAborted();
           await ctx.persistTurn?.({ outFile, attempts: attempts + 1 });
           trace.event(req.ticket, "model_turn", { status: "started", detail: { backend: "codex", thread_key: req.threadKey, effort: this.effort, attempt: attempts + 1 } });
@@ -114,11 +120,11 @@ export class CodexBackend implements AgentBackend {
         },
       });
     } catch (err) {
-      trace.event(req.ticket, "model_turn", { status: "failed", durationMs: Date.now() - started, detail: { backend: "codex", error: err } });
+      trace.event(req.ticket, "model_turn", { status: "failed", durationMs: modelStarted === undefined ? undefined : Date.now()-modelStarted, detail: { backend: "codex", thread_wait_ms: threadWaitMs ?? Date.now()-started, model_ms: modelStarted === undefined ? 0 : Date.now()-modelStarted, failure: classifyFailure(err,"codex"), error: err } });
       if (err instanceof CodexTimeoutError) throw new BackendTimeoutError(err.message);
       throw err;
     }
-    trace.event(req.ticket, "model_turn", { durationMs: Date.now() - started, detail: { backend: "codex", thread_key: req.threadKey, effort: this.effort, raw_reply: text } });
+    trace.event(req.ticket, "model_turn", { durationMs: modelStarted === undefined ? undefined : Date.now()-modelStarted, detail: { backend: "codex", thread_wait_ms: threadWaitMs, model_ms: modelStarted === undefined ? 0 : Date.now()-modelStarted, thread_key: req.threadKey, effort: this.effort, raw_reply: text } });
     // codex 没写 -o 文件（只从 JSONL 拿到文本）时补写：输出文件是"回合已完成"的唯一标志
     if ((await readNonEmpty(outFile)) === undefined) {
       const tmp = `${outFile}.${process.pid}.tmp`;
@@ -141,17 +147,35 @@ export class CodexBackend implements AgentBackend {
 /** JSONL 只提取白名单字段，不把原始事件（可能含凭据）存入观测库。 */
 export function codexObserver(ticket: string): (event: Record<string, unknown>) => void {
   const starts = new Map<string, number>();
+  let builtinCount = 0;
   return event => {
     const item = event.item as Record<string, unknown> | undefined;
     if (event.type === "thread.started") trace.event(ticket, "dispatched", { detail: { backend: "codex", thread_id: event.thread_id } });
-    if (event.type === "turn.completed") trace.event(ticket, "model_usage", { detail: { backend: "codex", usage: event.usage } });
-    if (item?.type !== "mcp_tool_call") return;
-    const id = String(item.id ?? item.tool);
-    if (event.type === "item.started") starts.set(id, Date.now());
+    if (event.type === "turn.completed") {
+      const usage = event.usage as Record<string,unknown> | undefined;
+      trace.event(ticket,"model_usage",{detail:{backend:"codex",input_tokens:usage?.input_tokens,output_tokens:usage?.output_tokens,cached_input_tokens:usage?.cached_input_tokens}});
+    }
+    if (event.type === "turn.failed" || event.type === "error") trace.event(ticket,"model_error",{status:"failed",detail:{backend:"codex",failure:classifyFailure(event.error ?? event.message,"codex")}});
+    if (!item || !['mcp_tool_call','command_execution','web_search','web_search_call'].includes(String(item.type))) return;
+    const id = String(item.id ?? item.tool ?? item.type).slice(0,128);
+    if (event.type === "item.started" && starts.size < 200) starts.set(id, Date.now());
     const done = event.type === "item.completed";
     const duration = typeof item.duration_ms === "number" ? item.duration_ms : starts.has(id) ? Date.now() - starts.get(id)! : undefined;
-    trace.event(ticket, "tool:" + String(item.tool ?? item.name ?? "unknown"), { status: done ? (item.status === "failed" || item.error ? "failed" : "ok") : "started",
-      durationMs: done ? duration : undefined, detail: { backend: "codex", server: item.server, call_id: id, input: item.arguments, output: item.result, error: item.error } });
+    if (item.type !== 'mcp_tool_call') {
+      if (!done) return;
+      starts.delete(id);
+      if (builtinCount++ >= 100) return;
+      const command = item.type === 'command_execution';
+      const action = item.action as Record<string,unknown> | undefined;
+      trace.event(ticket,command ? 'tool:command_execution' : 'tool:web_search',{status:item.status==='failed' || (command && typeof item.exit_code==='number' && item.exit_code!==0) ? 'failed':'ok',durationMs:duration,
+        detail:{backend:'codex',call_id:id,...(command ? {command:redactText(String(item.command ?? ''),200),exit_code:typeof item.exit_code==='number' ? item.exit_code : null} : {query:redactText(String(item.query ?? action?.query ?? ''),200)})}});
+      return;
+    }
+    if (!['item.started','item.updated','item.completed'].includes(String(event.type))) return;
+    const failed = item.status === 'failed' || !!item.error;
+    trace.event(ticket, "tool:" + String(item.tool ?? item.name ?? "unknown").slice(0,128), { status: done ? (failed ? "failed" : "ok") : "started",
+      durationMs: done ? duration : undefined, detail: { backend: "codex", server: item.server, call_id: id, input: item.arguments, output: item.result, error: item.error,
+        failure: failed ? classifyFailure(item.error,String(item.server ?? 'codex')) : undefined } });
     if (done) starts.delete(id);
   };
 }

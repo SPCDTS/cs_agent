@@ -16,7 +16,7 @@ export function startAlerts(opts: { enabled: boolean; owner?: string; bridge: Pi
   };
   const off = opts.trace.subscribe(e => {
     const d = JSON.parse(e.detail_json);
-    if (e.status === 'failed' && /codex|pi|model_turn|tool:/.test(e.stage) && /401|403|unauthorized|authentication|invalid.api.key|鉴权|认证/i.test(String(d.error ?? '')))
+    if (e.status === 'failed' && /codex|pi|model_turn|model_error|tool:/.test(e.stage) && d.failure?.kind === 'auth')
       send('模型鉴权失败，请检查凭据。');
     if (d.terminal === true) {
       for (const [ticket, ts] of terminal) if (now() - ts > 86400_000) terminal.delete(ticket);

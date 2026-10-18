@@ -64,13 +64,13 @@ describe('观测存储',()=>{
     vi.useFakeTimers();const {trace}=rig();let online=false;const send=vi.fn(async()=>({message_id:'fake'}));
     const bridge={status:()=>({ws_connected:online,disconnect_count:1,self_id:null,last_event_at:null}),send};
     const disabled=startAlerts({enabled:false,owner:'1',bridge,trace});
-    trace.event('a','backend:codex',{status:'failed',detail:{error:'HTTP 401'}});expect(send).not.toHaveBeenCalled();disabled.stop();
+    trace.event('a','backend:codex',{status:'failed',detail:{failure:{kind:'auth',provider:'test',status:401}}});expect(send).not.toHaveBeenCalled();disabled.stop();
     const alerts=startAlerts({enabled:true,owner:'1',bridge,trace});clean.push(()=>alerts.stop());
     for(const t of ['a','b','c'])trace.event(t,'failed',{detail:{terminal:true}});
     expect(send).toHaveBeenCalledTimes(1);expect(send).toHaveBeenLastCalledWith('private','1',expect.stringContaining('连续三条'));
-    trace.event('auth','backend:codex',{status:'failed',detail:{error:'HTTP 401'}});expect(send).toHaveBeenCalledTimes(1);
+    trace.event('auth','backend:codex',{status:'failed',detail:{failure:{kind:'auth',provider:'test',status:401}}});expect(send).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(31*60_000);expect(send).toHaveBeenCalledTimes(2);
     online=true;await vi.advanceTimersByTimeAsync(31*60_000);expect(send).toHaveBeenCalledTimes(2);
-    trace.event('auth2','backend:pi',{status:'failed',detail:{error:'HTTP 401'}});expect(send).toHaveBeenCalledTimes(3);
+    trace.event('auth2','backend:pi',{status:'failed',detail:{failure:{kind:'auth',provider:'test',status:401}}});expect(send).toHaveBeenCalledTimes(3);
   });
 });

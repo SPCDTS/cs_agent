@@ -1,3 +1,4 @@
+import { usageFields } from "../obs/usage.js";
 import { trace } from "../obs/trace.js";
 /**
  * 聊天记录衰老任务（设计 §2.2）：每天本地 HISTORY_SUMMARY_HOUR 点（容器默认 UTC，设 TZ 可改）执行：
@@ -71,7 +72,7 @@ async function summarize(opts: AgingOptions, systemPrompt: string, input: string
     { signal: AbortSignal.timeout(MODEL_TIMEOUT_MS), maxTokens: 2000 },
   );
   trace.event("@aging", "model_turn", { status: msg.stopReason === "error" ? "failed" : "ok", detail: {
-    provider: msg.provider, model: msg.model, input_tokens: msg.usage?.input, output_tokens: msg.usage?.output } });
+    provider: msg.provider, model: msg.model, ...usageFields(msg.usage) } });
   return textOf(msg).slice(0, SUMMARY_MAX + 100);
 }
 

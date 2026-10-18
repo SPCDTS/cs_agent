@@ -301,18 +301,18 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 |---|---|
 | dispatcher | received、admitted、routed、dispatched、recovered；按业务结果和 bridge 票据终态发 reply_sent / failed / fallback，terminal=true 标记终态；错误回复成功发出仍按业务失败统计 |
 | durable tasks | phase:submit / generate / collect / handle / reply，late_images、postprocess；每次执行或恢复记录开始与结束，checkpoint 含尝试次数 |
-| backend | backend:codex / pi 包围整个 handle；Codex model_turn 含线程键、effort、原始回复；JSONL mcp_tool_call 映射 tool:&lt;name&gt;，记录输入/输出摘要与耗时 |
+| backend | backend:codex / pi 包围整个 handle；Codex model_turn 含线程键、effort、回复摘要与 model_ms，onAcquired 前等待另记 thread_wait_ms；backend span 保留总耗时。mcp_tool_call 映射 tool:&lt;name&gt;；内置 command_execution / web_search 每轮合计≤100 条，只提取命令/查询前 200 字、退出码、耗时，不存原始 JSONL |
 | pi hook | GenerationTask 的每次请求与响应记录 model_turn 和 usage；ToolTask 的 before/after 记录 tool:&lt;name&gt;；CompactionTask 记录 compaction 尝试 |
 | 图片 | 公共接口包装记录 image:submit / image:collect；对账归 image:collect(operation=reconcile)，查询步骤发 recovered，包含 prompt_id；三条生图入口共用 |
 | 回复 | postprocess 保留原始与最终文字摘要；reply_sent 含 message_id、图片数、truncated、already_sent；relay 失败发非终态 fallback |
 
-Metrics 每 60 秒从持久化游标读取新事件（包括主进程摄取的 MCP 事件），内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样 dispatcher 队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理两张观测表。DeepSeek 用量用真实 usage 估算，不发额外模型请求。
+Metrics 每 60 秒从持久化游标读取新事件（包括主进程摄取的 MCP 事件），内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样 dispatcher 队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理两张观测表。DeepSeek 用量由 pi、relay、衰老共用 usageFields / usageCost 转换，包含 cacheRead 与 cacheWrite；只使用真实 usage，不发额外模型请求。
 
 HTTP 面板由原健康服务器承载：/healthz 分支无需认证，仅返回白名单健康 JSON（连接状态、degraded、检查布尔值和线程信息），其余路由交给 obs/http.ts。SSR 中文 HTML + 内联 CSS / JS、SSE，无 CDN、框架或新增依赖；上下文直接调用共享工具格式化逻辑。图片经过段校验、真实路径约束、链接拒绝与位图魔数检查；所有渲染字符串先 redactText 再 HTML 转义并设置 CSP。强制口令覆盖所有面板出口，Compose 只向宿主机 loopback 发布端口。
 
 存储或 schema / Metrics 初始化失败时切换无操作模式，/healthz 与总览显示 degraded: true，观测故障不影响业务。每票据默认 500 条（OBS_TICKET_EVENT_CAP，8–10000）、256 KiB detail；为三种终态和丢弃摘要预留槽位及字节，重复进度保留首末及计数，事件按 after=id&limit 游标读取。口令从 OBS_TOKEN 或 DATA_DIR/obs-token 获取，缺失时原子生成 32 字节随机 base64url、0600 文件；口令文件加入 Codex deny_read，子进程环境不传 OBS_TOKEN。口令获取失败则关闭面板访问。
 
-告警默认关闭；开启时通过 bridge 的公共 send 接口私聊 owner，所有原因共用 30 分钟限频。未改动 QQBridge 内部实现。观测保留期不删除业务 failed 索引，避免重新认领尚为 pending 的旧票据。部署、指标语义及限制见 DEPLOY.md 的“观测面板”。
+告警默认关闭；pi 工具执行边界及 Codex observer 从异常和 pi-durable diagnostics[].message 提取 {kind, provider, status}，kind 为 auth / network / rate_limit / other。鉴权告警只匹配结构化 auth，开启时通过 bridge 的公共 send 接口私聊 owner，所有原因共用 30 分钟限频。未改动 QQBridge 内部实现。观测保留期不删除业务 failed 索引，避免重新认领尚为 pending 的旧票据。部署、指标语义及限制见 DEPLOY.md 的“观测面板”。
 
 ## 11. 非目标（本期不做）
 

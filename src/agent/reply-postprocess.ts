@@ -1,3 +1,4 @@
+import { usageFields } from "../obs/usage.js";
 import { trace } from "../obs/trace.js";
 /**
  * 回复后处理（设计 §4.3，两后端统一）：
@@ -103,7 +104,7 @@ export async function relayFormat(
     { signal: signal ? AbortSignal.any([timeout, signal]) : timeout, maxTokens: 8000 },
   );
   if (ticket) trace.event(ticket, "model_turn", { status: ["error", "aborted"].includes(msg.stopReason) ? "failed" : "ok", durationMs: Date.now()-started,
-    detail: { operation: "relay", provider: msg.provider, model: msg.model, input_tokens: msg.usage?.input, output_tokens: msg.usage?.output, error: msg.errorMessage } });
+    detail: { operation: "relay", provider: msg.provider, model: msg.model, ...usageFields(msg.usage), error: msg.errorMessage } });
   if (msg.stopReason === "error" || msg.stopReason === "aborted") throw new Error(msg.errorMessage || `relay ${msg.stopReason}`);
   const out = msg.content
     .map((c) => (c.type === "text" ? c.text : ""))
