@@ -538,3 +538,12 @@ agent（codex | pi，只依赖 TurnContext）   ←  tools（MCP / 进程内）�
 
 ### 10.7 节奏
 第 1、2 步优先（安全），各自独立实现、评审、部署；第 3–6 步依次推进，每步单独可验证。
+
+### 10.8 第 1、2 步验收记录（2026-10-19，主会话验收通过，main 949a19c 已部署）
+- 第 1 步（astra，`4494158`）：codex 线程键改为 owner / group / private，`shared` 启动时以 `scope-split` 归档停用；每轮 `-C <WORKSPACE_DIR>/<键>` 并注入命名权限配置（隐藏整个 workspace 父目录、`pi-work`、`codex/trace`，仅开放本会话目录；owner 额外可写 prompts/workflows）；受管规则经 `developer_instructions` 每轮注入，父工作区 AGENTS.md 显式带入；拒绝 danger-full-access 与不安全目录布局。`scripts/verify-codex-scopes.mjs` 在构建镜像内用真实 codex 0.163 + 假模型服务实测 18 项全过（跨群绝对/相对路径、链接、复制、硬链接、写提示词/工作流、系统 deny_read 保留、trace、owner 读他会话、AGENTS.md 生效、view_image 跨会话、独立线程与重启续接）。
+- 第 2 步（astra，`b834437` + `695f3da`）：pi bash 经 bwrap（`--unshare-user --unshare-pid --die-with-parent --new-session --cap-drop ALL`，只读根、新 /proc、tmpfs /tmp、隐藏整个 pi-work 后只挂回本会话），禁读与 codex 同源并展开通配；文件工具 realpath 后按策略检查；fail closed。
+- 主会话审查补漏（major）：第 1 步引入的 codex 会话工作区与 `codex/trace` 不在共用禁读列表，pi 可跨会话读取 → `695f3da`：入口脚本禁读加 `$C/trace`，pi 整体禁读配置的 `WORKSPACE_DIR`。Codex 对抗审查因供应商内容过滤中断，未产出结论，改由主会话审查。
+- 合并：两分支先在各自 worktree 合并 main（与 O5 的 `qqRecallContextArgs` 冲突，两者都保留；O5 测试补 `threadKey`），Linux 容器（生产 seccomp、node 用户、bwrap）全量 1023 通过。
+- 事故：主会话一度在主树里做合并，冲突未解时被并行会话从主树构建部署，启动即归档了 shared；该会话已回滚并恢复。规则：合并只在独立 worktree 里做，部署从干净的提交构建。
+- 线上实测（生产容器、真实 /data，不发 QQ 消息）：pi 沙箱内读 qq-messages.sqlite / obs-token 均 Permission denied；`ls /workspace`、`/data/codex/trace`、`/data/media` 为空；`/data/pi-work` 只见本会话；`/proc` 仅 4 个进程，PID 1 是 bwrap，环境无 token；写 `/data/prompts` 为只读文件系统；文件工具读 sqlite、`/workspace/AGENTS.md`、`codex/auth.json` 被拒，读 `prompts/agent.md` 正常。healthz 正常，codex 线程只剩 owner，`shared` 归档 1 条。
+- 未覆盖：真实 QQ 群的端到端（两个群各问一轮确认互不可见）留给用户实测。
