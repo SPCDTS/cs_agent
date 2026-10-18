@@ -72,54 +72,70 @@ tool_timeout_sec = 15
   - 观测后台：聊天记录页同样经 `callQQContextTool` 渲染。
 - 效果：两层看到的历史内容、裁剪规则、字数上限完全一致；追问"把刚才那张图改成蓝色"时，意图层与 codex 看到的都是同一行 `[我] → 生图 prompt="..."`。
 
-### 2.5 图片记忆与召回（2026-10-18 用户需求）
-**问题**：消息库只存 `[image]` 占位，入站图片只在触发消息里下载到 `incoming/<ticket>/`，且只能被本票据使用。用户引用一张旧图（或说"用上面那张图"）时，生图和 agent 都拿不到这张图；机器人自己生成的图在票据清理后也找不回。
-**目标**：记忆系统里的图片用本地路径表示，引用旧图和按历史选图都能召回。
+### 2.5 图片记忆与召回（2026-10-18 用户需求；同日用户改为"按需召回"，取代先前的"全部入库"方案）
+**问题**：消息库只存 `[image]` 占位；入站图片只在触发消息里下载到 `incoming/<ticket>/`，且只能被本票据使用。用户说"上面那张图"或引用一张旧图时，agent 拿不到这张图；机器人自己发出的图在票据清理后也找不回。
+**原则**（用户决定）：图片**默认不进入记忆系统**。只有 LLM 调用召回工具时，才下载这张图放进媒体库，并把消息库里对应的 `[image]` 占位换成本地路径。
 
-#### 2.5.1 媒体库（`src/context/media.ts`，新增）
-- 文件：`${DATA_DIR}/media/<sha256 前 2 位>/<sha256>.<ext>`，按内容寻址，同图只存一份。目录创建与写入沿用 `incoming.ts` 的防符号链接 / 越界检查；已存在的同名文件校验字节一致后复用。
-- 表（放在 `qq-messages.sqlite`，由 `ContextStore` 建表与迁移）：
-  `message_media(scope, message_id, ordinal, sha256, path, status, reason, created_at)`，主键 `(scope, message_id, ordinal)`；`status ∈ pending | ok | skipped | failed`。`path` 只在 `ok` 时有值。
-- 图片校验与 §4 参考图完全一致：单张 12 B–10 MiB、PNG/JPEG/WebP/GIF、`validateImageHeader`（≤4096 边长 / 20 MP、拒绝动图）。不合格的记为 `skipped` 并写原因（例如"动图不入库"）。
-- 删除：`recall` 删除原始行时同步删除其 media 行；`purge` 清理原始消息时同样级联。之后由每日衰老任务做文件 GC：删除没有任何 media 行引用、且 mtime 超过 1 天的文件（宽限期避免与正在写入的行竞争）。媒体的保留期因此与原始消息一致（`HISTORY_RAW_DAYS` / `HISTORY_RAW_HARD_MAX_DAYS`），不另设配置。
+#### 2.5.1 默认行为不变
+- 入库、`[image]` 占位、触发消息的票据图片（`incoming/<ticket>/`，只供本票据使用，不进媒体库）全部保持现状。不做后台下载，不在入库时存图片 URL。
+- `[引用]` 头部改为 `[引用 #<message_id>] 昵称: 正文`，让 LLM 能拿这个 id 去召回被引用消息里的图。被引用消息已召回过的，正文里自然带着路径。
 
-#### 2.5.2 图片来源（三条入库路径）
-1. **普通入站消息（未触发）**：bridge 在发出 `raw` 前就提取图片段的 `url` / `file`（最多 3 张）放进 `message.attachments`，并在 `InboundMessage` 上追加可选字段 `triggered?: boolean`。`raw` 处理器入库时为每张图写 `pending` 行；未触发的消息交给**后台媒体下载队列**：
-   - 复用 `incoming-http.ts` 的 `downloadImage`（SSRF 防护、重定向、大小上限），URL 失败时同样走 `get_image` 刷新。
-   - 与触发消息的下载完全隔离，不占用 `INCOMING_DOWNLOAD_CONCURRENCY`：独立并发 `MEDIA_FEED_CONCURRENCY`（默认 1），队列上限 `MEDIA_FEED_QUEUE_MAX`（默认 200，满了直接记 `skipped`），单张截止 60 s。
-   - 开关 `MEDIA_FEED_ENABLED`（默认 true）；关闭后未触发消息的图只记 `skipped`，其余两条路径不受影响。
-   - 进程重启时不补下载遗留的 `pending` 行，启动时统一标记为 `failed`（URL 多半已过期，避免无限重试）。
-2. **触发消息**：`triggered=true` 的消息不进后台队列，以免重复下载。`message` 事件在图片下载完成后才发出，处理器此时把 `msg.images`（`incoming/<ticket>/` 下的文件）**复制**进媒体库并把对应行置为 `ok` / `skipped` / `failed`（与票据附件状态一致）。
-3. **机器人自己发出的图**：回复成功后、`cleanupTicketWorkdir` 之前，把本次发出的图片复制进媒体库，挂在机器人那一行上（`completeReply` 用 `reply_message_id` 替换占位 id 后的 message_id；没有 reply_message_id 时挂在 `self:<ticket>` 行）。
+#### 2.5.2 召回工具 `qq_image`
+- 参数：`message_id`（来自 `qq_recent` / `qq_search` / `qq_message` 行首的 `#id`，或 `[引用 #id]`；机器人自己的回复行同样可以召回）。
+- 两个后端同名同参数：pi 在进程内调用；codex 通过 `qq_context` MCP 调用（见 2.5.4）。两边最终都调用主进程的同一个 `MediaRecall.recall(access, messageId)`（`src/context/media.ts`，新增）。
+- `recall` 的步骤：
+  1. **范围**：`store.message(access, id)` 必须命中，否则返回"没有这条消息，或不在当前会话范围内"。命中行的 `scope` 记为 S，后续一律以 S 为准。
+  2. **已召回**：S 下这条消息已有 `ok` 的媒体行时，直接返回已有路径，不访问网络（幂等）。
+  3. **没有图**：用户消息正文不含 `[image]`、机器人行 `image_count` 为 0 时，返回"这条消息没有图片"。
+  4. **取原消息**：调 NapCat `get_msg(message_id)`，**必须校验**返回的消息属于 S：
+     - 群 S：`message_type=group` 且 `group_id` 一致；
+     - 私聊 S：`message_type=private`，且发送者是该用户或机器人自己（机器人发出的私聊回复）。
+     不一致直接拒绝并记 warn，不下载任何东西。只取这一条，不沿引用链往上。
+  5. **下载**：取其 image 段（每条最多 6 张），复用 `incoming-http.ts` 的 `downloadImage`（SSRF 防护、重定向、大小上限），失败时同样走 `get_image` 刷新 URL，绝不读 NapCat 宿主机路径。校验规则与参考图一致（12 B–10 MiB、PNG/JPEG/WebP/GIF、`validateImageHeader`）；不合格的记 `skipped` 并写原因（例如"动图不支持"）。
+  6. **入媒体库**：写入 `${DATA_DIR}/media/<sha256 前 2 位>/<sha256>.<ext>`，按内容寻址，同图只存一份；目录与文件沿用 `incoming.ts` 的防符号链接 / 越界检查，已存在的同名文件校验字节一致后复用。新表 `message_media(scope, message_id, ordinal, sha256, path, status, reason, created_at)`，主键 `(scope, message_id, ordinal)`，由 `ContextStore` 建表与迁移。
+  7. **换占位**：见 2.5.3。
+  8. **返回**：每张一行，`图1: /data/media/ab/<sha>.png（1024×768）`，或 `图2: 不可用（原因）`。
+- 并发与限额：同一 `(S, message_id)` 并发调用合并为一次；全局并发 2；单次召回总截止 60 s；**每个票据最多召回 5 次**，超出返回"本轮召回次数已用完"。
 
 #### 2.5.3 记忆里的表示
-- `text` 列不变，仍是 `[image]` 占位，避免路径污染 FTS 检索；路径只放在 `message_media`。
-- `format.ts` 渲染消息行时，在正文（≤120 字截断之后）追加 ` [图: <path1>, <path2>]`，路径不参与截断；`pending` 显示 `[图: 下载中]`，`failed` / `skipped` 显示 `[图: 不可用]`。`qq_recent`、`qq_message`（含引用链）、`qq_search` 都按这一规则输出。总字数上限照旧，超出时整行丢弃，不截断半个路径。
-- 衰老任务的摘要输入**不带路径**（对摘要没有价值）。
-- `[引用]` 头部：被引用消息有 `ok` 图片时，在引用正文后同样追加 ` [图: …]`。
+- 召回成功后，用 `UPDATE` 把 `messages.text` 里对应的 `[image]` 换成 `[image:<绝对路径>]`；FTS 由现有触发器自动同步。替换规则：
+  - 用 `get_msg` 返回的段按 `policy.ts` 的 `renderText` 重新渲染，如果结果（按入库时同样截断到 16000）与库里的 `text` 完全一致，就按段的顺序精确替换：第 n 个图片段 → 第 n 张图的路径，失败的保持 `[image]`；
+  - 不一致时（例如用户亲手打了 `[image]` 字样），在正文末尾追加 ` [image:<path>]`，不改动原文；
+  - 机器人行（正文是摘要，不含占位）一律追加到末尾。
+- `format.ts`：正文 120 字截断时，`[image:...]` 当作一个不可分割的整体，要么完整保留，要么整体移到省略号之后，绝不截出半个路径；总字数超出时整行丢弃。
+- 衰老任务的摘要输入把 `[image:...]` 还原成 `[image]`（路径对摘要没有价值）。
+- 删除：`recall` 撤回和 `purge` 清理时同步删除对应的媒体行；每日衰老任务做文件 GC，删除没有任何媒体行引用、且 mtime 超过 1 天的文件。媒体保留期因此与原始消息一致，不另设配置。
 
-#### 2.5.4 召回
-**A. 引用旧图自动带入（覆盖"引用 + 奶龙: …"与"引用 + 问图里有什么"）**
-- 触发消息带 reply 段且自身图片不足 3 张时，在 bridge 的入站下载任务里（与现有附件下载同一个 per-scope 链、同一截止时间）补齐被引用消息的图，合计仍 ≤3 张，自身图片排在前面：
-  1. 先查媒体库：通过可选注入的 `quoteImages(scope, messageId) => string[]`（`BridgeInternals` 或 config 的可选字段，main 用 `ContextStore` 实现），返回同一 scope 下 `ok` 的路径；
-  2. 查不到时调 NapCat `get_msg(message_id)`，**必须校验**返回消息的 `message_type` / `group_id`（群）或 `user_id`（私聊）与当前会话一致，不一致直接放弃；只追一层，不沿引用链往上；然后按现有 `downloadIncoming` 流程下载其 image 段。
-- 两种方式得到的文件都**复制到 `incoming/<ticket>/quote-<n>.<ext>`**，并写进票据附件（`IncomingAttachment` 追加可选 `source?: 'self' | 'quote'`）。因为文件落在本票据目录，router、codex `IMAGE_REFS`、pi、`validateReferences` 等下游全部不用改。
-- 失败（被引用消息没有图、取不到、跨会话、超时）只记附件原因，不阻断派发；引用图失败**不**写 `image_error`（不能因为引用图失败而让显式生图请求整单失败，退化为文生图并照常回复）。
-- 崩溃恢复：引用图附件与自身附件一样以 `pending` 持久化，`prepareIncoming` 重跑时一并补齐。
+#### 2.5.4 codex 侧接入：主进程 loopback 端点
+- `qq_context` MCP 保持只读，不持有 NapCat 凭据，也不写库。召回经主进程完成，沿用 ComfyUI loopback 转发的先例：
+  - 主进程在 `127.0.0.1:MEDIA_RECALL_PORT`（默认 8790，只绑定 loopback）提供 `POST /recall`，请求体 `{message_id}`，带 `Authorization: Bearer <token>`。
+  - **令牌**：每次 codex exec 生成一个随机 32 字节令牌，在主进程内绑定 `{access, ticket, 截止时间 = 本轮截止, 剩余次数 = 5}`，通过 `-c mcp_servers.qq_context.env.QQ_RECALL_TOKEN="…"` 注入，本轮结束（无论成败）立即作废。访问范围只取令牌绑定的值，请求里不接受范围。
+  - codex 能看到自己的令牌，也能从 shell 访问 loopback，但令牌只覆盖它本来就有的访问范围和次数，没有提权。
+- pi：工具直接调用 `MediaRecall`，`access` 取自 `PiRequestDoc.access`，次数限额同样按票据计。
 
-**B. 按历史选图（覆盖"用上面那张图改成蓝色"这类没有显式引用的情况）**
-- agent 从 `qq_recent` / `qq_message` 输出里看到 `/data/media/...` 路径后，可以直接作为 `generate_image.reference_images` 传入。
-- 校验扩展为：允许列表 = 本票据参考图 ∪ **媒体库中属于本次访问范围的 `ok` 路径**（`access=all` 时为全部 scope）。路径必须 realpath 落在 `${DATA_DIR}/media/` 下，并且在 `message_media` 里能按 path 查到一行 scope 在访问范围内的记录；否则拒绝。这样群聊里的 agent 拿不到 owner 私聊里的图。
-- 落点：
-  - `image-references.ts` 新增 `validateReferencesWithMedia(refs, ticketRefs, incomingDir, media: {root, isAllowed(path)})`；原函数保持不变。
-  - `tasks.ts`（显式生图路由）**不**放开历史图：该路由的参考图只来自票据（含 A 带入的引用图）。
-  - pi `generate_image` 工具：用请求里的 `access` 做范围过滤。
-  - codex：`image_gen` MCP 每次 exec 追加注入 `QQ_ACCESS`（与 `qq_context` 同值），MCP 以只读方式打开 `ContextStore` 做范围判断。`IMAGE_REFS` 语义不变，仍是本票据清单。
-- 两个后端的提示词同步修改：`reference_images` 可以选本轮参考图，或 `qq_recent` / `qq_message` 输出中 `[图: …]` 给出的路径；不得编造路径。
+#### 2.5.5 召回后的图怎么用
+- **看图**：codex 可以直接打开返回的本地路径。pi：如果 pi-ai 工具结果支持图片内容，就把召回的图（≤3 张）随工具结果一并返回，否则只返回路径（由实现方确认 pi-ai 的能力后选择，并在报告里说明）。
+- **当参考图**：`generate_image.reference_images` 的允许列表 = 本票据参考图 ∪ **媒体库中属于本次访问范围的 `ok` 路径**（`access=all` 时为全部 scope）。路径必须 realpath 落在 `${DATA_DIR}/media/` 下，并且在 `message_media` 里能按 path 查到 scope 在访问范围内的行，否则拒绝。这样群聊里的 agent 拿不到 owner 私聊或其他群的图。
+  - `image-references.ts` 新增带媒体库的校验函数，原 `validateReferences` 不变；
+  - pi `generate_image` 用请求的 `access` 判断范围；
+  - codex 的 `image_gen` MCP 每次 exec 追加注入 `QQ_ACCESS`（与 `qq_context` 同值），以只读方式打开 `ContextStore` 判断范围；`IMAGE_REFS` 语义不变；
+  - `tasks.ts` 的显式生图路由（`奶龙:` 前缀，不经 LLM）**不变**：它没有 LLM 调用召回工具，引用旧图在这条路由上仍不可用。
+- 两个后端的提示词同步修改：`[image]` 表示未召回的图，需要看图或拿来当参考图时，用 `qq_image` 召回（每轮最多 5 次）；`[image:<路径>]` 表示已召回，可以直接使用；`reference_images` 只能用本轮参考图或这些路径，不得编造。
 
-#### 2.5.5 验收要点
-- 单测：媒体库内容寻址与复用、符号链接越界拒绝、级联删除 + GC 宽限期；format 渲染（路径不截断、超额整行丢弃、三种状态）；后台队列满载 / 关闭开关 / 重启标记 failed；引用图两条路径（媒体库命中、`get_msg` 回退）、跨会话 `get_msg` 被拒、合计 ≤3、引用失败不写 `image_error`；历史选图允许 / 跨 scope 拒绝 / 非媒体目录拒绝（pi 与 image_gen MCP 两个入口都要覆盖）。
-- 冒烟：群里未 @ 发一张图 → `qq_recent` 能看到路径；随后引用这张图 + `奶龙: 改成卡通风格` → 生图请求带参考图；另一个群的 agent 传这条路径被拒。
+#### 2.5.6 配置
+`MEDIA_RECALL_PORT`（默认 8790）、`MEDIA_RECALL_MAX_PER_TICKET`（默认 5）。写入 `config.ts`、`.env.example`、`docs/DEPLOY.md`。
+
+#### 2.5.7 验收要点
+- 单测：
+  - 范围：跨 scope 的 message_id 被拒；`get_msg` 返回其他群 / 其他私聊被拒，且不落任何文件。
+  - 幂等与限额：重复召回不访问网络；并发召回合并为一次；每票据 5 次限额。
+  - 占位替换：段一致时精确替换、不一致时末尾追加、机器人行追加；FTS 能搜到路径。
+  - 格式化：路径不被截断、超额整行丢弃；摘要输入还原成 `[image]`。
+  - 媒体库：内容寻址与复用、符号链接越界拒绝、级联删除 + GC 宽限期。
+  - loopback 端点：无令牌 / 过期 / 作废 / 次数用完都被拒；只绑定 127.0.0.1。
+  - 历史选图：允许本范围路径，拒绝跨 scope 和非媒体目录路径；pi 与 `image_gen` MCP 两个入口都要覆盖。
+  - `[引用 #id]` 头部格式及其防伪造改写。
+- 冒烟：群里未 @ 发一张图 → `qq_recent` 只看到 `[image]`，媒体库为空；随后 @机器人 "把上面那张图改成卡通风格" → agent 调 `qq_image` → 媒体库出现文件，`qq_recent` 显示路径 → 生图请求带参考图；另一个群的 agent 召回这条 id 被拒。
 
 ## 3. codex 执行层
 
