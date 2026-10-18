@@ -173,7 +173,7 @@ describe('记忆页面', () => {
     expect((await r.page('/memory/scopes/a%2Fb')).res.status).toBe(404);
   });
 
-  it('摘要页：头部、全文转义、血缘待 O5、定位到时间线与该区间消息；未知或非法 id 404', async () => {
+  it('摘要页：头部、全文转义、无血缘记录、定位到时间线与该区间消息；未知或非法 id 404', async () => {
     const r = await rig();
     const tl = await r.api('/api/memory/scopes/group%3A123');
     const s = tl.tracks.day[0];
@@ -184,7 +184,7 @@ describe('记忆页面', () => {
     expect(html).toContain('群 123'); expect(html).toContain('尚存原文');
     expect(html).toMatch(/<dt>尚存原文<\/dt><dd>1 条/); // m1 落在区间内
     expect(html).toContain(`<dt>字数</dt><dd>${[...`日摘要正文 ${XSS} 比赛`].length} 字</dd>`);
-    expect(html).toContain('血缘：待 O5');
+    expect(html).toContain('暂无血缘记录（埋点启用前生成，或已超过保留期）'); expect(html).not.toContain('已被折叠进周摘要');
     expect(html).toContain(`href="/memory/scopes/group%3A123?from=${s.period_start}&amp;to=${s.period_end}#messages"`);
     expect(html).toContain(`href="/memory/scopes/group%3A123?from=${s.period_start - DAY}&amp;to=${s.period_end + DAY}"`);
     expect(html).toContain('href="/memory" aria-current="page"');

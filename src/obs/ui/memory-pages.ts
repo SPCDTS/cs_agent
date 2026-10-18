@@ -5,7 +5,7 @@
  */
 import type { AgingReport } from '../../context/aging.js';
 import { redactText } from '../redact.js';
-import type { AgingStatus, ArchiveRow, CompactionRow, Hit, MessageItem, Retention, ScopeSummary, ScopeTimeline } from '../memory/types.js';
+import type { AgingStatus, ArchiveRow, CompactionRow, Hit, MessageItem, Retention, ScopeSummary, ScopeTimeline, SummaryVersion } from '../memory/types.js';
 import { crumbs, dataScript } from './agents-pages.js';
 import { fmtInt } from './context-bar.js';
 import { empty, esc, fmtMs, fmtTime, fmtWhen, kv, scopeLabel, stamp, uri } from './html.js';
@@ -18,7 +18,8 @@ export interface MemoryOverview { scopes: ScopeSummary[]; aging: AgingStatus; re
 export interface MessagePage { items: MessageItem[]; next_before?: number; next_before_id?: number }
 export interface SummaryDetail {
   id: number; scope: string; kind: 'day' | 'week'; period_start: number; period_end: number;
-  created_at: number; text: string; surviving_raw: number; lineage: null | unknown;
+  created_at: number; text: string; surviving_raw: number; deleted?: true;
+  lineage: null | { versions: SummaryVersion[]; replaced: SummaryVersion[] };
 }
 export interface SearchResult { hits: Hit[]; tool_text: string; tool_text_chars: number; max_chars: number; dropped: number }
 export interface ArchivesResult { codex: ArchiveRow[]; pi: ArchiveRow[]; compactions: CompactionRow[] }
@@ -161,12 +162,48 @@ export function summaryPageBody(s: SummaryDetail, label: string): string {
   const len = [...s.text].length, length = s.period_end - s.period_start;
   const pad = Math.max(DAY, length);
   let out = crumbs([['记忆', '/memory'], [label, memoryScopeHref(s.scope)], [`${KIND[s.kind] ?? s.kind} #${s.id}`]]);
+  if (s.deleted) out += `<div class="flash warn" role="note"><b>这条${esc(KIND[s.kind] ?? s.kind)}已被折叠进周摘要并从聊天库删除。</b>下面是观测库保存的最后一个快照；生成时间为快照记录时间。</div>`;
   out += `<div class="sheet pad">${kv([['会话域', `<a href="${memoryScopeHref(s.scope)}">${esc(label)}</a> <small class="mono">${esc(s.scope)}</small>`], ['类型', esc(KIND[s.kind] ?? s.kind)],
     ['覆盖区间', `${span(s.period_start, s.period_end)} <small>（左闭右开）</small>`], ['生成于', esc(fmtTime(s.created_at))], ['字数', esc(chars(len))],
     ['尚存原文', `${esc(fmtInt(s.surviving_raw))} 条 <small>（区间内当前仍存在的原文，不等于生成摘要时的输入条数）</small>`]], 'meta')}
 <p class="mt"><a class="btn" href="${memoryScopeHref(s.scope, { from: Math.max(0, s.period_start - pad), to: s.period_end + pad })}">在时间线上查看</a> <a class="btn quiet" href="${memoryScopeHref(s.scope, { from: s.period_start, to: s.period_end }, '#messages')}">这段时间的消息</a></p></div>`;
   out += `<section><h2>正文</h2><div class="sheet pad"><div class="sum-text">${esc(s.text)}</div></div></section>`;
-  out += `<section><h2>血缘</h2>${empty('血缘：待 O5。摘要版本表（输入的消息 / 摘要 ID、裁剪信息、模型与批次）尚未实现；这里没有记录不代表摘要没有来源。')}</section>`;
+  out += lineageSection(s.lineage);
+  return out;
+}
+
+/** usage 是模型原样上报的对象：只列数值字段（tokens 计数），其它形状给紧凑 JSON。 */
+export function usageText(u: unknown): string {
+  if (u === null || u === undefined) return '';
+  if (typeof u === 'object' && !Array.isArray(u)) {
+    const nums = Object.entries(u as Record<string, unknown>).filter(([, v]) => typeof v === 'number');
+    if (nums.length) return nums.map(([k, v]) => `${k} ${fmtInt(v as number)}`).join(' · ');
+  }
+  const t = JSON.stringify(u) ?? '';
+  return t.length > 200 ? t.slice(0, 200) + '…' : t;
+}
+const short = (v: string, n: number) => v.length > n ? v.slice(0, n) : v;
+
+function versionCard(v: SummaryVersion): string {
+  const usage = usageText(v.usage);
+  const model = v.model || v.provider ? esc([v.model, v.provider].filter(Boolean).join(' / ')) : '<span class="faint">未调用模型（沿用原文或历史快照）</span>';
+  const msgs = v.input_message_ids.length
+    ? `<details><summary>${fmtInt(v.input_message_ids.length)} 条</summary><p class="mono lin-ids">${v.input_message_ids.map(id => esc(id)).join(' ')}</p></details>` : '<span class="faint">0 条</span>';
+  const sums = v.input_summary_ids.length ? v.input_summary_ids.map(id => `<a class="mono" href="${summaryHref(id)}">#${esc(id)}</a>`).join(' ') : '<span class="faint">—</span>';
+  const replaced = v.replaced_by !== null ? `版本 <span class="mono">#${esc(v.replaced_by)}</span>${v.replaced_at !== null ? `，${esc(fmtTime(v.replaced_at))}` : ''}` : '<span class="faint">未被替换</span>';
+  return `<li class="sheet pad lin-version"><div class="hit-head"><b>版本 #${esc(v.id)}</b><span class="pill">${esc(KIND[v.level] ?? v.level)}</span><span class="faint">${esc(fmtTime(v.created_at))}</span><span class="mono faint" title="${esc(v.batch_id)}">批次 ${esc(short(v.batch_id, 8))}</span></div>
+<div class="mt">${kv([['区间', span(v.period_start, v.period_end)], ['模型', model], ['用量', usage ? esc(usage) : '<span class="faint">—</span>'],
+    ['输入 → 保留', `${esc(chars(v.input_chars))} → ${esc(chars(v.kept_chars))}`], ['输入消息', msgs], ['输入摘要', sums],
+    ['正文 SHA-256', `<span class="mono" title="${esc(v.text_sha256)}">${esc(short(v.text_sha256, 12))}</span>`], ['被替换', replaced]], 'meta')}</div></li>`;
+}
+
+export function lineageSection(l: SummaryDetail['lineage']): string {
+  if (!l) return `<section><h2>血缘</h2>${empty('暂无血缘记录（埋点启用前生成，或已超过保留期）。没有记录不代表摘要没有来源。')}</section>`;
+  let out = `<section><h2>血缘 <small>${l.versions.length} 个版本</small></h2>`;
+  out += l.versions.length ? `<ol class="lin-list">${l.versions.map(versionCard).join('')}</ol>` : empty('这个摘要没有版本记录。');
+  out += '<p class="hint">输入字数是发给整理模型的 user 输入长度（不含 system prompt），保留字数是落库正文长度；SHA-256 针对原始落库快照，不是脱敏后的显示文本。版本可能已按保留期清理，断开的血缘不代表没有来源。</p></section>';
+  if (l.replaced.length) out += `<section><h2>被替换的日摘要快照 <small>${l.replaced.length} 条</small></h2><ol class="lin-list">${l.replaced.map(v => `<li class="sheet pad lin-version"><div class="hit-head"><a href="${summaryHref(v.summary_id)}">${esc(KIND[v.level] ?? v.level)} #${esc(v.summary_id)}</a><span>${span(v.period_start, v.period_end)}</span><span class="faint">版本 #${esc(v.id)} · ${esc(fmtTime(v.created_at))}</span><span class="mono faint" title="${esc(v.text_sha256)}">${esc(short(v.text_sha256, 12))}</span></div>
+<details class="mt"><summary>快照正文（${esc(chars([...v.text].length))}）</summary><div class="sum-text mt">${esc(v.text)}</div></details></li>`).join('')}</ol></section>`;
   return out;
 }
 

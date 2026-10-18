@@ -367,6 +367,9 @@ mark{background:var(--warn-soft);color:inherit;border-bottom:2px solid var(--war
 .tool-panel meter{flex:1 1 160px;height:12px}
 .tool-text{max-height:640px}
 .search-cols>section{margin-top:0}
+.flash.warn{border-color:var(--warn);background:var(--warn-soft)}
+ol.lin-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s2)}
+.lin-ids{margin:var(--s1) 0 0;overflow-wrap:anywhere;max-height:240px;overflow:auto}
 @media (max-width:900px){
   .turns-layout{grid-template-columns:minmax(0,1fr)}
   .tdir{position:static;max-height:280px}
