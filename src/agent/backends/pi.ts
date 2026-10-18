@@ -153,7 +153,13 @@ export class PiBackend implements AgentBackend {
     if (this.closing) return Promise.reject(new Error("pi 后端正在关闭"));
     // 排队取消只取消此等待；队列槽位仍保留，轮到后检查 signal，不启动新回合。
     const key = req.threadKey === "owner" ? "owner" : req.scope;
-    return awaitWithContext(this.lock(key, () => this.turn({ ...req, threadKey: key as AgentRequest["threadKey"] }, ctx)), withAbortSignal(ctx.signal, context));
+    // 实时视图：同一会话键上排队等待的时间（开始/结束各一条，不改变锁语义）
+    const queued = Date.now();
+    trace.event(req.ticket, "thread_wait", { status: "started", detail: { backend: "pi", conversation_key: key } });
+    return awaitWithContext(this.lock(key, () => {
+      trace.event(req.ticket, "thread_wait", { durationMs: Date.now() - queued, detail: { backend: "pi", conversation_key: key } });
+      return this.turn({ ...req, threadKey: key as AgentRequest["threadKey"] }, ctx);
+    }), withAbortSignal(ctx.signal, context));
   }
 
   private async turn(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {

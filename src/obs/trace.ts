@@ -1,4 +1,7 @@
 import type { ObsEvent, ObsStore } from './store.js';
+import { redact } from './redact.js';
+/** 实时视图收到的事件：与入库同一份脱敏，不经存储（存储降级或预算丢弃时实时视图仍可见）。 */
+export interface LiveEvent { ticket: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail: Record<string, unknown> }
 export interface EventOptions { ts?: number; status?: string; durationMs?: number; detail?: unknown; scope?: string }
 type Listener = (e: ObsEvent) => void;
 export function errorCategory(error: unknown): string {
@@ -12,17 +15,27 @@ export function errorCategory(error: unknown): string {
 /** 观测失败不影响业务副作用；丢失数供总览报告。 */
 export class Trace {
   private listeners = new Set<Listener>();
+  private taps = new Set<(e: LiveEvent) => void>();
   dropped = 0;
   constructor(private store?: Pick<ObsStore, 'append'>) {}
   attach(store?: Pick<ObsStore, 'append'>): void { this.store = store; }
   subscribe(fn: Listener): () => void { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
+  /** 进程内实时事件总线：每次 event() 同步推送（先于入库），供面板 /live 的 SSE 使用。 */
+  tap(fn: (e: LiveEvent) => void): () => void { this.taps.add(fn); return () => { this.taps.delete(fn); }; }
   event(ticket: string, stage: string, opts: EventOptions = {}): void {
-    if (!this.store) return;
+    if (!this.store && !this.taps.size) return;
     try {
       const detail = opts.status === 'failed' && opts.detail && typeof opts.detail === 'object'
         ? { ...opts.detail, error_category: errorCategory((opts.detail as Record<string, unknown>).error) } : opts.detail;
-      const event = this.store.append({ ticket, stage, scope: opts.scope ?? '', ts: opts.ts !== undefined && Number.isFinite(opts.ts) ? Math.max(0,opts.ts) : Date.now(), status: opts.status ?? 'ok',
-        duration_ms: opts.durationMs !== undefined && Number.isFinite(opts.durationMs) ? Math.max(0, opts.durationMs) : null, detail });
+      const ts = opts.ts !== undefined && Number.isFinite(opts.ts) ? Math.max(0,opts.ts) : Date.now(), status = opts.status ?? 'ok';
+      const duration_ms = opts.durationMs !== undefined && Number.isFinite(opts.durationMs) ? Math.max(0, opts.durationMs) : null;
+      if (this.taps.size) {
+        const red = redact(detail ?? {});
+        const live: LiveEvent = { ticket, stage, scope: opts.scope ?? '', ts, status, duration_ms, detail: red && typeof red === 'object' && !Array.isArray(red) ? red as Record<string, unknown> : { value: red } };
+        for (const fn of this.taps) { try { fn(live); } catch { /* 实时视图故障不影响业务 */ } }
+      }
+      if (!this.store) return;
+      const event = this.store.append({ ticket, stage, scope: opts.scope ?? '', ts, status, duration_ms, detail });
       if (!event) { this.dropped++; return; }
       for (const fn of this.listeners) { try { fn(event); } catch { this.dropped++; } }
     } catch { this.dropped++; }
