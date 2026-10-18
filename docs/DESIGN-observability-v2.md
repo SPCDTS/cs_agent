@@ -137,3 +137,5 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 - 验证环境为 Windows、Git Bash、Node **v24.15.0**。原有 entrypoint 临时目录与 Windows 进程树测试需要在沙箱外执行；权限恢复后完整套件通过。未另外验证 Node 22；未改变仓库既有 Node >=24 的 engine 声明。
 - 增量检测的边界：使用文件身份与旧首尾 4 KiB 指纹识别追加；同 inode、首尾不变的中段原位改写并增长，在访问受影响正文时由行 SHA256 检出，返回 409 并触发下一轮全量重建。在该访问之前，目录摘要可能仍为旧值。
 - 本阶段没有新 UI、上下文分析或记忆分析；未新增运行时依赖，未部署 Docker，未改 `.env`，仓库 `data/` 仅用于只读提取匿名 rollout 样本。`CODEX_ROLLOUT_TRACE_ROOT` 名称依据绑定调研 §3 对 0.163.0 的核验，本地没有 Codex npm 包，未调用真实 Codex 请求验证 trace 产物。
+
+**主会话验收（2026-10-18 13:20Z，镜像 cs-agent:dev 已部署）**：重跑 `npm run typecheck && npm test && npm run build`，55 文件 / 708 项全部通过；容器内 codex 0.163.0 二进制含 `CODEX_ROLLOUT_TRACE_ROOT` 字符串，变量名核实无误，`/data/codex/trace` 已创建。真实数据冒烟：`/api/agents` 报 codex 2 活动 + 1 归档；shared 线程 18 回合、owner 13 回合；最新回合 24 个块，5 次模型请求各带实测 usage（112,890 → 115,947），4 次 exec 工具调用参数与结果按 `call_id` 配对，票据与送达状态（sent / group 范围 / 耗时）正确附加；21,902 字节的 system_change 块按区间懒加载首尾正确，越界 400；未登录 401，POST 405，归档会话订阅 409，SSE 200 且带完整安全头；返回体中无 QQ 号以外的凭据样式。遗留给 O2/O3 的说明：回合级 `usage` 是该回合全部请求的累加，上下文占用应取最后一次 `model_request` 块的 usage。
