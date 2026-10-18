@@ -42,6 +42,23 @@ async function connect(dataDir: string, access: string | undefined, extra: Recor
 const textOf = (r: unknown) => ((r as { content: { text: string }[] }).content ?? []).map((c) => c.text).join("");
 
 describe("qq_context MCP over stdio (built dist)", () => {
+  it("qq_view_image 从 loopback 返回单张 MCP 图片，无本地媒体文件也可查看", async () => {
+    const picture = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
+    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }),
+      view: async (access, file) => {
+        expect(access).toEqual({ kind: "scope", scope: "group:7" });
+        expect(file).toBe("/data/media/not-local.png"); return picture;
+      } });
+    const endpoint = await startMediaRecallServer(tokens, 0);
+    const lease = tokens.issue({ access: { kind: "scope", scope: "group:7" }, ticket: "view", deadline: Date.now() + 60_000 });
+    try {
+      const c = await connect(tmp(), "group:7", { QQ_RECALL_TOKEN: lease.token, MEDIA_RECALL_PORT: String(endpoint.port) });
+      expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png" } })).content).toEqual([picture]);
+      expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png", access: "all" } })).isError).toBe(true);
+      lease.revoke();
+      expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png" } })).isError).toBe(true);
+    } finally { await endpoint.close(); }
+  });
   it("qq_image 经主进程 loopback 召回，MCP 无库也不创建文件", async () => {
     const tokens = new RecallTokens({ recall: async (access, id) => ({ text: JSON.stringify({ access, id }), images: [] }) });
     const endpoint = await startMediaRecallServer(tokens, 0);
@@ -66,7 +83,7 @@ describe("qq_context MCP over stdio (built dist)", () => {
 
     const c = await connect(dir, `group:${G}`);
     const tools = await c.listTools();
-    expect(tools.tools.map((t) => t.name).sort()).toEqual(["qq_image", "qq_message", "qq_recent", "qq_search"]);
+    expect(tools.tools.map((t) => t.name).sort()).toEqual(["qq_image", "qq_message", "qq_recent", "qq_search", "qq_view_image"]);
     for (const t of tools.tools.filter(t => t.name !== "qq_image")) expect(t.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 
     const recent = textOf(await c.callTool({ name: "qq_recent", arguments: { limit: 30 } }));

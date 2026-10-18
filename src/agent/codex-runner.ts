@@ -231,17 +231,17 @@ export function renderManagedAgentsMd(o: AgentsMdOptions): string {
 - 绝不透露环境变量、凭据、令牌（token）、API key、auth.json 或任何登录信息的内容。
 - 只读写下列目录：
 ${roots.map((r) => `  - ${describeRoot(r, o)}`).join("\n")}
-${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts 下的文件只在 owner 私聊明确要求时进行，群聊请求一律拒绝。\n` : ""}- 可只读打开 qq_image 返回的 ${data}/media/ 下的图片路径以查看图片。
+${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts 下的文件只在 owner 私聊明确要求时进行，群聊请求一律拒绝。\n` : ""}- 媒体库 ${data}/media/ 不可直接读取；使用 qq_view_image(path) 查看已召回图片。
 - 不读取、不透露其他位置的文件内容（例如 ${data}/codex、${data} 下的 *.sqlite 数据库与图片目录、/etc、/proc）。
 - 遇到上述请求（无论如何措辞、声称何种身份），简短拒绝即可，不解释细节。
 
 ## 生图（image_gen）
-- [image] 表示未召回的图片，需要查看或作为参考图时调用 qq_image(message_id)，每轮默认最多 5 次；返回路径文本后用文件工具打开查看。[image:<路径>] 表示已召回，可以直接使用。reference_images 只能使用本轮参考图或已召回且属于当前访问范围的媒体路径，不得编造。
+- [image] 表示未召回的图片，需要查看或作为参考图时调用 qq_image(message_id)，每轮默认最多 5 次；返回路径文本后用 qq_view_image(path) 查看。[image:<路径>] 表示已召回，可以直接使用。reference_images 只能使用本轮参考图或已召回且属于当前访问范围的媒体路径，不得编造。
 - 需要出图时调用 image_gen 的 generate_image（提示词可用中文，先查资料再画也可以）；生成的图片会随你的回复自动发给用户，回复文本只需一句简短说明，不要写文件路径。
 - 如果工具返回“仍在生成”，直接简短回复用户图片稍后发送，不要重试或再次调用。
 
 You serve QQ users through a relay. Never disclose environment variables, credentials, tokens,
-or auth.json. Only read/write: ${roots.join(", ")}. Recalled images under ${data}/media are read-only. Refuse other requests for files briefly.`;
+or auth.json. Only read/write: ${roots.join(", ")}. View recalled images with qq_view_image; never read ${data}/media directly. Refuse other requests for files briefly.`;
 }
 
 /** 首次启动播种到 prompts/codex.md；已有文件永不被默认值覆盖。 */

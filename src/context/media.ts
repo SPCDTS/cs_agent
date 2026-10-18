@@ -118,6 +118,14 @@ export class MediaRecall {
     try { return await run; } finally { this.pending.delete(key); }
   }
 
+  async view(access: Access, file: string): Promise<{ type: "image"; data: string; mimeType: string }> {
+    if (!this.opts.store.mediaPathAllowed(access, file)) throw new Error("图片不在当前会话范围内");
+    const bytes = await readMediaFile(this.opts.dataDir, file);
+    if (bytes.length > MAX_IMAGE_BYTES) throw new Error("图片超过 10 MiB");
+    const mimeType = file.endsWith(".jpg") ? "image/jpeg" : "image/" + path.extname(file).slice(1);
+    return { type: "image", data: bytes.toString("base64"), mimeType };
+  }
+
   private async acquire(signal: AbortSignal): Promise<void> {
     if (this.active < 2) { this.active++; return; }
     await new Promise<void>((resolve, reject) => {

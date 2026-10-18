@@ -18,7 +18,7 @@ export const RECALL_QUOTA_MESSAGE = "本轮召回次数已用完";
 export class RecallTokens {
   private readonly tokens = new Map<string, Lease>();
   private readonly tickets = new Map<string, { access: string; used: number }>();
-  constructor(private readonly media: Pick<MediaRecall, "recall">, readonly maxPerTicket = 5) {}
+  constructor(private readonly media: Pick<MediaRecall, "recall"> & Partial<Pick<MediaRecall, "view">>, readonly maxPerTicket = 5) {}
 
   issue(binding: RecallBinding): { token: string; revoke(): void } {
     const access = accessToString(binding.access);
@@ -58,6 +58,15 @@ export class RecallTokens {
     return result;
   }
 
+  async view(token: string, file: string) {
+    if (!this.valid(token)) throw new Error("召回令牌无效或已过期");
+    const lease = this.tokens.get(token)!;
+    if (!this.media.view) throw new Error("图片查看未启用");
+    const result = await abortable(this.media.view(lease.binding.access, file), lease.control.signal);
+    if (!this.valid(token)) throw new Error("召回令牌已作废");
+    return result;
+  }
+
   close(): void {
     for (const lease of this.tokens.values()) lease.revoke();
     this.tickets.clear();
@@ -70,7 +79,7 @@ export async function startMediaRecallServer(tokens: RecallTokens, port = 8790) 
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }).end(JSON.stringify(body));
     };
-    if (req.method !== "POST" || req.url !== "/recall") { send(404, { error: "不存在的召回端点" }); return; }
+    if (req.method !== "POST" || (req.url !== "/recall" && req.url !== "/view")) { send(404, { error: "不存在的召回端点" }); return; }
     const auth = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization ?? "");
     if (!auth || !tokens.valid(auth[1]!)) { send(401, { error: "召回令牌无效或已过期" }); return; }
     try {
@@ -81,6 +90,13 @@ export async function startMediaRecallServer(tokens: RecallTokens, port = 8790) 
         chunks.push(Buffer.from(chunk));
       }
       const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (req.url === "/view") {
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 ||
+            !("path" in body) || typeof body.path !== "string" || !body.path || body.path.length > 1024) {
+          send(400, { error: "仅接受 path" }); return;
+        }
+        send(200, await tokens.view(auth[1]!, body.path)); return;
+      }
       if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 ||
           !("message_id" in body) || typeof body.message_id !== "string" || !body.message_id.trim() || body.message_id.length > 128) {
         send(400, { error: "仅接受 message_id" }); return;

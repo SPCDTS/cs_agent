@@ -5,6 +5,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MediaRecall, cleanupMedia } from "../../src/context/media.js";
+import { RecallTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
+import { viewViaLoopback } from "../../src/mcp/media-recall-client.js";
 import { ContextStore } from "../../src/context/store.js";
 import { clipWithImages, formatMessage, formatMessageFull, formatRecent, withoutImagePaths } from "../../src/context/format.js";
 import { normalizeMessage } from "../../src/qq/policy.js";
@@ -57,6 +59,30 @@ afterEach(async () => {
 const noFiles = async () => expect(await fs.readdir(dir)).not.toContain("media");
 
 describe("按需图片召回", () => {
+  it("/view 按令牌范围读图，不占额度，拒绝无效令牌、跨范围和损坏/超大文件", async () => {
+    ingest();
+    const file = (await media.recall(access, "1")).images[0]!.path;
+    const tokens = new RecallTokens(media, 1);
+    const server = await startMediaRecallServer(tokens, 0);
+    const lease = tokens.issue({ access, ticket: "view", deadline: Date.now() + 60_000 });
+    const foreign = tokens.issue({ access: privateAccess, ticket: "foreign", deadline: Date.now() + 60_000 });
+    try {
+      for (let i = 0; i < 2; i++) expect(await viewViaLoopback(file, lease.token, server.port))
+        .toEqual({ type: "image", data: PNG.toString("base64"), mimeType: "image/png" });
+      await tokens.recall(lease.token, "1");
+      await expect(tokens.recall(lease.token, "1")).rejects.toThrow("次数");
+      expect((await viewViaLoopback(file, lease.token, server.port)).type).toBe("image");
+      await expect(viewViaLoopback(file, foreign.token, server.port)).rejects.toThrow("范围");
+      await expect(viewViaLoopback(file, "a".repeat(64), server.port)).rejects.toThrow("令牌");
+      await expect(viewViaLoopback(path.join(dir, "context.sqlite"), lease.token, server.port)).rejects.toThrow("范围");
+      await fs.writeFile(file, Buffer.alloc(10 * 1024 * 1024 + 1));
+      await expect(viewViaLoopback(file, lease.token, server.port)).rejects.toThrow("不安全");
+      await fs.writeFile(file, Buffer.alloc(100));
+      await expect(viewViaLoopback(file, lease.token, server.port)).rejects.toThrow();
+      lease.revoke();
+      await expect(viewViaLoopback(file, lease.token, server.port)).rejects.toThrow("令牌");
+    } finally { await server.close(); }
+  });
   it("入库不存 URL、不下载；跨范围在 API 前拒绝", async () => {
     ingest();
     expect(store.message(access, "1")!.row.text).toBe("[image]");
@@ -97,6 +123,7 @@ describe("按需图片召回", () => {
     expect(formatMessage(row)).toContain(result.images[0]!.path);
     expect(store.recall(row.scope, "1")).toBe(true);
     expect(store.media(row.scope, "1")).toEqual([]);
+    expect(store.message(priv ? privateAccess : access, "1")).toBeNull();
   });
   it("幂等、并发合并、内容寻址复用与 FTS 同步", async () => {
     ingest("1", [text("前[image]"), image, text("后"), image]);

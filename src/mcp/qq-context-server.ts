@@ -19,6 +19,7 @@ export interface QQContextDeps {
   /** 惰性打开只读库（库文件可能尚未创建）；抛错时工具返回错误文本 */
   openStore: () => ContextStore;
   maxChars?: number;
+  view?: (file: string) => Promise<{ type: "image"; data: string; mimeType: string }>;
   recall?: (messageId: string) => Promise<string>;
 }
 
@@ -27,8 +28,14 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: f
 
 const TOOLS = [
   {
+    name: "qq_view_image",
+    description: "查看当前访问范围内已召回的图片，一次一张，不占召回次数。",
+    inputSchema: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["path"], additionalProperties: false },
+    annotations: READ_ONLY,
+  },
+  {
     name: "qq_image",
-    description: "按消息 id 召回图片，只返回本地路径文本，用文件工具打开查看；每轮最多 5 次。",
+    description: "按消息 id 召回图片，只返回本地路径文本，用 qq_view_image 查看；每轮最多 5 次。",
     inputSchema: { type: "object", properties: { message_id: { type: "string", minLength: 1, maxLength: 128 } }, required: ["message_id"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
@@ -138,6 +145,14 @@ export function createQQContextServer(deps: QQContextDeps): Server {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS.map((t) => ({ ...t })) as never }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const args = req.params.arguments ?? {};
+    if (req.params.name === "qq_view_image") {
+      if (!deps.access) return text("qq_context 不可用：未配置有效的访问范围（QQ_ACCESS）。", true);
+      if (Object.keys(args).length !== 1 || typeof args.path !== "string" || !args.path || args.path.length > 1024) return text("仅接受 path", true);
+      try {
+        if (!deps.view) throw new Error("图片查看未启用");
+        return { content: [await deps.view(args.path)] };
+      } catch (err) { return text((err as Error).message, true); }
+    }
     if (req.params.name !== "qq_image") return callQQContextTool(deps, req.params.name, args);
     if (!deps.access) return text("qq_context 不可用：未配置有效的访问范围（QQ_ACCESS）。", true);
     if (Object.keys(args).length !== 1 || typeof args.message_id !== "string" || !args.message_id.trim() || args.message_id.length > 128) return text("仅接受 message_id", true);

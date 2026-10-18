@@ -123,6 +123,9 @@ describe("AGENTS.md", () => {
 
   it("global v4 template carries the marker, secrecy/reply rules, history, image_gen and browser discipline", () => {
     const md = renderAgentsMd(opts);
+    expect(md).toContain("qq_view_image(path)");
+    expect(md).not.toContain("可只读打开");
+    expect(md).not.toContain("are read-only");
     expect(md.startsWith(`${AGENTS_TEMPLATE_MARKER}\n`)).toBe(true);
     expect(AGENTS_TEMPLATE_MARKER).toBe("<!-- cs-agent-agents-template v5 -->");
     for (const s of ["仍在生成", "不要重试或再次调用", "image_gen", "随你的回复自动发给用户", "一句简短说明", "不用 Markdown", "300 字", "未核实", "qq_recent", "qq_search", "最多调用历史工具 2 次", "绝不登录任何账号", "关闭页面",
