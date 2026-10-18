@@ -13,6 +13,7 @@ import type { ContextStore, MediaRow, MessageRow } from "./store.js";
 
 export interface RecalledImage { path: string; width: number; height: number }
 export interface RecallResult { text: string; images: RecalledImage[] }
+interface RecallFlight { work: Promise<RecallResult>; control: AbortController; waiters: number }
 export interface MediaRecallOptions {
   store: ContextStore;
   dataDir: string;
@@ -120,7 +121,7 @@ export function recalledText(row: MessageRow, segments: Record<string, unknown>[
 
 /** 仅按需调用：同消息合并，全局最多两个任务，含排队总时限 60 秒。 */
 export class MediaRecall {
-  private readonly pending = new Map<string, Promise<RecallResult>>();
+  private readonly pending = new Map<string, RecallFlight>();
   private active = 0;
   private readonly waiting: (() => void)[] = [];
   constructor(private readonly opts: MediaRecallOptions) {}
@@ -131,12 +132,24 @@ export class MediaRecall {
     if (!hit) throw new Error("没有这条消息，或不在当前会话范围内");
     const row = hit.row;
     const key = JSON.stringify([row.scope, messageId]);
-    const existing = this.pending.get(key);
-    if (existing) return callerSignal ? abortable(existing, callerSignal) : existing;
-    const signal = AbortSignal.any([AbortSignal.timeout(60_000), ...(callerSignal ? [callerSignal] : [])]);
-    const run = this.run(row, signal);
-    this.pending.set(key, run);
-    try { return await run; } finally { this.pending.delete(key); }
+    let flight = this.pending.get(key);
+    if (!flight) {
+      const control = new AbortController();
+      const signal = AbortSignal.any([AbortSignal.timeout(60_000), control.signal]);
+      const created: RecallFlight = { control, waiters: 0, work: abortable(this.run(row, signal), signal).finally(() => {
+        if (this.pending.get(key) === created) this.pending.delete(key);
+      }) };
+      this.pending.set(key, created);
+      flight = created;
+    }
+    flight.waiters++;
+    try { return await (callerSignal ? abortable(flight.work, callerSignal) : flight.work); }
+    finally {
+      if (--flight.waiters === 0) {
+        if (this.pending.get(key) === flight) this.pending.delete(key);
+        flight.control.abort(new Error("召回已无等待者"));
+      }
+    }
   }
 
   async view(access: Access, file: string): Promise<{ type: "image"; data: string; mimeType: string }> {

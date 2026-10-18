@@ -14,19 +14,27 @@ interface Lease {
   revoke(): void;
 }
 export const RECALL_QUOTA_MESSAGE = "本轮召回次数已用完";
+const QUOTA_RETENTION_MS = 30 * 60_000;
+interface TicketQuota { access: string; used: number; active: number; lastRevoke: number; timer?: NodeJS.Timeout }
 
 /** 令牌只在主进程保存；同票据重新 exec 不重置预算，结束时立即撤销所有在途请求。 */
 export class RecallTokens {
   private readonly tokens = new Map<string, Lease>();
-  private readonly tickets = new Map<string, { access: string; used: number }>();
+  private readonly tickets = new Map<string, TicketQuota>();
   constructor(private readonly media: Pick<MediaRecall, "recall"> & Partial<Pick<MediaRecall, "view">>, readonly maxPerTicket = 5) {}
 
   issue(binding: RecallBinding): { token: string; revoke(): void } {
     const access = accessToString(binding.access);
     if (!parseAccess(access) || !binding.ticket || !Number.isFinite(binding.deadline) || binding.deadline <= Date.now()) throw new Error("召回绑定无效或已过期");
     binding.signal?.throwIfAborted();
-    const quota = this.tickets.get(binding.ticket) ?? { access, used: 0 };
+    let quota = this.tickets.get(binding.ticket);
+    // 定时器可能因事件循环忙碌延迟；新租约同样按实际时间检查重试窗口。
+    if (quota && !quota.active && Date.now() - quota.lastRevoke >= QUOTA_RETENTION_MS) {
+      clearTimeout(quota.timer); this.tickets.delete(binding.ticket); quota = undefined;
+    }
+    quota ??= { access, used: 0, active: 0, lastRevoke: 0 };
     if (quota.access !== access) throw new Error("召回票据范围不一致");
+    clearTimeout(quota.timer); quota.timer = undefined; quota.active++;
     this.tickets.set(binding.ticket, quota);
     const token = randomBytes(32).toString("hex"), control = new AbortController();
     const disposeSecret = registerTemporarySecrets([token]);
@@ -35,6 +43,13 @@ export class RecallTokens {
       if (!lease) return;
       this.tokens.delete(token); clearTimeout(lease.timer);
       disposeSecret();
+      quota.active--; quota.lastRevoke = Date.now();
+      if (!quota.active) {
+        quota.timer = setTimeout(() => {
+          if (!quota.active && this.tickets.get(binding.ticket) === quota) this.tickets.delete(binding.ticket);
+        }, QUOTA_RETENTION_MS);
+        quota.timer.unref();
+      }
       binding.signal?.removeEventListener("abort", revoke);
       control.abort(new Error("召回令牌已作废"));
     };
@@ -72,6 +87,7 @@ export class RecallTokens {
 
   close(): void {
     for (const lease of this.tokens.values()) lease.revoke();
+    for (const quota of this.tickets.values()) clearTimeout(quota.timer);
     this.tickets.clear();
   }
 }

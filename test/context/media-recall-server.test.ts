@@ -6,7 +6,7 @@ import type { Access } from "../../src/context/access.js";
 
 const access: Access = { kind: "scope", scope: "group:7" };
 const closes: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const close of closes.splice(0)) await close(); });
+afterEach(async () => { for (const close of closes.splice(0)) await close(); vi.useRealTimers(); });
 async function setup(max = 5) {
   const recall = vi.fn(async () => ({ text: "图1: /data/media/ab/example.png（1×1）", images: [] }));
   const tokens = new RecallTokens({ recall }, max);
@@ -74,5 +74,41 @@ describe("召回 loopback 与令牌", () => {
     expect(loadConfig({})).toMatchObject({ MEDIA_RECALL_PORT: 8790, MEDIA_RECALL_MAX_PER_TICKET: 5 });
     for (const value of ["0", "65536", "abc"]) expect(() => loadConfig({ MEDIA_RECALL_PORT: value })).toThrow();
     expect(() => loadConfig({ MEDIA_RECALL_MAX_PER_TICKET: "0" })).toThrow();
+  });
+  it("额度在最后一次作废后保留 30 分钟；活跃租约与重试不会重置预算", async () => {
+    vi.useFakeTimers();
+    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) }, 1);
+    const tickets = (tokens as unknown as { tickets: Map<string, unknown> }).tickets;
+    const issue = () => tokens.issue({ access, ticket: "retained", deadline: Date.now() + 2 * 60 * 60_000 });
+    try {
+      const first = issue(), active = issue();
+      await tokens.recall(first.token, "1"); first.revoke(); first.revoke();
+      await vi.advanceTimersByTimeAsync(31 * 60_000);
+      expect(tickets.size).toBe(1);
+      await expect(tokens.recall(active.token, "1")).rejects.toThrow("次数");
+      active.revoke();
+      await vi.advanceTimersByTimeAsync(29 * 60_000);
+      const retry = issue();
+      await expect(tokens.recall(retry.token, "1")).rejects.toThrow("次数");
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+      expect(tickets.size).toBe(1); retry.revoke();
+      await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
+      expect(tickets.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(tickets.size).toBe(0);
+      await expect(tokens.recall(issue().token, "1")).resolves.toMatchObject({ text: "ok" });
+    } finally { tokens.close(); }
+    expect(tickets.size).toBe(0); expect(vi.getTimerCount()).toBe(0);
+  });
+  it("自动到期后的额度会回收，close 清理回收定时器", async () => {
+    vi.useFakeTimers();
+    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) });
+    const tickets = (tokens as unknown as { tickets: Map<string, unknown> }).tickets;
+    tokens.issue({ access, ticket: "expiry", deadline: Date.now() + 1000 });
+    await vi.advanceTimersByTimeAsync(1000 + 30 * 60_000);
+    expect(tickets.size).toBe(0);
+    tokens.issue({ access, ticket: "close", deadline: Date.now() + 1000 }).revoke();
+    tokens.close();
+    expect(tickets.size).toBe(0); expect(vi.getTimerCount()).toBe(0);
   });
 });

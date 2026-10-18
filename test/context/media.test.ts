@@ -235,6 +235,34 @@ describe("按需图片召回", () => {
     expect((await settled).every(r => r.status === "fulfilled")).toBe(true);
     expect(peak).toBe(2);
   });
+  it.each(["owner", "group"])("%s 等待者取消不影响同一共享召回的另一个等待者", async cancelled => {
+    ingest();
+    let release!: () => void;
+    call.mockImplementation(async () => { await new Promise<void>(r => { release = r; }); return remote; });
+    const owner = new AbortController(), group = new AbortController();
+    const a = media.recall({ kind: "all" }, "1", owner.signal);
+    const b = media.recall(access, "1", group.signal);
+    const rejected = expect(cancelled === "owner" ? a : b).rejects.toThrow("本等待者取消");
+    await vi.waitFor(() => expect(call).toHaveBeenCalledOnce());
+    (cancelled === "owner" ? owner : group).abort(new Error("本等待者取消"));
+    await rejected; release();
+    expect((await (cancelled === "owner" ? b : a)).images).toHaveLength(1);
+    expect(call).toHaveBeenCalledOnce(); expect(downloads).toBe(1);
+  });
+  it("所有等待者取消后底层停止，重试不复用旧任务，迟到结果不能落盘", async () => {
+    ingest();
+    let release!: () => void;
+    call.mockImplementationOnce(async () => { await new Promise<void>(r => { release = r; }); return remote; });
+    const first = new AbortController(), second = new AbortController();
+    const settled = Promise.allSettled([media.recall(access, "1", first.signal), media.recall(access, "1", second.signal)]);
+    await vi.waitFor(() => expect(call).toHaveBeenCalledOnce());
+    first.abort(); second.abort();
+    expect((await settled).every(r => r.status === "rejected")).toBe(true);
+    const result = await media.recall(access, "1");
+    expect(result.images).toHaveLength(1); expect(call).toHaveBeenCalledTimes(2);
+    release(); await new Promise(r => setImmediate(r));
+    expect(downloads).toBe(1); expect(store.media("group:30001", "1")).toHaveLength(1);
+  });
   it("60 秒包括排队与 API 等待；迟到结果不能落盘", async () => {
     for (const id of ["1", "2", "3"]) ingest(id);
     const controls: AbortController[] = [];
