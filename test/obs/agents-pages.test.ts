@@ -198,7 +198,8 @@ describe('Agent 页面', () => {
     const r = await rig();
     const { res, html } = await r.page('/agents/codex/sessions/sess-1/context?at=t1&phase=before');
     expect(res.status).toBe(200); safe(html, res);
-    expect(html).toContain('分析引擎暂不可用（HTTP 404）');
+    // 测试注入的桩适配器不是 CodexSessionAdapter，分析引擎返回 503，页面按不可用状态渲染。
+    expect(html).toContain('分析引擎暂不可用（HTTP 503）');
     expect(html).toContain('<span class="pill on" aria-current="true">回合请求发出前</span>');
     expect(html).toContain('href="/agents/codex/sessions/sess-1/context?at=t1&amp;phase=after"');
     expect(html).toContain('href="/agents/codex/sessions/sess-1/turns/t1"');

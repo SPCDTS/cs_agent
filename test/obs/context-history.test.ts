@@ -12,8 +12,10 @@ const project = async (rows: unknown[]) => Promise.all(rows.map(row => projectRe
 describe('Codex 历史重建回归', () => {
   it('普通真实匿名 rollout 按手写序列重建，保留摘要而丢弃密文', async () => {
     const history = (await reconstructCodexHistory(await fixture('codex-rollout-anonymized.jsonl')));
-    expect(history.map(m => m.kind)).toEqual(['user', 'thinking', 'tool_call', 'tool_result', 'assistant']);
-    expect(history.map(m => m.preview)).toEqual(['请检查测试目录。QQ 号码已替换为匿名标记。', '先读取目录结构',
+    // fixture 含 codex 注入的 AGENTS.md / user_instructions / environment_context 三条 user 消息：它们确实在模型窗口内，按指令类别保留。
+    expect(history.map(m => m.kind)).toEqual(['user', 'user', 'user', 'user', 'thinking', 'tool_call', 'tool_result', 'assistant']);
+    expect(history.slice(0, 3).map(m => [m.contextual, m.category])).toEqual([[true, 'instructions'], [true, 'instructions'], [true, 'history']]);
+    expect(history.slice(3).map(m => m.preview)).toEqual(['请检查测试目录。QQ 号码已替换为匿名标记。', '先读取目录结构',
       '{"name":"exec_command","input":"{\\"command\\":\\"ls test\\"}"}', 'obs\nagent', '已检查两个测试目录。']);
     expect(JSON.stringify(history)).not.toContain('匿名加密占位');
   });

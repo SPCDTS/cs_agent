@@ -96,7 +96,7 @@ describe('Codex 会话正文适配器', () => {
     expect((await r.adapter.listSessions())[0]?.turns).toBe(1);
     expect(await r.adapter.turns('thread-fixture')).toHaveLength(1);
     const fresh = r.store.db.prepare('SELECT state_json FROM session_index').get() as { state_json: string };
-    expect(JSON.parse(fresh.state_json).version).toBe(2);
+    expect(JSON.parse(fresh.state_json).version).toBe(3);
     expect(fresh.state_json).not.toContain('旧版伪回合');
   });
 

@@ -22,7 +22,7 @@ export interface IndexedTurn {
   blocks: IndexedBlock[];
 }
 export interface CodexIndexState {
-  version: 2;
+  version: 3;
   turns: IndexedTurn[];
   prelude?: IndexedBlock[];
   calls: Record<string, { turn: number; block: number; ts?: number }>;
@@ -74,7 +74,7 @@ export class SessionIndex {
     return (this.db.prepare('SELECT * FROM session_index WHERE backend=? ORDER BY file').all(backend) as unknown as IndexRow[]).flatMap(row => {
       try {
         const state = JSON.parse(row.state_json) as CodexIndexState;
-        if (state.version !== 2 || !Array.isArray(state.turns)) return [];
+        if (state.version !== 3 || !Array.isArray(state.turns)) return [];
         return [{ file: row.file, size: row.size, mtime: row.mtime, identity: row.identity, head: row.head, tail: row.tail,
           lastOffset: row.last_offset, session: { backend: row.backend, id: row.session_id,
             ...(row.scope !== null ? { scope: row.scope } : {}), label: row.label, status: row.status,

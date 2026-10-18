@@ -148,7 +148,8 @@ export async function codexHistory(adapter: CodexSessionAdapter, session: string
   // replacement_history 保留了原始 item ID 时，仍能定位到 O1 的原始内容块。
   messages = messages.map(m => ({ ...m, location: m.location ?? (m.id ? originalItems.get(m.id)?.location : undefined) }));
   for (const m of messages) if (m.location) {
-    const blockKind = m.kind === 'system' || m.kind === 'developer' ? 'system_change' : m.kind;
+    // O1 把 codex 注入的指令/环境 user 消息索引为 system_change 块，签发引用时按同一类型查找。
+    const blockKind = m.kind === 'system' || m.kind === 'developer' || (m.contextual && m.role === 'user') ? 'system_change' : m.kind;
     m.ref = await adapter.contextRef(session, m.location.file, m.location.offset, blockKind);
   }
   const window = surviving.findLast(r => r.window)?.window;

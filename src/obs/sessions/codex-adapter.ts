@@ -63,7 +63,7 @@ export async function* rolloutLines(file: string, start = 0, end?: number): Asyn
 
 /** Codex 将指令和运行环境也写成 user 消息；按文本前缀识别，不能据角色分轮。 */
 function inputContextType(text: string): 'agents_md' | 'user_instructions' | 'environment_context' | 'marker' | undefined {
-  if (text.startsWith('# AGENTS.md instructions for ')) return 'agents_md';
+  if (text.startsWith('# AGENTS.md instructions')) return 'agents_md';
   if (text.startsWith('<user_instructions>')) return 'user_instructions';
   if (text.startsWith('<environment_context>')) return 'environment_context';
   if (text.startsWith('<turn_aborted>')) return 'marker';
@@ -232,7 +232,7 @@ export class CodexSessionAdapter implements SessionAdapter {
     const row: SessionIndexFile = incremental ? structuredClone(previous!) : {
       file, size: 0, mtime: 0, identity, head: '', tail: '', lastOffset: 0,
       session: { backend: 'codex', id: '', label: '', status: 'archived', started: 0, updated: 0, turns: 0 },
-      state: { version: 2, turns: [], calls: {} },
+      state: { version: 3, turns: [], calls: {} },
     };
     const oldCounts = new Map(previous?.state.turns.map(turn => [turn.index.turn, turn.blocks.length]) ?? []);
     if (incremental) this.diagnostics.incrementalScans++; else this.diagnostics.fullScans++;
@@ -382,7 +382,8 @@ export class CodexSessionAdapter implements SessionAdapter {
   /** 引用由 O1 已索引块签发，沿用正文校验及脱敏字节数。 */
   async contextRef(id: string, file: string, offset: number, kind: string): Promise<ContentRef | undefined> {
     const row = this.selected(id).find(item => item.file === file);
-    const block = row?.state.turns.flatMap(turn => turn.blocks).find(item => item.lineOffset === offset && item.kind === kind && item.item >= 0);
+    // 回合之间的指令/环境块暂存在 prelude，同样可签发引用。
+    const block = row && [...row.state.turns.flatMap(turn => turn.blocks), ...row.state.prelude ?? []].find(item => item.lineOffset === offset && item.kind === kind && item.item >= 0);
     if (!row || !block) return undefined;
     const raw = await this.rawBlock(row, block);
     if (raw.text === undefined) return undefined;
@@ -450,7 +451,7 @@ export class CodexSessionAdapter implements SessionAdapter {
     return inlineBlock(block, { session: row.session.id, offset: indexed.offset, length: bytes, bytes });
   }
   async content(ref: ContentRef): Promise<string> {
-    for (const row of this.selected(ref.session)) for (const turn of row.state.turns) for (const block of turn.blocks) {
+    for (const row of this.selected(ref.session)) for (const block of [...row.state.turns.flatMap(turn => turn.blocks), ...row.state.prelude ?? []]) {
       const slot = { session: row.session.id, offset: block.offset, length: block.capacity ?? block.bytes, bytes: block.bytes };
       if (!validRange(ref, slot)) continue;
       const source = await this.rawBlock(row, block);
