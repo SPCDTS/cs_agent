@@ -12,7 +12,7 @@ RUN npm run build && npm prune --omit=dev
 FROM node:24-bookworm-slim
 RUN echo 'Acquire::Retries "8";' > /etc/apt/apt.conf.d/80retries \
  && apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates git tini \
+ && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates git tini bubblewrap \
  && rm -rf /var/lib/apt/lists/*
 
 # comfy-cli + comfy-mcp（stdio MCP）装在独立 venv
@@ -41,6 +41,8 @@ RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/ent
  && mkdir -p /data /workspace /etc/codex && chown node:node /data /workspace /etc/codex
 
 USER node
+# 确认非 root 用户可执行系统 bwrap；命名空间实测需运行容器时使用 compose 的 seccomp profile。
+RUN test -x /usr/bin/bwrap && /usr/bin/bwrap --version
 # 关闭 comfy-cli 首次运行的交互式统计询问（否则会阻塞 MCP 子进程）
 RUN /opt/comfy/bin/comfy --skip-prompt tracking disable || true
 

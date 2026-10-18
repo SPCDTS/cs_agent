@@ -149,7 +149,7 @@ tool_timeout_sec = 15
 4. **动态令牌不占长期秘密表（minor）**：召回令牌不再 `registerSecrets`；改为可撤销的临时秘密（注册返回 dispose，令牌作废时移除）。长期秘密表满额时记一次 warn，而不是静默忽略。
 5. **single-flight 生命周期独立（minor）**：共享任务只受自身 60 s 截止控制；每个等待者按自己的取消信号单独退出；全部等待者都退出时才取消底层任务。
 6. **票据额度回收（minor）**：票据没有活跃令牌且距最后一次作废超过 30 分钟时删除其额度记录（保留重试窗口，不因单个令牌作废而重置额度）。
-7. **符号链接竞态（minor，接受）**：利用前提是能修改 `/data/media` 目录；codex 对该目录既不可写也不可读（第 1 条），pi 已按 §4.5 接受全文件访问风险。不改代码，在此记录。
+7. **符号链接竞态（minor，接受）**：codex 对 `/data/media` 既不可写也不可读（第 1 条）。§10.2 已给 pi 增加路径检查及写入边界；`realpath` 检查与实际 I/O 之间仍有路径被并发替换的窗口，按 §10.2 的决定保留这一 TOCTOU 限制。
 8. **撤回也删除机器人行**：实现把 `recall` 的 `is_self = 0` 条件去掉了。评估后接受：被撤回的机器人消息在 QQ 里已不存在，删除其行与媒体行是正确的；撤回事件只来自 NapCat，不能伪造。
 
 #### 2.5.9 验收记录（2026-10-18，主会话验收通过，合并 707538a 并已部署）
@@ -238,10 +238,9 @@ interface AgentBackend {
 - 工具（进程内，复用同一实现）：`web_search(query, count≤8)`、`fetch_page(url)`（§4.6）、`qq_recent` / `qq_search` / `qq_message`（统一上下文存储，**访问范围绑定到当前请求**：由适配层在 submit 时把 access 写入会话文档，工具执行时读取；shared 线程内不同 scope 的请求串行，因此不会串用）、`generate_image(prompt)`（写 `/data/images/<ticket>/`）、`qq_image`（§2.5）。不接浏览器。
 - **内置工具全部启用**（2026-10-18 用户决定）：安装 pi-durable 的 `createCodingTools()` 扩展，即 `read` / `write` / `edit` / `bash`，所有会话都启用（群、owner 私聊、其他私聊一视同仁）。
   - `read` 配置图片处理（`ReadToolOptions.images`，取 `DEFAULT_IMAGE_LIMITS`），读 PNG/JPEG/WebP/GIF 时返回图片内容，用于查看 `qq_image` 召回的图和本票据参考图。
-  - 执行环境：`NodeExecutionEnv`，每个 pi 会话一个工作目录 `${DATA_DIR}/pi-work/<会话键>/`（会话键中的 `:` 换成 `_`，首次使用时创建）；绝对路径不受限制。
-  - 子进程环境：`bash` 启动的进程**不继承**主进程里的凭据类环境变量（`NAPCAT_TOKEN`、`DEEPSEEK_API_KEY`/`DEEPSEEK_APIKEY`、面板口令及其他已注册的秘密），与 codex 侧"口令不进子进程环境"一致。这只是不把凭据直接塞给子进程，不限制工具本身的能力。
-  - （§10.2 将撤销此条：bash 经 bwrap、文件工具做路径检查。）
-  - **已接受的风险**：pi 跑在主进程里，没有 codex 那样的沙箱与 `deny_read`。内置工具能读写容器内的全部文件（包括各会话的消息库、票据库、`/data/obs-token`），群成员可以通过提示注入间接驱动这些工具，历史工具的访问范围过滤因此不再是硬边界。用户已知情并决定启用。
+  - 执行环境：`PiExecutionEnv`，每个会话一个工作目录 `${DATA_DIR}/pi-work/<会话键>/`（`:` 换成 `_`）；每次工具调用从已提交的 `PiRequestDoc` 绑定 access 与 ticket，恢复时同样重建，不依赖进程内的“当前请求”变量。
+  - `bash` 必须经 Linux bwrap：隔离 PID 并挂载新 `/proc`，根目录只读，仅当前工作区和临时 `/tmp` 可写，网络保留。与 codex 共用受管 `deny_read`，目录用只读空 tmpfs、文件用 `/dev/null` 遮蔽；其他 pi 工作区、pi 状态库也不可读。bwrap 缺失或配置读取、解析、展开失败时返回工具错误，不裸跑。子进程仅继承 `SHELL_ENV` 白名单及工具显式变量，单次最多 60 秒。
+  - 文件方法经 `realpath` 检查：禁读目标不可读；媒体文件须通过当前 access 的 `mediaPathAllowed`，另允许本票据的 `incoming/<ticket>/` 和 `images/<ticket>/`。写入仅限本会话工作区与本票据 `images/<ticket>/`；宿主 `/proc`、`/sys`、`/dev` 不向文件工具开放。
   - 观测：内置工具调用与 codex 内置命令同口径记录（工具名、命令或路径前 200 字、退出码、耗时），计入每票据事件预算。
 - 系统提示：`/data/prompts/agent.md` 热加载（与 codex 的 AGENTS.md 规则对齐：纯文本中文简短、不可信内容声明、历史工具纪律、需要事实先搜索、需要出图调用 generate_image 并一句话说明）。内置默认值在代码中。
 - 每轮输入格式与 codex 相同：`[来源] … / [引用] … / 正文`。
@@ -514,6 +513,10 @@ agent（codex | pi，只依赖 TurnContext）   ←  tools（MCP / 进程内）�
   - 读：命中禁读列表 → 拒绝；例外：`/data/media/...` 中 `mediaPathAllowed(本回合 scope, path)` 为真的文件，以及本票据的 `incoming/<ticket>/`、`images/<ticket>/`；
   - 写：仅本会话工作区与本票据的 `images/<ticket>/`。
 - 验收：pi 回合中 `bash` 读 qq-messages.sqlite / obs-token / 其他会话工作区 / `/proc/1/environ` 均失败；`read` 本会话召回的图成功、他群的图失败；bwrap 缺失时 bash 报错而非裸跑。
+- 实现细节：先用只读空 tmpfs 遮蔽整个 `pi-work`，只挂回本会话，避免命令运行期间新建会话目录泄漏。文件接口覆盖二进制/文本流、元数据、目录列表、重命名两端及临时文件；临时文件（包括 bash 输出溢出日志）落在本工作区。递归监听不提供。
+- 配置边界：解析入口脚本生成的 `[permissions.filesystem] deny_read` 字符串数组，支持注释、单/双引号、尾逗号和 `*`、`?`、`**`；不支持的 TOML/glob 语法及损坏 UTF-8 保守报错，不忽略规则。每次操作重新读取配置；读取路径可由 `CODEX_REQUIREMENTS_FILE` 覆盖。
+- 挂载边界：bash 在每次启动时展开匹配路径并遮蔽，运行期间不会动态重挂载新增或替换的受管路径；这是按 Codex 同类挂载方式实现的限制。其他 pi 会话目录由整个父目录的遮蔽处理，不受新增会话影响。
+- Linux 验证：镜像显式安装 `bubblewrap`，`USER node` 阶段检查 `/usr/bin/bwrap --version`；真实命名空间测试须在使用 `docker/seccomp-codex.json` 的容器中以非 root 用户运行 `npx vitest run test/agent/pi-sandbox-linux.test.ts`。该测试仅在非 Linux 跳过，在 Linux 上缺少 bwrap 或命名空间受限都会失败；覆盖文件遮蔽、只读挂载、PID 隔离、环境白名单、网络及超时/取消。Windows 只运行路径、参数、失败关闭及后端持久化回归，不能据此宣称已通过 Linux 容器实测。
 
 ### 10.3 第 3 步：抽出 Channel 接口（纯重构，行为不变）
 - 通用代码迁出 `src/qq/`：`image.ts`、`image-header.ts`、`incoming-http.ts` → `src/net/` 或 `src/media/`。

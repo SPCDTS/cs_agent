@@ -28,10 +28,11 @@ import { openHarness } from "../../src/agent/harness.js";
 import { loadConfig } from "../../src/config.js";
 import type { InboundMessage, ReplyTicketRecord } from "../../src/qq/types.js";
 import { tmp } from "./helpers.js";
+import { put, sandboxRequirements } from "./pi-sandbox-fixture.js";
 
 const context = BACKGROUND_CONTEXT;
 const cleanup: (() => Promise<unknown> | void)[] = [];
-afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
+afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); vi.unstubAllEnvs(); });
 const handleContext = () => ({ signal: new AbortController().signal, onEvent: vi.fn() });
 const request = (ticket: string, owner = false): AgentRequest => ({
   ticket, scope: owner ? "private:1" : "group:7", access: owner ? "all" : "group:7", threadKey: owner ? "owner" : "group:7",
@@ -47,6 +48,7 @@ const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === 
 
 async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
+  vi.stubEnv("CODEX_REQUIREMENTS_FILE", await sandboxRequirements(dir));
   const contextUsage = new ContextUsageStore(dir);
   cleanup.push(() => contextUsage.close());
   const store = new ContextStore(dir);
@@ -129,8 +131,9 @@ describe("pi durable backend", () => {
     expect(await fs.readFile(path.join(s.dir, "pi-work", req.threadKey.replace(":", "_"), "note.txt"), "utf8")).toBe("改后");
     const tools = seen!.messages.filter(m => m.role === "toolResult");
     expect(tools.map(m => m.toolName)).toEqual(["write", "edit", "read", "bash"]);
-    expect(tools.every(m => !m.isError)).toBe(true);
-    expect(results(seen!)).toContain("builtin-ok");
+    expect(tools.slice(0, 3).every(m => !m.isError)).toBe(true);
+    expect(tools[3]!.isError).toBe(process.platform !== "linux");
+    expect(results(seen!)).toContain(process.platform === "linux" ? "builtin-ok" : "Linux bwrap");
     expect(DEFAULT_PI_PROMPT).toContain("用 read 打开");
   });
 
@@ -143,6 +146,34 @@ describe("pi durable backend", () => {
     const result = seen!.messages.find(m => m.role === "toolResult" && m.toolName === "read");
     expect(result?.role === "toolResult" && result.content.some(c => c.type === "image" && c.mimeType === "image/png" && c.data.length > 0)).toBe(true);
     expect(result?.role === "toolResult" && result.isError).toBe(false);
+  });
+
+  it("文件权限从持久化请求重建：换票据、跨 scope 与 SQLite 重开不沿用旧权限", async () => {
+    const s = await setup([], { disk: true, vision: true });
+    const media = await mediaFixture(s.store, s.dir, "group:7");
+    const incoming = await put(path.join(s.dir, "incoming", "bound-old", "ref.txt"), "old-reference");
+    const oldImage = path.join(s.dir, "images", "bound-old", "file.txt");
+    let first: TranscriptContext | undefined;
+    s.faux.setResponses([call("read", { path: incoming }), call("write", { path: oldImage, content: "old-image" }),
+      call("read", { path: media }), ctx => { first = ctx; return reply("first"); }]);
+    await s.pi.handle(request("bound-old"), handleContext());
+    expect(first!.messages.filter(m => m.role === "toolResult").every(m => !m.isError)).toBe(true);
+    await s.pi.close();
+    let second: TranscriptContext | undefined;
+    const newImage = path.join(s.dir, "images", "bound-new", "new.txt");
+    const reopened = await setup([call("read", { path: incoming }), call("write", { path: oldImage, content: "bad" }),
+      call("write", { path: newImage, content: "new-image" }), ctx => { second = ctx; return reply(); }], { disk: true, dir: s.dir, vision: true });
+    expect((await reopened.pi.handle(request("bound-old"), handleContext())).text).toBe("first");
+    expect(reopened.faux.state.callCount).toBe(0);
+    await reopened.pi.handle(request("bound-new"), handleContext());
+    expect(second!.messages.filter(m => m.role === "toolResult").slice(-3).map(m => !!m.isError)).toEqual([true, true, false]);
+    expect(await fs.readFile(oldImage, "utf8")).toBe("old-image");
+    expect(await fs.readFile(newImage, "utf8")).toBe("new-image");
+    let other: TranscriptContext | undefined;
+    reopened.faux.setResponses([call("read", { path: media }), ctx => { other = ctx; return reply(); }]);
+    await reopened.pi.handle({ ...request("other-scope"), scope: "group:8", access: "group:8", threadKey: "group:8",
+      source: { type: "group", user_id: "1", group_id: "8", nickname: "其他群" } }, handleContext());
+    expect(other!.messages.find(m => m.role === "toolResult")?.isError).toBe(true);
   });
 
   it("四个内置工具共享二十次额度，与历史检索分开且新票据重置", async () => {
@@ -183,8 +214,8 @@ describe("pi durable backend", () => {
       expect(done.every(e => typeof e.duration_ms === "number" && !("output" in e.detail) && !("input" in e.detail))).toBe(true);
       expect(done[0]!.detail).toMatchObject({ tool: "write", path: "trace.txt", exit_code: null });
       expect(String(done[2]!.detail.command)).toHaveLength(200);
-      expect(done[2]!.detail.exit_code).toBe(0);
-      expect(done[3]!).toMatchObject({ status: "failed", detail: { tool: "bash", exit_code: 7 } });
+      expect(done[2]!.detail.exit_code).toBe(process.platform === "linux" ? 0 : null);
+      expect(done[3]!).toMatchObject({ status: "failed", detail: { tool: "bash", exit_code: process.platform === "linux" ? 7 : null } });
       expect(JSON.stringify(events)).not.toContain("do-not-log-file-content");
     } finally { untap(); }
   });

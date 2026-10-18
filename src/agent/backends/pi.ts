@@ -126,7 +126,11 @@ export class PiBackend implements AgentBackend {
       env: async (target, ctx) => {
         const threads = await target.read.snapshot(PiThreadsDoc, ctx);
         const key = Object.entries(threads ?? {}).find(([, id]) => id === target.conversationId)?.[0];
-        return key && key !== "shared" ? codingEnvironment(opts.dataDir, key) : undefined;
+        if (!key || key === "shared") return undefined;
+        // 每次工具调用/恢复均从已提交文档重建身份；不从 handle 闭包或全局变量取当前票据。
+        const request = await target.read.snapshot(PiRequestDoc, target.conversationId, ctx);
+        if (!request?.ticket) return undefined;
+        return codingEnvironment({ dataDir: opts.dataDir, key, request, store: opts.store });
       },
       settings: { toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
         enabled: true,

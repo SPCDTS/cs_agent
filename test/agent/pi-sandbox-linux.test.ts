@@ -1,0 +1,78 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { createServer } from "node:http";
+import { BACKGROUND_CONTEXT as context, withAbortSignal } from "@earendil-works/chord/context";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { sandboxFixture, put } from "./pi-sandbox-fixture.js";
+
+const cleanup: (() => Promise<unknown>)[] = [];
+afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); vi.unstubAllEnvs(); });
+
+// Linux 上不因缺 bwrap/不允许 user namespace 而跳过：容器的 seccomp 回归必须使测试失败。
+describe.runIf(process.platform === "linux")("真实 bwrap（请以容器 node 用户运行）", () => {
+  async function fixture() {
+    // 不放 /tmp：该目录整体被 tmpfs 覆盖，会掩盖 deny_read 挂载本身的错误。
+    const dir = await fs.mkdtemp("/var/tmp/cs-pi-sandbox-");
+    cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
+    const s = await sandboxFixture("group:7", "ticket-7", dir);
+    cleanup.push(() => s.env.cleanup(context));
+    return s;
+  }
+
+  it("遮蔽库/令牌/其他会话；仅工作区和临时 /tmp 可写，proc 为新 PID 空间", async () => {
+    expect(process.getuid!(), "必须以非 root 用户验证与生产一致的 user namespace 行为").not.toBe(0);
+    const { dir, env } = await fixture();
+    const secret = "fixture-private-content";
+    const files = await Promise.all(["qq-messages.sqlite", "qq-messages.sqlite-wal", "obs-token", "pi.sqlite", "pi.sqlite-shm", "codex/auth.json", "pi-work/group_8/note", "images/ticket-7/a", "media/a", "incoming/ticket-7/a"].map(p => put(path.join(dir, p), secret)));
+    const original = await put(path.join(dir, "public-file"), "public-content");
+    await fs.symlink(files[0]!, path.join(env.cwd, "alias"));
+    const hostPidNamespace = await fs.readlink("/proc/self/ns/pid");
+    vi.stubEnv("PI_PRIVATE_SECRET", secret);
+    vi.stubEnv("COMFYUI_URL", "https://alice:password@example.com");
+    let output = "";
+    const script = `
+      const fs = require('node:fs');
+      const paths = ${JSON.stringify([...files, path.join(env.cwd, "alias")])};
+      const read = p => { try { return fs.readFileSync(p, 'utf8'); } catch { return 'DENIED'; } };
+      const write = p => { try { fs.writeFileSync(p, 'changed'); return true; } catch { return false; } };
+      console.log(JSON.stringify({
+        contents: paths.map(read), public: read(${JSON.stringify(original)}),
+        writable: [write('own.txt'), write('/tmp/pi-sandbox-temp'), write(${JSON.stringify(original)}), write('/etc/pi-sandbox-test')],
+        parentEnv: read('/proc/1/environ'), pidNamespace: fs.readlinkSync('/proc/self/ns/pid'),
+        privateEnv: process.env.PI_PRIVATE_SECRET, url: process.env.COMFYUI_URL, explicit: process.env.TOOL_VAR,
+        peers: fs.readdirSync(${JSON.stringify(path.dirname(env.cwd))})
+      }));`;
+    const result = await env.exec([process.execPath, "-e", script], { env: { TOOL_VAR: "explicit" }, onOutput: text => { output += text; } }, context);
+    expect(result, output).toMatchObject({ ok: true, value: { exitCode: 0 } });
+    const report = JSON.parse(output.trim());
+    expect(report.contents.every((s: string) => s === "" || s === "DENIED")).toBe(true);
+    expect(report.public).toBe("public-content");
+    expect(report.writable).toEqual([true, true, false, false]);
+    expect(report.parentEnv).not.toContain(secret);
+    expect(report.pidNamespace).not.toBe(hostPidNamespace);
+    expect(report.privateEnv).toBeUndefined();
+    expect(report.url).toBeUndefined();
+    expect(report.explicit).toBe("explicit");
+    expect(report.peers).toEqual(["group_7"]);
+    expect(await fs.readFile(path.join(env.cwd, "own.txt"), "utf8")).toBe("changed");
+    expect(await fs.readFile(original, "utf8")).toBe("public-content");
+  });
+
+  it("保留 loopback 网络并把 shell 超时/取消传递给进程树", async () => {
+    const { env } = await fixture();
+    const server = createServer((_req, res) => res.end("network-ok"));
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    cleanup.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+    const port = (server.address() as { port: number }).port;
+    let output = "";
+    expect(await env.exec([process.execPath, "-e", `fetch('http://127.0.0.1:${port}').then(r=>r.text()).then(console.log)`],
+      { onOutput: text => { output += text; } }, context), output).toMatchObject({ ok: true, value: { exitCode: 0 } });
+    expect(output.trim()).toBe("network-ok");
+    expect(await env.exec("sleep 20", { timeout: 0.1 }, context)).toMatchObject({ ok: false, error: { code: "timeout" } });
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 150);
+    try {
+      expect(await env.exec("sleep 20", undefined, withAbortSignal(abort.signal, context))).toMatchObject({ ok: false, error: { code: "aborted" } });
+    } finally { clearTimeout(timer); }
+  });
+});
