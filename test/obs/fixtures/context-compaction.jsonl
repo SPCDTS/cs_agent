@@ -1,0 +1,16 @@
+{"timestamp":"2026-10-18T00:00:00Z","type":"session_meta","payload":{"id":"context-fixture","base_instructions":{"text":"匿名基础规则"},"cli_version":"0.163.0"}}
+{"timestamp":"2026-10-18T00:00:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-a","model_context_window":258400}}
+{"timestamp":"2026-10-18T00:00:01Z","type":"turn_context","payload":{"turn_id":"turn-a","model":"gpt-fixture"}}
+{"timestamp":"2026-10-18T00:00:02Z","type":"response_item","payload":{"type":"message","id":"user-a","role":"user","content":[{"type":"input_text","text":"第一问"}]}}
+{"timestamp":"2026-10-18T00:00:03Z","type":"response_item","payload":{"type":"message","id":"answer-a","role":"assistant","content":[{"type":"output_text","text":"第一答"}]}}
+{"timestamp":"2026-10-18T00:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":20},"model_context_window":258400}}}
+{"timestamp":"2026-10-18T00:00:05Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-a"}}
+{"timestamp":"2026-10-18T00:00:06Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-b"}}
+{"timestamp":"2026-10-18T00:00:06Z","type":"turn_context","payload":{"turn_id":"turn-b","model":"gpt-fixture"}}
+{"timestamp":"2026-10-18T00:00:07Z","type":"response_item","payload":{"type":"message","id":"user-b","role":"user","content":[{"type":"input_text","text":"第二问"}]}}
+{"timestamp":"2026-10-18T00:00:08Z","type":"compacted","payload":{"message":"匿名压缩摘要","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Another language model started to solve this problem. 匿名压缩摘要"}]},{"type":"message","id":"user-b","role":"user","content":[{"type":"input_text","text":"第二问"}]}]}}
+{"timestamp":"2026-10-18T00:00:09Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-b","name":"lookup","input":"{\"query\":\"匿名查询\"}"}}
+{"timestamp":"2026-10-18T00:00:10Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-b","output":"匿名结果"}}
+{"timestamp":"2026-10-18T00:00:11Z","type":"response_item","payload":{"type":"message","id":"answer-b","role":"assistant","content":[{"type":"output_text","text":"第二答"}]}}
+{"timestamp":"2026-10-18T00:00:12Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":180,"cached_input_tokens":30}}}}
+{"timestamp":"2026-10-18T00:00:13Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-b"}}

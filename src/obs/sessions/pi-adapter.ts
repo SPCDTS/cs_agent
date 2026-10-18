@@ -255,10 +255,26 @@ export class PiSessionAdapter implements SessionAdapter {
     return contentSlice(item.block.text, ref, item.ref);
   }
 
+  /** 回合后的边界是下一次 UserEntry 之前的最后一个已提交条目。 */
+  async contextBoundary(id: string, turnId: string, phase: 'before' | 'after'): Promise<string> {
+    const state = await this.state(id);
+    const index = state.turns.findIndex(turn => turn.index.turn === turnId);
+    if (index < 0) throw new SessionError(404, '回合不存在');
+    if (phase === 'before') return turnId;
+    const turn = state.turns[index];
+    return index === state.turns.length - 1 ? String(state.lastEntry)
+      : String(turn.blocks.at(-1)?.block.meta?.entry ?? turnId);
+  }
   /** 留给 O3 的公开历史上下文入口；不会自己重建 pi 内部上下文。 */
   async context(id: string, at?: string): Promise<ContextView> {
     await this.state(id);
     return this.options.source.context(id, at);
+  }
+  async contextRef(id: string, entry: string, kind: string): Promise<ContentRef | undefined> {
+    const state = await this.state(id);
+    const matches = state.turns.flatMap(turn => turn.blocks).filter(item => item.block.meta?.entry === entry && item.block.kind === kind && item.block.text !== undefined);
+    // 一个上下文消息可能包含多个内容块；不能给组合正文签发其中一块的引用。
+    return matches.length === 1 ? { ...matches[0].ref } : undefined;
   }
 
   subscribe(id: string, cb: (frame: BlockFrame) => void): () => void {

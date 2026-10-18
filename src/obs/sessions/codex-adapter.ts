@@ -372,6 +372,23 @@ export class CodexSessionAdapter implements SessionAdapter {
     if (!rows.length) throw new SessionError(404, '会话不存在');
     return rows;
   }
+  /** O3 只读定位快照；正文仍经 rolloutLines 流式读取。 */
+  async contextSource(id: string) {
+    await this.refresh();
+    return { codexHome: this.opts.codexHome, dataDir: this.opts.dataDir,
+      files: this.selected(id).map(row => ({ file: row.file, size: row.size, mtime: row.mtime, identity: row.identity,
+        lastOffset: row.lastOffset, turns: row.state.turns.map(turn => ({ turn: turn.index.turn, offset: turn.startOffset })) })) };
+  }
+  /** 引用由 O1 已索引块签发，沿用正文校验及脱敏字节数。 */
+  async contextRef(id: string, file: string, offset: number, kind: string): Promise<ContentRef | undefined> {
+    const row = this.selected(id).find(item => item.file === file);
+    const block = row?.state.turns.flatMap(turn => turn.blocks).find(item => item.lineOffset === offset && item.kind === kind && item.item >= 0);
+    if (!row || !block) return undefined;
+    const raw = await this.rawBlock(row, block);
+    if (raw.text === undefined) return undefined;
+    const bytes = Buffer.byteLength(safeText(raw.text));
+    return { session: id, offset: block.offset, length: bytes, bytes };
+  }
   async listSessions(filter: SessionFilter = {}): Promise<SessionRef[]> {
     const sessions = new Map<string, SessionRef>();
     for (const row of this.files.values()) {

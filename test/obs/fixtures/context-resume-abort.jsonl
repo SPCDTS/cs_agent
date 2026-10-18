@@ -1,0 +1,7 @@
+{"timestamp":"2026-10-18T00:01:00Z","type":"session_meta","payload":{"id":"context-fixture","source":"resume","cli_version":"0.163.0"}}
+{"timestamp":"2026-10-18T00:01:01Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-c"}}
+{"timestamp":"2026-10-18T00:01:01Z","type":"turn_context","payload":{"turn_id":"turn-c","model":"gpt-fixture"}}
+{"timestamp":"2026-10-18T00:01:02Z","type":"response_item","payload":{"type":"message","id":"user-c","role":"user","content":[{"type":"input_text","text":"恢复后的第三问"}]}}
+{"timestamp":"2026-10-18T00:01:03Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"仅保留摘要"}],"encrypted_content":"fixture-encrypted-private-body"}}
+{"timestamp":"2026-10-18T00:01:04Z","type":"response_item","payload":{"type":"function_call","call_id":"call-c","name":"lookup","arguments":"{}"}}
+{"timestamp":"2026-10-18T00:01:05Z","type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-c","reason":"interrupted"}}
