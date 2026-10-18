@@ -329,3 +329,12 @@ HTTP 面板由原健康服务器承载：/healthz 分支无需认证，仅返回
 ## 13. 管理审计预算
 
 `ObsStore` 按阶段（settings_changed、prompt_changed、thread_reset）或 `@` 票据前缀识别管理事件：直接追加脱敏后的行，跳过普通事件数量、累计字节预算及进度合并。普通预算聚合也排除管理行。`purge(days, now)` 接口保持不变，内部以构造时传入的管理保留天数分别清理；默认 365 天，普通事件与指标默认 30 天。主进程将已校验的 OBS_ADMIN_RETENTION_DAYS 传入，不改变面板查询契约。
+
+
+## 14. 重置事务与归档镜像
+
+pi 的 session 文档 `cs.pi.threads.archive` 保存最新 200 条归档和旧 JSONL 导入标记；`resetThread` 持有会话键锁与映射锁，在一次 `harness.commit` 内清空映射并追加归档。数据库提交后逐个原子重写 JSON/JSONL 镜像；镜像失败记录告警，下次启动或映射操作恢复。启动只在未迁移时读取旧 JSONL，迁移后始终从数据库重建。
+
+Codex 归档与映射文件的读改写共用文件串行队列；归档原子替换仅保留最新 200 条，再清空线程键。pi 与 Codex 共用 `thread-archive.ts` 的 JSONL 原子写出与轮换逻辑。Codex 两个文件仍不是跨文件事务；本次原子事务保证针对 pi SQLite。
+
+pi-durable 1.3.0 缺少公开删除会话 API（Harness / Storage / StorageWrite），故每日衰老尚不删除退休会话；PI_ARCHIVE_RETENTION_DAYS 默认 90 为目标保留天数，当前仅校验配置。归档行上限不等于底层会话存储上限，详见 DEPLOY.md。

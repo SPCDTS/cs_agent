@@ -4,7 +4,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import { defineDoc, MemoryStorage, type Harness, type JsonObject, type ConversationId } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PiBackend } from "../../src/agent/backends/pi.js";
+import { PiBackend, PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { createBackendSelector } from "../../src/agent/backends/select.js";
 import { BackendTimeoutError, type AgentRequest } from "../../src/agent/backends/types.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
@@ -468,5 +468,76 @@ describe("pi resetThread", () => {
     expect(after).toBeTypeOf("number"); expect(after).not.toBe(before);
     expect(await s.pi.resetThread("private:5")).toBeNull();
     await expect(s.pi.resetThread("../etc")).rejects.toThrow("非法会话键");
+  });
+});
+
+
+describe("pi 重置事务与归档轮换", () => {
+  it("SQLite 归档追加失败会回滚映射清空并报告错误", async () => {
+    const s = await setup([reply()], { disk: true });
+    await s.pi.handle(request("before-failure"), handleContext());
+    const before = await s.pi.readThreadIds();
+    const commit = s.pi.harness.commit.bind(s.pi.harness);
+    const fail = vi.spyOn(s.pi.harness, "commit").mockImplementationOnce((change, ctx) => commit(async tx => {
+      const doc = tx.doc.bind(tx);
+      const proxy = new Proxy(tx, { get(target, key, receiver) {
+        if (key === "doc") return (...args: unknown[]) => {
+          if (args[0] === PiThreadsArchiveDoc) throw new Error("archive append failed");
+          return Reflect.apply(doc, tx, args);
+        };
+        return Reflect.get(target, key, receiver);
+      } });
+      return change(proxy);
+    }, ctx));
+    try { await expect(s.pi.resetThread("group:7")).rejects.toThrow("archive append failed"); }
+    finally { fail.mockRestore(); }
+    expect(await s.pi.readThreadIds()).toEqual(before);
+    expect((await s.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual([]);
+    expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).toEqual(before);
+    await s.pi.close();
+    const restarted = await setup([], { dir: s.dir, disk: true });
+    expect(await restarted.pi.readThreadIds()).toEqual(before);
+    expect((await restarted.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual([]);
+  });
+
+  it("提交后 JSON/JSONL 镜像写入失败，重启从 SQLite 修复且不重复归档", async () => {
+    const s = await setup([reply()], { disk: true });
+    await s.pi.handle(request("mirror-failure"), handleContext());
+    const before = await s.pi.readThreadIds();
+    const rename = vi.spyOn(fs, "rename").mockRejectedValue(new Error("mirror write failed"));
+    try { expect(await s.pi.resetThread("group:7")).toBe(before["group:7"]); }
+    finally { rename.mockRestore(); }
+    expect(await s.pi.readThreadIds()).toEqual({});
+    expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).toEqual(before);
+    expect((await s.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toHaveLength(1);
+    await s.pi.close();
+    const restarted = await setup([], { dir: s.dir, disk: true });
+    expect(await restarted.pi.readThreadIds()).toEqual({});
+    expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).toEqual({});
+    const rows = (await fs.readFile(path.join(s.dir, "pi-threads-archive.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    expect(rows).toEqual([expect.objectContaining({ conversation: before["group:7"] })]);
+    expect(await restarted.pi.resetThread("group:7")).toBeNull();
+    expect((await restarted.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toHaveLength(1);
+  });
+
+  it("导入旧归档及后续重置只保留最新 200 条，重启不重复导入", async () => {
+    const dir = tmp("pi-archive-rotation-");
+    const rows = Array.from({ length: 205 }, (_, i) => ({ key: "group:7", conversation: 10000 + i, archived_at: new Date(i * 1000).toISOString(), reason: "legacy" }));
+    await fs.writeFile(path.join(dir, "pi-threads-archive.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n", "utf8");
+    const s = await setup([reply()], { dir, disk: true });
+    expect((await s.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual(rows.slice(-200));
+    await s.pi.handle(request("rotate"), handleContext());
+    const id = (await s.pi.readThreadIds())["group:7"];
+    await s.pi.resetThread("group:7");
+    const archive = (await s.pi.harness.snapshot(PiThreadsArchiveDoc, context))!.rows;
+    expect(archive).toHaveLength(200);
+    expect(archive[0]).toEqual(rows[6]); expect(archive.at(-1)?.conversation).toBe(id);
+    const file = path.join(dir, "pi-threads-archive.jsonl");
+    expect((await fs.readFile(file, "utf8")).trim().split("\n").map(line => JSON.parse(line))).toEqual(archive);
+    await s.pi.close();
+    await fs.writeFile(file, JSON.stringify(rows[0]) + "\n", "utf8");
+    const reopened = await setup([], { dir, disk: true });
+    expect((await reopened.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual(archive);
+    expect((await fs.readFile(file, "utf8")).trim().split("\n")).toHaveLength(200);
   });
 });

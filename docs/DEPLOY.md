@@ -309,3 +309,12 @@ ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUs
 `settings_changed`、`prompt_changed`、`thread_reset`，以及任何 ticket 以 `@` 开头的事件，都归入管理审计类别。不受单票据事件数量或累计 detail 字节预算限制，不合并进度、不覆盖终态，也不消耗同名普通票据的预算；仍按原有规则脱敏。管理事件仅由年龄清理，默认保留 365 天（`OBS_ADMIN_RETENTION_DAYS`），面板查询接口与分页上限不变。
 
 新增的 `PI_ARCHIVE_RETENTION_DAYS=90` 表示 pi 退休会话的目标保留期；当前安装的 pi-durable 1.3.0 没有删除会话 API，此项暂不触发数据库清理。两项配置均须为正整数。
+
+
+### 线程重置与归档上限
+
+Codex 的 `codex-threads-archive.jsonl`、pi 的 `pi-threads-archive.jsonl` 均只保留最新 200 条。Codex 在重置时通过进程内文件串行队列读改写，临时文件原子替换归档；不同键并发重置不会相互覆盖。
+
+pi 将映射清空与归档行写入同一次 `pi.sqlite` 事务。归档追加或事务失败时，重置报错且映射不变；事务成功后重写 `pi-threads.json` 和 JSONL 镜像。镜像写入失败只记录 `pi thread mirror stale; will retry`，已提交的重置仍然有效，下次启动或映射操作从数据库重写。首次升级会将旧 JSONL 最新 200 条导入一次；之后 SQLite 为权威数据，镜像缺失或陈旧不会反向覆盖数据库。
+
+限制：pi-durable 1.3.0 的公开 `Harness`、`Storage` 和 `StorageWrite` 接口均无删除会话能力，因此每日衰老任务暂不能按 `PI_ARCHIVE_RETENTION_DAYS=90` 删除退休会话，也不能清除迁移停用的旧 shared 会话。此配置目前仅校验、保留目标天数，不保证 pi.sqlite 大小有界；200 条上限仅约束重置归档记录和 JSONL 镜像，既有会话内容仍在数据库中。待库提供安全删除 API 后再接入每日衰老，不直接修改其内部表。

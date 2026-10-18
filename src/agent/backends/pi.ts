@@ -1,3 +1,4 @@
+import { readThreadArchive, writeThreadArchive, THREAD_ARCHIVE_LIMIT } from "../thread-archive.js";
 import { trace } from "../../obs/trace.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -21,6 +22,13 @@ const context = BACKGROUND_CONTEXT;
 /** 与会话创建同事务提交，JSON 映射是原子写出的运维镜像，丢失时可从 SQLite 重建。 */
 const PiThreadsDoc = defineDoc<Record<string, number | null>>({
   kind: "cs.pi.threads", version: 1, scope: "session", initial: () => ({}),
+});
+
+type PiArchiveRow = { key: string; conversation: number; archived_at: string; reason: string };
+/** 重置归档与映射在同一次 SQLite 提交中写入；JSONL 仅是可重建镜像。 */
+export const PiThreadsArchiveDoc = defineDoc<{ imported: boolean; rows: PiArchiveRow[] }>({
+  kind: "cs.pi.threads.archive", version: 1, scope: "session",
+  initial: () => ({ imported: false, rows: [] }),
 });
 
 const PiMigrationDoc = defineDoc<{ sharedRetired: boolean }>({
@@ -68,7 +76,8 @@ export class PiBackend implements AgentBackend {
         return true;
       }, context);
       if (retired) log.warn("pi shared conversation retired; mixed history will never be reused");
-      await backend.persistThreads();
+      await backend.importArchive();
+      await backend.persistMirrors();
       // 先把恢复中的回合纳入对应线程锁，再允许新请求；沿用已落盘截止时间。
       for (const [key, id] of Object.entries(await backend.readThreadIds())) {
         const conv = await harness.conversation(id as ConversationId, context);
@@ -113,6 +122,28 @@ export class PiBackend implements AgentBackend {
     } finally { await fs.unlink(tmp).catch(() => undefined); }
   }
 
+  private get archiveFile(): string { return path.join(this.opts.dataDir, "pi-threads-archive.jsonl"); }
+
+  private async importArchive(): Promise<void> {
+    if ((await this.harness.snapshot(PiThreadsArchiveDoc, context))?.imported) return;
+    const rows = await readThreadArchive<PiArchiveRow>(this.archiveFile);
+    await this.harness.commit(async tx => {
+      const archive = await tx.doc(PiThreadsArchiveDoc);
+      if (!archive.imported) { archive.rows = rows.slice(-THREAD_ARCHIVE_LIMIT); archive.imported = true; }
+    }, context);
+  }
+
+  /** 提交后的镜像失败只告警；下次启动或映射操作重写，不撤销已提交的重置。 */
+  private async persistMirrors(): Promise<void> {
+    for (const write of [() => this.persistThreads(), async () => {
+      const archive = await this.harness.snapshot(PiThreadsArchiveDoc, context);
+      await writeThreadArchive(this.archiveFile, archive?.rows ?? []);
+    }]) {
+      try { await write(); }
+      catch (err) { log.warn("pi thread mirror stale; will retry", { error: err instanceof Error ? err.message : String(err) }); }
+    }
+  }
+
   private async conversation(key: string): Promise<Conversation> {
     // 仅创建和 JSON 写回用短全局锁，模型回合按 owner 或 scope 分别串行。
     return this.lock("mapping", async () => {
@@ -122,13 +153,13 @@ export class PiBackend implements AgentBackend {
         const conv = await this.harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 会话不存在");
         await conv.configure(agent, context);
-        await this.persistThreads();
+        await this.persistMirrors();
         return conv;
       }
       const conv = await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent,
         init: async (tx, conversationId) => { (await tx.doc(PiThreadsDoc))[key] = conversationId; },
       }, context);
-      await this.persistThreads();
+      await this.persistMirrors();
       return conv;
     });
   }
@@ -222,17 +253,20 @@ export class PiBackend implements AgentBackend {
 
   /**
    * 面板"重置会话"：排在该键的回合之后（不打断进行中的回合），映射置空、旧会话保留在 SQLite 中作归档，
-   * 并追加一行到 ${DATA_DIR}/pi-threads-archive.jsonl；下一条消息新建会话。返回被归档的会话 id。
+   * 归档记录与映射同事务提交，再重写 JSON/JSONL 镜像；下一条消息新建会话。
    */
   resetThread(key: string, reason = "dashboard"): Promise<number | null> {
     if (key !== "owner" && !isScope(key)) return Promise.reject(new Error("非法会话键"));
     return this.lock(key, () => this.lock("mapping", async () => {
       const id = (await this.readThreadIds())[key] ?? null;
       if (id === null) return null;
-      await this.harness.commit(async tx => { (await tx.doc(PiThreadsDoc))[key] = null; }, context);
-      await fs.appendFile(path.join(this.opts.dataDir, "pi-threads-archive.jsonl"),
-        JSON.stringify({ key, conversation: id, archived_at: new Date().toISOString(), reason }) + "\n", { mode: 0o600 });
-      await this.persistThreads();
+      await this.harness.commit(async tx => {
+        (await tx.doc(PiThreadsDoc))[key] = null;
+        const archive = await tx.doc(PiThreadsArchiveDoc);
+        archive.rows.push({ key, conversation: id, archived_at: new Date().toISOString(), reason });
+        archive.rows = archive.rows.slice(-THREAD_ARCHIVE_LIMIT);
+      }, context);
+      await this.persistMirrors();
       log.info("pi conversation reset", { conversation_key: key, conversation: id, reason });
       return id;
     }));

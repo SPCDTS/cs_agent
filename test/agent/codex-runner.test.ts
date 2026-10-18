@@ -547,3 +547,19 @@ describe("resetThread", () => {
     expect(threadOf(dir, "owner")).toBeUndefined();
   });
 });
+
+
+describe("codex 归档轮换", () => {
+  it("并发重置两个键保留最新 200 条归档，不丢失任一新记录", async () => {
+    const { dir, runner } = setup();
+    writeFileSync(path.join(dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "new-owner" }, shared: { thread_id: "new-shared" } }), "utf8");
+    const file = path.join(dir, "codex-threads-archive.jsonl");
+    const old = Array.from({ length: 205 }, (_, i) => ({ key: "shared", thread_id: "old-" + i, archived_at: new Date(i * 1000).toISOString() }));
+    writeFileSync(file, old.map(row => JSON.stringify(row)).join("\n") + "\n", "utf8");
+    expect(await Promise.all([runner.resetThread("owner"), runner.resetThread("shared")])).toEqual(["new-owner", "new-shared"]);
+    const rows = readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    expect(rows).toHaveLength(200); expect(rows[0].thread_id).toBe("old-7");
+    expect(rows.slice(-2).map(row => row.thread_id).sort()).toEqual(["new-owner", "new-shared"]);
+    expect(await runner.readThreadIds()).toEqual({ owner: null, shared: null });
+  });
+});

@@ -1,3 +1,4 @@
+import { readThreadArchive, writeThreadArchive } from "./thread-archive.js";
 import { imageRefsValue } from "./image-references.js";
 /**
  * 两条固定 codex 线程：owner（owner 私聊）与 shared（所有群与其他私聊），记录在 ${DATA_DIR}/codex-threads.json。
@@ -405,14 +406,20 @@ export class CodexRunner {
    */
   resetThread(key: ThreadKey, reason = "dashboard"): Promise<string | null> {
     const run = (this.queues.get(key) ?? Promise.resolve()).then(async () => {
-      const old = await this.readThread(key);
-      if (old) {
-        const archive = path.join(path.dirname(this.opts.threadsFile), "codex-threads-archive.jsonl");
-        await fs.appendFile(archive, JSON.stringify({ key, ...old, archived_at: new Date().toISOString(), reason }) + "\n", { mode: 0o600 });
-      }
-      await this.writeThread(key, undefined);
-      log.info("codex thread reset", { thread_key: key, thread_id: old?.thread_id ?? null, reason });
-      return old?.thread_id ?? null;
+      await this.migrate();
+      return this.serialized(async () => {
+        const doc = await this.readThreadsRaw();
+        const old = doc[key];
+        if (old) {
+          const archive = path.join(path.dirname(this.opts.threadsFile), "codex-threads-archive.jsonl");
+          const rows = await readThreadArchive(archive);
+          await writeThreadArchive(archive, [...rows, { key, ...old, archived_at: new Date().toISOString(), reason }]);
+        }
+        delete doc[key];
+        await this.writeThreadsFile(doc);
+        log.info("codex thread reset", { thread_key: key, thread_id: old?.thread_id ?? null, reason });
+        return old?.thread_id ?? null;
+      });
     });
     this.queues.set(key, run.catch(() => undefined));
     return run;
