@@ -6,7 +6,7 @@ import { tmp } from "./helpers.js";
 export async function sandboxRequirements(dir: string): Promise<string> {
   const file = path.join(dir, "requirements.toml");
   await fs.writeFile(file, `[permissions.filesystem]\ndeny_read = [\n${[
-    "*.sqlite*", "obs-token", "codex/auth.json", "images", "media", "incoming", "tickets",
+    "*.sqlite*", "obs-token", "codex/auth.json", "codex/trace", "images", "media", "incoming", "tickets",
   ].map(p => JSON.stringify(path.join(dir, p))).join(",\n")}\n]\n`, "utf8");
   return file;
 }
@@ -15,9 +15,10 @@ export async function sandboxFixture(key = "group:7", ticket = "ticket-7", dataD
   const dir = await fs.realpath(dataDir);
   const requirementsFile = await sandboxRequirements(dir);
   const store = { mediaPathAllowed: (_access: unknown, _file: string) => false };
-  const options = { dataDir: dir, key, request: { ticket, access: key === "owner" ? "all" : key }, store, requirementsFile };
+  const workspaceDir = path.join(dir, "codex-work");
+  const options = { dataDir: dir, workspaceDir, key, request: { ticket, access: key === "owner" ? "all" : key }, store, requirementsFile };
   const env = await codingEnvironment(options);
-  return { dir, requirementsFile, store, options, env };
+  return { dir, workspaceDir, requirementsFile, store, options, env };
 }
 
 export async function put(file: string, text = "private-content"): Promise<string> {

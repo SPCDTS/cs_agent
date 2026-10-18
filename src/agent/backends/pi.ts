@@ -41,6 +41,8 @@ const PiMigrationDoc = defineDoc<{ sharedRetired: boolean }>({
 
 export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness"> {
   models: Models;
+  /** Codex 工作区根目录，交给 Pi 路径策略整体禁读。 */
+  workspaceDir?: string;
   contextUsage?: ContextUsageStore;
   model: ModelRef;
   thinkingLevel: ModelThinkingLevel;
@@ -117,6 +119,7 @@ export class PiBackend implements AgentBackend {
 
   static async open(opts: PiBackendOptions): Promise<PiBackend> {
     await new PiPromptLoader(opts.dataDir).read();
+    const workspaceDir = opts.workspaceDir ?? process.env.WORKSPACE_DIR ?? "/workspace";
     const registry = createRegistry();
     let harness!: Harness;
     registry.install(await codingTools());
@@ -130,7 +133,7 @@ export class PiBackend implements AgentBackend {
         // 每次工具调用/恢复均从已提交文档重建身份；不从 handle 闭包或全局变量取当前票据。
         const request = await target.read.snapshot(PiRequestDoc, target.conversationId, ctx);
         if (!request?.ticket) return undefined;
-        return codingEnvironment({ dataDir: opts.dataDir, key, request, store: opts.store });
+        return codingEnvironment({ dataDir: opts.dataDir, workspaceDir, key, request, store: opts.store });
       },
       settings: { toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
         enabled: true,

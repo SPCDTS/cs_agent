@@ -152,8 +152,12 @@ function matchesDeny(file: string, deny: DenyRead): boolean {
   }
 }
 
+interface PiDenyRead extends DenyRead { workspaceRoots: string[] }
+
 export interface PiSandboxOptions {
   dataDir: string;
+  /** Codex 的 WORKSPACE_DIR；必须由调用方传入，缺失时关闭工具权限。 */
+  workspaceDir?: string;
   key: string;
   request: { ticket: string; access: string };
   store: Pick<ContextStore, "mediaPathAllowed">;
@@ -185,17 +189,28 @@ export class PiPathPolicy {
     this.media = path.resolve(dataDir, "media");
   }
 
-  async deny(): Promise<DenyRead> {
+  async deny(): Promise<PiDenyRead> {
+    const { dataDir, workspaceDir } = this.options;
+    if (!workspaceDir?.trim()) throw new Error("pi 沙箱缺少 WORKSPACE_DIR");
+    const workspace = path.resolve(workspaceDir);
+    // 保留配置路径与规范路径；尚不存在的目录也禁读，链接不能绕过遮蔽或配置校验。
+    const workspaceRoots = [...new Set([workspace, await policyRealpath(workspace)])];
+    const dataRoots = [path.resolve(dataDir), await policyRealpath(dataDir)];
+    if (workspaceRoots.some(root => root === path.parse(root).root || dataRoots.some(dir => within(root, dir)))) {
+      throw new Error("pi 沙箱 WORKSPACE_DIR 不能是根目录或包含 DATA_DIR");
+    }
     const deny = await loadDenyRead(this.options.requirementsFile);
-    const extra = [path.resolve(this.options.dataDir, "pi.sqlite*"), path.resolve(this.options.dataDir, "pi-threads*")];
-    return { patterns: [...deny.patterns, ...extra], paths: [...deny.paths, ...await expandDenyRead(extra)] };
+    const extra = [path.resolve(dataDir, "pi.sqlite*"), path.resolve(dataDir, "pi-threads*"), ...workspaceRoots];
+    return { workspaceRoots, patterns: [...deny.patterns, ...extra], paths: [...deny.paths, ...await expandDenyRead(extra)] };
   }
 
-  async check(file: string, mode: "read" | "write", deny?: DenyRead): Promise<string> {
+  async check(file: string, mode: "read" | "write", deny?: PiDenyRead): Promise<string> {
     deny ??= await this.deny();
     const absolute = path.resolve(this.workspace, file);
     const canonical = await policyRealpath(absolute);
     const forbidden = () => { throw new Error(`pi 沙箱拒绝${mode === "read" ? "读取" : "写入"}：${file}`); };
+    // Codex 工作区整棵禁读写，优先于本票据图片、incoming 与媒体授权例外。
+    if ([absolute, canonical].some(p => deny.workspaceRoots.some(root => within(root, p)))) forbidden();
     // 在主进程内的文件接口不得读取宿主 proc、设备或内核接口。
     if ([absolute, canonical].some(p => ["/proc", "/sys", "/dev"].some(root => within(path.resolve(root), p)))) forbidden();
     // 同时校验词法路径与 realpath：票据目录/工作区自身被换成链接也不能扩大授权根。

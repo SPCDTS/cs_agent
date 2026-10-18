@@ -232,6 +232,7 @@ deny_read = [
   "$C/archived_sessions",
   "$C/history.jsonl",
   "$C/log",
+  "$C/trace",
   "$C/shell_snapshots",
   "$C/memories",
   "$C/*.sqlite*",

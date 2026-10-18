@@ -14,7 +14,7 @@ describe("受管 deny_read", () => {
     const managed = script.match(/\[permissions\.filesystem\]\r?\ndeny_read\s*=\s*\[[\s\S]*?\r?\n\]/)?.[0];
     expect(managed).toBeDefined();
     const rules = parseDenyRead(managed!.replaceAll("$C", "/fixture-data/codex").replaceAll("$D", "/fixture-data"));
-    for (const file of ["/fixture-data/*.sqlite*", "/fixture-data/codex/*.sqlite*", "/fixture-data/obs-token", "/fixture-data/media"]) {
+    for (const file of ["/fixture-data/*.sqlite*", "/fixture-data/codex/*.sqlite*", "/fixture-data/obs-token", "/fixture-data/media", "/fixture-data/codex/trace"]) {
       expect(rules).toContain(path.normalize(file));
     }
   });
@@ -55,6 +55,44 @@ describe("受管 deny_read", () => {
 });
 
 describe("Pi 文件策略", () => {
+  it("完整拒绝配置的 Codex 工作区与 trace，ID 归档仍可读", async () => {
+    const { dir, workspaceDir, env } = await sandboxFixture();
+    // 目录尚未创建时也拒绝；之后新增的 scope 在下一次调用中纳入 bwrap 遮蔽。
+    await expect(env.policy.check(path.join(workspaceDir, "group_8", "note"), "read")).rejects.toThrow("拒绝");
+    const files = await Promise.all([
+      put(path.join(workspaceDir, "group_8", "note")), put(path.join(workspaceDir, "owner", "note")),
+      put(path.join(dir, "codex", "trace", "x.json")),
+    ]);
+    for (const file of files) {
+      expect(await env.readTextFile(file, context)).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+      expect(await env.writeFile(file, "bad", context)).toMatchObject({ ok: false });
+    }
+    const deny = await env.policy.deny();
+    for (const root of [workspaceDir, path.join(dir, "codex", "trace")]) {
+      expect(deny.patterns).toContain(root);
+      expect(deny.paths).toContainEqual({ path: root, directory: true });
+      expect(bwrapArgs(env.cwd, env.policy.workRoot, deny.paths, "true").join(" ")).toContain("--tmpfs " + root + " --remount-ro " + root);
+    }
+    const archive = await put(path.join(dir, "codex-threads-archive.jsonl"), '{"thread_id":"ids-only"}');
+    expect(await env.readTextFile(archive, context)).toMatchObject({ ok: true, value: '{"thread_id":"ids-only"}' });
+    expect(deny.patterns).not.toContain(archive);
+    expect(await env.readTextFile(await put(path.join(workspaceDir + "-public", "note"), "public"), context)).toMatchObject({ ok: true, value: "public" });
+  });
+  it("Codex 工作区链接的真实目标同样禁读，票据例外不能覆盖它", async () => {
+    const { dir, workspaceDir, env, options } = await sandboxFixture();
+    const target = path.join(dir, "images", "ticket-7");
+    const file = await put(path.join(target, "secret"));
+    await fs.symlink(target, workspaceDir, process.platform === "win32" ? "junction" : "dir");
+    const deny = await env.policy.deny();
+    expect(deny.patterns).toEqual(expect.arrayContaining([workspaceDir, target]));
+    expect(deny.paths).toContainEqual({ path: target, directory: true });
+    for (const p of [file, path.join(workspaceDir, "secret")]) {
+      expect(await env.readTextFile(p, context)).toMatchObject({ ok: false });
+      expect(await env.writeFile(p, "bad", context)).toMatchObject({ ok: false });
+    }
+    const nested = await codingEnvironment({ ...options, workspaceDir: path.join(workspaceDir, "future") });
+    await expect(nested.policy.check(path.join(target, "future", "note"), "read")).rejects.toThrow("拒绝");
+  });
   it("默认文件可读；禁读库、票据、其他会话及主进程 proc 不可读", async () => {
     const { dir, env } = await sandboxFixture();
     for (const file of ["qq-messages.sqlite", "qq-messages.sqlite-wal", ".hidden.sqlite", "obs-token", "codex/auth.json", "tickets/other.json", "pi-work/group_8/note", "pi.sqlite-shm", "pi-threads.json"]) {

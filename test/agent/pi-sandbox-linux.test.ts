@@ -21,9 +21,21 @@ describe.runIf(process.platform === "linux")("真实 bwrap（请以容器 node �
 
   it("遮蔽库/令牌/其他会话；仅工作区和临时 /tmp 可写，proc 为新 PID 空间", async () => {
     expect(process.getuid!(), "必须以非 root 用户验证与生产一致的 user namespace 行为").not.toBe(0);
-    const { dir, env } = await fixture();
+    const { dir, workspaceDir, env } = await fixture();
     const secret = "fixture-private-content";
     const files = await Promise.all(["qq-messages.sqlite", "qq-messages.sqlite-wal", "obs-token", "pi.sqlite", "pi.sqlite-shm", "codex/auth.json", "pi-work/group_8/note", "images/ticket-7/a", "media/a", "incoming/ticket-7/a"].map(p => put(path.join(dir, p), secret)));
+    const crossScope = await Promise.all([
+      put(path.join(workspaceDir, "group_8", "note"), secret), put(path.join(dir, "codex", "trace", "x.json"), secret),
+    ]);
+    files.push(...crossScope);
+    for (const file of crossScope) {
+      for (const result of await Promise.all([
+        env.readTextFile(file, context), env.readTextLines(file, undefined, context), env.openTextLineReader(file, context),
+        env.readBinaryFile(file, context), env.openBinaryReader(file, undefined, context), env.fileInfo(file, context),
+      ])) expect(result).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    }
+    const archive = await put(path.join(dir, "codex-threads-archive.jsonl"), '{"thread_id":"ids-only"}');
+    expect(await env.readTextFile(archive, context)).toMatchObject({ ok: true, value: '{"thread_id":"ids-only"}' });
     const original = await put(path.join(dir, "public-file"), "public-content");
     await fs.symlink(files[0]!, path.join(env.cwd, "alias"));
     const hostPidNamespace = await fs.readlink("/proc/self/ns/pid");
@@ -36,7 +48,7 @@ describe.runIf(process.platform === "linux")("真实 bwrap（请以容器 node �
       const read = p => { try { return fs.readFileSync(p, 'utf8'); } catch { return 'DENIED'; } };
       const write = p => { try { fs.writeFileSync(p, 'changed'); return true; } catch { return false; } };
       console.log(JSON.stringify({
-        contents: paths.map(read), public: read(${JSON.stringify(original)}),
+        contents: paths.map(read), public: read(${JSON.stringify(original)}), archive: read(${JSON.stringify(archive)}),
         writable: [write('own.txt'), write('/tmp/pi-sandbox-temp'), write(${JSON.stringify(original)}), write('/etc/pi-sandbox-test')],
         parentEnv: read('/proc/1/environ'), pidNamespace: fs.readlinkSync('/proc/self/ns/pid'),
         privateEnv: process.env.PI_PRIVATE_SECRET, url: process.env.COMFYUI_URL, explicit: process.env.TOOL_VAR,
@@ -47,6 +59,7 @@ describe.runIf(process.platform === "linux")("真实 bwrap（请以容器 node �
     const report = JSON.parse(output.trim());
     expect(report.contents.every((s: string) => s === "" || s === "DENIED")).toBe(true);
     expect(report.public).toBe("public-content");
+    expect(report.archive).toBe('{"thread_id":"ids-only"}');
     expect(report.writable).toEqual([true, true, false, false]);
     expect(report.parentEnv).not.toContain(secret);
     expect(report.pidNamespace).not.toBe(hostPidNamespace);

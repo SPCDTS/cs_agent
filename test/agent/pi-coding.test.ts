@@ -67,6 +67,29 @@ describe("pi 内置工具执行环境", () => {
     expect(await env.writeFile("note.txt", "x", context)).toMatchObject({ ok: false });
   });
 
+  it.each(["unset", "empty", "blank", "root", "normalized-root", "data", "parent", "symlink"])("WORKSPACE_DIR %s 时关闭 bash 和文件工具", async kind => {
+    vi.spyOn(sandbox, "requireBwrap").mockResolvedValue();
+    const exec = vi.spyOn(NodeExecutionEnv.prototype, "exec");
+    const { dir, options } = await sandboxFixture();
+    const root = path.parse(dir).root;
+    let workspaceDir: string | undefined;
+    if (kind === "empty") workspaceDir = "";
+    if (kind === "blank") workspaceDir = "  ";
+    if (kind === "root") workspaceDir = root;
+    if (kind === "normalized-root") workspaceDir = path.join(root, "unused") + path.sep + "..";
+    if (kind === "data") workspaceDir = dir;
+    if (kind === "parent") workspaceDir = path.dirname(dir);
+    if (kind === "symlink") {
+      workspaceDir = path.join(dir, "workspace-link");
+      await fs.symlink(dir, workspaceDir, process.platform === "win32" ? "junction" : "dir");
+    }
+    const env = await codingEnvironment({ ...options, workspaceDir });
+    expect(await env.exec("touch should-not-exist", undefined, context)).toMatchObject({ ok: false, error: { code: "spawn_error", message: expect.stringContaining("WORKSPACE_DIR") } });
+    expect(exec).not.toHaveBeenCalled();
+    expect(await env.readTextFile(options.requirementsFile, context)).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+    expect(await env.writeFile("note.txt", "x", context)).toMatchObject({ ok: false, error: { code: "permission_denied" } });
+  });
+
   it("bwrap 缺失及启动被拒绝均不退回裸跑", async () => {
     const probe = vi.spyOn(sandbox, "requireBwrap").mockRejectedValue(new Error("ENOENT /usr/bin/bwrap"));
     const exec = vi.spyOn(NodeExecutionEnv.prototype, "exec").mockResolvedValue({ ok: false, error: new ExecutionError("spawn_error", "EPERM") });

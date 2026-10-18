@@ -46,7 +46,7 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { dir?: string; workspaceDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   vi.stubEnv("CODEX_REQUIREMENTS_FILE", await sandboxRequirements(dir));
   const contextUsage = new ContextUsageStore(dir);
@@ -67,7 +67,7 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
   const http = opts.fetch ?? vi.fn(async () => Response.json({ results: [{ title: "资料", date: "2026-10-18", summary: "摘要", url: "https://example.com", rerank_score: 1 }] })) as typeof fetch;
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
-  const pi = await PiBackend.open({ dataDir: dir, models, model: { provider: model.provider, modelId: model.id },
+  const pi = await PiBackend.open({ dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
     mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
     thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
@@ -135,6 +135,21 @@ describe("pi durable backend", () => {
     expect(tools[3]!.isError).toBe(process.platform !== "linux");
     expect(results(seen!)).toContain(process.platform === "linux" ? "builtin-ok" : "Linux bwrap");
     expect(DEFAULT_PI_PROMPT).toContain("用 read 打开");
+  });
+
+  it.each(["config", "env"])("从 %s 传入 Codex 工作区，read 不能跨 scope 读取", async source => {
+    const dir = tmp("cs-pi-workspace-");
+    const workspaceDir = path.join(dir, "configured-workspace");
+    const secret = await put(path.join(workspaceDir, "group_8", "note"), "other-scope-secret");
+    // 显式配置优先于环境变量；未传配置时使用环境变量。
+    vi.stubEnv("WORKSPACE_DIR", source === "env" ? workspaceDir : path.join(dir, "unused-workspace"));
+    let seen: TranscriptContext | undefined;
+    const s = await setup([call("read", { path: secret }), ctx => { seen = ctx; return reply(); }],
+      { dir, ...(source === "config" ? { workspaceDir } : {}) });
+    await s.pi.handle(request("workspace-denied"), handleContext());
+    expect(seen!.messages.find(m => m.role === "toolResult")?.isError).toBe(true);
+    expect(results(seen!)).toContain("拒绝读取");
+    expect(results(seen!)).not.toContain("other-scope-secret");
   });
 
   it("read 打开召回路径返回图片内容，qq_image 自身仍只返回文本", async () => {
