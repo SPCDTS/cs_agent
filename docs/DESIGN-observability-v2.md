@@ -183,3 +183,10 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 - 提交 `32fb8e8`→变基后 4 个提交（表与容错写入器、aging 血缘、pi / Codex MCP 召回埋点、只读 API 与三级证据契约，契约见 `docs/O5-recall-api.md`）。`summary_versions`、`recall_events` 建在 `observability.sqlite`，`OBS_MEMORY_RETENTION_DAYS` 默认 90，接入每日 purge。codex 每轮注入 `QQ_TICKET / QQ_BACKEND / QQ_SESSION`，MCP 子进程用独立 WAL 连接写入，写失败只告警不影响工具返回。
 - 主会话复跑：typecheck、70 文件 / 972 项、build 通过；主分支期间被另一会话推进（`d3d84b4` 仅文档），O5 变基后 ff 合并、部署。真实验证：容器内以 stdio 启动 `dist/mcp/qq-context.js`（env 带 ticket/session）调用 qq_search，`/api/memory/recalls` 立即出现该事件（返回 3 条、dropped 0、117 字），`/api/memory/recalls/:id` 给出命中预览与三级证据（此冒烟事件无对应回合，第三级为 unavailable，判定正确）；冒烟行随后删除。`summary_versions` 待下次整理（每日 03:00 UTC）后产生，`/api/memory/summaries/1` 当前 `lineage: null`。
 - 页面（召回记录页、摘要血缘区、回合页"记忆调用"、检索页第三级）由 Opus 在 `feat/obs-v2-recall-ui` 实现，合入后单独记录。
+
+### 事故记录：主树半合并代码被构建部署（2026-10-19 00:21–00:30 本地，主会话）
+
+- 经过：主会话按惯例在 `D:projectcs_agent` 主树执行 `docker compose build && up -d` 部署 O5 页面；此时另一会话正在主树上合并 `feat/codex-scope-threads`（§10.1，`codex-runner.ts` 有未解决冲突，28 个文件已暂存未提交）。ff 合并被拒，但构建已用主树工作目录完成，镜像包含了该未评审代码并运行约 3 分钟。其启动迁移把共享线程 `01a14d32…` 归档（reason `scope-split`）并从 `codex-threads.json` 删除。
+- 处置：用 `git worktree add --detach D:/project/cs_agent-rollback a82f998` 从已提交 main 干净构建镜像；停容器，按归档行把 `shared` 原样写回 `codex-threads.json` 并删除该归档行；启动后 `/api/agents` 显示 shared/owner 均活动（16 / 8 回合），容器镜像 sha 9120c3…。未触碰另一会话的合并状态与工作树，已通过跨会话消息告知。
+- 规则（此后强制）：**构建镜像一律从某个提交的干净 worktree 进行（`git worktree add --detach <path> <commit>` + `docker build -t cs-agent:dev <path>`），再在主目录 `docker compose up -d`；绝不以主树工作目录作为构建上下文**。部署前除确认队列为空外，还要确认 `git status` 无暂存/未合并内容。
+- 待办：O5 页面分支 `feat/obs-v2-recall-ui`（72 文件 / 986 项已通过）等另一会话的合并落地后变基、合并、从干净 worktree 构建部署。
