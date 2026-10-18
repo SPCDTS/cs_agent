@@ -1,10 +1,12 @@
+import { ContextStore } from "../context/store.js";
+import type { Access } from "../context/access.js";
 import { observeImages } from "../obs/image.js";
 import { IMAGE_OPTIONS_JSON_SCHEMA, validateImageOptions, type ImageOptions } from "../agent/image-options.js";
-import { imageRefsValue, validateReferences } from "../agent/image-references.js";
+import { imageRefsValue, validateReferencesWithMedia } from "../agent/image-references.js";
 /**
  * image_gen MCP 服务（设计 §4.4）：供容器内 codex 生图，复用 src/agent/image-gen.ts 的同一实现。
  * 输出目录只来自环境变量 IMAGE_TICKET_DIR（cs-agent 每次 codex exec 以 -c 注入 ${DATA_DIR}/images/<ticket>），
- * 工具参数里不接受输出路径（参考图仅接受 IMAGE_REFS 允许列表）；缺失、非法或不在 ${DATA_DIR}/images/ 的直接子目录时所有调用都拒绝。
+ * 工具参数里不接受输出路径（参考图接受 IMAGE_REFS 或当前访问范围内的媒体库路径）；缺失、非法或不在 ${DATA_DIR}/images/ 的直接子目录时所有调用都拒绝。
  * 每次调用输出到新的子目录 <IMAGE_TICKET_DIR>/call-<n>/（同名输出不会互相覆盖），返回 call-<n>/<文件名>；
  * 图片由 cs-agent 在回合结束后从票据目录递归收集并随回复发送。
  */
@@ -93,6 +95,7 @@ export interface ImageGenDeps {
   ticketDir: string | undefined;
   dataDir: string;
   imageRefs?: string;
+  access?: Access;
   waitMs?: number;
   imageTimeoutCapMs?: number;
   /** 惰性创建生图后端（首次调用时） */
@@ -121,6 +124,7 @@ const FAILURE_TEXT: Record<string, string> = {
 
 export function createImageGenServer(deps: ImageGenDeps): { server: Server; dispose: () => Promise<void> } {
   let backend: ImageBackend | undefined;
+  let store: ContextStore | undefined;
   let calls = 0;
   let chain: Promise<unknown> = Promise.resolve();
   const server = new Server(
@@ -141,8 +145,9 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
       options = validateImageOptions(args);
       const allowed = (deps.imageRefs ?? '').split(',').filter(Boolean);
       imageRefsValue(allowed);
-      options.reference_images = await validateReferences(options.reference_images ?? [], allowed,
-        path.join(deps.dataDir, 'incoming', path.basename(dir)));
+      options.reference_images = await validateReferencesWithMedia(options.reference_images ?? [], allowed,
+        path.join(deps.dataDir, 'incoming', path.basename(dir)), { dataDir: deps.dataDir, access: deps.access,
+          openStore: () => store ??= new ContextStore(deps.dataDir, { readOnly: true }) });
     } catch (err) { return text('生图参数无效：' + (err as Error).message, true); }
     if (calls >= MAX_CALLS) return text(`本次回复最多生成 ${MAX_CALLS} 次图片，已达上限。`, true);
     calls++;
@@ -202,6 +207,7 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
   return {
     server,
     dispose: async () => {
+      store?.close();
       await backend?.close().catch(() => undefined);
       await server.close().catch(() => undefined);
     },

@@ -407,8 +407,8 @@ describe("owner / shared threads", () => {
 describe("qq_context access override and §3.2 header", () => {
   it("qqAccessArgs validates and formats the per-call -c override", () => {
     expect(qqAccessArgs(undefined)).toEqual([]);
-    expect(qqAccessArgs("group:200000001")).toEqual(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"']);
-    expect(qqAccessArgs("all")).toEqual(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="all"']);
+    expect(qqAccessArgs("group:200000001")).toEqual(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"', "-c", 'mcp_servers.image_gen.env.QQ_ACCESS="group:200000001"']);
+    expect(qqAccessArgs("all")).toEqual(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="all"', "-c", 'mcp_servers.image_gen.env.QQ_ACCESS="all"']);
     expect(() => qqAccessArgs('group:1" ; x')).toThrow(/非法的 QQ_ACCESS/);
   });
 
@@ -469,9 +469,9 @@ describe("qq_context access override and §3.2 header", () => {
     await runner.ask("one", { qqAccess: "group:200000001" });
     await runner.ask("two", { qqAccess: "all" });
     const [a, b] = calls().filter((c) => c.phase === "start");
-    expect(a.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"']));
+    expect(a.argv).toEqual(expect.arrayContaining(qqAccessArgs("group:200000001")));
     expect(b.argv.slice(0, 2)).toEqual(["exec", "resume"]);
-    expect(b.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="all"']));
+    expect(b.argv).toEqual(expect.arrayContaining(qqAccessArgs("all")));
   });
 });
 

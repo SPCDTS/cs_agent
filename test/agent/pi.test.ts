@@ -1,3 +1,4 @@
+import { mediaFixture } from "../context/media-fixture.js";
 import type { MediaRecall } from "../../src/context/media.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { piContextCapacity } from "../../src/agent/pi-context-usage.js";
@@ -114,6 +115,25 @@ describe("pi durable backend", () => {
     await s.pi.handle(request("private-denied"), handleContext());
     expect(seen[2]).toContain("没有这条消息"); expect(seen[2]).not.toContain("私人秘密");
     await s.pi.handle(request("owner", true), handleContext()); expect(seen[3]).toContain("私人秘密");
+  });
+
+  it("历史参考图按请求范围校验，允许本群与 owner，拒绝别群和未登记路径", async () => {
+    let seen = "";
+    const s = await setup([]);
+    const media = await mediaFixture(s.store, s.dir, "group:7");
+    const foreign = path.join(s.dir, "outside.png"); await fs.writeFile(foreign, TRANSPARENT_PNG);
+    s.faux.setResponses([call("generate_image", { prompt: "编辑", reference_images: [media] }), reply(),
+      call("generate_image", { prompt: "编辑", reference_images: [media] }), ctx => { seen = results(ctx); return reply(); },
+      call("generate_image", { prompt: "编辑", reference_images: [foreign] }), reply(),
+      call("generate_image", { prompt: "编辑", reference_images: [media] }), reply()]);
+    await s.pi.handle(request("media-own"), handleContext());
+    expect(s.imageBackend.submit).toHaveBeenCalledWith(expect.objectContaining({ reference_images: [media] }), expect.anything(), expect.anything());
+    await s.pi.handle({ ...request("media-other"), scope: "group:8", access: "group:8", threadKey: "group:8" }, handleContext());
+    expect(seen).toContain("范围");
+    await s.pi.handle(request("media-outside"), handleContext());
+    expect(s.imageBackend.submit).toHaveBeenCalledTimes(1);
+    await s.pi.handle(request("media-owner", true), handleContext());
+    expect(s.imageBackend.submit).toHaveBeenCalledTimes(2);
   });
 
   it("writes generated files under the ticket/call directory and returns validated attachments", async () => {

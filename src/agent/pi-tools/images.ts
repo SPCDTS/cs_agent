@@ -7,7 +7,9 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { defineTool, type Harness } from "@earendil-works/pi-durable";
 import { ASPECTS, SIZES, validateImageOptions, type ImageOptions } from "../image-options.js";
 import { referenceUploads, ticketImageDir, type ImageBackend } from "../image-gen.js";
-import { validateReferences } from "../image-references.js";
+import type { ContextStore } from "../../context/store.js";
+import { parseAccess } from "../../context/access.js";
+import { validateReferencesWithMedia } from "../image-references.js";
 import { collectNewImages } from "../image-collect.js";
 import { readPendingImages, savePendingImage, type PendingImageJob } from "../image-pending.js";
 import { UnknownJobError } from "../image-gen.js";
@@ -17,9 +19,9 @@ import { PiRequestDoc } from "./request.js";
 export type PiImageBackend = Pick<ImageBackend, "name" | "submit" | "collect" | "reconcile" | "clearReferences">;
 
 /** 生图不是安全重放操作：中断后由 pi-durable 返回 interrupted，不盲目再提交。 */
-export function imageTool(dataDir: string, backend: PiImageBackend, getHarness: () => Harness) {
+export function imageTool(dataDir: string, backend: PiImageBackend, getHarness: () => Harness, store: ContextStore) {
   return defineTool({
-    name: "generate_image", description: "按描述生成或编辑图片，自动随本次 QQ 回复发送；参考图只能选本轮提供的文件。",
+    name: "generate_image", description: "按描述生成或编辑图片，自动随本次 QQ 回复发送；参考图只能选本轮附件或当前会话范围内已召回的图片。",
     replay: "unsafe",
     parameters: Type.Object({
       prompt: Type.String({ minLength: 1, maxLength: 2000 }),
@@ -38,9 +40,8 @@ export function imageTool(dataDir: string, backend: PiImageBackend, getHarness: 
       const signal = AbortSignal.any([AbortSignal.timeout(Math.max(1, request.deadline - Date.now())), ...(context.abortSignal ? [context.abortSignal] : [])]);
       signal.throwIfAborted();
       let opts: ImageOptions = validateImageOptions(args);
-      if (opts.reference_images?.some(file => !request.images.includes(file))) throw new Error("参考图只能选择本票据提供的文件");
-      opts.reference_images = await validateReferences(opts.reference_images ?? [], request.images,
-        path.join(dataDir, "incoming", request.ticket));
+      opts.reference_images = await validateReferencesWithMedia(opts.reference_images ?? [], request.images,
+        path.join(dataDir, "incoming", request.ticket), { dataDir, access: parseAccess(request.access), openStore: () => store });
       const root = path.resolve(dataDir, "images");
       await fs.mkdir(root, { recursive: true });
       if (await fs.realpath(root) !== path.join(await fs.realpath(dataDir), "images")) throw new Error("图片根目录不能是符号链接");

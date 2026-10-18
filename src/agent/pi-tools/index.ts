@@ -40,7 +40,7 @@ export function createPiExtension(opts: PiToolsOptions) {
     if (started.size >= 2048) started.delete(started.keys().next().value!);
     started.set(id, Date.now());
   };
-  const image = imageTool(opts.dataDir, opts.imageBackend, opts.getHarness);
+  const image = imageTool(opts.dataDir, opts.imageBackend, opts.getHarness, opts.store);
   const web = opts.web ?? new DeepSeekWeb();
   const prompt = new PiPromptLoader(opts.dataDir);
   const history = (name: string, description: string, parameters: ReturnType<typeof Type.Object>) => defineTool({

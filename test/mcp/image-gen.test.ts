@@ -1,3 +1,5 @@
+import { ContextStore } from "../../src/context/store.js";
+import { mediaFixture } from "../context/media-fixture.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -82,7 +84,7 @@ function workflowFile(dir: string): string {
 async function stdioClient(env: Record<string, string | undefined>): Promise<Client> {
   const base: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) base[k] = v;
-  for (const k of Object.keys(base)) if (k.startsWith("COMFY") || k === "IMAGE_TICKET_DIR" || k === "IMAGE_REFS") delete base[k];
+  for (const k of Object.keys(base)) if (k.startsWith("COMFY") || k === "IMAGE_TICKET_DIR" || k === "IMAGE_REFS" || k === "QQ_ACCESS") delete base[k];
   for (const [k, v] of Object.entries(env)) if (v !== undefined) base[k] = v;
   const client = new Client({ name: "test", version: "0" });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [ENTRY], env: base, stderr: "pipe" }));
@@ -141,6 +143,22 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     slowIds.delete(job.prompt_id);
     const files = await new HttpImageBackend({ baseUrl: comfyUrl, timeoutMs: 1000 }).collect(job.prompt_id, job.callDir, undefined, job.options);
     expect(files).toHaveLength(1); expect(prompts.length - before).toBe(1);
+  });
+
+  it("stdio 的 QQ_ACCESS 允许本域媒体，拒绝跨域、缺失权限和非媒体文件", async () => {
+    const dir = tmp(), store = new ContextStore(dir);
+    const media = await mediaFixture(store, dir); store.close();
+    const env = { DATA_DIR: dir, COMFY_MODE: "http", COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: "5" };
+    for (const [index, access] of ["group:7", "all", "group:8", undefined, "invalid"].entries()) {
+      const c = await stdioClient({ ...env, QQ_ACCESS: access, IMAGE_TICKET_DIR: path.join(dir, "images", "media-" + index) });
+      const result = await c.callTool({ name: "generate_image", arguments: { prompt: "编辑", reference_images: [media] } });
+      expect(result.isError === true).toBe(index > 1);
+    }
+    const c = await stdioClient({ ...env, QQ_ACCESS: "all", IMAGE_TICKET_DIR: path.join(dir, "images", "outside") });
+    const outside = path.join(dir, "outside.png"); writeFileSync(outside, PNG);
+    const result = await c.callTool({ name: "generate_image", arguments: { prompt: "编辑", reference_images: [outside] } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("范围");
   });
 
   it("lists generate_image as a non-read-only tool", async () => {

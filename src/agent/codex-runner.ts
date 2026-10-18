@@ -63,11 +63,12 @@ function reasoningEffortArgs(effort: ReasoningEffort | undefined): string[] {
   return ["-c", `model_reasoning_effort="${effort}"`];
 }
 
-/** 单轮的 qq_context 访问范围覆盖参数（值必须是 group:<id> / private:<qq> / all）。 */
+/** 单轮的 qq_context / image_gen 访问范围覆盖参数（值必须是 group:<id> / private:<qq> / all）。 */
 export function qqAccessArgs(access: string | undefined): string[] {
   if (access === undefined) return [];
   if (!parseAccess(access)) throw new Error(`非法的 QQ_ACCESS: ${String(access)}`);
-  return ["-c", `mcp_servers.qq_context.env.QQ_ACCESS="${access}"`];
+  return ["-c", `mcp_servers.qq_context.env.QQ_ACCESS="${access}"`,
+    "-c", `mcp_servers.image_gen.env.QQ_ACCESS="${access}"`];
 }
 
 /** 单轮的 image_gen 输出目录覆盖参数：绝对路径，只允许安全字符（与 entrypoint 的 toml_path 同一口径），不得含 ".."。 */

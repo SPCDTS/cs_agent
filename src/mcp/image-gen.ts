@@ -9,6 +9,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createImageBackend } from "../agent/image-gen.js";
 import { backendConfigFromEnv, createImageGenServer } from "./image-gen-server.js";
+import { parseAccess } from "../context/access.js";
 import { loadConfig } from "../config.js";
 
 import { ImageEventSpool } from "../obs/image-events.js";
@@ -17,6 +18,7 @@ const { server, dispose } = createImageGenServer({
   observer: dir => new Trace(new ImageEventSpool(dir)),
   ticketDir: process.env.IMAGE_TICKET_DIR,
   imageRefs: process.env.IMAGE_REFS,
+  access: parseAccess(process.env.QQ_ACCESS),
   dataDir: process.env.DATA_DIR || "/data",
   waitMs: loadConfig(process.env).IMAGE_GEN_MCP_WAIT_SEC * 1000,
   imageTimeoutCapMs: loadConfig(process.env).COMFY_TIMEOUT_SEC * 1000,
