@@ -610,7 +610,7 @@ export class CodexRunner {
     signal?.throwIfAborted();
     const child = spawn(bin, [...prefix, ...finalArgs], {
       cwd: this.opts.workspaceDir,
-      env: { ...buildCodexEnv(this.opts.codexHome), ...this.opts.env },
+      env: { ...buildCodexEnv(this.opts.codexHome), ...Object.fromEntries(Object.entries(this.opts.env ?? {}).filter(([key]) => key.toUpperCase() !== "OBS_TOKEN")) },
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true,

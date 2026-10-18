@@ -3,6 +3,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node
 import path from 'node:path';
 import os from 'node:os';
 import { afterEach, expect, it } from 'vitest';
+import { loadObsToken } from '../../src/obs/token.js';
+import { registerSecrets } from '../../src/obs/redact.js';
+import { readFileSync, statSync } from 'node:fs';
 import { createDashboard } from '../../src/obs/http.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { Trace } from '../../src/obs/trace.js';
@@ -13,9 +16,13 @@ import { TRANSPARENT_PNG } from '../../src/agent/image-gen.js';
 import { formatRecent } from '../../src/context/format.js';
 const clean:(()=>Promise<void>|void)[]=[];
 afterEach(async()=>{for(const fn of clean.splice(0).reverse())await fn();});
-async function rig(token=''){
+let cookie = '';
+const fetch: typeof globalThis.fetch = (input, init) => globalThis.fetch(input, {...init,headers:{...(cookie ? {Cookie:cookie} : {}),...init?.headers}});
+async function rig(token?: string){
   const dir=mkdtempSync(path.join(os.tmpdir(),'cs-obs-http-'));const store=new ObsStore(dir),context=new ContextStore(dir),trace=new Trace(store);
-  const config=loadConfig({DATA_DIR:dir,OBS_TOKEN:token,NAPCAT_TOKEN:'fake-napcat-secret'});
+  const config=loadConfig({DATA_DIR:dir,OBS_TOKEN:token ?? '',NAPCAT_TOKEN:'fake-napcat-secret'});
+  config.OBS_TOKEN = await loadObsToken(dir,config.OBS_TOKEN);
+  cookie = token === undefined ? 'obs_token='+config.OBS_TOKEN : '';
   trace.event('ticket1','received',{scope:'group:7',detail:{text:'原文 <script>坏</script>',sender:'用户'}});
   trace.event('ticket1','routed',{detail:{route:'image'}});
   trace.event('ticket1','reply_sent',{detail:{reply:'已完成',terminal:true}});
@@ -43,12 +50,12 @@ it('图片路由允许本票据位图，拒绝编码穿越、Windows 路径、�
   symlinkSync(dir,path.join(config.imagesDir,'ticket1','escape'),'junction');
   // node:http 保留原始路径，避免 fetch 的 URL 规范化掩盖漏洞。
   for(const p of ['/images/ticket1/%2e%2e/%2e%2e/outside.png','/images/ticket1/%2e%2e%5coutside.png','/images/ticket1/C%3A/outside.png','/images/ticket1/fake.png','/images/ticket1/escape/outside.png','/images/ticket1/%ZZ.png']){
-    const status=await new Promise<number|undefined>((resolve,reject)=>{const req=request(base+p,res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);req.end();});expect(status).toBe(404);
+    const status=await new Promise<number|undefined>((resolve,reject)=>{const req=request(base+p,{headers:{Cookie:cookie}},res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);req.end();});expect(status).toBe(404);
   }
 });
 it('口令保护页面、图片、SSE；正确口令换 HttpOnly cookie 并移除 URL 中的口令',async()=>{
   const {base}=await rig('fake-panel-secret');
-  for(const url of ['/','/logs/stream','/images/ticket1/call-1/result.png'])expect((await fetch(base+url)).status).toBe(401);
+  for(const url of ['/','/context','/logs/stream','/images/ticket1/call-1/result.png'])expect((await fetch(base+url)).status).toBe(401);
   expect((await fetch(base+'/?token=wrong')).status).toBe(401);
   const login=await fetch(base+'/?token=fake-panel-secret',{redirect:'manual'});expect(login.status).toBe(303);expect(login.headers.get('location')).toBe('/');
   expect(login.headers.get('set-cookie')).toContain('HttpOnly');
@@ -61,4 +68,31 @@ it('SSE 实时发出过滤后的结构化日志；缓冲有界且脱敏',async()
   const reader=res.body!.getReader();log.info('忽略',{ticket:'elsewhere'});log.info('实时中文',{ticket:'sse-ticket',token:'fake-sensitive'});
   const chunk=await reader.read();const text=new TextDecoder().decode(chunk.value);expect(text).toContain('实时中文');expect(text).not.toContain('fake-sensitive');expect(text).not.toContain('忽略');
   abort.abort();await reader.cancel().catch(()=>undefined);expect(logBuffer.recent().length).toBeLessThanOrEqual(1000);
+});
+
+it('未配置口令自动生成并复用文件，首页与上下文始终要求认证',async()=>{
+  const {base,config,dir}=await rig('');
+  expect(config.OBS_TOKEN).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(readFileSync(path.join(dir,'obs-token'),'utf8').trim()).toBe(config.OBS_TOKEN);
+  expect(await loadObsToken(dir)).toBe(config.OBS_TOKEN);
+  if(process.platform!=='win32')expect(statSync(path.join(dir,'obs-token')).mode&0o777).toBe(0o600);
+  expect((await fetch(base+'/')).status).toBe(401);
+  expect((await fetch(base+'/context')).status).toBe(401);
+});
+it('上下文正文、昵称、摘要和表单回显在 HTML 转义前脱敏',async()=>{
+  const {base,context}=await rig();const secret='registered-context-secret';registerSecrets([secret]);
+  const now=Math.floor(Date.now()/1000);
+  context.ingest({message_id:'secret',time:now,message_type:'group',group_id:'7',user_id:'1',self_id:'2',nickname:'昵称'+secret,text:'正文'+secret+' <script>',route_text:'',truncated:false,mentioned_self:true,images:[],segments:[]});
+  context.writeSummary({scope:'group:7',level:'day',period_start:now-86400,period_end:now-1,text:'摘要'+secret,msg_count:5});
+  for(const route of ['/context','/context?query='+secret,'/tickets?scope='+secret,'/logs?ticket='+secret]){
+    const res=await fetch(base+route);expect(res.status).toBe(200);const html=await res.text();expect(html).not.toContain(secret);expect(html).toContain('[已隐藏]');
+  }
+  const html=await (await fetch(base+'/context?query='+secret)).text();expect(html).toContain('摘要');expect(html).toContain('昵称');expect(html).toContain('&lt;script&gt;');
+});
+it('票据详情使用 after 游标分页，降级首页仍可渲染',async()=>{
+  const {base,store}=await rig();
+  const first=await (await fetch(base+'/tickets/ticket1?limit=1')).text();expect(first).toContain('下一页事件');expect(first).not.toContain('<h2>routed');
+  const id=store.events('ticket1',{limit:1})[0]!.id;
+  expect(await (await fetch(base+'/tickets/ticket1?limit=1&after='+id)).text()).toContain('routed');
+  store.degrade();const res=await fetch(base+'/');expect(res.status).toBe(200);expect(await res.text()).toContain('degraded: true');
 });

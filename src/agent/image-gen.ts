@@ -661,10 +661,15 @@ export interface ImageBackendConfig {
 export function createImageBackend(c: ImageBackendConfig): ImageBackend {
   const common = { models: c.models, cache: c.cache ?? /^(1|true|yes|on)$/i.test((c.baseEnv ?? process.env).COMFY_QWEN_CACHE ?? ""), timeoutMs: c.timeoutMs, checkpoint: c.checkpoint, workflowFile: c.workflowFile, promptNode: c.promptNode };
   if (c.mode === "http") return new HttpImageBackend({ baseUrl: c.comfyUrl, ...common });
+  return new McpImageBackend({ command: c.mcpBin, env: buildImageEnv(c), ...common });
+}
+
+/** MCP 子进程仅继承运行所需变量，OBS_TOKEN 不进入子进程。 */
+export function buildImageEnv(c: Pick<ImageBackendConfig, "baseEnv" | "comfyUrl" | "comfyBin">): Record<string,string> {
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(c.baseEnv ?? process.env)) if (v !== undefined) env[k] = v;
+  for (const [k, v] of Object.entries(c.baseEnv ?? process.env)) if (v !== undefined && /^(PATH|HOME|USERPROFILE|SYSTEMROOT|WINDIR|TEMP|TMP|APPDATA|LOCALAPPDATA|COMSPEC|PATHEXT|LANG|LC_ALL|TZ|PYTHONUNBUFFERED|COMFY_[A-Z_]+)$/i.test(k)) env[k] = v;
   Object.assign(env, { COMFYUI_URL: c.comfyUrl, COMFY_BIN: c.comfyBin });
-  return new McpImageBackend({ command: c.mcpBin, env, ...common });
+  return env;
 }
 
 /** 上传返回值必须仍在本票据子目录内，禁止把服务端路径直接当本机路径使用。 */

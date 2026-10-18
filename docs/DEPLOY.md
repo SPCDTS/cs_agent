@@ -268,13 +268,27 @@ fetch_page 只接收无凭据的公开 HTTP(S) URL，复用入站下载的 IP �
 | /pi | 会话数量、键与 id、累计用量、压缩尝试数和最后时间、压缩配置 |
 | /config | 脱敏后的生效配置、agent.md 内容与修改时间 |
 
-OBS_TOKEN 默认留空；设定后首次访问 /?token=你的口令。认证成功跳转到移除口令的 URL，并设置 HttpOnly、SameSite=Strict cookie。页面、图片和 SSE 都受保护；/healthz 保持原 JSON，不要求口令。不要把带口令的 URL 分享给他人。面板只接受 localhost、127.0.0.1、[::1] Host。
+面板始终要求口令，空 OBS_TOKEN 不再开放访问。启动时优先使用 OBS_TOKEN；留空则读取 DATA_DIR/obs-token，文件缺失时生成 32 字节随机数的 base64url 口令，以 0600 权限原子发布。仅生成时记录一次 observability token generated at /data/obs-token，日志不包含口令。管理员在自己的终端读取：
+
+~~~sh
+docker compose exec cs-agent cat /data/obs-token
+~~~
+
+打开 http://127.0.0.1:8787/，在登录表单粘贴口令；也支持 /?token=你的口令。若显式设置 OBS_TOKEN，应使用管理员配置的值。认证成功跳转到移除口令的 URL，并设置 HttpOnly、SameSite=Strict cookie。所有页面（含 /context）、图片和 SSE 都受保护。/healthz 保持无需口令的 JSON 探针，但仅发布连接状态、degraded、检查布尔值和线程信息，不返回服务地址、错误原文或凭据。不要分享带口令的 URL。面板只接受 localhost、127.0.0.1、[::1] Host。
+
+口令文件和原子发布临时文件列入 Codex deny_read；OBS_TOKEN 不进入 Codex 或 MCP 子进程环境白名单。口令无法读取或生成时面板拒绝访问，业务继续运行，健康探针显示 degraded: true。
 
 事件和指标存 DATA_DIR/observability.sqlite（WAL）。默认 OBS_RETENTION_DAYS=30，启动后第一次指标刷新及之后每天清理过期 events / metrics；关闭时刷新最后窗口。备份需使用 SQLite 一致性备份或包含 WAL。日志环形缓冲不落盘，重启会清空；原有 stderr 日志仍可由 Docker 采集。
 
-观测事件先脱敏再保存：已配置凭据、敏感字段、Bearer / 常见 API key / JWT、带凭据 URL 都会隐藏；原文、prompt、reply 等字符串最多 500 字。票据详情保留摘要用于诊断，不是完整聊天归档。上下文页面通过既有消息库读取，其存储保留策略不受 OBS_RETENTION_DAYS 影响。
+观测库损坏、路径不可写或 schema / Metrics 初始化失败时，观测降级为无操作存储；/healthz 与面板总览显示 degraded: true，消息处理继续运行。修复观测文件权限或隔离损坏文件后，在计划维护时重新启动进程以恢复采集；不要据空图表判断没有业务流量。此降级只覆盖观测子系统，业务数据库仍需正常工作。
 
-指标每 60 秒按独立窗口记录调用数、成功数、成功率、耗时 p50 / p95；超过一万次采样的类别用有界随机抽样计算分位数。窗口从共享事件库读取，因此包含 Codex 独立 image_gen MCP 的提交与收取。队列深度不含正在运行的请求；全局使用槽位、各 scope 等待数分别展示。ComfyUI 同时记录各次 submit / collect / reconcile 调用耗时，以及能匹配 prompt_id 时从提交成功到收取成功的任务总耗时（comfy_job_duration_ms），均不等同 GPU 纯计算时间。
+每张票据默认最多 500 条事件，由 OBS_TICKET_EVENT_CAP 配置（8–10000）；detail 总量最多 256 KiB。普通事件为三种 terminal=true 终态（reply_sent / failed / fallback）及 events_dropped 摘要预留槽位和字节，终态单条 detail 最多 1 KiB；重复终态保留最新一条。摘要的 dropped 给出被预算拒绝的事件数。相同 Codex 工具调用的进度保留首条和末条，末条 count 为累计进度数。详情按 after=id&limit 游标分页（页面默认 100、最多 200）。
+
+image_gen MCP 不打开观测库，只向本票据 obs-events.jsonl 追加经 schema 校验的事件（每个文件最多 200 行 / 256 KiB）。主进程在 lateImages 和终态回收时领取文件，逐行校验、用主进程秘密注册表脱敏后入库并删除；超大文件直接忽略并删除，非法行忽略。旁路文件仅为尽力观测，不参与业务恢复判定。
+
+观测事件先脱敏再保存：已配置凭据、敏感字段、Bearer / 常见 API key / JWT、带凭据 URL 都会隐藏；原文、prompt、reply 等字符串最多 500 字。票据详情保留摘要用于诊断，不是完整聊天归档。上下文页面通过既有消息库读取；正文、昵称、摘要、表单回显及其他渲染字符串均先脱敏再 HTML 转义，其存储保留策略不受 OBS_RETENTION_DAYS 影响。ws / wss 等任意协议 URL 的 userinfo 都会脱敏；NAPCAT_HTTP_URL / NAPCAT_WS_URL 禁止内嵌用户名和密码。
+
+指标每 60 秒按独立窗口记录调用数、成功数、成功率、耗时 p50 / p95；超过一万次采样的类别用有界随机抽样计算分位数。窗口从主进程事件库读取，也包含已摄取的 Codex image_gen MCP 提交与收取；摄取保留子进程事件时间。队列深度不含正在运行的请求；全局使用槽位、各 scope 等待数分别展示。ComfyUI 同时记录各次 submit / collect / reconcile 调用耗时，以及能匹配 prompt_id 时从提交成功到收取成功的任务总耗时（comfy_job_duration_ms），均不等同 GPU 纯计算时间。
 
 DEEPSEEK_PRICE_IN_PER_M / DEEPSEEK_PRICE_OUT_PER_M 默认 0；填入 deepseek-flash 的每百万 token 单价后估算费用，两项使用相同币种。输入包括可获得的 cache read / write；该估算不区分缓存优惠，也不包含搜索/抓页费用。用量来自 pi-ai 返回的 usage（pi、relay、衰老），未提供的用量不会猜测。观测为尽力记录，崩溃边界可能重记响应，已写入的事件通过持久化游标恢复聚合，尚未写入的事件仍可能丢失；durable 业务检查点独立，不受观测写入失败影响。
 

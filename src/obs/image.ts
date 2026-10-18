@@ -1,14 +1,14 @@
 import type { ImageBackend } from '../agent/image-gen.js';
-import { trace } from './trace.js';
+import { trace, type Trace } from './trace.js';
 /** 包装公共接口，生产与 fake 使用同一埋点；不改变提交、恢复、取消语义。 */
-export function observeImages<T extends Pick<ImageBackend, 'name' | 'submit' | 'collect' | 'reconcile'>>(backend: T, ticket: string): T {
+export function observeImages<T extends Pick<ImageBackend, 'name' | 'submit' | 'collect' | 'reconcile'>>(backend: T, ticket: string, observer: Trace = trace): T {
   return new Proxy(backend, { get(target, key) {
-    if (key === 'submit') return (...args: Parameters<ImageBackend['submit']>) => trace.span(ticket, 'image:submit', () => target.submit(...args),
+    if (key === 'submit') return (...args: Parameters<ImageBackend['submit']>) => observer.span(ticket, 'image:submit', () => target.submit(...args),
       { backend: target.name, prompt: args[0].prompt, filename_prefix: args[1]?.filenamePrefix }, prompt_id => ({ prompt_id }));
-    if (key === 'collect') return (...args: Parameters<ImageBackend['collect']>) => trace.span(ticket, 'image:collect', () => target.collect(...args),
+    if (key === 'collect') return (...args: Parameters<ImageBackend['collect']>) => observer.span(ticket, 'image:collect', () => target.collect(...args),
       { backend: target.name, prompt_id: args[0] }, images => ({ images }));
-    if (key === 'reconcile') return (...args: Parameters<ImageBackend['reconcile']>) => trace.span(ticket, 'image:collect', () => target.reconcile(args[0], args[1], args[2], async step => {
-      trace.event(ticket, 'recovered', { detail: { operation: 'image_reconcile', ...step } });
+    if (key === 'reconcile') return (...args: Parameters<ImageBackend['reconcile']>) => observer.span(ticket, 'image:collect', () => target.reconcile(args[0], args[1], args[2], async step => {
+      observer.event(ticket, 'recovered', { detail: { operation: 'image_reconcile', ...step } });
       await args[3]?.(step);
     }), { backend: target.name, operation: 'reconcile', filename_prefix: args[0].filenamePrefix }, result => result);
     const value = Reflect.get(target, key);

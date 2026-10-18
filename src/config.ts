@@ -27,9 +27,13 @@ const int = (def: number) => z.coerce.number().int().positive().default(def);
 
 export const DEFAULT_WORKFLOW = "qwen-image-2.1-turbo-api.json";
 
+const serviceUrl = z.string().url().refine(value => {
+  const url = new URL(value); return !url.username && !url.password;
+}, '服务 URL 不得包含用户名或密码');
+
 const EnvSchema = z.object({
-  NAPCAT_HTTP_URL: z.string().url().default("http://host.docker.internal:3000"),
-  NAPCAT_WS_URL: z.string().url().default("ws://host.docker.internal:3001"),
+  NAPCAT_HTTP_URL: serviceUrl.default("http://host.docker.internal:3000"),
+  NAPCAT_WS_URL: serviceUrl.default("ws://host.docker.internal:3001"),
   NAPCAT_TOKEN: z.string().default(""),
   QQ_ALLOW_USERS: z.string().default(""),
   QQ_ALLOW_GROUPS: list,
@@ -99,6 +103,7 @@ const EnvSchema = z.object({
 
   DATA_DIR: z.string().default("/data"),
   WORKSPACE_DIR: z.string().default("/workspace"),
+  OBS_TICKET_EVENT_CAP: z.coerce.number().int().min(8).max(10000).default(500),
   OBS_RETENTION_DAYS: int(30),
   OBS_TOKEN: z.string().default(""),
   ALERT_OWNER: bool(false),

@@ -1,9 +1,10 @@
+import { loadObsToken, publicHealth } from "./obs/token.js";
 import { ObsStore } from "./obs/store.js";
 import { trace } from "./obs/trace.js";
 import { Metrics, type Gauge } from "./obs/metrics.js";
 import { createDashboard } from "./obs/http.js";
 import { startAlerts } from "./obs/alerts.js";
-import { registerSecrets } from "./obs/redact.js";
+import { registerSecrets, redact } from "./obs/redact.js";
 import { cleanupIncoming } from "./qq/incoming.js";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -34,6 +35,8 @@ async function main(): Promise<void> {
   const cfg = loadConfig();
   requireProviderApiKey(cfg.AGENT_MODEL_PROVIDER);
   setLogLevel(cfg.LOG_LEVEL);
+  try { cfg.OBS_TOKEN = await loadObsToken(cfg.DATA_DIR, cfg.OBS_TOKEN, message => log.info(message)); }
+  catch { log.warn("observability token unavailable; dashboard access disabled"); }
   registerSecrets([cfg.OBS_TOKEN, cfg.NAPCAT_TOKEN]);
   const ctx = BACKGROUND_CONTEXT;
   log.info("starting cs-agent", {
@@ -73,8 +76,9 @@ async function main(): Promise<void> {
 
   // 统一上下文消息库（${DATA_DIR}/qq-messages.sqlite）：意图层与 codex 的 qq_context MCP 共用
   const store = new ContextStore(cfg.DATA_DIR);
-  const obs = new ObsStore(cfg.DATA_DIR);
+  const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP);
   trace.attach(obs);
+  if (obs.degraded) log.warn("observability storage degraded; agent continues");
 
   let bridge: QQBridge | undefined;
   const getBridge = () => {
@@ -242,13 +246,13 @@ async function main(): Promise<void> {
     const threads = await codex.readThreadIds();
     return Promise.all(Object.entries(threads).map(async ([key, id]) => ({ thread_key: key, thread_id: id,
       rollout_bytes: id ? await codex.rolloutSize(id) ?? null : null,
-      observed_turns: (obs.db.prepare("SELECT COUNT(*) n FROM events WHERE stage='model_turn' AND status='ok' AND json_extract(detail_json,'$.backend')='codex' AND json_extract(detail_json,'$.thread_key')=?").get(key) as {n:number}).n })));
+      observed_turns: obs.degraded ? 0 : (obs.db.prepare("SELECT COUNT(*) n FROM events WHERE stage='model_turn' AND status='ok' AND json_extract(detail_json,'$.backend')='codex' AND json_extract(detail_json,'$.thread_key')=?").get(key) as {n:number}).n })));
   };
   const piStatus = async () => ({ threads: await pi.readThreadIds(), ...await pi.threadHealth(),
-    compaction: obs.db.prepare("SELECT json_extract(detail_json,'$.conversation') conversation, COUNT(*) attempts, MAX(ts) last_at FROM events WHERE stage='compaction' GROUP BY conversation").all(),
+    compaction: obs.degraded ? [] : obs.db.prepare("SELECT json_extract(detail_json,'$.conversation') conversation, COUNT(*) attempts, MAX(ts) last_at FROM events WHERE stage='compaction' GROUP BY conversation").all(),
     usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
   const dashboard = createDashboard({ config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
-    health: () => ({ bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
+    health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
     codex: codexStatus, pi: piStatus });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
@@ -280,9 +284,10 @@ async function main(): Promise<void> {
       checks.codex && typeof checks.codex === "object" && "threads" in checks.codex
         ? { ...checks.codex, threads: await codex.readThreadIds().catch(() => null) }
         : checks.codex;
-    const body = { ok: st.ws_connected, ws_connected: st.ws_connected, bridge: st, ...checks, codex: codexCheck,
-      pi: { threads: await pi.threadHealth().catch(() => null) } };
-    res.writeHead(st.ws_connected ? 200 : 503, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+    const body = publicHealth({ connected: st.ws_connected, degraded: obs.degraded || !cfg.OBS_TOKEN,
+      comfy: checks.comfy, codex: codexCheck, threads: await codex.readThreadIds().catch(() => null),
+      pi: await pi.threadHealth().catch(() => null) });
+    res.writeHead(st.ws_connected ? 200 : 503, { "Content-Type": "application/json" }).end(JSON.stringify(redact(body, 20_000)));
   });
   server.listen(cfg.HEALTH_PORT, cfg.HEALTH_HOST, () => log.info("healthz listening", { port: cfg.HEALTH_PORT }));
 

@@ -1,3 +1,4 @@
+import { ingestImageEvents } from "../obs/image-events.js";
 import { trace } from "../obs/trace.js";
 import { observeImages } from "../obs/image.js";
 import path from "node:path";
@@ -144,6 +145,7 @@ async function replyPhase<S extends { phase: string }>(
  * 此时后端结果已在 TicketDoc 里，重跑不会再用到它；图片目录另行管理，不在这里删除。
  */
 async function cleanupTicketWorkdir(deps: TaskDeps, ticket: string, uploads: readonly RemoteUpload[] = []): Promise<void> {
+  await ingestImageEvents(ticketImageDir(deps.imagesDir, ticket));
   if (uploads.length) {
     if (!deps.imageBackend.clearReferences) throw new Error('生图后端不支持参考图覆盖');
     await deps.imageBackend.clearReferences(uploads);
@@ -479,6 +481,7 @@ export function createTasks(deps: TaskDeps) {
       },
       lateImages: async (_task, runtime, context) => {
         let doc = await ticketDoc(runtime, context);
+        await ingestImageEvents(ticketImageDir(deps.imagesDir, doc.ticket));
         const blocked = await blockedReason(deps, runtime, context, doc.ticket);
         if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "lateImages");
         const dir = ticketImageDir(deps.imagesDir, doc.ticket);

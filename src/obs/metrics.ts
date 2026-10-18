@@ -1,19 +1,20 @@
 import type { ObsEvent, ObsStore } from './store.js';
 export type Gauge = { name: string; labels?: Record<string, string>; value: number };
 type Aggregate = { count: number; success: number; durations: number[]; labels: Record<string, string> };
-/** 每个 60 秒窗口独立聚合；从事件游标读取，包含独立 image_gen MCP 进程的事件。 */
+/** 每个 60 秒窗口独立聚合；从事件游标读取，包含主进程摄取的 image_gen MCP 事件。 */
 export class Metrics {
-  private cursor: number;
+  private cursor = 0;
   private timer?: NodeJS.Timeout;
   private purgedAt = 0;
   private running?: Promise<void>;
   constructor(private store: ObsStore, private options: {
     retentionDays: number; inputPrice?: number; outputPrice?: number; gauges?: () => Promise<Gauge[]>;
-  }) { this.cursor = Number((store.db.prepare("SELECT value FROM obs_state WHERE key='metrics_cursor'").get() as { value: number } | undefined)?.value ?? 0); }
+  }) { try { this.cursor = Number((store.db.prepare("SELECT value FROM obs_state WHERE key='metrics_cursor'").get() as { value: number } | undefined)?.value ?? 0); } catch { store.degrade(); } }
   start(): void { this.timer = setInterval(() => { void this.flush().catch(() => undefined); }, 60_000); this.timer.unref(); }
   flush(now = Date.now()): Promise<void> {
+    if (this.store.degraded) return Promise.resolve();
     if (this.running) return this.running;
-    this.running = this.collect(now).finally(() => { this.running = undefined; });
+    this.running = this.collect(now).catch(() => { this.store.degrade(); }).finally(() => { this.running = undefined; });
     return this.running;
   }
   private async collect(now: number): Promise<void> {

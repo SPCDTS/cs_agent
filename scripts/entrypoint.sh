@@ -236,6 +236,8 @@ deny_read = [
   "$C/memories",
   "$C/*.sqlite*",
   "$D/*.sqlite*",
+  "$D/obs-token",
+  "$D/obs-token.*.tmp",
   "$D/images",
   "$D/incoming",
   "$D/tickets",
@@ -256,6 +258,7 @@ export CODEX_HOME="$CODEX_HOME_DIR"
 export CODEX_EFFECTIVE_WRITABLE_ROOTS="$WRITABLE_ROOTS_CSV"
 
 if [ "$#" -gt 0 ]; then
+  unset OBS_TOKEN
   exec "$@"
 fi
 exec node /app/dist/main.js

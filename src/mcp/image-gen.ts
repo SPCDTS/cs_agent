@@ -11,11 +11,10 @@ import { createImageBackend } from "../agent/image-gen.js";
 import { backendConfigFromEnv, createImageGenServer } from "./image-gen-server.js";
 import { loadConfig } from "../config.js";
 
-import { ObsStore } from "../obs/store.js";
-import { trace } from "../obs/trace.js";
-const obs = new ObsStore(process.env.DATA_DIR || "/data");
-trace.attach(obs);
+import { ImageEventSpool } from "../obs/image-events.js";
+import { Trace } from "../obs/trace.js";
 const { server, dispose } = createImageGenServer({
+  observer: dir => new Trace(new ImageEventSpool(dir)),
   ticketDir: process.env.IMAGE_TICKET_DIR,
   imageRefs: process.env.IMAGE_REFS,
   dataDir: process.env.DATA_DIR || "/data",

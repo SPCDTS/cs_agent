@@ -1,5 +1,5 @@
 import type { ObsEvent, ObsStore } from './store.js';
-export interface EventOptions { status?: string; durationMs?: number; detail?: unknown; scope?: string }
+export interface EventOptions { ts?: number; status?: string; durationMs?: number; detail?: unknown; scope?: string }
 type Listener = (e: ObsEvent) => void;
 export function errorCategory(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error ?? '');
@@ -13,16 +13,17 @@ export function errorCategory(error: unknown): string {
 export class Trace {
   private listeners = new Set<Listener>();
   dropped = 0;
-  constructor(private store?: ObsStore) {}
-  attach(store?: ObsStore): void { this.store = store; }
+  constructor(private store?: Pick<ObsStore, 'append'>) {}
+  attach(store?: Pick<ObsStore, 'append'>): void { this.store = store; }
   subscribe(fn: Listener): () => void { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
   event(ticket: string, stage: string, opts: EventOptions = {}): void {
     if (!this.store) return;
     try {
       const detail = opts.status === 'failed' && opts.detail && typeof opts.detail === 'object'
         ? { ...opts.detail, error_category: errorCategory((opts.detail as Record<string, unknown>).error) } : opts.detail;
-      const event = this.store.append({ ticket, stage, scope: opts.scope ?? '', ts: Date.now(), status: opts.status ?? 'ok',
+      const event = this.store.append({ ticket, stage, scope: opts.scope ?? '', ts: opts.ts !== undefined && Number.isFinite(opts.ts) ? Math.max(0,opts.ts) : Date.now(), status: opts.status ?? 'ok',
         duration_ms: opts.durationMs !== undefined && Number.isFinite(opts.durationMs) ? Math.max(0, opts.durationMs) : null, detail });
+      if (!event) { this.dropped++; return; }
       for (const fn of this.listeners) { try { fn(event); } catch { this.dropped++; } }
     } catch { this.dropped++; }
   }

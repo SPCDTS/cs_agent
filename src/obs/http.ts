@@ -10,7 +10,9 @@ import { redact, redactText } from './redact.js';
 import type { ObsStore } from './store.js';
 import { loadImage } from '../qq/image.js';
 
-const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]!);
+const esc = (v: unknown) => redactText(String(v ?? ''), 100_000).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]!);
+const uri = (v: string) => encodeURIComponent(redactText(v,100_000));
+const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
 const pre = (v: unknown) => `<pre>${esc(typeof v === 'string' ? v : JSON.stringify(redact(v, 20_000), null, 2))}</pre>`;
 const links = [['/', '总览'], ['/tickets', '票据'], ['/logs', '日志'], ['/context', '上下文'], ['/codex', 'Codex'], ['/pi', 'Pi'], ['/config', '配置']];
 function page(title: string, body: string, nonce: string, script = '') {
@@ -53,11 +55,11 @@ export function createDashboard(opts: DashboardOptions) {
     // loopback 面板拒绝任意 Host，防止本地浏览器的 DNS rebinding 读取聊天数据。
     if (!/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(req.headers.host ?? '')) { res.writeHead(403).end(); return; }
     if (req.method !== 'GET') { res.writeHead(405).end(); return; }
-    if (token) {
+    {
       const cookie = /(?:^|;\s*)obs_token=([^;]*)/.exec(req.headers.cookie ?? '')?.[1] ?? '';
       let saved = ''; try { saved = decodeURIComponent(cookie); } catch { /* 无效 cookie */ }
       const supplied = url.searchParams.get('token');
-      if (!equal(supplied ?? saved, token)) { res.writeHead(401, {'Content-Type':'text/html; charset=utf-8'}).end(page('需要访问口令','<form><input name="token" type="password" aria-label="访问口令"><button>进入面板</button></form>',nonce)); return; }
+      if (!token || !equal(supplied ?? saved, token)) { res.writeHead(401, {'Content-Type':'text/html; charset=utf-8'}).end(page('需要访问口令','<form><input name="token" type="password" aria-label="访问口令"><button>进入面板</button></form>',nonce)); return; }
       if (supplied !== null) {
         res.setHeader('Set-Cookie', 'obs_token='+encodeURIComponent(token)+'; HttpOnly; SameSite=Strict; Path=/');
         url.searchParams.delete('token');
@@ -74,7 +76,7 @@ export function createDashboard(opts: DashboardOptions) {
         const id = typeof line.ticket === 'string' ? line.ticket : '';
         if (ticket && (!id || (!id.startsWith(ticket) && !ticket.startsWith(id)))) return;
         if (level && line.level !== level) return;
-        if (!res.write('data: '+JSON.stringify(line)+'\n\n')) res.destroy();
+        if (!res.write('data: '+JSON.stringify(redact(line, 20_000))+'\n\n')) res.destroy();
       };
       const off = logBuffer.subscribe(emit);
       logBuffer.recent().forEach(emit);
@@ -93,27 +95,28 @@ export function createDashboard(opts: DashboardOptions) {
     let title='', body='', script='';
     if (url.pathname === '/') {
       title='运行总览';
-      body='<h2>健康状态</h2>'+pre(await opts.health())+'<h2>最近吞吐与错误率</h2><div class="cards">'+[1,24].map(h=>'<section><h3>'+h+' 小时</h3>'+pre(opts.store.throughput(Date.now()-h*3600_000))+'</section>').join('')+'</div><h2>队列与在途票据</h2>'+pre(opts.queue());
-      const rows=opts.store.db.prepare('SELECT * FROM metrics WHERE ts=(SELECT MAX(ts) FROM metrics) ORDER BY name LIMIT 150').all();
+      body=(opts.store.degraded ? '<p>观测已降级（degraded: true），业务继续运行。</p>' : '')+'<h2>健康状态</h2>'+pre(await opts.health())+'<h2>最近吞吐与错误率</h2><div class="cards">'+[1,24].map(h=>'<section><h3>'+h+' 小时</h3>'+pre(opts.store.throughput(Date.now()-h*3600_000))+'</section>').join('')+'</div><h2>队列与在途票据</h2>'+pre(opts.queue());
+      const rows=opts.store.degraded ? [] : opts.store.db.prepare('SELECT * FROM metrics WHERE ts=(SELECT MAX(ts) FROM metrics) ORDER BY name LIMIT 150').all();
       body+='<h2>最近一分钟指标（p50 / p95）</h2>'+pre(rows);
     } else if (url.pathname === '/tickets') {
       title='票据列表'; const filters=Object.fromEntries(['status','scope','route','backend'].map(k=>[k,q.get(k) ?? '']));
       const n=Math.max(0,Math.min(100000,Number(q.get('page'))||0));
       body='<form>'+Object.entries(filters).map(([k,v])=>`<label>${esc(({status:'状态',scope:'会话域',route:'路由',backend:'后端'} as Record<string,string>)[k])}<input name="${k}" value="${esc(v)}"></label>`).join('')+'<button>筛选</button></form><small>状态：processing / sent / failed / fallback；路由：image / agent / image_usage</small>';
-      body+='<table><tr><th>时间 / 票据</th><th>会话 / 发送者</th><th>路由 / 后端</th><th>状态 / 耗时</th></tr>'+opts.store.tickets({...filters,page:n}).map(r=>`<tr><td>${esc(new Date(r.ts).toLocaleString('zh-CN'))}<br><a href="/tickets/${encodeURIComponent(r.ticket)}">${esc(r.ticket)}</a></td><td>${esc(r.scope)}<br>${esc(r.sender)}</td><td>${esc(r.route)} / ${esc(r.backend)}</td><td>${esc(r.status)} / ${r.duration_ms} ms</td></tr>`).join('')+'</table>';
-      q.set('page',String(Math.max(0,n-1))); body+=`<a href="/tickets?${esc(q)}">上一页</a> · 第 ${n+1} 页 · `;
-      q.set('page',String(n+1)); body+=`<a href="/tickets?${esc(q)}">下一页</a>`;
+      body+='<table><tr><th>时间 / 票据</th><th>会话 / 发送者</th><th>路由 / 后端</th><th>状态 / 耗时</th></tr>'+opts.store.tickets({...filters,page:n}).map(r=>`<tr><td>${esc(new Date(r.ts).toLocaleString('zh-CN'))}<br><a href="/tickets/${uri(r.ticket)}">${esc(r.ticket)}</a></td><td>${esc(r.scope)}<br>${esc(r.sender)}</td><td>${esc(r.route)} / ${esc(r.backend)}</td><td>${esc(r.status)} / ${r.duration_ms} ms</td></tr>`).join('')+'</table>';
+      q.set('page',String(Math.max(0,n-1))); body+=`<a href="/tickets?${esc(queryLink(q))}">上一页</a> · 第 ${n+1} 页 · `;
+      q.set('page',String(n+1)); body+=`<a href="/tickets?${esc(queryLink(q))}">下一页</a>`;
     } else if (url.pathname.startsWith('/tickets/')) {
-      const ticket=decodeURIComponent(url.pathname.slice(9)); const events=opts.store.events(ticket);
+      const ticket=decodeURIComponent(url.pathname.slice(9)); const after=Math.max(0,Number(q.get('after'))||0), limit=Math.max(1,Math.min(200,Number(q.get('limit'))||100)); const events=opts.store.events(ticket,{after,limit});
       if (!events.length) {res.writeHead(404).end('票据不存在');return;}
       title='票据全链路'; body=`<p>${esc(ticket)} · 正文、提示词和回复只保存脱敏后前 500 字。历史由工具按需获取，无自动注入近期上下文。</p>`;
       body+=events.map(e=>`<article><h2>${esc(e.stage)} · ${esc(e.status)} ${e.duration_ms===null?'':e.duration_ms+' ms'}</h2><small>${esc(new Date(e.ts).toISOString())} · ${esc(e.scope)}</small>${pre(JSON.parse(e.detail_json))}</article>`).join('');
+      if (events.length === limit) body+=`<a href="/tickets/${uri(ticket)}?after=${events.at(-1)!.id}&amp;limit=${limit}">下一页事件</a>`;
       const root=path.join(opts.config.imagesDir,ticket);
       if (/^[A-Za-z0-9_-]{1,128}$/.test(ticket)) {
         const names=await fs.readdir(root,{recursive:true}).catch(()=>[] as string[]);
         const thumbs=[];
         for(const name of names.slice(0,200)) {try {const parts=[ticket,...name.split(path.sep)]; await imageFile(opts.config.imagesDir,parts);
-          const src='/images/'+parts.map(encodeURIComponent).join('/'); thumbs.push(`<a href="${src}"><img loading="lazy" src="${src}" alt="生成图"></a>`);
+          const src='/images/'+parts.map(uri).join('/'); thumbs.push(`<a href="${src}"><img loading="lazy" src="${src}" alt="生成图"></a>`);
         }catch{/* 只展示允许的位图 */}}
         body+='<h2>生成图片</h2>'+thumbs.join('');
       }

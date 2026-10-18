@@ -12,6 +12,10 @@ import { collectNewImages } from "../../src/agent/image-collect.js";
 import { backendConfigFromEnv, createImageGenServer, MAX_CALLS, resolveTicketDir } from "../../src/mcp/image-gen-server.js";
 import { FIXTURES, tmp } from "../agent/helpers.js";
 
+import { ObsStore } from '../../src/obs/store.js';
+import { Trace } from '../../src/obs/trace.js';
+import { registerSecrets } from '../../src/obs/redact.js';
+import { ingestImageEvents } from '../../src/obs/image-events.js';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ENTRY = path.join(ROOT, "dist", "mcp", "image-gen.js");
 const PNG = Buffer.from(
@@ -89,6 +93,20 @@ async function stdioClient(env: Record<string, string | undefined>): Promise<Cli
 const textOf = (r: unknown) => ((r as { content: { text: string }[] }).content[0]!.text);
 
 describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () => {
+  it('真实 MCP 子进程不打开损坏的观测库，prompt 由主进程注册表脱敏入库',async()=>{
+    const dir=tmp('cs-imggen-spool-'),ticketDir=path.join(dir,'images','spool');
+    const secret='main-registry-only-fixture';registerSecrets([secret]);
+    writeFileSync(path.join(dir,'observability.sqlite'),'corrupt sentinel','utf8');
+    const c=await stdioClient({DATA_DIR:dir,IMAGE_TICKET_DIR:ticketDir,COMFY_MODE:'http',COMFYUI_URL:comfyUrl,COMFY_TIMEOUT_SEC:'5',COMFY_WORKFLOW_FILE:workflowFile(dir)});
+    const result=await c.callTool({name:'generate_image',arguments:{prompt:'猫 '+secret}});expect(result.isError).not.toBe(true);
+    expect(readFileSync(path.join(dir,'observability.sqlite'),'utf8')).toBe('corrupt sentinel');
+    const store=new ObsStore(tmp('cs-imggen-main-'));
+    try {
+      await ingestImageEvents(ticketDir,new Trace(store));const rows=store.events('spool');expect(rows.length).toBeGreaterThanOrEqual(4);
+      expect(rows.map(e=>e.detail_json).join('')).not.toContain(secret);expect(rows[0]!.detail_json).toContain('[已隐藏]');
+      expect(existsSync(path.join(ticketDir,'obs-events.jsonl'))).toBe(false);
+    } finally {store.close();}
+  });
   it("慢 Comfy 任务在 MCP 等待上限后返回仍在生成，并追加 pending-jobs 清单", async () => {
     const dir = tmp("cs-imggen-");
     const ticketDir = path.join(dir, "images", "slow");
@@ -148,7 +166,7 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     const files = JSON.parse(textOf(r)).files as string[];
     expect(files).toHaveLength(1);
     expect(files[0]).toMatch(/^call-1\/[^/]+\.png$/);
-    expect(readdirSync(ticketDir)).toEqual(["call-1", "pending-jobs.json"]);
+    expect(readdirSync(ticketDir)).toEqual(["call-1", "obs-events.jsonl", "pending-jobs.json"]);
     expect(JSON.parse(readFileSync(path.join(ticketDir, "pending-jobs.json"), "utf8"))[0].status).toBe("done");
     expect(readFileSync(path.join(ticketDir, files[0]!)).subarray(0, 8)).toEqual(PNG.subarray(0, 8));
     expect((prompts[before] as Record<string, { inputs: { text?: string } }>)["4"]!.inputs.text).toBe("一只橘猫");

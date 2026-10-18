@@ -89,6 +89,7 @@ export async function nextCallDir(dir: string): Promise<string> {
 }
 
 export interface ImageGenDeps {
+  observer?: (dir: string) => import("../obs/trace.js").Trace;
   /** 原始 IMAGE_TICKET_DIR */
   ticketDir: string | undefined;
   dataDir: string;
@@ -156,7 +157,7 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
     let promptId: string | undefined;
     const submittedAt = Date.now();
     try {
-      backend ??= observeImages(deps.createBackend(), path.basename(dir));
+      backend ??= observeImages(deps.createBackend(), path.basename(dir), deps.observer?.(dir));
       job = { backend: backend.name, filenamePrefix: submission.filenamePrefix, options, callDir, submittedAt, status: "intent" };
       await savePendingImage(dir, job);
       if (uploads.length) await fs.writeFile(manifest, JSON.stringify(uploads), "utf8");

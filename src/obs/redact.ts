@@ -19,7 +19,12 @@ export function redactText(text: string, limit = 500): string {
     .replace(/\bsk-[A-Za-z0-9_-]+/g, '[已隐藏]')
     .replace(/((?:api[_-]?key|token|secret|password|authorization)["']?\s*[=:]\s*["']?)[^\s"'&,}]+/gi, '$1[已隐藏]')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[已隐藏]')
-    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[已隐藏]@');
+    .replace(/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>"']+/g, raw => {
+      try { const url = new URL(raw); if (url.username || url.password) {
+        url.username = ''; url.password = ''; return url.toString();
+      } } catch { return raw.replace(/(\/\/)[^/]*@/, '$1[已隐藏]@'); }
+      return raw;
+    });
   return out.length > limit ? out.slice(0, limit - 1).replace(/[\uD800-\uDBFF]$/, '') + '…' : out;
 }
 export function redact(value: unknown, limit = 500, depth = 0): unknown {

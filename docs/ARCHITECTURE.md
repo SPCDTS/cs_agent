@@ -295,7 +295,7 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 
 ### 10.4 观测系统（第 4 组）
 
-观测路径不参与业务事务和检查点决策。trace.event / trace.span 写入独立 WAL 数据库 observability.sqlite；写入或订阅者失败只增加 dropped_events，不重试业务操作。主进程先初始化 trace；独立 image_gen MCP 也写同一库，SQLite busy_timeout 协调短写事务。事件按 ticket 关联，scope 从接收事件继承；所有 detail 经共享脱敏器后才进入 SQLite 或日志环形缓冲。
+观测路径不参与业务事务和检查点决策。trace.event / trace.span 写入独立 WAL 数据库 observability.sqlite；写入或订阅者失败只增加 dropped_events，不重试业务操作。主进程独占观测库写入；独立 image_gen MCP 仅向票据目录 obs-events.jsonl 追加经 schema 校验的事件（≤200 行、≤256 KiB），lateImages 和终态回收负责领取、校验、按主进程秘密注册表脱敏入库并删除。超大文件忽略，非法行跳过。事件按 ticket 关联，scope 从接收事件继承；所有 detail 经共享脱敏器后才进入 SQLite 或日志环形缓冲。
 
 | 层 | 实际事件与职责 |
 |---|---|
@@ -306,9 +306,11 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | 图片 | 公共接口包装记录 image:submit / image:collect；对账归 image:collect(operation=reconcile)，查询步骤发 recovered，包含 prompt_id；三条生图入口共用 |
 | 回复 | postprocess 保留原始与最终文字摘要；reply_sent 含 message_id、图片数、truncated、already_sent；relay 失败发非终态 fallback |
 
-Metrics 每 60 秒从持久化游标读取新事件（包括 MCP 进程），内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样 dispatcher 队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理两张观测表。DeepSeek 用量用真实 usage 估算，不发额外模型请求。
+Metrics 每 60 秒从持久化游标读取新事件（包括主进程摄取的 MCP 事件），内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样 dispatcher 队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理两张观测表。DeepSeek 用量用真实 usage 估算，不发额外模型请求。
 
-HTTP 面板由原健康服务器承载：/healthz 分支保持 JSON 原样，其余路由交给 obs/http.ts。SSR 中文 HTML + 内联 CSS / JS、SSE，无 CDN、框架或新增依赖；上下文直接调用共享工具格式化逻辑。图片经过段校验、真实路径约束、链接拒绝与位图魔数检查；HTML 统一转义并设置 CSP。可选口令覆盖所有面板出口，Compose 只向宿主机 loopback 发布端口。
+HTTP 面板由原健康服务器承载：/healthz 分支无需认证，仅返回白名单健康 JSON（连接状态、degraded、检查布尔值和线程信息），其余路由交给 obs/http.ts。SSR 中文 HTML + 内联 CSS / JS、SSE，无 CDN、框架或新增依赖；上下文直接调用共享工具格式化逻辑。图片经过段校验、真实路径约束、链接拒绝与位图魔数检查；所有渲染字符串先 redactText 再 HTML 转义并设置 CSP。强制口令覆盖所有面板出口，Compose 只向宿主机 loopback 发布端口。
+
+存储或 schema / Metrics 初始化失败时切换无操作模式，/healthz 与总览显示 degraded: true，观测故障不影响业务。每票据默认 500 条（OBS_TICKET_EVENT_CAP，8–10000）、256 KiB detail；为三种终态和丢弃摘要预留槽位及字节，重复进度保留首末及计数，事件按 after=id&limit 游标读取。口令从 OBS_TOKEN 或 DATA_DIR/obs-token 获取，缺失时原子生成 32 字节随机 base64url、0600 文件；口令文件加入 Codex deny_read，子进程环境不传 OBS_TOKEN。口令获取失败则关闭面板访问。
 
 告警默认关闭；开启时通过 bridge 的公共 send 接口私聊 owner，所有原因共用 30 分钟限频。未改动 QQBridge 内部实现。观测保留期不删除业务 failed 索引，避免重新认领尚为 pending 的旧票据。部署、指标语义及限制见 DEPLOY.md 的“观测面板”。
 
