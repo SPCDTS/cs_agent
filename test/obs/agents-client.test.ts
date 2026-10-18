@@ -85,8 +85,8 @@ function contentServer(text: string, base: number) {
     const u = new URL(url, 'http://x'); const offset = Number(u.searchParams.get('offset')), length = Number(u.searchParams.get('length'));
     if (length > 256 * 1024) return { status: 400, body: { error: 'too big for client' } };
     let start = offset - base, end = Math.min(start + length, buf.length);
-    while (start < end && (buf[start]! & 0xc0) === 0x80) start++;
-    while (end < buf.length && end > start && (buf[end]! & 0xc0) === 0x80) end--;
+    while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start++;
+    while (end < buf.length && (buf[end]! & 0xc0) === 0x80) end++;
     return { status: 200, body: { text: buf.subarray(start, end).toString('utf8'), truncated: false } };
   };
 }

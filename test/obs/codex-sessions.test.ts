@@ -216,7 +216,8 @@ describe('Codex 会话正文适配器', () => {
     expect(ref.length).toBe(Buffer.byteLength(text));
     const partial = await r.adapter.content({ ...ref, offset: ref.offset + 9001, length: 8 });
     expect(partial).not.toContain('private'); expect(partial).not.toContain('\uFFFD');
-    await expect(r.adapter.content({ ...ref, length: ref.length + 1 })).rejects.toMatchObject({ status: 400 });
+    expect(await r.adapter.content({ ...ref, length: ref.length + 3 })).toBe(text);
+    await expect(r.adapter.content({ ...ref, length: ref.length + 4 })).rejects.toMatchObject({ status: 400 });
     await expect(r.adapter.content({ ...ref, offset: -1 })).rejects.toMatchObject({ status: 400 });
     await expect(r.adapter.content({ ...ref, length: 0 })).rejects.toMatchObject({ status: 400 });
     await expect(r.adapter.content({ ...ref, session: '../../.env' })).rejects.toMatchObject({ status: 404 });

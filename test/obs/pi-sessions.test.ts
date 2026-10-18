@@ -101,8 +101,9 @@ describe('Pi 会话适配器', () => {
     const text = await s.adapter.content(ref);
     expect(text).toContain('[已隐藏]');
     expect(text).not.toContain(secret);
+    expect(await s.adapter.content({ ...ref, length: ref.length + 3 })).toBe(text);
     expect(await s.adapter.content({ ...ref, offset: ref.offset + 9002, length: 8 })).not.toContain('test-private');
-    for (const invalid of [{ ...ref, offset: -1 }, { ...ref, length: 0 }, { ...ref, length: ref.length + 1 },
+    for (const invalid of [{ ...ref, offset: -1 }, { ...ref, length: 0 }, { ...ref, length: ref.length + 4 },
       { ...ref, offset: ref.offset + 0.5 }, { ...ref, offset: Number.MAX_SAFE_INTEGER }]) {
       await expect(s.adapter.content(invalid)).rejects.toMatchObject({ status: 400 });
     }
