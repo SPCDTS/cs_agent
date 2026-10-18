@@ -180,6 +180,40 @@ ol.feed{list-style:none;margin:var(--s3) 0 0;padding:var(--s2) 0 0;border-top:1p
 .conn.on::before{content:"● ";color:var(--ok)}
 .conn.off::before{content:"● ";color:var(--fail)}
 
+/* ── 上下文占用条（设计 §8.5）：轨道是一把刻度尺，每 10% 一道细刻线；墨色按占比由复写纸蓝转为琥珀、朱红。
+   pi 的两道压缩阈值是贯穿轨道的刻口（悬停看说明）；估算值用斜线虚填，超过 24 小时未更新的整体褪色。 ── */
+.ctx-list{display:grid;gap:var(--s4) var(--s6);grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr))}
+.ctx{--ctx-ink:var(--carbon);min-width:0}
+.ctx-t-warn{--ctx-ink:var(--warn)} .ctx-t-hot{--ctx-ink:var(--fail)}
+.ctx-stale,.ctx-none{--ctx-ink:var(--ink-3)}
+.ctx-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 var(--s3);margin-bottom:6px}
+.ctx-label{font-weight:600;font-size:var(--t-sm)}
+.ctx-num{font-size:var(--t-sm);color:var(--ink-2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.ctx-num b{font-weight:600;color:var(--ink)}
+.ctx-short{font-size:var(--t-xs);color:var(--ink-3);white-space:nowrap}
+.ctx-pct{margin-left:auto;font-weight:700;font-size:var(--t-md);color:var(--ctx-ink);white-space:nowrap;font-variant-numeric:tabular-nums}
+.ctx-track{position:relative;display:block;height:10px;border:1px solid var(--rule-strong);border-radius:var(--r-sm);background:var(--sheet-2)}
+.ctx-track::after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(to right,transparent 0 calc(10% - 1px),var(--rule) calc(10% - 1px) 10%)}
+.ctx-fill{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--ctx-ink);border-radius:2px 0 0 2px}
+.ctx-fill[data-w="100"]{border-radius:2px}
+.ctx-est .ctx-fill{background:repeating-linear-gradient(135deg,var(--ctx-ink) 0 3px,transparent 3px 6px);outline:1px dashed var(--ctx-ink);outline-offset:-1px}
+.ctx-stale .ctx-fill{opacity:.55}
+.ctx-stale .ctx-label,.ctx-stale .ctx-num b{color:var(--ink-2)}
+.ctx-tick{position:absolute;top:-5px;bottom:-5px;width:11px;margin-left:-5px;z-index:1;cursor:help}
+.ctx-tick::before{content:"";position:absolute;left:4px;top:0;bottom:0;width:3px;background:var(--sheet);border-left:1px solid var(--ink-2);border-right:1px solid var(--ink-2)}
+.ctx-tick.ctx-rs::before{border-color:var(--fail)}
+.ctx-tick:hover::before{background:var(--ink-2)} .ctx-tick.ctx-rs:hover::before{background:var(--fail)}
+.ctx-meta{margin-top:6px;font-size:var(--t-xs);color:var(--ink-3)}
+.ctx-none .ctx-pct{color:var(--ink-3)}
+.ctx-mini{display:flex;align-items:center;gap:var(--s2);flex:1 1 180px;max-width:300px;font-size:var(--t-xs);cursor:default}
+.ctx-mini .ctx-track{flex:1 1 60px;min-width:48px;height:6px}
+.ctx-mini .ctx-tick{top:-3px;bottom:-3px}
+.ctx-mini .ctx-pct{margin-left:0;font-size:var(--t-xs)}
+.ctx-mini .ctx-short{color:var(--ink-3)}
+.slip-top .ctx-mini{order:9}
+.thread-ctx{margin-bottom:var(--s4);padding-bottom:var(--s4);border-bottom:1px dashed var(--rule-strong)}
+${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.ctx-tick[data-at="${i}"]{left:${i}%}`).join('\n')}
+
 /* ── 日志 ── */
 .log{font-family:var(--mono);font-size:var(--t-xs);background:var(--sheet);border:1px solid var(--rule);border-radius:var(--r-md);max-height:70vh;overflow:auto;padding:var(--s2) 0}
 .log div{padding:1px var(--s4);white-space:pre-wrap;overflow-wrap:anywhere;border-left:3px solid transparent}
@@ -196,6 +230,7 @@ ol.feed{list-style:none;margin:var(--s3) 0 0;padding:var(--s2) 0 0;border-top:1p
   .thumbs img{width:44vw;height:44vw}
   .choice{min-width:100%}
   blockquote.said{font-size:var(--t-md)}
+  .ctx-mini{max-width:none;flex-basis:100%}
 }
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 `;
