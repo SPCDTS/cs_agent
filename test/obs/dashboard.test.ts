@@ -125,6 +125,35 @@ describe('面板二期页面', () => {
     expect(r.resetCodex).not.toHaveBeenCalled();
   });
 
+  it('设置页使用 same-origin Referrer-Policy，保留浏览器同源表单的 Origin', async () => {
+    const r = await rig();
+    const res = await r.get('/settings');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('referrer-policy')).toBe('same-origin');
+  });
+
+  it('Origin 为 null 且 Sec-Fetch-Site 为 same-origin 时允许有效 CSRF 表单，仍拒绝无效令牌', async () => {
+    const r = await rig();
+    const ok = { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: '', codexReplyMode: 'relay', codexReasoningEffort: 'high' };
+    const headers = { Origin: 'null', 'Sec-Fetch-Site': 'same-origin' };
+    expect((await r.post('/settings', { ...ok, _csrf: '' }, headers)).status).toBe(403);
+    expect(r.settings.current().agentBackend).toBe('codex');
+    const res = await r.post('/settings', ok, headers);
+    expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/settings?ok=saved');
+    expect(r.settings.current().agentBackend).toBe('pi');
+    expect((await r.post('/settings', ok, { ...headers, Origin: 'http://evil.example' })).status).toBe(403);
+  });
+
+  it.each([undefined, 'cross-site', 'same-site', 'none'])('Origin 为 null 且 Sec-Fetch-Site 为 %s 时拒绝写入', async site => {
+    const r = await rig();
+    const ok = { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: '', codexReplyMode: 'relay', codexReasoningEffort: 'high' };
+    const headers: Record<string, string> = { Origin: 'null' };
+    if (site !== undefined) headers['Sec-Fetch-Site'] = site;
+    const res = await r.post('/settings', ok, headers);
+    expect(res.status).toBe(403); expect(await res.text()).toBe('跨站请求被拒绝');
+    expect(r.settings.current().agentBackend).toBe('codex');
+  });
+
   it('保存设置立即生效、落盘并记录事件；非法覆盖表返回 400 且不改动', async () => {
     const r = await rig();
     const res = await r.post('/settings', { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: 'group:7=codex\nprivate:5=pi', codexReplyMode: 'direct', codexReasoningEffort: 'low', alertOwner: 'on' },

@@ -220,7 +220,7 @@ export function createDashboard(opts: DashboardOptions) {
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const nonce = randomBytes(18).toString('base64');
-    res.setHeader('Cache-Control','no-store'); res.setHeader('Referrer-Policy','no-referrer'); res.setHeader('X-Content-Type-Options','nosniff');
+    res.setHeader('Cache-Control','no-store'); res.setHeader('Referrer-Policy','same-origin'); res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Content-Security-Policy', `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
     let url: URL;
     try { url = new URL(req.url ?? '/', 'http://localhost'); } catch { res.writeHead(400).end(); return; }
@@ -307,10 +307,10 @@ export function createDashboard(opts: DashboardOptions) {
   }
 
   async function handlePost(req: IncomingMessage, res: ServerResponse, url: URL, nonce: string, host: string): Promise<void> {
-    // 同源检查：浏览器提供 Origin / Sec-Fetch-Site 时必须同源；再校验表单内 CSRF 令牌。
+    // 同源检查：Origin 为 null 时仅信任浏览器提供的 Sec-Fetch-Site: same-origin；其他 Origin 必须匹配，随后仍校验 CSRF 令牌。
     const origin = req.headers.origin;
-    if (origin && origin !== `http://${host}`) { res.writeHead(403).end('跨站请求被拒绝'); return; }
     const site = req.headers['sec-fetch-site'];
+    if (origin && origin !== `http://${host}` && !(origin === 'null' && site === 'same-origin')) { res.writeHead(403).end('跨站请求被拒绝'); return; }
     if (site && site !== 'same-origin' && site !== 'none') { res.writeHead(403).end('跨站请求被拒绝'); return; }
     let form: URLSearchParams;
     try { form = await readBody(req); }
