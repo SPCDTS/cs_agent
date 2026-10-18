@@ -138,6 +138,20 @@ tool_timeout_sec = 15
   - `[引用 #id]` 头部格式及其防伪造改写。
 - 冒烟：群里未 @ 发一张图 → `qq_recent` 只看到 `[image]`，媒体库为空；随后 @机器人 "把上面那张图改成卡通风格" → agent 调 `qq_image` → 媒体库出现文件，`qq_recent` 显示路径 → 生图请求带参考图；另一个群的 agent 召回这条 id 被拒。
 
+#### 2.5.8 验收修正（2026-10-18，对抗审查 1 阻断 + 3 major + 4 minor）
+1. **codex 不得直接读媒体库（阻断）**：所有会话的图都在同一个 `/data/media`，而 codex 的 `deny_read`（`scripts/entrypoint.sh`）没有覆盖它，群聊里的 codex 能用 shell 枚举、读取 owner 召回的私聊图片，绕过 `qq_image` 与参考图校验。修正：
+   - `deny_read` 加入 `"$D/media"`，AGENTS.md 删掉"可只读打开 media 路径"那条，改为"用 `qq_view_image` 查看"；
+   - `qq_context` MCP 新增 `qq_view_image(path)`：经同一个 loopback 端点（`POST /view`，同一个每轮令牌，不另计召回次数）由主进程校验 `mediaPathAllowed(令牌绑定的 access, path)` 与 `readMediaFile`，通过后以 MCP 图片内容返回（一次一张）。MCP 进程本身不读媒体文件。
+   - `qq_image` 仍只返回路径文本（用户要求的两后端一致不变）；看图在 pi 用内置 `read`，在 codex 用 `qq_view_image`。
+   - 冒烟时必须实测：codex 沙箱内 `ls/cat /data/media/...` 读不到；codex 自带的本地看图能力也读不到 `/data/media`（若能读到，记为新的阻断并上报）。
+2. **文件发布原子化 + GC 不误删（major）**：先写同目录唯一临时文件 `.<sha>.<rand>.tmp`，校验后 `link()` 发布为最终文件名（已存在则校验已有文件；已有文件损坏时用 `rename()` 原子替换）；复用已有文件时 `utimes` 刷新 mtime，使 1 天 GC 宽限期覆盖"复用后尚未提交媒体行"的窗口；GC 跳过临时文件但清理 1 天前的残留临时文件。
+3. **子进程环境改为白名单（major）**：pi 的 `bash` 子进程只继承 `PATH HOME USER LOGNAME SHELL LANG LANGUAGE LC_* TZ TERM TMPDIR` 及工具自身传入的变量，不再按变量名黑名单过滤（`COMFYUI_URL` 之类带内嵌凭据的 URL 也不会泄漏）。
+4. **动态令牌不占长期秘密表（minor）**：召回令牌不再 `registerSecrets`；改为可撤销的临时秘密（注册返回 dispose，令牌作废时移除）。长期秘密表满额时记一次 warn，而不是静默忽略。
+5. **single-flight 生命周期独立（minor）**：共享任务只受自身 60 s 截止控制；每个等待者按自己的取消信号单独退出；全部等待者都退出时才取消底层任务。
+6. **票据额度回收（minor）**：票据没有活跃令牌且距最后一次作废超过 30 分钟时删除其额度记录（保留重试窗口，不因单个令牌作废而重置额度）。
+7. **符号链接竞态（minor，接受）**：利用前提是能修改 `/data/media` 目录；codex 对该目录既不可写也不可读（第 1 条），pi 已按 §4.5 接受全文件访问风险。不改代码，在此记录。
+8. **撤回也删除机器人行**：实现把 `recall` 的 `is_self = 0` 条件去掉了。评估后接受：被撤回的机器人消息在 QQ 里已不存在，删除其行与媒体行是正确的；撤回事件只来自 NapCat，不能伪造。
+
 ## 3. codex 执行层
 
 ### 3.1 两条线程：owner 与 shared（2026-10-18 用户决定）
