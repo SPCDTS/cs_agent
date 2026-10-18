@@ -163,6 +163,7 @@ tool_timeout_sec = 15
 ## 3. codex 执行层
 
 ### 3.1 两条线程：owner 与 shared（2026-10-18 用户决定）
+> 已被 §10.1 取代：codex 改为按会话域分线程（owner / 每群 / 每个其他私聊），工作区按会话域隔离。
 - 评审指出单一线程会让 owner 私聊内容经 codex 记忆泄露到群聊。改为两条线程：`owner`（owner 私聊）与 `shared`（所有群与其他用户），映射存 `codex-threads.json`，旧 `codex-session.json` 迁移为 `owner`。每条线程一把互斥锁，两条可并行。
 - 历史检索仍不按线程分域，访问过滤见 §2.3。
 - 依赖 codex 自带的自动上下文压缩。安全阀：rollout 文件 > `CODEX_ROLLOUT_MAX_MB`（默认 50）或线程 > `CODEX_THREAD_MAX_DAYS`（默认 90）时新建线程（无交接摘要，历史靠 §2 的检索找回）。
@@ -239,6 +240,7 @@ interface AgentBackend {
   - `read` 配置图片处理（`ReadToolOptions.images`，取 `DEFAULT_IMAGE_LIMITS`），读 PNG/JPEG/WebP/GIF 时返回图片内容，用于查看 `qq_image` 召回的图和本票据参考图。
   - 执行环境：`NodeExecutionEnv`，每个 pi 会话一个工作目录 `${DATA_DIR}/pi-work/<会话键>/`（会话键中的 `:` 换成 `_`，首次使用时创建）；绝对路径不受限制。
   - 子进程环境：`bash` 启动的进程**不继承**主进程里的凭据类环境变量（`NAPCAT_TOKEN`、`DEEPSEEK_API_KEY`/`DEEPSEEK_APIKEY`、面板口令及其他已注册的秘密），与 codex 侧"口令不进子进程环境"一致。这只是不把凭据直接塞给子进程，不限制工具本身的能力。
+  - （§10.2 将撤销此条：bash 经 bwrap、文件工具做路径检查。）
   - **已接受的风险**：pi 跑在主进程里，没有 codex 那样的沙箱与 `deny_read`。内置工具能读写容器内的全部文件（包括各会话的消息库、票据库、`/data/obs-token`），群成员可以通过提示注入间接驱动这些工具，历史工具的访问范围过滤因此不再是硬边界。用户已知情并决定启用。
   - 观测：内置工具调用与 codex 内置命令同口径记录（工具名、命令或路径前 200 字、退出码、耗时），计入每票据事件预算。
 - 系统提示：`/data/prompts/agent.md` 热加载（与 codex 的 AGENTS.md 规则对齐：纯文本中文简短、不可信内容声明、历史工具纪律、需要事实先搜索、需要出图调用 generate_image 并一句话说明）。内置默认值在代码中。
@@ -476,3 +478,59 @@ interface ContextUsage {
 - 根因：`codex exec --json` 的 `turn.completed.usage` 是线程累计计费量（等于 rollout `token_count.info.total_token_usage`），实时路径把它当成本次请求上下文写入占用条；启动回填用的 `last_token_usage` 是对的，于是重启后短暂正确、下一回合又被覆盖。同一时刻真实值为 115,947。
 - 修复（astra，`8d26af1`）：回合结束、codex 进程退出后，从该线程 rollout 尾部读取最新 `token_count.last_token_usage` 写入占用条；读不到或比本轮开始更旧时保留旧值、只计一次回合并告警一次；`readRolloutContextUsage` 不再接受 `turn.completed.usage`；观测事件 `model_usage` 字段改名 `total_*`，实时页标注"线程累计"。
 - 主会话验收：在 O1 之上变基并解决 `codex-context-usage.ts` 冲突（只取 `token_count`）；typecheck 通过，全量 718 项通过（一次 Windows worker 崩溃为既有抖动，新增用例单独复跑三次稳定）。部署时清掉 `data/context-usage.json` 中标记为实测的错误 codex 记录，启动回填两条成功：shared 115,947 / 500,000（23%），owner 53,864（11%）。副作用：shared 回合计数由 rollout 尾部 2 MiB 可见范围重算为 3（真实 18 回合见 `/api/agents` 会话索引），下一回合起继续累加。
+
+## 10. IM 网关分层（v4，2026-10-18 用户决定）
+
+> 目标：QQ 协议只留在通道适配层；网关层负责会话、排队、可靠投递与能力签发；agent 后端只面对回合上下文。参照 Bot Framework（Adapter / TurnContext / ConversationReference）与 NoneBot2 / Koishi / Satori 的通用做法；保留现有已验证的部分（推送式接入、票据状态机、按 scope FIFO、工具按范围授权）。
+
+```
+channels/qq（OneBot WS/HTTP、normalize、send、fetchMedia、fetchHistory）
+   ⇅ Channel 接口
+gateway（ConversationRef=scope、触发与分流、按会话队列、Inbox/Outbox 幂等、TurnContext 能力令牌）
+   ⇅ TurnContext
+agent（codex | pi，只依赖 TurnContext）   ←  tools（MCP / 进程内）只经 TurnContext 访问记忆、媒体、发送
+```
+
+原则：
+- `ConversationRef = { channel, scope }` 是队列、记忆分区、授权范围、agent 会话的唯一键。
+- 模型能触及的一切能力（记忆检索、媒体召回、看图、生图、发送）都由网关按回合签发、按会话约束；凭据与协议细节不进入模型的执行环境。
+- 默认每回合只有一条最终回复，由网关经 Outbox 发出；agent 无收件人参数。
+
+### 10.1 第 1 步：codex 按会话域分线程（安全修复，取代 §3.1 的 owner/shared 两分）
+- 问题：非 owner 的所有群与私聊共用 codex `shared` 线程，A 群的对话内容留在线程上下文里，B 群下一轮可见；`QQ_ACCESS` 只约束工具，约束不了线程里已有的内容。此外所有会话共用可写的 `/workspace`（以及 `prompts`、`workflows`），文件也能跨会话传递，群成员还可借提示注入改写全局提示文件。
+- 线程键：与 pi 一致，`owner` | `group:<id>` | `private:<qq>`（`threadKeyForSource` 对非 owner 返回 scope）。`codex-threads.json` 按键存记录；`shared` 记录不再使用：启动时归档到 `codex-threads-archive.jsonl`（reason=`scope-split`）后删除，不迁移给任何 scope（参照 pi 停用 shared 的做法）。
+- 并发：每个线程键一条互斥队列（同键串行、不同键并行），总量仍受 `AGENT_CONCURRENCY` 约束；线程文件的读改写仍串行化。安全阀（rollout 大小 / 线程年龄）、上下文占用回填、面板重置线程都按动态键工作：面板列出 `codex-threads.json` 中现有的全部键；重置接口接受 `owner` 与合法 scope。
+- 工作区按会话域隔离：每轮 `-C ${WORKSPACE_DIR}/<键，':'→'_'>`（首次使用时创建）；可写目录按回合注入：
+  - 非 owner：仅本会话工作区（加 codex 运行必需的目录）；
+  - owner：本会话工作区 + `${DATA_DIR}/prompts` + `${DATA_DIR}/workflows`（保留 owner 经 codex 编辑提示与工作流的能力）。
+  - 受管规则与可编辑的行为指引在新工作区下仍须完整生效（实现方查明 codex 0.163 的 AGENTS.md 加载规则后选定方案，例如放入 `$CODEX_HOME/AGENTS.md` 或每个工作区生成一份；不得出现某个会话域缺规则的情况），`renderManagedAgentsMd` 按实际生效的可写目录渲染。
+  - 其他会话的工作区对本回合不可读（deny_read 或等效机制；若 codex 无法按回合注入 deny_read，则说明可行方案并上报，不得静默跳过）。
+- 观测：上下文占用条与会话页的标签按键显示（`owner 线程` / `群 <id>` / `私聊 <qq>`），旧 `shared` 记录只在归档中可见。
+- 验收：A 群与 B 群各发一轮后线程 id 不同；B 群回合的线程 rollout 中不含 A 群内容；非 owner 回合写 `/data/prompts` 失败、读其他会话工作区失败；owner 回合可写 prompts；重启后各键线程沿用；面板能列出并重置任一键。
+
+### 10.2 第 2 步：pi 内置工具加沙箱（撤销 §4.5 的"已接受的风险"）
+- `bash`：经 bwrap 执行，要求 `--unshare-pid`（新 `/proc`，看不到主进程 `/proc/1/environ`）、`--die-with-parent`；根文件系统只读绑定，仅本会话工作区 `${DATA_DIR}/pi-work/<键>` 与 `/tmp`（tmpfs）可写；禁读列表与 codex 同源（`/etc/codex/requirements.toml` 的 `deny_read`，展开其中的通配），另外禁读 `${DATA_DIR}/pi-work` 下其他会话的目录与 pi-durable 自身的状态库。网络保持可用（与 codex 一致）。bwrap 不可用或禁读列表读取失败 → `bash` 工具返回错误，**不得**退回无沙箱执行。环境变量白名单与 60 秒上限保留。
+- `read` / `write` / `edit`：在 `PiExecutionEnv` 的文件方法上做路径检查（`realpath` 后判断，软链接 TOCTOU 沿用 §2.5.8 已接受的结论）：
+  - 读：命中禁读列表 → 拒绝；例外：`/data/media/...` 中 `mediaPathAllowed(本回合 scope, path)` 为真的文件，以及本票据的 `incoming/<ticket>/`、`images/<ticket>/`；
+  - 写：仅本会话工作区与本票据的 `images/<ticket>/`。
+- 验收：pi 回合中 `bash` 读 qq-messages.sqlite / obs-token / 其他会话工作区 / `/proc/1/environ` 均失败；`read` 本会话召回的图成功、他群的图失败；bwrap 缺失时 bash 报错而非裸跑。
+
+### 10.3 第 3 步：抽出 Channel 接口（纯重构，行为不变）
+- 通用代码迁出 `src/qq/`：`image.ts`、`image-header.ts`、`incoming-http.ts` → `src/net/` 或 `src/media/`。
+- `src/channel/`：`ConversationRef`、`InboundEvent`（段数组、reply_to、mentions、能力声明）、`Channel { on, send(ref, segments, idemKey), fetchMedia(ref, messageId), fetchHistory(ref, range) }`。
+- `src/channels/qq/`：现 `QQBridge`、`onebot`、`policy`、`ReplyStore` 迁入并实现 `Channel`。`dispatch` / `tasks` / `context` / `mcp` 只依赖 `src/channel/`；`context/media.ts` 改用 `fetchMedia`，不再直接调用 OneBot。
+- 验收：`src/agent`、`src/context`、`src/mcp` 不再 import `channels/qq`；现网数据（票据库、消息库）原样沿用；全量测试通过。
+
+### 10.4 第 4 步：统一 TurnContext 能力令牌
+- 把 §2.5 的召回令牌推广为回合令牌：绑定 `ConversationRef`、票据、截止时间、各项配额；记忆检索、媒体召回、看图、生图、发送都以令牌鉴权。codex 经 MCP（令牌只在 MCP 子进程环境里），pi 进程内直接持有；两后端共用同一份实现与配额账本。
+
+### 10.5 第 5 步：Outbox 泛化 + 中途消息
+- `ReplyStore` 泛化为 Outbox：每条出站消息有类型（中途 / 最终 / 兜底）与幂等键（票据 + 序号），状态机不变。
+- 新工具 `qq_send(text)`：收件人固定为本回合会话，每回合 ≤2 条，经同一后处理与 trace；只要已发出任何消息就不再发兜底；最终回复照常。
+
+### 10.6 第 6 步：排队中合并 + 重连补洞
+- 同一 scope 内同一发送者在排队（未开始）期间的连续触发消息合并为一个回合；已开始的回合不打断。
+- WS 重连后用 NapCat 群历史接口补齐断线期间的消息，只入库不触发。
+
+### 10.7 节奏
+第 1、2 步优先（安全），各自独立实现、评审、部署；第 3–6 步依次推进，每步单独可验证。
