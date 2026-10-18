@@ -4,7 +4,7 @@ const sensitive = /(?:token|secret|password|passwd|authorization|cookie|credenti
 const scopeKey = (v: unknown) => typeof v === 'string' && /^(owner|shared|(?:group|private):\d+)$/.test(v);
 const safeMetadata = (key: string, value: unknown) =>
   (typeof value === 'number' && /tokens/i.test(key)) ||
-  (/^(thread_key|conversation_key)$/.test(key) && scopeKey(value)) ||
+  (/^(thread_key|conversation_key|key)$/.test(key) && scopeKey(value)) ||
   (key === 'keys' && Array.isArray(value) && value.every(scopeKey));
 export function registerSecrets(values: Iterable<string | undefined>): void {
   for (const value of values) if (value && value.length <= 16384 && secrets.size < 2048) secrets.add(value);

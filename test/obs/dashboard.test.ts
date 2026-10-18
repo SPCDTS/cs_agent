@@ -14,13 +14,14 @@ import { SettingsStore, SETTINGS_TICKET, type RuntimeSettings } from '../../src/
 import { CodexRunner } from '../../src/agent/codex-runner.js';
 import { CodexBackend } from '../../src/agent/backends/codex.js';
 import { FIXTURES } from '../agent/helpers.js';
+import { ContextUsageStub } from './fixtures/context-usage-stub.js';
 
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
 const defaults: RuntimeSettings = { agentBackend: 'codex', backendOverrides: {}, codexReplyMode: 'relay', codexReasoningEffort: 'high', alertOwner: false };
 
-async function rig() {
+async function rig(extra: { contextUsage?: ContextUsageStub } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
   const store = new ObsStore(dir), context = new ContextStore(dir);
   trace.attach(store);
@@ -31,7 +32,7 @@ async function rig() {
   const resetCodex = vi.fn(async (key: string): Promise<string | null> => key === 'shared' ? 'thread-old' : null);
   const resetPi = vi.fn(async () => 42);
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
-  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi,
+  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, ...extra,
     health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, comfy: { ok: true }, codex: { ok: false }, deepseek_key_present: true }),
     queue: () => ({ active: 1, slots: 2, waiting: 1, scopes: { 'group:7': 1 } }),
     codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'shared', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
@@ -293,4 +294,77 @@ describe('实时视图', () => {
     expect(slow.closedAfter).toBeGreaterThanOrEqual(250);
     expect(slow.closedAfter).toBeLessThan(5000);
   }, 20_000);
+});
+
+/** 持续读取 SSE（同一连接多次等待），测试结束时取消。 */
+function collect(res: Response) {
+  const reader = res.body!.getReader(), dec = new TextDecoder();
+  let text = '', closed = false;
+  void (async () => { for (;;) { const c = await reader.read().catch(() => ({ done: true, value: undefined })); if (c.done) { closed = true; return; } text += dec.decode(c.value, { stream: true }); } })();
+  clean.push(() => reader.cancel().catch(() => undefined));
+  return { async until(done: (t: string) => boolean, ms = 8000): Promise<string> {
+    const deadline = Date.now() + ms;
+    while (!done(text)) { if (closed || Date.now() > deadline) throw new Error('SSE timeout; got: ' + text.slice(-2000)); await new Promise(r => setTimeout(r, 20)); }
+    return text;
+  } };
+}
+
+describe('上下文占用条（§8.5）', () => {
+  const now = Date.now();
+  const stub = () => new ContextUsageStub([
+    { backend: 'pi', key: 'group:7', usedTokens: 115_000, windowTokens: 128_000, compaction: { background: 89_600, reserve: 112_000 }, turns: 9, updatedAt: now, source: 'turn' },
+    { backend: 'codex', key: 'shared', usedTokens: 100_000, windowTokens: 400_000, cachedTokens: 80_000, turns: 3, updatedAt: now, source: 'turn' },
+    { backend: 'codex', key: 'owner', usedTokens: 300_000, windowTokens: 400_000, turns: 20, updatedAt: now - 30 * 3600_000, source: 'turn' },
+    { backend: 'pi', key: 'owner', usedTokens: 2_000, windowTokens: 128_000, turns: 0, updatedAt: now, source: 'estimate' },
+  ]);
+
+  it('总览、/codex、/pi 首屏渲染占用条；总览 codex 在前、各自按占比降序；页面加载 usage.js', async () => {
+    const r = await rig({ contextUsage: stub() });
+    const home = await (await r.get('/')).text();
+    expect(home).toContain('上下文占用'); expect(home).toContain('src="/assets/usage.js"');
+    const order = [...home.matchAll(/data-ctx="([^"]+)"/g)].map(m => m[1]);
+    expect(order).toEqual(['codex|owner', 'codex|shared', 'pi|group:7', 'pi|owner']);
+    expect(home).toMatch(/class="ctx ctx-t-warn ctx-stale" data-ctx="codex\|owner"/);
+    expect(home).toContain('上次更新 30 小时前');
+    expect(home).toMatch(/class="ctx ctx-t-hot" data-ctx="pi\|group:7"/);
+    expect(home).toMatch(/class="ctx ctx-t-ok ctx-est" data-ctx="pi\|owner"/);
+    expect(home).not.toMatch(/\sstyle="/);
+
+    const codex = await r.get('/codex'); const ch = await codex.text();
+    expect(codex.status).toBe(200);
+    expect(ch).toContain('class="thread-ctx"'); expect(ch).toContain('100,000'); expect(ch).toContain('缓存命中 80,000');
+    expect(ch.indexOf('data-ctx="codex|shared"')).toBeLessThan(ch.indexOf('thread-old')); // 进度条在线程详情之上
+    const pi = await r.get('/pi'); const ph = await pi.text();
+    expect(pi.status).toBe(200);
+    expect(ph).toMatch(/class="ctx-tick ctx-bg" data-at="70" title="后台压缩阈值/); expect(ph).toMatch(/class="ctx-tick ctx-rs" data-at="88" title="阻塞压缩阈值/);
+    expect(ph.indexOf('data-ctx="pi|group:7"')).toBeLessThan(ph.indexOf('action="/pi/reset"'));
+    expect([...ph.matchAll(/data-ctx="([^"]+)"/g)].map(m => m[1])).toEqual(['pi|group:7', 'pi|owner']);
+    expect((await r.get('/assets/usage.js')).status).toBe(200);
+  });
+
+  it('未接入数据源时各页照常 200，codex 线程显示占位条', async () => {
+    const r = await rig();
+    expect(await (await r.get('/')).text()).toContain('上下文占用数据源未接入');
+    expect(await (await r.get('/codex')).text()).toMatch(/class="ctx ctx-none" data-ctx="codex\|owner"/);
+  });
+
+  it('/live 卡片头部有该线程的小型占用条；SSE 首帧带全部占用记录，context_usage 事件推送 context 增量', async () => {
+    const r = await rig({ contextUsage: stub() });
+    trace.event('tk-ctx', 'received', { scope: 'group:7', detail: { text: '在途', sender: '小明' } });
+    trace.event('tk-ctx', 'dispatched', { detail: { backend: 'pi', conversation_key: 'group:7' } });
+    const html = await (await r.get('/live')).text();
+    expect(html).toMatch(/<div class="ctx ctx-t-hot ctx-mini" data-ctx="pi\|group:7"/);
+    const sse = collect(await r.get('/live/stream'));
+    const first = await sse.until(t => t.includes('event: snapshot_end'));
+    expect(frames(first, 'context').map(f => `${f.usage.backend}|${f.usage.key}`)).toEqual(['codex|owner', 'codex|shared', 'pi|group:7', 'pi|owner']);
+    expect(first.indexOf('event: context')).toBeLessThan(first.indexOf('event: snapcard'));
+    expect(frames(first, 'snapcard')[0].card.thread).toBe('group:7');
+    const usageSse = collect(await r.get('/usage/stream'));
+    await usageSse.until(t => frames(t, 'context').length === 4);
+    trace.event('@pi', 'context_usage', { detail: { backend: 'pi', key: 'group:7', usedTokens: 20_000, windowTokens: 128_000, turns: 10, updatedAt: Date.now(), source: 'turn' } });
+    const live = await sse.until(t => frames(t, 'context').some(f => f.usage.usedTokens === 20_000));
+    expect(frames(live, 'context').find(f => f.usage.usedTokens === 20_000).usage).toMatchObject({ backend: 'pi', key: 'group:7', windowTokens: 128_000 });
+    const u = await usageSse.until(t => frames(t, 'context').some(f => f.usage.usedTokens === 20_000));
+    expect(frames(u, 'context')).toHaveLength(5);
+  });
 });

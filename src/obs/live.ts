@@ -3,20 +3,24 @@
  * 并把每个事件以增量推送给 /live 的 SSE 客户端。不读数据库、不轮询；事件已在 trace 内脱敏，
  * 这里只再做摘要与截断。卡片在终态后标记完成，保留最近若干张供页面收起显示；超出数量或过期的
  * 完成卡片在终态事件后与定时器里即时淘汰，并推送 remove 增量。每张卡片内的事件带单调递增的 seq，
- * 客户端据此增量渲染（事件环形截断后仍能续接）。
+ * 客户端据此增量渲染（事件环形截断后仍能续接）。stage=context_usage 的事件（设计 §8.5）另推一条
+ * context 增量（白名单字段），供各页的上下文占用条原地更新；卡片记下线程键（thread）以便查找。
  */
 import { redact, redactText } from './redact.js';
 import type { LiveEvent, Trace } from './trace.js';
+import { fmtPct, fmtShort, ratio, toContextUsage, type ContextUsage } from './ui/context-bar.js';
 
 export type CardState = 'queued' | 'running' | 'done' | 'failed';
 export interface LiveItem { seq: number; ts: number; stage: string; status: string; duration_ms: number | null; summary: string }
 export interface LiveCard {
   ticket: string; scope: string; text: string; sender: string; route: string; backend: string;
+  /** 线程键：codex 为 owner | shared，pi 为 owner | 会话域；来自 thread_wait / dispatched / model_turn 事件 */
+  thread: string;
   state: CardState; phase: string; phase_since: number; started: number; updated: number; finished: number | null;
   outcome: string; late_images: number; dropped: number; seq: number; items: LiveItem[];
 }
 export type CardHead = Omit<LiveCard, 'items'>;
-export type LiveMessage = { type: 'event'; card: CardHead; item: LiveItem } | { type: 'remove'; ticket: string };
+export type LiveMessage = { type: 'event'; card: CardHead; item: LiveItem } | { type: 'remove'; ticket: string } | { type: 'context'; usage: ContextUsage };
 
 const TERMINAL = new Set(['reply_sent', 'failed', 'fallback']);
 /** 字符串原样；对象展开为 `键 值` 对（工具参数），避免在界面上出现 JSON 括号与引号。 */
@@ -51,6 +55,8 @@ export function summarize(e: Pick<LiveEvent, 'stage' | 'status' | 'detail'>): st
   else if (e.stage === 'postprocess') { add('模式 ', d.mode); if (d.relayed !== undefined) parts.push(d.relayed ? '已整理' : '仅清洗'); }
   else if (TERMINAL.has(e.stage)) { add('', d.reply, 100); add('', d.reason ?? d.failure); }
   else if (e.stage === 'settings_changed') add('', d.changed);
+  else if (e.stage === 'context_usage' && typeof d.usedTokens === 'number' && typeof d.windowTokens === 'number')
+    parts.push(`上下文 ${fmtShort(d.usedTokens)} / ${fmtShort(d.windowTokens)}（${fmtPct(ratio(d.usedTokens, d.windowTokens))}）`);
   if (e.status === 'failed' && typeof d.error_category === 'string' && !parts.some(p => p.includes('error'))) parts.push(`错误类别 ${d.error_category}`);
   return parts.join(' · ').slice(0, 240);
 }
@@ -85,12 +91,16 @@ export class LiveBus {
   private head(card: LiveCard & { open?: unknown }): CardHead { const { items: _items, open: _open, ...head } = card; return head; }
 
   ingest(e: LiveEvent): void {
+    if (e.stage === 'context_usage') {
+      const usage = toContextUsage(e.detail);
+      if (usage) this.publish({ type: 'context', usage });
+    }
     if (e.ticket.startsWith('@')) return; // 设置变更、压缩等系统事件不是会话
     const terminal = TERMINAL.has(e.stage) && e.detail.terminal === true;
     let card = this.cards.get(e.ticket);
     if (!card) {
       if (terminal) return; // 重启前的票据只剩终态：不凭空造卡
-      card = { ticket: e.ticket, scope: e.scope, text: '', sender: '', route: '', backend: '', state: 'queued', phase: '', phase_since: e.ts,
+      card = { ticket: e.ticket, scope: e.scope, text: '', sender: '', route: '', backend: '', thread: '', state: 'queued', phase: '', phase_since: e.ts,
         started: e.ts, updated: e.ts, finished: null, outcome: '', late_images: 0, dropped: 0, seq: 0, items: [], open: [] };
       this.cards.set(e.ticket, card);
       if (this.cards.size > this.o.maxCards) this.prune(true);
@@ -105,6 +115,10 @@ export class LiveBus {
     if (e.stage === 'dispatched' && card.state === 'queued') card.state = 'running';
     if (typeof d.backend === 'string' && (e.stage.startsWith('backend:') || e.stage === 'dispatched' || (!card.backend && e.stage.startsWith('image:')))) card.backend = d.backend;
     if (e.stage.startsWith('backend:')) card.backend = e.stage.slice(8);
+    if (e.stage === 'thread_wait' || e.stage === 'dispatched' || e.stage === 'model_turn') {
+      const k = d.thread_key ?? d.conversation_key;
+      if (typeof k === 'string' && /^(owner|shared|(?:group|private):\d+)$/.test(k)) card.thread = k;
+    }
     if (e.stage === 'late_images' && e.status === 'started') card.late_images++;
     if (card.state === 'queued' && e.status === 'started') card.state = 'running';
     // 阶段栈：started 入栈；结束事件弹出该阶段及其之后打开的子阶段
@@ -124,8 +138,7 @@ export class LiveBus {
     const item: LiveItem = { seq: ++card.seq, ts: e.ts, stage: e.stage, status: e.status, duration_ms: e.duration_ms, summary: summarize(e) };
     card.items.push(item);
     if (card.items.length > this.o.maxItems) { card.items.splice(0, card.items.length - this.o.maxItems); card.dropped++; }
-    const msg: LiveMessage = { type: 'event', card: this.head(card), item };
-    for (const fn of this.subscribers) { try { fn(msg); } catch { /* 慢客户端由 SSE 层断开 */ } }
+    this.publish({ type: 'event', card: this.head(card), item });
     if (terminal) this.prune();
   }
 
@@ -142,8 +155,12 @@ export class LiveBus {
     }
   }
 
+  private publish(msg: LiveMessage): void {
+    for (const fn of this.subscribers) { try { fn(msg); } catch { /* 慢客户端由 SSE 层断开 */ } }
+  }
+
   private drop(ticket: string): void {
     this.cards.delete(ticket);
-    for (const fn of this.subscribers) { try { fn({ type: 'remove', ticket }); } catch { /* ignore */ } }
+    this.publish({ type: 'remove', ticket });
   }
 }

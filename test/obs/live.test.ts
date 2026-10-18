@@ -73,3 +73,24 @@ describe('实时总线', () => {
     } finally { vi.useRealTimers(); }
   });
 });
+
+describe('LiveBus 的 context 增量', () => {
+  it('context_usage 事件推送脱敏后的白名单记录（线程键不被当作密钥隐藏），卡片记下线程键', () => {
+    const trace = new Trace();
+    const bus = new LiveBus(trace);
+    const got: LiveMessage[] = [];
+    bus.subscribe(m => got.push(m));
+    trace.event('t1', 'received', { scope: 'group:7', detail: { text: '你好' } });
+    trace.event('t1', 'dispatched', { detail: { backend: 'pi', conversation_key: 'group:7' } });
+    trace.event('@pi', 'context_usage', { detail: { backend: 'pi', key: 'group:7', usedTokens: 64_000, windowTokens: 128_000, compaction: { background: 89_600, reserve: 112_000 }, turns: 3, updatedAt: 9, source: 'turn', secret: 'x' } });
+    const ctx = got.filter(m => m.type === 'context');
+    expect(ctx).toEqual([{ type: 'context', usage: { backend: 'pi', key: 'group:7', usedTokens: 64_000, windowTokens: 128_000, compaction: { background: 89_600, reserve: 112_000 }, turns: 3, updatedAt: 9, source: 'turn' } }]);
+    expect(bus.snapshot()[0]).toMatchObject({ ticket: 't1', backend: 'pi', thread: 'group:7' });
+    expect(bus.snapshot()).toHaveLength(1); // @ 系统票据不建卡
+    // 同票据内的 context_usage 也进事件流，摘要可读
+    trace.event('t1', 'context_usage', { detail: { backend: 'pi', key: 'group:7', usedTokens: 70_000, windowTokens: 128_000, turns: 4, updatedAt: 10, source: 'turn' } });
+    const last = got.filter(m => m.type === 'event').at(-1)!;
+    expect(last.type === 'event' && last.item.summary).toBe('上下文 70k / 128k（55%）');
+    bus.close();
+  });
+});

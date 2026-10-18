@@ -43,7 +43,7 @@ export const STAGES: Record<string, string> = {
   'phase:handle': '执行阶段', 'phase:submit': '提交阶段', 'phase:collect': '收图阶段', 'phase:reply': '发送阶段', 'phase:generate': '生图阶段',
   model_turn: '模型回合', model_usage: '用量', model_error: '模型错误', late_images: '延迟收图', postprocess: '整理回复',
   'image:submit': '提交生图', 'image:collect': '收取图片', reply_sent: '已回复', failed: '失败', fallback: '兜底回复',
-  compaction: '上下文压缩', events_dropped: '事件超出上限', settings_changed: '设置变更', thread_reset: '重置线程',
+  compaction: '上下文压缩', context_usage: '上下文占用', events_dropped: '事件超出上限', settings_changed: '设置变更', thread_reset: '重置线程',
 };
 export function stageLabel(stage: string): string {
   if (STAGES[stage]) return STAGES[stage]!;

@@ -16,6 +16,7 @@ import { formatBackendOverrides, SETTINGS_TICKET } from '../agent/settings.js';
 import { parseBackendOverrides } from '../agent/backends/select.js';
 import { REASONING_EFFORTS } from '../agent/codex-runner.js';
 import { ASSETS } from './ui/client.js';
+import { contextBar, sortUsage, type ContextUsage, type ContextUsageView } from './ui/context-bar.js';
 import { BACKENDS, ROUTES, csrfField, empty, esc, fmtBytes, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri, type Tone } from './ui/html.js';
 
 export { esc };
@@ -70,6 +71,8 @@ export interface DashboardOptions {
   resetCodex?: (key: 'owner' | 'shared') => Promise<string | null>;
   resetPi?: (key: string) => Promise<number | null>;
   trace?: Pick<Trace, 'event'>;
+  /** 每线程上下文占用（src/agent/context-usage.ts 的 ContextUsageStore；面板只读 all/get） */
+  contextUsage?: ContextUsageView;
 }
 function equal(a: string, b: string): boolean { const x=Buffer.from(a),y=Buffer.from(b); return x.length===y.length && timingSafeEqual(x,y); }
 /** 由访问口令派生的 CSRF 令牌：表单隐藏字段 + 服务端比对；不知道口令无法伪造。 */
@@ -239,10 +242,21 @@ export function createDashboard(opts: DashboardOptions) {
       // 逐卡脱敏，避免 redact 对数组的 100 项截断吞掉多余卡片（总数由 LiveBus 的 maxCards 约束）。
       const cards = opts.live.snapshot();
       send('snapshot', { now: Date.now(), count: cards.length });
+      // 占用记录先于卡片到达，卡片头部的小型占用条在首帧即可填充。
+      for (const usage of usageList()) send('context', { usage });
       for (const card of cards) send('snapcard', { card });
       send('snapshot_end', { count: cards.length });
-      const off = opts.live.subscribe((m: LiveMessage) => m.type === 'event' ? send('card', { card: m.card, item: m.item }) : send('remove', { ticket: m.ticket }));
+      const off = opts.live.subscribe((m: LiveMessage) => m.type === 'event' ? send('card', { card: m.card, item: m.item })
+        : m.type === 'context' ? send('context', { usage: m.usage }) : send('remove', { ticket: m.ticket }));
       res.on('close', off); return;
+    }
+    if (url.pathname === '/usage/stream') {
+      // 总览 / Codex / Pi 页的占用条：首帧当前全部记录（重连后补齐），之后只推 context 增量。
+      const out = sse(res); if (!out) return;
+      const send = (usage: ContextUsage) => out.send(`event: context\ndata: ${JSON.stringify(redact({ usage }, 2_000))}\n\n`);
+      for (const usage of usageList()) send(usage);
+      const off = opts.live?.subscribe(m => { if (m.type === 'context') send(m.usage); });
+      if (off) res.on('close', off); return;
     }
     if (url.pathname.startsWith('/images/')) {
       try {
@@ -314,10 +328,17 @@ export function createDashboard(opts: DashboardOptions) {
     }
   }
 
+  function usageList(): ContextUsage[] {
+    try { return opts.contextUsage ? sortUsage(opts.contextUsage.all()) : []; } catch { return []; }
+  }
+  function usageOf(backend: ContextUsage['backend'], key: string): ContextUsage | null {
+    try { return opts.contextUsage?.get(backend, key) ?? null; } catch { return null; }
+  }
+
   async function render(url: URL, nonce: string, flash?: { text: string; error?: boolean }): Promise<string | null> {
     const q = url.searchParams, p = url.pathname;
     const shell = (title: string, body: string, extra: { lead?: string; actions?: string; scripts?: string[] } = {}) => page({ title, path: p, nonce, body, flash, ...extra });
-    if (p === '/') return shell('运行总览', await overview(), { lead: '现在在处理什么、各依赖是否正常、最近的吞吐与失败。' });
+    if (p === '/') return shell('运行总览', await overview(), { lead: '现在在处理什么、各依赖是否正常、最近的吞吐与失败。', scripts: ['/assets/usage.js'] });
     if (p === '/live') return shell('进行中的会话', liveBody(), { lead: '正在处理与排队中的消息，按会话分组；事件由服务器实时推送。完成后收进下方列表。', scripts: ['/assets/live.js'],
       actions: '<span id="conn" class="conn">正在连接…</span>' });
     if (p === '/tickets') return shell('票据列表', tickets(q), { lead: '每条消息一张票据。点开查看从收到到回复的完整流转。' });
@@ -331,8 +352,8 @@ export function createDashboard(opts: DashboardOptions) {
         { lead: '最近 1000 行结构化日志，随后实时追加。可按票据或级别过滤。', scripts: ['/assets/logs.js'], actions: '<span id="conn" class="conn">正在连接…</span>' });
     }
     if (p === '/context') return shell('上下文检索', contextBody(q), { lead: '与 Codex / pi 的 qq_context 工具看到的内容一致。留空关键词查看最近记录。' });
-    if (p === '/codex') return shell('Codex 线程', await codexBody(), { lead: 'owner 私聊与其他会话各用一条长期线程。这里的轮次摘要来自观测事件，不读取会话原文。', scripts: ['/assets/forms.js'] });
-    if (p === '/pi') return shell('Pi 会话', await piBody(), { lead: 'pi 后端按 owner 与每个会话域各保持一个长期会话。', scripts: ['/assets/forms.js'] });
+    if (p === '/codex') return shell('Codex 线程', await codexBody(), { lead: 'owner 私聊与其他会话各用一条长期线程。这里的轮次摘要来自观测事件，不读取会话原文。', scripts: ['/assets/forms.js', '/assets/usage.js'] });
+    if (p === '/pi') return shell('Pi 会话', await piBody(), { lead: 'pi 后端按 owner 与每个会话域各保持一个长期会话。', scripts: ['/assets/forms.js', '/assets/usage.js'] });
     if (p === '/settings') return shell('设置', await settingsBody(), { lead: '修改立即对之后收到的消息生效，无需重启；.env 中的值只是初始默认。', scripts: ['/assets/forms.js'] });
     if (p === '/config') return shell('生效配置', await configBody(), { lead: '启动时从环境变量解析的配置（已脱敏）。运行中可改的项见<a href="/settings">设置</a>。' });
     return null;
@@ -349,6 +370,11 @@ export function createDashboard(opts: DashboardOptions) {
     out += live.length ? `<div class="sheet"><div class="wrap"><table class="list"><tbody>${live.slice(0, 12).map(c => `<tr><td>${statusStamp(c.state)}</td><td class="hide-sm">${esc(scopeLabel(c.scope))}</td><td><span class="excerpt">${esc(c.text || '（无原文）')}</span></td><td>${esc(c.phase ? stageLabel(c.phase) : '—')}</td><td class="num">${esc(fmtMs(Date.now() - c.started))}</td></tr>`).join('')}</tbody></table></div></div><p class="hint"><a href="/live">在实时页查看事件流</a></p>`
       : empty('眼下没有在处理的消息。新消息到达后会出现在这里和<a href="/live">实时页</a>。');
     out += '</section>';
+
+    const usage = usageList();
+    out += `<section><h2>上下文占用 <small>${usage.length ? `${usage.length} 条线程，codex 在前，按占比排序` : ''}</small></h2>${usage.length
+      ? `<div class="sheet pad"><div class="ctx-list">${usage.map(u => contextBar(u.backend, u.key, u)).join('')}</div></div>`
+      : empty(opts.contextUsage ? '还没有线程的占用记录。任一线程完成一个回合后，这里会显示它离上下文窗口还有多远。' : '上下文占用数据源未接入。')}</section>`;
 
     const bridge = asObj(health.bridge), comfy = asObj(health.comfy), codex = asObj(health.codex), aging = asObj(health.aging);
     const lamp = (name: string, tone: 'ok' | 'fail' | 'warn' | '', note: string) => `<div class="lamp"><b><i class="dot ${tone}" aria-hidden="true"></i>${esc(name)}</b><small>${esc(note)}</small></div>`;
@@ -382,7 +408,7 @@ export function createDashboard(opts: DashboardOptions) {
 
   function slipHtml(c: LiveCard): string {
     const items = c.items.slice(-30).map(it => `<li class="${it.status === 'failed' ? 'failed' : it.status === 'started' ? 'started' : ''}"><span class="faint">${esc(fmtOffset(Math.max(0, it.ts - c.started)))}</span><span class="sum"><b>${esc(stageLabel(it.stage))}${it.status === 'started' ? ' 开始' : it.status === 'failed' ? ' 失败' : ''}</b>  ${esc([fmtMs(it.duration_ms), it.summary].filter(Boolean).join('  '))}</span></li>`).join('');
-    return `<article class="slip${c.state === 'queued' ? ' queued' : ''}" data-ticket="${esc(c.ticket)}"><div class="slip-body"><div class="slip-top">${statusStamp(c.state)}<span class="who">${esc(c.sender || '—')}</span>${c.route ? `<span class="pill">${esc(ROUTES[c.route] ?? c.route)}</span>` : ''}${c.backend ? `<span class="pill">${esc(BACKENDS[c.backend] ?? c.backend)}</span>` : ''}<span class="elapsed">已耗时 ${esc(fmtMs(Date.now() - c.started))}</span></div>
+    return `<article class="slip${c.state === 'queued' ? ' queued' : ''}" data-ticket="${esc(c.ticket)}"><div class="slip-body"><div class="slip-top">${statusStamp(c.state)}<span class="who">${esc(c.sender || '—')}</span>${c.route ? `<span class="pill">${esc(ROUTES[c.route] ?? c.route)}</span>` : ''}${c.backend ? `<span class="pill">${esc(BACKENDS[c.backend] ?? c.backend)}</span>` : ''}<span class="elapsed">已耗时 ${esc(fmtMs(Date.now() - c.started))}</span>${c.backend && c.thread ? contextBar(c.backend, c.thread, usageOf(c.backend as ContextUsage['backend'], c.thread), { mini: true }) : ''}</div>
 <p class="text">${esc(c.text || '（无原文）')}</p><div class="phase">${c.phase ? `<span class="pulse" aria-hidden="true"></span><span>当前：${esc(stageLabel(c.phase))}</span>` : `<span class="faint">${c.state === 'queued' ? '排队等待同一会话的前一条消息' : '阶段之间'}</span>`}</div><ol class="feed">${items}</ol><div class="hint"><a href="/tickets/${uri(c.ticket)}">查看时间线</a></div></div></article>`;
   }
 
@@ -477,7 +503,7 @@ export function createDashboard(opts: DashboardOptions) {
     for (const t of threads) {
       const key = String(t.thread_key);
       const turns = opts.store.threadTurns('codex', key, 10);
-      body += `<section class="sheet pad flush"><h2>${key === 'owner' ? 'owner 线程' : key === 'shared' ? '共享线程' : esc(key)} <small>${key === 'owner' ? 'owner 私聊' : '群聊与其他私聊'}</small></h2>${kv([
+      body += `<section class="sheet pad flush"><h2>${key === 'owner' ? 'owner 线程' : key === 'shared' ? '共享线程' : esc(key)} <small>${key === 'owner' ? 'owner 私聊' : '群聊与其他私聊'}</small></h2><div class="thread-ctx">${contextBar('codex', key, usageOf('codex', key), { label: '上下文占用' })}</div>${kv([
         ['线程 id', t.thread_id ? `<span class="mono">${esc(t.thread_id)}</span>` : '<span class="muted">尚未创建（下一条消息新建）</span>'],
         ['rollout 大小', esc(fmtBytes(typeof t.rollout_bytes === 'number' ? t.rollout_bytes : null))],
         ['已观测回合', esc(t.observed_turns ?? turns.length)], ['最近活动', turns[0] ? time(turns[0].ts) : '—']])}
@@ -494,11 +520,19 @@ export function createDashboard(opts: DashboardOptions) {
     const map = asObj(status.threads);
     const keys = [...new Set([...Object.keys(map), ...(Array.isArray(status.keys) ? status.keys.map(String) : [])])].sort();
     let body = '';
+    const usageKeys = [...new Set([...keys, ...usageList().filter(u => u.backend === 'pi').map(u => u.key)])];
+    if (usageKeys.length) {
+      // 有记录的按占比降序，没有记录的会话排在后面显示占位条
+      const known = sortUsage(usageKeys.map(k => usageOf('pi', k)).filter((u): u is ContextUsage => !!u));
+      const bars = [...known.map(u => contextBar('pi', u.key, u)), ...usageKeys.filter(k => !known.some(u => u.key === k)).map(k => contextBar('pi', k, null))];
+      body += `<section class="flush"><h2>上下文占用 <small>两道刻口为后台压缩与阻塞压缩阈值</small></h2><div class="sheet pad"><div class="ctx-list">${bars.join('')}</div></div></section><section>`;
+    }
     if (!keys.length) body += empty('还没有 pi 会话。把某个会话域的后端切到 Pi（<a href="/settings">设置</a>）后，第一条消息会新建会话。');
     else body += `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>会话键</th><th>会话 id</th><th>最近活动</th><th class="num">已观测</th><th></th></tr></thead><tbody>${keys.map(k => {
       const turns = opts.store.threadTurns('pi', k, 10);
       return `<tr><td>${esc(scopeLabel(k))}</td><td class="mono">${esc(map[k] ?? '—')}</td><td>${turns[0] ? time(turns[0].ts) : '—'}</td><td class="num">${turns.length}${turns.length === 10 ? '+' : ''}</td><td>${resetForm('/pi/reset', k, ' ' + scopeLabel(k) + ' 的会话', !!opts.resetPi)}</td></tr>`;
     }).join('')}</tbody></table></div></div>`;
+    if (usageKeys.length) body += '</section>';
     for (const k of keys) body += `<section><h2>${esc(scopeLabel(k))} 最近 10 轮</h2><div class="sheet">${turnsTable(opts.store.threadTurns('pi', k, 10))}</div></section>`;
     const compaction = Array.isArray(status.compaction) ? status.compaction.map(asObj) : [];
     body += `<section><h2>上下文压缩</h2>${compaction.length ? `<div class="sheet"><table class="list"><thead><tr><th>会话 id</th><th class="num">次数</th><th>最近</th></tr></thead><tbody>${compaction.map(c => `<tr><td class="mono">${esc(c.conversation)}</td><td class="num">${esc(c.attempts)}</td><td>${typeof c.last_at === 'number' ? time(c.last_at) : '—'}</td></tr>`).join('')}</tbody></table></div>` : empty('还没有发生过压缩。')}</section>`;

@@ -1,19 +1,19 @@
 # 值守台（观测面板二期）
 
-容器内 `127.0.0.1:8787`，服务端渲染 HTML + 三个原生 JS 模块（`/assets/live.js`、`logs.js`、`forms.js`），无框架、无外部字体或 CDN。所有页面需要访问口令（`/data/obs-token` 或 `OBS_TOKEN`），首次以 `?token=` 登录后换成 HttpOnly cookie。
+容器内 `127.0.0.1:8787`，服务端渲染 HTML + 四个原生 JS 模块（`/assets/live.js`、`logs.js`、`forms.js`、`usage.js`），无框架、无外部字体或 CDN。所有页面需要访问口令（`/data/obs-token` 或 `OBS_TOKEN`），首次以 `?token=` 登录后换成 HttpOnly cookie。
 
 ## 页面
 
 | 路径 | 用途 | 写操作 |
 |---|---|---|
-| `/` 总览 | 进行中的消息、依赖信号灯、1h/24h 吞吐、并发与排队、当前设置、最近一分钟指标 | — |
-| `/live` 实时 | 按会话域分组的进行中/排队单据，SSE 推送事件流；完成后收进"刚刚完成" | — |
+| `/` 总览 | 进行中的消息、上下文占用（全部线程）、依赖信号灯、1h/24h 吞吐、并发与排队、当前设置、最近一分钟指标 | — |
+| `/live` 实时 | 按会话域分组的进行中/排队单据（页头带该线程的单行占用条），SSE 推送事件流；完成后收进"刚刚完成" | — |
 | `/tickets` | 票据列表，按状态/会话域/路由/后端筛选 | — |
 | `/tickets/<id>` | 单条票据：头部印章与元数据 → 原文 → 流转轨迹（时间线）→ 生成图片 | — |
 | `/logs` | 结构化日志实时尾随（SSE），按票据前缀/级别过滤 | — |
 | `/context` | 用 qq_context 工具浏览/检索消息库 | — |
-| `/codex` | owner / 共享线程：id、rollout 大小、已观测回合、最近 10 轮摘要、全局 AGENTS.md | `POST /codex/reset` |
-| `/pi` | 每个会话键的会话 id、最近活动、最近 10 轮摘要、压缩记录 | `POST /pi/reset` |
+| `/codex` | owner / 共享线程：上下文占用条、id、rollout 大小、已观测回合、最近 10 轮摘要、全局 AGENTS.md | `POST /codex/reset` |
+| `/pi` | 每个会话键的上下文占用条（含两道压缩阈值）、会话 id、最近活动、最近 10 轮摘要、压缩记录 | `POST /pi/reset` |
 | `/settings` | 运行时设置、编辑 agent.md、线程入口、最近变更、只读 AGENTS.md | `POST /settings`、`POST /settings/agent-md` |
 | `/config` | 启动时生效配置（脱敏）与 agent.md 当前内容 | — |
 
@@ -35,6 +35,14 @@
    ┌ 近 1 小时 ┐ ┌ 近 24 小时 ┐ ┌ 并发槽位 ┐
    │ 3 条完成  │ │ 4 条完成   │ │ 2 / 2    │
    │ 失败 1    │ │ 失败 1     │ │ 群… 排队1 │
+   上下文占用  4 条线程，codex 在前，按占比排序
+   ┌───────────────────────────────────────────────────────────────┐
+   │ Codex · owner 线程  300,000 / 400,000 tokens  300k / 400k  75% │
+   │ ███████████████████████████████████████████░░░░░░░░░░░░░░░░░  │  ← 刻度尺：每 10% 一道细线
+   │ 第 20 回合，缓存命中 80,000，更新于 14:02:11                     │
+   │ Pi · 群 200000001   115,000 / 128,000 tokens  115k / 128k  90% │
+   │ ██████████████████████████████████████████┃██████████┃████░░  │  ← ┃ 后台压缩 / 阻塞压缩阈值（悬停说明）
+   └───────────────────────────────────────────────────────────────┘
    当前设置（键值）   ▸ 最近一分钟指标（折叠）
 
 /live  进行中的会话                                   ● 实时连接中
@@ -42,6 +50,7 @@
    群 200000001 [2 条]
    ┆┌──────────────────────────────────────────────────────────────┐
    ┆│[处理中] 阿杰 (执行 agent) (Pi)                 已耗时 1 分 31 秒│
+   ┆│ ▬▬▬▬▬▬▬▬┃▬▬┃░░ 78% 100k / 128k                               │  ← 该线程的单行占用条
    ┆│ 能不能帮我查查明天上海的天气，顺便画一张带伞的奶龙              │
    ┆│ ● 当前：工具 generate_image   1 分 4 秒                       │
    ┆│ - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -│
@@ -84,6 +93,7 @@
 
 /codex  Codex 线程
    ┌ owner 线程 ───────────┐ ┌ 共享线程 ─────────────┐
+   │ 上下文占用 ▬▬▬░░ 31%  │ │ 上下文占用 ▬░░░░ 8%    │
    │ 线程 id  019a-…       │ │ 线程 id 019a-…        │
    │ rollout 17.5 MB       │ │ rollout 3.0 MB        │
    │ 已观测 41  最近 …     │ │ 已观测 12  最近 …      │
@@ -93,6 +103,7 @@
    共享线程最近 10 轮：…        ▸ 全局 AGENTS.md
 
 /pi  Pi 会话
+   上下文占用：每个会话键一条（有记录的按占比降序，其余为"暂无数据"占位）
    会话键 | 会话 id | 最近活动 | 已观测 | [重置线程]
    每个会话键最近 10 轮（同上表）   上下文压缩表   ▸ 用量（原始数据）
 
@@ -120,6 +131,22 @@
 - 间距：4 / 8 / 12 / 16 / 24 / 32 / 48；圆角 3（印章）/ 6（控件、单据）/ 10（面板）。
 - 深浅色：`@media (prefers-color-scheme: dark)` 自动切换；动效只有处理中阶段的脉冲点与新单据的一次高亮，`prefers-reduced-motion` 下全部关闭。
 
+## 上下文占用条（设计 §8.5）
+
+数据由 `src/agent/context-usage.ts` 的 `ContextUsageStore` 维护（每线程一条 `ContextUsage`），通过 `createDashboard({ contextUsage })` 接入；面板只用 `all()` / `get(backend, key)`，类型在 `src/obs/ui/context-bar.ts` 以同构结构声明。未接入时总览显示"数据源未接入"，各页照常。
+
+- 组件 `contextBar(backend, key, usage, {mini?})`（服务端）与 `usage.js` / `live.js` 内的 `ctxApply`（客户端）产生同一结构：`.ctx[data-ctx="backend|key"]` → `.ctx-head`（标签、`已用 / 窗口 tokens` 千分位、`k`/`M` 简写、百分比）→ `.ctx-track`（`role=progressbar`）→ `.ctx-meta`（回合数、缓存命中、压缩阈值、估算/更新时间）。`mini` 为单行（轨道 + 百分比 + 简写），用在实时卡片页头。
+- 宽度与刻口位置：`.ctx-fill[data-w]`、`.ctx-tick[data-at]` 取 0–100 的整数，theme.ts 生成对应的 101 条属性选择器规则——不写内联 `style`，CSP 不变，无脚本时首屏也正确；超过 100% 时条满格、百分比如实显示。
+- 分档：占比 <60% 复写纸蓝（`ctx-t-ok`）、60–85% 琥珀（`ctx-t-warn`）、>85% 朱红（`ctx-t-hot`）。pi 记录带 `compaction` 时画两道刻口：`ctx-bg` 后台压缩阈值、`ctx-rs` 阻塞压缩阈值，`title` 为中文说明。`source=estimate` 斜线虚填（`ctx-est`）；`updatedAt` 超过 24 小时褪色（`ctx-stale`）并显示"上次更新 x 小时前"；无记录显示"暂无占用数据"占位（`ctx-none`），SSE 到达后原地换成完整条。
+- 排序：总览 codex 在前、pi 在后，同后端按占比降序；`/pi` 有记录的按占比降序，其余占位在后。
+
+数据路径：
+
+- 首屏：服务端渲染时调用 `contextUsage.all()` / `get()`。
+- 实时：`ContextUsageStore` 每次更新写观测事件 `context_usage`（detail 即记录）→ `Trace.tap` → `LiveBus` 取白名单字段推送 `{type:'context', usage}` → `/live/stream` 与 `/usage/stream` 的 SSE `event: context`（`data: {usage}`）。`/live/stream` 在快照头之后、卡片之前先发全部记录；`/usage/stream`（总览、/codex、/pi 加载的 `usage.js`）首帧也发全部记录（重连补齐），之后只推增量。客户端只改 `textContent` / `dataset` / `className`。
+- 卡片的线程键 `thread` 来自 `thread_wait` / `dispatched` / `model_turn` 事件的 `thread_key`（codex）或 `conversation_key`（pi）；后端与线程键都已知后页头才出现占用条。
+- 脱敏：记录字段 `key` 与 `thread_key` 一样，只有取值为 `owner` / `shared` / `group:N` / `private:N` 时才不被当作密钥隐藏。
+
 ## 实时视图数据流
 
 ```
@@ -128,6 +155,7 @@ dispatch / tasks / codex JSONL observer / pi hooks
         ▼
 Trace ──tap──▶ LiveBus（内存卡片：阶段栈、事件流，已脱敏）──subscribe──▶ /live/stream（SSE）──▶ live.js
   │                                    snapshot → snapcard × N → snapshot_end，随后 card / remove 增量
+  │                                    context_usage 事件另推 context 增量（也发往 /usage/stream）
   └──append──▶ ObsStore（SQLite，票据时间线、指标）
 ```
 

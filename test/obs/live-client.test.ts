@@ -62,7 +62,7 @@ function boot() {
   return { ids, emit };
 }
 
-const head = (over: Record<string, unknown> = {}) => ({ ticket: 't1', scope: 'group:7', text: '你好', sender: '小明', route: '', backend: '', state: 'running', phase: '',
+const head = (over: Record<string, unknown> = {}) => ({ ticket: 't1', scope: 'group:7', text: '你好', sender: '小明', route: '', backend: '', thread: '', state: 'running', phase: '',
   phase_since: 0, started: 0, updated: 0, finished: null, outcome: '', late_images: 0, dropped: 0, seq: 0, ...over });
 
 describe('live.js 客户端渲染', () => {
@@ -109,4 +109,75 @@ describe('live.js 客户端渲染', () => {
     expect(top.querySelector('.who')!.textContent).toBe('小明');
     expect(ids.inflight!.querySelectorAll('.slip-top')).toHaveLength(1);
   });
+
+  it('卡片头部的小型占用条：首帧 context 快照填充，context 增量原地更新（档位、宽度、阈值、估算）', () => {
+    const { ids, emit } = boot();
+    const u = (over: Record<string, unknown> = {}) => ({ backend: 'pi', key: 'group:7', usedTokens: 64_000, windowTokens: 128_000, turns: 3, updatedAt: Date.now(), source: 'turn', ...over });
+    emit('snapshot', { now: Date.now(), count: 1 });
+    emit('context', { usage: u() });
+    emit('snapcard', { card: { ...head({ seq: 1, backend: 'pi', thread: 'group:7' }), items: [] } });
+    emit('snapshot_end', { count: 1 });
+    const bar = () => ids.inflight!.querySelector('[data-ctx="pi|group:7"]')!;
+    const first = bar();
+    expect(first.className).toBe('ctx ctx-t-ok ctx-mini');
+    expect(first.querySelector('.ctx-fill')!.dataset.w).toBe('50');
+    expect(first.querySelector('.ctx-pct')!.textContent).toBe('50%');
+    expect(first.querySelector('.ctx-short')!.textContent).toBe('64k / 128k');
+    expect(first.parentNode!.className).toBe('slip-top');
+    emit('context', { usage: u({ usedTokens: 120_000, compaction: { background: 89_600, reserve: 112_000 } }) });
+    expect(bar()).toBe(first); // 原地更新，不重建
+    expect(first.className).toBe('ctx ctx-t-hot ctx-mini');
+    expect(first.querySelector('.ctx-fill')!.dataset.w).toBe('94');
+    expect(first.querySelector('.ctx-pct')!.textContent).toBe('94%');
+    expect(first.querySelector('.ctx-bg')!.dataset.at).toBe('70');
+    expect(first.querySelector('.ctx-rs')!.attrs.title).toContain('阻塞压缩阈值：112,000 tokens');
+    emit('context', { usage: u({ usedTokens: 1_000, source: 'estimate', updatedAt: Date.now() - 48 * 3600_000 }) });
+    expect(first.className).toBe('ctx ctx-t-ok ctx-est ctx-stale ctx-mini');
+    expect(first.querySelector('.ctx-bg')).toBeNull();
+    // 别的线程的增量不影响本卡
+    emit('context', { usage: u({ key: 'owner', usedTokens: 127_000 }) });
+    expect(first.querySelector('.ctx-pct')!.textContent).toBe('<1%');
+  });
+
+  it('线程键在后续事件中才出现时补上占用条；没有记录时显示占位', () => {
+    const { ids, emit } = boot();
+    emit('snapshot', { now: Date.now(), count: 0 }); emit('snapshot_end', { count: 0 });
+    const item = (seq: number) => ({ seq, ts: seq, stage: 'thread_wait', status: 'started', duration_ms: null, summary: '' });
+    emit('card', { card: head({ seq: 1, backend: 'codex' }), item: item(1) });
+    expect(ids.inflight!.querySelector('.ctx')).toBeNull();
+    emit('card', { card: head({ seq: 2, backend: 'codex', thread: 'shared' }), item: item(2) });
+    const bar = ids.inflight!.querySelector('[data-ctx="codex|shared"]')!;
+    expect(bar.className).toContain('ctx-none'); expect(bar.textContent).toContain('暂无占用数据');
+    emit('context', { usage: { backend: 'codex', key: 'shared', usedTokens: 300_000, windowTokens: 400_000, turns: 1, updatedAt: Date.now(), source: 'turn' } });
+    expect(bar.className).toBe('ctx ctx-t-warn ctx-mini'); expect(bar.querySelector('.ctx-pct')!.textContent).toBe('75%');
+    emit('card', { card: head({ seq: 3, backend: 'codex', thread: 'shared' }), item: item(3) });
+    expect(ids.inflight!.querySelectorAll('.ctx')).toHaveLength(1);
+  });
 });
+
+describe('usage.js（总览 / Codex / Pi 页）', () => {
+  it('context 帧把服务端的"暂无数据"占位换成完整条，再次到达时原地更新数字与说明', () => {
+    const root = new El('BODY');
+    const placeholder = new El('DIV'); placeholder.className = 'ctx ctx-none'; placeholder.dataset.ctx = 'codex|owner';
+    root.append(placeholder);
+    const listeners: Record<string, (e: { data: string }) => void> = {};
+    const document = { createElement: (t: string) => new El(t.toUpperCase()), createTextNode: (t: string) => new El('#text', t), querySelectorAll: (sel: string) => root.querySelectorAll(sel) };
+    class EventSource { constructor(readonly url: string) { expect(url).toBe('/usage/stream'); } addEventListener(type: string, fn: (e: { data: string }) => void) { listeners[type] = fn; } }
+    vm.runInNewContext(ASSETS['usage.js']!, { document, EventSource, CSS: { escape: (s: string) => s }, setInterval: () => 0, Date, Math, JSON, Number, String, isFinite, encodeURIComponent });
+    const send = (usage: unknown) => listeners.context!({ data: JSON.stringify({ usage }) });
+    send({ backend: 'codex', key: 'owner', usedTokens: 123_456, windowTokens: 400_000, cachedTokens: 100_000, turns: 7, updatedAt: Date.now(), source: 'turn' });
+    const bar = root.querySelector('[data-ctx="codex|owner"]')!;
+    expect(bar).not.toBe(placeholder);
+    expect(bar.className).toBe('ctx ctx-t-ok');
+    expect(bar.querySelector('.ctx-label')!.textContent).toBe('Codex · owner 线程');
+    expect(bar.querySelector('.ctx-used')!.textContent).toBe('123,456');
+    expect(bar.querySelector('.ctx-num')!.textContent).toBe('123,456 / 400,000 tokens');
+    expect(bar.querySelector('.ctx-meta')!.textContent).toContain('缓存命中 100,000');
+    send({ backend: 'codex', key: 'owner', usedTokens: 380_000, windowTokens: 400_000, turns: 8, updatedAt: Date.now() - 25 * 3600_000, source: 'turn' });
+    expect(root.querySelector('[data-ctx="codex|owner"]')).toBe(bar);
+    expect(bar.className).toBe('ctx ctx-t-hot ctx-stale');
+    expect(bar.querySelector('.ctx-fill')!.dataset.w).toBe('95');
+    expect(bar.querySelector('.ctx-meta')!.textContent).toContain('上次更新 25 小时前');
+  });
+});
+
