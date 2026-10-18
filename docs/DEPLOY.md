@@ -105,11 +105,14 @@ Compose 将容器 HTTP 监听设为 0.0.0.0:8787，宿主机仅发布 127.0.0.1:
 | `./data/codex-threads.json` | 两条固定 codex 线程：`{"owner": {thread_id, created_at, updated_at}, "shared": {…}}`。owner 私聊（`QQ_OWNER`）用 `owner`，所有群和其他私聊共用 `shared`；删掉某个键（或整个文件），对应线程下一条请求就新建。旧版的单线程 `codex-session.json` 在新文件不存在时自动迁移为 `owner`（日志 `codex thread migrated`），旧文件改名为 `codex-session.json.migrated` |
 | `./data/incoming/<ticket>/` | 本票据参考图（≤3×10 MiB），票据 source_images 保存绝对路径供恢复；7 天清理，对 codex 命令沙箱禁读、不可写 |
 | `./data/prompts/agent.md` | 启动时只播种缺失的模板，包含生图参数与提示词指引；pi 每次模型请求热加载，保留不跨会话转述私人内容的规则 |
+| `./data/prompts/codex.md` | codex 自定义系统提示（`${DATA_DIR}/prompts/codex.md`）：首次启动创建默认回复规则、聊天记录工具纪律、联网与浏览器、生图提示词指引；已有文件不覆盖。面板保存校验 revision、拒绝空白与超过 64 KB 的内容；当前文件或提交内容命中已注册秘密／凭据样式时拒绝保存。保存后立即原子重写全局 AGENTS.md，下一次 codex 调用生效，无需重启容器 |
 | `./data/images/<ticket>/` | 生成的图片。pi / image_gen 每次生图写独立 `call-<n>/`；pending-jobs.json 在提交前记录意图、提交后记录 prompt_id，image-files.json 逐张记录下载状态。重启只收取/对账，不重提；坏 marker 隔离为 .bad-<时间戳>，回复保留正文并提示附件失败。未确认远端完成时保留参考图清理清单 |
 | `./data/tickets/<ticket>/` | 票据工作目录：codex 回合的最后一条消息 `codex-last.txt`（崩溃恢复时据此不重复询问 codex）。reply 与派发终态对账均幂等清理；发送后、清理前崩溃会在恢复时补删，图片目录不动。入口脚本启动时创建。对 codex 命令沙箱禁读、不可设为可写目录 |
 | `./data/*`（QQBridge） | 票据与去重 SQLite |
-| `./data/codex/AGENTS.md` | codex 的全局规则（安全规则、QQ 回复格式、聊天记录工具与浏览器使用纪律），**受管文件**：agent 每次启动按实际生效的可写目录重写（版本标记 `<!-- cs-agent-agents-template v5 -->`，日志 `wrote codex global AGENTS.md`）。codex 执行的命令对 `/data/codex` 只读，改不了它；要改规则请改代码里的模板 |
+| `./data/codex/AGENTS.md` | codex 的全局规则，**受管生成文件**：安全规则、实际生效的可写目录、参考图范围、图片自动附带与异步返回纪律组成受管段，再以两个换行拼接 `prompts/codex.md`。保留版本标记 `<!-- cs-agent-agents-template v5 -->`；main 启动和 store 保存时生成，日志 `wrote codex global AGENTS.md`。codex 执行的命令改不了它；编辑行为指引请通过面板修改 `codex.md`，不要手改生成文件 |
 | `./workspace/` | codex 工作目录（可写）。没有 `AGENTS.md` 时写入一份占位说明（“规则见全局 AGENTS.md；本目录是你的工作区”）。与旧版 v1 / v2 模板**全文相同**（忽略 CRLF）的文件会替换为占位说明（日志 `replaced old workspace AGENTS.md template with a stub`）；带旧模板标记但被改过的文件保持不动，并记 warn `workspace AGENTS.md is a modified old cs-agent template`。codex 会同时读取全局与工作区的 `AGENTS.md`（全局在前）；工作区这份 codex 自己能改，所以规则不放这里 |
+
+面板保存 codex 自定义提示后，`CodexPromptStore` 立即重新生成 `$CODEX_HOME/AGENTS.md`，并通知订阅者记录变更。runner 每轮启动独立的 `codex exec` 或 `codex exec resume` 进程，本服务不缓存 AGENTS.md；新提示从下一次调用起生效，正在进行的回合保持其已加载内容。直接在磁盘编辑 `codex.md` 后，需要调用 store 的 `regenerate()` 或在下次服务启动时生成；没有后台文件监听。自定义文件使用 UTF-8，保存保留原 BOM 和换行风格。
 
 ### 聊天记录（统一上下文）
 

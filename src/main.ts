@@ -6,7 +6,7 @@ import { Metrics, type Gauge } from "./obs/metrics.js";
 import { createDashboard } from "./obs/http.js";
 import { LiveBus } from "./obs/live.js";
 import { startAlerts } from "./obs/alerts.js";
-import { registerSecrets, redact } from "./obs/redact.js";
+import { registerSecrets, redact, redactText } from "./obs/redact.js";
 import { cleanupIncoming } from "./qq/incoming.js";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -22,7 +22,8 @@ import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
 import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
-import { CodexRunner, effectiveWritableRoots, ensureWorkspaceAgentsMd, writeGlobalAgentsMd } from "./agent/codex-runner.js";
+import { CodexRunner, effectiveWritableRoots, ensureWorkspaceAgentsMd } from "./agent/codex-runner.js";
+import { CodexPromptStore } from "./agent/codex-prompt.js";
 import { createImageBackend } from "./agent/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
 import { createTasks } from "./agent/tasks.js";
@@ -67,11 +68,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // codex 规则：受管的全局 $CODEX_HOME/AGENTS.md（对 codex 命令只读，每次启动按实际可写目录重写）；
+  // codex 规则：受管段 + prompts/codex.md 自定义段，启动和保存时重新生成全局 AGENTS.md；
   // 工作区只放一份占位说明（不存在或是未修改的旧模板时写入）
   const writableRoots = effectiveWritableRoots(process.env, cfg.CODEX_WRITABLE_ROOTS);
-  const agentsFile = await writeGlobalAgentsMd(cfg.codexHome, { dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, writableRoots });
-  log.info("wrote codex global AGENTS.md", { file: agentsFile, writable_roots: writableRoots });
+  const codexPrompt = new CodexPromptStore({ codexHome: cfg.codexHome, dataDir: cfg.DATA_DIR,
+    workspaceDir: cfg.WORKSPACE_DIR, writableRoots, containsSecret: text => redactText(text, Number.MAX_SAFE_INTEGER) !== text });
+  await codexPrompt.read();
+  await codexPrompt.regenerate();
+  log.info("wrote codex global AGENTS.md", { file: codexPrompt.agentsFile, writable_roots: writableRoots });
   if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md stub", { dir: cfg.WORKSPACE_DIR });
   // v2 的系统提示 ${DATA_DIR}/prompts/system.md 已弃用（规则分流不经模型）：存在时记一行弃用日志，不删除
   warnDeprecatedSystemPrompt(cfg.DATA_DIR);
@@ -261,7 +265,7 @@ async function main(): Promise<void> {
   const piStatus = async () => ({ threads: await pi.readThreadIds(), ...await pi.threadHealth(),
     compaction: obs.degraded ? [] : obs.db.prepare("SELECT json_extract(detail_json,'$.conversation') conversation, COUNT(*) attempts, MAX(ts) last_at FROM events WHERE stage='compaction' GROUP BY conversation").all(),
     usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
-  const dashboardData = { contextUsage };
+  const dashboardData = { contextUsage, codexPrompt };
   const dashboard = createDashboard({ ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
