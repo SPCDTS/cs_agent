@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { CodexRunner } from "../../src/agent/codex-runner.js";
 import { catalogContextWindow } from "../../src/agent/codex-model-catalog.js";
+import { readRolloutContextUsage, ROLLOUT_USAGE_MAX_BYTES } from "../../src/agent/codex-context-usage.js";
+import { log } from "../../src/log.js";
 import { loadConfig } from "../../src/config.js";
 import { trace } from "../../src/obs/trace.js";
 import { FIXTURES, tmp } from "./helpers.js";
@@ -88,6 +90,69 @@ function runnerSetup(env: NodeJS.ProcessEnv = {}, fallback?: number) {
 }
 
 describe("codex 上下文采集", () => {
+  it("启动恢复最后完成回合的用量和时间，重置不复活归档", async () => {
+    const { runner, store, dir } = runnerSetup();
+    const sessions = path.join(dir, "codex", "sessions", "2026", "10", "17");
+    await fs.mkdir(sessions, { recursive: true });
+    const file = path.join(sessions, "rollout-history.jsonl");
+    await fs.copyFile(path.join(FIXTURES, "context-rollout.jsonl"), file);
+    await fs.writeFile(path.join(dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "history" } }), "utf8");
+    const summary = vi.spyOn(log, "info");
+    await Promise.all([runner.initializeContextUsage(), runner.initializeContextUsage()]);
+    expect(store.get("codex", "owner")).toMatchObject({ usedTokens: 321, cachedTokens: 123,
+      turns: 2, source: "turn", updatedAt: Date.parse("2026-10-17T10:01:02Z"), windowTokens: 500000 });
+    expect(summary.mock.calls.filter(([message]) => message === "context usage backfilled")).toHaveLength(1);
+    expect(await runner.rolloutSize("history")).toBe((await fs.stat(file)).size);
+    await runner.resetThread("owner");
+    expect(store.get("codex", "owner")).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
+  });
+
+  it("rollout 缺失或无合法用量时保留估算记录", async () => {
+    const { runner, store, dir } = runnerSetup();
+    await fs.writeFile(path.join(dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "missing" }, shared: { thread_id: "empty" } }), "utf8");
+    const sessions = path.join(dir, "codex", "sessions"); await fs.mkdir(sessions, { recursive: true });
+    await fs.writeFile(path.join(sessions, "empty.jsonl"), '{"type":"turn.completed","usage":{"input_tokens":-1}}\n', "utf8");
+    await runner.initializeContextUsage();
+    for (const key of ["owner", "shared"]) expect(store.get("codex", key)).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
+    await expect(readRolloutContextUsage(path.join(dir, "missing"))).resolves.toBeUndefined();
+  });
+
+  it("损坏尾部不抛错，倒序读取总量不超过 2 MiB", async () => {
+    const file = path.join(tmp("rollout-tail-"), "tail.jsonl");
+    const fixture = await fs.readFile(path.join(FIXTURES, "context-rollout.jsonl"), "utf8");
+    await fs.writeFile(file, 'x'.repeat(ROLLOUT_USAGE_MAX_BYTES + 100) + '\n{broken}\n' + fixture + '\n{"type":', "utf8");
+    const realOpen = fs.open.bind(fs);
+    let readBytes = 0;
+    vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      const handle = await realOpen(...args);
+      const read = handle.read.bind(handle);
+      vi.spyOn(handle, "read").mockImplementation((async (buffer: Buffer, offset: number, length: number, position: number) => {
+        readBytes += length;
+        return read(buffer, offset, length, position);
+      }) as typeof handle.read);
+      return handle;
+    });
+    await expect(readRolloutContextUsage(file)).resolves.toMatchObject({ usedTokens: 321, cachedTokens: 123, turns: 2, truncated: true });
+    expect(readBytes).toBe(ROLLOUT_USAGE_MAX_BYTES);
+  });
+
+  it("兼容 turn.completed，损坏的最新用量回退旧完成回合", async () => {
+    const file = path.join(tmp("rollout-events-"), "events.jsonl");
+    await fs.writeFile(file, [
+      { timestamp: "2026-10-17T00:00:00Z", type: "turn.completed", usage: { input_tokens: 42, cached_input_tokens: 12 } },
+      { timestamp: "2026-10-18T00:00:00Z", type: "turn.completed", usage: { input_tokens: "invalid" } },
+    ].map(row => JSON.stringify(row)).join("\n"), "utf8");
+    expect(await readRolloutContextUsage(file)).toMatchObject({ usedTokens: 42, cachedTokens: 12, turns: 2, updatedAt: Date.parse("2026-10-17T00:00:00Z") });
+  });
+
+  it("历史回填不覆盖更新的已落盘用量，容量刷新不改变历史时间", () => {
+    const store = open(); store.recordTurn("codex", "owner", usage);
+    const prior = store.get("codex", "owner")!;
+    store.ensure("codex", "owner", { windowTokens: 600000 });
+    expect(store.backfill("codex", "owner", { usedTokens: 1, turns: 1, updatedAt: prior.updatedAt - 1 })).toBe(false);
+    expect(store.get("codex", "owner")).toMatchObject({ usedTokens: usage.usedTokens, updatedAt: prior.updatedAt, windowTokens: 600000 });
+  });
+
   it("精确匹配 slug.context_window，忽略最大窗口与百分比", () => {
     expect(catalogContextWindow(JSON.stringify({ models: [
       { slug: "other", context_window: 10 },

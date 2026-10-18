@@ -1,5 +1,6 @@
 import type { ContextUsageStore } from "./context-usage.js";
 import { loadCodexContextWindow } from "./codex-model-catalog.js";
+import { readRolloutContextUsage } from "./codex-context-usage.js";
 import { readThreadArchive, writeThreadArchive } from "./thread-archive.js";
 import { imageRefsValue } from "./image-references.js";
 /**
@@ -418,15 +419,38 @@ export class CodexRunner {
   private async loadContextUsage(): Promise<number> {
     const windowTokens = await loadCodexContextWindow({ command: this.opts.command, model: this.opts.model ?? "gpt-6.1-sol",
       env: this.childEnv(), fallback: this.opts.contextWindow });
+    await this.backfillContextUsage(windowTokens);
+    return windowTokens;
+  }
+
+  private async backfillContextUsage(windowTokens: number, keys: readonly ThreadKey[] = THREAD_KEYS): Promise<void> {
     const threads = await this.readThreadIds();
-    for (const key of THREAD_KEYS) {
-      if (threads[key]) this.opts.contextUsage?.ensure("codex", key, { windowTokens });
+    let backfilled = 0, truncated = 0;
+    for (const key of keys) {
+      if (threads[key]) {
+        this.opts.contextUsage?.ensure("codex", key, { windowTokens });
+        if (!this.opts.contextUsage) continue;
+        const files = await this.rolloutFiles(threads[key]);
+        let latest: Awaited<ReturnType<typeof readRolloutContextUsage>>;
+        for (const file of files) {
+          const history = await readRolloutContextUsage(file.file);
+          if (history && (!latest || history.updatedAt > latest.updatedAt)) latest = history;
+        }
+        if (latest) {
+          const { truncated: partial, ...history } = latest;
+          if (partial) {
+            truncated++;
+            history.turns = Math.max(history.turns, this.opts.contextUsage.get("codex", key)?.turns ?? 0);
+          }
+          if (this.opts.contextUsage.backfill("codex", key, history)) backfilled++;
+        }
+      }
       else {
         const old = this.opts.contextUsage?.get("codex", key);
         if (old && (old.turns || old.usedTokens || old.cachedTokens)) this.opts.contextUsage?.reset("codex", key);
       }
     }
-    return windowTokens;
+    log.info("context usage backfilled", { backend: "codex", checked: keys.filter(key => threads[key]).length, backfilled, truncated });
   }
 
   /** 在 threadKey（默认 shared）对应的线程上执行一轮；同一键串行。返回 codex 最后一条消息文本。 */
@@ -455,6 +479,7 @@ export class CodexRunner {
         delete doc[key];
         await this.writeThreadsFile(doc);
         this.opts.contextUsage?.reset("codex", key);
+        await this.backfillContextUsage(this.opts.contextUsage?.get("codex", key)?.windowTokens ?? this.opts.contextWindow ?? 400000, [key]);
         log.info("codex thread reset", { thread_key: key, thread_id: old?.thread_id ?? null, reason });
         return old?.thread_id ?? null;
       });
@@ -558,21 +583,27 @@ export class CodexRunner {
 
   /** 线程 rollout 文件 ${CODEX_HOME}/sessions/<年>/<月>/<日>/rollout-*-<thread_id>.jsonl 的大小（取最大）。 */
   async rolloutSize(threadId: string): Promise<number | undefined> {
+    const files = await this.rolloutFiles(threadId);
+    return files.length ? Math.max(...files.map(file => file.size)) : undefined;
+  }
+
+  /** 安全阀与启动回填共用发现逻辑，兼容日期子目录及同线程的多个文件。 */
+  private async rolloutFiles(threadId: string): Promise<{ file: string; size: number }[]> {
     const root = path.join(this.opts.codexHome, "sessions");
     let entries: string[];
     try {
       entries = await fs.readdir(root, { recursive: true });
     } catch {
-      return undefined;
+      return [];
     }
-    let size: number | undefined;
+    const files: { file: string; size: number }[] = [];
     for (const rel of entries) {
       const base = path.basename(rel);
       if (!base.endsWith(".jsonl") || !base.includes(threadId)) continue;
       const st = await fs.stat(path.join(root, rel)).catch(() => undefined);
-      if (st?.isFile()) size = Math.max(size ?? 0, st.size);
+      if (st?.isFile()) files.push({ file: path.join(root, rel), size: st.size });
     }
-    return size;
+    return files;
   }
 
   /** 安全阀：返回需要轮换的原因，否则 undefined。 */

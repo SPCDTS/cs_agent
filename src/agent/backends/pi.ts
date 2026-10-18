@@ -89,10 +89,11 @@ export class PiBackend implements AgentBackend {
         if (old.backend === "pi" && threadIds[old.key] === undefined &&
           (old.turns || old.usedTokens || old.cachedTokens || old.lastCompactionAt)) opts.contextUsage?.reset("pi", old.key);
       }
+      let backfilled = 0;
       for (const [key, id] of Object.entries(threadIds)) {
         const conv = await harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 线程映射指向不存在的会话");
-        await backend.observeContext(key, conv);
+        if (await backend.observeContext(key, conv)) backfilled++;
         const request = await harness.snapshot(PiRequestDoc, conv.id, context);
         if (request?.ticket) {
           const recovery = backend.lock(key, () => backend.bounded(conv, request.deadline, undefined,
@@ -100,6 +101,7 @@ export class PiBackend implements AgentBackend {
           void recovery.catch(err => log.warn("pi recovery ended", { thread: key, error: err instanceof Error ? err.message : String(err) }));
         }
       }
+      log.info("context usage backfilled", { backend: "pi", checked: Object.keys(threadIds).length, backfilled });
       return backend;
     } catch (err) { await harness.close(context); throw err; }
   }
@@ -155,12 +157,26 @@ export class PiBackend implements AgentBackend {
     }
   }
 
-  private async observeContext(key: string, conv: Conversation, ticket?: string): Promise<void> {
-    if (!this.opts.contextUsage || this.contextObservers.has(key)) return;
+  private async observeContext(key: string, conv: Conversation, ticket?: string): Promise<boolean> {
+    if (!this.opts.contextUsage || this.contextObservers.has(key)) return false;
     const model = this.opts.models.getModel(this.opts.model.provider, this.opts.model.modelId);
     if (!model) throw new Error("pi 上下文窗口缺少模型定义");
-    this.contextObservers.set(key, await PiContextObserver.open(this.harness, conv, key, this.opts.contextUsage,
-      piContextCapacity(model.contextWindow, this.opts.reserveTokens, this.opts.backgroundTokens), ticket));
+    const observer = await PiContextObserver.open(this.harness, conv, key, this.opts.contextUsage,
+      piContextCapacity(model.contextWindow, this.opts.reserveTokens, this.opts.backgroundTokens), ticket);
+    this.contextObservers.set(key, observer);
+    return observer.backfilled;
+  }
+
+  /** 重置后重新查当前映射，不能从已归档的会话恢复旧占用。 */
+  private async backfillResetContext(key: string): Promise<void> {
+    const id = (await this.readThreadIds())[key];
+    let backfilled = false;
+    if (id === undefined) this.opts.contextUsage?.reset("pi", key);
+    else {
+      const conv = await this.harness.conversation(id as ConversationId, context);
+      if (conv) backfilled = await this.observeContext(key, conv);
+    }
+    log.info("context usage backfilled", { backend: "pi", checked: id === undefined ? 0 : 1, backfilled: Number(backfilled) });
   }
 
   private async conversation(key: string, ticket: string): Promise<Conversation> {
@@ -281,7 +297,7 @@ export class PiBackend implements AgentBackend {
     if (key !== "owner" && !isScope(key)) return Promise.reject(new Error("非法会话键"));
     return this.lock(key, () => this.lock("mapping", async () => {
       const id = (await this.readThreadIds())[key] ?? null;
-      if (id === null) { this.opts.contextUsage?.reset("pi", key); return null; }
+      if (id === null) { await this.backfillResetContext(key); return null; }
       await this.harness.commit(async tx => {
         (await tx.doc(PiThreadsDoc))[key] = null;
         const archive = await tx.doc(PiThreadsArchiveDoc);
@@ -291,7 +307,7 @@ export class PiBackend implements AgentBackend {
       await this.persistMirrors();
       await this.contextObservers.get(key)?.close();
       this.contextObservers.delete(key);
-      this.opts.contextUsage?.reset("pi", key);
+      await this.backfillResetContext(key);
       log.info("pi conversation reset", { conversation_key: key, conversation: id, reason });
       return id;
     }));

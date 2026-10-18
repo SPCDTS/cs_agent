@@ -176,6 +176,8 @@ LOG_LEVEL=info
 
 ## 10. 实现阶段确认的偏离与补充（2026-10-18）
 
+上下文启动回填在面板服务前完成：codex 与轮换安全阀共用 rollout 发现逻辑，倒读末尾至多 2 MiB，以 `task_complete` 计回合、取此前最近 `token_count.info.last_token_usage` 和该记录时间；尾部截断只恢复可见回合数并保留既有更大计数；pi 按监听快照边界分页读取 harness 历史，恢复 assistant 输入及缓存、回合数与压缩消息时间，监听接续新提交；异常保留原记录，按后端记录汇总，重置后复查映射而不恢复归档。
+
 agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图，收到 prompt_id 立即更新，完整收取后标 done；lateImages 接管所有非 done 条目，按原前缀对账，绝不重新 submit。每个 call 目录的 image-files.json 保存预期文件名和 downloaded 状态；HTTP 逐张临时写入后 rename，恢复只下载缺失文件；MCP fetch_outputs 写入按 prompt_id 隔离的隐藏暂存目录，完整返回后才逐张原子发布。只有所有预期文件验证通过才完成任务。清单使用 lstat、64 KiB/8 任务上限和严格字段校验，坏清单重命名为 .bad-<时间戳>，正文保留并附上附件失败说明。未确认远端终态的参考图保留，不因票据回复或收取超时而提前覆盖。
 
 `cs.agent` 新增 `handle → lateImages → postprocess → reply` 检查点；逐任务按保存的参数复用 collect/reconcile，unknown 按前缀对账、不重新提交，超时用与 cs.image 相同的延期策略（IMAGE_COLLECT_EXTENSIONS 默认 2）。TicketDoc 保存期限、延期次数、对账步骤和最终结果；结果先落盘、清单后删除，恢复不重复收取已完成任务。晚到图片显式合并进回复，失败说明在后处理之后追加“有一张图生成超时未能发送”，参考图保留到最终收取结束。

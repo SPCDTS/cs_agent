@@ -127,6 +127,7 @@ async function main(): Promise<void> {
     threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,
   });
 
+  // 存储加载后先恢复历史占用；codex 初始化与 PiBackend.open 均完成后才开放面板。
   await codex.initializeContextUsage();
   const models = createAgentModels(cfg.codexHome);
   const agentModel = models.getModel(cfg.AGENT_MODEL_PROVIDER, cfg.AGENT_MODEL_ID);

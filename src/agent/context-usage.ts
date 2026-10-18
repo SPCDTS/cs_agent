@@ -19,6 +19,7 @@ export interface ContextUsage {
 
 type Backend = ContextUsage["backend"];
 type Capacity = Pick<ContextUsage, "windowTokens" | "compaction">;
+export type ContextUsageHistory = Pick<ContextUsage, "usedTokens" | "cachedTokens" | "turns" | "updatedAt" | "lastCompactionAt">;
 const nonnegative = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
 
 function valid(value: unknown): value is ContextUsage {
@@ -71,7 +72,7 @@ export class ContextUsageStore {
   ensure(backend: Backend, key: string, capacity: Capacity, ticket = "@context"): void {
     const old = this.get(backend, key);
     if (old && old.windowTokens === capacity.windowTokens && JSON.stringify(old.compaction) === JSON.stringify(capacity.compaction)) return;
-    this.update({ backend, key, usedTokens: 0, turns: 0, source: "estimate", ...old, ...capacity, updatedAt: Date.now() }, ticket);
+    this.update({ backend, key, usedTokens: 0, turns: 0, source: "estimate", ...old, ...capacity, updatedAt: old?.updatedAt ?? Date.now() }, ticket);
   }
 
   recordTurn(backend: Backend, key: string, usage: Capacity & Pick<ContextUsage, "usedTokens" | "cachedTokens">, ticket = "@context"): void {
@@ -82,6 +83,16 @@ export class ContextUsageStore {
   recordCompaction(backend: Backend, key: string, ticket = "@context"): void {
     const old = this.get(backend, key);
     if (old) this.update({ ...old, lastCompactionAt: Date.now(), updatedAt: Date.now() }, ticket);
+  }
+
+  /** 历史快照直接恢复计数；较新的已落盘用量优先，重复启动不累计回合。 */
+  backfill(backend: Backend, key: string, history: ContextUsageHistory, ticket = "@context"): boolean {
+    const old = this.get(backend, key);
+    if (!old || (old.source === "turn" && old.updatedAt > history.updatedAt)) return false;
+    const next = { ...old, ...history, source: "turn" as const };
+    if (!valid(next)) return false;
+    this.update(next, ticket);
+    return true;
   }
 
   reset(backend: Backend, key: string, ticket = "@context"): void {

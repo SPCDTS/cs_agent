@@ -6,7 +6,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
-import { defineDoc, MemoryStorage, type Harness, type JsonObject, type ConversationId } from "@earendil-works/pi-durable";
+import { CompactionEntry, defineDoc, MemoryStorage, type Harness, type JsonObject, type ConversationId } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiBackend, PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { createBackendSelector } from "../../src/agent/backends/select.js";
@@ -553,6 +553,35 @@ describe("pi 重置事务与归档轮换", () => {
 
 
 describe("pi 上下文占用", () => {
+  it("缺失用量文件时恢复 faux 会话历史与压缩时间，重开不调用模型", async () => {
+    const s = await setup([call("web_search", { query: "history" }), reply("第一轮"), reply("第二轮")], { disk: true });
+    await s.pi.handle(request("history-one"), handleContext());
+    await s.pi.handle(request("history-two"), handleContext());
+    const conv = (await s.pi.harness.conversation((await s.pi.readThreadIds())["group:7"] as ConversationId, context))!;
+    const messages = (await conv.context(context)).entries.flatMap(e => e.model ?? []).filter(m => m.role === "assistant");
+    const last = messages.at(-1)!;
+    const compactedAt = last.timestamp + 1;
+    await conv.commit(async tx => {
+      // 用量位于第二页，且已被压缩移出活动快照。
+      for (let i = 0; i < 260; i++) await tx.appendEntry(conv.id, { kind: "test.bookkeeping" });
+      await tx.appendEntry(conv.id, { kind: CompactionEntry.kind, head: "self",
+        model: [{ role: "user", content: "历史摘要", timestamp: compactedAt }], data: { reason: "manual" } });
+    }, context);
+    await s.pi.close(); await s.contextUsage.close();
+    await fs.unlink(path.join(s.dir, "context-usage.json"));
+    const restarted = await setup([reply("恢复后的新回合")], { dir: s.dir, disk: true });
+    expect(restarted.contextUsage.get("pi", "group:7")).toMatchObject({ turns: 3, source: "turn",
+      usedTokens: last.usage.input + last.usage.cacheRead + last.usage.cacheWrite, cachedTokens: last.usage.cacheRead,
+      updatedAt: last.timestamp, lastCompactionAt: compactedAt, windowTokens: 200000,
+      compaction: piContextCapacity(200000).compaction });
+    expect(restarted.faux.state.callCount).toBe(0);
+    await restarted.pi.handle(request("history-three"), handleContext());
+    await vi.waitFor(() => expect(restarted.contextUsage.get("pi", "group:7")!.turns).toBe(4));
+    await restarted.pi.resetThread("group:7");
+    expect(restarted.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
+    expect(restarted.contextUsage.get("pi", "group:7")!.lastCompactionAt).toBeUndefined();
+  });
+
   it("从 assistant 条目取输入与缓存，每次模型回合更新，重复回执不重复计数", async () => {
     const tool = call("web_search", { query: "usage" });
     const answer = reply("完成采集");
