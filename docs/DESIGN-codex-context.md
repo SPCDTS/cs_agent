@@ -89,7 +89,8 @@ tool_timeout_sec = 15
   3. **没有图**：用户消息正文不含 `[image]`、机器人行 `image_count` 为 0 时，返回"这条消息没有图片"。
   4. **取原消息**：调 NapCat `get_msg(message_id)`，**必须校验**返回的消息属于 S：
      - 群 S：`message_type=group` 且 `group_id` 一致；
-     - 私聊 S：`message_type=private`，且发送者是该用户或机器人自己（机器人发出的私聊回复）。
+     - 私聊 S、用户发的消息（库中行 `is_self=0`）：`message_type=private` 且发送者 `user_id` 就是 S 的用户；
+     - 机器人自己发的消息（库中行 `is_self=1`，群聊私聊都适用）：`get_msg` 只能证明发送者是机器人，证明不了收件人，所以**收件人以本地票据为准**——库中行必须带 `ticket`，`bridge.getTicket(ticket)` 的记录必须满足：会话（群号 / 私聊用户）等于 S、`status=sent`、`reply_message_id` 等于本次的 `message_id`；`get_msg` 返回的发送者必须是该票据的 `self_id`。如果 `get_msg` 另外带了收件人或会话字段（不同 NapCat 版本可能有），也必须与 S 一致。任何一项缺失或不符都拒绝。
      不一致直接拒绝并记 warn，不下载任何东西。只取这一条，不沿引用链往上。
   5. **下载**：取其 image 段（每条最多 6 张），复用 `incoming-http.ts` 的 `downloadImage`（SSRF 防护、重定向、大小上限），失败时同样走 `get_image` 刷新 URL，绝不读 NapCat 宿主机路径。校验规则与参考图一致（12 B–10 MiB、PNG/JPEG/WebP/GIF、`validateImageHeader`）；不合格的记 `skipped` 并写原因（例如"动图不支持"）。
   6. **入媒体库**：写入 `${DATA_DIR}/media/<sha256 前 2 位>/<sha256>.<ext>`，按内容寻址，同图只存一份；目录与文件沿用 `incoming.ts` 的防符号链接 / 越界检查，已存在的同名文件校验字节一致后复用。新表 `message_media(scope, message_id, ordinal, sha256, path, status, reason, created_at)`，主键 `(scope, message_id, ordinal)`，由 `ContextStore` 建表与迁移。
@@ -127,7 +128,7 @@ tool_timeout_sec = 15
 
 #### 2.5.7 验收要点
 - 单测：
-  - 范围：跨 scope 的 message_id 被拒；`get_msg` 返回其他群 / 其他私聊被拒，且不落任何文件。
+  - 范围：跨 scope 的 message_id 被拒；`get_msg` 返回其他群 / 其他私聊被拒，且不落任何文件；机器人行：没有 ticket、票据会话不是 S、`reply_message_id` 不符、票据不是 sent 时都被拒（覆盖"机器人发给 B 的消息冒充 `private:A`"的反例）。
   - 幂等与限额：重复召回不访问网络；并发召回合并为一次；每票据 5 次限额。
   - 占位替换：段一致时精确替换、不一致时末尾追加、机器人行追加；FTS 能搜到路径。
   - 格式化：路径不被截断、超额整行丢弃；摘要输入还原成 `[image]`。
