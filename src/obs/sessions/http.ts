@@ -1,5 +1,6 @@
 import type { ServerResponse } from 'node:http';
 import type { SseWriter } from '../http.js';
+import { analyzeContext, boundedContext, type ContextOptions } from '../context/index.js';
 import { redactSessionValue, RESPONSE_BYTES, utf8Slice } from './content.js';
 import { SessionError, type SessionAdapter, type SessionFilter, type SessionRef } from './types.js';
 
@@ -58,7 +59,7 @@ function contentResponse(text: string): { text: string; truncated: boolean } {
 }
 
 /** 必须从 dashboard 已通过 cookie/Host 鉴权的分支调用。 */
-export function createSessionRoutes(adapters: SessionAdapters, sse: (res: ServerResponse) => SseWriter | null) {
+export function createSessionRoutes(adapters: SessionAdapters, sse: (res: ServerResponse) => SseWriter | null, contextOptions: ContextOptions = {}) {
   const getAdapter = (backend: string) => {
     if (!BACKENDS.includes(backend as SessionRef['backend'])) throw new SessionError(404, '后端不存在');
     return adapters[backend as SessionRef['backend']];
@@ -106,6 +107,15 @@ export function createSessionRoutes(adapters: SessionAdapters, sse: (res: Server
       }
       const id = segment(parts[5] ?? '');
       const found = await findSession(adapter, id);
+      if (parts.length === 7 && parts[6] === 'context') {
+        if (q.getAll('at').length > 1 || q.getAll('phase').length > 1) throw new SessionError(400, '上下文参数不可重复');
+        const at = q.has('at') ? segment(q.get('at')!) : undefined;
+        const phase = q.get('phase') ?? 'after';
+        if (phase !== 'before' && phase !== 'after') throw new SessionError(400, 'phase 必须是 before 或 after');
+        const analysis = boundedContext(await analyzeContext(adapters, found.session.backend, id, { ...contextOptions, at, phase }));
+        // 固定契约的 key/tokens 已由引擎按字符串叶子脱敏，不能再当凭据字段遮蔽。
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(analysis)); return;
+      }
       if (parts.length === 6) {
         sessionJson(res, 200, { session: found.session, turns: await found.adapter.turns(id) }); return;
       }

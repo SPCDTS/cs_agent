@@ -151,3 +151,13 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 - 提交 `1dcffde` 指令消息不再分轮（索引版本 2，旧索引启动时重建）、`b640c0c` 分块切片跨界字符归前块、`5329e67` 离线目录签名时读取 `models_cache.json`、`19c538e` trace 总量上限 `CODEX_TRACE_MAX_MB`（默认 512）、`1828b40` favicon。
 - 主会话复跑：typecheck、58 文件 / 755 项、build 均通过；部署后真实数据：共享线程回合 18 → 15，AGENTS.md / environment_context 块以 `system_change` 进入下一回合 prelude，首个回合预览为真实用户输入；窗口 500,000 来源 `catalog.context_window`；`/favicon.ico` 200 `image/svg+xml`。
 - 部署副作用：重启时有一个票据正在 codex 回合中，启动恢复逻辑记为 interrupted 并自动重试（`will_retry: true`）。后续部署尽量选队列为空时进行。
+
+### O3：上下文结构分析引擎（2026-10-18）
+
+- 已实现 `src/obs/context/` 单一分析入口、六类构成统计与逐消息表；支持 Codex 回滚后存活检查点、replacement_history、resume、中止与孤儿工具规范化，以及 Pi 公开 ContextView、系统/工具折叠和 pi-ai 对照估算。接口、来源标签与限制见 [O3 上下文分析接口](O3-context-api.md)。
+- 官方 trace v1 只读读取精确请求、响应和实测用量，支持增量请求链；未知布局、缺失载荷与非法路径回退到 rollout。请求后发生压缩或回滚时不复用旧 trace 窗口，旧实测标为 stale。当前态在选择最后回合前刷新索引；组合 Pi 消息不借用单块正文引用。
+- 新增只读 `GET /api/agents/:backend/sessions/:id/context`，沿用鉴权与安全头；400/404 边界、1 MiB 响应裁剪和 ContentRef 懒加载已验证。`src/obs/http.ts` 只增加一处依赖参数传递，保持两参数路由工厂兼容。
+- 本地运行时依赖 `js-tiktoken@1.0.21` 和 o200k_base，单条估算上限 2 MiB，角色加约 4 token 开销；Dockerfile 的生产 node_modules 复制路径已核对，未部署镜像。
+- 最终完整验证：`npm.cmd run typecheck`、`npm.cmd test`、`npm.cmd run build` 全部通过；**59 个测试文件、758 项测试通过，0 失败、0 跳过**，相对 O1 新增 50 项。Windows / Node v24.15.0；原有 entrypoint 与 Windows 进程树测试在沙箱内受限，沙箱外完整套件通过。
+- 与设计的偏差及未验证项：真实只读样本未含 compaction，压缩/resume/中止组合使用按官方字段构造的匿名 fixture；trace 使用固定版本上游 schema 构造 fixture，未用本次真实请求产物复核。缺失动态指令、完整工具 schema、媒体或加密正文仍标不可用；估算存在脱敏、分段和 provider 模板误差，无法替代精确请求计费。
+- 未部署 Docker、修改 `.env` 或写入运行数据目录；任务书与 `.o3-research` 不进入提交。

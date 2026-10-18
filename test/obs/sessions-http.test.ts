@@ -58,7 +58,7 @@ async function rig(factory?: (dir: string, store: ObsStore) => Promise<SessionAd
 
 const sessionPath = '/api/agents/pi/sessions/1';
 const routes = ['/api/agents', '/api/agents/pi/sessions', sessionPath, `${sessionPath}/turns/turn-1`,
-  `${sessionPath}/content?offset=100&length=1`, '/agents/stream?backend=pi&session=1'];
+  `${sessionPath}/content?offset=100&length=1`, `${sessionPath}/context`, '/agents/stream?backend=pi&session=1'];
 
 describe('会话 API 鉴权与只读边界', () => {
   it.each(routes)('%s 要求鉴权，URL 口令只换 cookie，POST 拒绝', async route => {

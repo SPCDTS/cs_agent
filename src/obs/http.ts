@@ -206,7 +206,7 @@ export function createDashboard(opts: DashboardOptions) {
     codex: new CodexSessionAdapter({ store: opts.store, codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR }),
     ...(opts.piSessions ? { pi: new PiSessionAdapter({ store: opts.store, source: opts.piSessions }) } : {}),
   });
-  const sessionRoute = createSessionRoutes(adapters, sse);
+  const sessionRoute = createSessionRoutes(adapters, sse, { codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR, contextUsage: opts.contextUsage });
   const token = opts.config.OBS_TOKEN;
   const csrf = token ? csrfToken(token) : '';
   const tracer = opts.trace ?? defaultTrace;
