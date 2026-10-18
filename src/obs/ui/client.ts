@@ -5,6 +5,7 @@
  */
 import { BACKENDS, ROUTES, STAGES, TICKET_STATUS } from './html.js';
 import { STALE_MS } from './context-bar.js';
+import { AGENTS_JS } from './agents-client.js';
 
 const shared = `
 const STAGES=${JSON.stringify(STAGES)};
@@ -212,4 +213,5 @@ for(const t of document.querySelectorAll('textarea[data-count]')){const c=docume
 `;
 
 /** 每个模块自带共享工具函数（避免模块 import 受 CSP nonce 限制）。 */
-export const ASSETS: Record<string, string> = { 'live.js': shared + ctxShared + live, 'usage.js': shared + ctxShared + usage, 'logs.js': shared + logs, 'forms.js': forms };
+export const ASSETS: Record<string, string> = { 'live.js': shared + ctxShared + live, 'usage.js': shared + ctxShared + usage, 'logs.js': shared + logs, 'forms.js': forms,
+  'agents.js': shared + AGENTS_JS };

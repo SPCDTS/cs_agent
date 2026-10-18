@@ -6,13 +6,15 @@ export const esc = (v: unknown) => redactText(String(v ?? ''), 100_000).replace(
 export const uri = (v: string) => encodeURIComponent(redactText(v, 100_000));
 export const json = (v: unknown, limit = 20_000) => `<pre>${esc(typeof v === 'string' ? v : JSON.stringify(redact(v, limit), null, 2))}</pre>`;
 
-const NAV: [string, string][] = [['/', '总览'], ['/live', '实时'], ['/tickets', '票据'], ['/logs', '日志'], ['/context', '上下文'],
-  ['/codex', 'Codex'], ['/pi', 'Pi'], ['/settings', '设置'], ['/config', '配置']];
+/** 顶栏（观测 v2 设计 §1）；日志与配置从设置页进入，旧聊天记录检索归入"记忆"。 */
+const NAV: [string, string][] = [['/', '总览'], ['/agents', 'Agent'], ['/memory', '记忆'], ['/tickets', '票据'], ['/live', '实时'], ['/settings', '设置']];
+const NAV_ALIASES: Record<string, string[]> = { '/agents': ['/codex'], '/memory': ['/context'], '/settings': ['/logs', '/config'] };
 
 export interface PageOptions { title: string; path: string; lead?: string; actions?: string; body: string; nonce: string; scripts?: string[]; flash?: { text: string; error?: boolean } }
 
 export function page(o: PageOptions): string {
-  const active = (url: string) => url === '/' ? o.path === '/' : o.path === url || o.path.startsWith(url + '/');
+  const under = (url: string) => o.path === url || o.path.startsWith(url + '/');
+  const active = (url: string) => url === '/' ? o.path === '/' : under(url) || (NAV_ALIASES[url] ?? []).some(under);
   const nav = NAV.map(([url, label]) => `<a href="${url}"${active(url) ? ' aria-current="page"' : ''}>${url === '/live' ? '<i class="live-dot" aria-hidden="true"></i>' : ''}${label}</a>`).join('');
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark"><title>${esc(o.title)} · cs-agent 值守台</title><style nonce="${o.nonce}">${THEME_CSS}</style></head>

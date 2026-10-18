@@ -85,7 +85,7 @@ describe('会话 API 鉴权与只读边界', () => {
     expect((await (await r.get('/api/agents/pi/sessions?page=1')).json()).length).toBe(3);
     const filtered = await (await r.get('/api/agents/pi/sessions?status=archived&scope=group%3A7&since=249')).json();
     expect(filtered.map((s: SessionRef) => s.id)).toEqual(['50', '52']);
-    for (const url of ['/codex', '/pi', '/context']) expect((await r.get(url)).status).toBe(200);
+    for (const url of ['/agents', '/agents/pi/sessions', '/context']) expect((await r.get(url)).status).toBe(200);
   });
 
   it('回合和懒加载正文都脱敏，元数据及预览没有凭据', async () => {

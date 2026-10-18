@@ -36,7 +36,7 @@ async function rig(token?: string){
 }
 it('八个页面和票据详情可离线渲染；HTML 转义；共享上下文与配置脱敏',async()=>{
   const {base,context}=await rig();const sizes:Record<string,number>={};
-  for(const [url,title] of Object.entries({'/':'运行总览','/tickets':'票据列表','/tickets/ticket1':'票据全链路','/logs':'实时日志','/context':'上下文检索','/codex':'Codex 线程','/pi':'Pi 会话','/config':'生效配置'})){
+  for(const [url,title] of Object.entries({'/':'运行总览','/tickets':'票据列表','/tickets/ticket1':'票据全链路','/logs':'实时日志','/context':'上下文检索','/agents':'Agent','/agents/codex/sessions':'Codex 会话','/config':'生效配置'})){
     const res=await fetch(base+url);const text=await res.text();expect(res.status).toBe(200);expect(text).toContain(title);expect(text).not.toContain('fake-napcat-secret');expect(text).not.toMatch(/https:\/\/.*(?:cdn|unpkg)/);sizes[url]=Buffer.byteLength(text);
     if(url==='/tickets/ticket1'){expect(text).toContain('&lt;script&gt;');expect(text).toContain('/images/ticket1/call-1/result.png');}
   }

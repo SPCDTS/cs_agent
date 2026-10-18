@@ -21,6 +21,9 @@ import { REASONING_EFFORTS } from '../agent/codex-runner.js';
 import { ASSETS } from './ui/client.js';
 import { contextBar, sortUsage, type ContextUsage, type ContextUsageView } from './ui/context-bar.js';
 import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri } from './ui/html.js';
+import { PRELOAD_TURNS, agentsBody, byNewest, crumbs, dataScript, isBackend, memoryBody, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './ui/agents-pages.js';
+import { contextBody as contextAnalysisBody, contextError, contextUnavailable, type ContextAnalysis } from './ui/context-view.js';
+import type { Block, ObservedTurn, SessionRef } from './sessions/types.js';
 
 const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
 const MAX_SSE = 20;
@@ -318,6 +321,8 @@ export function createDashboard(opts: DashboardOptions) {
         res.writeHead(200,{'Content-Type':ext==='.jpg'||ext==='.jpeg'?'image/jpeg':'image/'+ext.slice(1)}).end(bytes);
       } catch { res.writeHead(404).end('图片不存在'); } return;
     }
+    // 旧 /codex、/pi 页并入 /agents/*（设计 §7）；/codex/agents-md 与重置 POST 保持原路径。
+    if (url.pathname === '/codex' || url.pathname === '/pi') { res.writeHead(303, { Location: `/agents${url.pathname}/sessions` }).end(); return; }
     const flashCode = q.get('ok');
     const flash = flashCode && FLASH[flashCode] ? { text: FLASH[flashCode]! } : undefined;
     const html = await render(url, nonce, flash);
@@ -377,14 +382,14 @@ export function createDashboard(opts: DashboardOptions) {
         // 进行中的回合可能还要几分钟：最多等 1.5 秒，否则告诉用户已排队。
         const outcome = await Promise.race([job.then(old => old === null ? 'unchanged' : 'reset'), new Promise<string>(r => setTimeout(() => r('queued'), 1500).unref())]);
         job.catch(() => undefined);
-        back(`${codex ? '/codex' : '/pi'}?ok=${outcome}`); return;
+        back(`/agents?ok=${outcome}`); return;
       }
       throw new HttpError(404, '没有这个操作');
     } catch (e) {
       const status = e instanceof HttpError ? e.status : 500;
       const message = e instanceof HttpError ? e.message : '操作失败，详见日志';
       const html = url.pathname.startsWith('/settings') ? await render(new URL('http://localhost/settings'), nonce, { text: message, error: true }) : null;
-      res.writeHead(status, {'Content-Type':'text/html; charset=utf-8'}).end(html ?? page({ title: '操作未完成', path: url.pathname, nonce, flash: { text: message, error: true }, body: `<p><a href="${url.pathname.startsWith('/pi') ? '/pi' : '/codex'}">返回</a></p>` }));
+      res.writeHead(status, {'Content-Type':'text/html; charset=utf-8'}).end(html ?? page({ title: '操作未完成', path: url.pathname, nonce, flash: { text: message, error: true }, body: '<p><a href="/agents">返回</a></p>' }));
     }
   }
 
@@ -411,9 +416,10 @@ export function createDashboard(opts: DashboardOptions) {
       return shell('实时日志', `<form class="bar"><label>票据<input name="ticket" placeholder="票据前缀" value="${esc(q.get('ticket'))}"></label><label>级别<select name="level"><option value="">全部级别</option>${['debug','info','warn','error'].map(l=>`<option ${q.get('level')===l?'selected':''}>${l}</option>`).join('')}</select></label><button>过滤</button></form><div id="tail" class="log" role="log" aria-live="polite"></div>`,
         { lead: '最近 1000 行结构化日志，随后实时追加。可按票据或级别过滤。', scripts: ['/assets/logs.js'], actions: '<span id="conn" class="conn">正在连接…</span>' });
     }
-    if (p === '/context') return shell('上下文检索', contextBody(q), { lead: '与 Codex / pi 的 qq_context 工具看到的内容一致。留空关键词查看最近记录。' });
-    if (p === '/codex') return shell('Codex 线程', await codexBody(), { lead: 'owner 私聊与其他会话各用一条长期线程。这里的轮次摘要来自观测事件，不读取会话原文。', scripts: ['/assets/forms.js', '/assets/usage.js'] });
-    if (p === '/pi') return shell('Pi 会话', await piBody(), { lead: 'pi 后端按 owner 与每个会话域各保持一个长期会话。', scripts: ['/assets/forms.js', '/assets/usage.js'] });
+    if (p === '/context') return shell('上下文检索', contextBody(q), { lead: '与 Codex / pi 的 qq_context 工具看到的内容一致。留空关键词查看最近记录。此页之后并入<a href="/memory">记忆</a>。' });
+    if (p === '/agents') return shell('Agent', await agentsPage(), { lead: '两个执行后端的会话、索引进度与每条线程的上下文占用。点进会话查看每个回合的输入、模型请求、工具调用与回复。', scripts: ['/assets/forms.js', '/assets/usage.js'] });
+    if (p.startsWith('/agents/')) return agentsRoute(p, q, nonce, shell);
+    if (p === '/memory') return shell('记忆', memoryBody(), { lead: '聊天记录库、摘要、检索与召回的可视化。' });
     if (p === '/settings') return shell('设置', await settingsBody(), { lead: '修改立即对之后收到的消息生效，无需重启；.env 中的值只是初始默认。', scripts: ['/assets/forms.js'] });
     if (p === '/config') return shell('生效配置', await configBody(), { lead: '启动时从环境变量解析的配置（已脱敏）。运行中可改的项见<a href="/settings">设置</a>。' });
     if (p === '/codex/agents-md') {
@@ -552,57 +558,107 @@ export function createDashboard(opts: DashboardOptions) {
     return body;
   }
 
-  function turnsTable(turns: ReturnType<ObsStore['threadTurns']>): string {
-    if (!turns.length) return empty('观测记录里还没有这条线程的回合。');
-    return `<div class="wrap"><table class="list"><thead><tr><th>状态</th><th>时间</th><th>收到</th><th class="hide-sm">回复</th><th class="num">耗时</th><th class="num hide-sm">工具 / tokens</th></tr></thead><tbody>${turns.map(t => `<tr><td>${statusStamp(t.status)}</td><td><a href="/tickets/${uri(t.ticket)}">${time(t.started)}</a></td><td><span class="excerpt">${esc(t.text || '—')}</span></td><td class="hide-sm"><span class="excerpt">${esc(t.reply || '—')}</span></td><td class="num">${esc(fmtMs(t.duration_ms))}</td><td class="num hide-sm">${t.tools} / ${t.input_tokens ? `${t.input_tokens}→${t.output_tokens}` : '—'}</td></tr>`).join('')}</tbody></table></div>`;
-  }
-  const resetForm = (action: string, key: string, label: string, enabled: boolean) => enabled
-    ? `<form method="post" action="${action}" data-confirm="重置${esc(label)}？当前会话会归档，下一条消息从空白上下文开始。进行中的回合会先跑完。">${csrfField(csrf)}<input type="hidden" name="key" value="${esc(key)}"><button class="danger">重置线程</button></form>` : '';
+  /* ───────── Agent → 会话 → 回合（观测 v2，数据取自 /api/agents/* 的同一路由） ───────── */
 
-  async function codexBody(): Promise<string> {
-    const status = await opts.codex();
-    const threads: Record<string, unknown>[] = Array.isArray(status) ? status.map(asObj) : Object.entries(asObj(status)).map(([thread_key, thread_id]) => ({ thread_key, thread_id }));
-    const known = new Set(threads.map(t => String(t.thread_key)));
-    for (const k of ['owner', 'shared']) if (!known.has(k)) threads.push({ thread_key: k, thread_id: null });
-    let body = '<div class="grid cols-2">';
-    for (const t of threads) {
-      const key = String(t.thread_key);
-      const turns = opts.store.threadTurns('codex', key, 10);
-      body += `<section class="sheet pad flush"><h2>${key === 'owner' ? 'owner 线程' : key === 'shared' ? '共享线程' : esc(key)} <small>${key === 'owner' ? 'owner 私聊' : '群聊与其他私聊'}</small></h2><div class="thread-ctx">${contextBar('codex', key, usageOf('codex', key), { label: '上下文占用' })}</div>${kv([
-        ['线程 id', t.thread_id ? `<span class="mono">${esc(t.thread_id)}</span>` : '<span class="muted">尚未创建（下一条消息新建）</span>'],
-        ['rollout 大小', esc(fmtBytes(typeof t.rollout_bytes === 'number' ? t.rollout_bytes : null))],
-        ['已观测回合', esc(t.observed_turns ?? turns.length)], ['最近活动', turns[0] ? time(turns[0].ts) : '—']])}
-<div class="mt">${resetForm('/codex/reset', key, key === 'owner' ? ' owner 线程' : '共享线程', !!opts.resetCodex && !!t.thread_id)}</div></section>`;
-    }
-    body += '</div>';
-    for (const t of threads) body += `<section><h2>${String(t.thread_key) === 'owner' ? 'owner 线程' : '共享线程'}最近 10 轮</h2><div class="sheet">${turnsTable(opts.store.threadTurns('codex', String(t.thread_key), 10))}</div></section>`;
-    body += `<section><details><summary>全局 AGENTS.md（受管文件，启动时重写，只读）</summary>${json(await readText(agentsMd))}</details><p class="hint"><a href="/codex/agents-md">单独查看</a>　在<a href="/settings#codex-prompt">设置页</a>编辑 codex.md</p></section>`;
-    return body;
+  /** 在服务端内部调用会话 JSON 路由：与浏览器拿到的是同一份已脱敏 JSON、同样的校验与错误码。 */
+  async function api(pathQuery: string): Promise<{ status: number; body: unknown }> {
+    let text = '';
+    const res = { statusCode: 200, headersSent: false, destroyed: false, writableEnded: false,
+      setHeader() { return res; }, getHeader() { return undefined; }, on() { return res; }, once() { return res; }, off() { return res; },
+      writeHead(status: number) { res.statusCode = status; res.headersSent = true; return res; },
+      write(chunk: unknown) { text += String(chunk); return true; },
+      end(chunk?: unknown) { if (typeof chunk === 'string' || Buffer.isBuffer(chunk)) text += String(chunk); res.headersSent = true; res.writableEnded = true; return res; } };
+    await sessionRoute(new URL(pathQuery, 'http://localhost'), res as unknown as ServerResponse);
+    let body: unknown = null;
+    try { body = text ? JSON.parse(text) : null; } catch { /* 非 JSON 响应 */ }
+    return { status: res.statusCode, body };
+  }
+  const apiError = (r: { status: number; body: unknown }) => typeof asObj(r.body).error === 'string' ? String(asObj(r.body).error) : `HTTP ${r.status}`;
+  const sessionApi = (backend: string, id: string) => `/api/agents/${encodeURIComponent(backend)}/sessions/${encodeURIComponent(id)}`;
+
+  async function agentsPage(): Promise<string> {
+    const sum = await api('/api/agents');
+    const summaries = sum.status === 200 && Array.isArray(sum.body) ? sum.body as AgentSummary[] : [];
+    const error = sum.status === 200 ? undefined : `会话索引暂不可用：${apiError(sum)}`;
+    const codexStatus = await opts.codex().catch(() => null);
+    const threads: Record<string, unknown>[] = Array.isArray(codexStatus) ? codexStatus.map(asObj) : Object.entries(asObj(codexStatus)).map(([thread_key, thread_id]) => ({ thread_key, thread_id }));
+    const codexTargets: ResetTarget[] = ['owner', 'shared'].map(key => ({ key, label: key === 'owner' ? ' owner 线程' : '共享线程',
+      enabled: !!opts.resetCodex && !!threads.find(t => String(t.thread_key) === key)?.thread_id }));
+    const piStatus = asObj(await opts.pi().catch(() => ({})));
+    const piKeys = [...new Set([...Object.keys(asObj(piStatus.threads)), ...(Array.isArray(piStatus.keys) ? piStatus.keys.map(String) : [])])].sort();
+    // 有占用记录的按占比降序，没有记录的会话排在后面显示占位条（与旧 /pi 页一致）。
+    const piUsage = sortUsage(usageList().filter(u => u.backend === 'pi')).map(u => u.key);
+    const cards: Record<'codex' | 'pi', AgentCardInput> = {
+      codex: { summary: summaries.find(x => x.backend === 'codex'), error, threads: codexTargets, usage: k => usageOf('codex', k) },
+      pi: { summary: summaries.find(x => x.backend === 'pi'), error, usage: k => usageOf('pi', k),
+        threads: [...piUsage.filter(k => piKeys.includes(k)), ...piKeys.filter(k => !piUsage.includes(k))].map(key => ({ key, label: ` ${scopeLabel(key)} 的会话`, enabled: !!opts.resetPi })),
+        extraUsageKeys: piUsage.filter(k => !piKeys.includes(k)) },
+    };
+    return agentsBody(cards, csrf);
   }
 
-  async function piBody(): Promise<string> {
-    const status = asObj(await opts.pi());
-    const map = asObj(status.threads);
-    const keys = [...new Set([...Object.keys(map), ...(Array.isArray(status.keys) ? status.keys.map(String) : [])])].sort();
-    let body = '';
-    const usageKeys = [...new Set([...keys, ...usageList().filter(u => u.backend === 'pi').map(u => u.key)])];
-    if (usageKeys.length) {
-      // 有记录的按占比降序，没有记录的会话排在后面显示占位条
-      const known = sortUsage(usageKeys.map(k => usageOf('pi', k)).filter((u): u is ContextUsage => !!u));
-      const bars = [...known.map(u => contextBar('pi', u.key, u)), ...usageKeys.filter(k => !known.some(u => u.key === k)).map(k => contextBar('pi', k, null))];
-      body += `<section class="flush"><h2>上下文占用 <small>两道刻口为后台压缩与阻塞压缩阈值</small></h2><div class="sheet pad"><div class="ctx-list">${bars.join('')}</div></div></section><section>`;
+  type Shell = (title: string, body: string, extra?: { lead?: string; actions?: string; scripts?: string[] }) => string;
+  /** /agents/:backend/sessions[/:id[/turns/:turn | /context]]；未知后端、会话或回合返回 null（404）。 */
+  async function agentsRoute(p: string, q: URLSearchParams, nonce: string, shell: Shell): Promise<string | null> {
+    const parts = p.split('/');
+    const backend = parts[2] ?? '';
+    if (!isBackend(backend) || parts[3] !== 'sessions' || parts.length > 7) return null;
+    const name = BACKENDS[backend] ?? backend;
+    if (parts.length === 4) {
+      const f = { status: q.get('status') ?? '', scope: q.get('scope') ?? '', since: q.get('since') ?? '', page: Math.max(0, Math.min(1_000_000, Math.floor(Number(q.get('page')) || 0))) };
+      if (f.status !== 'active' && f.status !== 'archived') f.status = '';
+      const query = new URLSearchParams();
+      if (f.status) query.set('status', f.status);
+      if (f.scope) query.set('scope', f.scope);
+      if (f.since) query.set('since', f.since);
+      query.set('page', String(f.page));
+      const r = await api(`/api/agents/${backend}/sessions?${query}`);
+      const rows = r.status === 200 && Array.isArray(r.body) ? r.body as SessionRef[] : null;
+      return shell(`${name} 会话`, sessionListBody(backend, rows, f, rows ? undefined : `读取会话失败：${apiError(r)}`),
+        { lead: '活动与归档会话，按更新时间倒序。ID 为后端真实会话 ID。', scripts: ['/assets/agents.js'] });
     }
-    if (!keys.length) body += empty('还没有 pi 会话。把某个会话域的后端切到 Pi（<a href="/settings">设置</a>）后，第一条消息会新建会话。');
-    else body += `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>会话键</th><th>会话 id</th><th>最近活动</th><th class="num">已观测</th><th></th></tr></thead><tbody>${keys.map(k => {
-      const turns = opts.store.threadTurns('pi', k, 10);
-      return `<tr><td>${esc(scopeLabel(k))}</td><td class="mono">${esc(map[k] ?? '—')}</td><td>${turns[0] ? time(turns[0].ts) : '—'}</td><td class="num">${turns.length}${turns.length === 10 ? '+' : ''}</td><td>${resetForm('/pi/reset', k, ' ' + scopeLabel(k) + ' 的会话', !!opts.resetPi)}</td></tr>`;
-    }).join('')}</tbody></table></div></div>`;
-    if (usageKeys.length) body += '</section>';
-    for (const k of keys) body += `<section><h2>${esc(scopeLabel(k))} 最近 10 轮</h2><div class="sheet">${turnsTable(opts.store.threadTurns('pi', k, 10))}</div></section>`;
-    const compaction = Array.isArray(status.compaction) ? status.compaction.map(asObj) : [];
-    body += `<section><h2>上下文压缩</h2>${compaction.length ? `<div class="sheet"><table class="list"><thead><tr><th>会话 id</th><th class="num">次数</th><th>最近</th></tr></thead><tbody>${compaction.map(c => `<tr><td class="mono">${esc(c.conversation)}</td><td class="num">${esc(c.attempts)}</td><td>${typeof c.last_at === 'number' ? time(c.last_at) : '—'}</td></tr>`).join('')}</tbody></table></div>` : empty('还没有发生过压缩。')}</section>`;
-    body += `<section><details><summary>用量与压缩策略（原始数据）</summary>${json({ usage: status.usage, compaction_policy: status.compaction_policy })}</details></section>`;
-    return body;
+    let id: string, turnId = '';
+    try { id = decodeURIComponent(parts[4] ?? ''); if (parts[6] !== undefined) turnId = decodeURIComponent(parts[6]); } catch { return null; }
+    if (!id || (parts.length === 6 && parts[5] !== 'context') || (parts.length === 7 && (parts[5] !== 'turns' || !turnId))) return null;
+    const sr = await api(sessionApi(backend, id));
+    if (sr.status === 404 || sr.status === 400) return null;
+    if (sr.status !== 200) return shell(`${name} 会话`, `<div class="flash err" role="alert">读取会话失败：${esc(apiError(sr))}</div>`);
+    const { session, turns } = sr.body as { session: SessionRef; turns: ObservedTurn[] };
+    const window = session.scope ? usageOf(backend, session.scope)?.windowTokens : undefined;
+    const ctx = { backend, session: session.id, ...(window ? { window } : {}) };
+    const title = session.label && session.label !== session.id ? session.label : sessionScope(backend, session.scope);
+    const newest = byNewest(turns);
+    const dataTail = dataScript('agents-data', nonce, { backend, session: session.id, active: false, window: window ?? null, base: 0 });
+    if (parts.length === 5) {
+      const pageNo = Math.max(0, Math.min(100_000, Math.floor(Number(q.get('page')) || 0)));
+      const preload = new Map<string, Block[]>();
+      await Promise.all(newest.slice(pageNo * 50, pageNo * 50 + PRELOAD_TURNS).map(async t => {
+        const r = await api(`${sessionApi(backend, id)}/turns/${encodeURIComponent(t.turn)}`);
+        if (r.status === 200) preload.set(t.turn, (asObj(r.body).blocks as Block[] | undefined) ?? []);
+      }));
+      return shell(`${name} · ${title}`, sessionPageBody({ ctx, session, turns, page: pageNo, preload, usage: session.scope ? usageOf(backend, session.scope) : null, nonce }),
+        { lead: '左侧回合目录，右侧回合流（最新在上，默认展开）。上下文占用取每个回合最后一次模型请求的实测输入。', scripts: ['/assets/agents.js', '/assets/usage.js'] });
+    }
+    if (parts[5] === 'turns') {
+      const tr = await api(`${sessionApi(backend, id)}/turns/${encodeURIComponent(turnId)}`);
+      if (tr.status === 404 || tr.status === 400) return null;
+      if (tr.status !== 200) return shell('回合详情', `<div class="flash err" role="alert">读取回合失败：${esc(apiError(tr))}</div>`);
+      const { turn, blocks } = tr.body as { turn: ObservedTurn; blocks: Block[] };
+      const k = newest.findIndex(t => t.turn === turn.turn);
+      return shell('回合详情', turnPageBody(ctx, session, turn, blocks, { newer: k > 0 ? newest[k - 1]?.turn : undefined, older: k >= 0 ? newest[k + 1]?.turn : undefined }) + dataTail,
+        { lead: '输入 → 模型请求（可多次）→ 工具调用（参数与结果折叠）→ 助手文本 → 送达。', scripts: ['/assets/agents.js'] });
+    }
+    // 上下文结构分析（设计 §4）：分析接口由 O3 提供；缺席（404/501/503）时给出不可用状态。
+    const at = q.get('at') || newest[0]?.turn || '';
+    const phase = q.get('phase') === 'before' ? 'before' : 'after';
+    const head = crumbs([['Agent', '/agents'], [name, sessionsHref(backend)], [title, sessionHref(backend, session.id)], ['上下文分析']]);
+    const lead = `回合 <span class="mono">${esc(at ? at.slice(0, 40) : '—')}</span> ${phase === 'before' ? '请求发出前' : '结束后'}的上下文窗口构成。实测与估算分开标注，未解释差额单列。`;
+    if (!at) return shell('上下文分析', head + empty('这个会话还没有回合，无法分析。') + dataTail, { lead });
+    const ar = await api(`${sessionApi(backend, id)}/context?${new URLSearchParams({ at, phase })}`);
+    const body = ar.status === 200 && ar.body && typeof ar.body === 'object' ? contextAnalysisBody(ctx, ar.body as ContextAnalysis)
+      : [404, 501, 503].includes(ar.status) ? contextUnavailable(ctx, at, phase, ar.status, typeof asObj(ar.body).error === 'string' ? String(asObj(ar.body).error) : undefined)
+        : contextError(ctx, at, phase, ar.status, apiError(ar));
+    return shell('上下文分析', head + body + dataTail, { lead, scripts: ['/assets/agents.js'] });
   }
 
   async function settingsBody(): Promise<string> {
@@ -631,13 +687,13 @@ export function createDashboard(opts: DashboardOptions) {
     body += `<section id="prompt"><h2>pi 系统提示 agent.md <small>${mtime ? `修改于 ${esc(fmtTime(mtime.getTime()))}` : '尚未创建'}</small></h2>${secretInside
       ? `<div class="flash err">文件中包含凭据样式的内容，面板只读展示脱敏版本；请在容器内直接编辑。</div>${json(prompt)}`
       : `<form method="post" action="/settings/agent-md" class="sheet pad">${csrfField(csrf)}<input type="hidden" name="revision" value="${esc(agentMdRevision(promptStat))}"><label>每轮对话前热加载，保存后 pi 下一轮即使用新内容。<textarea name="content" rows="18" spellcheck="false" data-count="agent-md-count">${esc(prompt)}</textarea></label><div class="hint"><span id="agent-md-count"></span>，上限 ${AGENT_MD_MAX_BYTES / 1024} KB</div><p class="mt"><button>保存 agent.md</button></p></form>`}</section>`;
-    body += `<section><h2>线程</h2><div class="sheet pad"><p>重置会归档当前会话并在下一条消息时新建，用于清掉跑偏的长期记忆。</p><p><a href="/codex">Codex 线程（owner / 共享）</a>　<a href="/pi">Pi 会话（按会话域）</a></p></div></section>`;
+    body += `<section><h2>线程</h2><div class="sheet pad"><p>重置会归档当前会话并在下一条消息时新建，用于清掉跑偏的长期记忆。</p><p><a href="/agents">Agent 页（Codex owner / 共享线程、Pi 各会话域）</a></p></div></section>`;
     const changes = opts.store.systemEvents(SETTINGS_TICKET, 15);
     body += `<section><h2>最近变更</h2>${changes.length ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>时间</th><th>内容</th><th>来源</th></tr></thead><tbody>${changes.map(e => { const dd = asObj(JSON.parse(e.detail_json));
       const bytes = (v: unknown) => typeof v === 'number' ? fmtBytes(v) : '—';
       const what = e.stage === 'prompt_changed' ? `${dd.target === 'codex' ? 'codex.md' : 'agent.md'} ${bytes(dd.bytes_before)} → ${bytes(dd.bytes_after)}` : Object.keys(asObj(dd.after)).map(k => `${SETTING_LABELS[k] ?? k}：${showSetting(asObj(dd.before)[k])} → ${showSetting(asObj(dd.after)[k])}`).join('；');
       return `<tr><td>${time(e.ts)}</td><td>${esc(what)}</td><td>${esc(dd.source === 'dashboard' ? '面板' : dd.source ?? '')}</td></tr>`; }).join('')}</tbody></table></div></div>` : empty('还没有通过面板修改过设置。')}</section>`;
-    body += `<section><p class="hint">完整的生效配置见<a href="/config">配置页</a>。</p></section>`;
+    body += `<section><p class="hint">完整的生效配置见<a href="/config">配置页</a>；结构化日志见<a href="/logs">实时日志</a>。</p></section>`;
     return body;
   }
 

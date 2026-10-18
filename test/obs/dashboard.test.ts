@@ -79,9 +79,9 @@ describe('面板二期页面', () => {
       '/live': ['进行中的会话', 'id="inflight"', 'id="done"', 'src="/assets/live.js"', 'data-ticket="t-live"', '群 7'],
       '/tickets': ['票据列表', 'name="status"'],
       '/logs': ['实时日志', 'src="/assets/logs.js"'],
-      '/context': ['上下文检索'],
-      '/codex': ['Codex 线程', 'thread-old', '2.4 MB', 'action="/codex/reset"', '全局 AGENTS.md'],
-      '/pi': ['Pi 会话', 'action="/pi/reset"', '群 7'],
+      '/context': ['上下文检索', 'href="/memory"'],
+      '/agents': ['Agent', 'action="/codex/reset"', 'action="/pi/reset"', '群 7', 'href="/codex/agents-md"', 'href="/agents/codex/sessions"', 'href="/agents/pi/sessions"'],
+      '/memory': ['记忆', 'O4'],
       '/settings': ['设置', 'action="/settings"', 'name="agentBackend"', 'name="_csrf"', 'action="/settings/agent-md"', '受管规则'],
       '/config': ['生效配置'],
     })) {
@@ -97,9 +97,11 @@ describe('面板二期页面', () => {
       const nonce = /<style nonce="([^"]+)"/.exec(html)![1]!;
       expect(res.headers.get('content-security-policy')).toContain(`'nonce-${nonce}'`);
       for (const m of html.matchAll(/<script[^>]*>/g)) expect(m[0]).toContain(`nonce="${nonce}"`);
-      if (url !== '/') expect(html).toContain(`href="${url}" aria-current="page"`);
+      const navOf: Record<string, string> = { '/logs': '/settings', '/config': '/settings', '/context': '/memory' };
+      if (url !== '/') expect(html).toContain(`href="${navOf[url] ?? url}" aria-current="page"`);
+      expect(html).toMatch(/<nav class="tabs"[^>]*><a href="\/"[^>]*>总览<\/a><a href="\/agents"[^>]*>Agent<\/a><a href="\/memory"[^>]*>记忆<\/a><a href="\/tickets"[^>]*>票据<\/a><a href="\/live"[^>]*>(<i[^>]*><\/i>)?实时<\/a><a href="\/settings"[^>]*>设置<\/a><\/nav>/);
     }
-    for (const asset of ['live.js', 'logs.js', 'forms.js']) {
+    for (const asset of ['live.js', 'logs.js', 'forms.js', 'agents.js']) {
       const res = await r.get('/assets/' + asset);
       expect(res.status).toBe(200); expect(res.headers.get('content-type')).toContain('text/javascript');
       const js = await res.text(); expect(js).not.toContain('innerHTML'); expect(js).not.toMatch(/setInterval\([^)]*fetch/);
@@ -213,12 +215,12 @@ describe('面板二期页面', () => {
   it('重置线程：校验键、调用后端、记录事件并带结果跳回', async () => {
     const r = await rig();
     const res = await r.post('/codex/reset', { _csrf: r.csrf, key: 'shared' });
-    expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/codex?ok=reset');
+    expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/agents?ok=reset');
     expect(r.resetCodex).toHaveBeenCalledWith('shared');
-    expect((await r.post('/codex/reset', { _csrf: r.csrf, key: 'owner' })).headers.get('location')).toBe('/codex?ok=unchanged');
+    expect((await r.post('/codex/reset', { _csrf: r.csrf, key: 'owner' })).headers.get('location')).toBe('/agents?ok=unchanged');
     expect((await r.post('/codex/reset', { _csrf: r.csrf, key: 'group:7' })).status).toBe(400);
     const pi = await r.post('/pi/reset', { _csrf: r.csrf, key: 'group:7' });
-    expect(pi.headers.get('location')).toBe('/pi?ok=reset'); expect(r.resetPi).toHaveBeenCalledWith('group:7');
+    expect(pi.headers.get('location')).toBe('/agents?ok=reset'); expect(r.resetPi).toHaveBeenCalledWith('group:7');
     expect((await r.post('/pi/reset', { _csrf: r.csrf, key: '../x' })).status).toBe(400);
     const ev = r.store.events('@codex').find(e => e.stage === 'thread_reset')!;
     expect(JSON.parse(ev.detail_json)).toMatchObject({ source: 'dashboard', thread_key: 'shared', archived: 'thread-old' });
@@ -226,9 +228,13 @@ describe('面板二期页面', () => {
     let release!: () => void;
     r.resetCodex.mockImplementationOnce(() => new Promise(res => { release = () => res('thread-busy'); }));
     const queued = await r.post('/codex/reset', { _csrf: r.csrf, key: 'shared' });
-    expect(queued.headers.get('location')).toBe('/codex?ok=queued');
+    expect(queued.headers.get('location')).toBe('/agents?ok=queued');
     release();
-    expect(await (await r.get('/codex?ok=queued')).text()).toContain('已排队');
+    expect(await (await r.get('/agents?ok=queued')).text()).toContain('已排队');
+    // 旧页面跳转到会话列表；重置表单仍在 /agents 卡片上（共享线程已存在，owner 尚未创建不给按钮）
+    for (const b of ['codex', 'pi']) { const old = await r.get('/' + b, { redirect: 'manual' }); expect(old.status).toBe(303); expect(old.headers.get('location')).toBe(`/agents/${b}/sessions`); }
+    const agents = await (await r.get('/agents')).text();
+    expect(agents.match(/action="\/codex\/reset"/g)).toHaveLength(1); expect(agents).toContain('name="key" value="shared"'); expect(agents).toContain(`name="_csrf" value="${r.csrf}"`);
   });
 });
 
@@ -349,7 +355,7 @@ describe('上下文占用条（§8.5）', () => {
     { backend: 'pi', key: 'owner', usedTokens: 2_000, windowTokens: 128_000, turns: 0, updatedAt: now, source: 'estimate' },
   ]);
 
-  it('总览、/codex、/pi 首屏渲染占用条；总览 codex 在前、各自按占比降序；页面加载 usage.js', async () => {
+  it('总览与 /agents 首屏渲染占用条；codex 在前、各自按占比降序；页面加载 usage.js', async () => {
     const r = await rig({ contextUsage: stub() });
     const home = await (await r.get('/')).text();
     expect(home).toContain('上下文占用'); expect(home).toContain('src="/assets/usage.js"');
@@ -361,22 +367,19 @@ describe('上下文占用条（§8.5）', () => {
     expect(home).toMatch(/class="ctx ctx-t-ok ctx-est" data-ctx="pi\|owner"/);
     expect(home).not.toMatch(/\sstyle="/);
 
-    const codex = await r.get('/codex'); const ch = await codex.text();
-    expect(codex.status).toBe(200);
-    expect(ch).toContain('class="thread-ctx"'); expect(ch).toContain('100,000'); expect(ch).toContain('缓存命中 80,000');
-    expect(ch.indexOf('data-ctx="codex|shared"')).toBeLessThan(ch.indexOf('thread-old')); // 进度条在线程详情之上
-    const pi = await r.get('/pi'); const ph = await pi.text();
-    expect(pi.status).toBe(200);
-    expect(ph).toMatch(/class="ctx-tick ctx-bg" data-at="70" title="后台压缩阈值/); expect(ph).toMatch(/class="ctx-tick ctx-rs" data-at="88" title="阻塞压缩阈值/);
-    expect(ph.indexOf('data-ctx="pi|group:7"')).toBeLessThan(ph.indexOf('action="/pi/reset"'));
-    expect([...ph.matchAll(/data-ctx="([^"]+)"/g)].map(m => m[1])).toEqual(['pi|group:7', 'pi|owner']);
+    const agents = await r.get('/agents'); const ah = await agents.text();
+    expect(agents.status).toBe(200); expect(ah).toContain('src="/assets/usage.js"');
+    expect(ah).toContain('100,000'); expect(ah).toContain('缓存命中 80,000');
+    expect(ah).toMatch(/class="ctx-tick ctx-bg" data-at="70" title="后台压缩阈值/); expect(ah).toMatch(/class="ctx-tick ctx-rs" data-at="88" title="阻塞压缩阈值/);
+    expect(ah.indexOf('data-ctx="pi|group:7"')).toBeLessThan(ah.indexOf('action="/pi/reset"'));
+    expect([...ah.matchAll(/data-ctx="([^"]+)"/g)].map(m => m[1])).toEqual(['codex|owner', 'codex|shared', 'pi|group:7', 'pi|owner']);
     expect((await r.get('/assets/usage.js')).status).toBe(200);
   });
 
   it('未接入数据源时各页照常 200，codex 线程显示占位条', async () => {
     const r = await rig();
     expect(await (await r.get('/')).text()).toContain('上下文占用数据源未接入');
-    expect(await (await r.get('/codex')).text()).toMatch(/class="ctx ctx-none" data-ctx="codex\|owner"/);
+    expect(await (await r.get('/agents')).text()).toMatch(/class="ctx ctx-none" data-ctx="codex\|owner"/);
   });
 
   it('/live 卡片头部有该线程的小型占用条；SSE 首帧带全部占用记录，context_usage 事件推送 context 增量', async () => {
