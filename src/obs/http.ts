@@ -17,7 +17,7 @@ import { parseBackendOverrides } from '../agent/backends/select.js';
 import { REASONING_EFFORTS } from '../agent/codex-runner.js';
 import { ASSETS } from './ui/client.js';
 import { contextBar, sortUsage, type ContextUsage, type ContextUsageView } from './ui/context-bar.js';
-import { BACKENDS, ROUTES, csrfField, empty, esc, fmtBytes, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri, type Tone } from './ui/html.js';
+import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri, type Tone } from './ui/html.js';
 
 export { esc };
 const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
@@ -174,6 +174,13 @@ const FLASH: Record<string, string> = {
 const SETTING_LABELS: Record<string, string> = { agentBackend: '默认后端', backendOverrides: '按会话覆盖', codexReplyMode: 'Codex 回复方式', codexReasoningEffort: 'Codex 推理强度', alertOwner: 'owner 告警' };
 const showSetting = (v: unknown) => typeof v === 'boolean' ? (v ? '开启' : '关闭') : v && typeof v === 'object' ? (Object.entries(v).map(([k, b]) => `${k}=${String(b)}`).join(', ') || '无') : String(v);
 const asObj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
+/** 聊天记录整理灯的说明：观测事件 ts（毫秒）或消息库 meta aging_last_run（秒）统一格式化。 */
+export function agingNote(aging: Record<string, unknown>, now = Date.now()): string {
+  const raw = aging.ts ?? aging.last_run;
+  if (raw === undefined || raw === null || raw === '') return '尚未运行';
+  const ms = epochMs(raw);
+  return ms === null ? `上次 ${String(raw)}` : `上次 ${fmtWhen(ms, now)}`;
+}
 const ticketStatus = (events: ObsEvent[]) => {
   const t = events.filter(e => ['reply_sent','failed','fallback'].includes(e.stage) && JSON.parse(e.detail_json).terminal === true).at(-1);
   if (!t) return 'processing';
@@ -423,7 +430,7 @@ export function createDashboard(opts: DashboardOptions) {
       lamp('ComfyUI', comfy.ok === true ? 'ok' : comfy.ok === false ? 'fail' : 'warn', comfy.ok === true ? String(comfy.comfyui_version ?? comfy.backend ?? '可用') : comfy.ok === false ? '自检失败' : '自检中'),
       lamp('Codex 凭据', codex.ok === true ? 'ok' : codex.ok === false ? 'fail' : 'warn', codex.ok === true ? 'auth.json 就绪' : codex.ok === false ? '缺少或无法读取凭据' : '检查中'),
       lamp('DeepSeek 密钥', health.deepseek_key_present === true ? 'ok' : health.deepseek_key_present === false ? 'fail' : '', health.deepseek_key_present === true ? '已配置' : health.deepseek_key_present === false ? '未配置' : '未知'),
-      lamp('聊天记录整理', aging.status === 'ok' ? 'ok' : aging.status === 'failed' ? 'fail' : '', typeof aging.ts === 'number' ? `上次 ${fmtTime(aging.ts)}` : aging.last_run ? `上次 ${String(aging.last_run)}` : '尚未运行'),
+      lamp('聊天记录整理', aging.status === 'ok' ? 'ok' : aging.status === 'failed' ? 'fail' : '', agingNote(aging)),
       lamp('观测存储', opts.store.degraded || health.degraded === true ? 'fail' : 'ok', opts.store.degraded ? '已降级' : `丢弃事件 ${Number(health.dropped_events ?? 0)} 条`),
     ];
     out += `<section><h2>依赖状态</h2><div class="lamps">${lamps.join('')}</div></section>`;

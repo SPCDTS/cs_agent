@@ -83,6 +83,14 @@ export function fmtAgo(ts: number, now = Date.now()): string {
   if (d < 86400_000) return `${Math.floor(d / 3600_000)} 小时前`;
   return `${Math.floor(d / 86400_000)} 天前`;
 }
+/** 秒或毫秒时间戳（数字或数字字符串）→ 毫秒；小于 1e12 视为秒。无效返回 null。 */
+export function epochMs(v: unknown): number | null {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(v) ? Number(v) : NaN;
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n < 1e12 ? n * 1000 : n;
+}
+/** 完整日期时间 + 相对时间，例如 "2026/10/18 16:00:00（3 小时前）"。 */
+export const fmtWhen = (ms: number, now = Date.now()) => `${fmtTime(ms)}（${fmtAgo(ms, now)}）`;
 export const time = (ts: number) => `<time datetime="${new Date(ts).toISOString()}" title="${esc(fmtTime(ts))}">${esc(fmtAgo(ts))}</time>`;
 export const empty = (text: string) => `<div class="empty">${text}</div>`;
 export const kv = (rows: [string, string][], cls = '') => `<dl class="kv${cls ? ' ' + cls : ''}">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
