@@ -351,3 +351,13 @@ interface ContextUsage {
 ```
 - **采集**：codex 后端从 `turn.completed.usage`（`input_tokens` + `cached_input_tokens`）取值，窗口来自 `codex debug models` 的模型目录（启动时读取一次并缓存；失败回退 `CODEX_CONTEXT_WINDOW`，默认 400000）；pi 后端从回合 usage 取值，窗口与 compaction 阈值来自 pi-ai 模型定义与 harness 设置；线程重置后记录归零。
 - **展示**（Opus）：总览页"上下文占用"区块与 `/codex`、`/pi` 页每线程一条进度条：已用/窗口与百分比，pi 条上标出后台压缩与阻塞压缩两条阈值线；颜色按占比分级（<60% 常态、60–85% 提醒、>85% 警示）；实时页卡片头部显示该线程的小型占用条；SSE 推送 `context_usage` 更新，不轮询。
+
+### 8.5 上下文占用进度条（2026-10-18，主会话验收通过）
+- 数据（astra）：`context-usage.json` 持久化；codex 取 `turn.completed.usage`，窗口来自 `codex debug models` 的 `models[].context_window`（gpt-6.1-sol = 500,000）；pi 取回合用量，deepseek-flash 窗口 1,000,000，后台压缩阈值 950,848、阻塞阈值 983,616（按 pi-durable 实际公式）；重置归零；`context_usage` 事件与 `/healthz.context_usage`。
+- 展示（Opus）：总览"上下文占用"区块、`/codex`、`/pi` 每线程进度条（三档颜色、pi 两条阈值线、估算虚线、过期灰显）、实时卡片迷你条；SSE 原地更新；无内联样式，CSP 不变。
+- 独立复跑：typecheck、528 测试、build、镜像构建通过；部署后总览与 `/codex` 页出现进度条，`/healthz` 返回 `context_usage`。
+- 说明：重启后线程占用显示为估算 0，待该线程下一回合后更新为真实值。
+
+### 8.6 codex 系统提示可编辑（2026-10-18 用户需求）
+- 全局 `$CODEX_HOME/AGENTS.md` 拆为两段：受管段（安全规则、可写目录、工具纪律，程序生成、不可编辑）+ 自定义段（`${DATA_DIR}/prompts/codex.md`，面板可编辑）。保存后立即重写 AGENTS.md，codex 每次调用重新读取，下一条消息生效；容器重启按同样方式再生成。
+- 面板设置页增加"codex 系统提示"编辑框（与 agent.md 并列，同样的 revision 防覆盖、密文拒绝、64 KB 上限），受管段只读折叠展示。
