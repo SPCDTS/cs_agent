@@ -164,3 +164,10 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 
 **主会话验收 O3（2026-10-18 14:30Z，已部署）**：在 O2 与五项修补之上变基，合流修正 `1651ffb`（适配器与引擎统一按前缀识别 AGENTS.md 注入、prelude 块可签发引用与懒加载、索引版本 3、O2 测试改为桩适配器下的 503）。复跑 typecheck、62 文件 / 805 项、build 通过（一次 `bad port` 为测试服务器端口抖动，单独复跑两次通过）。真实数据冒烟：共享线程最新回合恰好是部署后第一个带官方 trace 的回合，`before` / `after` 均从 trace 读到精确请求：after 实测输入 134,372（缓存 129,920，来源 `codex.trace.token_usage`），o200k 估算 129,285，未解释差额 +5,087（3.8%）；指令 9 条 14,388、工具定义 9,447、工具输出 38 条 97,784 均标"已记录"；168 条消息中 166 条带懒加载引用，页面展开 21.4 KB 全文正常；窗口 475,000 取自 rollout 的 `model_context_window`。省略 `at` 返回最后回合之后；`phase=x` 400，未知回合 404；浏览器无脚本错误。
 - 待后续改进：(1) 分类徽标取类别内最低来源，历史消息里只要有一条加密 reasoning 整个类别就显示"不可用"，应改为"部分不可用"并单列条数；(2) 分析页窗口用 codex 有效窗口 475,000，占用条用目录名义值 500,000，两处口径需统一（建议都显示有效窗口并注明名义值）。
+
+### O4（后端）：记忆只读接口（2026-10-18，astra 实现，主会话验收通过）
+
+- 提交 `4613c49`（整理器只读 running 状态）、`3ec6e7a`（`/api/memory`、`/api/memory/scopes/:scope[/messages]`、`/api/memory/summaries/:id`、`/api/memory/search`、`/api/memory/archives`；契约见 `docs/O4-memory-api.md`）、`6c11d8f`（消息分页复合游标 `before_id`/`after_id`，修正原契约"同秒即 400"的缺陷）。
+- 主会话复跑：typecheck、63 文件 / 897 项、build 通过；部署后真实库冒烟：2 个 scope、89 条消息、1 条日摘要；时间线按小时桶、保留期边界与空白区标注正确；摘要页给出区间内尚存原文 32 条；`limit=3` 连续翻 17 页拿全 50 条无重复；检索对照路径与模型工具一致（"Codex" 命中 2 条，tool_text 同步给出）；未知 scope 404、空 q 400、POST 405。
+- 排查记录：Windows Git Bash 下 curl `--data-urlencode` 传中文会被控制台编码转坏导致"0 命中"，改传百分号编码 URL 即正常；这是测试工具问题，不是接口缺陷。
+- 前端页面（Opus）在 `feat/obs-v2-memory` 上进行中，合入后单独记录。
