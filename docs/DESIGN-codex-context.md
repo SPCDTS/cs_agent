@@ -152,6 +152,14 @@ tool_timeout_sec = 15
 7. **符号链接竞态（minor，接受）**：利用前提是能修改 `/data/media` 目录；codex 对该目录既不可写也不可读（第 1 条），pi 已按 §4.5 接受全文件访问风险。不改代码，在此记录。
 8. **撤回也删除机器人行**：实现把 `recall` 的 `is_self = 0` 条件去掉了。评估后接受：被撤回的机器人消息在 QQ 里已不存在，删除其行与媒体行是正确的；撤回事件只来自 NapCat，不能伪造。
 
+#### 2.5.9 验收记录（2026-10-18，主会话验收通过，合并 707538a 并已部署）
+- 实现：分支 feat/image-recall 共 10 个提交（5aa7d19…e3d206a），含 §2.5.8 的 5 个修正提交。
+- 测试：Linux 容器（node:24-bookworm-slim）内 typecheck 通过，49 文件 631 项全部通过。Windows 本机全量多次出现已知的原生 worker 退出 3221226505（落在不同文件；main 基线 fa019ae 两次运行中也复现一次），无任何断言失败；新增的 media.test.ts 单独连跑 5 次均为 36/36。
+- 代码复读：召回前后两次范围校验、机器人行按票据核对收件人、参考图授权以 message_media 为准（手写 `[image:/etc/passwd]` 不产生授权）、loopback 只绑 127.0.0.1 且令牌在所有退出路径作废、bash 子进程环境白名单、原子发布与 GC 宽限。
+- 对抗审查（gpt-6-astra）：1 阻断 + 3 major + 4 minor，处理见 §2.5.8；修正后复查通过。
+- 线上冒烟（容器内，不向 QQ 发消息）：召回端点无令牌 401；qq_context MCP 列出 qq_image / qq_view_image；对群 200000001 的一条机器人发图消息实测召回——跨会话访问被拒、get_msg + 票据校验通过、图片入库 `/data/media/70/…png`（1024×1024）、二次召回走缓存、消息库正文替换为 `[image:<路径>]`、本会话 view 返回 image/png、他群 view 被拒；codex 沙箱内 `ls /data/media`、读该文件、读 qq-messages.sqlite 均 Permission denied（对照 `/data/prompts` 可读）。
+- 未覆盖：真实 QQ 端到端（用户发图 → @机器人"把上面那张图…"）留待用户实测；pi 内置工具尚未在真实流量上使用（pi 后端需经设置切换）。
+
 ## 3. codex 执行层
 
 ### 3.1 两条线程：owner 与 shared（2026-10-18 用户决定）
