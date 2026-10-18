@@ -115,13 +115,13 @@ tool_timeout_sec = 15
 - pi：工具直接调用 `MediaRecall`，`access` 取自 `PiRequestDoc.access`，次数限额同样按票据计。
 
 #### 2.5.5 召回后的图怎么用
-- **看图**：codex 可以直接打开返回的本地路径。pi：如果 pi-ai 工具结果支持图片内容，就把召回的图（≤3 张）随工具结果一并返回，否则只返回路径（由实现方确认 pi-ai 的能力后选择，并在报告里说明）。
+- **看图**（2026-10-18 用户决定：两个后端行为一致）：`qq_image` 在两个后端都**只返回路径文本**，不在工具结果里附带图片内容。看图由各自的文件工具完成：codex 用自带的本地图片查看，pi 用内置 `read` 工具（§4.5，`read` 读图片文件时返回图片内容）。
 - **当参考图**：`generate_image.reference_images` 的允许列表 = 本票据参考图 ∪ **媒体库中属于本次访问范围的 `ok` 路径**（`access=all` 时为全部 scope）。路径必须 realpath 落在 `${DATA_DIR}/media/` 下，并且在 `message_media` 里能按 path 查到 scope 在访问范围内的行，否则拒绝。这样群聊里的 agent 拿不到 owner 私聊或其他群的图。
   - `image-references.ts` 新增带媒体库的校验函数，原 `validateReferences` 不变；
   - pi `generate_image` 用请求的 `access` 判断范围；
   - codex 的 `image_gen` MCP 每次 exec 追加注入 `QQ_ACCESS`（与 `qq_context` 同值），以只读方式打开 `ContextStore` 判断范围；`IMAGE_REFS` 语义不变；
   - `tasks.ts` 的显式生图路由（`奶龙:` 前缀，不经 LLM）**不变**：它没有 LLM 调用召回工具，引用旧图在这条路由上仍不可用。
-- 两个后端的提示词同步修改：`[image]` 表示未召回的图，需要看图或拿来当参考图时，用 `qq_image` 召回（每轮最多 5 次）；`[image:<路径>]` 表示已召回，可以直接使用；`reference_images` 只能用本轮参考图或这些路径，不得编造。
+- 两个后端的提示词同步修改：`[image]` 表示未召回的图，需要看图或拿来当参考图时，用 `qq_image` 召回（每轮最多 5 次），拿到路径后用文件工具打开查看；`[image:<路径>]` 表示已召回，可以直接使用；`reference_images` 只能用本轮参考图或这些路径，不得编造。
 
 #### 2.5.6 配置
 `MEDIA_RECALL_PORT`（默认 8790）、`MEDIA_RECALL_MAX_PER_TICKET`（默认 5）。写入 `config.ts`、`.env.example`、`docs/DEPLOY.md`。
@@ -212,10 +212,16 @@ interface AgentBackend {
 ### 4.5 pi-durable 后端（新）
 - **每个会话域一条长期 durable conversation**（2026-10-18 评审后决定：owner 私聊一条；每个群一条；每个其他私聊用户一条；键 = `owner` | `<scope>`），id 持久化在 `/data/pi-threads.json`。与 codex 的 owner/shared 两分不同：pi 会话成本低，按域隔离可彻底避免非 owner 私聊与群聊共享记忆与压缩摘要。自动 compaction 开启（`reserveTokens` / `backgroundTokens` 取 pi-durable 默认或配置），记忆靠 compaction 摘要，不做轮换。
 - 模型：`AGENT_MODEL_PROVIDER`/`AGENT_MODEL_ID`（现为 deepseek / deepseek-flash）、`AGENT_THINKING_LEVEL`。
-- 工具（进程内，复用同一实现）：`web_search(query, count≤8)`、`fetch_page(url)`（§4.6）、`qq_recent` / `qq_search` / `qq_message`（统一上下文存储，**访问范围绑定到当前请求**：由适配层在 submit 时把 access 写入会话文档，工具执行时读取；shared 线程内不同 scope 的请求串行，因此不会串用）、`generate_image(prompt)`（写 `/data/images/<ticket>/`）。不接浏览器。
+- 工具（进程内，复用同一实现）：`web_search(query, count≤8)`、`fetch_page(url)`（§4.6）、`qq_recent` / `qq_search` / `qq_message`（统一上下文存储，**访问范围绑定到当前请求**：由适配层在 submit 时把 access 写入会话文档，工具执行时读取；shared 线程内不同 scope 的请求串行，因此不会串用）、`generate_image(prompt)`（写 `/data/images/<ticket>/`）、`qq_image`（§2.5）。不接浏览器。
+- **内置工具全部启用**（2026-10-18 用户决定）：安装 pi-durable 的 `createCodingTools()` 扩展，即 `read` / `write` / `edit` / `bash`，所有会话都启用（群、owner 私聊、其他私聊一视同仁）。
+  - `read` 配置图片处理（`ReadToolOptions.images`，取 `DEFAULT_IMAGE_LIMITS`），读 PNG/JPEG/WebP/GIF 时返回图片内容，用于查看 `qq_image` 召回的图和本票据参考图。
+  - 执行环境：`NodeExecutionEnv`，每个 pi 会话一个工作目录 `${DATA_DIR}/pi-work/<会话键>/`（会话键中的 `:` 换成 `_`，首次使用时创建）；绝对路径不受限制。
+  - 子进程环境：`bash` 启动的进程**不继承**主进程里的凭据类环境变量（`NAPCAT_TOKEN`、`DEEPSEEK_API_KEY`/`DEEPSEEK_APIKEY`、面板口令及其他已注册的秘密），与 codex 侧"口令不进子进程环境"一致。这只是不把凭据直接塞给子进程，不限制工具本身的能力。
+  - **已接受的风险**：pi 跑在主进程里，没有 codex 那样的沙箱与 `deny_read`。内置工具能读写容器内的全部文件（包括各会话的消息库、票据库、`/data/obs-token`），群成员可以通过提示注入间接驱动这些工具，历史工具的访问范围过滤因此不再是硬边界。用户已知情并决定启用。
+  - 观测：内置工具调用与 codex 内置命令同口径记录（工具名、命令或路径前 200 字、退出码、耗时），计入每票据事件预算。
 - 系统提示：`/data/prompts/agent.md` 热加载（与 codex 的 AGENTS.md 规则对齐：纯文本中文简短、不可信内容声明、历史工具纪律、需要事实先搜索、需要出图调用 generate_image 并一句话说明）。内置默认值在代码中。
 - 每轮输入格式与 codex 相同：`[来源] … / [引用] … / 正文`。
-- 工具调用上限（代码守卫）：每回合 `web_search ≤4`、`fetch_page ≤4`、`generate_image ≤2`、历史工具 ≤4；超限工具返回错误文本。回合超时 `PI_TURN_TIMEOUT_SEC`（300）。
+- 工具调用上限（代码守卫）：每回合 `web_search ≤4`、`fetch_page ≤4`、`generate_image ≤2`、历史工具 ≤4（`qq_image` 另按每票据 5 次计）、内置工具合计 ≤20（`bash` 单次超时 60 s）；超限工具返回错误文本。回合超时 `PI_TURN_TIMEOUT_SEC`（300）。
 
 ### 4.6 联网检索工具（DeepSeek Search/Fetch API，pi 后端使用）
 已核实：`POST https://api.deepseek.com/v1/tools/search`（`query` ≤128 字、`count` ≤50、`need_content`、支持 `site:` `lang:` `after:` 操作符）与 `POST /v1/tools/fetch`（`url` → Markdown 正文），同一 API key，5 QPS，$0.75/千次，2026-11-01 前免费。
