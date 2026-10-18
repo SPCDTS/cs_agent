@@ -11,6 +11,8 @@ import { CodexSessionAdapter } from './sessions/codex-adapter.js';
 import { PiSessionAdapter, type PiSessionSource } from './sessions/pi-adapter.js';
 import { createSessionRoutes, sessionJson, type SessionAdapters } from './sessions/http.js';
 import type { ObsEvent, ObsStore } from './store.js';
+import { createMemoryRoutes } from './memory/http.js';
+import type { MemoryAging, MemoryArchives } from './memory/types.js';
 import { loadImage } from '../qq/image.js';
 import { trace as defaultTrace, type Trace } from './trace.js';
 import { summarize, type LiveBus, type LiveCard, type LiveMessage } from './live.js';
@@ -75,6 +77,8 @@ export interface DashboardOptions {
   piSessions?: PiSessionSource;
   /** 可注入适配器，便于测试或其它宿主复用相同鉴权与路由。 */
   sessionAdapters?: SessionAdapters;
+  aging?: MemoryAging;
+  archives?: MemoryArchives;
   /** 运行时设置（/settings 可写）；缺省时设置页只读展示配置 */
   settings?: SettingsStore;
   /** 进行中会话的实时总线（/live） */
@@ -207,6 +211,10 @@ export function createDashboard(opts: DashboardOptions) {
     ...(opts.piSessions ? { pi: new PiSessionAdapter({ store: opts.store, source: opts.piSessions }) } : {}),
   });
   const sessionRoute = createSessionRoutes(adapters, sse, { codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR, contextUsage: opts.contextUsage });
+  const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, aging: opts.aging, archives: opts.archives,
+    maxChars: opts.config.QQ_CONTEXT_MAX_CHARS, retention: { rawDays: opts.config.HISTORY_RAW_DAYS,
+      summaryDays: opts.config.HISTORY_SUMMARY_DAYS, hardMaxDays: opts.config.HISTORY_RAW_HARD_MAX_DAYS,
+      dailyHour: opts.config.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
   const token = opts.config.OBS_TOKEN;
   const csrf = token ? csrfToken(token) : '';
   const tracer = opts.trace ?? defaultTrace;
@@ -272,6 +280,10 @@ export function createDashboard(opts: DashboardOptions) {
     if (url.pathname === '/api/agents' || url.pathname.startsWith('/api/agents/') || url.pathname === '/agents/stream') {
       if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); sessionJson(res, 405, { error: '会话接口只支持 GET' }); return; }
       await sessionRoute(url, res); return;
+    }
+    if (url.pathname === '/api/memory' || url.pathname.startsWith('/api/memory/')) {
+      if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); sessionJson(res, 405, { error: '记忆接口只支持 GET' }); return; }
+      await memoryRoute(url, res); return;
     }
     if (post) { await handlePost(req, res, url, nonce, host); return; }
     const q = url.searchParams;

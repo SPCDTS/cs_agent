@@ -35,7 +35,7 @@ import { CodexBackend } from "./agent/backends/codex.js";
 import { createBackendSelector, PiBackend } from "./agent/backends/select.js";
 import { ContextStore } from "./context/store.js";
 import { SettingsStore, settingsDefaults } from "./agent/settings.js";
-import { startAgingScheduler } from "./context/aging.js";
+import { msUntilNextRun, startAgingScheduler } from "./context/aging.js";
 
 async function main(): Promise<void> {
   // DEEPSEEK_APIKEY 等别名 → pi-ai 读取的标准变量名（须在创建 models 之前）
@@ -283,6 +283,10 @@ async function main(): Promise<void> {
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
     codex: codexStatus, pi: piStatus, piSessions: pi.sessionSource, settings, live,
+    aging: { running: aging.running, nextRun: () => { const now = Date.now(); return now + msUntilNextRun(cfg.HISTORY_SUMMARY_HOUR, now); },
+      config: { rawDays: cfg.HISTORY_RAW_DAYS, summaryDays: cfg.HISTORY_SUMMARY_DAYS, hardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,
+        dailyHour: cfg.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } },
+    archives: { codex: path.join(cfg.DATA_DIR, 'codex-threads-archive.jsonl'), pi: path.join(cfg.DATA_DIR, 'pi-threads-archive.jsonl') },
     resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
     onPurge: now => purgeCodexTrace(cfg.codexHome, cfg.CODEX_TRACE_RETENTION_DAYS, now, cfg.CODEX_TRACE_MAX_MB).then(() => undefined,
