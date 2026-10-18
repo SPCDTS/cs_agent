@@ -160,7 +160,7 @@ describe('记忆页面', () => {
     expect(html.match(/<li class="msg"/g)).toHaveLength(50);
     expect(html).toContain('<button type="button" class="quiet" id="msg-more">更早</button>');
     expect(typeof d.next_before).toBe('number');
-    expect('next_before_id' in d).toBe(true); // 接口给出时透传，缺席为 null
+    expect(typeof d.next_before_id).toBe('number'); // 同秒决胜游标透传给客户端
     expect(d.window).toEqual({ after: from - 1, before: to });
     const date = await r.page('/memory/scopes/group%3A123?from=2026-10-01&to=2026-10-03');
     expect(date.html).toContain('value="2026-10-01"'); expect(date.html).toContain('value="2026-10-03"');
