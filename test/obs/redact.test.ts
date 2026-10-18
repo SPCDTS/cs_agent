@@ -4,6 +4,17 @@ beforeEach(() => vi.resetModules());
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("临时秘密生命周期与长期容量", () => {
+  it("工具正文中的凭据值按完整引号值或整条认证头隐藏", async () => {
+    const { redactText } = await import("../../src/obs/redact.js");
+    for (const key of ['password', 'passwd', 'cookie', 'credential', 'credentials', 'api_key', 'authorization']) {
+      expect(redactText(JSON.stringify({ [key]: 'first second \\" third' }))).not.toMatch(/first|second|third/);
+      expect(redactText(`${key}='first second third'`)).not.toMatch(/first|second|third/);
+    }
+    for (const header of ['Cookie', 'Set-Cookie', 'Authorization']) {
+      expect(redactText(`start\n${header}: sid=first; auth=second\nend`)).toBe(`start\n${header}: [已隐藏]\nend`);
+    }
+    expect(redactText('{"input_tokens":100,"output_tokens":5}')).toBe('{"input_tokens":100,"output_tokens":5}');
+  });
   it("临时秘密按注册计数撤销，重复 dispose 不影响其他租约或长期秘密", async () => {
     const { registerTemporarySecrets, registerSecrets, redactText } = await import("../../src/obs/redact.js");
     const value = "temporary-fixture-778899";

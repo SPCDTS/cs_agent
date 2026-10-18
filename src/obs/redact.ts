@@ -48,9 +48,13 @@ export function withoutSecretEnv(env: NodeJS.ProcessEnv): Record<string, string>
 export function redactText(text: string, limit = 500): string {
   let out = text;
   for (const secret of allSecrets().sort((a, b) => b.length - a.length)) out = out.split(secret).join('[已隐藏]');
-  out = out.replace(/\bBearer\s+[^\s"'<>]+/gi, 'Bearer [已隐藏]')
+  // 先处理整行认证头、带引号的完整值（含空格/转义），再处理无引号的令牌。
+  out = out.replace(/(^|\r?\n)([ \t]*(?:Cookie|Set-Cookie|Authorization)\s*:\s*)[^\r\n]*/gi, '$1$2[已隐藏]')
+    .replace(/((?:api[_-]?key|apikey|token|secret|password|passwd|authorization|cookie|credentials?)["']?\s*[=:]\s*)"(?:\\.|[^"\\])*"/gi, '$1"[已隐藏]"')
+    .replace(/((?:api[_-]?key|apikey|token|secret|password|passwd|authorization|cookie|credentials?)["']?\s*[=:]\s*)'(?:\\.|[^'\\])*'/gi, "$1'[已隐藏]'")
+    .replace(/\bBearer\s+[^\s"'<>]+/gi, 'Bearer [已隐藏]')
     .replace(/\bsk-[A-Za-z0-9_-]+/g, '[已隐藏]')
-    .replace(/((?:api[_-]?key|token|secret|password|authorization)["']?\s*[=:]\s*["']?)[^\s"'&,}]+/gi, '$1[已隐藏]')
+    .replace(/((?:api[_-]?key|apikey|token|secret|password|passwd|authorization|cookie|credentials?)["']?\s*[=:]\s*["']?)[^\s"'&,};]+/gi, '$1[已隐藏]')
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[已隐藏]')
     .replace(/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>"']+/g, raw => {
       try { const url = new URL(raw); if (url.username || url.password) {
