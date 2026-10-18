@@ -13,7 +13,7 @@ import { validateReferences } from "../image-references.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
 import { PiRequestDoc } from "../pi-tools/request.js";
 import { PiPromptLoader } from "../pi-tools/prompt.js";
-import { parseAccess } from "../../context/access.js";
+import { isScope, parseAccess } from "../../context/access.js";
 import { log } from "../../log.js";
 import { BackendTimeoutError, type AgentBackend, type AgentRequest, type AgentHandleContext, type AgentResponse } from "./types.js";
 
@@ -212,6 +212,24 @@ export class PiBackend implements AgentBackend {
       ctx.onEvent({ type: "pi_done", thread: req.threadKey, conversation: conv.id, images: images.length });
       return { text, images };
     });
+  }
+
+  /**
+   * 面板"重置会话"：排在该键的回合之后（不打断进行中的回合），映射置空、旧会话保留在 SQLite 中作归档，
+   * 并追加一行到 ${DATA_DIR}/pi-threads-archive.jsonl；下一条消息新建会话。返回被归档的会话 id。
+   */
+  resetThread(key: string, reason = "dashboard"): Promise<number | null> {
+    if (key !== "owner" && !isScope(key)) return Promise.reject(new Error("非法会话键"));
+    return this.lock(key, () => this.lock("mapping", async () => {
+      const id = (await this.readThreadIds())[key] ?? null;
+      if (id === null) return null;
+      await this.harness.commit(async tx => { (await tx.doc(PiThreadsDoc))[key] = null; }, context);
+      await fs.appendFile(path.join(this.opts.dataDir, "pi-threads-archive.jsonl"),
+        JSON.stringify({ key, conversation: id, archived_at: new Date().toISOString(), reason }) + "\n", { mode: 0o600 });
+      await this.persistThreads();
+      log.info("pi conversation reset", { conversation_key: key, conversation: id, reason });
+      return id;
+    }));
   }
 
   /** 必须在关闭票据 harness 前调用，使其 signal 只停止等待、不终结 pi submission。 */

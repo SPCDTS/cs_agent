@@ -522,3 +522,28 @@ describe("outputFile (per-ticket -o path, R1)", () => {
     await expect(runner.ask("x", { outputFile: `${tmp()}/../out.txt` })).rejects.toThrow(/输出文件路径/);
   });
 });
+
+describe("resetThread", () => {
+  it("archives the current thread, clears it, and the next turn starts a fresh thread", async () => {
+    const { dir, runner, calls } = setup({ thread: "thread-old" });
+    await runner.ask("第一轮", { threadKey: "shared" });
+    expect(threadOf(dir)?.thread_id).toBe("thread-old");
+    expect(await runner.resetThread("shared")).toBe("thread-old");
+    expect(threadOf(dir)).toBeUndefined();
+    const archived = readFileSync(path.join(dir, "codex-threads-archive.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
+    expect(archived).toEqual([expect.objectContaining({ key: "shared", thread_id: "thread-old", reason: "dashboard" })]);
+    expect(await runner.resetThread("owner")).toBeNull();
+    await runner.ask("第二轮", { threadKey: "shared" });
+    expect(calls().filter(c => c.phase === "start").map(c => c.argv[1])).not.toContain("resume");
+  });
+
+  it("waits for the in-flight turn on the same key before resetting", async () => {
+    const { dir, runner } = setup({ sleepMs: 200, thread: "thread-busy" });
+    const turn = runner.ask("进行中", { threadKey: "owner" });
+    await new Promise(r => setTimeout(r, 50));
+    const reset = runner.resetThread("owner");
+    await turn;
+    expect(await reset).toBe("thread-busy");
+    expect(threadOf(dir, "owner")).toBeUndefined();
+  });
+});

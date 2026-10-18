@@ -399,6 +399,25 @@ export class CodexRunner {
     return run;
   }
 
+  /**
+   * 面板"重置线程"：排在该键的回合队列之后（不打断进行中的回合），把当前记录追加到
+   * ${threadsFile 同目录}/codex-threads-archive.jsonl，再清除记录；下一轮新建线程。返回被归档的线程 id。
+   */
+  resetThread(key: ThreadKey, reason = "dashboard"): Promise<string | null> {
+    const run = (this.queues.get(key) ?? Promise.resolve()).then(async () => {
+      const old = await this.readThread(key);
+      if (old) {
+        const archive = path.join(path.dirname(this.opts.threadsFile), "codex-threads-archive.jsonl");
+        await fs.appendFile(archive, JSON.stringify({ key, ...old, archived_at: new Date().toISOString(), reason }) + "\n", { mode: 0o600 });
+      }
+      await this.writeThread(key, undefined);
+      log.info("codex thread reset", { thread_key: key, thread_id: old?.thread_id ?? null, reason });
+      return old?.thread_id ?? null;
+    });
+    this.queues.set(key, run.catch(() => undefined));
+    return run;
+  }
+
   /** 两个线程当前的 id（healthz 用）。 */
   async readThreadIds(): Promise<Record<ThreadKey, string | null>> {
     const doc = await this.readThreads();

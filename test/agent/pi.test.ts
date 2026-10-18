@@ -451,3 +451,22 @@ describe("DeepSeek tools", () => {
     await expect(publicPageUrl("https://example.com", async () => [{ address: "8.8.8.8", family: 4 }, { address: "192.168.1.1", family: 4 }])).rejects.toThrow(/内部网络/);
   });
 });
+
+describe("pi resetThread", () => {
+  it("archives the conversation mapping; the next message starts a new conversation", async () => {
+    const s = await setup([reply("一"), reply("二")]);
+    await s.pi.handle(request("before"), handleContext());
+    const before = (await s.pi.readThreadIds())["group:7"];
+    expect(before).toBeTypeOf("number");
+    expect(await s.pi.resetThread("group:7")).toBe(before);
+    expect((await s.pi.readThreadIds())["group:7"]).toBeUndefined();
+    expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).not.toHaveProperty("group:7");
+    const archive = (await fs.readFile(path.join(s.dir, "pi-threads-archive.jsonl"), "utf8")).trim().split("\n").map(l => JSON.parse(l));
+    expect(archive).toEqual([expect.objectContaining({ key: "group:7", conversation: before })]);
+    await s.pi.handle(request("after"), handleContext());
+    const after = (await s.pi.readThreadIds())["group:7"];
+    expect(after).toBeTypeOf("number"); expect(after).not.toBe(before);
+    expect(await s.pi.resetThread("private:5")).toBeNull();
+    await expect(s.pi.resetThread("../etc")).rejects.toThrow("非法会话键");
+  });
+});
