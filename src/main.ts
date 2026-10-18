@@ -3,7 +3,7 @@ import { RecallTokens, startMediaRecallServer } from "./context/media-recall-ser
 import { createOneBotClient } from "./qq/onebot.js";
 import { ContextUsageStore } from "./agent/context-usage.js";
 import { loadObsToken, publicHealth } from "./obs/token.js";
-import { purgeMemoryInstrumentation } from "./obs/memory/instrumentation.js";
+import { MemoryInstrumentation, purgeMemoryInstrumentation } from "./obs/memory/instrumentation.js";
 import { ObsStore } from "./obs/store.js";
 import { trace } from "./obs/trace.js";
 import { Metrics, type Gauge } from "./obs/metrics.js";
@@ -90,6 +90,7 @@ async function main(): Promise<void> {
   const store = new ContextStore(cfg.DATA_DIR);
   const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP, cfg.OBS_ADMIN_RETENTION_DAYS);
   trace.attach(obs);
+  const instrumentation = obs.degraded ? undefined : MemoryInstrumentation.fromDb(obs.db);
   const contextUsage = new ContextUsageStore(cfg.DATA_DIR);
   // 进行中会话的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）
   const live = new LiveBus(trace);
@@ -213,7 +214,7 @@ async function main(): Promise<void> {
 
   // 聊天记录衰老（日/周摘要 + 清理）：每天 HISTORY_SUMMARY_HOUR 点（容器本地时区，默认 UTC）；启动时补跑
   const aging = startAgingScheduler({
-    store,
+    store, instrumentation,
     models,
     model: agentModel,
     rawDays: cfg.HISTORY_RAW_DAYS,

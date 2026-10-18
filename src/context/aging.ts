@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { MemoryInstrumentation, SummarySource } from "../obs/memory/instrumentation.js";
 import { cleanupMedia } from "./media.js";
 import path from "node:path";
 import { usageFields } from "../obs/usage.js";
@@ -34,6 +36,7 @@ const WEEK_SUMMARY_PROMPT = `你是聊天记录归档助手。下面是一个 QQ
 
 export interface AgingOptions {
   store: ContextStore;
+  instrumentation?: MemoryInstrumentation;
   models: Models;
   model: Model<Api>;
   rawDays: number;
@@ -67,7 +70,7 @@ function textOf(msg: AssistantMessage): string {
   return text;
 }
 
-async function summarize(opts: AgingOptions, systemPrompt: string, input: string): Promise<string> {
+async function summarize(opts: AgingOptions, systemPrompt: string, input: string): Promise<{ text: string; model: string; provider: string; usage: AssistantMessage["usage"] }> {
   const msg = await opts.models.completeSimple(
     opts.model,
     { systemPrompt, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
@@ -75,7 +78,7 @@ async function summarize(opts: AgingOptions, systemPrompt: string, input: string
   );
   trace.event("@aging", "model_turn", { status: msg.stopReason === "error" ? "failed" : "ok", detail: {
     provider: msg.provider, model: msg.model, ...usageFields(msg.usage) } });
-  return textOf(msg).slice(0, SUMMARY_MAX + 100);
+  return { text: textOf(msg).slice(0, SUMMARY_MAX + 100), model: msg.model, provider: msg.provider, usage: msg.usage };
 }
 
 const md = (ts: number) => {
@@ -87,7 +90,8 @@ const md = (ts: number) => {
 export async function runAging(opts: AgingOptions): Promise<AgingReport> {
   const started = Date.now();
   const nowSec = Math.floor((opts.now?.() ?? Date.now()) / 1000);
-  const { store } = opts;
+  const { store, instrumentation } = opts;
+  const batch_id = randomUUID();
   const report: AgingReport = { day_summaries: 0, week_summaries: 0, failed: 0, purged_messages: 0, purged_summaries: 0, ms: 0 };
 
   // 1. 日摘要
@@ -95,9 +99,19 @@ export async function runAging(opts: AgingOptions): Promise<AgingReport> {
     try {
       const rows = store.messagesBetween(day.scope, day.period_start, day.period_end);
       const lines = rows.map((r) => formatMessage({ ...r, text: withoutImagePaths(r.text), detail: r.detail ? withoutImagePaths(r.detail) : r.detail }, { now: day.period_start }));
-      const input = `会话：${day.scope}\n日期：${md(day.period_start)}\n\n${joinCapped(lines, INPUT_MAX_CHARS, "last")}`;
-      const text = await summarize(opts, DAY_SUMMARY_PROMPT, input);
-      store.writeSummary({ scope: day.scope, level: "day", period_start: day.period_start, period_end: day.period_end, text, msg_count: rows.length });
+      const body = joinCapped(lines, INPUT_MAX_CHARS, "last");
+      const input = `会话：${day.scope}\n日期：${md(day.period_start)}\n\n${body}`;
+      const result = await summarize(opts, DAY_SUMMARY_PROMPT, input);
+      // 从实际保留的尾部逐行匹配，重复文本仍保留各自的消息 ID。
+      const input_message_ids: string[] = [];
+      let end = body.length;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (body.slice(end - lines[i].length, end) !== lines[i]) break;
+        input_message_ids.unshift(rows[i].message_id); end -= lines[i].length + 1;
+      }
+      const written = store.writeSummary({ scope: day.scope, level: "day", period_start: day.period_start,
+        period_end: day.period_end, text: result.text, msg_count: rows.length });
+      instrumentation?.recordSummaryVersion(written, { ...result, batch_id, input_message_ids, input_chars: input.length });
       report.day_summaries++;
     } catch (err) {
       report.failed++;
@@ -110,15 +124,18 @@ export async function runAging(opts: AgingOptions): Promise<AgingReport> {
   for (const week of store.foldableWeeks(nowSec)) {
     if (stillPending.some((p) => p.scope === week.scope && p.period_start >= week.period_start && p.period_start < week.period_end)) continue;
     try {
-      const text =
-        week.days.length === 1
-          ? week.days[0]!.text
-          : await summarize(
-              opts,
-              WEEK_SUMMARY_PROMPT,
-              `会话：${week.scope}\n\n${week.days.map((d: SummaryRow) => formatSummary(d)).join("\n")}`,
-            );
-      store.replaceWithWeek(week, text);
+      const input = `会话：${week.scope}\n\n${week.days.map((d: SummaryRow) => formatSummary(d)).join("\n")}`;
+      // 只有一条日摘要时沿用原文，没有调用模型，不虚构模型与 usage。
+      const result = week.days.length === 1 ? { text: week.days[0]!.text } : await summarize(opts, WEEK_SUMMARY_PROMPT, input);
+      const source: SummarySource = { ...result, batch_id, input_summary_ids: week.days.map(d => d.id),
+        input_chars: week.days.length === 1 ? 0 : input.length };
+      const fold = () => {
+        const replaced = week.days.map(d => instrumentation?.snapshotReplaced(d, { batch_id }))
+          .filter((id): id is number => id !== undefined);
+        const written = store.replaceWithWeek(week, result.text);
+        instrumentation?.recordSummaryVersion(written, source, replaced);
+      };
+      if (instrumentation) instrumentation.transaction(fold); else fold();
       report.week_summaries++;
     } catch (err) {
       report.failed++;
