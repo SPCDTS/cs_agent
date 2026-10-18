@@ -163,7 +163,8 @@ blockquote.said{margin:0;padding:var(--s4) var(--s5);background:var(--sheet);bor
 .phase .pulse{width:8px;height:8px;border-radius:50%;background:var(--carbon);animation:pulse 1.6s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.25}}
 ol.feed{list-style:none;margin:var(--s3) 0 0;padding:var(--s2) 0 0;border-top:1px dashed var(--rule-strong);font-size:var(--t-xs);max-height:240px;overflow:auto}
-.feed li{display:grid;grid-template-columns:4.5em minmax(0,1fr);gap:var(--s2);padding:2px 0;color:var(--ink-2)}
+.feed li{display:grid;grid-template-columns:6em minmax(0,1fr);gap:var(--s2);padding:2px 0;color:var(--ink-2)}
+.feed li>.faint{white-space:nowrap;font-variant-numeric:tabular-nums}
 .feed li b{font-weight:600;color:var(--ink)}
 .feed li.failed b{color:var(--fail)}
 .feed li.started b{font-weight:400;color:var(--carbon)}
