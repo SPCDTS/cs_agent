@@ -40,6 +40,7 @@ export function createPiExtension(opts: PiToolsOptions) {
     if (started.size >= 2048) started.delete(started.keys().next().value!);
     started.set(id, Date.now());
   };
+  const recall = recallTool(opts.mediaRecall);
   const image = imageTool(opts.dataDir, opts.imageBackend, opts.getHarness, opts.store);
   const web = opts.web ?? new DeepSeekWeb();
   const prompt = new PiPromptLoader(opts.dataDir);
@@ -106,14 +107,14 @@ export function createPiExtension(opts: PiToolsOptions) {
         const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);
         if (bound?.ticket) trace.event(bound.ticket, "tool:" + call.name, { status: result.isError ? "failed" : "ok",
           durationMs: started.has(api.taskId) ? Date.now() - started.get(api.taskId)! : undefined,
-          detail: { backend: "pi", failure: result.isError ? failures.get(api.taskId) ?? diagnosticFailure(result, call.name === "generate_image" ? "comfy" : call.name.startsWith("qq_") ? "qq_context" : "deepseek") : undefined, output: result, error: result.isError ? result.output?.map(c => c.type === "text" ? c.text : "").join("\n") : undefined } });
+          detail: { backend: "pi", failure: result.isError ? failures.get(api.taskId) ?? diagnosticFailure(result, call.name === "generate_image" ? "comfy" : call.name === "qq_image" ? "media_recall" : call.name.startsWith("qq_") ? "qq_context" : "deepseek") : undefined, output: result, error: result.isError ? result.output?.map(c => c.type === "text" ? c.text : "").join("\n") : undefined } });
         failures.delete(api.taskId);
         started.delete(api.taskId);
         return undefined;
       } }),
     ],
     tools: [
-      recallTool(opts.mediaRecall),
+      defineTool({ ...recall, execute: (args, api, context) => boundary(api.taskId,"media_recall",async () => recall.execute(args,api,context)) }),
       defineTool({ name: "web_search", description: "搜索事实资料，返回标题、日期、摘要与来源链接。", replay: "safe",
         parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 128 }), count: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })) }, { additionalProperties: false }),
         execute: async (args, api, context) => boundary(api.taskId,"deepseek",async () => output(await web.search(args.query, args.count, context.abortSignal))),

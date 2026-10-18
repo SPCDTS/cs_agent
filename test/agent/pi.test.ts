@@ -44,7 +44,7 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall"> } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   const contextUsage = new ContextUsageStore(dir);
   cleanup.push(() => contextUsage.close());
@@ -65,7 +65,7 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
   const pi = await PiBackend.open({ dataDir: dir, models, model: { provider: model.provider, modelId: model.id },
-    mediaRecall: opts.mediaRecall,
+    mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
     thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
     ...(opts.disk ? {} : { storage: new MemoryStorage() }),
@@ -89,6 +89,26 @@ describe("pi durable backend", () => {
     expect(returned.every(m => m.role === "toolResult" && m.content.every(c => c.type === "text"))).toBe(true);
     expect(results(seen!)).toContain("没有记录");
   });
+  it("召回配置额度不占历史桶，失败归入媒体召回而非历史或模型服务", async () => {
+    const events: import("../../src/obs/trace.js").LiveEvent[] = [];
+    const untap = trace.tap(e => { if (e.ticket === "recall-failure") events.push(e); });
+    const recall = vi.fn(async () => { throw Object.assign(new Error("fixture authentication"), { status: 401 }); });
+    const s = await setup([...Array.from({ length: 3 }, () => call("qq_image", { message_id: "123" })),
+      ...Array.from({ length: 5 }, () => call("qq_recent")), reply()],
+      { mediaRecall: { recall }, mediaRecallMaxPerTicket: 2 });
+    try {
+      await s.pi.handle(request("recall-failure"), handleContext());
+      expect(recall).toHaveBeenCalledTimes(2);
+      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+      const doc = await s.pi.harness.snapshot(PiRequestDoc, id, context);
+      expect(Object.values(doc!.calls).filter(c => c.kind === "qq_image")).toHaveLength(2);
+      expect(Object.values(doc!.calls).filter(c => c.kind === "history")).toHaveLength(4);
+      const failed = events.filter(e => e.stage === "tool:qq_image" && e.detail.failure);
+      expect(failed).toHaveLength(2);
+      expect(failed[0]!.detail.failure).toMatchObject({ provider: "media_recall", kind: "auth", status: 401 });
+    } finally { untap(); }
+  });
+
   it("calls web_search through the faux model, then returns the final answer and source header", async () => {
     let seen: TranscriptContext | undefined;
     const s = await setup([call("web_search", { query: "CS2", count: 3 }), ctx => { seen = ctx; return reply("查到了"); }]);
