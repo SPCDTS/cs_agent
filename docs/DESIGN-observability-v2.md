@@ -1,6 +1,6 @@
 # 观测面板 v2 设计：Agent → 会话 → 回合，上下文结构分析，记忆可视化
 
-状态：待用户确认（2026-10-18）。调研依据见 `docs/research/observability-viewer-research.md`。本设计一经确认即为约束性文档；实现分组见 §7，验收记录追加到 §9。
+状态：已确认（2026-10-18，用户拍板 §8 三项决策）。调研依据见 `docs/research/observability-viewer-research.md`。本设计一经确认即为约束性文档；实现分组见 §7，验收记录追加到 §9。
 
 ## 0. 目标与非目标
 
@@ -122,10 +122,10 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 
 顺序：O1 → O2 与 O3 并行 → O4 → O5 → O6。每组独立评审（Codex astra 对抗评审）、独立部署、§9 记录。旧的 `/context`（聊天记录浏览）并入 `/memory/scopes/:scope`，旧 `/codex`、`/pi` 页并入 `/agents/*`，迁移完成前保留旧路由跳转。
 
-## 8. 待用户确认的决策
-1. 是否开启 codex 官方 trace（`CODEX_ROLLOUT_TRACE_ROOT`）以获得新回合的精确请求负载（磁盘增长可控，默认保留 14 天）。建议开启。
-2. 记忆埋点保留期默认 90 天是否合适。
-3. O6 图片画廊是否等 `feat/image-recall` 合入后再做（建议是）。
+## 8. 已确认的决策（2026-10-18）
+1. **开启** codex 官方 trace（`CODEX_ROLLOUT_TRACE_ROOT`），新回合保存精确请求负载，默认保留 14 天；分析页优先使用并标"已记录"。
+2. 记忆埋点（`summary_versions`、`recall_events`）保留期默认 **90 天**。
+3. O6 图片画廊**等 `feat/image-recall` 合入后再做**（已于 707538a 合入，O6 在 O5 之后接入）。
 
 ## 9. 验收记录
 （实现后追加）
