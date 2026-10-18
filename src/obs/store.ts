@@ -6,12 +6,14 @@ import { redact, redactText } from './redact.js';
 export interface ObsEvent { id: number; ticket: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail_json: string }
 export interface TicketRow { ticket: string; scope: string; ts: number; updated: number; route: string | null; backend: string | null; status: string; sender: string | null; duration_ms: number }
 export interface ThreadTurn { ticket: string; ts: number; started: number; text: string; reply: string; status: string; duration_ms: number; tools: number; input_tokens: number; output_tokens: number }
+/** 管理事件独立按年龄保留，不参与普通票据预算。 */
+const ADMIN_EVENT_SQL = "(ticket LIKE '@%' OR stage IN ('settings_changed','prompt_changed','thread_reset'))";
 export class ObsStore {
   private database?: DatabaseSync;
   degraded = false;
   get db(): DatabaseSync { if (!this.database) throw new Error('观测存储已降级'); return this.database; }
   degrade(): void { this.degraded = true; try { this.database?.close(); } catch { /* 尽力关闭 */ } this.database = undefined; }
-  constructor(dataDir: string, readonly eventCap = 500) {
+  constructor(dataDir: string, readonly eventCap = 500, readonly adminRetentionDays = 365) {
     try {
       mkdirSync(dataDir, { recursive: true });
       this.database = new DatabaseSync(path.join(dataDir, 'observability.sqlite'));
@@ -32,6 +34,12 @@ export class ObsStore {
     if (this.degraded) return;
     let detail_json = JSON.stringify(redact(e.detail ?? {}));
     const scope = e.scope || (this.db.prepare('SELECT scope FROM events WHERE ticket=? AND scope<>? LIMIT 1').get(e.ticket, '') as { scope: string } | undefined)?.scope || '';
+    const admin = e.ticket.startsWith('@') || ['settings_changed','prompt_changed','thread_reset'].includes(e.stage);
+    if (admin) {
+      const id = Number(this.db.prepare('INSERT INTO events(ticket,scope,ts,stage,status,duration_ms,detail_json) VALUES(?,?,?,?,?,?,?)')
+        .run(e.ticket, scope, e.ts, e.stage, e.status, e.duration_ms, detail_json).lastInsertRowid);
+      return { id, ticket: e.ticket, scope, ts: e.ts, stage: e.stage, status: e.status, duration_ms: e.duration_ms, detail_json };
+    }
     const terminal = ['reply_sent','failed','fallback'].includes(e.stage) && (e.detail as { terminal?: boolean } | undefined)?.terminal === true;
     // 三种终态各预留一行与 1 KiB，摘要另预留一行；重复终态更新对应行。
     if (terminal) detail_json = JSON.stringify({ ...JSON.parse(detail_json), terminal: true });
@@ -48,7 +56,7 @@ export class ObsStore {
         const last = progress[progress.length-1]!;
         const count = Number(JSON.parse(last.detail_json).count ?? 2) + 1;
         detail_json = JSON.stringify({...detail,count});
-        const used = (this.db.prepare('SELECT SUM(length(CAST(detail_json AS BLOB))) bytes FROM events WHERE ticket=?').get(e.ticket) as {bytes:number}).bytes;
+        const used = (this.db.prepare(`SELECT SUM(length(CAST(detail_json AS BLOB))) bytes FROM events WHERE ticket=? AND NOT ${ADMIN_EVENT_SQL}`).get(e.ticket) as {bytes:number}).bytes;
         const remaining = 256*1024-4096-used+Buffer.byteLength(last.detail_json);
         if (Buffer.byteLength(detail_json) > remaining) {
           // 预算不足时保留末条的时间、计数及有界摘要，首条仍保留原输入。
@@ -59,7 +67,7 @@ export class ObsStore {
         return { ...e, scope, id:last.id, detail_json };
       }
     }
-    const budget = this.db.prepare('SELECT COUNT(*) n, COALESCE(SUM(length(CAST(detail_json AS BLOB))),0) bytes FROM events WHERE ticket=?').get(e.ticket) as {n:number;bytes:number};
+    const budget = this.db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(length(CAST(detail_json AS BLOB))),0) bytes FROM events WHERE ticket=? AND NOT ${ADMIN_EVENT_SQL}`).get(e.ticket) as {n:number;bytes:number};
     if (!terminal && (budget.n >= Math.max(8,this.eventCap)-4 || budget.bytes+Buffer.byteLength(detail_json) > 256*1024-4096)) {
       const summary = this.db.prepare("SELECT id,detail_json FROM events WHERE ticket=? AND stage='events_dropped'").get(e.ticket) as {id:number;detail_json:string} | undefined;
       const dropped = Number(summary ? JSON.parse(summary.detail_json).dropped : 0)+1;
@@ -140,7 +148,7 @@ export class ObsStore {
   purge(days: number, now = Date.now()): { events: number; metrics: number } {
     if (this.degraded) return { events: 0, metrics: 0 };
     const cutoff = now - days * 86400_000;
-    return { events: Number(this.db.prepare('DELETE FROM events WHERE ts<?').run(cutoff).changes),
+    return { events: Number(this.db.prepare(`DELETE FROM events WHERE (NOT ${ADMIN_EVENT_SQL} AND ts<?) OR (${ADMIN_EVENT_SQL} AND ts<?)`).run(cutoff, now - this.adminRetentionDays * 86400_000).changes),
       metrics: Number(this.db.prepare('DELETE FROM metrics WHERE ts<?').run(cutoff).changes) };
   }
   close(): void { if (this.database?.isOpen) this.database.close(); }

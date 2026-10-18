@@ -278,11 +278,11 @@ docker compose exec cs-agent cat /data/obs-token
 
 口令文件和原子发布临时文件列入 Codex deny_read；OBS_TOKEN 不进入 Codex 或 MCP 子进程环境白名单。口令无法读取或生成时面板拒绝访问，业务继续运行，健康探针显示 degraded: true。
 
-事件和指标存 DATA_DIR/observability.sqlite（WAL）。默认 OBS_RETENTION_DAYS=30，启动后第一次指标刷新及之后每天清理过期 events / metrics；关闭时刷新最后窗口。备份需使用 SQLite 一致性备份或包含 WAL。日志环形缓冲不落盘，重启会清空；原有 stderr 日志仍可由 Docker 采集。
+事件和指标存 DATA_DIR/observability.sqlite（WAL）。普通事件与指标默认 OBS_RETENTION_DAYS=30，管理事件默认 OBS_ADMIN_RETENTION_DAYS=365；启动后第一次指标刷新及之后每天按各自年龄清理过期 events / metrics；关闭时刷新最后窗口。备份需使用 SQLite 一致性备份或包含 WAL。日志环形缓冲不落盘，重启会清空；原有 stderr 日志仍可由 Docker 采集。
 
 观测库损坏、路径不可写或 schema / Metrics 初始化失败时，观测降级为无操作存储；/healthz 与面板总览显示 degraded: true，消息处理继续运行。修复观测文件权限或隔离损坏文件后，在计划维护时重新启动进程以恢复采集；不要据空图表判断没有业务流量。此降级只覆盖观测子系统，业务数据库仍需正常工作。
 
-每张票据默认最多 500 条事件，由 OBS_TICKET_EVENT_CAP 配置（8–10000）；detail 总量最多 256 KiB。普通事件为三种 terminal=true 终态（reply_sent / failed / fallback）及 events_dropped 摘要预留槽位和字节，终态单条 detail 最多 1 KiB；重复终态保留最新一条。摘要的 dropped 给出被预算拒绝的事件数。相同 Codex 工具调用的进度保留首条和末条，末条 count 为累计进度数。详情按 after=id&limit 游标分页（页面默认 100、最多 200）。Codex 内置命令与搜索每轮合计最多 100 条，只保存命令或搜索词前 200 字、退出码与耗时，不保存原始 JSONL。
+普通票据默认最多 500 条事件，由 OBS_TICKET_EVENT_CAP 配置（8–10000）；detail 总量最多 256 KiB。普通事件为三种 terminal=true 终态（reply_sent / failed / fallback）及 events_dropped 摘要预留槽位和字节，终态单条 detail 最多 1 KiB；重复终态保留最新一条。摘要的 dropped 给出被预算拒绝的事件数。相同 Codex 工具调用的进度保留首条和末条，末条 count 为累计进度数。详情按 after=id&limit 游标分页（页面默认 100、最多 200）。Codex 内置命令与搜索每轮合计最多 100 条，只保存命令或搜索词前 200 字、退出码与耗时，不保存原始 JSONL。
 
 image_gen MCP 不打开观测库，只向本票据 obs-events.jsonl 追加经 schema 校验的事件（每个文件最多 200 行 / 256 KiB）。主进程在 lateImages 和终态回收时领取文件，逐行校验、用主进程秘密注册表脱敏后入库并删除；超大文件直接忽略并删除，非法行忽略。旁路文件仅为尽力观测，不参与业务恢复判定。
 
@@ -302,3 +302,10 @@ ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUs
 面板修改后端、Codex 推理强度或回复模式后，仅新派发的消息采用新值。Dispatcher 在等待附件准备和 scope 队列之前读取一次设置，将 `{backend, codexReasoningEffort, codexReplyMode}` 与票据一起写入 `TicketDoc.settings`。执行、relay/direct 后处理、机器人历史行和崩溃恢复都使用此快照；例如进行中的 high/relay 票据不会因面板改成 low/direct 而改变。
 
 升级前没有快照的存量票据无法还原历史设置：恢复时一次性写入固定 high/relay，后端优先采用已有结果中的 pi，否则 codex；后续重试沿用。没有 TicketDoc 的孤儿票据重新派发时才采样当前设置。
+
+
+### 管理事件保留期
+
+`settings_changed`、`prompt_changed`、`thread_reset`，以及任何 ticket 以 `@` 开头的事件，都归入管理审计类别。不受单票据事件数量或累计 detail 字节预算限制，不合并进度、不覆盖终态，也不消耗同名普通票据的预算；仍按原有规则脱敏。管理事件仅由年龄清理，默认保留 365 天（`OBS_ADMIN_RETENTION_DAYS`），面板查询接口与分页上限不变。
+
+新增的 `PI_ARCHIVE_RETENTION_DAYS=90` 表示 pi 退休会话的目标保留期；当前安装的 pi-durable 1.3.0 没有删除会话 API，此项暂不触发数据库清理。两项配置均须为正整数。

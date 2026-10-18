@@ -78,7 +78,7 @@ async function main(): Promise<void> {
 
   // 统一上下文消息库（${DATA_DIR}/qq-messages.sqlite）：意图层与 codex 的 qq_context MCP 共用
   const store = new ContextStore(cfg.DATA_DIR);
-  const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP);
+  const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP, cfg.OBS_ADMIN_RETENTION_DAYS);
   trace.attach(obs);
   // 进行中会话的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）
   const live = new LiveBus(trace);

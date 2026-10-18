@@ -76,6 +76,7 @@ const EnvSchema = z.object({
   /** 按 scope 覆盖后端：group:<群号>=pi,private:<QQ号>=codex */
   AGENT_BACKEND_OVERRIDES: z.string().default(""),
   PI_TURN_TIMEOUT_SEC: int(300),
+  PI_ARCHIVE_RETENTION_DAYS: int(90),
   PI_COMPACTION_RESERVE_TOKENS: int(DEFAULT_COMPACTION_POLICY.reserveTokens),
   PI_COMPACTION_BACKGROUND_TOKENS: z.coerce.number().int().min(0).default(DEFAULT_COMPACTION_POLICY.backgroundTokens),
 
@@ -105,6 +106,7 @@ const EnvSchema = z.object({
   WORKSPACE_DIR: z.string().default("/workspace"),
   OBS_TICKET_EVENT_CAP: z.coerce.number().int().min(8).max(10000).default(500),
   OBS_RETENTION_DAYS: int(30),
+  OBS_ADMIN_RETENTION_DAYS: int(365),
   OBS_TOKEN: z.string().default(""),
   ALERT_OWNER: bool(false),
   DEEPSEEK_PRICE_IN_PER_M: z.coerce.number().finite().nonnegative().default(0),
