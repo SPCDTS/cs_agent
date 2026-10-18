@@ -357,7 +357,7 @@ ol.msgs{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;ga
 .levels{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:var(--s2) var(--s3);align-items:baseline;margin-bottom:var(--s5);font-size:var(--t-sm)}
 .levels .hint{grid-column:1/-1;margin:0}
 .lv{display:inline-block;padding:0 8px;border-radius:var(--r-sm);font-size:var(--t-xs);font-weight:700;border:1.5px solid currentColor;white-space:nowrap}
-.lv-1{color:var(--carbon)} .lv-2{color:var(--ok)} .lv-3{color:var(--ink-3);border-style:dashed}
+.lv-1{color:var(--carbon)} .lv-2{color:var(--ok)} .lv-3{color:var(--queued)}
 ol.hits{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s2)}
 .hit-head{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s3);align-items:baseline;font-size:var(--t-sm)}
 .hit-head .mono{margin-left:auto}
@@ -368,8 +368,21 @@ mark{background:var(--warn-soft);color:inherit;border-bottom:2px solid var(--war
 .tool-text{max-height:640px}
 .search-cols>section{margin-top:0}
 .flash.warn{border-color:var(--warn);background:var(--warn-soft)}
+/* ── 召回记录（设计 §5.3）：三级证据面板沿用 lv-1/2/3 的颜色 ── */
+.rc-filter input{min-width:0}
+.rc-be.rc-codex{border-color:var(--carbon);color:var(--carbon)} .rc-be.rc-pi{border-color:var(--queued);color:var(--queued)}
+.rc-args code{display:inline-block;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+.rc-gauge{display:inline-flex;align-items:center;gap:var(--s1)}
+.rc-gauge meter{width:64px;height:10px}
+tr.rc-err td{background:var(--fail-soft)}
+.rc-caveat{margin-top:var(--s4)}
+.ev-cols>section{margin-top:0}
+.ev-panel{border-left:3px solid var(--rule-strong);padding-left:var(--s3)}
+.ev-1{border-left-color:var(--carbon)} .ev-2{border-left-color:var(--ok)} .ev-3{border-left-color:var(--queued)}
+.ev-panel.sheet{border-left-width:3px}
 ol.lin-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:var(--s2)}
 .lin-ids{margin:var(--s1) 0 0;overflow-wrap:anywhere;max-height:240px;overflow:auto}
+.turn-recalls .rc-args code{max-width:40ch}
 @media (max-width:900px){
   .turns-layout{grid-template-columns:minmax(0,1fr)}
   .tdir{position:static;max-height:280px}

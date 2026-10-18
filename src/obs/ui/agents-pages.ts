@@ -99,8 +99,11 @@ function dirItem(c: SessionCtx, t: ObservedTurn, n: number): string {
 export function turnSection(c: SessionCtx, t: ObservedTurn, n: number, blocks: Block[] | undefined, open: boolean): string {
   const facts = blocks ? turnFacts(blocks) : undefined;
   return `<details class="turn sheet" id="t-${n}" data-turn="${esc(t.turn)}"${open ? ' open' : ''}><summary class="turn-head"><span class="th-status">${turnStamp(t.status)}</span><span class="th-preview">${esc(t.preview || '（无预览）')}</span><span class="tm">${turnMeta(c, t, facts)}${qqLine(t)}</span></summary>
-<div class="turn-bar"><a href="${turnHref(c, t.turn)}">回合详情</a>${contextLinks(c, t.turn)}</div><div class="turn-body"${blocks ? '' : ' data-lazy="1"'}>${blocks ? blocksHtml(blocks) || '<p class="faint placeholder">这个回合还没有正文块。</p>' : '<p class="faint placeholder">展开后读取正文…</p>'}</div></details>`;
+<div class="turn-bar"><a href="${turnHref(c, t.turn)}">回合详情</a><a href="${turnRecallsHref(c, t.turn)}">记忆调用</a>${contextLinks(c, t.turn)}</div><div class="turn-body"${blocks ? '' : ' data-lazy="1"'}>${blocks ? blocksHtml(blocks) || '<p class="faint placeholder">这个回合还没有正文块。</p>' : '<p class="faint placeholder">展开后读取正文…</p>'}</div></details>`;
 }
+
+/** 该回合的召回记录列表（召回页按 session + turn 时间窗筛选）。 */
+export const turnRecallsHref = (c: SessionCtx, turn: string) => `/memory/recalls?${esc(new URLSearchParams({ backend: c.backend, session: c.session, turn }).toString())}`;
 
 export interface SessionPageInput {
   ctx: SessionCtx; session: SessionRef; turns: ObservedTurn[]; page: number;
@@ -126,11 +129,13 @@ ${s.scope ? `<div class="mt">${contextBar(ctx.backend, s.scope, i.usage, { label
 
 /* ───────── /agents/:backend/sessions/:id/turns/:turn ───────── */
 
-export function turnPageBody(ctx: SessionCtx, s: SessionRef, t: ObservedTurn, blocks: Block[], neighbors: { newer?: string; older?: string }): string {
+/** memory：回合内"记忆调用"段（http.ts 取召回接口后渲染；接口出错时为一行提示，不影响回合页）。 */
+export function turnPageBody(ctx: SessionCtx, s: SessionRef, t: ObservedTurn, blocks: Block[], neighbors: { newer?: string; older?: string }, memory = ''): string {
   const facts = turnFacts(blocks);
   let out = crumbs([['Agent', '/agents'], [BACKENDS[ctx.backend] ?? ctx.backend, sessionsHref(ctx.backend)], [s.label && s.label !== s.id ? s.label : sessionScope(ctx.backend, s.scope), sessionHref(ctx.backend, s.id)], ['回合']]);
   out += `<div class="sheet pad turn-detail-head"><div class="slip-top">${turnStamp(t.status)}<span class="mono faint">${esc(t.turn)}</span></div><div class="tm mt">${turnMeta(ctx, t, facts)}${qqLine(t)}</div>
 <p class="mt">${contextLinks(ctx, t.turn)}</p><p class="hint">${facts.requests} 次模型请求，${t.tools} 次工具调用。上下文占用取最后一次请求的实测输入；"回合累计"是本回合全部请求之和。</p></div>`;
+  out += memory;
   out += `<section><h2>正文 <small>${blocks.length} 个块</small></h2><div class="turn-body full">${blocksHtml(blocks) || empty('这个回合还没有正文块。')}</div></section>`;
   out += `<p class="hint mt">${neighbors.newer ? `<a href="${turnHref(ctx, neighbors.newer)}">较新的回合</a>　` : ''}<a href="${sessionHref(ctx.backend, s.id)}">返回会话</a>${neighbors.older ? `　<a href="${turnHref(ctx, neighbors.older)}">较早的回合</a>` : ''}</p>`;
   return out;

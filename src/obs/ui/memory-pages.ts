@@ -21,6 +21,8 @@ export interface SummaryDetail {
   created_at: number; text: string; surviving_raw: number; deleted?: true;
   lineage: null | { versions: SummaryVersion[]; replaced: SummaryVersion[] };
 }
+/** 首页召回卡：最近 24 小时的事件数（一页 50 条，has_more 时显示 50+）；null 表示读取失败。 */
+export interface RecallCount { count: number; more: boolean }
 export interface SearchResult { hits: Hit[]; tool_text: string; tool_text_chars: number; max_chars: number; dropped: number }
 export interface ArchivesResult { codex: ArchiveRow[]; pi: ArchiveRow[]; compactions: CompactionRow[] }
 
@@ -66,7 +68,7 @@ ${kv([
   ], 'meta')}</section>`;
 }
 
-export function memoryHomeBody(o: MemoryOverview, now: number): string {
+export function memoryHomeBody(o: MemoryOverview, now: number, recalls?: RecallCount | null): string {
   let out = agingCard(o, now);
   out += `<section><h2>会话域 <small>${o.scopes.length ? `${o.scopes.length} 个，按 scope 排序` : ''}</small></h2>`;
   out += o.scopes.length ? `<div class="sheet"><div class="wrap"><table class="list mem-scopes"><thead><tr><th>会话域</th><th class="num">消息</th><th class="num">日 / 周摘要</th><th class="num">待整理日</th><th class="num hide-sm">媒体</th><th class="hide-sm">时间范围</th><th class="num hide-sm">体量</th><th>时间线</th></tr></thead><tbody>${o.scopes.map(s => `<tr>
@@ -80,7 +82,7 @@ export function memoryHomeBody(o: MemoryOverview, now: number): string {
 <a class="sheet pad tool-link" href="/memory/search"><b>检索检查器</b><small>检索命中 → 工具实际返回的对照</small></a>
 <a class="sheet pad tool-link" href="/memory/archives"><b>线程归档</b><small>Codex / Pi 归档线程与 Pi 压缩记录</small></a>
 <a class="sheet pad tool-link" href="/context"><b>上下文检索（旧）</b><small>qq_context 工具原样输出</small></a>
-<div class="sheet pad tool-link off"><b>召回记录</b><small>待 O5：工具调用写入召回事件后启用</small></div>
+<a class="sheet pad tool-link" href="/memory/recalls"><b>召回记录</b><small>${recalls ? `最近 24 小时 ${fmtInt(recalls.count)}${recalls.more ? '+' : ''} 次工具召回` : recalls === null ? '最近 24 小时的数量暂不可用' : 'qq_recent / qq_search / qq_message 每次调用与三级证据'}</small></a>
 <div class="sheet pad tool-link off"><b>图片记忆</b><small>待 O6：图片入库落地后启用</small></div></div></section>`;
   return out;
 }
@@ -238,14 +240,20 @@ export function searchForm(f: SearchForm, scopes: ScopeSummary[]): string {
 <label>关键词<input name="q" value="${esc(f.q)}" placeholder="关键词，空格分隔多个词（须同时出现）" maxlength="100" required></label><label>天数<input name="days" type="number" min="1" max="180" placeholder="30" value="${esc(f.days)}"></label><label>条数<input name="limit" type="number" min="1" max="20" placeholder="10" value="${esc(f.limit)}"></label><button>检索</button></form>`;
 }
 
-export const LEVELS_NOTE = `<div class="levels sheet pad"><span class="lv lv-1">① 检索命中</span>数据库按关键词返回的记录（时间新到旧，无相关性分数）
+/** 第三级只对真实调用成立：检查器给出指向召回记录的链接（所选 scope 的 qq_search 调用）。 */
+export const levelsNote = (scope: string) => {
+  const p = new URLSearchParams();
+  if (scope) p.set('scope', scope);
+  p.set('tool', 'qq_search');
+  return `<div class="levels sheet pad"><span class="lv lv-1">① 检索命中</span>数据库按关键词返回的记录（时间新到旧，无相关性分数）
 <span class="lv lv-2">② 工具实际返回</span>经同一 formatter 与 QQ_CONTEXT_MAX_CHARS 字数上限裁剪后，qq_search 工具交给模型的文本
-<span class="lv lv-3">③ 进入模型请求</span><span class="faint">待 O5：需要召回事件埋点，才能确认某次回合的请求里确实出现过</span>
+<span class="lv lv-3">③ 进入模型请求</span><span>只对某次真实调用成立，检查器里的检索不产生第三级证据。<a href="/memory/recalls?${esc(p.toString())}">在召回记录中查看该 scope 的历史调用</a></span>
 <p class="hint mt">面板以管理员视角检索（全部或所选会话域），不代表某次对话的 QQ_ACCESS；这是当前数据库的对照，不证明历史上某次调用发生过，也不代表模型采用了这些内容。</p></div>`;
+};
 
 export function searchPageBody(f: SearchForm, scopes: ScopeSummary[], result?: SearchResult | { error: string }): string {
   let out = crumbs([['记忆', '/memory'], ['检索检查器']]) + searchForm(f, scopes);
-  out += LEVELS_NOTE;
+  out += levelsNote(f.scope);
   if (!result) return out;
   if ('error' in result) return out + `<div class="flash err" role="alert">${esc(result.error)}</div>`;
   const terms = searchTerms(f.q), r = result;

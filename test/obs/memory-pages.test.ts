@@ -89,7 +89,8 @@ describe('记忆页面', () => {
     expect(row).toContain('<td class="num">5</td>'); // 消息
     expect(row).toContain('<td class="num">1 / 1</td>'); // 日 / 周摘要
     for (const href of ['/memory/search', '/memory/archives', '/context']) expect(html).toContain(`href="${href}"`);
-    expect(html).toContain('待 O5'); expect(html).toContain('待 O6');
+    expect(html).toContain('<a class="sheet pad tool-link" href="/memory/recalls"><b>召回记录</b><small>最近 24 小时 0 次工具召回</small></a>');
+    expect(html).not.toContain('待 O5'); expect(html).toContain('待 O6');
   });
 
   it('补跑标记与未接入调度器', async () => {
@@ -99,7 +100,7 @@ describe('记忆页面', () => {
     expect(html).toContain('需要补跑'); expect(html).toContain('距上次成功运行已超过 24 小时'); expect(html).toContain('空闲');
   });
 
-  it('导航：/memory/* 与 /context 都高亮"记忆"；O5 / O6 占位；未知子路由 404', async () => {
+  it('导航：/memory/* 与 /context 都高亮"记忆"；O6 占位；未知子路由 404', async () => {
     const r = await rig();
     for (const url of ['/memory/scopes/group%3A123', '/memory/search', '/memory/archives', '/memory/recalls', '/memory/images', '/context']) {
       const { res, html } = await r.page(url);
@@ -107,9 +108,9 @@ describe('记忆页面', () => {
       expect(html, url).toContain('href="/memory" aria-current="page"');
       expect(html, url).not.toContain('href="/agents" aria-current');
     }
-    expect((await r.page('/memory/recalls')).html).toContain('召回记录：待 O5');
+    expect((await r.page('/memory/recalls')).html).toContain('还没有召回记录。模型调用 qq_recent / qq_search / qq_message');
     expect((await r.page('/memory/images')).html).toContain('图片记忆：待 O6');
-    for (const url of ['/memory/nope', '/memory/scopes', '/memory/scopes/', '/memory/scopes/group%3A123/extra', '/memory/summaries/', '/memory/scopes/%E0%A4%A'])
+    for (const url of ['/memory/nope', '/memory/recalls/abc', '/memory/recalls/1/x', '/memory/recalls/999', '/memory/scopes', '/memory/scopes/', '/memory/scopes/group%3A123/extra', '/memory/summaries/', '/memory/scopes/%E0%A4%A'])
       expect((await r.page(url)).res.status, url).toBe(404);
     // /context 链到所选会话域的时间线
     expect((await r.page('/context?scope=group%3A123')).html).toContain('href="/memory/scopes/group%3A123"');
@@ -200,7 +201,8 @@ describe('记忆页面', () => {
     expect(empty.html).toContain('<option value="group:123">群 123</option>');
     expect(empty.html).toContain('&lt;img src=x onerror=alert(1)&gt;</option>');
     expect(empty.html).not.toContain('class="hits"'); expect(empty.html).not.toContain('class="sheet pad tool-panel"');
-    expect(empty.html).toContain('③ 进入模型请求'); expect(empty.html).toContain('待 O5');
+    expect(empty.html).toContain('③ 进入模型请求'); expect(empty.html).not.toContain('待 O5');
+    expect(empty.html).toContain('<a href="/memory/recalls?tool=qq_search">在召回记录中查看该 scope 的历史调用</a>');
     expect((await r.page('/memory/search?q=%20%20')).html).not.toContain('class="sheet pad tool-panel"');
 
     const { res, html } = await r.page('/memory/search?q=script&scope=group%3A123&days=30&limit=10');

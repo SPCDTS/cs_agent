@@ -151,7 +151,7 @@ function newTurn(t,open){
   st.append(turnStamp(t.status||'running'));pv.dataset.live='1';
   tm.append(el('span','tm-time',fmtTime(t.started||Date.now())),el('span','tm-model'),el('span','tm-ctx'));s.append(st,pv,tm);
   const bar=el('div','turn-bar'),links=el('span','tm-links');links.append(link(ctxHref('before'),'分析此回合前的上下文'),link(ctxHref('after'),'分析此回合后的上下文'));
-  bar.append(link(turnHref,'回合详情'),links);
+  bar.append(link(turnHref,'回合详情'),link('/memory/recalls?backend='+enc(DATA.backend||'')+'&session='+enc(DATA.session||'')+'&turn='+enc(id),'记忆调用'),links);
   const body=el('div','turn-body');body.append(el('p','faint placeholder','等待正文…'));
   d.append(s,bar,body);d.open=!!open;watch(d);
   if(stream)stream.prepend(d);

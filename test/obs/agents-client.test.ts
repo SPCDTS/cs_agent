@@ -197,6 +197,7 @@ describe('agents.js 实时追加', () => {
     expect(dir.children[0]!.dataset.turn).toBe('t9');
     const links = d.querySelectorAll('A').map(a => a.href);
     expect(links).toContain('/agents/codex/sessions/s1/turns/t9');
+    expect(links).toContain('/memory/recalls?backend=codex&session=s1&turn=t9');
     expect(links).toContain('/agents/codex/sessions/s1/context?at=t9&phase=before');
   });
 

@@ -24,7 +24,8 @@ import { REASONING_EFFORTS } from '../agent/codex-runner.js';
 import { ASSETS } from './ui/client.js';
 import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
 import { MESSAGE_PAGE, archivesPageBody, memoryHomeBody, messageWindow, placeholderBody, rangeParams, scopePageBody, searchPageBody, summaryPageBody,
-  type ArchivesResult, type MemoryOverview, type MessagePage, type SearchResult, type SummaryDetail } from './ui/memory-pages.js';
+  type ArchivesResult, type MemoryOverview, type MessagePage, type RecallCount, type SearchResult, type SummaryDetail } from './ui/memory-pages.js';
+import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnRecallSection, type RecallDetail, type RecallList } from './ui/recall-pages.js';
 import type { ScopeTimeline } from './memory/types.js';
 import { contextBar, sortUsage, type ContextUsage, type ContextUsageView } from './ui/context-bar.js';
 import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri } from './ui/html.js';
@@ -634,11 +635,26 @@ export function createDashboard(opts: DashboardOptions) {
     const now = Date.now();
     const overview = async () => { const r = await api('/api/memory'); return r.status === 200 ? r.body as MemoryOverview : null; };
     if (p === '/memory') {
-      const r = await api('/api/memory');
-      const body = r.status === 200 ? memoryHomeBody(r.body as MemoryOverview, now) : `<div class="flash err" role="alert">读取记忆总览失败：${esc(apiError(r))}</div>`;
+      const [r, rc] = await Promise.all([api('/api/memory'), api(`/api/memory/recalls?since=${now - 86400_000}`).catch(() => null)]);
+      // 一次请求只取一页（50 条），超过时显示 50+；读取失败只让卡片退化为纯链接说明。
+      const recalls: RecallCount | null = rc && rc.status === 200 ? { count: (rc.body as RecallList).items.length, more: (rc.body as RecallList).has_more } : null;
+      const body = r.status === 200 ? memoryHomeBody(r.body as MemoryOverview, now, recalls) : `<div class="flash err" role="alert">读取记忆总览失败：${esc(apiError(r))}</div>`;
       return shell('记忆', body, { lead: '聊天记录库的会话域、日 / 周摘要、整理与保留期；从这里进入时间线、检索检查器和线程归档。' });
     }
-    if (p === '/memory/recalls') return shell('召回记录', placeholderBody('召回记录', 'O5'), { lead: '工具召回了哪些记忆、是否进入模型请求（设计 §5.3 第三级证据）。' });
+    if (p === '/memory/recalls') {
+      const f = recallFilters(q);
+      const [scopes, r] = await Promise.all([overview().then(o => o?.scopes ?? []), api(`/api/memory/recalls?${recallQuery(f)}`)]);
+      return shell('召回记录', recallsPageBody(f, scopes, r.status === 200 ? r.body as RecallList : { error: apiError(r) }),
+        { lead: '模型每次调用 qq_recent / qq_search / qq_message 的参数、返回条数与裁剪，最新在上；详情页给出三级证据（设计 §5.3）。' });
+    }
+    if (p.startsWith('/memory/recalls/')) {
+      const key = p.slice('/memory/recalls/'.length);
+      if (!/^\d{1,15}$/.test(key)) return null;
+      const r = await api(`/api/memory/recalls/${key}`);
+      if (r.status === 404 || r.status === 400) return null;
+      if (r.status !== 200) return shell('召回详情', `<div class="flash err" role="alert">读取召回事件失败：${esc(apiError(r))}</div><p class="mt"><a href="/memory/recalls">返回召回记录</a></p>`);
+      return shell(`召回 #${key}`, recallDetailBody(r.body as RecallDetail), { lead: '检索命中 → 工具实际返回 → 该回合内的调用证据，三级分别着色；第三级不等于模型采用了内容。' });
+    }
     if (p === '/memory/images') return shell('图片记忆', placeholderBody('图片记忆', 'O6'), { lead: '已入库图片的画廊（设计 §5.4）。' });
     if (p === '/memory/archives') {
       const r = await api('/api/memory/archives');
@@ -740,7 +756,12 @@ export function createDashboard(opts: DashboardOptions) {
       if (tr.status !== 200) return shell('回合详情', `<div class="flash err" role="alert">读取回合失败：${esc(apiError(tr))}</div>`);
       const { turn, blocks } = tr.body as { turn: ObservedTurn; blocks: Block[] };
       const k = newest.findIndex(t => t.turn === turn.turn);
-      return shell('回合详情', turnPageBody(ctx, session, turn, blocks, { newer: k > 0 ? newest[k - 1]?.turn : undefined, older: k >= 0 ? newest[k + 1]?.turn : undefined }) + dataTail,
+      // 记忆调用（设计 §5.2）：召回接口出错或抛异常都只降级为一行提示，回合页照常渲染。
+      const mq = new URLSearchParams({ backend, session: session.id, turn: turn.turn });
+      const rr = await api(`/api/memory/recalls?${mq}`).catch((e: unknown) => ({ status: 500, body: { error: e instanceof Error ? e.message : String(e) } }));
+      const memory = turnRecallSection(rr.status === 200 && rr.body && Array.isArray((rr.body as RecallList).items) ? rr.body as RecallList : { error: apiError(rr) },
+        { backend, session: session.id, turn: turn.turn });
+      return shell('回合详情', turnPageBody(ctx, session, turn, blocks, { newer: k > 0 ? newest[k - 1]?.turn : undefined, older: k >= 0 ? newest[k + 1]?.turn : undefined }, memory) + dataTail,
         { lead: '输入 → 模型请求（可多次）→ 工具调用（参数与结果折叠）→ 助手文本 → 送达。', scripts: ['/assets/agents.js'] });
     }
     // 上下文结构分析（设计 §4）：分析接口由 O3 提供；缺席（404/501/503）时给出不可用状态。
