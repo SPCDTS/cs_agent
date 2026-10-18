@@ -66,8 +66,10 @@ tool_timeout_sec = 15
 - `src/context/store.ts`：唯一的读写入口（入库、撤回、衰老、`recent()`、`search()`、`message()`、访问过滤）。
 - `src/context/format.ts`：唯一的紧凑格式化器，输出 `HH:MM 昵称: 文本`，机器人行渲染为 `HH:MM [我] → 生图 prompt="..." → 已发送 1 张图` 或 `[我] → codex(high) → "摘要"`。
 - 消费方：
-  - 意图层：派发器在每条消息前调用 `recent(scope, window=120min, limit=5)` 注入上下文块；工具 `recent_context` / `search_history` 直接进程内调用同一模块。
-  - codex：`qq_context` MCP 服务是同一模块的 stdio 外壳，工具 `qq_recent` / `qq_search` / `qq_message` 一一对应，访问范围由 `QQ_ACCESS` 注入。
+  - **按需检索，不自动注入**（2026-10-18 用户确认，取代早期"派发器每条消息前注入 recent 块"的方案）：派发时不预先拼接历史，只有消息指代此前内容或用户要求回顾时，由执行层自己调工具检索（见两个后端的提示词）。唯一自动带入的历史是 `[引用]` 头部：消息带 reply 段时按 `replyTo` 从库里查原文（≤200 字）。
+  - codex：`qq_context` MCP 服务是同一模块的 stdio 外壳，工具 `qq_recent` / `qq_search` / `qq_message`，访问范围由 `QQ_ACCESS` 注入。
+  - pi：进程内直接调用同一个 `callQQContextTool`，工具名与参数相同。
+  - 观测后台：聊天记录页同样经 `callQQContextTool` 渲染。
 - 效果：两层看到的历史内容、裁剪规则、字数上限完全一致；追问"把刚才那张图改成蓝色"时，意图层与 codex 看到的都是同一行 `[我] → 生图 prompt="..."`。
 
 ## 3. codex 执行层
