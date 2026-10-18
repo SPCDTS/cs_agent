@@ -14,7 +14,8 @@ const DAY = 86400_000;
 export const MESSAGE_PAGE = 50;
 
 export interface MemoryOverview { scopes: ScopeSummary[]; aging: AgingStatus; retention: Retention }
-export interface MessagePage { items: MessageItem[]; next_before?: number }
+/** next_before_id：同秒内的行 id 决胜游标（接口新增；缺席时只用 next_before）。 */
+export interface MessagePage { items: MessageItem[]; next_before?: number; next_before_id?: number }
 export interface SummaryDetail {
   id: number; scope: string; kind: 'day' | 'week'; period_start: number; period_end: number;
   created_at: number; text: string; surviving_raw: number; lineage: null | unknown;
@@ -114,7 +115,7 @@ export interface ScopePageInput {
   params: URLSearchParams; vendor: boolean;
 }
 const isError = (m: ScopePageInput['messages']): m is { error: string; status: number } => 'error' in m;
-export const SAME_SECOND_HINT = '边界两侧有同一秒内的多条消息，纯时间游标无法定位。请缩小时间范围（例如点击单个原文桶），或改用更大的 limit。';
+export const MESSAGE_ERROR_HINT = '读取消息失败';
 
 export function rangeControls(scope: string, params: URLSearchParams, now: number): string {
   const link = (preset: RangePreset, label: string) => {
@@ -146,10 +147,11 @@ ${t.gaps.length ? `<details class="mt"><summary>空白区间 ${t.gaps.length} �
   out += `<section id="messages"><h2>消息 <small id="msg-window">${span(t.range.first_ts, t.range.last_ts)}，最新在上</small></h2>
 <ol id="msgs" class="msgs">${isError(m) ? '' : m.items.map(messageItem).join('')}</ol>
 <div id="msg-empty"${!isError(m) && !m.items.length ? '' : ' hidden'}>${empty('这个窗口没有现存消息。')}</div>
-<p id="msg-note" class="hint${isError(m) ? ' err' : ''}" role="status">${isError(m) ? esc(m.status === 400 ? `${SAME_SECOND_HINT}（${m.error}）` : `读取消息失败：${m.error}`) : ''}</p>
+<p id="msg-note" class="hint${isError(m) ? ' err' : ''}" role="status">${isError(m) ? esc(`${MESSAGE_ERROR_HINT}（HTTP ${m.status}：${m.error}）`) : ''}</p>
 <p><button type="button" class="quiet" id="msg-more"${!isError(m) && m.next_before !== undefined ? '' : ' hidden'}>更早</button></p></section>`;
   out += dataScript('memory-data', i.nonce, { scope: t.scope, label: t.label, range: t.range, retention_edges: t.retention_edges, tracks: t.tracks, gaps: t.gaps,
-    window: win, next_before: isError(m) ? null : m.next_before ?? null, limit: MESSAGE_PAGE });
+    window: win, next_before: isError(m) ? null : m.next_before ?? null,
+    next_before_id: isError(m) ? null : m.next_before_id ?? null, limit: MESSAGE_PAGE });
   return out;
 }
 
@@ -192,10 +194,13 @@ export function highlight(text: string, terms: string[], limit = 100_000): strin
   return out + plain(t.slice(pos));
 }
 
+/** ContextStore.search 用 FTS5 trigram：少于 3 个字符（按 Unicode 码点）的词查不到任何记录。 */
+export const shortTerms = (q: string) => searchTerms(q).filter(t => [...t].length < 3);
+
 export interface SearchForm { scope: string; q: string; days: string; limit: string }
 export function searchForm(f: SearchForm, scopes: ScopeSummary[]): string {
   return `<form class="bar search-form" method="get" action="/memory/search"><label>会话域<select name="scope"><option value="">全部（管理员视角）</option>${scopes.map(s => `<option value="${esc(s.scope)}"${s.scope === f.scope ? ' selected' : ''}>${esc(s.label)}</option>`).join('')}${f.scope && !scopes.some(s => s.scope === f.scope) ? `<option value="${esc(f.scope)}" selected>${esc(f.scope)}</option>` : ''}</select></label>
-<label>关键词<input name="q" value="${esc(f.q)}" placeholder="空格分隔，最多 5 个词" maxlength="100" required></label><label>天数<input name="days" type="number" min="1" max="180" placeholder="30" value="${esc(f.days)}"></label><label>条数<input name="limit" type="number" min="1" max="20" placeholder="10" value="${esc(f.limit)}"></label><button>检索</button></form>`;
+<label>关键词<input name="q" value="${esc(f.q)}" placeholder="每个词至少 3 个字符，空格分隔" maxlength="100" required></label><label>天数<input name="days" type="number" min="1" max="180" placeholder="30" value="${esc(f.days)}"></label><label>条数<input name="limit" type="number" min="1" max="20" placeholder="10" value="${esc(f.limit)}"></label><button>检索</button></form>`;
 }
 
 export const LEVELS_NOTE = `<div class="levels sheet pad"><span class="lv lv-1">① 检索命中</span>数据库按关键词返回的记录（时间新到旧，无相关性分数）
@@ -205,6 +210,8 @@ export const LEVELS_NOTE = `<div class="levels sheet pad"><span class="lv lv-1">
 
 export function searchPageBody(f: SearchForm, scopes: ScopeSummary[], result?: SearchResult | { error: string }): string {
   let out = crumbs([['记忆', '/memory'], ['检索检查器']]) + searchForm(f, scopes);
+  const short = shortTerms(f.q);
+  if (short.length) out += `<div class="flash short-q" role="status">检索使用 FTS5 trigram 索引，少于 3 个字符的词不会命中：${short.map(t => `“${esc(t)}”`).join('、')}。请改用至少 3 个字符的词。</div>`;
   out += LEVELS_NOTE;
   if (!result) return out;
   if ('error' in result) return out + `<div class="flash err" role="alert">${esc(result.error)}</div>`;

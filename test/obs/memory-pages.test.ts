@@ -8,7 +8,7 @@ import { ContextStore } from '../../src/context/store.js';
 import type { InboundMessage } from '../../src/qq/types.js';
 import { createDashboard } from '../../src/obs/http.js';
 import { ObsStore } from '../../src/obs/store.js';
-import { highlight, messageWindow, rangeParams, rangeQuery, searchTerms } from '../../src/obs/ui/memory-pages.js';
+import { highlight, messageWindow, rangeParams, rangeQuery, searchTerms, shortTerms } from '../../src/obs/ui/memory-pages.js';
 
 const TOKEN = 'memory-pages-test-token-0123';
 const DAY = 86400_000, HOUR = 3600_000, G = 'group:123';
@@ -160,6 +160,7 @@ describe('记忆页面', () => {
     expect(html.match(/<li class="msg"/g)).toHaveLength(50);
     expect(html).toContain('<button type="button" class="quiet" id="msg-more">更早</button>');
     expect(typeof d.next_before).toBe('number');
+    expect('next_before_id' in d).toBe(true); // 接口给出时透传，缺席为 null
     expect(d.window).toEqual({ after: from - 1, before: to });
     const date = await r.page('/memory/scopes/group%3A123?from=2026-10-01&to=2026-10-03');
     expect(date.html).toContain('value="2026-10-01"'); expect(date.html).toContain('value="2026-10-03"');
@@ -211,6 +212,13 @@ describe('记忆页面', () => {
     expect(html).toMatch(/<pre class="tool-text">[^]*&lt;<mark>script<\/mark>&gt;/);
     expect(html).toMatch(/<meter min="0" max="\d+" value="\d+"/);
     expect(html).toContain('全部命中都进入了工具返回');
+    expect(html).not.toContain('class="flash short-q"');
+    expect(empty.html).not.toContain('class="flash short-q"');
+    // FTS5 trigram：少于 3 个字符的词给出提示（仍照常检索）
+    const short = await r.page('/memory/search?q=%E6%AF%94%E8%B5%9B%20script');
+    expect(short.html).toContain('class="flash short-q"'); expect(short.html).toContain('FTS5 trigram');
+    expect(short.html).toContain('“比赛”'); expect(short.html).not.toContain('“script”');
+    expect(short.html).toContain('class="sheet pad tool-panel"');
     const api = await r.api('/api/memory/search?q=script&scope=group%3A123&days=30&limit=10');
     expect(html.match(/<li class="hit sheet pad">/g)).toHaveLength(api.hits.length);
     // 消息命中链到时间线附近，摘要命中链到摘要页
@@ -254,5 +262,7 @@ describe('记忆页面纯函数', () => {
     expect(highlight('"q" \'x\'', ['q'])).toBe('&quot;<mark>q</mark>&quot; &#39;x&#39;');
     expect(highlight('无命中', ['x'])).toBe('无命中');
     expect(searchTerms('  a  b%_ c d e f g ')).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(shortTerms('比赛 abc 𠀀𠀁 a')).toEqual(['比赛', '𠀀𠀁', 'a']);
+    expect(shortTerms('三个字 abcd')).toEqual([]);
   });
 });

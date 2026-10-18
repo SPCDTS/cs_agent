@@ -3,15 +3,16 @@
  * vis-timeline 的条目内容、悬浮提示与分组标题都以元素传入（不走库内 HTML 字符串分支）。功能：
  * - 三条轨（原文桶 / 日摘要 / 周摘要）、空白背景（purged 与 no_records 分色）、保留边界竖线（不可拖动）。
  * - 点击原文桶 → 列出该桶 [start, end) 内的消息；点击摘要 → 打开 /memory/summaries/:id。
- * - 消息列表：newest first，每页 50，"更早"沿 next_before 翻页；同秒边界的 400 显示提示而不是静默跳过。
+ * - 消息列表：newest first，每页 50，"更早"沿 next_before 翻页，接口给出 next_before_id 时
+ *   一并带 before_id 作同秒决胜；错误显示提示，可重试。
  * 消息条目结构与 memory-pages.ts 的 messageItem 一致。
  */
-import { SAME_SECOND_HINT } from './memory-pages.js';
+import { MESSAGE_ERROR_HINT } from './memory-pages.js';
 
 export const MEMORY_JS = String.raw`
 const DATA=(()=>{const n=document.getElementById('memory-data');if(!n)return null;try{return JSON.parse(n.textContent);}catch(e){return null;}})();
 const enc=encodeURIComponent;
-const SAME_SECOND=${JSON.stringify(SAME_SECOND_HINT)};
+const ERR_HINT=${JSON.stringify(MESSAGE_ERROR_HINT)};
 function fmtTime(ts){try{return new Date(ts).toLocaleString('zh-CN',{hour12:false});}catch(e){return String(ts);}}
 function fmtInt(n){return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,',');}
 function cut(s,n){const a=Array.from(s||'');return a.length>n?a.slice(0,n).join('')+'…':a.join('');}
@@ -19,11 +20,13 @@ function cut(s,n){const a=Array.from(s||'');return a.length>n?a.slice(0,n).join(
 /* ── 消息列表 ── */
 const list=document.getElementById('msgs'), more=document.getElementById('msg-more'), note=document.getElementById('msg-note'),
   none=document.getElementById('msg-empty'), winLabel=document.getElementById('msg-window');
-const state={win:DATA?DATA.window:null,cursor:DATA?DATA.next_before:null,busy:false,seq:0};
+const num=v=>typeof v==='number'&&isFinite(v)?v:null;
+const state={win:DATA?DATA.window:null,cursor:DATA?num(DATA.next_before):null,cursorId:DATA?num(DATA.next_before_id):null,busy:false,seq:0};
 function windowOf(from,to){return from>=1?{after:from-1,before:to}:{before:to};}
-function messagesUrl(win,before){
+function messagesUrl(win,before,beforeId){
   const q=new URLSearchParams();
   q.set('before',String(before!=null?before:win.before));
+  if(before!=null&&beforeId!=null)q.set('before_id',String(beforeId));
   if(win.after!=null)q.set('after',String(win.after));
   q.set('limit',String(DATA.limit||50));
   return '/api/memory/scopes/'+enc(DATA.scope)+'/messages?'+q.toString();
@@ -50,15 +53,14 @@ async function loadPage(reset){
   if(more)more.disabled=true;
   setNote('读取中…');
   try{
-    const r=await fetch(messagesUrl(state.win,reset?null:state.cursor),{credentials:'same-origin'});
+    const r=await fetch(messagesUrl(state.win,reset?null:state.cursor,reset?null:state.cursorId),{credentials:'same-origin'});
     if(seq!==state.seq)return;
     let j=null;try{j=await r.json();}catch(e){}
     if(reset){list.replaceChildren();}
-    if(r.status===400){setNote(SAME_SECOND+(j&&j.error?'（'+j.error+'）':''),true);if(more)more.hidden=true;return;}
-    if(!r.ok){setNote('读取消息失败（HTTP '+r.status+(j&&j.error?'：'+j.error:'')+'），可重试',true);if(more){more.hidden=false;more.disabled=false;}return;}
+    if(!r.ok){setNote(ERR_HINT+'（HTTP '+r.status+(j&&j.error?'：'+j.error:'')+'），可重试',true);if(more){more.hidden=false;more.disabled=false;}return;}
     const items=Array.isArray(j&&j.items)?j.items:[];
     for(const m of items)list.append(msgNode(m));
-    state.cursor=typeof j.next_before==='number'?j.next_before:null;
+    state.cursor=num(j.next_before);state.cursorId=state.cursor==null?null:num(j.next_before_id);
     if(none)none.hidden=list.children.length>0;
     if(more){more.hidden=state.cursor==null;more.disabled=false;}
     setNote(state.cursor==null&&list.children.length?'已到这个窗口最早的消息。':'');
@@ -69,7 +71,7 @@ function selectWindow(from,to,label){
   if(!DATA)return;
   const a=Math.max(from,DATA.range.first_ts), b=Math.min(to,DATA.range.last_ts);
   if(!(a<b))return;
-  state.win=windowOf(a,b);state.cursor=null;
+  state.win=windowOf(a,b);state.cursor=null;state.cursorId=null;
   if(winLabel)winLabel.textContent=(label?label+'：':'')+fmtTime(a)+' — '+fmtTime(b)+'，最新在上';
   loadPage(true);
   const sec=document.getElementById('messages');if(sec&&sec.scrollIntoView)sec.scrollIntoView({block:'start'});

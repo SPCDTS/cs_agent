@@ -1,7 +1,7 @@
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { ASSETS } from '../../src/obs/ui/client.js';
-import { SAME_SECOND_HINT } from '../../src/obs/ui/memory-pages.js';
+import { MESSAGE_ERROR_HINT } from '../../src/obs/ui/memory-pages.js';
 
 type Listener = (e: unknown) => void;
 /** memory.js 所需的最小 DOM：元素树、textContent、dataset、hidden / disabled、监听器。 */
@@ -96,15 +96,34 @@ describe('memory.js 消息列表', () => {
     expect(last.all().some(e => e.tagName === 'SCRIPT' || e.tagName === 'I')).toBe(false);
   });
 
-  it('同秒边界 400 显示提示而不是静默跳过；其它错误可重试', async () => {
-    const replies: Reply[] = [{ status: 400, body: { error: '同一秒内有多条消息' } }, { status: 500, body: { error: '坏了' } }];
+  it('接口给出 next_before_id 时"更早"同时带 before 与 before_id；缺席时只带 before；换窗口后清空 id 游标', async () => {
+    const pages: Reply[] = [
+      { status: 200, body: { items: [msg(51)], next_before: R1 - 51_000, next_before_id: 4242 } },
+      { status: 200, body: { items: [msg(52)], next_before: R1 - 52_000 } },
+      { status: 200, body: { items: [msg(53)], next_before: R1 - 53_000 } },
+    ];
+    const b = boot({ data: { ...DATA, next_before_id: 777 }, fetch: () => pages.shift() ?? { status: 200, body: { items: [] } } });
+    const q = (i: number) => Object.fromEntries(new URL(b.requests[i]!, 'http://x').searchParams);
+    b.more.click(); await b.settle();
+    expect(q(0)).toEqual({ before: String(R1 - 50_000), before_id: '777', after: String(R0 - 1), limit: '50' });
+    b.more.click(); await b.settle();
+    expect(q(1)).toEqual({ before: String(R1 - 51_000), before_id: '4242', after: String(R0 - 1), limit: '50' });
+    b.more.click(); await b.settle();
+    expect(q(2)).toEqual({ before: String(R1 - 52_000), after: String(R0 - 1), limit: '50' });
+    // 点击原文桶：首页只带窗口界限，不沿用旧 id
+    b.timelines[0]!.emit('click', { item: 'r0' }); await b.settle();
+    expect(q(3)).toEqual({ before: String(R0 + 3600_000), after: String(R0 - 1), limit: '50' });
+  });
+
+  it('错误显示通用提示，可重试（400 不再特殊处理）', async () => {
+    const replies: Reply[] = [{ status: 400, body: { error: 'before 必须晚于 after' } }, { status: 500, body: { error: '坏了' } }];
     const b = boot({ fetch: () => replies.shift()! });
     b.more.click(); await b.settle();
-    expect(b.note.textContent).toBe(`${SAME_SECOND_HINT}（同一秒内有多条消息）`);
-    expect(b.note.className).toBe('hint err'); expect(b.more.hidden).toBe(true);
+    expect(b.note.textContent).toBe(`${MESSAGE_ERROR_HINT}（HTTP 400：before 必须晚于 after），可重试`);
+    expect(b.note.className).toBe('hint err'); expect(b.more.hidden).toBe(false); expect(b.more.disabled).toBe(false);
     expect(b.list.children).toHaveLength(50);
-    b.more.hidden = false; b.more.click(); await b.settle();
-    expect(b.note.textContent).toContain('HTTP 500'); expect(b.more.hidden).toBe(false); expect(b.more.disabled).toBe(false);
+    b.more.click(); await b.settle();
+    expect(b.note.textContent).toContain('HTTP 500'); expect(b.more.hidden).toBe(false);
   });
 
   it('并发点击只发一个请求', async () => {
