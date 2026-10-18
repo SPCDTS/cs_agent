@@ -139,3 +139,9 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 - 本阶段没有新 UI、上下文分析或记忆分析；未新增运行时依赖，未部署 Docker，未改 `.env`，仓库 `data/` 仅用于只读提取匿名 rollout 样本。`CODEX_ROLLOUT_TRACE_ROOT` 名称依据绑定调研 §3 对 0.163.0 的核验，本地没有 Codex npm 包，未调用真实 Codex 请求验证 trace 产物。
 
 **主会话验收（2026-10-18 13:20Z，镜像 cs-agent:dev 已部署）**：重跑 `npm run typecheck && npm test && npm run build`，55 文件 / 708 项全部通过；容器内 codex 0.163.0 二进制含 `CODEX_ROLLOUT_TRACE_ROOT` 字符串，变量名核实无误，`/data/codex/trace` 已创建。真实数据冒烟：`/api/agents` 报 codex 2 活动 + 1 归档；shared 线程 18 回合、owner 13 回合；最新回合 24 个块，5 次模型请求各带实测 usage（112,890 → 115,947），4 次 exec 工具调用参数与结果按 `call_id` 配对，票据与送达状态（sent / group 范围 / 耗时）正确附加；21,902 字节的 system_change 块按区间懒加载首尾正确，越界 400；未登录 401，POST 405，归档会话订阅 409，SSE 200 且带完整安全头；返回体中无 QQ 号以外的凭据样式。遗留给 O2/O3 的说明：回合级 `usage` 是该回合全部请求的累加，上下文占用应取最后一次 `model_request` 块的 usage。
+
+### O2：Agent → 会话 → 回合页面与上下文分析页（2026-10-18，Opus 实现，主会话验收通过）
+
+- 提交 `844a528`（在 O1 与占用条修复之上变基）。新增 `src/obs/ui/{agents-pages,turn-view,context-view,agents-client}.ts`，顶栏改为设计 §1 的六项（日志/配置从设置页进入），`/codex`、`/pi` 303 到 `/agents/*`，重置线程按钮移到 `/agents` 卡片。页面在服务端内部调用 `/api/agents/*` 路由取数，与浏览器拿到的是同一份脱敏 JSON 与错误码。上下文占用取回合内最后一次 `model_request` 的实测输入，回合累计另列。
+- 主会话复跑：typecheck 通过，57 文件 / 734 项全部通过，build 通过；镜像重建部署。容器内无头 Chromium 真实数据冒烟：`/agents`、会话列表、会话页（18 回合目录、最新回合展开、4 张工具卡、实时连接指示"实时更新中"）、回合页、懒加载回合展开后 11 个块、21.4 KB 大块"加载全文"分段读取完成且按钮消失、上下文分析页在 O3 未合入时正确显示"分析引擎暂不可用（HTTP 404）"、`/memory` 占位页、`/codex` 303；无脚本错误，唯一的 404 是浏览器自动请求 favicon。
+- 验收中发现、转入后续修补（不阻塞 O2）：(1) codex 把 AGENTS.md 指令与 `<environment_context>` 作为 user 消息写入 rollout，O1 适配器把它们当成了独立回合，应归为 system_change 且不开启回合；(2) `utf8Slice` 在分块边界可能丢一个跨界字符，客户端已绕过，服务端应修正；(3) 启动时 `codex debug models` 偶发拿到离线目录（所有模型 272,000），窗口由 500,000 变成 272,000，应在离线签名时优先读取 `models_cache.json`；(4) 官方 trace 清理只按天数，需加总量上限；(5) 补 favicon 路由。
