@@ -53,7 +53,7 @@ class Fake implements SessionAdapter {
 
 function adapters(): SessionAdapters {
   const codex = new Fake('codex', [
-    { backend: 'codex', id: 'sess-1', label: XSS, scope: 'shared', status: 'active', started: T0, updated: T0 + 3300, turns: 2 },
+    { backend: 'codex', id: 'sess-1', label: XSS, scope: 'group:1', status: 'active', started: T0, updated: T0 + 3300, turns: 2 },
     { backend: 'codex', id: 'sess-old', label: 'sess-old', scope: 'owner', status: 'archived', started: T0 - 9e6, updated: T0 - 8e6, turns: 0 },
   ], {
     'sess-1': [
@@ -71,10 +71,10 @@ async function rig() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cs-agents-pages-'));
   const store = new ObsStore(dir), context = new ContextStore(dir);
   const dispose = registerTemporarySecrets([TOKEN]);
-  const usage = new ContextUsageStub([{ backend: 'codex', key: 'shared', usedTokens: 5000, windowTokens: 20_000, turns: 2, updatedAt: Date.now(), source: 'turn' }]);
+  const usage = new ContextUsageStub([{ backend: 'codex', key: 'group:1', usedTokens: 5000, windowTokens: 20_000, turns: 2, updatedAt: Date.now(), source: 'turn' }]);
   const resetCodex = vi.fn(async () => 'old'), resetPi = vi.fn(async () => 1);
   const dashboard = createDashboard({ config: loadConfig({ DATA_DIR: dir, OBS_TOKEN: TOKEN }), store, context, contextUsage: usage, resetCodex, resetPi,
-    codex: async () => [{ thread_key: 'owner', thread_id: null }, { thread_key: 'shared', thread_id: 'sess-1' }],
+    codex: async () => [{ thread_key: 'owner', thread_id: null }, { thread_key: 'group:1', thread_id: 'sess-1' }, { thread_key: 'private:99', thread_id: 'sess-99' }],
     pi: async () => ({ threads: { 'group:7': 2 }, keys: ['group:7'] }), health: () => ({}), queue: () => ({}), sessionAdapters: adapters() });
   const server = createServer(dashboard.handle);
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
@@ -103,7 +103,9 @@ describe('Agent 页面', () => {
     expect(html).toContain('href="/agents" aria-current="page"');
     expect(html).toMatch(/data-backend="codex"[^]*?<div class="figure">1<\/div><div class="muted">活动会话<\/div><\/div><div><div class="figure">1<\/div><div class="muted">归档会话/);
     expect(html).toContain('索引中 1 / 4');
-    expect(html).toContain('data-ctx="codex|shared"'); expect(html).toContain('5,000');
+    expect(html).toContain('私聊 99'); expect(html).toContain('name="key" value="private:99"');
+    expect(html).not.toContain('name="key" value="shared"');
+    expect(html).toContain('data-ctx="codex|group:1"'); expect(html).toContain('5,000');
     expect(html).toContain('action="/codex/reset"'); expect(html).toContain('action="/pi/reset"'); expect(html).toContain('name="_csrf"');
     expect(html).toContain(`value="${csrfToken(TOKEN)}"`);
     expect(html).toContain('href="/agents/codex/sessions"'); expect(html).toContain('href="/agents/pi/sessions"');
@@ -115,7 +117,7 @@ describe('Agent 页面', () => {
     expect(res.status).toBe(200); safe(html, res);
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).toContain('<code class="mono sel">sess-1</code>'); expect(html).toContain('data-copy="sess-1"');
-    expect(html).toContain('href="/agents/codex/sessions/sess-1"'); expect(html).toContain('共享线程');
+    expect(html).toContain('href="/agents/codex/sessions/sess-1"'); expect(html).toContain('群 1');
     expect(html).toContain('src="/assets/agents.js"');
     const active = await r.page('/agents/codex/sessions?status=active');
     expect(active.html).toContain('sess-1'); expect(active.html).not.toContain('sess-old'); expect(active.html).toContain('<option value="active" selected>');

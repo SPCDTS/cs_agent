@@ -504,6 +504,7 @@ agent（codex | pi，只依赖 TurnContext）   ←  tools（MCP / 进程内）�
   - owner：本会话工作区 + `${DATA_DIR}/prompts` + `${DATA_DIR}/workflows`（保留 owner 经 codex 编辑提示与工作流的能力）。
   - 受管规则与可编辑的行为指引在新工作区下仍须完整生效（实现方查明 codex 0.163 的 AGENTS.md 加载规则后选定方案，例如放入 `$CODEX_HOME/AGENTS.md` 或每个工作区生成一份；不得出现某个会话域缺规则的情况），`renderManagedAgentsMd` 按实际生效的可写目录渲染。
   - 其他会话的工作区对本回合不可读（deny_read 或等效机制；若 codex 无法按回合注入 deny_read，则说明可行方案并上报，不得静默跳过）。
+- 配置兼容性补充（实现时收紧）：上述可写范围适用于 `workspace-write`；显式 `read-only` 仍禁止所有写入。`danger-full-access` 无法满足会话隔离，业务回合直接拒绝执行。入口脚本的 `CODEX_WRITABLE_ROOTS` / `CODEX_EFFECTIVE_WRITABLE_ROOTS` 不再扩大业务回合权限；每轮使用固定的会话权限配置覆盖。`WORKSPACE_DIR` 不得为系统根目录、包含 `DATA_DIR`，或经符号链接指向其它位置；遇到不安全布局则拒绝执行。
 - 观测：上下文占用条与会话页的标签按键显示（`owner 线程` / `群 <id>` / `私聊 <qq>`），旧 `shared` 记录只在归档中可见。
 - 验收：A 群与 B 群各发一轮后线程 id 不同；B 群回合的线程 rollout 中不含 A 群内容；非 owner 回合写 `/data/prompts` 失败、读其他会话工作区失败；owner 回合可写 prompts；重启后各键线程沿用；面板能列出并重置任一键。
 

@@ -92,7 +92,7 @@ describe("Codex 官方 trace", () => {
 
   it("创建 trace 目录并用精确环境变量将子进程限制在 CODEX_HOME 下", async () => {
     const dir = temp();
-    await runner(dir).ask("测试");
+    await runner(dir).ask("测试", { threadKey: "group:1" });
     expect(childEnv(dir).CODEX_ROLLOUT_TRACE_ROOT).toBe(path.join(dir, "codex", "trace"));
     expect(childEnv(dir).Codex_Rollout_Trace_Root).toBeUndefined();
     expect(existsSync(path.join(dir, "codex", "trace"))).toBe(true);
@@ -101,7 +101,7 @@ describe("Codex 官方 trace", () => {
   it("0 关闭 trace，清除父进程和额外环境中继承的大小写别名", async () => {
     vi.stubEnv("CODEX_ROLLOUT_TRACE_ROOT", "/inherited");
     const dir = temp();
-    await runner(dir, 0).ask("测试");
+    await runner(dir, 0).ask("测试", { threadKey: "group:1" });
     expect(Object.keys(childEnv(dir)).some(key => key.toUpperCase() === "CODEX_ROLLOUT_TRACE_ROOT")).toBe(false);
     expect(existsSync(path.join(dir, "codex", "trace"))).toBe(false);
   });

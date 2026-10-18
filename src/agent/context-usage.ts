@@ -58,6 +58,13 @@ export class ContextUsageStore {
     }
   }
 
+  /** 删除已停用线程的占用，避免面板把 shared 当作活跃会话。 */
+  remove(backend: Backend, key: string): void {
+    if (!this.records.delete(`${backend}:${key}`)) return;
+    this.revision++;
+    void this.flush().catch(() => log.warn("context usage removal persistence failed; will retry on shutdown"));
+  }
+
   all(): ContextUsage[] { return [...this.records.values()].map(u => structuredClone(u)); }
   get(backend: Backend, key: string): ContextUsage | undefined {
     const u = this.records.get(`${backend}:${key}`);

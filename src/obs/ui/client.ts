@@ -31,7 +31,7 @@ function ratio(u,w){return w>0?u/w*100:0;}
 function clampPct(p){return Math.max(0,Math.min(100,Math.round(p)));}
 function fmtPct(p){return (p>0&&p<1?'<1':String(Math.round(p)))+'%';}
 function tier(p){return p>85?'hot':p>=60?'warn':'ok';}
-function ctxLabel(b,k){const n=BACKENDS[b]||b;if(b==='codex')return n+' · '+(k==='owner'?'owner 线程':k==='shared'?'共享线程':k);return n+' · '+(k==='owner'?'owner 私聊':scopeLabel(k));}
+function ctxLabel(b,k){const n=BACKENDS[b]||b;if(b==='codex')return n+' · '+(k==='owner'?'owner 线程':scopeLabel(k));return n+' · '+(k==='owner'?'owner 私聊':scopeLabel(k));}
 function tickTitle(kind,at,w){return (kind==='bg'?'后台压缩阈值':'阻塞压缩阈值')+'：'+fmtInt(at)+' tokens（'+fmtPct(ratio(at,w))+'）。'+(kind==='bg'?'越过后在回合结束时于后台压缩上下文，不阻塞回复。':'越过后下一回合开始前必须先压缩，回复会等待压缩完成。');}
 function hhmmss(ts){const d=new Date(ts);return [d.getHours(),d.getMinutes(),d.getSeconds()].map(x=>String(x).padStart(2,'0')).join(':');}
 // 骨架：mini=单行（实时卡片头部），否则为完整条（标签、数字、轨道、说明）。

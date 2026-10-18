@@ -17,7 +17,7 @@ const user = (text = '继续检查') => record('response_item', { type: 'message
 const assistant = (text = '已完成') => record('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
 const done = () => record('event_msg', { type: 'task_complete' });
 
-async function rig(initial?: string, map: unknown = { shared: { thread_id: 'thread-fixture' } }) {
+async function rig(initial?: string, map: unknown = { "group:1": { thread_id: 'thread-fixture' } }) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-sessions-'));
   const codexHome = path.join(dir, 'codex');
   const directory = path.join(codexHome, 'sessions', '2026', '10', '17');
@@ -38,7 +38,7 @@ async function rig(initial?: string, map: unknown = { shared: { thread_id: 'thre
 describe('Codex 会话正文适配器', () => {
   it('真实结构匿名样本：用户条目分轮、过滤重复事件、模型强度、工具配对及用量去重', async () => {
     const r = await rig();
-    expect(await r.adapter.listSessions()).toEqual([expect.objectContaining({ backend: 'codex', id: 'thread-fixture', label: 'shared', scope: 'shared', status: 'active', turns: 1 })]);
+    expect(await r.adapter.listSessions()).toEqual([expect.objectContaining({ backend: 'codex', id: 'thread-fixture', label: 'group:1', scope: 'group:1', status: 'active', turns: 1 })]);
     const [turn] = await r.adapter.turns('thread-fixture');
     expect(turn).toMatchObject({ tools: 1, requests: 1, status: 'ok', usage: { input: 1000, output: 50, cached: 800, reasoning: 20, measured: true } });
     const blocks = await r.adapter.blocks('thread-fixture', turn!.turn);
@@ -139,7 +139,7 @@ describe('Codex 会话正文适配器', () => {
     await r.adapter.refresh();
     expect(await r.adapter.listSessions({ status: 'archived', scope: 'owner' })).toHaveLength(1);
     expect(await r.adapter.listSessions({ status: 'active' })).toHaveLength(0);
-    expect(await r.adapter.listSessions({ scope: 'shared' })).toHaveLength(0);
+    expect(await r.adapter.listSessions({ scope: 'group:1' })).toHaveLength(0);
     expect(await r.adapter.listSessions({ since: Date.parse(ts) })).toHaveLength(0);
     expect(await r.adapter.listSessions({ page: 1 })).toHaveLength(0);
     await expect(Promise.resolve().then(() => r.adapter.subscribe('thread-fixture', () => {}))).rejects.toMatchObject({ status: 400 });
@@ -310,7 +310,7 @@ describe('Codex 会话正文适配器', () => {
     cleanup.push(() => adapter.close());
     await adapter.refresh();
     expect(await adapter.listSessions()).toEqual([]);
-    r.store.append({ ticket: 'test-index-degraded', scope: 'shared', ts: Date.now(), stage: 'received', status: 'ok', duration_ms: null });
+    r.store.append({ ticket: 'test-index-degraded', scope: 'group:1', ts: Date.now(), stage: 'received', status: 'ok', duration_ms: null });
     expect(r.store.events('test-index-degraded')).toHaveLength(1);
     expect(r.store.degraded).toBe(false);
   });

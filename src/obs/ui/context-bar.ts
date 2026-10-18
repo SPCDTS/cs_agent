@@ -61,7 +61,7 @@ const tier = (p: number) => p > 85 ? 'hot' : p >= 60 ? 'warn' : 'ok';
 
 function ctxLabel(backend: string, key: string): string {
   const b = BACKENDS[backend] ?? backend;
-  if (backend === 'codex') return `${b} · ${key === 'owner' ? 'owner 线程' : key === 'shared' ? '共享线程' : key}`;
+  if (backend === 'codex') return `${b} · ${key === 'owner' ? 'owner 线程' : scopeLabel(key)}`;
   return `${b} · ${scopeLabel(key)}`;
 }
 

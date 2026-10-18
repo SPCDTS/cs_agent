@@ -30,14 +30,14 @@ async function rig(extra: { contextUsage?: ContextUsageStub; codexPrompt?: Codex
   const config = loadConfig({ DATA_DIR: dir, OBS_TOKEN: TOKEN, QQ_ALLOW_USERS: '1' });
   registerSecrets([TOKEN]);
   const settings = await SettingsStore.open(dir, defaults, trace);
-  const resetCodex = vi.fn(async (key: string): Promise<string | null> => key === 'shared' ? 'thread-old' : null);
+  const resetCodex = vi.fn(async (key: string): Promise<string | null> => key === 'group:7' ? 'thread-old' : null);
   const resetPi = vi.fn(async () => 42);
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
   const codexPrompt = extra.codexPrompt === null ? undefined : extra.codexPrompt ?? new CodexPromptStub();
   const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, contextUsage: extra.contextUsage, codexPrompt,
     health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, comfy: { ok: true }, codex: { ok: false }, deepseek_key_present: true }),
     queue: () => ({ active: 1, slots: 2, waiting: 1, scopes: { 'group:7': 1 } }),
-    codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'shared', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
+    codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'group:7', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
     pi: async () => ({ threads: { 'group:7': 42 }, count: 1, keys: ['group:7'], compaction: [] }) });
   const server = createServer(dashboard.handle);
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
@@ -123,7 +123,7 @@ describe('面板二期页面', () => {
     expect((await r.get('/settings', { method: 'PUT' })).status).toBe(405);
     expect(r.settings.current().agentBackend).toBe('codex');
     expect(r.resetCodex).not.toHaveBeenCalled();
-    expect((await r.post('/codex/reset', { key: 'shared' })).status).toBe(403);
+    expect((await r.post('/codex/reset', { key: 'group:7' })).status).toBe(403);
     expect(r.resetCodex).not.toHaveBeenCalled();
   });
 
@@ -214,27 +214,30 @@ describe('面板二期页面', () => {
 
   it('重置线程：校验键、调用后端、记录事件并带结果跳回', async () => {
     const r = await rig();
-    const res = await r.post('/codex/reset', { _csrf: r.csrf, key: 'shared' });
+    const res = await r.post('/codex/reset', { _csrf: r.csrf, key: 'group:7' });
     expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/agents?ok=reset');
-    expect(r.resetCodex).toHaveBeenCalledWith('shared');
+    expect(r.resetCodex).toHaveBeenCalledWith('group:7');
     expect((await r.post('/codex/reset', { _csrf: r.csrf, key: 'owner' })).headers.get('location')).toBe('/agents?ok=unchanged');
-    expect((await r.post('/codex/reset', { _csrf: r.csrf, key: 'group:7' })).status).toBe(400);
+    expect((await r.post('/codex/reset', { _csrf: r.csrf, key: 'shared' })).status).toBe(400);
+    expect((await r.post('/codex/reset', { _csrf: r.csrf, key: 'private:9' })).status).toBe(303);
+    expect(r.resetCodex).toHaveBeenCalledWith('private:9');
+    for (const key of ['group:0', 'private:01', '../owner']) expect((await r.post('/codex/reset', { _csrf: r.csrf, key })).status).toBe(400);
     const pi = await r.post('/pi/reset', { _csrf: r.csrf, key: 'group:7' });
     expect(pi.headers.get('location')).toBe('/agents?ok=reset'); expect(r.resetPi).toHaveBeenCalledWith('group:7');
     expect((await r.post('/pi/reset', { _csrf: r.csrf, key: '../x' })).status).toBe(400);
     const ev = r.store.events('@codex').find(e => e.stage === 'thread_reset')!;
-    expect(JSON.parse(ev.detail_json)).toMatchObject({ source: 'dashboard', thread_key: 'shared', archived: 'thread-old' });
+    expect(JSON.parse(ev.detail_json)).toMatchObject({ source: 'dashboard', thread_key: 'group:7', archived: 'thread-old' });
     // 进行中的回合：1.5 秒内未完成则提示已排队
     let release!: () => void;
     r.resetCodex.mockImplementationOnce(() => new Promise(res => { release = () => res('thread-busy'); }));
-    const queued = await r.post('/codex/reset', { _csrf: r.csrf, key: 'shared' });
+    const queued = await r.post('/codex/reset', { _csrf: r.csrf, key: 'group:7' });
     expect(queued.headers.get('location')).toBe('/agents?ok=queued');
     release();
     expect(await (await r.get('/agents?ok=queued')).text()).toContain('已排队');
-    // 旧页面跳转到会话列表；重置表单仍在 /agents 卡片上（共享线程已存在，owner 尚未创建不给按钮）
+    // 旧页面跳转到会话列表；重置表单仍在 /agents 卡片上（群会话已存在，owner 尚未创建不给按钮）
     for (const b of ['codex', 'pi']) { const old = await r.get('/' + b, { redirect: 'manual' }); expect(old.status).toBe(303); expect(old.headers.get('location')).toBe(`/agents/${b}/sessions`); }
     const agents = await (await r.get('/agents')).text();
-    expect(agents.match(/action="\/codex\/reset"/g)).toHaveLength(1); expect(agents).toContain('name="key" value="shared"'); expect(agents).toContain(`name="_csrf" value="${r.csrf}"`);
+    expect(agents.match(/action="\/codex\/reset"/g)).toHaveLength(1); expect(agents).toContain('name="key" value="group:7"'); expect(agents).toContain(`name="_csrf" value="${r.csrf}"`);
   });
 });
 
@@ -253,7 +256,7 @@ describe('实时视图', () => {
     trace.event('tk-live', 'received', { scope: 'group:7', detail: { text: `帮我查一下 ${secret}`, sender: '小红', message_id: '1' } });
     trace.event('tk-live', 'routed', { detail: { route: 'agent' } });
     trace.event('tk-live', 'dispatched', { detail: { attempts: 1 } });
-    const turn = trace.span('tk-live', 'backend:codex', () => backend.handle({ ticket: 'tk-live', scope: 'group:7', access: 'group:7', threadKey: 'shared', text: '帮我查一下',
+    const turn = trace.span('tk-live', 'backend:codex', () => backend.handle({ ticket: 'tk-live', scope: 'group:7', access: 'group:7', threadKey: 'group:7', text: '帮我查一下',
       source: { type: 'group', user_id: '1', group_id: '7', nickname: '小红' } }, { signal: new AbortController().signal, onEvent: () => {} }), { backend: 'codex' });
     let settled = false; void turn.then(() => { settled = true; });
     const during = await readUntil(sse, t => frames(t, 'card').some(f => f.item.stage === 'tool:command_execution' && f.item.status === 'started') && frames(t, 'card').some(f => f.item.stage === 'tool:qq_recent' && f.item.status === 'started'));
@@ -350,7 +353,7 @@ describe('上下文占用条（§8.5）', () => {
   const now = Date.now();
   const stub = () => new ContextUsageStub([
     { backend: 'pi', key: 'group:7', usedTokens: 115_000, windowTokens: 128_000, compaction: { background: 89_600, reserve: 112_000 }, turns: 9, updatedAt: now, source: 'turn' },
-    { backend: 'codex', key: 'shared', usedTokens: 100_000, windowTokens: 400_000, cachedTokens: 80_000, turns: 3, updatedAt: now, source: 'turn' },
+    { backend: 'codex', key: 'group:7', usedTokens: 100_000, windowTokens: 400_000, cachedTokens: 80_000, turns: 3, updatedAt: now, source: 'turn' },
     { backend: 'codex', key: 'owner', usedTokens: 300_000, windowTokens: 400_000, turns: 20, updatedAt: now - 30 * 3600_000, source: 'turn' },
     { backend: 'pi', key: 'owner', usedTokens: 2_000, windowTokens: 128_000, turns: 0, updatedAt: now, source: 'estimate' },
   ]);
@@ -360,7 +363,7 @@ describe('上下文占用条（§8.5）', () => {
     const home = await (await r.get('/')).text();
     expect(home).toContain('上下文占用'); expect(home).toContain('src="/assets/usage.js"');
     const order = [...home.matchAll(/data-ctx="([^"]+)"/g)].map(m => m[1]);
-    expect(order).toEqual(['codex|owner', 'codex|shared', 'pi|group:7', 'pi|owner']);
+    expect(order).toEqual(['codex|owner', 'codex|group:7', 'pi|group:7', 'pi|owner']);
     expect(home).toMatch(/class="ctx ctx-t-warn ctx-stale" data-ctx="codex\|owner"/);
     expect(home).toContain('上次更新 30 小时前');
     expect(home).toMatch(/class="ctx ctx-t-hot" data-ctx="pi\|group:7"/);
@@ -372,7 +375,7 @@ describe('上下文占用条（§8.5）', () => {
     expect(ah).toContain('100,000'); expect(ah).toContain('缓存命中 80,000');
     expect(ah).toMatch(/class="ctx-tick ctx-bg" data-at="70" title="后台压缩阈值/); expect(ah).toMatch(/class="ctx-tick ctx-rs" data-at="88" title="阻塞压缩阈值/);
     expect(ah.indexOf('data-ctx="pi|group:7"')).toBeLessThan(ah.indexOf('action="/pi/reset"'));
-    expect([...ah.matchAll(/data-ctx="([^"]+)"/g)].map(m => m[1])).toEqual(['codex|owner', 'codex|shared', 'pi|group:7', 'pi|owner']);
+    expect([...ah.matchAll(/data-ctx="([^"]+)"/g)].map(m => m[1])).toEqual(['codex|owner', 'codex|group:7', 'pi|group:7', 'pi|owner']);
     expect((await r.get('/assets/usage.js')).status).toBe(200);
   });
 
@@ -390,7 +393,7 @@ describe('上下文占用条（§8.5）', () => {
     expect(html).toMatch(/<div class="ctx ctx-t-hot ctx-mini" data-ctx="pi\|group:7"/);
     const sse = collect(await r.get('/live/stream'));
     const first = await sse.until(t => t.includes('event: snapshot_end'));
-    expect(frames(first, 'context').map(f => `${f.usage.backend}|${f.usage.key}`)).toEqual(['codex|owner', 'codex|shared', 'pi|group:7', 'pi|owner']);
+    expect(frames(first, 'context').map(f => `${f.usage.backend}|${f.usage.key}`)).toEqual(['codex|owner', 'codex|group:7', 'pi|group:7', 'pi|owner']);
     expect(first.indexOf('event: context')).toBeLessThan(first.indexOf('event: snapcard'));
     expect(frames(first, 'snapcard')[0].card.thread).toBe('group:7');
     const usageSse = collect(await r.get('/usage/stream'));

@@ -35,7 +35,7 @@ it('口令原子发布仅记录一次，子进程白名单排除 OBS_TOKEN，健
   expect(buildImageEnv({baseEnv:{OBS_TOKEN:'fake-secret',PATH:'path'},comfyUrl:'http://127.0.0.1',comfyBin:'fake'})).not.toHaveProperty('OBS_TOKEN');
   const cli=path.join(dir,'fake-env.mjs');writeFileSync(cli,`process.stdin.resume();process.stdin.on('end',()=>console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:String(!!process.env.OBS_TOKEN)}})));`,'utf8');
   const runner=new CodexRunner({command:[process.execPath,cli],codexHome:path.join(dir,'codex'),workspaceDir:path.join(dir,'ws'),threadsFile:path.join(dir,'threads.json'),sandbox:'read-only',timeoutMs:5000,env:{OBS_TOKEN:'fake-secret'}});
-  expect(await runner.ask('fake CLI only')).toBe('false');
+  expect(await runner.ask('fake CLI only', { threadKey: "group:1" })).toBe('false');
   const health=JSON.stringify(publicHealth({connected:true,degraded:true,comfy:{ok:false,error:'fake-secret',server:'http://private'},codex:{ok:true,error:'fake-secret'},threads:{owner:'thread-1'},pi:{count:0,keys:[]}}));
   expect(health).not.toMatch(/fake-secret|private/);expect(health).toContain('thread-1');expect(health).toContain('"degraded":true');
 });

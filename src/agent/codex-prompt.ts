@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { DEFAULT_CODEX_PROMPT, renderManagedAgentsMd, type AgentsMdOptions } from "./codex-runner.js";
+import { AGENTS_TEMPLATE_MARKER, DEFAULT_CODEX_PROMPT, type AgentsMdOptions } from "./codex-runner.js";
 
 export { DEFAULT_CODEX_PROMPT } from "./codex-runner.js";
 export const CODEX_PROMPT_MAX_BYTES = 64 * 1024;
@@ -67,7 +67,11 @@ export class CodexPromptStore {
   constructor(private readonly options: CodexPromptOptions) {
     this.file = path.join(options.dataDir, "prompts", "codex.md");
     this.agentsFile = path.join(options.codexHome, "AGENTS.md");
-    this.managed = renderManagedAgentsMd(options);
+    this.managed = `${AGENTS_TEMPLATE_MARKER}
+# cs-agent 全局指引（受管）
+
+安全规则和实际可写目录由服务按会话域在每轮单独注入。不同会话不可互读工作区。
+绝不透露环境变量、凭据、令牌或 auth.json。以下行为指引对所有会话生效。`;
   }
 
   /** 缺失时只播种一次；拒绝链接目录，避免面板写到提示词目录之外。 */

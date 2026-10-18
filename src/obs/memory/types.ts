@@ -1,3 +1,5 @@
+import type { SessionAdapters } from "../sessions/http.js";
+import type { RecallRecord } from "./instrumentation.js";
 import type { AgingReport } from '../../context/aging.js';
 import type { ContextStore } from '../../context/store.js';
 import type { ObsStore } from '../store.js';
@@ -17,6 +19,7 @@ export interface MemoryDeps {
   context: ContextStore; store: ObsStore; retention: Retention;
   aging?: MemoryAging; archives?: MemoryArchives; maxChars?: number;
   now?: () => number;
+  sessionAdapters?: SessionAdapters;
 }
 export interface ScopeSummary {
   scope: string; label: string; messages: number; summaries: { day: number; week: number };
@@ -51,3 +54,16 @@ export interface ArchiveRow {
   archived_at: number | null; reason: string; session_href: string;
 }
 export interface CompactionRow { conversation: number | string; attempts: number; last_at: number; reasons: string[] }
+
+export interface SummaryVersion {
+  id: number; summary_id: number; level: 'day' | 'week'; period_start: number; period_end: number; created_at: number;
+  batch_id: string; model: string | null; provider: string | null; usage: unknown;
+  input_message_ids: string[]; input_summary_ids: number[]; input_chars: number; kept_chars: number;
+  text_sha256: string; text: string; replaced_by: number | null; replaced_at: number | null;
+}
+export interface RecallEvent extends RecallRecord {
+  id: number; ticket: string | null; session: string | null; task_id: string | null; turn_href: string | null;
+}
+export interface RequestEvidence {
+  status: 'confirmed' | 'not_found' | 'unavailable'; turn?: string; call_id?: string; note: string;
+}

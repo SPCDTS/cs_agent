@@ -28,8 +28,8 @@ export function crumbs(items: [string, string?][]): string {
 const SESSION_STATUS: Record<string, [string, 'ok' | 'idle']> = { active: ['活动', 'ok'], archived: ['归档', 'idle'] };
 export const sessionStamp = (s: string) => { const [l, t] = SESSION_STATUS[s] ?? [s, 'idle' as const]; return stamp(l, t); };
 export const copyId = (id: string) => `<span class="idbox"><code class="mono sel">${esc(id)}</code><button type="button" class="quiet copy" data-copy="${esc(id)}" aria-label="复制 ID">复制</button></span>`;
-/** codex 的 scope 是线程键（owner / shared），pi 是会话域。 */
-export const sessionScope = (backend: string, scope?: string) => !scope ? '—' : backend === 'codex' ? (scope === 'owner' ? 'owner 线程' : scope === 'shared' ? '共享线程' : scope) : scopeLabel(scope);
+/** codex 的 scope 是线程键（owner / scope），pi 是会话域。 */
+export const sessionScope = (backend: string, scope?: string) => !scope ? '—' : backend === 'codex' ? (scope === 'owner' ? 'owner 线程' : scope === 'shared' ? '共享线程（已归档）' : scopeLabel(scope)) : scopeLabel(scope);
 
 /* ───────── /agents ───────── */
 
@@ -78,7 +78,7 @@ export function sessionListBody(backend: Backend, rows: SessionRef[] | null, f: 
   const opt = (v: string, l: string) => `<option value="${v}"${f.status === v ? ' selected' : ''}>${l}</option>`;
   let out = crumbs([['Agent', '/agents'], [BACKENDS[backend] ?? backend]]);
   out += `<form class="bar"><label>状态<select name="status">${opt('', '全部')}${opt('active', '活动')}${opt('archived', '归档')}</select></label>
-<label>scope<input name="scope" placeholder="${backend === 'codex' ? 'owner 或 shared' : 'owner / group:123'}" value="${esc(f.scope)}"></label><label>更新于此后<input name="since" type="date" value="${esc(f.since)}"></label><button>筛选</button>${f.status || f.scope || f.since ? `<a class="btn quiet" href="${sessionsHref(backend)}">清除</a>` : ''}</form>`;
+<label>scope<input name="scope" placeholder="${'owner / group:123 / private:123'}" value="${esc(f.scope)}"></label><label>更新于此后<input name="since" type="date" value="${esc(f.since)}"></label><button>筛选</button>${f.status || f.scope || f.since ? `<a class="btn quiet" href="${sessionsHref(backend)}">清除</a>` : ''}</form>`;
   if (error) out += `<div class="flash err" role="alert">${esc(error)}</div>`;
   if (!rows) return out;
   out += rows.length ? `<div class="sheet"><div class="wrap"><table class="list sessions"><thead><tr><th>会话</th><th>真实 ID</th><th>状态</th><th class="num">回合</th><th class="hide-sm">开始</th><th>更新</th></tr></thead><tbody>${rows.map(s => `<tr><td><a href="${sessionHref(backend, s.id)}">${esc(s.label && s.label !== s.id && s.label !== s.scope ? s.label : sessionScope(backend, s.scope))}</a>${s.label && s.label !== s.id && s.label !== s.scope ? `<br><small>${esc(sessionScope(backend, s.scope))}</small>` : ''}</td><td>${copyId(s.id)}</td><td>${sessionStamp(s.status)}</td><td class="num">${fmtInt(s.turns)}</td><td class="hide-sm">${esc(fmtTime(s.started))}</td><td>${time(s.updated)}</td></tr>`).join('')}</tbody></table></div></div>`

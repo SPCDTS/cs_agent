@@ -3,6 +3,7 @@ import { RecallTokens, startMediaRecallServer } from "./context/media-recall-ser
 import { createOneBotClient } from "./qq/onebot.js";
 import { ContextUsageStore } from "./agent/context-usage.js";
 import { loadObsToken, publicHealth } from "./obs/token.js";
+import { MemoryInstrumentation, purgeMemoryInstrumentation } from "./obs/memory/instrumentation.js";
 import { ObsStore } from "./obs/store.js";
 import { trace } from "./obs/trace.js";
 import { Metrics, type Gauge } from "./obs/metrics.js";
@@ -25,7 +26,7 @@ import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
 import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
-import { CodexRunner, effectiveWritableRoots, ensureWorkspaceAgentsMd } from "./agent/codex-runner.js";
+import { CodexRunner, ensureWorkspaceAgentsMd } from "./agent/codex-runner.js";
 import { purgeCodexTrace } from "./agent/codex-trace.js";
 import { CodexPromptStore } from "./agent/codex-prompt.js";
 import { createImageBackend } from "./agent/image-gen.js";
@@ -72,9 +73,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // codex 规则：受管段 + prompts/codex.md 自定义段，启动和保存时重新生成全局 AGENTS.md；
-  // 工作区只放一份占位说明（不存在或是未修改的旧模板时写入）
-  const writableRoots = effectiveWritableRoots(process.env, cfg.CODEX_WRITABLE_ROOTS);
+  // codex 全局行为指引来自 prompts/codex.md；实际权限规则由 runner 每轮单独注入。
+  // 父工作区的运维 AGENTS.md 保留，runner 显式带入每个子工作区回合。
+  const writableRoots: string[] = []; // 实际可写目录由 runner 每轮按会话权限计算。
   const codexPrompt = new CodexPromptStore({ codexHome: cfg.codexHome, dataDir: cfg.DATA_DIR,
     workspaceDir: cfg.WORKSPACE_DIR, writableRoots, containsSecret: text => redactText(text, Number.MAX_SAFE_INTEGER) !== text });
   await codexPrompt.read();
@@ -89,6 +90,7 @@ async function main(): Promise<void> {
   const store = new ContextStore(cfg.DATA_DIR);
   const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP, cfg.OBS_ADMIN_RETENTION_DAYS);
   trace.attach(obs);
+  const instrumentation = obs.degraded ? undefined : MemoryInstrumentation.fromDb(obs.db);
   const contextUsage = new ContextUsageStore(cfg.DATA_DIR);
   // 进行中会话的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）
   const live = new LiveBus(trace);
@@ -132,6 +134,8 @@ async function main(): Promise<void> {
     threadsFile: path.join(cfg.DATA_DIR, "codex-threads.json"),
     legacySessionFile: path.join(cfg.DATA_DIR, "codex-session.json"),
     sandbox: cfg.CODEX_SANDBOX,
+    sandboxNetwork: cfg.CODEX_SANDBOX_NETWORK,
+    preparePrompt: () => codexPrompt.regenerate(),
     timeoutMs: cfg.CODEX_TIMEOUT_SEC * 1000,
     rolloutMaxMb: cfg.CODEX_ROLLOUT_MAX_MB,
     threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,
@@ -158,7 +162,7 @@ async function main(): Promise<void> {
   const pi = await PiBackend.open({
     dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
-    thinkingLevel, store, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
+    thinkingLevel, store, instrumentation, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
   });
@@ -212,7 +216,7 @@ async function main(): Promise<void> {
 
   // 聊天记录衰老（日/周摘要 + 清理）：每天 HISTORY_SUMMARY_HOUR 点（容器本地时区，默认 UTC）；启动时补跑
   const aging = startAgingScheduler({
-    store,
+    store, instrumentation,
     models,
     model: agentModel,
     rawDays: cfg.HISTORY_RAW_DAYS,
@@ -289,8 +293,12 @@ async function main(): Promise<void> {
     archives: { codex: path.join(cfg.DATA_DIR, 'codex-threads-archive.jsonl'), pi: path.join(cfg.DATA_DIR, 'pi-threads-archive.jsonl') },
     resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
-    onPurge: now => purgeCodexTrace(cfg.codexHome, cfg.CODEX_TRACE_RETENTION_DAYS, now, cfg.CODEX_TRACE_MAX_MB).then(() => undefined,
-      error => { log.warn("codex trace purge failed", { error }); }),
+    onPurge: async now => {
+      try { if (!obs.degraded) purgeMemoryInstrumentation(obs.db, cfg.OBS_MEMORY_RETENTION_DAYS, now); }
+      catch (error) { log.warn("memory instrumentation purge failed", { error }); }
+      await purgeCodexTrace(cfg.codexHome, cfg.CODEX_TRACE_RETENTION_DAYS, now, cfg.CODEX_TRACE_MAX_MB)
+        .catch(error => { log.warn("codex trace purge failed", { error }); });
+    },
     gauges: async () => {
       const q = dispatcher.status(), ws = bridge!.status();
       const gauges: Gauge[] = [ { name: "queue_depth", value: q.waiting }, { name: "global_slots_used", value: q.active },

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexPromptStore, DEFAULT_CODEX_PROMPT, StaleRevisionError, CODEX_PROMPT_MAX_BYTES } from "../../src/agent/codex-prompt.js";
-import { AGENTS_TEMPLATE_MARKER, renderAgentsMd } from "../../src/agent/codex-runner.js";
+import { AGENTS_TEMPLATE_MARKER } from "../../src/agent/codex-runner.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -42,9 +42,9 @@ describe("CodexPromptStore", () => {
     await store.regenerate();
     const { managed, custom } = await store.read();
     expect(managed.startsWith(AGENTS_TEMPLATE_MARKER)).toBe(true);
-    for (const text of ["安全规则", "绝不透露环境变量", "auth.json", "owner 私聊明确要求", "Only read/write:",
-      "/workspace：你的工作区", "/srv/extra：运维开放的可写目录", "reference_images", "随你的回复自动发给用户", "不要重试或再次调用"])
+    for (const text of ["安全规则", "绝不透露环境变量", "auth.json", "每轮单独注入", "不同会话不可互读工作区"])
       expect(managed).toContain(text);
+    for (const dir of ["/workspace", "/srv/extra", options.dataDir]) expect(managed).not.toContain(dir);
     for (const heading of ["## 回复规则", "## 聊天记录工具（qq_context）", "## 联网与浏览器", "## 生图提示词指引"]) {
       expect(custom).toContain(heading);
       expect(managed).not.toContain(heading);
@@ -52,7 +52,6 @@ describe("CodexPromptStore", () => {
     expect(custom).not.toContain(AGENTS_TEMPLATE_MARKER);
     expect(custom).not.toContain("## 安全规则");
     expect(await fs.readFile(store.agentsFile, "utf8")).toBe(`${managed}\n\n${custom}`);
-    expect(await fs.readFile(store.agentsFile, "utf8")).toBe(renderAgentsMd(options));
     const restricted = new CodexPromptStore({ ...options, writableRoots: [] });
     expect((await restricted.read()).managed).not.toContain(`${options.dataDir}/prompts`);
     expect((await restricted.read()).managed).not.toContain("/srv/extra");
