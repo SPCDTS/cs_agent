@@ -83,7 +83,7 @@ export function memoryHomeBody(o: MemoryOverview, now: number, recalls?: RecallC
 <a class="sheet pad tool-link" href="/memory/archives"><b>线程归档</b><small>Codex / Pi 归档线程与 Pi 压缩记录</small></a>
 <a class="sheet pad tool-link" href="/context"><b>上下文检索（旧）</b><small>qq_context 工具原样输出</small></a>
 <a class="sheet pad tool-link" href="/memory/recalls"><b>召回记录</b><small>${recalls ? `最近 24 小时 ${fmtInt(recalls.count)}${recalls.more ? '+' : ''} 次工具召回` : recalls === null ? '最近 24 小时的数量暂不可用' : 'qq_recent / qq_search / qq_message 每次调用与三级证据'}</small></a>
-<div class="sheet pad tool-link off"><b>图片记忆</b><small>待 O6：图片入库落地后启用</small></div></div></section>`;
+<a class="sheet pad tool-link" href="/memory/images"><b>图片记忆</b><small>共 ${fmtInt(o.scopes.reduce((n, s) => n + s.media_count, 0))} 张（含已跳过）</small></a></div></section>`;
   return out;
 }
 

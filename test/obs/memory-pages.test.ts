@@ -90,7 +90,7 @@ describe('记忆页面', () => {
     expect(row).toContain('<td class="num">1 / 1</td>'); // 日 / 周摘要
     for (const href of ['/memory/search', '/memory/archives', '/context']) expect(html).toContain(`href="${href}"`);
     expect(html).toContain('<a class="sheet pad tool-link" href="/memory/recalls"><b>召回记录</b><small>最近 24 小时 0 次工具召回</small></a>');
-    expect(html).not.toContain('待 O5'); expect(html).toContain('待 O6');
+    expect(html).not.toContain('待 O5'); expect(html).not.toContain('待 O6'); expect(html).toContain('共 0 张（含已跳过）');
   });
 
   it('补跑标记与未接入调度器', async () => {
@@ -109,7 +109,7 @@ describe('记忆页面', () => {
       expect(html, url).not.toContain('href="/agents" aria-current');
     }
     expect((await r.page('/memory/recalls')).html).toContain('还没有召回记录。模型调用 qq_recent / qq_search / qq_message');
-    expect((await r.page('/memory/images')).html).toContain('图片记忆：待 O6');
+    expect((await r.page('/memory/images')).html).toContain('画廊只展示模型通过 qq_image 召回并入库的图片，不会主动下载');
     for (const url of ['/memory/nope', '/memory/recalls/abc', '/memory/recalls/1/x', '/memory/recalls/999', '/memory/scopes', '/memory/scopes/', '/memory/scopes/group%3A123/extra', '/memory/summaries/', '/memory/scopes/%E0%A4%A'])
       expect((await r.page(url)).res.status, url).toBe(404);
     // /context 链到所选会话域的时间线

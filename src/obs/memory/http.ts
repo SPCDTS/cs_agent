@@ -1,3 +1,4 @@
+import { ImageReader, type ImageFilters } from './images.js';
 import { summaryLineage } from "./lineage.js";
 import { RecallReader, type RecallFilters } from "./recalls.js";
 import type { ServerResponse } from 'node:http';
@@ -118,9 +119,29 @@ function search(deps: MemoryDeps, q: URLSearchParams, reader: MemoryReader) {
 export function createMemoryRoutes(deps: MemoryDeps) {
   return async function handleMemoryRoute(url: URL, res: ServerResponse): Promise<void> {
     let reader: MemoryReader | undefined;
+    let images: ImageReader | undefined;
     try {
       const p = url.pathname, q = url.searchParams, now = deps.now?.() ?? Date.now();
       const retention = deps.aging?.config ?? deps.retention;
+      if (p === '/api/memory/images' || /^\/api\/memory\/images\/[^/]+\/[^/]+\/[^/]+$/.test(p)) {
+        images = new ImageReader(deps.context);
+        if (p === '/api/memory/images') {
+          parameters(q, ['scope', 'status', 'since', 'page']);
+          const filters: ImageFilters = { page: q.get('page') === '0' ? 0 : integer(q.get('page') || null, 'page', 0, 1_000_000),
+            since: timestamp(q.get('since') || null, 'since') };
+          if (q.get('scope')) filters.scope = scopeValue(q.get('scope')!);
+          if (q.get('status')) {
+            const status = q.get('status');
+            if (status !== 'ok' && status !== 'skipped') throw new SessionError(400, 'status 必须是 ok 或 skipped');
+            filters.status = status;
+          }
+          sessionJson(res, 200, await images.list(filters)); return;
+        }
+        parameters(q, []);
+        const parts = p.split('/'), ordinal = segment(parts[6]);
+        sessionJson(res, 200, await images.detail(segment(parts[4]), segment(parts[5]),
+          ordinal === '0' ? 0 : integer(ordinal, 'ordinal', 0, Number.MAX_SAFE_INTEGER))); return;
+      }
       if (p === '/api/memory/archives') {
         parameters(q, []); sessionJson(res, 200, await memoryArchives(deps.archives, deps.store)); return;
       }
@@ -180,6 +201,6 @@ export function createMemoryRoutes(deps: MemoryDeps) {
     } catch (error) {
       sessionJson(res, error instanceof SessionError ? error.status : 500,
         { error: error instanceof SessionError ? error.message : '记忆读取暂不可用' });
-    } finally { reader?.close(); }
+    } finally { reader?.close(); images?.close(); }
   };
 }

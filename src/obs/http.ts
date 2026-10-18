@@ -1,3 +1,7 @@
+import { imageBinary } from './memory/images.js';
+import { SessionError } from './sessions/types.js';
+import { imagesPageBody, imageDetailBody, IMAGES_NOTE } from './ui/images-pages.js';
+import type { ImagePage, ImageDetail } from './memory/types.js';
 import { isThreadKey, type ThreadKey } from "../agent/codex-runner.js";
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual, randomBytes, createHash, createHmac, randomUUID } from 'node:crypto';
@@ -23,7 +27,7 @@ import { parseBackendOverrides } from '../agent/backends/select.js';
 import { REASONING_EFFORTS } from '../agent/codex-runner.js';
 import { ASSETS } from './ui/client.js';
 import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
-import { MESSAGE_PAGE, archivesPageBody, memoryHomeBody, messageWindow, placeholderBody, rangeParams, scopePageBody, searchPageBody, summaryPageBody,
+import { MESSAGE_PAGE, archivesPageBody, memoryHomeBody, messageWindow, rangeParams, scopePageBody, searchPageBody, summaryPageBody,
   type ArchivesResult, type MemoryOverview, type MessagePage, type RecallCount, type SearchResult, type SummaryDetail } from './ui/memory-pages.js';
 import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnRecallSection, type RecallDetail, type RecallList } from './ui/recall-pages.js';
 import type { ScopeTimeline } from './memory/types.js';
@@ -290,6 +294,16 @@ export function createDashboard(opts: DashboardOptions) {
     if (url.pathname === '/api/memory' || url.pathname.startsWith('/api/memory/')) {
       if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); sessionJson(res, 405, { error: '记忆接口只支持 GET' }); return; }
       await memoryRoute(url, res); return;
+    }
+    if (url.pathname.startsWith('/media/')) {
+      if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET' }).end(); return; }
+      try {
+        const { bytes, mime } = await imageBinary(opts.config.DATA_DIR, opts.context, url.pathname.slice('/media/'.length));
+        res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'private, max-age=3600' }).end(bytes);
+      } catch (error) {
+        res.writeHead(error instanceof SessionError ? error.status : 404).end('图片不可读取');
+      }
+      return;
     }
     if (post) { await handlePost(req, res, url, nonce, host); return; }
     const q = url.searchParams;
@@ -655,7 +669,15 @@ export function createDashboard(opts: DashboardOptions) {
       if (r.status !== 200) return shell('召回详情', `<div class="flash err" role="alert">读取召回事件失败：${esc(apiError(r))}</div><p class="mt"><a href="/memory/recalls">返回召回记录</a></p>`);
       return shell(`召回 #${key}`, recallDetailBody(r.body as RecallDetail), { lead: '检索命中 → 工具实际返回 → 该回合内的调用证据，三级分别着色；第三级不等于模型采用了内容。' });
     }
-    if (p === '/memory/images') return shell('图片记忆', placeholderBody('图片记忆', 'O6'), { lead: '已入库图片的画廊（设计 §5.4）。' });
+    if (p === '/memory/images') {
+      const [o, r] = await Promise.all([overview(), api('/api/memory/images?' + q.toString())]);
+      return shell('图片记忆', imagesPageBody(q, o?.scopes ?? [], r.status === 200 ? r.body as ImagePage : { error: apiError(r) }, nonce), { lead: IMAGES_NOTE });
+    }
+    if (p.startsWith('/memory/images/')) {
+      const r = await api('/api' + p);
+      if (r.status === 404 || r.status === 400) return null;
+      return shell('图片详情', r.status === 200 ? imageDetailBody(r.body as ImageDetail, nonce) : '<p class="flash err">图片详情暂不可用</p>', { lead: IMAGES_NOTE });
+    }
     if (p === '/memory/archives') {
       const r = await api('/api/memory/archives');
       return shell('线程归档', archivesPageBody(r.status === 200 ? r.body as ArchivesResult : { error: apiError(r) }), { lead: '重置线程时归档的 Codex / Pi 会话，以及 Pi 的上下文压缩记录；点会话 ID 进入回合流。' });

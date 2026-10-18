@@ -67,3 +67,14 @@ export interface RecallEvent extends RecallRecord {
 export interface RequestEvidence {
   status: 'confirmed' | 'not_found' | 'unavailable'; turn?: string; call_id?: string; note: string;
 }
+
+export interface ImageItem {
+  scope: string; message_id: string; ordinal: number; status: 'ok' | 'skipped'; sha256: string | null;
+  bytes: number | null; mime: string | null; width: number | null; height: number | null;
+  message_ts: number; sender_name: string; excerpt: string; thumb_href: string | null; href: string | null; present: boolean;
+}
+export interface ImagePage { items: ImageItem[]; page: number; has_more: boolean; totals: { ok: number; skipped: number; bytes: number } }
+export interface ImageDetail {
+  item: ImageItem; message: { scope: string; message_id: string; ts: number; sender_name: string; excerpt: string };
+  other_media: ImageItem[]; timeline_href: string;
+}
