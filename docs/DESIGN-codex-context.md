@@ -434,3 +434,10 @@ interface ContextUsage {
 - 前端（Opus）：设置页 codex.md 编辑卡（revision 防覆盖、密文拒绝、64 KB）、受管规则只读折叠、`/codex/agents-md` 只读页；变更记录区分 codex.md / agent.md；顺带修正总览"聊天记录整理"时间显示。
 - 独立复跑：typecheck、548 测试、build、镜像构建通过；部署后 codex.md 已生成、AGENTS.md 含两段、设置页与只读页 200。
 - 补充（2026-10-18）：启动回填——codex 从 rollout 的 `token_count` 事件取 `last_token_usage`，pi 从 harness 历史恢复；部署后 owner 线程 49,975 / 500,000（4 回合）、shared 83,413 / 500,000（8 回合）立即可见。554 测试通过。
+
+### 8.7 面板表单在浏览器中被判为跨站（2026-10-18，缺陷修复，主会话验收通过）
+- 现象：本机浏览器打开面板后，设置 / agent.md / codex.md / 重置线程等表单提交一律 403「跨站请求被拒绝」；curl 正常，单测未覆盖。
+- 根因：面板响应带 `Referrer-Policy: no-referrer`，按 Fetch 规范浏览器在该策略下把非 GET 请求的 `Origin` 序列化为字面 `null`，同源检查随即拒绝。容器内无头 Chromium 复现：`Origin: null`、`Sec-Fetch-Site: same-origin`、403。
+- 修复（astra，`ca62564`）：响应头改为 `Referrer-Policy: same-origin`；同源检查仅在 `Sec-Fetch-Site: same-origin` 时接受 `Origin: null`，其余不变，CSRF 令牌校验保留。新增 4 个回归测试。
+- 独立复跑：typecheck、560 测试通过；部署后浏览器复现脚本返回 303 并跳回 `?ok=codexPrompt`，响应头为 `same-origin`。
+- 排查事故：排查中经带 TTY 的 `docker compose exec` 读写提示文件，Windows 终端把 UTF-8 中文转码，codex.md / agent.md 短暂损坏；两文件当时仍为种子默认值，已按源码模板原样恢复（SHA-256 一致）。规则：容器内文件进出一律 `docker compose exec -T` 并以管道传递。
