@@ -27,3 +27,7 @@
 - 优先使用 rollout 记录的窗口容量，然后是调用方配置或现有容量存储；均不可用时保留现有 Codex 400000 / Pi 200000 的显示回退，并将 source 明确标为 default。
 - 只读检查的真实 rollout 未包含压缩样本；相关 fixture 为按官方结构构造的匿名序列。trace fixture 来自官方 schema，尚未用本次真实模型回合产物复核。未知新 schema 会降级为 unavailable。
 - 没有部署 Docker、修改 `.env` 或写入运行 `data/`；词表是否随镜像分发通过 Dockerfile 与生产依赖路径核对。
+
+## O6 类别可用性补充
+
+类别新增可选 `unavailable_items: number`，仅在存在不可用条目时返回其数量；旧字段不变。类别 provenance 取可见条目中占比最高的来源，同票依次优先 recorded、reconstructed、estimated。全部不可用或没有记录时仍为 unavailable。页面在部分不可用的类别主来源旁显示“部分不可用 N 条”；全部不可用时仍显示“不可用”。类别估算、估算总计及占窗口百分比只计可见部分，不把未知占用当作零；备注明确说明统计边界。

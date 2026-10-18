@@ -10,6 +10,7 @@ import { CodexSessionAdapter } from '../../src/obs/sessions/codex-adapter.js';
 import { PiSessionAdapter, type PiSessionSource } from '../../src/obs/sessions/pi-adapter.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { contextBody } from '../../src/obs/ui/context-view.js';
 
 const clean: Array<() => unknown | Promise<unknown>> = [];
 afterEach(async () => { for (const fn of clean.splice(0).reverse()) await fn(); });
@@ -88,6 +89,7 @@ describe('Codex 上下文分析', () => {
     const instructions = result.messages.filter(m => m.category === 'instructions');
     expect(instructions.map(m => m.preview)).toEqual(['匿名基础规则', '当前受管规则', '当前自定义规则']);
     expect(instructions.map(m => m.provenance)).toEqual(['recorded', 'reconstructed', 'reconstructed']);
+    expect(result.categories.find(c => c.key === 'instructions')).toMatchObject({ provenance: 'reconstructed' });
     expect(result.categories.find(c => c.key === 'tools')?.provenance).toBe('estimated');
     expect(result.notes.join('')).toContain('可能与回合当时不同');
   });
@@ -146,6 +148,22 @@ describe('Codex 上下文分析', () => {
 });
 
 describe('Codex 官方 trace', () => {
+  it.each([10, 0])('历史含 %s 条可见消息与一条加密 reasoning：主来源和不可用计数独立', async count => {
+    const r = await rig(), b = await traceBundle(r.home);
+    await json(path.join(b.payloads, 'request.json'), { input: [
+      ...Array.from({ length: count }, (_, n) => ({ type: 'message', role: 'user', content: '可见消息 ' + n })),
+      { type: 'reasoning', encrypted_content: 'private-reasoning', summary: [] },
+    ] });
+    const result = await r.analyze(r.turns[1].turn, 'before');
+    const category = result.categories.find(c => c.key === 'history')!;
+    expect(category).toMatchObject({ items: count + 1, provenance: count ? 'recorded' : 'unavailable', unavailable_items: 1 });
+    expect(category.tokens.estimated).toBe(count ? result.estimated.total : undefined);
+    expect(category.note).toContain('估算与百分比仅覆盖可见部分');
+    const html = contextBody({ backend: 'codex', session: 'context-fixture' }, result);
+    expect(html).not.toContain('private-reasoning');
+    if (count) expect(html).toContain('已记录</span> <span class="s-warn">部分不可用 1 条');
+    else expect(html).not.toContain('部分不可用');
+  });
   it('不存在时标不可用；存在时优先精确请求、工具及同请求实测', async () => {
     const r = await rig(), turn = r.turns[1].turn;
     expect((await r.analyze(turn, 'before')).notes.join('')).toContain('trace 不可用');

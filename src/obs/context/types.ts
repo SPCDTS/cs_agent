@@ -8,7 +8,7 @@ export type ContextAnalysis = {
   measured?: { input: number; cached?: number; at: number; stale: boolean; source: string };
   estimated: { total: number; tokenizer: string }; unexplained?: number;
   categories: Array<{ key: CategoryKey; label: string; items: number;
-    tokens: { estimated?: number; measured?: number }; provenance: Provenance; note?: string }>;
+    tokens: { estimated?: number; measured?: number }; provenance: Provenance; unavailable_items?: number; note?: string }>;
   messages: Array<{ index: number; kind: string; category: string; provenance: string;
     tokens: { estimated?: number; measured?: number }; preview: string; ref?: ContentRef; ts?: number; callId?: string }>;
   notes: string[];

@@ -18,7 +18,11 @@ function redactContext(value: unknown): unknown {
   return value;
 }
 function provenance(messages: HistoryMessage[]): Provenance {
-  return (['unavailable', 'estimated', 'reconstructed', 'recorded'] as const).find(p => messages.some(m => m.provenance === p)) ?? 'unavailable';
+  // 不可用项单独计数；可见来源按条目多数决定，同票优先可信度更高者。
+  const sources = ['recorded', 'reconstructed', 'estimated'] as const;
+  const counts = sources.map(p => messages.filter(m => m.provenance === p).length);
+  const most = Math.max(...counts);
+  return most ? sources[counts.indexOf(most)] : 'unavailable';
 }
 export async function analyzeContext(adapters: AdapterSet, backend: 'codex' | 'pi', sessionId: string, options: ContextOptions = {}): Promise<ContextAnalysis> {
   if (options.phase !== undefined && options.phase !== 'before' && options.phase !== 'after') throw new SessionError(400, 'phase 必须是 before 或 after');
@@ -41,19 +45,19 @@ export async function analyzeContext(adapters: AdapterSet, backend: 'codex' | 'p
   const capacity = configured ?? stored;
   const window = history.window ?? (capacity && capacity > 0 ? { tokens: capacity, source: configured ? 'configured.windowTokens' : 'context_usage.windowTokens' }
     : { tokens: backend === 'codex' ? 400000 : 200000, source: 'default (model window unavailable)' });
-  const categories = (Object.keys(labels) as CategoryKey[]).map(key => {
-    const items = history.messages.filter(m => m.category === key), available = items.filter(m => m.tokens.estimated !== undefined);
+  const categories: ContextAnalysis['categories'] = (Object.keys(labels) as CategoryKey[]).map(key => {
+    const items = history.messages.filter(m => m.category === key), available = items.filter(m => m.provenance !== 'unavailable' && m.tokens.estimated !== undefined);
+    const unavailable = items.filter(m => m.provenance === 'unavailable').length;
     return { key, label: labels[key], items: items.length, tokens: available.length ? { estimated: available.reduce((n, m) => n + m.tokens.estimated!, 0) } : {},
-      provenance: provenance(items), ...(items.length ? {} : { note: '没有可见记录，不能据此认定实际占用为零。' }) };
+      provenance: provenance(items), ...(unavailable ? { unavailable_items: unavailable,
+        note: '估算与百分比仅覆盖可见部分，不可用条目的占用未知。' } : {}),
+      ...(items.length ? {} : { note: '没有可见记录，不能据此认定实际占用为零。' }) };
   });
   const notes = [...history.notes, TOKEN_NOTE];
   const hidden = history.messages.filter(m => m.hidden).length;
-  if (hidden) {
-    const other = categories.find(c => c.key === 'other')!;
-    other.provenance = 'unavailable'; other.note = `${hidden} 条消息含不可见正文；仅对可见部分估算。`;
-  }
+  if (hidden) notes.push(`${hidden} 条消息含不可见正文；估算与百分比仅覆盖可见部分。`);
   if (history.messages.some(m => m.truncated)) notes.push('部分正文超过 2 MiB，估算仅覆盖上限内的内容。');
-  const total = history.messages.reduce((sum, m) => sum + (m.tokens.estimated ?? 0), 0);
+  const total = history.messages.reduce((sum, m) => sum + (m.provenance === 'unavailable' ? 0 : m.tokens.estimated ?? 0), 0);
   const result: ContextAnalysis = { backend, session: sessionId, at: { turn, phase }, generatedAt: Date.now(), window,
     measured: history.measured, estimated: { total, tokenizer: history.tokenizer ?? await tokenizerName() },
     ...(history.measured ? { unexplained: history.measured.input - total } : {}), categories,
