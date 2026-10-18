@@ -43,6 +43,21 @@ it('八个页面和票据详情可离线渲染；HTML 转义；共享上下文�
   console.log('HTML_BYTES '+JSON.stringify(sizes));
   const text=await (await fetch(base+'/context?scope=group%3A7')).text();expect(text).toContain(formatRecent(context.recent({kind:'scope',scope:'group:7'},{limit:30}),2500,{ids:true}));
 });
+it('favicon 无需鉴权且缓存一天，页面 head 引用同一个内嵌 SVG',async()=>{
+  const {base}=await rig('fake-panel-secret');
+  const res=await fetch(base+'/favicon.ico');
+  expect(res.status).toBe(200);
+  expect(res.headers.get('content-type')).toBe('image/svg+xml');
+  expect(res.headers.get('cache-control')).toBe('public, max-age=86400');
+  expect(res.headers.get('set-cookie')).toBeNull();
+  const icon=await res.text();
+  expect(icon).toMatch(/^<svg\b[^>]*xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+  expect(icon).toContain('<rect'); expect(icon).toContain('#2b47b5');
+  expect(icon).not.toContain('fake-panel-secret'); expect(icon).not.toContain('fake-napcat-secret');
+  expect(icon).not.toContain('<script'); expect(Buffer.byteLength(icon)).toBeLessThan(1024);
+  const page=await fetch(base+'/'); expect(page.status).toBe(401);
+  expect(await page.text()).toMatch(/<head>[\s\S]*<link rel="icon" href="\/favicon\.ico">[\s\S]*<\/head>/);
+});
 it('图片路由允许本票据位图，拒绝编码穿越、Windows 路径、链接和非图片',async()=>{
   const {base,config,dir}=await rig();expect((await fetch(base+'/images/ticket1/call-1/result.png')).status).toBe(200);
   writeFileSync(path.join(config.imagesDir,'ticket1','fake.png'),'not an image, padded');

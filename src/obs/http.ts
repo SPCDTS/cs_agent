@@ -26,6 +26,8 @@ import { contextBody as contextAnalysisBody, contextError, contextUnavailable, t
 import type { Block, ObservedTurn, SessionRef } from './sessions/types.js';
 
 const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
+// 与顶栏的蓝色方框及两条横线保持一致；静态图形不含运行数据。
+const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="7" y="4" width="18" height="24" rx="2" fill="none" stroke="#2b47b5" stroke-width="3"/><path d="M11 13h10M11 19h10" stroke="#2b47b5" stroke-width="3"/></svg>';
 const MAX_SSE = 20;
 /** SSE 写队列：未写出字节（队列 + socket 缓冲）超过上限，或一次 drain 等待超过时限才断开慢客户端。 */
 const SSE_MAX_PENDING = 2 * 1024 * 1024;
@@ -246,6 +248,9 @@ export function createDashboard(opts: DashboardOptions) {
     const host = req.headers.host ?? '';
     if (!/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host)) { res.writeHead(403).end(); return; }
     if (req.method !== 'GET' && req.method !== 'POST') { res.writeHead(405).end(); return; }
+    if (req.method === 'GET' && url.pathname === '/favicon.ico') {
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' }).end(FAVICON); return;
+    }
     const post = req.method === 'POST';
     {
       const cookie = /(?:^|;\s*)obs_token=([^;]*)/.exec(req.headers.cookie ?? '')?.[1] ?? '';

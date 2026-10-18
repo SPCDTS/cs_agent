@@ -17,7 +17,7 @@ export function page(o: PageOptions): string {
   const active = (url: string) => url === '/' ? o.path === '/' : under(url) || (NAV_ALIASES[url] ?? []).some(under);
   const nav = NAV.map(([url, label]) => `<a href="${url}"${active(url) ? ' aria-current="page"' : ''}>${url === '/live' ? '<i class="live-dot" aria-hidden="true"></i>' : ''}${label}</a>`).join('');
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark"><title>${esc(o.title)} · cs-agent 值守台</title><style nonce="${o.nonce}">${THEME_CSS}</style></head>
+<link rel="icon" href="/favicon.ico"><meta name="color-scheme" content="light dark"><title>${esc(o.title)} · cs-agent 值守台</title><style nonce="${o.nonce}">${THEME_CSS}</style></head>
 <body><header class="top"><div class="top-in"><a class="mark" href="/"><i aria-hidden="true"></i>cs-agent <span>值守台</span></a><nav class="tabs" aria-label="主导航">${nav}</nav></div></header>
 <main><div class="head"><div><h1>${esc(o.title)}</h1>${o.lead ? `<p>${o.lead}</p>` : ''}</div>${o.actions ? `<div class="actions">${o.actions}</div>` : ''}</div>
 ${o.flash ? `<div class="flash${o.flash.error ? ' err' : ''}" role="status">${esc(o.flash.text)}</div>` : ''}${o.body}</main>
