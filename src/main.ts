@@ -1,3 +1,6 @@
+import { MediaRecall } from "./context/media.js";
+import { RecallTokens, startMediaRecallServer } from "./context/media-recall-server.js";
+import { createOneBotClient } from "./qq/onebot.js";
 import { ContextUsageStore } from "./agent/context-usage.js";
 import { loadObsToken, publicHealth } from "./obs/token.js";
 import { ObsStore } from "./obs/store.js";
@@ -99,6 +102,11 @@ async function main(): Promise<void> {
     return bridge;
   };
 
+  const mediaRecall = new MediaRecall({ store, dataDir: cfg.DATA_DIR,
+    client: createOneBotClient(cfg.NAPCAT_HTTP_URL, cfg.NAPCAT_TOKEN, 15000), getTicket: ticket => getBridge().getTicket(ticket) });
+  const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET);
+  const recallServer = await startMediaRecallServer(recallTokens, cfg.MEDIA_RECALL_PORT);
+
   // comfy-cli 只对 loopback 目标获取 object_info：非 loopback 的 COMFYUI_URL 经容器内转发
   const comfyProxy =
     cfg.COMFY_MODE === "mcp" && !isLoopbackUrl(cfg.COMFYUI_URL)
@@ -116,6 +124,7 @@ async function main(): Promise<void> {
   });
   const codex = new CodexRunner({
     command: [cfg.CODEX_BIN],
+    recallTokens, mediaRecallPort: recallServer.port,
     contextUsage, model: cfg.CODEX_MODEL, contextWindow: cfg.CODEX_CONTEXT_WINDOW,
     codexHome: cfg.codexHome,
     workspaceDir: cfg.WORKSPACE_DIR,
@@ -146,6 +155,7 @@ async function main(): Promise<void> {
 
   const pi = await PiBackend.open({
     dataDir: cfg.DATA_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
+    mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
     thinkingLevel, store, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
@@ -323,6 +333,7 @@ async function main(): Promise<void> {
     server.close();
     alerts.stop();
     aging.stop();
+    await recallServer.close();
     await bridge!.stop().catch(() => undefined);
     await closeAgentHarnesses(harness, pi);
     await contextUsage.close().catch(() => log.warn("context usage shutdown flush failed"));

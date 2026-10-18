@@ -1,3 +1,6 @@
+import { recallTool } from "./recall.js";
+import type { MediaRecall } from "../../context/media.js";
+import { RECALL_QUOTA_MESSAGE } from "../../context/media-recall-server.js";
 import { usageFields } from "../../obs/usage.js";
 import { classifyFailure, diagnosticFailure, type Failure } from "../../obs/errors.js";
 import { trace } from "../../obs/trace.js";
@@ -18,6 +21,8 @@ export interface PiToolsOptions {
   getHarness: () => Harness;
   web?: DeepSeekWeb;
   maxContextChars?: number;
+  mediaRecall?: Pick<MediaRecall, "recall">;
+  mediaRecallMaxPerTicket?: number;
 }
 
 const output = (text: string) => ({ output: [{ type: "text" as const, text }] });
@@ -83,8 +88,8 @@ export function createPiExtension(opts: PiToolsOptions) {
           return { block: reason };
         };
         if (Date.now() >= bound.deadline) return block("pi 请求已超时");
-        const kind = call.name.startsWith("qq_") ? "history" : call.name;
-        const limit = kind === "generate_image" ? 2 : 4;
+        const kind = call.name === "qq_image" ? "qq_image" : call.name.startsWith("qq_") ? "history" : call.name;
+        const limit = kind === "qq_image" ? opts.mediaRecallMaxPerTicket ?? 5 : kind === "generate_image" ? 2 : 4;
         const allowed = await opts.getHarness().commit(async tx => {
           const doc = await tx.doc(PiRequestDoc, api.conversationId);
           if (doc.ticket !== bound.ticket) return false;
@@ -96,7 +101,7 @@ export function createPiExtension(opts: PiToolsOptions) {
           doc.calls[String(api.taskId)] = { kind, ordinal: used + 1 };
           return true;
         }, context);
-        return allowed ? undefined : block(`${call.name} 已达到本轮调用上限（${limit} 次）`);
+        return allowed ? undefined : block(kind === "qq_image" ? RECALL_QUOTA_MESSAGE : `${call.name} 已达到本轮调用上限（${limit} 次）`);
       }, afterTool: async (call, result, api, context) => {
         const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);
         if (bound?.ticket) trace.event(bound.ticket, "tool:" + call.name, { status: result.isError ? "failed" : "ok",
@@ -108,6 +113,7 @@ export function createPiExtension(opts: PiToolsOptions) {
       } }),
     ],
     tools: [
+      recallTool(opts.mediaRecall),
       defineTool({ name: "web_search", description: "搜索事实资料，返回标题、日期、摘要与来源链接。", replay: "safe",
         parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 128 }), count: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })) }, { additionalProperties: false }),
         execute: async (args, api, context) => boundary(api.taskId,"deepseek",async () => output(await web.search(args.query, args.count, context.abortSignal))),

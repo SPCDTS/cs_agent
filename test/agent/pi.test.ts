@@ -1,3 +1,4 @@
+import type { MediaRecall } from "../../src/context/media.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { piContextCapacity } from "../../src/agent/pi-context-usage.js";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
@@ -42,7 +43,7 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall"> } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   const contextUsage = new ContextUsageStore(dir);
   cleanup.push(() => contextUsage.close());
@@ -63,6 +64,7 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
   const pi = await PiBackend.open({ dataDir: dir, models, model: { provider: model.provider, modelId: model.id },
+    mediaRecall: opts.mediaRecall,
     thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
     ...(opts.disk ? {} : { storage: new MemoryStorage() }),
@@ -72,6 +74,20 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
 }
 
 describe("pi durable backend", () => {
+  it("qq_image 绑定请求范围，独立五次限额，结果仅有路径文本", async () => {
+    let seen: TranscriptContext | undefined;
+    const recall = vi.fn(async () => ({ text: "图1: /data/media/ab/test.png（1×1）", images: [{ path: "/data/media/ab/test.png", width: 1, height: 1 }] }));
+    const s = await setup([...Array.from({ length: 6 }, () => call("qq_image", { message_id: "123" })), call("qq_recent"),
+      ctx => { seen = ctx; return reply(); }], { mediaRecall: { recall } });
+    await s.pi.handle(request("recall"), handleContext());
+    expect(recall).toHaveBeenCalledTimes(5);
+    expect(recall).toHaveBeenCalledWith({ kind: "scope", scope: "group:7" }, "123", expect.any(AbortSignal));
+    expect(results(seen!)).toContain("本轮召回次数已用完");
+    expect(results(seen!)).toContain("/data/media/ab/test.png");
+    const returned = seen!.messages.filter(m => m.role === "toolResult" && m.toolName === "qq_image");
+    expect(returned.every(m => m.role === "toolResult" && m.content.every(c => c.type === "text"))).toBe(true);
+    expect(results(seen!)).toContain("没有记录");
+  });
   it("calls web_search through the faux model, then returns the final answer and source header", async () => {
     let seen: TranscriptContext | undefined;
     const s = await setup([call("web_search", { query: "CS2", count: 3 }), ctx => { seen = ctx; return reply("查到了"); }]);

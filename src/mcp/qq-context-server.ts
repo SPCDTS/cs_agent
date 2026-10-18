@@ -19,12 +19,19 @@ export interface QQContextDeps {
   /** 惰性打开只读库（库文件可能尚未创建）；抛错时工具返回错误文本 */
   openStore: () => ContextStore;
   maxChars?: number;
+  recall?: (messageId: string) => Promise<string>;
 }
 
 // 三个工具都只读当前会话的上下文库：声明只读注解（与审批模式无关，供客户端按注解判断）。
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 
 const TOOLS = [
+  {
+    name: "qq_image",
+    description: "按消息 id 召回图片，只返回本地路径文本，用文件工具打开查看；每轮最多 5 次。",
+    inputSchema: { type: "object", properties: { message_id: { type: "string", minLength: 1, maxLength: 128 } }, required: ["message_id"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
   {
     name: "qq_recent",
     description:
@@ -129,8 +136,15 @@ export function createQQContextServer(deps: QQContextDeps): Server {
     },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS.map((t) => ({ ...t })) as never }));
-  server.setRequestHandler(CallToolRequestSchema, async (req) =>
-    callQQContextTool(deps, req.params.name, (req.params.arguments ?? {}) as Record<string, unknown>),
-  );
+  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+    const args = req.params.arguments ?? {};
+    if (req.params.name !== "qq_image") return callQQContextTool(deps, req.params.name, args);
+    if (!deps.access) return text("qq_context 不可用：未配置有效的访问范围（QQ_ACCESS）。", true);
+    if (Object.keys(args).length !== 1 || typeof args.message_id !== "string" || !args.message_id.trim() || args.message_id.length > 128) return text("仅接受 message_id", true);
+    try {
+      if (!deps.recall) throw new Error("图片召回未启用");
+      return text(await deps.recall(args.message_id));
+    } catch (err) { return text((err as Error).message, true); }
+  });
   return server;
 }

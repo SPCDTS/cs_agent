@@ -1,3 +1,4 @@
+import { RecallTokens } from "../../src/context/media-recall-server.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -561,5 +562,32 @@ describe("codex 归档轮换", () => {
     expect(rows).toHaveLength(200); expect(rows[0].thread_id).toBe("old-7");
     expect(rows.slice(-2).map(row => row.thread_id).sort()).toEqual(["new-owner", "new-shared"]);
     expect(await runner.readThreadIds()).toEqual({ owner: null, shared: null });
+  });
+});
+
+
+describe("codex 召回令牌生命周期", () => {
+  it.each(["success", "failure", "timeout", "spawn"])("每次 exec 注入并在 %s 后撤销", async mode => {
+    const dir = tmp();
+    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) });
+    const issue = vi.spyOn(tokens, "issue");
+    const opts = setupOpts(dir);
+    if (mode === "failure") seedShared(dir, { thread_id: "flaky-recall" });
+    const runner = new CodexRunner({ ...opts, recallTokens: tokens, mediaRecallPort: 8791,
+      ...(mode === "spawn" ? { command: [path.join(dir, "missing.exe")] } : {}),
+      timeoutMs: mode === "timeout" ? 500 : 10_000,
+      env: { ...opts.env, FAKE_CODEX_SLEEP_MS: mode === "timeout" ? "20000" : "0" },
+    });
+    try { await runner.ask("test", { ticket: "tk", qqAccess: "group:7" }); } catch { /* 生命周期同样覆盖异常 */ }
+    expect(issue).toHaveBeenCalledOnce();
+    const lease = issue.mock.results[0]!.value;
+    expect(tokens.valid(lease.token)).toBe(false);
+    expect(issue.mock.calls[0]![0]).toMatchObject({ ticket: "tk", access: { kind: "scope", scope: "group:7" } });
+    if (mode !== "spawn") {
+      const argv = JSON.parse(readFileSync(path.join(dir, "calls.jsonl"), "utf8").split("\n")[0]!).argv as string[];
+      expect(argv).toContain('mcp_servers.qq_context.env.QQ_RECALL_TOKEN="' + lease.token + '"');
+      expect(argv).toContain('mcp_servers.qq_context.env.MEDIA_RECALL_PORT="8791"');
+    }
+    tokens.close();
   });
 });
