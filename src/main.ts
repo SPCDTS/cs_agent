@@ -285,7 +285,7 @@ async function main(): Promise<void> {
     codex: codexStatus, pi: piStatus, piSessions: pi.sessionSource, settings, live,
     resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
-    onPurge: now => purgeCodexTrace(cfg.codexHome, cfg.CODEX_TRACE_RETENTION_DAYS, now).then(() => undefined,
+    onPurge: now => purgeCodexTrace(cfg.codexHome, cfg.CODEX_TRACE_RETENTION_DAYS, now, cfg.CODEX_TRACE_MAX_MB).then(() => undefined,
       error => { log.warn("codex trace purge failed", { error }); }),
     gauges: async () => {
       const q = dispatcher.status(), ws = bridge!.status();

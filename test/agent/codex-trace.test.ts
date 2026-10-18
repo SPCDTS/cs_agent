@@ -38,6 +38,58 @@ describe("Codex 官方 trace", () => {
     }
   });
 
+  it("总量默认 512 MiB，0 不限，拒绝非法或超出安全字节数的配置", async () => {
+    expect(loadConfig({}).CODEX_TRACE_MAX_MB).toBe(512);
+    expect(loadConfig({ CODEX_TRACE_MAX_MB: "0" }).CODEX_TRACE_MAX_MB).toBe(0);
+    expect(loadConfig({ CODEX_TRACE_MAX_MB: "128" }).CODEX_TRACE_MAX_MB).toBe(128);
+    for (const value of ["-1", "1.5", "NaN", "Infinity", "9007199254740991"]) {
+      expect(() => loadConfig({ CODEX_TRACE_MAX_MB: value })).toThrow(/CODEX_TRACE_MAX_MB/);
+      await expect(purgeCodexTrace(temp(), 14, Date.now(), Number(value))).rejects.toThrow(/总量上限/);
+    }
+  });
+
+  it("先删除过期文件，再跨子目录按 mtime 清理到总量恰好达标", async () => {
+    const dir = temp(), root = path.join(dir, "trace"), nested = path.join(root, "nested");
+    mkdirSync(nested, { recursive: true });
+    const now = Date.UTC(2026, 9, 18), mb = 1024 * 1024;
+    const files = [
+      [path.join(root, "expired.json"), now - 15 * 86_400_000, 100],
+      [path.join(nested, "z-oldest.json"), now - 3000, mb / 2],
+      [path.join(root, "a-middle.json"), now - 2000, mb / 2],
+      [path.join(root, "latest.json"), now, mb],
+    ] as const;
+    for (const [file, time, size] of files) { writeFileSync(file, Buffer.alloc(size)); utimesSync(file, time / 1000, time / 1000); }
+    expect(await purgeCodexTrace(dir, 14, now, 1)).toEqual({ removed: 3, bytes: mb + 100 });
+    expect(files.map(([file]) => existsSync(file))).toEqual([false, false, false, true]);
+    expect(existsSync(nested)).toBe(true);
+    expect(await purgeCodexTrace(dir, 14, now, 1)).toEqual({ removed: 0, bytes: 0 });
+  });
+
+  it("按天清理后未超限时不额外删除；0 总量上限仍执行过期清理", async () => {
+    const dir = temp(), root = path.join(dir, "trace"); mkdirSync(root);
+    const old = path.join(root, "old"), recent = path.join(root, "recent");
+    writeFileSync(old, Buffer.alloc(1024 * 1024)); utimesSync(old, 0, 0);
+    writeFileSync(recent, Buffer.alloc(1024 * 1024));
+    expect(await purgeCodexTrace(dir, 14, Date.now(), 1)).toEqual({ removed: 1, bytes: 1024 * 1024 });
+    writeFileSync(old, "old"); utimesSync(old, 0, 0);
+    writeFileSync(recent, Buffer.alloc(2 * 1024 * 1024));
+    expect(await purgeCodexTrace(dir, 14, Date.now(), 0)).toEqual({ removed: 1, bytes: 3 });
+    expect(existsSync(recent)).toBe(true);
+  });
+
+  it("关闭按天清理仍可独立限制总量；链接目标不计入容量也不删除", async () => {
+    const dir = temp(), outside = temp(), root = path.join(dir, "trace"); mkdirSync(root);
+    const external = path.join(outside, "external"); writeFileSync(external, Buffer.alloc(2 * 1024 * 1024));
+    symlinkSync(outside, path.join(root, "linked"), "junction");
+    const file = path.join(root, "old"); writeFileSync(file, Buffer.alloc(1024 * 1024)); utimesSync(file, 0, 0);
+    expect(await purgeCodexTrace(dir, 0, Date.now(), 1)).toEqual({ removed: 0, bytes: 0 });
+    writeFileSync(file, Buffer.alloc(2 * 1024 * 1024));
+    expect(await purgeCodexTrace(dir, 0, Date.now(), 0)).toEqual({ removed: 0, bytes: 0 });
+    expect(await purgeCodexTrace(dir, 0, Date.now(), 1)).toEqual({ removed: 1, bytes: 2 * 1024 * 1024 });
+    expect(existsSync(external)).toBe(true);
+    expect(existsSync(path.join(root, "linked"))).toBe(true);
+  });
+
   it("创建 trace 目录并用精确环境变量将子进程限制在 CODEX_HOME 下", async () => {
     const dir = temp();
     await runner(dir).ask("测试");
@@ -61,10 +113,10 @@ describe("Codex 官方 trace", () => {
     const files = [[path.join(root, "old.jsonl"), cutoff - 1000], [path.join(nested, "old.json"), cutoff - 1000],
       [path.join(root, "boundary.json"), cutoff], [path.join(root, "recent.json"), now], [path.join(dir, "outside.json"), cutoff - 1000]] as const;
     for (const [file, time] of files) { writeFileSync(file, "payload"); utimesSync(file, time / 1000, time / 1000); }
-    expect(await purgeCodexTrace(dir, 14, now)).toBe(2);
+    expect(await purgeCodexTrace(dir, 14, now)).toEqual({ removed: 2, bytes: 14 });
     expect(files.map(([file]) => existsSync(file))).toEqual([false, false, true, true, true]);
     expect(existsSync(nested)).toBe(true);
-    expect(await purgeCodexTrace(dir, 14, now)).toBe(0);
+    expect(await purgeCodexTrace(dir, 14, now)).toEqual({ removed: 0, bytes: 0 });
   });
 
   it("不跟随 trace 内目录链接或作为 trace 根目录的链接", async () => {
@@ -72,19 +124,19 @@ describe("Codex 官方 trace", () => {
     mkdirSync(root);
     const file = path.join(outside, "old.json"); writeFileSync(file, "outside"); utimesSync(file, 0, 0);
     symlinkSync(outside, linked, "junction");
-    expect(await purgeCodexTrace(dir, 14)).toBe(0);
+    expect(await purgeCodexTrace(dir, 14)).toEqual({ removed: 0, bytes: 0 });
     expect(existsSync(file)).toBe(true);
     const other = temp(); symlinkSync(outside, path.join(other, "trace"), "junction");
-    expect(await purgeCodexTrace(other, 14)).toBe(0);
+    expect(await purgeCodexTrace(other, 14)).toEqual({ removed: 0, bytes: 0 });
     expect(existsSync(file)).toBe(true);
   });
 
   it("关闭时不清除历史 trace，缺少目录时不报错", async () => {
     const dir = temp();
-    expect(await purgeCodexTrace(dir, 14)).toBe(0);
+    expect(await purgeCodexTrace(dir, 14)).toEqual({ removed: 0, bytes: 0 });
     mkdirSync(path.join(dir, "trace"));
     const file = path.join(dir, "trace", "old.json"); writeFileSync(file, "old"); utimesSync(file, 0, 0);
-    expect(await purgeCodexTrace(dir, 0)).toBe(0);
+    expect(await purgeCodexTrace(dir, 0)).toEqual({ removed: 0, bytes: 0 });
     expect(existsSync(file)).toBe(true);
     await expect(purgeCodexTrace(dir, -1)).rejects.toThrow(/保留期/);
   });

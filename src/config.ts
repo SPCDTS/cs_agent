@@ -67,6 +67,8 @@ const EnvSchema = z.object({
   CODEX_TIMEOUT_SEC: int(600),
   /** 官方 rollout trace 保留天数；0 禁用请求负载记录。 */
   CODEX_TRACE_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(14),
+  /** 官方 trace 普通文件总量上限（MiB）；0 表示不限。 */
+  CODEX_TRACE_MAX_MB: z.coerce.number().int().nonnegative().max(Math.floor(Number.MAX_SAFE_INTEGER / 1024 / 1024)).default(512),
 
   AGENT_MODEL_PROVIDER: z.string().default("deepseek"),
   AGENT_MODEL_ID: z.string().default("deepseek-flash"),
