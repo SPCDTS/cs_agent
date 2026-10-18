@@ -76,6 +76,45 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
 }
 
 describe("pi durable backend", () => {
+  it("面板公开源分页读取真实历史与指定条目上下文，重置后仍列出归档", async () => {
+    const s = await setup([reply("历史回复"), reply("owner 回复")]);
+    await s.pi.handle(request("source-group"), handleContext());
+    await s.pi.handle(request("source-owner", true), handleContext());
+    const id = String((await s.pi.readThreadIds())["group:7"]);
+    const sessions = await s.pi.sessionSource.listConversations();
+    expect(sessions.find(item => item.id === id)).toMatchObject({ label: "group:7", scope: "group:7", status: "active" });
+    expect(sessions.find(item => item.label === "owner")).toMatchObject({ scope: "owner", status: "active" });
+    const first = await s.pi.sessionSource.entries(id, undefined, 1);
+    expect(first.items).toHaveLength(1);
+    expect(first.hasMore).toBe(true);
+    const later = await s.pi.sessionSource.entries(id, first.cursor, 256);
+    expect(later.items.every(item => item.id > first.items[0]!.id)).toBe(true);
+    const userEntry = [...first.items, ...later.items].find(item => item.kind === "pi.user")!;
+    const historical = await s.pi.sessionSource.context(id, String(userEntry.id));
+    expect(historical.messages.some(message => message.role === "user")).toBe(true);
+    expect(historical.messages.some(message => message.role === "assistant")).toBe(false);
+    expect((await s.pi.sessionSource.context(id)).messages.some(message => message.role === "assistant")).toBe(true);
+    await s.pi.resetThread("group:7");
+    expect((await s.pi.sessionSource.listConversations()).find(item => item.id === id))
+      .toMatchObject({ label: "group:7", scope: "group:7", status: "archived" });
+    expect((await s.pi.sessionSource.entries(id)).items).toHaveLength(first.items.length + later.items.length);
+    await expect(s.pi.sessionSource.entries("../../private")).rejects.toThrow("非法");
+  });
+
+  it("面板公开源使用 watchEvents 通知已提交条目且取消订阅有效", async () => {
+    const s = await setup([reply("初始回复"), reply("新增回复"), reply("取消后回复")]);
+    await s.pi.handle(request("source-live-1"), handleContext());
+    const id = String((await s.pi.readThreadIds())["group:7"]);
+    const changed = vi.fn();
+    const stop = await s.pi.sessionSource.subscribe!(id, changed);
+    await s.pi.handle(request("source-live-2"), handleContext());
+    await vi.waitFor(() => expect(changed).toHaveBeenCalled());
+    stop();
+    const count = changed.mock.calls.length;
+    await s.pi.handle(request("source-live-3"), handleContext());
+    expect(changed).toHaveBeenCalledTimes(count);
+  });
+
   it.each(["group", "owner", "private"])("所有 %s 会话注册四个内置工具并在独立工作目录执行", async kind => {
     let seen: TranscriptContext | undefined;
     const s = await setup([call("write", { path: "note.txt", content: "原文" }),

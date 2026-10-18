@@ -7,6 +7,9 @@ import type { ContextStore } from '../context/store.js';
 import { callQQContextTool } from '../mcp/qq-context-server.js';
 import { logBuffer, type LogLine } from '../log.js';
 import { redact, redactText } from './redact.js';
+import { CodexSessionAdapter } from './sessions/codex-adapter.js';
+import { PiSessionAdapter, type PiSessionSource } from './sessions/pi-adapter.js';
+import { createSessionRoutes, sessionJson, type SessionAdapters } from './sessions/http.js';
 import type { ObsEvent, ObsStore } from './store.js';
 import { loadImage } from '../qq/image.js';
 import { trace as defaultTrace, type Trace } from './trace.js';
@@ -63,6 +66,10 @@ export interface DashboardOptions {
   config: Config; store: ObsStore; context: ContextStore;
   health: () => unknown | Promise<unknown>; queue: () => unknown;
   codex: () => Promise<unknown>; pi: () => Promise<unknown>;
+  /** pi-durable 的只读公开接口；同时为后续历史上下文分析保留 context(at)。 */
+  piSessions?: PiSessionSource;
+  /** 可注入适配器，便于测试或其它宿主复用相同鉴权与路由。 */
+  sessionAdapters?: SessionAdapters;
   /** 运行时设置（/settings 可写）；缺省时设置页只读展示配置 */
   settings?: SettingsStore;
   /** 进行中会话的实时总线（/live） */
@@ -189,6 +196,12 @@ const ticketStatus = (events: ObsEvent[]) => {
 
 export function createDashboard(opts: DashboardOptions) {
   const clients = new Set<ServerResponse>();
+  let closed = false;
+  const adapters: SessionAdapters = opts.sessionAdapters ?? (opts.store.degraded ? {} : {
+    codex: new CodexSessionAdapter({ store: opts.store, codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR }),
+    ...(opts.piSessions ? { pi: new PiSessionAdapter({ store: opts.store, source: opts.piSessions }) } : {}),
+  });
+  const sessionRoute = createSessionRoutes(adapters, sse);
   const token = opts.config.OBS_TOKEN;
   const csrf = token ? csrfToken(token) : '';
   const tracer = opts.trace ?? defaultTrace;
@@ -209,6 +222,7 @@ export function createDashboard(opts: DashboardOptions) {
   });
 
   function sse(res: ServerResponse): SseWriter | null {
+    if (closed || res.destroyed || res.writableEnded) return null;
     if (clients.size >= MAX_SSE) { res.writeHead(503).end(); return null; }
     res.writeHead(200, { 'Content-Type':'text/event-stream', Connection:'keep-alive' }); res.flushHeaders();
     clients.add(res);
@@ -219,6 +233,7 @@ export function createDashboard(opts: DashboardOptions) {
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (closed) { res.writeHead(503).end(); return; }
     const nonce = randomBytes(18).toString('base64');
     res.setHeader('Cache-Control','no-store'); res.setHeader('Referrer-Policy','same-origin'); res.setHeader('X-Content-Type-Options','nosniff');
     res.setHeader('Content-Security-Policy', `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
@@ -245,6 +260,10 @@ export function createDashboard(opts: DashboardOptions) {
         url.searchParams.delete('token');
         res.writeHead(303, { Location: url.pathname + url.search }).end(); return;
       }
+    }
+    if (url.pathname === '/api/agents' || url.pathname.startsWith('/api/agents/') || url.pathname === '/agents/stream') {
+      if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); sessionJson(res, 405, { error: '会话接口只支持 GET' }); return; }
+      await sessionRoute(url, res); return;
     }
     if (post) { await handlePost(req, res, url, nonce, host); return; }
     const q = url.searchParams;
@@ -645,5 +664,6 @@ export function createDashboard(opts: DashboardOptions) {
   }
 
   return { handle: (req: IncomingMessage,res: ServerResponse) => handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(500);res.end('观测页面暂不可用');}),
-    close: () => {for(const res of clients)res.end();clients.clear();if(typeof offCodexPrompt==='function')offCodexPrompt();} };
+    close: async () => {closed=true;for(const res of clients)res.end();clients.clear();if(typeof offCodexPrompt==='function')offCodexPrompt();
+      await Promise.all(Object.values(adapters).map(adapter => adapter.close?.()));} };
 }

@@ -2,12 +2,13 @@ import type { ContextUsageStore } from "../context-usage.js";
 import { PiContextObserver, piContextCapacity } from "../pi-context-usage.js";
 import { readThreadArchive, writeThreadArchive, THREAD_ARCHIVE_LIMIT } from "../thread-archive.js";
 import { trace } from "../../obs/trace.js";
+import type { PiConversation, PiEntryPage, PiSessionSource } from "../../obs/sessions/pi-adapter.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT, withAbortSignal, awaitWithContext } from "@earendil-works/chord/context";
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { AssistantEntry, createRegistry, defineDoc, Harness, type Conversation, type ConversationId, type ModelRef, type Storage, type Submission } from "@earendil-works/pi-durable";
+import { AssistantEntry, createRegistry, defineDoc, Harness, ROOT_CONVERSATION_ID, watchEvents, type Conversation, type ConversationId, type Cursor, type EntryId, type ModelRef, type Storage, type Submission } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { buildCodexPrompt } from "../codex-runner.js";
 import { collectNewImages } from "../image-collect.js";
@@ -55,7 +56,64 @@ export class PiBackend implements AgentBackend {
   private readonly tails = new Map<string, Promise<unknown>>();
   private closing = false;
   private readonly contextObservers = new Map<string, PiContextObserver>();
-  private constructor(readonly harness: Harness, private readonly opts: PiBackendOptions) {}
+  readonly sessionSource: PiSessionSource;
+  private constructor(readonly harness: Harness, private readonly opts: PiBackendOptions) {
+    this.sessionSource = {
+      listConversations: () => this.listObservedConversations(),
+      entries: async (id, cursor, limit = 256): Promise<PiEntryPage> => {
+        const conv = await this.observedConversation(id);
+        const after = cursor === undefined ? 0 : this.observedId(cursor);
+        const page = await conv.entries({ order: "ascending", minEntryId: (after + 1) as EntryId },
+          Math.max(1, Math.min(1000, Math.floor(limit))), undefined, context);
+        return { items: page.items, cursor: page.items.length ? String(page.items.at(-1)!.id) : cursor, hasMore: !!page.next };
+      },
+      context: async (id, at) => (await this.observedConversation(id)).context(context,
+        at === undefined ? undefined : { at: this.observedId(at) as EntryId }),
+      subscribe: async (id, cb) => {
+        const conv = await this.observedConversation(id);
+        const stream = await watchEvents(this.harness, conv.id, context);
+        stream.start(async events => {
+          if (events.some(event => event.type === "entry_appended" || event.type === "message_end" || event.type === "snapshot")) cb();
+        });
+        return () => { void stream.stop().catch(() => undefined); };
+      },
+    };
+  }
+
+  /** 面板只通过公开 API 读取会话；禁止把请求中的 ID 当文件路径。 */
+  private observedId(id: string): number {
+    if (!/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) throw new Error("非法 Pi 会话或条目 ID");
+    return Number(id);
+  }
+
+  private async observedConversation(id: string): Promise<Conversation> {
+    const conv = await this.harness.conversation(this.observedId(id) as ConversationId, context);
+    if (!conv) throw new Error("Pi 会话不存在");
+    return conv;
+  }
+
+  private async listObservedConversations(): Promise<PiConversation[]> {
+    const [threads, archive] = await Promise.all([
+      this.harness.snapshot(PiThreadsDoc, context), this.harness.snapshot(PiThreadsArchiveDoc, context),
+    ]);
+    const active = new Map(Object.entries(threads ?? {}).filter(([key, id]) => key !== "shared" && id !== null)
+      .map(([key, id]) => [id, key]));
+    const archived = new Map((archive?.rows ?? []).map(row => [row.conversation, row.key]));
+    if (threads?.shared != null) archived.set(threads.shared, "shared");
+    const result: PiConversation[] = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await this.harness.commit(tx => tx.scanConversations({ order: "ascending" }, 256, cursor), context);
+      for (const row of page.items) {
+        if (row.id === ROOT_CONVERSATION_ID) continue;
+        const key = active.get(row.id) ?? archived.get(row.id);
+        result.push({ id: String(row.id), label: key ?? String(row.id), status: active.has(row.id) ? "active" : "archived",
+          ...(key ? { scope: key } : {}) });
+      }
+      cursor = page.next;
+    } while (cursor);
+    return result;
+  }
 
   static async open(opts: PiBackendOptions): Promise<PiBackend> {
     await new PiPromptLoader(opts.dataDir).read();

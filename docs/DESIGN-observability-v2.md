@@ -128,4 +128,12 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 3. O6 图片画廊**等 `feat/image-recall` 合入后再做**（已于 707538a 合入，O6 在 O5 之后接入）。
 
 ## 9. 验收记录
-（实现后追加）
+
+### O1：统一会话数据层与只读 API（2026-10-18）
+
+- 已实现统一类型、SQLite `session_index`、Codex 流式增量索引、Pi 公开接口适配、六类只读 JSON/SSE 接口、正文按需读取、票据与送达补充，以及官方 trace 开关和每日保留期清理。接口和调用示例见 [O1 会话观测数据接口](O1-sessions-api.md)，第三方来源见 [许可证记录](THIRD-PARTY.md)。
+- Codex/Pi/trace 分工实现后完成只读对抗审查，修复了凭据边界、SSE 首帧与并发消费竞态、关闭竞态、多请求事件顺序、实测用量/终态实时通知、超长票据终态读取与旧正文引用保护。
+- 最终完整验证：`npm.cmd run typecheck && npm.cmd test && npm.cmd run build` 全部通过；**55 个测试文件、708 项测试通过，0 失败、0 跳过**，本组新增 77 项测试。包含 50 MiB 流式索引与超 4 MiB 单行回归。
+- 验证环境为 Windows、Git Bash、Node **v24.15.0**。原有 entrypoint 临时目录与 Windows 进程树测试需要在沙箱外执行；权限恢复后完整套件通过。未另外验证 Node 22；未改变仓库既有 Node >=24 的 engine 声明。
+- 增量检测的边界：使用文件身份与旧首尾 4 KiB 指纹识别追加；同 inode、首尾不变的中段原位改写并增长，在访问受影响正文时由行 SHA256 检出，返回 409 并触发下一轮全量重建。在该访问之前，目录摘要可能仍为旧值。
+- 本阶段没有新 UI、上下文分析或记忆分析；未新增运行时依赖，未部署 Docker，未改 `.env`，仓库 `data/` 仅用于只读提取匿名 rollout 样本。`CODEX_ROLLOUT_TRACE_ROOT` 名称依据绑定调研 §3 对 0.163.0 的核验，本地没有 Codex npm 包，未调用真实 Codex 请求验证 trace 产物。

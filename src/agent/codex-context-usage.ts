@@ -6,11 +6,17 @@ const object = (v: unknown): Record<string, unknown> | undefined =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
 const count = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
 
-function usage(v: unknown): Pick<ContextUsageHistory, "usedTokens" | "cachedTokens"> | undefined {
-  const u = object(v);
-  if (!u || !count(u.input_tokens)) return undefined;
-  // Codex 的 input_tokens 已包含缓存，total_tokens 包含输出，不可用作上下文占用。
-  return { usedTokens: u.input_tokens, cachedTokens: count(u.cached_input_tokens) ? u.cached_input_tokens : undefined };
+/** rollout 与上下文占用条共用实测 token 字段解析，不把缓存再次加入 input。 */
+export function parseRolloutTokenUsage(record: unknown): { input: number; output: number; cached?: number; reasoning?: number; measured: true } | undefined {
+  const row = object(record);
+  if (!row) return undefined;
+  const payload = row.type === "event_msg" || row.type === "token_usage_record" ? object(row.payload) : row;
+  const raw = payload?.type === "token_count" ? object(object(payload.info)?.last_token_usage)
+    : row.type === "token_usage_record" || payload?.type === "turn.completed" ? object(payload?.usage) : undefined;
+  if (!raw || !count(raw.input_tokens)) return undefined;
+  return { input: raw.input_tokens, output: count(raw.output_tokens) ? raw.output_tokens : 0,
+    ...(count(raw.cached_input_tokens) ? { cached: raw.cached_input_tokens } : {}),
+    ...(count(raw.reasoning_output_tokens) ? { reasoning: raw.reasoning_output_tokens } : {}), measured: true };
 }
 
 /** 倒序按块读取末尾至多 2 MiB；跳过边界半行及损坏行，文件消失也不影响启动。 */
@@ -37,8 +43,8 @@ export async function readRolloutContextUsage(file: string): Promise<(ContextUsa
         }
         if (type === "task_started" || type === "turn.started") waitingForUsage = false;
         if (latest || !waitingForUsage) return;
-        const tokens = type === "token_count" ? usage(object(payload?.info)?.last_token_usage)
-          : type === "turn.completed" ? usage(payload?.usage) : undefined;
+        const parsed = parseRolloutTokenUsage(record);
+        const tokens = parsed ? { usedTokens: parsed.input, cachedTokens: parsed.cached } : undefined;
         const updatedAt = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : NaN;
         if (tokens && count(updatedAt)) latest = { ...tokens, updatedAt };
       } catch { /* 损坏或尚未写完的行只影响该行 */ }
