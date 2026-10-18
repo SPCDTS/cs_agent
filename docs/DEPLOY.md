@@ -318,3 +318,11 @@ Codex 的 `codex-threads-archive.jsonl`、pi 的 `pi-threads-archive.jsonl` 均�
 pi 将映射清空与归档行写入同一次 `pi.sqlite` 事务。归档追加或事务失败时，重置报错且映射不变；事务成功后重写 `pi-threads.json` 和 JSONL 镜像。镜像写入失败只记录 `pi thread mirror stale; will retry`，已提交的重置仍然有效，下次启动或映射操作从数据库重写。首次升级会将旧 JSONL 最新 200 条导入一次；之后 SQLite 为权威数据，镜像缺失或陈旧不会反向覆盖数据库。
 
 限制：pi-durable 1.3.0 的公开 `Harness`、`Storage` 和 `StorageWrite` 接口均无删除会话能力，因此每日衰老任务暂不能按 `PI_ARCHIVE_RETENTION_DAYS=90` 删除退休会话，也不能清除迁移停用的旧 shared 会话。此配置目前仅校验、保留目标天数，不保证 pi.sqlite 大小有界；200 条上限仅约束重置归档记录和 JSONL 镜像，既有会话内容仍在数据库中。待库提供安全删除 API 后再接入每日衰老，不直接修改其内部表。
+
+### 上下文占用数据（设计 §8.5）
+
+每线程的上一轮输入占用保存在 `DATA_DIR/context-usage.json`，按 `backend:key` 索引，250 ms 防抖、临时文件原子替换；启动重载、优雅退出刷盘。突发退出可能丢失尚未刷盘的最后更新。记录不含提示词或凭据，面板通过同一存储读取，更新同时发出 `context_usage` 事件；`/healthz` 的 `context_usage` 数组也提供这些记录。重置会话或 codex 安全阀轮换后占用、缓存和回合数归零。
+
+codex 每次进程启动仅查询一次 `codex debug models`（使用 runner 相同的 `CODEX_HOME` 与环境白名单，最多等待 15 s），按 `CODEX_MODEL` 匹配 `models[].slug`，窗口取 `context_window`。查询失败、缺模型或字段无效时回退 `CODEX_CONTEXT_WINDOW`（默认 400000），日志 `codex context window` 的 `source` 标明目录或回退来源；不调用模型。2026-10-18 实查 gpt-6.1-sol 为 500000。`usedTokens` 直接取 `input_tokens`，缓存已包含其中。
+
+pi 使用 pi-ai 模型窗口与实际 harness 压缩设置。deepseek-flash 为 1000000；默认 reserveTokens=16384、backgroundTokens=32768，对应后台 950848、阻塞 983616（公式与来源见 ARCHITECTURE §10）。BACKGROUND=0 关闭后台压缩，两条位置数值重合；超过阻塞位置时下一次请求等待压缩。输入包括 cacheRead / cacheWrite，缓存命中单列 cacheRead；工具循环中的每次 assistant 模型回合各计一次，压缩摘要生成的计费用量不混入占用。`lastCompactionAt` 仅在观察到已提交的 `pi.compaction` 摘要条目时更新，取主进程观测时间（条目没有墙钟时间戳），不把压缩尝试或失败当成功。升级前回合数与压缩时间不追溯；无回合用量的记录标为 `estimate`。

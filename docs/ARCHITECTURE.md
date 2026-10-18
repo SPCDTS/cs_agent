@@ -197,6 +197,7 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 
 | 项 | 实际做法 | 原因 |
 |---|---|---|
+| 上下文占用（§8.5） | `agent/context-usage.ts` 导出设计契约 `ContextUsage` 与 `ContextUsageStore`；按 `backend:key` 原子持久化、250 ms 防抖、启动重载，提供 all/get/subscribe/reset。codex 从 JSONL 输入用量采集，启动仅一次目录查询，按 `models[].slug` 匹配并取 `context_window`（gpt-6.1-sol=500000），失败回退 `CODEX_CONTEXT_WINDOW`（默认 400000）并记录 source。pi 从 `watchEvents` 的已提交 assistant 条目取 input + cacheRead + cacheWrite，窗口取 pi-ai 模型定义；已提交 `CompactionEntry` 更新成功压缩的观测时间，重置/轮换归零。main 将存储交给面板，逐更新发 `context_usage` trace，healthz 暴露数组 | pi-durable 1.3.0 `README.md` 的 Compaction 段、`dist/harness/types.d.ts` 的 `CompactionPolicy` 明确：`reserve = contextWindow - reserveTokens`；`background = contextWindow - reserveTokens - backgroundTokens`（后台提前量相对于阻塞位置，0 禁用后台）。deepseek-flash 窗口 1000000，默认阈值 950848 / 983616；`dist/harness/generation.js` 以 `tokens > threshold` 判定。按用户确认采用实际公式；输入占用不累计输出或压缩摘要花费 |
 | ComfyUI 访问 | 容器内 `loopback-proxy.ts` 把 `127.0.0.1:8188` 转发到 `COMFYUI_URL`，comfy-mcp 指向 loopback | comfy-cli 1.22 拒绝从非 loopback 主机读取 `/object_info`（SSRF 防护） |
 | 生图工作流 | 默认 `COMFY_WORKFLOW_FILE=/app/workflows/qwen-image-2.1-turbo-api.json` + `COMFY_PROMPT_NODE=4`，mcp 走 `run_workflow`，http 直接 `POST /prompt`；程序写入提示词并随机化 seed | 宿主机 ComfyUI 没有 SD1.5 checkpoint，只有 Qwen Image 2.1 Turbo，comfy-mcp 默认 `generate_image` 模板校验失败 |
 | codex resume | `codex exec resume` 无 `-C/-s`；cwd 由 spawn 决定，沙箱用 `-c sandbox_mode=…` | CLI 0.160/0.163 的参数限制 |

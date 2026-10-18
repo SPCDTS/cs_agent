@@ -1,3 +1,4 @@
+import { ContextUsageStore } from "./agent/context-usage.js";
 import { loadObsToken, publicHealth } from "./obs/token.js";
 import { ObsStore } from "./obs/store.js";
 import { trace } from "./obs/trace.js";
@@ -80,6 +81,7 @@ async function main(): Promise<void> {
   const store = new ContextStore(cfg.DATA_DIR);
   const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP, cfg.OBS_ADMIN_RETENTION_DAYS);
   trace.attach(obs);
+  const contextUsage = new ContextUsageStore(cfg.DATA_DIR);
   // 进行中会话的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）
   const live = new LiveBus(trace);
   if (obs.degraded) log.warn("observability storage degraded; agent continues");
@@ -110,6 +112,7 @@ async function main(): Promise<void> {
   });
   const codex = new CodexRunner({
     command: [cfg.CODEX_BIN],
+    contextUsage, model: cfg.CODEX_MODEL, contextWindow: cfg.CODEX_CONTEXT_WINDOW,
     codexHome: cfg.codexHome,
     workspaceDir: cfg.WORKSPACE_DIR,
     threadsFile: path.join(cfg.DATA_DIR, "codex-threads.json"),
@@ -120,6 +123,7 @@ async function main(): Promise<void> {
     threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,
   });
 
+  await codex.initializeContextUsage();
   const models = createAgentModels(cfg.codexHome);
   const agentModel = models.getModel(cfg.AGENT_MODEL_PROVIDER, cfg.AGENT_MODEL_ID);
   if (!agentModel) {
@@ -137,7 +141,7 @@ async function main(): Promise<void> {
 
   const pi = await PiBackend.open({
     dataDir: cfg.DATA_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
-    thinkingLevel, store, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
+    thinkingLevel, store, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
   });
@@ -257,7 +261,8 @@ async function main(): Promise<void> {
   const piStatus = async () => ({ threads: await pi.readThreadIds(), ...await pi.threadHealth(),
     compaction: obs.degraded ? [] : obs.db.prepare("SELECT json_extract(detail_json,'$.conversation') conversation, COUNT(*) attempts, MAX(ts) last_at FROM events WHERE stage='compaction' GROUP BY conversation").all(),
     usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
-  const dashboard = createDashboard({ config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
+  const dashboardData = { contextUsage };
+  const dashboard = createDashboard({ ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
     codex: codexStatus, pi: piStatus, settings, live,
@@ -294,7 +299,10 @@ async function main(): Promise<void> {
     const body = publicHealth({ connected: st.ws_connected, degraded: obs.degraded || !cfg.OBS_TOKEN,
       comfy: checks.comfy, codex: codexCheck, threads: await codex.readThreadIds().catch(() => null),
       pi: await pi.threadHealth().catch(() => null) });
-    res.writeHead(st.ws_connected ? 200 : 503, { "Content-Type": "application/json" }).end(JSON.stringify(redact(body, 20_000)));
+    // 每条记录单独脱敏，避免通用脱敏器的数组上限截断超过 100 个 pi 会话。
+    const health = { ...redact(body, 20_000) as Record<string, unknown>,
+      context_usage: contextUsage.all().map(usage => redact(usage, 20_000)) };
+    res.writeHead(st.ws_connected ? 200 : 503, { "Content-Type": "application/json" }).end(JSON.stringify(health));
   });
   server.listen(cfg.HEALTH_PORT, cfg.HEALTH_HOST, () => log.info("healthz listening", { port: cfg.HEALTH_PORT }));
 
@@ -312,6 +320,7 @@ async function main(): Promise<void> {
     aging.stop();
     await bridge!.stop().catch(() => undefined);
     await closeAgentHarnesses(harness, pi);
+    await contextUsage.close().catch(() => log.warn("context usage shutdown flush failed"));
     try {
       store.close();
     } catch {
