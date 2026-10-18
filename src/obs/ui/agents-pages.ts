@@ -135,7 +135,3 @@ export function turnPageBody(ctx: SessionCtx, s: SessionRef, t: ObservedTurn, bl
   out += `<p class="hint mt">${neighbors.newer ? `<a href="${turnHref(ctx, neighbors.newer)}">较新的回合</a>　` : ''}<a href="${sessionHref(ctx.backend, s.id)}">返回会话</a>${neighbors.older ? `　<a href="${turnHref(ctx, neighbors.older)}">较早的回合</a>` : ''}</p>`;
   return out;
 }
-
-export function memoryBody(): string {
-  return `<section class="flush">${empty('记忆系统可视化（设计 §5，分组 O4）尚未实现。旧的聊天记录检索仍在<a href="/context">上下文检索</a>页。')}</section>`;
-}

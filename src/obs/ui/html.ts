@@ -10,14 +10,16 @@ export const json = (v: unknown, limit = 20_000) => `<pre>${esc(typeof v === 'st
 const NAV: [string, string][] = [['/', '总览'], ['/agents', 'Agent'], ['/memory', '记忆'], ['/tickets', '票据'], ['/live', '实时'], ['/settings', '设置']];
 const NAV_ALIASES: Record<string, string[]> = { '/agents': ['/codex'], '/memory': ['/context'], '/settings': ['/logs', '/config'] };
 
-export interface PageOptions { title: string; path: string; lead?: string; actions?: string; body: string; nonce: string; scripts?: string[]; flash?: { text: string; error?: boolean } }
+export interface PageOptions { title: string; path: string; lead?: string; actions?: string; body: string; nonce: string; scripts?: string[];
+  /** 额外的 <head> 内容（同源样式表、带 nonce 的 defer 脚本）；调用方负责其中不含运行数据。 */
+  head?: string; flash?: { text: string; error?: boolean } }
 
 export function page(o: PageOptions): string {
   const under = (url: string) => o.path === url || o.path.startsWith(url + '/');
   const active = (url: string) => url === '/' ? o.path === '/' : under(url) || (NAV_ALIASES[url] ?? []).some(under);
   const nav = NAV.map(([url, label]) => `<a href="${url}"${active(url) ? ' aria-current="page"' : ''}>${url === '/live' ? '<i class="live-dot" aria-hidden="true"></i>' : ''}${label}</a>`).join('');
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="icon" href="/favicon.ico"><meta name="color-scheme" content="light dark"><title>${esc(o.title)} · cs-agent 值守台</title><style nonce="${o.nonce}">${THEME_CSS}</style></head>
+<link rel="icon" href="/favicon.ico"><meta name="color-scheme" content="light dark"><title>${esc(o.title)} · cs-agent 值守台</title>${o.head ?? ''}<style nonce="${o.nonce}">${THEME_CSS}</style></head>
 <body><header class="top"><div class="top-in"><a class="mark" href="/"><i aria-hidden="true"></i>cs-agent <span>值守台</span></a><nav class="tabs" aria-label="主导航">${nav}</nav></div></header>
 <main><div class="head"><div><h1>${esc(o.title)}</h1>${o.lead ? `<p>${o.lead}</p>` : ''}</div>${o.actions ? `<div class="actions">${o.actions}</div>` : ''}</div>
 ${o.flash ? `<div class="flash${o.flash.error ? ' err' : ''}" role="status">${esc(o.flash.text)}</div>` : ''}${o.body}</main>

@@ -186,10 +186,10 @@ describe('Agent 页面', () => {
     expect((await r.get('/codex/agents-md')).status).toBe(200);
   });
 
-  it('/memory 占位与导航；/context 指向记忆', async () => {
+  it('/memory 总览与导航；/context 指向记忆', async () => {
     const r = await rig();
     const m = await r.page('/memory');
-    expect(m.res.status).toBe(200); expect(m.html).toContain('O4'); expect(m.html).toContain('href="/memory" aria-current="page"');
+    expect(m.res.status).toBe(200); expect(m.html).toContain('聊天记录整理'); expect(m.html).toContain('href="/memory" aria-current="page"');
     const c = await r.page('/context');
     expect(c.html).toContain('href="/memory"'); expect(c.html).toContain('href="/memory" aria-current="page"');
   });

@@ -22,9 +22,12 @@ import { parseBackendOverrides } from '../agent/backends/select.js';
 import { REASONING_EFFORTS } from '../agent/codex-runner.js';
 import { ASSETS } from './ui/client.js';
 import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
+import { MESSAGE_PAGE, archivesPageBody, memoryHomeBody, messageWindow, placeholderBody, rangeParams, scopePageBody, searchPageBody, summaryPageBody,
+  type ArchivesResult, type MemoryOverview, type MessagePage, type SearchResult, type SummaryDetail } from './ui/memory-pages.js';
+import type { ScopeTimeline } from './memory/types.js';
 import { contextBar, sortUsage, type ContextUsage, type ContextUsageView } from './ui/context-bar.js';
 import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri } from './ui/html.js';
-import { PRELOAD_TURNS, agentsBody, byNewest, crumbs, dataScript, isBackend, memoryBody, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './ui/agents-pages.js';
+import { PRELOAD_TURNS, agentsBody, byNewest, crumbs, dataScript, isBackend, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './ui/agents-pages.js';
 import { contextBody as contextAnalysisBody, contextError, contextUnavailable, type ContextAnalysis } from './ui/context-view.js';
 import type { Block, ObservedTurn, SessionRef } from './sessions/types.js';
 
@@ -426,7 +429,7 @@ export function createDashboard(opts: DashboardOptions) {
 
   async function render(url: URL, nonce: string, flash?: { text: string; error?: boolean }): Promise<string | null> {
     const q = url.searchParams, p = url.pathname;
-    const shell = (title: string, body: string, extra: { lead?: string; actions?: string; scripts?: string[] } = {}) => page({ title, path: p, nonce, body, flash, ...extra });
+    const shell = (title: string, body: string, extra: { lead?: string; actions?: string; scripts?: string[]; head?: string } = {}) => page({ title, path: p, nonce, body, flash, ...extra });
     if (p === '/') return shell('运行总览', await overview(), { lead: '现在在处理什么、各依赖是否正常、最近的吞吐与失败。', scripts: ['/assets/usage.js'] });
     if (p === '/live') return shell('进行中的会话', liveBody(), { lead: '正在处理与排队中的消息，按会话分组；事件由服务器实时推送。完成后收进下方列表。', scripts: ['/assets/live.js'],
       actions: '<span id="conn" class="conn">正在连接…</span>' });
@@ -440,10 +443,10 @@ export function createDashboard(opts: DashboardOptions) {
       return shell('实时日志', `<form class="bar"><label>票据<input name="ticket" placeholder="票据前缀" value="${esc(q.get('ticket'))}"></label><label>级别<select name="level"><option value="">全部级别</option>${['debug','info','warn','error'].map(l=>`<option ${q.get('level')===l?'selected':''}>${l}</option>`).join('')}</select></label><button>过滤</button></form><div id="tail" class="log" role="log" aria-live="polite"></div>`,
         { lead: '最近 1000 行结构化日志，随后实时追加。可按票据或级别过滤。', scripts: ['/assets/logs.js'], actions: '<span id="conn" class="conn">正在连接…</span>' });
     }
-    if (p === '/context') return shell('上下文检索', contextBody(q), { lead: '与 Codex / pi 的 qq_context 工具看到的内容一致。留空关键词查看最近记录。此页之后并入<a href="/memory">记忆</a>。' });
+    if (p === '/context') return shell('上下文检索', contextBody(q), { lead: '与 Codex / pi 的 qq_context 工具看到的内容一致。留空关键词查看最近记录。时间线、摘要与检索对照见<a href="/memory">记忆</a>。' });
     if (p === '/agents') return shell('Agent', await agentsPage(), { lead: '两个执行后端的会话、索引进度与每条线程的上下文占用。点进会话查看每个回合的输入、模型请求、工具调用与回复。', scripts: ['/assets/forms.js', '/assets/usage.js'] });
     if (p.startsWith('/agents/')) return agentsRoute(p, q, nonce, shell);
-    if (p === '/memory') return shell('记忆', memoryBody(), { lead: '聊天记录库、摘要、检索与召回的可视化。' });
+    if (p === '/memory' || p.startsWith('/memory/')) return memoryPage(p, q, nonce, shell);
     if (p === '/settings') return shell('设置', await settingsBody(), { lead: '修改立即对之后收到的消息生效，无需重启；.env 中的值只是初始默认。', scripts: ['/assets/forms.js'] });
     if (p === '/config') return shell('生效配置', await configBody(), { lead: '启动时从环境变量解析的配置（已脱敏）。运行中可改的项见<a href="/settings">设置</a>。' });
     if (p === '/codex/agents-md') {
@@ -578,7 +581,7 @@ export function createDashboard(opts: DashboardOptions) {
     let body = `<form class="bar"><label>会话域<select name="scope"><option value="">全部（owner 视角）</option>${scopes.map(s=>`<option value="${esc(s)}" ${s===scope?'selected':''}>${esc(scopeLabel(s))}</option>`).join('')}</select></label><label>关键词<input name="query" placeholder="留空查看最近记录" value="${esc(q.get('query'))}"></label><button>检索</button></form>`;
     const query = q.get('query');
     const result = callQQContextTool({access:scope?{kind:'scope',scope}:{kind:'all'},openStore:()=>opts.context,maxChars:opts.config.QQ_CONTEXT_MAX_CHARS},query?'qq_search':'qq_recent',query?{query,days:180,limit:20}:{limit:30});
-    body += `<p class="muted">${query ? 'qq_search 结果' : 'qq_recent 最近 30 条'}（${esc(scope ? scopeLabel(scope) : '全部会话')}）</p>` + json(result.content.filter(c=>c.type==='text').map(c=>c.text).join('\n'));
+    body += `<p class="muted">${query ? 'qq_search 结果' : 'qq_recent 最近 30 条'}（${esc(scope ? scopeLabel(scope) : '全部会话')}）　${scope ? `<a href="/memory/scopes/${uri(scope)}">在记忆时间线中查看</a>` : '<a href="/memory">记忆总览</a>'}</p>` + json(result.content.filter(c=>c.type==='text').map(c=>c.text).join('\n'));
     return body;
   }
 
@@ -592,7 +595,9 @@ export function createDashboard(opts: DashboardOptions) {
       writeHead(status: number) { res.statusCode = status; res.headersSent = true; return res; },
       write(chunk: unknown) { text += String(chunk); return true; },
       end(chunk?: unknown) { if (typeof chunk === 'string' || Buffer.isBuffer(chunk)) text += String(chunk); res.headersSent = true; res.writableEnded = true; return res; } };
-    await sessionRoute(new URL(pathQuery, 'http://localhost'), res as unknown as ServerResponse);
+    const target = new URL(pathQuery, 'http://localhost');
+    const route = target.pathname === '/api/memory' || target.pathname.startsWith('/api/memory/') ? memoryRoute : sessionRoute;
+    await route(target, res as unknown as ServerResponse);
     let body: unknown = null;
     try { body = text ? JSON.parse(text) : null; } catch { /* 非 JSON 响应 */ }
     return { status: res.statusCode, body };
@@ -621,7 +626,72 @@ export function createDashboard(opts: DashboardOptions) {
     return agentsBody(cards, csrf);
   }
 
-  type Shell = (title: string, body: string, extra?: { lead?: string; actions?: string; scripts?: string[] }) => string;
+  type Shell = (title: string, body: string, extra?: { lead?: string; actions?: string; scripts?: string[]; head?: string }) => string;
+
+  /** /memory/*（设计 §1、§5）：数据取自 /api/memory/* 的同一路由；未知 scope / 摘要 / 子路由返回 null（404）。 */
+  async function memoryPage(p: string, q: URLSearchParams, nonce: string, shell: Shell): Promise<string | null> {
+    const now = Date.now();
+    const overview = async () => { const r = await api('/api/memory'); return r.status === 200 ? r.body as MemoryOverview : null; };
+    if (p === '/memory') {
+      const r = await api('/api/memory');
+      const body = r.status === 200 ? memoryHomeBody(r.body as MemoryOverview, now) : `<div class="flash err" role="alert">读取记忆总览失败：${esc(apiError(r))}</div>`;
+      return shell('记忆', body, { lead: '聊天记录库的会话域、日 / 周摘要、整理与保留期；从这里进入时间线、检索检查器和线程归档。' });
+    }
+    if (p === '/memory/recalls') return shell('召回记录', placeholderBody('召回记录', 'O5'), { lead: '工具召回了哪些记忆、是否进入模型请求（设计 §5.3 第三级证据）。' });
+    if (p === '/memory/images') return shell('图片记忆', placeholderBody('图片记忆', 'O6'), { lead: '已入库图片的画廊（设计 §5.4）。' });
+    if (p === '/memory/archives') {
+      const r = await api('/api/memory/archives');
+      return shell('线程归档', archivesPageBody(r.status === 200 ? r.body as ArchivesResult : { error: apiError(r) }), { lead: '重置线程时归档的 Codex / Pi 会话，以及 Pi 的上下文压缩记录；点会话 ID 进入回合流。' });
+    }
+    if (p === '/memory/search') {
+      const f = { scope: q.get('scope') ?? '', q: (q.get('q') ?? '').trim(), days: (q.get('days') ?? '').trim(), limit: (q.get('limit') ?? '').trim() };
+      const scopes = (await overview())?.scopes ?? [];
+      let result: SearchResult | { error: string } | undefined;
+      if (f.q) {
+        const query = new URLSearchParams({ q: f.q });
+        if (f.scope) query.set('scope', f.scope);
+        if (f.days) query.set('days', f.days);
+        if (f.limit) query.set('limit', f.limit);
+        const r = await api(`/api/memory/search?${query}`);
+        result = r.status === 200 ? r.body as SearchResult : { error: `检索失败：${apiError(r)}` };
+      }
+      return shell('检索检查器', searchPageBody(f, scopes, result), { lead: '同一次检索的两级证据：数据库命中了什么，qq_search 工具裁剪后实际会返回什么。' });
+    }
+    const parts = p.split('/');
+    if (parts.length !== 4 || (parts[2] !== 'scopes' && parts[2] !== 'summaries')) return null;
+    let key: string;
+    try { key = decodeURIComponent(parts[3] ?? ''); } catch { return null; }
+    // 与接口相同的 scope 规则：非法值（含斜杠、控制字符、. / ..）没有对应页面。
+    if (!key || key.length > 256 || key === '.' || key === '..' || /[\\/\x00-\x1f\x7f]/.test(key)) return null;
+    if (parts[2] === 'summaries') {
+      if (!/^[1-9]\d{0,15}$/.test(key)) return null;
+      const r = await api(`/api/memory/summaries/${encodeURIComponent(key)}`);
+      if (r.status === 404 || r.status === 400) return null;
+      if (r.status !== 200) return shell('摘要', `<div class="flash err" role="alert">读取摘要失败：${esc(apiError(r))}</div>`);
+      const s = r.body as SummaryDetail;
+      const label = (await overview())?.scopes.find(x => x.scope === s.scope)?.label ?? scopeLabel(s.scope);
+      return shell(`${s.kind === 'week' ? '周摘要' : '日摘要'} #${s.id}`, summaryPageBody(s, label), { lead: '摘要正文与覆盖区间；尚存原文为当前仍在库中的消息数。' });
+    }
+    const base = `/api/memory/scopes/${encodeURIComponent(key)}`;
+    const params = rangeParams(q);
+    const tr = await api(`${base}${params.size ? '?' + params : ''}`);
+    if (tr.status === 404) return null;
+    if (tr.status !== 200) {
+      return shell(scopeLabel(key), `<div class="flash err" role="alert">读取时间线失败：${esc(apiError(tr))}</div><p class="mt"><a href="/memory/scopes/${uri(key)}">查看全部区间</a>　<a href="/memory">返回记忆</a></p>`,
+        { lead: '区间参数接受毫秒时间戳、YYYY-MM-DD（UTC）或带时区的 ISO 时间，且 from 早于 to。' });
+    }
+    const timeline = tr.body as ScopeTimeline;
+    const win = messageWindow(timeline.range.first_ts, timeline.range.last_ts);
+    const mq = new URLSearchParams({ before: String(win.before), limit: String(MESSAGE_PAGE) });
+    if (win.after !== undefined) mq.set('after', String(win.after));
+    const mr = await api(`${base}/messages?${mq}`);
+    const messages = mr.status === 200 ? mr.body as MessagePage : { error: apiError(mr), status: mr.status };
+    // vis-timeline 固定版本，同源提供（设计 §5.1）；defer 脚本与模块脚本按文档顺序执行，memory.js 运行时 vis 已就绪。
+    const vendor = !!vendorAsset('vis-timeline.js') && !!vendorAsset('vis-timeline.css');
+    const head = vendor ? `<link rel="stylesheet" href="/assets/vendor/vis-timeline.css"><script nonce="${nonce}" defer src="/assets/vendor/vis-timeline.js"></script>` : '';
+    return shell(timeline.label, scopePageBody({ timeline, messages, nonce, now, params, vendor }),
+      { lead: '原文 / 日摘要 / 周摘要三条轨、空白区间与保留期边界；下方列出所选窗口内的消息。', scripts: ['/assets/memory.js'], head });
+  }
   /** /agents/:backend/sessions[/:id[/turns/:turn | /context]]；未知后端、会话或回合返回 null（404）。 */
   async function agentsRoute(p: string, q: URLSearchParams, nonce: string, shell: Shell): Promise<string | null> {
     const parts = p.split('/');

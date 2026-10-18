@@ -81,7 +81,7 @@ describe('面板二期页面', () => {
       '/logs': ['实时日志', 'src="/assets/logs.js"'],
       '/context': ['上下文检索', 'href="/memory"'],
       '/agents': ['Agent', 'action="/codex/reset"', 'action="/pi/reset"', '群 7', 'href="/codex/agents-md"', 'href="/agents/codex/sessions"', 'href="/agents/pi/sessions"'],
-      '/memory': ['记忆', 'O4'],
+      '/memory': ['记忆', '聊天记录整理', 'href="/memory/search"', 'href="/memory/archives"'],
       '/settings': ['设置', 'action="/settings"', 'name="agentBackend"', 'name="_csrf"', 'action="/settings/agent-md"', '受管规则'],
       '/config': ['生效配置'],
     })) {
