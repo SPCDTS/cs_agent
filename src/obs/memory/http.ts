@@ -1,3 +1,5 @@
+import { summaryLineage } from "./lineage.js";
+import { RecallReader, type RecallFilters } from "./recalls.js";
 import type { ServerResponse } from 'node:http';
 import { parseAccess, type Access } from '../../context/access.js';
 import { AGING_LAST_RUN_KEY, type AgingReport } from '../../context/aging.js';
@@ -122,6 +124,30 @@ export function createMemoryRoutes(deps: MemoryDeps) {
       if (p === '/api/memory/archives') {
         parameters(q, []); sessionJson(res, 200, await memoryArchives(deps.archives, deps.store)); return;
       }
+      if (p === '/api/memory/recalls' || /^\/api\/memory\/recalls\/[^/]+$/.test(p)) {
+        const recalls = new RecallReader(deps);
+        if (p === '/api/memory/recalls') {
+          parameters(q, ['scope', 'session', 'ticket', 'backend', 'tool', 'since', 'page', 'turn']);
+          const filters: RecallFilters = { page: 0, since: timestamp(q.get('since'), 'since') };
+          for (const key of ['scope', 'session', 'ticket', 'turn'] as const) if (q.has(key)) filters[key] = scopeValue(q.get(key)!);
+          if (q.has('backend')) {
+            const backend = q.get('backend');
+            if (backend !== 'pi' && backend !== 'codex') throw new SessionError(400, 'backend 必须是 codex 或 pi');
+            filters.backend = backend;
+          }
+          if (q.has('tool')) {
+            const tool = q.get('tool')!;
+            if (!['qq_recent', 'qq_search', 'qq_message'].includes(tool)) throw new SessionError(400, 'tool 无效');
+            filters.tool = tool;
+          }
+          if (q.has('page')) filters.page = q.get('page') === '0' ? 0 : integer(q.get('page'), 'page', 0, 1_000_000);
+          sessionJson(res, 200, await recalls.list(filters)); return;
+        }
+        parameters(q, []);
+        const id = integer(segment(p.split('/')[4]), 'id', 0, Number.MAX_SAFE_INTEGER);
+        reader = new MemoryReader(deps.context);
+        sessionJson(res, 200, await recalls.detail(id, reader)); return;
+      }
       if (p !== '/api/memory' && p !== '/api/memory/search' && !/^\/api\/memory\/(?:scopes\/[^/]+(?:\/messages)?|summaries\/[^/]+)$/.test(p))
         throw new SessionError(404, '接口不存在');
       reader = new MemoryReader(deps.context);
@@ -133,7 +159,8 @@ export function createMemoryRoutes(deps: MemoryDeps) {
       const parts = p.split('/');
       if (parts[3] === 'summaries') {
         parameters(q, []); const id = integer(segment(parts[4]), 'id', 0, Number.MAX_SAFE_INTEGER);
-        sessionJson(res, 200, reader.summary(id)); return;
+        const { lineage, snapshot } = summaryLineage(deps.store, id);
+        sessionJson(res, 200, { ...reader.summary(id, snapshot), lineage }); return;
       }
       const scope = segment(parts[4]), extent = reader.extent(scope);
       if (parts[5] === 'messages') {
