@@ -832,7 +832,7 @@ describe("agent path", () => {
     await r.dispatcher.dispatch(inbound("今晚有比赛吗", { group: "200000001", user: "42" }), "t-agent");
     expect(r.image.calls).toEqual([]);
     expect(r.backend.requests[0]).toMatchObject({
-      ticket: "t-agent", scope: "group:200000001", access: "group:200000001", threadKey: "shared", text: "今晚有比赛吗",
+      ticket: "t-agent", scope: "group:200000001", access: "group:200000001", threadKey: "group:200000001", text: "今晚有比赛吗",
     });
     expect(r.bridge.replies).toEqual([{ ticket: "t-agent", text: "答复\n今晚有比赛吗 ok ＠all", images: [] }]);
     expect(bot(r)[0]).toMatchObject({ action: "ask_codex", detail: "high", status: "已回复" });

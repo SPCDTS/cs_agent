@@ -48,11 +48,11 @@ describe("上下文占用存储", () => {
     const store = open(dir, 20);
     const rename = vi.spyOn(fs, "rename");
     store.subscribe(() => { throw new Error("subscriber failed"); });
-    for (let n = 0; n < 5; n++) store.recordTurn("codex", "shared", { ...usage, usedTokens: n });
+    for (let n = 0; n < 5; n++) store.recordTurn("codex", "group:1", { ...usage, usedTokens: n });
     await vi.waitFor(() => expect(rename).toHaveBeenCalledTimes(1));
     await store.flush();
     const json = JSON.parse(await fs.readFile(path.join(dir, "context-usage.json"), "utf8"));
-    expect(Object.keys(json)).toEqual(["codex:shared"]);
+    expect(Object.keys(json)).toEqual(["codex:group:1"]);
     expect(open(dir).all()).toEqual(store.all());
     expect((await fs.readdir(dir)).filter(name => name.endsWith(".tmp"))).toEqual([]);
   });
@@ -71,15 +71,15 @@ describe("上下文占用存储", () => {
 
   it("只计数时保留用量快照，新键保持零占用估算，后续采样不重复计数", () => {
     const store = open();
-    store.recordTurn("codex", "shared", { windowTokens: 500000 });
-    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 0, turns: 1, source: "estimate" });
-    store.recordTurn("codex", "shared", usage);
-    const prior = store.get("codex", "shared")!;
-    store.recordTurn("codex", "shared", { windowTokens: 500000 });
-    expect(store.get("codex", "shared")).toEqual({ ...prior, turns: 3 });
-    store.recordTurn("codex", "shared", { windowTokens: 500000, usedTokens: 0 });
-    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 0, turns: 4, source: "turn" });
-    expect(store.get("codex", "shared")!.cachedTokens).toBeUndefined();
+    store.recordTurn("codex", "group:1", { windowTokens: 500000 });
+    expect(store.get("codex", "group:1")).toMatchObject({ usedTokens: 0, turns: 1, source: "estimate" });
+    store.recordTurn("codex", "group:1", usage);
+    const prior = store.get("codex", "group:1")!;
+    store.recordTurn("codex", "group:1", { windowTokens: 500000 });
+    expect(store.get("codex", "group:1")).toEqual({ ...prior, turns: 3 });
+    store.recordTurn("codex", "group:1", { windowTokens: 500000, usedTokens: 0 });
+    expect(store.get("codex", "group:1")).toMatchObject({ usedTokens: 0, turns: 4, source: "turn" });
+    expect(store.get("codex", "group:1")!.cachedTokens).toBeUndefined();
   });
 
   it("忽略损坏文件与非法记录，不将非有限 token 写为 null", async () => {
@@ -122,11 +122,11 @@ describe("codex 上下文采集", () => {
 
   it("rollout 缺失或无合法用量时保留估算记录", async () => {
     const { runner, store, dir } = runnerSetup();
-    await fs.writeFile(path.join(dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "missing" }, shared: { thread_id: "empty" } }), "utf8");
+    await fs.writeFile(path.join(dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "missing" }, "group:1": { thread_id: "empty" } }), "utf8");
     const sessions = path.join(dir, "codex", "sessions"); await fs.mkdir(sessions, { recursive: true });
     await fs.writeFile(path.join(sessions, "empty.jsonl"), '{"type":"turn.completed","usage":{"input_tokens":-1}}\n', "utf8");
     await runner.initializeContextUsage();
-    for (const key of ["owner", "shared"]) expect(store.get("codex", key)).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
+    for (const key of ["owner", "group:1"]) expect(store.get("codex", key)).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
     await expect(readRolloutContextUsage(path.join(dir, "missing"))).resolves.toBeUndefined();
   });
 
@@ -242,19 +242,19 @@ describe("codex 上下文采集", () => {
 
   it.each(["age", "size", "missing"])("%s 轮换时先归零，再记录新线程的首轮", async reason => {
     const { dir, runner, store } = runnerSetup();
-    await runner.ask("one");
+    await runner.ask("one", { threadKey: "group:1" });
     const zeroes: number[] = [];
     store.subscribe(u => zeroes.push(u.turns));
     if (reason === "size") {
       const session = path.join(dir, "codex", "sessions"); await fs.mkdir(session, { recursive: true });
       await fs.writeFile(path.join(session, "rollout-thread-123.jsonl"), "oversize", "utf8");
       runner.opts.rolloutMaxMb = 0.000001;
-    } else await fs.writeFile(path.join(dir, "codex-threads.json"), JSON.stringify({ shared: {
+    } else await fs.writeFile(path.join(dir, "codex-threads.json"), JSON.stringify({ "group:1": {
       thread_id: reason === "missing" ? "missing-old" : "thread-123", created_at: reason === "age" ? "2000-01-01T00:00:00Z" : new Date().toISOString(),
     } }), "utf8");
-    await runner.ask("new");
+    await runner.ask("new", { threadKey: "group:1" });
     expect(zeroes).toEqual([0, 1]);
-    expect(store.get("codex", "shared")!.turns).toBe(1);
+    expect(store.get("codex", "group:1")!.turns).toBe(1);
   });
 
   it("映射已清空而用量未刷盘时，启动修复旧占用，新线程从首轮计数", async () => {
@@ -270,17 +270,17 @@ describe("codex 上下文采集", () => {
   it.each([{ FAKE_CODEX_CATALOG_FAIL: "1" }, { FAKE_CODEX_CATALOG: "invalid-json" }, { FAKE_CODEX_CATALOG: '{"models":[]}' }])("目录失败回退环境配置 %j", async env => {
     const cfg = loadConfig({ CODEX_CONTEXT_WINDOW: "654321" });
     const { runner, store } = runnerSetup(env, cfg.CODEX_CONTEXT_WINDOW);
-    await runner.ask("fallback");
-    expect(store.get("codex", "shared")!.windowTokens).toBe(654321);
+    await runner.ask("fallback", { threadKey: "group:1" });
+    expect(store.get("codex", "group:1")!.windowTokens).toBe(654321);
   });
 
   it("没有目录与覆盖值时默认 400000，缺失用量仍统计已完成回合", async () => {
     const { runner, store } = runnerSetup({ FAKE_CODEX_CATALOG_FAIL: "1", FAKE_CODEX_USAGE: "{}", FAKE_CODEX_ROLLOUT_USAGE: "" });
     expect(await runner.initializeContextUsage()).toBe(400000);
-    await runner.ask("no-usage");
-    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 0, source: "estimate", turns: 1 });
+    await runner.ask("no-usage", { threadKey: "group:1" });
+    expect(store.get("codex", "group:1")).toMatchObject({ usedTokens: 0, source: "estimate", turns: 1 });
     await runner.initializeContextUsage();
-    expect(store.get("codex", "shared")).toMatchObject({ windowTokens: 400000, source: "estimate", turns: 1 });
+    expect(store.get("codex", "group:1")).toMatchObject({ windowTokens: 400000, source: "estimate", turns: 1 });
     expect(loadConfig({}).CODEX_CONTEXT_WINDOW).toBe(400000);
     expect(() => loadConfig({ CODEX_CONTEXT_WINDOW: "0" })).toThrow();
   });

@@ -14,7 +14,7 @@ type CardState = 'queued' | 'running' | 'done' | 'failed';
 interface LiveItem { seq: number; ts: number; stage: string; status: string; duration_ms: number | null; summary: string }
 export interface LiveCard {
   ticket: string; scope: string; text: string; sender: string; route: string; backend: string;
-  /** 线程键：codex 为 owner | shared，pi 为 owner | 会话域；来自 thread_wait / dispatched / model_turn 事件 */
+  /** 线程键：两后端均为 owner | 会话域（兼容历史 shared）；来自 thread_wait / dispatched / model_turn 事件 */
   thread: string;
   state: CardState; phase: string; phase_since: number; started: number; updated: number; finished: number | null;
   outcome: string; late_images: number; dropped: number; seq: number; items: LiveItem[];

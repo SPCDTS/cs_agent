@@ -1,3 +1,4 @@
+import { isThreadKey, type ThreadKey } from "../agent/codex-runner.js";
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual, randomBytes, createHash, createHmac, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -87,7 +88,7 @@ export interface DashboardOptions {
   settings?: SettingsStore;
   /** 进行中会话的实时总线（/live） */
   live?: LiveBus;
-  resetCodex?: (key: 'owner' | 'shared') => Promise<string | null>;
+  resetCodex?: (key: ThreadKey) => Promise<string | null>;
   resetPi?: (key: string) => Promise<number | null>;
   trace?: Pick<Trace, 'event'>;
   /** 每线程上下文占用（src/agent/context-usage.ts 的 ContextUsageStore；面板只读 all/get） */
@@ -401,7 +402,7 @@ export function createDashboard(opts: DashboardOptions) {
         const key = form.get('key') ?? '';
         const reset = codex ? opts.resetCodex : opts.resetPi;
         if (!reset) throw new HttpError(404, '重置不可用');
-        if (codex ? key !== 'owner' && key !== 'shared' : key !== 'owner' && !/^(group|private):[1-9]\d{0,19}$/.test(key)) throw new HttpError(400, '非法的线程键');
+        if (!isThreadKey(key)) throw new HttpError(400, '非法的线程键');
         const job = (reset as (k: string) => Promise<string | number | null>)(key).then(old => {
           tracer.event(codex ? '@codex' : '@pi', 'thread_reset', { detail: { source: 'dashboard', backend: codex ? 'codex' : 'pi', [codex ? 'thread_key' : 'conversation_key']: key, archived: old } });
           return old;
@@ -611,7 +612,7 @@ export function createDashboard(opts: DashboardOptions) {
     const error = sum.status === 200 ? undefined : `会话索引暂不可用：${apiError(sum)}`;
     const codexStatus = await opts.codex().catch(() => null);
     const threads: Record<string, unknown>[] = Array.isArray(codexStatus) ? codexStatus.map(asObj) : Object.entries(asObj(codexStatus)).map(([thread_key, thread_id]) => ({ thread_key, thread_id }));
-    const codexTargets: ResetTarget[] = ['owner', 'shared'].map(key => ({ key, label: key === 'owner' ? ' owner 线程' : '共享线程',
+    const codexTargets: ResetTarget[] = threads.map(t => String(t.thread_key)).filter(isThreadKey).sort((a, b) => Number(b === "owner") - Number(a === "owner") || a.localeCompare(b)).map(key => ({ key, label: key === 'owner' ? 'owner 线程' : scopeLabel(key),
       enabled: !!opts.resetCodex && !!threads.find(t => String(t.thread_key) === key)?.thread_id }));
     const piStatus = asObj(await opts.pi().catch(() => ({})));
     const piKeys = [...new Set([...Object.keys(asObj(piStatus.threads)), ...(Array.isArray(piStatus.keys) ? piStatus.keys.map(String) : [])])].sort();

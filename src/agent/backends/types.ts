@@ -15,8 +15,8 @@ export interface AgentRequest {
   scope: string;
   /** 聊天记录访问范围（group:<id> / private:<qq> / all） */
   access: string;
-  /** 记忆隔离键：owner 私聊 → owner，pi 其余 → scope；codex 其余 → shared */
-  threadKey: ThreadKey | `group:${string}` | `private:${string}`;
+  /** 记忆隔离键：owner 私聊 → owner，其余 → scope */
+  threadKey: ThreadKey;
   source: TicketSource;
   /** 用户原文 */
   text: string;

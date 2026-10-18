@@ -4,7 +4,7 @@ import { trace } from "../../obs/trace.js";
 import { imageRefsValue, validateReferences } from "../image-references.js";
 /**
  * codex 后端（设计 §4.4）：现有 CodexRunner 的适配。
- * - 线程：owner / shared（由请求的 threadKey 决定，同键串行）；
+ * - 线程：owner / group:<id> / private:<qq>（由请求的 threadKey 决定，同键串行）；
  * - 推理强度：固定 CODEX_REASONING_EFFORT（不再按请求选择）；
  * - 每轮注入：qq_context 的 QQ_ACCESS、image_gen 的 IMAGE_TICKET_DIR（${DATA_DIR}/images/<ticket>）；
  * - 输入：§3.2 的 [来源] / [引用] 头部 + 原文；
@@ -110,7 +110,7 @@ export class CodexBackend implements AgentBackend {
       text = await this.opts.runner.ask(prompt + (refs.length ? "\n[本轮参考图]\n" + refs.join("\n") : ""), {
         ticket: req.ticket,
         onJsonEvent: codexObserver(req.ticket),
-        threadKey: req.threadKey === "owner" ? "owner" : "shared",
+        threadKey: req.threadKey,
         signal: ctx.signal,
         ...(effort ? { reasoningEffort: effort } : {}),
         qqAccess: req.access,

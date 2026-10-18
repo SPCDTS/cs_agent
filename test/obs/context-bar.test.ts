@@ -7,6 +7,11 @@ const usage = (over: Partial<ContextUsage> = {}): ContextUsage =>
   ({ backend: 'codex', key: 'owner', usedTokens: 123_456, windowTokens: 400_000, turns: 7, updatedAt: NOW - 60_000, source: 'turn', ...over });
 
 describe('上下文占用条渲染', () => {
+  it('codex 动态会话键显示群和私聊标签', () => {
+    expect(contextBar('codex', 'group:42', null)).toContain('Codex · 群 42');
+    expect(contextBar('codex', 'private:99', null)).toContain('Codex · 私聊 99');
+  });
+
   it('数字带千分位与 k/M 简写', () => {
     expect(fmtInt(1234567)).toBe('1,234,567');
     expect([999, 1000, 9_876, 12_345, 400_000, 1_000_000, 1_050_000, 2_345_678].map(fmtShort)).toEqual(['999', '1k', '9.9k', '12k', '400k', '1M', '1.05M', '2.35M']);

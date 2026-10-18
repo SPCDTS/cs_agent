@@ -1,3 +1,4 @@
+import { isThreadKey } from "../../agent/codex-runner.js";
 import { createReadStream, promises as fs } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
@@ -167,7 +168,7 @@ export class CodexSessionAdapter implements SessionAdapter {
     } catch { /* 首次启动没有归档。 */ }
     try {
       const document = object(JSON.parse(await fs.readFile(path.join(this.opts.dataDir, 'codex-threads.json'), 'utf8')));
-      for (const key of ['owner', 'shared']) {
+      for (const key of Object.keys(document ?? {}).filter(isThreadKey)) {
         const row = object(document?.[key]);
         if (typeof row?.thread_id === 'string') mappings.set(row.thread_id, { scope: key, label: key, status: 'active' });
       }

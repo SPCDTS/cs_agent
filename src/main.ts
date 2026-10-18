@@ -25,7 +25,7 @@ import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
 import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
-import { CodexRunner, effectiveWritableRoots, ensureWorkspaceAgentsMd } from "./agent/codex-runner.js";
+import { CodexRunner, ensureWorkspaceAgentsMd } from "./agent/codex-runner.js";
 import { purgeCodexTrace } from "./agent/codex-trace.js";
 import { CodexPromptStore } from "./agent/codex-prompt.js";
 import { createImageBackend } from "./agent/image-gen.js";
@@ -72,9 +72,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // codex 规则：受管段 + prompts/codex.md 自定义段，启动和保存时重新生成全局 AGENTS.md；
-  // 工作区只放一份占位说明（不存在或是未修改的旧模板时写入）
-  const writableRoots = effectiveWritableRoots(process.env, cfg.CODEX_WRITABLE_ROOTS);
+  // codex 全局行为指引来自 prompts/codex.md；实际权限规则由 runner 每轮单独注入。
+  // 父工作区的运维 AGENTS.md 保留，runner 显式带入每个子工作区回合。
+  const writableRoots: string[] = []; // 实际可写目录由 runner 每轮按会话权限计算。
   const codexPrompt = new CodexPromptStore({ codexHome: cfg.codexHome, dataDir: cfg.DATA_DIR,
     workspaceDir: cfg.WORKSPACE_DIR, writableRoots, containsSecret: text => redactText(text, Number.MAX_SAFE_INTEGER) !== text });
   await codexPrompt.read();
@@ -132,6 +132,8 @@ async function main(): Promise<void> {
     threadsFile: path.join(cfg.DATA_DIR, "codex-threads.json"),
     legacySessionFile: path.join(cfg.DATA_DIR, "codex-session.json"),
     sandbox: cfg.CODEX_SANDBOX,
+    sandboxNetwork: cfg.CODEX_SANDBOX_NETWORK,
+    preparePrompt: () => codexPrompt.regenerate(),
     timeoutMs: cfg.CODEX_TIMEOUT_SEC * 1000,
     rolloutMaxMb: cfg.CODEX_ROLLOUT_MAX_MB,
     threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,

@@ -18,7 +18,7 @@ if (argv[0] === "debug" && argv[1] === "models") {
   process.exit(0);
 }
 const out = argv[argv.indexOf("-o") + 1];
-const isResume = argv[0] === "exec" && argv[1] === "resume";
+const isResume = argv[0] === "exec" && argv.includes("resume");
 const sleepMs = Number(process.env.FAKE_CODEX_SLEEP_MS ?? 0);
 let stdin = "";
 process.stdin.setEncoding("utf8");

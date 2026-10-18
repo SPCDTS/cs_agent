@@ -29,11 +29,11 @@ import {
 import { FIXTURES, tmp } from "./helpers.js";
 
 /** codex-threads.json 中某个键的记录 */
-const threadOf = (dir: string, key: "owner" | "shared" = "shared") =>
+const threadOf = (dir: string, key: "owner" | "group:1" = "group:1") =>
   JSON.parse(readFileSync(path.join(dir, "codex-threads.json"), "utf8"))[key] as { thread_id: string; created_at?: string } | undefined;
-/** 预置 shared 线程记录 */
-const seedShared = (dir: string, rec: Record<string, string>) =>
-  writeFileSync(path.join(dir, "codex-threads.json"), JSON.stringify({ shared: rec }));
+/** 预置 scope 线程记录 */
+const seedScope = (dir: string, rec: Record<string, string>) =>
+  writeFileSync(path.join(dir, "codex-threads.json"), JSON.stringify({ "group:1": rec }));
 
 /** 与 setup() 相同的 runner 参数（同一目录，复用日志文件）。 */
 function setupOpts(dir: string) {
@@ -231,7 +231,7 @@ describe("CodexRunner", () => {
     process.env.NAPCAT_TOKEN = "napcat-secret";
     process.env.OPENAI_API_KEY = "sk-secret";
     const { runner, calls } = setup();
-    await runner.ask("hi");
+    await runner.ask("hi", { threadKey: "group:1" });
     const env = calls()[0].env as Record<string, string>;
     expect(env.NAPCAT_TOKEN).toBeUndefined();
     expect(env.OPENAI_API_KEY).toBeUndefined();
@@ -242,7 +242,7 @@ describe("CodexRunner", () => {
   it("persists thread id as soon as thread.started arrives, even if the turn then times out", async () => {
     const { dir, runner } = setup({ sleepMs: 20_000, timeoutMs: 1500, thread: "thread-early" });
     const sessionFile = path.join(dir, "codex-threads.json");
-    const pending = runner.ask("slow");
+    const pending = runner.ask("slow", { threadKey: "group:1" });
     const t0 = Date.now();
     while (!existsSync(sessionFile) && Date.now() - t0 < 1400) await new Promise((r) => setTimeout(r, 20));
     expect(threadOf(dir)?.thread_id).toBe("thread-early"); // 进程仍在运行
@@ -252,22 +252,22 @@ describe("CodexRunner", () => {
 
   it("resume failure that is not a missing session keeps the saved id and returns an error", async () => {
     const { dir, runner, calls } = setup({ thread: "thread-new" });
-    seedShared(dir, { thread_id: "flaky-1" });
-    await expect(runner.ask("again")).rejects.toThrow(/codex 执行失败/);
+    seedScope(dir, { thread_id: "flaky-1" });
+    await expect(runner.ask("again", { threadKey: "group:1" })).rejects.toThrow(/codex 执行失败/);
     expect(calls().filter((c) => c.phase === "start")).toHaveLength(1);
     expect(threadOf(dir)?.thread_id).toBe("flaky-1");
   });
 
   it("first turn captures thread id, persists it, returns -o text; passes CODEX_HOME and stdin prompt", async () => {
     const { dir, runner, calls } = setup();
-    const answer = await runner.ask("hello there");
+    const answer = await runner.ask("hello there", { threadKey: "group:1" });
     expect(answer).toBe("answer to: hello there");
     expect(threadOf(dir)?.thread_id).toBe("thread-123");
     expect(threadOf(dir, "owner")).toBeUndefined();
     const [start] = calls();
     expect(start.argv[0]).toBe("exec");
     expect(start.argv).toEqual(
-      expect.arrayContaining(["--json", "--skip-git-repo-check", "-o", "-C", path.join(dir, "ws"), "-s", "workspace-write"]),
+      expect.arrayContaining(["--json", "--skip-git-repo-check", "-o", "-C", path.join(dir, "ws", "group_1"), 'default_permissions="cs_agent_scope"']),
     );
     expect(start.argv.at(-1)).toBe("-");
     expect(start.stdin).toBe("hello there");
@@ -276,29 +276,29 @@ describe("CodexRunner", () => {
 
   it("later turns use `exec resume <id> ... -`", async () => {
     const { runner, calls } = setup();
-    await runner.ask("one");
-    await runner.ask("two");
+    await runner.ask("one", { threadKey: "group:1" });
+    await runner.ask("two", { threadKey: "group:1" });
     const starts = calls().filter((c) => c.phase === "start");
-    expect(starts[1].argv.slice(0, 2)).toEqual(["exec", "resume"]);
+    expect(starts[1].argv).toContain("resume");
     expect(starts[1].argv.slice(-2)).toEqual(["thread-123", "-"]);
-    expect(starts[1].argv).toEqual(expect.arrayContaining(["-c", 'sandbox_mode="workspace-write"']));
+    expect(starts[1].argv).toEqual(expect.arrayContaining(["-c", 'default_permissions="cs_agent_scope"']));
     expect(starts[1].stdin).toBe("two");
   });
 
   it("resume failure (lost session) starts a fresh session and overwrites the record", async () => {
     const { dir, runner, calls } = setup({ thread: "thread-new" });
-    seedShared(dir, { thread_id: "missing-1" });
-    const answer = await runner.ask("again");
+    seedScope(dir, { thread_id: "missing-1" });
+    const answer = await runner.ask("again", { threadKey: "group:1" });
     expect(answer).toBe("answer to: again");
     const starts = calls().filter((c) => c.phase === "start");
-    expect(starts.map((s) => s.argv[1])).toEqual(["resume", "--json"]);
+    expect(starts.map((s) => s.argv.includes("resume"))).toEqual([true, false]);
     expect(threadOf(dir)?.thread_id).toBe("thread-new");
   });
 
   it("timeout kills the process tree and throws CodexTimeoutError", async () => {
     const { runner, calls } = setup({ sleepMs: 20_000, timeoutMs: 800 });
     const t0 = Date.now();
-    await expect(runner.ask("slow")).rejects.toBeInstanceOf(CodexTimeoutError);
+    await expect(runner.ask("slow", { threadKey: "group:1" })).rejects.toBeInstanceOf(CodexTimeoutError);
     expect(Date.now() - t0).toBeLessThan(8000);
     const pid = calls()[0].pid as number;
     await new Promise((r) => setTimeout(r, 300));
@@ -308,27 +308,27 @@ describe("CodexRunner", () => {
 
   it("passes the chosen reasoning effort as a per-call -c override on first turn and on resume", async () => {
     const { runner, calls } = setup();
-    await runner.ask("one", { reasoningEffort: "low" });
-    await runner.ask("two", { reasoningEffort: "xhigh" });
+    await runner.ask("one", { threadKey: "group:1", reasoningEffort: "low" });
+    await runner.ask("two", { threadKey: "group:1", reasoningEffort: "xhigh" });
     const [first, second] = calls().filter((c) => c.phase === "start");
     const effortOf = (argv: string[]) => argv[argv.findIndex((a, i) => a === "-c" && argv[i + 1]?.startsWith("model_reasoning_effort=")) + 1];
     expect(first.argv[1]).toBe("--json");
     expect(effortOf(first.argv)).toBe('model_reasoning_effort="low"');
-    expect(second.argv.slice(0, 2)).toEqual(["exec", "resume"]);
+    expect(second.argv).toContain("resume");
     expect(effortOf(second.argv)).toBe('model_reasoning_effort="xhigh"');
     expect(second.argv.slice(-2)).toEqual(["thread-123", "-"]);
   });
 
   it("omits the override when no effort is given and rejects unknown efforts", async () => {
     const { runner, calls } = setup();
-    await runner.ask("plain");
+    await runner.ask("plain", { threadKey: "group:1" });
     expect(calls()[0].argv.join(" ")).not.toContain("model_reasoning_effort");
-    await expect(runner.ask("x", { reasoningEffort: "ultra" as never })).rejects.toThrow(/不支持的推理强度/);
+    await expect(runner.ask("x", { threadKey: "group:1", reasoningEffort: "ultra" as never })).rejects.toThrow(/不支持的推理强度/);
   });
 
   it("mutex: concurrent asks run one at a time in submission order", async () => {
     const { runner, calls } = setup({ sleepMs: 300 });
-    const results = await Promise.all([runner.ask("A"), runner.ask("B"), runner.ask("C")]);
+    const results = await Promise.all([runner.ask("A", { threadKey: "group:1" }), runner.ask("B", { threadKey: "group:1" }), runner.ask("C", { threadKey: "group:1" })]);
     expect(results).toEqual(["answer to: A", "answer to: B", "answer to: C"]);
     const recs = calls();
     expect(recs.map((r) => r.phase)).toEqual(["start", "end", "start", "end", "start", "end"]);
@@ -337,50 +337,50 @@ describe("CodexRunner", () => {
 
   it("onAcquired failure prevents spawn; missing-session fallback invokes it once (F5)", async () => {
     const { dir, runner, calls } = setup();
-    await expect(runner.ask("blocked", { onAcquired: async () => { throw new Error("commit failed"); } })).rejects.toThrow("commit failed");
+    await expect(runner.ask("blocked", { threadKey: "group:1", onAcquired: async () => { throw new Error("commit failed"); } })).rejects.toThrow("commit failed");
     expect(calls()).toEqual([]);
-    seedShared(dir, { thread_id: "missing-1" });
+    seedScope(dir, { thread_id: "missing-1" });
     const onAcquired = vi.fn(async () => undefined);
-    await runner.ask("retry missing session", { onAcquired });
+    await runner.ask("retry missing session", { threadKey: "group:1", onAcquired });
     expect(onAcquired).toHaveBeenCalledOnce();
     expect(calls().filter(c => c.phase === "start")).toHaveLength(2);
   });
 });
 
-describe("owner / shared threads", () => {
-  it("threadKeyForSource: owner private → owner; groups and other private users → shared", () => {
+describe("owner / scope threads", () => {
+  it("threadKeyForSource: owner private → owner; groups and other private users → scope", () => {
     const owner = "10000001";
     expect(threadKeyForSource({ type: "private", user_id: owner, group_id: null, nickname: "" }, owner)).toBe("owner");
-    expect(threadKeyForSource({ type: "group", user_id: owner, group_id: "200000001", nickname: "" }, owner)).toBe("shared");
-    expect(threadKeyForSource({ type: "private", user_id: "555666", group_id: null, nickname: "" }, owner)).toBe("shared");
-    expect(threadKeyForSource({ type: "private", user_id: owner, group_id: null, nickname: "" }, undefined)).toBe("shared");
-    expect(threadKeyForSource(undefined, owner)).toBe("shared");
+    expect(threadKeyForSource({ type: "group", user_id: owner, group_id: "200000001", nickname: "" }, owner)).toBe("group:200000001");
+    expect(threadKeyForSource({ type: "private", user_id: "555666", group_id: null, nickname: "" }, owner)).toBe("private:555666");
+    expect(threadKeyForSource({ type: "private", user_id: owner, group_id: null, nickname: "" }, undefined)).toBe(`private:${owner}`);
+    expect(() => threadKeyForSource(undefined, owner)).toThrow(/来源/);
   });
 
   it("keeps a separate thread per key and resumes each one", async () => {
     const { dir, runner, calls } = setup({ thread: "thread-a" });
     await runner.ask("owner 1", { threadKey: "owner" });
     expect(threadOf(dir, "owner")?.thread_id).toBe("thread-a");
-    expect(threadOf(dir, "shared")).toBeUndefined();
+    expect(threadOf(dir, "group:1")).toBeUndefined();
     const r2 = new CodexRunner({ ...setupOpts(dir), env: { ...setupOpts(dir).env, FAKE_CODEX_THREAD: "thread-b" } });
-    await r2.ask("shared 1", { threadKey: "shared" });
+    await r2.ask("shared 1", { threadKey: "group:1" });
     await r2.ask("owner 2", { threadKey: "owner" });
-    await r2.ask("shared 2");
+    await r2.ask("shared 2", { threadKey: "group:1" });
     expect(threadOf(dir, "owner")?.thread_id).toBe("thread-a");
-    expect(threadOf(dir, "shared")?.thread_id).toBe("thread-b");
-    expect(await r2.readThreadIds()).toEqual({ owner: "thread-a", shared: "thread-b" });
+    expect(threadOf(dir, "group:1")?.thread_id).toBe("thread-b");
+    expect(await r2.readThreadIds()).toEqual({ owner: "thread-a", "group:1": "thread-b" });
     const starts = calls().filter((c) => c.phase === "start");
-    expect(starts.map((c) => (c.argv[1] === "resume" ? `resume ${c.argv.at(-2)}` : "new"))).toEqual([
+    expect(starts.map((c) => (c.argv.includes("resume") ? `resume ${c.argv.at(-2)}` : "new"))).toEqual([
       "new", "new", "resume thread-a", "resume thread-b",
     ]);
   });
 
-  it("owner and shared turns run concurrently; two shared turns serialize", async () => {
+  it("different scope turns run concurrently; same scope turns serialize", async () => {
     const { runner, calls } = setup({ sleepMs: 400 });
     await Promise.all([
-      runner.ask("S1", { threadKey: "shared" }),
+      runner.ask("S1", { threadKey: "group:1" }),
       runner.ask("O1", { threadKey: "owner" }),
-      runner.ask("S2", { threadKey: "shared" }),
+      runner.ask("S2", { threadKey: "group:1" }),
     ]);
     const recs = calls();
     const span = (stdin: string) => {
@@ -388,7 +388,7 @@ describe("owner / shared threads", () => {
       return { start: st.t as number, end: recs.find((r) => r.phase === "end" && r.pid === st.pid)!.t as number };
     };
     const s1 = span("S1"), s2 = span("S2"), o1 = span("O1");
-    expect(o1.start).toBeLessThan(s1.end); // owner 与 shared 重叠
+    expect(o1.start).toBeLessThan(s1.end); // owner 与 group:1 重叠
     expect(s1.start).toBeLessThan(o1.end);
     expect(s2.start).toBeGreaterThanOrEqual(s1.end); // 同一键串行
   });
@@ -396,11 +396,11 @@ describe("owner / shared threads", () => {
   it("migrates the legacy codex-session.json into the owner thread once", async () => {
     const { dir, runner, calls } = setup();
     writeFileSync(path.join(dir, "codex-session.json"), JSON.stringify({ thread_id: "legacy-1", updated_at: new Date().toISOString() }));
-    expect(await runner.readThreadIds()).toEqual({ owner: "legacy-1", shared: null });
+    expect(await runner.readThreadIds()).toEqual({ owner: "legacy-1" });
     expect(existsSync(path.join(dir, "codex-session.json"))).toBe(false);
     expect(existsSync(path.join(dir, "codex-session.json.migrated"))).toBe(true);
     await runner.ask("hi", { threadKey: "owner" });
-    expect(calls()[0].argv.slice(0, 2)).toEqual(["exec", "resume"]);
+    expect(calls()[0].argv).toContain("resume");
     expect(calls()[0].argv.at(-2)).toBe("legacy-1");
     // 新文件已存在时不再迁移
     writeFileSync(path.join(dir, "codex-session.json"), JSON.stringify({ thread_id: "legacy-2" }));
@@ -462,21 +462,21 @@ describe("qq_context access override and §3.2 header", () => {
 
   it("passes the IMAGE_TICKET_DIR override on first turn and on resume", async () => {
     const { runner, calls } = setup();
-    await runner.ask("one", { imageTicketDir: "/data/images/t1" });
-    await runner.ask("two", { imageTicketDir: "/data/images/t2" });
+    await runner.ask("one", { threadKey: "group:1", imageTicketDir: "/data/images/t1" });
+    await runner.ask("two", { threadKey: "group:1", imageTicketDir: "/data/images/t2" });
     const [a, b] = calls().filter((c) => c.phase === "start");
     expect(a.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.image_gen.env.IMAGE_TICKET_DIR="/data/images/t1"']));
-    expect(b.argv.slice(0, 2)).toEqual(["exec", "resume"]);
+    expect(b.argv).toContain("resume");
     expect(b.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.image_gen.env.IMAGE_TICKET_DIR="/data/images/t2"']));
   });
 
   it("passes the QQ_ACCESS override on first turn and on resume", async () => {
     const { runner, calls } = setup();
-    await runner.ask("one", { qqAccess: "group:200000001" });
-    await runner.ask("two", { qqAccess: "all" });
+    await runner.ask("one", { threadKey: "group:1", qqAccess: "group:200000001" });
+    await runner.ask("two", { threadKey: "group:1", qqAccess: "all" });
     const [a, b] = calls().filter((c) => c.phase === "start");
     expect(a.argv).toEqual(expect.arrayContaining(qqAccessArgs("group:200000001")));
-    expect(b.argv.slice(0, 2)).toEqual(["exec", "resume"]);
+    expect(b.argv).toContain("resume");
     expect(b.argv).toEqual(expect.arrayContaining(qqAccessArgs("all")));
   });
 });
@@ -485,12 +485,12 @@ describe("single-thread safety valve", () => {
   it("rotates to a new thread when the rollout file exceeds the size limit", async () => {
     const { dir, calls } = setup({ thread: "thread-fresh" });
     const runner = new CodexRunner({ ...setupOpts(dir), rolloutMaxMb: 0.001 });
-    seedShared(dir, { thread_id: "thread-big", created_at: new Date().toISOString() });
+    seedScope(dir, { thread_id: "thread-big", created_at: new Date().toISOString() });
     const day = path.join(dir, "codex", "sessions", "2026", "10", "17");
     mkdirSync(day, { recursive: true });
     writeFileSync(path.join(day, "rollout-2026-10-17T00-00-00-thread-big.jsonl"), "x".repeat(4096));
     expect(await runner.rolloutSize("thread-big")).toBe(4096);
-    await runner.ask("hi");
+    await runner.ask("hi", { threadKey: "group:1" });
     const starts = calls().filter((c) => c.phase === "start");
     expect(starts).toHaveLength(1);
     expect(starts[0].argv[1]).toBe("--json"); // 新建而非 resume
@@ -501,11 +501,11 @@ describe("single-thread safety valve", () => {
     const { dir, calls } = setup({ thread: "thread-fresh" });
     const runner = new CodexRunner({ ...setupOpts(dir), threadMaxDays: 90 });
     const old = new Date(Date.now() - 91 * 86400_000).toISOString();
-    seedShared(dir, { thread_id: "thread-old", updated_at: old });
-    await runner.ask("a");
-    await runner.ask("b");
+    seedScope(dir, { thread_id: "thread-old", updated_at: old });
+    await runner.ask("a", { threadKey: "group:1" });
+    await runner.ask("b", { threadKey: "group:1" });
     const starts = calls().filter((c) => c.phase === "start");
-    expect(starts.map((s) => s.argv[1])).toEqual(["--json", "resume"]);
+    expect(starts.map((s) => s.argv.includes("resume"))).toEqual([false, true]);
     expect(starts[1].argv.slice(-2)).toEqual(["thread-fresh", "-"]);
     expect(Date.parse(threadOf(dir)!.created_at!)).toBeGreaterThan(Date.now() - 60_000);
   });
@@ -517,7 +517,7 @@ describe("outputFile (per-ticket -o path, R1)", () => {
     const out = path.join(dir, "tickets", "t1", "codex-last.txt");
     mkdirSync(path.dirname(out), { recursive: true });
     writeFileSync(out, "stale");
-    const text = await runner.ask("hello", { outputFile: out });
+    const text = await runner.ask("hello", { threadKey: "group:1", outputFile: out });
     expect(readFileSync(out, "utf8")).toBe(text);
     const start = calls().find((c) => c.phase === "start");
     expect(start.argv[start.argv.indexOf("-o") + 1]).toBe(out);
@@ -525,22 +525,22 @@ describe("outputFile (per-ticket -o path, R1)", () => {
 
   it("rejects relative paths and '..' segments", async () => {
     const { runner } = setup();
-    await expect(runner.ask("x", { outputFile: "rel/out.txt" })).rejects.toThrow(/输出文件路径/);
-    await expect(runner.ask("x", { outputFile: `${tmp()}/../out.txt` })).rejects.toThrow(/输出文件路径/);
+    await expect(runner.ask("x", { threadKey: "group:1", outputFile: "rel/out.txt" })).rejects.toThrow(/输出文件路径/);
+    await expect(runner.ask("x", { threadKey: "group:1", outputFile: `${tmp()}/../out.txt` })).rejects.toThrow(/输出文件路径/);
   });
 });
 
 describe("resetThread", () => {
   it("archives the current thread, clears it, and the next turn starts a fresh thread", async () => {
     const { dir, runner, calls } = setup({ thread: "thread-old" });
-    await runner.ask("第一轮", { threadKey: "shared" });
+    await runner.ask("第一轮", { threadKey: "group:1" });
     expect(threadOf(dir)?.thread_id).toBe("thread-old");
-    expect(await runner.resetThread("shared")).toBe("thread-old");
+    expect(await runner.resetThread("group:1")).toBe("thread-old");
     expect(threadOf(dir)).toBeUndefined();
     const archived = readFileSync(path.join(dir, "codex-threads-archive.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
-    expect(archived).toEqual([expect.objectContaining({ key: "shared", thread_id: "thread-old", reason: "dashboard" })]);
+    expect(archived).toEqual([expect.objectContaining({ key: "group:1", thread_id: "thread-old", reason: "dashboard" })]);
     expect(await runner.resetThread("owner")).toBeNull();
-    await runner.ask("第二轮", { threadKey: "shared" });
+    await runner.ask("第二轮", { threadKey: "group:1" });
     expect(calls().filter(c => c.phase === "start").map(c => c.argv[1])).not.toContain("resume");
   });
 
@@ -559,15 +559,15 @@ describe("resetThread", () => {
 describe("codex 归档轮换", () => {
   it("并发重置两个键保留最新 200 条归档，不丢失任一新记录", async () => {
     const { dir, runner } = setup();
-    writeFileSync(path.join(dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "new-owner" }, shared: { thread_id: "new-shared" } }), "utf8");
+    writeFileSync(path.join(dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "new-owner" }, "group:1": { thread_id: "new-shared" } }), "utf8");
     const file = path.join(dir, "codex-threads-archive.jsonl");
-    const old = Array.from({ length: 205 }, (_, i) => ({ key: "shared", thread_id: "old-" + i, archived_at: new Date(i * 1000).toISOString() }));
+    const old = Array.from({ length: 205 }, (_, i) => ({ key: "group:1", thread_id: "old-" + i, archived_at: new Date(i * 1000).toISOString() }));
     writeFileSync(file, old.map(row => JSON.stringify(row)).join("\n") + "\n", "utf8");
-    expect(await Promise.all([runner.resetThread("owner"), runner.resetThread("shared")])).toEqual(["new-owner", "new-shared"]);
+    expect(await Promise.all([runner.resetThread("owner"), runner.resetThread("group:1")])).toEqual(["new-owner", "new-shared"]);
     const rows = readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line));
     expect(rows).toHaveLength(200); expect(rows[0].thread_id).toBe("old-7");
     expect(rows.slice(-2).map(row => row.thread_id).sort()).toEqual(["new-owner", "new-shared"]);
-    expect(await runner.readThreadIds()).toEqual({ owner: null, shared: null });
+    expect(await runner.readThreadIds()).toEqual({});
   });
 });
 
@@ -583,13 +583,13 @@ describe("codex 召回令牌生命周期", () => {
       return lease;
     });
     const opts = setupOpts(dir);
-    if (mode === "failure") seedShared(dir, { thread_id: "flaky-recall" });
+    if (mode === "failure") seedScope(dir, { thread_id: "flaky-recall" });
     const runner = new CodexRunner({ ...opts, recallTokens: tokens, mediaRecallPort: 8791,
       ...(mode === "spawn" ? { command: [path.join(dir, "missing.exe")] } : {}),
       timeoutMs: mode === "timeout" ? 500 : 10_000,
       env: { ...opts.env, FAKE_CODEX_SLEEP_MS: mode === "timeout" ? "20000" : "0" },
     });
-    try { await runner.ask("test", { ticket: "tk", qqAccess: "group:7" }); } catch { /* 生命周期同样覆盖异常 */ }
+    try { await runner.ask("test", { threadKey: "group:1", ticket: "tk", qqAccess: "group:7" }); } catch { /* 生命周期同样覆盖异常 */ }
     expect(issue).toHaveBeenCalledOnce();
     const lease = issue.mock.results[0]!.value;
     expect(tokens.valid(lease.token)).toBe(false);
@@ -631,55 +631,55 @@ describe("codex 回合结束后的上下文用量", () => {
   it.each([false, true])("进程退出后用 rollout 的最后请求替换累计量，恢复线程=%s", async resume => {
     const { dir, runner, store } = contextSetup({ FAKE_CODEX_ROLLOUT_USAGE: JSON.stringify(lastUsage) });
     const threadId = resume ? "thread-resumed" : "thread-fresh";
-    if (resume) seedShared(dir, { thread_id: threadId });
+    if (resume) seedScope(dir, { thread_id: threadId });
     await runner.initializeContextUsage();
-    if (resume) store.recordTurn("codex", "shared", { windowTokens: 500000, usedTokens: 42000, cachedTokens: 12000 });
+    if (resume) store.recordTurn("codex", "group:1", { windowTokens: 500000, usedTokens: 42000, cachedTokens: 12000 });
     // 同线程有较旧的副本，不能仅按文件名或文件大小选中它。
     writeRollout(dir, "rollout-old-" + threadId + ".jsonl", "2000-01-01T00:00:00Z");
-    const before = store.get("codex", "shared"), during: (number | undefined)[] = [];
+    const before = store.get("codex", "group:1"), during: (number | undefined)[] = [];
     const warn = vi.spyOn(log, "warn");
-    await runner.ask("读取最后请求", { onJsonEvent: event => {
-      if (event.type === "turn.completed") during.push(store.get("codex", "shared")?.usedTokens ?? 0);
+    await runner.ask("读取最后请求", { threadKey: "group:1", onJsonEvent: event => {
+      if (event.type === "turn.completed") during.push(store.get("codex", "group:1")?.usedTokens ?? 0);
     } });
     expect(during).toEqual([before?.usedTokens ?? 0]);
-    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 115947, cachedTokens: 100000,
+    expect(store.get("codex", "group:1")).toMatchObject({ usedTokens: 115947, cachedTokens: 100000,
       windowTokens: 500000, turns: (before?.turns ?? 0) + 1, source: "turn" });
     expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(0);
     // rollout 已有多个 task_complete，也只能给本轮加一。
-    await runner.ask("再来一轮");
-    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 115947, cachedTokens: 100000, turns: (before?.turns ?? 0) + 2 });
+    await runner.ask("再来一轮", { threadKey: "group:1" });
+    expect(store.get("codex", "group:1")).toMatchObject({ usedTokens: 115947, cachedTokens: 100000, turns: (before?.turns ?? 0) + 2 });
   });
 
   it.each(["missing", "invalid", "stale"])("rollout 用量 %s 时保留旧快照，计数一次并告警一次", async mode => {
     const { dir, runner, store } = contextSetup(mode === "invalid" ? { FAKE_CODEX_ROLLOUT_USAGE: '{"input_tokens":-1}' } : {});
-    seedShared(dir, { thread_id: "thread-resumed" });
+    seedScope(dir, { thread_id: "thread-resumed" });
     await runner.initializeContextUsage();
-    store.recordTurn("codex", "shared", { windowTokens: 500000, usedTokens: 42000, cachedTokens: 12000 });
+    store.recordTurn("codex", "group:1", { windowTokens: 500000, usedTokens: 42000, cachedTokens: 12000 });
     if (mode === "stale") writeRollout(dir, "rollout-thread-resumed.jsonl", "2000-01-01T00:00:00Z");
-    const before = store.get("codex", "shared")!, warn = vi.spyOn(log, "warn");
-    await runner.ask("没有新用量", { ticket: "usage-fallback" });
-    expect(store.get("codex", "shared")).toEqual({ ...before, turns: before.turns + 1 });
+    const before = store.get("codex", "group:1")!, warn = vi.spyOn(log, "warn");
+    await runner.ask("没有新用量", { threadKey: "group:1", ticket: "usage-fallback" });
+    expect(store.get("codex", "group:1")).toEqual({ ...before, turns: before.turns + 1 });
     expect(warn.mock.calls.filter(([message]) => message === warning)).toEqual([[warning, {
-      key: "shared", thread_id: "thread-resumed", ticket: "usage-fallback",
+      key: "group:1", thread_id: "thread-resumed", ticket: "usage-fallback",
       reason: mode === "stale" ? "stale rollout usage" : "missing rollout usage",
     }]]);
   });
 
   it("新线程没有 rollout 时仍记录完成回合，以零占用估算", async () => {
     const { runner, store } = contextSetup(), warn = vi.spyOn(log, "warn");
-    await runner.ask("无 rollout");
-    expect(store.get("codex", "shared")).toMatchObject({ usedTokens: 0, turns: 1, windowTokens: 500000, source: "estimate" });
-    expect(store.get("codex", "shared")!.cachedTokens).toBeUndefined();
+    await runner.ask("无 rollout", { threadKey: "group:1" });
+    expect(store.get("codex", "group:1")).toMatchObject({ usedTokens: 0, turns: 1, windowTokens: 500000, source: "estimate" });
+    expect(store.get("codex", "group:1")!.cachedTokens).toBeUndefined();
     expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(1);
   });
 
   it("没有 turn.completed 的失败回合不增加计数或告警缺失用量", async () => {
     const { dir, runner, store } = contextSetup();
-    seedShared(dir, { thread_id: "flaky-usage" });
+    seedScope(dir, { thread_id: "flaky-usage" });
     await runner.initializeContextUsage();
-    const before = store.get("codex", "shared"), warn = vi.spyOn(log, "warn");
-    await expect(runner.ask("失败")).rejects.toThrow(/codex 执行失败/);
-    expect(store.get("codex", "shared")).toEqual(before);
+    const before = store.get("codex", "group:1"), warn = vi.spyOn(log, "warn");
+    await expect(runner.ask("失败", { threadKey: "group:1" })).rejects.toThrow(/codex 执行失败/);
+    expect(store.get("codex", "group:1")).toEqual(before);
     expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(0);
   });
 });
