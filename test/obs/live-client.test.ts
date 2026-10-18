@@ -152,6 +152,9 @@ describe('live.js 客户端渲染', () => {
     expect(bar.className).toBe('ctx ctx-t-warn ctx-mini'); expect(bar.querySelector('.ctx-pct')!.textContent).toBe('75%');
     emit('card', { card: head({ seq: 3, backend: 'codex', thread: 'shared' }), item: item(3) });
     expect(ids.inflight!.querySelectorAll('.ctx')).toHaveLength(1);
+    emit('context', { usage: { backend: 'codex', key: 'shared', usedTokens: 237500, windowTokens: 500000, effectiveWindowTokens: 475000, turns: 2, updatedAt: Date.now(), source: 'turn' } });
+    expect(bar.querySelector('.ctx-pct')!.textContent).toBe('50%');
+    expect(bar.attrs.title).toContain('名义 500,000 / 有效 475,000');
   });
 });
 
@@ -178,6 +181,14 @@ describe('usage.js（总览 / Codex / Pi 页）', () => {
     expect(bar.className).toBe('ctx ctx-t-hot ctx-stale');
     expect(bar.querySelector('.ctx-fill')!.dataset.w).toBe('95');
     expect(bar.querySelector('.ctx-meta')!.textContent).toContain('上次更新 25 小时前');
+    send({ backend: 'codex', key: 'owner', usedTokens: 237500, windowTokens: 500000, effectiveWindowTokens: 475000, turns: 9, updatedAt: Date.now(), source: 'turn' });
+    expect(bar.querySelector('.ctx-pct')!.textContent).toBe('50%');
+    expect(bar.querySelector('.ctx-num')!.textContent).toBe('237,500 / 475,000 tokens');
+    expect(bar.attrs.title).toBe('名义 500,000 / 有效 475,000');
+    send({ backend: 'codex', key: 'owner', usedTokens: 237500, windowTokens: 500000, turns: 10, updatedAt: Date.now(), source: 'turn' });
+    expect(bar.querySelector('.ctx-pct')!.textContent).toBe('48%');
+    expect(bar.querySelector('.ctx-num')!.textContent).toBe('237,500 / 500,000 tokens');
+    expect(bar.attrs.title).toBe('');
   });
 });
 

@@ -30,6 +30,7 @@ export async function readRolloutContextUsage(file: string): Promise<(ContextUsa
     let suffix = Buffer.alloc(0);
     let turns = 0;
     let waitingForUsage = false;
+    let effectiveWindowTokens: number | undefined;
     let latest: Omit<ContextUsageHistory, "turns"> | undefined;
     const consume = (line: Buffer) => {
       try {
@@ -42,6 +43,11 @@ export async function readRolloutContextUsage(file: string): Promise<(ContextUsa
           waitingForUsage = true;
         }
         if (type === "task_started" || type === "turn.started") waitingForUsage = false;
+        // 与已完成回合的快照对齐，忽略尾部尚未完成的回合；缺省时向前寻找最近有效记录。
+        if (type === "token_count" && (waitingForUsage || latest) && effectiveWindowTokens === undefined) {
+          const window = object(payload?.info)?.model_context_window;
+          if (count(window) && window > 0) effectiveWindowTokens = window;
+        }
         if (latest || !waitingForUsage) return;
         // turn.completed.usage 是线程累计量，只能用于识别回合结束，不能作为上下文占用；只取 token_count.last_token_usage。
         const parsed = type === "token_count" ? parseRolloutTokenUsage(record) : undefined;
@@ -65,7 +71,7 @@ export async function readRolloutContextUsage(file: string): Promise<(ContextUsa
       suffix = chunk.subarray(0, end);
     }
     if (start === 0) consume(suffix);
-    return latest && { ...latest, turns, truncated: start > 0 };
+    return latest && { ...latest, ...(effectiveWindowTokens !== undefined ? { effectiveWindowTokens } : {}), turns, truncated: start > 0 };
   } catch { return undefined; }
   finally { await handle?.close().catch(() => undefined); }
 }

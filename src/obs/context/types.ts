@@ -4,7 +4,7 @@ export type CategoryKey = 'instructions' | 'tools' | 'history' | 'tool_output' |
 export type Provenance = 'recorded' | 'reconstructed' | 'estimated' | 'unavailable';
 export type ContextAnalysis = {
   backend: 'codex' | 'pi'; session: string; at: { turn: string; phase: 'before' | 'after' }; generatedAt: number;
-  window: { tokens: number; source: string };
+  window: { tokens: number; source: string; nominalTokens?: number };
   measured?: { input: number; cached?: number; at: number; stale: boolean; source: string };
   estimated: { total: number; tokenizer: string }; unexplained?: number;
   categories: Array<{ key: CategoryKey; label: string; items: number;

@@ -53,6 +53,17 @@ async function traceBundle(home: string) {
 }
 
 describe('Codex 上下文分析', () => {
+  it('分析窗口仍来自 rollout，头部同时显示 contextUsage 的名义值', async () => {
+    const r = await rig(), sessions = await r.adapter.listSessions();
+    vi.spyOn(r.adapter, 'listSessions').mockResolvedValue(sessions.map(s => ({ ...s, scope: 'owner' })));
+    const result = await analyzeContext({ codex: r.adapter }, 'codex', 'context-fixture', {
+      contextUsage: { all: () => [{ backend: 'codex', key: 'owner', windowTokens: 500000 }] },
+    });
+    expect(result.window).toEqual({ tokens: 258400, source: 'codex.rollout.model_context_window', nominalTokens: 500000 });
+    const html = contextBody({ backend: 'codex', session: 'context-fixture' }, result);
+    expect(html).toContain('名义 500,000 / 有效 258,400');
+    expect(html).toContain('来源：codex.rollout.model_context_window');
+  });
   it('before 是首次请求输入，after 包含输出，当前态是最后回合之后', async () => {
     const r = await rig(), turn = r.turns[1].turn;
     const before = await r.analyze(turn, 'before'), after = await r.analyze(turn, 'after'), current = await r.analyze();

@@ -18,6 +18,24 @@ const open = (dir = tmp("context-usage-"), debounce = 10) => {
 const usage = { usedTokens: 1234, cachedTokens: 1000, windowTokens: 500000 };
 
 describe("上下文占用存储", () => {
+  it("旧记录无有效窗口仍可重载，新值持久化且只计数时保留；重置和容量变更后丢弃旧实测窗口", async () => {
+    const dir = tmp('context-effective-'), store = open(dir);
+    store.recordTurn('codex', 'owner', usage); await store.flush();
+    expect(open(dir).get('codex', 'owner')?.effectiveWindowTokens).toBeUndefined();
+    const old = store.get('codex', 'owner')!;
+    expect(store.backfill('codex', 'owner', { usedTokens: 1, turns: 1, updatedAt: old.updatedAt - 1, effectiveWindowTokens: 475000 })).toBe(true);
+    expect(store.get('codex', 'owner')).toEqual({ ...old, effectiveWindowTokens: 475000 });
+    store.recordTurn('codex', 'owner', { ...usage, effectiveWindowTokens: 475000 }); await store.flush();
+    expect(open(dir).get('codex', 'owner')).toMatchObject({ windowTokens: 500000, effectiveWindowTokens: 475000 });
+    store.recordTurn('codex', 'owner', { windowTokens: 500000 });
+    expect(store.get('codex', 'owner')?.effectiveWindowTokens).toBe(475000);
+    store.ensure('codex', 'owner', { windowTokens: 600000 });
+    expect(store.get('codex', 'owner')?.effectiveWindowTokens).toBeUndefined();
+    store.recordTurn('codex', 'owner', { ...usage, effectiveWindowTokens: 475000 });
+    store.reset('codex', 'owner');
+    expect(store.get('codex', 'owner')?.effectiveWindowTokens).toBeUndefined();
+    for (const n of [0, -1, NaN, Infinity]) expect(() => store.recordTurn('codex', 'owner', { ...usage, effectiveWindowTokens: n })).toThrow('非法上下文用量');
+  });
   it("按 backend:key 隔离，订阅与 trace 每次更新发出副本，重置后保留容量", async () => {
     const store = open();
     const events: { ticket: string; detail: unknown }[] = [];
@@ -103,6 +121,33 @@ function runnerSetup(env: NodeJS.ProcessEnv = {}, fallback?: number) {
 }
 
 describe("codex 上下文采集", () => {
+  it('rollout 取已完成回合最近的有效窗口，跳过未完成尾部、无值和非法值', async () => {
+    const file = path.join(tmp('rollout-effective-'), 'events.jsonl');
+    const record = (payload: unknown) => ({ timestamp: '2026-10-18T00:00:00Z', type: 'event_msg', payload });
+    const rows = [record({ type: 'task_started' }),
+      record({ type: 'token_count', info: { model_context_window: 400000, last_token_usage: { input_tokens: 10 } } }),
+      record({ type: 'token_count', info: { model_context_window: 475000 } }),
+      record({ type: 'token_count', info: { model_context_window: 0, last_token_usage: { input_tokens: 20 } } }),
+      record({ type: 'task_complete' }), record({ type: 'task_started' }),
+      record({ type: 'token_count', info: { model_context_window: 999999, last_token_usage: { input_tokens: 30 } } })];
+    await fs.writeFile(file, rows.map(r => JSON.stringify(r)).join('\n'), 'utf8');
+    expect(await readRolloutContextUsage(file)).toMatchObject({ usedTokens: 20, effectiveWindowTokens: 475000, turns: 1 });
+    for (const invalid of [undefined, '475000', -1]) {
+      await fs.writeFile(file, [record({ type: 'task_started' }), record({ type: 'token_count', info: { model_context_window: invalid,
+        last_token_usage: { input_tokens: 20 } } }), record({ type: 'task_complete' })].map(r => JSON.stringify(r)).join('\n'), 'utf8');
+      expect((await readRolloutContextUsage(file))?.effectiveWindowTokens).toBeUndefined();
+    }
+  });
+
+  it('回合结束和启动回填均保留 rollout 有效窗口与目录名义窗口', async () => {
+    const { runner, store } = runnerSetup({ FAKE_CODEX_MODEL_CONTEXT_WINDOW: '475000' });
+    await runner.ask('window', { threadKey: 'owner' });
+    expect(store.get('codex', 'owner')).toMatchObject({ usedTokens: 1000, windowTokens: 500000, effectiveWindowTokens: 475000 });
+    const copy = open(tmp('context-backfill-effective-'));
+    const restarted = new CodexRunner({ ...runner.opts, contextUsage: copy });
+    await restarted.initializeContextUsage();
+    expect(copy.get('codex', 'owner')).toMatchObject({ windowTokens: 500000, effectiveWindowTokens: 475000 });
+  });
   it("启动恢复最后完成回合的用量和时间，重置不复活归档", async () => {
     const { runner, store, dir } = runnerSetup();
     const sessions = path.join(dir, "codex", "sessions", "2026", "10", "17");

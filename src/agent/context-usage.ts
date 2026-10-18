@@ -10,6 +10,8 @@ export interface ContextUsage {
   usedTokens: number;
   cachedTokens?: number;
   windowTokens: number;
+  /** Codex rollout 上报的有效窗口；缺省时回退名义窗口。 */
+  effectiveWindowTokens?: number;
   compaction?: { background: number; reserve: number };
   turns: number;
   lastCompactionAt?: number;
@@ -19,7 +21,7 @@ export interface ContextUsage {
 
 type Backend = ContextUsage["backend"];
 type Capacity = Pick<ContextUsage, "windowTokens" | "compaction">;
-export type ContextUsageHistory = Pick<ContextUsage, "usedTokens" | "cachedTokens" | "turns" | "updatedAt" | "lastCompactionAt">;
+export type ContextUsageHistory = Pick<ContextUsage, "usedTokens" | "cachedTokens" | "effectiveWindowTokens" | "turns" | "updatedAt" | "lastCompactionAt">;
 const nonnegative = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
 
 function valid(value: unknown): value is ContextUsage {
@@ -30,6 +32,7 @@ function valid(value: unknown): value is ContextUsage {
     nonnegative(u.turns) && Number.isInteger(u.turns) && nonnegative(u.updatedAt) &&
     (u.source === "turn" || u.source === "estimate") &&
     (u.cachedTokens === undefined || nonnegative(u.cachedTokens)) &&
+    (u.effectiveWindowTokens === undefined || (nonnegative(u.effectiveWindowTokens) && u.effectiveWindowTokens > 0)) &&
     (u.lastCompactionAt === undefined || nonnegative(u.lastCompactionAt)) &&
     (u.compaction === undefined || (!!u.compaction && Number.isFinite(u.compaction.background) && Number.isFinite(u.compaction.reserve)));
 }
@@ -79,11 +82,12 @@ export class ContextUsageStore {
   ensure(backend: Backend, key: string, capacity: Capacity, ticket = "@context"): void {
     const old = this.get(backend, key);
     if (old && old.windowTokens === capacity.windowTokens && JSON.stringify(old.compaction) === JSON.stringify(capacity.compaction)) return;
+    if (old && old.windowTokens !== capacity.windowTokens) delete old.effectiveWindowTokens;
     this.update({ backend, key, usedTokens: 0, turns: 0, source: "estimate", ...old, ...capacity, updatedAt: old?.updatedAt ?? Date.now() }, ticket);
   }
 
   /** 每个完成回合只计数一次；缺少用量时保留原占用、来源和采样时间。 */
-  recordTurn(backend: Backend, key: string, usage: Capacity & Partial<Pick<ContextUsage, "usedTokens" | "cachedTokens">>, ticket = "@context"): void {
+  recordTurn(backend: Backend, key: string, usage: Capacity & Partial<Pick<ContextUsage, "usedTokens" | "cachedTokens" | "effectiveWindowTokens">>, ticket = "@context"): void {
     const old = this.get(backend, key);
     const sampled = usage.usedTokens !== undefined;
     this.update({ ...old, backend, key, ...usage, usedTokens: sampled ? usage.usedTokens! : old?.usedTokens ?? 0,
@@ -99,7 +103,15 @@ export class ContextUsageStore {
   /** 历史快照直接恢复计数；较新的已落盘用量优先，重复启动不累计回合。 */
   backfill(backend: Backend, key: string, history: ContextUsageHistory, ticket = "@context"): boolean {
     const old = this.get(backend, key);
-    if (!old || (old.source === "turn" && old.updatedAt > history.updatedAt)) return false;
+    if (!old) return false;
+    if (old.source === "turn" && old.updatedAt > history.updatedAt) {
+      // 旧版 recordTurn 的采样时间略晚于 rollout；只补缺失窗口，不能覆盖更晚的占用与计数。
+      if (old.effectiveWindowTokens !== undefined || history.effectiveWindowTokens === undefined) return false;
+      const enriched = { ...old, effectiveWindowTokens: history.effectiveWindowTokens };
+      if (!valid(enriched)) return false;
+      this.update(enriched, ticket);
+      return true;
+    }
     const next = { ...old, ...history, source: "turn" as const };
     if (!valid(next)) return false;
     this.update(next, ticket);
@@ -109,7 +121,7 @@ export class ContextUsageStore {
   reset(backend: Backend, key: string, ticket = "@context"): void {
     const old = this.get(backend, key);
     if (!old) return;
-    const { lastCompactionAt: _last, ...capacity } = old;
+    const { lastCompactionAt: _last, effectiveWindowTokens: _effective, ...capacity } = old;
     this.update({ ...capacity, usedTokens: 0, cachedTokens: 0, turns: 0, source: "estimate", updatedAt: Date.now() }, ticket);
   }
 

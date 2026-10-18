@@ -43,8 +43,9 @@ export async function analyzeContext(adapters: AdapterSet, backend: 'codex' | 'p
   const configured = typeof options.windowTokens === 'number' ? options.windowTokens : options.windowTokens?.[backend];
   const stored = options.contextUsage?.all().find(u => u.backend === backend && u.key === session.scope)?.windowTokens;
   const capacity = configured ?? stored;
-  const window = history.window ?? (capacity && capacity > 0 ? { tokens: capacity, source: configured ? 'configured.windowTokens' : 'context_usage.windowTokens' }
-    : { tokens: backend === 'codex' ? 400000 : 200000, source: 'default (model window unavailable)' });
+  const window = { ...(history.window ?? (capacity && capacity > 0 ? { tokens: capacity, source: configured ? 'configured.windowTokens' : 'context_usage.windowTokens' }
+    : { tokens: backend === 'codex' ? 400000 : 200000, source: 'default (model window unavailable)' })),
+    ...(backend === 'codex' && stored !== undefined && Number.isFinite(stored) && stored > 0 ? { nominalTokens: stored } : {}) };
   const categories: ContextAnalysis['categories'] = (Object.keys(labels) as CategoryKey[]).map(key => {
     const items = history.messages.filter(m => m.category === key), available = items.filter(m => m.provenance !== 'unavailable' && m.tokens.estimated !== undefined);
     const unavailable = items.filter(m => m.provenance === 'unavailable').length;

@@ -7,6 +7,22 @@ const usage = (over: Partial<ContextUsage> = {}): ContextUsage =>
   ({ backend: 'codex', key: 'owner', usedTokens: 123_456, windowTokens: 400_000, turns: 7, updatedAt: NOW - 60_000, source: 'turn', ...over });
 
 describe('上下文占用条渲染', () => {
+  it('有效窗口优先用于数字、百分比、提示和排序；旧记录及 pi 保持名义窗口', () => {
+    const u = usage({ usedTokens: 237500, windowTokens: 500000, effectiveWindowTokens: 475000 });
+    for (const mini of [false, true]) {
+      const html = contextBar('codex', 'owner', u, { mini, now: NOW });
+      expect(html).toContain('50%'); expect(html).toContain('data-w="50"'); expect(html).toContain('238k / 475k');
+      expect(html).toContain('名义 500,000 / 有效 475,000');
+      expect(html).toContain('237,500 / 475,000 tokens');
+    }
+    const old = contextBar('codex', 'owner', { ...u, effectiveWindowTokens: undefined });
+    expect(old).toContain('48%'); expect(old).toContain('238k / 500k'); expect(old).not.toContain('名义');
+    expect(contextBar('pi', 'owner', { ...u, backend: 'pi' })).toContain('238k / 500k');
+    const a = { ...u, key: 'a' }, b = usage({ key: 'b', usedTokens: 245000, windowTokens: 500000 });
+    expect(sortUsage([b, a]).map(u => u.key)).toEqual(['a', 'b']);
+    expect(toContextUsage({ ...u })?.effectiveWindowTokens).toBe(475000);
+    expect(toContextUsage({ ...u, effectiveWindowTokens: 0 })?.effectiveWindowTokens).toBeUndefined();
+  });
   it('codex 动态会话键显示群和私聊标签', () => {
     expect(contextBar('codex', 'group:42', null)).toContain('Codex · 群 42');
     expect(contextBar('codex', 'private:99', null)).toContain('Codex · 私聊 99');

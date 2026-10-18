@@ -28,6 +28,7 @@ const STALE_MS=${STALE_MS};
 function fmtInt(n){return String(Math.round(n)).replace(/\\B(?=(\\d{3})+(?!\\d))/g,',');}
 function fmtShort(n){const t=s=>s.replace(/\\.0+$|(\\.\\d*[1-9])0+$/,'$1');if(n<1000)return String(Math.round(n));if(n<1e6)return t((n/1000).toFixed(n<10000?1:0))+'k';return t((n/1e6).toFixed(2))+'M';}
 function ratio(u,w){return w>0?u/w*100:0;}
+function usageWindow(u){return u.backend==='codex'&&Number.isFinite(u.effectiveWindowTokens)&&u.effectiveWindowTokens>0?u.effectiveWindowTokens:u.windowTokens;}
 function clampPct(p){return Math.max(0,Math.min(100,Math.round(p)));}
 function fmtPct(p){return (p>0&&p<1?'<1':String(Math.round(p)))+'%';}
 function tier(p){return p>85?'hot':p>=60?'warn':'ok';}
@@ -56,23 +57,25 @@ function ctxParts(n){if(n._ctx)return n._ctx;const q=s=>n.querySelector(s);
 function ctxApply(n,u,nowTs){
   const mini=n.classList.contains('ctx-mini');
   if(!mini&&!n.querySelector('.ctx-used')){const [b,...k]=(n.dataset.ctx||'').split('|');const m=ctxNode(b,k.join('|'),false);if(n.parentNode)n.parentNode.replaceChild(m,n);n=m;}
-  const p=ratio(u.usedTokens,u.windowTokens), w=clampPct(p), x=ctxParts(n), stale=nowTs-u.updatedAt>STALE_MS;
+  const window=usageWindow(u), p=ratio(u.usedTokens,window), w=clampPct(p), x=ctxParts(n), stale=nowTs-u.updatedAt>STALE_MS;
+  const capacityTitle=u.backend==='codex'&&Number.isFinite(u.effectiveWindowTokens)&&u.effectiveWindowTokens>0?'名义 '+fmtInt(u.windowTokens)+' / 有效 '+fmtInt(window):'';
   n.className='ctx ctx-t-'+tier(p)+(u.source==='estimate'?' ctx-est':'')+(stale?' ctx-stale':'')+(mini?' ctx-mini':'');
-  x.fill.dataset.w=String(w);x.pct.textContent=fmtPct(p);x.short.textContent=fmtShort(u.usedTokens)+' / '+fmtShort(u.windowTokens);
-  x.track.setAttribute('aria-valuenow',String(w));x.track.setAttribute('aria-valuetext',fmtInt(u.usedTokens)+' / '+fmtInt(u.windowTokens)+' tokens，'+fmtPct(p));
+  x.fill.dataset.w=String(w);x.pct.textContent=fmtPct(p);x.short.textContent=fmtShort(u.usedTokens)+' / '+fmtShort(window);
+  x.track.setAttribute('aria-valuenow',String(w));x.track.setAttribute('aria-valuetext',fmtInt(u.usedTokens)+' / '+fmtInt(window)+' tokens，'+fmtPct(p));
   for(const k of ['bg','rs']){
-    const at=u.compaction&&u.windowTokens>0?(k==='bg'?u.compaction.background:u.compaction.reserve):null;
+    const at=u.compaction&&window>0?(k==='bg'?u.compaction.background:u.compaction.reserve):null;
     let t=x.ticks[k];
     if(at==null){if(t)t.remove();x.ticks[k]=null;continue;}
     if(!t){t=el('i','ctx-tick ctx-'+k);x.track.append(t);x.ticks[k]=t;}
-    t.dataset.at=String(clampPct(ratio(at,u.windowTokens)));t.setAttribute('title',tickTitle(k,at,u.windowTokens));
+    t.dataset.at=String(clampPct(ratio(at,window)));t.setAttribute('title',tickTitle(k,at,window));
   }
   const parts=(n.dataset.ctx||'').split('|'), label=ctxLabel(parts[0],parts.slice(1).join('|'));
-  if(mini){n.setAttribute('title',label+'：'+fmtInt(u.usedTokens)+' / '+fmtInt(u.windowTokens)+' tokens');return n;}
-  x.used.textContent=fmtInt(u.usedTokens);x.win.textContent=fmtInt(u.windowTokens);
+  if(mini){n.setAttribute('title',label+'：'+fmtInt(u.usedTokens)+' / '+fmtInt(window)+' tokens'+(capacityTitle?'；'+capacityTitle:''));return n;}
+  n.setAttribute('title',capacityTitle);
+  x.used.textContent=fmtInt(u.usedTokens);x.win.textContent=fmtInt(window);
   const meta=['第 '+fmtInt(u.turns||0)+' 回合'];
   if(u.cachedTokens)meta.push('缓存命中 '+fmtInt(u.cachedTokens));
-  if(u.compaction)meta.push('压缩阈值 '+fmtPct(ratio(u.compaction.background,u.windowTokens))+' / '+fmtPct(ratio(u.compaction.reserve,u.windowTokens)));
+  if(u.compaction)meta.push('压缩阈值 '+fmtPct(ratio(u.compaction.background,window))+' / '+fmtPct(ratio(u.compaction.reserve,window)));
   if(u.source==='estimate')meta.push('估算值（尚无真实回合用量）');
   meta.push(stale?'上次更新 '+Math.max(0,Math.floor((nowTs-u.updatedAt)/3600000))+' 小时前':'更新于 '+hhmmss(u.updatedAt));
   x.meta.textContent=meta.join('，');

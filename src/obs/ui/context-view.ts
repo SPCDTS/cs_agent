@@ -10,7 +10,7 @@ import { contextHref, turnHref, type SessionCtx } from './turn-view.js';
 export type Provenance = 'recorded' | 'reconstructed' | 'estimated' | 'unavailable';
 export type ContextAnalysis = {
   backend: 'codex' | 'pi'; session: string; at: { turn: string; phase: 'before' | 'after' }; generatedAt: number;
-  window: { tokens: number; source: string };
+  window: { tokens: number; source: string; nominalTokens?: number };
   measured?: { input: number; cached?: number; at: number; stale: boolean; source: string };
   estimated: { total: number; tokenizer: string };
   unexplained?: number;
@@ -55,7 +55,7 @@ export function contextBody(ctx: SessionCtx, a: ContextAnalysis): string {
   const m = a.measured;
   let out = phaseNav(ctx, a.at.turn, a.at.phase);
   out += `<div class="grid cols-3 ctx-figs">
-<div class="sheet pad"><div class="muted">上下文窗口</div><div class="figure">${tok(window)}<small class="muted"> tokens</small></div><div class="faint">来源：${esc(a.window?.source ?? '—')}</div></div>
+<div class="sheet pad"><div class="muted">上下文窗口</div><div class="figure">${tok(window)}<small class="muted"> tokens</small></div>${num(a.window?.nominalTokens) ? `<div class="faint">名义 ${tok(a.window.nominalTokens)} / ${a.window.source === 'codex.rollout.model_context_window' ? '有效' : '分析口径'} ${tok(window)}</div>` : ''}<div class="faint">来源：${esc(a.window?.source ?? '—')}</div></div>
 <div class="sheet pad"><div class="muted">实测输入${m?.stale ? ' ' + stamp('过期', 'warn') : ''}</div><div class="figure">${m ? tok(m.input) : '—'}${m ? `<small class="muted"> ${esc(fmtPct(ratio(m.input, window)))}</small>` : ''}</div><div class="faint">${m ? `${m.cached !== undefined ? `缓存 ${tok(m.cached)} · ` : ''}${esc(m.source)} · ${esc(fmtTime(m.at))}` : '没有可用的实测值'}</div></div>
 <div class="sheet pad"><div class="muted">估算总计</div><div class="figure">${tok(a.estimated?.total)}<small class="muted"> ${esc(fmtPct(ratio(a.estimated?.total ?? 0, window)))}</small></div><div class="faint">分词器：${esc(a.estimated?.tokenizer ?? '—')}${num(a.unexplained) ? ` · 未解释差额 <b class="${a.unexplained < 0 ? 's-warn' : ''}">${a.unexplained > 0 ? '+' : ''}${esc(fmtInt(a.unexplained))}</b>` : ''}</div></div></div>`;
   const cats = a.categories ?? [];

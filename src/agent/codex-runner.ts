@@ -754,7 +754,8 @@ export class CodexRunner {
       if (completed && this.opts.contextUsage) {
         const usage = id ? await this.latestRolloutContextUsage(id) : undefined;
         if (usage && usage.updatedAt >= startedAt) {
-          this.opts.contextUsage.recordTurn("codex", key, { windowTokens, usedTokens: usage.usedTokens, cachedTokens: usage.cachedTokens }, ticket);
+          this.opts.contextUsage.recordTurn("codex", key, { windowTokens, usedTokens: usage.usedTokens, cachedTokens: usage.cachedTokens,
+            ...(usage.effectiveWindowTokens !== undefined ? { effectiveWindowTokens: usage.effectiveWindowTokens } : {}) }, ticket);
         } else {
           this.opts.contextUsage.recordTurn("codex", key, { windowTokens }, ticket);
           log.warn("codex context usage unavailable after turn; keeping previous usage", {

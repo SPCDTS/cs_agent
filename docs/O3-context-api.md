@@ -31,3 +31,11 @@
 ## O6 类别可用性补充
 
 类别新增可选 `unavailable_items: number`，仅在存在不可用条目时返回其数量；旧字段不变。类别 provenance 取可见条目中占比最高的来源，同票依次优先 recorded、reconstructed、estimated。全部不可用或没有记录时仍为 unavailable。页面在部分不可用的类别主来源旁显示“部分不可用 N 条”；全部不可用时仍显示“不可用”。类别估算、估算总计及占窗口百分比只计可见部分，不把未知占用当作零；备注明确说明统计边界。
+
+## O6 窗口口径补充
+
+上下文占用记录新增可选 `effectiveWindowTokens`，从已完成 Codex 回合的 rollout `token_count.info.model_context_window` 读取最近正数值。启动回填和回合结束采样均保存此字段；扫描仍限制尾部 2 MiB，忽略尚未完成回合的尾部事件。`windowTokens` 保留模型目录名义值，不用固定 95% 公式推算有效值。
+
+Codex 占用条的首屏、SSE 更新、占比排序和无障碍文本均优先使用有效窗口；提示同时显示“名义 500,000 / 有效 475,000”。无有效值或旧记录没有该字段时继续使用名义窗口，Pi 口径不变。新线程重置或名义容量变更后丢弃旧有效值，待 rollout 重新采样。
+
+分析接口的 `window.tokens/source` 保持原来源优先级；若 `contextUsage` 有同域 Codex 名义窗口，额外返回 `window.nominalTokens` 并在页面头部显示。历史分析仍用当时 rollout 的窗口；名义值取当前记录，两者可能属于不同模型配置，不据此反算预留比例。
