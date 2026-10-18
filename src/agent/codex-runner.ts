@@ -435,7 +435,7 @@ export class CodexRunner {
   private async loadContextUsage(): Promise<number> {
     await this.prepareTraceDirectory();
     const windowTokens = await loadCodexContextWindow({ command: this.opts.command, model: this.opts.model ?? "gpt-6.1-sol",
-      env: this.childEnv(), fallback: this.opts.contextWindow });
+      env: this.childEnv(), fallback: this.opts.contextWindow, cacheFile: path.join(this.opts.codexHome, "models_cache.json") });
     await this.backfillContextUsage(windowTokens);
     return windowTokens;
   }

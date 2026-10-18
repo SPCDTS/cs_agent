@@ -175,6 +175,57 @@ describe("codex 上下文采集", () => {
     expect(catalogContextWindow('{"models":[{"slug":"bad","context_window":-1}]}', "bad")).toBeUndefined();
   });
 
+  it.each([
+    { FAKE_CODEX_CATALOG_FAIL: "1" },
+    { FAKE_CODEX_CATALOG: JSON.stringify({ models: [{ slug: "gpt-6.1-sol", context_window: 272000 }, { slug: "other", context_window: 272000 }] }) },
+  ])("命令失败或离线目录时采用只读模型缓存：%j", async env => {
+    const { runner, dir } = runnerSetup(env, 654321);
+    const home = path.join(dir, "codex"); await fs.mkdir(home, { recursive: true });
+    const cacheFile = path.join(home, "models_cache.json");
+    const cache = JSON.stringify({ fetched_at: "2026-10-18T00:00:00Z", etag: "fixture", client_version: "0.163.0", identity: "fixture",
+      models: [{ slug: "other", context_window: 100000 }, { slug: "gpt-6.1-sol", context_window: 500000 }] });
+    await fs.writeFile(cacheFile, cache, "utf8");
+    const before = await fs.stat(cacheFile);
+    const info = vi.spyOn(log, "info");
+    expect(await runner.initializeContextUsage()).toBe(500000);
+    expect(info).toHaveBeenCalledWith("codex context window", { model: "gpt-6.1-sol", windowTokens: 500000, source: "cache.context_window" });
+    expect(await fs.readFile(cacheFile, "utf8")).toBe(cache);
+    expect((await fs.stat(cacheFile)).mtimeMs).toBe(before.mtimeMs);
+  });
+
+  it("正常目录的模型窗口不被不同的缓存值覆盖", async () => {
+    const { runner, dir } = runnerSetup({ FAKE_CODEX_CATALOG: JSON.stringify({ models: [
+      { slug: "gpt-6.1-sol", context_window: 500000 }, { slug: "other", context_window: 272000 },
+    ] }) });
+    const home = path.join(dir, "codex"); await fs.mkdir(home, { recursive: true });
+    await fs.writeFile(path.join(home, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol", context_window: 600000 }] }), "utf8");
+    const info = vi.spyOn(log, "info");
+    expect(await runner.initializeContextUsage()).toBe(500000);
+    expect(info).toHaveBeenCalledWith("codex context window", expect.objectContaining({ source: "catalog.context_window" }));
+  });
+
+  it.each(['{broken', '{"models":[{"slug":"other","context_window":500000}]}',
+    '{"models":[{"slug":"gpt-6.1-sol","context_window":-1}]}'])('缓存不可用时保留目录值或配置回退：%s', async cache => {
+    for (const failed of [false, true]) {
+      const { runner, dir } = runnerSetup(failed ? { FAKE_CODEX_CATALOG_FAIL: "1" } : {
+        FAKE_CODEX_CATALOG: JSON.stringify({ models: [{ slug: "gpt-6.1-sol", context_window: 272000 }] }),
+      }, 654321);
+      const home = path.join(dir, "codex"); await fs.mkdir(home, { recursive: true });
+      await fs.writeFile(path.join(home, "models_cache.json"), cache, "utf8");
+      expect(await runner.initializeContextUsage()).toBe(failed ? 654321 : 272000);
+    }
+  });
+
+  it("离线目录与缓存值相同时仍标为目录来源", async () => {
+    const catalog = JSON.stringify({ models: [{ slug: "gpt-6.1-sol", context_window: 272000 }] });
+    const { runner, dir } = runnerSetup({ FAKE_CODEX_CATALOG: catalog });
+    const home = path.join(dir, "codex"); await fs.mkdir(home, { recursive: true });
+    await fs.writeFile(path.join(home, "models_cache.json"), catalog, "utf8");
+    const info = vi.spyOn(log, "info");
+    expect(await runner.initializeContextUsage()).toBe(272000);
+    expect(info).toHaveBeenCalledWith("codex context window", expect.objectContaining({ source: "catalog.context_window" }));
+  });
+
   it("启动与多个回合共用一次目录查询，JSONL 用量更新，不重复累加缓存", async () => {
     const { runner, store, catalogLog, dir } = runnerSetup();
     await Promise.all([runner.initializeContextUsage(), runner.initializeContextUsage()]);
