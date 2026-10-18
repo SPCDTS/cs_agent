@@ -1,17 +1,19 @@
 /**
  * 进行中会话的实时视图（设计 §8.4）：订阅 trace 的进程内总线（trace.tap），按票据维护内存卡片，
  * 并把每个事件以增量推送给 /live 的 SSE 客户端。不读数据库、不轮询；事件已在 trace 内脱敏，
- * 这里只再做摘要与截断。卡片在终态后标记完成，保留最近若干张供页面收起显示。
+ * 这里只再做摘要与截断。卡片在终态后标记完成，保留最近若干张供页面收起显示；超出数量或过期的
+ * 完成卡片在终态事件后与定时器里即时淘汰，并推送 remove 增量。每张卡片内的事件带单调递增的 seq，
+ * 客户端据此增量渲染（事件环形截断后仍能续接）。
  */
 import { redact, redactText } from './redact.js';
 import type { LiveEvent, Trace } from './trace.js';
 
 export type CardState = 'queued' | 'running' | 'done' | 'failed';
-export interface LiveItem { ts: number; stage: string; status: string; duration_ms: number | null; summary: string }
+export interface LiveItem { seq: number; ts: number; stage: string; status: string; duration_ms: number | null; summary: string }
 export interface LiveCard {
   ticket: string; scope: string; text: string; sender: string; route: string; backend: string;
   state: CardState; phase: string; phase_since: number; started: number; updated: number; finished: number | null;
-  outcome: string; late_images: number; dropped: number; items: LiveItem[];
+  outcome: string; late_images: number; dropped: number; seq: number; items: LiveItem[];
 }
 export type CardHead = Omit<LiveCard, 'items'>;
 export type LiveMessage = { type: 'event'; card: CardHead; item: LiveItem } | { type: 'remove'; ticket: string };
@@ -53,20 +55,23 @@ export function summarize(e: Pick<LiveEvent, 'stage' | 'status' | 'detail'>): st
   return parts.join(' · ').slice(0, 240);
 }
 
-export interface LiveBusOptions { maxItems?: number; maxFinished?: number; finishedTtlMs?: number; maxCards?: number; now?: () => number }
+export interface LiveBusOptions { maxItems?: number; maxFinished?: number; finishedTtlMs?: number; maxCards?: number; pruneIntervalMs?: number; now?: () => number }
 
 export class LiveBus {
   private readonly cards = new Map<string, LiveCard & { open: { stage: string; ts: number }[] }>();
   private readonly subscribers = new Set<(m: LiveMessage) => void>();
   private readonly off: () => void;
   private readonly o: Required<LiveBusOptions>;
+  private readonly timer: ReturnType<typeof setInterval>;
 
   constructor(trace: Pick<Trace, 'tap'>, options: LiveBusOptions = {}) {
-    this.o = { maxItems: 80, maxFinished: 30, finishedTtlMs: 30 * 60_000, maxCards: 300, now: Date.now, ...options };
+    this.o = { maxItems: 80, maxFinished: 30, finishedTtlMs: 30 * 60_000, maxCards: 300, pruneIntervalMs: 60_000, now: Date.now, ...options };
     this.off = trace.tap(e => this.ingest(e));
+    // 完成卡片的过期淘汰不依赖有人打开页面
+    this.timer = setInterval(() => this.prune(), this.o.pruneIntervalMs); this.timer.unref();
   }
 
-  close(): void { this.off(); this.subscribers.clear(); }
+  close(): void { clearInterval(this.timer); this.off(); this.subscribers.clear(); }
   subscribe(fn: (m: LiveMessage) => void): () => void { this.subscribers.add(fn); return () => { this.subscribers.delete(fn); }; }
 
   /** 当前全部卡片（进行中在前，按开始时间）；用于页面首屏与 SSE 首帧。 */
@@ -86,7 +91,7 @@ export class LiveBus {
     if (!card) {
       if (terminal) return; // 重启前的票据只剩终态：不凭空造卡
       card = { ticket: e.ticket, scope: e.scope, text: '', sender: '', route: '', backend: '', state: 'queued', phase: '', phase_since: e.ts,
-        started: e.ts, updated: e.ts, finished: null, outcome: '', late_images: 0, dropped: 0, items: [], open: [] };
+        started: e.ts, updated: e.ts, finished: null, outcome: '', late_images: 0, dropped: 0, seq: 0, items: [], open: [] };
       this.cards.set(e.ticket, card);
       if (this.cards.size > this.o.maxCards) this.prune(true);
     }
@@ -116,11 +121,12 @@ export class LiveBus {
       card.open = []; card.phase = ''; card.phase_since = e.ts;
     }
     card.updated = e.ts;
-    const item: LiveItem = { ts: e.ts, stage: e.stage, status: e.status, duration_ms: e.duration_ms, summary: summarize(e) };
+    const item: LiveItem = { seq: ++card.seq, ts: e.ts, stage: e.stage, status: e.status, duration_ms: e.duration_ms, summary: summarize(e) };
     card.items.push(item);
     if (card.items.length > this.o.maxItems) { card.items.splice(0, card.items.length - this.o.maxItems); card.dropped++; }
     const msg: LiveMessage = { type: 'event', card: this.head(card), item };
     for (const fn of this.subscribers) { try { fn(msg); } catch { /* 慢客户端由 SSE 层断开 */ } }
+    if (terminal) this.prune();
   }
 
   private prune(force = false): void {

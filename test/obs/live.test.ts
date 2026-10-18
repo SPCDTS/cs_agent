@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { LiveBus, summarize } from '../../src/obs/live.js';
+import { describe, expect, it, vi } from 'vitest';
+import { LiveBus, summarize, type LiveMessage } from '../../src/obs/live.js';
 import { Trace, type LiveEvent } from '../../src/obs/trace.js';
 import { registerSecrets } from '../../src/obs/redact.js';
 
@@ -36,5 +36,40 @@ describe('实时总线', () => {
     expect(JSON.stringify(got[0])).not.toContain(secret);
     expect(got[0]!.detail.api_key).toBe('[已隐藏]');
     expect(summarize(got[0]!)).toBe('query 查 [已隐藏]');
+  });
+
+  it('事件 seq 每张卡片单调递增，环形截断后继续增长', () => {
+    const listeners: ((e: LiveEvent) => void)[] = [];
+    const bus = new LiveBus({ tap: fn => { listeners.push(fn); return () => {}; } });
+    const got: LiveMessage[] = []; bus.subscribe(m => got.push(m));
+    let ts = 0;
+    for (let i = 0; i < 100; i++) listeners.forEach(fn => fn({ ticket: 'a', stage: 'tool:x', status: 'ok', scope: 'private:1', ts: ts++, duration_ms: null, detail: {} }));
+    const card = bus.snapshot()[0]!;
+    expect(card.items).toHaveLength(80);
+    expect(card.items.map(i => i.seq)).toEqual(Array.from({ length: 80 }, (_, i) => i + 21));
+    expect(card.seq).toBe(100);
+    const last = got.at(-1)!; expect(last.type === 'event' && last.item.seq).toBe(100);
+    bus.close();
+  });
+
+  it('完成卡片超过 30 张时在终态事件后立即推送 remove，无需快照请求；过期由定时器淘汰，close 清除定时器', () => {
+    vi.useFakeTimers();
+    try {
+      let now = 1_000;
+      const listeners: ((e: LiveEvent) => void)[] = [];
+      const timersBefore = vi.getTimerCount();
+      const bus = new LiveBus({ tap: fn => { listeners.push(fn); return () => {}; } }, { now: () => now, finishedTtlMs: 5_000, pruneIntervalMs: 1_000 });
+      expect(vi.getTimerCount()).toBe(timersBefore + 1);
+      const removed: string[] = []; bus.subscribe(m => { if (m.type === 'remove') removed.push(m.ticket); });
+      const ev = (ticket: string, stage: string, detail: Record<string, unknown> = {}) => listeners.forEach(fn => fn({ ticket, stage, status: 'ok', scope: 'private:1', ts: now++, duration_ms: null, detail }));
+      for (let i = 0; i < 31; i++) { ev(`t${i}`, 'received'); ev(`t${i}`, 'reply_sent', { terminal: true }); }
+      expect(removed).toEqual(['t0']);
+      ev('live', 'received');
+      now += 6_000; vi.advanceTimersByTime(1_000);
+      expect(removed).toHaveLength(31);
+      expect(removed).not.toContain('live');
+      bus.close();
+      expect(vi.getTimerCount()).toBe(timersBefore);
+    } finally { vi.useRealTimers(); }
   });
 });
