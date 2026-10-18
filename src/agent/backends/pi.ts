@@ -1,3 +1,5 @@
+import type { ContextUsageStore } from "../context-usage.js";
+import { PiContextObserver, piContextCapacity } from "../pi-context-usage.js";
 import { readThreadArchive, writeThreadArchive, THREAD_ARCHIVE_LIMIT } from "../thread-archive.js";
 import { trace } from "../../obs/trace.js";
 import { promises as fs } from "node:fs";
@@ -37,6 +39,7 @@ const PiMigrationDoc = defineDoc<{ sharedRetired: boolean }>({
 
 export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness"> {
   models: Models;
+  contextUsage?: ContextUsageStore;
   model: ModelRef;
   thinkingLevel: ModelThinkingLevel;
   timeoutMs?: number;
@@ -50,6 +53,7 @@ export class PiBackend implements AgentBackend {
   readonly name = "pi" as const;
   private readonly tails = new Map<string, Promise<unknown>>();
   private closing = false;
+  private readonly contextObservers = new Map<string, PiContextObserver>();
   private constructor(readonly harness: Harness, private readonly opts: PiBackendOptions) {}
 
   static async open(opts: PiBackendOptions): Promise<PiBackend> {
@@ -79,9 +83,16 @@ export class PiBackend implements AgentBackend {
       await backend.importArchive();
       await backend.persistMirrors();
       // 先把恢复中的回合纳入对应线程锁，再允许新请求；沿用已落盘截止时间。
-      for (const [key, id] of Object.entries(await backend.readThreadIds())) {
+      const threadIds = await backend.readThreadIds();
+      // 映射先提交、用量尚在防抖窗口就退出时，启动时修复已重置线程的旧用量。
+      for (const old of opts.contextUsage?.all() ?? []) {
+        if (old.backend === "pi" && threadIds[old.key] === undefined &&
+          (old.turns || old.usedTokens || old.cachedTokens || old.lastCompactionAt)) opts.contextUsage?.reset("pi", old.key);
+      }
+      for (const [key, id] of Object.entries(threadIds)) {
         const conv = await harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 线程映射指向不存在的会话");
+        await backend.observeContext(key, conv);
         const request = await harness.snapshot(PiRequestDoc, conv.id, context);
         if (request?.ticket) {
           const recovery = backend.lock(key, () => backend.bounded(conv, request.deadline, undefined,
@@ -144,7 +155,15 @@ export class PiBackend implements AgentBackend {
     }
   }
 
-  private async conversation(key: string): Promise<Conversation> {
+  private async observeContext(key: string, conv: Conversation, ticket?: string): Promise<void> {
+    if (!this.opts.contextUsage || this.contextObservers.has(key)) return;
+    const model = this.opts.models.getModel(this.opts.model.provider, this.opts.model.modelId);
+    if (!model) throw new Error("pi 上下文窗口缺少模型定义");
+    this.contextObservers.set(key, await PiContextObserver.open(this.harness, conv, key, this.opts.contextUsage,
+      piContextCapacity(model.contextWindow, this.opts.reserveTokens, this.opts.backgroundTokens), ticket));
+  }
+
+  private async conversation(key: string, ticket: string): Promise<Conversation> {
     // 仅创建和 JSON 写回用短全局锁，模型回合按 owner 或 scope 分别串行。
     return this.lock("mapping", async () => {
       const id = (await this.readThreadIds())[key];
@@ -153,12 +172,15 @@ export class PiBackend implements AgentBackend {
         const conv = await this.harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 会话不存在");
         await conv.configure(agent, context);
+        await this.observeContext(key, conv, ticket);
         await this.persistMirrors();
         return conv;
       }
       const conv = await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent,
         init: async (tx, conversationId) => { (await tx.doc(PiThreadsDoc))[key] = conversationId; },
       }, context);
+      this.opts.contextUsage?.reset("pi", key, ticket);
+      await this.observeContext(key, conv, ticket);
       await this.persistMirrors();
       return conv;
     });
@@ -198,7 +220,7 @@ export class PiBackend implements AgentBackend {
     if (this.closing) throw new Error("pi 后端正在关闭");
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(req.ticket)) throw new Error("非法票据");
     if (!parseAccess(req.access) || (req.threadKey !== "owner" && req.access !== req.scope)) throw new Error("非法访问范围");
-    const conv = await this.conversation(req.threadKey);
+    const conv = await this.conversation(req.threadKey, req.ticket);
     let requestId = ctx.piTurn?.requestId ?? req.ticket;
     const known = await conv.commit(tx => tx.submissionByRequest(conv.id, requestId), context);
     let deadline = Date.now() + (this.opts.timeoutMs ?? 300_000);
@@ -259,7 +281,7 @@ export class PiBackend implements AgentBackend {
     if (key !== "owner" && !isScope(key)) return Promise.reject(new Error("非法会话键"));
     return this.lock(key, () => this.lock("mapping", async () => {
       const id = (await this.readThreadIds())[key] ?? null;
-      if (id === null) return null;
+      if (id === null) { this.opts.contextUsage?.reset("pi", key); return null; }
       await this.harness.commit(async tx => {
         (await tx.doc(PiThreadsDoc))[key] = null;
         const archive = await tx.doc(PiThreadsArchiveDoc);
@@ -267,6 +289,9 @@ export class PiBackend implements AgentBackend {
         archive.rows = archive.rows.slice(-THREAD_ARCHIVE_LIMIT);
       }, context);
       await this.persistMirrors();
+      await this.contextObservers.get(key)?.close();
+      this.contextObservers.delete(key);
+      this.opts.contextUsage?.reset("pi", key);
       log.info("pi conversation reset", { conversation_key: key, conversation: id, reason });
       return id;
     }));
@@ -277,6 +302,8 @@ export class PiBackend implements AgentBackend {
 
   async close(): Promise<void> {
     this.beginShutdown();
+    await Promise.all([...this.contextObservers.values()].map(observer => observer.close()));
+    this.contextObservers.clear();
     await this.harness.close(context);
     await Promise.allSettled([...this.tails.values()]);
   }

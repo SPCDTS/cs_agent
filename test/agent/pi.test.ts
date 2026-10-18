@@ -1,3 +1,7 @@
+import { ContextUsageStore } from "../../src/agent/context-usage.js";
+import { piContextCapacity } from "../../src/agent/pi-context-usage.js";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import { trace } from "../../src/obs/trace.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -40,6 +44,8 @@ const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === 
 
 async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
+  const contextUsage = new ContextUsageStore(dir);
+  cleanup.push(() => contextUsage.close());
   const store = new ContextStore(dir);
   cleanup.push(() => store.close());
   const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200_000 }], tokensPerSecond: Infinity });
@@ -57,12 +63,12 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
   const pi = await PiBackend.open({ dataDir: dir, models, model: { provider: model.provider, modelId: model.id },
-    thinkingLevel: "off", store, imageBackend, web, timeoutMs: opts.timeoutMs,
+    thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
     ...(opts.disk ? {} : { storage: new MemoryStorage() }),
   });
   cleanup.push(() => pi.close());
-  return { pi, dir, store, faux, http, imageBackend, models };
+  return { pi, dir, store, contextUsage, faux, http, imageBackend, models };
 }
 
 describe("pi durable backend", () => {
@@ -299,6 +305,8 @@ describe("pi durable backend", () => {
     const view = await conv.context(context);
     expect(view.entries.some(e => e.kind === "pi.compaction")).toBe(true);
     expect(contexts.some(c => c.includes("context summarization assistant"))).toBe(true);
+    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")!.lastCompactionAt).toBeTypeOf("number"));
+    expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ turns: 2, compaction: { background: 50000, reserve: 50000 } });
   });
 
   it("aborts timed-out turns before releasing the mutex", async () => {
@@ -459,6 +467,7 @@ describe("pi resetThread", () => {
     const before = (await s.pi.readThreadIds())["group:7"];
     expect(before).toBeTypeOf("number");
     expect(await s.pi.resetThread("group:7")).toBe(before);
+    expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: 0, cachedTokens: 0, turns: 0, source: "estimate", windowTokens: 200000 });
     expect((await s.pi.readThreadIds())["group:7"]).toBeUndefined();
     expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).not.toHaveProperty("group:7");
     const archive = (await fs.readFile(path.join(s.dir, "pi-threads-archive.jsonl"), "utf8")).trim().split("\n").map(l => JSON.parse(l));
@@ -539,5 +548,43 @@ describe("pi 重置事务与归档轮换", () => {
     const reopened = await setup([], { dir, disk: true });
     expect((await reopened.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual(archive);
     expect((await fs.readFile(file, "utf8")).trim().split("\n")).toHaveLength(200);
+  });
+});
+
+
+describe("pi 上下文占用", () => {
+  it("从 assistant 条目取输入与缓存，每次模型回合更新，重复回执不重复计数", async () => {
+    const tool = call("web_search", { query: "usage" });
+    const answer = reply("完成采集");
+    const s = await setup([tool, answer], { reserveTokens: 16000, backgroundTokens: 32000 });
+    const events: { ticket: string; detail: Record<string, unknown> }[] = [];
+    const untap = trace.tap(e => { if (e.stage === "context_usage" && e.detail.source === "turn") events.push(e); });
+    try {
+      await s.pi.handle(request("usage-turn"), handleContext());
+      const conv = (await s.pi.harness.conversation((await s.pi.readThreadIds())["group:7"] as ConversationId, context))!;
+      const messages = (await conv.context(context)).entries.flatMap(e => e.model ?? []).filter(m => m.role === "assistant");
+      expect(messages).toHaveLength(2);
+      const actual = messages[1]!.usage;
+      expect(actual.cacheRead).toBeGreaterThan(0);
+      await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")).toMatchObject({
+        usedTokens: actual.input + actual.cacheRead + actual.cacheWrite, cachedTokens: actual.cacheRead, windowTokens: 200000, turns: 2, source: "turn",
+        compaction: { background: 152000, reserve: 184000 },
+      }));
+      expect(events.map(e => [e.ticket, e.detail.usedTokens])).toEqual(messages.map(m => ["usage-turn", m.usage.input + m.usage.cacheRead + m.usage.cacheWrite]));
+      await s.pi.handle(request("usage-turn"), handleContext());
+      expect(s.contextUsage.get("pi", "group:7")!.turns).toBe(2);
+      await s.contextUsage.flush();
+      expect(new ContextUsageStore(s.dir).all()).toEqual(s.contextUsage.all());
+      await s.pi.resetThread("group:7");
+      expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
+      expect(s.contextUsage.get("pi", "group:7")!.lastCompactionAt).toBeUndefined();
+    } finally { untap(); }
+  });
+
+  it("deepseek-flash 使用 pi-ai 的 1000000 窗口与默认实际压缩位置", () => {
+    const model = builtinModels().getModel("deepseek", "deepseek-flash")!;
+    expect(piContextCapacity(model.contextWindow)).toEqual({ windowTokens: 1000000,
+      compaction: { background: 950848, reserve: 983616 } });
+    expect(piContextCapacity(model.contextWindow, 16384, 0).compaction).toEqual({ background: 983616, reserve: 983616 });
   });
 });
