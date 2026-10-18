@@ -21,6 +21,41 @@ import { BACKENDS, ROUTES, csrfField, empty, esc, fmtBytes, fmtMs, fmtOffset, fm
 export { esc };
 const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
 const MAX_SSE = 20;
+/** SSE 写队列：未写出字节（队列 + socket 缓冲）超过上限，或一次 drain 等待超过时限才断开慢客户端。 */
+export const SSE_MAX_PENDING = 2 * 1024 * 1024;
+export const SSE_DRAIN_TIMEOUT_MS = 10_000;
+
+export interface SseWriter { send(frame: string): void }
+/** 按序写出 SSE 帧；write 返回 false 是正常背压，等待 drain 而不是断开。 */
+export function sseWriter(res: ServerResponse, maxPending = SSE_MAX_PENDING, drainTimeoutMs = SSE_DRAIN_TIMEOUT_MS): SseWriter {
+  const queue: string[] = [];
+  let queued = 0, flushing = false, closed = false;
+  res.on('close', () => { closed = true; queue.length = 0; queued = 0; });
+  const drained = () => new Promise<boolean>(resolve => {
+    const done = (ok: boolean) => { clearTimeout(timer); res.off('drain', onDrain); res.off('close', onClose); resolve(ok); };
+    const onDrain = () => done(true), onClose = () => done(false);
+    const timer = setTimeout(() => done(false), drainTimeoutMs);
+    res.on('drain', onDrain); res.on('close', onClose);
+  });
+  async function flush(): Promise<void> {
+    if (flushing) return;
+    flushing = true;
+    try {
+      while (queue.length && !closed) {
+        const frame = queue.shift()!; queued -= Buffer.byteLength(frame);
+        if (!res.write(frame) && !closed && !await drained()) { if (!closed) res.destroy(); return; }
+      }
+    } finally { flushing = false; }
+  }
+  return {
+    send(frame) {
+      if (closed) return;
+      const bytes = Buffer.byteLength(frame);
+      if (queued + bytes + res.writableLength > maxPending) { res.destroy(); return; }
+      queue.push(frame); queued += bytes; void flush();
+    },
+  };
+}
 const MAX_BODY = 512 * 1024;
 export const AGENT_MD_MAX_BYTES = 64 * 1024;
 
@@ -120,13 +155,14 @@ export function createDashboard(opts: DashboardOptions) {
   const tracer = opts.trace ?? defaultTrace;
   const agentMd = path.join(opts.config.DATA_DIR, 'prompts', 'agent.md');
 
-  function sse(res: ServerResponse): boolean {
-    if (clients.size >= MAX_SSE) { res.writeHead(503).end(); return false; }
+  function sse(res: ServerResponse): SseWriter | null {
+    if (clients.size >= MAX_SSE) { res.writeHead(503).end(); return null; }
     res.writeHead(200, { 'Content-Type':'text/event-stream', Connection:'keep-alive' }); res.flushHeaders();
     clients.add(res);
-    const heartbeat = setInterval(()=>{ if (!res.write(': keepalive\n\n')) res.destroy(); },15_000); heartbeat.unref();
+    const out = sseWriter(res);
+    const heartbeat = setInterval(()=>out.send(': keepalive\n\n'),15_000); heartbeat.unref();
     res.on('close',()=>{ clearInterval(heartbeat); clients.delete(res); });
-    return true;
+    return out;
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -165,13 +201,13 @@ export function createDashboard(opts: DashboardOptions) {
       res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }).end(body); return;
     }
     if (url.pathname === '/logs/stream') {
-      if (!sse(res)) return;
+      const out = sse(res); if (!out) return;
       const ticket = q.get('ticket'), level = q.get('level');
       const emit = (line: LogLine) => {
         const id = typeof line.ticket === 'string' ? line.ticket : '';
         if (ticket && (!id || (!id.startsWith(ticket) && !ticket.startsWith(id)))) return;
         if (level && line.level !== level) return;
-        if (!res.write('data: '+JSON.stringify(redact(line, 20_000))+'\n\n')) res.destroy();
+        out.send('data: '+JSON.stringify(redact(line, 20_000))+'\n\n');
       };
       const off = logBuffer.subscribe(emit);
       logBuffer.recent().forEach(emit);
@@ -179,9 +215,14 @@ export function createDashboard(opts: DashboardOptions) {
     }
     if (url.pathname === '/live/stream') {
       if (!opts.live) { res.writeHead(404).end(); return; }
-      if (!sse(res)) return;
-      const send = (event: string, data: unknown) => { if (!res.write(`event: ${event}\ndata: ${JSON.stringify(redact(data, 2_000))}\n\n`)) res.destroy(); };
-      send('snapshot', { now: Date.now(), cards: opts.live.snapshot() });
+      const out = sse(res); if (!out) return;
+      const send = (event: string, data: unknown) => out.send(`event: ${event}\ndata: ${JSON.stringify(redact(data, 2_000))}\n\n`);
+      // 快照分帧：snapshot 头（页面据此清空）→ 每张卡片一帧 snapcard → snapshot_end；之后的增量排在其后。
+      // 逐卡脱敏，避免 redact 对数组的 100 项截断吞掉多余卡片（总数由 LiveBus 的 maxCards 约束）。
+      const cards = opts.live.snapshot();
+      send('snapshot', { now: Date.now(), count: cards.length });
+      for (const card of cards) send('snapcard', { card });
+      send('snapshot_end', { count: cards.length });
       const off = opts.live.subscribe((m: LiveMessage) => m.type === 'event' ? send('card', { card: m.card, item: m.item }) : send('remove', { ticket: m.ticket }));
       res.on('close', off); return;
     }

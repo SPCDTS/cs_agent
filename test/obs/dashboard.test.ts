@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'nod
 import path from 'node:path';
 import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createDashboard, csrfToken } from '../../src/obs/http.js';
+import { createDashboard, csrfToken, sseWriter } from '../../src/obs/http.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { trace } from '../../src/obs/trace.js';
 import { LiveBus, type LiveCard } from '../../src/obs/live.js';
@@ -213,4 +213,57 @@ describe('实时视图', () => {
     expect(after).toMatch(/<details data-ticket="tk-live">[\s\S]*href="\/tickets\/tk-live"/);
   }, 20_000);
 
+  it('快照分帧并等待 drain：5 张 × 80 事件的大快照完整送达慢读者；超过 100 张卡片也不丢', async () => {
+    const r = await rig();
+    for (let c = 0; c < 5; c++) {
+      trace.event(`big-${c}`, 'received', { scope: 'group:7', detail: { text: '大卡片' } });
+      for (let i = 0; i < 90; i++) trace.event(`big-${c}`, 'tool:command_execution', { detail: { command: `第${i}步 ` + '长命令'.repeat(60) } });
+    }
+    for (let c = 0; c < 120; c++) trace.event(`small-${c}`, 'received', { scope: 'private:5', detail: { text: `小卡片 ${c}` } });
+    const raw = r.live.snapshot();
+    expect(raw).toHaveLength(125);
+    expect(Buffer.byteLength(JSON.stringify(raw))).toBeGreaterThan(200_000);
+    // 慢读者：连接后 1.5 秒不读，服务端写缓冲必然返回 false
+    const { request } = await import('node:http');
+    const text = await new Promise<string>((resolve, reject) => {
+      const req = request(r.base + '/live/stream', { headers: { Cookie: 'obs_token=' + encodeURIComponent(TOKEN) } }, res => {
+        res.pause(); let body = '';
+        setTimeout(() => { res.setEncoding('utf8'); res.on('data', (d: string) => { body += d; if (body.includes('event: snapshot_end\n')) { resolve(body); req.destroy(); } }); res.resume(); }, 1500);
+        res.on('error', reject); res.on('close', () => { if (!body.includes('event: snapshot_end\n')) reject(new Error('连接被断开：' + body.length)); });
+      });
+      req.on('error', reject); req.end();
+    });
+    expect(frames(text, 'snapshot')[0]).toMatchObject({ count: 125 });
+    const cards = frames(text, 'snapcard').map(f => f.card as LiveCard);
+    expect(cards).toHaveLength(125);
+    expect(new Set(cards.map(c => c.ticket)).size).toBe(125);
+    for (const c of cards.filter(c => c.ticket.startsWith('big-'))) {
+      expect(c.items).toHaveLength(80);
+      expect(c.items.at(-1)!.seq).toBe(91);
+    }
+    expect(frames(text, 'snapshot_end')[0]).toMatchObject({ count: 125 });
+  }, 20_000);
+
+  it('SSE 写队列：读者长期不读时，超过待写上限或 drain 超时才断开', async () => {
+    const { request } = await import('node:http');
+    const run = (maxPending: number, drainMs: number, total: number) => new Promise<{ closedAfter: number }>(resolve => {
+      const server = createServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.flushHeaders();
+        const out = sseWriter(res, maxPending, drainMs); const t0 = Date.now();
+        res.on('close', () => { resolve({ closedAfter: Date.now() - t0 }); server.closeAllConnections(); server.close(); });
+        const frame = 'data: ' + 'x'.repeat(16 * 1024) + '\n\n';
+        for (let sent = 0; sent < total; sent += frame.length) out.send(frame);
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const req = request(`http://127.0.0.1:${(server.address() as { port: number }).port}/`, res => res.pause());
+        req.on('error', () => undefined); req.end();
+      });
+    });
+    // 待写字节超过上限：立即断开
+    expect((await run(256 * 1024, 60_000, 8 * 1024 * 1024)).closedAfter).toBeLessThan(1000);
+    // 未超上限但读者一直不读：drain 等待超时后断开
+    const slow = await run(64 * 1024 * 1024, 300, 8 * 1024 * 1024);
+    expect(slow.closedAfter).toBeGreaterThanOrEqual(250);
+    expect(slow.closedAfter).toBeLessThan(5000);
+  }, 20_000);
 });

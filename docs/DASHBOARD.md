@@ -127,12 +127,18 @@ dispatch / tasks / codex JSONL observer / pi hooks
         │ trace.event(ticket, stage, {status, detail})
         ▼
 Trace ──tap──▶ LiveBus（内存卡片：阶段栈、事件流，已脱敏）──subscribe──▶ /live/stream（SSE）──▶ live.js
-  │                                                           snapshot 首帧 + card / remove 增量
+  │                                    snapshot → snapcard × N → snapshot_end，随后 card / remove 增量
   └──append──▶ ObsStore（SQLite，票据时间线、指标）
 ```
 
+- 快照分帧：`snapshot`（`{now, count}`，页面据此清空）→ 每张卡片一帧 `snapcard`（`{card}`，逐卡脱敏，不受数组 100 项截断影响；总数受 LiveBus 300 张上限约束）→ `snapshot_end`。快照与订阅同步建立，之后的增量严格排在快照之后。
+- 事件序号：每张卡片内事件带单调递增的 `seq`（卡片头 `seq` 为最新值）。服务端每卡只保留最近 80 条，客户端按 `seq` 只追加比已渲染更大的事件，增量 `card` 直接追加 `item`；`seq` 不大于已知值的增量（已含在快照中）被忽略。
+- 卡片页头（状态、发送者、路由、后端）与原文在每次更新时刷新。
+- 完成卡片：最多保留 30 张、30 分钟；终态事件后立即淘汰超额卡片，另有每分钟一次的过期检查（`close()` 时清除），淘汰都推送 `remove` 增量，无需页面重连。
+- 背压：所有 SSE 帧经写队列按序写出；`write()` 返回 false 时等待 `drain`。只有待写字节（队列 + socket 缓冲）超过 2 MB，或一次 `drain` 等待超过 10 秒，才断开该客户端。
+
 - 阶段开始事件：`phase:*`、`backend:*`、`image:*`、`late_images`、`postprocess` 由 span 产生；codex 新增 `thread_wait` 开始、内置命令/搜索 `item.started`；pi 新增 `thread_wait` 开始/结束。
-- 页面不轮询；唯一的定时器在浏览器本地刷新"已耗时"文字。SSE 与日志流共用 20 个连接上限，写缓冲满即断开。
+- 页面不轮询；唯一的定时器在浏览器本地刷新"已耗时"文字。SSE 与日志流共用 20 个连接上限，慢客户端按上面的背压规则断开。
 
 ## 运行时设置
 

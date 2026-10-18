@@ -21,6 +21,7 @@ function stamp(status){const [label,tone]=STATUS[status]||[status||'未知','idl
 const live = `
 const inflight=document.getElementById('inflight'), done=document.getElementById('done'), conn=document.getElementById('conn'), count=document.getElementById('live-count');
 const cards=new Map(), nodes=new Map();
+const MAX_ITEMS=80;
 let skew=0;
 const now=()=>Date.now()+skew;
 function group(scope){
@@ -36,34 +37,37 @@ function feedItem(it,t0){
   if(extra)body.append(document.createTextNode('  '+extra));
   li.append(body);return li;
 }
+// 单据骨架只建一次；页头（状态、发送者、路由、后端）与原文在每次更新时刷新。
 function slip(card){
-  const n=el('article','slip'+(card.state==='queued'?' queued':''));n.dataset.ticket=card.ticket;
-  const b=el('div','slip-body');
-  const top=el('div','slip-top');
-  top.append(stamp(card.state),el('span','who',card.sender||'—'));
-  if(card.route)top.append(el('span','pill',ROUTES[card.route]||card.route));
-  if(card.backend)top.append(el('span','pill',BACKENDS[card.backend]||card.backend));
-  const elapsed=el('span','elapsed');elapsed.dataset.since=card.started;elapsed.dataset.prefix='已耗时 ';top.append(elapsed);
-  const text=el('p','text',card.text||'（无原文）');
+  const n=el('article','slip');n.dataset.ticket=card.ticket;
+  const b=el('div','slip-body'), top=el('div','slip-top');
+  const h={top,stamp:stamp(card.state),who:el('span','who'),route:el('span','pill'),backend:el('span','pill'),elapsed:el('span','elapsed'),text:el('p','text')};
+  h.elapsed.dataset.prefix='已耗时 ';
+  top.append(h.stamp,h.who,h.route,h.backend,h.elapsed);
   const phase=el('div','phase');
   const feed=el('ol','feed');feed.setAttribute('aria-live','polite');
   const link=el('a',null,'查看时间线');link.href='/tickets/'+encodeURIComponent(card.ticket);
   const foot=el('div','hint');foot.append(link);
-  b.append(top,text,phase,feed,foot);n.append(b);
-  n._feed=feed;n._phase=phase;n._top=top;n._rendered=0;
+  b.append(top,h.text,phase,feed,foot);n.append(b);
+  n._h=h;n._feed=feed;n._phase=phase;n._seq=0;
   return n;
 }
 function fill(n,card){
-  const top=n._top;top.replaceChild(stamp(card.state),top.firstChild);
+  const h=n._h, st=stamp(card.state);h.top.replaceChild(st,h.stamp);h.stamp=st;
+  h.who.textContent=card.sender||'—';
+  h.route.textContent=card.route?(ROUTES[card.route]||card.route):'';h.route.hidden=!card.route;
+  h.backend.textContent=card.backend?(BACKENDS[card.backend]||card.backend):'';h.backend.hidden=!card.backend;
+  h.elapsed.dataset.since=card.started;
+  h.text.textContent=card.text||'（无原文）';
   n.classList.toggle('queued',card.state==='queued');
   n._phase.replaceChildren();
   if(card.phase){const p=el('span','pulse');p.setAttribute('aria-hidden','true');const since=el('span','faint');since.dataset.since=card.phase_since;
     n._phase.append(p,el('span',null,'当前：'+stageLabel(card.phase)),since);}
   else n._phase.append(el('span','faint',card.state==='queued'?'排队等待同一会话的前一条消息':'阶段之间'));
+  // 按事件序号增量追加：服务端事件环形截断后条数不变，但 seq 单调递增。
   const feed=n._feed, stick=feed.scrollTop+feed.clientHeight>=feed.scrollHeight-8;
-  for(const it of card.items.slice(n._rendered))feed.append(feedItem(it,card.started));
-  n._rendered=card.items.length;
-  while(feed.children.length>80)feed.firstChild.remove();
+  for(const it of card.items)if(it.seq>n._seq){feed.append(feedItem(it,card.started));n._seq=it.seq;}
+  while(feed.children.length>MAX_ITEMS)feed.firstChild.remove();
   if(stick)feed.scrollTop=feed.scrollHeight;
 }
 function finished(card){
@@ -73,12 +77,15 @@ function finished(card){
   const feed=el('ol','feed');for(const it of card.items.slice(-12))feed.append(feedItem(it,card.started));
   d.append(s,feed);return d;
 }
-function place(card,fresh){
+// snapshot=true：快照按服务端顺序逐张到达（完成卡片新的在前），追加到末尾且不高亮。
+function place(card,fresh,snapshot){
   const old=nodes.get(card.ticket);
   if(card.finished!=null){
     if(old&&old.tagName==='DETAILS')return;
     if(old)old.remove();
-    const d=finished(card);d.classList.add('flashin');done.prepend(d);nodes.set(card.ticket,d);
+    const d=finished(card);
+    if(snapshot)done.append(d);else{d.classList.add('flashin');done.prepend(d);}
+    nodes.set(card.ticket,d);
     while(done.children.length>30){const last=done.lastElementChild;nodes.delete(last.dataset.ticket);last.remove();}
   }else{
     let n=old;if(!n||n.tagName==='DETAILS'){if(n)n.remove();n=slip(card);if(fresh)n.classList.add('flashin');}
@@ -98,13 +105,14 @@ function tick(){for(const e of document.querySelectorAll('[data-since]'))e.textC
 setInterval(tick,1000);
 function connect(){
   const es=new EventSource('/live/stream');
+  // 快照分帧：snapshot（清空）→ 每张卡片一帧 snapcard → snapshot_end；随后是 card / remove 增量。
   es.addEventListener('snapshot',e=>{const m=JSON.parse(e.data);skew=m.now-Date.now();cards.clear();for(const n of nodes.values())n.remove();nodes.clear();
-    inflight.querySelectorAll('.scope-group').forEach(g=>g.remove());done.replaceChildren();
-    for(const c of m.cards)cards.set(c.ticket,c);
-    for(const c of m.cards.filter(c=>c.finished==null))place(c,false);
-    for(const c of m.cards.filter(c=>c.finished!=null).reverse())place(c,false); conn.className='conn on';conn.textContent='实时连接中';tick();});
+    inflight.querySelectorAll('.scope-group').forEach(g=>g.remove());done.replaceChildren();tidy();});
+  es.addEventListener('snapcard',e=>{const c=JSON.parse(e.data).card;cards.set(c.ticket,c);place(c,false,true);});
+  es.addEventListener('snapshot_end',()=>{conn.className='conn on';conn.textContent='实时连接中';tidy();tick();});
   es.addEventListener('card',e=>{const m=JSON.parse(e.data);const prev=cards.get(m.card.ticket);
-    const card={...m.card,items:[...(prev?prev.items:[]),m.item].slice(-80)};cards.set(card.ticket,card);place(card,!prev);tick();});
+    if(prev&&m.item.seq<=prev.seq)return; // 已包含在快照里
+    const card={...m.card,items:[...(prev?prev.items:[]),m.item].slice(-MAX_ITEMS)};cards.set(card.ticket,card);place(card,!prev,false);tick();});
   es.addEventListener('remove',e=>{const m=JSON.parse(e.data);cards.delete(m.ticket);const n=nodes.get(m.ticket);if(n)n.remove();nodes.delete(m.ticket);tidy();});
   es.onerror=()=>{conn.className='conn off';conn.textContent='连接中断，浏览器会自动重连';};
 }
