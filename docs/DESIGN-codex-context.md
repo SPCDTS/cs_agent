@@ -361,3 +361,8 @@ interface ContextUsage {
 ### 8.6 codex 系统提示可编辑（2026-10-18 用户需求）
 - 全局 `$CODEX_HOME/AGENTS.md` 拆为两段：受管段（安全规则、可写目录、工具纪律，程序生成、不可编辑）+ 自定义段（`${DATA_DIR}/prompts/codex.md`，面板可编辑）。保存后立即重写 AGENTS.md，codex 每次调用重新读取，下一条消息生效；容器重启按同样方式再生成。
 - 面板设置页增加"codex 系统提示"编辑框（与 agent.md 并列，同样的 revision 防覆盖、密文拒绝、64 KB 上限），受管段只读折叠展示。
+
+### 8.6 codex 系统提示可编辑（2026-10-18，主会话验收通过）
+- 后端（astra）：`CodexPromptStore`，`$CODEX_HOME/AGENTS.md` = 受管段（标记 v5、安全规则与有效目录、image_gen 附件规则）+ 自定义段（`/data/prompts/codex.md`，默认含回复规则、历史工具纪律、联网与浏览器、生图提示词指引）；保存即再生成，下一次 codex 调用生效。
+- 前端（Opus）：设置页 codex.md 编辑卡（revision 防覆盖、密文拒绝、64 KB）、受管规则只读折叠、`/codex/agents-md` 只读页；变更记录区分 codex.md / agent.md；顺带修正总览"聊天记录整理"时间显示。
+- 独立复跑：typecheck、548 测试、build、镜像构建通过；部署后 codex.md 已生成、AGENTS.md 含两段、设置页与只读页 200。
