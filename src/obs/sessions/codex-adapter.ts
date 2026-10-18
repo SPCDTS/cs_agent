@@ -61,6 +61,15 @@ export async function* rolloutLines(file: string, start = 0, end?: number): Asyn
   } finally { input.destroy(); }
 }
 
+/** Codex 将指令和运行环境也写成 user 消息；按文本前缀识别，不能据角色分轮。 */
+function inputContextType(text: string): 'agents_md' | 'user_instructions' | 'environment_context' | 'marker' | undefined {
+  if (text.startsWith('# AGENTS.md instructions for ')) return 'agents_md';
+  if (text.startsWith('<user_instructions>')) return 'user_instructions';
+  if (text.startsWith('<environment_context>')) return 'environment_context';
+  if (text.startsWith('<turn_aborted>')) return 'marker';
+  return undefined;
+}
+
 /** 纯解析便于正文重读；不保留 reasoning 的加密体或内部思考正文。 */
 function recordBlocks(row: Record<string, unknown>): Block[] {
   const p = object(row.payload) ?? row;
@@ -81,8 +90,11 @@ function recordBlocks(row: Record<string, unknown>): Block[] {
   if (type === 'message') {
     const role = p.role;
     if (!['user', 'assistant', 'system', 'developer'].includes(String(role))) return [];
-    const kind: Block['kind'] = role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : 'system_change';
-    const items: Block[] = [{ ...base, kind, text: textOf(p.content), ...(p.phase ? { meta: { phase: p.phase } } : {}) }];
+    const text = textOf(p.content);
+    const contextType = role === 'user' ? inputContextType(text) : undefined;
+    const kind: Block['kind'] = role === 'user' && !contextType ? 'user' : role === 'assistant' ? 'assistant' : 'system_change';
+    const items: Block[] = [{ ...base, kind, text,
+      ...(p.phase || contextType ? { meta: { ...(p.phase ? { phase: p.phase } : {}), ...(contextType ? { type: contextType } : {}) } } : {}) }];
     for (const part of Array.isArray(p.content) ? p.content : []) {
       const value = object(part);
       if (!['input_image', 'image', 'image_url'].includes(String(value?.type))) continue;
@@ -220,7 +232,7 @@ export class CodexSessionAdapter implements SessionAdapter {
     const row: SessionIndexFile = incremental ? structuredClone(previous!) : {
       file, size: 0, mtime: 0, identity, head: '', tail: '', lastOffset: 0,
       session: { backend: 'codex', id: '', label: '', status: 'archived', started: 0, updated: 0, turns: 0 },
-      state: { version: 1, turns: [], calls: {} },
+      state: { version: 2, turns: [], calls: {} },
     };
     const oldCounts = new Map(previous?.state.turns.map(turn => [turn.index.turn, turn.blocks.length]) ?? []);
     if (incremental) this.diagnostics.incrementalScans++; else this.diagnostics.fullScans++;
@@ -263,13 +275,13 @@ export class CodexSessionAdapter implements SessionAdapter {
     }
     row.session.updated = Math.max(row.session.updated, ts);
     const blocks = recordBlocks(record);
-    const user = record.type === 'response_item' && p.type === 'message' && p.role === 'user';
+    const user = blocks[0]?.kind === 'user';
     if (user) {
       const previous = row.state.turns.at(-1);
       if (previous && previous.index.status === 'running') { previous.index.status = 'ok'; previous.index.ended = ts; }
       row.state.pendingUsage = false;
       const turn = createHash('sha256').update(row.file).digest('hex').slice(0, 12) + '-' + line.offset;
-      const prelude = row.state.turns.length ? [] : row.state.prelude ?? [];
+      const prelude = row.state.prelude ?? [];
       row.state.prelude = undefined;
       row.state.turns.push({ index: { turn, started: ts, preview: redactText(blocks[0]?.text ?? '', 240), tools: prelude.filter(block => block.kind === 'tool_call').length, requests: 0, status: 'running' }, startOffset: line.offset, endOffset: line.end, blocks: prelude });
     }
@@ -279,7 +291,7 @@ export class CodexSessionAdapter implements SessionAdapter {
     }
     this.addBlocks(row, line, blocks);
     const turn = row.state.turns.at(-1);
-    if (!turn) return;
+    if (!turn || (blocks[0]?.kind === 'system_change' && turn.index.status !== 'running')) return;
     turn.endOffset = line.end;
     const parsedUsage = parseRolloutTokenUsage(record);
     if (parsedUsage) this.addUsage(row, turn, line, record, parsedUsage);
@@ -315,7 +327,10 @@ export class CodexSessionAdapter implements SessionAdapter {
       meta: { type: 'model_usage', request: turn.index.requests, usage } }], -3);
   }
   private addBlocks(row: SessionIndexFile, line: Line, blocks: Block[], synthetic?: number): void {
-    const turn = row.state.turns.at(-1);
+    const previous = row.state.turns.at(-1);
+    // 回合结束后的指令留到下一次真实用户输入；回合中的指令仍留在当前回合。
+    const betweenTurns = previous?.index.status !== 'running' && blocks[0]?.kind === 'system_change';
+    const turn = betweenTurns ? undefined : previous;
     const target = turn?.blocks ?? (row.state.prelude ??= []);
     for (let item = 0; item < blocks.length; item++) {
       const block = blocks[item]!;

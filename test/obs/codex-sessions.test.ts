@@ -42,12 +42,62 @@ describe('Codex 会话正文适配器', () => {
     const [turn] = await r.adapter.turns('thread-fixture');
     expect(turn).toMatchObject({ tools: 1, requests: 1, status: 'ok', usage: { input: 1000, output: 50, cached: 800, reasoning: 20, measured: true } });
     const blocks = await r.adapter.blocks('thread-fixture', turn!.turn);
+    expect(blocks.slice(0, 3).map(b => [b.kind, b.meta?.type])).toEqual([['system_change', 'agents_md'], ['system_change', 'user_instructions'], ['system_change', 'environment_context']]);
+    expect(blocks.splice(0, 3)).toHaveLength(3);
     expect(blocks.map(b => b.kind)).toEqual(['user', 'event', 'thinking', 'tool_call', 'tool_result', 'assistant', 'event', 'event']);
     expect(blocks[1]?.meta).toMatchObject({ type: 'model_request', model: 'gpt-fixture', effort: 'high' });
     expect(blocks[2]).toMatchObject({ text: '先读取目录结构', meta: { unavailable: true } });
     expect(JSON.stringify(blocks)).not.toContain('[匿名加密占位]');
     expect(blocks[3]).toMatchObject({ callId: 'fixture-call-1', meta: { name: 'exec_command', paired: true, duration_ms: 2000, status: 'ok' } });
     expect(blocks[4]).toMatchObject({ callId: 'fixture-call-1', text: 'obs\nagent', meta: { paired: true, duration_ms: 2000, name: 'exec_command' } });
+  });
+
+  it('回合间指令持久化为下一轮 prelude，回合内指令与标记不分轮', async () => {
+    const r = await rig();
+    const first = (await r.adapter.turns('thread-fixture'))[0]!;
+    const before = await r.adapter.blocks('thread-fixture', first.turn);
+    const firstEnd = (await fs.stat(r.file)).size;
+    await fs.appendFile(r.file, user('<environment_context>下一轮环境</environment_context>') + user('<turn_aborted>上一轮已停止</turn_aborted>'), 'utf8');
+    await r.adapter.refresh();
+    expect((await r.adapter.listSessions())[0]?.turns).toBe(1);
+    expect(await r.adapter.blocks('thread-fixture', first.turn)).toEqual(before);
+    const stored = r.store.db.prepare('SELECT state_json FROM session_index').get() as { state_json: string };
+    expect(JSON.parse(stored.state_json).turns[0].endOffset).toBe(firstEnd);
+    await r.restart();
+    expect(r.adapter.diagnostics.scannedBytes).toBe(0);
+    await fs.appendFile(r.file, user('真正的下一轮输入') + user('<user_instructions>回合内指令</user_instructions>') +
+      user('# AGENTS.md instructions for /workspace\n回合内仓库指令') + user('<turn_aborted>回合内标记</turn_aborted>'), 'utf8');
+    await r.adapter.refresh();
+    const turns = await r.adapter.turns('thread-fixture');
+    expect(turns).toHaveLength(2);
+    expect((await r.adapter.listSessions())[0]?.turns).toBe(2);
+    expect(turns[1]?.preview).toBe('真正的下一轮输入');
+    const blocks = await r.adapter.blocks('thread-fixture', turns[1]!.turn);
+    expect(blocks.map(b => b.kind)).toEqual(['system_change', 'system_change', 'user', 'system_change', 'system_change', 'system_change']);
+    expect(blocks.map(b => b.meta?.type)).toEqual(['environment_context', 'marker', undefined, 'user_instructions', 'agents_md', 'marker']);
+  });
+
+  it('前缀仅在开头生效，正文中引用指令标记仍然是用户输入', async () => {
+    const r = await rig(record('session_meta', { id: 'thread-fixture' }) + user('解释 <environment_context> 和 <turn_aborted> 的用途'));
+    expect((await r.adapter.turns('thread-fixture'))[0]?.preview).toContain('解释');
+    expect((await r.adapter.listSessions())[0]?.turns).toBe(1);
+  });
+
+  it('旧版持久化索引整体重建，不复用错误回合与正文偏移', async () => {
+    const r = await rig();
+    await r.adapter.close();
+    const stored = r.store.db.prepare('SELECT state_json FROM session_index').get() as { state_json: string };
+    const state = JSON.parse(stored.state_json);
+    state.version = 1;
+    state.turns.push({ ...state.turns[0], index: { ...state.turns[0].index, preview: '旧版伪回合' } });
+    r.store.db.prepare('UPDATE session_index SET state_json=?').run(JSON.stringify(state));
+    await r.restart();
+    expect(r.adapter.diagnostics.fullScans).toBe(1);
+    expect((await r.adapter.listSessions())[0]?.turns).toBe(1);
+    expect(await r.adapter.turns('thread-fixture')).toHaveLength(1);
+    const fresh = r.store.db.prepare('SELECT state_json FROM session_index').get() as { state_json: string };
+    expect(JSON.parse(fresh.state_json).version).toBe(2);
+    expect(fresh.state_json).not.toContain('旧版伪回合');
   });
 
   it('function/MCP 调用配对、图片占位、system_change、compaction 与失败状态', async () => {
