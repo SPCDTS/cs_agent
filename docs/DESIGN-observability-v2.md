@@ -171,3 +171,9 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 - 主会话复跑：typecheck、63 文件 / 897 项、build 通过；部署后真实库冒烟：2 个 scope、89 条消息、1 条日摘要；时间线按小时桶、保留期边界与空白区标注正确；摘要页给出区间内尚存原文 32 条；`limit=3` 连续翻 17 页拿全 50 条无重复；检索对照路径与模型工具一致（"Codex" 命中 2 条，tool_text 同步给出）；未知 scope 404、空 q 400、POST 405。
 - 排查记录：Windows Git Bash 下 curl `--data-urlencode` 传中文会被控制台编码转坏导致"0 命中"，改传百分号编码 URL 即正常；这是测试工具问题，不是接口缺陷。
 - 前端页面（Opus）在 `feat/obs-v2-memory` 上进行中，合入后单独记录。
+
+### O4（前端）：记忆可视化页面（2026-10-18，Opus 实现，主会话验收通过）
+
+- 提交 `5edbbfd`（vis-timeline 8.5.4 随镜像本地分发：`/assets/vendor/` 固定两项白名单，启动读入内存；CSP `style-src` 加 `'self'` 以允许同源样式表；standalone 包内无 nonce 的 styleInject 被精确停用）、`d6e75f7`（`/memory` 总览与整理卡、`/memory/scopes/:scope` 三轨时间线 + 空白背景 + 保留边界 + 范围控件 + 消息列表、`/memory/summaries/:id`、`/memory/search` 命中与工具实际返回对照、`/memory/archives`；`/memory/recalls`、`/memory/images` 为 O5/O6 占位）、`67865dd`（翻页带 `before_id` 决胜游标）、`9254c36`（测试）、主会话 `c4e9d10`（去掉我误导加入的"少于 3 字不命中"提示：`ContextStore.search` 走 LIKE，两字词可命中，真实库"苹果"命中 5 条）。
+- 主会话复跑：typecheck、66 文件 / 917 项、build 通过；部署后容器内无头 Chromium 真实数据冒烟：总览 2 个 scope 与整理状态（上次 02:59、下次 03:00、补跑正常、保留 30/90/180 天）；私聊时间线 6 个条目、3 条轨、2 段空白背景，点击原文桶后消息列表切到该桶 32 条并提示已到最早；日摘要页正常；检索"苹果图"3 条命中、6 处高亮、右侧工具实际返回逐字对照；归档页、旧 `/context` 页顶栏"记忆"高亮；vendor JS/CSS 200，路径穿越 404；浏览器零错误。
+- 已知口径：`purged` 空白是按保留策略推算，不是删除证明；`lineage` 待 O5。
