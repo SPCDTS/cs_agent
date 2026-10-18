@@ -111,6 +111,7 @@ const EnvSchema = z.object({
   WORKSPACE_DIR: z.string().default("/workspace"),
   OBS_TICKET_EVENT_CAP: z.coerce.number().int().min(8).max(10000).default(500),
   OBS_RETENTION_DAYS: int(30),
+  OBS_MEMORY_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(90),
   OBS_ADMIN_RETENTION_DAYS: int(365),
   OBS_TOKEN: z.string().default(""),
   ALERT_OWNER: bool(false),
