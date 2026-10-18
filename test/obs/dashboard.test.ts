@@ -1,9 +1,9 @@
 import { createServer } from 'node:http';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createDashboard, csrfToken, sseWriter } from '../../src/obs/http.js';
+import { agentMdRevision, createDashboard, csrfToken, sseWriter } from '../../src/obs/http.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { trace } from '../../src/obs/trace.js';
 import { LiveBus, type LiveCard } from '../../src/obs/live.js';
@@ -63,6 +63,8 @@ async function readUntil(res: Response, done: (text: string) => boolean, ms = 80
   void reader.cancel().catch(() => undefined);
   return text;
 }
+const revisionOf = async (r: { get: (url: string) => Promise<Response> }) =>
+  /name="revision" value="([^"]+)"/.exec(await (await r.get('/settings')).text())![1]!;
 const frames = (text: string, event: string) => text.split('\n\n').filter(f => f.startsWith(`event: ${event}\n`)).map(f => JSON.parse(f.slice(f.indexOf('data: ') + 6)));
 
 describe('面板二期页面', () => {
@@ -141,14 +143,39 @@ describe('面板二期页面', () => {
 
   it('agent.md 可在设置页编辑：原子写入、规范换行、大小上限，并记录事件', async () => {
     const r = await rig();
-    const res = await r.post('/settings/agent-md', { _csrf: r.csrf, content: '新的系统提示\r\n第二行' });
+    const res = await r.post('/settings/agent-md', { _csrf: r.csrf, revision: await revisionOf(r), content: '新的系统提示\r\n第二行' });
     expect(res.status).toBe(303);
     expect(readFileSync(path.join(r.dir, 'prompts', 'agent.md'), 'utf8')).toBe('新的系统提示\n第二行');
     expect(r.store.events(SETTINGS_TICKET).some(e => e.stage === 'prompt_changed')).toBe(true);
-    expect((await r.post('/settings/agent-md', { _csrf: r.csrf, content: 'x'.repeat(70_000) })).status).toBe(400);
-    expect((await r.post('/settings/agent-md', { _csrf: r.csrf, content: '   ' })).status).toBe(400);
+    const rev = await revisionOf(r);
+    expect((await r.post('/settings/agent-md', { _csrf: r.csrf, revision: rev, content: 'x'.repeat(70_000) })).status).toBe(400);
+    expect((await r.post('/settings/agent-md', { _csrf: r.csrf, revision: rev, content: '   ' })).status).toBe(400);
     expect(readFileSync(path.join(r.dir, 'prompts', 'agent.md'), 'utf8')).toBe('新的系统提示\n第二行');
     expect(await (await r.get('/settings')).text()).toContain('新的系统提示');
+  });
+
+  it('agent.md 服务端守卫：当前文件含已注册秘密时拒绝覆盖（409）；过期或缺失的 revision 被拒绝', async () => {
+    const r = await rig();
+    const file = path.join(r.dir, 'prompts', 'agent.md');
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, '旧提示');
+    const stale = await revisionOf(r);
+    // 另一处修改（容器内编辑）：大小变化 → revision 不同
+    writeFileSync(file, '容器内改过的提示');
+    const conflict = await r.post('/settings/agent-md', { _csrf: r.csrf, revision: stale, content: '覆盖' });
+    expect(conflict.status).toBe(409); expect(await conflict.text()).toContain('已在别处被修改');
+    expect((await r.post('/settings/agent-md', { _csrf: r.csrf, content: '覆盖' })).status).toBe(409);
+    expect(readFileSync(file, 'utf8')).toBe('容器内改过的提示');
+    // 文件里混入已注册秘密：页面不给表单，直接 POST（带正确 revision）也被拒
+    const secret = 'agent-md-secret-99887766'; registerSecrets([secret]);
+    writeFileSync(file, `提示 ${secret}`);
+    const html = await (await r.get('/settings')).text();
+    expect(html).not.toContain('action="/settings/agent-md"'); expect(html).not.toContain(secret);
+    const st = statSync(file);
+    const blocked = await r.post('/settings/agent-md', { _csrf: r.csrf, revision: agentMdRevision(st), content: '抹掉' });
+    expect(blocked.status).toBe(409);
+    const text = await blocked.text(); expect(text).toContain('凭据样式'); expect(text).not.toContain(secret);
+    expect(readFileSync(file, 'utf8')).toBe(`提示 ${secret}`);
   });
 
   it('重置线程：校验键、调用后端、记录事件并带结果跳回', async () => {

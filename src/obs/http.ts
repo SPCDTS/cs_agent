@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { timingSafeEqual, randomBytes, createHmac, randomUUID } from 'node:crypto';
+import { timingSafeEqual, randomBytes, createHash, createHmac, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config.js';
@@ -115,6 +115,24 @@ async function readText(file: string): Promise<string> {
 }
 
 /** agent.md 原子写：目录与目标都不能是链接，内容规范为 LF，大小有上限。 */
+/** 编辑框所见版本：mtime + 大小的摘要；文件不存在为 'none'。 */
+export const agentMdRevision = (st: { mtimeMs: number; size: number } | null): string =>
+  st ? createHash('sha256').update(`${st.mtimeMs}:${st.size}`).digest('hex').slice(0, 16) : 'none';
+
+/**
+ * 服务端守卫（不只依赖界面只读）：当前文件含已注册秘密时拒绝覆盖；表单 revision 与当前文件不符
+ * （被容器内或另一个标签页改过）时拒绝，避免覆盖他人修改。
+ */
+async function guardAgentMd(file: string, revision: string): Promise<void> {
+  let st: Awaited<ReturnType<typeof fs.lstat>> | null = null;
+  try { st = await fs.lstat(file); } catch { /* 不存在 */ }
+  if (st && st.isFile() && !st.isSymbolicLink() && st.size <= 256_000) {
+    const current = await fs.readFile(file, 'utf8');
+    if (redactText(current, 1_000_000) !== current) throw new HttpError(409, 'agent.md 中包含凭据样式的内容，面板禁止覆盖；请在容器内直接编辑。');
+  }
+  if (revision !== agentMdRevision(st)) throw new HttpError(409, 'agent.md 已在别处被修改，请刷新页面查看最新内容后再保存。');
+}
+
 async function writeAgentMd(file: string, content: string): Promise<{ before: number; after: number }> {
   const text = content.replace(/\r\n?/g, '\n');
   const bytes = Buffer.byteLength(text);
@@ -267,6 +285,7 @@ export function createDashboard(opts: DashboardOptions) {
         back('/settings?ok=saved'); return;
       }
       if (url.pathname === '/settings/agent-md') {
+        await guardAgentMd(agentMd, form.get('revision') ?? '');
         const r = await writeAgentMd(agentMd, form.get('content') ?? '');
         tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { source: 'dashboard', file: 'prompts/agent.md', bytes_before: r.before, bytes_after: r.after } });
         back('/settings?ok=prompt#prompt'); return;
@@ -505,12 +524,13 @@ export function createDashboard(opts: DashboardOptions) {
     }
     let prompt = '';
     try { const st = await fs.lstat(agentMd); prompt = st.isFile() && !st.isSymbolicLink() && st.size <= 256_000 ? await fs.readFile(agentMd, 'utf8') : ''; } catch { /* 不存在：pi 启动时会播种 */ }
-    const mtime = (await fs.stat(agentMd).catch(() => null))?.mtime;
+    const promptStat = await fs.lstat(agentMd).catch(() => null);
+    const mtime = promptStat?.mtime;
     // 编辑框显示原文以便保存时不破坏内容；但若其中出现已注册的秘密则只读展示脱敏版。
     const secretInside = redactText(prompt, 1_000_000) !== prompt;
     body += `<section id="prompt"><h2>pi 系统提示 agent.md <small>${mtime ? `修改于 ${esc(fmtTime(mtime.getTime()))}` : '尚未创建'}</small></h2>${secretInside
       ? `<div class="flash err">文件中包含凭据样式的内容，面板只读展示脱敏版本；请在容器内直接编辑。</div>${json(prompt)}`
-      : `<form method="post" action="/settings/agent-md" class="sheet pad">${csrfField(csrf)}<label>每轮对话前热加载，保存后 pi 下一轮即使用新内容。<textarea name="content" rows="18" spellcheck="false" data-count="agent-md-count">${esc(prompt)}</textarea></label><div class="hint"><span id="agent-md-count"></span>，上限 ${AGENT_MD_MAX_BYTES / 1024} KB</div><p class="mt"><button>保存 agent.md</button></p></form>`}</section>`;
+      : `<form method="post" action="/settings/agent-md" class="sheet pad">${csrfField(csrf)}<input type="hidden" name="revision" value="${esc(agentMdRevision(promptStat))}"><label>每轮对话前热加载，保存后 pi 下一轮即使用新内容。<textarea name="content" rows="18" spellcheck="false" data-count="agent-md-count">${esc(prompt)}</textarea></label><div class="hint"><span id="agent-md-count"></span>，上限 ${AGENT_MD_MAX_BYTES / 1024} KB</div><p class="mt"><button>保存 agent.md</button></p></form>`}</section>`;
     body += `<section><h2>线程</h2><div class="sheet pad"><p>重置会归档当前会话并在下一条消息时新建，用于清掉跑偏的长期记忆。</p><p><a href="/codex">Codex 线程（owner / 共享）</a>　<a href="/pi">Pi 会话（按会话域）</a></p></div></section>`;
     const changes = opts.store.systemEvents(SETTINGS_TICKET, 15);
     body += `<section><h2>最近变更</h2>${changes.length ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>时间</th><th>内容</th><th>来源</th></tr></thead><tbody>${changes.map(e => { const dd = asObj(JSON.parse(e.detail_json));
