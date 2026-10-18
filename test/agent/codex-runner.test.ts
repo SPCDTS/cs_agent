@@ -683,3 +683,14 @@ describe("codex 回合结束后的上下文用量", () => {
     expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(0);
   });
 });
+
+it("每轮覆盖召回归属，新线程 session 为空，resume 使用线程 ID", async () => {
+  const s = setup();
+  await s.runner.ask('首轮', { ticket: 'ticket-a', qqAccess: 'group:7' });
+  await s.runner.ask('续轮', { ticket: 'ticket-b', qqAccess: 'group:7' });
+  const starts = s.calls().filter(c => c.phase === 'start');
+  expect(starts[0].argv).toEqual(expect.arrayContaining(['mcp_servers.qq_context.env.QQ_TICKET="ticket-a"',
+    'mcp_servers.qq_context.env.QQ_BACKEND="codex"', 'mcp_servers.qq_context.env.QQ_SESSION=""']));
+  expect(starts[1].argv).toEqual(expect.arrayContaining(['mcp_servers.qq_context.env.QQ_TICKET="ticket-b"',
+    'mcp_servers.qq_context.env.QQ_SESSION="thread-123"']));
+});

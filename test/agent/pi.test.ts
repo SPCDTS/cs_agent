@@ -1,3 +1,4 @@
+import { MemoryInstrumentation } from "../../src/obs/memory/instrumentation.js";
 import { ObsStore } from "../../src/obs/store.js";
 import { mediaFixture } from "../context/media-fixture.js";
 import type { MediaRecall } from "../../src/context/media.js";
@@ -45,7 +46,7 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { instrumentation?: MemoryInstrumentation; dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   const contextUsage = new ContextUsageStore(dir);
   cleanup.push(() => contextUsage.close());
@@ -67,7 +68,7 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
   const model = faux.getModel();
   const pi = await PiBackend.open({ dataDir: dir, models, model: { provider: model.provider, modelId: model.id },
     mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
-    thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
+    instrumentation: opts.instrumentation, thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
     ...(opts.disk ? {} : { storage: new MemoryStorage() }),
   });
@@ -786,4 +787,17 @@ describe("pi 上下文占用", () => {
       compaction: { background: 950848, reserve: 983616 } });
     expect(piContextCapacity(model.contextWindow, 16384, 0).compaction).toEqual({ background: 983616, reserve: 983616 });
   });
+});
+
+it("pi 历史工具写入 ticket/session/task 并发出轻量 trace", async () => {
+  const obs = new ObsStore(tmp()); cleanup.push(() => obs.close());
+  const s = await setup([call("qq_recent"), reply()], { instrumentation: MemoryInstrumentation.fromDb(obs.db) });
+  s.store.ingest(inbound('m', '7', '历史记录'));
+  const events: string[] = [];
+  const off = trace.tap(e => { if (e.ticket === 'recall-observed') events.push(e.stage); }); cleanup.push(off);
+  await s.pi.handle(request('recall-observed'), handleContext());
+  const session = String((await s.pi.readThreadIds())['group:7']);
+  expect(obs.db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ backend: 'pi', ticket: 'recall-observed', session,
+    task_id: expect.stringMatching(/^\d+$/), tool: 'qq_recent', scope_hint: 'group:7', returned_json: '[{"kind":"message","id":"m"}]' });
+  expect(events).toContain('memory_recall');
 });

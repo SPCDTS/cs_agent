@@ -160,7 +160,7 @@ async function main(): Promise<void> {
   const pi = await PiBackend.open({
     dataDir: cfg.DATA_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
-    thinkingLevel, store, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
+    thinkingLevel, store, instrumentation, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
   });

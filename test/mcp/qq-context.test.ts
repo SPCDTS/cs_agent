@@ -1,3 +1,5 @@
+import { DatabaseSync } from "node:sqlite";
+import { mkdirSync } from "node:fs";
 import { RecallTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -154,4 +156,19 @@ describe("callQQContextTool caps", () => {
     expect((s.content[0] as { text: string }).text.split("\n").length).toBeLessThanOrEqual(21);
     expect(callQQContextTool(deps, "qq_search", { query: "  " }).isError).toBe(true);
   });
+});
+
+it("独立 MCP 写入召回归属，空 session 存 NULL，观测库不可写不影响工具", async () => {
+  for (const blocked of [false, true]) {
+    const dir = tmp(); writer = new ContextStore(dir); writer.ingest(msg("独立进程历史"));
+    if (blocked) mkdirSync(path.join(dir, "observability.sqlite"));
+    const c = await connect(dir, `group:${G}`, { QQ_TICKET: "mcp-ticket", QQ_BACKEND: "codex", QQ_SESSION: "" });
+    expect(textOf(await c.callTool({ name: "qq_recent", arguments: {} }))).toContain("独立进程历史");
+    if (!blocked) {
+      const db = new DatabaseSync(path.join(dir, "observability.sqlite"), { readOnly: true });
+      try { expect(db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ backend: 'codex', ticket: 'mcp-ticket', session: null, returned_count: 1 }); }
+      finally { db.close(); }
+    }
+    await c.close(); writer.close(); writer = undefined;
+  }
 });
