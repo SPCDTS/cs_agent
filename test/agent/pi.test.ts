@@ -1,3 +1,6 @@
+import { ObsStore } from "../../src/obs/store.js";
+import { mediaFixture } from "../context/media-fixture.js";
+import type { MediaRecall } from "../../src/context/media.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { piContextCapacity } from "../../src/agent/pi-context-usage.js";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
@@ -42,13 +45,13 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   const contextUsage = new ContextUsageStore(dir);
   cleanup.push(() => contextUsage.close());
   const store = new ContextStore(dir);
   cleanup.push(() => store.close());
-  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200_000 }], tokensPerSecond: Infinity });
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200_000, input: opts.vision ? ["text", "image"] : ["text"] }], tokensPerSecond: Infinity });
   faux.setResponses(steps);
   const models = createModels(); models.setProvider(faux.provider);
   const imageBackend = {
@@ -63,6 +66,7 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
   const pi = await PiBackend.open({ dataDir: dir, models, model: { provider: model.provider, modelId: model.id },
+    mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
     thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
     ...(opts.disk ? {} : { storage: new MemoryStorage() }),
@@ -72,13 +76,121 @@ async function setup(steps: FauxResponseStep[], opts: { dir?: string; timeoutMs?
 }
 
 describe("pi durable backend", () => {
+  it.each(["group", "owner", "private"])("所有 %s 会话注册四个内置工具并在独立工作目录执行", async kind => {
+    let seen: TranscriptContext | undefined;
+    const s = await setup([call("write", { path: "note.txt", content: "原文" }),
+      call("edit", { path: "note.txt", edits: [{ oldText: "原文", newText: "改后" }] }),
+      call("read", { path: "note.txt" }), call("bash", { command: "printf builtin-ok" }),
+      ctx => { seen = ctx; return reply(); }]);
+    await expect(fs.access(path.join(s.dir, "pi-work"))).rejects.toThrow();
+    const req = request("coding-" + kind, kind === "owner");
+    if (kind === "private") Object.assign(req, { scope: "private:9", access: "private:9", threadKey: "private:9",
+      source: { type: "private", user_id: "9", group_id: null, nickname: "测试者" } });
+    await s.pi.handle(req, handleContext());
+    expect(await fs.readFile(path.join(s.dir, "pi-work", req.threadKey.replace(":", "_"), "note.txt"), "utf8")).toBe("改后");
+    const tools = seen!.messages.filter(m => m.role === "toolResult");
+    expect(tools.map(m => m.toolName)).toEqual(["write", "edit", "read", "bash"]);
+    expect(tools.every(m => !m.isError)).toBe(true);
+    expect(results(seen!)).toContain("builtin-ok");
+    expect(DEFAULT_PI_PROMPT).toContain("用 read 打开");
+  });
+
+  it("read 打开召回路径返回图片内容，qq_image 自身仍只返回文本", async () => {
+    let seen: TranscriptContext | undefined;
+    const s = await setup([], { vision: true });
+    const media = await mediaFixture(s.store, s.dir);
+    s.faux.setResponses([call("read", { path: media }), ctx => { seen = ctx; return reply(); }]);
+    await s.pi.handle(request("read-image"), handleContext());
+    const result = seen!.messages.find(m => m.role === "toolResult" && m.toolName === "read");
+    expect(result?.role === "toolResult" && result.content.some(c => c.type === "image" && c.mimeType === "image/png" && c.data.length > 0)).toBe(true);
+    expect(result?.role === "toolResult" && result.isError).toBe(false);
+  });
+
+  it("四个内置工具共享二十次额度，与历史检索分开且新票据重置", async () => {
+    let seen: TranscriptContext | undefined;
+    const cycle = () => [call("write", { path: "cap.txt", content: "a" }),
+      call("edit", { path: "cap.txt", edits: [{ oldText: "a", newText: "b" }] }),
+      call("read", { path: "cap.txt" }), call("bash", { command: "true" })];
+    const s = await setup([...Array.from({ length: 5 }, cycle).flat(),
+      call("write", { path: "blocked.txt", content: "blocked" }), call("qq_recent"),
+      ctx => { seen = ctx; return reply(); },
+      call("write", { path: "next.txt", content: "next" }), reply()]);
+    const obs = new ObsStore(s.dir, 30); trace.attach(obs);
+    try {
+      await s.pi.handle(request("coding-cap"), handleContext());
+      expect(results(seen!)).toContain("本轮调用上限（20 次）");
+      expect(results(seen!)).toContain("没有记录");
+      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+      const doc = await s.pi.harness.snapshot(PiRequestDoc, id, context);
+      expect(Object.values(doc!.calls).filter(c => c.kind === "builtin")).toHaveLength(20);
+      await expect(fs.access(path.join(s.dir, "pi-work", "group_7", "blocked.txt"))).rejects.toThrow();
+      expect(obs.events("coding-cap").length).toBeLessThanOrEqual(30);
+      expect(obs.events("coding-cap").some(e => e.stage === "events_dropped")).toBe(true);
+      await s.pi.handle(request("coding-next"), handleContext());
+      expect(await fs.readFile(path.join(s.dir, "pi-work", "group_7", "next.txt"), "utf8")).toBe("next");
+    } finally { trace.attach(); obs.close(); }
+  });
+
+  it("内置调用只记录工具、前二百字的命令或路径、退出码和耗时", async () => {
+    const events: import("../../src/obs/trace.js").LiveEvent[] = [];
+    const untap = trace.tap(e => { if (e.ticket === "coding-trace" && e.stage.startsWith("tool:")) events.push(e); });
+    const s = await setup([call("write", { path: "trace.txt", content: "do-not-log-file-content" }),
+      call("read", { path: "trace.txt" }), call("bash", { command: "printf do-not-log-stdout; #" + "x".repeat(300) }),
+      call("bash", { command: "exit 7" }), reply()]);
+    try {
+      await s.pi.handle(request("coding-trace"), handleContext());
+      const done = events.filter(e => e.status !== "started");
+      expect(done).toHaveLength(4);
+      expect(done.every(e => typeof e.duration_ms === "number" && !("output" in e.detail) && !("input" in e.detail))).toBe(true);
+      expect(done[0]!.detail).toMatchObject({ tool: "write", path: "trace.txt", exit_code: null });
+      expect(String(done[2]!.detail.command)).toHaveLength(200);
+      expect(done[2]!.detail.exit_code).toBe(0);
+      expect(done[3]!).toMatchObject({ status: "failed", detail: { tool: "bash", exit_code: 7 } });
+      expect(JSON.stringify(events)).not.toContain("do-not-log-file-content");
+    } finally { untap(); }
+  });
+
+  it("qq_image 绑定请求范围，独立五次限额，结果仅有路径文本", async () => {
+    let seen: TranscriptContext | undefined;
+    const recall = vi.fn(async () => ({ text: "图1: /data/media/ab/test.png（1×1）", images: [{ path: "/data/media/ab/test.png", width: 1, height: 1 }] }));
+    const s = await setup([...Array.from({ length: 6 }, () => call("qq_image", { message_id: "123" })), call("qq_recent"),
+      ctx => { seen = ctx; return reply(); }], { mediaRecall: { recall } });
+    await s.pi.handle(request("recall"), handleContext());
+    expect(recall).toHaveBeenCalledTimes(5);
+    expect(recall).toHaveBeenCalledWith({ kind: "scope", scope: "group:7" }, "123", expect.any(AbortSignal));
+    expect(results(seen!)).toContain("本轮召回次数已用完");
+    expect(results(seen!)).toContain("/data/media/ab/test.png");
+    const returned = seen!.messages.filter(m => m.role === "toolResult" && m.toolName === "qq_image");
+    expect(returned.every(m => m.role === "toolResult" && m.content.every(c => c.type === "text"))).toBe(true);
+    expect(results(seen!)).toContain("没有记录");
+  });
+  it("召回配置额度不占历史桶，失败归入媒体召回而非历史或模型服务", async () => {
+    const events: import("../../src/obs/trace.js").LiveEvent[] = [];
+    const untap = trace.tap(e => { if (e.ticket === "recall-failure") events.push(e); });
+    const recall = vi.fn(async () => { throw Object.assign(new Error("fixture authentication"), { status: 401 }); });
+    const s = await setup([...Array.from({ length: 3 }, () => call("qq_image", { message_id: "123" })),
+      ...Array.from({ length: 5 }, () => call("qq_recent")), reply()],
+      { mediaRecall: { recall }, mediaRecallMaxPerTicket: 2 });
+    try {
+      await s.pi.handle(request("recall-failure"), handleContext());
+      expect(recall).toHaveBeenCalledTimes(2);
+      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+      const doc = await s.pi.harness.snapshot(PiRequestDoc, id, context);
+      expect(Object.values(doc!.calls).filter(c => c.kind === "qq_image")).toHaveLength(2);
+      expect(Object.values(doc!.calls).filter(c => c.kind === "history")).toHaveLength(4);
+      const failed = events.filter(e => e.stage === "tool:qq_image" && e.detail.failure);
+      expect(failed).toHaveLength(2);
+      expect(failed[0]!.detail.failure).toMatchObject({ provider: "media_recall", kind: "auth", status: 401 });
+    } finally { untap(); }
+  });
+
   it("calls web_search through the faux model, then returns the final answer and source header", async () => {
     let seen: TranscriptContext | undefined;
     const s = await setup([call("web_search", { query: "CS2", count: 3 }), ctx => { seen = ctx; return reply("查到了"); }]);
-    expect(await s.pi.handle({ ...request("search"), quote: { nickname: "友人", text: "此前的问题" } }, handleContext())).toEqual({ text: "查到了", images: [] });
+    expect(await s.pi.handle({ ...request("search"), quote: { message_id: "123", nickname: "友人", text: "此前的问题" } }, handleContext())).toEqual({ text: "查到了", images: [] });
     expect(results(seen!)).toContain("资料 / 2026-10-18 / 摘要 / https://example.com");
     expect(JSON.stringify(seen!.messages)).toContain("[来源] 群 7");
-    expect(JSON.stringify(seen!.messages)).toContain("[引用] 友人: 此前的问题");
+    expect(JSON.stringify(seen!.messages)).toContain("[引用 #123] 友人: 此前的问题");
     const init = vi.mocked(s.http).mock.calls[0]![1]!;
     expect(JSON.parse(String(init.body))).toEqual({ query: "CS2", count: 3, need_content: false });
   });
@@ -98,6 +210,25 @@ describe("pi durable backend", () => {
     await s.pi.handle(request("private-denied"), handleContext());
     expect(seen[2]).toContain("没有这条消息"); expect(seen[2]).not.toContain("私人秘密");
     await s.pi.handle(request("owner", true), handleContext()); expect(seen[3]).toContain("私人秘密");
+  });
+
+  it("历史参考图按请求范围校验，允许本群与 owner，拒绝别群和未登记路径", async () => {
+    let seen = "";
+    const s = await setup([]);
+    const media = await mediaFixture(s.store, s.dir, "group:7");
+    const foreign = path.join(s.dir, "outside.png"); await fs.writeFile(foreign, TRANSPARENT_PNG);
+    s.faux.setResponses([call("generate_image", { prompt: "编辑", reference_images: [media] }), reply(),
+      call("generate_image", { prompt: "编辑", reference_images: [media] }), ctx => { seen = results(ctx); return reply(); },
+      call("generate_image", { prompt: "编辑", reference_images: [foreign] }), reply(),
+      call("generate_image", { prompt: "编辑", reference_images: [media] }), reply()]);
+    await s.pi.handle(request("media-own"), handleContext());
+    expect(s.imageBackend.submit).toHaveBeenCalledWith(expect.objectContaining({ reference_images: [media] }), expect.anything(), expect.anything());
+    await s.pi.handle({ ...request("media-other"), scope: "group:8", access: "group:8", threadKey: "group:8" }, handleContext());
+    expect(seen).toContain("范围");
+    await s.pi.handle(request("media-outside"), handleContext());
+    expect(s.imageBackend.submit).toHaveBeenCalledTimes(1);
+    await s.pi.handle(request("media-owner", true), handleContext());
+    expect(s.imageBackend.submit).toHaveBeenCalledTimes(2);
   });
 
   it("writes generated files under the ticket/call directory and returns validated attachments", async () => {

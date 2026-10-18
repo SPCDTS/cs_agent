@@ -33,6 +33,17 @@ export interface MessageRow {
   image_count: number | null;
 }
 
+export interface MediaRow {
+  scope: string;
+  message_id: string;
+  ordinal: number;
+  sha256: string | null;
+  path: string | null;
+  status: "ok" | "skipped";
+  reason: string | null;
+  created_at: number;
+}
+
 export interface SummaryRow {
   id: number;
   scope: string;
@@ -128,6 +139,17 @@ CREATE TRIGGER IF NOT EXISTS summaries_au AFTER UPDATE OF text ON summaries BEGI
   INSERT INTO summaries_fts(rowid, text) VALUES (new.id, new.text);
 END;
 
+CREATE TABLE IF NOT EXISTS message_media (
+  scope TEXT NOT NULL, message_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+  sha256 TEXT, path TEXT, status TEXT NOT NULL CHECK (status IN ('ok','skipped')),
+  reason TEXT, created_at INTEGER NOT NULL,
+  PRIMARY KEY (scope, message_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS message_media_path ON message_media(path);
+CREATE TRIGGER IF NOT EXISTS messages_media_delete AFTER DELETE ON messages BEGIN
+  DELETE FROM message_media WHERE scope = old.scope AND message_id = old.message_id;
+END;
+
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
 
@@ -190,7 +212,7 @@ export class ContextStore {
 
   /** 撤回：删除原始行（摘要不回溯修改）。 */
   recall(scope: string, messageId: string): boolean {
-    const r = this.db.prepare("DELETE FROM messages WHERE scope = ? AND message_id = ? AND is_self = 0").run(scope, messageId);
+    const r = this.db.prepare("DELETE FROM messages WHERE scope = ? AND message_id = ?").run(scope, messageId);
     return Number(r.changes) > 0;
   }
 
@@ -339,6 +361,36 @@ export class ContextStore {
     return this.db
       .prepare(`SELECT * FROM messages WHERE message_id = ?${acc.sql} ORDER BY time DESC, id DESC LIMIT 1`)
       .get(messageId, ...acc.args) as MessageRow | undefined;
+  }
+
+  /** 媒体与正文替换同事务；撤回后的旧任务不能重新建行。 */
+  saveMedia(row: MessageRow, media: MediaRow[], text: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const updated = this.db.prepare("UPDATE messages SET text = ? WHERE id = ? AND scope = ? AND message_id = ? AND text = ?")
+        .run(text, row.id, row.scope, row.message_id, row.text);
+      if (!updated.changes) throw new Error("消息已撤回或变更");
+      const insert = this.db.prepare("INSERT OR REPLACE INTO message_media VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+      for (const m of media) insert.run(row.scope, row.message_id, m.ordinal, m.sha256, m.path, m.status, m.reason, m.created_at);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  media(scope: string, messageId: string): MediaRow[] {
+    return this.db.prepare("SELECT * FROM message_media WHERE scope = ? AND message_id = ? ORDER BY ordinal")
+      .all(scope, messageId) as unknown as MediaRow[];
+  }
+
+  mediaPathAllowed(access: Access, file: string): boolean {
+    const acc = this.accessClause(access, undefined)!;
+    return !!this.db.prepare("SELECT 1 FROM message_media WHERE path = ? AND status = 'ok'" + acc.sql + " LIMIT 1").get(file, ...acc.args);
+  }
+
+  mediaPathReferenced(file: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM message_media WHERE path = ? LIMIT 1").get(file);
   }
 
   // ------------------------------------------------------------------ 衰老

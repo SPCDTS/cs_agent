@@ -31,7 +31,7 @@ function segmentText(segment: Record<string, unknown>): string {
   return typeof text === "string" ? text : "";
 }
 
-function renderText(segments: Record<string, unknown>[]): string {
+export function renderText(segments: Record<string, unknown>[]): string {
   return segments.map(s => (segmentType(s) === "text" ? segmentText(s) : "[" + segmentType(s) + "]")).join("");
 }
 

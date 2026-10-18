@@ -1,3 +1,4 @@
+import { RecallTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -28,8 +29,8 @@ afterEach(async () => {
   writer = undefined;
 });
 
-async function connect(dataDir: string, access: string | undefined): Promise<Client> {
-  const env: Record<string, string> = { DATA_DIR: dataDir, PATH: process.env.PATH ?? "" };
+async function connect(dataDir: string, access: string | undefined, extra: Record<string, string> = {}): Promise<Client> {
+  const env: Record<string, string> = { ...extra, DATA_DIR: dataDir, PATH: process.env.PATH ?? "" };
   if (process.env.SYSTEMROOT) env.SYSTEMROOT = process.env.SYSTEMROOT;
   if (access !== undefined) env.QQ_ACCESS = access;
   const client = new Client({ name: "test", version: "1.0.0" });
@@ -41,7 +42,38 @@ async function connect(dataDir: string, access: string | undefined): Promise<Cli
 const textOf = (r: unknown) => ((r as { content: { text: string }[] }).content ?? []).map((c) => c.text).join("");
 
 describe("qq_context MCP over stdio (built dist)", () => {
-  it("lists the three tools and serves recent / search / message within the injected scope", async () => {
+  it("qq_view_image 从 loopback 返回单张 MCP 图片，无本地媒体文件也可查看", async () => {
+    const picture = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
+    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }),
+      view: async (access, file) => {
+        expect(access).toEqual({ kind: "scope", scope: "group:7" });
+        expect(file).toBe("/data/media/not-local.png"); return picture;
+      } });
+    const endpoint = await startMediaRecallServer(tokens, 0);
+    const lease = tokens.issue({ access: { kind: "scope", scope: "group:7" }, ticket: "view", deadline: Date.now() + 60_000 });
+    try {
+      const c = await connect(tmp(), "group:7", { QQ_RECALL_TOKEN: lease.token, MEDIA_RECALL_PORT: String(endpoint.port) });
+      expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png" } })).content).toEqual([picture]);
+      expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png", access: "all" } })).isError).toBe(true);
+      lease.revoke();
+      expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png" } })).isError).toBe(true);
+    } finally { await endpoint.close(); }
+  });
+  it("qq_image 经主进程 loopback 召回，MCP 无库也不创建文件", async () => {
+    const tokens = new RecallTokens({ recall: async (access, id) => ({ text: JSON.stringify({ access, id }), images: [] }) });
+    const endpoint = await startMediaRecallServer(tokens, 0);
+    const lease = tokens.issue({ access: { kind: "scope", scope: "group:7" }, ticket: "tk", deadline: Date.now() + 60_000 });
+    try {
+      const c = await connect(tmp(), "group:7", { QQ_RECALL_TOKEN: lease.token, MEDIA_RECALL_PORT: String(endpoint.port) });
+      const result = await c.callTool({ name: "qq_image", arguments: { message_id: "123" } });
+      expect(textOf(result)).toContain('"scope":"group:7"');
+      expect(textOf(result)).toContain('"id":"123"');
+      expect((result.content as { type: string }[]).every(c => c.type === "text")).toBe(true);
+      lease.revoke();
+      expect((await c.callTool({ name: "qq_image", arguments: { message_id: "123" } })).isError).toBe(true);
+    } finally { await endpoint.close(); }
+  });
+  it("lists the history and recall tools and serves recent / search / message within the injected scope", async () => {
     const dir = tmp();
     writer = new ContextStore(dir);
     const quoted = msg("今晚有cs比赛吗", { message_id: "500" });
@@ -51,8 +83,8 @@ describe("qq_context MCP over stdio (built dist)", () => {
 
     const c = await connect(dir, `group:${G}`);
     const tools = await c.listTools();
-    expect(tools.tools.map((t) => t.name).sort()).toEqual(["qq_message", "qq_recent", "qq_search"]);
-    for (const t of tools.tools) expect(t.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+    expect(tools.tools.map((t) => t.name).sort()).toEqual(["qq_image", "qq_message", "qq_recent", "qq_search", "qq_view_image"]);
+    for (const t of tools.tools.filter(t => t.name !== "qq_image")) expect(t.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 
     const recent = textOf(await c.callTool({ name: "qq_recent", arguments: { limit: 30 } }));
     expect(recent.split("\n")).toEqual([expect.stringMatching(/^#500 \d\d:\d\d De: 今晚有cs比赛吗$/), expect.stringMatching(/^#501 \d\d:\d\d 小明: 那明天呢$/)]);

@@ -40,6 +40,13 @@ function rig(responses: (FauxResponseFactory | ReturnType<typeof fauxAssistantMe
 }
 
 describe("runAging", () => {
+  it("摘要输入还原媒体占位，不携带路径", async () => {
+    const r = rig([fauxAssistantMessage(fauxText("摘要"))]);
+    for (let i = 0; i < 5; i++) r.store.ingest(msg(dayStart(2026, 10, 20) + i, "图 [image:/data/media/ab/secret.png]"));
+    await runAging(r.opts);
+    expect(r.inputs[0]).toContain("[image]");
+    expect(r.inputs[0]).not.toContain("/data/media");
+  });
   it("summarizes past days with ≥5 messages, skips small days and today, then is idempotent", async () => {
     const r = rig([fauxAssistantMessage(fauxText("10-20 摘要：讨论了比赛"))]);
     const d20 = dayStart(2026, 10, 20);

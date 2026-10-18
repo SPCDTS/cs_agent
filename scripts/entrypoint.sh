@@ -239,6 +239,7 @@ deny_read = [
   "$D/obs-token",
   "$D/obs-token.*.tmp",
   "$D/images",
+  "$D/media",
   "$D/incoming",
   "$D/tickets",
   "$D/codex-session.json*",

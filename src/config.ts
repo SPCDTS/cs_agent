@@ -49,6 +49,8 @@ const EnvSchema = z.object({
   /** mcp 模式下容器内 loopback 转发端口（comfy-cli 仅对 loopback 获取 object_info） */
   COMFY_LOOPBACK_PORT: int(8188),
   COMFY_TIMEOUT_SEC: int(300),
+  MEDIA_RECALL_PORT: z.coerce.number().int().min(1).max(65535).default(8790),
+  MEDIA_RECALL_MAX_PER_TICKET: int(5),
   INCOMING_DOWNLOAD_CONCURRENCY: int(2),
   INCOMING_DOWNLOAD_DEADLINE_SEC: int(60),
   IMAGE_COLLECT_EXTENSIONS: z.coerce.number().int().min(0).max(10).default(2),

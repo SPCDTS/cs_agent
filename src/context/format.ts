@@ -39,8 +39,30 @@ function scopeLabel(scope: string): string {
   return kind === "group" ? `[群${id}]` : `[私聊${id}]`;
 }
 
-/** 机器人行正文（不含时间）。 */
+/** 图片路径作为整体保留；超出正文预算的路径放在省略号之后。 */
+export function clipWithImages(text: string, max: number): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (clean.length <= max) return clean;
+  const tokens = [...clean.matchAll(/\[image:[^\]]+\]/g)];
+  let end = Math.max(0, max - 1);
+  for (const m of tokens) if (m.index < end && m.index + m[0].length > end) end = m.index;
+  const tail = tokens.filter(m => m.index >= end).map(m => m[0]);
+  return clip(clean.slice(0, end), end) + "…" + (tail.length ? " " + tail.join(" ") : "");
+}
+
+export function withoutImagePaths(text: string): string {
+  return text.replace(/\[image:[^\]]+\]/g, "[image]");
+}
+
+/** 机器人摘要正文不重复显示媒体标记，统一在动作后附上。 */
 function botBody(row: MessageRow): string {
+  const tokens = row.text.match(/\[image:[^\]]+\]/g) ?? [];
+  return botAction({ ...row, text: row.text.replace(/\[image:[^\]]+\]/g, "").trim() }) +
+    (tokens.length ? " " + tokens.join(" ") : "");
+}
+
+/** 机器人行正文（不含时间）。 */
+function botAction(row: MessageRow): string {
   const failed = row.status === BOT_STATUS.failed;
   if (row.status === BOT_STATUS.pending || !row.action) return "[我] → 处理中";
   switch (row.action) {
@@ -68,7 +90,7 @@ function prefix(row: MessageRow, o: FormatOptions): string {
 /** 单条消息一行：`HH:MM 昵称: 文本`（正文部分 ≤120 字）。 */
 export function formatMessage(row: MessageRow, o: FormatOptions = {}): string {
   const body = row.is_self ? botBody(row) : `${row.nickname || row.user_id}: ${row.text}`;
-  return prefix(row, o) + clip(body, EXCERPT_MAX);
+  return prefix(row, o) + clipWithImages(body, EXCERPT_MAX);
 }
 
 export function formatSummary(row: SummaryRow, o: Pick<FormatOptions, "showScope"> = {}): string {
@@ -128,5 +150,5 @@ export function formatMessageFull(
   const detail = row.is_self && row.detail ? `\n细节: ${row.detail}` : "";
   const chain = hit.chain.map((c, i) => `${"  ".repeat(i + 1)}↳ 引用 ${formatMessage(c, o)}`);
   const text = [head + detail, ...chain].join("\n");
-  return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
+  return text.length <= maxChars ? text : /\[image:/.test(text) ? joinCapped([head + detail, ...chain], maxChars) : `${text.slice(0, maxChars - 1)}…`;
 }

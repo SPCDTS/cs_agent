@@ -5,6 +5,7 @@
  * 环境：DATA_DIR（库目录，默认 /data）、QQ_ACCESS（group:<id> | private:<qq> | all）、QQ_CONTEXT_MAX_CHARS。
  * stdout 专用于 MCP 协议；诊断写 stderr。
  */
+import { recallViaLoopback, viewViaLoopback } from "./media-recall-client.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { parseAccess } from "../context/access.js";
 import { ContextStore } from "../context/store.js";
@@ -16,6 +17,8 @@ let store: ContextStore | undefined;
 
 const server = createQQContextServer({
   access: parseAccess(process.env.QQ_ACCESS),
+  recall: id => recallViaLoopback(id, process.env.QQ_RECALL_TOKEN, Number(process.env.MEDIA_RECALL_PORT || 8790)),
+  view: file => viewViaLoopback(file, process.env.QQ_RECALL_TOKEN, Number(process.env.MEDIA_RECALL_PORT || 8790)),
   openStore: () => (store ??= new ContextStore(dataDir, { readOnly: true })),
   ...(Number.isInteger(maxChars) && maxChars > 0 ? { maxChars } : {}),
 });
