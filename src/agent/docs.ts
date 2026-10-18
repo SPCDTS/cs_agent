@@ -5,6 +5,13 @@ import { defineDoc } from "@earendil-works/pi-durable";
 import type { ImageFailure, ImageSubmission, ReconcileStep, RemoteUpload } from "./image-gen.js";
 import type { RouteName } from "./router.js";
 
+/** 派发时冻结；执行、后处理与恢复只读此快照。 */
+export type TicketSettings = {
+  backend: import('./backends/types.js').BackendName;
+  codexReasoningEffort: import('./codex-runner.js').ReasoningEffort;
+  codexReplyMode: import('./reply-postprocess.js').ReplyMode;
+};
+
 export type TicketSource = {
   type: "private" | "group";
   user_id: string;
@@ -55,6 +62,7 @@ export type TicketState = {
   imageReconciliation?: (ReconcileStep & { attempt: number })[];
   imageResult?: ImageResult;
   agentResult?: AgentResult;
+  settings?: TicketSettings;
   lateImageJobs?: LateImageJob[];
   attachmentFailure?: boolean;
   /** pi 关闭恢复的重提编号；提交前落盘，最多补提一次。 */

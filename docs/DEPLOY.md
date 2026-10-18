@@ -295,3 +295,10 @@ DEEPSEEK_PRICE_IN_PER_M / DEEPSEEK_PRICE_OUT_PER_M 默认 0；填入 deepseek-fl
 ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUsers 的首项）时，WS 连续离线超过五分钟、模型鉴权失败、连续三条票据失败会经 bridge.send 向 owner 私聊告警；所有原因共用每 30 分钟一次限频。告警只带固定原因，不带用户原文或服务端错误正文。此功能仅使用 fake bridge 验证。
 
 健康含义：ComfyUI / Codex 是启动检查快照，不能证明当前网络或鉴权仍有效；DeepSeek 仅显示是否配置密钥。Pi 压缩统计表示 hook 观察到的尝试，不声明压缩成功；Codex 回合数仅覆盖观测保留期。现有 failed 派发索引必须保留以阻止 pending 票据在恢复时成为孤儿重跑，不随观测日志过期删除。
+
+
+### 运行时设置的票据快照
+
+面板修改后端、Codex 推理强度或回复模式后，仅新派发的消息采用新值。Dispatcher 在等待附件准备和 scope 队列之前读取一次设置，将 `{backend, codexReasoningEffort, codexReplyMode}` 与票据一起写入 `TicketDoc.settings`。执行、relay/direct 后处理、机器人历史行和崩溃恢复都使用此快照；例如进行中的 high/relay 票据不会因面板改成 low/direct 而改变。
+
+升级前没有快照的存量票据无法还原历史设置：恢复时一次性写入固定 high/relay，后端优先采用已有结果中的 pi，否则 codex；后续重试沿用。没有 TicketDoc 的孤儿票据重新派发时才采样当前设置。

@@ -100,7 +100,7 @@ export class CodexBackend implements AgentBackend {
       ...(req.time ? { time: req.time } : {}),
       ...(req.quote ? { quote: req.quote } : {}),
     });
-    const effort = this.effort;
+    const effort = req.settings ? req.settings.codexReasoningEffort : this.effort;
     const started = Date.now();
     trace.event(req.ticket, "thread_wait", { status: "started", detail: { backend: "codex", thread_key: req.threadKey } });
     let modelStarted: number | undefined;

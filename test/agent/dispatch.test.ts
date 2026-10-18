@@ -210,6 +210,7 @@ class BackendStub implements AgentBackend {
 interface RigOptions {
   concurrency?: number;
   codex?: AgentBackend;
+  codexEffort?: string;
   overrides?: Record<string, BackendName>;
   replyMode?: ReplyMode;
   codexEnv?: Record<string, string>;
@@ -265,7 +266,7 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
     imageCollectDelayMs: 10,
   });
   const harness = await openHarness({ models, extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "agent.sqlite") }, ctx);
-  const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: o.concurrency ?? 2, history: store, codexEffort: "high", retryDelayMs: 10 });
+  const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: o.concurrency ?? 2, history: store, codexEffort: o.codexEffort ?? "high", retryDelayMs: 10 });
   // 与 main.ts 一致：重开时先 recover() 再开启调度（测试里由 recover 后的 waitForTask 开启）
   if (!shared) harness.resume();
   const rig: Rig = {
@@ -881,7 +882,7 @@ describe("agent path", () => {
       env: { FAKE_CODEX_LOG: logFile, FAKE_CODEX_IMAGES: "5", FAKE_CODEX_TEXT: "```\n画好了\n```" },
     });
     const codex = new CodexBackend({ runner, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"), reasoningEffort: "medium" });
-    const r = await makeRig({ codex }, { dir, bridge: new BridgeStub(), image: new ImageStub(), backend: new BackendStub(), store: new ContextStore(dir) });
+    const r = await makeRig({ codex, codexEffort: "medium" }, { dir, bridge: new BridgeStub(), image: new ImageStub(), backend: new BackendStub(), store: new ContextStore(dir) });
     await r.dispatcher.dispatch(inbound("画一张图并配一句话", { group: "200000001", user: "42" }), "t-codex-e2e");
     const start = readFileSync(logFile, "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l)).find((c) => c.phase === "start");
     expect(start.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"']));

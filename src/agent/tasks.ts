@@ -23,8 +23,8 @@ import { accessForSource, accessToString } from "../context/access.js";
 import type { ContextStore } from "../context/store.js";
 import type { QQBridge } from "../qq/types.js";
 import { log } from "../log.js";
-import { threadKeyForSource } from "./codex-runner.js";
-import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
+import { isReasoningEffort, threadKeyForSource } from "./codex-runner.js";
+import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState, type TicketSettings } from "./docs.js";
 import { collectNewImages } from "./image-collect.js";
 import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendingImages, savePendingImage, PendingImageMarkerError } from "./image-pending.js";
 import { readImageFiles, prepareImageFiles, validImageFile } from "./image-files.js";
@@ -33,7 +33,7 @@ import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUC
 import { postprocessReply, sanitizeReply, type ReplyMode } from "./reply-postprocess.js";
 import { IMAGE_USAGE_REPLY } from "./router.js";
 import { BackendTimeoutError } from "./backends/types.js";
-import type { BackendSelector } from "./backends/select.js";
+import { backendNameFor, type BackendSelector } from "./backends/select.js";
 import { ticketWorkDir } from "./backends/codex.js";
 import { promises as fs } from "node:fs";
 
@@ -66,6 +66,9 @@ export interface TaskDeps {
   store?: Pick<ContextStore, "message">;
   /** codex 后端的回复模式（pi 后端恒为 direct）；relay 需要 models + model */
   codexReplyMode: ReplyMode | (() => ReplyMode);
+  codexReasoningEffort?: string | (() => string);
+  /** 生产入口一次读取全部设置，避免分别采样。仅派发时调用。 */
+  currentSettings?: () => Readonly<import('./settings.js').RuntimeSettings>;
   models?: Models;
   relayModel?: Model<Api>;
   /** reply 重试退避基数（毫秒），默认 2000 */
@@ -196,6 +199,16 @@ function phases<S extends { phase: string }>(handlers: TaskDefinition<TaskInput,
 }
 
 export function createTasks(deps: TaskDeps) {
+  const snapshotSettings = (scope: string, fallbackEffort?: string): TicketSettings => {
+    const current = deps.currentSettings?.();
+    const effort = current?.codexReasoningEffort ?? fallbackEffort ??
+      (typeof deps.codexReasoningEffort === "function" ? deps.codexReasoningEffort() : deps.codexReasoningEffort);
+    return {
+      backend: current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : deps.backends.select(scope).name,
+      codexReasoningEffort: isReasoningEffort(effort) ? effort : "high",
+      codexReplyMode: current?.codexReplyMode ?? (typeof deps.codexReplyMode === "function" ? deps.codexReplyMode() : deps.codexReplyMode),
+    };
+  };
   type ImageRuntime = Runtime<ImageCheckpoint>;
 
   /** 两条路径共用收取延期上限、退避和按参数计算的预算。 */
@@ -434,11 +447,13 @@ export function createTasks(deps: TaskDeps) {
           const started = Date.now();
           try {
             if (doc.image_error) throw new Error(doc.image_error);
-            const backend = deps.backends.select(scope);
+            if (!doc.settings) throw new Error("票据缺少派发设置快照");
+            const backend = deps.backends.select(scope, doc.settings.backend);
             backendName = backend.name;
             const res = await trace.span(doc.ticket, "backend:" + backend.name, () => backend.handle(
               {
                 ticket: doc.ticket,
+                settings: doc.settings,
                 scope,
                 access: accessToString(accessForSource(source, deps.owner)),
                 threadKey: backend.name === "pi" && threadKeyForSource(source, deps.owner) !== "owner"
@@ -583,8 +598,9 @@ export function createTasks(deps: TaskDeps) {
         const doc = await ticketDoc(runtime, context);
         let draft = doc.replyDraft;
         if (draft === undefined && doc.agentResult?.ok) {
-          const codexMode = typeof deps.codexReplyMode === "function" ? deps.codexReplyMode() : deps.codexReplyMode;
-          const mode: ReplyMode = doc.agentResult.backend === "codex" ? codexMode : "direct";
+          if (!doc.settings) throw new Error("票据缺少派发设置快照");
+          const codexMode = doc.settings.codexReplyMode;
+          const mode: ReplyMode = doc.settings.backend === "codex" ? codexMode : "direct";
           const out = await postprocessReply(doc.agentResult.text, {
             ticket: doc.ticket,
             mode,
@@ -593,7 +609,7 @@ export function createTasks(deps: TaskDeps) {
             signal: runtime.signal,
           });
           rethrowIfAborted(runtime.signal, new Error("aborted"));
-          trace.event(doc.ticket, "postprocess", { detail: { raw_reply: doc.agentResult.text, sent_text: out.text, relayed: out.relayed,
+          trace.event(doc.ticket, "postprocess", { detail: { raw_reply: doc.agentResult.text, sent_text: out.text, relayed: out.relayed, mode,
             truncated: out.text.includes("…（内容过长，已截断）") } });
           draft = out.text;
         }
@@ -616,7 +632,7 @@ export function createTasks(deps: TaskDeps) {
     abort: (_task, runtime, context) => abortTask(runtime, context),
   });
 
-  return { ImageTask, AgentTask, cleanupTicketWorkdir: (ticket: string, uploads?: readonly RemoteUpload[]) => cleanupTicketWorkdir(deps, ticket, uploads) };
+  return { ImageTask, AgentTask, snapshotSettings, cleanupTicketWorkdir: (ticket: string, uploads?: readonly RemoteUpload[]) => cleanupTicketWorkdir(deps, ticket, uploads) };
 }
 
 export type CsTasks = ReturnType<typeof createTasks>;

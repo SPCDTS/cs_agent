@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai";
+import { createModels, fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { ObsStore } from "../../src/obs/store.js";
 import { Trace, trace } from "../../src/obs/trace.js";
 import { SettingsStore, SETTINGS_TICKET, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
@@ -13,6 +13,8 @@ import type { AgentBackend, AgentRequest, BackendName } from "../../src/agent/ba
 import { createTasks } from "../../src/agent/tasks.js";
 import { openHarness } from "../../src/agent/harness.js";
 import { createCsAgentExtension } from "../../src/agent/extension.js";
+import { TicketDoc, DispatchDoc } from "../../src/agent/docs.js";
+import type { ConversationId } from "@earendil-works/pi-durable";
 import { Dispatcher } from "../../src/agent/dispatch.js";
 import { startAlerts } from "../../src/obs/alerts.js";
 import { loadConfig } from "../../src/config.js";
@@ -85,6 +87,7 @@ describe("运行时设置", () => {
     const image = { name: "fake", submit: async () => "p", collect: async () => [], reconcile: async () => ({ images: [] as string[] }), clearReferences: async () => {} };
     const tasks = createTasks({ getBridge: () => bridge, imageBackend: image, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
       backends: createBackendSelector({ current: () => settings.current(), backends: { codex, pi: fake("pi") } }),
+      currentSettings: () => settings.current(),
       codexReplyMode: () => settings.current().codexReplyMode, replyRetryDelayMs: 1 });
     const harness = await openHarness({ models: createModels(), extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "agent.sqlite") }, BACKGROUND_CONTEXT);
     clean.push(() => harness.close(BACKGROUND_CONTEXT));
@@ -116,5 +119,73 @@ describe("运行时设置", () => {
       fail(2); expect(send).toHaveBeenCalledTimes(1);
       alerts.stop();
     } finally { vi.useRealTimers(); }
+  });
+});
+
+
+describe("票据设置快照", () => {
+  it.each([false, true])("回合中热更新仍保留 high/relay，后续票据使用 low/direct；恢复=%s", async recovery => {
+    const dir = tmp();
+    const settings = await SettingsStore.open(dir, defaults, new Trace());
+    const obs = new ObsStore(dir); clean.push(() => obs.close()); trace.attach(obs);
+    const faux = fauxProvider({ models: [{ id: "relay" }], tokensPerSecond: Infinity });
+    faux.setResponses([fauxAssistantMessage("转述后的回答"), fauxAssistantMessage("排队票据的转述")]);
+    const models = createModels(); models.setProvider(faux.provider);
+    const replies = new Map<string, string>();
+    const bridge = {
+      getTicket: async (ticket: string) => ({ ticket_id: ticket, seq: 1, status: replies.has(ticket) ? "sent" : "pending" }) as ReplyTicketRecord,
+      listPendingTickets: async () => [],
+      reply: async (ticket: string, text: string) => { replies.set(ticket, text); return { message_id: ticket, already_sent: false, message_type: "private" as const, target_id: "1" }; },
+    };
+    const history = { recordPending: vi.fn(), completeReply: vi.fn() };
+    const efforts: (string | undefined)[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const current = vi.fn(() => settings.current());
+    const boot = async (block: boolean) => {
+      const codex = new CodexBackend({ imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
+        reasoningEffort: "low",
+        runner: { ask: async (_prompt, options) => {
+          efforts.push(options?.reasoningEffort); await options?.onAcquired?.();
+          if (block) await Promise.race([gate, new Promise<never>((_, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("shutdown")), { once: true }))]);
+          return "原始回答";
+        } },
+      });
+      const tasks = createTasks({ getBridge: () => bridge,
+        imageBackend: { name: "fake", submit: async () => "p", collect: async () => [], reconcile: async () => ({ images: [] }), clearReferences: async () => {} },
+        imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
+        backends: createBackendSelector({ current, backends: { codex } }), currentSettings: current,
+        codexReplyMode: () => { throw new Error("后处理不得读取设置"); }, models, relayModel: faux.getModel(),
+      });
+      const harness = await openHarness({ models, extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "tickets.sqlite") }, BACKGROUND_CONTEXT);
+      clean.push(() => harness.close(BACKGROUND_CONTEXT));
+      return { harness, dispatcher: new Dispatcher({ harness, bridge, tasks, history, concurrency: 1, retryDelayMs: 1 }) };
+    };
+    let first = await boot(true);
+    const msg: InboundMessage = { message_id: "m", time: 1, message_type: "private", user_id: "1", group_id: null, self_id: "2", nickname: "测试", text: "你好", route_text: "你好", images: [], segments: [], truncated: false, mentioned_self: true };
+    first.harness.resume();
+    const pending = first.dispatcher.dispatch(msg, "first");
+    await vi.waitFor(() => expect(efforts).toEqual(["high"]));
+    const id = (await first.harness.snapshot(DispatchDoc, BACKGROUND_CONTEXT))!.pending.first!.conversationId as ConversationId;
+    expect((await first.harness.snapshot(TicketDoc, id, BACKGROUND_CONTEXT))?.settings).toEqual({ backend: "codex", codexReasoningEffort: "high", codexReplyMode: "relay" });
+    // 已排队票据也应冻结；当前回合结束前改设置。
+    const queued = recovery ? undefined : first.dispatcher.dispatch(msg, "queued");
+    await settings.update({ codexReasoningEffort: "low", codexReplyMode: "direct", agentBackend: "pi" }, "test");
+    current.mockImplementation(() => { throw new Error("执行及恢复不得读取当前设置"); });
+    if (recovery) {
+      await first.harness.close(BACKGROUND_CONTEXT); await pending;
+      first = await boot(false);
+      await first.dispatcher.recover(); first.harness.resume(); await first.dispatcher.idle();
+    } else { release(); await pending; await queued; }
+    expect(replies.get("first")).toBe("转述后的回答");
+    expect(history.completeReply).toHaveBeenCalledWith("first", expect.objectContaining({ action: "ask_codex", detail: "high" }));
+    expect(efforts.every(e => e === "high")).toBe(true);
+    if (!recovery) expect(replies.get("queued")).toBe("排队票据的转述");
+    expect(obs.events("first").some(e => e.stage === "postprocess" && JSON.parse(e.detail_json).mode === "relay")).toBe(true);
+    await settings.update({ agentBackend: "codex" }, "test"); current.mockImplementation(() => settings.current());
+    await first.dispatcher.dispatch(msg, "next");
+    expect(efforts.at(-1)).toBe("low"); expect(replies.get("next")).toBe("原始回答");
+    expect(history.completeReply).toHaveBeenCalledWith("next", expect.objectContaining({ detail: "low" }));
+    expect(obs.events("next").some(e => e.stage === "postprocess" && JSON.parse(e.detail_json).mode === "direct")).toBe(true);
   });
 });

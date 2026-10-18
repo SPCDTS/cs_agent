@@ -39,7 +39,7 @@ export class PiBackendStub implements AgentBackend {
 }
 
 export interface BackendSelector {
-  select(scope: string): AgentBackend;
+  select(scope: string, fixedName?: BackendName): AgentBackend;
 }
 
 /**
@@ -53,9 +53,11 @@ export function createBackendSelector(opts: {
 )): BackendSelector {
   const live = () => "current" in opts ? opts.current() : { agentBackend: opts.defaultBackend, backendOverrides: opts.overrides };
   return {
-    select(scope) {
-      const { agentBackend, backendOverrides } = live();
-      const name = backendNameFor(scope, agentBackend, backendOverrides);
+    select(scope, fixedName) {
+      const name = fixedName ?? (() => {
+        const { agentBackend, backendOverrides } = live();
+        return backendNameFor(scope, agentBackend, backendOverrides);
+      })();
       const backend = opts.backends[name];
       if (!backend) throw new Error(`agent backend "${name}" is not registered`);
       return backend;

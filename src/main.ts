@@ -145,7 +145,7 @@ async function main(): Promise<void> {
   const backends = createBackendSelector({
     current: () => settings.current(),
     backends: {
-      codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, ticketsDir: cfg.ticketsDir, reasoningEffort: () => settings.current().codexReasoningEffort }),
+      codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, ticketsDir: cfg.ticketsDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT }),
       pi,
     },
   });
@@ -159,7 +159,8 @@ async function main(): Promise<void> {
     backends,
     owner: cfg.owner,
     store,
-    codexReplyMode: () => settings.current().codexReplyMode,
+    codexReplyMode: cfg.CODEX_REPLY_MODE,
+    currentSettings: () => settings.current(),
     models,
     relayModel: agentModel,
   });
@@ -185,7 +186,6 @@ async function main(): Promise<void> {
     tasks,
     concurrency: cfg.AGENT_CONCURRENCY,
     imagePrefixes: cfg.imagePrefixes,
-    codexEffort: () => settings.current().codexReasoningEffort,
     history: store,
   });
 

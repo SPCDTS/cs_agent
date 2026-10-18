@@ -10,6 +10,7 @@ export const BACKEND_NAMES = ["codex", "pi"] as const;
 
 export interface AgentRequest {
   ticket: string;
+  settings?: Readonly<import("../docs.js").TicketSettings>;
   /** 会话 scope：group:<id> / private:<qq> */
   scope: string;
   /** 聊天记录访问范围（group:<id> / private:<qq> / all） */

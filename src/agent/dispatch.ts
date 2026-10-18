@@ -19,7 +19,7 @@ import { trace } from "../obs/trace.js";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ConversationId, Harness, TaskId } from "@earendil-works/pi-durable";
 import type { InboundMessage, QQBridge, ReplyTicketRecord } from "../qq/types.js";
-import { DispatchDoc, TicketDoc, type DispatchEntry, type TicketSource } from "./docs.js";
+import { DispatchDoc, TicketDoc, type DispatchEntry, type TicketSource, type TicketSettings } from "./docs.js";
 import { log } from "../log.js";
 import { scopeOf } from "../context/access.js";
 import type { BotAction, ContextStore } from "../context/store.js";
@@ -43,7 +43,7 @@ export interface DispatcherOptions {
   tasks: CsTasks;
   concurrency: number;
   imagePrefixes?: readonly string[];
-  /** 写入消息库机器人行的 codex 推理强度（CODEX_REASONING_EFFORT；函数形式现读运行时设置） */
+  /** 兼容旧调用的派发默认推理强度；入队时写入快照，历史行不再现读 */
   codexEffort?: string | (() => string);
   context?: Context;
   history?: DispatchHistory;
@@ -103,14 +103,15 @@ export class Dispatcher {
   dispatch(msg: InboundMessage, ticket: string): Promise<void> {
     if (this.inflight.has(ticket)) return this.inflight.get(ticket)!;
     const scope = scopeOf(msg);
+    const settings = this.opts.tasks.snapshotSettings(scope, typeof this.opts.codexEffort === "function" ? this.opts.codexEffort() : this.opts.codexEffort);
     trace.event(ticket, "received", { scope, detail: { text: msg.text, sender: msg.nickname, message_id: msg.message_id } });
     this.withHistory("record pending failed", ticket, (h) =>
       h.recordPending(scope, ticket, msg.time, { replyTo: msg.message_id, selfId: msg.self_id }),
     );
     return this.track(ticket, "dispatch failed", () => {
       const registered = this.opts.bridge.prepareIncoming
-        ? this.opts.bridge.prepareIncoming(ticket).then(rec => this.register(msg.attachments?.some(a => a.status === 'pending') && rec ? inboundFromTicket(rec) : msg, ticket, scope))
-        : this.register(msg, ticket, scope);
+        ? this.opts.bridge.prepareIncoming(ticket).then(rec => this.register(msg.attachments?.some(a => a.status === 'pending') && rec ? inboundFromTicket(rec) : msg, ticket, scope, false, settings))
+        : this.register(msg, ticket, scope, false, settings);
       return this.enqueue(scope, async () => this.run(ticket, await registered));
     });
   }
@@ -275,7 +276,7 @@ export class Dispatcher {
     else this.active--;
   }
 
-  private async register(msg: InboundMessage, ticket: string, scope: string, fallbackOnly = false): Promise<ConversationId> {
+  private async register(msg: InboundMessage, ticket: string, scope: string, fallbackOnly = false, settings?: TicketSettings): Promise<ConversationId> {
     const { harness } = this.opts;
     const known = (await harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket];
     if (known) return known.conversationId as ConversationId;
@@ -295,6 +296,7 @@ export class Dispatcher {
         init: async (tx, conversationId) => {
           Object.assign(await tx.doc(TicketDoc, conversationId), {
             ticket, source, text: msg.text, time: msg.time, messageId: msg.message_id,
+            settings: settings ?? this.opts.tasks.snapshotSettings(scope),
             source_images: msg.images, ...(msg.image_error ? { image_error: msg.image_error } : {}),
             route: route.route,
             ...(route.route !== "agent" ? { prefix: route.prefix } : {}),
@@ -346,6 +348,8 @@ export class Dispatcher {
         if (r.route !== "agent") doc.prefix = r.prefix;
         if (r.route === "image") { doc.prompt = r.prompt; doc.imageOptions = r.options; }
       }
+      // 旧票据没有快照，无法重建历史设置；固定兼容值并持久化，恢复不读取热设置。
+      doc.settings ??= { backend: doc.agentResult?.backend === "pi" ? "pi" : "codex", codexReasoningEffort: "high", codexReplyMode: "relay" };
       const options = { ownership: { kind: "conversation" }, conversationId } as const;
       const id =
         doc.route === "agent"
@@ -489,9 +493,9 @@ export class Dispatcher {
         ok = doc.imageResult?.ok === true;
       } else if (doc?.route === "agent") {
         ok = doc.agentResult?.ok === true;
-        if (doc.agentResult?.backend === "codex") {
+        if (doc.settings?.backend === "codex") {
           action = "ask_codex";
-          detail = typeof this.opts.codexEffort === "function" ? this.opts.codexEffort() : this.opts.codexEffort;
+          detail = doc.settings?.codexReasoningEffort;
         }
       }
       trace.event(ticket, rec?.status === "sent" && ok ? "reply_sent" : "failed", { status: rec?.status === "sent" && ok ? "ok" : "failed",
