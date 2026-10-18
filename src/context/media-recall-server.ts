@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { registerTemporarySecrets } from "../obs/redact.js";
 import { accessToString, parseAccess, type Access } from "./access.js";
 import { abortable, type MediaRecall, type RecallResult } from "./media.js";
 
@@ -28,10 +29,12 @@ export class RecallTokens {
     if (quota.access !== access) throw new Error("召回票据范围不一致");
     this.tickets.set(binding.ticket, quota);
     const token = randomBytes(32).toString("hex"), control = new AbortController();
+    const disposeSecret = registerTemporarySecrets([token]);
     const revoke = () => {
       const lease = this.tokens.get(token);
       if (!lease) return;
       this.tokens.delete(token); clearTimeout(lease.timer);
+      disposeSecret();
       binding.signal?.removeEventListener("abort", revoke);
       control.abort(new Error("召回令牌已作废"));
     };

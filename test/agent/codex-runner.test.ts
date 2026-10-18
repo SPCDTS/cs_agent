@@ -1,3 +1,4 @@
+import { redactText } from "../../src/obs/redact.js";
 import { RecallTokens } from "../../src/context/media-recall-server.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -573,7 +574,12 @@ describe("codex 召回令牌生命周期", () => {
   it.each(["success", "failure", "timeout", "spawn"])("每次 exec 注入并在 %s 后撤销", async mode => {
     const dir = tmp();
     const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) });
-    const issue = vi.spyOn(tokens, "issue");
+    const originalIssue = tokens.issue.bind(tokens);
+    const issue = vi.spyOn(tokens, "issue").mockImplementation(binding => {
+      const lease = originalIssue(binding);
+      expect(redactText(lease.token)).toBe("[已隐藏]");
+      return lease;
+    });
     const opts = setupOpts(dir);
     if (mode === "failure") seedShared(dir, { thread_id: "flaky-recall" });
     const runner = new CodexRunner({ ...opts, recallTokens: tokens, mediaRecallPort: 8791,
@@ -585,6 +591,7 @@ describe("codex 召回令牌生命周期", () => {
     expect(issue).toHaveBeenCalledOnce();
     const lease = issue.mock.results[0]!.value;
     expect(tokens.valid(lease.token)).toBe(false);
+    expect(redactText(lease.token)).toBe(lease.token);
     expect(issue.mock.calls[0]![0]).toMatchObject({ ticket: "tk", access: { kind: "scope", scope: "group:7" } });
     if (mode !== "spawn") {
       const argv = JSON.parse(readFileSync(path.join(dir, "calls.jsonl"), "utf8").split("\n")[0]!).argv as string[];

@@ -1,5 +1,4 @@
 import type { RecallTokens } from "../context/media-recall-server.js";
-import { registerSecrets } from "../obs/redact.js";
 import type { ContextUsageStore } from "./context-usage.js";
 import { loadCodexContextWindow } from "./codex-model-catalog.js";
 import { readRolloutContextUsage } from "./codex-context-usage.js";
@@ -732,7 +731,6 @@ export class CodexRunner {
     const lease = this.opts.recallTokens?.issue({ access: access!, ticket: recall!.ticket!, deadline: Date.now() + this.opts.timeoutMs, signal });
     try {
       if (lease) {
-        registerSecrets([lease.token]);
         finalArgs.splice(finalArgs[1] === "resume" ? 2 : 1, 0, ...recallArgs(lease.token, this.opts.mediaRecallPort ?? 8790));
       }
       const child = spawn(bin, [...prefix, ...finalArgs], {
