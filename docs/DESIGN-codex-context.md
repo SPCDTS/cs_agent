@@ -649,3 +649,9 @@ interface RemoteMessage {
 - 事故：主会话一度在主树里做合并，冲突未解时被并行会话从主树构建部署，启动即归档了 shared；该会话已回滚并恢复。规则：合并只在独立 worktree 里做，部署从干净的提交构建。
 - 线上实测（生产容器、真实 /data，不发 QQ 消息）：pi 沙箱内读 qq-messages.sqlite / obs-token 均 Permission denied；`ls /workspace`、`/data/codex/trace`、`/data/media` 为空；`/data/pi-work` 只见本会话；`/proc` 仅 4 个进程，PID 1 是 bwrap，环境无 token；写 `/data/prompts` 为只读文件系统；文件工具读 sqlite、`/workspace/AGENTS.md`、`codex/auth.json` 被拒，读 `prompts/agent.md` 正常。healthz 正常，codex 线程只剩 owner，`shared` 归档 1 条。
 - 未覆盖：真实 QQ 群的端到端（两个群各问一轮确认互不可见）留给用户实测。
+
+### 10.9 第 3 步验收记录（2026-10-19，主会话验收通过，main 8804aa9 已部署）
+- 实现：Codex（gpt-6-astra）在独立 worktree 完成，1 条提交，30 个文件。新增 `src/channel/{types,ticket}.ts`；`qq/` 实现 `Channel`（新增 `fetchMessage` / `refreshImageUrl`，NapCat 字段归一化从 `context/media.ts` 原样搬入）；`context/media.ts` 不再引用 `qq/`，`main.ts` 不再单独创建 OneBot 客户端（改用通道自身的客户端，超时同为 15 s）。
+- 审查：主会话逐条对照 `checkScope` 新旧判定（非对象响应、类型、群号、发送者回退与冲突、消息 id、自回声票据核对、可选收件人字段、私聊带 group_id）与 `recalledText`（`renderText` 本身是逐段拼接，与 `segments[].rendered` 拼接等价），行为一致。
+- 测试：tsc 通过；全量 1295 通过、6 跳过；依赖测试新增 `channel` 层与三条规则，例外清单仍为空；原媒体召回用例断言未改；新增 `test/qq/channel.test.ts` 覆盖归一化。
+- 部署：干净 detached worktree 构建，队列空闲时 `up -d --no-build cs-agent`（napcat 未重建），容器 healthy，`ws_connected: true`，面板页面 200。未做真实 QQ 冒烟（不向真实群发消息）；图片召回的 `get_msg` 路径待下一次实际召回时观察日志。
