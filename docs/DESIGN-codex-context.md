@@ -404,6 +404,8 @@ CODEX_BROWSER=playwright
 
 回归测试沿用 fake-codex，在子进程启动时记录 cwd 的 AGENTS.md，覆盖首轮生成、内容相同时 mtime 不变、规则/权限/运维指引变化、模型改写后的恢复，以及新建与 resume 均不传 `developer_instructions`。提示词不是访问控制；会话权限仍由现有命名沙箱配置执行。
 
+**主会话验收（2026-10-19）**：分支 `fix/managed-rules-via-workspace-agents` 3 条提交 ff 到 main（b750b54…241e938），沙箱外复跑 82 文件 / 1214 项通过；镜像 `275b0fb6…` 部署，容器 healthy。真实回合（票据 31ae0ded，09:16:46 "生成一张极恶骑的图片给我"）：09:17:07 owner 线程 rollout 出现新的 `# AGENTS.md instructions` user 消息（2,357 字，含"发送图片与文件"与内置生图说明）；09:18:15 模型调用 `qq_send_image`，路径为当前线程 `generated_images` 下的 PNG，登记成功；`reply_sent.images = 1`，用户确认图片到达。owner 线程自 10-18 以来首次收到规则更新。`/workspace/owner/AGENTS.md` 首行为受管标记。读写加固（符号链接、临时文件名、父目录复核）由 `fix/harden-managed-agents-write` 跟进。
+
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
