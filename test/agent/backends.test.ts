@@ -95,6 +95,28 @@ describe("backend selection (§4.3)", () => {
       expect(() => ticketWorkDir(root, "")).toThrow();
     });
 
+    it("完成后进程滞留仍返回结果、保留附件和输出，重入票据不再启动回合", async () => {
+      const dir = tmp("cs-codex-grace-be-");
+      const logFile = path.join(dir, "calls.jsonl");
+      const runner = new CodexRunner({
+        command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
+        codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "ws"),
+        threadsFile: path.join(dir, "threads.json"), sandbox: "workspace-write", timeoutMs: 10000, exitGraceMs: 150,
+        env: { FAKE_CODEX_LOG: logFile, FAKE_CODEX_SLEEP_AFTER_OUT_MS: "8000", FAKE_CODEX_IMAGES: "1" },
+      });
+      const backend = new CodexBackend({ runner, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets") });
+      const persistTurn = vi.fn(async () => undefined);
+      const ctx = { signal: new AbortController().signal, onEvent: () => undefined, persistTurn };
+      expect((await backend.handle(req, ctx)).text).toBe("answer to: hi");
+      expect(readFileSync(path.join(dir, "tickets", req.ticket, CODEX_LAST_FILE), "utf8")).toBe("answer to: hi");
+      const start = JSON.parse(readFileSync(logFile, "utf8").trim());
+      const arg = start.argv.find((a: string) => a.startsWith("mcp_servers.qq_context.env.QQ_ATTACH_DIR="));
+      expect(existsSync(path.join(JSON.parse(arg.slice(arg.indexOf("=") + 1)), "img_0.png"))).toBe(true);
+      expect((await backend.handle(req, ctx)).text).toBe("answer to: hi");
+      expect(persistTurn).toHaveBeenCalledOnce();
+      expect(readFileSync(logFile, "utf8").trim().split("\n")).toHaveLength(1);
+    });
+
     it("two restarts while queued keep attempts at zero, then the ticket runs once (F5)", async () => {
       const dir = tmp("cs-codex-queued-");
       const logFile = path.join(dir, "calls.jsonl");

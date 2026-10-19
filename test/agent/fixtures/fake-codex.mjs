@@ -4,6 +4,7 @@
 // FAKE_CODEX_TEXT：覆盖回答正文。
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
@@ -65,8 +66,16 @@ process.stdin.on("end", async () => {
   }
   const text = process.env.FAKE_CODEX_TEXT ?? `answer to: ${stdin.trim().split("\n").pop()}`;
   emit({ type: "item.completed", item: { id: "item_1", type: "agent_message", text } });
-  emit({ type: "turn.completed", usage: JSON.parse(process.env.FAKE_CODEX_USAGE ?? "{}") });
-  writeFileSync(out, text);
+  if (process.env.FAKE_CODEX_NO_COMPLETED !== "1") emit({ type: "turn.completed", usage: JSON.parse(process.env.FAKE_CODEX_USAGE ?? "{}") });
+  if (process.env.FAKE_CODEX_NO_OUT !== "1") writeFileSync(out, text);
+  // 脱离父进程事件循环但继续持有输出管道；POSIX 保留 runner 的进程组以覆盖生产中的 killTree。
+  if (process.env.FAKE_CODEX_HOLD_PIPE === "1") {
+    const holder = spawn(process.execPath, ["-e", "setTimeout(() => process.stdout.write(process.argv[1]), 100); setTimeout(() => {}, 8000)", process.env.FAKE_CODEX_PIPE_TAIL ?? ""], {
+      stdio: ["ignore", process.stdout, process.stderr], detached: process.platform === "win32", windowsHide: true,
+    });
+    log({ phase: "holder", pid: holder.pid, t: Date.now() });
+    holder.unref();
+  }
   // FAKE_CODEX_SLEEP_AFTER_OUT_MS：写完 -o 文件后再挂起（模拟回合已完成、进程在结果提交前被杀）
   const after = Number(process.env.FAKE_CODEX_SLEEP_AFTER_OUT_MS ?? 0);
   if (after) await new Promise((r) => setTimeout(r, after));
@@ -85,4 +94,5 @@ process.stdin.on("end", async () => {
     appendFileSync(path.join(dir, "rollout-" + threadId + ".jsonl"), rows.join("\n") + "\n", "utf8");
   });
   log({ phase: "end", pid: process.pid, t: Date.now() });
+  process.exitCode = Number(process.env.FAKE_CODEX_EXIT_CODE ?? 0);
 });

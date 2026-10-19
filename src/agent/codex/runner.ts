@@ -45,6 +45,10 @@ export interface CodexRunnerOptions {
   legacySessionFile?: string;
   sandbox: "read-only" | "workspace-write" | "danger-full-access";
   timeoutMs: number;
+  /** 主进程 exit 后等待输出管道 close 的上限，默认 5000 ms。 */
+  closeGraceMs?: number;
+  /** turn.completed 后等待主进程 exit 的上限，默认 15000 ms；需非空输出文件才能提前成功。 */
+  exitGraceMs?: number;
   /** 额外环境变量（测试用） */
   env?: NodeJS.ProcessEnv;
   /** 安全阀：rollout 文件超过该大小（MB）则新建线程，默认 50 */
@@ -757,7 +761,7 @@ export class CodexRunner {
       if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
       return this.result(r);
     } finally {
-      // exec 已等待进程 close；此时 rollout 已刷新，不能在 JSONL 事件回调中抢先读取。
+      // exec 已等待 exit 与输出收尾；强制收尾时 rollout 可能缺失或陈旧，由下面的回退保留旧用量。
       if (completed && this.opts.contextUsage) {
         const usage = id ? await this.latestRolloutContextUsage(id) : undefined;
         if (usage && usage.updatedAt >= startedAt) {
@@ -823,10 +827,66 @@ export class CodexRunner {
 
       const outcome: RunOutcome = { code: null, turnStarted: false, stderrTail: "" };
       let persisted: Promise<void> | undefined;
+      let completed = false;
+      let exited = false;
+      let settled = false;
+      let forcedClose = false;
+      let exitCode: number | null = null;
+      let timedOut = false;
+      let aborted = false;
+      let closeTimer: ReturnType<typeof setTimeout> | undefined;
+      let exitTimer: ReturnType<typeof setTimeout> | undefined;
+      let finish: (code: number | null) => void;
+      const wait = new Promise<number | null>((resolve, reject) => {
+        finish = code => { if (!settled) { settled = true; resolve(code); } };
+        child.once("error", err => { if (!settled) { settled = true; reject(err); } });
+        child.once("exit", code => {
+          exited = true;
+          exitCode = code;
+          clearTimeout(exitTimer);
+          if (settled) return;
+          // 已拿到退出码后只等管道冲完，不再让总超时推翻主进程的结果。
+          clearTimeout(timer);
+          closeTimer = setTimeout(() => {
+            forcedClose = true;
+            log.warn("codex close grace expired; cleaning up descendants", { pid: child.pid, code });
+            stop(code);
+          }, this.opts.closeGraceMs ?? 5000);
+        });
+        child.once("close", code => finish(exited ? exitCode : code));
+      });
+      // 即使终止进程树被操作系统拒绝，也要释放本端管道，不能再次卡在 close。
+      const stop = (code: number | null) => {
+        if (settled) return;
+        killTree(child.pid);
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.unref();
+        finish(code);
+      };
+      const onCompleted = () => {
+        if (completed) return;
+        completed = true;
+        if (exited || settled) return;
+        exitTimer = setTimeout(() => {
+          void fs.readFile(outFile, "utf8").catch(() => undefined).then(text => {
+            // 读文件期间可能 exit、超时或取消；已知退出码与失败状态优先。
+            if (settled || exited || timedOut || aborted || outcome.failure || !text?.trim()) return;
+            outcome.outFileText = text;
+            log.warn("codex exit grace expired after completed output; cleaning up process tree", { pid: child.pid });
+            stop(0);
+          });
+        }, this.opts.exitGraceMs ?? 15000);
+      };
       const handle = (line: string) => {
         const had = outcome.threadId;
         this.onEvent(line, outcome);
-        try { onJsonEvent?.(JSON.parse(line)); } catch { /* 观测不影响 JSONL 执行 */ }
+        try {
+          const event = JSON.parse(line) as Record<string, unknown>;
+          if (event.type === "turn.completed") onCompleted();
+          onJsonEvent?.(event);
+        } catch { /* 观测不影响 JSONL 执行 */ }
         if (!had && outcome.threadId && onThreadId && !persisted) {
           persisted = onThreadId(outcome.threadId).catch((err) => log.error("persist codex session id failed", { error: err }));
         }
@@ -849,35 +909,39 @@ export class CodexRunner {
       child.stdin.on("error", () => undefined);
       child.stdin.end(prompt);
 
-      let timedOut = false;
-      let aborted = false;
       const timer = setTimeout(() => {
         timedOut = true;
-        killTree(child.pid);
+        stop(exitCode);
       }, this.opts.timeoutMs);
       const onAbort = () => {
         aborted = true;
-        killTree(child.pid);
+        stop(exitCode);
       };
       signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
 
       try {
-        outcome.code = await new Promise<number | null>((resolve, reject) => {
-          child.once("error", reject);
-          child.once("close", (code) => resolve(code));
-        });
+        outcome.code = await wait;
       } finally {
         clearTimeout(timer);
+        clearTimeout(closeTimer);
+        clearTimeout(exitTimer);
         signal?.removeEventListener("abort", onAbort);
       }
       if (buf.trim()) handle(buf.trim());
       await persisted;
       if (timedOut) throw new CodexTimeoutError(this.opts.timeoutMs);
       if (aborted) throw new Error("aborted");
-      outcome.outFileText = await fs.readFile(outFile, "utf8").catch(() => undefined);
-      if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+      if (forcedClose && outcome.code === 0 && !completed) {
+        outcome.code = 1;
+        outcome.failure = "output closed before turn.completed";
+      }
+      outcome.outFileText ??= await fs.readFile(outFile, "utf8").catch(() => undefined);
       return outcome;
-    } finally { lease?.revoke(); }
+    } finally {
+      lease?.revoke();
+      if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   private onEvent(line: string, o: RunOutcome): void {
