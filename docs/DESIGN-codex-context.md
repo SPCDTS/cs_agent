@@ -423,6 +423,8 @@ Codex 内置 imagegen 将原图写入 `$CODEX_HOME/generated_images/<thread_id>/
 
 每日任务在 `purgeCodexTrace` 之后调用；removed > 0 时记录成功日志与三个计数，失败只告警。保持现有调度：启动不立即清理，正常情况下在 `Metrics.start()` 后约 60 秒首次执行，后续间隔至少 24 小时；观测库降级时不执行。
 
+**主会话验收（2026-10-19）**：分支 `feat/generated-images-purge` 2 条提交 ff 到 main（472079a、dee6231）+ 日志小修 f546785；沙箱外复跑 85 文件 / 1331 项通过；镜像 `c1dce9ba…`（干净 worktree，main f546785）部署，容器 healthy、bridge 已连。容器内用构建产物对临时目录实测：10 天前的 3 MiB 文件按保留期删除且空线程目录被清（`removed 1 / dirs 1`），总量上限 3 MiB 时按 mtime 从旧到新再删 1 个文件，新文件保留；真实目录 2 个线程 4 张图均在 7 天内，未被清理。首次清理在启动约 60 秒后随每日维护任务运行，之后每 24 小时一次。另记：cs-agent-b7 发现 owner 线程请求体已达 16.87 MB（历史里内联的 4 张生图），WebSocket 传输在约 16 MiB 时被服务端关闭、每轮降级 HTTPS 前白耗约 1.5–2 分钟；本清理不影响已内联进历史的图片，缓解需靠压缩/重置线程或强制 HTTPS 传输（待实测开关后在受管配置处理）。
+
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
