@@ -2,15 +2,28 @@
  * 执行 agent 的后端抽象（设计 §4.3）。两后端：codex（容器内 CLI 固定线程）与 pi（进程内 durable 会话，第 3 组）。
  * 后端只产出文本（与回合内生成的图片）；回复目标、发送与后处理由 agent 任务负责，后端不能也不需要指定。
  */
-import type { TicketSource } from "../docs.js";
-import type { ThreadKey } from "../codex/runner.js";
+export type ThreadKey = "owner" | `group:${string}` | `private:${string}`;
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** 派发时冻结；执行、后处理与恢复只读此快照。 */
+export type TicketSettings = {
+  backend: BackendName;
+  codexReasoningEffort: ReasoningEffort;
+};
+
+export type TicketSource = {
+  type: "private" | "group";
+  user_id: string;
+  group_id: string | null;
+  nickname: string;
+};
 
 export type BackendName = "codex" | "pi";
 export const BACKEND_NAMES = ["codex", "pi"] as const;
 
 export interface AgentRequest {
   ticket: string;
-  settings?: Readonly<import("../docs.js").TicketSettings>;
+  settings?: Readonly<TicketSettings>;
   /** 会话 scope：group:<id> / private:<qq> */
   scope: string;
   /** 聊天记录访问范围（group:<id> / private:<qq> / all） */

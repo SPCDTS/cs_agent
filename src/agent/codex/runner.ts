@@ -19,7 +19,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { TicketSource } from "../docs.js";
+import type { TicketSource } from "../backends/types.js";
 import { log } from "../../shared/log.js";
 import { accessForSource, isScope, parseAccess } from "../../context/access.js";
 import { clip } from "../../context/store.js";
@@ -55,7 +55,7 @@ export interface CodexRunnerOptions {
 
 /** 允许的推理强度（不含 ultra：会自动委派子任务，成本高）。 */
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
-export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+import type { ReasoningEffort, ThreadKey } from "../backends/types.js";
 
 export function isReasoningEffort(v: unknown): v is ReasoningEffort {
   return typeof v === "string" && (REASONING_EFFORTS as readonly string[]).includes(v);
@@ -86,7 +86,6 @@ export function imageTicketDirArgs(dir: string | undefined): string[] {
 }
 
 /** 线程键与会话域一致；任何外部输入都必须通过 isThreadKey。 */
-export type ThreadKey = "owner" | `group:${string}` | `private:${string}`;
 export function isThreadKey(value: unknown): value is ThreadKey {
   return value === "owner" || isScope(value);
 }

@@ -5,18 +5,7 @@ import { defineDoc } from "@earendil-works/pi-durable";
 import type { ImageFailure, ImageSubmission, ReconcileStep, RemoteUpload } from "../media/gen/image-gen.js";
 import type { RouteName } from "./router.js";
 
-/** 派发时冻结；执行、后处理与恢复只读此快照。 */
-export type TicketSettings = {
-  backend: import('./backends/types.js').BackendName;
-  codexReasoningEffort: import('./codex/runner.js').ReasoningEffort;
-};
-
-export type TicketSource = {
-  type: "private" | "group";
-  user_id: string;
-  group_id: string | null;
-  nickname: string;
-};
+import type { TicketSettings, TicketSource } from "./backends/types.js";
 
 /** 已提交的 ComfyUI 任务（submit 阶段提交后立即与检查点同一提交写入；恢复时按它收取，不重复提交）。 */
 type ImageJob = { prompt_id: string; backend: string; /** 已提交次数（服务端丢失任务时最多重新提交 1 次） */ submits: number; status?: "running"; deadline?: number; extensions?: number; nextCollectAt?: number };

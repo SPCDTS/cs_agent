@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { CodexRunner, isThreadKey, type ThreadKey } from "../../src/agent/codex/runner.js";
+import { CodexRunner, isThreadKey } from "../../src/agent/codex/runner.js";
+import { type ThreadKey } from "../../src/agent/backends/types.js";
 import { codexWorkspacePolicy, prepareCodexWorkspace } from "../../src/agent/codex/workspace.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { CodexBackend } from "../../src/agent/backends/codex.js";

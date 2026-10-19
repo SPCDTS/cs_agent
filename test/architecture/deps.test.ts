@@ -13,8 +13,6 @@ const ALLOWED_EXCEPTIONS: Array<[from: string, to: string]> = [
   // P2：后端契约、配置解析与观察者接口。
   ['src/agent/backends/pi.ts', 'src/obs/sessions/pi-adapter.ts'],
   ['src/agent/backends/select.ts', 'src/agent/backends/pi.ts'],
-  ['src/agent/backends/types.ts', 'src/agent/docs.ts'],
-  ['src/agent/backends/types.ts', 'src/agent/codex/runner.ts'],
   ['src/agent/pi-tools/index.ts', 'src/obs/memory/instrumentation.ts'],
   ['src/config.ts', 'src/context/access.ts'],
   ['src/config.ts', 'src/agent/router.ts'],
