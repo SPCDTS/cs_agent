@@ -1,6 +1,6 @@
 # 设计：pi 后端经 magpie 出站
 
-状态：设计完成，待实现。关联：`docs/DESIGN-codex-via-magpie.md`（codex 已切换）。
+状态：已实现并部署（2026-10-19）。关联：`docs/DESIGN-codex-via-magpie.md`（codex 已切换）。
 
 ## 0. 事实（2026-10-19 实测）
 
@@ -65,4 +65,10 @@ export function createMagpieProvider(opts: { baseUrl: string; models: ProviderMo
 
 ## 5. 验收记录
 
-（主会话追加）
+### 2026-10-19，主会话验收
+
+- 代码：分支 `feat/pi-via-magpie`（codex 实现）cherry-pick 到 main 7791be8；主会话复核 diff 并补了目录条目缺 id 时跳过的防御。与设计的差异：pi-ai 1.3.0 不导出 `auth/helpers` 子路径与 `ProviderModel` 类型，改用根导出 `envApiKeyAuth` 与本地 `Omit<Model, "provider" | "baseUrl">` 别名，`createMagpieProvider` 补齐 `provider`/`baseUrl`；"重试 5 次"为首次请求后最多 5 次重试、间隔 3 s。沙箱外全量 88 文件 / 1394 项通过。
+- 部署：镜像 `b5a78d19…`（干净 build worktree，main 7791be8）；`.env` 改 `AGENT_MODEL_PROVIDER=magpie`、`AGENT_MODEL_ID=deepseek/deepseek-flash`（旧值备份 `.env.bak-pimagpie`），`DEEPSEEK_APIKEY` 保留给联网检索。启动日志 `pi models via magpie {base_url: http://host.docker.internal:3425/v1, models: 3}`，容器 healthy。
+- 容器内用构建产物核对注册结果：`magpie/deepseek/deepseek-flash` api `openai-completions`、窗口 1,000,000、maxTokens 393,216、`compat.thinkingFormat = "deepseek"`、档位映射与价格均继承自内置定义。
+- 真实流量：群 200000001 运行在 pi 后端，部署后首条消息（ticket 1d3f9bb9…，13:08:47Z）`model_turn` 记录 `provider=magpie`、`model=deepseek/deepseek-flash`、1821 ms、`cache_read_tokens=2176`（部署前同会话记录为 `provider=deepseek`），工具调用生图并随回复发出 1 张图。magpie `usage.jsonl` 对应记录 `agent=pi`、`callerKeyName=cs-agent`、`provider=deepseek host=api.deepseek.com`、`effort=low`（思考档位经网关生效）、`in=227 out=129 cache_read=8576`。
+- 结论：pi 的模型调用已全部经 magpie；联网检索按用户决定保持直连 DeepSeek。
