@@ -64,3 +64,32 @@ docker compose
 ## 6. 验收记录
 
 （待填）
+
+### 本地验收
+
+2026-10-19，在 `D:/project/cs_agent-napcat` 的 `feat/napcat-container` 分支完成代码与文档实现；基于 `acfdc36`。仅做本地验证，未构建镜像、未部署、未运行 `docker compose up`，未修改 `.env`、`data/`，未创建仓库根目录的 `napcat/`。真实迁移、扫码和 QQ 收发仍待主会话执行。
+
+| 验证 | 结果 |
+|---|---|
+| `npm.cmd run typecheck` | 通过，包含 src 与 test 的 TypeScript 检查 |
+| `npm.cmd run build` | 通过 |
+| `npx.cmd vitest run` | 1116 通过、32 失败、4 跳过，另有 1 次 worker 异常；文件汇总为 76 通过、4 失败、1 跳过，另 1 个文件因 worker 退出中断；未达到全绿 |
+| `npx.cmd vitest run test/napcat-config.test.ts test/config.test.ts` | 最终代码 24 通过、1 跳过；播种脚本使用 Windows PowerShell 5.1 验证，所有生成配置都在临时目录 |
+| `npx.cmd vitest run test/obs/dashboard.test.ts --maxWorkers 1` | 首轮 worker 退出码 `3221226505`；单独重跑 28 项全部通过 |
+| 4 项进程终止 / 恢复测试单 worker 重跑 | 仍全部失败，详情如下；未提权或等待审批 |
+| `docker compose -f docker-compose.yml config --quiet` | 已尝试，Docker 返回 `Access is denied`；对应 Vitest 用例跳过，Compose 解析未验证 |
+
+未通过或未能验证的用例：
+
+| 用例 / 范围 | 证据与限制 |
+|---|---|
+| `test/entrypoint.test.ts` 全部 28 项 | 入口脚本的临时目录可写性检查失败：`is not writable by uid 197612 (CodexSandboxOffline)`；未修改入口脚本或这些测试，需沙箱外复跑 |
+| `test/agent/codex-runner.test.ts`：`timeout kills the process tree and throws CodexTimeoutError` | 单独重跑仍耗时约 20 秒，超过 8 秒断言；对本次创建的短生命周期子进程调用 `taskkill /pid <pid> /t /f`，明确返回 `ERROR: Access denied` |
+| `test/agent/backends.test.ts`：`two restarts while queued keep attempts at zero, then the ticket runs once (F5)` | 首轮与单独重跑均 30 秒超时；进程终止受限环境下未能验证 |
+| `test/agent/dispatch.test.ts`：`crash after codex wrote its output but before the agentResult commit`、`crash mid-turn (marker, no output)` 两项 R1 用例 | 首轮与单独重跑均出现 30 秒测试超时和 10 秒清理 hook 超时；进程终止受限环境下未能验证 |
+| `test/agent/pi-sandbox-linux.test.ts` 两项真实 bwrap、`test/media/attach.test.ts` 的 FIFO 用例 | Windows 平台按原有条件跳过 |
+| PowerShell 7、固定 digest 镜像内健康检查、真实登录 / 收发 | `pwsh` 与 Docker 启动均被当前沙箱拒绝；PowerShell 5.1 已覆盖脚本，镜像与真实服务未运行 |
+
+播种验证覆盖：通用与账号 JSON 的完整结构、HTTP/WS 主机与 token、账号留空、重复运行的原字节和 mtime 不变、token 区分大小写、原字节备份、仅受管 token 更新（保留额外服务与嵌套字段）、中文及 BOM/换行保留、缺少 token / 非法账号 / 损坏配置时不部分覆盖。
+
+与原设计的调整：健康检查改用 `curl -fsS --max-time 4`，因为[官方基础镜像 Dockerfile](https://github.com/NapNeko/NapCat-Docker/blob/main/base/Dockerfile) 明确安装 curl、未声明 wget；这属于源码核实，固定 digest 的实际二进制仍待部署环境确认。回退命令改为先停容器 NapCat，再用 `up -d --no-deps cs-agent`，避免新增依赖将 NapCat 重新启动。新建 JSON 为 UTF-8 无 BOM；更新已有文件保留原编码与 BOM，遵循本任务的编码保留约束。`.ps1` 源码带 UTF-8 BOM 以兼容 Windows PowerShell 5.1 的中文注释，生成 JSON 不受影响。`.env.example` 的账号按任务说明留空，实际 `.env` 与部署步骤留给主会话。

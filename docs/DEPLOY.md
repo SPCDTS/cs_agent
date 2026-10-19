@@ -1,6 +1,6 @@
 # cs_agent 部署手册
 
-单容器：QQ（NapCat）→ 规则分流 →（`奶龙:` 前缀）ComfyUI 生图，或（其他消息）执行 agent（默认容器内 codex）→ 回到原 QQ 会话。设计见 `docs/ARCHITECTURE.md`。
+Compose 双服务：QQ（`napcat` 容器）→ `cs-agent` 规则分流 →（`奶龙:` 前缀）宿主机 ComfyUI 生图，或（其他消息）执行 agent（默认容器内 codex）→ 回到原 QQ 会话。设计见 `docs/ARCHITECTURE.md`。
 
 ## 0. 使用方式（v3）
 
@@ -34,7 +34,7 @@
 ## 1. 宿主机前置条件
 
 1. **Docker Desktop**（Windows），能使用 `host.docker.internal`。
-2. **NapCat** 保持现状：`agent-http` 127.0.0.1:3000、`agent-ws` 127.0.0.1:3001，使用 Bearer token，`messagePostFormat: array`。Docker Desktop 下容器经 `host.docker.internal` 可以直接访问宿主机 loopback 端口，无需改绑定。`.env` 里的 `NAPCAT_TOKEN` 取自 `D:\Tools\NapCat\config\onebot11_1670528780.json` 中 `agent-http` 条目的 token。
+2. **NapCat** 默认运行在 Compose 内网，地址为 `http://napcat:3000` / `ws://napcat:3001`，使用同一 `NAPCAT_TOKEN`，`messagePostFormat: array`。首次使用按下文「NapCat 容器」播种配置并扫码。也可通过环境变量指向宿主机 NapCat：`host.docker.internal:3000/3001`；原宿主机 `agent-http` / `agent-ws` 的 loopback 绑定可保留。迁移时沿用已有 `NAPCAT_TOKEN`。
 3. **ComfyUI** 用 `D:\Tools\ComfyLocal\start.ps1` 启动（127.0.0.1:8188），不需要改监听地址。
 4. **Codex 凭据**：在仓库根目录运行
    ```powershell
@@ -49,14 +49,19 @@
 ## 2. 配置
 
 ```powershell
+# 仅首次安装时复制；已有 .env 不覆盖。
 Copy-Item .env.example .env
-# 编辑 .env：至少填写 NAPCAT_TOKEN、DEEPSEEK_API_KEY（或 DEEPSEEK_APIKEY），确认 QQ_ALLOW_USERS / QQ_ALLOW_GROUPS
+# 编辑 .env：填写 NAPCAT_TOKEN、NAPCAT_WEBUI_TOKEN、DEEPSEEK_API_KEY（或 DEEPSEEK_APIKEY），确认 QQ_ALLOW_USERS / QQ_ALLOW_GROUPS
 ```
 
 关键变量（完整列表见 `.env.example`）：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
+| `NAPCAT_HTTP_URL` / `NAPCAT_WS_URL` | `http://napcat:3000` / `ws://napcat:3001` | 默认 Compose 内网；本地直接运行或回退宿主机时显式覆盖 |
+| `NAPCAT_TOKEN` | 空 | HTTP/WS 共用的 OneBot token；播种脚本要求非空，迁移时保留原值 |
+| `NAPCAT_WEBUI_TOKEN` | 空 | 随机生成的 WebUI 登录口令，与 OneBot token 分开；已有 WebUI 配置不会被此变量覆盖 |
+| `QQ_BOT_ACCOUNT` | 空 | 可选 QQ 号，传给 NapCat `ACCOUNT` 快速登录；首次仍需扫码 |
 | `IMAGE_PREFIXES` | `奶龙:,奶龙：` | 生图前缀，逗号分隔，逐字匹配（大小写与全/半角按原样），较长的优先；留空用默认 |
 | `AGENT_BACKEND` | `codex` | 执行 agent 后端：`codex`（容器内 codex 固定线程）或 `pi`（进程内 pi-durable 长期会话，工具可联网检索、查历史、生图） |
 | `AGENT_BACKEND_OVERRIDES` | 空 | 按会话覆盖后端：`group:200000001=pi,private:10000001=codex`。格式错误时启动失败。切换只影响之后的消息，两个后端的记忆互相独立 |
@@ -78,7 +83,48 @@ Copy-Item .env.example .env
 
 > codex 子进程只拿到最小环境变量：`PATH`、`HOME`、`LANG`/`LC_ALL`、`TERM`、`CODEX_HOME`、`NO_COLOR=1`，以及设置了的 `HTTP(S)_PROXY`/`NO_PROXY`。`NAPCAT_TOKEN`、`*_API_KEY` 等配置不会传给 codex。
 
+## NapCat 容器
+
+本节是部署时执行的步骤；本次代码改动不启动容器、不修改实际 `.env`。OneBot 的 3000/3001 只在 Compose 网络内使用，容器中监听 `0.0.0.0`；WebUI 只发布到宿主机回环。`cs-agent` 用普通 `depends_on: [napcat]` 控制启动顺序，不等待健康状态，未登录时由现有 WS 重连逻辑等待。
+
+| 服务 | 容器监听 / 目标 | 宿主机发布 | 用途 |
+|---|---|---|---|
+| NapCat HTTP | `0.0.0.0:3000` | 不发布 | `cs-agent` 调用 OneBot 动作 |
+| NapCat WS | `0.0.0.0:3001` | 不发布 | `cs-agent` 接收 OneBot 事件 |
+| NapCat WebUI | `6099` | `127.0.0.1:6099` | 登录、扫码与配置 |
+| cs-agent HTTP | `0.0.0.0:8787` | `127.0.0.1:8787` | 观测面板与健康检查 |
+| 宿主机 ComfyUI | `host.docker.internal:8188` | 沿用宿主机 `127.0.0.1:8188` | 生图，迁移不改变此地址 |
+
+### 首次登录与迁移
+
+1. 在部署仓库的 `.env` 中设置非空 `NAPCAT_TOKEN`；迁移时沿用原值。为 `NAPCAT_WEBUI_TOKEN` 生成独立随机口令，可用 `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`，将结果填入 `.env`。`QQ_BOT_ACCOUNT` 可填写机器人 QQ 号，留空则不启用快速登录。已有部署此时保持 cs-agent 的宿主机 URL 不变。
+2. 在宿主机运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/napcat-config.ps1`（也可用 `pwsh`）。脚本默认定位自身所在仓库，支持 `-Root <目录>` 用于隔离测试。读取 `.env` 中的两个键，支持单行引号和行尾注释，不执行命令、不展开变量；含 `$`、`#` 的 token 建议用单引号包裹。账号为空只生成 `onebot11.json`；非空时另写 `onebot11_<QQ号>.json`。
+3. 执行 `docker compose up -d napcat`，用 `docker compose logs -f napcat` 等待 WebUI 就绪。打开 `http://127.0.0.1:6099/webui`，用 WebUI 口令登录并扫码。`ACCOUNT` 只帮助快速登录，不能代替首次扫码。健康检查只确认 WebUI HTTP 可访问，不代表 QQ 已登录或 OneBot 已就绪。
+4. 在 WebUI / 日志确认机器人在线，并从 Compose 网络用带 Bearer token 的 `/get_login_info` 确认账号。已有 cs-agent 容器可执行下列只读检查，口令从容器环境读取，不直接写入命令：
+
+   ```powershell
+   docker compose exec cs-agent node -e "fetch('http://napcat:3000/get_login_info',{headers:{Authorization:'Bearer '+process.env.NAPCAT_TOKEN}}).then(r=>r.json()).then(console.log)"
+   ```
+
+5. 迁移已有部署时，**先停宿主机 NapCat**（退出 QQNT 或停启动项），再把 `.env` 中两项 URL 切到 `http://napcat:3000` / `ws://napcat:3001`，执行 `docker compose up -d cs-agent`。新安装在扫码后按下一节启动。cs-agent 始终只连接一个 NapCat，避免双响应。
+6. 发一条私聊确认收发，并在 `http://127.0.0.1:8787/live` 检查事件。真实迁移结果另记入设计文档 §6。宿主机 NapCat 停用但保留一周供回退，再由用户决定清理。
+
+### 配置、数据与口令更新
+
+- `./napcat/config` → `/app/napcat/config`：OneBot 配置及 `webui.json`。`./napcat/qq` → `/app/.config/QQ`：QQ 登录态和数据。整个 `napcat/` 已加入 `.gitignore`，包括备份都不得入库；备份时两目录一起保管。不迁移宿主机历史数据，cs-agent 聊天记录仍在原 `data/` 中。Windows Docker Desktop 卷由 VM 映射，不需要脚本修改目录权限。
+- 播种脚本新建 JSON 使用 UTF-8 无 BOM。两个受管服务 `agent-http` / `agent-ws` 的 token 均一致时打印 `unchanged`，不写文件、不改 mtime。任一 token 不同时先保存原字节到 `*.bak-<UTC时间戳>`，再只替换这两个 token 字段；其余字段、排版、原编码、BOM 和换行保留。缺少 token、账号非法、JSON 损坏或缺少受管服务时退出，不覆盖已有文件。脚本不会重置手工调整的端口等选项。
+- 轮换 `NAPCAT_TOKEN` 时，在维护窗口停止 NapCat、修改 `.env`、重新播种，再重建 NapCat 与 cs-agent 服务使两端生效。`WEBUI_TOKEN` 仅在 `webui.json` 不存在时初始化；已有 WebUI 口令通过 WebUI 修改，单改 `.env` 不会生效。
+- 固定 `mac_address: 02:42:ac:11:00:02` 减少设备指纹变化；不要在升级时随意改 MAC 或删除 QQ 数据目录。OneBot 配置由脚本播种，Compose 不设置 `MODE`。
+
+### 更新镜像与回退
+
+镜像固定为 2026-10-19 `latest` 的 index digest：`sha256:f611790ecffa23c3c182017d5cf68179dc24612403608cd835ad13d79642f1bd`。更新前备份上述两个目录，执行 `docker buildx imagetools inspect mlikiowa/napcat-docker:latest` 核实新 index digest，修改 `docker-compose.yml` 中 digest 和日期注释，再运行 `docker compose pull napcat`、`docker compose up -d napcat`。保留旧 digest 供回退；不使用 NapCat 版本号猜镜像标签。健康检查采用 `curl -fsS --max-time 4`；[官方基础镜像构建文件](https://github.com/NapNeko/NapCat-Docker/blob/main/base/Dockerfile) 明确安装 curl、未声明 wget，更新时需重新核实镜像工具。
+
+回退到宿主机 NapCat：先 `docker compose stop napcat`，把 `.env` 的 HTTP/WS URL 分别改回 `http://host.docker.internal:3000` / `ws://host.docker.internal:3001`，确认宿主机 OneBot token 与 `.env` 一致，再执行 `docker compose up -d --no-deps cs-agent` 并重新启动宿主机 NapCat。这里必须带 `--no-deps`，防止 Compose 因依赖关系重新启动容器 NapCat；保留容器数据目录，完成私聊与 `/live` 验证。
+
 ## 3. 启动
+
+首次使用先完成上节配置播种与扫码；下列命令会同时管理 cs-agent 和 NapCat。
 
 ```powershell
 docker compose up -d --build
@@ -154,11 +200,11 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 ### 残余风险
 
 - codex 执行的命令读不到 `auth.json`、会话、SQLite 库和图片（deny_read，见「7. codex 权限」），但 codex 进程本身（不受沙箱约束）持有这份 ChatGPT 凭据；不在 deny_read 中的 `/data` 文件（`config.toml`、`prompts/`、`workflows/`）命令仍可读取。MCP 服务进程（`qq_context`、浏览器）同样不受命令沙箱约束：浏览器的 `file:` 访问与任意代码执行工具已用工具白名单和 playwright-mcp 自带拦截封住（见上），但这依赖 playwright-mcp 与 Chromium 的实现，升级 `@playwright/mcp` 或 `@openai/codex` 后需要重新实测：`scripts/verify-browser-mcp.mjs` 在镜像内经 `codex app-server` 调用浏览器工具并检查（不调用模型；用法见脚本开头，务必挂假的 `/data`），全部通过时退出码为 0。`AGENTS.md` 只约束模型行为，不是访问控制。**只把能信任使用这个工作区的人加入 `QQ_ALLOW_USERS` / `QQ_ALLOW_GROUPS`**。
-- **浏览器 MCP 的网络访问**：`playwright-mcp` 进程由 codex 作为 MCP 服务启动，**不受 codex 命令沙箱约束**，可以访问容器能到达的任何网络。宿主机上的 ComfyUI（`host.docker.internal:8188`，无鉴权）、NapCat（3000/3001）以及容器自身的 healthz 都在这个范围内。`--blocked-origins` 阻止列表能拦住直接访问这些地址和内网/链路本地网段，但 @playwright/mcp 明确说明它**不是安全边界**：
+- **浏览器 MCP 的网络访问**：`playwright-mcp` 进程由 codex 作为 MCP 服务启动，**不受 codex 命令沙箱约束**，可以访问容器能到达的任何网络。宿主机 ComfyUI（`host.docker.internal:8188`，无鉴权）、Compose 内网 NapCat（`napcat:3000/3001`，需要 token，也可指向宿主机）以及容器自身的 healthz 都在这个范围内。`--blocked-origins` 阻止列表覆盖宿主机地址和内网/链路本地 IP，但未列入 `napcat` 这个服务名；NapCat 仍靠 OneBot token 鉴权。@playwright/mcp 明确说明该列表**不是安全边界**：
   - 不拦截重定向：公网页面 302 到 `http://host.docker.internal:8188/…` 时不会被阻止；
   - 按 URL 主机名匹配，不看解析结果：解析到内网 IP 的公网域名（如 `127.0.0.1.nip.io` 之类、DNS rebinding）不会被阻止；
   - 只覆盖浏览器发出的请求，与 codex 自身的 web_search 无关。
-  如需真正隔离，可设 `CODEX_BROWSER=none`；或在宿主机侧让 ComfyUI/NapCat 只接受鉴权请求、用防火墙限制 Docker 网段访问。
+  如需关闭浏览器访问，可设 `CODEX_BROWSER=none`；网络隔离需要按目标服务在宿主机或容器网络实施访问控制。
 - **`/data/prompts` 可写**（用户接受的风险）：codex 命令可以改写 `/data/prompts` 下的文件。v3 中 `system.md` 已不再被读取；pi 后端从这里热加载 `agent.md`，修改会在下一次模型请求生效。全局 AGENTS.md 规定只在 owner 私聊明确要求时才修改、群聊请求一律拒绝，但这**只靠模型遵守**。想彻底禁止，把 `/data/prompts` 从 `CODEX_WRITABLE_ROOTS` 去掉。
 - **显式开启 image_gen 后可被群成员触发**：任何能让 codex 处理消息的发送者都可以间接让它生图（每回合最多 4 次，图片只写到本票据目录、只随本条回复发出）。
 - **聊天记录**：群成员可以让 codex 检索本群 30 天内的原始消息和 180 天内的摘要（与能翻群记录一致）；owner 私聊可以检索全部会话。`./data/qq-messages.sqlite` 按聊天记录保管。
@@ -196,6 +242,8 @@ docker compose config
 ```
 
 Vitest 测试不访问真实 QQ、模型或 ComfyUI。另有显式宿主机冒烟：先 npm run build，再设置 COMFY_MODE=http 运行 node scripts/smoke-image-v2.mjs。该脚本固定连接 127.0.0.1:8188，只生成 5 个用例（1MP、16:9、2K、透明、单图编辑），结果与 prompt_id 保存在 data/imgv2-smoke；超时后重跑会继续收取原任务，已有结果不重复生成。验收记录见 [IMAGE-GEN-V2-ACCEPTANCE.md](IMAGE-GEN-V2-ACCEPTANCE.md)。
+
+`test/napcat-config.test.ts` 优先探测 `pwsh`，不可执行时尝试 `powershell`；均不可用则跳过并在用例名说明。播种只在临时目录执行，不触碰仓库 `.env` 或创建仓库 `napcat/`。检测到可用 Docker Compose 时另跑 `docker compose -f docker-compose.yml config --quiet`；命令不可用则跳过，不拉取镜像、不启动服务。
 
 ## 6. 排障
 

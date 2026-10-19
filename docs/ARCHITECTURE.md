@@ -21,7 +21,7 @@
 | `@earendil-works/pi-ai` | 内置 provider `openai-codex`（ChatGPT 订阅 OAuth，baseUrl `https://chatgpt.com/backend-api`）、`openai`、`anthropic` 等；`providers/faux` 可用于测试 |
 | `@openai/codex` | npm 0.163.0（本机 0.160.1）。`codex exec [PROMPT] --json -o <file> -C <dir> --skip-git-repo-check -s workspace-write`；`codex exec resume <SESSION_ID> [PROMPT]` 固定会话续聊；`CODEX_HOME` 决定 auth.json/config.toml/sessions 位置 |
 | `comfy-mcp` | PyPI 0.10.0，依赖 `mcp>=2,<3`、`pydantic>=2`、`anyio>=4.9`；入口 `comfy-mcp`（stdio MCP）。读取 `COMFYUI_URL` / `COMFYUI_HOST` / `COMFYUI_PORT` 指向远端 ComfyUI；`generate_image(prompt)` 内部走 `comfy run-template`（需要 `comfy-cli`，`COMFY_BIN`） |
-| NapCat（宿主机） | HTTP `agent-http` 127.0.0.1:3000、WS `agent-ws` 127.0.0.1:3001，Bearer token，`messagePostFormat: array`。**已实测：Docker Desktop 容器经 `host.docker.internal:3000/3001` 可直达宿主机 loopback 端口（返回 403/426），无需改绑定** |
+| NapCat（Compose 服务，2026-10-19 方案） | `mlikiowa/napcat-docker` 按 index digest 固定；HTTP `agent-http` / WS `agent-ws` 在容器内监听 `0.0.0.0:3000/3001`，cs-agent 默认访问 `http://napcat:3000` / `ws://napcat:3001`，同一 Bearer token，`messagePostFormat: array`。3000/3001 不发布，WebUI 只发布 `127.0.0.1:6099`。环境变量仍可指向宿主机 NapCat（`host.docker.internal:3000/3001`），用于回退；真实迁移验收见 `DESIGN-napcat-container.md` §6 |
 | ComfyUI（宿主机） | `D:\Tools\ComfyLocal\start.ps1` 以 `--listen 127.0.0.1 --port 8188` 后台启动；容器经 `host.docker.internal:8188` 可达，无需改为 0.0.0.0 |
 | 本机凭据 | 无 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`；`~/.codex/auth.json` 为 `auth_mode=chatgpt`（含 tokens）。因此 agent 的意图模型默认走 `openai-codex` provider 复用 ChatGPT OAuth |
 
@@ -204,8 +204,10 @@ LOG_LEVEL=info
 
 - 基础镜像 `node:24-bookworm-slim`；安装 `python3 python3-venv`，`/opt/comfy` venv 内 `pip install comfy-cli comfy-mcp`；`npm i -g @openai/codex@0.163.0`。
 - 多阶段：builder 编译 TS → runtime 仅带 `dist/` 与生产依赖。
-- `docker-compose.yml`：服务 `cs-agent`，`extra_hosts: ["host.docker.internal:host-gateway"]`，卷 `./data:/data`、`./workspace:/workspace`，`env_file: .env`，`restart: unless-stopped`，非 root 用户运行。
-- 健康检查：进程内 HTTP `GET /healthz`（仅容器内 127.0.0.1 监听）返回 WS 连接状态与 comfy/codex 自检结果。
+- `docker-compose.yml`：两个服务 `cs-agent` 与 `napcat`，均 `restart: unless-stopped`。cs-agent 保留 `extra_hosts: ["host.docker.internal:host-gateway"]` 访问宿主机 ComfyUI，卷 `./data:/data`、`./workspace:/workspace`，`env_file: .env`，非 root 用户运行；用普通 `depends_on: [napcat]` 控制顺序，不等待 `service_healthy`，登录前通过现有 WS 重连等待。
+- NapCat 固定镜像 `mlikiowa/napcat-docker@sha256:f611790ecffa23c3c182017d5cf68179dc24612403608cd835ad13d79642f1bd`（2026-10-19 index digest），`NAPCAT_UID/GID=1000`、固定 MAC `02:42:ac:11:00:02`，仅发布 `127.0.0.1:6099:6099`。`NAPCAT_WEBUI_TOKEN` 初始化 WebUI 口令，`QQ_BOT_ACCOUNT` 可选传给 `ACCOUNT`；不设 `MODE`。
+- NapCat 卷 `./napcat/config:/app/napcat/config` 与 `./napcat/qq:/app/.config/QQ` 持久化配置和登录态，整个目录忽略入库。宿主机脚本 `scripts/napcat-config.ps1` 从 `.env` 幂等播种通用及可选账号配置；token 相同不动，变化时先备份再仅改受管 token。OneBot 逻辑、图片 CDN 下载和附件 base64 传输不变，无需共享媒体卷。
+- 健康检查：cs-agent 的 `GET /healthz` 返回 WS 连接状态与 comfy/codex 自检结果（Compose 内监听 `0.0.0.0:8787`，仅发布宿主机 `127.0.0.1:8787`；本地直接运行仍默认回环）。NapCat 每 30 秒用 curl 检查 `http://127.0.0.1:6099/`，超时 5 秒、重试 5 次、启动宽限 60 秒，只代表 WebUI HTTP 就绪，不代表 QQ 已登录。
 
 ## 8. 宿主机前置条件（写入 docs/DEPLOY.md）
 
