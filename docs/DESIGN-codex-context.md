@@ -564,10 +564,62 @@ agent（codex | pi，只依赖 TurnContext）   ←  tools（MCP / 进程内）�
 - Linux 验证：镜像显式安装 `bubblewrap`，`USER node` 阶段检查 `/usr/bin/bwrap --version`；真实命名空间测试须在使用 `docker/seccomp-codex.json` 的容器中以非 root 用户运行 `npx vitest run test/agent/pi-sandbox-linux.test.ts`。该测试仅在非 Linux 跳过，在 Linux 上缺少 bwrap 或命名空间受限都会失败；覆盖文件遮蔽、只读挂载、PID 隔离、环境白名单、网络及超时/取消。Windows 只运行路径、参数、失败关闭及后端持久化回归，不能据此宣称已通过 Linux 容器实测。
 
 ### 10.3 第 3 步：抽出 Channel 接口（纯重构，行为不变）
-- 通用代码迁出 `src/qq/`：`image.ts`、`image-header.ts`、`incoming-http.ts` → `src/net/` 或 `src/media/`。
-- `src/channel/`：`ConversationRef`、`InboundEvent`（段数组、reply_to、mentions、能力声明）、`Channel { on, send(ref, segments, idemKey), fetchMedia(ref, messageId), fetchHistory(ref, range) }`。
-- `src/channels/qq/`：现 `QQBridge`、`onebot`、`policy`、`ReplyStore` 迁入并实现 `Channel`。`dispatch` / `tasks` / `context` / `mcp` 只依赖 `src/channel/`；`context/media.ts` 改用 `fetchMedia`，不再直接调用 OneBot。
-- 验收：`src/agent`、`src/context`、`src/mcp` 不再 import `channels/qq`；现网数据（票据库、消息库）原样沿用；全量测试通过。
+
+> 2026-10-19 细化（用户批准实施）。原稿的第一项"通用代码迁出 `src/qq/`"已由包结构整理 P1 完成（`src/media/`）。原稿的 `src/channels/qq/` 改为**保留 `src/qq/` 作为 QQ 通道实现**：包名不变，避免刚完成的 P0–P2 再搬一次，归属在本节和依赖测试里写明。
+
+**新包 `src/channel/`**（层位：shared → config → media → **channel** → qq → context → agent → obs → mcp → main），只放与具体 IM 无关的契约与纯函数，不得依赖 `qq/`：
+
+| 文件 | 内容 |
+|---|---|
+| `channel/types.ts` | 从 `qq/types.ts` 迁入且**字段名、取值不变**的通用类型：`ChatType`、`MessageSegment`、`IncomingAttachment`、`InboundMessage`、`TicketStatus`、`ReplyTicketRecord`、`ReplyResult`；`BridgeStatus` 改名 `ChannelStatus`（字段不变）；`QQBridgeEvents` 改名 `ChannelEvents`。新增 `ConversationRef = { channel: string; scope: string }`（本步只有 `channel: "qq"`，`scope` 仍是 `group:<id>` / `private:<qq>`，持久化数据不变）。新增 `Channel` 接口与 `RemoteMessage`（见下）。 |
+| `channel/ticket.ts` | 原 `qq/ticket.ts` 的 `inboundFromTicket`、`legacyRouteText`（只依赖类型）。 |
+
+**`Channel` 接口**（= 现 `QQBridge` 的公开面 + 两个取代直连 OneBot 的方法）：
+
+```ts
+interface Channel {
+  readonly name: string;                       // "qq"
+  start(): Promise<void>; stop(): Promise<void>; status(): ChannelStatus;
+  on/off<K extends keyof ChannelEvents>(...)   // message / raw / recall / connection / disconnect / error，语义不变
+  reply(ticket, text, imagePaths?, opts?): Promise<ReplyResult>;
+  uploadFile(type: ChatType, targetId: string, file: Buffer, name: string): Promise<{ file_id: string }>;
+  send(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }>;   // 仅运维告警
+  prepareIncoming?(ticket): Promise<ReplyTicketRecord | null>;
+  getTicket(ticket): Promise<ReplyTicketRecord | null>;
+  listPendingTickets(limit?, afterSeq?): Promise<ReplyTicketRecord[]>;
+  /** 取远端原消息（替代 media.ts 里的 get_msg）；不存在返回 null。 */
+  fetchMessage(messageId: string, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<RemoteMessage | null>;
+  /** 图片直链失效时换新地址（替代 get_image）；拿不到返回 undefined。 */
+  refreshImageUrl(file: string, opts: { signal: AbortSignal }): Promise<string | undefined>;
+}
+
+/** 适配器把协议字段归一化；范围核验仍由 context/media 按这些字段做，规则不变。 */
+interface RemoteMessage {
+  message_type: string;            // 原样透传，由核验方判断是否等于 group/private
+  message_id: string;              // 远端未给出时为 ""
+  group_id: string;                // 无则 ""
+  sender_id: string;               // user_id 或 sender.user_id
+  sender_conflict: boolean;        // sender.user_id 存在且与 user_id 不一致
+  recipient_fields: Record<string, string>;   // NapCat 各版本的可选收件人字段（target_id、peer_id…）中实际出现的
+  has_nonempty_group_field: boolean;          // 私聊里出现了非空 group_id
+  segments: { type: string; rendered: string; image?: { url: string; file: string } }[];   // rendered = 原 policy.renderText 对单段的结果
+}
+```
+
+**改动点**（行为逐字节不变）：
+- `qq/bridge.ts` 实现 `Channel`：`QQBridge` 变为 `Channel` 的类型别名或子接口，由 `createQQBridge` 返回；`fetchMessage` / `refreshImageUrl` 在适配器内用现有 OneBot 客户端实现，归一化逻辑从 `context/media.ts` 的 `checkScope` / `run` 原样搬入。
+- `context/media.ts`：`MediaRecallOptions` 去掉 `client: OneBotClient`，改为 `channel: Pick<Channel, "fetchMessage" | "refreshImageUrl" | "getTicket">`；`checkScope` 改为读 `RemoteMessage` 字段，判定条件一一对应原代码；`recalledText` 用 `segments[].rendered` 取代 `renderText`（整串比较用各段 `rendered` 拼接）。
+- `agent/dispatch.ts`、`agent/tasks.ts`、`context/access.ts`、`context/store.ts`、`obs/alerts.ts`、`main.ts`：类型改从 `channel/` 导入，参数类型用 `Pick<Channel, …>`。`main.ts` 是唯一同时 import `qq/` 和其他包的地方。
+- 不保留兼容转发导出（与 P2 一致）；`test/` 里引用 `qq/types.js` 的改为 `channel/types.js`。
+- `test/architecture/deps.test.ts`：`LAYERS` 加入 `channel`；新增规则"`agent` / `context` / `obs` / `mcp` 不得 import `qq/`"和"`channel` 不得 import `qq` / `context` / `agent`"。
+
+**不在本步**：字段改名（`group_id` / `self_id` 等 OneBot 风格的名字）、多通道 scope 前缀、Outbox、TurnContext 令牌。
+
+**验收**：
+- 依赖测试通过，且新规则对 `src/agent`、`src/context`、`src/obs`、`src/mcp` 生效。
+- 全量测试通过；`test/context/media*.test.ts` 原有的范围核验用例（含 NapCat 收件人字段、私聊带 group_id、自回声票据核对）全部不改断言、照样通过。
+- 新增适配器测试：对假 OneBot 的 `get_msg` / `get_image` 响应，验证 `fetchMessage` / `refreshImageUrl` 的归一化结果。
+- 部署后现网票据库、消息库原样沿用，冒烟（面板、qq_context MCP 召回图片）零错误。
 
 ### 10.4 第 4 步：统一 TurnContext 能力令牌
 - 把 §2.5 的召回令牌推广为回合令牌：绑定 `ConversationRef`、票据、截止时间、各项配额；记忆检索、媒体召回、看图、生图、发送都以令牌鉴权。codex 经 MCP（令牌只在 MCP 子进程环境里），pi 进程内直接持有；两后端共用同一份实现与配额账本。
