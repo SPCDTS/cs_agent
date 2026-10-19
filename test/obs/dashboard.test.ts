@@ -24,12 +24,12 @@ afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0
 const TOKEN = 'fake-dashboard-token-0123456789';
 const defaults: RuntimeSettings = { agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false };
 
-async function rig(extra: { contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null } = {}) {
+async function rig(extra: { contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
   const store = new ObsStore(dir), context = new ContextStore(dir);
   trace.attach(store);
   const live = new LiveBus(trace);
-  const config = loadConfig({ DATA_DIR: dir, OBS_TOKEN: TOKEN, QQ_ALLOW_USERS: '1' });
+  const config = loadConfig({ DATA_DIR: dir, OBS_TOKEN: TOKEN, QQ_ALLOW_USERS: '1', ...extra.env });
   registerSecrets([TOKEN]);
   const settings = await SettingsStore.open(dir, defaults, trace);
   const resetCodex = vi.fn(async (key: string): Promise<string | null> => key === 'group:7' ? 'thread-old' : null);
@@ -73,6 +73,13 @@ const revisionOf = async (r: { get: (url: string) => Promise<Response> }) =>
 const frames = (text: string, event: string) => text.split('\n\n').filter(f => f.startsWith(`event: ${event}\n`)).map(f => JSON.parse(f.slice(f.indexOf('data: ') + 6)));
 
 describe('面板二期页面', () => {
+  it.each(['magpie', 'openai'])('设置页只读显示 codex 提供者 %s，不显示 gateway key', async provider => {
+    const r = await rig({ env: { CODEX_PROVIDER: provider, CODEX_MAGPIE_URL: 'http://gateway.example:3425/v1', CODEX_MAGPIE_KEY: 'test-dashboard-magpie-key' } });
+    const html = await (await r.get('/settings')).text();
+    expect(html).toContain(provider === 'magpie' ? 'codex：经 magpie（http://gateway.example:3425/v1）' : 'codex：直连');
+    expect(html).not.toContain('test-dashboard-magpie-key');
+    expect(html).not.toMatch(/name="CODEX_(PROVIDER|MAGPIE_URL|MAGPIE_KEY)"/);
+  });
   it('所有页面 200，含设计令牌（深浅色）、导航高亮和关键元素；无内联 style 属性与外部资源', async () => {
     const r = await rig();
     trace.event('t-live', 'received', { scope: 'group:7', detail: { text: '在途消息', sender: '小明' } });

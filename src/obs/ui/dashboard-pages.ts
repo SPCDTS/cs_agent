@@ -47,7 +47,7 @@ export interface DashboardPageOptions {
 }
 export interface DashboardPageDeps {
   opts: DashboardPageOptions;
-  config: { owner?: string; imagesDir: string };
+  config: { owner?: string; imagesDir: string; CODEX_PROVIDER: "magpie" | "openai"; CODEX_MAGPIE_URL: string };
   csrf: string; agentMd: string; agentsMd: string;
   api(pathQuery: string): Promise<{ status: number; body: unknown }>;
   contextResult(scope: string, query: string | null): { content: { type: string; text?: string }[] };
@@ -437,7 +437,8 @@ export function createDashboardPages(deps: DashboardPageDeps) {
   }
 
   async function settingsBody(): Promise<string> {
-    let body = '';
+    const codexProvider = config.CODEX_PROVIDER === 'magpie' ? `经 magpie（${config.CODEX_MAGPIE_URL}）` : '直连';
+    let body = `<section class="sheet pad"><p>codex：${esc(redactText(codexProvider, 2000))}</p><p class="hint">提供者为只读启动配置；修改 .env 后重启生效。</p></section>`;
     if (!opts.settings) body += '<div class="flash err">运行时设置不可用，以下为只读的启动配置。</div>';
     const s = opts.settings?.current();
     const d = opts.settings?.defaults;
