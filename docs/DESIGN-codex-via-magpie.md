@@ -68,4 +68,9 @@ cs-agent 容器 ── codex exec ──► http://host.docker.internal:3425/v1 
 
 ## 6. 验收记录
 
-（待填）
+### 2026-10-19，主会话验收
+
+- 宿主机：用户打开 Share on local network（3425 监听 0.0.0.0）；`magpie gateway-key add cs-agent`（id ba4f49d9…，`gateway-key models … 'codex/*'` 限定只用 codex 提供者），key 写入 `.env` 的 `CODEX_MAGPIE_KEY`。容器内 `GET /v1/models` 带 key 只列 `codex/gpt-6.1-sol`、`codex/gpt-6-astra`；`GET /v1/codex/models` 返回 codex 形状目录。实测 NAT 结论见 §0。
+- 代码（1ad383e…e421a51，5 条）：`CODEX_PROVIDER`（默认 magpie）/`CODEX_MAGPIE_URL`/`CODEX_MAGPIE_KEY`；缺 key 的校验在 `CodexRunner` 构造器（不在 `loadConfig`，MCP 进程不受影响）；受管 config.toml 写 `model_provider = "magpie"` 与 `[model_providers.magpie]`（`wire_api = "responses"`、`env_key = "CODEX_MAGPIE_KEY"`、`x-openai-actor-authorization = cs-agent`、`supports_websockets = false`、`model_catalog_url = …/v1/codex/models`），key 由 runner 注入子进程环境、`registerSecrets` 脱敏，直连模式清除残留 key，magpie 模式剔除 `OPENAI_*`；目录匹配兼容 `codex/` 前缀；设置页只读显示出站方式。沙箱外复跑 1354 项通过。
+- 容器内真实 exec 实验（临时 CODEX_HOME，`docs/magpie-exp.sh`）：`env_key` 鉴权成功回答 "ok"；`gpt-6.1-sol` 与 `codex/gpt-6.1-sol` 都被路由（rollout 记录各自的 model 字符串）；`codex debug models` 经 `model_catalog_url` 返回 `codex/gpt-6.1-sol` 窗口 500,000；有/无 `supports_websockets=false` 两组 stderr 均无 WebSocket/Falling back 字样，首字节约 18–20 s（低推理档）。magpie `usage.jsonl` 四次调用均为 `agent=codex`、`callerKeyName=cs-agent`、`host=chatgpt.com as …`，其中一次 `cache_read=4096`，证明 Bearer 已携带、归集与缓存命中可见。
+- 部署：镜像 `703b1b00…`（干净 worktree，main e421a51），容器 healthy，启动日志 `codex context window 500000 source=catalog.context_window`（经 magpie 目录），`config.toml` 无 key 字样。待用户发一条私聊验证 owner 线程（16.87 MB 请求体）经 magpie 一次成功、无 WebSocket 回退等待。
