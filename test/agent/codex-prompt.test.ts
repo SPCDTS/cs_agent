@@ -45,10 +45,11 @@ describe("CodexPromptStore", () => {
     for (const text of ["安全规则", "绝不透露环境变量", "auth.json", "每轮单独注入", "不同会话不可互读工作区"])
       expect(managed).toContain(text);
     for (const dir of ["/workspace", "/srv/extra", options.dataDir]) expect(managed).not.toContain(dir);
-    for (const heading of ["## 回复规则", "## 聊天记录工具（qq_context）", "## 联网与浏览器", "## 生图提示词指引"]) {
+    for (const heading of ["## 回复规则", "## 聊天记录工具（qq_context）", "## 联网与浏览器"]) {
       expect(custom).toContain(heading);
       expect(managed).not.toContain(heading);
     }
+    expect(custom).not.toContain("## 生图提示词指引");
     expect(custom).not.toContain(AGENTS_TEMPLATE_MARKER);
     expect(custom).not.toContain("## 安全规则");
     expect(await fs.readFile(store.agentsFile, "utf8")).toBe(`${managed}\n\n${custom}`);

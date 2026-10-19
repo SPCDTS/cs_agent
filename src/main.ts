@@ -128,6 +128,7 @@ async function main(): Promise<void> {
   });
   const codex = new CodexRunner({
     command: [cfg.CODEX_BIN],
+    imageGen: cfg.CODEX_IMAGE_GEN,
     recallTokens, mediaRecallPort: recallServer.port,
     contextUsage, model: cfg.CODEX_MODEL, contextWindow: cfg.CODEX_CONTEXT_WINDOW,
     codexHome: cfg.codexHome,

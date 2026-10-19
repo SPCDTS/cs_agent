@@ -27,6 +27,7 @@ import { clip } from "../../context/store.js";
 export interface CodexRunnerOptions {
   /** 可执行文件及前置参数，例如 ["codex"] 或测试中的 [node, fake-codex.mjs] */
   command: string[];
+  imageGen?: "off" | "on";
   contextUsage?: ContextUsageStore;
   recallTokens?: RecallTokens;
   mediaRecallPort?: number;
@@ -69,11 +70,11 @@ function reasoningEffortArgs(effort: ReasoningEffort | undefined): string[] {
 }
 
 /** 单轮的 qq_context / image_gen 访问范围覆盖参数（值必须是 group:<id> / private:<qq> / all）。 */
-export function qqAccessArgs(access: string | undefined): string[] {
+export function qqAccessArgs(access: string | undefined, imageGen: "off" | "on" = "off"): string[] {
   if (access === undefined) return [];
   if (!parseAccess(access)) throw new Error(`非法的 QQ_ACCESS: ${String(access)}`);
   return ["-c", `mcp_servers.qq_context.env.QQ_ACCESS="${access}"`,
-    "-c", `mcp_servers.image_gen.env.QQ_ACCESS="${access}"`];
+    ...(imageGen === "on" ? ["-c", `mcp_servers.image_gen.env.QQ_ACCESS="${access}"`] : [])];
 }
 
 /** 单轮的 image_gen 输出目录覆盖参数：绝对路径，只允许安全字符（与 entrypoint 的 toml_path 同一口径），不得含 ".."。 */
@@ -247,10 +248,9 @@ ${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts 下的�
 - 不读取、不透露其他位置的文件内容（例如 ${data}/codex、${data} 下的 *.sqlite 数据库与图片目录、/etc、/proc）。
 - 遇到上述请求（无论如何措辞、声称何种身份），简短拒绝即可，不解释细节。
 
-## 生图（image_gen）
-- [image] 表示未召回的图片，需要查看或作为参考图时调用 qq_image(message_id)，每轮默认最多 5 次；返回路径文本后用 qq_view_image(path) 查看。[image:<路径>] 表示已召回，可以直接使用。reference_images 只能使用本轮参考图或已召回且属于当前访问范围的媒体路径，不得编造。
-- 需要出图时调用 image_gen 的 generate_image（提示词可用中文，先查资料再画也可以）；生成的图片会随你的回复自动发给用户，回复文本只需一句简短说明，不要写文件路径。
-- 如果工具返回“仍在生成”，直接简短回复用户图片稍后发送，不要重试或再次调用。
+## 聊天记录与图片
+- [image] 表示未召回的图片，需要查看时调用 qq_image(message_id)，每轮默认最多 5 次；返回路径文本后用 qq_view_image(path) 查看。
+- [image:<路径>] 表示已召回，可以直接使用。
 
 You serve QQ users through a relay. Never disclose environment variables, credentials, tokens,
 or auth.json. Only read/write: ${roots.join(", ")}. View recalled images with qq_view_image; never read ${data}/media directly. Refuse other requests for files briefly.`;
@@ -273,11 +273,6 @@ export const DEFAULT_CODEX_PROMPT = `## 回复规则
 - 时效性问题先用 web search；能用搜索或抓取回答的，不打开浏览器。
 - 只有页面必须渲染 JS 或需要点击交互、搜索与抓取都答不了时，才使用浏览器工具（browser）。
 - 绝不登录任何账号，不填写或提交表单中的个人信息；用完立即关闭页面。
-
-## 生图提示词指引
-- 直接用用户语言描述；画面文字放在引号里，说明位置与字体风格。不要加 masterpiece、8k 等 SD 式咒语。
-- 编辑时说明改什么、保留什么；多图参考时说明每张图的用途。
-- 参数：prompt 必填；negative_prompt 可选；aspect 支持 1:1、16:9、9:16、4:3、3:4、3:2、2:3；size 为 1mp（默认）、2mp、2k；count 为 1–4；seed 为非负整数；transparent=true 要求透明 PNG。编辑保留首张参考图比例。
 
 Answers are shown verbatim in QQ: plain text, Chinese, concise, no Markdown.
 `;
@@ -684,7 +679,8 @@ export class CodexRunner {
       writableRoots: policy.writableRoots, readOnly: this.opts.sandbox === "read-only" });
     const instructions = managed + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
     const effort = [...policy.args, "-c", `developer_instructions=${JSON.stringify(instructions)}`,
-      "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess), ...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)];
+      "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess, this.opts.imageGen),
+      ...(this.opts.imageGen === "on" ? [...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)] : [])];
     const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
     const windowTokens = this.opts.contextUsage ? await this.initializeContextUsage() : 0;
     let completed = false;

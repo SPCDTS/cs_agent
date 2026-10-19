@@ -27,6 +27,7 @@ function runEntrypointIn(
   const data = path.join(dir, "data");
   const ws = path.join(dir, "ws");
   const inheritedEnv = { ...process.env };
+  delete inheritedEnv.CODEX_IMAGE_GEN;
   delete inheritedEnv.CODEX_REMOTE_PLUGINS;
   delete inheritedEnv.CODEX_PLUGIN_PRUNE;
   const r = spawnSync("sh", [posix(script), ...args], {
@@ -332,9 +333,16 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(bad.stderr).toContain("invalid value 'never' for CODEX_MCP_APPROVAL_MODE");
   });
 
+  it.each([undefined, "off", "", "invalid", 'on"\nx = 1'])("默认或无效开关不注册 image_gen：%j", value => {
+    const r = runEntrypoint(value === undefined ? {} : { CODEX_IMAGE_GEN: value });
+    expect(r.status).toBe(0);
+    expect(parse(r.toml)["[mcp_servers.image_gen]"]).toBeUndefined();
+    expect(parse(r.toml)["[mcp_servers.image_gen.env]"]).toBeUndefined();
+  });
+
   it("writes the image_gen MCP section with COMFY_* passthrough, timeout and approval mode", () => {
     const r = runEntrypoint({
-      COMFY_QWEN_CACHE: "true", COMFY_MODE: "mcp", COMFYUI_URL: "http://host.docker.internal:8188", COMFY_TIMEOUT_SEC: "240", IMAGE_GEN_MCP_WAIT_SEC: "45",
+      CODEX_IMAGE_GEN: "on", COMFY_QWEN_CACHE: "true", COMFY_MODE: "mcp", COMFYUI_URL: "http://host.docker.internal:8188", COMFY_TIMEOUT_SEC: "240", IMAGE_GEN_MCP_WAIT_SEC: "45",
       COMFY_WORKFLOW_FILE: "/data/workflows/qwen-image-2.1-turbo-api.json", COMFY_PROMPT_NODE: "4",
       COMFY_MCP_BIN: "/opt/comfy/bin/comfy-mcp", COMFY_CHECKPOINT: 'bad"value', CODEX_MCP_APPROVAL_MODE: "auto",
     });
@@ -365,7 +373,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
   });
 
   it("image_gen tool timeout falls back to 300+30 for a non-numeric COMFY_TIMEOUT_SEC", () => {
-    const t = parse(runEntrypoint({ COMFY_TIMEOUT_SEC: "abc" }).toml);
+    const t = parse(runEntrypoint({ CODEX_IMAGE_GEN: "on", COMFY_TIMEOUT_SEC: "abc" }).toml);
     expect(t["mcp_servers.image_gen.tool_timeout_sec"]).toBe("330");
   });
 });

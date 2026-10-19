@@ -49,7 +49,7 @@ function setupOpts(dir: string) {
   };
 }
 
-function setup(extra: { sleepMs?: number; timeoutMs?: number; thread?: string } = {}) {
+function setup(extra: { sleepMs?: number; timeoutMs?: number; thread?: string; imageGen?: "off" | "on" } = {}) {
   const dir = tmp();
   const logFile = path.join(dir, "calls.jsonl");
   const runner = new CodexRunner({
@@ -59,6 +59,7 @@ function setup(extra: { sleepMs?: number; timeoutMs?: number; thread?: string } 
     threadsFile: path.join(dir, "codex-threads.json"),
     legacySessionFile: path.join(dir, "codex-session.json"),
     sandbox: "workspace-write",
+    imageGen: extra.imageGen,
     timeoutMs: extra.timeoutMs ?? 10_000,
     env: {
       FAKE_CODEX_LOG: logFile,
@@ -124,14 +125,15 @@ describe("isMissingSessionError", () => {
 describe("AGENTS.md", () => {
   const opts = { dataDir: "/data", workspaceDir: "/workspace", writableRoots: ["/workspace", "/data/prompts", "/data/workflows"] };
 
-  it("global v4 template carries the marker, secrecy/reply rules, history, image_gen and browser discipline", () => {
+  it("global v4 template carries the marker, secrecy/reply rules, history, recalled images and browser discipline", () => {
     const md = renderAgentsMd(opts);
     expect(md).toContain("qq_view_image(path)");
     expect(md).not.toContain("可只读打开");
     expect(md).not.toContain("are read-only");
+    for (const removed of ["image_gen", "reference_images", "生图提示词指引", "奶龙"]) expect(md).not.toContain(removed);
     expect(md.startsWith(`${AGENTS_TEMPLATE_MARKER}\n`)).toBe(true);
     expect(AGENTS_TEMPLATE_MARKER).toBe("<!-- cs-agent-agents-template v5 -->");
-    for (const s of ["仍在生成", "不要重试或再次调用", "image_gen", "随你的回复自动发给用户", "一句简短说明", "不用 Markdown", "300 字", "未核实", "qq_recent", "qq_search", "最多调用历史工具 2 次", "绝不登录任何账号", "关闭页面",
+    for (const s of ["## 聊天记录与图片", "qq_image(message_id)", "[image:<路径>]", "不用 Markdown", "300 字", "未核实", "qq_recent", "qq_search", "最多调用历史工具 2 次", "绝不登录任何账号", "关闭页面",
       "auth.json", "绝不透露环境变量", "/data/codex"]) {
       expect(md).toContain(s);
     }
@@ -413,8 +415,9 @@ describe("owner / scope threads", () => {
 describe("qq_context access override and §3.2 header", () => {
   it("qqAccessArgs validates and formats the per-call -c override", () => {
     expect(qqAccessArgs(undefined)).toEqual([]);
-    expect(qqAccessArgs("group:200000001")).toEqual(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"', "-c", 'mcp_servers.image_gen.env.QQ_ACCESS="group:200000001"']);
-    expect(qqAccessArgs("all")).toEqual(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="all"', "-c", 'mcp_servers.image_gen.env.QQ_ACCESS="all"']);
+    expect(qqAccessArgs("all")).toEqual(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="all"']);
+    expect(qqAccessArgs("group:200000001", "on")).toEqual(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"', "-c", 'mcp_servers.image_gen.env.QQ_ACCESS="group:200000001"']);
+    expect(qqAccessArgs("all", "on")).toEqual(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="all"', "-c", 'mcp_servers.image_gen.env.QQ_ACCESS="all"']);
     expect(() => qqAccessArgs('group:1" ; x')).toThrow(/非法的 QQ_ACCESS/);
   });
 
@@ -461,13 +464,20 @@ describe("qq_context access override and §3.2 header", () => {
   });
 
   it("passes the IMAGE_TICKET_DIR override on first turn and on resume", async () => {
-    const { runner, calls } = setup();
+    const { runner, calls } = setup({ imageGen: "on" });
     await runner.ask("one", { threadKey: "group:1", imageTicketDir: "/data/images/t1" });
     await runner.ask("two", { threadKey: "group:1", imageTicketDir: "/data/images/t2" });
     const [a, b] = calls().filter((c) => c.phase === "start");
     expect(a.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.image_gen.env.IMAGE_TICKET_DIR="/data/images/t1"']));
     expect(b.argv).toContain("resume");
     expect(b.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.image_gen.env.IMAGE_TICKET_DIR="/data/images/t2"']));
+    expect(b.argv).toContain('mcp_servers.image_gen.env.IMAGE_REFS=""');
+  });
+
+  it("默认首轮和续轮均不注入任何 image_gen 配置", async () => {
+    const { runner, calls } = setup();
+    for (const ticket of ["t1", "t2"]) await runner.ask("hi", { threadKey: "group:1", qqAccess: "all", imageTicketDir: `/data/images/${ticket}`, imageRefs: ["/data/incoming/a.png"] });
+    for (const call of calls().filter(c => c.phase === "start")) expect(call.argv.some((arg: string) => arg.includes("mcp_servers.image_gen"))).toBe(false);
   });
 
   it("passes the QQ_ACCESS override on first turn and on resume", async () => {

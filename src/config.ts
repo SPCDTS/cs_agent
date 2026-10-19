@@ -52,6 +52,7 @@ const EnvSchema = z.object({
   IMAGE_COLLECT_EXTENSIONS: z.coerce.number().int().min(0).max(10).default(2),
   IMAGE_GEN_MCP_WAIT_SEC: int(90),
 
+  CODEX_IMAGE_GEN: z.enum(["off", "on"]).default("off"),
   CODEX_BIN: z.string().default("codex"),
   CODEX_MODEL: z.string().default("gpt-6.1-sol"),
   CODEX_CONTEXT_WINDOW: int(400000),

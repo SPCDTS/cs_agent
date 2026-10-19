@@ -54,6 +54,7 @@ EFFORT="$(toml_value "${CODEX_REASONING_EFFORT:-high}" high CODEX_REASONING_EFFO
 WEB_SEARCH="$(toml_enum "${CODEX_WEB_SEARCH:-live}" live CODEX_WEB_SEARCH live cached disabled)"
 WEB_SEARCH_CONTEXT="$(toml_enum "${CODEX_WEB_SEARCH_CONTEXT:-low}" low CODEX_WEB_SEARCH_CONTEXT low medium high)"
 BROWSER="$(toml_enum "${CODEX_BROWSER:-playwright}" playwright CODEX_BROWSER playwright none)"
+IMAGE_GEN="$(toml_enum "${CODEX_IMAGE_GEN:-off}" off CODEX_IMAGE_GEN off on)"
 REMOTE_PLUGINS="$(toml_enum "${CODEX_REMOTE_PLUGINS:-off}" off CODEX_REMOTE_PLUGINS off on)"
 # MCP 工具调用审批：cs-agent 以非交互 codex exec（approval policy never）运行，需要审批的 MCP 调用会直接失败。
 # auto 按工具 annotations 决定，非只读（或未声明 readOnlyHint）的工具仍要求审批，非交互 exec 无法批准，
@@ -154,12 +155,12 @@ CONFIG="$CODEX_HOME_DIR/config.toml"
 cat > "$CONFIG.tmp" <<TOML
 # 受管文件：由 entrypoint.sh 在每次容器启动时按环境变量重写（CODEX_MODEL / CODEX_REASONING_EFFORT /
 # CODEX_WEB_SEARCH / CODEX_WEB_SEARCH_CONTEXT / CODEX_BROWSER / CODEX_MCP_APPROVAL_MODE / QQ_CONTEXT_MAX_CHARS /
-# CODEX_REMOTE_PLUGINS；CODEX_PLUGIN_PRUNE 控制写完配置后的缓存清理）。
+# CODEX_IMAGE_GEN / CODEX_REMOTE_PLUGINS；CODEX_PLUGIN_PRUNE 控制写完配置后的缓存清理）。
 # 远程插件对 QQ 客服场景无用，默认关闭并清理 figma/gmail；其余已缓存插件仍会加载，全部清理设 CODEX_PLUGIN_PRUNE=all。
 # 不要手工修改——改动会在下次启动时被覆盖；请改 .env 后重启容器。不继承宿主机配置。
 # model_reasoning_effort 只是默认值：cs-agent 每轮按请求以 -c model_reasoning_effort=... 覆盖。
 # qq_context 的访问范围 QQ_ACCESS 不写在这里：cs-agent 每轮以 -c mcp_servers.qq_context.env.QQ_ACCESS=... 注入；
-# image_gen 的输出目录 IMAGE_TICKET_DIR 同样每轮以 -c mcp_servers.image_gen.env.IMAGE_TICKET_DIR=... 注入。
+# CODEX_IMAGE_GEN=on 时 image_gen 的输出目录 IMAGE_TICKET_DIR 同样每轮以 -c mcp_servers.image_gen.env.IMAGE_TICKET_DIR=... 注入。
 model = "$MODEL"
 model_reasoning_effort = "$EFFORT"
 web_search = "$WEB_SEARCH"
@@ -184,6 +185,10 @@ default_tools_approval_mode = "$MCP_APPROVAL_MODE"
 DATA_DIR = "$MCP_DATA_DIR"
 QQ_CONTEXT_MAX_CHARS = "$CONTEXT_MAX_CHARS"
 
+TOML
+if [ "$IMAGE_GEN" = "on" ]; then
+  cat >> "$CONFIG.tmp" <<TOML
+
 # 生图（复用 agent 的生图实现）；mcp 模式经 agent 主进程的 127.0.0.1 loopback 转发访问 ComfyUI
 [mcp_servers.image_gen]
 command = "node"
@@ -195,6 +200,7 @@ default_tools_approval_mode = "$MCP_APPROVAL_MODE"
 [mcp_servers.image_gen.env]
 DATA_DIR = "$MCP_DATA_DIR"$IMAGE_GEN_ENV
 TOML
+fi
 if [ "$REMOTE_PLUGINS" = "off" ]; then
   cat >> "$CONFIG.tmp" <<'TOML'
 
