@@ -1,6 +1,6 @@
-import { redactText } from "../../src/obs/redact.js";
+import { redactText } from "../../src/shared/redact.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
-import { log } from "../../src/log.js";
+import { log } from "../../src/shared/log.js";
 import { RecallTokens } from "../../src/context/media-recall-server.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";

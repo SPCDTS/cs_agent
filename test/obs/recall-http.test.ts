@@ -10,7 +10,7 @@ import { createDashboard } from '../../src/obs/http.js';
 import { createMemoryRoutes } from '../../src/obs/memory/http.js';
 import { MemoryInstrumentation, type RecallRecord } from '../../src/obs/memory/instrumentation.js';
 import type { MemoryDeps } from '../../src/obs/memory/types.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import { CodexSessionAdapter } from '../../src/obs/sessions/codex-adapter.js';
 import { PiSessionAdapter } from '../../src/obs/sessions/pi-adapter.js';
 import { RESPONSE_BYTES } from '../../src/obs/sessions/content.js';

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { ObsStore } from "../../src/obs/store.js";
-import { Trace, trace } from "../../src/obs/trace.js";
+import { Trace, trace } from "../../src/shared/trace.js";
 import { SettingsStore, SETTINGS_TICKET, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
 import { createBackendSelector } from "../../src/agent/backends/select.js";
 import { CodexBackend } from "../../src/agent/backends/codex.js";
@@ -17,7 +17,7 @@ import { TicketDoc, DispatchDoc } from "../../src/agent/docs.js";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { Dispatcher } from "../../src/agent/dispatch.js";
 import { startAlerts } from "../../src/obs/alerts.js";
-import { log } from "../../src/log.js";
+import { log } from "../../src/shared/log.js";
 import { loadConfig } from "../../src/config.js";
 import type { InboundMessage, ReplyTicketRecord } from "../../src/qq/types.js";
 

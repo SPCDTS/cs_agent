@@ -3,9 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ObsStore } from '../../src/obs/store.js';
-import { Trace } from '../../src/obs/trace.js';
+import { Trace } from '../../src/shared/trace.js';
 import { Metrics } from '../../src/obs/metrics.js';
-import { registerSecrets } from '../../src/obs/redact.js';
+import { registerSecrets } from '../../src/shared/redact.js';
 import { startAlerts } from '../../src/obs/alerts.js';
 
 const clean: (()=>void)[]=[];

@@ -17,7 +17,7 @@ import { validateImageHeader } from '../qq/image-header.js';
 import { loadImage } from "../qq/image.js";
 import { prepareImageFiles, saveImageFile, atomicJson } from "./image-files.js";
 import { readPendingImages } from "./image-pending.js";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 
 export interface ImageBackend {
   readonly name: string;

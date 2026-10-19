@@ -15,8 +15,8 @@ import { backendConfigFromEnv, createImageGenServer, MAX_CALLS, resolveTicketDir
 import { FIXTURES, tmp } from "../agent/helpers.js";
 
 import { ObsStore } from '../../src/obs/store.js';
-import { Trace } from '../../src/obs/trace.js';
-import { registerSecrets } from '../../src/obs/redact.js';
+import { Trace } from '../../src/shared/trace.js';
+import { registerSecrets } from '../../src/shared/redact.js';
 import { ingestImageEvents } from '../../src/obs/image-events.js';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ENTRY = path.join(ROOT, "dist", "mcp", "image-gen.js");

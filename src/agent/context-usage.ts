@@ -1,8 +1,8 @@
 import { readFileSync, promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { trace } from "../obs/trace.js";
-import { log } from "../log.js";
+import { trace } from "../shared/trace.js";
+import { log } from "../shared/log.js";
 
 export interface ContextUsage {
   backend: "codex" | "pi";

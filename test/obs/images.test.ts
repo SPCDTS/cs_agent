@@ -10,7 +10,7 @@ import { MediaRecall } from '../../src/context/media.js';
 import { normalizeMessage } from '../../src/qq/policy.js';
 import { createDashboard } from '../../src/obs/http.js';
 import { imageBinary } from '../../src/obs/memory/images.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import { ObsStore } from '../../src/obs/store.js';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');

@@ -7,7 +7,7 @@ import { loadConfig } from '../../src/config.js';
 import { ContextStore } from '../../src/context/store.js';
 import { createDashboard } from '../../src/obs/http.js';
 import { ObsStore } from '../../src/obs/store.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import { CodexSessionAdapter } from '../../src/obs/sessions/codex-adapter.js';
 import { contentSlice, inlineBlock, RESPONSE_BYTES } from '../../src/obs/sessions/content.js';
 import type { SessionAdapters } from '../../src/obs/sessions/http.js';

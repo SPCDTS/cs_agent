@@ -7,7 +7,7 @@ import { loadConfig } from '../../src/config.js';
 import { ContextStore } from '../../src/context/store.js';
 import { createDashboard, csrfToken } from '../../src/obs/http.js';
 import { ObsStore } from '../../src/obs/store.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import type { SessionAdapters } from '../../src/obs/sessions/http.js';
 import type { Block, ContentRef, ObservedTurn, SessionAdapter, SessionFilter, SessionRef } from '../../src/obs/sessions/types.js';
 import { contextBody, contextUnavailable, type ContextAnalysis } from '../../src/obs/ui/context-view.js';

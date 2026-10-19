@@ -5,9 +5,9 @@ import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { CodexRunner } from "../../src/agent/codex-runner.js";
 import { catalogContextWindow } from "../../src/agent/codex-model-catalog.js";
 import { readRolloutContextUsage, ROLLOUT_USAGE_MAX_BYTES } from "../../src/agent/codex-context-usage.js";
-import { log } from "../../src/log.js";
+import { log } from "../../src/shared/log.js";
 import { loadConfig } from "../../src/config.js";
-import { trace } from "../../src/obs/trace.js";
+import { trace } from "../../src/shared/trace.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
 const stores: ContextUsageStore[] = [];

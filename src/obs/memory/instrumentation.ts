@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { SummaryRow } from '../../context/store.js';
-import { log } from '../../log.js';
+import { log } from '../../shared/log.js';
 
 export type RecallHit = { kind: 'message'; id: string } | { kind: 'summary'; id: number };
 export interface RecallObservation {

@@ -1,8 +1,11 @@
-import type { ObsEvent, ObsStore } from './store.js';
 import { redact } from './redact.js';
 /** 实时视图收到的事件：与入库同一份脱敏，不经存储（存储降级或预算丢弃时实时视图仍可见）。 */
 export interface LiveEvent { ticket: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail: Record<string, unknown> }
 export interface EventOptions { ts?: number; status?: string; durationMs?: number; detail?: unknown; scope?: string }
+export interface ObsEvent { id: number; ticket: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail_json: string }
+export interface TraceStore {
+  append(e: Omit<ObsEvent, 'id' | 'detail_json'> & { detail?: unknown }): ObsEvent | undefined;
+}
 type Listener = (e: ObsEvent) => void;
 function errorCategory(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error ?? '');
@@ -17,8 +20,8 @@ export class Trace {
   private listeners = new Set<Listener>();
   private taps = new Set<(e: LiveEvent) => void>();
   dropped = 0;
-  constructor(private store?: Pick<ObsStore, 'append'>) {}
-  attach(store?: Pick<ObsStore, 'append'>): void { this.store = store; }
+  constructor(private store?: TraceStore) {}
+  attach(store?: TraceStore): void { this.store = store; }
   subscribe(fn: Listener): () => void { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
   /** 进程内实时事件总线：每次 event() 同步推送（先于入库），供面板 /live 的 SSE 使用。 */
   tap(fn: (e: LiveEvent) => void): () => void { this.taps.add(fn); return () => { this.taps.delete(fn); }; }

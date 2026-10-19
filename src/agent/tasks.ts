@@ -1,5 +1,5 @@
 import { ingestImageEvents } from "../obs/image-events.js";
-import { trace } from "../obs/trace.js";
+import { trace } from "../shared/trace.js";
 import { observeImages } from "../obs/image.js";
 import path from "node:path";
 import { imageTimeoutMs } from "./image-options.js";
@@ -21,7 +21,7 @@ import { defineTask, type RunningTask, type TaskRuntime, type TaskDefinition } f
 import { accessForSource, accessToString } from "../context/access.js";
 import type { ContextStore } from "../context/store.js";
 import type { QQBridge } from "../qq/types.js";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 import { isReasoningEffort, threadKeyForSource } from "./codex-runner.js";
 import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState, type TicketSettings } from "./docs.js";
 import { collectNewImages } from "./image-collect.js";

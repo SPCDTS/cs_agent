@@ -90,7 +90,7 @@ async function nextCallDir(dir: string): Promise<string> {
 }
 
 export interface ImageGenDeps {
-  observer?: (dir: string) => import("../obs/trace.js").Trace;
+  observer?: (dir: string) => import("../shared/trace.js").Trace;
   /** 原始 IMAGE_TICKET_DIR */
   ticketDir: string | undefined;
   dataDir: string;

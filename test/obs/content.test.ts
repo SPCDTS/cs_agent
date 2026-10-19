@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { contentSlice, utf8Slice, validRange } from '../../src/obs/sessions/content.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 
 const text = '甲a乙🙂é丙𠮷丁';
 const bytes = Buffer.byteLength(text);

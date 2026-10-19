@@ -1,6 +1,6 @@
-import { classifyFailure } from "../../obs/errors.js";
-import { redactText } from "../../obs/redact.js";
-import { trace } from "../../obs/trace.js";
+import { classifyFailure } from "../../shared/errors.js";
+import { redactText } from "../../shared/redact.js";
+import { trace } from "../../shared/trace.js";
 import { imageRefsValue, validateReferences } from "../image-references.js";
 /**
  * codex 后端（设计 §4.4）：现有 CodexRunner 的适配。
@@ -23,7 +23,7 @@ import path from "node:path";
 import { buildCodexPrompt, CodexTimeoutError, isReasoningEffort, type CodexRunner, type ReasoningEffort } from "../codex-runner.js";
 import { collectNewImages, listFiles } from "../image-collect.js";
 import { ticketImageDir } from "../image-gen.js";
-import { log } from "../../log.js";
+import { log } from "../../shared/log.js";
 import { BackendTimeoutError, type AgentBackend, type AgentHandleContext, type AgentRequest, type AgentResponse } from "./types.js";
 
 /** 票据工作目录里的 codex 最后一条消息文件名 */

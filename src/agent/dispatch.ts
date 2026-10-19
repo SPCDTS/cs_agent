@@ -1,4 +1,4 @@
-import { trace } from "../obs/trace.js";
+import { trace } from "../shared/trace.js";
 /**
  * QQ 消息 → 规则分流 → durable 任务（设计 §4.1 / §4.7）：
  * 1. admit：createConversation(ownerless) 的同一 commit 内写入 TicketDoc（含分流结果 route/prefix/prompt）
@@ -20,7 +20,7 @@ import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context"
 import type { ConversationId, Harness, TaskId } from "@earendil-works/pi-durable";
 import type { InboundMessage, QQBridge, ReplyTicketRecord } from "../qq/types.js";
 import { DispatchDoc, TicketDoc, type DispatchEntry, type TicketSource, type TicketSettings } from "./docs.js";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 import { scopeOf } from "../context/access.js";
 import type { BotAction, ContextStore } from "../context/store.js";
 import { FALLBACK_REPLY } from "./replies.js";

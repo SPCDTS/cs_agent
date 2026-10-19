@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { registerTemporarySecrets } from "../obs/redact.js";
+import { registerTemporarySecrets } from "../shared/redact.js";
 import { accessToString, parseAccess, type Access } from "./access.js";
 import { abortable, type MediaRecall, type RecallResult } from "./media.js";
 

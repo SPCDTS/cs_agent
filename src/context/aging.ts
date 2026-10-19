@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { MemoryInstrumentation, SummarySource } from "../obs/memory/instrumentation.js";
 import { cleanupMedia } from "./media.js";
 import path from "node:path";
-import { usageFields } from "../obs/usage.js";
-import { trace } from "../obs/trace.js";
+import { usageFields } from "../shared/usage.js";
+import { trace } from "../shared/trace.js";
 /**
  * 聊天记录衰老任务（设计 §2.2）：每天本地 HISTORY_SUMMARY_HOUR 点（容器默认 UTC，设 TZ 可改）执行：
  * 1. 日摘要：每个 scope 今天之前、≥5 条且未被摘要覆盖的日子 → ≤400 字摘要（意图模型，pi-ai 直调）；
@@ -13,7 +13,7 @@ import { trace } from "../obs/trace.js";
  * 启动时若上次运行（meta.aging_last_run）早于 24h 立即补跑一次。任何错误只记日志，绝不使进程崩溃。
  */
 import type { Api, AssistantMessage, Model, Models } from "@earendil-works/pi-ai";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 import { formatMessage, formatSummary, joinCapped, withoutImagePaths } from "./format.js";
 import { SUMMARY_MAX, type ContextStore, type SummaryRow } from "./store.js";
 

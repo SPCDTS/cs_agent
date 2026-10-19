@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { LiveBus, summarize, type LiveMessage } from '../../src/obs/live.js';
-import { Trace, type LiveEvent } from '../../src/obs/trace.js';
-import { registerSecrets } from '../../src/obs/redact.js';
+import { Trace, type LiveEvent } from '../../src/shared/trace.js';
+import { registerSecrets } from '../../src/shared/redact.js';
 
 describe('实时总线', () => {
   it('卡片状态机：排队 → 运行 → 阶段栈 → 终态；系统票据与无主终态不建卡；完成卡片有上限', () => {

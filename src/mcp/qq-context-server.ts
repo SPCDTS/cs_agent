@@ -1,4 +1,4 @@
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 import type { RecallObservation, RecallHit } from "../obs/memory/instrumentation.js";
 import { returnedLines, returnedMessage } from "./recall-results.js";
 /**

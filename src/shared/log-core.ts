@@ -1,5 +1,5 @@
 /** 极简结构化日志：一行一个 JSON，写 stderr。绝不传入 token 等敏感值。 */
-import { redact } from './obs/redact.js';
+import { redact } from './redact-core.js';
 export type LogLine = { t: string; level: Level; msg: string; [key: string]: unknown };
 const ring: LogLine[] = [];
 const sinks = new Set<(line: LogLine) => void>();

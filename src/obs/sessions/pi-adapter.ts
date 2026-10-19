@@ -1,9 +1,9 @@
 import { AssistantEntry, CompactionEntry, ResetEntry, SystemEntry, UserEntry,
   type ContextView, type EntryRecord } from '@earendil-works/pi-durable';
 import type { Message } from '@earendil-works/pi-ai';
-import { redactText } from '../redact.js';
+import { redactText } from '../../shared/redact.js';
 import type { ObsStore } from '../store.js';
-import { usageCost } from '../usage.js';
+import { usageCost } from '../../shared/usage.js';
 import { contentSlice, inlineBlock, redactSessionValue, validRange } from './content.js';
 import { enrichTurns } from './enrichment.js';
 import { SessionError, type Block, type BlockFrame, type ContentRef, type ObservedTurn,

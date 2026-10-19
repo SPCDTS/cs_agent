@@ -4,7 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ObsEvent } from './store.js';
-import { trace, type Trace } from './trace.js';
+import { trace, type Trace } from '../shared/trace.js';
 
 export const IMAGE_EVENT_BYTES = 256 * 1024;
 const IMAGE_EVENT_LINES = 200;

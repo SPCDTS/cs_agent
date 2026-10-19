@@ -5,7 +5,7 @@ import type { MediaRecall } from "../../src/context/media.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { piContextCapacity } from "../../src/agent/pi-context-usage.js";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
-import { trace } from "../../src/obs/trace.js";
+import { trace } from "../../src/shared/trace.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -218,7 +218,7 @@ describe("pi durable backend", () => {
   });
 
   it("内置调用只记录工具、前二百字的命令或路径、退出码和耗时", async () => {
-    const events: import("../../src/obs/trace.js").LiveEvent[] = [];
+    const events: import("../../src/shared/trace.js").LiveEvent[] = [];
     const untap = trace.tap(e => { if (e.ticket === "coding-trace" && e.stage.startsWith("tool:")) events.push(e); });
     const s = await setup([call("write", { path: "trace.txt", content: "do-not-log-file-content" }),
       call("read", { path: "trace.txt" }), call("bash", { command: "printf do-not-log-stdout; #" + "x".repeat(300) }),
@@ -251,7 +251,7 @@ describe("pi durable backend", () => {
     expect(results(seen!)).toContain("没有记录");
   });
   it("召回配置额度不占历史桶，失败归入媒体召回而非历史或模型服务", async () => {
-    const events: import("../../src/obs/trace.js").LiveEvent[] = [];
+    const events: import("../../src/shared/trace.js").LiveEvent[] = [];
     const untap = trace.tap(e => { if (e.ticket === "recall-failure") events.push(e); });
     const recall = vi.fn(async () => { throw Object.assign(new Error("fixture authentication"), { status: 401 }); });
     const s = await setup([...Array.from({ length: 3 }, () => call("qq_image", { message_id: "123" })),

@@ -5,7 +5,7 @@ import { AssistantEntry, CompactionEntry, ResetEntry, SystemEntry, ToolResultEnt
 import { PiSessionAdapter, type PiConversation, type PiSessionSource } from '../../src/obs/sessions/pi-adapter.js';
 import type { BlockFrame } from '../../src/obs/sessions/types.js';
 import { ObsStore } from '../../src/obs/store.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import { tmp } from '../agent/helpers.js';
 
 const cleanup: (() => unknown | Promise<unknown>)[] = [];

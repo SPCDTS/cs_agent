@@ -6,7 +6,7 @@
  * 因此直接把 COMFYUI_URL 指向 host.docker.internal 时生图必然失败。经 loopback 转发即可。
  */
 import net from "node:net";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 
 export function isLoopbackUrl(url: string): boolean {
   const h = new URL(url).hostname;

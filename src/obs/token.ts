@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { registerSecrets } from './redact.js';
+import { registerSecrets } from '../shared/redact.js';
 
 /** 临时文件先写完再以硬链接发布；并发启动只接受首个已发布口令。 */
 export async function loadObsToken(dataDir: string, envToken = '', generated: (message: string) => void = () => {}): Promise<string> {

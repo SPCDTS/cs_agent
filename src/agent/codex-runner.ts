@@ -20,7 +20,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { TicketSource } from "./docs.js";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 import { accessForSource, isScope, parseAccess } from "../context/access.js";
 import { clip } from "../context/store.js";
 

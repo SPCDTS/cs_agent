@@ -6,7 +6,7 @@ import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { createRegistry, Harness, type Extension, type Storage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodexAuthFileStore } from "../auth/codex-oauth.js";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 
 /**
  * 内置 provider 全部注册（deepseek / openai-codex / openai / anthropic …，由 AGENT_MODEL_PROVIDER 选择）。

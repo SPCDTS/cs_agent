@@ -1,6 +1,6 @@
 import { CodexSessionAdapter } from '../sessions/codex-adapter.js';
 import { RESPONSE_BYTES } from '../sessions/content.js';
-import { redactText } from '../redact.js';
+import { redactText } from '../../shared/redact.js';
 import { SessionError } from '../sessions/types.js';
 import { codexHistory } from './codex.js';
 import { piHistory, type PiContextAdapter } from './pi-history.js';

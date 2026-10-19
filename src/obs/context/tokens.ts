@@ -1,4 +1,4 @@
-import { redactText } from '../redact.js';
+import { redactText } from '../../shared/redact.js';
 import { redactSessionValue, utf8Slice } from '../sessions/content.js';
 
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;

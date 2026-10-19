@@ -2,9 +2,10 @@ import { ensureMemoryTables } from './memory/instrumentation.js';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
-import { redact, redactText } from './redact.js';
+import { redact, redactText } from '../shared/redact.js';
 
-export interface ObsEvent { id: number; ticket: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail_json: string }
+import type { ObsEvent } from '../shared/trace.js';
+export type { ObsEvent } from '../shared/trace.js';
 export interface TicketRow { ticket: string; scope: string; ts: number; updated: number; route: string | null; backend: string | null; status: string; sender: string | null; duration_ms: number }
 export interface ThreadTurn { ticket: string; ts: number; started: number; text: string; reply: string; status: string; duration_ms: number; tools: number; input_tokens: number; output_tokens: number }
 /** 管理事件独立按年龄保留，不参与普通票据预算。 */

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { promisify } from "node:util";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 
 const exec = promisify(execFile);
 

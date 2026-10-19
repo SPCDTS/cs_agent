@@ -1,4 +1,4 @@
-import { redact, redactText } from '../redact.js';
+import { redact, redactText } from '../../shared/redact.js';
 import { SessionError, type Block, type ContentRef } from './types.js';
 
 export const INLINE_BYTES = 8 * 1024;

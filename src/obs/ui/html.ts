@@ -1,5 +1,5 @@
 /** 面板的服务端渲染部件：所有文本先脱敏再转义（esc），结构类名对应 theme.ts。 */
-import { redact, redactText } from '../redact.js';
+import { redact, redactText } from '../../shared/redact.js';
 import { THEME_CSS } from './theme.js';
 
 export const esc = (v: unknown) => redactText(String(v ?? ''), 100_000).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);

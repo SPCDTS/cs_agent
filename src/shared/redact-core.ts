@@ -1,24 +1,22 @@
-import { log } from '../log.js';
-
 /** 所有观测出口共用；先替换秘密再截断，避免保存凭据前半段。 */
 const secrets = new Set<string>();
 const temporarySecrets = new Map<string, number>();
 let saturationWarned = false;
 const allSecrets = () => [...secrets, ...temporarySecrets.keys()];
-const sensitive = /(?:token|secret|password|passwd|authorization|cookie|credential|api[_-]?key|apikey|^key$)/i;
+export const sensitive = /(?:token|secret|password|passwd|authorization|cookie|credential|api[_-]?key|apikey|^key$)/i;
 const scopeKey = (v: unknown) => typeof v === 'string' && /^(owner|shared|(?:group|private):\d+)$/.test(v);
 const safeMetadata = (key: string, value: unknown) =>
   (typeof value === 'number' && /tokens/i.test(key)) ||
   (/^(thread_key|conversation_key|key)$/.test(key) && scopeKey(value)) ||
   (key === 'keys' && Array.isArray(value) && value.every(scopeKey));
-export function registerSecrets(values: Iterable<string | undefined>): void {
+export function registerSecretsCore(values: Iterable<string | undefined>, onSaturation: () => void): void {
   for (const value of values) {
     if (!value || value.length > 16384 || secrets.has(value)) continue;
     if (secrets.size < 2048) secrets.add(value);
     else if (!saturationWarned) {
       saturationWarned = true;
-      // 环境初始化也会注册秘密，延后日志以免与 log 模块的初始化循环相撞。
-      queueMicrotask(() => log.warn("长期秘密表已满，新的长期秘密未注册"));
+      // 保留异步告警时机，日志出口由门面注入，核心不依赖日志。
+      queueMicrotask(onSaturation);
     }
   }
 }
@@ -35,9 +33,6 @@ export function registerTemporarySecrets(values: Iterable<string | undefined>): 
       if (count) temporarySecrets.set(value, count); else temporarySecrets.delete(value);
     }
   };
-}
-function registerEnvSecrets(env: NodeJS.ProcessEnv = process.env): void {
-  registerSecrets(Object.entries(env).filter(([k]) => sensitive.test(k)).map(([, v]) => v));
 }
 /** 子进程不继承凭据名称，也不继承以普通变量名保存的已注册秘密。 */
 export function withoutSecretEnv(env: NodeJS.ProcessEnv): Record<string, string> {
@@ -74,4 +69,3 @@ export function redact(value: unknown, limit = 500, depth = 0): unknown {
       ? '[已隐藏]' : redact(v, limit, depth + 1)]));
   return typeof value === 'bigint' ? String(value) : value;
 }
-registerEnvSecrets();

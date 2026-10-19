@@ -8,8 +8,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { isScope } from "../context/access.js";
-import { log } from "../log.js";
-import { trace as defaultTrace, type Trace } from "../obs/trace.js";
+import { log } from "../shared/log.js";
+import { trace as defaultTrace, type Trace } from "../shared/trace.js";
 import { REASONING_EFFORTS, type ReasoningEffort } from "./codex-runner.js";
 import { BACKEND_NAMES, type BackendName } from "./backends/types.js";
 

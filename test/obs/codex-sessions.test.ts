@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CodexSessionAdapter, MAX_ROLLOUT_LINE_BYTES } from '../../src/obs/sessions/codex-adapter.js';
 import { ObsStore } from '../../src/obs/store.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import type { BlockFrame, ContentRef } from '../../src/obs/sessions/types.js';
 
 const fixture = fileURLToPath(new URL('./fixtures/codex-rollout-anonymized.jsonl', import.meta.url));

@@ -1,7 +1,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { AssistantEntry, CompactionEntry, DEFAULT_COMPACTION_POLICY, watchEvents,
   type AgentEventStream, type Conversation, type Cursor, type EntryId, type EntryRecord, type Harness } from "@earendil-works/pi-durable";
-import { usageCost, usageFields } from "../obs/usage.js";
+import { usageCost, usageFields } from "../shared/usage.js";
 import { ContextUsageStore, type ContextUsage, type ContextUsageHistory } from "./context-usage.js";
 import { PiRequestDoc } from "./pi-tools/request.js";
 

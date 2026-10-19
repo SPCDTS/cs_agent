@@ -10,7 +10,7 @@ import type { InboundMessage } from '../../src/qq/types.js';
 import { createDashboard } from '../../src/obs/http.js';
 import { createMemoryRoutes } from '../../src/obs/memory/http.js';
 import type { MemoryDeps, MessageItem, MessagePage } from '../../src/obs/memory/types.js';
-import { redactText, registerTemporarySecrets } from '../../src/obs/redact.js';
+import { redactText, registerTemporarySecrets } from '../../src/shared/redact.js';
 import { RESPONSE_BYTES } from '../../src/obs/sessions/content.js';
 import { ObsStore } from '../../src/obs/store.js';
 

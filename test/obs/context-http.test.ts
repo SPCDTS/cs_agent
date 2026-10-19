@@ -5,7 +5,7 @@ import { boundedContext, type ContextAnalysis } from '../../src/obs/context/inde
 import type { PiContextAdapter } from '../../src/obs/context/pi-history.js';
 import { createSessionRoutes } from '../../src/obs/sessions/http.js';
 import { RESPONSE_BYTES } from '../../src/obs/sessions/content.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 
 const servers: Server[] = [];
 afterEach(async () => { for (const s of servers.splice(0)) { s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); } });

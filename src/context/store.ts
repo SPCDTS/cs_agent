@@ -8,7 +8,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { InboundMessage } from "../qq/types.js";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 import { scopeOf, type Access } from "./access.js";
 
 const CONTEXT_DB_FILE = "qq-messages.sqlite";

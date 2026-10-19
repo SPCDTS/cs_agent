@@ -1,4 +1,4 @@
-import { usageCost } from "./usage.js";
+import { usageCost } from "../shared/usage.js";
 import type { ObsEvent, ObsStore } from './store.js';
 export type Gauge = { name: string; labels?: Record<string, string>; value: number };
 type Aggregate = { count: number; success: number; durations: number[]; labels: Record<string, string> };

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ObsStore } from "../../src/obs/store.js";
-import { Trace } from "../../src/obs/trace.js";
+import { Trace } from "../../src/shared/trace.js";
 import { SettingsStore } from "../../src/agent/settings.js";
 import { loadConfig } from "../../src/config.js";
-import { log } from "../../src/log.js";
+import { log } from "../../src/shared/log.js";
 import { tmp } from "./helpers.js";
 
 const stores: ObsStore[] = [];

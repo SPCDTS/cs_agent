@@ -1,12 +1,12 @@
 import type { MemoryInstrumentation } from "../../obs/memory/instrumentation.js";
 import { BUILTIN_TOOLS } from "./coding.js";
-import { redactText } from "../../obs/redact.js";
+import { redactText } from "../../shared/redact.js";
 import { recallTool } from "./recall.js";
 import type { MediaRecall } from "../../context/media.js";
 import { RECALL_QUOTA_MESSAGE } from "../../context/media-recall-server.js";
-import { usageFields } from "../../obs/usage.js";
-import { classifyFailure, diagnosticFailure, type Failure } from "../../obs/errors.js";
-import { trace } from "../../obs/trace.js";
+import { usageFields } from "../../shared/usage.js";
+import { classifyFailure, diagnosticFailure, type Failure } from "../../shared/errors.js";
+import { trace } from "../../shared/trace.js";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, hook, section, ToolTask, GenerationTask, CompactionTask, type Harness } from "@earendil-works/pi-durable";
 import { parseAccess } from "../../context/access.js";

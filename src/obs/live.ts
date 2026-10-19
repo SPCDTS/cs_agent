@@ -6,8 +6,8 @@
  * 客户端据此增量渲染（事件环形截断后仍能续接）。stage=context_usage 的事件（设计 §8.5）另推一条
  * context 增量（白名单字段），供各页的上下文占用条原地更新；卡片记下线程键（thread）以便查找。
  */
-import { redact, redactText } from './redact.js';
-import type { LiveEvent, Trace } from './trace.js';
+import { redact, redactText } from '../shared/redact.js';
+import type { LiveEvent, Trace } from '../shared/trace.js';
 import { fmtPct, fmtShort, ratio, toContextUsage, type ContextUsage } from './ui/context-bar.js';
 
 type CardState = 'queued' | 'running' | 'done' | 'failed';

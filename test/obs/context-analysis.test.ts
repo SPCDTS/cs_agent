@@ -9,7 +9,7 @@ import { readCodexTrace } from '../../src/obs/context/codex-trace.js';
 import { CodexSessionAdapter } from '../../src/obs/sessions/codex-adapter.js';
 import { PiSessionAdapter, type PiSessionSource } from '../../src/obs/sessions/pi-adapter.js';
 import { ObsStore } from '../../src/obs/store.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import { contextBody } from '../../src/obs/ui/context-view.js';
 
 const clean: Array<() => unknown | Promise<unknown>> = [];

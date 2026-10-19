@@ -1,7 +1,7 @@
 import type { ContextUsageStore } from "../context-usage.js";
 import { PiContextObserver, piContextCapacity } from "../pi-context-usage.js";
 import { readThreadArchive, writeThreadArchive, THREAD_ARCHIVE_LIMIT } from "../thread-archive.js";
-import { trace } from "../../obs/trace.js";
+import { trace } from "../../shared/trace.js";
 import type { PiConversation, PiEntryPage, PiSessionSource } from "../../obs/sessions/pi-adapter.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -19,7 +19,7 @@ import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
 import { PiRequestDoc } from "../pi-tools/request.js";
 import { PiPromptLoader } from "../pi-tools/prompt.js";
 import { isScope, parseAccess } from "../../context/access.js";
-import { log } from "../../log.js";
+import { log } from "../../shared/log.js";
 import { BackendTimeoutError, type AgentBackend, type AgentRequest, type AgentHandleContext, type AgentResponse } from "./types.js";
 
 const context = BACKGROUND_CONTEXT;

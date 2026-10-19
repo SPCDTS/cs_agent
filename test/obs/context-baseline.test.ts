@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { analyzeContext, type ContextAnalysis } from '../../src/obs/context/index.js';
-import { registerTemporarySecrets } from '../../src/obs/redact.js';
+import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import { CodexSessionAdapter } from '../../src/obs/sessions/codex-adapter.js';
 import { createSessionRoutes } from '../../src/obs/sessions/http.js';
 import type { BlockFrame, ContentRef } from '../../src/obs/sessions/types.js';

@@ -13,7 +13,7 @@ import { parseAccess } from "../context/access.js";
 import { loadConfig } from "../config.js";
 
 import { ImageEventSpool } from "../obs/image-events.js";
-import { Trace } from "../obs/trace.js";
+import { Trace } from "../shared/trace.js";
 const { server, dispose } = createImageGenServer({
   observer: dir => new Trace(new ImageEventSpool(dir)),
   ticketDir: process.env.IMAGE_TICKET_DIR,

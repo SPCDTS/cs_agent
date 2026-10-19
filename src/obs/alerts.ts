@@ -1,6 +1,6 @@
 import type { QQBridge } from '../qq/types.js';
-import type { Trace } from './trace.js';
-import { log } from '../log.js';
+import type { Trace } from '../shared/trace.js';
+import { log } from '../shared/log.js';
 /**
  * 静态开关关闭时不订阅、不发送；函数开关（运行时设置）每次发送前现读，关闭期间不发送也不计入限频。
  * 所有告警共用 30 分钟限频，内容不含原文或服务端错误。

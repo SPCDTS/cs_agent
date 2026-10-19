@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { log } from "../log.js";
+import { log } from "../shared/log.js";
 import { downloadImage, type DownloadHooks } from "../qq/incoming-http.js";
 import { MAX_IMAGE_BYTES, MIN_IMAGE_BYTES } from "../qq/image.js";
 import { validateImageHeader } from "../qq/image-header.js";
