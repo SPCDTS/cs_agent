@@ -20,6 +20,12 @@ import path from 'node:path';
 /** 页面需要的结构化只读数据；不暴露观测数据库或后端实现。 */
 export interface RuntimeSettingsView {
   agentBackend: string; backendOverrides: Record<string, string>; codexReasoningEffort: string; alertOwner: boolean;
+  codexModel: string; piModel: string; piThinkingLevel: string;
+}
+/** 设置页模型下拉的可选清单（启动时读一次）。 */
+export interface ModelCatalogView {
+  codex(): { slug: string; contextWindow?: number }[];
+  pi(): { id: string; contextWindow: number; thinkingLevels: string[] }[];
 }
 export interface LiveCardView {
   ticket: string; scope: string; sender: string; text: string; state: string; phase: string;
@@ -36,6 +42,7 @@ export interface DashboardPageOptions {
   contextUsage?: ContextUsageView;
   settings?: { current(): Readonly<RuntimeSettingsView>; defaults: RuntimeSettingsView };
   codexPrompt?: { read(): Promise<CodexPromptSnapshot> };
+  modelCatalog?: ModelCatalogView;
   store: {
     degraded: boolean;
     throughput(since: number): { total: number; failed: number; error_rate: number };
@@ -66,7 +73,22 @@ type RuntimeSettings = RuntimeSettingsView;
 type LiveCard = LiveCardView;
 const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
 
-const SETTING_LABELS: Record<string, string> = { agentBackend: '默认后端', backendOverrides: '按会话覆盖', codexReasoningEffort: 'Codex 推理强度', alertOwner: 'owner 告警' };
+const SETTING_LABELS: Record<string, string> = { agentBackend: '默认后端', backendOverrides: '按会话覆盖', codexModel: 'Codex 模型', codexReasoningEffort: 'Codex 推理强度',
+  piModel: 'Pi 模型', piThinkingLevel: 'Pi 思考档位', alertOwner: 'owner 告警' };
+/** pi-ai ModelThinkingLevel 全集：模型不在清单里时的档位选项。 */
+const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+const AUTO_HINT = 'auto：派发时按消息难度自动选档，结果见票据页。';
+const windowK = (n?: number) => n ? ` · 窗口 ${Math.round(n / 1000)}k` : '';
+/** 票据快照 → `后端 · 模型 · 档位（来源 auto）`；旧票据缺字段时只拼已有部分。 */
+export function dispatchSettingsLine(snap: Record<string, unknown>): string {
+  const str = (v: unknown) => typeof v === 'string' && v ? v : undefined;
+  const backend = str(snap.backend) ?? '';
+  const model = backend === 'pi' ? str(snap.piModel) : str(snap.codexModel);
+  const effort = backend === 'pi' ? str(snap.piThinkingLevel) : str(snap.codexReasoningEffort);
+  const source = str(snap.effortSource);
+  const parts = [BACKENDS[backend] ?? backend, model, effort].filter(Boolean);
+  return parts.join(' · ') + (source === 'auto' || source === 'auto-fallback' ? `（来源 ${source}）` : '');
+}
 const showSetting = (v: unknown) => typeof v === 'boolean' ? (v ? '开启' : '关闭') : v && typeof v === 'object' ? (Object.entries(v).map(([k, b]) => `${k}=${String(b)}`).join(', ') || '无') : String(v);
 const asObj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
 /** 聊天记录整理灯的说明：观测事件 ts（毫秒）或消息库 meta aging_last_run（秒）统一格式化。 */
@@ -165,7 +187,8 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       out += `<section><h2>当前设置 <small><a href="/settings">修改</a></small></h2><div class="sheet pad">${kv([
         ['默认后端', esc(BACKENDS[s.agentBackend] ?? s.agentBackend)],
         ['按会话覆盖', Object.keys(s.backendOverrides).length ? Object.entries(s.backendOverrides).map(([k, v]) => `${esc(scopeLabel(k))} → ${esc(BACKENDS[v] ?? v)}`).join('，') : '无'],
-        ['Codex 推理强度', esc(s.codexReasoningEffort)], ['owner 告警', s.alertOwner ? '开启' : '关闭']])}</div></section>`;
+        ['Codex 模型', esc(s.codexModel)], ['Codex 推理强度', esc(s.codexReasoningEffort)],
+        ['Pi 模型', esc(s.piModel)], ['Pi 思考档位', esc(s.piThinkingLevel)], ['owner 告警', s.alertOwner ? '开启' : '关闭']])}</div></section>`;
     }
     const rows = opts.store.degraded ? [] : opts.store.latestMetrics();
     out += `<section><details><summary>最近一分钟指标（${rows.length} 项，p50 / p95 等）</summary><div class="sheet mt"><div class="wrap"><table class="list"><thead><tr><th>指标</th><th>标签</th><th class="num">值</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td class="mono">${esc(Object.entries(asObj(JSON.parse(r.labels_json))).filter(([, v]) => v !== '').map(([k, v]) => `${k}=${String(v)}`).join(' '))}</td><td class="num">${esc(Number.isInteger(r.value) ? r.value : r.value.toFixed(3))}</td></tr>`).join('')}</tbody></table></div></div></details></section>`;
@@ -217,9 +240,12 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     const backend = all.find(e => e.stage.startsWith('backend:'))?.stage.slice(8) ?? (all.map(e => detail(e).backend).find(v => typeof v === 'string') as string | undefined);
     const status = ticketStatus(all);
     const t0 = all[0]!.ts, t1 = all.at(-1)!.ts;
+    // 派发设置快照记在 admitted 事件；旧票据没有时不显示这一行。
+    const snap = all.filter(e => e.stage === 'admitted').map(e => asObj(detail(e).settings)).find(v => typeof v.backend === 'string');
     let body = `<div class="sheet pad"><div class="slip-top">${statusStamp(status, true)}<span class="mono faint">${esc(ticket)}</span></div><div class="mt">${kv([
       ['会话', esc(scopeLabel(all.find(e => e.scope)?.scope ?? ''))], ['发送者', esc(received ? detail(received).sender ?? '—' : '—')],
       ['路由', esc(ROUTES[route ?? ''] ?? route ?? '—')], ['后端', esc(BACKENDS[backend ?? ''] ?? backend ?? '—')],
+      ...(snap ? [['派发设置', esc(dispatchSettingsLine(snap))] as [string, string]] : []),
       ['收到', esc(fmtTime(t0))], ['总耗时', esc(fmtMs(t1 - t0))]], 'meta')}</div></div>`;
     if (received) body += `<section><h2>原文</h2><blockquote class="said">${esc(detail(received).text ?? '')}</blockquote><p class="hint">正文、提示词和回复只保存脱敏后的前 500 字。历史由工具按需获取，没有自动注入近期上下文。</p></section>`;
     body += `<section><h2>流转轨迹 <small>${events.length} 个事件${after ? '（续）' : ''}</small></h2><ol class="trail">${events.map(e => {
@@ -436,6 +462,41 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     return shell('上下文分析', head + body + dataTail, { lead, scripts: ['/assets/agents.js'] });
   }
 
+  /** 设置页按 agent 分两组：模型下拉（magpie 目录）+ 思考档位（auto + 支持的档位），设计 §5。 */
+  function agentModelFieldsets(s: Readonly<RuntimeSettings>, d: RuntimeSettingsView | undefined, diff: (k: keyof RuntimeSettings) => string): string {
+    const catalog = <T,>(read: (() => T[]) | undefined): T[] => { try { return read?.() ?? []; } catch { return []; } };
+    const option = (value: string, current: string, label = value) => `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(label)}</option>`;
+    // 当前值不在清单里时仍作为选项保留，保存其它字段不会意外改掉它。
+    const keep = (values: readonly string[], current: string) => values.includes(current) ? [...values] : [current, ...values];
+    const defaultsHint = (model?: string, effort?: string) => d ? `<div class="hint">.env 默认：模型 ${esc(model)}，档位 ${esc(effort)}。</div>` : '';
+
+    const codexModels = catalog(opts.modelCatalog?.codex);
+    const codexModelControl = codexModels.length
+      ? `<select name="codexModel">${keep(codexModels.map(m => m.slug), s.codexModel).map(slug => {
+        const m = codexModels.find(x => x.slug === slug);
+        return option(slug, s.codexModel, m ? slug + windowK(m.contextWindow) : `${slug}（不在目录中）`);
+      }).join('')}</select>`
+      : `<input name="codexModel" value="${esc(s.codexModel)}" spellcheck="false" autocomplete="off"><small>模型目录不可用，请手动填写模型 slug。</small>`;
+    const codexEffort = `<select name="codexReasoningEffort">${keep(['auto', ...REASONING_EFFORTS], s.codexReasoningEffort).map(e => option(e, s.codexReasoningEffort)).join('')}</select>`;
+    const codex = `<fieldset><legend>Codex 模型与推理强度</legend><div class="choices"><label>模型${diff('codexModel')}${codexModelControl}</label><label>推理强度${diff('codexReasoningEffort')}${codexEffort}</label></div>
+<div class="hint">每轮以 -c 参数传给 codex，下一条消息即生效，不换线程。${AUTO_HINT}</div>${defaultsHint(d?.codexModel, d?.codexReasoningEffort)}</fieldset>`;
+
+    const piModels = catalog(opts.modelCatalog?.pi);
+    const selectable = config.AGENT_MODEL_PROVIDER === 'magpie' && piModels.length > 0;
+    const piModelControl = selectable
+      ? `<select name="piModel">${keep(piModels.map(m => m.id), s.piModel).map(id => {
+        const m = piModels.find(x => x.id === id);
+        return option(id, s.piModel, m ? id + windowK(m.contextWindow) : `${id}（不在目录中）`);
+      }).join('')}</select>`
+      : `<input type="hidden" name="piModel" value="${esc(s.piModel)}"><span class="mono">${esc(s.piModel)}</span><small>提供者 ${esc(config.AGENT_MODEL_PROVIDER)} 下只读；切换模型需 magpie 提供者。</small>`;
+    // 档位按当前所选模型过滤（服务端渲染）；模型不在清单里时给全集，由 pi 后端就近收敛。
+    const levels = piModels.find(m => m.id === s.piModel)?.thinkingLevels ?? PI_THINKING_LEVELS;
+    const piLevel = `<select name="piThinkingLevel">${keep(['auto', ...levels.filter(l => l !== 'auto')], s.piThinkingLevel).map(l => option(l, s.piThinkingLevel)).join('')}</select>`;
+    const pi = `<fieldset><legend>Pi 模型与思考档位</legend><div class="choices"><label>模型${diff('piModel')}${piModelControl}</label><label>思考档位${diff('piThinkingLevel')}${piLevel}</label></div>
+<div class="hint">每次提交读取，下一条消息即生效。档位列表按当前已保存的模型过滤；换模型后保存一次再选档。${AUTO_HINT}</div>${defaultsHint(d?.piModel, d?.piThinkingLevel)}</fieldset>`;
+    return codex + '\n' + pi;
+  }
+
   async function settingsBody(): Promise<string> {
     const codexProvider = config.CODEX_PROVIDER === 'magpie' ? `经 magpie（${config.CODEX_MAGPIE_URL}）` : '直连';
     const piProvider = config.AGENT_MODEL_PROVIDER === 'magpie' ? `magpie（${config.CODEX_MAGPIE_URL}）` : `直连 ${config.AGENT_MODEL_PROVIDER}`;
@@ -449,7 +510,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       body += `<section class="flush"><form method="post" action="/settings" class="sheet pad">${csrfField(csrf)}
 <fieldset><legend>执行后端${diff('agentBackend')}</legend><div class="choices">${radio('agentBackend', 'codex', 'Codex', '容器内 codex CLI，owner 与共享两条长期线程，可用浏览器与命令。')}${radio('agentBackend', 'pi', 'Pi', '进程内 pi 会话，每个会话域独立记忆，联网检索走 DeepSeek。')}</div></fieldset>
 <fieldset><legend>按会话覆盖${diff('backendOverrides')}</legend><label>每行一项，例如 group:200000001=pi<textarea name="backendOverrides" rows="4" spellcheck="false">${esc(formatBackendOverrides(s.backendOverrides))}</textarea></label><div class="hint">留空表示全部使用上面的默认后端。会话域格式为 group:群号 或 private:QQ号。</div></fieldset>
-<fieldset><legend>Codex 推理强度${diff('codexReasoningEffort')}</legend><label><select name="codexReasoningEffort">${REASONING_EFFORTS.map(e => `<option${s.codexReasoningEffort === e ? ' selected' : ''}>${e}</option>`).join('')}</select></label><div class="hint">每轮以 -c 参数传给 codex，下一轮即生效。</div></fieldset>
+${agentModelFieldsets(s, d, diff)}
 <fieldset><legend>owner 告警${diff('alertOwner')}</legend><label class="choice"><input type="checkbox" name="alertOwner"${s.alertOwner ? ' checked' : ''}><span>向 owner 私聊发送告警<small>QQ 离线超过五分钟、模型鉴权失败、连续三条失败时发送，30 分钟内最多一条。${config.owner ? '' : '（当前没有配置 owner，开关不会生效）'}</small></span></label></fieldset>
 <button>保存设置</button></form></section>`;
     }

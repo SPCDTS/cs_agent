@@ -294,7 +294,8 @@ export class Dispatcher {
       },
       this.ctx,
     );
-    trace.event(ticket, "admitted", { scope, detail: { conversation: conv.id } });
+    // 派发设置快照进观测，票据页据此显示后端 · 模型 · 档位（来源）。
+    trace.event(ticket, "admitted", { scope, detail: { conversation: conv.id, settings } });
     trace.event(ticket, "routed", { scope, detail: route });
     log.info("message routed", {
       ticket: short(ticket),

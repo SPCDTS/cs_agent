@@ -51,6 +51,22 @@ export async function loadCodexContextWindow(opts: {
   return windowTokens;
 }
 
+/** 面板模型下拉的选项：启动时读一次缓存目录；缺失、损坏或为空时返回 []（面板退化为文本框）。 */
+export async function loadCodexModelCatalog(cacheFile: string): Promise<{ slug: string; contextWindow?: number }[]> {
+  try {
+    const catalog = JSON.parse(await fs.readFile(cacheFile, "utf8")) as { models?: { slug?: unknown; context_window?: unknown }[] };
+    if (!Array.isArray(catalog?.models)) return [];
+    const seen = new Set<string>();
+    return catalog.models.flatMap(m => {
+      const slug = m?.slug;
+      if (typeof slug !== "string" || !/^[A-Za-z0-9._/-]+$/.test(slug) || seen.has(slug)) return [];
+      seen.add(slug);
+      const cw = m.context_window;
+      return [typeof cw === "number" && Number.isSafeInteger(cw) && cw > 0 ? { slug, contextWindow: cw } : { slug }];
+    });
+  } catch { return []; }
+}
+
 /** 启动时只读缓存目录；不可用时允许安全的非空 slug，由 runner 再做参数校验。 */
 export async function loadCodexModelValidator(cacheFile: string): Promise<(slug: string) => boolean> {
   let slugs: Set<string> | undefined;

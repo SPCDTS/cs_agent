@@ -13,18 +13,19 @@ import { registerSecrets } from '../../src/shared/redact.js';
 import { ContextStore } from '../../src/context/store.js';
 import { loadConfig } from '../../src/config.js';
 import { SettingsStore, SETTINGS_TICKET, type RuntimeSettings, type SettingsValidators } from '../../src/agent/settings.js';
-import { CodexRunner } from '../../src/agent/codex/runner.js';
+import { CodexRunner, REASONING_EFFORTS } from '../../src/agent/codex/runner.js';
 import { CodexBackend } from '../../src/agent/backends/codex.js';
 import { FIXTURES } from '../agent/helpers.js';
 import { ContextUsageStub } from './fixtures/context-usage-stub.js';
 import { CodexPromptStub } from './fixtures/codex-prompt-stub.js';
+import { dispatchSettingsLine, type ModelCatalogView } from '../../src/obs/ui/dashboard-pages.js';
 
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
 const defaults: RuntimeSettings = { codexModel: 'gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false };
 
-async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv } = {}) {
+async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv; modelCatalog?: ModelCatalogView } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
   const store = new ObsStore(dir), context = new ContextStore(dir);
   trace.attach(store);
@@ -36,7 +37,7 @@ async function rig(extra: { validators?: SettingsValidators; contextUsage?: Cont
   const resetPi = vi.fn(async () => 42);
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
   const codexPrompt = extra.codexPrompt === null ? undefined : extra.codexPrompt ?? new CodexPromptStub();
-  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, contextUsage: extra.contextUsage, codexPrompt,
+  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog,
     health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, comfy: { ok: true }, codex: { ok: false }, deepseek_key_present: true }),
     queue: () => ({ active: 1, slots: 2, waiting: 1, scopes: { 'group:7': 1 } }),
     codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'group:7', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
@@ -571,5 +572,92 @@ describe('运行时模型设置 POST', () => {
       expect(response.status).toBe(400); expect(await response.text()).toContain('设置未保存');
       expect(readFileSync(r.settings.file, 'utf8')).toBe(before);
     }
+  });
+});
+
+describe('运行时模型设置页（§5）', () => {
+  const catalog: ModelCatalogView = {
+    codex: () => [{ slug: 'gpt-6.1-sol', contextWindow: 500_000 }, { slug: 'codex/gpt-6-astra', contextWindow: 272_000 }, { slug: 'bare<x>' }],
+    pi: () => [{ id: 'deepseek-flash', contextWindow: 128_000, thinkingLevels: ['off', 'low', 'high', 'max'] },
+      { id: 'codex/gpt-6.1-sol', contextWindow: 500_000, thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] }],
+  };
+  const magpie = { AGENT_MODEL_PROVIDER: 'magpie', CODEX_MAGPIE_URL: 'http://gateway.example:3425/v1', CODEX_MAGPIE_KEY: 'test-model-ui-key' };
+  const select = (html: string, name: string) => new RegExp(`<select name="${name}">([^]*?)</select>`).exec(html)?.[1];
+  const options = (inner: string | undefined) => [...(inner ?? '').matchAll(/<option value="([^"]*)"(?: selected)?>([^<]*)<\/option>/g)].map(m => m[1]);
+  const selected = (inner: string | undefined) => /<option value="([^"]*)" selected>/.exec(inner ?? '')?.[1];
+
+  it('两组下拉：codex 模型附窗口、档位含 auto；pi 档位按当前模型过滤，当前值 selected', async () => {
+    const r = await rig({ env: magpie, modelCatalog: catalog });
+    const html = await (await r.get('/settings')).text();
+    expect(html).toContain('Codex 模型与推理强度'); expect(html).toContain('Pi 模型与思考档位');
+    const codexModel = select(html, 'codexModel');
+    expect(options(codexModel)).toEqual(['gpt-6.1-sol', 'codex/gpt-6-astra', 'bare&lt;x&gt;']);
+    expect(selected(codexModel)).toBe('gpt-6.1-sol');
+    expect(codexModel).toContain('gpt-6.1-sol · 窗口 500k'); expect(codexModel).toContain('codex/gpt-6-astra · 窗口 272k');
+    expect(html).not.toContain('bare<x>');
+    const codexEffort = select(html, 'codexReasoningEffort');
+    expect(options(codexEffort)).toEqual(['auto', ...REASONING_EFFORTS]); expect(selected(codexEffort)).toBe('high');
+    expect(html).toContain('派发时按消息难度自动选档，结果见票据页');
+    const piModel = select(html, 'piModel');
+    expect(options(piModel)).toEqual(['deepseek-flash', 'codex/gpt-6.1-sol']); expect(selected(piModel)).toBe('deepseek-flash');
+    expect(piModel).toContain('deepseek-flash · 窗口 128k');
+    const piLevel = select(html, 'piThinkingLevel');
+    expect(options(piLevel)).toEqual(['auto', 'off', 'low', 'high', 'max']); expect(selected(piLevel)).toBe('low');
+    expect(html).not.toContain('模型目录不可用');
+    expect(html).not.toMatch(/\sstyle="/); expect(html).not.toContain('test-model-ui-key');
+
+    await r.settings.update({ codexModel: 'gpt-old', codexReasoningEffort: 'auto', piModel: 'codex/gpt-6.1-sol', piThinkingLevel: 'max' }, 'test');
+    const after = await (await r.get('/settings')).text();
+    const keptCodex = select(after, 'codexModel');
+    expect(options(keptCodex)[0]).toBe('gpt-old'); expect(selected(keptCodex)).toBe('gpt-old'); expect(keptCodex).toContain('gpt-old（不在目录中）');
+    expect(selected(select(after, 'codexReasoningEffort'))).toBe('auto');
+    expect(selected(select(after, 'piModel'))).toBe('codex/gpt-6.1-sol');
+    // codex/gpt-6.1-sol 不支持 max：仍保留当前值作为选项。
+    expect(options(select(after, 'piThinkingLevel'))).toEqual(['max', 'auto', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+    expect(selected(select(after, 'piThinkingLevel'))).toBe('max');
+    expect(after.match(/与 \.env 不同/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(after).toContain('Codex 模型：gpt-6.1-sol → gpt-old'); expect(after).toContain('Pi 思考档位：low → max');
+    const overview = await (await r.get('/')).text();
+    for (const m of ['Codex 模型', 'gpt-old', 'Pi 模型', 'codex/gpt-6.1-sol', 'Pi 思考档位', 'Codex 推理强度']) expect(overview).toContain(m);
+  });
+
+  it('codex 目录为空或缺省时退化为文本框并提示', async () => {
+    for (const modelCatalog of [undefined, { codex: () => [], pi: catalog.pi }, { codex: () => { throw new Error('boom'); }, pi: catalog.pi }]) {
+      const r = await rig({ env: magpie, modelCatalog });
+      const html = await (await r.get('/settings')).text();
+      expect(select(html, 'codexModel')).toBeUndefined();
+      expect(html).toContain('<input name="codexModel" value="gpt-6.1-sol"');
+      expect(html).toContain('模型目录不可用');
+      expect(options(select(html, 'codexReasoningEffort'))[0]).toBe('auto');
+    }
+  });
+
+  it('pi 提供者不是 magpie 时模型只读，hidden input 保持原值；档位仍可选', async () => {
+    const r = await rig({ env: { AGENT_MODEL_PROVIDER: 'deepseek' }, modelCatalog: { codex: catalog.codex, pi: () => [] } });
+    const html = await (await r.get('/settings')).text();
+    expect(select(html, 'piModel')).toBeUndefined();
+    expect(html).toContain('<input type="hidden" name="piModel" value="deepseek-flash">');
+    expect(html).toContain('提供者 deepseek 下只读');
+    expect(options(select(html, 'piThinkingLevel'))).toEqual(['auto', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+    const res = await r.post('/settings', { _csrf: r.csrf, agentBackend: 'codex', backendOverrides: '', codexReasoningEffort: 'high', piModel: 'deepseek-flash', piThinkingLevel: 'auto' });
+    expect(res.status).toBe(303);
+    expect(r.settings.current()).toMatchObject({ piModel: 'deepseek-flash', piThinkingLevel: 'auto' });
+  });
+
+  it('票据页派发设置行显示后端 · 模型 · 档位与 auto 来源；旧票据不显示', async () => {
+    const r = await rig();
+    trace.event('t-auto', 'admitted', { scope: 'group:7', detail: { conversation: 'c1', settings: { backend: 'codex', codexReasoningEffort: 'low', codexModel: 'gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', effortSource: 'auto' } } });
+    trace.event('t-pi', 'admitted', { scope: 'group:7', detail: { conversation: 'c2', settings: { backend: 'pi', codexReasoningEffort: 'high', codexModel: 'gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'high', effortSource: 'auto-fallback' } } });
+    trace.event('t-fixed', 'admitted', { scope: 'group:7', detail: { conversation: 'c3', settings: { backend: 'codex', codexReasoningEffort: 'xhigh', codexModel: 'gpt-6.1-sol', effortSource: 'fixed' } } });
+    trace.event('t-old', 'admitted', { scope: 'group:7', detail: { conversation: 'c4' } });
+    const row = async (t: string) => /<dt>派发设置<\/dt><dd>([^<]*)<\/dd>/.exec(await (await r.get('/tickets/' + t)).text())?.[1];
+    expect(await row('t-auto')).toBe('Codex · gpt-6.1-sol · low（来源 auto）');
+    expect(await row('t-pi')).toBe('Pi · deepseek-flash · high（来源 auto-fallback）');
+    expect(await row('t-fixed')).toBe('Codex · gpt-6.1-sol · xhigh');
+    expect(await row('t-old')).toBeUndefined();
+    expect((await r.get('/tickets/t-old')).status).toBe(200);
+    // 旧快照缺模型字段时只显示已有部分。
+    expect(dispatchSettingsLine({ backend: 'codex', codexReasoningEffort: 'high' })).toBe('Codex · high');
+    expect(dispatchSettingsLine({ backend: 'pi', codexReasoningEffort: 'high' })).toBe('Pi');
   });
 });

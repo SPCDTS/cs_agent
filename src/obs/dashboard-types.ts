@@ -10,6 +10,7 @@ import type { LiveBus } from './live.js';
 import type { ThreadKey } from '../agent/backends/types.js';
 import type { Trace } from '../shared/trace.js';
 import type { ContextUsageView } from '../shared/format.js';
+import type { ModelCatalogView } from './ui/dashboard-pages.js';
 
 export interface DashboardOptions {
   config: Config; store: ObsStore; context: ContextStore;
@@ -32,6 +33,8 @@ export interface DashboardOptions {
   contextUsage?: ContextUsageView;
   /** codex 系统提示（src/agent/codex/prompt.ts 的 CodexPromptStore）：受管段只读，自定义段 codex.md 可编辑 */
   codexPrompt?: CodexPromptView;
+  /** 设置页模型下拉的可选清单（启动时读一次）；缺省或为空时 codex 退化为文本框 */
+  modelCatalog?: ModelCatalogView;
 }
 
 /** CodexPromptStore 的结构类型：面板只依赖这三个方法。 */

@@ -57,6 +57,8 @@ it('前缀图片票据和 Codex agent 票据通过真实 dispatcher/任务，记
   expect(stages('agent')).toEqual(['admitted','routed','dispatched','phase:handle','backend:codex','thread_wait','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','postprocess','phase:reply','reply','reply_sent','phase:reply','reply_sent']);
   expect(r.store.events('image').find(e=>e.stage==='image:submit'&&e.status==='ok')?.detail_json).toContain('prompt-fake');
   expect(r.store.events('agent').find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')?.duration_ms).toBe(12);
+  // 派发设置快照随 admitted 入观测，票据页据此显示后端 · 档位。
+  expect(JSON.parse(r.store.events('agent').find(e=>e.stage==='admitted')!.detail_json).settings).toMatchObject({backend:'codex',codexReasoningEffort:'high',effortSource:'fixed'});
   expect(r.store.tickets().every(t=>t.status==='sent')).toBe(true);
   expect(complete).not.toHaveBeenCalled();expect(r.faux.state.callCount).toBe(0);
   const events=r.store.events('agent');

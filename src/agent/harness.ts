@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Context } from "@earendil-works/chord";
-import { clampThinkingLevel, type Api, type Model, type Models, type MutableModels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, getSupportedThinkingLevels, type Api, type Model, type Models, type MutableModels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { createRegistry, Harness, type Extension, type Storage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -39,6 +39,13 @@ export async function createAgentModels(
 /** 把配置的思考档位收敛到模型支持的档位（不支持时就近取值；无推理能力的模型为 off）。 */
 export function resolveThinkingLevel(model: Model<Api>, level: ModelThinkingLevel): ModelThinkingLevel {
   return clampThinkingLevel(model, level);
+}
+
+/** 面板 pi 模型下拉：提供者下的模型、窗口与可选档位（与 clampThinkingLevel 同一判定，不含 auto）。 */
+export function piModelCatalog(models: Pick<Models, "getModels">, provider: string): { id: string; contextWindow: number; thinkingLevels: string[] }[] {
+  try {
+    return models.getModels(provider).map(m => ({ id: m.id, contextWindow: m.contextWindow, thinkingLevels: getSupportedThinkingLevels(m) }));
+  } catch { return []; }
 }
 
 export interface OpenHarnessOptions {

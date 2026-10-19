@@ -1,4 +1,4 @@
-import { loadCodexModelValidator } from "./agent/codex/model-catalog.js";
+import { loadCodexModelCatalog, loadCodexModelValidator } from "./agent/codex/model-catalog.js";
 import { MediaRecall } from "./context/media.js";
 import { RecallTokens, startMediaRecallServer } from "./context/media-recall-server.js";
 import { ContextUsageStore } from "./agent/context-usage.js";
@@ -21,7 +21,7 @@ import { log, setLogLevel } from "./shared/log.js";
 import { findUnwritable, processIdentity } from "./fs-check.js";
 import { createQQBridge } from "./qq/index.js";
 import type { Channel } from "./channel/types.js";
-import { createAgentModels, openHarness, resolveThinkingLevel } from "./agent/harness.js";
+import { createAgentModels, openHarness, piModelCatalog, resolveThinkingLevel } from "./agent/harness.js";
 import { createCsAgentExtension } from "./agent/extension.js";
 import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
 import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
@@ -171,6 +171,10 @@ async function main(): Promise<void> {
     codexModel: await loadCodexModelValidator(path.join(cfg.codexHome, "models_cache.json")),
     piModel: id => !!models.getModel(cfg.AGENT_MODEL_PROVIDER, id),
   });
+  // 设置页下拉清单：启动读一次（与校验器同源），重启后更新。
+  const codexCatalog = await loadCodexModelCatalog(path.join(cfg.codexHome, "models_cache.json"));
+  const piCatalog = piModelCatalog(models, cfg.AGENT_MODEL_PROVIDER);
+  const modelCatalog = { codex: () => codexCatalog, pi: () => piCatalog };
   log.info("runtime settings loaded", { ...settings.current() });
   const currentPiModel = () => ({ provider: cfg.AGENT_MODEL_PROVIDER, modelId: settings.current().piModel });
   const autoModel = cfg.AUTO_EFFORT_MODEL ? models.getModel("magpie", cfg.AUTO_EFFORT_MODEL) : undefined;
@@ -313,7 +317,7 @@ async function main(): Promise<void> {
   const piStatus = async () => ({ threads: await pi.readThreadIds(), ...await pi.threadHealth(),
     compaction: obs.degraded ? [] : obs.db.prepare("SELECT json_extract(detail_json,'$.conversation') conversation, COUNT(*) attempts, MAX(ts) last_at FROM events WHERE stage='compaction' GROUP BY conversation").all(),
     usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
-  const dashboardData = { contextUsage, codexPrompt };
+  const dashboardData = { contextUsage, codexPrompt, modelCatalog };
   const dashboard = createDashboard({ ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
