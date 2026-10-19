@@ -204,3 +204,9 @@ Codex 历史重建规则（按 0.163.0 的 `rollout_reconstruction`）：回滚�
 - 主会话复跑：typecheck、75 文件 / 1064 项通过（1 文件 / 2 项为既有跳过）、build 通过；从干净分离 worktree 构建，队列空闲时部署，容器健康无告警。
 - 真实数据冒烟：画廊 2 张（总 2.66 MB），缩略图经 `/media/<sha>` 返回 `image/png` 1,031,768 B，`Cache-Control: private, max-age=3600`；详情页大图正常；非法 sha 400、未登记 sha 404、未登录 401；Agent 页占用条显示"53,864 / 475,000（11%）"并带"名义 500,000 / 有效 475,000"提示；分析页头部同时显示名义与有效窗口，历史类别徽标"已记录"且单列"部分不可用 4 条"；记忆首页图片卡"共 2 张"；浏览器零错误。
 - **观测面板 v2（O1–O6）至此全部上线。** 后续观察项：§10.1 按会话域分线程后，Agent 页会话列表与召回归属随真实回合逐步出现；官方 trace 目录体量按 `CODEX_TRACE_MAX_MB=512` 封顶；`summary_versions` 自下次整理起产生血缘。
+
+### 后续修复：Codex 基础指令可展开全文（2026-10-19，主会话验收）
+
+- 现象：上下文分析页"逐消息"第 1 条 system 基础指令（"You are Codex…"，约 4,154 token）只有 240 字预览、无"展开全文"按钮。原因：baseline 由 `session_meta`/`turn_context` 的 `base_instructions` 重建时未带位置，且 `contextRef` 只解析已索引块。
+- 修复（e1c31ce）：索引版本 3 → 4，基础指令作为独立 `baselines` 块索引（只存偏移，不进回合流与 SSE），`contextRef`/`content` 一并解析；pi 后端的 system prompt 由多段合成，暂未处理（另行设计）。
+- 验收：复跑 76 文件 / 1072 项通过；容器（镜像 239585a，由 cs-agent-b7 部署）中旧索引自动重建；API 返回 `ref{length 21,428}`，content 端点 `truncated=false`、首尾完整；headless Chromium 点击"展开全文（20.9 KB）"后正文由 240 字变为 21,420 字，页面零错误。
