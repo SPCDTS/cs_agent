@@ -12,7 +12,7 @@ import { AssistantEntry, createRegistry, defineDoc, Harness, ROOT_CONVERSATION_I
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { buildCodexPrompt } from "../codex/runner.js";
 import { collectNewImages } from "../../media/gen/image-collect.js";
-import { ticketImageDir } from "../../media/gen/image-gen.js";
+import { attachmentDirs } from "../../media/attach-paths.js";
 import { validateReferences } from "../../media/gen/image-references.js";
 import { codingEnvironment, codingTools } from "../pi-tools/coding.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
@@ -355,7 +355,8 @@ export class PiBackend implements AgentBackend {
       const answer = await conv.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
       const text = answer?.model?.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "text").map(c => c.text) : []).join("").trim();
       if (!text) throw new Error("pi 返回了空回复");
-      const images = await collectNewImages(ticketImageDir(path.join(this.opts.dataDir, "images"), req.ticket), new Set());
+      // 文件清单与 codex 使用同一票据路径，由 reply 阶段统一发送。
+      const images = await collectNewImages(attachmentDirs(this.opts.dataDir, req.ticket).attachDir, new Set());
       ctx.onEvent({ type: "pi_done", thread: req.threadKey, conversation: conv.id, images: images.length });
       return { text, images };
     });

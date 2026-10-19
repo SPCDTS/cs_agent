@@ -1,3 +1,5 @@
+import { readFileAttachments } from "../../src/media/attach.js";
+import { attachmentDirs } from "../../src/media/attach-paths.js";
 import { MemoryInstrumentation } from "../../src/obs/memory/instrumentation.js";
 import { ObsStore } from "../../src/obs/store.js";
 import { mediaFixture } from "../context/media-fixture.js";
@@ -650,6 +652,78 @@ describe("pi durable backend", () => {
     expect(replies).toHaveLength(1); expect(replies[0]!.ticket).toBe("dispatch-pi");
     expect(replies[0]!.text).toBe("# 图片好了 @你"); expect(replies[0]!.images).toHaveLength(1);
     expect(s.faux.state.callCount).toBe(2);
+  });
+});
+
+
+describe("pi 附件工具", () => {
+  it("使用本轮工作区，三文件四图片不消耗历史额度，重复内容只登记一次", async () => {
+    let seen!: TranscriptContext;
+    const s = await setup([
+      ...[0, 1, 2].map(i => call("qq_send_file", { path: i + ".txt" })),
+      call("qq_send_file", { path: "0.txt", name: "duplicate.txt" }),
+      ...[0, 1, 2, 3].map(i => call("qq_send_image", { path: i + ".png" })),
+      call("qq_send_file", { path: "extra.txt" }), call("qq_send_image", { path: "extra.png" }),
+      call("qq_recent"), ctx => { seen = ctx; return reply(); },
+    ]);
+    const work = path.join(s.dir, "pi-work", "group_7"); await fs.mkdir(work, { recursive: true });
+    for (const name of ["0", "1", "2", "3", "extra"]) {
+      await fs.writeFile(path.join(work, name + ".txt"), "文件" + name);
+      await fs.writeFile(path.join(work, name + ".png"), Buffer.concat([TRANSPARENT_PNG, Buffer.from(name)]));
+    }
+    const result = await s.pi.handle(request("pi-attach"), handleContext());
+    const tools = seen.messages.filter(m => m.role === "toolResult");
+    expect(tools.slice(0, 8).every(t => !t.isError)).toBe(true);
+    expect(tools.slice(8, 10).every(t => t.isError)).toBe(true);
+    expect(tools[10]!.isError).not.toBe(true);
+    expect(result.images).toHaveLength(4);
+    const files = await readFileAttachments(attachmentDirs(s.dir, "pi-attach").fileDir);
+    expect(files).toHaveLength(3); expect(files[0]!.originalPath).toBe(path.join(work, "0.txt"));
+    const id = (await s.pi.readThreadIds())["group:7"]!;
+    const doc = await s.pi.harness.snapshot(PiRequestDoc, id as ConversationId, context);
+    expect(Object.values(doc!.calls).filter(c => c.kind === "history")).toHaveLength(1);
+    expect(s.imageBackend.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(["group:7", "group:8"])("已召回媒体按当前访问范围校验：%s，失败分类为 qq_context", async scope => {
+    let seen!: TranscriptContext;
+    const s = await setup([]); const media = await mediaFixture(s.store, s.dir, scope);
+    s.faux.setResponses([call("qq_send_image", { path: media }), call("qq_send_file", { path: media }),
+      call("qq_send_file", { path: path.join(s.dir, "prompts", "agent.md") }), ctx => { seen = ctx; return reply(); }]);
+    const events: import("../../src/shared/trace.js").LiveEvent[] = [];
+    const stop = trace.tap(e => { if (e.ticket === "pi-attach-media") events.push(e); });
+    try { await s.pi.handle(request("pi-attach-media"), handleContext()); } finally { stop(); }
+    const tools = seen.messages.filter(m => m.role === "toolResult");
+    expect(tools.slice(0, 2).every(t => !!t.isError === (scope === "group:8"))).toBe(true);
+    expect(tools[2]!.isError).toBe(true);
+    const failure = events.find(e => e.stage === "tool:qq_send_file" && e.status === "failed")!;
+    expect(failure.detail.failure).toMatchObject({ provider: "qq_context" });
+    expect(events.some(e => e.stage === "memory_recall")).toBe(false);
+  });
+
+  it("通过 durable reply 发送文件与工作区图片，保留原文字回复", async () => {
+    const s = await setup([call("write", { path: "report.txt", content: "报告内容" }),
+      call("qq_send_file", { path: "report.txt", name: "报告.txt" }), call("qq_send_image", { path: "image.png" }), reply("已整理")]);
+    const work = path.join(s.dir, "pi-work", "group_7"); await fs.mkdir(work, { recursive: true });
+    await fs.writeFile(path.join(work, "image.png"), TRANSPARENT_PNG);
+    let sent = false;
+    const replies: { text: string; images?: string[] }[] = [];
+    const uploadFile = vi.fn(async (_type: string, _target: string, bytes: Buffer, name: string) => {
+      expect(sent).toBe(true); expect(bytes.toString()).toBe("报告内容"); expect(name).toBe("报告.txt"); return { file_id: "pi-file" };
+    });
+    const bridge = { uploadFile, getTicket: async (ticket: string) => ({ ticket_id: ticket, status: sent ? "sent" : "pending", seq: 1 }) as ReplyTicketRecord,
+      listPendingTickets: async () => [], reply: async (_ticket: string, text: string, images?: string[]) => {
+        replies.push({ text, images }); sent = true; return { message_id: "pi-msg", already_sent: false, message_type: "group" as const, target_id: "7" };
+      } };
+    const tasks = createTasks({ getBridge: () => bridge, imageBackend: s.imageBackend, imagesDir: path.join(s.dir, "images"),
+      backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: s.pi } }), owner: "1", store: s.store });
+    const harness = await openHarness({ models: s.models, extension: createCsAgentExtension(tasks), storage: new MemoryStorage() }, context);
+    cleanup.push(() => harness.close(context));
+    const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: 1, retryDelayMs: 1 });
+    await dispatcher.dispatch(inbound("file-msg", "7", "整理报告"), "pi-full-attach"); await dispatcher.idle();
+    expect(uploadFile).toHaveBeenCalledExactlyOnceWith("group", "7", Buffer.from("报告内容"), "报告.txt");
+    expect(replies[0]!.text).toBe("已整理"); expect(replies[0]!.images).toHaveLength(1);
+    await expect(fs.stat(attachmentDirs(s.dir, "pi-full-attach").fileDir)).rejects.toThrow();
   });
 });
 

@@ -1,5 +1,8 @@
+import path from "node:path";
+import { attachmentDirs, resolveAttachmentDir } from "../../media/attach-paths.js";
+import { DEFAULT_ATTACHMENT_LIMITS, type AttachmentLimits } from "../../media/attach.js";
 import type { RecallObserver } from "../../context/observer.js";
-import { BUILTIN_TOOLS } from "./coding.js";
+import { BUILTIN_TOOLS, PiExecutionEnv } from "./coding.js";
 import { redactText } from "../../shared/redact.js";
 import { recallTool } from "./recall.js";
 import type { MediaRecall } from "../../context/media.js";
@@ -11,7 +14,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, hook, section, ToolTask, GenerationTask, CompactionTask, type Harness } from "@earendil-works/pi-durable";
 import { parseAccess } from "../../context/access.js";
 import type { ContextStore } from "../../context/store.js";
-import { callQQContextTool } from "../../context/qq-context-tool.js";
+import { callQQAttachmentTool, callQQContextTool } from "../../context/qq-context-tool.js";
 import { imageTool, type PiImageBackend } from "./images.js";
 import { PiRequestDoc } from "./request.js";
 import { PiPromptLoader } from "./prompt.js";
@@ -24,6 +27,7 @@ export interface PiToolsOptions {
   getHarness: () => Harness;
   web?: DeepSeekWeb;
   maxContextChars?: number;
+  attachmentLimits?: AttachmentLimits;
   instrumentation?: RecallObserver;
   mediaRecall?: Pick<MediaRecall, "recall">;
   mediaRecallMaxPerTicket?: number;
@@ -70,6 +74,28 @@ export function createPiExtension(opts: PiToolsOptions) {
       });
     },
   });
+  const attachment = (name: "qq_send_image" | "qq_send_file") => defineTool({
+    name, description: name === "qq_send_image" ? "登记工作区或当前范围已召回的图片，随本次回复发送。" : "登记工作区或当前范围已召回的文件，在文字回复后发送。",
+    parameters: Type.Object({ path: Type.String({ minLength: 1, maxLength: 1024 }),
+      ...(name === "qq_send_file" ? { name: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })) } : {}) }, { additionalProperties: false }),
+    replay: "safe",
+    async execute(args, api, context) {
+      return boundary(api.taskId, "qq_context", async () => {
+        const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);
+        const env = api.env;
+        if (!bound?.ticket || !(env instanceof PiExecutionEnv) || env.policy.ticket !== bound.ticket) throw new Error("附件工具缺少本轮工作区");
+        const result = await callQQAttachmentTool({ access: parseAccess(bound.access), openStore: () => opts.store,
+          attachments: async () => {
+            const dirs = attachmentDirs(opts.dataDir, bound.ticket);
+            return { dataDir: opts.dataDir, workdir: env.policy.workspace,
+              attachDir: await resolveAttachmentDir(dirs.attachDir, path.join(opts.dataDir, "images"), "QQ_ATTACH_DIR"),
+              fileDir: await resolveAttachmentDir(dirs.fileDir, path.join(opts.dataDir, "files"), "QQ_FILE_DIR"),
+              limits: opts.attachmentLimits ?? DEFAULT_ATTACHMENT_LIMITS };
+          } }, name, args);
+        return { ...output(result.content.filter(c => c.type === "text").map(c => c.text).join("\n")), isError: result.isError === true };
+      });
+    },
+  });
   return defineExtension({
     name: "cs-pi",
     sections: [section("cs-pi", () => prompt.read(), { tag: false })],
@@ -104,6 +130,8 @@ export function createPiExtension(opts: PiToolsOptions) {
           return { block: reason };
         };
         if (Date.now() >= bound.deadline) return block("pi 请求已超时");
+        // 附件按实际登记内容限额，重复登记不占次数，也不消耗聊天记录工具额度。
+        if (call.name === "qq_send_image" || call.name === "qq_send_file") return undefined;
         const kind = BUILTIN_TOOLS.has(call.name) ? "builtin" : call.name === "qq_image" ? "qq_image" : call.name.startsWith("qq_") ? "history" : call.name;
         const limit = kind === "builtin" ? 20 : kind === "qq_image" ? opts.mediaRecallMaxPerTicket ?? 5 : kind === "generate_image" ? 2 : 4;
         const allowed = await opts.getHarness().commit(async tx => {
@@ -134,6 +162,7 @@ export function createPiExtension(opts: PiToolsOptions) {
       } }),
     ],
     tools: [
+      attachment("qq_send_image"), attachment("qq_send_file"),
       defineTool({ ...recall, execute: (args, api, context) => boundary(api.taskId,"media_recall",async () => recall.execute(args,api,context)) }),
       defineTool({ name: "web_search", description: "搜索事实资料，返回标题、日期、摘要与来源链接。", replay: "safe",
         parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 128 }), count: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })) }, { additionalProperties: false }),
