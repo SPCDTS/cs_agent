@@ -176,6 +176,43 @@ P0 最终临时例外共 16 条（与 `test/architecture/deps.test.ts` 完全对
 
 其中 `pi → pi-adapter`、`select → pi`、`config → backends/types`、`memory-pages → aging` 是扫描确认的现有边，P2 需连同原表列出的边一起处理。当前媒体代码仍在原包内，尚无违反 media 规则的实际文件边，未为不存在的边预留例外。
 
+### 6.2 P1 实际搬迁对照
+
+分层澄清：下载、魔数与尺寸校验是 QQ 传输依赖的底层能力，因此将 §1 的层序修正为 media（2）→ qq（3），且 media 禁止依赖任何 qq 模块（包括 qq/types），不增加白名单或临时例外。
+
+本轮只实施 P1。整文件迁移使用 `git mv`，调用处同步更新 import；通用校验与媒体访问权限检查按职责拆分，函数签名和实现逻辑保持不变。
+
+| 旧路径 | 新路径 | 移动的导出 / 逻辑 |
+|---|---|---|
+| `src/qq/image-header.ts` | `src/media/header.ts` | `validateImageHeader`，含容器头、动画与尺寸校验 |
+| `src/qq/incoming-http.ts` | `src/media/download.ts` | `downloadImage`、`DownloadHooks`、`forbiddenAddress`，含地址检查、DNS 固定、重定向和下载边界 |
+| `src/qq/image.ts` | `src/media/limits.ts` | `MAX_IMAGES`、`MIN_IMAGE_BYTES`、`MAX_IMAGE_BYTES`、`MAX_TOTAL_IMAGE_BYTES`、`isSupportedImage`、`loadImage` 及私有根目录/有界读取校验；`prepareImages`、`ImageSegment` 留在 qq，原有公开的校验导出保留兼容重导出 |
+| `src/agent/image-gen.ts` | `src/media/gen/image-gen.ts` | 生图后端、提交/收取/恢复/清理、失败分类与环境构造；只改 import，不改内部实现 |
+| `src/agent/image-references.ts` | `src/media/gen/image-references.ts` | `imageRefsValue`、`validateReferences`，即 TOML 参数与票据参考图校验 |
+| `src/agent/image-references.ts` | `src/context/image-references.ts` | `validateReferencesWithMedia`，保留原签名、媒体访问范围检查与读取顺序 |
+| `src/agent/image-collect.ts` | `src/media/gen/image-collect.ts` | `listFiles`、`collectNewImages` |
+| `src/agent/image-options.ts` | `src/media/gen/image-options.ts` | 参数 schema、尺寸预设、验证与超时预算 |
+| `src/agent/image-pending.ts` | `src/media/gen/image-pending.ts` | 延迟收图清单、原子保存、隔离与目录校验 |
+| `src/agent/image-files.ts` | `src/media/gen/image-files.ts` | 图片文件清单、校验与原子落盘 |
+| `src/agent/qwen-workflow.ts` | `src/media/gen/qwen-workflow.ts` | Qwen 模型配置与工作流构造，内容不变 |
+| `src/obs/image.ts` | `src/media/gen/observed.ts` | `observeImages`，通过 shared/trace 包装生图生命周期 |
+| `src/obs/image-events.ts` | `src/media/gen/events.ts` | `ImageEventSpool`、`ingestImageEvents`、`IMAGE_EVENT_BYTES`；`ObsEvent` 类型改从 shared/trace 导入 |
+
+实现说明：
+
+- `image-events` 属于生图任务生命周期：子进程只向票据目录内的 `obs-events.jsonl` 写入 submit/collect/recovered 事件，主进程领取并校验后调用共享 Trace。它不打开 `observability.sqlite`、不定义观测表，也不被面板直接读取，因此整文件迁入 media/gen，无需新增注入接口。
+- 原 `image-references.ts` 的 `validateReferencesWithMedia` 依赖 ContextStore、Access 与受限媒体读取。将这一段原样放到新增的 context/image-references，其余通用部分迁入 media/gen，避免 media → context；MCP 与 pi 工具仅调整 import，原参数、错误信息、检查顺序均保留。这是对 P1 整文件搬迁表的必要细分，未提前实施 P2 的观察者接口。
+- `loadImage` 的根目录和文件大小校验同样属于通用媒体逻辑，一并迁入 limits，避免生图实现反向依赖 qq/image。当前 media 无需 qq/types 的任何类型，未新增 media/types 或类型重导出。
+- `src/main.ts`、`src/mcp/qq-context.ts`、`src/mcp/image-gen.ts` 的入口路径保持不变；context 媒体持久化/召回服务、MCP 适配和 agent 调度留在原目录。
+
+依赖守卫删除以下三条 P1 例外；其余 **13 条均为 §6.1 列出的 P2 例外，原样保留**，没有新增例外。测试同时拒绝 media → qq/image 与 media → qq/types。
+
+| 删除的 from | 删除的 to |
+|---|---|
+| `src/agent/pi-tools/images.ts` | `src/obs/image.ts` |
+| `src/agent/tasks.ts` | `src/obs/image-events.ts` |
+| `src/agent/tasks.ts` | `src/obs/image.ts` |
+
 ## 7. 验收记录
 
 ### P0 本地验收（2026-10-19）
@@ -187,3 +224,22 @@ P0 最终临时例外共 16 条（与 `test/architecture/deps.test.ts` 完全对
 - 当前 123 个源文件、466 条去重文件依赖边、59 条跨目录依赖对；按 §0 相同口径（物理目录、双向边对，非所有简单环枚举）包级环为 **7 对**，满足 P0 ≤ 10。
 - 7 对分别为：`src ↔ src/obs`、`src/agent ↔ src/agent/backends`、`src/agent ↔ src/agent/pi-tools`、`src/agent ↔ src/obs`、`src/context ↔ src/obs/memory`、`src/obs ↔ src/obs/memory`、`src/obs ↔ src/obs/sessions`。
 - `docs/ARCHITECTURE.md` §4 已同步布局。P1/P2、容器验收与浏览器 smoke 留待后续阶段；本轮任务说明明确排除镜像与部署。
+
+### P1 本地验收（2026-10-19）
+
+- 分支 `refactor/package-layout-p1`；所有实现和提交均在 `D:/project/cs_agent-p1`。仅实施 P1，未构建镜像、未部署，未修改 data/、入口脚本或依赖清单；任务文件不提交。
+- `npm.cmd run typecheck` 通过，覆盖源码和测试两个 tsconfig；`test/architecture/deps.test.ts` 的 **14 项全部通过**。三条 P1 例外已删，13 条 P2 例外原样保留，无新增白名单或例外。
+- `npx.cmd vitest run` 全量首轮为 **73 个文件通过 / 4 个文件失败 / 1 个文件跳过；1069 项通过 / 26 项失败 / 2 项跳过**（1097 项，156.52 秒）。其中入口脚本的 22 项因系统临时目录的 shell 写入检查失败；仅将该次测试的 TEMP/TMP 指向本 worktree 的 `workspace/layout-p1/test-tmp` 后，`test/entrypoint.test.ts` **22 项全部通过**，没有改动测试或入口脚本。
+- 剩余 4 项进程终止/恢复用例单独重跑后仍失败，沙箱内对自建短生命周期子进程执行 `taskkill` 得到 `ERROR: Access denied`。未申请或等待沙箱外审批；下表仍需主会话在沙箱外验证。另有 `test/agent/pi-sandbox-linux.test.ts` 的两项真实 bwrap 测试按平台条件跳过（文件隔离、loopback 网络与进程树超时/取消），未在 Windows 验证。
+
+| 未通过的测试文件 | 用例 | 沙箱内结果 |
+|---|---|---|
+| `test/agent/codex-runner.test.ts` | `timeout kills the process tree and throws CodexTimeoutError` | 子进程约 20 秒自行结束，未满足 < 8 秒的终止断言 |
+| `test/agent/backends.test.ts` | `two restarts while queued keep attempts at zero, then the ticket runs once (F5)` | 等待取消中的子进程，30 秒超时 |
+| `test/agent/dispatch.test.ts` | `crash after codex wrote its output but before the agentResult commit → recovery reuses the file; codex runs exactly once (R1)` | 30 秒测试超时，清理 hook 10 秒超时 |
+| `test/agent/dispatch.test.ts` | `crash mid-turn (marker, no output) → logged as interrupted and re-asked exactly once (R1)` | 30 秒测试超时，清理 hook 10 秒超时 |
+
+- `npm.cmd run build` 通过；`dist/main.js`、`dist/mcp/qq-context.js`、`dist/mcp/image-gen.js` 均存在。真实 image_gen/qq_context stdio 测试通过，入口路径保持不变。
+- 当前 125 个源文件、468 条去重文件依赖边、66 条跨物理目录依赖对；按 P0 相同口径包级双向依赖为 **5 对**。media 的跨包依赖仅指向 shared，没有 qq（含 types）、context、agent、obs 或 mcp 依赖。
+- 5 对为：`src ↔ src/obs`、`src/agent ↔ src/agent/backends`、`src/context ↔ src/obs/memory`、`src/obs ↔ src/obs/memory`、`src/obs ↔ src/obs/sessions`，后续处理仍留给 P2。
+- 按迁移前版本逐项比对：10 个整文件迁移除 import 外内容一致；参考图权限拆分、通用读取校验与 QQ 图片段函数保持原样。变更文本保留 UTF-8、无 BOM、CRLF。`docs/ARCHITECTURE.md` §4 与本文 §6.2 已同步实际布局及澄清。

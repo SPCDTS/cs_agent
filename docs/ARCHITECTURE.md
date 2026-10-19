@@ -71,13 +71,20 @@ cs_agent/
 │  │  ├─ trace.ts               事件总线、ObsEvent/TraceStore 结构契约
 │  │  ├─ usage.ts, errors.ts     token 用量归一化、成本与失败分类
 │  │  └─ format.ts              数字格式化与上下文占用计算
+│  ├─ media/                     QQ 下层的通用媒体能力，不依赖 qq/context/agent/obs/mcp
+│  │  ├─ header.ts              图片容器头、动画与尺寸校验
+│  │  ├─ download.ts            安全下载、地址检查与 DownloadHooks
+│  │  ├─ limits.ts              图片数量/大小限制、魔数、根目录与文件读取校验
+│  │  └─ gen/                  生图后端、参考图、参数、收集、清单、Qwen 工作流与事件
+│  │     ├─ image-gen.ts        comfy-mcp(stdio) / HTTP，任务与 image_gen MCP 共用
+│  │     └─ observed.ts, events.ts  Trace 包装与票据旁路事件，不打开观测数据库
 │  ├─ qq/                        ★ Agent B 独占
 │  │  ├─ types.ts                ★ 主会话契约（只读）
 │  │  ├─ bridge.ts               createQQBridge：WS 收事件、HTTP 发送、重连、心跳、去重
 │  │  ├─ policy.ts               授权 / 触发规则（allowUsers、allowGroups、真实 at 段）
 │  │  ├─ reply-store.ts          票据持久化（node:sqlite），pending→sending→sent|uncertain
 │  │  ├─ ticket.ts               入站票据重建与旧 route_text 兼容转换
-│  │  ├─ image.ts                图片校验（魔数、大小、根目录、≤4 张/20MiB）→ base64:// 段
+│  │  ├─ image.ts                复用 media 校验，组装 OneBot base64:// 图片段
 │  │  └─ index.ts                导出 createQQBridge
 │  ├─ agent/                     ★ Agent A
 │  │  ├─ harness.ts              createModels + openai-codex provider + 注册表 + SQLite storage
@@ -86,12 +93,11 @@ cs_agent/
 │  │  ├─ tasks.ts                defineTask：cs.image（generate → reply）、cs.agent（handle → postprocess → reply）
 │  │  ├─ backends/               AgentBackend 接口、AGENT_BACKEND 选择、codex 适配、pi 占位
 │  │  ├─ codex-runner.ts         固定 codex 线程 owner/shared；互斥队列；JSONL 解析；线程 id 持久化；AGENTS.md
-│  │  ├─ image-gen.ts            生图实现：comfy-mcp(stdio) / HTTP，失败分类（任务与 image_gen MCP 共用）
-│  │  ├─ image-collect.ts        回合内新图片收集（≤4，魔数校验）
 │  │  ├─ reply-postprocess.ts    回复发送保护（≤4000，不改格式）
 │  │  └─ dispatch.ts             admit（会话 + TicketDoc + 索引）→ scope FIFO → 建任务 → waitForTask → 兜底
 │  ├─ context/                   消息库、访问范围、格式化、衰老与媒体持久化
 │  │  ├─ access.ts               访问范围校验、owner 解析与 scopeLabel
+│  │  ├─ image-references.ts    票据附件与媒体库参考图的访问权限校验
 │  │  ├─ qq-context-tool.ts      QQ 召回工具实现，供 MCP、pi 与面板共用
 │  │  └─ recall-results.ts       按实际返回正文计算召回命中
 │  ├─ obs/                       观测存储、路由与面板
@@ -109,7 +115,7 @@ cs_agent/
 └─ scripts/                      init-auth.ps1（把宿主机 ~/.codex/auth.json 复制进 ./data/codex/）
 ```
 
-P0 搬迁对照、分层规则与待清理例外见 [包结构设计 §6.1](DESIGN-package-layout.md#61-p0-实际搬迁对照)。依赖守卫位于 `test/architecture/deps.test.ts`；P1 的 media 与 P2 的 codex/观察者整理尚未实施。
+P0/P1 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-layout.md#61-p0-实际搬迁对照)、[§6.2](DESIGN-package-layout.md#62-p1-实际搬迁对照)。依赖守卫位于 `test/architecture/deps.test.ts`；media 位于 qq 下层，剩余 13 条临时例外均留给 P2 的 codex/接口/配置/观察者整理。
 
 ## 5. 关键设计决策
 
