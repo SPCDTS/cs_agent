@@ -98,4 +98,11 @@ pi 的 agent.md 也加这一段（这是工具用法说明，不是生图提示�
 
 ## 6. 验收记录
 
-（待填）
+### 2026-10-19，主会话验收（A 组 + B 组一次上线）
+
+- 分支 `feat/attachments`（基于 P2 的 75eac1f）7 条提交 cherry-pick 到 main（844b982…8695595）；主会话沙箱外复跑：typecheck 通过，79 文件 / 1137 项通过（含新增 `test/media/attach.test.ts`、`test/mcp/attachments.test.ts`），`npm run build` 三个 dist 入口存在。
+- 与设计的偏离（接受）：开关按任务书用 `CODEX_IMAGE_GEN`（非 §1 曾写的 `AGENT_IMAGE_TOOL`）；pi 提示词按用户澄清未改（§2.5 对 pi 的那句不执行）；pi 的工作区是执行策略里的 `${DATA_DIR}/pi-work/<scope>`，不是 `/workspace/<key>`（`docs/DESIGN-pi-agents-md.md` 据此修正）。
+- 代码审查要点：`media/attach.ts` 对路径逐级 lstat 拒绝软链接、O_NOFOLLOW 打开、读取期间 inode/大小不变、按 sha256 去重、manifest 原子写入、同票据串行；MCP 端 `resolveAttachmentDir` 要求三个目录分别是 `${DATA_DIR}/images`、`${DATA_DIR}/files`、`WORKSPACE_DIR` 的直接子目录且 realpath 不越界；reply 阶段 `fileUploads` 状态机 pending → sending → sent|uncertain，重启后遗留 sending 转 uncertain，只重传 pending，文字不重发。
+- 部署：镜像 `0c08125f…`（干净 worktree，main 8695595），队列空闲时切换，容器 healthy、无新告警。受管 `config.toml` 已无 `[mcp_servers.image_gen]`（仅注释提及），`WORKSPACE_DIR` 注入 qq_context；`/data/files` 已创建并进入 codex 禁读名单；线上 `data/prompts/codex.md` 本就没有"生图提示词指引"段，无需手工改。
+- 真实 stdio MCP 冒烟（`qq_context` 进程，注入三个目录变量）：`tools/list` 含 `qq_send_image`、`qq_send_file`；登记工作区文本文件 → "第 1/3 个"，同文件再登记仍为第 1 个（去重），工作区 PNG → "第 1/4 张"；`/data/codex/auth.json`、`.exe`、`../group_200000001/...` 三种来源均被拒绝并返回设计规定的错误文本；`manifest.json` 与 `attach-1/` 落盘正确。仪表盘三套浏览器冒烟零错误。
+- 待用户端到端验证：QQ 私聊让 bot 发一个工作区文件与一张工作区图片，确认文件消息到达、`reply_sent` 事件含 `files` 与 `file_id`；下一次真实 codex 回合的 developer 段应出现"发送图片与文件"小节且不再有 image_gen 工具定义。
