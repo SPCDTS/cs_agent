@@ -43,6 +43,7 @@ describe("model config defaults", () => {
       "/app/workflows/qwen-image-2.1-turbo-api.json",
     );
     expect(c.CODEX_SANDBOX_NETWORK).toBe(true);
+    expect(c.CODEX_WRITABLE_ROOTS).toBe("/workspace,/data/prompts");
   });
 });
 

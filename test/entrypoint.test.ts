@@ -214,6 +214,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
   });
 
   it("writes [sandbox_workspace_write] with network and validated writable roots", () => {
+    // 显式配置仍可开放 workflows；默认列表不再包含它。
     const def = parse(runEntrypoint({ CODEX_WRITABLE_ROOTS: "/workspace,/data/prompts,/data/workflows" }).toml);
     expect(def).toMatchObject({
       "sandbox_workspace_write.network_access": "true",
@@ -222,7 +223,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     // 默认值按实际 DATA_DIR / WORKSPACE_DIR 展开
     const d = runEntrypoint({});
     expect(parse(d.toml)["sandbox_workspace_write.writable_roots"]).toBe(
-      `["${d.dataDir.replace(/data$/, "ws")}", "${d.dataDir}/prompts", "${d.dataDir}/workflows"]`,
+      `["${d.dataDir.replace(/data$/, "ws")}", "${d.dataDir}/prompts"]`,
     );
     // 拒绝：相对路径、/、DATA_DIR 本身、CODEX_HOME 及其子目录、图片目录、*.sqlite、.. 与非法字符
     const dir = tmp("cs-entry-");
@@ -292,10 +293,10 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const env = { WORKFLOWS_SRC: posix(src) };
     runEntrypointIn(dir, env);
     expect(readFileSync(path.join(data, "workflows", "wf.json"), "utf8")).toBe("{\"v\":1}");
-    writeFileSync(path.join(data, "workflows", "wf.json"), "edited by codex");
+    writeFileSync(path.join(data, "workflows", "wf.json"), "edited by operator");
     writeFileSync(path.join(src, "wf.json"), "{\"v\":2}");
     runEntrypointIn(dir, env);
-    expect(readFileSync(path.join(data, "workflows", "wf.json"), "utf8")).toBe("edited by codex");
+    expect(readFileSync(path.join(data, "workflows", "wf.json"), "utf8")).toBe("edited by operator");
   });
 
   it("drops --sandbox only when PLAYWRIGHT_NO_SANDBOX=1", () => {

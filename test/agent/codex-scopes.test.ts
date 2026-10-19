@@ -100,13 +100,17 @@ describe("按会话域隔离 codex", () => {
       expect(row.argv).not.toContain("-s");
       expect(row.argv.some((arg: string) => arg.startsWith("sandbox_mode="))).toBe(false);
       const roots = JSON.parse(row.argv.find((arg: string) => arg.startsWith("sandbox_workspace_write.writable_roots=")).split("=")[1]);
-      expect(roots).toEqual(owner ? [ws, path.join(path.dirname(options.threadsFile), "prompts"), path.join(path.dirname(options.threadsFile), "workflows")] : [ws]);
+      expect(roots).toEqual(owner ? [ws, path.join(path.dirname(options.threadsFile), "prompts")] : [ws]);
+      const permissions = row.argv.find((arg: string) => arg.startsWith("permissions.cs_agent_scope="));
+      for (const root of roots) expect(permissions).toContain(`${JSON.stringify(root)}="write"`);
+      expect(permissions).not.toContain(JSON.stringify(path.join(path.dirname(options.threadsFile), "workflows")));
       expect(row.argv.some((arg: string) => arg.startsWith("developer_instructions="))).toBe(false);
       expect(row.argv).toContain("project_doc_max_bytes=131072");
       const rules = row.workspaceAgentsMd;
       expect(await fs.readFile(path.join(ws, "AGENTS.md"), "utf8")).toBe(rules);
       expect(rules).toContain("运维自定义中文指引");
       expect(rules).toContain(ws);
+      expect(rules).not.toContain("workflows");
       if (!owner) expect(rules).not.toContain(path.join(path.dirname(options.threadsFile), "prompts"));
     }
   });
@@ -138,10 +142,11 @@ describe("按会话域隔离 codex", () => {
 });
 
 describe("scope 工作区权限", () => {
-  it("只读会话不宣称可写；禁止关闭沙箱或把数据目录放在 workspace 内", () => {
+  it.each(["owner", "group:1", "private:1"])("%s 只读会话不宣称可写；禁止关闭沙箱或把数据目录放在 workspace 内", key => {
     const root = tmp();
-    const policy = codexWorkspacePolicy(path.join(root, "ws"), path.join(root, "data"), "group:1", "read-only", false);
+    const policy = codexWorkspacePolicy(path.join(root, "ws"), path.join(root, "data"), key, "read-only", false);
     expect(policy.writableRoots).toEqual([]);
+    expect(policy.args.join(" ")).not.toContain('="write"');
     expect(policy.args.join(" ")).toContain("enabled=false");
     expect(() => codexWorkspacePolicy(root, root, "owner", "workspace-write")).toThrow();
     expect(() => codexWorkspacePolicy(path.join(root, "ws"), root, "owner", "danger-full-access")).toThrow();

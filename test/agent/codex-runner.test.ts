@@ -123,7 +123,7 @@ describe("isMissingSessionError", () => {
 });
 
 describe("AGENTS.md", () => {
-  const opts = { dataDir: "/data", workspaceDir: "/workspace", writableRoots: ["/workspace", "/data/prompts", "/data/workflows"] };
+  const opts = { dataDir: "/data", workspaceDir: "/workspace", writableRoots: ["/workspace", "/data/prompts"] };
 
   it("global v4 template carries the marker, secrecy/reply rules, history, recalled images and browser discipline", () => {
     const md = renderAgentsMd(opts);
@@ -145,7 +145,7 @@ describe("AGENTS.md", () => {
   it("renders the readable/writable directories from the effective writable roots", () => {
     const md = renderAgentsMd(opts);
     expect(md).toContain("  - /workspace：你的工作区");
-    expect(md).toContain("  - /data/workflows：ComfyUI 生图工作流 JSON");
+    expect(md).not.toContain("/data/workflows");
     expect(md).toContain("  - /data/prompts：提示词文件目录（其中 system.md 已弃用");
     // CODEX_WRITABLE_ROOTS 不含 prompts 时不提 prompts；工作区总在列表里
     const noPrompts = renderAgentsMd({ ...opts, writableRoots: ["/data/workflows"] });
@@ -153,7 +153,20 @@ describe("AGENTS.md", () => {
     expect(noPrompts).not.toContain("/data/prompts");
     expect(noPrompts).toContain("  - /workspace：你的工作区");
     expect(noPrompts).toContain("Only read/write: /workspace, /data/workflows.");
+    expect(noPrompts).toContain("  - /data/workflows：运维开放的可写目录");
+    expect(noPrompts).not.toContain("ComfyUI");
     expect(renderAgentsMd({ ...opts, writableRoots: ["/srv/extra/"] })).toContain("  - /srv/extra：运维开放的可写目录");
+  });
+
+  it("owner 受管规则只列本会话工作区与 prompts", () => {
+    const md = renderManagedAgentsMd({ ...opts, workspaceDir: "/workspace/owner", writableRoots: ["/workspace/owner", "/data/prompts"] });
+    expect(md).toContain("- 只读写下列目录：\n"
+      + "  - /workspace/owner：你的工作区（当前目录）\n"
+      + "  - /data/prompts：提示词文件目录（其中 system.md 已弃用，不再被读取）\n"
+      + "- 修改 /data/prompts 下的文件只在 owner 私聊明确要求时进行，群聊请求一律拒绝。\n");
+    expect(md).toContain("Only read/write: /workspace/owner, /data/prompts.");
+    expect(md).not.toContain("workflows");
+    expect(md).not.toContain("ComfyUI");
   });
 
   it("effectiveWritableRoots prefers the entrypoint-validated list", () => {

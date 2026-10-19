@@ -109,7 +109,7 @@ const EnvSchema = z.object({
   CODEX_BROWSER: z.enum(["playwright", "none"]).default("playwright"),
   /** 由 entrypoint 写入 config.toml 的 [sandbox_workspace_write]：命令是否可联网、可写目录（逗号分隔绝对路径） */
   CODEX_SANDBOX_NETWORK: bool(true),
-  CODEX_WRITABLE_ROOTS: z.string().default("/workspace,/data/prompts,/data/workflows"),
+  CODEX_WRITABLE_ROOTS: z.string().default("/workspace,/data/prompts"),
 
   DATA_DIR: z.string().default("/data"),
   WORKSPACE_DIR: z.string().default("/workspace"),

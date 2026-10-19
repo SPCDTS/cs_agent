@@ -14,7 +14,7 @@ export function codexWorkspacePolicy(base: string, dataDir: string, key: string,
   }
   const workspaceDir = path.join(root, key.replace(":", "_"));
   const writableRoots = sandbox === "read-only" ? [] : [workspaceDir,
-    ...(key === "owner" ? [path.join(data, "prompts"), path.join(data, "workflows")] : [])];
+    ...(key === "owner" ? [path.join(data, "prompts")] : [])];
   const filesystem: Record<string, string> = {
     ":root": "read", [root]: "deny", [path.join(data, "pi-work")]: "deny",
     // 官方请求 trace 含各会话的完整输入，不能成为绕过线程隔离的读取入口。

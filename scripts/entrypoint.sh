@@ -18,7 +18,7 @@ for dir in "$DATA_DIR" "$WORKSPACE_DIR"; do
 done
 mkdir -p "$CODEX_HOME_DIR" "$DATA_DIR/images" "$DATA_DIR/files" "$DATA_DIR/tickets" "$DATA_DIR/prompts" "$DATA_DIR/incoming"
 
-# 项目自有、codex 可改的工作流目录：缺失时从镜像内 /app/workflows 复制一份（已存在则绝不覆盖）
+# ComfyUI 本地生图工作流目录：缺失时从镜像内 /app/workflows 复制一份（已存在则绝不覆盖）
 WORKFLOWS_SRC="${WORKFLOWS_SRC:-/app/workflows}"
 if [ ! -d "$DATA_DIR/workflows" ] && [ -d "$WORKFLOWS_SRC" ]; then
   cp -R "$WORKFLOWS_SRC" "$DATA_DIR/workflows.tmp.$$" && mv "$DATA_DIR/workflows.tmp.$$" "$DATA_DIR/workflows" \
@@ -111,7 +111,7 @@ CODEX_HOME_N="$(norm_path "$CODEX_HOME_DIR")"
 WRITABLE_ROOTS=""
 WRITABLE_ROOTS_CSV=""
 _old_ifs="$IFS"; IFS=','
-for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts,$DATA_DIR/workflows}; do
+for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts}; do
   IFS="$_old_ifs"
   _raw="$(printf '%s' "$_r" | tr -d ' ')"
   [ -n "$_raw" ] || { IFS=','; continue; }

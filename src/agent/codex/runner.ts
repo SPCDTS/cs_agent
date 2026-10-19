@@ -184,7 +184,6 @@ function describeRoot(root: string, o: AgentsMdOptions): string {
   const r = trimSlash(root);
   const data = trimSlash(o.dataDir);
   if (r === trimSlash(o.workspaceDir)) return `${r}：你的工作区（当前目录）`;
-  if (r === `${data}/workflows`) return `${r}：ComfyUI 生图工作流 JSON（改动在下一次生图时生效；改坏会导致生图失败）`;
   if (r === `${data}/prompts`) return `${r}：提示词文件目录（其中 system.md 已弃用，不再被读取）`;
   return `${r}：运维开放的可写目录`;
 }
