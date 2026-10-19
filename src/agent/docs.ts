@@ -9,7 +9,6 @@ import type { RouteName } from "./router.js";
 export type TicketSettings = {
   backend: import('./backends/types.js').BackendName;
   codexReasoningEffort: import('./codex-runner.js').ReasoningEffort;
-  codexReplyMode: import('./reply-postprocess.js').ReplyMode;
 };
 
 export type TicketSource = {

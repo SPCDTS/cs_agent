@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { createModels } from "@earendil-works/pi-ai";
 import { ObsStore } from "../../src/obs/store.js";
 import { Trace, trace } from "../../src/obs/trace.js";
 import { SettingsStore, SETTINGS_TICKET, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
@@ -17,13 +17,14 @@ import { TicketDoc, DispatchDoc } from "../../src/agent/docs.js";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { Dispatcher } from "../../src/agent/dispatch.js";
 import { startAlerts } from "../../src/obs/alerts.js";
+import { log } from "../../src/log.js";
 import { loadConfig } from "../../src/config.js";
 import type { InboundMessage, ReplyTicketRecord } from "../../src/qq/types.js";
 
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const tmp = () => { const dir = mkdtempSync(path.join(os.tmpdir(), "cs-settings-")); clean.push(() => rmSync(dir, { recursive: true, force: true })); return dir; };
-const defaults: RuntimeSettings = { agentBackend: "codex", backendOverrides: {}, codexReplyMode: "relay", codexReasoningEffort: "high", alertOwner: false };
+const defaults: RuntimeSettings = { agentBackend: "codex", backendOverrides: {}, codexReasoningEffort: "high", alertOwner: false };
 
 describe("运行时设置", () => {
   it(".env 为默认；修改原子落盘并在重开后保留；记录 settings_changed 事件", async () => {
@@ -59,13 +60,26 @@ describe("运行时设置", () => {
     expect((await SettingsStore.open(dir, defaults, new Trace())).current()).toEqual(defaults);
     writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ version: 1, settings: { agentBackend: "pi", extra: 1 } }));
     expect((await SettingsStore.open(dir, defaults, new Trace())).current()).toEqual(defaults);
-    writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ version: 1, settings: { codexReplyMode: "direct" } }));
-    expect((await SettingsStore.open(dir, defaults, new Trace())).current()).toEqual({ ...defaults, codexReplyMode: "direct" });
+  });
+
+  it.each(["relay", "direct"])("旧 settings.json 的 codexReplyMode=%s 被剥离，其它设置完整保留且不告警", async mode => {
+    const dir = tmp(), file = path.join(dir, "settings.json");
+    const saved: RuntimeSettings = { agentBackend: "pi", backendOverrides: { "group:7": "codex" }, codexReasoningEffort: "low", alertOwner: true };
+    writeFileSync(file, JSON.stringify({ version: 1, settings: { ...saved, codexReplyMode: mode } }), "utf8");
+    const warn = vi.spyOn(log, "warn");
+    try {
+      const settings = await SettingsStore.open(dir, defaults, new Trace());
+      expect(settings.current()).toEqual(saved);
+      expect(warn).not.toHaveBeenCalled();
+      await settings.update({ codexReasoningEffort: "medium" }, "test");
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ version: 1, settings: { ...saved, codexReasoningEffort: "medium" } });
+      expect((await SettingsStore.open(dir, defaults, new Trace())).current()).toEqual({ ...saved, codexReasoningEffort: "medium" });
+    } finally { warn.mockRestore(); }
   });
 
   it("settingsDefaults 取自 .env；不在允许列表的推理强度回落 high", () => {
-    const cfg = loadConfig({ AGENT_BACKEND: "pi", AGENT_BACKEND_OVERRIDES: "group:1=codex", CODEX_REPLY_MODE: "direct", CODEX_REASONING_EFFORT: "medium", ALERT_OWNER: "true" });
-    expect(settingsDefaults(cfg)).toEqual({ agentBackend: "pi", backendOverrides: { "group:1": "codex" }, codexReplyMode: "direct", codexReasoningEffort: "medium", alertOwner: true });
+    const cfg = loadConfig({ AGENT_BACKEND: "pi", AGENT_BACKEND_OVERRIDES: "group:1=codex", CODEX_REASONING_EFFORT: "medium", ALERT_OWNER: "true" });
+    expect(settingsDefaults(cfg)).toEqual({ agentBackend: "pi", backendOverrides: { "group:1": "codex" }, codexReasoningEffort: "medium", alertOwner: true });
     expect(settingsDefaults({ ...cfg, CODEX_REASONING_EFFORT: "bogus" }).codexReasoningEffort).toBe("high");
   });
 
@@ -88,7 +102,7 @@ describe("运行时设置", () => {
     const tasks = createTasks({ getBridge: () => bridge, imageBackend: image, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
       backends: createBackendSelector({ current: () => settings.current(), backends: { codex, pi: fake("pi") } }),
       currentSettings: () => settings.current(),
-      codexReplyMode: () => settings.current().codexReplyMode, replyRetryDelayMs: 1 });
+      replyRetryDelayMs: 1 });
     const harness = await openHarness({ models: createModels(), extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "agent.sqlite") }, BACKGROUND_CONTEXT);
     clean.push(() => harness.close(BACKGROUND_CONTEXT));
     harness.resume();
@@ -96,7 +110,6 @@ describe("运行时设置", () => {
     const msg = (text: string, group?: string): InboundMessage => ({ message_id: text, time: Math.floor(Date.now() / 1000), message_type: group ? "group" : "private",
       user_id: "1", group_id: group ?? null, self_id: "2", nickname: "测试", text, route_text: text, images: [], segments: [], truncated: false, mentioned_self: true });
 
-    await settings.update({ codexReplyMode: "direct" }, "test");
     await dispatcher.dispatch(msg("一"), "t1");
     await settings.update({ agentBackend: "pi" }, "test");
     await dispatcher.dispatch(msg("二"), "t2");
@@ -124,13 +137,11 @@ describe("运行时设置", () => {
 
 
 describe("票据设置快照", () => {
-  it.each([false, true])("回合中热更新仍保留 high/relay，后续票据使用 low/direct；恢复=%s", async recovery => {
+  it.each([false, true])("回合中热更新仍保留 high，后续票据使用 low；恢复=%s", async recovery => {
     const dir = tmp();
     const settings = await SettingsStore.open(dir, defaults, new Trace());
     const obs = new ObsStore(dir); clean.push(() => obs.close()); trace.attach(obs);
-    const faux = fauxProvider({ models: [{ id: "relay" }], tokensPerSecond: Infinity });
-    faux.setResponses([fauxAssistantMessage("转述后的回答"), fauxAssistantMessage("排队票据的转述")]);
-    const models = createModels(); models.setProvider(faux.provider);
+    const models = createModels();
     const replies = new Map<string, string>();
     const bridge = {
       getTicket: async (ticket: string) => ({ ticket_id: ticket, seq: 1, status: replies.has(ticket) ? "sent" : "pending" }) as ReplyTicketRecord,
@@ -155,7 +166,6 @@ describe("票据设置快照", () => {
         imageBackend: { name: "fake", submit: async () => "p", collect: async () => [], reconcile: async () => ({ images: [] }), clearReferences: async () => {} },
         imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
         backends: createBackendSelector({ current, backends: { codex } }), currentSettings: current,
-        codexReplyMode: () => { throw new Error("后处理不得读取设置"); }, models, relayModel: faux.getModel(),
       });
       const harness = await openHarness({ models, extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "tickets.sqlite") }, BACKGROUND_CONTEXT);
       clean.push(() => harness.close(BACKGROUND_CONTEXT));
@@ -167,25 +177,25 @@ describe("票据设置快照", () => {
     const pending = first.dispatcher.dispatch(msg, "first");
     await vi.waitFor(() => expect(efforts).toEqual(["high"]));
     const id = (await first.harness.snapshot(DispatchDoc, BACKGROUND_CONTEXT))!.pending.first!.conversationId as ConversationId;
-    expect((await first.harness.snapshot(TicketDoc, id, BACKGROUND_CONTEXT))?.settings).toEqual({ backend: "codex", codexReasoningEffort: "high", codexReplyMode: "relay" });
+    expect((await first.harness.snapshot(TicketDoc, id, BACKGROUND_CONTEXT))?.settings).toEqual({ backend: "codex", codexReasoningEffort: "high" });
     // 已排队票据也应冻结；当前回合结束前改设置。
     const queued = recovery ? undefined : first.dispatcher.dispatch(msg, "queued");
-    await settings.update({ codexReasoningEffort: "low", codexReplyMode: "direct", agentBackend: "pi" }, "test");
+    await settings.update({ codexReasoningEffort: "low", agentBackend: "pi" }, "test");
     current.mockImplementation(() => { throw new Error("执行及恢复不得读取当前设置"); });
     if (recovery) {
       await first.harness.close(BACKGROUND_CONTEXT); await pending;
       first = await boot(false);
       await first.dispatcher.recover(); first.harness.resume(); await first.dispatcher.idle();
     } else { release(); await pending; await queued; }
-    expect(replies.get("first")).toBe("转述后的回答");
+    expect(replies.get("first")).toBe("原始回答");
     expect(history.completeReply).toHaveBeenCalledWith("first", expect.objectContaining({ action: "ask_codex", detail: "high" }));
     expect(efforts.every(e => e === "high")).toBe(true);
-    if (!recovery) expect(replies.get("queued")).toBe("排队票据的转述");
-    expect(obs.events("first").some(e => e.stage === "postprocess" && JSON.parse(e.detail_json).mode === "relay")).toBe(true);
+    if (!recovery) expect(replies.get("queued")).toBe("原始回答");
+    expect(obs.events("first").some(e => e.stage === "postprocess" && JSON.parse(e.detail_json).sent_text === "原始回答")).toBe(true);
     await settings.update({ agentBackend: "codex" }, "test"); current.mockImplementation(() => settings.current());
     await first.dispatcher.dispatch(msg, "next");
     expect(efforts.at(-1)).toBe("low"); expect(replies.get("next")).toBe("原始回答");
     expect(history.completeReply).toHaveBeenCalledWith("next", expect.objectContaining({ detail: "low" }));
-    expect(obs.events("next").some(e => e.stage === "postprocess" && JSON.parse(e.detail_json).mode === "direct")).toBe(true);
+    expect(obs.events("next").some(e => e.stage === "postprocess" && JSON.parse(e.detail_json).sent_text === "原始回答")).toBe(true);
   });
 });

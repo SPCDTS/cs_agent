@@ -12,12 +12,10 @@ import { log } from "../log.js";
 import { trace as defaultTrace, type Trace } from "../obs/trace.js";
 import { REASONING_EFFORTS, type ReasoningEffort } from "./codex-runner.js";
 import { BACKEND_NAMES, type BackendName } from "./backends/types.js";
-import type { ReplyMode } from "./reply-postprocess.js";
 
 export interface RuntimeSettings {
   agentBackend: BackendName;
   backendOverrides: Record<string, BackendName>;
-  codexReplyMode: ReplyMode;
   codexReasoningEffort: ReasoningEffort;
   alertOwner: boolean;
 }
@@ -27,11 +25,13 @@ const SettingsSchema = z.object({
   agentBackend: backend,
   backendOverrides: z.record(z.string().refine(isScope, "scope 必须是 group:<群号> 或 private:<QQ号>"), backend)
     .refine(v => Object.keys(v).length <= 500, "覆盖表最多 500 项"),
-  codexReplyMode: z.enum(["relay", "direct"]),
   codexReasoningEffort: z.enum(REASONING_EFFORTS),
   alertOwner: z.boolean(),
 }).strict();
-const FileSchema = z.object({ version: z.literal(1), settings: SettingsSchema.partial() }).strict();
+// 只在读取旧文件时剥离已移除的字段；其余未知键及运行时更新仍严格校验。
+const FileSettingsSchema = SettingsSchema.partial().extend({ codexReplyMode: z.unknown().optional() })
+  .transform(({ codexReplyMode: _legacy, ...settings }) => settings);
+const FileSchema = z.object({ version: z.literal(1), settings: FileSettingsSchema }).strict();
 
 const SETTINGS_FILE = "settings.json";
 /** 记录设置变更的观测票据（以 @ 开头：不进票据列表） */
@@ -41,11 +41,11 @@ export type SettingsSource = "dashboard" | "test";
 
 /** `.env` 里的 CODEX_REASONING_EFFORT 可能是任意字符串；不在允许列表时取 high。 */
 export function settingsDefaults(cfg: {
-  AGENT_BACKEND: BackendName; backendOverrides: Record<string, BackendName>; CODEX_REPLY_MODE: ReplyMode;
+  AGENT_BACKEND: BackendName; backendOverrides: Record<string, BackendName>;
   CODEX_REASONING_EFFORT: string; ALERT_OWNER: boolean;
 }): RuntimeSettings {
   const effort = (REASONING_EFFORTS as readonly string[]).includes(cfg.CODEX_REASONING_EFFORT) ? cfg.CODEX_REASONING_EFFORT as ReasoningEffort : "high";
-  return { agentBackend: cfg.AGENT_BACKEND, backendOverrides: { ...cfg.backendOverrides }, codexReplyMode: cfg.CODEX_REPLY_MODE,
+  return { agentBackend: cfg.AGENT_BACKEND, backendOverrides: { ...cfg.backendOverrides },
     codexReasoningEffort: effort, alertOwner: cfg.ALERT_OWNER };
 }
 

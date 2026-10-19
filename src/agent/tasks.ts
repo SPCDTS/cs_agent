@@ -17,7 +17,6 @@ import { validateReferences } from "./image-references.js";
  * 进程关闭（runtime.signal 中止）时阶段直接抛出、不提交任何结果，重启后该阶段重跑。
  */
 import type { Context } from "@earendil-works/chord";
-import type { Api, Model, Models } from "@earendil-works/pi-ai";
 import { defineTask, type RunningTask, type TaskRuntime, type TaskDefinition } from "@earendil-works/pi-durable";
 import { accessForSource, accessToString } from "../context/access.js";
 import type { ContextStore } from "../context/store.js";
@@ -30,7 +29,7 @@ import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendin
 import { readImageFiles, prepareImageFiles, validImageFile } from "./image-files.js";
 import { classifyImageError, referenceUploads, recoverRemoteUploads, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend, type RemoteUpload } from "./image-gen.js";
 import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
-import { postprocessReply, sanitizeReply, type ReplyMode } from "./reply-postprocess.js";
+import { postprocessReply, sanitizeReply } from "./reply-postprocess.js";
 import { IMAGE_USAGE_REPLY } from "./router.js";
 import { BackendTimeoutError } from "./backends/types.js";
 import { backendNameFor, type BackendSelector } from "./backends/select.js";
@@ -64,13 +63,9 @@ export interface TaskDeps {
   owner?: string;
   /** 统一上下文存储：查找 [引用] 正文 */
   store?: Pick<ContextStore, "message">;
-  /** codex 后端的回复模式（pi 后端恒为 direct）；relay 需要 models + model */
-  codexReplyMode: ReplyMode | (() => ReplyMode);
   codexReasoningEffort?: string | (() => string);
   /** 生产入口一次读取全部设置，避免分别采样。仅派发时调用。 */
   currentSettings?: () => Readonly<import('./settings.js').RuntimeSettings>;
-  models?: Models;
-  relayModel?: Model<Api>;
   /** reply 重试退避基数（毫秒），默认 2000 */
   replyRetryDelayMs?: number;
 }
@@ -206,7 +201,6 @@ export function createTasks(deps: TaskDeps) {
     return {
       backend: current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : deps.backends.select(scope).name,
       codexReasoningEffort: isReasoningEffort(effort) ? effort : "high",
-      codexReplyMode: current?.codexReplyMode ?? (typeof deps.codexReplyMode === "function" ? deps.codexReplyMode() : deps.codexReplyMode),
     };
   };
   type ImageRuntime = Runtime<ImageCheckpoint>;
@@ -597,20 +591,10 @@ export function createTasks(deps: TaskDeps) {
         const doc = await ticketDoc(runtime, context);
         let draft = doc.replyDraft;
         if (draft === undefined && doc.agentResult?.ok) {
-          if (!doc.settings) throw new Error("票据缺少派发设置快照");
-          const codexMode = doc.settings.codexReplyMode;
-          const mode: ReplyMode = doc.settings.backend === "codex" ? codexMode : "direct";
-          const out = await postprocessReply(doc.agentResult.text, {
-            ticket: doc.ticket,
-            mode,
-            ...(deps.models ? { models: deps.models } : {}),
-            ...(deps.relayModel ? { model: deps.relayModel } : {}),
-            signal: runtime.signal,
-          });
+          draft = postprocessReply(doc.agentResult.text);
           rethrowIfAborted(runtime.signal, new Error("aborted"));
-          trace.event(doc.ticket, "postprocess", { detail: { raw_reply: doc.agentResult.text, sent_text: out.text, relayed: out.relayed, mode,
-            truncated: out.text.includes("…（内容过长，已截断）") } });
-          draft = out.text;
+          trace.event(doc.ticket, "postprocess", { detail: { raw_reply: doc.agentResult.text, sent_text: draft,
+            truncated: draft.includes("…（内容过长，已截断）") } });
         }
         await runtime.commit(async (tx) => {
           if (draft !== undefined) (await tx.doc(TicketDoc, runtime.conversationId)).replyDraft = draft;

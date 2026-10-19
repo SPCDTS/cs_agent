@@ -1,7 +1,5 @@
-import type { Models } from "@earendil-works/pi-ai";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { fitText, postprocessReply, QQ_TEXT_LIMIT, RELAY_PROMPT, sanitizeReply, stripMarkdown } from "../../src/agent/reply-postprocess.js";
+import { fitText, postprocessReply, QQ_TEXT_LIMIT, sanitizeReply, stripMarkdown } from "../../src/agent/reply-postprocess.js";
 
 const LONE_HIGH = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
 const LONE_LOW = /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
@@ -70,55 +68,8 @@ describe("sanitize", () => {
   });
 });
 
-describe("relay / direct", () => {
-  it("relay prompt is at most 5 lines", () => {
-    expect(RELAY_PROMPT.split("\n").length).toBeLessThanOrEqual(5);
-  });
-
-  it("direct mode never calls a model", async () => {
-    const models = {
-      completeSimple: async () => {
-        throw new Error("must not be called");
-      },
-    } as unknown as Models;
-    const r = await postprocessReply("**hi** @x", { mode: "direct", models, model: {} as never });
-    expect(r).toEqual({ text: "hi ＠x", relayed: false });
-  });
-
-  it("relay uses the faux model output (then sanitizes it)", async () => {
-    const faux = fauxProvider();
-    const models = createModels();
-    models.setProvider(faux.provider);
-    let seenSystem = "";
-    faux.setResponses([
-      (context) => {
-        seenSystem = JSON.stringify(context);
-        return fauxAssistantMessage(fauxText("## 整理好了 @某人"));
-      },
-    ]);
-    const r = await postprocessReply("# raw", { mode: "relay", models, model: faux.getModel() });
-    expect(r).toEqual({ text: "整理好了 ＠某人", relayed: true });
-    expect(seenSystem).toContain("整理成适合在 QQ 里直接显示的纯文本");
-  });
-
-  it("relay error, empty output or timeout falls back to sanitize only", async () => {
-    const faux = fauxProvider();
-    const models = createModels();
-    models.setProvider(faux.provider);
-    faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "rate limited" }), fauxAssistantMessage(fauxText("   "))]);
-    expect(await postprocessReply("**a**", { mode: "relay", models, model: faux.getModel() })).toEqual({ text: "a", relayed: false });
-    expect(await postprocessReply("**b**", { mode: "relay", models, model: faux.getModel() })).toEqual({ text: "b", relayed: false });
-
-    const hanging = {
-      completeSimple: (_m: unknown, _c: unknown, o: { signal: AbortSignal }) =>
-        new Promise((_r, reject) => o.signal.addEventListener("abort", () => reject(new Error("aborted")))),
-    } as unknown as Models;
-    const started = Date.now();
-    expect(await postprocessReply("**c**", { mode: "relay", models: hanging, model: {} as never, timeoutMs: 50 })).toEqual({ text: "c", relayed: false });
-    expect(Date.now() - started).toBeLessThan(2000);
-  });
-
-  it("relay without a configured model sanitizes only", async () => {
-    expect(await postprocessReply("`x`", { mode: "relay" })).toEqual({ text: "x", relayed: false });
+describe("postprocessReply", () => {
+  it("保留原始措辞，仅清洗 Markdown 和提及符号", () => {
+    expect(postprocessReply("# 标题\n**原始回答** @某人\n\n\n下一段")).toBe("标题\n原始回答 ＠某人\n\n下一段");
   });
 });

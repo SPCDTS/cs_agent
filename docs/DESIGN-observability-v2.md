@@ -60,7 +60,7 @@ type Usage        = { input: number; output: number; cached?: number; reasoning?
 ## 3. 回合详情页
 
 - 头部：时间、耗时、模型与强度（codex 来自 `turn_context`，pi 来自 `model_turn`）、usage（实测）、QQ 来源与送达状态（有票据时）、"分析此回合前/后的上下文"。
-- 正文块：用户输入（含图片占位与引用块）→ 每次模型请求一条分隔（usage、耗时）→ 工具调用卡（名称、服务器、参数 JSON 折叠、结果折叠、耗时、状态；结果超 8 KB 只给预览与"加载全文"）→ 助手文本 → 后处理与送达（relay 前后对照）。
+- 正文块：用户输入（含图片占位与引用块）→ 每次模型请求一条分隔（usage、耗时）→ 工具调用卡（名称、服务器、参数 JSON 折叠、结果折叠、耗时、状态；结果超 8 KB 只给预览与"加载全文"）→ 助手文本 → 后处理与送达（代码清洗前后对照，后处理不调用模型；历史模型事件仍可读取）。
 - 所有文本经 `redactText`；JSON 经转义后渲染；图片经现有带鉴权的媒体路由。
 - 懒加载：`/api/agents/:backend/sessions/:id/content?offset=&length=`，服务端校验范围并脱敏。
 - SSE：活动会话页订阅 `/agents/stream?session=`，新块追加，不整页刷新。

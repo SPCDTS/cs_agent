@@ -33,30 +33,32 @@ describe("model config defaults", () => {
 });
 
 describe("v3 router / backend config", () => {
-  it("defaults: 奶龙 prefixes, codex backend, no overrides, relay reply mode", () => {
+  it("defaults: 奶龙 prefixes, codex backend, no overrides", () => {
     const c = loadConfig({});
     expect(c.imagePrefixes).toEqual(["奶龙:", "奶龙："]);
     expect(c.AGENT_BACKEND).toBe("codex");
     expect(c.backendOverrides).toEqual({});
-    expect(c.CODEX_REPLY_MODE).toBe("relay");
     expect(c.CODEX_REASONING_EFFORT).toBe("high");
   });
 
-  it("parses IMAGE_PREFIXES, AGENT_BACKEND, AGENT_BACKEND_OVERRIDES, CODEX_REPLY_MODE", () => {
+  it("parses IMAGE_PREFIXES, AGENT_BACKEND, AGENT_BACKEND_OVERRIDES", () => {
     const c = loadConfig({
       IMAGE_PREFIXES: "画:, 画：",
       AGENT_BACKEND: "pi",
       AGENT_BACKEND_OVERRIDES: "group:200000001=codex",
-      CODEX_REPLY_MODE: "direct",
     });
     expect(c.imagePrefixes).toEqual(["画:", "画："]);
     expect(c.AGENT_BACKEND).toBe("pi");
     expect(c.backendOverrides).toEqual({ "group:200000001": "codex" });
-    expect(c.CODEX_REPLY_MODE).toBe("direct");
     expect(() => loadConfig({ AGENT_BACKEND: "claude" })).toThrow(/AGENT_BACKEND/);
     expect(() => loadConfig({ AGENT_BACKEND_OVERRIDES: "group:1=x" })).toThrow(/配置无效.*AGENT_BACKEND_OVERRIDES/);
-    expect(() => loadConfig({ CODEX_REPLY_MODE: "smart" })).toThrow(/CODEX_REPLY_MODE/);
   });
+});
+
+it.each(["relay", "direct", "smart"])("旧 CODEX_REPLY_MODE=%s 被忽略且保留其它配置", mode => {
+  const config = loadConfig({ CODEX_REPLY_MODE: mode, AGENT_BACKEND: "pi", CODEX_REASONING_EFFORT: "low" });
+  expect(config).not.toHaveProperty("CODEX_REPLY_MODE");
+  expect(config).toMatchObject({ AGENT_BACKEND: "pi", CODEX_REASONING_EFFORT: "low" });
 });
 
 describe("DEEPSEEK_APIKEY alias", () => {

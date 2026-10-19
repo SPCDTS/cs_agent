@@ -23,7 +23,6 @@ import { observeImages } from '../../src/obs/image.js';
 import type { InboundMessage, ReplyTicketRecord } from '../../src/qq/types.js';
 import { DeepSeekWeb } from '../../src/agent/pi-tools/web.js';
 import { startAlerts } from '../../src/obs/alerts.js';
-import { relayFormat } from '../../src/agent/reply-postprocess.js';
 import { runAging } from '../../src/context/aging.js';
 import { Metrics } from '../../src/obs/metrics.js';
 import { usageCost } from '../../src/obs/usage.js';
@@ -44,20 +43,25 @@ async function rig(){
     o?.onJsonEvent?.({type:'item.completed',item:{id:'call1',type:'mcp_tool_call',tool:'qq_recent',status:'completed',duration_ms:12}});return '## 假回答';
   }}});
   const tasks=createTasks({getBridge:()=>bridge,imageBackend:image,imagesDir:path.join(dir,'images'),ticketsDir:path.join(dir,'tickets'),
-    backends:createBackendSelector({defaultBackend:'codex',overrides:{},backends:{codex,pi:new PiBackendStub()}}),codexReplyMode:'direct',replyRetryDelayMs:1});
+    backends:createBackendSelector({defaultBackend:'codex',overrides:{},backends:{codex,pi:new PiBackendStub()}}),replyRetryDelayMs:1});
   const harness=await openHarness({models,extension:createCsAgentExtension(tasks),dbFile:path.join(dir,'agent.sqlite')},BACKGROUND_CONTEXT);clean.push(()=>harness.close(BACKGROUND_CONTEXT));
   const dispatcher=new Dispatcher({harness,bridge,tasks,concurrency:2,retryDelayMs:1});
   const msg=(text:string):InboundMessage=>({message_id:'1',time:Math.floor(Date.now()/1000),message_type:'private',user_id:'1',group_id:null,self_id:'2',nickname:'测试',text,route_text:text,images:[],segments:[],truncated:false,mentioned_self:false});
   return {dir,store,context,models,faux,bridge,image,dispatcher,msg,codex};
 }
 it('前缀图片票据和 Codex agent 票据通过真实 dispatcher/任务，记录完整阶段与终态',async()=>{
-  const r=await rig();await r.dispatcher.dispatch(r.msg('奶龙: 猫'),'image');await r.dispatcher.dispatch(r.msg('你好'),'agent');
+  const r=await rig();const complete=vi.spyOn(r.models,'completeSimple');await r.dispatcher.dispatch(r.msg('奶龙: 猫'),'image');await r.dispatcher.dispatch(r.msg('你好'),'agent');
   const stages=(t:string)=>r.store.events(t).map(e=>e.stage).filter((s,i,a)=>i===0||a[i-1]!==s);
   expect(stages('image')).toEqual(['received','admitted','routed','dispatched','phase:submit','image:submit','phase:submit','phase:collect','image:collect','phase:collect','phase:reply','reply_sent','phase:reply','reply_sent']);
   expect(stages('agent')).toEqual(['received','admitted','routed','dispatched','phase:handle','backend:codex','thread_wait','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','postprocess','phase:reply','reply_sent','phase:reply','reply_sent']);
   expect(r.store.events('image').find(e=>e.stage==='image:submit'&&e.status==='ok')?.detail_json).toContain('prompt-fake');
   expect(r.store.events('agent').find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')?.duration_ms).toBe(12);
   expect(r.store.tickets().every(t=>t.status==='sent')).toBe(true);
+  expect(complete).not.toHaveBeenCalled();expect(r.faux.state.callCount).toBe(0);
+  const events=r.store.events('agent');
+  expect(events.filter(e=>e.stage==='model_turn')).toHaveLength(2);
+  expect(events.some(e=>e.stage==='fallback'||JSON.parse(e.detail_json).operation==='relay')).toBe(false);
+  expect(events.find(e=>e.stage==='postprocess'&&JSON.parse(e.detail_json).sent_text)?.detail_json).toContain('假回答');
   expect(r.dispatcher.status()).toMatchObject({active:0,waiting:0,scopes:{},tickets:[]});
 });
 it('业务生图失败但错误回复已送出时，票据仍统计为失败',async()=>{
@@ -151,7 +155,7 @@ it('Codex 内置命令和搜索只保存白名单摘要，每轮最多 100 条�
   expect(JSON.parse(rows[0]!.detail_json).command.length).toBe(200);expect(JSON.parse(rows[1]!.detail_json).query.length).toBe(200);
   expect(rows.map(e=>e.detail_json).join('')).not.toContain('forbidden-');
 });
-it('pi、relay、衰老使用同一非零缓存 usage fixture，费用口径一致',async()=>{
+it('pi、衰老使用同一非零缓存 usage fixture，费用口径一致',async()=>{
   const r=await rig();const usage={input:100,output:20,cacheRead:30,cacheWrite:10,totalTokens:160,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}};
   const model={...r.faux.getModel(),provider:"deepseek"};
   const stream=()=>{
@@ -162,13 +166,12 @@ it('pi、relay、衰老使用同一非零缓存 usage fixture，费用口径一�
   r.models.setProvider(createProvider({id:model.provider,models:[model],auth:{apiKey:{name:'fixture',resolve:async()=>({auth:{}})}},api:{stream,streamSimple:stream}}));
   const pi=await PiBackend.open({dataDir:r.dir,models:r.models,model:{provider:model.provider,modelId:model.id},thinkingLevel:'off',store:r.context,imageBackend:r.image,storage:new MemoryStorage()});clean.push(()=>pi.close());
   await pi.handle({ticket:'usage-pi',scope:'private:1',threadKey:'private:1',access:'private:1',text:'hello',source:{type:'private',user_id:'1',group_id:null,nickname:'test'}},{signal:new AbortController().signal,onEvent:()=>{}});
-  await relayFormat('text',r.models,model,1000,undefined,'usage-relay');
   const now=Date.UTC(2026,9,21,3),day=Date.UTC(2026,9,20)/1000;
   for(let i=0;i<5;i++)r.context.ingest({...r.msg('历史'+i),message_id:'history'+i,time:day+i});
   const report=await runAging({store:r.context,models:r.models,model,rawDays:30,summaryDays:180,hour:3,now:()=>now});expect(report.day_summaries).toBe(1);
   const metrics=new Metrics(r.store,{retentionDays:365,inputPrice:2,outputPrice:4});await metrics.flush();
-  expect(r.store.db.prepare("SELECT value FROM metrics WHERE name='deepseek_estimated_cost'").get()?.value).toBeCloseTo(.00108);
-  for(const ticket of ['usage-pi','usage-relay','@aging']){
+  expect(r.store.db.prepare("SELECT value FROM metrics WHERE name='deepseek_estimated_cost'").get()?.value).toBeCloseTo(.00072);
+  for(const ticket of ['usage-pi','@aging']){
     const d=JSON.parse(r.store.events(ticket).find(e=>e.stage==='model_turn'&&e.status==='ok')!.detail_json);
     expect(d).toMatchObject({input_tokens:100,output_tokens:20,cache_read_tokens:30,cache_write_tokens:10});
     expect(usageCost({input:d.input_tokens,output:d.output_tokens,cacheRead:d.cache_read_tokens,cacheWrite:d.cache_write_tokens},2,4).cost).toBe(.00036);
@@ -183,4 +186,22 @@ it('lateImages 与终态回收都会摄取 MCP 旁路事件',async()=>{
   };
   await r.dispatcher.dispatch(r.msg('hello'),'spool-flow');
   expect(r.store.events('spool-flow').some(e=>e.stage==='image:submit'&&e.detail_json.includes('late-spool'))).toBe(true);
+});
+
+it('历史 relay 用量按通用模型事件聚合，缺缓存字段可读且重启不重复计费',async()=>{
+  const r=await rig();
+  const detail={operation:'relay',provider:'deepseek',model:'legacy-model',input_tokens:100,output_tokens:20};
+  trace.event('legacy-usage','model_turn',{status:'started',detail});
+  trace.event('legacy-usage','model_turn',{status:'ok',durationMs:20,detail});
+  trace.event('legacy-usage','fallback',{status:'failed',detail:{operation:'relay',terminal:false}});
+  trace.event('legacy-usage','reply_sent',{detail:{terminal:true}});
+  const options={retentionDays:365,inputPrice:2,outputPrice:4};
+  await new Metrics(r.store,options).flush();
+  await new Metrics(r.store,options).flush(Date.now()+1);
+  const total=(name:string)=>r.store.db.prepare('SELECT SUM(value) value FROM metrics WHERE name=?').get(name)?.value;
+  expect(total('deepseek_input_tokens')).toBe(100);
+  expect(total('deepseek_output_tokens')).toBe(20);
+  expect(total('deepseek_estimated_cost')).toBeCloseTo(.00028);
+  expect(r.store.degraded).toBe(false);
+  expect(r.store.throughput(0)).toMatchObject({total:1,failed:0});
 });

@@ -349,7 +349,7 @@ export class Dispatcher {
         if (r.route === "image") { doc.prompt = r.prompt; doc.imageOptions = r.options; }
       }
       // 旧票据没有快照，无法重建历史设置；固定兼容值并持久化，恢复不读取热设置。
-      doc.settings ??= { backend: doc.agentResult?.backend === "pi" ? "pi" : "codex", codexReasoningEffort: "high", codexReplyMode: "relay" };
+      doc.settings ??= { backend: doc.agentResult?.backend === "pi" ? "pi" : "codex", codexReasoningEffort: "high" };
       const options = { ownership: { kind: "conversation" }, conversationId } as const;
       const id =
         doc.route === "agent"

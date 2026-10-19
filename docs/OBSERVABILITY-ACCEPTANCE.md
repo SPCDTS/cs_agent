@@ -2,6 +2,8 @@
 
 2026-10-18，在 Windows / Node 24 上完成。未停止、重启或替换运行容器；只构建 `cs-agent:g4`。没有调用真实模型、Codex、QQ 或 ComfyUI；测试使用 fake CLI、faux 模型、假 bridge 与本机临时 HTTP 服务。未修改 `.env`、seccomp 配置和设计稿，未修改或暂存 `src/qq/**`、`test/qq/**`。
 
+> 2026-10-19 更新：回复后处理已移除 relay，两后端均只做代码清洗；postprocess 阶段保留，不再发出 relay 模型调用或其 fallback 事件。下文保留原验收记录，历史事件与用量仍可读取、聚合。
+
 ## 文件
 
 | 逻辑组 | 文件 |

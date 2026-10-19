@@ -55,7 +55,7 @@ export function summarize(e: Pick<LiveEvent, 'stage' | 'status' | 'detail'>): st
   }
   else if (e.stage.startsWith('tool:')) { add('', d.command ?? d.query ?? d.input, 140); if (e.status !== 'started') add('→ ', d.error ?? (typeof d.exit_code === 'number' ? `exit ${d.exit_code}` : undefined), 80); add('', d.server); }
   else if (e.stage.startsWith('image:')) { add('', d.prompt, 100); add('任务 ', d.prompt_id, 40); if (Array.isArray(d.images)) parts.push(`${d.images.length} 张图`); }
-  else if (e.stage === 'postprocess') { add('模式 ', d.mode); if (d.relayed !== undefined) parts.push(d.relayed ? '已整理' : '仅清洗'); }
+  else if (e.stage === 'postprocess') { add('→ ', d.sent_text, 100); if (d.truncated) parts.push('已截断'); }
   else if (TERMINAL.has(e.stage)) { add('', d.reply, 100); add('', d.reason ?? d.failure); }
   else if (e.stage === 'settings_changed') add('', d.changed);
   else if (e.stage === 'context_usage' && typeof d.usedTokens === 'number' && typeof d.windowTokens === 'number')

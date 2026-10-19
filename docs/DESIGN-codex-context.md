@@ -224,7 +224,7 @@ interface AgentBackend {
 - 选择：`AGENT_BACKEND=codex|pi`（全局默认 `codex`，保持现状），可选 `AGENT_BACKEND_OVERRIDES=group:200000001=pi,private:10000001=codex` 按 scope 覆盖。切换只影响后续消息，两后端的记忆各自独立。
 - **线程键**沿用 owner / shared 两分（§3.1），两后端都按此隔离记忆；同一线程键串行，不同并行。
 - **图片附带（两后端统一）**：后端在回合中若调用了生图（pi 的进程内工具 / codex 的 `image_gen` MCP），图片写入 `/data/images/<ticket>/`；适配层在回合结束后收集该目录内本回合产生的文件（≤4 张）随文本一并发出。后端不需要也不能指定回复目标。
-- **回复后处理（两后端统一）**：代码清洗（去 Markdown 代码围栏/标题/表格符号，不出现 `@`，UTF-16 ≤4000 截断）。codex 后端额外保留 `CODEX_REPLY_MODE=relay|direct`（默认 `relay`：用意图模型做一次 ≤5 行提示的格式整理，失败回退清洗；`direct`：仅清洗）。pi 后端由其系统提示直接产出合规文本，仅清洗。
+- **回复后处理（两后端统一）**：仅做代码清洗（去 Markdown 代码围栏/标题/表格符号，`@` 换为全角 `＠`，UTF-16 ≤4000 截断且不拆代理对）。两个后端由系统提示要求纯文本，后处理不调用模型。
 
 ### 4.4 codex 后端（现有能力的适配）
 - 现有 ask-codex：owner/shared 线程、`CODEX_HOME` 受管配置、`qq_context`（`QQ_ACCESS` 按次注入）、浏览器 MCP、`web_search = "live"`、沙箱与 deny_read。
@@ -329,8 +329,6 @@ INTENT_CONTEXT_MAX_CHARS=1500
 WEB_SEARCH_MAX_PER_MESSAGE=2
 FETCH_MAX_PER_MESSAGE=2
 CODEX_BROWSER=playwright
-CODEX_REPLY_MODE=relay
-CODEX_REPLY_SANITIZE=true
 ```
 
 ## 6. 边界与隐私
@@ -368,7 +366,7 @@ CODEX_REPLY_SANITIZE=true
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
-2. **规则分流 + 生图路径 + 后端抽象 + codex 适配**（§4.1–4.4）：`IMAGE_PREFIXES` 分流、两阶段生图任务、`AgentBackend` 接口与 `AGENT_BACKEND` 切换、codex 适配（固定 effort、`image_gen` MCP、图片收集、relay/direct 后处理）、按 scope FIFO。意图模型的 `route` 会话与系统提示退场（`system.md` 不再使用，保留文件但记录弃用）。测试：前缀匹配（半/全角、空提示）、生图崩溃恢复不重复、codex 适配经 fake codex、image_gen MCP 经 stdio、图片收集上限、后处理清洗。
+2. **规则分流 + 生图路径 + 后端抽象 + codex 适配**（§4.1–4.4）：`IMAGE_PREFIXES` 分流、两阶段生图任务、`AgentBackend` 接口与 `AGENT_BACKEND` 切换、codex 适配（固定 effort、`image_gen` MCP、图片收集、仅代码清洗的后处理）、按 scope FIFO。意图模型的 `route` 会话与系统提示退场（`system.md` 不再使用，保留文件但记录弃用）。测试：前缀匹配（半/全角、空提示）、生图崩溃恢复不重复、codex 适配经 fake codex、image_gen MCP 经 stdio、图片收集上限、后处理清洗。
 3. **pi-durable 后端**（§4.5、4.6）
 3b. **生图工具 v2**（§4.9）：参数化工作流生成器、尺寸预设、透明输出、参考图编辑（bridge 下载触发消息的图片）、前缀内联选项、三处接入（前缀路径 / pi 工具 / image_gen MCP）。测试：工作流生成器快照、预设表、内联选项解析、参考图路径限制、bridge 图片下载与清理；真实 ComfyUI 冒烟（1MP 文生图、16:9、透明、单图编辑）。
 （原 3）：长期 durable 会话（owner/shared）与 compaction、进程内工具（web_search / fetch_page / qq_* / generate_image）、访问范围绑定、`agent.md` 热加载提示、调用上限与超时、`AGENT_BACKEND=pi` 切换与 overrides。测试：faux 模型工具调用链、访问范围隔离、上限守卫、429 退避、切换后端互不影响。
@@ -419,12 +417,14 @@ CODEX_REPLY_SANITIZE=true
 - 附带：实现方把 Comfy MCP 启动环境改为显式白名单。
 
 ### 8.4 面板二期（2026-10-18 用户反馈：要能切后端、要看进行中的会话、UI 要好看）
-- **运行时切换后端**：面板"设置"页可修改全局 `AGENT_BACKEND` 与按会话域的覆盖表，保存到 `${DATA_DIR}/settings.json`（原子写），立即对后续消息生效，无需重启；`.env` 值仅作初始默认。所有写操作需口令会话 + CSRF 令牌，并记入观测事件（who=面板、时间、变更前后值）。同页可切 `CODEX_REPLY_MODE`、`CODEX_REASONING_EFFORT`、`ALERT_OWNER`，以及查看/编辑热加载的 `agent.md` 与全局 AGENTS.md（受管文件只读展示）。
+- **运行时切换后端**：面板"设置"页可修改全局 `AGENT_BACKEND` 与按会话域的覆盖表，保存到 `${DATA_DIR}/settings.json`（原子写），立即对后续消息生效，无需重启；`.env` 值仅作初始默认。所有写操作需口令会话 + CSRF 令牌，并记入观测事件（who=面板、时间、变更前后值）。同页可切 `CODEX_REASONING_EFFORT`、`ALERT_OWNER`，以及查看/编辑热加载的 `agent.md` 与全局 AGENTS.md（受管文件只读展示）。
 - **进行中会话实时视图**：`/live` 页按会话域列出正在处理与排队中的票据，每张卡片实时显示：原文、路由、后端、当前阶段与已耗时、codex/pi 的事件流（工具调用、命令执行摘要、搜索查询、生图任务进度）、延迟收图状态；通过 SSE 推送事件，页面不轮询。完成后卡片收起并链接到票据时间线。观测事件表需要在阶段开始时就写入"进行中"事件，而不是只在结束时写。
 - **codex / pi 会话查看**：`/codex` 与 `/pi` 页可查看各线程最近 N 轮的摘要（来自观测事件，不读 rollout 原文），并提供"重置该线程"（新建会话、旧会话归档）的受口令保护操作。
 - **视觉重设计**（由 Opus 负责前端）：统一的设计系统（排版、间距、颜色令牌、深浅色自动），信息层级清晰（总览卡片 → 列表 → 详情时间线），中文界面，无外部 CDN，仍为服务端渲染 + 少量原生 JS + SSE；移动端可读。
 
 ### 面板二期（2026-10-18，主会话验收通过）
+> 2026-10-19 更新：回复模式已移除，两个后端均只做代码清洗；下文保留原验收记录。
+
 - Opus 实现：运行时设置（`settings.json` 热生效）、`/settings`（后端/覆盖/回复模式/强度/告警、agent.md 编辑、线程重置）、`/live` 实时视图（进程内事件总线 → SSE）、codex/pi 线程页、整体视觉重设计（设计令牌、深浅色、移动端）。主会话查看截图确认视觉与信息层级达标。
 - 独立复跑：typecheck、498 测试、build、镜像构建通过；部署后容器 healthy，登录后各页 200，`/live/stream` 正常推送快照帧。
 - gpt-6-astra 评审 10 条（无阻断）全部修复：SSE 快照分帧与背压、客户端 80 条后冻结、卡片页头刷新、卡片逐个脱敏、完成卡片定时淘汰、agent.md 服务端密文与 revision 守卫、时间列折行；热更新不改变在途消息（派发时固化设置快照）、管理审计事件独立保留策略、pi 重置原子化、线程归档限 200 条。

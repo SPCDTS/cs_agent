@@ -43,8 +43,7 @@ QQ 用户 ──NapCat(OneBot v11)──► QQBridge(ws 收 / http 发)
         reply：固定模板（成功 / 服务不可用 / 超时 /              MCP：qq_context、image_gen（→ /data/images/<ticket>/）、browser
                内容被拒 / 其他）+ 图                              回合后收集新图片（≤4，魔数校验）
                                                                   pi：第 3 组（当前占位，选中即回复失败模板）
-                                                                postprocess：代码清洗；codex 且 CODEX_REPLY_MODE=relay 时
-                                                                  先经意图模型整理（20 s，失败回退清洗）
+                                                                postprocess：两个后端均只做代码清洗，不调用模型
                  └───────────────────┬──────────────────────────────┘
                                      ▼
                   QQBridge.reply(ticket, text, images)（票据幂等：sent 不重发，uncertain 不自动重试）
@@ -82,7 +81,7 @@ cs_agent/
 │  │  ├─ codex-runner.ts         固定 codex 线程 owner/shared；互斥队列；JSONL 解析；线程 id 持久化；AGENTS.md
 │  │  ├─ image-gen.ts            生图实现：comfy-mcp(stdio) / HTTP，失败分类（任务与 image_gen MCP 共用）
 │  │  ├─ image-collect.ts        回合内新图片收集（≤4，魔数校验）
-│  │  ├─ reply-postprocess.ts    代码清洗 + relay 整理
+│  │  ├─ reply-postprocess.ts    回复代码清洗（不调用模型）
 │  │  └─ dispatch.ts             admit（会话 + TicketDoc + 索引）→ scope FIFO → 建任务 → waitForTask → 兜底
 │  ├─ mcp/                       codex 的 stdio MCP：qq-context.ts（聊天记录）、image-gen.ts（生图）
 │  └─ auth/codex-oauth.ts        把 /data/codex/auth.json 的 ChatGPT tokens 映射为 pi-ai 凭据
@@ -170,7 +169,7 @@ LOG_LEVEL=info
 ## 9. 测试要求
 
 - **qq/**：用本地假 OneBot 服务器（`ws` + `node:http`）测试：授权规则、@ 检测、去重、重连、票据幂等（sent / uncertain / 并发锁）、群回复段格式、图片校验。
-- **agent/**（v3）：规则分流（半/全角、前导空白与 `[at]`、空提示、未命中）；生图任务崩溃恢复（阶段间关闭 harness 后重开：一次生图、一次发送）；任务失败后重跑跳过已完成阶段；scope FIFO 与跨 scope 并行；codex 后端经假 `codex` 脚本（`QQ_ACCESS` / `IMAGE_TICKET_DIR` / 固定 effort、图片收集 ≤4）；`image_gen` MCP 经 stdio（假 ComfyUI HTTP）与假 comfy-mcp；后处理清洗与 relay 回退（faux provider）；后端选择与 pi 占位。
+- **agent/**（v3）：规则分流（半/全角、前导空白与 `[at]`、空提示、未命中）；生图任务崩溃恢复（阶段间关闭 harness 后重开：一次生图、一次发送）；任务失败后重跑跳过已完成阶段；scope FIFO 与跨 scope 并行；codex 后端经假 `codex` 脚本（`QQ_ACCESS` / `IMAGE_TICKET_DIR` / 固定 effort、图片收集 ≤4）；`image_gen` MCP 经 stdio（假 ComfyUI HTTP）与假 comfy-mcp；后处理清洗且不调用模型、旧设置与票据恢复兼容；后端选择与 pi 占位。
 - `docker build` 必须成功；`docker compose config` 校验通过。
 - 不向真实群发测试消息。
 
@@ -244,10 +243,10 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | image_gen MCP | `src/mcp/image-gen.ts`（stdio，低层 `Server`）：工具 `generate_image(prompt)`，非只读注解；输出目录只来自 `IMAGE_TICKET_DIR`，必须是 `${DATA_DIR}/images/` 的直接子目录（realpath 复核），否则拒绝；每进程（每回合）≤4 次；每次调用输出到新的子目录 `call-<n>/`（n = 已有 call 目录数 + 1，同名输出不会互相覆盖），返回 `call-<n>/<文件名>`（评审 R9）；后端配置用 `loadConfig` 解析透传的 `COMFY_*`，mcp 模式下非 loopback 的 `COMFYUI_URL` 改走 `http://127.0.0.1:COMFY_LOOPBACK_PORT`（agent 主进程的 loopback 转发；codex 及其 MCP 子进程与主进程同一网络命名空间） | 复用同一生图实现 |
 | 受管 config.toml | 新增 `[mcp_servers.image_gen]`（`tool_timeout_sec = COMFY_TIMEOUT_SEC + 30`，审批模式同 `CODEX_MCP_APPROVAL_MODE`）与 `[mcp_servers.image_gen.env]`（`DATA_DIR` + 已设置的 `COMFY_MODE`/`COMFYUI_URL`/`COMFY_MCP_BIN`/`COMFY_BIN`/`COMFY_CHECKPOINT`/`COMFY_WORKFLOW_FILE`/`COMFY_PROMPT_NODE`/`COMFY_TIMEOUT_SEC`/`COMFY_LOOPBACK_PORT`/`LOG_LEVEL`；含引号、反斜杠或非可打印字符的值告警跳过） | codex 给 MCP 子进程的环境只有少量默认变量 + env 表 |
 | AGENTS.md | 模板 v4：新增"生图（image_gen）"一条（图片随回复自动发送，回复只需一句说明）；`/data/prompts` 说明改为 system.md 已弃用 | 设计稿 §4.4 |
-| 后处理 | `reply-postprocess.ts`：去代码围栏行（保留内容）、标题符号、表格竖线/分隔行、加粗与行内代码标记；`@` 换为全角 `＠`；压缩空行；孤立代理项先替换为 U+FFFD（`toWellFormed`，评审 R11），再 `fitText` ≤4000 UTF-16。codex 后端 `CODEX_REPLY_MODE=relay`（默认）先用意图模型（5 行提示，20 s 超时）整理再清洗，失败回退清洗；`direct` 只清洗。`CODEX_REPLY_SANITIZE` 未引入：清洗在 v3 中总是开启 | 设计稿 §4.3 |
+| 后处理 | `reply-postprocess.ts`：去代码围栏行（保留内容）、标题符号、表格竖线/分隔行、加粗与行内代码标记；`@` 换为全角 `＠`；压缩空行；孤立代理项先替换为 U+FFFD（`toWellFormed`，评审 R11），再 `fitText` ≤4000 UTF-16。两个后端均只做代码清洗，不调用模型。`CODEX_REPLY_SANITIZE` 未引入：清洗在 v3 中总是开启 | 设计稿 §4.3 |
 | 模型工具退场 | 删除 `generate_image` / `ask_codex` / `reply_qq` 工具、`claimBusinessCall` 与意图系统提示；`CodexRunner` 移至 `src/agent/codex-runner.ts`，生图实现移至 `src/agent/image-gen.ts` | 设计稿 §7 第 2 组 |
 | 消息库机器人行 | 生图：`completeReply(action=generate_image, detail=prompt)`；codex 后端：`ask_codex`（detail = `CODEX_REASONING_EFFORT`）；用法提示与 pi：`reply`；业务失败或兜底记 `失败` | 统一上下文 §2.4 |
-| 新增环境变量 | `IMAGE_PREFIXES`、`AGENT_BACKEND`、`AGENT_BACKEND_OVERRIDES`、`CODEX_REPLY_MODE` | 见 `.env.example` |
+| 新增环境变量 | `IMAGE_PREFIXES`、`AGENT_BACKEND`、`AGENT_BACKEND_OVERRIDES` | 见 `.env.example` |
 
 已实测：容器内 `codex exec`（OAuth + workspace-write 沙箱）正常；容器内经 mcp 与 http 两条路径均生成真实 PNG（约 10–17 s）。
 
@@ -308,9 +307,9 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | backend | backend:codex / pi 包围整个 handle；Codex model_turn 含线程键、effort、回复摘要与 model_ms，onAcquired 前等待另记 thread_wait_ms；backend span 保留总耗时。mcp_tool_call 映射 tool:&lt;name&gt;；内置 command_execution / web_search 每轮合计≤100 条，只提取命令/查询前 200 字、退出码、耗时，不存原始 JSONL |
 | pi hook | GenerationTask 的每次请求与响应记录 model_turn 和 usage；ToolTask 的 before/after 记录 tool:&lt;name&gt;；CompactionTask 记录 compaction 尝试 |
 | 图片 | 公共接口包装记录 image:submit / image:collect；对账归 image:collect(operation=reconcile)，查询步骤发 recovered，包含 prompt_id；三条生图入口共用 |
-| 回复 | postprocess 保留原始与最终文字摘要；reply_sent 含 message_id、图片数、truncated、already_sent；relay 失败发非终态 fallback |
+| 回复 | postprocess 仅清洗并保留原始与最终文字摘要；reply_sent 含 message_id、图片数、truncated、already_sent；后处理不产生模型调用或 fallback |
 
-Metrics 每 60 秒从持久化游标读取新事件（包括主进程摄取的 MCP 事件），内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样 dispatcher 队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理普通事件与指标；管理事件仅按 OBS_ADMIN_RETENTION_DAYS（默认 365 天）清理。DeepSeek 用量由 pi、relay、衰老共用 usageFields / usageCost 转换，包含 cacheRead 与 cacheWrite；只使用真实 usage，不发额外模型请求。
+Metrics 每 60 秒从持久化游标读取新事件（包括主进程摄取的 MCP 事件），内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样 dispatcher 队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理普通事件与指标；管理事件仅按 OBS_ADMIN_RETENTION_DAYS（默认 365 天）清理。DeepSeek 用量由 pi、衰老共用 usageFields / usageCost 转换，包含 cacheRead 与 cacheWrite；只使用真实 usage，不发额外模型请求。
 
 HTTP 面板由原健康服务器承载：/healthz 分支无需认证，仅返回白名单健康 JSON（连接状态、degraded、检查布尔值和线程信息），其余路由交给 obs/http.ts。SSR 中文 HTML + 内联 CSS / JS、SSE，无 CDN、框架或新增依赖；上下文直接调用共享工具格式化逻辑。图片经过段校验、真实路径约束、链接拒绝与位图魔数检查；所有渲染字符串先 redactText 再 HTML 转义并设置 CSP。强制口令覆盖所有面板出口，Compose 只向宿主机 loopback 发布端口。
 
@@ -325,9 +324,9 @@ HTTP 面板由原健康服务器承载：/healthz 分支无需认证，仅返回
 
 ## 12. 派发设置一致性
 
-`TicketDoc.settings` 保存派发时的后端、Codex 推理强度与回复模式。生产入口通过单次 `SettingsStore.current()` 获取一致副本；快照在异步附件准备及 FIFO 排队之前取得，与 TicketDoc/DispatchDoc 同事务持久化。handle 按快照选择已注册后端，Codex 请求显式携带快照，postprocess 和历史机器人行只读票据值，恢复与重试不重新采样。
+`TicketDoc.settings` 保存派发时的后端与 Codex 推理强度。生产入口通过单次 `SettingsStore.current()` 获取一致副本；快照在异步附件准备及 FIFO 排队之前取得，与 TicketDoc/DispatchDoc 同事务持久化。handle 按快照选择已注册后端，Codex 请求显式携带快照，历史机器人行只读票据值，恢复与重试不重新采样。
 
-旧版无快照票据采用固定兼容值（high/relay，已有 pi 结果则 pi，否则 codex）并持久化。无法从现存记录推断的旧设置不声称能够还原；新登记的孤儿票据按新的派发处理。
+旧版无快照票据采用固定兼容值（high，已有 pi 结果则 pi，否则 codex）并持久化。无法从现存记录推断的旧设置不声称能够还原；新登记的孤儿票据按新的派发处理。旧票据中的 `codexReplyMode` 被忽略；后处理固定清洗原文。
 
 
 ## 13. 管理审计预算

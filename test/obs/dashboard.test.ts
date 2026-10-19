@@ -20,7 +20,7 @@ import { CodexPromptStub } from './fixtures/codex-prompt-stub.js';
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
-const defaults: RuntimeSettings = { agentBackend: 'codex', backendOverrides: {}, codexReplyMode: 'relay', codexReasoningEffort: 'high', alertOwner: false };
+const defaults: RuntimeSettings = { agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false };
 
 async function rig(extra: { contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
@@ -94,6 +94,7 @@ describe('面板二期页面', () => {
       expect(html).not.toMatch(/\sstyle="/);
       expect(html).not.toMatch(/(src|href)="https?:/);
       expect(html).not.toContain(TOKEN);
+      expect(html).not.toContain('codexReplyMode');
       const nonce = /<style nonce="([^"]+)"/.exec(html)![1]!;
       expect(res.headers.get('content-security-policy')).toContain(`'nonce-${nonce}'`);
       for (const m of html.matchAll(/<script[^>]*>/g)) expect(m[0]).toContain(`nonce="${nonce}"`);
@@ -110,9 +111,27 @@ describe('面板二期页面', () => {
     expect((await r.get('/nope')).status).toBe(404);
   });
 
+  it('历史 relay 事件、用量和非终态 fallback 仍可显示', async () => {
+    const r = await rig();
+    trace.event('legacy', 'received', { detail: { text: '旧票据' } });
+    trace.event('legacy', 'model_turn', { status: 'ok', durationMs: 20,
+      detail: { operation: 'relay', provider: 'deepseek', model: 'legacy-model', input_tokens: 100, output_tokens: 20 } });
+    trace.event('legacy', 'fallback', { status: 'failed', detail: { operation: 'relay', terminal: false } });
+    trace.event('legacy', 'postprocess', { detail: { mode: 'relay', relayed: false, raw_reply: '**原文**', sent_text: '原文' } });
+    for (const url of ['/tickets/legacy', '/live']) {
+      const res = await r.get(url), html = await res.text();
+      expect(res.status).toBe(200);
+      expect(html).toContain('输入 100 / 输出 20 tokens');
+      expect(html).toContain('原文');
+    }
+    trace.event('legacy', 'reply_sent', { detail: { terminal: true, reply: '原文' } });
+    expect(r.store.tickets().find(t => t.ticket === 'legacy')?.status).toBe('sent');
+    expect(await (await r.get('/live')).text()).toContain('已回复');
+  });
+
   it('写操作要求 cookie 会话与 CSRF 令牌；跨站来源、错误令牌与 URL 口令都被拒绝', async () => {
     const r = await rig();
-    const ok = { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: '', codexReplyMode: 'relay', codexReasoningEffort: 'high' };
+    const ok = { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: '', codexReasoningEffort: 'high' };
     expect((await r.post('/settings', { ...ok, _csrf: '' })).status).toBe(403);
     expect((await r.post('/settings', { ...ok, _csrf: r.csrf.slice(0, -1) + 'x' })).status).toBe(403);
     expect((await r.post('/settings', ok, { Origin: 'http://evil.example' })).status).toBe(403);
@@ -136,7 +155,7 @@ describe('面板二期页面', () => {
 
   it('Origin 为 null 且 Sec-Fetch-Site 为 same-origin 时允许有效 CSRF 表单，仍拒绝无效令牌', async () => {
     const r = await rig();
-    const ok = { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: '', codexReplyMode: 'relay', codexReasoningEffort: 'high' };
+    const ok = { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: '', codexReasoningEffort: 'high' };
     const headers = { Origin: 'null', 'Sec-Fetch-Site': 'same-origin' };
     expect((await r.post('/settings', { ...ok, _csrf: '' }, headers)).status).toBe(403);
     expect(r.settings.current().agentBackend).toBe('codex');
@@ -148,7 +167,7 @@ describe('面板二期页面', () => {
 
   it.each([undefined, 'cross-site', 'same-site', 'none'])('Origin 为 null 且 Sec-Fetch-Site 为 %s 时拒绝写入', async site => {
     const r = await rig();
-    const ok = { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: '', codexReplyMode: 'relay', codexReasoningEffort: 'high' };
+    const ok = { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: '', codexReasoningEffort: 'high' };
     const headers: Record<string, string> = { Origin: 'null' };
     if (site !== undefined) headers['Sec-Fetch-Site'] = site;
     const res = await r.post('/settings', ok, headers);
@@ -158,19 +177,19 @@ describe('面板二期页面', () => {
 
   it('保存设置立即生效、落盘并记录事件；非法覆盖表返回 400 且不改动', async () => {
     const r = await rig();
-    const res = await r.post('/settings', { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: 'group:7=codex\nprivate:5=pi', codexReplyMode: 'direct', codexReasoningEffort: 'low', alertOwner: 'on' },
+    const res = await r.post('/settings', { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: 'group:7=codex\nprivate:5=pi', codexReasoningEffort: 'low', alertOwner: 'on' },
       { Origin: r.base, 'Sec-Fetch-Site': 'same-origin' });
     expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/settings?ok=saved');
-    expect(r.settings.current()).toEqual({ agentBackend: 'pi', backendOverrides: { 'group:7': 'codex', 'private:5': 'pi' }, codexReplyMode: 'direct', codexReasoningEffort: 'low', alertOwner: true });
+    expect(r.settings.current()).toEqual({ agentBackend: 'pi', backendOverrides: { 'group:7': 'codex', 'private:5': 'pi' }, codexReasoningEffort: 'low', alertOwner: true });
     expect(JSON.parse(readFileSync(path.join(r.dir, 'settings.json'), 'utf8')).settings.agentBackend).toBe('pi');
     const ev = r.store.events(SETTINGS_TICKET).find(e => e.stage === 'settings_changed')!;
     expect(JSON.parse(ev.detail_json)).toMatchObject({ source: 'dashboard', before: { agentBackend: 'codex' }, after: { agentBackend: 'pi' } });
     const page = await (await r.get('/settings?ok=saved')).text();
     expect(page).toContain('设置已保存'); expect(page).toContain('与 .env 不同'); expect(page).toContain('agentBackend');
-    const bad = await r.post('/settings', { _csrf: r.csrf, agentBackend: 'codex', backendOverrides: 'evil=pi<script>', codexReplyMode: 'relay', codexReasoningEffort: 'high' });
+    const bad = await r.post('/settings', { _csrf: r.csrf, agentBackend: 'codex', backendOverrides: 'evil=pi<script>', codexReasoningEffort: 'high' });
     expect(bad.status).toBe(400);
     const html = await bad.text(); expect(html).toContain('覆盖表'); expect(html).not.toContain('<script>');
-    const badEnum = await r.post('/settings', { _csrf: r.csrf, agentBackend: 'gpt', backendOverrides: '', codexReplyMode: 'relay', codexReasoningEffort: 'high' });
+    const badEnum = await r.post('/settings', { _csrf: r.csrf, agentBackend: 'gpt', backendOverrides: '', codexReasoningEffort: 'high' });
     expect(badEnum.status).toBe(400);
     expect(r.settings.current().agentBackend).toBe('pi');
   });

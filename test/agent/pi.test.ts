@@ -572,7 +572,7 @@ describe("pi durable backend", () => {
     };
     const bootTickets = async (backend: typeof s) => {
       const tasks = createTasks({ getBridge: () => bridge, imageBackend: backend.imageBackend, imagesDir: path.join(s.dir, "images"),
-        backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: backend.pi } }), codexReplyMode: "direct" });
+        backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: backend.pi } }) });
       const harness = await openHarness({ models: backend.models, extension: createCsAgentExtension(tasks), dbFile: path.join(s.dir, "tickets.sqlite") }, context);
       cleanup.push(() => harness.close(context));
       return { harness, dispatcher: new Dispatcher({ harness, bridge, tasks, concurrency: 2, retryDelayMs: 1 }) };
@@ -608,7 +608,7 @@ describe("pi durable backend", () => {
     const restarted = await setup([ctx => { expect(JSON.stringify(ctx.messages)).toContain("原始输入"); return reply("恢复完成"); }], { disk: true, dir: s.dir });
     const ticketHarness = await openHarness({ models: restarted.models, extension: createCsAgentExtension(createTasks({
       getBridge: () => { throw new Error("unused"); }, imageBackend: restarted.imageBackend, imagesDir: path.join(s.dir, "images"),
-      backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: restarted.pi } }), codexReplyMode: "direct",
+      backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: restarted.pi } }),
     })), storage: new MemoryStorage() }, context);
     cleanup.push(() => ticketHarness.close(context));
     const ticket = await ticketHarness.createConversation({ ownership: { kind: "ownerless" } }, context);
@@ -639,7 +639,7 @@ describe("pi durable backend", () => {
     };
     const tasks = createTasks({ getBridge: () => bridge, imageBackend: s.imageBackend, imagesDir: path.join(s.dir, "images"),
       backends: createBackendSelector({ defaultBackend: cfg.AGENT_BACKEND, overrides: cfg.backendOverrides, backends: { pi: s.pi } }),
-      codexReplyMode: "relay", owner: "1", store: s.store,
+      owner: "1", store: s.store,
     });
     const harness: Harness = await openHarness({ models: s.models, extension: createCsAgentExtension(tasks), storage: new MemoryStorage() }, context);
     cleanup.push(() => harness.close(context));

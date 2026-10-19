@@ -84,7 +84,6 @@
    │ (●) Codex  容器内 codex CLI…  ( ) Pi  进程内…  │
    │ 按会话覆盖  与 .env 不同                      │
    │ [ group:200000001=pi                        ] │
-   │ Codex 回复方式 (●) 整理后发送 ( ) 直接发送      │
    │ Codex 推理强度 [high ▾]   owner 告警 [ ] 开启   │
    │ [保存设置]                                     │
    └───────────────────────────────────────────────┘
@@ -174,7 +173,7 @@ Trace ──tap──▶ LiveBus（内存卡片：阶段栈、事件流，已脱
 
 ## 运行时设置
 
-`${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexReplyMode`、`codexReasoningEffort`、`alertOwner`。后端选择器、codex 推理强度、回复后处理、owner 告警与消息库机器人行都在每条消息时现读 `settings.current()`。每次变更写观测事件 `settings_changed`（票据 `@settings`，含变更前后值与来源 `dashboard`）；agent.md 保存记 `prompt_changed`（`target: "pi"`）；codex.md 保存记 `prompt_changed`（`target: "codex"`，`file: prompts/codex.md`，前后字节数）——由面板启动时对 `codexPrompt.subscribe` 的唯一订阅写入，POST 处理器本身不记，避免重复；线程重置记 `thread_reset`（`@codex` / `@pi`）。
+`${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexReasoningEffort`、`alertOwner`。后端与 Codex 推理强度在派发时读取 `settings.current()` 并写入票据快照，执行与消息库机器人行沿用快照；owner 告警开关独立现读。回复固定只做代码清洗，面板不再提供回复方式选项。旧文件中的 `codexReplyMode` 读取时剥离，下次保存时移除，其它字段仍严格校验。每次变更写观测事件 `settings_changed`（票据 `@settings`，含变更前后值与来源 `dashboard`）；agent.md 保存记 `prompt_changed`（`target: "pi"`）；codex.md 保存记 `prompt_changed`（`target: "codex"`，`file: prompts/codex.md`，前后字节数）——由面板启动时对 `codexPrompt.subscribe` 的唯一订阅写入，POST 处理器本身不记，避免重复；线程重置记 `thread_reset`（`@codex` / `@pi`）。
 
 ## 安全
 

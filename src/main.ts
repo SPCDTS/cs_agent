@@ -55,7 +55,6 @@ async function main(): Promise<void> {
     data_dir: cfg.DATA_DIR,
     agent_backend: cfg.AGENT_BACKEND,
     backend_overrides: cfg.backendOverrides,
-    codex_reply_mode: cfg.CODEX_REPLY_MODE,
     image_prefixes: cfg.imagePrefixes,
   });
 
@@ -184,10 +183,7 @@ async function main(): Promise<void> {
     backends,
     owner: cfg.owner,
     store,
-    codexReplyMode: cfg.CODEX_REPLY_MODE,
     currentSettings: () => settings.current(),
-    models,
-    relayModel: agentModel,
   });
   const extension = createCsAgentExtension(tasks);
   const harness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);

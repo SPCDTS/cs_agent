@@ -60,8 +60,7 @@ Copy-Item .env.example .env
 | `IMAGE_PREFIXES` | `奶龙:,奶龙：` | 生图前缀，逗号分隔，逐字匹配（大小写与全/半角按原样），较长的优先；留空用默认 |
 | `AGENT_BACKEND` | `codex` | 执行 agent 后端：`codex`（容器内 codex 固定线程）或 `pi`（进程内 pi-durable 长期会话，工具可联网检索、查历史、生图） |
 | `AGENT_BACKEND_OVERRIDES` | 空 | 按会话覆盖后端：`group:200000001=pi,private:10000001=codex`。格式错误时启动失败。切换只影响之后的消息，两个后端的记忆互相独立 |
-| `CODEX_REPLY_MODE` | `relay` | codex 回复的后处理：`relay` 先用意图模型（下一行）把回答整理成 QQ 纯文本（20 s 超时，失败回退），再做代码清洗；`direct` 只做代码清洗（去代码围栏、标题符号、表格竖线，`@` 换成全角 `＠`，截断到 4000 字） |
-| `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` | `deepseek` / `deepseek-flash` | 执行模型：用于 pi 后端、codex 回复的 relay 整理与聊天记录日/周摘要（DeepSeek OpenAI 兼容接口 `https://api.deepseek.com`）。也可切换到 `openai-codex`（复用 `auth.json` 的 ChatGPT OAuth，如 `gpt-6-luna`）、`openai`、`anthropic` 等，后两者需设置对应的 `*_API_KEY` |
+| `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` | `deepseek` / `deepseek-flash` | 执行模型：用于 pi 后端与聊天记录日/周摘要（DeepSeek OpenAI 兼容接口 `https://api.deepseek.com`）。也可切换到 `openai-codex`（复用 `auth.json` 的 ChatGPT OAuth，如 `gpt-6-luna`）、`openai`、`anthropic` 等，后两者需设置对应的 `*_API_KEY` |
 | `DEEPSEEK_API_KEY` | 空 | DeepSeek API key；写作 `DEEPSEEK_APIKEY` 也可（启动时自动映射）。provider 为 `deepseek` 时缺少密钥，agent 启动即退出 |
 | `AGENT_THINKING_LEVEL` | `low` | 意图模型思考档位。deepseek-flash 支持 off/low/high/max，其他值就近调整（如 medium → high）并记 warn 日志 |
 | `AGENT_CONCURRENCY` | 2 | 同时处理的 QQ 消息数，多出来的排队（排队状态已持久化） |
@@ -295,7 +294,7 @@ image_gen MCP 不打开观测库，只向本票据 obs-events.jsonl 追加经 sc
 
 指标每 60 秒按独立窗口记录调用数、成功数、成功率、耗时 p50 / p95；超过一万次采样的类别用有界随机抽样计算分位数。窗口从主进程事件库读取，也包含已摄取的 Codex image_gen MCP 提交与收取；摄取保留子进程事件时间。队列深度不含正在运行的请求；全局使用槽位、各 scope 等待数分别展示。ComfyUI 同时记录各次 submit / collect / reconcile 调用耗时，以及能匹配 prompt_id 时从提交成功到收取成功的任务总耗时（comfy_job_duration_ms），均不等同 GPU 纯计算时间。
 
-DEEPSEEK_PRICE_IN_PER_M / DEEPSEEK_PRICE_OUT_PER_M 默认 0；填入 deepseek-flash 的每百万 token 单价后估算费用，两项使用相同币种。输入包括可获得的 cache read / write；该估算不区分缓存优惠，也不包含搜索/抓页费用。用量来自 pi-ai 返回的 usage（pi、relay、衰老），三条路径使用同一 usage 字段转换和费用计算（含 cacheRead / cacheWrite），未提供的用量不会猜测。观测为尽力记录，崩溃边界可能重记响应，已写入的事件通过持久化游标恢复聚合，尚未写入的事件仍可能丢失；durable 业务检查点独立，不受观测写入失败影响。
+DEEPSEEK_PRICE_IN_PER_M / DEEPSEEK_PRICE_OUT_PER_M 默认 0；填入 deepseek-flash 的每百万 token 单价后估算费用，两项使用相同币种。输入包括可获得的 cache read / write；该估算不区分缓存优惠，也不包含搜索/抓页费用。用量来自 pi-ai 返回的 usage（pi、衰老），两条路径使用同一 usage 字段转换和费用计算（含 cacheRead / cacheWrite），未提供的用量不会猜测。观测为尽力记录，崩溃边界可能重记响应，已写入的事件通过持久化游标恢复聚合，尚未写入的事件仍可能丢失；durable 业务检查点独立，不受观测写入失败影响。
 
 ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUsers 的首项）时，WS 连续离线超过五分钟、模型鉴权失败、连续三条票据失败会经 bridge.send 向 owner 私聊告警；所有原因共用每 30 分钟一次限频。告警只带固定原因，不带用户原文或服务端错误正文。此功能仅使用 fake bridge 验证。
 
@@ -304,9 +303,11 @@ ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUs
 
 ### 运行时设置的票据快照
 
-面板修改后端、Codex 推理强度或回复模式后，仅新派发的消息采用新值。Dispatcher 在等待附件准备和 scope 队列之前读取一次设置，将 `{backend, codexReasoningEffort, codexReplyMode}` 与票据一起写入 `TicketDoc.settings`。执行、relay/direct 后处理、机器人历史行和崩溃恢复都使用此快照；例如进行中的 high/relay 票据不会因面板改成 low/direct 而改变。
+面板修改后端或 Codex 推理强度后，仅新派发的消息采用新值。Dispatcher 在等待附件准备和 scope 队列之前读取一次设置，将 `{backend, codexReasoningEffort}` 与票据一起写入 `TicketDoc.settings`。执行、机器人历史行和崩溃恢复都使用此快照；例如进行中的 high 票据不会因面板改成 low 而改变。两个后端的回复均只做代码清洗：去 Markdown 残留、`@` 换为全角 `＠`、UTF-16 ≤4000 截断且不拆代理对；后处理不调用模型。
 
-升级前没有快照的存量票据无法还原历史设置：恢复时一次性写入固定 high/relay，后端优先采用已有结果中的 pi，否则 codex；后续重试沿用。没有 TicketDoc 的孤儿票据重新派发时才采样当前设置。
+升级前没有快照的存量票据无法还原历史设置：恢复时一次性写入固定 high，后端优先采用已有结果中的 pi，否则 codex；后续重试沿用。没有 TicketDoc 的孤儿票据重新派发时才采样当前设置。
+
+升级无需手动迁移：`.env` 残留的 `CODEX_REPLY_MODE` 被忽略；`settings.json` 读取时剥离 `codexReplyMode`，保留其它有效设置，下次保存移除旧键；旧票据的同名字段不参与执行。已持久化的回复草稿继续用于恢复，避免改写已完成阶段。历史 `operation=relay` 事件和用量仍可展示、聚合，新后处理保留 postprocess 事件，不再产生 relay 模型调用或其 fallback 事件。
 
 
 ### 管理事件保留期

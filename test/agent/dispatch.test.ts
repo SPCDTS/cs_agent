@@ -21,7 +21,6 @@ import { createTasks, MAX_REPLY_ATTEMPTS } from "../../src/agent/tasks.js";
 import { imageFilenamePrefix, UnknownJobError, type ImageBackend, type ImageSubmission, type ReconcileProgress } from "../../src/agent/image-gen.js";
 import { AGENT_FAILURE_REPLIES, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
 import { IMAGE_USAGE_REPLY } from "../../src/agent/router.js";
-import type { ReplyMode } from "../../src/agent/reply-postprocess.js";
 import type { InboundMessage, ReplyTicketRecord } from "../../src/qq/types.js";
 import { ContextStore } from "../../src/context/store.js";
 import { FIXTURES, tmp } from "./helpers.js";
@@ -212,9 +211,7 @@ interface RigOptions {
   codex?: AgentBackend;
   codexEffort?: string;
   overrides?: Record<string, BackendName>;
-  replyMode?: ReplyMode;
   codexEnv?: Record<string, string>;
-  relay?: boolean;
 }
 
 interface Rig {
@@ -259,9 +256,6 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
     backends,
     owner: OWNER,
     store,
-    codexReplyMode: o.replyMode ?? "direct",
-    models,
-    relayModel: faux.getModel(),
     replyRetryDelayMs: 10,
     imageCollectDelayMs: 10,
   });
@@ -827,7 +821,7 @@ describe("rule router → image path", () => {
 });
 
 describe("agent path", () => {
-  it("non-prefixed message → agent backend with scope/access/threadKey; reply is sanitized (direct)", async () => {
+  it("non-prefixed message → agent backend with scope/access/threadKey; reply is sanitized", async () => {
     const r = await makeRig();
     await r.dispatcher.dispatch(inbound("今晚有比赛吗", { group: "200000001", user: "42" }), "t-agent");
     expect(r.image.calls).toEqual([]);
@@ -844,19 +838,32 @@ describe("agent path", () => {
     expect(r.backend.requests[0]).toMatchObject({ access: "all", threadKey: "owner", scope: `private:${OWNER}` });
   });
 
-  it("relay mode: the intent model's reformatted text is sent (sanitized again)", async () => {
-    const r = await makeRig({ replyMode: "relay" });
-    r.faux.setResponses([fauxAssistantMessage(fauxText("整理后的答复 @某人"))]);
-    await r.dispatcher.dispatch(inbound("问个问题"), "t-relay");
-    expect(r.bridge.replies[0]!.text).toBe("整理后的答复 ＠某人");
-    expect(r.faux.state.callCount).toBe(1);
+  it("codex 原始答复只做清洗，意图模型不会被调用", async () => {
+    const r = await makeRig();
+    r.faux.setResponses([fauxAssistantMessage(fauxText("不应发送的改写"))]);
+    await r.dispatcher.dispatch(inbound("问个问题"), "sanitize-only");
+    expect(r.bridge.replies[0]!.text).toBe("答复\n问个问题 ok ＠all");
+    expect(r.faux.state.callCount).toBe(0);
   });
 
-  it("relay failure falls back to sanitize only", async () => {
-    const r = await makeRig({ replyMode: "relay" });
-    r.faux.setResponses([fauxAssistantMessage([], { stopReason: "error", errorMessage: "boom" })]);
-    await r.dispatcher.dispatch(inbound("问"), "t-relay-fail");
-    expect(r.bridge.replies[0]!.text).toBe("答复\n问 ok ＠all");
+  it.each([false, true])("旧 TicketDoc 的 codexReplyMode 在重开后可读取、恢复并只清洗；已有后端结果=%s", async completed => {
+    const r = await makeRig();
+    const legacySettings = JSON.parse('{"backend":"codex","codexReasoningEffort":"low","codexReplyMode":"relay"}');
+    const conversation = await r.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+      Object.assign(await tx.doc(TicketDoc, id), { ticket: "legacy", text: "旧消息", route: "agent",
+        source: { type: "private", user_id: OWNER, group_id: null, nickname: "tester" }, settings: legacySettings,
+        ...(completed ? { agentResult: { ok: true, backend: "codex", text: "## 旧回答 @all", images: [] } } : {}) });
+      (await tx.doc(DispatchDoc)).pending.legacy = { conversationId: id, scope: "private:" + OWNER, ticketSeq: 1, attempts: 0 };
+    } }, ctx);
+    await r.harness.close(ctx);
+    await r.reopen();
+    expect((await r.harness.snapshot(TicketDoc, conversation.id, ctx))?.settings).toEqual(legacySettings);
+    await r.dispatcher.recover();
+    await r.dispatcher.idle();
+    expect(r.bridge.replies[0]!.text).toBe(completed ? "旧回答 ＠all" : "答复\n旧消息 ok ＠all");
+    expect(r.backend.requests).toHaveLength(completed ? 0 : 1);
+    expect(r.faux.state.callCount).toBe(0);
+    expect(await pendingIndex(r)).toEqual({});
   });
 
   it("override selects the pi stub → failure template, row marked 失败", async () => {

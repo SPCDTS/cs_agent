@@ -61,8 +61,6 @@ const EnvSchema = z.object({
   CODEX_CONTEXT_WINDOW: int(400000),
   /** codex 推理强度（写入 config.toml，codex 后端每轮也以 -c 显式传入；不再按请求选择） */
   CODEX_REASONING_EFFORT: z.string().default("high"),
-  /** codex 后端回复后处理：relay（意图模型整理格式，失败回退清洗）| direct（仅代码清洗） */
-  CODEX_REPLY_MODE: z.enum(["relay", "direct"]).default("relay"),
   CODEX_SANDBOX: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("workspace-write"),
   CODEX_TIMEOUT_SEC: int(600),
   /** 官方 rollout trace 保留天数；0 禁用请求负载记录。 */

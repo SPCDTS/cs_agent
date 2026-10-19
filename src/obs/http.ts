@@ -196,7 +196,7 @@ const FLASH: Record<string, string> = {
   reset: '已重置：旧会话已归档，下一条消息会新建会话。', queued: '已排队：当前回合结束后立即重置，旧会话会归档。', unchanged: '没有可重置的会话。',
 };
 
-const SETTING_LABELS: Record<string, string> = { agentBackend: '默认后端', backendOverrides: '按会话覆盖', codexReplyMode: 'Codex 回复方式', codexReasoningEffort: 'Codex 推理强度', alertOwner: 'owner 告警' };
+const SETTING_LABELS: Record<string, string> = { agentBackend: '默认后端', backendOverrides: '按会话覆盖', codexReasoningEffort: 'Codex 推理强度', alertOwner: 'owner 告警' };
 const showSetting = (v: unknown) => typeof v === 'boolean' ? (v ? '开启' : '关闭') : v && typeof v === 'object' ? (Object.entries(v).map(([k, b]) => `${k}=${String(b)}`).join(', ') || '无') : String(v);
 const asObj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
 /** 聊天记录整理灯的说明：观测事件 ts（毫秒）或消息库 meta aging_last_run（秒）统一格式化。 */
@@ -392,7 +392,7 @@ export function createDashboard(opts: DashboardOptions) {
         catch (e) { throw new HttpError(400, (e as Error).message.replace('AGENT_BACKEND_OVERRIDES', '覆盖表')); }
         try {
           await opts.settings.update({ agentBackend: form.get('agentBackend') as RuntimeSettings['agentBackend'], backendOverrides: overrides,
-            codexReplyMode: form.get('codexReplyMode') as RuntimeSettings['codexReplyMode'], codexReasoningEffort: form.get('codexReasoningEffort') as RuntimeSettings['codexReasoningEffort'],
+            codexReasoningEffort: form.get('codexReasoningEffort') as RuntimeSettings['codexReasoningEffort'],
             alertOwner: form.get('alertOwner') === 'on' }, 'dashboard');
         } catch (e) { throw new HttpError(400, '设置未保存：取值不在允许范围内。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
         back('/settings?ok=saved'); return;
@@ -513,7 +513,7 @@ export function createDashboard(opts: DashboardOptions) {
       out += `<section><h2>当前设置 <small><a href="/settings">修改</a></small></h2><div class="sheet pad">${kv([
         ['默认后端', esc(BACKENDS[s.agentBackend] ?? s.agentBackend)],
         ['按会话覆盖', Object.keys(s.backendOverrides).length ? Object.entries(s.backendOverrides).map(([k, v]) => `${esc(scopeLabel(k))} → ${esc(BACKENDS[v] ?? v)}`).join('，') : '无'],
-        ['Codex 回复', s.codexReplyMode === 'relay' ? '经模型整理格式' : '直接发送（仅清洗）'], ['Codex 推理强度', esc(s.codexReasoningEffort)], ['owner 告警', s.alertOwner ? '开启' : '关闭']])}</div></section>`;
+        ['Codex 推理强度', esc(s.codexReasoningEffort)], ['owner 告警', s.alertOwner ? '开启' : '关闭']])}</div></section>`;
     }
     const rows = opts.store.degraded ? [] : opts.store.db.prepare('SELECT * FROM metrics WHERE ts=(SELECT MAX(ts) FROM metrics) ORDER BY name LIMIT 150').all() as { name: string; labels_json: string; value: number; ts: number }[];
     out += `<section><details><summary>最近一分钟指标（${rows.length} 项，p50 / p95 等）</summary><div class="sheet mt"><div class="wrap"><table class="list"><thead><tr><th>指标</th><th>标签</th><th class="num">值</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td class="mono">${esc(Object.entries(asObj(JSON.parse(r.labels_json))).filter(([, v]) => v !== '').map(([k, v]) => `${k}=${String(v)}`).join(' '))}</td><td class="num">${esc(Number.isInteger(r.value) ? r.value : r.value.toFixed(3))}</td></tr>`).join('')}</tbody></table></div></div></details></section>`;
@@ -810,7 +810,6 @@ export function createDashboard(opts: DashboardOptions) {
       body += `<section class="flush"><form method="post" action="/settings" class="sheet pad">${csrfField(csrf)}
 <fieldset><legend>执行后端${diff('agentBackend')}</legend><div class="choices">${radio('agentBackend', 'codex', 'Codex', '容器内 codex CLI，owner 与共享两条长期线程，可用浏览器与命令。')}${radio('agentBackend', 'pi', 'Pi', '进程内 pi 会话，每个会话域独立记忆，联网检索走 DeepSeek。')}</div></fieldset>
 <fieldset><legend>按会话覆盖${diff('backendOverrides')}</legend><label>每行一项，例如 group:200000001=pi<textarea name="backendOverrides" rows="4" spellcheck="false">${esc(formatBackendOverrides(s.backendOverrides))}</textarea></label><div class="hint">留空表示全部使用上面的默认后端。会话域格式为 group:群号 或 private:QQ号。</div></fieldset>
-<fieldset><legend>Codex 回复方式${diff('codexReplyMode')}</legend><div class="choices">${radio('codexReplyMode', 'relay', '整理后发送', '由意图模型把 Codex 的回答整理成适合 QQ 的纯文本，失败时退回清洗。')}${radio('codexReplyMode', 'direct', '直接发送', '只做代码清洗（去掉 Markdown 等）。')}</div></fieldset>
 <fieldset><legend>Codex 推理强度${diff('codexReasoningEffort')}</legend><label><select name="codexReasoningEffort">${REASONING_EFFORTS.map(e => `<option${s.codexReasoningEffort === e ? ' selected' : ''}>${e}</option>`).join('')}</select></label><div class="hint">每轮以 -c 参数传给 codex，下一轮即生效。</div></fieldset>
 <fieldset><legend>owner 告警${diff('alertOwner')}</legend><label class="choice"><input type="checkbox" name="alertOwner"${s.alertOwner ? ' checked' : ''}><span>向 owner 私聊发送告警<small>QQ 离线超过五分钟、模型鉴权失败、连续三条失败时发送，30 分钟内最多一条。${opts.config.owner ? '' : '（当前没有配置 owner，开关不会生效）'}</small></span></label></fieldset>
 <button>保存设置</button></form></section>`;
