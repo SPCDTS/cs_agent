@@ -28,3 +28,10 @@
 - 使用位置：`/memory/scopes/:scope` 时间线（设计 §5.1）。`src/obs/ui/vendor.ts` 启动时从 `node_modules/vis-timeline` 读取 `standalone/umd/vis-timeline-graph2d.min.js` 与 `styles/vis-timeline-graph2d.min.css` 各一次（去掉 sourceMappingURL 注释；JS 内唯一的 `styleInject` 入口改为不执行——它会追加不带 nonce 的 `<style>` 而被 CSP 拒绝，相同样式已由 CSS 文件提供），经已鉴权的 `/assets/vendor/vis-timeline.js` / `.css` 提供；白名单只有这两项，其它路径 404，不走 CDN。
 - standalone 构建已内含 vis-data、moment 等依赖，浏览器端不再加载其它文件。npm 按 peerDependencies 自动安装的 `vis-data`、`vis-util`、`moment`、`xss` 等只出现在锁文件中，运行时不使用；`dependencies` 只新增 vis-timeline 一项。
 - 渲染约定：条目内容、悬浮提示和分组标题全部以 DOM 元素（`textContent`）传入，不走库内的 HTML 字符串分支；库通过 CSSOM 设置位置，不需要 `unsafe-inline`。为加载同源样式表，CSP 的 `style-src` 由 `'nonce-…'` 扩为 `'self' 'nonce-…'`。
+
+## pi-coding-agent 项目指引加载语义
+
+- 参考版本：`@mariozechner/pi-coding-agent@0.73.1` 的 `src/core/resource-loader.ts`，核实依据见 [设计文档 §0](DESIGN-pi-agents-md.md#0-已核实的事实)。
+- 语义参照 pi-coding-agent `loadProjectContextFiles`（MIT），未复制代码。
+- 使用位置：`src/agent/pi-tools/project-context.ts`。独立实现候选文件名优先级、去重、运维层在前的顺序，以及 `<project_instructions path="…">` 渲染格式。
+- 本项目仅显式读取 `WORKSPACE_DIR` 和 `DATA_DIR/pi-work/<key>`，不采用上游向文件系统根遍历或 Git worktree 遮蔽逻辑；增加普通文件、128 KiB、UTF-8、目录边界校验与缓存，日志走 `shared/log`。未安装 pi-coding-agent，也未引入新依赖。

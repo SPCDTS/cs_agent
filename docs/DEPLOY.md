@@ -270,6 +270,10 @@ stdio 测试由 Vitest globalSetup 每次统一执行一次 npm run build，确�
 
 `DATA_DIR/prompts/agent.md` 缺失时写入代码内的默认中文提示词，已有文件绝不覆盖；每次模型请求按 mtime/size 热加载，改完无需重启。旧 `system.md` 仍弃用。默认全文位于 `src/agent/pi-tools/prompt.ts`，涵盖 QQ 纯文本、事实搜索、历史工具纪律及生图文字/编辑指引。
 
+pi 还读取两层项目指引：运维层 `WORKSPACE_DIR/AGENTS.md`（默认 `/workspace/AGENTS.md`），以及会话层 `DATA_DIR/pi-work/<key>/AGENTS.md`（默认 `/data/pi-work/<key>/AGENTS.md`，例如 `group_200000001`；冒号换成下划线）。提示词顺序为 `agent.md` → 运维指引 → 会话指引，全部进入 system 消息；codex 侧 AGENTS.md 以 user 角色注入。pi 会话指引位于 `pi-work/<key>`，该目录中的文件可由本会话 write/edit 工具修改。
+
+两层目录均按 `AGENTS.override.md` → `AGENTS.md` → `AGENTS.MD` → `CLAUDE.md` → `CLAUDE.MD` 选择第一个普通文件。请使用不超过 128 KiB 的 UTF-8 普通文件；支持 BOM，空白文件不注入。链接、超限或不可读文件会被跳过并记录去重告警。每次模型请求检查 mtime/size，更新后无需重启，内容未变不会重复写入 system 条目。不会向父目录搜索，也不会读取 `/data/AGENTS.md` 或 `/data/pi-work/AGENTS.md`；无 cwd 时只使用运维指引，非 pi-work 直接子目录的 cwd 会被忽略并告警。
+
 DeepSeek Search/Fetch 使用 `DEEPSEEK_API_KEY`（兼容 `DEEPSEEK_APIKEY`），即使执行模型是其他 provider，联网工具仍需要此密钥。未配置时仅联网工具返回不可用。Search 最多 8 条、2500 字，Fetch 最多 4000 字；仅 429 退避一次，其余 HTTP 错误不重试。每回合 web_search/fetch_page 各最多 4 次、三种 qq 工具合计 4 次、generate_image 最多 2 次，上限通过 ToolTask hook 持久化计数，模型不能修改。
 
 fetch_page 只接收无凭据的公开 HTTP(S) URL，复用入站下载的 IP 判定，解析全部 DNS 地址并拒绝任何内网地址。实际抓取发生在 DeepSeek 服务器，无法在本机固定其 DNS 结果或检查服务端重定向链；该部分依赖 DeepSeek 服务端策略，本次未执行真实 API 请求。

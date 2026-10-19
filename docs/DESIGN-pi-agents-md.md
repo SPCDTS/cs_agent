@@ -79,3 +79,24 @@ pi 的 system 基础指令在上下文分析页仍是"多段合成、暂无全�
 ## 6. 验收记录
 
 （待填）
+
+### 本地验收
+
+2026-10-19，在 `D:/project/cs_agent-piagents` 的 `feat/pi-agents-md` 分支完成实现。未构建镜像、未部署，也未操作运行数据目录。
+
+- 加载器公开 API：`loadProjectContextFiles({ dataDir, workspaceDir, cwd? }): Promise<ProjectContextFile[]>`、`renderProjectContext(files): string | undefined`，以及 `new ProjectContextLoader({ dataDir, workspaceDir })` 的 `load(cwd?)` / `render(cwd?)`。文件对象为 `{ path, content }`。
+- 相对 §3 的 API 草案，增加显式 `dataDir` 参数，供校验 `cwd` 是否为 `DATA_DIR/pi-work` 的直接子目录；使用已有后端参数，没有新增配置键。路径采用 §2.1 和任务说明修正后的 `/data/pi-work/<key>`，没有使用 §3 文档清单中遗留的 `/workspace/<key>`。实现另对 path 属性做 XML 转义、对 UTF-8 做严格解码；读取范围、顺序与接入行为均按设计执行。
+- 每次渲染重新 lstat 候选文件，以 `mtimeMs:size` 缓存文件内容；戳未变直接复用文件对象和该 cwd 的缓存字符串。戳改变后若渲染文本仍相同，继续返回原缓存字符串。JavaScript 字符串为原始值；单测同时检查读取次数和缓存对象复用，集成测试验证连续相同回合只有一条 `pi.system`，文件更新后才新增第二条。
+- `npm.cmd run typecheck`、`npm.cmd run build` 均通过。加载器、pi 后端和依赖分层定向测试共 96 项通过，其中新增加载器测试 16 项、system 集成测试 2 项。
+- 全量 `npx.cmd vitest run`（附加 JSON 报告参数）首次结果：81 个文件，1123 通过、32 失败、3 跳过，共 1158 项。入口脚本的 28 项失败来自 Git Bash 无法写系统临时目录；将该次测试进程的 TEMP/TMP 指向当前 worktree 内临时目录后，28 项全部通过。综合全量与补跑结果：1151 项已通过，剩余 4 项受沙箱限制未验证成功，3 项平台跳过；不声明全量全绿。
+
+以下 4 项已单独复跑，仍受 Windows `taskkill /T /F` 的“拒绝访问”影响，需主会话在沙箱外验证；未等待审批、未修改相关用例或业务代码：
+
+| 文件 | 未验证成功的用例 | 结果 |
+|---|---|---|
+| `test/agent/codex-runner.test.ts:303` | `timeout kills the process tree and throws CodexTimeoutError` | 子进程约 20 秒自然退出，未满足 8 秒内终止断言 |
+| `test/agent/backends.test.ts:98` | `two restarts while queued keep attempts at zero, then the ticket runs once (F5)` | 30 秒超时 |
+| `test/agent/dispatch.test.ts:1004` | `crash after codex wrote its output but before the agentResult commit`（R1） | 测试及清理 hook 超时 |
+| `test/agent/dispatch.test.ts:1024` | `crash mid-turn (marker, no output)`（R1） | 测试及清理 hook 超时 |
+
+Windows 平台按现有条件跳过 `test/agent/pi-sandbox-linux.test.ts` 的 2 项真实 bwrap 用例和 `test/media/attach.test.ts` 的 1 项 FIFO 用例。真实容器及模型验收按任务约束未执行，留给主会话。第三方说明、架构 §5.8 和部署说明已同步；设计原文保持不变，仅在 §6 末尾追加本小节。

@@ -170,6 +170,14 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 - 可通过 `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` / 对应 API Key 环境变量切换到 `openai` / `anthropic` 等 API-Key provider。
 - 意图识别用小/便宜模型即可。
 
+### 5.8 pi 项目指引与 system 消息
+
+pi 的提示词按顺序由三部分组成：`DATA_DIR/prompts/agent.md`（默认 `/data/prompts/agent.md`）、`WORKSPACE_DIR/AGENTS.md`（默认 `/workspace/AGENTS.md`）、`DATA_DIR/pi-work/<key>/AGENTS.md`（默认 `/data/pi-work/<key>/AGENTS.md`，key 中冒号换成下划线）。`agent.md` 保持独立的 `cs-pi` section；后两者以 `project-context` section 排在其后，两段均为 `tag: false`，由 pi-durable 合成为最前面的一条 system 消息。codex 的 AGENTS.md 则以 user 角色注入。
+
+`ProjectContextLoader` 只显式检查运维目录和当前 `input.env.cwd`，不向上遍历，不读取 `DATA_DIR/AGENTS.md` 或 `pi-work/AGENTS.md`。cwd 必须是 `DATA_DIR/pi-work` 的直接子目录；缺失时只读取运维层，非法值忽略并只告警一次。同一目录按 `AGENTS.override.md` → `AGENTS.md` → `AGENTS.MD` → `CLAUDE.md` → `CLAUDE.MD` 选择第一个普通文件，重复目录只处理一次。
+
+主进程通过 Node fs 读取，不经 `PiExecutionEnv`。符号链接及目录不作为文件读取；超过 128 KiB、不可读或非法 UTF-8 的文件跳过并按文件变化去重告警；UTF-8 BOM 去除，空白正文省略。每次渲染检查 `mtimeMs:size`，戳未变时复用文件与渲染字符串；戳变化但渲染文本相同时也保留缓存字符串，避免重复生成 `pi.system` 条目。没有有效文件时 section 返回 `undefined`。
+
 ## 6. 环境变量（`.env.example`）
 
 ```
