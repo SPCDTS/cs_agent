@@ -65,11 +65,18 @@ cs_agent/
 ├─ src/
 │  ├─ main.ts                    启动：加载配置 → 打开 Harness → resume() → 启动 QQBridge → 事件循环
 │  ├─ config.ts                  环境变量解析与校验（zod）
+│  ├─ shared/                    横切工具（不依赖业务或观测层）
+│  │  ├─ log.ts, log-core.ts     结构化日志门面、级别、缓冲区与订阅出口
+│  │  ├─ redact.ts, redact-core.ts  环境秘密注册、生命周期与脱敏核心
+│  │  ├─ trace.ts               事件总线、ObsEvent/TraceStore 结构契约
+│  │  ├─ usage.ts, errors.ts     token 用量归一化、成本与失败分类
+│  │  └─ format.ts              数字格式化与上下文占用计算
 │  ├─ qq/                        ★ Agent B 独占
 │  │  ├─ types.ts                ★ 主会话契约（只读）
 │  │  ├─ bridge.ts               createQQBridge：WS 收事件、HTTP 发送、重连、心跳、去重
 │  │  ├─ policy.ts               授权 / 触发规则（allowUsers、allowGroups、真实 at 段）
 │  │  ├─ reply-store.ts          票据持久化（node:sqlite），pending→sending→sent|uncertain
+│  │  ├─ ticket.ts               入站票据重建与旧 route_text 兼容转换
 │  │  ├─ image.ts                图片校验（魔数、大小、根目录、≤4 张/20MiB）→ base64:// 段
 │  │  └─ index.ts                导出 createQQBridge
 │  ├─ agent/                     ★ Agent A
@@ -83,11 +90,26 @@ cs_agent/
 │  │  ├─ image-collect.ts        回合内新图片收集（≤4，魔数校验）
 │  │  ├─ reply-postprocess.ts    回复代码清洗（不调用模型）
 │  │  └─ dispatch.ts             admit（会话 + TicketDoc + 索引）→ scope FIFO → 建任务 → waitForTask → 兜底
+│  ├─ context/                   消息库、访问范围、格式化、衰老与媒体持久化
+│  │  ├─ access.ts               访问范围校验、owner 解析与 scopeLabel
+│  │  ├─ qq-context-tool.ts      QQ 召回工具实现，供 MCP、pi 与面板共用
+│  │  └─ recall-results.ts       按实际返回正文计算召回命中
+│  ├─ obs/                       观测存储、路由与面板
+│  │  ├─ store.ts, schema.ts     观测库与记忆表 DDL；独立进程共用建表逻辑
+│  │  ├─ http.ts, http-util.ts   路由挂载、页面组合与 SSE/CSRF 工具
+│  │  ├─ live.ts                 实时事件摘要与会话卡片
+│  │  ├─ sessions/              会话索引、读取、订阅及会话路由
+│  │  ├─ context/               上下文分析及独立的 /context 路由
+│  │  ├─ memory/                记忆读取、埋点和记忆路由
+│  │  └─ ui/                    HTML 与前端资源；context-bar 保留原有计算导出的兼容重导出
 │  ├─ mcp/                       codex 的 stdio MCP：qq-context.ts（聊天记录）、image-gen.ts（生图）
+│  │  └─ qq-context-server.ts   工具注册、回调注入与图片调用适配；查询委托 context
 │  └─ auth/codex-oauth.ts        把 /data/codex/auth.json 的 ChatGPT tokens 映射为 pi-ai 凭据
 ├─ test/                         vitest；qq/ 下的测试归 Agent B，其余归 Agent A
 └─ scripts/                      init-auth.ps1（把宿主机 ~/.codex/auth.json 复制进 ./data/codex/）
 ```
+
+P0 搬迁对照、分层规则与待清理例外见 [包结构设计 §6.1](DESIGN-package-layout.md#61-p0-实际搬迁对照)。依赖守卫位于 `test/architecture/deps.test.ts`；P1 的 media 与 P2 的 codex/观察者整理尚未实施。
 
 ## 5. 关键设计决策
 
