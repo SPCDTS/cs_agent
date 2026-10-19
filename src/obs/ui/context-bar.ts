@@ -6,7 +6,6 @@
 import { BACKENDS, esc } from './html.js';
 import { scopeLabel } from '../../context/access.js';
 import { STALE_MS, num, fmtInt, fmtShort, ratio, usageWindow, clampPct, fmtPct, tier, hoursAgo, type ContextUsage } from '../../shared/format.js';
-export { STALE_MS, toContextUsage, fmtInt, fmtShort, ratio, usageWindow, fmtPct, sortUsage, type ContextUsage, type ContextUsageView } from '../../shared/format.js';
 
 function ctxLabel(backend: string, key: string): string {
   const b = BACKENDS[backend] ?? backend;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { contextBar, fmtShort, fmtInt, sortUsage, toContextUsage, type ContextUsage } from '../../src/obs/ui/context-bar.js';
+import { contextBar } from '../../src/obs/ui/context-bar.js';
+import { fmtShort, fmtInt, sortUsage, toContextUsage, type ContextUsage } from '../../src/shared/format.js';
 import { THEME_CSS } from '../../src/obs/ui/theme.js';
 
 const NOW = Date.UTC(2026, 9, 18, 12);

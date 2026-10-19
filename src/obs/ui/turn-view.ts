@@ -3,7 +3,7 @@
  * 块结构与 agents-client.ts 的客户端渲染保持同一类名，实时追加与懒加载复用同一套样式。
  */
 import type { Block, ContentRef, ObservedTurn, Usage } from '../sessions/types.js';
-import { fmtInt, fmtPct, ratio } from './context-bar.js';
+import { fmtInt, fmtPct, ratio } from '../../shared/format.js';
 import { esc, fmtBytes, fmtMs, fmtTime, stamp, statusStamp, uri, type Tone } from './html.js';
 import { scopeLabel } from '../../context/access.js';
 

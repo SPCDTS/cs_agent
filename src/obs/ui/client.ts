@@ -4,7 +4,7 @@
  * 页面上唯一的定时器只在本地刷新"已耗时"文字。
  */
 import { BACKENDS, ROUTES, STAGES, TICKET_STATUS } from './html.js';
-import { STALE_MS } from './context-bar.js';
+import { STALE_MS } from '../../shared/format.js';
 import { AGENTS_JS } from './agents-client.js';
 import { MEMORY_JS } from './memory-client.js';
 

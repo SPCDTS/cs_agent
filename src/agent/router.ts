@@ -27,7 +27,6 @@ export function parseImagePrefixes(raw: string | undefined): string[] {
   return list.length ? list : [...DEFAULT_IMAGE_PREFIXES];
 }
 
-export { legacyRouteText } from "../qq/ticket.js";
 
 /** routeText：InboundMessage.route_text（只去首尾空白后逐字匹配前缀）。 */
 export function routeMessage(routeText: string, prefixes: readonly string[] = DEFAULT_IMAGE_PREFIXES, images: readonly string[] = []): RouteResult {

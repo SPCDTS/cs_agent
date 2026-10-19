@@ -3,7 +3,7 @@
  * 这里按约定的 ContextAnalysis 结构渲染头部、构成表与逐消息表；实测与估算分开，来源用标签区分，
  * 没有来源的数字显示"—"而不是 0。分析接口缺席（404/501/503）时给出"分析引擎暂不可用"。
  */
-import { fmtInt, fmtPct, ratio } from './context-bar.js';
+import { fmtInt, fmtPct, ratio } from '../../shared/format.js';
 import { empty, esc, fmtBytes, fmtTime, stamp, type Tone } from './html.js';
 import { contextHref, turnHref, type SessionCtx } from './turn-view.js';
 

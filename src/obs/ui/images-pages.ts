@@ -1,6 +1,6 @@
 import type { ImageDetail, ImageItem, ImagePage, ScopeSummary } from '../memory/types.js';
 import { crumbs } from './agents-pages.js';
-import { fmtInt } from './context-bar.js';
+import { fmtInt } from '../../shared/format.js';
 import { empty, esc, fmtBytes, fmtTime, kv, uri } from './html.js';
 import { memoryScopeHref } from './memory-pages.js';
 

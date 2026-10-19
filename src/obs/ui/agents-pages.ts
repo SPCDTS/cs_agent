@@ -3,7 +3,8 @@
  * （http.ts 在服务端内部调用会话路由取得，已按会话脱敏规则处理）；这里只做渲染，所有文本经 esc。
  */
 import type { Block, ObservedTurn, SessionRef } from '../sessions/types.js';
-import { contextBar, fmtInt, type ContextUsage } from './context-bar.js';
+import { contextBar } from './context-bar.js';
+import { fmtInt, type ContextUsage } from '../../shared/format.js';
 import { BACKENDS, csrfField, empty, esc, fmtTime, kv, stamp, statusStamp, time, uri } from './html.js';
 import { scopeLabel } from '../../context/access.js';
 import { blocksHtml, contextHref, contextLinks, qqLine, turnFacts, turnHref, turnMeta, turnStamp, type SessionCtx } from './turn-view.js';

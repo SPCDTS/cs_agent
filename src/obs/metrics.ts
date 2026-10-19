@@ -1,5 +1,6 @@
 import { usageCost } from "../shared/usage.js";
-import type { ObsEvent, ObsStore } from './store.js';
+import type { ObsStore } from './store.js';
+import type { ObsEvent } from '../shared/trace.js';
 export type Gauge = { name: string; labels?: Record<string, string>; value: number };
 type Aggregate = { count: number; success: number; durations: number[]; labels: Record<string, string> };
 /** 每个 60 秒窗口独立聚合；从事件游标读取，包含主进程摄取的 image_gen MCP 事件。 */

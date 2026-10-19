@@ -6,7 +6,7 @@
 import { redactText } from '../../shared/redact.js';
 import type { AgingReport, AgingStatus, ArchiveRow, CompactionRow, Hit, MessageItem, Retention, ScopeSummary, ScopeTimeline, SummaryVersion } from '../memory/types.js';
 import { crumbs, dataScript } from './agents-pages.js';
-import { fmtInt } from './context-bar.js';
+import { fmtInt } from '../../shared/format.js';
 import { empty, esc, fmtMs, fmtTime, fmtWhen, kv, stamp, uri } from './html.js';
 import { scopeLabel } from '../../context/access.js';
 

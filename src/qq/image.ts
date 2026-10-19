@@ -3,7 +3,6 @@
  * realpath 必须落在 imageRoot 下，魔数仅允许 PNG / JPEG / WebP / GIF。
  */
 import { MAX_IMAGES, MAX_TOTAL_IMAGE_BYTES, loadImage } from "../media/limits.js";
-export { MAX_IMAGES, MIN_IMAGE_BYTES, MAX_IMAGE_BYTES, isSupportedImage, loadImage } from "../media/limits.js";
 
 export interface ImageSegment {
   type: "image";

@@ -27,7 +27,6 @@ import type { BotAction, ContextStore } from "../context/store.js";
 import { FALLBACK_REPLY } from "./replies.js";
 import { DEFAULT_IMAGE_PREFIXES, routeMessage } from "./router.js";
 import { inboundFromTicket, legacyRouteText } from "../qq/ticket.js";
-export { inboundFromTicket } from "../qq/ticket.js";
 import type { CsTasks, TaskResult } from "./tasks.js";
 
 export { FALLBACK_REPLY } from "./replies.js";

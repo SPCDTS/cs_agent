@@ -1,4 +1,4 @@
-import type { ContextUsage } from '../../../src/obs/ui/context-bar.js';
+import type { ContextUsage } from '../../../src/shared/format.js';
 
 /** 与 ContextUsageStore 同形的内存桩：all / get / subscribe，set 时通知订阅者。 */
 export class ContextUsageStub {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_IMAGE_PREFIXES, IMAGE_USAGE_REPLY, legacyRouteText, parseInlineImageOptions, parseImagePrefixes, routeMessage } from "../../src/agent/router.js";
+import { DEFAULT_IMAGE_PREFIXES, IMAGE_USAGE_REPLY, parseInlineImageOptions, parseImagePrefixes, routeMessage } from "../../src/agent/router.js";
+import { legacyRouteText } from "../../src/qq/ticket.js";
 
 describe("rule router (§4.1)", () => {
   it.each(['__proto__', 'constructor', 'toString'])('原型键 %s 留在提示词中', token => {

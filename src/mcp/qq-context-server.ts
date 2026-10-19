@@ -7,7 +7,6 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { accessToString } from "../context/access.js";
 import { callQQContextTool, qqContextText as text, RECENT_MAX, SEARCH_LIMIT_MAX, SEARCH_DAYS_MAX, type QQContextToolDeps } from "../context/qq-context-tool.js";
-export { callQQContextTool } from "../context/qq-context-tool.js";
 
 export interface QQContextDeps extends QQContextToolDeps {
   view?: (file: string) => Promise<{ type: "image"; data: string; mimeType: string }>;

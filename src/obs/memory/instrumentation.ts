@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ensureMemoryTables } from '../schema.js';
-export { ensureMemoryTables } from '../schema.js';
 import type { SummaryRow } from '../../context/store.js';
 import { log } from '../../shared/log.js';
 

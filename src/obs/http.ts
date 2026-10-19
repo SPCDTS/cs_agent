@@ -1,6 +1,5 @@
 import { resolveAgentConfig } from '../agent/config.js';
 import { csrfToken, sseWriter, type SseWriter } from './http-util.js';
-export { csrfToken, sseWriter, type SseWriter } from './http-util.js';
 import { createContextRoutes } from './context/http.js';
 import { imageBinary } from './memory/images.js';
 import { SessionError } from './sessions/types.js';
@@ -21,7 +20,8 @@ import { CodexSessionAdapter } from './sessions/codex-adapter.js';
 import { PiSessionAdapter } from './sessions/pi-adapter.js';
 import { type PiSessionSource } from '../agent/backends/pi-session-types.js';
 import { createSessionRoutes, sessionJson, type SessionAdapters } from './sessions/http.js';
-import type { ObsEvent, ObsStore } from './store.js';
+import type { ObsStore } from './store.js';
+import type { ObsEvent } from '../shared/trace.js';
 import { createMemoryRoutes } from './memory/http.js';
 import type { MemoryAging, MemoryArchives } from './memory/types.js';
 import { loadImage } from '../media/limits.js';
@@ -37,7 +37,8 @@ import { MESSAGE_PAGE, archivesPageBody, memoryHomeBody, messageWindow, rangePar
   type ArchivesResult, type MemoryOverview, type MessagePage, type RecallCount, type SearchResult, type SummaryDetail } from './ui/memory-pages.js';
 import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnRecallSection, type RecallDetail, type RecallList } from './ui/recall-pages.js';
 import type { ScopeTimeline } from './memory/types.js';
-import { contextBar, sortUsage, type ContextUsage, type ContextUsageView } from './ui/context-bar.js';
+import { contextBar } from './ui/context-bar.js';
+import { sortUsage, type ContextUsage, type ContextUsageView } from '../shared/format.js';
 import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, stageLabel, stamp, statusStamp, time, uri } from './ui/html.js';
 import { scopeLabel } from '../context/access.js';
 import { PRELOAD_TURNS, agentsBody, byNewest, crumbs, dataScript, isBackend, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './ui/agents-pages.js';

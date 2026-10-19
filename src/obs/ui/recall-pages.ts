@@ -6,7 +6,7 @@
  */
 import type { RecallEvent, RequestEvidence, ScopeSummary } from '../memory/types.js';
 import { crumbs } from './agents-pages.js';
-import { fmtInt } from './context-bar.js';
+import { fmtInt } from '../../shared/format.js';
 import { BACKENDS, empty, esc, fmtMs, fmtTime, json, kv, stamp, uri } from './html.js';
 import { scopeLabel } from '../../context/access.js';
 import { memoryScopeHref, summaryHref } from './memory-pages.js';
