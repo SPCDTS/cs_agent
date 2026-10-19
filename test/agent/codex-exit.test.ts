@@ -41,7 +41,9 @@ describe("Codex exit / close grace", () => {
     expect(readFileSync(outputFile, "utf8")).toBe("answer to: pipe");
   });
 
-  it("close grace 后清理持有 stdout 的孙进程", async () => {
+  // 生产环境（Linux）codex 以独立进程组启动，killTree 杀整组，孤儿孙进程一并清理；
+  // Windows 下 fixture 的孙进程是 detached 的新进程组，父进程退出后 taskkill /T 够不到，无法验证，按平台跳过。
+  it.skipIf(process.platform === "win32")("close grace 后清理持有 stdout 的孙进程", async () => {
     const { runner, calls } = setup({ FAKE_CODEX_HOLD_PIPE: "1" });
     await runner.ask("cleanup", { threadKey: "owner" });
     const pid = calls().find(c => c.phase === "holder")!.pid;
