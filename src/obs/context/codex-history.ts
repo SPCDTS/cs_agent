@@ -115,7 +115,7 @@ export async function projectRecord(raw: unknown, location?: { file: string; off
     result.historyMode = str(p.history_mode);
     const base = p.base_instructions;
     const content = typeof base === 'string' ? base : str(object(base).text);
-    if (content) result.baseline = await codexMessage({ type: 'message', role: 'system', content }, { ts });
+    if (content) result.baseline = await codexMessage({ type: 'message', role: 'system', content }, { ts, location });
   }
   if (type === 'event_msg' && p.type === 'thread_settings_applied') {
     const tools = p.tools ?? object(p.settings).tools ?? p.mcp_tools;

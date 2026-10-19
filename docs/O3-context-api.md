@@ -17,6 +17,7 @@
 - `js-tiktoken@1.0.21` 与 `o200k_base` 是本地运行时依赖。每条计入角色与约 4 token 开销；单条正文最多 2 MiB，长文本每 8 KiB 分段。分段边界、脱敏替换及 provider 的实际模板会造成估算差异。词表不可用时明确报告 fallback；Pi 消息优先回退到 pi-ai。
 - JSON 正文先使用 `redactSessionValue`，字符串使用 `redactText`，再生成不超过 240 字符的预览。固定契约字段 `key/tokens/tokenizer` 不作为凭据字段遮蔽。返回体再次脱敏所有字符串；不输出密文或媒体二进制，索引文件绝对路径不进入响应元数据。
 - 正文引用由 O1 适配器签发，禁止把任意磁盘偏移伪装成 `ContentRef`。组合消息无法对应唯一正文块时省略引用，适配器拒绝签发时不再从其它路径补引用；replacement 中保留原 item ID 的消息可关联原已索引块。
+- Codex baseline 使用分析时实际生效的 `session_meta.base_instructions` / `turn_context.base_instructions` 的 `ref`，通过 content 接口读取完整脱敏正文；索引版本 4 将其独立保存，不增加回合可见块，旧版索引自动重建，引用沿用虚拟 UTF-8 字节区间及内容变化时的 409 校验。
 - rollout 缓存按文件路径、size、mtime 和文件身份区分，每个适配器最多 4 个投影快照，每份最多 4 MiB；超限不缓存。为旧式压缩保留用户文本各不超过 80 KiB 的首尾片段，其余正文只留预览与估算。读取前核对路径与身份，不跟随符号链接。trace 只扫描有限深度和目录数量，单个 JSON 载荷限制 8 MiB，路径必须位于 bundle 的 payloads 目录。
 - HTTP 沿用 dashboard 鉴权、安全头与只读限制。无效参数 400，未知回合 404。JSON 超过 1 MiB 时先把预览缩到 80 字符，再截断消息表并加说明；分类计数与 token 总量保持完整窗口统计。
 

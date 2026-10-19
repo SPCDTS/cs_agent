@@ -81,8 +81,10 @@ function recordBlocks(row: Record<string, unknown>): Block[] {
     return [{ ...base, kind: 'compaction', text: textOf(p.message ?? p.summary ?? p.text),
       meta: { replacement_history: Array.isArray(p.replacement_history), ...(p.reason ? { reason: p.reason } : {}) } }];
   }
-  if (row.type === 'turn_context') return [{ ...base, kind: 'event', text: '模型请求', meta: {
-    type: 'model_request', model: p.model, effort: p.effort ?? p.reasoning_effort ?? object(object(p.collaboration_mode)?.settings)?.reasoning_effort } }];
+  if (row.type === 'session_meta' || row.type === 'turn_context') {
+    const text = string(p.base_instructions) ?? string(object(p.base_instructions)?.text);
+    return text ? [{ ...base, kind: 'system_change', text }] : [];
+  }
   if (row.type === 'event_msg') {
     if (['turn_aborted', 'error', 'turn.failed'].includes(type ?? '')) return [{ ...base, kind: 'event', text: textOf(p.message ?? p.error ?? type), meta: { type, status: 'failed' } }];
     return [];
@@ -233,7 +235,7 @@ export class CodexSessionAdapter implements SessionAdapter {
     const row: SessionIndexFile = incremental ? structuredClone(previous!) : {
       file, size: 0, mtime: 0, identity, head: '', tail: '', lastOffset: 0,
       session: { backend: 'codex', id: '', label: '', status: 'archived', started: 0, updated: 0, turns: 0 },
-      state: { version: 3, turns: [], calls: {} },
+      state: { version: 4, turns: [], calls: {} },
     };
     const oldCounts = new Map(previous?.state.turns.map(turn => [turn.index.turn, turn.blocks.length]) ?? []);
     if (incremental) this.diagnostics.incrementalScans++; else this.diagnostics.fullScans++;
@@ -276,6 +278,11 @@ export class CodexSessionAdapter implements SessionAdapter {
     }
     row.session.updated = Math.max(row.session.updated, ts);
     const blocks = recordBlocks(record);
+    if (record.type === 'session_meta' || record.type === 'turn_context') {
+      if (record.type === 'turn_context') row.state.context = { model: string(p.model), effort: string(p.effort) ?? string(p.reasoning_effort) ?? string(object(object(p.collaboration_mode)?.settings)?.reasoning_effort) };
+      this.addBlocks(row, line, blocks, undefined, true);
+      return;
+    }
     const user = blocks[0]?.kind === 'user';
     if (user) {
       const previous = row.state.turns.at(-1);
@@ -285,10 +292,6 @@ export class CodexSessionAdapter implements SessionAdapter {
       const prelude = row.state.prelude ?? [];
       row.state.prelude = undefined;
       row.state.turns.push({ index: { turn, started: ts, preview: redactText(blocks[0]?.text ?? '', 240), tools: prelude.filter(block => block.kind === 'tool_call').length, requests: 0, status: 'running' }, startOffset: line.offset, endOffset: line.end, blocks: prelude });
-    }
-    if (record.type === 'turn_context') {
-      row.state.context = { model: string(p.model), effort: string(p.effort) ?? string(p.reasoning_effort) ?? string(object(object(p.collaboration_mode)?.settings)?.reasoning_effort) };
-      return;
     }
     this.addBlocks(row, line, blocks);
     const turn = row.state.turns.at(-1);
@@ -327,12 +330,12 @@ export class CodexSessionAdapter implements SessionAdapter {
     this.addBlocks(row, line, [{ kind: 'event', ts: timestamp(record.timestamp), text: '模型用量',
       meta: { type: 'model_usage', request: turn.index.requests, usage } }], -3);
   }
-  private addBlocks(row: SessionIndexFile, line: Line, blocks: Block[], synthetic?: number): void {
+  private addBlocks(row: SessionIndexFile, line: Line, blocks: Block[], synthetic?: number, baseline = false): void {
     const previous = row.state.turns.at(-1);
     // 回合结束后的指令留到下一次真实用户输入；回合中的指令仍留在当前回合。
     const betweenTurns = previous?.index.status !== 'running' && blocks[0]?.kind === 'system_change';
-    const turn = betweenTurns ? undefined : previous;
-    const target = turn?.blocks ?? (row.state.prelude ??= []);
+    const turn = baseline || betweenTurns ? undefined : previous;
+    const target = baseline ? (row.state.baselines ??= []) : turn?.blocks ?? (row.state.prelude ??= []);
     for (let item = 0; item < blocks.length; item++) {
       const block = blocks[item]!;
       if (turn && ['assistant', 'thinking', 'tool_call'].includes(block.kind)) {
@@ -383,8 +386,8 @@ export class CodexSessionAdapter implements SessionAdapter {
   /** 引用由 O1 已索引块签发，沿用正文校验及脱敏字节数。 */
   async contextRef(id: string, file: string, offset: number, kind: string): Promise<ContentRef | undefined> {
     const row = this.selected(id).find(item => item.file === file);
-    // 回合之间的指令/环境块暂存在 prelude，同样可签发引用。
-    const block = row && [...row.state.turns.flatMap(turn => turn.blocks), ...row.state.prelude ?? []].find(item => item.lineOffset === offset && item.kind === kind && item.item >= 0);
+    // 回合之间的指令/环境及独立保存的基础指令，同样通过已索引块签发引用。
+    const block = row && [...row.state.turns.flatMap(turn => turn.blocks), ...row.state.prelude ?? [], ...row.state.baselines ?? []].find(item => item.lineOffset === offset && item.kind === kind && item.item >= 0);
     if (!row || !block) return undefined;
     const raw = await this.rawBlock(row, block);
     if (raw.text === undefined) return undefined;
@@ -452,7 +455,7 @@ export class CodexSessionAdapter implements SessionAdapter {
     return inlineBlock(block, { session: row.session.id, offset: indexed.offset, length: bytes, bytes });
   }
   async content(ref: ContentRef): Promise<string> {
-    for (const row of this.selected(ref.session)) for (const block of [...row.state.turns.flatMap(turn => turn.blocks), ...row.state.prelude ?? []]) {
+    for (const row of this.selected(ref.session)) for (const block of [...row.state.turns.flatMap(turn => turn.blocks), ...row.state.prelude ?? [], ...row.state.baselines ?? []]) {
       const slot = { session: row.session.id, offset: block.offset, length: block.capacity ?? block.bytes, bytes: block.bytes };
       if (!validRange(ref, slot)) continue;
       const source = await this.rawBlock(row, block);
