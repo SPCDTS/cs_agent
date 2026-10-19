@@ -347,6 +347,12 @@ export class Dispatcher {
    * 每次尝试开始时 attempts +1（落盘）；票据仍 pending 时退避后在队首重试。harness 关闭（进程退出）时 attempts 提交失败、
    * 直接抛出并保留索引，重启后 recover() 继续。
    */
+  private async hasUnfinishedFileReply(ticket: string, conversationId: ConversationId): Promise<boolean> {
+    const doc = await this.opts.harness.snapshot(TicketDoc, conversationId, this.ctx);
+    return doc?.route === "agent" && !!doc.agentResult && doc.replyCompleted !== true &&
+      (await this.opts.bridge.getTicket(ticket))?.status === "sent";
+  }
+
   private async run(ticket: string, conversationId: ConversationId): Promise<void> {
     for (let local = 0; ; local++) {
       const entry = await this.opts.harness.commit(async (tx) => {
@@ -356,7 +362,7 @@ export class Dispatcher {
         return { attempts: e.attempts, givenUp: e.givenUp === true };
       }, this.ctx);
       if (!entry) return; // 索引已清除（其他路径已完成）或已标记 failed
-      if (entry.givenUp || entry.attempts > MAX_ATTEMPTS) {
+      if (entry.givenUp || (entry.attempts > MAX_ATTEMPTS && !await this.hasUnfinishedFileReply(ticket, conversationId))) {
         log.warn("ticket reached max attempts, giving up", { ticket: short(ticket), attempts: entry.attempts - 1 });
         await this.giveUp(ticket);
         return;
@@ -379,7 +385,7 @@ export class Dispatcher {
   private async attempt(ticket: string, conversationId: ConversationId, attempts: number): Promise<"terminal" | "fallback" | "pending"> {
     // 已回复过的票据（重复投递）：不再运行任务
     const pre = await this.opts.bridge.getTicket(ticket).catch(() => undefined);
-    if (pre === null || isTerminal(pre?.status)) {
+    if (pre === null || (isTerminal(pre?.status) && !await this.hasUnfinishedFileReply(ticket, conversationId))) {
       if (pre) await this.recordOutcome(ticket, conversationId);
       log.info("ticket already terminal, skipping", { ticket: short(ticket), status: pre?.status ?? "missing" });
       return "terminal";
@@ -397,6 +403,8 @@ export class Dispatcher {
         ...(outcome.status === "failed" || outcome.status === "faulted" ? { error: outcome.error.message } : {}),
       });
     }
+    // 文件回复尚未提交终态时保留索引；尤其不能因文字 sent 提前删除 manifest。
+    if (await this.hasUnfinishedFileReply(ticket, conversationId)) return "pending";
     const outcome = await this.fallbackIfUnreplied(ticket);
     if (outcome === "terminal") await this.recordOutcome(ticket, conversationId);
     return outcome;
@@ -481,7 +489,8 @@ export class Dispatcher {
       trace.event(ticket, rec?.status === "sent" && ok ? "reply_sent" : "failed", { status: rec?.status === "sent" && ok ? "ok" : "failed",
         detail: { terminal: true, ticket_status: rec?.status, route: doc?.route, backend: doc?.agentResult?.backend,
           failure: doc?.agentResult && !doc.agentResult.ok ? doc.agentResult.failure : doc?.imageResult && !doc.imageResult.ok ? doc.imageResult.failure : undefined,
-          message_id: rec?.reply_message_id, reply: doc?.replyText, images: doc?.replyImages } });
+          message_id: rec?.reply_message_id, reply: doc?.replyText, images: doc?.replyImages,
+          files: doc?.fileUploads?.map(({ name, bytes, status }) => ({ name, bytes, status })) } });
       this.withHistory("record reply failed", ticket, (h) =>
         h.completeReply(ticket, {
           action,

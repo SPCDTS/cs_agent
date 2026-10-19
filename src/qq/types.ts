@@ -129,6 +129,8 @@ export interface QQBridge {
    * text 1-4000 字符，纯文本（QQ 不渲染 Markdown）；images 0-4 张，base64:// 发送。
    */
   reply(ticket: string, text: string, imagePaths?: string[], opts?: { signal?: AbortSignal }): Promise<ReplyResult>;
+  /** 文件作为独立 QQ 消息发送；调用者负责持久化幂等状态。 */
+  uploadFile(type: ChatType, targetId: string, file: Buffer, name: string): Promise<{ file_id: string }>;
   prepareIncoming?(ticket: string): Promise<ReplyTicketRecord | null>;
   getTicket(ticket: string): Promise<ReplyTicketRecord | null>;
   /** 列出仍为 pending 的票据（按 seq 升序，最多 limit 条，默认 200）；afterSeq 为分页游标（只取 seq 更大的），供启动时与派发索引对账 */

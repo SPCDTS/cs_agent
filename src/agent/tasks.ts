@@ -1,3 +1,5 @@
+import { attachmentDirs } from "../media/attach-paths.js";
+import { readFileAttachments, readAttachmentData, type FileAttachment } from "../media/attach.js";
 import { ingestImageEvents } from "../media/gen/events.js";
 import { trace } from "../shared/trace.js";
 import { observeImages } from "../media/gen/observed.js";
@@ -52,7 +54,7 @@ const MAX_IMAGE_SUBMITS = 2;
 export type AgentCheckpoint = { phase: "handle" } | { phase: "lateImages"; job?: number; extensions?: number } | { phase: "postprocess" } | ReplyCheckpoint;
 
 export interface TaskDeps {
-  getBridge: () => Pick<QQBridge, "reply" | "getTicket">;
+  getBridge: () => Pick<QQBridge, "reply" | "getTicket" | "uploadFile">;
   imageBackend: Pick<ImageBackend, "submit" | "collect" | "reconcile" | "name" | "clearReferences">;
   imagesDir: string;
   imageTimeoutCapMs?: number;
@@ -109,20 +111,25 @@ async function replyPhase<S extends { phase: string }>(
   if (blocked && blocked !== "ticket sent") return failBlocked(runtime, context, doc.ticket, blocked, "reply");
   try {
     const res = await deps.getBridge().reply(doc.ticket, text, images, { signal: runtime.signal });
+    const files = doc.route === "agent" ? await uploadAttachments(deps, runtime, context) : [];
     await cleanupTicketWorkdir(deps, doc.ticket);
     await runtime.commit(async (tx) => {
       const d = await tx.doc(TicketDoc, runtime.conversationId);
       d.replyText = text;
       d.replyImages = images.length;
       d.replyMessageId = res.message_id;
+      d.replyCompleted = true;
       return { status: "terminal", outcome: { status: "completed", result: { sent: true, already_sent: res.already_sent } } };
     }, context);
-    trace.event(doc.ticket, "reply_sent", { detail: { message_id: res.message_id, images: images.length, reply: text,
+    if (doc.route === "agent") trace.event(doc.ticket, "reply", { detail: { files } });
+    trace.event(doc.ticket, "reply_sent", { detail: { files, message_id: res.message_id, images: images.length, reply: text,
       already_sent: res.already_sent, truncated: text.includes("…（内容过长，已截断）"), terminal: false } });
     log.info("reply sent", { ticket: short(doc.ticket), message_id: res.message_id, already_sent: res.already_sent, images: images.length });
   } catch (err) {
     rethrowIfAborted(runtime.signal, err);
     const rec = await deps.getBridge().getTicket(doc.ticket).catch(() => undefined);
+    // 文字已发出后的存储故障必须留给恢复处理，不能清理尚未上传的文件。
+    if (rec?.status === "sent") throw err;
     const retry = rec?.status === "pending" && attempt + 1 < MAX_REPLY_ATTEMPTS;
     log.warn(retry ? "reply failed before sending, will retry" : "reply failed", {
       ticket: short(doc.ticket),
@@ -139,6 +146,51 @@ async function replyPhase<S extends { phase: string }>(
   }
 }
 
+/** 文字 markSent 之后逐个登记发送意图；中断中的 sending 永远不重发。 */
+async function uploadAttachments(deps: TaskDeps, runtime: AnyRuntime, context: Context) {
+  let doc = await ticketDoc(runtime, context);
+  const fileDir = attachmentDirs(path.dirname(deps.imagesDir), doc.ticket).fileDir;
+  let entries: FileAttachment[] = [];
+  try { entries = await readFileAttachments(fileDir); }
+  catch (error) {
+    log.warn("attachment manifest invalid", { ticket: short(doc.ticket), error });
+    await runtime.commit(async tx => { (await tx.doc(TicketDoc, runtime.conversationId)).fileManifestError = true; return undefined; }, context);
+  }
+  if (doc.fileUploads === undefined) {
+    await runtime.commit(async tx => {
+      (await tx.doc(TicketDoc, runtime.conversationId)).fileUploads = entries.map(({ name, bytes, sha256 }) => ({ name, bytes, sha256, status: "pending" }));
+      return undefined;
+    }, context);
+    doc = await ticketDoc(runtime, context);
+  }
+  for (const [index, upload] of doc.fileUploads!.entries()) {
+    if (upload.status === "sent" || upload.status === "uncertain") continue;
+    if (upload.status === "sending") {
+      await runtime.commit(async tx => { (await tx.doc(TicketDoc, runtime.conversationId)).fileUploads![index]!.status = "uncertain"; return undefined; }, context);
+      continue;
+    }
+    runtime.signal.throwIfAborted();
+    await runtime.commit(async tx => { (await tx.doc(TicketDoc, runtime.conversationId)).fileUploads![index]!.status = "sending"; return undefined; }, context);
+    let file_id: string | undefined;
+    try {
+      const entry = entries[index];
+      if (!entry || entry.name !== upload.name || entry.bytes !== upload.bytes || entry.sha256 !== upload.sha256) throw new Error("附件清单与票据不一致");
+      const file = await readAttachmentData(fileDir, entry);
+      const source = doc.source;
+      file_id = (await deps.getBridge().uploadFile(source.type, source.type === "group" ? source.group_id! : source.user_id, file, upload.name)).file_id;
+      if (!file_id) throw new Error("文件上传缺少 file_id");
+    } catch (error) { log.warn("attachment upload uncertain; will not retry", { ticket: short(doc.ticket), name: upload.name, error }); }
+    // 持久化失败不能被上传异常分支吞掉；重启时 sending 会转为 uncertain。
+    await runtime.commit(async tx => {
+      const row = (await tx.doc(TicketDoc, runtime.conversationId)).fileUploads![index]!;
+      row.status = file_id ? "sent" : "uncertain";
+      if (file_id) row.file_id = file_id;
+      return undefined;
+    }, context);
+  }
+  return (await ticketDoc(runtime, context)).fileUploads!.map(({ name, bytes, status }) => ({ name, bytes, status }));
+}
+
 /**
  * 回复阶段结束（发出或放弃）后删除票据工作目录 ${ticketsDir}/<ticket>（codex-last.txt 等）。
  * 此时后端结果已在 TicketDoc 里，重跑不会再用到它；图片目录另行管理，不在这里删除。
@@ -150,9 +202,10 @@ async function cleanupTicketWorkdir(deps: TaskDeps, ticket: string, uploads: rea
     await deps.imageBackend.clearReferences(uploads);
   }
   await recoverRemoteUploads(ticketImageDir(deps.imagesDir, ticket), deps.imageBackend);
-  if (!deps.ticketsDir) return;
-  try {
-    await fs.rm(ticketWorkDir(deps.ticketsDir, ticket), { recursive: true, force: true });
+  const dirs = [attachmentDirs(path.dirname(deps.imagesDir), ticket).fileDir,
+    ...(deps.ticketsDir ? [ticketWorkDir(deps.ticketsDir, ticket)] : [])];
+  for (const dir of dirs) try {
+    await fs.rm(dir, { recursive: true, force: true });
   } catch (err) {
     log.warn("ticket dir cleanup failed", { ticket: short(ticket), error: (err as Error).message });
   }
@@ -423,6 +476,11 @@ export function createTasks(deps: TaskDeps) {
     phases: phases<AgentCheckpoint>({
       handle: async (_task, runtime, context) => {
         const doc = await ticketDoc(runtime, context);
+        // 文字已发出后的重启只恢复回复附件，不再运行后端或 lateImages。
+        if (doc.agentResult && (await deps.getBridge().getTicket(doc.ticket))?.status === "sent") {
+          await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "reply", attempt: 0 } }), context);
+          return;
+        }
         let result: AgentResult | undefined = doc.agentResult;
         if (!result) {
           const source = doc.source;

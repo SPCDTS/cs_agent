@@ -71,6 +71,33 @@ afterEach(async () => {
   rmSync(imageRoot, { recursive: true, force: true });
 });
 
+
+describe("文件上传", () => {
+  it.each(["private", "group"] as const)("%s 使用 base64 和清洗文件名，不传 folder", async type => {
+    server.override = call => call.action.startsWith("upload_") ? { body: { status: "ok", retcode: 0, data: { file_id: "file-id" } } } : undefined;
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const file = Buffer.alloc(2 * 1024 * 1024, 1);
+      expect(await bridge.uploadFile(type, type === "private" ? OWNER : GROUP, file, "../报\u0000告.txt".replace("\\u0000", "\u0000"))).toEqual({ file_id: "file-id" });
+      const call = server.calls.find(c => c.action === "upload_" + type + "_file")!;
+      expect(call.body).toEqual({ [type === "private" ? "user_id" : "group_id"]: Number(type === "private" ? OWNER : GROUP), file: "base64://" + file.toString("base64"), name: "报告.txt" });
+      expect(timeout).toHaveBeenLastCalledWith(34_000);
+    } finally { timeout.mockRestore(); }
+  });
+
+  it("超时最多 120 秒；缺少 file_id 或 API 失败视为不确定", async () => {
+    const custom = createQQBridge(config({ timeoutMs: 119_000 }));
+    server.override = call => call.action.startsWith("upload_") ? { body: { status: "ok", retcode: 0, data: {} } } : undefined;
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      await expect(custom.uploadFile("private", OWNER, Buffer.from("x"), "a.txt")).rejects.toThrow("不确定");
+      expect(timeout).toHaveBeenLastCalledWith(120_000);
+      server.override = call => call.action.startsWith("upload_") ? { http: 500 } : undefined;
+      await expect(bridge.uploadFile("private", OWNER, Buffer.from("x"), "a.txt")).rejects.toThrow("不要重试");
+    } finally { timeout.mockRestore(); }
+  });
+});
+
 describe("connection", () => {
   it("connects with bearer token and reports status", async () => {
     expect(server.wsAuthFailures).toBe(0);

@@ -1,3 +1,5 @@
+import { trace } from "../../src/shared/trace.js";
+import { registerFileAttachment, readFileAttachments, DEFAULT_ATTACHMENT_LIMITS } from "../../src/media/attach.js";
 import type { ImageOptions } from "../../src/media/gen/image-options.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -41,6 +43,10 @@ const deferred = <T = void>() => {
 
 /** QQBridge 桩：记录 reply，维护票据状态。 */
 class BridgeStub {
+  uploads: { type: string; target: string; file: Buffer; name: string }[] = [];
+  async uploadFile(type: "private" | "group", target: string, file: Buffer, name: string) {
+    this.uploads.push({ type, target, file, name }); return { file_id: `file-${this.uploads.length}` };
+  }
   replies: { ticket: string; text: string; images?: string[] }[] = [];
   status = new Map<string, ReplyTicketRecord["status"]>();
   pending: ReplyTicketRecord[] = [];
@@ -820,6 +826,82 @@ describe("rule router → image path", () => {
   });
 });
 
+
+describe("文件附件回复", () => {
+  async function files(r: Rig, ticket: string, count = 3) {
+    const workdir = path.join(r.dir, "ws"); mkdirSync(workdir, { recursive: true });
+    const fileDir = path.join(r.dir, "files", ticket);
+    for (let i = 0; i < count; i++) {
+      const file = path.join(workdir, i + ".txt"); writeFileSync(file, "附件" + i, "utf8");
+      await registerFileAttachment({ path: file, workdir, fileDir, limits: { ...DEFAULT_ATTACHMENT_LIMITS, maxFiles: 4 } });
+    }
+    return { fileDir, entries: await readFileAttachments(fileDir) };
+  }
+
+  it.each([undefined, "7"])("文字已发送后逐个上传到原会话，失败不重试且继续后续文件：群=%s", async group => {
+    const r = await makeRig(), ticket = "file-reply";
+    const { fileDir } = await files(r, ticket);
+    const events: unknown[] = []; const unsub = trace.tap(e => { if (e.ticket === ticket && e.stage === "reply") events.push(e.detail.files); });
+    let id!: ConversationId;
+    const upload = r.bridge.uploadFile.bind(r.bridge);
+    r.bridge.uploadFile = async (...args) => {
+      expect(r.bridge.status.get(ticket)).toBe("sent"); expect(r.bridge.replies).toHaveLength(1);
+      id = (await pendingIndex(r))[ticket]!.conversationId as ConversationId;
+      const doc = await r.harness.snapshot(TicketDoc, id, ctx);
+      const index = r.bridge.uploads.length;
+      expect(doc?.fileUploads?.[index]?.status).toBe("sending");
+      expect(doc?.fileUploads?.slice(index + 1).every(row => row.status === "pending")).toBe(true);
+      const result = await upload(...args);
+      if (index === 1) throw new Error("上传响应丢失");
+      return result;
+    };
+    try { await r.dispatcher.dispatch(inbound("发文件", { group }), ticket); } finally { unsub(); }
+    const doc = await r.harness.snapshot(TicketDoc, id, ctx);
+    expect(doc?.fileUploads?.map(row => row.status)).toEqual(["sent", "uncertain", "sent"]);
+    expect(doc?.fileUploads?.[0]?.file_id).toBe("file-1"); expect(doc?.replyCompleted).toBe(true);
+    expect(r.bridge.uploads.map(row => [row.type, row.target, row.file.toString()])).toEqual([0, 1, 2].map(i => [group ? "group" : "private", group ?? OWNER, "附件" + i]));
+    expect(events).toEqual([doc?.fileUploads?.map(({ name, bytes, status }) => ({ name, bytes, status }))]);
+    expect(existsSync(fileDir)).toBe(false); expect(await pendingIndex(r)).toEqual({});
+  });
+
+  it.each([false, true])("重启只发送 pending，sending 转 uncertain，sent/uncertain 不重发；清单已入文档=%s", async initialized => {
+    const r = await makeRig(), ticket = "file-recovery";
+    const { entries, fileDir } = await files(r, ticket, initialized ? 4 : 2);
+    const statuses = ["pending", "sending", "sent", "uncertain"] as const;
+    const conv = await r.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+      Object.assign(await tx.doc(TicketDoc, id), { ticket, route: "agent", source: { type: "private", user_id: OWNER, group_id: null, nickname: "test" },
+        text: "请求", replyDraft: "已发文字", agentResult: { ok: true, backend: "codex", text: "已发文字", images: [] },
+        ...(initialized ? { fileUploads: entries.map(({ name, bytes, sha256 }, i) => ({ name, bytes, sha256, status: statuses[i], ...(i === 2 ? { file_id: "old-id" } : {}) })) } : {}) });
+      (await tx.doc(DispatchDoc)).pending[ticket] = { conversationId: id, scope: "private:" + OWNER, attempts: MAX_ATTEMPTS, ticketSeq: 1 };
+    } }, ctx);
+    r.bridge.status.set(ticket, "sent");
+    await r.harness.close(ctx); await r.reopen(); await r.dispatcher.recover(); await r.dispatcher.idle();
+    const doc = await r.harness.snapshot(TicketDoc, conv.id, ctx);
+    expect(r.backend.requests).toHaveLength(0); expect(r.bridge.replies).toHaveLength(0);
+    expect(r.bridge.uploads.map(row => row.name)).toEqual(initialized ? ["0.txt"] : ["0.txt", "1.txt"]);
+    expect(doc?.fileUploads?.map(row => row.status)).toEqual(initialized ? ["sent", "uncertain", "sent", "uncertain"] : ["sent", "sent"]);
+    if (initialized) expect(doc?.fileUploads?.[2]?.file_id).toBe("old-id");
+    expect(doc?.replyCompleted).toBe(true); expect(existsSync(fileDir)).toBe(false);
+  });
+
+  it("损坏清单不影响文字，且清理所有文件副本", async () => {
+    const r = await makeRig(), ticket = "bad-manifest";
+    const { fileDir } = await files(r, ticket, 1);
+    writeFileSync(path.join(fileDir, "manifest.json"), "broken", "utf8");
+    await r.dispatcher.dispatch(inbound("回复"), ticket);
+    expect(r.bridge.replies).toHaveLength(1); expect(r.bridge.uploads).toHaveLength(0);
+    expect(existsSync(fileDir)).toBe(false);
+  });
+
+  it("副本缺失或内容变化只将对应文件记 uncertain", async () => {
+    const r = await makeRig(), ticket = "changed-file";
+    const { fileDir, entries } = await files(r, ticket, 2);
+    writeFileSync(path.join(fileDir, entries[0]!.filename), "篡改内容", "utf8");
+    await r.dispatcher.dispatch(inbound("回复"), ticket);
+    expect(r.bridge.replies).toHaveLength(1); expect(r.bridge.uploads.map(row => row.name)).toEqual(["1.txt"]);
+  });
+});
+
 describe("agent path", () => {
   it("non-prefixed message → agent backend with scope/access/threadKey; reply is sent as-is", async () => {
     const r = await makeRig();
@@ -876,7 +958,7 @@ describe("agent path", () => {
     expect(bot(r).find((b) => b.ticket === "t-pi")).toMatchObject({ status: "失败" });
   });
 
-  it("codex backend end to end via fake codex: QQ_ACCESS, IMAGE_TICKET_DIR, configured effort; ≤4 collected images attached", async () => {
+  it("codex backend end to end via fake codex: QQ_ACCESS, QQ_ATTACH_DIR, configured effort; ≤4 collected images attached", async () => {
     const dir = tmp("cs-dispatch-codex-");
     const logFile = path.join(dir, "codex-calls.jsonl");
     const runner = new CodexRunner({
@@ -893,7 +975,8 @@ describe("agent path", () => {
     await r.dispatcher.dispatch(inbound("画一张图并配一句话", { group: "200000001", user: "42" }), "t-codex-e2e");
     const start = readFileSync(logFile, "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l)).find((c) => c.phase === "start");
     expect(start.argv).toEqual(expect.arrayContaining(["-c", 'mcp_servers.qq_context.env.QQ_ACCESS="group:200000001"']));
-    expect(start.argv).toEqual(expect.arrayContaining(["-c", `mcp_servers.image_gen.env.IMAGE_TICKET_DIR="${imgDir(r, "t-codex-e2e")}"`]));
+    expect(start.argv).toContain(`mcp_servers.qq_context.env.QQ_ATTACH_DIR=${JSON.stringify(path.join(dir, "images", "t-codex-e2e"))}`);
+    expect(start.argv.some((arg: string) => arg.includes("mcp_servers.image_gen"))).toBe(false);
     expect(start.argv).toEqual(expect.arrayContaining(["-c", 'model_reasoning_effort="medium"']));
     expect(start.stdin.split("\n")[0]).toMatch(/^\[来源\] 群 200000001 · tester\(42\) · /);
     const reply = r.bridge.replies[0]!;

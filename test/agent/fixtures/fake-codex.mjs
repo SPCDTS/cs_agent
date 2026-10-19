@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 假 codex：记录 argv/stdin 到 FAKE_CODEX_LOG，输出 JSONL，写 -o 文件。
-// FAKE_CODEX_IMAGES=N：模拟 image_gen MCP，向 -c 注入的 IMAGE_TICKET_DIR 写 N 张 PNG 和一个非图片文件。
+// FAKE_CODEX_IMAGES=N：模拟图片附件/生图，向本轮注入的图片目录写 N 张 PNG 和一个非图片文件。
 // FAKE_CODEX_TEXT：覆盖回答正文。
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -50,9 +50,11 @@ process.stdin.on("end", async () => {
   if (sleepMs) await new Promise((r) => setTimeout(r, sleepMs));
   if (tools) { emit({ type: "item.completed", item: { ...cmd, status: "completed", exit_code: 0 } }); emit({ type: "item.completed", item: { ...mcp, status: "completed", result: { content: [] } } }); }
   const images = Number(process.env.FAKE_CODEX_IMAGES ?? 0);
-  const dirArg = argv.find((a) => a.startsWith("mcp_servers.image_gen.env.IMAGE_TICKET_DIR="));
+  const attachArg = argv.find(a => a.startsWith("mcp_servers.qq_context.env.QQ_ATTACH_DIR=") && !a.endsWith('=""'));
+  const dirArg = attachArg || argv.find((a) => a.startsWith("mcp_servers.image_gen.env.IMAGE_TICKET_DIR="));
   if (images && dirArg) {
-    const dir = dirArg.slice(dirArg.indexOf("=") + 1).replace(/^"|"$/g, "");
+    const raw = dirArg.slice(dirArg.indexOf("=") + 1);
+    const dir = attachArg ? JSON.parse(raw) : raw.replace(/^"|"$/g, "");
     mkdirSync(dir, { recursive: true });
     for (let i = 0; i < images; i++) writeFileSync(path.join(dir, `img_${i}.png`), PNG);
     writeFileSync(path.join(dir, "notes.txt"), "not an image file");

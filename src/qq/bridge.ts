@@ -2,6 +2,7 @@
  * createQQBridge：NapCat OneBot v11 —— WebSocket 收事件，HTTP 调 API。
  * 负责：重连与心跳、自回声过滤、去重、授权 / 触发、票据持久化、按票据幂等回复。
  */
+import { attachmentName } from "../media/attach.js";
 import type { DownloadHooks } from '../media/download.js';
 import { inboundFromTicket } from './ticket.js';
 import { downloadIncoming } from "./incoming.js";
@@ -455,6 +456,19 @@ class Bridge extends EventEmitter implements QQBridge {
     const messageId = stringField(data, "message_id");
     store.markSent(ticket, messageId);
     return { already_sent: false, message_id: messageId, message_type: type, target_id: targetId };
+  }
+
+  async uploadFile(type: ChatType, targetId: string, file: Buffer, name: string): Promise<{ file_id: string }> {
+    if (type !== "private" && type !== "group") throw new Error("会话类型必须为 private 或 group。");
+    if (!Buffer.isBuffer(file) || !file.length) throw new Error("文件不能为空");
+    const timeoutMs = Math.min(120_000, Math.max(this.timeoutMs, IMAGE_TIMEOUT_MS) + Math.ceil(file.length / 1024 / 1024) * 2000);
+    const data = await this.client.call(type === "private" ? "upload_private_file" : "upload_group_file", {
+      [type === "private" ? "user_id" : "group_id"]: numericId(targetId),
+      file: "base64://" + file.toString("base64"), name: attachmentName(name),
+    }, { sending: true, timeoutMs });
+    const file_id = stringField(data, "file_id");
+    if (!file_id) throw new OneBotError("文件上传缺少 file_id，结果不确定，不要重试", true);
+    return { file_id };
   }
 
   async send(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }> {

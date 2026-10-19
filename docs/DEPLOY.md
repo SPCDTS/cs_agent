@@ -167,6 +167,8 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 
 `qq_send_image(path)` 登记图片；`qq_send_file(path, name?)` 登记文件，name 缺省取原文件名。来源只能是本轮工作区普通文件或当前 QQ_ACCESS 范围已召回媒体，拒绝软链接；文件名取 basename、去控制字符、最多 120 字符。图片魔数、单张 10 MiB、合计 20 MiB、每轮 4 张限制沿用回复通道。
 
+文件在文字（含图片）确认发送后逐个上传到原会话，群聊放根目录。每次上传前持久化 `fileUploads.status=sending`，成功保存 `sent` 和 `file_id`，异常保存 `uncertain`；恢复只发送 `pending`，遗留 `sending` 转 `uncertain`。文字已发出但附件未结束时保留派发索引；全部结束后观测 `reply.files` 记录名字、大小和状态，再清理文件副本。上传超时至少 30 秒，每 MiB 加 2 秒，最高 120 秒。
+
 每轮注入 `QQ_ATTACH_DIR=${DATA_DIR}/images/<ticket>`、`QQ_FILE_DIR=${DATA_DIR}/files/<ticket>`、`QQ_WORKDIR=${WORKSPACE_DIR}/<会话键>`。注入值必须是安全字符组成、不含 `..` 的绝对路径；MCP 再校验前两者分别是 images/files 的直接子目录且票据相同，工作区是 WORKSPACE_DIR 的直接子目录，拒绝软链接与 realpath 越界。`WORKSPACE_DIR` 与 `ATTACH_*` 配置由入口脚本透传。
 
 ### 生图 MCP（image_gen）

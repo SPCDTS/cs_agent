@@ -30,6 +30,12 @@ export type AgentResult =
  * 每个 QQ 消息会话的文档。ticket 只来自这里，后端无法指定回复目标。
  * 各阶段的结果写在这里（而不只是任务检查点）：任务失败后派发器新建的任务能跳过已完成的阶段。
  */
+export type FileUpload = {
+  name: string; bytes: number; sha256: string;
+  status: "pending" | "sending" | "sent" | "uncertain";
+  file_id?: string;
+};
+
 export type TicketState = {
   ticket: string;
   source: TicketSource;
@@ -63,6 +69,10 @@ export type TicketState = {
   replyText?: string;
   replyImages?: number;
   replyMessageId?: string;
+  /** 文字已发出不代表附件已完成；此标记与回复阶段终态一起提交。 */
+  replyCompleted?: boolean;
+  fileUploads?: FileUpload[];
+  fileManifestError?: boolean;
   /** 入站消息时间（unix 秒）与 message_id（[来源] 头部 / 引用查找用） */
   time?: number;
   messageId?: string;

@@ -566,6 +566,7 @@ describe("pi durable backend", () => {
     } });
     const replies: string[] = [];
     const bridge = {
+      uploadFile: async () => ({ file_id: "unused" }),
       getTicket: async (ticket: string) => ({ ticket_id: ticket, status: replies.length ? "sent" : "pending", seq: 1 }) as ReplyTicketRecord,
       listPendingTickets: async () => [],
       reply: async (_ticket: string, text: string) => { replies.push(text); return { message_id: "one", already_sent: false, message_type: "group" as const, target_id: "7" }; },
@@ -632,6 +633,7 @@ describe("pi durable backend", () => {
     const replies: { ticket: string; text: string; images?: string[] }[] = [];
     let sent = false;
     const bridge = {
+      uploadFile: async () => ({ file_id: "unused" }),
       getTicket: async (ticket: string) => ({ ticket_id: ticket, status: sent ? "sent" : "pending", seq: 1 }) as ReplyTicketRecord,
       listPendingTickets: async () => [],
       reply: async (ticket: string, text: string, images?: string[]) => { replies.push({ ticket, text, images }); sent = true;

@@ -35,7 +35,7 @@ async function rig(){
   clean.push(()=>rmSync(dir,{recursive:true,force:true}),()=>{store.close();context.close();});
   const models=createModels(),faux=fauxProvider({tokensPerSecond:Infinity});models.setProvider(faux.provider);
   const states=new Map<string,string>();
-  const bridge={getTicket:async(ticket:string)=>({ticket_id:ticket,seq:1,status:states.get(ticket)??'pending'}) as ReplyTicketRecord,
+  const bridge={uploadFile:async()=>({file_id:"unused"}),getTicket:async(ticket:string)=>({ticket_id:ticket,seq:1,status:states.get(ticket)??'pending'}) as ReplyTicketRecord,
     listPendingTickets:async()=>[],reply:async(ticket:string)=>{states.set(ticket,'sent');return {message_id:'reply-'+ticket,already_sent:false,message_type:'private' as const,target_id:'1'};}};
   const image={name:'fake-comfy',submit:async()=>'prompt-fake',collect:async(_id:string,out:string)=>{mkdirSync(out,{recursive:true});const file=path.join(out,'result.png');writeFileSync(file,TRANSPARENT_PNG);return [file];},reconcile:async()=>({images:[] as string[]}),clearReferences:async()=>{}};
   const codex=new CodexBackend({imagesDir:path.join(dir,'images'),ticketsDir:path.join(dir,'tickets'),reasoningEffort:'high',runner:{ask:async(_prompt,o)=>{
@@ -53,7 +53,7 @@ it('前缀图片票据和 Codex agent 票据通过真实 dispatcher/任务，记
   const r=await rig();const complete=vi.spyOn(r.models,'completeSimple');await r.dispatcher.dispatch(r.msg('奶龙: 猫'),'image');await r.dispatcher.dispatch(r.msg('你好'),'agent');
   const stages=(t:string)=>r.store.events(t).map(e=>e.stage).filter((s,i,a)=>i===0||a[i-1]!==s);
   expect(stages('image')).toEqual(['received','admitted','routed','dispatched','phase:submit','image:submit','phase:submit','phase:collect','image:collect','phase:collect','phase:reply','reply_sent','phase:reply','reply_sent']);
-  expect(stages('agent')).toEqual(['received','admitted','routed','dispatched','phase:handle','backend:codex','thread_wait','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','postprocess','phase:reply','reply_sent','phase:reply','reply_sent']);
+  expect(stages('agent')).toEqual(['received','admitted','routed','dispatched','phase:handle','backend:codex','thread_wait','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','postprocess','phase:reply','reply','reply_sent','phase:reply','reply_sent']);
   expect(r.store.events('image').find(e=>e.stage==='image:submit'&&e.status==='ok')?.detail_json).toContain('prompt-fake');
   expect(r.store.events('agent').find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')?.duration_ms).toBe(12);
   expect(r.store.tickets().every(t=>t.status==='sent')).toBe(true);
