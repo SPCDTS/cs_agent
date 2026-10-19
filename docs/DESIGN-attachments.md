@@ -1,8 +1,10 @@
 # 执行 agent 的附件发送与生图工具下线（2026-10-19）
 
-用户决定（2026-10-19）：
-1. 本地生图已由规则分流器（`奶龙:` 前缀）接管，执行 agent 不再需要考虑生图：移除 AGENTS.md / agent.md 里关于生图的说明。
-2. 给执行 agent 加上"通过 IM 发送图片、文件"的能力。
+用户决定（2026-10-19，含同日澄清）：
+1. codex 有内置的生图能力（`.system` 技能 `imagegen`），cs-agent 不干预、不在提示词上做任何处理；因此撤掉 cs-agent 自己给 codex 挂的 `image_gen` MCP 及 AGENTS.md 里关于它的说明。
+2. pi 继续持有 `generate_image` 工具，不增加任何额外提示词；`data/prompts/agent.md` 不动。
+3. `奶龙:` 前缀分流是用户的测试入口，与 agent 流程无关：不在任何提示词里提及，规则分流代码不动。
+4. 给执行 agent 加上"通过 IM 发送图片、文件"的能力（codex 用内置生图产出的文件也经此发送）。
 
 实施排在包结构整理 P1 之后（P1 正在搬动 `agent/image-*`、`qq/image*`、`mcp/image-gen*`），避免冲突；§6 记录验收。
 
@@ -14,18 +16,17 @@
 - codex 每个线程键（`owner` / `group:<id>` / `private:<qq>`）的工作区是 `/workspace/<key 冒号换下划线>`，由 `codexWorkspacePolicy` 以命名权限隔离，其他会话目录不可读。pi 后端同样以 `workspaceDir/<key>` 为工作目录（`codingEnvironment`）。
 - MCP 服务进程由 codex 直接 spawn，不在 bwrap 沙箱内，可读写 `/data`；`qq_context` MCP 已持有本轮 `QQ_ACCESS` / `QQ_TICKET` / `QQ_BACKEND` / `QQ_SESSION`。
 
-## 1. 生图工具下线（执行 agent 不再生图）
+## 1. 撤掉 cs-agent 给 codex 挂的生图工具（codex 用自带能力）
 
 | 项 | 改法 |
 |---|---|
-| 受管 AGENTS.md（`renderManagedAgentsMd`） | 删除"## 生图（image_gen）"整段；保留 `qq_image` / `qq_view_image` 的召回说明（移到"聊天记录与图片"小节）；新增一行："本服务的生图由固定前缀触发：用户想画图或改图时，告诉他把要画的内容写在「奶龙:」后面发送（前缀以 IMAGE_PREFIXES 的第一个为准，渲染时取配置值），你自己不要尝试生图。" |
-| 播种的自定义提示词 `DEFAULT_CODEX_PROMPT` | 删除"## 生图提示词指引"段。已部署环境的 `data/prompts/codex.md` 是持久化文件，不会被默认值覆盖：部署时由主会话按同样内容手工删除该段（在 /settings 页或直接编辑文件），并记入 §6。 |
-| pi 的 `DEFAULT_AGENT_PROMPT` 与 `data/prompts/agent.md` | 同上，删除生图相关 4 行，保留召回说明；加同一句前缀提示。 |
-| codex 的 `image_gen` MCP 注册（entrypoint `[mcp_servers.image_gen]`） | 新增 `CODEX_IMAGE_GEN=off|on`（默认 `off`）：off 时不写该段，`codex-runner` 不再注入 `IMAGE_TICKET_DIR` / `IMAGE_REFS` 相关 `-c`（保留函数，按开关跳过）。on 时行为不变（保留给需要模型生图的场景）。 |
-| pi 的 `generate_image` 工具 | 同一开关 `AGENT_IMAGE_TOOL`？不另设：复用 `CODEX_IMAGE_GEN` 语义过于 codex 化，改名为 **`AGENT_IMAGE_TOOL=off|on`**（默认 off），同时控制 codex 的 MCP 注册与 pi 的工具注册；entrypoint 读它决定是否写 `[mcp_servers.image_gen]`。 |
-| 规则分流的生图路径（`cs.image` 任务、main.ts 的 `imageBackend`） | 不变。 |
+| 受管 AGENTS.md（`renderManagedAgentsMd`） | 删除"## 生图（image_gen）"整段。其中关于图片召回的两句（`[image]` / `qq_image(message_id)` / `qq_view_image(path)` / `[image:<路径>]`）与生图无关，移到"聊天记录与图片"小节保留，但去掉 `reference_images` 这半句。**不加**任何关于生图或前缀的替代说明。 |
+| 播种的自定义提示词 `DEFAULT_CODEX_PROMPT` | 删除"## 生图提示词指引"段。已部署环境的 `data/prompts/codex.md` 是持久化文件，默认值不会覆盖：部署时由主会话手工删除该段并记入 §6。 |
+| codex 的 `image_gen` MCP 注册（entrypoint `[mcp_servers.image_gen]`） | 新增 `CODEX_IMAGE_GEN=off|on`（默认 `off`）：off 时不写该段，`codex-runner` 不再注入 `IMAGE_TICKET_DIR` / `IMAGE_REFS` / `mcp_servers.image_gen.env.QQ_ACCESS` 相关 `-c`（保留函数，按开关跳过），`src/mcp/image-gen.ts` 代码保留。on 时行为与现在一致。 |
+| codex 内置 `imagegen` 技能 | 不动。它产出的图片落在工作区（cwd）里，由 §2 的 `qq_send_image(path)` 发出。 |
+| pi 的 `generate_image` 工具与 `DEFAULT_AGENT_PROMPT` / `data/prompts/agent.md` | 不动。pi 生成的图片仍由 `collectNewImages` 自动随回复发出。 |
+| 规则分流的生图路径（`cs.image` 任务、main.ts 的 `imageBackend`） | 不动（用户的测试入口）。 |
 | 回合结束的图片收集（`collectNewImages`） | 保留：它同时是 §2 附件图片的发送通道。 |
-| 技能 `imagegen`（codex 内置 `.system` 技能） | 不动；模型即使按技能尝试，也没有可用的生图工具，会得到明确失败。 |
 
 ## 2. 附件发送能力
 
@@ -68,7 +69,7 @@
 
 受管 AGENTS.md 新增小节"发送图片与文件"：
 - "要把工作区里的图片或文件发给用户时，调用 qq_send_image(path) / qq_send_file(path)，它们会随本次回复自动发出；每次回复最多 4 张图、3 个文件，单个文件不超过 20 MiB。只能发送你工作区内的文件和已召回（[image:<路径>]）的图片。回复文本里不要写文件路径。"
-pi 的 agent.md 同样加这一段。
+pi 的 agent.md 也加这一段（这是工具用法说明，不是生图提示）。
 
 ### 2.6 观测与文档
 
@@ -85,15 +86,15 @@ pi 的 agent.md 同样加这一段。
 
 ## 4. 实施分组
 
-- A（后端，Codex）：§1 全部 + §2.1–2.4 的 codex 侧（`qq_context` MCP 工具、`codex-runner` 注入、`tasks.ts` reply 阶段、bridge 的 `uploadFile`、票据清理）+ 测试 + 文档。
-- B（pi 侧，Codex）：pi-tools 两个工具、pi 提示词、pi 回合收集文件清单。
+- A（后端，Codex）：§1 的 codex 侧 + §2.1–2.4 的 codex 侧（`qq_context` MCP 工具、`codex-runner` 注入、`tasks.ts` reply 阶段、bridge 的 `uploadFile`、票据清理）+ 测试 + 文档。
+- B（pi 侧，Codex）：pi-tools 两个工具、pi 回合收集文件清单；pi 的生图工具与提示词不动。
 - 两组可并行（文件不重叠：A 不碰 `agent/pi-tools`、`agent/backends/pi.ts`、`agent/prompt.ts`）。
-- 主会话验收：真实容器里用 stdio 方式调用 `qq_send_file` 登记一个工作区文件；再用 QQ 私聊让 bot 发一个文件与一张工作区图片（用户侧）；检查 reply 事件与 NapCat 返回的 `file_id`；确认 developer/AGENTS.md 里已无生图段落、`image_gen` MCP 不再在 `tools` 列表中（上下文分析页"工具定义"类别）。
+- 主会话验收：真实容器里用 stdio 方式调用 `qq_send_file` 登记一个工作区文件；再用 QQ 私聊让 bot 发一个文件与一张工作区图片（用户侧）；检查 reply 事件与 NapCat 返回的 `file_id`；确认 AGENTS.md 里已无我们自己的生图段落、`image_gen` MCP 不再在 codex 的 `tools` 列表中（上下文分析页"工具定义"类别）。
 
 ## 5. 非目标
 
 - 不支持发送语音、视频、合并转发；不支持从 URL 直接发文件（模型可先下载到工作区再发）。
-- 不改规则分流的生图路径与 ComfyUI 实现；不删除 `image_gen` MCP 代码（开关为 on 时仍可用）。
+- 不改规则分流的生图路径与 ComfyUI 实现；不删除 `image_gen` MCP 代码（开关为 on 时仍可用）；不碰 codex 内置 `imagegen` 技能，也不为它写任何提示。
 
 ## 6. 验收记录
 
