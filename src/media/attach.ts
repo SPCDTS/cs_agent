@@ -11,6 +11,8 @@ export const DEFAULT_ATTACHMENT_LIMITS: AttachmentLimits = { maxBytes: 20 * 1024
 export interface AttachmentSource {
   path: string;
   workdir: string;
+  /** 额外的只读来源根目录，与工作区执行相同的路径校验。 */
+  extraRoots?: string[];
   mediaCheck?: (canonical: string) => boolean | Promise<boolean>;
 }
 export interface FileAttachment {
@@ -19,7 +21,7 @@ export interface FileAttachment {
   name: string;
   bytes: number;
   sha256: string;
-  source: "workspace" | "media";
+  source: "workspace" | "generated" | "media";
 }
 const SOURCE_ERROR = "只能发送工作区内的文件或已召回的图片";
 const digest = (data: Buffer) => createHash("sha256").update(data).digest("hex");
@@ -66,6 +68,14 @@ async function sourceFile(o: AttachmentSource, min: number, max: number) {
   const root = await fs.realpath(o.workdir);
   let source: FileAttachment["source"] | undefined = inside(root, canonical) && inside(path.resolve(o.workdir), file) ? "workspace" : undefined;
   if (!source) {
+    for (const extraRoot of o.extraRoots ?? []) {
+      if (!inside(path.resolve(extraRoot), file)) continue;
+      try {
+        if (inside(await fs.realpath(extraRoot), canonical)) { source = "generated"; break; }
+      } catch { /* 缺失或不可访问的来源根目录不扩大白名单。 */ }
+    }
+  }
+  if (!source) {
     try { if (await o.mediaCheck?.(canonical)) source = "media"; }
     catch { /* 媒体库不可用或内容失效均不扩大来源白名单。 */ }
   }
@@ -105,7 +115,7 @@ export async function readFileAttachments(fileDir: string): Promise<FileAttachme
   if (!Array.isArray(rows) || rows.some((row, index) => !row || typeof row.originalPath !== "string" ||
     typeof row.name !== "string" || attachmentName(row.name) !== row.name || row.filename !== `${index + 1}-${row.name}` ||
     !Number.isSafeInteger(row.bytes) || row.bytes < 1 || !/^[a-f0-9]{64}$/.test(row.sha256) ||
-    !["workspace", "media"].includes(row.source))) throw new Error("附件 manifest 格式无效");
+    !["workspace", "generated", "media"].includes(row.source))) throw new Error("附件 manifest 格式无效");
   return rows as FileAttachment[];
 }
 

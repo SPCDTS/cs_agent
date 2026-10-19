@@ -51,6 +51,46 @@ describe("附件登记", () => {
     }
   });
 
+  it("额外来源支持图片与文件，来源按工作区、额外目录、召回媒体排序", async () => {
+    const o = await setup(); const generated = path.join(o.root, "generated"); await fs.mkdir(generated);
+    const file = path.join(generated, "image.png"); await fs.writeFile(file, png());
+    const options = { ...o, extraRoots: [path.join(o.root, "missing"), generated, o.workdir], mediaCheck: () => { throw new Error("不应查询媒体库"); } };
+    for (const register of [registerFileAttachment, registerImageAttachment]) expect(await register({ ...options, path: file })).toContain("已登记");
+    expect((await readFileAttachments(o.fileDir))[0]!.source).toBe("generated");
+    await fs.writeFile(path.join(generated, "local.png"), png(1));
+    await o.write("local.png", png(2));
+    await registerFileAttachment({ ...options, path: "local.png" });
+    expect((await readFileAttachments(o.fileDir))[1]).toMatchObject({ source: "workspace", originalPath: await fs.realpath(path.join(o.workdir, "local.png")) });
+  });
+
+  it("额外来源不能放行根目录、相邻目录或其他会话，未授权时仍可检查召回媒体", async () => {
+    const o = await setup(); const generated = path.join(o.root, "generated"); await fs.mkdir(generated);
+    const outside = path.join(o.root, "generated-other"); await fs.mkdir(outside);
+    const file = path.join(outside, "image.png"); await fs.writeFile(file, png());
+    for (const register of [registerFileAttachment, registerImageAttachment]) {
+      for (const source of [generated, file]) await expect(register({ ...o, extraRoots: [generated], path: source })).rejects.toThrow();
+      expect(await register({ ...o, extraRoots: [generated], path: file, mediaCheck: p => p === file })).toContain("已登记");
+    }
+    expect((await readFileAttachments(o.fileDir))[0]!.source).toBe("media");
+  });
+
+  it("额外来源拒绝文件、父目录及来源根目录的软链接", async () => {
+    const o = await setup(); const generated = path.join(o.root, "generated"); await fs.mkdir(generated);
+    const target = path.join(generated, "real.png"); await fs.writeFile(target, png());
+    const fileLink = path.join(generated, "link.png"); await fs.symlink(target, fileLink, "file");
+    const nested = path.join(generated, "nested"); await fs.mkdir(nested); await fs.writeFile(path.join(nested, "image.png"), png());
+    const dirLink = path.join(generated, "alias"); await fs.symlink(nested, dirLink, "junction");
+    const rootLink = path.join(o.root, "root-alias"); await fs.symlink(generated, rootLink, "junction");
+    const outside = await o.write("outside.png", png());
+    const escape = path.join(generated, "escape.png"); await fs.symlink(outside, escape, "file");
+    for (const register of [registerFileAttachment, registerImageAttachment]) {
+      for (const file of [fileLink, path.join(dirLink, "image.png"), path.join(rootLink, "real.png"), escape]) {
+        await expect(register({ ...o, extraRoots: [generated, rootLink], path: file, mediaCheck: () => true })).rejects.toThrow("软链接");
+      }
+      await expect(register({ ...o, extraRoots: [rootLink], path: target })).rejects.toThrow();
+    }
+  });
+
   it("已召回媒体由当前访问范围回调判定，图片与文件均支持", async () => {
     const o = await setup(); const file = path.join(o.root, "media-hash"); await fs.writeFile(file, png());
     const canonical = await fs.realpath(file);

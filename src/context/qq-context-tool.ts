@@ -19,7 +19,7 @@ export interface QQContextToolDeps {
   /** 惰性打开只读库（库文件可能尚未创建）；抛错时工具返回错误文本 */
   openStore: () => ContextStore;
   maxChars?: number;
-  attachments?: () => Promise<{ dataDir: string; workdir: string; attachDir: string; fileDir: string; limits: AttachmentLimits }>;
+  attachments?: () => Promise<{ dataDir: string; workdir: string; extraRoots?: string[]; attachDir: string; fileDir: string; limits: AttachmentLimits }>;
   onRecall?: (event: RecallObservation) => void;
 }
 

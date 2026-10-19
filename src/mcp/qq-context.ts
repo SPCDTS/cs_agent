@@ -6,6 +6,7 @@
  * stdout 专用于 MCP 协议；诊断写 stderr。
  */
 import path from "node:path";
+import { promises as fs } from "node:fs";
 import { loadConfig } from "../config.js";
 import { resolveAttachmentDir } from "../media/attach-paths.js";
 import { recallViaLoopback, viewViaLoopback } from "./media-recall-client.js";
@@ -28,7 +29,14 @@ const server = createQQContextServer({
     const fileDir = await resolveAttachmentDir(process.env.QQ_FILE_DIR, path.join(dataDir, "files"), "QQ_FILE_DIR");
     const workdir = await resolveAttachmentDir(process.env.QQ_WORKDIR, cfg.WORKSPACE_DIR, "QQ_WORKDIR");
     if (path.basename(attachDir) !== path.basename(fileDir)) throw new Error("附件目录票据不一致");
-    return { dataDir, attachDir, fileDir, workdir, limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } };
+    const extraRoots: string[] = [];
+    const session = process.env.QQ_SESSION;
+    if (process.env.QQ_BACKEND === "codex" && session?.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session)) {
+      const generated = path.join(dataDir, "codex", "generated_images", session);
+      const stat = await fs.lstat(generated).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
+      if (stat?.isDirectory()) extraRoots.push(generated);
+    }
+    return { dataDir, attachDir, fileDir, workdir, extraRoots, limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } };
   },
   onRecall: event => {
     (instrumentation ??= MemoryInstrumentation.openOwn(dataDir)).recordRecall({ ...event,

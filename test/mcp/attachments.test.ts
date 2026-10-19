@@ -25,7 +25,7 @@ async function setup(extra: Record<string, string> = {}) {
   const work = path.join(base, "group_7"), files = path.join(data, "files", "t1"), images = path.join(data, "images", "t1");
   await fs.mkdir(work, { recursive: true });
   await fs.writeFile(path.join(work, "报告.txt"), "报告"); await fs.writeFile(path.join(work, "图.png"), PNG);
-  const env = { ...process.env, DATA_DIR: data, WORKSPACE_DIR: base, QQ_WORKDIR: work, QQ_ATTACH_DIR: images, QQ_FILE_DIR: files, QQ_ACCESS: "group:7", ...extra } as Record<string, string>;
+  const env = { ...process.env, DATA_DIR: data, WORKSPACE_DIR: base, QQ_WORKDIR: work, QQ_ATTACH_DIR: images, QQ_FILE_DIR: files, QQ_ACCESS: "group:7", QQ_BACKEND: "", QQ_SESSION: "", ...extra } as Record<string, string>;
   const client = new Client({ name: "test", version: "1" });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [entry], env, stderr: "pipe" })); clients.push(client);
   return { client, dir, data, work, base, files, images };
@@ -69,4 +69,30 @@ it("目录解析拒绝相对路径、注入字符、..、根目录、深层目�
   expect(await resolveAttachmentDir(valid, root, "QQ_FILE_DIR")).toBe(await fs.realpath(valid));
   const link = path.join(root, "alias"); await fs.symlink(valid, link, "junction");
   await expect(resolveAttachmentDir(link, root, "QQ_FILE_DIR")).rejects.toThrow();
+});
+
+const session = "01a14a4a-f09f-7631-b8ae-b5e604cb217c";
+it.each([session, session.toUpperCase()])("codex 的合法会话 %s 可登记内置生图，其他会话仍拒绝", async session => {
+  const o = await setup({ QQ_BACKEND: "codex", QQ_SESSION: session });
+  const generated = path.join(o.data, "codex", "generated_images", session);
+  // 生图目录尚不存在时，工作区附件仍可正常登记，且不会主动创建来源目录。
+  expect((await o.client.callTool({ name: "qq_send_image", arguments: { path: "图.png" } })).isError).not.toBe(true);
+  await expect(fs.stat(generated)).rejects.toMatchObject({ code: "ENOENT" });
+  await fs.mkdir(generated, { recursive: true }); const file = path.join(generated, "image.png"); await fs.writeFile(file, PNG);
+  for (const name of ["qq_send_image", "qq_send_file"]) expect((await o.client.callTool({ name, arguments: { path: file } })).isError).not.toBe(true);
+  expect((await readFileAttachments(o.files))[0]!.source).toBe("generated");
+  const other = path.join(o.data, "codex", "generated_images", "11111111-1111-4111-8111-111111111111");
+  await fs.mkdir(other); await fs.writeFile(path.join(other, "image.png"), PNG);
+  expect((await o.client.callTool({ name: "qq_send_image", arguments: { path: path.join(other, "image.png") } })).isError).toBe(true);
+});
+
+it.each([
+  ["codex", ""], ["codex", "invalid"], ["codex", session + "-extra"], ["codex", session + "\n"], ["codex", "../" + session],
+  ["codex", "01a14a4a-f09f-7631-b8ae-b5e604cb217g"], ["pi", session], ["", session],
+])("后端 %s、会话 %s 不会开放生图来源", async (backend, session) => {
+  const o = await setup({ QQ_BACKEND: backend, QQ_SESSION: session });
+  // Windows 文件名不允许换行；仍验证非法会话不能访问去掉换行后的合法目录。
+  const generated = path.join(o.data, "codex", "generated_images", process.platform === "win32" ? session.trimEnd() : session);
+  await fs.mkdir(generated, { recursive: true }); const file = path.join(generated, "image.png"); await fs.writeFile(file, PNG);
+  for (const name of ["qq_send_image", "qq_send_file"]) expect((await o.client.callTool({ name, arguments: { path: file } })).isError).toBe(true);
 });
