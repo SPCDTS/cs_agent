@@ -8,7 +8,7 @@
  */
 import { redact, redactText } from '../shared/redact.js';
 import type { LiveEvent, Trace } from '../shared/trace.js';
-import { fmtPct, fmtShort, ratio, toContextUsage, type ContextUsage } from './ui/context-bar.js';
+import { fmtPct, fmtShort, ratio, toContextUsage, type ContextUsage } from '../shared/format.js';
 
 type CardState = 'queued' | 'running' | 'done' | 'failed';
 interface LiveItem { seq: number; ts: number; stage: string; status: string; duration_ms: number | null; summary: string }
