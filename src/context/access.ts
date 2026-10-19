@@ -44,3 +44,9 @@ export function resolveOwner(qqOwner: string, allowUsers: string[] | "*"): strin
   if (qqOwner.trim()) return qqOwner.trim();
   return allowUsers === "*" ? undefined : allowUsers[0];
 }
+
+export function scopeLabel(scope: string): string {
+  const m = /^(group|private):(\d+)$/.exec(scope);
+  if (!m) return scope === 'owner' ? 'owner 私聊' : scope === 'shared' ? '共享线程' : scope || '未知会话';
+  return (m[1] === 'group' ? '群 ' : '私聊 ') + m[2];
+}

@@ -4,7 +4,8 @@
  */
 import type { Block, ObservedTurn, SessionRef } from '../sessions/types.js';
 import { contextBar, fmtInt, type ContextUsage } from './context-bar.js';
-import { BACKENDS, csrfField, empty, esc, fmtTime, kv, scopeLabel, stamp, statusStamp, time, uri } from './html.js';
+import { BACKENDS, csrfField, empty, esc, fmtTime, kv, stamp, statusStamp, time, uri } from './html.js';
+import { scopeLabel } from '../../context/access.js';
 import { blocksHtml, contextHref, contextLinks, qqLine, turnFacts, turnHref, turnMeta, turnStamp, type SessionCtx } from './turn-view.js';
 
 export const PAGE_SIZE = 50;

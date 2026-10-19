@@ -35,7 +35,8 @@ import { MESSAGE_PAGE, archivesPageBody, memoryHomeBody, messageWindow, rangePar
 import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnRecallSection, type RecallDetail, type RecallList } from './ui/recall-pages.js';
 import type { ScopeTimeline } from './memory/types.js';
 import { contextBar, sortUsage, type ContextUsage, type ContextUsageView } from './ui/context-bar.js';
-import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, scopeLabel, stageLabel, stamp, statusStamp, time, uri } from './ui/html.js';
+import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, stageLabel, stamp, statusStamp, time, uri } from './ui/html.js';
+import { scopeLabel } from '../context/access.js';
 import { PRELOAD_TURNS, agentsBody, byNewest, crumbs, dataScript, isBackend, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './ui/agents-pages.js';
 import { contextBody as contextAnalysisBody, contextError, contextUnavailable, type ContextAnalysis } from './ui/context-view.js';
 import type { Block, ObservedTurn, SessionRef } from './sessions/types.js';

@@ -8,7 +8,8 @@ import { redactText } from '../../shared/redact.js';
 import type { AgingStatus, ArchiveRow, CompactionRow, Hit, MessageItem, Retention, ScopeSummary, ScopeTimeline, SummaryVersion } from '../memory/types.js';
 import { crumbs, dataScript } from './agents-pages.js';
 import { fmtInt } from './context-bar.js';
-import { empty, esc, fmtMs, fmtTime, fmtWhen, kv, scopeLabel, stamp, uri } from './html.js';
+import { empty, esc, fmtMs, fmtTime, fmtWhen, kv, stamp, uri } from './html.js';
+import { scopeLabel } from '../../context/access.js';
 
 const DAY = 86400_000;
 export const MESSAGE_PAGE = 50;

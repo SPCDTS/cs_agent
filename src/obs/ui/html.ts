@@ -36,11 +36,7 @@ export const TICKET_STATUS: Record<string, [string, Tone]> = {
 };
 export const statusStamp = (status: string, big = false) => { const [label, tone] = TICKET_STATUS[status] ?? [status || '未知', 'idle' as Tone]; return stamp(label, tone, big); };
 
-export function scopeLabel(scope: string): string {
-  const m = /^(group|private):(\d+)$/.exec(scope);
-  if (!m) return scope === 'owner' ? 'owner 私聊' : scope === 'shared' ? '共享线程' : scope || '未知会话';
-  return (m[1] === 'group' ? '群 ' : '私聊 ') + m[2];
-}
+export { scopeLabel } from '../../context/access.js';
 
 export const STAGES: Record<string, string> = {
   received: '收到消息', recovered: '重启后接管', admitted: '已入队', routed: '分流', dispatched: '开始处理', thread_wait: '等待线程',

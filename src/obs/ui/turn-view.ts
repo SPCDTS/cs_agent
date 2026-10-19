@@ -4,7 +4,8 @@
  */
 import type { Block, ContentRef, ObservedTurn, Usage } from '../sessions/types.js';
 import { fmtInt, fmtPct, ratio } from './context-bar.js';
-import { esc, fmtBytes, fmtMs, fmtTime, scopeLabel, stamp, statusStamp, uri, type Tone } from './html.js';
+import { esc, fmtBytes, fmtMs, fmtTime, stamp, statusStamp, uri, type Tone } from './html.js';
+import { scopeLabel } from '../../context/access.js';
 
 export const TURN_STATUS: Record<string, [string, Tone]> = { ok: ['完成', 'ok'], failed: ['失败', 'fail'], running: ['进行中', 'run'] };
 export const turnStamp = (status: string) => { const [label, tone] = TURN_STATUS[status] ?? [status || '未知', 'idle' as Tone]; return stamp(label, tone); };

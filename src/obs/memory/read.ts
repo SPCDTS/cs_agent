@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { ContextStore, MessageRow, SummaryRow } from '../../context/store.js';
 import { redactText } from '../../shared/redact.js';
 import { SessionError } from '../sessions/types.js';
-import { scopeLabel } from '../ui/html.js';
+import { scopeLabel } from '../../context/access.js';
 import type { MessagePage, Retention, ScopeSummary, ScopeTimeline, SummaryItem, TrackBucket } from './types.js';
 
 const DAY = 86400;

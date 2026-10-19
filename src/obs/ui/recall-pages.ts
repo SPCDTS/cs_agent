@@ -7,7 +7,8 @@
 import type { RecallEvent, RequestEvidence, ScopeSummary } from '../memory/types.js';
 import { crumbs } from './agents-pages.js';
 import { fmtInt } from './context-bar.js';
-import { BACKENDS, empty, esc, fmtMs, fmtTime, json, kv, scopeLabel, stamp, uri } from './html.js';
+import { BACKENDS, empty, esc, fmtMs, fmtTime, json, kv, stamp, uri } from './html.js';
+import { scopeLabel } from '../../context/access.js';
 import { memoryScopeHref, summaryHref } from './memory-pages.js';
 
 export const RECALL_PAGE = 50;

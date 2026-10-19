@@ -3,7 +3,8 @@
  * 宽度与阈值位置用 data-w / data-at（整数百分比）+ theme.ts 中生成的属性选择器表达，
  * 不写内联 style（CSP 禁止），无脚本时首屏也正确。
  */
-import { BACKENDS, esc, scopeLabel } from './html.js';
+import { BACKENDS, esc } from './html.js';
+import { scopeLabel } from '../../context/access.js';
 import { STALE_MS, num, fmtInt, fmtShort, ratio, usageWindow, clampPct, fmtPct, tier, hoursAgo, type ContextUsage } from '../../shared/format.js';
 export { STALE_MS, toContextUsage, fmtInt, fmtShort, ratio, usageWindow, fmtPct, sortUsage, type ContextUsage, type ContextUsageView } from '../../shared/format.js';
 
