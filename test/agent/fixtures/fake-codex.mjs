@@ -30,6 +30,10 @@ process.stdin.on("end", async () => {
   const emit = (o) => process.stdout.write(JSON.stringify(o) + "\n");
   if (isResume) {
     const id = argv[argv.length - 2];
+    if (process.env.FAKE_CODEX_RESUME_ERROR) {
+      process.stderr.write(process.env.FAKE_CODEX_RESUME_ERROR);
+      process.exit(1);
+    }
     if (id.startsWith("missing")) {
       process.stderr.write(`Error: thread/resume: thread/resume failed: no rollout found for thread id ${id}\n`);
       process.exit(1);

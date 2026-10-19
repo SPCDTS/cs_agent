@@ -149,13 +149,15 @@ export function buildCodexEnv(codexHome: string, source: NodeJS.ProcessEnv = pro
 
 /** resume 失败时，确认"会话不存在"的 stderr / 错误消息特征；只有匹配才新建会话。 */
 const MISSING_SESSION_PATTERNS: RegExp[] = [
+  // Codex 0.163.0 npm 包：no rollout found for thread id / conversation id。
   /no rollout found/i,
-  /thread\/resume failed/i,
   /no (thread|session|conversation) found/i,
   /(thread|session|conversation) not found/i,
 ];
 
 export function isMissingSessionError(text: string): boolean {
+  // JSON-RPC 内部错误可能夹带 rg 的 not found 噪声，不能据此清除线程。
+  if (/\bcode\s*[:=]?\s*-32603\b/i.test(text)) return false;
   return MISSING_SESSION_PATTERNS.some((re) => re.test(text));
 }
 
@@ -503,11 +505,7 @@ export class CodexRunner {
       return this.serialized(async () => {
         const doc = await this.readThreadsRaw();
         const old = doc[key];
-        if (old) {
-          const archive = path.join(path.dirname(this.opts.threadsFile), "codex-threads-archive.jsonl");
-          const rows = await readThreadArchive(archive);
-          await writeThreadArchive(archive, [...rows, { key, ...old, archived_at: new Date().toISOString(), reason }]);
-        }
+        if (old) await this.archiveThread(key, old, reason);
         delete doc[key];
         await this.writeThreadsFile(doc);
         this.opts.contextUsage?.reset("codex", key);
@@ -605,12 +603,21 @@ export class CodexRunner {
     }
   }
 
+  /** 调用方持有文件锁；先归档成功再清除映射，避免丢失恢复线索。 */
+  private async archiveThread(key: ThreadKey, old: ThreadRecord, reason: string, stderr?: string): Promise<void> {
+    const archive = path.join(path.dirname(this.opts.threadsFile), "codex-threads-archive.jsonl");
+    const rows = await readThreadArchive(archive);
+    await writeThreadArchive(archive, [...rows, { key, ...old, archived_at: new Date().toISOString(), reason,
+      ...(stderr === undefined ? {} : { stderr: stderr.slice(-300) }) }]);
+  }
+
   /** 设置/清除某个键的线程记录（读-改-写，串行化）。 */
-  private async writeThread(key: ThreadKey, threadId: string | undefined): Promise<void> {
+  private async writeThread(key: ThreadKey, threadId: string | undefined, missingStderr?: string): Promise<void> {
     await this.migrate();
     await this.serialized(async () => {
       const doc = await this.readThreadsRaw();
       const now = new Date().toISOString();
+      if (missingStderr !== undefined && doc[key]) await this.archiveThread(key, doc[key], "missing", missingStderr);
       if (threadId) doc[key] = { thread_id: threadId, created_at: now, updated_at: now };
       else delete doc[key];
       await this.writeThreadsFile(doc);
@@ -719,9 +726,9 @@ export class CodexRunner {
         );
         if (r.code === 0) return this.result(r);
         if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
-          // 已确认会话不存在：新建会话并覆盖记录
+          // 已确认会话不存在：先归档旧映射，再新建会话。归档失败则保留映射并报错。
           log.warn("codex thread missing, starting fresh thread", { key, thread_id: id, stderr: r.stderrTail.slice(-300) });
-          await this.writeThread(key, undefined);
+          await this.writeThread(key, undefined, r.stderrTail);
           this.opts.contextUsage?.reset("codex", key, ticket);
           id = undefined;
           onAcquired = undefined; // 同一次回合的失效线程回退不重复计数

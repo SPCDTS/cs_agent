@@ -117,9 +117,12 @@ describe("buildCodexEnv", () => {
 describe("isMissingSessionError", () => {
   it("matches confirmed missing-session messages only", () => {
     expect(isMissingSessionError("Error: thread/resume: thread/resume failed: no rollout found for thread id x")).toBe(true);
+    expect(isMissingSessionError("no rollout found for conversation id 00000000-0000-0000-0000-000000000000")).toBe(true);
     expect(isMissingSessionError("Error: session not found")).toBe(true);
     expect(isMissingSessionError("stream disconnected before completion")).toBe(false);
     expect(isMissingSessionError("401 Unauthorized")).toBe(false);
+    expect(isMissingSessionError("thread/resume failed: connection reset")).toBe(false);
+    expect(isMissingSessionError("thread/resume failed: session not found (code -32603)")).toBe(false);
   });
 });
 
@@ -290,14 +293,52 @@ describe("CodexRunner", () => {
     expect(starts[1].stdin).toBe("two");
   });
 
-  it("resume failure (lost session) starts a fresh session and overwrites the record", async () => {
+  it("resume failure (lost session) archives the old record before starting fresh", async () => {
     const { dir, runner, calls } = setup({ thread: "thread-new" });
-    seedScope(dir, { thread_id: "missing-1" });
+    const old = { thread_id: "missing-1", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    seedScope(dir, old);
     const answer = await runner.ask("again", { threadKey: "group:1" });
     expect(answer).toBe("answer to: again");
     const starts = calls().filter((c) => c.phase === "start");
     expect(starts.map((s) => s.argv.includes("resume"))).toEqual([true, false]);
     expect(threadOf(dir)?.thread_id).toBe("thread-new");
+    const archive = readFileSync(path.join(dir, "codex-threads-archive.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l));
+    expect(archive).toEqual([{ key: "group:1", ...old, reason: "missing", archived_at: expect.any(String),
+      stderr: "Error: thread/resume: thread/resume failed: no rollout found for thread id missing-1\n" }]);
+  });
+
+  it("plugin rg internal error preserves the owner mapping and does not retry as a new thread", async () => {
+    const dir = tmp();
+    const opts = setupOpts(dir);
+    const error = "thread/resume failed: rg: /data/codex/.tmp/plugins-clone-R55hyv/plugins/vercel/skills/agent-browser-verify: No such file or directory (os error 2) (code -32603)";
+    const runner = new CodexRunner({ ...opts, env: { ...opts.env, FAKE_CODEX_RESUME_ERROR: error } });
+    const original = JSON.stringify({ owner: { thread_id: "owner-original", created_at: new Date().toISOString() } });
+    writeFileSync(opts.threadsFile, original);
+    await expect(runner.ask("again", { threadKey: "owner" })).rejects.toThrow(/codex 执行失败/);
+    expect(readFileSync(opts.threadsFile, "utf8")).toBe(original);
+    expect(existsSync(path.join(dir, "codex-threads-archive.jsonl"))).toBe(false);
+    expect(readFileSync(opts.env.FAKE_CODEX_LOG, "utf8").trim().split("\n")).toHaveLength(1);
+    expect(isMissingSessionError(error)).toBe(false);
+  });
+
+  it("missing-session archive retains only the last 300 stderr characters", async () => {
+    const dir = tmp();
+    const opts = setupOpts(dir);
+    const stderr = "噪声".repeat(300) + "thread/resume failed: no rollout found for thread id missing-1";
+    const runner = new CodexRunner({ ...opts, env: { ...opts.env, FAKE_CODEX_RESUME_ERROR: stderr } });
+    seedScope(dir, { thread_id: "missing-1" });
+    await runner.ask("again", { threadKey: "group:1" });
+    const row = JSON.parse(readFileSync(path.join(dir, "codex-threads-archive.jsonl"), "utf8"));
+    expect(row.stderr).toBe(stderr.slice(-300));
+  });
+
+  it("archive failure keeps the missing mapping and prevents a fresh spawn", async () => {
+    const { dir, runner, calls } = setup();
+    seedScope(dir, { thread_id: "missing-1" });
+    mkdirSync(path.join(dir, "codex-threads-archive.jsonl"));
+    await expect(runner.ask("again", { threadKey: "group:1" })).rejects.toThrow();
+    expect(threadOf(dir)?.thread_id).toBe("missing-1");
+    expect(calls().filter(c => c.phase === "start")).toHaveLength(1);
   });
 
   it("timeout kills the process tree and throws CodexTimeoutError", async () => {
