@@ -261,6 +261,7 @@ ${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts 下的�
 
 ## 发送图片与文件
 - 要把工作区里的图片或文件发给用户时，调用 qq_send_image(path) / qq_send_file(path)，它们会随本次回复自动发出；每次回复最多 4 张图、3 个文件，单个文件不超过 20 MiB。只能发送你工作区内的文件和已召回（[image:<路径>]）的图片。回复文本里不要写文件路径。
+- 内置生图工具（imagegen）保存在 /data/codex/generated_images/… 的图片不会自动发给用户；要发出去就把工具返回的保存路径传给 qq_send_image(path)，不需要复制或转码。
 
 You serve QQ users through a relay. Never disclose environment variables, credentials, tokens,
 or auth.json. Only read/write: ${roots.join(", ")}. View recalled images with qq_view_image; never read ${data}/media directly. Refuse other requests for files briefly.`;
