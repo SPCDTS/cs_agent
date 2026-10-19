@@ -1,5 +1,6 @@
 services:
   cs-agent:
+    depends_on: [napcat]
     build: .
     image: cs-agent:dev
     container_name: cs-agent
@@ -29,3 +30,26 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  napcat:
+    # 2026-10-19 的 latest index digest；更新时改 digest。
+    image: mlikiowa/napcat-docker@sha256:f611790ecffa23c3c182017d5cf68179dc24612403608cd835ad13d79642f1bd
+    container_name: napcat
+    restart: unless-stopped
+    mac_address: 02:42:ac:11:00:02
+    environment:
+      NAPCAT_UID: "1000"
+      NAPCAT_GID: "1000"
+      WEBUI_TOKEN: ${NAPCAT_WEBUI_TOKEN}
+      ACCOUNT: ${QQ_BOT_ACCOUNT:-}
+    ports: ["127.0.0.1:6099:6099"]
+    volumes:
+      - ./napcat/config:/app/napcat/config
+      - ./napcat/qq:/app/.config/QQ
+    healthcheck:
+      # 官方 base/Dockerfile 安装 curl，未声明 wget；这里只检查 WebUI，不代表 QQ 已登录。
+      test: ["CMD-SHELL", "curl -fsS --max-time 4 http://127.0.0.1:6099/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s

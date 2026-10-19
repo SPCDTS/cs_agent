@@ -4,6 +4,19 @@ import { applyEnvAliases, requireProviderApiKey } from "../src/config.js";
 import { loadAgentConfig as loadConfig } from "../src/agent/config.js";
 import { tmp } from "./agent/helpers.js";
 
+describe("NapCat 服务地址", () => {
+  it("默认使用 compose 内网，空值沿用默认，保留宿主机覆盖与凭据校验", () => {
+    const defaults = { NAPCAT_HTTP_URL: "http://napcat:3000", NAPCAT_WS_URL: "ws://napcat:3001" };
+    expect(loadConfig({})).toMatchObject(defaults);
+    expect(loadConfig({ NAPCAT_HTTP_URL: "", NAPCAT_WS_URL: "" })).toMatchObject(defaults);
+    const host = { NAPCAT_HTTP_URL: "http://host.docker.internal:3000", NAPCAT_WS_URL: "ws://host.docker.internal:3001" };
+    expect(loadConfig(host)).toMatchObject(host);
+    for (const key of ["NAPCAT_HTTP_URL", "NAPCAT_WS_URL"]) {
+      expect(() => loadConfig({ [key]: "http://user:password@napcat:3000" })).toThrow(/服务 URL 不得包含/);
+    }
+  });
+});
+
 describe("model config defaults", () => {
   it("defaults the intent model to deepseek/deepseek-flash", () => {
     const c = loadConfig({});

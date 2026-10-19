@@ -26,8 +26,8 @@ const serviceUrl = z.string().url().refine(value => {
 }, '服务 URL 不得包含用户名或密码');
 
 const EnvSchema = z.object({
-  NAPCAT_HTTP_URL: serviceUrl.default("http://host.docker.internal:3000"),
-  NAPCAT_WS_URL: serviceUrl.default("ws://host.docker.internal:3001"),
+  NAPCAT_HTTP_URL: serviceUrl.default("http://napcat:3000"),
+  NAPCAT_WS_URL: serviceUrl.default("ws://napcat:3001"),
   NAPCAT_TOKEN: z.string().default(""),
   QQ_ALLOW_USERS: z.string().default(""),
   QQ_ALLOW_GROUPS: list,
