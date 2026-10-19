@@ -325,3 +325,11 @@ P0 最终临时例外共 16 条（与 `test/architecture/deps.test.ts` 完全对
 - 与设计的偏离：`image-events.ts` 归入 `media/gen/events.ts`（只处理票据目录 JSONL，不开观测库）；`validateReferencesWithMedia` 依赖 ContextStore 权限检查，原样切到新建的 `context/image-references.ts`；`loadImage` 等通用校验进 `media/limits.ts`，`qq/image.ts` 保留 re-export（P2 删）。主会话逐行对比原文件确认为纯切分，测试只改 import 路径。
 - 部署：镜像 `fb814556…`（干净 worktree，ed622f5），队列空闲时切换，容器 healthy、无新告警。冒烟零错误：仪表盘四套浏览器脚本（Agent/上下文分析含基础指令展开/记忆/召回/图片画廊与 /media）、stdio 真实进程调用 `qq_search`、搬动后的 `dist/mcp/image-gen.js` 以 stdio 启动并 `tools/list` 返回 `generate_image`。
 - 备注：主目录 `node_modules` 曾缺 js-tiktoken 导致 vitest 全局构建失败，`npm ci` 后恢复，与代码无关。上一条提交 9a47168 的说明误称"恢复 P0 记录"，实际该记录此前从未写入成功，本次首次写入。
+
+### P2（2026-10-19，主会话验收）
+
+- 分支 `refactor/package-layout-p2` 11 条提交 cherry-pick 到 main（80da59f…f1278e2，文档一条与主会话记录冲突，按"两边保留"解决）；主会话沙箱外复跑：typecheck 通过，77 文件 / 1097 项通过，`npm run build` 三个 dist 入口存在；`deps.test.ts` 16 项通过，`ALLOWED_EXCEPTIONS` 为空，新增"包间无环"与"obs/http.ts ≤ 300 行"守卫（实际 240 行）。
+- 落地内容：`agent/codex/{runner,prompt,trace,context-usage,model-catalog,workspace,oauth}.ts`（`auth/` 目录删除）；`config.ts` 成叶子，业务解析在 `agent/config.ts`（`loadAgentConfig`，main / mcp / 测试改用）；`context/observer.ts` 定义 `SummaryObserver` / `RecallObserver`，`MemoryInstrumentation` 实现，main 接线不变；`agent/backends/pi-session-types.ts` 承载 pi 会话源契约；P0/P1 全部兼容 re-export 删除；`obs/http.ts` 拆为 `http.ts` + `dashboard-io.ts` + `dashboard-post.ts` + `dashboard-types.ts` + `ui/dashboard-pages.ts`。
+- 口径说明：按 §0 物理目录统计仍有 7 对双向边（`src ↔ agent`、`src ↔ obs`、`agent ↔ backends`、`agent ↔ codex`、`backends ↔ codex`、`obs ↔ memory`、`obs ↔ sessions`），全部是"根文件 ↔ 包"或"包 ↔ 自己的子目录"这类分层允许的边；按 §1 的逻辑分层，跨层违规为 0。P0 验收里已把 §4 第 4 条改为此口径。
+- 部署：镜像 `54a81db2…`（干净 worktree，f1278e2），队列空闲时切换，容器 healthy、无新告警。冒烟零错误：首页 / 设置 / 实时 / Agent / 记忆 / 上下文检索页 200；四套浏览器脚本（含基础指令展开、图片画廊与 /media）；stdio 真实进程调用 `qq_search`（写入召回事件 #8）与 `dist/mcp/image-gen.js` 的 `tools/list`。
+- **包结构整理 P0–P2 至此全部上线。** 后续新增跨包 import 由 `test/architecture/deps.test.ts` 把关。
