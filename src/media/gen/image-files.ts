@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { validateImageHeader } from "../media/header.js";
+import { validateImageHeader } from "../header.js";
 
 const IMAGE_FILE_MANIFEST = "image-files.json";
 const filename = z.string().min(1).max(255).refine(s => !/[\\/:]/.test(s) && s !== "." && s !== "..");

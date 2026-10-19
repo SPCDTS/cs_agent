@@ -13,11 +13,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { imageTimeoutMs, validateImageOptions, type ImageOptions } from "./image-options.js";
 import { buildQwenWorkflow, QWEN_MODELS, type QwenModels } from "./qwen-workflow.js";
-import { validateImageHeader } from '../media/header.js';
-import { loadImage } from "../media/limits.js";
+import { validateImageHeader } from '../header.js';
+import { loadImage } from "../limits.js";
 import { prepareImageFiles, saveImageFile, atomicJson } from "./image-files.js";
 import { readPendingImages } from "./image-pending.js";
-import { log } from "../shared/log.js";
+import { log } from "../../shared/log.js";
 
 export interface ImageBackend {
   readonly name: string;

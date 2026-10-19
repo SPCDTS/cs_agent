@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { HttpImageBackend, McpImageBackend, UnknownJobError, defaultWorkflow, parseToolResult, patchWorkflow, type ReconcileStep } from "../../src/agent/image-gen.js";
+import { HttpImageBackend, McpImageBackend, UnknownJobError, defaultWorkflow, parseToolResult, patchWorkflow, type ReconcileStep } from "../../src/media/gen/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "../../src/agent/loopback-proxy.js";
 import { FIXTURES, tmp } from "./helpers.js";
 

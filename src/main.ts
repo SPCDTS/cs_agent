@@ -29,7 +29,7 @@ import { Dispatcher } from "./agent/dispatch.js";
 import { CodexRunner, ensureWorkspaceAgentsMd } from "./agent/codex-runner.js";
 import { purgeCodexTrace } from "./agent/codex-trace.js";
 import { CodexPromptStore } from "./agent/codex-prompt.js";
-import { createImageBackend } from "./agent/image-gen.js";
+import { createImageBackend } from "./media/gen/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
 import { createTasks } from "./agent/tasks.js";
 import { CodexBackend } from "./agent/backends/codex.js";

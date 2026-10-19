@@ -1,8 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpImageBackend, McpImageBackend } from "../../src/agent/image-gen.js";
-import { QWEN_MODELS } from "../../src/agent/qwen-workflow.js";
+import { HttpImageBackend, McpImageBackend } from "../../src/media/gen/image-gen.js";
+import { QWEN_MODELS } from "../../src/media/gen/qwen-workflow.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");

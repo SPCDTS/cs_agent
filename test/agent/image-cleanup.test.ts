@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HttpImageBackend, recoverRemoteUploads, TRANSPARENT_PNG } from '../../src/agent/image-gen.js';
+import { HttpImageBackend, recoverRemoteUploads, TRANSPARENT_PNG } from '../../src/media/gen/image-gen.js';
 import { validateImageHeader } from '../../src/media/header.js';
 import { tmp } from './helpers.js';
 

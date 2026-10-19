@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { readPendingImages, savePendingImage, PendingImageMarkerError } from "../../src/agent/image-pending.js";
+import { readPendingImages, savePendingImage, PendingImageMarkerError } from "../../src/media/gen/image-pending.js";
 import { tmp } from "./helpers.js";
 
 describe("附件 marker 边界校验", () => {

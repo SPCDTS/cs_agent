@@ -9,8 +9,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { HttpImageBackend, McpImageBackend, type ImageBackend } from "../../src/agent/image-gen.js";
-import { collectNewImages } from "../../src/agent/image-collect.js";
+import { HttpImageBackend, McpImageBackend, type ImageBackend } from "../../src/media/gen/image-gen.js";
+import { collectNewImages } from "../../src/media/gen/image-collect.js";
 import { backendConfigFromEnv, createImageGenServer, MAX_CALLS, resolveTicketDir } from "../../src/mcp/image-gen-server.js";
 import { FIXTURES, tmp } from "../agent/helpers.js";
 

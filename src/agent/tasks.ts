@@ -2,8 +2,8 @@ import { ingestImageEvents } from "../obs/image-events.js";
 import { trace } from "../shared/trace.js";
 import { observeImages } from "../obs/image.js";
 import path from "node:path";
-import { imageTimeoutMs } from "./image-options.js";
-import { validateReferences } from "./image-references.js";
+import { imageTimeoutMs } from "../media/gen/image-options.js";
+import { validateReferences } from "../media/gen/image-references.js";
 /**
  * 每条 QQ 消息的 durable 任务（pi-durable defineTask，设计 §4.2 / §4.3）：
  * - 生图任务 `cs.image`：submit（提交 ComfyUI，prompt_id 立即落盘）→ collect（按 prompt_id 等待并下载）→ reply
@@ -24,10 +24,10 @@ import type { QQBridge } from "../qq/types.js";
 import { log } from "../shared/log.js";
 import { isReasoningEffort, threadKeyForSource } from "./codex-runner.js";
 import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState, type TicketSettings } from "./docs.js";
-import { collectNewImages } from "./image-collect.js";
-import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendingImages, savePendingImage, PendingImageMarkerError } from "./image-pending.js";
-import { readImageFiles, prepareImageFiles, validImageFile } from "./image-files.js";
-import { classifyImageError, referenceUploads, recoverRemoteUploads, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend, type RemoteUpload } from "./image-gen.js";
+import { collectNewImages } from "../media/gen/image-collect.js";
+import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendingImages, savePendingImage, PendingImageMarkerError } from "../media/gen/image-pending.js";
+import { readImageFiles, prepareImageFiles, validImageFile } from "../media/gen/image-files.js";
+import { classifyImageError, referenceUploads, recoverRemoteUploads, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend, type RemoteUpload } from "../media/gen/image-gen.js";
 import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
 import { postprocessReply, fitReply } from "./reply-postprocess.js";
 import { IMAGE_USAGE_REPLY } from "./router.js";

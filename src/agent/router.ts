@@ -1,4 +1,4 @@
-import { ASPECTS, type ImageOptions } from "./image-options.js";
+import { ASPECTS, type ImageOptions } from "../media/gen/image-options.js";
 /**
  * 规则分流器（设计 §4.1，无模型）：
  * - 输入是 bridge 计算的分流文本 route_text（已跳过开头真实的 at / reply 段，见 qq/policy.ts），这里只去首尾空白；

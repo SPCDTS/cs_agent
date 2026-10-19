@@ -1,8 +1,8 @@
-import type { ImageFileManifest } from "./image-files.js";
-import type { ImageOptions } from "./image-options.js";
-import type { PendingImageJob } from "./image-pending.js";
+import type { ImageFileManifest } from "../media/gen/image-files.js";
+import type { ImageOptions } from "../media/gen/image-options.js";
+import type { PendingImageJob } from "../media/gen/image-pending.js";
 import { defineDoc } from "@earendil-works/pi-durable";
-import type { ImageFailure, ImageSubmission, ReconcileStep, RemoteUpload } from "./image-gen.js";
+import type { ImageFailure, ImageSubmission, ReconcileStep, RemoteUpload } from "../media/gen/image-gen.js";
 import type { RouteName } from "./router.js";
 
 /** 派发时冻结；执行、后处理与恢复只读此快照。 */

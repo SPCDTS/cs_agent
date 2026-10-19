@@ -1,10 +1,11 @@
 import { ContextStore } from "../context/store.js";
 import type { Access } from "../context/access.js";
 import { observeImages } from "../obs/image.js";
-import { IMAGE_OPTIONS_JSON_SCHEMA, validateImageOptions, type ImageOptions } from "../agent/image-options.js";
-import { imageRefsValue, validateReferencesWithMedia } from "../agent/image-references.js";
+import { IMAGE_OPTIONS_JSON_SCHEMA, validateImageOptions, type ImageOptions } from "../media/gen/image-options.js";
+import { imageRefsValue } from "../media/gen/image-references.js";
+import { validateReferencesWithMedia } from "../context/image-references.js";
 /**
- * image_gen MCP 服务（设计 §4.4）：供容器内 codex 生图，复用 src/agent/image-gen.ts 的同一实现。
+ * image_gen MCP 服务（设计 §4.4）：供容器内 codex 生图，复用 src/media/gen/image-gen.ts 的同一实现。
  * 输出目录只来自环境变量 IMAGE_TICKET_DIR（cs-agent 每次 codex exec 以 -c 注入 ${DATA_DIR}/images/<ticket>），
  * 工具参数里不接受输出路径（参考图接受 IMAGE_REFS 或当前访问范围内的媒体库路径）；缺失、非法或不在 ${DATA_DIR}/images/ 的直接子目录时所有调用都拒绝。
  * 每次调用输出到新的子目录 <IMAGE_TICKET_DIR>/call-<n>/（同名输出不会互相覆盖），返回 call-<n>/<文件名>；
@@ -15,13 +16,13 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { classifyImageError, referenceUploads, type ImageBackend, type ImageBackendConfig } from "../agent/image-gen.js";
-import { imageTimeoutMs } from "../agent/image-options.js";
-import { savePendingImage, type PendingImageJob } from "../agent/image-pending.js";
+import { classifyImageError, referenceUploads, type ImageBackend, type ImageBackendConfig } from "../media/gen/image-gen.js";
+import { imageTimeoutMs } from "../media/gen/image-options.js";
+import { savePendingImage, type PendingImageJob } from "../media/gen/image-pending.js";
 import { isLoopbackUrl } from "../agent/loopback-proxy.js";
 import { loadConfig } from "../config.js";
-import { readImageFiles, validImageFile } from "../agent/image-files.js";
-import { collectNewImages } from "../agent/image-collect.js";
+import { readImageFiles, validImageFile } from "../media/gen/image-files.js";
+import { collectNewImages } from "../media/gen/image-collect.js";
 
 /** 每个 MCP 进程（即每个 codex 回合）最多生图次数；回复最多附带 4 张 */
 export const MAX_CALLS = 4;

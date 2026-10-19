@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import { imageRefsArgs } from "../../src/agent/codex-runner.js";
 import { ContextStore } from "../../src/context/store.js";
 import { mediaFixture } from "../context/media-fixture.js";
-import { validateReferencesWithMedia, validateReferences } from "../../src/agent/image-references.js";
+import { validateReferencesWithMedia } from "../../src/context/image-references.js";
+import { validateReferences } from "../../src/media/gen/image-references.js";
 import { tmp } from "./helpers.js";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");

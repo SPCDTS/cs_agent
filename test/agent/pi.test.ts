@@ -19,7 +19,7 @@ import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
 import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prompt.js";
 import { PiRequestDoc } from "../../src/agent/pi-tools/request.js";
 import { ContextStore } from "../../src/context/store.js";
-import { TRANSPARENT_PNG, type ImageBackend } from "../../src/agent/image-gen.js";
+import { TRANSPARENT_PNG, type ImageBackend } from "../../src/media/gen/image-gen.js";
 import { closeAgentHarnesses } from "../../src/agent/shutdown.js";
 import { TicketDoc, DispatchDoc } from "../../src/agent/docs.js";
 import { Dispatcher } from "../../src/agent/dispatch.js";

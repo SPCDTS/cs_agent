@@ -4,8 +4,8 @@
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { isSupportedImage, MAX_IMAGE_BYTES, MAX_IMAGES, MIN_IMAGE_BYTES } from "../media/limits.js";
-import { log } from "../shared/log.js";
+import { isSupportedImage, MAX_IMAGE_BYTES, MAX_IMAGES, MIN_IMAGE_BYTES } from "../limits.js";
+import { log } from "../../shared/log.js";
 
 /** 目录内全部文件的相对路径（递归，不跟随软链接）；目录不存在时为空。 */
 export async function listFiles(dir: string): Promise<Set<string>> {

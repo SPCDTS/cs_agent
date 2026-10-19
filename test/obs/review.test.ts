@@ -10,7 +10,7 @@ import { Metrics } from '../../src/obs/metrics.js';
 import { redactText, registerSecrets } from '../../src/shared/redact.js';
 import { loadConfig } from '../../src/config.js';
 import { publicHealth, loadObsToken } from '../../src/obs/token.js';
-import { buildImageEnv } from '../../src/agent/image-gen.js';
+import { buildImageEnv } from '../../src/media/gen/image-gen.js';
 import { buildCodexEnv, CodexRunner } from '../../src/agent/codex-runner.js';
 import { ImageEventSpool, ingestImageEvents, IMAGE_EVENT_BYTES } from '../../src/obs/image-events.js';
 const clean: (()=>void)[]=[];

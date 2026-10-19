@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ASPECTS, imageDimensions, imageTimeoutMs, SIZE_PRESETS, validateImageOptions } from "../../src/agent/image-options.js";
-import { buildQwenWorkflow } from "../../src/agent/qwen-workflow.js";
+import { ASPECTS, imageDimensions, imageTimeoutMs, SIZE_PRESETS, validateImageOptions } from "../../src/media/gen/image-options.js";
+import { buildQwenWorkflow } from "../../src/media/gen/qwen-workflow.js";
 import { parseInlineImageOptions, routeMessage } from "../../src/agent/router.js";
 
 describe("生图 v2 参数与预设", () => {

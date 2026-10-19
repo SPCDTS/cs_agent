@@ -14,11 +14,11 @@ import { createBackendSelector, PiBackendStub } from '../../src/agent/backends/s
 import { createTasks } from '../../src/agent/tasks.js';
 import { openHarness } from '../../src/agent/harness.js';
 import { createCsAgentExtension } from '../../src/agent/extension.js';
-import { TRANSPARENT_PNG, UnknownJobError } from '../../src/agent/image-gen.js';
+import { TRANSPARENT_PNG, UnknownJobError } from '../../src/media/gen/image-gen.js';
 import { ContextStore } from '../../src/context/store.js';
 import { CodexRunner } from '../../src/agent/codex-runner.js';
 import { codexObserver } from '../../src/agent/backends/codex.js';
-import { savePendingImage } from '../../src/agent/image-pending.js';
+import { savePendingImage } from '../../src/media/gen/image-pending.js';
 import { observeImages } from '../../src/obs/image.js';
 import type { InboundMessage, ReplyTicketRecord } from '../../src/qq/types.js';
 import { DeepSeekWeb } from '../../src/agent/pi-tools/web.js';

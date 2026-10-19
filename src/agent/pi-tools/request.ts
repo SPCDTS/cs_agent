@@ -1,4 +1,4 @@
-import type { PendingImageJob } from "../image-pending.js";
+import type { PendingImageJob } from "../../media/gen/image-pending.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 
 /** 仅适配器写入身份；工具参数不能覆盖。计数按 taskId 去重，恢复不额外计次。 */

@@ -12,7 +12,7 @@ import { Trace } from '../../src/shared/trace.js';
 import { ContextStore } from '../../src/context/store.js';
 import { loadConfig } from '../../src/config.js';
 import { log, logBuffer } from '../../src/shared/log.js';
-import { TRANSPARENT_PNG } from '../../src/agent/image-gen.js';
+import { TRANSPARENT_PNG } from '../../src/media/gen/image-gen.js';
 import { formatRecent } from '../../src/context/format.js';
 const clean:(()=>Promise<void>|void)[]=[];
 afterEach(async()=>{for(const fn of clean.splice(0).reverse())await fn();});

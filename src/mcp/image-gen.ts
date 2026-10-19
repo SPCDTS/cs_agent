@@ -7,7 +7,7 @@
  * stdout 专用于 MCP 协议；诊断写 stderr。
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createImageBackend } from "../agent/image-gen.js";
+import { createImageBackend } from "../media/gen/image-gen.js";
 import { backendConfigFromEnv, createImageGenServer } from "./image-gen-server.js";
 import { parseAccess } from "../context/access.js";
 import { loadConfig } from "../config.js";

@@ -1,5 +1,5 @@
 /** 固定回复模板（生图路径、agent 失败、兜底）。 */
-import type { ImageFailure } from "./image-gen.js";
+import type { ImageFailure } from "../media/gen/image-gen.js";
 
 export const FALLBACK_REPLY = "抱歉，这条消息处理失败了，请稍后再试。";
 export const IMAGE_SUCCESS_REPLY = "图片生成好了";

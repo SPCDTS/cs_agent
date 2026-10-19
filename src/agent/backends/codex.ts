@@ -1,7 +1,7 @@
 import { classifyFailure } from "../../shared/errors.js";
 import { redactText } from "../../shared/redact.js";
 import { trace } from "../../shared/trace.js";
-import { imageRefsValue, validateReferences } from "../image-references.js";
+import { imageRefsValue, validateReferences } from "../../media/gen/image-references.js";
 /**
  * codex 后端（设计 §4.4）：现有 CodexRunner 的适配。
  * - 线程：owner / group:<id> / private:<qq>（由请求的 threadKey 决定，同键串行）；
@@ -21,8 +21,8 @@ import { imageRefsValue, validateReferences } from "../image-references.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { buildCodexPrompt, CodexTimeoutError, isReasoningEffort, type CodexRunner, type ReasoningEffort } from "../codex-runner.js";
-import { collectNewImages, listFiles } from "../image-collect.js";
-import { ticketImageDir } from "../image-gen.js";
+import { collectNewImages, listFiles } from "../../media/gen/image-collect.js";
+import { ticketImageDir } from "../../media/gen/image-gen.js";
 import { log } from "../../shared/log.js";
 import { BackendTimeoutError, type AgentBackend, type AgentHandleContext, type AgentRequest, type AgentResponse } from "./types.js";
 

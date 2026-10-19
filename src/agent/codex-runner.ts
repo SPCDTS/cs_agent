@@ -4,7 +4,7 @@ import type { ContextUsageStore } from "./context-usage.js";
 import { loadCodexContextWindow } from "./codex-model-catalog.js";
 import { readRolloutContextUsage } from "./codex-context-usage.js";
 import { readThreadArchive, writeThreadArchive } from "./thread-archive.js";
-import { imageRefsValue } from "./image-references.js";
+import { imageRefsValue } from "../media/gen/image-references.js";
 /**
  * 按会话域隔离 codex 线程：owner（owner 私聊）、group:<id> 与 private:<qq>，记录在 ${DATA_DIR}/codex-threads.json。
  * 首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
