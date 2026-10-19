@@ -93,7 +93,7 @@ Copy-Item .env.example .env
 |---|---|---|---|
 | NapCat HTTP | `0.0.0.0:3000` | 不发布 | `cs-agent` 调用 OneBot 动作 |
 | NapCat WS | `0.0.0.0:3001` | 不发布 | `cs-agent` 接收 OneBot 事件 |
-| NapCat WebUI | `6099` | `127.0.0.1:6099` | 登录、扫码与配置 |
+| NapCat WebUI | `6099` | `127.0.0.1:${NAPCAT_WEBUI_PORT:-6099}` | 登录、扫码与配置；宿主机旧 NapCat 仍占用 6099 时在 `.env` 设 `NAPCAT_WEBUI_PORT=6098` |
 | cs-agent HTTP | `0.0.0.0:8787` | `127.0.0.1:8787` | 观测面板与健康检查 |
 | 宿主机 ComfyUI | `host.docker.internal:8188` | 沿用宿主机 `127.0.0.1:8188` | 生图，迁移不改变此地址 |
 

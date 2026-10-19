@@ -42,7 +42,7 @@ services:
       NAPCAT_GID: "1000"
       WEBUI_TOKEN: ${NAPCAT_WEBUI_TOKEN}
       ACCOUNT: ${QQ_BOT_ACCOUNT:-}
-    ports: ["127.0.0.1:6099:6099"]
+    ports: ["127.0.0.1:${NAPCAT_WEBUI_PORT:-6099}:6099"]
     volumes:
       - ./napcat/config:/app/napcat/config
       - ./napcat/qq:/app/.config/QQ
