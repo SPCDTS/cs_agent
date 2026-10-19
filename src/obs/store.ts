@@ -1,4 +1,4 @@
-import { ensureMemoryTables } from './memory/instrumentation.js';
+import { ensureMemoryTables } from './schema.js';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
