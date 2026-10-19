@@ -27,13 +27,7 @@ export function parseImagePrefixes(raw: string | undefined): string[] {
   return list.length ? list : [...DEFAULT_IMAGE_PREFIXES];
 }
 
-/**
- * 仅用于没有 route_text 的旧数据（v2 票据文档、迁移前的票据行）：去掉开头渲染出的 [at] / [reply] 占位。
- * 新消息一律用 bridge 的 route_text，不经过这里。
- */
-export function legacyRouteText(text: string): string {
-  return text.replace(/^(?:\s*\[(?:at|reply)\])+/, "");
-}
+export { legacyRouteText } from "../qq/ticket.js";
 
 /** routeText：InboundMessage.route_text（只去首尾空白后逐字匹配前缀）。 */
 export function routeMessage(routeText: string, prefixes: readonly string[] = DEFAULT_IMAGE_PREFIXES, images: readonly string[] = []): RouteResult {

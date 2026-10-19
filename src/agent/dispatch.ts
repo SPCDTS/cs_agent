@@ -24,7 +24,9 @@ import { log } from "../shared/log.js";
 import { scopeOf } from "../context/access.js";
 import type { BotAction, ContextStore } from "../context/store.js";
 import { FALLBACK_REPLY } from "./replies.js";
-import { DEFAULT_IMAGE_PREFIXES, legacyRouteText, routeMessage } from "./router.js";
+import { DEFAULT_IMAGE_PREFIXES, routeMessage } from "./router.js";
+import { inboundFromTicket, legacyRouteText } from "../qq/ticket.js";
+export { inboundFromTicket } from "../qq/ticket.js";
 import type { CsTasks, TaskResult } from "./tasks.js";
 
 export { FALLBACK_REPLY } from "./replies.js";
@@ -49,28 +51,6 @@ export interface DispatcherOptions {
   history?: DispatchHistory;
   /** 票据仍 pending 时队首重试的退避基数（毫秒，第 n 次重试等待 n 倍），默认 5000 */
   retryDelayMs?: number;
-}
-
-/** 从持久化票据重建入站消息（仅用于崩溃对账；段信息不保存，置空）。 */
-export function inboundFromTicket(rec: ReplyTicketRecord): InboundMessage {
-  return {
-    message_id: rec.source_message_id,
-    time: Math.floor(Date.parse(rec.created_at) / 1000) || 0,
-    message_type: rec.message_type,
-    user_id: rec.user_id,
-    group_id: rec.group_id,
-    self_id: rec.self_id,
-    nickname: rec.source_nickname,
-    text: rec.source_text,
-    // 旧行没有保存分流文本：按旧规则从渲染文本推导（仅限迁移前的票据）
-    route_text: rec.source_route_text ?? legacyRouteText(rec.source_text),
-    truncated: false,
-    mentioned_self: rec.message_type === "group",
-    segments: [],
-    images: rec.source_images ?? [],
-    attachments: rec.attachments ?? [],
-    ...(rec.source_image_error ? { image_error: rec.source_image_error } : {}),
-  };
 }
 
 /** sent/uncertain 为终态；sending 只会因发送中途崩溃而残留，QQBridge 不会再发送它，同样视为终态 */

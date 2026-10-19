@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DownloadHooks } from '../../src/qq/incoming-http.js';
 import { cleanupIncoming, downloadIncoming, INCOMING_RETENTION_MS } from "../../src/qq/incoming.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
-import { inboundFromTicket } from "../../src/agent/dispatch.js";
+import { inboundFromTicket } from "../../src/qq/ticket.js";
 import type { InboundMessage, QQBridge } from "../../src/qq/types.js";
 import { tmp } from "../agent/helpers.js";
 import { FakeOneBot, groupEvent, privateEvent, SELF_ID, TOKEN, waitFor } from "./fake-onebot.js";
