@@ -151,7 +151,7 @@ Compose 将容器 HTTP 监听设为 0.0.0.0:8787，宿主机仅发布 127.0.0.1:
 |---|---|
 | `./data/pi.sqlite` / `./data/pi-threads.json` | pi 长期会话按 `owner`（owner 私聊）或 `group:<id>` / `private:<id>` 隔离；JSON 是 SQLite 映射的原子写出镜像。旧 owner 保留，旧 shared 停用且仅记录一次日志，绝不复用混合历史。同键串行、不同键并行，受 AGENT_CONCURRENCY 限制 |
 | `./data/agent.sqlite` | pi-durable 会话、任务和派发索引（崩溃后自动续跑） |
-| `./data/codex/` | `CODEX_HOME`：`auth.json`、`config.toml`、sessions。**`config.toml` 是受管文件**：入口脚本每次启动都按 `CODEX_MODEL` / `CODEX_REASONING_EFFORT` / `CODEX_WEB_SEARCH` / `CODEX_WEB_SEARCH_CONTEXT` / `CODEX_BROWSER` / `CODEX_MCP_APPROVAL_MODE` / `QQ_CONTEXT_MAX_CHARS` / `CODEX_REMOTE_PLUGINS` 重写（含 `web_search`、可选 `[features] remote_plugin = false`、`[mcp_servers.qq_context]`、可选 `[mcp_servers.browser]`），写完后按 `CODEX_PLUGIN_PRUNE` 清理远程插件缓存；手工修改会被覆盖；要改请改 `.env` 后重启 |
+| `./data/codex/` | `CODEX_HOME`：`auth.json`、`config.toml`、sessions。**`config.toml` 是受管文件**：入口脚本每次启动都按 `CODEX_MODEL` / `CODEX_REASONING_EFFORT` / `CODEX_WEB_SEARCH` / `CODEX_WEB_SEARCH_CONTEXT` / `CODEX_BROWSER` / `CODEX_MCP_APPROVAL_MODE` / `QQ_CONTEXT_MAX_CHARS` / `CODEX_REMOTE_PLUGINS` 重写（含 `web_search`、可选 `[features] plugins = false` 与 `remote_plugin = false`、`[mcp_servers.qq_context]`、可选 `[mcp_servers.browser]`），写完后按 `CODEX_PLUGIN_PRUNE` 清理远程插件缓存；手工修改会被覆盖；要改请改 `.env` 后重启 |
 | `./data/qq-messages.sqlite`（+ `-wal` / `-shm`） | 统一上下文消息库：允许范围内的全部 QQ 消息（含不触发的群消息）、机器人回复行（动作、生图提示词、codex 推理强度、状态）、日/周摘要。**按聊天记录保管**。撤回的消息会删除原始行 |
 | `./data/prompts/system.md` | **已弃用**：v2 意图模型的系统提示。v3 规则分流不经模型，不再读取它；文件保留不删，存在时启动日志记一行 `system.md is deprecated and no longer used` |
 | `./data/codex-threads.json` | 两条固定 codex 线程：`{"owner": {thread_id, created_at, updated_at}, "shared": {…}}`。owner 私聊（`QQ_OWNER`）用 `owner`，所有群和其他私聊共用 `shared`；删掉某个键（或整个文件），对应线程下一条请求就新建。旧版的单线程 `codex-session.json` 在新文件不存在时自动迁移为 `owner`（日志 `codex thread migrated`），旧文件改名为 `codex-session.json.migrated` |
@@ -188,7 +188,7 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 
 远程插件对 QQ 客服场景无用，默认关闭并清理 figma/gmail；其余已缓存插件会继续被加载，想全部清掉设 `CODEX_PLUGIN_PRUNE=all`。
 
-- `CODEX_REMOTE_PLUGINS=off|on`，默认 `off`：受管配置写入 `[features]` 下的 `remote_plugin = false`；设为 `on` 时省略该段，保持 codex 默认行为。非法值经 `toml_enum` 告警并回退 `off`。
+- `CODEX_REMOTE_PLUGINS=off|on`，默认 `off`：受管配置写入 `[features]` 下的 `plugins = false` 与 `remote_plugin = false`（前者才是关键：codex 0.163 启动时会同步插件市场并重装缺失的精选插件，与技能扫描竞态导致线程启动失败；`.system` 内置技能仍可用）；设为 `on` 时省略该段，保持 codex 默认行为。非法值经 `toml_enum` 告警并回退 `off`。
 - `CODEX_PLUGIN_PRUNE` 默认 `figma,gmail`：每次启动写完配置后删除 `$CODEX_HOME/plugins/cache/openai-curated-remote/<name>`；精确值 `all` 删除整个市场缓存目录，显式空字符串不清插件缓存。名单按逗号分隔，非空名称只允许 `[A-Za-z0-9._-]` 且不能是 `.` 或 `..`；非法项告警跳过，其余项继续处理，不展开通配符。无论是否清理插件缓存，都会删除 `$CODEX_HOME/plugins/.remote-plugin-install-staging`；目录不存在不报错。此清理开关独立于 `CODEX_REMOTE_PLUGINS`。
 
 - `web_search = "live"`（`CODEX_WEB_SEARCH=live|cached|disabled`），`[tools.web_search] context_size = "low"`（`CODEX_WEB_SEARCH_CONTEXT`）限制搜索结果注入量。

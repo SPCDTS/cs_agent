@@ -212,7 +212,10 @@ fi
 if [ "$REMOTE_PLUGINS" = "off" ]; then
   cat >> "$CONFIG.tmp" <<'TOML'
 
+# plugins=false 关闭插件市场启动同步与远程插件安装（0.163 实测：仅 remote_plugin=false 仍会同步并重装被删插件，
+# 安装临时目录与技能扫描竞态导致 thread/start -32603）；.system 内置技能不受影响。
 [features]
+plugins = false
 remote_plugin = false
 TOML
 fi

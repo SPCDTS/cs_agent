@@ -98,6 +98,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
       model_reasoning_effort: '"high"',
       web_search: '"live"',
       "features.remote_plugin": "false",
+      "features.plugins": "false",
       "tools.web_search.context_size": '"low"',
       "mcp_servers.qq_context.command": '"node"',
       "mcp_servers.qq_context.args": '["/app/dist/mcp/qq-context.js"]',
@@ -131,6 +132,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(r.status).toBe(0);
     expect(parse(r.toml)["[features]"]).toBeUndefined();
     expect(parse(r.toml)["features.remote_plugin"]).toBeUndefined();
+    expect(parse(r.toml)["features.plugins"]).toBeUndefined();
     expect(r.toml).not.toMatch(/^remote_plugin\s*=/m);
   });
 
@@ -138,6 +140,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const r = runEntrypoint({ CODEX_REMOTE_PLUGINS: value });
     expect(r.status).toBe(0);
     expect(parse(r.toml)["features.remote_plugin"]).toBe("false");
+    expect(parse(r.toml)["features.plugins"]).toBe("false");
     expect(parse(r.toml).x).toBeUndefined();
     if (value && value !== "off") {
       expect(r.stderr).toContain("entrypoint: WARNING invalid value");
