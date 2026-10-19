@@ -23,7 +23,8 @@
 | `comfy-mcp` | PyPI 0.10.0，依赖 `mcp>=2,<3`、`pydantic>=2`、`anyio>=4.9`；入口 `comfy-mcp`（stdio MCP）。读取 `COMFYUI_URL` / `COMFYUI_HOST` / `COMFYUI_PORT` 指向远端 ComfyUI；`generate_image(prompt)` 内部走 `comfy run-template`（需要 `comfy-cli`，`COMFY_BIN`） |
 | NapCat（Compose 服务，2026-10-19 方案） | `mlikiowa/napcat-docker` 按 index digest 固定；HTTP `agent-http` / WS `agent-ws` 在容器内监听 `0.0.0.0:3000/3001`，cs-agent 默认访问 `http://napcat:3000` / `ws://napcat:3001`，同一 Bearer token，`messagePostFormat: array`。3000/3001 不发布，WebUI 只发布 `127.0.0.1:6099`。环境变量仍可指向宿主机 NapCat（`host.docker.internal:3000/3001`），用于回退；真实迁移验收见 `DESIGN-napcat-container.md` §6 |
 | ComfyUI（宿主机） | `D:\Tools\ComfyLocal\start.ps1` 以 `--listen 127.0.0.1 --port 8188` 后台启动；容器经 `host.docker.internal:8188` 可达，无需改为 0.0.0.0 |
-| 本机凭据 | 无 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`；`~/.codex/auth.json` 为 `auth_mode=chatgpt`（含 tokens）。因此 agent 的意图模型默认走 `openai-codex` provider 复用 ChatGPT OAuth |
+| codex 模型提供者（2026-10-19） | 默认 `CODEX_PROVIDER=magpie`，容器经 `http://host.docker.internal:3425/v1` 访问宿主机 magpie，使用 Responses 与 `supports_websockets=false`；gateway key 仅经环境变量注入，目录用 `/v1/codex/models`。容器 NAT 被视为回环，key 归集与限定模型，不是这条路径的访问控制 |
+| 模型凭据 | codex 仅 `CODEX_PROVIDER=openai` 直连时需要容器内 `auth.json`；pi / 摘要默认 DeepSeek API key，可选 `openai-codex` OAuth 不受该开关影响 |
 
 ## 3. 总体结构（v3）
 
@@ -159,14 +160,17 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 
 ### 5.6 附件发送与 codex 工具注册
 
+- codex 的模型提供者默认改为宿主机 magpie，受管配置使用 `env_key="CODEX_MAGPIE_KEY"`、`wire_api="responses"`、`supports_websockets=false` 与 `/codex/models` 目录。MCP 注册、附件路径与受管 AGENTS.md 不受提供者开关影响；MCP 不新增 key 透传，基础配置允许空 key，只有 CodexRunner 启动时检查 magpie key。设置页展示只读提供者与 URL。
+
 - 独立生图任务仍只由规则分流触发；pi 的 `generate_image` 保留。codex 的 `image_gen` MCP 由 `CODEX_IMAGE_GEN=off|on` 控制，默认 off；on 恢复旧注册与注入。受管 AGENTS.md 与新播种的 codex 提示词删除专用生图段，只保留聊天图片召回与附件用法。
 - `qq_send_image(path)`、`qq_send_file(path, name?)` 只能登记本轮工作区普通文件或当前访问范围内已召回媒体，拒绝软链接、目录及其他来源。媒体归属由 ContextStore 回调注入，media 层无向上依赖。
 - 图片复制到 `images/<ticket>/attach-<n>/`，沿用回合收集与 QQ 图片段；文件复制到 `files/<ticket>/` 并原子写 manifest，按 sha256 去重。限制默认 4 张图片、3 个文件、单文件 20 MiB，文件名与扩展名按附件配置校验。
 - 文字 markSent 后逐文件持久化 `pending → sending → sent|uncertain`。上传使用 base64，成功保存 file_id；恢复只发送 pending，遗留 sending 转 uncertain。`replyCompleted` 防止派发器在文字发送后提前清理；全部处理完成后记录 reply.files 并删除文件副本。
 
 ### 5.7 模型凭据
+- `CODEX_PROVIDER=magpie|openai` 默认 magpie；`CODEX_MAGPIE_URL` 默认 `http://host.docker.internal:3425/v1`。runner 对目录查询及 exec/resume 注入 `CODEX_MAGPIE_KEY`，主进程注册脱敏，key 不落盘；magpie 不依赖容器 ChatGPT 凭据，直连仍保留原有 OAuth 行为。默认模型仍为 `gpt-6.1-sol`，目录优先精确匹配，再忽略提供者前缀，保留离线缓存回退。真实 env_key 鉴权、短名路由与 WebSocket 对照待主会话运行实验确认。
 - 意图模型默认 provider `deepseek`、model `deepseek-flash`（pi-ai 内置 deepseek provider，OpenAI-completions 兼容接口 `https://api.deepseek.com`，支持工具调用）。密钥读环境变量 `DEEPSEEK_API_KEY`；`.env` 中写作 `DEEPSEEK_APIKEY` 也可，启动时映射为标准名，缺少密钥则启动失败。deepseek-flash 支持的思考档位为 off/low/high/max，`AGENT_THINKING_LEVEL` 不受支持时就近调整（如 medium → high）并记一条 warn 日志。
-- `openai-codex` provider 仍可选（`AGENT_MODEL_PROVIDER=openai-codex`），凭据来自 `/data/codex/auth.json`（与容器内 codex 共用同一份，由 `scripts/init-auth.ps1` 从宿主机复制一次）。实现方须查明 pi-ai `auth/oauth/openai-codex` 期望的 credential 字段（access/refresh/account_id/expires）并做映射；pi-ai 自行刷新时**写回**同一文件以保持与 codex 一致，若两者刷新策略冲突须在报告中指出。
+- `openai-codex` provider 仍可选（`AGENT_MODEL_PROVIDER=openai-codex`），凭据来自 `/data/codex/auth.json`（仅在 codex 也直连时共用同一份，由 `scripts/init-auth.ps1` 从宿主机复制一次）。实现方须查明 pi-ai `auth/oauth/openai-codex` 期望的 credential 字段（access/refresh/account_id/expires）并做映射；pi-ai 自行刷新时**写回**同一文件以保持与 codex 一致，若两者刷新策略冲突须在报告中指出。
 - 可通过 `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` / 对应 API Key 环境变量切换到 `openai` / `anthropic` 等 API-Key provider。
 - 意图识别用小/便宜模型即可。
 
@@ -189,6 +193,9 @@ QQ_ALLOW_GROUPS=200000001          # 逗号分隔
 QQ_GROUP_MENTIONS=true
 COMFYUI_URL=http://host.docker.internal:8188
 COMFY_TIMEOUT_SEC=300
+CODEX_PROVIDER=magpie
+CODEX_MAGPIE_URL=http://host.docker.internal:3425/v1
+CODEX_MAGPIE_KEY=
 CODEX_MODEL=gpt-6.1-sol
 CODEX_REASONING_EFFORT=high        # 缺省值；每轮由意图模型选择的档位覆盖
 CODEX_TIMEOUT_SEC=600
@@ -213,7 +220,7 @@ LOG_LEVEL=info
 
 1. NapCat 保持现状（127.0.0.1:3000/3001 + token）；Docker Desktop 的 `host.docker.internal` 可直达宿主机 loopback 服务，已实测。`.env` 的 `NAPCAT_TOKEN` 取自 `D:\Tools\NapCat\config\onebot11_1670528780.json` 中 `agent-http` 条目的 token。
 2. ComfyUI 用 `D:\Tools\ComfyLocal\start.ps1` 启动即可（127.0.0.1:8188），无需改监听地址。
-3. 运行 `scripts/init-auth.ps1` 把 `~/.codex/auth.json` 复制到 `./data/codex/auth.json`；或在容器内执行 `codex login --device-auth`。
+3. 默认先配置宿主机 magpie 的局域网共享、cs-agent gateway key 和模型范围（见 DEPLOY「codex 经 magpie」）；仅 `CODEX_PROVIDER=openai` 时运行 `scripts/init-auth.ps1` 把 `~/.codex/auth.json` 复制到 `./data/codex/auth.json`；或在容器内执行 `codex login --device-auth`。
 4. `docker compose up -d --build`；查看 `docker compose logs -f`。
 
 ## 9. 测试要求
@@ -255,7 +262,7 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | codex resume | `codex exec resume` 无 `-C/-s`；cwd 由 spawn 决定，沙箱用 `-c sandbox_mode=…` | CLI 0.160/0.163 的参数限制 |
 | 每会话工具纪律 | 代码层 `claimBusinessCall` 守卫：第二次业务工具调用直接报错并提示调用 `reply_qq`；`reply_qq` 失败返回带 terminate 的错误；会话结束而票据仍 pending 时派发器补发一条兜底回复 | 不依赖模型完全遵守系统提示 |
 | 会话 | `harness.createConversation({ownership:{kind:"ownerless"}, init})`，`init` 同一提交内写入 `cs.ticket` 文档与 `cs.dispatch` 索引；启动时 `Dispatcher.recover()` 按索引重提交（requestId=ticket 去重）；自动 compaction 关闭 | 单消息会话无需压缩 |
-| 凭据 | pi-ai openai-codex 凭据 `{type:"oauth", access, refresh, expires, accountId}` ← Codex `auth.json` 的 `tokens.*`；刷新后按 Codex 格式写回同一文件 | 容器内 codex 与 agent 共用一份 |
+| 凭据 | pi-ai openai-codex 凭据 `{type:"oauth", access, refresh, expires, accountId}` ← Codex `auth.json` 的 `tokens.*`；刷新后按 Codex 格式写回同一文件 | 仅 codex 直连且 agent 选择 openai-codex 时共用一份 |
 | 默认意图模型 | `deepseek/deepseek-flash`（DEEPSEEK_API_KEY 或别名 DEEPSEEK_APIKEY）；`openai-codex/gpt-6-luna` 仍可选 | 意图识别任务简单，改用 DeepSeek API key，不占 ChatGPT 额度 |
 | codex 模型与推理强度 | 默认 `gpt-6.1-sol`；`ask_codex.reasoning_effort` 由意图模型按请求选 `low…max`，以 `-c model_reasoning_effort=…` 逐轮覆盖 | 简单问题不必用高推理强度，复杂任务按需提高 |
 | 统一上下文消息库（设计 v2 §2.1/§2.4） | `src/context/store.ts`：`/data/qq-messages.sqlite`（WAL），`messages` / `summaries` + trigram FTS5（触发器同步）；2 字中文词用 `LIKE` 回退全表扫描，≥3 字走 trigram 索引；所有读取带 `Access` 过滤；`format.ts` 为意图层与 MCP 共用的唯一格式化器（非今天的行加 `MM-DD`，MCP 输出加 `#message_id`） | 设计稿 §2；trigram 对 <3 字的 MATCH 无结果 |

@@ -36,22 +36,22 @@ Compose 双服务：QQ（`napcat` 容器）→ `cs-agent` 规则分流 →（`�
 1. **Docker Desktop**（Windows），能使用 `host.docker.internal`。
 2. **NapCat** 默认运行在 Compose 内网，地址为 `http://napcat:3000` / `ws://napcat:3001`，使用同一 `NAPCAT_TOKEN`，`messagePostFormat: array`。首次使用按下文「NapCat 容器」播种配置并扫码。也可通过环境变量指向宿主机 NapCat：`host.docker.internal:3000/3001`；原宿主机 `agent-http` / `agent-ws` 的 loopback 绑定可保留。迁移时沿用已有 `NAPCAT_TOKEN`。
 3. **ComfyUI** 用 `D:\Tools\ComfyLocal\start.ps1` 启动（127.0.0.1:8188），不需要改监听地址。
-4. **Codex 凭据**：在仓库根目录运行
+4. **Codex 提供者**：默认经宿主机 magpie，按下文「codex 经 magpie」配置 gateway key。仅 `CODEX_PROVIDER=openai` 直连时需要容器内 ChatGPT 凭据，在仓库根目录运行
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\init-auth.ps1
    ```
-   它会把 `~/.codex/auth.json`（`auth_mode=chatgpt`）复制到 `./data/codex/auth.json`。容器内的 codex 和 agent 的意图模型（`openai-codex` provider）共用这一份。脚本不会打印 token。
+   它会把 `~/.codex/auth.json`（`auth_mode=chatgpt`）复制到 `./data/codex/auth.json`。仅直连的 codex 使用这一份；如果另外选择 `AGENT_MODEL_PROVIDER=openai-codex`，pi / 摘要模型也会使用它（不随 CODEX_PROVIDER 改变）。脚本不会打印 token。
    也可以不复制，改为在容器里登录：`docker compose run --rm cs-agent codex login --device-auth`（`CODEX_HOME=/data/codex`）。
    入口脚本带参数时，会先准备目录和 `config.toml`，再 `exec` 这个命令；不带参数时才启动 agent。其他一次性命令同理，例如 `docker compose run --rm cs-agent codex --version`。
 
-> 刷新冲突：refresh_token 会轮换。容器（agent / 容器内 codex）刷新后会写回 `./data/codex/auth.json`，宿主机那份 `~/.codex/auth.json` 可能随之失效，反过来也一样。容器内的 agent 每次读写都重新读取文件，只在 token 快过期时刷新；刷新完成、写回之前会再读一次文件，如果其中的 `refresh_token` 已经变了（说明容器内 codex 在此期间刷新过），agent 采用文件里的新 token，丢弃自己的刷新结果，不覆盖。这样能避免绝大多数互相覆盖，但"再读一次"和写回之间仍有极短的窗口，两者不共享文件锁，不能做到绝对互斥；万一出现鉴权失败，重新运行 `scripts/init-auth.ps1` 或在容器内 `codex login --device-auth` 即可。宿主机 codex 失效时重新 `codex login` 即可。
+> 以下刷新冲突仅涉及使用 ChatGPT OAuth 的进程（codex 仅在 `CODEX_PROVIDER=openai` 时）：refresh_token 会轮换。容器（agent / 容器内 codex）刷新后会写回 `./data/codex/auth.json`，宿主机那份 `~/.codex/auth.json` 可能随之失效，反过来也一样。容器内的 agent 每次读写都重新读取文件，只在 token 快过期时刷新；刷新完成、写回之前会再读一次文件，如果其中的 `refresh_token` 已经变了（说明容器内 codex 在此期间刷新过），agent 采用文件里的新 token，丢弃自己的刷新结果，不覆盖。这样能避免绝大多数互相覆盖，但"再读一次"和写回之间仍有极短的窗口，两者不共享文件锁，不能做到绝对互斥；万一出现鉴权失败，重新运行 `scripts/init-auth.ps1` 或在容器内 `codex login --device-auth` 即可。宿主机 codex 失效时重新 `codex login` 即可。
 
 ## 2. 配置
 
 ```powershell
 # 仅首次安装时复制；已有 .env 不覆盖。
 Copy-Item .env.example .env
-# 编辑 .env：填写 NAPCAT_TOKEN、NAPCAT_WEBUI_TOKEN、DEEPSEEK_API_KEY（或 DEEPSEEK_APIKEY），确认 QQ_ALLOW_USERS / QQ_ALLOW_GROUPS
+# 编辑 .env：填写 CODEX_MAGPIE_KEY、NAPCAT_TOKEN、NAPCAT_WEBUI_TOKEN、DEEPSEEK_API_KEY（或 DEEPSEEK_APIKEY），确认 QQ_ALLOW_USERS / QQ_ALLOW_GROUPS
 ```
 
 关键变量（完整列表见 `.env.example`）：
@@ -81,9 +81,41 @@ Copy-Item .env.example .env
 | `CODEX_CLOSE_GRACE_MS` | 5000 | 可选，正整数毫秒。主进程 `exit` 后最多等待 `close` 冲完 stdout/stderr；到期清理遗留进程并释放管道，完成事件已收到且退出码为 0 时成功，非零退出码仍失败 |
 | `CODEX_EXIT_GRACE_MS` | 15000 | 可选，正整数毫秒。收到 `turn.completed` 后仍无 `exit`，到期检查 `-o` 文件；可读且非空时清理进程并成功返回，否则保留原总超时。取消与已发生的超时不会被完成事件覆盖 |
 | `IMAGE_GEN_MCP_WAIT_SEC` / `IMAGE_COLLECT_EXTENSIONS` | 90 / 2 | MCP 最多等待参数预算与前者的较小值；超时交给 agent 的 lateImages 阶段，后者控制两条生图路径的额外收取窗口数 |
+| `CODEX_PROVIDER` | `magpie` | `magpie\|openai`；默认经宿主机网关，`openai` 恢复直连 |
+| `CODEX_MAGPIE_URL` | `http://host.docker.internal:3425/v1` | Responses API 根地址；入口脚本只接受安全字符组成的 HTTP(S) URL，不能含凭据、查询或片段；尾斜杠会移除 |
+| `CODEX_MAGPIE_KEY` | 空 | 基础配置解析允许为空，magpie runner 启动时必填；只经环境变量注入并注册脱敏 |
 | `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `gpt-6.1-sol` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节）。`CODEX_REASONING_EFFORT`（`low/medium/high/xhigh/max`）固定使用，每轮也以 `-c model_reasoning_effort="…"` 显式传入（日志 `codex backend done` 的 `effort` 字段）；v3 不再按请求选择 |
 
-> codex 子进程只拿到最小环境变量：`PATH`、`HOME`、`LANG`/`LC_ALL`、`TERM`、`CODEX_HOME`、`NO_COLOR=1`，以及设置了的 `HTTP(S)_PROXY`/`NO_PROXY`。`NAPCAT_TOKEN`、`*_API_KEY` 等配置不会传给 codex。
+> codex 子进程只拿到最小环境变量：`PATH`、`HOME`、`LANG`/`LC_ALL`、`TERM`、`CODEX_HOME`、`NO_COLOR=1`，以及设置了的 `HTTP(S)_PROXY`/`NO_PROXY`。`NAPCAT_TOKEN`、`*_API_KEY` 等配置不会传给 codex；magpie 模式只额外注入专用 `CODEX_MAGPIE_KEY`，直连模式不传该 key。
+
+## codex 经 magpie
+
+宿主机侧按以下步骤配置（容器内 codex 使用宿主机 magpie 的模型提供者）：
+
+1. magpie 的 Settings → **Share on local network** 打开局域网共享。
+2. 在宿主机执行 `magpie gateway-key add cs-agent`，将返回的 key 填到私有 `.env` 的 `CODEX_MAGPIE_KEY`；再执行 `magpie gateway-key models <id> 'codex/*'`，将该 key 限定到 codex 模型。不要把真实 key 放进文档或提交。
+3. Settings → Network and sharing → Allowed addresses 填入实际 Docker 网段（当前设计为 `172.20.0.0/16`）；如有防火墙阻拦，仅向 Docker 虚拟网卡放行 3425。注意下文 NAT 例外。
+
+```dotenv
+CODEX_PROVIDER=magpie
+CODEX_MAGPIE_URL=http://host.docker.internal:3425/v1
+CODEX_MAGPIE_KEY=<仅在私有环境中填写 gateway key>
+CODEX_MODEL=gpt-6.1-sol
+```
+
+入口脚本写入 `model_provider = "magpie"` 与 Responses provider，指定 `supports_websockets = false`，直接使用 HTTP 流而不先尝试 WebSocket。容器到默认网关地址为 HTTP，magpie 到上游为 HTTPS。模型默认仍是 `gpt-6.1-sol`，也接受 `codex/gpt-6.1-sol`；短名路由与实际鉴权需用独立实验验证，若短名不可用，先显式设置带前缀模型。
+
+配置文件仅保存 `env_key = "CODEX_MAGPIE_KEY"`。主进程构造 CodexRunner 时检查 key，缺失或纯空白会以「配置无效：CODEX_PROVIDER=magpie 需要 CODEX_MAGPIE_KEY」启动失败；目录查询、exec 和 resume 共用同一份受控环境。基础 `loadConfig` 不检查 key，以便 qq_context / image_gen MCP 继续读取自身配置；MCP 不新增 gateway key 透传。key 加入主进程脱敏表。由于 key 不落盘，`config.toml` 无需加入 deny_read，原有凭据和数据禁读规则不变。
+
+目录地址为 `<CODEX_MAGPIE_URL>/codex/models`（默认 `/v1/codex/models`）；`codex debug models` 的 slug 优先精确匹配，再忽略提供者前缀比较，取 `context_window` 原值。保留离线目录签名与 `models_cache.json` 回退。设置页只读显示「codex：经 magpie（URL）」或「codex：直连」。
+
+在 magpie **Usage** 页按 gateway key 名 `cs-agent` 查看调用、缓存命中及费用；cs-agent 原有 token_usage 与上下文观测不变。健康检查在 magpie 模式只确认 key 已配置，不探测远端服务，也不再要求 `auth.json`；真实连通性以实验回答和 Usage 记录为准。
+
+**Docker Desktop NAT 例外（设计 §0 已实测）**：容器访问 `host.docker.internal` 会被 magpie 视为回环，无 key 的请求也可能成功；这条路径上 key 用于归集用量与限定模型，不能当作访问控制，Allowed addresses 也不起作用。当前保持命令沙箱可联网，命令能够直接访问网关并绕过 key 的模型限制。可选加固是在 magpie 侧用 `MAGPIE_ADDR=<LAN 网卡 IP>:3425` 固定到 LAN 地址，再同步修改 URL；这会要求本机调用也提供 key，未包含在本次变更中。
+
+回退时设置 `CODEX_PROVIDER=openai`、准备容器内 `auth.json`（`scripts/init-auth.ps1` 或 `codex login --device-auth`），然后重建 / 重启服务。入口脚本会重写受管文件并移除 magpie 顶层选择与 provider 段，runner 不再注入 magpie key。pi 后端与 DeepSeek 配置不受此开关影响。
+
+容器真实验证脚本 `docs/magpie-exp.sh` 为未提交的交接文件，由主会话在独立 `CODEX_HOME=/data/codex-exp-mg` 中运行，检查 env_key、两种模型名、目录窗口及 WebSocket 对照。NAT 路径上「回答成功」本身不能证明 Bearer 已携带，须同时确认 Usage 归集到 `cs-agent`。16 MB+ owner 回合及真实缓存命中仍需主会话补验。
 
 ## NapCat 容器
 
@@ -153,7 +185,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 Compose 将容器 HTTP 监听设为 0.0.0.0:8787，宿主机仅发布 127.0.0.1:8787；本地直接运行仍默认监听 127.0.0.1。`/healthz` 的 JSON 和状态码不变，返回：
 - `ws_connected`：NapCat WS 是否在线（离线时 HTTP 503，容器显示 unhealthy）
 - `comfy`：启动时 comfy 的自检结果（mcp：`server_info`；http：`/system_stats`）
-- `codex`：`auth.json` 是否存在，以及当前固定会话 id
+- `codex`：magpie 模式检查 key 已配置（不探测网关），openai 直连检查 `auth.json` 是否存在；同时报告当前固定会话 id
 - `pi.threads`：`{count, keys: [...]}`，仅显示启用的会话数量和键，不返回 id 或聊天内容
 
 > comfy-cli 1.22 在 local 模式下拒绝从非 loopback 主机获取 `/object_info`（SSRF 防护），所以 mcp 模式下 agent 会在容器内的 `127.0.0.1:${COMFY_LOOPBACK_PORT:-8188}` 启动一个 TCP 转发，指向 `COMFYUI_URL`，再把 comfy-mcp 指向这个 loopback 地址。日志中出现 `comfy loopback proxy listening` 即表示转发已启动。
@@ -164,7 +196,7 @@ Compose 将容器 HTTP 监听设为 0.0.0.0:8787，宿主机仅发布 127.0.0.1:
 |---|---|
 | `./data/pi.sqlite` / `./data/pi-threads.json` | pi 长期会话按 `owner`（owner 私聊）或 `group:<id>` / `private:<id>` 隔离；JSON 是 SQLite 映射的原子写出镜像。旧 owner 保留，旧 shared 停用且仅记录一次日志，绝不复用混合历史。同键串行、不同键并行，受 AGENT_CONCURRENCY 限制 |
 | `./data/agent.sqlite` | pi-durable 会话、任务和派发索引（崩溃后自动续跑） |
-| `./data/codex/` | `CODEX_HOME`：`auth.json`、`config.toml`、sessions。**`config.toml` 是受管文件**：入口脚本每次启动都按 `CODEX_MODEL` / `CODEX_REASONING_EFFORT` / `CODEX_WEB_SEARCH` / `CODEX_WEB_SEARCH_CONTEXT` / `CODEX_BROWSER` / `CODEX_MCP_APPROVAL_MODE` / `QQ_CONTEXT_MAX_CHARS` / `CODEX_REMOTE_PLUGINS` 重写（含 `web_search`、可选 `[features] plugins = false` 与 `remote_plugin = false`、`[mcp_servers.qq_context]`、可选 `[mcp_servers.browser]`），写完后按 `CODEX_PLUGIN_PRUNE` 清理远程插件缓存；手工修改会被覆盖；要改请改 `.env` 后重启 |
+| `./data/codex/` | `CODEX_HOME`：`auth.json`（codex 仅直连时需要）、`config.toml`、sessions。**`config.toml` 是受管文件**：入口脚本每次启动都按 `CODEX_PROVIDER` / `CODEX_MAGPIE_URL` / `CODEX_MODEL` / `CODEX_REASONING_EFFORT` / `CODEX_WEB_SEARCH` / `CODEX_WEB_SEARCH_CONTEXT` / `CODEX_BROWSER` / `CODEX_MCP_APPROVAL_MODE` / `QQ_CONTEXT_MAX_CHARS` / `CODEX_REMOTE_PLUGINS` 重写（含 `web_search`、可选 `[features] plugins = false` 与 `remote_plugin = false`、`[mcp_servers.qq_context]`、可选 `[mcp_servers.browser]`），写完后按 `CODEX_PLUGIN_PRUNE` 清理远程插件缓存；手工修改会被覆盖；要改请改 `.env` 后重启 |
 | `./data/qq-messages.sqlite`（+ `-wal` / `-shm`） | 统一上下文消息库：允许范围内的全部 QQ 消息（含不触发的群消息）、机器人回复行（动作、生图提示词、codex 推理强度、状态）、日/周摘要。**按聊天记录保管**。撤回的消息会删除原始行 |
 | `./data/prompts/system.md` | **已弃用**：v2 意图模型的系统提示。v3 规则分流不经模型，不再读取它；文件保留不删，存在时启动日志记一行 `system.md is deprecated and no longer used` |
 | `./data/codex-threads.json` | 两条固定 codex 线程：`{"owner": {thread_id, created_at, updated_at}, "shared": {…}}`。owner 私聊（`QQ_OWNER`）用 `owner`，所有群和其他私聊共用 `shared`；删掉某个键（或整个文件），对应线程下一条请求就新建。旧版的单线程 `codex-session.json` 在新文件不存在时自动迁移为 `owner`（日志 `codex thread migrated`），旧文件改名为 `codex-session.json.migrated` |
