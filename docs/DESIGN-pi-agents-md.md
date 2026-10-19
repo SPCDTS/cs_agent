@@ -100,3 +100,10 @@ pi 的 system 基础指令在上下文分析页仍是"多段合成、暂无全�
 | `test/agent/dispatch.test.ts:1024` | `crash mid-turn (marker, no output)`（R1） | 测试及清理 hook 超时 |
 
 Windows 平台按现有条件跳过 `test/agent/pi-sandbox-linux.test.ts` 的 2 项真实 bwrap 用例和 `test/media/attach.test.ts` 的 1 项 FIFO 用例。真实容器及模型验收按任务约束未执行，留给主会话。第三方说明、架构 §5.8 和部署说明已同步；设计原文保持不变，仅在 §6 末尾追加本小节。
+
+### 2026-10-19，主会话验收
+
+- 分支 `feat/pi-agents-md` 3 条提交 ff 到 main（6cc1fbb…c68a3a6）；主会话沙箱外复跑：typecheck 通过，80 文件 / 1155 项通过，`npm run build` 通过。
+- 代码审查：`ProjectContextLoader` 只读 `WORKSPACE_DIR` 与 `cwd`（须为 `${DATA_DIR}/pi-work/` 直接子目录，否则忽略并告警一次），候选名顺序与上游一致，拒绝软链接/非普通文件/超 128 KiB，严格 UTF-8 去 BOM，空白视为不存在，按 `mtimeMs:size` 缓存且正文未变时返回同一字符串；渲染沿用上游 `<project_instructions path="…">` 格式并对 path 做 XML 转义。与设计的偏离（接受）：API 多一个 `dataDir` 参数用于校验 cwd 边界。
+- 部署：镜像 `bbb8f7f3…`（干净 worktree，main c68a3a6），队列空闲时切换，容器 healthy、无新告警。容器内用构建产物直接渲染：`files = /workspace/AGENTS.md , /data/pi-work/private_10000001/AGENTS.md`，重复渲染返回同一引用，`cwd=/data/pi-work` 被忽略并告警、无 cwd 时只有运维层文件；仪表盘浏览器冒烟零错误。
+- 待观察：真实 pi 回合（需 `AGENT_BACKEND_OVERRIDES` 把某会话切到 pi）后，上下文分析页 system 消息应含两段 `<project_instructions>`。
