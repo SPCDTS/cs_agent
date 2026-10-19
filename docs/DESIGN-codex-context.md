@@ -384,6 +384,26 @@ CODEX_BROWSER=playwright
 - 修正：受管配置改写 `[features] plugins = false`（同时保留 `remote_plugin = false`），实测无同步、无安装，提示词只剩 `.system` 内置技能（imagegen、openai-docs、skill-creator、skill-installer）。`CODEX_PLUGIN_PRUNE` 保留但已非必要（`CODEX_REMOTE_PLUGINS=on` 时修剪会再次触发重装竞态，文档已注明）。main 87bc811，镜像 `eb0f899d…` 以 `--no-deps` 部署，容器 healthy，`config.toml` 第 37–39 行为 `[features] plugins = false / remote_plugin = false`。
 - `codex debug prompt-input` 不触发该同步，只能用真实 exec 验证。
 
+### 8.12 受管规则下发路径
+
+2026-10-19 使用真实 codex 0.163、临时 `CODEX_HOME` 对照 rollout，已确认以下行为；此结论修正 §10.8 中“受管规则经 developer_instructions 每轮注入”的描述，也取代早期将全部规则放在全局 AGENTS.md 的方案。
+
+| 操作 | rollout 结果 |
+|---|---|
+| 新建线程，`-c developer_instructions` 含 `MARK_DEV_V1`，cwd 的 `AGENTS.md` 含 `MARK_AGENTS_V1` | developer 消息含 `MARK_DEV_V1`；user 消息 `# AGENTS.md instructions` 含 `MARK_AGENTS_V1` |
+| resume，参数和文件都不变 | 无新注入 |
+| resume，只把 `developer_instructions` 改为 `MARK_DEV_V2` | 无新注入，线程内仍只有旧 V1 开发者指令 |
+| resume，只把 cwd 的 `AGENTS.md` 改为 `MARK_AGENTS_V2` | 新增 user 消息含 V2，并声明新的 AGENTS.md 指令替换此前指令 |
+
+因此，逐轮传入 `developer_instructions` 无法更新已有线程的受管规则。此次调整后的路径为：
+
+- `$CODEX_HOME/AGENTS.md` 承载用户可编辑的全局行为指引：编辑源为 `${DATA_DIR}/prompts/codex.md`，`CodexPromptStore` 拼接通用保密与会话隔离说明后生成；启动、面板保存及每轮 `preparePrompt` 都会再生成。不要直接编辑生成文件。
+- `${WORKSPACE_DIR}/<key>/AGENTS.md`（默认 `/workspace/<key>/AGENTS.md`，键中的冒号换成下划线）承载受管规则。`turn()` 在启动新线程或 resume 前，按本轮实际权限渲染安全规则、可写目录、聊天图片召回与图片/文件发送说明，再追加可选的 `## 运维工作区指引`。父目录 `AGENTS.override.md` / `AGENTS.md` 仍是运维维护的输入，服务不改写它们，也不再播种占位文件。
+- 会话域文件以 `<!-- cs-agent-managed-workspace-agents v1 -->` 开头，下一行为“由 cs-agent 每轮生成，改动会被覆盖。”。每轮比较完整内容，文件缺失或内容不同才通过 `writeAtomic`（同目录临时文件 + rename）原子写入；相同则不写，保留 mtime。模型对该文件的修改在下一轮覆盖恢复，不再识别或保留旧占位/V1/V2 模板。
+- 全局与会话域 AGENTS.md 都以 **user 角色**进入 codex 上下文，内容变化时由 codex 在续轮重新注入。不再传入 `-c developer_instructions=`，保留 `project_doc_max_bytes=131072`；无需重置已有线程，受管规则更新从它的下一轮生效。
+
+回归测试沿用 fake-codex，在子进程启动时记录 cwd 的 AGENTS.md，覆盖首轮生成、内容相同时 mtime 不变、规则/权限/运维指引变化、模型改写后的恢复，以及新建与 resume 均不传 `developer_instructions`。提示词不是访问控制；会话权限仍由现有命名沙箱配置执行。
+
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。

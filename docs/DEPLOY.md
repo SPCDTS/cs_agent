@@ -162,10 +162,11 @@ Compose 将容器 HTTP 监听设为 0.0.0.0:8787，宿主机仅发布 127.0.0.1:
 | `./data/files/<ticket>/` | 文件附件副本与 `manifest.json`（原路径、名字、大小、sha256、来源）；QQ 上传使用 base64，无需与 NapCat 共享卷。票据清理时删除，命令沙箱禁读、不可写 |
 | `./data/tickets/<ticket>/` | 票据工作目录：codex 回合的最后一条消息 `codex-last.txt`（崩溃恢复时据此不重复询问 codex）。reply 与派发终态对账均幂等清理；发送后、清理前崩溃会在恢复时补删，图片目录不动。入口脚本启动时创建。对 codex 命令沙箱禁读、不可设为可写目录 |
 | `./data/*`（QQBridge） | 票据与去重 SQLite |
-| `./data/codex/AGENTS.md` | codex 的全局规则，**受管生成文件**：安全规则、实际生效的可写目录、参考图范围、图片自动附带与异步返回纪律组成受管段，再以两个换行拼接 `prompts/codex.md`。保留版本标记 `<!-- cs-agent-agents-template v5 -->`；main 启动和 store 保存时生成，日志 `wrote codex global AGENTS.md`。codex 执行的命令改不了它；编辑行为指引请通过面板修改 `codex.md`，不要手改生成文件 |
-| `./workspace/` | codex 工作目录（可写）。没有 `AGENTS.md` 时写入一份占位说明（“规则见全局 AGENTS.md；本目录是你的工作区”）。与旧版 v1 / v2 模板**全文相同**（忽略 CRLF）的文件会替换为占位说明（日志 `replaced old workspace AGENTS.md template with a stub`）；带旧模板标记但被改过的文件保持不动，并记 warn `workspace AGENTS.md is a modified old cs-agent template`。codex 会同时读取全局与工作区的 `AGENTS.md`（全局在前）；工作区这份 codex 自己能改，所以规则不放这里 |
+| `./data/codex/AGENTS.md` | codex 全局行为指引的**生成文件**：通用保密与会话隔离说明 + 两个换行 + 用户可编辑的 `prompts/codex.md`，保留标记 `<!-- cs-agent-agents-template v5 -->`。main 启动、store 保存和每轮 preparePrompt 时生成；编辑行为指引请通过面板或磁盘修改 `codex.md`，不要手改生成文件。具体安全规则、实际可写目录、聊天图片与发送图片/文件规则位于会话域 AGENTS.md |
+| `./workspace/` | codex 各会话工作区的父目录。运维可维护 `AGENTS.override.md` 或 `AGENTS.md`，runner 将选中的非空指引拼入每个会话的受管文件；服务不再播种占位说明，也不再识别替换旧 V1/V2 模板 |
+| `./workspace/<key>/AGENTS.md` | **受管规则文件**（key 中冒号换成下划线）。runner 每轮在 exec/resume 前生成，首行 `<!-- cs-agent-managed-workspace-agents v1 -->`，第二行“由 cs-agent 每轮生成，改动会被覆盖。”；包含按实际权限渲染的规则及可选的“运维工作区指引”。仅文件缺失或全文不同时原子写入，内容相同保留 mtime。模型改写后下一轮会恢复，不作为可编辑行为指引入口 |
 
-面板保存 codex 自定义提示后，`CodexPromptStore` 立即重新生成 `$CODEX_HOME/AGENTS.md`，并通知订阅者记录变更。runner 每轮启动独立的 `codex exec` 或 `codex exec resume` 进程，本服务不缓存 AGENTS.md；新提示从下一次调用起生效，正在进行的回合保持其已加载内容。直接在磁盘编辑 `codex.md` 后，需要调用 store 的 `regenerate()` 或在下次服务启动时生成；没有后台文件监听。自定义文件使用 UTF-8，保存保留原 BOM 和换行风格。
+面板保存 codex 自定义提示后，`CodexPromptStore` 立即重新生成 `$CODEX_HOME/AGENTS.md`，并通知订阅者记录变更。runner 每轮通过 `preparePrompt` 再生成全局指引，并更新会话域受管文件，然后启动独立的 `codex exec` 或 `codex exec resume` 进程；面板保存或直接在磁盘编辑 `codex.md` 都从下一轮生效，正在进行的回合保持其已加载内容，无需后台文件监听。全局与会话域 AGENTS.md 均以 user 角色进入上下文，内容变化时续轮重新注入；不再使用无法更新已有线程的 `developer_instructions`，保留 `project_doc_max_bytes=131072`，无需重置旧线程。自定义文件使用 UTF-8，保存保留原 BOM 和换行风格。实验结论见[设计稿 §8.12](DESIGN-codex-context.md#812-受管规则下发路径)。
 
 ### 聊天记录（统一上下文）
 
@@ -274,7 +275,7 @@ writable_roots = ["/workspace", "/data/prompts", "/data/workflows"] # CODEX_WRIT
 - **写入**：只能写 `/workspace`、`/data/prompts`（提示词目录；`system.md` 已弃用）、`/data/workflows`（生图工作流），以及 codex 默认可写的 `/tmp`。`/data` 本身、`/data/codex`（auth.json、sessions）、`/data/*.sqlite`、`/data/images`、`/data/tickets` 都不可写；入口脚本先规范化每一项（合并重复的 `/`，去掉 `/./`、末尾的 `/.` 与 `/`），再与规范化后的 `DATA_DIR` / `CODEX_HOME` 比较，拒绝 `/`、`/data` 本身及其上级目录、`/data/codex` 及其子目录、`/data/images`、`/data/tickets` 及其子目录、`*.sqlite`、任何含 `..` 或非法字符的项，并打印 `rejected CODEX_WRITABLE_ROOTS entry`（例如 `/data//`、`/data/.`、`/data/codex/.`、`/data/images//x` 都会被拒绝）。
 - **工作流**：`/data/workflows/` 不存在时，启动会从镜像的 `/app/workflows/` 复制一份（已存在则绝不覆盖）。默认 `COMFY_WORKFLOW_FILE=/data/workflows/qwen-image-2.1-turbo-api.json`。旧值 `/app/workflows/…` 仍然有效，只是 codex 改不了那份。
 - **网络**：命令可以联网（`network_access = true`），因此能直接访问宿主机的 ComfyUI `host.docker.internal:8188`（无鉴权，可以提交任务、读取输出）。NapCat（3000/3001）需要 Bearer token，codex 拿不到。
-- **规则文件**：codex 从 `$CODEX_HOME/AGENTS.md`（`/data/codex/AGENTS.md`，受管、命令只读）读取全局规则，再叠加工作区的 `/workspace/AGENTS.md`。全局规则里的“只读写下列目录”按入口脚本导出的 `CODEX_EFFECTIVE_WRITABLE_ROOTS`（规范化、校验后的 `CODEX_WRITABLE_ROOTS`）渲染：默认列出 `/workspace`、`/data/prompts`（提示词目录）、`/data/workflows`（ComfyUI 工作流 JSON）；`CODEX_WRITABLE_ROOTS` 去掉 prompts 后规则里也不再提它。
+- **规则文件**：codex 从 `$CODEX_HOME/AGENTS.md` 读取全局行为指引，再加载 cwd 的 `/workspace/<key>/AGENTS.md` 受管规则，二者均为 user 角色。父工作区的运维指引由 runner 显式拼入会话域文件。受管规则里的“只读写下列目录”按 `codexWorkspacePolicy` 的实际权限渲染：非 owner 仅本会话目录，owner 额外包含 `/data/prompts` 与 `/data/workflows`，read-only 不宣称任何目录可写。每轮文件缺失或内容变化才原子重写；不变不触碰 mtime，模型修改会在下一轮覆盖恢复。
 - **读取（deny_read）**：入口脚本每次启动重写 `/etc/codex/requirements.toml`（镜像内 `/etc/codex` 归 node 所有；写不进去时容器以退出码 1 退出）：
 
   ```toml
