@@ -378,6 +378,12 @@ CODEX_BROWSER=playwright
 - 验收：沙箱外复跑 80 文件 / 1176 项通过 + 1 跳过；镜像 `9e9b6a8b…`（干净 worktree，main 39d763c）以 `--no-deps` 只切换 cs-agent，容器 healthy、无新告警；面板与附件 stdio 冒烟零错误。待用户在 QQ 私聊验证"把 skirk.png 发给我"（文件已在 `/workspace/owner/skirk.png`）。
 - 调查：干净未登录的临时 CODEX_HOME 下，默认与 `features.plugins=false` 都不触发 `.tmp/plugins` 同步，无法据此证明关闭插件能消除生产竞态；记录在 `docs/research/codex-runnerfix-2026-10-19.md`，暂不改插件配置，靠判定收紧兜底。
 
+### 8.11 根因修正：codex 插件市场启动同步（2026-10-19）
+
+- §8.9 的修剪方案是错的：codex 0.163 启动时 `startup_sync` 会 git clone `github.com/openai/plugins` 到 `$CODEX_HOME/.tmp/plugins`，并**重装缺失的精选插件**到 `plugins/.remote-plugin-install-staging/remote-plugin-bundle-*`；`features.remote_plugin=false` 与 `[plugins."x@openai-curated-remote"] enabled=false` 都拦不住（临时 CODEX_HOME 真实 exec 三组实验：现状配置 exit 1 并复现 `ripgrep unreadable glob scan failed … remote-plugin-bundle-*/skills/figma-use`；按名禁用后 figma/gmail 被装回且 54 个技能全部进入提示词）。被修剪的插件每轮重装，安装临时目录与技能扫描的 `rg` 竞态 → `thread/start -32603`，即 §8.10 两次事故的根因。
+- 修正：受管配置改写 `[features] plugins = false`（同时保留 `remote_plugin = false`），实测无同步、无安装，提示词只剩 `.system` 内置技能（imagegen、openai-docs、skill-creator、skill-installer）。`CODEX_PLUGIN_PRUNE` 保留但已非必要（`CODEX_REMOTE_PLUGINS=on` 时修剪会再次触发重装竞态，文档已注明）。main 87bc811，镜像 `eb0f899d…` 以 `--no-deps` 部署，容器 healthy，`config.toml` 第 37–39 行为 `[features] plugins = false / remote_plugin = false`。
+- `codex debug prompt-input` 不触发该同步，只能用真实 exec 验证。
+
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。

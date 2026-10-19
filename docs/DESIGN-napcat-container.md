@@ -93,3 +93,10 @@ docker compose
 播种验证覆盖：通用与账号 JSON 的完整结构、HTTP/WS 主机与 token、账号留空、重复运行的原字节和 mtime 不变、token 区分大小写、原字节备份、仅受管 token 更新（保留额外服务与嵌套字段）、中文及 BOM/换行保留、缺少 token / 非法账号 / 损坏配置时不部分覆盖。
 
 与原设计的调整：健康检查改用 `curl -fsS --max-time 4`，因为[官方基础镜像 Dockerfile](https://github.com/NapNeko/NapCat-Docker/blob/main/base/Dockerfile) 明确安装 curl、未声明 wget；这属于源码核实，固定 digest 的实际二进制仍待部署环境确认。回退命令改为先停容器 NapCat，再用 `up -d --no-deps cs-agent`，避免新增依赖将 NapCat 重新启动。新建 JSON 为 UTF-8 无 BOM；更新已有文件保留原编码与 BOM，遵循本任务的编码保留约束。`.ps1` 源码带 UTF-8 BOM 以兼容 Windows PowerShell 5.1 的中文注释，生成 JSON 不受影响。`.env.example` 的账号按任务说明留空，实际 `.env` 与部署步骤留给主会话。
+
+### 2026-10-19，迁移实施（主会话 + 用户扫码）
+
+- 代码：main d3f1d1d（compose 服务、播种脚本、默认值、文档，81 文件 / 1167 项全绿）+ 919874f（`NAPCAT_WEBUI_PORT`：宿主机 6099 被旧 NapCat 占用，迁移期容器 WebUI 发布到 127.0.0.1:6098）。固定 digest 镜像内确认有 `curl`，健康检查可用。
+- 步骤：`.env` 写入 `NAPCAT_WEBUI_TOKEN`（随机）与 `QQ_BOT_ACCOUNT=1670528780`；`scripts/napcat-config.ps1 -Root D:\project\cs_agent` 播种两份 OneBot 配置（PowerShell 5.1 下 `$PSScriptRoot` 默认值为空，需显式 `-Root`，待修）；`docker compose up -d napcat` 后日志出现二维码，用户在 WebUI 扫码；从 cs-agent 容器调 `napcat:3000/get_login_info` 返回 `user_id 1670528780 / 风失`。
+- 顺序事故：容器端登录后宿主机 NapCat 被挤下线（cs-agent 日志 `napcat disconnected code 1006`），其启动器 `NapCatWinBootMain.exe` 立刻重启 QQ；主会话随即切换 `.env` 到 `napcat:3000/3001` 并以 `--no-deps` 重启 cs-agent（`napcat connected`），再停掉宿主机 NapCat：杀启动器与 QQ 主进程后又被根进程重拉，最终停根进程 64032 及三个子进程，6099 释放；用户个人 QQ（10-14 启动的进程族）未受影响。设计 §3 "先停宿主机再切" 在实际中反转为"容器登录即挤掉宿主机"，正确顺序是：扫码后立即切换 cs-agent，再清理宿主机进程。
+- 状态：`napcat` healthy、cs-agent healthy 且 bridge 已连接容器 NapCat；宿主机 NapCat 无自启动项。待用户私聊一条验证收发；一周后决定是否清理 `D:\Tools\NapCat`。
