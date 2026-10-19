@@ -1,10 +1,14 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Root = (Split-Path -Parent $PSScriptRoot)
+    [string]$Root = ""
 )
 
 $ErrorActionPreference = 'Stop'
 $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+if (-not $Root) {
+    $base = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $Root = Split-Path -Parent $base
+}
 $Root = [System.IO.Path]::GetFullPath($Root)
 
 # 只读所需的两个键；不执行 .env 内容，不展开变量，不打印凭据。

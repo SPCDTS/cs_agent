@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,9 +7,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const script = path.join(root, "scripts", "napcat-config.ps1");
-const shell = ["pwsh", "powershell"].find(command =>
+const shells = ["pwsh", "powershell"].filter(command =>
   spawnSync(command, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "exit 0"], { timeout: 10000 }).status === 0,
 );
+const shell = shells[0];
 const dirs: string[] = [];
 function fixture(env: string) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "cs-napcat-"));
@@ -35,6 +36,23 @@ afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: tru
 
 // 探测可执行性：例如沙箱禁止 pwsh 时继续尝试 Windows PowerShell 5.1。
 describe.skipIf(!shell)("NapCat 播种脚本（无可用 PowerShell 时跳过）", () => {
+  it.each(shells)("%s 不传 -Root 时以脚本父目录为根，不依赖当前目录", command => {
+    const dir = fixture("NAPCAT_TOKEN=default-root-token\nQQ_BOT_ACCOUNT=123456\n");
+    const scripts = path.join(dir, "scripts"); mkdirSync(scripts);
+    const copied = path.join(scripts, "napcat-config.ps1"); copyFileSync(script, copied);
+    const cwd = path.join(dir, "elsewhere"); mkdirSync(cwd);
+    const result = spawnSync(command, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", copied], {
+      cwd, encoding: "utf8", timeout: 15000,
+    });
+    expect(result.error).toBeUndefined(); expect(result.stderr).toBe(""); expect(result.status).toBe(0);
+    for (const name of ["onebot11.json", "onebot11_123456.json"]) {
+      const config = readConfig(configPath(dir, name));
+      expect(config.network.httpServers[0].token).toBe("default-root-token");
+      expect(config.network.websocketServers[0].token).toBe("default-root-token");
+    }
+    expect(existsSync(path.join(cwd, "napcat"))).toBe(false);
+  });
+
   it("生成两份 UTF-8 无 BOM 配置，启用 HTTP/WS 并注入字面量 token", () => {
     const token = 'test-$token#="中文"';
     const dir = fixture(`NAPCAT_TOKEN='${token}' # 注释\nQQ_BOT_ACCOUNT="123456"\n`);
