@@ -1,0 +1,128 @@
+# 包结构与分层整理（2026-10-19）
+
+用户要求：在观测面板 v2 收尾后，顺手把"包之间耦合过度"的问题整理掉。本文是约束实施的设计，§7 记录验收。
+
+## 0. 现状（2026-10-19，commit c856372）
+
+用脚本统计 `src/` 下目录间的 import（类型与值一并计入）：
+
+| 指标 | 数值 |
+|---|---|
+| 目录 / 文件 / 行数 | 13 / 115 / 16,640 |
+| 跨目录依赖对 | 62 |
+| 双向依赖（包级环） | 19 |
+| 文件级直接互引 | `log.ts` ↔ `obs/redact.ts`；`obs/http.ts` ↔ `obs/sessions/http.ts` |
+
+问题按影响排序：
+
+1. **横切工具寄生在 `obs/`**：`obs/redact.ts`（8 个包引用）、`obs/trace.ts`（6）、`obs/usage.ts`（4）、`obs/errors.ts`，加上根目录 `log.ts`（7），且 `log.ts` 反向 import `obs/redact.ts`。结果所有业务包都"依赖观测层"，掩盖真实依赖。
+2. **图片 / 媒体功能摊在 5 个包、17 个文件、约 1,900 行**：`agent/image-*`（7 文件）、`agent/qwen-workflow.ts`、`agent/pi-tools/images.ts`、`qq/image.ts`、`qq/image-header.ts`、`qq/incoming-http.ts`、`context/media.ts`、`context/media-recall-server.ts`、`obs/image.ts`、`obs/image-events.ts`、`mcp/image-gen*.ts`、`mcp/media-recall-client.ts`。`context/media.ts` 一个文件 import 6 个 `qq/` 模块。
+3. **`obs/http.ts` 863 行枢纽**：路由表 28 个分支 + 页面渲染 + CSRF + 提示词编辑 + 会话/记忆二次分发，import 了 `agent`、`context`、`mcp`、`config`；`obs ↔ obs/ui`、`obs ↔ obs/sessions`、`obs ↔ obs/memory` 三个环都经过它。
+4. **`agent/` 平铺 28 文件**：codex-*（7 文件约 1,400 行）、image-*、pi-* 三簇混放；`agent/backends → agent` 14 条、反向 6 条；`backends/types.ts` 从 971 行的 `codex-runner.ts` 取类型。
+5. **传输层回调业务层**：`qq/bridge.ts → agent/dispatch.inboundFromTicket`，而该函数的入参出参类型都在 `qq/types.ts`。
+6. **核心记忆层依赖观测层**：`context/aging.ts → obs/memory/instrumentation`（类型）、`obs/usage`、`obs/trace`；`obs/memory/read.ts → obs/ui/html.scopeLabel`（后端依赖 UI）；`obs/store.ts → obs/memory/instrumentation.ensureMemoryTables` 而 `obs/memory/*` 又 import `obs/store`。
+7. **`config.ts` 不是叶子**：import `agent/router`、`agent/backends/select`、`context/access` 的解析函数。
+8. **`obs ↔ mcp`**：`obs/http.ts`、`obs/memory/http.ts` 直接 import `mcp/qq-context-server.callQQContextTool`（为了和模型走同一条路径，决定正确，位置不对）；`mcp` 又 import `obs/memory/instrumentation`、`obs/image`。
+
+可接受、不动的：`obs/context → obs/sessions`（分析器依赖会话模型，12 条，内聚合理）；`mcp → context/agent`（薄适配层）；`obs/ui → obs/memory`、`obs/ui → obs/sessions` 全为类型 import。
+
+## 1. 目标分层
+
+自下而上，**只允许向下 import**（含 `import type`；不区分类型与值，规则才简单可查）：
+
+| 层 | 目录 | 职责 | 允许 import |
+|---|---|---|---|
+| 0 | `shared/` | 日志、脱敏、trace 事件总线、usage 字段、错误类型、数字格式化 | 仅 node 内建与第三方 |
+| 1 | `config.ts` | 环境变量 → 原始配置值（zod） | shared |
+| 2 | `qq/` | OneBot 传输、票据、策略、入站消息类型（`qq/types.ts` 同时是领域类型） | shared, config |
+| 3 | `media/` | 图片下载/校验/魔数、生图流水线（ComfyUI/Qwen）、生图任务与清单、图片事件 | shared, config, qq（仅 `qq/types`） |
+| 4 | `context/` | 消息库、衰老、格式化、媒体持久化、media-recall 服务、`qq_context` 工具门面、观察者接口 | shared, config, qq, media |
+| 5 | `agent/`（含 `agent/codex/`、`agent/backends/`、`agent/pi-tools/`） | 分流、派发、任务、后端、codex 运行器 | ≤4 |
+| 6 | `obs/`（含 `obs/sessions`、`obs/context`、`obs/memory`、`obs/ui`） | 观测存储、仪表盘、会话索引、上下文分析、记忆可视化 | ≤5 |
+| 7 | `mcp/` | stdio MCP 进程入口与服务实现（`qq_context`、`image_gen`、media-recall 客户端） | ≤6（独立进程需要自己打开 `obs/memory/instrumentation`） |
+| 8 | `main.ts` | 组合根 | 任意 |
+
+`obs/` 内部子层：`obs/ui` 只可 import `obs/sessions/types`、`obs/memory/types`、`obs/context/types` 与 `shared`；`obs/memory`、`obs/sessions`、`obs/context` 不可 import `obs/ui`、`obs/http.ts`；`obs/sessions` 不可 import `obs/context`（路由移走后）；`obs/context` 可 import `obs/sessions`。`agent/` 内部：`agent/backends/types.ts` 与 `agent/backends/select.ts` 不可 import 任何实现文件（`codex-runner`、`docs` 之外的具体后端）。
+
+**不可移动的入口**（被 `Dockerfile`、`config.toml`、`scripts/entrypoint.sh`、`docs/DEPLOY.md` 以 `dist/...` 路径引用）：`src/main.ts`、`src/mcp/qq-context.ts`、`src/mcp/image-gen.ts`。
+
+## 2. 分组与搬迁对照表
+
+每组一个分支内若干提交，用 `git mv` 保留历史；每条提交只做一件事（搬一组文件 + 改 import，或只改一个接口）。行为零变化，不改任何对外路由、API、文件格式、配置键。
+
+### P0 横切工具归位、断掉最便宜的环
+
+| 现位置 | 新位置 | 说明 |
+|---|---|---|
+| `src/log.ts` | `src/shared/log.ts` | |
+| `src/obs/redact.ts` | `src/shared/redact.ts` | 与 log 的互引消失：log 不再 import redact 之外的东西，redact 不 import log |
+| `src/obs/trace.ts` | `src/shared/trace.ts` | `Trace`、`LiveEvent`、`trace()` |
+| `src/obs/usage.ts` | `src/shared/usage.ts` | `usageFields` |
+| `src/obs/errors.ts` | `src/shared/errors.ts` | |
+| `obs/ui/context-bar.ts` 中的 `fmtPct`/`fmtShort`/`ratio`/`toContextUsage` 等纯计算 | `src/shared/format.ts` | `context-bar.ts` 只留 HTML；`obs/live.ts` 改 import shared |
+| `agent/dispatch.ts: inboundFromTicket` | `src/qq/ticket.ts`（或并入 `reply-store.ts`） | `qq/bridge.ts` 与 `agent/dispatch.ts` 都从 qq 取；qq 成为叶子 |
+| `obs/http.ts: SseWriter / sseWriter / csrfToken` | `src/obs/http-util.ts` | `obs/sessions/http.ts`、`obs/live.ts` 改 import http-util |
+| `obs/sessions/http.ts` 中 `/context` 路由分支 | `src/obs/context/http.ts` | 由 `obs/http.ts` 挂载；`obs/sessions` 不再 import `obs/context` |
+| `obs/ui/html.ts: scopeLabel` | `src/context/access.ts` | 作用域语义属于 context；`obs/memory/read.ts`、`obs/ui` 都从那里取 |
+| `obs/memory/instrumentation.ts: ensureMemoryTables` | `src/obs/store.ts`（或新建 `obs/schema.ts`） | 表结构归存储层；`obs/memory/*` 单向依赖 `obs/store` |
+| `mcp/qq-context-server.ts: callQQContextTool` 及其依赖的结果拼装 | `src/context/qq-context-tool.ts` | `mcp/qq-context-server.ts` 变薄：注册工具、注入 `onRecall`；`obs/http.ts`、`obs/memory/http.ts` 改 import context |
+| 新增 `test/architecture/deps.test.ts` | | §3 的依赖规则测试；P0 末尾带"临时例外清单"（P1/P2 要消的边），P2 末尾清单为空 |
+
+### P1 `media/` 包
+
+| 现位置 | 新位置 | 说明 |
+|---|---|---|
+| `qq/image-header.ts` | `media/header.ts` | 魔数校验 |
+| `qq/incoming-http.ts`（`downloadImage`、`DownloadHooks`） | `media/download.ts` | `qq/incoming.ts`、`context/media.ts` 改 import |
+| `qq/image.ts` 中的尺寸常量与通用校验 | `media/limits.ts` | QQ 消息段（`prepareImages`、`ImageSegment`）留在 `qq/image.ts`，改为 import media |
+| `agent/image-gen.ts` | `media/gen/image-gen.ts` | ComfyUI 流水线 |
+| `agent/image-references.ts`、`image-collect.ts`、`image-options.ts`、`image-pending.ts`、`image-files.ts`、`qwen-workflow.ts` | `media/gen/*.ts` | |
+| `obs/image.ts`（`ImageBackend` 的 trace 包装） | `media/gen/observed.ts` | 依赖 shared/trace，不再属于 obs |
+| `obs/image-events.ts` | `media/gen/events.ts` | 若阅读后发现它本质是观测存储表，则留在 `obs/` 并改为 `main.ts` 注入；由实施者读代码后决定并在报告中说明 |
+| `context/media.ts`、`context/media-recall-server.ts`、`mcp/media-recall-client.ts`、`mcp/image-gen*.ts`、`agent/pi-tools/images.ts`、`agent/docs.ts` | 不动 | 只改 import 指向 `media/` |
+
+规则：`media/` 不可 import `qq/`（除 `qq/types`）、`context/`、`agent/`、`obs/`。
+
+### P2 `agent/codex/`、接口文件去实现依赖、config 成叶子、观察者接口
+
+| 现位置 | 新位置 / 改法 | 说明 |
+|---|---|---|
+| `agent/codex-runner.ts`、`codex-prompt.ts`、`codex-trace.ts`、`codex-context-usage.ts`、`codex-model-catalog.ts`、`codex-workspace.ts` | `agent/codex/{runner,prompt,trace,context-usage,model-catalog,workspace}.ts` | |
+| `auth/codex-oauth.ts` | `agent/codex/oauth.ts` | 单文件包并入 |
+| `agent/backends/types.ts` import `ThreadKey`（codex-runner）、`TicketSource`（docs） | 类型移到 `agent/backends/types.ts` 自身或 `agent/codex/types.ts`；`agent/docs.ts` 不再被接口文件 import | 接口文件只依赖类型文件 |
+| `config.ts` import `parseImagePrefixes`、`parseBackendOverrides`、`resolveOwner` | `config.ts` 只输出原始字符串/数组；解析下沉到 `agent/router.ts`、`agent/backends/select.ts`、`context/access.ts` 的构造处（或 `main.ts` 组合时解析） | `config.ts` 只 import zod 与 shared |
+| `context/aging.ts` → `obs/memory/instrumentation`（类型）；`agent/pi-tools` → `obs/memory` | 在 `context/observer.ts` 定义 `SummaryObserver` / `RecallObserver` 接口（即 instrumentation 现有方法签名的子集）；`obs/memory/instrumentation.ts` 实现它；`main.ts` 注入；`mcp/` 独立进程仍可直接 `MemoryInstrumentation.openOwn` | context、agent 不再 import obs |
+| `obs/http.ts` | 只保留 `createDashboard` 路由挂载与页面 shell，目标 ≤ 300 行；页面体与 API 分别在 `obs/ui/*`、`obs/sessions/http.ts`、`obs/memory/http.ts`、`obs/context/http.ts` | 已有分发结构，主要是把内联页面体搬到 `obs/ui/dashboard-pages.ts` |
+
+## 3. 依赖规则测试（`test/architecture/deps.test.ts`）
+
+- 扫描 `src/**/*.ts` 的静态 `import`/`export … from`/`import()` 相对路径，归到包：`shared`、`config`、`qq`、`media`、`context`、`agent`（含子目录）、`obs`（含子目录）、`mcp`、`main`。
+- 断言：每条跨包边 `A → B` 满足 `layer(B) ≤ layer(A)`，且满足 §1 的 `obs/` 内部、`agent/` 内部与 `media/` 规则。
+- 维护一个 `ALLOWED_EXCEPTIONS: Array<[from, to]>`，P0 时列出 P1/P2 待消的边，并断言**每条例外仍然存在**（防止例外过期不清）；P2 结束时清单为空。
+- 失败信息列出违规的文件对，便于定位。脚本复用主会话的统计方式（见 scratchpad `depgraph.mjs` 的正则），但只认 `src/`。
+
+## 4. 验收（主会话亲自做）
+
+每组各一次：
+
+1. `npm run typecheck`、`npx vitest run` 全绿（Windows 偶发 worker exit 3221226505 / "bad port" 为已知抖动，单独重跑）；`deps.test.ts` 绿且例外清单与本文一致。
+2. `npm run build` 后 `dist/main.js`、`dist/mcp/qq-context.js`、`dist/mcp/image-gen.js` 存在。
+3. 从干净的 detached worktree 构建镜像、部署（与 cs-agent-b7 串行），容器健康无告警；浏览器 smoke（已有 `smoke-o6.mjs` / `smoke-mem.mjs` / `smoke-recall-ui.mjs`）零错误；`smoke-mcp-recall.mjs` 以真实 stdio 进程调用 `qq_search` 成功并写入召回事件。
+4. 重新跑依赖统计：P0 后包级环 ≤ 10；P2 后为 0；`obs/http.ts` ≤ 300 行。
+5. `docs/ARCHITECTURE.md` §4"目录与模块归属"更新为新布局；本文 §7 写验收记录。
+
+## 5. 非目标
+
+- 不拆 `obs/context` 与 `obs/sessions`；不把 `mcp/` 的适配层再抽象。
+- 不改任何行为、路由、数据格式、配置键、`dist/` 入口路径；不借机重写 `codex-runner.ts` 或 `image-gen.ts` 内部。
+- 不引入新依赖（不装 dependency-cruiser / madge，自写测试即可）。
+
+## 6. 协调
+
+- 另一会话 cs-agent-b7 有一个进行中的改动（删除 codex 回复 relay 转写与代码清洗），涉及 `agent/reply-postprocess.ts`、`config.ts`、`agent/settings.ts`、`agent/docs.ts`、`agent/dispatch.ts`、`agent/tasks.ts`、`main.ts`、`obs/http.ts`、`obs/live.ts`、`obs/usage.ts` 等。双方约定：它先合入并部署，然后发消息；本重构在其之后从 main 开 `refactor/package-layout` 分支。期间 main 只接受纯文档提交。
+- 重构落地后把 §2 的对照表发给 cs-agent-b7 作为 rebase 依据。
+- 实施全部交给子代理（Codex gpt-6-astra），P0 → P1 → P2 顺序在同一分支上进行，组间由主会话验收后再继续。
+
+## 7. 验收记录
+
+（待填）
