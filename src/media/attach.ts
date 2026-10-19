@@ -38,10 +38,13 @@ async function noSymlinks(file: string): Promise<void> {
 
 async function readBounded(file: string, min: number, max: number): Promise<Buffer> {
   await noSymlinks(file);
+  const before = await fs.lstat(file);
+  // FIFO/设备必须在 open 前拒绝，避免以只读方式打开管道时等待写入端。
+  if (!before.isFile() || before.size < min || before.size > max) throw new Error(`附件必须为 ${min} B～${max / 1024 / 1024} MiB 的普通文件`);
   const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.size < min || stat.size > max) throw new Error(`附件必须为 ${min} B～${max / 1024 / 1024} MiB 的普通文件`);
+    if (!stat.isFile() || stat.size < min || stat.size > max || stat.dev !== before.dev || stat.ino !== before.ino) throw new Error(`附件必须为 ${min} B～${max / 1024 / 1024} MiB 的普通文件`);
     // 有界读取：读取期间增长的文件不能令内存无上限膨胀，也不能绕过大小限制。
     const buffer = Buffer.alloc(stat.size + 1);
     let offset = 0;
@@ -61,8 +64,11 @@ async function sourceFile(o: AttachmentSource, min: number, max: number) {
   try { await noSymlinks(file); } catch { throw new Error(SOURCE_ERROR + "（文件不存在或含软链接）"); }
   const canonical = await fs.realpath(file);
   const root = await fs.realpath(o.workdir);
-  const source: FileAttachment["source"] | undefined = inside(root, canonical) && inside(path.resolve(o.workdir), file) ? "workspace"
-    : await o.mediaCheck?.(canonical) ? "media" : undefined;
+  let source: FileAttachment["source"] | undefined = inside(root, canonical) && inside(path.resolve(o.workdir), file) ? "workspace" : undefined;
+  if (!source) {
+    try { if (await o.mediaCheck?.(canonical)) source = "media"; }
+    catch { /* 媒体库不可用或内容失效均不扩大来源白名单。 */ }
+  }
   if (!source) throw new Error(SOURCE_ERROR);
   const data = await readBounded(file, min, max);
   if (await fs.realpath(file) !== canonical) throw new Error(SOURCE_ERROR);

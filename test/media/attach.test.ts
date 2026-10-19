@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -58,6 +59,16 @@ describe("附件登记", () => {
       expect(await register({ ...o, path: file, mediaCheck: p => p === canonical })).toContain("已登记");
     }
     expect((await readFileAttachments(o.fileDir))[0]!.source).toBe("media");
+  });
+
+  it("媒体归属校验失败时仍返回来源限制错误", async () => {
+    const o = await setup(); const file = path.join(o.root, "media"); await fs.writeFile(file, png());
+    await expect(registerFileAttachment({ ...o, path: file, mediaCheck: () => { throw new Error("数据库未就绪"); } })).rejects.toThrow("只能发送工作区内的文件或已召回的图片");
+  });
+
+  it.skipIf(process.platform === "win32")("工作区 FIFO 在打开前拒绝，不等待写入端", async () => {
+    const o = await setup(); const file = path.join(o.workdir, "pipe"); execFileSync("mkfifo", [file]);
+    await expect(registerFileAttachment({ ...o, path: file })).rejects.toThrow("普通文件");
   });
 
   it("校验空文件、图片最小大小、单个上限及魔数", async () => {
