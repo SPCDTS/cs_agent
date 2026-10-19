@@ -106,3 +106,11 @@ pi 的 agent.md 也加这一段（这是工具用法说明，不是生图提示�
 - 部署：镜像 `0c08125f…`（干净 worktree，main 8695595），队列空闲时切换，容器 healthy、无新告警。受管 `config.toml` 已无 `[mcp_servers.image_gen]`（仅注释提及），`WORKSPACE_DIR` 注入 qq_context；`/data/files` 已创建并进入 codex 禁读名单；线上 `data/prompts/codex.md` 本就没有"生图提示词指引"段，无需手工改。
 - 真实 stdio MCP 冒烟（`qq_context` 进程，注入三个目录变量）：`tools/list` 含 `qq_send_image`、`qq_send_file`；登记工作区文本文件 → "第 1/3 个"，同文件再登记仍为第 1 个（去重），工作区 PNG → "第 1/4 张"；`/data/codex/auth.json`、`.exe`、`../group_200000001/...` 三种来源均被拒绝并返回设计规定的错误文本；`manifest.json` 与 `attach-1/` 落盘正确。仪表盘三套浏览器冒烟零错误。
 - 待用户端到端验证：QQ 私聊让 bot 发一个工作区文件与一张工作区图片，确认文件消息到达、`reply_sent` 事件含 `files` 与 `file_id`；下一次真实 codex 回合的 developer 段应出现"发送图片与文件"小节且不再有 image_gen 工具定义。
+
+### 2026-10-19，后续修复：内置生图的图片发送与空消息拦截（主会话验收）
+
+- 现象 1（08:14:51 "生成一张极恶骑的图片给我"）：codex 内置 `image_gen__imagegen` 出图成功（`/data/codex/generated_images/<线程>/exec-….png`，3.26 MB），但工具输出文本称"图片已展示给用户"，模型未调用 `qq_send_image`；且该目录不在工作区，原来源白名单也会拒绝。回复无图。
+- 现象 2（08:14:22，skirk.png 文件发出后 5 秒）：NapCat 上报一条来自用户的私聊 `message`，段数组为空，用户确认未手动发送；它被派发给 codex，32 秒后回了一句寒暄。判断为文件传输相关的系统消息被当作普通消息。
+- 修复（b102743、7be7e60、f46e1b6、1b6a35b）：`media/attach.ts` 新增 `extraRoots` 只读来源（realpath 与软链接校验同工作区），codex 侧仅在 `QQ_BACKEND=codex` 且 `QQ_SESSION` 为合法 UUID、目录存在时加入 `${DATA_DIR}/codex/generated_images/<session>`，`source` 多一个取值 `generated`；AGENTS.md "发送图片与文件"追加一句"内置生图的图片不会自动发出，把保存路径传给 qq_send_image"；桥接层对 `route_text`、`text` 皆空且无图片/附件的入站消息不派发不回复，记 `ignored` 事件（`segments`、`message_id`、`sender`、`reason`），`received` 事件移到桥接层并带 `segments`（去重保序 ≤ 20），守卫位于票据写库之前，不留悬空票据；播种脚本 `-Root` 在 PowerShell 5.1 下默认值修复。
+- 验收：沙箱外复跑 82 文件 / 1213 项通过；镜像 `dc25da06…`（干净 worktree，main 1b6a35b）部署，容器 healthy、bridge 已连容器 NapCat；stdio 真实进程：本线程 generated_images 的 3.26 MB PNG → "第 1/4 张"，其他线程目录 → 拒绝，工作区/媒体/黑名单/穿越回归全部符合；面板浏览器冒烟零错误。待用户再发一次生图验证图片随回复到达；空消息拦截待下一次文件发送后观察 `ignored` 事件。
+- 待办：`/data/codex/generated_images/` 随生图累积（每张约 3 MB），需要清理策略（按线程/按天）。
