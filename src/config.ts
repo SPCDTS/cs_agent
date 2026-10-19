@@ -65,6 +65,10 @@ const EnvSchema = z.object({
   CODEX_REASONING_EFFORT: z.string().default("high"),
   CODEX_SANDBOX: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("workspace-write"),
   CODEX_TIMEOUT_SEC: int(600),
+  /** 主进程退出后等待 stdout/stderr 关闭的毫秒数。 */
+  CODEX_CLOSE_GRACE_MS: int(5000),
+  /** 收到 turn.completed 后等待主进程退出的毫秒数；需非空输出文件才能兜底成功。 */
+  CODEX_EXIT_GRACE_MS: int(15000),
   /** 官方 rollout trace 保留天数；0 禁用请求负载记录。 */
   CODEX_TRACE_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(14),
   /** 官方 trace 普通文件总量上限（MiB）；0 表示不限。 */

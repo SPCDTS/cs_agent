@@ -78,6 +78,8 @@ Copy-Item .env.example .env
 | `ATTACH_FILE_DENY_EXT` | `.exe,.bat,.cmd,.ps1,.vbs,.js,.scr,.msi,.com,.lnk` | 附件扩展名黑名单，逗号分隔、不区分大小写 |
 | `CODEX_IMAGE_GEN` | `off` | cs-agent 的生图 MCP：`off` 不注册、不注入参数，`on` 恢复；不影响 pi 与规则分流 |
 | `CODEX_TIMEOUT_SEC` / `COMFY_TIMEOUT_SEC` | 600 / 300 | codex 单轮超时；生图收取预算按 1mp/2mp/2k 分别为 120/240/600 秒 × count，上限 COMFY_TIMEOUT_SEC；默认额外收取 2 次，始终使用原 prompt_id |
+| `CODEX_CLOSE_GRACE_MS` | 5000 | 可选，正整数毫秒。主进程 `exit` 后最多等待 `close` 冲完 stdout/stderr；到期清理遗留进程并释放管道，完成事件已收到且退出码为 0 时成功，非零退出码仍失败 |
+| `CODEX_EXIT_GRACE_MS` | 15000 | 可选，正整数毫秒。收到 `turn.completed` 后仍无 `exit`，到期检查 `-o` 文件；可读且非空时清理进程并成功返回，否则保留原总超时。取消与已发生的超时不会被完成事件覆盖 |
 | `IMAGE_GEN_MCP_WAIT_SEC` / `IMAGE_COLLECT_EXTENSIONS` | 90 / 2 | MCP 最多等待参数预算与前者的较小值；超时交给 agent 的 lateImages 阶段，后者控制两条生图路径的额外收取窗口数 |
 | `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `gpt-6.1-sol` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节）。`CODEX_REASONING_EFFORT`（`low/medium/high/xhigh/max`）固定使用，每轮也以 `-c model_reasoning_effort="…"` 显式传入（日志 `codex backend done` 的 `effort` 字段）；v3 不再按请求选择 |
 
@@ -121,6 +123,8 @@ Copy-Item .env.example .env
 镜像固定为 2026-10-19 `latest` 的 index digest：`sha256:f611790ecffa23c3c182017d5cf68179dc24612403608cd835ad13d79642f1bd`。更新前备份上述两个目录，执行 `docker buildx imagetools inspect mlikiowa/napcat-docker:latest` 核实新 index digest，修改 `docker-compose.yml` 中 digest 和日期注释，再运行 `docker compose pull napcat`、`docker compose up -d napcat`。保留旧 digest 供回退；不使用 NapCat 版本号猜镜像标签。健康检查采用 `curl -fsS --max-time 4`；[官方基础镜像构建文件](https://github.com/NapNeko/NapCat-Docker/blob/main/base/Dockerfile) 明确安装 curl、未声明 wget，更新时需重新核实镜像工具。
 
 回退到宿主机 NapCat：先 `docker compose stop napcat`，把 `.env` 的 HTTP/WS URL 分别改回 `http://host.docker.internal:3000` / `ws://host.docker.internal:3001`，确认宿主机 OneBot token 与 `.env` 一致，再执行 `docker compose up -d --no-deps cs-agent` 并重新启动宿主机 NapCat。这里必须带 `--no-deps`，防止 Compose 因依赖关系重新启动容器 NapCat；保留容器数据目录，完成私聊与 `/live` 验证。
+
+Codex 收尾时先等待主进程退出，再给输出管道一个有限的刷新窗口；已取得退出码后，总超时不再把成功回合改判失败。正常 `close` 会立即返回，不额外等待 grace；强制收尾会保留本轮输出文件与附件，供正常结果提交或票据恢复使用。Linux 清理 runner 创建的进程组；Windows 使用 `taskkill /T /F`。若系统拒绝终止，runner 仍释放本端管道并结束等待，但进程是否实际清理需要在有权限的环境验证。
 
 ## 3. 启动
 

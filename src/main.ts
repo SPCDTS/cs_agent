@@ -139,6 +139,8 @@ async function main(): Promise<void> {
     sandboxNetwork: cfg.CODEX_SANDBOX_NETWORK,
     preparePrompt: () => codexPrompt.regenerate(),
     timeoutMs: cfg.CODEX_TIMEOUT_SEC * 1000,
+    closeGraceMs: cfg.CODEX_CLOSE_GRACE_MS,
+    exitGraceMs: cfg.CODEX_EXIT_GRACE_MS,
     rolloutMaxMb: cfg.CODEX_ROLLOUT_MAX_MB,
     threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,
     traceRetentionDays: cfg.CODEX_TRACE_RETENTION_DAYS,

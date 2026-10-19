@@ -46,6 +46,20 @@ describe("model config defaults", () => {
   });
 });
 
+describe("Codex 退出宽限配置", () => {
+  it("默认值及毫秒覆盖值保持原单位", () => {
+    expect(loadConfig({})).toMatchObject({ CODEX_CLOSE_GRACE_MS: 5000, CODEX_EXIT_GRACE_MS: 15000 });
+    expect(loadConfig({ CODEX_CLOSE_GRACE_MS: "250", CODEX_EXIT_GRACE_MS: "750" }))
+      .toMatchObject({ CODEX_CLOSE_GRACE_MS: 250, CODEX_EXIT_GRACE_MS: 750 });
+  });
+
+  it.each(["0", "-1", "1.5", "invalid"])("拒绝非法宽限时间 %s", value => {
+    for (const key of ["CODEX_CLOSE_GRACE_MS", "CODEX_EXIT_GRACE_MS"]) {
+      expect(() => loadConfig({ [key]: value })).toThrow(key);
+    }
+  });
+});
+
 describe("v3 router / backend config", () => {
   it("defaults: 奶龙 prefixes, codex backend, no overrides", () => {
     const c = loadConfig({});
