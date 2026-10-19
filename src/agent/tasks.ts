@@ -29,7 +29,7 @@ import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendin
 import { readImageFiles, prepareImageFiles, validImageFile } from "./image-files.js";
 import { classifyImageError, referenceUploads, recoverRemoteUploads, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend, type RemoteUpload } from "./image-gen.js";
 import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
-import { postprocessReply, sanitizeReply } from "./reply-postprocess.js";
+import { postprocessReply, fitReply } from "./reply-postprocess.js";
 import { IMAGE_USAGE_REPLY } from "./router.js";
 import { BackendTimeoutError } from "./backends/types.js";
 import { backendNameFor, type BackendSelector } from "./backends/select.js";
@@ -604,10 +604,10 @@ export function createTasks(deps: TaskDeps) {
       reply: (task, runtime, context) =>
         replyPhase(deps, task, runtime, context, (doc) => {
           const r = doc.agentResult;
-          let text = r?.ok ? doc.replyDraft ?? sanitizeReply(r.text) : r ? AGENT_FAILURE_REPLIES[r.failure] : FALLBACK_REPLY;
+          let text = r?.ok ? doc.replyDraft ?? fitReply(r.text) : r ? AGENT_FAILURE_REPLIES[r.failure] : FALLBACK_REPLY;
           const late = doc.lateImageJobs ?? [];
-          if (doc.attachmentFailure) text = sanitizeReply(text.slice(0, 3900) + "\n附件收取失败，部分图片未能发送。");
-          if (late.some(job => job.result && !job.result.ok)) text = sanitizeReply(text.slice(0, 3900) + "\n有一张图生成超时未能发送");
+          if (doc.attachmentFailure) text = fitReply(text.slice(0, 3900) + "\n附件收取失败，部分图片未能发送。");
+          if (late.some(job => job.result && !job.result.ok)) text = fitReply(text.slice(0, 3900) + "\n有一张图生成超时未能发送");
           const images = [...new Set([...(r?.ok ? r.images : []), ...late.flatMap(job => job.result?.ok ? job.result.images : [])])].slice(0, 4);
           return { text, images };
         }),

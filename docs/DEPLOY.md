@@ -303,7 +303,7 @@ ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUs
 
 ### 运行时设置的票据快照
 
-面板修改后端或 Codex 推理强度后，仅新派发的消息采用新值。Dispatcher 在等待附件准备和 scope 队列之前读取一次设置，将 `{backend, codexReasoningEffort}` 与票据一起写入 `TicketDoc.settings`。执行、机器人历史行和崩溃恢复都使用此快照；例如进行中的 high 票据不会因面板改成 low 而改变。两个后端的回复均只做代码清洗：去 Markdown 残留、`@` 换为全角 `＠`、UTF-16 ≤4000 截断且不拆代理对；后处理不调用模型。
+面板修改后端或 Codex 推理强度后，仅新派发的消息采用新值。Dispatcher 在等待附件准备和 scope 队列之前读取一次设置，将 `{backend, codexReasoningEffort}` 与票据一起写入 `TicketDoc.settings`。执行、机器人历史行和崩溃恢复都使用此快照；例如进行中的 high 票据不会因面板改成 low 而改变。两个后端的回复均原文照发，不做 Markdown/`@` 转换（格式由提示词约束）；只保留发送保护：UTF-16 ≤4000 截断且不拆代理对、空文本占位；后处理不调用模型。
 
 升级前没有快照的存量票据无法还原历史设置：恢复时一次性写入固定 high，后端优先采用已有结果中的 pi，否则 codex；后续重试沿用。没有 TicketDoc 的孤儿票据重新派发时才采样当前设置。
 

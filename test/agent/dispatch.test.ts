@@ -821,14 +821,14 @@ describe("rule router → image path", () => {
 });
 
 describe("agent path", () => {
-  it("non-prefixed message → agent backend with scope/access/threadKey; reply is sanitized", async () => {
+  it("non-prefixed message → agent backend with scope/access/threadKey; reply is sent as-is", async () => {
     const r = await makeRig();
     await r.dispatcher.dispatch(inbound("今晚有比赛吗", { group: "200000001", user: "42" }), "t-agent");
     expect(r.image.calls).toEqual([]);
     expect(r.backend.requests[0]).toMatchObject({
       ticket: "t-agent", scope: "group:200000001", access: "group:200000001", threadKey: "group:200000001", text: "今晚有比赛吗",
     });
-    expect(r.bridge.replies).toEqual([{ ticket: "t-agent", text: "答复\n今晚有比赛吗 ok ＠all", images: [] }]);
+    expect(r.bridge.replies).toEqual([{ ticket: "t-agent", text: "## 答复\n**今晚有比赛吗** ok @all", images: [] }]);
     expect(bot(r)[0]).toMatchObject({ action: "ask_codex", detail: "high", status: "已回复" });
   });
 
@@ -838,15 +838,15 @@ describe("agent path", () => {
     expect(r.backend.requests[0]).toMatchObject({ access: "all", threadKey: "owner", scope: `private:${OWNER}` });
   });
 
-  it("codex 原始答复只做清洗，意图模型不会被调用", async () => {
+  it("codex 原始答复原样发送，意图模型不会被调用", async () => {
     const r = await makeRig();
     r.faux.setResponses([fauxAssistantMessage(fauxText("不应发送的改写"))]);
     await r.dispatcher.dispatch(inbound("问个问题"), "sanitize-only");
-    expect(r.bridge.replies[0]!.text).toBe("答复\n问个问题 ok ＠all");
+    expect(r.bridge.replies[0]!.text).toBe("## 答复\n**问个问题** ok @all");
     expect(r.faux.state.callCount).toBe(0);
   });
 
-  it.each([false, true])("旧 TicketDoc 的 codexReplyMode 在重开后可读取、恢复并只清洗；已有后端结果=%s", async completed => {
+  it.each([false, true])("旧 TicketDoc 的 codexReplyMode 在重开后可读取、恢复并原样发送；已有后端结果=%s", async completed => {
     const r = await makeRig();
     const legacySettings = JSON.parse('{"backend":"codex","codexReasoningEffort":"low","codexReplyMode":"relay"}');
     const conversation = await r.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
@@ -860,7 +860,7 @@ describe("agent path", () => {
     expect((await r.harness.snapshot(TicketDoc, conversation.id, ctx))?.settings).toEqual(legacySettings);
     await r.dispatcher.recover();
     await r.dispatcher.idle();
-    expect(r.bridge.replies[0]!.text).toBe(completed ? "旧回答 ＠all" : "答复\n旧消息 ok ＠all");
+    expect(r.bridge.replies[0]!.text).toBe(completed ? "## 旧回答 @all" : "## 答复\n**旧消息** ok @all");
     expect(r.backend.requests).toHaveLength(completed ? 0 : 1);
     expect(r.faux.state.callCount).toBe(0);
     expect(await pendingIndex(r)).toEqual({});
@@ -897,7 +897,7 @@ describe("agent path", () => {
     expect(start.argv).toEqual(expect.arrayContaining(["-c", 'model_reasoning_effort="medium"']));
     expect(start.stdin.split("\n")[0]).toMatch(/^\[来源\] 群 200000001 · tester\(42\) · /);
     const reply = r.bridge.replies[0]!;
-    expect(reply.text).toBe("画好了");
+    expect(reply.text).toBe("```\n画好了\n```");
     expect(reply.images).toHaveLength(4);
     expect(reply.images!.every((f) => f.endsWith(".png"))).toBe(true);
   });

@@ -646,7 +646,7 @@ describe("pi durable backend", () => {
     const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: 2, retryDelayMs: 1 });
     await dispatcher.dispatch(inbound("message", "7", "请画只猫"), "dispatch-pi"); await dispatcher.idle();
     expect(replies).toHaveLength(1); expect(replies[0]!.ticket).toBe("dispatch-pi");
-    expect(replies[0]!.text).toBe("图片好了 ＠你"); expect(replies[0]!.images).toHaveLength(1);
+    expect(replies[0]!.text).toBe("# 图片好了 @你"); expect(replies[0]!.images).toHaveLength(1);
     expect(s.faux.state.callCount).toBe(2);
   });
 });

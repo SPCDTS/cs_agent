@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitText, postprocessReply, QQ_TEXT_LIMIT, sanitizeReply, stripMarkdown } from "../../src/agent/reply-postprocess.js";
+import { fitReply, fitText, postprocessReply, QQ_TEXT_LIMIT } from "../../src/agent/reply-postprocess.js";
 
 const LONE_HIGH = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
 const LONE_LOW = /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
@@ -33,43 +33,25 @@ describe("fitText (UTF-16 code units, same rule as QQBridge)", () => {
     expect(long.text.length).toBeLessThanOrEqual(QQ_TEXT_LIMIT);
     expect(long.text).not.toMatch(LONE_HIGH);
     expect(long.text).not.toMatch(LONE_LOW);
-    expect(sanitizeReply("x\uDC01 @y")).toBe("x� ＠y");
+    expect(fitReply("x\uDC01 @y")).toBe("x� @y");
   });
   it("empty text gets a placeholder", () => {
     expect(fitText("   ").text).toBe("（无内容）");
   });
 });
 
-describe("sanitize", () => {
-  it("strips code fences (keeping their content), heading markers, bold and inline code", () => {
-    const md = `# 标题\n## 小节\n正文 **加粗** 与 \`code\`\n${FENCE}ts\nconst a = 1;\n${FENCE}\n~~~\nx\n~~~`;
-    expect(stripMarkdown(md)).toBe("标题\n小节\n正文 加粗 与 code\nconst a = 1;\nx");
-  });
-
-  it("turns tables into plain rows and drops separator lines", () => {
-    const md = "| 队伍 | 比分 |\n|---|:---:|\n| NAVI | 2 |\n| FaZe | 1 |";
-    expect(stripMarkdown(md)).toBe("队伍  比分\nNAVI  2\nFaZe  1");
-  });
-
-  it("never outputs @ and collapses extra blank lines", () => {
-    const out = sanitizeReply("@全体成员 联系 a@b.com\n\n\n\n下一段");
-    expect(out).not.toContain("@");
-    expect(out).toBe("＠全体成员 联系 a＠b.com\n\n下一段");
-  });
-
-  it("caps at 4000 UTF-16 units without splitting surrogates", () => {
-    const out = sanitizeReply("# h\n" + "😀".repeat(3000));
-    expect(out.length).toBeLessThanOrEqual(4000);
-    expect(out).not.toMatch(LONE_HIGH);
-  });
-
-  it("leaves a '#' inside text alone", () => {
-    expect(stripMarkdown("编号#3 和 C#")).toBe("编号#3 和 C#");
-  });
-});
-
 describe("postprocessReply", () => {
-  it("保留原始措辞，仅清洗 Markdown 和提及符号", () => {
-    expect(postprocessReply("# 标题\n**原始回答** @某人\n\n\n下一段")).toBe("标题\n原始回答 ＠某人\n\n下一段");
+  it("原文照发：Markdown、@ 与空行都不改动", () => {
+    const md = `# 标题\n**加粗** 与 \`code\` __init__\n${FENCE}ts\nconst a = 1;\n${FENCE}\n| 队伍 | 比分 |\n|---|---|\n\n\n\n＠ @全体成员 a@b.com`;
+    expect(postprocessReply(md)).toBe(md);
+  });
+
+  it("仍只做发送保护：去首尾空白、空文本占位、超长截断不拆代理对", () => {
+    expect(postprocessReply("  # 原文  \n")).toBe("# 原文");
+    expect(postprocessReply("")).toBe("（无内容）");
+    const out = postprocessReply("# h\n" + "😀".repeat(3000));
+    expect(out.length).toBeLessThanOrEqual(QQ_TEXT_LIMIT);
+    expect(out.startsWith("# h\n")).toBe(true);
+    expect(out).not.toMatch(LONE_HIGH);
   });
 });

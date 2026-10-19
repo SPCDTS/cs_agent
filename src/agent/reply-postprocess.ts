@@ -1,9 +1,7 @@
 /**
- * 回复后处理（设计 §4.3，两后端统一）：
- * - sanitize（代码清洗）：去 Markdown 代码围栏行、标题符号、表格竖线与分隔行、加粗/行内代码标记；
- *   `@` 换成全角 `＠`（QQ 里不会被当成 @ 提及）；压缩多余空行；孤立代理项换成 U+FFFD，
- *   UTF-16 ≤4000 截断且不拆代理对（fitText）。
- * 两个后端均只清洗原文，不调用模型。
+ * 回复后处理（设计 §4.3，两后端统一）：模型原文照发，不改格式、不调用模型。
+ * 只保留发送保护：孤立代理项换成 U+FFFD、去首尾空白、空文本给占位，
+ * UTF-16 ≤4000 截断且不拆代理对（与 QQBridge 的校验口径一致）。
  */
 
 /** QQ 文本上限，按 UTF-16 code unit 计（与 QQBridge 的校验口径一致） */
@@ -26,42 +24,12 @@ export function fitText(text: string, limit = QQ_TEXT_LIMIT): { text: string; tr
   return { text: cut + TRUNC_NOTE, truncated: true };
 }
 
-const FENCE_RE = /^\s*(```|~~~)/;
-const HEADING_RE = /^\s{0,3}#{1,6}\s+/;
-const TABLE_SEP_RE = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
-const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
-
-/** 去 Markdown 标记（不调用模型）。 */
-export function stripMarkdown(text: string): string {
-  const out: string[] = [];
-  for (const raw of text.replace(/\r\n?/g, "\n").split("\n")) {
-    if (FENCE_RE.test(raw)) continue; // 围栏行本身删除，围栏内的内容保留
-    if (TABLE_SEP_RE.test(raw)) continue;
-    let line = raw.replace(HEADING_RE, "");
-    if (TABLE_ROW_RE.test(line)) {
-      line = line
-        .trim()
-        .replace(/^\|/, "")
-        .replace(/\|$/, "")
-        .split("|")
-        .map((c) => c.trim())
-        .join("  ");
-    }
-    line = line
-      .replace(/\*\*(.+?)\*\*/g, "$1")
-      .replace(/__(.+?)__/g, "$1")
-      .replace(/`([^`\n]+)`/g, "$1");
-    out.push(line);
-  }
-  return out.join("\n").replace(/\n{3,}/g, "\n\n");
+/** 发送保护：只保证 QQBridge 能接受，不改动内容格式。 */
+export function fitReply(text: string, limit = QQ_TEXT_LIMIT): string {
+  return fitText(text, limit).text;
 }
 
-/** 代码清洗：去 Markdown、去 @、≤4000。 */
-export function sanitizeReply(text: string, limit = QQ_TEXT_LIMIT): string {
-  return fitText(stripMarkdown(text).replace(/@/g, "＠"), limit).text;
-}
-
-/** 后端文本 → 最终回复正文；仅做代码清洗。 */
+/** 后端文本 → 最终回复正文；原文照发，仅做发送保护。 */
 export function postprocessReply(text: string): string {
-  return sanitizeReply(text);
+  return fitReply(text);
 }
