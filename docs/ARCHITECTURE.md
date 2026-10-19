@@ -9,7 +9,7 @@
 1. 通过内置 **QQBridge** 工具从 QQ（NapCat OneBot v11）接收消息；
 2. **规则分流**（无模型，v3）：消息以 `IMAGE_PREFIXES`（默认 `奶龙:` / `奶龙：`）开头 → 前缀之后解析内联选项，其余文本作为提示词；
 3. **生图路径** → 调用 **ComfyUI 的 MCP**（`comfy-mcp`）生成图片，以固定模板把图片回到原 QQ 会话；
-4. **其他消息** → 交给**执行 agent**：后端可切换（`AGENT_BACKEND=codex|pi`，可按会话覆盖），默认是**同一容器内**的 `codex` CLI 固定线程（owner / shared），其回答经后处理后回到原 QQ 会话；codex 可经 `image_gen` MCP 自行生图，图片随回复发送。
+4. **其他消息** → 交给**执行 agent**：后端可切换（`AGENT_BACKEND=codex|pi`，可按会话覆盖），默认是**同一容器内**的 `codex` CLI 固定线程（owner / shared），其回答经后处理后回到原 QQ 会话；codex 通过 `qq_context` 的附件工具发送已有图片或文件，cs-agent 的 `image_gen` MCP 默认关闭。
 
 > v2 的"意图识别模型选工具"（`generate_image` / `ask_codex` / `reply_qq` 三个模型工具与热加载 `system.md`）已在 v3 移除，见 §5.2 与 §10。
 
@@ -39,10 +39,10 @@ QQ 用户 ──NapCat(OneBot v11)──► QQBridge(ws 收 / http 发)
         任务 cs.image：generate → reply                        任务 cs.agent：handle → postprocess → reply
         generate：comfy-mcp(stdio) 或 HTTP                     handle：AgentBackend（AGENT_BACKEND / OVERRIDES）
           COMFYUI_URL 经 127.0.0.1 loopback 转发                  codex：codex exec [resume] 固定线程 owner/shared
-          → /data/images/<ticket>/                                  -c QQ_ACCESS / IMAGE_TICKET_DIR，effort=CODEX_REASONING_EFFORT
-        reply：固定模板（成功 / 服务不可用 / 超时 /              MCP：qq_context、image_gen（→ /data/images/<ticket>/）、browser
+          → /data/images/<ticket>/                                  -c QQ_ACCESS / QQ_ATTACH_DIR / QQ_FILE_DIR / QQ_WORKDIR
+        reply：固定模板（成功 / 服务不可用 / 超时 /              MCP：qq_context（含附件工具）、browser（image_gen 默认关闭）
                内容被拒 / 其他）+ 图                              回合后收集新图片（≤4，魔数校验）
-                                                                  pi：第 3 组（当前占位，选中即回复失败模板）
+                                                                  pi：进程内 pi-durable（保留 generate_image）
                                                                 postprocess：原文照发，只做 4000 字发送保护
                  └───────────────────┬──────────────────────────────┘
                                      ▼
@@ -74,6 +74,7 @@ cs_agent/
 │  ├─ media/                     QQ 下层的通用媒体能力，不依赖 qq/context/agent/obs/mcp
 │  │  ├─ header.ts              图片容器头、动画与尺寸校验
 │  │  ├─ download.ts            安全下载、地址检查与 DownloadHooks
+│  │  ├─ attach.ts, attach-paths.ts  附件来源/大小/数量/去重、文件清单与票据目录校验
 │  │  ├─ limits.ts              图片数量/大小限制、魔数、根目录与文件读取校验
 │  │  └─ gen/                  生图后端、参考图、参数、收集、清单、Qwen 工作流与事件
 │  │     ├─ image-gen.ts        comfy-mcp(stdio) / HTTP，任务与 image_gen MCP 共用
@@ -102,7 +103,7 @@ cs_agent/
 │  │  ├─ access.ts               访问范围校验、owner 解析与 scopeLabel
 │  │  ├─ observer.ts             SummaryObserver/RecallObserver 与 DTO；由 main 注入存储实现
 │  │  ├─ image-references.ts    票据附件与媒体库参考图的访问权限校验
-│  │  ├─ qq-context-tool.ts      QQ 召回工具实现，供 MCP、pi 与面板共用
+│  │  ├─ qq-context-tool.ts      QQ 召回与附件工具门面，媒体归属交给 ContextStore
 │  │  └─ recall-results.ts       按实际返回正文计算召回命中
 │  ├─ obs/                       观测存储、路由与面板
 │  │  ├─ store.ts, schema.ts     观测库与记忆表 DDL；独立进程共用建表逻辑
@@ -156,7 +157,14 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 去掉：Codex 桌面管道、member-workspaces、group-context、MCP server 外壳、计划任务守护、loopback 限制（改为显式 URL + token 配置）。
 改进：票据与去重状态改用 `node:sqlite` 单文件；端点由环境变量直接给出；暴露为进程内模块而非 MCP。
 
-### 5.6 模型凭据
+### 5.6 附件发送与 codex 工具注册
+
+- 独立生图任务仍只由规则分流触发；pi 的 `generate_image` 保留。codex 的 `image_gen` MCP 由 `CODEX_IMAGE_GEN=off|on` 控制，默认 off；on 恢复旧注册与注入。受管 AGENTS.md 与新播种的 codex 提示词删除专用生图段，只保留聊天图片召回与附件用法。
+- `qq_send_image(path)`、`qq_send_file(path, name?)` 只能登记本轮工作区普通文件或当前访问范围内已召回媒体，拒绝软链接、目录及其他来源。媒体归属由 ContextStore 回调注入，media 层无向上依赖。
+- 图片复制到 `images/<ticket>/attach-<n>/`，沿用回合收集与 QQ 图片段；文件复制到 `files/<ticket>/` 并原子写 manifest，按 sha256 去重。限制默认 4 张图片、3 个文件、单文件 20 MiB，文件名与扩展名按附件配置校验。
+- 文字 markSent 后逐文件持久化 `pending → sending → sent|uncertain`。上传使用 base64，成功保存 file_id；恢复只发送 pending，遗留 sending 转 uncertain。`replyCompleted` 防止派发器在文字发送后提前清理；全部处理完成后记录 reply.files 并删除文件副本。
+
+### 5.7 模型凭据
 - 意图模型默认 provider `deepseek`、model `deepseek-flash`（pi-ai 内置 deepseek provider，OpenAI-completions 兼容接口 `https://api.deepseek.com`，支持工具调用）。密钥读环境变量 `DEEPSEEK_API_KEY`；`.env` 中写作 `DEEPSEEK_APIKEY` 也可，启动时映射为标准名，缺少密钥则启动失败。deepseek-flash 支持的思考档位为 off/low/high/max，`AGENT_THINKING_LEVEL` 不受支持时就近调整（如 medium → high）并记一条 warn 日志。
 - `openai-codex` provider 仍可选（`AGENT_MODEL_PROVIDER=openai-codex`），凭据来自 `/data/codex/auth.json`（与容器内 codex 共用同一份，由 `scripts/init-auth.ps1` 从宿主机复制一次）。实现方须查明 pi-ai `auth/oauth/openai-codex` 期望的 credential 字段（access/refresh/account_id/expires）并做映射；pi-ai 自行刷新时**写回**同一文件以保持与 codex 一致，若两者刷新策略冲突须在报告中指出。
 - 可通过 `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` / 对应 API Key 环境变量切换到 `openai` / `anthropic` 等 API-Key provider。

@@ -131,6 +131,8 @@ describe("AGENTS.md", () => {
     expect(md).toContain("qq_view_image(path)");
     expect(md).not.toContain("可只读打开");
     expect(md).not.toContain("are read-only");
+    expect(md).toContain("## 发送图片与文件");
+    expect(md).toContain("要把工作区里的图片或文件发给用户时，调用 qq_send_image(path) / qq_send_file(path)，它们会随本次回复自动发出；每次回复最多 4 张图、3 个文件，单个文件不超过 20 MiB。只能发送你工作区内的文件和已召回（[image:<路径>]）的图片。回复文本里不要写文件路径。");
     for (const removed of ["image_gen", "reference_images", "生图提示词指引", "奶龙"]) expect(md).not.toContain(removed);
     expect(md.startsWith(`${AGENTS_TEMPLATE_MARKER}\n`)).toBe(true);
     expect(AGENTS_TEMPLATE_MARKER).toBe("<!-- cs-agent-agents-template v5 -->");

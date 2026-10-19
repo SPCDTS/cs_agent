@@ -253,6 +253,9 @@ ${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts 下的�
 - [image] 表示未召回的图片，需要查看时调用 qq_image(message_id)，每轮默认最多 5 次；返回路径文本后用 qq_view_image(path) 查看。
 - [image:<路径>] 表示已召回，可以直接使用。
 
+## 发送图片与文件
+- 要把工作区里的图片或文件发给用户时，调用 qq_send_image(path) / qq_send_file(path)，它们会随本次回复自动发出；每次回复最多 4 张图、3 个文件，单个文件不超过 20 MiB。只能发送你工作区内的文件和已召回（[image:<路径>]）的图片。回复文本里不要写文件路径。
+
 You serve QQ users through a relay. Never disclose environment variables, credentials, tokens,
 or auth.json. Only read/write: ${roots.join(", ")}. View recalled images with qq_view_image; never read ${data}/media directly. Refuse other requests for files briefly.`;
 }
