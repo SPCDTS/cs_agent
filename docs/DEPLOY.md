@@ -126,6 +126,19 @@ Copy-Item .env.example .env
 
 Codex 收尾时先等待主进程退出，再给输出管道一个有限的刷新窗口；已取得退出码后，总超时不再把成功回合改判失败。正常 `close` 会立即返回，不额外等待 grace；强制收尾会保留本轮输出文件与附件，供正常结果提交或票据恢复使用。Linux 清理 runner 创建的进程组；Windows 使用 `taskkill /T /F`。若系统拒绝终止，runner 仍释放本端管道并结束等待，但进程是否实际清理需要在有权限的环境验证。
 
+### Codex trace 与内置生图输出清理
+
+| 环境变量 | 默认值 | 含义 |
+|---|---|---|
+| `CODEX_TRACE_RETENTION_DAYS` | 14 | 官方 trace 保留天数；0 禁用请求负载记录并关闭按天清理 |
+| `CODEX_TRACE_MAX_MB` | 512 | 官方 trace 普通文件总量上限，单位 MiB；0 不限 |
+| `CODEX_GENERATED_IMAGES_RETENTION_DAYS` | 7 | 内置生图输出保留天数；0 关闭按天清理 |
+| `CODEX_GENERATED_IMAGES_MAX_MB` | 1024 | 内置生图输出普通文件总量上限，单位 MiB（默认 1 GiB）；0 不限 |
+
+上述变量均接受非负整数；总量换算为字节后必须是安全整数。清理先删除 mtime 早于保留期截止时间的普通文件，再跨线程按 mtime 从旧到新删除，直到总量不超限；两个限制都为 0 时不清理。内置生图输出位于 `$CODEX_HOME/generated_images/<thread_id>/exec-*.png`（默认对应 `./data/codex/generated_images/`），清理不跟随链接，删除前以 realpath 核验根目录边界，最后仅移除空子目录并保留根目录。
+
+`qq_send_image` 登记时已把图片复制到票据图片目录，清理原图不影响已登记的副本；原图主要用于模型后续回看或再次发送。清理沿用观测库每日任务，在 trace 清理之后执行：启动不会立即执行，正常情况下首次在 `Metrics.start()` 后约 60 秒触发，此后间隔至少 24 小时；观测库降级时不执行。成功删除文件时记录 `codex generated images purged`（removed、bytes、dirs），失败只记录 `codex generated images purge failed` 告警。
+
 ## 3. 启动
 
 首次使用先完成上节配置播种与扫码；下列命令会同时管理 cs-agent 和 NapCat。

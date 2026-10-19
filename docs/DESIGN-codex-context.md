@@ -413,6 +413,16 @@ CODEX_BROWSER=playwright
 - 改动（7541963、47ac621）：`codexWorkspacePolicy` owner 的额外可写根只剩 `${DATA_DIR}/prompts`；`describeRoot` 删除 workflows 描述；`scripts/entrypoint.sh` 与 `src/config.ts` 的 `CODEX_WRITABLE_ROOTS` 默认值改为 `/workspace,/data/prompts`；workflows 目录播种与 `COMFY_WORKFLOW_FILE` 不变；`.env.example`、`docs/DEPLOY.md`、`docs/ARCHITECTURE.md` 同步。
 - 验收：沙箱外复跑 83 文件 / 1237 项通过；镜像 `2593b102…`（干净 worktree，main 47ac621）部署，容器 healthy、bridge 已连，受管 `config.toml` 不再出现 `/data/workflows`。owner 线程下一回合将收到更新后的 AGENTS.md 注入（可写目录列表只剩工作区与 prompts）。子代理提交署名被其运行时改为 Sonnet 5.5，落 main 时已改回项目规范的 Fable 5.1。
 
+### 8.14 内置生图输出清理
+
+Codex 内置 imagegen 将原图写入 `$CODEX_HOME/generated_images/<thread_id>/exec-*.png`。`qq_send_image` 登记时已把副本复制到票据图片目录，原图主要供模型后续回看或“把刚才那张再发一次”；清理原图不会删除已登记的票据副本，也不改变生图与发送逻辑。
+
+`purgeGeneratedImages` 沿用官方 trace 的清理口径：`CODEX_GENERATED_IMAGES_RETENTION_DAYS` 默认 7 天，`CODEX_GENERATED_IMAGES_MAX_MB` 默认 1024 MiB（1 GiB）。先删 mtime 早于保留期截止时间的普通文件，再将剩余普通文件跨线程按 mtime 从旧到新清理到总量不超限；mtime 相同时按路径排序。两个限制各以 0 禁用，都为 0 时连空目录也保留。
+
+根目录不存在、不是目录或本身为链接时返回零；遍历使用 lstat 跳过链接，并以 realpath 二次限定根内范围，容量阶段删除前再次核验。文件清理后由内向外以非递归 rmdir 移除空子目录，保留非空目录、链接与根目录；并发删除导致的 ENOENT 或目录变为非空不视为失败。返回 removed（文件数）、bytes（实际删除字节数）、dirs（空目录数）。参数校验与 trace 一致，非法值抛错。
+
+每日任务在 `purgeCodexTrace` 之后调用；removed > 0 时记录成功日志与三个计数，失败只告警。保持现有调度：启动不立即清理，正常情况下在 `Metrics.start()` 后约 60 秒首次执行，后续间隔至少 24 小时；观测库降级时不执行。
+
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
