@@ -109,6 +109,7 @@ Compose 将容器 HTTP 监听设为 0.0.0.0:8787，宿主机仅发布 127.0.0.1:
 | `./data/prompts/agent.md` | 启动时只播种缺失的模板，包含生图参数与提示词指引；pi 每次模型请求热加载，保留不跨会话转述私人内容的规则 |
 | `./data/prompts/codex.md` | codex 自定义系统提示（`${DATA_DIR}/prompts/codex.md`）：首次启动创建默认回复规则、聊天记录工具纪律、联网与浏览器；已有文件不覆盖。已部署文件中的旧“生图提示词指引”需由运维手工删除。面板保存校验 revision、拒绝空白与超过 64 KB 的内容；当前文件或提交内容命中已注册秘密／凭据样式时拒绝保存。保存后立即原子重写全局 AGENTS.md，下一次 codex 调用生效，无需重启容器 |
 | `./data/images/<ticket>/` | 生成的图片。pi / image_gen 每次生图写独立 `call-<n>/`；pending-jobs.json 在提交前记录意图、提交后记录 prompt_id，image-files.json 逐张记录下载状态。重启只收取/对账，不重提；坏 marker 隔离为 .bad-<时间戳>，回复保留正文并提示附件失败。未确认远端完成时保留参考图清理清单 |
+| `./data/files/<ticket>/` | 文件附件副本与 `manifest.json`（原路径、名字、大小、sha256、来源）；QQ 上传使用 base64，无需与 NapCat 共享卷。票据清理时删除，命令沙箱禁读、不可写 |
 | `./data/tickets/<ticket>/` | 票据工作目录：codex 回合的最后一条消息 `codex-last.txt`（崩溃恢复时据此不重复询问 codex）。reply 与派发终态对账均幂等清理；发送后、清理前崩溃会在恢复时补删，图片目录不动。入口脚本启动时创建。对 codex 命令沙箱禁读、不可设为可写目录 |
 | `./data/*`（QQBridge） | 票据与去重 SQLite |
 | `./data/codex/AGENTS.md` | codex 的全局规则，**受管生成文件**：安全规则、实际生效的可写目录、参考图范围、图片自动附带与异步返回纪律组成受管段，再以两个换行拼接 `prompts/codex.md`。保留版本标记 `<!-- cs-agent-agents-template v5 -->`；main 启动和 store 保存时生成，日志 `wrote codex global AGENTS.md`。codex 执行的命令改不了它；编辑行为指引请通过面板修改 `codex.md`，不要手改生成文件 |
@@ -161,6 +162,12 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 - **`/data/prompts` 可写**（用户接受的风险）：codex 命令可以改写 `/data/prompts` 下的文件。v3 中 `system.md` 已不再被读取；pi 后端从这里热加载 `agent.md`，修改会在下一次模型请求生效。全局 AGENTS.md 规定只在 owner 私聊明确要求时才修改、群聊请求一律拒绝，但这**只靠模型遵守**。想彻底禁止，把 `/data/prompts` 从 `CODEX_WRITABLE_ROOTS` 去掉。
 - **显式开启 image_gen 后可被群成员触发**：任何能让 codex 处理消息的发送者都可以间接让它生图（每回合最多 4 次，图片只写到本票据目录、只随本条回复发出）。
 - **聊天记录**：群成员可以让 codex 检索本群 30 天内的原始消息和 180 天内的摘要（与能翻群记录一致）；owner 私聊可以检索全部会话。`./data/qq-messages.sqlite` 按聊天记录保管。
+
+### 附件工具（qq_context）
+
+`qq_send_image(path)` 登记图片；`qq_send_file(path, name?)` 登记文件，name 缺省取原文件名。来源只能是本轮工作区普通文件或当前 QQ_ACCESS 范围已召回媒体，拒绝软链接；文件名取 basename、去控制字符、最多 120 字符。图片魔数、单张 10 MiB、合计 20 MiB、每轮 4 张限制沿用回复通道。
+
+每轮注入 `QQ_ATTACH_DIR=${DATA_DIR}/images/<ticket>`、`QQ_FILE_DIR=${DATA_DIR}/files/<ticket>`、`QQ_WORKDIR=${WORKSPACE_DIR}/<会话键>`。注入值必须是安全字符组成、不含 `..` 的绝对路径；MCP 再校验前两者分别是 images/files 的直接子目录且票据相同，工作区是 WORKSPACE_DIR 的直接子目录，拒绝软链接与 realpath 越界。`WORKSPACE_DIR` 与 `ATTACH_*` 配置由入口脚本透传。
 
 ### 生图 MCP（image_gen）
 

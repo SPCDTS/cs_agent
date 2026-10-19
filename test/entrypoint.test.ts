@@ -225,7 +225,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const dir = tmp("cs-entry-");
     const data = shPath(path.join(dir, "data"));
     const roots = ["/workspace", " /srv/prompts/ ", "relative", "/", data, `${data}/`, `${data}/codex`, `${data}/codex/sessions`,
-      `${data}/images`, `${data}/incoming`, `${data}/incoming/x`, `${data}/tickets`, `${data}/tickets/x`, `${data}/qq-messages.sqlite`, "/x/../etc", '/w"x', "/opt/ok"];
+      `${data}/files`, `${data}/files/x`, `${data}/images`, `${data}/incoming`, `${data}/incoming/x`, `${data}/tickets`, `${data}/tickets/x`, `${data}/qq-messages.sqlite`, "/x/../etc", '/w"x', "/opt/ok"];
     const r = runEntrypointIn(dir, { CODEX_SANDBOX_NETWORK: "false", CODEX_WRITABLE_ROOTS: roots.join(",") });
     const t = parse(r.toml);
     expect(t["sandbox_workspace_write.network_access"]).toBe("false");
@@ -264,7 +264,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const list = JSON.parse(/deny_read = (\[[\s\S]*?\])/.exec(r.requirements)![1]!.replace(/,\s*\]/, "]")) as string[];
     expect(list).toEqual(expect.arrayContaining([
       `${d}/codex/auth.json`, `${d}/codex/sessions`, `${d}/codex/*.sqlite*`, `${d}/codex/history.jsonl`, `${d}/codex/trace`,
-      `${d}/*.sqlite*`, `${d}/images`, `${d}/media`, `${d}/incoming`, `${d}/tickets`, `${d}/codex-session.json*`, `${d}/codex-threads.json`,
+      `${d}/*.sqlite*`, `${d}/files`, `${d}/images`, `${d}/media`, `${d}/incoming`, `${d}/tickets`, `${d}/codex-session.json*`, `${d}/codex-threads.json`,
     ]));
     // 不能整个禁读 CODEX_HOME（codex 的 arg0 辅助程序在 $CODEX_HOME/tmp）；config.toml / AGENTS.md 可读
     expect(list).not.toContain(`${d}/codex`);
@@ -338,6 +338,12 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(r.status).toBe(0);
     expect(parse(r.toml)["[mcp_servers.image_gen]"]).toBeUndefined();
     expect(parse(r.toml)["[mcp_servers.image_gen.env]"]).toBeUndefined();
+  });
+
+  it("透传附件限制与工作区根到 qq_context", () => {
+    const r = runEntrypoint({ ATTACH_FILE_MAX_MB: "5", ATTACH_FILES_MAX: "2", ATTACH_FILE_DENY_EXT: ".zip,.exe" });
+    expect(r.status).toBe(0);
+    expect(parse(r.toml)).toMatchObject({ "mcp_servers.qq_context.env.ATTACH_FILE_MAX_MB": '"5"', "mcp_servers.qq_context.env.ATTACH_FILES_MAX": '"2"', "mcp_servers.qq_context.env.ATTACH_FILE_DENY_EXT": '".zip,.exe"', "mcp_servers.qq_context.env.WORKSPACE_DIR": `"${r.dataDir.replace(/data$/, "ws")}"` });
   });
 
   it("writes the image_gen MCP section with COMFY_* passthrough, timeout and approval mode", () => {

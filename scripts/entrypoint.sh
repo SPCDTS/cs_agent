@@ -16,7 +16,7 @@ for dir in "$DATA_DIR" "$WORKSPACE_DIR"; do
     exit 1
   fi
 done
-mkdir -p "$CODEX_HOME_DIR" "$DATA_DIR/images" "$DATA_DIR/tickets" "$DATA_DIR/prompts" "$DATA_DIR/incoming"
+mkdir -p "$CODEX_HOME_DIR" "$DATA_DIR/images" "$DATA_DIR/files" "$DATA_DIR/tickets" "$DATA_DIR/prompts" "$DATA_DIR/incoming"
 
 # 项目自有、codex 可改的工作流目录：缺失时从镜像内 /app/workflows 复制一份（已存在则绝不覆盖）
 WORKFLOWS_SRC="${WORKFLOWS_SRC:-/app/workflows}"
@@ -61,6 +61,7 @@ REMOTE_PLUGINS="$(toml_enum "${CODEX_REMOTE_PLUGINS:-off}" off CODEX_REMOTE_PLUG
 # 所以默认 approve（一律自动批准）。浏览器能调用哪些工具仍由 enabled_tools 白名单限定。
 MCP_APPROVAL_MODE="$(toml_enum "${CODEX_MCP_APPROVAL_MODE:-approve}" approve CODEX_MCP_APPROVAL_MODE auto prompt writes approve)"
 MCP_DATA_DIR="$(toml_path "$DATA_DIR" /data DATA_DIR)"
+MCP_WORKSPACE_DIR="$(toml_path "$WORKSPACE_DIR" /workspace WORKSPACE_DIR)"
 case "${QQ_CONTEXT_MAX_CHARS:-}" in
   ""|*[!0-9]*) CONTEXT_MAX_CHARS=2500 ;;
   *) CONTEXT_MAX_CHARS="$QQ_CONTEXT_MAX_CHARS" ;;
@@ -91,6 +92,12 @@ for _n in COMFY_MODE COMFYUI_URL COMFY_MCP_BIN COMFY_BIN COMFY_CHECKPOINT COMFY_
   [ -n "$_line" ] && IMAGE_GEN_ENV="$IMAGE_GEN_ENV
 $_line"
 done
+ATTACH_ENV=""
+for _n in ATTACH_FILE_MAX_MB ATTACH_FILES_MAX ATTACH_FILE_DENY_EXT; do
+  _line="$(toml_env_line "$_n")"
+  [ -n "$_line" ] && ATTACH_ENV="$ATTACH_ENV
+$_line"
+done
 SANDBOX_NETWORK="$(toml_enum "${CODEX_SANDBOX_NETWORK:-true}" true CODEX_SANDBOX_NETWORK true false)"
 # 路径规范化：合并重复的 /，去掉 "/./" 段、末尾的 "/." 与 "/"（根目录保持 "/"）。".." 不在这里处理（调用方直接拒绝）。
 norm_path() {
@@ -114,7 +121,7 @@ for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts,$DATA_DIR/wor
   esac
   _r="$(norm_path "$_raw")"
   case "$_r" in
-    /|"$DATA_N"|"$CODEX_HOME_N"|"$CODEX_HOME_N"/*|"$DATA_N/images"|"$DATA_N/images"/*|"$DATA_N/incoming"|"$DATA_N/incoming"/*|"$DATA_N/tickets"|"$DATA_N/tickets"/*|*.sqlite|*.sqlite-*) _bad=1 ;;
+    /|"$DATA_N"|"$CODEX_HOME_N"|"$CODEX_HOME_N"/*|"$DATA_N/images"|"$DATA_N/images"/*|"$DATA_N/files"|"$DATA_N/files"/*|"$DATA_N/incoming"|"$DATA_N/incoming"/*|"$DATA_N/tickets"|"$DATA_N/tickets"/*|*.sqlite|*.sqlite-*) _bad=1 ;;
   esac
   case "$DATA_N/" in "$_r"/*) _bad=1 ;; esac # DATA_DIR 的上级目录
   if [ "$_bad" = 1 ]; then
@@ -184,6 +191,7 @@ default_tools_approval_mode = "$MCP_APPROVAL_MODE"
 [mcp_servers.qq_context.env]
 DATA_DIR = "$MCP_DATA_DIR"
 QQ_CONTEXT_MAX_CHARS = "$CONTEXT_MAX_CHARS"
+WORKSPACE_DIR = "$MCP_WORKSPACE_DIR"$ATTACH_ENV
 
 TOML
 if [ "$IMAGE_GEN" = "on" ]; then
@@ -277,6 +285,7 @@ deny_read = [
   "$D/obs-token",
   "$D/obs-token.*.tmp",
   "$D/images",
+  "$D/files",
   "$D/media",
   "$D/incoming",
   "$D/tickets",

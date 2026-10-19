@@ -17,6 +17,7 @@ import {
   isMissingSessionError,
   isReplaceableAgentsMd,
   qqAccessArgs,
+  qqAttachmentArgs,
   imageTicketDirArgs,
   AGENTS_TEMPLATE_MARKER,
   effectiveWritableRoots,
@@ -478,6 +479,14 @@ describe("qq_context access override and §3.2 header", () => {
     const { runner, calls } = setup();
     for (const ticket of ["t1", "t2"]) await runner.ask("hi", { threadKey: "group:1", qqAccess: "all", imageTicketDir: `/data/images/${ticket}`, imageRefs: ["/data/incoming/a.png"] });
     for (const call of calls().filter(c => c.phase === "start")) expect(call.argv.some((arg: string) => arg.includes("mcp_servers.image_gen"))).toBe(false);
+  });
+
+  it("附件目录每轮注入当前票据和本会话工作区，并安全转义 Windows 路径", async () => {
+    const { runner, calls, dir } = setup();
+    for (const ticket of ["t1", "t2"]) await runner.ask("hi", { threadKey: "group:1", ticket });
+    const starts = calls().filter(c => c.phase === "start");
+    for (let i = 0; i < 2; i++) expect(starts[i].argv).toEqual(expect.arrayContaining(qqAttachmentArgs(path.join(dir, "images", `t${i + 1}`), path.join(dir, "files", `t${i + 1}`), path.join(dir, "ws", "group_1"))));
+    for (const bad of ["relative", "/data/images/../codex", '/data/images/a"b', "/data/images/a b"]) expect(() => qqAttachmentArgs(bad, "/data/files/t1", "/workspace/owner")).toThrow();
   });
 
   it("passes the QQ_ACCESS override on first turn and on resume", async () => {

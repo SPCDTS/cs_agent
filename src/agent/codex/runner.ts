@@ -1,3 +1,4 @@
+import { attachmentDirs, validateAttachmentPath } from "../../media/attach-paths.js";
 import { codexWorkspacePolicy, prepareCodexWorkspace } from "./workspace.js";
 import type { RecallTokens } from "../../context/media-recall-server.js";
 import type { ContextUsageStore } from "../context-usage.js";
@@ -678,7 +679,8 @@ export class CodexRunner {
     const managed = renderManagedAgentsMd({ dataDir: path.dirname(this.opts.threadsFile), workspaceDir: policy.workspaceDir,
       writableRoots: policy.writableRoots, readOnly: this.opts.sandbox === "read-only" });
     const instructions = managed + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
-    const effort = [...policy.args, "-c", `developer_instructions=${JSON.stringify(instructions)}`,
+    const attachment = ticket ? attachmentDirs(path.dirname(this.opts.threadsFile), ticket) : undefined;
+    const effort = [...policy.args, ...qqAttachmentArgs(attachment?.attachDir, attachment?.fileDir, policy.workspaceDir), "-c", `developer_instructions=${JSON.stringify(instructions)}`,
       "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess, this.opts.imageGen),
       ...(this.opts.imageGen === "on" ? [...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)] : [])];
     const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
@@ -957,6 +959,15 @@ export function recallArgs(token: string, port: number): string[] {
   return ["-c", 'mcp_servers.qq_context.env.QQ_RECALL_TOKEN="' + token + '"',
     "-c", 'mcp_servers.qq_context.env.MEDIA_RECALL_PORT="' + port + '"',
     "-c", "mcp_servers.qq_context.tool_timeout_sec=70"];
+}
+
+/** 每轮显式覆盖附件目录；缺少票据时清空，避免续轮继承旧票据。 */
+export function qqAttachmentArgs(attachDir: string | undefined, fileDir: string | undefined, workdir: string): string[] {
+  return Object.entries({ QQ_ATTACH_DIR: attachDir ?? "", QQ_FILE_DIR: fileDir ?? "", QQ_WORKDIR: workdir })
+    .flatMap(([key, value]) => {
+      if (value) validateAttachmentPath(value, key);
+      return ["-c", `mcp_servers.qq_context.env.${key}=${JSON.stringify(value)}`];
+    });
 }
 
 /** 每次启动覆盖归属；新线程显式清空 session，避免继承旧环境。值按 TOML 基本字符串转义。 */

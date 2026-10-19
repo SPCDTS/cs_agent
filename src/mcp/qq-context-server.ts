@@ -6,7 +6,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { accessToString } from "../context/access.js";
-import { callQQContextTool, qqContextText as text, RECENT_MAX, SEARCH_LIMIT_MAX, SEARCH_DAYS_MAX, type QQContextToolDeps } from "../context/qq-context-tool.js";
+import { callQQAttachmentTool, callQQContextTool, qqContextText as text, RECENT_MAX, SEARCH_LIMIT_MAX, SEARCH_DAYS_MAX, type QQContextToolDeps } from "../context/qq-context-tool.js";
 
 export interface QQContextDeps extends QQContextToolDeps {
   view?: (file: string) => Promise<{ type: "image"; data: string; mimeType: string }>;
@@ -17,6 +17,18 @@ export interface QQContextDeps extends QQContextToolDeps {
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 
 const TOOLS = [
+  {
+    name: "qq_send_image",
+    description: "登记工作区内或当前范围已召回的图片，随本次回复发送，最多 4 张。",
+    inputSchema: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["path"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "qq_send_file",
+    description: "登记工作区内或当前范围已召回的文件，在本次文字回复之后发送。",
+    inputSchema: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 1024 }, name: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["path"], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  },
   {
     name: "qq_view_image",
     description: "查看当前访问范围内已召回的图片，一次一张，不占召回次数。",
@@ -84,6 +96,7 @@ export function createQQContextServer(deps: QQContextDeps): Server {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS.map((t) => ({ ...t })) as never }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const args = req.params.arguments ?? {};
+    if (["qq_send_image", "qq_send_file"].includes(req.params.name)) return callQQAttachmentTool(deps, req.params.name, args);
     if (req.params.name === "qq_view_image") {
       if (!deps.access) return text("qq_context 不可用：未配置有效的访问范围（QQ_ACCESS）。", true);
       if (Object.keys(args).length !== 1 || typeof args.path !== "string" || !args.path || args.path.length > 1024) return text("仅接受 path", true);
