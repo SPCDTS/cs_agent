@@ -152,7 +152,9 @@ async function main(): Promise<void> {
 
   // 存储加载后先恢复历史占用；codex 初始化与 PiBackend.open 均完成后才开放面板。
   await codex.initializeContextUsage();
-  const models = createAgentModels(cfg.codexHome);
+  const magpie = cfg.AGENT_MODEL_PROVIDER === "magpie" ? { baseUrl: cfg.CODEX_MAGPIE_URL, apiKey: cfg.CODEX_MAGPIE_KEY } : undefined;
+  const models = await createAgentModels(cfg.codexHome, magpie);
+  if (magpie) log.info("pi models via magpie", { base_url: magpie.baseUrl, models: models.getModels("magpie").length });
   const agentModel = models.getModel(cfg.AGENT_MODEL_PROVIDER, cfg.AGENT_MODEL_ID);
   if (!agentModel) {
     throw new Error(`未知模型 ${cfg.AGENT_MODEL_PROVIDER}/${cfg.AGENT_MODEL_ID}`);

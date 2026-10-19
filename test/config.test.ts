@@ -156,6 +156,15 @@ describe("DEEPSEEK_APIKEY alias", () => {
   });
 });
 
+describe("magpie 网关密钥", () => {
+  it("requireProviderApiKey 缺少或空 CODEX_MAGPIE_KEY 时失败，有值时通过", () => {
+    for (const env of [{}, { CODEX_MAGPIE_KEY: "" }, { DEEPSEEK_API_KEY: "deepseek-only" }]) {
+      expect(() => requireProviderApiKey("magpie", env)).toThrow(/CODEX_MAGPIE_KEY/);
+    }
+    expect(() => requireProviderApiKey("magpie", { CODEX_MAGPIE_KEY: "gateway-key" })).not.toThrow();
+  });
+});
+
 describe("deepseek-flash model (no network)", () => {
   const saved = { a: process.env.DEEPSEEK_API_KEY, b: process.env.DEEPSEEK_APIKEY };
   afterEach(() => {
@@ -165,8 +174,8 @@ describe("deepseek-flash model (no network)", () => {
     else process.env.DEEPSEEK_APIKEY = saved.b;
   });
 
-  it("resolves as an OpenAI-completions model on api.deepseek.com", () => {
-    const models = createAgentModels(tmp());
+  it("resolves as an OpenAI-completions model on api.deepseek.com", async () => {
+    const models = await createAgentModels(tmp());
     const m = models.getModel("deepseek", "deepseek-flash");
     expect(m).toBeDefined();
     expect(m).toMatchObject({ provider: "deepseek", api: "openai-completions", baseUrl: "https://api.deepseek.com" });
@@ -178,13 +187,13 @@ describe("deepseek-flash model (no network)", () => {
     delete process.env.DEEPSEEK_API_KEY;
     process.env.DEEPSEEK_APIKEY = "test-alias-key";
     applyEnvAliases(process.env);
-    const models = createAgentModels(tmp());
+    const models = await createAgentModels(tmp());
     const auth = await models.getAuth("deepseek");
     expect(auth?.auth).toMatchObject({ apiKey: "test-alias-key" });
   });
 
-  it("unsupported thinking levels are adjusted instead of failing", () => {
-    const m = createAgentModels(tmp()).getModel("deepseek", "deepseek-flash")!;
+  it("unsupported thinking levels are adjusted instead of failing", async () => {
+    const m = (await createAgentModels(tmp())).getModel("deepseek", "deepseek-flash")!;
     expect(resolveThinkingLevel(m, "low")).toBe("low");
     expect(resolveThinkingLevel(m, "medium")).toBe("high");
     expect(resolveThinkingLevel(m, "off")).toBe("off");

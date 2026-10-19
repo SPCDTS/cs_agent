@@ -60,6 +60,26 @@ describe('观测存储',()=>{
     const reopened=new Metrics(store,{retentionDays:30});await reopened.flush();
     expect(store.db.prepare("SELECT COUNT(*) n FROM metrics WHERE name='calls'").get()).toMatchObject({n:2});
   });
+  it('magpie 的 deepseek/ 模型沿用 DeepSeek 计价，其他模型不计入且不重复', async () => {
+    const {store,trace}=rig();
+    const metrics=new Metrics(store,{retentionDays:30,inputPrice:2,outputPrice:4});
+    const usage={input_tokens:100,output_tokens:20,cache_read_tokens:10,cache_write_tokens:5};
+    for (const [provider,model] of [
+      ['deepseek','deepseek-flash'], ['magpie','deepseek/deepseek-flash'],
+      ['magpie','codex/gpt-6.1-sol'], ['magpie','deepseek-flash'], ['magpie','deepseekish/model'],
+      ['other','deepseek/deepseek-flash'], ['magpie',undefined],
+    ]) trace.event('billing','model_turn',{status:'ok',detail:{provider,model,...usage}});
+    trace.event('billing','model_turn',{status:'started',detail:{provider:'magpie',model:'deepseek/deepseek-flash',...usage}});
+    trace.event('billing','tool:web',{status:'ok',detail:{provider:'magpie',model:'deepseek/deepseek-flash',...usage}});
+    await metrics.flush();
+    const total=(name:string)=>Number(store.db.prepare('SELECT SUM(value) value FROM metrics WHERE name=?').get(name)?.value);
+    expect(total('deepseek_input_tokens')).toBe(230);
+    expect(total('deepseek_output_tokens')).toBe(40);
+    expect(total('deepseek_estimated_cost')).toBeCloseTo(.00062);
+    await metrics.flush();
+    expect(total('deepseek_input_tokens')).toBe(230);
+    expect(total('deepseek_estimated_cost')).toBeCloseTo(.00062);
+  });
   it('告警默认关闭；连续失败、鉴权失败与 WS 离线共用限频',async()=>{
     vi.useFakeTimers();const {trace}=rig();let online=false;const send=vi.fn(async()=>({message_id:'fake'}));
     const bridge={status:()=>({ws_connected:online,disconnect_count:1,self_id:null,last_event_at:null}),send};

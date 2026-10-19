@@ -80,6 +80,18 @@ describe('面板二期页面', () => {
     expect(html).not.toContain('test-dashboard-magpie-key');
     expect(html).not.toMatch(/name="CODEX_(PROVIDER|MAGPIE_URL|MAGPIE_KEY)"/);
   });
+  it.each(['magpie', 'deepseek', 'openai'])('设置页只读显示 pi 出站 %s，保留 DeepSeek 密钥灯', async provider => {
+    const r = await rig({ env: { AGENT_MODEL_PROVIDER: provider, CODEX_PROVIDER: 'openai',
+      CODEX_MAGPIE_URL: 'http://pi-gateway.example:3425/v1', CODEX_MAGPIE_KEY: 'test-pi-dashboard-key' } });
+    const response = await r.get('/settings');
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain(provider === 'magpie' ? 'pi：magpie（http://pi-gateway.example:3425/v1）' : 'pi：直连 ' + provider);
+    expect(html).toContain('codex：直连');
+    expect(html).not.toContain('test-pi-dashboard-key');
+    expect(html).not.toMatch(/name="(AGENT_MODEL_PROVIDER|CODEX_MAGPIE_URL|CODEX_MAGPIE_KEY)"/);
+    expect(await (await r.get('/')).text()).toContain('DeepSeek 密钥');
+  });
   it('所有页面 200，含设计令牌（深浅色）、导航高亮和关键元素；无内联 style 属性与外部资源', async () => {
     const r = await rig();
     trace.event('t-live', 'received', { scope: 'group:7', detail: { text: '在途消息', sender: '小明' } });

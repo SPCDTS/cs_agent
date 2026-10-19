@@ -1,19 +1,39 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Context } from "@earendil-works/chord";
-import { clampThinkingLevel, type Api, type Model, type Models, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, type Api, type Model, type Models, type MutableModels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { createRegistry, Harness, type Extension, type Storage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodexAuthFileStore } from "./codex/oauth.js";
 import { log } from "../shared/log.js";
+import { createMagpieProvider, fetchMagpieCatalog, magpieProviderModels, type MagpieCatalogEntry } from "./magpie-models.js";
 
 /**
  * 内置 provider 全部注册（deepseek / openai-codex / openai / anthropic …，由 AGENT_MODEL_PROVIDER 选择）。
  * openai-codex 的凭据来自 ${codexHome}/auth.json；API key provider（deepseek 读 DEEPSEEK_API_KEY 等）读环境变量。
  */
-export function createAgentModels(codexHome: string): Models {
-  return builtinModels({ credentials: new CodexAuthFileStore(path.join(codexHome, "auth.json")) });
+export async function createAgentModels(
+  codexHome: string,
+  magpie?: { baseUrl: string; apiKey: string },
+  deps: { fetch?: typeof fetch; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<MutableModels> {
+  const models = builtinModels({ credentials: new CodexAuthFileStore(path.join(codexHome, "auth.json")) });
+  if (!magpie) return models;
+  let entries: MagpieCatalogEntry[];
+  for (let retries = 0; ; retries++) {
+    try {
+      entries = await fetchMagpieCatalog(magpie.baseUrl, magpie.apiKey, deps.fetch);
+      break;
+    } catch (error) {
+      // 首次失败后最多重试 5 次，避免网关启动稍晚导致立即退出。
+      if (retries === 5) throw new Error(`magpie 模型目录不可达: ${error instanceof Error ? error.message : String(error)}`);
+      await (deps.sleep ?? sleep)(3000);
+    }
+  }
+  models.setProvider(createMagpieProvider({ baseUrl: magpie.baseUrl, models: magpieProviderModels(entries, models) }));
+  return models;
 }
 
 /** 把配置的思考档位收敛到模型支持的档位（不支持时就近取值；无推理能力的模型为 off）。 */

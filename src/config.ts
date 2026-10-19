@@ -60,8 +60,9 @@ const EnvSchema = z.object({
   CODEX_IMAGE_GEN: z.enum(["off", "on"]).default("off"),
   CODEX_BIN: z.string().default("codex"),
   CODEX_PROVIDER: z.enum(["magpie", "openai"]).default("magpie"),
+  /** codex 与 pi 共用的 magpie 网关地址。 */
   CODEX_MAGPIE_URL: serviceUrl.default("http://host.docker.internal:3425/v1"),
-  /** 仅 CodexRunner 启动时校验；MCP 也读取基础配置，但不需要模型凭据。 */
+  /** codex 与 pi 共用的网关密钥，各自在启用 magpie 时校验；MCP 读取基础配置不要求凭据。 */
   CODEX_MAGPIE_KEY: z.string().default(""),
   CODEX_MODEL: z.string().default("gpt-6.1-sol"),
   CODEX_CONTEXT_WINDOW: int(400000),
@@ -153,6 +154,7 @@ const ENV_ALIASES: Readonly<Record<string, string>> = {
 /** API key provider 需要的环境变量（pi-ai 按标准名读取）。 */
 const PROVIDER_API_KEY_ENV: Readonly<Record<string, string>> = {
   deepseek: "DEEPSEEK_API_KEY",
+  magpie: "CODEX_MAGPIE_KEY",
   openai: "OPENAI_API_KEY",
   anthropic: "ANTHROPIC_API_KEY",
 };

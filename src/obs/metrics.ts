@@ -32,7 +32,7 @@ export class Metrics {
         cursor = e.id;
         if (e.status === 'started') continue;
         const d = JSON.parse(e.detail_json);
-        if (e.stage === 'model_turn' && d.provider === 'deepseek') {
+        if (e.stage === 'model_turn' && (d.provider === 'deepseek' || (d.provider === 'magpie' && String(d.model).startsWith('deepseek/')))) {
           const converted = usageCost({input:d.input_tokens,output:d.output_tokens,cacheRead:d.cache_read_tokens,cacheWrite:d.cache_write_tokens},this.options.inputPrice,this.options.outputPrice);
           usage.input += converted.input; usage.output += converted.output; usage.cost += converted.cost;
         }
