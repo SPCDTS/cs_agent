@@ -12,7 +12,7 @@ import { LiveBus, type LiveCard } from '../../src/obs/live.js';
 import { registerSecrets } from '../../src/shared/redact.js';
 import { ContextStore } from '../../src/context/store.js';
 import { loadConfig } from '../../src/config.js';
-import { SettingsStore, SETTINGS_TICKET, type RuntimeSettings } from '../../src/agent/settings.js';
+import { SettingsStore, SETTINGS_TICKET, type RuntimeSettings, type SettingsValidators } from '../../src/agent/settings.js';
 import { CodexRunner } from '../../src/agent/codex/runner.js';
 import { CodexBackend } from '../../src/agent/backends/codex.js';
 import { FIXTURES } from '../agent/helpers.js';
@@ -22,16 +22,16 @@ import { CodexPromptStub } from './fixtures/codex-prompt-stub.js';
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
-const defaults: RuntimeSettings = { agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false };
+const defaults: RuntimeSettings = { codexModel: 'gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false };
 
-async function rig(extra: { contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv } = {}) {
+async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
   const store = new ObsStore(dir), context = new ContextStore(dir);
   trace.attach(store);
   const live = new LiveBus(trace);
   const config = loadConfig({ DATA_DIR: dir, OBS_TOKEN: TOKEN, QQ_ALLOW_USERS: '1', ...extra.env });
   registerSecrets([TOKEN]);
-  const settings = await SettingsStore.open(dir, defaults, trace);
+  const settings = await SettingsStore.open(dir, defaults, trace, extra.validators);
   const resetCodex = vi.fn(async (key: string): Promise<string | null> => key === 'group:7' ? 'thread-old' : null);
   const resetPi = vi.fn(async () => 42);
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
@@ -201,7 +201,7 @@ describe('面板二期页面', () => {
     const res = await r.post('/settings', { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: 'group:7=codex\nprivate:5=pi', codexReasoningEffort: 'low', alertOwner: 'on' },
       { Origin: r.base, 'Sec-Fetch-Site': 'same-origin' });
     expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/settings?ok=saved');
-    expect(r.settings.current()).toEqual({ agentBackend: 'pi', backendOverrides: { 'group:7': 'codex', 'private:5': 'pi' }, codexReasoningEffort: 'low', alertOwner: true });
+    expect(r.settings.current()).toEqual({ ...defaults, agentBackend: 'pi', backendOverrides: { 'group:7': 'codex', 'private:5': 'pi' }, codexReasoningEffort: 'low', alertOwner: true });
     expect(JSON.parse(readFileSync(path.join(r.dir, 'settings.json'), 'utf8')).settings.agentBackend).toBe('pi');
     const ev = r.store.events(SETTINGS_TICKET).find(e => e.stage === 'settings_changed')!;
     expect(JSON.parse(ev.detail_json)).toMatchObject({ source: 'dashboard', before: { agentBackend: 'codex' }, after: { agentBackend: 'pi' } });
@@ -554,5 +554,22 @@ describe('codex 系统提示 codex.md', () => {
     expect(html).not.toContain(secret); expect(html).not.toContain(TOKEN);
     expect(html).not.toMatch(/\sstyle="/);
     expect(html).toContain('href="/settings#codex-prompt"');
+  });
+});
+
+describe('运行时模型设置 POST', () => {
+  it('接入四个模型字段与 auto；非法值走 flash 且不落盘', async () => {
+    const r = await rig({ validators: { codexModel: id => [defaults.codexModel, 'codex/gpt-6-astra'].includes(id),
+      piModel: id => [defaults.piModel, 'codex/gpt-6.1-sol'].includes(id) } });
+    const form = { _csrf: r.csrf, agentBackend: 'pi', backendOverrides: '', codexModel: 'codex/gpt-6-astra',
+      codexReasoningEffort: 'auto', piModel: 'codex/gpt-6.1-sol', piThinkingLevel: 'auto' };
+    expect((await r.post('/settings', form)).status).toBe(303);
+    expect(r.settings.current()).toMatchObject({ codexModel: form.codexModel, codexReasoningEffort: 'auto', piModel: form.piModel, piThinkingLevel: 'auto' });
+    const before = readFileSync(r.settings.file, 'utf8');
+    for (const patch of [{ codexModel: 'unknown' }, { piModel: 'unknown' }, { codexModel: 'bad"slug' }, { piModel: '' }, { piThinkingLevel: 'ultra' }, { codexReasoningEffort: 'nonsense' }]) {
+      const response = await r.post('/settings', { ...form, ...patch });
+      expect(response.status).toBe(400); expect(await response.text()).toContain('设置未保存');
+      expect(readFileSync(r.settings.file, 'utf8')).toBe(before);
+    }
   });
 });

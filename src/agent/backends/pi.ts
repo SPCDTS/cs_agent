@@ -7,7 +7,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT, withAbortSignal, awaitWithContext } from "@earendil-works/chord/context";
-import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, type Models, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { AssistantEntry, createRegistry, defineDoc, Harness, ROOT_CONVERSATION_ID, watchEvents, type Conversation, type ConversationId, type Cursor, type EntryId, type ModelRef, type Storage, type Submission } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { buildCodexPrompt } from "../codex/runner.js";
@@ -45,6 +45,7 @@ export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "w
   workspaceDir?: string;
   contextUsage?: ContextUsageStore;
   model: ModelRef;
+  currentModel?: () => ModelRef;
   thinkingLevel: ModelThinkingLevel;
   timeoutMs?: number;
   reserveTokens?: number;
@@ -229,12 +230,19 @@ export class PiBackend implements AgentBackend {
     }
   }
 
-  private async observeContext(key: string, conv: Conversation, ticket?: string): Promise<boolean> {
-    if (!this.opts.contextUsage || this.contextObservers.has(key)) return false;
-    const model = this.opts.models.getModel(this.opts.model.provider, this.opts.model.modelId);
+  private async observeContext(key: string, conv: Conversation, ticket?: string, ref = this.opts.model): Promise<boolean> {
+    if (!this.opts.contextUsage) return false;
+    const model = this.opts.models.getModel(ref.provider, ref.modelId);
     if (!model) throw new Error("pi 上下文窗口缺少模型定义");
+    const capacity = piContextCapacity(model.contextWindow, this.opts.reserveTokens, this.opts.backgroundTokens);
+    const existing = this.contextObservers.get(key);
+    if (existing) {
+      existing.updateCapacity(capacity);
+      this.opts.contextUsage.ensure("pi", key, capacity, ticket);
+      return false;
+    }
     const observer = await PiContextObserver.open(this.harness, conv, key, this.opts.contextUsage,
-      piContextCapacity(model.contextWindow, this.opts.reserveTokens, this.opts.backgroundTokens), ticket);
+      capacity, ticket);
     this.contextObservers.set(key, observer);
     return observer.backfilled;
   }
@@ -251,16 +259,25 @@ export class PiBackend implements AgentBackend {
     log.info("context usage backfilled", { backend: "pi", checked: id === undefined ? 0 : 1, backfilled: Number(backfilled) });
   }
 
-  private async conversation(key: string, ticket: string): Promise<Conversation> {
+  private async conversation(key: string, ticket: string, settings?: AgentRequest["settings"]): Promise<Conversation> {
     // 仅创建和 JSON 写回用短全局锁，模型回合按 owner 或 scope 分别串行。
     return this.lock("mapping", async () => {
       const id = (await this.readThreadIds())[key];
-      const agent = { model: this.opts.model, thinkingLevel: this.opts.thinkingLevel };
+      // 旧票据缺少 piModel 时保留启动模型；新票据按设计每次提交读取当前模型。
+      let ref = settings?.piModel !== undefined ? this.opts.currentModel?.() ?? { ...this.opts.model, modelId: settings.piModel } : this.opts.model;
+      let model = this.opts.models.getModel(ref.provider, ref.modelId);
+      if (!model) {
+        log.warn("pi runtime model unavailable; using startup model", { provider: ref.provider, model: ref.modelId });
+        ref = this.opts.model;
+        model = this.opts.models.getModel(ref.provider, ref.modelId);
+      }
+      if (!model) throw new Error("pi 启动模型不可用");
+      const agent = { model: ref, thinkingLevel: clampThinkingLevel(model, settings?.piThinkingLevel ?? this.opts.thinkingLevel) };
       if (id !== undefined) {
         const conv = await this.harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 会话不存在");
         await conv.configure(agent, context);
-        await this.observeContext(key, conv, ticket);
+        await this.observeContext(key, conv, ticket, ref);
         await this.persistMirrors();
         return conv;
       }
@@ -268,7 +285,7 @@ export class PiBackend implements AgentBackend {
         init: async (tx, conversationId) => { (await tx.doc(PiThreadsDoc))[key] = conversationId; },
       }, context);
       this.opts.contextUsage?.reset("pi", key, ticket);
-      await this.observeContext(key, conv, ticket);
+      await this.observeContext(key, conv, ticket, ref);
       await this.persistMirrors();
       return conv;
     });
@@ -308,7 +325,7 @@ export class PiBackend implements AgentBackend {
     if (this.closing) throw new Error("pi 后端正在关闭");
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(req.ticket)) throw new Error("非法票据");
     if (!parseAccess(req.access) || (req.threadKey !== "owner" && req.access !== req.scope)) throw new Error("非法访问范围");
-    const conv = await this.conversation(req.threadKey, req.ticket);
+    const conv = await this.conversation(req.threadKey, req.ticket, req.settings);
     let requestId = ctx.piTurn?.requestId ?? req.ticket;
     const known = await conv.commit(tx => tx.submissionByRequest(conv.id, requestId), context);
     let deadline = Date.now() + (this.opts.timeoutMs ?? 300_000);

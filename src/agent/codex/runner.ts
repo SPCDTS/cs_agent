@@ -11,7 +11,7 @@ import { imageRefsValue } from "../../media/gen/image-references.js";
  * 首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
  * 之后 `codex exec resume <id>`；只有确认"会话不存在"的 resume 失败才新建线程。
  * 每个线程键一条互斥队列（不同会话可并行，同一键串行）；超时 kill 进程树。子进程只拿到最小环境变量，magpie 模式额外注入专用 gateway key。
- * 推理强度固定取 CODEX_REASONING_EFFORT（codex 后端每轮以 `-c model_reasoning_effort="<档位>"` 显式传入）。
+ * 模型与推理强度取票据快照，缺省沿用启动设置（codex 后端每轮以 `-c model_reasoning_effort="<档位>"` 显式传入）。
  * 聊天记录访问范围每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS="<范围>"` 注入（群 → 本群，owner 私聊 → all）；
  * 生图输出目录每轮以 `-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="<DATA_DIR>/images/<ticket>"` 注入。
  * 安全阀：resume 前若线程 rollout 文件 > rolloutMaxMb 或线程年龄 > threadMaxDays，新建线程（历史靠 qq_context 找回）。
@@ -115,6 +115,7 @@ export interface AskOptions {
   threadKey: ThreadKey;
   signal?: AbortSignal;
   reasoningEffort?: ReasoningEffort;
+  model?: string;
   /** 本轮 qq_context MCP 的访问范围 */
   qqAccess?: string;
   /** 本轮 image_gen MCP 的输出目录（${DATA_DIR}/images/<ticket>） */
@@ -423,6 +424,8 @@ export class CodexRunner {
   private migrated: Promise<void> | undefined;
 
   private contextInitialization?: Promise<number>;
+  private readonly modelWindows = new Map<string, number>();
+  private readonly loadingWindows = new Map<string, Promise<number>>();
   constructor(readonly opts: CodexRunnerOptions) {
     if (opts.provider === "magpie" && !opts.magpieKey?.trim()) {
       throw new Error("配置无效：CODEX_PROVIDER=magpie 需要 CODEX_MAGPIE_KEY");
@@ -448,17 +451,30 @@ export class CodexRunner {
     if ((this.opts.traceRetentionDays ?? 14) > 0) await fs.mkdir(path.join(this.opts.codexHome, "trace"), { recursive: true });
   }
 
-  /** main 启动时调用；后续回合复用同一份目录结果。 */
+  /** main 启动时回填历史；后续回合按模型缓存目录窗口。 */
   initializeContextUsage(): Promise<number> {
     return this.contextInitialization ??= this.loadContextUsage();
   }
 
   private async loadContextUsage(): Promise<number> {
     await this.prepareTraceDirectory();
-    const windowTokens = await loadCodexContextWindow({ command: this.opts.command, model: this.opts.model ?? "gpt-6.1-sol",
-      env: this.childEnv(), fallback: this.opts.contextWindow, cacheFile: path.join(this.opts.codexHome, "models_cache.json") });
+    const windowTokens = await this.contextWindow();
     await this.backfillContextUsage(windowTokens);
     return windowTokens;
+  }
+
+  private contextWindow(model = this.opts.model ?? "gpt-6.1-sol"): Promise<number> {
+    const cached = this.modelWindows.get(model);
+    if (cached !== undefined) return Promise.resolve(cached);
+    let pending = this.loadingWindows.get(model);
+    if (!pending) {
+      pending = loadCodexContextWindow({ command: this.opts.command, model, env: this.childEnv(),
+        fallback: this.opts.contextWindow, cacheFile: path.join(this.opts.codexHome, "models_cache.json") })
+        .then(window => { this.modelWindows.set(model, window); return window; })
+        .finally(() => this.loadingWindows.delete(model));
+      this.loadingWindows.set(model, pending);
+    }
+    return pending;
   }
 
   private async backfillContextUsage(windowTokens: number, keys?: readonly ThreadKey[]): Promise<void> {
@@ -690,8 +706,9 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, ticket }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, model, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, ticket }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
+    if (model !== undefined && !/^[A-Za-z0-9._/-]+$/.test(model)) throw new Error("非法的 codex 模型 slug");
     const policy = codexWorkspacePolicy(this.opts.workspaceDir, path.dirname(this.opts.threadsFile), key, this.opts.sandbox, this.opts.sandboxNetwork, this.opts.codexHome);
     const guidance = await prepareCodexWorkspace(this.opts.workspaceDir, policy.workspaceDir);
     await this.opts.preparePrompt?.();
@@ -703,10 +720,13 @@ export class CodexRunner {
     await writeManagedFile(agentsFile, agentsContent);
     const attachment = ticket ? attachmentDirs(path.dirname(this.opts.threadsFile), ticket) : undefined;
     const effort = [...policy.args, ...qqAttachmentArgs(attachment?.attachDir, attachment?.fileDir, policy.workspaceDir),
-      "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess, this.opts.imageGen),
+      "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort),
+      ...(model !== undefined ? ["-c", `model="${model}"`] : []), ...qqAccessArgs(qqAccess, this.opts.imageGen),
       ...(this.opts.imageGen === "on" ? [...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)] : [])];
     const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
-    const windowTokens = this.opts.contextUsage ? await this.initializeContextUsage() : 0;
+    if (this.opts.contextUsage) await this.initializeContextUsage();
+    const windowTokens = this.opts.contextUsage ? await this.contextWindow(model) : 0;
+    this.opts.contextUsage?.ensure("codex", key, { windowTokens }, ticket);
     let completed = false;
     const observe = (event: Record<string, unknown>) => {
       if (event.type === "turn.completed") completed = true;

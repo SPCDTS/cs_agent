@@ -1,3 +1,4 @@
+import { loadCodexModelValidator } from "./agent/codex/model-catalog.js";
 import { MediaRecall } from "./context/media.js";
 import { RecallTokens, startMediaRecallServer } from "./context/media-recall-server.js";
 import { ContextUsageStore } from "./agent/context-usage.js";
@@ -95,10 +96,6 @@ async function main(): Promise<void> {
   // 进行中会话的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）
   const live = new LiveBus(trace);
   if (obs.degraded) log.warn("observability storage degraded; agent continues");
-  // 面板可改的运行时设置：.env 为初始默认，${DATA_DIR}/settings.json 覆盖；每条消息现读
-  const settings = await SettingsStore.open(cfg.DATA_DIR, settingsDefaults(cfg));
-  log.info("runtime settings loaded", { ...settings.current() });
-
   let bridge: Channel | undefined;
   const getBridge = () => {
     if (!bridge) throw new Error("QQBridge 未就绪");
@@ -169,7 +166,18 @@ async function main(): Promise<void> {
     });
   }
 
+  // 模型目录就绪后注入校验器；.env 为默认，settings.json 覆盖。
+  const settings = await SettingsStore.open(cfg.DATA_DIR, settingsDefaults(cfg), trace, {
+    codexModel: await loadCodexModelValidator(path.join(cfg.codexHome, "models_cache.json")),
+    piModel: id => !!models.getModel(cfg.AGENT_MODEL_PROVIDER, id),
+  });
+  log.info("runtime settings loaded", { ...settings.current() });
+  const currentPiModel = () => ({ provider: cfg.AGENT_MODEL_PROVIDER, modelId: settings.current().piModel });
+  const autoModel = cfg.AUTO_EFFORT_MODEL ? models.getModel("magpie", cfg.AUTO_EFFORT_MODEL) : undefined;
+  if (cfg.AUTO_EFFORT_MODEL && !autoModel) log.warn("auto effort model unavailable; using heuristics and fallback", { model: cfg.AUTO_EFFORT_MODEL });
+
   const pi = await PiBackend.open({
+    currentModel: currentPiModel,
     dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
     thinkingLevel, store, instrumentation, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
@@ -196,6 +204,17 @@ async function main(): Promise<void> {
     owner: cfg.owner,
     store,
     currentSettings: () => settings.current(),
+    codexReasoningEffort: cfg.CODEX_REASONING_EFFORT, piThinkingLevel: cfg.AGENT_THINKING_LEVEL,
+    effortRouter: { model: cfg.AUTO_EFFORT_MODEL, timeoutMs: cfg.AUTO_EFFORT_TIMEOUT_MS,
+      ...(autoModel ? { complete: async (prompt: string, signal: AbortSignal) => {
+        const result = await models.completeSimple(autoModel,
+          { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+          // pi-ai 的 simple 接口用 undefined 表示 off（thinkingLevel 仅用于 durable agent）。
+          { signal, reasoning: undefined, maxTokens: 8 });
+        if (result.stopReason === "error" || result.stopReason === "aborted") throw new Error("分类模型失败");
+        return result.content.map(c => c.type === "text" ? c.text : "").join("");
+      } } : {}),
+    },
   });
   const extension = createCsAgentExtension(tasks);
   const harness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
@@ -226,7 +245,7 @@ async function main(): Promise<void> {
   const aging = startAgingScheduler({
     store, instrumentation,
     models,
-    model: agentModel,
+    model: () => { const ref = currentPiModel(); return models.getModel(ref.provider, ref.modelId) ?? agentModel; },
     rawDays: cfg.HISTORY_RAW_DAYS,
     summaryDays: cfg.HISTORY_SUMMARY_DAYS,
     rawHardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,

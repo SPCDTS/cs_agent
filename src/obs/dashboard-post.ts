@@ -32,6 +32,9 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
         try {
           await opts.settings.update({ agentBackend: form.get('agentBackend') as RuntimeSettings['agentBackend'], backendOverrides: overrides,
             codexReasoningEffort: form.get('codexReasoningEffort') as RuntimeSettings['codexReasoningEffort'],
+            ...(form.has('codexModel') ? { codexModel: form.get('codexModel')! } : {}),
+            ...(form.has('piModel') ? { piModel: form.get('piModel')! } : {}),
+            ...(form.has('piThinkingLevel') ? { piThinkingLevel: form.get('piThinkingLevel') as RuntimeSettings['piThinkingLevel'] } : {}),
             alertOwner: form.get('alertOwner') === 'on' }, 'dashboard');
         } catch (e) { throw new HttpError(400, '设置未保存：取值不在允许范围内。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
         back('/settings?ok=saved'); return;

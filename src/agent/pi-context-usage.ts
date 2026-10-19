@@ -14,7 +14,9 @@ export function piContextCapacity(windowTokens: number, reserveTokens = DEFAULT_
 
 /** 只消费已提交的 assistant / compaction 条目，工具循环中的每次模型回合各计一次。 */
 export class PiContextObserver {
-  private constructor(private readonly stream: AgentEventStream, readonly backfilled: boolean) {}
+  private constructor(private readonly stream: AgentEventStream, readonly backfilled: boolean, private readonly capacity: Pick<ContextUsage, "windowTokens" | "compaction">) {}
+
+  updateCapacity(next: Pick<ContextUsage, "windowTokens" | "compaction">): void { Object.assign(this.capacity, next); }
 
   static async open(harness: Harness, conv: Conversation, key: string, store: ContextUsageStore,
     capacity: Pick<ContextUsage, "windowTokens" | "compaction">, ticket?: string): Promise<PiContextObserver> {
@@ -49,7 +51,7 @@ export class PiContextObserver {
         else if (event.type === "snapshot") for (const entry of event.entries) consume(entry, ticket);
       }
     });
-    return new PiContextObserver(stream, backfilled);
+    return new PiContextObserver(stream, backfilled, capacity);
   }
 
   async close(): Promise<void> { await this.stream.stop(); }

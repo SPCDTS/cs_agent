@@ -83,14 +83,14 @@ export class Dispatcher {
   dispatch(msg: InboundMessage, ticket: string): Promise<void> {
     if (this.inflight.has(ticket)) return this.inflight.get(ticket)!;
     const scope = scopeOf(msg);
-    const settings = this.opts.tasks.snapshotSettings(scope, typeof this.opts.codexEffort === "function" ? this.opts.codexEffort() : this.opts.codexEffort);
+    const settings = this.opts.tasks.snapshotSettings(scope, typeof this.opts.codexEffort === "function" ? this.opts.codexEffort() : this.opts.codexEffort, this.effortMessage(msg, ticket));
     this.withHistory("record pending failed", ticket, (h) =>
       h.recordPending(scope, ticket, msg.time, { replyTo: msg.message_id, selfId: msg.self_id }),
     );
     return this.track(ticket, "dispatch failed", () => {
       const registered = this.opts.bridge.prepareIncoming
-        ? this.opts.bridge.prepareIncoming(ticket).then(rec => this.register(msg.attachments?.some(a => a.status === 'pending') && rec ? inboundFromTicket(rec) : msg, ticket, scope, false, settings))
-        : this.register(msg, ticket, scope, false, settings);
+        ? this.opts.bridge.prepareIncoming(ticket).then(async rec => this.register(msg.attachments?.some(a => a.status === 'pending') && rec ? inboundFromTicket(rec) : msg, ticket, scope, false, await settings))
+        : settings.then(value => this.register(msg, ticket, scope, false, value));
       return this.enqueue(scope, async () => this.run(ticket, await registered));
     });
   }
@@ -255,6 +255,11 @@ export class Dispatcher {
     else this.active--;
   }
 
+  private effortMessage(msg: InboundMessage, ticket: string) {
+    return { ticket, text: msg.text, hasImages: msg.images.length > 0 || msg.segments.some(s => s.type === "image"),
+      hasQuote: msg.segments.some(s => s.type === "reply") };
+  }
+
   private async register(msg: InboundMessage, ticket: string, scope: string, fallbackOnly = false, settings?: TicketSettings): Promise<ConversationId> {
     const { harness } = this.opts;
     const known = (await harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket];
@@ -269,13 +274,14 @@ export class Dispatcher {
     const route = routeMessage(msg.route_text, this.prefixes, msg.images);
     // 唯一排序键：bridge admit 时分配的票据 seq（崩溃恢复时与孤儿票据统一排序）
     const ticketSeq = (await this.opts.bridge.getTicket(ticket).catch(() => undefined))?.seq;
+    settings ??= await this.opts.tasks.snapshotSettings(scope, undefined, this.effortMessage(msg, ticket));
     const conv = await harness.createConversation(
       {
         ownership: { kind: "ownerless" },
         init: async (tx, conversationId) => {
           Object.assign(await tx.doc(TicketDoc, conversationId), {
             ticket, source, text: msg.text, time: msg.time, messageId: msg.message_id,
-            settings: settings ?? this.opts.tasks.snapshotSettings(scope),
+            settings,
             source_images: msg.images, ...(msg.image_error ? { image_error: msg.image_error } : {}),
             route: route.route,
             ...(route.route !== "agent" ? { prefix: route.prefix } : {}),

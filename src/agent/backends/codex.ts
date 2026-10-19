@@ -5,7 +5,7 @@ import { imageRefsValue, validateReferences } from "../../media/gen/image-refere
 /**
  * codex 后端（设计 §4.4）：现有 CodexRunner 的适配。
  * - 线程：owner / group:<id> / private:<qq>（由请求的 threadKey 决定，同键串行）；
- * - 推理强度：固定 CODEX_REASONING_EFFORT（不再按请求选择）；
+ * - 模型与推理强度：优先使用票据快照；旧票据沿用启动默认值；
  * - 每轮注入：qq_context 的 QQ_ACCESS、image_gen 的 IMAGE_TICKET_DIR（${DATA_DIR}/images/<ticket>）；
  * - 输入：§3.2 的 [来源] / [引用] 头部 + 原文；
  * - 回合结束后收集票据图片目录里本回合新出现的图片（≤4，魔数检查）随文本返回。
@@ -113,6 +113,7 @@ export class CodexBackend implements AgentBackend {
         onJsonEvent: codexObserver(req.ticket),
         threadKey: req.threadKey,
         signal: ctx.signal,
+        ...(req.settings?.codexModel !== undefined ? { model: req.settings.codexModel } : {}),
         ...(effort ? { reasoningEffort: effort } : {}),
         qqAccess: req.access,
         imageTicketDir: dir,

@@ -66,7 +66,7 @@ const EnvSchema = z.object({
   CODEX_MAGPIE_KEY: z.string().default(""),
   CODEX_MODEL: z.string().default("gpt-6.1-sol"),
   CODEX_CONTEXT_WINDOW: int(400000),
-  /** codex 推理强度（写入 config.toml，codex 后端每轮也以 -c 显式传入；不再按请求选择） */
+  /** codex 初始推理强度与 auto 失败时的回退档位（同时写入 config.toml） */
   CODEX_REASONING_EFFORT: z.string().default("high"),
   CODEX_SANDBOX: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("workspace-write"),
   CODEX_TIMEOUT_SEC: int(600),
@@ -86,6 +86,9 @@ const EnvSchema = z.object({
   AGENT_MODEL_PROVIDER: z.string().default("deepseek"),
   AGENT_MODEL_ID: z.string().default("deepseek-flash"),
   AGENT_THINKING_LEVEL: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).default("low"),
+  /** auto 选档模型始终取 magpie 提供者；空值禁用分类调用。 */
+  AUTO_EFFORT_MODEL: z.string().trim().default("deepseek/deepseek-flash"),
+  AUTO_EFFORT_TIMEOUT_MS: int(4000),
   AGENT_CONCURRENCY: int(2),
   /** 规则分流的生图前缀（逗号分隔，逐字匹配）；命中后前缀之后的全部文本作为提示词 */
   IMAGE_PREFIXES: z.string().default("奶龙:,奶龙："),
@@ -180,8 +183,9 @@ export function requireProviderApiKey(provider: string, env: NodeJS.ProcessEnv =
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  // 空字符串视为未设置，便于 .env 中留空项走默认值
+  // 通常将空字符串视为未设置；AUTO_EFFORT_MODEL 的空值专门表示禁用分类。
   const cleaned = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined && v !== ""));
+  if (env.AUTO_EFFORT_MODEL !== undefined) cleaned.AUTO_EFFORT_MODEL = env.AUTO_EFFORT_MODEL;
   const parsed = EnvSchema.safeParse(cleaned);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");

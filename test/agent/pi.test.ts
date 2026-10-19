@@ -1,3 +1,5 @@
+import { log } from "../../src/shared/log.js";
+import type { ModelRef } from "@earendil-works/pi-durable";
 import { readFileAttachments } from "../../src/media/attach.js";
 import { attachmentDirs } from "../../src/media/attach-paths.js";
 import { MemoryInstrumentation } from "../../src/obs/memory/instrumentation.js";
@@ -49,14 +51,14 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   vi.stubEnv("CODEX_REQUIREMENTS_FILE", await sandboxRequirements(dir));
   const contextUsage = new ContextUsageStore(dir);
   cleanup.push(() => contextUsage.close());
   const store = new ContextStore(dir);
   cleanup.push(() => store.close());
-  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200_000, input: opts.vision ? ["text", "image"] : ["text"] }], tokensPerSecond: Infinity });
+  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200_000, input: opts.vision ? ["text", "image"] : ["text"] }, { id: "runtime", contextWindow: 400000, reasoning: true }], tokensPerSecond: Infinity });
   faux.setResponses(steps);
   const models = createModels(); models.setProvider(faux.provider);
   const imageBackend = {
@@ -71,7 +73,7 @@ async function setup(steps: FauxResponseStep[], opts: { instrumentation?: Memory
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
   const pi = await PiBackend.open({ dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
-    mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
+    currentModel: opts.currentModel, mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
     instrumentation: opts.instrumentation, thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
     ...(opts.disk ? {} : { storage: new MemoryStorage() }),
@@ -956,4 +958,36 @@ it("pi 历史工具写入 ticket/session/task 并发出轻量 trace", async () =
   expect(obs.db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ backend: 'pi', ticket: 'recall-observed', session,
     task_id: expect.stringMatching(/^\d+$/), tool: 'qq_recent', scope_hint: 'group:7', returned_json: '[{"kind":"message","id":"m"}]' });
   expect(events).toContain('memory_recall');
+});
+
+describe("pi 运行时模型设置", () => {
+  it("新票据提交读取当前模型和快照档位，旧票据保持启动默认", async () => {
+    const calls: { model: string; reasoning: unknown }[] = [];
+    const step: FauxResponseStep = (_ctx, options, _state, model) => { calls.push({ model: model.id, reasoning: options?.reasoning }); return reply(); };
+    let current!: ModelRef;
+    const s = await setup([step, step, step], { currentModel: () => current });
+    current = { provider: s.faux.getModel().provider, modelId: "runtime" };
+    const req = request("runtime-model");
+    req.settings = { backend: "pi", codexReasoningEffort: "high", piModel: "test", piThinkingLevel: "high", effortSource: "auto" };
+    await s.pi.handle(req, handleContext());
+    const thread = (await s.pi.readThreadIds())["group:7"];
+    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")?.windowTokens).toBe(400000));
+    await s.pi.handle(request("legacy-model"), handleContext());
+    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")?.windowTokens).toBe(200000));
+    current = { ...current, modelId: "test" };
+    await s.pi.handle({ ...req, ticket: "runtime-clamp", settings: { ...req.settings, piThinkingLevel: "xhigh" } }, handleContext());
+    expect((await s.pi.readThreadIds())["group:7"]).toBe(thread);
+    expect(calls).toEqual([{ model: "runtime", reasoning: "high" }, { model: "test", reasoning: undefined }, { model: "test", reasoning: undefined }]);
+  });
+  it("设置中的模型不存在时 warn 并回退启动模型", async () => {
+    let modelId: string | undefined;
+    const s = await setup([(_ctx, _options, _state, model) => { modelId = model.id; return reply(); }],
+      { currentModel: () => ({ provider: "missing", modelId: "gone" }) });
+    const warn = vi.spyOn(log, "warn");
+    try {
+      await s.pi.handle({ ...request("model-fallback"), settings: { backend: "pi", codexReasoningEffort: "high", piModel: "gone", piThinkingLevel: "high" } }, handleContext());
+      expect(modelId).toBe("test");
+      expect(warn).toHaveBeenCalledWith("pi runtime model unavailable; using startup model", { provider: "missing", model: "gone" });
+    } finally { warn.mockRestore(); }
+  });
 });

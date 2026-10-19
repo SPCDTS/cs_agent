@@ -1,11 +1,12 @@
 /**
  * 运行时设置（设计 §8.4）：`${DATA_DIR}/settings.json` 持久化面板可改的项，`.env` 只是初始默认值。
- * 派发器在消息入队前读取 `current()` 并写入票据快照；修改仅影响之后派发的消息。告警开关独立现读。
+ * 派发器在入队前冻结后端、档位与模型记录；Pi 模型在提交时现读，告警开关独立现读。
  * 文件原子写（临时文件 + rename），读写都经 zod 校验；文件损坏时记录告警并回退到 `.env` 默认值（不覆盖坏文件）。
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { z } from "zod";
 import { isScope } from "../context/access.js";
 import { log } from "../shared/log.js";
@@ -17,8 +18,16 @@ import { BACKEND_NAMES, type BackendName } from "./backends/types.js";
 export interface RuntimeSettings {
   agentBackend: BackendName;
   backendOverrides: Record<string, BackendName>;
-  codexReasoningEffort: ReasoningEffort;
+  codexModel: string;
+  codexReasoningEffort: ReasoningEffort | "auto";
+  piModel: string;
+  piThinkingLevel: ModelThinkingLevel | "auto";
   alertOwner: boolean;
+}
+
+export interface SettingsValidators {
+  codexModel(slug: string): boolean;
+  piModel(id: string): boolean;
 }
 
 const backend = z.enum(BACKEND_NAMES);
@@ -26,7 +35,10 @@ const SettingsSchema = z.object({
   agentBackend: backend,
   backendOverrides: z.record(z.string().refine(isScope, "scope 必须是 group:<群号> 或 private:<QQ号>"), backend)
     .refine(v => Object.keys(v).length <= 500, "覆盖表最多 500 项"),
-  codexReasoningEffort: z.enum(REASONING_EFFORTS),
+  codexModel: z.string().regex(/^[A-Za-z0-9._/-]+$/, "模型 slug 含非法字符"),
+  codexReasoningEffort: z.enum([...REASONING_EFFORTS, "auto"]),
+  piModel: z.string().trim().min(1),
+  piThinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]),
   alertOwner: z.boolean(),
 }).strict();
 // 只在读取旧文件时剥离已移除的字段；其余未知键及运行时更新仍严格校验。
@@ -44,10 +56,12 @@ export type SettingsSource = "dashboard" | "test";
 export function settingsDefaults(cfg: {
   AGENT_BACKEND: BackendName; backendOverrides: Record<string, BackendName>;
   CODEX_REASONING_EFFORT: string; ALERT_OWNER: boolean;
+  CODEX_MODEL: string; AGENT_MODEL_ID: string; AGENT_THINKING_LEVEL: ModelThinkingLevel;
 }): RuntimeSettings {
   const effort = (REASONING_EFFORTS as readonly string[]).includes(cfg.CODEX_REASONING_EFFORT) ? cfg.CODEX_REASONING_EFFORT as ReasoningEffort : "high";
   return { agentBackend: cfg.AGENT_BACKEND, backendOverrides: { ...cfg.backendOverrides },
-    codexReasoningEffort: effort, alertOwner: cfg.ALERT_OWNER };
+    codexModel: cfg.CODEX_MODEL, codexReasoningEffort: effort, piModel: cfg.AGENT_MODEL_ID,
+    piThinkingLevel: cfg.AGENT_THINKING_LEVEL, alertOwner: cfg.ALERT_OWNER };
 }
 
 type Listener = (next: Readonly<RuntimeSettings>, before: Readonly<RuntimeSettings>) => void;
@@ -58,13 +72,13 @@ export class SettingsStore {
   private readonly listeners = new Set<Listener>();
   readonly file: string;
 
-  private constructor(dataDir: string, readonly defaults: Readonly<RuntimeSettings>, initial: RuntimeSettings, private readonly trace: Trace) {
+  private constructor(dataDir: string, readonly defaults: Readonly<RuntimeSettings>, initial: RuntimeSettings, private readonly trace: Trace, private readonly validators?: SettingsValidators) {
     this.file = path.join(dataDir, SETTINGS_FILE);
     this.value = initial;
   }
 
   /** 读取持久化设置并覆盖默认值；文件不存在 → 默认值。 */
-  static async open(dataDir: string, defaults: RuntimeSettings, trace: Trace = defaultTrace): Promise<SettingsStore> {
+  static async open(dataDir: string, defaults: RuntimeSettings, trace: Trace = defaultTrace, validators?: SettingsValidators): Promise<SettingsStore> {
     const base = SettingsSchema.parse(defaults);
     let initial = base;
     const file = path.join(dataDir, SETTINGS_FILE);
@@ -76,7 +90,7 @@ export class SettingsStore {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") log.warn("settings.json invalid; using .env defaults", { error: err instanceof Error ? err.message : String(err) });
     }
-    return new SettingsStore(dataDir, base, initial, trace);
+    return new SettingsStore(dataDir, base, initial, trace, validators);
   }
 
   /** 当前生效值（每条消息现读）。返回冻结副本，调用方不能就地修改。 */
@@ -91,6 +105,11 @@ export class SettingsStore {
     const run = this.chain.then(async () => {
       const before = this.current();
       const next = SettingsSchema.parse({ ...this.value, ...patch });
+      for (const field of ["codexModel", "piModel"] as const) {
+        if (this.validators && !this.validators[field](next[field])) {
+          throw new z.ZodError([{ code: "custom", path: [field], message: "模型不在可用目录中" }]);
+        }
+      }
       await this.write(next);
       this.value = next;
       const after = this.current();

@@ -39,7 +39,7 @@ export interface AgingOptions {
   store: ContextStore;
   instrumentation?: SummaryObserver;
   models: Models;
-  model: Model<Api>;
+  model: () => Model<Api>;
   rawDays: number;
   summaryDays: number;
   /** 未被摘要覆盖的原始消息最长保留天数（默认 90） */
@@ -73,7 +73,7 @@ function textOf(msg: AssistantMessage): string {
 
 async function summarize(opts: AgingOptions, systemPrompt: string, input: string): Promise<{ text: string; model: string; provider: string; usage: AssistantMessage["usage"] }> {
   const msg = await opts.models.completeSimple(
-    opts.model,
+    opts.model(),
     { systemPrompt, messages: [{ role: "user", content: input, timestamp: Date.now() }] },
     { signal: AbortSignal.timeout(MODEL_TIMEOUT_MS), maxTokens: 2000 },
   );

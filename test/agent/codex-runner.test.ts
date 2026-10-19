@@ -786,3 +786,34 @@ it("每轮覆盖召回归属，新线程 session 为空，resume 使用线程 ID
   expect(starts[1].argv).toEqual(expect.arrayContaining(['mcp_servers.qq_context.env.QQ_TICKET="ticket-b"',
     'mcp_servers.qq_context.env.QQ_SESSION="thread-123"']));
 });
+
+describe("运行时 codex 模型", () => {
+  it("首轮与 resume 使用快照模型 argv，各模型窗口分别缓存", async () => {
+    const dir = tmp(), opts = setupOpts(dir), usage = new ContextUsageStore(dir);
+    const catalogLog = path.join(dir, "catalog.jsonl");
+    const runner = new CodexRunner({ ...opts, model: "model-a", contextUsage: usage, env: { ...opts.env,
+      FAKE_CODEX_CATALOG_LOG: catalogLog,
+      FAKE_CODEX_CATALOG: JSON.stringify({ models: [{ slug: "model-a", context_window: 100000 }, { slug: "codex/model-b", context_window: 300000 }] }),
+    } });
+    try {
+      await runner.ask("第一轮", { threadKey: "group:1", model: "model-a" });
+      expect(usage.get("codex", "group:1")?.windowTokens).toBe(100000);
+      const thread = threadOf(dir)?.thread_id;
+      await runner.ask("切模型", { threadKey: "group:1", model: "codex/model-b" });
+      expect(usage.get("codex", "group:1")?.windowTokens).toBe(300000);
+      expect(threadOf(dir)?.thread_id).toBe(thread);
+      await runner.ask("旧票据默认", { threadKey: "group:1" });
+      expect(usage.get("codex", "group:1")?.windowTokens).toBe(100000);
+      const calls = readFileSync(opts.env.FAKE_CODEX_LOG, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(c => c.phase === "start");
+      expect(calls[0].argv).toEqual(expect.arrayContaining(["-c", 'model="model-a"']));
+      expect(calls[1].argv).toEqual(expect.arrayContaining(["resume", "-c", 'model="codex/model-b"']));
+      expect(calls[2].argv.some((arg: string) => arg.startsWith("model="))).toBe(false);
+      expect(readFileSync(catalogLog, "utf8").trim().split("\n")).toHaveLength(2);
+    } finally { await usage.close(); }
+  });
+  it.each(['bad"slug', "bad slug", "", "bad\nslug"])("模型 slug 拒绝非法输入：%s", async model => {
+    const { runner, calls } = setup();
+    await expect(runner.ask("test", { threadKey: "group:1", model })).rejects.toThrow("非法");
+    expect(calls()).toEqual([]);
+  });
+});

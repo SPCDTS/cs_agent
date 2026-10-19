@@ -35,8 +35,8 @@ function rig(responses: (FauxResponseFactory | ReturnType<typeof fauxAssistantMe
       return typeof r === "function" ? r(context, undefined as never, undefined as never, undefined as never) : r;
     }) as FauxResponseFactory[],
   );
-  const opts: AgingOptions = { store, models, model: faux.getModel(), rawDays: 30, summaryDays: 180, hour: 3, now: () => NOW };
-  return { store, faux, opts, inputs };
+  const opts: AgingOptions = { store, models, model: () => faux.getModel(), rawDays: 30, summaryDays: 180, hour: 3, now: () => NOW };
+  return { store, faux, opts, inputs, models };
 }
 
 describe("runAging", () => {
@@ -156,4 +156,20 @@ describe("scheduler", () => {
     expect(s.running()).toBe(false);
     s.stop();
   });
+});
+
+it("衰老任务每次运行读取当前模型 getter", async () => {
+  const r = rig([fauxAssistantMessage("首日摘要"), fauxAssistantMessage("次日摘要")]);
+  const first = r.faux.getModel();
+  const other = fauxProvider({ provider: "aging-next", models: [{ id: "next" }], tokensPerSecond: Infinity });
+  other.setResponses([fauxAssistantMessage("新模型摘要")]); r.models.setProvider(other.provider);
+  let current = first;
+  const seen: string[] = [];
+  r.opts.model = () => { seen.push(current.id); return current; };
+  for (let i = 0; i < 5; i++) r.store.ingest(msg(dayStart(2026, 10, 19) + i, "正文"));
+  expect((await runAging(r.opts)).day_summaries).toBe(1);
+  current = other.getModel();
+  for (let i = 0; i < 5; i++) r.store.ingest(msg(dayStart(2026, 10, 20) + i, "正文"));
+  expect((await runAging(r.opts)).day_summaries).toBe(1);
+  expect(seen).toEqual([first.id, "next"]);
 });

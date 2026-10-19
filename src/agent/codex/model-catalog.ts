@@ -50,3 +50,14 @@ export async function loadCodexContextWindow(opts: {
   log.warn("codex context window", { model: opts.model, windowTokens, source: opts.fallback === undefined ? "default" : "CODEX_CONTEXT_WINDOW" });
   return windowTokens;
 }
+
+/** 启动时只读缓存目录；不可用时允许安全的非空 slug，由 runner 再做参数校验。 */
+export async function loadCodexModelValidator(cacheFile: string): Promise<(slug: string) => boolean> {
+  let slugs: Set<string> | undefined;
+  try {
+    const catalog = JSON.parse(await fs.readFile(cacheFile, "utf8")) as { models?: { slug?: unknown }[] };
+    const valid = catalog.models?.map(m => m?.slug).filter((slug): slug is string => typeof slug === "string" && !!slug);
+    if (valid?.length) slugs = new Set(valid);
+  } catch { /* 缺失或损坏的目录允许手动输入。 */ }
+  return slug => /^[A-Za-z0-9._/-]+$/.test(slug) && (!slugs || slugs.has(slug));
+}

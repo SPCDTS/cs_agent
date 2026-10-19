@@ -169,7 +169,7 @@ it('pi、衰老使用同一非零缓存 usage fixture，费用口径一致',asyn
   await pi.handle({ticket:'usage-pi',scope:'private:1',threadKey:'private:1',access:'private:1',text:'hello',source:{type:'private',user_id:'1',group_id:null,nickname:'test'}},{signal:new AbortController().signal,onEvent:()=>{}});
   const now=Date.UTC(2026,9,21,3),day=Date.UTC(2026,9,20)/1000;
   for(let i=0;i<5;i++)r.context.ingest({...r.msg('历史'+i),message_id:'history'+i,time:day+i});
-  const report=await runAging({store:r.context,models:r.models,model,rawDays:30,summaryDays:180,hour:3,now:()=>now});expect(report.day_summaries).toBe(1);
+  const report=await runAging({store:r.context,models:r.models,model:()=>model,rawDays:30,summaryDays:180,hour:3,now:()=>now});expect(report.day_summaries).toBe(1);
   const metrics=new Metrics(r.store,{retentionDays:365,inputPrice:2,outputPrice:4});await metrics.flush();
   expect(r.store.db.prepare("SELECT value FROM metrics WHERE name='deepseek_estimated_cost'").get()?.value).toBeCloseTo(.00072);
   for(const ticket of ['usage-pi','@aging']){

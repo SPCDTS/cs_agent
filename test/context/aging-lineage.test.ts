@@ -21,7 +21,7 @@ function rig() {
     return fauxAssistantMessage(fauxText('长摘要'.repeat(200)));
   }));
   const instrumentation = MemoryInstrumentation.fromDb(obs.db);
-  const opts: AgingOptions = { store, instrumentation, models, model: faux.getModel(), rawDays: 30, summaryDays: 180, hour: 3, now: () => NOW };
+  const opts: AgingOptions = { store, instrumentation, models, model: () => faux.getModel(), rawDays: 30, summaryDays: 180, hour: 3, now: () => NOW };
   const seed = (start: number, n = 5) => {
     for (let i = 0; i < n; i++) store.ingest({ message_id: String(start + i), time: start + i, message_type: 'group',
       group_id: '1', user_id: '2', self_id: '3', nickname: '甲', text: '正文'.repeat(100), route_text: '', truncated: false,
@@ -35,7 +35,7 @@ it('日版本保存实际裁剪正文、模型用量与实际进入输入的消�
   const version = r.obs.db.prepare('SELECT * FROM summary_versions').get()!;
   const written = r.store.search({ kind: 'all' }, { query: '长摘要', days: 30, limit: 10, now: NOW / 1000 })[0].row;
   expect(version).toMatchObject({ summary_id: written.id, text: written.text, kept_chars: written.text.length,
-    input_chars: r.inputs[0].length, model: r.opts.model.id, provider: r.opts.model.provider,
+    input_chars: r.inputs[0].length, model: r.opts.model().id, provider: r.opts.model().provider,
     text_sha256: createHash('sha256').update(written.text).digest('hex') });
   const ids = JSON.parse(String(version.input_message_ids_json)) as string[];
   expect(ids.length).toBeGreaterThan(0); expect(ids.length).toBeLessThan(200);

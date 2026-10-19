@@ -1,3 +1,5 @@
+import { resolveAutoEffort, type EffortRouterDeps, type EffortMessage } from "./effort-router.js";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { attachmentDirs } from "../media/attach-paths.js";
 import { readFileAttachments, readAttachmentData, type FileAttachment } from "../media/attach.js";
 import { ingestImageEvents } from "../media/gen/events.js";
@@ -71,6 +73,8 @@ export interface TaskDeps {
   currentSettings?: () => Readonly<import('./settings.js').RuntimeSettings>;
   /** reply 重试退避基数（毫秒），默认 2000 */
   replyRetryDelayMs?: number;
+  effortRouter?: EffortRouterDeps;
+  piThinkingLevel?: ModelThinkingLevel;
 }
 
 type Runtime<S extends { phase: string }> = TaskRuntime<TaskInput, S, TaskResult, object>;
@@ -248,14 +252,26 @@ function phases<S extends { phase: string }>(handlers: TaskDefinition<TaskInput,
 }
 
 export function createTasks(deps: TaskDeps) {
-  const snapshotSettings = (scope: string, fallbackEffort?: string): TicketSettings => {
+  const snapshotSettings = async (scope: string, fallbackEffort?: string, msg?: EffortMessage): Promise<TicketSettings> => {
+    // 必须在第一个 await 之前一次采样，排队期间的设置变更不影响本票据。
     const current = deps.currentSettings?.();
-    const effort = current?.codexReasoningEffort ?? fallbackEffort ??
-      (typeof deps.codexReasoningEffort === "function" ? deps.codexReasoningEffort() : deps.codexReasoningEffort);
-    return {
-      backend: current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : deps.backends.select(scope).name,
-      codexReasoningEffort: isReasoningEffort(effort) ? effort : "high",
-    };
+    const configured = fallbackEffort ?? (typeof deps.codexReasoningEffort === "function" ? deps.codexReasoningEffort() : deps.codexReasoningEffort);
+    const codexFallback = isReasoningEffort(configured) ? configured : "high";
+    const piFallback = deps.piThinkingLevel ?? "low";
+    const effort = current?.codexReasoningEffort ?? codexFallback;
+    const backend = current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : deps.backends.select(scope).name;
+    const snapshot: TicketSettings = { backend, codexReasoningEffort: isReasoningEffort(effort) ? effort : codexFallback,
+      ...(current ? { codexModel: current.codexModel, piModel: current.piModel,
+        piThinkingLevel: current.piThinkingLevel === "auto" ? piFallback : current.piThinkingLevel } : {}), effortSource: "fixed" };
+    const input = msg ?? { ticket: "@effort", text: "", hasImages: false, hasQuote: false };
+    if (backend === "codex" && effort === "auto") {
+      const routed = await resolveAutoEffort(deps.effortRouter ?? {}, input, codexFallback);
+      snapshot.codexReasoningEffort = routed.effort; snapshot.effortSource = routed.source;
+    } else if (backend === "pi" && current?.piThinkingLevel === "auto") {
+      const routed = await resolveAutoEffort(deps.effortRouter ?? {}, input, piFallback);
+      snapshot.piThinkingLevel = routed.effort; snapshot.effortSource = routed.source;
+    }
+    return snapshot;
   };
   type ImageRuntime = Runtime<ImageCheckpoint>;
 
