@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   setLogLevel(cfg.LOG_LEVEL);
   try { cfg.OBS_TOKEN = await loadObsToken(cfg.DATA_DIR, cfg.OBS_TOKEN, message => log.info(message)); }
   catch { log.warn("observability token unavailable; dashboard access disabled"); }
-  registerSecrets([cfg.OBS_TOKEN, cfg.NAPCAT_TOKEN]);
+  registerSecrets([cfg.OBS_TOKEN, cfg.NAPCAT_TOKEN, cfg.CODEX_MAGPIE_KEY]);
   const ctx = BACKGROUND_CONTEXT;
   log.info("starting cs-agent", {
     provider: cfg.AGENT_MODEL_PROVIDER,
@@ -131,6 +131,7 @@ async function main(): Promise<void> {
   });
   const codex = new CodexRunner({
     command: [cfg.CODEX_BIN],
+    provider: cfg.CODEX_PROVIDER, magpieKey: cfg.CODEX_MAGPIE_KEY,
     imageGen: cfg.CODEX_IMAGE_GEN,
     recallTokens, mediaRecallPort: recallServer.port,
     contextUsage, model: cfg.CODEX_MODEL, contextWindow: cfg.CODEX_CONTEXT_WINDOW,
@@ -272,6 +273,10 @@ async function main(): Promise<void> {
   codex
     .readThreadIds()
     .then(async (threads) => {
+      if (cfg.CODEX_PROVIDER === "magpie") {
+        checks.codex = { ok: true, provider: "magpie", key_present: !!cfg.CODEX_MAGPIE_KEY, threads };
+        return;
+      }
       const { access } = await import("node:fs/promises");
       const authOk = await access(path.join(cfg.codexHome, "auth.json")).then(() => true, () => false);
       checks.codex = { ok: authOk, auth_json: authOk, threads };

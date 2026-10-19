@@ -22,7 +22,7 @@ const bool = (def: boolean) =>
 const int = (def: number) => z.coerce.number().int().positive().default(def);
 
 const serviceUrl = z.string().url().refine(value => {
-  const url = new URL(value); return !url.username && !url.password;
+  const url = URL.parse(value); return !url?.username && !url?.password;
 }, '服务 URL 不得包含用户名或密码');
 
 const EnvSchema = z.object({
@@ -59,6 +59,10 @@ const EnvSchema = z.object({
 
   CODEX_IMAGE_GEN: z.enum(["off", "on"]).default("off"),
   CODEX_BIN: z.string().default("codex"),
+  CODEX_PROVIDER: z.enum(["magpie", "openai"]).default("magpie"),
+  CODEX_MAGPIE_URL: serviceUrl.default("http://host.docker.internal:3425/v1"),
+  /** 仅 CodexRunner 启动时校验；MCP 也读取基础配置，但不需要模型凭据。 */
+  CODEX_MAGPIE_KEY: z.string().default(""),
   CODEX_MODEL: z.string().default("gpt-6.1-sol"),
   CODEX_CONTEXT_WINDOW: int(400000),
   /** codex 推理强度（写入 config.toml，codex 后端每轮也以 -c 显式传入；不再按请求选择） */

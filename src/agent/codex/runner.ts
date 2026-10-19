@@ -10,7 +10,7 @@ import { imageRefsValue } from "../../media/gen/image-references.js";
  * 按会话域隔离 codex 线程：owner（owner 私聊）、group:<id> 与 private:<qq>，记录在 ${DATA_DIR}/codex-threads.json。
  * 首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
  * 之后 `codex exec resume <id>`；只有确认"会话不存在"的 resume 失败才新建线程。
- * 每个线程键一条互斥队列（不同会话可并行，同一键串行）；超时 kill 进程树。子进程只拿到最小环境变量（不含 token / API key）。
+ * 每个线程键一条互斥队列（不同会话可并行，同一键串行）；超时 kill 进程树。子进程只拿到最小环境变量，magpie 模式额外注入专用 gateway key。
  * 推理强度固定取 CODEX_REASONING_EFFORT（codex 后端每轮以 `-c model_reasoning_effort="<档位>"` 显式传入）。
  * 聊天记录访问范围每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS="<范围>"` 注入（群 → 本群，owner 私聊 → all）；
  * 生图输出目录每轮以 `-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="<DATA_DIR>/images/<ticket>"` 注入。
@@ -29,6 +29,9 @@ import { clip } from "../../context/store.js";
 export interface CodexRunnerOptions {
   /** 可执行文件及前置参数，例如 ["codex"] 或测试中的 [node, fake-codex.mjs] */
   command: string[];
+  /** 主进程显式传入提供者；省略时保留独立 runner 原有的直连行为。 */
+  provider?: "magpie" | "openai";
+  magpieKey?: string;
   imageGen?: "off" | "on";
   contextUsage?: ContextUsageStore;
   recallTokens?: RecallTokens;
@@ -419,10 +422,20 @@ export class CodexRunner {
   private migrated: Promise<void> | undefined;
 
   private contextInitialization?: Promise<number>;
-  constructor(readonly opts: CodexRunnerOptions) {}
+  constructor(readonly opts: CodexRunnerOptions) {
+    if (opts.provider === "magpie" && !opts.magpieKey?.trim()) {
+      throw new Error("配置无效：CODEX_PROVIDER=magpie 需要 CODEX_MAGPIE_KEY");
+    }
+  }
 
   private childEnv(): NodeJS.ProcessEnv {
     const env = { ...buildCodexEnv(this.opts.codexHome), ...Object.fromEntries(Object.entries(this.opts.env ?? {}).filter(([key]) => key.toUpperCase() !== "OBS_TOKEN")) };
+    // 只从显式配置注入 gateway key；直连时清除额外环境中的残留值及大小写别名。
+    for (const key of Object.keys(env)) {
+      const name = key.toUpperCase();
+      if (name === "CODEX_MAGPIE_KEY" || (this.opts.provider === "magpie" && (name.startsWith("OPENAI_") || name === "CODEX_API_KEY"))) delete env[key];
+    }
+    if (this.opts.provider === "magpie") env.CODEX_MAGPIE_KEY = this.opts.magpieKey;
     // Codex 0.163.0 官方开关，来源见 docs/research/observability-viewer-research.md §3。
     // 不接受继承的路径；Windows 环境变量不区分大小写，关闭时也必须移除别名。
     for (const key of Object.keys(env)) if (key.toUpperCase() === "CODEX_ROLLOUT_TRACE_ROOT") delete env[key];

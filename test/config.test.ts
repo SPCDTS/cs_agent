@@ -17,6 +17,24 @@ describe("NapCat 服务地址", () => {
   });
 });
 
+describe("Codex 提供者配置", () => {
+  it("默认经 magpie，基础配置允许空 key 供 MCP 读取", () => {
+    for (const env of [{}, { CODEX_PROVIDER: "", CODEX_MAGPIE_URL: "", CODEX_MAGPIE_KEY: "" }]) {
+      expect(loadConfig(env)).toMatchObject({ CODEX_PROVIDER: "magpie", CODEX_MAGPIE_URL: "http://host.docker.internal:3425/v1", CODEX_MAGPIE_KEY: "", CODEX_MODEL: "gpt-6.1-sol" });
+    }
+    expect(loadConfig({ CODEX_PROVIDER: "openai" }).CODEX_MAGPIE_KEY).toBe("");
+    expect(loadConfig({ CODEX_MAGPIE_KEY: "test-gateway-key", CODEX_MAGPIE_URL: "https://gateway.example/v1" }))
+      .toMatchObject({ CODEX_MAGPIE_KEY: "test-gateway-key", CODEX_MAGPIE_URL: "https://gateway.example/v1" });
+  });
+
+  it("拒绝未知提供者、非法 URL 及 URL 内嵌凭据", () => {
+    expect(() => loadConfig({ CODEX_PROVIDER: "unknown" })).toThrow(/CODEX_PROVIDER/);
+    for (const url of ["not-a-url", "http://user:secret@gateway.example/v1"]) {
+      expect(() => loadConfig({ CODEX_MAGPIE_URL: url })).toThrow(/CODEX_MAGPIE_URL/);
+    }
+  });
+});
+
 describe("model config defaults", () => {
   it("defaults the intent model to deepseek/deepseek-flash", () => {
     const c = loadConfig({});
