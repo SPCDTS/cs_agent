@@ -1,4 +1,4 @@
-import { observeImages } from "../../obs/image.js";
+import { observeImages } from "../../media/gen/observed.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";

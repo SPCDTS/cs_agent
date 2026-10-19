@@ -1,5 +1,5 @@
-import type { ImageBackend } from '../media/gen/image-gen.js';
-import { trace, type Trace } from '../shared/trace.js';
+import type { ImageBackend } from './image-gen.js';
+import { trace, type Trace } from '../../shared/trace.js';
 /** 包装公共接口，生产与 fake 使用同一埋点；不改变提交、恢复、取消语义。 */
 export function observeImages<T extends Pick<ImageBackend, 'name' | 'submit' | 'collect' | 'reconcile'>>(backend: T, ticket: string, observer: Trace = trace): T {
   return new Proxy(backend, { get(target, key) {

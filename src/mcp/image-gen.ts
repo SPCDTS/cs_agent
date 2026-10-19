@@ -12,7 +12,7 @@ import { backendConfigFromEnv, createImageGenServer } from "./image-gen-server.j
 import { parseAccess } from "../context/access.js";
 import { loadConfig } from "../config.js";
 
-import { ImageEventSpool } from "../obs/image-events.js";
+import { ImageEventSpool } from "../media/gen/events.js";
 import { Trace } from "../shared/trace.js";
 const { server, dispose } = createImageGenServer({
   observer: dir => new Trace(new ImageEventSpool(dir)),

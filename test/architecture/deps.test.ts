@@ -8,12 +8,8 @@ const LAYERS = { shared: 0, config: 1, media: 2, qq: 3, context: 4, agent: 5, ob
 type Package = keyof typeof LAYERS;
 type Edge = [from: string, to: string];
 
-/** 只放 P1/P2 尚未消除的具体文件边；禁止按整个包豁免新增依赖。 */
+/** 只放 P2 尚未消除的具体文件边；禁止按整个包豁免新增依赖。 */
 const ALLOWED_EXCEPTIONS: Array<[from: string, to: string]> = [
-  // P1：生图包装与事件归位。
-  ['src/agent/pi-tools/images.ts', 'src/obs/image.ts'],
-  ['src/agent/tasks.ts', 'src/obs/image-events.ts'],
-  ['src/agent/tasks.ts', 'src/obs/image.ts'],
   // P2：后端契约、配置解析与观察者接口。
   ['src/agent/backends/pi.ts', 'src/obs/sessions/pi-adapter.ts'],
   ['src/agent/backends/select.ts', 'src/agent/backends/pi.ts'],

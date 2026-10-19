@@ -1,6 +1,6 @@
 import { ContextStore } from "../context/store.js";
 import type { Access } from "../context/access.js";
-import { observeImages } from "../obs/image.js";
+import { observeImages } from "../media/gen/observed.js";
 import { IMAGE_OPTIONS_JSON_SCHEMA, validateImageOptions, type ImageOptions } from "../media/gen/image-options.js";
 import { imageRefsValue } from "../media/gen/image-references.js";
 import { validateReferencesWithMedia } from "../context/image-references.js";

@@ -1,6 +1,6 @@
-import { ingestImageEvents } from "../obs/image-events.js";
+import { ingestImageEvents } from "../media/gen/events.js";
 import { trace } from "../shared/trace.js";
-import { observeImages } from "../obs/image.js";
+import { observeImages } from "../media/gen/observed.js";
 import path from "node:path";
 import { imageTimeoutMs } from "../media/gen/image-options.js";
 import { validateReferences } from "../media/gen/image-references.js";
