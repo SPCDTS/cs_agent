@@ -3,9 +3,8 @@
  * （http.ts 在服务端内部调用记忆路由取得，契约见 docs/O4-memory-api.md）；这里只做渲染，所有文本经 esc。
  * 时间线由 /assets/memory.js 用本地 vis-timeline 绘制，数据经 <script type="application/json"> 传入。
  */
-import type { AgingReport } from '../../context/aging.js';
 import { redactText } from '../../shared/redact.js';
-import type { AgingStatus, ArchiveRow, CompactionRow, Hit, MessageItem, Retention, ScopeSummary, ScopeTimeline, SummaryVersion } from '../memory/types.js';
+import type { AgingReport, AgingStatus, ArchiveRow, CompactionRow, Hit, MessageItem, Retention, ScopeSummary, ScopeTimeline, SummaryVersion } from '../memory/types.js';
 import { crumbs, dataScript } from './agents-pages.js';
 import { fmtInt } from './context-bar.js';
 import { empty, esc, fmtMs, fmtTime, fmtWhen, kv, stamp, uri } from './html.js';

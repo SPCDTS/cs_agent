@@ -11,7 +11,6 @@ type Edge = [from: string, to: string];
 /** 只放 P2 尚未消除的具体文件边；禁止按整个包豁免新增依赖。 */
 const ALLOWED_EXCEPTIONS: Array<[from: string, to: string]> = [
   // P2：后端契约、配置解析与观察者接口。
-  ['src/obs/ui/memory-pages.ts', 'src/context/aging.ts'],
 ];
 
 function files(dir: string): string[] {
