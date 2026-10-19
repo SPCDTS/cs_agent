@@ -49,7 +49,28 @@ toml_path() {
   echo "entrypoint: WARNING invalid path '$1' for $3, using '$2'" >&2
   printf '%s' "$2"
 }
-MODEL="$(toml_value "${CODEX_MODEL:-gpt-6.1-sol}" gpt-6.1-sol CODEX_MODEL)"
+# 模型 id 允许提供者前缀，仍拒绝可注入 TOML 的字符。
+MODEL="${CODEX_MODEL:-gpt-6.1-sol}"
+case "$MODEL" in
+  *[!A-Za-z0-9._/-]*) echo "entrypoint: WARNING invalid CODEX_MODEL, using gpt-6.1-sol" >&2; MODEL=gpt-6.1-sol ;;
+esac
+PROVIDER="${CODEX_PROVIDER:-magpie}"
+PROVIDER_CONFIG=""
+case "$PROVIDER" in
+  magpie)
+    MAGPIE_URL="${CODEX_MAGPIE_URL:-http://host.docker.internal:3425/v1}"
+    # 与 toml_path 一样只允许安全字符，额外放行 URL 的冒号；拒绝凭据、查询及片段。
+    case "$MAGPIE_URL" in
+      *[!A-Za-z0-9._/:-]*|http://|https://) echo "entrypoint: ERROR invalid CODEX_MAGPIE_URL" >&2; exit 1 ;;
+      http://*|https://*) ;;
+      *) echo "entrypoint: ERROR CODEX_MAGPIE_URL requires http(s)" >&2; exit 1 ;;
+    esac
+    MAGPIE_URL="$(printf '%s' "$MAGPIE_URL" | sed 's#/*$##')"
+    PROVIDER_CONFIG='model_provider = "magpie"'
+    ;;
+  openai) ;;
+  *) echo "entrypoint: ERROR CODEX_PROVIDER must be magpie or openai" >&2; exit 1 ;;
+esac
 EFFORT="$(toml_value "${CODEX_REASONING_EFFORT:-high}" high CODEX_REASONING_EFFORT)"
 WEB_SEARCH="$(toml_enum "${CODEX_WEB_SEARCH:-live}" live CODEX_WEB_SEARCH live cached disabled)"
 WEB_SEARCH_CONTEXT="$(toml_enum "${CODEX_WEB_SEARCH_CONTEXT:-low}" low CODEX_WEB_SEARCH_CONTEXT low medium high)"
@@ -162,7 +183,7 @@ CONFIG="$CODEX_HOME_DIR/config.toml"
 cat > "$CONFIG.tmp" <<TOML
 # 受管文件：由 entrypoint.sh 在每次容器启动时按环境变量重写（CODEX_MODEL / CODEX_REASONING_EFFORT /
 # CODEX_WEB_SEARCH / CODEX_WEB_SEARCH_CONTEXT / CODEX_BROWSER / CODEX_MCP_APPROVAL_MODE / QQ_CONTEXT_MAX_CHARS /
-# CODEX_IMAGE_GEN / CODEX_REMOTE_PLUGINS；CODEX_PLUGIN_PRUNE 控制写完配置后的缓存清理）。
+# CODEX_PROVIDER / CODEX_MAGPIE_URL / CODEX_IMAGE_GEN / CODEX_REMOTE_PLUGINS；CODEX_PLUGIN_PRUNE 控制写完配置后的缓存清理）。
 # 远程插件对 QQ 客服场景无用，默认关闭并清理 figma/gmail；其余已缓存插件仍会加载，全部清理设 CODEX_PLUGIN_PRUNE=all。
 # 不要手工修改——改动会在下次启动时被覆盖；请改 .env 后重启容器。不继承宿主机配置。
 # model_reasoning_effort 只是默认值：cs-agent 每轮按请求以 -c model_reasoning_effort=... 覆盖。
@@ -171,6 +192,7 @@ cat > "$CONFIG.tmp" <<TOML
 model = "$MODEL"
 model_reasoning_effort = "$EFFORT"
 web_search = "$WEB_SEARCH"
+$PROVIDER_CONFIG
 
 # codex 命令沙箱（cs-agent 以 -s workspace-write 运行）：命令可联网（CODEX_SANDBOX_NETWORK），
 # 只能写下列目录（CODEX_WRITABLE_ROOTS）；/data/codex、*.sqlite、/data/images 不在其中。
@@ -194,6 +216,19 @@ QQ_CONTEXT_MAX_CHARS = "$CONTEXT_MAX_CHARS"
 WORKSPACE_DIR = "$MCP_WORKSPACE_DIR"$ATTACH_ENV
 
 TOML
+if [ "$PROVIDER" = "magpie" ]; then
+  cat >> "$CONFIG.tmp" <<TOML
+
+[model_providers.magpie]
+name = "magpie"
+base_url = "$MAGPIE_URL"
+wire_api = "responses"
+env_key = "CODEX_MAGPIE_KEY"
+http_headers = { "x-openai-actor-authorization" = "cs-agent" }
+supports_websockets = false
+model_catalog_url = "$MAGPIE_URL/codex/models"
+TOML
+fi
 if [ "$IMAGE_GEN" = "on" ]; then
   cat >> "$CONFIG.tmp" <<TOML
 

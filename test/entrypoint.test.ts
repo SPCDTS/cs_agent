@@ -27,6 +27,9 @@ function runEntrypointIn(
   const data = path.join(dir, "data");
   const ws = path.join(dir, "ws");
   const inheritedEnv = { ...process.env };
+  for (const key of Object.keys(inheritedEnv)) {
+    if (["CODEX_PROVIDER", "CODEX_MAGPIE_URL", "CODEX_MAGPIE_KEY"].includes(key.toUpperCase())) delete inheritedEnv[key];
+  }
   delete inheritedEnv.CODEX_IMAGE_GEN;
   delete inheritedEnv.CODEX_REMOTE_PLUGINS;
   delete inheritedEnv.CODEX_PLUGIN_PRUNE;
@@ -95,6 +98,14 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     const t = parse(toml);
     expect(t).toMatchObject({
       model: '"gpt-6.1-sol"',
+      model_provider: '"magpie"',
+      "model_providers.magpie.name": '"magpie"',
+      "model_providers.magpie.base_url": '"http://host.docker.internal:3425/v1"',
+      "model_providers.magpie.wire_api": '"responses"',
+      "model_providers.magpie.env_key": '"CODEX_MAGPIE_KEY"',
+      "model_providers.magpie.http_headers": '{ "x-openai-actor-authorization" = "cs-agent" }',
+      "model_providers.magpie.supports_websockets": "false",
+      "model_providers.magpie.model_catalog_url": '"http://host.docker.internal:3425/v1/codex/models"',
       model_reasoning_effort: '"high"',
       web_search: '"live"',
       "features.remote_plugin": "false",
@@ -125,6 +136,42 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(t["mcp_servers.qq_context.env.DATA_DIR"]).toMatch(/^"\/[A-Za-z0-9._/-]+"$/);
     expect(t["mcp_servers.qq_context.env.QQ_ACCESS"]).toBeUndefined(); // 每轮由 -c 注入
     expect(t["mcp_servers.browser.command"]).toMatch(/playwright-mcp"$/);
+  });
+
+  it("支持带前缀模型、自定义 URL 与尾斜杠，key 不写入文件或诊断", () => {
+    const key = 'test-key-"\nshould-never-be-written';
+    const r = runEntrypoint({ CODEX_MODEL: "codex/gpt-6.1-sol", CODEX_MAGPIE_URL: "https://gateway.example:3425/v1/", CODEX_MAGPIE_KEY: key });
+    expect(r.status).toBe(0);
+    expect(parse(r.toml)).toMatchObject({ model: '"codex/gpt-6.1-sol"', "model_providers.magpie.base_url": '"https://gateway.example:3425/v1"', "model_providers.magpie.model_catalog_url": '"https://gateway.example:3425/v1/codex/models"' });
+    expect(r.toml + r.requirements + r.stdout + r.stderr).not.toContain(key);
+    expect(r.toml).not.toContain("experimental_bearer_token");
+  });
+
+  it("openai 省略全部 magpie 配置，重启可移除旧提供者段", () => {
+    const dir = tmp("cs-entry-");
+    expect(runEntrypointIn(dir, {}).status).toBe(0);
+    const r = runEntrypointIn(dir, { CODEX_PROVIDER: "openai", CODEX_MAGPIE_URL: 'ignored"url' });
+    expect(r.status).toBe(0);
+    expect(parse(r.toml).model_provider).toBeUndefined();
+    expect(r.toml).not.toContain("[model_providers.magpie]");
+    expect(r.toml).not.toContain("env_key =");
+  });
+
+  it.each(['http://host/"\nx=1', "http://user:secret@host/v1", "http://host/v1?key=x", "http://host/v1#x", "ftp://host/v1", "http://"])("非法 URL 不覆盖现有配置且不输出原值：%j", url => {
+    const dir = tmp("cs-entry-");
+    const before = runEntrypointIn(dir, {});
+    const r = runEntrypointIn(dir, { CODEX_MAGPIE_URL: url });
+    expect(r.status).not.toBe(0);
+    expect(r.toml).toBe(before.toml);
+    expect(r.stderr).toContain("ERROR");
+    expect(r.stderr).not.toContain(url);
+  });
+
+  it("缺 key 仍可生成配置，鉴权由真正启动 codex 的 runner 校验", () => {
+    const r = runEntrypoint({ CODEX_MAGPIE_KEY: "" });
+    expect(r.status).toBe(0);
+    expect(parse(r.toml)["model_providers.magpie.env_key"]).toBe('"CODEX_MAGPIE_KEY"');
+    expect(runEntrypoint({ CODEX_PROVIDER: "unknown" }).status).not.toBe(0);
   });
 
   it("omits the remote plugin feature override when enabled", () => {
