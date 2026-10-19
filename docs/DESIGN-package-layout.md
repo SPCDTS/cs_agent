@@ -243,3 +243,19 @@ P0 最终临时例外共 16 条（与 `test/architecture/deps.test.ts` 完全对
 - 当前 125 个源文件、468 条去重文件依赖边、66 条跨物理目录依赖对；按 P0 相同口径包级双向依赖为 **5 对**。media 的跨包依赖仅指向 shared，没有 qq（含 types）、context、agent、obs 或 mcp 依赖。
 - 5 对为：`src ↔ src/obs`、`src/agent ↔ src/agent/backends`、`src/context ↔ src/obs/memory`、`src/obs ↔ src/obs/memory`、`src/obs ↔ src/obs/sessions`，后续处理仍留给 P2。
 - 按迁移前版本逐项比对：10 个整文件迁移除 import 外内容一致；参考图权限拆分、通用读取校验与 QQ 图片段函数保持原样。变更文本保留 UTF-8、无 BOM、CRLF。`docs/ARCHITECTURE.md` §4 与本文 §6.2 已同步实际布局及澄清。
+
+### P0（2026-10-19，主会话验收）
+
+- 分支 `refactor/package-layout` 9 条提交 ff 到 main `cd4a1c3`；主会话沙箱外复跑：typecheck 通过，77 文件 / 1089 项通过（含 `test/architecture/deps.test.ts` 13 项），`npm run build` 后三个 dist 入口存在。
+- 依赖规则：16 条临时例外全部对应 P1/P2 条目，并由"例外必须仍存在"的断言防止过期；按 §0 口径包级环 19 → 7 对（余下的是 obs 根 ↔ obs 子目录、agent ↔ agent 子目录、root ↔ obs、context ↔ obs/memory 这类 P2 或分层允许的边）。
+- 与设计的偏离：log/redact 多拆出 `log-core.ts`/`redact-core.ts` 以消除文件级环；`legacyRouteText` 随 `inboundFromTicket` 一并下沉到 `qq/ticket.ts`；`ensureMemoryTables` 落在新建的 `obs/schema.ts`；`scopeLabel → context/access` 作为 UI 白名单的明确允许项；原模块保留兼容 re-export，P2 结束时统一删除。
+- 部署：由 cs-agent-b7 以 main `c360eb8`（含 P0）构建部署，随后主会话以 `8b5da19`（+ 插件修剪）再次部署，镜像 `649a5e0c…`，容器 healthy。真实数据冒烟零错误：Agent/会话/上下文分析（含基础指令展开）、记忆时间线/检索/归档、召回记录与摘要血缘（整理后已出现版本 #4）、图片画廊与 `/media/<sha>`；独立 stdio 进程调用 `qq_search` 成功并写入召回事件 #6，证明搬到 `context/` 的工具门面与 `obs/schema.ts` 的建表在独立进程里正常。
+- §4 第 4 条的"P2 后包级环为 0"按物理目录口径不可达（obs 根与子目录、config 作为叶子被 obs 引用都是允许边），改为：P2 结束时 `deps.test.ts` 的例外清单为空、无层序违规。
+
+### P1（2026-10-19，主会话验收）
+
+- 分支 `refactor/package-layout-p1` 4 条提交 cherry-pick 到 main（2f36507…ed622f5）；主会话沙箱外复跑：typecheck 通过，77 文件 / 1095 项通过，`npm run build` 三个 dist 入口存在；`deps.test.ts` 14 项通过，例外由 16 条减到 13 条（P1 三条全部消除，无新增）。
+- 设计澄清：§1 原把 qq 置于 media 之下，与 P1 要求 qq 引用 media 的下载/校验矛盾；裁定层序改为 shared → config → media → qq → context → agent → obs → mcp → main，media 不得 import qq 的任何文件（含 qq/types）。实际未出现 media 需要 qq/types 的情况。
+- 与设计的偏离：`image-events.ts` 归入 `media/gen/events.ts`（只处理票据目录 JSONL，不开观测库）；`validateReferencesWithMedia` 依赖 ContextStore 权限检查，原样切到新建的 `context/image-references.ts`；`loadImage` 等通用校验进 `media/limits.ts`，`qq/image.ts` 保留 re-export（P2 删）。主会话逐行对比原文件确认为纯切分，测试只改 import 路径。
+- 部署：镜像 `fb814556…`（干净 worktree，ed622f5），队列空闲时切换，容器 healthy、无新告警。冒烟零错误：仪表盘四套浏览器脚本（Agent/上下文分析含基础指令展开/记忆/召回/图片画廊与 /media）、stdio 真实进程调用 `qq_search`、搬动后的 `dist/mcp/image-gen.js` 以 stdio 启动并 `tools/list` 返回 `generate_image`。
+- 备注：主目录 `node_modules` 曾缺 js-tiktoken 导致 vitest 全局构建失败，`npm ci` 后恢复，与代码无关。上一条提交 9a47168 的说明误称"恢复 P0 记录"，实际该记录此前从未写入成功，本次首次写入。
