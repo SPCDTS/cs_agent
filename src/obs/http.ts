@@ -5,7 +5,7 @@ import { imageBinary } from './memory/images.js';
 import { SessionError } from './sessions/types.js';
 import { imagesPageBody, imageDetailBody, IMAGES_NOTE } from './ui/images-pages.js';
 import type { ImagePage, ImageDetail } from './memory/types.js';
-import { isThreadKey, type ThreadKey } from "../agent/codex-runner.js";
+import { isThreadKey, type ThreadKey } from "../agent/codex/runner.js";
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual, randomBytes, createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -27,7 +27,7 @@ import { summarize, type LiveBus, type LiveCard, type LiveMessage } from './live
 import type { SettingsStore, RuntimeSettings } from '../agent/settings.js';
 import { formatBackendOverrides, SETTINGS_TICKET } from '../agent/settings.js';
 import { parseBackendOverrides } from '../agent/backends/select.js';
-import { REASONING_EFFORTS } from '../agent/codex-runner.js';
+import { REASONING_EFFORTS } from '../agent/codex/runner.js';
 import { ASSETS } from './ui/client.js';
 import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
 import { MESSAGE_PAGE, archivesPageBody, memoryHomeBody, messageWindow, rangeParams, scopePageBody, searchPageBody, summaryPageBody,

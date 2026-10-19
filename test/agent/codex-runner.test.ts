@@ -25,7 +25,7 @@ import {
   WORKSPACE_AGENTS_MD_V2,
   WORKSPACE_AGENTS_STUB,
   writeGlobalAgentsMd,
-} from "../../src/agent/codex-runner.js";
+} from "../../src/agent/codex/runner.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
 /** codex-threads.json 中某个键的记录 */

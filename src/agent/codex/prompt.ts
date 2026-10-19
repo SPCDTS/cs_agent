@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { AGENTS_TEMPLATE_MARKER, DEFAULT_CODEX_PROMPT, type AgentsMdOptions } from "./codex-runner.js";
+import { AGENTS_TEMPLATE_MARKER, DEFAULT_CODEX_PROMPT, type AgentsMdOptions } from "./runner.js";
 
-export { DEFAULT_CODEX_PROMPT } from "./codex-runner.js";
+export { DEFAULT_CODEX_PROMPT } from "./runner.js";
 export const CODEX_PROMPT_MAX_BYTES = 64 * 1024;
 
 export interface CodexPromptOptions extends AgentsMdOptions {

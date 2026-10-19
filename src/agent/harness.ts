@@ -5,7 +5,7 @@ import { clampThinkingLevel, type Api, type Model, type Models, type ModelThinki
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { createRegistry, Harness, type Extension, type Storage } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { CodexAuthFileStore } from "../auth/codex-oauth.js";
+import { CodexAuthFileStore } from "./codex/oauth.js";
 import { log } from "../shared/log.js";
 
 /**

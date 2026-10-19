@@ -3,8 +3,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CodexPromptStore, DEFAULT_CODEX_PROMPT, StaleRevisionError, CODEX_PROMPT_MAX_BYTES } from "../../src/agent/codex-prompt.js";
-import { AGENTS_TEMPLATE_MARKER } from "../../src/agent/codex-runner.js";
+import { CodexPromptStore, DEFAULT_CODEX_PROMPT, StaleRevisionError, CODEX_PROMPT_MAX_BYTES } from "../../src/agent/codex/prompt.js";
+import { AGENTS_TEMPLATE_MARKER } from "../../src/agent/codex/runner.js";
 
 const dirs: string[] = [];
 afterEach(async () => {

@@ -20,7 +20,7 @@ import { imageRefsValue, validateReferences } from "../../media/gen/image-refere
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { buildCodexPrompt, CodexTimeoutError, isReasoningEffort, type CodexRunner, type ReasoningEffort } from "../codex-runner.js";
+import { buildCodexPrompt, CodexTimeoutError, isReasoningEffort, type CodexRunner, type ReasoningEffort } from "../codex/runner.js";
 import { collectNewImages, listFiles } from "../../media/gen/image-collect.js";
 import { ticketImageDir } from "../../media/gen/image-gen.js";
 import { log } from "../../shared/log.js";

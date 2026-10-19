@@ -8,7 +8,7 @@ import type { RouteName } from "./router.js";
 /** 派发时冻结；执行、后处理与恢复只读此快照。 */
 export type TicketSettings = {
   backend: import('./backends/types.js').BackendName;
-  codexReasoningEffort: import('./codex-runner.js').ReasoningEffort;
+  codexReasoningEffort: import('./codex/runner.js').ReasoningEffort;
 };
 
 export type TicketSource = {

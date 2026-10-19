@@ -1,10 +1,10 @@
-import { codexWorkspacePolicy, prepareCodexWorkspace } from "./codex-workspace.js";
-import type { RecallTokens } from "../context/media-recall-server.js";
-import type { ContextUsageStore } from "./context-usage.js";
-import { loadCodexContextWindow } from "./codex-model-catalog.js";
-import { readRolloutContextUsage } from "./codex-context-usage.js";
-import { readThreadArchive, writeThreadArchive } from "./thread-archive.js";
-import { imageRefsValue } from "../media/gen/image-references.js";
+import { codexWorkspacePolicy, prepareCodexWorkspace } from "./workspace.js";
+import type { RecallTokens } from "../../context/media-recall-server.js";
+import type { ContextUsageStore } from "../context-usage.js";
+import { loadCodexContextWindow } from "./model-catalog.js";
+import { readRolloutContextUsage } from "./context-usage.js";
+import { readThreadArchive, writeThreadArchive } from "../thread-archive.js";
+import { imageRefsValue } from "../../media/gen/image-references.js";
 /**
  * 按会话域隔离 codex 线程：owner（owner 私聊）、group:<id> 与 private:<qq>，记录在 ${DATA_DIR}/codex-threads.json。
  * 首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
@@ -19,10 +19,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { TicketSource } from "./docs.js";
-import { log } from "../shared/log.js";
-import { accessForSource, isScope, parseAccess } from "../context/access.js";
-import { clip } from "../context/store.js";
+import type { TicketSource } from "../docs.js";
+import { log } from "../../shared/log.js";
+import { accessForSource, isScope, parseAccess } from "../../context/access.js";
+import { clip } from "../../context/store.js";
 
 export interface CodexRunnerOptions {
   /** 可执行文件及前置参数，例如 ["codex"] 或测试中的 [node, fake-codex.mjs] */

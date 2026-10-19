@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { CodexAuthFileStore, codexFileToCredential, jwtExpiryMs } from "../../src/auth/codex-oauth.js";
+import { CodexAuthFileStore, codexFileToCredential, jwtExpiryMs } from "../../src/agent/codex/oauth.js";
 import { loadConfig } from "../../src/config.js";
 import { tmp } from "./helpers.js";
 

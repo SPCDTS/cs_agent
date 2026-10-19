@@ -3,7 +3,7 @@
  * 后端只产出文本（与回合内生成的图片）；回复目标、发送与后处理由 agent 任务负责，后端不能也不需要指定。
  */
 import type { TicketSource } from "../docs.js";
-import type { ThreadKey } from "../codex-runner.js";
+import type { ThreadKey } from "../codex/runner.js";
 
 export type BackendName = "codex" | "pi";
 export const BACKEND_NAMES = ["codex", "pi"] as const;

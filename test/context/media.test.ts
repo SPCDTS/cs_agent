@@ -12,7 +12,7 @@ import { clipWithImages, formatMessage, formatMessageFull, formatRecent, without
 import { normalizeMessage } from "../../src/qq/policy.js";
 import type { ReplyTicketRecord } from "../../src/qq/types.js";
 import type { Access } from "../../src/context/access.js";
-import { buildCodexPrompt } from "../../src/agent/codex-runner.js";
+import { buildCodexPrompt } from "../../src/agent/codex/runner.js";
 import { tmp } from "../agent/helpers.js";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");

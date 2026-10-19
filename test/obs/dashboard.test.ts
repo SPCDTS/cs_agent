@@ -11,7 +11,7 @@ import { registerSecrets } from '../../src/shared/redact.js';
 import { ContextStore } from '../../src/context/store.js';
 import { loadConfig } from '../../src/config.js';
 import { SettingsStore, SETTINGS_TICKET, type RuntimeSettings } from '../../src/agent/settings.js';
-import { CodexRunner } from '../../src/agent/codex-runner.js';
+import { CodexRunner } from '../../src/agent/codex/runner.js';
 import { CodexBackend } from '../../src/agent/backends/codex.js';
 import { FIXTURES } from '../agent/helpers.js';
 import { ContextUsageStub } from './fixtures/context-usage-stub.js';

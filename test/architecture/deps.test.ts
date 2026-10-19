@@ -14,7 +14,7 @@ const ALLOWED_EXCEPTIONS: Array<[from: string, to: string]> = [
   ['src/agent/backends/pi.ts', 'src/obs/sessions/pi-adapter.ts'],
   ['src/agent/backends/select.ts', 'src/agent/backends/pi.ts'],
   ['src/agent/backends/types.ts', 'src/agent/docs.ts'],
-  ['src/agent/backends/types.ts', 'src/agent/codex-runner.ts'],
+  ['src/agent/backends/types.ts', 'src/agent/codex/runner.ts'],
   ['src/agent/pi-tools/index.ts', 'src/obs/memory/instrumentation.ts'],
   ['src/config.ts', 'src/context/access.ts'],
   ['src/config.ts', 'src/agent/router.ts'],
@@ -55,8 +55,6 @@ function packageOf(file: string): Package {
   if (file === 'src/main.ts') return 'main';
   // 根目录的文件系统探测是底层工具，P0 未要求搬动其路径。
   if (file === 'src/fs-check.ts') return 'shared';
-  // P2 才搬 OAuth 文件；现在按设计中的 agent 归属检查，保留其物理目录用于环统计。
-  if (file === 'src/auth/codex-oauth.ts') return 'agent';
   const name = file.split('/')[1];
   if (name in LAYERS) return name as Package;
   throw new Error(`未归层的源文件：${file}`);

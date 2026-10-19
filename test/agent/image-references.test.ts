@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { imageRefsArgs } from "../../src/agent/codex-runner.js";
+import { imageRefsArgs } from "../../src/agent/codex/runner.js";
 import { ContextStore } from "../../src/context/store.js";
 import { mediaFixture } from "../context/media-fixture.js";
 import { validateReferencesWithMedia } from "../../src/context/image-references.js";

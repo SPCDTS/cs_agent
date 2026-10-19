@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { isScope } from "../context/access.js";
+import { isScope } from "../../context/access.js";
 
 /** 0.163 的命名权限配置与 sandbox_mode 互斥，必须整份按轮注入。 */
 export function codexWorkspacePolicy(base: string, dataDir: string, key: string, sandbox: string, network = true, codexHome = path.join(dataDir, "codex")) {

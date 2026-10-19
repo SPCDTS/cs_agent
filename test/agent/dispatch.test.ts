@@ -13,7 +13,7 @@ import { Dispatcher, FALLBACK_REPLY, MAX_ATTEMPTS } from "../../src/agent/dispat
 import { DispatchDoc, TicketDoc } from "../../src/agent/docs.js";
 import { createCsAgentExtension } from "../../src/agent/extension.js";
 import { openHarness } from "../../src/agent/harness.js";
-import { CodexRunner } from "../../src/agent/codex-runner.js";
+import { CodexRunner } from "../../src/agent/codex/runner.js";
 import { CodexBackend } from "../../src/agent/backends/codex.js";
 import { createBackendSelector, PiBackendStub } from "../../src/agent/backends/select.js";
 import type { AgentBackend, BackendName } from "../../src/agent/backends/types.js";

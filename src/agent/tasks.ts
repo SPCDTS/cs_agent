@@ -22,7 +22,7 @@ import { accessForSource, accessToString } from "../context/access.js";
 import type { ContextStore } from "../context/store.js";
 import type { QQBridge } from "../qq/types.js";
 import { log } from "../shared/log.js";
-import { isReasoningEffort, threadKeyForSource } from "./codex-runner.js";
+import { isReasoningEffort, threadKeyForSource } from "./codex/runner.js";
 import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState, type TicketSettings } from "./docs.js";
 import { collectNewImages } from "../media/gen/image-collect.js";
 import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendingImages, savePendingImage, PendingImageMarkerError } from "../media/gen/image-pending.js";

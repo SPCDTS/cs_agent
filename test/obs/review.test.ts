@@ -11,7 +11,7 @@ import { redactText, registerSecrets } from '../../src/shared/redact.js';
 import { loadConfig } from '../../src/config.js';
 import { publicHealth, loadObsToken } from '../../src/obs/token.js';
 import { buildImageEnv } from '../../src/media/gen/image-gen.js';
-import { buildCodexEnv, CodexRunner } from '../../src/agent/codex-runner.js';
+import { buildCodexEnv, CodexRunner } from '../../src/agent/codex/runner.js';
 import { ImageEventSpool, ingestImageEvents, IMAGE_EVENT_BYTES } from '../../src/media/gen/events.js';
 const clean: (()=>void)[]=[];
 afterEach(()=>{for(const fn of clean.splice(0).reverse())fn();});

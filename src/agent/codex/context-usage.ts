@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import type { ContextUsageHistory } from "./context-usage.js";
+import type { ContextUsageHistory } from "../context-usage.js";
 
 export const ROLLOUT_USAGE_MAX_BYTES = 2 * 1024 * 1024;
 const object = (v: unknown): Record<string, unknown> | undefined =>

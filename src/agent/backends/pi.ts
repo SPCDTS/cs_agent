@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT, withAbortSignal, awaitWithContext } from "@earendil
 import type { Models, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { AssistantEntry, createRegistry, defineDoc, Harness, ROOT_CONVERSATION_ID, watchEvents, type Conversation, type ConversationId, type Cursor, type EntryId, type ModelRef, type Storage, type Submission } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { buildCodexPrompt } from "../codex-runner.js";
+import { buildCodexPrompt } from "../codex/runner.js";
 import { collectNewImages } from "../../media/gen/image-collect.js";
 import { ticketImageDir } from "../../media/gen/image-gen.js";
 import { validateReferences } from "../../media/gen/image-references.js";

@@ -3,7 +3,7 @@ import path from "node:path";
 import { CODEX_LAST_FILE, CodexBackend, MAX_CODEX_TURNS, ticketWorkDir } from "../../src/agent/backends/codex.js";
 import { FIXTURES, tmp } from "./helpers.js";
 import { describe, expect, it, vi } from "vitest";
-import { CodexRunner, type AskOptions } from "../../src/agent/codex-runner.js";
+import { CodexRunner, type AskOptions } from "../../src/agent/codex/runner.js";
 import { backendNameFor, createBackendSelector, parseBackendOverrides, PI_NOT_IMPLEMENTED, PiBackendStub } from "../../src/agent/backends/select.js";
 import type { AgentBackend } from "../../src/agent/backends/types.js";
 

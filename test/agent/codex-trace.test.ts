@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFile
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CodexRunner } from "../../src/agent/codex-runner.js";
-import { purgeCodexTrace } from "../../src/agent/codex-trace.js";
+import { CodexRunner } from "../../src/agent/codex/runner.js";
+import { purgeCodexTrace } from "../../src/agent/codex/trace.js";
 import { loadConfig } from "../../src/config.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
