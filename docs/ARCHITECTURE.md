@@ -64,7 +64,7 @@ cs_agent/
 ├─ package.json, tsconfig.json   （ESM, TypeScript, Node 24, vitest）
 ├─ src/
 │  ├─ main.ts                    启动：加载配置 → 打开 Harness → resume() → 启动 QQBridge → 事件循环
-│  ├─ config.ts                  环境变量解析与校验（zod）
+│  ├─ config.ts                  环境变量与基础值校验（zod），不 import 业务模块
 │  ├─ shared/                    横切工具（不依赖业务或观测层）
 │  │  ├─ log.ts, log-core.ts     结构化日志门面、级别、缓冲区与订阅出口
 │  │  ├─ redact.ts, redact-core.ts  环境秘密注册、生命周期与脱敏核心
@@ -89,33 +89,37 @@ cs_agent/
 │  ├─ agent/                     ★ Agent A
 │  │  ├─ harness.ts              createModels + openai-codex provider + 注册表 + SQLite storage
 │  │  ├─ extension.ts            defineExtension("cs-agent")：注册两个 durable 任务（v3 无模型工具）
+│  │  ├─ config.ts               组合时解析 owner、IMAGE_PREFIXES 与后端覆盖表
 │  │  ├─ router.ts               规则分流（IMAGE_PREFIXES）
 │  │  ├─ tasks.ts                defineTask：cs.image（generate → reply）、cs.agent（handle → postprocess → reply）
-│  │  ├─ backends/               AgentBackend 接口、AGENT_BACKEND 选择、codex 适配、pi 占位
-│  │  ├─ codex-runner.ts         固定 codex 线程 owner/shared；互斥队列；JSONL 解析；线程 id 持久化；AGENTS.md
+│  │  ├─ backends/               纯请求契约、后端选择、Codex/Pi 实现与 Pi 只读会话源契约
+│  │  ├─ codex/                  runner、prompt、trace、context-usage、model-catalog、workspace、oauth
+│  │  │  ├─ runner.ts            owner/会话域线程、互斥队列、JSONL、线程持久化与 AGENTS.md
+│  │  │  └─ oauth.ts             将 Codex auth.json 的 ChatGPT tokens 映射为 pi-ai 凭据
 │  │  ├─ reply-postprocess.ts    回复发送保护（≤4000，不改格式）
 │  │  └─ dispatch.ts             admit（会话 + TicketDoc + 索引）→ scope FIFO → 建任务 → waitForTask → 兜底
 │  ├─ context/                   消息库、访问范围、格式化、衰老与媒体持久化
 │  │  ├─ access.ts               访问范围校验、owner 解析与 scopeLabel
+│  │  ├─ observer.ts             SummaryObserver/RecallObserver 与 DTO；由 main 注入存储实现
 │  │  ├─ image-references.ts    票据附件与媒体库参考图的访问权限校验
 │  │  ├─ qq-context-tool.ts      QQ 召回工具实现，供 MCP、pi 与面板共用
 │  │  └─ recall-results.ts       按实际返回正文计算召回命中
 │  ├─ obs/                       观测存储、路由与面板
 │  │  ├─ store.ts, schema.ts     观测库与记忆表 DDL；独立进程共用建表逻辑
-│  │  ├─ http.ts, http-util.ts   路由挂载、页面组合与 SSE/CSRF 工具
+│  │  ├─ http.ts, http-util.ts   240 行路由组合入口与 SSE/CSRF 工具
+│  │  ├─ dashboard-*.ts         面板选项契约、POST 处理与文件/表单边界
 │  │  ├─ live.ts                 实时事件摘要与会话卡片
 │  │  ├─ sessions/              会话索引、读取、订阅及会话路由
 │  │  ├─ context/               上下文分析及独立的 /context 路由
 │  │  ├─ memory/                记忆读取、埋点和记忆路由
-│  │  └─ ui/                    HTML 与前端资源；context-bar 保留原有计算导出的兼容重导出
-│  ├─ mcp/                       codex 的 stdio MCP：qq-context.ts（聊天记录）、image-gen.ts（生图）
-│  │  └─ qq-context-server.ts   工具注册、回调注入与图片调用适配；查询委托 context
-│  └─ auth/codex-oauth.ts        把 /data/codex/auth.json 的 ChatGPT tokens 映射为 pi-ai 凭据
+│  │  └─ ui/                    HTML 与前端资源；dashboard-pages 接收只读数据，计算直引 shared
+│  └─ mcp/                       codex 的 stdio MCP：qq-context.ts（聊天记录）、image-gen.ts（生图）
+│     └─ qq-context-server.ts   工具注册、回调注入与图片调用适配；查询委托 context
 ├─ test/                         vitest；qq/ 下的测试归 Agent B，其余归 Agent A
 └─ scripts/                      init-auth.ps1（把宿主机 ~/.codex/auth.json 复制进 ./data/codex/）
 ```
 
-P0/P1 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-layout.md#61-p0-实际搬迁对照)、[§6.2](DESIGN-package-layout.md#62-p1-实际搬迁对照)。依赖守卫位于 `test/architecture/deps.test.ts`；media 位于 qq 下层，剩余 13 条临时例外均留给 P2 的 codex/接口/配置/观察者整理。
+P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-layout.md#61-p0-实际搬迁对照)、[§6.2](DESIGN-package-layout.md#62-p1-实际搬迁对照)、[§6.3](DESIGN-package-layout.md#63-p2-实际搬迁对照)。依赖守卫位于 `test/architecture/deps.test.ts`；media 位于 qq 下层，P2 后例外清单为空，逻辑分层跨包无环。P0/P1 兼容转导出已清理；物理目录口径仍有 7 对双向边，原因与完整清单见 §6.3。
 
 ## 5. 关键设计决策
 

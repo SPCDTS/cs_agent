@@ -213,6 +213,52 @@ P0 最终临时例外共 16 条（与 `test/architecture/deps.test.ts` 完全对
 | `src/agent/tasks.ts` | `src/obs/image-events.ts` |
 | `src/agent/tasks.ts` | `src/obs/image.ts` |
 
+### 6.3 P2 实际搬迁对照
+
+本轮在 `D:/project/cs_agent-p2`、分支 `refactor/package-layout-p2` 上，以 `ed622f5` 为起点实施。七个整文件迁移使用 `git mv`；其余为职责与类型抽取，调用处直接引用新归属。没有修改 §1 的分层规则或 UI 白名单，13 条 P2 临时例外全部消除，`ALLOWED_EXCEPTIONS = []`，仍保留过期、重复例外检查。
+
+| 旧路径 / 职责 | 新路径 / 改法 | 移动的导出 / 逻辑 |
+|---|---|---|
+| `src/agent/codex-runner.ts` | `src/agent/codex/runner.ts` | Codex 运行器、参数构造、线程与提示词逻辑；内部流程不改 |
+| `src/agent/codex-prompt.ts` | `src/agent/codex/prompt.ts` | `CodexPromptStore`、提示词版本与持久化 |
+| `src/agent/codex-trace.ts` | `src/agent/codex/trace.ts` | 官方 trace 清理 |
+| `src/agent/codex-context-usage.ts` | `src/agent/codex/context-usage.ts` | rollout 用量读取 |
+| `src/agent/codex-model-catalog.ts` | `src/agent/codex/model-catalog.ts` | 模型上下文窗口目录 |
+| `src/agent/codex-workspace.ts` | `src/agent/codex/workspace.ts` | 按会话隔离的工作区规则 |
+| `src/auth/codex-oauth.ts` | `src/agent/codex/oauth.ts` | OAuth 凭据适配；移除空 auth 目录和依赖测试特判 |
+| `agent/docs.ts`、`agent/codex/runner.ts` 的请求契约 | `src/agent/backends/types.ts` | `TicketSource`、`TicketSettings`、`ThreadKey`、`ReasoningEffort`；实现反向引用契约，接口不再引用 docs/runner |
+| `agent/backends/select.ts → pi.ts` | 删除 `PiBackend` 转导出 | 选择器原本已接收注册的后端实例；main 直接 import Pi，无需增加工厂或改变初始化 |
+| `obs/sessions/pi-adapter.ts` 的会话源类型 | `src/agent/backends/pi-session-types.ts` | `PiConversation`、`PiEntryPage`、`PiSessionSource`；PiConversation 直接声明原有字段，不依赖观测 SessionRef |
+| `config.ts` 的业务解析 | `src/agent/config.ts` | `resolveAgentConfig` / `loadAgentConfig` 在主入口、MCP 构造或面板构造处调用原来的 owner、前缀、覆盖表解析；原配置键、默认值、启动错误文字和配置页派生字段保留 |
+| `obs/memory/instrumentation.ts` 的业务观察契约 | `src/context/observer.ts` | `SummaryObserver`、`RecallObserver`，以及 `RecallHit`、`RecallObservation`、`RecallRecord`、`SummarySource`；实现类显式 implements，main 已有的实例注入继续使用，MCP 独立打开行为不变 |
+| `obs/ui/memory-pages.ts → context/aging.ts` | 经 `obs/memory/types.ts` 引用 | `AgingReport` 作为记忆页面契约转导出；这是任务要求的契约出口，不是旧路径兼容层 |
+| `obs/http.ts` 内联页面与页面路由 | `src/obs/ui/dashboard-pages.ts` | 总览、实时、票据、设置、配置、会话/记忆页面组合及 `agingNote`；通过结构化只读接口取得业务数据，不 import 存储或后端实现 |
+| `obs/http.ts` 的文件/表单边界、POST 与选项类型 | `obs/dashboard-io.ts`、`obs/dashboard-post.ts`、`obs/dashboard-types.ts` | 路径、大小、秘密与版本检查，写操作及面板组合接口；`agentMdRevision` 与测试契约改为直接 import 新位置 |
+
+删除的 P0/P1 兼容 re-export 如下，源码和测试调用方均直接 import 目标模块：
+
+| 原模块 | 删除的名字 | 直接引用的目标 |
+|---|---|---|
+| `agent/dispatch.ts` | `inboundFromTicket` | `qq/ticket.ts` |
+| `agent/router.ts` | `legacyRouteText` | `qq/ticket.ts` |
+| `obs/http.ts` | `SseWriter`、`sseWriter`、`csrfToken` | `obs/http-util.ts` |
+| `obs/ui/html.ts` | `scopeLabel` | `context/access.ts` |
+| `obs/memory/instrumentation.ts` | `ensureMemoryTables` | `obs/schema.ts` |
+| `mcp/qq-context-server.ts` | `callQQContextTool` | `context/qq-context-tool.ts` |
+| `obs/store.ts` | `ObsEvent` | `shared/trace.ts` |
+| `obs/ui/context-bar.ts` | `STALE_MS`、`toContextUsage`、`fmtInt`、`fmtShort`、`ratio`、`usageWindow`、`fmtPct`、`sortUsage`、`ContextUsage`、`ContextUsageView` | `shared/format.ts` |
+| `qq/image.ts` | `MAX_IMAGES`、`MIN_IMAGE_BYTES`、`MAX_IMAGE_BYTES`、`isSupportedImage`、`loadImage` | `media/limits.ts` |
+
+另外删除 `agent/backends/select.ts` 的 `PiBackend` 转导出。`shared/log.ts`、`shared/redact.ts` 是带初始化职责的正式门面，其 core 导出不是旧路径兼容出口，因此保留；已有 `qq/index.ts`、Codex prompt 常量出口等非 P0/P1 兼容导出不扩大清理范围。
+
+实现与验收口径说明：
+
+- 面板除页面体外还抽出了 POST、I/O 与接口，以满足 HTTP 入口 ≤300 行并保持 UI 依赖白名单；`obs/http.ts` 为 **240 行**。静态逐字比对确认：页面函数只将指标 SQL 和上下文工具调用替换为等价的注入回调，POST 函数内容未变。既有 dashboard/http 测试只调整必要 import，断言未改。
+- `config.ts` 不再 import 任何业务模块。基础路径拼接及第三方 `DEFAULT_COMPACTION_POLICY` 默认值读取保持不变；业务派生字段由 `AgentConfig` 承载，不改变环境变量语义或面板展示。
+- **§4 的“P2 包级环为 0”按 §0 的物理目录口径未达成：实际为 7 对。** §1 的逻辑分层与物理目录不是同一个图：`main.ts` 和 `config.ts` 都计入 `src`，因此合法的 `main → agent → config` 会被折叠成目录双向边；同样，obs 根目录同时放路由与存储，agent 根目录同时放调度与共享后端工具。Codex 子目录与接口搬迁也会改变目录统计，但不等于引入文件环。未为了数字归零而改入口路径、增加白名单或进行任务外的存储/运行时目录搬迁。
+- 7 对为：`src ↔ src/agent`、`src ↔ src/obs`、`src/agent ↔ src/agent/backends`、`src/agent ↔ src/agent/codex`、`src/agent/backends ↔ src/agent/codex`、`src/obs ↔ src/obs/memory`、`src/obs ↔ src/obs/sessions`。按 §1 包归属统计的跨包依赖环为 **0**，所有内部方向约束通过。测试保留原物理目录 ≤10 的断言，新增逻辑包无环与 HTTP 行数检查；没有将物理目录数字冒充为 0。
+
+
 ## 7. 验收记录
 
 ### P0 本地验收（2026-10-19）
@@ -243,6 +289,26 @@ P0 最终临时例外共 16 条（与 `test/architecture/deps.test.ts` 完全对
 - 当前 125 个源文件、468 条去重文件依赖边、66 条跨物理目录依赖对；按 P0 相同口径包级双向依赖为 **5 对**。media 的跨包依赖仅指向 shared，没有 qq（含 types）、context、agent、obs 或 mcp 依赖。
 - 5 对为：`src ↔ src/obs`、`src/agent ↔ src/agent/backends`、`src/context ↔ src/obs/memory`、`src/obs ↔ src/obs/memory`、`src/obs ↔ src/obs/sessions`，后续处理仍留给 P2。
 - 按迁移前版本逐项比对：10 个整文件迁移除 import 外内容一致；参考图权限拆分、通用读取校验与 QQ 图片段函数保持原样。变更文本保留 UTF-8、无 BOM、CRLF。`docs/ARCHITECTURE.md` §4 与本文 §6.2 已同步实际布局及澄清。
+
+### P2 本地验收（2026-10-19）
+
+- 分支 `refactor/package-layout-p2`，起点 `ed622f5`；所有实施与提交均在 `D:/project/cs_agent-p2`。没有构建镜像、部署、修改 data/ 或 scripts/entrypoint.sh；任务说明文件不提交。锁文件依赖仅安装在本 worktree，npm 缓存也位于本 worktree。
+- `npm.cmd run typecheck` 通过，覆盖源码与测试两个 tsconfig。`test/architecture/deps.test.ts` 的 **16 项全部通过**，例外清单为空，未放宽任何依赖规则。
+- `npx.cmd vitest run` 首轮为 **73 个文件通过 / 4 个文件失败 / 1 个文件跳过；1071 项通过 / 26 项失败 / 2 项跳过**（1099 项，159.74 秒）。入口脚本的 22 项因系统临时目录的 shell 可写性检查失败；仅将该次复跑的 TEMP/TMP 指向 `D:/project/cs_agent-p2/workspace/layout-p2/test-tmp`，`test/entrypoint.test.ts` **22 项全部通过**（46.83 秒）。未修改测试断言或入口脚本。汇总首轮与定向复跑，已有 **1093 项通过，4 项仍未通过，2 项按平台条件跳过**，不能称为全量全绿。
+- 下列 4 项用原断言定向复跑仍失败（82.10 秒）。对本次创建、3 秒后自行结束的诊断子进程调用 `taskkill /PID <pid> /T /F`，返回 `ERROR: Access denied`。未申请或等待沙箱外审批，需主会话在沙箱外复验。
+
+| 文件 | 未通过的用例 | 定向复跑结果 |
+|---|---|---|
+| `test/agent/codex-runner.test.ts` | `timeout kills the process tree and throws CodexTimeoutError` | 约 20 秒自行结束，不满足 <8 秒断言 |
+| `test/agent/backends.test.ts` | `two restarts while queued keep attempts at zero, then the ticket runs once (F5)` | 30 秒测试超时 |
+| `test/agent/dispatch.test.ts` | `crash after codex wrote its output but before the agentResult commit → recovery reuses the file; codex runs exactly once (R1)` | 30 秒测试超时，清理 hook 10 秒超时 |
+| `test/agent/dispatch.test.ts` | `crash mid-turn (marker, no output) → logged as interrupted and re-asked exactly once (R1)` | 30 秒测试超时，清理 hook 10 秒超时 |
+
+- `test/agent/pi-sandbox-linux.test.ts` 两项真实 bwrap 检查在 Windows 按平台条件跳过：文件/令牌/会话隔离及可写目录、loopback 网络与超时/取消的进程树传播。它们未在本轮 Windows 环境验证。定向复跑因名称过滤产生的 126 项 skipped 不属于新增未验证项，它们已包含在首轮全量结果内。
+- 面板相关定向检查的 `memory-pages.test.ts` 曾出现 5 项 `bad port`，单独复跑 10 项全部通过，最终全量测试中也通过；dashboard/http 原有断言通过。全量测试触发的快照换行重写已核对内容一致并恢复原 CRLF，没有提交快照改动。
+- `npm.cmd run build` 通过，`dist/main.js`、`dist/mcp/qq-context.js`、`dist/mcp/image-gen.js` 都存在；真实 stdio 的 image_gen / qq_context 测试在全量运行中通过。
+- 当前 **132 个源文件、499 条去重文件依赖边、72 条跨物理目录依赖对**。§0 物理目录双向依赖为 **7 对**，未达到 §4 的物理口径 0，具体原因与清单见 §6.3；§1 逻辑分层跨包依赖环为 **0**。`obs/http.ts` **240 行**，已增加 ≤300 行守卫。
+- 变更文本保持 UTF-8、无 BOM、CRLF；`docs/ARCHITECTURE.md` §4 与本文 §6.3 已更新。容器、浏览器 smoke、真实 Linux bwrap 和沙箱外进程终止检查不在本轮已验证范围内。
 
 ### P0（2026-10-19，主会话验收）
 
