@@ -19,7 +19,7 @@ import { Dispatcher } from "../../src/agent/dispatch.js";
 import { startAlerts } from "../../src/obs/alerts.js";
 import { log } from "../../src/shared/log.js";
 import { loadAgentConfig as loadConfig } from "../../src/agent/config.js";
-import type { InboundMessage, ReplyTicketRecord } from "../../src/qq/types.js";
+import type { InboundMessage, ReplyTicketRecord } from "../../src/channel/types.js";
 
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });

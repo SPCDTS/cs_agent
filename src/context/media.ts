@@ -5,9 +5,7 @@ import { log } from "../shared/log.js";
 import { downloadImage, type DownloadHooks } from "../media/download.js";
 import { MAX_IMAGE_BYTES, MIN_IMAGE_BYTES } from "../media/limits.js";
 import { validateImageHeader } from "../media/header.js";
-import { isRecord, stringField, type OneBotClient } from "../qq/onebot.js";
-import { renderText } from "../qq/policy.js";
-import type { QQBridge } from "../qq/types.js";
+import type { Channel, RemoteMessage } from "../channel/types.js";
 import { scopeOf, type Access } from "./access.js";
 import type { ContextStore, MediaRow, MessageRow } from "./store.js";
 
@@ -17,8 +15,7 @@ interface RecallFlight { work: Promise<RecallResult>; control: AbortController; 
 export interface MediaRecallOptions {
   store: ContextStore;
   dataDir: string;
-  client: OneBotClient;
-  getTicket: QQBridge["getTicket"];
+  channel: Pick<Channel, "fetchMessage" | "refreshImageUrl" | "getTicket">;
   downloadHooks?: DownloadHooks;
 }
 
@@ -100,15 +97,15 @@ async function saveFile(dataDir: string, bytes: Buffer, signal: AbortSignal): Pr
 }
 
 /** 使用真实段定位占位，用户手写的 [image] 不会被误替换。 */
-export function recalledText(row: MessageRow, segments: Record<string, unknown>[], media: MediaRow[]): string {
+export function recalledText(row: MessageRow, segments: RemoteMessage["segments"], media: MediaRow[]): string {
   const paths = new Map(media.filter(m => m.status === "ok" && m.path).map(m => [m.ordinal, m.path!]));
-  if (row.is_self || renderText(segments).slice(0, 16000) !== row.text) {
+  if (row.is_self || segments.map(s => s.rendered).join("").slice(0, 16000) !== row.text) {
     return row.text + [...paths.values()].map(p => " [image:" + p + "]").join("");
   }
   let offset = 0, ordinal = 0;
   const parts: string[] = [];
   for (const segment of segments) {
-    const original = renderText([segment]);
+    const original = segment.rendered;
     const remaining = Math.max(0, 16000 - offset);
     if (segment.type === "image") {
       const file = paths.get(++ordinal);
@@ -180,32 +177,31 @@ export class MediaRecall {
     if (!current || current.id !== row.id || current.text !== row.text) throw new Error("消息已撤回或变更");
   }
 
-  private async checkScope(row: MessageRow, remote: unknown, signal: AbortSignal): Promise<void> {
+  private async checkScope(row: MessageRow, remote: RemoteMessage | null, signal: AbortSignal): Promise<void> {
     const reject = () => {
       log.warn("media recall scope mismatch", { scope: row.scope, message_id: row.message_id });
       throw new Error("原消息不在当前会话范围内");
     };
-    if (!isRecord(remote)) return reject();
+    if (!remote) return reject();
     const [kind, id] = row.scope.split(":");
     if (remote.message_type !== kind) return reject();
-    if (kind === "group" && stringField(remote, "group_id") !== id) return reject();
-    const sender = stringField(remote, "user_id") || stringField(remote.sender, "user_id");
-    if (stringField(remote.sender, "user_id") && stringField(remote.sender, "user_id") !== sender) return reject();
-    if (stringField(remote, "message_id") && stringField(remote, "message_id") !== row.message_id) return reject();
+    if (kind === "group" && remote.group_id !== id) return reject();
+    const sender = remote.sender_id;
+    if (remote.sender_conflict) return reject();
+    if (remote.message_id && remote.message_id !== row.message_id) return reject();
     if (!row.is_self) {
       if (kind === "private" && sender !== id) return reject();
       return;
     }
     if (!row.ticket) return reject();
-    const ticket = await abortable(this.opts.getTicket(row.ticket), signal);
+    const ticket = await abortable(this.opts.channel.getTicket(row.ticket), signal);
     if (!ticket || scopeOf(ticket) !== row.scope || ticket.status !== "sent" ||
         ticket.reply_message_id !== row.message_id || !ticket.self_id || sender !== ticket.self_id) return reject();
     // NapCat 各版本的可选收件人字段；出现时必须与本地票据一致。
-    for (const field of ["target_id", "peer_id", "peer_uid", "peerId", "peerUid", "recipient_id", "receiver_id",
-      "target_user_id", "target_group_id"]) {
-      if (Object.hasOwn(remote, field) && stringField(remote, field) !== id) return reject();
+    for (const recipient of Object.values(remote.recipient_fields)) {
+      if (recipient !== id) return reject();
     }
-    if (kind === "private" && Object.hasOwn(remote, "group_id") && ![null, undefined, 0, "0", ""].includes(remote.group_id as never)) return reject();
+    if (kind === "private" && remote.has_nonempty_group_field) return reject();
   }
 
   private async result(media: MediaRow[], signal: AbortSignal): Promise<RecallResult> {
@@ -229,26 +225,23 @@ export class MediaRecall {
       const cached = this.opts.store.media(row.scope, row.message_id);
       if (cached.some(m => m.status === "ok")) return await this.result(cached, signal);
       if (row.is_self ? !row.image_count : !row.text.includes("[image]")) return { text: "这条消息没有图片", images: [] };
-      const remote = await abortable(this.opts.client.call("get_msg", { message_id: row.message_id }, { timeoutMs: 60_000 }), signal);
+      const remote = await abortable(this.opts.channel.fetchMessage(row.message_id, { signal, timeoutMs: 60_000 }), signal);
       await this.checkScope(row, remote, signal);
       this.stillPresent(row);
-      const segments = isRecord(remote) && Array.isArray(remote.message) ? remote.message.filter(isRecord) : [];
+      const segments = remote?.segments ?? [];
       const pictures = segments.filter(s => s.type === "image").slice(0, 6);
       const media: MediaRow[] = [];
       for (const [i, segment] of pictures.entries()) {
         const m: MediaRow = { scope: row.scope, message_id: row.message_id, ordinal: i + 1,
           path: null, sha256: null, status: "skipped", reason: null, created_at: Math.floor(Date.now() / 1000) };
         try {
-          const data = isRecord(segment.data) ? segment.data : {};
-          const file = stringField(data, "file");
-          const url = stringField(data, "url") || (/^https?:\/\//i.test(file) ? file : "");
+          const { file, url } = segment.image ?? { file: "", url: "" };
           let bytes: Buffer;
           try { bytes = await abortable(downloadImage(url, signal, this.opts.downloadHooks), signal); }
           catch (err) {
             signal.throwIfAborted();
             if (!file) throw err;
-            const info = await abortable(this.opts.client.call("get_image", { file }), signal);
-            const fresh = stringField(info, "url");
+            const fresh = await abortable(this.opts.channel.refreshImageUrl(file, { signal }), signal);
             if (!fresh || fresh === url) throw err;
             bytes = await abortable(downloadImage(fresh, signal, this.opts.downloadHooks), signal);
           }

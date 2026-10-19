@@ -14,7 +14,7 @@ import { validateReferences } from "../media/gen/image-references.js";
  * 检查点语义：每个阶段把结果写进会话文档 TicketDoc，并在**同一次 runtime.commit** 里把检查点推进到下一阶段。
  * 进程在阶段之间崩溃时，任务从已提交的检查点继续：已完成的生图 / 后端调用不会重跑；
  * 即使任务本身失败、由派发器新建任务重跑，新任务也先看 TicketDoc，已有结果的阶段直接跳过。
- * reply 阶段依赖 QQBridge 票据幂等：sent → already_sent 不重发；sending/uncertain → 不重发、任务以 failed 结束；
+ * reply 阶段依赖 Channel 票据幂等：sent → already_sent 不重发；sending/uncertain → 不重发、任务以 failed 结束；
  * 只有发送前就失败（票据仍 pending）才在任务内退避重试（≤3 次，次数记在检查点里）。
  * 进程关闭（runtime.signal 中止）时阶段直接抛出、不提交任何结果，重启后该阶段重跑。
  */
@@ -22,7 +22,7 @@ import type { Context } from "@earendil-works/chord";
 import { defineTask, type RunningTask, type TaskRuntime, type TaskDefinition } from "@earendil-works/pi-durable";
 import { accessForSource, accessToString } from "../context/access.js";
 import type { ContextStore } from "../context/store.js";
-import type { QQBridge } from "../qq/types.js";
+import type { Channel } from "../channel/types.js";
 import { log } from "../shared/log.js";
 import { isReasoningEffort, threadKeyForSource } from "./codex/runner.js";
 import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
@@ -54,7 +54,7 @@ const MAX_IMAGE_SUBMITS = 2;
 export type AgentCheckpoint = { phase: "handle" } | { phase: "lateImages"; job?: number; extensions?: number } | { phase: "postprocess" } | ReplyCheckpoint;
 
 export interface TaskDeps {
-  getBridge: () => Pick<QQBridge, "reply" | "getTicket" | "uploadFile">;
+  getBridge: () => Pick<Channel, "reply" | "getTicket" | "uploadFile">;
   imageBackend: Pick<ImageBackend, "submit" | "collect" | "reconcile" | "name" | "clearReferences">;
   imagesDir: string;
   imageTimeoutCapMs?: number;

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
-const LAYERS = { shared: 0, config: 1, media: 2, qq: 3, context: 4, agent: 5, obs: 6, mcp: 7, main: 8 } as const;
+const LAYERS = { shared: 0, config: 1, media: 2, channel: 3, qq: 4, context: 5, agent: 6, obs: 7, mcp: 8, main: 9 } as const;
 type Package = keyof typeof LAYERS;
 type Edge = [from: string, to: string];
 
@@ -48,7 +48,9 @@ function packageOf(file: string): Package {
 function violations([from, to]: Edge): string[] {
   const a = packageOf(from), b = packageOf(to), reasons: string[] = [];
   if (a !== b && LAYERS[b] > LAYERS[a]) reasons.push('跨包向上依赖');
-  if (a === 'media' && b === 'qq') reasons.push('media 不可依赖 qq');
+  if (['agent', 'context', 'obs', 'mcp'].includes(a) && b === 'qq') reasons.push('上层不可依赖 qq 实现');
+  if (a === 'channel' && ['qq', 'context', 'agent'].includes(b)) reasons.push('channel 不可依赖通道实现或上层');
+  if (a === 'media' && ['channel', 'qq'].includes(b)) reasons.push('media 不可依赖 channel 或 qq');
   if (from.startsWith('src/obs/ui/') && !to.startsWith('src/obs/ui/') && b !== 'shared' &&
       !['src/obs/sessions/types.ts', 'src/obs/memory/types.ts', 'src/obs/context/types.ts',
         // P0 第 6 项明确要求 scopeLabel 归 context；这是 §1 UI 白名单的必要补充。
@@ -103,6 +105,14 @@ describe('包结构与分层', () => {
     ['src/shared/new.ts', 'src/config.ts'],
     ['src/media/new.ts', 'src/qq/image.ts'],
     ['src/media/new.ts', 'src/qq/types.ts'],
+    ['src/media/new.ts', 'src/channel/types.ts'],
+    ['src/channel/new.ts', 'src/qq/types.ts'],
+    ['src/channel/new.ts', 'src/context/access.ts'],
+    ['src/channel/new.ts', 'src/agent/tasks.ts'],
+    ['src/agent/new.ts', 'src/qq/types.ts'],
+    ['src/context/new.ts', 'src/qq/onebot.ts'],
+    ['src/obs/new.ts', 'src/qq/bridge.ts'],
+    ['src/mcp/new.ts', 'src/qq/policy.ts'],
     ['src/obs/ui/new.ts', 'src/obs/store.ts'],
     ['src/obs/memory/new.ts', 'src/obs/ui/html.ts'],
     ['src/obs/sessions/new.ts', 'src/obs/context/types.ts'],

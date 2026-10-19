@@ -1,6 +1,5 @@
 import { MediaRecall } from "./context/media.js";
 import { RecallTokens, startMediaRecallServer } from "./context/media-recall-server.js";
-import { createOneBotClient } from "./qq/onebot.js";
 import { ContextUsageStore } from "./agent/context-usage.js";
 import { loadObsToken, publicHealth } from "./obs/token.js";
 import { MemoryInstrumentation, purgeMemoryInstrumentation } from "./obs/memory/instrumentation.js";
@@ -20,7 +19,7 @@ import { loadAgentConfig as loadConfig } from "./agent/config.js";
 import { log, setLogLevel } from "./shared/log.js";
 import { findUnwritable, processIdentity } from "./fs-check.js";
 import { createQQBridge } from "./qq/index.js";
-import type { QQBridge } from "./qq/types.js";
+import type { Channel } from "./channel/types.js";
 import { createAgentModels, openHarness, resolveThinkingLevel } from "./agent/harness.js";
 import { createCsAgentExtension } from "./agent/extension.js";
 import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
@@ -99,14 +98,18 @@ async function main(): Promise<void> {
   const settings = await SettingsStore.open(cfg.DATA_DIR, settingsDefaults(cfg));
   log.info("runtime settings loaded", { ...settings.current() });
 
-  let bridge: QQBridge | undefined;
+  let bridge: Channel | undefined;
   const getBridge = () => {
     if (!bridge) throw new Error("QQBridge 未就绪");
     return bridge;
   };
 
   const mediaRecall = new MediaRecall({ store, dataDir: cfg.DATA_DIR,
-    client: createOneBotClient(cfg.NAPCAT_HTTP_URL, cfg.NAPCAT_TOKEN, 15000), getTicket: ticket => getBridge().getTicket(ticket) });
+    channel: {
+      fetchMessage: (messageId, opts) => getBridge().fetchMessage(messageId, opts),
+      refreshImageUrl: (file, opts) => getBridge().refreshImageUrl(file, opts),
+      getTicket: ticket => getBridge().getTicket(ticket),
+    } });
   const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET);
   const recallServer = await startMediaRecallServer(recallTokens, cfg.MEDIA_RECALL_PORT);
 

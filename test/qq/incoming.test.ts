@@ -10,8 +10,8 @@ import { trace, type LiveEvent } from "../../src/shared/trace.js";
 import { hasUsableContent, normalizeMessage } from "../../src/qq/policy.js";
 import { ticketIdFor } from "../../src/qq/reply-store.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
-import { inboundFromTicket } from "../../src/qq/ticket.js";
-import type { InboundMessage, QQBridge } from "../../src/qq/types.js";
+import { inboundFromTicket } from "../../src/channel/ticket.js";
+import type { InboundMessage, Channel } from "../../src/channel/types.js";
 import { tmp } from "../agent/helpers.js";
 import { FakeOneBot, groupEvent, privateEvent, SELF_ID, TOKEN, waitFor } from "./fake-onebot.js";
 
@@ -20,7 +20,7 @@ let cdn: Server;
 let url: string;
 let downloads: (string | undefined)[];
 let napcat: FakeOneBot;
-let bridge: QQBridge;
+let bridge: Channel;
 let dir: string;
 const hooks: DownloadHooks = {
   resolve: async () => [{ address: '93.184.216.34', family: 4 }],

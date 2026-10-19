@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DB_FILE, ReplyStore, ticketIdFor } from "../../src/qq/reply-store.js";
-import type { InboundMessage } from "../../src/qq/types.js";
+import type { InboundMessage } from "../../src/channel/types.js";
 
 let dir: string;
 let store: ReplyStore | null;

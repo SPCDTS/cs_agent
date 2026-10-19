@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { ContextStore } from '../../src/context/store.js';
-import type { InboundMessage } from '../../src/qq/types.js';
+import type { InboundMessage } from '../../src/channel/types.js';
 import { createDashboard } from '../../src/obs/http.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { highlight, messageWindow, rangeParams, rangeQuery, searchTerms } from '../../src/obs/ui/memory-pages.js';

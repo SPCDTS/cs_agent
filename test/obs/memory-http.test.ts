@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { ContextStore } from '../../src/context/store.js';
 import { callQQContextTool } from '../../src/context/qq-context-tool.js';
-import type { InboundMessage } from '../../src/qq/types.js';
+import type { InboundMessage } from '../../src/channel/types.js';
 import { createDashboard } from '../../src/obs/http.js';
 import { createMemoryRoutes } from '../../src/obs/memory/http.js';
 import type { MemoryDeps, MessageItem, MessagePage } from '../../src/obs/memory/types.js';

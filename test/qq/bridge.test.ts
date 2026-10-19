@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReplyStore } from "../../src/qq/reply-store.js";
-import { createQQBridge, ticketIdFor, type InboundMessage, type QQBridge, type QQBridgeConfig } from "../../src/qq/index.js";
+import { createQQBridge, ticketIdFor, type QQBridgeConfig } from "../../src/qq/index.js";
+import type { InboundMessage, Channel } from "../../src/channel/types.js";
 import { FakeOneBot, groupEvent, privateEvent, SELF_ID, TOKEN, waitFor } from "./fake-onebot.js";
 
 const OWNER = "20001";
@@ -15,7 +16,7 @@ const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
 let server: FakeOneBot;
 let dataDir: string;
 let imageRoot: string;
-let bridge: QQBridge;
+let bridge: Channel;
 let received: { message: InboundMessage; ticket: string }[];
 let errors: Error[];
 
@@ -27,7 +28,7 @@ function config(overrides: Partial<QQBridgeConfig> = {}): QQBridgeConfig {
   };
 }
 
-async function startBridge(overrides: Partial<QQBridgeConfig> = {}): Promise<QQBridge> {
+async function startBridge(overrides: Partial<QQBridgeConfig> = {}): Promise<Channel> {
   const b = createQQBridge(config(overrides), { reconnectBaseMs: 50, heartbeatMs: 60000 });
   b.on("message", (message, ticket) => received.push({ message, ticket }));
   b.on("error", e => errors.push(e));

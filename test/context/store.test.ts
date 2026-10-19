@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { accessForSource, parseAccess, resolveOwner, type Access } from "../../src/context/access.js";
 import { formatMessage, formatRecent, formatSearch, formatSummary, joinCapped } from "../../src/context/format.js";
 import { ContextStore } from "../../src/context/store.js";
-import type { InboundMessage } from "../../src/qq/types.js";
+import type { InboundMessage } from "../../src/channel/types.js";
 import { tmp } from "../agent/helpers.js";
 
 const G = "200000001";

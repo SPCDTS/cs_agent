@@ -23,7 +23,7 @@ import { createTasks, MAX_REPLY_ATTEMPTS } from "../../src/agent/tasks.js";
 import { imageFilenamePrefix, UnknownJobError, type ImageBackend, type ImageSubmission, type ReconcileProgress } from "../../src/media/gen/image-gen.js";
 import { AGENT_FAILURE_REPLIES, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
 import { IMAGE_USAGE_REPLY } from "../../src/agent/router.js";
-import type { InboundMessage, ReplyTicketRecord } from "../../src/qq/types.js";
+import type { InboundMessage, ReplyTicketRecord } from "../../src/channel/types.js";
 import { ContextStore } from "../../src/context/store.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
@@ -41,7 +41,7 @@ const deferred = <T = void>() => {
   return { promise, resolve, reject };
 };
 
-/** QQBridge 桩：记录 reply，维护票据状态。 */
+/** Channel 桩：记录 reply，维护票据状态。 */
 class BridgeStub {
   uploads: { type: string; target: string; file: Buffer; name: string }[] = [];
   async uploadFile(type: "private" | "group", target: string, file: Buffer, name: string) {

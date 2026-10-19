@@ -3,7 +3,8 @@
  * - @ 检测只看真实 at 段，永不解析文本里的 CQ 码或 "@昵称"。
  * - allowUsers 中的用户在任何会话可触发；allowGroups 中的群，任何成员可触发（群内仍需真实 @）。
  */
-import type { ChatType, InboundMessage, MessageSegment, QQBridgeConfig } from "./types.js";
+import type { ChatType, InboundMessage, MessageSegment } from "../channel/types.js";
+import type { QQBridgeConfig } from "./types.js";
 import { isRecord, isValidId } from "./onebot.js";
 
 const MAX_TEXT = 16000;

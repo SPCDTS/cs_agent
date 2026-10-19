@@ -8,7 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { afterEach, describe, expect, it } from "vitest";
 import { callQQContextTool } from "../../src/context/qq-context-tool.js";
 import { ContextStore } from "../../src/context/store.js";
-import type { InboundMessage } from "../../src/qq/types.js";
+import type { InboundMessage } from "../../src/channel/types.js";
 import { tmp } from "../agent/helpers.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");

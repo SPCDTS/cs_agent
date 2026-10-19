@@ -3,14 +3,14 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { createQQBridge } from '../../src/qq/bridge.js';
-import type { QQBridge, InboundMessage } from '../../src/qq/types.js';
+import type { Channel, InboundMessage } from '../../src/channel/types.js';
 import { normalizeMessage } from '../../src/qq/policy.js';
 import { ReplyStore, ticketIdFor } from '../../src/qq/reply-store.js';
 import { FakeOneBot, privateEvent, TOKEN, waitFor } from './fake-onebot.js';
 import { tmp } from '../agent/helpers.js';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
-let bridge: QQBridge, bot: FakeOneBot, cdn: Server, dir: string, base: string;
+let bridge: Channel, bot: FakeOneBot, cdn: Server, dir: string, base: string;
 let held: ServerResponse[], received: InboundMessage[], active: number, peak: number;
 const picture = (user: string, id: string) => privateEvent(user, '', { message_id: id, message: [{ type: 'text', data: { text: '改图' } }, { type: 'image', data: { url: 'http://public.test/hold', file: id } }] });
 function makeBridge(deadline = 2000) {

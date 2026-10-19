@@ -6,16 +6,17 @@ import { log } from "../shared/log.js";
 import { trace } from "../shared/trace.js";
 import { attachmentName } from "../media/attach.js";
 import type { DownloadHooks } from '../media/download.js';
-import { inboundFromTicket } from './ticket.js';
+import { inboundFromTicket } from '../channel/ticket.js';
 import { downloadIncoming } from "./incoming.js";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import type {
-  BridgeStatus, ChatType, InboundMessage, QQBridge, QQBridgeConfig, QQBridgeEvents,
-  ReplyResult, ReplyTicketRecord,
-} from "./types.js";
+  Channel, ChannelStatus, ChatType, InboundMessage, ChannelEvents,
+  RemoteMessage, ReplyResult, ReplyTicketRecord,
+} from "../channel/types.js";
+import type { QQBridge, QQBridgeConfig } from "./types.js";
 import { createOneBotClient, isRecord, numericId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
-import { hasUsableContent, isAllowed, isTriggered, messageSegmentTypes, normalizeMessage, validatePolicy } from "./policy.js";
+import { hasUsableContent, isAllowed, isTriggered, messageSegmentTypes, normalizeMessage, renderText, validatePolicy } from "./policy.js";
 import { prepareImages, type ImageSegment } from "./image.js";
 import { dedupeKey, isTicketId, ticketIdFor, ReplyStore } from "./reply-store.js";
 
@@ -28,6 +29,7 @@ const DOWN_REPORT_INTERVAL_MS = 5 * 60 * 1000;
 
 /** 测试 / 运维用的内部参数，不属于对外契约。 */
 interface BridgeInternals {
+  client?: OneBotClient;
   downloadHooks?: DownloadHooks;
   reconnectBaseMs?: number;
   reconnectMaxMs?: number;
@@ -66,7 +68,8 @@ function buildMessage(type: ChatType, userId: string, text: string, images: Imag
   return [...head, ...images];
 }
 
-class Bridge extends EventEmitter implements QQBridge {
+class Bridge extends EventEmitter implements Channel {
+  readonly name = "qq";
   private readonly config: QQBridgeConfig;
   private readonly client: OneBotClient;
   private readonly timeoutMs: number;
@@ -109,7 +112,7 @@ class Bridge extends EventEmitter implements QQBridge {
     this.downloadConcurrency = config.incomingDownloadConcurrency ?? 2;
     this.downloadDeadlineMs = config.incomingDownloadDeadlineMs ?? 60_000;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.client = createOneBotClient(config.httpUrl, config.token, this.timeoutMs);
+    this.client = internals.client ?? createOneBotClient(config.httpUrl, config.token, this.timeoutMs);
     this.reconnectBaseMs = internals.reconnectBaseMs ?? 1000;
     this.reconnectMaxMs = internals.reconnectMaxMs ?? 30000;
     this.heartbeatMs = internals.heartbeatMs ?? 25000;
@@ -154,7 +157,7 @@ class Bridge extends EventEmitter implements QQBridge {
     this.store = null;
   }
 
-  status(): BridgeStatus {
+  status(): ChannelStatus {
     return {
       ws_connected: this.connected,
       disconnect_count: this.disconnectCount,
@@ -163,13 +166,65 @@ class Bridge extends EventEmitter implements QQBridge {
     };
   }
 
+  /** 取消等待时忽略迟到的 OneBot 响应；HTTP 请求沿用客户端超时。 */
+  private remoteCall(action: string, params: Record<string, unknown>, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<unknown> {
+    const work = this.client.call(action, params, opts.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs });
+    const { signal } = opts;
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      work.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+      if (signal.aborted) abort();
+    });
+  }
+
+  async fetchMessage(messageId: string, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<RemoteMessage | null> {
+    const remote = await this.remoteCall("get_msg", { message_id: messageId }, opts);
+    if (!isRecord(remote)) return null;
+    const sender = stringField(remote, "user_id") || stringField(remote.sender, "user_id");
+    const recipient_fields: Record<string, string> = {};
+    // NapCat 各版本的可选收件人字段；保留实际出现的字段，包括无效值转成的空字符串。
+    for (const field of ["target_id", "peer_id", "peer_uid", "peerId", "peerUid", "recipient_id", "receiver_id",
+      "target_user_id", "target_group_id"]) {
+      if (Object.hasOwn(remote, field)) recipient_fields[field] = stringField(remote, field);
+    }
+    const segments = Array.isArray(remote.message) ? remote.message.filter(isRecord) : [];
+    return {
+      message_type: typeof remote.message_type === "string" ? remote.message_type : "",
+      message_id: stringField(remote, "message_id"),
+      group_id: stringField(remote, "group_id"),
+      sender_id: sender,
+      sender_conflict: !!stringField(remote.sender, "user_id") && stringField(remote.sender, "user_id") !== sender,
+      recipient_fields,
+      has_nonempty_group_field: Object.hasOwn(remote, "group_id") && ![null, undefined, 0, "0", ""].includes(remote.group_id as never),
+      segments: segments.map(segment => {
+        const normalized: RemoteMessage["segments"][number] = {
+          type: typeof segment.type === "string" ? segment.type : "unknown",
+          rendered: renderText([segment]),
+        };
+        if (segment.type === "image") {
+          const data = isRecord(segment.data) ? segment.data : {};
+          const file = stringField(data, "file");
+          const url = stringField(data, "url") || (/^https?:\/\//i.test(file) ? file : "");
+          normalized.image = { url, file };
+        }
+        return normalized;
+      }),
+    };
+  }
+
+  async refreshImageUrl(file: string, opts: { signal: AbortSignal }): Promise<string | undefined> {
+    const info = await this.remoteCall("get_image", { file }, { signal: opts.signal });
+    return stringField(info, "url") || undefined;
+  }
+
   // ---------- 事件订阅（类型化） ----------
 
-  override on<K extends keyof QQBridgeEvents>(event: K, listener: QQBridgeEvents[K]): this {
+  override on<K extends keyof ChannelEvents>(event: K, listener: ChannelEvents[K]): this {
     return super.on(event, listener);
   }
 
-  override off<K extends keyof QQBridgeEvents>(event: K, listener: QQBridgeEvents[K]): this {
+  override off<K extends keyof ChannelEvents>(event: K, listener: ChannelEvents[K]): this {
     return super.off(event, listener);
   }
 

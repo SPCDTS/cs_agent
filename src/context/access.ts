@@ -3,7 +3,7 @@
  * - `{kind:"scope"}`：只见该会话（群 `group:<id>` / 私聊 `private:<qq>`）；
  * - `{kind:"all"}`：全部会话，仅 owner 私聊使用。
  */
-import type { ChatType } from "../qq/types.js";
+import type { ChatType } from "../channel/types.js";
 
 export type Access = { kind: "scope"; scope: string } | { kind: "all" };
 

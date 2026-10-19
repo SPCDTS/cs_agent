@@ -9,8 +9,9 @@ import { RecallTokens, startMediaRecallServer } from "../../src/context/media-re
 import { viewViaLoopback } from "../../src/mcp/media-recall-client.js";
 import { ContextStore } from "../../src/context/store.js";
 import { clipWithImages, formatMessage, formatMessageFull, formatRecent, withoutImagePaths } from "../../src/context/format.js";
+import { createQQBridge } from "../../src/qq/bridge.js";
 import { normalizeMessage } from "../../src/qq/policy.js";
-import type { ReplyTicketRecord } from "../../src/qq/types.js";
+import type { ReplyTicketRecord } from "../../src/channel/types.js";
 import type { Access } from "../../src/context/access.js";
 import { buildCodexPrompt } from "../../src/agent/codex/runner.js";
 import { tmp } from "../agent/helpers.js";
@@ -47,7 +48,10 @@ beforeEach(async () => {
   base = "http://127.0.0.1:" + (cdn.address() as AddressInfo).port;
   call.mockReset().mockImplementation(async action => action === "get_msg" ? remote : { url: "https://public.test/fresh" });
   getTicket.mockReset().mockImplementation(async () => ticket);
-  media = new MediaRecall({ dataDir: dir, store, client: { call }, getTicket,
+  const channel = createQQBridge({ httpUrl: "http://unused.test", wsUrl: "ws://unused.test", token: "",
+    allowUsers: "*", allowGroups: [], groupMentions: true, dataDir: dir, imageRoot: dir }, { client: { call } });
+  channel.getTicket = getTicket;
+  media = new MediaRecall({ dataDir: dir, store, channel,
     downloadHooks: { resolve: async () => [{ address: "93.184.216.34", family: 4 }],
       request: (url, opts, cb) => request(new URL(url.pathname, base), { ...opts, lookup: undefined }, cb) } });
 });

@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { InboundMessage, ReplyTicketRecord, TicketStatus } from "./types.js";
+import type { InboundMessage, ReplyTicketRecord, TicketStatus } from "../channel/types.js";
 
 const SEEN_LIMIT = 2000;
 export const DB_FILE = "qq-bridge.sqlite";

@@ -2,7 +2,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxText, type FauxRe
 import { afterEach, describe, expect, it } from "vitest";
 import { AGING_LAST_RUN_KEY, msUntilNextRun, needsCatchUp, runAging, startAgingScheduler, type AgingOptions } from "../../src/context/aging.js";
 import { ContextStore } from "../../src/context/store.js";
-import type { InboundMessage } from "../../src/qq/types.js";
+import type { InboundMessage } from "../../src/channel/types.js";
 import { tmp } from "../agent/helpers.js";
 
 const G = "group:200000001";

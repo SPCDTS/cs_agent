@@ -20,7 +20,7 @@ import { CodexRunner } from '../../src/agent/codex/runner.js';
 import { codexObserver } from '../../src/agent/backends/codex.js';
 import { savePendingImage } from '../../src/media/gen/image-pending.js';
 import { observeImages } from '../../src/media/gen/observed.js';
-import type { InboundMessage, ReplyTicketRecord } from '../../src/qq/types.js';
+import type { InboundMessage, ReplyTicketRecord } from '../../src/channel/types.js';
 import { DeepSeekWeb } from '../../src/agent/pi-tools/web.js';
 import { startAlerts } from '../../src/obs/alerts.js';
 import { runAging } from '../../src/context/aging.js';

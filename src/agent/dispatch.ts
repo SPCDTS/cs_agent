@@ -12,13 +12,13 @@ import { trace } from "../shared/trace.js";
  *    仍发不出 → 条目标记 failed 并继续下一条。终态（sent/uncertain）才从 DispatchDoc 删除；
  *    进程退出时保留索引，重启后 recover() 把索引条目与孤儿票据按票据 seq 统一排序继续。
  * 5. 任务的外部副作用阶段（提交生图、codex 回合、回复）开始前检查票据仍 pending 且条目未 givenUp，否则以 failed 结束。
- * 6. recover() 还与 QQBridge 的 pending 票据对账：admit 已落盘但派发索引未写入的票据，用票据里保存的来源与原文
+ * 6. recover() 还与 Channel 的 pending 票据对账：admit 已落盘但派发索引未写入的票据，用票据里保存的来源与原文
  *    重建消息重新派发（分页取尽全部 pending 票据）。v2 遗留条目（无任务）先中止其旧的模型会话，再按原文重新分流。
  * 7. 统一上下文（可选 history）：收到消息即写入机器人"处理中"行；终态后按 TicketDoc 更新为"已回复"/"失败"。
  */
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ConversationId, Harness, TaskId } from "@earendil-works/pi-durable";
-import type { InboundMessage, QQBridge, ReplyTicketRecord } from "../qq/types.js";
+import type { InboundMessage, Channel, ReplyTicketRecord } from "../channel/types.js";
 import { DispatchDoc, TicketDoc, type DispatchEntry } from "./docs.js";
 import { type TicketSource, type TicketSettings } from "./backends/types.js";
 import { log } from "../shared/log.js";
@@ -26,7 +26,7 @@ import { scopeOf } from "../context/access.js";
 import type { BotAction, ContextStore } from "../context/store.js";
 import { FALLBACK_REPLY } from "./replies.js";
 import { DEFAULT_IMAGE_PREFIXES, routeMessage } from "./router.js";
-import { inboundFromTicket, legacyRouteText } from "../qq/ticket.js";
+import { inboundFromTicket, legacyRouteText } from "../channel/ticket.js";
 import type { CsTasks, TaskResult } from "./tasks.js";
 
 export { FALLBACK_REPLY } from "./replies.js";
@@ -35,7 +35,7 @@ export const MAX_ATTEMPTS = 3;
 /** 启动对账时每页读取的 pending 票据数（分页直到取尽） */
 const PENDING_PAGE = 200;
 
-type DispatchBridge = Pick<QQBridge, "reply" | "getTicket" | "listPendingTickets" | "prepareIncoming">;
+type DispatchBridge = Pick<Channel, "reply" | "getTicket" | "listPendingTickets" | "prepareIncoming">;
 /** 统一上下文存储中派发器用到的写入口 */
 export type DispatchHistory = Pick<ContextStore, "recordPending" | "completeReply">;
 
@@ -53,7 +53,7 @@ export interface DispatcherOptions {
   retryDelayMs?: number;
 }
 
-/** sent/uncertain 为终态；sending 只会因发送中途崩溃而残留，QQBridge 不会再发送它，同样视为终态 */
+/** sent/uncertain 为终态；sending 只会因发送中途崩溃而残留，Channel 不会再发送它，同样视为终态 */
 const isTerminal = (status: string | undefined) => status === "sent" || status === "uncertain" || status === "sending";
 const short = (t: string) => t.slice(0, 12);
 const sourceScope = (s: TicketSource) => (s.type === "group" ? `group:${s.group_id}` : `private:${s.user_id}`);
@@ -96,7 +96,7 @@ export class Dispatcher {
   }
 
   /**
-   * 启动时：DispatchDoc 中未完成的票据（attempts 达上限的直接兜底）与 QQBridge 中没有索引的 pending 票据（分页取尽）
+   * 启动时：DispatchDoc 中未完成的票据（attempts 达上限的直接兜底）与 Channel 中没有索引的 pending 票据（分页取尽）
    * 按票据 seq（bridge admit 顺序）统一排序后依次入队。返回处理的票据数。
    */
   async recover(): Promise<number> {
