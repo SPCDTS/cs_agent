@@ -21,9 +21,9 @@
 |---|---|---|
 | 1 | `${DATA_DIR}/prompts/agent.md` | 现有全局提示词，保持为独立 section `cs-pi`，位置不变（不并入下面的项目上下文） |
 | 2 | `${WORKSPACE_DIR}/AGENTS.override.md`，否则 `AGENTS.md` / `AGENTS.MD` / `CLAUDE.md` / `CLAUDE.MD` | 运维层说明，与 codex 的 `prepareCodexWorkspace` 读的是同一个文件 |
-| 3 | `${WORKSPACE_DIR}/<key>/…`（同样的候选顺序） | 会话域自己的说明；模型用 `write`/`edit` 可以改它（与 codex cwd AGENTS.md 同等行为） |
+| 3 | `${DATA_DIR}/pi-work/<key 冒号换下划线>/…`（同样的候选顺序） | 会话域自己的说明；pi 的工作区由 `PiPathPolicy` 定为 `${DATA_DIR}/pi-work/<key>`（**不是** `/workspace/<key>`，2026-10-19 核实）；模型用 `write`/`edit` 可以改它（与 codex cwd AGENTS.md 同等行为） |
 
-`agentDir` 这一级不另设：pi 没有 CODEX_HOME 的对应物，`agent.md` 已承担全局角色。
+`agentDir` 这一级不另设：pi 没有 CODEX_HOME 的对应物，`agent.md` 已承担全局角色。第 2 级与第 3 级不在同一棵目录树上，所以不做上游那种"从 cwd 逐级向上"的遍历，而是显式读两处：`WORKSPACE_DIR` 一处、`input.env.cwd`（即 pi 工作区）一处；绝不读 `${DATA_DIR}/AGENTS.md` 或 `pi-work/AGENTS.md`。
 
 ### 2.2 读取与校验（主进程 Node fs，不经 PiExecutionEnv）
 
@@ -52,7 +52,7 @@ Project-specific instructions and guidelines:
 
 ### 2.4 会话域从哪来
 
-section 的 `input.env.cwd` 即 `PiExecutionEnv` 的 `policy.workspace`（`/workspace/<key>`），据此确定第 3 级目录与向上的终点 `WORKSPACE_DIR`（取自 `PiBackend` 的 `workspaceDir`，通过扩展工厂参数传入）。`input.env` 缺失（例如纯文本回合没有环境）时只渲染第 2 级。
+section 的 `input.env.cwd` 即 `PiExecutionEnv` 的 `policy.workspace`（`${DATA_DIR}/pi-work/<key>`），据此确定第 3 级目录；第 2 级目录是 `WORKSPACE_DIR`（取自 `PiBackend` 的 `workspaceDir`，通过扩展工厂参数传入）。`input.env` 缺失（例如纯文本回合没有环境）时只渲染第 2 级。读取只接受 `cwd` 恰为 `${DATA_DIR}/pi-work/` 直接子目录的情况，否则忽略第 3 级并 `log.warn`。
 
 ## 3. 改动清单
 
@@ -74,7 +74,7 @@ pi 的 system 基础指令在上下文分析页仍是"多段合成、暂无全�
 
 ## 5. 实施顺序
 
-包结构整理 P2 正在改 `agent/pi-tools/index.ts` 与 `agent/backends/pi.ts`（观察者注入），本改动排在 P2 合入之后、附件发送 B 组（也动 pi-tools）之前或与之串行，交 Codex 子代理；主会话验收：真实容器切 `AGENT_BACKEND_OVERRIDES` 让 owner 私聊走 pi，放一个 `/workspace/private_10000001/AGENTS.md`，在上下文分析页确认 system 消息包含该文件内容。
+包结构整理 P2 正在改 `agent/pi-tools/index.ts` 与 `agent/backends/pi.ts`（观察者注入），本改动排在 P2 合入之后、附件发送 B 组（也动 pi-tools）之前或与之串行，交 Codex 子代理；主会话验收：真实容器切 `AGENT_BACKEND_OVERRIDES` 让 owner 私聊走 pi，放一个 `/data/pi-work/private_10000001/AGENTS.md`，在上下文分析页确认 system 消息包含该文件内容；同时确认 `/workspace/AGENTS.md` 的内容也在。
 
 ## 6. 验收记录
 
