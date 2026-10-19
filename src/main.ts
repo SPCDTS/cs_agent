@@ -305,7 +305,7 @@ async function main(): Promise<void> {
         .catch(error => { log.warn("codex trace purge failed", { error }); });
       await purgeGeneratedImages(cfg.codexHome, cfg.CODEX_GENERATED_IMAGES_RETENTION_DAYS, now, cfg.CODEX_GENERATED_IMAGES_MAX_MB)
         .then(({ removed, bytes, dirs }) => { if (removed > 0) log.info("codex generated images purged", { removed, bytes, dirs }); })
-        .catch(() => { log.warn("codex generated images purge failed"); });
+        .catch(error => { log.warn("codex generated images purge failed", { error }); });
     },
     gauges: async () => {
       const q = dispatcher.status(), ws = bridge!.status();
