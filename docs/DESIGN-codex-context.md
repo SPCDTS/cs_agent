@@ -407,6 +407,12 @@ CODEX_BROWSER=playwright
 **主会话验收（2026-10-19）**：分支 `fix/managed-rules-via-workspace-agents` 3 条提交 ff 到 main（b750b54…241e938），沙箱外复跑 82 文件 / 1214 项通过；镜像 `275b0fb6…` 部署，容器 healthy。真实回合（票据 31ae0ded，09:16:46 "生成一张极恶骑的图片给我"）：09:17:07 owner 线程 rollout 出现新的 `# AGENTS.md instructions` user 消息（2,357 字，含"发送图片与文件"与内置生图说明）；09:18:15 模型调用 `qq_send_image`，路径为当前线程 `generated_images` 下的 PNG，登记成功；`reply_sent.images = 1`，用户确认图片到达。owner 线程自 10-18 以来首次收到规则更新。`/workspace/owner/AGENTS.md` 首行为受管标记。读写加固（符号链接、临时文件名、父目录复核）由 `fix/harden-managed-agents-write` 跟进。
 **读写加固（2026-10-19）**：上述 `writeAtomic` 已由 `writeManagedFile` 替代，会话域文件与 `writeGlobalAgentsMd` 共用此入口。每轮先 `lstat`；缺失则创建，仅对不超过 256 KiB 的普通文件，通过 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` 打开、`fstat` 复核类型、大小及文件身份后进行有界读取比较，内容相同时保留 mtime。符号链接、目录、FIFO、设备等非普通文件及超大文件不读取，删除原路径后重建，并记录 `managed file replaced`（file、kind）。临时文件采用同目录随机 UUID 名，以 `wx` 独占创建，写入、fsync、关闭后 rename；失败清理临时路径，避免可预测临时链接写穿到工作区外。rename 前重新确认父目录为真实目录，写后再以 lstat 校验普通文件及 UTF-8 字节长度，校验失败即让本轮失败。Windows 缺少 NOFOLLOW/NONBLOCK 时保留文件身份检查，无法创建文件符号链接（EPERM）的测试明确跳过；Linux 的 FIFO、设备与并发竞态保护不能以 Windows 测试替代。此措施不改变规则的加载时机：回合内篡改不影响已启动的 codex exec，下一轮启动前检查并恢复；即使前一轮留下后台进程，也不额外依赖回合结束时的进程组清理。父目录复核是写入前的检查，不宣称抵御具备替换父目录权限的持续竞态。
 
+### 8.13 codex 不再拥有 /data/workflows 可写根（2026-10-19，主会话验收）
+
+- 用户指出受管 AGENTS.md 里"`/data/workflows：ComfyUI 生图工作流 JSON…`"一行已无意义（codex 用自带 imagegen，不做本地生图）。用户决定 ComfyUI 本地生图整体保留（`奶龙:` 规则路由与 pi 的 `generate_image` 仍用），只收窄 codex。
+- 改动（7541963、47ac621）：`codexWorkspacePolicy` owner 的额外可写根只剩 `${DATA_DIR}/prompts`；`describeRoot` 删除 workflows 描述；`scripts/entrypoint.sh` 与 `src/config.ts` 的 `CODEX_WRITABLE_ROOTS` 默认值改为 `/workspace,/data/prompts`；workflows 目录播种与 `COMFY_WORKFLOW_FILE` 不变；`.env.example`、`docs/DEPLOY.md`、`docs/ARCHITECTURE.md` 同步。
+- 验收：沙箱外复跑 83 文件 / 1237 项通过；镜像 `2593b102…`（干净 worktree，main 47ac621）部署，容器 healthy、bridge 已连，受管 `config.toml` 不再出现 `/data/workflows`。owner 线程下一回合将收到更新后的 AGENTS.md 注入（可写目录列表只剩工作区与 prompts）。子代理提交署名被其运行时改为 Sonnet 5.5，落 main 时已改回项目规范的 Fable 5.1。
+
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
