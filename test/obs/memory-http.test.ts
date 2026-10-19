@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { ContextStore } from '../../src/context/store.js';
-import { callQQContextTool } from '../../src/mcp/qq-context-server.js';
+import { callQQContextTool } from '../../src/context/qq-context-tool.js';
 import type { InboundMessage } from '../../src/qq/types.js';
 import { createDashboard } from '../../src/obs/http.js';
 import { createMemoryRoutes } from '../../src/obs/memory/http.js';

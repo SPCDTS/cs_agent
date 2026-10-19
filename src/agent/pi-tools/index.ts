@@ -11,7 +11,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, hook, section, ToolTask, GenerationTask, CompactionTask, type Harness } from "@earendil-works/pi-durable";
 import { parseAccess } from "../../context/access.js";
 import type { ContextStore } from "../../context/store.js";
-import { callQQContextTool } from "../../mcp/qq-context-server.js";
+import { callQQContextTool } from "../../context/qq-context-tool.js";
 import { imageTool, type PiImageBackend } from "./images.js";
 import { PiRequestDoc } from "./request.js";
 import { PiPromptLoader } from "./prompt.js";

@@ -5,7 +5,7 @@ import type { ServerResponse } from 'node:http';
 import { parseAccess, type Access } from '../../context/access.js';
 import { AGING_LAST_RUN_KEY, type AgingReport } from '../../context/aging.js';
 import { DEFAULT_CONTEXT_MAX_CHARS, formatMessage, formatSummary } from '../../context/format.js';
-import { callQQContextTool } from '../../mcp/qq-context-server.js';
+import { callQQContextTool } from '../../context/qq-context-tool.js';
 import { sessionJson } from '../sessions/http.js';
 import { redactSessionValue } from '../sessions/content.js';
 import { SessionError } from '../sessions/types.js';

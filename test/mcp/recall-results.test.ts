@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
 import { ContextStore } from '../../src/context/store.js';
-import { callQQContextTool } from '../../src/mcp/qq-context-server.js';
+import { callQQContextTool } from '../../src/context/qq-context-tool.js';
 import { formatMessageFull, formatRecent, formatSearch } from '../../src/context/format.js';
 import type { RecallObservation } from '../../src/obs/memory/instrumentation.js';
 import { tmp } from '../agent/helpers.js';

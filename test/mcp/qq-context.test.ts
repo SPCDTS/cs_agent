@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { callQQContextTool } from "../../src/mcp/qq-context-server.js";
+import { callQQContextTool } from "../../src/context/qq-context-tool.js";
 import { ContextStore } from "../../src/context/store.js";
 import type { InboundMessage } from "../../src/qq/types.js";
 import { tmp } from "../agent/helpers.js";

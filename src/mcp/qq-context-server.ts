@@ -1,28 +1,15 @@
-import { log } from "../shared/log.js";
-import type { RecallObservation, RecallHit } from "../obs/memory/instrumentation.js";
-import { returnedLines, returnedMessage } from "./recall-results.js";
 /**
  * qq_context MCP 服务（设计 §2.3）：统一上下文存储的 stdio 外壳，供容器内 codex 检索 QQ 聊天记录。
  * 访问范围只来自环境变量 QQ_ACCESS（每次 codex exec 以 -c 注入），工具参数里不接受范围；
  * 缺失或非法时所有工具都返回错误文本。只读连接；输出一律经 src/context/format.ts。
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { accessToString, type Access } from "../context/access.js";
-import { DEFAULT_CONTEXT_MAX_CHARS, formatMessageFull, formatRecent, formatSearch, type FormatOptions } from "../context/format.js";
-import type { ContextStore } from "../context/store.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { accessToString } from "../context/access.js";
+import { callQQContextTool, qqContextText as text, RECENT_MAX, SEARCH_LIMIT_MAX, SEARCH_DAYS_MAX, type QQContextToolDeps } from "../context/qq-context-tool.js";
+export { callQQContextTool } from "../context/qq-context-tool.js";
 
-const RECENT_MAX = 30;
-const SEARCH_LIMIT_MAX = 20;
-const SEARCH_DAYS_MAX = 180;
-
-export interface QQContextDeps {
-  /** QQ_ACCESS 解析结果；undefined 表示缺失/非法 */
-  access: Access | undefined;
-  /** 惰性打开只读库（库文件可能尚未创建）；抛错时工具返回错误文本 */
-  openStore: () => ContextStore;
-  maxChars?: number;
-  onRecall?: (event: RecallObservation) => void;
+export interface QQContextDeps extends QQContextToolDeps {
   view?: (file: string) => Promise<{ type: "image"; data: string; mimeType: string }>;
   recall?: (messageId: string) => Promise<string>;
 }
@@ -84,81 +71,6 @@ const TOOLS = [
     annotations: READ_ONLY,
   },
 ] as const;
-
-const text = (t: string, isError = false): CallToolResult => ({ content: [{ type: "text", text: t }], ...(isError ? { isError } : {}) });
-
-function int(v: unknown, def: number, max: number): number {
-  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
-  if (!Number.isFinite(n)) return def;
-  return Math.min(max, Math.max(1, Math.floor(n)));
-}
-
-/** 工具调用的纯函数实现（便于进程内测试）。 */
-export function callQQContextTool(deps: QQContextDeps, name: string, args: Record<string, unknown>): CallToolResult {
-  const ts = Date.now();
-  let returned: RecallHit[] = [], count = 0;
-  const result = queryQQContextTool(deps, name, args, (hits, total) => { returned = hits; count = total; });
-  if (deps.onRecall && ["qq_recent", "qq_search", "qq_message"].includes(name)) {
-    try {
-      deps.onRecall({ ts, tool: name, args, access: deps.access ? accessToString(deps.access) : '',
-        scope_hint: deps.access?.kind === 'scope' ? deps.access.scope : null,
-        returned, returned_count: returned.length, dropped_count: count - returned.length,
-        chars: result.content.filter(c => c.type === 'text').map(c => c.text).join('\n').length,
-        max_chars: name === 'qq_message' ? 1500 : deps.maxChars ?? DEFAULT_CONTEXT_MAX_CHARS,
-        duration_ms: Math.max(0, Date.now() - ts), is_error: result.isError === true });
-    } catch (error) { log.warn('memory recall callback failed', { error }); }
-  }
-  return result;
-}
-
-function queryQQContextTool(deps: QQContextDeps, name: string, args: Record<string, unknown>,
-  observe: (hits: RecallHit[], count: number) => void): CallToolResult {
-  const { access } = deps;
-  if (!access) return text("qq_context 不可用：未配置有效的访问范围（QQ_ACCESS）。", true);
-  let store: ContextStore;
-  try {
-    store = deps.openStore();
-  } catch (err) {
-    return text(`qq_context 不可用：消息库无法打开（${(err as Error).message.slice(0, 120)}）。`, true);
-  }
-  const max = deps.maxChars ?? DEFAULT_CONTEXT_MAX_CHARS;
-  const fmt: FormatOptions = { ids: true, showScope: access.kind === "all" };
-  try {
-    switch (name) {
-      case "qq_recent": {
-        const before = typeof args.before_message_id === "string" && args.before_message_id ? args.before_message_id : undefined;
-        const rows = store.recent(access, { limit: int(args.limit, 15, RECENT_MAX), ...(before ? { beforeMessageId: before } : {}) });
-        const output = rows.length ? formatRecent(rows, max, fmt) : "（没有记录）";
-        observe(returnedLines(rows.map(row => ({ kind: 'message', row })), output, fmt, 'last'), rows.length);
-        return text(output);
-      }
-      case "qq_search": {
-        const query = typeof args.query === "string" ? args.query.trim() : "";
-        if (!query) return text("query 不能为空。", true);
-        const items = store.search(access, {
-          query: query.slice(0, 100),
-          days: int(args.days, 30, SEARCH_DAYS_MAX),
-          limit: int(args.limit, 10, SEARCH_LIMIT_MAX),
-        });
-        const output = items.length ? formatSearch(items, max, fmt) : "（没有匹配的记录）";
-        observe(returnedLines(items, output, fmt, 'first'), items.length);
-        return text(output);
-      }
-      case "qq_message": {
-        const id = typeof args.message_id === "string" ? args.message_id.trim() : String(args.message_id ?? "");
-        if (!id) return text("message_id 不能为空。", true);
-        const hit = store.message(access, id);
-        const output = hit ? formatMessageFull(hit, fmt) : "（没有这条消息，或不在当前会话范围内）";
-        observe(hit ? returnedMessage(hit, output, fmt) : [], hit ? 1 + hit.chain.length : 0);
-        return text(output);
-      }
-      default:
-        return text(`未知工具：${name}`, true);
-    }
-  } catch (err) {
-    return text(`qq_context 查询失败：${(err as Error).message.slice(0, 160)}`, true);
-  }
-}
 
 export function createQQContextServer(deps: QQContextDeps): Server {
   const server = new Server(

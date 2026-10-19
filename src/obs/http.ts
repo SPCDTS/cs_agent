@@ -12,7 +12,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config.js';
 import type { ContextStore } from '../context/store.js';
-import { callQQContextTool } from '../mcp/qq-context-server.js';
+import { callQQContextTool } from '../context/qq-context-tool.js';
 import { logBuffer, type LogLine } from '../shared/log.js';
 import { redact, redactText } from '../shared/redact.js';
 import { CodexSessionAdapter } from './sessions/codex-adapter.js';
