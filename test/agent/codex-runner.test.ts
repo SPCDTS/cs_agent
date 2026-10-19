@@ -12,10 +12,8 @@ import {
   threadKeyForSource,
   CodexRunner,
   CodexTimeoutError,
-  ensureWorkspaceAgentsMd,
   extractThreadId,
   isMissingSessionError,
-  isReplaceableAgentsMd,
   qqAccessArgs,
   qqAttachmentArgs,
   imageTicketDirArgs,
@@ -23,9 +21,6 @@ import {
   effectiveWritableRoots,
   renderAgentsMd,
   renderManagedAgentsMd,
-  WORKSPACE_AGENTS_MD_V1,
-  WORKSPACE_AGENTS_MD_V2,
-  WORKSPACE_AGENTS_STUB,
   writeGlobalAgentsMd,
 } from "../../src/agent/codex/runner.js";
 import { FIXTURES, tmp } from "./helpers.js";
@@ -176,56 +171,6 @@ describe("AGENTS.md", () => {
     expect(readFileSync(file, "utf8")).toBe(renderAgentsMd(opts));
   });
 
-  it("workspace: writes a stub once and never overwrites operator files", async () => {
-    const dir = path.join(tmp(), "ws");
-    expect(await ensureWorkspaceAgentsMd(dir)).toBe(true);
-    expect(readFileSync(path.join(dir, "AGENTS.md"), "utf8")).toBe(WORKSPACE_AGENTS_STUB);
-    expect(WORKSPACE_AGENTS_STUB).toContain("规则见全局 AGENTS.md；本目录是你的工作区");
-    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
-    writeFileSync(path.join(dir, "AGENTS.md"), "custom");
-    expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
-    expect(readFileSync(path.join(dir, "AGENTS.md"), "utf8")).toBe("custom");
-  });
-
-  it("workspace: replaces a file exactly equal to the v1 or v2 template (CRLF ok) with the stub", async () => {
-    const dir = path.join(tmp(), "ws");
-    mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "AGENTS.md");
-    for (const old of [WORKSPACE_AGENTS_MD_V1, WORKSPACE_AGENTS_MD_V2, WORKSPACE_AGENTS_MD_V1.replace(/\n/g, "\r\n"), `${WORKSPACE_AGENTS_MD_V2}\n\n`]) {
-      writeFileSync(file, old);
-      expect(await ensureWorkspaceAgentsMd(dir)).toBe(true);
-      expect(readFileSync(file, "utf8")).toBe(WORKSPACE_AGENTS_STUB);
-    }
-  });
-
-  it("workspace: keeps a modified old template (marker present but text differs) and logs a warning", async () => {
-    const dir = path.join(tmp(), "ws");
-    mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "AGENTS.md");
-    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      for (const edited of [
-        `${WORKSPACE_AGENTS_MD_V2}\n- 运维改过的 v2\n`,
-        "<!-- cs-agent-agents-template v1 -->\n旧模板但改过",
-        `${WORKSPACE_AGENTS_MD_V1}\n- 运维加的一条规则\n`,
-      ]) {
-        writeFileSync(file, edited);
-        expect(await ensureWorkspaceAgentsMd(dir)).toBe(false);
-        expect(readFileSync(file, "utf8")).toBe(edited);
-      }
-      const warns = err.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("modified old cs-agent template"));
-      expect(warns).toHaveLength(3);
-    } finally {
-      err.mockRestore();
-    }
-  });
-
-  it("the live workspace AGENTS.md, if present, is an old template or a stub", () => {
-    const live = path.resolve(FIXTURES, "../../../workspace/AGENTS.md");
-    if (!existsSync(live)) return;
-    const text = readFileSync(live, "utf8");
-    expect(isReplaceableAgentsMd(text) || text.replace(/\r\n/g, "\n") === WORKSPACE_AGENTS_STUB).toBe(true);
-  });
 });
 
 describe("CodexRunner", () => {

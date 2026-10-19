@@ -27,7 +27,7 @@ import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
 import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
-import { CodexRunner, ensureWorkspaceAgentsMd } from "./agent/codex/runner.js";
+import { CodexRunner } from "./agent/codex/runner.js";
 import { purgeCodexTrace } from "./agent/codex/trace.js";
 import { CodexPromptStore } from "./agent/codex/prompt.js";
 import { createImageBackend } from "./media/gen/image-gen.js";
@@ -74,15 +74,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // codex 全局行为指引来自 prompts/codex.md；实际权限规则由 runner 每轮单独注入。
-  // 父工作区的运维 AGENTS.md 保留，runner 显式带入每个子工作区回合。
+  // codex 全局行为指引来自 prompts/codex.md；实际权限规则由 runner 每轮写入会话域 AGENTS.md。
+  // 父工作区的运维 AGENTS.md 保留，runner 拼入每个子工作区的受管规则。
   const writableRoots: string[] = []; // 实际可写目录由 runner 每轮按会话权限计算。
   const codexPrompt = new CodexPromptStore({ codexHome: cfg.codexHome, dataDir: cfg.DATA_DIR,
     workspaceDir: cfg.WORKSPACE_DIR, writableRoots, containsSecret: text => redactText(text, Number.MAX_SAFE_INTEGER) !== text });
   await codexPrompt.read();
   await codexPrompt.regenerate();
   log.info("wrote codex global AGENTS.md", { file: codexPrompt.agentsFile, writable_roots: writableRoots });
-  if (await ensureWorkspaceAgentsMd(cfg.WORKSPACE_DIR)) log.info("wrote workspace AGENTS.md stub", { dir: cfg.WORKSPACE_DIR });
   // v2 的系统提示 ${DATA_DIR}/prompts/system.md 已弃用（规则分流不经模型）：存在时记一行弃用日志，不删除
   warnDeprecatedSystemPrompt(cfg.DATA_DIR);
   await new PiPromptLoader(cfg.DATA_DIR).read();
