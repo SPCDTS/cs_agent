@@ -17,7 +17,8 @@ import { imageRefsValue } from "../../media/gen/image-references.js";
  * 安全阀：resume 前若线程 rollout 文件 > rolloutMaxMb 或线程年龄 > threadMaxDays，新建线程（历史靠 qq_context 找回）。
  */
 import { spawn, spawnSync } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { constants, promises as fs, type Stats } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { TicketSource } from "../backends/types.js";
@@ -254,18 +255,95 @@ export function effectiveWritableRoots(env: NodeJS.ProcessEnv, configured: strin
   return raw.split(",").map((r) => r.trim()).filter((r) => r.startsWith("/"));
 }
 
-/** 原子写入（tmp + rename）。 */
-async function writeAtomic(file: string, content: string): Promise<void> {
-  const tmp = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, content);
-  await fs.rename(tmp, file);
+const MANAGED_FILE_MAX_BYTES = 256 * 1024;
+
+function managedReplacementKind(stat: Stats): string | undefined {
+  if (stat.isSymbolicLink()) return "symlink";
+  if (stat.isDirectory()) return "directory";
+  if (stat.isFIFO()) return "fifo";
+  if (stat.isCharacterDevice()) return "character-device";
+  if (stat.isBlockDevice()) return "block-device";
+  if (stat.isSocket()) return "socket";
+  if (!stat.isFile()) return "non-regular";
+  if (stat.size > MANAGED_FILE_MAX_BYTES) return "oversized";
+  return undefined;
+}
+
+/** 受管文件不信任工作区内的旧路径；有界比较，独占创建临时文件后原子替换。 */
+export async function writeManagedFile(file: string, content: string): Promise<"unchanged" | "written"> {
+  const parent = path.dirname(file);
+  const checkParent = async () => {
+    const stat = await fs.lstat(parent);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`受管文件父目录必须是真实目录: ${parent}`);
+  };
+  const lstat = () => fs.lstat(file).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  await checkParent();
+  const before = await lstat();
+  let kind = before && managedReplacementKind(before);
+  if (before && !kind) {
+    // NOFOLLOW 防止检查后换成链接；NONBLOCK 防止检查后换成 FIFO 而在 open 挂起。
+    const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ELOOP") { kind = "symlink"; return undefined; }
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      });
+    if (handle) {
+      try {
+        const stat = await handle.stat();
+        kind = managedReplacementKind(stat);
+        // Windows 不提供 NOFOLLOW 时，也不读取检查后被替换的 inode。
+        if (!kind && stat.dev === before.dev && stat.ino === before.ino) {
+          const buffer = Buffer.alloc(stat.size + 1);
+          let offset = 0;
+          while (offset < buffer.length) {
+            const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+            if (!bytesRead) break;
+            offset += bytesRead;
+          }
+          if (offset > MANAGED_FILE_MAX_BYTES) kind = "oversized";
+          if (offset === stat.size && buffer.subarray(0, offset).equals(Buffer.from(content, "utf8"))) {
+            const current = await lstat();
+            kind = current && managedReplacementKind(current);
+            if (current && !kind && current.dev === stat.dev && current.ino === stat.ino && current.size === offset) {
+              // Codex resume 会重新注入变化的 AGENTS.md；内容相同时保留 mtime。
+              return "unchanged";
+            }
+          }
+        }
+      } finally { await handle.close(); }
+    }
+  }
+  if (kind) {
+    await fs.rm(file, { recursive: true, force: true });
+    log.warn("managed file replaced", { file, kind });
+  }
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  try {
+    const handle = await fs.open(tmp, "wx");
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally { await handle.close(); }
+    // prepareCodexWorkspace 的检查早于写入；提交替换前再次拒绝父目录链接。
+    await checkParent();
+    await fs.rename(tmp, file);
+    const result = await fs.lstat(file);
+    if (!result.isFile() || result.size !== Buffer.byteLength(content, "utf8")) {
+      throw new Error(`受管文件写入后校验失败: ${file}`);
+    }
+    return "written";
+  } finally { await fs.rm(tmp, { force: true }); }
 }
 
 /** 受管全局规则：每次启动按当前可写目录重写 $CODEX_HOME/AGENTS.md（codex exec 会读取它）。返回文件路径。 */
 export async function writeGlobalAgentsMd(codexHome: string, o: AgentsMdOptions): Promise<string> {
   await fs.mkdir(codexHome, { recursive: true });
   const file = path.join(codexHome, "AGENTS.md");
-  await writeAtomic(file, renderAgentsMd(o));
+  await writeManagedFile(file, renderAgentsMd(o));
   return file;
 }
 
@@ -609,12 +687,7 @@ export class CodexRunner {
     const instructions = managed + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
     const agentsFile = path.join(policy.workspaceDir, "AGENTS.md");
     const agentsContent = `<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 每轮生成，改动会被覆盖。\n\n${instructions}\n`;
-    const existing = await fs.readFile(agentsFile, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return undefined;
-      throw error;
-    });
-    // Codex resume 会重新注入变化的 AGENTS.md；内容未变时保留 mtime。
-    if (existing !== agentsContent) await writeAtomic(agentsFile, agentsContent);
+    await writeManagedFile(agentsFile, agentsContent);
     const attachment = ticket ? attachmentDirs(path.dirname(this.opts.threadsFile), ticket) : undefined;
     const effort = [...policy.args, ...qqAttachmentArgs(attachment?.attachDir, attachment?.fileDir, policy.workspaceDir),
       "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess, this.opts.imageGen),
