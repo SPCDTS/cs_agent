@@ -2,7 +2,7 @@ import { redactText } from "../../src/shared/redact.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { log } from "../../src/shared/log.js";
 import { RecallTokens } from "../../src/context/media-recall-server.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -22,6 +22,7 @@ import {
   AGENTS_TEMPLATE_MARKER,
   effectiveWritableRoots,
   renderAgentsMd,
+  renderManagedAgentsMd,
   WORKSPACE_AGENTS_MD_V1,
   WORKSPACE_AGENTS_MD_V2,
   WORKSPACE_AGENTS_STUB,
@@ -234,6 +235,76 @@ describe("CodexRunner", () => {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+  });
+
+  it("首轮启动前写入会话域受管 AGENTS.md，后续内容不变时保留 mtime", async () => {
+    const { dir, runner, calls } = setup();
+    const workspaceDir = path.join(dir, "ws", "group_1"), file = path.join(workspaceDir, "AGENTS.md");
+    expect(existsSync(file)).toBe(false);
+    await runner.ask("首轮", { threadKey: "group:1" });
+    const expected = "<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 每轮生成，改动会被覆盖。\n\n"
+      + renderManagedAgentsMd({ dataDir: dir, workspaceDir, writableRoots: [workspaceDir] }) + "\n";
+    expect(readFileSync(file, "utf8")).toBe(expected);
+    expect(expected).not.toContain("## 运维工作区指引");
+    // 固定旧时间戳，避免依赖文件系统时间精度或测试等待。
+    utimesSync(file, new Date("2020-01-01T00:00:00Z"), new Date("2020-01-01T00:00:00Z"));
+    const before = statSync(file).mtimeMs;
+    await runner.ask("续轮", { threadKey: "group:1" });
+    expect(readFileSync(file, "utf8")).toBe(expected);
+    expect(statSync(file).mtimeMs).toBe(before);
+    const starts = calls().filter(c => c.phase === "start");
+    expect(starts.map(c => c.argv.includes("resume"))).toEqual([false, true]);
+    for (const start of starts) {
+      expect(start.workspaceAgentsMd).toBe(expected);
+      expect(start.argv.some((arg: string) => arg.startsWith("developer_instructions="))).toBe(false);
+      expect(start.argv).toContain("project_doc_max_bytes=131072");
+    }
+  });
+
+  it("续轮覆盖模型对受管文件的修改", async () => {
+    const { dir, runner, calls } = setup();
+    await runner.ask("首轮", { threadKey: "group:1" });
+    const file = path.join(dir, "ws", "group_1", "AGENTS.md"), expected = readFileSync(file, "utf8");
+    writeFileSync(file, "模型改写的规则", "utf8");
+    utimesSync(file, new Date("2020-01-01T00:00:00Z"), new Date("2020-01-01T00:00:00Z"));
+    const before = statSync(file).mtimeMs;
+    await runner.ask("恢复规则", { threadKey: "group:1" });
+    expect(readFileSync(file, "utf8")).toBe(expected);
+    expect(statSync(file).mtimeMs).not.toBe(before);
+    expect(calls().filter(c => c.phase === "start").at(-1).workspaceAgentsMd).toBe(expected);
+  });
+
+  it("权限变化后在 resume 前重写规则，只读会话仍由父进程生成受管文件", async () => {
+    const dir = tmp(), options = setupOpts(dir), file = path.join(options.workspaceDir, "group_1", "AGENTS.md");
+    await new CodexRunner(options).ask("可写", { threadKey: "group:1" });
+    const before = readFileSync(file, "utf8");
+    await new CodexRunner({ ...options, sandbox: "read-only" }).ask("只读", { threadKey: "group:1" });
+    const after = readFileSync(file, "utf8");
+    expect(after).not.toBe(before);
+    expect(after).toContain(`本轮只读：${path.dirname(file)}；没有可写目录。`);
+    const starts = readFileSync(options.env.FAKE_CODEX_LOG, "utf8").trim().split("\n")
+      .map(line => JSON.parse(line)).filter(row => row.phase === "start");
+    expect(starts[1].argv).toContain("resume");
+    expect(starts[1].workspaceAgentsMd).toBe(after);
+  });
+
+  it.each(["AGENTS.md", "AGENTS.override.md"])("父工作区 %s 指引变化后写入续轮受管文件", async name => {
+    const { dir, runner, calls } = setup();
+    const base = path.join(dir, "ws"), file = path.join(base, "group_1", "AGENTS.md");
+    mkdirSync(base, { recursive: true });
+    writeFileSync(path.join(base, name), "运维指引第一版", "utf8");
+    await runner.ask("首轮", { threadKey: "group:1" });
+    expect(readFileSync(file, "utf8")).toContain("\n\n## 运维工作区指引\n运维指引第一版\n");
+    writeFileSync(path.join(base, name), "运维指引第二版", "utf8");
+    await runner.ask("续轮", { threadKey: "group:1" });
+    const after = readFileSync(file, "utf8");
+    expect(after).toContain("\n\n## 运维工作区指引\n运维指引第二版\n");
+    expect(after).not.toContain("运维指引第一版");
+    const starts = calls().filter(c => c.phase === "start");
+    expect(starts[0].workspaceAgentsMd).toContain("运维指引第一版");
+    expect(starts[1].workspaceAgentsMd).toBe(after);
+    expect(starts[1].argv).toContain("resume");
+    expect(readFileSync(path.join(base, name), "utf8")).toBe("运维指引第二版");
   });
 
   it("child process does not inherit secrets from the parent env", async () => {

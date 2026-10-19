@@ -101,7 +101,10 @@ describe("按会话域隔离 codex", () => {
       expect(row.argv.some((arg: string) => arg.startsWith("sandbox_mode="))).toBe(false);
       const roots = JSON.parse(row.argv.find((arg: string) => arg.startsWith("sandbox_workspace_write.writable_roots=")).split("=")[1]);
       expect(roots).toEqual(owner ? [ws, path.join(path.dirname(options.threadsFile), "prompts"), path.join(path.dirname(options.threadsFile), "workflows")] : [ws]);
-      const rules = JSON.parse(row.argv.find((arg: string) => arg.startsWith("developer_instructions=")).slice("developer_instructions=".length));
+      expect(row.argv.some((arg: string) => arg.startsWith("developer_instructions="))).toBe(false);
+      expect(row.argv).toContain("project_doc_max_bytes=131072");
+      const rules = row.workspaceAgentsMd;
+      expect(await fs.readFile(path.join(ws, "AGENTS.md"), "utf8")).toBe(rules);
       expect(rules).toContain("运维自定义中文指引");
       expect(rules).toContain(ws);
       if (!owner) expect(rules).not.toContain(path.join(path.dirname(options.threadsFile), "prompts"));

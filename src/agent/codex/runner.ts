@@ -694,8 +694,16 @@ export class CodexRunner {
     const managed = renderManagedAgentsMd({ dataDir: path.dirname(this.opts.threadsFile), workspaceDir: policy.workspaceDir,
       writableRoots: policy.writableRoots, readOnly: this.opts.sandbox === "read-only" });
     const instructions = managed + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
+    const agentsFile = path.join(policy.workspaceDir, "AGENTS.md");
+    const agentsContent = `<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 每轮生成，改动会被覆盖。\n\n${instructions}\n`;
+    const existing = await fs.readFile(agentsFile, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    // Codex resume 会重新注入变化的 AGENTS.md；内容未变时保留 mtime。
+    if (existing !== agentsContent) await writeAtomic(agentsFile, agentsContent);
     const attachment = ticket ? attachmentDirs(path.dirname(this.opts.threadsFile), ticket) : undefined;
-    const effort = [...policy.args, ...qqAttachmentArgs(attachment?.attachDir, attachment?.fileDir, policy.workspaceDir), "-c", `developer_instructions=${JSON.stringify(instructions)}`,
+    const effort = [...policy.args, ...qqAttachmentArgs(attachment?.attachDir, attachment?.fileDir, policy.workspaceDir),
       "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort), ...qqAccessArgs(qqAccess, this.opts.imageGen),
       ...(this.opts.imageGen === "on" ? [...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)] : [])];
     const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);

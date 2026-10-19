@@ -2,7 +2,7 @@
 // 假 codex：记录 argv/stdin 到 FAKE_CODEX_LOG，输出 JSONL，写 -o 文件。
 // FAKE_CODEX_IMAGES=N：模拟图片附件/生图，向本轮注入的图片目录写 N 张 PNG 和一个非图片文件。
 // FAKE_CODEX_TEXT：覆盖回答正文。
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
@@ -27,7 +27,9 @@ process.stdin.on("data", (c) => (stdin += c));
 process.stdin.on("end", async () => {
   const log = (rec) => process.env.FAKE_CODEX_LOG && appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify(rec) + "\n");
   const start = Date.now();
-  log({ phase: "start", pid: process.pid, argv, stdin, codexHome: process.env.CODEX_HOME, cwd: process.cwd(), t: start, env: process.env });
+  const agentsFile = path.join(process.cwd(), "AGENTS.md");
+  const workspaceAgentsMd = existsSync(agentsFile) ? readFileSync(agentsFile, "utf8") : null;
+  log({ phase: "start", pid: process.pid, argv, stdin, codexHome: process.env.CODEX_HOME, cwd: process.cwd(), workspaceAgentsMd, t: start, env: process.env });
   const emit = (o) => process.stdout.write(JSON.stringify(o) + "\n");
   if (isResume) {
     const id = argv[argv.length - 2];
