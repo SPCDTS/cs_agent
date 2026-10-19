@@ -2,7 +2,7 @@ import type { ContextUsageStore } from "../context-usage.js";
 import { PiContextObserver, piContextCapacity } from "../pi-context-usage.js";
 import { readThreadArchive, writeThreadArchive, THREAD_ARCHIVE_LIMIT } from "../thread-archive.js";
 import { trace } from "../../shared/trace.js";
-import type { PiConversation, PiEntryPage, PiSessionSource } from "../../obs/sessions/pi-adapter.js";
+import type { PiConversation, PiEntryPage, PiSessionSource } from "./pi-session-types.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";

@@ -1,3 +1,4 @@
+import type { PiConversation, PiEntryPage, PiSessionSource } from '../../agent/backends/pi-session-types.js';
 import { AssistantEntry, CompactionEntry, ResetEntry, SystemEntry, UserEntry,
   type ContextView, type EntryRecord } from '@earendil-works/pi-durable';
 import type { Message } from '@earendil-works/pi-ai';
@@ -8,20 +9,6 @@ import { contentSlice, inlineBlock, redactSessionValue, validRange } from './con
 import { enrichTurns } from './enrichment.js';
 import { SessionError, type Block, type BlockFrame, type ContentRef, type ObservedTurn,
   type SessionAdapter, type SessionFilter, type SessionRef, type TurnIndex } from './types.js';
-
-export type PiConversation = Omit<SessionRef, 'backend' | 'turns' | 'started' | 'updated'> & {
-  started?: number; updated?: number;
-};
-export type PiEntryPage = { items: readonly EntryRecord[]; cursor?: string; hasMore: boolean };
-
-/** 仅封装 pi-durable 公开接口；游标是最后读到的 entry ID，用于后续 minEntryId 扫描。 */
-export interface PiSessionSource {
-  listConversations(): Promise<PiConversation[]>;
-  entries(id: string, cursor?: string, limit?: number): Promise<PiEntryPage>;
-  context(id: string, at?: string): Promise<ContextView>;
-  /** 实际后端使用 watchEvents；注入源没有实时总线时由适配器轮询。 */
-  subscribe?(id: string, cb: () => void): Promise<() => void>;
-}
 
 type StoredBlock = { block: Block; ref: ContentRef };
 type PiTurn = { index: TurnIndex; blocks: StoredBlock[] };

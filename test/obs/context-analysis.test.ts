@@ -7,7 +7,8 @@ import { AssistantEntry, CompactionEntry, SystemEntry, UserEntry, type ContextVi
 import { analyzeContext } from '../../src/obs/context/index.js';
 import { readCodexTrace } from '../../src/obs/context/codex-trace.js';
 import { CodexSessionAdapter } from '../../src/obs/sessions/codex-adapter.js';
-import { PiSessionAdapter, type PiSessionSource } from '../../src/obs/sessions/pi-adapter.js';
+import { PiSessionAdapter } from '../../src/obs/sessions/pi-adapter.js';
+import { type PiSessionSource } from '../../src/agent/backends/pi-session-types.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import { contextBody } from '../../src/obs/ui/context-view.js';

@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fauxAssistantMessage, fauxToolCall, type AssistantMessage, type Message } from '@earendil-works/pi-ai';
 import { AssistantEntry, CompactionEntry, ResetEntry, SystemEntry, ToolResultEntry, UserEntry,
   type ContextView, type ConversationId, type EntryId, type EntryRecord } from '@earendil-works/pi-durable';
-import { PiSessionAdapter, type PiConversation, type PiSessionSource } from '../../src/obs/sessions/pi-adapter.js';
+import { PiSessionAdapter } from '../../src/obs/sessions/pi-adapter.js';
+import { type PiConversation, type PiSessionSource } from '../../src/agent/backends/pi-session-types.js';
 import type { BlockFrame } from '../../src/obs/sessions/types.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { registerTemporarySecrets } from '../../src/shared/redact.js';
