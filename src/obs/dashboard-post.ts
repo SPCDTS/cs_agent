@@ -1,0 +1,79 @@
+/** 面板写操作：沿用同源、CSRF、版本检查与原有响应。 */
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { DashboardOptions } from './dashboard-types.js';
+import { equal, readBody, HttpError, guardAgentMd, writeAgentMd } from './dashboard-io.js';
+import { isThreadKey } from '../agent/codex/runner.js';
+import { SETTINGS_TICKET, type RuntimeSettings } from '../agent/settings.js';
+import { parseBackendOverrides } from '../agent/backends/select.js';
+import { redactText } from '../shared/redact.js';
+import type { Trace } from '../shared/trace.js';
+import { page } from './ui/html.js';
+
+export function createDashboardPost(opts: DashboardOptions, csrf: string, agentMd: string,
+  tracer: Pick<Trace, 'event'>,
+  render: (url: URL, nonce: string, flash?: { text: string; error?: boolean }) => Promise<string | null>) {
+  async function handlePost(req: IncomingMessage, res: ServerResponse, url: URL, nonce: string, host: string): Promise<void> {
+    // 同源检查：Origin 为 null 时仅信任浏览器提供的 Sec-Fetch-Site: same-origin；其他 Origin 必须匹配，随后仍校验 CSRF 令牌。
+    const origin = req.headers.origin;
+    const site = req.headers['sec-fetch-site'];
+    if (origin && origin !== `http://${host}` && !(origin === 'null' && site === 'same-origin')) { res.writeHead(403).end('跨站请求被拒绝'); return; }
+    if (site && site !== 'same-origin' && site !== 'none') { res.writeHead(403).end('跨站请求被拒绝'); return; }
+    let form: URLSearchParams;
+    try { form = await readBody(req); }
+    catch (e) { res.writeHead(e instanceof HttpError ? e.status : 400).end(e instanceof Error ? e.message : ''); return; }
+    if (!csrf || !equal(form.get('_csrf') ?? '', csrf)) { res.writeHead(403, {'Content-Type':'text/plain; charset=utf-8'}).end('CSRF 令牌无效，请刷新页面后重试'); return; }
+    const back = (location: string) => res.writeHead(303, { Location: location }).end();
+    try {
+      if (url.pathname === '/settings') {
+        if (!opts.settings) throw new HttpError(404, '运行时设置不可用');
+        let overrides: RuntimeSettings['backendOverrides'];
+        try { overrides = parseBackendOverrides((form.get('backendOverrides') ?? '').split(/[\r\n,]+/).join(',')); }
+        catch (e) { throw new HttpError(400, (e as Error).message.replace('AGENT_BACKEND_OVERRIDES', '覆盖表')); }
+        try {
+          await opts.settings.update({ agentBackend: form.get('agentBackend') as RuntimeSettings['agentBackend'], backendOverrides: overrides,
+            codexReasoningEffort: form.get('codexReasoningEffort') as RuntimeSettings['codexReasoningEffort'],
+            alertOwner: form.get('alertOwner') === 'on' }, 'dashboard');
+        } catch (e) { throw new HttpError(400, '设置未保存：取值不在允许范围内。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
+        back('/settings?ok=saved'); return;
+      }
+      if (url.pathname === '/settings/agent-md') {
+        await guardAgentMd(agentMd, form.get('revision') ?? '');
+        const r = await writeAgentMd(agentMd, form.get('content') ?? '');
+        tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { target: 'pi', source: 'dashboard', file: 'prompts/agent.md', bytes_before: r.before, bytes_after: r.after } });
+        back('/settings?ok=prompt#prompt'); return;
+      }
+      if (url.pathname === '/settings/codex-prompt') {
+        if (!opts.codexPrompt) throw new HttpError(404, 'codex 系统提示不可用');
+        try { await opts.codexPrompt.save((form.get('content') ?? '').replace(/\r\n?/g, '\n'), form.get('revision') ?? ''); }
+        catch (e) {
+          if ((e as Error)?.name === 'StaleRevisionError') throw new HttpError(409, 'codex.md 已在别处被修改，请刷新后再保存');
+          throw new HttpError(409, redactText(e instanceof Error && e.message ? e.message : 'codex.md 未保存', 2_000));
+        }
+        back('/settings?ok=codexPrompt#codex-prompt'); return;
+      }
+      if (url.pathname === '/codex/reset' || url.pathname === '/pi/reset') {
+        const codex = url.pathname === '/codex/reset';
+        const key = form.get('key') ?? '';
+        const reset = codex ? opts.resetCodex : opts.resetPi;
+        if (!reset) throw new HttpError(404, '重置不可用');
+        if (!isThreadKey(key)) throw new HttpError(400, '非法的线程键');
+        const job = (reset as (k: string) => Promise<string | number | null>)(key).then(old => {
+          tracer.event(codex ? '@codex' : '@pi', 'thread_reset', { detail: { source: 'dashboard', backend: codex ? 'codex' : 'pi', [codex ? 'thread_key' : 'conversation_key']: key, archived: old } });
+          return old;
+        });
+        // 进行中的回合可能还要几分钟：最多等 1.5 秒，否则告诉用户已排队。
+        const outcome = await Promise.race([job.then(old => old === null ? 'unchanged' : 'reset'), new Promise<string>(r => setTimeout(() => r('queued'), 1500).unref())]);
+        job.catch(() => undefined);
+        back(`/agents?ok=${outcome}`); return;
+      }
+      throw new HttpError(404, '没有这个操作');
+    } catch (e) {
+      const status = e instanceof HttpError ? e.status : 500;
+      const message = e instanceof HttpError ? e.message : '操作失败，详见日志';
+      const html = url.pathname.startsWith('/settings') ? await render(new URL('http://localhost/settings'), nonce, { text: message, error: true }) : null;
+      res.writeHead(status, {'Content-Type':'text/html; charset=utf-8'}).end(html ?? page({ title: '操作未完成', path: url.pathname, nonce, flash: { text: message, error: true }, body: '<p><a href="/agents">返回</a></p>' }));
+    }
+  }
+
+  return handlePost;
+}

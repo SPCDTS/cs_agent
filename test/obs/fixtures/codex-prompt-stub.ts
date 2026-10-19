@@ -1,4 +1,4 @@
-import type { CodexPromptSnapshot, CodexPromptView } from '../../../src/obs/http.js';
+import type { CodexPromptSnapshot, CodexPromptView } from '../../../src/obs/dashboard-types.js';
 
 class StaleRevisionError extends Error { override name = 'StaleRevisionError'; }
 

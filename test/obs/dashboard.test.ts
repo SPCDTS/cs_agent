@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync }
 import path from 'node:path';
 import os from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { agentMdRevision, createDashboard } from '../../src/obs/http.js';
+import { createDashboard } from '../../src/obs/http.js';
+import { agentMdRevision } from '../../src/obs/dashboard-io.js';
 import { csrfToken, sseWriter } from '../../src/obs/http-util.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { trace } from '../../src/shared/trace.js';

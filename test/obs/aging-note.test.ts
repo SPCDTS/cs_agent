@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agingNote } from '../../src/obs/http.js';
+import { agingNote } from '../../src/obs/ui/dashboard-pages.js';
 import { epochMs, fmtTime } from '../../src/obs/ui/html.js';
 
 describe('聊天记录整理时间', () => {
