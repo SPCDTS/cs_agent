@@ -4,7 +4,6 @@
  */
 import { isScope } from "../../context/access.js";
 import { BACKEND_NAMES, type AgentBackend, type BackendName } from "./types.js";
-export { PiBackend } from "./pi.js";
 
 function isBackendName(v: unknown): v is BackendName {
   return typeof v === "string" && (BACKEND_NAMES as readonly string[]).includes(v);
