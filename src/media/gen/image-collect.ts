@@ -14,7 +14,9 @@ export async function listFiles(dir: string): Promise<Set<string>> {
     if (depth > 4) return;
     const ents = await fs.readdir(path.join(dir, rel), { withFileTypes: true }).catch(() => []);
     for (const e of ents) {
-      if (e.name === ".download" || e.name.endsWith(".tmp") || e.name.endsWith(".json") || e.name.includes(".bad-")) continue;
+      // attach-* 的副本按魔数识别，原文件即使没有图片扩展名也必须收集。
+      const attachment = /^attach-\d+$/.test(rel);
+      if (!attachment && (e.name === ".download" || e.name.endsWith(".tmp") || e.name.endsWith(".json") || e.name.includes(".bad-"))) continue;
       const r = rel ? path.join(rel, e.name) : e.name;
       if (e.isDirectory()) await walk(r, depth + 1);
       else out.add(r);

@@ -52,6 +52,11 @@ const EnvSchema = z.object({
   IMAGE_COLLECT_EXTENSIONS: z.coerce.number().int().min(0).max(10).default(2),
   IMAGE_GEN_MCP_WAIT_SEC: int(90),
 
+  ATTACH_FILE_MAX_MB: z.coerce.number().int().positive().max(1024).default(20),
+  ATTACH_FILES_MAX: int(3),
+  ATTACH_FILE_DENY_EXT: z.string().default(".exe,.bat,.cmd,.ps1,.vbs,.js,.scr,.msi,.com,.lnk")
+    .transform(v => v.split(",").map(ext => ext.trim().toLowerCase()).filter(Boolean)),
+
   CODEX_IMAGE_GEN: z.enum(["off", "on"]).default("off"),
   CODEX_BIN: z.string().default("codex"),
   CODEX_MODEL: z.string().default("gpt-6.1-sol"),
