@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentModels, resolveThinkingLevel } from "../src/agent/harness.js";
-import { applyEnvAliases, loadConfig, requireProviderApiKey } from "../src/config.js";
+import { applyEnvAliases, requireProviderApiKey } from "../src/config.js";
+import { loadAgentConfig as loadConfig } from "../src/agent/config.js";
 import { tmp } from "./agent/helpers.js";
 
 describe("model config defaults", () => {

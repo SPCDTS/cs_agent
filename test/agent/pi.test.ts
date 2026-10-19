@@ -26,7 +26,7 @@ import { Dispatcher } from "../../src/agent/dispatch.js";
 import { createTasks } from "../../src/agent/tasks.js";
 import { createCsAgentExtension } from "../../src/agent/extension.js";
 import { openHarness } from "../../src/agent/harness.js";
-import { loadConfig } from "../../src/config.js";
+import { loadAgentConfig as loadConfig } from "../../src/agent/config.js";
 import type { InboundMessage, ReplyTicketRecord } from "../../src/qq/types.js";
 import { tmp } from "./helpers.js";
 import { put, sandboxRequirements } from "./pi-sandbox-fixture.js";

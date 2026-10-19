@@ -1,3 +1,4 @@
+import { resolveAgentConfig } from '../agent/config.js';
 import { csrfToken, sseWriter, type SseWriter } from './http-util.js';
 export { csrfToken, sseWriter, type SseWriter } from './http-util.js';
 import { createContextRoutes } from './context/http.js';
@@ -182,25 +183,26 @@ const ticketStatus = (events: ObsEvent[]) => {
 };
 
 export function createDashboard(opts: DashboardOptions) {
+  const config = resolveAgentConfig(opts.config);
   const clients = new Set<ServerResponse>();
   let closed = false;
   const adapters: SessionAdapters = opts.sessionAdapters ?? (opts.store.degraded ? {} : {
-    codex: new CodexSessionAdapter({ store: opts.store, codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR }),
+    codex: new CodexSessionAdapter({ store: opts.store, codexHome: config.codexHome, dataDir: config.DATA_DIR }),
     ...(opts.piSessions ? { pi: new PiSessionAdapter({ store: opts.store, source: opts.piSessions }) } : {}),
   });
   const handleSessions = createSessionRoutes(adapters, sse);
-  const handleContext = createContextRoutes(adapters, { codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR, contextUsage: opts.contextUsage });
+  const handleContext = createContextRoutes(adapters, { codexHome: config.codexHome, dataDir: config.DATA_DIR, contextUsage: opts.contextUsage });
   const sessionRoute = (url: URL, res: ServerResponse) => url.pathname.split('/').length === 7 && url.pathname.endsWith('/context')
     ? handleContext(url, res) : handleSessions(url, res);
   const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, sessionAdapters: adapters, aging: opts.aging, archives: opts.archives,
-    maxChars: opts.config.QQ_CONTEXT_MAX_CHARS, retention: { rawDays: opts.config.HISTORY_RAW_DAYS,
-      summaryDays: opts.config.HISTORY_SUMMARY_DAYS, hardMaxDays: opts.config.HISTORY_RAW_HARD_MAX_DAYS,
-      dailyHour: opts.config.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
-  const token = opts.config.OBS_TOKEN;
+    maxChars: config.QQ_CONTEXT_MAX_CHARS, retention: { rawDays: config.HISTORY_RAW_DAYS,
+      summaryDays: config.HISTORY_SUMMARY_DAYS, hardMaxDays: config.HISTORY_RAW_HARD_MAX_DAYS,
+      dailyHour: config.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
+  const token = config.OBS_TOKEN;
   const csrf = token ? csrfToken(token) : '';
   const tracer = opts.trace ?? defaultTrace;
-  const agentMd = path.join(opts.config.DATA_DIR, 'prompts', 'agent.md');
-  const agentsMd = path.join(opts.config.codexHome, 'AGENTS.md');
+  const agentMd = path.join(config.DATA_DIR, 'prompts', 'agent.md');
+  const agentsMd = path.join(config.codexHome, 'AGENTS.md');
   // codex.md 变更由存储通知，面板只在此处记一次 prompt_changed（处理器本身不记，避免重复）。
   let codexBytes: Promise<number | null> = opts.codexPrompt ? opts.codexPrompt.read().then(s => Buffer.byteLength(s.custom), () => null) : Promise.resolve(null);
   const offCodexPrompt = opts.codexPrompt?.subscribe(change => {
@@ -269,7 +271,7 @@ export function createDashboard(opts: DashboardOptions) {
     if (url.pathname.startsWith('/media/')) {
       if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET' }).end(); return; }
       try {
-        const { bytes, mime } = await imageBinary(opts.config.DATA_DIR, opts.context, url.pathname.slice('/media/'.length));
+        const { bytes, mime } = await imageBinary(config.DATA_DIR, opts.context, url.pathname.slice('/media/'.length));
         res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'private, max-age=3600' }).end(bytes);
       } catch (error) {
         res.writeHead(error instanceof SessionError ? error.status : 404).end('图片不可读取');
@@ -329,8 +331,8 @@ export function createDashboard(opts: DashboardOptions) {
     if (url.pathname.startsWith('/images/')) {
       try {
         const segments = (req.url ?? '').split('?')[0]!.slice('/images/'.length).split('/').map(decodeURIComponent);
-        const file = await imageFile(opts.config.imagesDir,segments);
-        const bytes = loadImage(file, opts.config.imagesDir);
+        const file = await imageFile(config.imagesDir,segments);
+        const bytes = loadImage(file, config.imagesDir);
         const ext=path.extname(file).toLowerCase();
         res.writeHead(200,{'Content-Type':ext==='.jpg'||ext==='.jpeg'?'image/jpeg':'image/'+ext.slice(1)}).end(bytes);
       } catch { res.writeHead(404).end('图片不存在'); } return;
@@ -549,11 +551,11 @@ export function createDashboard(opts: DashboardOptions) {
     if (events.length === limit) body += `<p><a href="/tickets/${uri(ticket)}?after=${events.at(-1)!.id}&amp;limit=${limit}">下一页事件</a></p>`;
     body += '</section>';
     if (/^[A-Za-z0-9_-]{1,128}$/.test(ticket)) {
-      const root = path.join(opts.config.imagesDir,ticket);
+      const root = path.join(config.imagesDir,ticket);
       const names = await fs.readdir(root,{recursive:true}).catch(()=>[] as string[]);
       const thumbs: string[] = [];
       for (const name of names.slice(0,200)) {
-        try { const parts = [ticket,...name.split(path.sep)]; await imageFile(opts.config.imagesDir,parts);
+        try { const parts = [ticket,...name.split(path.sep)]; await imageFile(config.imagesDir,parts);
           const src = '/images/'+parts.map(uri).join('/'); thumbs.push(`<a href="${src}"><img loading="lazy" src="${src}" alt="生成图 ${esc(name)}"></a>`);
         } catch { /* 只展示允许的位图 */ }
       }
@@ -567,7 +569,7 @@ export function createDashboard(opts: DashboardOptions) {
     const scopes = opts.context.scopes();
     let body = `<form class="bar"><label>会话域<select name="scope"><option value="">全部（owner 视角）</option>${scopes.map(s=>`<option value="${esc(s)}" ${s===scope?'selected':''}>${esc(scopeLabel(s))}</option>`).join('')}</select></label><label>关键词<input name="query" placeholder="留空查看最近记录" value="${esc(q.get('query'))}"></label><button>检索</button></form>`;
     const query = q.get('query');
-    const result = callQQContextTool({access:scope?{kind:'scope',scope}:{kind:'all'},openStore:()=>opts.context,maxChars:opts.config.QQ_CONTEXT_MAX_CHARS},query?'qq_search':'qq_recent',query?{query,days:180,limit:20}:{limit:30});
+    const result = callQQContextTool({access:scope?{kind:'scope',scope}:{kind:'all'},openStore:()=>opts.context,maxChars:config.QQ_CONTEXT_MAX_CHARS},query?'qq_search':'qq_recent',query?{query,days:180,limit:20}:{limit:30});
     body += `<p class="muted">${query ? 'qq_search 结果' : 'qq_recent 最近 30 条'}（${esc(scope ? scopeLabel(scope) : '全部会话')}）　${scope ? `<a href="/memory/scopes/${uri(scope)}">在记忆时间线中查看</a>` : '<a href="/memory">记忆总览</a>'}</p>` + json(result.content.filter(c=>c.type==='text').map(c=>c.text).join('\n'));
     return body;
   }
@@ -782,7 +784,7 @@ export function createDashboard(opts: DashboardOptions) {
 <fieldset><legend>执行后端${diff('agentBackend')}</legend><div class="choices">${radio('agentBackend', 'codex', 'Codex', '容器内 codex CLI，owner 与共享两条长期线程，可用浏览器与命令。')}${radio('agentBackend', 'pi', 'Pi', '进程内 pi 会话，每个会话域独立记忆，联网检索走 DeepSeek。')}</div></fieldset>
 <fieldset><legend>按会话覆盖${diff('backendOverrides')}</legend><label>每行一项，例如 group:200000001=pi<textarea name="backendOverrides" rows="4" spellcheck="false">${esc(formatBackendOverrides(s.backendOverrides))}</textarea></label><div class="hint">留空表示全部使用上面的默认后端。会话域格式为 group:群号 或 private:QQ号。</div></fieldset>
 <fieldset><legend>Codex 推理强度${diff('codexReasoningEffort')}</legend><label><select name="codexReasoningEffort">${REASONING_EFFORTS.map(e => `<option${s.codexReasoningEffort === e ? ' selected' : ''}>${e}</option>`).join('')}</select></label><div class="hint">每轮以 -c 参数传给 codex，下一轮即生效。</div></fieldset>
-<fieldset><legend>owner 告警${diff('alertOwner')}</legend><label class="choice"><input type="checkbox" name="alertOwner"${s.alertOwner ? ' checked' : ''}><span>向 owner 私聊发送告警<small>QQ 离线超过五分钟、模型鉴权失败、连续三条失败时发送，30 分钟内最多一条。${opts.config.owner ? '' : '（当前没有配置 owner，开关不会生效）'}</small></span></label></fieldset>
+<fieldset><legend>owner 告警${diff('alertOwner')}</legend><label class="choice"><input type="checkbox" name="alertOwner"${s.alertOwner ? ' checked' : ''}><span>向 owner 私聊发送告警<small>QQ 离线超过五分钟、模型鉴权失败、连续三条失败时发送，30 分钟内最多一条。${config.owner ? '' : '（当前没有配置 owner，开关不会生效）'}</small></span></label></fieldset>
 <button>保存设置</button></form></section>`;
     }
     body += await codexPromptCard();
@@ -819,7 +821,7 @@ export function createDashboard(opts: DashboardOptions) {
   }
 
   async function configBody(): Promise<string> {
-    const cfg = asObj(redact(opts.config, 2_000));
+    const cfg = asObj(redact(config, 2_000));
     const rows = Object.entries(cfg).sort(([a], [b]) => a.localeCompare(b));
     let body = `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>项</th><th>值</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><td class="mono">${esc(k)}</td><td class="mono">${esc(typeof v === 'string' ? v : JSON.stringify(v))}</td></tr>`).join('')}</tbody></table></div></div>`;
     const st = await fs.stat(agentMd).catch(() => null);

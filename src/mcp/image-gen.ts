@@ -10,7 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createImageBackend } from "../media/gen/image-gen.js";
 import { backendConfigFromEnv, createImageGenServer } from "./image-gen-server.js";
 import { parseAccess } from "../context/access.js";
-import { loadConfig } from "../config.js";
+import { loadAgentConfig as loadConfig } from "../agent/config.js";
 
 import { ImageEventSpool } from "../media/gen/events.js";
 import { Trace } from "../shared/trace.js";

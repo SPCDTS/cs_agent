@@ -18,7 +18,7 @@ import type { ConversationId } from "@earendil-works/pi-durable";
 import { Dispatcher } from "../../src/agent/dispatch.js";
 import { startAlerts } from "../../src/obs/alerts.js";
 import { log } from "../../src/shared/log.js";
-import { loadConfig } from "../../src/config.js";
+import { loadAgentConfig as loadConfig } from "../../src/agent/config.js";
 import type { InboundMessage, ReplyTicketRecord } from "../../src/qq/types.js";
 
 const clean: (() => unknown)[] = [];

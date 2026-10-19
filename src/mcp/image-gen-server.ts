@@ -20,7 +20,7 @@ import { classifyImageError, referenceUploads, type ImageBackend, type ImageBack
 import { imageTimeoutMs } from "../media/gen/image-options.js";
 import { savePendingImage, type PendingImageJob } from "../media/gen/image-pending.js";
 import { isLoopbackUrl } from "../agent/loopback-proxy.js";
-import { loadConfig } from "../config.js";
+import { loadAgentConfig as loadConfig } from "../agent/config.js";
 import { readImageFiles, validImageFile } from "../media/gen/image-files.js";
 import { collectNewImages } from "../media/gen/image-collect.js";
 

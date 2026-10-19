@@ -1,9 +1,5 @@
 import path from "node:path";
 import { z } from "zod";
-import { resolveOwner } from "./context/access.js";
-import { parseImagePrefixes } from "./agent/router.js";
-import { parseBackendOverrides } from "./agent/backends/select.js";
-import type { BackendName } from "./agent/backends/types.js";
 import { DEFAULT_COMPACTION_POLICY } from "@earendil-works/pi-durable";
 
 /** 逗号分隔列表；空串 → []。 */
@@ -129,10 +125,6 @@ export interface Config extends Env {
   imagesDir: string;
   /** ${DATA_DIR}/tickets：每张票据的工作目录（codex 回合的 codex-last.txt），回复后清理 */
   ticketsDir: string;
-  /** QQ_OWNER，否则 QQ_ALLOW_USERS 第一项；QQ_ALLOW_USERS=* 且未设 QQ_OWNER 时无 owner */
-  owner: string | undefined;
-  imagePrefixes: string[];
-  backendOverrides: Record<string, BackendName>;
 }
 
 /** 环境变量别名 → pi-ai 读取的标准名（.env 中常见的写法差异）。 */
@@ -176,12 +168,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`配置无效: ${issues}`);
   }
   const e = parsed.data;
-  let backendOverrides: Record<string, BackendName>;
-  try {
-    backendOverrides = parseBackendOverrides(e.AGENT_BACKEND_OVERRIDES);
-  } catch (err) {
-    throw new Error(`配置无效: ${(err as Error).message}`);
-  }
   const users = e.QQ_ALLOW_USERS.trim();
   const allowUsers: string[] | "*" =
     users === "*"
@@ -196,8 +182,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     codexHome: path.join(e.DATA_DIR, "codex"),
     imagesDir: path.join(e.DATA_DIR, "images"),
     ticketsDir: path.join(e.DATA_DIR, "tickets"),
-    owner: resolveOwner(e.QQ_OWNER, allowUsers),
-    imagePrefixes: parseImagePrefixes(e.IMAGE_PREFIXES),
-    backendOverrides,
   };
 }
