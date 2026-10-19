@@ -5,11 +5,14 @@ import { log } from "../../shared/log.js";
 
 const exec = promisify(execFile);
 
-/** debug models 的顶层为 {models: [...] }，按 slug 精确选择，使用 context_window 原值。 */
+/** debug models 的顶层为 {models: [...] }；精确匹配优先，其次忽略提供者前缀。 */
+const unprefixedModel = (model: string) => model.replace(/^[^/]+\//, "");
 export function catalogContextWindow(json: string, model: string): number | undefined {
   const catalog = JSON.parse(json) as { models?: { slug?: string; context_window?: unknown }[] };
   if (!Array.isArray(catalog?.models)) return undefined;
-  const value = catalog.models.find(m => m?.slug === model)?.context_window;
+  const selected = catalog.models.find(m => m?.slug === model)
+    ?? catalog.models.find(m => typeof m?.slug === "string" && unprefixedModel(m.slug) === unprefixedModel(model));
+  const value = selected?.context_window;
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
