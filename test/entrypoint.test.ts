@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -26,9 +26,12 @@ function runEntrypointIn(
   writeFileSync(script, readFileSync(path.join(ROOT, "scripts", "entrypoint.sh"), "utf8").replace(/\r/g, ""));
   const data = path.join(dir, "data");
   const ws = path.join(dir, "ws");
+  const inheritedEnv = { ...process.env };
+  delete inheritedEnv.CODEX_REMOTE_PLUGINS;
+  delete inheritedEnv.CODEX_PLUGIN_PRUNE;
   const r = spawnSync("sh", [posix(script), ...args], {
     env: {
-      ...process.env, DATA_DIR: shPath(data), WORKSPACE_DIR: shPath(ws), WORKFLOWS_SRC: "/nonexistent",
+      ...inheritedEnv, DATA_DIR: shPath(data), WORKSPACE_DIR: shPath(ws), WORKFLOWS_SRC: "/nonexistent",
       CODEX_REQUIREMENTS_FILE: shPath(path.join(dir, "etc-codex", "requirements.toml")), ...env,
     },
     encoding: "utf8",
@@ -46,6 +49,19 @@ function runEntrypointIn(
     /* 同上 */
   }
   return { toml, requirements, stdout: r.stdout, stderr: r.stderr, status: r.status, dataDir: shPath(data) };
+}
+
+/** 只在临时目录预置插件缓存和暂存目录，不接触真实 CODEX_HOME。 */
+function seedPluginCache(names = ["figma", "gmail", "notion"]) {
+  const dir = tmp("cs-entry-");
+  const plugins = path.join(dir, "data", "codex", "plugins");
+  const cache = path.join(plugins, "cache", "openai-curated-remote");
+  const otherCache = path.join(plugins, "cache", "openai-bundled", "keep");
+  const staging = path.join(plugins, ".remote-plugin-install-staging");
+  for (const name of names) mkdirSync(path.join(cache, name, "x"), { recursive: true });
+  mkdirSync(otherCache, { recursive: true });
+  mkdirSync(path.join(staging, "pending"), { recursive: true });
+  return { dir, cache, otherCache, staging };
 }
 
 /** 极简 TOML 读取：返回 { "section.key": value }，只覆盖本文件用到的语法。 */
@@ -80,6 +96,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
       model: '"gpt-6.1-sol"',
       model_reasoning_effort: '"high"',
       web_search: '"live"',
+      "features.remote_plugin": "false",
       "tools.web_search.context_size": '"low"',
       "mcp_servers.qq_context.command": '"node"',
       "mcp_servers.qq_context.args": '["/app/dist/mcp/qq-context.js"]',
@@ -106,6 +123,73 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(t["mcp_servers.qq_context.env.DATA_DIR"]).toMatch(/^"\/[A-Za-z0-9._/-]+"$/);
     expect(t["mcp_servers.qq_context.env.QQ_ACCESS"]).toBeUndefined(); // 每轮由 -c 注入
     expect(t["mcp_servers.browser.command"]).toMatch(/playwright-mcp"$/);
+  });
+
+  it("omits the remote plugin feature override when enabled", () => {
+    const r = runEntrypoint({ CODEX_REMOTE_PLUGINS: "on" });
+    expect(r.status).toBe(0);
+    expect(parse(r.toml)["[features]"]).toBeUndefined();
+    expect(parse(r.toml)["features.remote_plugin"]).toBeUndefined();
+    expect(r.toml).not.toMatch(/^remote_plugin\s*=/m);
+  });
+
+  it.each(["off", "", "invalid", 'on"\nx = 1'])("defaults remote plugins to off for %j", (value) => {
+    const r = runEntrypoint({ CODEX_REMOTE_PLUGINS: value });
+    expect(r.status).toBe(0);
+    expect(parse(r.toml)["features.remote_plugin"]).toBe("false");
+    expect(parse(r.toml).x).toBeUndefined();
+    if (value && value !== "off") {
+      expect(r.stderr).toContain("entrypoint: WARNING invalid value");
+      expect(r.stderr).toContain("CODEX_REMOTE_PLUGINS");
+    }
+  });
+
+  it("prunes figma and gmail by default on each startup while retaining notion", () => {
+    const { dir, cache, otherCache, staging } = seedPluginCache();
+    for (let startup = 0; startup < 2; startup++) {
+      if (startup) mkdirSync(path.join(cache, "figma", "x"), { recursive: true });
+      const r = runEntrypointIn(dir, {});
+      expect(r.status).toBe(0);
+      expect(existsSync(path.join(cache, "figma"))).toBe(false);
+      expect(existsSync(path.join(cache, "gmail"))).toBe(false);
+      expect(existsSync(path.join(cache, "notion", "x"))).toBe(true);
+      expect(existsSync(otherCache)).toBe(true);
+      expect(existsSync(staging)).toBe(false);
+    }
+  });
+
+  it("removes the whole curated cache for all and tolerates missing directories", () => {
+    const { dir, cache, otherCache, staging } = seedPluginCache();
+    for (let startup = 0; startup < 2; startup++) {
+      const r = runEntrypointIn(dir, { CODEX_PLUGIN_PRUNE: "all" });
+      expect(r.status).toBe(0);
+      expect(existsSync(cache)).toBe(false);
+      expect(existsSync(otherCache)).toBe(true);
+      expect(existsSync(staging)).toBe(false);
+      expect(existsSync(path.join(dir, "data", "codex", "config.toml"))).toBe(true);
+    }
+  });
+
+  it("keeps cached plugins for an empty prune list but clears install staging", () => {
+    const { dir, cache, staging } = seedPluginCache();
+    const r = runEntrypointIn(dir, { CODEX_PLUGIN_PRUNE: "" });
+    expect(r.status).toBe(0);
+    for (const name of ["figma", "gmail", "notion"]) expect(existsSync(path.join(cache, name, "x"))).toBe(true);
+    expect(existsSync(staging)).toBe(false);
+    expect(r.stderr).not.toContain("rejected CODEX_PLUGIN_PRUNE");
+  });
+
+  it("skips invalid prune entries without expanding globs or affecting valid entries", () => {
+    const allowed = "Plugin_2.0-test";
+    const { dir, cache, otherCache, staging } = seedPluginCache(["figma", "gmail", "notion", allowed]);
+    const invalid = ["../notion", ".", "..", "*", "not?on", "[n]otion", "notion/", "notion\\x", "not ion", "插件", ""];
+    const r = runEntrypointIn(dir, { CODEX_PLUGIN_PRUNE: ["figma", ...invalid, allowed, "gmail"].join(","), CODEX_REMOTE_PLUGINS: "on" });
+    expect(r.status).toBe(0);
+    for (const name of ["figma", "gmail", allowed]) expect(existsSync(path.join(cache, name))).toBe(false);
+    expect(existsSync(path.join(cache, "notion", "x"))).toBe(true);
+    expect(existsSync(otherCache)).toBe(true);
+    expect(existsSync(staging)).toBe(false);
+    for (const entry of invalid) expect(r.stderr).toContain("entrypoint: WARNING rejected CODEX_PLUGIN_PRUNE entry '" + entry + "'");
   });
 
   it("restricts the browser MCP to an enabled_tools allowlist without the RCE / local-file tools", () => {

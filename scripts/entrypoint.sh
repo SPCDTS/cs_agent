@@ -54,6 +54,7 @@ EFFORT="$(toml_value "${CODEX_REASONING_EFFORT:-high}" high CODEX_REASONING_EFFO
 WEB_SEARCH="$(toml_enum "${CODEX_WEB_SEARCH:-live}" live CODEX_WEB_SEARCH live cached disabled)"
 WEB_SEARCH_CONTEXT="$(toml_enum "${CODEX_WEB_SEARCH_CONTEXT:-low}" low CODEX_WEB_SEARCH_CONTEXT low medium high)"
 BROWSER="$(toml_enum "${CODEX_BROWSER:-playwright}" playwright CODEX_BROWSER playwright none)"
+REMOTE_PLUGINS="$(toml_enum "${CODEX_REMOTE_PLUGINS:-off}" off CODEX_REMOTE_PLUGINS off on)"
 # MCP 工具调用审批：cs-agent 以非交互 codex exec（approval policy never）运行，需要审批的 MCP 调用会直接失败。
 # auto 按工具 annotations 决定，非只读（或未声明 readOnlyHint）的工具仍要求审批，非交互 exec 无法批准，
 # 所以默认 approve（一律自动批准）。浏览器能调用哪些工具仍由 enabled_tools 白名单限定。
@@ -152,7 +153,9 @@ PW_ENABLED_TOOLS='"browser_navigate", "browser_navigate_back", "browser_snapshot
 CONFIG="$CODEX_HOME_DIR/config.toml"
 cat > "$CONFIG.tmp" <<TOML
 # 受管文件：由 entrypoint.sh 在每次容器启动时按环境变量重写（CODEX_MODEL / CODEX_REASONING_EFFORT /
-# CODEX_WEB_SEARCH / CODEX_WEB_SEARCH_CONTEXT / CODEX_BROWSER / CODEX_MCP_APPROVAL_MODE / QQ_CONTEXT_MAX_CHARS）。
+# CODEX_WEB_SEARCH / CODEX_WEB_SEARCH_CONTEXT / CODEX_BROWSER / CODEX_MCP_APPROVAL_MODE / QQ_CONTEXT_MAX_CHARS /
+# CODEX_REMOTE_PLUGINS；CODEX_PLUGIN_PRUNE 控制写完配置后的缓存清理）。
+# 远程插件对 QQ 客服场景无用，默认关闭并清理 figma/gmail；其余已缓存插件仍会加载，全部清理设 CODEX_PLUGIN_PRUNE=all。
 # 不要手工修改——改动会在下次启动时被覆盖；请改 .env 后重启容器。不继承宿主机配置。
 # model_reasoning_effort 只是默认值：cs-agent 每轮按请求以 -c model_reasoning_effort=... 覆盖。
 # qq_context 的访问范围 QQ_ACCESS 不写在这里：cs-agent 每轮以 -c mcp_servers.qq_context.env.QQ_ACCESS=... 注入；
@@ -192,6 +195,13 @@ default_tools_approval_mode = "$MCP_APPROVAL_MODE"
 [mcp_servers.image_gen.env]
 DATA_DIR = "$MCP_DATA_DIR"$IMAGE_GEN_ENV
 TOML
+if [ "$REMOTE_PLUGINS" = "off" ]; then
+  cat >> "$CONFIG.tmp" <<'TOML'
+
+[features]
+remote_plugin = false
+TOML
+fi
 if [ "$BROWSER" = "playwright" ]; then
   if [ -x "$PLAYWRIGHT_MCP_BIN" ]; then
     cat >> "$CONFIG.tmp" <<TOML
@@ -213,6 +223,27 @@ TOML
   fi
 fi
 mv -f "$CONFIG.tmp" "$CONFIG"
+
+# 空字符串表示不清缓存，只有未设置时才使用默认名单；暂存目录每次启动都清理。
+PLUGIN_PRUNE="${CODEX_PLUGIN_PRUNE-figma,gmail}"
+PLUGIN_CACHE_DIR="$CODEX_HOME_DIR/plugins/cache/openai-curated-remote"
+case "$PLUGIN_PRUNE" in
+  all) rm -rf -- "$PLUGIN_CACHE_DIR" ;;
+  "") ;;
+  *)
+    # 逐项截取，不做单词拆分或通配符展开；拒绝 . 和 ..，避免删除缓存根目录或越界。
+    _prune_rest="$PLUGIN_PRUNE,"
+    while [ -n "$_prune_rest" ]; do
+      _plugin="${_prune_rest%%,*}"
+      _prune_rest="${_prune_rest#*,}"
+      case "$_plugin" in
+        ""|.|..|*[!A-Za-z0-9._-]*) echo "entrypoint: WARNING rejected CODEX_PLUGIN_PRUNE entry '$_plugin'" >&2 ;;
+        *) rm -rf -- "$PLUGIN_CACHE_DIR/$_plugin" ;;
+      esac
+    done
+    ;;
+esac
+rm -rf -- "$CODEX_HOME_DIR/plugins/.remote-plugin-install-staging"
 
 # codex 命令沙箱的禁读列表（受管，每次启动重写）。codex 0.163 只从系统级 requirements.toml
 # （/etc/codex/requirements.toml，镜像内归 node 所有）读取 [permissions.filesystem] deny_read；
