@@ -370,6 +370,14 @@ CODEX_BROWSER=playwright
 - 修复（d54caa5、8b5da19）：entrypoint 受管配置新增 `[features] remote_plugin = false`（`CODEX_REMOTE_PLUGINS=off|on`，默认 off），启动时按 `CODEX_PLUGIN_PRUNE`（默认 `figma,gmail`，`all` 清空，显式空串不清，名单只允许 `[A-Za-z0-9._-]`，拒绝 `.`/`..`）删除缓存目录并清理安装暂存目录；entrypoint 测试 22 项；用户决定多代理功能暂不关闭。
 - 验收：沙箱外复跑 77 文件 / 1098 项通过；部署后 `config.toml` 第 50–51 行为 `[features] remote_plugin = false`，缓存目录剩 13 个（figma、gmail 已删，暂存目录消失），容器 healthy。其余 13 个缓存插件（其中 6 个带 skills）仍会进入提示词，约 3,800 token/请求；全清设 `CODEX_PLUGIN_PRUNE=all`。下一次真实回合的上下文分析页应不再出现 figma 技能，待观察。
 
+### 8.10 事故：误判线程丢失与回合收尾卡死（2026-10-19，主会话验收）
+
+- 现象：07:07:47 恢复 owner 线程时 codex 返回 JSON-RPC -32603（其启动时同步插件市场克隆目录 `$CODEX_HOME/.tmp/plugins*` 与 `rg` 扫描的竞态），外层措辞 `thread/resume failed`；`MISSING_SESSION_PATTERNS` 里过宽的 `/thread\/resume failed/i` 命中 → 映射被删、新建线程，原线程既未归档也未保留。同一回合模型用自带 imagegen 出图并成功登记 `qq_send_image`，07:11:03 `task_complete`，但模型开的交互式 shell/python 子进程持有 stdout 管道，运行器等 `close` 直到 600 s 超时，按失败回复、附件随票据清理丢失。
+- 数据修复：主会话在宿主机把 `data/codex-threads.json` 的 owner 改回 `01a14a4a…`，并在 `codex-threads-archive.jsonl` 归档误建线程 `01a152fc…`（reason `false-missing-detection`）。重启后面板显示 owner 会话 `01a14a4a…` active、8 回合。
+- 代码修复（5f9a74b、9e53d8b、52f3503、39d763c）：丢失判定只认 codex 0.163 真实措辞（`no rollout found for thread id` / `conversation id`、`not found`），`-32603` 一律按其他失败处理并保留映射；真丢失时先归档旧映射（reason `missing` + stderr 尾部）再新建；收尾以 `exit` 为准，`close` 最多等 `CODEX_CLOSE_GRACE_MS`（默认 5000）后清理进程树并释放本端管道，`turn.completed` 后 `CODEX_EXIT_GRACE_MS`（默认 15000）仍未 `exit` 且输出文件非空则按成功收尾；Linux 下 codex 以独立进程组启动，整组清理可覆盖孤儿孙进程（Windows 无法验证，对应用例按平台跳过）。
+- 验收：沙箱外复跑 80 文件 / 1176 项通过 + 1 跳过；镜像 `9e9b6a8b…`（干净 worktree，main 39d763c）以 `--no-deps` 只切换 cs-agent，容器 healthy、无新告警；面板与附件 stdio 冒烟零错误。待用户在 QQ 私聊验证"把 skirk.png 发给我"（文件已在 `/workspace/owner/skirk.png`）。
+- 调查：干净未登录的临时 CODEX_HOME 下，默认与 `features.plugins=false` 都不触发 `.tmp/plugins` 同步，无法据此证明关闭插件能消除生产竞态；记录在 `docs/research/codex-runnerfix-2026-10-19.md`，暂不改插件配置，靠判定收紧兜底。
+
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
