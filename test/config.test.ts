@@ -47,6 +47,29 @@ describe("model config defaults", () => {
   });
 });
 
+describe("Codex 内置生图清理配置", () => {
+  it("默认保留 7 天、总量 1024 MiB，空值沿用默认", () => {
+    const defaults = { CODEX_GENERATED_IMAGES_RETENTION_DAYS: 7, CODEX_GENERATED_IMAGES_MAX_MB: 1024 };
+    expect(loadConfig({})).toMatchObject(defaults);
+    expect(loadConfig({ CODEX_GENERATED_IMAGES_RETENTION_DAYS: "", CODEX_GENERATED_IMAGES_MAX_MB: "" })).toMatchObject(defaults);
+    expect(loadConfig({ CODEX_GENERATED_IMAGES_RETENTION_DAYS: "30", CODEX_GENERATED_IMAGES_MAX_MB: "128" }))
+      .toMatchObject({ CODEX_GENERATED_IMAGES_RETENTION_DAYS: 30, CODEX_GENERATED_IMAGES_MAX_MB: 128 });
+    expect(loadConfig({ CODEX_GENERATED_IMAGES_RETENTION_DAYS: "0", CODEX_GENERATED_IMAGES_MAX_MB: "0" }))
+      .toMatchObject({ CODEX_GENERATED_IMAGES_RETENTION_DAYS: 0, CODEX_GENERATED_IMAGES_MAX_MB: 0 });
+  });
+
+  it.each(["-1", "1.5", "NaN", "Infinity", "9007199254740992"])("拒绝非法清理配置 %s", value => {
+    for (const key of ["CODEX_GENERATED_IMAGES_RETENTION_DAYS", "CODEX_GENERATED_IMAGES_MAX_MB"]) {
+      expect(() => loadConfig({ [key]: value })).toThrow(key);
+    }
+  });
+
+  it("拒绝超出安全字节数的总量上限", () => {
+    expect(() => loadConfig({ CODEX_GENERATED_IMAGES_MAX_MB: String(Math.floor(Number.MAX_SAFE_INTEGER / 1024 / 1024) + 1) }))
+      .toThrow("CODEX_GENERATED_IMAGES_MAX_MB");
+  });
+});
+
 describe("Codex 退出宽限配置", () => {
   it("默认值及毫秒覆盖值保持原单位", () => {
     expect(loadConfig({})).toMatchObject({ CODEX_CLOSE_GRACE_MS: 5000, CODEX_EXIT_GRACE_MS: 15000 });

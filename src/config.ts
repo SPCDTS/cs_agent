@@ -73,6 +73,10 @@ const EnvSchema = z.object({
   CODEX_TRACE_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(14),
   /** 官方 trace 普通文件总量上限（MiB）；0 表示不限。 */
   CODEX_TRACE_MAX_MB: z.coerce.number().int().nonnegative().max(Math.floor(Number.MAX_SAFE_INTEGER / 1024 / 1024)).default(512),
+  /** 内置生图输出保留天数；0 禁用按天清理。 */
+  CODEX_GENERATED_IMAGES_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(7),
+  /** 内置生图输出普通文件总量上限（MiB）；0 表示不限。 */
+  CODEX_GENERATED_IMAGES_MAX_MB: z.coerce.number().int().nonnegative().max(Math.floor(Number.MAX_SAFE_INTEGER / 1024 / 1024)).default(1024),
 
   AGENT_MODEL_PROVIDER: z.string().default("deepseek"),
   AGENT_MODEL_ID: z.string().default("deepseek-flash"),

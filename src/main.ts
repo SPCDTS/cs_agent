@@ -28,6 +28,7 @@ import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
 import { CodexRunner } from "./agent/codex/runner.js";
 import { purgeCodexTrace } from "./agent/codex/trace.js";
+import { purgeGeneratedImages } from "./agent/codex/generated-images.js";
 import { CodexPromptStore } from "./agent/codex/prompt.js";
 import { createImageBackend } from "./media/gen/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
@@ -302,6 +303,9 @@ async function main(): Promise<void> {
       catch (error) { log.warn("memory instrumentation purge failed", { error }); }
       await purgeCodexTrace(cfg.codexHome, cfg.CODEX_TRACE_RETENTION_DAYS, now, cfg.CODEX_TRACE_MAX_MB)
         .catch(error => { log.warn("codex trace purge failed", { error }); });
+      await purgeGeneratedImages(cfg.codexHome, cfg.CODEX_GENERATED_IMAGES_RETENTION_DAYS, now, cfg.CODEX_GENERATED_IMAGES_MAX_MB)
+        .then(({ removed, bytes, dirs }) => { if (removed > 0) log.info("codex generated images purged", { removed, bytes, dirs }); })
+        .catch(() => { log.warn("codex generated images purge failed"); });
     },
     gauges: async () => {
       const q = dispatcher.status(), ws = bridge!.status();
