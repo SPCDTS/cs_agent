@@ -84,7 +84,6 @@ export class Dispatcher {
     if (this.inflight.has(ticket)) return this.inflight.get(ticket)!;
     const scope = scopeOf(msg);
     const settings = this.opts.tasks.snapshotSettings(scope, typeof this.opts.codexEffort === "function" ? this.opts.codexEffort() : this.opts.codexEffort);
-    trace.event(ticket, "received", { scope, detail: { text: msg.text, sender: msg.nickname, message_id: msg.message_id } });
     this.withHistory("record pending failed", ticket, (h) =>
       h.recordPending(scope, ticket, msg.time, { replyTo: msg.message_id, selfId: msg.self_id }),
     );

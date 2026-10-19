@@ -5,6 +5,10 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DownloadHooks } from '../../src/media/download.js';
 import { cleanupIncoming, downloadIncoming, INCOMING_RETENTION_MS } from "../../src/qq/incoming.js";
+import { log } from "../../src/shared/log.js";
+import { trace, type LiveEvent } from "../../src/shared/trace.js";
+import { hasUsableContent, normalizeMessage } from "../../src/qq/policy.js";
+import { ticketIdFor } from "../../src/qq/reply-store.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import { inboundFromTicket } from "../../src/qq/ticket.js";
 import type { InboundMessage, QQBridge } from "../../src/qq/types.js";
@@ -103,5 +107,73 @@ describe("触发消息参考图", () => {
     expect(await cleanupIncoming(dir, now)).toBe(1);
     expect(await fs.readdir(root)).toEqual(expect.arrayContaining([path.basename(fresh), "not-a-ticket", "c".repeat(64)]));
     expect((await fs.stat(target)).isDirectory()).toBe(true);
+  });
+});
+
+describe("空内容过滤与入站观测", () => {
+  it.each([[], [{ type: "text", data: { text: " \n\t" } }]])("空内容不派发、不建票据、不回复并记录 ignored：%j", async (...parts) => {
+    const events: LiveEvent[] = []; const off = trace.tap(e => events.push(e));
+    const info = vi.spyOn(log, "info");
+    const event = privateEvent("20001", "", { message: parts });
+    const ticket = ticketIdFor(normalizeMessage(event)!);
+    try {
+      napcat.push(event);
+      await waitFor(() => events.some(e => e.stage === "ignored"));
+      expect(events.map(e => e.stage)).toEqual(["received", "ignored"]);
+      const detail = { segments: parts.length ? ["text"] : [], message_id: String(event.message_id), sender: "nick-20001" };
+      expect(events[0]).toMatchObject({ ticket, scope: "private:20001", detail: { ...detail, text: parts.length ? " \n\t" : "" } });
+      expect(events[1]).toMatchObject({ ticket, scope: "private:20001", detail: { ...detail, reason: "empty content" } });
+      expect(info).toHaveBeenCalledWith("inbound ignored: empty content", detail);
+      expect(received).toEqual([]); expect(downloads).toEqual([]);
+      expect(await bridge.getTicket(ticket)).toBeNull();
+      expect(napcat.calls.some(c => c.action.startsWith("send_") || c.action.startsWith("upload_"))).toBe(false);
+    } finally { off(); info.mockRestore(); }
+  });
+
+  it.each(["text", "image", "at", "reply", "file"])("只有 %s 段仍正常派发，received 记录段类型", async type => {
+    const events: LiveEvent[] = []; const off = trace.tap(e => events.push(e));
+    const data = type === "text" ? { text: "你好" } : type === "image" ? { url } : type === "at" ? { qq: SELF_ID } : { id: "1" };
+    try {
+      napcat.push(privateEvent("20001", "", { message: [{ type, data }] }));
+      await waitFor(() => received.length === 1);
+      expect(events.filter(e => e.stage === "received")).toHaveLength(1);
+      expect(events[0]!.detail.segments).toEqual([type]);
+      expect(events.some(e => e.stage === "ignored")).toBe(false);
+      if (type === "image") expect(received[0]!.message.images).toHaveLength(1);
+    } finally { off(); }
+  });
+
+  it("超长空白截断了图片占位时，仍按原始附件派发", async () => {
+    napcat.push(privateEvent("20001", "", { message: [
+      { type: "text", data: { text: " ".repeat(16000) } }, segment({ url }),
+    ] }));
+    await waitFor(() => received.length === 1);
+    expect(received[0]!.message.text.trim()).toBe("");
+    expect(received[0]!.message.route_text.trim()).toBe("");
+    expect(received[0]!.message.images).toHaveLength(1);
+  });
+
+  it("received.segments 按原始段类型去重保序，最多 20 项，不受 100 段正文截断影响", async () => {
+    const events: LiveEvent[] = []; const off = trace.tap(e => events.push(e));
+    const types = ["text", ...Array.from({ length: 25 }, (_, i) => "kind-" + i)];
+    const message = [
+      ...Array.from({ length: 105 }, () => ({ type: "text", data: { text: "字" } })),
+      ...types.slice(1).flatMap(type => [{ type, data: {} }, { type, data: {} }]),
+    ];
+    try {
+      napcat.push(privateEvent("20001", "", { message }));
+      await waitFor(() => received.length === 1);
+      expect(events[0]!.detail.segments).toEqual(types.slice(0, 20));
+      expect(received[0]!.message.segments).toHaveLength(100);
+    } finally { off(); }
+  });
+
+  it("内容判定分别保留分流文字、原始文字、图片和附件", () => {
+    const empty = { text: " ", route_text: "\n", images: [] };
+    expect(hasUsableContent(empty)).toBe(false);
+    expect(hasUsableContent({ ...empty, route_text: "请求" })).toBe(true);
+    expect(hasUsableContent({ ...empty, text: "[reply]" })).toBe(true);
+    expect(hasUsableContent({ ...empty, images: ["image.png"] })).toBe(true);
+    expect(hasUsableContent({ ...empty, attachments: [{ status: "pending", file: "image" }] })).toBe(true);
   });
 });

@@ -22,6 +22,16 @@ function segmentType(segment: Record<string, unknown>): string {
   return typeof segment.type === "string" ? segment.type : "unknown";
 }
 
+/** 观测只记录原始段类型，去重保序，最多 20 项，不受正文段截断影响。 */
+export function messageSegmentTypes(event: Record<string, unknown>): string[] {
+  return [...new Set(rawSegments(event).map(segmentType))].slice(0, 20);
+}
+
+/** 空文字且无图片、附件时，不进入 agent 派发。 */
+export function hasUsableContent(message: Pick<InboundMessage, "text" | "route_text" | "images" | "attachments">): boolean {
+  return !!(message.route_text.trim() || message.text.trim() || message.images.length || message.attachments?.length);
+}
+
 function segmentData(segment: Record<string, unknown>): Record<string, unknown> {
   return isRecord(segment.data) ? segment.data : {};
 }

@@ -2,6 +2,8 @@
  * createQQBridge：NapCat OneBot v11 —— WebSocket 收事件，HTTP 调 API。
  * 负责：重连与心跳、自回声过滤、去重、授权 / 触发、票据持久化、按票据幂等回复。
  */
+import { log } from "../shared/log.js";
+import { trace } from "../shared/trace.js";
 import { attachmentName } from "../media/attach.js";
 import type { DownloadHooks } from '../media/download.js';
 import { inboundFromTicket } from './ticket.js';
@@ -13,7 +15,7 @@ import type {
   ReplyResult, ReplyTicketRecord,
 } from "./types.js";
 import { createOneBotClient, isRecord, numericId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
-import { isAllowed, isTriggered, normalizeMessage, validatePolicy } from "./policy.js";
+import { hasUsableContent, isAllowed, isTriggered, messageSegmentTypes, normalizeMessage, validatePolicy } from "./policy.js";
 import { prepareImages, type ImageSegment } from "./image.js";
 import { dedupeKey, isTicketId, ticketIdFor, ReplyStore } from "./reply-store.js";
 
@@ -287,10 +289,18 @@ class Bridge extends EventEmitter implements QQBridge {
     if (!store) return;
     const id = ticketIdFor(message);
     if (store.get(id)) return;
+    const scope = message.message_type === "group" ? "group:" + message.group_id : "private:" + message.user_id;
+    const detail = { segments: messageSegmentTypes(event), message_id: message.message_id, sender: message.nickname };
+    trace.event(id, "received", { scope, detail: { text: message.text, ...detail } });
     const attachments = (Array.isArray(event.message) ? event.message : [])
       .filter(s => isRecord(s) && s.type === 'image')
       .map(s => ({ status: 'pending' as const, deadline: Date.now() + this.downloadDeadlineMs, url: stringField(isRecord(s.data) ? s.data : {}, 'url'), file: stringField(isRecord(s.data) ? s.data : {}, 'file') }));
     message.attachments = attachments;
+    if (!hasUsableContent(message)) {
+      log.info("inbound ignored: empty content", detail);
+      trace.event(id, "ignored", { scope, detail: { ...detail, reason: "empty content" } });
+      return;
+    }
     const inflight = this.senderInflight.get(message.user_id) ?? 0;
     if (attachments.length && inflight >= 2) {
       message.attachments = attachments.map(a => ({ ...a, status: 'skipped', reason: '发送者下载并发超过 2' }));
