@@ -204,13 +204,13 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 
 ### 残余风险
 
-- codex 执行的命令读不到 `auth.json`、会话、SQLite 库和图片（deny_read，见「7. codex 权限」），但 codex 进程本身（不受沙箱约束）持有这份 ChatGPT 凭据；不在 deny_read 中的 `/data` 文件（`config.toml`、`prompts/`、`workflows/`）命令仍可读取。MCP 服务进程（`qq_context`、浏览器）同样不受命令沙箱约束：浏览器的 `file:` 访问与任意代码执行工具已用工具白名单和 playwright-mcp 自带拦截封住（见上），但这依赖 playwright-mcp 与 Chromium 的实现，升级 `@playwright/mcp` 或 `@openai/codex` 后需要重新实测：`scripts/verify-browser-mcp.mjs` 在镜像内经 `codex app-server` 调用浏览器工具并检查（不调用模型；用法见脚本开头，务必挂假的 `/data`），全部通过时退出码为 0。`AGENTS.md` 只约束模型行为，不是访问控制。**只把能信任使用这个工作区的人加入 `QQ_ALLOW_USERS` / `QQ_ALLOW_GROUPS`**。
+- codex 执行的命令读不到 `auth.json`、会话、SQLite 库和图片（deny_read，见「7. codex 权限」），但 codex 进程本身（不受沙箱约束）持有这份 ChatGPT 凭据；不在 deny_read 中的 `/data` 文件（`config.toml`、`prompts/`、`workflows/`）命令仍可读取，其中 `/data/workflows` 不在默认可写根中，受管 AGENTS.md 也不再介绍它。MCP 服务进程（`qq_context`、浏览器）同样不受命令沙箱约束：浏览器的 `file:` 访问与任意代码执行工具已用工具白名单和 playwright-mcp 自带拦截封住（见上），但这依赖 playwright-mcp 与 Chromium 的实现，升级 `@playwright/mcp` 或 `@openai/codex` 后需要重新实测：`scripts/verify-browser-mcp.mjs` 在镜像内经 `codex app-server` 调用浏览器工具并检查（不调用模型；用法见脚本开头，务必挂假的 `/data`），全部通过时退出码为 0。`AGENTS.md` 只约束模型行为，不是访问控制。**只把能信任使用这个工作区的人加入 `QQ_ALLOW_USERS` / `QQ_ALLOW_GROUPS`**。
 - **浏览器 MCP 的网络访问**：`playwright-mcp` 进程由 codex 作为 MCP 服务启动，**不受 codex 命令沙箱约束**，可以访问容器能到达的任何网络。宿主机 ComfyUI（`host.docker.internal:8188`，无鉴权）、Compose 内网 NapCat（`napcat:3000/3001`，需要 token，也可指向宿主机）以及容器自身的 healthz 都在这个范围内。`--blocked-origins` 阻止列表覆盖宿主机地址和内网/链路本地 IP，但未列入 `napcat` 这个服务名；NapCat 仍靠 OneBot token 鉴权。@playwright/mcp 明确说明该列表**不是安全边界**：
   - 不拦截重定向：公网页面 302 到 `http://host.docker.internal:8188/…` 时不会被阻止；
   - 按 URL 主机名匹配，不看解析结果：解析到内网 IP 的公网域名（如 `127.0.0.1.nip.io` 之类、DNS rebinding）不会被阻止；
   - 只覆盖浏览器发出的请求，与 codex 自身的 web_search 无关。
   如需关闭浏览器访问，可设 `CODEX_BROWSER=none`；网络隔离需要按目标服务在宿主机或容器网络实施访问控制。
-- **`/data/prompts` 可写**（用户接受的风险）：codex 命令可以改写 `/data/prompts` 下的文件。v3 中 `system.md` 已不再被读取；pi 后端从这里热加载 `agent.md`，修改会在下一次模型请求生效。全局 AGENTS.md 规定只在 owner 私聊明确要求时才修改、群聊请求一律拒绝，但这**只靠模型遵守**。想彻底禁止，把 `/data/prompts` 从 `CODEX_WRITABLE_ROOTS` 去掉。
+- **`/data/prompts` 可写**（用户接受的风险）：codex 的 owner 会话命令可以改写 `/data/prompts` 下的文件。v3 中 `system.md` 已不再被读取；pi 后端从这里热加载 `agent.md`，修改会在下一次模型请求生效。会话域受管 AGENTS.md 规定只在 owner 私聊明确要求时才修改；是否得到明确要求仍靠模型遵守，非 owner 会话的写入由沙箱禁止。若要连 owner 也禁止，需收紧 `codexWorkspacePolicy`；仅修改 `CODEX_WRITABLE_ROOTS` 不会改变业务回合的固定权限。
 - **显式开启 image_gen 后可被群成员触发**：任何能让 codex 处理消息的发送者都可以间接让它生图（每回合最多 4 次，图片只写到本票据目录、只随本条回复发出）。
 - **聊天记录**：群成员可以让 codex 检索本群 30 天内的原始消息和 180 天内的摘要（与能翻群记录一致）；owner 私聊可以检索全部会话。`./data/qq-messages.sqlite` 按聊天记录保管。
 
@@ -267,15 +267,15 @@ codex 以 `-s workspace-write` 运行，命令由它自带的 bwrap 沙箱执行
 ```toml
 [sandbox_workspace_write]
 network_access = true                                              # CODEX_SANDBOX_NETWORK
-writable_roots = ["/workspace", "/data/prompts", "/data/workflows"] # CODEX_WRITABLE_ROOTS
+writable_roots = ["/workspace", "/data/prompts"] # CODEX_WRITABLE_ROOTS
 ```
 
 - **前提**：bwrap 需要非特权用户命名空间。Docker 默认的 seccomp 配置阻止 `CLONE_NEWUSER`，所以在 `docker-compose.yml` 加 `security_opt: [seccomp=./docker/seccomp-codex.json]`（Docker 默认 profile + 仅放开命名空间/挂载相关系统调用）之前，codex 在容器里**任何命令都无法执行**。
 - **身份**：容器进程与 codex 命令都以 `node`（uid 1000）运行。
-- **写入**：只能写 `/workspace`、`/data/prompts`（提示词目录；`system.md` 已弃用）、`/data/workflows`（生图工作流），以及 codex 默认可写的 `/tmp`。`/data` 本身、`/data/codex`（auth.json、sessions）、`/data/*.sqlite`、`/data/images`、`/data/tickets` 都不可写；入口脚本先规范化每一项（合并重复的 `/`，去掉 `/./`、末尾的 `/.` 与 `/`），再与规范化后的 `DATA_DIR` / `CODEX_HOME` 比较，拒绝 `/`、`/data` 本身及其上级目录、`/data/codex` 及其子目录、`/data/images`、`/data/tickets` 及其子目录、`*.sqlite`、任何含 `..` 或非法字符的项，并打印 `rejected CODEX_WRITABLE_ROOTS entry`（例如 `/data//`、`/data/.`、`/data/codex/.`、`/data/images//x` 都会被拒绝）。
-- **工作流**：`/data/workflows/` 不存在时，启动会从镜像的 `/app/workflows/` 复制一份（已存在则绝不覆盖）。默认 `COMFY_WORKFLOW_FILE=/data/workflows/qwen-image-2.1-turbo-api.json`。旧值 `/app/workflows/…` 仍然有效，只是 codex 改不了那份。
+- **写入**：入口脚本的默认可写根为 `/workspace`、`/data/prompts`。业务回合通过命名权限 `filesystem` 与 `writable_roots` 同步收窄：owner 仅 `/workspace/owner`、`/data/prompts`（提示词目录；`system.md` 已弃用），非 owner 仅本会话目录，read-only 没有可写根。`/data/workflows` 不在默认可写列表；`CODEX_WRITABLE_ROOTS` 的显式配置也不会扩大业务回合的固定权限。`/data` 本身、`/data/codex`（auth.json、sessions）、`/data/*.sqlite`、`/data/images`、`/data/tickets` 都不可写；入口脚本先规范化每一项（合并重复的 `/`，去掉 `/./`、末尾的 `/.` 与 `/`），再与规范化后的 `DATA_DIR` / `CODEX_HOME` 比较，拒绝 `/`、`/data` 本身及其上级目录、`/data/codex` 及其子目录、`/data/images`、`/data/tickets` 及其子目录、`*.sqlite`、任何含 `..` 或非法字符的项，并打印 `rejected CODEX_WRITABLE_ROOTS entry`（例如 `/data//`、`/data/.`、`/data/codex/.`、`/data/images//x` 都会被拒绝）。
+- **工作流**：`/data/workflows/` 不存在时，启动会从镜像的 `/app/workflows/` 复制一份（已存在则绝不覆盖）。历史自定义工作流默认位置 `COMFY_WORKFLOW_FILE=/data/workflows/qwen-image-2.1-turbo-api.json` 保留可用；当前配置默认留空，使用 Qwen 参数化生成器。旧值 `/app/workflows/…` 仍然有效。目录播种与 ComfyUI 本地生图不变，codex 默认不可写 `/data/workflows`，受管 AGENTS.md 不再介绍其用途；显式将该路径传入渲染器时仅显示“运维开放的可写目录”。
 - **网络**：命令可以联网（`network_access = true`），因此能直接访问宿主机的 ComfyUI `host.docker.internal:8188`（无鉴权，可以提交任务、读取输出）。NapCat（3000/3001）需要 Bearer token，codex 拿不到。
-- **规则文件**：codex 从 `$CODEX_HOME/AGENTS.md` 读取全局行为指引，再加载 cwd 的 `/workspace/<key>/AGENTS.md` 受管规则，二者均为 user 角色。父工作区的运维指引由 runner 显式拼入会话域文件。受管规则里的“只读写下列目录”按 `codexWorkspacePolicy` 的实际权限渲染：非 owner 仅本会话目录，owner 额外包含 `/data/prompts` 与 `/data/workflows`，read-only 不宣称任何目录可写。每轮文件缺失或内容变化才原子重写；不变不触碰 mtime，模型修改会在下一轮覆盖恢复。
+- **规则文件**：codex 从 `$CODEX_HOME/AGENTS.md` 读取全局行为指引，再加载 cwd 的 `/workspace/<key>/AGENTS.md` 受管规则，二者均为 user 角色。父工作区的运维指引由 runner 显式拼入会话域文件。受管规则里的“只读写下列目录”按 `codexWorkspacePolicy` 的实际权限渲染：非 owner 仅本会话目录，owner 额外只包含 `/data/prompts`，read-only 不宣称任何目录可写。每轮文件缺失或内容变化才原子重写；不变不触碰 mtime，模型修改会在下一轮覆盖恢复。
 - **读取（deny_read）**：入口脚本每次启动重写 `/etc/codex/requirements.toml`（镜像内 `/etc/codex` 归 node 所有；写不进去时容器以退出码 1 退出）：
 
   ```toml
@@ -288,8 +288,8 @@ writable_roots = ["/workspace", "/data/prompts", "/data/workflows"] # CODEX_WRIT
   codex 0.163 只认系统级 `requirements.toml` 里的这个键（放在 `$CODEX_HOME/requirements.toml` 不生效；`config.toml` 的 `[permissions.<profile>]` 与 `sandbox_mode` 互斥，cs-agent 每轮要用 `-c sandbox_mode=…`）。命中的路径在 bwrap 里被空文件/空目录覆盖，`workspace-write` 与 `read-only` 都生效；glob 在每条命令启动时展开，所以之后新建的 `*.sqlite` 也会覆盖。不能整个禁读 `/data/codex`：codex 的 arg0 辅助程序在 `/data/codex/tmp`，整目录禁读时 codex 拒绝启动沙箱。`/data/codex/config.toml`、`/data/codex/AGENTS.md`、`skills/` 仍可读（不含秘密）。
 - **凭据**：codex 子进程的环境变量走白名单（PATH/HOME/LANG/TERM/TZ/代理变量），不含 NapCat token、API key 等任何秘密。codex 执行的命令读不到 `/data/codex/auth.json`（见上）。
 - **QQ**：codex 没有发送 QQ 消息的能力，回复只经 cs-agent 的 agent 任务发回原会话（目标来自票据，codex 无法指定）。
-- **实测**（`cs-agent:g1`，`codex sandbox -c sandbox_mode="workspace-write"`，seccomp=docker/seccomp-codex.json；unconfined 结果相同）：uid 1000；`/workspace`、`/data/prompts`、`/data/workflows`、`/tmp` 可写；`/data`、`/data/codex`、`/data/images`、`/data/qq-messages.sqlite` 写入被拒；`host.docker.internal:8188/system_stats` 返回 200，NapCat `:3000` 无 token 返回 403，公网 200；`CODEX_SANDBOX_NETWORK=false` 时三者都失败（EPERM / EAI_AGAIN）；沙箱内环境变量中没有 token / API key。默认 seccomp 下 bwrap 报 `No permissions to create a new namespace`。
-- **实测 deny_read**（`cs-agent:g1fix`，`--security-opt seccomp=./docker/seccomp-codex.json --user node -w /workspace`，假数据卷）：`codex sandbox -c sandbox_mode="workspace-write" -- cat <路径>` 对 `/data/codex/auth.json`、`sessions/**`、`/data/codex/state_5.sqlite(-wal)`、`/data/agent.sqlite`、`qq-bridge.sqlite`、`qq-messages.sqlite(-wal)`、`observability.sqlite`、`/data/images/**`、`/data/codex-session.json` 均为 `Permission denied`；`cp` 到工作区、软链接后读取同样被拒，硬链接到 `/data/workflows` 报 `Invalid cross-device link`；`python3 open()` 报 `PermissionError`；`read-only` 模式同样被拒；`/data/codex/config.toml` 可读；`/workspace`、`/data/workflows`、`/data/prompts` 可写，`/data/codex`、`/etc/codex` 只读。
+- **实测**（`cs-agent:g1`，`codex sandbox -c sandbox_mode="workspace-write"`，seccomp=docker/seccomp-codex.json；unconfined 结果相同）：uid 1000；`/workspace`、`/data/prompts`、`/data/workflows`、`/tmp` 可写；`/data`、`/data/codex`、`/data/images`、`/data/qq-messages.sqlite` 写入被拒；`host.docker.internal:8188/system_stats` 返回 200，NapCat `:3000` 无 token 返回 403，公网 200；`CODEX_SANDBOX_NETWORK=false` 时三者都失败（EPERM / EAI_AGAIN）；沙箱内环境变量中没有 token / API key。默认 seccomp 下 bwrap 报 `No permissions to create a new namespace`。（2026-10-19 起 /data/workflows 不在默认可写列表）
+- **实测 deny_read**（`cs-agent:g1fix`，`--security-opt seccomp=./docker/seccomp-codex.json --user node -w /workspace`，假数据卷）：`codex sandbox -c sandbox_mode="workspace-write" -- cat <路径>` 对 `/data/codex/auth.json`、`sessions/**`、`/data/codex/state_5.sqlite(-wal)`、`/data/agent.sqlite`、`qq-bridge.sqlite`、`qq-messages.sqlite(-wal)`、`observability.sqlite`、`/data/images/**`、`/data/codex-session.json` 均为 `Permission denied`；`cp` 到工作区、软链接后读取同样被拒，硬链接到 `/data/workflows` 报 `Invalid cross-device link`；`python3 open()` 报 `PermissionError`；`read-only` 模式同样被拒；`/data/codex/config.toml` 可读；`/workspace`、`/data/workflows`、`/data/prompts` 可写，`/data/codex`、`/etc/codex` 只读。（2026-10-19 起 /data/workflows 不在默认可写列表）
 - 关闭联网：`.env` 中设 `CODEX_SANDBOX_NETWORK=false` 后重启（web_search 是 codex 服务端的工具，不受影响）。
 
 ## 生图 v2 审查修复（2026-10-18）
