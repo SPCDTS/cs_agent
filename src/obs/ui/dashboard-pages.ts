@@ -478,7 +478,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       }).join('')}</select>`
       : `<input name="codexModel" value="${esc(s.codexModel)}" spellcheck="false" autocomplete="off"><small>模型目录不可用，请手动填写模型 slug。</small>`;
     const codexEffort = `<select name="codexReasoningEffort">${keep(['auto', ...REASONING_EFFORTS], s.codexReasoningEffort).map(e => option(e, s.codexReasoningEffort)).join('')}</select>`;
-    const codex = `<fieldset><legend>Codex 模型与推理强度</legend><div class="choices"><label>模型${diff('codexModel')}${codexModelControl}</label><label>推理强度${diff('codexReasoningEffort')}${codexEffort}</label></div>
+    const codex = `<fieldset><legend>Codex 模型与推理强度</legend><div class="choices"><label><span>模型${diff('codexModel')}</span>${codexModelControl}</label><label><span>推理强度${diff('codexReasoningEffort')}</span>${codexEffort}</label></div>
 <div class="hint">每轮以 -c 参数传给 codex，下一条消息即生效，不换线程。${AUTO_HINT}</div>${defaultsHint(d?.codexModel, d?.codexReasoningEffort)}</fieldset>`;
 
     const piModels = catalog(opts.modelCatalog?.pi);
@@ -492,7 +492,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     // 档位按当前所选模型过滤（服务端渲染）；模型不在清单里时给全集，由 pi 后端就近收敛。
     const levels = piModels.find(m => m.id === s.piModel)?.thinkingLevels ?? PI_THINKING_LEVELS;
     const piLevel = `<select name="piThinkingLevel">${keep(['auto', ...levels.filter(l => l !== 'auto')], s.piThinkingLevel).map(l => option(l, s.piThinkingLevel)).join('')}</select>`;
-    const pi = `<fieldset><legend>Pi 模型与思考档位</legend><div class="choices"><label>模型${diff('piModel')}${piModelControl}</label><label>思考档位${diff('piThinkingLevel')}${piLevel}</label></div>
+    const pi = `<fieldset><legend>Pi 模型与思考档位</legend><div class="choices"><label><span>模型${diff('piModel')}</span>${piModelControl}</label><label><span>思考档位${diff('piThinkingLevel')}</span>${piLevel}</label></div>
 <div class="hint">每次提交读取，下一条消息即生效。档位列表按当前已保存的模型过滤；换模型后保存一次再选档。${AUTO_HINT}</div>${defaultsHint(d?.piModel, d?.piThinkingLevel)}</fieldset>`;
     return codex + '\n' + pi;
   }
