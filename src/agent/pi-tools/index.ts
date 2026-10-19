@@ -1,4 +1,4 @@
-import type { MemoryInstrumentation } from "../../obs/memory/instrumentation.js";
+import type { RecallObserver } from "../../context/observer.js";
 import { BUILTIN_TOOLS } from "./coding.js";
 import { redactText } from "../../shared/redact.js";
 import { recallTool } from "./recall.js";
@@ -24,7 +24,7 @@ export interface PiToolsOptions {
   getHarness: () => Harness;
   web?: DeepSeekWeb;
   maxContextChars?: number;
-  instrumentation?: MemoryInstrumentation;
+  instrumentation?: RecallObserver;
   mediaRecall?: Pick<MediaRecall, "recall">;
   mediaRecallMaxPerTicket?: number;
 }

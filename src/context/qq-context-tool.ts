@@ -1,6 +1,6 @@
 /** 进程内共用的 QQ 召回工具：访问校验、查询、格式化与召回观察回调。 */
 import { log } from '../shared/log.js';
-import type { RecallObservation, RecallHit } from '../obs/memory/instrumentation.js';
+import type { RecallObservation, RecallHit } from './observer.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { returnedLines, returnedMessage } from './recall-results.js';
 import { accessToString, type Access } from './access.js';

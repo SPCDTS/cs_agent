@@ -1,6 +1,6 @@
 import { formatMessage, formatMessageFull, formatSummary, type FormatOptions } from './format.js';
 import type { ContextItem, MessageRow } from './store.js';
-import type { RecallHit } from '../obs/memory/instrumentation.js';
+import type { RecallHit } from './observer.js';
 
 const ref = (item: ContextItem): RecallHit => item.kind === 'message'
   ? { kind: 'message', id: item.row.message_id } : { kind: 'summary', id: item.row.id };

@@ -11,14 +11,10 @@ type Edge = [from: string, to: string];
 /** 只放 P2 尚未消除的具体文件边；禁止按整个包豁免新增依赖。 */
 const ALLOWED_EXCEPTIONS: Array<[from: string, to: string]> = [
   // P2：后端契约、配置解析与观察者接口。
-  ['src/agent/pi-tools/index.ts', 'src/obs/memory/instrumentation.ts'],
   ['src/config.ts', 'src/context/access.ts'],
   ['src/config.ts', 'src/agent/router.ts'],
   ['src/config.ts', 'src/agent/backends/select.ts'],
   ['src/config.ts', 'src/agent/backends/types.ts'],
-  ['src/context/aging.ts', 'src/obs/memory/instrumentation.ts'],
-  ['src/context/qq-context-tool.ts', 'src/obs/memory/instrumentation.ts'],
-  ['src/context/recall-results.ts', 'src/obs/memory/instrumentation.ts'],
   ['src/obs/ui/memory-pages.ts', 'src/context/aging.ts'],
 ];
 

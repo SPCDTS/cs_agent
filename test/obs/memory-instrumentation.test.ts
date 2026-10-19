@@ -3,7 +3,8 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { loadConfig } from '../../src/config.js';
-import { ensureMemoryTables, MemoryInstrumentation, purgeMemoryInstrumentation, type RecallRecord } from '../../src/obs/memory/instrumentation.js';
+import { ensureMemoryTables, MemoryInstrumentation, purgeMemoryInstrumentation } from '../../src/obs/memory/instrumentation.js';
+import { type RecallRecord } from '../../src/context/observer.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { tmp } from '../agent/helpers.js';
 

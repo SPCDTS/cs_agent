@@ -1,5 +1,5 @@
 import type { SessionAdapters } from "../sessions/http.js";
-import type { RecallRecord } from "./instrumentation.js";
+import type { RecallRecord } from "../../context/observer.js";
 import type { AgingReport } from '../../context/aging.js';
 import type { ContextStore } from '../../context/store.js';
 import type { ObsStore } from '../store.js';

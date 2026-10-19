@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { MemoryInstrumentation, SummarySource } from "../obs/memory/instrumentation.js";
+import type { SummaryObserver } from "./observer.js";
+import type { SummarySource } from "./observer.js";
 import { cleanupMedia } from "./media.js";
 import path from "node:path";
 import { usageFields } from "../shared/usage.js";
@@ -36,7 +37,7 @@ const WEEK_SUMMARY_PROMPT = `你是聊天记录归档助手。下面是一个 QQ
 
 export interface AgingOptions {
   store: ContextStore;
-  instrumentation?: MemoryInstrumentation;
+  instrumentation?: SummaryObserver;
   models: Models;
   model: Model<Api>;
   rawDays: number;

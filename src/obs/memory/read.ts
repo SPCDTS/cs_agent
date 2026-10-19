@@ -1,5 +1,5 @@
 import { parseAccess } from "../../context/access.js";
-import type { RecallHit } from "./instrumentation.js";
+import type { RecallHit } from "../../context/observer.js";
 import { DatabaseSync } from 'node:sqlite';
 import type { ContextStore, MessageRow, SummaryRow } from '../../context/store.js';
 import { redactText } from '../../shared/redact.js';
