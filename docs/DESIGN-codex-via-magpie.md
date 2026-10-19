@@ -11,6 +11,8 @@
 - **cs-agent 对 codex 的依赖面**：`codexHome` 下的 `auth.json`（ChatGPT OAuth）仅用于直连；`loadCodexContextWindow` 通过 `codex debug models` 读目录取 `context_window`，离线签名（全部 272,000）时回退 `models_cache.json`；rollout 的 `model_context_window` 仍由 codex 自己写，O3 分析不受影响；`features.plugins=false` 已关插件同步。
 - 现状问题（cs-agent-b7 发现）：owner 线程请求体 16.87 MB，WebSocket 在约 16 MiB 时被服务端关闭，codex 每轮重试 1.5–2 分钟后才降级 HTTPS。关 WebSocket 直接解决；经 magpie 后 magpie 自身也只用 HTTPS 转发。
 
+- **实测（2026-10-19，Share on local network 打开后）**：容器内 `host.docker.internal:3425` 带 key `GET /v1/models` 200 且只列 `codex/*`（key 限定生效）；**不带 key 的 `GET /v1/models` 与 `POST /v1/responses` 也都 200 并真实完成了一次模型调用**（usage.jsonl 记为 `node`）。原因：Docker Desktop（Windows）把容器到 `host.docker.internal` 的流量经宿主机 NAT，magpie 看到的对端是回环地址，按"回环永远宽松"处理。结论：对这条路径，gateway key 的作用是**归集用量与限定模型**，不是访问控制；`MAGPIE_ALLOW_IPS` 对它也不生效。宿主机上任何本地进程本来就能用 magpie，容器并未扩大攻击面；但 codex 沙箱内的命令若能访问网络，也能直接调 magpie 绕过 key 的模型限制——**`CODEX_SANDBOX_NETWORK` 保持现状（联网）时需接受这一点**，或在 magpie 侧用 `MAGPIE_ADDR` 固定到 LAN 网卡地址（文档称此时本机调用也要 key），作为可选加固列入 §5。
+
 ## 1. 目标形态
 
 ```
@@ -59,6 +61,7 @@ cs-agent 容器 ── codex exec ──► http://host.docker.internal:3425/v1 
 
 ## 5. 后续（不在本次）
 
+- 可选加固：magpie 以 `MAGPIE_ADDR=<LAN 网卡 IP>:3425` 启动并把 cs-agent 指向该 IP，使容器调用也必须带 key（代价：宿主机本地 agent 也要配 key）。
 - 从 compose/`data/codex` 中移除 `auth.json` 的依赖（init-auth 脚本标记为仅 `CODEX_PROVIDER=openai` 需要）。
 - pi 后端的 DeepSeek 也经 magpie（pi-ai 的 OpenAI-compatible provider 指向 `host.docker.internal:3425`），统一用量归集。
 - 观测面板读取 magpie `/v1/magpie/usage`（按 key 过滤）显示费用与缓存命中（设计 §8 曾讨论）。
