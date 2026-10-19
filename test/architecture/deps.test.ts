@@ -8,10 +8,8 @@ const LAYERS = { shared: 0, config: 1, media: 2, qq: 3, context: 4, agent: 5, ob
 type Package = keyof typeof LAYERS;
 type Edge = [from: string, to: string];
 
-/** 只放 P2 尚未消除的具体文件边；禁止按整个包豁免新增依赖。 */
-const ALLOWED_EXCEPTIONS: Array<[from: string, to: string]> = [
-  // P2：后端契约、配置解析与观察者接口。
-];
+/** P2 已清空例外；保留过期与重复检查，禁止后续按包豁免。 */
+const ALLOWED_EXCEPTIONS: Array<[from: string, to: string]> = [];
 
 function files(dir: string): string[] {
   return readdirSync(path.join(ROOT, dir), { withFileTypes: true }).flatMap(entry => {
@@ -152,7 +150,30 @@ describe('包结构与分层', () => {
     for (const file of graph.keys()) visit(file, []);
   });
 
-  it('记录包级双向依赖数，P0 不超过 10 对', () => {
+  it('HTTP 组合入口不超过 300 行', () => {
+    const lines = readFileSync(path.join(ROOT, 'src/obs/http.ts'), 'utf8').trimEnd().split('\n').length;
+    expect(lines).toBeLessThanOrEqual(300);
+  });
+
+  it('设计层级的包间依赖没有环', () => {
+    const graph = new Map<Package, Set<Package>>();
+    for (const [from, to] of edges) {
+      const a = packageOf(from), b = packageOf(to);
+      if (a === b) continue;
+      if (!graph.has(a)) graph.set(a, new Set());
+      graph.get(a)!.add(b);
+    }
+    const done = new Set<Package>();
+    const visit = (name: Package, trail: Package[]) => {
+      if (trail.includes(name)) throw new Error('分层包依赖环：' + [...trail, name].join(' → '));
+      if (done.has(name)) return;
+      for (const target of graph.get(name) ?? []) visit(target, [...trail, name]);
+      done.add(name);
+    };
+    for (const name of graph.keys()) visit(name, []);
+  });
+
+  it('记录物理目录双向依赖数，保留 P0 的 10 对上限', () => {
     // 与设计现状统计同口径：物理目录为包（含 obs 子目录、agent/backends 等），根文件归根目录。
     const packages = new Set(edges.filter(([from, to]) => path.posix.dirname(from) !== path.posix.dirname(to))
       .map(([from, to]) => `${path.posix.dirname(from)} → ${path.posix.dirname(to)}`));
@@ -160,7 +181,7 @@ describe('包结构与分层', () => {
       const [from, to] = edge.split(' → ');
       return from < to && packages.has(`${to} → ${from}`) ? [`${from} ↔ ${to}`] : [];
     }).sort();
-    console.info(`P0 包级环：${cycles.length} 对\n${cycles.join('\n')}`);
+    console.info(`物理目录双向依赖：${cycles.length} 对\n${cycles.join('\n')}`);
     expect(cycles.length, cycles.join('\n')).toBeLessThanOrEqual(10);
   });
 });
