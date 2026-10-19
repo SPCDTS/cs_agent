@@ -2,8 +2,8 @@ import { lookup } from 'node:dns/promises';
 import { request as httpRequest, type RequestOptions, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
-import { MAX_IMAGE_BYTES, MIN_IMAGE_BYTES } from './image.js';
-import { validateImageHeader } from './image-header.js';
+import { MAX_IMAGE_BYTES, MIN_IMAGE_BYTES } from './limits.js';
+import { validateImageHeader } from './header.js';
 
 export interface DownloadHooks {
   resolve?: (host: string) => Promise<{ address: string; family: number }[]>;

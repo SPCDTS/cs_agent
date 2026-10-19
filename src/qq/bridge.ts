@@ -2,7 +2,7 @@
  * createQQBridge：NapCat OneBot v11 —— WebSocket 收事件，HTTP 调 API。
  * 负责：重连与心跳、自回声过滤、去重、授权 / 触发、票据持久化、按票据幂等回复。
  */
-import type { DownloadHooks } from './incoming-http.js';
+import type { DownloadHooks } from '../media/download.js';
 import { inboundFromTicket } from './ticket.js';
 import { downloadIncoming } from "./incoming.js";
 import { EventEmitter } from "node:events";

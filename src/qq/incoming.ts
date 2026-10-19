@@ -1,7 +1,7 @@
-import { downloadImage, type DownloadHooks } from './incoming-http.js';
+import { downloadImage, type DownloadHooks } from '../media/download.js';
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { MAX_IMAGE_BYTES, MIN_IMAGE_BYTES } from "./image.js";
+import { MAX_IMAGE_BYTES, MIN_IMAGE_BYTES } from "../media/limits.js";
 import { isRecord, stringField, type OneBotClient } from "./onebot.js";
 
 export const INCOMING_RETENTION_MS = 7 * 86400_000;

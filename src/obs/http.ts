@@ -21,7 +21,7 @@ import { createSessionRoutes, sessionJson, type SessionAdapters } from './sessio
 import type { ObsEvent, ObsStore } from './store.js';
 import { createMemoryRoutes } from './memory/http.js';
 import type { MemoryAging, MemoryArchives } from './memory/types.js';
-import { loadImage } from '../qq/image.js';
+import { loadImage } from '../media/limits.js';
 import { trace as defaultTrace, type Trace } from '../shared/trace.js';
 import { summarize, type LiveBus, type LiveCard, type LiveMessage } from './live.js';
 import type { SettingsStore, RuntimeSettings } from '../agent/settings.js';

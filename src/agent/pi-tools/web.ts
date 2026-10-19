@@ -1,7 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import { forbiddenAddress } from "../../qq/incoming-http.js";
+import { forbiddenAddress } from "../../media/download.js";
 import { awaitWithContext, BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 
 export interface WebOptions {

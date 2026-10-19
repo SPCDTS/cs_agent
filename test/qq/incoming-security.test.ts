@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { downloadImage, forbiddenAddress, type DownloadHooks } from '../../src/qq/incoming-http.js';
+import { downloadImage, forbiddenAddress, type DownloadHooks } from '../../src/media/download.js';
 import { downloadIncoming } from '../../src/qq/incoming.js';
 import { tmp } from '../agent/helpers.js';
 

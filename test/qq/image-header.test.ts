@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateImageHeader } from '../../src/qq/image-header.js';
+import { validateImageHeader } from '../../src/media/header.js';
 
 function png(w: number, h: number) {
   const b = Buffer.alloc(33); Buffer.from([137,80,78,71,13,10,26,10]).copy(b);

@@ -3,7 +3,7 @@ import { request, createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DownloadHooks } from '../../src/qq/incoming-http.js';
+import type { DownloadHooks } from '../../src/media/download.js';
 import { cleanupIncoming, downloadIncoming, INCOMING_RETENTION_MS } from "../../src/qq/incoming.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import { inboundFromTicket } from "../../src/qq/ticket.js";

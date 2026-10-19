@@ -34,8 +34,8 @@
 |---|---|---|---|
 | 0 | `shared/` | 日志、脱敏、trace 事件总线、usage 字段、错误类型、数字格式化 | 仅 node 内建与第三方 |
 | 1 | `config.ts` | 环境变量 → 原始配置值（zod） | shared |
-| 2 | `qq/` | OneBot 传输、票据、策略、入站消息类型（`qq/types.ts` 同时是领域类型） | shared, config |
-| 3 | `media/` | 图片下载/校验/魔数、生图流水线（ComfyUI/Qwen）、生图任务与清单、图片事件 | shared, config, qq（仅 `qq/types`） |
+| 2 | `media/` | 图片下载/校验/魔数、生图流水线（ComfyUI/Qwen）、生图任务与清单、图片事件 | shared, config |
+| 3 | `qq/` | OneBot 传输、票据、策略、入站消息类型（`qq/types.ts` 同时是领域类型） | shared, config, media |
 | 4 | `context/` | 消息库、衰老、格式化、媒体持久化、media-recall 服务、`qq_context` 工具门面、观察者接口 | shared, config, qq, media |
 | 5 | `agent/`（含 `agent/codex/`、`agent/backends/`、`agent/pi-tools/`） | 分流、派发、任务、后端、codex 运行器 | ≤4 |
 | 6 | `obs/`（含 `obs/sessions`、`obs/context`、`obs/memory`、`obs/ui`） | 观测存储、仪表盘、会话索引、上下文分析、记忆可视化 | ≤5 |
@@ -81,7 +81,7 @@
 | `obs/image-events.ts` | `media/gen/events.ts` | 若阅读后发现它本质是观测存储表，则留在 `obs/` 并改为 `main.ts` 注入；由实施者读代码后决定并在报告中说明 |
 | `context/media.ts`、`context/media-recall-server.ts`、`mcp/media-recall-client.ts`、`mcp/image-gen*.ts`、`agent/pi-tools/images.ts`、`agent/docs.ts` | 不动 | 只改 import 指向 `media/` |
 
-规则：`media/` 不可 import `qq/`（除 `qq/types`）、`context/`、`agent/`、`obs/`。
+规则：`media/` 不可 import `qq/`（包括 `qq/types`）、`context/`、`agent/`、`obs/`、`mcp/`。
 
 ### P2 `agent/codex/`、接口文件去实现依赖、config 成叶子、观察者接口
 

@@ -3,7 +3,7 @@ import path from "node:path";
 import type { Access } from "../context/access.js";
 import type { ContextStore } from "../context/store.js";
 import { readMediaFile } from "../context/media.js";
-import { loadImage } from "../qq/image.js";
+import { loadImage } from "../media/limits.js";
 
 /** 注入 TOML 的清单只接受绝对路径，不允许引号、逗号、控制字符或遍历段。 */
 export function imageRefsValue(refs: readonly string[]): string {
