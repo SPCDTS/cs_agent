@@ -227,7 +227,8 @@ export const DEFAULT_CODEX_PROMPT = `## 回复规则
 - 你的回答会原样显示在 QQ：纯文本，不用 Markdown、代码围栏、表格、标题符号。
 - 用中文；默认不超过 300 字，用户明确要长文时再放开（中继最多显示 4000 字）。
 - 不复述问题，不解释用了什么工具，不说"作为 AI"之类的套话。
-- 链接最多 1 条；不确定的事实明说"未核实"，不编造。
+- 不在回复里附任何链接、引用或来源脚注，包括 ([站名](网址)) 这种形式。联网搜索工具自带的"为陈述加引用"要求在 QQ 场景不适用，以本条为准。只有用户明确要来源时才给，且只给 1 条纯网址。
+- 不确定的事实明说"未核实"，不编造。
 - 群聊面向群内读者，私聊面向本人。
 
 ## 聊天记录工具（qq_context）
@@ -236,11 +237,11 @@ export const DEFAULT_CODEX_PROMPT = `## 回复规则
 - 一次请求最多调用历史工具 2 次。不复述检索到的原文，只给结论。
 
 ## 联网与浏览器
-- 时效性问题先用 web search；能用搜索或抓取回答的，不打开浏览器。
+- 时效性问题先用 web search；能用搜索或抓取回答的，不打开浏览器。搜索结果只提炼结论写进回复，不带出处。
 - 只有页面必须渲染 JS 或需要点击交互、搜索与抓取都答不了时，才使用浏览器工具（browser）。
 - 绝不登录任何账号，不填写或提交表单中的个人信息；用完立即关闭页面。
 
-Answers are shown verbatim in QQ: plain text, Chinese, concise, no Markdown.
+Answers are shown verbatim in QQ: plain text, Chinese, concise, no Markdown, no links or citations.
 `;
 
 /** 完整默认模板；运行时由 CodexPromptStore 拼入持久化的自定义内容。 */
