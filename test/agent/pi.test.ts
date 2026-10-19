@@ -11,7 +11,7 @@ import { trace } from "../../src/shared/trace.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getSystemMessageText, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import { CompactionEntry, defineDoc, MemoryStorage, type Harness, type JsonObject, type ConversationId } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiBackend, PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
@@ -470,6 +470,40 @@ describe("pi durable backend", () => {
     expect(await reopened.pi.readThreadIds()).toEqual(ids);
     expect((await reopened.pi.handle(request("once"), handleContext())).text).toBe("first");
     expect(reopened.faux.state.callCount).toBe(0);
+  });
+
+  it.each(["config", "env"])("项目指引通过 %s 工作区注入 system，热更新且不重复写入相同 system 条目", async source => {
+    const dir = tmp("cs-pi-project-");
+    const workspaceDir = path.join(dir, "workspace");
+    vi.stubEnv("WORKSPACE_DIR", source === "env" ? workspaceDir : path.join(dir, "unused-workspace"));
+    const outer = await put(path.join(workspaceDir, "AGENTS.md"), "运维项目指引");
+    const inner = await put(path.join(dir, "pi-work", "group_7", "AGENTS.md"), "会话项目指引");
+    await put(path.join(dir, "AGENTS.md"), "不得加载的数据目录指引");
+    await put(path.join(dir, "pi-work", "AGENTS.md"), "不得加载的会话根指引");
+    const seen: TranscriptContext[] = [];
+    const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
+    const s = await setup([inspect, inspect, inspect], { dir, ...(source === "config" ? { workspaceDir } : {}) });
+    await s.pi.handle(request("project1"), handleContext());
+    await s.pi.handle(request("project2"), handleContext());
+    const first = seen[0].messages[0];
+    expect(first.role).toBe("system");
+    if (first.role !== "system") throw new Error("缺少 system 消息");
+    const system = getSystemMessageText(first);
+    expect(system).toContain(DEFAULT_PI_PROMPT);
+    expect(system).toContain('<project_instructions path="' + outer + '">\n运维项目指引\n</project_instructions>');
+    expect(system).toContain('<project_instructions path="' + inner + '">\n会话项目指引\n</project_instructions>');
+    expect(system.indexOf(DEFAULT_PI_PROMPT)).toBeLessThan(system.indexOf("运维项目指引"));
+    expect(system.indexOf("运维项目指引")).toBeLessThan(system.indexOf("会话项目指引"));
+    expect(system).not.toContain("不得加载");
+    expect(system).not.toContain("<project-context>");
+    expect(seen[0].messages.filter(m => m.role === "user").map(m => JSON.stringify(m)).join("")).not.toContain("项目指引");
+    const id = String((await s.pi.readThreadIds())["group:7"]);
+    const systems = async () => (await s.pi.sessionSource.entries(id, undefined, 256)).items.filter(e => e.kind === "pi.system");
+    expect(await systems()).toHaveLength(1);
+    await fs.writeFile(inner, "热更新后的会话项目指引", "utf8");
+    await s.pi.handle(request("project3"), handleContext());
+    expect(JSON.stringify(seen[2].messages.filter(m => m.role === "system"))).toContain("热更新后的会话项目指引");
+    expect(await systems()).toHaveLength(2);
   });
 
   it("hot-loads agent.md without overwriting existing text", async () => {

@@ -18,10 +18,12 @@ import { callQQAttachmentTool, callQQContextTool } from "../../context/qq-contex
 import { imageTool, type PiImageBackend } from "./images.js";
 import { PiRequestDoc } from "./request.js";
 import { PiPromptLoader } from "./prompt.js";
+import { ProjectContextLoader } from "./project-context.js";
 import { DeepSeekWeb } from "./web.js";
 
 export interface PiToolsOptions {
   dataDir: string;
+  workspaceDir: string;
   store: ContextStore;
   imageBackend: PiImageBackend;
   getHarness: () => Harness;
@@ -57,6 +59,7 @@ export function createPiExtension(opts: PiToolsOptions) {
   const image = imageTool(opts.dataDir, opts.imageBackend, opts.getHarness, opts.store);
   const web = opts.web ?? new DeepSeekWeb();
   const prompt = new PiPromptLoader(opts.dataDir);
+  const projectContext = new ProjectContextLoader(opts);
   const history = (name: string, description: string, parameters: ReturnType<typeof Type.Object>) => defineTool({
     name, description, parameters, replay: "safe",
     async execute(args, api, context) {
@@ -98,7 +101,10 @@ export function createPiExtension(opts: PiToolsOptions) {
   });
   return defineExtension({
     name: "cs-pi",
-    sections: [section("cs-pi", () => prompt.read(), { tag: false })],
+    sections: [
+      section("cs-pi", () => prompt.read(), { tag: false }),
+      section("project-context", input => projectContext.render(input.env?.cwd), { tag: false }),
+    ],
     hooks: [
       hook(CompactionTask, { beforeCompact: async (compact, api, context) => {
         const bound = await api.snapshot(PiRequestDoc, api.conversationId, context);

@@ -39,9 +39,9 @@ const PiMigrationDoc = defineDoc<{ sharedRetired: boolean }>({
   kind: "cs.pi.migration", version: 1, scope: "session", initial: () => ({ sharedRetired: false }),
 });
 
-export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness"> {
+export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "workspaceDir"> {
   models: Models;
-  /** Codex 工作区根目录，交给 Pi 路径策略整体禁读。 */
+  /** 运维指引根目录；Pi 工具路径策略仍整体禁读此 Codex 工作区。 */
   workspaceDir?: string;
   contextUsage?: ContextUsageStore;
   model: ModelRef;
@@ -123,7 +123,7 @@ export class PiBackend implements AgentBackend {
     const registry = createRegistry();
     let harness!: Harness;
     registry.install(await codingTools());
-    registry.install(createPiExtension({ ...opts, getHarness: () => harness }));
+    registry.install(createPiExtension({ ...opts, workspaceDir, getHarness: () => harness }));
     harness = await Harness.open(opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite")), {
       models: opts.models, registry,
       env: async (target, ctx) => {
