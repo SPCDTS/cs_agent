@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextView } from '@earendil-works/pi-durable';
 import { boundedContext, type ContextAnalysis } from '../../src/obs/context/index.js';
 import type { PiContextAdapter } from '../../src/obs/context/pi-history.js';
-import { createSessionRoutes } from '../../src/obs/sessions/http.js';
+import { createContextRoutes } from '../../src/obs/context/http.js';
 import { RESPONSE_BYTES } from '../../src/obs/sessions/content.js';
 import { registerTemporarySecrets } from '../../src/shared/redact.js';
 
@@ -15,7 +15,7 @@ async function rig(count = 1) {
   const pi: PiContextAdapter = { listSessions: async () => [{ backend: 'pi', id: '1', label: 'owner', status: 'active', started: 0, updated: 1, turns: 1 }],
     turns: async () => [{ turn: '2', started: 0, preview: '', tools: 0, requests: 0, status: 'ok' }],
     blocks: async () => [], content: async () => '', context: async () => view };
-  const handle = createSessionRoutes({ pi }, () => null, { windowTokens: 12000 });
+  const handle = createContextRoutes({ pi }, { windowTokens: 12000 });
   const server = createServer((req, res) => { void handle(new URL(req.url!, 'http://localhost'), res); });
   servers.push(server); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   return (query = '') => fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/api/agents/pi/sessions/1/context${query}`);

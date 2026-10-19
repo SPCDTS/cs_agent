@@ -7,6 +7,7 @@ import { analyzeContext, type ContextAnalysis } from '../../src/obs/context/inde
 import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import { CodexSessionAdapter } from '../../src/obs/sessions/codex-adapter.js';
 import { createSessionRoutes } from '../../src/obs/sessions/http.js';
+import { createContextRoutes } from '../../src/obs/context/http.js';
 import type { BlockFrame, ContentRef } from '../../src/obs/sessions/types.js';
 import { ObsStore } from '../../src/obs/store.js';
 
@@ -36,7 +37,9 @@ async function rig(initial: string) {
   cleanup.push(() => adapter.close());
   await adapter.refresh();
   const server = createServer((req, res) => {
-    void createSessionRoutes({ codex: adapter }, () => null)(new URL(req.url!, 'http://localhost'), res);
+    const url = new URL(req.url!, 'http://localhost');
+    const handle = url.pathname.endsWith('/context') ? createContextRoutes({ codex: adapter }) : createSessionRoutes({ codex: adapter }, () => null);
+    void handle(url, res);
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   cleanup.push(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });

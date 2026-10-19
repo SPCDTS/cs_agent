@@ -1,6 +1,5 @@
 import type { ServerResponse } from 'node:http';
-import type { SseWriter } from '../http.js';
-import { analyzeContext, boundedContext, type ContextOptions } from '../context/index.js';
+import type { SseWriter } from '../http-util.js';
 import { redactSessionValue, RESPONSE_BYTES, utf8Slice } from './content.js';
 import { SessionError, type SessionAdapter, type SessionFilter, type SessionRef } from './types.js';
 
@@ -24,7 +23,7 @@ function integer(raw: string | null, name: string, fallback?: number): number {
   return n;
 }
 
-function segment(raw: string): string {
+export function segment(raw: string): string {
   let value: string;
   try { value = decodeURIComponent(raw); } catch { throw new SessionError(400, '路径编码无效'); }
   if (!value || value.length > 256 || value === '.' || value === '..' || /[\\/\x00-\x1f\x7f]/.test(value))
@@ -58,8 +57,7 @@ function contentResponse(text: string): { text: string; truncated: boolean } {
   return { text: utf8Slice(safe, 0, lo), truncated: true };
 }
 
-/** 必须从 dashboard 已通过 cookie/Host 鉴权的分支调用。 */
-export function createSessionRoutes(adapters: SessionAdapters, sse: (res: ServerResponse) => SseWriter | null, contextOptions: ContextOptions = {}) {
+export function sessionLookup(adapters: SessionAdapters) {
   const getAdapter = (backend: string) => {
     if (!BACKENDS.includes(backend as SessionRef['backend'])) throw new SessionError(404, '后端不存在');
     return adapters[backend as SessionRef['backend']];
@@ -69,6 +67,12 @@ export function createSessionRoutes(adapters: SessionAdapters, sse: (res: Server
     if (!session || !adapter) throw new SessionError(404, '会话不存在或尚未索引');
     return { session, adapter };
   };
+  return { getAdapter, findSession };
+}
+
+/** 必须从 dashboard 已通过 cookie/Host 鉴权的分支调用。 */
+export function createSessionRoutes(adapters: SessionAdapters, sse: (res: ServerResponse) => SseWriter | null) {
+  const { getAdapter, findSession } = sessionLookup(adapters);
   return async function handleSessionRoute(url: URL, res: ServerResponse): Promise<void> {
     try {
       const p = url.pathname, q = url.searchParams;
@@ -107,15 +111,6 @@ export function createSessionRoutes(adapters: SessionAdapters, sse: (res: Server
       }
       const id = segment(parts[5] ?? '');
       const found = await findSession(adapter, id);
-      if (parts.length === 7 && parts[6] === 'context') {
-        if (q.getAll('at').length > 1 || q.getAll('phase').length > 1) throw new SessionError(400, '上下文参数不可重复');
-        const at = q.has('at') ? segment(q.get('at')!) : undefined;
-        const phase = q.get('phase') ?? 'after';
-        if (phase !== 'before' && phase !== 'after') throw new SessionError(400, 'phase 必须是 before 或 after');
-        const analysis = boundedContext(await analyzeContext(adapters, found.session.backend, id, { ...contextOptions, at, phase }));
-        // 固定契约的 key/tokens 已由引擎按字符串叶子脱敏，不能再当凭据字段遮蔽。
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(analysis)); return;
-      }
       if (parts.length === 6) {
         sessionJson(res, 200, { session: found.session, turns: await found.adapter.turns(id) }); return;
       }

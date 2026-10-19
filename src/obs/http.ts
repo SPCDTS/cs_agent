@@ -1,10 +1,13 @@
+import { csrfToken, sseWriter, type SseWriter } from './http-util.js';
+export { csrfToken, sseWriter, type SseWriter } from './http-util.js';
+import { createContextRoutes } from './context/http.js';
 import { imageBinary } from './memory/images.js';
 import { SessionError } from './sessions/types.js';
 import { imagesPageBody, imageDetailBody, IMAGES_NOTE } from './ui/images-pages.js';
 import type { ImagePage, ImageDetail } from './memory/types.js';
 import { isThreadKey, type ThreadKey } from "../agent/codex-runner.js";
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { timingSafeEqual, randomBytes, createHash, createHmac, randomUUID } from 'node:crypto';
+import { timingSafeEqual, randomBytes, createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config.js';
@@ -41,41 +44,6 @@ const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])
 // 与顶栏的蓝色方框及两条横线保持一致；静态图形不含运行数据。
 const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="7" y="4" width="18" height="24" rx="2" fill="none" stroke="#2b47b5" stroke-width="3"/><path d="M11 13h10M11 19h10" stroke="#2b47b5" stroke-width="3"/></svg>';
 const MAX_SSE = 20;
-/** SSE 写队列：未写出字节（队列 + socket 缓冲）超过上限，或一次 drain 等待超过时限才断开慢客户端。 */
-const SSE_MAX_PENDING = 2 * 1024 * 1024;
-const SSE_DRAIN_TIMEOUT_MS = 10_000;
-
-export interface SseWriter { send(frame: string): void }
-/** 按序写出 SSE 帧；write 返回 false 是正常背压，等待 drain 而不是断开。 */
-export function sseWriter(res: ServerResponse, maxPending = SSE_MAX_PENDING, drainTimeoutMs = SSE_DRAIN_TIMEOUT_MS): SseWriter {
-  const queue: string[] = [];
-  let queued = 0, flushing = false, closed = false;
-  res.on('close', () => { closed = true; queue.length = 0; queued = 0; });
-  const drained = () => new Promise<boolean>(resolve => {
-    const done = (ok: boolean) => { clearTimeout(timer); res.off('drain', onDrain); res.off('close', onClose); resolve(ok); };
-    const onDrain = () => done(true), onClose = () => done(false);
-    const timer = setTimeout(() => done(false), drainTimeoutMs);
-    res.on('drain', onDrain); res.on('close', onClose);
-  });
-  async function flush(): Promise<void> {
-    if (flushing) return;
-    flushing = true;
-    try {
-      while (queue.length && !closed) {
-        const frame = queue.shift()!; queued -= Buffer.byteLength(frame);
-        if (!res.write(frame) && !closed && !await drained()) { if (!closed) res.destroy(); return; }
-      }
-    } finally { flushing = false; }
-  }
-  return {
-    send(frame) {
-      if (closed) return;
-      const bytes = Buffer.byteLength(frame);
-      if (queued + bytes + res.writableLength > maxPending) { res.destroy(); return; }
-      queue.push(frame); queued += bytes; void flush();
-    },
-  };
-}
 const MAX_BODY = 512 * 1024;
 const AGENT_MD_MAX_BYTES = 64 * 1024;
 
@@ -111,9 +79,6 @@ export interface CodexPromptView {
   subscribe(fn: (change?: unknown) => void): (() => void) | void;
 }
 function equal(a: string, b: string): boolean { const x=Buffer.from(a),y=Buffer.from(b); return x.length===y.length && timingSafeEqual(x,y); }
-/** 由访问口令派生的 CSRF 令牌：表单隐藏字段 + 服务端比对；不知道口令无法伪造。 */
-export function csrfToken(obsToken: string): string { return createHmac('sha256', obsToken).update('cs-agent-dashboard-csrf-v1').digest('base64url'); }
-
 /** URL 每段与 realpath 双重限制，拒绝软链接和跨票据读取；只允许校验过的位图。 */
 async function imageFile(root: string, segments: string[]): Promise<string> {
   if (segments.length < 2 || segments.length > 5 || !/^[A-Za-z0-9_-]{1,128}$/.test(segments[0]!) ||
@@ -220,7 +185,10 @@ export function createDashboard(opts: DashboardOptions) {
     codex: new CodexSessionAdapter({ store: opts.store, codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR }),
     ...(opts.piSessions ? { pi: new PiSessionAdapter({ store: opts.store, source: opts.piSessions }) } : {}),
   });
-  const sessionRoute = createSessionRoutes(adapters, sse, { codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR, contextUsage: opts.contextUsage });
+  const handleSessions = createSessionRoutes(adapters, sse);
+  const handleContext = createContextRoutes(adapters, { codexHome: opts.config.codexHome, dataDir: opts.config.DATA_DIR, contextUsage: opts.contextUsage });
+  const sessionRoute = (url: URL, res: ServerResponse) => url.pathname.split('/').length === 7 && url.pathname.endsWith('/context')
+    ? handleContext(url, res) : handleSessions(url, res);
   const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, sessionAdapters: adapters, aging: opts.aging, archives: opts.archives,
     maxChars: opts.config.QQ_CONTEXT_MAX_CHARS, retention: { rawDays: opts.config.HISTORY_RAW_DAYS,
       summaryDays: opts.config.HISTORY_SUMMARY_DAYS, hardMaxDays: opts.config.HISTORY_RAW_HARD_MAX_DAYS,
