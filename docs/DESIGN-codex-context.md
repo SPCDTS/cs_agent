@@ -363,6 +363,13 @@ CODEX_BROWSER=playwright
 ### 8.3 告警（可选）
 `ALERT_OWNER=true` 时，WS 断线超 5 分钟、codex/DeepSeek 鉴权失败、连续 3 条票据失败，向 owner 私聊发一条告警（限频 1 次/30 分钟，走 `send()` 而非票据）。默认关闭。
 
+### 8.9 远程插件修剪（2026-10-19，主会话验收）
+
+- 现象：上下文分析页 developer 区出现 figma/notion/gmail 等技能说明（`<skills_instructions>` 约 21.8 KB / 4,800 token），来源是 codex-cli 0.163 的 `remote_plugin` 功能自动从 OpenAI 精选远程市场下载到 `$CODEX_HOME/plugins/cache/openai-curated-remote/` 的 15 个插件，不是宿主机配置泄入（compose 只挂 data/ 与 workspace/，容器内 `/home/node/.codex` 为空）。
+- 实测（临时 CODEX_HOME，6 次真实 exec）：`features.remote_plugin=false` 与 `[plugins."x@openai-curated-remote"] enabled=false` 都不会让已缓存插件退出提示词，删缓存目录才有效；清空后默认配置短时间内未重新拉取；关远程目录另少约 900 字插件提示。`codex debug prompt-input` 不显示远程插件，验证只能看真实 rollout。
+- 修复（d54caa5、8b5da19）：entrypoint 受管配置新增 `[features] remote_plugin = false`（`CODEX_REMOTE_PLUGINS=off|on`，默认 off），启动时按 `CODEX_PLUGIN_PRUNE`（默认 `figma,gmail`，`all` 清空，显式空串不清，名单只允许 `[A-Za-z0-9._-]`，拒绝 `.`/`..`）删除缓存目录并清理安装暂存目录；entrypoint 测试 22 项；用户决定多代理功能暂不关闭。
+- 验收：沙箱外复跑 77 文件 / 1098 项通过；部署后 `config.toml` 第 50–51 行为 `[features] remote_plugin = false`，缓存目录剩 13 个（figma、gmail 已删，暂存目录消失），容器 healthy。其余 13 个缓存插件（其中 6 个带 skills）仍会进入提示词，约 3,800 token/请求；全清设 `CODEX_PLUGIN_PRUNE=all`。下一次真实回合的上下文分析页应不再出现 figma 技能，待观察。
+
 ## 7. 实施拆分（各自测试、单独重建部署）
 
 1. **消息库 + 衰老任务 + `qq_context` MCP + AGENTS.md + codex web_search**。测试：假 OneBot 入库/撤回/清理、摘要任务（faux 模型）、FTS 中文检索、MCP 上限与访问过滤、`QQ_ACCESS` 注入。
