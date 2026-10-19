@@ -47,9 +47,11 @@ describe("运行时模型与档位", () => {
   it("codex 缓存目录校验与目录不可用回退", async () => {
     const file = path.join(tmp(), "models_cache.json");
     expect((await loadCodexModelValidator(file))("new/model")).toBe(true);
-    writeFileSync(file, JSON.stringify({ models: [{ slug: "known" }] }), "utf8");
+    writeFileSync(file, JSON.stringify({ models: [{ slug: "known" }, { slug: "codex/gpt-6.1-sol" }, { slug: "deepseek/deepseek-flash" }] }), "utf8");
     const validate = await loadCodexModelValidator(file);
     expect(validate("known")).toBe(true); expect(validate("unknown")).toBe(false);
+    // 裸 slug 只按 codex 提供者兼容：gpt-6.1-sol 可用，deepseek-flash 不能省略前缀
+    expect(validate("gpt-6.1-sol")).toBe(true); expect(validate("codex/gpt-6.1-sol")).toBe(true); expect(validate("deepseek-flash")).toBe(false);
     writeFileSync(file, "{broken", "utf8");
     const fallback = await loadCodexModelValidator(file);
     expect(fallback("unknown")).toBe(true); expect(fallback("")).toBe(false); expect(fallback('a"')).toBe(false);

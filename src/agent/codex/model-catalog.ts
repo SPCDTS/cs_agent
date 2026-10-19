@@ -75,5 +75,6 @@ export async function loadCodexModelValidator(cacheFile: string): Promise<(slug:
     const valid = catalog.models?.map(m => m?.slug).filter((slug): slug is string => typeof slug === "string" && !!slug);
     if (valid?.length) slugs = new Set(valid);
   } catch { /* 缺失或损坏的目录允许手动输入。 */ }
-  return slug => /^[A-Za-z0-9._/-]+$/.test(slug) && (!slugs || slugs.has(slug));
+  // magpie 目录的 slug 带 `codex/` 前缀，而 CODEX_MODEL 习惯不带：裸 slug 按 codex 提供者兼容（与 catalogContextWindow 一致）。
+  return slug => /^[A-Za-z0-9._/-]+$/.test(slug) && (!slugs || slugs.has(slug) || slugs.has(`codex/${slug}`));
 }
