@@ -81,6 +81,21 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
         tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { target: 'pi', source: 'dashboard', file: 'prompts/agent.md', bytes_before: r.before, bytes_after: r.after } });
         back('/settings?ok=prompt#prompt'); return;
       }
+      if (url.pathname === '/settings/codex-base-prompt' || url.pathname === '/settings/codex-base-prompt/restore') {
+        if (!opts.codexBasePrompt) throw new HttpError(404, 'codex 基础指令不可用');
+        const model = form.get('model') ?? '';
+        if (model !== (opts.settings?.current().codexModel ?? opts.config.CODEX_MODEL)) {
+          throw new HttpError(409, '当前 codex 模型已改变，请刷新页面后再保存。');
+        }
+        try {
+          const revision = form.get('revision') ?? '';
+          if (url.pathname.endsWith('/restore')) await opts.codexBasePrompt.restore(model, revision);
+          else await opts.codexBasePrompt.save(model, form.get('content') ?? '', revision);
+        } catch (e) {
+          throw new HttpError(409, redactText(e instanceof Error ? e.message : '基础指令未保存', 2_000));
+        }
+        back('/settings?ok=codexBasePrompt#codex-base-prompt'); return;
+      }
       if (url.pathname === '/settings/codex-prompt') {
         if (!opts.codexPrompt) throw new HttpError(404, 'codex 系统提示不可用');
         try { await opts.codexPrompt.save((form.get('content') ?? '').replace(/\r\n?/g, '\n'), form.get('revision') ?? ''); }

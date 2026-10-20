@@ -33,6 +33,7 @@ import { CodexRunner } from "./agent/codex/runner.js";
 import { purgeCodexTrace } from "./agent/codex/trace.js";
 import { purgeGeneratedImages } from "./agent/codex/generated-images.js";
 import { CodexPromptStore } from "./agent/codex/prompt.js";
+import { CodexBasePromptStore } from "./agent/codex/base-prompt.js";
 import { createImageBackend } from "./media/gen/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
 import { createTasks } from "./agent/tasks.js";
@@ -82,6 +83,9 @@ async function main(): Promise<void> {
   const writableRoots: string[] = []; // 实际可写目录由 runner 每轮按会话权限计算。
   const codexPrompt = new CodexPromptStore({ codexHome: cfg.codexHome, dataDir: cfg.DATA_DIR,
     workspaceDir: cfg.WORKSPACE_DIR, writableRoots, containsSecret: text => redactText(text, Number.MAX_SAFE_INTEGER) !== text });
+  const codexBasePrompt = new CodexBasePromptStore({ codexHome: cfg.codexHome, dataDir: cfg.DATA_DIR,
+    ...(cfg.CODEX_PROVIDER === "magpie" ? { magpieUrl: cfg.CODEX_MAGPIE_URL, magpieKey: cfg.CODEX_MAGPIE_KEY } : {}),
+    containsSecret: text => redactText(text, Number.MAX_SAFE_INTEGER) !== text });
   await codexPrompt.read();
   await codexPrompt.regenerate();
   log.info("wrote codex global AGENTS.md", { file: codexPrompt.agentsFile, writable_roots: writableRoots });
@@ -142,6 +146,7 @@ async function main(): Promise<void> {
     sandbox: cfg.CODEX_SANDBOX,
     sandboxNetwork: cfg.CODEX_SANDBOX_NETWORK,
     preparePrompt: () => codexPrompt.regenerate(),
+    prepareBasePrompt: model => codexBasePrompt.prepare(model),
     timeoutMs: cfg.CODEX_TIMEOUT_SEC * 1000,
     closeGraceMs: cfg.CODEX_CLOSE_GRACE_MS,
     exitGraceMs: cfg.CODEX_EXIT_GRACE_MS,
@@ -322,7 +327,7 @@ async function main(): Promise<void> {
     compaction: obs.degraded ? [] : obs.db.prepare("SELECT json_extract(detail_json,'$.conversation') conversation, COUNT(*) attempts, MAX(ts) last_at FROM events WHERE stage='compaction' GROUP BY conversation").all(),
     usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
   const skills = cfg.PI_SKILLS_DIR === "off" ? undefined : new SkillsStore({ dir: cfg.PI_SKILLS_DIR, loader: new SkillsLoader({ dir: cfg.PI_SKILLS_DIR }) });
-  const dashboardData = { contextUsage, codexPrompt, modelCatalog, skills };
+  const dashboardData = { contextUsage, codexPrompt, codexBasePrompt, modelCatalog, skills };
   const dashboard = createDashboard({ ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
@@ -332,7 +337,7 @@ async function main(): Promise<void> {
         dailyHour: cfg.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } },
     archives: { codex: path.join(cfg.DATA_DIR, 'codex-threads-archive.jsonl'), pi: path.join(cfg.DATA_DIR, 'pi-threads-archive.jsonl') },
     resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key),
-    compactCodex: (key) => codex.compactThread(key), compactPi: (key) => pi.compactThread(key) });
+    compactCodex: (key) => codex.compactThread(key, "dashboard", settings.currentForTurn().codexModel), compactPi: (key) => pi.compactThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
     onPurge: async now => {
       try { if (!obs.degraded) purgeMemoryInstrumentation(obs.db, cfg.OBS_MEMORY_RETENTION_DAYS, now); }

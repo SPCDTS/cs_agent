@@ -11,6 +11,8 @@ interface CompactOptions {
   start: () => CompactChild;
   killTree?: (pid: number | undefined) => void;
   timeoutMs?: number;
+  /** 压缩与基础指令使用同一运行时模型，显式覆盖恢复线程中的旧模型。 */
+  model?: string;
 }
 
 const object = (value: unknown): Record<string, unknown> =>
@@ -98,7 +100,7 @@ export async function compactAppServer(threadId: string, opts: CompactOptions): 
         }
         if (method === "initialize") {
           send({ method: "initialized" });
-          request("thread/resume", { threadId });
+          request("thread/resume", { threadId, ...(opts.model === undefined ? {} : { model: opts.model }) });
         } else if (method === "thread/resume") {
           compactRequested = true;
           request("thread/compact/start", { threadId });

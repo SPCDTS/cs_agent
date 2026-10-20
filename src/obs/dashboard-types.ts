@@ -11,7 +11,7 @@ import type { LiveBus } from './live.js';
 import type { ThreadKey } from '../agent/backends/types.js';
 import type { Trace } from '../shared/trace.js';
 import type { ContextUsageView } from '../shared/format.js';
-import type { ModelCatalogView } from './ui/dashboard-pages.js';
+import type { CodexBasePromptSnapshot, ModelCatalogView } from './ui/dashboard-pages.js';
 
 export interface DashboardOptions {
   /** 共享技能管理；off 时不注入。页面使用 list/readSkillMd/files。 */
@@ -38,8 +38,18 @@ export interface DashboardOptions {
   contextUsage?: ContextUsageView;
   /** codex 系统提示（src/agent/codex/prompt.ts 的 CodexPromptStore）：受管段只读，自定义段 codex.md 可编辑 */
   codexPrompt?: CodexPromptView;
+  codexBasePrompt?: CodexBasePromptView;
   /** 设置页模型下拉的可选清单（启动时读一次）；缺省或为空时 codex 退化为文本框 */
   modelCatalog?: ModelCatalogView;
+}
+
+/** 基础指令存储契约；保存、恢复均绑定页面中的模型与版本。 */
+export interface CodexBasePromptView {
+  readonly managed: string;
+  read(model: string): Promise<CodexBasePromptSnapshot | undefined>;
+  save(model: string, custom: string, expectedRevision: string): Promise<{ revision: string }>;
+  restore(model: string, expectedRevision: string): Promise<{ revision: string }>;
+  subscribe(fn: (change: { model: string; file: string; revision: string; bytes_before: number; bytes_after: number }) => void): () => void;
 }
 
 /** CodexPromptStore 的结构类型：面板只依赖这三个方法。 */

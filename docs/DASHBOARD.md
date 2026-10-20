@@ -15,7 +15,7 @@
 | `/codex` | owner / 共享线程：上下文占用条、id、rollout 大小、已观测回合、最近 10 轮摘要、全局 AGENTS.md | `POST /codex/reset` |
 | `/pi` | 每个会话键的上下文占用条（含两道压缩阈值）、会话 id、最近活动、最近 10 轮摘要、压缩记录 | `POST /pi/reset` |
 | `/codex/agents-md` | 当前全局 `$CODEX_HOME/AGENTS.md`（受管规则 + codex.md）的只读脱敏全文 | — |
-| `/settings` | 运行时设置、编辑 codex.md（含只读受管规则）与 agent.md、线程入口、最近变更 | `POST /settings`、`POST /settings/codex-prompt`、`POST /settings/agent-md` |
+| `/settings` | 运行时设置、编辑 codex.md、当前模型基础指令（含只读受管规则）与 agent.md、线程入口、最近变更 | `POST /settings`、`POST /settings/codex-prompt`、`POST /settings/codex-base-prompt`、`POST /settings/codex-base-prompt/restore`、`POST /settings/agent-md` |
 | `/config` | 启动时生效配置（脱敏）与 agent.md 当前内容 | — |
 
 ### 布局草图
@@ -174,6 +174,8 @@ Trace ──tap──▶ LiveBus（内存卡片：阶段栈、事件流，已脱
 ## 运行时设置
 
 `${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexReasoningEffort`、`alertOwner`。后端与 Codex 推理强度在派发时读取 `settings.current()` 并写入票据快照，执行与消息库机器人行沿用快照；owner 告警开关独立现读。回复原文照发（仅 4000 字发送保护），面板不再提供回复方式选项。旧文件中的 `codexReplyMode` 读取时剥离，下次保存时移除，其它字段仍严格校验。每次变更写观测事件 `settings_changed`（票据 `@settings`，含变更前后值与来源 `dashboard`）；agent.md 保存记 `prompt_changed`（`target: "pi"`）；codex.md 保存记 `prompt_changed`（`target: "codex"`，`file: prompts/codex.md`，前后字节数）——由面板启动时对 `codexPrompt.subscribe` 的唯一订阅写入，POST 处理器本身不记，避免重复；线程重置记 `thread_reset`（`@codex` / `@pi`）。
+
+codex.md 编辑器旁的「codex 基础指令（当前 codexModel）」编辑 `DATA_DIR/prompts/codex-base/<安全 slug>.md`，显示「与目录默认不同」状态及自动追加的 QQ 受管规则。保存和「恢复目录默认」均校验 CSRF、模型和文件 revision，冲突返回 409；变更记录为 `prompt_changed`（`target: "codex-base"`）。下一轮即生效，包含已有线程续聊；Codex 升级不会更新已播种文件，请用「恢复目录默认」。模板缺失时沿用 Codex 默认行为，不创建空文件。
 
 ## 安全
 

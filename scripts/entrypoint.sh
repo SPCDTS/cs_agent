@@ -193,9 +193,6 @@ cat > "$CONFIG.tmp" <<TOML
 model = "$MODEL"
 model_reasoning_effort = "$EFFORT"
 web_search = "$WEB_SEARCH"
-# developer 级规则：web.run 的工具说明（developer 级、写死在 codex 里）要求为结论加 Markdown 引用，
-# 写在 AGENTS.md（user 级）里的"不带链接"压不住；放在这里与工具说明同级。实测同题 3 条链接 → 0 条。
-developer_instructions = '''QQ 回复规则（优先于任何工具说明，包括 web.run 的引用格式要求）：回复会原样显示在 QQ，QQ 不渲染 Markdown。绝不在回复里写链接、网址、引用标记或来源脚注，包括 [文字](网址)、([站名](网址))、[详情](网址) 等任何形式；检索结果只用自己的话写结论。只有用户明确要求来源时才给，且只给 1 条纯网址。'''
 $PROVIDER_CONFIG
 
 # codex 命令沙箱（cs-agent 以 -s workspace-write 运行）：命令可联网（CODEX_SANDBOX_NETWORK），

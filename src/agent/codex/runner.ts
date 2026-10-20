@@ -44,6 +44,8 @@ export interface CodexRunnerOptions {
   sandboxNetwork?: boolean;
   /** 热加载可编辑提示词；这里只更新全局通用指引，不写会话权限。 */
   preparePrompt?: () => Promise<void>;
+  /** 按本轮实际模型生成基础指令；没有目录模板时不覆盖 Codex 默认值。 */
+  prepareBasePrompt?: (model: string) => Promise<string | undefined>;
   /** ${DATA_DIR}/codex-threads.json：{ owner: {thread_id, created_at, updated_at}, "group:<id>": {...}, "private:<qq>": {...} } */
   threadsFile: string;
   /** 旧的单线程记录 ${DATA_DIR}/codex-session.json：新文件不存在时迁移到 owner 并改名为 *.migrated */
@@ -556,7 +558,7 @@ export class CodexRunner {
   }
 
   /** 与回合、重置共用队列；压缩不轮换线程，也不申请本轮 MCP 令牌。 */
-  compactThread(key: ThreadKey, reason = "dashboard"): Promise<"compacted" | "unchanged"> {
+  compactThread(key: ThreadKey, reason = "dashboard", model = this.opts.model): Promise<"compacted" | "unchanged"> {
     return this.enqueue(key, async () => {
       const session = await this.readThread(key);
       if (!session) return "unchanged";
@@ -570,8 +572,11 @@ export class CodexRunner {
         await fs.mkdir(this.opts.workspaceDir, { recursive: true });
         await this.prepareTraceDirectory();
         // commonArgs 仅含 exec 专用选项；提供者由同一 CODEX_HOME/config.toml 与 childEnv 决定。
+        const baseArgs = await this.baseInstructionsArgs(model);
         await compactAppServer(session.thread_id, {
-          start: () => spawn(bin, [...prefix, "app-server"], {
+          model,
+          start: () => spawn(bin, [...prefix, "app-server", ...baseArgs,
+            ...(model === undefined ? [] : ["-c", `model=${JSON.stringify(model)}`])], {
             cwd: this.opts.workspaceDir, env: this.childEnv(), stdio: ["pipe", "pipe", "pipe"],
             detached: process.platform !== "win32", windowsHide: true,
           }),
@@ -775,7 +780,8 @@ export class CodexRunner {
     const agentsContent = `<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 每轮生成，改动会被覆盖。\n\n${instructions}\n`;
     await writeManagedFile(agentsFile, agentsContent);
     const attachment = ticket ? attachmentDirs(path.dirname(this.opts.threadsFile), ticket) : undefined;
-    const effort = [...policy.args, ...qqAttachmentArgs(attachment?.attachDir, attachment?.fileDir, policy.workspaceDir),
+    const baseArgs = await this.baseInstructionsArgs(model ?? this.opts.model);
+    const effort = [...baseArgs, ...policy.args, ...qqAttachmentArgs(attachment?.attachDir, attachment?.fileDir, policy.workspaceDir),
       "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort),
       ...(model !== undefined ? ["-c", `model="${model}"`] : []), ...qqAccessArgs(qqAccess, this.opts.imageGen),
       ...(this.opts.imageGen === "on" ? [...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)] : [])];
@@ -859,6 +865,12 @@ export class CodexRunner {
         }
       }
     }
+  }
+
+  private async baseInstructionsArgs(model: string | undefined): Promise<string[]> {
+    if (model === undefined) return [];
+    const file = await this.opts.prepareBasePrompt?.(model);
+    return file === undefined ? [] : ["-c", `model_instructions_file=${JSON.stringify(file)}`];
   }
 
   private commonArgs(): string[] {

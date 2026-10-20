@@ -36,6 +36,7 @@ const MAX_SSE = 20;
 const FLASH: Record<string, string> = {
   skillsUploaded: '技能上传已处理，下一条消息生效。', skillsDeleted: '技能已删除，下一条消息生效。',
   saved: '设置已保存，之后收到的消息按新设置处理。', prompt: 'agent.md 已保存，pi 下一轮对话即读取新内容。',
+  codexBasePrompt: 'codex 基础指令已保存，下一轮生效（含已有线程续聊）。',
   codexPrompt: 'codex.md 已保存，AGENTS.md 已重写，codex 下一条消息即使用新内容。',
   reset: '已重置：旧会话已归档，下一条消息会新建会话。', queued: '已排队：当前回合结束后立即重置，旧会话会归档。', unchanged: '没有可操作的会话。',
   compacted: '会话已压缩：保留摘要，旧工具输出与图片已从活动上下文中清理。', compactQueued: '压缩已排队或正在执行，完成结果请查看日志。',
@@ -77,6 +78,10 @@ export function createDashboard(opts: DashboardOptions) {
       tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { target: 'codex', source: typeof c.source === 'string' ? c.source : 'dashboard', file: 'prompts/codex.md', bytes_before: prev, bytes_after: after } });
       return after;
     })().catch(() => null);
+  });
+
+  const offCodexBasePrompt = opts.codexBasePrompt?.subscribe(change => {
+    tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { ...change, target: 'codex-base', source: 'dashboard' } });
   });
 
   /**
@@ -282,6 +287,6 @@ export function createDashboard(opts: DashboardOptions) {
   }
 
   return { handle: (req: IncomingMessage,res: ServerResponse) => handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(500);res.end('观测页面暂不可用');}),
-    close: async () => {closed=true;for(const res of clients)res.end();clients.clear();if(typeof offCodexPrompt==='function')offCodexPrompt();
+    close: async () => {closed=true;for(const res of clients)res.end();clients.clear();if(typeof offCodexPrompt==='function')offCodexPrompt();offCodexBasePrompt?.();
       await Promise.all(Object.values(adapters).map(adapter => adapter.close?.()));} };
 }

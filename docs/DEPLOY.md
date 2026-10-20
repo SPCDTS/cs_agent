@@ -213,6 +213,8 @@ Compose 将容器 HTTP 监听设为 0.0.0.0:8787，宿主机仅发布 127.0.0.1:
 
 面板保存 codex 自定义提示后，`CodexPromptStore` 立即重新生成 `$CODEX_HOME/AGENTS.md`，并通知订阅者记录变更。runner 每轮通过 `preparePrompt` 再生成全局指引，并更新会话域受管文件，然后启动独立的 `codex exec` 或 `codex exec resume` 进程；面板保存或直接在磁盘编辑 `codex.md` 都从下一轮生效，正在进行的回合保持其已加载内容，无需后台文件监听。全局与会话域 AGENTS.md 均以 user 角色进入上下文，内容变化时续轮重新注入；不再使用无法更新已有线程的 `developer_instructions`，保留 `project_doc_max_bytes=131072`，无需重置旧线程。自定义文件使用 UTF-8，保存保留原 BOM 和换行风格。实验结论见[设计稿 §8.12](DESIGN-codex-context.md#812-受管规则下发路径)。
 
+Codex 每个模型的完整基础指令保存在 `DATA_DIR/prompts/codex-base/<安全 slug>.md`（例如 `codex__gpt-6.1-sol.md`），首次使用从 `CODEX_HOME/models_cache.json` 的 `model_messages.instructions_template` 原样播种，缓存缺失时查询 Magpie 目录；没有模板则沿用 Codex 默认行为。每轮将可编辑内容与固定 QQ 受管规则拼接到 `CODEX_HOME/base-instructions/<安全 slug>.md`，通过 `model_instructions_file` 应用于新线程、已有线程续聊和手动压缩。内容不变不重写生效文件。设置页或本地修改下一轮生效；Codex 升级不会覆盖已播种文件，需在设置页使用「恢复目录默认」取得当前目录模板。
+
 ### 聊天记录（统一上下文）
 
 - **入库**：QQBridge 把允许群的全部消息、允许用户的私聊写入 `qq-messages.sqlite`；收到触发消息时写入一行 `[我] → 处理中`，回复后更新为 `生图 prompt=… → 已发送 N 张图` / `codex(high) → "摘要"` / `失败`。

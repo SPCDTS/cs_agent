@@ -35,6 +35,7 @@ export interface LiveCardView {
   items: { stage: string; status: string | null; ts: number; duration_ms: number | null; summary: string }[];
 }
 export interface CodexPromptSnapshot { managed: string; custom: string; revision: string; file: string; updatedAt: number | null }
+export interface CodexBasePromptSnapshot extends CodexPromptSnapshot { model: string; differs: boolean | null }
 export interface DashboardPageOptions {
   /** 技能页只读契约；上传、下载与删除由 HTTP 层处理。 */
   skills?: {
@@ -50,6 +51,7 @@ export interface DashboardPageOptions {
   contextUsage?: ContextUsageView;
   settings?: { current(): Readonly<RuntimeSettingsView>; defaults: RuntimeSettingsView };
   codexPrompt?: { read(): Promise<CodexPromptSnapshot> };
+  codexBasePrompt?: { readonly managed: string; read(model: string): Promise<CodexBasePromptSnapshot | undefined> };
   modelCatalog?: ModelCatalogView;
   store: {
     degraded: boolean;
@@ -68,7 +70,7 @@ export interface DashboardPageOptions {
 export interface ContextUsageEventView { ts: number; ticket: string; detail: ContextUsage }
 export interface DashboardPageDeps {
   opts: DashboardPageOptions;
-  config: { owner?: string; imagesDir: string; CODEX_PROVIDER: "magpie" | "openai"; CODEX_MAGPIE_URL: string; AGENT_MODEL_PROVIDER: string };
+  config: { owner?: string; imagesDir: string; CODEX_PROVIDER: "magpie" | "openai"; CODEX_MAGPIE_URL: string; CODEX_MODEL?: string; AGENT_MODEL_PROVIDER: string };
   csrf: string; agentMd: string; agentsMd: string;
   api(pathQuery: string): Promise<{ status: number; body: unknown }>;
   contextResult(scope: string, query: string | null): { content: { type: string; text?: string }[] };
@@ -606,6 +608,7 @@ ${agentModelFieldsets(s, d, diff)}
 <button>保存设置</button></form></section>`;
     }
     body += await codexPromptCard();
+    body += await codexBasePromptCard(s?.codexModel ?? config.CODEX_MODEL);
     let prompt = '';
     try { const st = await fs.lstat(agentMd); prompt = st.isFile() && !st.isSymbolicLink() && st.size <= 256_000 ? await fs.readFile(agentMd, 'utf8') : ''; } catch { /* 不存在：pi 启动时会播种 */ }
     const promptStat = await fs.lstat(agentMd).catch(() => null);
@@ -619,10 +622,28 @@ ${agentModelFieldsets(s, d, diff)}
     const changes = opts.store.systemEvents(SETTINGS_TICKET, 15);
     body += `<section><h2>最近变更</h2>${changes.length ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>时间</th><th>内容</th><th>来源</th></tr></thead><tbody>${changes.map(e => { const dd = asObj(JSON.parse(e.detail_json));
       const bytes = (v: unknown) => typeof v === 'number' ? fmtBytes(v) : '—';
-      const what = e.stage === 'prompt_changed' ? `${dd.target === 'codex' ? 'codex.md' : 'agent.md'} ${bytes(dd.bytes_before)} → ${bytes(dd.bytes_after)}` : Object.keys(asObj(dd.after)).map(k => `${SETTING_LABELS[k] ?? k}：${showSetting(asObj(dd.before)[k])} → ${showSetting(asObj(dd.after)[k])}`).join('；');
+      const what = e.stage === 'prompt_changed' ? `${dd.target === 'codex-base' ? `codex 基础指令（${dd.model}）` : dd.target === 'codex' ? 'codex.md' : 'agent.md'} ${bytes(dd.bytes_before)} → ${bytes(dd.bytes_after)}` : Object.keys(asObj(dd.after)).map(k => `${SETTING_LABELS[k] ?? k}：${showSetting(asObj(dd.before)[k])} → ${showSetting(asObj(dd.after)[k])}`).join('；');
       return `<tr><td>${time(e.ts)}</td><td>${esc(what)}</td><td>${esc(dd.source === 'dashboard' ? '面板' : dd.source ?? '')}</td></tr>`; }).join('')}</tbody></table></div></div>` : empty('还没有通过面板修改过设置。')}</section>`;
     body += `<section><p class="hint">完整的生效配置见<a href="/config">配置页</a>；结构化日志见<a href="/logs">实时日志</a>。</p></section>`;
     return body;
+  }
+
+  async function codexBasePromptCard(model: string | undefined): Promise<string> {
+    const head = `<section id="codex-base-prompt"><h2>codex 基础指令（${esc(model ?? '未配置')}）</h2>`;
+    const store = opts.codexBasePrompt;
+    if (!store || !model) return head + empty('codex 基础指令存储未接入。') + '</section>';
+    const preview = `<details class="mt"><summary>自动追加的 QQ 受管规则（只读）</summary>${json(redactText(store.managed, 1_000_000))}</details>`;
+    let snap: CodexBasePromptSnapshot | undefined;
+    try { snap = await store.read(model); }
+    catch { return head + '<div class="flash err">读取基础指令失败，请检查文件编码、大小及权限。</div>' + preview + '</section>'; }
+    if (!snap) return head + empty('目录模板暂不可用；本轮使用 Codex 默认基础指令。') + preview + '</section>';
+    const diff = snap.differs === null ? '<span class="hint">目录模板暂不可用，无法比较。</span>'
+      : snap.differs ? '<span class="changed">与目录默认不同</span>' : '<span class="hint">与目录默认一致</span>';
+    const fields = `${csrfField(csrf)}<input type="hidden" name="model" value="${esc(model)}"><input type="hidden" name="revision" value="${esc(snap.revision)}">`;
+    const editor = redactText(snap.custom, 1_000_000) !== snap.custom
+      ? `<div class="flash err">基础指令包含凭据样式的内容，面板只读展示脱敏版本；请在容器内直接编辑。</div>${json(redactText(snap.custom, 1_000_000))}`
+      : `<form method="post" action="/settings/codex-base-prompt" class="sheet pad">${fields}<label>下一轮生效，包含已有线程续聊；自动追加 QQ 受管规则。<textarea name="content" rows="18" spellcheck="false" data-count="codex-base-count">${esc(snap.custom)}</textarea></label><div class="hint"><span id="codex-base-count"></span>，上限 64 KB。Codex 升级不会更新已播种文件。</div><p class="mt"><button>保存基础指令</button></p></form><form method="post" action="/settings/codex-base-prompt/restore" class="mt">${fields}<button class="quiet"${snap.differs === null ? ' disabled' : ''}>恢复目录默认</button></form>`;
+    return head + `<p>${diff} <small>修改于 ${esc(fmtTime(snap.updatedAt ?? 0))}</small></p>` + editor + preview + '</section>';
   }
 
   async function codexPromptCard(): Promise<string> {
