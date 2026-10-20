@@ -28,6 +28,7 @@ import { FALLBACK_REPLY } from "./replies.js";
 import { DEFAULT_IMAGE_PREFIXES, routeMessage } from "./router.js";
 import { inboundFromTicket, legacyRouteText } from "../channel/ticket.js";
 import type { CsTasks, TaskResult } from "./tasks.js";
+import type { ScheduledRuntime } from "./schedule/run.js";
 
 export { FALLBACK_REPLY } from "./replies.js";
 /** 同一票据最多运行次数；达到即放弃运行，改发兜底回复 */
@@ -46,6 +47,7 @@ export interface DispatcherOptions {
   bridge: DispatchBridge;
   tasks: CsTasks;
   concurrency: number;
+  scheduled?: Pick<ScheduledRuntime, "ScheduledTask" | "finish">;
   imagePrefixes?: readonly string[];
   /** 兼容旧调用的派发默认推理强度；入队时写入快照，历史行不再现读 */
   codexEffort?: string | (() => string);
@@ -71,6 +73,8 @@ export class Dispatcher {
   private readonly inflight = new Map<string, Promise<void>>();
   /** 每个 scope 的队尾：新消息排在它后面（FIFO） */
   private readonly chains = new Map<string, Promise<void>>();
+  /** 定时条目需异步读取 scope；仅串行化入队动作，执行仍按 scope 并行。 */
+  private admissionTail = Promise.resolve();
   private readonly ctx: Context;
   private readonly prefixes: readonly string[];
   /** recover() 时打了中止标记的上次活任务：轮到其票据时先等它结束，再新建任务 */
@@ -93,8 +97,19 @@ export class Dispatcher {
       const registered = this.opts.bridge.prepareIncoming
         ? this.opts.bridge.prepareIncoming(ticket).then(async rec => this.register(msg.attachments?.some(a => a.status === 'pending') && rec ? inboundFromTicket(rec) : msg, ticket, scope, false, await settings))
         : settings.then(value => this.register(msg, ticket, scope, false, value));
-      return this.enqueue(scope, async () => this.run(ticket, await registered));
+      return this.inAdmissionOrder(() => ({ done: this.enqueue(scope, async () => this.run(ticket, await registered)) }));
     });
+  }
+
+  /** 排程事务提交后唤醒已登记的运行，与消息共用 scope 队列和并发槽位。 */
+  dispatchScheduled(ticket: string): Promise<void> {
+    return this.track(ticket, "scheduled dispatch failed", () => this.inAdmissionOrder(async () => {
+      const entry = (await this.opts.harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket];
+      if (!entry) return { done: Promise.resolve() };
+      if (entry.kind !== "scheduled" || !entry.scope || !this.opts.scheduled) throw new Error("定时执行器未绑定或派发条目无效");
+      trace.event(ticket, "admitted", { scope: entry.scope, detail: { kind: "scheduled", conversation: entry.conversationId } });
+      return { done: this.enqueue(entry.scope, () => this.run(ticket, entry.conversationId as ConversationId)) };
+    }));
   }
 
   /**
@@ -163,11 +178,18 @@ export class Dispatcher {
         const doc = await this.opts.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, this.ctx).catch(() => undefined);
         trace.event(ticket, "recovered", { scope, detail: { kind: item.kind, text: doc?.text, route: doc?.route, sender: doc?.source.nickname } });
         void this.track(ticket, "recover failed", () =>
-          this.enqueue(scope, () => this.run(ticket, entry.conversationId as ConversationId)),
+          this.inAdmissionOrder(() => ({ done: this.enqueue(scope, () => this.run(ticket, entry.conversationId as ConversationId)) })),
         );
         continue;
       }
       const rec = item.rec;
+      if (rec.origin === "scheduled") {
+        // SQLite 开票后、排程提交前崩溃：没有 durable 触发快照，禁止重建成入站消息。
+        await this.opts.tasks.sendService.reconcile(ticket);
+        await this.opts.tasks.sendService.settle(ticket);
+        trace.event(ticket, "failed", { status: "failed", detail: { terminal: true, reason: "scheduled_orphan" } });
+        continue;
+      }
       trace.event(ticket, "recovered", { scope: rec.message_type === "group" ? `group:${rec.group_id}` : `private:${rec.user_id}`, detail: { kind: item.kind } });
       if (!rec.source_text.trim()) {
         // 原文缺失也持久化派发条目；兜底未终态前一直占据 scope 队首。
@@ -175,7 +197,7 @@ export class Dispatcher {
         const scope = rec.message_type === "group" ? `group:${rec.group_id}` : `private:${rec.user_id}`;
         void this.track(ticket, "orphan fallback failed", () => {
           const registered = this.register(inboundFromTicket(rec), ticket, scope, true);
-          return this.enqueue(scope, async () => this.run(ticket, await registered));
+          return this.inAdmissionOrder(() => ({ done: this.enqueue(scope, async () => this.run(ticket, await registered)) }));
         });
       } else {
         log.warn("orphan pending ticket without dispatch index, re-dispatching", { ticket: short(rec.ticket_id) });
@@ -214,6 +236,12 @@ export class Dispatcher {
       .finally(() => this.inflight.delete(ticket));
     this.inflight.set(ticket, p);
     return p;
+  }
+
+  private inAdmissionOrder(work: () => { done: Promise<void> } | Promise<{ done: Promise<void> }>): Promise<void> {
+    const admitted = this.admissionTail.then(work);
+    this.admissionTail = admitted.then(() => undefined, () => undefined);
+    return admitted.then(({ done }) => done);
   }
 
   /** 排到 scope 队尾；轮到时再占用一个全局并发槽位。 */
@@ -340,7 +368,9 @@ export class Dispatcher {
       // 旧票据没有快照，无法重建历史设置；固定兼容值并持久化，恢复不读取热设置。
       doc.settings ??= { backend: doc.agentResult?.backend === "pi" ? "pi" : "codex", codexReasoningEffort: "high" };
       const options = { ownership: { kind: "conversation" }, conversationId } as const;
+      if (entry.kind === "scheduled" && !this.opts.scheduled) throw new Error("定时执行器未绑定");
       const id =
+        entry.kind === "scheduled" ? await tx.createTask(this.opts.scheduled!.ScheduledTask, { ticket }, options) :
         doc.route === "agent"
           ? await tx.createTask(AgentTask, { ticket }, options)
           : await tx.createTask(ImageTask, { ticket }, options);
@@ -394,9 +424,11 @@ export class Dispatcher {
 
   /** 一次尝试：运行（或继续）任务并等待终态，票据仍 pending 时发一次兜底。返回 fallbackIfUnreplied 的结果。 */
   private async attempt(ticket: string, conversationId: ConversationId, attempts: number): Promise<"terminal" | "fallback" | "pending"> {
+    const scheduled = (await this.opts.harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket]?.kind === "scheduled";
+    if (scheduled && (await this.opts.harness.snapshot(TicketDoc, conversationId, this.ctx))?.replyCompleted) return "terminal";
     // 已回复过的票据（重复投递）：不再运行任务
     const pre = await this.opts.bridge.getTicket(ticket).catch(() => undefined);
-    if (pre === null || (isTerminal(pre?.status) && !await this.hasUnfinishedFileReply(ticket, conversationId))) {
+    if (!scheduled && (pre === null || (isTerminal(pre?.status) && !await this.hasUnfinishedFileReply(ticket, conversationId)))) {
       if (pre) await this.recordOutcome(ticket, conversationId);
       log.info("ticket already terminal, skipping", { ticket: short(ticket), status: pre?.status ?? "missing" });
       return "terminal";
@@ -413,6 +445,9 @@ export class Dispatcher {
         attempts,
         ...(outcome.status === "failed" || outcome.status === "faulted" ? { error: outcome.error.message } : {}),
       });
+    }
+    if (scheduled) {
+      return (await this.opts.harness.snapshot(TicketDoc, conversationId, this.ctx))?.replyCompleted ? "terminal" : "pending";
     }
     // 文件回复尚未提交终态时保留索引；尤其不能因文字 sent 提前删除 manifest。
     if (await this.hasUnfinishedFileReply(ticket, conversationId)) return "pending";
@@ -447,6 +482,13 @@ export class Dispatcher {
         log.warn("abort task before fallback failed; fallback deferred", { ticket: short(ticket), task: taskId, error: err });
         throw err;
       }
+    }
+    const entry = (await harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket];
+    if (entry?.kind === "scheduled") {
+      if (!this.opts.scheduled) throw new Error("定时执行器未绑定");
+      await this.opts.scheduled.finish(harness, entry.conversationId as ConversationId, this.ctx, Date.now(), true);
+      await this.clearIndex(ticket);
+      return;
     }
     const fallback = await this.fallbackIfUnreplied(ticket);
     if (fallback !== "pending") {
@@ -560,6 +602,7 @@ export class Dispatcher {
     });
     if (rec === undefined) return "pending";
     if (rec === null) return "terminal"; // 票据不存在：没有可回复的目标，不再保留索引
+    if (rec.origin === "scheduled") return "pending"; // 定时回合只能经 recordRun 结算，绝不发兜底。
     if (isTerminal(rec.status)) return "terminal";
     const entry = (await this.opts.harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket];
     const doc = entry ? await this.opts.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, this.ctx) : undefined;

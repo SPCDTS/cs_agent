@@ -32,7 +32,7 @@ import type { Channel } from "../channel/types.js";
 import { log } from "../shared/log.js";
 import { isReasoningEffort, threadKeyForSource } from "./codex/runner.js";
 import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
-import { type TicketSettings } from "./backends/types.js";
+import { type AgentRequest, type TicketSettings } from "./backends/types.js";
 import { collectNewImages } from "../media/gen/image-collect.js";
 import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendingImages, savePendingImage, PendingImageMarkerError } from "../media/gen/image-pending.js";
 import { readImageFiles, prepareImageFiles, validImageFile } from "../media/gen/image-files.js";
@@ -84,7 +84,7 @@ export interface TaskDeps {
 type Runtime<S extends { phase: string }> = TaskRuntime<TaskInput, S, TaskResult, object>;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyRuntime = TaskRuntime<TaskInput, any, TaskResult, object>;
+export type AnyRuntime = TaskRuntime<TaskInput, any, TaskResult, object>;
 
 async function ticketDoc(runtime: Pick<AnyRuntime, "snapshot" | "conversationId">, context: Context): Promise<Readonly<TicketState>> {
   const doc = await runtime.snapshot(TicketDoc, runtime.conversationId, context);
@@ -588,84 +588,93 @@ export function createTasks(deps: TaskDeps) {
       sent_messages: rows.filter(row => row.status === "sent").length } });
   }
 
+  /** 入站与定时任务共用后端调用、回合持久标记及结果检查点。 */
+  async function handleAgent(runtime: AnyRuntime, context: Context, options: {
+    scheduled?: boolean;
+    request?: Pick<AgentRequest, "scope" | "access" | "threadKey" | "senderIsOwner">;
+    signal?: AbortSignal;
+  } = {}): Promise<void> {
+    const doc = await ticketDoc(runtime, context);
+    // 文字已发出后的重启只恢复回复附件，不再运行后端或 lateImages。
+    if (doc.agentResult && (await deps.getBridge().getTicket(doc.ticket))?.status === "sent") {
+      await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "settle", attempt: 0 } }), context);
+      return;
+    }
+    let result: AgentResult | undefined = doc.agentResult;
+    if (!result) {
+      const source = doc.source;
+      const scope = options.request?.scope ?? (source.type === "group" ? `group:${source.group_id}` : `private:${source.user_id}`);
+      let quote: { message_id: string; nickname: string; text: string } | undefined;
+      if (doc.replyTo && deps.store) {
+        try {
+          const hit = deps.store.message({ kind: "scope", scope }, doc.replyTo);
+          if (hit) quote = { message_id: hit.row.message_id, nickname: hit.row.is_self ? "我" : hit.row.nickname || hit.row.user_id, text: hit.row.text };
+        } catch (err) {
+          log.warn("quote lookup failed", { ticket: short(doc.ticket), error: err });
+        }
+      }
+      const blocked = await blockedReason(deps, runtime, context, doc.ticket);
+      if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "handle");
+      let backendName = "unknown";
+      const started = Date.now();
+      try {
+        options.signal?.throwIfAborted();
+        if (doc.image_error) throw new Error(doc.image_error);
+        if (!doc.settings) throw new Error("票据缺少派发设置快照");
+        const backend = deps.backends.select(scope, doc.settings.backend);
+        backendName = backend.name;
+        const res = await trace.span(doc.ticket, "backend:" + backend.name, () => backend.handle(
+          {
+            ticket: doc.ticket,
+            settings: doc.settings,
+            scope,
+            access: options.request?.access ?? accessToString(accessForSource(source, deps.owner)),
+            threadKey: options.request?.threadKey ?? threadKeyForSource(source, deps.owner),
+            senderIsOwner: options.request?.senderIsOwner ?? (!!deps.owner && source.user_id === deps.owner),
+            source: { ...source },
+            text: doc.text,
+            images: doc.source_images ?? [],
+            ...(doc.time ? { time: doc.time } : {}),
+            ...(quote ? { quote } : {}),
+          },
+          {
+            signal: options.signal ?? runtime.signal,
+            onEvent: (e) => log.debug("agent backend event", { ticket: short(doc.ticket), ...e }),
+            piTurn: doc.piTurn,
+            persistPiTurn: state => runtime.commit(async tx => {
+              (await tx.doc(TicketDoc, runtime.conversationId)).piTurn = { ...state };
+              return undefined;
+            }, context),
+            ...(doc.codexTurn ? { turn: doc.codexTurn } : {}),
+            // 启动外部回合之前落盘"回合已开始"（不推进检查点）
+            persistTurn: (state) =>
+              runtime.commit(async (tx) => {
+                (await tx.doc(TicketDoc, runtime.conversationId)).codexTurn = { ...state };
+                return undefined;
+              }, context),
+          },
+        ), { backend: backend.name }, res => ({ raw_reply: res.text, images: res.images }));
+        options.signal?.throwIfAborted();
+        result = { ok: true, backend: backendName, text: res.text, images: [...(res.images ?? [])].slice(0, 4) };
+      } catch (err) {
+        rethrowIfAborted(runtime.signal, err);
+        const failure = err instanceof BackendTimeoutError || options.signal?.aborted ? "timeout" : "failed";
+        log.warn("agent backend failed", { ticket: short(doc.ticket), backend: backendName, ms: Date.now() - started, failure, error: (err as Error).message });
+        result = { ok: false, backend: backendName, failure };
+      }
+    }
+    await runtime.commit(async (tx) => {
+      (await tx.doc(TicketDoc, runtime.conversationId)).agentResult = result;
+      return { status: "running", checkpoint: options.scheduled ? { phase: "settle", attempt: 0 } : { phase: "lateImages" } };
+    }, context);
+  }
+
   const AgentTask = defineTask<TaskInput, AgentCheckpoint, TaskResult>({
     name: AGENT_TASK,
     version: 1,
     initial: () => ({ phase: "handle" }),
     phases: phases<AgentCheckpoint>({
-      handle: async (_task, runtime, context) => {
-        const doc = await ticketDoc(runtime, context);
-        // 文字已发出后的重启只恢复回复附件，不再运行后端或 lateImages。
-        if (doc.agentResult && (await deps.getBridge().getTicket(doc.ticket))?.status === "sent") {
-          await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "settle", attempt: 0 } }), context);
-          return;
-        }
-        let result: AgentResult | undefined = doc.agentResult;
-        if (!result) {
-          const source = doc.source;
-          const scope = source.type === "group" ? `group:${source.group_id}` : `private:${source.user_id}`;
-          let quote: { message_id: string; nickname: string; text: string } | undefined;
-          if (doc.replyTo && deps.store) {
-            try {
-              const hit = deps.store.message({ kind: "scope", scope }, doc.replyTo);
-              if (hit) quote = { message_id: hit.row.message_id, nickname: hit.row.is_self ? "我" : hit.row.nickname || hit.row.user_id, text: hit.row.text };
-            } catch (err) {
-              log.warn("quote lookup failed", { ticket: short(doc.ticket), error: err });
-            }
-          }
-          const blocked = await blockedReason(deps, runtime, context, doc.ticket);
-          if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "handle");
-          let backendName = "unknown";
-          const started = Date.now();
-          try {
-            if (doc.image_error) throw new Error(doc.image_error);
-            if (!doc.settings) throw new Error("票据缺少派发设置快照");
-            const backend = deps.backends.select(scope, doc.settings.backend);
-            backendName = backend.name;
-            const res = await trace.span(doc.ticket, "backend:" + backend.name, () => backend.handle(
-              {
-                ticket: doc.ticket,
-                settings: doc.settings,
-                scope,
-                access: accessToString(accessForSource(source, deps.owner)),
-                threadKey: threadKeyForSource(source, deps.owner),
-                senderIsOwner: !!deps.owner && source.user_id === deps.owner,
-                source: { ...source },
-                text: doc.text,
-                images: doc.source_images ?? [],
-                ...(doc.time ? { time: doc.time } : {}),
-                ...(quote ? { quote } : {}),
-              },
-              {
-                signal: runtime.signal,
-                onEvent: (e) => log.debug("agent backend event", { ticket: short(doc.ticket), ...e }),
-                piTurn: doc.piTurn,
-                persistPiTurn: state => runtime.commit(async tx => {
-                  (await tx.doc(TicketDoc, runtime.conversationId)).piTurn = { ...state };
-                  return undefined;
-                }, context),
-                ...(doc.codexTurn ? { turn: doc.codexTurn } : {}),
-                // 启动外部回合之前落盘"回合已开始"（不推进检查点）
-                persistTurn: (state) =>
-                  runtime.commit(async (tx) => {
-                    (await tx.doc(TicketDoc, runtime.conversationId)).codexTurn = { ...state };
-                    return undefined;
-                  }, context),
-              },
-            ), { backend: backend.name }, res => ({ raw_reply: res.text, images: res.images }));
-            result = { ok: true, backend: backendName, text: res.text, images: [...(res.images ?? [])].slice(0, 4) };
-          } catch (err) {
-            rethrowIfAborted(runtime.signal, err);
-            const failure = err instanceof BackendTimeoutError ? "timeout" : "failed";
-            log.warn("agent backend failed", { ticket: short(doc.ticket), backend: backendName, ms: Date.now() - started, failure, error: (err as Error).message });
-            result = { ok: false, backend: backendName, failure };
-          }
-        }
-        await runtime.commit(async (tx) => {
-          (await tx.doc(TicketDoc, runtime.conversationId)).agentResult = result;
-          return { status: "running", checkpoint: { phase: "lateImages" } };
-        }, context);
-      },
+      handle: (_task, runtime, context) => handleAgent(runtime, context),
       lateImages: async (_task, runtime, context) => {
         let doc = await ticketDoc(runtime, context);
         await ingestImageEvents(ticketImageDir(deps.imagesDir, doc.ticket));
@@ -774,7 +783,7 @@ export function createTasks(deps: TaskDeps) {
     abort: (_task, runtime, context) => abortTask(runtime, context),
   });
 
-  return { ImageTask, AgentTask, snapshotSettings, sendService, cleanupTicketWorkdir: (ticket: string, uploads?: readonly RemoteUpload[]) => cleanupTicketWorkdir(deps, ticket, uploads) };
+  return { ImageTask, AgentTask, handleAgent, snapshotSettings, sendService, cleanupTicketWorkdir: (ticket: string, uploads?: readonly RemoteUpload[]) => cleanupTicketWorkdir(deps, ticket, uploads) };
 }
 
 export type CsTasks = ReturnType<typeof createTasks>;

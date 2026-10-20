@@ -6,13 +6,13 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { InboundMessage, ReplyTicketRecord, TicketStatus } from "../channel/types.js";
+import type { InboundMessage, OutboundTicket, ReplyTicketRecord, TicketStatus } from "../channel/types.js";
 
 import { isModelOutboxRow, type OutboxInput, type OutboxRow } from "../channel/outbox.js";
 
 const SEEN_LIMIT = 2000;
 export const DB_FILE = "qq-bridge.sqlite";
-const TICKET_PATTERN = /^[a-f0-9]{64}$/;
+const TICKET_PATTERN = /^(?:[a-f0-9]{64}|run_[a-f0-9]{40})$/;
 
 export function isTicketId(value: string): boolean {
   return typeof value === "string" && TICKET_PATTERN.test(value);
@@ -32,6 +32,8 @@ export function dedupeKey(m: Pick<InboundMessage, "self_id" | "message_type" | "
 }
 
 interface TicketRow {
+  origin: "message" | "scheduled";
+  target_id: string | null;
   ticket_id: string;
   self_id: string;
   user_id: string;
@@ -56,6 +58,8 @@ interface TicketRow {
 function toRecord(row: TicketRow): ReplyTicketRecord {
   const record: ReplyTicketRecord = {
     ticket_id: row.ticket_id,
+    origin: row.origin,
+    ...(row.target_id ? { target_id: row.target_id } : {}),
     self_id: row.self_id,
     user_id: row.user_id,
     group_id: row.group_id,
@@ -123,6 +127,8 @@ export class ReplyStore {
   /** 旧库补列：source_text（崩溃对账需要原文）、source_route_text（分流文本；旧行保持 NULL）。 */
   private migrate(): void {
     const columns = this.db.prepare("PRAGMA table_info(tickets)").all() as { name: string }[];
+    if (!columns.some(c => c.name === "origin")) this.db.exec("ALTER TABLE tickets ADD COLUMN origin TEXT NOT NULL DEFAULT 'message'");
+    if (!columns.some(c => c.name === "target_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN target_id TEXT");
     if (!columns.some(c => c.name === "group_name")) this.db.exec("ALTER TABLE tickets ADD COLUMN group_name TEXT");
     if (!columns.some(c => c.name === "attachments")) this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT");
     if (!columns.some(c => c.name === "source_images")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_images TEXT");
@@ -153,7 +159,8 @@ export class ReplyStore {
         : input.suffix ? rows.find(row => row.key === input.ticket + "#" + input.suffix)
         : rows.find(row => row.key === input.ticket + "#" + input.sequence);
       if (existing) { this.db.exec("COMMIT"); return existing; }
-      if (!input.suffix && modelRows.length >= 3) throw new Error("本回合最多发送 3 条消息");
+      const limit = this.get(input.ticket)?.origin === "scheduled" ? 5 : 3;
+      if (!input.suffix && modelRows.length >= limit) throw new Error(`本回合最多发送 ${limit} 条消息`);
       const ordinal = (rows.at(-1)?.ordinal ?? 0) + 1;
       const key = input.ticket + "#" + (input.suffix ?? input.sequence ?? modelRows.length + 1);
       this.db.prepare(`INSERT INTO outbox
@@ -193,7 +200,7 @@ export class ReplyStore {
   }
   settleTicket(ticket: string): void {
     const rows = this.listOutbox(ticket);
-    if (!rows.some(row => row.status !== "pending")) throw new Error("本回合尚无消息发送");
+    if (this.get(ticket)?.origin !== "scheduled" && !rows.some(row => row.status !== "pending")) throw new Error("本回合尚无消息发送");
     this.db.prepare("UPDATE tickets SET status='sent', reply_message_id=?, sent_at=? WHERE ticket_id=? AND status='pending'")
       .run(rows.find(row => row.status === "sent")?.message_id ?? null, new Date().toISOString(), ticket);
   }
@@ -225,6 +232,24 @@ export class ReplyStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  /** 与入站票据共用 rowid 序列；重放不得改变目标、创建者或已终结状态。 */
+  openOutbound(ticket: string, target: OutboundTicket & { self_id: string }): ReplyTicketRecord {
+    if (!/^run_[a-f0-9]{40}$/.test(ticket) || target.origin !== "scheduled" ||
+        !["group", "private"].includes(target.message_type) ||
+        ![target.user_id, target.target_id, target.self_id].every(id => /^[1-9][0-9]{0,19}$/.test(id))) {
+      throw new Error("定时出站票据无效");
+    }
+    this.db.prepare(`INSERT OR IGNORE INTO tickets
+      (ticket_id,self_id,user_id,group_id,message_type,source_message_id,source_nickname,source_text,created_at,status,origin,target_id)
+      VALUES (?,?,?,?,?,'','','',?,'pending','scheduled',?)`)
+      .run(ticket, target.self_id, target.user_id, target.message_type === "group" ? target.target_id : null,
+        target.message_type, new Date().toISOString(), target.target_id);
+    const rec = this.get(ticket)!;
+    if (rec.origin !== target.origin || rec.self_id !== target.self_id || rec.user_id !== target.user_id ||
+        rec.message_type !== target.message_type || rec.target_id !== target.target_id) throw new Error("出站票据绑定不一致");
+    return rec;
   }
 
   /** 建票据；已存在时保留原记录。返回票据 ID。 */

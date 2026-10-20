@@ -88,6 +88,40 @@ async function setup(steps: FauxResponseStep[], opts: { sendService?: SendServic
 }
 
 describe("pi durable backend", () => {
+  it("owner 的定时群回合允许 all 读取，仍复用群线程；普通创建者不能扩大范围", async () => {
+    const f = sendFixture(), ticket = "run_" + "b".repeat(40);
+    await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "1" });
+    let seen!: TranscriptContext;
+    const s = await setup([call("send_message", { text: "定时完成" }), transcript => { seen = transcript; return reply(); }],
+      { dir: f.dir, sendService: f.service });
+    await s.pi.handle({ ...request(ticket), access: "all", senderIsOwner: true }, handleContext());
+    expect(seen.messages.find(message => message.role === "toolResult")?.isError).not.toBe(true);
+    expect(f.service.rows(ticket)).toMatchObject([{ status: "sent", mention_user_id: null }]);
+    const threads = await s.pi.readThreadIds();
+    expect(threads.owner).toBeUndefined();
+    const id = threads["group:7"] as ConversationId;
+    expect(await s.pi.harness.snapshot(PiRequestDoc, id, context)).toMatchObject({ access: "all", senderIsOwner: true });
+    await expect(s.pi.handle({ ...request("scheduled-member"), access: "all" }, handleContext())).rejects.toThrow("非法访问范围");
+  });
+
+  it("恢复定时回合时按当前身份缩小 pi 的持久授权", async () => {
+    let started = false;
+    const s = await setup([async (_ctx, opts) => {
+      started = true;
+      await new Promise<void>(resolve => opts?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return fauxAssistantMessage("", { stopReason: "aborted" });
+    }, reply("恢复完成")]);
+    const cancel = new AbortController();
+    const pending = s.pi.handle({ ...request("scheduled-resume"), access: "all", senderIsOwner: true },
+      { ...handleContext(), signal: cancel.signal });
+    const rejected = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(started).toBe(true));
+    cancel.abort(); await rejected;
+    await s.pi.handle(request("scheduled-resume"), handleContext());
+    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+    expect(await s.pi.harness.snapshot(PiRequestDoc, id, context)).toMatchObject({ access: "group:7", senderIsOwner: false });
+  });
+
   it.each([false, true])("qq_chats 仅在 all 范围调用通道（主人私聊=%s）", async owner => {
     const listChats = vi.fn<Channel["listChats"]>().mockResolvedValue({ groups: [{ group_id: "7", name: "家庭群", member_count: 6 }], friends: [] });
     let seen!: TranscriptContext;

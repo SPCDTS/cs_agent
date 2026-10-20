@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { ticketTarget } from "../channel/ticket.js";
 import type { Channel, ReplyTicketRecord } from "../channel/types.js";
 import { isModelOutboxRow, type OutboxRow } from "../channel/outbox.js";
 import { prepareSendAttachments, readAttachmentData, type AttachmentLimits } from "../media/attach.js";
@@ -10,7 +11,7 @@ import type { ContextStore } from "../context/store.js";
 import { trace } from "../shared/trace.js";
 import { log } from "../shared/log.js";
 
-export const SEND_RULE = "回复用户必须调用 send_message；直接输出的文字不会发给用户。一条消息说完就不要再发，不发送重复说明。本回合最多 3 条消息，每条文字 1～4000 字符，可附 4 张图片、3 个文件（单个不超过 20 MiB）。";
+export const SEND_RULE = "回复用户必须调用 send_message；直接输出的文字不会发给用户。一条消息说完就不要再发，不发送重复说明。用户消息回合最多 3 条、定时任务回合最多 5 条消息，每条文字 1～4000 字符，可附 4 张图片、3 个文件（单个不超过 20 MiB）。";
 export interface SendResult {
   status: OutboxRow["status"]; already_sent: boolean; message_id: string | null;
   message_type: OutboxRow["message_type"]; target_id: string; note?: string; original_text?: string;
@@ -73,7 +74,8 @@ export class SendService {
         if (attempt) this.counters.set(attempt, ordinal!);
         return this.deliver(duplicate, rec, signal);
       }
-      if (!existing && rows.filter(isModelOutboxRow).length >= 3) throw new Error("本回合最多发送 3 条消息");
+      const limit = rec.origin === "scheduled" ? 5 : 3;
+      if (!existing && rows.filter(isModelOutboxRow).length >= limit) throw new Error(`本回合最多发送 ${limit} 条消息`);
       let row = existing;
       if (!row) {
         if (rec.status !== "pending") throw new Error("本回合已经结束");
@@ -99,8 +101,8 @@ export class SendService {
         }
         row = channel.outbox.reserveOutbox({
           ticket: binding.ticket, sequence: ordinal, call_id: "callId" in identity ? identity.callId : null,
-          message_type: rec.message_type, target_id: rec.message_type === "group" ? rec.group_id! : rec.user_id,
-          mention_user_id: rec.message_type === "group" && !rows.some(r => r.status !== "pending") ? rec.user_id : null,
+          message_type: rec.message_type, target_id: ticketTarget(rec),
+          mention_user_id: rec.origin !== "scheduled" && rec.message_type === "group" && !rows.some(r => r.status !== "pending") ? rec.user_id : null,
           text: args.text, images, files,
         });
       }
@@ -113,11 +115,12 @@ export class SendService {
   async system(ticket: string, suffix: "late" | "fallback", text: string, images: string[] = [], signal?: AbortSignal, noSendFallback = false) {
     return this.serial(ticket, async () => {
       const rec = await this.record(ticket), rows = this.rows(ticket);
+      if (rec.origin === "scheduled") throw new Error("定时回合不发送系统补发消息");
       if (rec.status !== "pending") throw new Error("本回合已经结束");
       const existing = rows.find(row => row.key === ticket + "#" + suffix);
       const row = this.opts.getChannel().outbox.reserveOutbox({
         ticket, suffix, call_id: null, text, images, files: [],
-        message_type: rec.message_type, target_id: rec.message_type === "group" ? rec.group_id! : rec.user_id,
+        message_type: rec.message_type, target_id: ticketTarget(rec),
         mention_user_id: rec.message_type === "group" && !rows.some(r => r.status !== "pending") ? rec.user_id : null,
       });
       if (!existing && suffix === "fallback" && noSendFallback) trace.event(ticket, "no_send_fallback");

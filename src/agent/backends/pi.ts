@@ -325,7 +325,7 @@ export class PiBackend implements AgentBackend {
     ctx.signal.throwIfAborted();
     if (this.closing) throw new Error("pi 后端正在关闭");
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(req.ticket)) throw new Error("非法票据");
-    if (!parseAccess(req.access) || (req.threadKey !== "owner" && req.access !== req.scope)) throw new Error("非法访问范围");
+    if (!parseAccess(req.access) || (req.threadKey !== "owner" && req.access !== req.scope && !(req.senderIsOwner === true && req.access === "all"))) throw new Error("非法访问范围");
     const conv = await this.conversation(req.threadKey, req.ticket, req.settings);
     let requestId = ctx.piTurn?.requestId ?? req.ticket;
     const known = await conv.commit(tx => tx.submissionByRequest(conv.id, requestId), context);
@@ -343,7 +343,10 @@ export class PiBackend implements AgentBackend {
       await conv.commit(async tx => {
         const doc = await tx.doc(PiRequestDoc, conv.id);
         // 崩溃可能发生在绑定与 submit 之间，同票据继续沿用计数、截止时间与原文。
-        if (doc.ticket === req.ticket) { doc.source = req.source; deadline = doc.deadline; return; }
+        if (doc.ticket === req.ticket) {
+          Object.assign(doc, { source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true });
+          deadline = doc.deadline; return;
+        }
         Object.assign(doc, { ticket: req.ticket, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true, images, content, deadline, calls: {}, imageJobs: [] });
       }, context);
     } else if (known.status !== "done" && known.status !== "unanswered") {
@@ -351,6 +354,12 @@ export class PiBackend implements AgentBackend {
       if (bound?.ticket !== req.ticket) throw new Error("pi 在途请求与绑定不一致");
       deadline = bound.deadline;
     }
+    // 定时恢复会按当前身份重新授权；未结束的同票据不能沿用崩溃前的读取范围或 owner 权限。
+    if (known && known.status !== "done") await conv.commit(async tx => {
+      const bound = await tx.doc(PiRequestDoc, conv.id);
+      if (bound.ticket !== req.ticket) throw new Error("pi 在途请求与绑定不一致");
+      Object.assign(bound, { source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true });
+    }, context);
     trace.event(req.ticket, "dispatched", { detail: { backend: "pi", conversation_key: req.threadKey, conversation: conv.id, recovered: !!known } });
     if (known) trace.event(req.ticket, "recovered", { detail: { backend: "pi", request_id: requestId } });
     ctx.onEvent({ type: "pi_start", thread: req.threadKey, conversation: conv.id });
