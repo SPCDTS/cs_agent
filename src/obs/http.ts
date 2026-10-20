@@ -98,6 +98,7 @@ export function createDashboard(opts: DashboardOptions) {
         return event && asContextUsageEvent(event);
       },
       analyzeTicketTurns: (ticket, events) => ticketContextTurns(opts.store, ticket, events),
+      ticketBriefs: tickets => opts.store.ticketBriefs(tickets),
     } },
     config, csrf, agentMd, agentsMd, api,
     contextResult: (scope, query) => callQQContextTool({access:scope?{kind:'scope',scope}:{kind:'all'},openStore:()=>opts.context,maxChars:config.QQ_CONTEXT_MAX_CHARS},query?'qq_search':'qq_recent',query?{query,days:180,limit:20}:{limit:30}),

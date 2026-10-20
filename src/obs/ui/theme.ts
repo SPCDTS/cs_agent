@@ -219,25 +219,53 @@ ol.feed{list-style:none;margin:var(--s3) 0 0;padding:var(--s2) 0 0;border-top:1p
 .thread-ctx{margin-bottom:var(--s4);padding-bottom:var(--s4);border-bottom:1px dashed var(--rule-strong)}
 ${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.ctx-tick[data-at="${i}"]{left:${i}%}`).join('\n')}
 
-/* ── 上下文监控走势（DESIGN-context-monitor §3）：竖条高度 = 占窗口比例（data-h），底部缓存命中段占条高 data-c，
-   条的底色即未命中部分。miss 红色顶标、partial 琥珀顶标，压缩 / 重建前插一道虚线分隔。与 ctx-fill 同一机制，无内联 style。 ── */
-.cu-chart{display:flex;align-items:flex-end;gap:2px;height:120px;padding-top:8px;border-bottom:1px solid var(--rule-strong);overflow-x:auto}
-.cu-bar{position:relative;display:flex;flex-direction:column;justify-content:flex-end;flex:1 0 6px;max-width:20px;height:0;min-height:1px;background:var(--ink-3);border-radius:2px 2px 0 0;cursor:help}
+/* ── 上下文监控走势（DESIGN-context-monitor §3、§9.3）：竖条高度 = 占窗口比例（data-h），底部缓存命中段占条高 data-c，
+   条的底色即未命中部分（miss 红、partial 琥珀，另有顶标）。同一票据的条装在一个 .cu-group 按钮里，底部 2 px 基线，
+   点击在下方 .cu-pane 显示对应 .cu-pop（/assets/context-usage.js）。纵轴刻度与网格线、压缩 / 重建标签都只用 CSS，无内联 style。
+   几何：图高 160 px = 顶部留白 16 px（顶标与分隔标签）+ 绘图区 143 px + 1 px 基线；网格线画在滚动容器上铺满宽度，
+   .cu-track 收缩到条的宽度，时间轴首尾因此对齐首尾两根条。 ── */
+.cu-sec>h2{flex-wrap:wrap}
+.cu-plot{display:flex;align-items:flex-start;gap:var(--s2)}
+.cu-y{position:relative;flex:none;width:3.2em;height:143px;margin-top:16px;font-size:11px;line-height:1;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.cu-y span{position:absolute;right:0;transform:translateY(50%)}
+.cu-y .cu-y0{bottom:0} .cu-y .cu-y25{bottom:25%} .cu-y .cu-y50{bottom:50%} .cu-y .cu-y75{bottom:75%} .cu-y .cu-y100{bottom:100%}
+.cu-scroll{flex:1 1 auto;min-width:0;overflow-x:auto;padding-bottom:var(--s1);background-repeat:no-repeat;background-size:100% 1px;
+  background-image:linear-gradient(var(--rule),var(--rule)),linear-gradient(var(--rule),var(--rule)),linear-gradient(var(--rule),var(--rule)),linear-gradient(var(--rule),var(--rule)),linear-gradient(var(--rule-strong),var(--rule-strong));
+  background-position:0 16px,0 calc(16px + 143px * .25),0 calc(16px + 143px * .5),0 calc(16px + 143px * .75),0 159px}
+.cu-track{width:max-content}
+.cu-chart{display:flex;align-items:flex-end;gap:6px;height:160px;padding:16px 4px 0;border-bottom:1px solid transparent}
+.cu-x{display:flex;justify-content:space-between;gap:var(--s4);padding:2px 4px 0;font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums;white-space:nowrap}
+.cu-bar{position:relative;display:flex;flex-direction:column;justify-content:flex-end;flex:0 0 10px;height:0;min-height:1px;background:var(--ink-3);border-radius:2px 2px 0 0;cursor:help}
 .cu-c{display:block;height:0;background:var(--carbon);border-radius:inherit}
-.cu-bar.cu-compact,.cu-bar.cu-reset{opacity:.6}
+.cu-bar.cu-miss{background:var(--fail)} .cu-bar.cu-partial{background:var(--warn)}
 .cu-bar.cu-miss::before,.cu-bar.cu-partial::before{content:"";position:absolute;left:-1px;right:-1px;top:-6px;height:4px;border-radius:1px;background:var(--fail)}
 .cu-bar.cu-partial::before{background:var(--warn)}
-.cu-sep{flex:none;align-self:stretch;width:0;margin:0 2px;border-left:1px dashed var(--ink-2)}
-.cu-group{display:flex;align-items:flex-end;align-self:stretch;gap:1px;flex:1 0 auto;padding:0 1px;border-radius:2px 2px 0 0}
-.cu-group[data-g="1"]{background:var(--sheet-2);box-shadow:inset 0 0 0 1px var(--rule)}
+.cu-sep{position:relative;flex:none;align-self:stretch;width:0;margin:0 3px;border-left:1px dashed var(--ink-2)}
+.cu-sep::after{content:attr(data-label);position:absolute;top:-15px;left:-1em;padding:0 2px;font-size:10px;font-style:normal;line-height:13px;white-space:nowrap;color:var(--ink-2);background:var(--sheet)}
+.cu-group{position:relative;display:flex;align-items:flex-end;align-self:stretch;gap:2px;flex:none;margin:0;padding:0 1px;font:inherit;color:inherit;background:transparent;border:0;border-radius:2px 2px 0 0;cursor:pointer}
+.cu-group::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--carbon)}
+.cu-group[data-worst="partial"]::after{background:var(--warn)} .cu-group[data-worst="miss"]::after{background:var(--fail)}
+.cu-group .cu-bar{cursor:inherit}
+.cu-group:hover,.cu-group:focus-visible{filter:none;box-shadow:0 0 0 1px var(--rule-strong);background:var(--sheet-2)}
+.cu-group.is-active{box-shadow:0 0 0 2px var(--carbon);background:var(--carbon-soft)}
+.cu-pane{margin-top:var(--s3)}
+.cu-pop{padding:var(--s3) var(--s4);background:var(--sheet-2);border:1px solid var(--rule);border-left:3px solid var(--carbon);border-radius:var(--r-md)}
+.cu-pop[hidden]{display:none}
+.cu-pop-head{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1) var(--s3);font-size:var(--t-sm);margin-bottom:var(--s2)}
+.cu-pop-head .cu-close{margin-left:auto;padding:2px 10px;font-size:var(--t-xs)}
+.cu-pop .said{font-size:var(--t-sm);padding:var(--s2) var(--s3);margin-bottom:var(--s2)}
+.cu-pop .said.cu-reply{border-left-color:var(--ink-3)}
+.cu-pop-label{margin:0 0 2px;font-size:var(--t-xs);color:var(--ink-3)}
+.cu-pop table.list{font-size:var(--t-xs)}
+.cu-pop-foot{margin:var(--s2) 0 0;font-size:var(--t-sm)}
 .cu-reqs{list-style:none;margin:var(--s1) 0 0;padding:0}
 .trail .cu-reqs li{padding:0}
 .trail .cu-reqs li::before{content:none}
-.cu-legend{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s4)}
+.cu-legend{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s3);margin-left:auto;font-size:var(--t-xs);font-weight:400;color:var(--ink-3)}
 .cu-key{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;border-radius:2px}
 .cu-key.k-c{background:var(--carbon)} .cu-key.k-u{background:var(--ink-3)} .cu-key.k-miss{background:var(--fail)} .cu-key.k-partial{background:var(--warn)}
 .cu-key.k-sep{width:0;border-radius:0;border-left:1px dashed var(--ink-2)}
-.cu-key.k-g{background:var(--sheet-2);box-shadow:inset 0 0 0 1px var(--rule)}
+.cu-key.k-g{height:2px;vertical-align:2px;border-radius:0;background:var(--carbon)}
 .cu-m-miss{color:var(--fail)}
 .cu-hit{font-size:var(--t-xs);font-variant-numeric:tabular-nums}
 ${Array.from({ length: 101 }, (_, i) => `.cu-bar[data-h="${i}"]{height:${i}%}.cu-c[data-c="${i}"]{height:${i}%}`).join('\n')}
