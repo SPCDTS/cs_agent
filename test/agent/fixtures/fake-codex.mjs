@@ -87,10 +87,12 @@ process.stdin.on("end", async () => {
     const dir = path.join(process.env.CODEX_HOME, "sessions", "2026", "10", "18");
     mkdirSync(dir, { recursive: true });
     const timestamp = new Date().toISOString();
+    const usage = JSON.parse(process.env.FAKE_CODEX_ROLLOUT_USAGE);
+    const requests = Array.isArray(usage) ? usage : [usage];
     const rows = [
       { type: "task_started" },
-      { type: "token_count", info: { last_token_usage: JSON.parse(process.env.FAKE_CODEX_ROLLOUT_USAGE), total_token_usage: JSON.parse(process.env.FAKE_CODEX_USAGE ?? "{}"),
-        ...(process.env.FAKE_CODEX_MODEL_CONTEXT_WINDOW ? { model_context_window: Number(process.env.FAKE_CODEX_MODEL_CONTEXT_WINDOW) } : {}) } },
+      ...requests.map(last_token_usage => ({ type: "token_count", info: { last_token_usage, total_token_usage: JSON.parse(process.env.FAKE_CODEX_USAGE ?? "{}"),
+        ...(process.env.FAKE_CODEX_MODEL_CONTEXT_WINDOW ? { model_context_window: Number(process.env.FAKE_CODEX_MODEL_CONTEXT_WINDOW) } : {}) } })),
       { type: "task_complete" },
     ].map(payload => JSON.stringify({ timestamp, type: "event_msg", payload }));
     appendFileSync(path.join(dir, "rollout-" + threadId + ".jsonl"), rows.join("\n") + "\n", "utf8");

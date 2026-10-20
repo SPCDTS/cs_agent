@@ -109,7 +109,14 @@ describe('上下文历史查询', () => {
     const detail: ContextUsage = { backend: 'codex', key: 'owner', usedTokens: 10_000, cachedTokens: 0,
       windowTokens: 100_000, turns: 2, updatedAt: ts, source: 'turn', ...patch };
     store.append({ ticket, ts, scope: '', stage: 'context_usage', status: 'ok', duration_ms: null, detail });
-    return { ts, ticket, detail };
+    return { ts, ticket, kind: 'usage' as const, detail };
+  }
+  function request(store: ObsStore, at: number, ticket: string, seq = 1,
+    patch: Record<string, unknown> = {}, writtenAt = at) {
+    const detail = { backend: 'codex', key: 'owner', ticket, seq, turn: 2, input: 10_000, cached: 0,
+      window: 100_000, at, ...patch };
+    store.append({ ticket, ts: writtenAt, scope: '', stage: 'model_request', status: 'ok', duration_ms: null, detail });
+    return { ts: at, ticket, kind: 'request' as const, detail };
   }
   function system(store: ObsStore, ts: number, stage: string, detail: unknown = {}, ticket = '@settings') {
     store.append({ ticket, ts, stage, detail, scope: '', status: 'ok', duration_ms: null });
@@ -279,6 +286,67 @@ describe('上下文历史查询', () => {
     const expected = record(store, 1, { cachedTokens: 7000 }, 'later-id');
     system(store, 2, 'context_usage', { backend: 'codex', key: 'owner', source: 'turn', usedTokens: 'bad' });
     expect(store.previousContextTurn('codex', 'owner', 3)).toEqual(expected);
+  });
+  it('contextSeries 合并新旧请求，按 at 排序，去除同票据回合并按请求计 miss 与汇总', () => {
+    const { store } = rig();
+    record(store, 0, {}, 'old');
+    request(store, 10, 'new', 1, { cached: 5000 }, 100);
+    request(store, 20, 'new', 2, { cached: 0 }, 100);
+    record(store, 101, { usedTokens: 999999 }, 'new');
+    request(store, 25, 'pi-new', 1, { backend: 'pi', key: 'group:7' }, 99);
+    record(store, 30, { source: 'compact' }, '@context');
+    request(store, 40, 'next', 1, {}, 110);
+    system(store, 15, 'prompt_changed');
+    const series = store.contextSeries();
+    expect(series.map(s => [s.backend, s.key, s.requests, s.tickets, s.misses])).toEqual([
+      ['codex', 'owner', 4, 3, 1], ['pi', 'group:7', 1, 1, 0],
+    ]);
+    expect(series[0].turns.map(t => [t.ts, t.ticket, t.seq, t.requests, t.mark])).toEqual([
+      [0, 'old', 1, 1, 'first'], [10, 'new', 1, 2, 'partial'], [20, 'new', 2, 2, 'miss'],
+      [30, '@context', 0, 0, 'compact'], [40, 'next', 1, 1, 'compact'],
+    ]);
+    expect(series[0].turns[2].reasons).toEqual(['提示词变更']);
+  });
+  it('contextSeries 请求 limit 不受重复回合和压缩影响，since 使用 at 且回退检查覆盖区间外请求', () => {
+    const { store } = rig();
+    request(store, 10, 'a', 1, {}, 100);
+    request(store, 20, 'a', 2, {}, 100);
+    record(store, 21, { source: 'compact' }, '@context');
+    request(store, 30, 'b', 1, {}, 100);
+    record(store, 101, {}, 'a');
+    record(store, 102, {}, 'b');
+    const [series] = store.contextSeries({ limit: 2 });
+    expect(series.turns.map(t => t.ts)).toEqual([20, 21, 30]);
+    expect(series).toMatchObject({ requests: 2, tickets: 2, misses: 0 });
+    expect(series.turns[0]).toMatchObject({ seq: 2, requests: 2 });
+    expect(store.contextSeries({ since: 21 })[0].turns.map(t => t.ts)).toEqual([21, 30]);
+    expect(store.contextSeries({ since: 31 })).toEqual([]);
+  });
+  it('previousContextTurn 返回上一请求，按票据优先新事件并支持旧票据回退', () => {
+    const { store } = rig();
+    const old = record(store, 1, {}, 'old');
+    const first = request(store, 10, 'new', 1, {}, 100);
+    const last = request(store, 20, 'new', 2, {}, 100);
+    record(store, 101, {}, 'new');
+    record(store, 25, { source: 'compact' });
+    request(store, 26, 'other-thread', 1, { key: 'group:7' });
+    expect(store.previousContextTurn('codex', 'owner', 10)).toEqual(old);
+    expect(store.previousContextTurn('codex', 'owner', 20)).toEqual(first);
+    expect(store.previousContextTurn('codex', 'owner', 102)).toEqual(last);
+    const laterOld = record(store, 105, {}, 'later-old');
+    expect(store.previousContextTurn('codex', 'owner', 106)).toEqual(laterOld);
+  });
+  it('请求相同时间按插入顺序，非法请求跳过，压缩独占窗口时请求和票据数为零', () => {
+    const { store } = rig();
+    request(store, 1, 'a');
+    const later = request(store, 1, 'a', 2);
+    request(store, 2, 'invalid', 0);
+    request(store, 3, 'invalid-time', 1, { at: 'bad' });
+    request(store, 4, 'invalid-input', 1, { input: -1 });
+    record(store, 5, { source: 'compact' }, '@context');
+    expect(store.contextSeries()[0].turns.map(t => [t.ts, t.seq])).toEqual([[1, 1], [1, 2], [5, 0]]);
+    expect(store.previousContextTurn('codex', 'owner', 5)).toEqual(later);
+    expect(store.contextSeries({ since: 5 })[0]).toMatchObject({ requests: 0, tickets: 0, misses: 0 });
   });
   it('上下文查询不修改存储，空库与 degraded 返回空结果', () => {
     const { store } = rig();

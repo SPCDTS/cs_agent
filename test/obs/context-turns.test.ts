@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeContextTurns, type ContextUsageEvent, type SystemEvent } from '../../src/obs/context-turns.js';
+import { analyzeContextTurns, type ContextUsageEvent, type ContextRequestEvent, type SystemEvent } from '../../src/obs/context-turns.js';
 import type { ContextUsage } from '../../src/shared/format.js';
+
+function request(ts: number, ticket: string, seq = 1, patch: Partial<ContextRequestEvent['detail']> = {}): ContextRequestEvent {
+  return { ts, ticket, kind: 'request', detail: { backend: 'codex', key: 'owner', ticket, seq, turn: 2,
+    input: 10_000, cached: 0, window: 100_000, at: ts, ...patch } };
+}
 
 const minute = 60_000;
 function event(ts: number, detail: Partial<ContextUsage> = {}): ContextUsageEvent {
@@ -156,5 +161,41 @@ describe('上下文回合分析', () => {
     const first = analyzeContextTurns(events, system);
     expect(analyzeContextTurns(events, system)).toEqual(first);
     expect({ events, system }).toEqual(before);
+  });
+});
+
+describe('每请求上下文分析', () => {
+  it('纯新数据按票据统计请求数，票据内与跨票据都以上一请求为基准', () => {
+    const turns = analyzeContextTurns([request(0, 'a', 1, { turn: 1 }),
+      request(10, 'a', 2, { turn: 1, cached: 9000 }), request(20, 'a', 3, { turn: 1 }),
+      request(30, 'b', 1, { cached: 5000 })], []);
+    expect(turns.map(t => [t.ticket, t.seq, t.requests, t.turn, t.mark, t.gapMs])).toEqual([
+      ['a', 1, 3, 1, 'first', undefined], ['a', 2, 3, 1, undefined, 10],
+      ['a', 3, 3, 1, 'miss', 10], ['b', 1, 1, 2, 'partial', 10],
+    ]);
+  });
+  it('纯旧数据回退为 seq=1，turn 从 turns 恢复，压缩不计入请求数', () => {
+    const turns = analyzeContextTurns([event(0), event(10, { source: 'compact' }), event(20), event(30, { turns: 1 })], []);
+    expect(turns.map(t => [t.seq, t.requests, t.turn, t.mark])).toEqual([
+      [1, 1, 2, 'first'], [0, 0, 2, 'compact'], [1, 1, 2, 'compact'], [1, 1, 1, 'reset'],
+    ]);
+  });
+  it('混合数据按整票据优先请求，保留旧票据和压缩分隔，重复用量不改变基准', () => {
+    const turns = analyzeContextTurns([event(0),
+      { ...event(1, { usedTokens: 999999 }), ticket: 'new' }, request(2, 'new'),
+      { ...event(3, { source: 'compact' }), ticket: 'new' }, request(4, 'new', 2),
+      { ...event(5, { usedTokens: 999999 }), ticket: 'new' }, event(6, { cachedTokens: 9000 })], []);
+    expect(turns.map(t => [t.ts, t.seq, t.requests, t.mark])).toEqual([
+      [0, 1, 1, 'first'], [2, 1, 2, 'miss'], [3, 0, 0, 'compact'], [4, 2, 2, 'compact'], [6, 1, 1, undefined],
+    ]);
+  });
+  it('request 使用 at、有效窗口与 turn 判定，首票据后续请求不重复标重建', () => {
+    const turns = analyzeContextTurns([request(1000, 'old', 1, { at: 0 }),
+      request(1001, 'reset', 1, { turn: 1, at: 10 }),
+      request(1002, 'reset', 2, { turn: 1, at: 20, effective_window: 80_000, cached: 5000 })],
+      [change(15, 'prompt_changed')]);
+    expect(turns[1]).toMatchObject({ ts: 10, turn: 1, mark: 'reset', gapMs: 10 });
+    expect(turns[2]).toMatchObject({ ts: 20, turn: 1, mark: 'partial', gapMs: 10, window: 80_000, pct: 0.125,
+      reasons: ['提示词变更', '窗口变化'] });
   });
 });

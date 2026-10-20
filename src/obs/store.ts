@@ -4,19 +4,40 @@ import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { redact, redactText } from '../shared/redact.js';
 import { toContextUsage } from '../shared/format.js';
-import { analyzeContextTurns, type ContextAnalysisOptions, type ContextUsageEvent, type SystemEvent, type ThreadContextSeries } from './context-turns.js';
+import { analyzeContextTurns, type ContextAnalysisOptions, type ContextEvent, type SystemEvent, type ThreadContextSeries } from './context-turns.js';
 
 import type { ObsEvent } from '../shared/trace.js';
 export interface TicketRow { ticket: string; scope: string; ts: number; updated: number; route: string | null; backend: string | null; status: string; sender: string | null; duration_ms: number }
 export interface ThreadTurn { ticket: string; ts: number; started: number; text: string; reply: string; status: string; duration_ms: number; tools: number; input_tokens: number; output_tokens: number }
 /** 管理事件独立按年龄保留，不参与普通票据预算。 */
 const ADMIN_EVENT_SQL = "(ticket LIKE '@%' OR stage IN ('settings_changed','prompt_changed','thread_reset'))";
-type ContextRow = Pick<ObsEvent, 'ts' | 'ticket' | 'detail_json'>;
-function contextEvent(row: ContextRow): ContextUsageEvent | undefined {
+type ContextRow = Pick<ObsEvent, 'ts' | 'ticket' | 'stage' | 'detail_json'>;
+// 请求在回合结束时批量入库；排序、since 和原因区间必须使用请求自身时间。
+const CONTEXT_TS_SQL = "CASE WHEN stage='model_request' THEN json_extract(detail_json,'$.at') ELSE ts END";
+const CONTEXT_REQUEST_SQL = `(stage='model_request' OR (stage='context_usage'
+  AND json_extract(detail_json,'$.source')='turn' AND NOT EXISTS (
+    SELECT 1 FROM events request WHERE request.ticket=events.ticket AND request.stage='model_request'
+    AND json_extract(request.detail_json,'$.backend')=json_extract(events.detail_json,'$.backend')
+    AND json_extract(request.detail_json,'$.key')=json_extract(events.detail_json,'$.key'))))`;
+function contextEvent(row: ContextRow): ContextEvent | undefined {
   const detail: unknown = JSON.parse(row.detail_json);
   if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return;
-  const usage = toContextUsage(detail as Record<string, unknown>);
-  if (usage) return { ts: row.ts, ticket: row.ticket, detail: usage };
+  const d = detail as Record<string, unknown>;
+  if (row.stage === 'model_request') {
+    const nonnegative = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+    if ((d.backend !== 'codex' && d.backend !== 'pi') || typeof d.key !== 'string' || !d.key || d.key.length > 64 ||
+        !nonnegative(d.input) || !nonnegative(d.window) || d.window === 0 || !nonnegative(d.at) ||
+        !nonnegative(d.seq) || !Number.isInteger(d.seq) || d.seq < 1 ||
+        !nonnegative(d.turn) || !Number.isInteger(d.turn) || d.turn < 1) return;
+    return { ts: d.at, ticket: row.ticket, kind: 'request', detail: {
+      backend: d.backend, key: d.key, ticket: row.ticket, seq: d.seq, turn: d.turn, input: d.input, window: d.window, at: d.at,
+      ...(nonnegative(d.cached) ? { cached: d.cached } : {}),
+      ...(nonnegative(d.output) ? { output: d.output } : {}),
+      ...(nonnegative(d.effective_window) && d.effective_window > 0 ? { effective_window: d.effective_window } : {}),
+    } };
+  }
+  const usage = toContextUsage(d);
+  if (usage) return { ts: row.ts, ticket: row.ticket, kind: 'usage', detail: usage };
 }
 export class ObsStore {
   private database?: DatabaseSync;
@@ -155,34 +176,40 @@ export class ObsStore {
     });
   }
   /**
-   * 默认每线程 40 条、最多 200 条；只读取最近至多 2000 条 turn/compact。
+   * 默认每线程 40 次请求、最多 200 次；只读取最近至多 2000 条请求/旧回合/压缩。
    * 线程按最近活动倒序，线程内按 ts/id 升序；截断边界不补读历史基准。
    * analysis 覆盖判定阈值（面板 ?miss=&partial= 临时覆盖，仅影响展示）。
    */
   contextSeries(opts: { limit?: number; since?: number; backend?: string; key?: string; analysis?: ContextAnalysisOptions } = {}): ThreadContextSeries[] {
     if (this.degraded) return [];
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(200, Math.floor(opts.limit!))) : 40;
-    const clauses = ["stage='context_usage'", "json_extract(detail_json,'$.source') IN ('turn','compact')"];
+    const clauses = [`(${CONTEXT_REQUEST_SQL} OR (stage='context_usage' AND json_extract(detail_json,'$.source')='compact'))`];
     const args: SQLInputValue[] = [];
-    if (Number.isFinite(opts.since)) { clauses.push('ts>=?'); args.push(opts.since!); }
+    if (Number.isFinite(opts.since)) { clauses.push(`${CONTEXT_TS_SQL}>=?`); args.push(opts.since!); }
     for (const field of ['backend', 'key'] as const) if (opts[field] !== undefined) {
       clauses.push(`json_extract(detail_json,'$.${field}')=?`); args.push(opts[field]!);
     }
-    // 线程数也只在最近 2000 条中计算，避免为确定 M 扫描完整历史。
-    const rows = this.db.prepare(`WITH recent AS MATERIALIZED (
-      SELECT id,ts,ticket,detail_json FROM events INDEXED BY events_ts
+    // 去除重复回合后再取有界快照；压缩分隔不占每线程的请求预算。
+    const rows = this.db.prepare(`SELECT ts,ticket,stage,detail_json FROM (
+      SELECT id,ts,ticket,stage,detail_json FROM events INDEXED BY events_ts
       WHERE ${clauses.join(' AND ')} ORDER BY ts DESC,id DESC LIMIT 2000
-    ) SELECT ts,ticket,detail_json FROM recent ORDER BY ts DESC,id DESC
-      LIMIT (SELECT MIN(2000,COUNT(DISTINCT json_array(json_extract(detail_json,'$.backend'),json_extract(detail_json,'$.key')))*?) FROM recent)`)
-      .all(...args, limit) as ContextRow[];
-    const groups = new Map<string, ContextUsageEvent[]>();
-    for (const row of rows) {
-      const event = contextEvent(row);
-      if (!event) continue;
-      const id = JSON.stringify([event.detail.backend, event.detail.key]);
+    ) ORDER BY ${CONTEXT_TS_SQL} DESC,id DESC`).all(...args) as ContextRow[];
+    const events = rows.flatMap(row => { const event = contextEvent(row); return event ? [event] : []; });
+    const threadId = (event: ContextEvent) => JSON.stringify([event.detail.backend, event.detail.key]);
+    const budget = Math.min(2000, new Set(events.map(threadId)).size * limit);
+    const groups = new Map<string, ContextEvent[]>();
+    const counts = new Map<string, number>();
+    let requests = 0;
+    for (const event of events) {
+      const id = threadId(event);
+      const isRequest = event.kind === 'request' || event.detail.source === 'turn';
+      if (isRequest && requests++ >= budget) break;
+      const count = counts.get(id) ?? 0;
+      if (count >= limit) continue;
       const group = groups.get(id) ?? [];
       if (!groups.has(id)) groups.set(id, group);
-      if (group.length < limit) group.push(event);
+      group.push(event);
+      if (isRequest) counts.set(id, count + 1);
     }
     const retained = [...groups.values()].flat();
     if (!retained.length) return [];
@@ -208,17 +235,18 @@ export class ObsStore {
       const threadResets = resets.filter(event => event.detail.backend === backend &&
         (event.detail.key ?? event.detail[backend === 'codex' ? 'thread_key' : 'conversation_key']) === key);
       const turns = analyzeContextTurns(events, [...system, ...threadResets], opts.analysis);
-      return { backend, key, turns,
+      const requests = turns.filter(turn => turn.source === 'turn');
+      return { backend, key, turns, requests: requests.length, tickets: new Set(requests.map(turn => turn.ticket)).size,
         misses: turns.filter(turn => turn.mark === 'miss').length, window: turns.at(-1)!.window };
     });
   }
-  /** 严格早于 beforeTs 的最近实际回合；忽略 estimate 和 compact。 */
-  previousContextTurn(backend: 'codex' | 'pi', key: string, beforeTs: number): ContextUsageEvent | undefined {
+  /** 严格早于 beforeTs 的最近请求；同票据有请求时忽略旧回合，压缩与估算不作为基准。 */
+  previousContextTurn(backend: 'codex' | 'pi', key: string, beforeTs: number): ContextEvent | undefined {
     if (this.degraded || !Number.isFinite(beforeTs)) return;
-    const rows = this.db.prepare(`SELECT ts,ticket,detail_json FROM events INDEXED BY events_ts
-      WHERE ts<? AND stage='context_usage' AND json_extract(detail_json,'$.backend')=?
-      AND json_extract(detail_json,'$.key')=? AND json_extract(detail_json,'$.source')='turn'
-      ORDER BY ts DESC,id DESC`).iterate(beforeTs, backend, key);
+    const rows = this.db.prepare(`SELECT ts,ticket,stage,detail_json FROM events INDEXED BY events_ts
+      WHERE ${CONTEXT_TS_SQL}<? AND ${CONTEXT_REQUEST_SQL} AND json_extract(detail_json,'$.backend')=?
+      AND json_extract(detail_json,'$.key')=?
+      ORDER BY ${CONTEXT_TS_SQL} DESC,CASE WHEN stage='model_request' THEN 1 ELSE 0 END DESC,id DESC`).iterate(beforeTs, backend, key);
     for (const row of rows) {
       const event = contextEvent(row as ContextRow);
       if (event) return event;

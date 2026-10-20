@@ -19,8 +19,10 @@ export function parseRolloutTokenUsage(record: unknown): { input: number; output
     ...(count(raw.reasoning_output_tokens) ? { reasoning: raw.reasoning_output_tokens } : {}), measured: true };
 }
 
+export interface RolloutRequestUsage { input: number; cached?: number; output: number; at: number }
+
 /** 倒序按块读取末尾至多 2 MiB；跳过边界半行及损坏行，文件消失也不影响启动。 */
-export async function readRolloutContextUsage(file: string, compactedAfter?: number): Promise<(ContextUsageHistory & { truncated: boolean }) | undefined> {
+export async function readRolloutContextUsage(file: string, compactedAfter?: number): Promise<(ContextUsageHistory & { truncated: boolean; requests: RolloutRequestUsage[] }) | undefined> {
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     handle = await fs.open(file, "r");
@@ -30,6 +32,8 @@ export async function readRolloutContextUsage(file: string, compactedAfter?: num
     let suffix = Buffer.alloc(0);
     let turns = 0;
     let waitingForUsage = false;
+    let requestTurn: number | undefined;
+    const requests: RolloutRequestUsage[] = [];
     let effectiveWindowTokens: number | undefined;
     let latest: Omit<ContextUsageHistory, "turns"> | undefined;
     let compactUsage: typeof latest;
@@ -72,12 +76,16 @@ export async function readRolloutContextUsage(file: string, compactedAfter?: num
           const window = object(payload?.info)?.model_context_window;
           if (count(window) && window > 0) effectiveWindowTokens = window;
         }
-        if (latest || !waitingForUsage) return;
+        if (!waitingForUsage || (requestTurn !== undefined && turns !== requestTurn)) return;
         // turn.completed.usage 是线程累计量，只能用于识别回合结束，不能作为上下文占用；只取 token_count.last_token_usage。
         const parsed = type === "token_count" ? parseRolloutTokenUsage(record) : undefined;
         const tokens = parsed ? { usedTokens: parsed.input, cachedTokens: parsed.cached } : undefined;
         const updatedAt = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : NaN;
-        if (tokens && count(updatedAt)) latest = { ...tokens, updatedAt };
+        if (tokens && parsed && count(updatedAt)) {
+          latest ??= { ...tokens, updatedAt };
+          requestTurn ??= turns;
+          requests.push({ input: parsed.input, cached: parsed.cached, output: parsed.output, at: updatedAt });
+        }
       } catch { /* 损坏或尚未写完的行只影响该行 */ }
     };
     while (position > start) {
@@ -95,7 +103,7 @@ export async function readRolloutContextUsage(file: string, compactedAfter?: num
       suffix = chunk.subarray(0, end);
     }
     if (start === 0) consume(suffix);
-    return latest && { ...latest, ...(effectiveWindowTokens !== undefined ? { effectiveWindowTokens } : {}), turns, truncated: start > 0 };
+    return latest && { ...latest, ...(effectiveWindowTokens !== undefined ? { effectiveWindowTokens } : {}), turns, truncated: start > 0, requests: requests.reverse().sort((a, b) => a.at - b.at) };
   } catch { return undefined; }
   finally { await handle?.close().catch(() => undefined); }
 }

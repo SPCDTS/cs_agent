@@ -124,7 +124,8 @@ describe('上下文监控页面 /context-usage', () => {
     expect(one).not.toContain('Pi · 群 7');
     expect(one).not.toContain('只看此线程');
     expect(one).toContain('name="key" value="owner"'); expect(one).toContain('name="limit" value="2"');
-    expect(one.match(/<span class="cu-bar/g)).toHaveLength(2);
+    // limit=2 保留两次请求，期间的一条压缩分隔不占请求预算。
+    expect(one.match(/<span class="cu-bar/g)).toHaveLength(3);
     expect((await r.html('/context-usage?limit=999')).html).toContain('name="limit" value="200"');
     const loose = (await r.html('/context-usage?backend=codex&miss=0.01&partial=0.5')).html;
     expect(loose).toContain('name="miss" value="0.01"'); expect(loose).toContain('name="partial" value="0.5"');

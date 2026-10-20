@@ -27,7 +27,7 @@ import type { DashboardOptions } from './dashboard-types.js';
 import { equal, imageFile, readText, agentMdRevision, AGENT_MD_MAX_BYTES } from './dashboard-io.js';
 import { createDashboardPost } from './dashboard-post.js';
 import { createDashboardPages } from './ui/dashboard-pages.js';
-import { analyzeContextTurns, type ContextTurn, type ContextUsageEvent, type SystemEvent } from './context-turns.js';
+import { asContextUsageEvent, analyzeContextTurns, type ContextTurn, type ContextUsageEvent, type SystemEvent } from './context-turns.js';
 
 // 与顶栏的蓝色方框及两条横线保持一致；静态图形不含运行数据。
 const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="7" y="4" width="18" height="24" rx="2" fill="none" stroke="#2b47b5" stroke-width="3"/><path d="M11 13h10M11 19h10" stroke="#2b47b5" stroke-width="3"/></svg>';
@@ -114,7 +114,10 @@ export function createDashboard(opts: DashboardOptions) {
       events: (ticket, options) => opts.store.events(ticket, options),
       systemEvents: (ticket, limit) => opts.store.systemEvents(ticket, limit),
       contextSeries: o => opts.store.contextSeries(o),
-      previousContextTurn: (backend, key, beforeTs) => opts.store.previousContextTurn(backend, key, beforeTs),
+      previousContextTurn: (backend, key, beforeTs) => {
+        const event = opts.store.previousContextTurn(backend, key, beforeTs);
+        return event && asContextUsageEvent(event);
+      },
       analyzeTicketTurn: ticketContextTurn,
     } },
     config, csrf, agentMd, agentsMd, api,

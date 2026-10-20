@@ -12,7 +12,7 @@ import { mediaFixture } from "../context/media-fixture.js";
 import type { MediaRecall } from "../../src/context/media.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { piContextCapacity, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
+import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { trace } from "../../src/shared/trace.js";
 import { promises as fs } from "node:fs";
@@ -1070,24 +1070,25 @@ describe("pi 上下文占用", () => {
     await s.pi.close(); await s.contextUsage.close();
     await fs.unlink(path.join(s.dir, "context-usage.json"));
     const restarted = await setup([reply("恢复后的新回合")], { dir: s.dir, disk: true });
-    expect(restarted.contextUsage.get("pi", "group:7")).toMatchObject({ turns: 3, source: "turn",
+    expect(restarted.contextUsage.get("pi", "group:7")).toMatchObject({ turns: 2, source: "turn",
       usedTokens: last.usage.input + last.usage.cacheRead + last.usage.cacheWrite, cachedTokens: last.usage.cacheRead,
       updatedAt: last.timestamp, lastCompactionAt: compactedAt, windowTokens: 200000,
       compaction: piContextCapacity(200000).compaction });
     expect(restarted.faux.state.callCount).toBe(0);
     await restarted.pi.handle(request("history-three"), handleContext());
-    await vi.waitFor(() => expect(restarted.contextUsage.get("pi", "group:7")!.turns).toBe(4));
+    await vi.waitFor(() => expect(restarted.contextUsage.get("pi", "group:7")!.turns).toBe(3));
     await restarted.pi.resetThread("group:7");
     expect(restarted.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
     expect(restarted.contextUsage.get("pi", "group:7")!.lastCompactionAt).toBeUndefined();
   });
 
-  it("从 assistant 条目取输入与缓存，每次模型回合更新，重复回执不重复计数", async () => {
-    const tool = call("web_search", { query: "usage" });
-    const answer = reply("完成采集");
-    const s = await setup([tool, answer], { reserveTokens: 16000, backgroundTokens: 32000 });
-    const events: { ticket: string; detail: Record<string, unknown> }[] = [];
-    const untap = trace.tap(e => { if (e.stage === "context_usage" && e.detail.source === "turn") events.push(e); });
+  it("pi 每请求记 recordRequest、每票据一次 recordTurn，seq 随票据重置且重复回执不增计数", async () => {
+    const s = await setup([call("web_search", { query: "usage" }), reply("完成采集"), reply("下一票据")],
+      { reserveTokens: 16000, backgroundTokens: 32000 });
+    const events: { ticket: string; stage: string; detail: Record<string, unknown> }[] = [];
+    const untap = trace.tap(e => {
+      if (e.stage === "model_request" || (e.stage === "context_usage" && e.detail.source === "turn")) events.push(e);
+    });
     try {
       await s.pi.handle(request("usage-turn"), handleContext());
       const conv = (await s.pi.harness.conversation((await s.pi.readThreadIds())["group:7"] as ConversationId, context))!;
@@ -1095,19 +1096,40 @@ describe("pi 上下文占用", () => {
       expect(messages).toHaveLength(2);
       const actual = messages[1]!.usage;
       expect(actual.cacheRead).toBeGreaterThan(0);
-      await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")).toMatchObject({
-        usedTokens: actual.input + actual.cacheRead + actual.cacheWrite, cachedTokens: actual.cacheRead, windowTokens: 200000, turns: 2, source: "turn",
+      expect(s.contextUsage.get("pi", "group:7")).toMatchObject({
+        usedTokens: actual.input + actual.cacheRead + actual.cacheWrite, cachedTokens: actual.cacheRead, windowTokens: 200000, turns: 1, source: "turn",
         compaction: { background: 152000, reserve: 184000 },
-      }));
-      expect(events.map(e => [e.ticket, e.detail.usedTokens])).toEqual(messages.map(m => ["usage-turn", m.usage.input + m.usage.cacheRead + m.usage.cacheWrite]));
+      });
+      expect(events.map(e => e.stage)).toEqual(["model_request", "model_request", "context_usage"]);
+      expect(events.slice(0, 2).map(e => e.detail)).toEqual(messages.map((m, index) => ({
+        backend: "pi", key: "group:7", ticket: "usage-turn", seq: index + 1, turn: 1,
+        input: m.usage.input + m.usage.cacheRead + m.usage.cacheWrite, cached: m.usage.cacheRead, output: m.usage.output,
+        window: 200000, at: m.timestamp,
+      })));
       await s.pi.handle(request("usage-turn"), handleContext());
-      expect(s.contextUsage.get("pi", "group:7")!.turns).toBe(2);
+      expect(events).toHaveLength(3);
+      expect(s.contextUsage.get("pi", "group:7")!.turns).toBe(1);
+      await s.pi.handle(request("usage-next"), handleContext());
+      expect(events[3]).toMatchObject({ ticket: "usage-next", stage: "model_request", detail: { seq: 1, turn: 2 } });
+      expect(events[4]).toMatchObject({ ticket: "usage-next", stage: "context_usage", detail: { turns: 2 } });
+      expect(events).toHaveLength(5);
       await s.contextUsage.flush();
       expect(new ContextUsageStore(s.dir).all()).toEqual(s.contextUsage.all());
       await s.pi.resetThread("group:7");
       expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
       expect(s.contextUsage.get("pi", "group:7")!.lastCompactionAt).toBeUndefined();
     } finally { untap(); }
+  });
+
+  it("pi 回合完成时缺少请求样本仍只计一个回合并保留原占用", async () => {
+    const s = await setup([reply("第一轮"), reply("没有用量")]);
+    await s.pi.handle(request("sampled"), handleContext());
+    const before = s.contextUsage.get("pi", "group:7")!;
+    const last = vi.spyOn(PiContextObserver.prototype, "lastRequest").mockReturnValue(undefined);
+    try {
+      await s.pi.handle(request("unsampled"), handleContext());
+      expect(s.contextUsage.get("pi", "group:7")).toEqual({ ...before, turns: 2 });
+    } finally { last.mockRestore(); }
   });
 
   it("deepseek-flash 使用 pi-ai 的 1000000 窗口与默认实际压缩位置", () => {

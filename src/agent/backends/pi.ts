@@ -125,7 +125,8 @@ export class PiBackend implements AgentBackend {
     let harness!: Harness;
     registry.install(await codingTools());
     registry.install(createPiExtension({ ...opts, workspaceDir, getHarness: () => harness }));
-    harness = await Harness.open(opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite")), {
+    const storage = opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite"));
+    harness = await Harness.open(storage, {
       models: opts.models, registry,
       env: async (target, ctx) => {
         const threads = await target.read.snapshot(PiThreadsDoc, ctx);
@@ -143,7 +144,7 @@ export class PiBackend implements AgentBackend {
       } },
       onReport: err => log.warn("pi harness report", { error: err instanceof Error ? err.message : String(err) }),
     }, context);
-    const backend = new PiBackend(harness, opts);
+    const backend = new PiBackend(harness, { ...opts, storage });
     try {
       const retired = await harness.commit(async tx => {
         const threads = await tx.doc(PiThreadsDoc);
@@ -241,7 +242,7 @@ export class PiBackend implements AgentBackend {
       this.opts.contextUsage.ensure("pi", key, capacity, ticket);
       return false;
     }
-    const observer = await PiContextObserver.open(this.harness, conv, key, this.opts.contextUsage,
+    const observer = await PiContextObserver.open(this.harness, conv, key, this.opts.contextUsage, this.opts.storage!,
       capacity, ticket);
     this.contextObservers.set(key, observer);
     return observer.backfilled;
@@ -376,6 +377,16 @@ export class PiBackend implements AgentBackend {
       const answer = await conv.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
       // 回复经 send_message 发出，最终回答可以为空。
       const text = answer?.model?.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "text").map(c => c.text) : []).join("").trim() ?? "";
+      if (this.opts.contextUsage && known?.status !== "done") {
+        const observer = this.contextObservers.get(req.threadKey);
+        await observer?.synchronize(req.ticket, settled.answer);
+        const last = observer?.lastRequest(req.ticket);
+        const capacity = this.opts.contextUsage.get("pi", req.threadKey)!;
+        this.opts.contextUsage.recordTurn("pi", req.threadKey, {
+          windowTokens: capacity.windowTokens, compaction: capacity.compaction,
+          ...(last ? { usedTokens: last.usedTokens, cachedTokens: last.cachedTokens } : {}),
+        }, req.ticket);
+      }
       // 保留回合产物供审计；成功生图须通过 send_message 显式发送。
       const images = await collectNewImages(attachmentDirs(this.opts.dataDir, req.ticket).attachDir, new Set());
       ctx.onEvent({ type: "pi_done", thread: req.threadKey, conversation: conv.id, images: images.length });

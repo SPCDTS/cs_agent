@@ -1,8 +1,21 @@
 import { ratio, usageWindow, type ContextUsage } from '../shared/format.js';
-import type { ContextAnalysisOptions, ContextTurn } from '../shared/context-turns.js';
+import type { ContextAnalysisOptions, ContextTurn, ModelRequestDetail } from '../shared/context-turns.js';
 
 export type { ContextAnalysisOptions, ContextTurn, ThreadContextSeries } from '../shared/context-turns.js';
-export interface ContextUsageEvent { ts: number; ticket: string; detail: ContextUsage }
+/** kind 缺省兼容现有票据页的旧用量调用；存储查询始终显式返回 kind。 */
+export interface ContextUsageEvent { ts: number; ticket: string; kind?: 'usage'; detail: ContextUsage }
+export interface ContextRequestEvent { ts: number; ticket: string; kind: 'request'; detail: ModelRequestDetail }
+export type ContextEvent = ContextUsageEvent | ContextRequestEvent;
+
+/** 旧页面适配与分析共用字段映射；请求时间以 at 为准。 */
+export function asContextUsageEvent(event: ContextEvent): ContextUsageEvent {
+  if (event.kind !== 'request') return event;
+  const d = event.detail;
+  return { ts: d.at, ticket: event.ticket, kind: 'usage', detail: {
+    backend: d.backend, key: d.key, usedTokens: d.input, cachedTokens: d.cached,
+    windowTokens: d.window, effectiveWindowTokens: d.effective_window, turns: d.turn, updatedAt: d.at, source: 'turn',
+  } };
+}
 export interface SystemEvent { ts: number; stage: string; detail: Record<string, unknown> }
 
 /**
@@ -10,19 +23,23 @@ export interface SystemEvent { ts: number; stage: string; detail: Record<string,
  * 系统原因取 (prev.ts, ts]，按时间排序并去重，再追加间隔、窗口原因。
  */
 export function analyzeContextTurns(
-  events: ContextUsageEvent[], system: SystemEvent[], opts: ContextAnalysisOptions = {},
+  events: ContextEvent[], system: SystemEvent[], opts: ContextAnalysisOptions = {},
 ): ContextTurn[] {
   const { missRatio = 0.5, partialRatio = 0.9, minPrevTokens = 4096, gapMs = 60 * 60_000 } = opts;
   const orderedSystem = [...system].sort((a, b) => a.ts - b.ts);
   const result: ContextTurn[] = [];
+  const requestTickets = new Set(events.filter(event => event.kind === 'request').map(event => event.ticket));
   let prev: ContextTurn | undefined;
   let previousSource: ContextTurn['source'] | undefined;
-  for (const { ts, ticket, detail: usage } of events) {
+  for (const event of events) {
+    const { ts, ticket, detail: usage } = asContextUsageEvent(event);
+    if (event.kind !== 'request' && usage.source === 'turn' && requestTickets.has(ticket)) continue;
     if (usage.source === 'estimate') continue;
     const window = usageWindow(usage);
     const cached = usage.cachedTokens ?? 0;
     const turn: ContextTurn = {
-      ts, ticket, used: usage.usedTokens, cached, uncached: Math.max(0, usage.usedTokens - cached),
+      ts, ticket, seq: usage.source === 'compact' ? 0 : event.kind === 'request' ? event.detail.seq : 1,
+      requests: 0, turn: usage.turns, used: usage.usedTokens, cached, uncached: Math.max(0, usage.usedTokens - cached),
       window, pct: ratio(usage.usedTokens, window) / 100, turns: usage.turns, source: usage.source, reasons: [],
       ...(prev ? { gapMs: ts - prev.ts } : {}),
     };
@@ -32,7 +49,7 @@ export function analyzeContextTurns(
       // 先排除低于缓存粒度的基准，再处理压缩、重建与命中率。
     } else if (previousSource === 'compact') {
       turn.mark = 'compact';
-    } else if (prev && usage.turns === 1) {
+    } else if (prev && turn.turn === 1 && turn.seq === 1) {
       turn.mark = 'reset';
     } else if (!prev) {
       turn.mark = 'first';
@@ -59,5 +76,8 @@ export function analyzeContextTurns(
     previousSource = usage.source;
     if (usage.source === 'turn') prev = turn;
   }
+  const counts = new Map<string, number>();
+  for (const turn of result) if (turn.source === 'turn') counts.set(turn.ticket, Math.max((counts.get(turn.ticket) ?? 0) + 1, turn.seq));
+  for (const turn of result) if (turn.source === 'turn') turn.requests = counts.get(turn.ticket)!;
   return result;
 }

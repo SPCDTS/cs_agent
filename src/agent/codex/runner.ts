@@ -508,7 +508,7 @@ export class CodexRunner {
         if (!this.opts.contextUsage) continue;
         const latest = await this.latestRolloutContextUsage(threads[key]);
         if (latest) {
-          const { truncated: partial, ...history } = latest;
+          const { truncated: partial, requests: _requests, ...history } = latest;
           if (partial) {
             truncated++;
             history.turns = Math.max(history.turns, this.opts.contextUsage.get("codex", key)?.turns ?? 0);
@@ -858,6 +858,12 @@ export class CodexRunner {
       if (completed && this.opts.contextUsage) {
         const usage = id ? await this.latestRolloutContextUsage(id) : undefined;
         if (usage && usage.updatedAt >= startedAt) {
+          for (const [index, request] of usage.requests.entries()) {
+            this.opts.contextUsage.recordRequest("codex", key, {
+              ticket: ticket ?? "@context", seq: index + 1, usedTokens: request.input, cachedTokens: request.cached,
+              outputTokens: request.output, windowTokens, effectiveWindowTokens: usage.effectiveWindowTokens, at: request.at,
+            });
+          }
           this.opts.contextUsage.recordTurn("codex", key, { windowTokens, usedTokens: usage.usedTokens, cachedTokens: usage.cachedTokens,
             ...(usage.effectiveWindowTokens !== undefined ? { effectiveWindowTokens: usage.effectiveWindowTokens } : {}) }, ticket);
         } else {

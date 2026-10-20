@@ -19,6 +19,17 @@ export interface ContextUsage {
   source: "turn" | "estimate" | "compact";
 }
 
+export interface ContextRequestUsage {
+  ticket: string;
+  seq: number;
+  usedTokens: number;
+  cachedTokens?: number;
+  outputTokens?: number;
+  windowTokens: number;
+  effectiveWindowTokens?: number;
+  at: number;
+}
+
 type Backend = ContextUsage["backend"];
 type Capacity = Pick<ContextUsage, "windowTokens" | "compaction">;
 export type ContextUsageHistory = Pick<ContextUsage, "usedTokens" | "cachedTokens" | "effectiveWindowTokens" | "turns" | "updatedAt" | "lastCompactionAt">;
@@ -84,6 +95,15 @@ export class ContextUsageStore {
     if (old && old.windowTokens === capacity.windowTokens && JSON.stringify(old.compaction) === JSON.stringify(capacity.compaction)) return;
     if (old && old.windowTokens !== capacity.windowTokens) delete old.effectiveWindowTokens;
     this.update({ backend, key, usedTokens: 0, turns: 0, source: "estimate", ...old, ...capacity, updatedAt: old?.updatedAt ?? Date.now() }, ticket);
+  }
+
+  /** 每次模型请求只写事件；线程状态、订阅与持久化仍由回合完成路径维护。 */
+  recordRequest(backend: Backend, key: string, req: ContextRequestUsage): void {
+    trace.event(req.ticket, "model_request", { detail: {
+      backend, key, ticket: req.ticket, seq: req.seq, turn: (this.get(backend, key)?.turns ?? 0) + 1,
+      input: req.usedTokens, cached: req.cachedTokens, output: req.outputTokens, window: req.windowTokens,
+      ...(req.effectiveWindowTokens !== undefined ? { effective_window: req.effectiveWindowTokens } : {}), at: req.at,
+    } });
   }
 
   /** 每个完成回合只计数一次；缺少用量时保留原占用、来源和采样时间。 */

@@ -18,6 +18,34 @@ const open = (dir = tmp("context-usage-"), debounce = 10) => {
 const usage = { usedTokens: 1234, cachedTokens: 1000, windowTokens: 500000 };
 
 describe("上下文占用存储", () => {
+  it("recordRequest 只写请求事件，不改状态、不通知订阅、不安排或触发持久化", async () => {
+    const dir = tmp("context-request-"), store = open(dir);
+    store.recordTurn("codex", "owner", usage);
+    await store.flush();
+    const before = store.all(), file = await fs.readFile(path.join(dir, "context-usage.json"), "utf8");
+    const listener = vi.fn();
+    store.subscribe(listener);
+    const emit = vi.spyOn(trace, "event"), flush = vi.spyOn(store, "flush");
+    const timer = vi.spyOn(globalThis, "setTimeout"), write = vi.spyOn(fs, "writeFile");
+    store.recordRequest("codex", "owner", { ...usage, ticket: "req", seq: 1, outputTokens: 42, effectiveWindowTokens: 475000, at: 123 });
+    store.recordRequest("codex", "owner", { ...usage, ticket: "req", seq: 2, at: 124 });
+    store.recordRequest("pi", "new", { ...usage, ticket: "new-req", seq: 1, at: 125 });
+    expect(emit).toHaveBeenCalledTimes(3);
+    expect(emit).toHaveBeenNthCalledWith(1, "req", "model_request", { detail: {
+      backend: "codex", key: "owner", ticket: "req", seq: 1, turn: 2,
+      input: 1234, cached: 1000, output: 42, window: 500000, effective_window: 475000, at: 123,
+    } });
+    expect(emit.mock.calls[1][2]?.detail).toMatchObject({ seq: 2, turn: 2, at: 124 });
+    expect(emit.mock.calls[2][2]?.detail).toMatchObject({ backend: "pi", key: "new", turn: 1 });
+    expect(store.all()).toEqual(before);
+    expect(listener).not.toHaveBeenCalled();
+    expect(timer).not.toHaveBeenCalled();
+    expect(flush).not.toHaveBeenCalled();
+    await store.flush();
+    expect(write).not.toHaveBeenCalled();
+    expect(await fs.readFile(path.join(dir, "context-usage.json"), "utf8")).toBe(file);
+  });
+
   it("压缩样本保留计数和容量，清除旧缓存，历史回填不能覆盖较新压缩", async () => {
     const dir = tmp("context-compact-"), store = open(dir);
     store.recordTurn("codex", "owner", { ...usage, effectiveWindowTokens: 475000 });
@@ -135,6 +163,50 @@ function runnerSetup(env: NodeJS.ProcessEnv = {}, fallback?: number) {
 }
 
 describe("codex 上下文采集", () => {
+  it.each([["task_started", "task_complete"], ["turn.started", "turn.completed"]])(
+    "rollout 收集本回合全部有效请求并按时间升序，隔离历史和未完成尾部（%s/%s）", async (start, end) => {
+      const file = path.join(tmp("rollout-requests-"), "events.jsonl");
+      const row = (ms: number, payload: unknown) => JSON.stringify({ timestamp: new Date(ms).toISOString(), type: "event_msg", payload });
+      const token = (input: number, cached?: number) => ({ type: "token_count", info: {
+        last_token_usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: input / 10 },
+      } });
+      await fs.writeFile(file, [
+        row(0, { type: start }), row(1, token(100)), row(2, { type: end }),
+        row(3, { type: start }), row(10, token(1000, 800)), row(5, token(500)),
+        row(10, token(1100, 1000)), row(11, token(-1)), row(12, { type: end }),
+        row(13, { type: start }), row(14, token(9999)), '{"type":',
+      ].join("\n"), "utf8");
+      expect(await readRolloutContextUsage(file)).toMatchObject({ usedTokens: 1100, cachedTokens: 1000, turns: 2,
+        requests: [{ input: 500, output: 50, at: 5 }, { input: 1000, cached: 800, output: 100, at: 10 },
+          { input: 1100, cached: 1000, output: 110, at: 10 }] });
+    });
+
+  it("runner 按序记录本票据请求后只记一次回合，后续票据 seq 归一且不重复采集历史", async () => {
+    const { runner, store } = runnerSetup({ FAKE_CODEX_MODEL_CONTEXT_WINDOW: "475000",
+      FAKE_CODEX_ROLLOUT_USAGE: JSON.stringify([
+        { input_tokens: 1000, cached_input_tokens: 750, output_tokens: 50 },
+        { input_tokens: 1500, cached_input_tokens: 1000, output_tokens: 100 },
+      ]) });
+    const seen: { ticket: string; stage: string; detail: Record<string, unknown>; turns: number }[] = [];
+    const untap = trace.tap(e => {
+      if (e.stage === "model_request" || (e.stage === "context_usage" && e.detail.source === "turn"))
+        seen.push({ ...e, turns: store.get("codex", "owner")?.turns ?? 0 });
+    });
+    try {
+      await runner.ask("one", { ticket: "multi-one", threadKey: "owner" });
+      await runner.ask("two", { ticket: "multi-two", threadKey: "owner" });
+      expect(seen.map(e => [e.ticket, e.stage, e.turns])).toEqual([
+        ["multi-one", "model_request", 0], ["multi-one", "model_request", 0], ["multi-one", "context_usage", 1],
+        ["multi-two", "model_request", 1], ["multi-two", "model_request", 1], ["multi-two", "context_usage", 2],
+      ]);
+      expect(seen.filter(e => e.stage === "model_request").map(e => e.detail)).toEqual([1, 2].flatMap(turn =>
+        [1, 2].map(seq => ({ backend: "codex", key: "owner", ticket: turn === 1 ? "multi-one" : "multi-two", turn, seq,
+          input: seq === 1 ? 1000 : 1500, cached: seq === 1 ? 750 : 1000, output: seq === 1 ? 50 : 100,
+          window: 500000, effective_window: 475000, at: expect.any(Number) }))));
+      expect(store.get("codex", "owner")).toMatchObject({ usedTokens: 1500, cachedTokens: 1000, turns: 2 });
+    } finally { untap(); }
+  });
+
   it('rollout 取已完成回合最近的有效窗口，跳过未完成尾部、无值和非法值', async () => {
     const file = path.join(tmp('rollout-effective-'), 'events.jsonl');
     const record = (payload: unknown) => ({ timestamp: '2026-10-18T00:00:00Z', type: 'event_msg', payload });
@@ -336,7 +408,11 @@ describe("codex 上下文采集", () => {
   it("没有目录与覆盖值时默认 400000，缺失用量仍统计已完成回合", async () => {
     const { runner, store } = runnerSetup({ FAKE_CODEX_CATALOG_FAIL: "1", FAKE_CODEX_USAGE: "{}", FAKE_CODEX_ROLLOUT_USAGE: "" });
     expect(await runner.initializeContextUsage()).toBe(400000);
+    const request = vi.spyOn(store, "recordRequest"), warn = vi.spyOn(log, "warn");
     await runner.ask("no-usage", { threadKey: "group:1" });
+    expect(request).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith("codex context usage unavailable after turn; keeping previous usage",
+      expect.objectContaining({ reason: "missing rollout usage" }));
     expect(store.get("codex", "group:1")).toMatchObject({ usedTokens: 0, source: "estimate", turns: 1 });
     await runner.initializeContextUsage();
     expect(store.get("codex", "group:1")).toMatchObject({ windowTokens: 400000, source: "estimate", turns: 1 });

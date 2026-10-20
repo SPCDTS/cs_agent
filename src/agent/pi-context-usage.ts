@@ -2,9 +2,9 @@ import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { log } from "../shared/log.js";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { AssistantEntry, CompactionEntry, DEFAULT_COMPACTION_POLICY, watchEvents,
-  type AgentEventStream, type Conversation, type Cursor, type EntryId, type EntryRecord, type Harness } from "@earendil-works/pi-durable";
+  type AgentEventStream, type Conversation, type Cursor, type EntryId, type EntryRecord, type Harness, type Storage } from "@earendil-works/pi-durable";
 import { usageCost, usageFields } from "../shared/usage.js";
-import { ContextUsageStore, type ContextUsage, type ContextUsageHistory } from "./context-usage.js";
+import { ContextUsageStore, type ContextUsage, type ContextUsageHistory, type ContextRequestUsage } from "./context-usage.js";
 import { PiRequestDoc } from "./pi-tools/request.js";
 
 /** pi-durable README / CompactionPolicy：backgroundTokens 是阻塞阈值以下的提前量。 */
@@ -14,48 +14,85 @@ export function piContextCapacity(windowTokens: number, reserveTokens = DEFAULT_
     reserve: windowTokens - reserveTokens } };
 }
 
-/** 只消费已提交的 assistant / compaction 条目，工具循环中的每次模型回合各计一次。 */
+/** 每条已提交的助手消息记一次请求；回合完成后由后端统一更新线程状态。 */
 export class PiContextObserver {
-  private constructor(private readonly stream: AgentEventStream, readonly backfilled: boolean, private readonly capacity: Pick<ContextUsage, "windowTokens" | "compaction">) {}
+  private pending: Promise<void> = Promise.resolve();
+  private lastAssistant = 0;
+  private lastCompaction = 0;
+  private lastEntry = 0;
+  private request?: ContextRequestUsage;
+
+  private constructor(private readonly stream: AgentEventStream, readonly backfilled: boolean,
+    private readonly capacity: Pick<ContextUsage, "windowTokens" | "compaction">,
+    private readonly conv: Conversation, private readonly key: string, private readonly store: ContextUsageStore) {}
 
   updateCapacity(next: Pick<ContextUsage, "windowTokens" | "compaction">): void { Object.assign(this.capacity, next); }
 
-  static async open(harness: Harness, conv: Conversation, key: string, store: ContextUsageStore,
+  lastRequest(ticket: string): ContextRequestUsage | undefined {
+    return this.request?.ticket === ticket ? { ...this.request } : undefined;
+  }
+
+  private enqueue(work: () => Promise<void>): Promise<void> {
+    const next = this.pending.then(work);
+    this.pending = next.catch(() => undefined);
+    return next;
+  }
+
+  private async consume(entry: EntryRecord, ticket: string): Promise<void> {
+    this.lastEntry = Math.max(this.lastEntry, entry.id);
+    if (AssistantEntry.is(entry) && entry.id > this.lastAssistant) {
+      this.lastAssistant = entry.id;
+      const message = entry.model?.find(m => m.role === "assistant");
+      if (message?.role === "assistant") {
+        this.request = { ticket, seq: (this.lastRequest(ticket)?.seq ?? 0) + 1,
+          usedTokens: usageCost(message.usage).input, cachedTokens: usageFields(message.usage).cache_read_tokens,
+          outputTokens: usageFields(message.usage).output_tokens, windowTokens: this.capacity.windowTokens, at: message.timestamp };
+        this.store.recordRequest("pi", this.key, this.request);
+      }
+    } else if (CompactionEntry.is(entry) && entry.id > this.lastCompaction) {
+      this.lastCompaction = entry.id;
+      await refreshPiCompactionUsage(this.conv, this.key, this.store, ticket, entry.id);
+    }
+  }
+
+  /** 回执可能先于监听送达；用已提交历史补齐至最终答案，并与监听串行去重。 */
+  synchronize(ticket: string, answer: EntryId): Promise<void> {
+    return this.enqueue(async () => {
+      let cursor: Cursor | undefined;
+      const minEntryId = (this.lastEntry + 1) as EntryId;
+      if (minEntryId > answer) return;
+      do {
+        const page = await this.conv.entries({ minEntryId, maxEntryId: answer, order: "ascending" }, 256, cursor, BACKGROUND_CONTEXT);
+        for (const entry of page.items) await this.consume(entry, ticket);
+        cursor = page.next;
+      } while (cursor);
+    });
+  }
+
+  static async open(harness: Harness, conv: Conversation, key: string, store: ContextUsageStore, storage: Storage,
     capacity: Pick<ContextUsage, "windowTokens" | "compaction">, ticket?: string): Promise<PiContextObserver> {
     const stream = await watchEvents(harness, conv.id, BACKGROUND_CONTEXT);
     store.ensure("pi", key, capacity, ticket);
-    // 快照与监听原子注册；历史只扫描至快照末尾，扫描期间的新提交交给监听，避免重复计数。
+    // 快照与监听原子注册，历史不重新发请求事件。
     const tail = stream.snapshot.entries.reduce((last, entry) => Math.max(last, entry.id), 0) as EntryId;
-    const history = tail ? await readPiContextUsage(conv, tail) : undefined;
+    const history = tail ? await readPiContextUsage(conv, tail, storage) : undefined;
     const backfilled = history ? store.backfill("pi", key, history, ticket) : false;
-    // 初始快照中的旧条目不重复累计；溢出快照只补记注册后出现的条目。
-    let lastAssistant = stream.snapshot.entries.reduce((last, e) => AssistantEntry.is(e) ? Math.max(last, e.id) : last, 0);
-    let lastCompaction = stream.snapshot.entries.reduce((last, e) => CompactionEntry.is(e) ? Math.max(last, e.id) : last, 0);
-    const consume = async (entry: EntryRecord, ticket: string) => {
-      if (AssistantEntry.is(entry) && entry.id > lastAssistant) {
-        lastAssistant = entry.id;
-        const message = entry.model?.find(m => m.role === "assistant");
-        if (message?.role === "assistant") {
-          store.recordTurn("pi", key, { ...capacity, usedTokens: usageCost(message.usage).input,
-            cachedTokens: usageFields(message.usage).cache_read_tokens }, ticket);
-        }
-      } else if (CompactionEntry.is(entry) && entry.id > lastCompaction) {
-        lastCompaction = entry.id;
-        await refreshPiCompactionUsage(conv, key, store, ticket, entry.id);
-      }
-    };
-    stream.start(async events => {
+    const observer = new PiContextObserver(stream, backfilled, capacity, conv, key, store);
+    observer.lastEntry = tail;
+    observer.lastAssistant = stream.snapshot.entries.reduce((last, e) => AssistantEntry.is(e) ? Math.max(last, e.id) : last, 0);
+    observer.lastCompaction = stream.snapshot.entries.reduce((last, e) => CompactionEntry.is(e) ? Math.max(last, e.id) : last, 0);
+    stream.start(events => observer.enqueue(async () => {
       const bound = await harness.snapshot(PiRequestDoc, conv.id, BACKGROUND_CONTEXT);
       const ticket = bound?.ticket || "@context";
       for (const event of events) {
-        if (event.type === "message_end" || event.type === "entry_appended") await consume(event.entry, ticket);
-        else if (event.type === "snapshot") for (const entry of event.entries) await consume(entry, ticket);
+        if (event.type === "message_end" || event.type === "entry_appended") await observer.consume(event.entry, ticket);
+        else if (event.type === "snapshot") for (const entry of event.entries) await observer.consume(entry, ticket);
       }
-    });
-    return new PiContextObserver(stream, backfilled, capacity);
+    }));
+    return observer;
   }
 
-  async close(): Promise<void> { await this.stream.stop(); }
+  async close(): Promise<void> { await this.stream.stop(); await this.pending; }
 }
 
 /** 手动压缩和 observer 共用 pi-ai 的估算，摘要前的 assistant 用量不再代表当前上下文。 */
@@ -70,8 +107,8 @@ export async function refreshPiCompactionUsage(conv: Conversation, key: string, 
   }
 }
 
-/** 活动上下文会因压缩缩短；用公开历史分页接口恢复全部 assistant 回合与最近成功压缩。 */
-async function readPiContextUsage(conv: Conversation, tail: EntryId): Promise<ContextUsageHistory | undefined> {
+/** 活动上下文会因压缩缩短；用公开历史分页接口恢复已完成票据数与最近成功压缩。 */
+async function readPiContextUsage(conv: Conversation, tail: EntryId, storage: Storage): Promise<ContextUsageHistory | undefined> {
   try {
     return await conv.commit(async tx => {
       let cursor: Cursor | undefined;
@@ -82,7 +119,6 @@ async function readPiContextUsage(conv: Conversation, tail: EntryId): Promise<Co
         const page = await tx.scanEntries({ conversationId: conv.id, maxEntryId: tail, order: "descending" }, 256, cursor);
         for (const entry of page.items) {
           if (AssistantEntry.is(entry)) {
-            turns++;
             const message = entry.model?.find(m => m.role === "assistant");
             if (!latest && message?.role === "assistant" && message.usage &&
                 Number.isFinite(message.timestamp) && message.timestamp >= 0) {
@@ -93,6 +129,14 @@ async function readPiContextUsage(conv: Conversation, tail: EntryId): Promise<Co
             const timestamp = entry.model?.[0]?.timestamp;
             if (typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp >= 0) lastCompactionAt = timestamp;
           }
+        }
+        cursor = page.next;
+      } while (cursor);
+      // 工具循环有多条 assistant，但一条完成的 input 回执只代表一个票据回合。
+      do {
+        const page = await storage.scanSubmissions({ conversationId: conv.id, status: "done", order: "descending" }, 256, cursor, BACKGROUND_CONTEXT);
+        for (const submission of page.items) {
+          if (submission.type === "input" && submission.status === "done" && submission.answer <= tail) turns++;
         }
         cursor = page.next;
       } while (cursor);
