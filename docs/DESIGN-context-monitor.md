@@ -66,3 +66,34 @@ export function analyzeContextTurns(events: ContextUsageEvent[], system: SystemE
 - 部署：镜像 `dfc9209e…`（干净 build worktree，main 02f1527），容器 healthy。
 - 真实数据核对（owner codex 线程，60 轮）：设计 §6 的样本全部符合——10-19 20:31（12:31Z）输入 204,820 / 命中 3,712（2%）标 miss，原因"间隔 108 分钟、窗口变化"；其后 20:35 命中 92%、20:40 命中 100% 不标记；10-20 16:42（08:42Z）命中 3% 标 miss，原因"切换模型、提示词变更、间隔 1202 分钟"（f2 当日切换模型 slug 与 developer_instructions）；f2 的压缩回合标 compact。修正前的误报：10-18 21:34 上一轮 445k、本轮 53k、命中 52k（旧版本压缩无 compact 记录）被标 miss，改基准后不再标记；10-20 18:08 由 miss 变为 partial（81%）。10-18 19:23/19:24 两轮（历史里内联生图的 39 万/44 万 token 时期）命中 66%/70% 标 partial、原因未知，与当时 WebSocket 超限回退 HTTPS 的现象一致，保留。
 - 页面列出 5 条线程（codex owner/group/shared、pi owner/group），导航"上下文监控"，agents 页线程行有"监控"入口。
+
+## 8. 口径改为"每请求一根、按票据分组"（用户 2026-10-20 决定）
+
+### 8.1 现状与问题
+
+- codex：每票据一条 `context_usage`，取回合末尾最后一次请求的 `token_count.last_token_usage`；回合内因工具调用产生的多次请求不可见。
+- pi：每条助手消息（即每次模型请求）调一次 `recordTurn`，一个票据多条记录，`turns` 计数随请求数膨胀（群线程显示 31 回合实为 31 次请求）。
+- 两边口径不一致，图上一根条的含义不同。
+
+### 8.2 数据采集
+
+- `ContextUsageStore` 新增 `recordRequest(backend, key, { ticket, seq, usedTokens, cachedTokens, outputTokens?, windowTokens, effectiveWindowTokens?, at })`：只写观测事件 `model_request`（detail `{ backend, key, ticket, seq, turn, input, cached, output, window, effective_window?, at }`，`turn` 为该线程当前 `turns + 1`，即本票据的回合序号），**不改变** `ContextUsage` 状态、不自增 `turns`。`recordTurn` 语义不变：每票据一次，自增 `turns`，写 `context_usage`。
+- codex：`readRolloutContextUsage` 增加返回本回合全部 `token_count` 记录（`task_started`/`turn.started` 之后、`task_complete` 之前，按时间升序，每条 `{ input, cached, output, at }`）；runner 在回合结束后先按序 `recordRequest`（seq 从 1 起），再用最后一条 `recordTurn`。rollout 缺失时两者都跳过并保留现有 warn。
+- pi：`pi-context-usage.ts` 的 `consume` 对每条助手消息改调 `recordRequest`（seq 按票据内计数）；`recordTurn` 改到 `PiBackend.handle` 在该票据回合完成后调用一次，用最后一次请求的用量。压缩路径不变。
+- 事件量：codex 每票据几条到十几条，pi 同现在；观测库保留期清理覆盖。
+
+### 8.3 分析
+
+- `contextSeries` 的输入改为 `model_request` 事件（按 backend/key 分组、ts 升序），并把 `context_usage` 中 `source=compact` 的记录合入序列作为压缩分隔；旧数据（没有 `model_request` 的区间）回退用 `context_usage` 的 `source=turn` 记录，视为 `seq=1` 的单请求票据。
+- `ContextTurn` 增加 `seq`、`requests`（同票据的请求总数，渲染后填）、`turn`；重建判定改用 `turn === 1`（线程重置后的第一个票据）而不是 `turns`。miss/partial 的基准仍是上一条请求（跨票据或票据内均可），`gapMs` 同理。
+- 汇总：`回合数` = 不同票据数，新增 `请求数` = 记录条数；`misses` 按请求计。
+
+### 8.4 页面
+
+- 走势条：同一票据的条相邻并用分组样式（外框或交替底色）；title 为 `票据 X · 第 n/N 次请求 · 时间 · 输入 · 命中 · 原因`。
+- 明细表：票据列合并显示（同票据多行时只在首行放链接，后续行显示 `└ 第 n 次`），新增"请求"列；汇总表加"请求数"。票据页的模型回合行按请求列出命中率。
+
+### 8.5 测试与验收
+
+- store：`recordRequest` 写 `model_request` 且不改状态；codex 解析器返回全部 token_count；pi 每请求 recordRequest、每票据一次 recordTurn；分析对混合（新事件 + 旧 context_usage）序列的回退；UI 分组渲染。
+- 验收：owner codex 一个带工具调用的票据在图上出现多根相邻条且首条之后命中接近 100%；pi 群线程"回合数"回落为票据数；旧数据区间仍能显示。
