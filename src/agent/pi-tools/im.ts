@@ -31,7 +31,7 @@ export function createPiImExtensions(opts: Pick<PiToolsOptions, "sendService" | 
           } catch (error) { return { ...output((error as Error).message), isError: true }; }
         },
       }),
-      ...(permissions.actorIsOwner ? AUTH_TOOLS.map(name => defineTool({
+      ...(permissions.auth ? AUTH_TOOLS.map(name => defineTool({
         name, description: authDescriptions[name], parameters: authParameters[name],
         replay: name === "auth_list" ? "safe" as const : "unsafe" as const,
         async execute(args, api, context) {
@@ -47,8 +47,8 @@ export function createPiImExtensions(opts: Pick<PiToolsOptions, "sendService" | 
     ],
   });
   return {
-    basic: make("cs-pi-im", { actorIsOwner: false, target: false }),
-    targeted: make("cs-pi-im-target", { actorIsOwner: false, target: true }),
-    owner: make("cs-pi-im-owner", { actorIsOwner: true, target: true }),
+    basic: make("cs-pi-im", { actorIsOwner: false, target: false, auth: false }),
+    targeted: make("cs-pi-im-target", { actorIsOwner: false, target: true, auth: false }),
+    owner: make("cs-pi-im-owner", { actorIsOwner: true, target: true, auth: true }),
   };
 }

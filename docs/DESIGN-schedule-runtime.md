@@ -5,22 +5,22 @@
 
 ## 1. 存储
 - 派发 harness（pi-durable，`src/agent/harness.ts`）的 Session 级文档 `SchedulesDoc`（kind `cs.schedules`，形状 `SchedulesState`），由 A 定义。
-- 运行结果回写 `Schedule.runs`（最近 20 条）与 `failures`，经 `ScheduleRunRecorder.recordRun`（A 实现，B 调用）。
+- 运行结果回写 `Schedule.runs`（最多 20 条，queued / running 永不裁剪；在途超过上限时全部保留）与 `failures`，经 `ScheduleRunRecorder.recordRun`（A 实现，B 调用）。
 
 ## 2. A：定义、校验、管理接口（第 4 步）
 模块：`src/agent/schedule/`（`model.ts` 校验与下次时刻计算、`service.ts` ScheduleService）。
 
 - 字段见 `Schedule`。默认 `options`：`stale_after_ms = 10 分钟`，`timeout_ms = 300 s`（上限 900 s）。
-- 校验：name 1–64 字；prompt 1–8000 字；conversation 为合法会话键；rule：
+- 校验：name 1–64 字；prompt 1–8000 字；conversation 与 `isScope` 相同（QQ 号 1–20 位）；`owner` 必须已配置 owner，更新也复核已有会话；rule：
   - `rrule`：用 `rrule@2.8.1`（已在 package.json），`DTSTART;TZID=Asia/Shanghai`。**rrule.js 带 TZID 时返回"把北京墙钟时间放进 UTC 字段"的 Date，必须减 8 小时得到真实时刻**（Asia/Shanghai 无夏令时）；写 `nextFireAt(rule, afterMs)` 统一处理并用测试锁定（如每天 08:30 → 真实 00:30Z）。
-  - 最小间隔：owner 5 分钟、被授权人 30 分钟（用连续两次触发的间隔判断）。
+  - 最小间隔：owner 5 分钟、被授权人 30 分钟（检查前 50 次触发的相邻间隔；RRULE 正文仅接受 RFC 字段白名单，禁止嵌入 DTSTART/TZID，UNTIL 必须为 UTC 日期时间；低于最小间隔的 SECONDLY/MINUTELY 在遍历前拒绝，所有 rrule 遍历限时 250ms，校验在 harness.commit 外执行）。
   - `at`：必须在未来。
 - 数量：被授权人最多 5 条 active；owner 不限。创建者必须是 owner 或持有 `schedule` 授权（第 3 步的 GrantsDoc；若第 3 步代码尚未合入，用一个可注入的 `canSchedule(actor)` 函数，默认只允许 owner）。
 - `ScheduleService`：`create / update / pause / resume / remove / runNow / list / get / recordRun`。
   - 每个修改在**一次提交**里改 `SchedulesDoc` 并创建或中止对应的排程任务；revision+1。
   - `resume`：从"现在"往后算 `next_fire_at`。
   - `runNow`：不改 `next_fire_at`，直接经 `ScheduledRunAdmitter.admit` 触发一次（fire_at = now）。
-  - `recordRun`：按 fire_key 覆盖或追加 run；sent / silent 清零 failures；failed 累加，达到 3 置 paused（`pause_reason = "连续 3 次失败"`）并发 trace `schedule_paused`、走现有告警通道。
+  - `recordRun`：按 fire_key 覆盖或追加 run；sent / silent 清零 failures；failed 累加，达到 3 时仅 active 置 paused（completed 保持 completed）（`pause_reason = "连续 3 次失败"`）并发 trace `schedule_paused`、走现有告警通道。
 - JSON 接口（供第 8 步面板与第 7 步工具复用，本步只做服务端）：在面板服务下 `GET /api/schedules`、`POST /api/schedules`（create）、`POST /api/schedules/:id/{update,pause,resume,run,delete}`，同源 + CSRF 规则沿用 `src/obs/dashboard-post.ts`。
 
 ## 3. A：排程任务（第 5 步）
@@ -28,7 +28,7 @@
 - 阶段 `wait`：检查点 `{ phase: "wait", next_fire_at }`；`runtime.sleep(next_fire_at)`（内存等待；持久性靠检查点，重启后重跑本阶段继续睡到同一时刻，已过点立即返回）。
 - 阶段 `fire`（一次提交内完成）：
   1. 重读定义：不存在、非 active、revision 不等 → 任务以 completed 结束（被新任务取代）。
-  2. 迟到 `now - next_fire_at > stale_after_ms` → 记 skipped(stale)，与上一条连续的 stale 合并计数（`skipped_count`）。
+  2. 迟到 `now - next_fire_at > stale_after_ms` → 记 skipped(stale)，仅在上一条 stale 的 ended_at 距本次 fire_at 不超过一个触发间隔时合并计数（`skipped_count`）。
   3. 上一轮运行仍为 queued / running → 记 skipped(overlap)。
   4. 否则 `admitter.admit(tx, fire)`，记 run(queued, ticket)。
   5. `next = nextFireAt(rule, now)`；没有下一次（一次性已执行、UNTIL/COUNT 到期）→ completed；否则写回 `next_fire_at` 与检查点 `{ phase: "wait", next_fire_at: next }`。
@@ -62,5 +62,9 @@ B 先于 A 合入也可：A 依赖 `ScheduledRunAdmitter` 接口，测试中用�
 - 定义服务与执行器共用 `GrantsService.canSchedule(actor, conversation)`：当前 owner 始终有权；其他创建者须持有未过期且含 `schedule` 的 grant，并满足 grant 的来源 scopes。非 owner 不得进入 owner 线程；owner 代操作已有定义也会重新检查原创建者权限。
 - 自动触发和 `runNow` 共用 `ScheduledRunLauncher`：事务外 `prepare(fire)` 开票并冻结后端设置；事务内复核定义 revision、运行 ordinal、重叠与幂等状态，然后调用预备结果的 `admit(tx, fire)`；提交成功后调用 `dispatchScheduled(ticket)`，不阻塞等待后端结束。准备期间定义或序号变化时，自动触发重新准备，手动运行返回冲突供调用方重试。
 - B 的运行回写直接调用 A 的 `ScheduleService.recordRun`。无权时通过 `pauseWithReason` 使用与手动暂停相同的事务逻辑；同一原因的重放不再增加 revision，定义已删除时不重建。
-- 启动时依次执行 `dispatcher.recover()`、`schedules.start()`、`harness.resume()`。恢复先接管普通消息和定时运行的 FIFO，随后补齐排程任务并继续检查点。开票后、admit 提交前崩溃留下的孤儿票据不重跑；若该触发再次到达排程阶段，将其记为失败并释放占用，避免永久 queued。
+- 启动时依次执行 `dispatcher.recover()`、`schedules.start()`、`harness.resume()`。恢复先接管普通消息和定时运行的 FIFO，随后补齐排程任务并继续检查点。开票后、admit 提交前崩溃留下的孤儿票据不重跑；若该触发再次到达排程阶段，将其记为 skipped(interrupted) 并释放占用，不增加失败次数，避免永久 queued。`ScheduleRun.reason` 仅新增 `interrupted` 表达该中断。
 - `test/agent/schedule-integration.test.ts` 使用假时钟、真实 durable/SQLite 文档、真实 dispatcher/SendService/Outbox 与假后端，验证发送不 @、静默、失败计数、失权暂停、恢复与准备期间的定义变更。
+
+- fire 的 prepare/admit 异常只影响本次运行：admit 的局部写入完整回滚，再以新事务记录 failed(backend_failed) 和错误说明，按普通失败累计并推进下一次触发；连续三次失败仍自动暂停。
+- 设置快照与绑定校验先于开票，避免准备失败留下票据。未被采用的预备结果（revision、stale、overlap 或 runNow 冲突）结算出站票据；清理前检查持久 admission，不结算已被另一提交接管的票据。
+- ScheduleService 在启动和每十分钟巡检 active 定义，发现 cs.schedule 任务缺失或终态则重建；停机时停止巡检。已存活的检查点保持原样。

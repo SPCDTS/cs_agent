@@ -102,6 +102,10 @@ describe("pi durable backend", () => {
     const threads = await s.pi.readThreadIds();
     expect(threads.owner).toBeUndefined();
     const id = threads["group:7"] as ConversationId;
+    const conv = (await s.pi.harness.conversation(id, context))!;
+    const tools = (await conv.agent(context)).tools;
+    expect(tools.some(tool => tool.name.startsWith("auth_"))).toBe(false);
+    expect(tools.find(tool => tool.name === "send_message")!.parameters).toHaveProperty("properties.target");
     expect(await s.pi.harness.snapshot(PiRequestDoc, id, context)).toMatchObject({ access: "all", actor: "qq:1", actorIsOwner: true, senderIsOwner: true });
     await expect(s.pi.handle({ ...request("scheduled-member"), access: "all" }, handleContext())).rejects.toThrow("非法访问范围");
   });

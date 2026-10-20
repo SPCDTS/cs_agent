@@ -34,8 +34,8 @@ it("定时私聊按来源目标匹配 grant.scopes，actor 始终是创建者；
   await f.grants.panel("auth_grant", { user: "qq:9", caps: ["send"], targets: ["qq:group:8"], scopes: ["private:9"] });
   await expect(f.service.send(binding, { text: "错误来源授权", target: "qq:group:8" }, { callId: "wrong" })).rejects.toThrow("授权");
   await f.grants.panel("auth_grant", { user: "qq:9", caps: ["send"], targets: ["qq:group:8"], scopes: ["private:1"] });
-  expect(await f.grants.verify(binding)).toEqual({ actor: "qq:9", actorIsOwner: false, scope: "private:1" });
-  expect(await f.grants.permissions(binding)).toEqual({ actorIsOwner: false, target: true });
+  expect(await f.grants.verify(binding)).toEqual({ actor: "qq:9", actorIsOwner: false, scope: "private:1", origin: "scheduled" });
+  expect(await f.grants.permissions(binding)).toEqual({ actorIsOwner: false, target: true, auth: false });
   await f.service.send(binding, { text: "默认会话" }, { callId: "source" });
   await f.service.send(binding, { text: "显式来源", target: "qq:private:1" }, { callId: "explicit" });
   expect(f.listChats).not.toHaveBeenCalled();
@@ -51,7 +51,7 @@ it("定时默认发送与普通跨会话发送共用每日 ref 额度，事务�
   const f = await grantsFixture(), ticket = runTicket(3);
   await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "1" });
   for (let i = 0; i < 99; i++) f.store.reserveOutbox({
-    ticket: `quota_${i}`, call_id: null, message_type: "group", target_id: "7",
+    ticket: `quota_${i}`, proactive: true, call_id: null, message_type: "group", target_id: "7",
     mention_user_id: null, text: "已有额度", images: [], files: [],
   });
   const incoming = f.store.createTicket({ ...f.msg, message_type: "private", group_id: null, message_id: "private" });

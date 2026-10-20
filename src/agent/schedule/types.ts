@@ -21,8 +21,8 @@ export interface ScheduleRun {
   fire_key: string;
   fire_at: number;
   status: ScheduleRunStatus;
-  /** skipped 的原因：stale（迟到/停机）、overlap（上一轮未完）、paused、revision */
-  reason?: "stale" | "overlap" | "paused" | "revision" | "timeout" | "backend_failed";
+  /** skipped 的原因：stale（迟到/停机）、overlap（上一轮未完）、interrupted（开票后提交前中断）、paused、revision */
+  reason?: "stale" | "overlap" | "interrupted" | "paused" | "revision" | "timeout" | "backend_failed";
   /** 停机合并跳过的次数 */
   skipped_count?: number;
   started_at?: number;
@@ -56,7 +56,7 @@ export interface Schedule {
   next_fire_at: number | null;
   /** 连续失败次数，达到 3 自动暂停 */
   failures: number;
-  /** 最近 20 次运行，新的在后 */
+  /** 最近 20 次运行，新的在后；queued/running 不裁剪，在途超过上限时全部保留。 */
   runs: ScheduleRun[];
 }
 
@@ -79,7 +79,9 @@ export interface ScheduledFire {
  * 同一 fire_key 重复调用返回同一张运行票据（幂等）。
  */
 export interface ScheduledRunAdmitter {
-  /** skipped 表示已终结的孤儿票据不能重跑；排程侧须记失败并解除 in_flight。 */
+  /** skipped 表示已终结的孤儿票据不能重跑；排程侧须记 skipped(interrupted) 并解除 in_flight，不累计失败。 */
+  /** 未采用预备结果时结算出站票据；必须先检查同票据是否已被另一提交接管。 */
+  discard?(tx: unknown): Promise<void>;
   admit(tx: unknown, fire: ScheduledFire): Promise<{ ticket: string; skipped?: boolean }>;
 }
 

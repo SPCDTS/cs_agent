@@ -8,13 +8,13 @@ import { qqContextText } from "../context/qq-context-tool.js";
 export function createImServer(send: (args: unknown) => Promise<unknown>, opts: {
   permissions?: ImPermissions; auth?: (name: AuthTool, args: unknown) => Promise<unknown>;
 } = {}): Server {
-  const permissions = opts.permissions ?? { actorIsOwner: false, target: false };
+  const permissions = opts.permissions ?? { actorIsOwner: false, target: false, auth: false };
   const server = new Server({ name: "im", version: "1.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{
     name: "send_message", description: "立即发送消息，默认回复本回合会话，返回 message_id。直接输出不会送达用户；一条消息说完就不要再发。",
     inputSchema: sendParameters(permissions.target),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  }, ...(permissions.actorIsOwner ? AUTH_TOOLS.map(name => ({
+  }, ...(permissions.auth ? AUTH_TOOLS.map(name => ({
     name, description: authDescriptions[name], inputSchema: authParameters[name],
     annotations: { readOnlyHint: name === "auth_list", destructiveHint: name === "auth_revoke", openWorldHint: false },
   })) : [])] }));
@@ -26,7 +26,7 @@ export function createImServer(send: (args: unknown) => Promise<unknown>, opts: 
         return qqContextText(JSON.stringify(await send(args)));
       }
       if (AUTH_TOOLS.includes(req.params.name as AuthTool)) {
-        if (!permissions.actorIsOwner || !opts.auth) throw new Error("授权工具仅限 owner 回合");
+        if (!permissions.auth || !opts.auth) throw new Error("授权工具仅限 owner 回合");
         return qqContextText(JSON.stringify(await opts.auth(req.params.name as AuthTool, req.params.arguments ?? {})));
       }
       return qqContextText("未知工具：" + req.params.name, true);
@@ -50,7 +50,7 @@ export async function imViaLoopback(endpoint: "im-info" | AuthTool | "send", arg
 
 export async function imPermissions(token: string | undefined, port = 8790): Promise<ImPermissions> {
   const result = await imViaLoopback("im-info", {}, token, port) as ImPermissions;
-  if (!result || typeof result.actorIsOwner !== "boolean" || typeof result.target !== "boolean") throw new Error("IM 权限返回格式错误");
+  if (!result || typeof result.actorIsOwner !== "boolean" || typeof result.target !== "boolean" || typeof result.auth !== "boolean") throw new Error("IM 权限返回格式错误");
   return result;
 }
 

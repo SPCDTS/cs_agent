@@ -571,6 +571,9 @@ class Bridge extends EventEmitter implements Channel {
     if (!record || record.status !== "pending") throw new Error("回合票据已结束或不存在");
     // 目标由网关授权后写入 Outbox；通道仍校验来源允许名单、登录号和不可变的行内容。
     const sameSource = target.message_type === record.message_type && target.target_id === ticketTarget(record);
+    if (target.message_type === "group" && !this.config.allowGroups.includes(target.target_id)) {
+      throw new Error("目标群不在 QQ_ALLOW_GROUPS 允许名单中");
+    }
     if (opts?.mention && (record.origin === "scheduled" || !sameSource || record.message_type !== "group" || opts.mention !== record.user_id)) throw new Error("定时或主动发送不能 @，回复只能 @ 本轮发送者");
     if (text !== row.text || JSON.stringify(imagePaths) !== JSON.stringify(row.images) || (opts?.mention ?? null) !== row.mention_user_id) throw new Error("Outbox 内容不一致");
     validateText(text);

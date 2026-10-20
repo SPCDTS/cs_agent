@@ -23,7 +23,7 @@ export interface GrantBinding extends Partial<TurnIdentity> {
   ticket: string;
   source?: { type: "group" | "private"; user_id: string; group_id: string | null };
 }
-export interface ImPermissions { actorIsOwner: boolean; target: boolean }
+export interface ImPermissions { actorIsOwner: boolean; target: boolean; auth: boolean }
 
 export function parseTarget(value: unknown): { message_type: "group" | "private"; target_id: string; scope: string } {
   if (typeof value !== "string" || value !== value.trim() || !new RegExp(TARGET_PATTERN).test(value)) throw new Error("target 必须是 qq:group:<id> 或 qq:private:<QQ号>");
@@ -42,7 +42,7 @@ export class GrantsService {
   }) {}
   private now() { return (this.opts.now ?? Date.now)(); }
 
-  async verify(binding: GrantBinding): Promise<{ actor: string; actorIsOwner: boolean; scope: string }> {
+  async verify(binding: GrantBinding): Promise<{ actor: string; actorIsOwner: boolean; scope: string; origin: "message" | "scheduled" }> {
     const rec = await this.opts.getChannel().getTicket(binding.ticket);
     if (!rec) throw new Error("回合票据不存在");
     const actor = `qq:${rec.user_id}`, actorIsOwner = !!this.opts.owner && rec.user_id === this.opts.owner;
@@ -50,7 +50,7 @@ export class GrantsService {
         binding.source.type !== rec.message_type || binding.source.user_id !== rec.user_id || binding.source.group_id !== rec.group_id) {
       throw new Error("回合身份与票据不一致");
     }
-    return { actor, actorIsOwner, scope: `${rec.message_type}:${ticketTarget(rec)}` };
+    return { actor, actorIsOwner, origin: rec.origin ?? "message", scope: `${rec.message_type}:${ticketTarget(rec)}` };
   }
 
   async list() {
@@ -75,11 +75,11 @@ export class GrantsService {
 
   async permissions(binding: GrantBinding): Promise<ImPermissions> {
     // 升级前的快照没有身份声明，关闭新增能力；不能从 access=all 推断 owner。
-    if (!binding.actor || binding.actorIsOwner === undefined) return { actorIsOwner: false, target: false };
+    if (!binding.actor || binding.actorIsOwner === undefined) return { actorIsOwner: false, target: false, auth: false };
     const identity = await this.verify(binding);
-    if (identity.actorIsOwner) return { actorIsOwner: true, target: true };
+    if (identity.actorIsOwner) return { actorIsOwner: true, target: true, auth: identity.origin !== "scheduled" };
     const grant = await this.active(identity.actor, identity.scope);
-    return { actorIsOwner: false, target: !!grant?.caps.includes("send") && grant.targets.some(t => t !== `qq:${identity.scope}`) };
+    return { actorIsOwner: false, auth: false, target: !!grant?.caps.includes("send") && grant.targets.some(t => t !== `qq:${identity.scope}`) };
   }
 
   async authorizeSend(binding: GrantBinding, target: string): Promise<void> {
@@ -91,7 +91,7 @@ export class GrantsService {
 
   async tool(binding: GrantBinding, name: AuthTool, args: unknown): Promise<unknown> {
     const identity = await this.verify(binding);
-    if (!identity.actorIsOwner) throw new Error("授权工具仅限 owner 回合");
+    if (!identity.actorIsOwner || identity.origin === "scheduled") throw new Error("授权工具仅限 owner 交互回合");
     if (name === "auth_list") {
       z.object({}).strict().parse(args);
       return this.list();

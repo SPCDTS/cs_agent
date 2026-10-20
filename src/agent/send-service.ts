@@ -63,10 +63,6 @@ export class SendService {
       const sourceRef = `qq:${rec.message_type}:${ticketTarget(rec)}`;
       const targetRef = args.target ?? sourceRef, target = parseTarget(targetRef), targeted = targetRef !== sourceRef;
       const proactive = targeted || rec.origin === "scheduled";
-      if (targeted) {
-        if (!this.opts.grants) throw new Error("主动发送授权未启用");
-        await this.opts.grants.authorizeSend(binding, targetRef);
-      }
       const rows = this.rows(binding.ticket);
       const attempt = "attempt" in identity ? binding.ticket + ":" + identity.attempt : undefined;
       const ordinal = attempt ? (this.counters.get(attempt) ?? 0) + 1 : undefined;
@@ -90,7 +86,15 @@ export class SendService {
       if (existing && (existing.message_type !== target.message_type || existing.target_id !== target.target_id)) {
         return { ...this.result(existing, true), original_text: existing.text, note: "调用 id 已绑定其他消息，新内容未发送。" };
       }
-      if (targeted && (!existing || existing.status === "pending")) await this.checkMembership(target, signal);
+      if (existing && existing.status !== "pending") {
+        if (attempt) this.counters.set(attempt, ordinal!);
+        return this.deliver(existing, rec, signal);
+      }
+      if (targeted) {
+        if (!this.opts.grants) throw new Error("主动发送授权未启用");
+        await this.opts.grants.authorizeSend(binding, targetRef);
+        await this.checkMembership(target, signal);
+      }
       // 定时消息也是主动发送；默认来源与显式 target 共用每天每 ref 的额度。
       if (proactive) {
         const day = this.day();
@@ -128,7 +132,7 @@ export class SendService {
           message_type: target.message_type, target_id: target.target_id,
           mention_user_id: !targeted && rec.origin !== "scheduled" && rec.message_type === "group" && !rows.some(r => r.status !== "pending") ? rec.user_id : null,
           ...(proactive ? { dailyLimit: { ...this.day(), limit: 100 } } : {}),
-          text: args.text, images, files,
+          proactive, text: args.text, images, files,
         });
       }
       if (attempt) this.counters.set(attempt, ordinal!);

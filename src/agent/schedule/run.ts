@@ -96,17 +96,21 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
   async function prepare(input: ScheduledFire): Promise<ScheduledRunAdmitter> {
     const fire = structuredClone(input), ticket = scheduledTicket(fire.fire_key);
     const { scope, source, outbound } = binding(fire);
-    const rec = await opts.getChannel().openOutbound(ticket, outbound);
     const text = scheduledInput(fire);
     const settings = await tasks.snapshotSettings(scope, undefined, { ticket, text, hasImages: false, hasQuote: false });
+    const rec = await opts.getChannel().openOutbound(ticket, outbound);
     return {
+      async discard(transaction) {
+        const known = await (transaction as Tx).doc(AdmissionDoc, ticket, {});
+        if (known.conversationId === undefined) await tasks.sendService.settle(ticket);
+      },
       async admit(transaction, candidate) {
         if (candidate.fire_key !== fire.fire_key) throw new Error("预备票据与触发标识不一致");
         const tx = transaction as Tx;
         const known = await tx.doc(AdmissionDoc, ticket, {});
         // 终态孤儿票据也不得重新派发。
         if (known.conversationId !== undefined) return { ticket };
-        if (rec.status !== "pending") return { ticket, skipped: true };
+        if ((await opts.getChannel().getTicket(ticket))?.status !== "pending") return { ticket, skipped: true };
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
         Object.assign(await tx.doc(TicketDoc, conversation.id), {
           ticket, source, text, route: "agent", settings, time: Math.floor(fire.fire_at / 1000),

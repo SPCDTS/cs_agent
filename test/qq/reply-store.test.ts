@@ -93,11 +93,30 @@ describe("ReplyStore", () => {
     const ticket = "run_" + "d".repeat(40);
     store.openOutbound(ticket, { origin: "scheduled", message_type: "private", target_id: "20001", user_id: "9", self_id: "10001" });
     const row = store.reserveOutbox({ ticket, call_id: "target", message_type: "group", target_id: "8",
-      mention_user_id: null, text: "迁移后主动发送", images: [], files: [],
+      proactive: true, mention_user_id: null, text: "迁移后主动发送", images: [], files: [],
       dailyLimit: { start: "2000-01-01T00:00:00.000Z", end: "2100-01-01T00:00:00.000Z", limit: 100 } });
     store.close(); store = new ReplyStore(dir);
     expect(store.get(ticket)).toMatchObject({ origin: "scheduled", target_id: "20001", user_id: "9" });
     expect(store.getOutbox(row.key)).toEqual(row);
     expect(store.countModelOutbox("group", "8", "2000-01-01T00:00:00.000Z", "2100-01-01T00:00:00.000Z")).toBe(1);
   });
+});
+
+
+it("旧 Outbox 行迁移为非主动，重开后保留显式主动标记", () => {
+  store = new ReplyStore(dir);
+  const old = store.reserveOutbox({ ticket: "old", call_id: null, message_type: "group", target_id: "8",
+    mention_user_id: null, text: "旧消息", images: [], files: [], proactive: true });
+  store.close();
+  const raw = new DatabaseSync(join(dir, DB_FILE));
+  raw.exec("ALTER TABLE outbox DROP COLUMN proactive");
+  raw.close();
+  store = new ReplyStore(dir);
+  expect(store.getOutbox(old.key)?.proactive).toBe(false);
+  expect(store.countModelOutbox("group", "8", "2000", "2100")).toBe(0);
+  const current = store.reserveOutbox({ ticket: "new", call_id: null, message_type: "group", target_id: "8",
+    mention_user_id: null, text: "新主动消息", images: [], files: [], proactive: true });
+  store.close(); store = new ReplyStore(dir);
+  expect(store.getOutbox(current.key)?.proactive).toBe(true);
+  expect(store.countModelOutbox("group", "8", "2000", "2100")).toBe(1);
 });

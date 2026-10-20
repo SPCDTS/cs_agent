@@ -4,7 +4,7 @@ import { ScheduleRuntimeDoc, SchedulesDoc } from "../../src/agent/schedule/docs.
 import { ctx, flush, input, owner, rig, START } from "./schedule-fixture.js";
 
 const clean: (() => Promise<void>)[] = [];
-beforeEach(() => { vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] }); vi.setSystemTime(START); });
+beforeEach(() => { vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] }); vi.setSystemTime(START); });
 afterEach(async () => { for (const close of clean.splice(0)) await close(); vi.useRealTimers(); });
 const setup = async () => { const r = await rig(); clean.push(() => r.close()); return r; };
 type Rig = Awaited<ReturnType<typeof rig>>;
@@ -179,4 +179,61 @@ describe("cs.schedule 假时钟与持久恢复", () => {
     expect(r.event).toHaveBeenCalledTimes(1);
     expect(r.reports).toEqual([]);
   });
+});
+
+
+it.each(["prepare", "admit"] as const)("%s 抛错只记录本次失败；下一次照常触发", async stage => {
+  const r = await setup(), s = await r.service.create(owner, input()), id = await taskId(r, s.id);
+  r.admitter.prepareError = stage === "prepare"; r.admitter.reject = stage === "admit";
+  r.harness.resume(); await waiting(r, id, START + 300_000);
+  await vi.advanceTimersByTimeAsync(300_000);
+  await waiting(r, id, START + 600_000);
+  expect(await r.service.get(s.id)).toMatchObject({ status: "active", failures: 1, runs: [
+    { status: "failed", reason: "backend_failed", note: expect.stringContaining(stage === "prepare" ? "prepare failed" : "admission failed") },
+  ] });
+  expect((await r.harness.snapshot(ScheduleRuntimeDoc, ctx))?.in_flight).toEqual({});
+  r.admitter.prepareError = false; r.admitter.reject = false;
+  await vi.advanceTimersByTimeAsync(300_000);
+  await flush(() => r.admitter.calls.length === 1);
+  expect((await r.service.get(s.id))?.runs.map(run => run.status)).toEqual(["failed", "queued"]);
+  expect(r.reports).toEqual([]);
+});
+
+it("连续三次 prepare 失败按普通失败自动暂停", async () => {
+  const r = await setup(), s = await r.service.create(owner, input()), id = await taskId(r, s.id);
+  r.admitter.prepareError = true; r.harness.resume();
+  for (let n = 1; n <= 3; n++) {
+    await waiting(r, id, START + n * 300_000); await vi.advanceTimersByTimeAsync(300_000);
+    await flush(async () => (await r.service.get(s.id))?.runs.length === n);
+  }
+  expect(await r.service.get(s.id)).toMatchObject({ status: "paused", failures: 3 });
+  expect(r.reports).toEqual([]);
+});
+
+it("启动与十分钟巡检补齐缺失或终态任务，保留仍存活的任务", async () => {
+  const r = await setup(), s = await r.service.create(owner, input()), old = await taskId(r, s.id);
+  await r.harness.abortTask(old, ctx); r.harness.resume();
+  await flush(async () => (await r.harness.getTask(old, ctx))?.state.status === "terminal");
+  await r.service.start();
+  const alive = await taskId(r, s.id);
+  expect(alive).not.toBe(old);
+  await r.service.start(); expect(await taskId(r, s.id)).toBe(alive);
+  await r.harness.abortTask(alive, ctx);
+  await flush(async () => (await r.harness.getTask(alive, ctx))?.state.status === "terminal");
+  await vi.advanceTimersByTimeAsync(599_999);
+  expect(await taskId(r, s.id)).toBe(alive);
+  await vi.advanceTimersByTimeAsync(1);
+  await flush(async () => await taskId(r, s.id) !== alive);
+  await r.harness.commit(async tx => { (await tx.doc(ScheduleRuntimeDoc)).tasks[s.id] = 999999; }, ctx);
+  await r.service.start();
+  expect(await taskId(r, s.id)).not.toBe(999999);
+});
+
+it("两段不相连的停机不合并 stale 行", async () => {
+  const r = await setup(), s = await r.service.create(owner, input()), at = START + 300_000;
+  await r.service.recordRun(s.id, { fire_key: `${s.id}@${START - 900_000}`, fire_at: START - 900_000,
+    status: "skipped", reason: "stale", skipped_count: 2, ended_at: START - 600_000 });
+  vi.setSystemTime(at + 900_000); r.harness.resume();
+  await flush(async () => (await r.service.get(s.id))?.runs.length === 2);
+  expect((await r.service.get(s.id))?.runs.map(run => run.skipped_count)).toEqual([2, 4]);
 });

@@ -1,5 +1,7 @@
 import rrule from "rrule";
+import { runInNewContext } from "node:vm";
 import { z } from "zod";
+import { isScope } from "../../context/access.js";
 import type { Schedule, ScheduleRule } from "./types.js";
 
 const { RRule, rrulestr } = rrule;
@@ -22,7 +24,7 @@ const optionsSchema = z.object({
 const fields = {
   name: z.string().trim().min(1).max(64),
   prompt: z.string().trim().min(1).max(8000),
-  conversation: z.string().regex(/^(owner|(?:group|private):[1-9]\d*)$/),
+  conversation: z.string().refine(value => value === "owner" || isScope(value) && value === value.trim()),
   rule: ruleSchema,
   mode: z.literal("thread").optional(),
   options: optionsSchema.optional(),
@@ -61,7 +63,12 @@ function recurrence(rule: Extract<ScheduleRule, { kind: "rrule" }>) {
     BYHOUR: [0, 23], BYMONTH: [1, 12], BYMONTHDAY: [-31, 31, true],
     BYYEARDAY: [-366, 366, true], BYWEEKNO: [-53, 53, true], BYSETPOS: [-366, 366, true],
   };
+  const allowed = new Set(["FREQ", "UNTIL", "COUNT", "INTERVAL", "BYSECOND", "BYMINUTE", "BYHOUR",
+    "BYDAY", "BYMONTHDAY", "BYYEARDAY", "BYWEEKNO", "BYMONTH", "BYSETPOS", "WKST"]);
   for (const [key, value] of parts) {
+    if (!allowed.has(key)) throw new ScheduleError(400, `RRULE 不支持字段 ${key}`);
+    if (key === "FREQ" && !/^(YEARLY|MONTHLY|WEEKLY|DAILY|HOURLY|MINUTELY|SECONDLY)$/.test(value)) throw new ScheduleError(400, "RRULE FREQ 无效");
+    if (key === "WKST" && !/^(MO|TU|WE|TH|FR|SA|SU)$/.test(value)) throw new ScheduleError(400, "RRULE WKST 无效");
     const range = ranges[key];
     if (range && (["INTERVAL", "COUNT"].includes(key) && value.includes(",") ||
       value.split(",").some(v => !/^-?\d+$/.test(v) || +v < range[0] || +v > range[1] || range[2] && +v === 0))) {
@@ -78,6 +85,10 @@ function recurrence(rule: Extract<ScheduleRule, { kind: "rrule" }>) {
     }
   }
   if (!parts.some(([key]) => key === "FREQ")) throw new ScheduleError(400, "RRULE 缺少 FREQ");
+  const values = Object.fromEntries(parts);
+  if (values.COUNT && values.UNTIL) throw new ScheduleError(400, "RRULE COUNT 与 UNTIL 不可同时使用");
+  // 秒/分钟级的密集规则必须在调用 rrule 前拒绝，避免从旧 DTSTART 扫描海量候选。
+  checkFrequency(values, 5);
   try {
     const start = new Date(Math.ceil(rule.dtstart / 1000) * 1000 + SHANGHAI_OFFSET_MS).toISOString().replace(/[-:]/g, "").slice(0, 15);
     const parsed = rrulestr(`DTSTART;TZID=Asia/Shanghai:${start}\nRRULE:${rule.rrule}`);
@@ -92,20 +103,44 @@ function recurrence(rule: Extract<ScheduleRule, { kind: "rrule" }>) {
   }
 }
 
+/** 固定代码调用受信任的 rrule；VM 超时中断无解过滤器等同步长循环。 */
+function evaluate<T>(operation: () => T): T {
+  try { return runInNewContext("operation()", { operation }, { timeout: 250 }) as T; }
+  catch (error) {
+    if ((error as { code?: string }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
+      throw new ScheduleError(400, "RRULE 计算超过 250ms，请简化规则或缩短 DTSTART 范围");
+    }
+    throw error;
+  }
+}
+
 /** 严格晚于 afterMs；一次性及 COUNT / UNTIL 到期返回 null。 */
 export function nextFireAt(rule: ScheduleRule, afterMs: number): number | null {
   if (rule.kind === "at") return rule.at > afterMs ? rule.at : null;
-  const next = recurrence(rule).after(new Date(afterMs + SHANGHAI_OFFSET_MS), false);
+  const next = evaluate(() => recurrence(rule).after(new Date(afterMs + SHANGHAI_OFFSET_MS), false));
   return next ? next.getTime() - SHANGHAI_OFFSET_MS : null;
+}
+
+function checkFrequency(values: Record<string, string>, minutes: number): void {
+  const unit = values.FREQ === "SECONDLY" ? 1000 : values.FREQ === "MINUTELY" ? 60_000 : undefined;
+  if (unit && Number(values.INTERVAL ?? 1) * unit < minutes * 60_000) {
+    throw new ScheduleError(400, `触发间隔不得少于 ${minutes} 分钟`);
+  }
 }
 
 export function validateRule(rule: ScheduleRule, now: number, owner: boolean): number {
   if (rule.kind === "rrule") {
-    const first = nextFireAt(rule, rule.dtstart - 1);
-    const second = first === null ? null : nextFireAt(rule, first);
-    if (first !== null && second !== null && second - first < (owner ? 5 : 30) * 60_000) {
-      throw new ScheduleError(400, `触发间隔不得少于 ${owner ? 5 : 30} 分钟`);
-    }
+    const minutes = owner ? 5 : 30;
+    checkFrequency(Object.fromEntries(rule.rrule.split(";").map(part => part.split("="))), minutes);
+    let previous: number | undefined;
+    evaluate(() => recurrence(rule).all((date, index) => {
+      const at = date.getTime() - SHANGHAI_OFFSET_MS;
+      if (previous !== undefined && at - previous < minutes * 60_000) {
+        throw new ScheduleError(400, `触发间隔不得少于 ${minutes} 分钟`);
+      }
+      previous = at;
+      return index < 49;
+    }));
   }
   const next = nextFireAt(rule, now);
   if (next === null) throw new ScheduleError(400, "规则必须包含未来的触发时刻");
@@ -116,7 +151,7 @@ export function validateRule(rule: ScheduleRule, now: number, owner: boolean): n
 export function missedFires(rule: ScheduleRule, from: number, now: number): number {
   if (rule.kind === "at") return 1;
   let count = 0;
-  recurrence(rule).between(new Date(from + SHANGHAI_OFFSET_MS), new Date(now + SHANGHAI_OFFSET_MS), true,
-    () => { count++; return true; });
+  evaluate(() => recurrence(rule).between(new Date(from + SHANGHAI_OFFSET_MS), new Date(now + SHANGHAI_OFFSET_MS), true,
+    () => { count++; return true; }));
   return Math.max(1, count);
 }

@@ -55,6 +55,7 @@
 | `call_id` | 后端给出的稳定工具调用 id（pi 的 toolCallId），可空；`(ticket, call_id)` 唯一 |
 | `message_type` / `target_id` | 发送目标 |
 | `mention_user_id` | 群里要 @ 的人，可空 |
+| `proactive` | 显式 target 不同于来源会话，或票据 origin=scheduled 时为 true；旧行迁移为 false |
 | `status` | pending → sending → sent / uncertain；sending / uncertain 永不自动重发 |
 | `message_id`、`text_sha256`、`images`、`created_at`、`sent_at` | 回执与审计 |
 
@@ -126,10 +127,10 @@ type Grant = {
 ### 4.3 工具
 - `send_message` 增加可选参数 `target`：`<channel>:<scope>` 字符串，本步只支持 `qq:group:<id>`、`qq:private:<qq>`。
   - 省略或等于本回合会话 → 与第 2 步相同。
-  - 指向别处 → 校验：(1) 格式合法；(2) 发言人是 owner，或持有未过期且 scopes 允许本会话的 `send` 授权、target 在其 `targets` 内；(3) bot 确实在该群 / 对方是好友（`Channel.listChats`，结果缓存 5 分钟）；(4) 该 ref 当天（Asia/Shanghai）主动发送 < 100 条（按 Outbox 中发往该 ref 的模型行计）。不通过返回错误文本。
+  - 指向别处 → 校验：(1) 格式合法；(2) 发言人是 owner，或持有未过期且 scopes 允许本会话的 `send` 授权、target 在其 `targets` 内；(3) 目标群必须在 `QQ_ALLOW_GROUPS` 内且 bot 确实在该群；私聊对方必须是好友（`Channel.listChats`，结果缓存 5 分钟）；(4) 该 ref 当天（Asia/Shanghai）主动发送 < 100 条（仅按 Outbox 中 `proactive=true` 的模型行计，含 pending / sending / uncertain 预留；普通入站回合回复来源会话不计，定时回合所有消息均计）。不通过返回错误文本。
   - 主动发送不 @ 任何人；计入本回合 3 条额度；Outbox 行的目标是 target；发出的消息作为 bot 行写入**目标会话**的消息库。
   - 工具参数说明里只有在本回合有权使用 target 时才出现 `target`（pi 按回合配置工具；codex 的 im MCP 子进程按令牌声明决定是否在 schema 中列出）。
-- `auth_grant({ user, caps, targets?, scopes?, expires_in_hours? })` / `auth_revoke({ user, caps? })` / `auth_list()`：仅 owner 发起的回合可用（其他回合不列出、调用也拒绝）。pi 进程内；codex 放在 `im` MCP（回环端点同样按令牌校验 owner）。
+- `auth_grant({ user, caps, targets?, scopes?, expires_in_hours? })` / `auth_revoke({ user, caps? })` / `auth_list()`：仅 owner 发起的交互回合可用，包括群聊（其他回合不列出、调用也拒绝；`origin=scheduled` 即使创建者是 owner 也禁止，发送 target 仍按创建者权限判断）。pi 进程内；codex 放在 `im` MCP（回环端点同样按令牌校验 owner）。
 - trace：`send_message` 增加 `target`；新增 `auth_changed`（来源 panel / tool、前后差异）。
 
 ### 4.4 验收

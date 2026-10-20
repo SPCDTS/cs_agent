@@ -54,7 +54,9 @@ describe("定时规则", () => {
   it.each(["", "FREQ=MINUTELY;INTERVAL=0", "FREQ=DAILY;COUNT=0", "FREQ=DAILY;BYHOUR=25",
     "FREQ=DAILY;BYMINUTE=60", "FREQ=DAILY;BYSECOND=-1", "FREQ=MONTHLY;BYMONTHDAY=0",
     "FREQ=DAILY;BYDAY=54MO", "FREQ=DAILY;BYDAY=0MO", "FREQ=BOGUS", "BYHOUR=8",
-    "FREQ=DAILY;FREQ=WEEKLY", "FREQ=DAILY;UNTIL=20261020", "FREQ=DAILY;UNTIL=20260230T003000Z",
+    "FREQ=DAILY;DTSTART=20261020T080000Z", "FREQ=DAILY;TZID=UTC", "FREQ=DAILY;TZID=Asia/Shanghai",
+    "FREQ=DAILY;BYEASTER=1", "FREQ=DAILY;FOO=1", "FREQ=DAILY;WKST=XX", "FREQ=DAILY;UNTIL=20261020T080000",
+    "FREQ=DAILY;COUNT=2;UNTIL=20261021T003000Z", "FREQ=DAILY;FREQ=WEEKLY", "FREQ=DAILY;UNTIL=20261020", "FREQ=DAILY;UNTIL=20260230T003000Z",
     "DTSTART;TZID=UTC:20261020T080000\nRRULE:FREQ=DAILY"])(
     "拒绝非法规则 %s", rrule => expect(() => validateRule({ ...daily, rrule }, now, true)).toThrow(),
   );
@@ -69,6 +71,7 @@ describe("定时规则", () => {
     expect(DEFAULT_SCHEDULE_OPTIONS).toEqual({ stale_after_ms: 600_000, timeout_ms: 300_000 });
     for (const patch of [
       { name: "" }, { name: "a".repeat(65) }, { prompt: "" }, { prompt: "a".repeat(8001) },
+      { conversation: "group:" + "1".repeat(21) }, { conversation: "private:" + "1".repeat(21) }, { conversation: "group:1\\n" },
       { conversation: "group:x" }, { conversation: "private:0" }, { conversation: "qq:group:1" },
       { mode: "fork" }, { options: { timeout_ms: 900_001 } }, { options: { timeout_ms: 0 } },
       { options: { stale_after_ms: -1 } }, { created_by: "qq:1" },
@@ -77,4 +80,20 @@ describe("定时规则", () => {
     expect(() => parseUpdate({ conversation: "private:1" })).toThrow();
     expect(() => parseUpdate({ revision: 10 })).toThrow();
   });
+});
+
+
+it("前两次合规但第三次间隔过短仍拒绝", () => {
+  expect(() => validateRule({ ...daily, rrule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=0,10,11" }, now, true)).toThrow("间隔");
+});
+
+it.each(["FREQ=SECONDLY", "FREQ=MINUTELY", "FREQ=SECONDLY;INTERVAL=299"])("旧 DTSTART 的密集规则 %s 在遍历之前被拒绝", rrule => {
+  expect(() => validateRule({ kind: "rrule", rrule, dtstart: 0 }, now, true)).toThrow("间隔");
+});
+
+
+it("无解的分钟级过滤器受计算预算限制，不扫描到 9999 年", () => {
+  const rule: ScheduleRule = { kind: "rrule", dtstart: now,
+    rrule: "FREQ=MINUTELY;INTERVAL=5;BYMONTH=2;BYMONTHDAY=30" };
+  expect(() => validateRule(rule, now, true)).toThrow("计算超过");
 });

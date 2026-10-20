@@ -12,7 +12,7 @@ import type { AgentBackend, AgentRequest } from "../../src/agent/backends/types.
 import { parseAccess } from "../../src/context/access.js";
 import { Dispatcher } from "../../src/agent/dispatch.js";
 import { DispatchDoc } from "../../src/agent/docs.js";
-import { ScheduleRuntimeDoc } from "../../src/agent/schedule/docs.js";
+import { SchedulesDoc, ScheduleRuntimeDoc } from "../../src/agent/schedule/docs.js";
 import { createScheduledRuntime, scheduledTicket } from "../../src/agent/schedule/run.js";
 import { ScheduleService } from "../../src/agent/schedule/service.js";
 import { createScheduleTask } from "../../src/agent/schedule/task.js";
@@ -69,14 +69,14 @@ async function rig() {
   };
   await open();
   await service.start();
-  cleanup.push(async () => { await harness.close(ctx); await dispatcher.idle(); });
-  return { ...f, send, grants, scheduled, requests, reports, launcher,
+  cleanup.push(async () => { service.stop(); await harness.close(ctx); await dispatcher.idle(); });
+  return { ...f, send, grants, tasks, scheduled, scheduleTask, requests, reports, launcher,
     get service() { return service; }, get harness() { return harness; }, get dispatcher() { return dispatcher; },
     get outcome() { return outcome; },
     set outcome(value: typeof outcome) { outcome = value; },
     get dispatchEnabled() { return dispatchEnabled; },
     set dispatchEnabled(value: boolean) { dispatchEnabled = value; },
-    async restart() { await harness.close(ctx); await dispatcher.idle(); await open(); },
+    async restart() { service.stop(); await harness.close(ctx); await dispatcher.idle(); await open(); },
     async recover() { await dispatcher.recover(); await service.start(); harness.resume(); },
     async waiting(schedule: Schedule, at: number) {
       const id = (await harness.snapshot(ScheduleRuntimeDoc, ctx))!.tasks[schedule.id] as TaskId;
@@ -93,7 +93,7 @@ async function rig() {
       await vi.advanceTimersByTimeAsync(at - Date.now());
       await flush(async () => (await service.get(schedule.id))!.runs.some(run => run.fire_at === at));
       if (dispatchEnabled) {
-        await flush(async () => ["sent", "silent", "failed"].includes((await service.get(schedule.id))!.runs.at(-1)!.status));
+        await flush(async () => ["sent", "silent", "failed", "skipped"].includes((await service.get(schedule.id))!.runs.at(-1)!.status));
         await dispatcher.idle();
       }
       return (await service.get(schedule.id))!;
@@ -164,9 +164,9 @@ it("立即运行也在提交后自动派发，后端失败累计三次暂停且�
 it.each(["expired", "revoked"] as const)("排队后授权 %s：执行前按创建者重查并暂停，owner 不能代替创建者权限", async kind => {
   const r = await rig(); r.dispatchEnabled = false;
   await r.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"], scopes: ["group:7"], expires_in_hours: 1 });
-  const s = await r.service.create("qq:9", input({ conversation: "group:7", rule: { kind: "at", at: START + 1000 } }));
+  const s = await r.service.create("qq:9", input({ conversation: "group:7", rule: { kind: "rrule", rrule: "FREQ=MINUTELY;INTERVAL=30", dtstart: START } }));
   await r.recover();
-  const queued = (await r.fire(s, START + 1000)).runs[0];
+  const queued = (await r.fire(s, START + 1_800_000)).runs[0];
   if (kind === "expired") vi.setSystemTime(START + 3_600_000);
   else await r.grants.panel("auth_revoke", { user: "qq:9", caps: ["schedule"] });
   await r.dispatcher.dispatchScheduled(queued.ticket!);
@@ -207,11 +207,11 @@ it("开票后提交前崩溃：孤儿票据不重跑，也不让 Schedule 永久
   await r.restart();
   await r.recover();
   const skipped = await r.fire(s, at);
-  expect(skipped.runs[0]).toMatchObject({ status: "failed", note: expect.stringContaining("未重新执行") });
-  expect(skipped.failures).toBe(1);
+  expect(skipped.runs[0]).toMatchObject({ status: "skipped", reason: "interrupted", note: expect.stringContaining("未重新执行") });
+  expect(skipped.failures).toBe(0);
   expect(r.requests).toEqual([]);
   expect((await r.harness.snapshot(ScheduleRuntimeDoc, ctx))?.in_flight).toEqual({});
-  expect((await r.fire(s, at + 300_000)).runs.map(run => run.status)).toEqual(["failed", "sent"]);
+  expect((await r.fire(s, at + 300_000)).runs.map(run => run.status)).toEqual(["skipped", "sent"]);
   expect(r.requests).toHaveLength(1);
 });
 
@@ -225,6 +225,74 @@ it("prepare 不占提交锁；准备期间定义变更，立即运行拒绝旧�
   };
   await expect(r.service.runNow("qq:1", s.id)).rejects.toMatchObject({ status: 409 });
   expect(r.requests).toEqual([]);
+  expect(r.store.get(scheduledTicket(`${s.id}@${START}`))?.status).toBe("sent");
   expect((await r.service.get(s.id))?.runs).toEqual([]);
   expect((await r.harness.snapshot(DispatchDoc, ctx))?.pending ?? {}).toEqual({});
+});
+
+
+it.each(["login", "settings", "binding", "admit"] as const)("真实 %s 异常不会终结排程，也不会留下待处理票据或部分 admission", async stage => {
+  const r = await rig(), s = await r.service.create("qq:1", input({ conversation: "group:7" }));
+  if (stage === "binding") await r.harness.commit(async tx => {
+    (await tx.doc(SchedulesDoc)).schedules[s.id].conversation = "group:invalid";
+  }, ctx);
+  if (stage === "login") vi.spyOn(r.bridge, "openOutbound").mockRejectedValueOnce(new Error("NapCat 离线"));
+  if (stage === "settings") vi.spyOn(r.tasks, "snapshotSettings").mockRejectedValueOnce(new Error("读取设置失败"));
+  if (stage === "admit") {
+    const prepare = r.launcher.prepare;
+    r.launcher.prepare = async fire => {
+      const prepared = await prepare(fire);
+      r.launcher.prepare = prepare;
+      return { ...prepared, admit: async (tx, fire) => {
+        await prepared.admit(tx, fire);
+        throw new Error("admission 写入后失败");
+      } };
+    };
+  }
+  await r.recover();
+  const result = await r.fire(s, START + 300_000);
+  expect(result).toMatchObject({ status: "active", failures: 1, next_fire_at: START + 600_000,
+    runs: [{ status: "failed", reason: "backend_failed", note: expect.stringContaining("失败") }] });
+  expect((await r.harness.snapshot(DispatchDoc, ctx))?.pending ?? {}).toEqual({});
+  expect(r.store.listPending()).toEqual([]);
+  if (stage === "binding") await r.harness.commit(async tx => {
+    (await tx.doc(SchedulesDoc)).schedules[s.id].conversation = "group:7";
+  }, ctx);
+  expect((await r.fire(s, START + 600_000)).runs.map(run => run.status)).toEqual(["failed", "sent"]);
+  expect(r.requests).toHaveLength(1);
+  expect(r.reports).toEqual([]);
+});
+
+it.each(["revision", "stale", "overlap"] as const)("自动 fire 在准备后判定 %s 时结算未采用的票据", async conflict => {
+  const r = await rig(), s = await r.service.create("qq:1", input({ conversation: "group:7" }));
+  const at = s.next_fire_at!, prepare = r.launcher.prepare;
+  vi.setSystemTime(at);
+  r.launcher.prepare = async fire => {
+    const result = await prepare(fire);
+    if (conflict === "revision") await r.service.update("qq:1", s.id, { prompt: "新版" });
+    if (conflict === "stale") vi.setSystemTime(at + s.options.stale_after_ms + 1);
+    if (conflict === "overlap") await r.service.recordRun(s.id, {
+      fire_key: `${s.id}@${at - 1}`, fire_at: at - 1, status: "running",
+    });
+    return result;
+  };
+  await r.scheduleTask.definition.phases.fire({
+    input: { id: s.id, revision: s.revision }, state: { status: "running", checkpoint: { phase: "fire", next_fire_at: at } },
+  } as never, { snapshot: r.harness.snapshot.bind(r.harness), now: Date.now,
+    commit: (change: Parameters<typeof r.harness.commit>[0]) => r.harness.commit(change, ctx),
+  } as never, ctx);
+  expect(r.store.get(scheduledTicket(`${s.id}@${at}`))?.status).toBe("sent");
+  expect((await r.harness.snapshot(DispatchDoc, ctx))?.pending ?? {}).toEqual({});
+  expect(r.requests).toEqual([]);
+});
+
+it("同一 fire 并发 runNow 的清理不会结算已被另一次提交接管的票据", async () => {
+  const r = await rig(), s = await r.service.create("qq:1", input({ conversation: "group:7" }));
+  r.dispatchEnabled = false;
+  const results = await Promise.all([r.service.runNow("qq:1", s.id), r.service.runNow("qq:1", s.id)]);
+  expect(results[0]).toEqual(results[1]);
+  expect(r.store.get(results[0].ticket!)?.status).toBe("pending");
+  expect(Object.keys((await r.harness.snapshot(DispatchDoc, ctx))!.pending)).toEqual([results[0].ticket]);
+  await r.dispatcher.dispatchScheduled(results[0].ticket!);
+  expect(r.requests).toHaveLength(1);
 });

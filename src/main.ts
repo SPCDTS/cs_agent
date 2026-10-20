@@ -438,6 +438,7 @@ async function main(): Promise<void> {
     server.close();
     alerts.stop();
     aging.stop();
+    schedules.stop();
     await recallServer.close();
     await bridge!.stop().catch(() => undefined);
     await closeAgentHarnesses(harness, pi);

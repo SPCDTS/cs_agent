@@ -13,7 +13,7 @@ export interface RecallBinding extends Partial<TurnIdentity> {
   workdir?: string; session?: string;
 }
 export interface SendGateway {
-  permissions?(binding: RecallBinding): Promise<{ actorIsOwner: boolean; target: boolean }>;
+  permissions?(binding: RecallBinding): Promise<{ actorIsOwner: boolean; target: boolean; auth: boolean }>;
   auth?(binding: RecallBinding, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown): Promise<unknown>;
   send(binding: RecallBinding, attempt: string, args: unknown, signal: AbortSignal): Promise<unknown>;
   release(ticket: string, attempt: string): void;
@@ -90,7 +90,7 @@ export class RecallTokens {
 
   async permissions(token: string) {
     if (!this.valid(token)) throw new Error("发送令牌无效或已过期");
-    const result = await this.gateway?.permissions?.(this.tokens.get(token)!.binding) ?? { actorIsOwner: false, target: false };
+    const result = await this.gateway?.permissions?.(this.tokens.get(token)!.binding) ?? { actorIsOwner: false, target: false, auth: false };
     if (!this.valid(token)) throw new Error("发送令牌已作废");
     return result;
   }
@@ -98,7 +98,7 @@ export class RecallTokens {
   async auth(token: string, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown) {
     if (!this.valid(token)) throw new Error("发送令牌无效或已过期");
     const binding = this.tokens.get(token)!.binding;
-    if (!binding.actorIsOwner || !this.gateway?.auth) throw new Error("授权工具仅限 owner 回合");
+    if (!binding.actorIsOwner || !(await this.permissions(token)).auth || !this.gateway?.auth) throw new Error("授权工具仅限 owner 回合");
     return this.gateway.auth(binding, name, args);
   }
 

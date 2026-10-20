@@ -25,7 +25,8 @@ export class AdmitterStub implements ScheduledRunAdmitter, ScheduledRunLauncher 
   calls: ScheduledFire[] = [];
   fail = false;
   reject = false;
-  async prepare(_fire: ScheduledFire) { return this; }
+  prepareError = false;
+  async prepare(_fire: ScheduledFire) { if (this.prepareError) throw new Error("prepare failed"); return this; }
   dispatchScheduled(_ticket: string) {}
   async admit(tx: unknown, fire: ScheduledFire) {
     if (this.reject) throw new Error("admission failed");
@@ -65,7 +66,7 @@ export async function rig(options: { canSchedule?: (actor: string) => boolean | 
   await open();
   return {
     get harness() { return harness; }, get service() { return service; }, admitter, event, reports, task,
-    async restart() { await harness.close(ctx); await open(); },
-    async close() { await harness.close(ctx); rmSync(dir, { recursive: true, force: true }); },
+    async restart() { service.stop(); await harness.close(ctx); await open(); },
+    async close() { service.stop(); await harness.close(ctx); rmSync(dir, { recursive: true, force: true }); },
   };
 }

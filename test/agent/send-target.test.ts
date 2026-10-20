@@ -71,7 +71,7 @@ it("相同正文不同目标分别发送；codex 重跑目标改变只返回原�
 });
 
 function seed(f: Awaited<ReturnType<typeof grantsFixture>>, n: number) {
-  for (let i = 0; i < n; i++) f.store.reserveOutbox({ ticket: `quota_${i}`, call_id: null, text: "计数", images: [], files: [],
+  for (let i = 0; i < n; i++) f.store.reserveOutbox({ ticket: `quota_${i}`, proactive: true, call_id: null, text: "计数", images: [], files: [],
     message_type: "group", target_id: "8", mention_user_id: null });
 }
 
@@ -117,4 +117,40 @@ it("pending 跨目标消息重试不能绕过授权撤销或更换目标", async
   expect(replay).toMatchObject({ status: "pending", target_id: "8" });
   expect(f.service.rows(f.ticket)).toHaveLength(1);
   expect(f.call.mock.calls.filter(c => c[0].startsWith("send_"))).toHaveLength(0);
+});
+
+
+it.each(["pi", "codex"] as const)("已发送目标消息在授权撤销后仍可按 %s 调用身份重放", async backend => {
+  const f = await grantsFixture("99");
+  await f.grants.panel("auth_grant", { user: "qq:1", caps: ["send"], targets: ["qq:group:8"] });
+  const args = { text: "已授权发送", target: "qq:group:8" };
+  const first = await f.service.send(f.binding, args, backend === "pi" ? { callId: "stable" } : { attempt: "first" });
+  await f.grants.panel("auth_revoke", { user: "qq:1" });
+  const replay = await f.service.send(f.binding, args, backend === "pi" ? { callId: "stable" } : { attempt: "retry" });
+  expect(replay).toMatchObject({ already_sent: true, message_id: first.message_id });
+  expect(f.call.mock.calls.filter(([action]) => action === "send_group_msg")).toHaveLength(1);
+  await expect(f.service.send(f.binding, { ...args, text: "新调用" }, { callId: "new" })).rejects.toThrow("授权");
+});
+
+it("普通来源回复不计每日主动额度，显式跨会话发送单独计数", async () => {
+  const f = await grantsFixture();
+  for (let i = 0; i < 100; i++) {
+    const ticket = f.store.createTicket({ ...f.msg, group_id: "8", message_id: "reply-" + i });
+    await f.service.send({ ...f.binding, ticket, source: { ...f.binding.source, group_id: "8" } },
+      { text: "普通回复", ...(i % 2 ? { target: "qq:group:8" } : {}) }, { callId: "reply" });
+    expect(f.service.rows(ticket)[0].proactive).toBe(false);
+  }
+  const count = () => f.store.countModelOutbox("group", "8", "2000", "2100");
+  expect(count()).toBe(0);
+  await f.service.send(f.binding, { text: "主动通知", target: "qq:group:8" }, { callId: "proactive" });
+  expect(f.service.rows(f.ticket)[0].proactive).toBe(true);
+  expect(count()).toBe(1);
+});
+
+it("即使 owner 有权且 bot 已入群，目标群也必须在 QQ_ALLOW_GROUPS 内", async () => {
+  const f = await grantsFixture();
+  f.listChats.mockResolvedValue({ groups: [{ group_id: "99", name: "未允许群" }], friends: [] });
+  await expect(f.service.send(f.binding, { target: "qq:group:99", text: "拒绝" }, { callId: "denied" })).rejects.toThrow("QQ_ALLOW_GROUPS");
+  expect(f.call.mock.calls.some(([action]) => action.startsWith("send_"))).toBe(false);
+  expect(f.service.rows(f.ticket)[0].status).toBe("pending");
 });

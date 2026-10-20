@@ -377,3 +377,14 @@ it("派发器尝试耗尽也记录失败，释放队列且不走消息兜底", a
   expect((await f.harness.snapshot(DispatchDoc, ctx))?.pending).toEqual({});
   expect(f.service.rows(ticket)).toEqual([]);
 });
+
+
+it("准备后票据被冲突清理终结，admit 重查票据状态并跳过", async () => {
+  const r = await rig(), value = fire();
+  const first = await r.scheduled.prepare(value), second = await r.scheduled.prepare(value);
+  await r.harness.commit(tx => first.discard!(tx), ctx);
+  const result = await r.harness.commit(tx => second.admit(tx, value), ctx);
+  expect(result).toMatchObject({ ticket: scheduledTicket(value.fire_key), skipped: true });
+  expect((await r.harness.snapshot(DispatchDoc, ctx))?.pending ?? {}).toEqual({});
+  expect(r.store.get(result.ticket)?.status).toBe("sent");
+});

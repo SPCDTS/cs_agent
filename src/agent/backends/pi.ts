@@ -365,8 +365,8 @@ export class PiBackend implements AgentBackend {
       if (bound.ticket !== req.ticket) throw new Error("pi 在途请求与绑定不一致");
       Object.assign(bound, { actor: req.actor, actorIsOwner: req.actorIsOwner, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true });
     }, context);
-    const permissions = await this.opts.grants?.permissions(req) ?? { actorIsOwner: false, target: false };
-    const im = createPiImExtensions(this.opts), selected = permissions.actorIsOwner ? im.owner : permissions.target ? im.targeted : im.basic;
+    const permissions = await this.opts.grants?.permissions(req) ?? { actorIsOwner: false, target: false, auth: false };
+    const im = createPiImExtensions(this.opts), selected = permissions.auth ? im.owner : permissions.target ? im.targeted : im.basic;
     await conv.configure({ extensions: { add: [selected], remove: Object.values(im).filter(e => e.name !== selected.name) } }, context);
     trace.event(req.ticket, "dispatched", { detail: { backend: "pi", conversation_key: req.threadKey, conversation: conv.id, recovered: !!known } });
     if (known) trace.event(req.ticket, "recovered", { detail: { backend: "pi", request_id: requestId } });

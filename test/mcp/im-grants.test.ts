@@ -7,9 +7,13 @@ import { grantsFixture } from "../agent/grants-fixture.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
-async function setup(owner: boolean, grant = false) {
+async function setup(owner: boolean, grant = false, scheduled = false) {
   const f = await grantsFixture(owner ? "1" : "99");
   if (grant) await f.grants.panel("auth_grant", { user: "qq:1", caps: ["send"], targets: ["qq:group:8"] });
+  if (scheduled) {
+    f.binding.ticket = "run_" + "f".repeat(40);
+    await f.bridge.openOutbound(f.binding.ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "1" });
+  }
   const tokens = new RecallTokens({ recall: async () => ({ text: "", images: [] }) }, 5, undefined, {
     permissions: b => f.grants.permissions(b),
     auth: (b, name, args) => f.grants.tool(b, name, args),
@@ -74,4 +78,17 @@ it("已启动的 im schema 不赋予持久权限，授权撤销后跨目标发�
   await f.grants.panel("auth_revoke", { user: "qq:1" });
   expect((await f.client.callTool({ name: "send_message", arguments: { target: "qq:group:8", text: "已撤销" } })).isError).toBe(true);
   expect(f.service.rows(f.ticket)).toHaveLength(0);
+});
+
+
+it.each([true, false])("定时回合 owner=%s 的 MCP 和 HTTP 均不开放 auth，保留有权 target", async owner => {
+  const f = await setup(owner, !owner, true);
+  const tools = (await f.client.listTools()).tools;
+  expect(tools.map(t => t.name)).toEqual(["send_message"]);
+  expect(tools[0].inputSchema.properties).toHaveProperty("target");
+  for (const name of ["auth_grant", "auth_revoke", "auth_list"]) {
+    expect((await f.client.callTool({ name, arguments: {} })).isError).toBe(true);
+    expect((await f.post(name, {})).status).toBe(400);
+  }
+  expect((await f.client.callTool({ name: "send_message", arguments: { target: "qq:group:8", text: "定时通知" } })).isError).not.toBe(true);
 });

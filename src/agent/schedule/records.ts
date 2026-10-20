@@ -25,7 +25,12 @@ export async function recordRunInTransaction(tx: Tx, scheduleId: string, run: Sc
     schedule.runs.push(row);
     schedule.runs.sort((a, b) => a.fire_at - b.fire_at);
   } else schedule.runs[index] = row;
-  if (schedule.runs.length > 20) schedule.runs.splice(0, schedule.runs.length - 20);
+  // 在途记录必须保留；超过上限时只裁剪最早的终态记录。
+  while (schedule.runs.length > 20) {
+    const oldest = schedule.runs.findIndex(settled);
+    if (oldest < 0) break;
+    schedule.runs.splice(oldest, 1);
+  }
   if (run.status === "sent" || run.status === "silent" || run.status === "failed") {
     // 历史只有 20 条，保留最后结算水位，防止旧 fire_key 重放再次累计失败或清零新失败。
     if (inFlight || !last || run.fire_at > last.fire_at || run.fire_at === last.fire_at && run.status !== last.status) {
@@ -34,7 +39,7 @@ export async function recordRunInTransaction(tx: Tx, scheduleId: string, run: Sc
     }
   }
   schedule.updated_at = now;
-  if (schedule.failures >= 3 && schedule.status !== "paused") {
+  if (schedule.failures >= 3 && schedule.status === "active") {
     schedule.status = "paused";
     schedule.pause_reason = "连续 3 次失败";
     schedule.next_fire_at = null;

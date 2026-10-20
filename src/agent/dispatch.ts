@@ -187,7 +187,7 @@ export class Dispatcher {
         // SQLite 开票后、排程提交前崩溃：没有 durable 触发快照，禁止重建成入站消息。
         await this.opts.tasks.sendService.reconcile(ticket);
         await this.opts.tasks.sendService.settle(ticket);
-        trace.event(ticket, "failed", { status: "failed", detail: { terminal: true, reason: "scheduled_orphan" } });
+        trace.event(ticket, "recovered", { detail: { terminal: true, reason: "scheduled_orphan", status: "interrupted" } });
         continue;
       }
       trace.event(ticket, "recovered", { scope: rec.message_type === "group" ? `group:${rec.group_id}` : `private:${rec.user_id}`, detail: { kind: item.kind } });

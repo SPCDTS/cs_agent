@@ -28,7 +28,7 @@ export function sendFixture(group = true) {
     return { message_id: String(++n) };
   });
   const bridge = createQQBridge({ httpUrl: "http://unused.test", wsUrl: "ws://unused.test", token: "",
-    allowUsers: ["1"], allowGroups: ["7"], groupMentions: true, dataDir: dir, imageRoot: path.join(dir, "images") }, { client: { call } });
+    allowUsers: ["1"], allowGroups: ["7", "8"], groupMentions: true, dataDir: dir, imageRoot: path.join(dir, "images") }, { client: { call } });
   const service = new SendService({ getChannel: () => bridge, dataDir: dir, store: history });
   clean.push(() => { store.close(); history.close(); }, () => bridge.stop());
   const binding = { ticket, workdir, source: { type: msg.message_type, user_id: msg.user_id, group_id: msg.group_id },

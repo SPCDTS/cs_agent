@@ -127,6 +127,8 @@ export class ReplyStore {
 
   /** 旧库补列：source_text（崩溃对账需要原文）、source_route_text（分流文本；旧行保持 NULL）。 */
   private migrate(): void {
+    const outboxColumns = this.db.prepare("PRAGMA table_info(outbox)").all() as { name: string }[];
+    if (!outboxColumns.some(c => c.name === "proactive")) this.db.exec("ALTER TABLE outbox ADD COLUMN proactive INTEGER NOT NULL DEFAULT 0");
     const columns = this.db.prepare("PRAGMA table_info(tickets)").all() as { name: string }[];
     if (!columns.some(c => c.name === "origin")) this.db.exec("ALTER TABLE tickets ADD COLUMN origin TEXT NOT NULL DEFAULT 'message'");
     if (!columns.some(c => c.name === "target_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN target_id TEXT");
@@ -144,7 +146,7 @@ export class ReplyStore {
 
   getOutbox(key: string): OutboxRow | null {
     const row = this.db.prepare("SELECT * FROM outbox WHERE key = ?").get(key);
-    return row ? { ...row, images: JSON.parse(String(row.images)), files: JSON.parse(String(row.files)) } as OutboxRow : null;
+    return row ? { ...row, proactive: row.proactive === 1, images: JSON.parse(String(row.images)), files: JSON.parse(String(row.files)) } as OutboxRow : null;
   }
 
   listOutbox(ticket: string): OutboxRow[] {
@@ -154,7 +156,7 @@ export class ReplyStore {
 
   countModelOutbox(type: ChatType, targetId: string, start: string, end: string): number {
     const row = this.db.prepare(`SELECT count(*) AS n FROM outbox WHERE message_type=? AND target_id=?
-      AND created_at>=? AND created_at<? AND key != ticket || '#late' AND key != ticket || '#fallback'`)
+      AND proactive=1 AND created_at>=? AND created_at<? AND key != ticket || '#late' AND key != ticket || '#fallback'`)
       .get(type, targetId, start, end) as { n: number };
     return row.n;
   }
@@ -169,15 +171,15 @@ export class ReplyStore {
       if (existing) { this.db.exec("COMMIT"); return existing; }
       const limit = this.get(input.ticket)?.origin === "scheduled" ? 5 : 3;
       if (!input.suffix && modelRows.length >= limit) throw new Error(`本回合最多发送 ${limit} 条消息`);
-      if (input.dailyLimit && this.countModelOutbox(input.message_type, input.target_id, input.dailyLimit.start, input.dailyLimit.end) >= input.dailyLimit.limit) {
+      if (input.proactive && input.dailyLimit && this.countModelOutbox(input.message_type, input.target_id, input.dailyLimit.start, input.dailyLimit.end) >= input.dailyLimit.limit) {
         throw new Error("该 target 当天最多主动发送 100 条消息（Asia/Shanghai）");
       }
       const ordinal = (rows.at(-1)?.ordinal ?? 0) + 1;
       const key = input.ticket + "#" + (input.suffix ?? input.sequence ?? modelRows.length + 1);
       this.db.prepare(`INSERT INTO outbox
-        (key,ticket,ordinal,call_id,message_type,target_id,mention_user_id,status,text,text_sha256,images,files,created_at)
-        VALUES (?,?,?,?,?,?,?,'pending',?,?,?,?,?)`).run(key, input.ticket, ordinal, input.call_id,
-        input.message_type, input.target_id, input.mention_user_id, input.text,
+        (key,ticket,ordinal,call_id,message_type,target_id,mention_user_id,proactive,status,text,text_sha256,images,files,created_at)
+        VALUES (?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)`).run(key, input.ticket, ordinal, input.call_id,
+        input.message_type, input.target_id, input.mention_user_id, input.proactive ? 1 : 0, input.text,
         createHash("sha256").update(input.text).digest("hex"), JSON.stringify(input.images), JSON.stringify(input.files), new Date().toISOString());
       this.db.exec("COMMIT");
       return this.getOutbox(key)!;

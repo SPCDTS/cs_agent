@@ -8,11 +8,13 @@ export interface OutboxFile {
 export interface OutboxRow {
   key: string; ticket: string; ordinal: number; call_id: string | null;
   message_type: ChatType; target_id: string; mention_user_id: string | null;
+  /** 显式跨会话发送或定时回合；旧行迁移为 false。 */
+  proactive: boolean;
   status: TicketStatus; message_id: string | null; text: string; text_sha256: string;
   images: string[]; files: OutboxFile[]; created_at: string; sent_at: string | null;
 }
-export type OutboxInput = Omit<OutboxRow, "ordinal" | "status" | "message_id" | "text_sha256" | "created_at" | "sent_at" | "key"> &
-  { sequence?: number; suffix?: "fallback" | "late"; dailyLimit?: { start: string; end: string; limit: number } };
+export type OutboxInput = Omit<OutboxRow, "ordinal" | "status" | "message_id" | "text_sha256" | "created_at" | "sent_at" | "key" | "proactive"> &
+  { proactive?: boolean; sequence?: number; suffix?: "fallback" | "late"; dailyLimit?: { start: string; end: string; limit: number } };
 export interface OutboxStore {
   getOutbox(key: string): OutboxRow | null;
   listOutbox(ticket: string): OutboxRow[];

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ScheduleRuntimeDoc, SchedulesDoc } from "../../src/agent/schedule/docs.js";
 import { ctx, input, owner, rig, START } from "./schedule-fixture.js";
+import { ScheduleService } from "../../src/agent/schedule/service.js";
 import type { ScheduleRun } from "../../src/agent/schedule/types.js";
 
 const clean: (() => Promise<void>)[] = [];
@@ -133,7 +134,7 @@ describe("ScheduleService", () => {
     expect(await r.service.list()).toEqual([]);
   });
 
-  it("排队运行被 20 条 overlap 挤出历史后仍阻止重叠，结算后解除占用", async () => {
+  it("排队运行不会被 20 条 overlap 挤出历史，结算后解除占用", async () => {
     const r = await setup(), s = await r.service.create(owner, input());
     const first = await r.service.runNow(owner, s.id);
     for (let n = 1; n <= 22; n++) {
@@ -141,9 +142,47 @@ describe("ScheduleService", () => {
       expect((await r.service.runNow(owner, s.id)).reason).toBe("overlap");
     }
     expect(r.admitter.calls).toHaveLength(1);
+    expect((await r.service.get(s.id))?.runs).toContainEqual(first);
+    expect((await r.service.get(s.id))?.runs).toHaveLength(20);
     await r.service.recordRun(s.id, { ...first, status: "silent" });
     vi.setSystemTime(START + 23);
     expect((await r.service.runNow(owner, s.id)).status).toBe("queued");
     expect(r.admitter.calls).toHaveLength(2);
   });
+});
+
+
+it("未配置 owner 时拒绝 owner 会话；更新也检查已有会话的长度", async () => {
+  const r = await setup();
+  const service = new ScheduleService({ harness: r.harness, task: r.task, admitter: r.admitter, canSchedule: () => true });
+  await expect(service.create("qq:1", input())).rejects.toThrow("owner");
+  const s = await r.service.create(owner, input());
+  await r.harness.commit(async tx => { (await tx.doc(SchedulesDoc)).schedules[s.id].conversation = `group:${"1".repeat(21)}`; }, ctx);
+  await expect(r.service.update(owner, s.id, { name: "更新" })).rejects.toThrow("conversation");
+});
+
+it("completed 的失败计数仍累加，但三次失败或失权都不能改成 paused", async () => {
+  const r = await setup(), s = await r.service.create(owner, input());
+  await r.harness.commit(async tx => {
+    const schedule = (await tx.doc(SchedulesDoc)).schedules[s.id];
+    schedule.status = "completed"; schedule.next_fire_at = null;
+  }, ctx);
+  for (let n = 1; n <= 3; n++) await r.service.recordRun(s.id, {
+    fire_key: `${s.id}@${START + n}`, fire_at: START + n, status: "failed",
+  });
+  await r.service.pauseWithReason(s.id, "失权");
+  expect(await r.service.get(s.id)).toMatchObject({ status: "completed", failures: 3, revision: 1, next_fire_at: null });
+  expect(r.event).not.toHaveBeenCalled();
+});
+
+it.each(["queued", "running"] as const)("裁剪只删除终态记录，保留 %s", async status => {
+  const r = await setup(), s = await r.service.create(owner, input());
+  const first = { fire_key: `${s.id}@${START}`, fire_at: START, status };
+  await r.service.recordRun(s.id, first);
+  for (let n = 1; n <= 25; n++) await r.service.recordRun(s.id, {
+    fire_key: `${s.id}@${START + n}`, fire_at: START + n, status: "skipped", reason: "overlap",
+  });
+  const runs = (await r.service.get(s.id))!.runs;
+  expect(runs).toHaveLength(20); expect(runs[0]).toEqual(first);
+  expect(runs[1].fire_at).toBe(START + 7);
 });

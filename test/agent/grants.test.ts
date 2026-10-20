@@ -37,10 +37,10 @@ it("schedule 不授予 send；只授权来源目标时不开放 target；owner �
   const f = await grantsFixture("99");
   for (const data of [{ caps: ["schedule"], targets: ["qq:group:8"] }, { caps: ["send"], targets: [] }, { caps: ["send"], targets: ["qq:group:7"] }]) {
     await f.grants.panel("auth_grant", { user: "qq:1", ...data });
-    expect(await f.grants.permissions(f.binding)).toEqual({ actorIsOwner: false, target: false });
+    expect(await f.grants.permissions(f.binding)).toEqual({ actorIsOwner: false, target: false, auth: false });
   }
   const owner = await grantsFixture();
-  expect(await owner.grants.permissions(owner.binding)).toEqual({ actorIsOwner: true, target: true });
+  expect(await owner.grants.permissions(owner.binding)).toEqual({ actorIsOwner: true, target: true, auth: true });
 });
 
 it("按 cap 撤销保留剩余授权，全撤销删除；不存在的授权撤销不重复记 trace", async () => {
@@ -63,7 +63,7 @@ it("非 owner 直接调用全部 auth 工具均拒绝，伪造身份、来源或
     { ...f.binding, actor: "qq:99", actorIsOwner: true },
     { ...f.binding, actorIsOwner: true }, { ...f.binding, source: { ...f.binding.source, group_id: "8" } },
   ]) await expect(f.grants.permissions(binding)).rejects.toThrow("身份");
-  expect(await f.grants.permissions({ ...f.binding, actor: undefined, actorIsOwner: undefined })).toEqual({ actorIsOwner: false, target: false });
+  expect(await f.grants.permissions({ ...f.binding, actor: undefined, actorIsOwner: undefined })).toEqual({ actorIsOwner: false, target: false, auth: false });
 });
 
 it.each([
@@ -97,4 +97,17 @@ it("canSchedule 按创建者检查 schedule cap、来源和到期边界；owner 
   expect(await f.grants.canSchedule("qq:9", "private:8")).toBe(true);
   await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"], scopes: [] });
   expect(await f.grants.canSchedule("qq:9", "group:7")).toBe(false);
+});
+
+
+it.each(["1", "99"])("定时回合禁止 auth 工具，仍按创建者 %s 保留发送权限", async owner => {
+  const f = await grantsFixture(owner), ticket = "run_" + "a".repeat(40);
+  await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "1" });
+  if (owner !== "1") await f.grants.panel("auth_grant", { user: "qq:1", caps: ["send"], targets: ["qq:group:8"] });
+  const binding = { ...f.binding, ticket };
+  expect(await f.grants.permissions(binding)).toEqual({ actorIsOwner: owner === "1", auth: false, target: true });
+  for (const name of ["auth_grant", "auth_revoke", "auth_list"] as const) {
+    await expect(f.grants.tool(binding, name, {})).rejects.toThrow("交互");
+  }
+  await expect(f.grants.authorizeSend(binding, "qq:group:8")).resolves.toBeUndefined();
 });

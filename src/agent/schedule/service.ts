@@ -1,3 +1,5 @@
+import { isScope } from "../../context/access.js";
+import { log } from "../../shared/log.js";
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ConversationId, Harness, TaskId, Tx } from "@earendil-works/pi-durable";
@@ -23,6 +25,7 @@ export interface ScheduleServiceOptions {
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 export class ScheduleService implements ScheduleRunRecorder {
+  private sweepTimer?: ReturnType<typeof setInterval>;
   private readonly ctx: Context;
   private readonly now: () => number;
   private readonly owner: string | undefined;
@@ -34,6 +37,17 @@ export class ScheduleService implements ScheduleRunRecorder {
 
   /** 在 resume harness 前调用；专用会话只创建一次，已有检查点原样恢复。 */
   async start(): Promise<void> {
+    await this.sweep();
+    this.sweepTimer ??= setInterval(() => {
+      void this.sweep().catch(error => log.error("schedule task sweep failed", { error }));
+    }, 10 * 60_000);
+    this.sweepTimer.unref();
+  }
+
+  stop(): void { clearInterval(this.sweepTimer); this.sweepTimer = undefined; }
+
+  /** 启动与每十分钟修复 active 定义缺失或已终结的排程任务。 */
+  private async sweep(): Promise<void> {
     await this.opts.harness.commit(async tx => {
       const meta = await tx.doc(ScheduleRuntimeDoc);
       const doc = await tx.doc(SchedulesDoc);
@@ -62,8 +76,8 @@ export class ScheduleService implements ScheduleRunRecorder {
     const fields = parseCreate(input);
     // 授权回调可能读取同一 harness 的 GrantsDoc，不能在占用提交队列时调用它。
     await this.authorize(actor, fields.conversation);
+    const now = this.now(), next = validateRule(fields.rule, now, actor === this.owner);
     return this.opts.harness.commit(async tx => {
-      const now = this.now(), next = validateRule(fields.rule, now, actor === this.owner);
       const doc = await tx.doc(SchedulesDoc);
       this.quota(Object.values(doc.schedules), actor);
       const schedule: Schedule = {
@@ -79,11 +93,11 @@ export class ScheduleService implements ScheduleRunRecorder {
 
   async update(actor: string, id: string, input: unknown): Promise<Schedule> {
     const patch = parseUpdate(input);
-    await this.authorizeRun(actor, id);
+    const snapshot = await this.authorizeRun(actor, id);
+    const next = patch.rule || snapshot.status === "active"
+      ? validateRule(patch.rule ?? snapshot.rule, this.now(), snapshot.created_by === this.owner) : null;
     return this.modify(actor, id, async (_tx, schedule) => {
-      const rule = patch.rule ?? schedule.rule;
-      const next = patch.rule || schedule.status === "active"
-        ? validateRule(rule, this.now(), schedule.created_by === this.owner) : null;
+      if (schedule.revision !== snapshot.revision) throw new ScheduleError(409, "定时任务已变更，请重试");
       Object.assign(schedule, patch, { options: { ...schedule.options, ...patch.options } });
       if (schedule.status === "active") schedule.next_fire_at = next;
     });
@@ -108,7 +122,7 @@ export class ScheduleService implements ScheduleRunRecorder {
   }
 
   private async pauseInTransaction(tx: Tx, schedule: Schedule, reason: string): Promise<boolean> {
-    if (schedule.status === "paused" && schedule.pause_reason === reason) return false;
+    if (schedule.status === "completed" || schedule.status === "paused" && schedule.pause_reason === reason) return false;
     schedule.status = "paused"; schedule.pause_reason = reason; schedule.next_fire_at = null;
     schedule.revision++; schedule.updated_at = this.now();
     delete (await tx.doc(ScheduleRuntimeDoc)).tasks[schedule.id];
@@ -116,10 +130,12 @@ export class ScheduleService implements ScheduleRunRecorder {
   }
 
   async resume(actor: string, id: string): Promise<Schedule> {
-    await this.authorizeRun(actor, id);
+    const snapshot = await this.authorizeRun(actor, id);
+    const next = validateRule(snapshot.rule, this.now(), snapshot.created_by === this.owner);
     return this.modify(actor, id, async (tx, schedule) => {
+      if (schedule.revision !== snapshot.revision) throw new ScheduleError(409, "定时任务已变更，请重试");
       this.quota(Object.values((await tx.doc(SchedulesDoc)).schedules), schedule.created_by, id);
-      schedule.next_fire_at = validateRule(schedule.rule, this.now(), schedule.created_by === this.owner);
+      schedule.next_fire_at = next;
       schedule.status = "active";
       schedule.failures = 0;
       delete schedule.pause_reason;
@@ -142,15 +158,21 @@ export class ScheduleService implements ScheduleRunRecorder {
     const fireAt = this.now();
     const prepared = await prepareRun(snapshot, await this.opts.harness.snapshot(ScheduleRuntimeDoc, this.ctx), fireAt, this.opts.admitter);
     let paused: Schedule | undefined;
-    const run = await this.opts.harness.commit(async tx => {
-      const schedule = this.editable((await tx.doc(SchedulesDoc)).schedules[id], actor);
-      const revision = schedule.revision, now = this.now();
-      if (schedule.revision !== snapshot.revision) throw new ScheduleError(409, "定时任务已变更，请重试");
-      const result = await admitRun(tx, schedule, fireAt, now, prepared);
-      if (!result) throw new ScheduleError(409, "定时运行序号已变更，请重试");
-      if (schedule.revision !== revision && schedule.pause_reason === "连续 3 次失败") paused = copy(schedule);
-      return copy(result);
-    }, this.ctx);
+    let run: ScheduleRun;
+    try {
+      run = await this.opts.harness.commit(async tx => {
+        const schedule = this.editable((await tx.doc(SchedulesDoc)).schedules[id], actor);
+        const revision = schedule.revision, now = this.now();
+        if (schedule.revision !== snapshot.revision) throw new ScheduleError(409, "定时任务已变更，请重试");
+        const result = await admitRun(tx, schedule, fireAt, now, prepared);
+        if (!result) throw new ScheduleError(409, "定时运行序号已变更，请重试");
+        if (schedule.revision !== revision && schedule.pause_reason === "连续 3 次失败") paused = copy(schedule);
+        return copy(result);
+      }, this.ctx);
+    } finally {
+      // 即使 revision/ordinal 冲突导致提交回滚，也必须结算未采用的预备票据。
+      if (prepared?.admitter.discard) await this.opts.harness.commit(tx => prepared.admitter.discard!(tx), this.ctx);
+    }
     reportPaused(paused, this.opts.trace);
     if (run.ticket && (run.status === "queued" || run.status === "running")) this.opts.admitter.dispatchScheduled(run.ticket);
     return run;
@@ -189,6 +211,9 @@ export class ScheduleService implements ScheduleRunRecorder {
   }
 
   private async authorize(actor: string, conversation: ScheduleConversation): Promise<void> {
+    if (conversation === "owner" ? !this.owner : !isScope(conversation) || conversation !== conversation.trim()) {
+      throw new ScheduleError(400, "定时任务 conversation 无效或未配置 owner");
+    }
     if (!/^qq:[1-9]\d*$/.test(actor) || actor !== this.owner && !await this.opts.canSchedule?.(actor, conversation)) {
       throw new ScheduleError(403, "没有 schedule 授权");
     }
