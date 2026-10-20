@@ -7,3 +7,4 @@ napcat/
 *.log
 .vscode/
 .env.bak*
+.external_doc
