@@ -30,6 +30,11 @@ import { SkillsLoader } from "./agent/pi-tools/skills.js";
 import { SkillsStore } from "./agent/skills-store.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
+import type { Tx } from "@earendil-works/pi-durable";
+import { ScheduleService } from "./agent/schedule/service.js";
+import { createScheduleTask } from "./agent/schedule/task.js";
+import { recordRunInTransaction } from "./agent/schedule/records.js";
+import type { ScheduledRunAdmitter } from "./agent/schedule/types.js";
 import { CodexRunner } from "./agent/codex/runner.js";
 import { purgeCodexTrace } from "./agent/codex/trace.js";
 import { purgeGeneratedImages } from "./agent/codex/generated-images.js";
@@ -45,7 +50,7 @@ import { ContextStore } from "./context/store.js";
 import { SettingsStore, settingsDefaults } from "./agent/settings.js";
 import { msUntilNextRun, startAgingScheduler } from "./context/aging.js";
 
-async function main(): Promise<void> {
+async function main(deps: { scheduledRunAdmitter?: ScheduledRunAdmitter } = {}): Promise<void> {
   // DEEPSEEK_APIKEY 等别名 → pi-ai 读取的标准变量名（须在创建 models 之前）
   applyEnvAliases(process.env);
   const cfg = loadConfig();
@@ -242,8 +247,23 @@ async function main(): Promise<void> {
       } } : {}),
     },
   });
-  const extension = createCsAgentExtension(tasks);
+  // 任务 B 接入时注入真实 admitter；当前占位只记录失败，不启动执行后端。
+  const scheduledAdmitter: ScheduledRunAdmitter = deps.scheduledRunAdmitter ?? {
+    async admit(tx, fire) {
+      log.warn("scheduled backend unavailable", { schedule: fire.schedule.id, fire_key: fire.fire_key });
+      const ticket = `run_unavailable_${fire.fire_key}`;
+      await recordRunInTransaction(tx as Tx, fire.schedule.id, {
+        fire_key: fire.fire_key, fire_at: fire.fire_at, ticket, status: "failed",
+        reason: "backend_failed", ended_at: Date.now(), note: "定时执行后端尚未接入",
+      }, Date.now());
+      return { ticket };
+    },
+  };
+  const scheduleTask = createScheduleTask({ admitter: scheduledAdmitter });
+  const extension = createCsAgentExtension(tasks, [scheduleTask]);
   const harness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
+  const schedules = new ScheduleService({ harness, task: scheduleTask, admitter: scheduledAdmitter, owner: cfg.owner });
+  await schedules.start();
 
   bridge = createQQBridge({
     httpUrl: cfg.NAPCAT_HTTP_URL,
@@ -281,6 +301,7 @@ async function main(): Promise<void> {
 
   // 继续上次未完成的工作：先由派发器按 scope FIFO 接管索引中的票据（v2 遗留会话先中止），再开启任务调度。
   // 运行中的任务从最后提交的检查点继续（已完成的阶段不重跑）。
+  const alerts = startAlerts({ enabled: () => settings.current().alertOwner, owner: cfg.owner, bridge, trace });
   await dispatcher.recover();
   harness.resume();
 
@@ -341,7 +362,7 @@ async function main(): Promise<void> {
     usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
   const skills = cfg.PI_SKILLS_DIR === "off" ? undefined : new SkillsStore({ dir: cfg.PI_SKILLS_DIR, loader: new SkillsLoader({ dir: cfg.PI_SKILLS_DIR }) });
   const dashboardData = { contextUsage, codexPrompt, codexBasePrompt, modelCatalog, skills };
-  const dashboard = createDashboard({ ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
+  const dashboard = createDashboard({ ...dashboardData, schedules, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
     codex: codexStatus, pi: piStatus, piSessions: pi.sessionSource, settings, live,
@@ -377,7 +398,6 @@ async function main(): Promise<void> {
       return gauges;
     } });
   metrics.start();
-  const alerts = startAlerts({ enabled: () => settings.current().alertOwner, owner: cfg.owner, bridge, trace });
   const server: Server = createServer(async (req, res) => {
     if (req.url !== "/healthz") {
       await dashboard.handle(req, res);

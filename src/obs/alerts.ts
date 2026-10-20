@@ -20,6 +20,7 @@ export function startAlerts(opts: { enabled: boolean | (() => boolean); owner?: 
   };
   const off = opts.trace.subscribe(e => {
     const d = JSON.parse(e.detail_json);
+    if (e.stage === 'schedule_paused') send('定时任务连续三次失败，已自动暂停，请打开观测面板排查。');
     if (e.status === 'failed' && /codex|pi|model_turn|model_error|tool:/.test(e.stage) && d.failure?.kind === 'auth')
       send('模型鉴权失败，请检查凭据。');
     if (d.terminal === true) {

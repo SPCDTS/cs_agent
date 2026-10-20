@@ -1,7 +1,7 @@
 /** 面板写操作：沿用同源、CSRF、版本检查与原有响应。 */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DashboardOptions } from './dashboard-types.js';
-import { equal, readBody, readMultipart, HttpError, guardAgentMd, writeAgentMd } from './dashboard-io.js';
+import { equal, readBody, readMultipart, HttpError, guardAgentMd, writeAgentMd, guardDashboardOrigin } from './dashboard-io.js';
 import { SkillsStoreError } from '../agent/skills-store.js';
 import { isThreadKey } from '../agent/codex/runner.js';
 import { SETTINGS_TICKET, type RuntimeSettings } from '../agent/settings.js';
@@ -16,10 +16,8 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
   render: (url: URL, nonce: string, flash?: { text: string; error?: boolean }) => Promise<string | null>) {
   async function handlePost(req: IncomingMessage, res: ServerResponse, url: URL, nonce: string, host: string): Promise<void> {
     // 同源检查：Origin 为 null 时仅信任浏览器提供的 Sec-Fetch-Site: same-origin；其他 Origin 必须匹配，随后仍校验 CSRF 令牌。
-    const origin = req.headers.origin;
-    const site = req.headers['sec-fetch-site'];
-    if (origin && origin !== `http://${host}` && !(origin === 'null' && site === 'same-origin')) { res.writeHead(403).end('跨站请求被拒绝'); return; }
-    if (site && site !== 'same-origin' && site !== 'none') { res.writeHead(403).end('跨站请求被拒绝'); return; }
+    try { guardDashboardOrigin(req, host); }
+    catch { res.writeHead(403).end('跨站请求被拒绝'); return; }
     let form: URLSearchParams;
     let file: Awaited<ReturnType<typeof readMultipart>>['file'];
     try {

@@ -27,6 +27,13 @@ export async function imageFile(root: string, segments: string[]): Promise<strin
 
 export class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 
+/** 表单与 JSON 写接口共用同源策略；Origin 缺省时仍须通过各自的 CSRF 校验。 */
+export function guardDashboardOrigin(req: IncomingMessage, host: string): void {
+  const origin = req.headers.origin, site = req.headers['sec-fetch-site'];
+  if (origin && origin !== `http://${host}` && !(origin === 'null' && site === 'same-origin') ||
+      site && site !== 'same-origin' && site !== 'none') throw new HttpError(403, '跨站请求被拒绝');
+}
+
 export async function readBody(req: IncomingMessage): Promise<URLSearchParams> {
   if (!/^application\/x-www-form-urlencoded\b/i.test(req.headers['content-type'] ?? '')) throw new HttpError(415, '只接受表单提交');
   const chunks: Buffer[] = []; let size = 0;
