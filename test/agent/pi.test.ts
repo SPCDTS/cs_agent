@@ -7,7 +7,8 @@ import { ObsStore } from "../../src/obs/store.js";
 import { mediaFixture } from "../context/media-fixture.js";
 import type { MediaRecall } from "../../src/context/media.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
-import { piContextCapacity } from "../../src/agent/pi-context-usage.js";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { piContextCapacity, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { trace } from "../../src/shared/trace.js";
 import { promises as fs } from "node:fs";
@@ -639,17 +640,28 @@ describe("pi durable backend", () => {
     expect(await s.pi.compactThread("owner")).toBe("unchanged");
     expect(await s.pi.compactThread("private:9")).toBe("unchanged");
     await expect(s.pi.compactThread("shared")).rejects.toThrow("非法");
-    await s.pi.handle({ ...request("manual-long"), text: "历史事实。".repeat(50_000) }, handleContext());
+    await s.pi.handle({ ...request("manual-long"), text: "历史事实。".repeat(30_000) }, handleContext());
     await s.pi.handle({ ...request("manual-recent"), text: "recent material. ".repeat(6_000) }, handleContext());
     const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")?.turns).toBe(2));
+    const before = s.contextUsage.get("pi", "group:7")!;
+    expect(before.source).toBe("turn");
+    expect(s.faux.state.callCount).toBe(2);
     const wait = vi.spyOn(s.pi.harness, "waitForTask");
     expect(await s.pi.compactThread("group:7")).toBe("compacted");
+    const after = s.contextUsage.get("pi", "group:7")!;
+    expect(after).toMatchObject({ turns: before.turns, source: "compact", lastCompactionAt: expect.any(Number) });
+    expect(after.usedTokens).toBeLessThan(before.usedTokens);
+    expect(after.cachedTokens).toBeUndefined();
     expect(wait).toHaveBeenCalled();
     expect((await s.pi.readThreadIds())["group:7"]).toBe(id);
     const conv = (await s.pi.harness.conversation(id, context))!;
     await conv.waitForIdle(context);
     const view = await conv.context(context);
     expect(view.entries.some(e => e.kind === "pi.compaction")).toBe(true);
+    expect(after.usedTokens).toBe(estimateContextTokens(view.messages).tokens);
+    await s.contextUsage.flush();
+    expect(new ContextUsageStore(s.dir).get("pi", "group:7")).toMatchObject({ usedTokens: after.usedTokens, source: "compact", turns: 2 });
   });
 
   it("面板压缩排在进行中的回合之后，后续重置等待压缩完成", async () => {
@@ -1023,6 +1035,28 @@ describe("pi 重置事务与归档轮换", () => {
 
 
 describe("pi 上下文占用", () => {
+  it("observer 在摘要提交后立即估算，重复刷新不增加回合；读取失败保留记录", async () => {
+    const s = await setup([reply("之前的回复")]);
+    await s.pi.handle(request("compact-observer"), handleContext());
+    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")?.turns).toBe(1));
+    const conv = (await s.pi.harness.conversation((await s.pi.readThreadIds())["group:7"] as ConversationId, context))!;
+    await conv.commit(tx => tx.appendEntry(conv.id, { kind: CompactionEntry.kind, head: "self",
+      model: [{ role: "user", content: "短摘要", timestamp: Date.now() }], data: { reason: "manual" } }), context);
+    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ source: "compact", turns: 1 }));
+    const expected = estimateContextTokens((await conv.context(context)).messages).tokens;
+    expect(s.contextUsage.get("pi", "group:7")?.usedTokens).toBe(expected);
+    await refreshPiCompactionUsage(conv, "group:7", s.contextUsage);
+    expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: expected, turns: 1 });
+    const before = s.contextUsage.get("pi", "group:7");
+    const read = vi.spyOn(conv, "context").mockRejectedValueOnce(new Error("unavailable"));
+    const info = vi.spyOn(log, "info");
+    try {
+      await expect(refreshPiCompactionUsage(conv, "group:7", s.contextUsage)).resolves.toBeUndefined();
+      expect(s.contextUsage.get("pi", "group:7")).toEqual(before);
+      expect(info).toHaveBeenCalledWith("pi context usage unavailable after compaction; keeping previous usage", { key: "group:7" });
+    } finally { read.mockRestore(); info.mockRestore(); }
+  });
+
   it("缺失用量文件时恢复 faux 会话历史与压缩时间，重开不调用模型", async () => {
     const s = await setup([call("web_search", { query: "history" }), reply("第一轮"), reply("第二轮")], { disk: true });
     await s.pi.handle(request("history-one"), handleContext());

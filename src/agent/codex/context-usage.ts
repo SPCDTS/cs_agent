@@ -20,7 +20,7 @@ export function parseRolloutTokenUsage(record: unknown): { input: number; output
 }
 
 /** 倒序按块读取末尾至多 2 MiB；跳过边界半行及损坏行，文件消失也不影响启动。 */
-export async function readRolloutContextUsage(file: string): Promise<(ContextUsageHistory & { truncated: boolean }) | undefined> {
+export async function readRolloutContextUsage(file: string, compactedAfter?: number): Promise<(ContextUsageHistory & { truncated: boolean }) | undefined> {
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     handle = await fs.open(file, "r");
@@ -32,12 +32,36 @@ export async function readRolloutContextUsage(file: string): Promise<(ContextUsa
     let waitingForUsage = false;
     let effectiveWindowTokens: number | undefined;
     let latest: Omit<ContextUsageHistory, "turns"> | undefined;
+    let compactUsage: typeof latest;
+    let sawCompaction = false;
     const consume = (line: Buffer) => {
       try {
         const record = object(JSON.parse(line.toString("utf8")));
         if (!record) return;
         const payload = record.type === "event_msg" ? object(record.payload) : record;
         const type = payload?.type;
+        // 手动压缩不一定有 task_complete；只接受本次 compacted 标记之后的快照。
+        // 此快照 input_tokens 可为 0，total_tokens 才是摘要与保留消息的上下文估算。
+        if (compactedAfter !== undefined) {
+          if (latest || sawCompaction) return;
+          const updatedAt = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : NaN;
+          if (record.type === "compacted") {
+            sawCompaction = true;
+            if (count(updatedAt) && updatedAt >= compactedAfter && compactUsage && compactUsage.updatedAt >= updatedAt) {
+              latest = { ...compactUsage, lastCompactionAt: updatedAt };
+            }
+          } else if (type === "task_started" || type === "turn.started" || type === "task_complete" || type === "turn.completed") {
+            compactUsage = undefined;
+          } else if (type === "token_count" && !compactUsage && count(updatedAt) && updatedAt >= compactedAfter) {
+            const info = object(payload?.info);
+            const total = object(info?.last_token_usage)?.total_tokens;
+            if (count(total)) {
+              compactUsage = { usedTokens: total, updatedAt,
+                ...(count(info?.model_context_window) && info.model_context_window > 0 ? { effectiveWindowTokens: info.model_context_window } : {}) };
+            }
+          }
+          return;
+        }
         if (type === "task_complete" || type === "turn.completed") {
           turns++;
           waitingForUsage = true;

@@ -16,7 +16,7 @@ export interface ContextUsage {
   turns: number;
   lastCompactionAt?: number;
   updatedAt: number;
-  source: "turn" | "estimate";
+  source: "turn" | "estimate" | "compact";
 }
 
 type Backend = ContextUsage["backend"];
@@ -30,7 +30,7 @@ function valid(value: unknown): value is ContextUsage {
   return (u.backend === "codex" || u.backend === "pi") && typeof u.key === "string" && !!u.key &&
     nonnegative(u.usedTokens) && nonnegative(u.windowTokens) && u.windowTokens > 0 &&
     nonnegative(u.turns) && Number.isInteger(u.turns) && nonnegative(u.updatedAt) &&
-    (u.source === "turn" || u.source === "estimate") &&
+    (u.source === "turn" || u.source === "estimate" || u.source === "compact") &&
     (u.cachedTokens === undefined || nonnegative(u.cachedTokens)) &&
     (u.effectiveWindowTokens === undefined || (nonnegative(u.effectiveWindowTokens) && u.effectiveWindowTokens > 0)) &&
     (u.lastCompactionAt === undefined || nonnegative(u.lastCompactionAt)) &&
@@ -95,16 +95,20 @@ export class ContextUsageStore {
       source: sampled ? "turn" : old?.source ?? "estimate", updatedAt: sampled ? Date.now() : old?.updatedAt ?? Date.now() }, ticket);
   }
 
-  recordCompaction(backend: Backend, key: string, ticket = "@context"): void {
+  /** 压缩采样只替换占用，保留回合数；旧缓存命中量不适用于摘要后的上下文。 */
+  recordCompaction(backend: Backend, key: string, ticket = "@context",
+    usage?: Pick<ContextUsage, "usedTokens"> & Partial<Pick<ContextUsage, "effectiveWindowTokens">>): void {
     const old = this.get(backend, key);
-    if (old) this.update({ ...old, lastCompactionAt: Date.now(), updatedAt: Date.now() }, ticket);
+    if (old) this.update({ ...old, ...(usage ? { ...usage, cachedTokens: undefined, source: "compact" as const } : {}),
+      lastCompactionAt: Date.now(), updatedAt: Date.now() }, ticket);
   }
 
   /** 历史快照直接恢复计数；较新的已落盘用量优先，重复启动不累计回合。 */
   backfill(backend: Backend, key: string, history: ContextUsageHistory, ticket = "@context"): boolean {
     const old = this.get(backend, key);
     if (!old) return false;
-    if (old.source === "turn" && old.updatedAt > history.updatedAt) {
+    if ((old.source === "turn" && old.updatedAt > history.updatedAt) ||
+        (old.source === "compact" && old.updatedAt >= history.updatedAt)) {
       // 旧版 recordTurn 的采样时间略晚于 rollout；只补缺失窗口，不能覆盖更晚的占用与计数。
       if (old.effectiveWindowTokens !== undefined || history.effectiveWindowTokens === undefined) return false;
       const enriched = { ...old, effectiveWindowTokens: history.effectiveWindowTokens };

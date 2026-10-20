@@ -1,3 +1,5 @@
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { log } from "../shared/log.js";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { AssistantEntry, CompactionEntry, DEFAULT_COMPACTION_POLICY, watchEvents,
   type AgentEventStream, type Conversation, type Cursor, type EntryId, type EntryRecord, type Harness } from "@earendil-works/pi-durable";
@@ -29,7 +31,7 @@ export class PiContextObserver {
     // 初始快照中的旧条目不重复累计；溢出快照只补记注册后出现的条目。
     let lastAssistant = stream.snapshot.entries.reduce((last, e) => AssistantEntry.is(e) ? Math.max(last, e.id) : last, 0);
     let lastCompaction = stream.snapshot.entries.reduce((last, e) => CompactionEntry.is(e) ? Math.max(last, e.id) : last, 0);
-    const consume = (entry: EntryRecord, ticket: string) => {
+    const consume = async (entry: EntryRecord, ticket: string) => {
       if (AssistantEntry.is(entry) && entry.id > lastAssistant) {
         lastAssistant = entry.id;
         const message = entry.model?.find(m => m.role === "assistant");
@@ -39,22 +41,33 @@ export class PiContextObserver {
         }
       } else if (CompactionEntry.is(entry) && entry.id > lastCompaction) {
         lastCompaction = entry.id;
-        // entry 无墙钟时间戳；记录摘要落入当前会话时的观测时间，不把 beforeCompact 当成功。
-        store.recordCompaction("pi", key, ticket);
+        await refreshPiCompactionUsage(conv, key, store, ticket, entry.id);
       }
     };
     stream.start(async events => {
       const bound = await harness.snapshot(PiRequestDoc, conv.id, BACKGROUND_CONTEXT);
       const ticket = bound?.ticket || "@context";
       for (const event of events) {
-        if (event.type === "message_end" || event.type === "entry_appended") consume(event.entry, ticket);
-        else if (event.type === "snapshot") for (const entry of event.entries) consume(entry, ticket);
+        if (event.type === "message_end" || event.type === "entry_appended") await consume(event.entry, ticket);
+        else if (event.type === "snapshot") for (const entry of event.entries) await consume(entry, ticket);
       }
     });
     return new PiContextObserver(stream, backfilled, capacity);
   }
 
   async close(): Promise<void> { await this.stream.stop(); }
+}
+
+/** 手动压缩和 observer 共用 pi-ai 的估算，摘要前的 assistant 用量不再代表当前上下文。 */
+export async function refreshPiCompactionUsage(conv: Conversation, key: string, store: ContextUsageStore,
+  ticket = "@context", at?: EntryId): Promise<void> {
+  try {
+    const view = await conv.context(BACKGROUND_CONTEXT, at === undefined ? undefined : { at });
+    if (!view.entries.some(entry => CompactionEntry.is(entry))) return;
+    store.recordCompaction("pi", key, ticket, { usedTokens: estimateContextTokens(view.messages).tokens });
+  } catch {
+    log.info("pi context usage unavailable after compaction; keeping previous usage", { key });
+  }
 }
 
 /** 活动上下文会因压缩缩短；用公开历史分页接口恢复全部 assistant 回合与最近成功压缩。 */

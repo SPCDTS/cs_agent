@@ -189,6 +189,13 @@ describe('usage.js（总览 / Codex / Pi 页）', () => {
     expect(bar.querySelector('.ctx-pct')!.textContent).toBe('48%');
     expect(bar.querySelector('.ctx-num')!.textContent).toBe('237,500 / 500,000 tokens');
     expect(bar.attrs.title).toBe('');
+    send({ backend: 'codex', key: 'owner', usedTokens: 10701, windowTokens: 500000, turns: 10, updatedAt: Date.now(), source: 'compact' });
+    expect(root.querySelector('[data-ctx="codex|owner"]')).toBe(bar);
+    expect(bar.className).toBe('ctx ctx-t-ok ctx-est');
+    expect(bar.querySelector('.ctx-num')!.textContent).toBe('10,701 / 500,000 tokens');
+    expect(bar.querySelector('.ctx-meta')!.textContent).toContain('压缩后估算');
+    expect(bar.querySelector('.ctx-meta')!.textContent).toContain('第 10 回合');
+    expect(bar.querySelector('.ctx-meta')!.textContent).not.toContain('尚无真实回合用量');
   });
 });
 

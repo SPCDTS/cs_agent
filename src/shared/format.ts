@@ -13,7 +13,7 @@ export interface ContextUsage {
   turns: number;
   lastCompactionAt?: number;
   updatedAt: number;
-  source: 'turn' | 'estimate';
+  source: 'turn' | 'estimate' | 'compact';
 }
 export interface ContextUsageView {
   all(): ContextUsage[];
@@ -36,7 +36,7 @@ export function toContextUsage(d: Record<string, unknown>): ContextUsage | null 
     turns: num(d.turns) ? d.turns : 0,
     ...(num(d.lastCompactionAt) ? { lastCompactionAt: d.lastCompactionAt } : {}),
     updatedAt: num(d.updatedAt) ? d.updatedAt : Date.now(),
-    source: d.source === 'estimate' ? 'estimate' : 'turn',
+    source: d.source === 'compact' ? 'compact' : d.source === 'estimate' ? 'estimate' : 'turn',
   };
 }
 

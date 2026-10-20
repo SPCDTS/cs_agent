@@ -8,6 +8,16 @@ const usage = (over: Partial<ContextUsage> = {}): ContextUsage =>
   ({ backend: 'codex', key: 'owner', usedTokens: 123_456, windowTokens: 400_000, turns: 7, updatedAt: NOW - 60_000, source: 'turn', ...over });
 
 describe('上下文占用条渲染', () => {
+  it('压缩来源穿过事件解析，首屏显示压缩后估算与保留的回合数', () => {
+    const u = toContextUsage({ ...usage({ source: 'compact', usedTokens: 10701 }) })!;
+    expect(u.source).toBe('compact');
+    const html = contextBar('codex', 'owner', u, { now: NOW });
+    expect(html).toContain('压缩后估算'); expect(html).toContain('ctx-est');
+    expect(html).toContain('10,701'); expect(html).toContain('第 7 回合');
+    expect(html).not.toContain('尚无真实回合用量');
+    expect(contextBar('codex', 'owner', u, { mini: true, now: NOW })).toContain('ctx-est');
+  });
+
   it('有效窗口优先用于数字、百分比、提示和排序；旧记录及 pi 保持名义窗口', () => {
     const u = usage({ usedTokens: 237500, windowTokens: 500000, effectiveWindowTokens: 475000 });
     for (const mini of [false, true]) {

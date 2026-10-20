@@ -59,7 +59,7 @@ function ctxApply(n,u,nowTs){
   if(!mini&&!n.querySelector('.ctx-used')){const [b,...k]=(n.dataset.ctx||'').split('|');const m=ctxNode(b,k.join('|'),false);if(n.parentNode)n.parentNode.replaceChild(m,n);n=m;}
   const window=usageWindow(u), p=ratio(u.usedTokens,window), w=clampPct(p), x=ctxParts(n), stale=nowTs-u.updatedAt>STALE_MS;
   const capacityTitle=u.backend==='codex'&&Number.isFinite(u.effectiveWindowTokens)&&u.effectiveWindowTokens>0?'名义 '+fmtInt(u.windowTokens)+' / 有效 '+fmtInt(window):'';
-  n.className='ctx ctx-t-'+tier(p)+(u.source==='estimate'?' ctx-est':'')+(stale?' ctx-stale':'')+(mini?' ctx-mini':'');
+  n.className='ctx ctx-t-'+tier(p)+(u.source!=='turn'?' ctx-est':'')+(stale?' ctx-stale':'')+(mini?' ctx-mini':'');
   x.fill.dataset.w=String(w);x.pct.textContent=fmtPct(p);x.short.textContent=fmtShort(u.usedTokens)+' / '+fmtShort(window);
   x.track.setAttribute('aria-valuenow',String(w));x.track.setAttribute('aria-valuetext',fmtInt(u.usedTokens)+' / '+fmtInt(window)+' tokens，'+fmtPct(p));
   for(const k of ['bg','rs']){
@@ -77,6 +77,7 @@ function ctxApply(n,u,nowTs){
   if(u.cachedTokens)meta.push('缓存命中 '+fmtInt(u.cachedTokens));
   if(u.compaction)meta.push('压缩阈值 '+fmtPct(ratio(u.compaction.background,window))+' / '+fmtPct(ratio(u.compaction.reserve,window)));
   if(u.source==='estimate')meta.push('估算值（尚无真实回合用量）');
+  if(u.source==='compact')meta.push('压缩后估算');
   meta.push(stale?'上次更新 '+Math.max(0,Math.floor((nowTs-u.updatedAt)/3600000))+' 小时前':'更新于 '+hhmmss(u.updatedAt));
   x.meta.textContent=meta.join('，');
   return n;

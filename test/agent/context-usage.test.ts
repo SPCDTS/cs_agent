@@ -18,6 +18,20 @@ const open = (dir = tmp("context-usage-"), debounce = 10) => {
 const usage = { usedTokens: 1234, cachedTokens: 1000, windowTokens: 500000 };
 
 describe("上下文占用存储", () => {
+  it("压缩样本保留计数和容量，清除旧缓存，历史回填不能覆盖较新压缩", async () => {
+    const dir = tmp("context-compact-"), store = open(dir);
+    store.recordTurn("codex", "owner", { ...usage, effectiveWindowTokens: 475000 });
+    store.recordCompaction("codex", "owner", "@context", { usedTokens: 0 });
+    const compact = store.get("codex", "owner")!;
+    expect(compact).toMatchObject({ usedTokens: 0, source: "compact", turns: 1, effectiveWindowTokens: 475000 });
+    expect(compact.cachedTokens).toBeUndefined();
+    expect(store.backfill("codex", "owner", { usedTokens: 100, turns: 9, updatedAt: compact.updatedAt - 1 })).toBe(false);
+    expect(store.backfill("codex", "owner", { usedTokens: 100, turns: 9, updatedAt: compact.updatedAt })).toBe(false);
+    await store.flush(); expect(open(dir).get("codex", "owner")).toEqual(compact);
+    store.recordTurn("codex", "owner", usage);
+    expect(store.get("codex", "owner")).toMatchObject({ ...usage, turns: 2, source: "turn" });
+  });
+
   it("旧记录无有效窗口仍可重载，新值持久化且只计数时保留；重置和容量变更后丢弃旧实测窗口", async () => {
     const dir = tmp('context-effective-'), store = open(dir);
     store.recordTurn('codex', 'owner', usage); await store.flush();

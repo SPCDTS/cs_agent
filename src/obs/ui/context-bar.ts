@@ -33,7 +33,7 @@ export function contextBar(backend: string, key: string, u: ContextUsage | null 
   const capacityTitle = u.backend === 'codex' && num(u.effectiveWindowTokens) && u.effectiveWindowTokens > 0
     ? `名义 ${fmtInt(u.windowTokens)} / 有效 ${fmtInt(window)}` : '';
   const stale = now - u.updatedAt > STALE_MS;
-  const cls = `ctx ctx-t-${tier(p)}${u.source === 'estimate' ? ' ctx-est' : ''}${stale ? ' ctx-stale' : ''}${o.mini ? ' ctx-mini' : ''}`;
+  const cls = `ctx ctx-t-${tier(p)}${u.source !== 'turn' ? ' ctx-est' : ''}${stale ? ' ctx-stale' : ''}${o.mini ? ' ctx-mini' : ''}`;
   const ticks = u.compaction && window > 0
     ? (['bg', 'rs'] as const).map(k => { const at = k === 'bg' ? u.compaction!.background : u.compaction!.reserve;
       return `<i class="ctx-tick ctx-${k}" data-at="${clampPct(ratio(at, window))}" title="${esc(tickTitle(k, at, window))}"></i>`; }).join('') : '';
@@ -47,6 +47,7 @@ export function contextBar(backend: string, key: string, u: ContextUsage | null 
   if (u.cachedTokens) meta.push(`缓存命中 ${fmtInt(u.cachedTokens)}`);
   if (u.compaction) meta.push(`压缩阈值 ${fmtPct(ratio(u.compaction.background, window))} / ${fmtPct(ratio(u.compaction.reserve, window))}`);
   if (u.source === 'estimate') meta.push('估算值（尚无真实回合用量）');
+  if (u.source === 'compact') meta.push('压缩后估算');
   meta.push(stale ? `上次更新 ${hoursAgo(u.updatedAt, now)} 小时前` : `更新于 ${new Date(u.updatedAt).toLocaleTimeString('zh-CN', { hour12: false, timeZone: process.env.TZ || undefined })}`);
   return `<div class="${cls}" ${attrs}${capacityTitle ? ` title="${esc(capacityTitle)}"` : ''}><div class="ctx-head"><span class="ctx-label">${esc(label)}</span><span class="ctx-num"><b class="ctx-used">${fmtInt(u.usedTokens)}</b> / <span class="ctx-win">${fmtInt(window)}</span> tokens</span><span class="ctx-short">${esc(short)}</span><span class="ctx-pct">${fmtPct(p)}</span></div>${track('div')}<div class="ctx-meta">${esc(meta.join('，'))}</div></div>`;
 }

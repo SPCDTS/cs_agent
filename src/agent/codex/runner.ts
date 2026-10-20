@@ -578,6 +578,18 @@ export class CodexRunner {
           killTree,
         });
         compacted = true;
+        if (this.opts.contextUsage) {
+          try {
+            const usage = await this.latestRolloutContextUsage(session.thread_id, startedAt);
+            if (usage) this.opts.contextUsage.recordCompaction("codex", key, "@context", {
+              usedTokens: usage.usedTokens,
+              ...(usage.effectiveWindowTokens !== undefined ? { effectiveWindowTokens: usage.effectiveWindowTokens } : {}),
+            });
+            else log.info("codex context usage unavailable after compaction; keeping previous usage", detail);
+          } catch {
+            log.info("codex context usage refresh failed after compaction; keeping previous usage", detail);
+          }
+        }
         return "compacted";
       } finally {
         log.info("codex thread compaction ended", { ...detail, compacted, duration_ms: Date.now() - startedAt });
@@ -727,11 +739,11 @@ export class CodexRunner {
   }
 
   /** 按用量时间选最新快照；时间相同时优先较大的 rollout，与启动回填共用。 */
-  private async latestRolloutContextUsage(threadId: string): ReturnType<typeof readRolloutContextUsage> {
+  private async latestRolloutContextUsage(threadId: string, compactedAfter?: number): ReturnType<typeof readRolloutContextUsage> {
     const files = await this.rolloutFiles(threadId);
     let latest: Awaited<ReturnType<typeof readRolloutContextUsage>>;
     for (const { file } of files.sort((a, b) => b.size - a.size)) {
-      const history = await readRolloutContextUsage(file);
+      const history = await readRolloutContextUsage(file, compactedAfter);
       if (history && (!latest || history.updatedAt > latest.updatedAt)) latest = history;
     }
     return latest;

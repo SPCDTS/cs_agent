@@ -1,5 +1,5 @@
 import type { ContextUsageStore } from "../context-usage.js";
-import { PiContextObserver, piContextCapacity } from "../pi-context-usage.js";
+import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../pi-context-usage.js";
 import { readThreadArchive, writeThreadArchive, THREAD_ARCHIVE_LIMIT } from "../thread-archive.js";
 import { trace } from "../../shared/trace.js";
 import type { PiConversation, PiEntryPage, PiSessionSource } from "./pi-session-types.js";
@@ -414,6 +414,7 @@ export class PiBackend implements AgentBackend {
       const task = await conv.compact(undefined, context);
       const { state: { outcome } } = await this.harness.waitForTask(task, context);
       if (outcome.status !== "completed") throw new Error(`pi 会话压缩失败（${outcome.status}）`);
+      if (this.opts.contextUsage) await refreshPiCompactionUsage(conv, key, this.opts.contextUsage);
       return "compacted";
     });
   }
