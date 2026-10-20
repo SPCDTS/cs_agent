@@ -63,8 +63,8 @@ export interface DashboardPageOptions {
     /** 上下文监控（设计 DESIGN-context-monitor §2–3）：按线程的已判定回合序列。 */
     contextSeries(opts: { limit?: number; since?: number; backend?: string; key?: string; analysis?: ContextAnalysisOptions }): ThreadContextSeries[];
     previousContextTurn(backend: ContextUsage['backend'], key: string, beforeTs: number): ContextUsageEventView | undefined;
-    /** 票据页：把本票据的 context_usage 记录交给数据层判定，返回本票据最后一条实际回合。 */
-    analyzeTicketTurn(backend: ContextUsage['backend'], key: string, ticketEvents: ContextUsageEventView[]): ContextTurn | undefined;
+    /** 票据页：把本票据的 model_request / context_usage 事件交给数据层判定，返回本票据全部请求（按 seq）。 */
+    analyzeTicketTurns(ticket: string, ticketEvents: ObsEvent[]): ContextTurn[];
   };
 }
 export interface ContextUsageEventView { ts: number; ticket: string; detail: ContextUsage }
@@ -124,10 +124,26 @@ function turnTitle(t: ContextTurn): string {
   if (t.mark) parts.push(MARKS[t.mark] + (t.reasons.length ? '：' + t.reasons.join('、') : ''));
   return parts.join(' · ');
 }
+/** 走势条 title：`票据 X · 第 n/N 次请求 · 时间 · 输入 · 命中 · 原因`；压缩记录没有票据，沿用 turnTitle。 */
+const barTitle = (t: ContextTurn) => t.source === 'compact' ? turnTitle(t) : `票据 ${t.ticket.slice(0, 12)} · 第 ${t.seq}/${t.requests} 次请求 · ${turnTitle(t)}`;
+/** 把序列切成连续的同票据段；压缩记录各自成段。 */
+function ticketRuns(turns: ContextTurn[]): ContextTurn[][] {
+  const runs: ContextTurn[][] = [];
+  for (const t of turns) {
+    const last = runs.at(-1)?.at(-1);
+    if (last && t.source === 'turn' && last.source === 'turn' && last.ticket === t.ticket) runs.at(-1)!.push(t); else runs.push([t]);
+  }
+  return runs;
+}
 /** miss / partial 用 .changed 样式，title 写原因；其他标记不在票据页提示。 */
 const missMark = (t: ContextTurn) => t.mark === 'miss' || t.mark === 'partial'
   ? `<span class="changed cu-m-${t.mark}" title="${esc(t.reasons.join('、'))}">${MARKS[t.mark]}</span>` : '';
-const turnHit = (t: ContextTurn) => `<span class="muted cu-hit" title="${esc(turnTitle(t))}">命中 ${fmtInt(t.cached)} / ${fmtInt(t.used)}（${fmtPct(hitPct(t))}）</span>${missMark(t)}`;
+const turnHit = (t: ContextTurn, prefix = '') => `<span class="muted cu-hit" title="${esc(turnTitle(t))}">${prefix}命中 ${fmtInt(t.cached)} / ${fmtInt(t.used)}（${fmtPct(hitPct(t))}）</span>${missMark(t)}`;
+/** 票据页：单请求沿用一行；多请求在行内给总数，下方逐次列出 `第 n 次：命中 X / Y（Z%）` 与标记。 */
+const ticketHits = (turns: ContextTurn[]) => turns.length === 1 ? { inline: turnHit(turns[0]!), list: '' } : {
+  inline: `<span class="muted cu-hit">${turns.length} 次请求</span>`,
+  list: `<ul class="cu-reqs">${turns.map(t => `<li>${turnHit(t, `第 ${t.seq} 次：`)}</li>`).join('')}</ul>`,
+};
 const usageHref = (backend: string, key: string) => `/context-usage?backend=${uri(backend)}&amp;key=${uri(key)}`;
 
 const ticketStatus = (events: ObsEvent[]) => {
@@ -166,7 +182,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
         { lead: '最近 1000 行结构化日志，随后实时追加。可按票据或级别过滤。', scripts: ['/assets/logs.js'], actions: '<span id="conn" class="conn">正在连接…</span>' });
     }
     if (p === '/context') return shell('上下文检索', contextBody(q), { lead: '与 Codex / pi 的 qq_context 工具看到的内容一致。留空关键词查看最近记录。时间线、摘要与检索对照见<a href="/memory">记忆</a>。' });
-    if (p === '/context-usage') return shell('上下文监控', contextUsageBody(q), { lead: '每条线程最近若干轮的输入占用（竖条高度 = 占窗口比例），其中缓存命中与未命中分两色；异常的缓存未命中标红并给出原因推断。刷新页面更新。' });
+    if (p === '/context-usage') return shell('上下文监控', contextUsageBody(q), { lead: '每条线程最近若干次模型请求的输入占用（一根竖条一次请求，同一票据的请求相邻成组；高度 = 占窗口比例），其中缓存命中与未命中分两色；异常的缓存未命中标红并给出原因推断。刷新页面更新。' });
     if (p === '/agents') return shell('Agent', await agentsPage(), { lead: '两个执行后端的会话、索引进度与每条线程的上下文占用。点进会话查看每个回合的输入、模型请求、工具调用与回复。', scripts: ['/assets/forms.js', '/assets/usage.js'] });
     if (p.startsWith('/agents/')) return agentsRoute(p, q, nonce, shell);
     if (p === '/memory' || p.startsWith('/memory/')) return memoryPage(p, q, nonce, shell);
@@ -287,16 +303,16 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       ...(snap ? [['派发设置', esc(dispatchSettingsLine(snap))] as [string, string]] : []),
       ['收到', esc(fmtTime(t0))], ['总耗时', esc(fmtMs(t1 - t0))]], 'meta')}</div></div>`;
     if (received) body += `<section><h2>原文</h2><blockquote class="said">${esc(detail(received).text ?? '')}</blockquote><p class="hint">正文、提示词和回复只保存脱敏后的前 500 字。历史由工具按需获取，没有自动注入近期上下文。</p></section>`;
-    // 缓存命中（DESIGN-context-monitor §3）：判定由数据层完成，标在最后一个完成的模型回合行；没有模型回合时标在占用事件行。
-    const usageEvents: ContextUsageEventView[] = all.filter(e => e.stage === 'context_usage').flatMap(e => {
-      const u = toContextUsage(detail(e)); return u && u.source !== 'estimate' ? [{ ts: e.ts, ticket, detail: u }] : []; });
-    const lastUsage = usageEvents.filter(e => e.detail.source === 'turn').at(-1);
-    const ctxTurn = lastUsage ? opts.store.analyzeTicketTurn(lastUsage.detail.backend, lastUsage.detail.key, usageEvents) : undefined;
-    const hitRowId = ctxTurn ? (all.filter(e => e.stage === 'model_turn' && e.status !== 'started').at(-1) ?? all.find(e => e.stage === 'context_usage' && e.ts === ctxTurn.ts))?.id : undefined;
+    // 缓存命中（DESIGN-context-monitor §3、§8.4）：判定由数据层完成，按请求列在最后一个完成的模型回合行；
+    // 没有模型回合时标在最后一条请求 / 占用事件行。
+    const ctxTurns = opts.store.analyzeTicketTurns(ticket, all);
+    const hits = ctxTurns.length ? ticketHits(ctxTurns) : undefined;
+    const hitRowId = hits ? (all.filter(e => e.stage === 'model_turn' && e.status !== 'started').at(-1)
+      ?? all.filter(e => e.stage === 'model_request' || (e.stage === 'context_usage' && toContextUsage(detail(e))?.source === 'turn')).at(-1))?.id : undefined;
     body += `<section><h2>流转轨迹 <small>${events.length} 个事件${after ? '（续）' : ''}</small></h2><ol class="trail">${events.map(e => {
       const d = detail(e), terminal = ['reply_sent','failed','fallback'].includes(e.stage) && d.terminal === true;
       const sum = summarize({ stage: e.stage, status: e.status, detail: d });
-      return `<li class="${e.status === 'started' ? 'started' : e.status === 'failed' ? 'failed' : 'ok'}${terminal ? ' terminal' : ''}"><div class="row"><span class="t">+${esc(fmtMs(e.ts - t0) || '0 毫秒')}</span><span class="stage">${esc(stageLabel(e.stage))}${e.status === 'started' ? ' 开始' : ''}</span>${ctxTurn && e.id === hitRowId ? turnHit(ctxTurn) : ''}${e.status === 'failed' ? stamp('失败', 'fail') : ''}${e.duration_ms !== null ? `<span class="muted">${esc(fmtMs(e.duration_ms))}</span>` : ''}<code class="faint">${esc(e.stage)}</code></div>${sum ? `<div class="sum">${esc(sum)}</div>` : ''}<details><summary>详情</summary>${json(d)}</details></li>`;
+      return `<li class="${e.status === 'started' ? 'started' : e.status === 'failed' ? 'failed' : 'ok'}${terminal ? ' terminal' : ''}"><div class="row"><span class="t">+${esc(fmtMs(e.ts - t0) || '0 毫秒')}</span><span class="stage">${esc(stageLabel(e.stage))}${e.status === 'started' ? ' 开始' : ''}</span>${hits && e.id === hitRowId ? hits.inline : ''}${e.status === 'failed' ? stamp('失败', 'fail') : ''}${e.duration_ms !== null ? `<span class="muted">${esc(fmtMs(e.duration_ms))}</span>` : ''}<code class="faint">${esc(e.stage)}</code></div>${hits && e.id === hitRowId ? hits.list : ''}${sum ? `<div class="sum">${esc(sum)}</div>` : ''}<details><summary>详情</summary>${json(d)}</details></li>`;
     }).join('')}</ol>`;
     if (events.length === limit) body += `<p><a href="/tickets/${uri(ticket)}?after=${events.at(-1)!.id}&amp;limit=${limit}">下一页事件</a></p>`;
     body += '</section>';
@@ -339,7 +355,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
 
     const field = (name: string, label: string, value: string, attrs: string) => `<label>${label}<input name="${name}" value="${esc(value)}" ${attrs}></label>`;
     let body = `<form class="bar"><label>后端<select name="backend"><option value="">全部</option>${Object.entries(BACKENDS).map(([v, l]) => `<option value="${v}"${backend === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>${
-      field('key', '线程键', key, 'placeholder="owner 或 group:123"')}${field('limit', '每线程回合', String(limit), 'type="number" min="1" max="200"')}${
+      field('key', '线程键', key, 'placeholder="owner 或 group:123"')}${field('limit', '每线程请求', String(limit), 'type="number" min="1" max="200"')}${
       field('miss', '未命中阈值', missRatio === undefined ? '' : String(missRatio), 'type="number" min="0" max="1" step="0.05" placeholder="0.5"')}${
       field('partial', '部分命中阈值', partialRatio === undefined ? '' : String(partialRatio), 'type="number" min="0" max="1" step="0.05" placeholder="0.9"')}<button>筛选</button>${filtered ? '<a class="btn quiet" href="/context-usage">清除</a>' : ''}</form>`;
     if (opts.store.degraded) body += '<div class="flash err">观测存储已降级：读不到上下文占用历史。</div>';
@@ -350,25 +366,39 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       const recent = s.turns.filter(t => t.source === 'turn' && t.ts >= since);
       const used = recent.reduce((n, t) => n + t.used, 0), cached = recent.reduce((n, t) => n + t.cached, 0);
       const misses = recent.filter(t => t.mark === 'miss').length;
+      const tickets = new Set(recent.map(t => t.ticket)).size;
       const u = usageOf(s.backend, s.key), win = u ? usageWindow(u) : 0;
       const occ = u && win > 0 ? `${fmtPct(ratio(u.usedTokens, win))} · ${fmtInt(u.usedTokens)} / ${fmtInt(win)}` : '—';
-      return `<tr><td><a href="#cu-${i}">${esc(ctxLabel(s.backend, s.key))}</a></td><td class="num">${occ}</td><td class="num">${recent.length}</td><td class="num">${misses ? `<span class="s-fail">${misses}</span>` : '0'}</td><td class="num">${used ? fmtPct(cached / used * 100) : '—'}</td></tr>`;
+      return `<tr><td><a href="#cu-${i}">${esc(ctxLabel(s.backend, s.key))}</a></td><td class="num">${occ}</td><td class="num">${tickets}</td><td class="num">${recent.length}</td><td class="num">${misses ? `<span class="s-fail">${misses}</span>` : '0'}</td><td class="num">${used ? fmtPct(cached / used * 100) : '—'}</td></tr>`;
     }).join('');
-    body += `<section><h2>线程汇总 <small>${series.length} 条线程；回合数、未命中与平均命中率（按 token 加权）统计最近 24 小时，以本页每线程最多 ${limit} 轮为限</small></h2><div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>线程</th><th class="num">当前占用（占比 · 已用 / 窗口）</th><th class="num">24 h 回合</th><th class="num">未命中</th><th class="num">平均命中率</th></tr></thead><tbody>${summary}</tbody></table></div></div></section>`;
+    body += `<section><h2>线程汇总 <small>${series.length} 条线程；回合数（票据）、请求数、未命中与平均命中率（按 token 加权）统计最近 24 小时，以本页每线程最多 ${limit} 次请求为限</small></h2><div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>线程</th><th class="num">当前占用（占比 · 已用 / 窗口）</th><th class="num">24 h 回合数</th><th class="num">请求数</th><th class="num">未命中</th><th class="num">平均命中率</th></tr></thead><tbody>${summary}</tbody></table></div></div></section>`;
 
-    const legend = '<p class="cu-legend hint"><span><i class="cu-key k-c" aria-hidden="true"></i>缓存命中</span><span><i class="cu-key k-u" aria-hidden="true"></i>未命中部分</span><span><i class="cu-key k-miss" aria-hidden="true"></i>未命中标记</span><span><i class="cu-key k-partial" aria-hidden="true"></i>部分命中</span><span><i class="cu-key k-sep" aria-hidden="true"></i>压缩 / 重建</span></p>';
+    const legend = '<p class="cu-legend hint"><span><i class="cu-key k-c" aria-hidden="true"></i>缓存命中</span><span><i class="cu-key k-u" aria-hidden="true"></i>未命中部分</span><span><i class="cu-key k-miss" aria-hidden="true"></i>未命中标记</span><span><i class="cu-key k-partial" aria-hidden="true"></i>部分命中</span><span><i class="cu-key k-sep" aria-hidden="true"></i>压缩 / 重建</span><span><i class="cu-key k-g" aria-hidden="true"></i>同一票据的请求</span></p>';
     body += series.map((s, i) => {
       const label = ctxLabel(s.backend, s.key);
-      const bars = s.turns.map((t, j) => {
-        // 压缩记录与其后的回合都标 compact；分隔符只画一次。
-        const sep = (t.mark === 'compact' || t.mark === 'reset') && s.turns[j - 1]?.source !== 'compact'
+      const runs = ticketRuns(s.turns);
+      const bar = (t: ContextTurn, prev: ContextTurn | undefined) => {
+        // 压缩记录与其后的请求都标 compact；分隔符只画一次。
+        const sep = (t.mark === 'compact' || t.mark === 'reset') && prev?.source !== 'compact'
           ? `<i class="cu-sep" title="${esc(MARKS[t.mark])}" aria-hidden="true"></i>` : '';
-        return `${sep}<span class="cu-bar${t.mark ? ` cu-${t.mark}` : ''}" data-h="${clampPct(Math.min(t.pct, 1) * 100)}" title="${esc(turnTitle(t))}"><i class="cu-c" data-c="${clampPct(hitPct(t))}"></i></span>`;
+        return { sep, html: `<span class="cu-bar${t.mark ? ` cu-${t.mark}` : ''}" data-h="${clampPct(Math.min(t.pct, 1) * 100)}" title="${esc(barTitle(t))}"><i class="cu-c" data-c="${clampPct(hitPct(t))}"></i></span>` };
+      };
+      // 同票据的请求放进一个 .cu-group，data-g 随票据切换交替底色；压缩记录不进分组。分隔符只会出现在段首。
+      let g = 1, prevTicket = '';
+      const bars = runs.map(run => {
+        const first = run[0]!, head = bar(first, s.turns[s.turns.indexOf(first) - 1]);
+        if (first.source !== 'turn') return head.sep + head.html;
+        if (first.ticket !== prevTicket) { g ^= 1; prevTicket = first.ticket; }
+        return `${head.sep}<span class="cu-group" data-g="${g}">${head.html}${run.slice(1).map((t, k) => bar(t, run[k]).html).join('')}</span>`;
       }).join('');
       const markCell = (t: ContextTurn) => !t.mark ? '—' : missMark(t) || `<span class="muted">${MARKS[t.mark]}</span>`;
-      const rows = [...s.turns].reverse().map(t => `<tr><td>${esc(fmtTime(t.ts))}</td><td><a class="mono" href="/tickets/${uri(t.ticket)}">${esc(t.ticket.slice(0, 12))}</a></td><td class="num">${fmtInt(t.used)}</td><td class="num">${fmtInt(t.cached)}</td><td class="num">${fmtInt(t.uncached)}</td><td class="num">${fmtPct(t.pct * 100)}</td><td>${markCell(t)}</td><td>${t.reasons.length ? esc(t.reasons.join('、')) : '—'}</td><td class="num">${t.gapMs === undefined ? '—' : esc(fmtMs(t.gapMs) || '0 毫秒')}</td></tr>`).join('');
-      return `<section id="cu-${i}"><h2>${esc(label)} <small>最近 ${s.turns.length} 条 · 未命中 ${s.misses} 次 · 窗口 ${fmtInt(s.window)}${backend && key ? '' : ` · <a href="${usageHref(s.backend, s.key)}">只看此线程</a>`}</small></h2><div class="sheet pad"><div class="cu-chart" role="img" aria-label="${esc(`${label} 最近 ${s.turns.length} 条上下文占用走势，未命中 ${s.misses} 次`)}">${bars}</div>${legend}
-<details class="mt"><summary>明细（${s.turns.length} 条，最新在上）</summary><div class="wrap"><table class="list"><thead><tr><th>时间</th><th>票据</th><th class="num">输入</th><th class="num">缓存命中</th><th class="num">未命中</th><th class="num">占窗口</th><th>标记</th><th>原因</th><th class="num">与上一轮间隔</th></tr></thead><tbody>${rows}</tbody></table></div></details></div></section>`;
+      // 票据段按最新在上排列，段内按请求顺序；同票据只在首行放链接，后续行写 └ 第 n 次。
+      const ticketCell = (t: ContextTurn, k: number) => k > 0 ? `<span class="muted">└ 第 ${t.seq} 次</span>`
+        : `<a class="mono" href="/tickets/${uri(t.ticket)}">${esc(t.ticket.slice(0, 12))}</a>`;
+      const rows = [...runs].reverse().flatMap(run => run.map((t, k) => `<tr><td>${esc(fmtTime(t.ts))}</td><td>${ticketCell(t, k)}</td><td class="num">${t.source === 'turn' ? `${t.seq}/${t.requests}` : '—'}</td><td class="num">${fmtInt(t.used)}</td><td class="num">${fmtInt(t.cached)}</td><td class="num">${fmtInt(t.uncached)}</td><td class="num">${fmtPct(t.pct * 100)}</td><td>${markCell(t)}</td><td>${t.reasons.length ? esc(t.reasons.join('、')) : '—'}</td><td class="num">${t.gapMs === undefined ? '—' : esc(fmtMs(t.gapMs) || '0 毫秒')}</td></tr>`)).join('');
+      const count = `最近 ${s.requests} 次请求（${s.tickets} 个票据）`;
+      return `<section id="cu-${i}"><h2>${esc(label)} <small>${count} · 未命中 ${s.misses} 次 · 窗口 ${fmtInt(s.window)}${backend && key ? '' : ` · <a href="${usageHref(s.backend, s.key)}">只看此线程</a>`}</small></h2><div class="sheet pad"><div class="cu-chart" role="img" aria-label="${esc(`${label} ${count}的上下文占用走势，未命中 ${s.misses} 次`)}">${bars}</div>${legend}
+<details class="mt"><summary>明细（${s.turns.length} 条，最新票据在上）</summary><div class="wrap"><table class="list"><thead><tr><th>时间</th><th>票据</th><th class="num">请求</th><th class="num">输入</th><th class="num">缓存命中</th><th class="num">未命中</th><th class="num">占窗口</th><th>标记</th><th>原因</th><th class="num">与上一请求间隔</th></tr></thead><tbody>${rows}</tbody></table></div></details></div></section>`;
     }).join('');
     return body;
   }

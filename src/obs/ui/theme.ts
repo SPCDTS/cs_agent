@@ -228,10 +228,16 @@ ${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.c
 .cu-bar.cu-miss::before,.cu-bar.cu-partial::before{content:"";position:absolute;left:-1px;right:-1px;top:-6px;height:4px;border-radius:1px;background:var(--fail)}
 .cu-bar.cu-partial::before{background:var(--warn)}
 .cu-sep{flex:none;align-self:stretch;width:0;margin:0 2px;border-left:1px dashed var(--ink-2)}
+.cu-group{display:flex;align-items:flex-end;align-self:stretch;gap:1px;flex:1 0 auto;padding:0 1px;border-radius:2px 2px 0 0}
+.cu-group[data-g="1"]{background:var(--sheet-2);box-shadow:inset 0 0 0 1px var(--rule)}
+.cu-reqs{list-style:none;margin:var(--s1) 0 0;padding:0}
+.trail .cu-reqs li{padding:0}
+.trail .cu-reqs li::before{content:none}
 .cu-legend{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s4)}
 .cu-key{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;border-radius:2px}
 .cu-key.k-c{background:var(--carbon)} .cu-key.k-u{background:var(--ink-3)} .cu-key.k-miss{background:var(--fail)} .cu-key.k-partial{background:var(--warn)}
 .cu-key.k-sep{width:0;border-radius:0;border-left:1px dashed var(--ink-2)}
+.cu-key.k-g{background:var(--sheet-2);box-shadow:inset 0 0 0 1px var(--rule)}
 .cu-m-miss{color:var(--fail)}
 .cu-hit{font-size:var(--t-xs);font-variant-numeric:tabular-nums}
 ${Array.from({ length: 101 }, (_, i) => `.cu-bar[data-h="${i}"]{height:${i}%}.cu-c[data-c="${i}"]{height:${i}%}`).join('\n')}
