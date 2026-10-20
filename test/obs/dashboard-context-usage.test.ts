@@ -62,7 +62,7 @@ const sectionOf = (html: string, label: string) => {
 };
 
 describe('上下文监控页面 /context-usage', () => {
-  it('导航入口、汇总表（线程名、当前占用条、24 h 回合 / 未命中 / 平均命中率）', async () => {
+  it('导航入口、汇总表（线程名、当前占用文字、24 h 回合 / 未命中 / 平均命中率）', async () => {
     const r = await rig(); seed(r);
     const { status, html } = await r.html('/context-usage');
     expect(status).toBe(200);
@@ -70,8 +70,11 @@ describe('上下文监控页面 /context-usage', () => {
     expect(html).toContain('<a href="/context-usage" aria-current="page">上下文监控</a>');
     expect(html).toMatch(/<a href="\/memory"[^>]*>记忆<\/a><a href="\/context-usage"/);
     // codex 在最近活动的前面；5 个实际回合、1 次未命中、命中率 364,712 / 895,000 ≈ 41%。
-    expect(html).toMatch(/<tr><td><a href="#cu-0">Codex · owner 线程<\/a><\/td><td><div class="ctx ctx-t-ok ctx-mini" data-ctx="codex\|owner"[^]*?<\/td><td class="num">5<\/td><td class="num"><span class="s-fail">1<\/span><\/td><td class="num">41%<\/td><\/tr>/);
-    expect(html).toMatch(/<tr><td><a href="#cu-1">Pi · 群 7<\/a><\/td><td><div class="ctx ctx-mini ctx-none" data-ctx="pi\|group:7"[^]*?<\/td><td class="num">1<\/td><td class="num">0<\/td><td class="num">0%<\/td><\/tr>/);
+    expect(html).toContain('<th class="num">当前占用（占比 · 已用 / 窗口）</th>');
+    expect(html).toContain('<tr><td><a href="#cu-0">Codex · owner 线程</a></td><td class="num">13% · 52,000 / 400,000</td><td class="num">5</td><td class="num"><span class="s-fail">1</span></td><td class="num">41%</td></tr>');
+    expect(html).toContain('<tr><td><a href="#cu-1">Pi · 群 7</a></td><td class="num">—</td><td class="num">1</td><td class="num">0</td><td class="num">0%</td></tr>');
+    // 进度条组件不再出现在本页（完整条在 Agent 页）。
+    expect(html).not.toContain('data-ctx=');
     expect(html).not.toMatch(/\sstyle="/);
     expect(html).not.toMatch(/<script(?![^>]*type="module")/);
   });

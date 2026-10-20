@@ -197,5 +197,22 @@ describe('usage.js（总览 / Codex / Pi 页）', () => {
     expect(bar.querySelector('.ctx-meta')!.textContent).toContain('第 10 回合');
     expect(bar.querySelector('.ctx-meta')!.textContent).not.toContain('尚无真实回合用量');
   });
+
+  it('总览的迷你条（无 .ctx-head / .ctx-meta）原地更新，不换节点、不抛错', () => {
+    const root = new El('BODY');
+    const mini = new El('DIV'); mini.className = 'ctx ctx-mini ctx-none'; mini.dataset.ctx = 'pi|group:7';
+    const track = new El('SPAN'); track.className = 'ctx-track'; const fill = new El('I'); fill.className = 'ctx-fill'; fill.dataset.w = '0'; track.append(fill);
+    const pct = new El('SPAN', '—'); pct.className = 'ctx-pct'; const short = new El('SPAN', '暂无占用数据'); short.className = 'ctx-short';
+    mini.append(track, pct, short); root.append(mini);
+    const listeners: Record<string, (e: { data: string }) => void> = {};
+    const document = { createElement: (t: string) => new El(t.toUpperCase()), createTextNode: (t: string) => new El('#text', t), querySelectorAll: (sel: string) => root.querySelectorAll(sel) };
+    class EventSource { addEventListener(type: string, fn: (e: { data: string }) => void) { listeners[type] = fn; } }
+    vm.runInNewContext(ASSETS['usage.js']!, { document, EventSource, CSS: { escape: (s: string) => s }, setInterval: () => 0, Date, Math, JSON, Number, String, isFinite, encodeURIComponent });
+    expect(() => listeners.context!({ data: JSON.stringify({ usage: { backend: 'pi', key: 'group:7', usedTokens: 64_000, windowTokens: 128_000, turns: 3, updatedAt: Date.now(), source: 'turn' } }) })).not.toThrow();
+    expect(root.querySelector('[data-ctx="pi|group:7"]')).toBe(mini);
+    expect(mini.className).toBe('ctx ctx-t-ok ctx-mini');
+    expect(pct.textContent).toBe('50%'); expect(short.textContent).toBe('64k / 128k'); expect(fill.dataset.w).toBe('50');
+    expect(mini.attrs.title).toContain('64,000 / 128,000 tokens');
+  });
 });
 

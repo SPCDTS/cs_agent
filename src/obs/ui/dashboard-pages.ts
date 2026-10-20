@@ -5,7 +5,7 @@ import { redact, redactText } from '../../shared/redact.js';
 import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnRecallSection, type RecallDetail, type RecallList } from './recall-pages.js';
 import type { ScopeTimeline } from '../memory/types.js';
 import { contextBar, ctxLabel } from './context-bar.js';
-import { clampPct, fmtInt, fmtPct, sortUsage, toContextUsage, type ContextUsage, type ContextUsageView } from '../../shared/format.js';
+import { clampPct, fmtInt, fmtPct, ratio, sortUsage, toContextUsage, usageWindow, type ContextUsage, type ContextUsageView } from '../../shared/format.js';
 import type { ContextAnalysisOptions, ContextTurn, ThreadContextSeries } from '../../shared/context-turns.js';
 import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, stageLabel, stamp, statusStamp, time, uri, type Flash } from './html.js';
 import { scopeLabel } from '../../context/access.js';
@@ -192,15 +192,10 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     const health = asObj(await opts.health());
     const queue = asObj(opts.queue());
     let out = opts.store.degraded ? '<div class="flash err">观测存储已降级（degraded: true）：业务照常运行，但事件与指标暂不落库。</div>' : '';
-    const live = opts.live?.snapshot().filter(c => c.finished === null) ?? [];
-    out += `<section><h2>现在 <small>${live.length ? `${live.length} 条进行中` : ''}</small></h2>`;
-    out += live.length ? `<div class="sheet"><div class="wrap"><table class="list"><tbody>${live.slice(0, 12).map(c => `<tr><td>${statusStamp(c.state)}</td><td class="hide-sm">${esc(scopeLabel(c.scope))}</td><td><span class="excerpt">${esc(c.text || '（无原文）')}</span></td><td>${esc(c.phase ? stageLabel(c.phase) : '—')}</td><td class="num">${esc(fmtMs(Date.now() - c.started))}</td></tr>`).join('')}</tbody></table></div></div><p class="hint"><a href="/live">在实时页查看事件流</a></p>`
-      : empty('眼下没有在处理的消息。新消息到达后会出现在这里和<a href="/live">实时页</a>。');
-    out += '</section>';
-
+    // 一行迷你条（悬停看完整数字）；完整条在 Agent 页，走势在上下文监控页。
     const usage = usageList();
-    out += `<section><h2>上下文占用 <small>${usage.length ? `${usage.length} 条线程，codex 在前，按占比排序` : ''}</small></h2>${usage.length
-      ? `<div class="sheet pad"><div class="ctx-list">${usage.map(u => contextBar(u.backend, u.key, u)).join('')}</div></div>`
+    out += `<section><h2>上下文占用 <small>${usage.length ? `${usage.length} 条线程 · ` : ''}<a href="/context-usage">上下文监控 →</a></small></h2>${usage.length
+      ? `<div class="sheet pad"><div class="ctx-list ctx-list-mini">${usage.map(u => `<div class="ctx-item"><span class="ctx-item-label">${esc(ctxLabel(u.backend, u.key))}</span>${contextBar(u.backend, u.key, u, { mini: true })}</div>`).join('')}</div></div>`
       : empty(opts.contextUsage ? '还没有线程的占用记录。任一线程完成一个回合后，这里会显示它离上下文窗口还有多远。' : '上下文占用数据源未接入。')}</section>`;
 
     const bridge = asObj(health.bridge), comfy = asObj(health.comfy), codex = asObj(health.codex), aging = asObj(health.aging);
@@ -219,18 +214,22 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     const t1 = tp(1), t24 = tp(24);
     const fig = (label: string, t: { total: number; failed: number; error_rate: number }) => `<div class="sheet pad"><div class="muted">${label}</div><div class="figure">${t.total}<small class="muted"> 条完成</small></div><div class="${t.failed ? 's-fail' : 'muted'}">失败或兜底 ${t.failed} 条（${(t.error_rate * 100).toFixed(t.error_rate && t.error_rate < .1 ? 1 : 0)}%）</div></div>`;
     const scopes = Object.entries(asObj(queue.scopes)).filter(([, n]) => Number(n) > 0);
-    out += `<section><h2>吞吐与队列</h2><div class="grid cols-3">${fig('近 1 小时', t1)}${fig('近 24 小时', t24)}<div class="sheet pad"><div class="muted">并发槽位</div><div class="figure">${Number(queue.active ?? 0)} / ${Number(queue.slots ?? 0)}</div><div class="muted">${scopes.length ? scopes.map(([s, n]) => `${esc(scopeLabel(s))} 排队 ${Number(n)} 条`).join('，') : `排队 ${Math.max(0, Number(queue.waiting ?? 0))} 条`}</div></div></div></section>`;
+    out += `<section><h2>吞吐与队列</h2><div class="grid cols-3">${fig('近 1 小时', t1)}${fig('近 24 小时', t24)}<div class="sheet pad"><div class="muted">并发槽位</div><div class="figure">${Number(queue.active ?? 0)} / ${Number(queue.slots ?? 0)}</div><div class="muted">${scopes.length ? scopes.map(([s, n]) => `${esc(scopeLabel(s))} 排队 ${Number(n)} 条`).join('，') : `排队 ${Math.max(0, Number(queue.waiting ?? 0))} 条`}</div></div></div>`;
+    // 在途消息与实时页同一数据源，这里只给计数。
+    const live = opts.live?.snapshot().filter(c => c.finished === null);
+    const queued = live?.filter(c => c.state === 'queued').length ?? 0;
+    out += `<p class="hint mt">${live ? `处理中 ${live.length - queued} · 排队 ${queued} · ` : ''}<a href="/live">实时页查看进行中的会话</a></p></section>`;
+
+    const rows = opts.store.degraded ? [] : opts.store.latestMetrics();
+    out += `<section><details><summary>最近一分钟指标（${rows.length} 项，p50 / p95 等）</summary><div class="sheet mt"><div class="wrap"><table class="list"><thead><tr><th>指标</th><th>标签</th><th class="num">值</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td class="mono">${esc(Object.entries(asObj(JSON.parse(r.labels_json))).filter(([, v]) => v !== '').map(([k, v]) => `${k}=${String(v)}`).join(' '))}</td><td class="num">${esc(Number.isInteger(r.value) ? r.value : r.value.toFixed(3))}</td></tr>`).join('')}</tbody></table></div></div></details></section>`;
 
     if (opts.settings) {
       const s = opts.settings.current();
-      out += `<section><h2>当前设置 <small><a href="/settings">修改</a></small></h2><div class="sheet pad">${kv([
-        ['默认后端', esc(BACKENDS[s.agentBackend] ?? s.agentBackend)],
-        ['按会话覆盖', Object.keys(s.backendOverrides).length ? Object.entries(s.backendOverrides).map(([k, v]) => `${esc(scopeLabel(k))} → ${esc(BACKENDS[v] ?? v)}`).join('，') : '无'],
-        ['Codex 模型', esc(s.codexModel)], ['Codex 推理强度', esc(s.codexReasoningEffort)],
-        ['Pi 模型', esc(s.piModel)], ['Pi 思考档位', esc(s.piThinkingLevel)], ['owner 告警', s.alertOwner ? '开启' : '关闭']])}</div></section>`;
+      const line = [`默认后端 ${esc(BACKENDS[s.agentBackend] ?? s.agentBackend)}`, `覆盖 ${Object.keys(s.backendOverrides).length} 条`,
+        `Codex ${esc(s.codexModel)} / ${esc(s.codexReasoningEffort)}`, `Pi ${esc(s.piModel)} / ${esc(s.piThinkingLevel)}`,
+        `owner 告警 ${s.alertOwner ? '开' : '关'}`].join(' · ');
+      out += `<section><h2>当前设置</h2><div class="sheet pad settings-line"><span>${line}</span><a href="/settings">修改</a></div></section>`;
     }
-    const rows = opts.store.degraded ? [] : opts.store.latestMetrics();
-    out += `<section><details><summary>最近一分钟指标（${rows.length} 项，p50 / p95 等）</summary><div class="sheet mt"><div class="wrap"><table class="list"><thead><tr><th>指标</th><th>标签</th><th class="num">值</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.name)}</td><td class="mono">${esc(Object.entries(asObj(JSON.parse(r.labels_json))).filter(([, v]) => v !== '').map(([k, v]) => `${k}=${String(v)}`).join(' '))}</td><td class="num">${esc(Number.isInteger(r.value) ? r.value : r.value.toFixed(3))}</td></tr>`).join('')}</tbody></table></div></div></details></section>`;
     return out;
   }
 
@@ -350,9 +349,11 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       const recent = s.turns.filter(t => t.source === 'turn' && t.ts >= since);
       const used = recent.reduce((n, t) => n + t.used, 0), cached = recent.reduce((n, t) => n + t.cached, 0);
       const misses = recent.filter(t => t.mark === 'miss').length;
-      return `<tr><td><a href="#cu-${i}">${esc(ctxLabel(s.backend, s.key))}</a></td><td>${contextBar(s.backend, s.key, usageOf(s.backend, s.key), { mini: true })}</td><td class="num">${recent.length}</td><td class="num">${misses ? `<span class="s-fail">${misses}</span>` : '0'}</td><td class="num">${used ? fmtPct(cached / used * 100) : '—'}</td></tr>`;
+      const u = usageOf(s.backend, s.key), win = u ? usageWindow(u) : 0;
+      const occ = u && win > 0 ? `${fmtPct(ratio(u.usedTokens, win))} · ${fmtInt(u.usedTokens)} / ${fmtInt(win)}` : '—';
+      return `<tr><td><a href="#cu-${i}">${esc(ctxLabel(s.backend, s.key))}</a></td><td class="num">${occ}</td><td class="num">${recent.length}</td><td class="num">${misses ? `<span class="s-fail">${misses}</span>` : '0'}</td><td class="num">${used ? fmtPct(cached / used * 100) : '—'}</td></tr>`;
     }).join('');
-    body += `<section><h2>线程汇总 <small>${series.length} 条线程；回合数、未命中与平均命中率（按 token 加权）统计最近 24 小时，以本页每线程最多 ${limit} 轮为限</small></h2><div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>线程</th><th>当前占用</th><th class="num">24 h 回合</th><th class="num">未命中</th><th class="num">平均命中率</th></tr></thead><tbody>${summary}</tbody></table></div></div></section>`;
+    body += `<section><h2>线程汇总 <small>${series.length} 条线程；回合数、未命中与平均命中率（按 token 加权）统计最近 24 小时，以本页每线程最多 ${limit} 轮为限</small></h2><div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>线程</th><th class="num">当前占用（占比 · 已用 / 窗口）</th><th class="num">24 h 回合</th><th class="num">未命中</th><th class="num">平均命中率</th></tr></thead><tbody>${summary}</tbody></table></div></div></section>`;
 
     const legend = '<p class="cu-legend hint"><span><i class="cu-key k-c" aria-hidden="true"></i>缓存命中</span><span><i class="cu-key k-u" aria-hidden="true"></i>未命中部分</span><span><i class="cu-key k-miss" aria-hidden="true"></i>未命中标记</span><span><i class="cu-key k-partial" aria-hidden="true"></i>部分命中</span><span><i class="cu-key k-sep" aria-hidden="true"></i>压缩 / 重建</span></p>';
     body += series.map((s, i) => {
@@ -618,7 +619,6 @@ ${agentModelFieldsets(s, d, diff)}
     body += `<section id="prompt"><h2>pi 系统提示 agent.md <small>${mtime ? `修改于 ${esc(fmtTime(mtime.getTime()))}` : '尚未创建'}</small></h2>${secretInside
       ? `<div class="flash err">文件中包含凭据样式的内容，面板只读展示脱敏版本；请在容器内直接编辑。</div>${json(prompt)}`
       : `<form method="post" action="/settings/agent-md" class="sheet pad">${csrfField(csrf)}<input type="hidden" name="revision" value="${esc(agentMdRevision(promptStat))}"><label>每轮对话前热加载，保存后 pi 下一轮即使用新内容。<textarea name="content" rows="18" spellcheck="false" data-count="agent-md-count">${esc(prompt)}</textarea></label><div class="hint"><span id="agent-md-count"></span>，上限 ${AGENT_MD_MAX_BYTES / 1024} KB</div><p class="mt"><button>保存 agent.md</button></p></form>`}</section>`;
-    body += `<section><h2>线程</h2><div class="sheet pad"><p>重置会归档当前会话并在下一条消息时新建，用于清掉跑偏的长期记忆。</p><p><a href="/agents">Agent 页（Codex owner / 共享线程、Pi 各会话域）</a></p></div></section>`;
     const changes = opts.store.systemEvents(SETTINGS_TICKET, 15);
     body += `<section><h2>最近变更</h2>${changes.length ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>时间</th><th>内容</th><th>来源</th></tr></thead><tbody>${changes.map(e => { const dd = asObj(JSON.parse(e.detail_json));
       const bytes = (v: unknown) => typeof v === 'number' ? fmtBytes(v) : '—';

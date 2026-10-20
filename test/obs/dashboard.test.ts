@@ -100,7 +100,7 @@ describe('面板二期页面', () => {
     const r = await rig();
     trace.event('t-live', 'received', { scope: 'group:7', detail: { text: '在途消息', sender: '小明' } });
     for (const [url, marks] of Object.entries({
-      '/': ['运行总览', '依赖状态', 'class="lamps"', '在途消息', '并发槽位'],
+      '/': ['运行总览', '依赖状态', 'class="lamps"', '并发槽位', '处理中 0 · 排队 1 · <a href="/live">'],
       '/live': ['进行中的会话', 'id="inflight"', 'id="done"', 'src="/assets/live.js"', 'data-ticket="t-live"', '群 7'],
       '/tickets': ['票据列表', 'name="status"'],
       '/logs': ['实时日志', 'src="/assets/logs.js"'],
@@ -128,6 +128,11 @@ describe('面板二期页面', () => {
       if (url !== '/') expect(html).toContain(`href="${navOf[url] ?? url}" aria-current="page"`);
       expect(html).toMatch(/<nav class="tabs"[^>]*><a href="\/"[^>]*>总览<\/a><a href="\/agents"[^>]*>Agent<\/a><a href="\/memory"[^>]*>记忆<\/a><a href="\/context-usage"[^>]*>上下文监控<\/a><a href="\/tickets"[^>]*>票据<\/a><a href="\/live"[^>]*>(<i[^>]*><\/i>)?实时<\/a><a href="\/skills"[^>]*>技能<\/a><a href="\/settings"[^>]*>设置<\/a><\/nav>/);
     }
+    // 去重：总览不再列在途卡片（只给计数，详情在实时页）；设置页不再有"线程"区块（重置/压缩在 Agent 页）。
+    const home = await (await r.get('/')).text();
+    expect(home).not.toContain('在途消息'); expect(home).not.toContain('<h2>现在');
+    const settingsHtml = await (await r.get('/settings')).text();
+    expect(settingsHtml).not.toContain('<h2>线程</h2>'); expect(settingsHtml).not.toContain('重置会归档当前会话');
     for (const asset of ['live.js', 'logs.js', 'forms.js', 'agents.js']) {
       const res = await r.get('/assets/' + asset);
       expect(res.status).toBe(200); expect(res.headers.get('content-type')).toContain('text/javascript');
@@ -464,16 +469,19 @@ describe('上下文占用条（§8.5）', () => {
     { backend: 'pi', key: 'owner', usedTokens: 2_000, windowTokens: 128_000, turns: 0, updatedAt: now, source: 'estimate' },
   ]);
 
-  it('总览与 /agents 首屏渲染占用条；codex 在前、各自按占比降序；页面加载 usage.js', async () => {
+  it('总览一行迷你条 + 监控链接，/agents 完整条；codex 在前、各自按占比降序；页面加载 usage.js', async () => {
     const r = await rig({ contextUsage: stub() });
     const home = await (await r.get('/')).text();
     expect(home).toContain('上下文占用'); expect(home).toContain('src="/assets/usage.js"');
+    expect(home).toContain('<a href="/context-usage">上下文监控 →</a>');
+    expect(home).toContain('<div class="ctx-list ctx-list-mini">');
     const order = [...home.matchAll(/data-ctx="([^"]+)"/g)].map(m => m[1]);
     expect(order).toEqual(['codex|owner', 'codex|group:7', 'pi|group:7', 'pi|owner']);
-    expect(home).toMatch(/class="ctx ctx-t-warn ctx-stale" data-ctx="codex\|owner"/);
-    expect(home).toContain('上次更新 30 小时前');
-    expect(home).toMatch(/class="ctx ctx-t-hot" data-ctx="pi\|group:7"/);
-    expect(home).toMatch(/class="ctx ctx-t-ok ctx-est" data-ctx="pi\|owner"/);
+    expect(home).toMatch(/<span class="ctx-item-label">Codex · owner 线程<\/span><div class="ctx ctx-t-warn ctx-stale ctx-mini" data-ctx="codex\|owner"/);
+    expect(home).toMatch(/class="ctx ctx-t-hot ctx-mini" data-ctx="pi\|group:7"/);
+    expect(home).toMatch(/class="ctx ctx-t-ok ctx-est ctx-mini" data-ctx="pi\|owner"/);
+    // 完整条（标签头、说明行）只在 Agent 页。
+    expect(home).not.toContain('class="ctx-head"'); expect(home).not.toContain('class="ctx-meta"');
     expect(home).not.toMatch(/\sstyle="/);
 
     const agents = await r.get('/agents'); const ah = await agents.text();
@@ -683,7 +691,12 @@ describe('运行时模型设置页（§5）', () => {
     expect(after.match(/与 \.env 不同/g)?.length).toBeGreaterThanOrEqual(4);
     expect(after).toContain('Codex 模型：codex/gpt-6.1-sol → gpt-6.1-sol'); expect(after).toContain('Pi 思考档位：low → max');
     const overview = await (await r.get('/')).text();
-    for (const m of ['Codex 模型', 'gpt-6.1-sol', 'Pi 模型', 'codex/gpt-6.1-sol', 'Pi 思考档位', 'Codex 推理强度']) expect(overview).toContain(m);
+    // 总览的设置摘要压成一行，"修改"链到设置页；位于最近一分钟指标之后。
+    const line = /<div class="sheet pad settings-line"><span>([^<]*)<\/span><a href="\/settings">修改<\/a><\/div>/.exec(overview);
+    expect(line?.[1]).toMatch(/^默认后端 \S+ · 覆盖 0 条 · Codex gpt-6\.1-sol \/ auto · Pi codex\/gpt-6\.1-sol \/ max · owner 告警 [开关]$/);
+    expect(overview.indexOf('最近一分钟指标')).toBeGreaterThan(overview.indexOf('<h2>吞吐与队列'));
+    expect(overview.indexOf('最近一分钟指标')).toBeLessThan(overview.indexOf('<h2>当前设置'));
+    expect(overview).not.toContain('Codex 推理强度'); expect(overview).not.toContain('Pi 思考档位');
   });
 
   it('codex 目录为空或缺省时退化为文本框并提示', async () => {

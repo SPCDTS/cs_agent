@@ -211,6 +211,10 @@ ol.feed{list-style:none;margin:var(--s3) 0 0;padding:var(--s2) 0 0;border-top:1p
 .ctx-mini .ctx-pct{margin-left:0;font-size:var(--t-xs)}
 .ctx-mini .ctx-short{color:var(--ink-3)}
 .slip-top .ctx-mini{order:9}
+.ctx-list-mini{display:flex;flex-wrap:wrap;gap:var(--s2) var(--s6)}
+.ctx-item{display:flex;align-items:center;gap:var(--s2);flex:1 1 260px;max-width:420px;min-width:0}
+.ctx-item-label{font-size:var(--t-xs);font-weight:600;white-space:nowrap}
+.settings-line{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:var(--s2) var(--s4);font-size:var(--t-sm)}
 .thread-ctx{margin-bottom:var(--s4);padding-bottom:var(--s4);border-bottom:1px dashed var(--rule-strong)}
 ${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.ctx-tick[data-at="${i}"]{left:${i}%}`).join('\n')}
 
