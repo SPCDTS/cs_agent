@@ -3,12 +3,21 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { redact, redactText } from '../shared/redact.js';
+import { toContextUsage } from '../shared/format.js';
+import { analyzeContextTurns, type ContextUsageEvent, type SystemEvent, type ThreadContextSeries } from './context-turns.js';
 
 import type { ObsEvent } from '../shared/trace.js';
 export interface TicketRow { ticket: string; scope: string; ts: number; updated: number; route: string | null; backend: string | null; status: string; sender: string | null; duration_ms: number }
 export interface ThreadTurn { ticket: string; ts: number; started: number; text: string; reply: string; status: string; duration_ms: number; tools: number; input_tokens: number; output_tokens: number }
 /** 管理事件独立按年龄保留，不参与普通票据预算。 */
 const ADMIN_EVENT_SQL = "(ticket LIKE '@%' OR stage IN ('settings_changed','prompt_changed','thread_reset'))";
+type ContextRow = Pick<ObsEvent, 'ts' | 'ticket' | 'detail_json'>;
+function contextEvent(row: ContextRow): ContextUsageEvent | undefined {
+  const detail: unknown = JSON.parse(row.detail_json);
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return;
+  const usage = toContextUsage(detail as Record<string, unknown>);
+  if (usage) return { ts: row.ts, ticket: row.ticket, detail: usage };
+}
 export class ObsStore {
   private database?: DatabaseSync;
   degraded = false;
@@ -140,6 +149,75 @@ export class ObsStore {
         duration_ms: (terminal?.ts ?? ts) - (events[0]?.ts ?? ts), tools: events.filter(e => e.stage.startsWith('tool:') && e.status !== 'started').length,
         input_tokens: input, output_tokens: output };
     });
+  }
+  /**
+   * 默认每线程 40 条、最多 200 条；只读取最近至多 2000 条 turn/compact。
+   * 线程按最近活动倒序，线程内按 ts/id 升序；截断边界不补读历史基准。
+   */
+  contextSeries(opts: { limit?: number; since?: number; backend?: string; key?: string } = {}): ThreadContextSeries[] {
+    if (this.degraded) return [];
+    const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(200, Math.floor(opts.limit!))) : 40;
+    const clauses = ["stage='context_usage'", "json_extract(detail_json,'$.source') IN ('turn','compact')"];
+    const args: SQLInputValue[] = [];
+    if (Number.isFinite(opts.since)) { clauses.push('ts>=?'); args.push(opts.since!); }
+    for (const field of ['backend', 'key'] as const) if (opts[field] !== undefined) {
+      clauses.push(`json_extract(detail_json,'$.${field}')=?`); args.push(opts[field]!);
+    }
+    // 线程数也只在最近 2000 条中计算，避免为确定 M 扫描完整历史。
+    const rows = this.db.prepare(`WITH recent AS MATERIALIZED (
+      SELECT id,ts,ticket,detail_json FROM events INDEXED BY events_ts
+      WHERE ${clauses.join(' AND ')} ORDER BY ts DESC,id DESC LIMIT 2000
+    ) SELECT ts,ticket,detail_json FROM recent ORDER BY ts DESC,id DESC
+      LIMIT (SELECT MIN(2000,COUNT(DISTINCT json_array(json_extract(detail_json,'$.backend'),json_extract(detail_json,'$.key')))*?) FROM recent)`)
+      .all(...args, limit) as ContextRow[];
+    const groups = new Map<string, ContextUsageEvent[]>();
+    for (const row of rows) {
+      const event = contextEvent(row);
+      if (!event) continue;
+      const id = JSON.stringify([event.detail.backend, event.detail.key]);
+      const group = groups.get(id) ?? [];
+      if (!groups.has(id)) groups.set(id, group);
+      if (group.length < limit) group.push(event);
+    }
+    const retained = [...groups.values()].flat();
+    if (!retained.length) return [];
+    const start = Math.min(...retained.map(event => event.ts)), end = Math.max(...retained.map(event => event.ts));
+    const systemRows = this.db.prepare(`SELECT ts,stage,detail_json FROM events INDEXED BY events_ts
+      WHERE ts>=? AND ts<=? AND ticket='@settings' AND stage IN ('settings_changed','prompt_changed')
+      ORDER BY ts DESC,id DESC LIMIT 500`).all(start, end) as Pick<ObsEvent, 'ts' | 'stage' | 'detail_json'>[];
+    const system: SystemEvent[] = systemRows.reverse().flatMap(row => {
+      const detail: unknown = JSON.parse(row.detail_json);
+      return detail && typeof detail === 'object' && !Array.isArray(detail) ? [{ ts: row.ts, stage: row.stage, detail: detail as Record<string, unknown> }] : [];
+    });
+    const resetRows = this.db.prepare(`SELECT ts,stage,detail_json FROM events INDEXED BY events_ts
+      WHERE ts>=? AND ts<=? AND stage='thread_reset' ORDER BY ts DESC,id DESC LIMIT 500`)
+      .all(start, end) as Pick<ObsEvent, 'ts' | 'stage' | 'detail_json'>[];
+    const resets: SystemEvent[] = resetRows.reverse().flatMap(row => {
+      const detail: unknown = JSON.parse(row.detail_json);
+      return detail && typeof detail === 'object' && !Array.isArray(detail) ? [{ ts: row.ts, stage: row.stage, detail: detail as Record<string, unknown> }] : [];
+    });
+    return [...groups.values()].map(events => {
+      events.reverse();
+      const { backend, key } = events[0].detail;
+      // 保留线程重置事件供分析；设计的 reset 判定仍以回合计数回到 1 为准。
+      const threadResets = resets.filter(event => event.detail.backend === backend &&
+        (event.detail.key ?? event.detail[backend === 'codex' ? 'thread_key' : 'conversation_key']) === key);
+      const turns = analyzeContextTurns(events, [...system, ...threadResets]);
+      return { backend, key, turns,
+        misses: turns.filter(turn => turn.mark === 'miss').length, window: turns.at(-1)!.window };
+    });
+  }
+  /** 严格早于 beforeTs 的最近实际回合；忽略 estimate 和 compact。 */
+  previousContextTurn(backend: 'codex' | 'pi', key: string, beforeTs: number): ContextUsageEvent | undefined {
+    if (this.degraded || !Number.isFinite(beforeTs)) return;
+    const rows = this.db.prepare(`SELECT ts,ticket,detail_json FROM events INDEXED BY events_ts
+      WHERE ts<? AND stage='context_usage' AND json_extract(detail_json,'$.backend')=?
+      AND json_extract(detail_json,'$.key')=? AND json_extract(detail_json,'$.source')='turn'
+      ORDER BY ts DESC,id DESC`).iterate(beforeTs, backend, key);
+    for (const row of rows) {
+      const event = contextEvent(row as ContextRow);
+      if (event) return event;
+    }
   }
   /** 最近的系统事件（@ 开头的票据，例如 @settings）。 */
   systemEvents(ticket: string, limit = 20): ObsEvent[] {
