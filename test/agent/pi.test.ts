@@ -40,7 +40,7 @@ const cleanup: (() => Promise<unknown> | void)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); vi.unstubAllEnvs(); });
 const handleContext = () => ({ signal: new AbortController().signal, onEvent: vi.fn() });
 const request = (ticket: string, owner = false): AgentRequest => ({
-  ticket, scope: owner ? "private:1" : "group:7", access: owner ? "all" : "group:7", threadKey: owner ? "owner" : "group:7",
+  ticket, scope: owner ? "private:1" : "group:7", access: owner ? "all" : "group:7", threadKey: owner ? "owner" : "group:7", senderIsOwner: owner,
   source: { type: owner ? "private" : "group", user_id: "1", group_id: owner ? null : "7", nickname: "测试者" }, text: "查一下", time: 1_760_000_000,
 });
 const inbound = (id: string, group: string | null, text: string): InboundMessage => ({
@@ -83,6 +83,32 @@ async function setup(steps: FauxResponseStep[], opts: { currentModel?: () => Mod
 }
 
 describe("pi durable backend", () => {
+  it.each([true, false])("技能权限与提示按本轮发送者接线（owner 私聊=%s），下一条非 owner 消息不可改", async privateOwner => {
+    const dir = tmp("pi-skills-owner-"), skillsDir = path.join(dir, "custom-skills"), file = path.join(skillsDir, "hello", "SKILL.md");
+    const text = "---\nname: hello\ndescription: owner 新增技能\n---\n正文";
+    const seen: TranscriptContext[] = [];
+    const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
+    const s = await setup([call("write", { path: file, content: text }), inspect, call("write", { path: file, content: "群改写" }), inspect], { dir, skillsDir });
+    await s.pi.handle({ ...request("skills-owner-write", privateOwner), senderIsOwner: true }, handleContext());
+    expect(await fs.readFile(file, "utf8")).toBe(text);
+    const ownerSystem = seen[0].messages.findLast(m => m.role === "system")!;
+    if (ownerSystem.role !== "system") throw new Error("缺少 system");
+    expect(getSystemMessageText(ownerSystem)).toContain("技能写入规则");
+    expect(getSystemMessageText(ownerSystem)).toContain(skillsDir + "/<name>/");
+    const ids = await s.pi.readThreadIds();
+    const ownerId = ids[privateOwner ? "owner" : "group:7"] as ConversationId;
+    expect((await s.pi.harness.snapshot(PiRequestDoc, ownerId, context))?.senderIsOwner).toBe(true);
+    await s.pi.handle(request("skills-group-write"), handleContext());
+    const groupSystem = seen[1].messages.findLast(m => m.role === "system")!;
+    if (groupSystem.role !== "system") throw new Error("缺少 system");
+    expect(getSystemMessageText(groupSystem)).toContain("owner 新增技能");
+    expect(getSystemMessageText(groupSystem)).not.toContain("技能写入规则");
+    const groupId = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+    expect((await s.pi.harness.snapshot(PiRequestDoc, groupId, context))?.senderIsOwner).toBe(false);
+    if (!privateOwner) expect(groupId).toBe(ownerId);
+    expect(seen[1].messages.some(m => m.role === "toolResult" && m.isError)).toBe(true);
+    expect(await fs.readFile(file, "utf8")).toBe(text);
+  });
   it("面板公开源分页读取真实历史与指定条目上下文，重置后仍列出归档", async () => {
     const s = await setup([reply("历史回复"), reply("owner 回复")]);
     await s.pi.handle(request("source-group"), handleContext());

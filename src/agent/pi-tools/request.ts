@@ -5,6 +5,8 @@ import { defineDoc } from "@earendil-works/pi-durable";
 export const PiRequestDoc = defineDoc<{
   ticket: string;
   access: string;
+  /** 与票据一起持久化；旧快照缺失时不授予技能写权限。 */
+  senderIsOwner?: boolean;
   images: string[];
   content: string;
   deadline: number;
@@ -12,5 +14,5 @@ export const PiRequestDoc = defineDoc<{
   calls: Record<string, { kind: string; ordinal: number }>;
 }>({
   kind: "cs.pi.request", version: 1, scope: "conversation", history: "latest", fork: "initial",
-  initial: () => ({ ticket: "", access: "", images: [], content: "", deadline: 0, calls: {} }),
+  initial: () => ({ ticket: "", access: "", senderIsOwner: false, images: [], content: "", deadline: 0, calls: {} }),
 });

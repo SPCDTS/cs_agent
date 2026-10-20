@@ -526,6 +526,7 @@ export function createTasks(deps: TaskDeps) {
                 scope,
                 access: accessToString(accessForSource(source, deps.owner)),
                 threadKey: threadKeyForSource(source, deps.owner),
+                senderIsOwner: !!deps.owner && source.user_id === deps.owner,
                 source: { ...source },
                 text: doc.text,
                 images: doc.source_images ?? [],

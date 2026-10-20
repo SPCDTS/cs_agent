@@ -35,6 +35,12 @@ export interface LiveCardView {
 }
 export interface CodexPromptSnapshot { managed: string; custom: string; revision: string; file: string; updatedAt: number | null }
 export interface DashboardPageOptions {
+  /** 技能页只读契约；上传、下载与删除由 HTTP 层处理。 */
+  skills?: {
+    list(): Promise<{ name: string; dir: string; description?: string; files: number; bytes: number; diagnostics: string[]; hidden: boolean; mtime: number }[]>;
+    readSkillMd(name: string): Promise<string>;
+    files(name: string): Promise<{ path: string; size: number }[]>;
+  };
   health(): unknown | Promise<unknown>; queue(): unknown; codex(): Promise<unknown>; pi(): Promise<unknown>;
   resetCodex?: unknown; resetPi?: unknown;
   live?: { snapshot(): LiveCardView[] };

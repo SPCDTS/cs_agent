@@ -36,6 +36,8 @@ export interface AgentRequest {
   access: string;
   /** 记忆隔离键：owner 私聊 → owner，其余 → scope */
   threadKey: ThreadKey;
+  /** 主进程按本条消息发送者与配置的 owner 比较；旧请求缺省为 false。 */
+  senderIsOwner?: boolean;
   source: TicketSource;
   /** 用户原文 */
   text: string;

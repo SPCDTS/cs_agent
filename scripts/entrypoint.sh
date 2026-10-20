@@ -128,11 +128,11 @@ norm_path() {
 DATA_N="$(norm_path "$DATA_DIR")"
 CODEX_HOME_N="$(norm_path "$CODEX_HOME_DIR")"
 # codex workspace-write 沙箱可写目录：逗号分隔的绝对路径，先规范化再检查；
-# /、DATA_DIR 本身及其上级、CODEX_HOME 及其子目录、图片目录、*.sqlite、含 ".." 或非法字符的一律拒绝
+# /、DATA_DIR 本身及其上级、CODEX_HOME（仅 skills/shared 例外）、图片目录、*.sqlite、含 ".." 或非法字符的一律拒绝
 WRITABLE_ROOTS=""
 WRITABLE_ROOTS_CSV=""
 _old_ifs="$IFS"; IFS=','
-for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts}; do
+for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts,$DATA_DIR/codex/skills/shared}; do
   IFS="$_old_ifs"
   _raw="$(printf '%s' "$_r" | tr -d ' ')"
   [ -n "$_raw" ] || { IFS=','; continue; }
@@ -142,6 +142,7 @@ for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts}; do
   esac
   _r="$(norm_path "$_raw")"
   case "$_r" in
+    "$CODEX_HOME_N/skills/shared") ;; # 只开放共享挂载根，其他 Codex 状态仍拒绝。
     /|"$DATA_N"|"$CODEX_HOME_N"|"$CODEX_HOME_N"/*|"$DATA_N/images"|"$DATA_N/images"/*|"$DATA_N/files"|"$DATA_N/files"/*|"$DATA_N/incoming"|"$DATA_N/incoming"/*|"$DATA_N/tickets"|"$DATA_N/tickets"/*|*.sqlite|*.sqlite-*) _bad=1 ;;
   esac
   case "$DATA_N/" in "$_r"/*) _bad=1 ;; esac # DATA_DIR 的上级目录
@@ -195,7 +196,7 @@ web_search = "$WEB_SEARCH"
 $PROVIDER_CONFIG
 
 # codex 命令沙箱（cs-agent 以 -s workspace-write 运行）：命令可联网（CODEX_SANDBOX_NETWORK），
-# 只能写下列目录（CODEX_WRITABLE_ROOTS）；/data/codex、*.sqlite、/data/images 不在其中。
+# 只能写下列目录（CODEX_WRITABLE_ROOTS）；Codex 仅 skills/shared 可写，凭据与会话仍不可写。
 [sandbox_workspace_write]
 network_access = $SANDBOX_NETWORK
 writable_roots = [$WRITABLE_ROOTS]

@@ -156,10 +156,12 @@ interface PiDenyRead extends DenyRead { workspaceRoots: string[] }
 
 export interface PiSandboxOptions {
   dataDir: string;
+  /** 空值使用 dataDir/skills；off 禁用技能写入。 */
+  skillsDir?: string;
   /** Codex 的 WORKSPACE_DIR；必须由调用方传入，缺失时关闭工具权限。 */
   workspaceDir?: string;
   key: string;
-  request: { ticket: string; access: string };
+  request: { ticket: string; access: string; senderIsOwner?: boolean };
   store: Pick<ContextStore, "mediaPathAllowed">;
   requirementsFile?: string;
 }
@@ -169,6 +171,7 @@ export class PiPathPolicy {
   readonly ticket: string;
   readonly workspace: string;
   readonly workRoot: string;
+  readonly skillsDir?: string;
   private readonly images: string;
   private readonly incoming: string;
   private readonly media: string;
@@ -187,6 +190,7 @@ export class PiPathPolicy {
     this.images = path.resolve(dataDir, "images", this.ticket);
     this.incoming = path.resolve(dataDir, "incoming", this.ticket);
     this.media = path.resolve(dataDir, "media");
+    this.skillsDir = options.skillsDir === "off" ? undefined : path.resolve(options.skillsDir || path.join(dataDir, "skills"));
   }
 
   async deny(): Promise<PiDenyRead> {
@@ -220,7 +224,8 @@ export class PiPathPolicy {
     const state = [path.resolve(this.options.dataDir, "pi.sqlite*"), path.resolve(this.options.dataDir, "pi-threads*")];
     if ([absolute, canonical].some(p => state.some(pattern => globMatch(p, pattern)))) forbidden();
     if (mode === "write") {
-      if (!inRoot(this.workspace) && !inRoot(this.images)) forbidden();
+      const skillsWrite = this.options.request.senderIsOwner === true && this.skillsDir !== undefined && inRoot(this.skillsDir);
+      if (!inRoot(this.workspace) && !inRoot(this.images) && !skillsWrite) forbidden();
       // 本票据图片是 deny_read(images) 的明确例外；其他受管禁读目标仍不可覆写。
       if (!inRoot(this.images) && (matchesDeny(absolute, deny) || matchesDeny(canonical, deny))) forbidden();
     } else if (!inRoot(this.images) && !inRoot(this.incoming)) {
@@ -233,12 +238,15 @@ export class PiPathPolicy {
 }
 
 /** 顺序很重要：先隐藏整棵 pi-work，再只挂回本会话，避免新建会话目录的枚举竞态。 */
-export function bwrapArgs(workspace: string, workRoot: string, denied: readonly DeniedPath[], command: string | readonly string[]): string[] {
+export function bwrapArgs(workspace: string, workRoot: string, denied: readonly DeniedPath[], command: string | readonly string[],
+  options?: { senderIsOwner?: boolean; skillsDir?: string }): string[] {
   const args = ["--unshare-user", "--unshare-pid", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
     "--ro-bind", "/", "/", "--proc", "/proc", "--remount-ro", "/proc",
     "--dev", "/dev", "--tmpfs", "/dev/shm", "--remount-ro", "/dev/shm", "--remount-ro", "/dev",
     "--tmpfs", "/sys", "--remount-ro", "/sys", "--tmpfs", "/tmp",
     "--tmpfs", workRoot, "--bind", workspace, workspace, "--remount-ro", workRoot];
+  // 只读根之后开放 owner 技能目录；deny 最后覆盖，避免可写挂载重新暴露受保护文件。
+  if (options?.senderIsOwner === true && options.skillsDir && options.skillsDir !== "off") args.push("--bind", options.skillsDir, options.skillsDir);
   for (const item of denied) {
     // proc、sys、dev 已被新挂载遮蔽；保留工作区内显式 deny 的优先级。
     if (["/proc", "/sys", "/dev"].some(root => within(root, item.path))) continue;

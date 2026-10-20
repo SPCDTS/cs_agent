@@ -279,17 +279,18 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     // 默认值按实际 DATA_DIR / WORKSPACE_DIR 展开
     const d = runEntrypoint({});
     expect(parse(d.toml)["sandbox_workspace_write.writable_roots"]).toBe(
-      `["${d.dataDir.replace(/data$/, "ws")}", "${d.dataDir}/prompts"]`,
+      `["${d.dataDir.replace(/data$/, "ws")}", "${d.dataDir}/prompts", "${d.dataDir}/codex/skills/shared"]`,
     );
     // 拒绝：相对路径、/、DATA_DIR 本身、CODEX_HOME 及其子目录、图片目录、*.sqlite、.. 与非法字符
     const dir = tmp("cs-entry-");
     const data = shPath(path.join(dir, "data"));
     const roots = ["/workspace", " /srv/prompts/ ", "relative", "/", data, `${data}/`, `${data}/codex`, `${data}/codex/sessions`,
+      `${data}/codex/skills`, `${data}/codex/skills/shared-other`, `${data}/codex/skills/shared/nested`, `${data}/codex/skills/shared`,
       `${data}/files`, `${data}/files/x`, `${data}/images`, `${data}/incoming`, `${data}/incoming/x`, `${data}/tickets`, `${data}/tickets/x`, `${data}/qq-messages.sqlite`, "/x/../etc", '/w"x', "/opt/ok"];
     const r = runEntrypointIn(dir, { CODEX_SANDBOX_NETWORK: "false", CODEX_WRITABLE_ROOTS: roots.join(",") });
     const t = parse(r.toml);
     expect(t["sandbox_workspace_write.network_access"]).toBe("false");
-    expect(t["sandbox_workspace_write.writable_roots"]).toBe('["/workspace", "/srv/prompts", "/opt/ok"]');
+    expect(t["sandbox_workspace_write.writable_roots"]).toBe(`["/workspace", "/srv/prompts", "${data}/codex/skills/shared", "/opt/ok"]`);
     expect(r.stderr).toContain("rejected CODEX_WRITABLE_ROOTS entry 'relative'");
     expect(r.stderr).toContain(`rejected CODEX_WRITABLE_ROOTS entry '${data}/codex'`);
     expect(parse(runEntrypoint({ CODEX_SANDBOX_NETWORK: "maybe" }).toml)["sandbox_workspace_write.network_access"]).toBe("true");

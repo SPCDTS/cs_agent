@@ -1,7 +1,8 @@
 /** 面板写操作：沿用同源、CSRF、版本检查与原有响应。 */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DashboardOptions } from './dashboard-types.js';
-import { equal, readBody, HttpError, guardAgentMd, writeAgentMd } from './dashboard-io.js';
+import { equal, readBody, readMultipart, HttpError, guardAgentMd, writeAgentMd } from './dashboard-io.js';
+import { SkillsStoreError } from '../agent/skills-store.js';
 import { isThreadKey } from '../agent/codex/runner.js';
 import { SETTINGS_TICKET, type RuntimeSettings } from '../agent/settings.js';
 import { parseBackendOverrides } from '../agent/backends/select.js';
@@ -19,11 +20,45 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
     if (origin && origin !== `http://${host}` && !(origin === 'null' && site === 'same-origin')) { res.writeHead(403).end('跨站请求被拒绝'); return; }
     if (site && site !== 'same-origin' && site !== 'none') { res.writeHead(403).end('跨站请求被拒绝'); return; }
     let form: URLSearchParams;
-    try { form = await readBody(req); }
+    let file: Awaited<ReturnType<typeof readMultipart>>['file'];
+    try {
+      if (url.pathname === '/skills/upload') {
+        const multipart = await readMultipart(req, { maxBytes: 20 * 1024 * 1024 });
+        form = multipart.fields; file = multipart.file;
+      } else form = await readBody(req);
+    }
     catch (e) { res.writeHead(e instanceof HttpError ? e.status : 400).end(e instanceof Error ? e.message : ''); return; }
     if (!csrf || !equal(form.get('_csrf') ?? '', csrf)) { res.writeHead(403, {'Content-Type':'text/plain; charset=utf-8'}).end('CSRF 令牌无效，请刷新页面后重试'); return; }
     const back = (location: string) => res.writeHead(303, { Location: location }).end();
     try {
+      if (url.pathname === '/skills/upload') {
+        if (!opts.skills) throw new HttpError(404, '技能管理未启用');
+        if (!file) throw new HttpError(400, '请选择技能文件');
+        const overwrite = form.get('overwrite') === 'on';
+        let detail: string;
+        if (/\.zip$/i.test(file.name)) {
+          const result = await opts.skills.importZip(file.data, { overwrite });
+          detail = `导入 ${result.imported.length} 个：${result.imported.join('、') || '无'}。` +
+            `跳过 ${result.skipped.length} 个：` + result.skipped.map(s => `${s.path}（${s.reason}）`).join('；');
+        } else {
+          let text: string;
+          try { text = new TextDecoder('utf-8', { fatal: true }).decode(file.data); }
+          catch { throw new HttpError(400, 'SKILL.md 必须是 UTF-8 文本'); }
+          const result = await opts.skills.importSkillMd(text, { overwrite });
+          detail = `已导入 ${result.name}。`;
+        }
+        // 限制重定向头长度；批量结果保留总数，避免浏览器后续 GET 超过请求头上限。
+        if (detail.length > 1200) detail = detail.slice(0, 1200) + '…（结果过长，已截断）';
+        back('/skills?' + new URLSearchParams({ ok: 'skillsUploaded', detail })); return;
+      }
+      const deletion = /^\/skills\/([^/]+)\/delete$/.exec(url.pathname);
+      if (deletion) {
+        if (!opts.skills) throw new HttpError(404, '技能管理未启用');
+        let name: string;
+        try { name = decodeURIComponent(deletion[1]); } catch { throw new HttpError(400, '非法技能名称'); }
+        await opts.skills.remove(name);
+        back('/skills?ok=skillsDeleted'); return;
+      }
       if (url.pathname === '/settings') {
         if (!opts.settings) throw new HttpError(404, '运行时设置不可用');
         let overrides: RuntimeSettings['backendOverrides'];
@@ -71,10 +106,11 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
       }
       throw new HttpError(404, '没有这个操作');
     } catch (e) {
-      const status = e instanceof HttpError ? e.status : 500;
-      const message = e instanceof HttpError ? e.message : '操作失败，详见日志';
+      const expected = e instanceof HttpError || e instanceof SkillsStoreError;
+      const status = expected ? e.status : 500;
+      const message = expected ? e.message : '操作失败，详见日志';
       const html = url.pathname.startsWith('/settings') ? await render(new URL('http://localhost/settings'), nonce, { text: message, error: true }) : null;
-      res.writeHead(status, {'Content-Type':'text/html; charset=utf-8'}).end(html ?? page({ title: '操作未完成', path: url.pathname, nonce, flash: { text: message, error: true }, body: '<p><a href="/agents">返回</a></p>' }));
+      res.writeHead(status, {'Content-Type':'text/html; charset=utf-8'}).end(html ?? page({ title: '操作未完成', path: url.pathname, nonce, flash: { text: message, error: true }, body: `<p><a href="${url.pathname.startsWith('/skills/') ? '/skills' : '/agents'}">返回</a></p>` }));
     }
   }
 

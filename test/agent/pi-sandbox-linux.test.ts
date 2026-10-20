@@ -4,12 +4,24 @@ import { createServer } from "node:http";
 import { BACKGROUND_CONTEXT as context, withAbortSignal } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sandboxFixture, put } from "./pi-sandbox-fixture.js";
+import { codingEnvironment } from "../../src/agent/pi-tools/coding.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); vi.unstubAllEnvs(); });
 
 // Linux 上不因缺 bwrap/不允许 user namespace 而跳过：容器的 seccomp 回归必须使测试失败。
 describe.runIf(process.platform === "linux")("真实 bwrap（请以容器 node 用户运行）", () => {
+  it("同一群的 owner 发送者 bash 可写技能，下一条非 owner 回合只读", async () => {
+    const { dir, options } = await fixture(), skillsDir = path.join(dir, "skills");
+    const file = await put(path.join(skillsDir, "hello", "SKILL.md"), "初始内容");
+    for (const senderIsOwner of [true, false]) {
+      const env = await codingEnvironment({ ...options, skillsDir, request: { ...options.request, senderIsOwner } });
+      cleanup.push(() => env.cleanup(context));
+      const script = `const fs = require('node:fs'); try { fs.writeFileSync(${JSON.stringify(file)}, 'owner'); } catch { process.exit(3); }`;
+      expect(await env.exec([process.execPath, "-e", script], undefined, context)).toMatchObject({ ok: true, value: { exitCode: senderIsOwner ? 0 : 3 } });
+    }
+    expect(await fs.readFile(file, "utf8")).toBe("owner");
+  });
   async function fixture() {
     // 不放 /tmp：该目录整体被 tmpfs 覆盖，会掩盖 deny_read 挂载本身的错误。
     const dir = await fs.mkdtemp("/var/tmp/cs-pi-sandbox-");

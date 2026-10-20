@@ -38,6 +38,70 @@ export async function readBody(req: IncomingMessage): Promise<URLSearchParams> {
   return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
 }
 
+/** 有界二进制解析；只认完整 boundary 行，文件内同名片段不会被截断。 */
+export async function readMultipart(req: IncomingMessage, { maxBytes }: { maxBytes: number }): Promise<{
+  fields: URLSearchParams; file?: { name: string; type: string; data: Buffer };
+}> {
+  const contentType = req.headers['content-type'] ?? '';
+  const match = /^multipart\/form-data\s*;\s*boundary=(?:"([^"\r\n]+)"|([^;\s"]+))\s*$/i.exec(contentType);
+  const boundary = match?.[1] ?? match?.[2];
+  if (!boundary || boundary.length > 70 || !/^[\x20-\x7e]+$/.test(boundary)) throw new HttpError(415, '只接受 multipart/form-data 上传');
+  const limit = Math.min(maxBytes, 20 * 1024 * 1024);
+  if (!Number.isSafeInteger(limit) || limit <= 0) throw new HttpError(400, '无效上传限额');
+  const chunks: Buffer[] = []; let size = 0;
+  // 超限后继续排空输入，使 HTTP 层仍能发送 413，而不是销毁连接。
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.length;
+    if (size > limit) { req.resume(); throw new HttpError(413, '上传内容超过大小上限'); }
+    chunks.push(bytes);
+  }
+  const body = Buffer.concat(chunks), marker = Buffer.from('--' + boundary), separator = Buffer.from('\r\n--' + boundary);
+  const fields = new URLSearchParams();
+  let file: { name: string; type: string; data: Buffer } | undefined;
+  let offset = 0;
+  const invalid = () => new HttpError(400, 'multipart 表单格式无效');
+  if (!body.subarray(0, marker.length).equals(marker)) throw invalid();
+  offset = marker.length;
+  while (true) {
+    if (body.subarray(offset, offset + 2).toString() === '--') {
+      const tail = body.subarray(offset + 2).toString();
+      if (tail !== '' && tail !== '\r\n') throw invalid();
+      return { fields, file };
+    }
+    if (body.subarray(offset, offset + 2).toString() !== '\r\n') throw invalid();
+    offset += 2;
+    const endHeaders = body.indexOf('\r\n\r\n', offset);
+    if (endHeaders < 0 || endHeaders - offset > 8192) throw invalid();
+    const headers = new Map<string, string>();
+    for (const line of body.subarray(offset, endHeaders).toString('utf8').split('\r\n')) {
+      const header = /^([\w-]+):\s*(.*)$/.exec(line);
+      if (!header || headers.has(header[1].toLowerCase())) throw invalid();
+      headers.set(header[1].toLowerCase(), header[2]);
+    }
+    const disposition = /^form-data;\s*name="([^"\r\n]+)"(?:;\s*filename="([^"\r\n]*)")?$/i.exec(headers.get('content-disposition') ?? '');
+    if (!disposition || headers.has('content-transfer-encoding')) throw invalid();
+    const start = endHeaders + 4;
+    let end = body.indexOf(separator, start);
+    while (end >= 0 && !['\r\n', '--'].includes(body.subarray(end + separator.length, end + separator.length + 2).toString())) {
+      end = body.indexOf(separator, end + separator.length);
+    }
+    if (end < 0) throw invalid();
+    const data = body.subarray(start, end), name = disposition[1], filename = disposition[2];
+    if (filename !== undefined) {
+      if (file || name !== 'file' || /[\\/\x00-\x1f]/.test(filename)) throw new HttpError(400, '只允许一个 file 文件字段');
+      if (/\.zip$/i.test(filename)) {
+        if (!data.subarray(0, 4).equals(Buffer.from([80, 75, 3, 4]))) throw new HttpError(415, 'ZIP 文件签名无效');
+      } else if (!/\.md$/i.test(filename)) throw new HttpError(415, '只接受 ZIP 或 Markdown 文件');
+      file = { name: filename, type: headers.get('content-type') ?? 'application/octet-stream', data };
+    } else {
+      if (fields.has(name)) throw new HttpError(400, '不接受重复表单字段');
+      fields.append(name, data.toString('utf8'));
+    }
+    offset = end + separator.length;
+  }
+}
+
 /** 只认普通文件（非链接、≤256 KB）；内容先脱敏。 */
 export async function readText(file: string): Promise<string> {
   try {

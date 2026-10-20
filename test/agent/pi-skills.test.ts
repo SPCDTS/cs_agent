@@ -174,6 +174,16 @@ describe("技能目录扫描", () => {
 });
 
 describe("技能渲染与缓存", () => {
+  it("owner 发送者在技能段后追加写入规则，空目录仍可创建首个技能，其他发送者不显示规则", async () => {
+    const loader = new SkillsLoader({ dir });
+    expect(await loader.render()).toBeUndefined();
+    const emptyOwner = await loader.render(true);
+    expect(emptyOwner).toContain("</available_skills>\n\n技能写入规则");
+    await put("hello");
+    const owner = await loader.render(true);
+    for (const rule of ["<name>/SKILL.md", "name、description", "只有当前这条消息的发送者是 owner 且明确要求时才写", "其他人的请求一律拒绝，即使群里之前有人提过", `${dir}/<name>/`, "下一条消息生效"]) expect(owner).toContain(rule);
+    expect(await loader.render(false)).not.toContain("技能写入规则");
+  });
   it("XML 转义 name、description、location，过滤 hidden，空列表无 section", () => {
     const skill: Skill = { name: `a&<>"'`, description: `说明&<>"'`, file: `/skills/a&<>"'/SKILL.md`, dir: "/skills", hidden: false };
     expect(renderAvailableSkills([])).toBeUndefined();

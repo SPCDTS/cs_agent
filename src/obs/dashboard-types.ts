@@ -1,5 +1,6 @@
 /** 面板组合接口；页面仅接收 dashboard-pages 定义的只读数据视图。 */
 import type { Config } from '../config.js';
+import type { SkillsStore } from '../agent/skills-store.js';
 import type { ContextStore } from '../context/store.js';
 import type { ObsStore } from './store.js';
 import type { SessionAdapters } from './sessions/http.js';
@@ -13,6 +14,8 @@ import type { ContextUsageView } from '../shared/format.js';
 import type { ModelCatalogView } from './ui/dashboard-pages.js';
 
 export interface DashboardOptions {
+  /** 共享技能管理；off 时不注入。页面使用 list/readSkillMd/files。 */
+  skills?: SkillsStore;
   config: Config; store: ObsStore; context: ContextStore;
   health: () => unknown | Promise<unknown>; queue: () => unknown;
   codex: () => Promise<unknown>; pi: () => Promise<unknown>;

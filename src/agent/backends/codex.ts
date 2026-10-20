@@ -112,6 +112,7 @@ export class CodexBackend implements AgentBackend {
         ticket: req.ticket,
         onJsonEvent: codexObserver(req.ticket),
         threadKey: req.threadKey,
+        senderIsOwner: req.senderIsOwner === true,
         signal: ctx.signal,
         ...(req.settings?.codexModel !== undefined ? { model: req.settings.codexModel } : {}),
         ...(effort ? { reasoningEffort: effort } : {}),

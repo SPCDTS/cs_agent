@@ -108,7 +108,7 @@ export function createPiExtension(opts: PiToolsOptions) {
     sections: [
       section("cs-pi", () => prompt.read(), { tag: false }),
       section("project-context", input => projectContext.render(input.env?.cwd), { tag: false }),
-      section("skills", () => skills?.render(), { tag: false }),
+      section("skills", input => skills?.render(input.env instanceof PiExecutionEnv && input.env.policy.options.request.senderIsOwner === true), { tag: false }),
     ],
     hooks: [
       hook(CompactionTask, { beforeCompact: async (compact, api, context) => {

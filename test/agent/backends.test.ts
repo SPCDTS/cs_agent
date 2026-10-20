@@ -33,6 +33,13 @@ describe("backend selection (§4.3)", () => {
   });
 
   describe("CodexBackend per-ticket idempotency (R1)", () => {
+    it.each([true, false, undefined])("群请求逐轮将 senderIsOwner=%s 传给 CodexRunner，缺省关闭技能写入", async senderIsOwner => {
+      const dir = tmp("skills-codex-backend-"), ask = vi.fn(async () => "答复");
+      const backend = new CodexBackend({ runner: { ask }, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets") });
+      await backend.handle({ ticket: "test", scope: "group:7", access: "group:7", threadKey: "group:7", senderIsOwner,
+        source: { type: "group", user_id: "1", group_id: "7", nickname: "用户" }, text: "写技能" }, { signal: new AbortController().signal, onEvent: () => {} });
+      expect(ask).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ threadKey: "group:7", senderIsOwner: senderIsOwner === true }));
+    });
     const req = { ticket: "abc123", scope: "private:1", access: "all", threadKey: "owner", source: { type: "private", user_id: "1", group_id: null, nickname: "n" }, text: "hi" } as const;
     const setup = () => {
       const dir = tmp("cs-codex-be-");

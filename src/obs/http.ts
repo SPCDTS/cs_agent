@@ -1,4 +1,5 @@
 import { resolveAgentConfig } from '../agent/config.js';
+import { SkillsStoreError } from '../agent/skills-store.js';
 import { csrfToken, sseWriter, type SseWriter } from './http-util.js';
 import { createContextRoutes } from './context/http.js';
 import { imageBinary } from './memory/images.js';
@@ -32,6 +33,7 @@ const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><re
 const MAX_SSE = 20;
 
 const FLASH: Record<string, string> = {
+  skillsUploaded: '技能上传已处理，下一条消息生效。', skillsDeleted: '技能已删除，下一条消息生效。',
   saved: '设置已保存，之后收到的消息按新设置处理。', prompt: 'agent.md 已保存，pi 下一轮对话即读取新内容。',
   codexPrompt: 'codex.md 已保存，AGENTS.md 已重写，codex 下一条消息即使用新内容。',
   reset: '已重置：旧会话已归档，下一条消息会新建会话。', queued: '已排队：当前回合结束后立即重置，旧会话会归档。', unchanged: '没有可重置的会话。',
@@ -167,6 +169,20 @@ export function createDashboard(opts: DashboardOptions) {
       return;
     }
     if (post) { await handlePost(req, res, url, nonce, host); return; }
+    const skillZip = /^\/skills\/([^/]+)\.zip$/.exec(url.pathname);
+    if (skillZip) {
+      if (!opts.skills) { res.writeHead(404).end('技能管理未启用'); return; }
+      try {
+        let name: string;
+        try { name = decodeURIComponent(skillZip[1]); } catch { throw new SkillsStoreError(400, '非法技能名称'); }
+        const bytes = await opts.skills.exportZip(name);
+        res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="${name}.zip"` }).end(Buffer.from(bytes));
+      } catch (error) {
+        res.writeHead(error instanceof SkillsStoreError ? error.status : 500, { 'Content-Type': 'text/plain; charset=utf-8' })
+          .end(error instanceof SkillsStoreError ? error.message : '技能下载失败');
+      }
+      return;
+    }
     const q = url.searchParams;
     if (url.pathname.startsWith('/assets/vendor/')) {
       // 固定白名单（vis-timeline 的 JS 与 CSS），启动时读入内存；其它名字一律 404。
@@ -228,7 +244,8 @@ export function createDashboard(opts: DashboardOptions) {
     // 旧 /codex、/pi 页并入 /agents/*（设计 §7）；/codex/agents-md 与重置 POST 保持原路径。
     if (url.pathname === '/codex' || url.pathname === '/pi') { res.writeHead(303, { Location: `/agents${url.pathname}/sessions` }).end(); return; }
     const flashCode = q.get('ok');
-    const flash = flashCode && FLASH[flashCode] ? { text: FLASH[flashCode]! } : undefined;
+    const flash = flashCode && Object.hasOwn(FLASH, flashCode) ? { text: FLASH[flashCode]! +
+      (flashCode === 'skillsUploaded' ? ' ' + (q.get('detail') ?? '').slice(0, 16_000) : '') } : undefined;
     const html = await render(url, nonce, flash);
     if (html === null) { res.writeHead(404, {'Content-Type':'text/html; charset=utf-8'}).end(page({ title: '没有这个页面', path: url.pathname, nonce, body: empty('地址不对或票据已过保留期。可以从<a href="/tickets">票据列表</a>重新查找。') })); return; }
     res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(html);

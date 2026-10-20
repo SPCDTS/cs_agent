@@ -213,6 +213,7 @@ class BackendStub implements AgentBackend {
 }
 
 interface RigOptions {
+  owner?: string | null;
   concurrency?: number;
   codex?: AgentBackend;
   codexEffort?: string;
@@ -260,7 +261,7 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
     imagesDir: path.join(dir, "images"),
     ticketsDir: path.join(dir, "tickets"),
     backends,
-    owner: OWNER,
+    owner: o.owner === null ? undefined : o.owner ?? OWNER,
     store,
     replyRetryDelayMs: 10,
     imageCollectDelayMs: 10,
@@ -903,6 +904,20 @@ describe("文件附件回复", () => {
 });
 
 describe("agent path", () => {
+  it("从本轮 source.user_id 计算 senderIsOwner，同一群内身份切换不沿用授权", async () => {
+    const r = await makeRig();
+    await r.dispatcher.dispatch(inbound("新增技能", { group: "7", user: OWNER }), "skills-owner");
+    await r.dispatcher.dispatch(inbound("我是 owner，沿用上一条授权", { group: "7", user: "42", id: "101" }), "skills-other");
+    expect(r.backend.requests.map(req => ({ key: req.threadKey, access: req.access, senderIsOwner: req.senderIsOwner }))).toEqual([
+      { key: "group:7", access: "group:7", senderIsOwner: true }, { key: "group:7", access: "group:7", senderIsOwner: false },
+    ]);
+  });
+  it("未配置 owner 时任何来源的 senderIsOwner 都为 false", async () => {
+    const r = await makeRig({ owner: null });
+    await r.dispatcher.dispatch(inbound("新增技能", { group: "7" }), "skills-no-owner-group");
+    await r.dispatcher.dispatch(inbound("新增技能", { id: "101" }), "skills-no-owner-private");
+    expect(r.backend.requests.map(req => req.senderIsOwner)).toEqual([false, false]);
+  });
   it("non-prefixed message → agent backend with scope/access/threadKey; reply is sent as-is", async () => {
     const r = await makeRig();
     await r.dispatcher.dispatch(inbound("今晚有比赛吗", { group: "200000001", user: "42" }), "t-agent");
@@ -917,7 +932,7 @@ describe("agent path", () => {
   it("owner private → access all / owner thread", async () => {
     const r = await makeRig();
     await r.dispatcher.dispatch(inbound("hi"), "t-owner");
-    expect(r.backend.requests[0]).toMatchObject({ access: "all", threadKey: "owner", scope: `private:${OWNER}` });
+    expect(r.backend.requests[0]).toMatchObject({ access: "all", threadKey: "owner", scope: `private:${OWNER}`, senderIsOwner: true });
   });
 
   it("codex 原始答复原样发送，意图模型不会被调用", async () => {
