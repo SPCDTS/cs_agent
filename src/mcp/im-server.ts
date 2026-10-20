@@ -17,7 +17,7 @@ export function createImServer(send: (args: unknown) => Promise<unknown>, opts: 
     : permissions.schedule ? SCHEDULE_MANAGEMENT_TOOLS : [];
   const server = new Server({ name: "im", version: "1.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{
-    name: "send_message", description: "立即发送消息，默认回复本回合会话，返回 message_id。直接输出不会送达用户；一条消息说完就不要再发。",
+    name: "send_message", description: "用户能看到你内容的唯一方式。立即发送消息，默认回复本回合会话，返回 message_id。回合结束前必须至少调用一次把答复发出；直接输出不会送达用户；一条消息说完就不要再发。",
     inputSchema: sendParameters(permissions.target),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, ...(permissions.auth ? AUTH_TOOLS.map(name => ({

@@ -14,7 +14,7 @@ export function createPiImExtensions(opts: Pick<PiToolsOptions, "sendService" | 
     name,
     tools: [
       defineTool({
-        name: "send_message", description: "立即发送文字及可选图片、文件，默认回复本回合会话，返回 message_id。不要发送重复说明。",
+        name: "send_message", description: "用户能看到你内容的唯一方式。立即发送文字及可选图片、文件，默认回复本回合会话，返回 message_id。回合结束前必须至少调用一次把答复发出；不要发送重复说明。",
         parameters: sendParameters(permissions.target), replay: "safe",
         async execute(args, api, context) {
           try {

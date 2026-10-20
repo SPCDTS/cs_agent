@@ -12,7 +12,7 @@ import type { ContextStore } from "../context/store.js";
 import { trace } from "../shared/trace.js";
 import { log } from "../shared/log.js";
 
-export const SEND_RULE = "回复用户必须调用 send_message；直接输出的文字不会发给用户。一条消息说完就不要再发，不发送重复说明。用户消息回合最多 3 条、定时任务回合最多 5 条消息，每条文字 1～4000 字符，可附 4 张图片、3 个文件（单个不超过 20 MiB）。";
+export const SEND_RULE = "用户只能看到 send_message 发出的内容；直接输出的文字用户完全看不到。每一轮要对用户说的话（答复、确认、结果、提问）都必须调用 send_message 发出，包括用其他工具办完事之后告诉用户结果的那一句。一条消息说完就不要再发，不发送重复说明。用户消息回合最多 3 条、定时任务回合最多 5 条消息，每条文字 1～4000 字符，可附 4 张图片、3 个文件（单个不超过 20 MiB）。";
 export interface SendResult {
   status: OutboxRow["status"]; already_sent: boolean; message_id: string | null;
   message_type: OutboxRow["message_type"]; target_id: string; note?: string; original_text?: string;

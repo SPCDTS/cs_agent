@@ -28,7 +28,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getSystemMessageText, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import { CompactionEntry, defineDoc, MemoryStorage, type Harness, type JsonObject, type ConversationId } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PiBackend, PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
+import { PI_SEND_REMINDER, PiBackend, PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { createBackendSelector } from "../../src/agent/backends/select.js";
 import { BackendTimeoutError, type AgentRequest } from "../../src/agent/backends/types.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
@@ -367,6 +367,8 @@ describe("pi durable backend", () => {
     expect(results(seen!)).toContain("资料 / 2026-10-18 / 摘要 / https://example.com");
     expect(JSON.stringify(seen!.messages)).toContain("[来源] 群 7");
     expect(JSON.stringify(seen!.messages)).toContain("[引用 #123] 友人: 此前的问题");
+    // 消息回合末尾带发送方式提醒；run_ 开头的定时运行不带。
+    expect(JSON.stringify(seen!.messages)).toContain(JSON.stringify(PI_SEND_REMINDER).slice(1, -1));
     const init = vi.mocked(s.http).mock.calls[0]![1]!;
     expect(JSON.parse(String(init.body))).toEqual({ query: "CS2", count: 3, need_content: false });
   });
