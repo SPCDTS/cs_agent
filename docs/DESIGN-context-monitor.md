@@ -67,6 +67,12 @@ export function analyzeContextTurns(events: ContextUsageEvent[], system: SystemE
 - 真实数据核对（owner codex 线程，60 轮）：设计 §6 的样本全部符合——10-19 20:31（12:31Z）输入 204,820 / 命中 3,712（2%）标 miss，原因"间隔 108 分钟、窗口变化"；其后 20:35 命中 92%、20:40 命中 100% 不标记；10-20 16:42（08:42Z）命中 3% 标 miss，原因"切换模型、提示词变更、间隔 1202 分钟"（f2 当日切换模型 slug 与 developer_instructions）；f2 的压缩回合标 compact。修正前的误报：10-18 21:34 上一轮 445k、本轮 53k、命中 52k（旧版本压缩无 compact 记录）被标 miss，改基准后不再标记；10-20 18:08 由 miss 变为 partial（81%）。10-18 19:23/19:24 两轮（历史里内联生图的 39 万/44 万 token 时期）命中 66%/70% 标 partial、原因未知，与当时 WebSocket 超限回退 HTTPS 的现象一致，保留。
 - 页面列出 5 条线程（codex owner/group/shared、pi owner/group），导航"上下文监控"，agents 页线程行有"监控"入口。
 
+### 2026-10-20，§8 口径切换的主会话验收
+
+- 代码：数据层 bfdc324（codex：`recordRequest` 写 `model_request`；codex 回合内全部 token_count；pi 每请求记录、每票据一次 `recordTurn`；分析混合新旧数据）、页面 7c86f0f（Opus：按票据分组的走势条、汇总加请求数、明细"请求"列与 `└ 第 n 次`、票据页逐请求命中率；票据分析逻辑由主会话抽到 `obs/context-ticket.ts` 以满足 http.ts ≤ 300 行的架构约束）。与 f2 的 b98bc9c（最终回答允许为空）在 pi.ts 合并，两边语义都保留。全量 1843 项通过。
+- 部署：镜像 `3fae2527…`（main 7c86f0f）。页面：5 条线程，codex owner "最近 40 次请求（18 个票据）"，pi 群 "32 次请求（9 个票据）"——旧数据在 pi 侧本就是每请求一条，现在正确按票据分组；codex 旧票据每票据一条（当时只记最后一次请求），新票据起会按请求展开。
+- 待观察：下一批带工具调用的 codex 票据应在图上出现多根相邻条，首条之后命中接近 100%。
+
 ## 8. 口径改为"每请求一根、按票据分组"（用户 2026-10-20 决定）
 
 ### 8.1 现状与问题
