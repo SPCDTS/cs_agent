@@ -9,6 +9,8 @@ services:
         required: false
     environment:
       HEALTH_HOST: 0.0.0.0
+      # 容器时区：面板时间显示、每日任务小时、codex/pi 沙箱里的 date 都按它；留空用 Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
       DATA_DIR: /data
       WORKSPACE_DIR: /workspace
     ports: ["127.0.0.1:8787:8787"]
