@@ -14,9 +14,9 @@
 
 目标：
 1. 面板新增 `/skills` 页：列出共享目录里的技能（名称、描述、目录、文件数、大小、诊断），查看 SKILL.md，上传（zip 或单个 SKILL.md），下载（zip），删除。
-2. agent 可以自行新增/修改技能：共享目录改为可写挂载；**仅 owner 会话**（codex owner 线程、pi owner 私聊）获得写权限，群会话保持只读。管理规则写进两边提示词。
+2. agent 可以自行新增/修改技能：共享目录改为可写挂载；**权限跟身份走**（用户 2026-10-20 决定）：当前消息的发送者是 owner（`source.user_id === OWNER_QQ`）时，无论私聊还是群聊，本轮都获得技能目录写权限；其他发送者的回合保持只读。管理规则写进两边提示词。
 
-非目标：在线编辑器；技能市场/从 GitHub 安装（magpie Library 或手工放文件即可）；给群会话写权限（如用户要放开，只需把 §4 的 owner 判断去掉，单独决定）。
+非目标：在线编辑器；技能市场/从 GitHub 安装（另见 §9 安装器调研，后续单独设计）。
 
 ## 2. 存储与安全规则（`src/agent/skills-store.ts`，agent 层）
 
@@ -52,11 +52,12 @@ export class SkillsStore {
 ## 4. agent 写权限
 
 - 挂载：两条 volume 去掉 `:ro`。
-- codex（`workspace.ts`）：owner 可写根增加 `${codexHome}/skills/shared`；entrypoint 的 `CODEX_WRITABLE_ROOTS` 默认值同步加 `$DATA_DIR/codex/skills/shared`。群线程不变。
-- pi（`PiPathPolicy`）：`key === "owner"` 时 `check(mode="write")` 允许 `skillsDir` 内（词法与 realpath 都在内，拒绝 `.tmp-*` 以外的点目录？不必，只要在根内即可）；`bwrapArgs` 对 owner 增加 `--bind skillsDir skillsDir`（可写），非 owner 不加（保持 ro-bind）。`PiSandboxOptions` 增加 `skillsDir`。
+- 身份判定：票据的 `source.user_id === cfg.OWNER_QQ`（主进程算好，作为 `senderIsOwner` 随请求传给后端；owner 未配置时恒为 false）。这是按**本轮消息**判定，不是按会话：群线程里 owner 的回合可写，其他人的回合不可写。
+- codex（`workspace.ts`）：`policy` 按 `(key, senderIsOwner)` 计算，`senderIsOwner` 时可写根增加 `${codexHome}/skills/shared`（owner 线程原有的 `${DATA_DIR}/prompts` 规则不变，仍只在 owner 线程）；entrypoint 的 `CODEX_WRITABLE_ROOTS` 默认值同步加 `$DATA_DIR/codex/skills/shared`（config.toml 的静态值只是上限，每轮 `-c` 仍按本轮策略收窄）。
+- pi（`PiPathPolicy`）：`request.senderIsOwner` 为 true 时 `check(mode="write")` 允许 `skillsDir` 内（词法与 realpath 都在内）；`bwrapArgs` 相应增加 `--bind skillsDir skillsDir`（可写），否则不加（保持 ro-bind）。`PiSandboxOptions.request` 增加 `senderIsOwner`。
 - 提示词：
-  - codex 受管 AGENTS.md（`renderManagedAgentsMd`）owner 分支列出可写目录 `/data/codex/skills/shared`，并加一节"技能"：技能目录结构 `<name>/SKILL.md`（frontmatter `name`、`description`）；新增或修改技能只在 owner 私聊明确要求时进行，群聊一律拒绝；写到 `/data/codex/skills/shared/<name>/`，不要用 `skill-creator` 的默认位置 `$CODEX_HOME/skills/<name>`（pi 看不到）；改完告诉用户下一条消息生效。
-  - pi 的 skills 段（`renderAvailableSkills`）在 owner 会话追加一段同样的规则（`SkillsLoader.render(owner: boolean)`）；非 owner 不提写入。
+  - codex 受管 AGENTS.md（`renderManagedAgentsMd`）owner 分支列出可写目录 `/data/codex/skills/shared`，并加一节"技能"：技能目录结构 `<name>/SKILL.md`（frontmatter `name`、`description`）；新增或修改技能只在**当前这条消息的发送者是 owner**（头部 QQ 号等于 owner）且明确要求时进行；其他人的请求一律拒绝，即使群里之前有人提过；写到 `/data/codex/skills/shared/<name>/`，不要用 `skill-creator` 的默认位置 `$CODEX_HOME/skills/<name>`（pi 看不到）；改完告诉用户下一条消息生效。
+  - pi 的 skills 段（`renderAvailableSkills`）在 `senderIsOwner` 的回合追加一段同样的规则（`SkillsLoader.render(owner: boolean)`，按本轮请求传）；其他回合不提写入。
 - 加载器：pi 已每轮重读；codex 每条消息新进程。agent 写完即生效，无需面板操作。
 
 ## 5. 配置
@@ -68,13 +69,22 @@ export class SkillsStore {
 - skills-store：名称校验；zip 导入（正常多技能、根下 SKILL.md、zip slip `../`、绝对路径、链接条目、超大文件、超条目数、缺 description 跳过、已存在不覆盖/覆盖）；导出 zip 内容与路径前缀；删除中间态；`.tmp-*` 对加载器不可见。
 - multipart 解析：单文件 + 字段、超限 413、非法类型。
 - 面板：`/skills` 列表渲染与转义、查看页、下载头、上传/删除 POST（CSRF）。
-- 权限：codex `workspace.ts` owner roots 含 skills/shared、群不含；pi policy owner 可写 skillsDir、群写被拒；bwrap 参数 owner 含 `--bind skillsDir`。
+- 权限：codex `workspace.ts` `senderIsOwner` 时 roots 含 skills/shared（含群线程）、非 owner 发送者不含；pi policy `senderIsOwner` 可写 skillsDir、其他发送者写被拒；bwrap 参数随之。
 - compose 测试改为断言无 `:ro`；entrypoint 测试 `CODEX_WRITABLE_ROOTS` 默认含 skills/shared。
 
 ## 7. 验收（主会话）
 
-部署后：面板上传一个 zip（含两个技能，其中一个缺 description）→ 列表显示一个导入、一个跳过原因；下载 zip 解压一致；owner 私聊让 codex 新建一个技能 → 目录出现、pi 群消息能看到；群里让 agent 改技能 → 被拒；删除后两边不再列出。
+部署后：面板上传一个 zip（含两个技能，其中一个缺 description）→ 列表显示一个导入、一个跳过原因；下载 zip 解压一致；owner 在群里让 agent 新建一个技能 → 目录出现、另一个后端能看到；非 owner 在群里让 agent 改技能 → 被拒；删除后两边不再列出。
 
 ## 8. 验收记录
 
 （主会话追加）
+
+## 9. 安装器调研（2026-10-20）
+
+- vercel-labs/skills（`npx skills add <source>`，MIT）：源支持 GitHub 简写/完整 URL/仓库子路径、GitLab、Azure Repos、任意 git URL、本地路径、直接下载 URL（单个 SKILL.md 或 zip/tar/tgz，默认限 10 MiB 下载、25 MiB 解压、1000 文件）；`-a universal` 装到 `.agents/skills/`（项目）或 `~/.agents/skills/`（全局）；纯 CLI，无库 API；有匿名遥测与"安全评级"请求（`DISABLE_TELEMETRY=1` 关闭）。容器内有 git/npx/Node 24，可在临时目录运行后把 `.agents/skills/*` 经 `SkillsStore` 导入。
+- numman-ali/openskills：Claude Code 兼容的通用加载器，项目级/全局安装，支持本地路径与私有 git；README 较旧。
+- codex 内置 `skill-installer` 系统技能：由模型自己执行 git/下载，装到 `$CODEX_HOME/skills`（非共享目录）。
+- 自实现最小方案：GitHub 仓库/子路径 → `codeload.github.com/<owner>/<repo>/zip/refs/heads/<branch>` 下载 zip → 现有 `importZip`（已含 zip slip/大小/条目限制），子路径时只导入该前缀；直接 zip/SKILL.md URL 同理。约 80 行，无新依赖、无遥测。
+- 结论待用户定：推荐"自实现 GitHub/URL 安装"进 `/skills` 页；需要 GitLab/私有仓库等再接 `npx skills`。
+
