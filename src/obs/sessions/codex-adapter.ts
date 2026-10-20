@@ -8,9 +8,10 @@ import { log } from '../../shared/log.js';
 import { redactText } from '../../shared/redact.js';
 import type { ObsStore } from '../store.js';
 import { contentSlice, inlineBlock, redactSessionValue, validRange } from './content.js';
+import { readTraceContent } from './trace-content.js';
 import { enrichTurns } from './enrichment.js';
 import { SessionIndex, type SessionIndexFile, type IndexedBlock, type IndexedTurn } from './session-index.js';
-import { SessionError, type Block, type BlockFrame, type ContentRef, type SessionAdapter, type SessionFilter, type SessionRef, type Usage } from './types.js';
+import { SessionError, type Block, type BlockFrame, type ContentRef, type SessionAdapter, type SessionFilter, type SessionRef, type TraceContentRef, type Usage } from './types.js';
 
 export const MAX_ROLLOUT_LINE_BYTES = 4 * 1024 * 1024;
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -453,6 +454,10 @@ export class CodexSessionAdapter implements SessionAdapter {
     const block = await this.rawBlock(row, indexed);
     const bytes = Buffer.byteLength(safeText(block.text ?? ''));
     return inlineBlock(block, { session: row.session.id, offset: indexed.offset, length: bytes, bytes });
+  }
+  async traceContent(id: string, ref: TraceContentRef): Promise<string> {
+    this.selected(id);
+    return readTraceContent(this.opts.codexHome, id, ref);
   }
   async content(ref: ContentRef): Promise<string> {
     for (const row of this.selected(ref.session)) for (const block of [...row.state.turns.flatMap(turn => turn.blocks), ...row.state.prelude ?? [], ...row.state.baselines ?? []]) {

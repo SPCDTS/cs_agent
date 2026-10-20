@@ -566,6 +566,25 @@ export function createDashboardPages(deps: DashboardPageDeps) {
    * 后一段跳过续字节，因此按页码寻址既不丢也不重；末页与"是否还有下一段"按实际返回的 UTF-8 字节数判断。
    */
   async function contentPage(backend: string, id: string, session: SessionRef, title: string, q: URLSearchParams, shell: Shell): Promise<string | null> {
+    if (['bundle', 'payload', 'select'].some(key => q.has(key))) {
+      if (backend !== 'codex' || ['offset', 'length', 'page'].some(key => q.has(key))
+        || ['bundle', 'payload', 'select'].some(key => q.getAll(key).length !== 1 || !q.get(key))) return null;
+      const ref = { bundle: q.get('bundle')!, payload: q.get('payload')!, select: q.get('select')! };
+      const head = crumbs([['Agent', '/agents'], [BACKENDS[backend], sessionsHref(backend)], [title, sessionHref(backend, session.id)], ['正文']]);
+      const lead = '官方 trace 中的正文（已按会话脱敏规则处理），单次响应最多 1 MiB。';
+      const r = await api(`${sessionApi(backend, id)}/trace-content?${new URLSearchParams(ref)}`);
+      if (r.status === 404 || r.status === 400) return null;
+      if (r.status !== 200) return shell('正文', `${head}<div class="flash err" role="alert">读取正文失败：${esc(apiError(r))}</div>`, { lead });
+      const body = asObj(r.body), text = typeof body.text === 'string' ? body.text : '';
+      const meta = kv([
+        ['bundle', `<code class="mono">${esc(ref.bundle)}</code>`],
+        ['payload', `<code class="mono">${esc(ref.payload)}</code>`],
+        ['select', `<code class="mono">${esc(ref.select)}</code>`],
+        ['来源会话', `<a href="${sessionHref(backend, session.id)}">${esc(title)}</a> <code class="mono">${esc(session.id)}</code>`],
+      ]);
+      const warn = body.truncated === true ? '<div class="flash err" role="alert">正文超出单次响应上限，已被服务端截断。</div>' : '';
+      return shell('正文', `${head}<section class="sheet pad">${meta}</section>${warn}<section><pre class="mono wrap full">${escFull(text)}</pre></section>`, { lead });
+    }
     const int = (v: string | null) => v !== null && /^\d{1,16}$/.test(v) ? Number(v) : NaN;
     const offset = int(q.get('offset')), length = int(q.get('length'));
     const page = q.get('page') === null || q.get('page') === '' ? 0 : int(q.get('page'));

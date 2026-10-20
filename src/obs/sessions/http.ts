@@ -1,6 +1,7 @@
 import type { ServerResponse } from 'node:http';
 import type { SseWriter } from '../http-util.js';
 import { redactSessionValue, RESPONSE_BYTES, utf8Slice } from './content.js';
+import { validateTraceRef } from './trace-content.js';
 import { SessionError, type SessionAdapter, type SessionFilter, type SessionRef } from './types.js';
 
 export type SessionAdapters = Partial<Record<SessionRef['backend'], SessionAdapter>>;
@@ -119,6 +120,16 @@ export function createSessionRoutes(adapters: SessionAdapters, sse: (res: Server
         const turn = (await found.adapter.turns(id)).find(t => t.turn === turnId);
         if (!turn) throw new SessionError(404, '回合不存在');
         sessionJson(res, 200, { turn, blocks: await found.adapter.blocks(id, turnId) }); return;
+      }
+      if (parts.length === 7 && parts[6] === 'trace-content') {
+        if (parts[3] !== 'codex' || !found.adapter.traceContent) throw new SessionError(404, '后端不提供 trace 正文');
+        if (['bundle', 'payload', 'select'].some(key => q.getAll(key).length !== 1)
+          || ['offset', 'length', 'page'].some(key => q.has(key))) throw new SessionError(400, 'trace 正文参数无效');
+        const ref = { bundle: q.get('bundle')!, payload: q.get('payload')!, select: q.get('select')! };
+        validateTraceRef(id, ref);
+        const text = await found.adapter.traceContent(id, ref);
+        if (text === undefined) throw new SessionError(404, 'trace 正文不存在');
+        sessionJson(res, 200, contentResponse(text)); return;
       }
       if (parts.length === 7 && parts[6] === 'content') {
         const offset = integer(q.get('offset'), 'offset'), length = integer(q.get('length'), 'length');

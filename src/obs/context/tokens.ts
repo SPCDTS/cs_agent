@@ -1,5 +1,6 @@
 import { redactText } from '../../shared/redact.js';
-import { redactSessionValue, utf8Slice } from '../sessions/content.js';
+import { utf8Slice } from '../sessions/content.js';
+export { safeBody } from '../sessions/content.js';
 
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;
 export const TOKEN_NOTE = '估算针对脱敏后的可见正文，使用本地 o200k_base；每条消息包含角色 token 与约 4 token 开销。单条正文最多 2 MiB；长文本按 8 KiB 分段，图片、音频和加密正文不计为 0，而标记不可用。';
@@ -12,12 +13,6 @@ function getEncoder(): Promise<Encoder | undefined> {
 }
 export async function tokenizerName(): Promise<string> { return await getEncoder() ? 'o200k_base' : 'characters/3.5 (fallback)'; }
 
-/** JSON 字符串先按字段脱敏，避免嵌套工具参数中的 password 等字段漏出。 */
-export function safeBody(value: unknown): string {
-  if (typeof value !== 'string') return JSON.stringify(redactSessionValue(value)) ?? '';
-  try { return JSON.stringify(redactSessionValue(JSON.parse(value))); }
-  catch { return redactText(value, Number.MAX_SAFE_INTEGER); }
-}
 export async function estimateTokens(body: string, role = ''): Promise<{ tokens: number; truncated: boolean }> {
   const text = utf8Slice(body, 0, MAX_BODY_BYTES), enc = await getEncoder();
   let tokens = 4;

@@ -3,6 +3,7 @@
  * 这里按约定的 ContextAnalysis 结构渲染头部、构成表与逐消息表；实测与估算分开，来源用标签区分，
  * 没有来源的数字显示"—"而不是 0。分析接口缺席（404/501/503）时给出"分析引擎暂不可用"。
  */
+import type { TraceContentRef } from '../sessions/types.js';
 import { fmtInt, fmtPct, ratio } from '../../shared/format.js';
 import { empty, esc, fmtBytes, fmtTime, stamp, uri, type Tone } from './html.js';
 import { contextHref, turnHref, type SessionCtx } from './turn-view.js';
@@ -17,7 +18,7 @@ export type ContextAnalysis = {
   categories: Array<{ key: 'instructions' | 'tools' | 'history' | 'tool_output' | 'compaction' | 'other'; label: string; items: number;
     tokens: { estimated?: number; measured?: number }; provenance: Provenance; unavailable_items?: number; note?: string }>;
   messages: Array<{ index: number; kind: string; category: string; provenance: string; tokens: { estimated?: number; measured?: number };
-    preview: string; ref?: { session: string; offset: number; length: number; bytes: number }; ts?: number; callId?: string }>;
+    preview: string; ref?: { session: string; offset: number; length: number; bytes: number }; traceRef?: TraceContentRef; ts?: number; callId?: string }>;
   notes: string[];
 };
 
@@ -37,6 +38,10 @@ const pctBar = (value: number | undefined, window: number) => {
 /** 正文页链接：/agents/:backend/sessions/:session/content?offset=&length=[&page=]（已转义，可直接放进属性）。 */
 export const contentHref = (backend: string, session: string, offset: number, length: number, page = 0) =>
   `/agents/${uri(backend)}/sessions/${uri(session)}/content?offset=${Number(offset)}&amp;length=${Number(length)}${page > 0 ? `&amp;page=${Number(page)}` : ''}`;
+
+/** trace 正文链接与字节区间链接互斥；每个参数独立编码后转义 HTML 属性。 */
+export const traceContentHref = (backend: string, session: string, ref: TraceContentRef) =>
+  esc(`/agents/${uri(backend)}/sessions/${uri(session)}/content?bundle=${uri(ref.bundle)}&payload=${uri(ref.payload)}&select=${uri(ref.select)}`);
 
 export const PHASE_LABEL = { before: '回合请求发出前', after: '回合结束后' } as const;
 
@@ -66,7 +71,7 @@ export function contextBody(ctx: SessionCtx, a: ContextAnalysis): string {
   out += `<section><h2>构成 <small>百分比为占上下文窗口的比例；差额单独列出，不摊到任何类别</small></h2>${cats.length ? `<div class="sheet"><div class="wrap"><table class="list ctx-cats"><thead><tr><th>类别</th><th class="num">条目</th><th class="num">估算</th><th class="num">实测</th><th>来源</th><th>占比</th></tr></thead><tbody>${cats.map(c => `<tr data-cat="${esc(c.key)}"><td>${esc(c.label)}${c.note ? `<br><small>${esc(c.note)}</small>` : ''}</td><td class="num">${tok(c.items)}</td><td class="num">${c.provenance === 'unavailable' && !num(c.tokens?.estimated) ? '—' : tok(c.tokens?.estimated)}</td><td class="num">${tok(c.tokens?.measured)}</td><td>${provStamp(c.provenance)}${c.unavailable_items && c.unavailable_items < c.items ? ` <span class="s-warn">部分不可用 ${esc(fmtInt(c.unavailable_items))} 条</span>` : ''}</td><td>${pctBar(c.tokens?.measured ?? c.tokens?.estimated, window)}</td></tr>`).join('')}${num(a.unexplained) ? `<tr class="unexplained"><td>未解释差额<br><small>实测输入 − 估算总计</small></td><td class="num">—</td><td class="num">—</td><td class="num">${a.unexplained > 0 ? '+' : ''}${esc(fmtInt(a.unexplained))}</td><td>${provStamp('unavailable')}</td><td>${pctBar(Math.abs(a.unexplained), window)}</td></tr>` : ''}</tbody></table></div></div>` : empty('没有类别数据。')}</section>`;
   const msgs = a.messages ?? [];
   const catLabel = new Map(cats.map(c => [c.key as string, c.label]));
-  out += `<section><h2>逐消息 <small>${msgs.length} 条 · 预览 240 字；点全文查看完整正文</small></h2>${msgs.length ? `<div class="sheet"><div class="wrap"><table class="list ctx-msgs"><thead><tr><th class="num">#</th><th>类型</th><th class="hide-sm">类别</th><th>来源</th><th class="num">估算</th><th>内容</th></tr></thead><tbody>${msgs.map(x => `<tr><td class="num">${esc(x.index)}</td><td>${esc(x.kind)}${x.callId ? `<br><small class="mono">${esc(x.callId)}</small>` : ''}</td><td class="hide-sm">${esc(catLabel.get(x.category) ?? x.category)}</td><td>${provStamp(x.provenance)}</td><td class="num">${tok(x.tokens?.estimated)}${num(x.tokens?.measured) ? `<br><small>实测 ${tok(x.tokens.measured)}</small>` : ''}</td><td class="msg-cell"><div class="bt prose${x.ref ? ' partial' : ''}">${esc(x.preview)}</div>${x.ref ? `<div class="load-row"><button type="button" class="quiet load-full" data-session="${esc(x.ref.session)}" data-offset="${Number(x.ref.offset)}" data-length="${Number(x.ref.length)}">展开全文（${esc(fmtBytes(x.ref.bytes ?? x.ref.length))}）</button> <a class="btn quiet" href="${contentHref(ctx.backend, x.ref.session, x.ref.offset, x.ref.length)}">全文</a><span class="load-note" role="status"></span></div>` : ''}</td></tr>`).join('')}</tbody></table></div></div>` : empty('没有逐消息数据。')}</section>`;
+  out += `<section><h2>逐消息 <small>${msgs.length} 条 · 预览 240 字；点全文查看完整正文</small></h2>${msgs.length ? `<div class="sheet"><div class="wrap"><table class="list ctx-msgs"><thead><tr><th class="num">#</th><th>类型</th><th class="hide-sm">类别</th><th>来源</th><th class="num">估算</th><th>内容</th></tr></thead><tbody>${msgs.map(x => `<tr><td class="num">${esc(x.index)}</td><td>${esc(x.kind)}${x.callId ? `<br><small class="mono">${esc(x.callId)}</small>` : ''}</td><td class="hide-sm">${esc(catLabel.get(x.category) ?? x.category)}</td><td>${provStamp(x.provenance)}</td><td class="num">${tok(x.tokens?.estimated)}${num(x.tokens?.measured) ? `<br><small>实测 ${tok(x.tokens.measured)}</small>` : ''}</td><td class="msg-cell"><div class="bt prose${x.ref ? ' partial' : ''}">${esc(x.preview)}</div>${x.ref ? `<div class="load-row"><button type="button" class="quiet load-full" data-session="${esc(x.ref.session)}" data-offset="${Number(x.ref.offset)}" data-length="${Number(x.ref.length)}">展开全文（${esc(fmtBytes(x.ref.bytes ?? x.ref.length))}）</button> <a class="btn quiet" href="${contentHref(ctx.backend, x.ref.session, x.ref.offset, x.ref.length)}">全文</a><span class="load-note" role="status"></span></div>` : x.traceRef ? `<div class="load-row"><a class="btn quiet" href="${traceContentHref(ctx.backend, ctx.session, x.traceRef)}">全文</a></div>` : ''}</td></tr>`).join('')}</tbody></table></div></div>` : empty('没有逐消息数据。')}</section>`;
   if (a.notes?.length) out += `<section><h2>说明</h2><ul class="notes">${a.notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul></section>`;
   out += `<p class="hint">生成于 ${esc(fmtTime(a.generatedAt))}。"重建"表示按当前文件推断、可能与当时不同；"不可用"的内容不计为 0。</p>`;
   return out;

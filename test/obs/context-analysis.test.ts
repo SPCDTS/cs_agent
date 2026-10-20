@@ -30,7 +30,7 @@ async function rig(resume = false) {
 const json = (file: string, data: unknown) => fs.writeFile(file, JSON.stringify(data), 'utf8');
 
 async function traceBundle(home: string) {
-  const dir = path.join(home, 'trace', 'bundle'), payloads = path.join(dir, 'payloads');
+  const dir = path.join(home, 'trace', 'trace-fixture-context-fixture'), payloads = path.join(dir, 'payloads');
   await fs.mkdir(payloads, { recursive: true });
   await json(path.join(dir, 'manifest.json'), { schema_version: 1, root_thread_id: 'context-fixture', rollout_id: 'rollout-id', raw_event_log: 'trace.jsonl' });
   const ref = (name: string) => ({ raw_payload_id: name, kind: { type: 'inference_request' }, path: `payloads/${name}.json` });
@@ -160,6 +160,39 @@ describe('Codex 上下文分析', () => {
 });
 
 describe('Codex 官方 trace', () => {
+  it('instructions/tools/input/output_items 的 traceRef 透传分析结果，rollout ref 同时保留', async () => {
+    const r = await rig(), b = await traceBundle(r.home);
+    const traceRef = (payload: string, select: string) => ({ bundle: path.basename(b.dir), payload: `payloads/${payload}.json`, select });
+    const before = await r.analyze(r.turns[1].turn, 'before');
+    expect(before.messages.map(m => m.traceRef)).toEqual([
+      traceRef('request', '/instructions'), traceRef('request', '/tools/0'), traceRef('request', '/input/0'),
+    ]);
+    expect(before.messages[0].ref).toBeUndefined();
+    expect(before.messages[1].ref).toBeUndefined();
+    expect(before.messages[2].ref?.session).toBe('context-fixture');
+    const after = await r.analyze(r.turns[1].turn, 'after');
+    expect(after.messages.at(-1)?.traceRef).toEqual(traceRef('response', '/output_items/0'));
+    expect(after.messages.at(-1)?.ref?.session).toBe('context-fixture');
+    for (const message of after.messages) {
+      const text = await r.adapter.traceContent('context-fixture', message.traceRef!);
+      expect(text.length).toBeGreaterThan(0);
+      expect(text).toContain(message.preview);
+    }
+  });
+  it('过滤非消息条目后仍引用原始 input/output 下标，未匹配 rollout 的输入可读全文', async () => {
+    const r = await rig(), b = await traceBundle(r.home);
+    await json(path.join(b.payloads, 'request.json'), { ...b.request, input: [
+      { type: 'configuration_update' }, ...b.request.input, { type: 'message', role: 'user', content: '仅在 trace 中' },
+    ] });
+    await json(path.join(b.payloads, 'response.json'), { output_items: [
+      { type: 'configuration_update' }, { type: 'message', role: 'assistant', content: '仅在 trace 的输出' },
+    ] });
+    const result = await r.analyze(r.turns[1].turn, 'after');
+    expect(result.messages.map(m => m.traceRef?.select)).toEqual(['/instructions', '/tools/0', '/input/1', '/input/2', '/output_items/1']);
+    const unmatched = result.messages.find(m => m.preview === '仅在 trace 中')!;
+    expect(unmatched.ref).toBeUndefined();
+    expect(await r.adapter.traceContent('context-fixture', unmatched.traceRef!)).toBe(JSON.stringify({ type: 'message', role: 'user', content: '仅在 trace 中' }));
+  });
   it.each([10, 0])('历史含 %s 条可见消息与一条加密 reasoning：主来源和不可用计数独立', async count => {
     const r = await rig(), b = await traceBundle(r.home);
     await json(path.join(b.payloads, 'request.json'), { input: [
@@ -213,6 +246,12 @@ describe('Codex 官方 trace', () => {
     const trace = await readCodexTrace(r.home, 'context-fixture', 'turn-b', 'after');
     expect(trace?.messages.map(m => m.preview)).toEqual(['第二问', '第二答', '继续']);
     expect(trace?.measured?.input).toBe(333);
+    expect(trace?.messages.map(m => m.traceRef)).toEqual([
+      { bundle: path.basename(b.dir), payload: 'payloads/request.json', select: '/input/0' },
+      { bundle: path.basename(b.dir), payload: 'payloads/response.json', select: '/output_items/0' },
+      { bundle: path.basename(b.dir), payload: 'payloads/next.json', select: '/input/0' },
+    ]);
+    for (const message of trace!.messages) expect(await r.adapter.traceContent('context-fixture', message.traceRef!)).toContain(message.preview);
     await json(path.join(b.payloads, 'next.json'), { previous_response_id: 'missing', input: [] });
     expect(await readCodexTrace(r.home, 'context-fixture', 'turn-b', 'after')).toBeUndefined();
   });

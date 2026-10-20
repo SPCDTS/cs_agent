@@ -1,4 +1,4 @@
-import type { ContentRef, SessionAdapter } from '../sessions/types.js';
+import type { ContentRef, SessionAdapter, TraceContentRef } from '../sessions/types.js';
 
 export type CategoryKey = 'instructions' | 'tools' | 'history' | 'tool_output' | 'compaction' | 'other';
 export type Provenance = 'recorded' | 'reconstructed' | 'estimated' | 'unavailable';
@@ -10,7 +10,7 @@ export type ContextAnalysis = {
   categories: Array<{ key: CategoryKey; label: string; items: number;
     tokens: { estimated?: number; measured?: number }; provenance: Provenance; unavailable_items?: number; note?: string }>;
   messages: Array<{ index: number; kind: string; category: string; provenance: string;
-    tokens: { estimated?: number; measured?: number }; preview: string; ref?: ContentRef; ts?: number; callId?: string }>;
+    tokens: { estimated?: number; measured?: number }; preview: string; ref?: ContentRef; traceRef?: TraceContentRef; ts?: number; callId?: string }>;
   notes: string[];
 };
 export type ContextOptions = {

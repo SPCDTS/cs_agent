@@ -3,6 +3,7 @@ export type SessionRef = { backend: 'codex' | 'pi'; id: string; label: string; s
 export type TurnIndex = { turn: string; started: number; ended?: number; ticket?: string; preview: string; tools: number; requests: number; usage?: Usage; status: 'ok' | 'failed' | 'running' };
 export type Block = { kind: 'user' | 'assistant' | 'thinking' | 'tool_call' | 'tool_result' | 'image' | 'event' | 'compaction' | 'system_change'; ts?: number; callId?: string; text?: string; preview?: string; ref?: ContentRef; meta?: Record<string, unknown> };
 export type ContentRef = { session: string; offset: number; length: number; bytes: number };
+export type TraceContentRef = { bundle: string; payload: string; select: string };
 export type Usage = { input: number; output: number; cached?: number; reasoning?: number; measured: boolean };
 
 /** 送达是票据的补充事实，不替代模型回合的 status。 */
@@ -18,6 +19,7 @@ export interface SessionAdapter {
   turns(id: string): Promise<ObservedTurn[]>;
   blocks(id: string, turn: string): Promise<Block[]>;
   content(ref: ContentRef): Promise<string>;
+  traceContent?(id: string, ref: TraceContentRef): Promise<string | undefined>;
   subscribe?(id: string, cb: (frame: BlockFrame) => void): () => void;
   refresh?(): Promise<void>;
   close?(): void | Promise<void>;

@@ -144,6 +144,32 @@ describe('上下文分析逐消息表的"全文"链接', () => {
     notes: [],
   };
 
+  it('只有 traceRef 的行带编码并转义的全文链接；同时有 ref 时优先区间链接', () => {
+    const traceRef = { bundle: 'trace-fixture-sess-1', payload: 'payloads/request.json', select: '/tools/3' };
+    const analysis: ContextAnalysis = { ...stub, messages: [
+      { ...stub.messages[0], traceRef },
+      { ...stub.messages[1], traceRef },
+    ] };
+    const html = contextBody({ backend: 'codex', session: 'sess-1' }, analysis);
+    const short = html.split('<tr>').find(row => row.includes('短消息'))!;
+    const long = html.split('<tr>').find(row => row.includes('输出…'))!;
+    expect(short).toContain('<a class="btn quiet" href="/agents/codex/sessions/sess-1/content?bundle=trace-fixture-sess-1&amp;payload=payloads%2Frequest.json&amp;select=%2Ftools%2F3">全文</a>');
+    expect(short).not.toContain('load-full');
+    expect(long).toContain('/sessions/sess-src/content?offset=64&amp;length=9000');
+    expect(long).not.toContain('bundle=');
+  });
+
+  it('trace 引用中的特殊字符不能注入 HTML 属性或额外查询参数', () => {
+    const analysis: ContextAnalysis = { ...stub, messages: [{ ...stub.messages[0],
+      traceRef: { bundle: 'trace-"><script>', payload: 'payloads/a.json&offset=1', select: "/tools/0' onclick='bad" },
+    }] };
+    const html = contextBody({ backend: 'codex', session: 'sess-1' }, analysis);
+    expect(html).not.toContain('<script>'); expect(html).not.toContain(' onclick=');
+    expect(html).toContain('bundle=trace-%22%3E%3Cscript%3E');
+    expect(html).toContain('payload=payloads%2Fa.json%26offset%3D1');
+    expect(html).toContain('select=%2Ftools%2F0&#39;%20onclick%3D&#39;bad');
+  });
+
   it('有 ref 的行带指向来源会话的全文链接（length 取 ref.length）并保留原地展开按钮；无 ref 的行不带；表头说明预览', () => {
     const html = contextBody({ backend: 'codex', session: 'sess-1' }, stub);
     const rows = html.split('<tr>').slice(1);

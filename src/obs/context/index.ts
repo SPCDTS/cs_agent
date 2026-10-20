@@ -63,7 +63,7 @@ export async function analyzeContext(adapters: AdapterSet, backend: 'codex' | 'p
     measured: history.measured, estimated: { total, tokenizer: history.tokenizer ?? await tokenizerName() },
     ...(history.measured ? { unexplained: history.measured.input - total } : {}), categories,
     messages: history.messages.map((m, index) => ({ index, kind: m.kind, category: m.category, provenance: m.provenance,
-      tokens: m.tokens, preview: m.preview.slice(0, 240), ...(m.ref ? { ref: m.ref } : {}), ...(m.ts !== undefined ? { ts: m.ts } : {}), ...(m.callId ? { callId: m.callId } : {}) })),
+      tokens: m.tokens, preview: m.preview.slice(0, 240), ...(m.ref ? { ref: m.ref } : {}), ...(m.traceRef ? { traceRef: m.traceRef } : {}), ...(m.ts !== undefined ? { ts: m.ts } : {}), ...(m.callId ? { callId: m.callId } : {}) })),
     notes: [...new Set(notes)] };
   const safe = redactContext(result) as ContextAnalysis;
   safe.messages.forEach(m => { m.preview = redactText(m.preview, 240); });

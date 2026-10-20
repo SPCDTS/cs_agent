@@ -17,6 +17,12 @@ export function redactSessionValue(value: unknown, depth = 0): unknown {
   return value;
 }
 
+/** JSON 字符串先按字段脱敏，避免嵌套工具参数中的 password 等字段漏出。 */
+export function safeBody(value: unknown): string {
+  if (typeof value !== 'string') return JSON.stringify(redactSessionValue(value)) ?? '';
+  try { return JSON.stringify(redactSessionValue(JSON.parse(value))); }
+  catch { return redactText(value, Number.MAX_SAFE_INTEGER); }
+}
 /** 正文先整体脱敏，再生成预览，防止凭据跨预览边界时漏出前半段。 */
 export function inlineBlock(block: Block, ref: ContentRef): Block {
   if (block.text === undefined) return redactSessionValue(block) as Block;

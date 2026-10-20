@@ -1,6 +1,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { rolloutLines } from '../sessions/codex-adapter.js';
+import { TRACE_PAYLOAD_PATH } from '../sessions/trace-content.js';
+import type { TraceContentRef } from '../sessions/types.js';
 import { codexMessage, num, object, str } from './codex-history.js';
 import { localFile, smallJson } from './files.js';
 import { estimateTokens, preview, safeBody } from './tokens.js';
@@ -63,14 +65,17 @@ export async function readCodexTrace(home: string, session: string, turn: string
     const candidate = phase === 'before' ? candidates[0] : candidates.at(-1);
     if (!candidate) return undefined;
     const { bundle, selected, attempts } = candidate;
-    const payload = async (ref: unknown) => {
+    const payloadName = (ref: unknown) => {
       const name = str(object(ref).path);
-      if (!name || !/^payloads\/[A-Za-z0-9_.-]+\.json$/.test(name)) throw new Error('unknown payload path');
-      return object(await smallJson(root, path.join(bundle, name)));
+      if (!name || !TRACE_PAYLOAD_PATH.test(name) || /[\r\n]/.test(name)) throw new Error('unknown payload path');
+      return name;
     };
+    const payload = async (ref: unknown) => object(await smallJson(root, path.join(bundle, payloadName(ref))));
+    const reference = (ref: unknown, select: string): TraceContentRef => ({ bundle: path.basename(bundle), payload: payloadName(ref), select });
+    const entries = (items: unknown[], ref: unknown, field: string) => items.map((raw, index) => ({ raw, traceRef: reference(ref, `/${field}/${index}`) }));
     const request = await payload(selected.request);
     if (!Array.isArray(request.input)) return undefined;
-    let input: unknown[] = request.input;
+    let input = entries(request.input, selected.request, 'input');
     if (request.previous_response_id) {
       // 增量传输不能冒充完整窗口；沿 response_id 回溯同线程请求链。
       const seen = new Set<string>();
@@ -78,37 +83,38 @@ export async function readCodexTrace(home: string, session: string, turn: string
       while (previousId) {
         if (seen.has(previousId) || seen.size >= 32) return undefined;
         seen.add(previousId);
-        let parent: { request: Record<string, unknown>; response: Record<string, unknown> } | undefined;
+        let parent: { request: Record<string, unknown>; response: Record<string, unknown>; attempt: Attempt } | undefined;
         for (const attempt of attempts.filter(a => a.thread === session && a.at < selected.at && a.response).reverse()) {
           const response = await payload(attempt.response);
-          if (response.response_id === previousId) { parent = { response, request: await payload(attempt.request) }; break; }
+          if (response.response_id === previousId) { parent = { response, request: await payload(attempt.request), attempt }; break; }
         }
         if (!parent || !Array.isArray(parent.request.input) || !Array.isArray(parent.response.output_items)) return undefined;
-        input = [...parent.request.input, ...parent.response.output_items, ...input];
+        input = [...entries(parent.request.input, parent.attempt.request, 'input'),
+          ...entries(parent.response.output_items, parent.attempt.response, 'output_items'), ...input];
         previousId = str(parent.request.previous_response_id);
       }
     }
     const messages: HistoryMessage[] = [];
     if (typeof request.instructions === 'string' && request.instructions) {
       const item = await codexMessage({ type: 'message', role: 'system', content: request.instructions });
-      if (item) messages.push(item);
+      if (item) messages.push({ ...item, traceRef: reference(selected.request, '/instructions') });
     }
     if (request.tools !== undefined && !Array.isArray(request.tools)) return undefined;
-    for (const tool of (request.tools as unknown[] | undefined) ?? []) {
+    for (const [index, tool] of ((request.tools as unknown[] | undefined) ?? []).entries()) {
       const body = safeBody(tool), count = await estimateTokens(body, 'tool');
       messages.push({ kind: 'tool_definition', category: 'tools', provenance: 'recorded', preview: preview(body),
-        tokens: { estimated: count.tokens }, truncated: count.truncated });
+        tokens: { estimated: count.tokens }, truncated: count.truncated, traceRef: reference(selected.request, `/tools/${index}`) });
     }
-    for (const raw of input) {
+    for (const { raw, traceRef } of input) {
       const item = await codexMessage(raw);
-      if (item) messages.push(item);
+      if (item) messages.push({ ...item, traceRef });
     }
     const response = selected.response ? await payload(selected.response) : undefined;
     if (phase === 'after') {
       if (!response || !Array.isArray(response.output_items)) return undefined;
-      for (const raw of response.output_items) {
+      for (const [index, raw] of response.output_items.entries()) {
         const item = await codexMessage(raw, { ts: selected.completed });
-        if (item) messages.push(item);
+        if (item) messages.push({ ...item, traceRef: reference(selected.response, `/output_items/${index}`) });
       }
     }
     const usage = object(response?.token_usage), inputTokens = num(usage.input_tokens);
