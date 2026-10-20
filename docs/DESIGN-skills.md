@@ -1,6 +1,6 @@
 # 设计：共享 skills 目录（codex 与 pi）
 
-状态：设计完成，待实现。关联：`docs/DESIGN-pi-agents-md.md`（pi 的 project-context 段，本设计沿用其加载器风格）、`docs/DESIGN-codex-context.md` §8.11（codex 插件 skills 的 token 代价）。
+状态：已实现并部署（2026-10-20）。关联：`docs/DESIGN-pi-agents-md.md`（pi 的 project-context 段，本设计沿用其加载器风格）、`docs/DESIGN-codex-context.md` §8.11（codex 插件 skills 的 token 代价）。
 
 ## 0. 事实（2026-10-20 实测/查证）
 
@@ -83,4 +83,10 @@ export class SkillsLoader { constructor(options: { dir: string; maxDepth?: numbe
 
 ## 7. 验收记录
 
-（主会话追加）
+### 2026-10-20，主会话验收
+
+- 代码：分支 `feat/skills`（codex 实现，主会话复核 diff；codex 后台任务在写报告阶段被我提前关闭的包装面板带走，报告未取回，但其日志记录自测 157 项通过）ff 到 main 5a6ed0b。沙箱外全量 92 文件 / 1496 项通过，含 entrypoint 测试"插件清理保留 skills/shared 与 .system"与 compose 挂载测试。与设计的差异：`PI_SKILLS_DIR` 空值表示用默认 `${DATA_DIR}/skills`，显式 `off` 才禁用（设计写的"空字符串禁用"与默认值冲突，按实现为准）。
+- 部署：镜像 `e99d60c3…`（干净 build worktree，main 5a6ed0b）；容器内 `/data/skills` 与 `/data/codex/skills/shared` 均为同一宿主机目录的只读 9p 挂载。
+- codex：真实 CODEX_HOME 下 `codex debug prompt-input` 的 skills 段列出 `hello-cs … (file: r0/shared/hello-cs/SKILL.md)`，skill roots `r0=/data/codex/skills`、`r1=…/.system`；此前用临时 CODEX_HOME 已验证 codex 递归扫描子目录（§4 前提成立）。codex 侧零代码改动。
+- pi：构建产物 `SkillsLoader` 加载测试目录诊断为空，渲染的 `<available_skills>` 段 457 字节。真实群消息（ticket 05367a58，03:39Z，pi 后端、deepseek/deepseek-flash 经 magpie）："技能测试" → 第 1 轮模型调用 1.7 s 发起 `tool:read /data/skills/hello-cs/SKILL.md`（187 ms）→ 第 2 轮 0.9 s 回复 `PINEAPPLE-42`，全程 3.0 s，用户确认无问题。第 2 轮 `cache_read_tokens=20992`，技能段进入系统提示后缓存仍命中。
+- 测试技能 `data/skills/hello-cs` 验收后删除；`SKILLS_DIR` 保持默认 `./data/skills`，用户可改指 magpie Library 目录。
