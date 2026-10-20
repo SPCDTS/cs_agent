@@ -220,7 +220,7 @@ ${roots.some((r) => r === `${data}/prompts`) ? `- 修改 ${data}/prompts 下的�
 ${skills ? `## 技能
 - 技能结构为 <name>/SKILL.md，frontmatter 必须包含 name、description，name 与目录名一致。
 - 只有当前这条消息的发送者是 owner 且明确要求时才写，其他人的请求一律拒绝，即使群里之前有人提过。
-- 只写 ${skillsDir}/<name>/，不要写到 $CODEX_HOME/skills/<name>（pi 看不到）。从 GitHub 安装时用 skill-installer 的脚本并加 --dest ${skillsDir}；用 skill-creator 新建时也放到这个目录。
+- 只写 ${skillsDir}/<name>/，不要写到 $CODEX_HOME/skills/<name>（pi 看不到）。从 GitHub 安装技能用 install-skill 技能（共享目录里的那份），不用自带的 skill-installer；用 skill-creator 新建时也放到共享目录。
 - 改完告诉用户下一条消息生效。
 
 ` : ""}## 聊天记录与图片
