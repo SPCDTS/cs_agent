@@ -7,29 +7,38 @@ import { FIXTURES, tmp } from "./helpers.js";
 
 describe("magpie 模型目录", () => {
   it.each([
-    ["codex/gpt-6.1-sol", "gpt-6.1-sol"],
-    ["gpt-6.1-sol", "codex/gpt-6.1-sol"],
-    ["codex/gpt-6.1-sol", "codex/gpt-6.1-sol"],
-  ])("目录 %s 可匹配配置 %s", (slug, model) => {
-    expect(catalogContextWindow(JSON.stringify({ models: [{ slug, context_window: 500000 }] }), model)).toBe(500000);
+    ["codex/gpt-6.1-sol", "gpt-6.1-sol", undefined],
+    ["gpt-6.1-sol", "codex/gpt-6.1-sol", undefined],
+    ["codex/gpt-6.1-sol", "other/gpt-6.1-sol", undefined],
+    ["codex/gpt-6.1-sol", "codex/gpt-6.1-sol", 500000],
+    ["gpt-6.1-sol", "gpt-6.1-sol", 500000],
+    ["deepseek/deepseek-flash", "deepseek-flash", undefined],
+    ["deepseek/deepseek-flash", "deepseek/deepseek-flash", 500000],
+  ])("目录 %s 与配置 %s 只按完整 slug 匹配", (slug, model, expected) => {
+    expect(catalogContextWindow(JSON.stringify({ models: [{ slug, context_window: 500000 }] }), model)).toBe(expected);
   });
 
-  it("精确 slug 优先；前缀回退仍检查窗口有效性", () => {
+  it("同名不同前缀互不混淆；检查窗口有效性", () => {
     const catalog = JSON.stringify({ models: [null, { slug: 123 }, { slug: "other/gpt-6.1-sol", context_window: 123 }, { slug: "codex/gpt-6.1-sol", context_window: 500000 }] });
     expect(catalogContextWindow(catalog, "codex/gpt-6.1-sol")).toBe(500000);
-    expect(catalogContextWindow(catalog, "gpt-6-astra")).toBeUndefined();
+    expect(catalogContextWindow(catalog, "other/gpt-6.1-sol")).toBe(123);
+    expect(catalogContextWindow(catalog, "gpt-6.1-sol")).toBeUndefined();
     for (const context_window of [0, -1, 1.5, "500000"]) {
-      expect(catalogContextWindow(JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window }] }), "gpt-6.1-sol")).toBeUndefined();
+      expect(catalogContextWindow(JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window }] }), "codex/gpt-6.1-sol")).toBeUndefined();
     }
   });
 
-  it("带前缀的离线目录仍回退到无前缀模型缓存", async () => {
+  it.each([
+    ["codex/gpt-6.1-sol", 500000],
+    ["gpt-6.1-sol", 272000],
+    ["other/gpt-6.1-sol", 272000],
+  ])("离线目录只回退到相同 slug 的缓存：%s", async (slug, expected) => {
     const cacheFile = path.join(tmp("cs-magpie-catalog-"), "models_cache.json");
-    writeFileSync(cacheFile, JSON.stringify({ models: [{ slug: "gpt-6.1-sol", context_window: 500000 }] }), "utf8");
+    writeFileSync(cacheFile, JSON.stringify({ models: [{ slug, context_window: 500000 }] }), "utf8");
     expect(await loadCodexContextWindow({
       command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")], model: "codex/gpt-6.1-sol", cacheFile,
       env: { FAKE_CODEX_CATALOG: JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window: 272000 }, { slug: "codex/gpt-6-astra", context_window: 272000 }] }) },
-    })).toBe(500000);
+    })).toBe(expected);
   });
 });
 
@@ -37,10 +46,10 @@ describe("面板模型清单 loadCodexModelCatalog", () => {
   it("读取 slug 与有效窗口，跳过非法、重复项", async () => {
     const cacheFile = path.join(tmp("cs-codex-catalog-"), "models_cache.json");
     writeFileSync(cacheFile, JSON.stringify({ models: [
-      { slug: "gpt-6.1-sol", context_window: 500000 }, { slug: "codex/gpt-6-astra", context_window: 1.5 }, null, { slug: 7 },
-      { slug: 'bad"slug' }, { slug: "gpt-6.1-sol", context_window: 1 },
+      { slug: "codex/gpt-6.1-sol", context_window: 500000 }, { slug: "codex/gpt-6-astra", context_window: 1.5 }, null, { slug: 7 },
+      { slug: 'bad"slug' }, { slug: "codex/gpt-6.1-sol", context_window: 1 },
     ] }), "utf8");
-    expect(await loadCodexModelCatalog(cacheFile)).toEqual([{ slug: "gpt-6.1-sol", contextWindow: 500000 }, { slug: "codex/gpt-6-astra" }]);
+    expect(await loadCodexModelCatalog(cacheFile)).toEqual([{ slug: "codex/gpt-6.1-sol", contextWindow: 500000 }, { slug: "codex/gpt-6-astra" }]);
   });
 
   it.each([["缺失", undefined], ["损坏", "{not json"], ["形状不对", JSON.stringify({ models: "x" })], ["空目录", JSON.stringify({ models: [] })]])("%s时返回空数组", async (_label, content) => {

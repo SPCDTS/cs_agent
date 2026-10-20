@@ -33,7 +33,7 @@ describe("NapCat 服务地址", () => {
 describe("Codex 提供者配置", () => {
   it("默认经 magpie，基础配置允许空 key 供 MCP 读取", () => {
     for (const env of [{}, { CODEX_PROVIDER: "", CODEX_MAGPIE_URL: "", CODEX_MAGPIE_KEY: "" }]) {
-      expect(loadConfig(env)).toMatchObject({ CODEX_PROVIDER: "magpie", CODEX_MAGPIE_URL: "http://host.docker.internal:3425/v1", CODEX_MAGPIE_KEY: "", CODEX_MODEL: "gpt-6.1-sol" });
+      expect(loadConfig(env)).toMatchObject({ CODEX_PROVIDER: "magpie", CODEX_MAGPIE_URL: "http://host.docker.internal:3425/v1", CODEX_MAGPIE_KEY: "", CODEX_MODEL: "codex/gpt-6.1-sol" });
     }
     expect(loadConfig({ CODEX_PROVIDER: "openai" }).CODEX_MAGPIE_KEY).toBe("");
     expect(loadConfig({ CODEX_MAGPIE_KEY: "test-gateway-key", CODEX_MAGPIE_URL: "https://gateway.example/v1" }))
@@ -53,7 +53,14 @@ describe("model config defaults", () => {
     const c = loadConfig({});
     expect(c.AGENT_MODEL_PROVIDER).toBe("deepseek");
     expect(c.AGENT_MODEL_ID).toBe("deepseek-flash");
-    expect(c.CODEX_MODEL).toBe("gpt-6.1-sol");
+    expect(c.CODEX_MODEL).toBe("codex/gpt-6.1-sol");
+  });
+
+  it("Codex 空值用完整默认 slug，显式配置原样保留", () => {
+    expect(loadConfig({ CODEX_MODEL: "" }).CODEX_MODEL).toBe("codex/gpt-6.1-sol");
+    for (const model of ["codex/gpt-6-astra", "deepseek/deepseek-flash", "gpt-6.1-sol"]) {
+      expect(loadConfig({ CODEX_MODEL: model }).CODEX_MODEL).toBe(model);
+    }
   });
 
   it("history / codex context defaults and owner resolution", () => {

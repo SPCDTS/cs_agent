@@ -28,7 +28,7 @@ function runEntrypointIn(
   const ws = path.join(dir, "ws");
   const inheritedEnv = { ...process.env };
   for (const key of Object.keys(inheritedEnv)) {
-    if (["CODEX_PROVIDER", "CODEX_MAGPIE_URL", "CODEX_MAGPIE_KEY"].includes(key.toUpperCase())) delete inheritedEnv[key];
+    if (["CODEX_PROVIDER", "CODEX_MAGPIE_URL", "CODEX_MAGPIE_KEY", "CODEX_MODEL"].includes(key.toUpperCase())) delete inheritedEnv[key];
   }
   delete inheritedEnv.CODEX_IMAGE_GEN;
   delete inheritedEnv.CODEX_REMOTE_PLUGINS;
@@ -97,7 +97,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(status).toBe(0);
     const t = parse(toml);
     expect(t).toMatchObject({
-      model: '"gpt-6.1-sol"',
+      model: '"codex/gpt-6.1-sol"',
       model_provider: '"magpie"',
       "model_providers.magpie.name": '"magpie"',
       "model_providers.magpie.base_url": '"http://host.docker.internal:3425/v1"',
@@ -139,6 +139,13 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(t["mcp_servers.browser.command"]).toMatch(/playwright-mcp"$/);
   });
 
+  it.each<Record<string, string>>([{}, { CODEX_MODEL: "" }, { CODEX_MODEL: 'bad"slug' }])("未设置、空值和非法模型均写入完整默认 slug：%j", env => {
+    const r = runEntrypoint(env);
+    expect(r.status).toBe(0);
+    expect(parse(r.toml).model).toBe('"codex/gpt-6.1-sol"');
+    if (env.CODEX_MODEL) expect(r.stderr).toContain("WARNING invalid CODEX_MODEL, using codex/gpt-6.1-sol");
+  });
+
   it("支持带前缀模型、自定义 URL 与尾斜杠，key 不写入文件或诊断", () => {
     const key = 'test-key-"\nshould-never-be-written';
     const r = runEntrypoint({ CODEX_MODEL: "codex/gpt-6.1-sol", CODEX_MAGPIE_URL: "https://gateway.example:3425/v1/", CODEX_MAGPIE_KEY: key });
@@ -146,6 +153,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(parse(r.toml)).toMatchObject({ model: '"codex/gpt-6.1-sol"', "model_providers.magpie.base_url": '"https://gateway.example:3425/v1"', "model_providers.magpie.model_catalog_url": '"https://gateway.example:3425/v1/codex/models"' });
     expect(r.toml + r.requirements + r.stdout + r.stderr).not.toContain(key);
     expect(r.toml).not.toContain("experimental_bearer_token");
+    expect(r.stderr).not.toContain("invalid CODEX_MODEL");
   });
 
   it("openai 省略全部 magpie 配置，重启可移除旧提供者段", () => {

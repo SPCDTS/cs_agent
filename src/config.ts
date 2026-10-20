@@ -25,6 +25,8 @@ const serviceUrl = z.string().url().refine(value => {
   const url = URL.parse(value); return !url?.username && !url?.password;
 }, '服务 URL 不得包含用户名或密码');
 
+export const DEFAULT_CODEX_MODEL = "codex/gpt-6.1-sol";
+
 const EnvSchema = z.object({
   NAPCAT_HTTP_URL: serviceUrl.default("http://napcat:3000"),
   NAPCAT_WS_URL: serviceUrl.default("ws://napcat:3001"),
@@ -64,7 +66,7 @@ const EnvSchema = z.object({
   CODEX_MAGPIE_URL: serviceUrl.default("http://host.docker.internal:3425/v1"),
   /** codex 与 pi 共用的网关密钥，各自在启用 magpie 时校验；MCP 读取基础配置不要求凭据。 */
   CODEX_MAGPIE_KEY: z.string().default(""),
-  CODEX_MODEL: z.string().default("gpt-6.1-sol"),
+  CODEX_MODEL: z.string().default(DEFAULT_CODEX_MODEL),
   CODEX_CONTEXT_WINDOW: int(400000),
   /** codex 初始推理强度与 auto 失败时的回退档位（同时写入 config.toml） */
   CODEX_REASONING_EFFORT: z.string().default("high"),

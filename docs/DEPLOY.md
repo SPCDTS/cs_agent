@@ -84,7 +84,7 @@ Copy-Item .env.example .env
 | `CODEX_PROVIDER` | `magpie` | `magpie\|openai`；默认经宿主机网关，`openai` 恢复直连 |
 | `CODEX_MAGPIE_URL` | `http://host.docker.internal:3425/v1` | Responses API 根地址；入口脚本只接受安全字符组成的 HTTP(S) URL，不能含凭据、查询或片段；尾斜杠会移除 |
 | `CODEX_MAGPIE_KEY` | 空 | 基础配置解析允许为空，magpie runner 启动时必填；只经环境变量注入并注册脱敏 |
-| `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `gpt-6.1-sol` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节）。`CODEX_REASONING_EFFORT`（`low/medium/high/xhigh/max`）固定使用，每轮也以 `-c model_reasoning_effort="…"` 显式传入（日志 `codex backend done` 的 `effort` 字段）；v3 不再按请求选择 |
+| `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `codex/gpt-6.1-sol` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节）。`CODEX_REASONING_EFFORT`（`low/medium/high/xhigh/max`）固定使用，每轮也以 `-c model_reasoning_effort="…"` 显式传入（日志 `codex backend done` 的 `effort` 字段）；v3 不再按请求选择 |
 
 > codex 子进程只拿到最小环境变量：`PATH`、`HOME`、`LANG`/`LC_ALL`、`TERM`、`CODEX_HOME`、`NO_COLOR=1`，以及设置了的 `HTTP(S)_PROXY`/`NO_PROXY`。`NAPCAT_TOKEN`、`*_API_KEY` 等配置不会传给 codex；magpie 模式只额外注入专用 `CODEX_MAGPIE_KEY`，直连模式不传该 key。
 
@@ -100,14 +100,14 @@ Copy-Item .env.example .env
 CODEX_PROVIDER=magpie
 CODEX_MAGPIE_URL=http://host.docker.internal:3425/v1
 CODEX_MAGPIE_KEY=<仅在私有环境中填写 gateway key>
-CODEX_MODEL=gpt-6.1-sol
+CODEX_MODEL=codex/gpt-6.1-sol
 ```
 
-入口脚本写入 `model_provider = "magpie"` 与 Responses provider，指定 `supports_websockets = false`，直接使用 HTTP 流而不先尝试 WebSocket。容器到默认网关地址为 HTTP，magpie 到上游为 HTTPS。模型默认仍是 `gpt-6.1-sol`，也接受 `codex/gpt-6.1-sol`；短名路由与实际鉴权需用独立实验验证，若短名不可用，先显式设置带前缀模型。
+入口脚本写入 `model_provider = "magpie"` 与 Responses provider，指定 `supports_websockets = false`，直接使用 HTTP 流而不先尝试 WebSocket。容器到默认网关地址为 HTTP，magpie 到上游为 HTTPS。模型默认是 `codex/gpt-6.1-sol`。`CODEX_MODEL` 和运行时 `codexModel` 必须与 `GET $CODEX_MAGPIE_URL/codex/models` 返回的 `slug` 完全一致，不省略或自动补齐前缀。Codex 0.163 按完整 slug 查找模型元数据；短名即使能被网关路由，也会使 Codex 回退到默认 `ModelInfo`（例如 272k 而非目录中的 500k 上下文，缺少 Responses Lite 等能力）。
 
 配置文件仅保存 `env_key = "CODEX_MAGPIE_KEY"`。主进程构造 CodexRunner 时检查 key，缺失或纯空白会以「配置无效：CODEX_PROVIDER=magpie 需要 CODEX_MAGPIE_KEY」启动失败；目录查询、exec 和 resume 共用同一份受控环境。基础 `loadConfig` 不检查 key，以便 qq_context / image_gen MCP 继续读取自身配置；MCP 不新增 gateway key 透传。key 加入主进程脱敏表。由于 key 不落盘，`config.toml` 无需加入 deny_read，原有凭据和数据禁读规则不变。
 
-目录地址为 `<CODEX_MAGPIE_URL>/codex/models`（默认 `/v1/codex/models`）；`codex debug models` 的 slug 优先精确匹配，再忽略提供者前缀比较，取 `context_window` 原值。保留离线目录签名与 `models_cache.json` 回退。设置页只读显示「codex：经 magpie（URL）」或「codex：直连」。
+目录地址为 `<CODEX_MAGPIE_URL>/codex/models`（默认 `/v1/codex/models`）；`codex debug models` 的 slug 仅精确匹配完整名称，取 `context_window` 原值。保留离线目录签名与 `models_cache.json` 回退，缓存也只匹配相同 slug。设置页只读显示「codex：经 magpie（URL）」或「codex：直连」。
 
 在 magpie **Usage** 页按 gateway key 名 `cs-agent` 查看调用、缓存命中及费用；cs-agent 原有 token_usage 与上下文观测不变。健康检查在 magpie 模式只确认 key 已配置，不探测远端服务，也不再要求 `auth.json`；真实连通性以实验回答和 Usage 记录为准。
 
@@ -427,6 +427,8 @@ ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUs
 
 ### 运行时设置的票据快照
 
+设置页的 `codexModel` 下拉按目录 slug 原样展示和保存。启动目录可用时，持久化或环境配置中不在目录里的值会记录告警，并保留原值显示为「不在目录中」，不自动改写 `settings.json`。新回合快照回退到 `CODEX_MODEL`；若环境默认也不在目录中，则用内置默认 `codex/gpt-6.1-sol`。目录不可用时继续使用配置值。旧短名需要在 `.env` 或面板手动改为目录中的完整 slug。
+
 面板修改后端或 Codex 推理强度后，仅新派发的消息采用新值。Dispatcher 在等待附件准备和 scope 队列之前读取一次设置，将 `{backend, codexReasoningEffort}` 与票据一起写入 `TicketDoc.settings`。执行、机器人历史行和崩溃恢复都使用此快照；例如进行中的 high 票据不会因面板改成 low 而改变。两个后端的回复均原文照发，不做 Markdown/`@` 转换（格式由提示词约束）；只保留发送保护：UTF-16 ≤4000 截断且不拆代理对、空文本占位；后处理不调用模型。
 
 升级前没有快照的存量票据无法还原历史设置：恢复时一次性写入固定 high，后端优先采用已有结果中的 pi，否则 codex；后续重试沿用。没有 TicketDoc 的孤儿票据重新派发时才采样当前设置。
@@ -455,6 +457,6 @@ pi 将映射清空与归档行写入同一次 `pi.sqlite` 事务。归档追加�
 
 每线程的上一轮输入占用保存在 `DATA_DIR/context-usage.json`，按 `backend:key` 索引，250 ms 防抖、临时文件原子替换；启动重载、优雅退出刷盘。突发退出可能丢失尚未刷盘的最后更新。记录不含提示词或凭据，面板通过同一存储读取，更新同时发出 `context_usage` 事件；`/healthz` 的 `context_usage` 数组也提供这些记录。重置会话或 codex 安全阀轮换后占用、缓存和回合数归零。
 
-codex 每次进程启动仅查询一次 `codex debug models`（使用 runner 相同的 `CODEX_HOME` 与环境白名单，最多等待 15 s），按 `CODEX_MODEL` 匹配 `models[].slug`，窗口取 `context_window`。查询失败、缺模型或字段无效时回退 `CODEX_CONTEXT_WINDOW`（默认 400000），日志 `codex context window` 的 `source` 标明目录或回退来源；不调用模型。2026-10-18 实查 gpt-6.1-sol 为 500000。`usedTokens` 直接取 `input_tokens`，缓存已包含其中。
+codex 每次进程启动仅查询一次 `codex debug models`（使用 runner 相同的 `CODEX_HOME` 与环境白名单，最多等待 15 s），按 `CODEX_MODEL` 精确匹配 `models[].slug`，窗口取 `context_window`。查询失败、缺模型或字段无效时回退 `CODEX_CONTEXT_WINDOW`（默认 400000），日志 `codex context window` 的 `source` 标明目录或回退来源；不调用模型。2026-10-18 实查 gpt-6.1-sol 为 500000。`usedTokens` 直接取 `input_tokens`，缓存已包含其中。
 
 pi 使用 pi-ai 模型窗口与实际 harness 压缩设置。deepseek-flash 为 1000000；默认 reserveTokens=16384、backgroundTokens=32768，对应后台 950848、阻塞 983616（公式与来源见 ARCHITECTURE §10）。BACKGROUND=0 关闭后台压缩，两条位置数值重合；超过阻塞位置时下一次请求等待压缩。输入包括 cacheRead / cacheWrite，缓存命中单列 cacheRead；工具循环中的每次 assistant 模型回合各计一次，压缩摘要生成的计费用量不混入占用。`lastCompactionAt` 仅在观察到已提交的 `pi.compaction` 摘要条目时更新，取主进程观测时间（条目没有墙钟时间戳），不把压缩尝试或失败当成功。启动时从持久化历史回填回合数与压缩消息时间；无回合用量的记录标为 `estimate`。

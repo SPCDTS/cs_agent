@@ -812,22 +812,22 @@ describe("运行时 codex 模型", () => {
   it("首轮与 resume 使用快照模型 argv，各模型窗口分别缓存", async () => {
     const dir = tmp(), opts = setupOpts(dir), usage = new ContextUsageStore(dir);
     const catalogLog = path.join(dir, "catalog.jsonl");
-    const runner = new CodexRunner({ ...opts, model: "model-a", contextUsage: usage, env: { ...opts.env,
+    const runner = new CodexRunner({ ...opts, model: "codex/gpt-6.1-sol", contextUsage: usage, env: { ...opts.env,
       FAKE_CODEX_CATALOG_LOG: catalogLog,
-      FAKE_CODEX_CATALOG: JSON.stringify({ models: [{ slug: "model-a", context_window: 100000 }, { slug: "codex/model-b", context_window: 300000 }] }),
+      FAKE_CODEX_CATALOG: JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window: 100000 }, { slug: "codex/gpt-6-astra", context_window: 300000 }] }),
     } });
     try {
-      await runner.ask("第一轮", { threadKey: "group:1", model: "model-a" });
+      await runner.ask("第一轮", { threadKey: "group:1", model: "codex/gpt-6.1-sol" });
       expect(usage.get("codex", "group:1")?.windowTokens).toBe(100000);
       const thread = threadOf(dir)?.thread_id;
-      await runner.ask("切模型", { threadKey: "group:1", model: "codex/model-b" });
+      await runner.ask("切模型", { threadKey: "group:1", model: "codex/gpt-6-astra" });
       expect(usage.get("codex", "group:1")?.windowTokens).toBe(300000);
       expect(threadOf(dir)?.thread_id).toBe(thread);
       await runner.ask("旧票据默认", { threadKey: "group:1" });
       expect(usage.get("codex", "group:1")?.windowTokens).toBe(100000);
       const calls = readFileSync(opts.env.FAKE_CODEX_LOG, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(c => c.phase === "start");
-      expect(calls[0].argv).toEqual(expect.arrayContaining(["-c", 'model="model-a"']));
-      expect(calls[1].argv).toEqual(expect.arrayContaining(["resume", "-c", 'model="codex/model-b"']));
+      expect(calls[0].argv).toEqual(expect.arrayContaining(["-c", 'model="codex/gpt-6.1-sol"']));
+      expect(calls[1].argv).toEqual(expect.arrayContaining(["resume", "-c", 'model="codex/gpt-6-astra"']));
       expect(calls[2].argv.some((arg: string) => arg.startsWith("model="))).toBe(false);
       expect(readFileSync(catalogLog, "utf8").trim().split("\n")).toHaveLength(2);
     } finally { await usage.close(); }

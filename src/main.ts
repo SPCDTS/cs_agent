@@ -211,7 +211,7 @@ async function main(): Promise<void> {
     backends,
     owner: cfg.owner,
     store,
-    currentSettings: () => settings.current(),
+    currentSettings: () => settings.currentForTurn(),
     codexReasoningEffort: cfg.CODEX_REASONING_EFFORT, piThinkingLevel: cfg.AGENT_THINKING_LEVEL,
     effortRouter: { model: cfg.AUTO_EFFORT_MODEL, timeoutMs: cfg.AUTO_EFFORT_TIMEOUT_MS,
       ...(autoModel ? { complete: async (prompt: string, signal: AbortSignal) => {

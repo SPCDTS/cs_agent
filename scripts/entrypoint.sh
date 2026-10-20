@@ -50,9 +50,9 @@ toml_path() {
   printf '%s' "$2"
 }
 # 模型 id 允许提供者前缀，仍拒绝可注入 TOML 的字符。
-MODEL="${CODEX_MODEL:-gpt-6.1-sol}"
+MODEL="${CODEX_MODEL:-codex/gpt-6.1-sol}"
 case "$MODEL" in
-  *[!A-Za-z0-9._/-]*) echo "entrypoint: WARNING invalid CODEX_MODEL, using gpt-6.1-sol" >&2; MODEL=gpt-6.1-sol ;;
+  *[!A-Za-z0-9._/-]*) echo "entrypoint: WARNING invalid CODEX_MODEL, using codex/gpt-6.1-sol" >&2; MODEL=codex/gpt-6.1-sol ;;
 esac
 PROVIDER="${CODEX_PROVIDER:-magpie}"
 PROVIDER_CONFIG=""

@@ -487,7 +487,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     const codexModels = catalog(opts.modelCatalog?.codex);
     const codexModelControl = codexModels.length
       ? `<select name="codexModel">${keep(codexModels.map(m => m.slug), s.codexModel).map(slug => {
-        const m = codexModels.find(x => x.slug === slug) ?? codexModels.find(x => x.slug === `codex/${slug}`);
+        const m = codexModels.find(x => x.slug === slug);
         return option(slug, s.codexModel, m ? slug + windowK(m.contextWindow) : `${slug}（不在目录中）`);
       }).join('')}</select>`
       : `<input name="codexModel" value="${esc(s.codexModel)}" spellcheck="false" autocomplete="off"><small>模型目录不可用，请手动填写模型 slug。</small>`;

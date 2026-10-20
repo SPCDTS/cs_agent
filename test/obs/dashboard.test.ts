@@ -24,7 +24,7 @@ import { dispatchSettingsLine, type ModelCatalogView } from '../../src/obs/ui/da
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
-const defaults: RuntimeSettings = { codexModel: 'gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false };
+const defaults: RuntimeSettings = { codexModel: 'codex/gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false };
 
 async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv; modelCatalog?: ModelCatalogView } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
@@ -631,7 +631,7 @@ describe('运行时模型设置 POST', () => {
     expect((await r.post('/settings', form)).status).toBe(303);
     expect(r.settings.current()).toMatchObject({ codexModel: form.codexModel, codexReasoningEffort: 'auto', piModel: form.piModel, piThinkingLevel: 'auto' });
     const before = readFileSync(r.settings.file, 'utf8');
-    for (const patch of [{ codexModel: 'unknown' }, { piModel: 'unknown' }, { codexModel: 'bad"slug' }, { piModel: '' }, { piThinkingLevel: 'ultra' }, { codexReasoningEffort: 'nonsense' }]) {
+    for (const patch of [{ codexModel: 'unknown' }, { codexModel: 'gpt-6-astra' }, { piModel: 'unknown' }, { codexModel: 'bad"slug' }, { piModel: '' }, { piThinkingLevel: 'ultra' }, { codexReasoningEffort: 'nonsense' }]) {
       const response = await r.post('/settings', { ...form, ...patch });
       expect(response.status).toBe(400); expect(await response.text()).toContain('设置未保存');
       expect(readFileSync(r.settings.file, 'utf8')).toBe(before);
@@ -641,7 +641,7 @@ describe('运行时模型设置 POST', () => {
 
 describe('运行时模型设置页（§5）', () => {
   const catalog: ModelCatalogView = {
-    codex: () => [{ slug: 'gpt-6.1-sol', contextWindow: 500_000 }, { slug: 'codex/gpt-6-astra', contextWindow: 272_000 }, { slug: 'bare<x>' }],
+    codex: () => [{ slug: 'codex/gpt-6.1-sol', contextWindow: 500_000 }, { slug: 'codex/gpt-6-astra', contextWindow: 272_000 }, { slug: 'bare<x>' }],
     pi: () => [{ id: 'deepseek-flash', contextWindow: 128_000, thinkingLevels: ['off', 'low', 'high', 'max'] },
       { id: 'codex/gpt-6.1-sol', contextWindow: 500_000, thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] }],
   };
@@ -655,9 +655,9 @@ describe('运行时模型设置页（§5）', () => {
     const html = await (await r.get('/settings')).text();
     expect(html).toContain('Codex 模型与推理强度'); expect(html).toContain('Pi 模型与思考档位');
     const codexModel = select(html, 'codexModel');
-    expect(options(codexModel)).toEqual(['gpt-6.1-sol', 'codex/gpt-6-astra', 'bare&lt;x&gt;']);
-    expect(selected(codexModel)).toBe('gpt-6.1-sol');
-    expect(codexModel).toContain('gpt-6.1-sol · 窗口 500k'); expect(codexModel).toContain('codex/gpt-6-astra · 窗口 272k');
+    expect(options(codexModel)).toEqual(['codex/gpt-6.1-sol', 'codex/gpt-6-astra', 'bare&lt;x&gt;']);
+    expect(selected(codexModel)).toBe('codex/gpt-6.1-sol');
+    expect(codexModel).toContain('codex/gpt-6.1-sol · 窗口 500k'); expect(codexModel).toContain('codex/gpt-6-astra · 窗口 272k');
     expect(html).not.toContain('bare<x>');
     const codexEffort = select(html, 'codexReasoningEffort');
     expect(options(codexEffort)).toEqual(['auto', ...REASONING_EFFORTS]); expect(selected(codexEffort)).toBe('high');
@@ -670,19 +670,19 @@ describe('运行时模型设置页（§5）', () => {
     expect(html).not.toContain('模型目录不可用');
     expect(html).not.toMatch(/\sstyle="/); expect(html).not.toContain('test-model-ui-key');
 
-    await r.settings.update({ codexModel: 'gpt-old', codexReasoningEffort: 'auto', piModel: 'codex/gpt-6.1-sol', piThinkingLevel: 'max' }, 'test');
+    await r.settings.update({ codexModel: 'gpt-6.1-sol', codexReasoningEffort: 'auto', piModel: 'codex/gpt-6.1-sol', piThinkingLevel: 'max' }, 'test');
     const after = await (await r.get('/settings')).text();
     const keptCodex = select(after, 'codexModel');
-    expect(options(keptCodex)[0]).toBe('gpt-old'); expect(selected(keptCodex)).toBe('gpt-old'); expect(keptCodex).toContain('gpt-old（不在目录中）');
+    expect(options(keptCodex)[0]).toBe('gpt-6.1-sol'); expect(selected(keptCodex)).toBe('gpt-6.1-sol'); expect(keptCodex).toContain('gpt-6.1-sol（不在目录中）');
     expect(selected(select(after, 'codexReasoningEffort'))).toBe('auto');
     expect(selected(select(after, 'piModel'))).toBe('codex/gpt-6.1-sol');
     // codex/gpt-6.1-sol 不支持 max：仍保留当前值作为选项。
     expect(options(select(after, 'piThinkingLevel'))).toEqual(['max', 'auto', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
     expect(selected(select(after, 'piThinkingLevel'))).toBe('max');
     expect(after.match(/与 \.env 不同/g)?.length).toBeGreaterThanOrEqual(4);
-    expect(after).toContain('Codex 模型：gpt-6.1-sol → gpt-old'); expect(after).toContain('Pi 思考档位：low → max');
+    expect(after).toContain('Codex 模型：codex/gpt-6.1-sol → gpt-6.1-sol'); expect(after).toContain('Pi 思考档位：low → max');
     const overview = await (await r.get('/')).text();
-    for (const m of ['Codex 模型', 'gpt-old', 'Pi 模型', 'codex/gpt-6.1-sol', 'Pi 思考档位', 'Codex 推理强度']) expect(overview).toContain(m);
+    for (const m of ['Codex 模型', 'gpt-6.1-sol', 'Pi 模型', 'codex/gpt-6.1-sol', 'Pi 思考档位', 'Codex 推理强度']) expect(overview).toContain(m);
   });
 
   it('codex 目录为空或缺省时退化为文本框并提示', async () => {
@@ -690,7 +690,7 @@ describe('运行时模型设置页（§5）', () => {
       const r = await rig({ env: magpie, modelCatalog });
       const html = await (await r.get('/settings')).text();
       expect(select(html, 'codexModel')).toBeUndefined();
-      expect(html).toContain('<input name="codexModel" value="gpt-6.1-sol"');
+      expect(html).toContain('<input name="codexModel" value="codex/gpt-6.1-sol"');
       expect(html).toContain('模型目录不可用');
       expect(options(select(html, 'codexReasoningEffort'))[0]).toBe('auto');
     }

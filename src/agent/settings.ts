@@ -8,6 +8,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { z } from "zod";
+import { DEFAULT_CODEX_MODEL } from "../config.js";
 import { isScope } from "../context/access.js";
 import { log } from "../shared/log.js";
 import { trace as defaultTrace, type Trace } from "../shared/trace.js";
@@ -90,12 +91,26 @@ export class SettingsStore {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") log.warn("settings.json invalid; using .env defaults", { error: err instanceof Error ? err.message : String(err) });
     }
-    return new SettingsStore(dataDir, base, initial, trace, validators);
+    const store = new SettingsStore(dataDir, base, initial, trace, validators);
+    if (validators && !validators.codexModel(initial.codexModel)) {
+      log.warn("codex model not in catalog; using default for turns", {
+        model: initial.codexModel, fallback: store.currentForTurn().codexModel,
+      });
+    }
+    return store;
   }
 
-  /** 当前生效值（每条消息现读）。返回冻结副本，调用方不能就地修改。 */
+  /** 当前配置原值（含不在目录中的模型，供面板显示）。返回冻结副本，调用方不能就地修改。 */
   current(): Readonly<RuntimeSettings> {
     return Object.freeze({ ...this.value, backendOverrides: Object.freeze({ ...this.value.backendOverrides }) }) as Readonly<RuntimeSettings>;
+  }
+
+  /** 回合快照：目录可用时无效模型回退到 CODEX_MODEL；环境默认也无效则用内置默认，不改配置。 */
+  currentForTurn(): Readonly<RuntimeSettings> {
+    const current = this.current();
+    if (!this.validators || this.validators.codexModel(current.codexModel)) return current;
+    const codexModel = this.validators.codexModel(this.defaults.codexModel) ? this.defaults.codexModel : DEFAULT_CODEX_MODEL;
+    return Object.freeze({ ...current, codexModel });
   }
 
   subscribe(fn: Listener): () => void { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }

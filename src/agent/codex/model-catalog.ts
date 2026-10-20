@@ -5,13 +5,11 @@ import { log } from "../../shared/log.js";
 
 const exec = promisify(execFile);
 
-/** debug models 的顶层为 {models: [...] }；精确匹配优先，其次忽略提供者前缀。 */
-const unprefixedModel = (model: string) => model.replace(/^[^/]+\//, "");
+/** debug models 的顶层为 {models: [...] }；与 Codex 一致，只按完整 slug 精确匹配。 */
 export function catalogContextWindow(json: string, model: string): number | undefined {
   const catalog = JSON.parse(json) as { models?: { slug?: string; context_window?: unknown }[] };
   if (!Array.isArray(catalog?.models)) return undefined;
-  const selected = catalog.models.find(m => m?.slug === model)
-    ?? catalog.models.find(m => typeof m?.slug === "string" && unprefixedModel(m.slug) === unprefixedModel(model));
+  const selected = catalog.models.find(m => m?.slug === model);
   const value = selected?.context_window;
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
@@ -75,6 +73,5 @@ export async function loadCodexModelValidator(cacheFile: string): Promise<(slug:
     const valid = catalog.models?.map(m => m?.slug).filter((slug): slug is string => typeof slug === "string" && !!slug);
     if (valid?.length) slugs = new Set(valid);
   } catch { /* 缺失或损坏的目录允许手动输入。 */ }
-  // magpie 目录的 slug 带 `codex/` 前缀，而 CODEX_MODEL 习惯不带：裸 slug 按 codex 提供者兼容（与 catalogContextWindow 一致）。
-  return slug => /^[A-Za-z0-9._/-]+$/.test(slug) && (!slugs || slugs.has(slug) || slugs.has(`codex/${slug}`));
+  return slug => /^[A-Za-z0-9._/-]+$/.test(slug) && (!slugs || slugs.has(slug));
 }

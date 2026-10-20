@@ -477,7 +477,7 @@ export class CodexRunner {
     return windowTokens;
   }
 
-  private contextWindow(model = this.opts.model ?? "gpt-6.1-sol"): Promise<number> {
+  private contextWindow(model = this.opts.model ?? "codex/gpt-6.1-sol"): Promise<number> {
     const cached = this.modelWindows.get(model);
     if (cached !== undefined) return Promise.resolve(cached);
     let pending = this.loadingWindows.get(model);

@@ -15,7 +15,7 @@ const argv = process.argv.slice(2);
 if (argv[0] === "debug" && argv[1] === "models") {
   if (process.env.FAKE_CODEX_CATALOG_LOG) appendFileSync(process.env.FAKE_CODEX_CATALOG_LOG, JSON.stringify({ argv, codexHome: process.env.CODEX_HOME }) + "\n");
   if (process.env.FAKE_CODEX_CATALOG_FAIL) process.exit(1);
-  process.stdout.write(process.env.FAKE_CODEX_CATALOG ?? JSON.stringify({ models: [{ slug: "gpt-6.1-sol", context_window: 500000 }] }));
+  process.stdout.write(process.env.FAKE_CODEX_CATALOG ?? JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window: 500000 }] }));
   process.exit(0);
 }
 const out = argv[argv.indexOf("-o") + 1];

@@ -23,13 +23,13 @@
 ### 2.1 RuntimeSettings 新增
 
 ```ts
-codexModel: string;          // magpie 目录里的 slug（如 "gpt-6.1-sol" 或 "codex/gpt-6.1-sol"），默认 cfg.CODEX_MODEL
+codexModel: string;          // magpie 目录里的完整 slug（如 "codex/gpt-6.1-sol"），默认 cfg.CODEX_MODEL
 codexReasoningEffort: ReasoningEffort | "auto";   // 现有字段放宽
 piModel: string;             // AGENT_MODEL_PROVIDER 下的 modelId，默认 cfg.AGENT_MODEL_ID
 piThinkingLevel: ModelThinkingLevel | "auto";     // 默认 cfg.AGENT_THINKING_LEVEL
 ```
 
-校验：`SettingsStore.update` 之外，`settings.ts` 增加可注入的 `validators: { codexModel(slug): boolean; piModel(id): boolean }`，由 main 注入（codex：模型在 `models_cache.json` 目录里，或目录不可用时非空即可；pi：`models.getModel(provider, id)` 存在）。老 `settings.json` 缺字段时用 `.env` 默认值补齐（沿用 `FileSettingsSchema.partial()` 的读法）。
+校验：`SettingsStore.update` 之外，`settings.ts` 增加可注入的 `validators: { codexModel(slug): boolean; piModel(id): boolean }`，由 main 注入（codex：与 `models_cache.json` 中的 slug 精确相等，或目录不可用时允许安全的非空 slug；pi：`models.getModel(provider, id)` 存在）。老 `settings.json` 缺字段时用 `.env` 默认值补齐（沿用 `FileSettingsSchema.partial()` 的读法）。目录可用时，无效的持久化或环境模型保留原值，告警并在面板标为「不在目录中」；`currentForTurn()` 为新回合选择有效的 `CODEX_MODEL`，环境默认也无效则使用内置 `codex/gpt-6.1-sol`。目录不可用时继续使用配置值。不得自动补前缀：Codex 自身按完整 slug 查元数据，短名会回退到默认窗口与能力。
 
 ### 2.2 票据快照 TicketSettings
 
@@ -76,7 +76,7 @@ POST 处理在 `dashboard-post.ts` 的现有 `/settings` 分支加字段；非�
 
 ## 6. 配置
 
-新增 `AUTO_EFFORT_MODEL`（默认 `deepseek/deepseek-flash`）、`AUTO_EFFORT_TIMEOUT_MS`（默认 4000）。`CODEX_MODEL`、`AGENT_MODEL_ID`、`CODEX_REASONING_EFFORT`、`AGENT_THINKING_LEVEL` 变成初始默认值（与 `AGENT_BACKEND` 同义）；`AGENT_THINKING_LEVEL` 的 zod 枚举保持不含 auto（auto 只在运行时设置里）。
+新增 `AUTO_EFFORT_MODEL`（默认 `deepseek/deepseek-flash`）、`AUTO_EFFORT_TIMEOUT_MS`（默认 4000）。`CODEX_MODEL`（默认 `codex/gpt-6.1-sol`）、`AGENT_MODEL_ID`、`CODEX_REASONING_EFFORT`、`AGENT_THINKING_LEVEL` 变成初始默认值（与 `AGENT_BACKEND` 同义）；`AGENT_THINKING_LEVEL` 的 zod 枚举保持不含 auto（auto 只在运行时设置里）。
 
 ## 7. 测试
 
@@ -89,7 +89,7 @@ POST 处理在 `dashboard-post.ts` 的现有 `/settings` 分支加字段；非�
 
 ## 8. 验收（主会话）
 
-部署后：面板把 pi 模型切到 `codex/gpt-6.1-sol` 再切回，群消息的 `model_turn` 记录随之变化、magpie 用量 `agent=pi` 的 `req` 对应；codex 模型切 `gpt-6-astra` 后 owner 私聊的 rollout `thread_settings_applied.model` 变化且仍 resume 同一线程、上下文窗口按新模型；两边选 auto 后寒暄消息快照 low（快路径，无分类调用），技术问题快照 high/xhigh 且 `effort_route` 事件有耗时与模型；分类模型不可达时 `auto-fallback` 生效。
+部署后：面板把 pi 模型切到 `codex/gpt-6.1-sol` 再切回，群消息的 `model_turn` 记录随之变化、magpie 用量 `agent=pi` 的 `req` 对应；codex 模型切 `codex/gpt-6-astra` 后 owner 私聊的 rollout `thread_settings_applied.model` 变化且仍 resume 同一线程、上下文窗口按新模型；两边选 auto 后寒暄消息快照 low（快路径，无分类调用），技术问题快照 high/xhigh 且 `effort_route` 事件有耗时与模型；分类模型不可达时 `auto-fallback` 生效。
 
 ## 9. 验收记录
 
