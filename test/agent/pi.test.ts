@@ -1,3 +1,7 @@
+import { scheduleToolsFixture } from "./schedule-tools-fixture.js";
+import type { ScheduleTools } from "../../src/agent/schedule/tools.js";
+import type { GrantBinding } from "../../src/agent/grants.js";
+import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
 import type { GrantsService } from "../../src/agent/grants.js";
 import { grantsFixture } from "./grants-fixture.js";
 import { SendService } from "../../src/agent/send-service.js";
@@ -58,7 +62,7 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { grants?: GrantsService; sendService?: SendService; channel?: Pick<Channel, "listChats">; currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { scheduleTools?: ScheduleTools; grants?: GrantsService; sendService?: SendService; channel?: Pick<Channel, "listChats">; currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   vi.stubEnv("CODEX_REQUIREMENTS_FILE", await sandboxRequirements(dir));
   const contextUsage = new ContextUsageStore(dir);
@@ -79,7 +83,7 @@ async function setup(steps: FauxResponseStep[], opts: { grants?: GrantsService; 
   const http = opts.fetch ?? vi.fn(async () => Response.json({ results: [{ title: "资料", date: "2026-10-18", summary: "摘要", url: "https://example.com", rerank_score: 1 }] })) as typeof fetch;
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
-  const pi = await PiBackend.open({ sendService: opts.sendService, grants: opts.grants, dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
+  const pi = await PiBackend.open({ scheduleTools: opts.scheduleTools, sendService: opts.sendService, grants: opts.grants, dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
     channel: opts.channel, skillsDir: opts.skillsDir, currentModel: opts.currentModel, mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
     instrumentation: opts.instrumentation, thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
@@ -1298,4 +1302,52 @@ it("定时私聊使用目标会话线程和来源授权，创建者身份与目�
   expect(Object.keys(threads)).toEqual(["private:1"]);
   expect(await s.pi.harness.snapshot(PiRequestDoc, threads["private:1"] as ConversationId, context))
     .toMatchObject({ actor: "qq:9", actorIsOwner: false, access: "private:1", source: { user_id: "9" } });
+});
+
+
+it("定时工具按 pi 回合切换：owner、授权人、无权成员、定时运行与恢复交互", async () => {
+  const f = await scheduleToolsFixture(), seen: TranscriptContext[] = [];
+  const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
+  const s = await setup([
+    call("schedule_create", f.args), inspect,
+    call("schedule_create", f.args), inspect,
+    call("schedule_list"), inspect,
+    call("schedule_control", { action: "pause", reason: "等待更新" }), inspect,
+    call("schedule_list"), inspect,
+    call("schedule_control", { action: "complete", reason: "停止监控" }), inspect,
+  ], { dir: f.dir, grants: f.grants, scheduleTools: f.tools });
+  const req = (bound: GrantBinding): AgentRequest => {
+    const source = bound.source!, scope = source.type === "group" ? "group:" + source.group_id : "private:" + source.user_id;
+    return { ticket: bound.ticket, actor: bound.actor, actorIsOwner: bound.actorIsOwner, senderIsOwner: bound.actorIsOwner,
+      scope, access: bound.actorIsOwner ? "all" : scope, threadKey: scope as AgentRequest["threadKey"],
+      source: { ...source, nickname: "测试者" }, text: "管理任务" };
+  };
+  const visible = async () => {
+    const id = (await s.pi.readThreadIds())["group:7"]! as ConversationId;
+    const conv = (await s.pi.harness.conversation(id, context))!;
+    return (await conv.agent(context)).tools.map(t => t.name).filter(n => n.startsWith("schedule_"));
+  };
+  await s.pi.handle(req(f.binding()), handleContext());
+  expect(await visible()).toEqual([...SCHEDULE_MANAGEMENT_TOOLS]);
+  expect(seen[0].messages.filter(m => m.role === "toolResult").at(-1)?.isError).not.toBe(true);
+  const own = (await f.service.list("qq:1"))[0];
+  expect(own).toMatchObject({ conversation: "group:7", created_by: "qq:1" });
+  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"], scopes: ["group:7"] });
+  await s.pi.handle(req(f.binding("9")), handleContext());
+  expect(await visible()).toEqual([...SCHEDULE_MANAGEMENT_TOOLS]);
+  const memberOwn = (await f.service.list("qq:9"))[0];
+  expect(memberOwn.created_by).toBe("qq:9");
+  await f.grants.panel("auth_revoke", { user: "qq:9" });
+  await s.pi.handle(req(f.binding("9")), handleContext());
+  expect(await visible()).toEqual([]);
+  expect(seen[2].messages.filter(m => m.role === "toolResult").at(-1)).toMatchObject({ isError: true });
+  await s.pi.handle(req(await f.scheduled(own.id)), handleContext());
+  expect(await visible()).toEqual(["schedule_control"]);
+  expect((await f.service.get(own.id))?.status).toBe("paused");
+  await s.pi.handle(req(f.binding()), handleContext());
+  expect(await visible()).toEqual([...SCHEDULE_MANAGEMENT_TOOLS]);
+  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"] });
+  await s.pi.handle(req(await f.scheduled(memberOwn.id, "qq:9")), handleContext());
+  expect(await visible()).toEqual(["schedule_control"]);
+  expect((await f.service.get(memberOwn.id))?.status).toBe("completed");
 });

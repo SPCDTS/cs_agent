@@ -32,6 +32,7 @@ import { SkillsLoader } from "./agent/pi-tools/skills.js";
 import { SkillsStore } from "./agent/skills-store.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
+import { ScheduleTools } from "./agent/schedule/tools.js";
 import { ScheduleService } from "./agent/schedule/service.js";
 import { createScheduleTask } from "./agent/schedule/task.js";
 import { createScheduledRuntime } from "./agent/schedule/run.js";
@@ -127,8 +128,11 @@ async function main(): Promise<void> {
   const grants = new GrantsService({ getHarness: () => dispatchHarness, getChannel: getBridge, owner: cfg.owner });
   const sendService = new SendService({ grants, getChannel: getBridge, dataDir: cfg.DATA_DIR, store,
     limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } });
+  let schedules: ScheduleService;
+  const scheduleTools = new ScheduleTools({ grants, getHarness: () => dispatchHarness, getSchedules: () => schedules });
   const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel, {
-    permissions: binding => grants.permissions(binding),
+    permissions: async binding => ({ ...await grants.permissions(binding), ...await scheduleTools.permissions(binding) }),
+    schedule: (binding, name, args) => scheduleTools.tool(binding, name, args),
     auth: (binding, name, args) => grants.tool(binding, name, args),
     send: (binding, attempt, args, signal) => sendService.send({
       ticket: binding.ticket, source: binding.source, actor: binding.actor, actorIsOwner: binding.actorIsOwner, access: binding.access, workdir: binding.workdir!,
@@ -242,7 +246,6 @@ async function main(): Promise<void> {
     },
   });
   // 回调仅在恢复/调度后调用；先注册两类任务，再补齐服务与派发器，避免构造环。
-  let schedules: ScheduleService;
   const canSchedule = grants.canSchedule.bind(grants);
   const scheduled = createScheduledRuntime({
     getChannel: getBridge, tasks, owner: cfg.owner, canSchedule,
@@ -273,7 +276,7 @@ async function main(): Promise<void> {
 
   // 恢复 pi 工具前，派发授权文档与 Channel 必须已就绪。
   const pi = await PiBackend.open({
-    sendService, grants,
+    sendService, grants, scheduleTools,
     currentModel: currentPiModel,
     dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     skillsDir: cfg.PI_SKILLS_DIR,
