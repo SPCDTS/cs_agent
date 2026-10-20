@@ -100,6 +100,8 @@ export const TicketDoc = defineDoc<TicketState>({
  * v2 的旧条目没有 scope/taskId（其会话里可能还有旧的模型会话任务，recover 时先中止）。
  */
 export type DispatchEntry = {
+  /** 缺省为入站消息；定时回合共用 scope FIFO，但永不兜底。 */
+  kind?: "message" | "scheduled";
   conversationId: number;
   scope?: string;
   /** bridge 票据的 seq（admit 顺序，唯一排序键） */

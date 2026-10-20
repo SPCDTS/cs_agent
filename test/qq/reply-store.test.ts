@@ -88,5 +88,16 @@ describe("ReplyStore", () => {
     const t = store.admit(msg("new", "新消息"))!;
     expect(store.get(t)?.source_text).toBe("新消息");
     expect(store.listPending().map(r => r.ticket_id)).toEqual([old, t]);
+    expect(store.get(old)?.origin).toBe("message");
+    expect(store.get(old)?.target_id).toBeUndefined();
+    const ticket = "run_" + "d".repeat(40);
+    store.openOutbound(ticket, { origin: "scheduled", message_type: "private", target_id: "20001", user_id: "9", self_id: "10001" });
+    const row = store.reserveOutbox({ ticket, call_id: "target", message_type: "group", target_id: "8",
+      mention_user_id: null, text: "迁移后主动发送", images: [], files: [],
+      dailyLimit: { start: "2000-01-01T00:00:00.000Z", end: "2100-01-01T00:00:00.000Z", limit: 100 } });
+    store.close(); store = new ReplyStore(dir);
+    expect(store.get(ticket)).toMatchObject({ origin: "scheduled", target_id: "20001", user_id: "9" });
+    expect(store.getOutbox(row.key)).toEqual(row);
+    expect(store.countModelOutbox("group", "8", "2000-01-01T00:00:00.000Z", "2100-01-01T00:00:00.000Z")).toBe(1);
   });
 });

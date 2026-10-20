@@ -179,7 +179,7 @@ export class PiPathPolicy {
     const { key, request, dataDir } = options;
     const access = parseAccess(request.access);
     if ((key !== "owner" && !isScope(key)) || !access ||
-        (key === "owner" ? access.kind !== "all" : access.kind === "all" ? request.actorIsOwner !== true : access.scope !== key)) {
+        (key === "owner" ? access.kind !== "all" : access.kind === "all" ? (request.actorIsOwner ?? request.senderIsOwner) !== true : access.scope !== key)) {
       throw new Error("pi 工作目录缺少匹配的会话键与访问范围");
     }
     if (!/^[A-Za-z0-9_-]+$/.test(request.ticket)) throw new Error("pi 缺少有效票据");

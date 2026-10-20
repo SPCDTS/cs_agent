@@ -313,7 +313,7 @@ export class PiBackend implements AgentBackend {
   handle(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {
     if (this.closing) return Promise.reject(new Error("pi 后端正在关闭"));
     // 排队取消只取消此等待；队列槽位仍保留，轮到后检查 signal，不启动新回合。
-    const key = req.source.type === "group" ? `group:${req.source.group_id}` : req.threadKey === "owner" ? "owner" : `private:${req.source.user_id}`;
+    const key = req.source.type === "group" ? `group:${req.source.group_id}` : req.threadKey === "owner" ? "owner" : req.scope;
     // 实时视图：同一会话键上排队等待的时间（开始/结束各一条，不改变锁语义）
     const queued = Date.now();
     trace.event(req.ticket, "thread_wait", { status: "started", detail: { backend: "pi", conversation_key: key } });
@@ -327,7 +327,7 @@ export class PiBackend implements AgentBackend {
     ctx.signal.throwIfAborted();
     if (this.closing) throw new Error("pi 后端正在关闭");
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(req.ticket)) throw new Error("非法票据");
-    if (!parseAccess(req.access) || (req.access !== req.scope && !(req.access === "all" && (req.actorIsOwner === true || req.senderIsOwner === true)))) throw new Error("非法访问范围");
+    if (!parseAccess(req.access) || (req.access !== req.scope && !(req.access === "all" && (req.actorIsOwner ?? req.senderIsOwner) === true))) throw new Error("非法访问范围");
     const conv = await this.conversation(req.threadKey, req.ticket, req.settings);
     let requestId = ctx.piTurn?.requestId ?? req.ticket;
     const known = await conv.commit(tx => tx.submissionByRequest(conv.id, requestId), context);
@@ -335,7 +335,7 @@ export class PiBackend implements AgentBackend {
       const doc = await tx.doc(PiRequestDoc, conv.id);
       if (doc.ticket === req.ticket) {
         doc.source ??= req.source;
-        doc.actor = req.actor; doc.actorIsOwner = req.actorIsOwner === true;
+        doc.actor = req.actor; doc.actorIsOwner = req.actorIsOwner;
       }
     }, context);
     let deadline = Date.now() + (this.opts.timeoutMs ?? 300_000);
@@ -348,14 +348,23 @@ export class PiBackend implements AgentBackend {
       await conv.commit(async tx => {
         const doc = await tx.doc(PiRequestDoc, conv.id);
         // 崩溃可能发生在绑定与 submit 之间，同票据继续沿用计数、截止时间与原文。
-        if (doc.ticket === req.ticket) { doc.source = req.source; doc.actor = req.actor; doc.actorIsOwner = req.actorIsOwner === true; deadline = doc.deadline; return; }
-        Object.assign(doc, { ticket: req.ticket, actor: req.actor, actorIsOwner: req.actorIsOwner === true, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true, images, content, deadline, calls: {}, imageJobs: [] });
+        if (doc.ticket === req.ticket) {
+          Object.assign(doc, { actor: req.actor, actorIsOwner: req.actorIsOwner, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true });
+          deadline = doc.deadline; return;
+        }
+        Object.assign(doc, { ticket: req.ticket, actor: req.actor, actorIsOwner: req.actorIsOwner, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true, images, content, deadline, calls: {}, imageJobs: [] });
       }, context);
     } else if (known.status !== "done" && known.status !== "unanswered") {
       const bound = await this.harness.snapshot(PiRequestDoc, conv.id, context);
       if (bound?.ticket !== req.ticket) throw new Error("pi 在途请求与绑定不一致");
       deadline = bound.deadline;
     }
+    // 定时恢复会按当前身份重新授权；未结束的同票据不能沿用崩溃前的读取范围或 owner 权限。
+    if (known && known.status !== "done") await conv.commit(async tx => {
+      const bound = await tx.doc(PiRequestDoc, conv.id);
+      if (bound.ticket !== req.ticket) throw new Error("pi 在途请求与绑定不一致");
+      Object.assign(bound, { actor: req.actor, actorIsOwner: req.actorIsOwner, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true });
+    }, context);
     const permissions = await this.opts.grants?.permissions(req) ?? { actorIsOwner: false, target: false };
     const im = createPiImExtensions(this.opts), selected = permissions.actorIsOwner ? im.owner : permissions.target ? im.targeted : im.basic;
     await conv.configure({ extensions: { add: [selected], remove: Object.values(im).filter(e => e.name !== selected.name) } }, context);

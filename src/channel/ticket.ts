@@ -30,3 +30,8 @@ export function inboundFromTicket(rec: ReplyTicketRecord): InboundMessage {
     ...(rec.source_image_error ? { image_error: rec.source_image_error } : {}),
   };
 }
+
+/** 出站票据保留创建者身份，发送地址独立取自 target_id。 */
+export function ticketTarget(rec: ReplyTicketRecord): string {
+  return rec.target_id ?? (rec.message_type === "group" ? rec.group_id! : rec.user_id);
+}

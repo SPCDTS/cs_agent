@@ -6,13 +6,13 @@ import { log } from "../shared/log.js";
 import { trace } from "../shared/trace.js";
 import { attachmentName } from "../media/attach.js";
 import type { DownloadHooks } from '../media/download.js';
-import { inboundFromTicket } from '../channel/ticket.js';
+import { inboundFromTicket, ticketTarget } from '../channel/ticket.js';
 import { downloadIncoming } from "./incoming.js";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import type {
   Channel, ChannelStatus, ChatType, InboundMessage, ChannelEvents,
-  RemoteMessage, ReplyResult, ReplyTicketRecord,
+  RemoteMessage, ReplyResult, ReplyTicketRecord, OutboundTicket,
 } from "../channel/types.js";
 import type { QQBridge, QQBridgeConfig } from "./types.js";
 import { createOneBotClient, isRecord, numericId, isValidId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
@@ -540,6 +540,13 @@ class Bridge extends EventEmitter implements Channel {
 
   // ---------- 票据回复 ----------
 
+  async openOutbound(ticket: string, target: OutboundTicket): Promise<ReplyTicketRecord> {
+    const login = await this.client.call("get_login_info");
+    const self_id = stringField(login, "user_id");
+    numericId(self_id);
+    return this.requireStore().openOutbound(ticket, { ...target, self_id });
+  }
+
   async getTicket(ticket: string): Promise<ReplyTicketRecord | null> {
     return this.requireStore().get(ticket);
   }
@@ -563,8 +570,8 @@ class Bridge extends EventEmitter implements Channel {
     const record = store.get(row.ticket);
     if (!record || record.status !== "pending") throw new Error("回合票据已结束或不存在");
     // 目标由网关授权后写入 Outbox；通道仍校验来源允许名单、登录号和不可变的行内容。
-    const sameSource = target.message_type === record.message_type && target.target_id === (record.message_type === "group" ? record.group_id : record.user_id);
-    if (opts?.mention && (!sameSource || record.message_type !== "group" || opts.mention !== record.user_id)) throw new Error("主动发送不能 @，回复只能 @ 本轮发送者");
+    const sameSource = target.message_type === record.message_type && target.target_id === ticketTarget(record);
+    if (opts?.mention && (record.origin === "scheduled" || !sameSource || record.message_type !== "group" || opts.mention !== record.user_id)) throw new Error("定时或主动发送不能 @，回复只能 @ 本轮发送者");
     if (text !== row.text || JSON.stringify(imagePaths) !== JSON.stringify(row.images) || (opts?.mention ?? null) !== row.mention_user_id) throw new Error("Outbox 内容不一致");
     validateText(text);
     const images = prepareImages(imagePaths, this.config.imageRoot);
@@ -584,7 +591,8 @@ class Bridge extends EventEmitter implements Channel {
   }
 
   private async checkReplyIdentity(record: ReplyTicketRecord, signal?: AbortSignal): Promise<void> {
-    if (!isAllowed(this.config, record)) throw new Error("此发送者已不在允许回复的名单中。");
+    if (!isAllowed(this.config, record.origin === "scheduled" && record.message_type === "private"
+      ? { ...record, user_id: ticketTarget(record) } : record)) throw new Error("此发送者已不在允许回复的名单中。");
     numericId(record.user_id);
     signal?.throwIfAborted();
     const login = await this.client.call("get_login_info");
@@ -608,7 +616,7 @@ class Bridge extends EventEmitter implements Channel {
     const record = store.get(ticket);
     if (!record) throw new Error("回复凭据不存在。");
     const type = record.message_type;
-    const targetId = type === "group" ? record.group_id ?? "" : record.user_id;
+    const targetId = ticketTarget(record);
     if (record.status === "sent") {
       return { already_sent: true, message_id: record.reply_message_id ?? "", message_type: type, target_id: targetId };
     }
@@ -626,7 +634,7 @@ class Bridge extends EventEmitter implements Channel {
     try {
       data = await this.client.call(type === "group" ? "send_group_msg" : "send_private_msg", {
         [type === "group" ? "group_id" : "user_id"]: target,
-        message: buildMessage(type, record.user_id, text, images),
+        message: buildMessage(type, record.origin === "scheduled" ? "" : record.user_id, text, images),
       }, { sending: true, timeoutMs: images.length ? Math.max(this.timeoutMs, IMAGE_TIMEOUT_MS) : this.timeoutMs });
     } catch (error) {
       store.markUncertain(ticket);

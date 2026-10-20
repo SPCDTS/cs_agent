@@ -90,6 +90,40 @@ async function setup(steps: FauxResponseStep[], opts: { grants?: GrantsService; 
 }
 
 describe("pi durable backend", () => {
+  it("owner 的定时群回合允许 all 读取，仍复用群线程；普通创建者不能扩大范围", async () => {
+    const f = await grantsFixture(), ticket = "run_" + "b".repeat(40);
+    await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "1" });
+    let seen!: TranscriptContext;
+    const s = await setup([call("send_message", { target: "qq:group:8", text: "定时完成" }), transcript => { seen = transcript; return reply(); }],
+      { dir: f.dir, sendService: f.service, grants: f.grants });
+    await s.pi.handle({ ...request(ticket), access: "all", actor: "qq:1", actorIsOwner: true, senderIsOwner: true }, handleContext());
+    expect(seen.messages.find(message => message.role === "toolResult")?.isError).not.toBe(true);
+    expect(f.service.rows(ticket)).toMatchObject([{ status: "sent", target_id: "8", mention_user_id: null }]);
+    const threads = await s.pi.readThreadIds();
+    expect(threads.owner).toBeUndefined();
+    const id = threads["group:7"] as ConversationId;
+    expect(await s.pi.harness.snapshot(PiRequestDoc, id, context)).toMatchObject({ access: "all", actor: "qq:1", actorIsOwner: true, senderIsOwner: true });
+    await expect(s.pi.handle({ ...request("scheduled-member"), access: "all" }, handleContext())).rejects.toThrow("非法访问范围");
+  });
+
+  it("恢复定时回合时按当前身份缩小 pi 的持久授权", async () => {
+    let started = false;
+    const s = await setup([async (_ctx, opts) => {
+      started = true;
+      await new Promise<void>(resolve => opts?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return fauxAssistantMessage("", { stopReason: "aborted" });
+    }, reply("恢复完成")]);
+    const cancel = new AbortController();
+    const pending = s.pi.handle({ ...request("scheduled-resume"), access: "all", actor: "qq:1", actorIsOwner: true, senderIsOwner: true },
+      { ...handleContext(), signal: cancel.signal });
+    const rejected = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(started).toBe(true));
+    cancel.abort(); await rejected;
+    await s.pi.handle({ ...request("scheduled-resume"), actor: "qq:1", actorIsOwner: false }, handleContext());
+    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+    expect(await s.pi.harness.snapshot(PiRequestDoc, id, context)).toMatchObject({ access: "group:7", actor: "qq:1", actorIsOwner: false, senderIsOwner: false });
+  });
+
   it.each([false, true])("qq_chats 仅在 all 范围调用通道（主人私聊=%s）", async owner => {
     const listChats = vi.fn<Channel["listChats"]>().mockResolvedValue({ groups: [{ group_id: "7", name: "家庭群", member_count: 6 }], friends: [] });
     let seen!: TranscriptContext;
@@ -1243,4 +1277,21 @@ it("owner 群回合 all 读取但留在群线程，身份与工具配置随群�
   expect(observed[2]!.messages.filter(m => m.role === "toolResult").at(-1)).toMatchObject({ isError: true });
   expect(f.service.rows(denied.ticket)).toHaveLength(0);
   expect(await s.pi.harness.snapshot(PiRequestDoc, conv.id, context)).toMatchObject({ actor: "qq:3", actorIsOwner: false, access: "group:7" });
+});
+
+it("定时私聊使用目标会话线程和来源授权，创建者身份与目标分开绑定", async () => {
+  const f = await grantsFixture("99"), ticket = "run_" + "c".repeat(40);
+  await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "private", target_id: "1", user_id: "9" });
+  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["send"], targets: ["qq:group:8"], scopes: ["private:1"] });
+  let seen!: TranscriptContext;
+  const s = await setup([call("send_message", { target: "qq:group:8", text: "定时跨会话通知" }),
+    transcript => { seen = transcript; return reply(); }], { dir: f.dir, grants: f.grants, sendService: f.service });
+  await s.pi.handle({ ...request(ticket), scope: "private:1", access: "private:1", threadKey: "private:1",
+    actor: "qq:9", actorIsOwner: false, source: { type: "private", user_id: "9", group_id: null, nickname: "创建者" } }, handleContext());
+  expect(seen.messages.find(message => message.role === "toolResult")?.isError).not.toBe(true);
+  expect(f.service.rows(ticket)).toMatchObject([{ status: "sent", target_id: "8", mention_user_id: null }]);
+  const threads = await s.pi.readThreadIds();
+  expect(Object.keys(threads)).toEqual(["private:1"]);
+  expect(await s.pi.harness.snapshot(PiRequestDoc, threads["private:1"] as ConversationId, context))
+    .toMatchObject({ actor: "qq:9", actorIsOwner: false, access: "private:1", source: { user_id: "9" } });
 });

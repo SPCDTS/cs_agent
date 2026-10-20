@@ -2,7 +2,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Harness } from "@earendil-works/pi-durable";
 import { z } from "zod";
 import type { Channel, TurnIdentity } from "../channel/types.js";
-import { isScope, scopeOf } from "../context/access.js";
+import { isScope } from "../context/access.js";
+import { ticketTarget } from "../channel/ticket.js";
 import { trace, type Trace } from "../shared/trace.js";
 import { GrantsDoc, type Grant } from "./docs.js";
 
@@ -49,7 +50,7 @@ export class GrantsService {
         binding.source.type !== rec.message_type || binding.source.user_id !== rec.user_id || binding.source.group_id !== rec.group_id) {
       throw new Error("回合身份与票据不一致");
     }
-    return { actor, actorIsOwner, scope: scopeOf(rec) };
+    return { actor, actorIsOwner, scope: `${rec.message_type}:${ticketTarget(rec)}` };
   }
 
   async list() {

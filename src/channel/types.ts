@@ -41,8 +41,20 @@ export interface InboundMessage {
 
 export type TicketStatus = "pending" | "sending" | "sent" | "uncertain";
 
+/** 定时出站票据的创建者与目的地分开保存；self_id 由 Channel 查询并绑定。 */
+export interface OutboundTicket {
+  message_type: ChatType;
+  target_id: string;
+  origin: "scheduled";
+  user_id: string;
+}
+
 export interface ReplyTicketRecord {
-  ticket_id: string;            // sha256 hex，由 self_id:type:group_id:user_id:message_id 决定性生成
+  /** 旧票据缺省为入站消息。 */
+  origin?: "message" | "scheduled";
+  /** 定时私聊的目标可能不同于创建者。 */
+  target_id?: string;
+  ticket_id: string;            // 入站为 sha256 hex；定时为 run_ + fire_key 的 sha256 前 40 位
   self_id: string;
   user_id: string;
   group_id: string | null;
@@ -96,6 +108,7 @@ export interface ChannelEvents {
 }
 
 export interface Channel {
+  openOutbound(ticket: string, target: OutboundTicket): Promise<ReplyTicketRecord>;
   readonly outbox: import("./outbox.js").OutboxStore;
   send(key: string, target: { message_type: ChatType; target_id: string }, text: string, images?: string[],
     opts?: { mention?: string; signal?: AbortSignal }): Promise<ReplyResult>;
