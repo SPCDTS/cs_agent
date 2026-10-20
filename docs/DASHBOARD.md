@@ -17,12 +17,20 @@
 | `/codex/agents-md` | 当前全局 `$CODEX_HOME/AGENTS.md`（受管规则 + codex.md）的只读脱敏全文 | — |
 | `/settings` | 运行时设置、授权列表与增删、编辑 codex.md、当前模型基础指令（含只读受管规则）与 agent.md、线程入口、最近变更 | `POST /settings`、`POST /settings/codex-prompt`、`POST /settings/codex-base-prompt`、`POST /settings/codex-base-prompt/restore`、`POST /settings/agent-md`、`POST /settings/grants/add`、`POST /settings/grants/revoke` |
 | `/config` | 启动时生效配置（脱敏）与 agent.md 当前内容 | — |
+| `/schedules` 定时任务 | 运行中 / 已暂停 / 已结束计数；任务表（名称、会话含群名、人话规则、下次触发、状态与暂停原因、最近运行、连续失败、操作）；新建表单 | `POST /schedules`、`POST /schedules/<id>/{update,pause,resume,run,delete}` |
+| `/schedules/<id>` | 单个任务：完整提示词、规则与 RRULE 原文、超时、创建者、运行记录（新的在上）与编辑表单 | 同上 |
 
 ### 授权管理
 
-设置页的“授权”一节显示用户、send / schedule 能力、目标 ref、来源 scopes、授权者及有效 / 已过期状态。添加会替换该用户的整条授权；目标留空表示不能主动发送，来源留空表示任何会话，时效留空表示长期。撤销删除整条授权；owner 回合的 auth_revoke 工具另支持按能力撤销。schedule 当前仅存储，不执行任务。
+设置页的“授权”一节显示用户、send / schedule 能力、目标 ref、来源 scopes、授权者及有效 / 已过期状态。添加会替换该用户的整条授权；目标留空表示不能主动发送，来源留空表示任何会话，时效留空表示长期。撤销删除整条授权；owner 回合的 auth_revoke 工具另支持按能力撤销。schedule 允许创建并管理自己的定时任务。
 
 持有面板 OBS_TOKEN 的运维者代表配置的 owner；增删仍要求登录、同源和 CSRF 令牌，没有配置 owner 时仅展示列表。变更记入 auth_changed（source=panel，含前后差异）；工具变更为 source=tool。send_message 轨迹显示实际 target，便于核对跨会话投递。
+
+### 定时任务
+
+面板身份即 owner：列表显示全部任务，新建任务的创建者为 `qq:<owner>`；未配置 owner 或未接入 ScheduleService 时页面只显示未启用。表单 POST 与其他面板表单一样要求登录、同源与 CSRF，直接调用 ScheduleService（与 `/api/schedules` JSON 接口同一套校验）；校验失败时以错误提示重绘原页面并保留输入。
+
+触发方式按北京时间填写：一次性（日期 + 时刻）；每天 / 每周（时刻 + 星期多选，不选为每天，换算为 `FREQ=DAILY` 或 `FREQ=WEEKLY;BYDAY=…;BYHOUR;BYMINUTE`，起点取当前整分钟）；自定义 RRULE 正文。编辑时规则未改动则不提交 rule，保留原起点；会话创建后不可改。会话下拉为 owner 私聊加消息库里已有的群 / 私聊，群名来自 `scope_names`。删除用页内展开的确认按钮（不弹 `window.confirm`）。
 
 ### 布局草图
 
