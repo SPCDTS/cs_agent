@@ -105,7 +105,7 @@ const EnvSchema = z.object({
   PI_COMPACTION_RESERVE_TOKENS: int(DEFAULT_COMPACTION_POLICY.reserveTokens),
   PI_COMPACTION_BACKGROUND_TOKENS: z.coerce.number().int().min(0).default(DEFAULT_COMPACTION_POLICY.backgroundTokens),
 
-  /** owner QQ 号（私聊可检索全部会话历史）；留空 = QQ_ALLOW_USERS 的第一项 */
+  /** owner QQ 号（私聊和群聊均可检索全部会话历史）；留空 = QQ_ALLOW_USERS 的第一项 */
   QQ_OWNER: z.string().regex(/^\d*$/, "QQ_OWNER 必须是 QQ 号").default(""),
   /** 统一上下文消息库：原始消息保留天数、摘要保留天数、每日衰老任务的本地小时（容器默认 UTC） */
   HISTORY_RAW_DAYS: int(30),

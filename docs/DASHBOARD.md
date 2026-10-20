@@ -15,8 +15,14 @@
 | `/codex` | owner / 共享线程：上下文占用条、id、rollout 大小、已观测回合、最近 10 轮摘要、全局 AGENTS.md | `POST /codex/reset` |
 | `/pi` | 每个会话键的上下文占用条（含两道压缩阈值）、会话 id、最近活动、最近 10 轮摘要、压缩记录 | `POST /pi/reset` |
 | `/codex/agents-md` | 当前全局 `$CODEX_HOME/AGENTS.md`（受管规则 + codex.md）的只读脱敏全文 | — |
-| `/settings` | 运行时设置、编辑 codex.md、当前模型基础指令（含只读受管规则）与 agent.md、线程入口、最近变更 | `POST /settings`、`POST /settings/codex-prompt`、`POST /settings/codex-base-prompt`、`POST /settings/codex-base-prompt/restore`、`POST /settings/agent-md` |
+| `/settings` | 运行时设置、授权列表与增删、编辑 codex.md、当前模型基础指令（含只读受管规则）与 agent.md、线程入口、最近变更 | `POST /settings`、`POST /settings/codex-prompt`、`POST /settings/codex-base-prompt`、`POST /settings/codex-base-prompt/restore`、`POST /settings/agent-md`、`POST /settings/grants/add`、`POST /settings/grants/revoke` |
 | `/config` | 启动时生效配置（脱敏）与 agent.md 当前内容 | — |
+
+### 授权管理
+
+设置页的“授权”一节显示用户、send / schedule 能力、目标 ref、来源 scopes、授权者及有效 / 已过期状态。添加会替换该用户的整条授权；目标留空表示不能主动发送，来源留空表示任何会话，时效留空表示长期。撤销删除整条授权；owner 回合的 auth_revoke 工具另支持按能力撤销。schedule 当前仅存储，不执行任务。
+
+持有面板 OBS_TOKEN 的运维者代表配置的 owner；增删仍要求登录、同源和 CSRF 令牌，没有配置 owner 时仅展示列表。变更记入 auth_changed（source=panel，含前后差异）；工具变更为 source=tool。send_message 轨迹显示实际 target，便于核对跨会话投递。
 
 ### 布局草图
 

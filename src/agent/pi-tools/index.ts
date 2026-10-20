@@ -1,3 +1,4 @@
+import type { GrantsService } from "../grants.js";
 import type { Channel } from "../../channel/types.js";
 import { chatsTool } from "./chats.js";
 import path from "node:path";
@@ -26,6 +27,7 @@ import { DeepSeekWeb } from "./web.js";
 
 export interface PiToolsOptions {
   sendService?: SendService;
+  grants?: GrantsService;
   dataDir: string;
   workspaceDir: string;
   /** 空值或未设置使用 dataDir/skills；off 禁用技能目录。 */
@@ -85,25 +87,6 @@ export function createPiExtension(opts: PiToolsOptions) {
       });
     },
   });
-  const send = defineTool({
-    name: "send_message", description: "立即向本回合会话发送文字及可选图片、文件，返回 message_id。不要发送重复说明。",
-    parameters: Type.Object({ text: Type.String({ minLength: 1, maxLength: 4000 }),
-      images: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 1024 }), { maxItems: 4 })),
-      files: Type.Optional(Type.Array(Type.Object({ path: Type.String({ minLength: 1, maxLength: 1024 }),
-        name: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })) }, { additionalProperties: false }), { maxItems: 3 })),
-    }, { additionalProperties: false }), replay: "safe",
-    async execute(args, api, context) {
-      try {
-        const bound = await api.snapshot(PiRequestDoc, api.conversationId, context), env = api.env;
-        const access = parseAccess(bound?.access);
-        if (!bound?.ticket || !bound.source || !access || !(env instanceof PiExecutionEnv) || env.policy.ticket !== bound.ticket || !opts.sendService) throw new Error("发送工具缺少本轮绑定");
-        const signal = AbortSignal.any([...(context.abortSignal ? [context.abortSignal] : []), AbortSignal.timeout(Math.max(1, bound.deadline - Date.now()))]);
-        const result = await opts.sendService.send({ ticket: bound.ticket, source: bound.source, access,
-          workdir: env.policy.workspace, extraRoots: [path.join(opts.dataDir, "images", bound.ticket)] }, args, { callId: api.callId }, signal);
-        return output(JSON.stringify(result));
-      } catch (error) { return { ...output((error as Error).message), isError: true }; }
-    },
-  });
   return defineExtension({
     name: "cs-pi",
     sections: [
@@ -143,6 +126,7 @@ export function createPiExtension(opts: PiToolsOptions) {
         };
         if (Date.now() >= bound.deadline) return block("pi 请求已超时");
         // send_message 由 Outbox 限额，重放不额外计次，也不消耗聊天记录工具额度。
+        if (call.name.startsWith("auth_")) return bound.actorIsOwner ? undefined : block("授权工具仅限 owner 回合");
         if (call.name === "send_message") return undefined;
         const kind = BUILTIN_TOOLS.has(call.name) ? "builtin" : call.name === "qq_image" ? "qq_image" : call.name.startsWith("qq_") ? "history" : call.name;
         const limit = kind === "builtin" ? 20 : kind === "qq_image" ? opts.mediaRecallMaxPerTicket ?? 5 : kind === "generate_image" ? 2 : 4;
@@ -175,7 +159,6 @@ export function createPiExtension(opts: PiToolsOptions) {
     ],
     tools: [
       chatsTool(opts.channel),
-      send,
       defineTool({ ...recall, execute: (args, api, context) => boundary(api.taskId,"media_recall",async () => recall.execute(args,api,context)) }),
       defineTool({ name: "web_search", description: "搜索事实资料，返回标题、日期、摘要与来源链接。", replay: "safe",
         parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 128 }), count: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })) }, { additionalProperties: false }),

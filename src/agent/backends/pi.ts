@@ -16,6 +16,7 @@ import { attachmentDirs } from "../../media/attach-paths.js";
 import { validateReferences } from "../../media/gen/image-references.js";
 import { codingEnvironment, codingTools } from "../pi-tools/coding.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
+import { createPiImExtensions } from "../pi-tools/im.js";
 import { PiRequestDoc } from "../pi-tools/request.js";
 import { PiPromptLoader } from "../pi-tools/prompt.js";
 import { isScope, parseAccess } from "../../context/access.js";
@@ -123,8 +124,9 @@ export class PiBackend implements AgentBackend {
     const workspaceDir = opts.workspaceDir ?? process.env.WORKSPACE_DIR ?? "/workspace";
     const registry = createRegistry();
     let harness!: Harness;
-    registry.install(await codingTools());
-    registry.install(createPiExtension({ ...opts, workspaceDir, getHarness: () => harness }));
+    const coding = await codingTools(), extension = createPiExtension({ ...opts, workspaceDir, getHarness: () => harness });
+    const im = createPiImExtensions(opts);
+    for (const item of [coding, extension, ...Object.values(im)]) registry.install(item);
     const storage = opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite"));
     harness = await Harness.open(storage, {
       models: opts.models, registry,
@@ -137,7 +139,7 @@ export class PiBackend implements AgentBackend {
         if (!request?.ticket) return undefined;
         return codingEnvironment({ dataDir: opts.dataDir, workspaceDir, skillsDir: opts.skillsDir, key, request, store: opts.store });
       },
-      settings: { toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
+      settings: { extensions: [coding, extension, im.basic], toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
         enabled: true,
         ...(opts.reserveTokens !== undefined ? { reserveTokens: opts.reserveTokens } : {}),
         ...(opts.backgroundTokens !== undefined ? { backgroundTokens: opts.backgroundTokens } : {}),
@@ -311,7 +313,7 @@ export class PiBackend implements AgentBackend {
   handle(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {
     if (this.closing) return Promise.reject(new Error("pi 后端正在关闭"));
     // 排队取消只取消此等待；队列槽位仍保留，轮到后检查 signal，不启动新回合。
-    const key = req.threadKey === "owner" ? "owner" : req.scope;
+    const key = req.source.type === "group" ? `group:${req.source.group_id}` : req.threadKey === "owner" ? "owner" : `private:${req.source.user_id}`;
     // 实时视图：同一会话键上排队等待的时间（开始/结束各一条，不改变锁语义）
     const queued = Date.now();
     trace.event(req.ticket, "thread_wait", { status: "started", detail: { backend: "pi", conversation_key: key } });
@@ -325,13 +327,16 @@ export class PiBackend implements AgentBackend {
     ctx.signal.throwIfAborted();
     if (this.closing) throw new Error("pi 后端正在关闭");
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(req.ticket)) throw new Error("非法票据");
-    if (!parseAccess(req.access) || (req.threadKey !== "owner" && req.access !== req.scope)) throw new Error("非法访问范围");
+    if (!parseAccess(req.access) || (req.access !== req.scope && !(req.access === "all" && (req.actorIsOwner === true || req.senderIsOwner === true)))) throw new Error("非法访问范围");
     const conv = await this.conversation(req.threadKey, req.ticket, req.settings);
     let requestId = ctx.piTurn?.requestId ?? req.ticket;
     const known = await conv.commit(tx => tx.submissionByRequest(conv.id, requestId), context);
     if (known) await conv.commit(async tx => {
       const doc = await tx.doc(PiRequestDoc, conv.id);
-      if (doc.ticket === req.ticket && !doc.source) doc.source = req.source;
+      if (doc.ticket === req.ticket) {
+        doc.source ??= req.source;
+        doc.actor = req.actor; doc.actorIsOwner = req.actorIsOwner === true;
+      }
     }, context);
     let deadline = Date.now() + (this.opts.timeoutMs ?? 300_000);
     if (!known) {
@@ -343,14 +348,17 @@ export class PiBackend implements AgentBackend {
       await conv.commit(async tx => {
         const doc = await tx.doc(PiRequestDoc, conv.id);
         // 崩溃可能发生在绑定与 submit 之间，同票据继续沿用计数、截止时间与原文。
-        if (doc.ticket === req.ticket) { doc.source = req.source; deadline = doc.deadline; return; }
-        Object.assign(doc, { ticket: req.ticket, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true, images, content, deadline, calls: {}, imageJobs: [] });
+        if (doc.ticket === req.ticket) { doc.source = req.source; doc.actor = req.actor; doc.actorIsOwner = req.actorIsOwner === true; deadline = doc.deadline; return; }
+        Object.assign(doc, { ticket: req.ticket, actor: req.actor, actorIsOwner: req.actorIsOwner === true, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true, images, content, deadline, calls: {}, imageJobs: [] });
       }, context);
     } else if (known.status !== "done" && known.status !== "unanswered") {
       const bound = await this.harness.snapshot(PiRequestDoc, conv.id, context);
       if (bound?.ticket !== req.ticket) throw new Error("pi 在途请求与绑定不一致");
       deadline = bound.deadline;
     }
+    const permissions = await this.opts.grants?.permissions(req) ?? { actorIsOwner: false, target: false };
+    const im = createPiImExtensions(this.opts), selected = permissions.actorIsOwner ? im.owner : permissions.target ? im.targeted : im.basic;
+    await conv.configure({ extensions: { add: [selected], remove: Object.values(im).filter(e => e.name !== selected.name) } }, context);
     trace.event(req.ticket, "dispatched", { detail: { backend: "pi", conversation_key: req.threadKey, conversation: conv.id, recovered: !!known } });
     if (known) trace.event(req.ticket, "recovered", { detail: { backend: "pi", request_id: requestId } });
     ctx.onEvent({ type: "pi_start", thread: req.threadKey, conversation: conv.id });

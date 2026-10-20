@@ -702,12 +702,12 @@ describe("codex 召回令牌生命周期", () => {
       timeoutMs: mode === "timeout" ? 500 : 10_000,
       env: { ...opts.env, FAKE_CODEX_SLEEP_MS: mode === "timeout" ? "20000" : "0" },
     });
-    try { await runner.ask("test", { threadKey: "group:1", ticket: "tk", qqAccess: "group:7" }); } catch { /* 生命周期同样覆盖异常 */ }
+    try { await runner.ask("test", { threadKey: "group:1", ticket: "tk", qqAccess: "all", actor: "qq:1", actorIsOwner: true, source: { type: "group", user_id: "1", group_id: "1", nickname: "" } }); } catch { /* 生命周期同样覆盖异常 */ }
     expect(issue).toHaveBeenCalledOnce();
     const lease = issue.mock.results[0]!.value;
     expect(tokens.valid(lease.token)).toBe(false);
     expect(redactText(lease.token)).toBe(lease.token);
-    expect(issue.mock.calls[0]![0]).toMatchObject({ ticket: "tk", access: { kind: "scope", scope: "group:7" } });
+    expect(issue.mock.calls[0]![0]).toMatchObject({ ticket: "tk", access: { kind: "all" }, actor: "qq:1", actorIsOwner: true, source: { type: "group", user_id: "1", group_id: "1" } });
     if (mode !== "spawn") {
       const recorded = JSON.parse(readFileSync(path.join(dir, "calls.jsonl"), "utf8").split("\n")[0]!);
       const argv = recorded.argv as string[];

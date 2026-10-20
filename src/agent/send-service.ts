@@ -1,7 +1,8 @@
+import { parseTarget, type GrantsService } from "./grants.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { Channel, ReplyTicketRecord } from "../channel/types.js";
+import type { Channel, ReplyTicketRecord, TurnIdentity } from "../channel/types.js";
 import { isModelOutboxRow, type OutboxRow } from "../channel/outbox.js";
 import { prepareSendAttachments, readAttachmentData, type AttachmentLimits } from "../media/attach.js";
 import { readMediaFile } from "../context/media.js";
@@ -15,18 +16,19 @@ export interface SendResult {
   status: OutboxRow["status"]; already_sent: boolean; message_id: string | null;
   message_type: OutboxRow["message_type"]; target_id: string; note?: string; original_text?: string;
 }
-export interface SendArguments { text: string; images?: string[]; files?: { path: string; name?: string }[] }
-export interface SendBinding {
+export interface SendArguments { target?: string; text: string; images?: string[]; files?: { path: string; name?: string }[] }
+export interface SendBinding extends Partial<TurnIdentity> {
   ticket: string; access: Access; workdir: string; extraRoots?: string[];
   source?: { type: "private" | "group"; user_id: string; group_id: string | null };
 }
-export type SendChannel = Pick<Channel, "outbox" | "send" | "uploadFile" | "getTicket" | "settleTicket">;
+export type SendChannel = Pick<Channel, "outbox" | "send" | "uploadFile" | "getTicket" | "settleTicket"> & Partial<Pick<Channel, "listChats">>;
 
 /** 参数校验在网关执行；MCP 与 pi 均把错误作为工具文本返回。 */
 export function validateSendArguments(input: unknown): SendArguments {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("send_message 参数必须是对象");
   const a = input as Record<string, unknown>;
-  if (Object.keys(a).some(k => !["text", "images", "files"].includes(k))) throw new Error("仅接受 text、images、files，不能指定目标");
+  if (Object.keys(a).some(k => !["text", "images", "files", "target"].includes(k))) throw new Error("仅接受 text、images、files、target");
+  if (a.target !== undefined) parseTarget(a.target);
   if (typeof a.text !== "string" || !a.text.trim() || a.text.length > 4000) throw new Error("消息必须是 1～4000 字符的非空文字");
   const validPath = (v: unknown) => typeof v === "string" && !!v.trim() && v.length <= 1024;
   if (a.images !== undefined && (!Array.isArray(a.images) || a.images.length > 4 || !a.images.every(validPath))) throw new Error("images 最多 4 个本地图片路径");
@@ -40,7 +42,8 @@ export function validateSendArguments(input: unknown): SendArguments {
 export class SendService {
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly counters = new Map<string, number>();
-  constructor(private readonly opts: { getChannel(): SendChannel; dataDir: string; store?: Pick<ContextStore, "mediaPathAllowed" | "recordSent">; limits?: AttachmentLimits }) {}
+  private chats?: { value: Awaited<ReturnType<Channel["listChats"]>>; expires: number };
+  constructor(private readonly opts: { grants?: GrantsService; now?: () => number; getChannel(): SendChannel; dataDir: string; store?: Pick<ContextStore, "mediaPathAllowed" | "recordSent">; limits?: AttachmentLimits }) {}
   rows(ticket: string) { return this.opts.getChannel().outbox.listOutbox(ticket); }
   releaseAttempt(ticket: string, attempt: string) { this.counters.delete(ticket + ":" + attempt); }
 
@@ -56,24 +59,41 @@ export class SendService {
       if ("callId" in identity && !identity.callId) throw new Error("发送工具缺少稳定调用 id");
       const args = validateSendArguments(input), channel = this.opts.getChannel();
       const rec = await this.record(binding.ticket, binding.source);
+      const sourceRef = `qq:${rec.message_type}:${rec.message_type === "group" ? rec.group_id : rec.user_id}`;
+      const targetRef = args.target ?? sourceRef, target = parseTarget(targetRef), targeted = targetRef !== sourceRef;
+      if (targeted) {
+        if (!this.opts.grants) throw new Error("主动发送授权未启用");
+        await this.opts.grants.authorizeSend(binding, targetRef);
+      }
       const rows = this.rows(binding.ticket);
       const attempt = "attempt" in identity ? binding.ticket + ":" + identity.attempt : undefined;
       const ordinal = attempt ? (this.counters.get(attempt) ?? 0) + 1 : undefined;
       // 校验失败不计调用；有效调用（含发送失败）按次序重放。
       const existing = "callId" in identity ? rows.find(r => r.call_id === identity.callId) : rows.find(r => r.key === binding.ticket + "#" + ordinal);
       const hash = createHash("sha256").update(args.text).digest("hex");
-      if (existing && attempt && existing.text_sha256 !== hash) {
+      if (existing && attempt && (existing.text_sha256 !== hash || existing.message_type !== target.message_type || existing.target_id !== target.target_id)) {
         this.counters.set(attempt, ordinal!);
         return { ...this.result(existing, true), original_text: existing.text,
           note: (this.result(existing, true).note ?? "") + "本次调用映射到已有消息。新内容未发送，如需发送请再调用一次。" };
       }
       // 文本去重在附件读取、限额与新建行之前；不确定的消息不能通过新 call_id 重发。
-      const duplicate = !existing && rows.find(r => r.status !== "pending" && r.text_sha256 === hash);
+      const duplicate = !existing && rows.find(r => r.status !== "pending" && r.text_sha256 === hash && r.message_type === target.message_type && r.target_id === target.target_id);
       if (duplicate) {
         if (attempt) this.counters.set(attempt, ordinal!);
         return this.deliver(duplicate, rec, signal);
       }
       if (!existing && rows.filter(isModelOutboxRow).length >= 3) throw new Error("本回合最多发送 3 条消息");
+      // 已发回执可重放；仍待发送的行使用原目标，不能通过更换参数绕过授权。
+      if (existing && (existing.message_type !== target.message_type || existing.target_id !== target.target_id)) {
+        return { ...this.result(existing, true), original_text: existing.text, note: "调用 id 已绑定其他消息，新内容未发送。" };
+      }
+      if (targeted && (!existing || existing.status === "pending")) {
+        await this.checkMembership(target, signal);
+        const day = this.day();
+        if (!existing && channel.outbox.countModelOutbox(target.message_type, target.target_id, day.start, day.end) >= 100) {
+          throw new Error("该 target 当天最多主动发送 100 条消息（Asia/Shanghai）");
+        }
+      }
       let row = existing;
       if (!row) {
         if (rec.status !== "pending") throw new Error("本回合已经结束");
@@ -97,16 +117,38 @@ export class SendService {
           await fs.writeFile(filename, file.data, { flag: "wx" });
           files.push({ filename, name: file.name, bytes: file.data.length, sha256: file.sha256, status: "pending" });
         }
+        if (targeted) await this.opts.grants!.authorizeSend(binding, targetRef);
+        signal?.throwIfAborted();
         row = channel.outbox.reserveOutbox({
           ticket: binding.ticket, sequence: ordinal, call_id: "callId" in identity ? identity.callId : null,
-          message_type: rec.message_type, target_id: rec.message_type === "group" ? rec.group_id! : rec.user_id,
-          mention_user_id: rec.message_type === "group" && !rows.some(r => r.status !== "pending") ? rec.user_id : null,
+          message_type: target.message_type, target_id: target.target_id,
+          mention_user_id: !targeted && rec.message_type === "group" && !rows.some(r => r.status !== "pending") ? rec.user_id : null,
+          ...(targeted ? { dailyLimit: { ...this.day(), limit: 100 } } : {}),
           text: args.text, images, files,
         });
       }
       if (attempt) this.counters.set(attempt, ordinal!);
       return this.deliver(row, rec, signal);
     });
+  }
+
+  private day() {
+    const now = (this.opts.now ?? Date.now)();
+    const start = Math.floor((now + 8 * 3_600_000) / 86_400_000) * 86_400_000 - 8 * 3_600_000;
+    return { start: new Date(start).toISOString(), end: new Date(start + 86_400_000).toISOString() };
+  }
+
+  private async checkMembership(target: ReturnType<typeof parseTarget>, signal?: AbortSignal) {
+    const now = (this.opts.now ?? Date.now)();
+    if (!this.chats || this.chats.expires <= now) {
+      const channel = this.opts.getChannel();
+      if (!channel.listChats) throw new Error("无法检查目标群或好友");
+      const value = await channel.listChats({ signal: signal ?? AbortSignal.timeout(30_000) });
+      this.chats = { value, expires: (this.opts.now ?? Date.now)() + 5 * 60_000 };
+    }
+    const found = target.message_type === "group" ? this.chats.value.groups.some(g => g.group_id === target.target_id)
+      : this.chats.value.friends.some(f => f.user_id === target.target_id);
+    if (!found) throw new Error("bot 不在目标群或对方不是好友");
   }
 
   /** #late、#fallback 由任务调用；不暴露给模型。 */
@@ -203,7 +245,7 @@ export class SendService {
       }
       return result;
     } finally {
-      if (!result.already_sent) trace.event(row.ticket, "send_message", { detail: { ordinal: row.ordinal, message_id: result.message_id,
+      if (!result.already_sent) trace.event(row.ticket, "send_message", { detail: { target: `qq:${row.message_type}:${row.target_id}`, ordinal: row.ordinal, message_id: result.message_id,
         status: result.status, images: row.images.length, files: channel.outbox.getOutbox(row.key)!.files.map(({ name, bytes, status }) => ({ name, bytes, status })),
         already_sent: false } });
     }

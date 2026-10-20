@@ -7,7 +7,7 @@ import { PiRequestDoc } from "./request.js";
 
 export function chatsTool(channel?: Pick<Channel, "listChats">) {
   return defineTool({
-    name: "qq_chats", description: "只读列出群名、群号及好友备注；仅限主人私聊，用于按名称确认会话。",
+    name: "qq_chats", description: "只读列出群名、群号及好友备注；仅限主人回合，用于按名称确认会话。",
     replay: "safe", parameters: Type.Object({}, { additionalProperties: false }),
     async execute(_args, api, context) {
       try {

@@ -12,10 +12,11 @@ export interface OutboxRow {
   images: string[]; files: OutboxFile[]; created_at: string; sent_at: string | null;
 }
 export type OutboxInput = Omit<OutboxRow, "ordinal" | "status" | "message_id" | "text_sha256" | "created_at" | "sent_at" | "key"> &
-  { sequence?: number; suffix?: "fallback" | "late" };
+  { sequence?: number; suffix?: "fallback" | "late"; dailyLimit?: { start: string; end: string; limit: number } };
 export interface OutboxStore {
   getOutbox(key: string): OutboxRow | null;
   listOutbox(ticket: string): OutboxRow[];
+  countModelOutbox(type: ChatType, targetId: string, start: string, end: string): number;
   reserveOutbox(input: OutboxInput): OutboxRow;
   markOutboxSending(key: string): boolean;
   markOutboxSent(key: string, messageId: string): void;

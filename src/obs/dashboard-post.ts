@@ -1,6 +1,7 @@
 /** 面板写操作：沿用同源、CSRF、版本检查与原有响应。 */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { DashboardOptions } from './dashboard-types.js';
+import { resolveAgentConfig } from '../agent/config.js';
 import { equal, readBody, readMultipart, HttpError, guardAgentMd, writeAgentMd } from './dashboard-io.js';
 import { SkillsStoreError } from '../agent/skills-store.js';
 import { isThreadKey } from '../agent/codex/runner.js';
@@ -59,6 +60,19 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
         try { name = decodeURIComponent(deletion[1]); } catch { throw new HttpError(400, '非法技能名称'); }
         await opts.skills.remove(name);
         back('/skills?ok=skillsDeleted'); return;
+      }
+      if (url.pathname === '/settings/grants/add' || url.pathname === '/settings/grants/revoke') {
+        if (!opts.grants || !resolveAgentConfig(opts.config).owner) throw new HttpError(403, '仅配置 owner 的面板可修改授权');
+        const split = (name: string) => (form.get(name) ?? '').split(/[\s,，]+/).filter(Boolean);
+        try {
+          if (url.pathname.endsWith('/add')) await opts.grants.panel('auth_grant', {
+            user: form.get('user') ?? '', caps: form.getAll('caps'), targets: split('targets'),
+            ...(form.get('scopes')?.trim() ? { scopes: split('scopes') } : {}),
+            ...(form.get('expires_in_hours')?.trim() ? { expires_in_hours: Number(form.get('expires_in_hours')) } : {}),
+          });
+          else await opts.grants.panel('auth_revoke', { user: form.get('user') ?? '' });
+        } catch (error) { throw new HttpError(400, '授权未保存：' + (error as Error).message); }
+        back('/settings?ok=saved#grants'); return;
       }
       if (url.pathname === '/settings') {
         if (!opts.settings) throw new HttpError(404, '运行时设置不可用');

@@ -3,7 +3,7 @@ import { headerNickname } from "../shared/header.js";
 import { abortable } from "./media.js";
 import type { Access } from "./access.js";
 
-export const CHATS_DENIED = "qq_chats 仅限主人私聊（access=all）使用。";
+export const CHATS_DENIED = "qq_chats 仅限主人回合（access=all）使用。";
 const CHAT_LIMIT = 200;
 
 export async function listChatsText(access: Access | undefined, channel: Pick<Channel, "listChats"> | undefined, signal: AbortSignal): Promise<string> {

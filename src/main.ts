@@ -20,6 +20,8 @@ import { loadAgentConfig as loadConfig } from "./agent/config.js";
 import { log, setLogLevel } from "./shared/log.js";
 import { findUnwritable, processIdentity } from "./fs-check.js";
 import { createQQBridge } from "./qq/index.js";
+import { GrantsService } from "./agent/grants.js";
+import type { Harness } from "@earendil-works/pi-durable";
 import { SendService } from "./agent/send-service.js";
 import type { Channel } from "./channel/types.js";
 import { createAgentModels, openHarness, piModelCatalog, resolveThinkingLevel } from "./agent/harness.js";
@@ -117,11 +119,15 @@ async function main(): Promise<void> {
       getTicket: ticket => getBridge().getTicket(ticket),
     } });
   const chatsChannel: Pick<Channel, "listChats"> = { listChats: opts => getBridge().listChats(opts) };
-  const sendService = new SendService({ getChannel: getBridge, dataDir: cfg.DATA_DIR, store,
+  let dispatchHarness: Harness;
+  const grants = new GrantsService({ getHarness: () => dispatchHarness, getChannel: getBridge, owner: cfg.owner });
+  const sendService = new SendService({ grants, getChannel: getBridge, dataDir: cfg.DATA_DIR, store,
     limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } });
   const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel, {
+    permissions: binding => grants.permissions(binding),
+    auth: (binding, name, args) => grants.tool(binding, name, args),
     send: (binding, attempt, args, signal) => sendService.send({
-      ticket: binding.ticket, source: binding.source, access: binding.access, workdir: binding.workdir!,
+      ticket: binding.ticket, source: binding.source, actor: binding.actor, actorIsOwner: binding.actorIsOwner, access: binding.access, workdir: binding.workdir!,
       extraRoots: [path.join(cfg.imagesDir, binding.ticket),
         ...(/^[0-9a-f-]{36}$/i.test(binding.session ?? "") ? [path.join(cfg.codexHome, "generated_images", binding.session!)] : [])],
     }, args, { attempt }, signal),
@@ -199,23 +205,12 @@ async function main(): Promise<void> {
   const autoModel = cfg.AUTO_EFFORT_MODEL ? models.getModel("magpie", cfg.AUTO_EFFORT_MODEL) : undefined;
   if (cfg.AUTO_EFFORT_MODEL && !autoModel) log.warn("auto effort model unavailable; using heuristics and fallback", { model: cfg.AUTO_EFFORT_MODEL });
 
-  const pi = await PiBackend.open({
-    sendService,
-    currentModel: currentPiModel,
-    dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
-    skillsDir: cfg.PI_SKILLS_DIR,
-    channel: chatsChannel, mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
-    thinkingLevel, store, instrumentation, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
-    reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
-    maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
-    attachmentLimits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT },
-  });
   // 执行 agent 后端（§4.3）：codex（默认）与 pi 长期会话。
   const backends = createBackendSelector({
     current: () => settings.current(),
     backends: {
       codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, ticketsDir: cfg.ticketsDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT }),
-      pi,
+      pi: { name: "pi", handle: (req, context) => pi.handle(req, context) },
     },
   });
   const tasks = createTasks({
@@ -243,7 +238,7 @@ async function main(): Promise<void> {
     },
   });
   const extension = createCsAgentExtension(tasks);
-  const harness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
+  const harness = dispatchHarness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
 
   bridge = createQQBridge({
     httpUrl: cfg.NAPCAT_HTTP_URL,
@@ -258,6 +253,18 @@ async function main(): Promise<void> {
     incomingDownloadDeadlineMs: cfg.INCOMING_DOWNLOAD_DEADLINE_SEC * 1000,
   });
 
+  // 恢复 pi 工具前，派发授权文档与 Channel 必须已就绪。
+  const pi = await PiBackend.open({
+    sendService, grants,
+    currentModel: currentPiModel,
+    dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
+    skillsDir: cfg.PI_SKILLS_DIR,
+    channel: chatsChannel, mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
+    thinkingLevel, store, instrumentation, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
+    reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
+    maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
+    attachmentLimits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT },
+  });
   const dispatcher = new Dispatcher({
     harness,
     bridge,
@@ -341,7 +348,8 @@ async function main(): Promise<void> {
     usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
   const skills = cfg.PI_SKILLS_DIR === "off" ? undefined : new SkillsStore({ dir: cfg.PI_SKILLS_DIR, loader: new SkillsLoader({ dir: cfg.PI_SKILLS_DIR }) });
   const dashboardData = { contextUsage, codexPrompt, codexBasePrompt, modelCatalog, skills };
-  const dashboard = createDashboard({ ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
+  const dashboard = createDashboard({
+    grants, ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
     codex: codexStatus, pi: piStatus, piSessions: pi.sessionSource, settings, live,

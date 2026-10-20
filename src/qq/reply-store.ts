@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { InboundMessage, ReplyTicketRecord, TicketStatus } from "../channel/types.js";
+import type { ChatType, InboundMessage, ReplyTicketRecord, TicketStatus } from "../channel/types.js";
 
 import { isModelOutboxRow, type OutboxInput, type OutboxRow } from "../channel/outbox.js";
 
@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS outbox (
   message_id TEXT, text TEXT NOT NULL, text_sha256 TEXT NOT NULL, images TEXT NOT NULL, files TEXT NOT NULL,
   created_at TEXT NOT NULL, sent_at TEXT, UNIQUE(ticket, call_id), UNIQUE(ticket, ordinal)
 );
+CREATE INDEX IF NOT EXISTS outbox_target_day ON outbox(message_type,target_id,created_at);
 CREATE TABLE IF NOT EXISTS seen_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   key TEXT NOT NULL UNIQUE,
@@ -145,6 +146,13 @@ export class ReplyStore {
       .map(row => this.getOutbox(row.key)!);
   }
 
+  countModelOutbox(type: ChatType, targetId: string, start: string, end: string): number {
+    const row = this.db.prepare(`SELECT count(*) AS n FROM outbox WHERE message_type=? AND target_id=?
+      AND created_at>=? AND created_at<? AND key != ticket || '#late' AND key != ticket || '#fallback'`)
+      .get(type, targetId, start, end) as { n: number };
+    return row.n;
+  }
+
   reserveOutbox(input: OutboxInput): OutboxRow {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -154,6 +162,9 @@ export class ReplyStore {
         : rows.find(row => row.key === input.ticket + "#" + input.sequence);
       if (existing) { this.db.exec("COMMIT"); return existing; }
       if (!input.suffix && modelRows.length >= 3) throw new Error("本回合最多发送 3 条消息");
+      if (input.dailyLimit && this.countModelOutbox(input.message_type, input.target_id, input.dailyLimit.start, input.dailyLimit.end) >= input.dailyLimit.limit) {
+        throw new Error("该 target 当天最多主动发送 100 条消息（Asia/Shanghai）");
+      }
       const ordinal = (rows.at(-1)?.ordinal ?? 0) + 1;
       const key = input.ticket + "#" + (input.suffix ?? input.sequence ?? modelRows.length + 1);
       this.db.prepare(`INSERT INTO outbox

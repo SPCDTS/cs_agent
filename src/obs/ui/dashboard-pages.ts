@@ -37,6 +37,7 @@ export interface LiveCardView {
 export interface CodexPromptSnapshot { managed: string; custom: string; revision: string; file: string; updatedAt: number | null }
 export interface CodexBasePromptSnapshot extends CodexPromptSnapshot { model: string; differs: boolean | null }
 export interface DashboardPageOptions {
+  grants?: { list(): Promise<{ user: string; caps: string[]; targets: string[]; scopes?: string[]; expires_at?: number; expired: boolean; granted_by: string; created_at: number; updated_at: number }[]> };
   /** 技能页只读契约；上传、下载与删除由 HTTP 层处理。 */
   skills?: {
     list(): Promise<{ name: string; dir: string; description?: string; files: number; bytes: number; diagnostics: string[]; hidden: boolean; mtime: number }[]>;
@@ -695,6 +696,7 @@ ${agentModelFieldsets(s, d, diff)}
 <fieldset><legend>owner 告警${diff('alertOwner')}</legend><label class="choice"><input type="checkbox" name="alertOwner"${s.alertOwner ? ' checked' : ''}><span>向 owner 私聊发送告警<small>QQ 离线超过五分钟、模型鉴权失败、连续三条失败时发送，30 分钟内最多一条。${config.owner ? '' : '（当前没有配置 owner，开关不会生效）'}</small></span></label></fieldset>
 <button>保存设置</button></form></section>`;
     }
+    body += await grantsCard();
     body += await codexPromptCard();
     body += await codexBasePromptCard(s?.codexModel ?? config.CODEX_MODEL);
     let prompt = '';
@@ -713,6 +715,20 @@ ${agentModelFieldsets(s, d, diff)}
       return `<tr><td>${time(e.ts)}</td><td>${esc(what)}</td><td>${esc(dd.source === 'dashboard' ? '面板' : dd.source ?? '')}</td></tr>`; }).join('')}</tbody></table></div></div>` : empty('还没有通过面板修改过设置。')}</section>`;
     body += `<section><p class="hint">完整的生效配置见<a href="/config">配置页</a>；结构化日志见<a href="/logs">实时日志</a>。</p></section>`;
     return body;
+  }
+
+  async function grantsCard(): Promise<string> {
+    if (!opts.grants) return '';
+    const grants = await opts.grants.list();
+    const rows = grants.map(g => `<tr><td class="mono">${esc(g.user)}</td><td>${esc(g.caps.join('、'))}</td><td>${g.targets.map(esc).join('<br>') || '不能主动发送'}</td><td>${g.scopes === undefined ? '任何会话' : g.scopes.map(esc).join('<br>') || '无'}</td><td>${g.expired ? '<span class="changed">已过期</span>' : '有效'}<br>${g.expires_at === undefined ? '长期' : esc(fmtTime(g.expires_at))}</td><td>${esc(g.granted_by)}</td><td>${config.owner ? `<form method="post" action="/settings/grants/revoke">${csrfField(csrf)}<input type="hidden" name="user" value="${esc(g.user)}"><button class="danger">撤销</button></form>` : ''}</td></tr>`).join('');
+    return `<section id="grants"><h2>授权</h2><p class="hint">由 owner 管理。添加会替换该用户的现有授权；schedule 当前仅存储，尚不执行定时任务。</p>
+<div class="sheet wrap"><table class="list"><thead><tr><th>用户</th><th>能力</th><th>发送目标</th><th>来源范围</th><th>状态 / 到期</th><th>授权人</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
+${config.owner ? `<form method="post" action="/settings/grants/add" class="sheet pad mt">${csrfField(csrf)}
+<label>用户（qq:QQ号）<input name="user" placeholder="qq:10001" required></label>
+<div class="choices"><label class="choice"><input type="checkbox" name="caps" value="send" checked>send</label><label class="choice"><input type="checkbox" name="caps" value="schedule">schedule（仅存储）</label></div>
+<label>发送目标（每行一个 qq:group:群号 或 qq:private:QQ号；留空不能主动发往别处）<textarea name="targets" rows="3"></textarea></label>
+<label>来源会话（group:群号 或 private:QQ号；留空为任何会话）<textarea name="scopes" rows="2"></textarea></label>
+<label>有效小时数（留空为长期）<input type="number" name="expires_in_hours" min="0.001" step="any" max="876000"></label><p class="mt"><button>添加 / 替换授权</button></p></form>` : '<p class="hint">未配置 owner，授权只读。</p>'}</section>`;
   }
 
   async function codexBasePromptCard(model: string | undefined): Promise<string> {

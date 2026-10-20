@@ -22,7 +22,7 @@
 
 1. ~~群名进上下文 + `qq_chats`~~（已上线，main 0318d34）。
 2. **Outbox + `send_message`（本步，见 §3）**：仅发回本回合会话，不含 target。
-3. 回合令牌扩展、授权表 `GrantsDoc`、`auth_*` 工具、`send_message.target`；owner 在群里改为全部读取范围（D9）。
+3. **已实现，待部署验收（见 §4）**：回合令牌扩展、授权表 `GrantsDoc`、`auth_*` 工具、`send_message.target`；owner 在群里读取全部范围，但仍使用来源群线程。§4.4 的部署后实测尚未执行。
 4. `ScheduleDoc` 与管理 API（RRULE 校验、revision、面板增删改）。
 5. 排程器 `cs.schedule`（wait / fire 两阶段，持久化 `next_fire_at`，`runtime.sleep` 只负责进程存活期间的等待）。
 6. admit 与运行（`DispatchDoc` 的 `kind: "scheduled"`、输入外壳、record、连续失败自停），pi 与 codex 的 thread / fork。
@@ -105,7 +105,7 @@ Channel 接口新增 `send(key, target, text, images, { mention?, signal })`：
 ### 4.1 回合身份
 - 每个入站回合的"发言人"只取 Channel 给出的真实发送者 QQ 号（票据 `user_id`），不看消息内容。回合令牌 / `PiRequestDoc` 增加 `actor`（`qq:<user_id>`）与 `actorIsOwner`。
 - **owner 全域（D9）**：发言人是 owner 时，无论私聊还是群聊，读取范围都是全部（`access = all`）。
-- **owner 在群里的回合跑在 owner 线程里**（`threadKey = owner`，即 `accessForSource` 改为 owner 恒为 all 后，`threadKeyForSource` 的自然结果），回复仍发回该群。原因：owner 回合会读到私聊等别处内容，这些工具输出若留在群线程里，之后群成员触发的回合能在上下文中看到。群线程的连续性靠 `qq_recent` 读该群历史（含 bot 发言行）弥补。
+- **owner 在群里的回合仍跑在该群线程里**（`threadKey = group:<id>`），仅将读取范围放宽为 `access = all`，回复仍发回来源群。线程键独立于读取范围，按来源决定：owner 私聊 → `owner`，群消息 → `group:<id>`，其他私聊 → `private:<qq>`；codex 与 pi 保持一致。用户接受群线程历史中可能留有 owner 回合读取的别处内容，后续群成员的回合可能从线程历史中看到这些内容（2026-10-20 用户决定，覆盖原隔离方案）。
 - 非 owner 的读取范围不变（群 → 本群，私聊 → 本人）。
 
 ### 4.2 授权表 GrantsDoc
@@ -133,7 +133,7 @@ type Grant = {
 - trace：`send_message` 增加 `target`；新增 `auth_changed`（来源 panel / tool、前后差异）。
 
 ### 4.4 验收
-- 单元测试：owner 群消息 access=all 且 threadKey=owner；非 owner 不变；target 四项校验；@ 规则；额度共享；目标会话 bot 行；授权过期、scopes；auth 工具对非 owner 不可见且拒绝；面板增删与 CSRF。
+- 单元测试：owner 群消息 access=all 且 threadKey=group:<id>，owner 私聊 threadKey=owner；非 owner 不变；target 四项校验；@ 规则；额度共享；目标会话 bot 行；授权过期、scopes；auth 工具对非 owner 不可见且拒绝；面板增删与 CSRF。
 - 部署后 owner 私聊实测：`qq_chats` 查群 → 指定 target 发到 owner 自己的另一个私聊 / 测试用群（不在真实群里测试）。
 
 ## 5. 后续步骤要点（第 4–8 步，实现前再细化）
