@@ -763,11 +763,11 @@ ${agentModelFieldsets(s, d, diff)}
     if (!opts.grants) return '';
     const grants = await opts.grants.list();
     const rows = grants.map(g => `<tr><td class="mono">${esc(g.user)}</td><td>${esc(g.caps.join('、'))}</td><td>${g.targets.map(esc).join('<br>') || '不能主动发送'}</td><td>${g.scopes === undefined ? '任何会话' : g.scopes.map(esc).join('<br>') || '无'}</td><td>${g.expired ? '<span class="changed">已过期</span>' : '有效'}<br>${g.expires_at === undefined ? '长期' : esc(fmtTime(g.expires_at))}</td><td>${esc(g.granted_by)}</td><td>${config.owner ? `<form method="post" action="/settings/grants/revoke">${csrfField(csrf)}<input type="hidden" name="user" value="${esc(g.user)}"><button class="danger">撤销</button></form>` : ''}</td></tr>`).join('');
-    return `<section id="grants"><h2>授权</h2><p class="hint">由 owner 管理。添加会替换该用户的现有授权；schedule 当前仅存储，尚不执行定时任务。</p>
+    return `<section id="grants"><h2>授权</h2><p class="hint">由 owner 管理。添加会替换该用户的现有授权；schedule 允许创建并管理自己的定时任务。</p>
 <div class="sheet wrap"><table class="list"><thead><tr><th>用户</th><th>能力</th><th>发送目标</th><th>来源范围</th><th>状态 / 到期</th><th>授权人</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
 ${config.owner ? `<form method="post" action="/settings/grants/add" class="sheet pad mt">${csrfField(csrf)}
 <label>用户（qq:QQ号）<input name="user" placeholder="qq:10001" required></label>
-<div class="choices"><label class="choice"><input type="checkbox" name="caps" value="send" checked>send</label><label class="choice"><input type="checkbox" name="caps" value="schedule">schedule（仅存储）</label></div>
+<div class="choices"><label class="choice"><input type="checkbox" name="caps" value="send" checked>send</label><label class="choice"><input type="checkbox" name="caps" value="schedule">schedule</label></div>
 <label>发送目标（每行一个 qq:group:群号 或 qq:private:QQ号；留空不能主动发往别处）<textarea name="targets" rows="3"></textarea></label>
 <label>来源会话（group:群号 或 private:QQ号；留空为任何会话）<textarea name="scopes" rows="2"></textarea></label>
 <label>有效小时数（留空为长期）<input type="number" name="expires_in_hours" min="0.001" step="any" max="876000"></label><p class="mt"><button>添加 / 替换授权</button></p></form>` : '<p class="hint">未配置 owner，授权只读。</p>'}</section>`;

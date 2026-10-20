@@ -292,6 +292,14 @@ ${Array.from({ length: 101 }, (_, i) => `.cu-bar[data-h="${i}"]{height:${i}%}.cu
 .ops{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2)}
 .ops form{margin:0}
 .ops button,.ops .btn{padding:4px 10px;font-size:var(--t-xs)}
+/* 定时任务：页内删除二次确认（details 展开，不弹原生对话框）与触发方式字段切换（纯 CSS） */
+.gate{position:relative}
+.gate>summary{list-style:none;display:inline-flex;align-items:center;padding:4px 10px;font-size:var(--t-xs);font-weight:600;color:var(--fail);border:1px solid var(--fail);border-radius:var(--r-md)}
+.gate>summary::-webkit-details-marker{display:none}
+.gate[open]>summary{background:var(--fail-soft)}
+.gate-pop{position:absolute;right:0;z-index:5;margin-top:var(--s1);width:max-content;max-width:280px;display:grid;gap:var(--s2);padding:var(--s3);background:var(--sheet);border:1px solid var(--rule-strong);border-radius:var(--r-md);box-shadow:var(--shadow);font-size:var(--t-sm);white-space:normal}
+.sch-form:not(:has([name=type][value=once]:checked)) .sch-once,.sch-form:not(:has([name=type][value=repeat]:checked)) .sch-repeat,
+.sch-form:not(:has([name=type][value=rrule]:checked)) .sch-rrule,.sch-form:has([name=type][value=rrule]:checked) .sch-time{display:none}
 .idbox{display:inline-flex;align-items:center;gap:var(--s2);max-width:100%}
 .idbox code{overflow-wrap:anywhere;user-select:all}
 button.copy,button.load-full{padding:2px 9px;font-size:var(--t-xs);font-weight:500}

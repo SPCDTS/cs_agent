@@ -524,6 +524,12 @@ export class ContextStore {
     return (this.db.prepare("SELECT scope FROM messages UNION SELECT scope FROM summaries ORDER BY scope").all() as {scope:string}[]).map(r=>r.scope);
   }
 
+  /** 面板显示用：会话域 → 最近一次入站消息携带的群名。 */
+  scopeNames(): Record<string, string> {
+    const rows = this.db.prepare("SELECT scope, name FROM scope_names").all() as { scope: string; name: string }[];
+    return Object.fromEntries(rows.map(r => [r.scope, r.name]));
+  }
+
   /** 运维统计（DEPLOY 文档 / 日志用）。 */
   stats(): { messages: number; summaries: number } {
     const m = this.db.prepare("SELECT COUNT(*) AS n FROM messages").get() as { n: number };

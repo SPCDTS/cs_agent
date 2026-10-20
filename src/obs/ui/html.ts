@@ -10,7 +10,7 @@ export const uri = (v: string) => encodeURIComponent(redactText(v, 100_000));
 export const json = (v: unknown, limit = 20_000) => `<pre>${esc(typeof v === 'string' ? v : JSON.stringify(redact(v, limit), null, 2))}</pre>`;
 
 /** 顶栏（观测 v2 设计 §1）；日志与配置从设置页进入，旧聊天记录检索归入"记忆"。 */
-const NAV: [string, string][] = [['/', '总览'], ['/agents', 'Agent'], ['/memory', '记忆'], ['/context-usage', '上下文监控'], ['/tickets', '票据'], ['/live', '实时'], ['/skills', '技能'], ['/settings', '设置']];
+const NAV: [string, string][] = [['/', '总览'], ['/agents', 'Agent'], ['/memory', '记忆'], ['/context-usage', '上下文监控'], ['/tickets', '票据'], ['/live', '实时'], ['/schedules', '定时任务'], ['/skills', '技能'], ['/settings', '设置']];
 const NAV_ALIASES: Record<string, string[]> = { '/agents': ['/codex'], '/memory': ['/context'], '/settings': ['/logs', '/config'] };
 
 export interface PageOptions { title: string; path: string; lead?: string; actions?: string; body: string; nonce: string; scripts?: string[];

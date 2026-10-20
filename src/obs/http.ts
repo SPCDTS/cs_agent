@@ -30,6 +30,7 @@ import { createDashboardPages } from './ui/dashboard-pages.js';
 import { asContextUsageEvent } from './context-turns.js';
 import { ticketContextTurns } from './context-ticket.js';
 import { createScheduleRoutes } from './schedules.js';
+import { createSchedulePanel, isSchedulePath } from './schedule-panel.js';
 
 // 与顶栏的蓝色方框及两条横线保持一致；静态图形不含运行数据。
 const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="7" y="4" width="18" height="24" rx="2" fill="none" stroke="#2b47b5" stroke-width="3"/><path d="M11 13h10M11 19h10" stroke="#2b47b5" stroke-width="3"/></svg>';
@@ -106,7 +107,8 @@ export function createDashboard(opts: DashboardOptions) {
     isThreadKey, summarize, imageFile, readText, agentMdRevision, formatBackendOverrides,
     reasoningEfforts: REASONING_EFFORTS, agentMdMaxBytes: AGENT_MD_MAX_BYTES, settingsTicket: SETTINGS_TICKET,
   });
-  const handlePost = createDashboardPost(opts, csrf, agentMd, tracer, render);
+  const schedulePanel = createSchedulePanel({ service: opts.schedules, owner: config.owner, csrf, context: opts.context });
+  const handlePost = createDashboardPost(opts, csrf, agentMd, tracer, render, schedulePanel.post);
   const handleSchedules = createScheduleRoutes(opts.schedules, config.owner, csrf);
 
   /** 在服务端内部调用会话 JSON 路由：与浏览器拿到的是同一份已脱敏 JSON、同样的校验与错误码。 */
@@ -266,9 +268,9 @@ export function createDashboard(opts: DashboardOptions) {
     const flashCode = q.get('ok');
     const detail = flashCode === 'skillsUploaded' ? (q.get('detail') ?? '').slice(0, 16_000) : '';
     const flash = flashCode && Object.hasOwn(FLASH, flashCode) ? { text: FLASH[flashCode]!, error: flashCode === 'compactFailed', ...(detail ? { detail } : {}) } : undefined;
-    const html = await render(url, nonce, flash);
+    const html = isSchedulePath(url.pathname) ? await schedulePanel.render(url, nonce) : await render(url, nonce, flash);
     if (html === null) {
-      const notFound = url.pathname.startsWith('/skills/') ? '没有这个技能。可以从<a href="/skills">技能列表</a>重新查找。' : '地址不对或票据已过保留期。可以从<a href="/tickets">票据列表</a>重新查找。';
+      const notFound = isSchedulePath(url.pathname) ? '没有这个定时任务。可以从<a href="/schedules">定时任务列表</a>重新查找。' : url.pathname.startsWith('/skills/') ? '没有这个技能。可以从<a href="/skills">技能列表</a>重新查找。' : '地址不对或票据已过保留期。可以从<a href="/tickets">票据列表</a>重新查找。';
       res.writeHead(404, {'Content-Type':'text/html; charset=utf-8'}).end(page({ title: '没有这个页面', path: url.pathname, nonce, body: empty(notFound) })); return;
     }
     res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(html);

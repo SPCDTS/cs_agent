@@ -14,7 +14,8 @@ import { log } from '../shared/log.js';
 
 export function createDashboardPost(opts: DashboardOptions, csrf: string, agentMd: string,
   tracer: Pick<Trace, 'event'>,
-  render: (url: URL, nonce: string, flash?: { text: string; error?: boolean }) => Promise<string | null>) {
+  render: (url: URL, nonce: string, flash?: { text: string; error?: boolean }) => Promise<string | null>,
+  schedulePost?: (form: URLSearchParams, url: URL, res: ServerResponse, nonce: string) => Promise<void>) {
   async function handlePost(req: IncomingMessage, res: ServerResponse, url: URL, nonce: string, host: string): Promise<void> {
     // 同源检查：Origin 为 null 时仅信任浏览器提供的 Sec-Fetch-Site: same-origin；其他 Origin 必须匹配，随后仍校验 CSRF 令牌。
     try { guardDashboardOrigin(req, host); }
@@ -29,6 +30,7 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
     }
     catch (e) { res.writeHead(e instanceof HttpError ? e.status : 400).end(e instanceof Error ? e.message : ''); return; }
     if (!csrf || !equal(form.get('_csrf') ?? '', csrf)) { res.writeHead(403, {'Content-Type':'text/plain; charset=utf-8'}).end('CSRF 令牌无效，请刷新页面后重试'); return; }
+    if (schedulePost && (url.pathname === '/schedules' || url.pathname.startsWith('/schedules/'))) { await schedulePost(form, url, res, nonce); return; }
     const back = (location: string) => res.writeHead(303, { Location: location }).end();
     try {
       if (url.pathname === '/skills/upload') {
