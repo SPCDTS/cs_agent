@@ -1,4 +1,6 @@
 import { redactText } from "../../src/shared/redact.js";
+import { CodexBackend } from "../../src/agent/backends/codex.js";
+import { CodexDeliveryNotes, deliveryNoteText } from "../../src/agent/delivery-note.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { log } from "../../src/shared/log.js";
 import { RecallTokens } from "../../src/context/media-recall-server.js";
@@ -73,6 +75,53 @@ function setup(extra: { sleepMs?: number; timeoutMs?: number; thread?: string; i
       : [];
   return { dir, runner, calls };
 }
+
+it("Codex 提醒跨重启保留，只注入对应线程下一轮的来源行之后，开始后清除", async () => {
+  const f = setup(), notes = new CodexDeliveryNotes(f.dir);
+  const note = { ticket: "previous", threadKey: "group:1" as const, fallback: "原兜底\n第二行" };
+  const backend = new CodexBackend({ runner: f.runner, imagesDir: path.join(f.dir, "images"), ticketsDir: path.join(f.dir, "tickets") });
+  await backend.recordDeliveryNote(note);
+  await backend.recordDeliveryNote(note);
+  const prompt = buildCodexPrompt({ type: "group", group_id: "1", user_id: "2", nickname: "测试者" }, "继续",
+    { time: 1_760_000_000, quote: { message_id: "3", nickname: "引用者", text: "引用正文" } });
+  await f.runner.ask(prompt, { threadKey: "group:2" });
+  expect(await notes.pending(note.threadKey)).toMatchObject(note);
+  const restarted = new CodexRunner(setupOpts(f.dir));
+  await restarted.ask(prompt, { threadKey: note.threadKey });
+  expect(await notes.pending(note.threadKey)).toBeUndefined();
+  // 已消费的同票据重放不能重新挂起提醒。
+  await backend.recordDeliveryNote(note);
+  await restarted.ask(prompt, { threadKey: note.threadKey });
+  const calls = f.calls().filter(call => call.phase === "start");
+  expect(calls.map(call => call.stdin)).toEqual([prompt,
+    [prompt.split("\n")[0], deliveryNoteText(note.fallback).replace("\n", " "), ...prompt.split("\n").slice(1)].join("\n"), prompt]);
+});
+
+it("Codex 启动失败保留提醒，缺失线程回退的新回合仍能收到", async () => {
+  const f = setup(), notes = new CodexDeliveryNotes(f.dir);
+  const note = { ticket: "failed-before-start", threadKey: "group:1" as const, fallback: "兜底原文" };
+  await notes.record(note);
+  const failing = new CodexRunner({ ...setupOpts(f.dir), command: [path.join(f.dir, "missing-codex")] });
+  const prompt = buildCodexPrompt({ type: "group", group_id: "1", user_id: "2", nickname: "" }, "重试");
+  await expect(failing.ask(prompt, { threadKey: note.threadKey })).rejects.toThrow();
+  expect(await notes.pending(note.threadKey)).toMatchObject(note);
+  seedScope(f.dir, { thread_id: "missing-thread" });
+  await new CodexRunner(setupOpts(f.dir)).ask(prompt, { threadKey: note.threadKey });
+  expect(f.calls().filter(call => call.phase === "start").every(call => call.stdin.includes(deliveryNoteText(note.fallback)))).toBe(true);
+  expect(await notes.pending(note.threadKey)).toBeUndefined();
+});
+
+it("Codex turn.started 时清除提醒，结束前的新提醒不被旧回合清除", async () => {
+  const f = setup({ sleepMs: 500 }), notes = new CodexDeliveryNotes(f.dir);
+  const note = { ticket: "before-start", threadKey: "group:1" as const, fallback: "旧兜底" };
+  await notes.record(note);
+  const run = f.runner.ask("继续", { threadKey: note.threadKey });
+  await vi.waitFor(async () => expect(await notes.pending(note.threadKey)).toBeUndefined());
+  const next = { ...note, ticket: "after-start", fallback: "新兜底" };
+  await notes.record(next);
+  await run;
+  expect(await notes.pending(note.threadKey)).toMatchObject(next);
+});
 
 describe("extractThreadId", () => {
   it("reads thread.started thread_id and tolerates session_id variants", () => {

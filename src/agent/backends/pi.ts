@@ -2,6 +2,8 @@ import type { ContextUsageStore } from "../context-usage.js";
 import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../pi-context-usage.js";
 import { readThreadArchive, writeThreadArchive, THREAD_ARCHIVE_LIMIT } from "../thread-archive.js";
 import { trace } from "../../shared/trace.js";
+import { deliveryNoteText } from "../delivery-note.js";
+import type { DeliveryNote } from "./types.js";
 import type { PiConversation, PiEntryPage, PiSessionSource } from "./pi-session-types.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -323,6 +325,15 @@ export class PiBackend implements AgentBackend {
     }), withAbortSignal(ctx.signal, context));
   }
 
+  async recordDeliveryNote(note: DeliveryNote): Promise<void> {
+    if (note.conversationId === undefined) return;
+    const conv = await this.harness.conversation(note.conversationId as ConversationId, context);
+    if (!conv) throw new Error("投递提醒的 pi 会话不存在");
+    await conv.submit({ type: "write", requestId: note.ticket + "#delivery-note",
+      entry: { kind: "cs.delivery_note", data: { ...note },
+        model: [{ role: "user", content: deliveryNoteText(note.fallback), timestamp: Date.now() }] } }, context);
+  }
+
   private async turn(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {
     ctx.signal.throwIfAborted();
     if (this.closing) throw new Error("pi 后端正在关闭");
@@ -330,6 +341,9 @@ export class PiBackend implements AgentBackend {
     if (!parseAccess(req.access) || (req.access !== req.scope && !(req.access === "all" && (req.actorIsOwner ?? req.senderIsOwner) === true))) throw new Error("非法访问范围");
     const conv = await this.conversation(req.threadKey, req.ticket, req.settings);
     let requestId = ctx.piTurn?.requestId ?? req.ticket;
+    if (ctx.piTurn?.conversationId !== conv.id) {
+      await ctx.persistPiTurn?.({ requestId, retries: ctx.piTurn?.retries ?? 0, conversationId: conv.id });
+    }
     const known = await conv.commit(tx => tx.submissionByRequest(conv.id, requestId), context);
     if (known) await conv.commit(async tx => {
       const doc = await tx.doc(PiRequestDoc, conv.id);
@@ -385,7 +399,7 @@ export class PiBackend implements AgentBackend {
         requestId = req.ticket + "#r" + ((ctx.piTurn?.retries ?? 0) + 1);
         // 先续期再保存后缀；后缀已落盘但 submit 前再次退出时，不能沿用旧的过期期限。
         await conv.commit(async tx => { (await tx.doc(PiRequestDoc, conv.id)).deadline = deadline; }, context);
-        await ctx.persistPiTurn?.({ requestId, retries: (ctx.piTurn?.retries ?? 0) + 1 });
+        await ctx.persistPiTurn?.({ requestId, retries: (ctx.piTurn?.retries ?? 0) + 1, conversationId: conv.id });
         waitContext.abortSignal?.throwIfAborted();
         submission = await conv.submit({ type: "input", requestId, content: bound.content, whenBusy: "reject" }, context);
         settled = await submission.wait(waitContext);

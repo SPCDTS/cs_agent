@@ -214,7 +214,7 @@ async function main(): Promise<void> {
     current: () => settings.current(),
     backends: {
       codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, ticketsDir: cfg.ticketsDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT }),
-      pi: { name: "pi", handle: (req, context) => pi.handle(req, context) },
+      pi: { name: "pi", handle: (req, context) => pi.handle(req, context), recordDeliveryNote: note => pi.recordDeliveryNote(note) },
     },
   });
   const tasks = createTasks({

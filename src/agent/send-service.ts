@@ -160,7 +160,8 @@ export class SendService {
   }
 
   /** #late、#fallback 由任务调用；不暴露给模型。 */
-  async system(ticket: string, suffix: "late" | "fallback", text: string, images: string[] = [], signal?: AbortSignal, noSendFallback = false) {
+  async system(ticket: string, suffix: "late" | "fallback", text: string, images: string[] = [], signal?: AbortSignal, noSendFallback = false,
+    onReserved?: () => Promise<void>) {
     return this.serial(ticket, async () => {
       const rec = await this.record(ticket), rows = this.rows(ticket);
       if (rec.origin === "scheduled") throw new Error("定时回合不发送系统补发消息");
@@ -172,6 +173,7 @@ export class SendService {
         mention_user_id: rec.message_type === "group" && !rows.some(r => r.status !== "pending") ? rec.user_id : null,
       });
       if (!existing && suffix === "fallback" && noSendFallback) trace.event(ticket, "no_send_fallback");
+      await onReserved?.();
       return this.deliver(row, rec, signal);
     });
   }

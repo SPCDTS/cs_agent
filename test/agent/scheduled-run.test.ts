@@ -44,7 +44,8 @@ async function rig(handle: AgentBackend["handle"] = async () => ({ text: "无需
   const recorder = new RecorderStub(), pauseSchedule = vi.fn(async () => {});
   const requests: AgentRequest[] = [], events: { stage: string; ticket: string; detail: Record<string, unknown> }[] = [];
   cleanup.push(trace.tap(event => events.push(event)));
-  const backend: AgentBackend = { name: opts.backend ?? "codex", handle: async (...args) => {
+  const recordDeliveryNote = vi.fn<NonNullable<AgentBackend["recordDeliveryNote"]>>().mockResolvedValue();
+  const backend: AgentBackend = { name: opts.backend ?? "codex", recordDeliveryNote, handle: async (...args) => {
     requests.push(args[0]); return handle(...args);
   } };
   const tasks = createTasks({ owner: "1", getBridge: () => f.bridge, sendService: f.service,
@@ -60,7 +61,7 @@ async function rig(handle: AgentBackend["handle"] = async () => ({ text: "无需
   const dispatch = () => new Dispatcher({ harness, tasks, scheduled, bridge: f.bridge, concurrency: opts.concurrency ?? 2, retryDelayMs: 1 });
   let dispatcher = dispatch();
   cleanup.push(() => harness.close(ctx));
-  return { ...f, tasks, scheduled, recorder, pauseSchedule, requests, events,
+  return { ...f, tasks, scheduled, recorder, pauseSchedule, requests, events, recordDeliveryNote,
     get harness() { return harness; }, get dispatcher() { return dispatcher; },
     async reopen() {
       await harness.close(ctx); await dispatcher.idle();
@@ -132,6 +133,8 @@ it.each(["pi", "codex"] as const)("%s 定时回合静默结束，最终答案留
   expect((await f.harness.snapshot(TicketDoc, id, ctx))?.replyCompleted).toBe(true);
   expect(f.events.find(e => e.stage === "schedule_run")?.detail).toMatchObject({ fire_key: fire().fire_key, ordinal: 1, status: "silent", sent: 0 });
   expect(f.events.some(e => e.stage === "no_send_fallback")).toBe(false);
+  expect(f.events.some(e => e.stage === "delivery_note")).toBe(false);
+  expect(f.recordDeliveryNote).not.toHaveBeenCalled();
 });
 
 it("send_message 复用 Outbox，最多五条且每条都不 @，附件和历史仍可用", async () => {

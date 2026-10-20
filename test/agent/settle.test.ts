@@ -21,10 +21,11 @@ const context = BACKGROUND_CONTEXT, cleanup: (() => Promise<unknown> | void)[] =
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 async function rig(handle: AgentBackend["handle"], legacy?: "postprocess" | "reply", brokenPhase?: "lateImages" | "settle") {
   const f = sendFixture();
+  const recordDeliveryNote = vi.fn<NonNullable<AgentBackend["recordDeliveryNote"]>>().mockResolvedValue();
   const events: { stage: string; detail: unknown }[] = [];
   cleanup.push(trace.tap(e => { if (e.ticket === f.ticket) events.push(e); }));
   const tasks = createTasks({ getBridge: () => f.bridge, sendService: f.service, imagesDir: path.join(f.dir, "images"),
-    backends: createBackendSelector({ defaultBackend: "codex", backends: { codex: { name: "codex", handle } }, overrides: {} }),
+    backends: createBackendSelector({ defaultBackend: "codex", backends: { codex: { name: "codex", handle, recordDeliveryNote } }, overrides: {} }),
     imageBackend: { name: "test", submit: async () => "p", collect: async (_id, dir) => {
       await fs.mkdir(dir, { recursive: true }); await fs.writeFile(path.join(dir, "late.png"), TRANSPARENT_PNG); return [];
     }, reconcile: async () => ({ images: [] }), clearReferences: async () => {} }, replyRetryDelayMs: 1 });
@@ -53,7 +54,7 @@ async function rig(handle: AgentBackend["handle"], legacy?: "postprocess" | "rep
   }
   cleanup.push(() => harness.close(context));
   const dispatcher = new Dispatcher({ harness, bridge: f.bridge, tasks, concurrency: 1, retryDelayMs: 1, history: f.history });
-  return { ...f, tasks, harness, dispatcher, events, conversationId };
+  return { ...f, tasks, harness, dispatcher, events, conversationId, recordDeliveryNote };
 }
 
 it.each(["ok", "timeout", "failed"] as const)("零发送回合按 %s 兜底；最终回答只保存在文档及 trace", async outcome => {
@@ -66,6 +67,8 @@ it.each(["ok", "timeout", "failed"] as const)("零发送回合按 %s 兜底；�
   const row = f.service.rows(f.ticket)[0]!;
   expect(row.key).toBe(f.ticket + "#fallback");
   expect(row.text).toBe(outcome === "ok" ? FALLBACK_REPLY : AGENT_FAILURE_REPLIES[outcome]);
+  expect(f.recordDeliveryNote).toHaveBeenCalledExactlyOnceWith({ ticket: f.ticket, threadKey: "group:7", fallback: row.text });
+  expect(f.events.filter(e => e.stage === "delivery_note")).toMatchObject([{ detail: { backend: "codex", thread_key: "group:7", fallback: row.text } }]);
   expect(f.events.filter(e => e.stage === "no_send_fallback")).toHaveLength(outcome === "ok" ? 1 : 0);
   expect(f.events.find(e => e.stage === "final_answer")?.detail).toEqual({ text: outcome === "ok" ? "最终答案不得发送" : "", sent_messages: 1 });
   expect((await f.bridge.getTicket(f.ticket))?.status).toBe("sent");
@@ -83,6 +86,7 @@ it.each(["sent", "sending", "uncertain"] as const)("已有 %s 时后端失败不
   await f.dispatcher.dispatch(f.msg, f.ticket);
   expect(f.service.rows(f.ticket)).toHaveLength(1);
   expect(f.events.some(e => e.stage === "no_send_fallback")).toBe(false);
+  expect(f.recordDeliveryNote).not.toHaveBeenCalled();
   expect((await f.bridge.getTicket(f.ticket))?.status).toBe("sent");
 });
 
@@ -99,6 +103,34 @@ it("迟到图片使用 #late，已发送图片不重复；成功的最终回答�
   expect(f.service.rows(f.ticket)).toMatchObject([{ key: f.ticket + "#late", text: IMAGE_SUCCESS_REPLY, status: "sent" }]);
   expect(f.service.rows(f.ticket)[0]!.images).toHaveLength(1);
   expect(f.history.message(f.binding.access, f.service.rows(f.ticket)[0]!.message_id!)?.row.text).toBe(IMAGE_SUCCESS_REPLY);
+  expect(f.recordDeliveryNote).not.toHaveBeenCalled();
+});
+
+it("兜底预留后发送前失败，提醒只记录一次并使用原兜底正文", async () => {
+  const f = await rig(async () => ({ text: "没有发出" }));
+  f.call.mockImplementationOnce(async () => ({ user_id: 99 }));
+  await f.dispatcher.dispatch(f.msg, f.ticket);
+  expect(f.recordDeliveryNote).toHaveBeenCalledExactlyOnceWith({ ticket: f.ticket, threadKey: "group:7", fallback: FALLBACK_REPLY });
+  expect(f.events.filter(e => e.stage === "delivery_note")).toHaveLength(1);
+  expect(f.service.rows(f.ticket)).toMatchObject([{ key: f.ticket + "#fallback", status: "sent" }]);
+});
+
+it("恢复已预留并发出的 fallback，仍补齐原 backend/thread 的提醒", async () => {
+  const f = await rig(async () => { throw new Error("不应重跑"); });
+  await f.service.system(f.ticket, "fallback", AGENT_FAILURE_REPLIES.failed);
+  await f.service.settle(f.ticket);
+  const conv = await f.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+    Object.assign(await tx.doc(TicketDoc, id), { ticket: f.ticket, route: "agent", source: f.binding.source,
+      agentResult: { ok: false, backend: "codex", threadKey: "owner", failure: "failed" } });
+    (await tx.doc(DispatchDoc)).pending[f.ticket] = { conversationId: id, scope: "group:7" };
+  } }, context);
+  const taskId = await f.harness.commit(tx => tx.createTask(f.tasks.AgentTask, { ticket: f.ticket },
+    { ownership: { kind: "conversation" }, conversationId: conv.id }), context);
+  f.harness.resume();
+  await f.harness.waitForTask(taskId, context);
+  expect(f.recordDeliveryNote).toHaveBeenCalledExactlyOnceWith({ ticket: f.ticket, threadKey: "owner", fallback: AGENT_FAILURE_REPLIES.failed });
+  expect((await f.harness.snapshot(TicketDoc, conv.id, context))?.deliveryNoted).toBe(true);
+  expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(1);
 });
 
 it("后端完成的图片仅留存；没有 send_message 或迟到任务时使用 fallback", async () => {
