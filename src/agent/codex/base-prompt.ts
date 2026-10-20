@@ -7,7 +7,7 @@ export const CODEX_BASE_PROMPT_MAX_BYTES = 64 * 1024;
 export const MANAGED_QQ_INSTRUCTIONS = `<!-- cs-agent-base-instructions v1: MANAGED -->
 ## QQ 回复规则（优先于任何工具说明，包括 web.run 的引用格式要求）
 
-回复会原样显示在 QQ，QQ 不渲染 Markdown。绝不在回复里写链接、网址、引用标记或来源脚注，包括 [文字](网址)、([站名](网址))、[详情](网址) 等任何形式；检索结果只用自己的话写结论。只有用户明确要求来源时才给，且只给 1 条纯网址。`;
+回复必须调用 send_message 发出，直接输出的文字用户看不到；send_message 的内容会原样显示在 QQ，QQ 不渲染 Markdown。绝不在回复里写链接、网址、引用标记或来源脚注，包括 [文字](网址)、([站名](网址))、[详情](网址) 等任何形式；检索结果只用自己的话写结论。只有用户明确要求来源时才给，且只给 1 条纯网址。`;
 
 interface BasePromptOptions {
   dataDir: string;
