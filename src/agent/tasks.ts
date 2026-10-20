@@ -602,7 +602,10 @@ export function createTasks(deps: TaskDeps) {
         }
         let result: AgentResult | undefined = doc.agentResult;
         if (!result) {
-          const source = doc.source;
+          const record = await deps.getBridge().getTicket(doc.ticket);
+          if (!record) throw new Error("回合票据不存在");
+          const source = { ...doc.source, type: record.message_type, user_id: record.user_id, group_id: record.group_id };
+          const actor = `qq:${record.user_id}`, actorIsOwner = !!deps.owner && record.user_id === deps.owner;
           const scope = source.type === "group" ? `group:${source.group_id}` : `private:${source.user_id}`;
           let quote: { message_id: string; nickname: string; text: string } | undefined;
           if (doc.replyTo && deps.store) {
@@ -624,12 +627,12 @@ export function createTasks(deps: TaskDeps) {
             backendName = backend.name;
             const res = await trace.span(doc.ticket, "backend:" + backend.name, () => backend.handle(
               {
-                ticket: doc.ticket,
+                ticket: doc.ticket, actor, actorIsOwner,
                 settings: doc.settings,
                 scope,
                 access: accessToString(accessForSource(source, deps.owner)),
                 threadKey: threadKeyForSource(source, deps.owner),
-                senderIsOwner: !!deps.owner && source.user_id === deps.owner,
+                senderIsOwner: actorIsOwner,
                 source: { ...source },
                 text: doc.text,
                 images: doc.source_images ?? [],

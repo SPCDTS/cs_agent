@@ -1,7 +1,7 @@
 /**
  * 消息库访问范围：存储不分域，读取一律带访问过滤。
  * - `{kind:"scope"}`：只见该会话（群 `group:<id>` / 私聊 `private:<qq>`）；
- * - `{kind:"all"}`：全部会话，仅 owner 私聊使用。
+ * - `{kind:"all"}`：全部会话，owner 在私聊和群聊均可使用。
  */
 import type { ChatType } from "../channel/types.js";
 
@@ -17,13 +17,13 @@ export function scopeOf(m: { message_type: ChatType; group_id: string | null; us
   return m.message_type === "group" ? `group:${m.group_id}` : `private:${m.user_id}`;
 }
 
-/** 票据来源 → 访问范围：群 → 本群；owner 私聊 → all；其他私聊 → 本人。 */
+/** 票据来源 → 访问范围：owner → all；其他群消息 → 本群；其他私聊 → 本人。 */
 export function accessForSource(
   source: { type: ChatType; user_id: string; group_id: string | null },
   owner: string | undefined,
 ): Access {
-  if (source.type === "group") return { kind: "scope", scope: `group:${source.group_id}` };
   if (owner && source.user_id === owner) return { kind: "all" };
+  if (source.type === "group") return { kind: "scope", scope: `group:${source.group_id}` };
   return { kind: "scope", scope: `private:${source.user_id}` };
 }
 

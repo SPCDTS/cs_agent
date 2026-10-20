@@ -22,7 +22,7 @@
 
 1. ~~群名进上下文 + `qq_chats`~~（已上线，main 0318d34）。
 2. **Outbox + `send_message`（本步，见 §3）**：仅发回本回合会话，不含 target。
-3. 回合令牌扩展、授权表 `GrantsDoc`、`auth_*` 工具、`send_message.target`；owner 在群里改为全部读取范围（D9）。
+3. **已实现，待部署验收（见 §4）**：回合令牌扩展、授权表 `GrantsDoc`、`auth_*` 工具、`send_message.target`；owner 在群里读取全部范围，但仍使用来源群线程。§4.4 的部署后实测尚未执行。
 4. `ScheduleDoc` 与管理 API（RRULE 校验、revision、面板增删改）。
 5. 排程器 `cs.schedule`（wait / fire 两阶段，持久化 `next_fire_at`，`runtime.sleep` 只负责进程存活期间的等待）。
 6. admit 与运行（`DispatchDoc` 的 `kind: "scheduled"`、输入外壳、record、连续失败自停），pi 与 codex 的 thread / fork。
@@ -100,10 +100,44 @@ Channel 接口新增 `send(key, target, text, images, { mention?, signal })`：
 - 单元测试：Outbox 状态机与幂等（sent 重放、sending 不重发）、pi 同 call_id 重放、codex 第 n 次映射、限额、@ 只在第一条、回合结束三分支、迟到图片、文件顺序。
 - 部署后在 owner 私聊实测：普通问答、发图、发文件、一次超时（不在真实群里测试）；观察 `no_send_fallback` 比例。
 
-## 4. 后续步骤要点（第 3–8 步，实现前再细化）
+## 4. 第 3 步：授权表、owner 全域、send_message.target
 
-- 授权表 `GrantsDoc { user, caps: ("send"|"schedule")[], targets, scopes?, expires_at?, granted_by, created_at }`；动作授权只取 Channel 给出的真实发送者 QQ 号。
-- `send_message.target` 校验：格式、bot 在群里或对方是好友、发言人有权、ref 当天限额。
+### 4.1 回合身份
+- 每个入站回合的"发言人"只取 Channel 给出的真实发送者 QQ 号（票据 `user_id`），不看消息内容。回合令牌 / `PiRequestDoc` 增加 `actor`（`qq:<user_id>`）与 `actorIsOwner`。
+- **owner 全域（D9）**：发言人是 owner 时，无论私聊还是群聊，读取范围都是全部（`access = all`）。
+- **owner 在群里的回合仍跑在该群线程里**（`threadKey = group:<id>`），仅将读取范围放宽为 `access = all`，回复仍发回来源群。线程键独立于读取范围，按来源决定：owner 私聊 → `owner`，群消息 → `group:<id>`，其他私聊 → `private:<qq>`；codex 与 pi 保持一致。用户接受群线程历史中可能留有 owner 回合读取的别处内容，后续群成员的回合可能从线程历史中看到这些内容（2026-10-20 用户决定，覆盖原隔离方案）。
+- 非 owner 的读取范围不变（群 → 本群，私聊 → 本人）。
+
+### 4.2 授权表 GrantsDoc
+派发 harness 的 Session 级文档，键为 `user`（`qq:<qq号>`）：
+```ts
+type Grant = {
+  user: string;                    // "qq:10001"
+  caps: ("send" | "schedule")[];   // schedule 本步只存储，第 4 步起生效
+  targets: string[];               // send 可发往的 ref；空 = 不能主动发往别处
+  scopes?: string[];               // 在哪些来源会话里生效（"group:1" / "private:2"）；缺省 = 任何会话
+  expires_at?: number;             // ms
+  granted_by: string; created_at: number; updated_at: number;
+};
+```
+- 只能由 owner 修改：面板（设置页新增"授权"一节：列表、添加、撤销）或 owner 发起的回合里的工具。
+- 过期的授权在判定时视为不存在，面板显示为已过期。
+
+### 4.3 工具
+- `send_message` 增加可选参数 `target`：`<channel>:<scope>` 字符串，本步只支持 `qq:group:<id>`、`qq:private:<qq>`。
+  - 省略或等于本回合会话 → 与第 2 步相同。
+  - 指向别处 → 校验：(1) 格式合法；(2) 发言人是 owner，或持有未过期且 scopes 允许本会话的 `send` 授权、target 在其 `targets` 内；(3) bot 确实在该群 / 对方是好友（`Channel.listChats`，结果缓存 5 分钟）；(4) 该 ref 当天（Asia/Shanghai）主动发送 < 100 条（按 Outbox 中发往该 ref 的模型行计）。不通过返回错误文本。
+  - 主动发送不 @ 任何人；计入本回合 3 条额度；Outbox 行的目标是 target；发出的消息作为 bot 行写入**目标会话**的消息库。
+  - 工具参数说明里只有在本回合有权使用 target 时才出现 `target`（pi 按回合配置工具；codex 的 im MCP 子进程按令牌声明决定是否在 schema 中列出）。
+- `auth_grant({ user, caps, targets?, scopes?, expires_in_hours? })` / `auth_revoke({ user, caps? })` / `auth_list()`：仅 owner 发起的回合可用（其他回合不列出、调用也拒绝）。pi 进程内；codex 放在 `im` MCP（回环端点同样按令牌校验 owner）。
+- trace：`send_message` 增加 `target`；新增 `auth_changed`（来源 panel / tool、前后差异）。
+
+### 4.4 验收
+- 单元测试：owner 群消息 access=all 且 threadKey=group:<id>，owner 私聊 threadKey=owner；非 owner 不变；target 四项校验；@ 规则；额度共享；目标会话 bot 行；授权过期、scopes；auth 工具对非 owner 不可见且拒绝；面板增删与 CSRF。
+- 部署后 owner 私聊实测：`qq_chats` 查群 → 指定 target 发到 owner 自己的另一个私聊 / 测试用群（不在真实群里测试）。
+
+## 5. 后续步骤要点（第 4–8 步，实现前再细化）
+
 - `ScheduleDoc` 字段：`id`、`revision`、`name`、`prompt`、`conversation`（来源，不可改）、`rule`（`rrule` 或 `at`，Asia/Shanghai）、`status`（active / paused / completed）、`mode`、`options`（`stale_after_ms` 默认 10 分钟、`timeout_ms` 默认 300 s 上限 900 s）、`next_fire_at`、`runs`（最近 20 次）、`failures`、`created_by`。
 - 排程任务 fire 阶段一次提交：判定（去重 `fire_key = id@fire_at`、迟到、暂停 / revision、重叠）→ admit 或记跳过 → 计算晚于 now 的下一次 → 写检查点。
 - 定时回合输入外壳：`[定时任务] 名称 · 计划时间 · 第 n 次`、提示词、最近 3 次运行记录、"需要通知就调用 send_message，不需要就直接结束，要停止调用 schedule_control"。

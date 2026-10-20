@@ -37,7 +37,8 @@ describe("access", () => {
     expect(parseAccess(`group:${G}`)).toEqual(grp);
     expect(parseAccess("private:10000001")).toEqual({ kind: "scope", scope: "private:10000001" });
     for (const bad of [undefined, "", "group:", "group:abc", "everyone", "group:1;rm"]) expect(parseAccess(bad)).toBeUndefined();
-    expect(accessForSource({ type: "group", user_id: "1", group_id: G }, "1")).toEqual(grp);
+    expect(accessForSource({ type: "group", user_id: "1", group_id: G }, "1")).toEqual(all);
+    expect(accessForSource({ type: "group", user_id: "2", group_id: G }, "1")).toEqual(grp);
     expect(accessForSource({ type: "private", user_id: "10000001", group_id: null }, "10000001")).toEqual(all);
     expect(accessForSource({ type: "private", user_id: "555", group_id: null }, "10000001")).toEqual({ kind: "scope", scope: "private:555" });
     expect(resolveOwner("", ["111", "222"])).toBe("111");

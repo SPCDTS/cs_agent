@@ -21,7 +21,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: f
 const TOOLS = [
   {
     name: "qq_chats",
-    description: "只读列出群名、群号及好友备注；仅限主人私聊，用于按名称确认会话。",
+    description: "只读列出群名、群号及好友备注；仅限主人回合，用于按名称确认会话。",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: READ_ONLY,
   },

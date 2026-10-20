@@ -150,3 +150,6 @@ export interface RemoteMessage {
   /** rendered 是单段的原始文本渲染结果。 */
   segments: { type: string; rendered: string; image?: { url: string; file: string } }[];
 }
+
+/** 主进程从 Channel 票据记录构造，不接受模型参数中的身份。 */
+export interface TurnIdentity { actor: string; actorIsOwner: boolean }

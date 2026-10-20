@@ -13,7 +13,7 @@ import { imageRefsValue } from "../../media/gen/image-references.js";
  * 之后 `codex exec resume <id>`；只有确认"会话不存在"的 resume 失败才新建线程。
  * 每个线程键一条互斥队列（不同会话可并行，同一键串行）；超时 kill 进程树。子进程只拿到最小环境变量，magpie 模式额外注入专用 gateway key。
  * 模型与推理强度取票据快照，缺省沿用启动设置（codex 后端每轮以 `-c model_reasoning_effort="<档位>"` 显式传入）。
- * 聊天记录访问范围每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS="<范围>"` 注入（群 → 本群，owner 私聊 → all）；
+ * 聊天记录访问范围每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS="<范围>"` 注入（owner 含群聊 → all，其他群 → 本群）；
  * 生图输出目录每轮以 `-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="<DATA_DIR>/images/<ticket>"` 注入。
  * 安全阀：resume 前若线程 rollout 文件 > rolloutMaxMb 或线程年龄 > threadMaxDays，新建线程（历史靠 qq_context 找回）。
  */
@@ -25,7 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import type { TicketSource } from "../backends/types.js";
 import { log } from "../../shared/log.js";
-import { accessForSource, isScope, parseAccess } from "../../context/access.js";
+import { isScope, parseAccess } from "../../context/access.js";
 import { headerField, headerNickname } from "../../shared/header.js";
 
 export interface CodexRunnerOptions {
@@ -106,13 +106,16 @@ export function isThreadKey(value: unknown): value is ThreadKey {
 
 export function threadKeyForSource(source: TicketSource | undefined, owner: string | undefined): ThreadKey {
   if (!source) throw new Error("缺少 codex 会话来源");
-  const access = accessForSource(source, owner);
-  const key = access.kind === "all" ? "owner" : access.scope;
+  // 线程按来源隔离；owner 群回合读取 all，但仍使用来源群线程。
+  const key = source.type === "group" ? `group:${source.group_id}`
+    : owner && source.user_id === owner ? "owner" : `private:${source.user_id}`;
   if (!isThreadKey(key)) throw new Error("非法的 codex 会话来源");
   return key;
 }
 
 export interface AskOptions {
+  actor?: string;
+  actorIsOwner?: boolean;
   source?: TicketSource;
   /** 仅本轮发送者身份决定技能写权限；不可从线程键推断。 */
   senderIsOwner?: boolean;
@@ -229,7 +232,7 @@ ${skills ? `## 技能
 - 改完告诉用户下一条消息生效。
 
 ` : ""}## 聊天记录与图片
-- 主人私聊可用 qq_chats 查看群名、群号和好友备注，按名称确认会话。
+- 主人回合可用 qq_chats 查看群名、群号和好友备注，按名称确认会话。
 - [image] 表示未召回的图片，需要查看时调用 qq_image(message_id)，每轮默认最多 5 次；返回路径文本后用 qq_view_image(path) 查看。
 - [image:<路径>] 表示已召回，可以直接使用。
 
@@ -770,7 +773,7 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, model, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, ticket, senderIsOwner, source }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, model, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, ticket, senderIsOwner, source, actor, actorIsOwner }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
     if (model !== undefined && !/^[A-Za-z0-9._/-]+$/.test(model)) throw new Error("非法的 codex 模型 slug");
     const policy = codexWorkspacePolicy(this.opts.workspaceDir, path.dirname(this.opts.threadsFile), key, this.opts.sandbox, this.opts.sandboxNetwork, this.opts.codexHome, senderIsOwner === true);
@@ -819,7 +822,7 @@ export class CodexRunner {
           outFile,
           onAcquired,
           observe,
-          { access: qqAccess, ticket, source, workdir: policy.workspaceDir, session: id },
+          { access: qqAccess, ticket, source, actor, actorIsOwner, workdir: policy.workspaceDir, session: id },
         );
         if (r.code === 0) return this.result(r);
         if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
@@ -849,7 +852,7 @@ export class CodexRunner {
         outFile,
         onAcquired,
         observe,
-        { access: qqAccess, ticket, source, workdir: policy.workspaceDir, session: id },
+        { access: qqAccess, ticket, source, actor, actorIsOwner, workdir: policy.workspaceDir, session: id },
       );
       if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
       return this.result(r);
@@ -899,7 +902,7 @@ export class CodexRunner {
     outputFile?: string,
     onAcquired?: () => Promise<void>,
     onJsonEvent?: (event: Record<string, unknown>) => void,
-    recall?: { access?: string; ticket?: string; source?: TicketSource; workdir?: string; session?: string },
+    recall?: { actor?: string; actorIsOwner?: boolean; access?: string; ticket?: string; source?: TicketSource; workdir?: string; session?: string },
   ): Promise<RunOutcome> {
     const tmpDir = outputFile ? undefined : await fs.mkdtemp(path.join(os.tmpdir(), "cs-codex-"));
     const outFile = outputFile ?? path.join(tmpDir!, "last.txt");
@@ -916,7 +919,7 @@ export class CodexRunner {
     signal?.throwIfAborted();
     const access = parseAccess(recall?.access);
     if (this.opts.recallTokens && (!access || !recall?.ticket)) throw new Error("召回请求缺少访问范围或票据");
-    const lease = this.opts.recallTokens?.issue({ access: access!, ticket: recall!.ticket!, source: recall?.source, workdir: recall?.workdir, session: recall?.session, deadline: Date.now() + this.opts.timeoutMs, signal });
+    const lease = this.opts.recallTokens?.issue({ access: access!, ticket: recall!.ticket!, source: recall?.source, actor: recall?.actor, actorIsOwner: recall?.actorIsOwner, workdir: recall?.workdir, session: recall?.session, deadline: Date.now() + this.opts.timeoutMs, signal });
     try {
       if (lease) {
         finalArgs.splice(finalArgs.includes("resume") ? finalArgs.indexOf("resume") + 1 : 1, 0, ...recallArgs(this.opts.mediaRecallPort ?? 8790));

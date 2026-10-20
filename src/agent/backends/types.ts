@@ -30,6 +30,8 @@ export const BACKEND_NAMES = ["codex", "pi"] as const;
 
 export interface AgentRequest {
   ticket: string;
+  actor?: string;
+  actorIsOwner?: boolean;
   settings?: Readonly<TicketSettings>;
   /** 会话 scope：group:<id> / private:<qq> */
   scope: string;

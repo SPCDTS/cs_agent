@@ -228,7 +228,7 @@ export class ContextStore {
     this.db.prepare(`INSERT OR IGNORE INTO messages
       (scope,message_id,time,user_id,nickname,is_self,text,reply_to_id,ticket,status,action,image_count)
       VALUES (?,?,?,?,'我',1,?,?,?,'已回复',?,?)`).run(scope, row.message_id, Math.floor(Date.parse(row.sent_at ?? row.created_at) / 1000),
-      source.self_id, row.text, source.source_message_id, row.key, row.key.endsWith("#fallback") ? "fallback" : "reply", row.images.length);
+      source.self_id, row.text, scope === scopeOf(source) ? source.source_message_id : null, row.key, row.key.endsWith("#fallback") ? "fallback" : "reply", row.images.length);
   }
 
   /** 收到消息即写入机器人"处理中"行（幂等：每个票据一行）。 */

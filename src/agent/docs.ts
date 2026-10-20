@@ -125,3 +125,18 @@ export const DispatchDoc = defineDoc<DispatchState>({
   scope: "session",
   initial: () => ({ pending: {} }),
 });
+
+/** owner 管理的动作授权；schedule 本阶段仅存储。 */
+export type Grant = {
+  user: string;
+  caps: ("send" | "schedule")[];
+  targets: string[];
+  scopes?: string[];
+  expires_at?: number;
+  granted_by: string;
+  created_at: number;
+  updated_at: number;
+};
+export const GrantsDoc = defineDoc<Record<string, Grant>>({
+  kind: "cs.grants", version: 1, scope: "session", initial: () => ({}),
+});

@@ -9,7 +9,7 @@
 1. 通过内置 **QQBridge** 工具从 QQ（NapCat OneBot v11）接收消息；
 2. **规则分流**（无模型，v3）：消息以 `IMAGE_PREFIXES`（默认 `奶龙:` / `奶龙：`）开头 → 前缀之后解析内联选项，其余文本作为提示词；
 3. **生图路径** → 调用 **ComfyUI 的 MCP**（`comfy-mcp`）生成图片，以固定模板把图片回到原 QQ 会话；
-4. **其他消息** → 交给**执行 agent**：后端可切换（`AGENT_BACKEND=codex|pi`，可按会话覆盖），默认是**同一容器内**的 `codex` CLI 固定线程（owner / shared），其回答经后处理后回到原 QQ 会话；codex 通过 `qq_context` 的附件工具发送已有图片或文件，cs-agent 的 `image_gen` MCP 默认关闭。
+4. **其他消息** → 交给**执行 agent**：后端可切换（`AGENT_BACKEND=codex|pi`，可按会话覆盖），默认是**同一容器内**的 `codex` CLI，线程按来源会话确定；两后端通过 `send_message` 发送文字、图片或文件，默认回复来源会话，有授权时可指定 target；最终回答只留存，cs-agent 的 `image_gen` MCP 默认关闭。
 
 > v2 的"意图识别模型选工具"（`generate_image` / `ask_codex` / `reply_qq` 三个模型工具与热加载 `system.md`）已在 v3 移除，见 §5.2 与 §10。
 
@@ -165,8 +165,11 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 - codex 的模型提供者默认改为宿主机 magpie，受管配置使用 `env_key="CODEX_MAGPIE_KEY"`、`wire_api="responses"`、`supports_websockets=false` 与 `/codex/models` 目录。MCP 注册、附件路径与受管 AGENTS.md 不受提供者开关影响；MCP 不新增 key 透传，基础配置允许空 key，只有 CodexRunner 启动时检查 magpie key。设置页展示只读提供者与 URL。
 
 - 独立生图任务仍只由规则分流触发；pi 的 `generate_image` 保留。codex 的 `image_gen` MCP 由 `CODEX_IMAGE_GEN=off|on` 控制，默认 off；on 恢复旧注册与注入。受管 AGENTS.md 与新播种的 codex 提示词删除专用生图段，只保留聊天图片召回与附件用法。
-- 统一工具 `send_message({ text, images?, files? })` 立即发回本回合会话，文件项为 `{ path, name? }`；模型不能指定目标。pi 在进程内调用 agent 层 SendService，codex 的独立 `im` MCP 通过每轮令牌访问 loopback `POST /send`。令牌绑定票据、来源及工作区，结束即撤销。
-- ReplyStore 的 Outbox 按票据和序号持久化正文、图片及文件状态：pi 按稳定 call_id 重放，codex 按本次 exec 的第 n 次有效调用映射。模型每回合最多 3 条，系统 #late / #fallback 独立计额；相同正文哈希复用已发或不确定行，不确定结果不向模型报工具错误；群聊仅第一条 @ 提问者。图片、文件沿用 media/attach.ts 的来源与大小校验，副本保存在 `images/<ticket>/outbox/`。
+- 统一工具 `send_message({ text, images?, files?, target? })` 默认发回本回合会话，文件项为 `{ path, name? }`。跨会话目标仅支持 `qq:group:<id>` / `qq:private:<QQ号>`，由 SendService 校验格式、owner 或有效授权（含 scopes / 到期时间）、群成员或好友关系（缓存 5 分钟）及 Asia/Shanghai 每 ref 每天 100 条额度。日额度按该 ref 的全部模型 Outbox 行计，系统行排除，SQLite 预留行时原子复核；与来源回复共用每回合 3 条。主动发送不 @，机器人历史及附件写向目标会话，跨会话正文去重包含目标。
+- pi 在进程内调用 SendService；codex 的独立 `im` MCP 通过 loopback `/send`、`/im-info`、`/auth_grant`、`/auth_revoke`、`/auth_list` 调用主进程。令牌与 `PiRequestDoc` 绑定票据、来源、真实 `actor=qq:<user_id>` 和 `actorIsOwner`，身份只取 Channel 票据，不读消息正文。pi 按回合选择固定工具配置；im 子进程启动时从令牌绑定查询权限，仅有权回合列出 `target`，仅 owner 回合列出 `auth_*`，服务端逐次复核。
+- `GrantsDoc` 是派发 harness（agent.sqlite）的 Session 文档，以 user 为键；`auth_grant` 替换该用户的授权，`auth_revoke` 可撤销部分能力或整条，过期授权只读展示但不生效。面板沿用 owner 运维令牌与同源 / CSRF 保护。`schedule` 本阶段只存储，不引入排程器。`auth_changed` 记录 panel / tool、操作者及前后差异，`send_message` trace 带实际 target。
+- owner 在群和私聊均读取 `all`；线程键独立按来源决定：owner 私聊为 `owner`，所有群消息为 `group:<id>`，其他私聊为 `private:<qq>`。用户接受 owner 读取的其他会话内容可能留在来源群线程历史中；Codex 与 pi 一致，派发 FIFO 仍按来源 scope。
+- ReplyStore 的 Outbox 按票据和序号持久化正文、图片及文件状态：pi 按稳定 call_id 重放，codex 按本次 exec 的第 n 次有效调用映射。模型每回合最多 3 条，系统 #late / #fallback 独立计额；同目标的相同正文哈希复用已发或不确定行，不确定结果不向模型报工具错误；群聊仅第一条 @ 提问者。图片、文件沿用 media/attach.ts 的来源与大小校验，副本保存在 `images/<ticket>/outbox/`。
 - 正文 sent 后逐个上传文件，分别持久化 `pending → sending → sent|uncertain`；sending/uncertain 永不重发。每条成功消息立即写一条上下文机器人行，可按 message_id 引用。
 - agent 阶段为 handle → lateImages → settle；迟到图片使用 #late，零发送成功回合用 #fallback 并记录 no_send_fallback，零发送失败回合用对应失败提示。最终回答只保存到 TicketDoc.agentResult 并记录 final_answer。旧 postprocess/reply 检查点映射到 settle，尚未发出的旧草稿/答案及图片通过 #fallback 保留；已发送的旧附件继续恢复。派发普通尝试最多 3 次，确有未完成文件回复时总尝试最多 6 次；持续恢复故障不阻塞同 scope 的后续消息。结算与副本清理均进入票据串行队列，终态清理 Outbox 副本，仍有 pending/sending 文件的消息目录保留。cs.image 不变。
 
@@ -273,7 +276,7 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | 机器人回复行 | 派发器 admit 时 `recordPending`（`处理中`），终态后按 `TicketDoc.imagePrompt` / `codexEffort` / `replyText` / `replyImages` 调 `completeReply`；兜底、uncertain 或业务工具失败记 `失败`；QQ 回复的 message_id 替换占位 id | 意图层与 codex 看到同一行 `[我] → …` |
 | 衰老任务 | `src/context/aging.ts`：每日本地 `HISTORY_SUMMARY_HOUR` 点；`models.completeSimple` 直调意图模型生成日摘要；已结束自然周折叠为周摘要（仅 1 天时直接复用）；`meta.aging_last_run` 早于 24h 时启动补跑；原始消息只在所在时段被日/周摘要覆盖后才按 `HISTORY_RAW_DAYS` 清理，未覆盖的兜底保留 `HISTORY_RAW_HARD_MAX_DAYS`（90）天 | 设计稿 §2.2；"满 7 天"实现为"自然周结束" |
 | qq_context MCP | `src/mcp/qq-context.ts`（低层 `Server` + stdio），只读连接；范围只来自 `QQ_ACCESS`，缺失/非法时所有工具返回错误文本 | 设计稿 §2.3 |
-| ask_codex 注入 | 每轮 `-c mcp_servers.qq_context.env.QQ_ACCESS="…"`（群→本群、owner 私聊→`all`、其他私聊→本人）；头部改为 §3.2 的 `[来源]` / `[引用]` 两行；`TZ` 加入 codex 子进程环境白名单 | 设计稿 §3.2 |
+| ask_codex 注入 | 每轮 `-c mcp_servers.qq_context.env.QQ_ACCESS="…"`（owner（含群聊）→`all`、其他群→本群、其他私聊→本人）；头部改为 §3.2 的 `[来源]` / `[引用]` 两行；`TZ` 加入 codex 子进程环境白名单 | 设计稿 §3.2 |
 | codex 双线程 | `owner`（owner 私聊，即访问范围 all）与 `shared`（所有群与其他私聊）两条线程，记录在 `/data/codex-threads.json`（原子写，读-改-写串行化）；每键一条互斥队列，两键可并行；旧 `codex-session.json` 在新文件缺失时迁移到 `owner` 并改名 `.migrated`；healthz `codex.threads: {owner, shared}` | 用户 2026-10-18 决定（评审 R1）：owner 的长任务不阻塞群聊，群聊上下文不进入 owner 线程 |
 | codex 线程安全阀 | 每条线程 resume 前检查 rollout 文件大小与线程年龄（记录含 `created_at`，旧记录用 `updated_at`），超限新建该线程并记 `codex thread rotated`（带 `key`） | 设计稿 §3.1 |
 | 受管 config.toml | entrypoint 写入 `web_search`、`[tools.web_search]`、`[mcp_servers.qq_context]`（env `DATA_DIR`、`QQ_CONTEXT_MAX_CHARS`）与可选 `[mcp_servers.browser]`；枚举/路径值经 `toml_enum` / `toml_path` 校验 | 设计稿 §3.4、§4.4 |

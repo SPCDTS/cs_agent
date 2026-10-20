@@ -1,4 +1,4 @@
-import type { Channel } from "../channel/types.js";
+import type { Channel, TurnIdentity } from "../channel/types.js";
 import { CHATS_DENIED, listChatsText } from "./chats.js";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
@@ -7,12 +7,14 @@ import { registerTemporarySecrets } from "../shared/redact.js";
 import { accessToString, parseAccess, type Access } from "./access.js";
 import { abortable, type MediaRecall, type RecallResult } from "./media.js";
 
-export interface RecallBinding {
+export interface RecallBinding extends Partial<TurnIdentity> {
   access: Access; ticket: string; deadline: number; signal?: AbortSignal;
   source?: { type: "private" | "group"; user_id: string; group_id: string | null };
   workdir?: string; session?: string;
 }
 export interface SendGateway {
+  permissions?(binding: RecallBinding): Promise<{ actorIsOwner: boolean; target: boolean }>;
+  auth?(binding: RecallBinding, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown): Promise<unknown>;
   send(binding: RecallBinding, attempt: string, args: unknown, signal: AbortSignal): Promise<unknown>;
   release(ticket: string, attempt: string): void;
 }
@@ -86,6 +88,20 @@ export class RecallTokens {
     return this.gateway.send(lease.binding, token, args, lease.control.signal);
   }
 
+  async permissions(token: string) {
+    if (!this.valid(token)) throw new Error("发送令牌无效或已过期");
+    const result = await this.gateway?.permissions?.(this.tokens.get(token)!.binding) ?? { actorIsOwner: false, target: false };
+    if (!this.valid(token)) throw new Error("发送令牌已作废");
+    return result;
+  }
+
+  async auth(token: string, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown) {
+    if (!this.valid(token)) throw new Error("发送令牌无效或已过期");
+    const binding = this.tokens.get(token)!.binding;
+    if (!binding.actorIsOwner || !this.gateway?.auth) throw new Error("授权工具仅限 owner 回合");
+    return this.gateway.auth(binding, name, args);
+  }
+
   async recall(token: string, messageId: string): Promise<RecallResult> {
     if (!this.valid(token)) throw new Error("召回令牌无效或已过期");
     const lease = this.tokens.get(token)!;
@@ -127,17 +143,24 @@ export async function startMediaRecallServer(tokens: RecallTokens, port = 8790) 
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }).end(JSON.stringify(body));
     };
-    if (req.method !== "POST" || (req.url !== "/recall" && req.url !== "/view" && req.url !== "/chats" && req.url !== "/send")) { send(404, { error: "不存在的召回端点" }); return; }
+    if (req.method !== "POST" || !["/recall", "/view", "/chats", "/send", "/im-info", "/auth_grant", "/auth_revoke", "/auth_list"].includes(req.url ?? "")) { send(404, { error: "不存在的召回端点" }); return; }
     const auth = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization ?? "");
     if (!auth || !tokens.valid(auth[1]!)) { send(401, { error: "召回令牌无效或已过期" }); return; }
     try {
       let size = 0; const chunks: Buffer[] = [];
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > (req.url === "/send" ? 64 * 1024 : 2048)) { send(413, { error: "请求过大" }); return; }
+        if (size > (["/send", "/auth_grant"].includes(req.url!) ? 64 * 1024 : 2048)) { send(413, { error: "请求过大" }); return; }
         chunks.push(Buffer.from(chunk));
       }
       const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (req.url === "/im-info") {
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) throw new Error("im-info 不接受参数");
+        send(200, await tokens.permissions(auth[1]!)); return;
+      }
+      if (req.url === "/auth_grant" || req.url === "/auth_revoke" || req.url === "/auth_list") {
+        send(200, await tokens.auth(auth[1]!, req.url.slice(1) as "auth_grant" | "auth_revoke" | "auth_list", body)); return;
+      }
       if (req.url === "/send") { send(200, await tokens.send(auth[1]!, body)); return; }
       if (req.url === "/chats") {
         if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) {

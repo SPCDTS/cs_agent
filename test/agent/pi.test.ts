@@ -1,3 +1,5 @@
+import type { GrantsService } from "../../src/agent/grants.js";
+import { grantsFixture } from "./grants-fixture.js";
 import { SendService } from "../../src/agent/send-service.js";
 import { sendFixture } from "./send-fixture.js";
 import { FALLBACK_REPLY, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
@@ -56,7 +58,7 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { sendService?: SendService; channel?: Pick<Channel, "listChats">; currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { grants?: GrantsService; sendService?: SendService; channel?: Pick<Channel, "listChats">; currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   vi.stubEnv("CODEX_REQUIREMENTS_FILE", await sandboxRequirements(dir));
   const contextUsage = new ContextUsageStore(dir);
@@ -77,7 +79,7 @@ async function setup(steps: FauxResponseStep[], opts: { sendService?: SendServic
   const http = opts.fetch ?? vi.fn(async () => Response.json({ results: [{ title: "资料", date: "2026-10-18", summary: "摘要", url: "https://example.com", rerank_score: 1 }] })) as typeof fetch;
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
-  const pi = await PiBackend.open({ sendService: opts.sendService, dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
+  const pi = await PiBackend.open({ sendService: opts.sendService, grants: opts.grants, dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
     channel: opts.channel, skillsDir: opts.skillsDir, currentModel: opts.currentModel, mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
     instrumentation: opts.instrumentation, thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
@@ -94,7 +96,7 @@ describe("pi durable backend", () => {
     const s = await setup([call("qq_chats"), ctx => { seen = ctx; return reply(); }], { channel: { listChats } });
     await s.pi.handle(request("chats", owner), handleContext());
     expect(listChats).toHaveBeenCalledTimes(owner ? 1 : 0);
-    expect(results(seen)).toContain(owner ? "group:7 家庭群（6 人）" : "仅限主人私聊");
+    expect(results(seen)).toContain(owner ? "group:7 家庭群（6 人）" : "仅限主人回合");
     const result = seen.messages.find(m => m.role === "toolResult" && m.toolName === "qq_chats");
     expect(result?.role === "toolResult" && result.isError).toBe(!owner);
   });
@@ -468,7 +470,7 @@ describe("pi durable backend", () => {
     const inspect = (ctx: TranscriptContext) => { seen.push(JSON.stringify(ctx.messages)); return reply(); };
     const s = await setup([inspect, inspect, inspect, inspect]);
     await s.pi.handle({ ...request("g7"), text: "GROUP_SEVEN_SECRET" }, handleContext());
-    await s.pi.handle({ ...request("g8"), scope: "group:8", access: "group:8", text: "GROUP_EIGHT_SECRET" }, handleContext());
+    await s.pi.handle({ ...request("g8"), scope: "group:8", access: "group:8", source: { ...request("g8").source, group_id: "8" }, text: "GROUP_EIGHT_SECRET" }, handleContext());
     await s.pi.handle({ ...request("o1", true), text: "OWNER_SECRET" }, handleContext());
     await s.pi.handle(request("g7-again"), handleContext());
     expect(seen[1]).not.toContain("GROUP_SEVEN_SECRET");
@@ -1199,4 +1201,46 @@ it("pi 的不确定发送以非错误工具结果返回，换 call_id 同文重�
   expect(JSON.stringify(tools)).toContain("消息可能已送达，不要重发");
   expect(f.service.rows(f.ticket)).toHaveLength(1);
   expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(1);
+});
+
+
+it("owner 群回合 all 读取但留在群线程，身份与工具配置随群内发言人切换", async () => {
+  const f = await grantsFixture();
+  const observed: TranscriptContext[] = [];
+  const inspect = (ctx: TranscriptContext) => { observed.push(ctx); return reply(); };
+  const s = await setup([
+    call("qq_recent"),
+    call("auth_grant", { user: "qq:3", caps: ["send", "schedule"], targets: ["qq:group:8"], scopes: ["group:7"] }),
+    call("send_message", { target: "qq:group:8", text: "跨会话消息" }),
+    call("send_message", { text: "来源群回复" }), inspect,
+    call("auth_list"), inspect,
+    call("send_message", { target: "qq:group:8", text: "撤销后不能发" }), inspect,
+  ], { dir: f.dir, grants: f.grants, sendService: f.service });
+  s.store.ingest(inbound("private-owner", null, "owner 可读取的私聊内容"));
+  await s.pi.handle({ ...request(f.ticket), access: "all", actor: "qq:1", actorIsOwner: true, senderIsOwner: true }, handleContext());
+  const ids = await s.pi.readThreadIds();
+  expect(ids.owner).toBeUndefined();
+  expect(results(observed[0]!)).toContain("owner 可读取的私聊内容");
+  expect(f.service.rows(f.ticket).map(r => r.target_id)).toEqual(["8", "7"]);
+  const conv = (await s.pi.harness.conversation(ids["group:7"]! as ConversationId, context))!;
+  const tools = () => conv.agent(context).then(a => a.tools);
+  expect((await tools()).map(t => t.name)).toContain("auth_grant");
+  expect((await tools()).find(t => t.name === "send_message")!.parameters).toHaveProperty("properties.target");
+  expect(await s.pi.harness.snapshot(PiRequestDoc, conv.id, context)).toMatchObject({ actor: "qq:1", actorIsOwner: true, access: "all" });
+  const member = (message_id: string) => {
+    const ticket = f.store.createTicket({ ...f.msg, user_id: "3", message_id });
+    return { ...request(ticket), actor: "qq:3", actorIsOwner: false, source: { ...request(ticket).source, user_id: "3" } };
+  };
+  await s.pi.handle(member("member-granted"), handleContext());
+  expect((await tools()).some(t => t.name.startsWith("auth_"))).toBe(false);
+  expect((await tools()).find(t => t.name === "send_message")!.parameters).toHaveProperty("properties.target");
+  expect(observed[1]!.messages.filter(m => m.role === "toolResult").at(-1)).toMatchObject({ isError: true });
+  expect(await s.pi.readThreadIds()).toEqual(ids);
+  await f.grants.panel("auth_revoke", { user: "qq:3" });
+  const denied = member("member-denied");
+  await s.pi.handle(denied, handleContext());
+  expect((await tools()).find(t => t.name === "send_message")!.parameters).not.toHaveProperty("properties.target");
+  expect(observed[2]!.messages.filter(m => m.role === "toolResult").at(-1)).toMatchObject({ isError: true });
+  expect(f.service.rows(denied.ticket)).toHaveLength(0);
+  expect(await s.pi.harness.snapshot(PiRequestDoc, conv.id, context)).toMatchObject({ actor: "qq:3", actorIsOwner: false, access: "group:7" });
 });
