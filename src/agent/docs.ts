@@ -130,7 +130,7 @@ export const DispatchDoc = defineDoc<DispatchState>({
   initial: () => ({ pending: {} }),
 });
 
-/** owner 管理的动作授权；schedule 本阶段仅存储。 */
+/** owner 管理的动作授权：send 主动发往别处，schedule 创建并管理自己的定时任务。 */
 export type Grant = {
   user: string;
   caps: ("send" | "schedule")[];
