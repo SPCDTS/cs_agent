@@ -79,7 +79,17 @@ export interface ScheduledFire {
  * 同一 fire_key 重复调用返回同一张运行票据（幂等）。
  */
 export interface ScheduledRunAdmitter {
-  admit(tx: unknown, fire: ScheduledFire): Promise<{ ticket: string }>;
+  /** skipped 表示已终结的孤儿票据不能重跑；排程侧须记失败并解除 in_flight。 */
+  admit(tx: unknown, fire: ScheduledFire): Promise<{ ticket: string; skipped?: boolean }>;
+}
+
+/**
+ * 排程与执行的接线：prepare 在事务外冻结输入/开票，admit 在事务内登记；
+ * dispatchScheduled 只在提交成功后唤醒派发器，不等待整轮后端结束。
+ */
+export interface ScheduledRunLauncher {
+  prepare(fire: ScheduledFire): Promise<ScheduledRunAdmitter>;
+  dispatchScheduled(ticket: string): void;
 }
 
 /** 执行结束后回写运行结果（第 6 步调用，第 4 步的 ScheduleService 实现）。 */

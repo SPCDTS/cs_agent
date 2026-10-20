@@ -54,3 +54,13 @@
 
 ## 5. 合并顺序
 B 先于 A 合入也可：A 依赖 `ScheduledRunAdmitter` 接口，测试中用桩；B 依赖 `ScheduleRunRecorder`，测试中用桩。最终在 `src/main.ts` 接线（后合入的一方负责）。
+
+
+## 6. A/B 集成接线
+
+- `main.ts` 先创建 grants、发送服务和通用任务，再创建 `createScheduledRuntime` 与 `cs.schedule`。扩展同时注册 `cs.image`、`cs.agent`、`cs.schedule`、`cs.scheduled`。recorder、暂停和派发回调延迟读取已构造的服务，避免构造时互相调用。
+- 定义服务与执行器共用 `GrantsService.canSchedule(actor, conversation)`：当前 owner 始终有权；其他创建者须持有未过期且含 `schedule` 的 grant，并满足 grant 的来源 scopes。非 owner 不得进入 owner 线程；owner 代操作已有定义也会重新检查原创建者权限。
+- 自动触发和 `runNow` 共用 `ScheduledRunLauncher`：事务外 `prepare(fire)` 开票并冻结后端设置；事务内复核定义 revision、运行 ordinal、重叠与幂等状态，然后调用预备结果的 `admit(tx, fire)`；提交成功后调用 `dispatchScheduled(ticket)`，不阻塞等待后端结束。准备期间定义或序号变化时，自动触发重新准备，手动运行返回冲突供调用方重试。
+- B 的运行回写直接调用 A 的 `ScheduleService.recordRun`。无权时通过 `pauseWithReason` 使用与手动暂停相同的事务逻辑；同一原因的重放不再增加 revision，定义已删除时不重建。
+- 启动时依次执行 `dispatcher.recover()`、`schedules.start()`、`harness.resume()`。恢复先接管普通消息和定时运行的 FIFO，随后补齐排程任务并继续检查点。开票后、admit 提交前崩溃留下的孤儿票据不重跑；若该触发再次到达排程阶段，将其记为失败并释放占用，避免永久 queued。
+- `test/agent/schedule-integration.test.ts` 使用假时钟、真实 durable/SQLite 文档、真实 dispatcher/SendService/Outbox 与假后端，验证发送不 @、静默、失败计数、失权暂停、恢复与准备期间的定义变更。

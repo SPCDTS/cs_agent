@@ -13,9 +13,11 @@ import type { ThreadKey } from '../agent/backends/types.js';
 import type { Trace } from '../shared/trace.js';
 import type { ContextUsageView } from '../shared/format.js';
 import type { CodexBasePromptSnapshot, ModelCatalogView } from './ui/dashboard-pages.js';
+import type { ScheduleManagement } from './schedules.js';
 
 export interface DashboardOptions {
   grants?: Pick<GrantsService, 'list' | 'panel'>;
+  schedules?: ScheduleManagement;
   /** 共享技能管理；off 时不注入。页面使用 list/readSkillMd/files。 */
   skills?: SkillsStore;
   config: Config; store: ObsStore; context: ContextStore;

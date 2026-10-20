@@ -29,6 +29,7 @@ import { createDashboardPost } from './dashboard-post.js';
 import { createDashboardPages } from './ui/dashboard-pages.js';
 import { asContextUsageEvent } from './context-turns.js';
 import { ticketContextTurns } from './context-ticket.js';
+import { createScheduleRoutes } from './schedules.js';
 
 // 与顶栏的蓝色方框及两条横线保持一致；静态图形不含运行数据。
 const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="7" y="4" width="18" height="24" rx="2" fill="none" stroke="#2b47b5" stroke-width="3"/><path d="M11 13h10M11 19h10" stroke="#2b47b5" stroke-width="3"/></svg>';
@@ -106,6 +107,7 @@ export function createDashboard(opts: DashboardOptions) {
     reasoningEfforts: REASONING_EFFORTS, agentMdMaxBytes: AGENT_MD_MAX_BYTES, settingsTicket: SETTINGS_TICKET,
   });
   const handlePost = createDashboardPost(opts, csrf, agentMd, tracer, render);
+  const handleSchedules = createScheduleRoutes(opts.schedules, config.owner, csrf);
 
   /** 在服务端内部调用会话 JSON 路由：与浏览器拿到的是同一份已脱敏 JSON、同样的校验与错误码。 */
   async function api(pathQuery: string): Promise<{ status: number; body: unknown }> {
@@ -164,6 +166,9 @@ export function createDashboard(opts: DashboardOptions) {
         url.searchParams.delete('token');
         res.writeHead(303, { Location: url.pathname + url.search }).end(); return;
       }
+    }
+    if (url.pathname === '/api/schedules' || url.pathname.startsWith('/api/schedules/')) {
+      await handleSchedules(req, res, url, host); return;
     }
     if (url.pathname === '/api/agents' || url.pathname.startsWith('/api/agents/') || url.pathname === '/agents/stream') {
       if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); sessionJson(res, 405, { error: '会话接口只支持 GET' }); return; }

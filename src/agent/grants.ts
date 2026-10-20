@@ -66,6 +66,13 @@ export class GrantsService {
       (grant.scopes === undefined || grant.scopes.includes(scope)) ? grant : undefined;
   }
 
+  /** 定时定义与实际执行共用：按创建者、来源范围和当前到期时间检查。 */
+  async canSchedule(actor: string, conversation: string): Promise<boolean> {
+    if (this.opts.owner && actor === `qq:${this.opts.owner}`) return true;
+    if (conversation === "owner" || !isScope(conversation)) return false;
+    return !!(await this.active(actor, conversation))?.caps.includes("schedule");
+  }
+
   async permissions(binding: GrantBinding): Promise<ImPermissions> {
     // 升级前的快照没有身份声明，关闭新增能力；不能从 access=all 推断 owner。
     if (!binding.actor || binding.actorIsOwner === undefined) return { actorIsOwner: false, target: false };

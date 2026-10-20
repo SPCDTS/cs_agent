@@ -55,7 +55,7 @@ async function rig(handle: AgentBackend["handle"] = async () => ({ text: "无需
   });
   const scheduled = createScheduledRuntime({ getChannel: () => f.bridge, tasks, recorder, pauseSchedule, owner: "1", ...opts });
   const dbFile = path.join(f.dir, "scheduled.sqlite");
-  const open = () => openHarness({ models: createModels(), extension: createCsAgentExtension(tasks, scheduled), dbFile }, ctx);
+  const open = () => openHarness({ models: createModels(), extension: createCsAgentExtension(tasks, [scheduled.ScheduledTask]), dbFile }, ctx);
   let harness = await open();
   const dispatch = () => new Dispatcher({ harness, tasks, scheduled, bridge: f.bridge, concurrency: opts.concurrency ?? 2, retryDelayMs: 1 });
   let dispatcher = dispatch();

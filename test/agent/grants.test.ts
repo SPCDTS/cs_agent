@@ -79,3 +79,22 @@ it.each([
   await expect(f.grants.tool(f.binding, "auth_grant", args)).rejects.toThrow();
   expect(await f.grants.list()).toEqual([]); expect(f.event).not.toHaveBeenCalled();
 });
+
+it("canSchedule 按创建者检查 schedule cap、来源和到期边界；owner 不依赖 grant", async () => {
+  const f = await grantsFixture();
+  expect(await f.grants.canSchedule("qq:1", "owner")).toBe(true);
+  expect(await f.grants.canSchedule("qq:9", "group:7")).toBe(false);
+  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["send"], scopes: ["group:7"] });
+  expect(await f.grants.canSchedule("qq:9", "group:7")).toBe(false);
+  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"], scopes: ["group:7"], expires_in_hours: 1 });
+  expect(await f.grants.canSchedule("qq:9", "group:7")).toBe(true);
+  expect(await f.grants.canSchedule("qq:9", "group:8")).toBe(false);
+  expect(await f.grants.canSchedule("qq:9", "owner")).toBe(false);
+  f.advance(3_600_000);
+  expect(await f.grants.canSchedule("qq:9", "group:7")).toBe(false);
+  expect(await f.grants.canSchedule("qq:1", "group:7")).toBe(true);
+  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"] });
+  expect(await f.grants.canSchedule("qq:9", "private:8")).toBe(true);
+  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"], scopes: [] });
+  expect(await f.grants.canSchedule("qq:9", "group:7")).toBe(false);
+});

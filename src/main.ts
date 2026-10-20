@@ -32,6 +32,10 @@ import { SkillsLoader } from "./agent/pi-tools/skills.js";
 import { SkillsStore } from "./agent/skills-store.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
+import { ScheduleService } from "./agent/schedule/service.js";
+import { createScheduleTask } from "./agent/schedule/task.js";
+import { createScheduledRuntime } from "./agent/schedule/run.js";
+import type { ScheduledRunLauncher } from "./agent/schedule/types.js";
 import { CodexRunner } from "./agent/codex/runner.js";
 import { purgeCodexTrace } from "./agent/codex/trace.js";
 import { purgeGeneratedImages } from "./agent/codex/generated-images.js";
@@ -237,8 +241,22 @@ async function main(): Promise<void> {
       } } : {}),
     },
   });
-  const extension = createCsAgentExtension(tasks);
+  // 回调仅在恢复/调度后调用；先注册两类任务，再补齐服务与派发器，避免构造环。
+  let schedules: ScheduleService;
+  const canSchedule = grants.canSchedule.bind(grants);
+  const scheduled = createScheduledRuntime({
+    getChannel: getBridge, tasks, owner: cfg.owner, canSchedule,
+    recorder: { recordRun: (id, run) => schedules.recordRun(id, run) },
+    pauseSchedule: (id, reason) => schedules.pauseWithReason(id, reason),
+  });
+  const scheduledAdmitter: ScheduledRunLauncher = {
+    prepare: scheduled.prepare,
+    dispatchScheduled: ticket => { void dispatcher.dispatchScheduled(ticket); },
+  };
+  const scheduleTask = createScheduleTask({ admitter: scheduledAdmitter });
+  const extension = createCsAgentExtension(tasks, [scheduleTask, scheduled.ScheduledTask]);
   const harness = dispatchHarness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
+  schedules = new ScheduleService({ harness, task: scheduleTask, admitter: scheduledAdmitter, owner: cfg.owner, canSchedule });
 
   bridge = createQQBridge({
     httpUrl: cfg.NAPCAT_HTTP_URL,
@@ -266,7 +284,7 @@ async function main(): Promise<void> {
     attachmentLimits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT },
   });
   const dispatcher = new Dispatcher({
-    harness,
+    harness, scheduled,
     bridge,
     tasks,
     concurrency: cfg.AGENT_CONCURRENCY,
@@ -288,7 +306,9 @@ async function main(): Promise<void> {
 
   // 继续上次未完成的工作：先由派发器按 scope FIFO 接管索引中的票据（v2 遗留会话先中止），再开启任务调度。
   // 运行中的任务从最后提交的检查点继续（已完成的阶段不重跑）。
+  const alerts = startAlerts({ enabled: () => settings.current().alertOwner, owner: cfg.owner, bridge, trace });
   await dispatcher.recover();
+  await schedules.start();
   harness.resume();
 
   // raw 先于 message 发出：入站消息先入库，派发器再写机器人"处理中"行
@@ -349,7 +369,7 @@ async function main(): Promise<void> {
   const skills = cfg.PI_SKILLS_DIR === "off" ? undefined : new SkillsStore({ dir: cfg.PI_SKILLS_DIR, loader: new SkillsLoader({ dir: cfg.PI_SKILLS_DIR }) });
   const dashboardData = { contextUsage, codexPrompt, codexBasePrompt, modelCatalog, skills };
   const dashboard = createDashboard({
-    grants, ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
+    grants, schedules, ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
     codex: codexStatus, pi: piStatus, piSessions: pi.sessionSource, settings, live,
@@ -385,7 +405,6 @@ async function main(): Promise<void> {
       return gauges;
     } });
   metrics.start();
-  const alerts = startAlerts({ enabled: () => settings.current().alertOwner, owner: cfg.owner, bridge, trace });
   const server: Server = createServer(async (req, res) => {
     if (req.url !== "/healthz") {
       await dashboard.handle(req, res);

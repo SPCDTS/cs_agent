@@ -105,7 +105,8 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
         const tx = transaction as Tx;
         const known = await tx.doc(AdmissionDoc, ticket, {});
         // 终态孤儿票据也不得重新派发。
-        if (known.conversationId !== undefined || rec.status !== "pending") return { ticket };
+        if (known.conversationId !== undefined) return { ticket };
+        if (rec.status !== "pending") return { ticket, skipped: true };
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
         Object.assign(await tx.doc(TicketDoc, conversation.id), {
           ticket, source, text, route: "agent", settings, time: Math.floor(fire.fire_at / 1000),

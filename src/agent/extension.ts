@@ -1,16 +1,15 @@
-import { defineExtension } from "@earendil-works/pi-durable";
+import { defineExtension, type AnyTask } from "@earendil-works/pi-durable";
 import type { CsTasks } from "./tasks.js";
-import type { ScheduledRuntime } from "./schedule/run.js";
 
 const EXTENSION_NAME = "cs-agent";
 
 /**
  * v3：不再有面向模型的工具与系统提示（意图模型的 route 会话已退场）。
- * 注册生图 / agent 任务；主进程传入定时运行工厂时一并注册 cs.scheduled。
+ * 注册生图 / agent 任务，以及宿主注入的排程与定时执行任务。
  */
-export function createCsAgentExtension(tasks: CsTasks, scheduled?: Pick<ScheduledRuntime, "ScheduledTask">) {
+export function createCsAgentExtension(tasks: CsTasks, additionalTasks: readonly AnyTask[] = []) {
   return defineExtension({
     name: EXTENSION_NAME,
-    tasks: [tasks.ImageTask, tasks.AgentTask, ...(scheduled ? [scheduled.ScheduledTask] : [])],
+    tasks: [tasks.ImageTask, tasks.AgentTask, ...additionalTasks],
   });
 }
