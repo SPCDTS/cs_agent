@@ -19,6 +19,7 @@
     "@modelcontextprotocol/sdk": "^1.32.1",
     "fflate": "^0.8.3",
     "js-tiktoken": "1.0.21",
+    "rrule": "^2.8.1",
     "vis-timeline": "8.5.4",
     "ws": "^8.22.0",
     "zod": "^4.6.7"
