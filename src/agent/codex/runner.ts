@@ -1,4 +1,5 @@
 import { SEND_RULE } from "../send-service.js";
+import { CodexDeliveryNotes, deliveryNoteText } from "../delivery-note.js";
 import { attachmentDirs, validateAttachmentPath } from "../../media/attach-paths.js";
 import { codexWorkspacePolicy, prepareCodexWorkspace } from "./workspace.js";
 import type { RecallTokens } from "../../context/media-recall-server.js";
@@ -795,8 +796,21 @@ export class CodexRunner {
     if (this.opts.contextUsage) await this.initializeContextUsage();
     const windowTokens = this.opts.contextUsage ? await this.contextWindow(model) : 0;
     this.opts.contextUsage?.ensure("codex", key, { windowTokens }, ticket);
+    const notes = new CodexDeliveryNotes(path.dirname(this.opts.threadsFile));
+    const note = await notes.pending(key);
+    if (note) {
+      const line = deliveryNoteText(note.fallback).replace(/[\r\n\u2028\u2029]+/g, " ");
+      // buildCodexPrompt 生成的来源行之后、引用和用户正文之前。
+      prompt = prompt.startsWith("[来源]") ? prompt.replace(/\r?\n|$/, newline => "\n" + line + newline) : line + "\n" + prompt;
+    }
+    let noteCleared: Promise<void> | undefined;
     let completed = false;
     const observe = (event: Record<string, unknown>) => {
+      if (event.type === "turn.started" && note && !noteCleared) {
+        noteCleared = notes.clear(note);
+        // 立即处理拒绝，释放线程锁前再等待并传播存储故障。
+        void noteCleared.catch(() => {});
+      }
       if (event.type === "turn.completed") completed = true;
       onJsonEvent?.(event);
     };
@@ -857,6 +871,7 @@ export class CodexRunner {
       if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
       return this.result(r);
     } finally {
+      await noteCleared;
       // exec 已等待 exit 与输出收尾；强制收尾时 rollout 可能缺失或陈旧，由下面的回退保留旧用量。
       if (completed && this.opts.contextUsage) {
         const usage = id ? await this.latestRolloutContextUsage(id) : undefined;

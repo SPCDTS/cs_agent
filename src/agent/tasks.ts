@@ -493,6 +493,27 @@ export function createTasks(deps: TaskDeps) {
     abort: (_task, runtime, context) => abortTask(runtime, context),
   });
 
+  async function recordDeliveryNote(runtime: AnyRuntime, context: Context): Promise<void> {
+    const doc = await ticketDoc(runtime, context), result = doc.agentResult;
+    if (doc.deliveryNoted || doc.replyDraft !== undefined || !result?.threadKey ||
+        (result.backend !== "pi" && result.backend !== "codex")) return;
+    const rec = await deps.getBridge().getTicket(doc.ticket);
+    if (!rec || rec.origin === "scheduled") return;
+    const rows = sendService.rows(doc.ticket), fallback = rows.find(row => row.key === doc.ticket + "#fallback");
+    if (!fallback || rows.some(row => row !== fallback && row.status !== "pending")) return;
+    if (result.backend === "pi" && doc.piTurn?.conversationId === undefined) return;
+    const backend = deps.backends.select(`${rec.message_type}:${ticketTarget(rec)}`, result.backend);
+    if (!backend.recordDeliveryNote) return;
+    await backend.recordDeliveryNote({ ticket: doc.ticket, threadKey: result.threadKey, fallback: fallback.text,
+      ...(doc.piTurn?.conversationId !== undefined ? { conversationId: doc.piTurn.conversationId } : {}) });
+    await runtime.commit(async tx => {
+      (await tx.doc(TicketDoc, runtime.conversationId)).deliveryNoted = true;
+      return undefined;
+    }, context);
+    trace.event(doc.ticket, "delivery_note", { detail: { backend: result.backend, thread_key: result.threadKey,
+      conversation: doc.piTurn?.conversationId, fallback: fallback.text } });
+  }
+
   async function settleAgent(task: RunningTask<TaskInput, AgentCheckpoint, TaskResult>, runtime: Runtime<AgentCheckpoint>, context: Context) {
     let doc = await ticketDoc(runtime, context);
     const attempt = "attempt" in task.state.checkpoint ? task.state.checkpoint.attempt : 0;
@@ -509,6 +530,8 @@ export function createTasks(deps: TaskDeps) {
     }
     const blocked = await blockedReason(deps, runtime, context, doc.ticket);
     if (blocked && !["ticket sent", "ticket sending", "ticket uncertain"].includes(blocked)) return failBlocked(runtime, context, doc.ticket, blocked, "settle");
+    // 预留后退出或发送已结束时，仍补齐提醒；不依赖再次调用 system。
+    await recordDeliveryNote(runtime, context);
     try {
       // 先恢复已发送正文后的附件；状态 uncertain 的消息仍算已发送，不补兜底。
       await sendService.reconcile(doc.ticket, runtime.signal);
@@ -545,7 +568,8 @@ export function createTasks(deps: TaskDeps) {
         }
         if (!sendService.rows(doc.ticket).some(row => row.status !== "pending")) {
           const text = doc.agentResult && !doc.agentResult.ok ? AGENT_FAILURE_REPLIES[doc.agentResult.failure] : FALLBACK_REPLY;
-          await sendService.system(doc.ticket, "fallback", text, [], runtime.signal, doc.agentResult?.ok === true);
+          await sendService.system(doc.ticket, "fallback", text, [], runtime.signal, doc.agentResult?.ok === true,
+            () => recordDeliveryNote(runtime, context));
         }
         await sendService.settle(doc.ticket);
       }
@@ -610,6 +634,7 @@ export function createTasks(deps: TaskDeps) {
       const actor = `qq:${record.user_id}`;
       const actorIsOwner = options.request?.senderIsOwner ?? (!!deps.owner && record.user_id === deps.owner);
       const scope = options.request?.scope ?? `${record.message_type}:${ticketTarget(record)}`;
+      const threadKey = options.request?.threadKey ?? threadKeyForSource(source, deps.owner);
       let quote: { message_id: string; nickname: string; text: string } | undefined;
       if (doc.replyTo && deps.store) {
         try {
@@ -635,7 +660,7 @@ export function createTasks(deps: TaskDeps) {
             settings: doc.settings,
             scope,
             access: options.request?.access ?? accessToString(accessForSource(source, deps.owner)),
-            threadKey: options.request?.threadKey ?? threadKeyForSource(source, deps.owner),
+            threadKey,
             senderIsOwner: actorIsOwner,
             source: { ...source },
             text: doc.text,
@@ -661,12 +686,12 @@ export function createTasks(deps: TaskDeps) {
           },
         ), { backend: backend.name }, res => ({ raw_reply: res.text, images: res.images }));
         options.signal?.throwIfAborted();
-        result = { ok: true, backend: backendName, text: res.text, images: [...(res.images ?? [])].slice(0, 4) };
+        result = { ok: true, backend: backendName, threadKey, text: res.text, images: [...(res.images ?? [])].slice(0, 4) };
       } catch (err) {
         rethrowIfAborted(runtime.signal, err);
         const failure = err instanceof BackendTimeoutError || options.signal?.aborted ? "timeout" : "failed";
         log.warn("agent backend failed", { ticket: short(doc.ticket), backend: backendName, ms: Date.now() - started, failure, error: (err as Error).message });
-        result = { ok: false, backend: backendName, failure };
+        result = { ok: false, backend: backendName, threadKey, failure };
       }
     }
     await runtime.commit(async (tx) => {

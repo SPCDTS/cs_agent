@@ -5,6 +5,7 @@ import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
 import type { GrantsService } from "../../src/agent/grants.js";
 import { grantsFixture } from "./grants-fixture.js";
 import { SendService } from "../../src/agent/send-service.js";
+import { deliveryNoteText } from "../../src/agent/delivery-note.js";
 import { sendFixture } from "./send-fixture.js";
 import { FALLBACK_REPLY, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
 import { withOutbox } from "./outbox-stub.js";
@@ -855,13 +856,13 @@ describe("pi durable backend", () => {
     const persistPiTurn = async (state: { requestId: string; retries: number }) => {
       expect(restarted.faux.state.callCount).toBe(0);
       await ticket.commit(async tx => { (await tx.doc(TicketDoc, ticket.id)).piTurn = state; }, context);
-      if (crash) throw new Error("crash before submit");
+      if (crash && state.retries === 1) throw new Error("crash before submit");
     };
     const retry = restarted.pi.handle(request("legacy-abort"), { ...handleContext(), persistPiTurn });
     if (crash) await expect(retry).rejects.toThrow("crash before submit");
     else expect((await retry).text).toBe("恢复完成");
     const piTurn = (await ticketHarness.snapshot(TicketDoc, ticket.id, context))!.piTurn!;
-    expect(piTurn).toEqual({ requestId: "legacy-abort#r1", retries: 1 });
+    expect(piTurn).toEqual({ requestId: "legacy-abort#r1", retries: 1, conversationId: conv.id });
     expect((await restarted.pi.handle(request("legacy-abort"), { ...handleContext(), piTurn, persistPiTurn })).text).toBe("恢复完成");
     expect(restarted.faux.state.callCount).toBe(1);
   });
@@ -935,6 +936,38 @@ describe("pi send_message 工具", () => {
     expect(tools[1]!.isError).toBe(true);
   });
 
+  it("兜底写入原 pi 会话一次，下一次模型请求可见且不单独触发推理", async () => {
+    const f = sendFixture();
+    let seen!: TranscriptContext;
+    const s = await setup([reply("直接回答，没有调用发送"), ctx => { seen = ctx; return reply(); }],
+      { dir: f.dir, sendService: f.service });
+    const tasks = createTasks({ getBridge: () => f.bridge, sendService: f.service, imageBackend: s.imageBackend,
+      imagesDir: path.join(s.dir, "images"), replyRetryDelayMs: 1,
+      backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: s.pi } }) });
+    const harness = await openHarness({ models: s.models, extension: createCsAgentExtension(tasks), storage: new MemoryStorage() }, context);
+    cleanup.push(() => harness.close(context));
+    const dispatcher = new Dispatcher({ harness, bridge: f.bridge, tasks, concurrency: 1, retryDelayMs: 1 });
+    // 提醒已持久化但 TicketDoc 标记尚未提交时失败，下一次必须依赖 requestId 去重。
+    const record = s.pi.recordDeliveryNote.bind(s.pi);
+    const noteCall = vi.spyOn(s.pi, "recordDeliveryNote").mockImplementationOnce(async note => {
+      await record(note); throw new Error("模拟提醒提交后的进程中断");
+    });
+    await dispatcher.dispatch(f.msg, f.ticket);
+    expect(noteCall).toHaveBeenCalledTimes(2);
+    const id = (await s.pi.readThreadIds())["group:7"]!;
+    const notes = (await s.pi.sessionSource.entries(String(id))).items.filter(entry => entry.kind === "cs.delivery_note");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ data: { ticket: f.ticket, threadKey: "group:7", conversationId: id, fallback: FALLBACK_REPLY },
+      model: [{ role: "user", content: deliveryNoteText(FALLBACK_REPLY) }] });
+    await s.pi.handle(request("next-delivery-turn"), handleContext());
+    expect(seen.messages.filter(message => message.role === "user" && message.content === deliveryNoteText(FALLBACK_REPLY))).toHaveLength(1);
+    // 映射重置后，重放仍写回原会话，不污染新会话。
+    await s.pi.resetThread("group:7");
+    await record({ ticket: f.ticket, threadKey: "group:7", conversationId: id, fallback: FALLBACK_REPLY });
+    expect((await s.pi.sessionSource.entries(String(id))).items.filter(entry => entry.kind === "cs.delivery_note")).toHaveLength(1);
+    expect((await s.pi.readThreadIds())["group:7"]).toBeUndefined();
+  });
+
   it("真实 durable 回合立即发送正文后上传附件，最终回答不发送、settle 不补兜底", async () => {
     const f = sendFixture();
     const s = await setup([call("write", { path: "report.txt", content: "报告内容" }),
@@ -953,6 +986,8 @@ describe("pi send_message 工具", () => {
     expect(f.service.rows(f.ticket)[0]!.text).toBe("已整理");
     expect((await f.bridge.getTicket(f.ticket))!.status).toBe("sent");
     expect((await harness.snapshot(DispatchDoc, context))!.pending).toEqual({});
+    const id = (await s.pi.readThreadIds())["group:7"]!;
+    expect((await s.pi.sessionSource.entries(String(id))).items.some(entry => entry.kind === "cs.delivery_note")).toBe(false);
   });
 });
 

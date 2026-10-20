@@ -67,8 +67,8 @@ export interface AgentHandleContext {
   onEvent(e: AgentEvent): void;
   /** 上次（崩溃前）记录的回合标记；首次处理时为 undefined */
   turn?: Readonly<TurnState>;
-  piTurn?: Readonly<{ requestId: string; retries: number }>;
-  persistPiTurn?(state: { requestId: string; retries: number }): Promise<void>;
+  piTurn?: Readonly<{ requestId: string; retries: number; conversationId?: number }>;
+  persistPiTurn?(state: { requestId: string; retries: number; conversationId?: number }): Promise<void>;
   /** 启动外部回合之前持久化回合标记（durable 任务提供；单独调用后端时可省略） */
   persistTurn?(state: TurnState): Promise<void>;
 }
@@ -82,6 +82,15 @@ export interface AgentResponse {
 export interface AgentBackend {
   readonly name: BackendName;
   handle(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse>;
+  recordDeliveryNote?(note: DeliveryNote): Promise<void>;
+}
+
+/** 只由网关根据实际预留的兜底行生成；会话标识来自本轮持久记录。 */
+export interface DeliveryNote {
+  ticket: string;
+  threadKey: ThreadKey;
+  conversationId?: number;
+  fallback: string;
 }
 
 /** 后端超时：agent 任务据此选"处理超时"模板。 */

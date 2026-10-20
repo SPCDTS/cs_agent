@@ -55,7 +55,7 @@ it('前缀图片票据和 Codex agent 票据通过真实 dispatcher/任务，记
   const stages=(t:string)=>r.store.events(t).map(e=>e.stage).filter((s,i,a)=>i===0||a[i-1]!==s);
   // received 由真实桥接层记录；这里直接调用派发器，从 admitted 开始。
   expect(stages('image')).toEqual(['admitted','routed','dispatched','phase:submit','image:submit','phase:submit','phase:collect','image:collect','phase:collect','phase:reply','reply_sent','phase:reply','reply_sent']);
-  expect(stages('agent')).toEqual(['admitted','routed','dispatched','phase:handle','backend:codex','thread_wait','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','phase:settle','no_send_fallback','send_message','final_answer','phase:settle','reply_sent']);
+  expect(stages('agent')).toEqual(['admitted','routed','dispatched','phase:handle','backend:codex','thread_wait','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','phase:settle','no_send_fallback','delivery_note','send_message','final_answer','phase:settle','reply_sent']);
   expect(r.store.events('image').find(e=>e.stage==='image:submit'&&e.status==='ok')?.detail_json).toContain('prompt-fake');
   expect(r.store.events('agent').find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')?.duration_ms).toBe(12);
   // 派发设置快照随 admitted 入观测，票据页据此显示后端 · 档位。

@@ -5,7 +5,7 @@ import { defineDoc } from "@earendil-works/pi-durable";
 import type { ImageFailure, ImageSubmission, ReconcileStep, RemoteUpload } from "../media/gen/image-gen.js";
 import type { RouteName } from "./router.js";
 
-import type { TicketSettings, TicketSource } from "./backends/types.js";
+import type { ThreadKey, TicketSettings, TicketSource } from "./backends/types.js";
 
 /** 已提交的 ComfyUI 任务（submit 阶段提交后立即与检查点同一提交写入；恢复时按它收取，不重复提交）。 */
 type ImageJob = { prompt_id: string; backend: string; /** 已提交次数（服务端丢失任务时最多重新提交 1 次） */ submits: number; status?: "running"; deadline?: number; extensions?: number; nextCollectAt?: number };
@@ -22,9 +22,9 @@ type LateImageJob = PendingImageJob & {
 };
 
 /** 执行 agent 的结果（handle 阶段与检查点同一提交写入；任务重跑时据此不再调用后端）。 */
-export type AgentResult =
+export type AgentResult = { threadKey?: ThreadKey } & (
   | { ok: true; backend: string; text: string; images: string[] }
-  | { ok: false; backend: string; failure: "timeout" | "failed" };
+  | { ok: false; backend: string; failure: "timeout" | "failed" });
 
 /**
  * 每个 QQ 消息会话的文档。ticket 只来自这里，后端无法指定回复目标。
@@ -60,7 +60,9 @@ export type TicketState = {
   lateImageJobs?: LateImageJob[];
   attachmentFailure?: boolean;
   /** pi 关闭恢复的重提编号；提交前落盘，最多补提一次。 */
-  piTurn?: { requestId: string; retries: number };
+  piTurn?: { requestId: string; retries: number; conversationId?: number };
+  /** 后端提醒已持久接收；后端仍需按 ticket 去重，以覆盖提交前崩溃。 */
+  deliveryNoted?: boolean;
   /** 后端回合标记：启动外部回合（codex）之前写入，崩溃恢复时据此避免重复询问 */
   codexTurn?: { outFile: string; attempts: number };
   /** 升级前 postprocess 留下的旧正文，仅兼容读取；不再发送。 */

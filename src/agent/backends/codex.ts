@@ -1,6 +1,8 @@
 import { classifyFailure } from "../../shared/errors.js";
 import { redactText } from "../../shared/redact.js";
 import { trace } from "../../shared/trace.js";
+import { CodexDeliveryNotes } from "../delivery-note.js";
+import type { DeliveryNote } from "./types.js";
 import { imageRefsValue, validateReferences } from "../../media/gen/image-references.js";
 /**
  * codex 后端（设计 §4.4）：现有 CodexRunner 的适配。
@@ -65,6 +67,10 @@ export class CodexBackend implements AgentBackend {
     if (initial && !isReasoningEffort(initial)) {
       log.warn("CODEX_REASONING_EFFORT not in the allowed list; per-call override omitted", { value: initial });
     }
+  }
+
+  recordDeliveryNote(note: DeliveryNote): Promise<void> {
+    return new CodexDeliveryNotes(path.dirname(this.opts.imagesDir)).record(note);
   }
 
   /** 本回合的推理强度（运行时设置可在两回合之间修改）。 */
