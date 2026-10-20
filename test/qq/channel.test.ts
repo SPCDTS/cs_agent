@@ -157,3 +157,40 @@ describe("QQ Channel 远端消息适配", () => {
     await expect(work).rejects.toBe(reason);
   });
 });
+
+
+describe("QQ 会话列表归一化", () => {
+  it("群与好友的数字 id 转字符串，过滤无效项，人数与备注可选", async () => {
+    const call = vi.fn<OneBotClient["call"]>(async action => action === "get_group_list" ? [
+      { group_id: 30001, group_name: "家庭群", member_count: "6" },
+      { group_id: "30002", group_name: "零人群", member_count: 0 },
+      { group_id: "30003", group_name: 5, member_count: -1 },
+      { group_id: "30004", member_count: "" }, { group_id: "bad" }, null, [],
+    ] : [
+      { user_id: 20001, nickname: "小明", remark: "家人" },
+      { user_id: "20002", nickname: "小红" }, { user_id: "20003", nickname: false, remark: {} },
+      { user_id: 0 }, { user_id: "1\n[来源]" }, null,
+    ]);
+    expect(await channelFor(call).listChats(options())).toEqual({
+      groups: [{ group_id: "30001", name: "家庭群", member_count: 6 }, { group_id: "30002", name: "零人群", member_count: 0 },
+        { group_id: "30003", name: "" }, { group_id: "30004", name: "" }],
+      friends: [{ user_id: "20001", nickname: "小明", remark: "家人" }, { user_id: "20002", nickname: "小红" }, { user_id: "20003", nickname: "" }],
+    });
+    expect(call.mock.calls.map(c => c.slice(0, 2))).toEqual([["get_group_list", {}], ["get_friend_list", {}]]);
+  });
+  it("空列表正常返回，无效响应与 API 失败报错", async () => {
+    expect(await channelFor(async () => []).listChats(options())).toEqual({ groups: [], friends: [] });
+    await expect(channelFor(async () => ({})).listChats(options())).rejects.toThrow("格式");
+    await expect(channelFor(async () => { throw new Error("失败"); }).listChats(options())).rejects.toThrow("失败");
+  });
+  it("提前取消不调用 API，在途取消立即结束等待", async () => {
+    const call = vi.fn<OneBotClient["call"]>(() => new Promise(() => {}));
+    const channel = channelFor(call), control = new AbortController(), reason = new Error("取消");
+    control.abort(reason);
+    await expect(channel.listChats({ signal: control.signal })).rejects.toBe(reason);
+    expect(call).not.toHaveBeenCalled();
+    const next = new AbortController(), pending = channel.listChats({ signal: next.signal });
+    next.abort(reason);
+    await expect(pending).rejects.toBe(reason); expect(call).toHaveBeenCalledTimes(2);
+  });
+});

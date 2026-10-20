@@ -15,10 +15,14 @@ import type {
   RemoteMessage, ReplyResult, ReplyTicketRecord,
 } from "../channel/types.js";
 import type { QQBridge, QQBridgeConfig } from "./types.js";
-import { createOneBotClient, isRecord, numericId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
+import { createOneBotClient, isRecord, numericId, isValidId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
 import { hasUsableContent, isAllowed, isTriggered, messageSegmentTypes, normalizeMessage, renderText, validatePolicy } from "./policy.js";
 import { prepareImages, type ImageSegment } from "./image.js";
 import { dedupeKey, isTicketId, ticketIdFor, ReplyStore } from "./reply-store.js";
+
+const GROUP_NAME_TTL_MS = 6 * 60 * 60_000;
+const GROUP_NAME_BACKOFF_MS = 60_000;
+const GROUP_NAME_TIMEOUT_MS = 1500;
 
 const DEFAULT_TIMEOUT_MS = 15000;
 const IMAGE_TIMEOUT_MS = 30000;
@@ -99,6 +103,9 @@ class Bridge extends EventEmitter implements Channel {
   private readonly downloadHooks: DownloadHooks;
   private readonly downloadConcurrency: number;
   private readonly downloadDeadlineMs: number;
+  private readonly groupNames = new Map<string, { name?: string; expires: number }>();
+  private readonly groupNameJobs = new Map<string, Promise<string | undefined>>();
+  private readonly rawJobs = new Map<string, Promise<void>>();
   private readonly seen = new Set<string>();
   private readonly locks = new Set<string>();
 
@@ -168,6 +175,7 @@ class Bridge extends EventEmitter implements Channel {
 
   /** 取消等待时忽略迟到的 OneBot 响应；HTTP 请求沿用客户端超时。 */
   private remoteCall(action: string, params: Record<string, unknown>, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<unknown> {
+    opts.signal.throwIfAborted();
     const work = this.client.call(action, params, opts.timeoutMs === undefined ? undefined : { timeoutMs: opts.timeoutMs });
     const { signal } = opts;
     return new Promise((resolve, reject) => {
@@ -211,6 +219,56 @@ class Bridge extends EventEmitter implements Channel {
         return normalized;
       }),
     };
+  }
+
+  async listChats(opts: { signal: AbortSignal }): ReturnType<Channel["listChats"]> {
+    const [groupList, friendList] = await Promise.all([
+      this.remoteCall("get_group_list", {}, opts), this.remoteCall("get_friend_list", {}, opts),
+    ]);
+    opts.signal.throwIfAborted();
+    if (!Array.isArray(groupList) || !Array.isArray(friendList)) throw new Error("会话列表返回格式错误");
+    const groups = groupList.filter(isRecord).flatMap(row => {
+      const group_id = stringField(row, "group_id");
+      if (!isValidId(group_id)) return [];
+      const name = typeof row.group_name === "string" ? row.group_name : "";
+      if (name) this.groupNames.set(group_id, { name, expires: Date.now() + GROUP_NAME_TTL_MS });
+      const count = typeof row.member_count === "number" || typeof row.member_count === "string" && row.member_count.trim()
+        ? Number(row.member_count) : NaN;
+      return [{ group_id, name, ...(Number.isSafeInteger(count) && count >= 0 ? { member_count: count } : {}) }];
+    });
+    const friends = friendList.filter(isRecord).flatMap(row => {
+      const user_id = stringField(row, "user_id");
+      if (!isValidId(user_id)) return [];
+      return [{ user_id, nickname: typeof row.nickname === "string" ? row.nickname : "",
+        ...(typeof row.remark === "string" ? { remark: row.remark } : {}) }];
+    });
+    return { groups, friends };
+  }
+
+  private nameMessage(message: InboundMessage): Promise<void> | undefined {
+    if (message.message_type !== "group" || !message.group_id) return;
+    const groupId = message.group_id, cached = this.groupNames.get(groupId);
+    if (cached && cached.expires > Date.now()) { message.group_name = cached.name; return; }
+    let job = this.groupNameJobs.get(groupId);
+    if (!job) {
+      const entry = { name: cached?.name, expires: 0 }; // 刷新失败时沿用旧群名
+      this.groupNames.set(groupId, entry);
+      const control = new AbortController();
+      const timer = setTimeout(() => control.abort(new Error("群名查询超时")), GROUP_NAME_TIMEOUT_MS);
+      timer.unref();
+      job = this.remoteCall("get_group_info", { group_id: numericId(groupId) }, { signal: control.signal, timeoutMs: GROUP_NAME_TIMEOUT_MS })
+        .then(info => {
+          const name = isRecord(info) && typeof info.group_name === "string" ? info.group_name : "";
+          if (!name) throw new Error("群名为空");
+          if (this.groupNames.get(groupId) === entry) { entry.name = name; entry.expires = Date.now() + GROUP_NAME_TTL_MS; }
+          return this.groupNames.get(groupId)?.name;
+        }).catch(() => {
+          if (this.groupNames.get(groupId) === entry) entry.expires = Date.now() + GROUP_NAME_BACKOFF_MS;
+          return this.groupNames.get(groupId)?.name;
+        }).finally(() => { clearTimeout(timer); this.groupNameJobs.delete(groupId); });
+      this.groupNameJobs.set(groupId, job);
+    }
+    return job.then(name => { message.group_name = name; });
   }
 
   async refreshImageUrl(file: string, opts: { signal: AbortSignal }): Promise<string | undefined> {
@@ -333,8 +391,17 @@ class Bridge extends EventEmitter implements Channel {
     }
     const message = normalizeMessage(event);
     if (!message || message.user_id === message.self_id) return; // 非消息 / 非法 / 自回声
-    if (inFeedScope(this.config, message)) this.emitSafe("raw", message);
-    if (!isTriggered(this.config, message)) return;
+    const feed = inFeedScope(this.config, message), triggered = isTriggered(this.config, message);
+    const named = feed || triggered ? this.nameMessage(message) : undefined;
+    if (feed) {
+      if (named) {
+        const key = "group:" + message.group_id + ":" + message.message_id;
+        const raw = named.then(() => { if (this.running) this.emitSafe("raw", message); });
+        this.rawJobs.set(key, raw);
+        void raw.finally(() => { if (this.rawJobs.get(key) === raw) this.rawJobs.delete(key); });
+      } else this.emitSafe("raw", message);
+    }
+    if (!triggered) return;
 
     const key = dedupeKey(message);
     if (this.seen.has(key)) return;
@@ -361,10 +428,10 @@ class Bridge extends EventEmitter implements Channel {
       message.attachments = attachments.map(a => ({ ...a, status: 'skipped', reason: '发送者下载并发超过 2' }));
     }
     const ticket = store.admit(message); // 同步事务先保存 dedupe、pending 及恢复元数据。
-    if (ticket) this.enqueueIncoming(message, ticket, true);
+    if (ticket) this.enqueueIncoming(message, ticket, true, named);
   }
 
-  private enqueueIncoming(message: InboundMessage, ticket: string, emit: boolean): Promise<void> {
+  private enqueueIncoming(message: InboundMessage, ticket: string, emit: boolean, named?: Promise<void>): Promise<void> {
     const existing = this.incomingJobs.get(ticket);
     if (existing) return existing;
     const scope = message.message_type === 'group' ? 'group:' + message.group_id : 'private:' + message.user_id;
@@ -410,6 +477,10 @@ class Bridge extends EventEmitter implements Channel {
         }
         store.finishAttachments(ticket, message.attachments!, message.image_error);
       }
+      if (named) {
+        await named;
+        if (message.group_name) store.setGroupName(ticket, message.group_name);
+      }
       if (emit && this.running) this.emit('message', message, ticket);
     }).catch(err => this.emitError(toError(err)));
     this.incomingJobs.set(ticket, run); this.scopeChains.set(scope, run);
@@ -436,7 +507,12 @@ class Bridge extends EventEmitter implements Channel {
     if (!messageId) return;
     if (event.notice_type === "group_recall") {
       const group = idOf(event.group_id);
-      if (group && this.config.allowGroups.includes(group)) this.emitSafe("recall", "group:" + group, messageId);
+      if (group && this.config.allowGroups.includes(group)) {
+        // 群名查询异步化后，撤回仍须排在原消息入库之后。
+        const raw = this.rawJobs.get("group:" + group + ":" + messageId);
+        if (raw) void raw.then(() => { if (this.running) this.emitSafe("recall", "group:" + group, messageId); });
+        else this.emitSafe("recall", "group:" + group, messageId);
+      }
     } else if (event.notice_type === "friend_recall") {
       const user = idOf(event.user_id);
       if (user && (this.config.allowUsers === "*" || this.config.allowUsers.includes(user))) {

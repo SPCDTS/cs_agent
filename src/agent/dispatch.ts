@@ -268,6 +268,7 @@ export class Dispatcher {
       type: msg.message_type,
       user_id: msg.user_id,
       group_id: msg.group_id,
+      ...(msg.group_name ? { group_name: msg.group_name } : {}),
       nickname: msg.nickname,
     };
     const reply = msg.segments.find((s) => s.type === "reply") as { data: { id?: string } } | undefined;

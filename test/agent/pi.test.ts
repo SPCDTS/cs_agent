@@ -31,7 +31,7 @@ import { createTasks } from "../../src/agent/tasks.js";
 import { createCsAgentExtension } from "../../src/agent/extension.js";
 import { openHarness } from "../../src/agent/harness.js";
 import { loadAgentConfig as loadConfig } from "../../src/agent/config.js";
-import type { InboundMessage, ReplyTicketRecord } from "../../src/channel/types.js";
+import type { Channel, InboundMessage, ReplyTicketRecord } from "../../src/channel/types.js";
 import { tmp } from "./helpers.js";
 import { put, sandboxRequirements } from "./pi-sandbox-fixture.js";
 
@@ -51,7 +51,7 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { channel?: Pick<Channel, "listChats">; currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   vi.stubEnv("CODEX_REQUIREMENTS_FILE", await sandboxRequirements(dir));
   const contextUsage = new ContextUsageStore(dir);
@@ -73,7 +73,7 @@ async function setup(steps: FauxResponseStep[], opts: { currentModel?: () => Mod
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
   const pi = await PiBackend.open({ dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
-    skillsDir: opts.skillsDir, currentModel: opts.currentModel, mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
+    channel: opts.channel, skillsDir: opts.skillsDir, currentModel: opts.currentModel, mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
     instrumentation: opts.instrumentation, thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
     ...(opts.disk ? {} : { storage: new MemoryStorage() }),
@@ -83,6 +83,16 @@ async function setup(steps: FauxResponseStep[], opts: { currentModel?: () => Mod
 }
 
 describe("pi durable backend", () => {
+  it.each([false, true])("qq_chats 仅在 all 范围调用通道（主人私聊=%s）", async owner => {
+    const listChats = vi.fn<Channel["listChats"]>().mockResolvedValue({ groups: [{ group_id: "7", name: "家庭群", member_count: 6 }], friends: [] });
+    let seen!: TranscriptContext;
+    const s = await setup([call("qq_chats"), ctx => { seen = ctx; return reply(); }], { channel: { listChats } });
+    await s.pi.handle(request("chats", owner), handleContext());
+    expect(listChats).toHaveBeenCalledTimes(owner ? 1 : 0);
+    expect(results(seen)).toContain(owner ? "group:7 家庭群（6 人）" : "仅限主人私聊");
+    const result = seen.messages.find(m => m.role === "toolResult" && m.toolName === "qq_chats");
+    expect(result?.role === "toolResult" && result.isError).toBe(!owner);
+  });
   it.each([true, false])("技能权限与提示按本轮发送者接线（owner 私聊=%s），下一条非 owner 消息不可改", async privateOwner => {
     const dir = tmp("pi-skills-owner-"), skillsDir = path.join(dir, "custom-skills"), file = path.join(skillsDir, "hello", "SKILL.md");
     const text = "---\nname: hello\ndescription: owner 新增技能\n---\n正文";

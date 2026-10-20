@@ -10,6 +10,7 @@
  *   [周摘要 10-06~10-12] ……
  * 非今天的消息在时间前加 "MM-DD "；ids=true 时行首加 "#<message_id> "（供 qq_message / before_message_id 使用）。
  */
+import { headerNickname } from "../shared/header.js";
 import { BOT_STATUS, clip, EXCERPT_MAX, SUMMARY_MAX, type ContextItem, type MessageRow, type SummaryRow } from "./store.js";
 
 export const DEFAULT_CONTEXT_MAX_CHARS = 2500;
@@ -34,9 +35,10 @@ function formatTime(ts: number, now = Math.floor(Date.now() / 1000)): string {
   return sameDay(d, new Date(now * 1000)) ? hm : `${md(d)} ${hm}`;
 }
 
-function scopeLabel(scope: string): string {
+function scopeLabel(scope: string, name?: string): string {
   const [kind, id] = scope.split(":");
-  return kind === "group" ? `[群${id}]` : `[私聊${id}]`;
+  const label = name ? `(${headerNickname(name)})` : "";
+  return kind === "group" ? `[群${id}${label}]` : `[私聊${id}${label}]`;
 }
 
 /** 图片路径作为整体保留；超出正文预算的路径放在省略号之后。 */
@@ -83,7 +85,7 @@ function botAction(row: MessageRow): string {
 
 function prefix(row: MessageRow, o: FormatOptions): string {
   const id = o.ids && !row.message_id.startsWith("self:") ? `#${row.message_id} ` : "";
-  const scope = o.showScope ? `${scopeLabel(row.scope)} ` : "";
+  const scope = o.showScope ? `${scopeLabel(row.scope, row.scope_name)} ` : "";
   return `${id}${scope}${formatTime(row.time, o.now)} `;
 }
 
@@ -97,7 +99,7 @@ export function formatSummary(row: SummaryRow, o: Pick<FormatOptions, "showScope
   const start = new Date(row.period_start * 1000);
   const label =
     row.level === "day" ? `[日摘要 ${md(start)}]` : `[周摘要 ${md(start)}~${md(new Date((row.period_end - 86400) * 1000))}]`;
-  const scope = o.showScope ? `${scopeLabel(row.scope)} ` : "";
+  const scope = o.showScope ? `${scopeLabel(row.scope, row.scope_name)} ` : "";
   return `${scope}${label} ${clip(row.text, SUMMARY_MAX)}`;
 }
 

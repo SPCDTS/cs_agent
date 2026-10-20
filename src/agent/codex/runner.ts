@@ -24,7 +24,7 @@ import path from "node:path";
 import type { TicketSource } from "../backends/types.js";
 import { log } from "../../shared/log.js";
 import { accessForSource, isScope, parseAccess } from "../../context/access.js";
-import { clip } from "../../context/store.js";
+import { headerField, headerNickname } from "../../shared/header.js";
 
 export interface CodexRunnerOptions {
   /** 可执行文件及前置参数，例如 ["codex"] 或测试中的 [node, fake-codex.mjs] */
@@ -224,6 +224,7 @@ ${skills ? `## 技能
 - 改完告诉用户下一条消息生效。
 
 ` : ""}## 聊天记录与图片
+- 主人私聊可用 qq_chats 查看群名、群号和好友备注，按名称确认会话。
 - [image] 表示未召回的图片，需要查看时调用 qq_image(message_id)，每轮默认最多 5 次；返回路径文本后用 qq_view_image(path) 查看。
 - [image:<路径>] 表示已召回，可以直接使用。
 
@@ -1005,28 +1006,15 @@ export class CodexRunner {
   }
 }
 
-const HEADER_NICKNAME_MAX = 40;
-const HEADER_LABEL_RE = /\[(来源|引用(?:\s+#[^\]\r\n]*)?)\]/g;
-
-/** 折成单行：控制字符、行/段分隔符一律换成空格并合并空白。 */
-function oneLine(text: string): string {
-  return text.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
-}
-
-/** 头部里的不可信字段（昵称、引用正文）：单行，且不含我们的 [来源]/[引用] 标签。 */
-function headerField(text: string, max: number): string {
-  return clip(oneLine(text).replace(HEADER_LABEL_RE, "($1)"), max);
-}
-
-/** 头部用的昵称：单行、去标签、≤40 字。 */
-function headerNickname(nickname: string): string {
-  return headerField(nickname, HEADER_NICKNAME_MAX);
+function groupLabel(s: TicketSource): string {
+  const name = s.group_name ? headerNickname(s.group_name) : "";
+  return name ? `群 ${name}(${s.group_id})` : `群 ${s.group_id}`;
 }
 
 export function sourceLabel(s: TicketSource): string {
   const nick = s.nickname ? headerNickname(s.nickname) : "";
   const who = nick ? `${nick}(${s.user_id})` : s.user_id;
-  return s.type === "group" ? `QQ 群 ${s.group_id} 成员 ${who}` : `QQ 私聊用户 ${who}`;
+  return s.type === "group" ? `QQ ${groupLabel(s)} 成员 ${who}` : `QQ 私聊用户 ${who}`;
 }
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
@@ -1052,7 +1040,7 @@ export function buildCodexPrompt(
 ): string {
   const nick = source.nickname ? headerNickname(source.nickname) : "";
   const who = nick ? `${nick}(${source.user_id})` : source.user_id;
-  const where = source.type === "group" ? `群 ${source.group_id}` : "私聊";
+  const where = source.type === "group" ? groupLabel(source) : "私聊";
   const time = localStamp(opts.time && opts.time > 0 ? opts.time : Math.floor(Date.now() / 1000));
   const lines = [`[来源] ${where} · ${who} · ${time}`];
   if (opts.quote) {

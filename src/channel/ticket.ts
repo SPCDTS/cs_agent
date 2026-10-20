@@ -16,6 +16,7 @@ export function inboundFromTicket(rec: ReplyTicketRecord): InboundMessage {
     message_type: rec.message_type,
     user_id: rec.user_id,
     group_id: rec.group_id,
+    ...(rec.group_name ? { group_name: rec.group_name } : {}),
     self_id: rec.self_id,
     nickname: rec.source_nickname,
     text: rec.source_text,

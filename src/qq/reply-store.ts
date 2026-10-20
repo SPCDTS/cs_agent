@@ -34,6 +34,7 @@ interface TicketRow {
   self_id: string;
   user_id: string;
   group_id: string | null;
+  group_name: string | null;
   message_type: string;
   source_message_id: string;
   source_nickname: string;
@@ -56,6 +57,7 @@ function toRecord(row: TicketRow): ReplyTicketRecord {
     self_id: row.self_id,
     user_id: row.user_id,
     group_id: row.group_id,
+    ...(row.group_name ? { group_name: row.group_name } : {}),
     message_type: row.message_type === "group" ? "group" : "private",
     source_message_id: row.source_message_id,
     source_nickname: row.source_nickname,
@@ -112,6 +114,7 @@ export class ReplyStore {
   /** 旧库补列：source_text（崩溃对账需要原文）、source_route_text（分流文本；旧行保持 NULL）。 */
   private migrate(): void {
     const columns = this.db.prepare("PRAGMA table_info(tickets)").all() as { name: string }[];
+    if (!columns.some(c => c.name === "group_name")) this.db.exec("ALTER TABLE tickets ADD COLUMN group_name TEXT");
     if (!columns.some(c => c.name === "attachments")) this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT");
     if (!columns.some(c => c.name === "source_images")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_images TEXT");
     if (!columns.some(c => c.name === "source_image_error")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_image_error TEXT");
@@ -162,11 +165,15 @@ export class ReplyStore {
   /** 返回 true 表示新建了票据行；false 表示已存在（保留原记录）。 */
   private insertTicket(ticket: string, m: InboundMessage, now: string): boolean {
     const result = this.db.prepare(`INSERT OR IGNORE INTO tickets
-      (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, source_text, source_route_text, source_images, source_image_error, attachments, created_at, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
+      (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, source_text, source_route_text, source_images, source_image_error, attachments, created_at, group_name, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
       .run(ticket, m.self_id, m.user_id, m.message_type === "group" ? m.group_id : null,
-        m.message_type, m.message_id, m.nickname, m.text, m.route_text, JSON.stringify(m.images), m.image_error ?? null, JSON.stringify(m.attachments ?? []), now);
+        m.message_type, m.message_id, m.nickname, m.text, m.route_text, JSON.stringify(m.images), m.image_error ?? null, JSON.stringify(m.attachments ?? []), now, m.group_name ?? null);
     return Number(result.changes) === 1;
+  }
+
+  setGroupName(ticket: string, name: string): void {
+    this.db.prepare("UPDATE tickets SET group_name = ? WHERE ticket_id = ?").run(name, ticket);
   }
 
   finishAttachments(ticket: string, attachments: NonNullable<InboundMessage['attachments']>, error?: string): void {

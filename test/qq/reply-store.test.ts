@@ -1,3 +1,4 @@
+import { inboundFromTicket } from "../../src/channel/ticket.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,12 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "reply-store-")); store = nu
 afterEach(() => { store?.close(); rmSync(dir, { recursive: true, force: true }); });
 
 describe("ReplyStore", () => {
+  it("群名随票据保存并在重新打开后恢复", () => {
+    store = new ReplyStore(dir);
+    const ticket = store.admit({ ...msg("group"), message_type: "group", group_id: "7", group_name: "家庭群" })!;
+    store.close(); store = new ReplyStore(dir);
+    expect(inboundFromTicket(store.get(ticket)!).group_name).toBe("家庭群");
+  });
   it("admit stores source_text and returns null for a repeat", () => {
     store = new ReplyStore(dir);
     const t = store.admit(msg("1", "画一只猫"));
@@ -76,6 +83,7 @@ describe("ReplyStore", () => {
 
     store = new ReplyStore(dir);
     expect(store.get(old)?.source_text).toBe("");
+    expect(inboundFromTicket(store.get(old)!).group_name).toBeUndefined();
     expect(store.get(old)?.source_route_text).toBeUndefined();
     const t = store.admit(msg("new", "新消息"))!;
     expect(store.get(t)?.source_text).toBe("新消息");

@@ -9,7 +9,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { loadConfig } from "../config.js";
 import { resolveAttachmentDir } from "../media/attach-paths.js";
-import { recallViaLoopback, viewViaLoopback } from "./media-recall-client.js";
+import { chatsViaLoopback, recallViaLoopback, viewViaLoopback } from "./media-recall-client.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { parseAccess } from "../context/access.js";
 import { MemoryInstrumentation } from "../obs/memory/instrumentation.js";
@@ -43,6 +43,7 @@ const server = createQQContextServer({
       backend: process.env.QQ_BACKEND || 'codex', ticket: process.env.QQ_TICKET || null,
       session: process.env.QQ_SESSION || null });
   },
+  chats: () => chatsViaLoopback(process.env.QQ_RECALL_TOKEN, Number(process.env.MEDIA_RECALL_PORT || 8790)),
   recall: id => recallViaLoopback(id, process.env.QQ_RECALL_TOKEN, Number(process.env.MEDIA_RECALL_PORT || 8790)),
   view: file => viewViaLoopback(file, process.env.QQ_RECALL_TOKEN, Number(process.env.MEDIA_RECALL_PORT || 8790)),
   openStore: () => (store ??= new ContextStore(dataDir, { readOnly: true })),

@@ -45,6 +45,7 @@ async function pushAndFlush(...events: unknown[]): Promise<InboundMessage[]> {
   const sentinel = privateEvent(OWNER, "sentinel");
   server.push(sentinel);
   await waitFor(() => received.some(r => r.message.message_id === String(sentinel.message_id)), 5000, "sentinel");
+  await Promise.all((await bridge.listPendingTickets()).map(r => bridge.prepareIncoming?.(r.ticket_id)));
   return received.slice(before).map(r => r.message).filter(m => m.text !== "sentinel");
 }
 

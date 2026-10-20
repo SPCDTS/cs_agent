@@ -19,6 +19,7 @@ export interface InboundMessage {
   message_type: ChatType;
   user_id: string;
   group_id: string | null;
+  group_name?: string;
   self_id: string;
   nickname: string;
   /** text 段拼接，其它段以 "[type]" 占位，最长 16000 字符 */
@@ -48,6 +49,7 @@ export interface ReplyTicketRecord {
   message_type: ChatType;
   source_message_id: string;
   source_nickname: string;
+  group_name?: string;
   /** 原消息正文（normalize 后的 text），用于崩溃后无派发索引时重建处理 */
   source_text: string;
   /** 原消息的分流文本（InboundMessage.route_text）；旧库的行没有该列时为 undefined */
@@ -116,6 +118,11 @@ export interface Channel {
   send(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }>;
   /** 取远端原消息；不存在返回 null。 */
   fetchMessage(messageId: string, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<RemoteMessage | null>;
+  /** 只读列出群与好友；调用方负责访问范围校验。 */
+  listChats(opts: { signal: AbortSignal }): Promise<{
+    groups: { group_id: string; name: string; member_count?: number }[];
+    friends: { user_id: string; nickname: string; remark?: string }[];
+  }>;
   /** 图片直链失效时换新地址；拿不到返回 undefined。 */
   refreshImageUrl(file: string, opts: { signal: AbortSignal }): Promise<string | undefined>;
 }

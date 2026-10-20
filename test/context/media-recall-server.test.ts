@@ -1,6 +1,7 @@
+import type { Channel } from "../../src/channel/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RecallTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
-import { recallViaLoopback } from "../../src/mcp/media-recall-client.js";
+import { chatsViaLoopback, recallViaLoopback } from "../../src/mcp/media-recall-client.js";
 import { loadConfig } from "../../src/config.js";
 import type { Access } from "../../src/context/access.js";
 
@@ -110,5 +111,52 @@ describe("召回 loopback 与令牌", () => {
     tokens.issue({ access, ticket: "close", deadline: Date.now() + 1000 }).revoke();
     tokens.close();
     expect(tickets.size).toBe(0); expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+
+describe("会话列表 loopback", () => {
+  async function chatsSetup() {
+    const listChats = vi.fn<Channel["listChats"]>().mockResolvedValue({ groups: [{ group_id: "7", name: "家庭群" }], friends: [] });
+    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) }, 1, { listChats });
+    const server = await startMediaRecallServer(tokens, 0); closes.push(server.close);
+    const issue = (access: Access, ticket: string) => tokens.issue({ access, ticket, deadline: Date.now() + 60_000 });
+    const post = (token?: string, body: unknown = {}) => fetch("http://127.0.0.1:" + server.port + "/chats", {
+      method: "POST", headers: { ...(token ? { Authorization: "Bearer " + token } : {}), "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    return { listChats, tokens, server, issue, post };
+  }
+  it("缺失、伪造、过期令牌拒绝；scope 令牌无权访问，参数不能提升权限", async () => {
+    const s = await chatsSetup();
+    expect((await s.post()).status).toBe(401); expect((await s.post("a".repeat(64))).status).toBe(401);
+    for (const scope of ["group:7", "private:1"]) {
+      const lease = s.issue({ kind: "scope", scope }, scope);
+      expect((await s.post(lease.token)).status).toBe(403);
+      expect((await s.post(lease.token, { access: "all" })).status).toBe(400);
+      lease.revoke(); expect((await s.post(lease.token)).status).toBe(401);
+    }
+    const exp = s.issue({ kind: "all" }, "expired");
+    const now = Date.now(), clock = vi.spyOn(Date, "now").mockReturnValue(now + 61_000);
+    try { expect((await s.post(exp.token)).status).toBe(401); } finally { clock.mockRestore(); }
+    expect(s.listChats).not.toHaveBeenCalled();
+  });
+  it("all 返回清洗后的文本列表，不消耗媒体召回预算；拒绝非空参数", async () => {
+    const s = await chatsSetup(), lease = s.issue({ kind: "all" }, "owner");
+    for (const body of [{ scope: "group:7" }, [], null, { message_id: "1" }]) expect((await s.post(lease.token, body)).status).toBe(400);
+    expect(s.listChats).not.toHaveBeenCalled();
+    await s.tokens.recall(lease.token, "1");
+    expect(await chatsViaLoopback(lease.token, s.server.port)).toBe("group:7 家庭群");
+    expect((await s.post(lease.token)).status).toBe(200);
+    expect(s.listChats).toHaveBeenCalledTimes(2);
+  });
+  it("撤销令牌立即取消在途查询，即使通道不响应取消也不能返回迟到结果", async () => {
+    const s = await chatsSetup(), lease = s.issue({ kind: "all" }, "owner");
+    let finish!: (v: Awaited<ReturnType<Channel["listChats"]>>) => void;
+    s.listChats.mockImplementation(() => new Promise(r => { finish = r; }));
+    const pending = s.post(lease.token);
+    await vi.waitFor(() => expect(s.listChats).toHaveBeenCalledOnce());
+    const signal = s.listChats.mock.calls[0]![0].signal;
+    lease.revoke(); expect(signal.aborted).toBe(true);
+    expect((await pending).status).toBe(401); finish({ groups: [], friends: [] });
   });
 });

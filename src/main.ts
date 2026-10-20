@@ -110,7 +110,8 @@ async function main(): Promise<void> {
       refreshImageUrl: (file, opts) => getBridge().refreshImageUrl(file, opts),
       getTicket: ticket => getBridge().getTicket(ticket),
     } });
-  const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET);
+  const chatsChannel: Pick<Channel, "listChats"> = { listChats: opts => getBridge().listChats(opts) };
+  const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel);
   const recallServer = await startMediaRecallServer(recallTokens, cfg.MEDIA_RECALL_PORT);
 
   // comfy-cli 只对 loopback 目标获取 object_info：非 loopback 的 COMFYUI_URL 经容器内转发
@@ -186,7 +187,7 @@ async function main(): Promise<void> {
     currentModel: currentPiModel,
     dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     skillsDir: cfg.PI_SKILLS_DIR,
-    mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
+    channel: chatsChannel, mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
     thinkingLevel, store, instrumentation, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,

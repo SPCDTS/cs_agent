@@ -145,7 +145,9 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 - 每轮推理强度：v3 固定取 `CODEX_REASONING_EFFORT`，首轮与 resume 均追加 `-c model_reasoning_effort="<档位>"`（v2 曾由意图模型按请求选择）。若 resume 因会话丢失失败 → 新建会话并覆盖记录，回复中不暴露内部错误细节。
 - **互斥队列**：固定会话一次只跑一轮，其余排队；单轮超时可配（默认 600 s），超时后 kill 进程树并回复用户"处理超时"。
 - 容器内 `config.toml` 为受管文件，入口脚本每次启动按环境变量重写最小版本（`model`、`model_reasoning_effort` 来自环境变量，默认 `gpt-6.1-sol` / `high`；后者只是缺省值，每轮被上面的 `-c` 覆盖），**不**继承宿主机的 Windows 路径配置。
-- 传给 codex 的 prompt 带来源标注（私聊/群、昵称），不带 QQ 号之外的任何授权语义。
+- codex 与 pi 共用的来源头部在群名已知时显示 `群 家庭群(123456)`，否则沿用群号；群名与昵称统一折成单行、中和来源/引用标签并限制 40 字，不赋予授权语义。QQBridge 的群名缓存来自 `get_group_info`（6 小时 TTL，硬超时 1500ms，失败退避 60 秒），随入站消息和恢复票据传递。
+- 上下文库以幂等迁移建立 `scope_names(scope PRIMARY KEY, name, updated_at)`，记录带群名的消息时 upsert；跨会话历史的消息、引用链与摘要标签附上清洗后的群名。
+- 只读工具 `qq_chats()` 列出群名/群号及好友备注，每类最多 200 条，仅限主人私聊（`access=all`）。pi 直接调用 Channel，codex 的 qq_context MCP 通过 `POST /chats` 回到 loopback 服务；主进程以同一回合 recall token 再次核验权限，令牌过期或撤销即取消查询。Channel 的 `listChats` 使用 `get_group_list/get_friend_list` 并刷新群名缓存，context 仅依赖通道契约。
 
 ### 5.4 ComfyUI 经 MCP
 - 容器内以 stdio 启动 `comfy-mcp`（Python venv），`COMFYUI_URL=http://host.docker.internal:8188`，`COMFY_BIN=/opt/comfy/bin/comfy`。

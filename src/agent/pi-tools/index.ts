@@ -1,3 +1,5 @@
+import type { Channel } from "../../channel/types.js";
+import { chatsTool } from "./chats.js";
 import path from "node:path";
 import { attachmentDirs, resolveAttachmentDir } from "../../media/attach-paths.js";
 import { DEFAULT_ATTACHMENT_LIMITS, type AttachmentLimits } from "../../media/attach.js";
@@ -34,6 +36,7 @@ export interface PiToolsOptions {
   maxContextChars?: number;
   attachmentLimits?: AttachmentLimits;
   instrumentation?: RecallObserver;
+  channel?: Pick<Channel, "listChats">;
   mediaRecall?: Pick<MediaRecall, "recall">;
   mediaRecallMaxPerTicket?: number;
 }
@@ -173,6 +176,7 @@ export function createPiExtension(opts: PiToolsOptions) {
       } }),
     ],
     tools: [
+      chatsTool(opts.channel),
       attachment("qq_send_image"), attachment("qq_send_file"),
       defineTool({ ...recall, execute: (args, api, context) => boundary(api.taskId,"media_recall",async () => recall.execute(args,api,context)) }),
       defineTool({ name: "web_search", description: "搜索事实资料，返回标题、日期、摘要与来源链接。", replay: "safe",

@@ -21,6 +21,7 @@ export type TicketSource = {
   type: "private" | "group";
   user_id: string;
   group_id: string | null;
+  group_name?: string;
   nickname: string;
 };
 

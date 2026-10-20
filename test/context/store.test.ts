@@ -1,6 +1,7 @@
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { accessForSource, parseAccess, resolveOwner, type Access } from "../../src/context/access.js";
-import { formatMessage, formatRecent, formatSearch, formatSummary, joinCapped } from "../../src/context/format.js";
+import { formatMessage, formatMessageFull, formatRecent, formatSearch, formatSummary, joinCapped } from "../../src/context/format.js";
 import { ContextStore } from "../../src/context/store.js";
 import type { InboundMessage } from "../../src/channel/types.js";
 import { tmp } from "../agent/helpers.js";
@@ -46,6 +47,30 @@ describe("access", () => {
 });
 
 describe("ContextStore", () => {
+  it("scope_names 幂等迁移、入站 upsert，跨域消息、引用与摘要标签附上清洗后的群名", () => {
+    const dir = tmp();
+    store = new ContextStore(dir); const file = store.file; store.close();
+    const old = new DatabaseSync(file); old.exec("DROP TABLE scope_names"); old.close();
+    store = new ContextStore(dir); store.close(); store = new ContextStore(dir);
+    const s = store, scope = "group:" + G;
+    s.ingest({ ...msg("群名测试", { message_id: "named", time: T0 }), group_name: "旧名" });
+    s.ingest({ ...msg("引用测试", { replyTo: "named", message_id: "quote", time: T0 + 1 }), group_name: "家庭群\n[来源]" });
+    s.ingest(msg("无名不会覆盖", { time: T0 + 2 }));
+    s.ingest({ ...msg("私聊不写群名", { message_type: "private" }), group_name: "伪造" });
+    s.writeSummary({ scope, level: "day", period_start: T0, period_end: T0 + 86400, text: "摘要测试", msg_count: 2 });
+    const db = new DatabaseSync(file, { readOnly: true });
+    try { expect(db.prepare("SELECT * FROM scope_names").all()).toEqual([{ scope, name: "家庭群\n[来源]", updated_at: expect.any(Number) }]); }
+    finally { db.close(); }
+    const label = "[群" + G + "(家庭群 (来源))]";
+    expect(formatRecent(s.recent(all, { limit: 10 }), 2500, { showScope: true })).toContain(label);
+    expect(formatSearch(s.search(all, { query: "测试", days: 1, limit: 10, now: T0 + 60 }), 2500, { showScope: true })).toContain(label + " [日摘要");
+    const full = formatMessageFull(s.message(all, "quote")!, { showScope: true });
+    expect(full.split(label)).toHaveLength(3); expect(full).not.toContain("[来源]");
+    expect(formatMessage(s.message(all, "named")!.row)).not.toContain(label);
+    expect(s.recent({ kind: "scope", scope: "group:999" }, { limit: 10 })).toEqual([]);
+    s.close(); store = new ContextStore(dir, { readOnly: true });
+    expect(formatMessage(store.message(all, "named")!.row, { showScope: true })).toContain(label);
+  });
   it("ingests idempotently, recalls, and returns recent rows old→new within the window", () => {
     const s = open();
     s.ingest(msg("第一条", { message_id: "1", time: T0 - 3 * 3600 }));

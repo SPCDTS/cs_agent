@@ -5,18 +5,26 @@
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CHATS_DENIED } from "../context/chats.js";
 import { accessToString } from "../context/access.js";
 import { callQQAttachmentTool, callQQContextTool, qqContextText as text, RECENT_MAX, SEARCH_LIMIT_MAX, SEARCH_DAYS_MAX, type QQContextToolDeps } from "../context/qq-context-tool.js";
 
 export interface QQContextDeps extends QQContextToolDeps {
   view?: (file: string) => Promise<{ type: "image"; data: string; mimeType: string }>;
+  chats?: () => Promise<string>;
   recall?: (messageId: string) => Promise<string>;
 }
 
-// 三个工具都只读当前会话的上下文库：声明只读注解（与审批模式无关，供客户端按注解判断）。
+// 只读工具声明统一注解（与审批模式无关，供客户端按注解判断）。
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 
 const TOOLS = [
+  {
+    name: "qq_chats",
+    description: "只读列出群名、群号及好友备注；仅限主人私聊，用于按名称确认会话。",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: READ_ONLY,
+  },
   {
     name: "qq_send_image",
     description: "登记工作区内或当前范围已召回的图片，随本次回复发送，最多 4 张。",
@@ -96,6 +104,14 @@ export function createQQContextServer(deps: QQContextDeps): Server {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS.map((t) => ({ ...t })) as never }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const args = req.params.arguments ?? {};
+    if (req.params.name === "qq_chats") {
+      if (deps.access?.kind !== "all") return text(CHATS_DENIED, true);
+      if (Object.keys(args).length) return text("qq_chats 不接受参数", true);
+      try {
+        if (!deps.chats) throw new Error("会话列表未启用");
+        return text(await deps.chats());
+      } catch (err) { return text((err as Error).message, true); }
+    }
     if (["qq_send_image", "qq_send_file"].includes(req.params.name)) return callQQAttachmentTool(deps, req.params.name, args);
     if (req.params.name === "qq_view_image") {
       if (!deps.access) return text("qq_context 不可用：未配置有效的访问范围（QQ_ACCESS）。", true);

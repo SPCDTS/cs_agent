@@ -9,7 +9,10 @@ import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { InboundMessage } from "../channel/types.js";
 import { log } from "../shared/log.js";
+import { clip } from "../shared/header.js";
 import { scopeOf, type Access } from "./access.js";
+
+export { clip } from "../shared/header.js";
 
 const CONTEXT_DB_FILE = "qq-messages.sqlite";
 export const BOT_STATUS = { pending: "处理中", replied: "已回复", failed: "失败" } as const;
@@ -19,6 +22,7 @@ export type BotAction = "generate_image" | "research+generate_image" | "ask_code
 export interface MessageRow {
   id: number;
   scope: string;
+  scope_name?: string;
   message_id: string;
   time: number;
   user_id: string;
@@ -47,6 +51,7 @@ export interface MediaRow {
 export interface SummaryRow {
   id: number;
   scope: string;
+  scope_name?: string;
   level: "day" | "week";
   period_start: number;
   period_end: number;
@@ -150,17 +155,12 @@ CREATE TRIGGER IF NOT EXISTS messages_media_delete AFTER DELETE ON messages BEGI
   DELETE FROM message_media WHERE scope = old.scope AND message_id = old.message_id;
 END;
 
+CREATE TABLE IF NOT EXISTS scope_names (
+  scope TEXT PRIMARY KEY, name TEXT NOT NULL, updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
-
-export function clip(text: string, max: number): string {
-  const t = text.replace(/\s+/g, " ").trim();
-  if (t.length <= max) return t;
-  let cut = t.slice(0, Math.max(0, max - 1));
-  const last = cut.charCodeAt(cut.length - 1);
-  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
-  return `${cut}…`;
-}
 
 /** 检索词：按空白切分，去掉 LIKE 通配符，最多 5 个词。 */
 function searchTerms(query: string): string[] {
@@ -200,6 +200,10 @@ export class ContextStore {
 
   /** 入站 QQ 消息入库（幂等：同 scope+message_id 只保留第一条）。 */
   ingest(m: InboundMessage): void {
+    if (m.message_type === "group" && m.group_name) {
+      this.db.prepare("INSERT INTO scope_names (scope, name, updated_at) VALUES (?, ?, ?) ON CONFLICT (scope) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at")
+        .run(scopeOf(m), m.group_name, nowSec());
+    }
     const reply = m.segments.find((s) => s.type === "reply") as { data: { id?: string } } | undefined;
     this.db
       .prepare(
@@ -270,6 +274,11 @@ export class ContextStore {
 
   // ------------------------------------------------------------------ 读取（带访问过滤）
 
+  private withScopeName<T extends { scope: string }>(row: T): T & { scope_name?: string } {
+    const name = this.db.prepare("SELECT name FROM scope_names WHERE scope = ?").get(row.scope) as { name: string } | undefined;
+    return name ? { ...row, scope_name: name.name } : row;
+  }
+
   private accessClause(access: Access, scope: string | undefined, column = "scope"): { sql: string; args: SQLInputValue[] } | null {
     if (access.kind === "scope") {
       if (scope !== undefined && scope !== access.scope) return null; // 跨域请求一律拒绝
@@ -299,7 +308,7 @@ export class ContextStore {
     }
     sql += " ORDER BY time DESC, id DESC LIMIT ?";
     args.push(Math.max(0, Math.floor(opts.limit)));
-    return (this.db.prepare(sql).all(...args) as unknown as MessageRow[]).reverse();
+    return (this.db.prepare(sql).all(...args) as unknown as MessageRow[]).reverse().map(row => this.withScopeName(row));
   }
 
   /** 关键词检索：原始消息与摘要混排，按时间新→旧。 */
@@ -329,8 +338,8 @@ export class ContextStore {
       .all(...likeArgs(1), since, ...sAcc.args, limit) as unknown as SummaryRow[];
 
     const items: ContextItem[] = [
-      ...msgs.map((row) => ({ kind: "message" as const, row })),
-      ...sums.map((row) => ({ kind: "summary" as const, row })),
+      ...msgs.map((row) => ({ kind: "message" as const, row: this.withScopeName(row) })),
+      ...sums.map((row) => ({ kind: "summary" as const, row: this.withScopeName(row) })),
     ];
     const t = (i: ContextItem) => (i.kind === "message" ? i.row.time : i.row.period_end);
     return items.sort((a, b) => t(b) - t(a)).slice(0, limit);
@@ -352,7 +361,7 @@ export class ContextStore {
       chain.push(next);
       cur = next;
     }
-    return { row, chain };
+    return { row: this.withScopeName(row), chain: chain.map(r => this.withScopeName(r)) };
   }
 
   private findMessage(access: Access, messageId: string, scope?: string): MessageRow | undefined {

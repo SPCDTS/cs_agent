@@ -904,6 +904,11 @@ describe("文件附件回复", () => {
 });
 
 describe("agent path", () => {
+  it("入站群名经过 TicketDoc 传入后端", async () => {
+    const r = await makeRig();
+    await r.dispatcher.dispatch({ ...inbound("你好", { group: "7" }), group_name: "家庭群" }, "named-group");
+    expect(r.backend.requests[0]?.source).toMatchObject({ type: "group", group_id: "7", group_name: "家庭群" });
+  });
   it("从本轮 source.user_id 计算 senderIsOwner，同一群内身份切换不沿用授权", async () => {
     const r = await makeRig();
     await r.dispatcher.dispatch(inbound("新增技能", { group: "7", user: OWNER }), "skills-owner");

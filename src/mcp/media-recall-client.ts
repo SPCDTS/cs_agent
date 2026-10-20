@@ -40,3 +40,16 @@ export async function viewViaLoopback(file: string, token: string | undefined, p
       typeof body.mimeType !== "string" || !/^image\/(png|jpeg|webp|gif)$/.test(body.mimeType)) throw new Error("图片查看返回格式错误");
   return { type: "image", data: body.data, mimeType: body.mimeType };
 }
+
+export async function chatsViaLoopback(token: string | undefined, port = 8790): Promise<string> {
+  if (!token || !/^[a-f0-9]{64}$/.test(token)) throw new Error("QQ_RECALL_TOKEN 未配置");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("MEDIA_RECALL_PORT 无效");
+  const response = await fetch("http://127.0.0.1:" + port + "/chats", {
+    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: "{}", redirect: "error", signal: AbortSignal.timeout(65_000),
+  });
+  const body = await response.json() as { text?: unknown; error?: unknown };
+  if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "会话列表查询失败");
+  if (typeof body.text !== "string") throw new Error("会话列表返回格式错误");
+  return body.text;
+}

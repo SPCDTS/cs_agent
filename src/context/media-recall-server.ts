@@ -1,3 +1,5 @@
+import type { Channel } from "../channel/types.js";
+import { CHATS_DENIED, listChatsText } from "./chats.js";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -21,7 +23,7 @@ interface TicketQuota { access: string; used: number; active: number; lastRevoke
 export class RecallTokens {
   private readonly tokens = new Map<string, Lease>();
   private readonly tickets = new Map<string, TicketQuota>();
-  constructor(private readonly media: Pick<MediaRecall, "recall"> & Partial<Pick<MediaRecall, "view">>, readonly maxPerTicket = 5) {}
+  constructor(private readonly media: Pick<MediaRecall, "recall"> & Partial<Pick<MediaRecall, "view">>, readonly maxPerTicket = 5, private readonly channel?: Pick<Channel, "listChats">) {}
 
   issue(binding: RecallBinding): { token: string; revoke(): void } {
     const access = accessToString(binding.access);
@@ -85,6 +87,14 @@ export class RecallTokens {
     return result;
   }
 
+  async chats(token: string): Promise<{ text: string }> {
+    if (!this.valid(token)) throw new Error("召回令牌无效或已过期");
+    const lease = this.tokens.get(token)!;
+    const text = await listChatsText(lease.binding.access, this.channel, lease.control.signal);
+    if (!this.valid(token)) throw new Error("召回令牌已作废");
+    return { text };
+  }
+
   close(): void {
     for (const lease of this.tokens.values()) lease.revoke();
     for (const quota of this.tickets.values()) clearTimeout(quota.timer);
@@ -98,7 +108,7 @@ export async function startMediaRecallServer(tokens: RecallTokens, port = 8790) 
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }).end(JSON.stringify(body));
     };
-    if (req.method !== "POST" || (req.url !== "/recall" && req.url !== "/view")) { send(404, { error: "不存在的召回端点" }); return; }
+    if (req.method !== "POST" || (req.url !== "/recall" && req.url !== "/view" && req.url !== "/chats")) { send(404, { error: "不存在的召回端点" }); return; }
     const auth = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization ?? "");
     if (!auth || !tokens.valid(auth[1]!)) { send(401, { error: "召回令牌无效或已过期" }); return; }
     try {
@@ -109,6 +119,12 @@ export async function startMediaRecallServer(tokens: RecallTokens, port = 8790) 
         chunks.push(Buffer.from(chunk));
       }
       const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (req.url === "/chats") {
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) {
+          send(400, { error: "qq_chats 不接受参数" }); return;
+        }
+        send(200, await tokens.chats(auth[1]!)); return;
+      }
       if (req.url === "/view") {
         if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 ||
             !("path" in body) || typeof body.path !== "string" || !body.path || body.path.length > 1024) {
@@ -124,7 +140,7 @@ export async function startMediaRecallServer(tokens: RecallTokens, port = 8790) 
       send(200, result);
     } catch (err) {
       const message = (err as Error).message;
-      send(message === RECALL_QUOTA_MESSAGE ? 429 : tokens.valid(auth[1]!) ? 400 : 401, { error: message });
+      send(message === RECALL_QUOTA_MESSAGE ? 429 : !tokens.valid(auth[1]!) ? 401 : message === CHATS_DENIED ? 403 : 400, { error: message });
     }
   });
   server.requestTimeout = 65_000;

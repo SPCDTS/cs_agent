@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { callQQContextTool } from "../../src/context/qq-context-tool.js";
 import { ContextStore } from "../../src/context/store.js";
 import type { InboundMessage } from "../../src/channel/types.js";
@@ -44,6 +44,27 @@ async function connect(dataDir: string, access: string | undefined, extra: Recor
 const textOf = (r: unknown) => ((r as { content: { text: string }[] }).content ?? []).map((c) => c.text).join("");
 
 describe("qq_context MCP over stdio (built dist)", () => {
+  it("qq_chats 通过回合令牌查询；MCP 拒绝非 all，伪造 all 仍被主进程拒绝", async () => {
+    const listChats = vi.fn(async () => ({ groups: [{ group_id: "7", name: "家庭群", member_count: 6 }], friends: [{ user_id: "1", nickname: "家人" }] }));
+    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) }, 5, { listChats });
+    const endpoint = await startMediaRecallServer(tokens, 0);
+    const owner = tokens.issue({ access: { kind: "all" }, ticket: "owner", deadline: Date.now() + 60_000 });
+    const group = tokens.issue({ access: { kind: "scope", scope: "group:7" }, ticket: "group", deadline: Date.now() + 60_000 });
+    const env = (token: string) => ({ QQ_RECALL_TOKEN: token, MEDIA_RECALL_PORT: String(endpoint.port) });
+    try {
+      const c = await connect(tmp(), "all", env(owner.token));
+      expect(textOf(await c.callTool({ name: "qq_chats", arguments: {} }))).toBe("group:7 家庭群（6 人）\nprivate:1 家人");
+      expect(listChats).toHaveBeenCalledOnce(); listChats.mockClear();
+      const denied = await connect(tmp(), "group:7", env(owner.token));
+      expect((await denied.callTool({ name: "qq_chats", arguments: {} })).isError).toBe(true);
+      const forged = await connect(tmp(), "all", env(group.token));
+      expect((await forged.callTool({ name: "qq_chats", arguments: {} })).isError).toBe(true);
+      expect((await c.callTool({ name: "qq_chats", arguments: { access: "all" } })).isError).toBe(true);
+      owner.revoke();
+      expect((await c.callTool({ name: "qq_chats", arguments: {} })).isError).toBe(true);
+      expect(listChats).not.toHaveBeenCalled();
+    } finally { await endpoint.close(); }
+  });
   it("qq_view_image 从 loopback 返回单张 MCP 图片，无本地媒体文件也可查看", async () => {
     const picture = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
     const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }),
@@ -85,7 +106,7 @@ describe("qq_context MCP over stdio (built dist)", () => {
 
     const c = await connect(dir, `group:${G}`);
     const tools = await c.listTools();
-    expect(tools.tools.map((t) => t.name).sort()).toEqual(["qq_image", "qq_message", "qq_recent", "qq_search", "qq_send_file", "qq_send_image", "qq_view_image"]);
+    expect(tools.tools.map((t) => t.name).sort()).toEqual(["qq_chats", "qq_image", "qq_message", "qq_recent", "qq_search", "qq_send_file", "qq_send_image", "qq_view_image"]);
     for (const t of tools.tools.filter(t => !["qq_image", "qq_send_file", "qq_send_image"].includes(t.name))) expect(t.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
 
     const recent = textOf(await c.callTool({ name: "qq_recent", arguments: { limit: 30 } }));
