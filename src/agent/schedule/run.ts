@@ -1,3 +1,4 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import { defineDoc, defineDocFamily, defineTask, type ConversationId, type Harness, type Tx } from "@earendil-works/pi-durable";
@@ -40,6 +41,17 @@ export function scheduledTicket(fireKey: string): string {
   return "run_" + createHash("sha256").update(fireKey).digest("hex").slice(0, 40);
 }
 
+/** 从已提交 admission 反查本轮定义；工具参数不能指定或覆盖目标。 */
+export async function readScheduledRun(harness: Harness, ticket: string) {
+  const admission = await harness.snapshot(AdmissionDoc, ticket, BACKGROUND_CONTEXT);
+  if (admission?.conversationId === undefined) return undefined;
+  const id = admission.conversationId as ConversationId;
+  const run = await harness.snapshot(ScheduledRunDoc, id, BACKGROUND_CONTEXT);
+  const doc = await harness.snapshot(TicketDoc, id, BACKGROUND_CONTEXT);
+  return run?.schedule_id && run.fire_key === `${run.schedule_id}@${run.fire_at}` &&
+    scheduledTicket(run.fire_key) === ticket && doc?.ticket === ticket ? run : undefined;
+}
+
 function beijingTime(ms: number): string {
   return new Date(ms + 8 * 60 * 60_000).toISOString().slice(5, 16).replace("T", " ");
 }
@@ -49,7 +61,7 @@ export function scheduledInput(fire: ScheduledFire): string {
     .map(run => `${beijingTime(run.fire_at)} ${run.status}${run.note ? " " + run.note.replace(/\s+/g, " ").slice(0, 200) : ""}`);
   return `[定时任务] ${fire.schedule.name} · 计划时间 ${beijingTime(fire.fire_at)}（北京时间）· 第 ${fire.ordinal} 次\n` +
     `${fire.schedule.prompt}\n[最近运行] ${recent.join("；") || "无"}\n` +
-    "[说明] 这是定时任务，不是用户消息。需要通知就调用 send_message（可带 target），不需要就直接结束。";
+    "[说明] 这是定时任务，不是用户消息。需要通知就调用 send_message（可带 target），不需要就直接结束。需要停止后续触发时调用 schedule_control，说明暂停或完成的原因。";
 }
 
 export interface ScheduledRuntimeOptions {

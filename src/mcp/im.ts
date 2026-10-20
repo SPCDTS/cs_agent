@@ -7,6 +7,11 @@ async function main() {
   const server = createImServer(args => sendViaLoopback(args, token, port), {
     permissions: await imPermissions(token, port),
     auth: (name, args) => imViaLoopback(name, args, token, port),
+    schedule: async (name, args) => {
+      const result = await imViaLoopback(name, args, token, port);
+      if (typeof result !== "string") throw new Error("定时工具返回格式错误");
+      return result;
+    },
   });
   await server.connect(new StdioServerTransport());
 }

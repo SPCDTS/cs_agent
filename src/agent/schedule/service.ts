@@ -129,6 +129,20 @@ export class ScheduleService implements ScheduleRunRecorder {
     return true;
   }
 
+  /** 运行主动结束后续触发；已完成时重放不增加 revision，不中断当前运行。 */
+  async complete(actor: string, id: string): Promise<Schedule> {
+    return this.opts.harness.commit(async tx => {
+      const schedule = this.editable((await tx.doc(SchedulesDoc)).schedules[id], actor);
+      if (schedule.status !== "completed") {
+        schedule.status = "completed"; schedule.next_fire_at = null;
+        schedule.revision++; schedule.updated_at = this.now();
+        delete schedule.pause_reason;
+        delete (await tx.doc(ScheduleRuntimeDoc)).tasks[id];
+      }
+      return copy(schedule);
+    }, this.ctx);
+  }
+
   async resume(actor: string, id: string): Promise<Schedule> {
     const snapshot = await this.authorizeRun(actor, id);
     const next = validateRule(snapshot.rule, this.now(), snapshot.created_by === this.owner);

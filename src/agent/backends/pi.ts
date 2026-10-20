@@ -16,6 +16,7 @@ import { attachmentDirs } from "../../media/attach-paths.js";
 import { validateReferences } from "../../media/gen/image-references.js";
 import { codingEnvironment, codingTools } from "../pi-tools/coding.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
+import { createPiScheduleExtensions } from "../pi-tools/schedule.js";
 import { createPiImExtensions } from "../pi-tools/im.js";
 import { PiRequestDoc } from "../pi-tools/request.js";
 import { PiPromptLoader } from "../pi-tools/prompt.js";
@@ -126,7 +127,7 @@ export class PiBackend implements AgentBackend {
     let harness!: Harness;
     const coding = await codingTools(), extension = createPiExtension({ ...opts, workspaceDir, getHarness: () => harness });
     const im = createPiImExtensions(opts);
-    for (const item of [coding, extension, ...Object.values(im)]) registry.install(item);
+    for (const item of [coding, extension, ...Object.values(im), ...Object.values(createPiScheduleExtensions(opts.scheduleTools))]) registry.install(item);
     const storage = opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite"));
     harness = await Harness.open(storage, {
       models: opts.models, registry,
@@ -367,7 +368,14 @@ export class PiBackend implements AgentBackend {
     }, context);
     const permissions = await this.opts.grants?.permissions(req) ?? { actorIsOwner: false, target: false, auth: false };
     const im = createPiImExtensions(this.opts), selected = permissions.auth ? im.owner : permissions.target ? im.targeted : im.basic;
-    await conv.configure({ extensions: { add: [selected], remove: Object.values(im).filter(e => e.name !== selected.name) } }, context);
+    const schedule = createPiScheduleExtensions(this.opts.scheduleTools);
+    const available = await this.opts.scheduleTools?.permissions(req);
+    const scheduleExtension = available?.scheduleControl ? schedule.control : available?.schedule ? schedule.management : undefined;
+    await conv.configure({ extensions: {
+      add: [selected, ...(scheduleExtension ? [scheduleExtension] : [])],
+      remove: [...Object.values(im).filter(e => e.name !== selected.name),
+        ...Object.values(schedule).filter(e => e.name !== scheduleExtension?.name)],
+    } }, context);
     trace.event(req.ticket, "dispatched", { detail: { backend: "pi", conversation_key: req.threadKey, conversation: conv.id, recovered: !!known } });
     if (known) trace.event(req.ticket, "recovered", { detail: { backend: "pi", request_id: requestId } });
     ctx.onEvent({ type: "pi_start", thread: req.threadKey, conversation: conv.id });

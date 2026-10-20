@@ -1,3 +1,5 @@
+import { isScheduleTool } from "../../shared/schedule-tools.js";
+import type { ScheduleTools } from "../schedule/tools.js";
 import type { GrantsService } from "../grants.js";
 import type { Channel } from "../../channel/types.js";
 import { chatsTool } from "./chats.js";
@@ -28,6 +30,7 @@ import { DeepSeekWeb } from "./web.js";
 export interface PiToolsOptions {
   sendService?: SendService;
   grants?: GrantsService;
+  scheduleTools?: ScheduleTools;
   dataDir: string;
   workspaceDir: string;
   /** 空值或未设置使用 dataDir/skills；off 禁用技能目录。 */
@@ -127,7 +130,8 @@ export function createPiExtension(opts: PiToolsOptions) {
         if (Date.now() >= bound.deadline) return block("pi 请求已超时");
         // send_message 由 Outbox 限额，重放不额外计次，也不消耗聊天记录工具额度。
         if (call.name.startsWith("auth_")) return bound.actorIsOwner ? undefined : block("授权工具仅限 owner 回合");
-        if (call.name === "send_message") return undefined;
+        // 定时工具由共用服务逐次鉴权与限额，不套用历史查询的每轮四次上限。
+        if (call.name === "send_message" || isScheduleTool(call.name)) return undefined;
         const kind = BUILTIN_TOOLS.has(call.name) ? "builtin" : call.name === "qq_image" ? "qq_image" : call.name.startsWith("qq_") ? "history" : call.name;
         const limit = kind === "builtin" ? 20 : kind === "qq_image" ? opts.mediaRecallMaxPerTicket ?? 5 : kind === "generate_image" ? 2 : 4;
         const allowed = await opts.getHarness().commit(async tx => {

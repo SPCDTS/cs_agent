@@ -26,7 +26,7 @@
 4. `ScheduleDoc` 与管理 API（RRULE 校验、revision、面板增删改）。
 5. 排程器 `cs.schedule`（wait / fire 两阶段，持久化 `next_fire_at`，`runtime.sleep` 只负责进程存活期间的等待）。
 6. admit 与运行（`DispatchDoc` 的 `kind: "scheduled"`、输入外壳、record、连续失败自停），pi 与 codex 的 thread / fork。
-7. `schedule_*` / `schedule_control` 工具（MCP `schedule`）。
+7. **已实现，待部署验收**：`schedule_create/list/update/pause/resume/delete/run_now` 与 `schedule_control`（pi 逐轮扩展；codex 复用独立 `im` MCP 和回环端点，见 §6）。
 8. 面板定时任务页；owner 私聊实测（不在真实群里测试）。
 
 每一步单独实现、评审、部署、验收。
@@ -143,3 +143,13 @@ type Grant = {
 - 排程任务 fire 阶段一次提交：判定（去重 `fire_key = id@fire_at`、迟到、暂停 / revision、重叠）→ admit 或记跳过 → 计算晚于 now 的下一次 → 写检查点。
 - 定时回合输入外壳：`[定时任务] 名称 · 计划时间 · 第 n 次`、提示词、最近 3 次运行记录、"需要通知就调用 send_message，不需要就直接结束，要停止调用 schedule_control"。
 - `schedule_create` 时由模型把"发到家庭群"解析成具体 ref 写进保存的提示词。
+
+
+## 6. 第 7 步：模型定时工具
+
+- 管理工具仅在当前发言人通过 `canSchedule` 的交互回合出现；owner 可见并管理全部定义，其他授权人只管理自己创建的定义。pi 每轮切换固定扩展，codex 的 `im` 子进程启动时通过 `/im-info` 读取令牌权限；工具执行与 HTTP 端点仍逐次复核票据、来源和实时授权。
+- `schedule_create({ name, prompt, rule })` 的来源不可由模型指定：owner 私聊 → `owner`，群 → `group:<id>`，其他私聊 → `private:<qq>`；创建者固定为真实 actor。`rule` 为 `{ rrule, start? }` 或 `{ at }`，日期严格使用北京时间 `YYYY-MM-DD HH:mm`，start 缺省为现在。创建与更新复用 ScheduleService 的 RRULE、间隔、数量校验。
+- 工具说明要求 prompt 写清每次动作、通知对象和发送方式；“家庭群”等目的地先用 `qq_chats` 查为具体 ref 后写入 prompt。按需静默的监控必须注明“无新内容则静默（silent if nothing new）”。工具结果包含 id、状态和下次北京时间。
+- 定时运行只开放 `schedule_control({ action: "pause" | "complete", reason })`，不开放管理工具；目标从当前票据对应的持久 admission / ScheduledRunDoc 读取，不接受 id。complete 经 ScheduleService 设置 completed、清空下次触发并使旧排程失效；不打断当前运行，结果仍正常回写。暂停/完成的同义重放不重复增加 revision；已失去 schedule grant 的在途运行仍可停止自身。
+- 成功调用记录 `schedule_tool`，字段包括 action、id（list 为 null）、actor、tool，控制调用另记 reason。修改类 pi 工具采用 unsafe replay，避免崩溃重放产生额外定义或运行。
+- 自动测试覆盖 pi 与真实 im 子进程的可见性矩阵、服务端越权/撤权/过期令牌、来源绑定、只控制自身、完整中文 prompt 和北京时间解析；部署实测留到第 8 步 owner 私聊验收。

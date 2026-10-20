@@ -1,3 +1,4 @@
+import { isScheduleTool, SCHEDULE_TOOLS, type ScheduleTool, type ScheduleToolPermissions } from "../shared/schedule-tools.js";
 import type { Channel, TurnIdentity } from "../channel/types.js";
 import { CHATS_DENIED, listChatsText } from "./chats.js";
 import { randomBytes } from "node:crypto";
@@ -13,8 +14,9 @@ export interface RecallBinding extends Partial<TurnIdentity> {
   workdir?: string; session?: string;
 }
 export interface SendGateway {
-  permissions?(binding: RecallBinding): Promise<{ actorIsOwner: boolean; target: boolean; auth: boolean }>;
+  permissions?(binding: RecallBinding): Promise<{ actorIsOwner: boolean; target: boolean; auth: boolean } & Partial<ScheduleToolPermissions>>;
   auth?(binding: RecallBinding, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown): Promise<unknown>;
+  schedule?(binding: RecallBinding, name: ScheduleTool, args: unknown): Promise<string>;
   send(binding: RecallBinding, attempt: string, args: unknown, signal: AbortSignal): Promise<unknown>;
   release(ticket: string, attempt: string): void;
 }
@@ -102,6 +104,16 @@ export class RecallTokens {
     return this.gateway.auth(binding, name, args);
   }
 
+  async schedule(token: string, name: ScheduleTool, args: unknown): Promise<string> {
+    if (!this.valid(token)) throw new Error("定时工具令牌无效或已过期");
+    const binding = this.tokens.get(token)!.binding;
+    const permissions = await this.permissions(token);
+    if (!(name === "schedule_control" ? permissions.scheduleControl : permissions.schedule) || !this.gateway?.schedule) {
+      throw new Error("本回合无权使用此定时工具");
+    }
+    return this.gateway.schedule(binding, name, args);
+  }
+
   async recall(token: string, messageId: string): Promise<RecallResult> {
     if (!this.valid(token)) throw new Error("召回令牌无效或已过期");
     const lease = this.tokens.get(token)!;
@@ -143,14 +155,14 @@ export async function startMediaRecallServer(tokens: RecallTokens, port = 8790) 
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }).end(JSON.stringify(body));
     };
-    if (req.method !== "POST" || !["/recall", "/view", "/chats", "/send", "/im-info", "/auth_grant", "/auth_revoke", "/auth_list"].includes(req.url ?? "")) { send(404, { error: "不存在的召回端点" }); return; }
+    if (req.method !== "POST" || !["/recall", "/view", "/chats", "/send", "/im-info", "/auth_grant", "/auth_revoke", "/auth_list", ...SCHEDULE_TOOLS.map(name => "/" + name)].includes(req.url ?? "")) { send(404, { error: "不存在的召回端点" }); return; }
     const auth = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization ?? "");
     if (!auth || !tokens.valid(auth[1]!)) { send(401, { error: "召回令牌无效或已过期" }); return; }
     try {
       let size = 0; const chunks: Buffer[] = [];
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > (["/send", "/auth_grant"].includes(req.url!) ? 64 * 1024 : 2048)) { send(413, { error: "请求过大" }); return; }
+        if (size > (["/send", "/auth_grant", "/schedule_create", "/schedule_update"].includes(req.url!) ? 64 * 1024 : 2048)) { send(413, { error: "请求过大" }); return; }
         chunks.push(Buffer.from(chunk));
       }
       const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -160,6 +172,10 @@ export async function startMediaRecallServer(tokens: RecallTokens, port = 8790) 
       }
       if (req.url === "/auth_grant" || req.url === "/auth_revoke" || req.url === "/auth_list") {
         send(200, await tokens.auth(auth[1]!, req.url.slice(1) as "auth_grant" | "auth_revoke" | "auth_list", body)); return;
+      }
+      const scheduleTool = req.url!.slice(1);
+      if (isScheduleTool(scheduleTool)) {
+        send(200, await tokens.schedule(auth[1]!, scheduleTool, body)); return;
       }
       if (req.url === "/send") { send(200, await tokens.send(auth[1]!, body)); return; }
       if (req.url === "/chats") {

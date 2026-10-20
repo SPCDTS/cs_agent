@@ -14,7 +14,7 @@ export const authParameters = {
   auth_list: Type.Object({}, { additionalProperties: false }),
 };
 export const authDescriptions = {
-  auth_grant: "授予或替换一人的授权。targets 留空不能主动发往别处，scopes 省略表示任何来源；schedule 本阶段仅存储。",
+  auth_grant: "授予或替换一人的授权。targets 留空不能主动发往别处，scopes 省略表示任何来源；schedule 允许在授权来源会话管理自己的定时任务。",
   auth_revoke: "撤销一人的指定能力；省略 caps 则撤销全部授权。",
   auth_list: "列出授权及到期状态；仅限 owner 回合。",
 };
