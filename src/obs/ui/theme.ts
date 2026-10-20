@@ -214,6 +214,23 @@ ol.feed{list-style:none;margin:var(--s3) 0 0;padding:var(--s2) 0 0;border-top:1p
 .thread-ctx{margin-bottom:var(--s4);padding-bottom:var(--s4);border-bottom:1px dashed var(--rule-strong)}
 ${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.ctx-tick[data-at="${i}"]{left:${i}%}`).join('\n')}
 
+/* ── 上下文监控走势（DESIGN-context-monitor §3）：竖条高度 = 占窗口比例（data-h），底部缓存命中段占条高 data-c，
+   条的底色即未命中部分。miss 红色顶标、partial 琥珀顶标，压缩 / 重建前插一道虚线分隔。与 ctx-fill 同一机制，无内联 style。 ── */
+.cu-chart{display:flex;align-items:flex-end;gap:2px;height:120px;padding-top:8px;border-bottom:1px solid var(--rule-strong);overflow-x:auto}
+.cu-bar{position:relative;display:flex;flex-direction:column;justify-content:flex-end;flex:1 0 6px;max-width:20px;height:0;min-height:1px;background:var(--ink-3);border-radius:2px 2px 0 0;cursor:help}
+.cu-c{display:block;height:0;background:var(--carbon);border-radius:inherit}
+.cu-bar.cu-compact,.cu-bar.cu-reset{opacity:.6}
+.cu-bar.cu-miss::before,.cu-bar.cu-partial::before{content:"";position:absolute;left:-1px;right:-1px;top:-6px;height:4px;border-radius:1px;background:var(--fail)}
+.cu-bar.cu-partial::before{background:var(--warn)}
+.cu-sep{flex:none;align-self:stretch;width:0;margin:0 2px;border-left:1px dashed var(--ink-2)}
+.cu-legend{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s4)}
+.cu-key{display:inline-block;width:10px;height:10px;margin-right:4px;vertical-align:-1px;border-radius:2px}
+.cu-key.k-c{background:var(--carbon)} .cu-key.k-u{background:var(--ink-3)} .cu-key.k-miss{background:var(--fail)} .cu-key.k-partial{background:var(--warn)}
+.cu-key.k-sep{width:0;border-radius:0;border-left:1px dashed var(--ink-2)}
+.cu-m-miss{color:var(--fail)}
+.cu-hit{font-size:var(--t-xs);font-variant-numeric:tabular-nums}
+${Array.from({ length: 101 }, (_, i) => `.cu-bar[data-h="${i}"]{height:${i}%}.cu-c[data-c="${i}"]{height:${i}%}`).join('\n')}
+
 /* ── 日志 ── */
 .log{font-family:var(--mono);font-size:var(--t-xs);background:var(--sheet);border:1px solid var(--rule);border-radius:var(--r-md);max-height:70vh;overflow:auto;padding:var(--s2) 0}
 .log div{padding:1px var(--s4);white-space:pre-wrap;overflow-wrap:anywhere;border-left:3px solid transparent}
@@ -231,7 +248,8 @@ ${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.c
 .thread-row{display:flex;align-items:flex-end;gap:var(--s3)}
 .thread-row>.ctx{flex:1 1 auto}
 .thread-row form{flex:none}
-.thread-row button{padding:4px 10px;font-size:var(--t-xs)}
+.thread-row button,.thread-row .btn{padding:4px 10px;font-size:var(--t-xs)}
+.thread-row .btn{flex:none}
 .ops{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2)}
 .ops form{margin:0}
 .ops button,.ops .btn{padding:4px 10px;font-size:var(--t-xs)}

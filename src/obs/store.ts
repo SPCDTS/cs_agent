@@ -4,7 +4,7 @@ import path from 'node:path';
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { redact, redactText } from '../shared/redact.js';
 import { toContextUsage } from '../shared/format.js';
-import { analyzeContextTurns, type ContextUsageEvent, type SystemEvent, type ThreadContextSeries } from './context-turns.js';
+import { analyzeContextTurns, type ContextAnalysisOptions, type ContextUsageEvent, type SystemEvent, type ThreadContextSeries } from './context-turns.js';
 
 import type { ObsEvent } from '../shared/trace.js';
 export interface TicketRow { ticket: string; scope: string; ts: number; updated: number; route: string | null; backend: string | null; status: string; sender: string | null; duration_ms: number }
@@ -153,8 +153,9 @@ export class ObsStore {
   /**
    * 默认每线程 40 条、最多 200 条；只读取最近至多 2000 条 turn/compact。
    * 线程按最近活动倒序，线程内按 ts/id 升序；截断边界不补读历史基准。
+   * analysis 覆盖判定阈值（面板 ?miss=&partial= 临时覆盖，仅影响展示）。
    */
-  contextSeries(opts: { limit?: number; since?: number; backend?: string; key?: string } = {}): ThreadContextSeries[] {
+  contextSeries(opts: { limit?: number; since?: number; backend?: string; key?: string; analysis?: ContextAnalysisOptions } = {}): ThreadContextSeries[] {
     if (this.degraded) return [];
     const limit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(200, Math.floor(opts.limit!))) : 40;
     const clauses = ["stage='context_usage'", "json_extract(detail_json,'$.source') IN ('turn','compact')"];
@@ -202,7 +203,7 @@ export class ObsStore {
       // 保留线程重置事件供分析；设计的 reset 判定仍以回合计数回到 1 为准。
       const threadResets = resets.filter(event => event.detail.backend === backend &&
         (event.detail.key ?? event.detail[backend === 'codex' ? 'thread_key' : 'conversation_key']) === key);
-      const turns = analyzeContextTurns(events, [...system, ...threadResets]);
+      const turns = analyzeContextTurns(events, [...system, ...threadResets], opts.analysis);
       return { backend, key, turns,
         misses: turns.filter(turn => turn.mark === 'miss').length, window: turns.at(-1)!.window };
     });

@@ -55,7 +55,7 @@ function agentCard(backend: Backend, c: AgentCardInput, csrf: string): string {
   const keys = [...new Set([...c.threads.map(t => t.key), ...(c.extraUsageKeys ?? [])])];
   const rows = keys.map(k => {
     const t = c.threads.find(x => x.key === k);
-    return `<div class="thread-row">${contextBar(backend, k, c.usage(k))}${t ? resetForm(backend, csrf, t) + compactForm(backend, csrf, t) : ''}</div>`;
+    return `<div class="thread-row">${contextBar(backend, k, c.usage(k))}<a class="btn quiet" href="/context-usage?backend=${uri(backend)}&amp;key=${uri(k)}" title="上下文长度走势与缓存未命中">监控</a>${t ? resetForm(backend, csrf, t) + compactForm(backend, csrf, t) : ''}</div>`;
   }).join('');
   return `<section class="sheet pad flush agent-card" data-backend="${backend}"><h2><a href="${sessionsHref(backend)}">${esc(name)}</a> <small>${backend === 'codex' ? 'owner 与共享两条长期线程' : '每个会话域一个长期会话'}</small></h2>
 ${c.error ? `<div class="flash err">${esc(c.error)}</div>` : ''}<div class="agent-figs"><div><div class="figure">${s ? fmtInt(s.sessions_active) : '—'}</div><div class="muted">活动会话</div></div><div><div class="figure">${s ? fmtInt(s.sessions_archived) : '—'}</div><div class="muted">归档会话</div></div></div>

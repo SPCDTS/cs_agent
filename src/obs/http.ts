@@ -27,6 +27,7 @@ import type { DashboardOptions } from './dashboard-types.js';
 import { equal, imageFile, readText, agentMdRevision, AGENT_MD_MAX_BYTES } from './dashboard-io.js';
 import { createDashboardPost } from './dashboard-post.js';
 import { createDashboardPages } from './ui/dashboard-pages.js';
+import { analyzeContextTurns, type ContextTurn, type ContextUsageEvent, type SystemEvent } from './context-turns.js';
 
 // 与顶栏的蓝色方框及两条横线保持一致；静态图形不含运行数据。
 const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="7" y="4" width="18" height="24" rx="2" fill="none" stroke="#2b47b5" stroke-width="3"/><path d="M11 13h10M11 19h10" stroke="#2b47b5" stroke-width="3"/></svg>';
@@ -78,6 +79,27 @@ export function createDashboard(opts: DashboardOptions) {
     })().catch(() => null);
   });
 
+  /**
+   * 票据页的命中判定（设计 §3）：取该线程此票据之前最近一条 turn 作基准。优先用与 /context-usage 同一条
+   * 序列（从基准起，含期间 @context 的压缩记录与 @settings 原因）；基准不在该有界序列开头时，
+   * 退回只分析"基准 + 本票据记录"。返回本票据最后一条实际回合。
+   */
+  function ticketContextTurn(backend: 'codex' | 'pi', key: string, events: ContextUsageEvent[]): ContextTurn | undefined {
+    const own = events.filter(e => e.detail.backend === backend && e.detail.key === key && e.detail.source !== 'estimate').sort((a, b) => a.ts - b.ts);
+    const target = own.filter(e => e.detail.source === 'turn').at(-1);
+    if (!target) return;
+    const prev = opts.store.previousContextTurn(backend, key, own[0]!.ts);
+    if (prev) {
+      const turns = opts.store.contextSeries({ backend, key, since: prev.ts, limit: 200 })[0]?.turns ?? [];
+      const hit = turns.find(t => t.ts === target.ts && t.ticket === target.ticket && t.source === 'turn');
+      if (hit && turns[0]!.ts === prev.ts) return hit;
+    }
+    const system: SystemEvent[] = opts.store.systemEvents(SETTINGS_TICKET, 200)
+      .filter(e => e.stage === 'settings_changed' || e.stage === 'prompt_changed')
+      .map(e => ({ ts: e.ts, stage: e.stage, detail: asObj(JSON.parse(e.detail_json)) }));
+    return analyzeContextTurns([...(prev ? [prev] : []), ...own], system)[(prev ? 1 : 0) + own.indexOf(target)];
+  }
+
   const { render, usageList } = createDashboardPages({
     opts: { ...opts, store: {
       get degraded() { return opts.store.degraded; },
@@ -86,6 +108,9 @@ export function createDashboard(opts: DashboardOptions) {
       tickets: filters => opts.store.tickets(filters),
       events: (ticket, options) => opts.store.events(ticket, options),
       systemEvents: (ticket, limit) => opts.store.systemEvents(ticket, limit),
+      contextSeries: o => opts.store.contextSeries(o),
+      previousContextTurn: (backend, key, beforeTs) => opts.store.previousContextTurn(backend, key, beforeTs),
+      analyzeTicketTurn: ticketContextTurn,
     } },
     config, csrf, agentMd, agentsMd, api,
     contextResult: (scope, query) => callQQContextTool({access:scope?{kind:'scope',scope}:{kind:'all'},openStore:()=>opts.context,maxChars:config.QQ_CONTEXT_MAX_CHARS},query?'qq_search':'qq_recent',query?{query,days:180,limit:20}:{limit:30}),

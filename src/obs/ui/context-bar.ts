@@ -7,7 +7,7 @@ import { BACKENDS, esc } from './html.js';
 import { scopeLabel } from '../../context/access.js';
 import { STALE_MS, num, fmtInt, fmtShort, ratio, usageWindow, clampPct, fmtPct, tier, hoursAgo, type ContextUsage } from '../../shared/format.js';
 
-function ctxLabel(backend: string, key: string): string {
+export function ctxLabel(backend: string, key: string): string {
   const b = BACKENDS[backend] ?? backend;
   if (backend === 'codex') return `${b} · ${key === 'owner' ? 'owner 线程' : scopeLabel(key)}`;
   return `${b} · ${scopeLabel(key)}`;

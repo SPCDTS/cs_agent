@@ -134,6 +134,16 @@ describe('上下文历史查询', () => {
     expect(series.turns.map(turn => turn.mark)).toEqual(['first', 'miss', 'partial', 'compact', 'compact', 'reset', undefined]);
     expect(series).toMatchObject({ misses: 1, window: 80_000 });
   });
+  it('contextSeries 的 analysis 覆盖判定阈值并影响 misses', () => {
+    const { store } = rig();
+    record(store, 0);
+    record(store, 1, { cachedTokens: 4999 });
+    record(store, 2, { cachedTokens: 9500 });
+    expect(store.contextSeries()[0]).toMatchObject({ misses: 1 });
+    const [series] = store.contextSeries({ analysis: { missRatio: 0.4, partialRatio: 0.96 } });
+    expect(series.turns.map(turn => turn.mark)).toEqual(['first', 'partial', 'partial']);
+    expect(series.misses).toBe(0);
+  });
   it('contextSeries 每线程只保留最近 limit 条，再升序分析', () => {
     const { store } = rig();
     for (let ts = 0; ts < 8; ts++) record(store, ts, { backend: ts % 2 ? 'pi' : 'codex' });

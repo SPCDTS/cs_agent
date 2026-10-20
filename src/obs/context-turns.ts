@@ -1,36 +1,9 @@
 import { ratio, usageWindow, type ContextUsage } from '../shared/format.js';
+import type { ContextAnalysisOptions, ContextTurn } from '../shared/context-turns.js';
 
+export type { ContextAnalysisOptions, ContextTurn, ThreadContextSeries } from '../shared/context-turns.js';
 export interface ContextUsageEvent { ts: number; ticket: string; detail: ContextUsage }
 export interface SystemEvent { ts: number; stage: string; detail: Record<string, unknown> }
-export interface ContextTurn {
-  ts: number;
-  ticket: string;
-  used: number;
-  cached: number;
-  uncached: number;
-  window: number;
-  /** 占窗口的比例（0–1，可超过 1），不是百分数。 */
-  pct: number;
-  turns: number;
-  source: 'turn' | 'compact' | 'estimate';
-  mark?: 'miss' | 'partial' | 'first' | 'compact' | 'reset';
-  reasons: string[];
-  /** 与上一条实际 turn 的间隔；estimate 和 compact 不更新基准。 */
-  gapMs?: number;
-}
-export interface ThreadContextSeries {
-  backend: 'codex' | 'pi';
-  key: string;
-  turns: ContextTurn[];
-  misses: number;
-  window: number;
-}
-export interface ContextAnalysisOptions {
-  missRatio?: number;
-  partialRatio?: number;
-  minPrevTokens?: number;
-  gapMs?: number;
-}
 
 /**
  * 同一线程按 ts 升序输入；不修改输入、不读取时钟或存储。
