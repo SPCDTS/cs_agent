@@ -8,6 +8,7 @@ import { agentMdRevision } from '../../src/obs/dashboard-io.js';
 import { csrfToken, sseWriter } from '../../src/obs/http-util.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { trace } from '../../src/shared/trace.js';
+import { log } from '../../src/shared/log.js';
 import { LiveBus, type LiveCard } from '../../src/obs/live.js';
 import { registerSecrets } from '../../src/shared/redact.js';
 import { ContextStore } from '../../src/context/store.js';
@@ -35,9 +36,11 @@ async function rig(extra: { validators?: SettingsValidators; contextUsage?: Cont
   const settings = await SettingsStore.open(dir, defaults, trace, extra.validators);
   const resetCodex = vi.fn(async (key: string): Promise<string | null> => key === 'group:7' ? 'thread-old' : null);
   const resetPi = vi.fn(async () => 42);
+  const compactCodex = vi.fn(async (key: string): Promise<'compacted' | 'unchanged'> => key === 'owner' ? 'unchanged' : 'compacted');
+  const compactPi = vi.fn(async (_key: string): Promise<'compacted' | 'unchanged'> => 'compacted');
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
   const codexPrompt = extra.codexPrompt === null ? undefined : extra.codexPrompt ?? new CodexPromptStub();
-  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog,
+  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, compactCodex, compactPi, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog,
     health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, comfy: { ok: true }, codex: { ok: false }, deepseek_key_present: true }),
     queue: () => ({ active: 1, slots: 2, waiting: 1, scopes: { 'group:7': 1 } }),
     codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'group:7', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
@@ -51,7 +54,7 @@ async function rig(extra: { validators?: SettingsValidators; contextUsage?: Cont
   const get = (url: string, init: RequestInit = {}) => fetch(base + url, { ...init, headers: { Cookie: cookie, ...init.headers } });
   const post = (url: string, fields: Record<string, string>, headers: Record<string, string> = {}) => fetch(base + url, { method: 'POST', redirect: 'manual',
     headers: { Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded', ...headers }, body: new URLSearchParams(fields).toString() });
-  return { dir, store, live, settings, base, get, post, resetCodex, resetPi, codexPrompt, close: () => dashboard.close(), csrf: csrfToken(TOKEN) };
+  return { dir, store, live, settings, base, get, post, resetCodex, resetPi, compactCodex, compactPi, codexPrompt, close: () => dashboard.close(), csrf: csrfToken(TOKEN) };
 }
 
 /** 读 SSE 直到 predicate 满足（或超时）。 */
@@ -251,6 +254,67 @@ describe('面板二期页面', () => {
     expect(blocked.status).toBe(409);
     const text = await blocked.text(); expect(text).toContain('凭据样式'); expect(text).not.toContain(secret);
     expect(readFileSync(file, 'utf8')).toBe(`提示 ${secret}`);
+  });
+
+  it.each(['codex', 'pi'] as const)('%s 压缩校验 cookie、CSRF、同源与线程键，成功跳回并记录事件', async backend => {
+    const r = await rig(), route = '/' + backend + '/compact';
+    const compact = backend === 'codex' ? r.compactCodex : r.compactPi;
+    expect((await r.post(route, { key: 'group:7' })).status).toBe(403);
+    const fields = { key: 'group:7', _csrf: r.csrf };
+    expect((await r.post(route, fields, { Origin: 'https://other.example' })).status).toBe(403);
+    expect((await r.post(route, fields, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
+    expect((await r.post(route + '?token=' + TOKEN, fields, { Cookie: '' })).status).toBe(401);
+    for (const key of ['', 'shared', 'group:0', 'private:01', '../owner']) {
+      expect((await r.post(route, { ...fields, key })).status).toBe(400);
+    }
+    expect(compact).not.toHaveBeenCalled();
+    const response = await r.post(route, fields);
+    expect(response.status).toBe(303);
+    expect(response.headers.get('location')).toBe('/agents?ok=compacted');
+    expect(compact).toHaveBeenCalledWith('group:7');
+    const event = r.store.events('@' + backend).find(e => e.stage === 'thread_compacted')!;
+    expect(JSON.parse(event.detail_json)).toMatchObject({ source: 'dashboard', backend,
+      [backend === 'codex' ? 'thread_key' : 'conversation_key']: 'group:7' });
+    expect(await (await r.get('/agents?ok=compacted')).text()).toContain('会话已压缩');
+    compact.mockResolvedValueOnce('unchanged');
+    expect((await r.post(route, fields)).headers.get('location')).toBe('/agents?ok=unchanged');
+    expect(r.store.events('@' + backend).filter(e => e.stage === 'thread_compacted')).toHaveLength(1);
+  });
+
+  it.each(['codex', 'pi'] as const)('%s 压缩快速失败显示错误提示，排队后失败仍记录日志', async backend => {
+    const r = await rig(), route = '/' + backend + '/compact';
+    const compact = backend === 'codex' ? r.compactCodex : r.compactPi;
+    const errorLog = vi.spyOn(log, 'error');
+    try {
+      compact.mockRejectedValueOnce(new Error('secret-history'));
+      const response = await r.post(route, { key: 'group:7', _csrf: r.csrf });
+      expect(response.headers.get('location')).toBe('/agents?ok=compactFailed');
+      const html = await (await r.get('/agents?ok=compactFailed')).text();
+      expect(html).toContain('flash err');
+      expect(html).toContain('会话压缩失败');
+      expect(html).not.toContain('secret-history');
+      let fail!: (error: Error) => void;
+      compact.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+      const queued = await r.post(route, { key: 'group:7', _csrf: r.csrf });
+      expect(queued.headers.get('location')).toBe('/agents?ok=compactQueued');
+      expect(await (await r.get('/agents?ok=compactQueued')).text()).toContain('压缩已排队或正在执行');
+      fail(new Error('secret-history'));
+      await vi.waitFor(() => expect(errorLog).toHaveBeenCalledTimes(2));
+      expect(errorLog).toHaveBeenLastCalledWith('dashboard thread compaction failed', { backend, key: 'group:7' });
+      expect(r.store.events('@' + backend).filter(e => e.stage === 'thread_compacted')).toHaveLength(0);
+    } finally { errorLog.mockRestore(); }
+  });
+
+  it('压缩按钮与重置并列，包含标题、线程键和 CSRF，未创建的线程无按钮', async () => {
+    const r = await rig(), html = await (await r.get('/agents')).text();
+    for (const backend of ['codex', 'pi']) {
+      expect(html.match(new RegExp('action="/' + backend + '/compact"', 'g'))).toHaveLength(1);
+      expect(html).toContain('action="/' + backend + '/reset"');
+    }
+    expect(html).toContain('title="保留摘要，清理旧工具输出与图片；等待当前回合结束"');
+    expect(html).toContain('压缩会话</button>');
+    expect(html).toContain('name="key" value="group:7"');
+    expect(html).toContain('name="_csrf" value="' + r.csrf + '"');
   });
 
   it('重置线程：校验键、调用后端、记录事件并带结果跳回', async () => {

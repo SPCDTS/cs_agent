@@ -9,6 +9,7 @@ import { parseBackendOverrides } from '../agent/backends/select.js';
 import { redactText } from '../shared/redact.js';
 import type { Trace } from '../shared/trace.js';
 import { page } from './ui/html.js';
+import { log } from '../shared/log.js';
 
 export function createDashboardPost(opts: DashboardOptions, csrf: string, agentMd: string,
   tracer: Pick<Trace, 'event'>,
@@ -88,6 +89,31 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
           throw new HttpError(409, redactText(e instanceof Error && e.message ? e.message : 'codex.md 未保存', 2_000));
         }
         back('/settings?ok=codexPrompt#codex-prompt'); return;
+      }
+      if (url.pathname === '/codex/compact' || url.pathname === '/pi/compact') {
+        const codex = url.pathname === '/codex/compact';
+        const key = form.get('key') ?? '';
+        const compact = codex ? opts.compactCodex : opts.compactPi;
+        if (!compact) throw new HttpError(404, '压缩不可用');
+        if (!isThreadKey(key)) throw new HttpError(400, '非法的线程键');
+        // 同步抛错和异步失败统一处理；超出 HTTP 等待窗口后仍有失败日志。
+        const job = Promise.resolve().then(() => compact(key)).then(outcome => {
+          if (outcome === 'compacted') tracer.event(codex ? '@codex' : '@pi', 'thread_compacted', {
+            detail: { source: 'dashboard', backend: codex ? 'codex' : 'pi', [codex ? 'thread_key' : 'conversation_key']: key },
+          });
+          return outcome;
+        }).catch(() => {
+          // 后端错误可能含模型正文或凭据，只记操作与键。
+          log.error('dashboard thread compaction failed', { backend: codex ? 'codex' : 'pi', key });
+          return 'compactFailed' as const;
+        });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const outcome = await Promise.race([job, new Promise<'compactQueued'>(resolve => {
+            timer = setTimeout(() => resolve('compactQueued'), 1500).unref();
+          })]);
+          back(`/agents?ok=${outcome}`); return;
+        } finally { clearTimeout(timer); }
       }
       if (url.pathname === '/codex/reset' || url.pathname === '/pi/reset') {
         const codex = url.pathname === '/codex/reset';

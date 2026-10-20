@@ -403,6 +403,21 @@ export class PiBackend implements AgentBackend {
     }));
   }
 
+  /** 手动压缩排在该键回合之后，保留当前会话映射。 */
+  compactThread(key: string): Promise<"compacted" | "unchanged"> {
+    if (key !== "owner" && !isScope(key)) return Promise.reject(new Error("非法会话键"));
+    return this.lock(key, async () => {
+      const id = (await this.readThreadIds())[key];
+      if (id === undefined) return "unchanged";
+      const conv = await this.harness.conversation(id as ConversationId, context);
+      if (!conv) throw new Error("pi 会话不存在");
+      const task = await conv.compact(undefined, context);
+      const { state: { outcome } } = await this.harness.waitForTask(task, context);
+      if (outcome.status !== "completed") throw new Error(`pi 会话压缩失败（${outcome.status}）`);
+      return "compacted";
+    });
+  }
+
   /** 必须在关闭票据 harness 前调用，使其 signal 只停止等待、不终结 pi submission。 */
   beginShutdown(): void { this.closing = true; }
 

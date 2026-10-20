@@ -182,3 +182,14 @@ Trace ──tap──▶ LiveBus（内存卡片：阶段栈、事件流，已脱
 - codex.md（DESIGN-codex-context §8.6）：面板通过 `DashboardOptions.codexPrompt`（`CodexPromptStore` 的结构类型：`read()` / `save(custom, expectedRevision)` / `subscribe(fn)`）读写，不直接碰文件。表单带隐藏字段 `revision`（取自 `read()`），提交内容先把 CRLF / CR 规范为 LF 再交给 `save`；`StaleRevisionError` → 409"codex.md 已在别处被修改，请刷新后再保存"，存储的其他拒绝（为空、超过 64 KB、含凭据样式内容）→ 409 并显示存储给出的中文原因（先脱敏）；成功后 303 跳回 `/settings?ok=codexPrompt#codex-prompt`。当前自定义段含已注册秘密时只读展示脱敏版、不给表单。受管段只读折叠展示；完整 AGENTS.md 在 `/codex/agents-md` 只读脱敏查看。未接入存储时显示提示，POST 返回 404。
 - 渲染：服务端文本一律先脱敏再转义；客户端只用 `textContent`。CSP 为 nonce（样式与脚本），无内联 `style=` 属性；Host 白名单、图片路径段与 realpath 双重限制保持不变。
 - 线程重置排在该线程的回合队列之后，不打断进行中的回合；请求最多等 1.5 秒，否则提示"已排队"。
+
+
+## 临时手动压缩
+
+`/agents` 页在 Codex / Pi 的重置按钮旁提供“压缩会话”，分别调用 `POST /codex/compact` 和 `POST /pi/compact`。压缩保留摘要，清理活动上下文中的旧工具输出与图片；会话 ID 不变，磁盘历史不会因此删除。操作与回合、重置共用每会话队列，等待当前回合完成，不注入本轮 MCP 令牌。
+
+请求沿用同源、CSRF 和线程键校验，最多等待 1.5 秒：跳回 `/agents?ok=compacted|compactQueued|unchanged`；窗口内失败显示 `compactFailed` 错误提示，排队后的失败写日志。成功记录 `thread_compacted`（`@codex` / `@pi`）。
+
+Codex 使用同一二进制、`CODEX_HOME` 受管配置和提供者环境，启动一次性 `app-server`，依次初始化、恢复线程并调用 `thread/compact/start`，最长等待 5 分钟，结束后清理进程。Pi 调用已有会话的 `compact(undefined, context)` 并检查任务终态。压缩需要后端模型可用；操作完成不代表所有历史图片都必然移除，具体保留范围由后端决定。
+
+协议已用本机 `codex-cli 0.163.0-alpha.10.2` 的 `app-server generate-json-schema --experimental` 核对：`initialize` 要求 `clientInfo.name/version`，`thread/resume` 和 `thread/compact/start` 要求 `threadId`。完成依据为目标线程的 `item/completed`（`item.type=contextCompaction`）、成功的 `turn/completed`，或兼容已弃用的 `thread/compacted`；失败/中断的回合不会报成功。服务端请求中未实现的方法返回 JSON-RPC `-32601`。离线 smoke 仅验证握手和不存在的线程恢复；未调用真实模型验证压缩效果。协议概览见 [官方 App Server 文档](https://developers.openai.com/codex/app-server)。

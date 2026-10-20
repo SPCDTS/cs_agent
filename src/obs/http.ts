@@ -36,7 +36,9 @@ const FLASH: Record<string, string> = {
   skillsUploaded: '技能上传已处理，下一条消息生效。', skillsDeleted: '技能已删除，下一条消息生效。',
   saved: '设置已保存，之后收到的消息按新设置处理。', prompt: 'agent.md 已保存，pi 下一轮对话即读取新内容。',
   codexPrompt: 'codex.md 已保存，AGENTS.md 已重写，codex 下一条消息即使用新内容。',
-  reset: '已重置：旧会话已归档，下一条消息会新建会话。', queued: '已排队：当前回合结束后立即重置，旧会话会归档。', unchanged: '没有可重置的会话。',
+  reset: '已重置：旧会话已归档，下一条消息会新建会话。', queued: '已排队：当前回合结束后立即重置，旧会话会归档。', unchanged: '没有可操作的会话。',
+  compacted: '会话已压缩：保留摘要，旧工具输出与图片已从活动上下文中清理。', compactQueued: '压缩已排队或正在执行，完成结果请查看日志。',
+  compactFailed: '会话压缩失败，详见日志。',
 };
 
 const asObj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
@@ -245,7 +247,7 @@ export function createDashboard(opts: DashboardOptions) {
     if (url.pathname === '/codex' || url.pathname === '/pi') { res.writeHead(303, { Location: `/agents${url.pathname}/sessions` }).end(); return; }
     const flashCode = q.get('ok');
     const detail = flashCode === 'skillsUploaded' ? (q.get('detail') ?? '').slice(0, 16_000) : '';
-    const flash = flashCode && Object.hasOwn(FLASH, flashCode) ? { text: FLASH[flashCode]!, ...(detail ? { detail } : {}) } : undefined;
+    const flash = flashCode && Object.hasOwn(FLASH, flashCode) ? { text: FLASH[flashCode]!, error: flashCode === 'compactFailed', ...(detail ? { detail } : {}) } : undefined;
     const html = await render(url, nonce, flash);
     if (html === null) {
       const notFound = url.pathname.startsWith('/skills/') ? '没有这个技能。可以从<a href="/skills">技能列表</a>重新查找。' : '地址不对或票据已过保留期。可以从<a href="/tickets">票据列表</a>重新查找。';

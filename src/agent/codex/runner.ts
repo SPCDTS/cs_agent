@@ -17,6 +17,7 @@ import { imageRefsValue } from "../../media/gen/image-references.js";
  * 安全阀：resume 前若线程 rollout 文件 > rolloutMaxMb 或线程年龄 > threadMaxDays，新建线程（历史靠 qq_context 找回）。
  */
 import { spawn, spawnSync } from "node:child_process";
+import { compactAppServer } from "./app-server-compact.js";
 import { randomUUID } from "node:crypto";
 import { constants, promises as fs, type Stats } from "node:fs";
 import os from "node:os";
@@ -551,6 +552,36 @@ export class CodexRunner {
         log.info("codex thread reset", { thread_key: key, thread_id: old?.thread_id ?? null, reason });
         return old?.thread_id ?? null;
       });
+    });
+  }
+
+  /** 与回合、重置共用队列；压缩不轮换线程，也不申请本轮 MCP 令牌。 */
+  compactThread(key: ThreadKey, reason = "dashboard"): Promise<"compacted" | "unchanged"> {
+    return this.enqueue(key, async () => {
+      const session = await this.readThread(key);
+      if (!session) return "unchanged";
+      const startedAt = Date.now();
+      const detail = { thread_key: key, thread_id: session.thread_id, reason };
+      log.info("codex thread compaction started", detail);
+      let compacted = false;
+      try {
+        const [bin, ...prefix] = this.opts.command;
+        if (!bin) throw new Error("CODEX_BIN 未配置");
+        await fs.mkdir(this.opts.workspaceDir, { recursive: true });
+        await this.prepareTraceDirectory();
+        // commonArgs 仅含 exec 专用选项；提供者由同一 CODEX_HOME/config.toml 与 childEnv 决定。
+        await compactAppServer(session.thread_id, {
+          start: () => spawn(bin, [...prefix, "app-server"], {
+            cwd: this.opts.workspaceDir, env: this.childEnv(), stdio: ["pipe", "pipe", "pipe"],
+            detached: process.platform !== "win32", windowsHide: true,
+          }),
+          killTree,
+        });
+        compacted = true;
+        return "compacted";
+      } finally {
+        log.info("codex thread compaction ended", { ...detail, compacted, duration_ms: Date.now() - startedAt });
+      }
     });
   }
 

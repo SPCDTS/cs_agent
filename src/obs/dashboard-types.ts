@@ -31,6 +31,8 @@ export interface DashboardOptions {
   live?: LiveBus;
   resetCodex?: (key: ThreadKey) => Promise<string | null>;
   resetPi?: (key: string) => Promise<number | null>;
+  compactCodex?: (key: ThreadKey) => Promise<'compacted' | 'unchanged'>;
+  compactPi?: (key: string) => Promise<'compacted' | 'unchanged'>;
   trace?: Pick<Trace, 'event'>;
   /** 每线程上下文占用（src/agent/context-usage.ts 的 ContextUsageStore；面板只读 all/get） */
   contextUsage?: ContextUsageView;

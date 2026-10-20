@@ -331,7 +331,8 @@ async function main(): Promise<void> {
       config: { rawDays: cfg.HISTORY_RAW_DAYS, summaryDays: cfg.HISTORY_SUMMARY_DAYS, hardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,
         dailyHour: cfg.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } },
     archives: { codex: path.join(cfg.DATA_DIR, 'codex-threads-archive.jsonl'), pi: path.join(cfg.DATA_DIR, 'pi-threads-archive.jsonl') },
-    resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key) });
+    resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key),
+    compactCodex: (key) => codex.compactThread(key), compactPi: (key) => pi.compactThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
     onPurge: async now => {
       try { if (!obs.degraded) purgeMemoryInstrumentation(obs.db, cfg.OBS_MEMORY_RETENTION_DAYS, now); }

@@ -43,6 +43,7 @@ export interface DashboardPageOptions {
   };
   health(): unknown | Promise<unknown>; queue(): unknown; codex(): Promise<unknown>; pi(): Promise<unknown>;
   resetCodex?: unknown; resetPi?: unknown;
+  compactCodex?: unknown; compactPi?: unknown;
   live?: { snapshot(): LiveCardView[] };
   context: { scopes(): string[] };
   contextUsage?: ContextUsageView;
@@ -303,6 +304,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     const codexStatus = await opts.codex().catch(() => null);
     const threads: Record<string, unknown>[] = Array.isArray(codexStatus) ? codexStatus.map(asObj) : Object.entries(asObj(codexStatus)).map(([thread_key, thread_id]) => ({ thread_key, thread_id }));
     const codexTargets: ResetTarget[] = threads.map(t => String(t.thread_key)).filter(isThreadKey).sort((a, b) => Number(b === "owner") - Number(a === "owner") || a.localeCompare(b)).map(key => ({ key, label: key === 'owner' ? 'owner 线程' : scopeLabel(key),
+      compactEnabled: !!opts.compactCodex && !!threads.find(t => String(t.thread_key) === key)?.thread_id,
       enabled: !!opts.resetCodex && !!threads.find(t => String(t.thread_key) === key)?.thread_id }));
     const piStatus = asObj(await opts.pi().catch(() => ({})));
     const piKeys = [...new Set([...Object.keys(asObj(piStatus.threads)), ...(Array.isArray(piStatus.keys) ? piStatus.keys.map(String) : [])])].sort();
@@ -311,7 +313,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     const cards: Record<'codex' | 'pi', AgentCardInput> = {
       codex: { summary: summaries.find(x => x.backend === 'codex'), error, threads: codexTargets, usage: k => usageOf('codex', k) },
       pi: { summary: summaries.find(x => x.backend === 'pi'), error, usage: k => usageOf('pi', k),
-        threads: [...piUsage.filter(k => piKeys.includes(k)), ...piKeys.filter(k => !piUsage.includes(k))].map(key => ({ key, label: ` ${scopeLabel(key)} 的会话`, enabled: !!opts.resetPi })),
+        threads: [...piUsage.filter(k => piKeys.includes(k)), ...piKeys.filter(k => !piUsage.includes(k))].map(key => ({ key, label: ` ${scopeLabel(key)} 的会话`, enabled: !!opts.resetPi, compactEnabled: !!opts.compactPi })),
         extraUsageKeys: piUsage.filter(k => !piKeys.includes(k)) },
     };
     return agentsBody(cards, csrf);

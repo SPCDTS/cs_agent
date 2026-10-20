@@ -634,6 +634,57 @@ describe("pi durable backend", () => {
     expect((await r.pi.harness.snapshot(PiRequestDoc, id, context))?.access).toBe("group:7");
   });
 
+  it("面板压缩：无会话 unchanged，手动摘要完成后保留映射", async () => {
+    const s = await setup([reply("第一轮回复"), reply("第二轮回复"), reply("手动压缩摘要")]);
+    expect(await s.pi.compactThread("owner")).toBe("unchanged");
+    expect(await s.pi.compactThread("private:9")).toBe("unchanged");
+    await expect(s.pi.compactThread("shared")).rejects.toThrow("非法");
+    await s.pi.handle({ ...request("manual-long"), text: "历史事实。".repeat(50_000) }, handleContext());
+    await s.pi.handle({ ...request("manual-recent"), text: "recent material. ".repeat(6_000) }, handleContext());
+    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+    const wait = vi.spyOn(s.pi.harness, "waitForTask");
+    expect(await s.pi.compactThread("group:7")).toBe("compacted");
+    expect(wait).toHaveBeenCalled();
+    expect((await s.pi.readThreadIds())["group:7"]).toBe(id);
+    const conv = (await s.pi.harness.conversation(id, context))!;
+    await conv.waitForIdle(context);
+    const view = await conv.context(context);
+    expect(view.entries.some(e => e.kind === "pi.compaction")).toBe(true);
+  });
+
+  it("面板压缩排在进行中的回合之后，后续重置等待压缩完成", async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const began = new Promise<void>(resolve => { started = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const s = await setup([async () => { started(); await gate; return reply("已完成"); }, reply("摘要")]);
+    const turn = s.pi.handle(request("compact-queued"), handleContext());
+    await began;
+    const wait = vi.spyOn(s.pi.harness, "waitForTask");
+    const compact = s.pi.compactThread("group:7");
+    const reset = s.pi.resetThread("group:7");
+    await Promise.resolve();
+    expect(wait).not.toHaveBeenCalled();
+    release();
+    await turn;
+    expect(await compact).toBe("compacted");
+    expect(await reset).toBeTypeOf("number");
+    expect(await s.pi.compactThread("group:7")).toBe("unchanged");
+  });
+
+  it("面板压缩检查任务失败终态，随后仍可重置", async () => {
+    const s = await setup([reply("已有回复"), reply("摘要")]);
+    await s.pi.handle(request("compact-failed"), handleContext());
+    const wait = s.pi.harness.waitForTask.bind(s.pi.harness);
+    const spy = vi.spyOn(s.pi.harness, "waitForTask").mockImplementationOnce(async (id, ctx) => {
+      const task = await wait(id, ctx);
+      return { ...task, memos: undefined, state: { status: "terminal", outcome: { status: "failed", error: { message: "faux failure" } } } };
+    });
+    await expect(s.pi.compactThread("group:7")).rejects.toThrow("pi 会话压缩失败（failed）");
+    spy.mockRestore();
+    expect(await s.pi.resetThread("group:7")).toBeTypeOf("number");
+  });
+
   it("automatically compacts long-lived history with configured thresholds", async () => {
     const contexts: string[] = [];
     const respond = (ctx: TranscriptContext) => {
