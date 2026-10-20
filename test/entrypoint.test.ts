@@ -183,6 +183,12 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(runEntrypoint({ CODEX_PROVIDER: "unknown" }).status).not.toBe(0);
   });
 
+  it("writes the QQ no-link rule as developer instructions", () => {
+    const r = runEntrypoint({});
+    expect(r.status).toBe(0);
+    expect(r.toml).toMatch(/^developer_instructions = '''QQ 回复规则（优先于任何工具说明，包括 web\.run 的引用格式要求）[^\n]*绝不在回复里写链接[^\n]*'''$/m);
+  });
+
   it("omits the remote plugin feature override when enabled", () => {
     const r = runEntrypoint({ CODEX_REMOTE_PLUGINS: "on" });
     expect(r.status).toBe(0);
