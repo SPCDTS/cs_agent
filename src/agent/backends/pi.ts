@@ -374,8 +374,8 @@ export class PiBackend implements AgentBackend {
       }
       if (settled.status !== "done" || settled.type !== "input") throw new Error("pi 未能完成本次请求，请稍后再试。");
       const answer = await conv.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
-      const text = answer?.model?.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "text").map(c => c.text) : []).join("").trim();
-      if (!text) throw new Error("pi 返回了空回复");
+      // 回复经 send_message 发出，最终回答可以为空。
+      const text = answer?.model?.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "text").map(c => c.text) : []).join("").trim() ?? "";
       // 保留回合产物供审计；成功生图须通过 send_message 显式发送。
       const images = await collectNewImages(attachmentDirs(this.opts.dataDir, req.ticket).attachDir, new Set());
       ctx.onEvent({ type: "pi_done", thread: req.threadKey, conversation: conv.id, images: images.length });

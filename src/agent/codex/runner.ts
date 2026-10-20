@@ -880,10 +880,9 @@ export class CodexRunner {
     return ["--json", "--strict-config", "--skip-git-repo-check", "-o", "__OUT__"];
   }
 
+  /** 回复经 send_message 发出，最终回答可以为空；是否兜底由 settle 按 Outbox 判断。 */
   private result(r: RunOutcome): string {
-    const text = (r.outFileText ?? "").trim() || (r.lastAgentMessage ?? "").trim();
-    if (!text) throw new Error("codex 没有返回内容");
-    return text;
+    return (r.outFileText ?? "").trim() || (r.lastAgentMessage ?? "").trim();
   }
 
   private async exec(
