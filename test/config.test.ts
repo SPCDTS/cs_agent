@@ -1,8 +1,21 @@
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentModels, resolveThinkingLevel } from "../src/agent/harness.js";
 import { applyEnvAliases, requireProviderApiKey } from "../src/config.js";
 import { loadAgentConfig as loadConfig } from "../src/agent/config.js";
 import { tmp } from "./agent/helpers.js";
+
+describe("pi 技能目录配置", () => {
+  it("缺省和空值使用 DATA_DIR/skills，显式路径和 off 保留", () => {
+    expect(loadConfig({}).PI_SKILLS_DIR).toBe(path.join("/data", "skills"));
+    const dataDir = path.resolve("custom-data");
+    for (const value of [undefined, ""]) {
+      expect(loadConfig({ DATA_DIR: dataDir, PI_SKILLS_DIR: value }).PI_SKILLS_DIR).toBe(path.join(dataDir, "skills"));
+    }
+    expect(loadConfig({ PI_SKILLS_DIR: "/custom/skills" }).PI_SKILLS_DIR).toBe("/custom/skills");
+    expect(loadConfig({ PI_SKILLS_DIR: "off" }).PI_SKILLS_DIR).toBe("off");
+  });
+});
 
 describe("NapCat 服务地址", () => {
   it("默认使用 compose 内网，空值沿用默认，保留宿主机覆盖与凭据校验", () => {

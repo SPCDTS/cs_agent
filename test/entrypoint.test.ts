@@ -195,6 +195,15 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     }
   });
 
+  it.each([undefined, "all", "", "figma,gmail"])("插件清理 %s 保留 skills/shared 与 .system", prune => {
+    const { dir } = seedPluginCache();
+    const files = ["shared/hello/SKILL.md", ".system/builtin/SKILL.md"].map(name => path.join(dir, "data", "codex", "skills", name));
+    for (const file of files) { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, "保留技能", "utf8"); }
+    const result = runEntrypointIn(dir, prune === undefined ? {} : { CODEX_PLUGIN_PRUNE: prune });
+    expect(result.status, result.stderr).toBe(0);
+    for (const file of files) expect(readFileSync(file, "utf8")).toBe("保留技能");
+  });
+
   it("prunes figma and gmail by default on each startup while retaining notion", () => {
     const { dir, cache, otherCache, staging } = seedPluginCache();
     for (let startup = 0; startup < 2; startup++) {

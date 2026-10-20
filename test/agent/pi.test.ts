@@ -51,7 +51,7 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   vi.stubEnv("CODEX_REQUIREMENTS_FILE", await sandboxRequirements(dir));
   const contextUsage = new ContextUsageStore(dir);
@@ -73,7 +73,7 @@ async function setup(steps: FauxResponseStep[], opts: { currentModel?: () => Mod
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
   const pi = await PiBackend.open({ dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
-    currentModel: opts.currentModel, mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
+    skillsDir: opts.skillsDir, currentModel: opts.currentModel, mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
     instrumentation: opts.instrumentation, thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
     ...(opts.disk ? {} : { storage: new MemoryStorage() }),
@@ -506,6 +506,60 @@ describe("pi durable backend", () => {
     await s.pi.handle(request("project3"), handleContext());
     expect(JSON.stringify(seen[2].messages.filter(m => m.role === "system"))).toContain("热更新后的会话项目指引");
     expect(await systems()).toHaveLength(2);
+  });
+
+  it.each(["default", "custom"])("技能通过 %s 目录进入 system，按需 read 正文且下一轮热更新和删除生效", async mode => {
+    const dir = tmp("cs-pi-skills-system-");
+    const workspaceDir = path.join(dir, "workspace");
+    const skillsDir = mode === "default" ? path.join(dir, "skills") : path.join(dir, "custom-skills");
+    await put(path.join(workspaceDir, "AGENTS.md"), "技能之前的项目指引");
+    const file = await put(path.join(skillsDir, "hello", "SKILL.md"), "---\ndescription: 第一版技能描述\n---\n按需读取的技能正文");
+    await put(path.join(skillsDir, "hidden", "SKILL.md"), "---\ndescription: 隐藏技能描述\ndisable-model-invocation: true\n---\n隐藏正文");
+    const seen: TranscriptContext[] = [];
+    const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
+    const cfg = loadConfig({ DATA_DIR: dir, ...(mode === "custom" ? { PI_SKILLS_DIR: skillsDir } : {}) });
+    const s = await setup([inspect, inspect, inspect, inspect, call("read", { path: file }), inspect],
+      { dir, workspaceDir, skillsDir: cfg.PI_SKILLS_DIR });
+    const systemAt = (index: number) => {
+      const system = seen[index].messages.findLast(m => m.role === "system");
+      if (!system || system.role !== "system") throw new Error("缺少 system 消息");
+      return getSystemMessageText(system);
+    };
+    await s.pi.handle(request("skills1"), handleContext());
+    await s.pi.handle(request("skills2"), handleContext());
+    const system = systemAt(0);
+    expect(system).toContain("<available_skills>");
+    expect(system).toContain("<name>hello</name>");
+    expect(system).toContain("<description>第一版技能描述</description>");
+    expect(system).toContain("<location>" + file + "</location>");
+    expect(system.indexOf("技能之前的项目指引")).toBeLessThan(system.indexOf("<available_skills>"));
+    expect(system).not.toContain("隐藏技能描述");
+    expect(system).not.toContain("按需读取的技能正文");
+    expect(system).not.toContain("<skills>");
+    const id = String((await s.pi.readThreadIds())["group:7"]);
+    const systems = async () => (await s.pi.sessionSource.entries(id, undefined, 256)).items.filter(e => e.kind === "pi.system");
+    expect(await systems()).toHaveLength(1);
+    await fs.writeFile(file, "---\ndescription: 更新后的技能描述\n---\n按需读取的技能正文", "utf8");
+    const future = new Date(Date.now() + 2000); await fs.utimes(file, future, future);
+    await s.pi.handle(request("skills3"), handleContext());
+    expect(systemAt(2)).toContain("更新后的技能描述"); expect(await systems()).toHaveLength(2);
+    await fs.unlink(file);
+    await s.pi.handle(request("skills4"), handleContext());
+    expect(systemAt(3)).not.toContain("<available_skills>");
+    await put(file, "---\ndescription: 恢复技能描述\n---\n按需读取的技能正文");
+    await s.pi.handle(request("skills5"), handleContext());
+    expect(results(seen[4])).toContain("按需读取的技能正文");
+    expect(seen[4].messages.find(m => m.role === "toolResult")?.isError).toBe(false);
+  });
+
+  it("PI_SKILLS_DIR=off 禁用技能提示，即使默认目录存在", async () => {
+    const dir = tmp("cs-pi-skills-off-");
+    await put(path.join(dir, "skills", "hello", "SKILL.md"), "---\ndescription: 不应加载的技能\n---\n正文");
+    let seen!: TranscriptContext;
+    const cfg = loadConfig({ DATA_DIR: dir, PI_SKILLS_DIR: "off" });
+    const s = await setup([ctx => { seen = ctx; return reply(); }], { dir, skillsDir: cfg.PI_SKILLS_DIR });
+    await s.pi.handle(request("skills-off"), handleContext());
+    expect(JSON.stringify(seen.messages.filter(m => m.role === "system"))).not.toContain("<available_skills>");
   });
 
   it("hot-loads agent.md without overwriting existing text", async () => {

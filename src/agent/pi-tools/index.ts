@@ -19,11 +19,14 @@ import { imageTool, type PiImageBackend } from "./images.js";
 import { PiRequestDoc } from "./request.js";
 import { PiPromptLoader } from "./prompt.js";
 import { ProjectContextLoader } from "./project-context.js";
+import { SkillsLoader } from "./skills.js";
 import { DeepSeekWeb } from "./web.js";
 
 export interface PiToolsOptions {
   dataDir: string;
   workspaceDir: string;
+  /** 空值或未设置使用 dataDir/skills；off 禁用技能目录。 */
+  skillsDir?: string;
   store: ContextStore;
   imageBackend: PiImageBackend;
   getHarness: () => Harness;
@@ -60,6 +63,7 @@ export function createPiExtension(opts: PiToolsOptions) {
   const web = opts.web ?? new DeepSeekWeb();
   const prompt = new PiPromptLoader(opts.dataDir);
   const projectContext = new ProjectContextLoader(opts);
+  const skills = opts.skillsDir === "off" ? undefined : new SkillsLoader({ dir: opts.skillsDir || path.join(opts.dataDir, "skills") });
   const history = (name: string, description: string, parameters: ReturnType<typeof Type.Object>) => defineTool({
     name, description, parameters, replay: "safe",
     async execute(args, api, context) {
@@ -104,6 +108,7 @@ export function createPiExtension(opts: PiToolsOptions) {
     sections: [
       section("cs-pi", () => prompt.read(), { tag: false }),
       section("project-context", input => projectContext.render(input.env?.cwd), { tag: false }),
+      section("skills", () => skills?.render(), { tag: false }),
     ],
     hooks: [
       hook(CompactionTask, { beforeCompact: async (compact, api, context) => {

@@ -96,6 +96,8 @@ const EnvSchema = z.object({
   AGENT_BACKEND: z.enum(["codex", "pi"]).default("codex"),
   /** 按 scope 覆盖后端：group:<群号>=pi,private:<QQ号>=codex */
   AGENT_BACKEND_OVERRIDES: z.string().default(""),
+  /** 空值使用 DATA_DIR/skills；off 显式禁用。 */
+  PI_SKILLS_DIR: z.string().default(""),
   PI_TURN_TIMEOUT_SEC: int(300),
   PI_ARCHIVE_RETENTION_DAYS: int(90),
   PI_COMPACTION_RESERVE_TOKENS: int(DEFAULT_COMPACTION_POLICY.reserveTokens),
@@ -202,6 +204,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
           .filter(Boolean);
   return {
     ...e,
+    PI_SKILLS_DIR: e.PI_SKILLS_DIR || path.join(e.DATA_DIR, "skills"),
     allowUsers,
     codexHome: path.join(e.DATA_DIR, "codex"),
     imagesDir: path.join(e.DATA_DIR, "images"),
