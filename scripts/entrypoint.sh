@@ -245,12 +245,17 @@ default_tools_approval_mode = "$MCP_APPROVAL_MODE"
 DATA_DIR = "$MCP_DATA_DIR"$IMAGE_GEN_ENV
 TOML
 fi
+# apps=false 始终写入：否则 codex 按登录的 ChatGPT 账号加载 Apps 连接器（Notion/GitHub/Drive/Gmail…），
+# 每轮约 14 万 token 的工具定义，且群聊回合也能调用主人账号的连接器。
+cat >> "$CONFIG.tmp" <<'TOML'
+
+[features]
+apps = false
+TOML
 if [ "$REMOTE_PLUGINS" = "off" ]; then
   cat >> "$CONFIG.tmp" <<'TOML'
-
 # plugins=false 关闭插件市场启动同步与远程插件安装（0.163 实测：仅 remote_plugin=false 仍会同步并重装被删插件，
 # 安装临时目录与技能扫描竞态导致 thread/start -32603）；.system 内置技能不受影响。
-[features]
 plugins = false
 remote_plugin = false
 TOML

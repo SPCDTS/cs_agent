@@ -234,6 +234,7 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 
 远程插件对 QQ 客服场景无用，默认关闭并清理 figma/gmail；其余已缓存插件会继续被加载，想全部清掉设 `CODEX_PLUGIN_PRUNE=all`。
 
+- 受管配置始终写入 `[features] apps = false`：不加载登录账号的 ChatGPT Apps 连接器（Notion、GitHub、Drive、Gmail 等）。否则每轮附带约 14 万 token 的工具定义，且群聊回合也能调用主人账号的连接器。
 - `CODEX_REMOTE_PLUGINS=off|on`，默认 `off`：受管配置写入 `[features]` 下的 `plugins = false` 与 `remote_plugin = false`（前者才是关键：codex 0.163 启动时会同步插件市场并重装缺失的精选插件，与技能扫描竞态导致线程启动失败；`.system` 内置技能仍可用）；设为 `on` 时省略该段，保持 codex 默认行为。非法值经 `toml_enum` 告警并回退 `off`。
 - `CODEX_PLUGIN_PRUNE` 默认 `figma,gmail`：每次启动写完配置后删除 `$CODEX_HOME/plugins/cache/openai-curated-remote/<name>`；精确值 `all` 删除整个市场缓存目录，显式空字符串不清插件缓存。名单按逗号分隔，非空名称只允许 `[A-Za-z0-9._-]` 且不能是 `.` 或 `..`；非法项告警跳过，其余项继续处理，不展开通配符。无论是否清理插件缓存，都会删除 `$CODEX_HOME/plugins/.remote-plugin-install-staging`；目录不存在不报错。此清理开关独立于 `CODEX_REMOTE_PLUGINS`。
 

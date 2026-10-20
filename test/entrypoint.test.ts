@@ -108,6 +108,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
       "model_providers.magpie.model_catalog_url": '"http://host.docker.internal:3425/v1/codex/models"',
       model_reasoning_effort: '"high"',
       web_search: '"live"',
+      "features.apps": "false",
       "features.remote_plugin": "false",
       "features.plugins": "false",
       "tools.web_search.context_size": '"low"',
@@ -177,7 +178,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
   it("omits the remote plugin feature override when enabled", () => {
     const r = runEntrypoint({ CODEX_REMOTE_PLUGINS: "on" });
     expect(r.status).toBe(0);
-    expect(parse(r.toml)["[features]"]).toBeUndefined();
+    expect(parse(r.toml)["features.apps"]).toBe("false");
     expect(parse(r.toml)["features.remote_plugin"]).toBeUndefined();
     expect(parse(r.toml)["features.plugins"]).toBeUndefined();
     expect(r.toml).not.toMatch(/^remote_plugin\s*=/m);
