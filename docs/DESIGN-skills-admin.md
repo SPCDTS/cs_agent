@@ -1,6 +1,6 @@
 # 设计：面板 skill 管理页 + agent 自行写入技能
 
-状态：设计完成，待实现。前置：`docs/DESIGN-skills.md`（共享目录已上线，只读挂载）。
+状态：已实现并部署（2026-10-20）。前置：`docs/DESIGN-skills.md`（共享目录已上线，只读挂载）。
 
 ## 0. 事实（2026-10-20）
 
@@ -78,7 +78,13 @@ export class SkillsStore {
 
 ## 8. 验收记录
 
-（主会话追加）
+### 2026-10-20，主会话验收
+
+- 代码：后端（codex 实现，提交 dead157）+ 提示词改引 install-skill（56f21e1）+ 面板页面（Opus 实现，984a2d0）；主会话修了一处 UI 层直接 import agent 模块的架构违规（改为按错误形状判断）。沙箱外全量 1558 项通过。与设计差异：fflate 不暴露 zip 条目的链接标志，链接条目按普通文件落盘、不创建链接；zip 路径额外拒绝 Windows 设备名/ADS/大小写冲突；大小显示用现有 fmtBytes（KB/MB）。
+- 部署：镜像 `a9923f09…`（干净 build worktree，main 984a2d0）；容器内两条挂载均为 rw，受管 config 的 `writable_roots = ["/workspace", "/data/prompts", "/data/codex/skills/shared"]`。
+- 共享目录放入两个辅助技能（数据，不入库）：`install-skill`（codex 预装 skill-installer 的脚本原样，SKILL.md 改为固定 `--dest` 共享目录；原名拷贝会让 codex 列出两份同名技能，实测确认）、`find-skills`（改自 vercel-labs/skills 的 find-skills，用 `npm_config_cache=/tmp/npm-cache DISABLE_TELEMETRY=1 npx -y skills@latest find|add … -a universal -y`，安装时在临时目录建 `.agents/skills` → 共享目录的链接；主会话实测搜索与安装均落为真实目录）。
+- 真实流量（用户确认"没啥问题"）：04:40Z 用户经面板上传 `cs2-news-brief`，04:41Z 群消息（pi）立即按该技能生成 CS2 早报并发出；04:43–04:44Z owner 在群里要求安装 grill-me：pi 先 `npx skills find grill-me`，`npx skills add` 因容器到 github.com 的 git TLS 握手偶发失败未落地，install-skill 脚本同样受影响，模型改为从 raw.githubusercontent 逐文件下载并写入 `/data/skills/grill-me`、`/data/skills/grilling`（owner 回合可写生效），全程 85 s，回复说明已装好。中间一次 `cp /tmp/dl/... /data/skills/` 失败，原因是 pi 每条 bash 的 `/tmp` 为独立 tmpfs、不跨命令保留；已把"同一条命令内完成下载与拷贝"和 GitHub 回退路径写进 find-skills 的注意事项。
+- 面板：`/skills` 列出 5 个技能（含上传与 agent 安装的），诊断为空；下载/删除入口正常渲染。
 
 ## 9. 安装器调研（2026-10-20）
 
