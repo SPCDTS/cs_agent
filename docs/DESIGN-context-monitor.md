@@ -103,3 +103,41 @@ export function analyzeContextTurns(events: ContextUsageEvent[], system: SystemE
 
 - store：`recordRequest` 写 `model_request` 且不改状态；codex 解析器返回全部 token_count；pi 每请求 recordRequest、每票据一次 recordTurn；分析对混合（新事件 + 旧 context_usage）序列的回退；UI 分组渲染。
 - 验收：owner codex 一个带工具调用的票据在图上出现多根相邻条且首条之后命中接近 100%；pi 群线程"回合数"回落为票据数；旧数据区间仍能显示。
+
+## 9. 页面重做：伪票据排除、票据预览面板（用户 2026-10-20 反馈）
+
+### 9.1 现状与问题
+
+- **不在票据内的请求**：`ContextUsageStore.backfill`（每次容器启动）、`ensure`、`reset` 用伪票据 `@context` 写 `context_usage`，其中 backfill 写出的是 `source=turn` 的快照（rollout 里最后一次用量，值与上一真实请求相同）。§8.3 的旧数据回退把 `source=turn` 全部视为 seq=1 的单请求票据，于是 owner 线程开头出现 23 根等高的条，题注"票据 @context · 第 1/23 次请求"，时间都是历次重启时刻。库里现有 42 条 codex、2 条 pi 这样的记录。
+- **可读性**：图高 120 px、条宽 ≤ 20 px、分组只靠交替底色；没有纵轴刻度、没有时间轴；miss 只有 4 px 顶标；悬停 title 是唯一信息入口，无法点进票据。
+- **缺少入口**：用户想点一个票据组看到该票据的信息（谁、何时、多少次请求、每次命中），再从那里跳到票据时间线。
+
+### 9.2 数据层（obs，Codex）
+
+- `src/obs/store.ts` 的 `CONTEXT_REQUEST_SQL`：`context_usage` 的回退分支加 `AND events.ticket NOT LIKE '@%'`；`source=compact` 分隔不受影响（仍可来自 `@context`）。`contextSeries`、`previousContextTurn` 共用该谓词，预算、`requests`、`tickets` 计数随之不再包含伪票据。
+- `analyzeContextTurns`：`kind !== 'request'` 且 `source === 'turn'` 且 `ticket` 以 `@` 开头的事件直接跳过（纯函数对任何调用方都安全）。
+- `ContextTurn` 新增可选 `output?: number`（来自 `model_request.output`；旧记录无）。
+- 新增 `ObsStore.ticketBriefs(tickets: readonly string[]): Map<string, TicketBrief>`，类型放 `src/shared/context-turns.ts`：
+  ```ts
+  export interface TicketBrief { ticket: string; scope: string; ts: number; status: string; sender: string | null; route: string | null; backend: string | null;
+    duration_ms: number; text: string; reply: string; tools: number; settings?: Record<string, unknown> }
+  ```
+  `ts/status/sender/route/backend/duration_ms` 与 `tickets()` 同口径（把 `IN (...)` 过滤放进 `GROUP BY ticket` 之前，不要先全表分组再过滤）；`text` 取 received/recovered 的 `text`（库里已是脱敏前 500 字），`reply` 取 terminal 事件的 `reply`，否则 postprocess 的 `sent_text`，否则 model_turn 的 `raw_reply`/`reply`（与 `threadTurns` 一致）；`tools` 为 `stage LIKE 'tool:%' AND status<>'started'` 的条数；`settings` 取 `admitted` 事件的 `detail.settings`（无则省略）。最多 300 个票据，多余忽略；不存在的票据不在结果里。总查询次数固定（一次票据聚合 + 一次事件聚合），不要每票据单独查。
+
+### 9.3 页面（UI，Opus）
+
+- **图**：高 160 px；左侧纵轴刻度 0 / 25 / 50 / 75 / 100 %（占窗口），背景每 25 % 一条浅网格线（CSS 背景渐变，不用脚本）；图下方时间轴只标首尾两个时间（跨天时带日期）。条宽 8–14 px，组内间距 2 px，组间 6 px。
+- **票据组**：`<button type="button" class="cu-group" aria-controls="cu-pop-<i>-<n>" aria-expanded="false">`，内含该票据的所有条；底部 2 px 基线用 `--carbon`，悬停/聚焦加外框；含 miss 的组基线改 `--fail`、含 partial 改 `--warn`。条本身：命中段 `--carbon`，未命中段 `--ink-3`，miss 条的未命中段改 `--fail`，partial 改 `--warn`；顶标保留。压缩 / 重建分隔：虚线 + 顶部小字标签（`::after{content:attr(data-label)}`，"压缩"/"重建"）。
+- **预览面板**：每个线程区块在图下面放一个 `<div class="cu-pane">`，里面预渲染每个票据组对应的 `<div class="cu-pop" id="cu-pop-<i>-<n>" hidden>`：
+  - 头：状态戳、票据短 id（链接 `/tickets/<id>`）、会话 `scopeLabel(scope)`、发送者、收到时间、总耗时、派发设置（`dispatchSettingsLine(settings)`，无则不显示）、工具调用数。
+  - 原文前 120 字（`<blockquote class="said">`，超出加 …）；有回复时回复前 120 字。
+  - 请求表：第 n 次 · 时间 · 输入 · 命中（%）· 输出（无则 —）· 标记 / 原因。
+  - 底部链接："票据时间线 →"（`/tickets/<id>`）。
+  - 点击组：面板显示对应 pop、组加 `.is-active`、`aria-expanded=true`；再点同一组或面板里的"关闭"按钮或 Esc 关闭。脚本 `/assets/context-usage.js`（新文件 `src/obs/ui/context-usage-client.ts`，加入 `ASSETS`），只改 `hidden`/`className`/`aria-*`，不拼 HTML、不设置 style；无脚本时明细表仍是完整信息来源。
+- **其余**：图例并到区块标题右侧一行；汇总表、明细表结构不变；`esc()` 转义、无内联 style、无新依赖、UI import 白名单不变。
+
+### 9.4 测试与验收
+
+- 数据：`@context` 的 `source=turn` 记录在分析与查询里都不出现（混入序列时请求数、票据数不变），compact 分隔仍在；`ticketBriefs` 字段口径、300 上限、缺失票据省略；`output` 透传。
+- 页面：票据组是带 `aria-controls` 的按钮且与 pop 一一对应；pop 含票据链接、原文、请求行；分隔 `data-label`；纵轴与时间轴存在；脚本资源可取；CSP 测试照常。
+- 验收：owner 线程开头不再有 `@context` 组；点击任一组出现面板并能跳到票据页；下一批带工具调用的 codex 票据在面板里按请求逐行列出。
