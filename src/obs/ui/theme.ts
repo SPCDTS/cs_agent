@@ -42,6 +42,7 @@ small,.muted{color:var(--ink-2)}
 .faint{color:var(--ink-3)}
 code,.mono,pre{font-family:var(--mono);font-size:var(--t-sm)}
 pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--sheet-2);border:1px solid var(--rule);border-radius:var(--r-md);padding:var(--s3) var(--s4);max-height:520px;overflow:auto}
+pre.full{max-height:none}
 
 /* ── 页头与导航 ── */
 .top{background:var(--sheet);border-bottom:1px solid var(--rule)}

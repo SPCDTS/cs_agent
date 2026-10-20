@@ -2,7 +2,10 @@
 import { redact, redactText } from '../../shared/redact.js';
 import { THEME_CSS } from './theme.js';
 
-export const esc = (v: unknown) => redactText(String(v ?? ''), 100_000).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+const escHtml = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+export const esc = (v: unknown) => escHtml(redactText(String(v ?? ''), 100_000));
+/** 同 esc（脱敏 + 转义），但不按 10 万字截断；只用于正文页这类本身已分段限长的大块文本。 */
+export const escFull = (v: string) => escHtml(redactText(v, Number.MAX_SAFE_INTEGER));
 export const uri = (v: string) => encodeURIComponent(redactText(v, 100_000));
 export const json = (v: unknown, limit = 20_000) => `<pre>${esc(typeof v === 'string' ? v : JSON.stringify(redact(v, limit), null, 2))}</pre>`;
 

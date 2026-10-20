@@ -7,10 +7,10 @@ import type { ScopeTimeline } from '../memory/types.js';
 import { contextBar, ctxLabel } from './context-bar.js';
 import { clampPct, fmtInt, fmtPct, ratio, sortUsage, toContextUsage, usageWindow, type ContextUsage, type ContextUsageView } from '../../shared/format.js';
 import type { ContextAnalysisOptions, ContextTurn, ThreadContextSeries } from '../../shared/context-turns.js';
-import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, stageLabel, stamp, statusStamp, time, uri, type Flash } from './html.js';
+import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, escFull, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, stageLabel, stamp, statusStamp, time, uri, type Flash } from './html.js';
 import { scopeLabel } from '../../context/access.js';
 import { PRELOAD_TURNS, agentsBody, byNewest, crumbs, dataScript, isBackend, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './agents-pages.js';
-import { contextBody as contextAnalysisBody, contextError, contextUnavailable, type ContextAnalysis } from './context-view.js';
+import { contentHref, contextBody as contextAnalysisBody, contextError, contextUnavailable, type ContextAnalysis } from './context-view.js';
 import type { Block, ObservedTurn, SessionRef } from '../sessions/types.js';
 import { vendorAsset } from './vendor.js';
 import { MESSAGE_PAGE, archivesPageBody, memoryHomeBody, messageWindow, rangeParams, scopePageBody, searchPageBody, summaryPageBody, type ArchivesResult, type MemoryOverview, type MessagePage, type RecallCount, type SearchResult, type SummaryDetail } from './memory-pages.js';
@@ -377,6 +377,8 @@ export function createDashboardPages(deps: DashboardPageDeps) {
 
   const apiError = (r: { status: number; body: unknown }) => typeof asObj(r.body).error === 'string' ? String(asObj(r.body).error) : `HTTP ${r.status}`;
   const sessionApi = (backend: string, id: string) => `/api/agents/${encodeURIComponent(backend)}/sessions/${encodeURIComponent(id)}`;
+  /** 正文页每页字节数，与 agents.js"加载全文"的分段一致。 */
+  const CONTENT_PAGE = 256 * 1024;
 
   async function agentsPage(): Promise<string> {
     const sum = await api('/api/agents');
@@ -489,7 +491,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     return shell(timeline.label, scopePageBody({ timeline, messages, nonce, now, params, vendor }),
       { lead: '原文 / 日摘要 / 周摘要三条轨、空白区间与保留期边界；下方列出所选窗口内的消息。', scripts: ['/assets/memory.js'], head });
   }
-  /** /agents/:backend/sessions[/:id[/turns/:turn | /context]]；未知后端、会话或回合返回 null（404）。 */
+  /** /agents/:backend/sessions[/:id[/turns/:turn | /context | /content]]；未知后端、会话或回合返回 null（404）。 */
   async function agentsRoute(p: string, q: URLSearchParams, nonce: string, shell: Shell): Promise<string | null> {
     const parts = p.split('/');
     const backend = parts[2] ?? '';
@@ -510,7 +512,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     }
     let id: string, turnId = '';
     try { id = decodeURIComponent(parts[4] ?? ''); if (parts[6] !== undefined) turnId = decodeURIComponent(parts[6]); } catch { return null; }
-    if (!id || (parts.length === 6 && parts[5] !== 'context') || (parts.length === 7 && (parts[5] !== 'turns' || !turnId))) return null;
+    if (!id || (parts.length === 6 && parts[5] !== 'context' && parts[5] !== 'content') ||(parts.length === 7 && (parts[5] !== 'turns' || !turnId))) return null;
     const sr = await api(sessionApi(backend, id));
     if (sr.status === 404 || sr.status === 400) return null;
     if (sr.status !== 200) return shell(`${name} 会话`, `<div class="flash err" role="alert">读取会话失败：${esc(apiError(sr))}</div>`);
@@ -544,6 +546,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       return shell('回合详情', turnPageBody(ctx, session, turn, blocks, { newer: k > 0 ? newest[k - 1]?.turn : undefined, older: k >= 0 ? newest[k + 1]?.turn : undefined }, memory) + dataTail,
         { lead: '输入 → 模型请求（可多次）→ 工具调用（参数与结果折叠）→ 助手文本 → 送达。', scripts: ['/assets/agents.js'] });
     }
+    if (parts[5] === 'content') return contentPage(backend, id, session, title, q, shell);
     // 上下文结构分析（设计 §4）：分析接口由 O3 提供；缺席（404/501/503）时给出不可用状态。
     const at = q.get('at') || newest[0]?.turn || '';
     const phase = q.get('phase') === 'before' ? 'before' : 'after';
@@ -555,6 +558,40 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       : [404, 501, 503].includes(ar.status) ? contextUnavailable(ctx, at, phase, ar.status, typeof asObj(ar.body).error === 'string' ? String(asObj(ar.body).error) : undefined)
         : contextError(ctx, at, phase, ar.status, apiError(ar));
     return shell('上下文分析', head + body + dataTail, { lead, scripts: ['/assets/agents.js'] });
+  }
+
+  /**
+   * /agents/:backend/sessions/:id/content?offset=&length=[&page=]：会话文件正文区间的全文页。
+   * 每页一次请求 [offset + page×256 KiB, min(256 KiB, 剩余))：服务端在固定步长下把跨界字符归前一段、
+   * 后一段跳过续字节，因此按页码寻址既不丢也不重；末页与"是否还有下一段"按实际返回的 UTF-8 字节数判断。
+   */
+  async function contentPage(backend: string, id: string, session: SessionRef, title: string, q: URLSearchParams, shell: Shell): Promise<string | null> {
+    const int = (v: string | null) => v !== null && /^\d{1,16}$/.test(v) ? Number(v) : NaN;
+    const offset = int(q.get('offset')), length = int(q.get('length'));
+    const page = q.get('page') === null || q.get('page') === '' ? 0 : int(q.get('page'));
+    if (![offset, length, page].every(Number.isSafeInteger) || length <= 0 || !Number.isSafeInteger(offset + length)
+      || !Number.isSafeInteger(page * CONTENT_PAGE) || page * CONTENT_PAGE >= length) return null;
+    const start = offset + page * CONTENT_PAGE, size = Math.min(CONTENT_PAGE, length - page * CONTENT_PAGE);
+    const pages = Math.ceil(length / CONTENT_PAGE);
+    const name = BACKENDS[backend] ?? backend;
+    const head = crumbs([['Agent', '/agents'], [name, sessionsHref(backend)], [title, sessionHref(backend, session.id)], ['正文']]);
+    const lead = '会话文件中的一段正文（已按会话脱敏规则处理），每页最多 256 KiB。';
+    const r = await api(`${sessionApi(backend, id)}/content?offset=${start}&length=${size}`);
+    if (r.status === 404 || r.status === 400) return null;
+    if (r.status !== 200) return shell('正文', `${head}<div class="flash err" role="alert">读取正文失败：${esc(apiError(r))}</div>`, { lead });
+    const body = asObj(r.body), text = typeof body.text === 'string' ? body.text : '';
+    const got = Buffer.byteLength(text);
+    const meta = kv([
+      ['区间', `offset <span class="mono">${esc(fmtInt(offset))}</span> · length <span class="mono">${esc(fmtInt(length))}</span>`],
+      ['字节数', `${esc(fmtBytes(length))}${pages > 1 ? ` · 第 ${page + 1} / ${pages} 段，本段 ${esc(fmtBytes(got))}` : ''}`],
+      ['来源会话', `<a href="${sessionHref(backend, session.id)}">${esc(title)}</a> <code class="mono">${esc(session.id)}</code>`],
+    ]);
+    // 下一段：本段确实读到了正文（返回 0 字节说明文件里已没有更多内容），且区间还没读完。
+    const next = got > 0 && page + 1 < pages, prev = page > 0;
+    const nav = prev || next ? `<p class="hint mt">${prev ? `<a href="${contentHref(backend, id, offset, length, page - 1)}">上一段</a>` : ''}${prev && next ? '　' : ''}${next ? `<a href="${contentHref(backend, id, offset, length, page + 1)}">下一段</a>` : ''}</p>` : '';
+    const warn = body.truncated === true ? '<div class="flash err" role="alert">本段超出单次响应上限，已被服务端截断。</div>' : '';
+    const pre = got ? `<pre class="mono wrap full">${escFull(text)}</pre>` : empty('这一段没有正文（可能已超出会话文件的实际长度）。');
+    return shell('正文', `${head}<section class="sheet pad">${meta}</section>${warn}<section>${pre}</section>${nav}`, { lead });
   }
 
   /** 设置页按 agent 分两组：模型下拉（magpie 目录）+ 思考档位（auto + 支持的档位），设计 §5。 */
