@@ -20,6 +20,7 @@ import { loadAgentConfig as loadConfig } from "./agent/config.js";
 import { log, setLogLevel } from "./shared/log.js";
 import { findUnwritable, processIdentity } from "./fs-check.js";
 import { createQQBridge } from "./qq/index.js";
+import { SendService } from "./agent/send-service.js";
 import type { Channel } from "./channel/types.js";
 import { createAgentModels, openHarness, piModelCatalog, resolveThinkingLevel } from "./agent/harness.js";
 import { createCsAgentExtension } from "./agent/extension.js";
@@ -110,12 +111,22 @@ async function main(): Promise<void> {
 
   const mediaRecall = new MediaRecall({ store, dataDir: cfg.DATA_DIR,
     channel: {
+      get outbox() { return getBridge().outbox; },
       fetchMessage: (messageId, opts) => getBridge().fetchMessage(messageId, opts),
       refreshImageUrl: (file, opts) => getBridge().refreshImageUrl(file, opts),
       getTicket: ticket => getBridge().getTicket(ticket),
     } });
   const chatsChannel: Pick<Channel, "listChats"> = { listChats: opts => getBridge().listChats(opts) };
-  const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel);
+  const sendService = new SendService({ getChannel: getBridge, dataDir: cfg.DATA_DIR, store,
+    limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } });
+  const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel, {
+    send: (binding, attempt, args, signal) => sendService.send({
+      ticket: binding.ticket, source: binding.source, access: binding.access, workdir: binding.workdir!,
+      extraRoots: [path.join(cfg.imagesDir, binding.ticket),
+        ...(/^[0-9a-f-]{36}$/i.test(binding.session ?? "") ? [path.join(cfg.codexHome, "generated_images", binding.session!)] : [])],
+    }, args, { attempt }, signal),
+    release: (ticket, attempt) => sendService.releaseAttempt(ticket, attempt),
+  });
   const recallServer = await startMediaRecallServer(recallTokens, cfg.MEDIA_RECALL_PORT);
 
   // comfy-cli 只对 loopback 目标获取 object_info：非 loopback 的 COMFYUI_URL 经容器内转发
@@ -189,6 +200,7 @@ async function main(): Promise<void> {
   if (cfg.AUTO_EFFORT_MODEL && !autoModel) log.warn("auto effort model unavailable; using heuristics and fallback", { model: cfg.AUTO_EFFORT_MODEL });
 
   const pi = await PiBackend.open({
+    sendService,
     currentModel: currentPiModel,
     dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     skillsDir: cfg.PI_SKILLS_DIR,
@@ -207,6 +219,7 @@ async function main(): Promise<void> {
     },
   });
   const tasks = createTasks({
+    sendService,
     getBridge,
     imageBackend,
     imagesDir: cfg.imagesDir,

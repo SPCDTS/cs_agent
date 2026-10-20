@@ -179,3 +179,25 @@ export async function registerImageAttachment(o: AttachmentSource & { attachDir:
     return `已登记，将随回复发送（第 ${images.length + 1}/${MAX_IMAGES} 张）`;
   });
 }
+
+/** send_message 与旧附件登记共用来源、符号链接、大小、格式及扩展名校验。 */
+export async function prepareSendAttachments(source: Omit<AttachmentSource, "path">,
+  args: { images?: string[]; files?: { path: string; name?: string }[] }, limits = DEFAULT_ATTACHMENT_LIMITS) {
+  const images = [];
+  let total = 0;
+  for (const file of args.images ?? []) {
+    const image = await sourceFile({ ...source, path: file }, MIN_IMAGE_BYTES, MAX_IMAGE_BYTES);
+    if (!isSupportedImage(image.data)) throw new Error("仅支持 PNG、JPEG、WebP、GIF 图片");
+    total += image.data.length;
+    if (total > MAX_TOTAL_IMAGE_BYTES) throw new Error("每次回复图片合计不超过 20 MiB");
+    images.push(image);
+  }
+  const files = [];
+  if ((args.files?.length ?? 0) > Math.min(3, limits.maxFiles)) throw new Error("文件数量超过限制");
+  for (const file of args.files ?? []) {
+    const name = attachmentName(file.name ?? file.path);
+    if (limits.denyExtensions.map(ext => ext.trim().toLowerCase()).includes(path.extname(name).toLowerCase())) throw new Error("不允许发送此扩展名的文件");
+    files.push({ ...await sourceFile({ ...source, path: file.path }, 1, Math.min(20 * 1024 * 1024, limits.maxBytes)), name });
+  }
+  return { images, files };
+}

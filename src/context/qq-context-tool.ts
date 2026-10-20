@@ -1,6 +1,4 @@
 /** 进程内共用的 QQ 召回工具：访问校验、查询、格式化与召回观察回调。 */
-import { registerFileAttachment, registerImageAttachment, type AttachmentLimits } from "../media/attach.js";
-import { readMediaFile } from "./media.js";
 import { log } from '../shared/log.js';
 import type { RecallObservation, RecallHit } from './observer.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -19,7 +17,6 @@ export interface QQContextToolDeps {
   /** 惰性打开只读库（库文件可能尚未创建）；抛错时工具返回错误文本 */
   openStore: () => ContextStore;
   maxChars?: number;
-  attachments?: () => Promise<{ dataDir: string; workdir: string; extraRoots?: string[]; attachDir: string; fileDir: string; limits: AttachmentLimits }>;
   onRecall?: (event: RecallObservation) => void;
 }
 
@@ -29,26 +26,6 @@ function int(v: unknown, def: number, max: number): number {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
   if (!Number.isFinite(n)) return def;
   return Math.min(max, Math.max(1, Math.floor(n)));
-}
-
-/** 附件不产生召回证据；仅对媒体路径打开库并校验当前访问范围。 */
-export async function callQQAttachmentTool(deps: QQContextToolDeps, name: string, args: Record<string, unknown>): Promise<CallToolResult> {
-  if (!deps.access) return qqContextText("qq_context 不可用：未配置有效的访问范围（QQ_ACCESS）。", true);
-  if (typeof args.path !== "string" || !args.path || args.path.length > 1024 ||
-      Object.keys(args).some(key => key !== "path" && !(name === "qq_send_file" && key === "name")) ||
-      (args.name !== undefined && (typeof args.name !== "string" || !args.name || args.name.length > 1024))) return qqContextText("仅接受 path 和文件的可选 name", true);
-  try {
-    if (!deps.attachments) throw new Error("附件发送未启用");
-    const dirs = await deps.attachments();
-    const mediaCheck = async (canonical: string) => {
-      if (!deps.openStore().mediaPathAllowed(deps.access!, canonical)) return false;
-      await readMediaFile(dirs.dataDir, canonical);
-      return true;
-    };
-    const options = { ...dirs, path: args.path, mediaCheck };
-    return qqContextText(name === "qq_send_image" ? await registerImageAttachment(options)
-      : await registerFileAttachment({ ...options, name: args.name as string | undefined }));
-  } catch (err) { return qqContextText((err as Error).message, true); }
 }
 
 /** 工具调用的纯函数实现（便于进程内测试）。 */

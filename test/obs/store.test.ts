@@ -13,6 +13,14 @@ const clean: (()=>void)[]=[];
 afterEach(()=>{vi.useRealTimers(); for(const fn of clean.splice(0).reverse())fn();});
 function rig(){const dir=mkdtempSync(path.join(os.tmpdir(),'cs-obs-'));const store=new ObsStore(dir);clean.push(()=>rmSync(dir,{recursive:true,force:true}),()=>store.close());return {dir,store,trace:new Trace(store)};}
 describe('观测存储',()=>{
+  it('未发送兜底比例按 admitted 入站票据去重，空窗口为零', () => {
+    const { store, trace } = rig();
+    expect(store.throughput(Date.now())).toMatchObject({ inbound: 0, no_send_fallback: 0, no_send_ratio: 0 });
+    trace.event('a', 'admitted'); trace.event('a', 'admitted'); trace.event('b', 'admitted');
+    trace.event('a', 'no_send_fallback'); trace.event('a', 'no_send_fallback');
+    trace.event('legacy', 'no_send_fallback');
+    expect(store.throughput(0)).toMatchObject({ inbound: 2, no_send_fallback: 1, no_send_ratio: .5 });
+  });
   it('WAL 写入、跨连接读取、scope 继承、筛选、分页、保留清理',()=>{
     const {dir,store,trace}=rig();
     expect(store.db.prepare('PRAGMA journal_mode').get()).toMatchObject({journal_mode:'wal'});
@@ -27,7 +35,7 @@ describe('观测存储',()=>{
     expect(store.tickets({scope:'group:7',status:'sent',route:'agent',backend:'pi'})).toHaveLength(50);
     expect(store.tickets({page:1})).toHaveLength(3);
     expect(store.tickets({scope:"' OR 1=1 --"})).toEqual([]);
-    expect(store.throughput(0)).toEqual({total:53,failed:0,error_rate:0});
+    expect(store.throughput(0)).toMatchObject({total:53,failed:0,error_rate:0});
     store.metric(1,'old',{},1);
     store.append({ticket:'old',scope:'',ts:1,stage:'failed',status:'failed',duration_ms:null});
     expect(store.purge(30)).toEqual({events:1,metrics:1});
@@ -83,7 +91,7 @@ describe('观测存储',()=>{
   });
   it('告警默认关闭；连续失败、鉴权失败与 WS 离线共用限频',async()=>{
     vi.useFakeTimers();const {trace}=rig();let online=false;const send=vi.fn(async()=>({message_id:'fake'}));
-    const bridge={status:()=>({ws_connected:online,disconnect_count:1,self_id:null,last_event_at:null}),send};
+    const bridge={status:()=>({ws_connected:online,disconnect_count:1,self_id:null,last_event_at:null}),sendOps:send};
     const disabled=startAlerts({enabled:false,owner:'1',bridge,trace});
     trace.event('a','backend:codex',{status:'failed',detail:{failure:{kind:'auth',provider:'test',status:401}}});expect(send).not.toHaveBeenCalled();disabled.stop();
     const alerts=startAlerts({enabled:true,owner:'1',bridge,trace});clean.push(()=>alerts.stop());

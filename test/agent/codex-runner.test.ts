@@ -131,8 +131,8 @@ describe("AGENTS.md", () => {
     expect(md).not.toContain("可只读打开");
     expect(md).not.toContain("are read-only");
     expect(md).toContain("## 发送图片与文件");
-    expect(md).toContain("内置生图工具（imagegen）保存在 /data/codex/generated_images/… 的图片不会自动发给用户；要发出去就把工具返回的保存路径传给 qq_send_image(path)，不需要复制或转码。");
-    expect(md).toContain("要把工作区里的图片或文件发给用户时，调用 qq_send_image(path) / qq_send_file(path)，它们会随本次回复自动发出；每次回复最多 4 张图、3 个文件，单个文件不超过 20 MiB。只能发送你工作区内的文件和已召回（[image:<路径>]）的图片。回复文本里不要写文件路径。");
+    expect(md).toContain("内置生图工具（imagegen）保存在 /data/codex/generated_images/… 的图片不会自动发给用户；要发出去就把工具返回的保存路径传给 send_message 的 images，不需要复制或转码。");
+    expect(md).toContain("要把工作区里的图片或文件发给用户时，调用 send_message({ text, images: [path], files: [{ path, name? }] })，图片随正文立即发出，文件随后上传；每次回复最多 4 张图、3 个文件，单个文件不超过 20 MiB。只能发送你工作区内的文件和已召回（[image:<路径>]）的图片。回复文本里不要写文件路径。");
     for (const removed of ["image_gen", "reference_images", "生图提示词指引", "奶龙"]) expect(md).not.toContain(removed);
     expect(md.startsWith(`${AGENTS_TEMPLATE_MARKER}\n`)).toBe(true);
     expect(AGENTS_TEMPLATE_MARKER).toBe("<!-- cs-agent-agents-template v6 -->");
@@ -709,9 +709,13 @@ describe("codex 召回令牌生命周期", () => {
     expect(redactText(lease.token)).toBe(lease.token);
     expect(issue.mock.calls[0]![0]).toMatchObject({ ticket: "tk", access: { kind: "scope", scope: "group:7" } });
     if (mode !== "spawn") {
-      const argv = JSON.parse(readFileSync(path.join(dir, "calls.jsonl"), "utf8").split("\n")[0]!).argv as string[];
-      expect(argv).toContain('mcp_servers.qq_context.env.QQ_RECALL_TOKEN="' + lease.token + '"');
+      const recorded = JSON.parse(readFileSync(path.join(dir, "calls.jsonl"), "utf8").split("\n")[0]!);
+      const argv = recorded.argv as string[];
+      expect(recorded.env).toMatchObject({ IM_TOKEN: lease.token, QQ_RECALL_TOKEN: lease.token });
+      expect(argv.join(" ")).not.toContain(lease.token);
+      expect(argv.join(" ")).not.toMatch(/IM_TOKEN|QQ_RECALL_TOKEN/);
       expect(argv).toContain('mcp_servers.qq_context.env.MEDIA_RECALL_PORT="8791"');
+      expect(argv).toContain('mcp_servers.im.env.MEDIA_RECALL_PORT="8791"');
     }
     tokens.close();
   });
@@ -837,4 +841,27 @@ describe("运行时 codex 模型", () => {
     await expect(runner.ask("test", { threadKey: "group:1", model })).rejects.toThrow("非法");
     expect(calls()).toEqual([]);
   });
+});
+
+
+it("并发会话各自继承本轮令牌，argv 不含任一令牌，无绑定回合清除旧环境令牌", async () => {
+  const dir = tmp(), opts = setupOpts(dir);
+  const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) });
+  const issue = vi.spyOn(tokens, "issue");
+  try {
+    const runner = new CodexRunner({ ...opts, recallTokens: tokens, env: { ...opts.env, IM_TOKEN: "stale", QQ_RECALL_TOKEN: "stale" } });
+    await Promise.all([1, 2].map(n => runner.ask("并行", { threadKey: `group:${n}`, ticket: "ticket-" + n, qqAccess: "group:" + n })));
+    const leases = issue.mock.results.map(r => r.value.token as string);
+    expect(new Set(leases).size).toBe(2);
+    const calls = readFileSync(path.join(dir, "calls.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(c => c.phase === "start");
+    expect(new Set(calls.map(c => c.env.IM_TOKEN))).toEqual(new Set(leases));
+    for (const call of calls) {
+      expect(call.env.IM_TOKEN).toBe(call.env.QQ_RECALL_TOKEN);
+      for (const token of leases) expect(call.argv.join(" ")).not.toContain(token);
+    }
+    const plainDir = tmp(), plainOpts = setupOpts(plainDir);
+    await new CodexRunner({ ...plainOpts, env: { ...plainOpts.env, IM_TOKEN: "stale", QQ_RECALL_TOKEN: "stale" } }).ask("无绑定", { threadKey: "group:1" });
+    const plain = JSON.parse(readFileSync(path.join(plainDir, "calls.jsonl"), "utf8").split("\n")[0]!);
+    expect(plain.env.IM_TOKEN).toBeUndefined(); expect(plain.env.QQ_RECALL_TOKEN).toBeUndefined();
+  } finally { tokens.close(); issue.mockRestore(); }
 });

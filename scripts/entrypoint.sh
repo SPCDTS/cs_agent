@@ -204,7 +204,16 @@ writable_roots = [$WRITABLE_ROOTS]
 [tools.web_search]
 context_size = "$WEB_SEARCH_CONTEXT"
 
+[mcp_servers.im]
+env_vars = ["IM_TOKEN"]
+command = "node"
+args = ["/app/dist/mcp/im.js"]
+startup_timeout_sec = 10
+tool_timeout_sec = 600
+default_tools_approval_mode = "$MCP_APPROVAL_MODE"
+
 [mcp_servers.qq_context]
+env_vars = ["QQ_RECALL_TOKEN"]
 command = "node"
 args = ["/app/dist/mcp/qq-context.js"]
 startup_timeout_sec = 10

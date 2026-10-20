@@ -96,6 +96,10 @@ export interface ChannelEvents {
 }
 
 export interface Channel {
+  readonly outbox: import("./outbox.js").OutboxStore;
+  send(key: string, target: { message_type: ChatType; target_id: string }, text: string, images?: string[],
+    opts?: { mention?: string; signal?: AbortSignal }): Promise<ReplyResult>;
+  settleTicket(ticket: string): Promise<void>;
   readonly name: string;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -115,7 +119,7 @@ export interface Channel {
   /** 列出仍为 pending 的票据（按 seq 升序，最多 limit 条，默认 200）；afterSeq 为分页游标（只取 seq 更大的），供启动时与派发索引对账 */
   listPendingTickets(limit?: number, afterSeq?: number): Promise<ReplyTicketRecord[]>;
   /** 主动发送，仅供运维/测试使用，agent 工具层不暴露 */
-  send(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }>;
+  sendOps(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }>;
   /** 取远端原消息；不存在返回 null。 */
   fetchMessage(messageId: string, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<RemoteMessage | null>;
   /** 只读列出群与好友；调用方负责访问范围校验。 */

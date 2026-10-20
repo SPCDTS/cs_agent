@@ -8,6 +8,8 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { InboundMessage, ReplyTicketRecord, TicketStatus } from "../channel/types.js";
 
+import { isModelOutboxRow, type OutboxInput, type OutboxRow } from "../channel/outbox.js";
+
 const SEEN_LIMIT = 2000;
 export const DB_FILE = "qq-bridge.sqlite";
 const TICKET_PATTERN = /^[a-f0-9]{64}$/;
@@ -93,6 +95,13 @@ CREATE TABLE IF NOT EXISTS tickets (
   sent_at TEXT,
   reply_message_id TEXT
 );
+CREATE TABLE IF NOT EXISTS outbox (
+  key TEXT PRIMARY KEY, ticket TEXT NOT NULL, ordinal INTEGER NOT NULL, call_id TEXT,
+  message_type TEXT NOT NULL, target_id TEXT NOT NULL, mention_user_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending','sending','sent','uncertain')),
+  message_id TEXT, text TEXT NOT NULL, text_sha256 TEXT NOT NULL, images TEXT NOT NULL, files TEXT NOT NULL,
+  created_at TEXT NOT NULL, sent_at TEXT, UNIQUE(ticket, call_id), UNIQUE(ticket, ordinal)
+);
 CREATE TABLE IF NOT EXISTS seen_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   key TEXT NOT NULL UNIQUE,
@@ -124,6 +133,69 @@ export class ReplyStore {
     if (!columns.some(c => c.name === "source_route_text")) {
       this.db.exec("ALTER TABLE tickets ADD COLUMN source_route_text TEXT");
     }
+  }
+
+  getOutbox(key: string): OutboxRow | null {
+    const row = this.db.prepare("SELECT * FROM outbox WHERE key = ?").get(key);
+    return row ? { ...row, images: JSON.parse(String(row.images)), files: JSON.parse(String(row.files)) } as OutboxRow : null;
+  }
+
+  listOutbox(ticket: string): OutboxRow[] {
+    return (this.db.prepare("SELECT key FROM outbox WHERE ticket = ? ORDER BY ordinal").all(ticket) as { key: string }[])
+      .map(row => this.getOutbox(row.key)!);
+  }
+
+  reserveOutbox(input: OutboxInput): OutboxRow {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.listOutbox(input.ticket), modelRows = rows.filter(isModelOutboxRow);
+      const existing = input.call_id ? rows.find(row => row.call_id === input.call_id)
+        : input.suffix ? rows.find(row => row.key === input.ticket + "#" + input.suffix)
+        : rows.find(row => row.key === input.ticket + "#" + input.sequence);
+      if (existing) { this.db.exec("COMMIT"); return existing; }
+      if (!input.suffix && modelRows.length >= 3) throw new Error("本回合最多发送 3 条消息");
+      const ordinal = (rows.at(-1)?.ordinal ?? 0) + 1;
+      const key = input.ticket + "#" + (input.suffix ?? input.sequence ?? modelRows.length + 1);
+      this.db.prepare(`INSERT INTO outbox
+        (key,ticket,ordinal,call_id,message_type,target_id,mention_user_id,status,text,text_sha256,images,files,created_at)
+        VALUES (?,?,?,?,?,?,?,'pending',?,?,?,?,?)`).run(key, input.ticket, ordinal, input.call_id,
+        input.message_type, input.target_id, input.mention_user_id, input.text,
+        createHash("sha256").update(input.text).digest("hex"), JSON.stringify(input.images), JSON.stringify(input.files), new Date().toISOString());
+      this.db.exec("COMMIT");
+      return this.getOutbox(key)!;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  markOutboxSending(key: string): boolean {
+    return Number(this.db.prepare(`UPDATE outbox SET status='sending',
+      mention_user_id=CASE WHEN EXISTS (SELECT 1 FROM outbox prior WHERE prior.ticket=outbox.ticket AND prior.status<>'pending')
+        THEN NULL ELSE mention_user_id END WHERE key=? AND status='pending'`).run(key).changes) === 1;
+  }
+  markOutboxSent(key: string, messageId: string): void {
+    this.db.prepare("UPDATE outbox SET status='sent', message_id=?, sent_at=? WHERE key=? AND status='sending'")
+      .run(messageId, new Date().toISOString(), key);
+  }
+  markOutboxUncertain(key: string): void {
+    this.db.prepare("UPDATE outbox SET status='uncertain' WHERE key=? AND status='sending'").run(key);
+  }
+  updateOutboxFile(key: string, index: number, status: OutboxRow["status"], fileId?: string): void {
+    const row = this.getOutbox(key);
+    if (!row?.files[index]) throw new Error("Outbox 附件不存在");
+    const file = row.files[index]!;
+    const valid = file.status === "pending" && status === "sending" ||
+      file.status === "sending" && (status === "sent" || status === "uncertain");
+    if (!valid) throw new Error("Outbox 附件状态已改变");
+    const before = JSON.stringify(row.files);
+    file.status = status;
+    if (fileId) file.file_id = fileId;
+    if (Number(this.db.prepare("UPDATE outbox SET files=? WHERE key=? AND files=?")
+      .run(JSON.stringify(row.files), key, before).changes) !== 1) throw new Error("Outbox 附件状态已改变");
+  }
+  settleTicket(ticket: string): void {
+    const rows = this.listOutbox(ticket);
+    if (!rows.some(row => row.status !== "pending")) throw new Error("本回合尚无消息发送");
+    this.db.prepare("UPDATE tickets SET status='sent', reply_message_id=?, sent_at=? WHERE ticket_id=? AND status='pending'")
+      .run(rows.find(row => row.status === "sent")?.message_id ?? null, new Date().toISOString(), ticket);
   }
 
   close(): void {

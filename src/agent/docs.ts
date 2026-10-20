@@ -63,7 +63,7 @@ export type TicketState = {
   piTurn?: { requestId: string; retries: number };
   /** 后端回合标记：启动外部回合（codex）之前写入，崩溃恢复时据此避免重复询问 */
   codexTurn?: { outFile: string; attempts: number };
-  /** 后处理后的回复正文（agent 路径 postprocess 阶段写入） */
+  /** 升级前 postprocess 留下的旧正文，仅兼容读取；不再发送。 */
   replyDraft?: string;
   /** 实际发出的正文、图片数与 QQ 消息 id */
   replyText?: string;

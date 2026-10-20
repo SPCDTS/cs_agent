@@ -1,3 +1,5 @@
+import { FALLBACK_REPLY } from "../../src/agent/replies.js";
+import { withOutbox } from "./outbox-stub.js";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -100,7 +102,7 @@ describe("运行时设置", () => {
       reply: async (ticket: string, text: string) => { states.set(ticket, "sent"); replies.push(text); return { message_id: "r-" + ticket, already_sent: false, message_type: "private" as const, target_id: "1" }; },
     };
     const image = { name: "fake", submit: async () => "p", collect: async () => [], reconcile: async () => ({ images: [] as string[] }), clearReferences: async () => {} };
-    const tasks = createTasks({ getBridge: () => bridge, imageBackend: image, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
+    const tasks = createTasks({ getBridge: () => withOutbox(bridge), imageBackend: image, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
       backends: createBackendSelector({ current: () => settings.current(), backends: { codex, pi: fake("pi") } }),
       currentSettings: () => settings.current(),
       replyRetryDelayMs: 1 });
@@ -119,14 +121,14 @@ describe("运行时设置", () => {
     await dispatcher.dispatch(msg("四", "8"), "t4");
     expect(calls.map(c => `${c.ticket}:${c.backend}`)).toEqual(["t2:pi", "t4:pi"]);
     expect(efforts).toEqual(["high", "low"]);
-    expect(replies).toEqual(["codex 回答", "来自 pi", "codex 回答", "来自 pi"]);
+    expect(replies).toEqual(Array(4).fill(FALLBACK_REPLY));
 
     vi.useFakeTimers();
     try {
       const send = vi.fn(async () => ({ message_id: "a" }));
       const t = new Trace({ append: e => ({ ...e, id: 1, detail_json: JSON.stringify(e.detail ?? {}) }) });
       const alerts = startAlerts({ enabled: () => settings.current().alertOwner, owner: "1", trace: t,
-        bridge: { status: () => ({ ws_connected: true, disconnect_count: 0, self_id: null, last_event_at: null }), send } });
+        bridge: { status: () => ({ ws_connected: true, disconnect_count: 0, self_id: null, last_event_at: null }), sendOps: send } });
       const fail = (n: number) => { for (let i = 0; i < 3; i++) t.event(`f${n}-${i}`, "failed", { detail: { terminal: true } }); };
       fail(1); expect(send).not.toHaveBeenCalled();
       await settings.update({ alertOwner: true }, "test");
@@ -164,7 +166,7 @@ describe("票据设置快照", () => {
           return "原始回答";
         } },
       });
-      const tasks = createTasks({ getBridge: () => bridge,
+      const tasks = createTasks({ getBridge: () => withOutbox(bridge),
         imageBackend: { name: "fake", submit: async () => "p", collect: async () => [], reconcile: async () => ({ images: [] }), clearReferences: async () => {} },
         imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
         backends: createBackendSelector({ current, backends: { codex } }), currentSettings: current,
@@ -189,16 +191,16 @@ describe("票据设置快照", () => {
       first = await boot(false);
       await first.dispatcher.recover(); first.harness.resume(); await first.dispatcher.idle();
     } else { release(); await pending; await queued; }
-    expect(replies.get("first")).toBe("原始回答");
-    expect(history.completeReply).toHaveBeenCalledWith("first", expect.objectContaining({ action: "ask_codex", detail: "high" }));
+    expect(replies.get("first")).toBe(FALLBACK_REPLY);
+    expect(history.completeReply).not.toHaveBeenCalled();
     expect(efforts.every(e => e === "high")).toBe(true);
-    if (!recovery) expect(replies.get("queued")).toBe("原始回答");
-    expect(obs.events("first").some(e => e.stage === "postprocess" && JSON.parse(e.detail_json).sent_text === "原始回答")).toBe(true);
+    if (!recovery) expect(replies.get("queued")).toBe(FALLBACK_REPLY);
+    expect(obs.events("first").some(e => e.stage === "final_answer" && JSON.parse(e.detail_json).text === "原始回答")).toBe(true);
     await settings.update({ agentBackend: "codex" }, "test"); current.mockImplementation(() => settings.current());
     await first.dispatcher.dispatch(msg, "next");
-    expect(efforts.at(-1)).toBe("low"); expect(replies.get("next")).toBe("原始回答");
-    expect(history.completeReply).toHaveBeenCalledWith("next", expect.objectContaining({ detail: "low" }));
-    expect(obs.events("next").some(e => e.stage === "postprocess" && JSON.parse(e.detail_json).sent_text === "原始回答")).toBe(true);
+    expect(efforts.at(-1)).toBe("low"); expect(replies.get("next")).toBe(FALLBACK_REPLY);
+    expect(history.completeReply).not.toHaveBeenCalled();
+    expect(obs.events("next").some(e => e.stage === "final_answer" && JSON.parse(e.detail_json).text === "原始回答")).toBe(true);
   });
 });
 
@@ -218,7 +220,7 @@ describe("auto 派发集成", () => {
       reply: async (ticket: string) => { sent.add(ticket); return { message_id: ticket, already_sent: false, message_type: "private" as const, target_id: "1" }; },
     };
     const tasks = createTasks({ currentSettings: () => settings.current(), codexReasoningEffort: "medium", effortRouter: { complete },
-      getBridge: () => bridge, imagesDir: path.join(dir, "images"),
+      getBridge: () => withOutbox(bridge), imagesDir: path.join(dir, "images"),
       imageBackend: { name: "fake", submit: vi.fn(), collect: vi.fn(), reconcile: vi.fn(), clearReferences: vi.fn() },
       backends: createBackendSelector({ current: () => settings.current(), backends: { codex } }),
     });

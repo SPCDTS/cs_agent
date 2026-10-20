@@ -21,7 +21,7 @@ export type PiImageBackend = Pick<ImageBackend, "name" | "submit" | "collect" | 
 /** 生图不是安全重放操作：中断后由 pi-durable 返回 interrupted，不盲目再提交。 */
 export function imageTool(dataDir: string, backend: PiImageBackend, getHarness: () => Harness, store: ContextStore) {
   return defineTool({
-    name: "generate_image", description: "按描述生成或编辑图片，自动随本次 QQ 回复发送；参考图只能选本轮附件或当前会话范围内已召回的图片。",
+    name: "generate_image", description: "按描述生成或编辑图片，返回路径后用 send_message 发送；参考图只能选本轮附件或当前会话范围内已召回的图片。",
     replay: "unsafe",
     parameters: Type.Object({
       prompt: Type.String({ minLength: 1, maxLength: 2000 }),
@@ -102,7 +102,7 @@ export function imageTool(dataDir: string, backend: PiImageBackend, getHarness: 
       // 仅确认任务完成后清理；中断/超时保留参考图供远端继续读取。
       if (uploads.length) { await backend.clearReferences!(uploads); await fs.unlink(manifest).catch(() => undefined); }
       const images = await collectNewImages(dir, new Set());
-      return { output: [{ type: "text" as const, text: "已生成 " + images.length + " 张图片，将自动附带。" }] };
+      return { output: [{ type: "text" as const, text: JSON.stringify({ images, note: "请用 send_message 的 images 发送这些图片" }) }] };
     },
   });
 }

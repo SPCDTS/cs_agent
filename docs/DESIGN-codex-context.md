@@ -373,7 +373,7 @@ CODEX_BROWSER=playwright
 
 ### 8.10 事故：误判线程丢失与回合收尾卡死（2026-10-19，主会话验收）
 
-- 现象：07:07:47 恢复 owner 线程时 codex 返回 JSON-RPC -32603（其启动时同步插件市场克隆目录 `$CODEX_HOME/.tmp/plugins*` 与 `rg` 扫描的竞态），外层措辞 `thread/resume failed`；`MISSING_SESSION_PATTERNS` 里过宽的 `/thread\/resume failed/i` 命中 → 映射被删、新建线程，原线程既未归档也未保留。同一回合模型用自带 imagegen 出图并成功登记 `qq_send_image`，07:11:03 `task_complete`，但模型开的交互式 shell/python 子进程持有 stdout 管道，运行器等 `close` 直到 600 s 超时，按失败回复、附件随票据清理丢失。
+- 现象：07:07:47 恢复 owner 线程时 codex 返回 JSON-RPC -32603（其启动时同步插件市场克隆目录 `$CODEX_HOME/.tmp/plugins*` 与 `rg` 扫描的竞态），外层措辞 `thread/resume failed`；`MISSING_SESSION_PATTERNS` 里过宽的 `/thread\/resume failed/i` 命中 → 映射被删、新建线程，原线程既未归档也未保留。同一回合模型用自带 imagegen 出图并成功登记 旧图片登记工具，07:11:03 `task_complete`，但模型开的交互式 shell/python 子进程持有 stdout 管道，运行器等 `close` 直到 600 s 超时，按失败回复、附件随票据清理丢失。
 - 数据修复：主会话在宿主机把 `data/codex-threads.json` 的 owner 改回 `01a14a4a…`，并在 `codex-threads-archive.jsonl` 归档误建线程 `01a152fc…`（reason `false-missing-detection`）。重启后面板显示 owner 会话 `01a14a4a…` active、8 回合。
 - 代码修复（5f9a74b、9e53d8b、52f3503、39d763c）：丢失判定只认 codex 0.163 真实措辞（`no rollout found for thread id` / `conversation id`、`not found`），`-32603` 一律按其他失败处理并保留映射；真丢失时先归档旧映射（reason `missing` + stderr 尾部）再新建；收尾以 `exit` 为准，`close` 最多等 `CODEX_CLOSE_GRACE_MS`（默认 5000）后清理进程树并释放本端管道，`turn.completed` 后 `CODEX_EXIT_GRACE_MS`（默认 15000）仍未 `exit` 且输出文件非空则按成功收尾；Linux 下 codex 以独立进程组启动，整组清理可覆盖孤儿孙进程（Windows 无法验证，对应用例按平台跳过）。
 - 验收：沙箱外复跑 80 文件 / 1176 项通过 + 1 跳过；镜像 `9e9b6a8b…`（干净 worktree，main 39d763c）以 `--no-deps` 只切换 cs-agent，容器 healthy、无新告警；面板与附件 stdio 冒烟零错误。待用户在 QQ 私聊验证"把 skirk.png 发给我"（文件已在 `/workspace/owner/skirk.png`）。
@@ -405,7 +405,7 @@ CODEX_BROWSER=playwright
 
 回归测试沿用 fake-codex，在子进程启动时记录 cwd 的 AGENTS.md，覆盖首轮生成、内容相同时 mtime 不变、规则/权限/运维指引变化、模型改写后的恢复，以及新建与 resume 均不传 `developer_instructions`。提示词不是访问控制；会话权限仍由现有命名沙箱配置执行。
 
-**主会话验收（2026-10-19）**：分支 `fix/managed-rules-via-workspace-agents` 3 条提交 ff 到 main（b750b54…241e938），沙箱外复跑 82 文件 / 1214 项通过；镜像 `275b0fb6…` 部署，容器 healthy。真实回合（票据 31ae0ded，09:16:46 "生成一张极恶骑的图片给我"）：09:17:07 owner 线程 rollout 出现新的 `# AGENTS.md instructions` user 消息（2,357 字，含"发送图片与文件"与内置生图说明）；09:18:15 模型调用 `qq_send_image`，路径为当前线程 `generated_images` 下的 PNG，登记成功；`reply_sent.images = 1`，用户确认图片到达。owner 线程自 10-18 以来首次收到规则更新。`/workspace/owner/AGENTS.md` 首行为受管标记。读写加固（符号链接、临时文件名、父目录复核）由 `fix/harden-managed-agents-write` 跟进。
+**主会话验收（2026-10-19）**：分支 `fix/managed-rules-via-workspace-agents` 3 条提交 ff 到 main（b750b54…241e938），沙箱外复跑 82 文件 / 1214 项通过；镜像 `275b0fb6…` 部署，容器 healthy。真实回合（票据 31ae0ded，09:16:46 "生成一张极恶骑的图片给我"）：09:17:07 owner 线程 rollout 出现新的 `# AGENTS.md instructions` user 消息（2,357 字，含"发送图片与文件"与内置生图说明）；09:18:15 模型调用 旧图片登记工具，路径为当前线程 `generated_images` 下的 PNG，登记成功；`reply_sent.images = 1`，用户确认图片到达。owner 线程自 10-18 以来首次收到规则更新。`/workspace/owner/AGENTS.md` 首行为受管标记。读写加固（符号链接、临时文件名、父目录复核）由 `fix/harden-managed-agents-write` 跟进。
 **读写加固（2026-10-19）**：上述 `writeAtomic` 已由 `writeManagedFile` 替代，会话域文件与 `writeGlobalAgentsMd` 共用此入口。每轮先 `lstat`；缺失则创建，仅对不超过 256 KiB 的普通文件，通过 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` 打开、`fstat` 复核类型、大小及文件身份后进行有界读取比较，内容相同时保留 mtime。符号链接、目录、FIFO、设备等非普通文件及超大文件不读取，删除原路径后重建，并记录 `managed file replaced`（file、kind）。临时文件采用同目录随机 UUID 名，以 `wx` 独占创建，写入、fsync、关闭后 rename；失败清理临时路径，避免可预测临时链接写穿到工作区外。rename 前重新确认父目录为真实目录，写后再以 lstat 校验普通文件及 UTF-8 字节长度，校验失败即让本轮失败。Windows 缺少 NOFOLLOW/NONBLOCK 时保留文件身份检查，无法创建文件符号链接（EPERM）的测试明确跳过；Linux 的 FIFO、设备与并发竞态保护不能以 Windows 测试替代。此措施不改变规则的加载时机：回合内篡改不影响已启动的 codex exec，下一轮启动前检查并恢复；即使前一轮留下后台进程，也不额外依赖回合结束时的进程组清理。父目录复核是写入前的检查，不宣称抵御具备替换父目录权限的持续竞态。
 
 ### 8.13 codex 不再拥有 /data/workflows 可写根（2026-10-19，主会话验收）
@@ -416,7 +416,7 @@ CODEX_BROWSER=playwright
 
 ### 8.14 内置生图输出清理
 
-Codex 内置 imagegen 将原图写入 `$CODEX_HOME/generated_images/<thread_id>/exec-*.png`。`qq_send_image` 登记时已把副本复制到票据图片目录，原图主要供模型后续回看或“把刚才那张再发一次”；清理原图不会删除已登记的票据副本，也不改变生图与发送逻辑。
+Codex 内置 imagegen 将原图写入 `$CODEX_HOME/generated_images/<thread_id>/exec-*.png`。`send_message` 发送图片前会把副本复制到票据图片目录，原图主要供模型后续回看或“把刚才那张再发一次”；清理原图不会删除已登记的票据副本，也不改变生图与发送逻辑。
 
 `purgeGeneratedImages` 沿用官方 trace 的清理口径：`CODEX_GENERATED_IMAGES_RETENTION_DAYS` 默认 7 天，`CODEX_GENERATED_IMAGES_MAX_MB` 默认 1024 MiB（1 GiB）。先删 mtime 早于保留期截止时间的普通文件，再将剩余普通文件跨线程按 mtime 从旧到新清理到总量不超限；mtime 相同时按路径排序。两个限制各以 0 禁用，都为 0 时连空目录也保留。
 

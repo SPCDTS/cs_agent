@@ -195,3 +195,7 @@ codex.md 编辑器旁的「codex 基础指令（当前 codexModel）」编辑 `D
 Codex 使用同一二进制、`CODEX_HOME` 受管配置和提供者环境，启动一次性 `app-server`，依次初始化、恢复线程并调用 `thread/compact/start`，最长等待 5 分钟，结束后清理进程。Pi 调用已有会话的 `compact(undefined, context)` 并检查任务终态。压缩需要后端模型可用；操作完成不代表所有历史图片都必然移除，具体保留范围由后端决定。
 
 协议已用本机 `codex-cli 0.163.0-alpha.10.2` 的 `app-server generate-json-schema --experimental` 核对：`initialize` 要求 `clientInfo.name/version`，`thread/resume` 和 `thread/compact/start` 要求 `threadId`。完成依据为目标线程的 `item/completed`（`item.type=contextCompaction`）、成功的 `turn/completed`，或兼容已弃用的 `thread/compacted`；失败/中断的回合不会报成功。服务端请求中未实现的方法返回 JSON-RPC `-32601`。离线 smoke 仅验证握手和不存在的线程恢复；未调用真实模型验证压缩效果。协议概览见 [官方 App Server 文档](https://developers.openai.com/codex/app-server)。
+
+### 统一发送观测
+
+首页展示近 24 小时 `no_send_fallback` 占入站回合的比例（按 admitted 票据去重，零回合时为 0）。时间线中的 `send_message` 含序号、message_id、图片数、文件状态与 already_sent，仅记录首次发送尝试，重放/对账不重复计数；no_send_fallback 仅在首次预留系统兜底行时计数；`final_answer` 为仅留存的最终回答，`no_send_fallback` 表示成功回合没有发送消息而触发兜底。

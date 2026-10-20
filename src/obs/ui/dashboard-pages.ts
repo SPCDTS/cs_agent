@@ -55,7 +55,7 @@ export interface DashboardPageOptions {
   modelCatalog?: ModelCatalogView;
   store: {
     degraded: boolean;
-    throughput(since: number): { total: number; failed: number; error_rate: number };
+    throughput(since: number): { total: number; failed: number; error_rate: number; no_send_fallback?: number; inbound?: number; no_send_ratio?: number };
     latestMetrics(): { name: string; labels_json: string; value: number; ts: number }[];
     tickets(filters: Record<string, unknown>): { ticket: string; scope: string; ts: number; status: string; sender: string | null; route: string | null; backend: string | null; duration_ms: number }[];
     events(ticket: string, options: { after?: number; limit: number }): ObsEvent[];
@@ -212,6 +212,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
 
     const tp = (h: number) => opts.store.throughput(Date.now() - h * 3600_000);
     const t1 = tp(1), t24 = tp(24);
+    out += `<div class="muted">近 24 小时未调用发送工具而兜底：${t24.no_send_fallback ?? 0} / ${t24.inbound ?? 0} 个入站回合（${((t24.no_send_ratio ?? 0) * 100).toFixed(1)}%）</div>`;
     const fig = (label: string, t: { total: number; failed: number; error_rate: number }) => `<div class="sheet pad"><div class="muted">${label}</div><div class="figure">${t.total}<small class="muted"> 条完成</small></div><div class="${t.failed ? 's-fail' : 'muted'}">失败或兜底 ${t.failed} 条（${(t.error_rate * 100).toFixed(t.error_rate && t.error_rate < .1 ? 1 : 0)}%）</div></div>`;
     const scopes = Object.entries(asObj(queue.scopes)).filter(([, n]) => Number(n) > 0);
     out += `<section><h2>吞吐与队列</h2><div class="grid cols-3">${fig('近 1 小时', t1)}${fig('近 24 小时', t24)}<div class="sheet pad"><div class="muted">并发槽位</div><div class="figure">${Number(queue.active ?? 0)} / ${Number(queue.slots ?? 0)}</div><div class="muted">${scopes.length ? scopes.map(([s, n]) => `${esc(scopeLabel(s))} 排队 ${Number(n)} 条`).join('，') : `排队 ${Math.max(0, Number(queue.waiting ?? 0))} 条`}</div></div></div>`;

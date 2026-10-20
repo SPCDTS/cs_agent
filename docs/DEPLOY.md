@@ -169,7 +169,7 @@ Codex 收尾时先等待主进程退出，再给输出管道一个有限的刷�
 
 上述变量均接受非负整数；总量换算为字节后必须是安全整数。清理先删除 mtime 早于保留期截止时间的普通文件，再跨线程按 mtime 从旧到新删除，直到总量不超限；两个限制都为 0 时不清理。内置生图输出位于 `$CODEX_HOME/generated_images/<thread_id>/exec-*.png`（默认对应 `./data/codex/generated_images/`），清理不跟随链接，删除前以 realpath 核验根目录边界，最后仅移除空子目录并保留根目录。
 
-`qq_send_image` 登记时已把图片复制到票据图片目录，清理原图不影响已登记的副本；原图主要用于模型后续回看或再次发送。清理沿用观测库每日任务，在 trace 清理之后执行：启动不会立即执行，正常情况下首次在 `Metrics.start()` 后约 60 秒触发，此后间隔至少 24 小时；观测库降级时不执行。成功删除文件时记录 `codex generated images purged`（removed、bytes、dirs），失败只记录 `codex generated images purge failed` 告警。
+`send_message` 发送图片前会把图片复制到票据图片目录，清理原图不影响已登记的副本；原图主要用于模型后续回看或再次发送。清理沿用观测库每日任务，在 trace 清理之后执行：启动不会立即执行，正常情况下首次在 `Metrics.start()` 后约 60 秒触发，此后间隔至少 24 小时；观测库降级时不执行。成功删除文件时记录 `codex generated images purged`（removed、bytes、dirs），失败只记录 `codex generated images purge failed` 告警。
 
 ## 3. 启动
 
@@ -262,19 +262,19 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 - **显式开启 image_gen 后可被群成员触发**：任何能让 codex 处理消息的发送者都可以间接让它生图（每回合最多 4 次，图片只写到本票据目录、只随本条回复发出）。
 - **聊天记录**：群成员可以让 codex 检索本群 30 天内的原始消息和 180 天内的摘要（与能翻群记录一致）；owner 私聊可以检索全部会话。`./data/qq-messages.sqlite` 按聊天记录保管。
 
-### 附件工具（qq_context）
+### 统一发送工具（im）
 
-`qq_send_image(path)` 登记图片；`qq_send_file(path, name?)` 登记文件，name 缺省取原文件名。来源只能是本轮工作区普通文件或当前 QQ_ACCESS 范围已召回媒体，拒绝软链接；文件名取 basename、去控制字符、最多 120 字符。图片魔数、单张 10 MiB、合计 20 MiB、每轮 4 张限制沿用回复通道。
+`send_message({ text, images: [path], files: [{ path, name? }] })` 立即发送文字和图片，再上传文件，name 缺省取原文件名。来源只能是本轮工作区普通文件或当前 QQ_ACCESS 范围已召回媒体，拒绝软链接；文件名取 basename、去控制字符、最多 120 字符。图片魔数、单张 10 MiB、合计 20 MiB、每条消息 4 张限制沿用回复通道。模型每回合最多 3 条消息，系统 #late / #fallback 不占额度。当前票据的生成图片与绑定的 Codex 线程 generated_images 目录也可作为来源。
 
-文件在文字（含图片）确认发送后逐个上传到原会话，群聊放根目录。每次上传前持久化 `fileUploads.status=sending`，成功保存 `sent` 和 `file_id`，异常保存 `uncertain`；恢复只发送 `pending`，遗留 `sending` 转 `uncertain`。文字已发出但附件未结束时保留派发索引；全部结束后观测 `reply.files` 记录名字、大小和状态，再清理文件副本。上传超时至少 30 秒，每 MiB 加 2 秒，最高 120 秒。
+文件在文字（含图片）确认发送后逐个上传到原会话，群聊放根目录。每次上传前持久化 Outbox 的文件状态 `sending`，成功保存 `sent` 和 `file_id`，异常保存 `uncertain`；恢复只发送 `pending`，遗留 `sending` 转 `uncertain`。文字已发出但附件未结束时保留派发索引；观测 `send_message` 的 files 字段记录名字、大小和状态；票据结束时删除 Outbox 副本，仍有 pending/sending 文件的消息目录保留，避免破坏恢复。上传超时至少 30 秒，每 MiB 加 2 秒，最高 120 秒。
 
-每轮注入 `QQ_ATTACH_DIR=${DATA_DIR}/images/<ticket>`、`QQ_FILE_DIR=${DATA_DIR}/files/<ticket>`、`QQ_WORKDIR=${WORKSPACE_DIR}/<会话键>`。注入值必须是安全字符组成、不含 `..` 的绝对路径；MCP 再校验前两者分别是 images/files 的直接子目录且票据相同，工作区是 WORKSPACE_DIR 的直接子目录，拒绝软链接与 realpath 越界。`WORKSPACE_DIR` 与 `ATTACH_*` 配置由入口脚本透传。
+runner 每轮通过 Codex 子进程环境传入 `IM_TOKEN` 与 `QQ_RECALL_TOKEN`，受管 im / qq_context 配置各自用 env_vars 转发；令牌不进入 argv，端口仍通过非敏感配置注入。令牌在主进程绑定票据、来源与工作区，结束即撤销；模型不能选目标。发送网关通过 media/attach.ts 校验普通文件、软链接、realpath 与来源权限。旧附件目录参数仍由 runner 注入，但 qq_context 不再读取它们或提供发送工具。
 
 ### 生图 MCP（image_gen）
 
 默认 `CODEX_IMAGE_GEN=off`，不写入两个 image_gen 配置段，也不注入 IMAGE_TICKET_DIR、IMAGE_REFS 或其 QQ_ACCESS。以下仅在 `CODEX_IMAGE_GEN=on` 时适用。受管 AGENTS.md 和新播种的 codex 提示词不再包含生图说明。
 
-- 慢任务在 MCP 等待上限后返回“图片仍在生成……无需重试”，仅此时写入票据目录的 `pending-jobs.json`。agent 在 `handle → lateImages → postprocess → reply` 中按原 prompt_id 收取到原 `call-<n>/`，结果并入同一条回复（最多 4 张）；这期间同 scope 的后续消息继续排队。最终失败追加“有一张图生成超时未能发送”。
+- 生图提交前写入票据目录的 `pending-jobs.json`；慢任务在 MCP 等待上限后返回“图片仍在生成……无需重试”。agent 在 `handle → lateImages → settle` 中按原 prompt_id 收取到原 `call-<n>/`，结果通过 #late 消息发送（最多 4 张）；这期间同 scope 的后续消息继续排队。最终失败追加“有一张图生成超时未能发送”。
 - `lateImages` 将各任务的参数、期限、延期次数、对账步骤和结果保存到 TicketDoc；unknown 先按前缀对账，绝不重新提交。全部结果落盘后删除清单，恢复时复用已下载的有效图片或已保存的结果。参考图清单保留至最终收取结束再覆盖清理。`IMAGE_GEN_MCP_WAIT_SEC` 由启动脚本透传给 MCP；部署时需将该变量传入容器，未设置默认 90 秒。
 - 工具参数与前缀共用 ImageOptions：prompt、negative_prompt、aspect、size、count、seed、reference_images、transparent。每轮（含 resume）注入 IMAGE_REFS，没图时显式注入空串，防止旧轮次路径继承；只允许本票据 incoming 下的允许列表文件，校验绝对路径、字符、realpath、大小、魔数。
 - 参考图上传到 ComfyUI input 的每票据子目录。若 comfy-mcp 的 upload_file 支持 paths 和 subfolder 则使用它；本机安装版本只有 paths/overwrite，不能指定子目录，因而回退到同 COMFYUI_URL 的 HTTP /upload/image。真实冒烟覆盖 HTTP 上传，MCP 两种能力分支由假服务测试。
@@ -379,9 +379,9 @@ DeepSeek Search/Fetch 使用 `DEEPSEEK_API_KEY`（兼容 `DEEPSEEK_APIKEY`），
 
 fetch_page 只接收无凭据的公开 HTTP(S) URL，复用入站下载的 IP 判定，解析全部 DNS 地址并拒绝任何内网地址。实际抓取发生在 DeepSeek 服务器，无法在本机固定其 DNS 结果或检查服务端重定向链；该部分依赖 DeepSeek 服务端策略，本次未执行真实 API 请求。
 
-pi 也有 `qq_send_image` / `qq_send_file`，来源为本轮 PiExecutionEnv 工作区或当前范围已召回媒体，文件由共用 reply 阶段按 manifest 发送。
+pi 通过进程内 send_message 调用与 im 共用的 SendService，来源绑定 PiRequestDoc 与 PiExecutionEnv，文件按 Outbox 状态发送。
 
-图片写到 `DATA_DIR/images/<ticket>/call-<n>/`，最终由既有回复任务附带最多 4 张；参考图只能取本票据 incoming 清单。远端参考图清单在上传前保存，完成或失败时覆盖清理，清理失败保留供既有终态清理恢复。生图工具使用 pi-durable 的 unsafe 重放策略：崩溃中断的外部生图调用不自动重提，模型收到 interrupted；已保存图片仍可随完成的回复附带。`requestId=ticket` 保证提交幂等，不等于外部生图服务的事务性 exactly-once。慢图受 pi 总回合期限限制；此次没有改动并行任务负责的 image_gen MCP 延迟收图逻辑。
+图片写到 `DATA_DIR/images/<ticket>/call-<n>/`，工具成功返回路径后由模型用 send_message 显式发送；未完成的任务交给 lateImages 收取并以 #late 发送。参考图只能取本票据 incoming 清单。远端参考图清单在上传前保存，完成或失败时覆盖清理，清理失败保留供既有终态清理恢复。生图工具使用 pi-durable 的 unsafe 重放策略：崩溃中断的外部生图调用不自动重提，模型收到 interrupted；已保存图片仍可通过 send_message 发送。`requestId=ticket` 保证提交幂等，不等于外部生图服务的事务性 exactly-once。慢图受 pi 总回合期限限制；此次没有改动并行任务负责的 image_gen MCP 延迟收图逻辑。
 
 ## 观测面板
 
@@ -435,7 +435,7 @@ ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUs
 
 升级前没有快照的存量票据无法还原历史设置：恢复时一次性写入固定 high，后端优先采用已有结果中的 pi，否则 codex；后续重试沿用。没有 TicketDoc 的孤儿票据重新派发时才采样当前设置。
 
-升级无需手动迁移：`.env` 残留的 `CODEX_REPLY_MODE` 被忽略；`settings.json` 读取时剥离 `codexReplyMode`，保留其它有效设置，下次保存移除旧键；旧票据的同名字段不参与执行。已持久化的回复草稿继续用于恢复，避免改写已完成阶段。历史 `operation=relay` 事件和用量仍可展示、聚合，新后处理保留 postprocess 事件，不再产生 relay 模型调用或其 fallback 事件。
+升级无需手动迁移：`.env` 残留的 `CODEX_REPLY_MODE` 被忽略；`settings.json` 读取时剥离 `codexReplyMode`，保留其它有效设置，下次保存移除旧键；旧票据的同名字段不参与执行。旧 postprocess/reply 检查点由 settle 接管，新回合最终回答不自动发送；升级时旧草稿/最终答案及最多 4 张图片通过 #fallback 保留，已发送的旧附件继续恢复。历史 operation=relay/postprocess 事件仍可展示，新回合使用 final_answer 与 send_message。
 
 
 ### 管理事件保留期

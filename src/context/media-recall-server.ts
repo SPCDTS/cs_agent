@@ -7,7 +7,15 @@ import { registerTemporarySecrets } from "../shared/redact.js";
 import { accessToString, parseAccess, type Access } from "./access.js";
 import { abortable, type MediaRecall, type RecallResult } from "./media.js";
 
-export interface RecallBinding { access: Access; ticket: string; deadline: number; signal?: AbortSignal }
+export interface RecallBinding {
+  access: Access; ticket: string; deadline: number; signal?: AbortSignal;
+  source?: { type: "private" | "group"; user_id: string; group_id: string | null };
+  workdir?: string; session?: string;
+}
+export interface SendGateway {
+  send(binding: RecallBinding, attempt: string, args: unknown, signal: AbortSignal): Promise<unknown>;
+  release(ticket: string, attempt: string): void;
+}
 interface Lease {
   binding: RecallBinding;
   remaining: number;
@@ -23,9 +31,9 @@ interface TicketQuota { access: string; used: number; active: number; lastRevoke
 export class RecallTokens {
   private readonly tokens = new Map<string, Lease>();
   private readonly tickets = new Map<string, TicketQuota>();
-  constructor(private readonly media: Pick<MediaRecall, "recall"> & Partial<Pick<MediaRecall, "view">>, readonly maxPerTicket = 5, private readonly channel?: Pick<Channel, "listChats">) {}
+  constructor(private readonly media: Pick<MediaRecall, "recall"> & Partial<Pick<MediaRecall, "view">>, readonly maxPerTicket = 5, private readonly channel?: Pick<Channel, "listChats">, private readonly gateway?: SendGateway) {}
 
-  issue(binding: RecallBinding): { token: string; revoke(): void } {
+  issue(binding: RecallBinding): { token: string; revoke(): void; session(value: string): void } {
     const access = accessToString(binding.access);
     if (!parseAccess(access) || !binding.ticket || !Number.isFinite(binding.deadline) || binding.deadline <= Date.now()) throw new Error("召回绑定无效或已过期");
     binding.signal?.throwIfAborted();
@@ -45,6 +53,7 @@ export class RecallTokens {
       if (!lease) return;
       this.tokens.delete(token); clearTimeout(lease.timer);
       disposeSecret();
+      this.gateway?.release(binding.ticket, token);
       quota.active--; quota.lastRevoke = Date.now();
       if (!quota.active) {
         quota.timer = setTimeout(() => {
@@ -57,14 +66,24 @@ export class RecallTokens {
     };
     const timer = setTimeout(revoke, Math.max(1, binding.deadline - Date.now()));
     timer.unref();
-    this.tokens.set(token, { binding: { ...binding, access: { ...binding.access } }, remaining: Math.max(0, this.maxPerTicket - quota.used), control, timer, revoke });
+    this.tokens.set(token, { binding: { ...binding, access: { ...binding.access }, ...(binding.source ? { source: { ...binding.source } } : {}) }, remaining: Math.max(0, this.maxPerTicket - quota.used), control, timer, revoke });
     binding.signal?.addEventListener("abort", revoke, { once: true });
-    return { token, revoke };
+    return { token, revoke, session: value => {
+      const lease = this.tokens.get(token);
+      if (lease) lease.binding.session = value;
+    } };
   }
 
   valid(token: string): boolean {
     const lease = this.tokens.get(token);
     return !!lease && lease.binding.deadline > Date.now() && !lease.control.signal.aborted;
+  }
+
+  async send(token: string, args: unknown): Promise<unknown> {
+    if (!this.valid(token)) throw new Error("发送令牌无效或已过期");
+    const lease = this.tokens.get(token)!;
+    if (!this.gateway || !lease.binding.source || !lease.binding.workdir) throw new Error("发送令牌未绑定本回合来源");
+    return this.gateway.send(lease.binding, token, args, lease.control.signal);
   }
 
   async recall(token: string, messageId: string): Promise<RecallResult> {
@@ -108,17 +127,18 @@ export async function startMediaRecallServer(tokens: RecallTokens, port = 8790) 
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }).end(JSON.stringify(body));
     };
-    if (req.method !== "POST" || (req.url !== "/recall" && req.url !== "/view" && req.url !== "/chats")) { send(404, { error: "不存在的召回端点" }); return; }
+    if (req.method !== "POST" || (req.url !== "/recall" && req.url !== "/view" && req.url !== "/chats" && req.url !== "/send")) { send(404, { error: "不存在的召回端点" }); return; }
     const auth = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization ?? "");
     if (!auth || !tokens.valid(auth[1]!)) { send(401, { error: "召回令牌无效或已过期" }); return; }
     try {
       let size = 0; const chunks: Buffer[] = [];
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > 2048) { send(413, { error: "请求过大" }); return; }
+        if (size > (req.url === "/send" ? 64 * 1024 : 2048)) { send(413, { error: "请求过大" }); return; }
         chunks.push(Buffer.from(chunk));
       }
       const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (req.url === "/send") { send(200, await tokens.send(auth[1]!, body)); return; }
       if (req.url === "/chats") {
         if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) {
           send(400, { error: "qq_chats 不接受参数" }); return;

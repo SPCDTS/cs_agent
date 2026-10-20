@@ -5,7 +5,7 @@ import { log } from '../shared/log.js';
  * 静态开关关闭时不订阅、不发送；函数开关（运行时设置）每次发送前现读，关闭期间不发送也不计入限频。
  * 所有告警共用 30 分钟限频，内容不含原文或服务端错误。
  */
-export function startAlerts(opts: { enabled: boolean | (() => boolean); owner?: string; bridge: Pick<Channel, 'status' | 'send'>; trace: Trace; now?: () => number }) {
+export function startAlerts(opts: { enabled: boolean | (() => boolean); owner?: string; bridge: Pick<Channel, 'status' | 'sendOps'>; trace: Trace; now?: () => number }) {
   if (opts.enabled === false || !opts.owner) return { stop() {} };
   const enabled = typeof opts.enabled === 'function' ? opts.enabled : () => true;
   const now = opts.now ?? Date.now;
@@ -16,7 +16,7 @@ export function startAlerts(opts: { enabled: boolean | (() => boolean); owner?: 
   const send = (reason: string) => {
     if (!enabled() || now() - last < 30 * 60_000) return;
     last = now();
-    void opts.bridge.send('private', opts.owner!, 'cs-agent 告警：' + reason).catch(() => log.warn('owner alert delivery failed'));
+    void opts.bridge.sendOps('private', opts.owner!, 'cs-agent 告警：' + reason).catch(() => log.warn('owner alert delivery failed'));
   };
   const off = opts.trace.subscribe(e => {
     const d = JSON.parse(e.detail_json);

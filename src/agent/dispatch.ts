@@ -14,7 +14,7 @@ import { trace } from "../shared/trace.js";
  * 5. 任务的外部副作用阶段（提交生图、codex 回合、回复）开始前检查票据仍 pending 且条目未 givenUp，否则以 failed 结束。
  * 6. recover() 还与 Channel 的 pending 票据对账：admit 已落盘但派发索引未写入的票据，用票据里保存的来源与原文
  *    重建消息重新派发（分页取尽全部 pending 票据）。v2 遗留条目（无任务）先中止其旧的模型会话，再按原文重新分流。
- * 7. 统一上下文（可选 history）：收到消息即写入机器人"处理中"行；终态后按 TicketDoc 更新为"已回复"/"失败"。
+ * 7. 生图路径保留 pending/completed 历史钩子；agent 每条成功 Outbox 消息由 SendService 独立入库。
  */
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { ConversationId, Harness, TaskId } from "@earendil-works/pi-durable";
@@ -32,6 +32,8 @@ import type { CsTasks, TaskResult } from "./tasks.js";
 export { FALLBACK_REPLY } from "./replies.js";
 /** 同一票据最多运行次数；达到即放弃运行，改发兜底回复 */
 export const MAX_ATTEMPTS = 3;
+/** 已发送正文的附件恢复最多额外运行三次，不能无限占用 FIFO。 */
+export const MAX_FILE_REPLY_ATTEMPTS = MAX_ATTEMPTS + 3;
 /** 启动对账时每页读取的 pending 票据数（分页直到取尽） */
 const PENDING_PAGE = 200;
 
@@ -84,7 +86,7 @@ export class Dispatcher {
     if (this.inflight.has(ticket)) return this.inflight.get(ticket)!;
     const scope = scopeOf(msg);
     const settings = this.opts.tasks.snapshotSettings(scope, typeof this.opts.codexEffort === "function" ? this.opts.codexEffort() : this.opts.codexEffort, this.effortMessage(msg, ticket));
-    this.withHistory("record pending failed", ticket, (h) =>
+    if (routeMessage(msg.route_text, this.prefixes, msg.images).route !== "agent") this.withHistory("record pending failed", ticket, (h) =>
       h.recordPending(scope, ticket, msg.time, { replyTo: msg.message_id, selfId: msg.self_id }),
     );
     return this.track(ticket, "dispatch failed", () => {
@@ -356,8 +358,9 @@ export class Dispatcher {
    */
   private async hasUnfinishedFileReply(ticket: string, conversationId: ConversationId): Promise<boolean> {
     const doc = await this.opts.harness.snapshot(TicketDoc, conversationId, this.ctx);
-    return doc?.route === "agent" && !!doc.agentResult && doc.replyCompleted !== true &&
-      (await this.opts.bridge.getTicket(ticket))?.status === "sent";
+    return doc?.route === "agent" && doc.replyCompleted !== true &&
+      ((await this.opts.bridge.getTicket(ticket))?.status === "sent" ||
+        this.opts.tasks.sendService.rows(ticket).some(row => row.status === "sent" && row.files.some(file => file.status === "pending")));
   }
 
   private async run(ticket: string, conversationId: ConversationId): Promise<void> {
@@ -369,7 +372,8 @@ export class Dispatcher {
         return { attempts: e.attempts, givenUp: e.givenUp === true };
       }, this.ctx);
       if (!entry) return; // 索引已清除（其他路径已完成）或已标记 failed
-      if (entry.givenUp || (entry.attempts > MAX_ATTEMPTS && !await this.hasUnfinishedFileReply(ticket, conversationId))) {
+      if (entry.givenUp || entry.attempts > MAX_FILE_REPLY_ATTEMPTS ||
+          (entry.attempts > MAX_ATTEMPTS && !await this.hasUnfinishedFileReply(ticket, conversationId))) {
         log.warn("ticket reached max attempts, giving up", { ticket: short(ticket), attempts: entry.attempts - 1 });
         await this.giveUp(ticket);
         return;
@@ -479,6 +483,7 @@ export class Dispatcher {
     try {
       const doc = await this.opts.harness.snapshot(TicketDoc, conversationId, this.ctx);
       const rec = await this.opts.bridge.getTicket(ticket);
+      if (doc?.route === "agent") await this.opts.tasks.sendService.reconcile(ticket);
       let action: BotAction = "reply";
       let detail: string | undefined;
       let ok = true;
@@ -498,7 +503,7 @@ export class Dispatcher {
           failure: doc?.agentResult && !doc.agentResult.ok ? doc.agentResult.failure : doc?.imageResult && !doc.imageResult.ok ? doc.imageResult.failure : undefined,
           message_id: rec?.reply_message_id, reply: doc?.replyText, images: doc?.replyImages,
           files: doc?.fileUploads?.map(({ name, bytes, status }) => ({ name, bytes, status })) } });
-      this.withHistory("record reply failed", ticket, (h) =>
+      if (doc?.route !== "agent") this.withHistory("record reply failed", ticket, (h) =>
         h.completeReply(ticket, {
           action,
           ...(detail ? { detail } : {}),
@@ -513,9 +518,9 @@ export class Dispatcher {
     }
   }
 
-  private recordFallback(ticket: string, replyMessageId?: string): void {
+  private recordFallback(ticket: string, replyMessageId?: string, outbox = false): void {
     trace.event(ticket, "fallback", { status: "failed", detail: { terminal: true, message_id: replyMessageId, reply: FALLBACK_REPLY } });
-    this.withHistory("record fallback failed", ticket, (h) =>
+    if (!outbox) this.withHistory("record fallback failed", ticket, (h) =>
       h.completeReply(ticket, {
         action: "fallback",
         excerpt: FALLBACK_REPLY,
@@ -556,6 +561,26 @@ export class Dispatcher {
     if (rec === undefined) return "pending";
     if (rec === null) return "terminal"; // 票据不存在：没有可回复的目标，不再保留索引
     if (isTerminal(rec.status)) return "terminal";
+    const entry = (await this.opts.harness.snapshot(DispatchDoc, this.ctx))?.pending[ticket];
+    const doc = entry ? await this.opts.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, this.ctx) : undefined;
+    if (doc?.route === "agent" || entry?.fallbackOnly) {
+      const service = this.opts.tasks.sendService;
+      try {
+        await service.reconcile(ticket);
+        if (service.rows(ticket).some(row => row.status !== "pending")) {
+          await service.settle(ticket); return "terminal";
+        }
+        await service.system(ticket, "fallback", FALLBACK_REPLY, [], undefined, doc?.agentResult?.ok === true);
+        await service.settle(ticket);
+        this.recordFallback(ticket, service.rows(ticket).find(row => row.status === "sent")?.message_id ?? undefined, true);
+        return "fallback";
+      } catch (error) {
+        if (service.rows(ticket).some(row => row.status !== "pending")) {
+          await service.settle(ticket); return "terminal";
+        }
+        log.error("outbox fallback failed", { ticket: short(ticket), error }); return "pending";
+      }
+    }
     try {
       const sent = await this.opts.bridge.reply(ticket, FALLBACK_REPLY);
       log.warn("fallback reply sent", { ticket: short(ticket) });

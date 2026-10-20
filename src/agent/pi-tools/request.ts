@@ -4,6 +4,7 @@ import { defineDoc } from "@earendil-works/pi-durable";
 /** 仅适配器写入身份；工具参数不能覆盖。计数按 taskId 去重，恢复不额外计次。 */
 export const PiRequestDoc = defineDoc<{
   ticket: string;
+  source?: { type: "private" | "group"; user_id: string; group_id: string | null };
   access: string;
   /** 与票据一起持久化；旧快照缺失时不授予技能写权限。 */
   senderIsOwner?: boolean;

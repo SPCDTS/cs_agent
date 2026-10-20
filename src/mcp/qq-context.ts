@@ -5,10 +5,6 @@
  * 环境：DATA_DIR（库目录，默认 /data）、QQ_ACCESS（group:<id> | private:<qq> | all）、QQ_CONTEXT_MAX_CHARS。
  * stdout 专用于 MCP 协议；诊断写 stderr。
  */
-import path from "node:path";
-import { promises as fs } from "node:fs";
-import { loadConfig } from "../config.js";
-import { resolveAttachmentDir } from "../media/attach-paths.js";
 import { chatsViaLoopback, recallViaLoopback, viewViaLoopback } from "./media-recall-client.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { parseAccess } from "../context/access.js";
@@ -23,21 +19,6 @@ let instrumentation: MemoryInstrumentation | undefined;
 
 const server = createQQContextServer({
   access: parseAccess(process.env.QQ_ACCESS),
-  attachments: async () => {
-    const cfg = loadConfig();
-    const attachDir = await resolveAttachmentDir(process.env.QQ_ATTACH_DIR, path.join(dataDir, "images"), "QQ_ATTACH_DIR");
-    const fileDir = await resolveAttachmentDir(process.env.QQ_FILE_DIR, path.join(dataDir, "files"), "QQ_FILE_DIR");
-    const workdir = await resolveAttachmentDir(process.env.QQ_WORKDIR, cfg.WORKSPACE_DIR, "QQ_WORKDIR");
-    if (path.basename(attachDir) !== path.basename(fileDir)) throw new Error("附件目录票据不一致");
-    const extraRoots: string[] = [];
-    const session = process.env.QQ_SESSION;
-    if (process.env.QQ_BACKEND === "codex" && session?.length === 36 && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(session)) {
-      const generated = path.join(dataDir, "codex", "generated_images", session);
-      const stat = await fs.lstat(generated).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return undefined; throw error; });
-      if (stat?.isDirectory()) extraRoots.push(generated);
-    }
-    return { dataDir, attachDir, fileDir, workdir, extraRoots, limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } };
-  },
   onRecall: event => {
     (instrumentation ??= MemoryInstrumentation.openOwn(dataDir)).recordRecall({ ...event,
       backend: process.env.QQ_BACKEND || 'codex', ticket: process.env.QQ_TICKET || null,

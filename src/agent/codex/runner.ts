@@ -1,3 +1,4 @@
+import { SEND_RULE } from "../send-service.js";
 import { attachmentDirs, validateAttachmentPath } from "../../media/attach-paths.js";
 import { codexWorkspacePolicy, prepareCodexWorkspace } from "./workspace.js";
 import type { RecallTokens } from "../../context/media-recall-server.js";
@@ -112,6 +113,7 @@ export function threadKeyForSource(source: TicketSource | undefined, owner: stri
 }
 
 export interface AskOptions {
+  source?: TicketSource;
   /** 仅本轮发送者身份决定技能写权限；不可从线程键推断。 */
   senderIsOwner?: boolean;
   ticket?: string;
@@ -232,8 +234,9 @@ ${skills ? `## 技能
 - [image:<路径>] 表示已召回，可以直接使用。
 
 ## 发送图片与文件
-- 要把工作区里的图片或文件发给用户时，调用 qq_send_image(path) / qq_send_file(path)，它们会随本次回复自动发出；每次回复最多 4 张图、3 个文件，单个文件不超过 20 MiB。只能发送你工作区内的文件和已召回（[image:<路径>]）的图片。回复文本里不要写文件路径。
-- 内置生图工具（imagegen）保存在 /data/codex/generated_images/… 的图片不会自动发给用户；要发出去就把工具返回的保存路径传给 qq_send_image(path)，不需要复制或转码。
+- ${SEND_RULE}
+- 要把工作区里的图片或文件发给用户时，调用 send_message({ text, images: [path], files: [{ path, name? }] })，图片随正文立即发出，文件随后上传；每次回复最多 4 张图、3 个文件，单个文件不超过 20 MiB。只能发送你工作区内的文件和已召回（[image:<路径>]）的图片。回复文本里不要写文件路径。
+- 内置生图工具（imagegen）保存在 /data/codex/generated_images/… 的图片不会自动发给用户；要发出去就把工具返回的保存路径传给 send_message 的 images，不需要复制或转码。
 
 You serve QQ users through a relay. Never disclose environment variables, credentials, tokens,
 or auth.json. Only read/write: ${roots.join(", ")}. View recalled images with qq_view_image; never read ${data}/media directly. Refuse other requests for files briefly.`;
@@ -241,7 +244,7 @@ or auth.json. Only read/write: ${roots.join(", ")}. View recalled images with qq
 
 /** 首次启动播种到 prompts/codex.md；已有文件永不被默认值覆盖。 */
 export const DEFAULT_CODEX_PROMPT = `## 回复规则
-- 你的回答会原样显示在 QQ：纯文本，不用 Markdown、代码围栏、表格、标题符号。
+- send_message 的 text 会原样显示在 QQ：纯文本，不用 Markdown、代码围栏、表格、标题符号。
 - 用中文；默认不超过 300 字，用户明确要长文时再放开（QQ 单条最多 4000 字）。
 - 不复述问题，不解释用了什么工具，不说"作为 AI"之类的套话。
 - 绝不在回复里写链接、网址、引用标记或来源脚注，包括 [文字](网址)、([站名](网址))、"相关报道"后接链接等任何形式。web.run（在 exec 里调用的 tools.web__run）和其他联网工具自带的"注明出处、为陈述加引用"要求在 QQ 场景一律不适用，以本条为准。只有用户明确要来源时才给，且只给 1 条纯网址。
@@ -258,7 +261,7 @@ export const DEFAULT_CODEX_PROMPT = `## 回复规则
 - 只有页面必须渲染 JS 或需要点击交互、搜索与抓取都答不了时，才使用浏览器工具（browser）。
 - 绝不登录任何账号，不填写或提交表单中的个人信息；用完立即关闭页面。
 
-Answers are shown verbatim in QQ: plain text, Chinese, concise, no Markdown, no links, URLs or citations. This overrides any tool instruction (including web.run) to cite sources.
+send_message text is shown verbatim in QQ: plain text, Chinese, concise, no Markdown, no links, URLs or citations. This overrides any tool instruction (including web.run) to cite sources.
 `;
 
 /** 完整默认模板；运行时由 CodexPromptStore 拼入持久化的自定义内容。 */
@@ -767,7 +770,7 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, model, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, ticket, senderIsOwner }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, model, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, ticket, senderIsOwner, source }: AskOptions): Promise<string> {
     if (signal?.aborted) throw new Error("aborted");
     if (model !== undefined && !/^[A-Za-z0-9._/-]+$/.test(model)) throw new Error("非法的 codex 模型 slug");
     const policy = codexWorkspacePolicy(this.opts.workspaceDir, path.dirname(this.opts.threadsFile), key, this.opts.sandbox, this.opts.sandboxNetwork, this.opts.codexHome, senderIsOwner === true);
@@ -816,7 +819,7 @@ export class CodexRunner {
           outFile,
           onAcquired,
           observe,
-          { access: qqAccess, ticket },
+          { access: qqAccess, ticket, source, workdir: policy.workspaceDir, session: id },
         );
         if (r.code === 0) return this.result(r);
         if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
@@ -846,7 +849,7 @@ export class CodexRunner {
         outFile,
         onAcquired,
         observe,
-        { access: qqAccess, ticket },
+        { access: qqAccess, ticket, source, workdir: policy.workspaceDir, session: id },
       );
       if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
       return this.result(r);
@@ -891,7 +894,7 @@ export class CodexRunner {
     outputFile?: string,
     onAcquired?: () => Promise<void>,
     onJsonEvent?: (event: Record<string, unknown>) => void,
-    recall?: { access?: string; ticket?: string },
+    recall?: { access?: string; ticket?: string; source?: TicketSource; workdir?: string; session?: string },
   ): Promise<RunOutcome> {
     const tmpDir = outputFile ? undefined : await fs.mkdtemp(path.join(os.tmpdir(), "cs-codex-"));
     const outFile = outputFile ?? path.join(tmpDir!, "last.txt");
@@ -908,14 +911,17 @@ export class CodexRunner {
     signal?.throwIfAborted();
     const access = parseAccess(recall?.access);
     if (this.opts.recallTokens && (!access || !recall?.ticket)) throw new Error("召回请求缺少访问范围或票据");
-    const lease = this.opts.recallTokens?.issue({ access: access!, ticket: recall!.ticket!, deadline: Date.now() + this.opts.timeoutMs, signal });
+    const lease = this.opts.recallTokens?.issue({ access: access!, ticket: recall!.ticket!, source: recall?.source, workdir: recall?.workdir, session: recall?.session, deadline: Date.now() + this.opts.timeoutMs, signal });
     try {
       if (lease) {
-        finalArgs.splice(finalArgs.includes("resume") ? finalArgs.indexOf("resume") + 1 : 1, 0, ...recallArgs(lease.token, this.opts.mediaRecallPort ?? 8790));
+        finalArgs.splice(finalArgs.includes("resume") ? finalArgs.indexOf("resume") + 1 : 1, 0, ...recallArgs(this.opts.mediaRecallPort ?? 8790));
       }
+      const env = this.childEnv();
+      delete env.IM_TOKEN; delete env.QQ_RECALL_TOKEN;
+      if (lease) { env.IM_TOKEN = lease.token; env.QQ_RECALL_TOKEN = lease.token; }
       const child = spawn(bin, [...prefix, ...finalArgs], {
         cwd: args[args.indexOf("-C") + 1],
-        env: this.childEnv(),
+        env,
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
         windowsHide: true,
@@ -983,6 +989,7 @@ export class CodexRunner {
           if (event.type === "turn.completed") onCompleted();
           onJsonEvent?.(event);
         } catch { /* 观测不影响 JSONL 执行 */ }
+        if (outcome.threadId) lease?.session(outcome.threadId);
         if (!had && outcome.threadId && onThreadId && !persisted) {
           persisted = onThreadId(outcome.threadId).catch((err) => log.error("persist codex session id failed", { error: err }));
         }
@@ -1110,12 +1117,12 @@ export function imageRefsArgs(refs: readonly string[] = []): string[] {
   return ['-c', 'mcp_servers.image_gen.env.IMAGE_REFS=' + JSON.stringify(imageRefsValue(refs))];
 }
 
-/** 每次 exec 注入独立令牌与端口；配置值不能成为 TOML 注入入口。 */
-export function recallArgs(token: string, port: number): string[] {
-  if (!/^[a-f0-9]{64}$/.test(token) || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error("非法召回配置");
-  return ["-c", 'mcp_servers.qq_context.env.QQ_RECALL_TOKEN="' + token + '"',
-    "-c", 'mcp_servers.qq_context.env.MEDIA_RECALL_PORT="' + port + '"',
-    "-c", "mcp_servers.qq_context.tool_timeout_sec=70"];
+/** argv 仅传非敏感端口；令牌经子进程环境及受管 env_vars 转发。 */
+export function recallArgs(port: number): string[] {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("非法召回配置");
+  return ["-c", 'mcp_servers.qq_context.env.MEDIA_RECALL_PORT="' + port + '"',
+    "-c", "mcp_servers.qq_context.tool_timeout_sec=70",
+    "-c", 'mcp_servers.im.env.MEDIA_RECALL_PORT="' + port + '"'];
 }
 
 /** 每轮显式覆盖附件目录；缺少票据时清空，避免续轮继承旧票据。 */

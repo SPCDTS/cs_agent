@@ -1,3 +1,5 @@
+import { SendService } from "../../src/agent/send-service.js";
+import { withOutbox } from "./outbox-stub.js";
 import { trace } from "../../src/shared/trace.js";
 import { registerFileAttachment, readFileAttachments, DEFAULT_ATTACHMENT_LIMITS } from "../../src/media/attach.js";
 import type { ImageOptions } from "../../src/media/gen/image-options.js";
@@ -256,7 +258,8 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
     backends: { codex: o.codex ?? backend, pi: new PiBackendStub() },
   });
   const tasks = createTasks({
-    getBridge: () => bridge,
+    sendService: new SendService({ getChannel: () => withOutbox(bridge), dataDir: dir, store }),
+    getBridge: () => withOutbox(bridge),
     imageBackend: image,
     imagesDir: path.join(dir, "images"),
     ticketsDir: path.join(dir, "tickets"),
@@ -322,7 +325,7 @@ describe("agent lateImages", () => {
     };
     await r.dispatcher.dispatch(inbound("画图"), ticket);
     expect(submits).toBe(1); expect(r.image.calls).toEqual([]); expect(r.image.collects).toEqual(["accepted"]);
-    expect(r.bridge.replies[0]).toMatchObject({ text: "正文保留", images: [expect.any(String)] });
+    expect(r.bridge.replies[0]).toMatchObject({ text: IMAGE_SUCCESS_REPLY, images: [expect.any(String)] });
   });
 
   it("count=4 下载一张后崩溃，重启仅下载剩余三张并完成整个批次", async () => {
@@ -375,7 +378,7 @@ describe("agent lateImages", () => {
       return { text: "成功的原始正文" };
     };
     await r.dispatcher.dispatch(inbound("画图"), ticket);
-    expect(r.bridge.replies[0]?.text).toBe("成功的原始正文\n附件收取失败，部分图片未能发送。");
+    expect(r.bridge.replies[0]?.text).toBe("附件收取失败，部分图片未能发送。");
     expect(readdirSync(dir).filter(f => f.startsWith("pending-jobs.json.bad-"))).toHaveLength(1);
     expect(existsSync(marker)).toBe(false); expect(r.image.collects).toEqual([]); expect(r.image.calls).toEqual([]);
   });
@@ -410,7 +413,7 @@ describe("agent lateImages", () => {
     try {
       await r.dispatcher.dispatch(inbound("画图"), ticket);
       expect(posts).toBe(1); expect(downloads).toBe(1);
-      expect(r.bridge.replies[0]).toMatchObject({ text: "图片稍后发送", images: [realpathSync(path.join(imgDir(r, ticket), "call-1", "late.png"))] });
+      expect(r.bridge.replies[0]).toMatchObject({ text: IMAGE_SUCCESS_REPLY, images: [realpathSync(path.join(imgDir(r, ticket), "call-1", "late.png"))] });
       expect(existsSync(path.join(imgDir(r, ticket), "pending-jobs.json"))).toBe(false);
     } finally { await client.close(); await dispose(); fetch.mockRestore(); }
   });
@@ -839,32 +842,6 @@ describe("文件附件回复", () => {
     return { fileDir, entries: await readFileAttachments(fileDir) };
   }
 
-  it.each([undefined, "7"])("文字已发送后逐个上传到原会话，失败不重试且继续后续文件：群=%s", async group => {
-    const r = await makeRig(), ticket = "file-reply";
-    const { fileDir } = await files(r, ticket);
-    const events: unknown[] = []; const unsub = trace.tap(e => { if (e.ticket === ticket && e.stage === "reply") events.push(e.detail.files); });
-    let id!: ConversationId;
-    const upload = r.bridge.uploadFile.bind(r.bridge);
-    r.bridge.uploadFile = async (...args) => {
-      expect(r.bridge.status.get(ticket)).toBe("sent"); expect(r.bridge.replies).toHaveLength(1);
-      id = (await pendingIndex(r))[ticket]!.conversationId as ConversationId;
-      const doc = await r.harness.snapshot(TicketDoc, id, ctx);
-      const index = r.bridge.uploads.length;
-      expect(doc?.fileUploads?.[index]?.status).toBe("sending");
-      expect(doc?.fileUploads?.slice(index + 1).every(row => row.status === "pending")).toBe(true);
-      const result = await upload(...args);
-      if (index === 1) throw new Error("上传响应丢失");
-      return result;
-    };
-    try { await r.dispatcher.dispatch(inbound("发文件", { group }), ticket); } finally { unsub(); }
-    const doc = await r.harness.snapshot(TicketDoc, id, ctx);
-    expect(doc?.fileUploads?.map(row => row.status)).toEqual(["sent", "uncertain", "sent"]);
-    expect(doc?.fileUploads?.[0]?.file_id).toBe("file-1"); expect(doc?.replyCompleted).toBe(true);
-    expect(r.bridge.uploads.map(row => [row.type, row.target, row.file.toString()])).toEqual([0, 1, 2].map(i => [group ? "group" : "private", group ?? OWNER, "附件" + i]));
-    expect(events).toEqual([doc?.fileUploads?.map(({ name, bytes, status }) => ({ name, bytes, status }))]);
-    expect(existsSync(fileDir)).toBe(false); expect(await pendingIndex(r)).toEqual({});
-  });
-
   it.each([false, true])("重启只发送 pending，sending 转 uncertain，sent/uncertain 不重发；清单已入文档=%s", async initialized => {
     const r = await makeRig(), ticket = "file-recovery";
     const { entries, fileDir } = await files(r, ticket, initialized ? 4 : 2);
@@ -894,12 +871,19 @@ describe("文件附件回复", () => {
     expect(existsSync(fileDir)).toBe(false);
   });
 
-  it("副本缺失或内容变化只将对应文件记 uncertain", async () => {
+  it("升级前已发送票据的附件副本变化只将对应文件记 uncertain", async () => {
     const r = await makeRig(), ticket = "changed-file";
     const { fileDir, entries } = await files(r, ticket, 2);
     writeFileSync(path.join(fileDir, entries[0]!.filename), "篡改内容", "utf8");
-    await r.dispatcher.dispatch(inbound("回复"), ticket);
-    expect(r.bridge.replies).toHaveLength(1); expect(r.bridge.uploads.map(row => row.name)).toEqual(["1.txt"]);
+    await r.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+      Object.assign(await tx.doc(TicketDoc, id), { ticket, route: "agent", text: "请求",
+        source: { type: "private", user_id: OWNER, group_id: null, nickname: "test" },
+        agentResult: { ok: true, backend: "codex", text: "已发送", images: [] } });
+      (await tx.doc(DispatchDoc)).pending[ticket] = { conversationId: id, scope: "private:" + OWNER };
+    } }, ctx);
+    r.bridge.status.set(ticket, "sent");
+    await r.harness.close(ctx); await r.reopen(); await r.dispatcher.recover(); await r.dispatcher.idle();
+    expect(r.bridge.replies).toHaveLength(0); expect(r.bridge.uploads.map(row => row.name)).toEqual(["1.txt"]);
   });
 });
 
@@ -923,15 +907,15 @@ describe("agent path", () => {
     await r.dispatcher.dispatch(inbound("新增技能", { id: "101" }), "skills-no-owner-private");
     expect(r.backend.requests.map(req => req.senderIsOwner)).toEqual([false, false]);
   });
-  it("non-prefixed message → agent backend with scope/access/threadKey; reply is sent as-is", async () => {
+  it("non-prefixed message → agent backend with scope/access/threadKey; final answer is retained and no-send falls back", async () => {
     const r = await makeRig();
     await r.dispatcher.dispatch(inbound("今晚有比赛吗", { group: "200000001", user: "42" }), "t-agent");
     expect(r.image.calls).toEqual([]);
     expect(r.backend.requests[0]).toMatchObject({
       ticket: "t-agent", scope: "group:200000001", access: "group:200000001", threadKey: "group:200000001", text: "今晚有比赛吗",
     });
-    expect(r.bridge.replies).toEqual([{ ticket: "t-agent", text: "## 答复\n**今晚有比赛吗** ok @all", images: [] }]);
-    expect(bot(r)[0]).toMatchObject({ action: "ask_codex", detail: "high", status: "已回复" });
+    expect(r.bridge.replies).toEqual([{ ticket: "t-agent", text: FALLBACK_REPLY, images: [] }]);
+    expect(bot(r)[0]).toMatchObject({ action: "fallback", status: "已回复" });
   });
 
   it("owner private → access all / owner thread", async () => {
@@ -940,15 +924,15 @@ describe("agent path", () => {
     expect(r.backend.requests[0]).toMatchObject({ access: "all", threadKey: "owner", scope: `private:${OWNER}`, senderIsOwner: true });
   });
 
-  it("codex 原始答复原样发送，意图模型不会被调用", async () => {
+  it("codex 最终回答不发送，意图模型不会被调用", async () => {
     const r = await makeRig();
     r.faux.setResponses([fauxAssistantMessage(fauxText("不应发送的改写"))]);
     await r.dispatcher.dispatch(inbound("问个问题"), "sanitize-only");
-    expect(r.bridge.replies[0]!.text).toBe("## 答复\n**问个问题** ok @all");
+    expect(r.bridge.replies[0]!.text).toBe(FALLBACK_REPLY);
     expect(r.faux.state.callCount).toBe(0);
   });
 
-  it.each([false, true])("旧 TicketDoc 的 codexReplyMode 在重开后可读取、恢复并原样发送；已有后端结果=%s", async completed => {
+  it.each([false, true])("旧 TicketDoc 的 codexReplyMode 在重开后可读取、恢复并按零发送规则兜底；已有后端结果=%s", async completed => {
     const r = await makeRig();
     const legacySettings = JSON.parse('{"backend":"codex","codexReasoningEffort":"low","codexReplyMode":"relay"}');
     const conversation = await r.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
@@ -962,7 +946,7 @@ describe("agent path", () => {
     expect((await r.harness.snapshot(TicketDoc, conversation.id, ctx))?.settings).toEqual(legacySettings);
     await r.dispatcher.recover();
     await r.dispatcher.idle();
-    expect(r.bridge.replies[0]!.text).toBe(completed ? "## 旧回答 @all" : "## 答复\n**旧消息** ok @all");
+    expect(r.bridge.replies[0]!.text).toBe(FALLBACK_REPLY);
     expect(r.backend.requests).toHaveLength(completed ? 0 : 1);
     expect(r.faux.state.callCount).toBe(0);
     expect(await pendingIndex(r)).toEqual({});
@@ -973,12 +957,12 @@ describe("agent path", () => {
     await r.dispatcher.dispatch(inbound("hello", { group: "7", user: "42" }), "t-pi");
     await r.dispatcher.dispatch(inbound("hello", { group: "8", user: "42", id: "101" }), "t-codex");
     expect(r.bridge.replies.find((x) => x.ticket === "t-pi")!.text).toBe(AGENT_FAILURE_REPLIES.failed);
-    expect(r.bridge.replies.find((x) => x.ticket === "t-codex")!.text).toContain("ok");
+    expect(r.bridge.replies.find((x) => x.ticket === "t-codex")!.text).toBe(FALLBACK_REPLY);
     expect(r.backend.requests.map((q) => q.ticket)).toEqual(["t-codex"]);
-    expect(bot(r).find((b) => b.ticket === "t-pi")).toMatchObject({ status: "失败" });
+    expect(bot(r).find((b) => b.ticket === "t-pi#fallback")).toMatchObject({ action: "fallback", status: "已回复" });
   });
 
-  it("codex backend end to end via fake codex: QQ_ACCESS, QQ_ATTACH_DIR, configured effort; ≤4 collected images attached", async () => {
+  it("codex backend end to end via fake codex: QQ_ACCESS, QQ_ATTACH_DIR, configured effort; final output and collected images are not automatically sent", async () => {
     const dir = tmp("cs-dispatch-codex-");
     const logFile = path.join(dir, "codex-calls.jsonl");
     const runner = new CodexRunner({
@@ -1000,8 +984,8 @@ describe("agent path", () => {
     expect(start.argv).toEqual(expect.arrayContaining(["-c", 'model_reasoning_effort="medium"']));
     expect(start.stdin.split("\n")[0]).toMatch(/^\[来源\] 群 200000001 · tester\(42\) · /);
     const reply = r.bridge.replies[0]!;
-    expect(reply.text).toBe("```\n画好了\n```");
-    expect(reply.images).toHaveLength(4);
+    expect(reply.text).toBe(FALLBACK_REPLY);
+    expect(reply.images).toHaveLength(0);
     expect(reply.images!.every((f) => f.endsWith(".png"))).toBe(true);
   });
 
@@ -1037,7 +1021,7 @@ describe("agent path", () => {
     await r.dispatcher.recover();
     await r.dispatcher.idle();
     expect(codexStarts(logFile)).toBe(1);
-    expect(r.bridge.replies).toEqual([{ ticket: "t-r1", text: "已完成的回答", images: [] }]);
+    expect(r.bridge.replies).toEqual([{ ticket: "t-r1", text: FALLBACK_REPLY, images: [] }]);
     expect(existsSync(path.join(dir, "tickets", "t-r1"))).toBe(false); // 回复后清理票据工作目录
   });
 
@@ -1056,7 +1040,7 @@ describe("agent path", () => {
     await r.dispatcher.recover();
     await r.dispatcher.idle();
     expect(codexStarts(logFile)).toBe(2);
-    expect(r.bridge.replies).toEqual([{ ticket: "t-r1b", text: "第二次的回答", images: [] }]);
+    expect(r.bridge.replies).toEqual([{ ticket: "t-r1b", text: FALLBACK_REPLY, images: [] }]);
   });
 
   it("backend timeout → timeout template", async () => {
@@ -1130,7 +1114,7 @@ describe("ordering (§4.7)", () => {
     const idx = await pendingIndex(r);
     expect(idx["t-f1"]).toMatchObject({ state: "failed", givenUp: true, attempts: MAX_ATTEMPTS + 1 });
     expect(idx["t-f2"]).toMatchObject({ state: "failed" });
-    expect(bot(r).find((b) => b.ticket === "t-f1")).toMatchObject({ status: "失败" });
+    expect(bot(r).find((b) => b.ticket === "t-f1")).toBeUndefined();
 
     // 重启：failed 条目不再处理，也不会被对账当作孤儿重跑
     r.bridge.replyDown = false;
@@ -1276,9 +1260,9 @@ describe("dispatcher bookkeeping", () => {
     await r.dispatcher.idle();
     expect(r.backend.requests.length).toBe(before);
     expect(statusAtFallback).toEqual(["terminal"]);
-    expect(r.bridge.replies).toEqual([{ ticket: "t-cap", text: FALLBACK_REPLY, images: undefined }]);
+    expect(r.bridge.replies).toEqual([{ ticket: "t-cap", text: FALLBACK_REPLY, images: [] }]);
     expect(await pendingIndex(r)).toEqual({});
-    expect(bot(r).find((b) => b.ticket === "t-cap")).toMatchObject({ action: "fallback", status: "失败" });
+    expect(bot(r).find((b) => b.ticket === "t-cap#fallback")).toMatchObject({ action: "fallback", status: "已回复" });
   });
 
   it("a task phase that finds the dispatch entry given up ends failed without side effects (R3)", async () => {

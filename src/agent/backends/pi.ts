@@ -328,6 +328,10 @@ export class PiBackend implements AgentBackend {
     const conv = await this.conversation(req.threadKey, req.ticket, req.settings);
     let requestId = ctx.piTurn?.requestId ?? req.ticket;
     const known = await conv.commit(tx => tx.submissionByRequest(conv.id, requestId), context);
+    if (known) await conv.commit(async tx => {
+      const doc = await tx.doc(PiRequestDoc, conv.id);
+      if (doc.ticket === req.ticket && !doc.source) doc.source = req.source;
+    }, context);
     let deadline = Date.now() + (this.opts.timeoutMs ?? 300_000);
     if (!known) {
       await conv.waitForIdle(withAbortSignal(ctx.signal, context));
@@ -338,8 +342,8 @@ export class PiBackend implements AgentBackend {
       await conv.commit(async tx => {
         const doc = await tx.doc(PiRequestDoc, conv.id);
         // 崩溃可能发生在绑定与 submit 之间，同票据继续沿用计数、截止时间与原文。
-        if (doc.ticket === req.ticket) { deadline = doc.deadline; return; }
-        Object.assign(doc, { ticket: req.ticket, access: req.access, senderIsOwner: req.senderIsOwner === true, images, content, deadline, calls: {}, imageJobs: [] });
+        if (doc.ticket === req.ticket) { doc.source = req.source; deadline = doc.deadline; return; }
+        Object.assign(doc, { ticket: req.ticket, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true, images, content, deadline, calls: {}, imageJobs: [] });
       }, context);
     } else if (known.status !== "done" && known.status !== "unanswered") {
       const bound = await this.harness.snapshot(PiRequestDoc, conv.id, context);
@@ -372,7 +376,7 @@ export class PiBackend implements AgentBackend {
       const answer = await conv.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
       const text = answer?.model?.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "text").map(c => c.text) : []).join("").trim();
       if (!text) throw new Error("pi 返回了空回复");
-      // 文件清单与 codex 使用同一票据路径，由 reply 阶段统一发送。
+      // 保留回合产物供审计；成功生图须通过 send_message 显式发送。
       const images = await collectNewImages(attachmentDirs(this.opts.dataDir, req.ticket).attachDir, new Set());
       ctx.onEvent({ type: "pi_done", thread: req.threadKey, conversation: conv.id, images: images.length });
       return { text, images };

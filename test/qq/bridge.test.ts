@@ -390,18 +390,18 @@ describe("reply", () => {
 
 describe("send", () => {
   it("sends plain text to group and private", async () => {
-    await expect(bridge.send("group", GROUP, "ops")).resolves.toMatchObject({ message_id: expect.any(String) });
-    await bridge.send("private", OWNER, "ops2");
+    await expect(bridge.sendOps("group", GROUP, "ops")).resolves.toMatchObject({ message_id: expect.any(String) });
+    await bridge.sendOps("private", OWNER, "ops2");
     expect(server.sendCalls().map(c => [c.action, c.body])).toEqual([
       ["send_group_msg", { group_id: Number(GROUP), message: [{ type: "text", data: { text: "ops" } }] }],
       ["send_private_msg", { user_id: Number(OWNER), message: [{ type: "text", data: { text: "ops2" } }] }],
     ]);
-    await expect(bridge.send("private", "0123", "x")).rejects.toThrow();
+    await expect(bridge.sendOps("private", "0123", "x")).rejects.toThrow();
   });
 
   it("send failure is reported as uncertain", async () => {
     server.override = () => ({ http: 503 });
-    await expect(bridge.send("private", OWNER, "x")).rejects.toMatchObject({ uncertain: true });
+    await expect(bridge.sendOps("private", OWNER, "x")).rejects.toMatchObject({ uncertain: true });
   });
 });
 

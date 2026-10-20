@@ -66,7 +66,7 @@ function toError(value: unknown): Error {
 }
 
 function buildMessage(type: ChatType, userId: string, text: string, images: ImageSegment[]): OutSegment[] {
-  const head: OutSegment[] = type === "group"
+  const head: OutSegment[] = type === "group" && userId
     ? [{ type: "at", data: { qq: userId } }, { type: "text", data: { text: "\n" + text } }]
     : [{ type: "text", data: { text } }];
   return [...head, ...images];
@@ -548,6 +548,48 @@ class Bridge extends EventEmitter implements Channel {
     return this.requireStore().listPending(limit, afterSeq);
   }
 
+  get outbox() { return this.requireStore(); }
+
+  async settleTicket(ticket: string): Promise<void> { this.requireStore().settleTicket(ticket); }
+
+  /** 发送前共享票据授权、登录号检查和消息构建；sending 后绝不自动重试。 */
+  async send(key: string, target: { message_type: ChatType; target_id: string }, text: string, imagePaths: string[] = [],
+    opts?: { mention?: string; signal?: AbortSignal }): Promise<ReplyResult> {
+    const store = this.requireStore(), row = store.getOutbox(key);
+    if (!row || row.message_type !== target.message_type || row.target_id !== target.target_id) throw new Error("Outbox 目标不一致");
+    const result = { message_type: row.message_type, target_id: row.target_id };
+    if (row.status === "sent") return { ...result, already_sent: true, message_id: row.message_id ?? "" };
+    if (row.status !== "pending") throw new Error("上一次发送结果不确定（uncertain），不要自动重发");
+    const record = store.get(row.ticket);
+    if (!record || record.status !== "pending") throw new Error("回合票据已结束或不存在");
+    if (target.message_type !== record.message_type || target.target_id !== (record.message_type === "group" ? record.group_id : record.user_id) ||
+      (opts?.mention && opts.mention !== record.user_id)) throw new Error("只能发回本回合会话");
+    if (text !== row.text || JSON.stringify(imagePaths) !== JSON.stringify(row.images) || (opts?.mention ?? null) !== row.mention_user_id) throw new Error("Outbox 内容不一致");
+    validateText(text);
+    const images = prepareImages(imagePaths, this.config.imageRoot);
+    await this.checkReplyIdentity(record, opts?.signal);
+    opts?.signal?.throwIfAborted();
+    if (!store.markOutboxSending(key)) throw new Error("发送状态已改变，结果不确定，不重发");
+    try {
+      const data = await this.client.call(target.message_type === "group" ? "send_group_msg" : "send_private_msg", {
+        [target.message_type === "group" ? "group_id" : "user_id"]: numericId(target.target_id),
+        message: buildMessage(target.message_type, store.getOutbox(key)!.mention_user_id ?? "", text, images),
+      }, { sending: true, timeoutMs: images.length ? Math.max(this.timeoutMs, IMAGE_TIMEOUT_MS) : this.timeoutMs });
+      const messageId = stringField(data, "message_id");
+      if (!messageId) throw new Error("发送缺少 message_id");
+      store.markOutboxSent(key, messageId);
+      return { ...result, already_sent: false, message_id: messageId };
+    } catch (error) { store.markOutboxUncertain(key); throw new OneBotError("QQ 发送结果不确定（uncertain），不会自动重发：" + toError(error).message, true); }
+  }
+
+  private async checkReplyIdentity(record: ReplyTicketRecord, signal?: AbortSignal): Promise<void> {
+    if (!isAllowed(this.config, record)) throw new Error("此发送者已不在允许回复的名单中。");
+    numericId(record.user_id);
+    signal?.throwIfAborted();
+    const login = await this.client.call("get_login_info");
+    if (stringField(login, "user_id") !== record.self_id) throw new Error("NapCat 当前登录账号与收到消息的账号不一致。");
+  }
+
   async reply(ticket: string, text: string, imagePaths: string[] = [], opts?: { signal?: AbortSignal }): Promise<ReplyResult> {
     validateText(text);
     if (!isTicketId(ticket)) throw new Error("回复凭据无效。");
@@ -570,15 +612,11 @@ class Bridge extends EventEmitter implements Channel {
       return { already_sent: true, message_id: record.reply_message_id ?? "", message_type: type, target_id: targetId };
     }
     if (record.status !== "pending") throw new Error("上一次回复结果不确定（previous result uncertain），请查看聊天记录，不要自动重发。");
-    if (!isAllowed(this.config, record)) throw new Error("此发送者已不在允许回复的名单中。");
-
     const target = numericId(targetId);
     numericId(record.user_id);
     const images = prepareImages(imagePaths, this.config.imageRoot);
 
-    signal?.throwIfAborted();
-    const login = await this.client.call("get_login_info");
-    if (stringField(login, "user_id") !== record.self_id) throw new Error("NapCat 当前登录账号与收到消息的账号不一致。");
+    await this.checkReplyIdentity(record, signal);
 
     signal?.throwIfAborted();
     if (!store.markSending(ticket)) throw new Error("票据状态已改变，可能已在其他进程发送，请勿重发。");
@@ -612,7 +650,7 @@ class Bridge extends EventEmitter implements Channel {
     return { file_id };
   }
 
-  async send(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }> {
+  async sendOps(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }> {
     if (type !== "private" && type !== "group") throw new Error("会话类型必须为 private 或 group。");
     const id = numericId(targetId);
     validateText(text);

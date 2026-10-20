@@ -1,3 +1,7 @@
+import { SendService } from "../../src/agent/send-service.js";
+import { sendFixture } from "./send-fixture.js";
+import { FALLBACK_REPLY, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
+import { withOutbox } from "./outbox-stub.js";
 import { log } from "../../src/shared/log.js";
 import type { ModelRef } from "@earendil-works/pi-durable";
 import { readFileAttachments } from "../../src/media/attach.js";
@@ -52,7 +56,7 @@ const reply = (text = "完成") => fauxAssistantMessage(text);
 const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
 const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
 
-async function setup(steps: FauxResponseStep[], opts: { channel?: Pick<Channel, "listChats">; currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
+async function setup(steps: FauxResponseStep[], opts: { sendService?: SendService; channel?: Pick<Channel, "listChats">; currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
   const dir = opts.dir ?? tmp("cs-pi-");
   vi.stubEnv("CODEX_REQUIREMENTS_FILE", await sandboxRequirements(dir));
   const contextUsage = new ContextUsageStore(dir);
@@ -73,7 +77,7 @@ async function setup(steps: FauxResponseStep[], opts: { channel?: Pick<Channel, 
   const http = opts.fetch ?? vi.fn(async () => Response.json({ results: [{ title: "资料", date: "2026-10-18", summary: "摘要", url: "https://example.com", rerank_score: 1 }] })) as typeof fetch;
   const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
   const model = faux.getModel();
-  const pi = await PiBackend.open({ dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
+  const pi = await PiBackend.open({ sendService: opts.sendService, dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
     channel: opts.channel, skillsDir: opts.skillsDir, currentModel: opts.currentModel, mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
     instrumentation: opts.instrumentation, thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
     reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
@@ -763,7 +767,7 @@ describe("pi durable backend", () => {
       reply: async (_ticket: string, text: string) => { replies.push(text); return { message_id: "one", already_sent: false, message_type: "group" as const, target_id: "7" }; },
     };
     const bootTickets = async (backend: typeof s) => {
-      const tasks = createTasks({ getBridge: () => bridge, imageBackend: backend.imageBackend, imagesDir: path.join(s.dir, "images"),
+      const tasks = createTasks({ getBridge: () => withOutbox(bridge), imageBackend: backend.imageBackend, imagesDir: path.join(s.dir, "images"),
         backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: backend.pi } }) });
       const harness = await openHarness({ models: backend.models, extension: createCsAgentExtension(tasks), dbFile: path.join(s.dir, "tickets.sqlite") }, context);
       cleanup.push(() => harness.close(context));
@@ -778,7 +782,7 @@ describe("pi durable backend", () => {
     const restarted = await setup([reply("恢复后的唯一回答")], { disk: true, dir: s.dir });
     const t2 = await bootTickets(restarted);
     await t2.dispatcher.recover(); t2.harness.resume(); await t2.dispatcher.idle();
-    expect(replies).toEqual(["恢复后的唯一回答"]);
+    expect(replies).toEqual([FALLBACK_REPLY]);
     expect((await t2.harness.snapshot(TicketDoc, ticketId, context))?.agentResult).toMatchObject({ ok: true, text: "恢复后的唯一回答" });
     expect(restarted.faux.state.callCount).toBe(1);
   });
@@ -818,7 +822,7 @@ describe("pi durable backend", () => {
     expect(restarted.faux.state.callCount).toBe(1);
   });
 
-  it("AGENT_BACKEND=pi dispatches through durable tasks and attaches images to the original ticket", async () => {
+  it("AGENT_BACKEND=pi 的 done 生图未显式发送时由 lateImages 补发", async () => {
     const s = await setup([call("generate_image", { prompt: "猫" }), reply("# 图片好了 @你")]);
     const cfg = loadConfig({ AGENT_BACKEND: "pi", DATA_DIR: s.dir });
     const replies: { ticket: string; text: string; images?: string[] }[] = [];
@@ -830,7 +834,7 @@ describe("pi durable backend", () => {
       reply: async (ticket: string, text: string, images?: string[]) => { replies.push({ ticket, text, images }); sent = true;
         return { message_id: "reply-id", already_sent: false, message_type: "group" as const, target_id: "7" }; },
     };
-    const tasks = createTasks({ getBridge: () => bridge, imageBackend: s.imageBackend, imagesDir: path.join(s.dir, "images"),
+    const tasks = createTasks({ getBridge: () => withOutbox(bridge), imageBackend: s.imageBackend, imagesDir: path.join(s.dir, "images"),
       backends: createBackendSelector({ defaultBackend: cfg.AGENT_BACKEND, overrides: cfg.backendOverrides, backends: { pi: s.pi } }),
       owner: "1", store: s.store,
     });
@@ -839,80 +843,72 @@ describe("pi durable backend", () => {
     const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: 2, retryDelayMs: 1 });
     await dispatcher.dispatch(inbound("message", "7", "请画只猫"), "dispatch-pi"); await dispatcher.idle();
     expect(replies).toHaveLength(1); expect(replies[0]!.ticket).toBe("dispatch-pi");
-    expect(replies[0]!.text).toBe("# 图片好了 @你"); expect(replies[0]!.images).toHaveLength(1);
+    expect(replies[0]!.text).toBe(IMAGE_SUCCESS_REPLY); expect(replies[0]!.images).toHaveLength(1);
     expect(s.faux.state.callCount).toBe(2);
   });
 });
 
 
-describe("pi 附件工具", () => {
-  it("使用本轮工作区，三文件四图片不消耗历史额度，重复内容只登记一次", async () => {
+describe("pi send_message 工具", () => {
+  it("稳定 callId 传入网关，发送三条后返回限额错误，不消耗历史额度", async () => {
+    const f = sendFixture(), send = vi.spyOn(f.service, "send");
     let seen!: TranscriptContext;
     const s = await setup([
-      ...[0, 1, 2].map(i => call("qq_send_file", { path: i + ".txt" })),
-      call("qq_send_file", { path: "0.txt", name: "duplicate.txt" }),
-      ...[0, 1, 2, 3].map(i => call("qq_send_image", { path: i + ".png" })),
-      call("qq_send_file", { path: "extra.txt" }), call("qq_send_image", { path: "extra.png" }),
-      call("qq_recent"), ctx => { seen = ctx; return reply(); },
-    ]);
+      call("send_message", { text: "附件", images: ["0.png", "1.png", "2.png", "3.png"],
+        files: [{ path: "0.txt" }, { path: "1.txt" }, { path: "2.txt" }] }),
+      call("send_message", { text: "第二条" }), call("send_message", { text: "第三条" }),
+      call("send_message", { text: "第四条" }), call("qq_recent"), ctx => { seen = ctx; return reply("仅留存"); },
+    ], { dir: f.dir, sendService: f.service });
     const work = path.join(s.dir, "pi-work", "group_7"); await fs.mkdir(work, { recursive: true });
-    for (const name of ["0", "1", "2", "3", "extra"]) {
+    for (const name of ["0", "1", "2", "3"]) {
       await fs.writeFile(path.join(work, name + ".txt"), "文件" + name);
       await fs.writeFile(path.join(work, name + ".png"), Buffer.concat([TRANSPARENT_PNG, Buffer.from(name)]));
     }
-    const result = await s.pi.handle(request("pi-attach"), handleContext());
+    await s.pi.handle(request(f.ticket), handleContext());
     const tools = seen.messages.filter(m => m.role === "toolResult");
-    expect(tools.slice(0, 8).every(t => !t.isError)).toBe(true);
-    expect(tools.slice(8, 10).every(t => t.isError)).toBe(true);
-    expect(tools[10]!.isError).not.toBe(true);
-    expect(result.images).toHaveLength(4);
-    const files = await readFileAttachments(attachmentDirs(s.dir, "pi-attach").fileDir);
-    expect(files).toHaveLength(3); expect(files[0]!.originalPath).toBe(path.join(work, "0.txt"));
+    expect(tools.slice(0, 3).every(t => !t.isError)).toBe(true);
+    expect(tools[3]!.isError).toBe(true); expect(tools[4]!.isError).not.toBe(true);
+    expect(send.mock.calls[0]![2]).toEqual({ callId: tools[0]!.toolCallId });
+    expect(f.service.rows(f.ticket)).toHaveLength(3);
+    expect(f.service.rows(f.ticket)[0]!.files.map(x => x.status)).toEqual(["sent", "sent", "sent"]);
     const id = (await s.pi.readThreadIds())["group:7"]!;
     const doc = await s.pi.harness.snapshot(PiRequestDoc, id as ConversationId, context);
     expect(Object.values(doc!.calls).filter(c => c.kind === "history")).toHaveLength(1);
-    expect(s.imageBackend.submit).not.toHaveBeenCalled();
+    expect(doc!.source).toMatchObject({ type: "group", group_id: "7", user_id: "1" });
   });
 
-  it.each(["group:7", "group:8"])("已召回媒体按当前访问范围校验：%s，失败分类为 qq_context", async scope => {
+  it.each(["group:7", "group:8"])("已召回媒体按绑定范围校验：%s", async scope => {
+    const f = sendFixture();
+    const s = await setup([], { dir: f.dir, sendService: f.service });
+    const media = await mediaFixture(s.store, s.dir, scope);
     let seen!: TranscriptContext;
-    const s = await setup([]); const media = await mediaFixture(s.store, s.dir, scope);
-    s.faux.setResponses([call("qq_send_image", { path: media }), call("qq_send_file", { path: media }),
-      call("qq_send_file", { path: path.join(s.dir, "prompts", "agent.md") }), ctx => { seen = ctx; return reply(); }]);
-    const events: import("../../src/shared/trace.js").LiveEvent[] = [];
-    const stop = trace.tap(e => { if (e.ticket === "pi-attach-media") events.push(e); });
-    try { await s.pi.handle(request("pi-attach-media"), handleContext()); } finally { stop(); }
+    s.faux.setResponses([call("send_message", { text: "图", images: [media] }),
+      call("send_message", { text: "文件", files: [{ path: path.join(s.dir, "prompts", "agent.md") }] }),
+      ctx => { seen = ctx; return reply(); }]);
+    await s.pi.handle(request(f.ticket), handleContext());
     const tools = seen.messages.filter(m => m.role === "toolResult");
-    expect(tools.slice(0, 2).every(t => !!t.isError === (scope === "group:8"))).toBe(true);
-    expect(tools[2]!.isError).toBe(true);
-    const failure = events.find(e => e.stage === "tool:qq_send_file" && e.status === "failed")!;
-    expect(failure.detail.failure).toMatchObject({ provider: "qq_context" });
-    expect(events.some(e => e.stage === "memory_recall")).toBe(false);
+    expect(!!tools[0]!.isError).toBe(scope === "group:8");
+    expect(tools[1]!.isError).toBe(true);
   });
 
-  it("通过 durable reply 发送文件与工作区图片，保留原文字回复", async () => {
+  it("真实 durable 回合立即发送正文后上传附件，最终回答不发送、settle 不补兜底", async () => {
+    const f = sendFixture();
     const s = await setup([call("write", { path: "report.txt", content: "报告内容" }),
-      call("qq_send_file", { path: "report.txt", name: "报告.txt" }), call("qq_send_image", { path: "image.png" }), reply("已整理")]);
+      call("send_message", { text: "已整理", files: [{ path: "report.txt", name: "报告.txt" }], images: ["image.png"] }),
+      reply("这段最终回答仅留存")], { dir: f.dir, sendService: f.service });
     const work = path.join(s.dir, "pi-work", "group_7"); await fs.mkdir(work, { recursive: true });
     await fs.writeFile(path.join(work, "image.png"), TRANSPARENT_PNG);
-    let sent = false;
-    const replies: { text: string; images?: string[] }[] = [];
-    const uploadFile = vi.fn(async (_type: string, _target: string, bytes: Buffer, name: string) => {
-      expect(sent).toBe(true); expect(bytes.toString()).toBe("报告内容"); expect(name).toBe("报告.txt"); return { file_id: "pi-file" };
-    });
-    const bridge = { uploadFile, getTicket: async (ticket: string) => ({ ticket_id: ticket, status: sent ? "sent" : "pending", seq: 1 }) as ReplyTicketRecord,
-      listPendingTickets: async () => [], reply: async (_ticket: string, text: string, images?: string[]) => {
-        replies.push({ text, images }); sent = true; return { message_id: "pi-msg", already_sent: false, message_type: "group" as const, target_id: "7" };
-      } };
-    const tasks = createTasks({ getBridge: () => bridge, imageBackend: s.imageBackend, imagesDir: path.join(s.dir, "images"),
-      backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: s.pi } }), owner: "1", store: s.store });
+    const tasks = createTasks({ getBridge: () => f.bridge, sendService: f.service, imageBackend: s.imageBackend,
+      imagesDir: path.join(s.dir, "images"), backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: s.pi } }) });
     const harness = await openHarness({ models: s.models, extension: createCsAgentExtension(tasks), storage: new MemoryStorage() }, context);
     cleanup.push(() => harness.close(context));
-    const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: 1, retryDelayMs: 1 });
-    await dispatcher.dispatch(inbound("file-msg", "7", "整理报告"), "pi-full-attach"); await dispatcher.idle();
-    expect(uploadFile).toHaveBeenCalledExactlyOnceWith("group", "7", Buffer.from("报告内容"), "报告.txt");
-    expect(replies[0]!.text).toBe("已整理"); expect(replies[0]!.images).toHaveLength(1);
-    await expect(fs.stat(attachmentDirs(s.dir, "pi-full-attach").fileDir)).rejects.toThrow();
+    const dispatcher = new Dispatcher({ harness, bridge: f.bridge, tasks, concurrency: 1, retryDelayMs: 1, history: s.store });
+    await dispatcher.dispatch(f.msg, f.ticket);
+    expect(f.call.mock.calls.map(c => c[0])).toEqual(["get_login_info", "send_group_msg", "upload_group_file"]);
+    expect(f.service.rows(f.ticket)).toHaveLength(1);
+    expect(f.service.rows(f.ticket)[0]!.text).toBe("已整理");
+    expect((await f.bridge.getTicket(f.ticket))!.status).toBe("sent");
+    expect((await harness.snapshot(DispatchDoc, context))!.pending).toEqual({});
   });
 });
 
@@ -1165,4 +1161,20 @@ describe("pi 运行时模型设置", () => {
       expect(warn).toHaveBeenCalledWith("pi runtime model unavailable; using startup model", { provider: "missing", model: "gone" });
     } finally { warn.mockRestore(); }
   });
+});
+
+
+it("pi 的不确定发送以非错误工具结果返回，换 call_id 同文重试不再发送", async () => {
+  const f = sendFixture();
+  f.call.mockImplementationOnce(async () => ({ user_id: 2 })).mockRejectedValueOnce(new Error("回执丢失"));
+  let seen!: TranscriptContext;
+  const s = await setup([call("send_message", { text: "可能送达" }), call("send_message", { text: "可能送达" }),
+    ctx => { seen = ctx; return reply(); }], { dir: f.dir, sendService: f.service });
+  await s.pi.handle(request(f.ticket), handleContext());
+  const tools = seen.messages.filter(m => m.role === "toolResult");
+  expect(tools).toHaveLength(2);
+  expect(tools.every(t => !t.isError)).toBe(true);
+  expect(JSON.stringify(tools)).toContain("消息可能已送达，不要重发");
+  expect(f.service.rows(f.ticket)).toHaveLength(1);
+  expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(1);
 });

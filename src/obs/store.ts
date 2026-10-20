@@ -114,11 +114,15 @@ export class ObsStore {
     return this.db.prepare(`SELECT * FROM (${this.ticketQuery}) WHERE ${clauses.join(' AND ')} ORDER BY ts DESC LIMIT 50 OFFSET ?`)
       .all(...args, Math.max(0, Math.floor(filters.page ?? 0)) * 50) as unknown as TicketRow[];
   }
-  throughput(since: number): { total: number; failed: number; error_rate: number } {
-    if (this.degraded) return { total: 0, failed: 0, error_rate: 0 };
+  throughput(since: number): { total: number; failed: number; error_rate: number; no_send_fallback: number; inbound: number; no_send_ratio: number } {
+    if (this.degraded) return { total: 0, failed: 0, error_rate: 0, no_send_fallback: 0, inbound: 0, no_send_ratio: 0 };
     const row = this.db.prepare(`SELECT COUNT(*) total, COALESCE(SUM(status IN ('failed','fallback','timeout')),0) failed FROM (${this.ticketQuery}) WHERE updated>=? AND status<>'processing'`)
       .get(since) as { total: number; failed: number };
-    return { ...row, error_rate: row.total ? row.failed / row.total : 0 };
+    const inbound = this.db.prepare("SELECT COUNT(DISTINCT ticket) n FROM events WHERE stage='admitted' AND ts>=?").get(since) as { n: number };
+    const fallback = this.db.prepare(`SELECT COUNT(DISTINCT ticket) n FROM events WHERE stage='no_send_fallback'
+      AND ticket IN (SELECT ticket FROM events WHERE stage='admitted' AND ts>=?)`).get(since) as { n: number };
+    return { ...row, error_rate: row.total ? row.failed / row.total : 0, inbound: inbound.n, no_send_fallback: fallback.n,
+      no_send_ratio: inbound.n ? fallback.n / inbound.n : 0 };
   }
   metric(ts: number, name: string, labels: object, value: number): void {
     if (!this.degraded && Number.isFinite(value)) this.db.prepare('INSERT INTO metrics VALUES(?,?,?,?)').run(ts, name, JSON.stringify(redact(labels)), value);

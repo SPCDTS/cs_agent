@@ -1,3 +1,4 @@
+import { withOutbox } from "../agent/outbox-stub.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -42,7 +43,7 @@ async function rig(){
     await o?.onAcquired?.();o?.onJsonEvent?.({type:'item.started',item:{id:'call1',type:'mcp_tool_call',tool:'qq_recent',server:'qq_context',arguments:{limit:2}}});
     o?.onJsonEvent?.({type:'item.completed',item:{id:'call1',type:'mcp_tool_call',tool:'qq_recent',status:'completed',duration_ms:12}});return '## 假回答';
   }}});
-  const tasks=createTasks({getBridge:()=>bridge,imageBackend:image,imagesDir:path.join(dir,'images'),ticketsDir:path.join(dir,'tickets'),
+  const tasks=createTasks({getBridge:()=>withOutbox(bridge),imageBackend:image,imagesDir:path.join(dir,'images'),ticketsDir:path.join(dir,'tickets'),
     backends:createBackendSelector({defaultBackend:'codex',overrides:{},backends:{codex,pi:new PiBackendStub()}}),replyRetryDelayMs:1});
   const harness=await openHarness({models,extension:createCsAgentExtension(tasks),dbFile:path.join(dir,'agent.sqlite')},BACKGROUND_CONTEXT);clean.push(()=>harness.close(BACKGROUND_CONTEXT));
   const dispatcher=new Dispatcher({harness,bridge,tasks,concurrency:2,retryDelayMs:1});
@@ -54,7 +55,7 @@ it('前缀图片票据和 Codex agent 票据通过真实 dispatcher/任务，记
   const stages=(t:string)=>r.store.events(t).map(e=>e.stage).filter((s,i,a)=>i===0||a[i-1]!==s);
   // received 由真实桥接层记录；这里直接调用派发器，从 admitted 开始。
   expect(stages('image')).toEqual(['admitted','routed','dispatched','phase:submit','image:submit','phase:submit','phase:collect','image:collect','phase:collect','phase:reply','reply_sent','phase:reply','reply_sent']);
-  expect(stages('agent')).toEqual(['admitted','routed','dispatched','phase:handle','backend:codex','thread_wait','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','postprocess','phase:reply','reply','reply_sent','phase:reply','reply_sent']);
+  expect(stages('agent')).toEqual(['admitted','routed','dispatched','phase:handle','backend:codex','thread_wait','model_turn','tool:qq_recent','model_turn','backend:codex','phase:handle','late_images','phase:settle','no_send_fallback','send_message','final_answer','phase:settle','reply_sent']);
   expect(r.store.events('image').find(e=>e.stage==='image:submit'&&e.status==='ok')?.detail_json).toContain('prompt-fake');
   expect(r.store.events('agent').find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')?.duration_ms).toBe(12);
   // 派发设置快照随 admitted 入观测，票据页据此显示后端 · 档位。
@@ -62,9 +63,10 @@ it('前缀图片票据和 Codex agent 票据通过真实 dispatcher/任务，记
   expect(r.store.tickets().every(t=>t.status==='sent')).toBe(true);
   expect(complete).not.toHaveBeenCalled();expect(r.faux.state.callCount).toBe(0);
   const events=r.store.events('agent');
+  expect(events.filter(e=>e.stage==='send_message').map(e=>JSON.parse(e.detail_json).already_sent)).toEqual([false]);
   expect(events.filter(e=>e.stage==='model_turn')).toHaveLength(2);
   expect(events.some(e=>e.stage==='fallback'||JSON.parse(e.detail_json).operation==='relay')).toBe(false);
-  expect(events.find(e=>e.stage==='postprocess'&&JSON.parse(e.detail_json).sent_text)?.detail_json).toContain('假回答');
+  expect(events.find(e=>e.stage==='final_answer'&&JSON.parse(e.detail_json).text)?.detail_json).toContain('假回答');
   expect(r.dispatcher.status()).toMatchObject({active:0,waiting:0,scopes:{},tickets:[]});
 });
 it('业务生图失败但错误回复已送出时，票据仍统计为失败',async()=>{
@@ -119,7 +121,7 @@ it('pi 每轮模型与工具 hook 记录用量、输入和结果，不需真实 
 
 it('真实 pi-durable 工具抛错 diagnostics 触发结构化鉴权告警，正文匹配不触发且告警限频',async()=>{
   const r=await rig();const send=vi.fn(async()=>({message_id:'alert'}));
-  const alerts=startAlerts({enabled:true,owner:'1',trace,bridge:{status:()=>({ws_connected:true,disconnect_count:0,self_id:null,last_event_at:null}),send}});clean.push(()=>alerts.stop());
+  const alerts=startAlerts({enabled:true,owner:'1',trace,bridge:{status:()=>({ws_connected:true,disconnect_count:0,self_id:null,last_event_at:null}),sendOps:send}});clean.push(()=>alerts.stop());
   trace.event('noise','tool:web_search',{status:'failed',detail:{error:'HTTP 401'}});expect(send).not.toHaveBeenCalled();
   const web=new DeepSeekWeb();web.search=async()=>{throw Object.assign(new Error('HTTP 401 fake provider'),{status:401});};
   r.faux.setResponses([fauxAssistantMessage(fauxToolCall('web_search',{query:'test'}),{stopReason:'toolUse'}),fauxAssistantMessage('检索失败')]);

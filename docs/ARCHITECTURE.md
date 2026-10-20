@@ -37,17 +37,17 @@ QQ 用户 ──NapCat(OneBot v11)──► QQBridge(ws 收 / http 发)
                      pi-durable Harness（SQLite /data/agent.sqlite）：每条消息一个 ownerless 会话 + 一个 durable 任务
                  ┌───────────────────┴──────────────────────────────┐
         route=image / image_usage                              route=agent
-        任务 cs.image：generate → reply                        任务 cs.agent：handle → postprocess → reply
+        任务 cs.image：generate → reply                        任务 cs.agent：handle → lateImages → settle
         generate：comfy-mcp(stdio) 或 HTTP                     handle：AgentBackend（AGENT_BACKEND / OVERRIDES）
           COMFYUI_URL 经 127.0.0.1 loopback 转发                  codex：codex exec [resume] 固定线程 owner/shared
           → /data/images/<ticket>/                                  -c QQ_ACCESS / QQ_ATTACH_DIR / QQ_FILE_DIR / QQ_WORKDIR
-        reply：固定模板（成功 / 服务不可用 / 超时 /              MCP：qq_context（含附件工具）、browser（image_gen 默认关闭）
-               内容被拒 / 其他）+ 图                              回合后收集新图片（≤4，魔数校验）
+        reply：固定模板（成功 / 服务不可用 / 超时 /              MCP：qq_context（只读）、im（发送）、browser
+               内容被拒 / 其他）+ 图                              send_message 即时发文字、图片与文件
                                                                   pi：进程内 pi-durable（保留 generate_image）
-                                                                postprocess：原文照发，只做 4000 字发送保护
+                                                                settle：迟到图片 #late；零发送才兜底 #fallback
                  └───────────────────┬──────────────────────────────┘
                                      ▼
-                  QQBridge.reply(ticket, text, images)（票据幂等：sent 不重发，uncertain 不自动重试）
+                  图片路由 reply(ticket)；agent 路由 send(outboxKey)（sent 重放，uncertain 不重发）
                                      ▼
                               QQ 原私聊 / 原群(@原发送者)
 ```
@@ -93,7 +93,7 @@ cs_agent/
 │  │  ├─ extension.ts            defineExtension("cs-agent")：注册两个 durable 任务（v3 无模型工具）
 │  │  ├─ config.ts               组合时解析 owner、IMAGE_PREFIXES 与后端覆盖表
 │  │  ├─ router.ts               规则分流（IMAGE_PREFIXES）
-│  │  ├─ tasks.ts                defineTask：cs.image（generate → reply）、cs.agent（handle → postprocess → reply）
+│  │  ├─ tasks.ts                defineTask：cs.image（generate → reply）、cs.agent（handle → lateImages → settle）
 │  │  ├─ backends/               纯请求契约、后端选择、Codex/Pi 实现与 Pi 只读会话源契约
 │  │  ├─ codex/                  runner、prompt、trace、context-usage、model-catalog、workspace、oauth
 │  │  │  ├─ runner.ts            owner/会话域线程、互斥队列、JSONL、线程持久化与 AGENTS.md
@@ -165,9 +165,10 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 - codex 的模型提供者默认改为宿主机 magpie，受管配置使用 `env_key="CODEX_MAGPIE_KEY"`、`wire_api="responses"`、`supports_websockets=false` 与 `/codex/models` 目录。MCP 注册、附件路径与受管 AGENTS.md 不受提供者开关影响；MCP 不新增 key 透传，基础配置允许空 key，只有 CodexRunner 启动时检查 magpie key。设置页展示只读提供者与 URL。
 
 - 独立生图任务仍只由规则分流触发；pi 的 `generate_image` 保留。codex 的 `image_gen` MCP 由 `CODEX_IMAGE_GEN=off|on` 控制，默认 off；on 恢复旧注册与注入。受管 AGENTS.md 与新播种的 codex 提示词删除专用生图段，只保留聊天图片召回与附件用法。
-- `qq_send_image(path)`、`qq_send_file(path, name?)` 只能登记本轮工作区普通文件或当前访问范围内已召回媒体，拒绝软链接、目录及其他来源。媒体归属由 ContextStore 回调注入，media 层无向上依赖。
-- 图片复制到 `images/<ticket>/attach-<n>/`，沿用回合收集与 QQ 图片段；文件复制到 `files/<ticket>/` 并原子写 manifest，按 sha256 去重。限制默认 4 张图片、3 个文件、单文件 20 MiB，文件名与扩展名按附件配置校验。
-- 文字 markSent 后逐文件持久化 `pending → sending → sent|uncertain`。上传使用 base64，成功保存 file_id；恢复只发送 pending，遗留 sending 转 uncertain。`replyCompleted` 防止派发器在文字发送后提前清理；全部处理完成后记录 reply.files 并删除文件副本。
+- 统一工具 `send_message({ text, images?, files? })` 立即发回本回合会话，文件项为 `{ path, name? }`；模型不能指定目标。pi 在进程内调用 agent 层 SendService，codex 的独立 `im` MCP 通过每轮令牌访问 loopback `POST /send`。令牌绑定票据、来源及工作区，结束即撤销。
+- ReplyStore 的 Outbox 按票据和序号持久化正文、图片及文件状态：pi 按稳定 call_id 重放，codex 按本次 exec 的第 n 次有效调用映射。模型每回合最多 3 条，系统 #late / #fallback 独立计额；相同正文哈希复用已发或不确定行，不确定结果不向模型报工具错误；群聊仅第一条 @ 提问者。图片、文件沿用 media/attach.ts 的来源与大小校验，副本保存在 `images/<ticket>/outbox/`。
+- 正文 sent 后逐个上传文件，分别持久化 `pending → sending → sent|uncertain`；sending/uncertain 永不重发。每条成功消息立即写一条上下文机器人行，可按 message_id 引用。
+- agent 阶段为 handle → lateImages → settle；迟到图片使用 #late，零发送成功回合用 #fallback 并记录 no_send_fallback，零发送失败回合用对应失败提示。最终回答只保存到 TicketDoc.agentResult 并记录 final_answer。旧 postprocess/reply 检查点映射到 settle，尚未发出的旧草稿/答案及图片通过 #fallback 保留；已发送的旧附件继续恢复。派发普通尝试最多 3 次，确有未完成文件回复时总尝试最多 6 次；持续恢复故障不阻塞同 scope 的后续消息。结算与副本清理均进入票据串行队列，终态清理 Outbox 副本，仍有 pending/sending 文件的消息目录保留。cs.image 不变。
 
 ### 5.7 模型凭据
 - `CODEX_PROVIDER=magpie|openai` 默认 magpie；`CODEX_MAGPIE_URL` 默认 `http://host.docker.internal:3425/v1`。runner 对目录查询及 exec/resume 注入 `CODEX_MAGPIE_KEY`，主进程注册脱敏，key 不落盘；magpie 不依赖容器 ChatGPT 凭据，直连仍保留原有 OAuth 行为。默认模型为 `codex/gpt-6.1-sol`，上下文、设置校验与面板均按完整目录 slug 精确匹配，离线缓存也不跨前缀匹配。Codex 0.163 的短名会落到默认模型元数据，丢失目录窗口与能力。无效 `codexModel` 保留原值并告警，新回合使用有效的 `CODEX_MODEL`，环境默认也无效则用内置默认；目录不可用时保留配置值。
@@ -238,7 +239,7 @@ LOG_LEVEL=info
 
 agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图，收到 prompt_id 立即更新，完整收取后标 done；lateImages 接管所有非 done 条目，按原前缀对账，绝不重新 submit。每个 call 目录的 image-files.json 保存预期文件名和 downloaded 状态；HTTP 逐张临时写入后 rename，恢复只下载缺失文件；MCP fetch_outputs 写入按 prompt_id 隔离的隐藏暂存目录，完整返回后才逐张原子发布。只有所有预期文件验证通过才完成任务。清单使用 lstat、64 KiB/8 任务上限和严格字段校验，坏清单重命名为 .bad-<时间戳>，正文保留并附上附件失败说明。未确认远端终态的参考图保留，不因票据回复或收取超时而提前覆盖。
 
-`cs.agent` 新增 `handle → lateImages → postprocess → reply` 检查点；逐任务按保存的参数复用 collect/reconcile，unknown 按前缀对账、不重新提交，超时用与 cs.image 相同的延期策略（IMAGE_COLLECT_EXTENSIONS 默认 2）。TicketDoc 保存期限、延期次数、对账步骤和最终结果；结果先落盘、清单后删除，恢复不重复收取已完成任务。晚到图片显式合并进回复，失败说明在后处理之后追加“有一张图生成超时未能发送”，参考图保留到最终收取结束。
+`cs.agent` 新增 `handle → lateImages → settle` 检查点；逐任务按保存的参数复用 collect/reconcile，unknown 按前缀对账、不重新提交，超时用与 cs.image 相同的延期策略（IMAGE_COLLECT_EXTENSIONS 默认 2）。TicketDoc 保存期限、延期次数、对账步骤和最终结果；结果先落盘、清单后删除，恢复不重复收取已完成任务。晚到图片由 #late 单独发送，收取失败提示也放入这条消息，参考图保留到最终收取结束。
 
 生图 v2 审查后的执行边界：
 
@@ -287,7 +288,7 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | 项 | 实际做法 | 原因 |
 |---|---|---|
 | 分流 | `router.ts` 规则分流，取代意图模型；输入是 bridge 计算的 `InboundMessage.route_text`（`policy.ts` 跳过开头真实的 at / reply 段后渲染；`text` 不变，供历史使用），路由器只去首尾空白再逐字匹配前缀，用户亲手输入的 `[at]` 字样不做特殊处理。票据表 `source_route_text` 列保存它供崩溃对账；旧行 / v2 票据文档没有时才按旧规则去掉渲染出的占位（`legacyRouteText`） | 设计稿 §4.1；评审 R10：文本占位与用户输入无法区分 |
-| durable 任务 | `tasks.ts`：`defineTask` 定义 `cs.image`（submit → collect → reply；旧任务停在 `generate` 时按 submit 处理）与 `cs.agent`（handle → postprocess → reply），经扩展的 `tasks` 注册；派发器轮到某票据时 `tx.createTask(…, {ownership:{kind:"conversation"}, conversationId})`，任务 id 记入 DispatchDoc，`harness.waitForTask` 等待 | 设计稿 §4.2 / §4.3 |
+| durable 任务 | `tasks.ts`：`defineTask` 定义 `cs.image`（submit → collect → reply；旧任务停在 `generate` 时按 submit 处理）与 `cs.agent`（handle → lateImages → settle），经扩展的 `tasks` 注册；派发器轮到某票据时 `tx.createTask(…, {ownership:{kind:"conversation"}, conversationId})`，任务 id 记入 DispatchDoc，`harness.waitForTask` 等待 | 设计稿 §4.2 / §4.3 |
 | 检查点 | 每阶段把结果（`imageJob` / `imageResult` / `codexTurn` / `agentResult` / `replyDraft` / `replyText`）写进 TicketDoc，并在同一 `runtime.commit` 里返回下一阶段的检查点；新任务（上一个任务失败后重跑）也先读 TicketDoc 跳过已完成阶段；进程关闭时阶段抛出而不提交 | 崩溃不重复生图 / 不重复发送 |
 | 生图提交与收取 | 提交前保存 `submitIntent={attempt,filenamePrefix}`，SaveImage 使用 `cs-<ticket前12位hex>-<attempt>`；HTTP 与 MCP 的自定义 `run_workflow` 均修改图，默认 `generate_image` 不支持前缀时改走可控图。提交后保存 `imageJob` 并进入 collect。缺失 prompt_id 或 unknown 时统一经 HTTP 查 `/history`、`/queue` 认领任务，否则按前缀探测 `/view` 的 `_00001_.png` 至 count（默认 1、最多 4）；`imageReconciliation` 记录每步，明确无输出才以新 attempt 重交，总上限 2 次。查询失败不重交；有效本地图片仍可复用 | 评审 F1 / F2：覆盖提交响应丢失与历史被清理的窗口 |
 | codex 回合幂等 | `-o` 固定写 `${DATA_DIR}/tickets/<ticket>/codex-last.txt`；取得线程锁、复查 signal 后，通过 `onAcquired` 在 spawn 前持久化 `codexTurn={outFile,attempts}`，排队不计次数。已有输出直接复用；有标记无输出最多再问一次。reply 与派发终态对账共用幂等 `cleanupTicketWorkdir`，覆盖 sent / sending / uncertain / failed / given-up，图片目录不动 | 评审 R1、F5 / F6：避免排队耗尽次数与崩溃遗留目录 |
@@ -299,12 +300,12 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | v2 遗留 | 无 `taskId` 的旧索引条目：先 `conversation.abort()` 中止旧模型会话，再按原文重新分流建任务 | 升级时在途消息 |
 | 后端 | `backends/types.ts`（`AgentBackend`，结果可带 `images`）、`select.ts`（`AGENT_BACKEND` / `AGENT_BACKEND_OVERRIDES`，`PiBackendStub` 抛 `pi backend not implemented yet (group 3)`）、`codex.ts`（适配 `CodexRunner`） | 设计稿 §4.3 / §4.4 |
 | codex 适配 | `-c model_reasoning_effort`（`CODEX_REASONING_EFFORT`）、`-c mcp_servers.qq_context.env.QQ_ACCESS`、`-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="<DATA_DIR>/images/<ticket>"`（路径只允许 `[A-Za-z0-9._/-]`、不含 `..`）；回合前记下票据目录已有文件，回合后取新增的普通文件（不跟随软链接），按 QQBridge 口径校验大小与魔数，按 mtime 取前 4 张 | 设计稿 §4.4 |
-| image_gen MCP | `src/mcp/image-gen.ts`（stdio，低层 `Server`）：工具 `generate_image(prompt)`，非只读注解；输出目录只来自 `IMAGE_TICKET_DIR`，必须是 `${DATA_DIR}/images/` 的直接子目录（realpath 复核），否则拒绝；每进程（每回合）≤4 次；每次调用输出到新的子目录 `call-<n>/`（n = 已有 call 目录数 + 1，同名输出不会互相覆盖），返回 `call-<n>/<文件名>`（评审 R9）；后端配置用 `loadConfig` 解析透传的 `COMFY_*`，mcp 模式下非 loopback 的 `COMFYUI_URL` 改走 `http://127.0.0.1:COMFY_LOOPBACK_PORT`（agent 主进程的 loopback 转发；codex 及其 MCP 子进程与主进程同一网络命名空间） | 复用同一生图实现 |
+| image_gen MCP | `src/mcp/image-gen.ts`（stdio，低层 `Server`）：工具 `generate_image(prompt)`，非只读注解；输出目录只来自 `IMAGE_TICKET_DIR`，必须是 `${DATA_DIR}/images/` 的直接子目录（realpath 复核），否则拒绝；每进程（每回合）≤4 次；每次调用输出到新的子目录 `call-<n>/`（n = 已有 call 目录数 + 1，同名输出不会互相覆盖），返回可传给 send_message 的图片绝对路径；后端配置用 `loadConfig` 解析透传的 `COMFY_*`，mcp 模式下非 loopback 的 `COMFYUI_URL` 改走 `http://127.0.0.1:COMFY_LOOPBACK_PORT`（agent 主进程的 loopback 转发；codex 及其 MCP 子进程与主进程同一网络命名空间） | 复用同一生图实现 |
 | 受管 config.toml | 新增 `[mcp_servers.image_gen]`（`tool_timeout_sec = COMFY_TIMEOUT_SEC + 30`，审批模式同 `CODEX_MCP_APPROVAL_MODE`）与 `[mcp_servers.image_gen.env]`（`DATA_DIR` + 已设置的 `COMFY_MODE`/`COMFYUI_URL`/`COMFY_MCP_BIN`/`COMFY_BIN`/`COMFY_CHECKPOINT`/`COMFY_WORKFLOW_FILE`/`COMFY_PROMPT_NODE`/`COMFY_TIMEOUT_SEC`/`COMFY_LOOPBACK_PORT`/`LOG_LEVEL`；含引号、反斜杠或非可打印字符的值告警跳过） | codex 给 MCP 子进程的环境只有少量默认变量 + env 表 |
-| AGENTS.md | 模板 v4：新增"生图（image_gen）"一条（图片随回复自动发送，回复只需一句说明）；`/data/prompts` 说明改为 system.md 已弃用 | 设计稿 §4.4 |
-| 后处理 | `reply-postprocess.ts`：模型原文照发，不再做 Markdown/`@` 转换（2026-10-19 移除，格式由提示词约束）。只保留发送保护 `fitText`：孤立代理项替换为 U+FFFD（`toWellFormed`，评审 R11）、去首尾空白、空文本占位、≤4000 UTF-16 截断且不拆代理对。不调用模型 | 设计稿 §4.3 |
+| AGENTS.md | 受管规则要求 send_message；普通最终输出不送达；用户可编辑提示词不承担这条规则 | 设计稿 §4.4 |
+| 结算 | `tasks.ts` 的 settle 保留 agentResult，记录 final_answer；零发送时按结果兜底，文本超限由 send_message 返回错误，不截断 | 定时任务设计 §3.4 |
 | 模型工具退场 | 删除 `generate_image` / `ask_codex` / `reply_qq` 工具、`claimBusinessCall` 与意图系统提示；`CodexRunner` 移至 `src/agent/codex-runner.ts`，生图实现移至 `src/agent/image-gen.ts` | 设计稿 §7 第 2 组 |
-| 消息库机器人行 | 生图：`completeReply(action=generate_image, detail=prompt)`；codex 后端：`ask_codex`（detail = `CODEX_REASONING_EFFORT`）；用法提示与 pi：`reply`；业务失败或兜底记 `失败` | 统一上下文 §2.4 |
+| 消息库机器人行 | 生图保留 `recordPending/completeReply`；agent 每条 sent Outbox 消息独立写入真实 message_id 与正文，包含 #late / #fallback | 统一发送设计 §3.6 |
 | 新增环境变量 | `IMAGE_PREFIXES`、`AGENT_BACKEND`、`AGENT_BACKEND_OVERRIDES` | 见 `.env.example` |
 
 已实测：容器内 `codex exec`（OAuth + workspace-write 沙箱）正常；容器内经 mcp 与 http 两条路径均生成真实 PNG（约 10–17 s）。
@@ -362,11 +363,11 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | 层 | 实际事件与职责 |
 |---|---|
 | dispatcher | received、admitted、routed、dispatched、recovered；按业务结果和 bridge 票据终态发 reply_sent / failed / fallback，terminal=true 标记终态；错误回复成功发出仍按业务失败统计 |
-| durable tasks | phase:submit / generate / collect / handle / reply，late_images、postprocess；每次执行或恢复记录开始与结束，checkpoint 含尝试次数 |
+| durable tasks | phase:submit / generate / collect / handle / reply，late_images、phase:settle；每次执行或恢复记录开始与结束，checkpoint 含尝试次数 |
 | backend | backend:codex / pi 包围整个 handle；Codex model_turn 含线程键、effort、回复摘要与 model_ms，onAcquired 前等待另记 thread_wait_ms；backend span 保留总耗时。mcp_tool_call 映射 tool:&lt;name&gt;；内置 command_execution / web_search 每轮合计≤100 条，只提取命令/查询前 200 字、退出码、耗时，不存原始 JSONL |
 | pi hook | GenerationTask 的每次请求与响应记录 model_turn 和 usage；ToolTask 的 before/after 记录 tool:&lt;name&gt;；CompactionTask 记录 compaction 尝试 |
 | 图片 | 公共接口包装记录 image:submit / image:collect；对账归 image:collect(operation=reconcile)，查询步骤发 recovered，包含 prompt_id；三条生图入口共用 |
-| 回复 | postprocess 原文照发（仅长度保护）并保留原始与最终文字摘要；reply_sent 含 message_id、图片数、truncated、already_sent；后处理不产生模型调用或 fallback |
+| 回复 | send_message 含序号、message_id、图片数、文件状态与 already_sent；final_answer 留存最终回答，no_send_fallback 标记成功但零发送的回合 |
 
 Metrics 每 60 秒从持久化游标读取新事件（包括主进程摄取的 MCP 事件），内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样 dispatcher 队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理普通事件与指标；管理事件仅按 OBS_ADMIN_RETENTION_DAYS（默认 365 天）清理。DeepSeek 用量由 pi、衰老共用 usageFields / usageCost 转换，包含 cacheRead 与 cacheWrite；只使用真实 usage，不发额外模型请求。
 

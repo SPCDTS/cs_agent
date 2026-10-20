@@ -36,7 +36,8 @@
 ### 3.1 行为
 
 - 模型通过 `send_message({ text, images?, files? })` 向**本回合会话**发一条消息：立即发送，返回 `message_id`。
-- 每次调用就是一条 QQ 消息；本回合会话为群时，**本回合第一条**消息 @ 提问者（与现在一致），之后的不 @。
+- 新调用的正文哈希若与本票据已有 sent / sending / uncertain 行相同，返回已有结果，不再建行或发送。不确定结果以非错误工具结果提示“消息可能已送达，不要重发”；已 sent 但缺回执时明确返回状态和空 message_id。
+- 每次未被去重的有效调用就是一条 QQ 消息；本回合会话为群时，**本回合第一条**消息 @ 提问者（与现在一致），之后的不 @。
 - 校验失败（空文本、超过 4000 字、图片 >4、文件 >3 或 >20 MiB、路径不在允许范围、本回合已达 3 条）直接返回错误文本给模型，不截断、不改写。路径规则沿用 `media/attach.ts`。
 - 图片随该条消息发出；文件在该条文字发出后用 `uploadFile` 单独发送（与现在的附件顺序一致），状态各自记录。
 - `qq_send_image` / `qq_send_file` 删除（不做兼容），由 `send_message` 的 `images` / `files` 取代。
@@ -62,33 +63,36 @@ Channel 接口新增 `send(key, target, text, images, { mention?, signal })`：
 - 否则 markSending → 发送 → markSent，失败 markUncertain。与 `reply()` 共用 `buildMessage`、登录号校验、允许名单校验。
 - 现有 `Channel.send(type, targetId, text)`（运维用、非幂等）改名或删除，避免和新接口混淆。
 
+系统补发的 `#late` / `#fallback` 独立记入 Outbox，不占模型的 3 条额度，也不受这个上限限制；`#fallback` 仍只在没有任何已发送或结果不确定的消息时出现。
+
 入站票据的含义调整：回合结束且（Outbox 里本票据有任何 sent / sending / uncertain 行，或兜底已发）时，票据置 sent，派发器照常把它当终态。
 
 ### 3.3 序号与重跑
 
 - pi：工具调用带稳定的 `toolCallId`。网关按 `(ticket, call_id)` 查 Outbox：已有行 → 返回该行的结果（已发则返回原回执），否则分配 `ordinal = 本票据最大序号 + 1` 并插入。崩溃后 pi 重放同一调用时拿到同一行。
-- codex：MCP 调用 id 不稳定。网关按"本回合尝试内的第 n 次调用"分配序号（计数器按 `ticket + 回合尝试号` 存在内存）：回合重跑时第 n 次调用映射到已有的 `#n` 行，已发过就直接返回原回执。残余风险：重跑时第 n 次的措辞可能与已发出的不同，以已发出的为准。
-- 每回合上限按 Outbox 里本票据的行数计，重跑不额外消耗额度。
+- codex：MCP 调用 id 不稳定。网关按"本回合尝试内的第 n 次调用"分配序号（计数器按 `ticket + 回合尝试号` 存在内存）：回合重跑时第 n 次调用映射到已有的 `#n` 行，已发过就直接返回原回执。重跑时第 n 次的正文哈希若与已有行不同，返回 already_sent 和原文，并说明“新内容未发送，如需发送请再调用一次”；下一次调用按第 n+1 次映射。
+- 每回合 3 条上限仅按 Outbox 里本票据的模型 `send_message` 行数计，重跑不额外消耗额度；系统 `#late` / `#fallback` 不计入且不受此上限限制。数字键 `#n` 对应模型调用顺序，`ordinal` 记录包括系统消息在内的写入顺序。
 
 ### 3.4 回合结束规则（agent 任务）
 
 `cs.agent` 的阶段改为：handle → lateImages → **settle**（取代 postprocess + reply）：
-1. 迟到图片（MCP 超时后才完成的生图）：有完成的图片时，以 `#late` 发一条（文字用 `IMAGE_SUCCESS_REPLY`），附件收取失败或生图超时的提示也放在这条里。
+1. 迟到图片（包含已 done 但可能未将路径交给模型的任务）：保留与已发图片哈希不重复的完成图片，以 `#late` 发一条（文字用 `IMAGE_SUCCESS_REPLY`），附件收取失败或生图超时的提示也放在这条里。
 2. 本票据 Outbox 中有任何 sent / sending / uncertain 行 → 票据 sent，任务完成。
 3. 一条都没有：后端成功 → 发 `FALLBACK_REPLY`（`#fallback`）并记 `no_send_fallback`；后端超时 / 失败 → 发 `AGENT_FAILURE_REPLIES[failure]`（`#fallback`）。
-4. 最终回答写入 `TicketDoc.agentResult` 与 trace（`postprocess` 事件改为 `final_answer`，`detail: { text, sent_messages }`），不发送。
+4. 升级兼容：旧 postprocess/reply 检查点，或已有 replyDraft 且无 Outbox 行时，以 `#fallback` 发送 `replyDraft ?? fitReply(agentResult.text)` 及最多 4 张 agentResult.images，避免丢失旧回合答案。票据已非 pending 时，settle 跳过系统补发，仅恢复附件与终态。
+5. 最终回答写入 `TicketDoc.agentResult` 与 trace（`postprocess` 事件改为 `final_answer`，`detail: { text, sent_messages }`），不发送。
 
 ### 3.5 工具暴露
 
 - 网关实现：`agent` 层新模块（如 `src/agent/send-service.ts`），持有 Outbox、限额、序号逻辑；pi 工具与 codex 端点都调它。
 - pi：进程内工具 `send_message`，从 `PiRequestDoc` 取票据与来源，`replay: "safe"`（幂等由 Outbox 保证）。
-- codex：新 MCP server `im`（`src/mcp/im-server.ts` + entrypoint 受管配置 `[mcp_servers.im]`），工具 `send_message`；经回环服务新端点 `POST /send` 调主进程，用每轮令牌鉴权（令牌绑定票据与来源，模型不能指定目标）。令牌由 runner 每轮注入（同 `QQ_RECALL_TOKEN` 的方式）。
+- codex：新 MCP server `im`（`src/mcp/im-server.ts` + entrypoint 受管配置 `[mcp_servers.im]`），工具 `send_message`；经回环服务新端点 `POST /send` 调主进程，用每轮令牌鉴权（令牌绑定票据与来源，模型不能指定目标）。runner 将 IM_TOKEN 与 QQ_RECALL_TOKEN 写入本轮 Codex 子进程环境，受管配置分别通过 env_vars 转发，令牌不得进入 argv。
 - 提示词：在受管部分（codex `renderManagedAgentsMd`、pi 的 `cs-pi` 段）写明"回复用户必须调用 send_message；直接输出的文字不会发给用户；一条消息说完就不要再发"，用户可编辑的 codex.md / agent.md 不承担这条规则。codex.md 默认模板与 codex runner 里关于 `qq_send_image` / `qq_send_file` 的说明改为 `send_message`。
 
 ### 3.6 上下文与观测
 
 - 每条发出的消息写入消息库的机器人行（现在 `recordPending` / `completeReply` 只记一条，改为每条 `send_message` 一行，`#fallback` 也记），`[引用]` 查找能命中这些 message_id。
-- trace：`send_message`（ordinal、message_id、images、files、already_sent）、`no_send_fallback`、`final_answer`。
+- trace：`send_message`（ordinal、message_id、images、files、already_sent）只记录首次发送尝试，重放与对账不重复计数；`no_send_fallback` 仅在成功但零发送的新回合首次预留 #fallback 时记录；最终回答记录 `final_answer`。
 - 面板首页显示近 24 小时 `no_send_fallback` 占入站回合的比例。
 
 ### 3.7 验收

@@ -183,10 +183,10 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     expect(r.isError).toBeFalsy();
     const files = JSON.parse(textOf(r)).files as string[];
     expect(files).toHaveLength(1);
-    expect(files[0]).toMatch(/^call-1\/[^/]+\.png$/);
+    expect(path.dirname(files[0]!)).toBe(path.join(ticketDir, "call-1"));
     expect(readdirSync(ticketDir)).toEqual(["call-1", "obs-events.jsonl", "pending-jobs.json"]);
     expect(JSON.parse(readFileSync(path.join(ticketDir, "pending-jobs.json"), "utf8"))[0].status).toBe("done");
-    expect(readFileSync(path.join(ticketDir, files[0]!)).subarray(0, 8)).toEqual(PNG.subarray(0, 8));
+    expect(readFileSync(files[0]!).subarray(0, 8)).toEqual(PNG.subarray(0, 8));
     expect((prompts[before] as Record<string, { inputs: { text?: string } }>)["4"]!.inputs.text).toBe("一只橘猫");
   });
 
@@ -273,12 +273,12 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
     const { client, dispose } = await connect(dir, ticketDir);
     try {
       const r = await client.callTool({ name: "generate_image", arguments: { prompt: "a dog" } });
-      expect(JSON.parse(textOf(r)).files).toEqual(["call-1/ComfyUI_00001_.png"]);
+      expect(JSON.parse(textOf(r)).files).toEqual([path.join(ticketDir, "call-1", "ComfyUI_00001_.png")]);
       // 假 comfy-mcp 每次都输出同名 ComfyUI_00001_.png：分目录后每次都是新文件
       for (let i = 2; i <= MAX_CALLS; i++) {
         const again = await client.callTool({ name: "generate_image", arguments: { prompt: "again" } });
         expect(again.isError).toBeFalsy();
-        expect(JSON.parse(textOf(again)).files).toEqual([`call-${i}/ComfyUI_00001_.png`]);
+        expect(JSON.parse(textOf(again)).files).toEqual([path.join(ticketDir, `call-${i}`, "ComfyUI_00001_.png")]);
       }
       const all = await collectNewImages(ticketDir, new Set(["old.png"]), 10);
       expect(all).toHaveLength(MAX_CALLS);

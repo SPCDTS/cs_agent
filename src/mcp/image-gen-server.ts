@@ -192,9 +192,9 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
         await fs.unlink(manifest);
       }
     }
-    const files = (await collectNewImages(callDir, new Set())).map((f) => `${path.basename(callDir)}/${path.basename(f)}`);
+    const files = await collectNewImages(callDir, new Set());
     if (!files.length) return text("生图没有产出有效图片。", true);
-    return text(JSON.stringify({ files, note: "图片会随你的回复自动发送给用户" }));
+    return text(JSON.stringify({ files, note: "请用 send_message 的 images 发送这些图片" }));
   };
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
