@@ -6,7 +6,7 @@ import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnReca
 import type { ScopeTimeline } from '../memory/types.js';
 import { contextBar } from './context-bar.js';
 import { sortUsage, type ContextUsage, type ContextUsageView } from '../../shared/format.js';
-import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, stageLabel, stamp, statusStamp, time, uri } from './html.js';
+import { BACKENDS, ROUTES, csrfField, empty, epochMs, esc, fmtBytes, fmtWhen, fmtMs, fmtOffset, fmtTime, json, kv, page, stageLabel, stamp, statusStamp, time, uri, type Flash } from './html.js';
 import { scopeLabel } from '../../context/access.js';
 import { PRELOAD_TURNS, agentsBody, byNewest, crumbs, dataScript, isBackend, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './agents-pages.js';
 import { contextBody as contextAnalysisBody, contextError, contextUnavailable, type ContextAnalysis } from './context-view.js';
@@ -123,7 +123,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     try { return opts.contextUsage?.get(backend, key) ?? null; } catch { return null; }
   }
 
-  async function render(url: URL, nonce: string, flash?: { text: string; error?: boolean }): Promise<string | null> {
+  async function render(url: URL, nonce: string, flash?: Flash): Promise<string | null> {
     const q = url.searchParams, p = url.pathname;
     const shell = (title: string, body: string, extra: { lead?: string; actions?: string; scripts?: string[]; head?: string } = {}) => page({ title, path: p, nonce, body, flash, ...extra });
     if (p === '/') return shell('运行总览', await overview(), { lead: '现在在处理什么、各依赖是否正常、最近的吞吐与失败。', scripts: ['/assets/usage.js'] });
@@ -144,6 +144,12 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     if (p.startsWith('/agents/')) return agentsRoute(p, q, nonce, shell);
     if (p === '/memory' || p.startsWith('/memory/')) return memoryPage(p, q, nonce, shell);
     if (p === '/settings') return shell('设置', await settingsBody(), { lead: '修改立即对之后收到的消息生效，无需重启；.env 中的值只是初始默认。', scripts: ['/assets/forms.js'] });
+    if (p === '/skills') return shell('技能', await skillsBody(), { lead: 'pi 与 codex 共用的技能目录；上传、删除后下一条消息即生效。' });
+    if (p.startsWith('/skills/')) {
+      let name: string; try { name = decodeURIComponent(p.slice(8)); } catch { return null; }
+      const body = await skillDetail(name); if (body === null) return null;
+      return shell(name, body, { lead: 'SKILL.md 原文与目录下的文件。' });
+    }
     if (p === '/config') return shell('生效配置', await configBody(), { lead: '启动时从环境变量解析的配置（已脱敏）。运行中可改的项见<a href="/settings">设置</a>。' });
     if (p === '/codex/agents-md') {
       const st = await fs.stat(agentsMd).catch(() => null);
@@ -551,6 +557,36 @@ ${agentModelFieldsets(s, d, diff)}
       ? `<div class="flash err">codex.md 中包含凭据样式的内容，面板只读展示脱敏版本；请在容器内直接编辑。</div>${json(redactText(snap.custom, 1_000_000))}`
       : `<form method="post" action="/settings/codex-prompt" class="sheet pad">${csrfField(csrf)}<input type="hidden" name="revision" value="${esc(snap.revision)}"><label>拼接在受管规则之后写入全局 AGENTS.md，codex 下一条消息即使用新内容。<textarea name="content" rows="18" spellcheck="false" data-count="codex-md-count">${esc(snap.custom)}</textarea></label><div class="hint"><span id="codex-md-count"></span>，上限 ${AGENT_MD_MAX_BYTES / 1024} KB</div><p class="mt"><button>保存 codex.md</button></p></form>`;
     return `${head(snap.updatedAt ? `修改于 ${esc(fmtTime(snap.updatedAt))}` : '尚未修改')}${editor}<details class="mt"><summary>受管规则（程序生成，不可编辑）</summary>${json(redactText(snap.managed, 1_000_000))}</details>${link}</section>`;
+  }
+
+  /* ───────── 技能（设计 skills-admin §3）：上传、下载与删除由 HTTP 层处理，这里只渲染 ───────── */
+
+  const skillOps = (name: string) => `<div class="ops"><a class="btn quiet" href="/skills/${uri(name)}.zip">下载</a><form method="post" action="/skills/${uri(name)}/delete">${csrfField(csrf)}<button class="danger">删除</button></form></div>`;
+
+  async function skillsBody(): Promise<string> {
+    if (!opts.skills) return empty('技能目录已禁用（PI_SKILLS_DIR=off）。');
+    let body = `<form method="post" action="/skills/upload" enctype="multipart/form-data" class="sheet pad">${csrfField(csrf)}<div class="choices"><label><span>技能文件</span><input type="file" name="file" accept=".zip,.md" required></label><label class="choice"><input type="checkbox" name="overwrite"><span>覆盖同名技能</span></label></div><div class="hint">zip 内每个技能为 <code>&lt;name&gt;/SKILL.md</code>，或直接上传单个 SKILL.md；上限 20 MiB。</div><p class="mt"><button>上传</button></p></form>`;
+    const list = await opts.skills.list();
+    const clip = (s: string) => { const chars = Array.from(s); return chars.length > 120 ? chars.slice(0, 120).join('') + '…' : s; };
+    const notes = (s: { diagnostics: string[]; hidden: boolean }) => [...(s.hidden ? ['<span class="muted">不列入提示</span>'] : []), ...s.diagnostics.map(d => `<span class="changed">${esc(d)}</span>`)].join('<br>') || '—';
+    body += `<section><h2>已安装 <small>${list.length ? `${list.length} 个` : ''}</small></h2>${list.length ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>名称</th><th>描述</th><th class="num">文件 / 大小</th><th>诊断</th><th class="hide-sm">修改时间</th><th>操作</th></tr></thead><tbody>${list.map(s => `<tr><td><a class="mono" href="/skills/${uri(s.name)}">${esc(s.name)}</a></td><td>${s.description ? esc(clip(s.description)) : '<span class="faint">—</span>'}</td><td class="num">${s.files} 个 / ${esc(fmtBytes(s.bytes))}</td><td>${notes(s)}</td><td class="hide-sm">${esc(fmtTime(s.mtime))}</td><td>${skillOps(s.name)}</td></tr>`).join('')}</tbody></table></div></div>`
+      : empty('技能目录还是空的。上传一个 zip 或 SKILL.md 开始。')}</section>`;
+    body += '<section><p class="hint">技能目录位于宿主机 <code>SKILLS_DIR</code>，pi 与 codex 共用；owner 本人发来的消息也可让 agent 自行写入技能。</p></section>';
+    return body;
+  }
+
+  /** 名称非法或技能不存在（SkillsStoreError）返回 null（404）。 */
+  async function skillDetail(name: string): Promise<string | null> {
+    if (!opts.skills) return null;
+    let files: { path: string; size: number }[], md: string;
+    try { [files, md] = await Promise.all([opts.skills.files(name), opts.skills.readSkillMd(name)]); }
+    // UI 层不引入 agent 模块：按 SkillsStoreError 的形状（带 status 的 Error）判定，见 agent/skills-store.ts。
+    catch (e) { if (e instanceof Error && typeof (e as { status?: unknown }).status === 'number') return null; throw e; }
+    let body = crumbs([['技能', '/skills'], [name]]);
+    body += `<section class="flush"><h2>SKILL.md</h2><pre class="mono">${esc(md)}</pre></section>`;
+    body += `<section><h2>文件 <small>${files.length} 个</small></h2><div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>相对路径</th><th class="num">大小</th></tr></thead><tbody>${files.map(f => `<tr><td class="mono">${esc(f.path)}</td><td class="num">${esc(fmtBytes(f.size))}</td></tr>`).join('')}</tbody></table></div></div></section>`;
+    body += `<section>${skillOps(name)}</section>`;
+    return body;
   }
 
   async function configBody(): Promise<string> {

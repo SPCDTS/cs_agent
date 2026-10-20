@@ -122,7 +122,7 @@ describe('面板二期页面', () => {
       for (const m of html.matchAll(/<script[^>]*>/g)) expect(m[0]).toContain(`nonce="${nonce}"`);
       const navOf: Record<string, string> = { '/logs': '/settings', '/config': '/settings', '/context': '/memory' };
       if (url !== '/') expect(html).toContain(`href="${navOf[url] ?? url}" aria-current="page"`);
-      expect(html).toMatch(/<nav class="tabs"[^>]*><a href="\/"[^>]*>总览<\/a><a href="\/agents"[^>]*>Agent<\/a><a href="\/memory"[^>]*>记忆<\/a><a href="\/tickets"[^>]*>票据<\/a><a href="\/live"[^>]*>(<i[^>]*><\/i>)?实时<\/a><a href="\/settings"[^>]*>设置<\/a><\/nav>/);
+      expect(html).toMatch(/<nav class="tabs"[^>]*><a href="\/"[^>]*>总览<\/a><a href="\/agents"[^>]*>Agent<\/a><a href="\/memory"[^>]*>记忆<\/a><a href="\/tickets"[^>]*>票据<\/a><a href="\/live"[^>]*>(<i[^>]*><\/i>)?实时<\/a><a href="\/skills"[^>]*>技能<\/a><a href="\/settings"[^>]*>设置<\/a><\/nav>/);
     }
     for (const asset of ['live.js', 'logs.js', 'forms.js', 'agents.js']) {
       const res = await r.get('/assets/' + asset);

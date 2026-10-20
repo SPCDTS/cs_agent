@@ -232,6 +232,9 @@ ${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.c
 .thread-row>.ctx{flex:1 1 auto}
 .thread-row form{flex:none}
 .thread-row button{padding:4px 10px;font-size:var(--t-xs)}
+.ops{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2)}
+.ops form{margin:0}
+.ops button,.ops .btn{padding:4px 10px;font-size:var(--t-xs)}
 .idbox{display:inline-flex;align-items:center;gap:var(--s2);max-width:100%}
 .idbox code{overflow-wrap:anywhere;user-select:all}
 button.copy,button.load-full{padding:2px 9px;font-size:var(--t-xs);font-weight:500}

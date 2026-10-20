@@ -7,12 +7,14 @@ export const uri = (v: string) => encodeURIComponent(redactText(v, 100_000));
 export const json = (v: unknown, limit = 20_000) => `<pre>${esc(typeof v === 'string' ? v : JSON.stringify(redact(v, limit), null, 2))}</pre>`;
 
 /** 顶栏（观测 v2 设计 §1）；日志与配置从设置页进入，旧聊天记录检索归入"记忆"。 */
-const NAV: [string, string][] = [['/', '总览'], ['/agents', 'Agent'], ['/memory', '记忆'], ['/tickets', '票据'], ['/live', '实时'], ['/settings', '设置']];
+const NAV: [string, string][] = [['/', '总览'], ['/agents', 'Agent'], ['/memory', '记忆'], ['/tickets', '票据'], ['/live', '实时'], ['/skills', '技能'], ['/settings', '设置']];
 const NAV_ALIASES: Record<string, string[]> = { '/agents': ['/codex'], '/memory': ['/context'], '/settings': ['/logs', '/config'] };
 
 export interface PageOptions { title: string; path: string; lead?: string; actions?: string; body: string; nonce: string; scripts?: string[];
   /** 额外的 <head> 内容（同源样式表、带 nonce 的 defer 脚本）；调用方负责其中不含运行数据。 */
-  head?: string; flash?: { text: string; error?: boolean } }
+  head?: string; flash?: Flash }
+/** 操作结果提示；detail 为附加明细（如上传的导入 / 跳过结果），以 <small> 转义显示。 */
+export interface Flash { text: string; error?: boolean; detail?: string }
 
 export function page(o: PageOptions): string {
   const under = (url: string) => o.path === url || o.path.startsWith(url + '/');
@@ -22,7 +24,7 @@ export function page(o: PageOptions): string {
 <link rel="icon" href="/favicon.ico"><meta name="color-scheme" content="light dark"><title>${esc(o.title)} · cs-agent 值守台</title>${o.head ?? ''}<style nonce="${o.nonce}">${THEME_CSS}</style></head>
 <body><header class="top"><div class="top-in"><a class="mark" href="/"><i aria-hidden="true"></i>cs-agent <span>值守台</span></a><nav class="tabs" aria-label="主导航">${nav}</nav></div></header>
 <main><div class="head"><div><h1>${esc(o.title)}</h1>${o.lead ? `<p>${o.lead}</p>` : ''}</div>${o.actions ? `<div class="actions">${o.actions}</div>` : ''}</div>
-${o.flash ? `<div class="flash${o.flash.error ? ' err' : ''}" role="status">${esc(o.flash.text)}</div>` : ''}${o.body}</main>
+${o.flash ? `<div class="flash${o.flash.error ? ' err' : ''}" role="status">${esc(o.flash.text)}${o.flash.detail ? ` <small>${esc(o.flash.detail)}</small>` : ''}</div>` : ''}${o.body}</main>
 ${(o.scripts ?? []).map(src => `<script type="module" nonce="${o.nonce}" src="${src}"></script>`).join('')}</body></html>`;
 }
 

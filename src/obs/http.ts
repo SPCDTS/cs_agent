@@ -244,10 +244,13 @@ export function createDashboard(opts: DashboardOptions) {
     // 旧 /codex、/pi 页并入 /agents/*（设计 §7）；/codex/agents-md 与重置 POST 保持原路径。
     if (url.pathname === '/codex' || url.pathname === '/pi') { res.writeHead(303, { Location: `/agents${url.pathname}/sessions` }).end(); return; }
     const flashCode = q.get('ok');
-    const flash = flashCode && Object.hasOwn(FLASH, flashCode) ? { text: FLASH[flashCode]! +
-      (flashCode === 'skillsUploaded' ? ' ' + (q.get('detail') ?? '').slice(0, 16_000) : '') } : undefined;
+    const detail = flashCode === 'skillsUploaded' ? (q.get('detail') ?? '').slice(0, 16_000) : '';
+    const flash = flashCode && Object.hasOwn(FLASH, flashCode) ? { text: FLASH[flashCode]!, ...(detail ? { detail } : {}) } : undefined;
     const html = await render(url, nonce, flash);
-    if (html === null) { res.writeHead(404, {'Content-Type':'text/html; charset=utf-8'}).end(page({ title: '没有这个页面', path: url.pathname, nonce, body: empty('地址不对或票据已过保留期。可以从<a href="/tickets">票据列表</a>重新查找。') })); return; }
+    if (html === null) {
+      const notFound = url.pathname.startsWith('/skills/') ? '没有这个技能。可以从<a href="/skills">技能列表</a>重新查找。' : '地址不对或票据已过保留期。可以从<a href="/tickets">票据列表</a>重新查找。';
+      res.writeHead(404, {'Content-Type':'text/html; charset=utf-8'}).end(page({ title: '没有这个页面', path: url.pathname, nonce, body: empty(notFound) })); return;
+    }
     res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(html);
   }
 
