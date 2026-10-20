@@ -7,6 +7,7 @@ import { toContextUsage } from '../shared/format.js';
 import { analyzeContextTurns, type ContextAnalysisOptions, type ContextEvent, type SystemEvent, type ThreadContextSeries } from './context-turns.js';
 
 import type { ObsEvent } from '../shared/trace.js';
+import type { TicketBrief } from '../shared/context-turns.js';
 export interface TicketRow { ticket: string; scope: string; ts: number; updated: number; route: string | null; backend: string | null; status: string; sender: string | null; duration_ms: number }
 export interface ThreadTurn { ticket: string; ts: number; started: number; text: string; reply: string; status: string; duration_ms: number; tools: number; input_tokens: number; output_tokens: number }
 /** 管理事件独立按年龄保留，不参与普通票据预算。 */
@@ -15,7 +16,7 @@ type ContextRow = Pick<ObsEvent, 'ts' | 'ticket' | 'stage' | 'detail_json'>;
 // 请求在回合结束时批量入库；排序、since 和原因区间必须使用请求自身时间。
 const CONTEXT_TS_SQL = "CASE WHEN stage='model_request' THEN json_extract(detail_json,'$.at') ELSE ts END";
 const CONTEXT_REQUEST_SQL = `(stage='model_request' OR (stage='context_usage'
-  AND json_extract(detail_json,'$.source')='turn' AND NOT EXISTS (
+  AND json_extract(detail_json,'$.source')='turn' AND events.ticket NOT LIKE '@%' AND NOT EXISTS (
     SELECT 1 FROM events request WHERE request.ticket=events.ticket AND request.stage='model_request'
     AND json_extract(request.detail_json,'$.backend')=json_extract(events.detail_json,'$.backend')
     AND json_extract(request.detail_json,'$.key')=json_extract(events.detail_json,'$.key'))))`;
@@ -118,7 +119,7 @@ export class ObsStore {
     return this.db.prepare('SELECT * FROM events WHERE ticket=? AND id>? ORDER BY id LIMIT ?').all(ticket,
       Number.isFinite(after) ? Math.max(0,Math.floor(after)) : 0, Number.isFinite(limit) ? Math.max(1,Math.min(2000,Math.floor(limit))) : 500) as unknown as ObsEvent[];
   }
-  private ticketQuery = `SELECT ticket, MAX(scope) scope, MIN(ts) ts, MAX(ts) updated,
+  private ticketQuery(where = '1=1'): string { return `SELECT ticket, MAX(scope) scope, MIN(ts) ts, MAX(ts) updated,
     MAX(CASE WHEN stage IN ('routed','recovered') THEN json_extract(detail_json,'$.route') END) route,
     COALESCE(MAX(CASE WHEN stage LIKE 'backend:%' THEN json_extract(detail_json,'$.backend') END),
       MAX(CASE WHEN stage='image:submit' THEN json_extract(detail_json,'$.backend') END)) backend,
@@ -126,18 +127,54 @@ export class ObsStore {
     COALESCE((SELECT CASE WHEN t.stage='failed' AND json_extract(t.detail_json,'$.failure')='timeout' THEN 'timeout'
       WHEN t.stage='failed' THEN 'failed' WHEN t.stage='fallback' THEN 'fallback' ELSE 'sent' END
       FROM events t WHERE t.ticket=e.ticket AND t.stage IN ('failed','fallback','reply_sent') AND json_extract(t.detail_json,'$.terminal')=1 ORDER BY t.id DESC LIMIT 1),'processing') status,
-    MAX(ts)-MIN(ts) duration_ms FROM events e WHERE ticket NOT LIKE '@%' GROUP BY ticket`;
+    MAX(ts)-MIN(ts) duration_ms FROM events e WHERE ticket NOT LIKE '@%' AND ${where} GROUP BY ticket`; }
   tickets(filters: { status?: string; scope?: string; route?: string; backend?: string; page?: number } = {}): TicketRow[] {
     if (this.degraded) return [];
     const args: SQLInputValue[] = [];
     const clauses = ['1=1'];
     for (const key of ['status', 'scope', 'route', 'backend'] as const) if (filters[key]) { clauses.push(`${key}=?`); args.push(filters[key]!); }
-    return this.db.prepare(`SELECT * FROM (${this.ticketQuery}) WHERE ${clauses.join(' AND ')} ORDER BY ts DESC LIMIT 50 OFFSET ?`)
+    return this.db.prepare(`SELECT * FROM (${this.ticketQuery()}) WHERE ${clauses.join(' AND ')} ORDER BY ts DESC LIMIT 50 OFFSET ?`)
       .all(...args, Math.max(0, Math.floor(filters.page ?? 0)) * 50) as unknown as TicketRow[];
+  }
+  /** 最多 300 个不同票据；先限定聚合范围，再批量读取事件并在内存归并。 */
+  ticketBriefs(tickets: readonly string[]): Map<string, TicketBrief> {
+    const briefs = new Map<string, TicketBrief>();
+    if (this.degraded || !tickets.length) return briefs;
+    const ids = [...new Set(tickets)].slice(0, 300);
+    const where = `ticket IN (${ids.map(() => '?').join(',')})`;
+    const rows = this.db.prepare(this.ticketQuery(where)).all(...ids) as unknown as TicketRow[];
+    const events = this.db.prepare(`SELECT ticket,stage,status,detail_json FROM events WHERE ${where} ORDER BY id`)
+      .all(...ids) as Pick<ObsEvent, 'ticket' | 'stage' | 'status' | 'detail_json'>[];
+    const groups = new Map<string, { stage: string; status: string; detail: Record<string, unknown> }[]>();
+    for (const event of events) {
+      const parsed: unknown = JSON.parse(event.detail_json);
+      const detail = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+      const group = groups.get(event.ticket) ?? [];
+      if (!groups.has(event.ticket)) groups.set(event.ticket, group);
+      group.push({ stage: event.stage, status: event.status, detail });
+    }
+    for (const { ticket, scope, ts, status, sender, route, backend, duration_ms } of rows) {
+      const group = groups.get(ticket) ?? [];
+      const received = group.find(e => e.stage === 'received' || (e.stage === 'recovered' && e.detail.text !== undefined));
+      const terminal = group.filter(e => ['reply_sent', 'failed', 'fallback'].includes(e.stage) &&
+        (e.detail.terminal === true || e.detail.terminal === 1)).at(-1);
+      const sent = group.filter(e => e.stage === 'postprocess' && e.status !== 'started').at(-1);
+      const turn = group.filter(e => e.stage === 'model_turn' && e.status !== 'started').at(-1);
+      const reply = terminal && typeof terminal.detail.reply === 'string' ? terminal.detail.reply :
+        sent ? sent.detail.sent_text : turn ? turn.detail.raw_reply ?? turn.detail.reply : undefined;
+      const settings = group.filter(e => e.stage === 'admitted').map(e => e.detail.settings)
+        .find((value): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value));
+      briefs.set(ticket, { ticket, scope, ts, status, sender, route, backend, duration_ms,
+        text: received ? String(received.detail.text ?? '') : '', reply: typeof reply === 'string' ? reply : '',
+        tools: group.filter(e => e.stage.toLowerCase().startsWith('tool:') && e.status !== 'started').length,
+        ...(settings ? { settings } : {}),
+      });
+    }
+    return briefs;
   }
   throughput(since: number): { total: number; failed: number; error_rate: number; no_send_fallback: number; inbound: number; no_send_ratio: number } {
     if (this.degraded) return { total: 0, failed: 0, error_rate: 0, no_send_fallback: 0, inbound: 0, no_send_ratio: 0 };
-    const row = this.db.prepare(`SELECT COUNT(*) total, COALESCE(SUM(status IN ('failed','fallback','timeout')),0) failed FROM (${this.ticketQuery}) WHERE updated>=? AND status<>'processing'`)
+    const row = this.db.prepare(`SELECT COUNT(*) total, COALESCE(SUM(status IN ('failed','fallback','timeout')),0) failed FROM (${this.ticketQuery()}) WHERE updated>=? AND status<>'processing'`)
       .get(since) as { total: number; failed: number };
     const inbound = this.db.prepare("SELECT COUNT(DISTINCT ticket) n FROM events WHERE stage='admitted' AND ts>=?").get(since) as { n: number };
     const fallback = this.db.prepare(`SELECT COUNT(DISTINCT ticket) n FROM events WHERE stage='no_send_fallback'

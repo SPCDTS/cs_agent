@@ -14,6 +14,8 @@ export interface ContextTurn {
   used: number;
   cached: number;
   uncached: number;
+  /** 请求输出 token 数；旧用量记录不提供。 */
+  output?: number;
   window: number;
   /** 占窗口的比例（0–1，可超过 1），不是百分数。 */
   pct: number;
@@ -54,4 +56,19 @@ export interface ModelRequestDetail {
   window: number;
   effective_window?: number;
   at: number;
+}
+/** 票据预览摘要；字段口径与票据列表、线程回合摘要一致。 */
+export interface TicketBrief {
+  ticket: string;
+  scope: string;
+  ts: number;
+  status: string;
+  sender: string | null;
+  route: string | null;
+  backend: string | null;
+  duration_ms: number;
+  text: string;
+  reply: string;
+  tools: number;
+  settings?: Record<string, unknown>;
 }

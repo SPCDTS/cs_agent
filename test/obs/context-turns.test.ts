@@ -165,6 +165,30 @@ describe('上下文回合分析', () => {
 });
 
 describe('每请求上下文分析', () => {
+  it('混入 @ 伪票据 turn 快照不改变分析结果，compact 仍保留分隔', () => {
+    const compact = { ...event(30, { source: 'compact' }), ticket: '@context' };
+    const real = [event(10), request(20, 'new'), compact, request(50, 'new', 2), event(70)];
+    const system = [change(15, 'prompt_changed'), change(65, 'settings_changed', { changed: ['codexModel'] })];
+    const snapshot = (ts: number, ticket = '@context'): ContextUsageEvent =>
+      ({ ...event(ts, { usedTokens: 1, turns: 1 }), ticket, kind: 'usage' });
+    const mixed = [snapshot(0), real[0], snapshot(11, '@backfill'), real[1], real[2],
+      snapshot(40), real[3], { ...snapshot(60), kind: undefined }, real[4], snapshot(80)];
+    const expected = analyzeContextTurns(real, system);
+    expect(analyzeContextTurns(mixed, system)).toEqual(expected);
+    expect(expected.map(turn => [turn.ts, turn.mark, turn.gapMs])).toEqual([
+      [10, 'first', undefined], [20, 'miss', 10], [30, 'compact', 10], [50, 'compact', 30], [70, 'miss', 20],
+    ]);
+    expect(expected[2]).toMatchObject({ ticket: '@context', seq: 0, requests: 0 });
+    expect(analyzeContextTurns([snapshot(0)], [])).toEqual([]);
+  });
+  it('request 透传 output（包括零），旧记录及未提供输出的请求不带 output 字段', () => {
+    const turns = analyzeContextTurns([request(0, 'a', 1, { output: 123 }),
+      request(1, 'a', 2, { output: 0 }), request(2, 'b', 1, { output: undefined }),
+      event(3), { ...event(4, { source: 'compact' }), ticket: '@context' }, request(5, '@request', 1, { output: 7 })], []);
+    expect(turns.map(turn => turn.output)).toEqual([123, 0, undefined, undefined, undefined, 7]);
+    for (const turn of turns.slice(2, 5)) expect(turn).not.toHaveProperty('output');
+    expect(turns[5]).toMatchObject({ ticket: '@request', seq: 1, requests: 1, output: 7 });
+  });
   it('纯新数据按票据统计请求数，票据内与跨票据都以上一请求为基准', () => {
     const turns = analyzeContextTurns([request(0, 'a', 1, { turn: 1 }),
       request(10, 'a', 2, { turn: 1, cached: 9000 }), request(20, 'a', 3, { turn: 1 }),

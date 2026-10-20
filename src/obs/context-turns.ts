@@ -35,12 +35,14 @@ export function analyzeContextTurns(
     const { ts, ticket, detail: usage } = asContextUsageEvent(event);
     if (event.kind !== 'request' && usage.source === 'turn' && requestTickets.has(ticket)) continue;
     if (usage.source === 'estimate') continue;
+    if (event.kind !== 'request' && usage.source === 'turn' && ticket.startsWith('@')) continue;
     const window = usageWindow(usage);
     const cached = usage.cachedTokens ?? 0;
     const turn: ContextTurn = {
       ts, ticket, seq: usage.source === 'compact' ? 0 : event.kind === 'request' ? event.detail.seq : 1,
       requests: 0, turn: usage.turns, used: usage.usedTokens, cached, uncached: Math.max(0, usage.usedTokens - cached),
       window, pct: ratio(usage.usedTokens, window) / 100, turns: usage.turns, source: usage.source, reasons: [],
+      ...(event.kind === 'request' && event.detail.output !== undefined ? { output: event.detail.output } : {}),
       ...(prev ? { gapMs: ts - prev.ts } : {}),
     };
     if (usage.source === 'compact') {

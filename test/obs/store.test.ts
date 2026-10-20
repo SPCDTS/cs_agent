@@ -168,7 +168,7 @@ describe('上下文历史查询', () => {
   });
   it('contextSeries limit 默认 40，范围 1–200，取整且非有限值回退默认', () => {
     const { store } = rig();
-    for (let ts = 0; ts < 205; ts++) record(store, ts, {}, '@context');
+    for (let ts = 0; ts < 205; ts++) record(store, ts);
     for (const limit of [undefined, NaN, Infinity]) {
       const [series] = store.contextSeries({ limit });
       expect(series.turns).toHaveLength(40);
@@ -259,7 +259,7 @@ describe('上下文历史查询', () => {
   });
   it('contextSeries 全局上下文快照最多 2000 条', () => {
     const { store } = rig();
-    for (let ts = 0; ts < 2100; ts++) record(store, ts, { key: `group:${ts % 11}` }, '@context');
+    for (let ts = 0; ts < 2100; ts++) record(store, ts, { key: `group:${ts % 11}` });
     const turns = store.contextSeries({ limit: 200 }).flatMap(group => group.turns);
     expect(turns).toHaveLength(2000);
     expect(Math.min(...turns.map(turn => turn.ts))).toBe(100);
@@ -347,6 +347,41 @@ describe('上下文历史查询', () => {
     expect(store.contextSeries()[0].turns.map(t => [t.ts, t.seq])).toEqual([[1, 1], [1, 2], [5, 0]]);
     expect(store.previousContextTurn('codex', 'owner', 5)).toEqual(later);
     expect(store.contextSeries({ since: 5 })[0]).toMatchObject({ requests: 0, tickets: 0, misses: 0 });
+  });
+  it('contextSeries 排除伪票据 turn 快照，不占请求预算且保留 compact 分隔与 output', () => {
+    const { store } = rig();
+    record(store, 10, {}, 'old');
+    request(store, 20, 'new', 1, { output: 123 });
+    record(store, 30, { source: 'compact' }, '@context');
+    request(store, 40, 'new', 2, { output: 0 });
+    const expected = store.contextSeries({ limit: 3 });
+    for (const ts of [0, 15, 25, 35, 45]) record(store, ts, { usedTokens: 1 }, '@context');
+    record(store, 50, {}, '@backfill');
+    record(store, 60, { backend: 'pi', key: 'snapshots-only' }, '@context');
+    // 快照也不能耗掉 SQL 的全局 2000 条取数预算。
+    for (let ts = 100; ts < 2101; ts++) record(store, ts, {}, '@context');
+    expect(store.contextSeries({ limit: 3 })).toEqual(expected);
+    expect(expected).toHaveLength(1);
+    expect(expected[0]).toMatchObject({ requests: 3, tickets: 2 });
+    expect(expected[0].turns.map(turn => [turn.ticket, turn.seq, turn.output])).toEqual([
+      ['old', 1, undefined], ['new', 1, 123], ['@context', 0, undefined], ['new', 2, 0],
+    ]);
+    expect(expected[0].turns[0]).not.toHaveProperty('output');
+    expect(expected[0].turns[2]).toMatchObject({ mark: 'compact', requests: 0 });
+    expect(store.contextSeries({ since: 41 })).toEqual([]);
+  });
+  it('previousContextTurn 跳过 @context 及其他伪票据 turn，仍返回真实旧记录或请求', () => {
+    const { store } = rig();
+    record(store, 0, {}, '@context');
+    expect(store.previousContextTurn('codex', 'owner', 1)).toBeUndefined();
+    const old = record(store, 10, {}, 'old');
+    record(store, 15, {}, '@context');
+    record(store, 16, {}, '@backfill');
+    expect(store.previousContextTurn('codex', 'owner', 20)).toEqual(old);
+    const real = request(store, 20, 'new');
+    record(store, 25, {}, '@context');
+    record(store, 30, { source: 'compact' }, '@context');
+    expect(store.previousContextTurn('codex', 'owner', 40)).toEqual(real);
   });
   it('上下文查询不修改存储，空库与 degraded 返回空结果', () => {
     const { store } = rig();
