@@ -37,7 +37,9 @@ export function analyzeContextTurns(
     } else if (!prev) {
       turn.mark = 'first';
     } else {
-      const hitRatio = prev.used > 0 ? cached / prev.used : 1;
+      // 可缓存前缀不可能超过本轮输入：上下文在两轮之间被压缩变短（旧版本没有 compact 记录）时，基准取较小者。
+      const expected = Math.min(prev.used, usage.usedTokens);
+      const hitRatio = expected > 0 ? cached / expected : 1;
       if (hitRatio < missRatio) turn.mark = 'miss';
       else if (hitRatio < partialRatio) turn.mark = 'partial';
       if (turn.mark) {

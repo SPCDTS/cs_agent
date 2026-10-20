@@ -21,6 +21,14 @@ describe('上下文回合分析', () => {
     expect(turn.mark).toBeUndefined();
     expect(turn.reasons).toEqual([]);
   });
+  it('基准取上一轮长度与本轮输入的较小者：上下文变短后按本轮输入算命中率', () => {
+    // 上一轮 445k，本轮 53k（旧版本压缩没有 compact 记录）：命中 52k 应是命中而不是 miss。
+    const turns = analyzeContextTurns([event(0, { usedTokens: 445_000, cachedTokens: 400_000 }),
+      event(1, { usedTokens: 53_864, cachedTokens: 52_224 })], []);
+    expect(turns[1].mark).toBeUndefined();
+    const partial = analyzeContextTurns([event(0, { usedTokens: 145_000 }), event(1, { usedTokens: 46_538, cachedTokens: 37_760 })], [])[1];
+    expect(partial.mark).toBe('partial');
+  });
   it.each([
     [4999, 'miss'], [5000, 'partial'], [8999, 'partial'], [9000, undefined],
   ] as const)('默认阈值边界 cached=%i → %s', (cachedTokens, mark) => {
