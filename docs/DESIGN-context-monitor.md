@@ -1,6 +1,6 @@
 # 设计：面板上下文长度监控与缓存未命中标记
 
-状态：设计完成，待实现。关联：设计 §8.5 上下文占用条（`src/obs/ui/context-bar.ts`、`src/agent/context-usage.ts`）。
+状态：已实现并部署（2026-10-20）。关联：设计 §8.5 上下文占用条（`src/obs/ui/context-bar.ts`、`src/agent/context-usage.ts`）。
 
 ## 0. 事实（2026-10-20）
 
@@ -60,4 +60,9 @@ export function analyzeContextTurns(events: ContextUsageEvent[], system: SystemE
 
 ## 7. 验收记录
 
-（主会话追加）
+### 2026-10-20，主会话验收
+
+- 代码：数据层 8b5e9a3（codex 实现：`analyzeContextTurns` 纯函数 + `ObsStore.contextSeries/previousContextTurn`，53 个测试）、页面 75a205f（Opus 实现：`/context-usage`、票据页命中率、agents 页"监控"链接；类型移到 `src/shared/context-turns.ts` 以满足 UI 层 import 白名单，阈值通过 `contextSeries({ analysis })` 传入而不是在 http.ts 重算）、主会话修正 02f1527（基准改为 `min(上一轮长度, 本轮输入)`）。沙箱外全量 1703 项通过。
+- 部署：镜像 `dfc9209e…`（干净 build worktree，main 02f1527），容器 healthy。
+- 真实数据核对（owner codex 线程，60 轮）：设计 §6 的样本全部符合——10-19 20:31（12:31Z）输入 204,820 / 命中 3,712（2%）标 miss，原因"间隔 108 分钟、窗口变化"；其后 20:35 命中 92%、20:40 命中 100% 不标记；10-20 16:42（08:42Z）命中 3% 标 miss，原因"切换模型、提示词变更、间隔 1202 分钟"（f2 当日切换模型 slug 与 developer_instructions）；f2 的压缩回合标 compact。修正前的误报：10-18 21:34 上一轮 445k、本轮 53k、命中 52k（旧版本压缩无 compact 记录）被标 miss，改基准后不再标记；10-20 18:08 由 miss 变为 partial（81%）。10-18 19:23/19:24 两轮（历史里内联生图的 39 万/44 万 token 时期）命中 66%/70% 标 partial、原因未知，与当时 WebSocket 超限回退 HTTPS 的现象一致，保留。
+- 页面列出 5 条线程（codex owner/group/shared、pi owner/group），导航"上下文监控"，agents 页线程行有"监控"入口。
