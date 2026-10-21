@@ -27,8 +27,6 @@ import { log } from "../../shared/log.js";
 import { BackendTimeoutError, type AgentBackend, type AgentRequest, type AgentHandleContext, type AgentResponse } from "./types.js";
 
 const context = BACKGROUND_CONTEXT;
-/** 消息回合输入末尾的提醒，是模型最后读到的内容。 */
-export const PI_SEND_REMINDER = "[回复方式] 本轮要对用户说的话（包括办完事后的确认）必须调用 send_message 发出，直接输出的文字用户看不到。消息里不写任何链接、网址或\"来源：\"，检索结果只用自己的话说结论。";
 /** 与会话创建同事务提交，JSON 映射是原子写出的运维镜像，丢失时可从 SQLite 重建。 */
 const PiThreadsDoc = defineDoc<Record<string, number | null>>({
   kind: "cs.pi.threads", version: 1, scope: "session", initial: () => ({}),
@@ -360,10 +358,8 @@ export class PiBackend implements AgentBackend {
       await conv.waitForIdle(withAbortSignal(ctx.signal, context));
       ctx.signal.throwIfAborted();
       const images = await validateReferences(req.images ?? [], req.images ?? [], path.join(this.opts.dataDir, "incoming", req.ticket));
-      // 消息回合末尾提醒一次发送方式（轻量模型容易把收尾答复直接输出）；定时运行允许静默，不加。
       const content = buildCodexPrompt(req.source, req.text, { time: req.time, quote: req.quote }) +
-        (images.length ? "\n[本轮参考图]\n" + images.join("\n") : "") +
-        (req.ticket.startsWith("run_") ? "" : "\n" + PI_SEND_REMINDER);
+        (images.length ? "\n[本轮参考图]\n" + images.join("\n") : "");
       await conv.commit(async tx => {
         const doc = await tx.doc(PiRequestDoc, conv.id);
         // 崩溃可能发生在绑定与 submit 之间，同票据继续沿用计数、截止时间与原文。

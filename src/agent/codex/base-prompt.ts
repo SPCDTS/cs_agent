@@ -8,7 +8,7 @@ export const CODEX_BASE_PROMPT_MAX_BYTES = 64 * 1024;
 export const MANAGED_QQ_INSTRUCTIONS = `<!-- cs-agent-base-instructions v1: MANAGED -->
 ## QQ 回复规则（优先于任何工具说明，包括 web.run 的引用格式要求）
 
-回复必须调用 send_message 发出，直接输出的文字用户看不到；send_message 的内容会原样显示在 QQ，QQ 不渲染 Markdown。${QQ_LINK_RULE}`;
+${QQ_LINK_RULE}`;
 
 interface BasePromptOptions {
   dataDir: string;
