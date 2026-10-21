@@ -4,7 +4,7 @@ import type { GrantsService } from "../grants.js";
 import type { Channel } from "../../channel/types.js";
 import { chatsTool } from "./chats.js";
 import path from "node:path";
-import { SEND_RULE, type SendService } from "../send-service.js";
+import { QQ_LINK_RULE, SEND_RULE, type SendService } from "../send-service.js";
 import { type AttachmentLimits } from "../../media/attach.js";
 import type { RecallObserver } from "../../context/observer.js";
 import { BUILTIN_TOOLS, PiExecutionEnv } from "./coding.js";
@@ -93,7 +93,7 @@ export function createPiExtension(opts: PiToolsOptions) {
   return defineExtension({
     name: "cs-pi",
     sections: [
-      section("cs-pi", async () => SEND_RULE + "\n\n" + await prompt.read(), { tag: false }),
+      section("cs-pi", async () => SEND_RULE + "\n" + QQ_LINK_RULE + "\n\n" + await prompt.read(), { tag: false }),
       section("project-context", input => projectContext.render(input.env?.cwd), { tag: false }),
       section("skills", input => skills?.render(input.env instanceof PiExecutionEnv && input.env.policy.options.request.senderIsOwner === true), { tag: false }),
     ],

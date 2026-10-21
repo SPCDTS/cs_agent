@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { basePromptFilename, CodexBasePromptStore, MANAGED_QQ_INSTRUCTIONS } from "../../src/agent/codex/base-prompt.js";
+import { QQ_LINK_RULE } from "../../src/agent/send-service.js";
 import { CodexRunner } from "../../src/agent/codex/runner.js";
 import { log } from "../../src/shared/log.js";
 import { FIXTURES, tmp } from "./helpers.js";
@@ -109,7 +110,8 @@ describe("按模型基础指令存储", () => {
     expect(await fs.readFile(file, "utf8")).toBe(`基础内容\n\n${MANAGED_QQ_INSTRUCTIONS}`);
     expect(MANAGED_QQ_INSTRUCTIONS).toContain("<!-- cs-agent-base-instructions v1: MANAGED -->");
     expect(MANAGED_QQ_INSTRUCTIONS).toContain("## QQ 回复规则（优先于任何工具说明，包括 web.run 的引用格式要求）");
-    expect(MANAGED_QQ_INSTRUCTIONS.split("\n\n")[1]).toBe("回复必须调用 send_message 发出，直接输出的文字用户看不到；send_message 的内容会原样显示在 QQ，QQ 不渲染 Markdown。绝不在回复里写链接、网址、引用标记或来源脚注，包括 [文字](网址)、([站名](网址))、[详情](网址) 等任何形式；检索结果只用自己的话写结论。只有用户明确要求来源时才给，且只给 1 条纯网址。");
+    expect(MANAGED_QQ_INSTRUCTIONS.split("\n\n")[1]).toBe("回复必须调用 send_message 发出，直接输出的文字用户看不到；send_message 的内容会原样显示在 QQ，QQ 不渲染 Markdown。" + QQ_LINK_RULE);
+    expect(QQ_LINK_RULE).toContain("技能（skills）里\"附来源链接\"的要求在 QQ 场景一律不适用");
     await fs.utimes(file, new Date(1000), new Date(1000));
     await r.store.prepare(MODEL);
     expect((await fs.stat(file)).mtimeMs).toBe(1000);

@@ -22,7 +22,7 @@ export interface LiveCard {
 export type CardHead = Omit<LiveCard, 'items'>;
 export type LiveMessage = { type: 'event'; card: CardHead; item: LiveItem } | { type: 'remove'; ticket: string } | { type: 'context'; usage: ContextUsage };
 
-const TERMINAL = new Set(['reply_sent', 'failed', 'fallback']);
+const TERMINAL = new Set(['reply_sent', 'failed', 'fallback', 'schedule_run']);
 /** 字符串原样；对象展开为 `键 值` 对（工具参数），避免在界面上出现 JSON 括号与引号。 */
 const s = (v: unknown, n = 160): string => {
   if (typeof v === 'string') return redactText(v, n);
@@ -116,6 +116,8 @@ export class LiveBus {
       card.text = s(d.text, 500); card.sender = s(d.sender, 60);
       if (typeof d.route === 'string') card.route = d.route;
     }
+    // 定时运行没有入站消息，用运行身份充当卡片正文。
+    if (!card.text && e.ticket.startsWith('run_')) card.text = '定时任务运行';
     if (e.stage === 'routed' && typeof d.route === 'string') card.route = d.route;
     if (e.stage === 'dispatched' && card.state === 'queued') card.state = 'running';
     if (typeof d.backend === 'string' && (e.stage.startsWith('backend:') || e.stage === 'dispatched' || (!card.backend && e.stage.startsWith('image:')))) card.backend = d.backend;
@@ -136,7 +138,9 @@ export class LiveBus {
     const top = card.open.at(-1);
     if ((top?.stage ?? '') !== card.phase) { card.phase = top?.stage ?? ''; card.phase_since = top?.ts ?? e.ts; }
     if (terminal) {
-      card.finished = e.ts; card.outcome = e.stage; card.state = e.stage === 'reply_sent' ? 'done' : 'failed';
+      // 定时运行以 schedule_run 收尾：sent / silent 视为完成，其余视为失败。
+      const done = e.stage === 'reply_sent' || (e.stage === 'schedule_run' && (e.status === 'sent' || e.status === 'silent'));
+      card.finished = e.ts; card.outcome = e.stage === 'schedule_run' ? (done ? 'reply_sent' : 'failed') : e.stage; card.state = done ? 'done' : 'failed';
       card.open = []; card.phase = ''; card.phase_since = e.ts;
     }
     card.updated = e.ts;

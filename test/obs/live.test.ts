@@ -26,6 +26,21 @@ describe('实时总线', () => {
     expect(bus.snapshot().map(c => c.ticket)).toEqual(['e']);
   });
 
+  it('定时运行：无入站消息也有正文，schedule_run 终态收卡（sent/silent 完成，failed 失败）', () => {
+    let now = 1000;
+    const listeners: ((e: LiveEvent) => void)[] = [];
+    const bus = new LiveBus({ tap: fn => { listeners.push(fn); return () => {}; } }, { maxFinished: 5, now: () => now });
+    const ev = (ticket: string, stage: string, status = 'ok', detail: Record<string, unknown> = {}) => listeners.forEach(fn => fn({ ticket, stage, status, scope: 'group:1', ts: now++, duration_ms: null, detail }));
+    for (const [t, status] of [['run_a', 'sent'], ['run_b', 'silent'], ['run_c', 'failed']] as const) {
+      ev(t, 'phase:handle', 'started'); ev(t, 'backend:pi', 'started');
+      ev(t, 'schedule_run', status, { terminal: true, status });
+    }
+    const cards = Object.fromEntries(bus.snapshot().map(c => [c.ticket, c]));
+    expect(cards.run_a).toMatchObject({ text: '定时任务运行', state: 'done', outcome: 'reply_sent', phase: '' });
+    expect(cards.run_b).toMatchObject({ state: 'done', outcome: 'reply_sent' });
+    expect(cards.run_c).toMatchObject({ state: 'failed', outcome: 'failed' });
+  });
+
   it('trace.tap 在无存储时也推送，并先脱敏；摘要把工具参数展开为键值', () => {
     const secret = 'tap-secret-445566'; registerSecrets([secret]);
     const t = new Trace(); const got: LiveEvent[] = [];
