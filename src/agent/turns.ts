@@ -11,14 +11,14 @@ import { trace } from "../shared/trace.js";
 import type { BackendName, TicketSettings } from "./backends/types.js";
 import type { ThreadHost } from "./host/thread-host.js";
 import { STALL_MS } from "./host/thread-host.js";
-import type { InputRef, ThreadAdapter, ThreadHostEvents, ThreadKey, TurnContext, TurnEnded } from "./host/types.js";
+import type { InputRef, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey, TurnContext, TurnEnded } from "./host/types.js";
 import { TURN_NOTICES } from "./replies.js";
 import type { SendService } from "./send-service.js";
 import type { TurnSettings } from "./turn-settings.js";
 
 /** 后端适配器：开轮时额外接收本轮设置快照。 */
 export interface BackendAdapter extends ThreadAdapter {
-  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext, settings?: TicketSettings): Promise<{ turnId: string }>;
+  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext, settings?: TicketSettings): Promise<StartTurnResult>;
 }
 
 /** 后端不可用超过重试时长：输入无法投递（§8.1 第三种提示）。 */
@@ -44,7 +44,7 @@ export class BackendRouter implements ThreadAdapter {
     return this.opts.backends[name];
   }
 
-  async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext): Promise<{ turnId: string }> {
+  async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext): Promise<StartTurnResult> {
     const now = this.opts.now ?? Date.now, deadline = now() + (this.opts.retryMs ?? 120_000);
     for (let attempt = 1; ; attempt++) {
       try {
@@ -76,6 +76,10 @@ export class BackendRouter implements ThreadAdapter {
 
   async recoverTurn(threadKey: ThreadKey, turnId: string): Promise<"alive" | "lost"> {
     return this.byTurn(turnId)?.recoverTurn(threadKey, turnId) ?? "lost";
+  }
+
+  async abandon(threadKey: ThreadKey, turnId: string): Promise<void> {
+    await this.byTurn(turnId)?.abandon?.(threadKey, turnId);
   }
 }
 

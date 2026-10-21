@@ -21,21 +21,23 @@ import { isScope } from "../../context/access.js";
 import { log } from "../../shared/log.js";
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import type { InboundRecord, TurnBinding } from "../../channel/types.js";
-import type { HostCallbacks, InputRef, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
+import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
 import type { RenderedInputs } from "../inbox.js";
 import type { TicketSettings } from "./types.js";
 
 /**
  * pi 后端（设计 §6）：每个会话键一个常驻的 pi-durable 会话，回合 = pi 的一次 run（从输入到最终回答）。
  * 1. 开一轮：首条输入 whenBusy=followUp（requestId = 入站键，重放取回同一提交），同批其余输入 steer 并入；
- *    会话恰好已有 run（宿主尚未看到的唤醒回合）时，输入全部 steer 并入那次 run，回合 id 取那次 run。
+ *    会话恰好已有 run（宿主尚未看到的唤醒回合）时输入不并入，回报 backendTurnId，宿主按唤醒回合接管、输入排到其后
+ *    （例外：那次 run 正是本批首条输入开的——开轮请求未确认就重启——仍是宿主的这一轮）。
  *    回合 id = `pi:<会话>:<run 首条输入的提交 id>`；该提交结束（done / unanswered）即回合结束。
  * 2. 插话：适配器自己判断回合是否仍在（回合首条提交未结束）才 steer，否则返回 no_active_turn 由宿主排队；
  *    判断与提交之间回合恰好结束时，插话会自己开一次 run，按唤醒回合回报（身份只会更严格）。
  * 3. 唤醒：会话事件流里出现宿主不知道的 run（子 agent 汇报 follow-up）→ onTurnStarted(backend)；
- *    宿主有回合进行中时出现的 run 视为并入该回合（同一会话一次只有一个回合）。
+ *    宿主有回合进行中时出现的 run 只刷新活动时间（同一会话一次只有一个回合），其工具调用按唤醒身份（见 5）。
  * 4. 没有单轮时限、没有每轮工具配额；中止只来自面板"停止"与看门狗（连同子 agent 一起停）。
- * 5. 工具身份在调用时由 binding() 从宿主求出（§7.3）；子会话由 initChild 写入父会话键，固定为唤醒身份。
+ * 5. 工具身份在调用时由 binding() 从宿主求出（§7.3），且只给宿主开的那次 run（当前 run 的首条提交 = 宿主当前回合）；
+ *    其余 run（唤醒、宿主放弃的回合、事件尚未送达的 run）按唤醒身份。子会话由 initChild 写入父会话键，固定为唤醒身份。
  * 6. 恢复：pi-durable 持久化 run 与子 agent，重启后回合续跑；bind 宿主 → 宿主恢复（recoverTurn）→ attach 事件流并恢复调度。
  */
 
@@ -267,7 +269,14 @@ export class PiBackend implements ThreadAdapter {
       if (doc?.threadKey) { threadKey = doc.threadKey; child = true; }
     }
     if (!threadKey) return undefined;
-    const turn = this.opts.turns.binding(threadKey);
+    let turn = this.opts.turns.binding(threadKey);
+    // 宿主的本轮身份只给宿主开的那次 run：会话当前的 run 须是本适配器为宿主开的回合，且与宿主的当前回合一致
+    // （开轮请求未确认时宿主还没有 turnId）。唤醒 run、宿主放弃的回合、宿主不知道的 run 一律按唤醒身份。
+    const active = this.threads.get(threadKey)?.active;
+    if (!child && !await this.hostOwnsRun(threadKey, conversationId, turn.turnId)) {
+      turn = { ...turn, identity: { kind: "wake" }, inputs: [] };
+      if (active) turn.turnId = active.turnId; else delete turn.turnId;
+    } else if (!child && active && !turn.turnId) turn = { ...turn, turnId: active.turnId }; // 开轮请求未确认：回合 id 以本适配器为准
     const identity = child ? { kind: "wake" as const } : turn.identity;
     const person = identity.kind === "user" ? identity.sender : identity.kind === "scheduled" ? identity.creator : undefined;
     const ownerPerson = !!person && isOwner(this.owners(), person);
@@ -275,6 +284,14 @@ export class PiBackend implements ThreadAdapter {
     const images = inputs.length ? this.opts.turns.records(inputs.map(inboundKey => ({ inboundKey }))).flatMap(rec => rec.images) : [];
     return { ...turn, identity, inputs, images, child, ...(child ? { turnId: undefined } : {}),
       access: ownerPerson || (!person && threadKey === "owner") ? "all" : turn.scope, senderIsOwner: ownerPerson && !child };
+  }
+
+  private async hostOwnsRun(threadKey: string, conversationId: number, hostTurnId: string | undefined): Promise<boolean> {
+    const state = this.threads.get(threadKey), active = state?.active;
+    if (!active || active.owner !== "host" || Number(state.conv) !== conversationId) return false;
+    if (hostTurnId !== undefined && hostTurnId !== active.turnId) return false;
+    const live = await this.harness.snapshot(LiveDoc, state.conv, context);
+    return live?.run?.inputs[0] === active.first;
   }
 
   async readThreadIds(): Promise<Record<string, number>> {
@@ -410,31 +427,44 @@ export class PiBackend implements ThreadAdapter {
 
   // ───────────── ThreadAdapter ─────────────
 
-  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turn: TurnContext, settings?: TicketSettings): Promise<{ turnId: string }> {
+  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turn: TurnContext, settings?: TicketSettings): Promise<StartTurnResult> {
     if (this.closing) return Promise.reject(new Error("pi 后端正在关闭"));
     return this.serial(threadKey, async () => {
       const conv = await this.conversation(threadKey, settings);
-      await this.configureTools(conv, threadKey);
-      const records = this.opts.turns.records(inputs);
       const live = await this.harness.snapshot(LiveDoc, conv.id, context);
       const state = this.state(threadKey, conv.id);
-      // 会话已有 run（宿主还没看到的唤醒回合）：全部并入；否则首条 followUp 开新 run，其余并入。
-      let first: SubmissionId | undefined = live?.run?.inputs[0];
+      // 会话已有 run（宿主还没看到的唤醒回合，或宿主已放弃的回合）：输入不并入——并入会让唤醒工作拿到本轮发送者的身份。
+      // 按唤醒回合回报，输入由宿主排队到它结束。
+      const records = this.opts.turns.records(inputs);
+      const running = state.active?.first ?? live?.run?.inputs[0];
+      if (running !== undefined) {
+        // 例外：那次 run 正是本批首条输入开的（开轮请求未确认就崩溃，宿主重新开轮）——仍是宿主的这一轮。
+        const request = (await (await this.harness.submission(running, context))?.status(context))?.requestId;
+        if (request !== undefined && request === records[0]?.key) {
+          const active = state.active ?? { turnId: piTurnId(conv.id, running), first: running, owner: "host" as const };
+          active.owner = "host";
+          if (!state.active) { state.active = active; this.waitTurn(threadKey, active); }
+          return { turnId: active.turnId };
+        }
+        if (!state.active) await this.startWake(threadKey, state, running);
+        state.active!.owner = "backend";
+        return { backendTurnId: state.active!.turnId };
+      }
+      await this.configureTools(conv, threadKey);
+      // 首条 followUp 开新 run，其余并入。
+      let first: SubmissionId | undefined;
       for (const [index, record] of records.entries()) {
         const submission = await conv.submit({ type: "input", requestId: record.key, content: await this.content(record),
-          whenBusy: live?.run || index > 0 ? "steer" : "followUp" }, context);
+          whenBusy: index > 0 ? "steer" : "followUp" }, context);
         first ??= submission.id;
       }
       if (first === undefined) throw new Error("pi 回合没有输入");
       const turnId = piTurnId(conv.id, first);
-      if (state.active?.turnId === turnId) state.active.owner = "host";
-      else {
-        const active: ActiveTurn = { turnId, first, owner: "host" };
-        state.active = active;
-        this.waitTurn(threadKey, active);
-      }
+      const active: ActiveTurn = { turnId, first, owner: "host" };
+      state.active = active;
+      this.waitTurn(threadKey, active);
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "pi", conversation_key: threadKey, conversation: conv.id,
-        kind: turn.kind, inputs: inputs.map(i => i.inboundKey), joined: !!live?.run } });
+        kind: turn.kind, inputs: inputs.map(i => i.inboundKey) } });
       return { turnId };
     });
   }
@@ -461,6 +491,14 @@ export class PiBackend implements ThreadAdapter {
     if (id === undefined) return;
     const conv = await this.harness.conversation(id as ConversationId, context);
     await conv?.abort(context, { background: true });
+  }
+
+  /** 宿主放弃的回合（被唤醒回合取代）：run 继续，但工具身份降为唤醒；结束仍照常回报（宿主按过期忽略）。 */
+  async abandon(threadKey: ThreadKey, turnId: string): Promise<void> {
+    await this.serial(threadKey, async () => {
+      const active = this.threads.get(threadKey)?.active;
+      if (active?.turnId === turnId) active.owner = "backend";
+    });
   }
 
   async recoverTurn(threadKey: ThreadKey, turnId: string): Promise<"alive" | "lost"> {

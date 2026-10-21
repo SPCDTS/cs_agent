@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { CodexRunner } from "../../src/agent/codex/runner.js";
 import { RecallTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
 import { TURN_NOTICES } from "../../src/agent/replies.js";
@@ -18,8 +18,8 @@ async function codexRig(env: Record<string, string> = {}) {
   let runner!: CodexRunner;
   const r = await residentRig({ backend: "codex", codexAsk: (prompt, opts) => runner.ask(prompt, opts) });
   const tokens = new RecallTokens({ recall: async () => ({ text: "", images: [] }) }, 5, undefined, {
-    permissions: async lease => r.grants.permissions(r.inbox.binding(lease.threadKey)),
-    send: (lease, callKey, args, signal) => r.sendService.send({ ...r.inbox.binding(lease.threadKey), access: lease.access,
+    permissions: async lease => r.grants.permissions(r.inbox.bindingForTurn(lease.threadKey, lease.turnId)),
+    send: (lease, callKey, args, signal) => r.sendService.send({ ...r.inbox.bindingForTurn(lease.threadKey, lease.turnId), access: lease.access,
       workdir: lease.workdir! }, args, callKey, signal),
   });
   const server = await startMediaRecallServer(tokens, 0);
@@ -79,4 +79,27 @@ it("重启时进行中的 codex 回合按丢失结束并提示中断", async () 
   await r.restart();
   await r.idle(20_000);
   expect(r.texts("7")).toEqual([TURN_NOTICES.lost]);
+});
+
+it("codex 回合被唤醒回合取代：旧 exec 被中止，其租约不能以下一轮（owner）的身份发送", async () => {
+  const { r, calls } = await codexRig({ FAKE_CODEX_SLEEP_MS: "2000", FAKE_CODEX_SEND: "回复" });
+  const first = await r.say("5", "普通用户的问题");
+  await vi.waitFor(() => expect(r.host.thread("group:7")?.turnId).toMatch(/^codex:/), { timeout: 5000 });
+  const oldTurn = r.host.thread("group:7")!.turnId!;
+  // 后端开的唤醒回合取代了进行中的 codex 回合（宿主没收到上一轮的结束事件）
+  r.host.onTurnStarted("group:7", "pi:999:999", "backend");
+  await r.host.idle();
+  r.host.onTurnCompleted("group:7", "pi:999:999", { status: "completed" });
+  await r.host.idle();
+  await r.say("1", "owner 的问题");
+  await vi.waitFor(() => expect(r.host.thread("group:7")?.turnSender).toBe("1"), { timeout: 5000 });
+  const ownerTurn = r.host.thread("group:7")!.turnId!;
+  expect(() => r.inbox.bindingForTurn("group:7", oldTurn)).toThrow("本回合已结束");
+  expect(r.inbox.bindingForTurn("group:7", ownerTurn).identity).toEqual({ kind: "user", sender: "1" });
+  await r.idle(20_000);
+  expect(r.bridge.inbox.getInbound(first)!.turn_id).toBe(oldTurn);
+  expect(r.bridge.outbox.listOutboxByTurn(oldTurn)).toEqual([]);
+  expect(r.bridge.outbox.listOutboxByTurn(ownerTurn)).toMatchObject([{ status: "sent", mention_user_id: "1" }]);
+  expect(r.texts("7")).toEqual(["回复"]);
+  expect(calls().filter(c => c.phase === "send")).toHaveLength(1);
 });

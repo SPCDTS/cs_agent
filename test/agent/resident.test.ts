@@ -94,6 +94,46 @@ describe("常驻 agent：输入 → ThreadHost → pi 回合 → send_message", 
   });
 });
 
+describe("群里 owner 多账号插话（§7.2）", () => {
+  it("A 开轮、B 在第一条回复前插话：首条回复 @ 本轮发送者 A 并正常发出，input_key 仍为最新输入", async () => {
+    const slow = gate();
+    const results: string[][] = [];
+    const r = await residentRig({ owners: ["1", "9"], brain: (ctx) => {
+      const end = ctx.messages.at(-1)!;
+      if (end.role === "toolResult") { results.push(toolResults(ctx)); return reply("结束"); }
+      if (lastUser(ctx).endsWith("慢")) return (async () => { await slow.wait(); return call(["send_message", { text: "好" }]); })();
+      return call(["send_message", { text: "其他" }]);
+    } });
+    const a = await r.say("1", "慢");
+    await vi_wait(() => slow.entered === 1);
+    const b = await r.say("9", "另一个号补充");
+    expect(r.host.thread("group:7")?.turnInputs.map(i => i.inboundKey)).toEqual([a, b]);
+    slow.open();
+    await r.idle();
+    expect(results.flat().some(t => t.includes("回复只能 @"))).toBe(false);
+    expect(r.texts("7")[0]).toBe("好");
+    expect(r.mentions()[0]).toBe("1");
+    const rows = r.bridge.outbox.listOutboxByTurn(r.bridge.inbox.getInbound(a)!.turn_id!);
+    expect(rows[0]).toMatchObject({ status: "sent", mention_user_id: "1", input_key: b });
+  });
+
+  it("bridge 拒绝发送（@ 对象不合法）时模型收到错误", async () => {
+    const results: string[][] = [];
+    const r = await residentRig({ brain: (ctx) => {
+      const end = ctx.messages.at(-1)!;
+      if (end.role === "toolResult") { results.push(toolResults(ctx)); return reply("结束"); }
+      return call(["send_message", { text: "好" }]);
+    } });
+    // 模拟通道拒绝：@ 对象换成本轮之外的人
+    const original = r.bridge.send.bind(r.bridge);
+    r.bridge.send = (key, target, body, images, opts) => original(key, target, body, images, { ...opts, mention: "6" });
+    await r.say("5", "你好");
+    await r.idle();
+    expect(r.sent).toEqual([]);
+    expect(results.flat().some(t => t.includes("回复只能 @ 本轮发送者"))).toBe(true);
+  });
+});
+
 describe("出错提示与看门狗（§8）", () => {
   it("回合失败发一条出错提示；10 分钟内同一会话不再重复", async () => {
     let now = Date.now();
@@ -163,6 +203,47 @@ describe("子 agent 唤醒回合（§6.2、§7.3）", () => {
     expect(r.texts("8")).toEqual([]);
     expect(r.mentions()).toEqual([null]);
     expect(results[1]!.some(t => t.includes("唤醒回合只能发往本会话"))).toBe(true);
+  });
+});
+
+describe("唤醒回合不被用户输入升级（§7.3）", () => {
+  it("宿主尚未确认唤醒 run 时 owner 来消息：输入不并入唤醒 run，唤醒工作保持唤醒身份，消息排到其后", async () => {
+    const wakeGate = gate();
+    const results: string[][] = [];
+    const r = await residentRig({ owners: ["1"], brain: (ctx) => {
+      if (isChild(ctx)) return reply("晴，25 度");
+      const end = ctx.messages.at(-1)!;
+      if (end.role === "toolResult") { results.push(toolResults(ctx)); return reply("收尾"); }
+      const input = lastUser(ctx);
+      if (input.startsWith("[子 agent 完成]")) return (async () => { await wakeGate.wait(); return call(["send_message", { text: "转告", target: "qq:group:8" }]); })();
+      if (input.endsWith("新消息")) return call(["send_message", { text: "收到新消息" }]);
+      return call(["subagent", { action: "spawn", name: "w", task: "查天气" }]);
+    } });
+    // 宿主暂不处理后端开的回合（模拟唤醒事件还在路上）
+    const deferred: (() => void)[] = [];
+    const onTurnStarted = r.host.onTurnStarted.bind(r.host);
+    r.host.onTurnStarted = (threadKey, turnId, by) => {
+      if (by === "backend") deferred.push(() => onTurnStarted(threadKey, turnId, by));
+      else onTurnStarted(threadKey, turnId, by);
+    };
+    await r.say("1", "查一下天气");
+    await vi_wait(() => wakeGate.entered === 1, 15_000);
+    await r.host.idle();
+    expect(r.host.thread("group:7")?.busy).toBe(false);
+    const late = await r.say("1", "新消息");
+    await r.host.idle();
+    // 输入没有并入唤醒 run：宿主按唤醒回合接管，消息排队
+    expect(r.host.thread("group:7")).toMatchObject({ busy: true, turnKind: "wake", pending: [{ inboundKey: late }] });
+    expect(r.host.currentIdentity("group:7")).toEqual({ kind: "wake" });
+    wakeGate.open();
+    for (const fire of deferred.splice(0)) fire();
+    await r.idle(15_000);
+    expect(r.texts("8")).toEqual([]);
+    expect(results.some(rs => rs.some(t => t.includes("唤醒回合只能发往本会话")))).toBe(true);
+    // 新消息在唤醒回合结束后单独一轮，身份为 owner
+    expect(r.texts("7")).toEqual(["收到新消息"]);
+    expect(r.mentions()).toEqual(["1"]);
+    expect(r.bridge.inbox.getInbound(late)).toMatchObject({ state: "done" });
   });
 });
 

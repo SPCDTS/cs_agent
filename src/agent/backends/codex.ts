@@ -72,7 +72,8 @@ export class CodexBackend implements ThreadAdapter {
     const rendered = await this.opts.turns.render(this.opts.turns.records(inputs));
     const done = this.run(threadKey, turnId, rendered, turn, settings, control.signal)
       .then(result => {
-        this.running.delete(threadKey);
+        // 被放弃的旧 exec 可能晚于下一轮结束：只移除自己
+        if (this.running.get(threadKey)?.turnId === turnId) this.running.delete(threadKey);
         this.host?.onTurnCompleted(threadKey, turnId, result);
       });
     this.running.set(threadKey, { turnId, control, done });
@@ -85,6 +86,12 @@ export class CodexBackend implements ThreadAdapter {
 
   async interrupt(threadKey: ThreadKey): Promise<void> {
     this.running.get(threadKey)?.control.abort(new Error("回合已中止"));
+  }
+
+  /** 宿主放弃的回合（被唤醒回合取代）：中止仍在运行的 exec（连同其召回 / 发送租约），不能留到下一轮以新身份调用工具。 */
+  async abandon(threadKey: ThreadKey, turnId: string): Promise<void> {
+    const run = this.running.get(threadKey);
+    if (run?.turnId === turnId) run.control.abort(new Error("回合已被取代"));
   }
 
   /** exec 随进程退出丢失（§5.4）。 */

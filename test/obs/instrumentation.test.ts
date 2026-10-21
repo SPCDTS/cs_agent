@@ -35,19 +35,23 @@ afterEach(async()=>{trace.attach(undefined);for(const fn of clean.splice(0).reve
  */
 function hostStub(name:string){
   const records=new Map<string,InboundRecord>();
+  // pi 回合的 id 以适配器为准（宿主当前回合须与 pi 当前 run 一致），开轮后写回
+  const state:{turnId?:string}={turnId:name};
   const turns={
-    binding:(threadKey:string)=>({threadKey,identity:{kind:'user' as const,sender:'1'},scope:'private:1',turnId:name,inputs:[...records.keys()],inputKey:[...records.keys()].at(-1)}),
+    binding:(threadKey:string)=>({threadKey,identity:{kind:'user' as const,sender:'1'},scope:'private:1',...(state.turnId?{turnId:state.turnId}:{}),inputs:[...records.keys()],inputKey:[...records.keys()].at(-1)}),
     records:(inputs:readonly {inboundKey:string}[])=>inputs.map(i=>records.get(i.inboundKey)!),
     render:async(recs:readonly InboundRecord[])=>({text:recs.map(r=>r.text).join('\n'),images:[],source:{type:'private' as const,user_id:'1',group_id:null,nickname:'测试'}}),
   };
-  return {turns,records};
+  return {turns,records,state};
 }
 async function piTurn(pi:PiBackend,stub:ReturnType<typeof hostStub>,key:string,text:string){
   stub.records.set(key,{key,kind:'user',seq:stub.records.size+1,scope:'private:1',thread_key:'private:1',self_id:'2',user_id:'1',group_id:null,message_type:'private',
     message_id:key,nickname:'测试',text,route_text:text,time:1,images:[],attachments:[],created_at:new Date().toISOString(),state:'queued'});
   let done!:(status:string)=>void;const ended=new Promise<string>(r=>{done=r;});
   pi.bind({onTurnStarted:()=>{},onActivity:()=>{},onTurnCompleted:(_k,_t,result)=>done(result.status)});
-  await pi.startTurn('private:1',[{inboundKey:key,kind:'user',sender:'1',seq:1,at:1}],{kind:'user',sender:'1'});
+  stub.state.turnId=undefined;
+  const started=await pi.startTurn('private:1',[{inboundKey:key,kind:'user',sender:'1',seq:1,at:1}],{kind:'user',sender:'1'});
+  if('turnId' in started)stub.state.turnId=started.turnId;
   return ended;
 }
 async function openPi(r:Awaited<ReturnType<typeof rig>>,name:string,extra:Partial<PiBackendOptions>={}){
@@ -149,7 +153,7 @@ it('pi 每轮模型与工具 hook 记录用量、输入和结果，不需真实 
   const r=await rig();r.faux.setResponses([fauxAssistantMessage(fauxToolCall('qq_recent',{}),{stopReason:'toolUse'}),fauxAssistantMessage('假模型完成')]);
   const p=await openPi(r,'pi-ticket');
   expect(await p.run('in-1','历史')).toBe('completed');
-  const rows=r.store.events('turn:pi-ticket');expect(rows.filter(e=>e.stage==='model_turn'&&e.status==='started')).toHaveLength(2);
+  const rows=r.store.events('turn:'+p.stub.state.turnId);expect(rows.filter(e=>e.stage==='model_turn'&&e.status==='started')).toHaveLength(2);
   expect(rows.filter(e=>e.stage==='model_turn'&&e.status==='ok')).toHaveLength(2);
   expect(rows.find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')).toMatchObject({duration_ms:expect.any(Number)});
   expect(rows.filter(e=>e.stage==='model_turn'&&e.status==='ok').every(e=>'input_tokens' in JSON.parse(e.detail_json))).toBe(true);
@@ -163,7 +167,7 @@ it('真实 pi-durable 工具抛错 diagnostics 触发结构化鉴权告警，正
   r.faux.setResponses([fauxAssistantMessage(fauxToolCall('web_search',{query:'test'}),{stopReason:'toolUse'}),fauxAssistantMessage('检索失败')]);
   const p=await openPi(r,'auth-tool',{web});
   await p.run('in-1','检索');
-  const failed=r.store.events('turn:auth-tool').find(e=>e.stage==='tool:web_search'&&e.status==='failed')!;
+  const failed=r.store.events('turn:'+p.stub.state.turnId).find(e=>e.stage==='tool:web_search'&&e.status==='failed')!;
   const detail=JSON.parse(failed.detail_json);expect(detail.failure).toEqual({kind:'auth',provider:'deepseek',status:401});
   expect(detail.output.diagnostics[0]).toMatchObject({code:'tool_error',message:'HTTP 401 fake provider'});
   expect(send).toHaveBeenCalledTimes(1);
@@ -172,7 +176,7 @@ it('真实 pi-durable 工具抛错 diagnostics 触发结构化鉴权告警，正
   r.image.submit=async()=>{throw Object.assign(new Error('opaque image error'),{status:403});};
   r.faux.setResponses([fauxAssistantMessage(fauxToolCall('generate_image',{prompt:'fake'}),{stopReason:'toolUse'}),fauxAssistantMessage('生图失败')]);
   await p.run('in-2','画图');
-  const imageFailure=r.store.events('turn:auth-tool').find(e=>e.stage==='tool:generate_image'&&e.status==='failed')!;
+  const imageFailure=r.store.events('turn:'+p.stub.state.turnId).find(e=>e.stage==='tool:generate_image'&&e.status==='failed')!;
   expect(JSON.parse(imageFailure.detail_json).failure).toEqual({kind:'auth',provider:'comfy',status:403});expect(send).toHaveBeenCalledTimes(1);
 });
 it('Codex 排队时间与模型时间分别记录，backend span 保留总耗时',async()=>{
@@ -213,7 +217,7 @@ it('pi、衰老使用同一非零缓存 usage fixture，费用口径一致',asyn
   const report=await runAging({store:r.context,models:r.models,model:()=>model,rawDays:30,summaryDays:180,hour:3,now:()=>now});expect(report.day_summaries).toBe(1);
   const metrics=new Metrics(r.store,{retentionDays:365,inputPrice:2,outputPrice:4});await metrics.flush();
   expect(r.store.db.prepare("SELECT value FROM metrics WHERE name='deepseek_estimated_cost'").get()?.value).toBeCloseTo(.00072);
-  for(const ticket of ['turn:usage-pi','@aging']){
+  for(const ticket of ['turn:'+stub.state.turnId,'@aging']){
     const d=JSON.parse(r.store.events(ticket).find(e=>e.stage==='model_turn'&&e.status==='ok')!.detail_json);
     expect(d).toMatchObject({input_tokens:100,output_tokens:20,cache_read_tokens:30,cache_write_tokens:10});
     expect(usageCost({input:d.input_tokens,output:d.output_tokens,cacheRead:d.cache_read_tokens,cacheWrite:d.cache_write_tokens},2,4).cost).toBe(.00036);

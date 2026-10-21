@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync, mkdirSync, symlinkSync, utimesSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, utimesSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SendService } from "../../src/agent/send-service.js";
@@ -156,11 +156,27 @@ it.each(["sent", "uncertain"] as const)("同一回合内新调用与 %s 行正�
   const f = sendFixture();
   if (status === "uncertain") f.call.mockImplementationOnce(async () => ({ user_id: 2 })).mockRejectedValueOnce(new Error("响应丢失"));
   const first = await f.service.send(f.binding, { text: "同一内容" }, "first");
-  const repeat = await f.service.send(f.binding, { text: "同一内容", files: [{ path: "不存在.txt" }] }, "another");
+  const repeat = await f.service.send(f.binding, { text: "同一内容" }, "another");
   expect(repeat).toMatchObject({ status, already_sent: true, message_id: first.message_id });
   if (status === "uncertain") expect(repeat.note).toContain("消息可能已送达，不要重发");
   expect(rows(f)).toHaveLength(1);
   expect(await f.service.send(f.bindingFor(undefined, "t2"), { text: "同一内容" }, "next-turn")).toMatchObject({ already_sent: false });
+});
+
+it("同一回合正文相同但图片或文件不同：照常发送新附件；附件内容相同才视为重复", async () => {
+  const f = sendFixture();
+  writeFileSync(path.join(f.workdir, "other.png"), Buffer.concat([readFileSync(path.join(f.workdir, "image.png")), Buffer.from([0])]));
+  const first = await f.service.send(f.binding, { text: "看图", images: ["image.png"] }, "first");
+  const otherImage = await f.service.send(f.binding, { text: "看图", images: ["other.png"] }, "second");
+  expect(otherImage).toMatchObject({ already_sent: false });
+  expect(otherImage.message_id).not.toBe(first.message_id);
+  const withFile = await f.service.send(f.binding, { text: "看图", images: ["image.png"], files: [{ path: "file.txt" }] }, "third");
+  expect(withFile).toMatchObject({ already_sent: false });
+  // 同一图片内容（不同路径）且没有文件：与第一条重复
+  writeFileSync(path.join(f.workdir, "copy.png"), readFileSync(path.join(f.workdir, "image.png")));
+  expect(await f.service.send(f.binding, { text: "看图", images: ["copy.png"] }, "fourth")).toMatchObject({ already_sent: true, message_id: first.message_id });
+  expect(groupSends(f)).toHaveLength(3);
+  expect(rows(f).find(r => r.key === "group:7:third")!.files).toMatchObject([{ status: "sent" }]);
 });
 
 it("重放与 reconcile 不重复记录 send_message；观测按回合键", async () => {

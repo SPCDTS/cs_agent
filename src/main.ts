@@ -140,8 +140,8 @@ async function main(): Promise<void> {
     limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } });
   let schedules: ScheduleService;
   const scheduleTools = new ScheduleTools({ grants, getHarness: () => dispatchHarness, getSchedules: () => schedules });
-  // codex 的 IM / 召回租约只绑定会话与回合；身份在每次调用时从宿主求出。
-  const turnOf = (lease: RecallBinding) => inbox.binding(lease.threadKey);
+  // codex 的 IM / 召回租约只绑定会话与回合；身份在每次调用时从宿主求出，且租约的回合须仍是宿主的当前回合。
+  const turnOf = (lease: RecallBinding) => inbox.bindingForTurn(lease.threadKey, lease.turnId);
   const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel, {
     permissions: async lease => ({ ...await grants.permissions(turnOf(lease)), ...await scheduleTools.permissions(turnOf(lease)) }),
     schedule: (lease, name, args) => scheduleTools.tool(turnOf(lease), name, args),
@@ -252,7 +252,7 @@ async function main(): Promise<void> {
   const scheduled = createScheduledRuntime({
     getChannel: getBridge, getHarness: () => dispatchHarness, owner: cfg.owner, owners: cfg.owners, canSchedule,
     deliver: key => inbox.deliverScheduled(key),
-    inputState: key => host.inputState(key),
+    inputState: key => host.inputState(key), inputOutcome: key => host.inputOutcome(key),
     recorder: { recordRun: (id, run) => schedules.recordRun(id, run) },
     pauseSchedule: (id, reason) => schedules.pauseWithReason(id, reason),
   });
@@ -308,7 +308,8 @@ async function main(): Promise<void> {
   const router = new BackendRouter({ backends: { pi, codex: codexBackend }, settings: turnSettings, turns: inbox });
   const monitor = new TurnMonitor({ inbox, sendService, scheduled, getHost: () => host });
   // 会话宿主（§4.2）：状态存于派发 harness 的 cs.thread-host 文档；并发上限只限进行中的回合数。
-  host = new ThreadHost({ store: harness, adapter: router, concurrency: cfg.AGENT_CONCURRENCY, owners: cfg.owners, events: monitor.events });
+  host = new ThreadHost({ store: harness, adapter: router, concurrency: cfg.AGENT_CONCURRENCY, owners: cfg.owners, events: monitor.events,
+    admit: (_threadKey, input) => scheduled.admit(input.inboundKey) });
   pi.bind(host);
   codexBackend.attach(host);
 

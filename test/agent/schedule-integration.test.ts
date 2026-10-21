@@ -69,7 +69,7 @@ async function rig() {
   const adapter = new FakeAdapter((threadKey, turnId) => send.send({ ...inbox.binding(threadKey),
     access: { kind: "scope", scope: inbox.binding(threadKey).scope }, workdir: f.workdir }, { text: "定时通知" }, `${turnId}#1`));
   const scheduled = createScheduledRuntime({ getChannel: () => f.bridge, getHarness: () => harness, owner: "1", owners: ["1"], canSchedule,
-    deliver: key => inbox.deliverScheduled(key), inputState: key => host.inputState(key),
+    deliver: key => inbox.deliverScheduled(key), inputState: key => host.inputState(key), inputOutcome: key => host.inputOutcome(key),
     recorder: { recordRun: (id, run) => service.recordRun(id, run) },
     pauseSchedule: (id, reason) => service.pauseWithReason(id, reason),
   });
@@ -91,7 +91,8 @@ async function rig() {
     }, ctx);
     service = new ScheduleService({ harness, task: scheduleTask, admitter: launcher, owner: "1", canSchedule });
     monitor = new TurnMonitor({ inbox, sendService: send, scheduled, getHost: () => host });
-    host = new ThreadHost({ store: harness, adapter, concurrency: 2, owners: ["1"], events: monitor.events });
+    host = new ThreadHost({ store: harness, adapter, concurrency: 2, owners: ["1"], events: monitor.events,
+      admit: (_threadKey, input) => scheduled.admit(input.inboundKey) });
     adapter.host = host;
   };
   await open();
@@ -234,6 +235,52 @@ it.each(["expired", "revoked"] as const)("排队后授权 %s：投递前按创�
   expect(r.adapter.turns).toEqual([]);
   expect(r.store.getInbound(queued.ticket!)!.state).toBe("done");
   await expect(r.service.runNow("qq:1", s.id)).rejects.toMatchObject({ status: 403 });
+});
+
+it.each(["release", "restart"] as const)("已在宿主排队的定时输入，授权撤销后开轮前重查（%s）：记无权失败并暂停，不开回合", async mode => {
+  const r = await rig();
+  await r.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"], scopes: ["group:7"], expires_in_hours: 1 });
+  const s = await r.service.create("qq:9", input({ conversation: "group:7", rule: { kind: "rrule", rrule: "FREQ=MINUTELY;INTERVAL=30", dtstart: START } }));
+  await r.recover();
+  r.adapter.hold = true; r.adapter.outcome = "silent";
+  await r.host.deliver("group:7", { inboundKey: r.key, kind: "user", sender: "1" });
+  await r.host.idle();
+  const queued = (await r.fire(s, START + 1_800_000, false)).runs[0]!;
+  await r.settle().catch(() => undefined);
+  expect(await r.host.inputState(queued.ticket!)).toBe("queued");
+  await r.grants.panel("auth_revoke", { user: "qq:9", caps: ["schedule"] });
+  if (mode === "restart") {
+    await r.restart();
+    await r.recover();
+  }
+  r.adapter.release();
+  await r.settle();
+  await flush(async () => (await r.service.get(s.id))!.status === "paused");
+  expect((await r.service.get(s.id))!).toMatchObject({ status: "paused", pause_reason: expect.stringContaining("无权"),
+    runs: [{ status: "failed", note: expect.stringContaining("无权") }] });
+  expect(r.adapter.turns.map(t => t.ctx.kind)).toEqual(["user"]);
+  expect(r.store.getInbound(queued.ticket!)!.state).toBe("done");
+  expect(await r.host.inputState(queued.ticket!)).toBe("done");
+});
+
+it("定时回合失败、结果回写前崩溃：恢复按宿主持久化的失败结算，不清零连续失败计数", async () => {
+  const r = await rig();
+  const s = await r.service.create("qq:1", input({ conversation: "group:7" }));
+  await r.recover();
+  r.adapter.outcome = "failed";
+  // 模拟崩溃：宿主已把输入标记 done，异步的 finish 尚未写入结果
+  const finish = vi.spyOn(r.scheduled, "finish").mockImplementation(async () => {});
+  await r.fire(s, START + 300_000, false);
+  await r.settle();
+  expect(await r.host.inputState(scheduledInputKey(`${s.id}@${START + 300_000}`))).toBe("done");
+  expect((await r.service.get(s.id))!.runs[0]!.status).toBe("running");
+  finish.mockRestore();
+  await r.restart();
+  await r.recover();
+  await r.settle();
+  await flush(async () => (await r.service.get(s.id))!.runs[0]!.status !== "running");
+  expect((await r.service.get(s.id))!).toMatchObject({ failures: 1, runs: [{ status: "failed", note: "回合失败" }] });
+  expect(r.adapter.turns).toHaveLength(1);
 });
 
 it("启动恢复已提交但未投递的定时运行与普通消息，同时继续排程任务", async () => {

@@ -18,7 +18,7 @@ import { log } from "../../shared/log.js";
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import { HostInputDoc, ThreadHostDoc, ThreadHostIndexDoc, type ThreadHostState } from "./docs.js";
 import type {
-  DeliverResult, HostCallbacks, HostInput, InputRef, ThreadAdapter, ThreadHostEvents, ThreadKey,
+  DeliverResult, HostCallbacks, HostInput, InputRef, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey,
   TurnEnded, TurnIdentity, TurnStatus,
 } from "./types.js";
 
@@ -33,6 +33,11 @@ export interface ThreadHostOptions {
   /** owner 的多个 QQ 号算同一发送者 */
   owners?: OwnerIds | (() => OwnerIds);
   events?: ThreadHostEvents;
+  /**
+   * 定时输入开轮前的准入复核（§10）：排队期间创建者的授权可能已撤销或过期，开轮前（含重启恢复后）按当前授权重查。
+   * 返回 false：不开轮，该输入按失败结束（拒绝记录与暂停由调用方在返回前持久化）。抛错按开轮失败处理。
+   */
+  admit?(threadKey: ThreadKey, input: InputRef): Promise<boolean>;
   now?: () => number;
   context?: Context;
 }
@@ -199,15 +204,34 @@ export class ThreadHost implements HostCallbacks {
         await this.save(threadKey, begun);
         used = true;
         this.holding.add(threadKey);
-        let turnId: string;
+        let started: StartTurnResult | "denied";
         try {
-          ({ turnId } = await this.opts.adapter.startTurn(threadKey, inputs, { kind: head.kind, sender: head.sender }));
+          // 定时输入开轮前按创建者当前授权复核（排队期间可能已撤销或过期）
+          started = head.kind === "scheduled" && this.opts.admit && !await this.opts.admit(threadKey, head) ? "denied"
+            : await this.opts.adapter.startTurn(threadKey, inputs, { kind: head.kind, sender: head.sender });
         } catch (error) {
           log.warn("thread host start turn failed", { thread: threadKey, inputs: [...keys], error });
           await this.finish(threadKey, begun, "failed", error instanceof Error ? error.message : String(error));
           return;
         }
+        if (started === "denied") {
+          log.warn("thread host scheduled input denied at turn start", { thread: threadKey, input: head.inboundKey });
+          await this.finish(threadKey, begun, "failed", "定时任务创建者已无权限");
+          return;
+        }
         const cur = this.threads.get(threadKey)!;
+        if ("backendTurnId" in started) {
+          // 后端已有本宿主尚未确认的回合（唤醒）：按唤醒回合接管（身份为唤醒，不升级为本轮发送者），输入放回队列等它结束
+          log.warn("thread host start yielded to backend turn", { thread: threadKey, turn: started.backendTurnId, inputs: [...keys] });
+          const wake: ThreadHostState = {
+            ...cur, turnId: started.backendTurnId, turnKind: "wake", turnInputs: [], pending: bySeq([...inputs, ...cur.pending]),
+            mentioned: false, lastActivityAt: this.now(),
+          };
+          delete wake.turnSender;
+          await this.save(threadKey, wake);
+          return;
+        }
+        const turnId = started.turnId;
         await this.save(threadKey, { ...cur, turnId }, tx => this.markInputs(tx, threadKey, inputs, "delivered"));
         this.emit("inputsDelivered", threadKey, turnId, inputs);
       });
@@ -219,10 +243,11 @@ export class ThreadHost implements HostCallbacks {
     this.pump(threadKey);
   }
 
-  /** 回合结束：清空本轮、输入标记 done、归还槽位，并通知外层。 */
+  /** 回合结束：清空本轮、输入标记 done（同一提交记下回合结果）、归还槽位，并通知外层。 */
   private async finish(threadKey: ThreadKey, s: ThreadHostState, status: TurnStatus, error?: string): Promise<void> {
     const cur = this.threads.get(threadKey) ?? s;
-    await this.save(threadKey, idleState(cur), tx => this.markInputs(tx, threadKey, s.turnInputs, "done"));
+    await this.save(threadKey, idleState(cur), tx => this.markInputs(tx, threadKey, s.turnInputs, "done",
+      { status, ...(s.turnId ? { turnId: s.turnId } : {}) }));
     if (this.holding.delete(threadKey)) this.slots.release();
     const event: TurnEnded = {
       threadKey, kind: s.turnKind ?? "wake", inputs: s.turnInputs, status,
@@ -242,6 +267,11 @@ export class ThreadHost implements HostCallbacks {
         // 没收到上一轮的结束事件就开了唤醒回合：上一轮按已结束处理，身份收窄为唤醒（只更严格）
         log.warn("thread host wake turn superseded active turn", { thread: threadKey, previous: s.turnId, turnId });
         await this.finish(threadKey, s, "completed", "superseded by backend turn");
+        // 上一轮的后端工作可能仍在运行（codex exec）：不能再以该回合的身份行事
+        if (s.turnId) {
+          await this.opts.adapter.abandon?.(threadKey, s.turnId)
+            .catch(error => log.warn("thread host abandon superseded turn failed", { thread: threadKey, turn: s.turnId, error }));
+        }
       }
       const cur = this.threads.get(threadKey)!;
       const wake: ThreadHostState = {
@@ -313,6 +343,13 @@ export class ThreadHost implements HostCallbacks {
   async inputState(inboundKey: string): Promise<"queued" | "delivered" | "done" | undefined> {
     const doc = await this.opts.store.snapshot(HostInputDoc, inboundKey, this.ctx);
     return doc && doc.state !== "new" ? doc.state : undefined;
+  }
+
+  /** 已结束输入所在回合的结果（与 done 同一提交写入）；未结束或没有记录返回 undefined。 */
+  async inputOutcome(inboundKey: string): Promise<{ status: TurnStatus; turnId?: string } | undefined> {
+    const doc = await this.opts.store.snapshot(HostInputDoc, inboundKey, this.ctx);
+    if (doc?.state !== "done" || !doc.status) return undefined;
+    return { status: doc.status, ...(doc.turnId ? { turnId: doc.turnId } : {}) };
   }
 
   /** 观测用的只读副本 */
@@ -406,8 +443,9 @@ export class ThreadHost implements HostCallbacks {
     else delete index.active[next.threadKey];
   }
 
-  private async markInputs(tx: Tx, threadKey: string, refs: readonly InputRef[], state: "delivered" | "done"): Promise<void> {
-    for (const ref of refs) (await tx.doc(HostInputDoc, ref.inboundKey, threadKey)).state = state;
+  private async markInputs(tx: Tx, threadKey: string, refs: readonly InputRef[], state: "delivered" | "done",
+    outcome?: { status: TurnStatus; turnId?: string }): Promise<void> {
+    for (const ref of refs) Object.assign(await tx.doc(HostInputDoc, ref.inboundKey, threadKey), { state, ...outcome });
   }
 
   private serial<T>(threadKey: string, work: () => Promise<T>): Promise<T> {

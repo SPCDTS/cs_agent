@@ -8,7 +8,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { afterEach, describe, expect, it } from "vitest";
 import { HostInputDoc, ThreadHostDoc } from "../../../src/agent/host/docs.js";
 import { ThreadHost, STALL_MS } from "../../../src/agent/host/thread-host.js";
-import type { HostCallbacks, InputRef, ThreadAdapter, ThreadKey, TurnContext, TurnEnded } from "../../../src/agent/host/types.js";
+import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnEnded } from "../../../src/agent/host/types.js";
 
 const ctx = BACKGROUND_CONTEXT;
 const G = "group:42" as ThreadKey, H = "group:43" as ThreadKey, P = "private:7" as ThreadKey;
@@ -26,11 +26,21 @@ class FakeAdapter implements ThreadAdapter {
   failStart?: string;
   /** 开轮挂起（模拟开轮请求发出后进程崩溃） */
   hangStart = false;
+  /** 后端已有宿主尚未确认的唤醒回合：开轮时不收输入，回报该回合 */
+  busyWake?: string;
+  abandoned: { threadKey: ThreadKey; turnId: string }[] = [];
   private n = 0;
 
-  async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turnCtx: TurnContext) {
+  async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turnCtx: TurnContext): Promise<StartTurnResult> {
     if (this.hangStart) return new Promise<never>(() => {});
     if (this.failStart) throw new Error(this.failStart);
+    if (this.busyWake) {
+      const turnId = this.busyWake;
+      this.busyWake = undefined;
+      this.live.set(threadKey, turnId);
+      this.host.onTurnStarted(threadKey, turnId, "backend");
+      return { backendTurnId: turnId };
+    }
     const turnId = `t${++this.n}`;
     this.live.set(threadKey, turnId);
     this.starts.push({ threadKey, keys: inputs.map(i => i.inboundKey), ctx: turnCtx, turnId });
@@ -45,6 +55,7 @@ class FakeAdapter implements ThreadAdapter {
   }
   async interrupt(threadKey: ThreadKey) { this.interrupts.push(threadKey); }
   async recoverTurn(threadKey: ThreadKey) { return this.recoverAs(threadKey); }
+  async abandon(threadKey: ThreadKey, turnId: string) { this.abandoned.push({ threadKey, turnId }); }
 
   /** 后端回合结束，但结束事件暂不送达（插话竞态） */
   endSilently(threadKey: ThreadKey) { const id = this.live.get(threadKey)!; this.live.delete(threadKey); return id; }
@@ -64,7 +75,7 @@ class FakeAdapter implements ThreadAdapter {
 const rigs: { close(): Promise<void> }[] = [];
 afterEach(async () => { for (const r of rigs.splice(0)) await r.close(); });
 
-async function rig(options: { concurrency?: number; now?: () => number } = {}) {
+async function rig(options: { concurrency?: number; now?: () => number; admit?: (threadKey: ThreadKey, input: InputRef) => Promise<boolean> } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "cs-thread-host-"));
   let harness!: Harness, host!: ThreadHost, adapter!: FakeAdapter;
   const ended: TurnEnded[] = [];
@@ -74,7 +85,7 @@ async function rig(options: { concurrency?: number; now?: () => number } = {}) {
       { registry: createRegistry(), models: createModels() }, ctx);
     adapter = fresh;
     host = new ThreadHost({
-      store: harness, adapter, concurrency: options.concurrency ?? 4, owners: OWNERS, now: options.now,
+      store: harness, adapter, concurrency: options.concurrency ?? 4, owners: OWNERS, now: options.now, admit: options.admit,
       events: {
         turnEnded: e => ended.push(e),
         inputsDelivered: (_t, turnId, inputs) => delivered.push({ turnId, keys: inputs.map(i => i.inboundKey) }),
@@ -225,6 +236,50 @@ describe("ThreadHost 投递规则（§4.2）", () => {
     expect(r.host.status().active).toBe(1);
     r.host.onTurnCompleted(G, "t1", { status: "completed" }); await r.settle();
     expect(r.host.thread(G)).toMatchObject({ busy: true, turnId });
+    // 被取代的回合交给适配器放弃（codex 中止 exec、pi 降为唤醒身份）
+    expect(r.adapter.abandoned).toEqual([{ threadKey: G, turnId: "t1" }]);
+  });
+
+  it("开轮时后端回报已有唤醒回合：输入不送入，按唤醒回合接管（唤醒身份），输入排到其后", async () => {
+    const r = await rig();
+    r.adapter.busyWake = "w9";
+    await r.user(G, "m1", "1001"); await r.settle();
+    expect(r.host.thread(G)).toMatchObject({ busy: true, turnId: "w9", turnKind: "wake", turnInputs: [], pending: [{ inboundKey: "m1" }] });
+    expect(r.host.thread(G)!.turnSender).toBeUndefined();
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "wake" });
+    expect(await r.host.takeMention(G)).toBe(false);
+    expect(r.delivered).toEqual([]);
+    expect(await r.host.inputState("m1")).toBe("queued");
+    r.adapter.complete(G, "completed", "w9"); await r.settle();
+    expect(r.ended[0]).toMatchObject({ turnId: "w9", kind: "wake", inputs: [] });
+    expect(r.adapter.starts).toMatchObject([{ keys: ["m1"], ctx: { kind: "user", sender: "1001" } }]);
+    expect(r.host.thread(G)).toMatchObject({ busy: true, turnKind: "user", turnSender: "1001" });
+    expect(r.host.status().active).toBe(1);
+  });
+
+  it("定时输入开轮前复核：拒绝 → 不开轮，以 failed 结束该输入，继续下一条", async () => {
+    const admitted: string[] = [];
+    const r = await rig({ admit: async (_t, input) => { admitted.push(input.inboundKey); return input.inboundKey !== "s1"; } });
+    await r.user(G, "a1", "A"); await r.settle();
+    await r.scheduled(G, "s1"); await r.scheduled(G, "s2");
+    expect(admitted).toEqual([]);
+    r.adapter.complete(G); await r.settle();
+    expect(admitted).toEqual(["s1", "s2"]);
+    expect(r.ended[1]).toMatchObject({ kind: "scheduled", status: "failed", inputs: [{ inboundKey: "s1" }] });
+    expect(r.ended[1]!.turnId).toBeUndefined();
+    expect(await r.host.inputState("s1")).toBe("done");
+    expect(r.adapter.keysOf(G)).toEqual([["a1"], ["s2"]]);
+    expect(r.host.status().active).toBe(1);
+  });
+
+  it("回合结果与输入 done 同一提交持久化（inputOutcome）", async () => {
+    const r = await rig();
+    await r.user(G, "a1", "A"); await r.settle();
+    expect(await r.host.inputOutcome("a1")).toBeUndefined();
+    r.adapter.complete(G, "failed"); await r.settle();
+    expect(await r.host.inputOutcome("a1")).toEqual({ status: "failed", turnId: "t1" });
+    await r.restart();
+    expect(await r.host.inputOutcome("a1")).toEqual({ status: "failed", turnId: "t1" });
   });
 
   it("开轮失败 → 以 failed 结束这些输入，继续下一条排队输入", async () => {

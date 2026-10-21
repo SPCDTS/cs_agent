@@ -48,6 +48,19 @@ function validCallKey(callKey: string): string {
   return callKey;
 }
 
+const sha256 = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
+
+/**
+ * 去重用的附件比较：图片按内容、文件按内容与显示名，保持顺序。
+ * 已登记行的图片读 Outbox 副本；副本已被清理时内容未知，只要求数量一致（宁可不重发）。
+ */
+async function sameAttachments(row: OutboxRow, prepared: Awaited<ReturnType<typeof prepareSendAttachments>>): Promise<boolean> {
+  if (row.images.length !== prepared.images.length || row.files.length !== prepared.files.length) return false;
+  if (row.files.some((file, i) => file.sha256 !== prepared.files[i]!.sha256 || file.name !== prepared.files[i]!.name)) return false;
+  const images = await Promise.all(row.images.map(file => fs.readFile(file).then(sha256, () => undefined)));
+  return images.every((hash, i) => hash === undefined || hash === sha256(prepared.images[i]!.data));
+}
+
 /**
  * send_message 绑定会话（设计 §7）：行键 `<threadKey>:<callKey>`，同一调用重放取回同一行（永不重发）。
  * 没有"本回合已经结束"与每轮条数的校验；失控防护由 bridge 发送规则负责（§9）。按会话串行。
@@ -91,11 +104,17 @@ export class SendService {
         }
         return this.deliver(existing, signal);
       }
-      // 同一回合里内容与目标相同、已发出或结果不确定的消息不能通过新的调用键重发。
+      // 同一回合里内容（正文 + 图片与文件内容）与目标相同、已发出或结果不确定的消息不能通过新的调用键重发。
       const hash = createHash("sha256").update(args.text).digest("hex");
-      const duplicate = binding.turnId ? channel.outbox.listOutboxByTurn(binding.turnId).find(r => !r.system && r.status !== "pending" &&
-        r.text_sha256 === hash && r.message_type === target.message_type && r.target_id === target.target_id) : undefined;
-      if (duplicate) return this.deliver(duplicate, signal);
+      const candidates = binding.turnId ? channel.outbox.listOutboxByTurn(binding.turnId).filter(r => !r.system && r.status !== "pending" &&
+        r.text_sha256 === hash && r.message_type === target.message_type && r.target_id === target.target_id) : [];
+      let prepared: Awaited<ReturnType<typeof prepareSendAttachments>> | undefined;
+      if (candidates.length) {
+        prepared = await this.prepare(binding, args);
+        for (const row of candidates) {
+          if (await sameAttachments(row, prepared)) return this.deliver(row, signal);
+        }
+      }
       if (targeted) {
         if (binding.identity.kind === "wake") throw new Error("唤醒回合只能发往本会话；需要发往别处请先在本会话请用户确认");
         if (!this.opts.grants) throw new Error("主动发送授权未启用");
@@ -106,13 +125,7 @@ export class SendService {
       if (proactive && channel.outbox.countModelOutbox(target.message_type, target.target_id, this.day().start, this.day().end) >= 100) {
         throw new Error("该 target 当天最多主动发送 100 条消息（Asia/Shanghai）");
       }
-      const prepared = await prepareSendAttachments({
-        workdir: binding.workdir, extraRoots: binding.extraRoots,
-        mediaCheck: async file => {
-          if (!this.opts.store?.mediaPathAllowed(binding.access, file)) return false;
-          await readMediaFile(this.opts.dataDir, file); return true;
-        },
-      }, args, this.opts.limits);
+      prepared ??= await this.prepare(binding, args);
       signal?.throwIfAborted();
       const { images, files } = await this.copy(binding.threadKey, prepared);
       if (targeted) await this.opts.grants!.authorizeSend(binding, targetRef);
@@ -127,6 +140,16 @@ export class SendService {
       });
       return this.deliver(row, signal);
     });
+  }
+
+  private prepare(binding: SendBinding, args: SendArguments) {
+    return prepareSendAttachments({
+      workdir: binding.workdir, extraRoots: binding.extraRoots,
+      mediaCheck: async file => {
+        if (!this.opts.store?.mediaPathAllowed(binding.access, file)) return false;
+        await readMediaFile(this.opts.dataDir, file); return true;
+      },
+    }, args, this.opts.limits);
   }
 
   /** 附件先复制到会话的 Outbox 目录，发送与补传只读副本。 */

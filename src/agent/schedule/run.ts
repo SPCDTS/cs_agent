@@ -82,6 +82,8 @@ export interface ScheduledRuntimeOptions {
   deliver(key: string): Promise<void>;
   /** 宿主中的输入状态（恢复时判断输入是否已结束） */
   inputState?(key: string): Promise<"queued" | "delivered" | "done" | undefined>;
+  /** 已结束输入所在回合的结果（宿主与 done 同一提交写入）：结算回写前崩溃时据此重放同一结果 */
+  inputOutcome?(key: string): Promise<{ status: TurnStatus; turnId?: string } | undefined>;
   recorder: ScheduleRunRecorder;
   /** 主进程身份配置，可在运行前读取当前 owner。 */
   owner?: string | (() => string | undefined);
@@ -192,19 +194,38 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
     // 升级前登记的运行没有定时输入：按中断结束，避免永久占用重叠判定。
     if (!opts.getChannel().inbox.getInbound(key)) { await finish(key, { status: "lost" }); return; }
     const state = await opts.inputState?.(key);
-    if (state === "done") { await finish(key); return; }
-    if (state === undefined) {
-      const senderIsOwner = isOwnerActor(owners(), run.created_by);
-      const allowed = (run.conversation !== "owner" || senderIsOwner) &&
-        (opts.canSchedule ? await opts.canSchedule(run.created_by, run.conversation) : senderIsOwner);
-      if (!allowed) {
-        await update(run.conversationId, s => { s.denied = true; s.started_at ??= Date.now(); });
-        opts.getChannel().inbox.markInbound([key], "done");
-        await finish(key);
-        return;
-      }
+    if (state === "done") {
+      // 宿主已结束该输入、结算尚未回写（崩溃）：按宿主记下的回合结果结算；没有结果记录时不能当作成功
+      await finish(key, await opts.inputOutcome?.(key) ?? { status: "lost" });
+      return;
     }
+    // 投递前复核；已在宿主排队的输入由宿主开轮前再经 admit 复核
+    if (state === undefined && !await admit(key)) return;
     await opts.deliver(key);
+  }
+
+  /** 创建者当前是否仍可定时（owner 会话只允许 owner）。 */
+  async function allowed(run: RunState): Promise<boolean> {
+    const senderIsOwner = isOwnerActor(owners(), run.created_by);
+    return (run.conversation !== "owner" || senderIsOwner) &&
+      (opts.canSchedule ? await opts.canSchedule(run.created_by, run.conversation) : senderIsOwner);
+  }
+
+  /**
+   * 定时输入开轮前的准入复核（ThreadHost.admit，含重启恢复后的排队输入）：按创建者当前授权重查。
+   * 无权 → 先持久化 denied，再结束输入、记失败并暂停；返回 false 时宿主不开轮。
+   */
+  async function admit(key: string): Promise<boolean> {
+    const run = await readScheduledRun(opts.getHarness(), key);
+    if (!run) return true;
+    // 已结算的运行不再执行
+    if (!run.denied && !run.result) {
+      if (await allowed(run)) return true;
+      await update(run.conversationId, s => { s.denied = true; s.started_at ??= Date.now(); });
+    }
+    opts.getChannel().inbox.markInbound([key], "done");
+    await finish(key);
+    return false;
   }
 
   /** 输入送达后端：记 running 与所在回合。 */
@@ -226,7 +247,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
     }
   }
 
-  return { prepare, launch, delivered, finish, recover };
+  return { prepare, launch, admit, delivered, finish, recover };
 }
 
 export type ScheduledRuntime = ReturnType<typeof createScheduledRuntime>;

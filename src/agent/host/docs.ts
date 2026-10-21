@@ -1,5 +1,5 @@
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
-import type { InputRef, TurnKind } from "./types.js";
+import type { InputRef, TurnKind, TurnStatus } from "./types.js";
 
 /**
  * 每个会话键一份（family 成员键 = threadKey，§4.2）。
@@ -41,8 +41,13 @@ export const ThreadHostIndexDoc = defineDoc<{ nextSeq: number; active: Record<st
  * 每条输入一份（成员键 = inboundKey），只作幂等凭据与投递状态：
  * 回合结束后输入从会话文档移除，这里仍保留，重复投递永远是空操作。
  * state：queued（未送达后端）→ delivered（后端已收下）→ done（所在回合结束）。
+ * done 时同一提交写入所在回合的结果（status、turnId）：外层的结算（定时运行统计）崩溃丢失后据此重放同一结果。
  */
-export const HostInputDoc = defineDocFamily<{ threadKey: string; seq: number; state: "new" | "queued" | "delivered" | "done" }, string>({
+export type HostInputState = {
+  threadKey: string; seq: number; state: "new" | "queued" | "delivered" | "done";
+  status?: TurnStatus; turnId?: string;
+};
+export const HostInputDoc = defineDocFamily<HostInputState, string>({
   kind: "cs.thread-host.input", version: 1, scope: "session", family: true,
   initial: threadKey => ({ threadKey, seq: 0, state: "new" }),
 });

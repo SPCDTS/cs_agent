@@ -29,15 +29,26 @@ export type TurnContext = { kind: InputKind; sender: string };
 
 export type TurnStatus = "completed" | "failed" | "lost";
 
+/**
+ * 开轮结果：turnId 为新回合；backendTurnId 表示后端已有宿主尚未确认的回合（子 agent 唤醒等）——
+ * 输入没有送入（并入会让唤醒工作拿到本轮发送者的身份），宿主按唤醒回合接管该回合，输入放回队列等它结束。
+ */
+export type StartTurnResult = { turnId: string } | { backendTurnId: string };
+
 export interface ThreadAdapter {
-  /** 开一轮；返回后端回合 id。抛错视为投递失败，宿主按回合失败结束这些输入。 */
-  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext): Promise<{ turnId: string }>;
+  /** 开一轮。抛错视为投递失败，宿主按回合失败结束这些输入。 */
+  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext): Promise<StartTurnResult>;
   /** 插话进当前回合；回合恰好已结束（或 id 不符）时返回 no_active_turn，宿主回退为排队。 */
   steer(threadKey: ThreadKey, turnId: string, input: InputRef): Promise<"ok" | "no_active_turn">;
   /** 中止当前回合（面板"停止"、看门狗）；回合结束仍由 onTurnCompleted 回报。 */
   interrupt(threadKey: ThreadKey): Promise<void>;
   /** 重启恢复：持久化为进行中的回合是否仍存在（pi 回合可续跑 → alive；codex 随进程丢失 → lost）。 */
   recoverTurn(threadKey: ThreadKey, turnId: string): Promise<"alive" | "lost">;
+  /**
+   * 宿主已不再跟踪这个回合（被唤醒回合取代）：仍在运行的后端工作不能再以该回合的身份行事——
+   * codex 中止 exec；pi 把该 run 降为唤醒身份。之后的结束事件宿主按过期忽略。
+   */
+  abandon?(threadKey: ThreadKey, turnId: string): Promise<void>;
 }
 
 /**

@@ -157,7 +157,7 @@ describe("每轮设置快照", () => {
     const router = new BackendRouter({ backends: { codex, pi }, turns, settings: createTurnSettings({ currentSettings: current }) });
     records.set("first", record("first", "private:1"));
     const first = await router.startTurn("private:1", [ref("first")], { kind: "user", sender: "1" });
-    expect(first.turnId).toMatch(/^codex:/);
+    expect(first).toEqual({ turnId: expect.stringMatching(/^codex:/) });
     await vi.waitFor(() => expect(efforts).toEqual(["high"]));
     await settings.update({ codexReasoningEffort: "low", agentBackend: "pi" }, "test");
     current.mockImplementation(() => { throw new Error("回合内不得读取当前设置"); });

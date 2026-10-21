@@ -4,6 +4,7 @@
  * 生图前缀路由仍按票据回复（第 2 阶段保留）。
  */
 import { log } from "../shared/log.js";
+import { isOwner } from "../shared/owners.js";
 import { trace } from "../shared/trace.js";
 import { attachmentName } from "../media/attach.js";
 import type { DownloadHooks } from '../media/download.js';
@@ -589,8 +590,9 @@ class Bridge extends EventEmitter implements Channel {
         !isAllowed(this.config, { message_type: "private", user_id: target.target_id, group_id: null })) {
       throw new Error("此发送者已不在允许回复的名单中。");
     }
+    // @ 对象是本轮发送者（宿主 takeMention）；行的 input_key 是本轮最新输入。owner 多账号插话时二者可能是同一人的不同账号。
     if (opts?.mention && (row.proactive || row.system || target.message_type !== "group" || input?.kind !== "user" ||
-        input.scope !== scope || opts.mention !== input.user_id)) throw new Error("定时或主动发送不能 @，回复只能 @ 本轮发送者");
+        input.scope !== scope || !this.samePerson(opts.mention, input.user_id))) throw new Error("定时或主动发送不能 @，回复只能 @ 本轮发送者");
     if (text !== row.text || JSON.stringify(imagePaths) !== JSON.stringify(row.images) || (opts?.mention ?? null) !== row.mention_user_id) throw new Error("Outbox 内容不一致");
     validateText(text);
     const images = prepareImages(imagePaths, this.config.imageRoot);
@@ -611,6 +613,11 @@ class Bridge extends EventEmitter implements Channel {
       store.markOutboxSent(key, messageId);
       return { ...result, already_sent: false, message_id: messageId };
     } catch (error) { store.markOutboxUncertain(key); throw new OneBotError("QQ 发送结果不确定（uncertain），不会自动重发：" + toError(error).message, true); }
+  }
+
+  /** 同一发送者：同一 QQ 号，或 owner 的多个账号（与 ThreadHost.sameSender 一致）。 */
+  private samePerson(a: string, b: string): boolean {
+    return a === b || (isOwner(this.config.owners, a) && isOwner(this.config.owners, b));
   }
 
   /** 收到输入的账号必须仍是当前登录账号；定时输入没有收件账号，只要求登录可用。 */
