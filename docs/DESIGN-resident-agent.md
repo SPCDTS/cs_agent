@@ -107,7 +107,7 @@ QQ bridge ──@消息──▶ Inbox ──▶ ThreadHost(会话键) ──▶
 ### 5.3 MCP 与令牌
 
 - `im`、`qq_context`、`image_gen` 三个 MCP 服务按线程启动。令牌改为**线程令牌**：`thread/start` / `thread/resume` 的 `config` 里写入 `mcp_servers.im.env.IM_TOKEN` 等，绑定 threadKey，线程存在期间有效，进程重启时重新签发。
-  **待验证（阶段 3 开工前）**：app-server 是否为每个线程单独起 MCP 子进程、`config` 里的 MCP env 是否按线程生效。若不是，退而求其次：令牌不区分线程，`im` 服务在每次调用时带上 codex 提供的线程标识（`_meta` 或请求头），主进程据此解析。
+  **已验证（2026-10-21，0.164.0-alpha.8）**：`thread/start` 的 `config` 用点号键（`{"mcp_servers.im.env.IM_TOKEN": "..."}`）即按线程生效；app-server 为每个线程单独起一个 MCP 进程（两个线程两个 pid、各自的 env），同一线程跨回合复用。MCP `tools/call` 请求带 `_meta.callId`（与 `mcpToolCall` 条目 id 相同，形如 `exec-<uuid>`）和 `_meta["x-codex-turn-metadata"]`（含 `session_id`、`thread_id`）。
 - 令牌只证明"来自哪个线程"；发送者身份、读取范围、目标授权由主进程在每次调用时从 ThreadHost 的当前状态求出（7.3），不再把 `QQ_ACCESS`、`IMAGE_TICKET_DIR` 烤进环境变量。
 - 生图输出与附件目录按线程：`/data/images/<threadKey>/`、`/data/files/<threadKey>/`，定期清理（保留 7 天）。
 
@@ -161,7 +161,7 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 
 ### 7.4 Outbox
 
-- 行键改为 `<threadKey>:<callKey>`。`callKey`：pi 用稳定的 `toolCallId`；codex 由 `im` MCP 服务在每次调用时生成 UUID（常驻进程不会重放工具调用，靠状态机防"已发出未记账"）。
+- 行键改为 `<threadKey>:<callKey>`。`callKey`：pi 用稳定的 `toolCallId`；codex 用 MCP 请求的 `_meta.callId`（已验证随每次调用提供），`im` 服务原样转给主进程。
 - 状态机 `pending → sending → sent | uncertain`、永不自动重发、文件分步上传、`recordSent` 写入消息库，全部沿用。
 - 系统消息（出错提示、熔断通知）键为 `<threadKey>:sys:<uuid>`，不计主动额度。
 - `outbox.ticket` 列改为 `thread_key`，新增 `turn_id`（观测用）、`input_key`（引用用：发往本群时 `reply_to_id` = 本轮最后一条输入的 message_id）。
