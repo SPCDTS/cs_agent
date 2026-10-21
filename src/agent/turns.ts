@@ -1,8 +1,8 @@
 /**
  * 回合编排（设计 §4、§8）：
  * - BackendRouter：ThreadHost 的适配器入口，按会话键选择后端（面板设置与覆盖表；owner 线程取首个 owner 账号私聊的覆盖），
- *   不按单条输入的 scope——一个会话同一时间只由一个后端服务（§4.3）。后端由 plan 在会话空闲开新回合时选定、宿主落盘，
- *   开轮（含重启后恢复未确认的开轮）按落盘的后端执行；会话的上一回合属于另一个后端且那个后端在该会话仍有工作
+ *   不按单条输入的 scope——一个会话同一时间只由一个后端服务（§4.3）。后端属于会话：plan 选定、宿主落盘在会话文档，
+ *   开轮（含重启后恢复未确认的开轮）按会话后端执行；配置改为别的后端时，会话当前后端在该会话仍有工作
  *   （pi 子 agent 在跑、被放弃的 exec 未退出）时，本轮仍用旧后端，切换在它结束后生效。开轮时冻结设置快照；
  *   插话、恢复、放弃按回合 id 前缀（pi: / codex:）交给对应后端；后端不可用时开轮重试，超过 2 分钟才算投递失败。
  * - TurnMonitor：宿主事件的外层处理——Inbox 状态、观测、定时运行统计、出错提示（同一会话 10 分钟内最多一条）、
@@ -64,17 +64,21 @@ export class BackendRouter implements ThreadAdapter {
   }
 
   /**
-   * 选定本轮后端（宿主在会话空闲开新回合、写入"开轮中"之前调用）：按会话键的设置选择；上一回合属于另一个后端且
-   * 那个后端在该会话仍忙（pi 子 agent 在跑、run 未结束、被放弃的 exec 未退出）时，仍用旧后端。
+   * 选定会话后端（宿主在开新回合前、可以切换时调用）：按会话键的设置选择；会话当前后端（current）在该会话仍忙
+   * （pi 子 agent 在跑、run 未结束、被放弃的 exec 未退出）时仍用它。会话首次选定（没有 current）时，若某个后端在该会话
+   * 已有工作（升级前遗留、先到的唤醒回合），也选它。busy 抛错即本次选择失败，宿主沿用当前后端。
    */
-  async plan(threadKey: ThreadKey, input: InputRef, opts: { previousTurnId?: string }): Promise<string> {
+  async plan(threadKey: ThreadKey, input: InputRef, current?: string): Promise<string> {
     const [rec] = this.opts.turns.records([input]);
     const scope = this.threadScope(threadKey, rec!.scope);
     const wanted = this.opts.backendFor ? this.opts.backendFor(scope) : (await this.opts.settings(scope)).backend;
-    const previous = opts.previousTurnId ? this.nameOf(opts.previousTurnId) : undefined;
-    if (previous && previous !== wanted && await this.opts.backends[previous]?.busy?.(threadKey)) {
-      log.info("backend switch deferred; previous backend still busy", { thread: threadKey, from: previous, to: wanted });
-      return previous;
+    const others = current !== undefined ? [current as BackendName]
+      : (Object.keys(this.opts.backends) as BackendName[]).filter(name => name !== wanted);
+    for (const name of others) {
+      if (name !== wanted && await this.opts.backends[name]?.busy?.(threadKey)) {
+        log.info("backend switch deferred; thread still busy on its backend", { thread: threadKey, backend: name, configured: wanted });
+        return name;
+      }
     }
     return wanted;
   }

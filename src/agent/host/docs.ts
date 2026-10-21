@@ -21,10 +21,11 @@ export type ThreadHostState = {
   mentioned: boolean;
   /** 开轮时写入；回合中的活动只在内存刷新，不逐条落盘 */
   lastActivityAt?: number;
-  /** 本会话最近一个回合（含唤醒回合）的 id，空闲后保留：路由据此判定会话当前的后端（一个会话同一时间只由一个后端服务） */
-  lastTurnId?: string;
-  /** 开轮时选定的后端（与"开轮中"状态同一提交落盘）：未确认的开轮重启后按它重新开轮，不重新选择 */
-  route?: { inboundKey: string; backend: string };
+  /**
+   * 会话后端（一个会话同一时间只由一个后端服务，§4.3）：开轮、插话、放弃与恢复都用它；空闲后保留。
+   * 只在开新回合、会话空闲、队列里只有这一条且它从未交给过后端、旧后端不忙时才可能改变。
+   */
+  backend?: string;
 };
 
 export const ThreadHostDoc = defineDocFamily<ThreadHostState, string>({
@@ -44,11 +45,12 @@ export const ThreadHostIndexDoc = defineDoc<{ nextSeq: number; active: Record<st
 /**
  * 每条输入一份（成员键 = inboundKey），只作幂等凭据与投递状态：
  * 回合结束后输入从会话文档移除，这里仍保留，重复投递永远是空操作。
- * state：queued（未送达后端）→ delivered（后端已收下）→ done（所在回合结束）。
+ * state：queued（未交给后端）→ starting（开轮或插话请求已发出、未确认；崩溃后它可能已在会话后端里）
+ * → delivered（后端已收下）→ done（所在回合结束）。插话被拒时 starting 改回 queued。
  * done 时同一提交写入所在回合的结果（status、turnId）：外层的结算（定时运行统计）崩溃丢失后据此重放同一结果。
  */
 export type HostInputState = {
-  threadKey: string; seq: number; state: "new" | "queued" | "delivered" | "done";
+  threadKey: string; seq: number; state: "new" | "queued" | "starting" | "delivered" | "done";
   status?: TurnStatus; turnId?: string;
 };
 export const HostInputDoc = defineDocFamily<HostInputState, string>({

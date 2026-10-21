@@ -74,13 +74,17 @@ describe("BackendRouter", () => {
       ({ backend: backend ?? "codex" as const, codexReasoningEffort: "high" as const }));
     const turns = { records: (inputs: readonly Pick<InputRef, "inboundKey">[]) => inputs.map(i => rec(i.inboundKey)) };
     const router = new BackendRouter({ backends: { pi, codex }, settings, turns, backendFor: () => "codex" });
-    expect(await router.plan("group:7", input("a"), { previousTurnId: "pi:3:4" })).toBe("pi");
+    expect(await router.plan("group:7", input("a"), "pi")).toBe("pi");
     expect(pi.busy).toHaveBeenCalledWith("group:7");
     piBusy = false;
-    expect(await router.plan("group:7", input("b"), { previousTurnId: "pi:3:4" })).toBe("codex");
-    // 上一轮就是新后端：不查旧后端
-    expect(await router.plan("group:7", input("c"), { previousTurnId: "codex:x" })).toBe("codex");
-    expect(pi.busy).toHaveBeenCalledTimes(2);
+    expect(await router.plan("group:7", input("b"), "pi")).toBe("codex");
+    // 会话当前就是新后端或首次选定：不查旧后端
+    expect(await router.plan("group:7", input("c"), "codex")).toBe("codex");
+    // 首次选定（没有当前后端）：其他后端在该会话已有工作时选它
+    expect(await router.plan("group:7", input("d"))).toBe("codex");
+    expect(pi.busy).toHaveBeenCalledTimes(3);
+    piBusy = true;
+    expect(await router.plan("group:7", input("e"))).toBe("pi");
     expect(settings).not.toHaveBeenCalled();
   });
 

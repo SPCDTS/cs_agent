@@ -5,7 +5,10 @@
  *    插话被拒（回合恰好结束）→ 按到达序号排队；其余（他人消息、定时任务、定时/唤醒回合中的消息）→ 排队。
  * 3. 回合结束 → 空闲，按 seq 取队首一条输入开新一轮（每轮只开一条）；开轮成功后，队首紧随其后的同一发送者的连续用户消息
  *    逐条插话进本轮（遇到他人或定时即止，不越过更早到达的他人消息；插话被拒则留在队列）。
- *    开轮前由适配器 plan 选定本轮后端，与"开轮中"状态一同落盘；未确认的开轮重启后沿用该后端，不重新选择。
+ *    后端属于会话（thread.backend，落盘在会话文档）：开轮、插话、放弃与恢复都用它。首次见到会话时按配置选定（plan）；
+ *    之后只在开新回合时、会话空闲、队列里只有这一条且它从未交给过后端（输入文档不是 starting）时才重新选择，
+ *    plan 再确认旧后端在该会话不忙；条件不满足或 plan 失败都沿用当前后端（新会话 plan 失败则稍后重试，不在没有后端时开轮）。
+ *    输入交给后端之前（开轮、插话）先把输入文档标为 starting，崩溃后据此知道它可能已在该会话的后端里。
  * 4. 全局并发上限只限制进行中的回合数：开轮请求按输入的全局到达序号等待槽位，插话不占槽位；
  *    唤醒回合由后端发起，无法拒绝，照常计数（可能暂时超出上限）。
  * 5. 每个会话的操作（投递、开轮、插话、回合事件、@ 记账）在内存里串行；等待槽位不占用串行队列。
@@ -33,6 +36,8 @@ export interface ThreadHostOptions {
   concurrency: number | (() => number);
   /** owner 的多个 QQ 号算同一发送者 */
   owners?: OwnerIds | (() => OwnerIds);
+  /** 新会话选定后端（plan）失败后重试开轮的间隔，默认 1 秒 */
+  planRetryMs?: number;
   events?: ThreadHostEvents;
   /**
    * 定时输入开轮前的准入复核（§10）：排队期间创建者的授权可能已撤销或过期，开轮前（含重启恢复后）按当前授权重查。
@@ -44,12 +49,12 @@ export interface ThreadHostOptions {
 }
 
 /** 文档里可缺省的字段：写回时不在新状态里的要删除，不能残留上一轮的值。 */
-const OPTIONAL = ["turnId", "turnKind", "turnSender", "lastActivityAt", "lastTurnId", "route"] as const;
+const OPTIONAL = ["turnId", "turnKind", "turnSender", "lastActivityAt", "backend"] as const;
 
-/** 空闲状态；keepRoute：未确认的开轮放回队列时保留已落盘的后端（重启后沿用）。 */
-function idleState(s: ThreadHostState, pending = s.pending, keepRoute = false): ThreadHostState {
+/** 空闲状态：会话后端保留。 */
+function idleState(s: ThreadHostState, pending = s.pending): ThreadHostState {
   return { threadKey: s.threadKey, busy: false, turnInputs: [], pending, mentioned: false,
-    ...(s.lastTurnId ? { lastTurnId: s.lastTurnId } : {}), ...(keepRoute && s.route ? { route: s.route } : {}) };
+    ...(s.backend !== undefined ? { backend: s.backend } : {}) };
 }
 
 function bySeq(refs: readonly InputRef[]): InputRef[] {
@@ -130,22 +135,8 @@ export class ThreadHost implements HostCallbacks {
       if (!ref || !next) return "duplicate" as const;
       this.threads.set(threadKey, next);
       if (!this.canSteer(next, ref)) return "queued" as const;
-      const turnId = next.turnId!;
-      let steered: "ok" | "no_active_turn";
-      try {
-        steered = await this.opts.adapter.steer(threadKey, turnId, ref);
-      } catch (error) {
-        log.warn("thread host steer failed, queued instead", { thread: threadKey, input: ref.inboundKey, error });
-        steered = "no_active_turn";
-      }
       // 插话被拒：输入留在队列（按 seq），等回合结束事件后再开轮
-      if (steered !== "ok") return "queued" as const;
-      const cur = this.threads.get(threadKey)!;
-      await this.save(threadKey, {
-        ...cur, pending: cur.pending.filter(p => p.inboundKey !== ref!.inboundKey), turnInputs: [...cur.turnInputs, ref],
-      }, tx => this.markInputs(tx, threadKey, [ref!], "delivered"));
-      this.emit("inputsDelivered", threadKey, turnId, [ref]);
-      return "steered" as const;
+      return await this.steerOne(threadKey, next.turnId!, ref) ? "steered" as const : "queued" as const;
     });
     return result.then(r => { this.pump(threadKey); return r; });
   }
@@ -168,21 +159,39 @@ export class ThreadHost implements HostCallbacks {
     for (;;) {
       const cur = this.threads.get(threadKey)!;
       const ref = cur.pending[0];
-      if (!ref || !this.canSteer(cur, ref)) return;
-      let steered: "ok" | "no_active_turn";
-      try {
-        steered = await this.opts.adapter.steer(threadKey, cur.turnId!, ref);
-      } catch (error) {
-        log.warn("thread host steer failed, queued instead", { thread: threadKey, input: ref.inboundKey, error });
-        steered = "no_active_turn";
-      }
-      if (steered !== "ok") return;
-      const now = this.threads.get(threadKey)!;
-      await this.save(threadKey, {
-        ...now, pending: now.pending.filter(p => p.inboundKey !== ref.inboundKey), turnInputs: [...now.turnInputs, ref],
-      }, tx => this.markInputs(tx, threadKey, [ref], "delivered"));
-      this.emit("inputsDelivered", threadKey, cur.turnId!, [ref]);
+      if (!ref || !this.canSteer(cur, ref) || !await this.steerOne(threadKey, cur.turnId!, ref)) return;
     }
+  }
+
+  /**
+   * 插话一条输入：先把输入文档标为 starting（已交给后端）再提交——提交后、记账前崩溃时，恢复据此不换后端重跑；
+   * 被拒则改回 queued，留在队列。须在会话串行内调用。
+   */
+  private async steerOne(threadKey: ThreadKey, turnId: string, ref: InputRef): Promise<boolean> {
+    await this.opts.store.commit(tx => this.markInputs(tx, threadKey, [ref], "starting"), this.ctx);
+    let steered: "ok" | "no_active_turn";
+    try {
+      steered = await this.opts.adapter.steer(threadKey, turnId, ref);
+    } catch (error) {
+      log.warn("thread host steer failed, queued instead", { thread: threadKey, input: ref.inboundKey, error });
+      steered = "no_active_turn";
+    }
+    if (steered !== "ok") {
+      await this.opts.store.commit(tx => this.markInputs(tx, threadKey, [ref], "queued"), this.ctx);
+      return false;
+    }
+    const cur = this.threads.get(threadKey)!;
+    await this.save(threadKey, {
+      ...cur, pending: cur.pending.filter(p => p.inboundKey !== ref.inboundKey), turnInputs: [...cur.turnInputs, ref],
+    }, tx => this.markInputs(tx, threadKey, [ref], "delivered"));
+    this.emit("inputsDelivered", threadKey, turnId, [ref]);
+    return true;
+  }
+
+  /** 会话后端可以重新选择（调用方保证空闲）：队列里只有将开轮的这一条，且它从未交给过后端。 */
+  private async mayReselect(s: ThreadHostState): Promise<boolean> {
+    if (s.pending.length !== 1) return false;
+    return (await this.opts.store.snapshot(HostInputDoc, s.pending[0]!.inboundKey, this.ctx))?.state === "queued";
   }
 
   // ───────────── 开轮 ─────────────
@@ -196,7 +205,7 @@ export class ThreadHost implements HostCallbacks {
   }
 
   private async startNext(threadKey: ThreadKey, seq: number): Promise<void> {
-    let acquired = false, used = false;
+    let acquired = false, used = false, deferred = false;
     try {
       await this.slots.acquire(seq);
       acquired = true;
@@ -206,24 +215,25 @@ export class ThreadHost implements HostCallbacks {
         // 等槽位期间后端开了唤醒回合：本轮让给它，结束后再开
         if (s.busy || !s.pending.length) return;
         const head = s.pending[0]!, inputs = [head], keys = [head.inboundKey];
-        // 本轮后端：未确认的开轮重启后沿用落盘的选择；否则由适配器按会话当前后端选定（只在空闲开新回合时）
-        let backend = s.route?.inboundKey === head.inboundKey ? s.route.backend : undefined;
-        if (backend === undefined && this.opts.adapter.plan) {
+        // 会话后端：首次按配置选定；之后只在可以切换时重新选择（plan 再确认旧后端不忙）；选择失败沿用当前后端
+        let backend = s.backend;
+        if (this.opts.adapter.plan && (backend === undefined || await this.mayReselect(s))) {
           try {
-            backend = await this.opts.adapter.plan(threadKey, head, { ...(s.lastTurnId ? { previousTurnId: s.lastTurnId } : {}) });
+            backend = await this.opts.adapter.plan(threadKey, head, s.backend);
           } catch (error) {
-            log.warn("thread host plan failed; adapter selects at start", { thread: threadKey, input: head.inboundKey, error });
+            log.warn("thread host plan failed; keeping thread backend", { thread: threadKey, backend: s.backend, error });
+            // 新会话没有后端可沿用：不开轮，稍后重试
+            if (backend === undefined) { deferred = true; return; }
           }
         }
         const begun: ThreadHostState = {
           ...s, busy: true, turnKind: head.kind, turnSender: head.sender, turnInputs: inputs,
           pending: s.pending.slice(1), mentioned: false, lastActivityAt: this.now(),
-          ...(backend !== undefined ? { route: { inboundKey: head.inboundKey, backend } } : {}),
+          ...(backend !== undefined ? { backend } : {}),
         };
         delete begun.turnId;
-        if (backend === undefined) delete begun.route;
-        // 先落盘"开轮中"（连同本轮后端）：崩溃后据缺少 turnId 判定未确认，输入放回队列，按同一后端重新开轮
-        await this.save(threadKey, begun);
+        // 先落盘"开轮中"（连同会话后端，输入标为 starting）：崩溃后据缺少 turnId 判定未确认，输入放回队列，按同一后端重新开轮
+        await this.save(threadKey, begun, tx => this.markInputs(tx, threadKey, inputs, "starting"));
         used = true;
         this.holding.add(threadKey);
         let started: StartTurnResult;
@@ -248,7 +258,7 @@ export class ThreadHost implements HostCallbacks {
           // 后端已有本宿主尚未确认的回合（唤醒）：按唤醒回合接管（身份为唤醒，不升级为本轮发送者），输入放回队列等它结束
           log.warn("thread host start yielded to backend turn", { thread: threadKey, turn: started.backendTurnId, inputs: keys });
           const wake: ThreadHostState = {
-            ...cur, turnId: started.backendTurnId, lastTurnId: started.backendTurnId, turnKind: "wake", turnInputs: [],
+            ...cur, turnId: started.backendTurnId, turnKind: "wake", turnInputs: [],
             pending: bySeq([...inputs, ...cur.pending]),
             mentioned: false, lastActivityAt: this.now(),
           };
@@ -257,13 +267,17 @@ export class ThreadHost implements HostCallbacks {
           return;
         }
         const turnId = started.turnId;
-        await this.save(threadKey, { ...cur, turnId, lastTurnId: turnId }, tx => this.markInputs(tx, threadKey, inputs, "delivered"));
+        await this.save(threadKey, { ...cur, turnId }, tx => this.markInputs(tx, threadKey, inputs, "delivered"));
         this.emit("inputsDelivered", threadKey, turnId, inputs);
         await this.steerQueued(threadKey);
       });
     } finally {
       this.starting.delete(threadKey);
       if (acquired && !used) this.slots.release();
+    }
+    if (deferred) {
+      setTimeout(() => this.pump(threadKey), this.opts.planRetryMs ?? 1000).unref();
+      return;
     }
     // 开轮失败或让给唤醒回合后，队列里仍可能有输入
     this.pump(threadKey);
@@ -309,7 +323,7 @@ export class ThreadHost implements HostCallbacks {
       }
       const cur = this.threads.get(threadKey)!;
       const wake: ThreadHostState = {
-        ...cur, busy: true, turnId, lastTurnId: turnId, turnKind: "wake", turnInputs: [], mentioned: false, lastActivityAt: this.now(),
+        ...cur, busy: true, turnId, turnKind: "wake", turnInputs: [], mentioned: false, lastActivityAt: this.now(),
       };
       delete wake.turnSender;
       await this.save(threadKey, wake);
@@ -376,7 +390,8 @@ export class ThreadHost implements HostCallbacks {
   /** 输入的投递状态（Inbox 恢复对账用）；宿主从未收到的输入返回 undefined。 */
   async inputState(inboundKey: string): Promise<"queued" | "delivered" | "done" | undefined> {
     const doc = await this.opts.store.snapshot(HostInputDoc, inboundKey, this.ctx);
-    return doc && doc.state !== "new" ? doc.state : undefined;
+    // starting（已交给后端、未确认）对外仍是排队中
+    return doc && doc.state !== "new" ? doc.state === "starting" ? "queued" : doc.state : undefined;
   }
 
   /** 已结束输入所在回合的结果（与 done 同一提交写入）；未结束或没有记录返回 undefined。 */
@@ -414,7 +429,7 @@ export class ThreadHost implements HostCallbacks {
         const s = await this.load(key);
         if (!s.busy) return;
         if (!s.turnId) {
-          await this.save(key, idleState(s, bySeq([...s.turnInputs, ...s.pending]), true));
+          await this.save(key, idleState(s, bySeq([...s.turnInputs, ...s.pending])));
           return;
         }
         let state: "alive" | "lost";
@@ -477,7 +492,7 @@ export class ThreadHost implements HostCallbacks {
     else delete index.active[next.threadKey];
   }
 
-  private async markInputs(tx: Tx, threadKey: string, refs: readonly InputRef[], state: "delivered" | "done",
+  private async markInputs(tx: Tx, threadKey: string, refs: readonly InputRef[], state: "queued" | "starting" | "delivered" | "done",
     outcome?: { status: TurnStatus; turnId?: string }): Promise<void> {
     for (const ref of refs) Object.assign(await tx.doc(HostInputDoc, ref.inboundKey, threadKey), { state, ...outcome });
   }

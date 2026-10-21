@@ -5,7 +5,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostInputDoc, ThreadHostDoc } from "../../../src/agent/host/docs.js";
 import { ThreadHost, STALL_MS } from "../../../src/agent/host/thread-host.js";
 import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnEnded } from "../../../src/agent/host/types.js";
@@ -31,11 +31,13 @@ class FakeAdapter implements ThreadAdapter {
   abandoned: { threadKey: ThreadKey; turnId: string }[] = [];
   /** 放弃回合时后端的处理：aborted = 工作被中止 */
   abandonAs: { status: "completed" | "failed" | "lost"; error?: string } = { status: "completed" };
-  /** 选择后端（plan）时宿主给出的上一回合 id */
-  previous: (string | undefined)[] = [];
-  /** plan 选定的后端，以及每次开轮收到的后端 */
+  /** plan 调用时会话当前的后端；plan 选定的后端（planError 时抛错）；每次开轮收到的后端 */
+  plans: (string | undefined)[] = [];
   planAs = "fake";
+  planError?: string;
   backends: (string | undefined)[] = [];
+  /** 插话挂起（模拟插话已提交给后端、宿主记账前进程崩溃） */
+  hangSteer = false;
   /** 开轮时后端内部重试前复核被拒 */
   denyOnRetry = false;
   private n = 0;
@@ -44,6 +46,7 @@ class FakeAdapter implements ThreadAdapter {
     if (this.hangStart) return new Promise<never>(() => {});
     if (this.failStart) throw new Error(this.failStart);
     if (this.denyOnRetry && turnCtx.admit && !await turnCtx.admit()) return { denied: true };
+    this.backends.push(turnCtx.backend);
     if (this.busyWake) {
       const turnId = this.busyWake;
       this.busyWake = undefined;
@@ -53,18 +56,19 @@ class FakeAdapter implements ThreadAdapter {
     }
     const turnId = `t${++this.n}`;
     this.live.set(threadKey, turnId);
-    const { admit: _admit, backend, ...plain } = turnCtx;
-    this.backends.push(backend);
+    const { admit: _admit, backend: _backend, ...plain } = turnCtx;
     this.starts.push({ threadKey, keys: inputs.map(i => i.inboundKey), ctx: plain, turnId });
     // 真实后端会在 startTurn 返回前就回报 turn/started
     this.host.onTurnStarted(threadKey, turnId, "host");
     return { turnId };
   }
-  async plan(_threadKey: ThreadKey, _input: InputRef, opts: { previousTurnId?: string }) {
-    this.previous.push(opts.previousTurnId);
+  async plan(_threadKey: ThreadKey, _input: InputRef, current?: string) {
+    this.plans.push(current);
+    if (this.planError) throw new Error(this.planError);
     return this.planAs;
   }
   async steer(threadKey: ThreadKey, turnId: string, input: InputRef) {
+    if (this.hangSteer) { this.steers.push({ threadKey, turnId, key: input.inboundKey, reply: "hang" }); return new Promise<never>(() => {}); }
     const reply = this.live.get(threadKey) === turnId ? "ok" as const : "no_active_turn" as const;
     this.steers.push({ threadKey, turnId, key: input.inboundKey, reply });
     return reply;
@@ -280,21 +284,6 @@ describe("ThreadHost 投递规则（§4.2）", () => {
     // 随后到达的结束事件按过期忽略
     r.host.onTurnCompleted(G, "t1", { status: "failed" }); await r.settle();
     expect(r.ended).toHaveLength(1);
-  });
-
-  it("会话的上一回合 id（含唤醒回合）随选择后端交给适配器，空闲与重启后保留（路由据此保持会话当前后端）", async () => {
-    const r = await rig();
-    await r.user(G, "a1", "A"); await r.settle();
-    r.adapter.complete(G); await r.settle();
-    const wake = r.adapter.wake(G); await r.settle();
-    r.adapter.complete(G); await r.settle();
-    await r.user(G, "b1", "A"); await r.settle();
-    expect(r.adapter.previous).toEqual([undefined, wake]);
-    const b1Turn = r.host.thread(G)!.turnId!;
-    r.adapter.complete(G); await r.settle();
-    await r.restart();
-    await r.user(G, "c1", "A"); await r.settle();
-    expect(r.adapter.previous).toEqual([b1Turn]);
   });
 
   it("定时输入：后端内部重试开轮前复核被拒 → 不开轮，以 failed 结束", async () => {
@@ -515,23 +504,95 @@ describe("ThreadHost 持久化与重启恢复", () => {
     expect(r.ended).toHaveLength(1);
   });
 
-  it("开轮请求未确认就重启：沿用开轮时持久化的后端，不重新选择（即使设置已改）", async () => {
+  it("后端属于会话（thread.backend）：首次见到时按配置选定并落盘；之后只在可以切换时才重新选择", async () => {
+    const r = await rig();
+    r.adapter.planAs = "pi";
+    await r.user(G, "a1", "A"); await r.settle();
+    expect(await r.harness.snapshot(ThreadHostDoc, G, ctx)).toMatchObject({ busy: true, backend: "pi" });
+    expect(r.adapter.plans).toEqual([undefined]);
+    // 配置改为 codex：会话忙时排队的输入不触发切换（他人消息排队，轮到时队列里还有输入、或输入已交过后端都不切换）
+    r.adapter.planAs = "codex";
+    await r.user(G, "b1", "B"); await r.user(G, "c1", "C");
+    r.adapter.complete(G); await r.settle();
+    expect(r.adapter.backends).toEqual(["pi", "pi"]);
+    r.adapter.complete(G); await r.settle();
+    // c1 是队列里唯一一条、从未交给后端：切换（plan 收到当前后端，由它判断旧后端是否仍忙）
+    expect(r.adapter.backends).toEqual(["pi", "pi", "codex"]);
+    expect(r.adapter.plans).toEqual([undefined, "pi"]);
+    expect(r.host.thread(G)).toMatchObject({ backend: "codex" });
+  });
+
+  it("回归：开轮请求未确认就重启 → 沿用会话后端，不重新选择（即使设置已改）", async () => {
     const r = await rig();
     r.adapter.planAs = "pi";
     r.adapter.hangStart = true;
     await r.user(G, "a1", "A");
     for (let i = 0; i < 200 && !(await r.harness.snapshot(ThreadHostDoc, G, ctx))?.busy; i++) await new Promise(res => setImmediate(res));
-    expect(await r.harness.snapshot(ThreadHostDoc, G, ctx)).toMatchObject({ busy: true, route: { inboundKey: "a1", backend: "pi" } });
+    expect(await r.harness.snapshot(ThreadHostDoc, G, ctx)).toMatchObject({ busy: true, backend: "pi" });
     const next = new FakeAdapter();
     next.planAs = "codex";
     await r.restart(next, false);
-    expect(next.previous).toEqual([]);
+    expect(next.plans).toEqual([]);
     expect(next.backends).toEqual(["pi"]);
     expect(next.keysOf(G)).toEqual([["a1"]]);
-    // 回合结束后，下一个新回合才重新选择（会话空闲时）
+    // 回合结束、会话空闲且没有交过后端的输入时，下一个新回合才可能切换
     next.complete(G); await r.settle();
     await r.user(G, "b1", "A"); await r.settle();
     expect(next.backends).toEqual(["pi", "codex"]);
+  });
+
+  it("回归：开轮后插话已交给后端、宿主记账前崩溃 → 重启后该输入按会话原后端开轮，不重新选择", async () => {
+    const r = await rig();
+    r.adapter.planAs = "pi";
+    await r.user(G, "x1", "X"); await r.settle();
+    await r.user(G, "a1", "A"); await r.user(G, "a2", "A");
+    r.adapter.hangSteer = true;
+    r.adapter.complete(G);
+    for (let i = 0; i < 500 && !r.adapter.steers.some(x => x.key === "a2"); i++) await new Promise(res => setImmediate(res));
+    // a1 开轮成功，a2 的插话挂起（已交给后端，宿主还没记账）
+    expect(r.adapter.keysOf(G)).toEqual([["x1"], ["a1"]]);
+    const next = new FakeAdapter();
+    next.planAs = "codex";
+    next.recoverAs = () => "lost";
+    await r.restart(next, false);
+    expect(next.plans).toEqual([]);
+    expect(next.backends).toEqual(["pi"]);
+    expect(next.keysOf(G)).toEqual([["a2"]]);
+  });
+
+  it("回归：未确认的开轮重启后让给唤醒回合、输入放回队列 → 唤醒结束后仍按会话原后端开轮", async () => {
+    const r = await rig();
+    r.adapter.planAs = "pi";
+    r.adapter.hangStart = true;
+    await r.user(G, "a1", "A");
+    for (let i = 0; i < 200 && !(await r.harness.snapshot(ThreadHostDoc, G, ctx))?.busy; i++) await new Promise(res => setImmediate(res));
+    const next = new FakeAdapter();
+    next.planAs = "codex";
+    next.busyWake = "w9";
+    await r.restart(next, false);
+    expect(r.host.thread(G)).toMatchObject({ busy: true, turnId: "w9", turnKind: "wake", backend: "pi", pending: [{ inboundKey: "a1" }] });
+    next.complete(G, "completed", "w9"); await r.settle();
+    expect(next.plans).toEqual([]);
+    expect(next.backends).toEqual(["pi", "pi"]);
+    expect(next.keysOf(G)).toEqual([["a1"]]);
+  });
+
+  it("回归：plan 抛错 → 已有后端的会话沿用当前后端；新会话不开轮，稍后重试，绝不在没有落盘后端时开轮", async () => {
+    const r = await rig();
+    r.adapter.planAs = "pi";
+    await r.user(G, "a1", "A"); await r.settle();
+    r.adapter.complete(G); await r.settle();
+    r.adapter.planError = "设置读取失败";
+    await r.user(G, "a2", "A"); await r.settle();
+    expect(r.adapter.backends).toEqual(["pi", "pi"]);
+    r.adapter.complete(G); await r.settle();
+    await r.user(H, "h1", "B"); await r.settle();
+    expect(r.adapter.keysOf(H)).toEqual([]);
+    expect(r.host.thread(H)).toMatchObject({ busy: false, pending: [{ inboundKey: "h1" }] });
+    expect(r.host.thread(H)!.backend).toBeUndefined();
+    r.adapter.planError = undefined;
+    await vi.waitFor(() => expect(r.adapter.keysOf(H)).toEqual([["h1"]]), { timeout: 5000, interval: 20 });
+    expect(r.host.thread(H)).toMatchObject({ backend: "pi" });
   });
 
   it("排队状态跨宿主重建保持", async () => {

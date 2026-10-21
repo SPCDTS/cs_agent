@@ -28,7 +28,7 @@ export type InputRef = HostInput & { seq: number; at: number };
  * 开一轮时随输入一起交给适配器的回合信息。
  * admit：定时输入的准入复核（宿主在首次开轮前已调用）；适配器内部重试开轮时，每次重试前须再调用，
  * 返回 false 时不再开轮、返回 { denied: true }。适配器不得把它传给后端本身。
- * backend：宿主随"开轮中"状态持久化的本轮后端（由 plan 选定）；重启后恢复未确认的开轮时原样交回，适配器不得重新选择。
+ * backend：会话后端（宿主落盘在会话文档，由 plan 选定）；适配器按它开轮，不得重新选择。
  */
 export type TurnContext = { kind: InputKind; sender: string; admit?: () => Promise<boolean>; backend?: string };
 
@@ -48,11 +48,11 @@ export type TurnOutcome = { status: TurnStatus; error?: string };
 
 export interface ThreadAdapter {
   /**
-   * 选定本轮后端（宿主在会话串行内、写入"开轮中"之前调用，只在会话空闲开新回合时）。返回值随"开轮中"状态持久化，
-   * 作为 ctx.backend 交回 startTurn；未确认的开轮重启后沿用，不重新选择。一个会话同一时间只由一个后端服务（§4.3）：
-   * previousTurnId 为本会话上一个回合（含唤醒回合），其后端在该会话仍忙（pi 子 agent 在跑等）时不切换。
+   * 选定会话后端（宿主在会话串行内、开新回合之前调用：会话首次开轮，或会话空闲、队列只有这一条且它从未交给过后端时）。
+   * current 为会话当前后端：配置改为别的后端时，current 在该会话仍忙（pi 子 agent 在跑等）则返回 current。
+   * 返回值落盘为会话后端，作为 ctx.backend 交回 startTurn。抛错时宿主沿用当前后端（新会话则稍后重试）。
    */
-  plan?(threadKey: ThreadKey, input: InputRef, opts: { previousTurnId?: string }): Promise<string>;
+  plan?(threadKey: ThreadKey, input: InputRef, current?: string): Promise<string>;
   /** 开一轮（宿主每轮只送一条输入；同一发送者随后的输入走插话）。抛错视为投递失败，宿主按回合失败结束这条输入。 */
   startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext): Promise<StartTurnResult>;
   /** 插话进当前回合；回合恰好已结束（或 id 不符）时返回 no_active_turn，宿主回退为排队。 */
