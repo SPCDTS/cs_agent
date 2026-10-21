@@ -1,3 +1,4 @@
+import { isOwner, isOwnerActor } from "../shared/owners.js";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Harness } from "@earendil-works/pi-durable";
 import { z } from "zod";
@@ -37,6 +38,7 @@ export class GrantsService {
     getHarness(): Harness;
     getChannel(): Pick<Channel, "getTicket">;
     owner?: string;
+    owners?: readonly string[];
     now?: () => number;
     trace?: Pick<Trace, "event">;
   }) {}
@@ -45,7 +47,7 @@ export class GrantsService {
   async verify(binding: GrantBinding): Promise<{ actor: string; actorIsOwner: boolean; scope: string; origin: "message" | "scheduled" }> {
     const rec = await this.opts.getChannel().getTicket(binding.ticket);
     if (!rec) throw new Error("回合票据不存在");
-    const actor = `qq:${rec.user_id}`, actorIsOwner = !!this.opts.owner && rec.user_id === this.opts.owner;
+    const actor = `qq:${rec.user_id}`, actorIsOwner = isOwner(this.opts.owners ?? this.opts.owner, rec.user_id);
     if (binding.actor !== actor || binding.actorIsOwner !== actorIsOwner || !binding.source ||
         binding.source.type !== rec.message_type || binding.source.user_id !== rec.user_id || binding.source.group_id !== rec.group_id) {
       throw new Error("回合身份与票据不一致");
@@ -68,7 +70,7 @@ export class GrantsService {
 
   /** 定时定义与实际执行共用：按创建者、来源范围和当前到期时间检查。 */
   async canSchedule(actor: string, conversation: string): Promise<boolean> {
-    if (this.opts.owner && actor === `qq:${this.opts.owner}`) return true;
+    if (isOwnerActor(this.opts.owners ?? this.opts.owner, actor)) return true;
     if (conversation === "owner" || !isScope(conversation)) return false;
     return !!(await this.active(actor, conversation))?.caps.includes("schedule");
   }

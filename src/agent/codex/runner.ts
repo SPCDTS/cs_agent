@@ -1,3 +1,4 @@
+import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import { SEND_RULE } from "../send-service.js";
 import { CodexDeliveryNotes, deliveryNoteText } from "../delivery-note.js";
 import { attachmentDirs, validateAttachmentPath } from "../../media/attach-paths.js";
@@ -105,11 +106,11 @@ export function isThreadKey(value: unknown): value is ThreadKey {
   return value === "owner" || isScope(value);
 }
 
-export function threadKeyForSource(source: TicketSource | undefined, owner: string | undefined): ThreadKey {
+export function threadKeyForSource(source: TicketSource | undefined, owners: OwnerIds): ThreadKey {
   if (!source) throw new Error("缺少 codex 会话来源");
   // 线程按来源隔离；owner 群回合读取 all，但仍使用来源群线程。
   const key = source.type === "group" ? `group:${source.group_id}`
-    : owner && source.user_id === owner ? "owner" : `private:${source.user_id}`;
+    : isOwner(owners, source.user_id) ? "owner" : `private:${source.user_id}`;
   if (!isThreadKey(key)) throw new Error("非法的 codex 会话来源");
   return key;
 }

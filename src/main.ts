@@ -125,7 +125,7 @@ async function main(): Promise<void> {
     } });
   const chatsChannel: Pick<Channel, "listChats"> = { listChats: opts => getBridge().listChats(opts) };
   let dispatchHarness: Harness;
-  const grants = new GrantsService({ getHarness: () => dispatchHarness, getChannel: getBridge, owner: cfg.owner });
+  const grants = new GrantsService({ getHarness: () => dispatchHarness, getChannel: getBridge, owner: cfg.owner, owners: cfg.owners });
   const sendService = new SendService({ grants, getChannel: getBridge, dataDir: cfg.DATA_DIR, store,
     limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } });
   let schedules: ScheduleService;
@@ -230,7 +230,7 @@ async function main(): Promise<void> {
     imageTimeoutCapMs: cfg.COMFY_TIMEOUT_SEC * 1000,
     imageCollectExtensions: cfg.IMAGE_COLLECT_EXTENSIONS,
     backends,
-    owner: cfg.owner,
+    owner: cfg.owner, owners: cfg.owners,
     store,
     currentSettings: () => settings.currentForTurn(),
     codexReasoningEffort: cfg.CODEX_REASONING_EFFORT, piThinkingLevel: cfg.AGENT_THINKING_LEVEL,
@@ -248,7 +248,7 @@ async function main(): Promise<void> {
   // 回调仅在恢复/调度后调用；先注册两类任务，再补齐服务与派发器，避免构造环。
   const canSchedule = grants.canSchedule.bind(grants);
   const scheduled = createScheduledRuntime({
-    getChannel: getBridge, tasks, owner: cfg.owner, canSchedule,
+    getChannel: getBridge, tasks, owner: cfg.owner, owners: cfg.owners, canSchedule,
     recorder: { recordRun: (id, run) => schedules.recordRun(id, run) },
     pauseSchedule: (id, reason) => schedules.pauseWithReason(id, reason),
   });
@@ -259,13 +259,14 @@ async function main(): Promise<void> {
   const scheduleTask = createScheduleTask({ admitter: scheduledAdmitter });
   const extension = createCsAgentExtension(tasks, [scheduleTask, scheduled.ScheduledTask]);
   const harness = dispatchHarness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
-  schedules = new ScheduleService({ harness, task: scheduleTask, admitter: scheduledAdmitter, owner: cfg.owner, canSchedule });
+  schedules = new ScheduleService({ harness, task: scheduleTask, admitter: scheduledAdmitter, owner: cfg.owner, owners: cfg.owners, canSchedule });
 
   bridge = createQQBridge({
     httpUrl: cfg.NAPCAT_HTTP_URL,
     wsUrl: cfg.NAPCAT_WS_URL,
     token: cfg.NAPCAT_TOKEN,
     allowUsers: cfg.allowUsers,
+    owners: cfg.owners,
     allowGroups: cfg.QQ_ALLOW_GROUPS,
     groupMentions: cfg.QQ_GROUP_MENTIONS,
     dataDir: cfg.DATA_DIR,
@@ -291,6 +292,7 @@ async function main(): Promise<void> {
     bridge,
     tasks,
     concurrency: cfg.AGENT_CONCURRENCY,
+    owners: cfg.owners,
     imagePrefixes: cfg.imagePrefixes,
     history: store,
   });

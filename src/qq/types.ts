@@ -9,6 +9,8 @@ export interface QQBridgeConfig {
   token: string;
   /** "*" 或 QQ 号列表；列表中的用户在任何会话均可触发 */
   allowUsers: string[] | "*";
+  /** owner 账号始终允许入站，独立于 allowUsers。 */
+  owners?: readonly string[];
   /** 群号列表；群内任何成员可通过真实 @机器人 触发 */
   allowGroups: string[];
   /** 为 false 时群消息一律不触发 */

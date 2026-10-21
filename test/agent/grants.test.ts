@@ -111,3 +111,19 @@ it.each(["1", "99"])("定时回合禁止 auth 工具，仍按创建者 %s 保留
   }
   await expect(f.grants.authorizeSend(binding, "qq:group:8")).resolves.toBeUndefined();
 });
+
+it("第二 owner 具备完整授权和定时权限，面板仍使用主账号", async () => {
+  const f = await grantsFixture("99", false, ["99", "1"]);
+  expect(await f.grants.permissions(f.binding)).toEqual({ actorIsOwner: true, target: true, auth: true });
+  await expect(f.grants.authorizeSend(f.binding, "qq:private:9")).resolves.toBeUndefined();
+  expect(await f.grants.canSchedule("qq:1", "owner")).toBe(true);
+  expect(await f.grants.canSchedule("qq:1", "group:8")).toBe(true);
+  expect(await f.grants.canSchedule("qq:9", "owner")).toBe(false);
+  await f.grants.tool(f.binding, "auth_grant", { user: "qq:9", caps: ["schedule"] });
+  expect((await f.grants.list())[0]).toMatchObject({ granted_by: "qq:1" });
+  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["send"] });
+  expect((await f.grants.list())[0]).toMatchObject({ granted_by: "qq:99" });
+  await f.grants.tool(f.binding, "auth_revoke", { user: "qq:9" });
+  expect(await f.grants.tool(f.binding, "auth_list", {})).toEqual([]);
+  await expect(f.grants.permissions({ ...f.binding, actor: "qq:99" })).rejects.toThrow("身份");
+});

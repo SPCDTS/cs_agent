@@ -3,6 +3,7 @@
  * - @ 检测只看真实 at 段，永不解析文本里的 CQ 码或 "@昵称"。
  * - allowUsers 中的用户在任何会话可触发；allowGroups 中的群，任何成员可触发（群内仍需真实 @）。
  */
+import { isOwner } from "../shared/owners.js";
 import type { ChatType, InboundMessage, MessageSegment } from "../channel/types.js";
 import type { QQBridgeConfig } from "./types.js";
 import { isRecord, isValidId } from "./onebot.js";
@@ -120,7 +121,7 @@ export function normalizeMessage(event: unknown): InboundMessage | null {
   };
 }
 
-export type PolicyConfig = Pick<QQBridgeConfig, "allowUsers" | "allowGroups" | "groupMentions">;
+export type PolicyConfig = Pick<QQBridgeConfig, "allowUsers" | "allowGroups" | "groupMentions" | "owners">;
 
 export interface AuthSubject {
   message_type: ChatType;
@@ -129,8 +130,8 @@ export interface AuthSubject {
 }
 
 /** 发送者是否被授权（不含触发条件）。 */
-export function isAllowed(policy: PolicyConfig, m: AuthSubject): boolean {
-  if (policy.allowUsers === "*" || policy.allowUsers.includes(m.user_id)) return true;
+export function isAllowed(policy: Pick<PolicyConfig, "allowUsers" | "allowGroups" | "owners">, m: AuthSubject): boolean {
+  if (isOwner(policy.owners, m.user_id) || policy.allowUsers === "*" || policy.allowUsers.includes(m.user_id)) return true;
   return m.message_type === "group" && m.group_id !== null && policy.allowGroups.includes(m.group_id);
 }
 
@@ -143,6 +144,9 @@ export function isTriggered(policy: PolicyConfig, m: InboundMessage): boolean {
 
 /** 校验配置中的 QQ 号 / 群号列表。 */
 export function validatePolicy(policy: PolicyConfig): void {
+  if (policy.owners !== undefined && (!Array.isArray(policy.owners) || policy.owners.some(id => !isValidId(id)))) {
+    throw new Error("owners 必须为 QQ 号字符串列表。");
+  }
   if (policy.allowUsers !== "*") {
     if (!Array.isArray(policy.allowUsers) || policy.allowUsers.some(id => !isValidId(id))) {
       throw new Error("allowUsers 必须为 \"*\" 或 QQ 号字符串列表。");

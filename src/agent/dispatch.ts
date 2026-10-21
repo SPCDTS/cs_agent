@@ -1,3 +1,4 @@
+import { ownerScope } from "../shared/owners.js";
 import { trace } from "../shared/trace.js";
 /**
  * QQ 消息 → 规则分流 → durable 任务（设计 §4.1 / §4.7）：
@@ -28,7 +29,7 @@ import { FALLBACK_REPLY } from "./replies.js";
 import { DEFAULT_IMAGE_PREFIXES, routeMessage } from "./router.js";
 import { inboundFromTicket, legacyRouteText } from "../channel/ticket.js";
 import type { CsTasks, TaskResult } from "./tasks.js";
-import type { ScheduledRuntime } from "./schedule/run.js";
+import { ScheduledRunDoc, type ScheduledRuntime } from "./schedule/run.js";
 
 export { FALLBACK_REPLY } from "./replies.js";
 /** 同一票据最多运行次数；达到即放弃运行，改发兜底回复 */
@@ -47,6 +48,8 @@ export interface DispatcherOptions {
   bridge: DispatchBridge;
   tasks: CsTasks;
   concurrency: number;
+  /** owner 私聊共用互斥队列，原始 scope 仍用于存储和投递。 */
+  owners?: readonly string[];
   scheduled?: Pick<ScheduledRuntime, "ScheduledTask" | "finish">;
   imagePrefixes?: readonly string[];
   /** 兼容旧调用的派发默认推理强度；入队时写入快照，历史行不再现读 */
@@ -108,7 +111,7 @@ export class Dispatcher {
       if (!entry) return { done: Promise.resolve() };
       if (entry.kind !== "scheduled" || !entry.scope || !this.opts.scheduled) throw new Error("定时执行器未绑定或派发条目无效");
       trace.event(ticket, "admitted", { scope: entry.scope, detail: { kind: "scheduled", conversation: entry.conversationId } });
-      return { done: this.enqueue(entry.scope, () => this.run(ticket, entry.conversationId as ConversationId)) };
+      return { done: this.enqueue(await this.queueScope(entry, entry.scope), () => this.run(ticket, entry.conversationId as ConversationId)) };
     }));
   }
 
@@ -177,8 +180,9 @@ export class Dispatcher {
         const scope = entry.scope ?? (await this.legacyScope(ticket, entry));
         const doc = await this.opts.harness.snapshot(TicketDoc, entry.conversationId as ConversationId, this.ctx).catch(() => undefined);
         trace.event(ticket, "recovered", { scope, detail: { kind: item.kind, text: doc?.text, route: doc?.route, sender: doc?.source.nickname } });
+        const queueScope = await this.queueScope(entry, scope);
         void this.track(ticket, "recover failed", () =>
-          this.inAdmissionOrder(() => ({ done: this.enqueue(scope, () => this.run(ticket, entry.conversationId as ConversationId)) })),
+          this.inAdmissionOrder(() => ({ done: this.enqueue(queueScope, () => this.run(ticket, entry.conversationId as ConversationId)) })),
         );
         continue;
       }
@@ -244,8 +248,17 @@ export class Dispatcher {
     return admitted.then(({ done }) => done);
   }
 
+  private async queueScope(entry: DispatchEntry, scope: string): Promise<string> {
+    if (entry.kind !== "scheduled") return scope;
+    const run = await this.opts.harness.snapshot(ScheduledRunDoc, entry.conversationId as ConversationId, this.ctx);
+    // 已开票的目标被冻结；即使重启后更换主账号，owner 定时回合仍需占用共享队列。
+    return run?.conversation === "owner" ? "owner" : scope;
+  }
+
   /** 排到 scope 队尾；轮到时再占用一个全局并发槽位。 */
   private enqueue(scope: string, work: () => Promise<void>): Promise<void> {
+    // 所有入队入口（普通消息、定时任务、索引恢复和孤儿票据）在此统一映射。
+    scope = ownerScope(this.opts.owners, scope);
     this.scopeDepth.set(scope, (this.scopeDepth.get(scope) ?? 0) + 1);
     const prev = this.chains.get(scope) ?? Promise.resolve();
     const run = prev.then(() => this.withSlot(async () => {

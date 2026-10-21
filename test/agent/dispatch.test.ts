@@ -222,6 +222,7 @@ class BackendStub implements AgentBackend {
 
 interface RigOptions {
   owner?: string | null;
+  owners?: readonly string[];
   concurrency?: number;
   codex?: AgentBackend;
   codexEffort?: string;
@@ -271,12 +272,13 @@ async function makeRig(o: RigOptions = {}, shared?: Pick<Rig, "dir" | "bridge" |
     ticketsDir: path.join(dir, "tickets"),
     backends,
     owner: o.owner === null ? undefined : o.owner ?? OWNER,
+    owners: o.owners,
     store,
     replyRetryDelayMs: 10,
     imageCollectDelayMs: 10,
   });
   const harness = await openHarness({ models, extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "agent.sqlite") }, ctx);
-  const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: o.concurrency ?? 2, history: store, codexEffort: o.codexEffort ?? "high", retryDelayMs: 10 });
+  const dispatcher = new Dispatcher({ harness, bridge, tasks, owners: o.owners, concurrency: o.concurrency ?? 2, history: store, codexEffort: o.codexEffort ?? "high", retryDelayMs: 10 });
   const dispatch = dispatcher.dispatch.bind(dispatcher);
   dispatcher.dispatch = (msg, ticket) => { bridge.records.set(ticket, msg); return dispatch(msg, ticket); };
   // 与 main.ts 一致：重开时先 recover() 再开启调度（测试里由 recover 后的 waitForTask 开启）
@@ -1364,4 +1366,72 @@ it("回合 actor 只信票据 user_id，即使来源正文和 TicketDoc 声称 o
     actor: "qq:42", actorIsOwner: false, senderIsOwner: false, access: "group:7", threadKey: "group:7",
     source: { user_id: "42" },
   });
+});
+
+it("多个 owner 私聊共用 FIFO，普通私聊并行且存储与回复仍按实际账号", async () => {
+  const secondary = "10000002", stranger = "555", gate = deferred();
+  const r = await makeRig({ owners: [OWNER, secondary], concurrency: 3 });
+  const handle = r.backend.handle.bind(r.backend);
+  r.backend.handle = async (req, context) => {
+    if (req.text === "primary") await gate.promise;
+    return handle(req, context);
+  };
+  const first = r.dispatcher.dispatch(inbound("primary"), "owners-first");
+  await vi.waitFor(() => expect(r.dispatcher.status().running_scopes).toContain("owner"));
+  const second = r.dispatcher.dispatch(inbound("secondary", { user: secondary }), "owners-second");
+  const third = r.dispatcher.dispatch(inbound("stranger", { user: stranger }), "owners-third");
+  try {
+    await third;
+    expect(r.backend.requests.map(req => req.text)).toEqual(["stranger"]);
+    expect(r.dispatcher.status()).toMatchObject({ running_scopes: ["owner"], scopes: { owner: 1 } });
+    const entries = await pendingIndex(r);
+    for (const [ticket, user] of [["owners-first", OWNER], ["owners-second", secondary]]) {
+      expect(entries[ticket].scope).toBe("private:" + user);
+      expect(await r.harness.snapshot(TicketDoc, entries[ticket].conversationId as never, ctx)).toMatchObject({ source: { user_id: user, type: "private" } });
+    }
+  } finally { gate.resolve(); await Promise.all([first, second, third]); }
+  expect(r.backend.requests.map(req => req.text)).toEqual(["stranger", "primary", "secondary"]);
+  for (const user of [OWNER, secondary]) {
+    expect(r.backend.requests.find(req => req.source.user_id === user)).toMatchObject({
+      scope: "private:" + user, threadKey: "owner", access: "all", actor: "qq:" + user, actorIsOwner: true, senderIsOwner: true,
+    });
+  }
+  expect(r.backend.requests[0]).toMatchObject({ threadKey: "private:555", access: "private:555", actorIsOwner: false });
+  expect(r.bridge.replies.map(reply => reply.ticket)).toEqual(["owners-third", "owners-first", "owners-second"]);
+  expect(new Set(bot(r).map(row => row.scope))).toEqual(new Set(["private:" + OWNER, "private:" + secondary, "private:" + stranger]));
+  expect(await pendingIndex(r)).toEqual({});
+});
+
+it.each([false, true])("恢复索引（旧式无 scope=%s）与两个账号的孤儿票据按统一 FIFO 执行", async legacy => {
+  const secondary = "10000002", r = await makeRig({ owners: [OWNER, secondary], concurrency: 3 });
+  const gate = deferred(), started: string[] = [], handle = r.backend.handle.bind(r.backend);
+  r.backend.handle = async (req, context) => {
+    started.push(req.text);
+    if (req.text === "indexed") await gate.promise;
+    return handle(req, context);
+  };
+  const msg = inbound("indexed", { user: secondary });
+  r.bridge.records.set("owners-indexed", msg);
+  await r.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+    Object.assign(await tx.doc(TicketDoc, id), { ticket: "owners-indexed", text: msg.text, route: "agent",
+      source: { type: "private", user_id: secondary, group_id: null, nickname: "测试" } });
+    (await tx.doc(DispatchDoc)).pending["owners-indexed"] = { conversationId: id, ticketSeq: 1, attempts: 0,
+      ...(legacy ? {} : { scope: "private:" + secondary }) };
+  } }, ctx);
+  for (const [i, user, text] of [[2, OWNER, ""], [3, secondary, "orphan"], [4, "555", "stranger"]] as const) {
+    const ticket = "owners-orphan-" + i;
+    r.bridge.pending.push({ ...await r.bridge.getTicket(ticket), ticket_id: ticket, seq: i, user_id: user,
+      source_text: text, source_message_id: String(i), message_type: "private", group_id: null });
+  }
+  try {
+    expect(await r.dispatcher.recover()).toBe(4);
+    await vi.waitFor(() => expect(started).toContain("stranger"));
+    expect(started).toEqual(["indexed", "stranger"]);
+    expect(r.bridge.replies.some(reply => reply.ticket === "owners-orphan-2")).toBe(false);
+  } finally { gate.resolve(); await r.dispatcher.idle(); }
+  expect(started).toEqual(["indexed", "stranger", "orphan"]);
+  const replies = r.bridge.replies.map(reply => reply.ticket);
+  expect(replies.indexOf("owners-indexed")).toBeLessThan(replies.indexOf("owners-orphan-2"));
+  expect(replies.indexOf("owners-orphan-2")).toBeLessThan(replies.indexOf("owners-orphan-3"));
+  expect(await pendingIndex(r)).toEqual({});
 });

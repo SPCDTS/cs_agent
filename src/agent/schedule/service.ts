@@ -1,3 +1,4 @@
+import { isOwnerActor } from "../../shared/owners.js";
 import { isScope } from "../../context/access.js";
 import { log } from "../../shared/log.js";
 import { randomUUID } from "node:crypto";
@@ -16,6 +17,7 @@ export interface ScheduleServiceOptions {
   admitter: ScheduledRunLauncher;
   /** QQ 号或 qq:<号>；授权服务未接入时只有 owner 可创建。 */
   owner?: string;
+  owners?: readonly string[];
   canSchedule?: (actor: string, conversation: ScheduleConversation) => boolean | Promise<boolean>;
   now?: () => number;
   context?: Context;
@@ -29,10 +31,12 @@ export class ScheduleService implements ScheduleRunRecorder {
   private readonly ctx: Context;
   private readonly now: () => number;
   private readonly owner: string | undefined;
+  private readonly owners: readonly string[];
   constructor(private readonly opts: ScheduleServiceOptions) {
     this.ctx = opts.context ?? BACKGROUND_CONTEXT;
     this.now = opts.now ?? Date.now;
     this.owner = opts.owner?.replace(/^(?!qq:)/, "qq:");
+    this.owners = (opts.owners ?? (opts.owner ? [opts.owner] : [])).map(id => id.replace(/^qq:/, ""));
   }
 
   /** 在 resume harness 前调用；专用会话只创建一次，已有检查点原样恢复。 */
@@ -65,7 +69,7 @@ export class ScheduleService implements ScheduleRunRecorder {
 
   async list(actor?: string): Promise<Schedule[]> {
     const doc = await this.opts.harness.snapshot(SchedulesDoc, this.ctx);
-    return Object.values(doc?.schedules ?? {}).filter(s => actor === undefined || actor === this.owner || s.created_by === actor).map(copy);
+    return Object.values(doc?.schedules ?? {}).filter(s => actor === undefined || isOwnerActor(this.owners, actor) || s.created_by === actor).map(copy);
   }
 
   async get(id: string, actor?: string): Promise<Schedule | undefined> {
@@ -76,7 +80,7 @@ export class ScheduleService implements ScheduleRunRecorder {
     const fields = parseCreate(input);
     // 授权回调可能读取同一 harness 的 GrantsDoc，不能在占用提交队列时调用它。
     await this.authorize(actor, fields.conversation);
-    const now = this.now(), next = validateRule(fields.rule, now, actor === this.owner);
+    const now = this.now(), next = validateRule(fields.rule, now, isOwnerActor(this.owners, actor));
     return this.opts.harness.commit(async tx => {
       const doc = await tx.doc(SchedulesDoc);
       this.quota(Object.values(doc.schedules), actor);
@@ -95,7 +99,7 @@ export class ScheduleService implements ScheduleRunRecorder {
     const patch = parseUpdate(input);
     const snapshot = await this.authorizeRun(actor, id);
     const next = patch.rule || snapshot.status === "active"
-      ? validateRule(patch.rule ?? snapshot.rule, this.now(), snapshot.created_by === this.owner) : null;
+      ? validateRule(patch.rule ?? snapshot.rule, this.now(), isOwnerActor(this.owners, snapshot.created_by)) : null;
     return this.modify(actor, id, async (_tx, schedule) => {
       if (schedule.revision !== snapshot.revision) throw new ScheduleError(409, "定时任务已变更，请重试");
       Object.assign(schedule, patch, { options: { ...schedule.options, ...patch.options } });
@@ -145,7 +149,7 @@ export class ScheduleService implements ScheduleRunRecorder {
 
   async resume(actor: string, id: string): Promise<Schedule> {
     const snapshot = await this.authorizeRun(actor, id);
-    const next = validateRule(snapshot.rule, this.now(), snapshot.created_by === this.owner);
+    const next = validateRule(snapshot.rule, this.now(), isOwnerActor(this.owners, snapshot.created_by));
     return this.modify(actor, id, async (tx, schedule) => {
       if (schedule.revision !== snapshot.revision) throw new ScheduleError(409, "定时任务已变更，请重试");
       this.quota(Object.values((await tx.doc(SchedulesDoc)).schedules), schedule.created_by, id);
@@ -220,7 +224,7 @@ export class ScheduleService implements ScheduleRunRecorder {
 
   private editable(schedule: Schedule | undefined, actor: string): Schedule {
     if (!schedule || !Object.hasOwn(schedule, "id")) throw new ScheduleError(404, "定时任务不存在");
-    if (actor !== this.owner && actor !== schedule.created_by) throw new ScheduleError(403, "只能管理自己创建的定时任务");
+    if (!isOwnerActor(this.owners, actor) && actor !== schedule.created_by) throw new ScheduleError(403, "只能管理自己创建的定时任务");
     return schedule;
   }
 
@@ -228,7 +232,7 @@ export class ScheduleService implements ScheduleRunRecorder {
     if (conversation === "owner" ? !this.owner : !isScope(conversation) || conversation !== conversation.trim()) {
       throw new ScheduleError(400, "定时任务 conversation 无效或未配置 owner");
     }
-    if (!/^qq:[1-9]\d*$/.test(actor) || actor !== this.owner && !await this.opts.canSchedule?.(actor, conversation)) {
+    if (!/^qq:[1-9]\d*$/.test(actor) || !isOwnerActor(this.owners, actor) && !await this.opts.canSchedule?.(actor, conversation)) {
       throw new ScheduleError(403, "没有 schedule 授权");
     }
   }
@@ -241,7 +245,7 @@ export class ScheduleService implements ScheduleRunRecorder {
   }
 
   private quota(schedules: Schedule[], actor: string, excluding?: string): void {
-    if (actor !== this.owner && schedules.filter(s => s.id !== excluding && s.created_by === actor && s.status === "active").length >= 5) {
+    if (!isOwnerActor(this.owners, actor) && schedules.filter(s => s.id !== excluding && s.created_by === actor && s.status === "active").length >= 5) {
       throw new ScheduleError(409, "被授权人最多创建 5 条 active 定时任务");
     }
   }

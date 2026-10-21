@@ -1,3 +1,5 @@
+import { threadKeyForSource } from "../../src/agent/codex/runner.js";
+import { accessForSource, accessToString } from "../../src/context/access.js";
 import { scheduleToolsFixture } from "./schedule-tools-fixture.js";
 import type { ScheduleTools } from "../../src/agent/schedule/tools.js";
 import type { GrantBinding } from "../../src/agent/grants.js";
@@ -1385,4 +1387,26 @@ it("定时工具按 pi 回合切换：owner、授权人、无权成员、定时�
   await s.pi.handle(req(await f.scheduled(memberOwn.id, "qq:9")), handleContext());
   expect(await visible()).toEqual(["schedule_control"]);
   expect((await f.service.get(memberOwn.id))?.status).toBe("completed");
+});
+
+it("两个 owner 账号共用 pi 会话与历史，第二账号保留授权工具权限", async () => {
+  const owners = ["99", "1"], f = await grantsFixture("99", false, owners);
+  let seen!: TranscriptContext;
+  const s = await setup([reply("主账号的历史答复"), call("auth_list"), transcript => { seen = transcript; return reply("继续对话"); }],
+    { dir: f.dir, grants: f.grants, sendService: f.service });
+  for (const user of owners) {
+    const msg = { ...f.msg, user_id: user, message_type: "private" as const, group_id: null, message_id: "owner-" + user };
+    const ticket = f.store.createTicket(msg), source = { type: "private" as const, user_id: user, group_id: null, nickname: "测试" };
+    await s.pi.handle({ ...request(ticket, true), scope: "private:" + user, source,
+      actor: "qq:" + user, actorIsOwner: true, threadKey: threadKeyForSource(source, owners),
+      access: accessToString(accessForSource(source, owners)) }, handleContext());
+  }
+  expect(JSON.stringify(seen.messages)).toContain("主账号的历史答复");
+  const result = seen.messages.find(message => message.role === "toolResult" && message.toolName === "auth_list");
+  expect(result?.role).toBe("toolResult");
+  expect(result?.role === "toolResult" && result.isError).not.toBe(true);
+  const threads = await s.pi.readThreadIds();
+  expect(Object.keys(threads)).toEqual(["owner"]);
+  expect(await s.pi.harness.snapshot(PiRequestDoc, threads.owner as ConversationId, context))
+    .toMatchObject({ actor: "qq:1", actorIsOwner: true, senderIsOwner: true, access: "all", source: { user_id: "1" } });
 });

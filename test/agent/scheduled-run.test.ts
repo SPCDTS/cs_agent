@@ -37,8 +37,9 @@ class RecorderStub implements ScheduleRunRecorder {
 }
 
 async function rig(handle: AgentBackend["handle"] = async () => ({ text: "无需通知" }),
-  opts: Partial<Pick<ScheduledRuntimeOptions, "owner" | "canSchedule">> & { concurrency?: number; backend?: "pi" | "codex" } = {}) {
-  const f = sendFixture();
+  opts: Partial<Pick<ScheduledRuntimeOptions, "owner" | "owners" | "canSchedule">> & { concurrency?: number; backend?: "pi" | "codex" } = {}) {
+  const ownerIds = typeof opts.owners === "function" ? opts.owners() : opts.owners;
+  const f = sendFixture(true, ownerIds);
   // fixture 的入站票据不参与定时恢复；FIFO 测试另建真实入站票据。
   f.store.markSending(f.ticket); f.store.markSent(f.ticket, "old");
   const recorder = new RecorderStub(), pauseSchedule = vi.fn(async () => {});
@@ -48,7 +49,7 @@ async function rig(handle: AgentBackend["handle"] = async () => ({ text: "无需
   const backend: AgentBackend = { name: opts.backend ?? "codex", recordDeliveryNote, handle: async (...args) => {
     requests.push(args[0]); return handle(...args);
   } };
-  const tasks = createTasks({ owner: "1", getBridge: () => f.bridge, sendService: f.service,
+  const tasks = createTasks({ owner: "1", owners: ownerIds, getBridge: () => f.bridge, sendService: f.service,
     imagesDir: path.join(f.dir, "images"), replyRetryDelayMs: 1,
     imageBackend: { name: "test", submit: async () => "p", collect: async () => [],
       reconcile: async () => ({ images: [] }), clearReferences: async () => {} },
@@ -58,7 +59,7 @@ async function rig(handle: AgentBackend["handle"] = async () => ({ text: "无需
   const dbFile = path.join(f.dir, "scheduled.sqlite");
   const open = () => openHarness({ models: createModels(), extension: createCsAgentExtension(tasks, [scheduled.ScheduledTask]), dbFile }, ctx);
   let harness = await open();
-  const dispatch = () => new Dispatcher({ harness, tasks, scheduled, bridge: f.bridge, concurrency: opts.concurrency ?? 2, retryDelayMs: 1 });
+  const dispatch = () => new Dispatcher({ harness, tasks, scheduled, owners: typeof opts.owners === "function" ? opts.owners() : opts.owners, bridge: f.bridge, concurrency: opts.concurrency ?? 2, retryDelayMs: 1 });
   let dispatcher = dispatch();
   cleanup.push(() => harness.close(ctx));
   return { ...f, tasks, scheduled, recorder, pauseSchedule, requests, events, recordDeliveryNote,
@@ -78,8 +79,8 @@ async function rig(handle: AgentBackend["handle"] = async () => ({ text: "无需
       await dispatcher.dispatchScheduled(admitted.ticket);
       return admitted;
     },
-    async message(text: string, id: string, group: string | null = "7") {
-      const msg = { ...f.msg, text, route_text: text, message_id: id, group_id: group,
+    async message(text: string, id: string, group: string | null = "7", user = "1") {
+      const msg = { ...f.msg, user_id: user, text, route_text: text, message_id: id, group_id: group,
         message_type: group ? "group" as const : "private" as const };
       const ticket = f.store.createTicket(msg);
       return { msg, ticket };
@@ -390,4 +391,81 @@ it("准备后票据被冲突清理终结，admit 重查票据状态并跳过", a
   expect(result).toMatchObject({ ticket: scheduledTicket(value.fire_key), skipped: true });
   expect((await r.harness.snapshot(DispatchDoc, ctx))?.pending ?? {}).toEqual({});
   expect(r.store.get(result.ticket)?.status).toBe("sent");
+});
+
+it.each(["owner", "private:9"] as const)("第二 owner 的定时回合复用 owner 线程，%s 的投递目标保持独立", async conversation => {
+  let f!: Awaited<ReturnType<typeof rig>>;
+  f = await rig(async req => {
+    await f.service.send({ ...f.binding, ticket: req.ticket, source: req.source }, { text: "定时通知" }, { callId: "notify" });
+    return { text: "完成" };
+  }, { owners: ["1", "9"] });
+  const value = fire({ created_by: "qq:9", conversation });
+  const { ticket } = await f.run(value), target = conversation === "owner" ? "1" : "9";
+  expect(f.requests[0]).toMatchObject({ actor: "qq:9", actorIsOwner: true, senderIsOwner: true,
+    threadKey: "owner", scope: "private:" + target, access: "all", source: { user_id: "9" } });
+  expect(f.store.get(ticket)).toMatchObject({ user_id: "9", target_id: target });
+  expect(f.service.rows(ticket)).toMatchObject([{ target_id: target, status: "sent" }]);
+  expect(f.recorder.runs.get(value.fire_key)).toMatchObject({ status: "sent" });
+  expect(f.pauseSchedule).not.toHaveBeenCalled();
+});
+
+it("第二 owner 私聊、owner 定时回合和主账号私聊共用队列", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }), started: string[] = [];
+  const f = await rig(async req => {
+    started.push(req.text.startsWith("[定时任务]") ? "定时" : req.text);
+    if (req.text === "第二账号") await gate;
+    return { text: "完成" };
+  }, { owners: ["1", "9"], concurrency: 3 });
+  const first = await f.message("第二账号", "owners-1", null, "9");
+  const p1 = f.dispatcher.dispatch(first.msg, first.ticket);
+  await vi.waitFor(() => expect(started).toEqual(["第二账号"]));
+  const scheduled = await f.admit(fire({ created_by: "qq:9", conversation: "owner" }));
+  const p2 = f.dispatcher.dispatchScheduled(scheduled.ticket);
+  const primary = await f.message("主账号", "owners-2", null);
+  const p3 = f.dispatcher.dispatch(primary.msg, primary.ticket);
+  const other = await f.message("其他群", "owners-3");
+  const p4 = f.dispatcher.dispatch(other.msg, other.ticket);
+  try {
+    await vi.waitFor(() => expect(started).toContain("其他群"));
+    expect(started).toEqual(["第二账号", "其他群"]);
+    expect(f.dispatcher.status().scopes.owner).toBe(2);
+  } finally { release(); await Promise.all([p1, p2, p3, p4]); }
+  expect(started.filter(value => value !== "其他群")).toEqual(["第二账号", "定时", "主账号"]);
+});
+
+it("第二 owner 从配置移除后，恢复定时回合前重新拒绝 owner 线程权限", async () => {
+  let owners = ["1", "9"];
+  const f = await rig(undefined, { owners: () => owners, canSchedule: () => true });
+  const { ticket } = await f.admit(fire({ created_by: "qq:9", conversation: "owner" }));
+  owners = ["1"];
+  await f.reopen();
+  await f.dispatcher.recover(); await f.dispatcher.idle();
+  expect(f.requests).toEqual([]);
+  expect(f.store.get(ticket)?.status).toBe("sent");
+  expect(f.pauseSchedule).toHaveBeenCalledTimes(1);
+});
+
+it("重启后更换主账号，旧 owner 定时票据仍与新主账号私聊串行，冻结投递目标不变", async () => {
+  let owners = ["1", "9"], release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started: string[] = [];
+  const f = await rig(async req => {
+    started.push(req.threadKey);
+    if (req.ticket.startsWith("run_")) await gate;
+    return { text: "完成" };
+  }, { owner: () => owners[0], owners: () => owners, concurrency: 3 });
+  const scheduled = await f.admit(fire({ created_by: "qq:9", conversation: "owner" }));
+  const msg = await f.message("新主账号", "new-primary", null, "9");
+  owners = ["9"];
+  await f.reopen();
+  try {
+    expect(await f.dispatcher.recover()).toBe(2);
+    await vi.waitFor(() => expect(started).toEqual(["owner"]));
+    expect(f.dispatcher.status().scopes.owner).toBe(1);
+    expect(f.store.get(scheduled.ticket)).toMatchObject({ target_id: "1", user_id: "9" });
+    expect((await f.harness.snapshot(DispatchDoc, ctx))?.pending[scheduled.ticket].scope).toBe("private:1");
+  } finally { release(); await f.dispatcher.idle(); }
+  expect(f.requests.map(req => req.ticket)).toEqual([scheduled.ticket, msg.ticket]);
+  expect(started).toEqual(["owner", "owner"]);
 });

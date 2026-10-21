@@ -47,7 +47,7 @@ export async function flush(check: () => Promise<boolean> | boolean = () => true
   throw new Error("调度器未到达预期检查点");
 }
 
-export async function rig(options: { canSchedule?: (actor: string) => boolean | Promise<boolean>; admitter?: AdmitterStub } = {}) {
+export async function rig(options: { owners?: readonly string[]; canSchedule?: (actor: string) => boolean | Promise<boolean>; admitter?: AdmitterStub } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "cs-schedule-"));
   const admitter = options.admitter ?? new AdmitterStub(), event = vi.fn();
   const task = createScheduleTask({ admitter, trace: { event } });
@@ -59,7 +59,7 @@ export async function rig(options: { canSchedule?: (actor: string) => boolean | 
     harness = await Harness.open(await openNodeSqliteStorage(path.join(dir, "agent.sqlite")), {
       registry, models: createModels(), now: () => Date.now(), onReport: error => reports.push(error),
     }, ctx);
-    service = new ScheduleService({ harness, task, admitter, owner: "1", now: () => Date.now(),
+    service = new ScheduleService({ harness, task, admitter, owner: "1", owners: options.owners, now: () => Date.now(),
       canSchedule: options.canSchedule, trace: { event } });
     await service.start();
   };

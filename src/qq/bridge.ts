@@ -56,9 +56,9 @@ function idOf(value: unknown): string {
 }
 
 /** 消息库入库范围：允许群的全部消息 + 允许用户的私聊（与是否触发无关）。 */
-function inFeedScope(config: Pick<QQBridgeConfig, "allowUsers" | "allowGroups">, m: InboundMessage): boolean {
+function inFeedScope(config: Pick<QQBridgeConfig, "allowUsers" | "allowGroups" | "owners">, m: InboundMessage): boolean {
   if (m.message_type === "group") return m.group_id !== null && config.allowGroups.includes(m.group_id);
-  return config.allowUsers === "*" || config.allowUsers.includes(m.user_id);
+  return isAllowed(config, m);
 }
 
 function toError(value: unknown): Error {
@@ -515,7 +515,7 @@ class Bridge extends EventEmitter implements Channel {
       }
     } else if (event.notice_type === "friend_recall") {
       const user = idOf(event.user_id);
-      if (user && (this.config.allowUsers === "*" || this.config.allowUsers.includes(user))) {
+      if (user && isAllowed(this.config, { message_type: "private", user_id: user, group_id: null })) {
         this.emitSafe("recall", "private:" + user, messageId);
       }
     }

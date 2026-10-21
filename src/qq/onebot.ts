@@ -3,12 +3,8 @@
  * 发送类调用（sending=true）的任何失败都标记为 uncertain：消息可能已发出，禁止自动重试。
  */
 
-const ID_PATTERN = /^[1-9]\d{0,15}$/;
-
-/** QQ 号 / 群号是否为合法的正整数字符串（且在安全整数范围内）。 */
-export function isValidId(value: string): boolean {
-  return ID_PATTERN.test(value) && Number.isSafeInteger(Number(value));
-}
+import { isValidId } from "../shared/qq-id.js";
+export { isValidId } from "../shared/qq-id.js";
 
 /** 校验并转为 OneBot 需要的数字形式。 */
 export function numericId(value: string): number {

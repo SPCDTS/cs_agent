@@ -1,3 +1,4 @@
+import { isOwnerActor, ownerScope } from "../../shared/owners.js";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
@@ -70,6 +71,7 @@ export interface ScheduledRuntimeOptions {
   recorder: ScheduleRunRecorder;
   /** 主进程身份配置，可在运行前读取当前 owner。 */
   owner?: string | (() => string | undefined);
+  owners?: readonly string[] | (() => readonly string[]);
   /** actor 为 qq:<创建者>；缺省只允许当前 owner。每次调用后端前重新检查。 */
   canSchedule?(actor: string, conversation: ScheduleConversation): boolean | Promise<boolean>;
   /** 由定义服务提供幂等暂停；B 不依赖或修改 SchedulesDoc。 */
@@ -83,6 +85,7 @@ type RunStore = {
 
 export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
   const owner = () => typeof opts.owner === "function" ? opts.owner() : opts.owner;
+  const owners = () => (typeof opts.owners === "function" ? opts.owners() : opts.owners) ?? owner();
   const { tasks } = opts;
 
   function binding(fire: ScheduledFire): { scope: string; source: TicketSource; outbound: OutboundTicket } {
@@ -196,7 +199,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
           await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "settle", attempt: 0 } }), context);
           return;
         }
-        const currentOwner = owner(), senderIsOwner = run.created_by === `qq:${currentOwner}`;
+        const currentOwners = owners(), senderIsOwner = isOwnerActor(currentOwners, run.created_by);
         const allowed = (run.conversation !== "owner" || senderIsOwner) &&
           (opts.canSchedule ? await opts.canSchedule(run.created_by, run.conversation) : senderIsOwner);
         runtime.signal.throwIfAborted();
@@ -221,7 +224,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
           ? AbortSignal.timeout(Math.ceil(remaining)) : AbortSignal.abort(new Error("定时运行超时"))]);
         await tasks.handleAgent(runtime, context, { scheduled: true, signal, request: {
           scope: entry.scope, access: senderIsOwner ? "all" : entry.scope,
-          threadKey: run.conversation, senderIsOwner,
+          threadKey: senderIsOwner ? ownerScope(currentOwners, run.conversation) : run.conversation, senderIsOwner,
         } });
       },
       settle: async (_task, runtime, context) => {

@@ -1,3 +1,4 @@
+import { isOwner } from "../shared/owners.js";
 import { fitReply } from "./reply-postprocess.js";
 import { SendService } from "./send-service.js";
 import { ticketTarget } from "../channel/ticket.js";
@@ -71,6 +72,7 @@ export interface TaskDeps {
   ticketsDir?: string;
   backends: BackendSelector;
   owner?: string;
+  owners?: readonly string[];
   /** 统一上下文存储：查找 [引用] 正文 */
   store?: Pick<ContextStore, "message">;
   codexReasoningEffort?: string | (() => string);
@@ -632,9 +634,9 @@ export function createTasks(deps: TaskDeps) {
       // user_id 始终是实际发言人或定时创建者；私聊收件人由票据 target_id 独立确定。
       const source = { ...doc.source, type: record.message_type, user_id: record.user_id, group_id: record.group_id };
       const actor = `qq:${record.user_id}`;
-      const actorIsOwner = options.request?.senderIsOwner ?? (!!deps.owner && record.user_id === deps.owner);
+      const actorIsOwner = options.request?.senderIsOwner ?? isOwner(deps.owners ?? deps.owner, record.user_id);
       const scope = options.request?.scope ?? `${record.message_type}:${ticketTarget(record)}`;
-      const threadKey = options.request?.threadKey ?? threadKeyForSource(source, deps.owner);
+      const threadKey = options.request?.threadKey ?? threadKeyForSource(source, deps.owners ?? deps.owner);
       let quote: { message_id: string; nickname: string; text: string } | undefined;
       if (doc.replyTo && deps.store) {
         try {
@@ -659,7 +661,7 @@ export function createTasks(deps: TaskDeps) {
             ticket: doc.ticket, actor, actorIsOwner,
             settings: doc.settings,
             scope,
-            access: options.request?.access ?? accessToString(accessForSource(source, deps.owner)),
+            access: options.request?.access ?? accessToString(accessForSource(source, deps.owners ?? deps.owner)),
             threadKey,
             senderIsOwner: actorIsOwner,
             source: { ...source },

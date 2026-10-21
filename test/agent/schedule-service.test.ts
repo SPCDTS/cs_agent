@@ -186,3 +186,26 @@ it.each(["queued", "running"] as const)("裁剪只删除终态记录，保留 %s
   expect(runs).toHaveLength(20); expect(runs[0]).toEqual(first);
   expect(runs[1].fire_at).toBe(START + 7);
 });
+
+it("第二 owner 可管理全部任务，享有五分钟规则且不受五条额度限制", async () => {
+  const r = await setup({ owners: ["1", "2"], canSchedule: actor => actor === "qq:3" });
+  const primary = await r.service.create(owner, input());
+  const other = await r.service.create("qq:3", input({ conversation: "group:7",
+    rule: { kind: "rrule", rrule: "FREQ=MINUTELY;INTERVAL=30", dtstart: START } }));
+  const secondary = [];
+  for (let n = 0; n < 6; n++) secondary.push(await r.service.create("qq:2", input()));
+  expect(await r.service.list("qq:2")).toHaveLength(8);
+  expect(await r.service.list("qq:3")).toHaveLength(1);
+  expect(await r.service.get(primary.id, "qq:2")).toEqual(primary);
+  await r.service.update("qq:2", primary.id, { name: "第二账号修改" });
+  await r.service.update(owner, secondary[0].id, { name: "主账号修改" });
+  await r.service.pause(owner, secondary[0].id);
+  await expect(r.service.resume("qq:2", secondary[0].id)).resolves.toMatchObject({ status: "active" });
+  await expect(r.service.runNow("qq:2", primary.id)).resolves.toHaveProperty("ticket");
+  await r.service.pause("qq:2", other.id);
+  await expect(r.service.resume("qq:2", other.id)).resolves.toMatchObject({ status: "active" });
+  await r.service.remove("qq:2", other.id);
+  await expect(r.service.remove("qq:3", primary.id)).rejects.toMatchObject({ status: 403 });
+  await r.service.complete("qq:2", primary.id);
+  expect(await r.service.get(primary.id)).toMatchObject({ status: "completed" });
+});

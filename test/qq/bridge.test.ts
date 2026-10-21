@@ -446,3 +446,21 @@ describe("raw / recall feed", () => {
     expect(errors.some(e => e.message.includes("db down"))).toBe(true);
   });
 });
+
+it("不在 allowUsers 中的第二 owner 仍触发、入库、接收原账号回复与撤回通知", async () => {
+  await bridge.stop();
+  const secondary = "10000002";
+  bridge = await startBridge({ allowUsers: [], owners: [OWNER, secondary] });
+  const raw = vi.fn(), recall = vi.fn();
+  bridge.on("raw", raw); bridge.on("recall", recall);
+  const messages = await pushAndFlush(privateEvent(secondary, "第二账号"), privateEvent(STRANGER, "陌生人"));
+  expect(messages.map(message => message.user_id)).toEqual([secondary]);
+  expect(raw.mock.calls.map(([message]) => message.user_id)).toContain(secondary);
+  expect(raw.mock.calls.some(([message]) => message.user_id === STRANGER)).toBe(false);
+  const receivedMessage = received.find(row => row.message.user_id === secondary)!;
+  expect(await bridge.reply(receivedMessage.ticket, "回复第二账号")).toMatchObject({ target_id: secondary, message_type: "private" });
+  server.push({ post_type: "notice", notice_type: "friend_recall", user_id: secondary, message_id: "recalled-owner" });
+  server.push({ post_type: "notice", notice_type: "friend_recall", user_id: STRANGER, message_id: "recalled-stranger" });
+  await pushAndFlush();
+  expect(recall.mock.calls).toEqual([["private:" + secondary, "recalled-owner"]]);
+});

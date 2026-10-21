@@ -3,6 +3,7 @@
  * - `{kind:"scope"}`：只见该会话（群 `group:<id>` / 私聊 `private:<qq>`）；
  * - `{kind:"all"}`：全部会话，owner 在私聊和群聊均可使用。
  */
+import { isOwner, type OwnerIds } from "../shared/owners.js";
 import type { ChatType } from "../channel/types.js";
 
 export type Access = { kind: "scope"; scope: string } | { kind: "all" };
@@ -20,9 +21,9 @@ export function scopeOf(m: { message_type: ChatType; group_id: string | null; us
 /** 票据来源 → 访问范围：owner → all；其他群消息 → 本群；其他私聊 → 本人。 */
 export function accessForSource(
   source: { type: ChatType; user_id: string; group_id: string | null },
-  owner: string | undefined,
+  owners: OwnerIds,
 ): Access {
-  if (owner && source.user_id === owner) return { kind: "all" };
+  if (isOwner(owners, source.user_id)) return { kind: "all" };
   if (source.type === "group") return { kind: "scope", scope: `group:${source.group_id}` };
   return { kind: "scope", scope: `private:${source.user_id}` };
 }
@@ -39,10 +40,15 @@ export function parseAccess(value: string | undefined): Access | undefined {
   return undefined;
 }
 
-/** owner：QQ_OWNER，否则 QQ_ALLOW_USERS 的第一项（为 "*" 时无 owner）。 */
+/** QQ_OWNER 列表；空列表仅回退到 QQ_ALLOW_USERS 首项（为 "*" 时无 owner）。 */
+export function resolveOwners(qqOwner: string, allowUsers: string[] | "*"): string[] {
+  const owners = qqOwner.split(",").map(id => id.trim()).filter(Boolean);
+  return owners.length ? [...new Set(owners)] : allowUsers === "*" ? [] : allowUsers.slice(0, 1);
+}
+
+/** 需要单一投递目标或面板身份时使用首个 owner。 */
 export function resolveOwner(qqOwner: string, allowUsers: string[] | "*"): string | undefined {
-  if (qqOwner.trim()) return qqOwner.trim();
-  return allowUsers === "*" ? undefined : allowUsers[0];
+  return resolveOwners(qqOwner, allowUsers)[0];
 }
 
 export function scopeLabel(scope: string): string {
