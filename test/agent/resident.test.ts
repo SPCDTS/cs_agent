@@ -289,60 +289,42 @@ async function vi_wait(check: () => boolean, timeout = 10_000): Promise<void> {
   }
 }
 
-describe("pi 开轮请求未确认就重启（重放同一批输入）", () => {
-  /** 落盘两条同一发送者的入站输入，不经宿主（模拟宿主已持久化"开轮中"的批次）。 */
-  function admitPair(r: Awaited<ReturnType<typeof residentRig>>) {
-    return ["第一条", "第二条"].map((body, i) => {
-      const msg = r.message("5", body);
-      const key = (r.bridge.inbox as ReplyStore).admit(msg, "group:7")!;
-      r.history.ingest(msg);
-      return { inboundKey: key, kind: "user" as const, sender: "5", seq: 100 + i, at: 0 };
-    });
-  }
-
-  it("首条已提交、第二条未提交：重放时把其余输入幂等并入仍在进行的 run", async () => {
+describe("一轮只开一条输入（§4.2）", () => {
+  it("同一发送者排队的两条：开轮只送首条，第二条在开轮后插话进同一回合", async () => {
     const slow = gate();
-    const users: string[][] = [];
-    const r = await residentRig({ brain: async (ctx) => {
-      users.push(ctx.messages.filter(m => m.role === "user").map(m => lastUser({ ...ctx, messages: [m] })));
-      if (users.length === 1) await slow.wait();
-      return reply("结束");
+    const r = await residentRig({ brain: (ctx) => {
+      if (ctx.messages.at(-1)!.role === "toolResult") return reply("结束");
+      if (lastUser(ctx).endsWith("慢")) return (async () => { await slow.wait(); return reply("好了"); })();
+      return reply("收到");
     } });
-    const [a, b] = admitPair(r);
-    const first = await r.pi.startTurn("group:7", [a!], { kind: "user", sender: "5" });
+    const starts: number[] = [];
+    const startTurn = r.pi.startTurn.bind(r.pi);
+    r.pi.startTurn = (threadKey, inputs, ctx, settings) => { starts.push(inputs.length); return startTurn(threadKey, inputs, ctx, settings); };
+    await r.say("6", "慢");
     await vi_wait(() => slow.entered === 1);
-    // 崩溃后宿主重新开同一批
-    const again = await r.pi.startTurn("group:7", [a!, b!], { kind: "user", sender: "5" });
-    expect(again).toEqual(first);
+    const a = await r.say("5", "第一条");
+    const b = await r.say("5", "第二条");
     slow.open();
-    await vi_wait(() => users.some(u => u.some(t => t.includes("第二条"))));
+    await r.idle();
+    expect(starts).toEqual([1, 1]);
+    expect(r.bridge.inbox.getInbound(a)!.turn_id).toBe(r.bridge.inbox.getInbound(b)!.turn_id);
   });
 
-  it("首条所在 run 已结束：其余输入不并入（否则会自己开一次唤醒 run），只回报已收下的输入", async () => {
-    const users: string[] = [];
-    const r = await residentRig({ brain: (ctx) => { users.push(lastUser(ctx)); return reply("结束"); } });
-    const [a, b] = admitPair(r);
-    const first = await r.pi.startTurn("group:7", [a!], { kind: "user", sender: "5" });
-    await vi_wait(() => users.length === 1);
-    await new Promise(resolve => setTimeout(resolve, 200));
-    const again = await r.pi.startTurn("group:7", [a!, b!], { kind: "user", sender: "5" });
-    expect(again).toEqual({ ...first, accepted: [a!.inboundKey] });
-    await new Promise(resolve => setTimeout(resolve, 300));
-    expect(users.some(t => t.includes("第二条"))).toBe(false);
-  });
-
-  it("首条所在 run 已结束且其余输入也已在那次 run 里处理过：一并算本轮收下，不放回队列（避免换后端重跑）", async () => {
-    const seen: string[] = [];
-    const r = await residentRig({ brain: (ctx) => { seen.push(lastUser(ctx)); return reply("结束"); } });
-    const [a, b] = admitPair(r);
-    const first = await r.pi.startTurn("group:7", [a!, b!], { kind: "user", sender: "5" });
-    await vi_wait(() => seen.some(t => t.includes("第二条")));
-    await new Promise(resolve => setTimeout(resolve, 200));
-    const calls = seen.length;
-    const again = await r.pi.startTurn("group:7", [a!, b!], { kind: "user", sender: "5" });
+  it("开轮请求未确认就重启：重放同一条输入取回同一提交，回合结果取该提交的真实结果（失败照常回报）", async () => {
+    const r = await residentRig({ brain: () => Object.assign(reply(""), { stopReason: "error" as const, errorMessage: "上游 500" }) });
+    const msg = r.message("5", "会失败");
+    const key = (r.bridge.inbox as ReplyStore).admit(msg, "group:7")!;
+    r.history.ingest(msg);
+    const input = { inboundKey: key, kind: "user" as const, sender: "5", seq: 100, at: 0 };
+    const completed: { turnId: string; status: string }[] = [];
+    const onTurnCompleted = r.host.onTurnCompleted.bind(r.host);
+    r.host.onTurnCompleted = (threadKey, turnId, result) => { completed.push({ turnId, status: result.status }); onTurnCompleted(threadKey, turnId, result); };
+    const first = await r.pi.startTurn("group:7", [input], { kind: "user", sender: "5" });
+    await vi_wait(() => completed.length === 1);
+    const again = await r.pi.startTurn("group:7", [input], { kind: "user", sender: "5" });
     expect(again).toEqual(first);
-    await new Promise(resolve => setTimeout(resolve, 300));
-    expect(seen).toHaveLength(calls);
+    await vi_wait(() => completed.length === 2);
+    expect(completed).toEqual([{ turnId: (first as { turnId: string }).turnId, status: "failed" }, { turnId: (first as { turnId: string }).turnId, status: "failed" }]);
   });
 });
 
@@ -362,6 +344,33 @@ describe("pi 会话仍有后台工作（后端切换判定）", () => {
     expect(await r.pi.busy("group:7")).toBe(true);
     child.open();
     await vi.waitFor(async () => expect(await r.pi.busy("group:7")).toBe(false), { timeout: 15_000, interval: 20 });
+    await r.idle(15_000);
+  });
+
+  it("busy 在一次一致的读取里判断：子 agent 汇报恰在读取之间唤醒主会话时仍为 busy", async () => {
+    const child = gate(), wake = gate();
+    const r = await residentRig({ brain: (ctx) => {
+      if (isChild(ctx)) return (async () => { await child.wait(); return reply("晴"); })();
+      if (ctx.messages.at(-1)!.role === "toolResult") return reply("收尾");
+      if (lastUser(ctx).startsWith("[子 agent 完成]")) return (async () => { await wake.wait(); return reply("知道了"); })();
+      return call(["subagent", { action: "spawn", name: "w", task: "查天气" }]);
+    } });
+    await r.say("5", "派个子 agent");
+    await vi_wait(() => child.entered === 1, 15_000);
+    await vi_wait(() => !r.host.thread("group:7")?.busy);
+    // 第一次读取之后、第二次读取之前：子 agent 完成，汇报唤醒主会话（汇报登记随之清空）
+    const snapshot = r.pi.harness.snapshot.bind(r.pi.harness);
+    let reads = 0;
+    (r.pi.harness as { snapshot: unknown }).snapshot = async (...args: Parameters<typeof snapshot>) => {
+      const value = await snapshot(...args);
+      if (++reads === 2) { child.open(); await vi_wait(() => wake.entered === 1, 15_000); await new Promise(res => setTimeout(res, 200)); }
+      return value;
+    };
+    const busy = await r.pi.busy("group:7");
+    (r.pi.harness as { snapshot: unknown }).snapshot = snapshot;
+    child.open();
+    expect(busy).toBe(true);
+    wake.open();
     await r.idle(15_000);
   });
 });

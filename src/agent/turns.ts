@@ -1,8 +1,9 @@
 /**
  * 回合编排（设计 §4、§8）：
  * - BackendRouter：ThreadHost 的适配器入口，按会话键选择后端（面板设置与覆盖表；owner 线程取首个 owner 账号私聊的覆盖），
- *   不按单条输入的 scope——一个会话同一时间只由一个后端服务（§4.3）。会话的上一回合属于另一个后端且那个后端在该会话
- *   仍有工作（pi 子 agent 在跑、被放弃的 exec 未退出）时，本轮仍用旧后端，切换在它结束后生效。开轮时冻结设置快照；
+ *   不按单条输入的 scope——一个会话同一时间只由一个后端服务（§4.3）。后端由 plan 在会话空闲开新回合时选定、宿主落盘，
+ *   开轮（含重启后恢复未确认的开轮）按落盘的后端执行；会话的上一回合属于另一个后端且那个后端在该会话仍有工作
+ *   （pi 子 agent 在跑、被放弃的 exec 未退出）时，本轮仍用旧后端，切换在它结束后生效。开轮时冻结设置快照；
  *   插话、恢复、放弃按回合 id 前缀（pi: / codex:）交给对应后端；后端不可用时开轮重试，超过 2 分钟才算投递失败。
  * - TurnMonitor：宿主事件的外层处理——Inbox 状态、观测、定时运行统计、出错提示（同一会话 10 分钟内最多一条）、
  *   回合结束后补传附件；看门狗：回合连续 30 分钟没有任何事件即中止（随后按回合失败提示）。
@@ -33,6 +34,8 @@ export interface BackendRouterOptions {
   backends: Partial<Record<BackendName, BackendAdapter>>;
   settings: TurnSettings;
   turns: { records(inputs: readonly Pick<InputRef, "inboundKey">[]): InboundRecord[] };
+  /** 只选后端（面板设置与覆盖表，不做档位路由）；缺省取 settings 快照的 backend */
+  backendFor?: (scope: string) => BackendName;
   /** owner 线程按首个 owner 账号的私聊 scope 选择后端 */
   owners?: OwnerIds | (() => OwnerIds);
   /** 开轮失败的重试总时长，默认 2 分钟 */
@@ -60,9 +63,25 @@ export class BackendRouter implements ThreadAdapter {
     return first ? `private:${first}` : fallback;
   }
 
+  /**
+   * 选定本轮后端（宿主在会话空闲开新回合、写入"开轮中"之前调用）：按会话键的设置选择；上一回合属于另一个后端且
+   * 那个后端在该会话仍忙（pi 子 agent 在跑、run 未结束、被放弃的 exec 未退出）时，仍用旧后端。
+   */
+  async plan(threadKey: ThreadKey, input: InputRef, opts: { previousTurnId?: string }): Promise<string> {
+    const [rec] = this.opts.turns.records([input]);
+    const scope = this.threadScope(threadKey, rec!.scope);
+    const wanted = this.opts.backendFor ? this.opts.backendFor(scope) : (await this.opts.settings(scope)).backend;
+    const previous = opts.previousTurnId ? this.nameOf(opts.previousTurnId) : undefined;
+    if (previous && previous !== wanted && await this.opts.backends[previous]?.busy?.(threadKey)) {
+      log.info("backend switch deferred; previous backend still busy", { thread: threadKey, from: previous, to: wanted });
+      return previous;
+    }
+    return wanted;
+  }
+
   async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext): Promise<StartTurnResult> {
     const now = this.opts.now ?? Date.now, deadline = now() + (this.opts.retryMs ?? 120_000);
-    const { admit, previousTurnId, ...turn } = ctx;
+    const { admit, backend: planned, ...turn } = ctx;
     for (let attempt = 1; ; attempt++) {
       try {
         // 定时输入：宿主在首次开轮前已复核；重试窗口可长达数分钟，每次重试前按当前授权再复核
@@ -74,13 +93,8 @@ export class BackendRouter implements ThreadAdapter {
           ticket: head.key, text: records.map(r => r.text).join("\n"),
           hasImages: records.some(r => r.images.length > 0), hasQuote: records.some(r => !!r.reply_to),
         };
-        let settings = await this.opts.settings(scope, msg);
-        // 后端切换只在旧后端于该会话没有工作时生效；否则本轮仍用旧后端
-        const previous = previousTurnId ? this.nameOf(previousTurnId) : undefined;
-        if (previous && previous !== settings.backend && await this.opts.backends[previous]?.busy?.(threadKey)) {
-          log.info("backend switch deferred; previous backend still busy", { thread: threadKey, from: previous, to: settings.backend });
-          settings = await this.opts.settings(scope, msg, previous);
-        }
+        // 宿主已持久化本轮后端（plan）：按它执行，不按当前设置重新选择
+        const settings = planned ? await this.opts.settings(scope, msg, planned as BackendName) : await this.opts.settings(scope, msg);
         const backend = this.opts.backends[settings.backend];
         if (!backend) throw new Error(`agent backend "${settings.backend}" is not registered`);
         trace.event("in:" + head.key, "admitted", { scope: head.scope, detail: { settings, thread_key: threadKey } });

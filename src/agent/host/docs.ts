@@ -23,6 +23,8 @@ export type ThreadHostState = {
   lastActivityAt?: number;
   /** 本会话最近一个回合（含唤醒回合）的 id，空闲后保留：路由据此判定会话当前的后端（一个会话同一时间只由一个后端服务） */
   lastTurnId?: string;
+  /** 开轮时选定的后端（与"开轮中"状态同一提交落盘）：未确认的开轮重启后按它重新开轮，不重新选择 */
+  route?: { inboundKey: string; backend: string };
 };
 
 export const ThreadHostDoc = defineDocFamily<ThreadHostState, string>({

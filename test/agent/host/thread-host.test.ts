@@ -31,10 +31,11 @@ class FakeAdapter implements ThreadAdapter {
   abandoned: { threadKey: ThreadKey; turnId: string }[] = [];
   /** 放弃回合时后端的处理：aborted = 工作被中止 */
   abandonAs: { status: "completed" | "failed" | "lost"; error?: string } = { status: "completed" };
-  /** 每次开轮时宿主给出的上一回合 id（会话当前后端） */
+  /** 选择后端（plan）时宿主给出的上一回合 id */
   previous: (string | undefined)[] = [];
-  /** 开轮只收下这些输入（其余应回到队列） */
-  acceptOnly?: string[];
+  /** plan 选定的后端，以及每次开轮收到的后端 */
+  planAs = "fake";
+  backends: (string | undefined)[] = [];
   /** 开轮时后端内部重试前复核被拒 */
   denyOnRetry = false;
   private n = 0;
@@ -52,14 +53,16 @@ class FakeAdapter implements ThreadAdapter {
     }
     const turnId = `t${++this.n}`;
     this.live.set(threadKey, turnId);
-    const { admit: _admit, previousTurnId, ...plain } = turnCtx;
-    this.previous.push(previousTurnId);
-    const accepted = this.acceptOnly;
-    this.acceptOnly = undefined;
-    this.starts.push({ threadKey, keys: inputs.map(i => i.inboundKey).filter(k => !accepted || accepted.includes(k)), ctx: plain, turnId });
+    const { admit: _admit, backend, ...plain } = turnCtx;
+    this.backends.push(backend);
+    this.starts.push({ threadKey, keys: inputs.map(i => i.inboundKey), ctx: plain, turnId });
     // 真实后端会在 startTurn 返回前就回报 turn/started
     this.host.onTurnStarted(threadKey, turnId, "host");
-    return accepted ? { turnId, accepted } : { turnId };
+    return { turnId };
+  }
+  async plan(_threadKey: ThreadKey, _input: InputRef, opts: { previousTurnId?: string }) {
+    this.previous.push(opts.previousTurnId);
+    return this.planAs;
   }
   async steer(threadKey: ThreadKey, turnId: string, input: InputRef) {
     const reply = this.live.get(threadKey) === turnId ? "ok" as const : "no_active_turn" as const;
@@ -193,7 +196,10 @@ describe("ThreadHost 投递规则（§4.2）", () => {
     // B 的回合进行中，A 的消息不能插进 B 的回合
     expect(await r.user(G, "a3", "A")).toBe("queued");
     r.adapter.complete(G); await r.settle();
-    expect(r.adapter.keysOf(G)).toEqual([["a1"], ["b1"], ["a2", "a3"]]);
+    // 一轮只开一条输入；同一发送者随后的排队消息在开轮后插话进来
+    expect(r.adapter.keysOf(G)).toEqual([["a1"], ["b1"], ["a2"]]);
+    expect(r.adapter.steers.at(-1)).toMatchObject({ key: "a3", reply: "ok" });
+    expect(r.host.thread(G)!.turnInputs.map(i => i.inboundKey)).toEqual(["a2", "a3"]);
   });
 
   it("定时任务：空闲开轮（定时身份），忙时排队且不插话、不与用户消息合并", async () => {
@@ -215,7 +221,7 @@ describe("ThreadHost 投递规则（§4.2）", () => {
     expect(r.adapter.keysOf(G)).toEqual([["s1"], ["m1"], ["s2"], ["m2"]]);
   });
 
-  it("排队输入：同一发送者的连续消息合并为一轮，遇到他人或定时即止", async () => {
+  it("排队输入：一轮只开一条，同一发送者紧随其后的排队消息开轮后插话进来，遇到他人或定时即止", async () => {
     const r = await rig();
     await r.user(G, "a1", "A"); await r.settle();
     for (const [key, sender] of [["b1", "B"], ["b2", "B"], ["c1", "C"], ["b3", "B"]] as const) await r.user(G, key, sender);
@@ -224,7 +230,9 @@ describe("ThreadHost 投递规则（§4.2）", () => {
     const order: string[][] = [];
     for (let i = 0; i < 6; i++) { r.adapter.complete(G); await r.settle(); }
     order.push(...r.adapter.keysOf(G));
-    expect(order).toEqual([["a1"], ["b1", "b2"], ["c1"], ["b3"], ["o1", "o2"], ["s1"], ["o3"]]);
+    expect(order).toEqual([["a1"], ["b1"], ["c1"], ["b3"], ["o1"], ["s1"], ["o3"]]);
+    expect(r.adapter.steers.filter(x => x.reply === "ok").map(x => x.key)).toEqual(["b2", "o2"]);
+    expect(r.ended.map(e => e.inputs.map(i => i.inboundKey))).toEqual([["a1"], ["b1", "b2"], ["c1"], ["b3"], ["o1", "o2"], ["s1"]]);
   });
 
   it("唤醒回合：后端开轮 → 忙（唤醒身份），用户消息排队到唤醒回合结束", async () => {
@@ -274,7 +282,7 @@ describe("ThreadHost 投递规则（§4.2）", () => {
     expect(r.ended).toHaveLength(1);
   });
 
-  it("会话的上一回合 id（含唤醒回合）随开轮交给适配器，空闲与重启后保留（路由据此保持会话当前后端）", async () => {
+  it("会话的上一回合 id（含唤醒回合）随选择后端交给适配器，空闲与重启后保留（路由据此保持会话当前后端）", async () => {
     const r = await rig();
     await r.user(G, "a1", "A"); await r.settle();
     r.adapter.complete(G); await r.settle();
@@ -287,20 +295,6 @@ describe("ThreadHost 投递规则（§4.2）", () => {
     await r.restart();
     await r.user(G, "c1", "A"); await r.settle();
     expect(r.adapter.previous).toEqual([b1Turn]);
-  });
-
-  it("开轮时后端只收下部分输入：只有收下的标记 delivered，其余放回队列，回合结束后再开轮", async () => {
-    const r = await rig();
-    // h0 进行中；E 的两条排队，下一轮合并为 [h1, h2]，后端只收下 h1
-    await r.user(H, "h0", "D"); await r.settle();
-    await r.user(H, "h1", "E"); await r.user(H, "h2", "E"); await r.settle();
-    r.adapter.acceptOnly = ["h1"];
-    r.adapter.complete(H); await r.settle();
-    expect(r.host.thread(H)).toMatchObject({ busy: true, turnInputs: [{ inboundKey: "h1" }], pending: [{ inboundKey: "h2" }] });
-    expect(r.delivered.at(-1)!.keys).toEqual(["h1"]);
-    expect(await r.host.inputState("h2")).toBe("queued");
-    r.adapter.complete(H); await r.settle();
-    expect(r.adapter.keysOf(H)).toEqual([["h0"], ["h1"], ["h2"]]);
   });
 
   it("定时输入：后端内部重试开轮前复核被拒 → 不开轮，以 failed 结束", async () => {
@@ -521,6 +515,25 @@ describe("ThreadHost 持久化与重启恢复", () => {
     expect(r.ended).toHaveLength(1);
   });
 
+  it("开轮请求未确认就重启：沿用开轮时持久化的后端，不重新选择（即使设置已改）", async () => {
+    const r = await rig();
+    r.adapter.planAs = "pi";
+    r.adapter.hangStart = true;
+    await r.user(G, "a1", "A");
+    for (let i = 0; i < 200 && !(await r.harness.snapshot(ThreadHostDoc, G, ctx))?.busy; i++) await new Promise(res => setImmediate(res));
+    expect(await r.harness.snapshot(ThreadHostDoc, G, ctx)).toMatchObject({ busy: true, route: { inboundKey: "a1", backend: "pi" } });
+    const next = new FakeAdapter();
+    next.planAs = "codex";
+    await r.restart(next, false);
+    expect(next.previous).toEqual([]);
+    expect(next.backends).toEqual(["pi"]);
+    expect(next.keysOf(G)).toEqual([["a1"]]);
+    // 回合结束后，下一个新回合才重新选择（会话空闲时）
+    next.complete(G); await r.settle();
+    await r.user(G, "b1", "A"); await r.settle();
+    expect(next.backends).toEqual(["pi", "codex"]);
+  });
+
   it("排队状态跨宿主重建保持", async () => {
     const r = await rig();
     await r.scheduled(G, "s1"); await r.settle();
@@ -529,6 +542,7 @@ describe("ThreadHost 持久化与重启恢复", () => {
     expect(r.host.thread(G)).toMatchObject({ busy: true, turnId: "t1", turnKind: "scheduled" });
     expect(r.host.thread(G)!.pending.map(i => i.inboundKey)).toEqual(["a1", "a2"]);
     r.host.onTurnCompleted(G, "t1", { status: "completed" }); await r.settle();
-    expect(r.adapter.keysOf(G)).toEqual([["a1", "a2"]]);
+    expect(r.adapter.keysOf(G)).toEqual([["a1"]]);
+    expect(r.host.thread(G)!.turnInputs.map(i => i.inboundKey)).toEqual(["a1", "a2"]);
   });
 });

@@ -67,23 +67,33 @@ describe("BackendRouter", () => {
     expect(codex.startTurn).not.toHaveBeenCalled();
   });
 
-  it("后端切换只在会话不再有旧后端的工作时生效：旧后端仍忙（pi 子 agent 在跑）→ 本轮仍用旧后端", async () => {
+  it("plan 选择后端：后端切换只在旧后端于该会话不忙时生效（pi 子 agent 在跑 → 仍用旧后端）", async () => {
     let piBusy = true;
     const pi = adapter("pi", { busy: vi.fn(async () => piBusy) }), codex = adapter("codex");
     const settings = vi.fn(async (_scope: string, _msg?: unknown, backend?: "pi" | "codex") =>
       ({ backend: backend ?? "codex" as const, codexReasoningEffort: "high" as const }));
     const turns = { records: (inputs: readonly Pick<InputRef, "inboundKey">[]) => inputs.map(i => rec(i.inboundKey)) };
-    const router = new BackendRouter({ backends: { pi, codex }, settings, turns });
-    const ctx = { kind: "user" as const, sender: "5", previousTurnId: "pi:3:4" };
-    expect(await router.startTurn("group:7", [input("a")], ctx)).toEqual({ turnId: "pi:1" });
+    const router = new BackendRouter({ backends: { pi, codex }, settings, turns, backendFor: () => "codex" });
+    expect(await router.plan("group:7", input("a"), { previousTurnId: "pi:3:4" })).toBe("pi");
     expect(pi.busy).toHaveBeenCalledWith("group:7");
-    expect(settings).toHaveBeenLastCalledWith("group:7", expect.anything(), "pi");
-    expect(pi.startTurn).toHaveBeenCalledWith("group:7", expect.any(Array), { kind: "user", sender: "5" }, expect.objectContaining({ backend: "pi" }));
     piBusy = false;
-    expect(await router.startTurn("group:7", [input("b")], ctx)).toEqual({ turnId: "codex:1" });
+    expect(await router.plan("group:7", input("b"), { previousTurnId: "pi:3:4" })).toBe("codex");
     // 上一轮就是新后端：不查旧后端
-    expect(await router.startTurn("group:7", [input("c")], { ...ctx, previousTurnId: "codex:x" })).toEqual({ turnId: "codex:1" });
+    expect(await router.plan("group:7", input("c"), { previousTurnId: "codex:x" })).toBe("codex");
     expect(pi.busy).toHaveBeenCalledTimes(2);
+    expect(settings).not.toHaveBeenCalled();
+  });
+
+  it("开轮按宿主持久化的后端（ctx.backend）执行，不按当前设置重新选择", async () => {
+    const pi = adapter("pi"), codex = adapter("codex");
+    const settings = vi.fn(async (_scope: string, _msg?: unknown, backend?: "pi" | "codex") =>
+      ({ backend: backend ?? "codex" as const, codexReasoningEffort: "high" as const }));
+    const turns = { records: (inputs: readonly Pick<InputRef, "inboundKey">[]) => inputs.map(i => rec(i.inboundKey)) };
+    const router = new BackendRouter({ backends: { pi, codex }, settings, turns, backendFor: () => "codex" });
+    expect(await router.startTurn("group:7", [input("a")], { kind: "user", sender: "5", backend: "pi" })).toEqual({ turnId: "pi:1" });
+    expect(settings).toHaveBeenCalledWith("group:7", expect.anything(), "pi");
+    expect(pi.startTurn).toHaveBeenCalledWith("group:7", expect.any(Array), { kind: "user", sender: "5" }, expect.objectContaining({ backend: "pi" }));
+    expect(codex.startTurn).not.toHaveBeenCalled();
   });
 });
 

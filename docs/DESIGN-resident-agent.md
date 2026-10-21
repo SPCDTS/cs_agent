@@ -69,14 +69,20 @@ QQ bridge ──@消息──▶ Inbox ──▶ ThreadHost(会话键) ──▶
   turnSender?: string,        // 本轮发送者（用户输入）；定时为创建者；唤醒回合为空
   turnInputs: InputRef[],     // 本轮已送入的输入
   pending: InputRef[],        // 等本轮结束的输入（他人消息、定时任务）
-  mentioned: boolean }        // 本轮是否已 @ 过发送者，见 7.2
+  mentioned: boolean,         // 本轮是否已 @ 过发送者，见 7.2
+  lastTurnId?: string,        // 上一个回合（含唤醒回合），空闲后保留：判定会话当前后端
+  route?: { inboundKey, backend } } // 开轮时选定的后端，与"开轮中"同一提交落盘
 ```
+
+每轮只用**一条**输入开轮。排队的输入轮到时单独开一轮；开轮成功后，队首紧随其后的同一发送者（owner 多账号算同一人）的连续用户消息逐条插话进本轮（遇到他人或定时即止；插话被拒则留在队列）。不做"多条一起开轮"：未确认的开轮在重启后只涉及一条输入，后端按 requestId 去重即可。
+
+一个会话同一时间只由一个后端服务：后端按会话键选择（owner 线程按首个 owner 账号私聊的覆盖），只在会话空闲开新回合时选定（适配器 `plan`），连同"开轮中"状态一起落盘；重启后恢复未确认的开轮按落盘的后端执行，不重新选择。上一回合的后端在该会话仍有工作（pi run 未结束、子 agent 有未结束的汇报，在同一事务里判断；被放弃的 codex exec 未退出）时不切换。
 
 投递规则：
 
 | 输入 | 线程空闲 | 线程忙 |
 | --- | --- | --- |
-| 用户消息，发送者与本轮相同 | 开新一轮 | 插话进当前回合（codex `turn/steer` 带 `expectedTurnId`，pi `whenBusy: "steer"`）；插话被拒（回合恰好结束）则开新一轮 |
+| 用户消息，发送者与本轮相同 | 开新一轮 | 插话进当前回合（codex `turn/steer` 带 `expectedTurnId`，pi `whenBusy: "steer"`）；插话被拒（回合恰好结束）则进 `pending`，按到达顺序开新一轮 |
 | 用户消息，发送者与本轮不同 | 开新一轮 | 进 `pending`，本轮结束后按到达顺序开新一轮 |
 | 定时任务 | 开新一轮 | 进 `pending`，空闲时开新一轮 |
 | 子 agent 完成唤醒 | 由后端原生开一轮（codex `wake_on_agent_messages`、pi follow-up） | 后端原生排队 |

@@ -28,28 +28,32 @@ export type InputRef = HostInput & { seq: number; at: number };
  * 开一轮时随输入一起交给适配器的回合信息。
  * admit：定时输入的准入复核（宿主在首次开轮前已调用）；适配器内部重试开轮时，每次重试前须再调用，
  * 返回 false 时不再开轮、返回 { denied: true }。适配器不得把它传给后端本身。
- * previousTurnId：本会话上一个回合（含唤醒回合）的 id，空闲与重启后保留。一个会话同一时间只由一个后端服务（§4.3），
- * 路由据此判定会话当前的后端：旧后端在该会话仍有工作（pi 子 agent 在跑等）时，后端切换推迟到它结束。
+ * backend：宿主随"开轮中"状态持久化的本轮后端（由 plan 选定）；重启后恢复未确认的开轮时原样交回，适配器不得重新选择。
  */
-export type TurnContext = { kind: InputKind; sender: string; admit?: () => Promise<boolean>; previousTurnId?: string };
+export type TurnContext = { kind: InputKind; sender: string; admit?: () => Promise<boolean>; backend?: string };
 
 export type TurnStatus = "completed" | "failed" | "lost";
 
 /**
  * 开轮结果：
- * - turnId：新回合。accepted 存在时只有列出的入站键真正送入了后端（如重启后重放、首条所在 run 已结束），
- *   宿主只把这些标记为已送达，其余放回队列；缺省表示全部送入。
+ * - turnId：新回合（输入已送入）。
  * - backendTurnId：后端已有宿主尚未确认的回合（子 agent 唤醒等）——输入没有送入（并入会让唤醒工作拿到本轮发送者的身份），
  *   宿主按唤醒回合接管该回合，输入放回队列等它结束。
  * - denied：重试前准入复核被拒（见 TurnContext.admit），没有开轮。
  */
-export type StartTurnResult = { turnId: string; accepted?: readonly string[] } | { backendTurnId: string } | { denied: true };
+export type StartTurnResult = { turnId: string } | { backendTurnId: string } | { denied: true };
 
 /** 回合结果（与 onTurnCompleted 回报的一致）。 */
 export type TurnOutcome = { status: TurnStatus; error?: string };
 
 export interface ThreadAdapter {
-  /** 开一轮。抛错视为投递失败，宿主按回合失败结束这些输入。 */
+  /**
+   * 选定本轮后端（宿主在会话串行内、写入"开轮中"之前调用，只在会话空闲开新回合时）。返回值随"开轮中"状态持久化，
+   * 作为 ctx.backend 交回 startTurn；未确认的开轮重启后沿用，不重新选择。一个会话同一时间只由一个后端服务（§4.3）：
+   * previousTurnId 为本会话上一个回合（含唤醒回合），其后端在该会话仍忙（pi 子 agent 在跑等）时不切换。
+   */
+  plan?(threadKey: ThreadKey, input: InputRef, opts: { previousTurnId?: string }): Promise<string>;
+  /** 开一轮（宿主每轮只送一条输入；同一发送者随后的输入走插话）。抛错视为投递失败，宿主按回合失败结束这条输入。 */
   startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext): Promise<StartTurnResult>;
   /** 插话进当前回合；回合恰好已结束（或 id 不符）时返回 no_active_turn，宿主回退为排队。 */
   steer(threadKey: ThreadKey, turnId: string, input: InputRef): Promise<"ok" | "no_active_turn">;

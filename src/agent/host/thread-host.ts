@@ -3,13 +3,14 @@
  * 1. 每个会话键一份 `cs.thread-host` 文档，记录空闲/忙、当前回合、本轮输入与排队输入；内存镜像是唯一写入者。
  * 2. 投递：空闲 → 开新一轮；忙且本轮是同一发送者（owner 多账号算同一人）的用户回合 → 插话；
  *    插话被拒（回合恰好结束）→ 按到达序号排队；其余（他人消息、定时任务、定时/唤醒回合中的消息）→ 排队。
- * 3. 回合结束 → 空闲，按 seq 取下一批开新一轮：定时输入单独一轮；队首为用户消息时，
- *    紧随其后的同一发送者的连续用户消息并入同一轮（遇到他人或定时即止，不越过更早到达的他人消息）。
+ * 3. 回合结束 → 空闲，按 seq 取队首一条输入开新一轮（每轮只开一条）；开轮成功后，队首紧随其后的同一发送者的连续用户消息
+ *    逐条插话进本轮（遇到他人或定时即止，不越过更早到达的他人消息；插话被拒则留在队列）。
+ *    开轮前由适配器 plan 选定本轮后端，与"开轮中"状态一同落盘；未确认的开轮重启后沿用该后端，不重新选择。
  * 4. 全局并发上限只限制进行中的回合数：开轮请求按输入的全局到达序号等待槽位，插话不占槽位；
  *    唤醒回合由后端发起，无法拒绝，照常计数（可能暂时超出上限）。
  * 5. 每个会话的操作（投递、开轮、插话、回合事件、@ 记账）在内存里串行；等待槽位不占用串行队列。
  * 6. 重启：恢复集合里的会话，忙且有 turnId 的由适配器判定回合是否仍在（pi 续跑；codex 丢失 → lost 结束）；
- *    忙但没有 turnId（开轮请求未确认）的输入放回队列重新开轮；排队输入按 seq 重新驱动。
+ *    忙但没有 turnId（开轮请求未确认）的输入放回队列、按落盘的后端重新开轮；排队输入按 seq 重新驱动。
  * 7. 每条输入以 inboundKey 幂等：`cs.thread-host.input` 文档存在即为重复投递。
  */
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
@@ -43,11 +44,12 @@ export interface ThreadHostOptions {
 }
 
 /** 文档里可缺省的字段：写回时不在新状态里的要删除，不能残留上一轮的值。 */
-const OPTIONAL = ["turnId", "turnKind", "turnSender", "lastActivityAt", "lastTurnId"] as const;
+const OPTIONAL = ["turnId", "turnKind", "turnSender", "lastActivityAt", "lastTurnId", "route"] as const;
 
-function idleState(s: ThreadHostState, pending = s.pending): ThreadHostState {
+/** 空闲状态；keepRoute：未确认的开轮放回队列时保留已落盘的后端（重启后沿用）。 */
+function idleState(s: ThreadHostState, pending = s.pending, keepRoute = false): ThreadHostState {
   return { threadKey: s.threadKey, busy: false, turnInputs: [], pending, mentioned: false,
-    ...(s.lastTurnId ? { lastTurnId: s.lastTurnId } : {}) };
+    ...(s.lastTurnId ? { lastTurnId: s.lastTurnId } : {}), ...(keepRoute && s.route ? { route: s.route } : {}) };
 }
 
 function bySeq(refs: readonly InputRef[]): InputRef[] {
@@ -161,16 +163,26 @@ export class ThreadHost implements HostCallbacks {
     return isOwner(owners, a) && isOwner(owners, b);
   }
 
-  /** 定时输入单独一轮；用户消息合并其后同一发送者的连续用户消息。 */
-  private batch(pending: readonly InputRef[]): InputRef[] {
-    const head = pending[0]!;
-    if (head.kind !== "user") return [head];
-    const out = [head];
-    for (const ref of pending.slice(1)) {
-      if (ref.kind !== "user" || !this.sameSender(head.sender, ref.sender)) break;
-      out.push(ref);
+  /** 开轮后：队首紧随其后的同一发送者的连续用户消息逐条插话进本轮；被拒（回合恰好结束）即停，留在队列。须在会话串行内调用。 */
+  private async steerQueued(threadKey: ThreadKey): Promise<void> {
+    for (;;) {
+      const cur = this.threads.get(threadKey)!;
+      const ref = cur.pending[0];
+      if (!ref || !this.canSteer(cur, ref)) return;
+      let steered: "ok" | "no_active_turn";
+      try {
+        steered = await this.opts.adapter.steer(threadKey, cur.turnId!, ref);
+      } catch (error) {
+        log.warn("thread host steer failed, queued instead", { thread: threadKey, input: ref.inboundKey, error });
+        steered = "no_active_turn";
+      }
+      if (steered !== "ok") return;
+      const now = this.threads.get(threadKey)!;
+      await this.save(threadKey, {
+        ...now, pending: now.pending.filter(p => p.inboundKey !== ref.inboundKey), turnInputs: [...now.turnInputs, ref],
+      }, tx => this.markInputs(tx, threadKey, [ref], "delivered"));
+      this.emit("inputsDelivered", threadKey, cur.turnId!, [ref]);
     }
-    return out;
   }
 
   // ───────────── 开轮 ─────────────
@@ -193,15 +205,24 @@ export class ThreadHost implements HostCallbacks {
         const s = await this.load(threadKey);
         // 等槽位期间后端开了唤醒回合：本轮让给它，结束后再开
         if (s.busy || !s.pending.length) return;
-        const inputs = this.batch(s.pending);
-        const head = inputs[0]!;
-        const keys = new Set(inputs.map(i => i.inboundKey));
+        const head = s.pending[0]!, inputs = [head], keys = [head.inboundKey];
+        // 本轮后端：未确认的开轮重启后沿用落盘的选择；否则由适配器按会话当前后端选定（只在空闲开新回合时）
+        let backend = s.route?.inboundKey === head.inboundKey ? s.route.backend : undefined;
+        if (backend === undefined && this.opts.adapter.plan) {
+          try {
+            backend = await this.opts.adapter.plan(threadKey, head, { ...(s.lastTurnId ? { previousTurnId: s.lastTurnId } : {}) });
+          } catch (error) {
+            log.warn("thread host plan failed; adapter selects at start", { thread: threadKey, input: head.inboundKey, error });
+          }
+        }
         const begun: ThreadHostState = {
           ...s, busy: true, turnKind: head.kind, turnSender: head.sender, turnInputs: inputs,
-          pending: s.pending.filter(p => !keys.has(p.inboundKey)), mentioned: false, lastActivityAt: this.now(),
+          pending: s.pending.slice(1), mentioned: false, lastActivityAt: this.now(),
+          ...(backend !== undefined ? { route: { inboundKey: head.inboundKey, backend } } : {}),
         };
         delete begun.turnId;
-        // 先落盘"开轮中"：崩溃后据缺少 turnId 判定未确认，输入放回队列
+        if (backend === undefined) delete begun.route;
+        // 先落盘"开轮中"（连同本轮后端）：崩溃后据缺少 turnId 判定未确认，输入放回队列，按同一后端重新开轮
         await this.save(threadKey, begun);
         used = true;
         this.holding.add(threadKey);
@@ -211,9 +232,9 @@ export class ThreadHost implements HostCallbacks {
           const admit = head.kind === "scheduled" && this.opts.admit ? () => this.opts.admit!(threadKey, head) : undefined;
           started = admit && !await admit() ? { denied: true }
             : await this.opts.adapter.startTurn(threadKey, inputs, { kind: head.kind, sender: head.sender,
-              ...(admit ? { admit } : {}), ...(s.lastTurnId ? { previousTurnId: s.lastTurnId } : {}) });
+              ...(admit ? { admit } : {}), ...(backend !== undefined ? { backend } : {}) });
         } catch (error) {
-          log.warn("thread host start turn failed", { thread: threadKey, inputs: [...keys], error });
+          log.warn("thread host start turn failed", { thread: threadKey, inputs: keys, error });
           await this.finish(threadKey, begun, "failed", error instanceof Error ? error.message : String(error));
           return;
         }
@@ -225,7 +246,7 @@ export class ThreadHost implements HostCallbacks {
         const cur = this.threads.get(threadKey)!;
         if ("backendTurnId" in started) {
           // 后端已有本宿主尚未确认的回合（唤醒）：按唤醒回合接管（身份为唤醒，不升级为本轮发送者），输入放回队列等它结束
-          log.warn("thread host start yielded to backend turn", { thread: threadKey, turn: started.backendTurnId, inputs: [...keys] });
+          log.warn("thread host start yielded to backend turn", { thread: threadKey, turn: started.backendTurnId, inputs: keys });
           const wake: ThreadHostState = {
             ...cur, turnId: started.backendTurnId, lastTurnId: started.backendTurnId, turnKind: "wake", turnInputs: [],
             pending: bySeq([...inputs, ...cur.pending]),
@@ -235,14 +256,10 @@ export class ThreadHost implements HostCallbacks {
           await this.save(threadKey, wake);
           return;
         }
-        const turnId = started.turnId, accepted = started.accepted;
-        // 只有后端真正收下的输入算送达；其余放回队列，本轮结束后再开轮（不能随本轮一起被标记 done）
-        const delivered = accepted ? inputs.filter(i => accepted.includes(i.inboundKey)) : inputs;
-        const back = inputs.filter(i => !delivered.includes(i));
-        if (back.length) log.warn("thread host start accepted part of the batch", { thread: threadKey, turn: turnId, requeued: back.map(i => i.inboundKey) });
-        await this.save(threadKey, { ...cur, turnId, lastTurnId: turnId, turnInputs: delivered, pending: bySeq([...back, ...cur.pending]) },
-          tx => this.markInputs(tx, threadKey, delivered, "delivered"));
-        this.emit("inputsDelivered", threadKey, turnId, delivered);
+        const turnId = started.turnId;
+        await this.save(threadKey, { ...cur, turnId, lastTurnId: turnId }, tx => this.markInputs(tx, threadKey, inputs, "delivered"));
+        this.emit("inputsDelivered", threadKey, turnId, inputs);
+        await this.steerQueued(threadKey);
       });
     } finally {
       this.starting.delete(threadKey);
@@ -397,7 +414,7 @@ export class ThreadHost implements HostCallbacks {
         const s = await this.load(key);
         if (!s.busy) return;
         if (!s.turnId) {
-          await this.save(key, idleState(s, bySeq([...s.turnInputs, ...s.pending])));
+          await this.save(key, idleState(s, bySeq([...s.turnInputs, ...s.pending]), true));
           return;
         }
         let state: "alive" | "lost";
