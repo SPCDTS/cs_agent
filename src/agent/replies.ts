@@ -15,3 +15,8 @@ export const AGENT_FAILURE_REPLIES: Readonly<Record<"timeout" | "failed", string
   timeout: "处理超时了，请稍后再试。",
   failed: FALLBACK_REPLY,
 };
+
+export const AGENT_INTERRUPTION_NOTICES: Readonly<Record<"timeout" | "failed", string>> = {
+  timeout: "这次处理超时中断了，后续结果没能发出。",
+  failed: "这次处理中途出错了，后续结果没能发出。",
+};

@@ -35,6 +35,7 @@ import { createBackendSelector } from "../../src/agent/backends/select.js";
 import { BackendTimeoutError, type AgentRequest } from "../../src/agent/backends/types.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
 import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prompt.js";
+import { PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
 import { PiRequestDoc } from "../../src/agent/pi-tools/request.js";
 import { ContextStore } from "../../src/context/store.js";
 import { TRANSPARENT_PNG, type ImageBackend } from "../../src/media/gen/image-gen.js";
@@ -651,8 +652,8 @@ describe("pi durable backend", () => {
   });
 
   it("hot-loads agent.md without overwriting existing text", async () => {
-    const seen: string[] = [];
-    const inspect = (ctx: TranscriptContext) => { seen.push(JSON.stringify(ctx)); return reply(); };
+    const seen: TranscriptContext[] = [];
+    const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
     const s = await setup([inspect, inspect]);
     const file = path.join(s.dir, "prompts", "agent.md");
     expect(await fs.readFile(file, "utf8")).toBe(DEFAULT_PI_PROMPT);
@@ -660,7 +661,14 @@ describe("pi durable backend", () => {
     await fs.writeFile(file, "新系统提示：简短中文。", "utf8");
     const future = new Date(Date.now() + 2000); await fs.utimes(file, future, future);
     await s.pi.handle(request("prompt2"), handleContext());
-    expect(seen[1]).toContain("新系统提示：简短中文。");
+    expect(JSON.stringify(seen[1])).toContain("新系统提示：简短中文。");
+    for (const transcript of seen) {
+      const systems = transcript.messages.filter(m => m.role === "system");
+      expect(systems.length).toBeGreaterThan(0);
+      for (const system of systems) expect(getSystemMessageText(system).split(PI_WORKSPACE_RULE)).toHaveLength(2);
+      expect(JSON.stringify(transcript.messages.filter(m => m.role === "user"))).not.toContain(PI_WORKSPACE_RULE);
+    }
+    expect(DEFAULT_PI_PROMPT).not.toContain(PI_WORKSPACE_RULE);
     expect(await new PiPromptLoader(s.dir).read()).toBe("新系统提示：简短中文。");
   });
 
@@ -766,6 +774,30 @@ describe("pi durable backend", () => {
     expect(contexts.some(c => c.includes("context summarization assistant"))).toBe(true);
     await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")!.lastCompactionAt).toBeTypeOf("number"));
     expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ turns: 2, compaction: { background: 50000, reserve: 50000 } });
+  });
+
+  it("配置 600 秒时超过 300 秒仍运行，到截止时间才中止", async () => {
+    let started = false, aborted = false;
+    const s = await setup([async (_ctx, opts) => {
+      started = true;
+      await new Promise<void>(resolve => opts?.signal?.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true }));
+      return fauxAssistantMessage("", { stopReason: "aborted" });
+    }], { timeoutMs: 600_000 });
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const pending = s.pi.handle(request("timeout-600"), handleContext()).catch(error => error);
+      await vi.waitFor(() => expect(started).toBe(true));
+      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
+      const deadline = (await s.pi.harness.snapshot(PiRequestDoc, id, context))!.deadline;
+      expect(deadline - Date.now()).toBeGreaterThan(599_000);
+      await vi.advanceTimersByTimeAsync(deadline - Date.now() - 299_999);
+      expect(aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(299_998);
+      expect(aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await pending).toBeInstanceOf(BackendTimeoutError);
+      expect(aborted).toBe(true);
+    } finally { vi.useRealTimers(); }
   });
 
   it("aborts timed-out turns before releasing the mutex", async () => {

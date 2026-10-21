@@ -1,6 +1,7 @@
 import { isOwner } from "../shared/owners.js";
 import { fitReply } from "./reply-postprocess.js";
 import { SendService } from "./send-service.js";
+import { isModelOutboxRow } from "../channel/outbox.js";
 import { ticketTarget } from "../channel/ticket.js";
 import { createHash } from "node:crypto";
 import { resolveAutoEffort, type EffortRouterDeps, type EffortMessage } from "./effort-router.js";
@@ -39,7 +40,7 @@ import { collectNewImages } from "../media/gen/image-collect.js";
 import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendingImages, savePendingImage, PendingImageMarkerError } from "../media/gen/image-pending.js";
 import { readImageFiles, prepareImageFiles, validImageFile } from "../media/gen/image-files.js";
 import { classifyImageError, referenceUploads, recoverRemoteUploads, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend, type RemoteUpload } from "../media/gen/image-gen.js";
-import { AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
+import { AGENT_INTERRUPTION_NOTICES, AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
 import { IMAGE_USAGE_REPLY } from "./router.js";
 import { BackendTimeoutError } from "./backends/types.js";
 import { backendNameFor, type BackendSelector } from "./backends/select.js";
@@ -532,6 +533,12 @@ export function createTasks(deps: TaskDeps) {
     }
     const blocked = await blockedReason(deps, runtime, context, doc.ticket);
     if (blocked && !["ticket sent", "ticket sending", "ticket uncertain"].includes(blocked)) return failBlocked(runtime, context, doc.ticket, blocked, "settle");
+    // 已确认模型发过消息的失败回合独立补发通知；已发送或状态不确定的通知不重发。
+    const needsFailureNotice = () => {
+      const rows = sendService.rows(doc.ticket);
+      return doc.agentResult?.ok === false && rows.some(row => isModelOutboxRow(row) && row.status === "sent") &&
+        !rows.some(row => row.key === doc.ticket + "#fallback" && row.status !== "pending");
+    };
     // 预留后退出或发送已结束时，仍补齐提醒；不依赖再次调用 system。
     await recordDeliveryNote(runtime, context);
     try {
@@ -572,6 +579,8 @@ export function createTasks(deps: TaskDeps) {
           const text = doc.agentResult && !doc.agentResult.ok ? AGENT_FAILURE_REPLIES[doc.agentResult.failure] : FALLBACK_REPLY;
           await sendService.system(doc.ticket, "fallback", text, [], runtime.signal, doc.agentResult?.ok === true,
             () => recordDeliveryNote(runtime, context));
+        } else if (doc.agentResult?.ok === false && needsFailureNotice()) {
+          await sendService.system(doc.ticket, "fallback", AGENT_INTERRUPTION_NOTICES[doc.agentResult.failure], [], runtime.signal);
         }
         await sendService.settle(doc.ticket);
       }
@@ -580,14 +589,14 @@ export function createTasks(deps: TaskDeps) {
       // sending/uncertain 留作审计，永不重发；sent 后的存储故障交给派发恢复。
       const rows = sendService.rows(doc.ticket);
       if (rows.some(row => row.status !== "pending")) {
-        // 正文发出后的附件存储故障仍须恢复；迟到消息发送前失败最多重试三次。
+        // 正文发出后的附件存储故障仍须恢复；系统补发在发送前失败最多重试三次。
         try { await sendService.reconcile(doc.ticket, runtime.signal); }
         catch (recoveryError) {
           rethrowIfAborted(runtime.signal, recoveryError);
           log.warn("outbox reconciliation failed during settle recovery", { ticket: short(doc.ticket), error: recoveryError });
         }
         const pendingTicket = (await deps.getBridge().getTicket(doc.ticket))?.status === "pending";
-        const unfinished = sendService.rows(doc.ticket).some(row =>
+        const unfinished = pendingTicket && needsFailureNotice() || sendService.rows(doc.ticket).some(row =>
           pendingTicket && row.key.endsWith("#late") && row.status === "pending" ||
           row.status === "sent" && row.files.some(file => file.status === "pending"));
         if (unfinished && attempt + 1 < MAX_REPLY_ATTEMPTS) {

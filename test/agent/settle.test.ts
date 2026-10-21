@@ -10,7 +10,8 @@ import { createBackendSelector } from "../../src/agent/backends/select.js";
 import { BackendTimeoutError, type AgentBackend } from "../../src/agent/backends/types.js";
 import { Dispatcher, MAX_FILE_REPLY_ATTEMPTS } from "../../src/agent/dispatch.js";
 import { DispatchDoc, TicketDoc } from "../../src/agent/docs.js";
-import { FALLBACK_REPLY, AGENT_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
+import { AGENT_INTERRUPTION_NOTICES, FALLBACK_REPLY, AGENT_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
+import { LiveBus } from "../../src/obs/live.js";
 import { trace } from "../../src/shared/trace.js";
 import { sendFixture } from "./send-fixture.js";
 import { promises as fs } from "node:fs";
@@ -19,13 +20,13 @@ import { TRANSPARENT_PNG } from "../../src/media/gen/image-gen.js";
 
 const context = BACKGROUND_CONTEXT, cleanup: (() => Promise<unknown> | void)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
-async function rig(handle: AgentBackend["handle"], legacy?: "postprocess" | "reply", brokenPhase?: "lateImages" | "settle") {
+async function rig(handle: AgentBackend["handle"], legacy?: "postprocess" | "reply", brokenPhase?: "lateImages" | "settle", backend: "pi" | "codex" = "codex") {
   const f = sendFixture();
   const recordDeliveryNote = vi.fn<NonNullable<AgentBackend["recordDeliveryNote"]>>().mockResolvedValue();
   const events: { stage: string; detail: unknown }[] = [];
   cleanup.push(trace.tap(e => { if (e.ticket === f.ticket) events.push(e); }));
   const tasks = createTasks({ getBridge: () => f.bridge, sendService: f.service, imagesDir: path.join(f.dir, "images"),
-    backends: createBackendSelector({ defaultBackend: "codex", backends: { codex: { name: "codex", handle, recordDeliveryNote } }, overrides: {} }),
+    backends: createBackendSelector({ defaultBackend: backend, backends: { [backend]: { name: backend, handle, recordDeliveryNote } }, overrides: {} }),
     imageBackend: { name: "test", submit: async () => "p", collect: async (_id, dir) => {
       await fs.mkdir(dir, { recursive: true }); await fs.writeFile(path.join(dir, "late.png"), TRANSPARENT_PNG); return [];
     }, reconcile: async () => ({ images: [] }), clearReferences: async () => {} }, replyRetryDelayMs: 1 });
@@ -53,8 +54,14 @@ async function rig(handle: AgentBackend["handle"], legacy?: "postprocess" | "rep
     harness = await openHarness({ models: createModels(), extension: createCsAgentExtension(tasks), dbFile }, context);
   }
   cleanup.push(() => harness.close(context));
-  const dispatcher = new Dispatcher({ harness, bridge: f.bridge, tasks, concurrency: 1, retryDelayMs: 1, history: f.history });
-  return { ...f, tasks, harness, dispatcher, events, conversationId, recordDeliveryNote };
+  let dispatcher = new Dispatcher({ harness, bridge: f.bridge, tasks, concurrency: 1, retryDelayMs: 1, history: f.history });
+  return { ...f, tasks, get harness() { return harness; }, get dispatcher() { return dispatcher; }, events, conversationId, recordDeliveryNote,
+    async reopen() {
+      await harness.close(context);
+      harness = await openHarness({ models: createModels(), extension: createCsAgentExtension(tasks), dbFile }, context);
+      dispatcher = new Dispatcher({ harness, bridge: f.bridge, tasks, concurrency: 1, retryDelayMs: 1, history: f.history });
+    },
+  };
 }
 
 it.each(["ok", "timeout", "failed"] as const)("零发送回合按 %s 兜底；最终回答只保存在文档及 trace", async outcome => {
@@ -70,19 +77,19 @@ it.each(["ok", "timeout", "failed"] as const)("零发送回合按 %s 兜底；�
   expect(f.recordDeliveryNote).toHaveBeenCalledExactlyOnceWith({ ticket: f.ticket, threadKey: "group:7", fallback: row.text });
   expect(f.events.filter(e => e.stage === "delivery_note")).toMatchObject([{ detail: { backend: "codex", thread_key: "group:7", fallback: row.text } }]);
   expect(f.events.filter(e => e.stage === "no_send_fallback")).toHaveLength(outcome === "ok" ? 1 : 0);
+  if (outcome !== "ok") expect(f.events.filter(e => e.stage === "failed")).toMatchObject([
+    { status: "failed", detail: { terminal: true, failure: outcome } },
+  ]);
   expect(f.events.find(e => e.stage === "final_answer")?.detail).toEqual({ text: outcome === "ok" ? "最终答案不得发送" : "", sent_messages: 1 });
   expect((await f.bridge.getTicket(f.ticket))?.status).toBe("sent");
   expect((await f.harness.snapshot(DispatchDoc, context))?.pending).toEqual({});
 });
 
-it.each(["sent", "sending", "uncertain"] as const)("已有 %s 时后端失败不补兜底，终结入站票据", async status => {
+it.each(["sending", "uncertain"] as const)("仅有 %s 时后端失败不补兜底，终结入站票据", async status => {
   const f = await rig(async () => { throw new Error("失败"); });
-  if (status === "sent") await f.service.send(f.binding, { text: "已发" }, { callId: "call" });
-  else {
-    const row = f.store.reserveOutbox({ ticket: f.ticket, text: "可能已发", images: [], files: [], call_id: "call",
-      message_type: "group", target_id: "7", mention_user_id: "1" });
-    f.store.markOutboxSending(row.key); if (status === "uncertain") f.store.markOutboxUncertain(row.key);
-  }
+  const row = f.store.reserveOutbox({ ticket: f.ticket, text: "可能已发", images: [], files: [], call_id: "call",
+    message_type: "group", target_id: "7", mention_user_id: "1" });
+  f.store.markOutboxSending(row.key); if (status === "uncertain") f.store.markOutboxUncertain(row.key);
   await f.dispatcher.dispatch(f.msg, f.ticket);
   expect(f.service.rows(f.ticket)).toHaveLength(1);
   expect(f.events.some(e => e.stage === "no_send_fallback")).toBe(false);
@@ -317,4 +324,83 @@ it("旧检查点先保存兼容答案，对账异常后切到 settle 重试仍�
   f.harness.resume(); await f.harness.waitForTask(entry.taskId as never, context);
   expect(f.service.rows(f.ticket)[0]).toMatchObject({ key: f.ticket + "#fallback", text: "旧最终答案", status: "sent" });
   expect(f.events.some(e => e.stage === "no_send_fallback")).toBe(false);
+});
+
+it.each([
+  { backend: "pi", failure: "timeout", count: 1, notice: "这次处理超时中断了，后续结果没能发出。" },
+  { backend: "pi", failure: "failed", count: 3, notice: "这次处理中途出错了，后续结果没能发出。" },
+  { backend: "codex", failure: "timeout", count: 3, notice: "这次处理超时中断了，后续结果没能发出。" },
+  { backend: "codex", failure: "failed", count: 1, notice: "这次处理中途出错了，后续结果没能发出。" },
+] as const)("$backend 已发 $count 条后 $failure：独立通知且保留失败分类", async ({ backend, failure, count, notice }) => {
+  let f!: Awaited<ReturnType<typeof rig>>;
+  f = await rig(async (_req, ctx) => {
+    if (backend === "pi") await ctx.persistPiTurn!({ requestId: f.ticket, retries: 0, conversationId: 123 });
+    for (let n = 1; n <= count; n++) await f.service.send(f.binding, { text: "处理中" + n }, { callId: "send-" + n });
+    throw failure === "timeout" ? new BackendTimeoutError("超时") : new Error("后端失败");
+  }, undefined, undefined, backend);
+  const live = new LiveBus(trace);
+  cleanup.push(() => live.close());
+  await f.dispatcher.dispatch(f.msg, f.ticket);
+  const rows = f.service.rows(f.ticket);
+  expect(rows).toHaveLength(count + 1);
+  expect(rows.at(-1)).toMatchObject({ key: f.ticket + "#fallback", status: "sent", text: notice,
+    message_type: "group", target_id: "7", mention_user_id: null, proactive: false });
+  expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(count + 1);
+  expect(f.store.countModelOutbox("group", "7", "2000-01-01T00:00:00.000Z", "2100-01-01T00:00:00.000Z")).toBe(0);
+  expect(f.events.filter(e => e.stage === "failed")).toMatchObject([
+    { status: "failed", detail: { terminal: true, backend, failure, reply: notice } },
+  ]);
+  expect(f.events.some(e => ["reply_sent", "no_send_fallback", "delivery_note"].includes(e.stage))).toBe(false);
+  const card = live.snapshot().find(card => card.ticket === f.ticket);
+  expect(card).toMatchObject({ state: "failed", outcome: "failed", backend });
+  expect(card?.items.at(-1)?.summary).toContain(failure);
+  expect(f.recordDeliveryNote).not.toHaveBeenCalled();
+  expect((await f.bridge.getTicket(f.ticket))?.status).toBe("sent");
+  expect((await f.harness.snapshot(DispatchDoc, context))?.pending).toEqual({});
+});
+
+it.each(["absent", "pending", "sent", "sending", "uncertain", "settled"] as const)("中断通知在 %s 阶段重启后幂等恢复", async status => {
+  const handle = vi.fn<AgentBackend["handle"]>().mockRejectedValue(new Error("不得重跑后端"));
+  const f = await rig(handle);
+  await f.service.send(f.binding, { text: "正在收集数据" }, { callId: "promise" });
+  if (status === "sent" || status === "settled") {
+    await f.service.system(f.ticket, "fallback", AGENT_INTERRUPTION_NOTICES.timeout);
+    if (status === "settled") await f.service.settle(f.ticket);
+  } else if (status !== "absent") {
+    const row = f.store.reserveOutbox({ ticket: f.ticket, suffix: "fallback", call_id: null,
+      text: AGENT_INTERRUPTION_NOTICES.timeout, images: [], files: [], message_type: "group", target_id: "7", mention_user_id: null });
+    if (status !== "pending") f.store.markOutboxSending(row.key);
+    if (status === "uncertain") f.store.markOutboxUncertain(row.key);
+  }
+  const conv = await f.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+    Object.assign(await tx.doc(TicketDoc, id), { ticket: f.ticket, route: "agent", source: f.binding.source,
+      agentResult: { ok: false, backend: "codex", threadKey: "group:7", failure: "timeout" } });
+    (await tx.doc(DispatchDoc)).pending[f.ticket] = { conversationId: id, scope: "group:7", attempts: 0 };
+  } }, context);
+  await f.reopen();
+  await f.dispatcher.recover(); await f.dispatcher.idle();
+  await f.dispatcher.dispatch(f.msg, f.ticket);
+  expect(handle).not.toHaveBeenCalled();
+  expect(f.service.rows(f.ticket)).toHaveLength(2);
+  expect(f.service.rows(f.ticket).at(-1)?.text).toBe(AGENT_INTERRUPTION_NOTICES.timeout);
+  expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(["sending", "uncertain"].includes(status) ? 1 : 2);
+  expect(f.recordDeliveryNote).not.toHaveBeenCalled();
+  expect((await f.harness.snapshot(TicketDoc, conv.id, context))?.deliveryNoted).not.toBe(true);
+  expect((await f.harness.snapshot(TicketDoc, conv.id, context))?.agentResult).toMatchObject({ ok: false, failure: "timeout" });
+  expect((await f.bridge.getTicket(f.ticket))?.status).toBe("sent");
+});
+
+it.each(["before-reserve", "after-reserve"] as const)("中断通知在 %s 失败后重试，仍只发送一次", async phase => {
+  let f!: Awaited<ReturnType<typeof rig>>;
+  f = await rig(async () => {
+    await f.service.send(f.binding, { text: "正在处理" }, { callId: "promise" });
+    if (phase === "before-reserve") vi.spyOn(f.service, "system").mockRejectedValueOnce(new Error("预留暂不可用"));
+    else vi.spyOn(f.bridge, "send").mockRejectedValueOnce(new Error("发送前失败"));
+    throw new BackendTimeoutError("超时");
+  });
+  await f.dispatcher.dispatch(f.msg, f.ticket);
+  expect(f.service.rows(f.ticket)).toHaveLength(2);
+  expect(f.service.rows(f.ticket).at(-1)).toMatchObject({ key: f.ticket + "#fallback", status: "sent", text: AGENT_INTERRUPTION_NOTICES.timeout });
+  expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(2);
+  expect(f.recordDeliveryNote).not.toHaveBeenCalled();
 });

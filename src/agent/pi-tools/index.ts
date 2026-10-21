@@ -27,6 +27,8 @@ import { ProjectContextLoader } from "./project-context.js";
 import { SkillsLoader } from "./skills.js";
 import { DeepSeekWeb } from "./web.js";
 
+export const PI_WORKSPACE_RULE = "当前目录就是你的工作区，文件跨回合保留。普通文件一律用相对路径写在这里，不要尝试其他目录。bash 的 /tmp 每条命令结束即清空，文件工具也不能写入 /tmp；图片工具和有权限的技能操作使用各自指定的目录。";
+
 export interface PiToolsOptions {
   sendService?: SendService;
   grants?: GrantsService;
@@ -93,7 +95,7 @@ export function createPiExtension(opts: PiToolsOptions) {
   return defineExtension({
     name: "cs-pi",
     sections: [
-      section("cs-pi", async () => SEND_RULE + "\n" + QQ_LINK_RULE + "\n\n" + await prompt.read(), { tag: false }),
+      section("cs-pi", async () => SEND_RULE + "\n" + QQ_LINK_RULE + "\n" + PI_WORKSPACE_RULE + "\n\n" + await prompt.read(), { tag: false }),
       section("project-context", input => projectContext.render(input.env?.cwd), { tag: false }),
       section("skills", input => skills?.render(input.env instanceof PiExecutionEnv && input.env.policy.options.request.senderIsOwner === true), { tag: false }),
     ],

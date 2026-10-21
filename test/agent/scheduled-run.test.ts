@@ -159,17 +159,19 @@ it("send_message 复用 Outbox，最多五条且每条都不 @，附件和历史
   await expect(f.service.system(ticket, "fallback", "不得发送")).rejects.toThrow("不发送系统补发");
 });
 
-it.each(["failed", "timeout", "sent-then-failed"] as const)("%s 记失败，不补兜底", async outcome => {
+it.each(["failed", "timeout", "sent-then-failed", "sent-then-timeout"] as const)("%s 记失败，不补兜底", async outcome => {
   let f!: Awaited<ReturnType<typeof rig>>;
   f = await rig(async req => {
-    if (outcome === "sent-then-failed") await f.service.send({ ...f.binding, ticket: req.ticket, source: req.source }, { text: "已发" }, { callId: "sent" });
-    throw outcome === "timeout" ? new BackendTimeoutError("超时") : new Error("后端失败");
+    if (outcome.startsWith("sent-then-")) await f.service.send({ ...f.binding, ticket: req.ticket, source: req.source }, { text: "已发" }, { callId: "sent" });
+    throw outcome.endsWith("timeout") ? new BackendTimeoutError("超时") : new Error("后端失败");
   });
   const { ticket } = await f.run();
   expect(f.recorder.runs.get(fire().fire_key)).toMatchObject({
-    status: "failed", reason: outcome === "timeout" ? "timeout" : "backend_failed", sent: outcome === "sent-then-failed" ? 1 : 0,
+    status: "failed", reason: outcome.endsWith("timeout") ? "timeout" : "backend_failed", sent: outcome.startsWith("sent-then-") ? 1 : 0,
   });
   expect(f.service.rows(ticket).some(row => row.key.endsWith("#fallback"))).toBe(false);
+  expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(outcome.startsWith("sent-then-") ? 1 : 0);
+  expect(f.recordDeliveryNote).not.toHaveBeenCalled();
   expect(f.store.get(ticket)?.status).toBe("sent");
 });
 
