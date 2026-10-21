@@ -44,11 +44,12 @@ it("Channel 对 scheduled 票据拒绝 @；登录身份检查仍生效", async (
   await expect(f.bridge.openOutbound(ticket, target)).rejects.toThrow("绑定不一致");
 });
 
-it("持久 Outbox 本身执行五条上限，系统行不占模型额度", async () => {
+it("持久 Outbox 不再限制每轮条数，系统行不占模型序号", async () => {
   const f = sendFixture();
   await f.bridge.openOutbound(ticket, target);
-  for (let n = 1; n <= 5; n++) f.store.reserveOutbox({ ticket, call_id: `call-${n}`, text: `第${n}条`,
+  f.store.reserveOutbox({ ticket, suffix: "late", call_id: null, text: "系统", images: [], files: [],
+    message_type: "group", target_id: "7", mention_user_id: null });
+  for (let n = 1; n <= 6; n++) f.store.reserveOutbox({ ticket, call_id: `call-${n}`, text: `第${n}条`,
     images: [], files: [], message_type: "group", target_id: "7", mention_user_id: null });
-  expect(() => f.store.reserveOutbox({ ticket, call_id: "six", text: "第六条",
-    images: [], files: [], message_type: "group", target_id: "7", mention_user_id: null })).toThrow("最多发送 5 条");
+  expect(f.store.listOutbox(ticket).map(row => row.key.slice(ticket.length))).toEqual(["#late", "#1", "#2", "#3", "#4", "#5", "#6"]);
 });

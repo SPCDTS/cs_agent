@@ -14,6 +14,7 @@ import type { Trace } from '../shared/trace.js';
 import type { ContextUsageView } from '../shared/format.js';
 import type { CodexBasePromptSnapshot, ModelCatalogView } from './ui/dashboard-pages.js';
 import type { ScheduleManagement } from './schedules.js';
+import type { SendBreaker } from '../channel/send-rules.js';
 
 export interface DashboardOptions {
   grants?: Pick<GrantsService, 'list' | 'panel'>;
@@ -31,6 +32,8 @@ export interface DashboardOptions {
   archives?: MemoryArchives;
   /** 运行时设置（/settings 可写）；缺省时设置页只读展示配置 */
   settings?: SettingsStore;
+  /** bridge 发送熔断：设置页列出并可手动解除 */
+  sendBreakers?: { list(): SendBreaker[]; reset(scope: string): boolean };
   /** 进行中会话的实时总线（/live） */
   live?: LiveBus;
   resetCodex?: (key: ThreadKey) => Promise<string | null>;

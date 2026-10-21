@@ -22,7 +22,10 @@ import path from 'node:path';
 export interface RuntimeSettingsView {
   agentBackend: string; backendOverrides: Record<string, string>; codexReasoningEffort: string; alertOwner: boolean;
   codexModel: string; piModel: string; piThinkingLevel: string;
+  sendRules?: SendRulesView;
 }
+/** bridge 发送规则的五个限额（与 channel/send-rules 的 SendRuleLimits 同形）。 */
+export interface SendRulesView { perChatMinute: number; perChatHour: number; chatBreakerMinutes: number; globalMinute: number; globalBreakerMinutes: number }
 /** 设置页模型下拉的可选清单（启动时读一次）。 */
 export interface ModelCatalogView {
   codex(): { slug: string; contextWindow?: number }[];
@@ -51,6 +54,8 @@ export interface DashboardPageOptions {
   context: { scopes(): string[] };
   contextUsage?: ContextUsageView;
   settings?: { current(): Readonly<RuntimeSettingsView>; defaults: RuntimeSettingsView };
+  /** 当前处于熔断的发送范围；scope 为 group:<id> / private:<qq> / global，时间为毫秒。 */
+  sendBreakers?: { list(): { scope: string; until: number; tripped_at: number; reason: string }[] };
   codexPrompt?: { read(): Promise<CodexPromptSnapshot> };
   codexBasePrompt?: { readonly managed: string; read(model: string): Promise<CodexBasePromptSnapshot | undefined> };
   modelCatalog?: ModelCatalogView;
@@ -93,7 +98,11 @@ type LiveCard = LiveCardView;
 const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
 
 const SETTING_LABELS: Record<string, string> = { agentBackend: '默认后端', backendOverrides: '按会话覆盖', codexModel: 'Codex 模型', codexReasoningEffort: 'Codex 推理强度',
-  piModel: 'Pi 模型', piThinkingLevel: 'Pi 思考档位', alertOwner: 'owner 告警' };
+  piModel: 'Pi 模型', piThinkingLevel: 'Pi 思考档位', alertOwner: 'owner 告警', sendRules: '发送规则' };
+const SEND_RULE_INPUTS: [keyof SendRulesView, string, number][] = [
+  ['perChatMinute', '每会话每分钟（条）', 600], ['perChatHour', '每会话每小时（条）', 36_000], ['chatBreakerMinutes', '会话熔断时长（分钟）', 1440],
+  ['globalMinute', '全局每分钟（条）', 6000], ['globalBreakerMinutes', '全局熔断时长（分钟）', 1440],
+];
 /** pi-ai ModelThinkingLevel 全集：模型不在清单里时的档位选项。 */
 const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 const AUTO_HINT = 'auto：派发时按消息难度自动选档，结果见票据页。';
@@ -738,6 +747,7 @@ ${agentModelFieldsets(s, d, diff)}
 <fieldset><legend>owner 告警${diff('alertOwner')}</legend><label class="choice"><input type="checkbox" name="alertOwner"${s.alertOwner ? ' checked' : ''}><span>向 owner 私聊发送告警<small>QQ 离线超过五分钟、模型鉴权失败、连续三条失败时发送，30 分钟内最多一条。${config.owner ? '' : '（当前没有配置 owner，开关不会生效）'}</small></span></label></fieldset>
 <button>保存设置</button></form></section>`;
     }
+    body += sendRulesCard(s?.sendRules, d?.sendRules);
     body += await grantsCard();
     body += await codexPromptCard();
     body += await codexBasePromptCard(s?.codexModel ?? config.CODEX_MODEL);
@@ -753,9 +763,24 @@ ${agentModelFieldsets(s, d, diff)}
     const changes = opts.store.systemEvents(SETTINGS_TICKET, 15);
     body += `<section><h2>最近变更</h2>${changes.length ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>时间</th><th>内容</th><th>来源</th></tr></thead><tbody>${changes.map(e => { const dd = asObj(JSON.parse(e.detail_json));
       const bytes = (v: unknown) => typeof v === 'number' ? fmtBytes(v) : '—';
-      const what = e.stage === 'prompt_changed' ? `${dd.target === 'codex-base' ? `codex 基础指令（${dd.model}）` : dd.target === 'codex' ? 'codex.md' : 'agent.md'} ${bytes(dd.bytes_before)} → ${bytes(dd.bytes_after)}` : Object.keys(asObj(dd.after)).map(k => `${SETTING_LABELS[k] ?? k}：${showSetting(asObj(dd.before)[k])} → ${showSetting(asObj(dd.after)[k])}`).join('；');
+      const what = e.stage === 'send_breaker_reset' ? `解除发送熔断：${dd.scope === 'global' ? '全部会话' : scopeLabel(String(dd.scope))}` : e.stage === 'prompt_changed' ? `${dd.target === 'codex-base' ? `codex 基础指令（${dd.model}）` : dd.target === 'codex' ? 'codex.md' : 'agent.md'} ${bytes(dd.bytes_before)} → ${bytes(dd.bytes_after)}` : Object.keys(asObj(dd.after)).map(k => `${SETTING_LABELS[k] ?? k}：${showSetting(asObj(dd.before)[k])} → ${showSetting(asObj(dd.after)[k])}`).join('；');
       return `<tr><td>${time(e.ts)}</td><td>${esc(what)}</td><td>${esc(dd.source === 'dashboard' ? '面板' : dd.source ?? '')}</td></tr>`; }).join('')}</tbody></table></div></div>` : empty('还没有通过面板修改过设置。')}</section>`;
     body += `<section><p class="hint">完整的生效配置见<a href="/config">配置页</a>；结构化日志见<a href="/logs">实时日志</a>。</p></section>`;
+    return body;
+  }
+
+  function sendRulesCard(rules: SendRulesView | undefined, defaults: SendRulesView | undefined): string {
+    let body = `<section id="send-rules"><h2>发送规则</h2><p class="hint">经 bridge 发出的每条消息（回复、主动发送、系统补发）都按此计数；owner 告警不计。超过每分钟上限只拒绝本条，超过每小时上限熔断该会话，全局每分钟超限熔断全部发送；熔断时私聊通知 owner 一次。</p>`;
+    if (rules) {
+      const changed = (k: keyof SendRulesView) => defaults && rules[k] !== defaults[k] ? ' <span class="changed">与默认不同</span>' : '';
+      body += `<form method="post" action="/settings/send-rules" class="sheet pad">${csrfField(csrf)}<div class="choices">${SEND_RULE_INPUTS.map(([k, label, max]) =>
+        `<label><span>${esc(label)}${changed(k)}</span><input type="number" name="${k}" value="${rules[k]}" min="1" max="${max}" step="1" required></label>`).join('')}</div>
+${defaults ? `<div class="hint">默认：${SEND_RULE_INPUTS.map(([k, label]) => `${esc(label)} ${defaults[k]}`).join('，')}。</div>` : ''}<p class="mt"><button>保存发送规则</button></p></form>`;
+    }
+    const breakers = opts.sendBreakers?.list() ?? [];
+    body += `<h3 class="mt">熔断中</h3>${breakers.length ? `<div class="sheet wrap"><table class="list"><thead><tr><th>范围</th><th>原因</th><th>触发时间</th><th>恢复时间</th><th>操作</th></tr></thead><tbody>${breakers.map(b =>
+      `<tr><td>${b.scope === 'global' ? '全部会话' : `<span class="mono">${esc(b.scope)}</span>`}</td><td>${esc(b.reason)}</td><td>${esc(fmtTime(b.tripped_at))}</td><td>${esc(fmtTime(b.until))}</td><td><form method="post" action="/settings/send-breakers/reset">${csrfField(csrf)}<input type="hidden" name="scope" value="${esc(b.scope)}"><button class="danger">解除</button></form></td></tr>`).join('')}</tbody></table></div>`
+      : empty(opts.sendBreakers ? '当前没有熔断。' : '发送熔断状态不可用。')}</section>`;
     return body;
   }
 

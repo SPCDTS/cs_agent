@@ -21,10 +21,10 @@ describe("Outbox 与统一发送", () => {
     expect((await f.bridge.getTicket(f.ticket))?.status).toBe("pending");
     await f.service.settle(f.ticket);
     expect((await f.bridge.getTicket(f.ticket))?.status).toBe("sent");
-    await expect(f.service.send(f.binding, { text: "第四条" }, { callId: "4" })).rejects.toThrow("3 条");
+    await expect(f.service.send(f.binding, { text: "第四条" }, { callId: "4" })).rejects.toThrow("本回合已经结束");
   });
 
-  it("codex 新尝试的第 n 次映射原行，重建网关仍不重发且不多占限额", async () => {
+  it("codex 新尝试的第 n 次映射原行，重建网关仍不重发，超过三条照常发送", async () => {
     const f = sendFixture(false);
     const a = await f.service.send(f.binding, { text: "原文" }, { attempt: "a" });
     await f.service.send(f.binding, { text: "第二条" }, { attempt: "a" });
@@ -33,7 +33,8 @@ describe("Outbox 与统一发送", () => {
     await recovered.send(f.binding, { text: "改变第二条" }, { attempt: "b" });
     await recovered.send(f.binding, { text: "第三条" }, { attempt: "b" });
     expect(f.store.listOutbox(f.ticket).map(r => r.text)).toEqual(["原文", "第二条", "第三条"]);
-    await expect(recovered.send(f.binding, { text: "超额" }, { attempt: "b" })).rejects.toThrow("3 条");
+    await recovered.send(f.binding, { text: "第四条" }, { attempt: "b" });
+    expect(f.store.listOutbox(f.ticket).map(r => r.status)).toEqual(["sent", "sent", "sent", "sent"]);
   });
 
   it.each(["sending", "uncertain"] as const)("%s 不重发、不补兜底且可终结入站票据", async status => {
@@ -132,7 +133,7 @@ describe("Outbox 与统一发送", () => {
 });
 
 
-it.each(["pi", "codex"] as const)("系统消息不占 %s 模型额度，重放不会映射到系统行", async backend => {
+it.each(["pi", "codex"] as const)("系统消息与 %s 模型消息分开编号，重放不会映射到系统行", async backend => {
   const f = sendFixture();
   await f.service.system(f.ticket, "late", "系统迟到消息");
   const identity = (n: number, attempt: string) => backend === "pi" ? { callId: "call-" + n } : { attempt };
@@ -142,8 +143,8 @@ it.each(["pi", "codex"] as const)("系统消息不占 %s 模型额度，重放�
   expect(rows.map(row => row.ordinal)).toEqual([1, 2, 3, 4]);
   for (const n of [1, 2, 3]) expect(await f.service.send(f.binding, { text: "重放" }, identity(n, "retry")))
     .toMatchObject({ already_sent: true, message_id: rows[n]!.message_id });
-  await expect(f.service.send(f.binding, { text: "超额" }, identity(4, "retry"))).rejects.toThrow("3 条");
-  expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(4);
+  await f.service.send(f.binding, { text: "第四条模型消息" }, identity(4, "retry"));
+  expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(5);
 });
 
 

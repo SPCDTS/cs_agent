@@ -264,7 +264,7 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 
 ### 统一发送工具（im）
 
-`send_message({ text, images: [path], files: [{ path, name? }] })` 立即发送文字和图片，再上传文件，name 缺省取原文件名。来源只能是本轮工作区普通文件或当前 QQ_ACCESS 范围已召回媒体，拒绝软链接；文件名取 basename、去控制字符、最多 120 字符。图片魔数、单张 10 MiB、合计 20 MiB、每条消息 4 张限制沿用回复通道。模型每回合最多 3 条消息，系统 #late / #fallback 不占额度。当前票据的生成图片与绑定的 Codex 线程 generated_images 目录也可作为来源。
+`send_message({ text, images: [path], files: [{ path, name? }] })` 立即发送文字和图片，再上传文件，name 缺省取原文件名。来源只能是本轮工作区普通文件或当前 QQ_ACCESS 范围已召回媒体，拒绝软链接；文件名取 basename、去控制字符、最多 120 字符。图片魔数、单张 10 MiB、合计 20 MiB、每条消息 4 张限制沿用回复通道。不限每回合条数；所有出站消息受 bridge 发送规则约束（默认每会话每分钟 6 条、每小时 60 条触发会话熔断 60 分钟、全局每分钟 30 条触发全局熔断 10 分钟），在面板设置页"发送规则"调整或解除熔断。当前票据的生成图片与绑定的 Codex 线程 generated_images 目录也可作为来源。
 
 文件在文字（含图片）确认发送后逐个上传到原会话，群聊放根目录。每次上传前持久化 Outbox 的文件状态 `sending`，成功保存 `sent` 和 `file_id`，异常保存 `uncertain`；恢复只发送 `pending`，遗留 `sending` 转 `uncertain`。文字已发出但附件未结束时保留派发索引；观测 `send_message` 的 files 字段记录名字、大小和状态；票据结束时删除 Outbox 副本，仍有 pending/sending 文件的消息目录保留，避免破坏恢复。上传超时至少 30 秒，每 MiB 加 2 秒，最高 120 秒。
 

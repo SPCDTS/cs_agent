@@ -18,13 +18,14 @@ it.each(["qq:group:8", "qq:private:9"])("target %s 不 @，Outbox、文件和机
   } finally { off(); }
 });
 
-it("默认回复与等于来源的 target 沿用 @ 规则，与主动发送共享三条额度", async () => {
+it("默认回复与等于来源的 target 沿用 @ 规则，与主动发送同一回合不限条数", async () => {
   const f = await grantsFixture();
   await f.service.send(f.binding, { target: "qq:group:8", text: "先主动发" }, { callId: "1" });
   await f.service.send(f.binding, { target: "qq:group:7", text: "回复来源" }, { callId: "2" });
   await f.service.send(f.binding, { text: "补充" }, { callId: "3" });
   expect(f.service.rows(f.ticket).map(r => r.mention_user_id)).toEqual([null, null, null]);
-  await expect(f.service.send(f.binding, { target: "qq:private:9", text: "超额" }, { callId: "4" })).rejects.toThrow("3 条");
+  await f.service.send(f.binding, { target: "qq:private:9", text: "第四条" }, { callId: "4" });
+  expect(f.service.rows(f.ticket).map(r => r.status)).toEqual(["sent", "sent", "sent", "sent"]);
 });
 
 it.each(["qq:group:0", "qq:private:01", "group:8", "other:group:8", "qq:group:8:1", "qq:group:8\n", 8])("非法 target %j 在建行前拒绝", async target => {
@@ -134,6 +135,7 @@ it.each(["pi", "codex"] as const)("已发送目标消息在授权撤销后仍可
 
 it("普通来源回复不计每日主动额度，显式跨会话发送单独计数", async () => {
   const f = await grantsFixture();
+  Object.assign(f.rules, { perChatMinute: 1000, perChatHour: 1000, globalMinute: 1000 });
   for (let i = 0; i < 100; i++) {
     const ticket = f.store.createTicket({ ...f.msg, group_id: "8", message_id: "reply-" + i });
     await f.service.send({ ...f.binding, ticket, source: { ...f.binding.source, group_id: "8" } },

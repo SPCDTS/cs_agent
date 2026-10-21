@@ -271,6 +271,7 @@ async function main(): Promise<void> {
     groupMentions: cfg.QQ_GROUP_MENTIONS,
     dataDir: cfg.DATA_DIR,
     imageRoot: cfg.imagesDir,
+    sendRules: () => settings.current().sendRules,
     incomingDownloadConcurrency: cfg.INCOMING_DOWNLOAD_CONCURRENCY,
     incomingDownloadDeadlineMs: cfg.INCOMING_DOWNLOAD_DEADLINE_SEC * 1000,
   });
@@ -378,6 +379,7 @@ async function main(): Promise<void> {
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
     codex: codexStatus, pi: piStatus, piSessions: pi.sessionSource, settings, live,
+    sendBreakers: { list: () => bridge!.sendBreakers?.() ?? [], reset: scope => bridge!.resetSendBreaker?.(scope) ?? false },
     aging: { running: aging.running, nextRun: () => { const now = Date.now(); return now + msUntilNextRun(cfg.HISTORY_SUMMARY_HOUR, now); },
       config: { rawDays: cfg.HISTORY_RAW_DAYS, summaryDays: cfg.HISTORY_SUMMARY_DAYS, hardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,
         dailyHour: cfg.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } },

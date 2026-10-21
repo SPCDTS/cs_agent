@@ -9,6 +9,9 @@ import { DatabaseSync } from "node:sqlite";
 import type { ChatType, InboundMessage, OutboundTicket, ReplyTicketRecord, TicketStatus } from "../channel/types.js";
 
 import { isModelOutboxRow, type OutboxInput, type OutboxRow } from "../channel/outbox.js";
+import { isSendRuleError, type SendBreaker, type SendRuleLimits } from "../channel/send-rules.js";
+import { ticketTarget } from "../channel/ticket.js";
+import { SendRules } from "./send-rules.js";
 
 const SEEN_LIMIT = 2000;
 export const DB_FILE = "qq-bridge.sqlite";
@@ -116,6 +119,7 @@ CREATE TABLE IF NOT EXISTS seen_messages (
 
 export class ReplyStore {
   private readonly db: DatabaseSync;
+  private readonly rules: SendRules;
 
   constructor(dataDir: string) {
     mkdirSync(dataDir, { recursive: true });
@@ -123,12 +127,15 @@ export class ReplyStore {
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.rules = new SendRules(this.db);
   }
 
   /** 旧库补列：source_text（崩溃对账需要原文）、source_route_text（分流文本；旧行保持 NULL）。 */
   private migrate(): void {
     const outboxColumns = this.db.prepare("PRAGMA table_info(outbox)").all() as { name: string }[];
     if (!outboxColumns.some(c => c.name === "proactive")) this.db.exec("ALTER TABLE outbox ADD COLUMN proactive INTEGER NOT NULL DEFAULT 0");
+    // 被发送规则拒绝的原因；行仍为 pending，再次投递通过后清空。
+    if (!outboxColumns.some(c => c.name === "rejected")) this.db.exec("ALTER TABLE outbox ADD COLUMN rejected TEXT");
     const columns = this.db.prepare("PRAGMA table_info(tickets)").all() as { name: string }[];
     if (!columns.some(c => c.name === "origin")) this.db.exec("ALTER TABLE tickets ADD COLUMN origin TEXT NOT NULL DEFAULT 'message'");
     if (!columns.some(c => c.name === "target_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN target_id TEXT");
@@ -146,7 +153,9 @@ export class ReplyStore {
 
   getOutbox(key: string): OutboxRow | null {
     const row = this.db.prepare("SELECT * FROM outbox WHERE key = ?").get(key);
-    return row ? { ...row, proactive: row.proactive === 1, images: JSON.parse(String(row.images)), files: JSON.parse(String(row.files)) } as OutboxRow : null;
+    if (!row) return null;
+    const { rejected: _rejected, ...rest } = row;
+    return { ...rest, proactive: row.proactive === 1, images: JSON.parse(String(row.images)), files: JSON.parse(String(row.files)) } as OutboxRow;
   }
 
   listOutbox(ticket: string): OutboxRow[] {
@@ -156,7 +165,7 @@ export class ReplyStore {
 
   countModelOutbox(type: ChatType, targetId: string, start: string, end: string): number {
     const row = this.db.prepare(`SELECT count(*) AS n FROM outbox WHERE message_type=? AND target_id=?
-      AND proactive=1 AND created_at>=? AND created_at<? AND key != ticket || '#late' AND key != ticket || '#fallback'`)
+      AND proactive=1 AND rejected IS NULL AND created_at>=? AND created_at<? AND key != ticket || '#late' AND key != ticket || '#fallback'`)
       .get(type, targetId, start, end) as { n: number };
     return row.n;
   }
@@ -169,8 +178,6 @@ export class ReplyStore {
         : input.suffix ? rows.find(row => row.key === input.ticket + "#" + input.suffix)
         : rows.find(row => row.key === input.ticket + "#" + input.sequence);
       if (existing) { this.db.exec("COMMIT"); return existing; }
-      const limit = this.get(input.ticket)?.origin === "scheduled" ? 5 : 3;
-      if (!input.suffix && modelRows.length >= limit) throw new Error(`本回合最多发送 ${limit} 条消息`);
       if (input.proactive && input.dailyLimit && this.countModelOutbox(input.message_type, input.target_id, input.dailyLimit.start, input.dailyLimit.end) >= input.dailyLimit.limit) {
         throw new Error("该 target 当天最多主动发送 100 条消息（Asia/Shanghai）");
       }
@@ -187,7 +194,7 @@ export class ReplyStore {
   }
 
   markOutboxSending(key: string): boolean {
-    return Number(this.db.prepare(`UPDATE outbox SET status='sending',
+    return Number(this.db.prepare(`UPDATE outbox SET status='sending', rejected=NULL,
       mention_user_id=CASE WHEN EXISTS (SELECT 1 FROM outbox prior WHERE prior.ticket=outbox.ticket AND prior.status<>'pending')
         THEN NULL ELSE mention_user_id END WHERE key=? AND status='pending'`).run(key).changes) === 1;
   }
@@ -211,9 +218,54 @@ export class ReplyStore {
     if (Number(this.db.prepare("UPDATE outbox SET files=? WHERE key=? AND files=?")
       .run(JSON.stringify(row.files), key, before).changes) !== 1) throw new Error("Outbox 附件状态已改变");
   }
+  /**
+   * 发送规则检查 + pending → sending + 记数，同一写事务内完成。被规则拒绝时行保持 pending 并记下原因，
+   * 抛 SendRuleError；返回 false 表示状态已被改变（不可发送，也不记数）。
+   */
+  beginOutboxSend(key: string, limits: SendRuleLimits, now: number): boolean {
+    const row = this.getOutbox(key);
+    if (!row) return false;
+    return this.admitSend(`${row.message_type}:${row.target_id}`, limits, now, () => this.markOutboxSending(key),
+      reason => { this.db.prepare("UPDATE outbox SET rejected=? WHERE key=? AND status='pending'").run(reason, key); });
+  }
+
+  /** 旧票据回复路径（生图前缀路由、兜底）的同一套规则：检查 + pending → sending + 记数。 */
+  beginTicketSend(ticket: string, limits: SendRuleLimits, now: number): boolean {
+    const rec = this.get(ticket);
+    if (!rec) return false;
+    return this.admitSend(`${rec.message_type}:${ticketTarget(rec)}`, limits, now, () => this.markSending(ticket), () => {});
+  }
+
+  private admitSend(scope: string, limits: SendRuleLimits, now: number, mark: () => boolean, reject: (reason: string) => void): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      let rejected: unknown;
+      try { this.rules.check(scope, limits, now); }
+      catch (error) {
+        if (!isSendRuleError(error)) throw error;
+        reject(error.message); rejected = error;
+      }
+      // 熔断行与拒绝原因须提交；只有接纳且状态迁移成功的发送才记数。
+      const accepted = !rejected && mark();
+      if (accepted) this.rules.record(scope, now);
+      this.db.exec("COMMIT");
+      if (rejected) throw rejected;
+      return accepted;
+    } catch (error) {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  sendBreakers(now: number): SendBreaker[] { return this.rules.breakers(now); }
+  resetSendBreaker(scope: string, now: number): boolean { return this.rules.reset(scope, now); }
+
   settleTicket(ticket: string): void {
     const rows = this.listOutbox(ticket);
-    if (this.get(ticket)?.origin !== "scheduled" && !rows.some(row => row.status !== "pending")) throw new Error("本回合尚无消息发送");
+    // 系统补发被发送规则拒绝时仍须终结票据，否则兜底会在熔断期间反复重试。
+    const systemRejected = () => !!this.db.prepare(`SELECT 1 FROM outbox WHERE ticket=? AND rejected IS NOT NULL
+      AND (key = ticket || '#late' OR key = ticket || '#fallback')`).get(ticket);
+    if (this.get(ticket)?.origin !== "scheduled" && !rows.some(row => row.status !== "pending") && !systemRejected()) throw new Error("本回合尚无消息发送");
     this.db.prepare("UPDATE tickets SET status='sent', reply_message_id=?, sent_at=? WHERE ticket_id=? AND status='pending'")
       .run(rows.find(row => row.status === "sent")?.message_id ?? null, new Date().toISOString(), ticket);
   }

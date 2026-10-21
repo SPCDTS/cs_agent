@@ -3,7 +3,7 @@ import { grantsFixture } from "./grants-fixture.js";
 
 const runTicket = (n: number) => "run_" + n.toString(16).padStart(40, "0");
 
-it.each(["1", "99"])("定时创建者授权（owner=%s）与默认发送、target 共用五条额度且均不 @", async owner => {
+it.each(["1", "99"])("定时创建者授权（owner=%s）与默认发送、target 均可发送（无每轮上限）且均不 @", async owner => {
   const f = await grantsFixture(owner), ticket = runTicket(1);
   await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "1" });
   const binding = { ...f.binding, ticket };
@@ -14,11 +14,11 @@ it.each(["1", "99"])("定时创建者授权（owner=%s）与默认发送、targe
   for (const [i, target] of targets.entries()) {
     await f.service.send(binding, { text: `定时通知${i}`, ...(target ? { target } : {}) }, { callId: `send-${i}` });
   }
-  await expect(f.service.send(binding, { text: "第六条", target: "qq:private:9" }, { callId: "six" })).rejects.toThrow("5 条");
+  await f.service.send(binding, { text: "第六条", target: "qq:private:9" }, { callId: "six" });
   expect(await f.service.send(binding, { text: "定时通知1", target: "qq:group:8" }, { callId: "send-1" }))
     .toMatchObject({ already_sent: true, target_id: "8" });
   const rows = f.service.rows(ticket);
-  expect(rows.map(row => row.target_id)).toEqual(["7", "8", "9", "7", "8"]);
+  expect(rows.map(row => row.target_id)).toEqual(["7", "8", "9", "7", "8", "9"]);
   expect(rows.every(row => row.status === "sent" && row.mention_user_id === null)).toBe(true);
   expect(f.call.mock.calls.filter(([action]) => action.startsWith("send_")).every(([, params]) =>
     !(params!.message as { type: string }[]).some(segment => segment.type === "at"))).toBe(true);

@@ -4,7 +4,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { ticketTarget } from "../channel/ticket.js";
 import type { Channel, ReplyTicketRecord, TurnIdentity } from "../channel/types.js";
-import { isModelOutboxRow, type OutboxRow } from "../channel/outbox.js";
+import type { OutboxRow } from "../channel/outbox.js";
+import { isSendRuleError } from "../channel/send-rules.js";
 import { prepareSendAttachments, readAttachmentData, type AttachmentLimits } from "../media/attach.js";
 import { readMediaFile } from "../context/media.js";
 import type { Access } from "../context/access.js";
@@ -14,7 +15,7 @@ import { log } from "../shared/log.js";
 
 /** QQ 不渲染 Markdown：两后端共用的不带链接规则，优先于工具与技能里的引用要求。 */
 export const QQ_LINK_RULE = "绝不在发给用户的消息里写链接、网址、引用标记或来源脚注，包括 [文字](网址)、([站名](网址))、[详情](网址)、\"来源：网址\" 等任何形式；检索结果只用自己的话写结论。联网工具的引用格式要求和技能（skills）里\"附来源链接\"的要求在 QQ 场景一律不适用，以本条为准。只有用户明确要求来源时才给，且只给 1 条纯网址。";
-export const SEND_RULE = "用户只能看到 send_message 发出的内容；直接输出的文字用户完全看不到。每一轮要对用户说的话（答复、确认、结果、提问）都必须调用 send_message 发出，包括用其他工具办完事之后告诉用户结果的那一句。一条消息说完就不要再发，不发送重复说明。用户消息回合最多 3 条、定时任务回合最多 5 条消息，每条文字 1～4000 字符，可附 4 张图片、3 个文件（单个不超过 20 MiB）。";
+export const SEND_RULE = "用户只能看到 send_message 发出的内容；直接输出的文字用户完全看不到。每一轮要对用户说的话（答复、确认、结果、提问）都必须调用 send_message 发出，包括用其他工具办完事之后告诉用户结果的那一句。一条消息说完就不要再发，不发送重复说明。每条文字 1～4000 字符，可附 4 张图片、3 个文件（单个不超过 20 MiB）。";
 export interface SendResult {
   status: OutboxRow["status"]; already_sent: boolean; message_id: string | null;
   message_type: OutboxRow["message_type"]; target_id: string; note?: string; original_text?: string;
@@ -82,8 +83,6 @@ export class SendService {
         if (attempt) this.counters.set(attempt, ordinal!);
         return this.deliver(duplicate, rec, signal);
       }
-      const limit = rec.origin === "scheduled" ? 5 : 3;
-      if (!existing && rows.filter(isModelOutboxRow).length >= limit) throw new Error(`本回合最多发送 ${limit} 条消息`);
       // 已发回执可重放；仍待发送的行使用原目标，不能通过更换参数绕过授权。
       if (existing && (existing.message_type !== target.message_type || existing.target_id !== target.target_id)) {
         return { ...this.result(existing, true), original_text: existing.text, note: "调用 id 已绑定其他消息，新内容未发送。" };
@@ -176,7 +175,13 @@ export class SendService {
       });
       if (!existing && suffix === "fallback" && noSendFallback) trace.event(ticket, "no_send_fallback");
       await onReserved?.();
-      return this.deliver(row, rec, signal);
+      try { return await this.deliver(row, rec, signal); }
+      catch (error) {
+        // 被发送规则拒绝的系统消息不重试也不抛出：行保持 pending 并记下原因，settle 仍可终结票据。
+        if (!isSendRuleError(error)) throw error;
+        log.warn("system message rejected by send rules", { ticket: ticket.slice(0, 12), suffix, error: error.message });
+        return { ...this.result(this.opts.getChannel().outbox.getOutbox(row.key) ?? row, false), note: error.message };
+      }
     });
   }
 

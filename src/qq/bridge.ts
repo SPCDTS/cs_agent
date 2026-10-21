@@ -19,6 +19,7 @@ import { createOneBotClient, isRecord, numericId, isValidId, OneBotError, string
 import { hasUsableContent, isAllowed, isTriggered, messageSegmentTypes, normalizeMessage, renderText, validatePolicy } from "./policy.js";
 import { prepareImages, type ImageSegment } from "./image.js";
 import { dedupeKey, isTicketId, ticketIdFor, ReplyStore } from "./reply-store.js";
+import { DEFAULT_SEND_RULES, isSendRuleError, type SendBreaker } from "../channel/send-rules.js";
 
 const GROUP_NAME_TTL_MS = 6 * 60 * 60_000;
 const GROUP_NAME_BACKOFF_MS = 60_000;
@@ -40,6 +41,8 @@ interface BridgeInternals {
   heartbeatMs?: number;
   /** 连接持续不可用时 error 事件的最小间隔，默认 5 分钟 */
   downReportIntervalMs?: number;
+  /** 发送规则使用的时钟（毫秒），默认 Date.now */
+  now?: () => number;
 }
 
 type OutSegment = { type: string; data: Record<string, unknown> };
@@ -81,6 +84,7 @@ class Bridge extends EventEmitter implements Channel {
   private readonly reconnectMaxMs: number;
   private readonly heartbeatMs: number;
   private readonly downReportIntervalMs: number;
+  private readonly now: () => number;
 
   private store: ReplyStore | null = null;
   private socket: WebSocket | null = null;
@@ -124,6 +128,7 @@ class Bridge extends EventEmitter implements Channel {
     this.reconnectMaxMs = internals.reconnectMaxMs ?? 30000;
     this.heartbeatMs = internals.heartbeatMs ?? 25000;
     this.downReportIntervalMs = internals.downReportIntervalMs ?? DOWN_REPORT_INTERVAL_MS;
+    this.now = internals.now ?? Date.now;
   }
 
   // ---------- 生命周期 ----------
@@ -580,7 +585,10 @@ class Bridge extends EventEmitter implements Channel {
     const images = prepareImages(imagePaths, this.config.imageRoot);
     await this.checkReplyIdentity(record, opts?.signal);
     opts?.signal?.throwIfAborted();
-    if (!store.markOutboxSending(key)) throw new Error("发送状态已改变，结果不确定，不重发");
+    const limits = this.config.sendRules?.() ?? DEFAULT_SEND_RULES;
+    if (!this.underRules(row.ticket, `${row.message_type}:${row.target_id}`, () => store.beginOutboxSend(key, limits, this.now()))) {
+      throw new Error("发送状态已改变，结果不确定，不重发");
+    }
     try {
       const data = await this.client.call(target.message_type === "group" ? "send_group_msg" : "send_private_msg", {
         [target.message_type === "group" ? "group_id" : "user_id"]: numericId(target.target_id),
@@ -631,7 +639,10 @@ class Bridge extends EventEmitter implements Channel {
     await this.checkReplyIdentity(record, signal);
 
     signal?.throwIfAborted();
-    if (!store.markSending(ticket)) throw new Error("票据状态已改变，可能已在其他进程发送，请勿重发。");
+    const limits = this.config.sendRules?.() ?? DEFAULT_SEND_RULES;
+    if (!this.underRules(ticket, `${type}:${targetId}`, () => store.beginTicketSend(ticket, limits, this.now()))) {
+      throw new Error("票据状态已改变，可能已在其他进程发送，请勿重发。");
+    }
     // sending 已落盘后必须完成发送；此后不传 signal，失败仍按 uncertain 处理。
     let data: unknown;
     try {
@@ -648,6 +659,22 @@ class Bridge extends EventEmitter implements Channel {
     store.markSent(ticket, messageId);
     return { already_sent: false, message_id: messageId, message_type: type, target_id: targetId };
   }
+
+  /** 发送规则拒绝时记观测事件；刚触发熔断时另记 send_breaker，由告警通知 owner（每次熔断一次）。 */
+  private underRules(ticket: string, scope: string, begin: () => boolean): boolean {
+    try { return begin(); }
+    catch (error) {
+      if (isSendRuleError(error)) {
+        log.warn("outbound send rejected by send rules", { ticket: ticket.slice(0, 12), scope, rule: error.rule, breaker: error.scope });
+        trace.event(ticket, "send_rejected", { scope, status: "failed", detail: { rule: error.rule, breaker_scope: error.scope, error: error.message } });
+        if (error.tripped) trace.event(ticket, "send_breaker", { scope, detail: { ...error.tripped } });
+      }
+      throw error;
+    }
+  }
+
+  sendBreakers(): SendBreaker[] { return this.requireStore().sendBreakers(this.now()); }
+  resetSendBreaker(scope: string): boolean { return this.requireStore().resetSendBreaker(scope, this.now()); }
 
   async uploadFile(type: ChatType, targetId: string, file: Buffer, name: string): Promise<{ file_id: string }> {
     if (type !== "private" && type !== "group") throw new Error("会话类型必须为 private 或 group。");

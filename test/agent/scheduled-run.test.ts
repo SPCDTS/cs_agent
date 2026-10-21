@@ -138,24 +138,24 @@ it.each(["pi", "codex"] as const)("%s 定时回合静默结束，最终答案留
   expect(f.recordDeliveryNote).not.toHaveBeenCalled();
 });
 
-it("send_message 复用 Outbox，最多五条且每条都不 @，附件和历史仍可用", async () => {
+it("send_message 复用 Outbox，不限每轮条数且每条都不 @，附件和历史仍可用", async () => {
   let f!: Awaited<ReturnType<typeof rig>>;
   f = await rig(async req => {
     const binding = { ...f.binding, ticket: req.ticket, source: req.source };
     for (let n = 1; n <= 5; n++) await f.service.send(binding, { text: `定时通知${n}`,
       ...(n === 1 ? { images: [path.join(f.workdir, "image.png")], files: [{ path: path.join(f.workdir, "file.txt") }] } : {}),
     }, { callId: `send-${n}` });
-    await expect(f.service.send(binding, { text: "第六条" }, { callId: "send-6" })).rejects.toThrow("最多发送 5 条");
+    await f.service.send(binding, { text: "第六条" }, { callId: "send-6" });
     return { text: "已通知" };
   });
   const { ticket } = await f.run();
   const sends = f.call.mock.calls.filter(c => c[0] === "send_group_msg");
-  expect(sends).toHaveLength(5);
+  expect(sends).toHaveLength(6);
   expect(sends.every(call => !(call[1]!.message as { type: string }[]).some(segment => segment.type === "at"))).toBe(true);
   expect(f.service.rows(ticket).every(row => row.mention_user_id === null)).toBe(true);
   expect(f.service.rows(ticket)[0]!.files[0]?.status).toBe("sent");
   expect(f.history.message(f.binding.access, f.service.rows(ticket)[0]!.message_id!)?.row.text).toBe("定时通知1");
-  expect(f.recorder.runs.get(fire().fire_key)).toMatchObject({ status: "sent", sent: 5 });
+  expect(f.recorder.runs.get(fire().fire_key)).toMatchObject({ status: "sent", sent: 6 });
   await expect(f.service.system(ticket, "fallback", "不得发送")).rejects.toThrow("不发送系统补发");
 });
 

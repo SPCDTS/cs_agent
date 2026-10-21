@@ -7,6 +7,7 @@ import { SendService } from "../../src/agent/send-service.js";
 import { ContextStore } from "../../src/context/store.js";
 import { TRANSPARENT_PNG } from "../../src/media/gen/image-gen.js";
 import type { InboundMessage } from "../../src/channel/types.js";
+import { DEFAULT_SEND_RULES, type SendRuleLimits } from "../../src/channel/send-rules.js";
 import { tmp } from "./helpers.js";
 
 const clean: (() => unknown | Promise<unknown>)[] = [];
@@ -27,11 +28,15 @@ export function sendFixture(group = true, owners?: readonly string[]) {
     if (action.startsWith("upload_")) return { file_id: "file-" + ++n };
     return { message_id: String(++n) };
   });
+  // 发送规则可在用例内就地修改；clock 未设置时用真实时间。
+  const rules: SendRuleLimits = { ...DEFAULT_SEND_RULES };
+  const clock: { now?: number } = {};
   const bridge = createQQBridge({ httpUrl: "http://unused.test", wsUrl: "ws://unused.test", token: "",
-    allowUsers: ["1"], owners, allowGroups: ["7", "8"], groupMentions: true, dataDir: dir, imageRoot: path.join(dir, "images") }, { client: { call } });
+    allowUsers: ["1"], owners, allowGroups: ["7", "8"], groupMentions: true, dataDir: dir, imageRoot: path.join(dir, "images"),
+    sendRules: () => rules }, { client: { call }, now: () => clock.now ?? Date.now() });
   const service = new SendService({ getChannel: () => bridge, dataDir: dir, store: history });
   clean.push(() => { store.close(); history.close(); }, () => bridge.stop());
   const binding = { ticket, workdir, source: { type: msg.message_type, user_id: msg.user_id, group_id: msg.group_id },
     access: { kind: "scope" as const, scope: group ? "group:7" : "private:1" } };
-  return { dir, workdir, store, history, msg, ticket, bridge, service, binding, call };
+  return { dir, workdir, store, history, msg, ticket, bridge, service, binding, call, rules, clock };
 }

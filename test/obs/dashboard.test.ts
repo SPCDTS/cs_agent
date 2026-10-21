@@ -14,6 +14,8 @@ import { registerSecrets } from '../../src/shared/redact.js';
 import { ContextStore } from '../../src/context/store.js';
 import { loadConfig } from '../../src/config.js';
 import { SettingsStore, SETTINGS_TICKET, type RuntimeSettings, type SettingsValidators } from '../../src/agent/settings.js';
+import { DEFAULT_SEND_RULES } from '../../src/channel/send-rules.js';
+import type { DashboardOptions } from '../../src/obs/dashboard-types.js';
 import { CodexRunner, REASONING_EFFORTS } from '../../src/agent/codex/runner.js';
 import { CodexBackend } from '../../src/agent/backends/codex.js';
 import { FIXTURES } from '../agent/helpers.js';
@@ -24,9 +26,9 @@ import { dispatchSettingsLine, type ModelCatalogView } from '../../src/obs/ui/da
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
-const defaults: RuntimeSettings = { codexModel: 'codex/gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false };
+const defaults: RuntimeSettings = { codexModel: 'codex/gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES } };
 
-async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv; modelCatalog?: ModelCatalogView } = {}) {
+async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv; modelCatalog?: ModelCatalogView; sendBreakers?: DashboardOptions['sendBreakers'] } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
   const store = new ObsStore(dir), context = new ContextStore(dir);
   trace.attach(store);
@@ -40,7 +42,7 @@ async function rig(extra: { validators?: SettingsValidators; contextUsage?: Cont
   const compactPi = vi.fn(async (_key: string): Promise<'compacted' | 'unchanged'> => 'compacted');
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
   const codexPrompt = extra.codexPrompt === null ? undefined : extra.codexPrompt ?? new CodexPromptStub();
-  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, compactCodex, compactPi, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog,
+  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, compactCodex, compactPi, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog, sendBreakers: extra.sendBreakers,
     health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, comfy: { ok: true }, codex: { ok: false }, deepseek_key_present: true }),
     queue: () => ({ active: 1, slots: 2, waiting: 1, scopes: { 'group:7': 1 } }),
     codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'group:7', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
@@ -204,6 +206,34 @@ describe('面板二期页面', () => {
     const res = await r.post('/settings', ok, headers);
     expect(res.status).toBe(403); expect(await res.text()).toBe('跨站请求被拒绝');
     expect(r.settings.current().agentBackend).toBe('codex');
+  });
+
+  it('发送规则单独保存并校验；熔断列表可逐项解除并记录变更', async () => {
+    const breakers = [{ scope: 'group:7', until: Date.UTC(2026, 9, 21, 5), tripped_at: Date.UTC(2026, 9, 21, 4), reason: '每小时超过 60 条' },
+      { scope: 'global', until: Date.UTC(2026, 9, 21, 4, 10), tripped_at: Date.UTC(2026, 9, 21, 4), reason: '全局每分钟超过 30 条' }];
+    const reset = vi.fn((scope: string) => { const i = breakers.findIndex(b => b.scope === scope); if (i < 0) return false; breakers.splice(i, 1); return true; });
+    const r = await rig({ sendBreakers: { list: () => [...breakers], reset } });
+    const html = await (await r.get('/settings')).text();
+    expect(html).toContain('id="send-rules"'); expect(html).toContain('name="perChatMinute" value="6"');
+    expect(html).toContain('action="/settings/send-breakers/reset"'); expect(html).toContain('value="group:7"'); expect(html).toContain('全部会话');
+    const fields = { _csrf: r.csrf, perChatMinute: '8', perChatHour: '80', chatBreakerMinutes: '30', globalMinute: '40', globalBreakerMinutes: '5' };
+    const res = await r.post('/settings/send-rules', fields);
+    expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/settings?ok=saved#send-rules');
+    expect(r.settings.current().sendRules).toEqual({ perChatMinute: 8, perChatHour: 80, chatBreakerMinutes: 30, globalMinute: 40, globalBreakerMinutes: 5 });
+    for (const bad of [{ perChatMinute: '0' }, { perChatHour: '' }, { globalMinute: '1.5' }, { globalBreakerMinutes: 'abc' }]) {
+      const res400 = await r.post('/settings/send-rules', { ...fields, ...bad });
+      expect(res400.status).toBe(400); expect(await res400.text()).toContain('发送规则未保存');
+    }
+    expect(r.settings.current().sendRules.perChatMinute).toBe(8);
+    expect((await r.post('/settings/send-breakers/reset', { scope: 'group:7' })).status).toBe(403);
+    expect(reset).not.toHaveBeenCalled();
+    const ok = await r.post('/settings/send-breakers/reset', { _csrf: r.csrf, scope: 'group:7' });
+    expect(ok.status).toBe(303); expect(ok.headers.get('location')).toBe('/settings?ok=breakerReset#send-rules');
+    expect(reset).toHaveBeenCalledWith('group:7'); expect(breakers.map(b => b.scope)).toEqual(['global']);
+    expect((await r.post('/settings/send-breakers/reset', { _csrf: r.csrf, scope: 'group:7' })).status).toBe(409);
+    expect(JSON.parse(r.store.events(SETTINGS_TICKET).find(e => e.stage === 'send_breaker_reset')!.detail_json)).toEqual({ source: 'dashboard', scope: 'group:7' });
+    const after = await (await r.get('/settings?ok=breakerReset')).text();
+    expect(after).toContain('熔断已解除'); expect(after).toContain('解除发送熔断：'); expect(after).not.toContain('value="group:7"');
   });
 
   it('保存设置立即生效、落盘并记录事件；非法覆盖表返回 400 且不改动', async () => {

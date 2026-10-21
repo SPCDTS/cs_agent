@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ObsStore } from "../../src/obs/store.js";
 import { Trace } from "../../src/shared/trace.js";
 import { SettingsStore } from "../../src/agent/settings.js";
+import { DEFAULT_SEND_RULES } from "../../src/channel/send-rules.js";
 import { loadConfig } from "../../src/config.js";
 import { log } from "../../src/shared/log.js";
 import { tmp } from "./helpers.js";
@@ -15,7 +16,7 @@ describe("管理审计保留策略", () => {
   it("600 次 settings 变更全部保留，超过单票据数量和字节预算也不丢失", async () => {
     vi.spyOn(log, "info").mockImplementation(() => {});
     const { dir, store } = open();
-    const settings = await SettingsStore.open(dir, { codexModel: "gpt-6.1-sol", piModel: "deepseek-flash", piThinkingLevel: "low", agentBackend: "codex", backendOverrides: {}, codexReasoningEffort: "high", alertOwner: false }, new Trace(store));
+    const settings = await SettingsStore.open(dir, { codexModel: "gpt-6.1-sol", piModel: "deepseek-flash", piThinkingLevel: "low", agentBackend: "codex", backendOverrides: {}, codexReasoningEffort: "high", alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES } }, new Trace(store));
     const overrides = Object.fromEntries(Array.from({ length: 50 }, (_, i) => ["group:" + (i + 1), "pi" as const]));
     for (let i = 0; i < 600; i++) await settings.update({ backendOverrides: i % 2 ? {} : overrides }, "test");
     expect(store.events("@settings", 2000)).toHaveLength(600);

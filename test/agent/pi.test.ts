@@ -929,7 +929,7 @@ describe("pi durable backend", () => {
 
 
 describe("pi send_message 工具", () => {
-  it("稳定 callId 传入网关，发送三条后返回限额错误，不消耗历史额度", async () => {
+  it("稳定 callId 传入网关，同一回合第四条也能发出（无每轮条数上限），不消耗历史额度", async () => {
     const f = sendFixture(), send = vi.spyOn(f.service, "send");
     let seen!: TranscriptContext;
     const s = await setup([
@@ -945,10 +945,9 @@ describe("pi send_message 工具", () => {
     }
     await s.pi.handle(request(f.ticket), handleContext());
     const tools = seen.messages.filter(m => m.role === "toolResult");
-    expect(tools.slice(0, 3).every(t => !t.isError)).toBe(true);
-    expect(tools[3]!.isError).toBe(true); expect(tools[4]!.isError).not.toBe(true);
+    expect(tools.slice(0, 5).every(t => !t.isError)).toBe(true);
     expect(send.mock.calls[0]![2]).toEqual({ callId: tools[0]!.toolCallId });
-    expect(f.service.rows(f.ticket)).toHaveLength(3);
+    expect(f.service.rows(f.ticket)).toHaveLength(4);
     expect(f.service.rows(f.ticket)[0]!.files.map(x => x.status)).toEqual(["sent", "sent", "sent"]);
     const id = (await s.pi.readThreadIds())["group:7"]!;
     const doc = await s.pi.harness.snapshot(PiRequestDoc, id as ConversationId, context);

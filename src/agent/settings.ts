@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { z } from "zod";
 import { DEFAULT_CODEX_MODEL } from "../config.js";
+import { DEFAULT_SEND_RULES, type SendRuleLimits } from "../channel/send-rules.js";
 import { isScope } from "../context/access.js";
 import { log } from "../shared/log.js";
 import { trace as defaultTrace, type Trace } from "../shared/trace.js";
@@ -24,6 +25,8 @@ export interface RuntimeSettings {
   piModel: string;
   piThinkingLevel: ModelThinkingLevel | "auto";
   alertOwner: boolean;
+  /** bridge 出站发送规则（设计 DESIGN-resident-agent §9），每次发送前现读 */
+  sendRules: SendRuleLimits;
 }
 
 export interface SettingsValidators {
@@ -32,6 +35,11 @@ export interface SettingsValidators {
 }
 
 const backend = z.enum(BACKEND_NAMES);
+const count = (max: number) => z.number().int().min(1).max(max);
+const SendRulesSchema = z.object({
+  perChatMinute: count(600), perChatHour: count(36_000), chatBreakerMinutes: count(1440),
+  globalMinute: count(6000), globalBreakerMinutes: count(1440),
+}).strict();
 const SettingsSchema = z.object({
   agentBackend: backend,
   backendOverrides: z.record(z.string().refine(isScope, "scope 必须是 group:<群号> 或 private:<QQ号>"), backend)
@@ -41,9 +49,10 @@ const SettingsSchema = z.object({
   piModel: z.string().trim().min(1),
   piThinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]),
   alertOwner: z.boolean(),
+  sendRules: SendRulesSchema,
 }).strict();
-// 只在读取旧文件时剥离已移除的字段；其余未知键及运行时更新仍严格校验。
-const FileSettingsSchema = SettingsSchema.partial().extend({ codexReplyMode: z.unknown().optional() })
+// 只在读取旧文件时剥离已移除的字段；其余未知键及运行时更新仍严格校验。发送规则逐项缺省为默认值。
+const FileSettingsSchema = SettingsSchema.partial().extend({ codexReplyMode: z.unknown().optional(), sendRules: SendRulesSchema.partial().optional() })
   .transform(({ codexReplyMode: _legacy, ...settings }) => settings);
 const FileSchema = z.object({ version: z.literal(1), settings: FileSettingsSchema }).strict();
 
@@ -62,7 +71,7 @@ export function settingsDefaults(cfg: {
   const effort = (REASONING_EFFORTS as readonly string[]).includes(cfg.CODEX_REASONING_EFFORT) ? cfg.CODEX_REASONING_EFFORT as ReasoningEffort : "high";
   return { agentBackend: cfg.AGENT_BACKEND, backendOverrides: { ...cfg.backendOverrides },
     codexModel: cfg.CODEX_MODEL, codexReasoningEffort: effort, piModel: cfg.AGENT_MODEL_ID,
-    piThinkingLevel: cfg.AGENT_THINKING_LEVEL, alertOwner: cfg.ALERT_OWNER };
+    piThinkingLevel: cfg.AGENT_THINKING_LEVEL, alertOwner: cfg.ALERT_OWNER, sendRules: { ...DEFAULT_SEND_RULES } };
 }
 
 type Listener = (next: Readonly<RuntimeSettings>, before: Readonly<RuntimeSettings>) => void;
@@ -87,7 +96,7 @@ export class SettingsStore {
       const st = await fs.lstat(file);
       if (!st.isFile() || st.size > 256 * 1024) throw new Error("settings.json 不是普通文件或过大");
       const parsed = FileSchema.parse(JSON.parse(await fs.readFile(file, "utf8")));
-      initial = SettingsSchema.parse({ ...base, ...parsed.settings });
+      initial = SettingsSchema.parse({ ...base, ...parsed.settings, sendRules: { ...base.sendRules, ...parsed.settings.sendRules } });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") log.warn("settings.json invalid; using .env defaults", { error: err instanceof Error ? err.message : String(err) });
     }
@@ -102,7 +111,8 @@ export class SettingsStore {
 
   /** 当前配置原值（含不在目录中的模型，供面板显示）。返回冻结副本，调用方不能就地修改。 */
   current(): Readonly<RuntimeSettings> {
-    return Object.freeze({ ...this.value, backendOverrides: Object.freeze({ ...this.value.backendOverrides }) }) as Readonly<RuntimeSettings>;
+    return Object.freeze({ ...this.value, backendOverrides: Object.freeze({ ...this.value.backendOverrides }),
+      sendRules: Object.freeze({ ...this.value.sendRules }) }) as Readonly<RuntimeSettings>;
   }
 
   /** 回合快照：目录可用时无效模型回退到 CODEX_MODEL；环境默认也无效则用内置默认，不改配置。 */

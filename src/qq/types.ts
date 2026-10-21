@@ -1,4 +1,5 @@
 import type { Channel } from "../channel/types.js";
+import type { SendRuleLimits } from "../channel/send-rules.js";
 
 export interface QQBridgeConfig {
   /** 例如 http://host.docker.internal:3000 */
@@ -23,6 +24,8 @@ export interface QQBridgeConfig {
   dataDir: string;
   /** 允许作为回复附件的图片根目录；路径必须 realpath 后落在其下 */
   imageRoot: string;
+  /** 出站发送规则限额，每次发送前现读（面板可改）；缺省用 DEFAULT_SEND_RULES */
+  sendRules?: () => SendRuleLimits;
 }
 
 /** QQ 通道的公开契约。 */

@@ -131,7 +131,11 @@ export interface Channel {
   getTicket(ticket: string): Promise<ReplyTicketRecord | null>;
   /** 列出仍为 pending 的票据（按 seq 升序，最多 limit 条，默认 200）；afterSeq 为分页游标（只取 seq 更大的），供启动时与派发索引对账 */
   listPendingTickets(limit?: number, afterSeq?: number): Promise<ReplyTicketRecord[]>;
-  /** 主动发送，仅供运维/测试使用，agent 工具层不暴露 */
+  /** 当前处于熔断的发送 scope（group:<id> / private:<qq> / global）；不支持发送规则的通道缺省。 */
+  sendBreakers?(): import("./send-rules.js").SendBreaker[];
+  /** 手动解除熔断；返回 false 表示该 scope 没有处于熔断。 */
+  resetSendBreaker?(scope: string): boolean;
+  /** 主动发送，仅供运维/测试使用，agent 工具层不暴露；不受发送规则约束 */
   sendOps(type: ChatType, targetId: string, text: string): Promise<{ message_id: string }>;
   /** 取远端原消息；不存在返回 null。 */
   fetchMessage(messageId: string, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<RemoteMessage | null>;

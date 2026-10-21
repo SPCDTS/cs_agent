@@ -38,7 +38,7 @@ const MAX_SSE = 20;
 
 const FLASH: Record<string, string> = {
   skillsUploaded: '技能上传已处理，下一条消息生效。', skillsDeleted: '技能已删除，下一条消息生效。',
-  saved: '设置已保存，之后收到的消息按新设置处理。', prompt: 'agent.md 已保存，pi 下一轮对话即读取新内容。',
+  saved: '设置已保存，之后收到的消息按新设置处理。', breakerReset: '熔断已解除，该范围从此刻重新计数。', prompt: 'agent.md 已保存，pi 下一轮对话即读取新内容。',
   codexBasePrompt: 'codex 基础指令已保存，下一轮生效（含已有线程续聊）。',
   codexPrompt: 'codex.md 已保存，AGENTS.md 已重写，codex 下一条消息即使用新内容。',
   reset: '已重置：旧会话已归档，下一条消息会新建会话。', queued: '已排队：当前回合结束后立即重置，旧会话会归档。', unchanged: '没有可操作的会话。',

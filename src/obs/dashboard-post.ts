@@ -6,6 +6,8 @@ import { equal, readBody, readMultipart, HttpError, guardAgentMd, writeAgentMd, 
 import { SkillsStoreError } from '../agent/skills-store.js';
 import { isThreadKey } from '../agent/codex/runner.js';
 import { SETTINGS_TICKET, type RuntimeSettings } from '../agent/settings.js';
+
+const SEND_RULE_FIELDS = ['perChatMinute', 'perChatHour', 'chatBreakerMinutes', 'globalMinute', 'globalBreakerMinutes'] as const;
 import { parseBackendOverrides } from '../agent/backends/select.js';
 import { redactText } from '../shared/redact.js';
 import type { Trace } from '../shared/trace.js';
@@ -88,6 +90,20 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
             alertOwner: form.get('alertOwner') === 'on' }, 'dashboard');
         } catch (e) { throw new HttpError(400, '设置未保存：取值不在允许范围内。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
         back('/settings?ok=saved'); return;
+      }
+      if (url.pathname === '/settings/send-rules') {
+        if (!opts.settings) throw new HttpError(404, '运行时设置不可用');
+        const sendRules = Object.fromEntries(SEND_RULE_FIELDS.map(k => [k, Number(form.get(k) ?? '')])) as unknown as RuntimeSettings['sendRules'];
+        try { await opts.settings.update({ sendRules }, 'dashboard'); }
+        catch (e) { throw new HttpError(400, '发送规则未保存：每项必须是范围内的正整数。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
+        back('/settings?ok=saved#send-rules'); return;
+      }
+      if (url.pathname === '/settings/send-breakers/reset') {
+        if (!opts.sendBreakers) throw new HttpError(404, '发送熔断不可用');
+        const scope = form.get('scope') ?? '';
+        if (!opts.sendBreakers.reset(scope)) throw new HttpError(409, '该熔断已结束或不存在，请刷新页面。');
+        tracer.event(SETTINGS_TICKET, 'send_breaker_reset', { detail: { source: 'dashboard', scope } });
+        back('/settings?ok=breakerReset#send-rules'); return;
       }
       if (url.pathname === '/settings/agent-md') {
         await guardAgentMd(agentMd, form.get('revision') ?? '');
