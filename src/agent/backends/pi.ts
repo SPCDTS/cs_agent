@@ -28,7 +28,7 @@ import { BackendTimeoutError, type AgentBackend, type AgentRequest, type AgentHa
 
 const context = BACKGROUND_CONTEXT;
 /** 消息回合输入末尾的提醒，是模型最后读到的内容。 */
-export const PI_SEND_REMINDER = "[回复方式] 本轮要对用户说的话（包括办完事后的确认）必须调用 send_message 发出，直接输出的文字用户看不到。";
+export const PI_SEND_REMINDER = "[回复方式] 本轮要对用户说的话（包括办完事后的确认）必须调用 send_message 发出，直接输出的文字用户看不到。消息里不写任何链接、网址或\"来源：\"，检索结果只用自己的话说结论。";
 /** 与会话创建同事务提交，JSON 映射是原子写出的运维镜像，丢失时可从 SQLite 重建。 */
 const PiThreadsDoc = defineDoc<Record<string, number | null>>({
   kind: "cs.pi.threads", version: 1, scope: "session", initial: () => ({}),
