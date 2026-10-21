@@ -28,8 +28,10 @@ export type InputRef = HostInput & { seq: number; at: number };
  * 开一轮时随输入一起交给适配器的回合信息。
  * admit：定时输入的准入复核（宿主在首次开轮前已调用）；适配器内部重试开轮时，每次重试前须再调用，
  * 返回 false 时不再开轮、返回 { denied: true }。适配器不得把它传给后端本身。
+ * previousTurnId：本会话上一个回合（含唤醒回合）的 id，空闲与重启后保留。一个会话同一时间只由一个后端服务（§4.3），
+ * 路由据此判定会话当前的后端：旧后端在该会话仍有工作（pi 子 agent 在跑等）时，后端切换推迟到它结束。
  */
-export type TurnContext = { kind: InputKind; sender: string; admit?: () => Promise<boolean> };
+export type TurnContext = { kind: InputKind; sender: string; admit?: () => Promise<boolean>; previousTurnId?: string };
 
 export type TurnStatus = "completed" | "failed" | "lost";
 
@@ -43,8 +45,8 @@ export type TurnStatus = "completed" | "failed" | "lost";
  */
 export type StartTurnResult = { turnId: string; accepted?: readonly string[] } | { backendTurnId: string } | { denied: true };
 
-/** 放弃回合的结果：aborted = 后端工作被中止（回合按 lost 结束）；detached = 工作继续但不再代表该回合（按 completed 结束）。 */
-export type AbandonResult = "aborted" | "detached";
+/** 回合结果（与 onTurnCompleted 回报的一致）。 */
+export type TurnOutcome = { status: TurnStatus; error?: string };
 
 export interface ThreadAdapter {
   /** 开一轮。抛错视为投递失败，宿主按回合失败结束这些输入。 */
@@ -56,10 +58,15 @@ export interface ThreadAdapter {
   /** 重启恢复：持久化为进行中的回合是否仍存在（pi 回合可续跑 → alive；codex 随进程丢失 → lost）。 */
   recoverTurn(threadKey: ThreadKey, turnId: string): Promise<"alive" | "lost">;
   /**
-   * 宿主已不再跟踪这个回合（被唤醒回合取代）：仍在运行的后端工作不能再以该回合的身份行事——
-   * codex 中止 exec（aborted）；pi 把该 run 降为唤醒身份、继续运行（detached）。之后的结束事件宿主按过期忽略。
+   * 宿主已不再跟踪这个回合（被唤醒回合取代）：仍在运行的后端工作不能再以该回合的身份行事。返回宿主应记下的该回合结果：
+   * - 回合已在后端结束（结束事件还排在宿主队列里）→ 后端回报的真实结果（如 failed）；
+   * - codex exec 仍在跑 → 中止，lost；
+   * - pi run 降为唤醒身份、继续运行 → completed。
+   * 之后到达的结束事件宿主按过期忽略。
    */
-  abandon?(threadKey: ThreadKey, turnId: string): Promise<AbandonResult>;
+  abandon?(threadKey: ThreadKey, turnId: string): Promise<TurnOutcome>;
+  /** 后端在该会话是否仍有工作（run 未结束、pi 子 agent 在跑、被放弃的 exec 未退出）；后端切换须等它为 false。 */
+  busy?(threadKey: ThreadKey): Promise<boolean>;
 }
 
 /**

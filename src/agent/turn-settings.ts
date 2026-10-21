@@ -1,7 +1,7 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { resolveAutoEffort, type EffortMessage, type EffortRouterDeps } from "./effort-router.js";
 import { backendNameFor, type BackendSelector } from "./backends/select.js";
-import type { TicketSettings } from "./backends/types.js";
+import type { BackendName, TicketSettings } from "./backends/types.js";
 import { isReasoningEffort } from "./codex/runner.js";
 import type { RuntimeSettings } from "./settings.js";
 
@@ -17,16 +17,17 @@ export interface TurnSettingsDeps {
 /**
  * 每轮开始时冻结后端、模型与档位（设计附录 A 第 10 项：推理强度路由按本轮输入计算）。
  * 档位为 auto 时按本轮输入文本路由；定时与唤醒回合同样适用。
+ * backend：指定本轮后端（会话仍由旧后端服务、切换推迟时），缺省按设置与覆盖表选择。
  */
 export function createTurnSettings(deps: TurnSettingsDeps) {
-  return async (scope: string, msg?: EffortMessage): Promise<TicketSettings> => {
+  return async (scope: string, msg?: EffortMessage, forced?: BackendName): Promise<TicketSettings> => {
     // 必须在第一个 await 之前一次采样，排队期间的设置变更不影响本轮。
     const current = deps.currentSettings?.();
     const configured = typeof deps.codexReasoningEffort === "function" ? deps.codexReasoningEffort() : deps.codexReasoningEffort;
     const codexFallback = isReasoningEffort(configured) ? configured : "high";
     const piFallback = deps.piThinkingLevel ?? "low";
     const effort = current?.codexReasoningEffort ?? codexFallback;
-    const backend = current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : deps.backends?.select(scope).name ?? "codex";
+    const backend = forced ?? (current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : deps.backends?.select(scope).name ?? "codex");
     const snapshot: TicketSettings = { backend, codexReasoningEffort: isReasoningEffort(effort) ? effort : codexFallback,
       ...(current ? { codexModel: current.codexModel, piModel: current.piModel,
         piThinkingLevel: current.piThinkingLevel === "auto" ? piFallback : current.piThinkingLevel } : {}), effortSource: "fixed" };

@@ -26,7 +26,7 @@ import { ingestImageEvents } from "../../media/gen/events.js";
 import { observeImages } from "../../media/gen/observed.js";
 import { log } from "../../shared/log.js";
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
-import type { AbandonResult, HostCallbacks, InputRef, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
+import type { HostCallbacks, InputRef, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome, TurnStatus } from "../host/types.js";
 import type { PiTurns } from "./pi.js";
 import type { SendService } from "../send-service.js";
 import { IMAGE_SUCCESS_REPLY } from "../replies.js";
@@ -49,6 +49,10 @@ export class CodexBackend implements ThreadAdapter {
   readonly name = "codex" as const;
   private host?: HostCallbacks;
   private readonly running = new Map<string, { turnId: string; control: AbortController; done: Promise<void> }>();
+  /** 所有未退出的 exec（回合 id → 会话键），含被放弃、已不在 running 里的旧 exec */
+  private readonly execs = new Map<string, string>();
+  /** 最近结束的回合结果：宿主放弃回合时结束事件可能还排在宿主队列里，据此给出真实结果 */
+  private readonly ended = new Map<string, TurnOutcome>();
   constructor(private readonly opts: CodexBackendOptions) {
     const initial = typeof opts.reasoningEffort === "function" ? opts.reasoningEffort() : opts.reasoningEffort;
     if (initial && !isReasoningEffort(initial)) {
@@ -74,9 +78,13 @@ export class CodexBackend implements ThreadAdapter {
       .then(result => {
         // 被放弃的旧 exec 可能晚于下一轮结束：只移除自己
         if (this.running.get(threadKey)?.turnId === turnId) this.running.delete(threadKey);
+        this.execs.delete(turnId);
+        this.ended.set(turnId, result);
+        if (this.ended.size > 200) this.ended.delete(this.ended.keys().next().value!);
         this.host?.onTurnCompleted(threadKey, turnId, result);
       });
     this.running.set(threadKey, { turnId, control, done });
+    this.execs.set(turnId, threadKey);
     trace.event("turn:" + turnId, "dispatched", { detail: { backend: "codex", thread_key: threadKey, kind: turn.kind, inputs: inputs.map(i => i.inboundKey) } });
     return { turnId };
   }
@@ -88,12 +96,22 @@ export class CodexBackend implements ThreadAdapter {
     this.running.get(threadKey)?.control.abort(new Error("回合已中止"));
   }
 
-  /** 宿主放弃的回合（被唤醒回合取代）：中止仍在运行的 exec（连同其召回 / 发送租约），不能留到下一轮以新身份调用工具。 */
-  async abandon(threadKey: ThreadKey, turnId: string): Promise<AbandonResult> {
+  /**
+   * 宿主放弃的回合（被唤醒回合取代）：已结束的回合给出真实结果（结束事件可能还排在宿主队列里）；
+   * 仍在运行的 exec 中止（连同其召回 / 发送租约，不能留到下一轮以新身份调用工具），按 lost 结束。
+   */
+  async abandon(threadKey: ThreadKey, turnId: string): Promise<TurnOutcome> {
+    const ended = this.ended.get(turnId);
+    if (ended) return ended;
     const run = this.running.get(threadKey);
-    if (run?.turnId !== turnId) return "detached";
+    if (run?.turnId !== turnId) return { status: "lost", error: "codex 回合已不在运行" };
     run.control.abort(new Error("回合已被取代"));
-    return "aborted";
+    return { status: "lost", error: "回合已被取代" };
+  }
+
+  /** 该会话仍有未退出的 exec（含被放弃的）：后端切换须等它退出。 */
+  async busy(threadKey: ThreadKey): Promise<boolean> {
+    return [...this.execs.values()].includes(threadKey);
   }
 
   /** exec 随进程退出丢失（§5.4）。 */

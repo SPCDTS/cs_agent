@@ -21,6 +21,8 @@ export type ThreadHostState = {
   mentioned: boolean;
   /** 开轮时写入；回合中的活动只在内存刷新，不逐条落盘 */
   lastActivityAt?: number;
+  /** 本会话最近一个回合（含唤醒回合）的 id，空闲后保留：路由据此判定会话当前的后端（一个会话同一时间只由一个后端服务） */
+  lastTurnId?: string;
 };
 
 export const ThreadHostDoc = defineDocFamily<ThreadHostState, string>({

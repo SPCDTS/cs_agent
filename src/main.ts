@@ -305,7 +305,7 @@ async function main(): Promise<void> {
   });
   const codexBackend = new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT,
     turns: inbox, owners: cfg.owners, sendService, imageBackend, imageTimeoutCapMs: cfg.COMFY_TIMEOUT_SEC * 1000 });
-  const router = new BackendRouter({ backends: { pi, codex: codexBackend }, settings: turnSettings, turns: inbox });
+  const router = new BackendRouter({ backends: { pi, codex: codexBackend }, settings: turnSettings, turns: inbox, owners: cfg.owners });
   const monitor = new TurnMonitor({ inbox, sendService, scheduled, getHost: () => host });
   // 会话宿主（§4.2）：状态存于派发 harness 的 cs.thread-host 文档；并发上限只限进行中的回合数。
   host = new ThreadHost({ store: harness, adapter: router, concurrency: cfg.AGENT_CONCURRENCY, owners: cfg.owners, events: monitor.events,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { TranscriptContext } from "@earendil-works/pi-ai";
 import { TURN_NOTICES } from "../../src/agent/replies.js";
 import type { ReplyStore } from "../../src/qq/reply-store.js";
@@ -329,5 +329,51 @@ describe("pi 开轮请求未确认就重启（重放同一批输入）", () => {
     expect(again).toEqual({ ...first, accepted: [a!.inboundKey] });
     await new Promise(resolve => setTimeout(resolve, 300));
     expect(users.some(t => t.includes("第二条"))).toBe(false);
+  });
+
+  it("首条所在 run 已结束且其余输入也已在那次 run 里处理过：一并算本轮收下，不放回队列（避免换后端重跑）", async () => {
+    const seen: string[] = [];
+    const r = await residentRig({ brain: (ctx) => { seen.push(lastUser(ctx)); return reply("结束"); } });
+    const [a, b] = admitPair(r);
+    const first = await r.pi.startTurn("group:7", [a!, b!], { kind: "user", sender: "5" });
+    await vi_wait(() => seen.some(t => t.includes("第二条")));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const calls = seen.length;
+    const again = await r.pi.startTurn("group:7", [a!, b!], { kind: "user", sender: "5" });
+    expect(again).toEqual(first);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(seen).toHaveLength(calls);
+  });
+});
+
+describe("pi 会话仍有后台工作（后端切换判定）", () => {
+  it("子 agent 在跑时 busy；汇报唤醒结束后不再 busy", async () => {
+    const child = gate();
+    const r = await residentRig({ brain: (ctx) => {
+      if (isChild(ctx)) return (async () => { await child.wait(); return reply("晴"); })();
+      if (ctx.messages.at(-1)!.role === "toolResult") return reply("收尾");
+      if (lastUser(ctx).startsWith("[子 agent 完成]")) return reply("知道了");
+      return call(["subagent", { action: "spawn", name: "w", task: "查天气" }]);
+    } });
+    expect(await r.pi.busy("group:7")).toBe(false);
+    await r.say("5", "派个子 agent");
+    await vi_wait(() => child.entered === 1, 15_000);
+    await vi_wait(() => !r.host.thread("group:7")?.busy);
+    expect(await r.pi.busy("group:7")).toBe(true);
+    child.open();
+    await vi.waitFor(async () => expect(await r.pi.busy("group:7")).toBe(false), { timeout: 15_000, interval: 20 });
+    await r.idle(15_000);
+  });
+});
+
+describe("一个会话同一时间只由一个后端服务（§4.3）", () => {
+  it("owner 两个账号的私聊覆盖为不同后端：owner 线程只按首个 owner 账号的后端", async () => {
+    const r = await residentRig({ owners: ["1", "9"], backend: scope => scope === "private:9" ? "codex" : "pi",
+      brain: (ctx) => ctx.messages.at(-1)!.role === "toolResult" ? reply("结束") : call(["send_message", { text: "收到" }]) });
+    const key = await r.say("9", "第二个号的消息", null);
+    await r.idle();
+    expect(r.codexAsk).not.toHaveBeenCalled();
+    expect(r.bridge.inbox.getInbound(key)!.turn_id).toMatch(/^pi:/);
+    expect(r.texts()).toEqual(["收到"]);
   });
 });

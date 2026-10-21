@@ -1,7 +1,9 @@
 /**
  * 回合编排（设计 §4、§8）：
- * - BackendRouter：ThreadHost 的适配器入口，按本轮首条输入的会话选择后端（面板设置与覆盖表），开轮时冻结设置快照；
- *   插话、恢复按回合 id 前缀（pi: / codex:）交给对应后端；后端不可用时开轮重试，超过 2 分钟才算投递失败。
+ * - BackendRouter：ThreadHost 的适配器入口，按会话键选择后端（面板设置与覆盖表；owner 线程取首个 owner 账号私聊的覆盖），
+ *   不按单条输入的 scope——一个会话同一时间只由一个后端服务（§4.3）。会话的上一回合属于另一个后端且那个后端在该会话
+ *   仍有工作（pi 子 agent 在跑、被放弃的 exec 未退出）时，本轮仍用旧后端，切换在它结束后生效。开轮时冻结设置快照；
+ *   插话、恢复、放弃按回合 id 前缀（pi: / codex:）交给对应后端；后端不可用时开轮重试，超过 2 分钟才算投递失败。
  * - TurnMonitor：宿主事件的外层处理——Inbox 状态、观测、定时运行统计、出错提示（同一会话 10 分钟内最多一条）、
  *   回合结束后补传附件；看门狗：回合连续 30 分钟没有任何事件即中止（随后按回合失败提示）。
  */
@@ -11,7 +13,8 @@ import { trace } from "../shared/trace.js";
 import type { BackendName, TicketSettings } from "./backends/types.js";
 import type { ThreadHost } from "./host/thread-host.js";
 import { STALL_MS } from "./host/thread-host.js";
-import type { AbandonResult, InputRef, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey, TurnContext, TurnEnded } from "./host/types.js";
+import type { OwnerIds } from "../shared/owners.js";
+import type { InputRef, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey, TurnContext, TurnEnded, TurnOutcome } from "./host/types.js";
 import { TURN_NOTICES } from "./replies.js";
 import type { SendService } from "./send-service.js";
 import type { TurnSettings } from "./turn-settings.js";
@@ -30,6 +33,8 @@ export interface BackendRouterOptions {
   backends: Partial<Record<BackendName, BackendAdapter>>;
   settings: TurnSettings;
   turns: { records(inputs: readonly Pick<InputRef, "inboundKey">[]): InboundRecord[] };
+  /** owner 线程按首个 owner 账号的私聊 scope 选择后端 */
+  owners?: OwnerIds | (() => OwnerIds);
   /** 开轮失败的重试总时长，默认 2 分钟 */
   retryMs?: number;
   retryDelayMs?: number;
@@ -39,24 +44,43 @@ export interface BackendRouterOptions {
 export class BackendRouter implements ThreadAdapter {
   constructor(private readonly opts: BackendRouterOptions) {}
 
+  private nameOf(turnId: string): BackendName {
+    return turnId.slice(0, turnId.indexOf(":")) as BackendName;
+  }
+
   private byTurn(turnId: string): BackendAdapter | undefined {
-    const name = turnId.slice(0, turnId.indexOf(":")) as BackendName;
-    return this.opts.backends[name];
+    return this.opts.backends[this.nameOf(turnId)];
+  }
+
+  /** 会话键 → 选择后端用的 scope：群与私聊即本身；owner 线程为首个 owner 账号的私聊（没有 owner 时退回本轮输入的 scope）。 */
+  private threadScope(threadKey: ThreadKey, fallback: string): string {
+    if (threadKey !== "owner") return threadKey;
+    const owners = typeof this.opts.owners === "function" ? this.opts.owners() : this.opts.owners;
+    const first = typeof owners === "string" ? owners : owners?.[0];
+    return first ? `private:${first}` : fallback;
   }
 
   async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext): Promise<StartTurnResult> {
     const now = this.opts.now ?? Date.now, deadline = now() + (this.opts.retryMs ?? 120_000);
-    const { admit, ...turn } = ctx;
+    const { admit, previousTurnId, ...turn } = ctx;
     for (let attempt = 1; ; attempt++) {
       try {
         // 定时输入：宿主在首次开轮前已复核；重试窗口可长达数分钟，每次重试前按当前授权再复核
         if (attempt > 1 && admit && !await admit()) return { denied: true };
         const records = this.opts.turns.records(inputs);
         const head = records[0]!;
-        const settings = await this.opts.settings(head.scope, {
+        const scope = this.threadScope(threadKey, head.scope);
+        const msg = {
           ticket: head.key, text: records.map(r => r.text).join("\n"),
           hasImages: records.some(r => r.images.length > 0), hasQuote: records.some(r => !!r.reply_to),
-        });
+        };
+        let settings = await this.opts.settings(scope, msg);
+        // 后端切换只在旧后端于该会话没有工作时生效；否则本轮仍用旧后端
+        const previous = previousTurnId ? this.nameOf(previousTurnId) : undefined;
+        if (previous && previous !== settings.backend && await this.opts.backends[previous]?.busy?.(threadKey)) {
+          log.info("backend switch deferred; previous backend still busy", { thread: threadKey, from: previous, to: settings.backend });
+          settings = await this.opts.settings(scope, msg, previous);
+        }
         const backend = this.opts.backends[settings.backend];
         if (!backend) throw new Error(`agent backend "${settings.backend}" is not registered`);
         trace.event("in:" + head.key, "admitted", { scope: head.scope, detail: { settings, thread_key: threadKey } });
@@ -81,8 +105,8 @@ export class BackendRouter implements ThreadAdapter {
     return this.byTurn(turnId)?.recoverTurn(threadKey, turnId) ?? "lost";
   }
 
-  async abandon(threadKey: ThreadKey, turnId: string): Promise<AbandonResult> {
-    return await this.byTurn(turnId)?.abandon?.(threadKey, turnId) ?? "detached";
+  async abandon(threadKey: ThreadKey, turnId: string): Promise<TurnOutcome> {
+    return await this.byTurn(turnId)?.abandon?.(threadKey, turnId) ?? { status: "completed" };
   }
 }
 

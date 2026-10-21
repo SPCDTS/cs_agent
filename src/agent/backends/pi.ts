@@ -15,13 +15,13 @@ import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
 import { createPiScheduleExtensions } from "../pi-tools/schedule.js";
 import { createPiImExtensions } from "../pi-tools/im.js";
 import { PiChildDoc, traceKey, type PiCallBinding } from "../pi-tools/request.js";
-import { createSubagentExtension, isSubagentReportRequest, type SubagentOptions } from "../pi-tools/subagent.js";
+import { createSubagentExtension, isSubagentReportRequest, SubagentDoc, type SubagentOptions } from "../pi-tools/subagent.js";
 import { PiPromptLoader } from "../pi-tools/prompt.js";
 import { isScope } from "../../context/access.js";
 import { log } from "../../shared/log.js";
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import type { InboundRecord, TurnBinding } from "../../channel/types.js";
-import type { AbandonResult, HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
+import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome, TurnStatus } from "../host/types.js";
 import type { RenderedInputs } from "../inbox.js";
 import type { TicketSettings } from "./types.js";
 
@@ -103,6 +103,8 @@ export class PiBackend implements ThreadAdapter {
   /** 会话 id → 会话键（映射文档的内存反查） */
   private readonly keys = new Map<number, string>();
   private readonly contextObservers = new Map<string, PiContextObserver>();
+  /** 最近结束的回合结果（宿主放弃回合时结束事件可能还排在宿主队列里） */
+  private readonly ended = new Map<string, TurnOutcome>();
   readonly sessionSource: PiSessionSource;
   private constructor(readonly harness: Harness, private readonly opts: PiBackendOptions) {
     this.sessionSource = {
@@ -460,9 +462,13 @@ export class PiBackend implements ThreadAdapter {
       // 首条提交已结束（重放取回的是已完成的提交）时并入会自己开一次 run（唤醒身份），改为只回报收下的首条，其余由宿主放回队列。
       const settled = (await (await this.harness.submission(first, context))?.status(context))?.status;
       const accepted = [records[0]!.key];
-      if (settled !== undefined && settled !== "done" && settled !== "unanswered") {
-        for (const record of records.slice(1)) {
+      const open = settled !== undefined && settled !== "done" && settled !== "unanswered";
+      for (const record of records.slice(1)) {
+        if (open) {
           await conv.submit({ type: "input", requestId: record.key, content: await this.content(record), whenBusy: "steer" }, context);
+          accepted.push(record.key);
+        } else if (await this.harness.commit(tx => tx.submissionByRequest(conv.id, record.key), context)) {
+          // 重启前已提交（已随那次 run 处理）：算本轮收下，不能放回队列——否则可能按另一个后端再执行一次
           accepted.push(record.key);
         }
       }
@@ -504,12 +510,24 @@ export class PiBackend implements ThreadAdapter {
   }
 
   /** 宿主放弃的回合（被唤醒回合取代）：run 继续，但工具身份降为唤醒；结束仍照常回报（宿主按过期忽略）。 */
-  async abandon(threadKey: ThreadKey, turnId: string): Promise<AbandonResult> {
-    await this.serial(threadKey, async () => {
+  async abandon(threadKey: ThreadKey, turnId: string): Promise<TurnOutcome> {
+    return this.serial(threadKey, async () => {
+      const ended = this.ended.get(turnId);
+      if (ended) return ended;
       const active = this.threads.get(threadKey)?.active;
       if (active?.turnId === turnId) active.owner = "backend";
+      return { status: "completed" as const };
     });
-    return "detached";
+  }
+
+  /** 会话仍有工作：宿主未确认的 run、未结束的 run、在跑（有未结束汇报）的子 agent。后端切换须等它为 false。 */
+  async busy(threadKey: ThreadKey): Promise<boolean> {
+    if (this.threads.get(threadKey)?.active) return true;
+    const id = (await this.readThreadIds())[threadKey];
+    if (id === undefined) return false;
+    if ((await this.harness.snapshot(LiveDoc, id as ConversationId, context))?.run) return true;
+    const doc = await this.harness.snapshot(SubagentDoc, id as ConversationId, context);
+    return Object.values(doc?.children ?? {}).some(child => !child.stopped && child.pending.length > 0);
   }
 
   async recoverTurn(threadKey: ThreadKey, turnId: string): Promise<"alive" | "lost"> {
@@ -546,7 +564,10 @@ export class PiBackend implements ThreadAdapter {
         if (state?.active?.turnId !== active.turnId) return;
         delete state.active;
         await this.recordUsage(threadKey, active.turnId, answer).catch(err => log.warn("pi context usage update failed", { thread: threadKey, error: err }));
-        this.host?.onTurnCompleted(threadKey as ThreadKey, active.turnId, { status, ...(error ? { error } : {}) });
+        const outcome: TurnOutcome = { status, ...(error ? { error } : {}) };
+        this.ended.set(active.turnId, outcome);
+        if (this.ended.size > 200) this.ended.delete(this.ended.keys().next().value!);
+        this.host?.onTurnCompleted(threadKey as ThreadKey, active.turnId, outcome);
         const live = await this.harness.snapshot(LiveDoc, state.conv, context);
         if (live?.run && live.run.inputs[0] !== active.first) await this.startWake(threadKey, state, live.run.inputs[0]!);
       });

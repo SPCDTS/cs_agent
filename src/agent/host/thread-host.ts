@@ -19,7 +19,7 @@ import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import { HostInputDoc, ThreadHostDoc, ThreadHostIndexDoc, type ThreadHostState } from "./docs.js";
 import type {
   DeliverResult, HostCallbacks, HostInput, InputRef, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey,
-  TurnEnded, TurnIdentity, TurnStatus,
+  TurnEnded, TurnIdentity, TurnOutcome, TurnStatus,
 } from "./types.js";
 
 /** 看门狗默认阈值：回合连续 30 分钟没有任何事件视为卡死（§8.2） */
@@ -43,10 +43,11 @@ export interface ThreadHostOptions {
 }
 
 /** 文档里可缺省的字段：写回时不在新状态里的要删除，不能残留上一轮的值。 */
-const OPTIONAL = ["turnId", "turnKind", "turnSender", "lastActivityAt"] as const;
+const OPTIONAL = ["turnId", "turnKind", "turnSender", "lastActivityAt", "lastTurnId"] as const;
 
 function idleState(s: ThreadHostState, pending = s.pending): ThreadHostState {
-  return { threadKey: s.threadKey, busy: false, turnInputs: [], pending, mentioned: false };
+  return { threadKey: s.threadKey, busy: false, turnInputs: [], pending, mentioned: false,
+    ...(s.lastTurnId ? { lastTurnId: s.lastTurnId } : {}) };
 }
 
 function bySeq(refs: readonly InputRef[]): InputRef[] {
@@ -209,7 +210,8 @@ export class ThreadHost implements HostCallbacks {
           // 定时输入开轮前按创建者当前授权复核（排队期间可能已撤销或过期）；适配器内部重试前再经 ctx.admit 复核
           const admit = head.kind === "scheduled" && this.opts.admit ? () => this.opts.admit!(threadKey, head) : undefined;
           started = admit && !await admit() ? { denied: true }
-            : await this.opts.adapter.startTurn(threadKey, inputs, { kind: head.kind, sender: head.sender, ...(admit ? { admit } : {}) });
+            : await this.opts.adapter.startTurn(threadKey, inputs, { kind: head.kind, sender: head.sender,
+              ...(admit ? { admit } : {}), ...(s.lastTurnId ? { previousTurnId: s.lastTurnId } : {}) });
         } catch (error) {
           log.warn("thread host start turn failed", { thread: threadKey, inputs: [...keys], error });
           await this.finish(threadKey, begun, "failed", error instanceof Error ? error.message : String(error));
@@ -225,7 +227,8 @@ export class ThreadHost implements HostCallbacks {
           // 后端已有本宿主尚未确认的回合（唤醒）：按唤醒回合接管（身份为唤醒，不升级为本轮发送者），输入放回队列等它结束
           log.warn("thread host start yielded to backend turn", { thread: threadKey, turn: started.backendTurnId, inputs: [...keys] });
           const wake: ThreadHostState = {
-            ...cur, turnId: started.backendTurnId, turnKind: "wake", turnInputs: [], pending: bySeq([...inputs, ...cur.pending]),
+            ...cur, turnId: started.backendTurnId, lastTurnId: started.backendTurnId, turnKind: "wake", turnInputs: [],
+            pending: bySeq([...inputs, ...cur.pending]),
             mentioned: false, lastActivityAt: this.now(),
           };
           delete wake.turnSender;
@@ -237,7 +240,7 @@ export class ThreadHost implements HostCallbacks {
         const delivered = accepted ? inputs.filter(i => accepted.includes(i.inboundKey)) : inputs;
         const back = inputs.filter(i => !delivered.includes(i));
         if (back.length) log.warn("thread host start accepted part of the batch", { thread: threadKey, turn: turnId, requeued: back.map(i => i.inboundKey) });
-        await this.save(threadKey, { ...cur, turnId, turnInputs: delivered, pending: bySeq([...back, ...cur.pending]) },
+        await this.save(threadKey, { ...cur, turnId, lastTurnId: turnId, turnInputs: delivered, pending: bySeq([...back, ...cur.pending]) },
           tx => this.markInputs(tx, threadKey, delivered, "delivered"));
         this.emit("inputsDelivered", threadKey, turnId, delivered);
       });
@@ -270,24 +273,26 @@ export class ThreadHost implements HostCallbacks {
       if (s.busy && s.turnId === turnId) { this.touch(s); return; }
       if (initiatedBy === "host") return; // 不是本宿主当前的回合：过期事件
       if (s.busy) {
-        // 没收到上一轮的结束事件就开了唤醒回合（实际只发生在会话混用后端时：codex 回合进行中出现 pi 唤醒；
-        // pi 自己的唤醒 run 总在上一轮结束事件之后回报）。上一轮交给适配器放弃——其后端工作不能再以该回合的身份行事：
-        // 工作被中止（codex exec）→ 按 lost 结束，外层发中断提示（§8.1，照常限频），输入不自动重放（与重启丢失一致，避免重复副作用）；
-        // 工作继续（pi run 降为唤醒身份）→ 按 completed 结束。
+        // 没收到上一轮的结束事件就开了唤醒回合。会话按会话键固定一个后端（切换要等旧后端空闲）后不应再出现，
+        // 仍作防线：上一轮交给适配器放弃——其后端工作不能再以该回合的身份行事，并按适配器给出的真实结果结束：
+        // 已在后端结束（结束事件还排在本事件之后）→ 后端回报的结果（失败照常发出错提示）；
+        // 工作被中止（codex exec）→ lost，外层发中断提示（§8.1，照常限频），输入不自动重放（与重启丢失一致，避免重复副作用）；
+        // 工作继续（pi run 降为唤醒身份）→ completed。
         log.warn("thread host wake turn superseded active turn", { thread: threadKey, previous: s.turnId, turnId });
-        let status: TurnStatus = "completed";
+        let outcome: TurnOutcome = { status: "completed" };
         if (s.turnId && this.opts.adapter.abandon) {
           try {
-            if (await this.opts.adapter.abandon(threadKey, s.turnId) === "aborted") status = "lost";
+            outcome = await this.opts.adapter.abandon(threadKey, s.turnId);
           } catch (error) {
             log.warn("thread host abandon superseded turn failed", { thread: threadKey, turn: s.turnId, error });
+            outcome = { status: "lost", error: error instanceof Error ? error.message : String(error) };
           }
         }
-        await this.finish(threadKey, s, status, "superseded by backend turn");
+        await this.finish(threadKey, s, outcome.status, outcome.error ?? "superseded by backend turn");
       }
       const cur = this.threads.get(threadKey)!;
       const wake: ThreadHostState = {
-        ...cur, busy: true, turnId, turnKind: "wake", turnInputs: [], mentioned: false, lastActivityAt: this.now(),
+        ...cur, busy: true, turnId, lastTurnId: turnId, turnKind: "wake", turnInputs: [], mentioned: false, lastActivityAt: this.now(),
       };
       delete wake.turnSender;
       await this.save(threadKey, wake);

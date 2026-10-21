@@ -30,7 +30,9 @@ class FakeAdapter implements ThreadAdapter {
   busyWake?: string;
   abandoned: { threadKey: ThreadKey; turnId: string }[] = [];
   /** 放弃回合时后端的处理：aborted = 工作被中止 */
-  abandonAs: "aborted" | "detached" = "detached";
+  abandonAs: { status: "completed" | "failed" | "lost"; error?: string } = { status: "completed" };
+  /** 每次开轮时宿主给出的上一回合 id（会话当前后端） */
+  previous: (string | undefined)[] = [];
   /** 开轮只收下这些输入（其余应回到队列） */
   acceptOnly?: string[];
   /** 开轮时后端内部重试前复核被拒 */
@@ -50,7 +52,8 @@ class FakeAdapter implements ThreadAdapter {
     }
     const turnId = `t${++this.n}`;
     this.live.set(threadKey, turnId);
-    const { admit: _admit, ...plain } = turnCtx;
+    const { admit: _admit, previousTurnId, ...plain } = turnCtx;
+    this.previous.push(previousTurnId);
     const accepted = this.acceptOnly;
     this.acceptOnly = undefined;
     this.starts.push({ threadKey, keys: inputs.map(i => i.inboundKey).filter(k => !accepted || accepted.includes(k)), ctx: plain, turnId });
@@ -252,12 +255,38 @@ describe("ThreadHost 投递规则（§4.2）", () => {
 
   it("被取代回合的后端工作被中止（codex）：按 lost 结束（触发中断提示），输入不重放", async () => {
     const r = await rig();
-    r.adapter.abandonAs = "aborted";
+    r.adapter.abandonAs = { status: "lost" };
     await r.user(G, "a1", "A"); await r.settle();
     r.adapter.wake(G); await r.settle();
     expect(r.ended).toMatchObject([{ turnId: "t1", status: "lost", sender: "A", inputs: [{ inboundKey: "a1" }] }]);
     expect(await r.host.inputOutcome("a1")).toEqual({ status: "lost", turnId: "t1" });
     expect(r.host.thread(G)!.pending).toEqual([]);
+  });
+
+  it("被取代回合在后端已以失败结束（结束事件排在唤醒事件之后）：按后端的真实结果 failed 结束", async () => {
+    const r = await rig();
+    r.adapter.abandonAs = { status: "failed", error: "exec 失败" };
+    await r.user(G, "a1", "A"); await r.settle();
+    r.adapter.wake(G); await r.settle();
+    expect(r.ended).toMatchObject([{ turnId: "t1", status: "failed", error: "exec 失败", inputs: [{ inboundKey: "a1" }] }]);
+    // 随后到达的结束事件按过期忽略
+    r.host.onTurnCompleted(G, "t1", { status: "failed" }); await r.settle();
+    expect(r.ended).toHaveLength(1);
+  });
+
+  it("会话的上一回合 id（含唤醒回合）随开轮交给适配器，空闲与重启后保留（路由据此保持会话当前后端）", async () => {
+    const r = await rig();
+    await r.user(G, "a1", "A"); await r.settle();
+    r.adapter.complete(G); await r.settle();
+    const wake = r.adapter.wake(G); await r.settle();
+    r.adapter.complete(G); await r.settle();
+    await r.user(G, "b1", "A"); await r.settle();
+    expect(r.adapter.previous).toEqual([undefined, wake]);
+    const b1Turn = r.host.thread(G)!.turnId!;
+    r.adapter.complete(G); await r.settle();
+    await r.restart();
+    await r.user(G, "c1", "A"); await r.settle();
+    expect(r.adapter.previous).toEqual([b1Turn]);
   });
 
   it("开轮时后端只收下部分输入：只有收下的标记 delivered，其余放回队列，回合结束后再开轮", async () => {

@@ -105,3 +105,28 @@ it("codex 回合被唤醒回合取代：旧 exec 被中止，其租约不能以�
   expect(r.texts("7")).toEqual([TURN_NOTICES.lost, "回复"]);
   expect(calls().filter(c => c.phase === "send")).toHaveLength(1);
 });
+
+it("codex 回合已失败、结束事件排在唤醒事件之后：被取代时按后端的真实结果 failed 结束并发出错提示", async () => {
+  let fail!: () => void;
+  const failed = new Promise<void>(resolve => { fail = resolve; });
+  const r = await residentRig({ backend: "codex", codexAsk: async () => { await failed; throw new Error("exec 失败"); } });
+  // 结束事件暂扣：模拟它在宿主队列里排在唤醒事件之后
+  const deferred: (() => void)[] = [];
+  const onTurnCompleted = r.host.onTurnCompleted.bind(r.host);
+  r.host.onTurnCompleted = (threadKey, turnId, result) => {
+    if (turnId.startsWith("codex:")) deferred.push(() => onTurnCompleted(threadKey, turnId, result));
+    else onTurnCompleted(threadKey, turnId, result);
+  };
+  const key = await r.say("5", "会失败");
+  await vi.waitFor(() => expect(r.host.thread("group:7")?.turnId).toMatch(/^codex:/), { timeout: 5000 });
+  const turnId = r.host.thread("group:7")!.turnId!;
+  fail();
+  await vi.waitFor(() => expect(deferred).toHaveLength(1), { timeout: 5000 });
+  r.host.onTurnStarted("group:7", "pi:999:999", "backend");
+  await r.host.idle();
+  for (const fire of deferred.splice(0)) fire();
+  r.host.onTurnCompleted("group:7", "pi:999:999", { status: "completed" });
+  await r.idle(20_000);
+  expect(await r.host.inputOutcome(key)).toEqual({ status: "failed", turnId });
+  expect(r.texts("7")).toEqual([TURN_NOTICES.failed]);
+});

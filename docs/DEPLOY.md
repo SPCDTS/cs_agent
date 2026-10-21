@@ -64,7 +64,7 @@ Copy-Item .env.example .env
 | `QQ_BOT_ACCOUNT` | 空 | 可选 QQ 号，传给 NapCat `ACCOUNT` 快速登录；首次仍需扫码 |
 | `IMAGE_PREFIXES` | `奶龙:,奶龙：` | 生图前缀，逗号分隔，逐字匹配（大小写与全/半角按原样），较长的优先；留空用默认 |
 | `AGENT_BACKEND` | `codex` | 执行 agent 后端：`codex`（容器内 codex 固定线程）或 `pi`（进程内 pi-durable 长期会话，工具可联网检索、查历史、生图） |
-| `AGENT_BACKEND_OVERRIDES` | 空 | 按会话覆盖后端：`group:200000001=pi,private:10000001=codex`。格式错误时启动失败。切换只影响之后的消息，两个后端的记忆互相独立 |
+| `AGENT_BACKEND_OVERRIDES` | 空 | 按会话覆盖后端：`group:200000001=pi,private:10000001=codex`。格式错误时启动失败。后端按会话（线程）选择：owner 的所有账号共用 owner 线程，按**首个 owner 账号**（`QQ_OWNER` 列表第一个）的 `private:<QQ号>` 覆盖选择，其他 owner 账号的覆盖项对 owner 线程无效。切换（含面板修改）在会话空闲且旧后端在该会话没有后台工作（pi 子 agent 在跑、旧 exec 未退出）后的下一轮生效，两个后端的记忆互相独立 |
 | `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` | `deepseek` / `deepseek-flash` | 执行模型：用于 pi 后端与聊天记录日/周摘要（DeepSeek OpenAI 兼容接口 `https://api.deepseek.com`）。也可切换到 `openai-codex`（复用 `auth.json` 的 ChatGPT OAuth，如 `gpt-6-luna`）、`openai`、`anthropic` 等，后两者需设置对应的 `*_API_KEY` |
 | `DEEPSEEK_API_KEY` | 空 | DeepSeek API key；写作 `DEEPSEEK_APIKEY` 也可（启动时自动映射）。provider 为 `deepseek` 时缺少密钥，agent 启动即退出 |
 | `AGENT_THINKING_LEVEL` | `low` | 意图模型思考档位。deepseek-flash 支持 off/low/high/max，其他值就近调整（如 medium → high）并记 warn 日志 |

@@ -155,8 +155,9 @@ export async function residentRig(options: ResidentOptions = {}) {
       ...(options.reserveTokens !== undefined ? { reserveTokens: options.reserveTokens } : {}),
       ...(options.backgroundTokens !== undefined ? { backgroundTokens: options.backgroundTokens } : {}) });
     codex = new CodexBackend({ runner: { ask: codexAsk }, imagesDir: path.join(dir, "images"), turns: inbox, owners, sendService, imageBackend });
-    const settings = async (scope: string): Promise<TicketSettings> => ({ backend: backendOf(scope), codexReasoningEffort: "high", ...options.settings?.(scope) });
-    const router = new BackendRouter({ backends: { pi, codex }, settings, turns: inbox, retryMs: 50, retryDelayMs: 10 });
+    const settings = async (scope: string, _msg?: unknown, forced?: BackendName): Promise<TicketSettings> =>
+      ({ backend: forced ?? backendOf(scope), codexReasoningEffort: "high", ...options.settings?.(scope) });
+    const router = new BackendRouter({ backends: { pi, codex }, settings, turns: inbox, owners, retryMs: 50, retryDelayMs: 10 });
     monitor = new TurnMonitor({ inbox, sendService, getHost: () => host, now: options.now,
       noticeIntervalMs: options.noticeIntervalMs, stallMs: options.stallMs });
     host = new ThreadHost({ store: harness, adapter: router, concurrency: options.concurrency ?? 4, owners, events: monitor.events, now: options.now });
