@@ -193,7 +193,7 @@ it("真实 schedule 授权允许非 owner 创建并发送，身份与读取范�
   await r.recover();
   const result = await r.fire(s, START + 1000);
   expect(result).toMatchObject({ status: "completed", failures: 0, runs: [{ status: "sent" }] });
-  expect(r.adapter.turns[0]!.ctx).toEqual({ kind: "scheduled", sender: "9" });
+  expect(r.adapter.turns[0]!.ctx).toMatchObject({ kind: "scheduled", sender: "9", admit: expect.any(Function) });
   expect(r.store.listOutboxByTurn(r.adapter.turns[0]!.turnId)[0]).toMatchObject({ target_id: "7", mention_user_id: null });
   await expect(r.service.create("qq:9", input({ conversation: "group:8" }))).rejects.toMatchObject({ status: 403 });
   await expect(r.service.create("qq:9", input({ conversation: "owner" }))).rejects.toMatchObject({ status: 403 });

@@ -26,7 +26,7 @@ import { ingestImageEvents } from "../../media/gen/events.js";
 import { observeImages } from "../../media/gen/observed.js";
 import { log } from "../../shared/log.js";
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
-import type { HostCallbacks, InputRef, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
+import type { AbandonResult, HostCallbacks, InputRef, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
 import type { PiTurns } from "./pi.js";
 import type { SendService } from "../send-service.js";
 import { IMAGE_SUCCESS_REPLY } from "../replies.js";
@@ -89,9 +89,11 @@ export class CodexBackend implements ThreadAdapter {
   }
 
   /** 宿主放弃的回合（被唤醒回合取代）：中止仍在运行的 exec（连同其召回 / 发送租约），不能留到下一轮以新身份调用工具。 */
-  async abandon(threadKey: ThreadKey, turnId: string): Promise<void> {
+  async abandon(threadKey: ThreadKey, turnId: string): Promise<AbandonResult> {
     const run = this.running.get(threadKey);
-    if (run?.turnId === turnId) run.control.abort(new Error("回合已被取代"));
+    if (run?.turnId !== turnId) return "detached";
+    run.control.abort(new Error("回合已被取代"));
+    return "aborted";
   }
 
   /** exec 随进程退出丢失（§5.4）。 */

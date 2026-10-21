@@ -204,17 +204,18 @@ export class ThreadHost implements HostCallbacks {
         await this.save(threadKey, begun);
         used = true;
         this.holding.add(threadKey);
-        let started: StartTurnResult | "denied";
+        let started: StartTurnResult;
         try {
-          // 定时输入开轮前按创建者当前授权复核（排队期间可能已撤销或过期）
-          started = head.kind === "scheduled" && this.opts.admit && !await this.opts.admit(threadKey, head) ? "denied"
-            : await this.opts.adapter.startTurn(threadKey, inputs, { kind: head.kind, sender: head.sender });
+          // 定时输入开轮前按创建者当前授权复核（排队期间可能已撤销或过期）；适配器内部重试前再经 ctx.admit 复核
+          const admit = head.kind === "scheduled" && this.opts.admit ? () => this.opts.admit!(threadKey, head) : undefined;
+          started = admit && !await admit() ? { denied: true }
+            : await this.opts.adapter.startTurn(threadKey, inputs, { kind: head.kind, sender: head.sender, ...(admit ? { admit } : {}) });
         } catch (error) {
           log.warn("thread host start turn failed", { thread: threadKey, inputs: [...keys], error });
           await this.finish(threadKey, begun, "failed", error instanceof Error ? error.message : String(error));
           return;
         }
-        if (started === "denied") {
+        if ("denied" in started) {
           log.warn("thread host scheduled input denied at turn start", { thread: threadKey, input: head.inboundKey });
           await this.finish(threadKey, begun, "failed", "定时任务创建者已无权限");
           return;
@@ -231,9 +232,14 @@ export class ThreadHost implements HostCallbacks {
           await this.save(threadKey, wake);
           return;
         }
-        const turnId = started.turnId;
-        await this.save(threadKey, { ...cur, turnId }, tx => this.markInputs(tx, threadKey, inputs, "delivered"));
-        this.emit("inputsDelivered", threadKey, turnId, inputs);
+        const turnId = started.turnId, accepted = started.accepted;
+        // 只有后端真正收下的输入算送达；其余放回队列，本轮结束后再开轮（不能随本轮一起被标记 done）
+        const delivered = accepted ? inputs.filter(i => accepted.includes(i.inboundKey)) : inputs;
+        const back = inputs.filter(i => !delivered.includes(i));
+        if (back.length) log.warn("thread host start accepted part of the batch", { thread: threadKey, turn: turnId, requeued: back.map(i => i.inboundKey) });
+        await this.save(threadKey, { ...cur, turnId, turnInputs: delivered, pending: bySeq([...back, ...cur.pending]) },
+          tx => this.markInputs(tx, threadKey, delivered, "delivered"));
+        this.emit("inputsDelivered", threadKey, turnId, delivered);
       });
     } finally {
       this.starting.delete(threadKey);
@@ -264,14 +270,20 @@ export class ThreadHost implements HostCallbacks {
       if (s.busy && s.turnId === turnId) { this.touch(s); return; }
       if (initiatedBy === "host") return; // 不是本宿主当前的回合：过期事件
       if (s.busy) {
-        // 没收到上一轮的结束事件就开了唤醒回合：上一轮按已结束处理，身份收窄为唤醒（只更严格）
+        // 没收到上一轮的结束事件就开了唤醒回合（实际只发生在会话混用后端时：codex 回合进行中出现 pi 唤醒；
+        // pi 自己的唤醒 run 总在上一轮结束事件之后回报）。上一轮交给适配器放弃——其后端工作不能再以该回合的身份行事：
+        // 工作被中止（codex exec）→ 按 lost 结束，外层发中断提示（§8.1，照常限频），输入不自动重放（与重启丢失一致，避免重复副作用）；
+        // 工作继续（pi run 降为唤醒身份）→ 按 completed 结束。
         log.warn("thread host wake turn superseded active turn", { thread: threadKey, previous: s.turnId, turnId });
-        await this.finish(threadKey, s, "completed", "superseded by backend turn");
-        // 上一轮的后端工作可能仍在运行（codex exec）：不能再以该回合的身份行事
-        if (s.turnId) {
-          await this.opts.adapter.abandon?.(threadKey, s.turnId)
-            .catch(error => log.warn("thread host abandon superseded turn failed", { thread: threadKey, turn: s.turnId, error }));
+        let status: TurnStatus = "completed";
+        if (s.turnId && this.opts.adapter.abandon) {
+          try {
+            if (await this.opts.adapter.abandon(threadKey, s.turnId) === "aborted") status = "lost";
+          } catch (error) {
+            log.warn("thread host abandon superseded turn failed", { thread: threadKey, turn: s.turnId, error });
+          }
         }
+        await this.finish(threadKey, s, status, "superseded by backend turn");
       }
       const cur = this.threads.get(threadKey)!;
       const wake: ThreadHostState = {

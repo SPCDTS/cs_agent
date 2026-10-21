@@ -11,7 +11,7 @@ import { trace } from "../shared/trace.js";
 import type { BackendName, TicketSettings } from "./backends/types.js";
 import type { ThreadHost } from "./host/thread-host.js";
 import { STALL_MS } from "./host/thread-host.js";
-import type { InputRef, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey, TurnContext, TurnEnded } from "./host/types.js";
+import type { AbandonResult, InputRef, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey, TurnContext, TurnEnded } from "./host/types.js";
 import { TURN_NOTICES } from "./replies.js";
 import type { SendService } from "./send-service.js";
 import type { TurnSettings } from "./turn-settings.js";
@@ -46,8 +46,11 @@ export class BackendRouter implements ThreadAdapter {
 
   async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext): Promise<StartTurnResult> {
     const now = this.opts.now ?? Date.now, deadline = now() + (this.opts.retryMs ?? 120_000);
+    const { admit, ...turn } = ctx;
     for (let attempt = 1; ; attempt++) {
       try {
+        // 定时输入：宿主在首次开轮前已复核；重试窗口可长达数分钟，每次重试前按当前授权再复核
+        if (attempt > 1 && admit && !await admit()) return { denied: true };
         const records = this.opts.turns.records(inputs);
         const head = records[0]!;
         const settings = await this.opts.settings(head.scope, {
@@ -57,7 +60,7 @@ export class BackendRouter implements ThreadAdapter {
         const backend = this.opts.backends[settings.backend];
         if (!backend) throw new Error(`agent backend "${settings.backend}" is not registered`);
         trace.event("in:" + head.key, "admitted", { scope: head.scope, detail: { settings, thread_key: threadKey } });
-        return await backend.startTurn(threadKey, inputs, ctx, settings);
+        return await backend.startTurn(threadKey, inputs, turn, settings);
       } catch (error) {
         if (now() >= deadline) throw new UndeliverableError(error instanceof Error ? error.message : String(error));
         log.warn("start turn failed; retrying", { thread: threadKey, attempt, error });
@@ -78,8 +81,8 @@ export class BackendRouter implements ThreadAdapter {
     return this.byTurn(turnId)?.recoverTurn(threadKey, turnId) ?? "lost";
   }
 
-  async abandon(threadKey: ThreadKey, turnId: string): Promise<void> {
-    await this.byTurn(turnId)?.abandon?.(threadKey, turnId);
+  async abandon(threadKey: ThreadKey, turnId: string): Promise<AbandonResult> {
+    return await this.byTurn(turnId)?.abandon?.(threadKey, turnId) ?? "detached";
   }
 }
 

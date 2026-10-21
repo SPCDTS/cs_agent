@@ -98,8 +98,10 @@ it("codex 回合被唤醒回合取代：旧 exec 被中止，其租约不能以�
   expect(r.inbox.bindingForTurn("group:7", ownerTurn).identity).toEqual({ kind: "user", sender: "1" });
   await r.idle(20_000);
   expect(r.bridge.inbox.getInbound(first)!.turn_id).toBe(oldTurn);
-  expect(r.bridge.outbox.listOutboxByTurn(oldTurn)).toEqual([]);
+  // 被中止的旧回合按 lost 结束：发一条中断提示（系统消息），用户不会石沉大海；输入不自动重放
+  expect(r.bridge.outbox.listOutboxByTurn(oldTurn)).toMatchObject([{ system: true, text: TURN_NOTICES.lost }]);
+  expect(await r.host.inputOutcome(first)).toEqual({ status: "lost", turnId: oldTurn });
   expect(r.bridge.outbox.listOutboxByTurn(ownerTurn)).toMatchObject([{ status: "sent", mention_user_id: "1" }]);
-  expect(r.texts("7")).toEqual(["回复"]);
+  expect(r.texts("7")).toEqual([TURN_NOTICES.lost, "回复"]);
   expect(calls().filter(c => c.phase === "send")).toHaveLength(1);
 });

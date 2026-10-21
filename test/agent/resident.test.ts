@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TranscriptContext } from "@earendil-works/pi-ai";
 import { TURN_NOTICES } from "../../src/agent/replies.js";
+import type { ReplyStore } from "../../src/qq/reply-store.js";
 import { call, gate, isChild, lastUser, reply, residentRig, toolResults, type Brain } from "./resident-fixture.js";
 
 /** 收到指定正文的用户输入时调用 send_message 回复；工具结果之后收尾。 */
@@ -287,3 +288,46 @@ async function vi_wait(check: () => boolean, timeout = 10_000): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
 }
+
+describe("pi 开轮请求未确认就重启（重放同一批输入）", () => {
+  /** 落盘两条同一发送者的入站输入，不经宿主（模拟宿主已持久化"开轮中"的批次）。 */
+  function admitPair(r: Awaited<ReturnType<typeof residentRig>>) {
+    return ["第一条", "第二条"].map((body, i) => {
+      const msg = r.message("5", body);
+      const key = (r.bridge.inbox as ReplyStore).admit(msg, "group:7")!;
+      r.history.ingest(msg);
+      return { inboundKey: key, kind: "user" as const, sender: "5", seq: 100 + i, at: 0 };
+    });
+  }
+
+  it("首条已提交、第二条未提交：重放时把其余输入幂等并入仍在进行的 run", async () => {
+    const slow = gate();
+    const users: string[][] = [];
+    const r = await residentRig({ brain: async (ctx) => {
+      users.push(ctx.messages.filter(m => m.role === "user").map(m => lastUser({ ...ctx, messages: [m] })));
+      if (users.length === 1) await slow.wait();
+      return reply("结束");
+    } });
+    const [a, b] = admitPair(r);
+    const first = await r.pi.startTurn("group:7", [a!], { kind: "user", sender: "5" });
+    await vi_wait(() => slow.entered === 1);
+    // 崩溃后宿主重新开同一批
+    const again = await r.pi.startTurn("group:7", [a!, b!], { kind: "user", sender: "5" });
+    expect(again).toEqual(first);
+    slow.open();
+    await vi_wait(() => users.some(u => u.some(t => t.includes("第二条"))));
+  });
+
+  it("首条所在 run 已结束：其余输入不并入（否则会自己开一次唤醒 run），只回报已收下的输入", async () => {
+    const users: string[] = [];
+    const r = await residentRig({ brain: (ctx) => { users.push(lastUser(ctx)); return reply("结束"); } });
+    const [a, b] = admitPair(r);
+    const first = await r.pi.startTurn("group:7", [a!], { kind: "user", sender: "5" });
+    await vi_wait(() => users.length === 1);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const again = await r.pi.startTurn("group:7", [a!, b!], { kind: "user", sender: "5" });
+    expect(again).toEqual({ ...first, accepted: [a!.inboundKey] });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(users.some(t => t.includes("第二条"))).toBe(false);
+  });
+});

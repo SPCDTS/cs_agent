@@ -42,6 +42,19 @@ describe("BackendRouter", () => {
     const down = new BackendRouter({ backends: { pi: adapter("pi", { startTurn: async () => { throw new Error("挂了"); } }) }, settings, turns, retryMs: 20, retryDelayMs: 5 });
     await expect(down.startTurn("group:7", [input("a")], { kind: "user", sender: "5" })).rejects.toBeInstanceOf(UndeliverableError);
   });
+
+  it("重试开轮前复核准入：授权在两次尝试之间撤销 → 返回 denied，不再开轮；后端只收到不含 admit 的回合信息", async () => {
+    let fail = 1, allow = true;
+    const pi = adapter("pi", { startTurn: vi.fn(async () => { if (fail-- > 0) { allow = false; throw new Error("暂不可用"); } return { turnId: "pi:1" }; }) });
+    const settings = async () => ({ backend: "pi" as const, codexReasoningEffort: "high" as const });
+    const turns = { records: (inputs: readonly Pick<InputRef, "inboundKey">[]) => inputs.map(i => rec(i.inboundKey)) };
+    const router = new BackendRouter({ backends: { pi }, settings, turns, retryMs: 1000, retryDelayMs: 1 });
+    const admit = vi.fn(async () => allow);
+    expect(await router.startTurn("group:7", [input("s")], { kind: "scheduled", sender: "5", admit })).toEqual({ denied: true });
+    expect(pi.startTurn).toHaveBeenCalledTimes(1);
+    expect(pi.startTurn).toHaveBeenCalledWith("group:7", expect.any(Array), { kind: "scheduled", sender: "5" }, expect.anything());
+    expect(admit).toHaveBeenCalled();
+  });
 });
 
 describe("TurnMonitor 出错提示（§8.1）", () => {

@@ -29,11 +29,18 @@ class FakeAdapter implements ThreadAdapter {
   /** 后端已有宿主尚未确认的唤醒回合：开轮时不收输入，回报该回合 */
   busyWake?: string;
   abandoned: { threadKey: ThreadKey; turnId: string }[] = [];
+  /** 放弃回合时后端的处理：aborted = 工作被中止 */
+  abandonAs: "aborted" | "detached" = "detached";
+  /** 开轮只收下这些输入（其余应回到队列） */
+  acceptOnly?: string[];
+  /** 开轮时后端内部重试前复核被拒 */
+  denyOnRetry = false;
   private n = 0;
 
   async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turnCtx: TurnContext): Promise<StartTurnResult> {
     if (this.hangStart) return new Promise<never>(() => {});
     if (this.failStart) throw new Error(this.failStart);
+    if (this.denyOnRetry && turnCtx.admit && !await turnCtx.admit()) return { denied: true };
     if (this.busyWake) {
       const turnId = this.busyWake;
       this.busyWake = undefined;
@@ -43,10 +50,13 @@ class FakeAdapter implements ThreadAdapter {
     }
     const turnId = `t${++this.n}`;
     this.live.set(threadKey, turnId);
-    this.starts.push({ threadKey, keys: inputs.map(i => i.inboundKey), ctx: turnCtx, turnId });
+    const { admit: _admit, ...plain } = turnCtx;
+    const accepted = this.acceptOnly;
+    this.acceptOnly = undefined;
+    this.starts.push({ threadKey, keys: inputs.map(i => i.inboundKey).filter(k => !accepted || accepted.includes(k)), ctx: plain, turnId });
     // 真实后端会在 startTurn 返回前就回报 turn/started
     this.host.onTurnStarted(threadKey, turnId, "host");
-    return { turnId };
+    return accepted ? { turnId, accepted } : { turnId };
   }
   async steer(threadKey: ThreadKey, turnId: string, input: InputRef) {
     const reply = this.live.get(threadKey) === turnId ? "ok" as const : "no_active_turn" as const;
@@ -55,7 +65,7 @@ class FakeAdapter implements ThreadAdapter {
   }
   async interrupt(threadKey: ThreadKey) { this.interrupts.push(threadKey); }
   async recoverTurn(threadKey: ThreadKey) { return this.recoverAs(threadKey); }
-  async abandon(threadKey: ThreadKey, turnId: string) { this.abandoned.push({ threadKey, turnId }); }
+  async abandon(threadKey: ThreadKey, turnId: string) { this.abandoned.push({ threadKey, turnId }); return this.abandonAs; }
 
   /** 后端回合结束，但结束事件暂不送达（插话竞态） */
   endSilently(threadKey: ThreadKey) { const id = this.live.get(threadKey)!; this.live.delete(threadKey); return id; }
@@ -238,6 +248,43 @@ describe("ThreadHost 投递规则（§4.2）", () => {
     expect(r.host.thread(G)).toMatchObject({ busy: true, turnId });
     // 被取代的回合交给适配器放弃（codex 中止 exec、pi 降为唤醒身份）
     expect(r.adapter.abandoned).toEqual([{ threadKey: G, turnId: "t1" }]);
+  });
+
+  it("被取代回合的后端工作被中止（codex）：按 lost 结束（触发中断提示），输入不重放", async () => {
+    const r = await rig();
+    r.adapter.abandonAs = "aborted";
+    await r.user(G, "a1", "A"); await r.settle();
+    r.adapter.wake(G); await r.settle();
+    expect(r.ended).toMatchObject([{ turnId: "t1", status: "lost", sender: "A", inputs: [{ inboundKey: "a1" }] }]);
+    expect(await r.host.inputOutcome("a1")).toEqual({ status: "lost", turnId: "t1" });
+    expect(r.host.thread(G)!.pending).toEqual([]);
+  });
+
+  it("开轮时后端只收下部分输入：只有收下的标记 delivered，其余放回队列，回合结束后再开轮", async () => {
+    const r = await rig();
+    // h0 进行中；E 的两条排队，下一轮合并为 [h1, h2]，后端只收下 h1
+    await r.user(H, "h0", "D"); await r.settle();
+    await r.user(H, "h1", "E"); await r.user(H, "h2", "E"); await r.settle();
+    r.adapter.acceptOnly = ["h1"];
+    r.adapter.complete(H); await r.settle();
+    expect(r.host.thread(H)).toMatchObject({ busy: true, turnInputs: [{ inboundKey: "h1" }], pending: [{ inboundKey: "h2" }] });
+    expect(r.delivered.at(-1)!.keys).toEqual(["h1"]);
+    expect(await r.host.inputState("h2")).toBe("queued");
+    r.adapter.complete(H); await r.settle();
+    expect(r.adapter.keysOf(H)).toEqual([["h0"], ["h1"], ["h2"]]);
+  });
+
+  it("定时输入：后端内部重试开轮前复核被拒 → 不开轮，以 failed 结束", async () => {
+    let allow = true;
+    const r = await rig({ admit: async () => allow });
+    r.adapter.denyOnRetry = true;
+    const admitOnce = r.adapter.startTurn.bind(r.adapter);
+    // 首次复核通过后撤销授权，后端重试前再复核
+    r.adapter.startTurn = async (threadKey, inputs, ctx) => { allow = false; return admitOnce(threadKey, inputs, ctx); };
+    await r.scheduled(G, "s1"); await r.settle();
+    expect(r.ended).toMatchObject([{ kind: "scheduled", status: "failed", inputs: [{ inboundKey: "s1" }] }]);
+    expect(r.adapter.starts).toEqual([]);
+    expect(r.host.status().active).toBe(0);
   });
 
   it("开轮时后端回报已有唤醒回合：输入不送入，按唤醒回合接管（唤醒身份），输入排到其后", async () => {

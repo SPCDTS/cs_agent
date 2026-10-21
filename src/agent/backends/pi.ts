@@ -21,7 +21,7 @@ import { isScope } from "../../context/access.js";
 import { log } from "../../shared/log.js";
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import type { InboundRecord, TurnBinding } from "../../channel/types.js";
-import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
+import type { AbandonResult, HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
 import type { RenderedInputs } from "../inbox.js";
 import type { TicketSettings } from "./types.js";
 
@@ -29,7 +29,8 @@ import type { TicketSettings } from "./types.js";
  * pi 后端（设计 §6）：每个会话键一个常驻的 pi-durable 会话，回合 = pi 的一次 run（从输入到最终回答）。
  * 1. 开一轮：首条输入 whenBusy=followUp（requestId = 入站键，重放取回同一提交），同批其余输入 steer 并入；
  *    会话恰好已有 run（宿主尚未看到的唤醒回合）时输入不并入，回报 backendTurnId，宿主按唤醒回合接管、输入排到其后
- *    （例外：那次 run 正是本批首条输入开的——开轮请求未确认就重启——仍是宿主的这一轮）。
+ *    （例外：那次 run 正是本批首条输入开的——开轮请求未确认就重启——仍是宿主的这一轮，其余输入按 requestId 幂等补交）。
+ *    首条提交已结束时其余输入不再并入，回报 accepted 只含首条，其余由宿主放回队列。
  *    回合 id = `pi:<会话>:<run 首条输入的提交 id>`；该提交结束（done / unanswered）即回合结束。
  * 2. 插话：适配器自己判断回合是否仍在（回合首条提交未结束）才 steer，否则返回 no_active_turn 由宿主排队；
  *    判断与提交之间回合恰好结束时，插话会自己开一次 run，按唤醒回合回报（身份只会更严格）。
@@ -436,36 +437,45 @@ export class PiBackend implements ThreadAdapter {
       // 会话已有 run（宿主还没看到的唤醒回合，或宿主已放弃的回合）：输入不并入——并入会让唤醒工作拿到本轮发送者的身份。
       // 按唤醒回合回报，输入由宿主排队到它结束。
       const records = this.opts.turns.records(inputs);
+      if (!records.length) throw new Error("pi 回合没有输入");
       const running = state.active?.first ?? live?.run?.inputs[0];
+      let first: SubmissionId;
       if (running !== undefined) {
         // 例外：那次 run 正是本批首条输入开的（开轮请求未确认就崩溃，宿主重新开轮）——仍是宿主的这一轮。
         const request = (await (await this.harness.submission(running, context))?.status(context))?.requestId;
-        if (request !== undefined && request === records[0]?.key) {
-          const active = state.active ?? { turnId: piTurnId(conv.id, running), first: running, owner: "host" as const };
-          active.owner = "host";
-          if (!state.active) { state.active = active; this.waitTurn(threadKey, active); }
-          return { turnId: active.turnId };
+        if (request === undefined || request !== records[0]!.key) {
+          if (!state.active) await this.startWake(threadKey, state, running);
+          state.active!.owner = "backend";
+          return { backendTurnId: state.active!.turnId };
         }
-        if (!state.active) await this.startWake(threadKey, state, running);
-        state.active!.owner = "backend";
-        return { backendTurnId: state.active!.turnId };
+        first = running;
+        await this.configureTools(conv, threadKey);
+      } else {
+        await this.configureTools(conv, threadKey);
+        // 首条 followUp 开新 run
+        first = (await conv.submit({ type: "input", requestId: records[0]!.key, content: await this.content(records[0]!),
+          whenBusy: "followUp" }, context)).id;
       }
-      await this.configureTools(conv, threadKey);
-      // 首条 followUp 开新 run，其余并入。
-      let first: SubmissionId | undefined;
-      for (const [index, record] of records.entries()) {
-        const submission = await conv.submit({ type: "input", requestId: record.key, content: await this.content(record),
-          whenBusy: index > 0 ? "steer" : "followUp" }, context);
-        first ??= submission.id;
+      // 其余输入幂等并入（requestId = 入站键，重放取回同一提交；重启前可能只提交了一部分）——仅当首条所在 run 仍在进行；
+      // 首条提交已结束（重放取回的是已完成的提交）时并入会自己开一次 run（唤醒身份），改为只回报收下的首条，其余由宿主放回队列。
+      const settled = (await (await this.harness.submission(first, context))?.status(context))?.status;
+      const accepted = [records[0]!.key];
+      if (settled !== undefined && settled !== "done" && settled !== "unanswered") {
+        for (const record of records.slice(1)) {
+          await conv.submit({ type: "input", requestId: record.key, content: await this.content(record), whenBusy: "steer" }, context);
+          accepted.push(record.key);
+        }
       }
-      if (first === undefined) throw new Error("pi 回合没有输入");
       const turnId = piTurnId(conv.id, first);
-      const active: ActiveTurn = { turnId, first, owner: "host" };
-      state.active = active;
-      this.waitTurn(threadKey, active);
+      if (state.active?.turnId === turnId) state.active.owner = "host";
+      else {
+        const active: ActiveTurn = { turnId, first, owner: "host" };
+        state.active = active;
+        this.waitTurn(threadKey, active);
+      }
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "pi", conversation_key: threadKey, conversation: conv.id,
-        kind: turn.kind, inputs: inputs.map(i => i.inboundKey) } });
-      return { turnId };
+        kind: turn.kind, inputs: accepted } });
+      return accepted.length === records.length ? { turnId } : { turnId, accepted };
     });
   }
 
@@ -494,11 +504,12 @@ export class PiBackend implements ThreadAdapter {
   }
 
   /** 宿主放弃的回合（被唤醒回合取代）：run 继续，但工具身份降为唤醒；结束仍照常回报（宿主按过期忽略）。 */
-  async abandon(threadKey: ThreadKey, turnId: string): Promise<void> {
+  async abandon(threadKey: ThreadKey, turnId: string): Promise<AbandonResult> {
     await this.serial(threadKey, async () => {
       const active = this.threads.get(threadKey)?.active;
       if (active?.turnId === turnId) active.owner = "backend";
     });
+    return "detached";
   }
 
   async recoverTurn(threadKey: ThreadKey, turnId: string): Promise<"alive" | "lost"> {

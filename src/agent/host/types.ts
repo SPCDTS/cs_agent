@@ -24,16 +24,27 @@ export type HostInput = {
 /** 宿主持久化的输入引用：seq 为全局到达序号（跨会话单调递增），at 为到达时间（毫秒）。 */
 export type InputRef = HostInput & { seq: number; at: number };
 
-/** 开一轮时随输入一起交给适配器的回合信息。 */
-export type TurnContext = { kind: InputKind; sender: string };
+/**
+ * 开一轮时随输入一起交给适配器的回合信息。
+ * admit：定时输入的准入复核（宿主在首次开轮前已调用）；适配器内部重试开轮时，每次重试前须再调用，
+ * 返回 false 时不再开轮、返回 { denied: true }。适配器不得把它传给后端本身。
+ */
+export type TurnContext = { kind: InputKind; sender: string; admit?: () => Promise<boolean> };
 
 export type TurnStatus = "completed" | "failed" | "lost";
 
 /**
- * 开轮结果：turnId 为新回合；backendTurnId 表示后端已有宿主尚未确认的回合（子 agent 唤醒等）——
- * 输入没有送入（并入会让唤醒工作拿到本轮发送者的身份），宿主按唤醒回合接管该回合，输入放回队列等它结束。
+ * 开轮结果：
+ * - turnId：新回合。accepted 存在时只有列出的入站键真正送入了后端（如重启后重放、首条所在 run 已结束），
+ *   宿主只把这些标记为已送达，其余放回队列；缺省表示全部送入。
+ * - backendTurnId：后端已有宿主尚未确认的回合（子 agent 唤醒等）——输入没有送入（并入会让唤醒工作拿到本轮发送者的身份），
+ *   宿主按唤醒回合接管该回合，输入放回队列等它结束。
+ * - denied：重试前准入复核被拒（见 TurnContext.admit），没有开轮。
  */
-export type StartTurnResult = { turnId: string } | { backendTurnId: string };
+export type StartTurnResult = { turnId: string; accepted?: readonly string[] } | { backendTurnId: string } | { denied: true };
+
+/** 放弃回合的结果：aborted = 后端工作被中止（回合按 lost 结束）；detached = 工作继续但不再代表该回合（按 completed 结束）。 */
+export type AbandonResult = "aborted" | "detached";
 
 export interface ThreadAdapter {
   /** 开一轮。抛错视为投递失败，宿主按回合失败结束这些输入。 */
@@ -46,9 +57,9 @@ export interface ThreadAdapter {
   recoverTurn(threadKey: ThreadKey, turnId: string): Promise<"alive" | "lost">;
   /**
    * 宿主已不再跟踪这个回合（被唤醒回合取代）：仍在运行的后端工作不能再以该回合的身份行事——
-   * codex 中止 exec；pi 把该 run 降为唤醒身份。之后的结束事件宿主按过期忽略。
+   * codex 中止 exec（aborted）；pi 把该 run 降为唤醒身份、继续运行（detached）。之后的结束事件宿主按过期忽略。
    */
-  abandon?(threadKey: ThreadKey, turnId: string): Promise<void>;
+  abandon?(threadKey: ThreadKey, turnId: string): Promise<AbandonResult>;
 }
 
 /**
