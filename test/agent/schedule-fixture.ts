@@ -27,7 +27,7 @@ export class AdmitterStub implements ScheduledRunAdmitter, ScheduledRunLauncher 
   reject = false;
   prepareError = false;
   async prepare(_fire: ScheduledFire) { if (this.prepareError) throw new Error("prepare failed"); return this; }
-  dispatchScheduled(_ticket: string) {}
+  launch(_key: string) {}
   async admit(tx: unknown, fire: ScheduledFire) {
     if (this.reject) throw new Error("admission failed");
     this.calls.push(fire);

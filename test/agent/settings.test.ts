@@ -1,28 +1,20 @@
-import { FALLBACK_REPLY } from "../../src/agent/replies.js";
-import { withOutbox } from "./outbox-stub.js";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai";
 import { ObsStore } from "../../src/obs/store.js";
 import { Trace, trace } from "../../src/shared/trace.js";
 import { SettingsStore, SETTINGS_TICKET, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
 import { DEFAULT_SEND_RULES } from "../../src/channel/send-rules.js";
-import { createBackendSelector } from "../../src/agent/backends/select.js";
 import { CodexBackend } from "../../src/agent/backends/codex.js";
-import type { AgentBackend, AgentRequest, BackendName } from "../../src/agent/backends/types.js";
-import { createTasks } from "../../src/agent/tasks.js";
-import { openHarness } from "../../src/agent/harness.js";
-import { createCsAgentExtension } from "../../src/agent/extension.js";
-import { TicketDoc, DispatchDoc } from "../../src/agent/docs.js";
-import type { ConversationId } from "@earendil-works/pi-durable";
-import { Dispatcher } from "../../src/agent/dispatch.js";
+import type { BackendName, TicketSettings } from "../../src/agent/backends/types.js";
+import { BackendRouter, type BackendAdapter } from "../../src/agent/turns.js";
+import { createTurnSettings } from "../../src/agent/turn-settings.js";
+import type { InputRef, ThreadKey } from "../../src/agent/host/types.js";
 import { startAlerts } from "../../src/obs/alerts.js";
 import { log } from "../../src/shared/log.js";
 import { loadAgentConfig as loadConfig } from "../../src/agent/config.js";
-import type { InboundMessage, ReplyTicketRecord } from "../../src/channel/types.js";
+import type { InboundRecord } from "../../src/channel/types.js";
 
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
@@ -86,43 +78,31 @@ describe("运行时设置", () => {
     expect(settingsDefaults({ ...cfg, CODEX_REASONING_EFFORT: "bogus" }).codexReasoningEffort).toBe("high");
   });
 
-  it("派发器无需重启即按新设置选择后端；推理强度与告警开关同样现读", async () => {
+  it("路由器无需重启即按新设置选择后端；推理强度与告警开关同样现读", async () => {
     const dir = tmp();
     const settings = await SettingsStore.open(dir, defaults, new Trace());
-    const calls: { backend: string; ticket: string; effort?: string }[] = [];
-    const fake = (name: BackendName): AgentBackend => ({ name, handle: async (req: AgentRequest) => { calls.push({ backend: name, ticket: req.ticket }); return { text: `来自 ${name}` }; } });
-    const efforts: (string | undefined)[] = [];
-    const codex = new CodexBackend({ runner: { ask: async (_p, o) => { efforts.push(o?.reasoningEffort); await o?.onAcquired?.(); return "codex 回答"; } },
-      imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"), reasoningEffort: () => settings.current().codexReasoningEffort });
-    const states = new Map<string, string>();
-    const replies: string[] = [];
-    const bridge = {
-      uploadFile: async () => ({ file_id: "unused" }),
-      getTicket: async (ticket: string) => ({ ticket_id: ticket, seq: 1, status: states.get(ticket) ?? "pending" }) as ReplyTicketRecord,
-      listPendingTickets: async () => [],
-      reply: async (ticket: string, text: string) => { states.set(ticket, "sent"); replies.push(text); return { message_id: "r-" + ticket, already_sent: false, message_type: "private" as const, target_id: "1" }; },
+    const calls: string[] = [];
+    const fake = (name: BackendName): BackendAdapter => ({
+      startTurn: async (_threadKey, inputs, _ctx, snapshot) => { calls.push(`${inputs[0]!.inboundKey}:${name}:${snapshot?.codexReasoningEffort}`); return { turnId: `${name}:${inputs[0]!.inboundKey}` }; },
+      steer: async () => "no_active_turn", interrupt: async () => {}, recoverTurn: async () => "lost",
+    });
+    const records = new Map<string, InboundRecord>();
+    const router = new BackendRouter({ backends: { codex: fake("codex"), pi: fake("pi") }, turns: { records: inputs => inputs.map(i => records.get(i.inboundKey)!) },
+      settings: createTurnSettings({ currentSettings: () => settings.currentForTurn() }) });
+    const start = async (key: string, scope: string) => {
+      records.set(key, record(key, scope));
+      await router.startTurn(scope as ThreadKey, [ref(key)], { kind: "user", sender: "1" });
     };
-    const image = { name: "fake", submit: async () => "p", collect: async () => [], reconcile: async () => ({ images: [] as string[] }), clearReferences: async () => {} };
-    const tasks = createTasks({ getBridge: () => withOutbox(bridge), imageBackend: image, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
-      backends: createBackendSelector({ current: () => settings.current(), backends: { codex, pi: fake("pi") } }),
-      currentSettings: () => settings.current(),
-      replyRetryDelayMs: 1 });
-    const harness = await openHarness({ models: createModels(), extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "agent.sqlite") }, BACKGROUND_CONTEXT);
-    clean.push(() => harness.close(BACKGROUND_CONTEXT));
-    harness.resume();
-    const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: 1, retryDelayMs: 1 });
-    const msg = (text: string, group?: string): InboundMessage => ({ message_id: text, time: Math.floor(Date.now() / 1000), message_type: group ? "group" : "private",
-      user_id: "1", group_id: group ?? null, self_id: "2", nickname: "测试", text, route_text: text, images: [], segments: [], truncated: false, mentioned_self: true });
-
-    await dispatcher.dispatch(msg("一"), "t1");
+    await start("t1", "private:1");
     await settings.update({ agentBackend: "pi" }, "test");
-    await dispatcher.dispatch(msg("二"), "t2");
+    await start("t2", "private:1");
     await settings.update({ backendOverrides: { "group:9": "codex" }, codexReasoningEffort: "low" }, "test");
-    await dispatcher.dispatch(msg("三", "9"), "t3");
-    await dispatcher.dispatch(msg("四", "8"), "t4");
-    expect(calls.map(c => `${c.ticket}:${c.backend}`)).toEqual(["t2:pi", "t4:pi"]);
-    expect(efforts).toEqual(["high", "low"]);
-    expect(replies).toEqual(Array(4).fill(FALLBACK_REPLY));
+    await start("t3", "group:9");
+    await start("t4", "group:8");
+    expect(calls).toEqual(["t1:codex:high", "t2:pi:high", "t3:codex:low", "t4:pi:low"]);
+    // 回合 id 前缀决定插话 / 恢复交给哪个后端；未知前缀按丢失处理。
+    expect(await router.recoverTurn("group:8", "pi:t4")).toBe("lost");
+    expect(await router.recoverTurn("group:8", "other:1")).toBe("lost");
 
     vi.useFakeTimers();
     try {
@@ -140,105 +120,84 @@ describe("运行时设置", () => {
 });
 
 
-describe("票据设置快照", () => {
-  it.each([false, true])("回合中热更新仍保留 high，后续票据使用 low；恢复=%s", async recovery => {
+/** Inbox 记录桩：只填路由与渲染需要的字段。 */
+function record(key: string, scope: string, extra: Partial<InboundRecord> = {}): InboundRecord {
+  const [type, id] = scope.split(":") as ["group" | "private", string];
+  return { key, kind: "user", seq: 1, scope, thread_key: scope, self_id: "2", user_id: type === "private" ? id : "1", group_id: type === "group" ? id : null,
+    message_type: type, message_id: key, nickname: "测试", text: "你好", route_text: "你好", time: 1, images: [], attachments: [],
+    created_at: new Date().toISOString(), state: "queued", ...extra };
+}
+const ref = (key: string): InputRef => ({ inboundKey: key, kind: "user", sender: "1", seq: 1, at: 1 });
+
+describe("每轮设置快照", () => {
+  it("开轮时冻结后端与档位：回合中热更新不影响本轮，下一轮使用新设置", async () => {
     const dir = tmp();
     const settings = await SettingsStore.open(dir, defaults, new Trace());
-    const obs = new ObsStore(dir); clean.push(() => obs.close()); trace.attach(obs);
-    const models = createModels();
-    const replies = new Map<string, string>();
-    const bridge = {
-      uploadFile: async () => ({ file_id: "unused" }),
-      getTicket: async (ticket: string) => ({ ticket_id: ticket, seq: 1, status: replies.has(ticket) ? "sent" : "pending" }) as ReplyTicketRecord,
-      listPendingTickets: async () => [],
-      reply: async (ticket: string, text: string) => { replies.set(ticket, text); return { message_id: ticket, already_sent: false, message_type: "private" as const, target_id: "1" }; },
-    };
-    const history = { recordPending: vi.fn(), completeReply: vi.fn() };
     const efforts: (string | undefined)[] = [];
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    const current = vi.fn(() => settings.current());
-    const boot = async (block: boolean) => {
-      const codex = new CodexBackend({ imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
-        reasoningEffort: "low",
-        runner: { ask: async (_prompt, options) => {
-          efforts.push(options?.reasoningEffort); await options?.onAcquired?.();
-          if (block) await Promise.race([gate, new Promise<never>((_, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("shutdown")), { once: true }))]);
-          return "原始回答";
-        } },
-      });
-      const tasks = createTasks({ getBridge: () => withOutbox(bridge),
-        imageBackend: { name: "fake", submit: async () => "p", collect: async () => [], reconcile: async () => ({ images: [] }), clearReferences: async () => {} },
-        imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
-        backends: createBackendSelector({ current, backends: { codex } }), currentSettings: current,
-      });
-      const harness = await openHarness({ models, extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "tickets.sqlite") }, BACKGROUND_CONTEXT);
-      clean.push(() => harness.close(BACKGROUND_CONTEXT));
-      return { harness, dispatcher: new Dispatcher({ harness, bridge, tasks, history, concurrency: 1, retryDelayMs: 1 }) };
+    const current = vi.fn(() => settings.currentForTurn());
+    const records = new Map<string, InboundRecord>();
+    const turns = {
+      records: (inputs: readonly Pick<InputRef, "inboundKey">[]) => inputs.map(i => records.get(i.inboundKey)!),
+      render: async () => ({ text: "你好", images: [], source: { type: "private" as const, user_id: "1", group_id: null, nickname: "测试" } }),
+      binding: (threadKey: string) => ({ threadKey, identity: { kind: "user" as const, sender: "1" }, scope: "private:1", inputs: [] }),
     };
-    let first = await boot(true);
-    const msg: InboundMessage = { message_id: "m", time: 1, message_type: "private", user_id: "1", group_id: null, self_id: "2", nickname: "测试", text: "你好", route_text: "你好", images: [], segments: [], truncated: false, mentioned_self: true };
-    first.harness.resume();
-    const pending = first.dispatcher.dispatch(msg, "first");
+    let block = true;
+    const codex = new CodexBackend({ imagesDir: path.join(dir, "images"), reasoningEffort: "low", turns,
+      runner: { ask: async (_prompt, options) => {
+        efforts.push(options?.reasoningEffort); await options?.onAcquired?.();
+        if (block) await gate;
+        return "原始回答";
+      } },
+    });
+    const done: string[] = [];
+    codex.attach({ onTurnStarted: () => {}, onActivity: () => {}, onTurnCompleted: (_k, turnId, r) => { done.push(r.status); void turnId; } });
+    const pi: BackendAdapter = { startTurn: async () => { throw new Error("pi 不应被选中"); }, steer: async () => "no_active_turn", interrupt: async () => {}, recoverTurn: async () => "lost" };
+    const router = new BackendRouter({ backends: { codex, pi }, turns, settings: createTurnSettings({ currentSettings: current }) });
+    records.set("first", record("first", "private:1"));
+    const first = await router.startTurn("private:1", [ref("first")], { kind: "user", sender: "1" });
+    expect(first.turnId).toMatch(/^codex:/);
     await vi.waitFor(() => expect(efforts).toEqual(["high"]));
-    const id = (await first.harness.snapshot(DispatchDoc, BACKGROUND_CONTEXT))!.pending.first!.conversationId as ConversationId;
-    expect((await first.harness.snapshot(TicketDoc, id, BACKGROUND_CONTEXT))?.settings).toEqual({ backend: "codex", codexReasoningEffort: "high", codexModel: defaults.codexModel, piModel: defaults.piModel, piThinkingLevel: "low", effortSource: "fixed" });
-    // 已排队票据也应冻结；当前回合结束前改设置。
-    const queued = recovery ? undefined : first.dispatcher.dispatch(msg, "queued");
     await settings.update({ codexReasoningEffort: "low", agentBackend: "pi" }, "test");
-    current.mockImplementation(() => { throw new Error("执行及恢复不得读取当前设置"); });
-    if (recovery) {
-      await first.harness.close(BACKGROUND_CONTEXT); await pending;
-      first = await boot(false);
-      await first.dispatcher.recover(); first.harness.resume(); await first.dispatcher.idle();
-    } else { release(); await pending; await queued; }
-    expect(replies.get("first")).toBe(FALLBACK_REPLY);
-    expect(history.completeReply).not.toHaveBeenCalled();
-    expect(efforts.every(e => e === "high")).toBe(true);
-    if (!recovery) expect(replies.get("queued")).toBe(FALLBACK_REPLY);
-    expect(obs.events("first").some(e => e.stage === "final_answer" && JSON.parse(e.detail_json).text === "原始回答")).toBe(true);
-    await settings.update({ agentBackend: "codex" }, "test"); current.mockImplementation(() => settings.current());
-    await first.dispatcher.dispatch(msg, "next");
-    expect(efforts.at(-1)).toBe("low"); expect(replies.get("next")).toBe(FALLBACK_REPLY);
-    expect(history.completeReply).not.toHaveBeenCalled();
-    expect(obs.events("next").some(e => e.stage === "final_answer" && JSON.parse(e.detail_json).text === "原始回答")).toBe(true);
+    current.mockImplementation(() => { throw new Error("回合内不得读取当前设置"); });
+    release(); await codex.idle();
+    expect(efforts).toEqual(["high"]); expect(done).toEqual(["completed"]);
+    await settings.update({ agentBackend: "codex" }, "test"); current.mockImplementation(() => settings.currentForTurn());
+    block = false;
+    records.set("next", record("next", "private:1"));
+    await router.startTurn("private:1", [ref("next")], { kind: "user", sender: "1" });
+    await codex.idle();
+    expect(efforts.at(-1)).toBe("low");
   });
 });
 
-describe("auto 派发集成", () => {
-  it.each(["high", "invalid"])("派发等待分类 %s，票据落具体档位并传给 runner", async output => {
+describe("auto 档位", () => {
+  it.each(["high", "invalid"])("开轮等待分类 %s，具体档位与模型传给 runner", async output => {
     const dir = tmp(), settings = await SettingsStore.open(dir, { ...defaults, codexReasoningEffort: "auto" });
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     clean.push(() => release());
-    const complete = vi.fn(async () => output), ask = vi.fn(async (_prompt: string, options: import("../../src/agent/codex/runner.js").AskOptions) => {
+    const complete = vi.fn(async (_prompt: string, _signal: AbortSignal) => output), ask = vi.fn(async (_prompt: string, options: import("../../src/agent/codex/runner.js").AskOptions) => {
       await options.onAcquired?.(); await gate; return "已完成";
     });
-    const codex = new CodexBackend({ runner: { ask }, imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets") });
-    const sent = new Set<string>();
-    const bridge = { uploadFile: vi.fn(), listPendingTickets: async () => [],
-      getTicket: async (ticket: string) => ({ ticket_id: ticket, seq: 1, status: sent.has(ticket) ? "sent" : "pending" }) as ReplyTicketRecord,
-      reply: async (ticket: string) => { sent.add(ticket); return { message_id: ticket, already_sent: false, message_type: "private" as const, target_id: "1" }; },
-    };
-    const tasks = createTasks({ currentSettings: () => settings.current(), codexReasoningEffort: "medium", effortRouter: { complete },
-      getBridge: () => withOutbox(bridge), imagesDir: path.join(dir, "images"),
-      imageBackend: { name: "fake", submit: vi.fn(), collect: vi.fn(), reconcile: vi.fn(), clearReferences: vi.fn() },
-      backends: createBackendSelector({ current: () => settings.current(), backends: { codex } }),
-    });
-    const harness = await openHarness({ models: createModels(), extension: createCsAgentExtension(tasks), dbFile: path.join(dir, "auto.sqlite") }, BACKGROUND_CONTEXT);
-    clean.push(() => harness.close(BACKGROUND_CONTEXT));
-    const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: 1 });
-    const msg: InboundMessage = { message_id: "auto", time: 1, message_type: "private", user_id: "1", group_id: null, self_id: "2", nickname: "测试",
-      text: "看看", route_text: "看看", images: [], segments: [{ type: "reply", data: { id: "quoted" } }], truncated: false, mentioned_self: true };
-    const pending = dispatcher.dispatch(msg, "auto-ticket");
-    await vi.waitFor(async () => expect((await harness.snapshot(DispatchDoc, BACKGROUND_CONTEXT))?.pending["auto-ticket"]).toBeDefined());
-    const id = (await harness.snapshot(DispatchDoc, BACKGROUND_CONTEXT))!.pending["auto-ticket"]!.conversationId as ConversationId;
+    const rec = record("auto", "private:1", { text: "看看", reply_to: "quoted" });
+    const turns = { records: () => [rec],
+      render: async () => ({ text: "看看", images: [], source: { type: "private" as const, user_id: "1", group_id: null, nickname: "测试" } }),
+      binding: (threadKey: string) => ({ threadKey, identity: { kind: "user" as const, sender: "1" }, scope: "private:1", inputs: [] }) };
+    const codex = new CodexBackend({ runner: { ask }, imagesDir: path.join(dir, "images"), turns });
+    const seen: TicketSettings[] = [];
+    const router = new BackendRouter({ backends: { codex: { startTurn: (k, i, c, snapshot) => { seen.push(snapshot!); return codex.startTurn(k, i, c, snapshot); },
+      steer: () => codex.steer(), interrupt: k => codex.interrupt(k), recoverTurn: () => codex.recoverTurn() } }, turns,
+      settings: createTurnSettings({ currentSettings: () => settings.current(), codexReasoningEffort: "medium", effortRouter: { complete } }) });
+    await router.startTurn("private:1", [ref("auto")], { kind: "user", sender: "1" });
     const effort = output === "high" ? "high" : "medium";
-    expect((await harness.snapshot(TicketDoc, id, BACKGROUND_CONTEXT))?.settings).toMatchObject({ codexModel: defaults.codexModel,
-      codexReasoningEffort: effort, effortSource: output === "high" ? "auto" : "auto-fallback" });
+    expect(seen[0]).toMatchObject({ codexModel: defaults.codexModel, codexReasoningEffort: effort, effortSource: output === "high" ? "auto" : "auto-fallback" });
     expect(complete).toHaveBeenCalledTimes(1); expect(complete.mock.calls[0]?.length).toBe(2);
-    await settings.update({ codexModel: "changed-after-dispatch", codexReasoningEffort: "low" }, "test");
-    release(); await pending;
+    expect((complete.mock.calls[0] as unknown[] | undefined)?.[0]).toContain("有引用：true");
+    await settings.update({ codexModel: "changed-after-start", codexReasoningEffort: "low" }, "test");
+    await vi.waitFor(() => expect(ask).toHaveBeenCalled());
+    release(); await codex.idle();
     expect(ask).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ model: defaults.codexModel, reasoningEffort: effort }));
   });
 });

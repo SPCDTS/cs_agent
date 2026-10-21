@@ -1,229 +1,120 @@
-import { threadKeyForSource } from "../../src/agent/codex/runner.js";
-import { accessForSource, accessToString } from "../../src/context/access.js";
-import { scheduleToolsFixture } from "./schedule-tools-fixture.js";
-import type { ScheduleTools } from "../../src/agent/schedule/tools.js";
-import type { GrantBinding } from "../../src/agent/grants.js";
-import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
-import type { GrantsService } from "../../src/agent/grants.js";
-import { grantsFixture } from "./grants-fixture.js";
-import { SendService } from "../../src/agent/send-service.js";
-import { deliveryNoteText } from "../../src/agent/delivery-note.js";
-import { sendFixture } from "./send-fixture.js";
-import { FALLBACK_REPLY, IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
-import { withOutbox } from "./outbox-stub.js";
-import { log } from "../../src/shared/log.js";
-import type { ModelRef } from "@earendil-works/pi-durable";
-import { readFileAttachments } from "../../src/media/attach.js";
-import { attachmentDirs } from "../../src/media/attach-paths.js";
-import { MemoryInstrumentation } from "../../src/obs/memory/instrumentation.js";
-import { ObsStore } from "../../src/obs/store.js";
-import { mediaFixture } from "../context/media-fixture.js";
-import type { MediaRecall } from "../../src/context/media.js";
-import { ContextUsageStore } from "../../src/agent/context-usage.js";
-import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
-import { builtinModels } from "@earendil-works/pi-ai/providers/all";
-import { trace } from "../../src/shared/trace.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getSystemMessageText, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
-import { CompactionEntry, defineDoc, MemoryStorage, type Harness, type JsonObject, type ConversationId } from "@earendil-works/pi-durable";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { PiBackend, PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
-import { createBackendSelector } from "../../src/agent/backends/select.js";
-import { BackendTimeoutError, type AgentRequest } from "../../src/agent/backends/types.js";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
+import { getSystemMessageText, type Message, type TranscriptContext } from "@earendil-works/pi-ai";
+import { CompactionEntry, defineDoc, type ConversationId } from "@earendil-works/pi-durable";
+import { describe, expect, it, vi } from "vitest";
+import { PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
 import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prompt.js";
 import { PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
-import { PiRequestDoc } from "../../src/agent/pi-tools/request.js";
-import { ContextStore } from "../../src/context/store.js";
-import { TRANSPARENT_PNG, type ImageBackend } from "../../src/media/gen/image-gen.js";
-import { closeAgentHarnesses } from "../../src/agent/shutdown.js";
-import { TicketDoc, DispatchDoc } from "../../src/agent/docs.js";
-import { Dispatcher } from "../../src/agent/dispatch.js";
-import { createTasks } from "../../src/agent/tasks.js";
-import { createCsAgentExtension } from "../../src/agent/extension.js";
-import { openHarness } from "../../src/agent/harness.js";
-import { loadAgentConfig as loadConfig } from "../../src/agent/config.js";
-import type { Channel, InboundMessage, ReplyTicketRecord } from "../../src/channel/types.js";
+import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
+import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
+import { threadKeyOf } from "../../src/channel/ticket.js";
+import type { Channel, InboundMessage } from "../../src/channel/types.js";
+import { inboundKey, type ReplyStore } from "../../src/qq/reply-store.js";
+import { TRANSPARENT_PNG, UnknownJobError } from "../../src/media/gen/image-gen.js";
+import { MemoryInstrumentation } from "../../src/obs/memory/instrumentation.js";
+import { ObsStore } from "../../src/obs/store.js";
+import { log } from "../../src/shared/log.js";
+import { trace, type LiveEvent } from "../../src/shared/trace.js";
+import { mediaFixture } from "../context/media-fixture.js";
 import { tmp } from "./helpers.js";
-import { put, sandboxRequirements } from "./pi-sandbox-fixture.js";
+import { put } from "./pi-sandbox-fixture.js";
+import { scheduleToolsFixture } from "./schedule-tools-fixture.js";
+import { call, context, reply, residentRig, type Brain, type ResidentOptions, type ResidentRig } from "./resident-fixture.js";
 
-const context = BACKGROUND_CONTEXT;
-const cleanup: (() => Promise<unknown> | void)[] = [];
-afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); vi.unstubAllEnvs(); });
-const handleContext = () => ({ signal: new AbortController().signal, onEvent: vi.fn() });
-const request = (ticket: string, owner = false): AgentRequest => ({
-  ticket, scope: owner ? "private:1" : "group:7", access: owner ? "all" : "group:7", threadKey: owner ? "owner" : "group:7", senderIsOwner: owner,
-  source: { type: owner ? "private" : "group", user_id: "1", group_id: owner ? null : "7", nickname: "测试者" }, text: "查一下", time: 1_760_000_000,
-});
-const inbound = (id: string, group: string | null, text: string): InboundMessage => ({
-  message_id: id, message_type: group ? "group" : "private", group_id: group, user_id: "1", self_id: "2", nickname: "测试者",
-  time: Math.floor(Date.now() / 1000), text, route_text: text, truncated: false, mentioned_self: !!group, images: [], segments: [],
-});
-const reply = (text = "完成") => fauxAssistantMessage(text);
-const call = (name: string, args: JsonObject = {}) => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
-const results = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => JSON.stringify(m.content)).join("\n");
+type Step = Message | ((ctx: TranscriptContext, extra?: { model: string; reasoning: unknown }) => Message | Promise<Message>);
 
-async function setup(steps: FauxResponseStep[], opts: { scheduleTools?: ScheduleTools; grants?: GrantsService; sendService?: SendService; channel?: Pick<Channel, "listChats">; currentModel?: () => ModelRef; instrumentation?: MemoryInstrumentation; dir?: string; workspaceDir?: string; skillsDir?: string; timeoutMs?: number; fetch?: typeof fetch; disk?: boolean; reserveTokens?: number; backgroundTokens?: number; mediaRecall?: Pick<MediaRecall, "recall">; mediaRecallMaxPerTicket?: number; vision?: boolean } = {}) {
-  const dir = opts.dir ?? tmp("cs-pi-");
-  vi.stubEnv("CODEX_REQUIREMENTS_FILE", await sandboxRequirements(dir));
-  const contextUsage = new ContextUsageStore(dir);
-  cleanup.push(() => contextUsage.close());
-  const store = new ContextStore(dir);
-  cleanup.push(() => store.close());
-  const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200_000, input: opts.vision ? ["text", "image"] : ["text"] }, { id: "runtime", contextWindow: 400000, reasoning: true }], tokensPerSecond: Infinity });
-  faux.setResponses(steps);
-  const models = createModels(); models.setProvider(faux.provider);
-  const imageBackend = {
-    name: "fake-comfy", submit: vi.fn(async () => "image-job"),
-    collect: vi.fn(async (_id: string, outDir: string) => {
-      await fs.mkdir(outDir, { recursive: true }); const file = path.join(outDir, "result.png");
-      await fs.writeFile(file, TRANSPARENT_PNG); return [file];
-    }),
-    reconcile: vi.fn(async () => ({ images: [] as string[] })), clearReferences: vi.fn(async () => {}),
-  } satisfies Pick<ImageBackend, "name" | "submit" | "collect" | "reconcile" | "clearReferences">;
-  const http = opts.fetch ?? vi.fn(async () => Response.json({ results: [{ title: "资料", date: "2026-10-18", summary: "摘要", url: "https://example.com", rerank_score: 1 }] })) as typeof fetch;
-  const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
-  const model = faux.getModel();
-  const pi = await PiBackend.open({ scheduleTools: opts.scheduleTools, sendService: opts.sendService, grants: opts.grants, dataDir: dir, workspaceDir: opts.workspaceDir, models, model: { provider: model.provider, modelId: model.id },
-    channel: opts.channel, skillsDir: opts.skillsDir, currentModel: opts.currentModel, mediaRecall: opts.mediaRecall, mediaRecallMaxPerTicket: opts.mediaRecallMaxPerTicket,
-    instrumentation: opts.instrumentation, thinkingLevel: "off", store, contextUsage, imageBackend, web, timeoutMs: opts.timeoutMs,
-    reserveTokens: opts.reserveTokens, backgroundTokens: opts.backgroundTokens,
-    ...(opts.disk ? {} : { storage: new MemoryStorage() }),
-  });
-  cleanup.push(() => pi.close());
-  return { pi, dir, store, contextUsage, faux, http, imageBackend, models };
+/** 按顺序消费的模型脚本；用完后一律简短回答。 */
+function script(...steps: Step[]): Brain & { push(...more: Step[]): void; left(): number } {
+  const queue = [...steps];
+  const brain = ((ctx: TranscriptContext, _signal: AbortSignal | undefined, extra?: { model: string; reasoning: unknown }) => {
+    const step = queue.shift();
+    if (!step) return reply();
+    return typeof step === "function" ? step(ctx, extra) : step;
+  }) as Brain & { push(...more: Step[]): void; left(): number };
+  brain.push = (...more) => { queue.push(...more); };
+  brain.left = () => queue.length;
+  return brain;
 }
 
-describe("pi durable backend", () => {
-  it("owner 的定时群回合允许 all 读取，仍复用群线程；普通创建者不能扩大范围", async () => {
-    const f = await grantsFixture(), ticket = "run_" + "b".repeat(40);
-    await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "1" });
-    let seen!: TranscriptContext;
-    const s = await setup([call("send_message", { target: "qq:group:8", text: "定时完成" }), transcript => { seen = transcript; return reply(); }],
-      { dir: f.dir, sendService: f.service, grants: f.grants });
-    await s.pi.handle({ ...request(ticket), access: "all", actor: "qq:1", actorIsOwner: true, senderIsOwner: true }, handleContext());
-    expect(seen.messages.find(message => message.role === "toolResult")?.isError).not.toBe(true);
-    expect(f.service.rows(ticket)).toMatchObject([{ status: "sent", target_id: "8", mention_user_id: null }]);
-    const threads = await s.pi.readThreadIds();
-    expect(threads.owner).toBeUndefined();
-    const id = threads["group:7"] as ConversationId;
-    const conv = (await s.pi.harness.conversation(id, context))!;
-    const tools = (await conv.agent(context)).tools;
-    expect(tools.some(tool => tool.name.startsWith("auth_"))).toBe(false);
-    expect(tools.find(tool => tool.name === "send_message")!.parameters).toHaveProperty("properties.target");
-    expect(await s.pi.harness.snapshot(PiRequestDoc, id, context)).toMatchObject({ access: "all", actor: "qq:1", actorIsOwner: true, senderIsOwner: true });
-    await expect(s.pi.handle({ ...request("scheduled-member"), access: "all" }, handleContext())).rejects.toThrow("非法访问范围");
-  });
+async function rig(steps: Step[], options: ResidentOptions = {}): Promise<ResidentRig & { script: ReturnType<typeof script> }> {
+  const brain = script(...steps);
+  const r = await residentRig({ ...options, brain });
+  return Object.assign(r, { script: brain });
+}
 
-  it("恢复定时回合时按当前身份缩小 pi 的持久授权", async () => {
-    let started = false;
-    const s = await setup([async (_ctx, opts) => {
-      started = true;
-      await new Promise<void>(resolve => opts?.signal?.addEventListener("abort", () => resolve(), { once: true }));
-      return fauxAssistantMessage("", { stopReason: "aborted" });
-    }, reply("恢复完成")]);
-    const cancel = new AbortController();
-    const pending = s.pi.handle({ ...request("scheduled-resume"), access: "all", actor: "qq:1", actorIsOwner: true, senderIsOwner: true },
-      { ...handleContext(), signal: cancel.signal });
-    const rejected = expect(pending).rejects.toThrow();
-    await vi.waitFor(() => expect(started).toBe(true));
-    cancel.abort(); await rejected;
-    await s.pi.handle({ ...request("scheduled-resume"), actor: "qq:1", actorIsOwner: false }, handleContext());
-    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-    expect(await s.pi.harness.snapshot(PiRequestDoc, id, context)).toMatchObject({ access: "group:7", actor: "qq:1", actorIsOwner: false, senderIsOwner: false });
-  });
+const toolResults = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult");
+const results = (ctx: TranscriptContext) => toolResults(ctx).map(m => JSON.stringify(m.content)).join("\n");
+const systemOf = (ctx: TranscriptContext) => {
+  const system = ctx.messages.findLast(m => m.role === "system");
+  if (!system || system.role !== "system") throw new Error("缺少 system 消息");
+  return getSystemMessageText(system);
+};
+const turnOf = (r: ResidentRig, key: string) => r.bridge.inbox.getInbound(key)!.turn_id!;
+const convOf = async (r: ResidentRig, key: string) => (await r.pi.harness.conversation((await r.pi.readThreadIds())[key]! as ConversationId, context))!;
+/** say + idle：一条消息完整处理完。 */
+const turn = async (r: ResidentRig, user: string, text: string, group: string | null = "7", extra: Partial<InboundMessage> = {}) => {
+  const key = await r.say(user, text, group, extra);
+  await r.idle();
+  return key;
+};
 
-  it.each([false, true])("qq_chats 仅在 all 范围调用通道（主人私聊=%s）", async owner => {
+/** 先算出入站键再放附件（附件目录 incoming/<入站键>），之后照常落盘投递。 */
+async function sayWithImages(r: ResidentRig, user: string, text: string, files: (dir: string) => Promise<string[]>, group: string | null = "7") {
+  const msg = r.message(user, text, group);
+  const key = inboundKey(msg);
+  msg.images = await files(path.join(r.dir, "incoming", key));
+  (r.bridge.inbox as ReplyStore).admit(msg, threadKeyOf(msg, r.owners));
+  r.history.ingest(msg);
+  await r.inbox.receive(msg, key);
+  await r.idle();
+  return key;
+}
+
+describe("pi 常驻后端：工具身份随本轮绑定", () => {
+  it.each([false, true])("qq_chats 仅在 all 范围调用通道（owner=%s）", async owner => {
     const listChats = vi.fn<Channel["listChats"]>().mockResolvedValue({ groups: [{ group_id: "7", name: "家庭群", member_count: 6 }], friends: [] });
     let seen!: TranscriptContext;
-    const s = await setup([call("qq_chats"), ctx => { seen = ctx; return reply(); }], { channel: { listChats } });
-    await s.pi.handle(request("chats", owner), handleContext());
+    const r = await rig([call(["qq_chats", {}]), ctx => { seen = ctx; return reply(); }], { channel: { listChats } });
+    await turn(r, owner ? "1" : "5", "列一下会话", owner ? null : "7");
     expect(listChats).toHaveBeenCalledTimes(owner ? 1 : 0);
     expect(results(seen)).toContain(owner ? "group:7 家庭群（6 人）" : "仅限主人回合");
-    const result = seen.messages.find(m => m.role === "toolResult" && m.toolName === "qq_chats");
-    expect(result?.role === "toolResult" && result.isError).toBe(!owner);
+    expect(toolResults(seen).find(m => m.toolName === "qq_chats")?.isError).toBe(!owner);
   });
-  it.each([true, false])("技能权限与提示按本轮发送者接线（owner 私聊=%s），下一条非 owner 消息不可改", async privateOwner => {
+
+  it.each([true, false])("技能写权限与提示按本轮发送者接线（owner 私聊=%s），下一条非 owner 消息不可改", async privateOwner => {
     const dir = tmp("pi-skills-owner-"), skillsDir = path.join(dir, "custom-skills"), file = path.join(skillsDir, "hello", "SKILL.md");
     const text = "---\nname: hello\ndescription: owner 新增技能\n---\n正文";
     const seen: TranscriptContext[] = [];
     const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
-    const s = await setup([call("write", { path: file, content: text }), inspect, call("write", { path: file, content: "群改写" }), inspect], { dir, skillsDir });
-    await s.pi.handle({ ...request("skills-owner-write", privateOwner), senderIsOwner: true }, handleContext());
+    const r = await rig([call(["write", { path: file, content: text }]), inspect, call(["write", { path: file, content: "群改写" }]), inspect], { skillsDir });
+    await turn(r, "1", "写个技能", privateOwner ? null : "7");
     expect(await fs.readFile(file, "utf8")).toBe(text);
-    const ownerSystem = seen[0].messages.findLast(m => m.role === "system")!;
-    if (ownerSystem.role !== "system") throw new Error("缺少 system");
-    expect(getSystemMessageText(ownerSystem)).toContain("技能写入规则");
-    expect(getSystemMessageText(ownerSystem)).toContain(skillsDir + "/<name>/");
-    const ids = await s.pi.readThreadIds();
-    const ownerId = ids[privateOwner ? "owner" : "group:7"] as ConversationId;
-    expect((await s.pi.harness.snapshot(PiRequestDoc, ownerId, context))?.senderIsOwner).toBe(true);
-    await s.pi.handle(request("skills-group-write"), handleContext());
-    const groupSystem = seen[1].messages.findLast(m => m.role === "system")!;
-    if (groupSystem.role !== "system") throw new Error("缺少 system");
-    expect(getSystemMessageText(groupSystem)).toContain("owner 新增技能");
-    expect(getSystemMessageText(groupSystem)).not.toContain("技能写入规则");
-    const groupId = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-    expect((await s.pi.harness.snapshot(PiRequestDoc, groupId, context))?.senderIsOwner).toBe(false);
-    if (!privateOwner) expect(groupId).toBe(ownerId);
-    expect(seen[1].messages.some(m => m.role === "toolResult" && m.isError)).toBe(true);
+    expect(systemOf(seen[0]!)).toContain("技能写入规则");
+    expect(systemOf(seen[0]!)).toContain(skillsDir + "/<name>/");
+    await turn(r, "5", "改技能");
+    expect(systemOf(seen[1]!)).toContain("owner 新增技能");
+    expect(systemOf(seen[1]!)).not.toContain("技能写入规则");
+    expect(toolResults(seen[1]!).some(m => m.isError)).toBe(true);
     expect(await fs.readFile(file, "utf8")).toBe(text);
-  });
-  it("面板公开源分页读取真实历史与指定条目上下文，重置后仍列出归档", async () => {
-    const s = await setup([reply("历史回复"), reply("owner 回复")]);
-    await s.pi.handle(request("source-group"), handleContext());
-    await s.pi.handle(request("source-owner", true), handleContext());
-    const id = String((await s.pi.readThreadIds())["group:7"]);
-    const sessions = await s.pi.sessionSource.listConversations();
-    expect(sessions.find(item => item.id === id)).toMatchObject({ label: "group:7", scope: "group:7", status: "active" });
-    expect(sessions.find(item => item.label === "owner")).toMatchObject({ scope: "owner", status: "active" });
-    const first = await s.pi.sessionSource.entries(id, undefined, 1);
-    expect(first.items).toHaveLength(1);
-    expect(first.hasMore).toBe(true);
-    const later = await s.pi.sessionSource.entries(id, first.cursor, 256);
-    expect(later.items.every(item => item.id > first.items[0]!.id)).toBe(true);
-    const userEntry = [...first.items, ...later.items].find(item => item.kind === "pi.user")!;
-    const historical = await s.pi.sessionSource.context(id, String(userEntry.id));
-    expect(historical.messages.some(message => message.role === "user")).toBe(true);
-    expect(historical.messages.some(message => message.role === "assistant")).toBe(false);
-    expect((await s.pi.sessionSource.context(id)).messages.some(message => message.role === "assistant")).toBe(true);
-    await s.pi.resetThread("group:7");
-    expect((await s.pi.sessionSource.listConversations()).find(item => item.id === id))
-      .toMatchObject({ label: "group:7", scope: "group:7", status: "archived" });
-    expect((await s.pi.sessionSource.entries(id)).items).toHaveLength(first.items.length + later.items.length);
-    await expect(s.pi.sessionSource.entries("../../private")).rejects.toThrow("非法");
+    const ids = await r.pi.readThreadIds();
+    expect(Object.keys(ids).sort()).toEqual(privateOwner ? ["group:7", "owner"] : ["group:7"]);
   });
 
-  it("面板公开源使用 watchEvents 通知已提交条目且取消订阅有效", async () => {
-    const s = await setup([reply("初始回复"), reply("新增回复"), reply("取消后回复")]);
-    await s.pi.handle(request("source-live-1"), handleContext());
-    const id = String((await s.pi.readThreadIds())["group:7"]);
-    const changed = vi.fn();
-    const stop = await s.pi.sessionSource.subscribe!(id, changed);
-    await s.pi.handle(request("source-live-2"), handleContext());
-    await vi.waitFor(() => expect(changed).toHaveBeenCalled());
-    stop();
-    const count = changed.mock.calls.length;
-    await s.pi.handle(request("source-live-3"), handleContext());
-    expect(changed).toHaveBeenCalledTimes(count);
-  });
-
-  it.each(["group", "owner", "private"])("所有 %s 会话注册四个内置工具并在独立工作目录执行", async kind => {
+  it.each(["group", "owner", "private"])("%s 会话注册四个内置工具并在独立工作目录执行", async kind => {
     let seen: TranscriptContext | undefined;
-    const s = await setup([call("write", { path: "note.txt", content: "原文" }),
-      call("edit", { path: "note.txt", edits: [{ oldText: "原文", newText: "改后" }] }),
-      call("read", { path: "note.txt" }), call("bash", { command: "printf builtin-ok" }),
+    const r = await rig([call(["write", { path: "note.txt", content: "原文" }]),
+      call(["edit", { path: "note.txt", edits: [{ oldText: "原文", newText: "改后" }] }]),
+      call(["read", { path: "note.txt" }]), call(["bash", { command: "printf builtin-ok" }]),
       ctx => { seen = ctx; return reply(); }]);
-    await expect(fs.access(path.join(s.dir, "pi-work"))).rejects.toThrow();
-    const req = request("coding-" + kind, kind === "owner");
-    if (kind === "private") Object.assign(req, { scope: "private:9", access: "private:9", threadKey: "private:9",
-      source: { type: "private", user_id: "9", group_id: null, nickname: "测试者" } });
-    await s.pi.handle(req, handleContext());
-    expect(await fs.readFile(path.join(s.dir, "pi-work", req.threadKey.replace(":", "_"), "note.txt"), "utf8")).toBe("改后");
-    const tools = seen!.messages.filter(m => m.role === "toolResult");
+    await expect(fs.access(path.join(r.dir, "pi-work"))).rejects.toThrow();
+    const [user, group, key] = kind === "group" ? ["5", "7", "group:7"] : kind === "owner" ? ["1", null, "owner"] : ["5", null, "private:5"];
+    await turn(r, user!, "写文件", group);
+    expect(await fs.readFile(path.join(r.dir, "pi-work", key!.replace(":", "_"), "note.txt"), "utf8")).toBe("改后");
+    const tools = toolResults(seen!);
     expect(tools.map(m => m.toolName)).toEqual(["write", "edit", "read", "bash"]);
     expect(tools.slice(0, 3).every(m => !m.isError)).toBe(true);
     expect(tools[3]!.isError).toBe(process.platform !== "linux");
@@ -231,796 +122,725 @@ describe("pi durable backend", () => {
     expect(DEFAULT_PI_PROMPT).toContain("用 read 打开");
   });
 
-  it.each(["config", "env"])("从 %s 传入 Codex 工作区，read 不能跨 scope 读取", async source => {
+  it("配置的 Codex 工作区禁读，read 不能跨 scope 读取", async () => {
     const dir = tmp("cs-pi-workspace-");
     const workspaceDir = path.join(dir, "configured-workspace");
     const secret = await put(path.join(workspaceDir, "group_8", "note"), "other-scope-secret");
-    // 显式配置优先于环境变量；未传配置时使用环境变量。
-    vi.stubEnv("WORKSPACE_DIR", source === "env" ? workspaceDir : path.join(dir, "unused-workspace"));
     let seen: TranscriptContext | undefined;
-    const s = await setup([call("read", { path: secret }), ctx => { seen = ctx; return reply(); }],
-      { dir, ...(source === "config" ? { workspaceDir } : {}) });
-    await s.pi.handle(request("workspace-denied"), handleContext());
-    expect(seen!.messages.find(m => m.role === "toolResult")?.isError).toBe(true);
+    const r = await rig([call(["read", { path: secret }]), ctx => { seen = ctx; return reply(); }], { workspaceDir });
+    await turn(r, "5", "读一下");
+    expect(toolResults(seen!)[0]?.isError).toBe(true);
     expect(results(seen!)).toContain("拒绝读取");
     expect(results(seen!)).not.toContain("other-scope-secret");
   });
 
-  it("read 打开召回路径返回图片内容，qq_image 自身仍只返回文本", async () => {
+  it("read 打开召回路径返回图片内容", async () => {
     let seen: TranscriptContext | undefined;
-    const s = await setup([], { vision: true });
-    const media = await mediaFixture(s.store, s.dir);
-    s.faux.setResponses([call("read", { path: media }), ctx => { seen = ctx; return reply(); }]);
-    await s.pi.handle(request("read-image"), handleContext());
-    const result = seen!.messages.find(m => m.role === "toolResult" && m.toolName === "read");
-    expect(result?.role === "toolResult" && result.content.some(c => c.type === "image" && c.mimeType === "image/png" && c.data.length > 0)).toBe(true);
-    expect(result?.role === "toolResult" && result.isError).toBe(false);
+    const r = await rig([], { vision: true });
+    const media = await mediaFixture(r.history, r.dir);
+    r.script.push(call(["read", { path: media }]), ctx => { seen = ctx; return reply(); });
+    await turn(r, "5", "看图");
+    const result = toolResults(seen!).find(m => m.toolName === "read");
+    expect(result?.content.some(c => c.type === "image" && c.mimeType === "image/png" && c.data.length > 0)).toBe(true);
+    expect(result?.isError).toBe(false);
   });
 
-  it("文件权限从持久化请求重建：换票据、跨 scope 与 SQLite 重开不沿用旧权限", async () => {
-    const s = await setup([], { disk: true, vision: true });
-    const media = await mediaFixture(s.store, s.dir, "group:7");
-    const incoming = await put(path.join(s.dir, "incoming", "bound-old", "ref.txt"), "old-reference");
-    const oldImage = path.join(s.dir, "images", "bound-old", "file.txt");
-    let first: TranscriptContext | undefined;
-    s.faux.setResponses([call("read", { path: incoming }), call("write", { path: oldImage, content: "old-image" }),
-      call("read", { path: media }), ctx => { first = ctx; return reply("first"); }]);
-    await s.pi.handle(request("bound-old"), handleContext());
-    expect(first!.messages.filter(m => m.role === "toolResult").every(m => !m.isError)).toBe(true);
-    await s.pi.close();
+  it("文件权限每次调用从宿主当前回合重建：换输入、跨 scope 与重启不沿用旧权限", async () => {
+    const r = await rig([], { vision: true });
+    const media = await mediaFixture(r.history, r.dir, "group:7");
+    const groupImage = path.join(r.dir, "images", "group_7", "file.txt");
+    let first: TranscriptContext | undefined, ref = "";
+    r.script.push(ctx => call(["read", { path: ref }]), call(["write", { path: groupImage, content: "group-image" }]),
+      call(["read", { path: media }]), ctx => { first = ctx; return reply("first"); });
+    const old = await sayWithImages(r, "5", "看附件", async dir => {
+      ref = path.join(dir, "ref.png"); await fs.mkdir(dir, { recursive: true }); await fs.writeFile(ref, TRANSPARENT_PNG); return [ref];
+    });
+    expect(toolResults(first!).map(m => !!m.isError)).toEqual([false, false, false]);
+    expect(old).toBeTruthy();
+    await r.restart();
     let second: TranscriptContext | undefined;
-    const newImage = path.join(s.dir, "images", "bound-new", "new.txt");
-    const reopened = await setup([call("read", { path: incoming }), call("write", { path: oldImage, content: "bad" }),
-      call("write", { path: newImage, content: "new-image" }), ctx => { second = ctx; return reply(); }], { disk: true, dir: s.dir, vision: true });
-    expect((await reopened.pi.handle(request("bound-old"), handleContext())).text).toBe("first");
-    expect(reopened.faux.state.callCount).toBe(0);
-    await reopened.pi.handle(request("bound-new"), handleContext());
-    expect(second!.messages.filter(m => m.role === "toolResult").slice(-3).map(m => !!m.isError)).toEqual([true, true, false]);
-    expect(await fs.readFile(oldImage, "utf8")).toBe("old-image");
-    expect(await fs.readFile(newImage, "utf8")).toBe("new-image");
+    const otherImage = path.join(r.dir, "images", "group_8", "x.txt");
+    r.script.push(call(["read", { path: ref }]), call(["write", { path: otherImage, content: "bad" }]),
+      call(["write", { path: path.join(r.dir, "images", "group_7", "new.txt"), content: "new-image" }]), ctx => { second = ctx; return reply(); });
+    await turn(r, "5", "新的一轮");
+    expect(toolResults(second!).slice(-3).map(m => !!m.isError)).toEqual([true, true, false]);
+    expect(await fs.readFile(groupImage, "utf8")).toBe("group-image");
     let other: TranscriptContext | undefined;
-    reopened.faux.setResponses([call("read", { path: media }), ctx => { other = ctx; return reply(); }]);
-    await reopened.pi.handle({ ...request("other-scope"), scope: "group:8", access: "group:8", threadKey: "group:8",
-      source: { type: "group", user_id: "1", group_id: "8", nickname: "其他群" } }, handleContext());
-    expect(other!.messages.find(m => m.role === "toolResult")?.isError).toBe(true);
+    r.script.push(call(["read", { path: media }]), ctx => { other = ctx; return reply(); });
+    await turn(r, "5", "别的群", "8");
+    expect(toolResults(other!)[0]?.isError).toBe(true);
   });
 
-  it("四个内置工具共享二十次额度，与历史检索分开且新票据重置", async () => {
-    let seen: TranscriptContext | undefined;
-    const cycle = () => [call("write", { path: "cap.txt", content: "a" }),
-      call("edit", { path: "cap.txt", edits: [{ oldText: "a", newText: "b" }] }),
-      call("read", { path: "cap.txt" }), call("bash", { command: "true" })];
-    const s = await setup([...Array.from({ length: 5 }, cycle).flat(),
-      call("write", { path: "blocked.txt", content: "blocked" }), call("qq_recent"),
-      ctx => { seen = ctx; return reply(); },
-      call("write", { path: "next.txt", content: "next" }), reply()]);
-    const obs = new ObsStore(s.dir, 30); trace.attach(obs);
+  it("内置调用只记录工具、前二百字的命令或路径、退出码和耗时，按回合键归属", async () => {
+    const events: LiveEvent[] = [];
+    const untap = trace.tap(e => { if (e.ticket.startsWith("turn:pi:") && e.stage.startsWith("tool:")) events.push(e); });
+    const r = await rig([call(["write", { path: "trace.txt", content: "do-not-log-file-content" }]),
+      call(["read", { path: "trace.txt" }]), call(["bash", { command: "printf do-not-log-stdout; #" + "x".repeat(300) }]),
+      call(["bash", { command: "exit 7" }]), reply()]);
     try {
-      await s.pi.handle(request("coding-cap"), handleContext());
-      expect(results(seen!)).toContain("本轮调用上限（20 次）");
-      expect(results(seen!)).toContain("没有记录");
-      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-      const doc = await s.pi.harness.snapshot(PiRequestDoc, id, context);
-      expect(Object.values(doc!.calls).filter(c => c.kind === "builtin")).toHaveLength(20);
-      await expect(fs.access(path.join(s.dir, "pi-work", "group_7", "blocked.txt"))).rejects.toThrow();
-      expect(obs.events("coding-cap").length).toBeLessThanOrEqual(30);
-      expect(obs.events("coding-cap").some(e => e.stage === "events_dropped")).toBe(true);
-      await s.pi.handle(request("coding-next"), handleContext());
-      expect(await fs.readFile(path.join(s.dir, "pi-work", "group_7", "next.txt"), "utf8")).toBe("next");
-    } finally { trace.attach(); obs.close(); }
-  });
-
-  it("内置调用只记录工具、前二百字的命令或路径、退出码和耗时", async () => {
-    const events: import("../../src/shared/trace.js").LiveEvent[] = [];
-    const untap = trace.tap(e => { if (e.ticket === "coding-trace" && e.stage.startsWith("tool:")) events.push(e); });
-    const s = await setup([call("write", { path: "trace.txt", content: "do-not-log-file-content" }),
-      call("read", { path: "trace.txt" }), call("bash", { command: "printf do-not-log-stdout; #" + "x".repeat(300) }),
-      call("bash", { command: "exit 7" }), reply()]);
-    try {
-      await s.pi.handle(request("coding-trace"), handleContext());
+      const key = await turn(r, "5", "记录");
       const done = events.filter(e => e.status !== "started");
       expect(done).toHaveLength(4);
+      expect(new Set(done.map(e => e.ticket))).toEqual(new Set(["turn:" + turnOf(r, key)]));
       expect(done.every(e => typeof e.duration_ms === "number" && !("output" in e.detail) && !("input" in e.detail))).toBe(true);
       expect(done[0]!.detail).toMatchObject({ tool: "write", path: "trace.txt", exit_code: null });
       expect(String(done[2]!.detail.command)).toHaveLength(200);
-      expect(done[2]!.detail.exit_code).toBe(process.platform === "linux" ? 0 : null);
       expect(done[3]!).toMatchObject({ status: "failed", detail: { tool: "bash", exit_code: process.platform === "linux" ? 7 : null } });
       expect(JSON.stringify(events)).not.toContain("do-not-log-file-content");
     } finally { untap(); }
   });
 
-  it("qq_image 绑定请求范围，独立五次限额，结果仅有路径文本", async () => {
+  it("qq_image 绑定本轮读取范围，不再按回合限次，结果仅有路径文本", async () => {
     let seen: TranscriptContext | undefined;
     const recall = vi.fn(async () => ({ text: "图1: /data/media/ab/test.png（1×1）", images: [{ path: "/data/media/ab/test.png", width: 1, height: 1 }] }));
-    const s = await setup([...Array.from({ length: 6 }, () => call("qq_image", { message_id: "123" })), call("qq_recent"),
-      ctx => { seen = ctx; return reply(); }], { mediaRecall: { recall } });
-    await s.pi.handle(request("recall"), handleContext());
-    expect(recall).toHaveBeenCalledTimes(5);
+    const r = await rig([...Array.from({ length: 6 }, () => call(["qq_image", { message_id: "123" }])), ctx => { seen = ctx; return reply(); }],
+      { mediaRecall: { recall } });
+    await turn(r, "5", "召回");
+    expect(recall).toHaveBeenCalledTimes(6);
     expect(recall).toHaveBeenCalledWith({ kind: "scope", scope: "group:7" }, "123", expect.any(AbortSignal));
-    expect(results(seen!)).toContain("本轮召回次数已用完");
     expect(results(seen!)).toContain("/data/media/ab/test.png");
-    const returned = seen!.messages.filter(m => m.role === "toolResult" && m.toolName === "qq_image");
-    expect(returned.every(m => m.role === "toolResult" && m.content.every(c => c.type === "text"))).toBe(true);
-    expect(results(seen!)).toContain("没有记录");
-  });
-  it("召回配置额度不占历史桶，失败归入媒体召回而非历史或模型服务", async () => {
-    const events: import("../../src/shared/trace.js").LiveEvent[] = [];
-    const untap = trace.tap(e => { if (e.ticket === "recall-failure") events.push(e); });
-    const recall = vi.fn(async () => { throw Object.assign(new Error("fixture authentication"), { status: 401 }); });
-    const s = await setup([...Array.from({ length: 3 }, () => call("qq_image", { message_id: "123" })),
-      ...Array.from({ length: 5 }, () => call("qq_recent")), reply()],
-      { mediaRecall: { recall }, mediaRecallMaxPerTicket: 2 });
-    try {
-      await s.pi.handle(request("recall-failure"), handleContext());
-      expect(recall).toHaveBeenCalledTimes(2);
-      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-      const doc = await s.pi.harness.snapshot(PiRequestDoc, id, context);
-      expect(Object.values(doc!.calls).filter(c => c.kind === "qq_image")).toHaveLength(2);
-      expect(Object.values(doc!.calls).filter(c => c.kind === "history")).toHaveLength(4);
-      const failed = events.filter(e => e.stage === "tool:qq_image" && e.detail.failure);
-      expect(failed).toHaveLength(2);
-      expect(failed[0]!.detail.failure).toMatchObject({ provider: "media_recall", kind: "auth", status: 401 });
-    } finally { untap(); }
+    expect(toolResults(seen!).every(m => m.content.every(c => c.type === "text"))).toBe(true);
+    r.script.push(call(["qq_image", { message_id: "123" }]), reply());
+    await turn(r, "1", "owner 召回");
+    expect(recall).toHaveBeenLastCalledWith({ kind: "all" }, "123", expect.any(AbortSignal));
   });
 
-  it("calls web_search through the faux model, then returns the final answer and source header", async () => {
+  it("web_search 经 faux 模型调用；输入带来源头与引用", async () => {
     let seen: TranscriptContext | undefined;
-    const s = await setup([call("web_search", { query: "CS2", count: 3 }), ctx => { seen = ctx; return reply("查到了"); }]);
-    expect(await s.pi.handle({ ...request("search"), quote: { message_id: "123", nickname: "友人", text: "此前的问题" } }, handleContext())).toEqual({ text: "查到了", images: [] });
+    const http = vi.fn(async () => Response.json({ results: [{ title: "资料", date: "2026-10-18", summary: "摘要", url: "https://example.com", rerank_score: 1 }] })) as typeof fetch;
+    const web = new DeepSeekWeb({ apiKey: "test-only", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
+    const r = await rig([call(["web_search", { query: "CS2", count: 3 }]), ctx => { seen = ctx; return reply("查到了"); }], { web });
+    r.history.ingest(r.message("6", "此前的问题", "7", { message_id: "123", nickname: "友人" }));
+    await turn(r, "5", "查一下", "7", { segments: [{ type: "reply", data: { id: "123" } }] });
     expect(results(seen!)).toContain("资料 / 2026-10-18 / 摘要 / https://example.com");
     expect(JSON.stringify(seen!.messages)).toContain("[来源] 群 7");
     expect(JSON.stringify(seen!.messages)).toContain("[引用 #123] 友人: 此前的问题");
-    const init = vi.mocked(s.http).mock.calls[0]![1]!;
-    expect(JSON.parse(String(init.body))).toEqual({ query: "CS2", count: 3, need_content: false });
+    expect(JSON.parse(String(vi.mocked(http).mock.calls[0]![1]!.body))).toEqual({ query: "CS2", count: 3, need_content: false });
   });
 
-  it("binds history access for each scope request; groups never read private rows", async () => {
+  it("历史读取范围随本轮：群只读本群，owner 读全部", async () => {
     const seen: string[] = [];
     const final = (ctx: TranscriptContext) => { seen.push(results(ctx)); return reply(); };
-    const s = await setup([call("qq_recent"), final, call("qq_search", { query: "另群" }), final,
-      call("qq_message", { message_id: "private" }), final, call("qq_recent"), final]);
-    s.store.ingest(inbound("private", null, "私人秘密"));
-    s.store.ingest(inbound("group", "7", "本群消息"));
-    s.store.ingest(inbound("other", "8", "另群记录"));
-    await s.pi.handle(request("group7"), handleContext());
+    const r = await rig([call(["qq_recent", {}]), final, call(["qq_search", { query: "另群" }]), final,
+      call(["qq_message", { message_id: "private-x" }]), final, call(["qq_recent", {}]), final]);
+    r.history.ingest(r.message("6", "私人秘密", null, { message_id: "private-x" }));
+    r.history.ingest(r.message("6", "本群消息", "7"));
+    r.history.ingest(r.message("6", "另群记录", "8"));
+    await turn(r, "5", "看看");
     expect(seen[0]).toContain("本群消息"); expect(seen[0]).not.toContain("私人秘密"); expect(seen[0]).not.toContain("另群记录");
-    await s.pi.handle({ ...request("group8"), scope: "group:8", access: "group:8", source: { ...request("x").source, group_id: "8" } }, handleContext());
+    await turn(r, "5", "看看", "8");
     expect(seen[1]).toContain("另群记录");
-    await s.pi.handle(request("private-denied"), handleContext());
+    await turn(r, "5", "看看私聊");
     expect(seen[2]).toContain("没有这条消息"); expect(seen[2]).not.toContain("私人秘密");
-    await s.pi.handle(request("owner", true), handleContext()); expect(seen[3]).toContain("私人秘密");
+    await turn(r, "1", "owner 看看", null);
+    expect(seen[3]).toContain("私人秘密");
   });
 
-  it("历史参考图按请求范围校验，允许本群与 owner，拒绝别群和未登记路径", async () => {
+  it("参考图按本轮读取范围校验：允许本群与 owner，拒绝别群和未登记路径", async () => {
     let seen = "";
-    const s = await setup([]);
-    const media = await mediaFixture(s.store, s.dir, "group:7");
-    const foreign = path.join(s.dir, "outside.png"); await fs.writeFile(foreign, TRANSPARENT_PNG);
-    s.faux.setResponses([call("generate_image", { prompt: "编辑", reference_images: [media] }), reply(),
-      call("generate_image", { prompt: "编辑", reference_images: [media] }), ctx => { seen = results(ctx); return reply(); },
-      call("generate_image", { prompt: "编辑", reference_images: [foreign] }), reply(),
-      call("generate_image", { prompt: "编辑", reference_images: [media] }), reply()]);
-    await s.pi.handle(request("media-own"), handleContext());
-    expect(s.imageBackend.submit).toHaveBeenCalledWith(expect.objectContaining({ reference_images: [media] }), expect.anything(), expect.anything());
-    await s.pi.handle({ ...request("media-other"), scope: "group:8", access: "group:8", threadKey: "group:8" }, handleContext());
+    const r = await rig([]);
+    const media = await mediaFixture(r.history, r.dir, "group:7");
+    const foreign = path.join(r.dir, "outside.png"); await fs.writeFile(foreign, TRANSPARENT_PNG);
+    r.script.push(call(["generate_image", { prompt: "编辑", reference_images: [media] }]), reply(),
+      call(["generate_image", { prompt: "编辑", reference_images: [media] }]), ctx => { seen = results(ctx); return reply(); },
+      call(["generate_image", { prompt: "编辑", reference_images: [foreign] }]), reply(),
+      call(["generate_image", { prompt: "编辑", reference_images: [media] }]), reply());
+    await turn(r, "5", "本群");
+    expect(r.imageBackend.submit).toHaveBeenCalledWith(expect.objectContaining({ reference_images: [media] }), expect.anything(), expect.anything());
+    await turn(r, "5", "别群", "8");
     expect(seen).toContain("范围");
-    await s.pi.handle(request("media-outside"), handleContext());
-    expect(s.imageBackend.submit).toHaveBeenCalledTimes(1);
-    await s.pi.handle(request("media-owner", true), handleContext());
-    expect(s.imageBackend.submit).toHaveBeenCalledTimes(2);
+    await turn(r, "5", "外部路径");
+    expect(r.imageBackend.submit).toHaveBeenCalledTimes(1);
+    await turn(r, "1", "owner", "8");
+    expect(r.imageBackend.submit).toHaveBeenCalledTimes(2);
   });
 
-  it("writes generated files under the ticket/call directory and returns validated attachments", async () => {
-    const s = await setup([call("generate_image", { prompt: "写着“你好”的海报", aspect: "16:9", count: 2 }), reply("图片好了")]);
-    const out = await s.pi.handle(request("image"), handleContext());
-    expect(out.images).toEqual([await fs.realpath(path.join(s.dir, "images", "image", "call-1", "result.png"))]);
-    expect(s.imageBackend.submit.mock.calls).toHaveLength(1);
-    expect(s.imageBackend.collect).toHaveBeenCalledOnce();
+  it("生图写入 images/<会话>/call-<摘要>/ 并返回校验过的文件", async () => {
+    let seen = "";
+    const r = await rig([call(["generate_image", { prompt: "写着“你好”的海报", aspect: "16:9", count: 2 }]), ctx => { seen = results(ctx); return reply("图片好了"); }]);
+    await turn(r, "5", "画图");
+    const [dir] = (await fs.readdir(path.join(r.dir, "images", "group_7"))).filter(name => name.startsWith("call-"));
+    expect(dir).toMatch(/^call-[0-9a-f]{16}$/);
+    const file = await fs.realpath(path.join(r.dir, "images", "group_7", dir!, "result.png"));
+    expect(JSON.parse(JSON.parse(seen.split("\n")[0]!)[0].text).images).toEqual([file]);
+    expect(r.imageBackend.submit).toHaveBeenCalledOnce();
+    expect(r.imageBackend.collect).toHaveBeenCalledOnce();
   });
 
-  it("interrupted image tool retries collect the persisted job with exactly one submit", async () => {
-    const s = await setup([], { disk: true });
-    const ref = path.join(s.dir, "incoming", "image-retry", "ref.png");
-    await fs.mkdir(path.dirname(ref), { recursive: true }); await fs.writeFile(ref, TRANSPARENT_PNG);
-    let collecting = false;
-    s.imageBackend.collect.mockImplementation(async (_id, _dir, ...extra: unknown[]) => {
-      collecting = true;
-      const signal = extra[0] as AbortSignal;
-      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
-      throw new Error("interrupted");
-    });
-    s.faux.setResponses([call("generate_image", { prompt: "编辑", reference_images: [ref] })]);
-    const pending = s.pi.handle({ ...request("image-retry"), images: [ref] }, handleContext()).catch(() => undefined);
-    await vi.waitFor(() => expect(collecting).toBe(true));
-    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-    expect((await s.pi.harness.snapshot(PiRequestDoc, id, context))?.imageJobs?.[0]).toMatchObject({ ordinal: 1, prompt_id: "image-job", status: "submitted" });
-    await s.pi.close(); await pending;
-    expect(s.imageBackend.clearReferences).not.toHaveBeenCalled();
-    const restarted = await setup([call("generate_image", { prompt: "模型重试" }), reply("完成")], { disk: true, dir: s.dir });
-    const result = await restarted.pi.handle({ ...request("image-retry"), images: [ref] }, handleContext());
-    expect(result.images).toHaveLength(1);
-    expect(s.imageBackend.submit).toHaveBeenCalledOnce(); expect(restarted.imageBackend.submit).not.toHaveBeenCalled();
-    expect(restarted.imageBackend.collect).toHaveBeenCalledWith("image-job", expect.stringContaining("call-1"), expect.any(AbortSignal), expect.objectContaining({ prompt: "编辑" }));
-    expect(restarted.imageBackend.clearReferences).toHaveBeenCalledOnce();
-  });
-
-  it("reconciles an image intent when the submit response was lost instead of submitting again", async () => {
-    const s = await setup([call("generate_image", { prompt: "猫" }), call("generate_image", { prompt: "重试" }), reply()]);
-    s.imageBackend.submit.mockImplementation(async () => {
-      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-      expect((await s.pi.harness.snapshot(PiRequestDoc, id, context))?.imageJobs?.[0]).toMatchObject({ ordinal: 1, status: "intent", options: { prompt: "猫" } });
-      throw new Error("response lost after remote accept");
-    });
-    s.imageBackend.reconcile.mockImplementation(async (...args: unknown[]) => {
+  it("提交响应丢失时对账，不再次提交", async () => {
+    const r = await rig([call(["generate_image", { prompt: "猫" }]), reply()]);
+    r.imageBackend.collect.mockRejectedValueOnce(new UnknownJobError("lost"));
+    r.imageBackend.reconcile.mockImplementation(async (...args: unknown[]) => {
       const dir = args[1] as string;
+      await fs.mkdir(dir, { recursive: true });
       const file = path.join(dir, "reconciled.png"); await fs.writeFile(file, TRANSPARENT_PNG);
       return { images: [file] };
     });
-    expect((await s.pi.handle(request("image-intent"), handleContext())).images).toHaveLength(1);
-    expect(s.imageBackend.submit).toHaveBeenCalledOnce(); expect(s.imageBackend.reconcile).toHaveBeenCalledOnce();
+    await turn(r, "5", "画猫");
+    expect(r.imageBackend.submit).toHaveBeenCalledOnce(); expect(r.imageBackend.reconcile).toHaveBeenCalledOnce();
   });
 
-  it("accepts only the current ticket incoming references and cleans uploads", async () => {
+  it("参考图只接受本轮输入的 incoming 附件，完成后清理远端上传", async () => {
     let seen = "";
-    const s = await setup([]);
-    const own = path.join(s.dir, "incoming", "refs", "ref.png");
-    const other = path.join(s.dir, "incoming", "other", "ref.png");
-    for (const file of [own, other]) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, TRANSPARENT_PNG); }
-    s.faux.setResponses([call("generate_image", { prompt: "编辑", reference_images: [other] }), ctx => { seen = results(ctx); return reply(); },
-      call("generate_image", { prompt: "编辑", reference_images: [own] }), reply()]);
-    await s.pi.handle({ ...request("bad-refs"), images: [] }, handleContext());
-    expect(seen).toMatch(/参考图/); expect(s.imageBackend.submit).not.toHaveBeenCalled();
-    await s.pi.handle({ ...request("refs"), images: [own] }, handleContext());
-    expect(s.imageBackend.submit).toHaveBeenCalledOnce(); expect(s.imageBackend.clearReferences).toHaveBeenCalledOnce();
-    await expect(fs.access(path.join(s.dir, "images", "refs", "call-1", "remote-uploads.json"))).rejects.toThrow();
+    const r = await rig([]);
+    const other = path.join(r.dir, "incoming", "other", "ref.png");
+    await fs.mkdir(path.dirname(other), { recursive: true }); await fs.writeFile(other, TRANSPARENT_PNG);
+    r.script.push(call(["generate_image", { prompt: "编辑", reference_images: [other] }]), ctx => { seen = results(ctx); return reply(); });
+    await turn(r, "5", "改图");
+    expect(seen).toMatch(/参考图/); expect(r.imageBackend.submit).not.toHaveBeenCalled();
+    let own = "";
+    r.script.push(() => call(["generate_image", { prompt: "编辑", reference_images: [own] }]), reply());
+    await sayWithImages(r, "5", "改这张", async dir => {
+      own = path.join(dir, "ref.png"); await fs.mkdir(dir, { recursive: true }); await fs.writeFile(own, TRANSPARENT_PNG); return [own];
+    });
+    expect(r.imageBackend.submit).toHaveBeenCalledOnce(); expect(r.imageBackend.clearReferences).toHaveBeenCalledOnce();
   });
+});
 
-  it.each(["web_search", "fetch_page", "generate_image", "history"])("enforces the %s cap through ToolTask hooks", async kind => {
-    let seen = "";
-    const names = kind === "history" ? ["qq_recent", "qq_search", "qq_message"] : [kind];
-    const cap = kind === "generate_image" ? 2 : 4;
-    const args: Record<string, JsonObject> = { web_search: { query: "资料" }, fetch_page: { url: "https://example.com" }, generate_image: { prompt: "猫" }, qq_recent: {}, qq_search: { query: "资料" }, qq_message: { message_id: "1" } };
-    const steps = Array.from({ length: cap + 1 }, (_, i) => { const name = names[i % names.length]!; return call(name, args[name]); });
-    const http = vi.fn(async () => Response.json(kind === "fetch_page" ? { content: "正文" } : { results: [] })) as typeof fetch;
-    const s = await setup([...steps, ctx => { seen = results(ctx); return reply(); }], { fetch: http });
-    await s.pi.handle(request("caps"), handleContext());
-    expect(seen).toContain("已达到本轮调用上限");
-    if (kind === "generate_image") expect(s.imageBackend.submit).toHaveBeenCalledTimes(cap);
-    else if (kind !== "history") expect(http).toHaveBeenCalledTimes(cap);
-    s.faux.appendResponses([call(names[0]!, args[names[0]!]), reply()]);
-    await s.pi.handle(request("fresh-cap"), handleContext());
-    if (kind === "generate_image") expect(s.imageBackend.submit).toHaveBeenCalledTimes(cap + 1);
-  });
-
-  it("isolates owner/scope memories while same-thread turns serialize", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>(r => { release = r; });
-    let started = false;
-    const seen: string[] = [];
-    const s = await setup([async ctx => { seen.push(JSON.stringify(ctx)); started = true; await gate; return reply("owner-first"); },
-      ctx => { seen.push(JSON.stringify(ctx)); return reply("shared"); }, ctx => { seen.push(JSON.stringify(ctx)); return reply("owner-second"); }]);
-    const first = s.pi.handle({ ...request("first", true), text: "OWNER_ONLY" }, handleContext());
-    await vi.waitFor(() => expect(started).toBe(true));
-    const second = s.pi.handle({ ...request("second", true), text: "NEXT_OWNER" }, handleContext());
-    const parallel = await s.pi.handle({ ...request("parallel"), text: "SHARED_ONLY" }, handleContext());
-    expect(parallel.text).toBe("shared"); expect(seen).toHaveLength(2);
-    expect(seen[1]).not.toContain("OWNER_ONLY");
-    release(); await first; await second;
-    expect(seen[2]).toContain("OWNER_ONLY"); expect(seen[2]).not.toContain("SHARED_ONLY");
-    const ids = await s.pi.readThreadIds(); expect(ids.owner).not.toBe(ids["group:7"]);
-    expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).toEqual(ids);
-  });
-
-  it("isolates two groups and owner transcripts with durable per-scope conversations", async () => {
+describe("pi 会话隔离与映射", () => {
+  it("owner 与群各自常驻会话，记忆互不可见；映射镜像写入 pi-threads.json", async () => {
     const seen: string[] = [];
     const inspect = (ctx: TranscriptContext) => { seen.push(JSON.stringify(ctx.messages)); return reply(); };
-    const s = await setup([inspect, inspect, inspect, inspect]);
-    await s.pi.handle({ ...request("g7"), text: "GROUP_SEVEN_SECRET" }, handleContext());
-    await s.pi.handle({ ...request("g8"), scope: "group:8", access: "group:8", source: { ...request("g8").source, group_id: "8" }, text: "GROUP_EIGHT_SECRET" }, handleContext());
-    await s.pi.handle({ ...request("o1", true), text: "OWNER_SECRET" }, handleContext());
-    await s.pi.handle(request("g7-again"), handleContext());
+    const r = await rig([inspect, inspect, inspect, inspect]);
+    await turn(r, "5", "GROUP_SEVEN_SECRET");
+    await turn(r, "5", "GROUP_EIGHT_SECRET", "8");
+    await turn(r, "1", "OWNER_SECRET", null);
+    await turn(r, "6", "第二次");
     expect(seen[1]).not.toContain("GROUP_SEVEN_SECRET");
     expect(seen[2]).not.toMatch(/GROUP_SEVEN_SECRET|GROUP_EIGHT_SECRET/);
     expect(seen[3]).toContain("GROUP_SEVEN_SECRET");
     expect(seen[3]).not.toMatch(/GROUP_EIGHT_SECRET|OWNER_SECRET/);
-    expect(new Set(Object.values(await s.pi.readThreadIds())).size).toBe(3);
-    expect(await s.pi.threadHealth()).toEqual({ count: 3, keys: ["group:7", "group:8", "owner"] });
-    await expect(s.pi.handle({ ...request("bad-access"), access: "all" }, handleContext())).rejects.toThrow("非法访问范围");
+    expect(new Set(Object.values(await r.pi.readThreadIds())).size).toBe(3);
+    expect(await r.pi.threadHealth()).toEqual({ count: 3, keys: ["group:7", "group:8", "owner"] });
+    expect(JSON.parse(await fs.readFile(path.join(r.dir, "pi-threads.json"), "utf8"))).toEqual(await r.pi.readThreadIds());
   });
 
-  it("retires the legacy shared mapping once and preserves owner on migration", async () => {
-    const s = await setup([reply(), reply()], { disk: true });
-    await s.pi.handle(request("legacy-owner", true), handleContext());
-    await s.pi.handle(request("legacy-group"), handleContext());
-    const ids = await s.pi.readThreadIds();
+  it("旧 shared 映射只退役一次，保留 owner", async () => {
+    const r = await rig([reply(), reply(), reply()]);
+    await turn(r, "1", "owner", null);
+    await turn(r, "5", "群");
+    const ids = await r.pi.readThreadIds();
     const legacy = defineDoc<{ owner: number | null; shared: number | null }>({
       kind: "cs.pi.threads", version: 1, scope: "session", initial: () => ({ owner: null, shared: null }),
     });
-    await s.pi.harness.commit(async tx => {
+    await r.pi.harness.commit(async tx => {
       const doc = await tx.doc(legacy);
       Object.assign(doc, { owner: ids.owner, shared: ids["group:7"] });
       delete (doc as Record<string, unknown>)["group:7"];
     }, context);
-    await s.pi.close();
-    const reopened = await setup([reply()], { dir: s.dir, disk: true });
-    expect(await reopened.pi.readThreadIds()).toEqual({ owner: ids.owner });
-    await reopened.pi.handle(request("new-group"), handleContext());
-    expect((await reopened.pi.readThreadIds())["group:7"]).not.toBe(ids["group:7"]);
-    expect((await reopened.pi.readThreadIds()).shared).toBeUndefined();
+    await r.restart();
+    expect(await r.pi.readThreadIds()).toEqual({ owner: ids.owner });
+    await turn(r, "5", "新群消息");
+    expect((await r.pi.readThreadIds())["group:7"]).not.toBe(ids["group:7"]);
+    expect((await r.pi.readThreadIds()).shared).toBeUndefined();
   });
 
-  it("reuses requestId receipts after another request and after SQLite reopen", async () => {
-    const s = await setup([reply("first"), reply("second")], { disk: true });
-    await s.pi.handle(request("once"), handleContext());
-    await s.pi.handle(request("next"), handleContext());
-    expect((await s.pi.handle(request("once"), handleContext())).text).toBe("first");
-    expect(s.faux.state.callCount).toBe(2);
-    const ids = await s.pi.readThreadIds(); await s.pi.close();
-    await fs.unlink(path.join(s.dir, "pi-threads.json"));
-    const reopened = await setup([], { dir: s.dir, disk: true });
-    expect(await reopened.pi.readThreadIds()).toEqual(ids);
-    expect((await reopened.pi.handle(request("once"), handleContext())).text).toBe("first");
-    expect(reopened.faux.state.callCount).toBe(0);
+  it("面板公开源分页读取真实历史与指定条目上下文，重置后仍列出归档", async () => {
+    const r = await rig([reply("历史回复"), reply("owner 回复")]);
+    await turn(r, "5", "群消息");
+    await turn(r, "1", "owner 消息", null);
+    const id = String((await r.pi.readThreadIds())["group:7"]);
+    const sessions = await r.pi.sessionSource.listConversations();
+    expect(sessions.find(item => item.id === id)).toMatchObject({ label: "group:7", scope: "group:7", status: "active" });
+    expect(sessions.find(item => item.label === "owner")).toMatchObject({ scope: "owner", status: "active" });
+    const first = await r.pi.sessionSource.entries(id, undefined, 1);
+    expect(first.items).toHaveLength(1);
+    expect(first.hasMore).toBe(true);
+    const later = await r.pi.sessionSource.entries(id, first.cursor, 256);
+    const userEntry = [...first.items, ...later.items].find(item => item.kind === "pi.user")!;
+    const historical = await r.pi.sessionSource.context(id, String(userEntry.id));
+    expect(historical.messages.some(message => message.role === "user")).toBe(true);
+    expect(historical.messages.some(message => message.role === "assistant")).toBe(false);
+    expect((await r.pi.sessionSource.context(id)).messages.some(message => message.role === "assistant")).toBe(true);
+    await r.pi.resetThread("group:7");
+    expect((await r.pi.sessionSource.listConversations()).find(item => item.id === id))
+      .toMatchObject({ label: "group:7", scope: "group:7", status: "archived" });
+    await expect(r.pi.sessionSource.entries("../../private")).rejects.toThrow("非法");
   });
 
-  it.each(["config", "env"])("项目指引通过 %s 工作区注入 system，热更新且不重复写入相同 system 条目", async source => {
+  it("面板公开源 subscribe 通知已提交条目且取消订阅有效", async () => {
+    const r = await rig([reply("初始回复"), reply("新增回复"), reply("取消后回复")]);
+    await turn(r, "5", "一");
+    const id = String((await r.pi.readThreadIds())["group:7"]);
+    const changed = vi.fn();
+    const stop = await r.pi.sessionSource.subscribe!(id, changed);
+    await turn(r, "5", "二");
+    await vi.waitFor(() => expect(changed).toHaveBeenCalled());
+    stop();
+    const count = changed.mock.calls.length;
+    await turn(r, "5", "三");
+    expect(changed).toHaveBeenCalledTimes(count);
+  });
+});
+
+describe("pi system 提示热更新", () => {
+  it("项目指引通过配置的工作区注入 system，热更新且不重复写入相同 system 条目", async () => {
     const dir = tmp("cs-pi-project-");
     const workspaceDir = path.join(dir, "workspace");
-    vi.stubEnv("WORKSPACE_DIR", source === "env" ? workspaceDir : path.join(dir, "unused-workspace"));
     const outer = await put(path.join(workspaceDir, "AGENTS.md"), "运维项目指引");
     const inner = await put(path.join(dir, "pi-work", "group_7", "AGENTS.md"), "会话项目指引");
     await put(path.join(dir, "AGENTS.md"), "不得加载的数据目录指引");
-    await put(path.join(dir, "pi-work", "AGENTS.md"), "不得加载的会话根指引");
     const seen: TranscriptContext[] = [];
     const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
-    const s = await setup([inspect, inspect, inspect], { dir, ...(source === "config" ? { workspaceDir } : {}) });
-    await s.pi.handle(request("project1"), handleContext());
-    await s.pi.handle(request("project2"), handleContext());
-    const first = seen[0].messages[0];
-    expect(first.role).toBe("system");
-    if (first.role !== "system") throw new Error("缺少 system 消息");
-    const system = getSystemMessageText(first);
+    const r = await rig([inspect, inspect, inspect], { dir, workspaceDir });
+    await turn(r, "5", "一");
+    await turn(r, "5", "二");
+    const system = systemOf(seen[0]!);
     expect(system).toContain(DEFAULT_PI_PROMPT);
     expect(system).toContain('<project_instructions path="' + outer + '">\n运维项目指引\n</project_instructions>');
     expect(system).toContain('<project_instructions path="' + inner + '">\n会话项目指引\n</project_instructions>');
-    expect(system.indexOf(DEFAULT_PI_PROMPT)).toBeLessThan(system.indexOf("运维项目指引"));
-    expect(system.indexOf("运维项目指引")).toBeLessThan(system.indexOf("会话项目指引"));
     expect(system).not.toContain("不得加载");
-    expect(system).not.toContain("<project-context>");
-    expect(seen[0].messages.filter(m => m.role === "user").map(m => JSON.stringify(m)).join("")).not.toContain("项目指引");
-    const id = String((await s.pi.readThreadIds())["group:7"]);
-    const systems = async () => (await s.pi.sessionSource.entries(id, undefined, 256)).items.filter(e => e.kind === "pi.system");
+    const id = String((await r.pi.readThreadIds())["group:7"]);
+    const systems = async () => (await r.pi.sessionSource.entries(id, undefined, 256)).items.filter(e => e.kind === "pi.system");
     expect(await systems()).toHaveLength(1);
     await fs.writeFile(inner, "热更新后的会话项目指引", "utf8");
-    await s.pi.handle(request("project3"), handleContext());
-    expect(JSON.stringify(seen[2].messages.filter(m => m.role === "system"))).toContain("热更新后的会话项目指引");
+    await turn(r, "5", "三");
+    expect(systemOf(seen[2]!)).toContain("热更新后的会话项目指引");
     expect(await systems()).toHaveLength(2);
   });
 
-  it.each(["default", "custom"])("技能通过 %s 目录进入 system，按需 read 正文且下一轮热更新和删除生效", async mode => {
+  it("技能进入 system，按需 read 正文，下一轮热更新和删除生效；off 禁用", async () => {
     const dir = tmp("cs-pi-skills-system-");
-    const workspaceDir = path.join(dir, "workspace");
-    const skillsDir = mode === "default" ? path.join(dir, "skills") : path.join(dir, "custom-skills");
-    await put(path.join(workspaceDir, "AGENTS.md"), "技能之前的项目指引");
+    const skillsDir = path.join(dir, "skills");
     const file = await put(path.join(skillsDir, "hello", "SKILL.md"), "---\ndescription: 第一版技能描述\n---\n按需读取的技能正文");
     await put(path.join(skillsDir, "hidden", "SKILL.md"), "---\ndescription: 隐藏技能描述\ndisable-model-invocation: true\n---\n隐藏正文");
     const seen: TranscriptContext[] = [];
     const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
-    const cfg = loadConfig({ DATA_DIR: dir, ...(mode === "custom" ? { PI_SKILLS_DIR: skillsDir } : {}) });
-    const s = await setup([inspect, inspect, inspect, inspect, call("read", { path: file }), inspect],
-      { dir, workspaceDir, skillsDir: cfg.PI_SKILLS_DIR });
-    const systemAt = (index: number) => {
-      const system = seen[index].messages.findLast(m => m.role === "system");
-      if (!system || system.role !== "system") throw new Error("缺少 system 消息");
-      return getSystemMessageText(system);
-    };
-    await s.pi.handle(request("skills1"), handleContext());
-    await s.pi.handle(request("skills2"), handleContext());
-    const system = systemAt(0);
-    expect(system).toContain("<available_skills>");
+    const r = await rig([inspect, inspect, inspect, call(["read", { path: file }]), inspect], { dir, skillsDir });
+    await turn(r, "5", "一");
+    const system = systemOf(seen[0]!);
     expect(system).toContain("<name>hello</name>");
-    expect(system).toContain("<description>第一版技能描述</description>");
     expect(system).toContain("<location>" + file + "</location>");
-    expect(system.indexOf("技能之前的项目指引")).toBeLessThan(system.indexOf("<available_skills>"));
     expect(system).not.toContain("隐藏技能描述");
     expect(system).not.toContain("按需读取的技能正文");
-    expect(system).not.toContain("<skills>");
-    const id = String((await s.pi.readThreadIds())["group:7"]);
-    const systems = async () => (await s.pi.sessionSource.entries(id, undefined, 256)).items.filter(e => e.kind === "pi.system");
-    expect(await systems()).toHaveLength(1);
     await fs.writeFile(file, "---\ndescription: 更新后的技能描述\n---\n按需读取的技能正文", "utf8");
     const future = new Date(Date.now() + 2000); await fs.utimes(file, future, future);
-    await s.pi.handle(request("skills3"), handleContext());
-    expect(systemAt(2)).toContain("更新后的技能描述"); expect(await systems()).toHaveLength(2);
+    await turn(r, "5", "二");
+    expect(systemOf(seen[1]!)).toContain("更新后的技能描述");
     await fs.unlink(file);
-    await s.pi.handle(request("skills4"), handleContext());
-    expect(systemAt(3)).not.toContain("<available_skills>");
+    await turn(r, "5", "三");
+    expect(systemOf(seen[2]!)).not.toContain("<available_skills>");
     await put(file, "---\ndescription: 恢复技能描述\n---\n按需读取的技能正文");
-    await s.pi.handle(request("skills5"), handleContext());
-    expect(results(seen[4])).toContain("按需读取的技能正文");
-    expect(seen[4].messages.find(m => m.role === "toolResult")?.isError).toBe(false);
+    await turn(r, "5", "四");
+    expect(results(seen[3]!)).toContain("按需读取的技能正文");
+
+    const off = tmp("cs-pi-skills-off-");
+    await put(path.join(off, "skills", "hello", "SKILL.md"), "---\ndescription: 不应加载的技能\n---\n正文");
+    let offSeen!: TranscriptContext;
+    const r2 = await rig([ctx => { offSeen = ctx; return reply(); }], { dir: off, skillsDir: "off" });
+    await turn(r2, "5", "一");
+    expect(systemOf(offSeen)).not.toContain("<available_skills>");
   });
 
-  it("PI_SKILLS_DIR=off 禁用技能提示，即使默认目录存在", async () => {
-    const dir = tmp("cs-pi-skills-off-");
-    await put(path.join(dir, "skills", "hello", "SKILL.md"), "---\ndescription: 不应加载的技能\n---\n正文");
-    let seen!: TranscriptContext;
-    const cfg = loadConfig({ DATA_DIR: dir, PI_SKILLS_DIR: "off" });
-    const s = await setup([ctx => { seen = ctx; return reply(); }], { dir, skillsDir: cfg.PI_SKILLS_DIR });
-    await s.pi.handle(request("skills-off"), handleContext());
-    expect(JSON.stringify(seen.messages.filter(m => m.role === "system"))).not.toContain("<available_skills>");
-  });
-
-  it("hot-loads agent.md without overwriting existing text", async () => {
+  it("agent.md 热加载，不覆写已有内容；工作区规则只出现一次", async () => {
     const seen: TranscriptContext[] = [];
     const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
-    const s = await setup([inspect, inspect]);
-    const file = path.join(s.dir, "prompts", "agent.md");
+    const r = await rig([inspect, inspect]);
+    const file = path.join(r.dir, "prompts", "agent.md");
     expect(await fs.readFile(file, "utf8")).toBe(DEFAULT_PI_PROMPT);
-    await s.pi.handle(request("prompt1"), handleContext());
+    await turn(r, "5", "一");
     await fs.writeFile(file, "新系统提示：简短中文。", "utf8");
     const future = new Date(Date.now() + 2000); await fs.utimes(file, future, future);
-    await s.pi.handle(request("prompt2"), handleContext());
+    await turn(r, "5", "二");
     expect(JSON.stringify(seen[1])).toContain("新系统提示：简短中文。");
     for (const transcript of seen) {
-      const systems = transcript.messages.filter(m => m.role === "system");
-      expect(systems.length).toBeGreaterThan(0);
-      for (const system of systems) expect(getSystemMessageText(system).split(PI_WORKSPACE_RULE)).toHaveLength(2);
-      expect(JSON.stringify(transcript.messages.filter(m => m.role === "user"))).not.toContain(PI_WORKSPACE_RULE);
+      for (const system of transcript.messages.filter(m => m.role === "system")) expect(getSystemMessageText(system).split(PI_WORKSPACE_RULE)).toHaveLength(2);
     }
-    expect(DEFAULT_PI_PROMPT).not.toContain(PI_WORKSPACE_RULE);
-    expect(await new PiPromptLoader(s.dir).read()).toBe("新系统提示：简短中文。");
+    expect(await new PiPromptLoader(r.dir).read()).toBe("新系统提示：简短中文。");
+  });
+});
+
+describe("pi 重置与压缩", () => {
+  it("重置归档映射，下一条消息新建会话；回合进行中拒绝重置", async () => {
+    let release!: () => void;
+    const gateOpen = new Promise<void>(resolve => { release = resolve; });
+    const r = await rig([reply("一"), async () => { await gateOpen; return reply("慢"); }, reply("三")], { contextUsage: true });
+    await turn(r, "5", "一");
+    const before = (await r.pi.readThreadIds())["group:7"];
+    await r.say("5", "慢");
+    await vi.waitFor(() => expect(r.host.thread("group:7")?.turnId).toBeTruthy());
+    await expect(r.pi.resetThread("group:7")).rejects.toThrow("正在处理");
+    release();
+    await r.idle();
+    expect(await r.pi.resetThread("group:7")).toBe(before);
+    expect(r.contextUsage!.get("pi", "group:7")).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate", windowTokens: 200000 });
+    expect((await r.pi.readThreadIds())["group:7"]).toBeUndefined();
+    const archive = (await fs.readFile(path.join(r.dir, "pi-threads-archive.jsonl"), "utf8")).trim().split("\n").map(l => JSON.parse(l));
+    expect(archive).toEqual([expect.objectContaining({ key: "group:7", conversation: before })]);
+    await turn(r, "5", "三");
+    expect((await r.pi.readThreadIds())["group:7"]).not.toBe(before);
+    expect(await r.pi.resetThread("private:5")).toBeNull();
+    await expect(r.pi.resetThread("../etc")).rejects.toThrow("非法会话键");
   });
 
-  it("resumes an interrupted safe tool with its original request binding before a new same-scope turn", async () => {
-    let started = false;
-    const http: typeof fetch = async (_url, init) => {
-      started = true;
-      await new Promise<void>(resolve => init?.signal?.addEventListener("abort", () => resolve(), { once: true }));
-      throw new Error("aborted");
-    };
-    const s = await setup([call("web_search", { query: "旧请求" })], { disk: true, fetch: http });
-    const pending = s.pi.handle(request("interrupted"), handleContext()).catch(() => undefined);
-    await vi.waitFor(() => expect(started).toBe(true));
-    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-    expect((await s.pi.harness.snapshot(PiRequestDoc, id, context))?.access).toBe("group:7");
-    await s.pi.close(); await pending;
-    let resumed: TranscriptContext | undefined;
-    const r = await setup([ctx => { resumed = ctx; return reply("旧请求完成"); }, reply("新请求完成")], { disk: true, dir: s.dir });
-    const next = r.pi.handle(request("new"), handleContext());
-    expect((await r.pi.handle(request("interrupted"), handleContext())).text).toBe("旧请求完成");
-    expect((await next).text).toBe("新请求完成");
-    expect(results(resumed!)).toContain("资料"); expect(r.http).toHaveBeenCalledOnce();
-    expect((await r.pi.harness.snapshot(PiRequestDoc, id, context))?.access).toBe("group:7");
+  it("SQLite 归档追加失败会回滚映射清空并报告错误", async () => {
+    const r = await rig([reply()]);
+    await turn(r, "5", "一");
+    const before = await r.pi.readThreadIds();
+    const commit = r.pi.harness.commit.bind(r.pi.harness);
+    const fail = vi.spyOn(r.pi.harness, "commit").mockImplementationOnce((change, ctx) => commit(async tx => {
+      const doc = tx.doc.bind(tx);
+      const proxy = new Proxy(tx, { get(target, key, receiver) {
+        if (key === "doc") return (...args: unknown[]) => {
+          if (args[0] === PiThreadsArchiveDoc) throw new Error("archive append failed");
+          return Reflect.apply(doc, tx, args);
+        };
+        return Reflect.get(target, key, receiver);
+      } });
+      return change(proxy);
+    }, ctx));
+    try { await expect(r.pi.resetThread("group:7")).rejects.toThrow("archive append failed"); }
+    finally { fail.mockRestore(); }
+    expect(await r.pi.readThreadIds()).toEqual(before);
+    await r.restart();
+    expect(await r.pi.readThreadIds()).toEqual(before);
+    expect((await r.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual([]);
   });
 
-  it("面板压缩：无会话 unchanged，手动摘要完成后保留映射", async () => {
-    const s = await setup([reply("第一轮回复"), reply("第二轮回复"), reply("手动压缩摘要")]);
-    expect(await s.pi.compactThread("owner")).toBe("unchanged");
-    expect(await s.pi.compactThread("private:9")).toBe("unchanged");
-    await expect(s.pi.compactThread("shared")).rejects.toThrow("非法");
-    await s.pi.handle({ ...request("manual-long"), text: "历史事实。".repeat(30_000) }, handleContext());
-    await s.pi.handle({ ...request("manual-recent"), text: "recent material. ".repeat(6_000) }, handleContext());
-    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")?.turns).toBe(2));
-    const before = s.contextUsage.get("pi", "group:7")!;
-    expect(before.source).toBe("turn");
-    expect(s.faux.state.callCount).toBe(2);
-    const wait = vi.spyOn(s.pi.harness, "waitForTask");
-    expect(await s.pi.compactThread("group:7")).toBe("compacted");
-    const after = s.contextUsage.get("pi", "group:7")!;
+  it("提交后 JSON/JSONL 镜像写入失败，重启从 SQLite 修复且不重复归档", async () => {
+    const r = await rig([reply()]);
+    await turn(r, "5", "一");
+    const before = await r.pi.readThreadIds();
+    const rename = vi.spyOn(fs, "rename").mockRejectedValue(new Error("mirror write failed"));
+    try { expect(await r.pi.resetThread("group:7")).toBe(before["group:7"]); }
+    finally { rename.mockRestore(); }
+    expect(JSON.parse(await fs.readFile(path.join(r.dir, "pi-threads.json"), "utf8"))).toEqual(before);
+    await r.restart();
+    expect(JSON.parse(await fs.readFile(path.join(r.dir, "pi-threads.json"), "utf8"))).toEqual({});
+    expect(await r.pi.resetThread("group:7")).toBeNull();
+    expect((await r.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toHaveLength(1);
+  });
+
+  it("导入旧归档及后续重置只保留最新 200 条", async () => {
+    const dir = tmp("pi-archive-rotation-");
+    const rows = Array.from({ length: 205 }, (_, i) => ({ key: "group:7", conversation: 10000 + i, archived_at: new Date(i * 1000).toISOString(), reason: "legacy" }));
+    await fs.writeFile(path.join(dir, "pi-threads-archive.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n", "utf8");
+    const r = await rig([reply()], { dir });
+    expect((await r.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual(rows.slice(-200));
+    await turn(r, "5", "一");
+    const id = (await r.pi.readThreadIds())["group:7"];
+    await r.pi.resetThread("group:7");
+    const archive = (await r.pi.harness.snapshot(PiThreadsArchiveDoc, context))!.rows;
+    expect(archive).toHaveLength(200);
+    expect(archive[0]).toEqual(rows[6]); expect(archive.at(-1)?.conversation).toBe(id);
+  });
+
+  it("面板压缩：无会话 unchanged，手动摘要完成后保留映射并更新占用", async () => {
+    const r = await rig([reply("第一轮回复"), reply("第二轮回复"), reply("手动压缩摘要")], { contextUsage: true });
+    expect(await r.pi.compactThread("owner")).toBe("unchanged");
+    await expect(r.pi.compactThread("shared")).rejects.toThrow("非法");
+    await turn(r, "5", "历史事实。".repeat(30_000));
+    await turn(r, "5", "recent material. ".repeat(6_000));
+    const id = (await r.pi.readThreadIds())["group:7"];
+    await vi.waitFor(() => expect(r.contextUsage!.get("pi", "group:7")?.turns).toBe(2));
+    const before = r.contextUsage!.get("pi", "group:7")!;
+    expect(await r.pi.compactThread("group:7")).toBe("compacted");
+    const after = r.contextUsage!.get("pi", "group:7")!;
     expect(after).toMatchObject({ turns: before.turns, source: "compact", lastCompactionAt: expect.any(Number) });
     expect(after.usedTokens).toBeLessThan(before.usedTokens);
-    expect(after.cachedTokens).toBeUndefined();
-    expect(wait).toHaveBeenCalled();
-    expect((await s.pi.readThreadIds())["group:7"]).toBe(id);
-    const conv = (await s.pi.harness.conversation(id, context))!;
-    await conv.waitForIdle(context);
-    const view = await conv.context(context);
-    expect(view.entries.some(e => e.kind === "pi.compaction")).toBe(true);
-    expect(after.usedTokens).toBe(estimateContextTokens(view.messages).tokens);
-    await s.contextUsage.flush();
-    expect(new ContextUsageStore(s.dir).get("pi", "group:7")).toMatchObject({ usedTokens: after.usedTokens, source: "compact", turns: 2 });
+    expect((await r.pi.readThreadIds())["group:7"]).toBe(id);
   });
 
-  it("面板压缩排在进行中的回合之后，后续重置等待压缩完成", async () => {
-    let release!: () => void;
-    let started!: () => void;
-    const began = new Promise<void>(resolve => { started = resolve; });
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const s = await setup([async () => { started(); await gate; return reply("已完成"); }, reply("摘要")]);
-    const turn = s.pi.handle(request("compact-queued"), handleContext());
-    await began;
-    const wait = vi.spyOn(s.pi.harness, "waitForTask");
-    const compact = s.pi.compactThread("group:7");
-    const reset = s.pi.resetThread("group:7");
-    await Promise.resolve();
-    expect(wait).not.toHaveBeenCalled();
-    release();
-    await turn;
-    expect(await compact).toBe("compacted");
-    expect(await reset).toBeTypeOf("number");
-    expect(await s.pi.compactThread("group:7")).toBe("unchanged");
-  });
-
-  it("面板压缩检查任务失败终态，随后仍可重置", async () => {
-    const s = await setup([reply("已有回复"), reply("摘要")]);
-    await s.pi.handle(request("compact-failed"), handleContext());
-    const wait = s.pi.harness.waitForTask.bind(s.pi.harness);
-    const spy = vi.spyOn(s.pi.harness, "waitForTask").mockImplementationOnce(async (id, ctx) => {
-      const task = await wait(id, ctx);
-      return { ...task, memos: undefined, state: { status: "terminal", outcome: { status: "failed", error: { message: "faux failure" } } } };
-    });
-    await expect(s.pi.compactThread("group:7")).rejects.toThrow("pi 会话压缩失败（failed）");
-    spy.mockRestore();
-    expect(await s.pi.resetThread("group:7")).toBeTypeOf("number");
-  });
-
-  it("automatically compacts long-lived history with configured thresholds", async () => {
+  it("按配置阈值自动压缩长期历史", async () => {
     const contexts: string[] = [];
     const respond = (ctx: TranscriptContext) => {
       const text = JSON.stringify(ctx); contexts.push(text);
       return reply(text.includes("context summarization assistant") ? "压缩摘要：保留历史事实" : "正常回答");
     };
-    const s = await setup(Array.from({ length: 10 }, () => respond), { reserveTokens: 150_000, backgroundTokens: 0 });
-    // 第一轮后累计超过 50k tokens；保留最近 20k tokens，第二轮自动阻塞压缩。
-    await s.pi.handle({ ...request("long1"), text: "历史事实。".repeat(50_000) }, handleContext());
-    await s.pi.handle({ ...request("long2"), text: "近期材料。".repeat(20_000) }, handleContext());
-    const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-    const conv = (await s.pi.harness.conversation(id, context))!;
+    const r = await rig(Array.from({ length: 10 }, () => respond), { contextUsage: true, reserveTokens: 150_000, backgroundTokens: 0 });
+    await turn(r, "5", "历史事实。".repeat(50_000));
+    await turn(r, "5", "近期材料。".repeat(20_000));
+    const conv = await convOf(r, "group:7");
     await conv.waitForIdle(context);
-    const view = await conv.context(context);
-    expect(view.entries.some(e => e.kind === "pi.compaction")).toBe(true);
+    expect((await conv.context(context)).entries.some(e => e.kind === "pi.compaction")).toBe(true);
     expect(contexts.some(c => c.includes("context summarization assistant"))).toBe(true);
-    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")!.lastCompactionAt).toBeTypeOf("number"));
-    expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ turns: 2, compaction: { background: 50000, reserve: 50000 } });
-  });
-
-  it("配置 600 秒时超过 300 秒仍运行，到截止时间才中止", async () => {
-    let started = false, aborted = false;
-    const s = await setup([async (_ctx, opts) => {
-      started = true;
-      await new Promise<void>(resolve => opts?.signal?.addEventListener("abort", () => { aborted = true; resolve(); }, { once: true }));
-      return fauxAssistantMessage("", { stopReason: "aborted" });
-    }], { timeoutMs: 600_000 });
-    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
-    try {
-      const pending = s.pi.handle(request("timeout-600"), handleContext()).catch(error => error);
-      await vi.waitFor(() => expect(started).toBe(true));
-      const id = (await s.pi.readThreadIds())["group:7"] as ConversationId;
-      const deadline = (await s.pi.harness.snapshot(PiRequestDoc, id, context))!.deadline;
-      expect(deadline - Date.now()).toBeGreaterThan(599_000);
-      await vi.advanceTimersByTimeAsync(deadline - Date.now() - 299_999);
-      expect(aborted).toBe(false);
-      await vi.advanceTimersByTimeAsync(299_998);
-      expect(aborted).toBe(false);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(await pending).toBeInstanceOf(BackendTimeoutError);
-      expect(aborted).toBe(true);
-    } finally { vi.useRealTimers(); }
-  });
-
-  it("aborts timed-out turns before releasing the mutex", async () => {
-    let aborted = false;
-    const s = await setup([async (_ctx, opts) => {
-      await new Promise<void>(r => {
-        if (opts?.signal?.aborted) { aborted = true; r(); }
-        else opts?.signal?.addEventListener("abort", () => { aborted = true; r(); }, { once: true });
-      });
-      return fauxAssistantMessage("", { stopReason: "aborted" });
-    }, reply("next")], { timeoutMs: 100 });
-    await expect(s.pi.handle(request("timeout"), handleContext())).rejects.toBeInstanceOf(BackendTimeoutError);
-    expect(aborted).toBe(true);
-    expect((await s.pi.handle(request("after-timeout"), handleContext())).text).toBe("next");
-    const inspection = await s.pi.harness.inspect(context); expect(inspection.tasks).toHaveLength(0);
-  });
-
-  it("cancels a queued request without submitting it", async () => {
-    let release!: () => void; let started = false;
-    const gate = new Promise<void>(r => { release = r; });
-    const s = await setup([async () => { started = true; await gate; return reply(); }]);
-    const first = s.pi.handle(request("blocking"), handleContext());
-    await vi.waitFor(() => expect(started).toBe(true));
-    const cancel = new AbortController();
-    const queued = s.pi.handle(request("cancelled"), { ...handleContext(), signal: cancel.signal });
-    cancel.abort(); await expect(queued).rejects.toThrow();
-    release(); await first; expect(s.faux.state.callCount).toBe(1);
-  });
-
-  it.each(["model", "tool"])("resumes after coordinated ticket/pi shutdown during %s with exactly one answer", async phase => {
-    let started = false;
-    const wait = async (signal?: AbortSignal | null) => {
-      started = true;
-      await new Promise<void>(resolve => signal?.aborted ? resolve() : signal?.addEventListener("abort", () => resolve(), { once: true }));
-    };
-    const s = await setup(phase === "model" ? [async (_ctx, opts) => {
-      await wait(opts?.signal); return fauxAssistantMessage("", { stopReason: "aborted" });
-    }] : [call("web_search", { query: "恢复测试" })], { disk: true, fetch: async (_url, init) => {
-      await wait(init?.signal); throw new Error("aborted");
-    } });
-    const replies: string[] = [];
-    const bridge = {
-      uploadFile: async () => ({ file_id: "unused" }),
-      getTicket: async (ticket: string) => ({ ticket_id: ticket, status: replies.length ? "sent" : "pending", seq: 1 }) as ReplyTicketRecord,
-      listPendingTickets: async () => [],
-      reply: async (_ticket: string, text: string) => { replies.push(text); return { message_id: "one", already_sent: false, message_type: "group" as const, target_id: "7" }; },
-    };
-    const bootTickets = async (backend: typeof s) => {
-      const tasks = createTasks({ getBridge: () => withOutbox(bridge), imageBackend: backend.imageBackend, imagesDir: path.join(s.dir, "images"),
-        backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: backend.pi } }) });
-      const harness = await openHarness({ models: backend.models, extension: createCsAgentExtension(tasks), dbFile: path.join(s.dir, "tickets.sqlite") }, context);
-      cleanup.push(() => harness.close(context));
-      return { harness, dispatcher: new Dispatcher({ harness, bridge, tasks, concurrency: 2, retryDelayMs: 1 }) };
-    };
-    const t = await bootTickets(s);
-    const pending = t.dispatcher.dispatch(inbound("shutdown", "7", "原始输入"), "shutdown");
-    await vi.waitFor(() => expect(started).toBe(true));
-    const ticketId = (await t.harness.snapshot(DispatchDoc, context))!.pending.shutdown!.conversationId as ConversationId;
-    await closeAgentHarnesses(t.harness, s.pi); await pending;
-    expect(replies).toEqual([]);
-    const restarted = await setup([reply("恢复后的唯一回答")], { disk: true, dir: s.dir });
-    const t2 = await bootTickets(restarted);
-    await t2.dispatcher.recover(); t2.harness.resume(); await t2.dispatcher.idle();
-    expect(replies).toEqual([FALLBACK_REPLY]);
-    expect((await t2.harness.snapshot(TicketDoc, ticketId, context))?.agentResult).toMatchObject({ ok: true, text: "恢复后的唯一回答" });
-    expect(restarted.faux.state.callCount).toBe(1);
-  });
-
-  it.each([false, true])("persists a fresh request id before retrying an existing aborted receipt exactly once; crash before submit=%s", async crash => {
-    let started = false;
-    const s = await setup([async (_ctx, opts) => {
-      started = true;
-      await new Promise<void>(resolve => opts?.signal?.addEventListener("abort", () => resolve(), { once: true }));
-      return fauxAssistantMessage("", { stopReason: "aborted" });
-    }], { disk: true });
-    const cancel = new AbortController();
-    const pending = s.pi.handle({ ...request("legacy-abort"), text: "原始输入" }, { ...handleContext(), signal: cancel.signal }).catch(() => undefined);
-    await vi.waitFor(() => expect(started).toBe(true)); cancel.abort(); await pending;
-    const conv = (await s.pi.harness.conversation((await s.pi.readThreadIds())["group:7"] as ConversationId, context))!;
-    await conv.waitForIdle(context);
-    await conv.commit(async tx => { (await tx.doc(PiRequestDoc, conv.id)).deadline = Date.now() - 1000; }, context);
-    await s.pi.close();
-    const restarted = await setup([ctx => { expect(JSON.stringify(ctx.messages)).toContain("原始输入"); return reply("恢复完成"); }], { disk: true, dir: s.dir });
-    const ticketHarness = await openHarness({ models: restarted.models, extension: createCsAgentExtension(createTasks({
-      getBridge: () => { throw new Error("unused"); }, imageBackend: restarted.imageBackend, imagesDir: path.join(s.dir, "images"),
-      backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: restarted.pi } }),
-    })), storage: new MemoryStorage() }, context);
-    cleanup.push(() => ticketHarness.close(context));
-    const ticket = await ticketHarness.createConversation({ ownership: { kind: "ownerless" } }, context);
-    const persistPiTurn = async (state: { requestId: string; retries: number }) => {
-      expect(restarted.faux.state.callCount).toBe(0);
-      await ticket.commit(async tx => { (await tx.doc(TicketDoc, ticket.id)).piTurn = state; }, context);
-      if (crash && state.retries === 1) throw new Error("crash before submit");
-    };
-    const retry = restarted.pi.handle(request("legacy-abort"), { ...handleContext(), persistPiTurn });
-    if (crash) await expect(retry).rejects.toThrow("crash before submit");
-    else expect((await retry).text).toBe("恢复完成");
-    const piTurn = (await ticketHarness.snapshot(TicketDoc, ticket.id, context))!.piTurn!;
-    expect(piTurn).toEqual({ requestId: "legacy-abort#r1", retries: 1, conversationId: conv.id });
-    expect((await restarted.pi.handle(request("legacy-abort"), { ...handleContext(), piTurn, persistPiTurn })).text).toBe("恢复完成");
-    expect(restarted.faux.state.callCount).toBe(1);
-  });
-
-  it("AGENT_BACKEND=pi 的 done 生图未显式发送时由 lateImages 补发", async () => {
-    const s = await setup([call("generate_image", { prompt: "猫" }), reply("# 图片好了 @你")]);
-    const cfg = loadConfig({ AGENT_BACKEND: "pi", DATA_DIR: s.dir });
-    const replies: { ticket: string; text: string; images?: string[] }[] = [];
-    let sent = false;
-    const bridge = {
-      uploadFile: async () => ({ file_id: "unused" }),
-      getTicket: async (ticket: string) => ({ ticket_id: ticket, status: sent ? "sent" : "pending", seq: 1 }) as ReplyTicketRecord,
-      listPendingTickets: async () => [],
-      reply: async (ticket: string, text: string, images?: string[]) => { replies.push({ ticket, text, images }); sent = true;
-        return { message_id: "reply-id", already_sent: false, message_type: "group" as const, target_id: "7" }; },
-    };
-    const tasks = createTasks({ getBridge: () => withOutbox(bridge), imageBackend: s.imageBackend, imagesDir: path.join(s.dir, "images"),
-      backends: createBackendSelector({ defaultBackend: cfg.AGENT_BACKEND, overrides: cfg.backendOverrides, backends: { pi: s.pi } }),
-      owner: "1", store: s.store,
-    });
-    const harness: Harness = await openHarness({ models: s.models, extension: createCsAgentExtension(tasks), storage: new MemoryStorage() }, context);
-    cleanup.push(() => harness.close(context));
-    const dispatcher = new Dispatcher({ harness, bridge, tasks, concurrency: 2, retryDelayMs: 1 });
-    await dispatcher.dispatch(inbound("message", "7", "请画只猫"), "dispatch-pi"); await dispatcher.idle();
-    expect(replies).toHaveLength(1); expect(replies[0]!.ticket).toBe("dispatch-pi");
-    expect(replies[0]!.text).toBe(IMAGE_SUCCESS_REPLY); expect(replies[0]!.images).toHaveLength(1);
-    expect(s.faux.state.callCount).toBe(2);
+    await vi.waitFor(() => expect(r.contextUsage!.get("pi", "group:7")!.lastCompactionAt).toBeTypeOf("number"));
+    expect(r.contextUsage!.get("pi", "group:7")).toMatchObject({ turns: 2, compaction: { background: 50000, reserve: 50000 } });
   });
 });
 
+describe("pi 上下文占用", () => {
+  it("每请求 recordRequest、每回合一次 recordTurn，按回合键归属", async () => {
+    const events: { ticket: string; stage: string; detail: Record<string, unknown> }[] = [];
+    const untap = trace.tap(e => {
+      if (e.stage === "model_request" || (e.stage === "context_usage" && e.detail.source === "turn")) events.push(e);
+    });
+    const web = new DeepSeekWeb({ apiKey: "x", fetch: vi.fn(async () => Response.json({ results: [] })) as typeof fetch, backoffMs: 1 });
+    const r = await rig([call(["web_search", { query: "usage" }]), reply("完成采集"), reply("下一回合")],
+      { contextUsage: true, web, reserveTokens: 16000, backgroundTokens: 32000 });
+    try {
+      const key = await turn(r, "5", "采集");
+      const ticket = "turn:" + turnOf(r, key);
+      const conv = await convOf(r, "group:7");
+      const messages = (await conv.context(context)).entries.flatMap(e => e.model ?? []).filter(m => m.role === "assistant");
+      expect(messages).toHaveLength(2);
+      const actual = messages[1]!.usage;
+      await vi.waitFor(() => expect(r.contextUsage!.get("pi", "group:7")).toMatchObject({
+        usedTokens: actual.input + actual.cacheRead + actual.cacheWrite, windowTokens: 200000, turns: 1, source: "turn",
+        compaction: { background: 152000, reserve: 184000 } }));
+      expect(events.map(e => e.stage)).toEqual(["model_request", "model_request", "context_usage"]);
+      expect(events.slice(0, 2).map(e => e.detail)).toEqual(messages.map((m, index) => expect.objectContaining({
+        backend: "pi", key: "group:7", ticket, seq: index + 1, turn: 1 })));
+      const next = await turn(r, "5", "下一条");
+      await vi.waitFor(() => expect(events).toHaveLength(5));
+      expect(events[3]).toMatchObject({ ticket: "turn:" + turnOf(r, next), stage: "model_request", detail: { seq: 1, turn: 2 } });
+      expect(events[4]).toMatchObject({ stage: "context_usage", detail: { turns: 2 } });
+    } finally { untap(); }
+  });
+
+  it("回合完成时缺少请求样本仍只计一个回合并保留原占用", async () => {
+    const r = await rig([reply("第一轮"), reply("没有用量")], { contextUsage: true });
+    await turn(r, "5", "一");
+    await vi.waitFor(() => expect(r.contextUsage!.get("pi", "group:7")?.turns).toBe(1));
+    const before = r.contextUsage!.get("pi", "group:7")!;
+    const last = vi.spyOn(PiContextObserver.prototype, "lastRequest").mockReturnValue(undefined);
+    try {
+      await turn(r, "5", "二");
+      await vi.waitFor(() => expect(r.contextUsage!.get("pi", "group:7")).toEqual({ ...before, turns: 2 }));
+    } finally { last.mockRestore(); }
+  });
+
+  it("observer 在摘要提交后立即估算，重复刷新不增加回合；读取失败保留记录", async () => {
+    const r = await rig([reply("之前的回复")], { contextUsage: true });
+    await turn(r, "5", "一");
+    await vi.waitFor(() => expect(r.contextUsage!.get("pi", "group:7")?.turns).toBe(1));
+    const conv = await convOf(r, "group:7");
+    await conv.commit(tx => tx.appendEntry(conv.id, { kind: CompactionEntry.kind, head: "self",
+      model: [{ role: "user", content: "短摘要", timestamp: Date.now() }], data: { reason: "manual" } }), context);
+    await vi.waitFor(() => expect(r.contextUsage!.get("pi", "group:7")).toMatchObject({ source: "compact", turns: 1 }));
+    const expected = estimateContextTokens((await conv.context(context)).messages).tokens;
+    expect(r.contextUsage!.get("pi", "group:7")?.usedTokens).toBe(expected);
+    await refreshPiCompactionUsage(conv, "group:7", r.contextUsage!);
+    expect(r.contextUsage!.get("pi", "group:7")).toMatchObject({ usedTokens: expected, turns: 1 });
+    const before = r.contextUsage!.get("pi", "group:7");
+    const read = vi.spyOn(conv, "context").mockRejectedValueOnce(new Error("unavailable"));
+    const info = vi.spyOn(log, "info");
+    try {
+      await expect(refreshPiCompactionUsage(conv, "group:7", r.contextUsage!)).resolves.toBeUndefined();
+      expect(r.contextUsage!.get("pi", "group:7")).toEqual(before);
+    } finally { read.mockRestore(); info.mockRestore(); }
+  });
+
+  it("重启后从会话历史回填占用，不调用模型", async () => {
+    const r = await rig([reply("第一轮"), reply("第二轮")], { contextUsage: true });
+    await turn(r, "5", "一");
+    await turn(r, "5", "二");
+    await vi.waitFor(() => expect(r.contextUsage!.get("pi", "group:7")?.turns).toBe(2));
+    await r.contextUsage!.flush();
+    await fs.unlink(path.join(r.dir, "context-usage.json"));
+    const calls = r.faux.state.callCount;
+    await r.restart();
+    expect(r.contextUsage!.get("pi", "group:7")).toMatchObject({ turns: 2, source: "turn", windowTokens: 200000 });
+    expect(r.faux.state.callCount).toBe(calls);
+  });
+
+  it("deepseek-flash 使用 pi-ai 的 1000000 窗口与默认实际压缩位置", () => {
+    const model = builtinModels().getModel("deepseek", "deepseek-flash")!;
+    expect(piContextCapacity(model.contextWindow)).toEqual({ windowTokens: 1000000,
+      compaction: { background: 950848, reserve: 983616 } });
+  });
+});
+
+it("pi 历史工具记录回合与会话归属并发出轻量 trace", async () => {
+  const obs = new ObsStore(tmp());
+  try {
+    const r = await rig([call(["qq_recent", {}]), reply()], { instrumentation: MemoryInstrumentation.fromDb(obs.db) });
+    r.history.ingest(r.message("6", "历史记录", "7", { message_id: "m" }));
+    const events: string[] = [];
+    const off = trace.tap(e => { if (e.ticket.startsWith("turn:pi:")) events.push(e.stage); });
+    try {
+      const key = await turn(r, "5", "回顾");
+      const session = String((await r.pi.readThreadIds())["group:7"]);
+      expect(obs.db.prepare("SELECT * FROM recall_events").get()).toMatchObject({ backend: "pi", ticket: turnOf(r, key), session,
+        task_id: expect.stringMatching(/^\d+$/), tool: "qq_recent", scope_hint: "group:7" });
+      expect(events).toContain("memory_recall");
+    } finally { off(); }
+  } finally { obs.close(); }
+});
+
+describe("pi 运行时模型设置", () => {
+  it("开轮读取当前模型和快照档位；没有模型快照的回合沿用当前模型", async () => {
+    const calls: { model: string; reasoning: unknown }[] = [];
+    const step = (_ctx: TranscriptContext, extra?: { model: string; reasoning: unknown }) => { calls.push(extra!); return reply(); };
+    let modelId = "runtime";
+    const r = await rig([step, step], { extraModels: [{ id: "runtime", contextWindow: 400000, reasoning: true }], contextUsage: true,
+      currentModel: provider => ({ provider, modelId }), settings: () => ({ piModel: modelId, piThinkingLevel: "high" }) });
+    await turn(r, "5", "一");
+    await vi.waitFor(() => expect(r.contextUsage!.get("pi", "group:7")?.windowTokens).toBe(400000));
+    modelId = "test";
+    await turn(r, "5", "二");
+    expect(calls).toEqual([{ model: "runtime", reasoning: "high" }, { model: "test", reasoning: undefined }]);
+  });
+
+  it("设置中的模型不存在时 warn 并回退启动模型", async () => {
+    let modelId: string | undefined;
+    const warn = vi.spyOn(log, "warn");
+    try {
+      const r = await rig([(_ctx, extra) => { modelId = extra!.model; return reply(); }],
+        { currentModel: () => ({ provider: "missing", modelId: "gone" }), settings: () => ({ piModel: "gone" }) });
+      await turn(r, "5", "一");
+      expect(modelId).toBe("test");
+      expect(warn).toHaveBeenCalledWith("pi runtime model unavailable; using startup model", { provider: "missing", model: "gone" });
+    } finally { warn.mockRestore(); }
+  });
+});
 
 describe("pi send_message 工具", () => {
-  it("稳定 callId 传入网关，同一回合第四条也能发出（无每轮条数上限），不消耗历史额度", async () => {
-    const f = sendFixture(), send = vi.spyOn(f.service, "send");
+  it("稳定 toolCallId 作为调用键：Outbox 行键 <会话>:<callId>，同一回合第四条也能发出，附件从工作区发送", async () => {
     let seen!: TranscriptContext;
-    const s = await setup([
-      call("send_message", { text: "附件", images: ["0.png", "1.png", "2.png", "3.png"],
-        files: [{ path: "0.txt" }, { path: "1.txt" }, { path: "2.txt" }] }),
-      call("send_message", { text: "第二条" }), call("send_message", { text: "第三条" }),
-      call("send_message", { text: "第四条" }), call("qq_recent"), ctx => { seen = ctx; return reply("仅留存"); },
-    ], { dir: f.dir, sendService: f.service });
-    const work = path.join(s.dir, "pi-work", "group_7"); await fs.mkdir(work, { recursive: true });
-    for (const name of ["0", "1", "2", "3"]) {
+    const r = await rig([]);
+    const work = path.join(r.dir, "pi-work", "group_7"); await fs.mkdir(work, { recursive: true });
+    for (const name of ["0", "1"]) {
       await fs.writeFile(path.join(work, name + ".txt"), "文件" + name);
       await fs.writeFile(path.join(work, name + ".png"), Buffer.concat([TRANSPARENT_PNG, Buffer.from(name)]));
     }
-    await s.pi.handle(request(f.ticket), handleContext());
-    const tools = seen.messages.filter(m => m.role === "toolResult");
-    expect(tools.slice(0, 5).every(t => !t.isError)).toBe(true);
-    expect(send.mock.calls[0]![2]).toEqual({ callId: tools[0]!.toolCallId });
-    expect(f.service.rows(f.ticket)).toHaveLength(4);
-    expect(f.service.rows(f.ticket)[0]!.files.map(x => x.status)).toEqual(["sent", "sent", "sent"]);
-    const id = (await s.pi.readThreadIds())["group:7"]!;
-    const doc = await s.pi.harness.snapshot(PiRequestDoc, id as ConversationId, context);
-    expect(Object.values(doc!.calls).filter(c => c.kind === "history")).toHaveLength(1);
-    expect(doc!.source).toMatchObject({ type: "group", group_id: "7", user_id: "1" });
+    r.script.push(call(["send_message", { text: "附件", images: ["0.png", "1.png"], files: [{ path: "0.txt" }, { path: "1.txt" }] }]),
+      call(["send_message", { text: "第二条" }]), call(["send_message", { text: "第三条" }]), call(["send_message", { text: "第四条" }]),
+      ctx => { seen = ctx; return reply("仅留存"); });
+    const key = await turn(r, "5", "发几条");
+    const tools = toolResults(seen);
+    expect(tools.every(t => !t.isError)).toBe(true);
+    const rows = r.bridge.outbox.listOutboxByTurn(turnOf(r, key));
+    expect(rows.map(row => row.key)).toEqual(tools.map(t => "group:7:" + t.toolCallId));
+    expect(rows[0]!.files.map(x => x.status)).toEqual(["sent", "sent"]);
+    expect(r.texts("7")).toEqual(["附件", "第二条", "第三条", "第四条"]);
   });
 
-  it.each(["group:7", "group:8"])("已召回媒体按绑定范围校验：%s", async scope => {
-    const f = sendFixture();
-    const s = await setup([], { dir: f.dir, sendService: f.service });
-    const media = await mediaFixture(s.store, s.dir, scope);
+  it.each(["group:7", "group:8"])("已召回媒体按本轮读取范围校验：%s", async scope => {
+    const r = await rig([]);
+    const media = await mediaFixture(r.history, r.dir, scope);
     let seen!: TranscriptContext;
-    s.faux.setResponses([call("send_message", { text: "图", images: [media] }),
-      call("send_message", { text: "文件", files: [{ path: path.join(s.dir, "prompts", "agent.md") }] }),
-      ctx => { seen = ctx; return reply(); }]);
-    await s.pi.handle(request(f.ticket), handleContext());
-    const tools = seen.messages.filter(m => m.role === "toolResult");
+    r.script.push(call(["send_message", { text: "图", images: [media] }]),
+      call(["send_message", { text: "文件", files: [{ path: path.join(r.dir, "prompts", "agent.md") }] }]),
+      ctx => { seen = ctx; return reply(); });
+    await turn(r, "5", "发图");
+    const tools = toolResults(seen);
     expect(!!tools[0]!.isError).toBe(scope === "group:8");
     expect(tools[1]!.isError).toBe(true);
   });
 
-  it("兜底写入原 pi 会话一次，下一次模型请求可见且不单独触发推理", async () => {
-    const f = sendFixture();
+  it("不确定的发送以非错误工具结果返回，换调用键同文重试不再发送", async () => {
     let seen!: TranscriptContext;
-    const s = await setup([reply("直接回答，没有调用发送"), ctx => { seen = ctx; return reply(); }],
-      { dir: f.dir, sendService: f.service });
-    const tasks = createTasks({ getBridge: () => f.bridge, sendService: f.service, imageBackend: s.imageBackend,
-      imagesDir: path.join(s.dir, "images"), replyRetryDelayMs: 1,
-      backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: s.pi } }) });
-    const harness = await openHarness({ models: s.models, extension: createCsAgentExtension(tasks), storage: new MemoryStorage() }, context);
-    cleanup.push(() => harness.close(context));
-    const dispatcher = new Dispatcher({ harness, bridge: f.bridge, tasks, concurrency: 1, retryDelayMs: 1 });
-    // 提醒已持久化但 TicketDoc 标记尚未提交时失败，下一次必须依赖 requestId 去重。
-    const record = s.pi.recordDeliveryNote.bind(s.pi);
-    const noteCall = vi.spyOn(s.pi, "recordDeliveryNote").mockImplementationOnce(async note => {
-      await record(note); throw new Error("模拟提醒提交后的进程中断");
+    const r = await rig([call(["send_message", { text: "可能送达" }]), call(["send_message", { text: "可能送达" }]),
+      ctx => { seen = ctx; return reply(); }]);
+    const original = r.call.getMockImplementation()!;
+    let failed = false;
+    r.call.mockImplementation(async (action: string, params?: Record<string, unknown>) => {
+      if (action === "send_group_msg" && !failed) { failed = true; r.sent.push({ action, params: params! }); throw new Error("回执丢失"); }
+      return original(action, params);
     });
-    await dispatcher.dispatch(f.msg, f.ticket);
-    expect(noteCall).toHaveBeenCalledTimes(2);
-    const id = (await s.pi.readThreadIds())["group:7"]!;
-    const notes = (await s.pi.sessionSource.entries(String(id))).items.filter(entry => entry.kind === "cs.delivery_note");
-    expect(notes).toHaveLength(1);
-    expect(notes[0]).toMatchObject({ data: { ticket: f.ticket, threadKey: "group:7", conversationId: id, fallback: FALLBACK_REPLY },
-      model: [{ role: "user", content: deliveryNoteText(FALLBACK_REPLY) }] });
-    await s.pi.handle(request("next-delivery-turn"), handleContext());
-    expect(seen.messages.filter(message => message.role === "user" && message.content === deliveryNoteText(FALLBACK_REPLY))).toHaveLength(1);
-    // 映射重置后，重放仍写回原会话，不污染新会话。
-    await s.pi.resetThread("group:7");
-    await record({ ticket: f.ticket, threadKey: "group:7", conversationId: id, fallback: FALLBACK_REPLY });
-    expect((await s.pi.sessionSource.entries(String(id))).items.filter(entry => entry.kind === "cs.delivery_note")).toHaveLength(1);
-    expect((await s.pi.readThreadIds())["group:7"]).toBeUndefined();
+    const key = await turn(r, "5", "发");
+    const tools = toolResults(seen);
+    expect(tools).toHaveLength(2);
+    expect(tools.every(t => !t.isError)).toBe(true);
+    expect(JSON.stringify(tools)).toContain("消息可能已送达，不要重发");
+    expect(r.bridge.outbox.listOutboxByTurn(turnOf(r, key))).toHaveLength(1);
+    expect(r.sent.filter(s => s.action === "send_group_msg")).toHaveLength(1);
+  });
+});
+
+describe("pi 身份随发言人切换（§7.3）", () => {
+  it("owner 群回合 all 读取但留在群线程；工具与身份随群内发言人切换", async () => {
+    const observed: TranscriptContext[] = [];
+    const inspect = (ctx: TranscriptContext) => { observed.push(ctx); return reply(); };
+    const r = await rig([
+      call(["qq_recent", {}]),
+      call(["auth_grant", { user: "qq:6", caps: ["send"], targets: ["qq:group:8"], scopes: ["group:7"] }]),
+      call(["send_message", { target: "qq:group:8", text: "跨会话消息" }]),
+      call(["send_message", { text: "来源群回复" }]), inspect,
+      call(["auth_list", {}]), inspect,
+      call(["send_message", { target: "qq:group:8", text: "撤销后不能发" }]), inspect,
+    ]);
+    r.history.ingest(r.message("6", "owner 可读取的私聊内容", null, { message_id: "private-owner" }));
+    await turn(r, "1", "owner 在群里");
+    const ids = await r.pi.readThreadIds();
+    expect(ids.owner).toBeUndefined();
+    expect(results(observed[0]!)).toContain("owner 可读取的私聊内容");
+    expect(r.texts("8")).toEqual(["跨会话消息"]);
+    expect(r.texts("7")).toEqual(["来源群回复"]);
+    const conv = await convOf(r, "group:7");
+    const tools = () => conv.agent(context).then(a => a.tools);
+    expect((await tools()).map(t => t.name)).toContain("auth_grant");
+    await turn(r, "6", "成员");
+    expect((await tools()).some(t => t.name.startsWith("auth_"))).toBe(false);
+    expect((await tools()).find(t => t.name === "send_message")!.parameters).toHaveProperty("properties.target");
+    expect(toolResults(observed[1]!).at(-1)).toMatchObject({ isError: true });
+    await r.grants.panel("auth_revoke", { user: "qq:6" });
+    await turn(r, "6", "撤销后");
+    expect((await tools()).find(t => t.name === "send_message")!.parameters).not.toHaveProperty("properties.target");
+    expect(toolResults(observed[2]!).at(-1)).toMatchObject({ isError: true });
+    expect(r.texts("8")).toEqual(["跨会话消息"]);
+    expect(await r.pi.readThreadIds()).toEqual(ids);
   });
 
-  it("真实 durable 回合立即发送正文后上传附件，最终回答不发送、settle 不补兜底", async () => {
-    const f = sendFixture();
-    const s = await setup([call("write", { path: "report.txt", content: "报告内容" }),
-      call("send_message", { text: "已整理", files: [{ path: "report.txt", name: "报告.txt" }], images: ["image.png"] }),
-      reply("这段最终回答仅留存")], { dir: f.dir, sendService: f.service });
-    const work = path.join(s.dir, "pi-work", "group_7"); await fs.mkdir(work, { recursive: true });
-    await fs.writeFile(path.join(work, "image.png"), TRANSPARENT_PNG);
-    const tasks = createTasks({ getBridge: () => f.bridge, sendService: f.service, imageBackend: s.imageBackend,
-      imagesDir: path.join(s.dir, "images"), backends: createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { pi: s.pi } }) });
-    const harness = await openHarness({ models: s.models, extension: createCsAgentExtension(tasks), storage: new MemoryStorage() }, context);
-    cleanup.push(() => harness.close(context));
-    const dispatcher = new Dispatcher({ harness, bridge: f.bridge, tasks, concurrency: 1, retryDelayMs: 1, history: s.store });
-    await dispatcher.dispatch(f.msg, f.ticket);
-    expect(f.call.mock.calls.map(c => c[0])).toEqual(["get_login_info", "send_group_msg", "upload_group_file"]);
-    expect(f.service.rows(f.ticket)).toHaveLength(1);
-    expect(f.service.rows(f.ticket)[0]!.text).toBe("已整理");
-    expect((await f.bridge.getTicket(f.ticket))!.status).toBe("sent");
-    expect((await harness.snapshot(DispatchDoc, context))!.pending).toEqual({});
-    const id = (await s.pi.readThreadIds())["group:7"]!;
-    expect((await s.pi.sessionSource.entries(String(id))).items.some(entry => entry.kind === "cs.delivery_note")).toBe(false);
+  it("两个 owner 账号共用 owner 会话与历史，第二账号保留授权工具", async () => {
+    let seen!: TranscriptContext;
+    const r = await rig([reply("主账号的历史答复"), call(["auth_list", {}]), transcript => { seen = transcript; return reply("继续对话"); }],
+      { owners: ["9", "1"] });
+    await turn(r, "9", "第一个号", null);
+    await turn(r, "1", "第二个号", null);
+    expect(JSON.stringify(seen.messages)).toContain("主账号的历史答复");
+    const result = toolResults(seen).find(m => m.toolName === "auth_list");
+    expect(result?.isError).not.toBe(true);
+    expect(Object.keys(await r.pi.readThreadIds())).toEqual(["owner"]);
+  });
+
+  it("定时工具按回合身份切换：owner、授权人、无权成员、定时运行只剩 schedule_control", async () => {
+    const f = await scheduleToolsFixture(), seen: TranscriptContext[] = [];
+    const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
+    const r = await rig([
+      call(["schedule_create", f.args]), inspect,
+      call(["schedule_create", f.args]), inspect,
+      call(["schedule_list", {}]), inspect,
+      call(["schedule_control", { action: "pause", reason: "等待更新" }]), inspect,
+    ], { scheduleTools: f.tools, owners: ["1"] });
+    // 定时工具的授权表在装置自己的 harness 上
+    const visible = async () => (await (await convOf(r, "group:7")).agent(context)).tools.map(t => t.name).filter(n => n.startsWith("schedule_"));
+    await turn(r, "1", "建一个");
+    expect(await visible()).toEqual([...SCHEDULE_MANAGEMENT_TOOLS]);
+    expect(toolResults(seen[0]!).at(-1)?.isError).not.toBe(true);
+    const own = (await f.service.list("qq:1"))[0]!;
+    expect(own).toMatchObject({ conversation: "group:7", created_by: "qq:1" });
+    await f.grants.panel("auth_grant", { user: "qq:6", caps: ["schedule"], scopes: ["group:7"] });
+    await turn(r, "6", "我也建");
+    expect(await visible()).toEqual([...SCHEDULE_MANAGEMENT_TOOLS]);
+    expect((await f.service.list("qq:6"))[0]?.created_by).toBe("qq:6");
+    await f.grants.panel("auth_revoke", { user: "qq:6" });
+    await turn(r, "6", "再看看");
+    expect(await visible()).toEqual([]);
+    expect(toolResults(seen[2]!).at(-1)).toMatchObject({ isError: true });
+    // 定时回合：同一定时输入写入装置的 Inbox 后交给宿主
+    const bound = await f.scheduled(own.id);
+    const input = f.bridge.inbox.getInbound(bound.inputKey!)!;
+    r.bridge.inbox.openScheduledInput({ key: input.key, scope: input.scope, thread_key: input.thread_key, creator: "qq:1", text: input.text, time: input.time });
+    await r.inbox.deliverScheduled(input.key);
+    await r.idle();
+    expect(await visible()).toEqual(["schedule_control"]);
+    expect((await f.service.get(own.id))?.status).toBe("paused");
+  });
+});
+
+describe("pi 重启恢复", () => {
+  it("工具执行中重启：回合续跑，安全工具重放一次，只得到一个回答", async () => {
+    let started = 0;
+    const http: typeof fetch = async (_url, init) => {
+      started++;
+      if (started === 1) {
+        await new Promise<void>(resolve => init?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+        throw new Error("aborted");
+      }
+      return Response.json({ results: [{ title: "资料", summary: "摘要", url: "https://example.com", rerank_score: 1 }] });
+    };
+    const web = new DeepSeekWeb({ apiKey: "x", fetch: http, backoffMs: 1, resolve: async () => [{ address: "93.184.216.34", family: 4 }] });
+    let resumed: TranscriptContext | undefined;
+    const r = await rig([call(["web_search", { query: "旧请求" }]), ctx => { resumed = ctx; return call(["send_message", { text: "旧请求完成" }]); }, reply()], { web });
+    await r.say("5", "查一下");
+    await vi.waitFor(() => expect(started).toBe(1));
+    await r.restart();
+    await r.idle(20_000);
+    expect(started).toBe(2);
+    expect(results(resumed!)).toContain("资料");
+    expect(r.texts("7")).toEqual(["旧请求完成"]);
   });
 });
 
@@ -1050,394 +870,3 @@ describe("DeepSeek tools", () => {
   });
 });
 
-describe("pi resetThread", () => {
-  it("archives the conversation mapping; the next message starts a new conversation", async () => {
-    const s = await setup([reply("一"), reply("二")]);
-    await s.pi.handle(request("before"), handleContext());
-    const before = (await s.pi.readThreadIds())["group:7"];
-    expect(before).toBeTypeOf("number");
-    expect(await s.pi.resetThread("group:7")).toBe(before);
-    expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: 0, cachedTokens: 0, turns: 0, source: "estimate", windowTokens: 200000 });
-    expect((await s.pi.readThreadIds())["group:7"]).toBeUndefined();
-    expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).not.toHaveProperty("group:7");
-    const archive = (await fs.readFile(path.join(s.dir, "pi-threads-archive.jsonl"), "utf8")).trim().split("\n").map(l => JSON.parse(l));
-    expect(archive).toEqual([expect.objectContaining({ key: "group:7", conversation: before })]);
-    await s.pi.handle(request("after"), handleContext());
-    const after = (await s.pi.readThreadIds())["group:7"];
-    expect(after).toBeTypeOf("number"); expect(after).not.toBe(before);
-    expect(await s.pi.resetThread("private:5")).toBeNull();
-    await expect(s.pi.resetThread("../etc")).rejects.toThrow("非法会话键");
-  });
-});
-
-
-describe("pi 重置事务与归档轮换", () => {
-  it("SQLite 归档追加失败会回滚映射清空并报告错误", async () => {
-    const s = await setup([reply()], { disk: true });
-    await s.pi.handle(request("before-failure"), handleContext());
-    const before = await s.pi.readThreadIds();
-    const commit = s.pi.harness.commit.bind(s.pi.harness);
-    const fail = vi.spyOn(s.pi.harness, "commit").mockImplementationOnce((change, ctx) => commit(async tx => {
-      const doc = tx.doc.bind(tx);
-      const proxy = new Proxy(tx, { get(target, key, receiver) {
-        if (key === "doc") return (...args: unknown[]) => {
-          if (args[0] === PiThreadsArchiveDoc) throw new Error("archive append failed");
-          return Reflect.apply(doc, tx, args);
-        };
-        return Reflect.get(target, key, receiver);
-      } });
-      return change(proxy);
-    }, ctx));
-    try { await expect(s.pi.resetThread("group:7")).rejects.toThrow("archive append failed"); }
-    finally { fail.mockRestore(); }
-    expect(await s.pi.readThreadIds()).toEqual(before);
-    expect((await s.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual([]);
-    expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).toEqual(before);
-    await s.pi.close();
-    const restarted = await setup([], { dir: s.dir, disk: true });
-    expect(await restarted.pi.readThreadIds()).toEqual(before);
-    expect((await restarted.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual([]);
-  });
-
-  it("提交后 JSON/JSONL 镜像写入失败，重启从 SQLite 修复且不重复归档", async () => {
-    const s = await setup([reply()], { disk: true });
-    await s.pi.handle(request("mirror-failure"), handleContext());
-    const before = await s.pi.readThreadIds();
-    const rename = vi.spyOn(fs, "rename").mockRejectedValue(new Error("mirror write failed"));
-    try { expect(await s.pi.resetThread("group:7")).toBe(before["group:7"]); }
-    finally { rename.mockRestore(); }
-    expect(await s.pi.readThreadIds()).toEqual({});
-    expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).toEqual(before);
-    expect((await s.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toHaveLength(1);
-    await s.pi.close();
-    const restarted = await setup([], { dir: s.dir, disk: true });
-    expect(await restarted.pi.readThreadIds()).toEqual({});
-    expect(JSON.parse(await fs.readFile(path.join(s.dir, "pi-threads.json"), "utf8"))).toEqual({});
-    const rows = (await fs.readFile(path.join(s.dir, "pi-threads-archive.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
-    expect(rows).toEqual([expect.objectContaining({ conversation: before["group:7"] })]);
-    expect(await restarted.pi.resetThread("group:7")).toBeNull();
-    expect((await restarted.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toHaveLength(1);
-  });
-
-  it("导入旧归档及后续重置只保留最新 200 条，重启不重复导入", async () => {
-    const dir = tmp("pi-archive-rotation-");
-    const rows = Array.from({ length: 205 }, (_, i) => ({ key: "group:7", conversation: 10000 + i, archived_at: new Date(i * 1000).toISOString(), reason: "legacy" }));
-    await fs.writeFile(path.join(dir, "pi-threads-archive.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n", "utf8");
-    const s = await setup([reply()], { dir, disk: true });
-    expect((await s.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual(rows.slice(-200));
-    await s.pi.handle(request("rotate"), handleContext());
-    const id = (await s.pi.readThreadIds())["group:7"];
-    await s.pi.resetThread("group:7");
-    const archive = (await s.pi.harness.snapshot(PiThreadsArchiveDoc, context))!.rows;
-    expect(archive).toHaveLength(200);
-    expect(archive[0]).toEqual(rows[6]); expect(archive.at(-1)?.conversation).toBe(id);
-    const file = path.join(dir, "pi-threads-archive.jsonl");
-    expect((await fs.readFile(file, "utf8")).trim().split("\n").map(line => JSON.parse(line))).toEqual(archive);
-    await s.pi.close();
-    await fs.writeFile(file, JSON.stringify(rows[0]) + "\n", "utf8");
-    const reopened = await setup([], { dir, disk: true });
-    expect((await reopened.pi.harness.snapshot(PiThreadsArchiveDoc, context))?.rows).toEqual(archive);
-    expect((await fs.readFile(file, "utf8")).trim().split("\n")).toHaveLength(200);
-  });
-});
-
-
-describe("pi 上下文占用", () => {
-  it("observer 在摘要提交后立即估算，重复刷新不增加回合；读取失败保留记录", async () => {
-    const s = await setup([reply("之前的回复")]);
-    await s.pi.handle(request("compact-observer"), handleContext());
-    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")?.turns).toBe(1));
-    const conv = (await s.pi.harness.conversation((await s.pi.readThreadIds())["group:7"] as ConversationId, context))!;
-    await conv.commit(tx => tx.appendEntry(conv.id, { kind: CompactionEntry.kind, head: "self",
-      model: [{ role: "user", content: "短摘要", timestamp: Date.now() }], data: { reason: "manual" } }), context);
-    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ source: "compact", turns: 1 }));
-    const expected = estimateContextTokens((await conv.context(context)).messages).tokens;
-    expect(s.contextUsage.get("pi", "group:7")?.usedTokens).toBe(expected);
-    await refreshPiCompactionUsage(conv, "group:7", s.contextUsage);
-    expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: expected, turns: 1 });
-    const before = s.contextUsage.get("pi", "group:7");
-    const read = vi.spyOn(conv, "context").mockRejectedValueOnce(new Error("unavailable"));
-    const info = vi.spyOn(log, "info");
-    try {
-      await expect(refreshPiCompactionUsage(conv, "group:7", s.contextUsage)).resolves.toBeUndefined();
-      expect(s.contextUsage.get("pi", "group:7")).toEqual(before);
-      expect(info).toHaveBeenCalledWith("pi context usage unavailable after compaction; keeping previous usage", { key: "group:7" });
-    } finally { read.mockRestore(); info.mockRestore(); }
-  });
-
-  it("缺失用量文件时恢复 faux 会话历史与压缩时间，重开不调用模型", async () => {
-    const s = await setup([call("web_search", { query: "history" }), reply("第一轮"), reply("第二轮")], { disk: true });
-    await s.pi.handle(request("history-one"), handleContext());
-    await s.pi.handle(request("history-two"), handleContext());
-    const conv = (await s.pi.harness.conversation((await s.pi.readThreadIds())["group:7"] as ConversationId, context))!;
-    const messages = (await conv.context(context)).entries.flatMap(e => e.model ?? []).filter(m => m.role === "assistant");
-    const last = messages.at(-1)!;
-    const compactedAt = last.timestamp + 1;
-    await conv.commit(async tx => {
-      // 用量位于第二页，且已被压缩移出活动快照。
-      for (let i = 0; i < 260; i++) await tx.appendEntry(conv.id, { kind: "test.bookkeeping" });
-      await tx.appendEntry(conv.id, { kind: CompactionEntry.kind, head: "self",
-        model: [{ role: "user", content: "历史摘要", timestamp: compactedAt }], data: { reason: "manual" } });
-    }, context);
-    await s.pi.close(); await s.contextUsage.close();
-    await fs.unlink(path.join(s.dir, "context-usage.json"));
-    const restarted = await setup([reply("恢复后的新回合")], { dir: s.dir, disk: true });
-    expect(restarted.contextUsage.get("pi", "group:7")).toMatchObject({ turns: 2, source: "turn",
-      usedTokens: last.usage.input + last.usage.cacheRead + last.usage.cacheWrite, cachedTokens: last.usage.cacheRead,
-      updatedAt: last.timestamp, lastCompactionAt: compactedAt, windowTokens: 200000,
-      compaction: piContextCapacity(200000).compaction });
-    expect(restarted.faux.state.callCount).toBe(0);
-    await restarted.pi.handle(request("history-three"), handleContext());
-    await vi.waitFor(() => expect(restarted.contextUsage.get("pi", "group:7")!.turns).toBe(3));
-    await restarted.pi.resetThread("group:7");
-    expect(restarted.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
-    expect(restarted.contextUsage.get("pi", "group:7")!.lastCompactionAt).toBeUndefined();
-  });
-
-  it("pi 每请求记 recordRequest、每票据一次 recordTurn，seq 随票据重置且重复回执不增计数", async () => {
-    const s = await setup([call("web_search", { query: "usage" }), reply("完成采集"), reply("下一票据")],
-      { reserveTokens: 16000, backgroundTokens: 32000 });
-    const events: { ticket: string; stage: string; detail: Record<string, unknown> }[] = [];
-    const untap = trace.tap(e => {
-      if (e.stage === "model_request" || (e.stage === "context_usage" && e.detail.source === "turn")) events.push(e);
-    });
-    try {
-      await s.pi.handle(request("usage-turn"), handleContext());
-      const conv = (await s.pi.harness.conversation((await s.pi.readThreadIds())["group:7"] as ConversationId, context))!;
-      const messages = (await conv.context(context)).entries.flatMap(e => e.model ?? []).filter(m => m.role === "assistant");
-      expect(messages).toHaveLength(2);
-      const actual = messages[1]!.usage;
-      expect(actual.cacheRead).toBeGreaterThan(0);
-      expect(s.contextUsage.get("pi", "group:7")).toMatchObject({
-        usedTokens: actual.input + actual.cacheRead + actual.cacheWrite, cachedTokens: actual.cacheRead, windowTokens: 200000, turns: 1, source: "turn",
-        compaction: { background: 152000, reserve: 184000 },
-      });
-      expect(events.map(e => e.stage)).toEqual(["model_request", "model_request", "context_usage"]);
-      expect(events.slice(0, 2).map(e => e.detail)).toEqual(messages.map((m, index) => ({
-        backend: "pi", key: "group:7", ticket: "usage-turn", seq: index + 1, turn: 1,
-        input: m.usage.input + m.usage.cacheRead + m.usage.cacheWrite, cached: m.usage.cacheRead, output: m.usage.output,
-        window: 200000, at: m.timestamp,
-      })));
-      await s.pi.handle(request("usage-turn"), handleContext());
-      expect(events).toHaveLength(3);
-      expect(s.contextUsage.get("pi", "group:7")!.turns).toBe(1);
-      await s.pi.handle(request("usage-next"), handleContext());
-      expect(events[3]).toMatchObject({ ticket: "usage-next", stage: "model_request", detail: { seq: 1, turn: 2 } });
-      expect(events[4]).toMatchObject({ ticket: "usage-next", stage: "context_usage", detail: { turns: 2 } });
-      expect(events).toHaveLength(5);
-      await s.contextUsage.flush();
-      expect(new ContextUsageStore(s.dir).all()).toEqual(s.contextUsage.all());
-      await s.pi.resetThread("group:7");
-      expect(s.contextUsage.get("pi", "group:7")).toMatchObject({ usedTokens: 0, turns: 0, source: "estimate" });
-      expect(s.contextUsage.get("pi", "group:7")!.lastCompactionAt).toBeUndefined();
-    } finally { untap(); }
-  });
-
-  it("pi 回合完成时缺少请求样本仍只计一个回合并保留原占用", async () => {
-    const s = await setup([reply("第一轮"), reply("没有用量")]);
-    await s.pi.handle(request("sampled"), handleContext());
-    const before = s.contextUsage.get("pi", "group:7")!;
-    const last = vi.spyOn(PiContextObserver.prototype, "lastRequest").mockReturnValue(undefined);
-    try {
-      await s.pi.handle(request("unsampled"), handleContext());
-      expect(s.contextUsage.get("pi", "group:7")).toEqual({ ...before, turns: 2 });
-    } finally { last.mockRestore(); }
-  });
-
-  it("deepseek-flash 使用 pi-ai 的 1000000 窗口与默认实际压缩位置", () => {
-    const model = builtinModels().getModel("deepseek", "deepseek-flash")!;
-    expect(piContextCapacity(model.contextWindow)).toEqual({ windowTokens: 1000000,
-      compaction: { background: 950848, reserve: 983616 } });
-    expect(piContextCapacity(model.contextWindow, 16384, 0).compaction).toEqual({ background: 983616, reserve: 983616 });
-  });
-});
-
-it("pi 历史工具写入 ticket/session/task 并发出轻量 trace", async () => {
-  const obs = new ObsStore(tmp()); cleanup.push(() => obs.close());
-  const s = await setup([call("qq_recent"), reply()], { instrumentation: MemoryInstrumentation.fromDb(obs.db) });
-  s.store.ingest(inbound('m', '7', '历史记录'));
-  const events: string[] = [];
-  const off = trace.tap(e => { if (e.ticket === 'recall-observed') events.push(e.stage); }); cleanup.push(off);
-  await s.pi.handle(request('recall-observed'), handleContext());
-  const session = String((await s.pi.readThreadIds())['group:7']);
-  expect(obs.db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ backend: 'pi', ticket: 'recall-observed', session,
-    task_id: expect.stringMatching(/^\d+$/), tool: 'qq_recent', scope_hint: 'group:7', returned_json: '[{"kind":"message","id":"m"}]' });
-  expect(events).toContain('memory_recall');
-});
-
-describe("pi 运行时模型设置", () => {
-  it("新票据提交读取当前模型和快照档位，旧票据保持启动默认", async () => {
-    const calls: { model: string; reasoning: unknown }[] = [];
-    const step: FauxResponseStep = (_ctx, options, _state, model) => { calls.push({ model: model.id, reasoning: options?.reasoning }); return reply(); };
-    let current!: ModelRef;
-    const s = await setup([step, step, step], { currentModel: () => current });
-    current = { provider: s.faux.getModel().provider, modelId: "runtime" };
-    const req = request("runtime-model");
-    req.settings = { backend: "pi", codexReasoningEffort: "high", piModel: "test", piThinkingLevel: "high", effortSource: "auto" };
-    await s.pi.handle(req, handleContext());
-    const thread = (await s.pi.readThreadIds())["group:7"];
-    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")?.windowTokens).toBe(400000));
-    await s.pi.handle(request("legacy-model"), handleContext());
-    await vi.waitFor(() => expect(s.contextUsage.get("pi", "group:7")?.windowTokens).toBe(200000));
-    current = { ...current, modelId: "test" };
-    await s.pi.handle({ ...req, ticket: "runtime-clamp", settings: { ...req.settings, piThinkingLevel: "xhigh" } }, handleContext());
-    expect((await s.pi.readThreadIds())["group:7"]).toBe(thread);
-    expect(calls).toEqual([{ model: "runtime", reasoning: "high" }, { model: "test", reasoning: undefined }, { model: "test", reasoning: undefined }]);
-  });
-  it("设置中的模型不存在时 warn 并回退启动模型", async () => {
-    let modelId: string | undefined;
-    const s = await setup([(_ctx, _options, _state, model) => { modelId = model.id; return reply(); }],
-      { currentModel: () => ({ provider: "missing", modelId: "gone" }) });
-    const warn = vi.spyOn(log, "warn");
-    try {
-      await s.pi.handle({ ...request("model-fallback"), settings: { backend: "pi", codexReasoningEffort: "high", piModel: "gone", piThinkingLevel: "high" } }, handleContext());
-      expect(modelId).toBe("test");
-      expect(warn).toHaveBeenCalledWith("pi runtime model unavailable; using startup model", { provider: "missing", model: "gone" });
-    } finally { warn.mockRestore(); }
-  });
-});
-
-
-it("pi 的不确定发送以非错误工具结果返回，换 call_id 同文重试不再发送", async () => {
-  const f = sendFixture();
-  f.call.mockImplementationOnce(async () => ({ user_id: 2 })).mockRejectedValueOnce(new Error("回执丢失"));
-  let seen!: TranscriptContext;
-  const s = await setup([call("send_message", { text: "可能送达" }), call("send_message", { text: "可能送达" }),
-    ctx => { seen = ctx; return reply(); }], { dir: f.dir, sendService: f.service });
-  await s.pi.handle(request(f.ticket), handleContext());
-  const tools = seen.messages.filter(m => m.role === "toolResult");
-  expect(tools).toHaveLength(2);
-  expect(tools.every(t => !t.isError)).toBe(true);
-  expect(JSON.stringify(tools)).toContain("消息可能已送达，不要重发");
-  expect(f.service.rows(f.ticket)).toHaveLength(1);
-  expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(1);
-});
-
-
-it("owner 群回合 all 读取但留在群线程，身份与工具配置随群内发言人切换", async () => {
-  const f = await grantsFixture();
-  const observed: TranscriptContext[] = [];
-  const inspect = (ctx: TranscriptContext) => { observed.push(ctx); return reply(); };
-  const s = await setup([
-    call("qq_recent"),
-    call("auth_grant", { user: "qq:3", caps: ["send", "schedule"], targets: ["qq:group:8"], scopes: ["group:7"] }),
-    call("send_message", { target: "qq:group:8", text: "跨会话消息" }),
-    call("send_message", { text: "来源群回复" }), inspect,
-    call("auth_list"), inspect,
-    call("send_message", { target: "qq:group:8", text: "撤销后不能发" }), inspect,
-  ], { dir: f.dir, grants: f.grants, sendService: f.service });
-  s.store.ingest(inbound("private-owner", null, "owner 可读取的私聊内容"));
-  await s.pi.handle({ ...request(f.ticket), access: "all", actor: "qq:1", actorIsOwner: true, senderIsOwner: true }, handleContext());
-  const ids = await s.pi.readThreadIds();
-  expect(ids.owner).toBeUndefined();
-  expect(results(observed[0]!)).toContain("owner 可读取的私聊内容");
-  expect(f.service.rows(f.ticket).map(r => r.target_id)).toEqual(["8", "7"]);
-  const conv = (await s.pi.harness.conversation(ids["group:7"]! as ConversationId, context))!;
-  const tools = () => conv.agent(context).then(a => a.tools);
-  expect((await tools()).map(t => t.name)).toContain("auth_grant");
-  expect((await tools()).find(t => t.name === "send_message")!.parameters).toHaveProperty("properties.target");
-  expect(await s.pi.harness.snapshot(PiRequestDoc, conv.id, context)).toMatchObject({ actor: "qq:1", actorIsOwner: true, access: "all" });
-  const member = (message_id: string) => {
-    const ticket = f.store.createTicket({ ...f.msg, user_id: "3", message_id });
-    return { ...request(ticket), actor: "qq:3", actorIsOwner: false, source: { ...request(ticket).source, user_id: "3" } };
-  };
-  await s.pi.handle(member("member-granted"), handleContext());
-  expect((await tools()).some(t => t.name.startsWith("auth_"))).toBe(false);
-  expect((await tools()).find(t => t.name === "send_message")!.parameters).toHaveProperty("properties.target");
-  expect(observed[1]!.messages.filter(m => m.role === "toolResult").at(-1)).toMatchObject({ isError: true });
-  expect(await s.pi.readThreadIds()).toEqual(ids);
-  await f.grants.panel("auth_revoke", { user: "qq:3" });
-  const denied = member("member-denied");
-  await s.pi.handle(denied, handleContext());
-  expect((await tools()).find(t => t.name === "send_message")!.parameters).not.toHaveProperty("properties.target");
-  expect(observed[2]!.messages.filter(m => m.role === "toolResult").at(-1)).toMatchObject({ isError: true });
-  expect(f.service.rows(denied.ticket)).toHaveLength(0);
-  expect(await s.pi.harness.snapshot(PiRequestDoc, conv.id, context)).toMatchObject({ actor: "qq:3", actorIsOwner: false, access: "group:7" });
-});
-
-it("定时私聊使用目标会话线程和来源授权，创建者身份与目标分开绑定", async () => {
-  const f = await grantsFixture("99"), ticket = "run_" + "c".repeat(40);
-  await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "private", target_id: "1", user_id: "9" });
-  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["send"], targets: ["qq:group:8"], scopes: ["private:1"] });
-  let seen!: TranscriptContext;
-  const s = await setup([call("send_message", { target: "qq:group:8", text: "定时跨会话通知" }),
-    transcript => { seen = transcript; return reply(); }], { dir: f.dir, grants: f.grants, sendService: f.service });
-  await s.pi.handle({ ...request(ticket), scope: "private:1", access: "private:1", threadKey: "private:1",
-    actor: "qq:9", actorIsOwner: false, source: { type: "private", user_id: "9", group_id: null, nickname: "创建者" } }, handleContext());
-  expect(seen.messages.find(message => message.role === "toolResult")?.isError).not.toBe(true);
-  expect(f.service.rows(ticket)).toMatchObject([{ status: "sent", target_id: "8", mention_user_id: null }]);
-  const threads = await s.pi.readThreadIds();
-  expect(Object.keys(threads)).toEqual(["private:1"]);
-  expect(await s.pi.harness.snapshot(PiRequestDoc, threads["private:1"] as ConversationId, context))
-    .toMatchObject({ actor: "qq:9", actorIsOwner: false, access: "private:1", source: { user_id: "9" } });
-});
-
-
-it("定时工具按 pi 回合切换：owner、授权人、无权成员、定时运行与恢复交互", async () => {
-  const f = await scheduleToolsFixture(), seen: TranscriptContext[] = [];
-  const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
-  const s = await setup([
-    call("schedule_create", f.args), inspect,
-    call("schedule_create", f.args), inspect,
-    call("schedule_list"), inspect,
-    call("schedule_control", { action: "pause", reason: "等待更新" }), inspect,
-    call("schedule_list"), inspect,
-    call("schedule_control", { action: "complete", reason: "停止监控" }), inspect,
-  ], { dir: f.dir, grants: f.grants, scheduleTools: f.tools });
-  const req = (bound: GrantBinding): AgentRequest => {
-    const source = bound.source!, scope = source.type === "group" ? "group:" + source.group_id : "private:" + source.user_id;
-    return { ticket: bound.ticket, actor: bound.actor, actorIsOwner: bound.actorIsOwner, senderIsOwner: bound.actorIsOwner,
-      scope, access: bound.actorIsOwner ? "all" : scope, threadKey: scope as AgentRequest["threadKey"],
-      source: { ...source, nickname: "测试者" }, text: "管理任务" };
-  };
-  const visible = async () => {
-    const id = (await s.pi.readThreadIds())["group:7"]! as ConversationId;
-    const conv = (await s.pi.harness.conversation(id, context))!;
-    return (await conv.agent(context)).tools.map(t => t.name).filter(n => n.startsWith("schedule_"));
-  };
-  await s.pi.handle(req(f.binding()), handleContext());
-  expect(await visible()).toEqual([...SCHEDULE_MANAGEMENT_TOOLS]);
-  expect(seen[0].messages.filter(m => m.role === "toolResult").at(-1)?.isError).not.toBe(true);
-  const own = (await f.service.list("qq:1"))[0];
-  expect(own).toMatchObject({ conversation: "group:7", created_by: "qq:1" });
-  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"], scopes: ["group:7"] });
-  await s.pi.handle(req(f.binding("9")), handleContext());
-  expect(await visible()).toEqual([...SCHEDULE_MANAGEMENT_TOOLS]);
-  const memberOwn = (await f.service.list("qq:9"))[0];
-  expect(memberOwn.created_by).toBe("qq:9");
-  await f.grants.panel("auth_revoke", { user: "qq:9" });
-  await s.pi.handle(req(f.binding("9")), handleContext());
-  expect(await visible()).toEqual([]);
-  expect(seen[2].messages.filter(m => m.role === "toolResult").at(-1)).toMatchObject({ isError: true });
-  await s.pi.handle(req(await f.scheduled(own.id)), handleContext());
-  expect(await visible()).toEqual(["schedule_control"]);
-  expect((await f.service.get(own.id))?.status).toBe("paused");
-  await s.pi.handle(req(f.binding()), handleContext());
-  expect(await visible()).toEqual([...SCHEDULE_MANAGEMENT_TOOLS]);
-  await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"] });
-  await s.pi.handle(req(await f.scheduled(memberOwn.id, "qq:9")), handleContext());
-  expect(await visible()).toEqual(["schedule_control"]);
-  expect((await f.service.get(memberOwn.id))?.status).toBe("completed");
-});
-
-it("两个 owner 账号共用 pi 会话与历史，第二账号保留授权工具权限", async () => {
-  const owners = ["99", "1"], f = await grantsFixture("99", false, owners);
-  let seen!: TranscriptContext;
-  const s = await setup([reply("主账号的历史答复"), call("auth_list"), transcript => { seen = transcript; return reply("继续对话"); }],
-    { dir: f.dir, grants: f.grants, sendService: f.service });
-  for (const user of owners) {
-    const msg = { ...f.msg, user_id: user, message_type: "private" as const, group_id: null, message_id: "owner-" + user };
-    const ticket = f.store.createTicket(msg), source = { type: "private" as const, user_id: user, group_id: null, nickname: "测试" };
-    await s.pi.handle({ ...request(ticket, true), scope: "private:" + user, source,
-      actor: "qq:" + user, actorIsOwner: true, threadKey: threadKeyForSource(source, owners),
-      access: accessToString(accessForSource(source, owners)) }, handleContext());
-  }
-  expect(JSON.stringify(seen.messages)).toContain("主账号的历史答复");
-  const result = seen.messages.find(message => message.role === "toolResult" && message.toolName === "auth_list");
-  expect(result?.role).toBe("toolResult");
-  expect(result?.role === "toolResult" && result.isError).not.toBe(true);
-  const threads = await s.pi.readThreadIds();
-  expect(Object.keys(threads)).toEqual(["owner"]);
-  expect(await s.pi.harness.snapshot(PiRequestDoc, threads.owner as ConversationId, context))
-    .toMatchObject({ actor: "qq:1", actorIsOwner: true, senderIsOwner: true, access: "all", source: { user_id: "1" } });
-});

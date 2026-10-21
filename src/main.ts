@@ -32,6 +32,13 @@ import { SkillsLoader } from "./agent/pi-tools/skills.js";
 import { SkillsStore } from "./agent/skills-store.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Dispatcher } from "./agent/dispatch.js";
+import { Inbox } from "./agent/inbox.js";
+import { ThreadHost } from "./agent/host/thread-host.js";
+import type { ThreadKey } from "./agent/host/types.js";
+import { BackendRouter, TurnMonitor } from "./agent/turns.js";
+import { createTurnSettings } from "./agent/turn-settings.js";
+import { attachmentDirs } from "./media/attach-paths.js";
+import type { RecallBinding } from "./context/media-recall-server.js";
 import { ScheduleTools } from "./agent/schedule/tools.js";
 import { ScheduleService } from "./agent/schedule/service.js";
 import { createScheduleTask } from "./agent/schedule/task.js";
@@ -46,7 +53,6 @@ import { createImageBackend } from "./media/gen/image-gen.js";
 import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
 import { createTasks } from "./agent/tasks.js";
 import { CodexBackend } from "./agent/backends/codex.js";
-import { createBackendSelector } from "./agent/backends/select.js";
 import { PiBackend } from "./agent/backends/pi.js";
 import { ContextStore } from "./context/store.js";
 import { SettingsStore, settingsDefaults } from "./agent/settings.js";
@@ -125,21 +131,26 @@ async function main(): Promise<void> {
     } });
   const chatsChannel: Pick<Channel, "listChats"> = { listChats: opts => getBridge().listChats(opts) };
   let dispatchHarness: Harness;
-  const grants = new GrantsService({ getHarness: () => dispatchHarness, getChannel: getBridge, owner: cfg.owner, owners: cfg.owners });
+  // 会话宿主与 Inbox 在派发 harness 打开后创建；工具与发送在调用时才通过它们求本轮身份（§7.3）。
+  let host!: ThreadHost;
+  let inbox!: Inbox;
+  const grants = new GrantsService({ getHarness: () => dispatchHarness, owner: cfg.owner, owners: cfg.owners });
   const sendService = new SendService({ grants, getChannel: getBridge, dataDir: cfg.DATA_DIR, store,
+    mention: key => host.takeMention(key as ThreadKey),
     limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } });
   let schedules: ScheduleService;
   const scheduleTools = new ScheduleTools({ grants, getHarness: () => dispatchHarness, getSchedules: () => schedules });
+  // codex 的 IM / 召回租约只绑定会话与回合；身份在每次调用时从宿主求出。
+  const turnOf = (lease: RecallBinding) => inbox.binding(lease.threadKey);
   const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel, {
-    permissions: async binding => ({ ...await grants.permissions(binding), ...await scheduleTools.permissions(binding) }),
-    schedule: (binding, name, args) => scheduleTools.tool(binding, name, args),
-    auth: (binding, name, args) => grants.tool(binding, name, args),
-    send: (binding, attempt, args, signal) => sendService.send({
-      ticket: binding.ticket, source: binding.source, actor: binding.actor, actorIsOwner: binding.actorIsOwner, access: binding.access, workdir: binding.workdir!,
-      extraRoots: [path.join(cfg.imagesDir, binding.ticket),
-        ...(/^[0-9a-f-]{36}$/i.test(binding.session ?? "") ? [path.join(cfg.codexHome, "generated_images", binding.session!)] : [])],
-    }, args, { attempt }, signal),
-    release: (ticket, attempt) => sendService.releaseAttempt(ticket, attempt),
+    permissions: async lease => ({ ...await grants.permissions(turnOf(lease)), ...await scheduleTools.permissions(turnOf(lease)) }),
+    schedule: (lease, name, args) => scheduleTools.tool(turnOf(lease), name, args),
+    auth: (lease, name, args) => grants.tool(turnOf(lease), name, args),
+    send: (lease, callKey, args, signal) => sendService.send({
+      ...turnOf(lease), access: lease.access, workdir: lease.workdir!,
+      extraRoots: [attachmentDirs(cfg.DATA_DIR, lease.threadKey).attachDir,
+        ...(/^[0-9a-f-]{36}$/i.test(lease.session ?? "") ? [path.join(cfg.codexHome, "generated_images", lease.session!)] : [])],
+    }, args, callKey, signal),
   });
   const recallServer = await startMediaRecallServer(recallTokens, cfg.MEDIA_RECALL_PORT);
 
@@ -213,25 +224,8 @@ async function main(): Promise<void> {
   const autoModel = cfg.AUTO_EFFORT_MODEL ? models.getModel("magpie", cfg.AUTO_EFFORT_MODEL) : undefined;
   if (cfg.AUTO_EFFORT_MODEL && !autoModel) log.warn("auto effort model unavailable; using heuristics and fallback", { model: cfg.AUTO_EFFORT_MODEL });
 
-  // 执行 agent 后端（§4.3）：codex（默认）与 pi 长期会话。
-  const backends = createBackendSelector({
-    current: () => settings.current(),
-    backends: {
-      codex: new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, ticketsDir: cfg.ticketsDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT }),
-      pi: { name: "pi", handle: (req, context) => pi.handle(req, context), recordDeliveryNote: note => pi.recordDeliveryNote(note) },
-    },
-  });
-  const tasks = createTasks({
-    sendService,
-    getBridge,
-    imageBackend,
-    imagesDir: cfg.imagesDir,
-    ticketsDir: cfg.ticketsDir,
-    imageTimeoutCapMs: cfg.COMFY_TIMEOUT_SEC * 1000,
-    imageCollectExtensions: cfg.IMAGE_COLLECT_EXTENSIONS,
-    backends,
-    owner: cfg.owner, owners: cfg.owners,
-    store,
+  // 每轮开始时冻结后端、模型与档位（auto 档位按本轮输入路由）。
+  const turnSettings = createTurnSettings({
     currentSettings: () => settings.currentForTurn(),
     codexReasoningEffort: cfg.CODEX_REASONING_EFFORT, piThinkingLevel: cfg.AGENT_THINKING_LEVEL,
     effortRouter: { model: cfg.AUTO_EFFORT_MODEL, timeoutMs: cfg.AUTO_EFFORT_TIMEOUT_MS,
@@ -245,19 +239,29 @@ async function main(): Promise<void> {
       } } : {}),
     },
   });
-  // 回调仅在恢复/调度后调用；先注册两类任务，再补齐服务与派发器，避免构造环。
+  // 生图前缀路由（第 2 阶段仍按票据）：派发 harness 上的生图任务。
+  const tasks = createTasks({
+    getBridge,
+    imageBackend,
+    imagesDir: cfg.imagesDir,
+    imageTimeoutCapMs: cfg.COMFY_TIMEOUT_SEC * 1000,
+    imageCollectExtensions: cfg.IMAGE_COLLECT_EXTENSIONS,
+  });
+  // 定时运行（§10）：到点向来源会话的宿主投一条定时输入；先注册排程任务，再补齐服务与宿主，避免构造环。
   const canSchedule = grants.canSchedule.bind(grants);
   const scheduled = createScheduledRuntime({
-    getChannel: getBridge, tasks, owner: cfg.owner, owners: cfg.owners, canSchedule,
+    getChannel: getBridge, getHarness: () => dispatchHarness, owner: cfg.owner, owners: cfg.owners, canSchedule,
+    deliver: key => inbox.deliverScheduled(key),
+    inputState: key => host.inputState(key),
     recorder: { recordRun: (id, run) => schedules.recordRun(id, run) },
     pauseSchedule: (id, reason) => schedules.pauseWithReason(id, reason),
   });
   const scheduledAdmitter: ScheduledRunLauncher = {
     prepare: scheduled.prepare,
-    dispatchScheduled: ticket => { void dispatcher.dispatchScheduled(ticket); },
+    launch: key => { void scheduled.launch(key).catch(error => log.error("scheduled run launch failed", { key, error })); },
   };
   const scheduleTask = createScheduleTask({ admitter: scheduledAdmitter });
-  const extension = createCsAgentExtension(tasks, [scheduleTask, scheduled.ScheduledTask]);
+  const extension = createCsAgentExtension(tasks, [scheduleTask]);
   const harness = dispatchHarness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
   schedules = new ScheduleService({ harness, task: scheduleTask, admitter: scheduledAdmitter, owner: cfg.owner, owners: cfg.owners, canSchedule });
 
@@ -275,28 +279,38 @@ async function main(): Promise<void> {
     incomingDownloadConcurrency: cfg.INCOMING_DOWNLOAD_CONCURRENCY,
     incomingDownloadDeadlineMs: cfg.INCOMING_DOWNLOAD_DEADLINE_SEC * 1000,
   });
+  const dispatcher = new Dispatcher({
+    harness,
+    bridge,
+    tasks,
+    concurrency: cfg.AGENT_CONCURRENCY,
+    imagePrefixes: cfg.imagePrefixes,
+    history: store,
+  });
+  // Inbox（§4.1）：触发消息按前缀分流，agent 消息投递给会话宿主；生图前缀以入站键开票后走派发器。
+  inbox = new Inbox({ getChannel: getBridge, getHost: () => host, owners: cfg.owners, imagePrefixes: cfg.imagePrefixes, store, dataDir: cfg.DATA_DIR,
+    image: async (message, key) => { await getBridge().openImageTicket(key); void dispatcher.dispatch(message, key); } });
 
   // 恢复 pi 工具前，派发授权文档与 Channel 必须已就绪。
   const pi = await PiBackend.open({
-    sendService, grants, scheduleTools,
+    sendService, grants, scheduleTools, turns: inbox, owners: cfg.owners,
     currentModel: currentPiModel,
     dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     skillsDir: cfg.PI_SKILLS_DIR,
-    channel: chatsChannel, mediaRecall, mediaRecallMaxPerTicket: cfg.MEDIA_RECALL_MAX_PER_TICKET,
-    thinkingLevel, store, instrumentation, contextUsage, imageBackend, timeoutMs: cfg.PI_TURN_TIMEOUT_SEC * 1000,
+    channel: chatsChannel, mediaRecall,
+    thinkingLevel, store, instrumentation, contextUsage, imageBackend,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
     attachmentLimits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT },
   });
-  const dispatcher = new Dispatcher({
-    harness, scheduled,
-    bridge,
-    tasks,
-    concurrency: cfg.AGENT_CONCURRENCY,
-    owners: cfg.owners,
-    imagePrefixes: cfg.imagePrefixes,
-    history: store,
-  });
+  const codexBackend = new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT,
+    turns: inbox, owners: cfg.owners, sendService, imageBackend, imageTimeoutCapMs: cfg.COMFY_TIMEOUT_SEC * 1000 });
+  const router = new BackendRouter({ backends: { pi, codex: codexBackend }, settings: turnSettings, turns: inbox });
+  const monitor = new TurnMonitor({ inbox, sendService, scheduled, getHost: () => host });
+  // 会话宿主（§4.2）：状态存于派发 harness 的 cs.thread-host 文档；并发上限只限进行中的回合数。
+  host = new ThreadHost({ store: harness, adapter: router, concurrency: cfg.AGENT_CONCURRENCY, owners: cfg.owners, events: monitor.events });
+  pi.bind(host);
+  codexBackend.attach(host);
 
   // 聊天记录衰老（日/周摘要 + 清理）：每天 HISTORY_SUMMARY_HOUR 点（容器本地时区，默认 UTC）；启动时补跑
   const aging = startAgingScheduler({
@@ -310,12 +324,18 @@ async function main(): Promise<void> {
     cleanup: () => cleanupIncoming(cfg.DATA_DIR),
   });
 
-  // 继续上次未完成的工作：先由派发器按 scope FIFO 接管索引中的票据（v2 遗留会话先中止），再开启任务调度。
-  // 运行中的任务从最后提交的检查点继续（已完成的阶段不重跑）。
+  // 继续上次未完成的工作：宿主先恢复回合（pi 续跑；codex 丢失 → 中断提示），再接上 pi 事件流；
+  // 生图票据由派发器按 scope FIFO 接管；最后重新投递未送达的输入与在途的定时运行。
   const alerts = startAlerts({ enabled: () => settings.current().alertOwner, owner: cfg.owner, bridge, trace });
+  await host.recover();
+  await pi.attach();
+  await sendService.reconcile().catch(error => log.warn("outbox reconciliation failed", { error }));
   await dispatcher.recover();
   await schedules.start();
   harness.resume();
+  await inbox.recover();
+  await scheduled.recover();
+  monitor.start();
 
   // raw 先于 message 发出：入站消息先入库，派发器再写机器人"处理中"行
   bridge.on("raw", (msg) => {
@@ -332,7 +352,7 @@ async function main(): Promise<void> {
       log.warn("context recall failed", { error: err });
     }
   });
-  bridge.on("message", (msg, ticket) => void dispatcher.dispatch(msg, ticket));
+  bridge.on("message", (msg, key) => { inbox.receive(msg, key).catch(error => log.error("inbound delivery failed", { key: key.slice(0, 12), error })); });
   bridge.on("connection", () => log.info("napcat connected"));
   bridge.on("disconnect", (reason) => log.warn("napcat disconnected", { reason }));
   bridge.on("error", (err) => log.error("bridge error", { error: err }));
@@ -363,6 +383,13 @@ async function main(): Promise<void> {
     })
     .catch((err) => (checks.codex = { ok: false, error: (err as Error).message }));
 
+  // 面板与指标的队列视图：会话宿主（进行中回合 / 等待槽位 / 各会话排队数）加生图派发器。
+  const queueStatus = () => {
+    const h = host.status(), image = dispatcher.status();
+    const scopes: Record<string, number> = { ...image.scopes };
+    for (const key of h.busy) scopes[key] = (scopes[key] ?? 0) + (host.thread(key as ThreadKey)?.pending.length ?? 0);
+    return { active: h.active + image.active, slots: cfg.AGENT_CONCURRENCY, waiting: h.waiting + image.waiting, scopes, busy: h.busy };
+  };
   const codexStatus = async () => {
     const threads = await codex.readThreadIds();
     return Promise.all(Object.entries(threads).map(async ([key, id]) => ({ thread_key: key, thread_id: id,
@@ -375,7 +402,7 @@ async function main(): Promise<void> {
   const skills = cfg.PI_SKILLS_DIR === "off" ? undefined : new SkillsStore({ dir: cfg.PI_SKILLS_DIR, loader: new SkillsLoader({ dir: cfg.PI_SKILLS_DIR }) });
   const dashboardData = { contextUsage, codexPrompt, codexBasePrompt, modelCatalog, skills };
   const dashboard = createDashboard({
-    grants, schedules, ...dashboardData, config: cfg, store: obs, context: store, queue: () => dispatcher.status(),
+    grants, schedules, ...dashboardData, config: cfg, store: obs, context: store, queue: () => queueStatus(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
     codex: codexStatus, pi: piStatus, piSessions: pi.sessionSource, settings, live,
@@ -384,7 +411,7 @@ async function main(): Promise<void> {
       config: { rawDays: cfg.HISTORY_RAW_DAYS, summaryDays: cfg.HISTORY_SUMMARY_DAYS, hardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,
         dailyHour: cfg.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } },
     archives: { codex: path.join(cfg.DATA_DIR, 'codex-threads-archive.jsonl'), pi: path.join(cfg.DATA_DIR, 'pi-threads-archive.jsonl') },
-    resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key),
+    resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key), stopThread: key => monitor.stop(key as ThreadKey),
     compactCodex: (key) => codex.compactThread(key, "dashboard", settings.currentForTurn().codexModel), compactPi: (key) => pi.compactThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
     onPurge: async now => {
@@ -397,7 +424,7 @@ async function main(): Promise<void> {
         .catch(error => { log.warn("codex generated images purge failed", { error }); });
     },
     gauges: async () => {
-      const q = dispatcher.status(), ws = bridge!.status();
+      const q = queueStatus(), ws = bridge!.status();
       const gauges: Gauge[] = [ { name: "queue_depth", value: q.waiting }, { name: "global_slots_used", value: q.active },
         { name: "global_slots", value: q.slots }, { name: "ws_connected", value: Number(ws.ws_connected) },
         { name: "ws_disconnect_count", value: ws.disconnect_count }, { name: "pi_conversations", value: (await pi.threadHealth()).count } ];
@@ -446,6 +473,7 @@ async function main(): Promise<void> {
     alerts.stop();
     aging.stop();
     schedules.stop();
+    monitor.stopWatchdog();
     await recallServer.close();
     await bridge!.stop().catch(() => undefined);
     await closeAgentHarnesses(harness, pi);

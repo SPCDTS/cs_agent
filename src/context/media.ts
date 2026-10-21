@@ -194,12 +194,16 @@ export class MediaRecall {
       return;
     }
     if (!row.ticket) return reject();
-    const outbox = row.ticket.includes("#") ? this.opts.channel.outbox?.getOutbox(row.ticket) : undefined;
-    const ticket = await abortable(this.opts.channel.getTicket(outbox?.ticket ?? row.ticket), signal);
-    const sent = outbox ? outbox.status === "sent" && outbox.message_id === row.message_id &&
-      outbox.message_type + ":" + outbox.target_id === row.scope
-      : ticket?.status === "sent" && ticket.reply_message_id === row.message_id;
-    if (!ticket || scopeOf(ticket) !== row.scope || !sent || !ticket.self_id || sender !== ticket.self_id) return reject();
+    // 机器人消息：Outbox 行（键即消息库 ticket 列）或生图票据的回复，必须确认已发出且发出账号一致。
+    const outbox = this.opts.channel.outbox?.getOutbox(row.ticket);
+    if (outbox) {
+      if (outbox.status !== "sent" || outbox.message_id !== row.message_id || outbox.message_type + ":" + outbox.target_id !== row.scope ||
+          !row.user_id || sender !== row.user_id) return reject();
+    } else {
+      const ticket = await abortable(this.opts.channel.getTicket(row.ticket), signal);
+      const sent = ticket?.status === "sent" && ticket.reply_message_id === row.message_id;
+      if (!ticket || scopeOf(ticket) !== row.scope || !sent || !ticket.self_id || sender !== ticket.self_id) return reject();
+    }
     // NapCat 各版本的可选收件人字段；出现时必须与本地票据一致。
     for (const recipient of Object.values(remote.recipient_fields)) {
       if (recipient !== id) return reject();

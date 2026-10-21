@@ -1,24 +1,25 @@
 /**
  * createQQBridge：NapCat OneBot v11 —— WebSocket 收事件，HTTP 调 API。
- * 负责：重连与心跳、自回声过滤、去重、授权 / 触发、票据持久化、按票据幂等回复。
+ * 负责：重连与心跳、自回声过滤、去重、授权 / 触发、入站输入持久化（Inbox）、Outbox 幂等发送与发送规则；
+ * 生图前缀路由仍按票据回复（第 2 阶段保留）。
  */
 import { log } from "../shared/log.js";
 import { trace } from "../shared/trace.js";
 import { attachmentName } from "../media/attach.js";
 import type { DownloadHooks } from '../media/download.js';
-import { inboundFromTicket, ticketTarget } from '../channel/ticket.js';
+import { inboundFromRecord, threadKeyOf, ticketTarget } from '../channel/ticket.js';
 import { downloadIncoming } from "./incoming.js";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import type {
-  Channel, ChannelStatus, ChatType, InboundMessage, ChannelEvents,
-  RemoteMessage, ReplyResult, ReplyTicketRecord, OutboundTicket,
+  Channel, ChannelStatus, ChatType, InboundMessage, InboundRecord, ChannelEvents,
+  RemoteMessage, ReplyResult, ReplyTicketRecord,
 } from "../channel/types.js";
 import type { QQBridge, QQBridgeConfig } from "./types.js";
 import { createOneBotClient, isRecord, numericId, isValidId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
 import { hasUsableContent, isAllowed, isTriggered, messageSegmentTypes, normalizeMessage, renderText, validatePolicy } from "./policy.js";
 import { prepareImages, type ImageSegment } from "./image.js";
-import { dedupeKey, isTicketId, ticketIdFor, ReplyStore } from "./reply-store.js";
+import { dedupeKey, inboundKey, isTicketId, ReplyStore } from "./reply-store.js";
 import { DEFAULT_SEND_RULES, isSendRuleError, type SendBreaker } from "../channel/send-rules.js";
 
 const GROUP_NAME_TTL_MS = 6 * 60 * 60_000;
@@ -414,26 +415,27 @@ class Bridge extends EventEmitter implements Channel {
 
     const store = this.store;
     if (!store) return;
-    const id = ticketIdFor(message);
-    if (store.get(id)) return;
+    const id = inboundKey(message);
+    if (store.getInbound(id)) return;
     const scope = message.message_type === "group" ? "group:" + message.group_id : "private:" + message.user_id;
     const detail = { segments: messageSegmentTypes(event), message_id: message.message_id, sender: message.nickname };
-    trace.event(id, "received", { scope, detail: { text: message.text, ...detail } });
+    trace.event("in:" + id, "received", { scope, detail: { text: message.text, ...detail } });
     const attachments = (Array.isArray(event.message) ? event.message : [])
       .filter(s => isRecord(s) && s.type === 'image')
       .map(s => ({ status: 'pending' as const, deadline: Date.now() + this.downloadDeadlineMs, url: stringField(isRecord(s.data) ? s.data : {}, 'url'), file: stringField(isRecord(s.data) ? s.data : {}, 'file') }));
     message.attachments = attachments;
     if (!hasUsableContent(message)) {
       log.info("inbound ignored: empty content", detail);
-      trace.event(id, "ignored", { scope, detail: { ...detail, reason: "empty content" } });
+      trace.event("in:" + id, "ignored", { scope, detail: { ...detail, reason: "empty content" } });
       return;
     }
     const inflight = this.senderInflight.get(message.user_id) ?? 0;
     if (attachments.length && inflight >= 2) {
       message.attachments = attachments.map(a => ({ ...a, status: 'skipped', reason: '发送者下载并发超过 2' }));
     }
-    const ticket = store.admit(message); // 同步事务先保存 dedupe、pending 及恢复元数据。
-    if (ticket) this.enqueueIncoming(message, ticket, true, named);
+    // 同步事务先保存 dedupe 与输入（queued）；附件下载完成后才投递。
+    const admitted = store.admit(message, threadKeyOf(message, this.config.owners));
+    if (admitted) this.enqueueIncoming(message, admitted, true, named);
   }
 
   private enqueueIncoming(message: InboundMessage, ticket: string, emit: boolean, named?: Promise<void>): Promise<void> {
@@ -496,13 +498,13 @@ class Bridge extends EventEmitter implements Channel {
     return run;
   }
 
-  async prepareIncoming(ticket: string): Promise<ReplyTicketRecord | null> {
-    const rec = this.requireStore().get(ticket);
-    if (rec?.attachments?.some(a => a.status === 'pending')) {
-      await this.enqueueIncoming(inboundFromTicket(rec), ticket, false);
-    } else await this.incomingJobs.get(ticket);
-    const ready = this.requireStore().get(ticket);
-    if (ready?.attachments?.some(a => a.status === 'pending')) throw new Error('参考图仍未完成，暂缓派发');
+  async prepareIncoming(key: string): Promise<InboundRecord | null> {
+    const rec = this.requireStore().getInbound(key);
+    if (rec?.attachments.some(a => a.status === 'pending')) {
+      await this.enqueueIncoming(inboundFromRecord(rec), key, false);
+    } else await this.incomingJobs.get(key);
+    const ready = this.requireStore().getInbound(key);
+    if (ready?.attachments.some(a => a.status === 'pending')) throw new Error('参考图仍未完成，暂缓派发');
     return ready;
   }
 
@@ -543,13 +545,16 @@ class Bridge extends EventEmitter implements Channel {
     }
   }
 
-  // ---------- 票据回复 ----------
+  // ---------- 发送 ----------
 
-  async openOutbound(ticket: string, target: OutboundTicket): Promise<ReplyTicketRecord> {
-    const login = await this.client.call("get_login_info");
-    const self_id = stringField(login, "user_id");
-    numericId(self_id);
-    return this.requireStore().openOutbound(ticket, { ...target, self_id });
+  get inbox() { return this.requireStore(); }
+
+  async openImageTicket(key: string): Promise<ReplyTicketRecord> {
+    return this.requireStore().openImageTicket(key);
+  }
+
+  async abandonTicket(ticket: string): Promise<void> {
+    this.requireStore().abandonTicket(ticket);
   }
 
   async getTicket(ticket: string): Promise<ReplyTicketRecord | null> {
@@ -562,9 +567,10 @@ class Bridge extends EventEmitter implements Channel {
 
   get outbox() { return this.requireStore(); }
 
-  async settleTicket(ticket: string): Promise<void> { this.requireStore().settleTicket(ticket); }
-
-  /** 发送前共享票据授权、登录号检查和消息构建；sending 后绝不自动重试。 */
+  /**
+   * Outbox 发送：目标与内容由网关授权后写入行内，通道再校验允许名单、@ 对象（只能是本轮输入的发送者）、
+   * 登录号与不可变的行内容；sending 后绝不自动重试。
+   */
   async send(key: string, target: { message_type: ChatType; target_id: string }, text: string, imagePaths: string[] = [],
     opts?: { mention?: string; signal?: AbortSignal }): Promise<ReplyResult> {
     const store = this.requireStore(), row = store.getOutbox(key);
@@ -572,21 +578,27 @@ class Bridge extends EventEmitter implements Channel {
     const result = { message_type: row.message_type, target_id: row.target_id };
     if (row.status === "sent") return { ...result, already_sent: true, message_id: row.message_id ?? "" };
     if (row.status !== "pending") throw new Error("上一次发送结果不确定（uncertain），不要自动重发");
-    const record = store.get(row.ticket);
-    if (!record || record.status !== "pending") throw new Error("回合票据已结束或不存在");
-    // 目标由网关授权后写入 Outbox；通道仍校验来源允许名单、登录号和不可变的行内容。
-    const sameSource = target.message_type === record.message_type && target.target_id === ticketTarget(record);
+    const input = row.input_key ? store.getInbound(row.input_key) : null;
+    if (row.input_key && !input) throw new Error("发送绑定的输入不存在");
+    const scope = `${target.message_type}:${target.target_id}`;
     if (target.message_type === "group" && !this.config.allowGroups.includes(target.target_id)) {
       throw new Error("目标群不在 QQ_ALLOW_GROUPS 允许名单中");
     }
-    if (opts?.mention && (record.origin === "scheduled" || !sameSource || record.message_type !== "group" || opts.mention !== record.user_id)) throw new Error("定时或主动发送不能 @，回复只能 @ 本轮发送者");
+    // 回复本会话的私聊：对方须仍在允许名单（跨会话主动发送由网关授权与好友检查负责）。
+    if (target.message_type === "private" && input?.scope === scope &&
+        !isAllowed(this.config, { message_type: "private", user_id: target.target_id, group_id: null })) {
+      throw new Error("此发送者已不在允许回复的名单中。");
+    }
+    if (opts?.mention && (row.proactive || row.system || target.message_type !== "group" || input?.kind !== "user" ||
+        input.scope !== scope || opts.mention !== input.user_id)) throw new Error("定时或主动发送不能 @，回复只能 @ 本轮发送者");
     if (text !== row.text || JSON.stringify(imagePaths) !== JSON.stringify(row.images) || (opts?.mention ?? null) !== row.mention_user_id) throw new Error("Outbox 内容不一致");
     validateText(text);
     const images = prepareImages(imagePaths, this.config.imageRoot);
-    await this.checkReplyIdentity(record, opts?.signal);
+    await this.checkLogin(input?.self_id, opts?.signal);
     opts?.signal?.throwIfAborted();
     const limits = this.config.sendRules?.() ?? DEFAULT_SEND_RULES;
-    if (!this.underRules(row.ticket, `${row.message_type}:${row.target_id}`, () => store.beginOutboxSend(key, limits, this.now()))) {
+    const traceKey = row.turn_id ? "turn:" + row.turn_id : "thr:" + row.thread_key;
+    if (!this.underRules(traceKey, scope, () => store.beginOutboxSend(key, limits, this.now()))) {
       throw new Error("发送状态已改变，结果不确定，不重发");
     }
     try {
@@ -601,13 +613,19 @@ class Bridge extends EventEmitter implements Channel {
     } catch (error) { store.markOutboxUncertain(key); throw new OneBotError("QQ 发送结果不确定（uncertain），不会自动重发：" + toError(error).message, true); }
   }
 
-  private async checkReplyIdentity(record: ReplyTicketRecord, signal?: AbortSignal): Promise<void> {
-    if (!isAllowed(this.config, record.origin === "scheduled" && record.message_type === "private"
-      ? { ...record, user_id: ticketTarget(record) } : record)) throw new Error("此发送者已不在允许回复的名单中。");
-    numericId(record.user_id);
+  /** 收到输入的账号必须仍是当前登录账号；定时输入没有收件账号，只要求登录可用。 */
+  private async checkLogin(selfId: string | undefined, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     const login = await this.client.call("get_login_info");
-    if (stringField(login, "user_id") !== record.self_id) throw new Error("NapCat 当前登录账号与收到消息的账号不一致。");
+    const current = stringField(login, "user_id");
+    numericId(current);
+    if (selfId && current !== selfId) throw new Error("NapCat 当前登录账号与收到消息的账号不一致。");
+  }
+
+  private async checkReplyIdentity(record: ReplyTicketRecord, signal?: AbortSignal): Promise<void> {
+    if (!isAllowed(this.config, record)) throw new Error("此发送者已不在允许回复的名单中。");
+    numericId(record.user_id);
+    await this.checkLogin(record.self_id, signal);
   }
 
   async reply(ticket: string, text: string, imagePaths: string[] = [], opts?: { signal?: AbortSignal }): Promise<ReplyResult> {
@@ -648,7 +666,7 @@ class Bridge extends EventEmitter implements Channel {
     try {
       data = await this.client.call(type === "group" ? "send_group_msg" : "send_private_msg", {
         [type === "group" ? "group_id" : "user_id"]: target,
-        message: buildMessage(type, record.origin === "scheduled" ? "" : record.user_id, text, images),
+        message: buildMessage(type, record.user_id, text, images),
       }, { sending: true, timeoutMs: images.length ? Math.max(this.timeoutMs, IMAGE_TIMEOUT_MS) : this.timeoutMs });
     } catch (error) {
       store.markUncertain(ticket);
@@ -665,7 +683,7 @@ class Bridge extends EventEmitter implements Channel {
     try { return begin(); }
     catch (error) {
       if (isSendRuleError(error)) {
-        log.warn("outbound send rejected by send rules", { ticket: ticket.slice(0, 12), scope, rule: error.rule, breaker: error.scope });
+        log.warn("outbound send rejected by send rules", { key: ticket.slice(0, 40), scope, rule: error.rule, breaker: error.scope });
         trace.event(ticket, "send_rejected", { scope, status: "failed", detail: { rule: error.rule, breaker_scope: error.scope, error: error.message } });
         if (error.tripped) trace.event(ticket, "send_breaker", { scope, detail: { ...error.tripped } });
       }

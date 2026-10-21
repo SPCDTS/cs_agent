@@ -54,16 +54,21 @@ it("按 cap 撤销保留剩余授权，全撤销删除；不存在的授权撤�
   expect(f.event).toHaveBeenCalledTimes(3);
 });
 
-it("非 owner 直接调用全部 auth 工具均拒绝，伪造身份、来源或 access=all 不能提权", async () => {
+it("非 owner 直接调用全部 auth 工具均拒绝；非法身份或会话地址拒绝；唤醒回合没有任何主动权限", async () => {
   const f = await grantsFixture("99");
   for (const name of ["auth_grant", "auth_revoke", "auth_list"] as const) {
     await expect(f.grants.tool(f.binding, name, {})).rejects.toThrow("owner");
   }
-  for (const binding of [
-    { ...f.binding, actor: "qq:99", actorIsOwner: true },
-    { ...f.binding, actorIsOwner: true }, { ...f.binding, source: { ...f.binding.source, group_id: "8" } },
-  ]) await expect(f.grants.permissions(binding)).rejects.toThrow("身份");
-  expect(await f.grants.permissions({ ...f.binding, actor: undefined, actorIsOwner: undefined })).toEqual({ actorIsOwner: false, target: false, auth: false });
+  await expect(f.grants.permissions({ ...f.binding, identity: { kind: "user", sender: "01" } })).rejects.toThrow("身份");
+  await expect(f.grants.permissions({ ...f.binding, scope: "all" })).rejects.toThrow("地址");
+  // owner 线程的唤醒回合同样没有 target / 授权：需要别的权限时由模型在本会话请用户确认。
+  const owner = await grantsFixture();
+  for (const g of [f, owner]) {
+    const wake = { ...g.binding, identity: { kind: "wake" as const } };
+    expect(await g.grants.permissions(wake)).toEqual({ actorIsOwner: false, target: false, auth: false });
+    await expect(g.grants.authorizeSend(wake, "qq:group:8")).rejects.toThrow("唤醒");
+    await expect(g.grants.tool(wake, "auth_list", {})).rejects.toThrow("owner");
+  }
 });
 
 it.each([
@@ -101,10 +106,9 @@ it("canSchedule 按创建者检查 schedule cap、来源和到期边界；owner 
 
 
 it.each(["1", "99"])("定时回合禁止 auth 工具，仍按创建者 %s 保留发送权限", async owner => {
-  const f = await grantsFixture(owner), ticket = "run_" + "a".repeat(40);
-  await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "1" });
+  const f = await grantsFixture(owner);
   if (owner !== "1") await f.grants.panel("auth_grant", { user: "qq:1", caps: ["send"], targets: ["qq:group:8"] });
-  const binding = { ...f.binding, ticket };
+  const binding = { ...f.binding, identity: { kind: "scheduled" as const, creator: "1" }, inputs: ["run_" + "a".repeat(40)] };
   expect(await f.grants.permissions(binding)).toEqual({ actorIsOwner: owner === "1", auth: false, target: true });
   for (const name of ["auth_grant", "auth_revoke", "auth_list"] as const) {
     await expect(f.grants.tool(binding, name, {})).rejects.toThrow("交互");
@@ -125,5 +129,5 @@ it("第二 owner 具备完整授权和定时权限，面板仍使用主账号", 
   expect((await f.grants.list())[0]).toMatchObject({ granted_by: "qq:99" });
   await f.grants.tool(f.binding, "auth_revoke", { user: "qq:9" });
   expect(await f.grants.tool(f.binding, "auth_list", {})).toEqual([]);
-  await expect(f.grants.permissions({ ...f.binding, actor: "qq:99" })).rejects.toThrow("身份");
+  expect(await f.grants.permissions({ ...f.binding, identity: { kind: "user", sender: "9" } })).toEqual({ actorIsOwner: false, target: false, auth: false });
 });

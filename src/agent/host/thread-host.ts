@@ -309,6 +309,12 @@ export class ThreadHost implements HostCallbacks {
     return this.opts.adapter.interrupt(threadKey);
   }
 
+  /** 输入的投递状态（Inbox 恢复对账用）；宿主从未收到的输入返回 undefined。 */
+  async inputState(inboundKey: string): Promise<"queued" | "delivered" | "done" | undefined> {
+    const doc = await this.opts.store.snapshot(HostInputDoc, inboundKey, this.ctx);
+    return doc && doc.state !== "new" ? doc.state : undefined;
+  }
+
   /** 观测用的只读副本 */
   thread(threadKey: ThreadKey): Readonly<ThreadHostState> | undefined {
     const s = this.threads.get(threadKey);

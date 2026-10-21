@@ -1,6 +1,5 @@
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import { SEND_RULE } from "../send-service.js";
-import { CodexDeliveryNotes, deliveryNoteText } from "../delivery-note.js";
 import { attachmentDirs, validateAttachmentPath } from "../../media/attach-paths.js";
 import { codexWorkspacePolicy, prepareCodexWorkspace } from "./workspace.js";
 import type { RecallTokens } from "../../context/media-recall-server.js";
@@ -16,7 +15,7 @@ import { imageRefsValue } from "../../media/gen/image-references.js";
  * 每个线程键一条互斥队列（不同会话可并行，同一键串行）；超时 kill 进程树。子进程只拿到最小环境变量，magpie 模式额外注入专用 gateway key。
  * 模型与推理强度取票据快照，缺省沿用启动设置（codex 后端每轮以 `-c model_reasoning_effort="<档位>"` 显式传入）。
  * 聊天记录访问范围每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS="<范围>"` 注入（owner 含群聊 → all，其他群 → 本群）；
- * 生图输出目录每轮以 `-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="<DATA_DIR>/images/<ticket>"` 注入。
+ * 生图输出目录每轮以 `-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="<DATA_DIR>/images/<会话>"` 注入。
  * 安全阀：resume 前若线程 rollout 文件 > rolloutMaxMb 或线程年龄 > threadMaxDays，新建线程（历史靠 qq_context 找回）。
  */
 import { spawn, spawnSync } from "node:child_process";
@@ -116,12 +115,10 @@ export function threadKeyForSource(source: TicketSource | undefined, owners: Own
 }
 
 export interface AskOptions {
-  actor?: string;
-  actorIsOwner?: boolean;
-  source?: TicketSource;
   /** 仅本轮发送者身份决定技能写权限；不可从线程键推断。 */
   senderIsOwner?: boolean;
-  ticket?: string;
+  /** 本轮回合 id：召回 / IM 令牌绑定会话与回合，观测按回合归属 */
+  turnId?: string;
   onJsonEvent?: (event: Record<string, unknown>) => void;
   /** 本轮会话键，不允许缺省或复用 shared。 */
   threadKey: ThreadKey;
@@ -130,7 +127,7 @@ export interface AskOptions {
   model?: string;
   /** 本轮 qq_context MCP 的访问范围 */
   qqAccess?: string;
-  /** 本轮 image_gen MCP 的输出目录（${DATA_DIR}/images/<ticket>） */
+  /** 本轮 image_gen MCP 的输出目录（${DATA_DIR}/images/<会话>） */
   imageTicketDir?: string;
   imageRefs?: string[];
   /**
@@ -772,7 +769,8 @@ export class CodexRunner {
     return undefined;
   }
 
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, model, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, ticket, senderIsOwner, source, actor, actorIsOwner }: AskOptions): Promise<string> {
+  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, model, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, turnId, senderIsOwner }: AskOptions): Promise<string> {
+    const ticket = turnId ? "turn:" + turnId : undefined;
     if (signal?.aborted) throw new Error("aborted");
     if (model !== undefined && !/^[A-Za-z0-9._/-]+$/.test(model)) throw new Error("非法的 codex 模型 slug");
     const policy = codexWorkspacePolicy(this.opts.workspaceDir, path.dirname(this.opts.threadsFile), key, this.opts.sandbox, this.opts.sandboxNetwork, this.opts.codexHome, senderIsOwner === true);
@@ -784,9 +782,9 @@ export class CodexRunner {
     const agentsFile = path.join(policy.workspaceDir, "AGENTS.md");
     const agentsContent = `<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 每轮生成，改动会被覆盖。\n\n${instructions}\n`;
     await writeManagedFile(agentsFile, agentsContent);
-    const attachment = ticket ? attachmentDirs(path.dirname(this.opts.threadsFile), ticket) : undefined;
+    const attachment = attachmentDirs(path.dirname(this.opts.threadsFile), key);
     const baseArgs = await this.baseInstructionsArgs(model ?? this.opts.model);
-    const effort = [...baseArgs, ...policy.args, ...qqAttachmentArgs(attachment?.attachDir, attachment?.fileDir, policy.workspaceDir),
+    const effort = [...baseArgs, ...policy.args, ...qqAttachmentArgs(attachment.attachDir, attachment.fileDir, policy.workspaceDir),
       "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort),
       ...(model !== undefined ? ["-c", `model="${model}"`] : []), ...qqAccessArgs(qqAccess, this.opts.imageGen),
       ...(this.opts.imageGen === "on" ? [...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)] : [])];
@@ -794,21 +792,8 @@ export class CodexRunner {
     if (this.opts.contextUsage) await this.initializeContextUsage();
     const windowTokens = this.opts.contextUsage ? await this.contextWindow(model) : 0;
     this.opts.contextUsage?.ensure("codex", key, { windowTokens }, ticket);
-    const notes = new CodexDeliveryNotes(path.dirname(this.opts.threadsFile));
-    const note = await notes.pending(key);
-    if (note) {
-      const line = deliveryNoteText(note.fallback).replace(/[\r\n\u2028\u2029]+/g, " ");
-      // buildCodexPrompt 生成的来源行之后、引用和用户正文之前。
-      prompt = prompt.startsWith("[来源]") ? prompt.replace(/\r?\n|$/, newline => "\n" + line + newline) : line + "\n" + prompt;
-    }
-    let noteCleared: Promise<void> | undefined;
     let completed = false;
     const observe = (event: Record<string, unknown>) => {
-      if (event.type === "turn.started" && note && !noteCleared) {
-        noteCleared = notes.clear(note);
-        // 立即处理拒绝，释放线程锁前再等待并传播存储故障。
-        void noteCleared.catch(() => {});
-      }
       if (event.type === "turn.completed") completed = true;
       onJsonEvent?.(event);
     };
@@ -827,14 +812,14 @@ export class CodexRunner {
       }
       if (id) {
         const r = await this.exec(
-          ["exec", "-C", policy.workspaceDir, "resume", ...this.commonArgs(), ...effort, ...qqRecallContextArgs(ticket, id), id, "-"],
+          ["exec", "-C", policy.workspaceDir, "resume", ...this.commonArgs(), ...effort, ...qqRecallContextArgs(turnId, id), id, "-"],
           prompt,
           signal,
           undefined,
           outFile,
           onAcquired,
           observe,
-          { access: qqAccess, ticket, source, actor, actorIsOwner, workdir: policy.workspaceDir, session: id },
+          { access: qqAccess, threadKey: key, turnId, workdir: policy.workspaceDir, session: id },
         );
         if (r.code === 0) return this.result(r);
         if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
@@ -851,7 +836,7 @@ export class CodexRunner {
         }
       }
       const r = await this.exec(
-        ["exec", ...this.commonArgs(), ...effort, ...qqRecallContextArgs(ticket), "-C", policy.workspaceDir, "-"],
+        ["exec", ...this.commonArgs(), ...effort, ...qqRecallContextArgs(turnId), "-C", policy.workspaceDir, "-"],
         prompt,
         signal,
         async (threadId) => {
@@ -864,12 +849,11 @@ export class CodexRunner {
         outFile,
         onAcquired,
         observe,
-        { access: qqAccess, ticket, source, actor, actorIsOwner, workdir: policy.workspaceDir, session: id },
+        { access: qqAccess, threadKey: key, turnId, workdir: policy.workspaceDir, session: id },
       );
       if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
       return this.result(r);
     } finally {
-      await noteCleared;
       // exec 已等待 exit 与输出收尾；强制收尾时 rollout 可能缺失或陈旧，由下面的回退保留旧用量。
       if (completed && this.opts.contextUsage) {
         const usage = id ? await this.latestRolloutContextUsage(id) : undefined;
@@ -915,7 +899,7 @@ export class CodexRunner {
     outputFile?: string,
     onAcquired?: () => Promise<void>,
     onJsonEvent?: (event: Record<string, unknown>) => void,
-    recall?: { actor?: string; actorIsOwner?: boolean; access?: string; ticket?: string; source?: TicketSource; workdir?: string; session?: string },
+    recall?: { access?: string; threadKey: string; turnId?: string; workdir?: string; session?: string },
   ): Promise<RunOutcome> {
     const tmpDir = outputFile ? undefined : await fs.mkdtemp(path.join(os.tmpdir(), "cs-codex-"));
     const outFile = outputFile ?? path.join(tmpDir!, "last.txt");
@@ -931,8 +915,8 @@ export class CodexRunner {
     await onAcquired?.();
     signal?.throwIfAborted();
     const access = parseAccess(recall?.access);
-    if (this.opts.recallTokens && (!access || !recall?.ticket)) throw new Error("召回请求缺少访问范围或票据");
-    const lease = this.opts.recallTokens?.issue({ access: access!, ticket: recall!.ticket!, source: recall?.source, actor: recall?.actor, actorIsOwner: recall?.actorIsOwner, workdir: recall?.workdir, session: recall?.session, deadline: Date.now() + this.opts.timeoutMs, signal });
+    if (this.opts.recallTokens && (!access || !recall?.turnId)) throw new Error("召回请求缺少访问范围或回合");
+    const lease = this.opts.recallTokens?.issue({ access: access!, threadKey: recall!.threadKey, turnId: recall!.turnId!, workdir: recall?.workdir, session: recall?.session, deadline: Date.now() + this.opts.timeoutMs, signal });
     try {
       if (lease) {
         finalArgs.splice(finalArgs.includes("resume") ? finalArgs.indexOf("resume") + 1 : 1, 0, ...recallArgs(this.opts.mediaRecallPort ?? 8790));
@@ -1156,7 +1140,7 @@ export function qqAttachmentArgs(attachDir: string | undefined, fileDir: string 
 }
 
 /** 每次启动覆盖归属；新线程显式清空 session，避免继承旧环境。值按 TOML 基本字符串转义。 */
-export function qqRecallContextArgs(ticket?: string, session?: string): string[] {
-  return Object.entries({ QQ_TICKET: ticket ?? '', QQ_BACKEND: 'codex', QQ_SESSION: session ?? '' })
+export function qqRecallContextArgs(turnId?: string, session?: string): string[] {
+  return Object.entries({ QQ_TICKET: turnId ?? '', QQ_BACKEND: 'codex', QQ_SESSION: session ?? '' })
     .flatMap(([key, value]) => ['-c', `mcp_servers.qq_context.env.${key}=${JSON.stringify(value)}`]);
 }

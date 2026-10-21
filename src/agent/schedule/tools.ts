@@ -10,7 +10,7 @@ import { formatBeijingTime, parseToolRule, scheduleInputs } from "./tool-schema.
 const summary = (schedule: Schedule) =>
   `${schedule.id} · ${schedule.name} · 状态：${{ active: "启用", paused: "暂停", completed: "已完成" }[schedule.status]}（${schedule.status}）· 下次：${schedule.next_fire_at === null ? "无" : formatBeijingTime(schedule.next_fire_at) + "（北京时间）"}`;
 
-/** pi 与 codex 共用的执行入口；不信任模型参数或工具可见性，逐次复核真实票据与当前授权。 */
+/** pi 与 codex 共用的执行入口；不信任模型参数或工具可见性，逐次按会话宿主的本轮身份复核当前授权。 */
 export class ScheduleTools {
   constructor(private readonly opts: {
     grants: GrantsService;
@@ -20,11 +20,15 @@ export class ScheduleTools {
     trace?: Pick<Trace, "event">;
   }) {}
 
+  /** 唤醒回合没有身份，不能使用定时工具；定时回合只能控制本次运行的任务。 */
   private async access(binding: GrantBinding) {
-    const identity = await this.opts.grants.verify(binding);
+    const identity = this.opts.grants.identity(binding);
+    if (!identity) throw new Error("唤醒回合不能使用定时工具");
+    // 会话即线程键：owner 私聊为 owner，群与其他私聊为来源 scope。
     const conversation = (identity.actorIsOwner && identity.scope.startsWith("private:") ? "owner" : identity.scope) as ScheduleConversation;
     if (identity.origin === "scheduled") {
-      const run = await readScheduledRun(this.opts.getHarness(), binding.ticket);
+      let run: Awaited<ReturnType<typeof readScheduledRun>>;
+      for (const key of binding.inputs) run ??= await readScheduledRun(this.opts.getHarness(), key);
       if (!run || run.created_by !== identity.actor ||
           (run.conversation === "owner" ? !identity.actorIsOwner || !identity.scope.startsWith("private:") : run.conversation !== identity.scope)) {
         throw new Error("定时回合缺少有效的任务绑定");
@@ -36,7 +40,7 @@ export class ScheduleTools {
   }
 
   async permissions(binding: GrantBinding): Promise<ScheduleToolPermissions> {
-    if (!binding.actor || binding.actorIsOwner === undefined) return { schedule: false, scheduleControl: false };
+    if (binding.identity.kind === "wake") return { schedule: false, scheduleControl: false };
     const access = await this.access(binding);
     return { schedule: access.management, scheduleControl: access.scheduleId !== undefined };
   }
@@ -79,7 +83,7 @@ export class ScheduleTools {
         }
       }
     }
-    (this.opts.trace ?? trace).event(binding.ticket, "schedule_tool", { detail: {
+    (this.opts.trace ?? trace).event(binding.turnId ? "turn:" + binding.turnId : "thr:" + binding.threadKey, "schedule_tool", { detail: {
       action, id, actor: access.actor, tool: name, ...(reason ? { reason } : {}),
     } });
     return text;

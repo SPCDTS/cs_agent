@@ -1,21 +1,30 @@
-import type { PendingImageJob } from "../../media/gen/image-pending.js";
 import { defineDoc } from "@earendil-works/pi-durable";
+import type { TurnBinding } from "../../channel/types.js";
 
-/** 仅适配器写入身份；工具参数不能覆盖。计数按 taskId 去重，恢复不额外计次。 */
-export const PiRequestDoc = defineDoc<{
-  ticket: string;
-  actor?: string;
-  actorIsOwner?: boolean;
-  source?: { type: "private" | "group"; user_id: string; group_id: string | null };
-  access: string;
-  /** 与票据一起持久化；旧快照缺失时不授予技能写权限。 */
-  senderIsOwner?: boolean;
-  images: string[];
-  content: string;
-  deadline: number;
-  imageJobs?: (PendingImageJob & { ordinal: number })[];
-  calls: Record<string, { kind: string; ordinal: number }>;
-}>({
-  kind: "cs.pi.request", version: 1, scope: "conversation", history: "latest", fork: "initial",
-  initial: () => ({ ticket: "", access: "", senderIsOwner: false, images: [], content: "", deadline: 0, calls: {} }),
+/**
+ * 子 agent 会话的绑定（设计 §6.2）：创建子会话的同一提交写入父会话的会话键。
+ * 子会话共用父会话的工作区与附件目录，身份固定为唤醒（只读本会话范围，不能主动发送、定时或授权）。
+ */
+export const PiChildDoc = defineDoc<{ threadKey: string; parent: number }>({
+  kind: "cs.pi.child", version: 1, scope: "conversation", history: "latest", fork: "initial",
+  initial: () => ({ threadKey: "", parent: 0 }),
 });
+
+/**
+ * 工具调用时由宿主求出的本轮绑定（§7.3）：身份、发送地址与本轮输入来自会话宿主，模型参数不能覆盖；
+ * access 为读取范围（owner 本人为 all，其余为本会话），senderIsOwner 决定技能写权限。
+ */
+export interface PiCallBinding extends TurnBinding {
+  access: string;
+  senderIsOwner: boolean;
+  /** 子 agent 会话 */
+  child: boolean;
+  /** 本轮输入的参考图（generate_image 允许列表） */
+  images: readonly string[];
+}
+
+/** 回合级观测键：回合内为 turn:<id>，没有回合（子 agent 在父回合结束后仍在工作）为 thr:<会话键>。 */
+export function traceKey(binding: Pick<TurnBinding, "turnId" | "threadKey"> | undefined): string {
+  if (!binding) return "@pi";
+  return binding.turnId ? "turn:" + binding.turnId : "thr:" + binding.threadKey;
+}

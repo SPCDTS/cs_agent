@@ -1,16 +1,21 @@
-import { isOwnerActor, ownerScope } from "../../shared/owners.js";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { isOwnerActor } from "../../shared/owners.js";
+import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { createHash } from "node:crypto";
-import type { Context } from "@earendil-works/chord";
-import { defineDoc, defineDocFamily, defineTask, type ConversationId, type Harness, type Tx } from "@earendil-works/pi-durable";
-import type { Channel, OutboundTicket } from "../../channel/types.js";
+import { defineDoc, defineDocFamily, type ConversationId, type Harness, type Tx } from "@earendil-works/pi-durable";
+import type { Channel } from "../../channel/types.js";
 import { isScope } from "../../context/access.js";
+import { log } from "../../shared/log.js";
 import { trace } from "../../shared/trace.js";
-import { DispatchDoc, TicketDoc } from "../docs.js";
-import type { TicketSource } from "../backends/types.js";
-import type { CsTasks, TaskInput, TaskResult } from "../tasks.js";
+import type { TurnStatus } from "../host/types.js";
+import { ScheduleRuntimeDoc } from "./docs.js";
 import type { ScheduleConversation, ScheduledFire, ScheduledRunAdmitter, ScheduleRun, ScheduleRunRecorder } from "./types.js";
 
+/**
+ * 定时运行（设计 §10）：到点向来源会话的 ThreadHost 投一条定时输入（kind=scheduled，发送者 = 创建者），
+ * 线程忙则排队等空闲。运行记录 cs.scheduled-run 保留；结果按该输入所在回合发出的消息数统计：
+ * 有发送 → sent，无 → silent，回合失败 / 丢失或投递不确定 → failed。
+ * 第 2 阶段只统计输入所在的那一个回合，不含其后由子 agent 唤醒的回合。
+ */
 type RunState = {
   schedule_id: string;
   fire_key: string;
@@ -19,9 +24,13 @@ type RunState = {
   conversation: ScheduleConversation;
   created_by: string;
   timeout_ms: number;
+  /** 定时输入的入站键（run_ 开头），也是 admission 的成员键 */
+  input_key?: string;
   started_at?: number;
+  /** 输入所在回合（送达后端时写入） */
+  turn_id?: string;
   denied?: boolean;
-  /** 回写前保存最终结果；回写与票据结算跨库，恢复必须重放同一结果。 */
+  /** 回写前保存最终结果；回写跨文档，恢复必须重放同一结果。 */
   result?: { [K in keyof ScheduleRun]: ScheduleRun[K] };
   recorded?: boolean;
   paused?: boolean;
@@ -33,24 +42,24 @@ export const ScheduledRunDoc = defineDoc<RunState>({
     conversation: "owner", created_by: "", timeout_ms: 300_000 }),
 });
 
-/** DispatchDoc 清除后仍保留幂等凭据；每次触发一份文档，避免重写不断增长的全局表。 */
+/** 每次触发一份幂等凭据（成员键 = 定时输入键），指向保存运行文档的会话。 */
 const AdmissionDoc = defineDocFamily<{ conversationId?: number }, Record<string, never>>({
   kind: "cs.scheduled-admission", version: 1, scope: "session", family: true, initial: () => ({}),
 });
 
-export function scheduledTicket(fireKey: string): string {
+/** 定时输入的确定性键：run_ + sha256(fire_key) 前 40 位。 */
+export function scheduledInputKey(fireKey: string): string {
   return "run_" + createHash("sha256").update(fireKey).digest("hex").slice(0, 40);
 }
 
-/** 从已提交 admission 反查本轮定义；工具参数不能指定或覆盖目标。 */
-export async function readScheduledRun(harness: Harness, ticket: string) {
-  const admission = await harness.snapshot(AdmissionDoc, ticket, BACKGROUND_CONTEXT);
+/** 从已提交 admission 反查本次运行；工具参数不能指定或覆盖目标。 */
+export async function readScheduledRun(harness: Pick<Harness, "snapshot">, key: string) {
+  if (!/^run_[a-f0-9]{40}$/.test(key)) return undefined;
+  const admission = await harness.snapshot(AdmissionDoc, key, BACKGROUND_CONTEXT);
   if (admission?.conversationId === undefined) return undefined;
-  const id = admission.conversationId as ConversationId;
-  const run = await harness.snapshot(ScheduledRunDoc, id, BACKGROUND_CONTEXT);
-  const doc = await harness.snapshot(TicketDoc, id, BACKGROUND_CONTEXT);
-  return run?.schedule_id && run.fire_key === `${run.schedule_id}@${run.fire_at}` &&
-    scheduledTicket(run.fire_key) === ticket && doc?.ticket === ticket ? run : undefined;
+  const run = await harness.snapshot(ScheduledRunDoc, admission.conversationId as ConversationId, BACKGROUND_CONTEXT);
+  return run?.schedule_id && run.fire_key === `${run.schedule_id}@${run.fire_at}` && scheduledInputKey(run.fire_key) === key
+    ? { ...run, conversationId: admission.conversationId as ConversationId } : undefined;
 }
 
 function beijingTime(ms: number): string {
@@ -60,191 +69,164 @@ function beijingTime(ms: number): string {
 export function scheduledInput(fire: ScheduledFire): string {
   const recent = fire.schedule.runs.filter(run => run.fire_key !== fire.fire_key).slice(-3)
     .map(run => `${beijingTime(run.fire_at)} ${run.status}${run.note ? " " + run.note.replace(/\s+/g, " ").slice(0, 200) : ""}`);
-  return `[定时任务] ${fire.schedule.name} · 计划时间 ${beijingTime(fire.fire_at)}（北京时间）· 第 ${fire.ordinal} 次\n` +
+  return `[定时任务] ${fire.schedule.name} · 计划时间 ${beijingTime(fire.fire_at)}（北京时间）· 第 ${fire.ordinal} 次 · 创建者 ${fire.schedule.created_by}\n` +
     `${fire.schedule.prompt}\n[最近运行] ${recent.join("；") || "无"}\n` +
     "[说明] 这是定时任务，不是用户消息。需要通知就调用 send_message（可带 target），不需要就直接结束。需要停止后续触发时调用 schedule_control，说明暂停或完成的原因。";
 }
 
 export interface ScheduledRuntimeOptions {
-  getChannel(): Pick<Channel, "openOutbound" | "getTicket">;
-  tasks: CsTasks;
+  getChannel(): Pick<Channel, "inbox" | "outbox">;
+  /** 保存运行文档与 admission 的派发 harness */
+  getHarness(): Pick<Harness, "snapshot" | "commit">;
+  /** 投递定时输入（Inbox → ThreadHost） */
+  deliver(key: string): Promise<void>;
+  /** 宿主中的输入状态（恢复时判断输入是否已结束） */
+  inputState?(key: string): Promise<"queued" | "delivered" | "done" | undefined>;
   recorder: ScheduleRunRecorder;
   /** 主进程身份配置，可在运行前读取当前 owner。 */
   owner?: string | (() => string | undefined);
   owners?: readonly string[] | (() => readonly string[]);
-  /** actor 为 qq:<创建者>；缺省只允许当前 owner。每次调用后端前重新检查。 */
+  /** actor 为 qq:<创建者>；缺省只允许当前 owner。投递前重新检查。 */
   canSchedule?(actor: string, conversation: ScheduleConversation): boolean | Promise<boolean>;
-  /** 由定义服务提供幂等暂停；B 不依赖或修改 SchedulesDoc。 */
+  /** 由定义服务提供幂等暂停。 */
   pauseSchedule(scheduleId: string, reason: string): Promise<void>;
+  context?: Context;
 }
 
-type RunStore = {
-  snapshot: Harness["snapshot"];
-  commit(fn: (tx: Tx) => Promise<void>, context: Context): Promise<unknown>;
-};
-
 export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
+  const ctx = opts.context ?? BACKGROUND_CONTEXT;
   const owner = () => typeof opts.owner === "function" ? opts.owner() : opts.owner;
   const owners = () => (typeof opts.owners === "function" ? opts.owners() : opts.owners) ?? owner();
-  const { tasks } = opts;
 
-  function binding(fire: ScheduledFire): { scope: string; source: TicketSource; outbound: OutboundTicket } {
-    const user = /^qq:([1-9][0-9]{0,19})$/.exec(fire.schedule.created_by)?.[1];
+  /** 输入地址：群或私聊即会话本身；owner 会话发往当前首个 owner 的私聊。 */
+  function binding(fire: ScheduledFire): { scope: string; threadKey: string } {
     const conversation = fire.schedule.conversation;
     const scope = conversation === "owner" ? `private:${owner() ?? ""}` : conversation;
-    if (!user || !isScope(scope) || fire.fire_key !== `${fire.schedule.id}@${fire.fire_at}` ||
-        !Number.isSafeInteger(fire.fire_at) || !Number.isSafeInteger(fire.ordinal) || fire.ordinal < 1 ||
-        !Number.isFinite(fire.schedule.options.timeout_ms) || fire.schedule.options.timeout_ms <= 0 ||
-        fire.schedule.options.timeout_ms > 900_000) throw new Error("定时触发绑定无效");
-    const group = scope.startsWith("group:");
-    const target_id = scope.slice(scope.indexOf(":") + 1);
-    return { scope, source: { type: group ? "group" : "private", user_id: user,
-      group_id: group ? target_id : null, nickname: user },
-    outbound: { message_type: group ? "group" : "private", target_id, origin: "scheduled", user_id: user } };
+    if (!/^qq:[1-9][0-9]{0,19}$/.test(fire.schedule.created_by) || !isScope(scope) || fire.fire_key !== `${fire.schedule.id}@${fire.fire_at}` ||
+        !Number.isSafeInteger(fire.fire_at) || !Number.isSafeInteger(fire.ordinal) || fire.ordinal < 1) throw new Error("定时触发绑定无效");
+    return { scope, threadKey: conversation };
   }
 
   /**
-   * 必须在排程事务之前调用。返回的 admitter 只使用传入 tx，不做网络或嵌套提交。
-   * 本次输入在预备时冻结，同一 fire_key 的重试不受 runs 等后续变更影响。
-   * 同一份预备结果可在事务回滚后重试；提交成功后调用 dispatcher.dispatchScheduled(ticket)。
+   * 必须在排程事务之前调用：在 Inbox 写入定时输入（幂等，内容在预备时冻结）。
+   * admit 只使用传入 tx 登记运行文档；提交成功后调用 launch(key)。
    */
   async function prepare(input: ScheduledFire): Promise<ScheduledRunAdmitter> {
-    const fire = structuredClone(input), ticket = scheduledTicket(fire.fire_key);
-    const { scope, source, outbound } = binding(fire);
-    const text = scheduledInput(fire);
-    const settings = await tasks.snapshotSettings(scope, undefined, { ticket, text, hasImages: false, hasQuote: false });
-    const rec = await opts.getChannel().openOutbound(ticket, outbound);
+    const fire = structuredClone(input), key = scheduledInputKey(fire.fire_key);
+    const { scope, threadKey } = binding(fire);
+    opts.getChannel().inbox.openScheduledInput({ key, scope, thread_key: threadKey, creator: fire.schedule.created_by,
+      text: scheduledInput(fire), time: Math.floor(fire.fire_at / 1000) });
     return {
       async discard(transaction) {
-        const known = await (transaction as Tx).doc(AdmissionDoc, ticket, {});
-        if (known.conversationId === undefined) await tasks.sendService.settle(ticket);
+        const known = await (transaction as Tx).doc(AdmissionDoc, key, {});
+        // 未被采用的预备输入直接结束，恢复不会把它当作待投递输入。
+        if (known.conversationId === undefined) opts.getChannel().inbox.markInbound([key], "done");
       },
       async admit(transaction, candidate) {
-        if (candidate.fire_key !== fire.fire_key) throw new Error("预备票据与触发标识不一致");
+        if (candidate.fire_key !== fire.fire_key) throw new Error("预备输入与触发标识不一致");
         const tx = transaction as Tx;
-        const known = await tx.doc(AdmissionDoc, ticket, {});
-        // 终态孤儿票据也不得重新派发。
-        if (known.conversationId !== undefined) return { ticket };
-        if ((await opts.getChannel().getTicket(ticket))?.status !== "pending") return { ticket, skipped: true };
+        const known = await tx.doc(AdmissionDoc, key, {});
+        if (known.conversationId !== undefined) return { ticket: key };
+        // 已结束的孤儿输入不得重新执行。
+        if (opts.getChannel().inbox.getInbound(key)?.state !== "queued") return { ticket: key, skipped: true };
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-        Object.assign(await tx.doc(TicketDoc, conversation.id), {
-          ticket, source, text, route: "agent", settings, time: Math.floor(fire.fire_at / 1000),
-        });
         Object.assign(await tx.doc(ScheduledRunDoc, conversation.id), {
           schedule_id: fire.schedule.id, fire_key: fire.fire_key, fire_at: fire.fire_at,
           ordinal: fire.ordinal, conversation: fire.schedule.conversation, created_by: fire.schedule.created_by,
-          timeout_ms: fire.schedule.options.timeout_ms,
+          timeout_ms: fire.schedule.options.timeout_ms, input_key: key,
         });
-        (await tx.doc(DispatchDoc)).pending[ticket] = {
-          kind: "scheduled", conversationId: conversation.id, scope, ticketSeq: rec.seq, attempts: 0,
-        };
         known.conversationId = conversation.id;
-        return { ticket };
+        return { ticket: key };
       },
     };
   }
 
-  /** 任务与派发器故障恢复共用；recordRun 按 fire_key 幂等覆盖，暂停回调也必须幂等。 */
-  async function finish(store: RunStore, id: ConversationId, context: Context,
-    now = Date.now(), forceFailure = false): Promise<void> {
-    const ticketDoc = await store.snapshot(TicketDoc, id, context);
-    let run = await store.snapshot(ScheduledRunDoc, id, context);
-    if (!ticketDoc?.ticket || !run?.fire_key) throw new Error("定时运行文档缺失");
-    const ticket = ticketDoc.ticket;
-    if (ticketDoc.replyCompleted) return;
-    await tasks.sendService.reconcile(ticket);
+  async function update(id: ConversationId, change: (run: RunState) => void): Promise<RunState> {
+    await opts.getHarness().commit(async tx => { change(await tx.doc(ScheduledRunDoc, id)); }, ctx);
+    return (await opts.getHarness().snapshot(ScheduledRunDoc, id, ctx))!;
+  }
+
+  /** 计算并回写结果；recordRun 按 fire_key 幂等覆盖，暂停回调也必须幂等。 */
+  async function finish(key: string, outcome?: { status: TurnStatus; turnId?: string }): Promise<void> {
+    const found = await readScheduledRun(opts.getHarness(), key);
+    if (!found) return;
+    const { conversationId: id } = found;
+    let run: RunState = found;
     if (!run.result) {
-      const rows = tasks.sendService.rows(ticket);
+      const turnId = outcome?.turnId ?? run.turn_id;
+      const rows = turnId ? opts.getChannel().outbox.listOutboxByTurn(turnId).filter(row => !row.system) : [];
       const sent = rows.filter(row => row.status === "sent").length;
-      const result = ticketDoc.agentResult;
       // 不确定的投递不能算静默或成功；保留 Outbox 状态且永不重发。
       const deliveryFailed = rows.some(row => row.status !== "sent" || row.files.some(file => file.status !== "sent"));
-      const failed = run.denied || forceFailure || !result?.ok || deliveryFailed;
+      const turnFailed = !run.denied && (outcome?.status ?? "completed") !== "completed";
+      const failed = run.denied || turnFailed || deliveryFailed;
       const record: ScheduleRun = {
-        fire_key: run.fire_key, fire_at: run.fire_at, ticket, status: failed ? "failed" : sent ? "sent" : "silent",
-        sent, ...(run.started_at !== undefined ? { started_at: run.started_at } : {}), ended_at: now,
-        ...(failed && !run.denied ? { reason: result && !result.ok && result.failure === "timeout" ? "timeout" : "backend_failed" } : {}),
-        note: run.denied ? "无权：创建者已无定时任务权限" : result?.ok ? [...result.text].slice(0, 200).join("") : "",
+        fire_key: run.fire_key, fire_at: run.fire_at, ticket: key, status: failed ? "failed" : sent ? "sent" : "silent",
+        sent, ...(run.started_at !== undefined ? { started_at: run.started_at } : {}), ended_at: Date.now(),
+        ...(failed && !run.denied ? { reason: "backend_failed" as const } : {}),
+        note: run.denied ? "无权：创建者已无定时任务权限" : turnFailed ? (outcome?.status === "lost" ? "回合中断" : "回合失败") : "",
       };
-      await store.commit(async tx => { (await tx.doc(ScheduledRunDoc, id)).result = record; }, context);
-      run = (await store.snapshot(ScheduledRunDoc, id, context))!;
+      run = await update(id, state => { state.result = record; });
     }
     if (run.denied && !run.paused) {
       await opts.pauseSchedule(run.schedule_id, "无权：创建者已无定时任务权限");
-      await store.commit(async tx => { (await tx.doc(ScheduledRunDoc, id)).paused = true; }, context);
+      run = await update(id, state => { state.paused = true; });
     }
     if (!run.recorded) {
       await opts.recorder.recordRun(run.schedule_id, run.result!);
-      await store.commit(async tx => { (await tx.doc(ScheduledRunDoc, id)).recorded = true; }, context);
+      run = await update(id, state => { state.recorded = true; });
+      trace.event(run.turn_id ? "turn:" + run.turn_id : "in:" + key, "schedule_run", { status: run.result!.status, detail: {
+        fire_key: run.fire_key, ordinal: run.ordinal, status: run.result!.status, sent: run.result!.sent, terminal: true,
+      } });
     }
-    // silent / failed 也置票据终态，允许同 scope 后续消息继续。
-    await tasks.sendService.settle(ticket);
-    await store.commit(async tx => { (await tx.doc(TicketDoc, id)).replyCompleted = true; }, context);
-    trace.event(ticket, "schedule_run", { status: run.result!.status, detail: {
-      fire_key: run.fire_key, ordinal: run.ordinal, status: run.result!.status, sent: run.result!.sent, terminal: true,
-    } });
-    trace.event(ticket, "final_answer", { detail: {
-      text: ticketDoc.agentResult?.ok ? ticketDoc.agentResult.text : "", sent_messages: run.result!.sent,
-    } });
   }
 
-  const ScheduledTask = defineTask<TaskInput, { phase: "handle" } | { phase: "settle"; attempt: number }, TaskResult>({
-    name: "cs.scheduled", version: 1, initial: () => ({ phase: "handle" }),
-    phases: {
-      handle: async (_task, runtime, context) => {
-        const doc = await runtime.snapshot(TicketDoc, runtime.conversationId, context);
-        let run = await runtime.snapshot(ScheduledRunDoc, runtime.conversationId, context);
-        if (!doc?.ticket || !run?.fire_key) throw new Error("定时运行文档缺失");
-        if (doc.agentResult || run.result || run.denied) {
-          await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "settle", attempt: 0 } }), context);
-          return;
-        }
-        const currentOwners = owners(), senderIsOwner = isOwnerActor(currentOwners, run.created_by);
-        const allowed = (run.conversation !== "owner" || senderIsOwner) &&
-          (opts.canSchedule ? await opts.canSchedule(run.created_by, run.conversation) : senderIsOwner);
-        runtime.signal.throwIfAborted();
-        await runtime.commit(async tx => {
-          const state = await tx.doc(ScheduledRunDoc, runtime.conversationId);
-          state.started_at ??= runtime.now();
-          if (!allowed) state.denied = true;
-          return undefined;
-        }, context);
-        run = (await runtime.snapshot(ScheduledRunDoc, runtime.conversationId, context))!;
-        if (!allowed) {
-          await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "settle", attempt: 0 } }), context);
-          return;
-        }
-        const entry = (await runtime.snapshot(DispatchDoc, context))?.pending[doc.ticket];
-        if (!entry?.scope) throw new Error("定时派发 scope 缺失");
-        await opts.recorder.recordRun(run.schedule_id, {
-          fire_key: run.fire_key, fire_at: run.fire_at, status: "running", started_at: run.started_at, ticket: doc.ticket,
-        });
-        const remaining = run.started_at! + run.timeout_ms - runtime.now();
-        const signal = AbortSignal.any([runtime.signal, remaining > 0
-          ? AbortSignal.timeout(Math.ceil(remaining)) : AbortSignal.abort(new Error("定时运行超时"))]);
-        await tasks.handleAgent(runtime, context, { scheduled: true, signal, request: {
-          scope: entry.scope, access: senderIsOwner ? "all" : entry.scope,
-          threadKey: senderIsOwner ? ownerScope(currentOwners, run.conversation) : run.conversation, senderIsOwner,
-        } });
-      },
-      settle: async (_task, runtime, context) => {
-        // 适配 TaskRuntime.commit：只提交文档变更，不在 finish 内推进任务检查点。
-        const store: RunStore = {
-          snapshot: runtime.snapshot.bind(runtime),
-          commit: (fn, ctx) => runtime.commit(async tx => { await fn(tx); return undefined; }, ctx),
-        };
-        await finish(store, runtime.conversationId, context, runtime.now());
-        const run = (await runtime.snapshot(ScheduledRunDoc, runtime.conversationId, context))!;
-        await runtime.commit(async () => ({ status: "terminal", outcome: {
-          status: "completed", result: { sent: (run.result?.sent ?? 0) > 0 },
-        } }), context);
-      },
-    },
-    abort: async (_task, runtime, context) => {
-      await runtime.commit(async () => ({ status: "terminal", outcome: { status: "aborted" } }), context);
-    },
-  });
-  return { prepare, ScheduledTask, finish };
+  /**
+   * 提交成功后（及启动恢复时）调用：按创建者当时的授权决定投递或以无权结束。
+   * 已投递的输入重复投递是空操作；宿主中已结束的输入直接结算。
+   */
+  async function launch(key: string): Promise<void> {
+    const run = await readScheduledRun(opts.getHarness(), key);
+    if (!run) return;
+    if (run.result || run.denied) { await finish(key); return; }
+    // 升级前登记的运行没有定时输入：按中断结束，避免永久占用重叠判定。
+    if (!opts.getChannel().inbox.getInbound(key)) { await finish(key, { status: "lost" }); return; }
+    const state = await opts.inputState?.(key);
+    if (state === "done") { await finish(key); return; }
+    if (state === undefined) {
+      const senderIsOwner = isOwnerActor(owners(), run.created_by);
+      const allowed = (run.conversation !== "owner" || senderIsOwner) &&
+        (opts.canSchedule ? await opts.canSchedule(run.created_by, run.conversation) : senderIsOwner);
+      if (!allowed) {
+        await update(run.conversationId, s => { s.denied = true; s.started_at ??= Date.now(); });
+        opts.getChannel().inbox.markInbound([key], "done");
+        await finish(key);
+        return;
+      }
+    }
+    await opts.deliver(key);
+  }
+
+  /** 输入送达后端：记 running 与所在回合。 */
+  async function delivered(key: string, turnId: string): Promise<void> {
+    const found = await readScheduledRun(opts.getHarness(), key);
+    if (!found || found.result) return;
+    const run = await update(found.conversationId, s => { s.started_at ??= Date.now(); s.turn_id ??= turnId; });
+    await opts.recorder.recordRun(run.schedule_id, {
+      fire_key: run.fire_key, fire_at: run.fire_at, status: "running", started_at: run.started_at, ticket: key,
+    });
+  }
+
+  /** 启动时：仍在途（queued/running）的运行重新驱动。须在宿主恢复之后调用。 */
+  async function recover(): Promise<void> {
+    const meta = await opts.getHarness().snapshot(ScheduleRuntimeDoc, ctx);
+    for (const fireKey of Object.values(meta?.in_flight ?? {})) {
+      const key = scheduledInputKey(fireKey);
+      await launch(key).catch(error => log.warn("scheduled run recovery failed", { key, error }));
+    }
+  }
+
+  return { prepare, launch, delivered, finish, recover };
 }
 
 export type ScheduledRuntime = ReturnType<typeof createScheduledRuntime>;

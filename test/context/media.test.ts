@@ -23,7 +23,7 @@ const image = { type: "image", data: { url: "https://public.test/a", file: "a.pn
 const text = (value: string) => ({ type: "text", data: { text: value } });
 let dir: string, store: ContextStore, cdn: Server, base: string, downloads: number, bytes: Buffer;
 let remote: Record<string, unknown>, ticket: ReplyTicketRecord | null;
-let media: MediaRecall;
+let media: MediaRecall, channel: ReturnType<typeof createQQBridge>;
 const call = vi.fn(), getTicket = vi.fn();
 function event(id = "1", parts = [image] as Record<string, unknown>[], priv = false) {
   return { post_type: "message", message_type: priv ? "private" : "group", group_id: priv ? null : 30001,
@@ -48,7 +48,7 @@ beforeEach(async () => {
   base = "http://127.0.0.1:" + (cdn.address() as AddressInfo).port;
   call.mockReset().mockImplementation(async action => action === "get_msg" ? remote : { url: "https://public.test/fresh" });
   getTicket.mockReset().mockImplementation(async () => ticket);
-  const channel = createQQBridge({ httpUrl: "http://unused.test", wsUrl: "ws://unused.test", token: "",
+  channel = createQQBridge({ httpUrl: "http://unused.test", wsUrl: "ws://unused.test", token: "",
     allowUsers: "*", allowGroups: [], groupMentions: true, dataDir: dir, imageRoot: dir }, { client: { call } });
   channel.getTicket = getTicket;
   media = new MediaRecall({ dataDir: dir, store, channel,
@@ -69,8 +69,8 @@ describe("按需图片召回", () => {
     const file = (await media.recall(access, "1")).images[0]!.path;
     const tokens = new RecallTokens(media, 1);
     const server = await startMediaRecallServer(tokens, 0);
-    const lease = tokens.issue({ access, ticket: "view", deadline: Date.now() + 60_000 });
-    const foreign = tokens.issue({ access: privateAccess, ticket: "foreign", deadline: Date.now() + 60_000 });
+    const lease = tokens.issue({ access, threadKey: "group:7", turnId: "view", deadline: Date.now() + 60_000 });
+    const foreign = tokens.issue({ access: privateAccess, threadKey: "group:7", turnId: "foreign", deadline: Date.now() + 60_000 });
     try {
       for (let i = 0; i < 2; i++) expect(await viewViaLoopback(file, lease.token, server.port))
         .toEqual({ type: "image", data: PNG.toString("base64"), mimeType: "image/png" });
@@ -119,6 +119,28 @@ describe("按需图片召回", () => {
       await expect(media.recall(privateAccess, "1")).rejects.toThrow("范围");
       expect(downloads).toBe(0); await noFiles();
     });
+  it.each(["ok", "status", "message", "sender"])("Outbox 行（消息库 ticket 列为行键）：已发出、id 与发出账号一致才可召回（%s）", async fault => {
+    const key = "private:20001:call-1";
+    channel.outbox.reserveOutbox({ key, thread_key: "private:20001", turn_id: "t1", input_key: null, message_type: "private", target_id: "20001",
+      mention_user_id: null, text: "图片好了", images: ["/unused.png"], files: [] });
+    channel.outbox.markOutboxSending(key); channel.outbox.markOutboxSent(key, "1");
+    store.recordSent(channel.outbox.getOutbox(key)!, { selfId: "10001", replyTo: null });
+    remote = { ...event("1", [image], true), user_id: 10001 };
+    if (fault === "status" || fault === "message") {
+      const db = new DatabaseSync(path.join(dir, "qq-bridge.sqlite"));
+      db.prepare(fault === "status" ? "UPDATE outbox SET status='uncertain' WHERE key=?" : "UPDATE outbox SET message_id='2' WHERE key=?").run(key);
+      db.close();
+    }
+    if (fault === "sender") remote.user_id = 20001;
+    if (fault === "ok") {
+      const result = await media.recall(privateAccess, "1");
+      expect(result.images).toHaveLength(1);
+    } else {
+      await expect(media.recall(privateAccess, "1")).rejects.toThrow("范围");
+      expect(downloads).toBe(0);
+    }
+    expect(getTicket).not.toHaveBeenCalled();
+  });
   it.each([true, false])("机器人正确票据可召回并追加（private=%s）", async priv => {
     bot(priv);
     const result = await media.recall(priv ? privateAccess : access, "1");

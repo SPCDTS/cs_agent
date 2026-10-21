@@ -160,6 +160,14 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
           back(`/agents?ok=${outcome}`); return;
         } finally { clearTimeout(timer); }
       }
+      if (url.pathname === '/thread/stop') {
+        const key = form.get('key') ?? '';
+        if (!opts.stopThread) throw new HttpError(404, '停止不可用');
+        if (!isThreadKey(key)) throw new HttpError(400, '非法的线程键');
+        await opts.stopThread(key);
+        tracer.event('thr:' + key, 'thread_stopped', { detail: { source: 'dashboard', thread_key: key } });
+        back('/agents?ok=stopped'); return;
+      }
       if (url.pathname === '/codex/reset' || url.pathname === '/pi/reset') {
         const codex = url.pathname === '/codex/reset';
         const key = form.get('key') ?? '';

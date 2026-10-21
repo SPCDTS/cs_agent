@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isAllowed, isTriggered, normalizeMessage, validatePolicy, type PolicyConfig } from "../../src/qq/policy.js";
-import { ticketIdFor } from "../../src/qq/reply-store.js";
+import { inboundKey } from "../../src/qq/reply-store.js";
 import { groupEvent, privateEvent, SELF_ID } from "./fake-onebot.js";
 
 const policy: PolicyConfig = { allowUsers: ["20001"], allowGroups: ["30001"], groupMentions: true };
@@ -116,14 +116,14 @@ describe("policy", () => {
   });
 });
 
-describe("ticketIdFor", () => {
+describe("inboundKey", () => {
   it("is deterministic and separates chats", () => {
     const base = { self_id: "1", user_id: "2", message_id: "3" };
-    const p = ticketIdFor({ ...base, message_type: "private", group_id: null });
+    const p = inboundKey({ ...base, message_type: "private", group_id: null });
     expect(p).toMatch(/^[a-f0-9]{64}$/);
-    expect(ticketIdFor({ ...base, message_type: "private", group_id: null })).toBe(p);
-    const g1 = ticketIdFor({ ...base, message_type: "group", group_id: "9" });
-    const g2 = ticketIdFor({ ...base, message_type: "group", group_id: "8" });
+    expect(inboundKey({ ...base, message_type: "private", group_id: null })).toBe(p);
+    const g1 = inboundKey({ ...base, message_type: "group", group_id: "9" });
+    const g2 = inboundKey({ ...base, message_type: "group", group_id: "8" });
     expect(g1).not.toBe(p);
     expect(g1).not.toBe(g2);
   });

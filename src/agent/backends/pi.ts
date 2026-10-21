@@ -2,29 +2,42 @@ import type { ContextUsageStore } from "../context-usage.js";
 import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../pi-context-usage.js";
 import { readThreadArchive, writeThreadArchive, THREAD_ARCHIVE_LIMIT } from "../thread-archive.js";
 import { trace } from "../../shared/trace.js";
-import { deliveryNoteText } from "../delivery-note.js";
-import type { DeliveryNote } from "./types.js";
 import type { PiConversation, PiEntryPage, PiSessionSource } from "./pi-session-types.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { BACKGROUND_CONTEXT, withAbortSignal, awaitWithContext } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { clampThinkingLevel, type Models, type ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { AssistantEntry, createRegistry, defineDoc, Harness, ROOT_CONVERSATION_ID, watchEvents, type Conversation, type ConversationId, type Cursor, type EntryId, type ModelRef, type Storage, type Submission } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, Harness, LiveDoc, ROOT_CONVERSATION_ID, watchEvents, type AgentEvent, type AgentEventStream, type Conversation, type ConversationId, type Cursor, type EntryId, type ModelRef, type Storage, type SubmissionId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { buildCodexPrompt } from "../codex/runner.js";
-import { collectNewImages } from "../../media/gen/image-collect.js";
-import { attachmentDirs } from "../../media/attach-paths.js";
-import { validateReferences } from "../../media/gen/image-references.js";
 import { codingEnvironment, codingTools } from "../pi-tools/coding.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
 import { createPiScheduleExtensions } from "../pi-tools/schedule.js";
 import { createPiImExtensions } from "../pi-tools/im.js";
-import { PiRequestDoc } from "../pi-tools/request.js";
+import { PiChildDoc, traceKey, type PiCallBinding } from "../pi-tools/request.js";
+import { createSubagentExtension, isSubagentReportRequest, type SubagentOptions } from "../pi-tools/subagent.js";
 import { PiPromptLoader } from "../pi-tools/prompt.js";
-import { isScope, parseAccess } from "../../context/access.js";
+import { isScope } from "../../context/access.js";
 import { log } from "../../shared/log.js";
-import { BackendTimeoutError, type AgentBackend, type AgentRequest, type AgentHandleContext, type AgentResponse } from "./types.js";
+import { isOwner, type OwnerIds } from "../../shared/owners.js";
+import type { InboundRecord, TurnBinding } from "../../channel/types.js";
+import type { HostCallbacks, InputRef, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
+import type { RenderedInputs } from "../inbox.js";
+import type { TicketSettings } from "./types.js";
+
+/**
+ * pi 后端（设计 §6）：每个会话键一个常驻的 pi-durable 会话，回合 = pi 的一次 run（从输入到最终回答）。
+ * 1. 开一轮：首条输入 whenBusy=followUp（requestId = 入站键，重放取回同一提交），同批其余输入 steer 并入；
+ *    会话恰好已有 run（宿主尚未看到的唤醒回合）时，输入全部 steer 并入那次 run，回合 id 取那次 run。
+ *    回合 id = `pi:<会话>:<run 首条输入的提交 id>`；该提交结束（done / unanswered）即回合结束。
+ * 2. 插话：适配器自己判断回合是否仍在（回合首条提交未结束）才 steer，否则返回 no_active_turn 由宿主排队；
+ *    判断与提交之间回合恰好结束时，插话会自己开一次 run，按唤醒回合回报（身份只会更严格）。
+ * 3. 唤醒：会话事件流里出现宿主不知道的 run（子 agent 汇报 follow-up）→ onTurnStarted(backend)；
+ *    宿主有回合进行中时出现的 run 视为并入该回合（同一会话一次只有一个回合）。
+ * 4. 没有单轮时限、没有每轮工具配额；中止只来自面板"停止"与看门狗（连同子 agent 一起停）。
+ * 5. 工具身份在调用时由 binding() 从宿主求出（§7.3）；子会话由 initChild 写入父会话键，固定为唤醒身份。
+ * 6. 恢复：pi-durable 持久化 run 与子 agent，重启后回合续跑；bind 宿主 → 宿主恢复（recoverTurn）→ attach 事件流并恢复调度。
+ */
 
 const context = BACKGROUND_CONTEXT;
 /** 与会话创建同事务提交，JSON 映射是原子写出的运维镜像，丢失时可从 SQLite 重建。 */
@@ -43,7 +56,14 @@ const PiMigrationDoc = defineDoc<{ sharedRetired: boolean }>({
   kind: "cs.pi.migration", version: 1, scope: "session", initial: () => ({ sharedRetired: false }),
 });
 
-export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "workspaceDir"> {
+/** 宿主侧提供的输入读取与本轮绑定（Inbox）。 */
+export interface PiTurns {
+  binding(threadKey: string): TurnBinding;
+  records(inputs: readonly Pick<InputRef, "inboundKey">[]): InboundRecord[];
+  render(records: readonly InboundRecord[]): Promise<RenderedInputs>;
+}
+
+export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "workspaceDir" | "binding"> {
   models: Models;
   /** 运维指引根目录；Pi 工具路径策略仍整体禁读此 Codex 工作区。 */
   workspaceDir?: string;
@@ -51,17 +71,34 @@ export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "w
   model: ModelRef;
   currentModel?: () => ModelRef;
   thinkingLevel: ModelThinkingLevel;
-  timeoutMs?: number;
   reserveTokens?: number;
   backgroundTokens?: number;
   /** 测试用内存或自定义持久化存储；生产使用 DATA_DIR/pi.sqlite。 */
   storage?: Storage;
+  turns: PiTurns;
+  owners?: OwnerIds | (() => OwnerIds);
+  /** 子 agent 扩展的选项；false 不安装 */
+  subagent?: Partial<Omit<SubagentOptions, "getHarness" | "initChild">> | false;
 }
 
-export class PiBackend implements AgentBackend {
+type ActiveTurn = { turnId: string; first: SubmissionId; owner: "host" | "backend" };
+type ThreadState = { conv: ConversationId; active?: ActiveTurn; stream?: AgentEventStream };
+
+export const piTurnId = (conv: ConversationId | number, first: SubmissionId | number) => `pi:${Number(conv)}:${Number(first)}`;
+function parseTurnId(turnId: string): { conv: ConversationId; first: SubmissionId } | undefined {
+  const m = /^pi:([1-9]\d*):([1-9]\d*)$/.exec(turnId);
+  return m ? { conv: Number(m[1]) as unknown as ConversationId, first: Number(m[2]) as unknown as SubmissionId } : undefined;
+}
+
+export class PiBackend implements ThreadAdapter {
   readonly name = "pi" as const;
   private readonly tails = new Map<string, Promise<unknown>>();
   private closing = false;
+  private host?: HostCallbacks;
+  private attached = false;
+  private readonly threads = new Map<string, ThreadState>();
+  /** 会话 id → 会话键（映射文档的内存反查） */
+  private readonly keys = new Map<number, string>();
   private readonly contextObservers = new Map<string, PiContextObserver>();
   readonly sessionSource: PiSessionSource;
   private constructor(readonly harness: Harness, private readonly opts: PiBackendOptions) {
@@ -122,34 +159,44 @@ export class PiBackend implements AgentBackend {
     return result;
   }
 
+  /** 打开 harness 但不恢复调度：宿主恢复回合（recoverTurn）后由 attach() 接上事件流并恢复调度。 */
   static async open(opts: PiBackendOptions): Promise<PiBackend> {
     await new PiPromptLoader(opts.dataDir).read();
     const workspaceDir = opts.workspaceDir ?? process.env.WORKSPACE_DIR ?? "/workspace";
     const registry = createRegistry();
     let harness!: Harness;
-    const coding = await codingTools(), extension = createPiExtension({ ...opts, workspaceDir, getHarness: () => harness });
-    const im = createPiImExtensions(opts);
-    for (const item of [coding, extension, ...Object.values(im), ...Object.values(createPiScheduleExtensions(opts.scheduleTools))]) registry.install(item);
+    let backend!: PiBackend;
+    const binding = (id: number) => backend.binding(id);
+    const coding = await codingTools(), extension = createPiExtension({ ...opts, workspaceDir, getHarness: () => harness, binding });
+    const im = createPiImExtensions({ ...opts, binding });
+    const schedule = createPiScheduleExtensions(binding, opts.scheduleTools);
+    const subagent = opts.subagent === false ? undefined : createSubagentExtension({ ...opts.subagent, getHarness: () => harness,
+      // 子会话与父会话共用会话键（工作区、附件目录），身份固定为唤醒。
+      initChild: async (tx, parent, child) => {
+        const threads = await tx.doc(PiThreadsDoc);
+        const key = Object.entries(threads).find(([, id]) => id === Number(parent))?.[0];
+        if (!key || key === "shared") throw new Error("子 agent 只能由会话线程派出");
+        Object.assign(await tx.doc(PiChildDoc, child), { threadKey: key, parent: Number(parent) });
+      } });
+    for (const item of [coding, extension, ...Object.values(im), ...Object.values(schedule), ...(subagent ? [subagent] : [])]) registry.install(item);
     const storage = opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite"));
     harness = await Harness.open(storage, {
       models: opts.models, registry,
-      env: async (target, ctx) => {
-        const threads = await target.read.snapshot(PiThreadsDoc, ctx);
-        const key = Object.entries(threads ?? {}).find(([, id]) => id === target.conversationId)?.[0];
-        if (!key || key === "shared") return undefined;
-        // 每次工具调用/恢复均从已提交文档重建身份；不从 handle 闭包或全局变量取当前票据。
-        const request = await target.read.snapshot(PiRequestDoc, target.conversationId, ctx);
-        if (!request?.ticket) return undefined;
-        return codingEnvironment({ dataDir: opts.dataDir, workspaceDir, skillsDir: opts.skillsDir, key, request, store: opts.store });
+      env: async target => {
+        // 每次工具调用/恢复均从宿主当前回合重建身份；不从闭包或全局变量取当前回合。
+        const bound = await backend.binding(Number(target.conversationId));
+        if (!bound) return undefined;
+        return codingEnvironment({ dataDir: opts.dataDir, workspaceDir, skillsDir: opts.skillsDir, key: bound.threadKey,
+          request: { access: bound.access, senderIsOwner: bound.senderIsOwner, inputs: bound.inputs }, store: opts.store });
       },
-      settings: { extensions: [coding, extension, im.basic], toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
+      settings: { extensions: [coding, extension, im.basic, ...(subagent ? [subagent] : [])], toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
         enabled: true,
         ...(opts.reserveTokens !== undefined ? { reserveTokens: opts.reserveTokens } : {}),
         ...(opts.backgroundTokens !== undefined ? { backgroundTokens: opts.backgroundTokens } : {}),
       } },
       onReport: err => log.warn("pi harness report", { error: err instanceof Error ? err.message : String(err) }),
     }, context);
-    const backend = new PiBackend(harness, { ...opts, storage });
+    backend = new PiBackend(harness, { ...opts, storage });
     try {
       const retired = await harness.commit(async tx => {
         const threads = await tx.doc(PiThreadsDoc);
@@ -161,7 +208,6 @@ export class PiBackend implements AgentBackend {
       if (retired) log.warn("pi shared conversation retired; mixed history will never be reused");
       await backend.importArchive();
       await backend.persistMirrors();
-      // 先把恢复中的回合纳入对应线程锁，再允许新请求；沿用已落盘截止时间。
       const threadIds = await backend.readThreadIds();
       // 映射先提交、用量尚在防抖窗口就退出时，启动时修复已重置线程的旧用量。
       for (const old of opts.contextUsage?.all() ?? []) {
@@ -172,26 +218,63 @@ export class PiBackend implements AgentBackend {
       for (const [key, id] of Object.entries(threadIds)) {
         const conv = await harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 线程映射指向不存在的会话");
+        backend.keys.set(id, key);
         if (await backend.observeContext(key, conv)) backfilled++;
-        const request = await harness.snapshot(PiRequestDoc, conv.id, context);
-        if (request?.ticket) {
-          const recovery = backend.lock(key, () => backend.bounded(conv, request.deadline, undefined,
-            ctx => conv.waitForIdle(ctx)));
-          void recovery.catch(err => log.warn("pi recovery ended", { thread: key, error: err instanceof Error ? err.message : String(err) }));
-        }
       }
       log.info("context usage backfilled", { backend: "pi", checked: Object.keys(threadIds).length, backfilled });
       return backend;
     } catch (err) { await harness.close(context); throw err; }
   }
 
-  private lock<T>(key: string, work: () => Promise<T>): Promise<T> {
+  /** 宿主创建后立即绑定（恢复回合的结束事件需要回报）。 */
+  bind(host: HostCallbacks): void { this.host = host; }
+
+  /**
+   * 宿主恢复之后调用一次：接上每个会话的事件流（宿主不知道的 run 按唤醒回合回报），再恢复 pi 调度。
+   */
+  async attach(): Promise<void> {
+    this.attached = true;
+    for (const [key, id] of Object.entries(await this.readThreadIds())) {
+      await this.serial(key, async () => { await this.watchThread(key, id as ConversationId); });
+    }
+    this.harness.resume();
+  }
+
+  /** 会话键串行：开轮、插话、事件处理与回合结束互不交错。 */
+  private serial<T>(key: string, work: () => Promise<T>): Promise<T> {
     const previous = this.tails.get(key) ?? Promise.resolve();
     const run = previous.catch(() => undefined).then(work);
     const tail = run.catch(() => undefined);
     this.tails.set(key, tail);
     void tail.finally(() => { if (this.tails.get(key) === tail) this.tails.delete(key); });
     return run;
+  }
+
+  private owners(): OwnerIds { return typeof this.opts.owners === "function" ? this.opts.owners() : this.opts.owners; }
+
+  /**
+   * 工具调用时的本轮绑定（§7.3）：主会话取宿主当前回合；子会话固定为唤醒身份。
+   * 读取范围：本人是 owner（或 owner 线程的唤醒回合）为 all，其余为本会话。
+   */
+  async binding(conversationId: number): Promise<PiCallBinding | undefined> {
+    let threadKey = this.keys.get(conversationId), child = false;
+    if (!threadKey) {
+      const mapped = Object.entries(await this.harness.snapshot(PiThreadsDoc, context) ?? {}).find(([, id]) => id === conversationId)?.[0];
+      if (mapped && mapped !== "shared") { threadKey = mapped; this.keys.set(conversationId, mapped); }
+    }
+    if (!threadKey) {
+      const doc = await this.harness.snapshot(PiChildDoc, conversationId as ConversationId, context);
+      if (doc?.threadKey) { threadKey = doc.threadKey; child = true; }
+    }
+    if (!threadKey) return undefined;
+    const turn = this.opts.turns.binding(threadKey);
+    const identity = child ? { kind: "wake" as const } : turn.identity;
+    const person = identity.kind === "user" ? identity.sender : identity.kind === "scheduled" ? identity.creator : undefined;
+    const ownerPerson = !!person && isOwner(this.owners(), person);
+    const inputs = child ? [] : turn.inputs;
+    const images = inputs.length ? this.opts.turns.records(inputs.map(inboundKey => ({ inboundKey }))).flatMap(rec => rec.images) : [];
+    return { ...turn, identity, inputs, images, child, ...(child ? { turnId: undefined } : {}),
+      access: ownerPerson || (!person && threadKey === "owner") ? "all" : turn.scope, senderIsOwner: ownerPerson && !child };
   }
 
   async readThreadIds(): Promise<Record<string, number>> {
@@ -236,7 +319,7 @@ export class PiBackend implements AgentBackend {
     }
   }
 
-  private async observeContext(key: string, conv: Conversation, ticket?: string, ref = this.opts.model): Promise<boolean> {
+  private async observeContext(key: string, conv: Conversation, ref = this.opts.model): Promise<boolean> {
     if (!this.opts.contextUsage) return false;
     const model = this.opts.models.getModel(ref.provider, ref.modelId);
     if (!model) throw new Error("pi 上下文窗口缺少模型定义");
@@ -244,11 +327,11 @@ export class PiBackend implements AgentBackend {
     const existing = this.contextObservers.get(key);
     if (existing) {
       existing.updateCapacity(capacity);
-      this.opts.contextUsage.ensure("pi", key, capacity, ticket);
+      this.opts.contextUsage.ensure("pi", key, capacity);
       return false;
     }
     const observer = await PiContextObserver.open(this.harness, conv, key, this.opts.contextUsage, this.opts.storage!,
-      capacity, ticket);
+      capacity, undefined, () => { const active = this.threads.get(key)?.active; return active ? "turn:" + active.turnId : undefined; });
     this.contextObservers.set(key, observer);
     return observer.backfilled;
   }
@@ -265,12 +348,13 @@ export class PiBackend implements AgentBackend {
     log.info("context usage backfilled", { backend: "pi", checked: id === undefined ? 0 : 1, backfilled: Number(backfilled) });
   }
 
-  private async conversation(key: string, ticket: string, settings?: AgentRequest["settings"]): Promise<Conversation> {
-    // 仅创建和 JSON 写回用短全局锁，模型回合按 owner 或 scope 分别串行。
-    return this.lock("mapping", async () => {
+  /** 会话键 → 常驻会话（首次使用时创建）；每轮按设置快照配置模型与思考档位。 */
+  private async conversation(key: string, settings?: TicketSettings): Promise<Conversation> {
+    // 仅创建和 JSON 写回用短全局锁。
+    return this.serial("mapping", async () => {
       const id = (await this.readThreadIds())[key];
-      // 旧票据缺少 piModel 时保留启动模型；新票据按设计每次提交读取当前模型。
-      let ref = settings?.piModel !== undefined ? this.opts.currentModel?.() ?? { ...this.opts.model, modelId: settings.piModel } : this.opts.model;
+      // 没有快照（唤醒回合等）时读取当前模型。
+      let ref = settings?.piModel !== undefined ? this.opts.currentModel?.() ?? { ...this.opts.model, modelId: settings.piModel } : this.opts.currentModel?.() ?? this.opts.model;
       let model = this.opts.models.getModel(ref.provider, ref.modelId);
       if (!model) {
         log.warn("pi runtime model unavailable; using startup model", { provider: ref.provider, model: ref.modelId });
@@ -283,163 +367,204 @@ export class PiBackend implements AgentBackend {
         const conv = await this.harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 会话不存在");
         await conv.configure(agent, context);
-        await this.observeContext(key, conv, ticket, ref);
+        await this.observeContext(key, conv, ref);
         await this.persistMirrors();
         return conv;
       }
       const conv = await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent,
         init: async (tx, conversationId) => { (await tx.doc(PiThreadsDoc))[key] = conversationId; },
       }, context);
-      this.opts.contextUsage?.reset("pi", key, ticket);
-      await this.observeContext(key, conv, ticket, ref);
+      this.keys.set(Number(conv.id), key);
+      this.opts.contextUsage?.reset("pi", key);
+      await this.observeContext(key, conv, ref);
       await this.persistMirrors();
+      if (this.attached) await this.watchThread(key, conv.id);
       return conv;
     });
   }
 
-  /** 超时或调用方取消后，必须等实际回合中止才释放线程锁。取消等待本身不会取消 pi 工作。 */
-  private async bounded<T>(conv: Conversation, deadline: number, signal: AbortSignal | undefined,
-    work: (ctx: ReturnType<typeof withAbortSignal>) => Promise<T>): Promise<T> {
-    const timer = new AbortController();
-    const timeout = setTimeout(() => timer.abort(new BackendTimeoutError("处理超时，请稍后再试。")), Math.max(1, deadline - Date.now()));
-    const joined = AbortSignal.any([timer.signal, ...(signal ? [signal] : [])]);
-    try { return await work(withAbortSignal(joined, context)); }
-    catch (err) {
-      if (joined.aborted && !this.closing) {
-        await conv.abort(context, { background: true });
-        if (timer.signal.aborted) throw new BackendTimeoutError("处理超时，请稍后再试。");
-      }
-      throw err;
-    } finally { clearTimeout(timeout); }
-  }
-
-  handle(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {
-    if (this.closing) return Promise.reject(new Error("pi 后端正在关闭"));
-    // 排队取消只取消此等待；队列槽位仍保留，轮到后检查 signal，不启动新回合。
-    const key = req.source.type === "group" ? `group:${req.source.group_id}` : req.threadKey === "owner" ? "owner" : req.scope;
-    // 实时视图：同一会话键上排队等待的时间（开始/结束各一条，不改变锁语义）
-    const queued = Date.now();
-    trace.event(req.ticket, "thread_wait", { status: "started", detail: { backend: "pi", conversation_key: key } });
-    return awaitWithContext(this.lock(key, () => {
-      trace.event(req.ticket, "thread_wait", { durationMs: Date.now() - queued, detail: { backend: "pi", conversation_key: key } });
-      return this.turn({ ...req, threadKey: key as AgentRequest["threadKey"] }, ctx);
-    }), withAbortSignal(ctx.signal, context));
-  }
-
-  async recordDeliveryNote(note: DeliveryNote): Promise<void> {
-    if (note.conversationId === undefined) return;
-    const conv = await this.harness.conversation(note.conversationId as ConversationId, context);
-    if (!conv) throw new Error("投递提醒的 pi 会话不存在");
-    await conv.submit({ type: "write", requestId: note.ticket + "#delivery-note",
-      entry: { kind: "cs.delivery_note", data: { ...note },
-        model: [{ role: "user", content: deliveryNoteText(note.fallback), timestamp: Date.now() }] } }, context);
-  }
-
-  private async turn(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {
-    ctx.signal.throwIfAborted();
-    if (this.closing) throw new Error("pi 后端正在关闭");
-    if (!/^[A-Za-z0-9_-]{1,128}$/.test(req.ticket)) throw new Error("非法票据");
-    if (!parseAccess(req.access) || (req.access !== req.scope && !(req.access === "all" && (req.actorIsOwner ?? req.senderIsOwner) === true))) throw new Error("非法访问范围");
-    const conv = await this.conversation(req.threadKey, req.ticket, req.settings);
-    let requestId = ctx.piTurn?.requestId ?? req.ticket;
-    if (ctx.piTurn?.conversationId !== conv.id) {
-      await ctx.persistPiTurn?.({ requestId, retries: ctx.piTurn?.retries ?? 0, conversationId: conv.id });
-    }
-    const known = await conv.commit(tx => tx.submissionByRequest(conv.id, requestId), context);
-    if (known) await conv.commit(async tx => {
-      const doc = await tx.doc(PiRequestDoc, conv.id);
-      if (doc.ticket === req.ticket) {
-        doc.source ??= req.source;
-        doc.actor = req.actor; doc.actorIsOwner = req.actorIsOwner;
-      }
-    }, context);
-    let deadline = Date.now() + (this.opts.timeoutMs ?? 300_000);
-    if (!known) {
-      await conv.waitForIdle(withAbortSignal(ctx.signal, context));
-      ctx.signal.throwIfAborted();
-      const images = await validateReferences(req.images ?? [], req.images ?? [], path.join(this.opts.dataDir, "incoming", req.ticket));
-      const content = buildCodexPrompt(req.source, req.text, { time: req.time, quote: req.quote }) +
-        (images.length ? "\n[本轮参考图]\n" + images.join("\n") : "");
-      await conv.commit(async tx => {
-        const doc = await tx.doc(PiRequestDoc, conv.id);
-        // 崩溃可能发生在绑定与 submit 之间，同票据继续沿用计数、截止时间与原文。
-        if (doc.ticket === req.ticket) {
-          Object.assign(doc, { actor: req.actor, actorIsOwner: req.actorIsOwner, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true });
-          deadline = doc.deadline; return;
-        }
-        Object.assign(doc, { ticket: req.ticket, actor: req.actor, actorIsOwner: req.actorIsOwner, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true, images, content, deadline, calls: {}, imageJobs: [] });
-      }, context);
-    } else if (known.status !== "done" && known.status !== "unanswered") {
-      const bound = await this.harness.snapshot(PiRequestDoc, conv.id, context);
-      if (bound?.ticket !== req.ticket) throw new Error("pi 在途请求与绑定不一致");
-      deadline = bound.deadline;
-    }
-    // 定时恢复会按当前身份重新授权；未结束的同票据不能沿用崩溃前的读取范围或 owner 权限。
-    if (known && known.status !== "done") await conv.commit(async tx => {
-      const bound = await tx.doc(PiRequestDoc, conv.id);
-      if (bound.ticket !== req.ticket) throw new Error("pi 在途请求与绑定不一致");
-      Object.assign(bound, { actor: req.actor, actorIsOwner: req.actorIsOwner, source: req.source, access: req.access, senderIsOwner: req.senderIsOwner === true });
-    }, context);
-    const permissions = await this.opts.grants?.permissions(req) ?? { actorIsOwner: false, target: false, auth: false };
-    const im = createPiImExtensions(this.opts), selected = permissions.auth ? im.owner : permissions.target ? im.targeted : im.basic;
-    const schedule = createPiScheduleExtensions(this.opts.scheduleTools);
-    const available = await this.opts.scheduleTools?.permissions(req);
+  /** 按本轮身份选择 IM 与定时工具的 schema（调用时仍逐次复核身份）。 */
+  private async configureTools(conv: Conversation, threadKey: string): Promise<void> {
+    const binding = this.opts.turns.binding(threadKey);
+    const permissions = await this.opts.grants?.permissions(binding) ?? { actorIsOwner: false, target: false, auth: false };
+    const im = createPiImExtensions({ ...this.opts, binding: id => this.binding(id) }), selected = permissions.auth ? im.owner : permissions.target ? im.targeted : im.basic;
+    const schedule = createPiScheduleExtensions(id => this.binding(id), this.opts.scheduleTools);
+    const available = await this.opts.scheduleTools?.permissions(binding);
     const scheduleExtension = available?.scheduleControl ? schedule.control : available?.schedule ? schedule.management : undefined;
     await conv.configure({ extensions: {
       add: [selected, ...(scheduleExtension ? [scheduleExtension] : [])],
       remove: [...Object.values(im).filter(e => e.name !== selected.name),
         ...Object.values(schedule).filter(e => e.name !== scheduleExtension?.name)],
     } }, context);
-    trace.event(req.ticket, "dispatched", { detail: { backend: "pi", conversation_key: req.threadKey, conversation: conv.id, recovered: !!known } });
-    if (known) trace.event(req.ticket, "recovered", { detail: { backend: "pi", request_id: requestId } });
-    ctx.onEvent({ type: "pi_start", thread: req.threadKey, conversation: conv.id });
-    return this.bounded(conv, deadline, ctx.signal, async waitContext => {
-      const bound = await this.harness.snapshot(PiRequestDoc, conv.id, context);
-      waitContext.abortSignal?.throwIfAborted();
-      // requestId 直接使用 ticket；即使已有回执，也通过 submit 的持久化去重复用。
-      let submission: Submission = await conv.submit({ type: "input", requestId,
-        content: bound?.ticket === req.ticket ? bound.content : req.text, whenBusy: "reject" }, context);
-      let settled = await submission.wait(waitContext);
-      // 仅恢复既有的 aborted 回执；本次新发生的用户取消/超时不重提。
-      if (known?.status === "unanswered" && settled.status === "unanswered" && settled.reason === "aborted" &&
-          (ctx.piTurn?.retries ?? 0) < 1) {
-        if (bound?.ticket !== req.ticket) throw new Error("pi 恢复请求与绑定不一致");
-        requestId = req.ticket + "#r" + ((ctx.piTurn?.retries ?? 0) + 1);
-        // 先续期再保存后缀；后缀已落盘但 submit 前再次退出时，不能沿用旧的过期期限。
-        await conv.commit(async tx => { (await tx.doc(PiRequestDoc, conv.id)).deadline = deadline; }, context);
-        await ctx.persistPiTurn?.({ requestId, retries: (ctx.piTurn?.retries ?? 0) + 1, conversationId: conv.id });
-        waitContext.abortSignal?.throwIfAborted();
-        submission = await conv.submit({ type: "input", requestId, content: bound.content, whenBusy: "reject" }, context);
-        settled = await submission.wait(waitContext);
+  }
+
+  private state(key: string, conv: ConversationId): ThreadState {
+    let state = this.threads.get(key);
+    if (!state || state.conv !== conv) { state = { conv, ...(state?.stream ? { stream: state.stream } : {}) }; this.threads.set(key, state); }
+    return state;
+  }
+
+  private async content(record: InboundRecord): Promise<string> {
+    return (await this.opts.turns.render([record])).text;
+  }
+
+  // ───────────── ThreadAdapter ─────────────
+
+  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turn: TurnContext, settings?: TicketSettings): Promise<{ turnId: string }> {
+    if (this.closing) return Promise.reject(new Error("pi 后端正在关闭"));
+    return this.serial(threadKey, async () => {
+      const conv = await this.conversation(threadKey, settings);
+      await this.configureTools(conv, threadKey);
+      const records = this.opts.turns.records(inputs);
+      const live = await this.harness.snapshot(LiveDoc, conv.id, context);
+      const state = this.state(threadKey, conv.id);
+      // 会话已有 run（宿主还没看到的唤醒回合）：全部并入；否则首条 followUp 开新 run，其余并入。
+      let first: SubmissionId | undefined = live?.run?.inputs[0];
+      for (const [index, record] of records.entries()) {
+        const submission = await conv.submit({ type: "input", requestId: record.key, content: await this.content(record),
+          whenBusy: live?.run || index > 0 ? "steer" : "followUp" }, context);
+        first ??= submission.id;
       }
-      if (settled.status !== "done" || settled.type !== "input") throw new Error("pi 未能完成本次请求，请稍后再试。");
-      const answer = await conv.commit(tx => tx.entry(AssistantEntry, settled.answer), context);
-      // 回复经 send_message 发出，最终回答可以为空。
-      const text = answer?.model?.flatMap(m => m.role === "assistant" ? m.content.filter(c => c.type === "text").map(c => c.text) : []).join("").trim() ?? "";
-      if (this.opts.contextUsage && known?.status !== "done") {
-        const observer = this.contextObservers.get(req.threadKey);
-        await observer?.synchronize(req.ticket, settled.answer);
-        const last = observer?.lastRequest(req.ticket);
-        const capacity = this.opts.contextUsage.get("pi", req.threadKey)!;
-        this.opts.contextUsage.recordTurn("pi", req.threadKey, {
-          windowTokens: capacity.windowTokens, compaction: capacity.compaction,
-          ...(last ? { usedTokens: last.usedTokens, cachedTokens: last.cachedTokens } : {}),
-        }, req.ticket);
+      if (first === undefined) throw new Error("pi 回合没有输入");
+      const turnId = piTurnId(conv.id, first);
+      if (state.active?.turnId === turnId) state.active.owner = "host";
+      else {
+        const active: ActiveTurn = { turnId, first, owner: "host" };
+        state.active = active;
+        this.waitTurn(threadKey, active);
       }
-      // 保留回合产物供审计；成功生图须通过 send_message 显式发送。
-      const images = await collectNewImages(attachmentDirs(this.opts.dataDir, req.ticket).attachDir, new Set());
-      ctx.onEvent({ type: "pi_done", thread: req.threadKey, conversation: conv.id, images: images.length });
-      return { text, images };
+      trace.event("turn:" + turnId, "dispatched", { detail: { backend: "pi", conversation_key: threadKey, conversation: conv.id,
+        kind: turn.kind, inputs: inputs.map(i => i.inboundKey), joined: !!live?.run } });
+      return { turnId };
     });
   }
 
+  steer(threadKey: ThreadKey, turnId: string, input: InputRef): Promise<"ok" | "no_active_turn"> {
+    if (this.closing) return Promise.resolve("no_active_turn");
+    return this.serial(threadKey, async () => {
+      const active = this.threads.get(threadKey)?.active;
+      if (!active || active.turnId !== turnId) return "no_active_turn" as const;
+      const record = await (await this.harness.submission(active.first, context))?.status(context);
+      if (!record || record.status === "done" || record.status === "unanswered") return "no_active_turn" as const;
+      const conv = await this.harness.conversation(this.threads.get(threadKey)!.conv, context);
+      if (!conv) return "no_active_turn" as const;
+      const [rec] = this.opts.turns.records([input]);
+      await conv.submit({ type: "input", requestId: rec!.key, content: await this.content(rec!), whenBusy: "steer" }, context);
+      trace.event("turn:" + turnId, "steered", { detail: { backend: "pi", input: input.inboundKey } });
+      return "ok" as const;
+    });
+  }
+
+  /** 面板"停止"与看门狗：连同子 agent 一起中止；回合结束仍由提交结束驱动。 */
+  async interrupt(threadKey: ThreadKey): Promise<void> {
+    const id = (await this.readThreadIds())[threadKey];
+    if (id === undefined) return;
+    const conv = await this.harness.conversation(id as ConversationId, context);
+    await conv?.abort(context, { background: true });
+  }
+
+  async recoverTurn(threadKey: ThreadKey, turnId: string): Promise<"alive" | "lost"> {
+    const parsed = parseTurnId(turnId);
+    if (!parsed || (await this.readThreadIds())[threadKey] !== Number(parsed.conv)) return "lost";
+    if (!await this.harness.submission(parsed.first, context)) return "lost";
+    const active: ActiveTurn = { turnId, first: parsed.first, owner: "host" };
+    this.state(threadKey, parsed.conv).active = active;
+    this.waitTurn(threadKey, active);
+    return "alive";
+  }
+
+  // ───────────── 回合跟踪 ─────────────
+
+  /** 回合首条提交结束即回合结束；之后若会话已开始下一次 run（排队的子 agent 汇报），按唤醒回合回报。 */
+  private waitTurn(threadKey: string, active: ActiveTurn): void {
+    void (async () => {
+      let status: TurnStatus = "completed", error: string | undefined, answer: EntryId | undefined;
+      try {
+        const submission = await this.harness.submission(active.first, context);
+        if (!submission) { status = "lost"; error = "pi 提交不存在"; }
+        else {
+          const settled = await submission.wait(context);
+          if (settled.status === "done" && settled.type === "input") answer = settled.answer;
+          else { status = "failed"; error = settled.status === "unanswered" ? settled.reason : settled.status; }
+        }
+      } catch (err) {
+        if (this.closing) return;
+        status = "failed"; error = err instanceof Error ? err.message : String(err);
+      }
+      if (this.closing) return;
+      await this.serial(threadKey, async () => {
+        const state = this.threads.get(threadKey);
+        if (state?.active?.turnId !== active.turnId) return;
+        delete state.active;
+        await this.recordUsage(threadKey, active.turnId, answer).catch(err => log.warn("pi context usage update failed", { thread: threadKey, error: err }));
+        this.host?.onTurnCompleted(threadKey as ThreadKey, active.turnId, { status, ...(error ? { error } : {}) });
+        const live = await this.harness.snapshot(LiveDoc, state.conv, context);
+        if (live?.run && live.run.inputs[0] !== active.first) await this.startWake(threadKey, state, live.run.inputs[0]!);
+      });
+    })().catch(err => log.warn("pi turn watcher failed", { thread: threadKey, turn: active.turnId, error: err }));
+  }
+
+  private async recordUsage(threadKey: string, turnId: string, answer: EntryId | undefined): Promise<void> {
+    if (!this.opts.contextUsage || answer === undefined) return;
+    const key = "turn:" + turnId, observer = this.contextObservers.get(threadKey);
+    await observer?.synchronize(key, answer);
+    const last = observer?.lastRequest(key);
+    const capacity = this.opts.contextUsage.get("pi", threadKey);
+    if (!capacity) return;
+    this.opts.contextUsage.recordTurn("pi", threadKey, {
+      windowTokens: capacity.windowTokens, compaction: capacity.compaction,
+      ...(last ? { usedTokens: last.usedTokens, cachedTokens: last.cachedTokens } : {}),
+    }, key);
+  }
+
+  /** 宿主不知道的 run（子 agent 汇报唤醒等）：按后端开的回合回报（身份为唤醒）。 */
+  private async startWake(threadKey: string, state: ThreadState, first: SubmissionId): Promise<void> {
+    const active: ActiveTurn = { turnId: piTurnId(state.conv, first), first, owner: "backend" };
+    state.active = active;
+    const record = await (await this.harness.submission(first, context))?.status(context);
+    const report = isSubagentReportRequest(record?.requestId);
+    trace.event("turn:" + active.turnId, "received", { detail: { text: report ? "（子 agent 汇报唤醒）" : "（后端唤醒回合）", sender: "",
+      thread_key: threadKey, kind: "wake" } });
+    trace.event("turn:" + active.turnId, "dispatched", { detail: { backend: "pi", conversation_key: threadKey, conversation: state.conv, kind: "wake" } });
+    this.host?.onTurnStarted(threadKey as ThreadKey, active.turnId, "backend");
+    this.waitTurn(threadKey, active);
+  }
+
+  /** 接上会话事件流：run 开始时识别唤醒回合，模型与工具活动刷新看门狗。须在会话键串行内调用。 */
+  private async watchThread(threadKey: string, conv: ConversationId): Promise<void> {
+    const state = this.state(threadKey, conv);
+    if (state.stream) return;
+    const stream = await watchEvents(this.harness, conv, context);
+    state.stream = stream;
+    const handle = async (events: readonly AgentEvent[]) => {
+      for (const event of events) {
+        const run = event.type === "run_start" ? event.inputs : event.type === "snapshot" ? event.run?.inputs : undefined;
+        if (run?.length) {
+          const current = this.threads.get(threadKey);
+          if (!current || current.conv !== conv) return;
+          // 事件按提交顺序串行处理，可能晚于回合结束：以已提交的 run 为准，过期的 run 不再回报。
+          const live = await this.harness.snapshot(LiveDoc, conv, context);
+          if (live?.run?.inputs[0] !== run[0]) continue;
+          // 宿主有回合进行中时出现的 run 并入该回合（同一会话一次只有一个回合）。
+          if (current.active) this.host?.onActivity(threadKey as ThreadKey);
+          else await this.startWake(threadKey, current, run[0]!);
+        } else if (["message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "turn_start"].includes(event.type)) {
+          this.host?.onActivity(threadKey as ThreadKey);
+        }
+      }
+    };
+    await handle([stream.snapshot]);
+    stream.start(async events => { await this.serial(threadKey, () => handle(events)); });
+  }
+
   /**
-   * 面板"重置会话"：排在该键的回合之后（不打断进行中的回合），映射置空、旧会话保留在 SQLite 中作归档，
+   * 面板"重置会话"：会话有回合进行中时拒绝（不打断）；映射置空、旧会话保留在 SQLite 中作归档，
    * 归档记录与映射同事务提交，再重写 JSON/JSONL 镜像；下一条消息新建会话。
    */
   resetThread(key: string, reason = "dashboard"): Promise<number | null> {
     if (key !== "owner" && !isScope(key)) return Promise.reject(new Error("非法会话键"));
-    return this.lock(key, () => this.lock("mapping", async () => {
+    return this.serial(key, () => this.serial("mapping", async () => {
+      if (this.threads.get(key)?.active) throw new Error("会话正在处理中，请在本轮结束后再重置");
       const id = (await this.readThreadIds())[key] ?? null;
       if (id === null) { await this.backfillResetContext(key); return null; }
       await this.harness.commit(async tx => {
@@ -448,6 +573,10 @@ export class PiBackend implements AgentBackend {
         archive.rows.push({ key, conversation: id, archived_at: new Date().toISOString(), reason });
         archive.rows = archive.rows.slice(-THREAD_ARCHIVE_LIMIT);
       }, context);
+      this.keys.delete(id);
+      const state = this.threads.get(key);
+      this.threads.delete(key);
+      await state?.stream?.stop().catch(() => undefined);
       await this.persistMirrors();
       await this.contextObservers.get(key)?.close();
       this.contextObservers.delete(key);
@@ -457,30 +586,31 @@ export class PiBackend implements AgentBackend {
     }));
   }
 
-  /** 手动压缩排在该键回合之后，保留当前会话映射。 */
-  compactThread(key: string): Promise<"compacted" | "unchanged"> {
-    if (key !== "owner" && !isScope(key)) return Promise.reject(new Error("非法会话键"));
-    return this.lock(key, async () => {
-      const id = (await this.readThreadIds())[key];
-      if (id === undefined) return "unchanged";
-      const conv = await this.harness.conversation(id as ConversationId, context);
-      if (!conv) throw new Error("pi 会话不存在");
-      const task = await conv.compact(undefined, context);
-      const { state: { outcome } } = await this.harness.waitForTask(task, context);
-      if (outcome.status !== "completed") throw new Error(`pi 会话压缩失败（${outcome.status}）`);
-      if (this.opts.contextUsage) await refreshPiCompactionUsage(conv, key, this.opts.contextUsage);
-      return "compacted";
-    });
+  /** 手动压缩：pi 在会话工作时也能压缩（摘要在下一个边界放置），保留当前会话映射。 */
+  async compactThread(key: string): Promise<"compacted" | "unchanged"> {
+    if (key !== "owner" && !isScope(key)) throw new Error("非法会话键");
+    const id = (await this.readThreadIds())[key];
+    if (id === undefined) return "unchanged";
+    const conv = await this.harness.conversation(id as ConversationId, context);
+    if (!conv) throw new Error("pi 会话不存在");
+    const task = await conv.compact(undefined, context);
+    const { state: { outcome } } = await this.harness.waitForTask(task, context);
+    if (outcome.status !== "completed") throw new Error(`pi 会话压缩失败（${outcome.status}）`);
+    if (this.opts.contextUsage) await refreshPiCompactionUsage(conv, key, this.opts.contextUsage);
+    return "compacted";
   }
 
-  /** 必须在关闭票据 harness 前调用，使其 signal 只停止等待、不终结 pi submission。 */
+  /** 关闭前调用：之后的回合结束不再回报（重启后由宿主恢复），pi 回合与子 agent 保留检查点。 */
   beginShutdown(): void { this.closing = true; }
 
   async close(): Promise<void> {
     this.beginShutdown();
+    await Promise.all([...this.threads.values()].map(state => state.stream?.stop().catch(() => undefined)));
     await Promise.all([...this.contextObservers.values()].map(observer => observer.close()));
     this.contextObservers.clear();
     await this.harness.close(context);
     await Promise.allSettled([...this.tails.values()]);
   }
 }
+
+export { traceKey };

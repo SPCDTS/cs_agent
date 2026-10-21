@@ -1,13 +1,13 @@
 /**
- * 执行 agent 的后端抽象（设计 §4.3）。两后端：codex（容器内 CLI 固定线程）与 pi（进程内 durable 会话，第 3 组）。
- * 后端只产出文本（与回合内生成的图片）；回复目标、发送与后处理由 agent 任务负责，后端不能也不需要指定。
+ * 执行 agent 的后端公共类型（设计 §4.3）。两后端：codex（每轮 codex exec，第 2 阶段经适配层）与 pi（进程内常驻会话）；
+ * 二者都实现 ThreadHost 的 ThreadAdapter，回复只经 send_message（Outbox）发出。
  */
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 
 export type ThreadKey = "owner" | `group:${string}` | `private:${string}`;
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
-/** 派发时冻结；档位与后端按快照执行。Pi 的模型记录用于审计，提交时可读取当前模型。 */
+/** 每轮开始时冻结；档位与后端按快照执行。Pi 的模型记录用于审计，提交时可读取当前模型。 */
 export type TicketSettings = {
   backend: BackendName;
   codexReasoningEffort: ReasoningEffort;
@@ -17,6 +17,7 @@ export type TicketSettings = {
   effortSource?: "fixed" | "auto" | "auto-fallback";
 };
 
+/** 输入来源（来源头用）：定时输入的 user_id 为创建者。 */
 export type TicketSource = {
   type: "private" | "group";
   user_id: string;
@@ -28,70 +29,7 @@ export type TicketSource = {
 export type BackendName = "codex" | "pi";
 export const BACKEND_NAMES = ["codex", "pi"] as const;
 
-export interface AgentRequest {
-  ticket: string;
-  actor?: string;
-  actorIsOwner?: boolean;
-  settings?: Readonly<TicketSettings>;
-  /** 会话 scope：group:<id> / private:<qq> */
-  scope: string;
-  /** 聊天记录访问范围（group:<id> / private:<qq> / all） */
-  access: string;
-  /** 记忆隔离键：owner 私聊 → owner，其余 → scope */
-  threadKey: ThreadKey;
-  /** 主进程按本条消息发送者与配置的 owner 比较；旧请求缺省为 false。 */
-  senderIsOwner?: boolean;
-  source: TicketSource;
-  /** 用户原文 */
-  text: string;
-  images?: string[];
-  /** 入站消息时间（unix 秒） */
-  time?: number;
-  /** 被引用消息（≤200 字，由调用方从消息库查得） */
-  quote?: { message_id: string; nickname: string; text: string };
-}
-
-export interface AgentEvent {
-  type: string;
-  [key: string]: unknown;
-}
-
-/** 后端回合的持久化标记（写在 TicketDoc，跨崩溃保留）：回合已开始的次数与回合输出文件。 */
-export interface TurnState {
-  outFile: string;
-  attempts: number;
-}
-
-export interface AgentHandleContext {
-  signal: AbortSignal;
-  onEvent(e: AgentEvent): void;
-  /** 上次（崩溃前）记录的回合标记；首次处理时为 undefined */
-  turn?: Readonly<TurnState>;
-  piTurn?: Readonly<{ requestId: string; retries: number; conversationId?: number }>;
-  persistPiTurn?(state: { requestId: string; retries: number; conversationId?: number }): Promise<void>;
-  /** 启动外部回合之前持久化回合标记（durable 任务提供；单独调用后端时可省略） */
-  persistTurn?(state: TurnState): Promise<void>;
-}
-
-export interface AgentResponse {
-  text: string;
-  /** 回合内生成、随回复发送的图片（realpath，≤4，已过魔数检查） */
-  images?: string[];
-}
-
+/** 注册到选择器的后端（实现另见 ThreadAdapter）。 */
 export interface AgentBackend {
   readonly name: BackendName;
-  handle(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse>;
-  recordDeliveryNote?(note: DeliveryNote): Promise<void>;
 }
-
-/** 只由网关根据实际预留的兜底行生成；会话标识来自本轮持久记录。 */
-export interface DeliveryNote {
-  ticket: string;
-  threadKey: ThreadKey;
-  conversationId?: number;
-  fallback: string;
-}
-
-/** 后端超时：agent 任务据此选"处理超时"模板。 */
-export class BackendTimeoutError extends Error {}

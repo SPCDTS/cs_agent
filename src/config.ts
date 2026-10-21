@@ -101,7 +101,6 @@ const EnvSchema = z.object({
   AGENT_BACKEND_OVERRIDES: z.string().default(""),
   /** 空值使用 DATA_DIR/skills；off 显式禁用。 */
   PI_SKILLS_DIR: z.string().default(""),
-  PI_TURN_TIMEOUT_SEC: int(300),
   PI_ARCHIVE_RETENTION_DAYS: int(90),
   PI_COMPACTION_RESERVE_TOKENS: int(DEFAULT_COMPACTION_POLICY.reserveTokens),
   PI_COMPACTION_BACKGROUND_TOKENS: z.coerce.number().int().min(0).default(DEFAULT_COMPACTION_POLICY.backgroundTokens),
@@ -151,8 +150,6 @@ export interface Config extends Env {
   /** ${DATA_DIR}/codex，容器内 codex 与 pi-ai 共用的 CODEX_HOME */
   codexHome: string;
   imagesDir: string;
-  /** ${DATA_DIR}/tickets：每张票据的工作目录（codex 回合的 codex-last.txt），回复后清理 */
-  ticketsDir: string;
 }
 
 /** 环境变量别名 → pi-ai 读取的标准名（.env 中常见的写法差异）。 */
@@ -212,6 +209,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     allowUsers,
     codexHome: path.join(e.DATA_DIR, "codex"),
     imagesDir: path.join(e.DATA_DIR, "images"),
-    ticketsDir: path.join(e.DATA_DIR, "tickets"),
   };
 }

@@ -52,11 +52,9 @@ export interface HostCallbacks {
   onActivity(threadKey: ThreadKey): void;
 }
 
-/** 工具调用（发送、召回、生图、定时、授权）取用的本轮身份（§7.3）。 */
-export type TurnIdentity =
-  | { kind: "user"; sender: string }
-  | { kind: "scheduled"; creator: string }
-  | { kind: "wake" };
+/** 工具调用（发送、召回、生图、定时、授权）取用的本轮身份（§7.3）；契约定义在通道层，工具与通道共用。 */
+export type { TurnIdentity } from "../../channel/types.js";
+import type { TurnIdentity } from "../../channel/types.js";
 
 /** 回合结束（含开轮失败、重启后丢失）：外层据此发出错提示、把输入标记 done、统计定时运行结果。 */
 export type TurnEnded = {

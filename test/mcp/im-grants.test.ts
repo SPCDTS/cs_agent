@@ -7,21 +7,19 @@ import { grantsFixture } from "../agent/grants-fixture.js";
 
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
-async function setup(owner: boolean, grant = false, scheduled = false) {
+/** mode：本轮身份由会话宿主给出（用户回合 / 定时回合 / 唤醒回合），租约只绑定会话与回合。 */
+async function setup(owner: boolean, grant = false, mode: "user" | "scheduled" | "wake" = "user") {
   const f = await grantsFixture(owner ? "1" : "99");
   if (grant) await f.grants.panel("auth_grant", { user: "qq:1", caps: ["send"], targets: ["qq:group:8"] });
-  if (scheduled) {
-    f.binding.ticket = "run_" + "f".repeat(40);
-    await f.bridge.openOutbound(f.binding.ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "1" });
-  }
+  const binding = { ...f.binding, identity: mode === "user" ? f.binding.identity : mode === "scheduled"
+    ? { kind: "scheduled" as const, creator: "1" } : { kind: "wake" as const } };
   const tokens = new RecallTokens({ recall: async () => ({ text: "", images: [] }) }, 5, undefined, {
-    permissions: b => f.grants.permissions(b),
-    auth: (b, name, args) => f.grants.tool(b, name, args),
-    send: (b, attempt, args, signal) => f.service.send({ ...f.binding, ...b, workdir: b.workdir! }, args, { attempt }, signal),
-    release: (ticket, attempt) => f.service.releaseAttempt(ticket, attempt),
+    permissions: () => f.grants.permissions(binding),
+    auth: (_b, name, args) => f.grants.tool(binding, name, args),
+    send: (b, callKey, args, signal) => f.service.send({ ...binding, access: b.access, workdir: b.workdir! }, args, callKey, signal),
   });
   const server = await startMediaRecallServer(tokens, 0); cleanup.push(() => server.close());
-  const lease = tokens.issue({ ...f.binding, deadline: Date.now() + 60_000 });
+  const lease = tokens.issue({ threadKey: binding.threadKey, turnId: binding.turnId, access: binding.access, workdir: binding.workdir, deadline: Date.now() + 60_000 });
   const client = new Client({ name: "im-grants-test", version: "1" });
   await client.connect(new StdioClientTransport({ command: process.execPath,
     args: [fileURLToPath(new URL("../../dist/mcp/im.js", import.meta.url))],
@@ -42,7 +40,7 @@ it.each([[true, false], [false, true], [false, false]])("im 子进程按令牌�
   if (owner || grant) {
     const sent = await f.client.callTool({ name: "send_message", arguments: { target: "qq:group:8", text: "目标消息" } });
     expect(sent.isError).not.toBe(true);
-    expect(f.service.rows(f.ticket)[0]!.target_id).toBe("8");
+    expect(f.store.listOutboxByTurn(f.binding.turnId)[0]!.target_id).toBe("8");
   } else {
     expect((await f.client.callTool({ name: "send_message", arguments: { target: "qq:group:8", text: "拒绝" } })).isError).toBe(true);
   }
@@ -60,16 +58,25 @@ it("owner 工具增删查与 trace；额外 actor 参数不能改变授权者", 
   expect(f.event.mock.calls.map(c => c[1])).toEqual(["auth_changed", "auth_changed"]);
 });
 
-it("非 owner 不能直接调用隐藏工具或回环端点；伪造令牌绑定仍由票据校验拒绝", async () => {
+it("非 owner 不能直接调用隐藏工具或回环端点；撤销后令牌失效", async () => {
   const f = await setup(false);
   for (const name of ["auth_grant", "auth_revoke", "auth_list"]) {
     expect((await f.client.callTool({ name, arguments: {} })).isError).toBe(true);
     expect((await f.post(name, {})).status).toBe(400);
   }
-  const forged = f.tokens.issue({ ...f.binding, actor: "qq:99", actorIsOwner: true, deadline: Date.now() + 60_000 });
-  expect((await f.post("auth_list", {}, forged.token)).status).toBe(400);
   f.lease.revoke();
   expect((await f.post("auth_list", {})).status).toBe(401);
+});
+
+it("owner 线程的唤醒回合只开放发往本会话：无 target、无授权工具，跨会话发送在主进程拒绝", async () => {
+  const f = await setup(true, false, "wake");
+  const tools = (await f.client.listTools()).tools;
+  expect(tools.map(t => t.name)).toEqual(["send_message"]);
+  expect(Object.hasOwn(tools[0]!.inputSchema.properties!, "target")).toBe(false);
+  expect((await f.post("auth_list", {})).status).toBe(400);
+  expect((await f.post("send", { target: "qq:group:8", text: "越权" })).status).toBe(400);
+  expect((await f.client.callTool({ name: "send_message", arguments: { text: "汇报" } })).isError).not.toBe(true);
+  expect(f.store.listOutboxByTurn(f.binding.turnId).map(row => row.target_id)).toEqual(["7"]);
 });
 
 it("已启动的 im schema 不赋予持久权限，授权撤销后跨目标发送在主进程拒绝", async () => {
@@ -77,12 +84,12 @@ it("已启动的 im schema 不赋予持久权限，授权撤销后跨目标发�
   expect((await f.client.listTools()).tools[0]!.inputSchema.properties).toHaveProperty("target");
   await f.grants.panel("auth_revoke", { user: "qq:1" });
   expect((await f.client.callTool({ name: "send_message", arguments: { target: "qq:group:8", text: "已撤销" } })).isError).toBe(true);
-  expect(f.service.rows(f.ticket)).toHaveLength(0);
+  expect(f.store.listOutboxByTurn(f.binding.turnId)).toHaveLength(0);
 });
 
 
 it.each([true, false])("定时回合 owner=%s 的 MCP 和 HTTP 均不开放 auth，保留有权 target", async owner => {
-  const f = await setup(owner, !owner, true);
+  const f = await setup(owner, !owner, "scheduled");
   const tools = (await f.client.listTools()).tools;
   expect(tools.map(t => t.name)).toEqual(["send_message"]);
   expect(tools[0].inputSchema.properties).toHaveProperty("target");

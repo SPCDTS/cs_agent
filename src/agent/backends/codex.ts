@@ -1,67 +1,54 @@
 import { classifyFailure } from "../../shared/errors.js";
 import { redactText } from "../../shared/redact.js";
 import { trace } from "../../shared/trace.js";
-import { CodexDeliveryNotes } from "../delivery-note.js";
-import type { DeliveryNote } from "./types.js";
-import { imageRefsValue, validateReferences } from "../../media/gen/image-references.js";
+import { imageRefsValue } from "../../media/gen/image-references.js";
 /**
- * codex 后端（设计 §4.4）：现有 CodexRunner 的适配。
- * - 线程：owner / group:<id> / private:<qq>（由请求的 threadKey 决定，同键串行）；
- * - 模型与推理强度：优先使用票据快照；旧票据沿用启动默认值；
- * - 每轮注入：qq_context 的 QQ_ACCESS、image_gen 的 IMAGE_TICKET_DIR（${DATA_DIR}/images/<ticket>）；
- * - 输入：§3.2 的 [来源] / [引用] 头部 + 原文；
- * - 回合结束后收集票据图片目录里本回合新出现的图片（≤4，魔数检查）随文本返回。
- *
- * 每张票据幂等（同一票据的回合最多真正执行一次，中断时最多再问一次）：
- * - codex 的 `-o` 最后一条消息固定写到 ${DATA_DIR}/tickets/<ticket>/codex-last.txt；
- * - 启动 codex 之前先经 ctx.persistTurn 把"回合已开始"（输出路径 + 次数）写进 TicketDoc；
- * - 再次进入（进程在回合结束后、结果提交前崩溃）：输出文件非空 → 直接当作本回合结果，不再询问；
- *   有"已开始"标记却没有输出 → 上一回合被中断（codex 可能已部分执行）：记 `codex turn interrupted`，
- *   最多再问一次（次数落盘），第二次中断后直接失败。
- * 票据工作目录在回复后由 agent 任务清理（图片目录另行管理）。
+ * codex 后端的第 2 阶段适配层（设计 §14 第 2 步）：每轮仍是一次 `codex exec`（CodexRunner），由 ThreadHost 驱动。
+ * - 开一轮：立即返回回合 id（`codex:<uuid>`），exec 在后台运行，结束后回报 onTurnCompleted；
+ * - 插话：codex exec 不能插话，一律返回 no_active_turn，消息排队到下一轮；
+ * - 中止：面板"停止"与看门狗中止 exec 进程树；超时（CODEX_TIMEOUT_SEC）= 回合失败，按 §8.1 提示；
+ * - 恢复：exec 随进程退出丢失，重启后回合按 lost 结束（不自动重放）；
+ * - 线程：owner / group:<id> / private:<qq>，同键串行；读取范围按本轮身份（owner 本人 all，其余本会话）；
+ * - IM / 召回令牌每次 exec 一个租约，绑定会话键与回合 id，身份在调用时由宿主求出；
+ * - 生图输出目录按会话（${DATA_DIR}/images/<会话>）；image_gen 等待超时留下的任务在回合结束前补收，完成后以系统消息发出。
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { buildCodexPrompt, CodexTimeoutError, isReasoningEffort, type CodexRunner } from "../codex/runner.js";
-import { type ReasoningEffort } from "./types.js";
-import { collectNewImages, listFiles } from "../../media/gen/image-collect.js";
-import { ticketImageDir } from "../../media/gen/image-gen.js";
+import { randomUUID } from "node:crypto";
+import { CodexTimeoutError, isReasoningEffort, type CodexRunner } from "../codex/runner.js";
+import { type ReasoningEffort, type TicketSettings } from "./types.js";
+import { collectNewImages } from "../../media/gen/image-collect.js";
+import { attachmentDirs } from "../../media/attach-paths.js";
+import { imageTimeoutMs } from "../../media/gen/image-options.js";
+import { PENDING_IMAGE_JOBS, pendingCallDir, PendingImageMarkerError, quarantinePendingImages, readPendingImages } from "../../media/gen/image-pending.js";
+import { recoverRemoteUploads, UnknownJobError, type ImageBackend } from "../../media/gen/image-gen.js";
+import { ingestImageEvents } from "../../media/gen/events.js";
+import { observeImages } from "../../media/gen/observed.js";
 import { log } from "../../shared/log.js";
-import { BackendTimeoutError, type AgentBackend, type AgentHandleContext, type AgentRequest, type AgentResponse } from "./types.js";
-
-/** 票据工作目录里的 codex 最后一条消息文件名 */
-export const CODEX_LAST_FILE = "codex-last.txt";
-/** 同一票据最多启动 codex 回合的次数（首次 + 中断后重问 1 次） */
-export const MAX_CODEX_TURNS = 2;
-
-/**
- * 票据工作目录 ${ticketsDir}/<ticket>：非法字符替换为 _；解析后必须恰为 ticketsDir 的直接子目录。
- */
-export function ticketWorkDir(ticketsDir: string, ticket: string): string {
-  const seg = ticket.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
-  const root = path.resolve(ticketsDir);
-  const dir = path.resolve(root, seg);
-  if (!seg || path.relative(root, dir) !== seg) throw new Error(`非法的票据工作目录: ${ticket}`);
-  return dir;
-}
-
-async function readNonEmpty(file: string): Promise<string | undefined> {
-  const text = await fs.readFile(file, "utf8").catch(() => undefined);
-  return text?.trim() ? text.trim() : undefined;
-}
+import { isOwner, type OwnerIds } from "../../shared/owners.js";
+import type { HostCallbacks, InputRef, ThreadAdapter, ThreadKey, TurnContext, TurnStatus } from "../host/types.js";
+import type { PiTurns } from "./pi.js";
+import type { SendService } from "../send-service.js";
+import { IMAGE_SUCCESS_REPLY } from "../replies.js";
 
 export interface CodexBackendOptions {
   runner: Pick<CodexRunner, "ask">;
-  /** ${DATA_DIR}/images：票据图片目录的根（须与 image_gen MCP 的 ${DATA_DIR}/images 一致） */
+  /** ${DATA_DIR}/images：会话图片目录的根（须与 image_gen MCP 的 ${DATA_DIR}/images 一致） */
   imagesDir: string;
-  /** ${DATA_DIR}/tickets：票据工作目录的根（codex-last.txt） */
-  ticketsDir: string;
   /** CODEX_REASONING_EFFORT；不在允许列表内时不传覆盖参数（沿用 config.toml）。函数形式每回合现读（运行时设置）。 */
   reasoningEffort?: string | (() => string | undefined);
+  turns: PiTurns;
+  owners?: OwnerIds | (() => OwnerIds);
+  /** 补收图片的发送（系统消息）；未接入时只记日志 */
+  sendService?: Pick<SendService, "system">;
+  imageBackend?: Pick<ImageBackend, "name" | "submit" | "collect" | "reconcile" | "clearReferences">;
+  imageTimeoutCapMs?: number;
 }
 
-export class CodexBackend implements AgentBackend {
+export class CodexBackend implements ThreadAdapter {
   readonly name = "codex" as const;
+  private host?: HostCallbacks;
+  private readonly running = new Map<string, { turnId: string; control: AbortController; done: Promise<void> }>();
   constructor(private readonly opts: CodexBackendOptions) {
     const initial = typeof opts.reasoningEffort === "function" ? opts.reasoningEffort() : opts.reasoningEffort;
     if (initial && !isReasoningEffort(initial)) {
@@ -69,9 +56,7 @@ export class CodexBackend implements AgentBackend {
     }
   }
 
-  recordDeliveryNote(note: DeliveryNote): Promise<void> {
-    return new CodexDeliveryNotes(path.dirname(this.opts.imagesDir)).record(note);
-  }
+  attach(host: HostCallbacks): void { this.host = host; }
 
   /** 本回合的推理强度（运行时设置可在两回合之间修改）。 */
   private get effort(): ReasoningEffort | undefined {
@@ -79,93 +64,121 @@ export class CodexBackend implements AgentBackend {
     return isReasoningEffort(value) ? value : undefined;
   }
 
-  async handle(req: AgentRequest, ctx: AgentHandleContext): Promise<AgentResponse> {
-    const ticket = req.ticket.slice(0, 12);
-    const dir = ticketImageDir(this.opts.imagesDir, req.ticket);
-    await fs.mkdir(dir, { recursive: true });
-    const workDir = ticketWorkDir(this.opts.ticketsDir, req.ticket);
-    await fs.mkdir(workDir, { recursive: true });
-    const outFile = path.join(workDir, CODEX_LAST_FILE);
+  private owners(): OwnerIds { return typeof this.opts.owners === "function" ? this.opts.owners() : this.opts.owners; }
 
-    // 上次的回合已完成（输出已落盘）但结果没来得及提交：直接复用，不再询问
-    const done = await readNonEmpty(outFile);
-    if (done !== undefined) {
-      const images = await collectNewImages(dir, new Set());
-      log.warn("codex turn already completed before restart; reusing its output", { ticket, chars: done.length, images: images.length });
-      trace.event(req.ticket, "recovered", { detail: { backend: "codex", reason: "saved_output" } });
-      return { text: done, images };
-    }
-    const attempts = ctx.turn?.attempts ?? 0;
-    if (attempts > 0) {
-      log.warn("codex turn interrupted", { ticket, attempts, will_retry: attempts < MAX_CODEX_TURNS });
-      if (attempts >= MAX_CODEX_TURNS) throw new Error(`codex turn interrupted ${attempts} times; not asking again`);
-    }
-    const before = await listFiles(dir);
-    const refs = await validateReferences(req.images ?? [], req.images ?? [], path.join(path.dirname(this.opts.imagesDir), "incoming", req.ticket));
-    imageRefsValue(refs);
-    const prompt = buildCodexPrompt(req.source, req.text, {
-      ...(req.time ? { time: req.time } : {}),
-      ...(req.quote ? { quote: req.quote } : {}),
-    });
-    const effort = req.settings ? req.settings.codexReasoningEffort : this.effort;
+  async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turn: TurnContext, settings?: TicketSettings): Promise<{ turnId: string }> {
+    const turnId = "codex:" + randomUUID(), control = new AbortController();
+    // 先渲染：输入缺失等错误在开轮时就抛出，宿主按开轮失败处理。
+    const rendered = await this.opts.turns.render(this.opts.turns.records(inputs));
+    const done = this.run(threadKey, turnId, rendered, turn, settings, control.signal)
+      .then(result => {
+        this.running.delete(threadKey);
+        this.host?.onTurnCompleted(threadKey, turnId, result);
+      });
+    this.running.set(threadKey, { turnId, control, done });
+    trace.event("turn:" + turnId, "dispatched", { detail: { backend: "codex", thread_key: threadKey, kind: turn.kind, inputs: inputs.map(i => i.inboundKey) } });
+    return { turnId };
+  }
+
+  /** codex exec 不能插话：消息排队到下一轮。 */
+  async steer(): Promise<"no_active_turn"> { return "no_active_turn"; }
+
+  async interrupt(threadKey: ThreadKey): Promise<void> {
+    this.running.get(threadKey)?.control.abort(new Error("回合已中止"));
+  }
+
+  /** exec 随进程退出丢失（§5.4）。 */
+  async recoverTurn(): Promise<"lost"> { return "lost"; }
+
+  /** 等待所有在跑的回合结束（测试与关闭用）。 */
+  async idle(): Promise<void> { await Promise.allSettled([...this.running.values()].map(r => r.done)); }
+
+  private async run(threadKey: ThreadKey, turnId: string, rendered: Awaited<ReturnType<PiTurns["render"]>>, turn: TurnContext,
+    settings: TicketSettings | undefined, signal: AbortSignal): Promise<{ status: TurnStatus; error?: string }> {
+    const key = "turn:" + turnId;
+    const binding = this.opts.turns.binding(threadKey);
+    const person = turn.kind === "user" || turn.kind === "scheduled" ? turn.sender : undefined;
+    const ownerPerson = !!person && isOwner(this.owners(), person);
+    const access = ownerPerson || threadKey === "owner" ? "all" : binding.scope;
+    const dir = attachmentDirs(path.dirname(this.opts.imagesDir), threadKey).attachDir;
     const started = Date.now();
-    trace.event(req.ticket, "thread_wait", { status: "started", detail: { backend: "codex", thread_key: req.threadKey } });
     let modelStarted: number | undefined;
-    let threadWaitMs: number | undefined;
-    let text: string;
+    const effort = settings ? settings.codexReasoningEffort : this.effort;
     try {
-      text = await this.opts.runner.ask(prompt + (refs.length ? "\n[本轮参考图]\n" + refs.join("\n") : ""), {
-        ticket: req.ticket,
-        source: req.source, actor: req.actor, actorIsOwner: req.actorIsOwner,
-        onJsonEvent: codexObserver(req.ticket),
-        threadKey: req.threadKey,
-        senderIsOwner: req.senderIsOwner === true,
-        signal: ctx.signal,
-        ...(req.settings?.codexModel !== undefined ? { model: req.settings.codexModel } : {}),
+      await fs.mkdir(dir, { recursive: true });
+      const refs = rendered.images.slice(-3);
+      imageRefsValue(refs);
+      const text = await this.opts.runner.ask(rendered.text, {
+        turnId, threadKey, signal, senderIsOwner: ownerPerson,
+        onJsonEvent: codexObserver(key, () => this.host?.onActivity(threadKey)),
+        ...(settings?.codexModel !== undefined ? { model: settings.codexModel } : {}),
         ...(effort ? { reasoningEffort: effort } : {}),
-        qqAccess: req.access,
-        imageTicketDir: dir,
-        imageRefs: refs,
-        outputFile: outFile,
+        qqAccess: access, imageTicketDir: dir, imageRefs: refs,
         onAcquired: async () => {
-          modelStarted = Date.now(); threadWaitMs = modelStarted-started;
-          trace.event(req.ticket,"thread_wait",{durationMs:threadWaitMs,detail:{backend:"codex",thread_wait_ms:threadWaitMs}});
-          ctx.signal.throwIfAborted();
-          await ctx.persistTurn?.({ outFile, attempts: attempts + 1 });
-          trace.event(req.ticket, "model_turn", { status: "started", detail: { backend: "codex", thread_key: req.threadKey, effort, attempt: attempts + 1 } });
-          ctx.onEvent({ type: "codex_start", thread: req.threadKey, effort: effort ?? "default", attempt: attempts + 1 });
+          modelStarted = Date.now();
+          trace.event(key, "thread_wait", { durationMs: modelStarted - started, detail: { backend: "codex", thread_key: threadKey } });
+          trace.event(key, "model_turn", { status: "started", detail: { backend: "codex", thread_key: threadKey, effort } });
         },
       });
+      trace.event(key, "model_turn", { durationMs: modelStarted === undefined ? undefined : Date.now() - modelStarted, detail: {
+        backend: "codex", model_ms: modelStarted === undefined ? 0 : Date.now() - modelStarted, thread_key: threadKey, effort, raw_reply: text } });
+      trace.event(key, "final_answer", { detail: { text } });
+      await this.lateImages(threadKey, turnId, dir).catch(error => log.warn("codex late images failed", { thread: threadKey, error }));
+      log.info("codex turn done", { thread: threadKey, effort: effort ?? "default", ms: Date.now() - started, chars: text.length });
+      return { status: "completed" };
     } catch (err) {
-      trace.event(req.ticket, "model_turn", { status: "failed", durationMs: modelStarted === undefined ? undefined : Date.now()-modelStarted, detail: { backend: "codex", thread_key: req.threadKey, effort, thread_wait_ms: threadWaitMs ?? Date.now()-started, model_ms: modelStarted === undefined ? 0 : Date.now()-modelStarted, failure: classifyFailure(err,"codex"), error: err } });
-      if (err instanceof CodexTimeoutError) throw new BackendTimeoutError(err.message);
-      throw err;
+      trace.event(key, "model_turn", { status: "failed", durationMs: modelStarted === undefined ? undefined : Date.now() - modelStarted, detail: {
+        backend: "codex", thread_key: threadKey, effort, failure: classifyFailure(err, "codex"), error: err } });
+      const reason = err instanceof CodexTimeoutError ? "timeout" : signal.aborted ? "aborted" : (err as Error).message;
+      log.warn("codex turn failed", { thread: threadKey, turn: turnId, ms: Date.now() - started, error: reason });
+      await this.lateImages(threadKey, turnId, dir).catch(error => log.warn("codex late images failed", { thread: threadKey, error }));
+      return { status: "failed", error: reason };
     }
-    trace.event(req.ticket, "model_turn", { durationMs: modelStarted === undefined ? undefined : Date.now()-modelStarted, detail: { backend: "codex", thread_wait_ms: threadWaitMs, model_ms: modelStarted === undefined ? 0 : Date.now()-modelStarted, thread_key: req.threadKey, effort, raw_reply: text } });
-    // codex 没写 -o 文件（只从 JSONL 拿到文本）时补写：输出文件是"回合已完成"的唯一标志
-    if ((await readNonEmpty(outFile)) === undefined) {
-      const tmp = `${outFile}.${process.pid}.tmp`;
-      await fs.writeFile(tmp, text);
-      await fs.rename(tmp, outFile);
+  }
+
+  /**
+   * image_gen 等待超时只留下任务清单（prompt_id 已落盘）；回合结束前按清单补收，完成的图片以系统消息发往本会话。
+   * 清单收取后整体移除，下一轮重新开始计数（MCP 清单最多 8 条）。
+   */
+  private async lateImages(threadKey: string, turnId: string, dir: string): Promise<void> {
+    // image_gen MCP 写在会话目录的旁路事件先入观测库。
+    await ingestImageEvents(dir, undefined, "turn:" + turnId);
+    let jobs: Awaited<ReturnType<typeof readPendingImages>>;
+    try { jobs = await readPendingImages(dir); }
+    catch (err) {
+      if (!(err instanceof PendingImageMarkerError)) throw err;
+      await quarantinePendingImages(dir).catch(() => undefined);
+      jobs = [];
     }
-    const images = await collectNewImages(dir, before);
-    log.info("codex backend done", {
-      ticket,
-      thread: req.threadKey,
-      effort: effort ?? "default",
-      ms: Date.now() - started,
-      chars: text.length,
-      images: images.length,
-    });
-    return { text, images };
+    const pending = jobs.filter(job => job.status !== "done");
+    const images: string[] = [];
+    let failed = 0;
+    for (const job of pending) {
+      try {
+        if (!job.prompt_id || !this.opts.imageBackend) throw new UnknownJobError("intent");
+        const callDir = await pendingCallDir(dir, job.callDir);
+        await observeImages(this.opts.imageBackend, "turn:" + turnId).collect(job.prompt_id, callDir, AbortSignal.timeout(Math.ceil(imageTimeoutMs(job.options, this.opts.imageTimeoutCapMs ?? 300_000))), job.options);
+        images.push(...await collectNewImages(callDir, new Set()));
+      } catch (err) {
+        failed++;
+        log.warn("codex late image not collected", { thread: threadKey, prompt_id: job.prompt_id, error: err });
+      }
+    }
+    if (this.opts.imageBackend) await recoverRemoteUploads(dir, this.opts.imageBackend).catch(() => undefined);
+    await fs.rm(path.join(dir, PENDING_IMAGE_JOBS), { force: true });
+    if (!pending.length || !this.opts.sendService) return;
+    const text = (images.length ? IMAGE_SUCCESS_REPLY : "") + (failed ? (images.length ? "\n" : "") + "有图片生成超时未能发送" : "");
+    const binding = this.opts.turns.binding(threadKey);
+    await this.opts.sendService.system({ ...binding, turnId }, text, images.slice(0, 4));
   }
 }
 
-/** JSONL 只提取白名单字段，不把原始事件（可能含凭据）存入观测库。 */
-export function codexObserver(ticket: string): (event: Record<string, unknown>) => void {
+/** JSONL 只提取白名单字段，不把原始事件（可能含凭据）存入观测库。onActivity 刷新看门狗。 */
+export function codexObserver(ticket: string, onActivity?: () => void): (event: Record<string, unknown>) => void {
   const starts = new Map<string, number>();
   let builtinCount = 0;
   return event => {
+    onActivity?.();
     const item = event.item as Record<string, unknown> | undefined;
     if (event.type === "thread.started") trace.event(ticket, "dispatched", { detail: { backend: "codex", thread_id: event.thread_id } });
     if (event.type === "turn.completed") {

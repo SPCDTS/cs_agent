@@ -66,6 +66,15 @@ process.stdin.on("end", async () => {
     for (let i = 0; i < images; i++) writeFileSync(path.join(dir, `img_${i}.png`), PNG);
     writeFileSync(path.join(dir, "notes.txt"), "not an image file");
   }
+  // FAKE_CODEX_SEND：模拟 im MCP 的 send_message，经主进程 loopback /send 发出（IM_TOKEN 来自本轮租约）。
+  if (process.env.FAKE_CODEX_SEND && process.env.IM_TOKEN) {
+    const portArg = argv.find(a => a.startsWith("mcp_servers.im.env.MEDIA_RECALL_PORT="));
+    const port = portArg ? portArg.slice(portArg.indexOf("=") + 1).replace(/"/g, "") : "8790";
+    const res = await fetch(`http://127.0.0.1:${port}/send`, { method: "POST",
+      headers: { Authorization: "Bearer " + process.env.IM_TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({ text: process.env.FAKE_CODEX_SEND }) });
+    log({ phase: "send", status: res.status, body: await res.json() });
+  }
   const text = process.env.FAKE_CODEX_TEXT ?? `answer to: ${stdin.trim().split("\n").pop()}`;
   emit({ type: "item.completed", item: { id: "item_1", type: "agent_message", text } });
   if (process.env.FAKE_CODEX_NO_COMPLETED !== "1") emit({ type: "turn.completed", usage: JSON.parse(process.env.FAKE_CODEX_USAGE ?? "{}") });

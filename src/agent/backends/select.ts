@@ -27,16 +27,6 @@ export function backendNameFor(scope: string, defaultBackend: BackendName, overr
   return overrides[scope] ?? defaultBackend;
 }
 
-export const PI_NOT_IMPLEMENTED = "pi backend not implemented yet (group 3)";
-
-/** @deprecated 仅保留旧版测试兼容；生产入口注册真正的 PiBackend。 */
-export class PiBackendStub implements AgentBackend {
-  readonly name = "pi" as const;
-  async handle(): Promise<never> {
-    throw new Error(PI_NOT_IMPLEMENTED);
-  }
-}
-
 export interface BackendSelector {
   select(scope: string, fixedName?: BackendName): AgentBackend;
 }

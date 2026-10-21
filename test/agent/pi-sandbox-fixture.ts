@@ -11,12 +11,13 @@ export async function sandboxRequirements(dir: string): Promise<string> {
   return file;
 }
 
-export async function sandboxFixture(key = "group:7", ticket = "ticket-7", dataDir = tmp("pi-sandbox-")) {
+/** input 为本轮输入键（只读其 incoming 目录）；本会话图片目录为 images/<会话键，: 换成 _>。 */
+export async function sandboxFixture(key = "group:7", input = "ticket-7", dataDir = tmp("pi-sandbox-")) {
   const dir = await fs.realpath(dataDir);
   const requirementsFile = await sandboxRequirements(dir);
   const store = { mediaPathAllowed: (_access: unknown, _file: string) => false };
   const workspaceDir = path.join(dir, "codex-work");
-  const options = { dataDir: dir, workspaceDir, key, request: { ticket, access: key === "owner" ? "all" : key }, store, requirementsFile };
+  const options = { dataDir: dir, workspaceDir, key, request: { access: key === "owner" ? "all" : key, inputs: [input] }, store, requirementsFile };
   const env = await codingEnvironment(options);
   return { dir, workspaceDir, requirementsFile, store, options, env };
 }

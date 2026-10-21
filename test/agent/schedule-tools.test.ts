@@ -33,7 +33,7 @@ describe("定时工具", () => {
       for (const extra of [{ conversation: "group:8" }, { created_by: "qq:1" }, { actor: "qq:1" }]) {
         await expect(f.tools.tool(bound, "schedule_create", { ...f.args, ...extra })).rejects.toThrow();
       }
-      expect(f.event).toHaveBeenCalledWith(bound.ticket, "schedule_tool", { detail: {
+      expect(f.event).toHaveBeenCalledWith("thr:" + bound.threadKey, "schedule_tool", { detail: {
         action: "create", id: schedule.id, actor: `qq:${user}`, tool: "schedule_create",
       } });
     });
@@ -52,7 +52,7 @@ describe("定时工具", () => {
     expect(await f.tools.tool(owner, "schedule_pause", { id: own.id })).toContain("暂停");
   });
 
-  it("实时复核授权撤销、过期、scopes 与伪造身份；send 授权不赋予 schedule", async () => {
+  it("实时复核授权撤销、过期与 scopes；唤醒回合没有定时工具；send 授权不赋予 schedule", async () => {
     const f = await scheduleToolsFixture(), member = f.binding("9"), own = await f.create();
     await f.grants.panel("auth_grant", { user: "qq:9", caps: ["send"], targets: ["qq:group:8"] });
     expect((await f.tools.permissions(member)).schedule).toBe(false);
@@ -63,7 +63,9 @@ describe("定时工具", () => {
     for (const name of SCHEDULE_MANAGEMENT_TOOLS) await expect(f.tools.tool(member, name, { id: own.id })).rejects.toThrow("授权");
     await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"], expires_in_hours: Number.MIN_VALUE });
     expect((await f.tools.permissions(member)).schedule).toBe(false);
-    await expect(f.tools.permissions({ ...member, actor: "qq:1", actorIsOwner: true })).rejects.toThrow("不一致");
+    const wake = { ...f.binding(), identity: { kind: "wake" as const } };
+    expect(await f.tools.permissions(wake)).toEqual({ schedule: false, scheduleControl: false });
+    await expect(f.tools.tool(wake, "schedule_list", {})).rejects.toThrow("唤醒");
   });
 
   it("管理动作返回 id、状态和北京时间；run_now 不改计划，update 不改来源", async () => {
@@ -98,15 +100,14 @@ describe("定时工具", () => {
     expect((await f.service.get(first.id))?.status).toBe(updated.status);
   });
 
-  it("授权人失权后仍能停止自己的在途任务；不存在 admission 的票据不能控制", async () => {
+  it("授权人失权后仍能停止自己的在途任务；不存在 admission 的定时输入不能控制", async () => {
     const f = await scheduleToolsFixture(), member = f.binding("9");
     await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"] });
     const own = await f.create(member), run = await f.scheduled(own.id, "qq:9");
     await f.grants.panel("auth_revoke", { user: "qq:9" });
     expect(await f.tools.tool(run, "schedule_control", { action: "complete", reason: "停止" })).toContain("已完成");
-    const ticket = "run_" + "e".repeat(40);
-    await f.bridge.openOutbound(ticket, { origin: "scheduled", message_type: "group", target_id: "7", user_id: "9" });
-    await expect(f.tools.tool({ ...run, ticket }, "schedule_control", { action: "complete", reason: "停止" })).rejects.toThrow("绑定");
+    const key = "run_" + "e".repeat(40);
+    await expect(f.tools.tool({ ...run, inputs: [key] }, "schedule_control", { action: "complete", reason: "停止" })).rejects.toThrow("绑定");
   });
 });
 

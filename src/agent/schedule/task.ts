@@ -16,7 +16,7 @@ type PreparedRun = { fire: ScheduledFire; admitter: ScheduledRunAdmitter };
 const overlapping = (schedule: Schedule, meta: AdmissionState | undefined) =>
   !!meta?.in_flight[schedule.id] || schedule.runs.some(run => run.status === "queued" || run.status === "running");
 
-/** 开票与设置读取在事务外完成；提交时仍需复核 revision、序号和重叠状态。 */
+/** 定时输入在事务外写入；提交时仍需复核 revision、序号和重叠状态。 */
 export async function prepareRun(schedule: Schedule, meta: AdmissionState | undefined, fireAt: number,
   launcher: ScheduledRunLauncher): Promise<PreparedRun | undefined> {
   const fireKey = `${schedule.id}@${fireAt}`;
@@ -43,10 +43,10 @@ export async function admitRun(tx: Tx, schedule: Schedule, fireAt: number, now: 
   const { ticket, skipped } = await prepared.admitter.admit(tx, prepared.fire);
   if (skipped) await recordRunInTransaction(tx, schedule.id, {
     fire_key: fireKey, fire_at: fireAt, ticket, status: "skipped", reason: "interrupted", ended_at: now,
-    note: "运行票据已终结，未重新执行",
+    note: "定时输入已结束，未重新执行",
   }, now);
   meta.ordinals[schedule.id] = ordinal;
-  // admitter 可能拒绝已终结的孤儿票据，保留事务内写入的终态。
+  // admitter 可能拒绝已结束的孤儿输入，保留事务内写入的终态。
   const row = schedule.runs.find(run => run.fire_key === fireKey)!;
   row.ticket = ticket;
   return row;
@@ -147,7 +147,7 @@ export function createScheduleTask(opts: { admitter: ScheduledRunLauncher; trace
             return { status: "running" as const, checkpoint: { phase: "wait" as const, next_fire_at: next } };
           };
           const transition = await decide();
-          // discard 会核对持久 admission：另一提交已接管的票据不能结算。
+          // discard 会核对持久 admission：另一提交已接管的输入不能结束。
           await prepared?.admitter.discard?.(tx);
           return transition;
         }, context);
@@ -160,7 +160,7 @@ export function createScheduleTask(opts: { admitter: ScheduledRunLauncher; trace
         }
         reportPaused(paused, opts.trace);
         if (admitted?.ticket && (admitted.status === "queued" || admitted.status === "running")) {
-          opts.admitter.dispatchScheduled(admitted.ticket);
+          opts.admitter.launch(admitted.ticket);
         }
       },
     },

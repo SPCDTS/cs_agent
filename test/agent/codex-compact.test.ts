@@ -97,9 +97,9 @@ describe("CodexRunner.compactThread", () => {
 
   it.each(["magpie", "openai"] as const)("在 %s 回合后串行压缩，复用配置和环境，不申请 MCP 令牌", async provider => {
     const r = rig(provider);
-    const turn = r.runner.ask("first", { threadKey: "owner", ticket: "compact-before", qqAccess: "all" });
+    const turn = r.runner.ask("first", { threadKey: "owner", turnId: "compact-before", qqAccess: "all" });
     const compact = r.runner.compactThread("owner");
-    const next = r.runner.ask("second", { threadKey: "owner", ticket: "compact-after", qqAccess: "all" });
+    const next = r.runner.ask("second", { threadKey: "owner", turnId: "compact-after", qqAccess: "all" });
     expect(await turn).toBe("answer to: first");
     expect(await compact).toBe("compacted");
     expect(await next).toBe("answer to: second");

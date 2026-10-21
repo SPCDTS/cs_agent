@@ -31,7 +31,7 @@ export interface ScheduleRun {
   sent?: number;
   /** 最终回答前 200 字，作为运行记录（相当于 Codex 的 memory.md） */
   note?: string;
-  /** 运行票据（run_ 开头），用于 trace 与 Outbox */
+  /** 定时输入的入站键（run_ 开头），用于 trace 与运行记录 */
   ticket?: string;
 }
 
@@ -74,24 +74,23 @@ export interface ScheduledFire {
 }
 
 /**
- * 执行侧（第 6 步）实现、排程侧（第 5 步）调用的接口。
- * admit 必须只用传入的 tx 读写，并在同一次提交里建好运行票据、运行会话与派发条目；
- * 同一 fire_key 重复调用返回同一张运行票据（幂等）。
+ * 执行侧实现、排程侧调用的接口（设计 DESIGN-resident-agent §10）。
+ * admit 必须只用传入的 tx 读写，并在同一次提交里登记运行文档；同一 fire_key 重复调用返回同一个输入键（幂等）。
  */
 export interface ScheduledRunAdmitter {
-  /** skipped 表示已终结的孤儿票据不能重跑；排程侧须记 skipped(interrupted) 并解除 in_flight，不累计失败。 */
-  /** 未采用预备结果时结算出站票据；必须先检查同票据是否已被另一提交接管。 */
+  /** 未采用预备结果时结束预备的定时输入；必须先检查同一输入是否已被另一提交接管。 */
   discard?(tx: unknown): Promise<void>;
+  /** skipped 表示已结束的孤儿输入不能重跑；排程侧须记 skipped(interrupted) 并解除 in_flight，不累计失败。 */
   admit(tx: unknown, fire: ScheduledFire): Promise<{ ticket: string; skipped?: boolean }>;
 }
 
 /**
- * 排程与执行的接线：prepare 在事务外冻结输入/开票，admit 在事务内登记；
- * dispatchScheduled 只在提交成功后唤醒派发器，不等待整轮后端结束。
+ * 排程与执行的接线：prepare 在事务外冻结并写入定时输入，admit 在事务内登记；
+ * launch 只在提交成功后把输入交给会话宿主，不等待回合结束。
  */
 export interface ScheduledRunLauncher {
   prepare(fire: ScheduledFire): Promise<ScheduledRunAdmitter>;
-  dispatchScheduled(ticket: string): void;
+  launch(key: string): void;
 }
 
 /** 执行结束后回写运行结果（第 6 步调用，第 4 步的 ScheduleService 实现）。 */

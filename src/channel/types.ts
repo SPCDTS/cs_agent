@@ -41,20 +41,9 @@ export interface InboundMessage {
 
 export type TicketStatus = "pending" | "sending" | "sent" | "uncertain";
 
-/** 定时出站票据的创建者与目的地分开保存；self_id 由 Channel 查询并绑定。 */
-export interface OutboundTicket {
-  message_type: ChatType;
-  target_id: string;
-  origin: "scheduled";
-  user_id: string;
-}
-
+/** 生图前缀路由的票据（第 2 阶段仍走票据回复，设计 §11）；ticket_id 与入站键相同。 */
 export interface ReplyTicketRecord {
-  /** 旧票据缺省为入站消息。 */
-  origin?: "message" | "scheduled";
-  /** 定时私聊的目标可能不同于创建者。 */
-  target_id?: string;
-  ticket_id: string;            // 入站为 sha256 hex；定时为 run_ + fire_key 的 sha256 前 40 位
+  ticket_id: string;
   self_id: string;
   user_id: string;
   group_id: string | null;
@@ -62,20 +51,78 @@ export interface ReplyTicketRecord {
   source_message_id: string;
   source_nickname: string;
   group_name?: string;
-  /** 原消息正文（normalize 后的 text），用于崩溃后无派发索引时重建处理 */
   source_text: string;
-  /** 原消息的分流文本（InboundMessage.route_text）；旧库的行没有该列时为 undefined */
   source_route_text?: string;
   source_images?: string[];
   attachments?: IncomingAttachment[];
   source_image_error?: string;
   created_at: string;
-  /** admit 顺序号（票据表 rowid，与 created_at 同一事务分配，单调递增）：派发与崩溃恢复的唯一排序键 */
+  /** 开票顺序号（票据表 rowid）：派发与崩溃恢复的排序键 */
   seq: number;
   status: TicketStatus;
   attempted_at?: string;
   sent_at?: string;
   reply_message_id?: string;
+}
+
+/** 输入种类：QQ 消息或定时任务到点（设计 §4.1、§10）。 */
+export type InboundKind = "user" | "scheduled";
+/** queued 未送达后端 → delivered 后端已收下 → done 所在回合结束（§4.1）。 */
+export type InboundState = "queued" | "delivered" | "done";
+
+/** Inbox 持久化的一条输入；键为确定性入站键（定时为 run_ 键）。 */
+export interface InboundRecord {
+  key: string;
+  kind: InboundKind;
+  /** 到达顺序号（表 rowid） */
+  seq: number;
+  /** 本会话的投递地址：group:<id> / private:<qq> */
+  scope: string;
+  /** 会话线程键：owner / group:<id> / private:<qq> */
+  thread_key: string;
+  /** 收到消息的机器人账号；定时输入为空 */
+  self_id: string;
+  /** 发送者；定时输入为创建者 */
+  user_id: string;
+  group_id: string | null;
+  group_name?: string;
+  message_type: ChatType;
+  /** 入站消息 id；定时输入为空 */
+  message_id: string;
+  nickname: string;
+  text: string;
+  route_text: string;
+  /** 入站消息引用的 message_id */
+  reply_to?: string;
+  /** unix 秒 */
+  time: number;
+  images: string[];
+  attachments: IncomingAttachment[];
+  image_error?: string;
+  created_at: string;
+  state: InboundState;
+  turn_id?: string;
+}
+
+/** 定时输入：到点由执行侧写入（§10）；重放保持首次内容。 */
+export interface ScheduledInput {
+  key: string;
+  scope: string;
+  thread_key: string;
+  creator: string;
+  text: string;
+  time: number;
+}
+
+/** Inbox 的持久化契约；agent 不依赖 QQ 的 SQLite 实现。 */
+export interface InboxStore {
+  getInbound(key: string): InboundRecord | null;
+  /** 按到达顺序列出某状态的输入；afterSeq 为分页游标 */
+  listInbound(state: InboundState, limit?: number, afterSeq?: number): InboundRecord[];
+  /** 会话最近一条输入（唤醒回合取发送地址与引用） */
+  latestInbound(threadKey: string): InboundRecord | null;
+  markInbound(keys: readonly string[], state: InboundState, turnId?: string): void;
+  openScheduledInput(input: ScheduledInput): InboundRecord;
 }
 
 export interface ReplyResult {
@@ -93,8 +140,8 @@ export interface ChannelStatus {
 }
 
 export interface ChannelEvents {
-  /** 仅投递已通过授权与触发规则的消息；ticket 已持久化为 pending */
-  message: (message: InboundMessage, ticket: string) => void;
+  /** 仅投递已通过授权与触发规则的消息；key 为已持久化（queued）的入站键，附件已下载完毕 */
+  message: (message: InboundMessage, key: string) => void;
   /**
    * 允许范围内的每条入站消息（允许群的全部消息 + 允许用户的私聊），不论是否触发；
    * 不含机器人自回声。先于同一条消息的 message 事件发出。供本地消息库入库。
@@ -108,11 +155,10 @@ export interface ChannelEvents {
 }
 
 export interface Channel {
-  openOutbound(ticket: string, target: OutboundTicket): Promise<ReplyTicketRecord>;
   readonly outbox: import("./outbox.js").OutboxStore;
+  readonly inbox: InboxStore;
   send(key: string, target: { message_type: ChatType; target_id: string }, text: string, images?: string[],
     opts?: { mention?: string; signal?: AbortSignal }): Promise<ReplyResult>;
-  settleTicket(ticket: string): Promise<void>;
   readonly name: string;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -127,7 +173,12 @@ export interface Channel {
   reply(ticket: string, text: string, imagePaths?: string[], opts?: { signal?: AbortSignal }): Promise<ReplyResult>;
   /** 文件作为独立 QQ 消息发送；调用者负责持久化幂等状态。 */
   uploadFile(type: ChatType, targetId: string, file: Buffer, name: string): Promise<{ file_id: string }>;
-  prepareIncoming?(ticket: string): Promise<ReplyTicketRecord | null>;
+  /** 等待入站附件下载完成（恢复时补下载），返回最新的输入记录。 */
+  prepareIncoming?(key: string): Promise<InboundRecord | null>;
+  /** 生图前缀路由：以入站记录开票（幂等），之后经 reply 回复。 */
+  openImageTicket(key: string): Promise<ReplyTicketRecord>;
+  /** 部署前遗留、不再处理的票据：结束为 uncertain 留作审计。 */
+  abandonTicket?(ticket: string): Promise<void>;
   getTicket(ticket: string): Promise<ReplyTicketRecord | null>;
   /** 列出仍为 pending 的票据（按 seq 升序，最多 limit 条，默认 200）；afterSeq 为分页游标（只取 seq 更大的），供启动时与派发索引对账 */
   listPendingTickets(limit?: number, afterSeq?: number): Promise<ReplyTicketRecord[]>;
@@ -168,5 +219,24 @@ export interface RemoteMessage {
   segments: { type: string; rendered: string; image?: { url: string; file: string } }[];
 }
 
-/** 主进程从 Channel 票据记录构造，不接受模型参数中的身份。 */
-export interface TurnIdentity { actor: string; actorIsOwner: boolean }
+/** 本轮身份（设计 §7.3）：user 为发送者，scheduled 为创建者，wake 为没有新输入的唤醒回合。 */
+export type TurnIdentity =
+  | { kind: "user"; sender: string }
+  | { kind: "scheduled"; creator: string }
+  | { kind: "wake" };
+
+/**
+ * 工具调用时由主进程从会话宿主求出的绑定（§7）：身份、发送地址与本轮输入，模型参数不能覆盖。
+ * 子 agent 会话固定为 wake 身份。
+ */
+export interface TurnBinding {
+  threadKey: string;
+  turnId?: string;
+  identity: TurnIdentity;
+  /** 本会话的投递地址：group:<id> / private:<qq> */
+  scope: string;
+  /** 本轮最后一条输入（唤醒回合为会话最近一条）：@、引用与登录号校验 */
+  inputKey?: string;
+  /** 本轮全部输入键（附件目录） */
+  inputs: readonly string[];
+}

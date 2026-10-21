@@ -1,11 +1,9 @@
-import type { ImageFileManifest } from "../media/gen/image-files.js";
 import type { ImageOptions } from "../media/gen/image-options.js";
-import type { PendingImageJob } from "../media/gen/image-pending.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { ImageFailure, ImageSubmission, ReconcileStep, RemoteUpload } from "../media/gen/image-gen.js";
 import type { RouteName } from "./router.js";
 
-import type { ThreadKey, TicketSettings, TicketSource } from "./backends/types.js";
+import type { TicketSource } from "./backends/types.js";
 
 /** 已提交的 ComfyUI 任务（submit 阶段提交后立即与检查点同一提交写入；恢复时按它收取，不重复提交）。 */
 type ImageJob = { prompt_id: string; backend: string; /** 已提交次数（服务端丢失任务时最多重新提交 1 次） */ submits: number; status?: "running"; deadline?: number; extensions?: number; nextCollectAt?: number };
@@ -15,27 +13,10 @@ export type ImageResult =
   | { ok: true; images: string[] }
   | { ok: false; failure: ImageFailure; message?: string };
 
-/** MCP 超时后的逐任务收取进度；结果落盘后不再下载。 */
-type LateImageJob = PendingImageJob & {
-  deadline?: number; extensions: number; nextCollectAt?: number;
-  reconciliation?: ReconcileStep[]; result?: ImageResult; files?: ImageFileManifest;
-};
-
-/** 执行 agent 的结果（handle 阶段与检查点同一提交写入；任务重跑时据此不再调用后端）。 */
-export type AgentResult = { threadKey?: ThreadKey } & (
-  | { ok: true; backend: string; text: string; images: string[] }
-  | { ok: false; backend: string; failure: "timeout" | "failed" });
-
 /**
- * 每个 QQ 消息会话的文档。ticket 只来自这里，后端无法指定回复目标。
+ * 生图前缀路由的票据文档（第 2 阶段保留，设计 §11）：每条生图消息一个会话。ticket 只来自这里。
  * 各阶段的结果写在这里（而不只是任务检查点）：任务失败后派发器新建的任务能跳过已完成的阶段。
  */
-export type FileUpload = {
-  name: string; bytes: number; sha256: string;
-  status: "pending" | "sending" | "sent" | "uncertain";
-  file_id?: string;
-};
-
 export type TicketState = {
   ticket: string;
   source: TicketSource;
@@ -55,27 +36,11 @@ export type TicketState = {
   /** 每次对账查询前后的持久化记录；matched 的 prompt_id 同时写入 imageJob。 */
   imageReconciliation?: (ReconcileStep & { attempt: number })[];
   imageResult?: ImageResult;
-  agentResult?: AgentResult;
-  settings?: TicketSettings;
-  lateImageJobs?: LateImageJob[];
-  attachmentFailure?: boolean;
-  /** pi 关闭恢复的重提编号；提交前落盘，最多补提一次。 */
-  piTurn?: { requestId: string; retries: number; conversationId?: number };
-  /** 后端提醒已持久接收；后端仍需按 ticket 去重，以覆盖提交前崩溃。 */
-  deliveryNoted?: boolean;
-  /** 后端回合标记：启动外部回合（codex）之前写入，崩溃恢复时据此避免重复询问 */
-  codexTurn?: { outFile: string; attempts: number };
-  /** 升级前 postprocess 留下的旧正文，仅兼容读取；不再发送。 */
-  replyDraft?: string;
   /** 实际发出的正文、图片数与 QQ 消息 id */
   replyText?: string;
   replyImages?: number;
   replyMessageId?: string;
-  /** 文字已发出不代表附件已完成；此标记与回复阶段终态一起提交。 */
-  replyCompleted?: boolean;
-  fileUploads?: FileUpload[];
-  fileManifestError?: boolean;
-  /** 入站消息时间（unix 秒）与 message_id（[来源] 头部 / 引用查找用） */
+  /** 入站消息时间（unix 秒）与 message_id */
   time?: number;
   messageId?: string;
   /** 入站消息 reply 段引用的 message_id */
@@ -96,17 +61,14 @@ export const TicketDoc = defineDoc<TicketState>({
 });
 
 /**
- * Session 级派发索引：ticket → conversationId / 当前任务。
- * 仅保存未完成的票据；票据进入终态后才删除，基础设施错误时保留，重启后 recover() 按 ticketSeq
- * （bridge admit 顺序）与孤儿票据统一排序继续。attempts 为已开始运行的次数。
- * v2 的旧条目没有 scope/taskId（其会话里可能还有旧的模型会话任务，recover 时先中止）。
+ * Session 级生图派发索引：ticket → conversationId / 当前任务。
+ * 仅保存未完成的票据；票据进入终态后才删除，基础设施错误时保留，重启后 recover() 按 ticketSeq 继续。
+ * attempts 为已开始运行的次数。
  */
 export type DispatchEntry = {
-  /** 缺省为入站消息；定时回合共用 scope FIFO，但永不兜底。 */
-  kind?: "message" | "scheduled";
   conversationId: number;
   scope?: string;
-  /** bridge 票据的 seq（admit 顺序，唯一排序键） */
+  /** 票据的 seq（开票顺序，唯一排序键） */
   ticketSeq?: number;
   /** 旧的派发器自增序号（仅旧条目；排序时作次级键） */
   seq?: number;
@@ -120,6 +82,8 @@ export type DispatchEntry = {
   state?: "failed";
   /** v2 旧条目的提交内容（仅用于识别旧条目） */
   content?: string;
+  /** 部署前的条目可能是 agent / 定时运行（第 2 阶段起不再由派发器处理） */
+  kind?: "message" | "scheduled";
 };
 export type DispatchState = { pending: Record<string, DispatchEntry>; nextSeq?: number };
 

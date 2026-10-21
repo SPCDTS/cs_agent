@@ -362,7 +362,6 @@ stdio 测试由 Vitest globalSetup 每次统一执行一次 npm run build，确�
 
 | 配置 | 默认 | 作用 |
 |---|---|---|
-| `PI_TURN_TIMEOUT_SEC` | 300 | 取得线程锁后的回合期限，覆盖模型与工具；到期中止实际回合并等待退出，再释放锁。排队不消耗预算，重启沿用保存的截止时间 |
 | `PI_COMPACTION_RESERVE_TOKENS` | 16384 | 上下文超过模型窗口减此值时阻塞压缩 |
 | `PI_COMPACTION_BACKGROUND_TOKENS` | 32768 | 距阻塞阈值此 token 数时开始后台压缩；0 关闭后台压缩 |
 | `AGENT_MODEL_PROVIDER/AGENT_MODEL_ID` | deepseek / deepseek-flash | pi 模型；`AGENT_THINKING_LEVEL=low` 由现有模型能力解析器收敛 |

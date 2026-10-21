@@ -40,6 +40,8 @@ export interface DashboardOptions {
   resetPi?: (key: string) => Promise<number | null>;
   compactCodex?: (key: ThreadKey) => Promise<'compacted' | 'unchanged'>;
   compactPi?: (key: string) => Promise<'compacted' | 'unchanged'>;
+  /** 面板"停止"：中止该会话当前回合（连同子 agent），设计 §8.2 */
+  stopThread?: (key: string) => Promise<void>;
   trace?: Pick<Trace, 'event'>;
   /** 每线程上下文占用（src/agent/context-usage.ts 的 ContextUsageStore；面板只读 all/get） */
   contextUsage?: ContextUsageView;

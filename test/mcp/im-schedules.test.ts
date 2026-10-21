@@ -16,13 +16,20 @@ async function setup(user = "1", grant = false, scheduled = false) {
   let binding = f.binding(user);
   const own = scheduled ? await f.create(binding) : undefined;
   if (own) binding = await f.scheduled(own.id, binding.actor);
+  // 租约只绑定会话与回合；网关按回合 id 取回宿主给出的本轮绑定（测试中由 turns 表模拟）。
+  const turns = new Map<string, GrantBinding>();
+  const turnOf = (b: { turnId: string }) => turns.get(b.turnId)!;
   const tokens = new RecallTokens({ recall: async () => ({ text: "", images: [] }) }, 5, undefined, {
-    permissions: async b => ({ ...await f.grants.permissions(b), ...await f.tools.permissions(b) }),
-    schedule: (b, name, args) => f.tools.tool(b, name, args),
-    send: async () => { throw new Error("本测试不发送"); }, release: () => {},
+    permissions: async b => ({ ...await f.grants.permissions(turnOf(b)), ...await f.tools.permissions(turnOf(b)) }),
+    schedule: (b, name, args) => f.tools.tool(turnOf(b), name, args),
+    send: async () => { throw new Error("本测试不发送"); },
   });
   const server = await startMediaRecallServer(tokens, 0); cleanup.push(() => server.close());
-  const issue = (b: GrantBinding, deadline = Date.now() + 60_000) => tokens.issue({ ...b, deadline, access: { kind: "all" } });
+  const issue = (b: GrantBinding, deadline = Date.now() + 60_000) => {
+    const turnId = "turn-" + (turns.size + 1);
+    turns.set(turnId, b);
+    return tokens.issue({ threadKey: b.threadKey, turnId, deadline, access: { kind: "all" } });
+  };
   const lease = issue(binding);
   const client = new Client({ name: "schedule-test", version: "1" });
   await client.connect(new StdioClientTransport({ command: process.execPath,
@@ -76,7 +83,7 @@ it("codex 创建、列出、更新、暂停、恢复、立即运行和删除；�
   expect(await f.service.list()).toEqual([]);
 });
 
-it("HTTP 不接受模型传入的身份或来源，授权人不能操作 owner 的任务", async () => {
+it("HTTP 不接受模型传入的身份或来源，授权人不能操作 owner 的任务；唤醒回合没有定时工具", async () => {
   const f = await setup("9", true), ownerSchedule = await f.create(f.makeBinding("1"));
   for (const extra of [{ actor: "qq:1" }, { created_by: "qq:1" }, { conversation: "owner" }]) {
     expect((await f.post("schedule_create", { ...f.args, ...extra })).status).toBe(400);
@@ -85,8 +92,9 @@ it("HTTP 不接受模型传入的身份或来源，授权人不能操作 owner �
     expect((await f.post(name, { id: ownerSchedule.id })).status).toBe(400);
   }
   expect(JSON.stringify(await (await f.post("schedule_list", {})).json())).not.toContain(ownerSchedule.id);
-  const forged = f.issue({ ...f.binding, actor: "qq:1", actorIsOwner: true });
-  expect((await f.post("schedule_create", f.args, forged.token)).status).toBe(400);
+  const wake = f.issue({ ...f.makeBinding("1"), identity: { kind: "wake" } });
+  expect((await f.post("schedule_create", f.args, wake.token)).status).toBe(400);
+  expect((await f.post("schedule_list", {}, wake.token)).status).toBe(400);
   expect(await f.service.get(ownerSchedule.id)).toEqual(ownerSchedule);
 });
 

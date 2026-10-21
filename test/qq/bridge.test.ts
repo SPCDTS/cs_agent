@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReplyStore } from "../../src/qq/reply-store.js";
-import { createQQBridge, ticketIdFor, type QQBridgeConfig } from "../../src/qq/index.js";
+import { createQQBridge, inboundKey, type QQBridgeConfig } from "../../src/qq/index.js";
 import type { InboundMessage, Channel } from "../../src/channel/types.js";
 import { FakeOneBot, groupEvent, privateEvent, SELF_ID, TOKEN, waitFor } from "./fake-onebot.js";
 
@@ -45,15 +45,18 @@ async function pushAndFlush(...events: unknown[]): Promise<InboundMessage[]> {
   const sentinel = privateEvent(OWNER, "sentinel");
   server.push(sentinel);
   await waitFor(() => received.some(r => r.message.message_id === String(sentinel.message_id)), 5000, "sentinel");
-  await Promise.all((await bridge.listPendingTickets()).map(r => bridge.prepareIncoming?.(r.ticket_id)));
+  await Promise.all(bridge.inbox.listInbound("queued").map(r => bridge.prepareIncoming?.(r.key)));
   return received.slice(before).map(r => r.message).filter(m => m.text !== "sentinel");
 }
 
+/** 触发一条私聊并以其入站键开生图票据（reply 只服务生图前缀路由）。 */
 async function triggerPrivate(text = "hello"): Promise<{ message: InboundMessage; ticket: string }> {
   const event = privateEvent(OWNER, text);
   server.push(event);
   await waitFor(() => received.some(r => r.message.message_id === String(event.message_id)));
-  return received.find(r => r.message.message_id === String(event.message_id))!;
+  const hit = received.find(r => r.message.message_id === String(event.message_id))!;
+  await bridge.openImageTicket(hit.ticket);
+  return hit;
 }
 
 beforeEach(async () => {
@@ -211,17 +214,23 @@ describe("dedupe and tickets", () => {
     expect(again).toEqual([]);
   });
 
-  it("persists a pending ticket with deterministic id before emitting", async () => {
-    const { message, ticket } = await triggerPrivate();
-    expect(ticket).toBe(ticketIdFor(message));
-    const record = await bridge.getTicket(ticket);
-    expect(record).toMatchObject({
-      ticket_id: ticket, self_id: SELF_ID, user_id: OWNER, group_id: null,
-      message_type: "private", source_message_id: message.message_id, source_text: "hello", status: "pending",
+  it("persists a queued input with deterministic key before emitting", async () => {
+    const event = privateEvent(OWNER, "hello");
+    server.push(event);
+    await waitFor(() => received.some(r => r.message.message_id === String(event.message_id)));
+    const { message, ticket: key } = received.find(r => r.message.message_id === String(event.message_id))!;
+    expect(key).toBe(inboundKey(message));
+    expect(bridge.inbox.getInbound(key)).toMatchObject({
+      key, kind: "user", self_id: SELF_ID, user_id: OWNER, group_id: null, scope: "private:" + OWNER, thread_key: "private:" + OWNER,
+      message_type: "private", message_id: message.message_id, text: "hello", state: "queued",
     });
+    // 只有生图前缀路由会开票。
+    expect(await bridge.getTicket(key)).toBeNull();
+    expect(await bridge.openImageTicket(key)).toMatchObject({ ticket_id: key, source_text: "hello", status: "pending" });
+    expect(bridge.inbox.getInbound(key)!.state).toBe("done");
   });
 
-  it("lists pending tickets in creation order and drops them once sent", async () => {
+  it("lists pending image tickets in creation order and drops them once sent", async () => {
     const a = await triggerPrivate("first");
     const b = await triggerPrivate("second");
     let pending = await bridge.listPendingTickets();
@@ -304,6 +313,7 @@ describe("reply", () => {
     server.push(event);
     await waitFor(() => received.length === 1);
     const { ticket } = received[0]!;
+    await bridge.openImageTicket(ticket);
     const result = await bridge.reply(ticket, "a");
     expect(result).toMatchObject({ message_type: "group", target_id: GROUP });
     const send = server.sendCalls()[0]!;
@@ -458,6 +468,9 @@ it("不在 allowUsers 中的第二 owner 仍触发、入库、接收原账号回
   expect(raw.mock.calls.map(([message]) => message.user_id)).toContain(secondary);
   expect(raw.mock.calls.some(([message]) => message.user_id === STRANGER)).toBe(false);
   const receivedMessage = received.find(row => row.message.user_id === secondary)!;
+  // owner 的多个账号共用 owner 线程，回复地址仍是原账号。
+  expect(bridge.inbox.getInbound(receivedMessage.ticket)).toMatchObject({ thread_key: "owner", scope: "private:" + secondary });
+  await bridge.openImageTicket(receivedMessage.ticket);
   expect(await bridge.reply(receivedMessage.ticket, "回复第二账号")).toMatchObject({ target_id: secondary, message_type: "private" });
   server.push({ post_type: "notice", notice_type: "friend_recall", user_id: secondary, message_id: "recalled-owner" });
   server.push({ post_type: "notice", notice_type: "friend_recall", user_id: STRANGER, message_id: "recalled-stranger" });

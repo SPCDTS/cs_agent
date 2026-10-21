@@ -1,14 +1,16 @@
 /**
- * 票据与去重状态持久化（node:sqlite，WAL）。
- * 状态机：pending → sending → sent | uncertain；状态迁移带条件更新，跨进程也不会重复发送。
+ * 入站输入、Outbox 与生图票据的持久化（node:sqlite，WAL）。
+ * - inbound（Inbox，设计 §4.1）：每条触发消息 / 定时输入一行，state 只前进：queued → delivered → done；
+ * - outbox（§7.4）：pending → sending → sent | uncertain，状态迁移带条件更新，跨进程也不会重复发送；
+ * - tickets：仅生图前缀路由（§11 尚未迁移，第 2 阶段保留）按票据回复。
  */
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ChatType, InboundMessage, OutboundTicket, ReplyTicketRecord, TicketStatus } from "../channel/types.js";
+import type { ChatType, InboundMessage, InboundRecord, InboundState, ReplyTicketRecord, ScheduledInput, TicketStatus } from "../channel/types.js";
 
-import { isModelOutboxRow, type OutboxInput, type OutboxRow } from "../channel/outbox.js";
+import type { OutboxInput, OutboxRow } from "../channel/outbox.js";
 import { isSendRuleError, type SendBreaker, type SendRuleLimits } from "../channel/send-rules.js";
 import { ticketTarget } from "../channel/ticket.js";
 import { SendRules } from "./send-rules.js";
@@ -21,8 +23,8 @@ export function isTicketId(value: string): boolean {
   return typeof value === "string" && TICKET_PATTERN.test(value);
 }
 
-/** 决定性票据 ID：sha256(self_id:group:group_id:user_id:message_id | self_id:private:user_id:message_id)。 */
-export function ticketIdFor(m: Pick<InboundMessage, "self_id" | "message_type" | "group_id" | "user_id" | "message_id">): string {
+/** 决定性入站键：sha256(self_id:group:group_id:user_id:message_id | self_id:private:user_id:message_id)。 */
+export function inboundKey(m: Pick<InboundMessage, "self_id" | "message_type" | "group_id" | "user_id" | "message_id">): string {
   const key = m.message_type === "group"
     ? [m.self_id, "group", m.group_id ?? "", m.user_id, m.message_id].join(":")
     : [m.self_id, "private", m.user_id, m.message_id].join(":");
@@ -35,8 +37,6 @@ export function dedupeKey(m: Pick<InboundMessage, "self_id" | "message_type" | "
 }
 
 interface TicketRow {
-  origin: "message" | "scheduled";
-  target_id: string | null;
   ticket_id: string;
   self_id: string;
   user_id: string;
@@ -61,8 +61,6 @@ interface TicketRow {
 function toRecord(row: TicketRow): ReplyTicketRecord {
   const record: ReplyTicketRecord = {
     ticket_id: row.ticket_id,
-    origin: row.origin,
-    ...(row.target_id ? { target_id: row.target_id } : {}),
     self_id: row.self_id,
     user_id: row.user_id,
     group_id: row.group_id,
@@ -85,6 +83,37 @@ function toRecord(row: TicketRow): ReplyTicketRecord {
   return record;
 }
 
+interface InboundRow {
+  seq: number; key: string; kind: string; scope: string; thread_key: string; self_id: string; user_id: string;
+  group_id: string | null; group_name: string | null; message_type: string; message_id: string; nickname: string;
+  text: string; route_text: string; reply_to: string | null; time: number; images: string; attachments: string;
+  image_error: string | null; created_at: string; state: string; turn_id: string | null;
+}
+
+function toInbound(row: InboundRow): InboundRecord {
+  return {
+    key: row.key, kind: row.kind === "scheduled" ? "scheduled" : "user", seq: Number(row.seq), scope: row.scope,
+    thread_key: row.thread_key, self_id: row.self_id, user_id: row.user_id, group_id: row.group_id,
+    ...(row.group_name ? { group_name: row.group_name } : {}),
+    message_type: row.message_type === "group" ? "group" : "private", message_id: row.message_id, nickname: row.nickname,
+    text: row.text, route_text: row.route_text, ...(row.reply_to ? { reply_to: row.reply_to } : {}), time: Number(row.time),
+    images: JSON.parse(row.images), attachments: JSON.parse(row.attachments),
+    ...(row.image_error ? { image_error: row.image_error } : {}),
+    created_at: row.created_at, state: row.state as InboundState, ...(row.turn_id ? { turn_id: row.turn_id } : {}),
+  };
+}
+
+const STATE_RANK: Record<InboundState, number> = { queued: 0, delivered: 1, done: 2 };
+
+const OUTBOX_TABLE = `
+CREATE TABLE IF NOT EXISTS outbox (
+  key TEXT PRIMARY KEY, thread_key TEXT NOT NULL, turn_id TEXT, input_key TEXT, system INTEGER NOT NULL DEFAULT 0,
+  message_type TEXT NOT NULL, target_id TEXT NOT NULL, mention_user_id TEXT, proactive INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL CHECK (status IN ('pending','sending','sent','uncertain')),
+  message_id TEXT, text TEXT NOT NULL, text_sha256 TEXT NOT NULL, images TEXT NOT NULL, files TEXT NOT NULL,
+  created_at TEXT NOT NULL, sent_at TEXT, rejected TEXT
+);`;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tickets (
   ticket_id TEXT PRIMARY KEY,
@@ -102,14 +131,17 @@ CREATE TABLE IF NOT EXISTS tickets (
   sent_at TEXT,
   reply_message_id TEXT
 );
-CREATE TABLE IF NOT EXISTS outbox (
-  key TEXT PRIMARY KEY, ticket TEXT NOT NULL, ordinal INTEGER NOT NULL, call_id TEXT,
-  message_type TEXT NOT NULL, target_id TEXT NOT NULL, mention_user_id TEXT,
-  status TEXT NOT NULL CHECK (status IN ('pending','sending','sent','uncertain')),
-  message_id TEXT, text TEXT NOT NULL, text_sha256 TEXT NOT NULL, images TEXT NOT NULL, files TEXT NOT NULL,
-  created_at TEXT NOT NULL, sent_at TEXT, UNIQUE(ticket, call_id), UNIQUE(ticket, ordinal)
+CREATE TABLE IF NOT EXISTS inbound (
+  key TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('user','scheduled')),
+  scope TEXT NOT NULL, thread_key TEXT NOT NULL, self_id TEXT NOT NULL DEFAULT '', user_id TEXT NOT NULL,
+  group_id TEXT, group_name TEXT, message_type TEXT NOT NULL CHECK (message_type IN ('private','group')),
+  message_id TEXT NOT NULL DEFAULT '', nickname TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '',
+  route_text TEXT NOT NULL DEFAULT '', reply_to TEXT, time INTEGER NOT NULL,
+  images TEXT NOT NULL DEFAULT '[]', attachments TEXT NOT NULL DEFAULT '[]', image_error TEXT,
+  created_at TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','delivered','done')), turn_id TEXT
 );
-CREATE INDEX IF NOT EXISTS outbox_target_day ON outbox(message_type,target_id,created_at);
+CREATE INDEX IF NOT EXISTS inbound_state ON inbound(state);
+CREATE INDEX IF NOT EXISTS inbound_thread ON inbound(thread_key);
 CREATE TABLE IF NOT EXISTS seen_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   key TEXT NOT NULL UNIQUE,
@@ -130,42 +162,70 @@ export class ReplyStore {
     this.rules = new SendRules(this.db);
   }
 
-  /** 旧库补列：source_text（崩溃对账需要原文）、source_route_text（分流文本；旧行保持 NULL）。 */
-  private migrate(): void {
-    const outboxColumns = this.db.prepare("PRAGMA table_info(outbox)").all() as { name: string }[];
-    if (!outboxColumns.some(c => c.name === "proactive")) this.db.exec("ALTER TABLE outbox ADD COLUMN proactive INTEGER NOT NULL DEFAULT 0");
-    // 被发送规则拒绝的原因；行仍为 pending，再次投递通过后清空。
-    if (!outboxColumns.some(c => c.name === "rejected")) this.db.exec("ALTER TABLE outbox ADD COLUMN rejected TEXT");
-    const columns = this.db.prepare("PRAGMA table_info(tickets)").all() as { name: string }[];
-    if (!columns.some(c => c.name === "origin")) this.db.exec("ALTER TABLE tickets ADD COLUMN origin TEXT NOT NULL DEFAULT 'message'");
-    if (!columns.some(c => c.name === "target_id")) this.db.exec("ALTER TABLE tickets ADD COLUMN target_id TEXT");
-    if (!columns.some(c => c.name === "group_name")) this.db.exec("ALTER TABLE tickets ADD COLUMN group_name TEXT");
-    if (!columns.some(c => c.name === "attachments")) this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT");
-    if (!columns.some(c => c.name === "source_images")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_images TEXT");
-    if (!columns.some(c => c.name === "source_image_error")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_image_error TEXT");
-    if (!columns.some(c => c.name === "source_text")) {
-      this.db.exec("ALTER TABLE tickets ADD COLUMN source_text TEXT NOT NULL DEFAULT ''");
-    }
-    if (!columns.some(c => c.name === "source_route_text")) {
-      this.db.exec("ALTER TABLE tickets ADD COLUMN source_route_text TEXT");
-    }
+  private columns(table: string): string[] {
+    return (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name);
   }
+
+  /**
+   * 幂等迁移：
+   * - 旧票据表补列（生图路由仍读这些列）；
+   * - 旧 outbox（按票据：ticket/ordinal/call_id，UNIQUE(ticket, ordinal)）整表重建为按会话的新表：
+   *   thread_key 保留原票据号、#late/#fallback 行标为系统消息，主动额度所需的 proactive/created_at 原样保留。
+   */
+  private migrate(): void {
+    const columns = this.columns("tickets");
+    if (!columns.includes("group_name")) this.db.exec("ALTER TABLE tickets ADD COLUMN group_name TEXT");
+    if (!columns.includes("attachments")) this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT");
+    if (!columns.includes("source_images")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_images TEXT");
+    if (!columns.includes("source_image_error")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_image_error TEXT");
+    if (!columns.includes("source_text")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_text TEXT NOT NULL DEFAULT ''");
+    if (!columns.includes("source_route_text")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_route_text TEXT");
+    const outbox = this.columns("outbox");
+    if (outbox.includes("ticket")) {
+      if (!outbox.includes("proactive")) this.db.exec("ALTER TABLE outbox ADD COLUMN proactive INTEGER NOT NULL DEFAULT 0");
+      if (!outbox.includes("rejected")) this.db.exec("ALTER TABLE outbox ADD COLUMN rejected TEXT");
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.db.exec("DROP INDEX IF EXISTS outbox_target_day; ALTER TABLE outbox RENAME TO outbox_v1;");
+        this.db.exec(OUTBOX_TABLE);
+        this.db.exec(`INSERT INTO outbox (key,thread_key,turn_id,input_key,system,message_type,target_id,mention_user_id,proactive,
+          status,message_id,text,text_sha256,images,files,created_at,sent_at,rejected)
+          SELECT key,ticket,NULL,NULL,CASE WHEN key = ticket || '#late' OR key = ticket || '#fallback' THEN 1 ELSE 0 END,
+          message_type,target_id,mention_user_id,proactive,status,message_id,text,text_sha256,images,files,created_at,sent_at,rejected
+          FROM outbox_v1 ORDER BY rowid; DROP TABLE outbox_v1;`);
+        this.db.exec("COMMIT");
+      } catch (error) { if (this.db.isTransaction) this.db.exec("ROLLBACK"); throw error; }
+    } else this.db.exec(OUTBOX_TABLE);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS outbox_target_day ON outbox(message_type,target_id,created_at);
+      CREATE INDEX IF NOT EXISTS outbox_turn ON outbox(turn_id);`);
+  }
+
+  // ---------- Outbox ----------
 
   getOutbox(key: string): OutboxRow | null {
     const row = this.db.prepare("SELECT * FROM outbox WHERE key = ?").get(key);
     if (!row) return null;
     const { rejected: _rejected, ...rest } = row;
-    return { ...rest, proactive: row.proactive === 1, images: JSON.parse(String(row.images)), files: JSON.parse(String(row.files)) } as OutboxRow;
+    return { ...rest, proactive: row.proactive === 1, system: row.system === 1,
+      images: JSON.parse(String(row.images)), files: JSON.parse(String(row.files)) } as OutboxRow;
   }
 
-  listOutbox(ticket: string): OutboxRow[] {
-    return (this.db.prepare("SELECT key FROM outbox WHERE ticket = ? ORDER BY ordinal").all(ticket) as { key: string }[])
-      .map(row => this.getOutbox(row.key)!);
+  private rows(sql: string, ...args: (string | number)[]): OutboxRow[] {
+    return (this.db.prepare(sql).all(...args) as { key: string }[]).map(row => this.getOutbox(row.key)!);
+  }
+
+  listOutboxByTurn(turnId: string): OutboxRow[] {
+    return this.rows("SELECT key FROM outbox WHERE turn_id = ? ORDER BY rowid", turnId);
+  }
+
+  listUnfinishedOutbox(): OutboxRow[] {
+    return this.rows(`SELECT key FROM outbox WHERE status = 'sent'
+      AND (files LIKE '%"status":"pending"%' OR files LIKE '%"status":"sending"%') ORDER BY rowid`);
   }
 
   countModelOutbox(type: ChatType, targetId: string, start: string, end: string): number {
     const row = this.db.prepare(`SELECT count(*) AS n FROM outbox WHERE message_type=? AND target_id=?
-      AND proactive=1 AND rejected IS NULL AND created_at>=? AND created_at<? AND key != ticket || '#late' AND key != ticket || '#fallback'`)
+      AND proactive=1 AND system=0 AND rejected IS NULL AND created_at>=? AND created_at<?`)
       .get(type, targetId, start, end) as { n: number };
     return row.n;
   }
@@ -173,30 +233,23 @@ export class ReplyStore {
   reserveOutbox(input: OutboxInput): OutboxRow {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const rows = this.listOutbox(input.ticket), modelRows = rows.filter(isModelOutboxRow);
-      const existing = input.call_id ? rows.find(row => row.call_id === input.call_id)
-        : input.suffix ? rows.find(row => row.key === input.ticket + "#" + input.suffix)
-        : rows.find(row => row.key === input.ticket + "#" + input.sequence);
+      const existing = this.getOutbox(input.key);
       if (existing) { this.db.exec("COMMIT"); return existing; }
       if (input.proactive && input.dailyLimit && this.countModelOutbox(input.message_type, input.target_id, input.dailyLimit.start, input.dailyLimit.end) >= input.dailyLimit.limit) {
         throw new Error("该 target 当天最多主动发送 100 条消息（Asia/Shanghai）");
       }
-      const ordinal = (rows.at(-1)?.ordinal ?? 0) + 1;
-      const key = input.ticket + "#" + (input.suffix ?? input.sequence ?? modelRows.length + 1);
       this.db.prepare(`INSERT INTO outbox
-        (key,ticket,ordinal,call_id,message_type,target_id,mention_user_id,proactive,status,text,text_sha256,images,files,created_at)
-        VALUES (?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)`).run(key, input.ticket, ordinal, input.call_id,
-        input.message_type, input.target_id, input.mention_user_id, input.proactive ? 1 : 0, input.text,
+        (key,thread_key,turn_id,input_key,system,message_type,target_id,mention_user_id,proactive,status,text,text_sha256,images,files,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)`).run(input.key, input.thread_key, input.turn_id, input.input_key,
+        input.system ? 1 : 0, input.message_type, input.target_id, input.mention_user_id, input.proactive ? 1 : 0, input.text,
         createHash("sha256").update(input.text).digest("hex"), JSON.stringify(input.images), JSON.stringify(input.files), new Date().toISOString());
       this.db.exec("COMMIT");
-      return this.getOutbox(key)!;
+      return this.getOutbox(input.key)!;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   markOutboxSending(key: string): boolean {
-    return Number(this.db.prepare(`UPDATE outbox SET status='sending', rejected=NULL,
-      mention_user_id=CASE WHEN EXISTS (SELECT 1 FROM outbox prior WHERE prior.ticket=outbox.ticket AND prior.status<>'pending')
-        THEN NULL ELSE mention_user_id END WHERE key=? AND status='pending'`).run(key).changes) === 1;
+    return Number(this.db.prepare("UPDATE outbox SET status='sending', rejected=NULL WHERE key=? AND status='pending'").run(key).changes) === 1;
   }
   markOutboxSent(key: string, messageId: string): void {
     this.db.prepare("UPDATE outbox SET status='sent', message_id=?, sent_at=? WHERE key=? AND status='sending'")
@@ -229,7 +282,7 @@ export class ReplyStore {
       reason => { this.db.prepare("UPDATE outbox SET rejected=? WHERE key=? AND status='pending'").run(reason, key); });
   }
 
-  /** 旧票据回复路径（生图前缀路由、兜底）的同一套规则：检查 + pending → sending + 记数。 */
+  /** 生图票据回复路径的同一套规则：检查 + pending → sending + 记数。 */
   beginTicketSend(ticket: string, limits: SendRuleLimits, now: number): boolean {
     const rec = this.get(ticket);
     if (!rec) return false;
@@ -260,27 +313,18 @@ export class ReplyStore {
   sendBreakers(now: number): SendBreaker[] { return this.rules.breakers(now); }
   resetSendBreaker(scope: string, now: number): boolean { return this.rules.reset(scope, now); }
 
-  settleTicket(ticket: string): void {
-    const rows = this.listOutbox(ticket);
-    // 系统补发被发送规则拒绝时仍须终结票据，否则兜底会在熔断期间反复重试。
-    const systemRejected = () => !!this.db.prepare(`SELECT 1 FROM outbox WHERE ticket=? AND rejected IS NOT NULL
-      AND (key = ticket || '#late' OR key = ticket || '#fallback')`).get(ticket);
-    if (this.get(ticket)?.origin !== "scheduled" && !rows.some(row => row.status !== "pending") && !systemRejected()) throw new Error("本回合尚无消息发送");
-    this.db.prepare("UPDATE tickets SET status='sent', reply_message_id=?, sent_at=? WHERE ticket_id=? AND status='pending'")
-      .run(rows.find(row => row.status === "sent")?.message_id ?? null, new Date().toISOString(), ticket);
-  }
-
   close(): void {
     if (this.db.isOpen) this.db.close();
   }
 
+  // ---------- Inbox ----------
+
   /**
-   * 原子地登记一条已触发消息：去重 + 建票据（已存在则保留原记录）。
-   * 返回 null 表示重复消息：去重键已见过，或票据行早已存在（去重键被淘汰后再次到达），
-   * 两种情况都不得再次派发。
+   * 原子地登记一条已触发消息：去重 + 写入 inbound（queued）。
+   * 返回 null 表示重复消息：去重键已见过，或输入行早已存在（去重键被淘汰后再次到达），两种情况都不得再次投递。
    */
-  admit(m: InboundMessage): string | null {
-    const ticket = ticketIdFor(m);
+  admit(m: InboundMessage, threadKey: string): string | null {
+    const key = inboundKey(m);
     const now = new Date().toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -290,57 +334,87 @@ export class ReplyStore {
         return null;
       }
       this.db.prepare("DELETE FROM seen_messages WHERE id <= (SELECT MAX(id) FROM seen_messages) - ?").run(SEEN_LIMIT);
-      const created = this.insertTicket(ticket, m, now);
+      const reply = m.segments.find(s => s.type === "reply") as { data: { id?: string } } | undefined;
+      const created = this.db.prepare(`INSERT OR IGNORE INTO inbound
+        (key,kind,scope,thread_key,self_id,user_id,group_id,group_name,message_type,message_id,nickname,text,route_text,reply_to,time,
+         images,attachments,image_error,created_at,state)
+        VALUES (?,'user',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued')`).run(key,
+        m.message_type === "group" ? `group:${m.group_id}` : `private:${m.user_id}`, threadKey, m.self_id, m.user_id,
+        m.message_type === "group" ? m.group_id : null, m.group_name ?? null, m.message_type, m.message_id, m.nickname, m.text,
+        m.route_text, reply?.data.id || null, m.time > 0 ? Math.floor(m.time) : Math.floor(Date.now() / 1000),
+        JSON.stringify(m.images), JSON.stringify(m.attachments ?? []), m.image_error ?? null, now);
       this.db.exec("COMMIT");
-      return created ? ticket : null;
+      return Number(created.changes) === 1 ? key : null;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
   }
 
-  /** 与入站票据共用 rowid 序列；重放不得改变目标、创建者或已终结状态。 */
-  openOutbound(ticket: string, target: OutboundTicket & { self_id: string }): ReplyTicketRecord {
-    if (!/^run_[a-f0-9]{40}$/.test(ticket) || target.origin !== "scheduled" ||
-        !["group", "private"].includes(target.message_type) ||
-        ![target.user_id, target.target_id, target.self_id].every(id => /^[1-9][0-9]{0,19}$/.test(id))) {
-      throw new Error("定时出站票据无效");
-    }
-    this.db.prepare(`INSERT OR IGNORE INTO tickets
-      (ticket_id,self_id,user_id,group_id,message_type,source_message_id,source_nickname,source_text,created_at,status,origin,target_id)
-      VALUES (?,?,?,?,?,'','','',?,'pending','scheduled',?)`)
-      .run(ticket, target.self_id, target.user_id, target.message_type === "group" ? target.target_id : null,
-        target.message_type, new Date().toISOString(), target.target_id);
-    const rec = this.get(ticket)!;
-    if (rec.origin !== target.origin || rec.self_id !== target.self_id || rec.user_id !== target.user_id ||
-        rec.message_type !== target.message_type || rec.target_id !== target.target_id) throw new Error("出站票据绑定不一致");
+  /** 定时输入（§10）：重放不改变首次写入的内容。 */
+  openScheduledInput(input: ScheduledInput): InboundRecord {
+    const match = /^(group|private):([1-9][0-9]{0,19})$/.exec(input.scope);
+    const creator = /^qq:([1-9][0-9]{0,19})$/.exec(input.creator)?.[1];
+    if (!/^run_[a-f0-9]{40}$/.test(input.key) || !match || !creator) throw new Error("定时输入无效");
+    this.db.prepare(`INSERT OR IGNORE INTO inbound
+      (key,kind,scope,thread_key,user_id,group_id,message_type,nickname,text,route_text,time,created_at,state)
+      VALUES (?,'scheduled',?,?,?,?,?,?,?,?,?,?,'queued')`).run(input.key, input.scope, input.thread_key, creator,
+      match[1] === "group" ? match[2]! : null, match[1]!, creator, input.text, input.text, input.time, new Date().toISOString());
+    const rec = this.getInbound(input.key)!;
+    if (rec.kind !== "scheduled" || rec.scope !== input.scope || rec.user_id !== creator) throw new Error("定时输入绑定不一致");
     return rec;
   }
 
-  /** 建票据；已存在时保留原记录。返回票据 ID。 */
-  createTicket(m: InboundMessage): string {
-    const ticket = ticketIdFor(m);
-    this.insertTicket(ticket, m, new Date().toISOString());
-    return ticket;
+  getInbound(key: string): InboundRecord | null {
+    const row = this.db.prepare("SELECT rowid AS seq, * FROM inbound WHERE key = ?").get(key) as InboundRow | undefined;
+    return row ? toInbound(row) : null;
   }
 
-  /** 返回 true 表示新建了票据行；false 表示已存在（保留原记录）。 */
-  private insertTicket(ticket: string, m: InboundMessage, now: string): boolean {
-    const result = this.db.prepare(`INSERT OR IGNORE INTO tickets
-      (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, source_text, source_route_text, source_images, source_image_error, attachments, created_at, group_name, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`)
-      .run(ticket, m.self_id, m.user_id, m.message_type === "group" ? m.group_id : null,
-        m.message_type, m.message_id, m.nickname, m.text, m.route_text, JSON.stringify(m.images), m.image_error ?? null, JSON.stringify(m.attachments ?? []), now, m.group_name ?? null);
-    return Number(result.changes) === 1;
+  listInbound(state: InboundState, limit = 200, afterSeq = 0): InboundRecord[] {
+    const n = Number.isInteger(limit) && limit > 0 ? limit : 200;
+    return (this.db.prepare("SELECT rowid AS seq, * FROM inbound WHERE state = ? AND rowid > ? ORDER BY rowid LIMIT ?")
+      .all(state, Math.max(0, afterSeq), n) as unknown as InboundRow[]).map(toInbound);
   }
 
-  setGroupName(ticket: string, name: string): void {
-    this.db.prepare("UPDATE tickets SET group_name = ? WHERE ticket_id = ?").run(name, ticket);
+  latestInbound(threadKey: string): InboundRecord | null {
+    const row = this.db.prepare("SELECT rowid AS seq, * FROM inbound WHERE thread_key = ? ORDER BY rowid DESC LIMIT 1")
+      .get(threadKey) as InboundRow | undefined;
+    return row ? toInbound(row) : null;
   }
 
-  finishAttachments(ticket: string, attachments: NonNullable<InboundMessage['attachments']>, error?: string): void {
-    this.db.prepare('UPDATE tickets SET attachments = ?, source_images = ?, source_image_error = ? WHERE ticket_id = ?')
-      .run(JSON.stringify(attachments), JSON.stringify(attachments.flatMap(a => a.path ? [a.path] : [])), error ?? null, ticket);
+  /** 状态只前进；turnId 首次写入后保留。 */
+  markInbound(keys: readonly string[], state: InboundState, turnId?: string): void {
+    const update = this.db.prepare(`UPDATE inbound SET state = ?, turn_id = COALESCE(turn_id, ?) WHERE key = ? AND
+      CASE state WHEN 'queued' THEN 0 WHEN 'delivered' THEN 1 ELSE 2 END < ?`);
+    for (const key of keys) update.run(state, turnId ?? null, key, STATE_RANK[state]);
+  }
+
+  setGroupName(key: string, name: string): void {
+    this.db.prepare("UPDATE inbound SET group_name = ? WHERE key = ?").run(name, key);
+  }
+
+  finishAttachments(key: string, attachments: NonNullable<InboundMessage['attachments']>, error?: string): void {
+    this.db.prepare('UPDATE inbound SET attachments = ?, images = ?, image_error = ? WHERE key = ?')
+      .run(JSON.stringify(attachments), JSON.stringify(attachments.flatMap(a => a.path ? [a.path] : [])), error ?? null, key);
+  }
+
+  // ---------- 生图票据 ----------
+
+  /** 以入站记录开票（幂等）；输入随即标记 done，由票据接管。 */
+  openImageTicket(key: string): ReplyTicketRecord {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`INSERT OR IGNORE INTO tickets
+        (ticket_id,self_id,user_id,group_id,message_type,source_message_id,source_nickname,source_text,source_route_text,
+         source_images,source_image_error,attachments,created_at,group_name,status)
+        SELECT key,self_id,user_id,group_id,message_type,message_id,nickname,text,route_text,images,image_error,attachments,created_at,group_name,'pending'
+        FROM inbound WHERE key = ? AND kind = 'user'`).run(key);
+      this.db.prepare("UPDATE inbound SET state = 'done' WHERE key = ?").run(key);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    const rec = this.get(key);
+    if (!rec) throw new Error("生图票据对应的入站记录不存在");
+    return rec;
   }
 
   get(ticket: string): ReplyTicketRecord | null {
@@ -350,15 +424,21 @@ export class ReplyStore {
   }
 
   /**
-   * 仍为 pending 的票据，按 admit 顺序（seq = rowid 升序；与 created_at 在同一事务内分配）。
+   * 仍为 pending 的生图票据，按开票顺序（seq = rowid 升序）。旧版定时出站票据（run_）不再列出。
    * afterSeq 为游标：只返回 seq 大于它的行，用于分页直到取尽。
    */
   listPending(limit = 200, afterSeq = 0): ReplyTicketRecord[] {
     const n = Number.isInteger(limit) && limit > 0 ? limit : 200;
     const after = Number.isInteger(afterSeq) && afterSeq > 0 ? afterSeq : 0;
-    const rows = this.db.prepare("SELECT rowid AS seq, * FROM tickets WHERE status = 'pending' AND rowid > ? ORDER BY rowid ASC LIMIT ?")
-      .all(after, n) as unknown as TicketRow[];
+    const rows = this.db.prepare(`SELECT rowid AS seq, * FROM tickets WHERE status = 'pending' AND rowid > ?
+      AND substr(ticket_id, 1, 4) <> 'run_' ORDER BY rowid ASC LIMIT ?`).all(after, n) as unknown as TicketRow[];
     return rows.map(toRecord);
+  }
+
+  /** 部署前遗留的非生图票据：不再处理，结束为 uncertain 留作审计。 */
+  abandonTicket(ticket: string): void {
+    this.db.prepare("UPDATE tickets SET status = 'uncertain', attempted_at = ? WHERE ticket_id = ? AND status = 'pending'")
+      .run(new Date().toISOString(), ticket);
   }
 
   /** pending → sending；返回 false 表示状态已被改变（不可发送）。 */

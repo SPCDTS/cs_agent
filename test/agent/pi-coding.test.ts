@@ -11,15 +11,15 @@ import { sandboxFixture } from "./pi-sandbox-fixture.js";
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("pi 内置工具执行环境", () => {
-  it("首次创建会话目录并拒绝无效身份、跨域 access 与路径票据", async () => {
+  it("首次创建会话目录并拒绝无效身份、跨域 access 与路径输入键", async () => {
     for (const key of ["owner", "group:7", "private:9"]) {
       const { dir, env, options } = await sandboxFixture(key);
       expect(env).toBeInstanceOf(NodeExecutionEnv);
       expect(env.cwd).toBe(path.join(dir, "pi-work", key.replace(":", "_")));
       expect((await fs.stat(env.cwd)).isDirectory()).toBe(true);
       await expect(codingEnvironment({ ...options, key: "../escape" })).rejects.toThrow(/会话键/);
-      await expect(codingEnvironment({ ...options, request: { ticket: "t", access: "group:8" } })).rejects.toThrow(/访问范围/);
-      await expect(codingEnvironment({ ...options, request: { ...options.request, ticket: "../escape" } })).rejects.toThrow(/票据/);
+      await expect(codingEnvironment({ ...options, request: { access: "group:8", inputs: [] } })).rejects.toThrow(/访问范围/);
+      await expect(codingEnvironment({ ...options, request: { ...options.request, inputs: ["../escape"] } })).rejects.toThrow(/输入键/);
     }
   });
 

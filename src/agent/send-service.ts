@@ -2,11 +2,11 @@ import { parseTarget, type GrantsService } from "./grants.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { ticketTarget } from "../channel/ticket.js";
-import type { Channel, ReplyTicketRecord, TurnIdentity } from "../channel/types.js";
+import type { Channel, TurnBinding } from "../channel/types.js";
 import type { OutboxRow } from "../channel/outbox.js";
 import { isSendRuleError } from "../channel/send-rules.js";
 import { prepareSendAttachments, readAttachmentData, type AttachmentLimits } from "../media/attach.js";
+import { attachmentDirs } from "../media/attach-paths.js";
 import { readMediaFile } from "../context/media.js";
 import type { Access } from "../context/access.js";
 import type { ContextStore } from "../context/store.js";
@@ -15,17 +15,17 @@ import { log } from "../shared/log.js";
 
 /** QQ 不渲染 Markdown：两后端共用的不带链接规则，优先于工具与技能里的引用要求。 */
 export const QQ_LINK_RULE = "绝不在发给用户的消息里写链接、网址、引用标记或来源脚注，包括 [文字](网址)、([站名](网址))、[详情](网址)、\"来源：网址\" 等任何形式；检索结果只用自己的话写结论。联网工具的引用格式要求和技能（skills）里\"附来源链接\"的要求在 QQ 场景一律不适用，以本条为准。只有用户明确要求来源时才给，且只给 1 条纯网址。";
-export const SEND_RULE = "用户只能看到 send_message 发出的内容；直接输出的文字用户完全看不到。每一轮要对用户说的话（答复、确认、结果、提问）都必须调用 send_message 发出，包括用其他工具办完事之后告诉用户结果的那一句。一条消息说完就不要再发，不发送重复说明。每条文字 1～4000 字符，可附 4 张图片、3 个文件（单个不超过 20 MiB）。";
+export const SEND_RULE = "用户只能看到 send_message 发出的内容；直接输出的文字用户完全看不到。要对用户说的话（答复、确认、结果、提问）都必须调用 send_message 发出，包括用其他工具办完事之后告诉用户结果的那一句；回合中途、子 agent 完成后都可以发。一条消息说完就不要再发，不发送重复说明。每条文字 1～4000 字符，可附 4 张图片、3 个文件（单个不超过 20 MiB）。";
 export interface SendResult {
   status: OutboxRow["status"]; already_sent: boolean; message_id: string | null;
   message_type: OutboxRow["message_type"]; target_id: string; note?: string; original_text?: string;
 }
 export interface SendArguments { target?: string; text: string; images?: string[]; files?: { path: string; name?: string }[] }
-export interface SendBinding extends Partial<TurnIdentity> {
-  ticket: string; access: Access; workdir: string; extraRoots?: string[];
-  source?: { type: "private" | "group"; user_id: string; group_id: string | null };
+/** 发送绑定 = 会话绑定（§7）+ 本次调用可读的附件根；身份由主进程在调用时求出。 */
+export interface SendBinding extends TurnBinding {
+  access: Access; workdir: string; extraRoots?: string[];
 }
-export type SendChannel = Pick<Channel, "outbox" | "send" | "uploadFile" | "getTicket" | "settleTicket"> & Partial<Pick<Channel, "listChats">>;
+export type SendChannel = Pick<Channel, "outbox" | "inbox" | "send" | "uploadFile"> & Partial<Pick<Channel, "listChats" | "status">>;
 
 /** 参数校验在网关执行；MCP 与 pi 均把错误作为工具文本返回。 */
 export function validateSendArguments(input: unknown): SendArguments {
@@ -42,103 +42,108 @@ export function validateSendArguments(input: unknown): SendArguments {
   return a as unknown as SendArguments;
 }
 
-/** 按票据串行分配序号及发送；计数器只活在本次 codex exec，持久幂等由 Outbox 保证。 */
+/** 回合内的稳定调用键：pi 为 toolCallId，codex 为回合 id 与本回合序号。只允许安全字符，避免伪造系统行键。 */
+function validCallKey(callKey: string): string {
+  if (!/^[A-Za-z0-9_.:#|-]{1,200}$/.test(callKey) || callKey.startsWith("sys:")) throw new Error("发送工具缺少稳定调用 id");
+  return callKey;
+}
+
+/**
+ * send_message 绑定会话（设计 §7）：行键 `<threadKey>:<callKey>`，同一调用重放取回同一行（永不重发）。
+ * 没有"本回合已经结束"与每轮条数的校验；失控防护由 bridge 发送规则负责（§9）。按会话串行。
+ */
 export class SendService {
   private readonly queues = new Map<string, Promise<unknown>>();
-  private readonly counters = new Map<string, number>();
   private chats?: { value: Awaited<ReturnType<Channel["listChats"]>>; expires: number };
-  constructor(private readonly opts: { grants?: GrantsService; now?: () => number; getChannel(): SendChannel; dataDir: string; store?: Pick<ContextStore, "mediaPathAllowed" | "recordSent">; limits?: AttachmentLimits }) {}
-  rows(ticket: string) { return this.opts.getChannel().outbox.listOutbox(ticket); }
-  releaseAttempt(ticket: string, attempt: string) { this.counters.delete(ticket + ":" + attempt); }
+  constructor(private readonly opts: {
+    grants?: GrantsService; now?: () => number; getChannel(): SendChannel; dataDir: string;
+    store?: Pick<ContextStore, "mediaPathAllowed" | "recordSent">; limits?: AttachmentLimits;
+    /** 群会话本轮第一条发往本群的消息 @ 发送者（§7.2，ThreadHost.takeMention） */
+    mention?(threadKey: string): Promise<string | false>;
+  }) {}
 
-  private async serial<T>(ticket: string, fn: () => Promise<T>): Promise<T> {
-    const task = (this.queues.get(ticket) ?? Promise.resolve()).catch(() => {}).then(fn);
-    this.queues.set(ticket, task);
-    try { return await task; } finally { if (this.queues.get(ticket) === task) this.queues.delete(ticket); }
+  private async serial<T>(threadKey: string, fn: () => Promise<T>): Promise<T> {
+    const task = (this.queues.get(threadKey) ?? Promise.resolve()).catch(() => {}).then(fn);
+    this.queues.set(threadKey, task);
+    try { return await task; } finally { if (this.queues.get(threadKey) === task) this.queues.delete(threadKey); }
   }
 
-  async send(binding: SendBinding, input: unknown, identity: { callId: string } | { attempt: string }, signal?: AbortSignal) {
-    return this.serial(binding.ticket, async () => {
+  async send(binding: SendBinding, input: unknown, callKey: string, signal?: AbortSignal): Promise<SendResult> {
+    return this.serial(binding.threadKey, async () => {
       signal?.throwIfAborted();
-      if ("callId" in identity && !identity.callId) throw new Error("发送工具缺少稳定调用 id");
+      const key = `${binding.threadKey}:${validCallKey(callKey)}`;
       const args = validateSendArguments(input), channel = this.opts.getChannel();
-      const rec = await this.record(binding.ticket, binding.source);
-      const sourceRef = `qq:${rec.message_type}:${ticketTarget(rec)}`;
+      const sourceRef = `qq:${binding.scope}`;
       const targetRef = args.target ?? sourceRef, target = parseTarget(targetRef), targeted = targetRef !== sourceRef;
-      const proactive = targeted || rec.origin === "scheduled";
-      const rows = this.rows(binding.ticket);
-      const attempt = "attempt" in identity ? binding.ticket + ":" + identity.attempt : undefined;
-      const ordinal = attempt ? (this.counters.get(attempt) ?? 0) + 1 : undefined;
-      // 校验失败不计调用；有效调用（含发送失败）按次序重放。
-      const existing = "callId" in identity ? rows.find(r => r.call_id === identity.callId) : rows.find(r => r.key === binding.ticket + "#" + ordinal);
-      const hash = createHash("sha256").update(args.text).digest("hex");
-      if (existing && attempt && (existing.text_sha256 !== hash || existing.message_type !== target.message_type || existing.target_id !== target.target_id)) {
-        this.counters.set(attempt, ordinal!);
-        return { ...this.result(existing, true), original_text: existing.text,
-          note: (this.result(existing, true).note ?? "") + "本次调用映射到已有消息。新内容未发送，如需发送请再调用一次。" };
-      }
-      // 文本去重在附件读取、限额与新建行之前；不确定的消息不能通过新 call_id 重发。
-      const duplicate = !existing && rows.find(r => r.status !== "pending" && r.text_sha256 === hash && r.message_type === target.message_type && r.target_id === target.target_id);
-      if (duplicate) {
-        if (attempt) this.counters.set(attempt, ordinal!);
-        return this.deliver(duplicate, rec, signal);
-      }
-      // 已发回执可重放；仍待发送的行使用原目标，不能通过更换参数绕过授权。
+      const proactive = targeted || binding.identity.kind === "scheduled";
+      const existing = channel.outbox.getOutbox(key);
+      // 已绑定的调用键原样重放；仍待发送的行使用原目标，不能通过更换参数绕过授权。
       if (existing && (existing.message_type !== target.message_type || existing.target_id !== target.target_id)) {
         return { ...this.result(existing, true), original_text: existing.text, note: "调用 id 已绑定其他消息，新内容未发送。" };
       }
-      if (existing && existing.status !== "pending") {
-        if (attempt) this.counters.set(attempt, ordinal!);
-        return this.deliver(existing, rec, signal);
+      if (existing) {
+        // 仍待发送的跨会话行每次重试都按当前身份重新授权（撤销即时生效）；已发出的行只取回执。
+        const existingRef = `qq:${existing.message_type}:${existing.target_id}`;
+        if (existing.status === "pending" && existingRef !== sourceRef) {
+          if (binding.identity.kind === "wake") throw new Error("唤醒回合只能发往本会话；需要发往别处请先在本会话请用户确认");
+          if (!this.opts.grants) throw new Error("主动发送授权未启用");
+          await this.opts.grants.authorizeSend(binding, existingRef);
+        }
+        return this.deliver(existing, signal);
       }
+      // 同一回合里内容与目标相同、已发出或结果不确定的消息不能通过新的调用键重发。
+      const hash = createHash("sha256").update(args.text).digest("hex");
+      const duplicate = binding.turnId ? channel.outbox.listOutboxByTurn(binding.turnId).find(r => !r.system && r.status !== "pending" &&
+        r.text_sha256 === hash && r.message_type === target.message_type && r.target_id === target.target_id) : undefined;
+      if (duplicate) return this.deliver(duplicate, signal);
       if (targeted) {
+        if (binding.identity.kind === "wake") throw new Error("唤醒回合只能发往本会话；需要发往别处请先在本会话请用户确认");
         if (!this.opts.grants) throw new Error("主动发送授权未启用");
         await this.opts.grants.authorizeSend(binding, targetRef);
         await this.checkMembership(target, signal);
       }
       // 定时消息也是主动发送；默认来源与显式 target 共用每天每 ref 的额度。
-      if (proactive) {
-        const day = this.day();
-        if (!existing && channel.outbox.countModelOutbox(target.message_type, target.target_id, day.start, day.end) >= 100) {
-          throw new Error("该 target 当天最多主动发送 100 条消息（Asia/Shanghai）");
-        }
+      if (proactive && channel.outbox.countModelOutbox(target.message_type, target.target_id, this.day().start, this.day().end) >= 100) {
+        throw new Error("该 target 当天最多主动发送 100 条消息（Asia/Shanghai）");
       }
-      let row = existing;
-      if (!row) {
-        if (rec.status !== "pending") throw new Error("本回合已经结束");
-        const prepared = await prepareSendAttachments({
-          workdir: binding.workdir, extraRoots: binding.extraRoots,
-          mediaCheck: async file => {
-            if (!this.opts.store?.mediaPathAllowed(binding.access, file)) return false;
-            await readMediaFile(this.opts.dataDir, file); return true;
-          },
-        }, args, this.opts.limits);
-        signal?.throwIfAborted();
-        const dir = path.join(this.opts.dataDir, "images", binding.ticket, "outbox", randomUUID());
-        await fs.mkdir(dir, { recursive: true });
-        const images: string[] = [], files: OutboxRow["files"] = [];
-        for (const [i, image] of prepared.images.entries()) {
-          const file = path.join(dir, `image-${i}.png`);
-          await fs.writeFile(file, image.data, { flag: "wx" }); images.push(file);
-        }
-        for (const [i, file] of prepared.files.entries()) {
-          const filename = path.join(dir, `file-${i}`);
-          await fs.writeFile(filename, file.data, { flag: "wx" });
-          files.push({ filename, name: file.name, bytes: file.data.length, sha256: file.sha256, status: "pending" });
-        }
-        if (targeted) await this.opts.grants!.authorizeSend(binding, targetRef);
-        signal?.throwIfAborted();
-        row = channel.outbox.reserveOutbox({
-          ticket: binding.ticket, sequence: ordinal, call_id: "callId" in identity ? identity.callId : null,
-          message_type: target.message_type, target_id: target.target_id,
-          mention_user_id: !targeted && rec.origin !== "scheduled" && rec.message_type === "group" && !rows.some(r => r.status !== "pending") ? rec.user_id : null,
-          ...(proactive ? { dailyLimit: { ...this.day(), limit: 100 } } : {}),
-          proactive, text: args.text, images, files,
-        });
-      }
-      if (attempt) this.counters.set(attempt, ordinal!);
-      return this.deliver(row, rec, signal);
+      const prepared = await prepareSendAttachments({
+        workdir: binding.workdir, extraRoots: binding.extraRoots,
+        mediaCheck: async file => {
+          if (!this.opts.store?.mediaPathAllowed(binding.access, file)) return false;
+          await readMediaFile(this.opts.dataDir, file); return true;
+        },
+      }, args, this.opts.limits);
+      signal?.throwIfAborted();
+      const { images, files } = await this.copy(binding.threadKey, prepared);
+      if (targeted) await this.opts.grants!.authorizeSend(binding, targetRef);
+      signal?.throwIfAborted();
+      const ownGroup = !targeted && target.message_type === "group" && binding.identity.kind === "user";
+      const mention = ownGroup && this.opts.mention ? await this.opts.mention(binding.threadKey) : false;
+      const row = channel.outbox.reserveOutbox({
+        key, thread_key: binding.threadKey, turn_id: binding.turnId ?? null, input_key: binding.inputKey ?? null,
+        message_type: target.message_type, target_id: target.target_id, mention_user_id: mention || null,
+        ...(proactive ? { dailyLimit: { ...this.day(), limit: 100 } } : {}),
+        proactive, text: args.text, images, files,
+      });
+      return this.deliver(row, signal);
     });
+  }
+
+  /** 附件先复制到会话的 Outbox 目录，发送与补传只读副本。 */
+  private async copy(threadKey: string, prepared: Awaited<ReturnType<typeof prepareSendAttachments>>) {
+    const dir = path.join(attachmentDirs(this.opts.dataDir, threadKey).attachDir, "outbox", randomUUID());
+    await fs.mkdir(dir, { recursive: true });
+    const images: string[] = [], files: OutboxRow["files"] = [];
+    for (const [i, image] of prepared.images.entries()) {
+      const file = path.join(dir, `image-${i}.png`);
+      await fs.writeFile(file, image.data, { flag: "wx" }); images.push(file);
+    }
+    for (const [i, file] of prepared.files.entries()) {
+      const filename = path.join(dir, `file-${i}`);
+      await fs.writeFile(filename, file.data, { flag: "wx" });
+      files.push({ filename, name: file.name, bytes: file.data.length, sha256: file.sha256, status: "pending" });
+    }
+    return { images, files };
   }
 
   private day() {
@@ -160,56 +165,54 @@ export class SendService {
     if (!found) throw new Error("bot 不在目标群或对方不是好友");
   }
 
-  /** #late、#fallback 由任务调用；不暴露给模型。 */
-  async system(ticket: string, suffix: "late" | "fallback", text: string, images: string[] = [], signal?: AbortSignal, noSendFallback = false,
-    onReserved?: () => Promise<void>) {
-    return this.serial(ticket, async () => {
-      const rec = await this.record(ticket), rows = this.rows(ticket);
-      if (rec.origin === "scheduled") throw new Error("定时回合不发送系统补发消息");
-      if (rec.status !== "pending") throw new Error("本回合已经结束");
-      const existing = rows.find(row => row.key === ticket + "#" + suffix);
-      const row = this.opts.getChannel().outbox.reserveOutbox({
-        ticket, suffix, call_id: null, text, images, files: [],
-        message_type: rec.message_type, target_id: ticketTarget(rec),
-        mention_user_id: rec.message_type === "group" && !rows.some(r => r.status !== "pending") ? rec.user_id : null,
+  /**
+   * 系统消息（§8.1 出错提示；codex 回合后补收的图片）：键 `<threadKey>:sys:<uuid>`，发往本会话，不 @、不计主动额度、不暴露给模型。
+   * 被发送规则拒绝时不重试也不抛出：行保持 pending 并记下原因。
+   */
+  async system(binding: Pick<TurnBinding, "threadKey" | "scope" | "inputKey" | "turnId">, text: string, images: string[] = [], signal?: AbortSignal): Promise<SendResult> {
+    return this.serial(binding.threadKey, async () => {
+      const target = parseTarget(`qq:${binding.scope}`), channel = this.opts.getChannel();
+      const row = channel.outbox.reserveOutbox({
+        key: `${binding.threadKey}:sys:${randomUUID()}`, thread_key: binding.threadKey, turn_id: binding.turnId ?? null,
+        input_key: binding.inputKey ?? null, system: true, message_type: target.message_type, target_id: target.target_id,
+        mention_user_id: null, text, images, files: [],
       });
-      if (!existing && suffix === "fallback" && noSendFallback) trace.event(ticket, "no_send_fallback");
-      await onReserved?.();
-      try { return await this.deliver(row, rec, signal); }
+      try { return await this.deliver(row, signal); }
       catch (error) {
-        // 被发送规则拒绝的系统消息不重试也不抛出：行保持 pending 并记下原因，settle 仍可终结票据。
         if (!isSendRuleError(error)) throw error;
-        log.warn("system message rejected by send rules", { ticket: ticket.slice(0, 12), suffix, error: error.message });
-        return { ...this.result(this.opts.getChannel().outbox.getOutbox(row.key) ?? row, false), note: error.message };
+        log.warn("system message rejected by send rules", { thread: binding.threadKey, error: error.message });
+        return { ...this.result(channel.outbox.getOutbox(row.key) ?? row, false), note: error.message };
       }
     });
   }
 
-  /** settle / 派发恢复补齐 sent 行的附件及历史；不重发 uncertain 行。 */
-  async reconcile(ticket: string, signal?: AbortSignal): Promise<void> {
-    await this.serial(ticket, async () => {
-      const rec = await this.record(ticket);
-      for (const row of this.rows(ticket)) if (row.status === "sent") await this.deliver(row, rec, signal);
-    });
+  /** 启动与回合结束时补齐已发出消息的附件及消息库记录；不重发 uncertain 行。 */
+  async reconcile(signal?: AbortSignal): Promise<void> {
+    for (const row of this.opts.getChannel().outbox.listUnfinishedOutbox()) {
+      await this.serial(row.thread_key, () => this.deliver(row, signal)).catch(error =>
+        log.warn("outbox reconciliation failed", { key: row.key, error }));
+    }
   }
-  async settle(ticket: string) { await this.serial(ticket, () => this.opts.getChannel().settleTicket(ticket)); }
 
-  /** 终结后清理 Outbox 副本；未完成上传所需的整个消息目录仍保留。 */
-  async cleanup(ticket: string): Promise<void> {
-    await this.serial(ticket, async () => {
-      const rec = await this.record(ticket);
-      if (rec.status === "pending") return;
-      const root = path.resolve(this.opts.dataDir, "images", ticket, "outbox");
+  /**
+   * 清理会话 Outbox 目录里一小时前的副本；仍待发送或附件未传完的行引用的文件保留。
+   * 回合结束时调用，不影响进行中的发送（新副本不到一小时）。
+   */
+  async cleanup(threadKey: string, maxAgeMs = 3_600_000): Promise<void> {
+    await this.serial(threadKey, async () => {
+      const root = path.resolve(attachmentDirs(this.opts.dataDir, threadKey).attachDir, "outbox");
       const stat = await fs.lstat(root).catch(error => { if (error.code === "ENOENT") return undefined; throw error; });
       if (!stat) return;
       if (!stat.isDirectory() || stat.isSymbolicLink() || await fs.realpath(root) !== root) throw new Error("Outbox 清理目录无效");
-      const retained = this.rows(ticket).filter(row => row.files.some(file => file.status === "pending" || file.status === "sending"))
-        .flatMap(row => [...row.images, ...row.files.map(file => file.filename)]).map(file => path.resolve(file));
+      const retained = this.opts.getChannel().outbox.listUnfinishedOutbox().flatMap(row => [...row.images, ...row.files.map(file => file.filename)])
+        .map(file => path.resolve(file));
+      const now = (this.opts.now ?? Date.now)();
       for (const entry of await fs.readdir(root)) {
         const target = path.resolve(root, entry);
         if (path.dirname(target) !== root) throw new Error("Outbox 清理路径越界");
         if (retained.some(file => file === target || file.startsWith(target + path.sep))) continue;
         const child = await fs.lstat(target);
+        if (now - child.mtimeMs < maxAgeMs) continue;
         if (child.isSymbolicLink()) await fs.unlink(target);
         else await fs.rm(target, { recursive: true, force: true });
       }
@@ -224,13 +227,18 @@ export class SendService {
         : row.status === "sent" && !row.message_id ? { note: "消息已记录为发送成功，但缺少 message_id 回执；不要重发。" } : {}) };
   }
 
-  private async record(ticket: string, source?: SendBinding["source"]) {
-    const rec = await this.opts.getChannel().getTicket(ticket);
-    if (!rec || !/^[a-zA-Z0-9_-]+$/.test(ticket)) throw new Error("回合票据不存在或无效");
-    if (source && (source.type !== rec.message_type || source.user_id !== rec.user_id || source.group_id !== rec.group_id)) throw new Error("回合来源不一致");
-    return rec;
+  /** 消息库记录：机器人账号取自本轮输入（定时输入取当前登录号），发往输入所在会话时引用该输入。 */
+  private recordSent(row: OutboxRow): void {
+    const channel = this.opts.getChannel();
+    const input = row.input_key ? channel.inbox.getInbound(row.input_key) : null;
+    const scope = `${row.message_type}:${row.target_id}`;
+    this.opts.store?.recordSent(row, {
+      selfId: input?.self_id || channel.status?.().self_id || "",
+      replyTo: input?.kind === "user" && input.scope === scope ? input.message_id : null,
+    });
   }
-  private async deliver(row: OutboxRow, rec: ReplyTicketRecord, signal?: AbortSignal) {
+
+  private async deliver(row: OutboxRow, signal?: AbortSignal): Promise<SendResult> {
     const channel = this.opts.getChannel();
     const before = row.status;
     let alreadySent: boolean;
@@ -245,8 +253,8 @@ export class SendService {
     const result = this.result(row, alreadySent);
     try {
       if (row.status !== "sent") return result;
-      // 每条消息立即入库；恢复再写是幂等的，引用无需等整个回合结束。
-      try { if (row.message_id) this.opts.store?.recordSent(row, rec); }
+      // 每条消息立即入库；恢复再写是幂等的，引用无需等回合结束。
+      try { if (row.message_id) this.recordSent(row); }
       catch (error) { log.warn("outbox context record failed; reconciliation will retry", { key: row.key, error }); }
       for (const [index, file] of channel.outbox.getOutbox(row.key)!.files.entries()) {
         if (file.status === "sent" || file.status === "uncertain") continue;
@@ -263,7 +271,8 @@ export class SendService {
       }
       return result;
     } finally {
-      if (!result.already_sent) trace.event(row.ticket, "send_message", { detail: { target: `qq:${row.message_type}:${row.target_id}`, ordinal: row.ordinal, message_id: result.message_id,
+      if (!result.already_sent) trace.event(row.turn_id ? "turn:" + row.turn_id : "thr:" + row.thread_key, "send_message", { detail: {
+        target: `qq:${row.message_type}:${row.target_id}`, key: row.key, system: row.system, message_id: result.message_id,
         status: result.status, images: row.images.length, files: channel.outbox.getOutbox(row.key)!.files.map(({ name, bytes, status }) => ({ name, bytes, status })),
         already_sent: false } });
     }

@@ -35,7 +35,7 @@ export const sessionScope = (backend: string, scope?: string) => !scope ? '—' 
 
 /* ───────── /agents ───────── */
 
-export interface ResetTarget { key: string; label: string; enabled: boolean; compactEnabled?: boolean }
+export interface ResetTarget { key: string; label: string; enabled: boolean; compactEnabled?: boolean; stopEnabled?: boolean }
 export interface AgentCardInput {
   summary?: AgentSummary; error?: string;
   threads: ResetTarget[];
@@ -43,7 +43,11 @@ export interface AgentCardInput {
   extraUsageKeys?: string[];
 }
 const resetForm = (backend: Backend, csrf: string, t: ResetTarget) => t.enabled
-  ? `<form method="post" action="/${backend}/reset" data-confirm="重置${esc(t.label)}？当前会话会归档，下一条消息从空白上下文开始。进行中的回合会先跑完。">${csrfField(csrf)}<input type="hidden" name="key" value="${esc(t.key)}"><button class="danger">重置</button></form>` : '';
+  ? `<form method="post" action="/${backend}/reset" data-confirm="重置${esc(t.label)}？当前会话会归档，下一条消息从空白上下文开始。回合进行中时不能重置，请先停止或等它结束。">${csrfField(csrf)}<input type="hidden" name="key" value="${esc(t.key)}"><button class="danger">重置</button></form>` : '';
+
+/** 停止该会话当前回合（连同子 agent）；与后端无关，按会话键中止。 */
+const stopForm = (csrf: string, t: ResetTarget) => t.stopEnabled
+  ? `<form method="post" action="/thread/stop" data-confirm="停止${esc(t.label)}当前的回合？子 agent 会一起停止，排队的消息随后照常处理。">${csrfField(csrf)}<input type="hidden" name="key" value="${esc(t.key)}"><button title="中止当前回合与子 agent">停止</button></form>` : '';
 
 const compactForm = (backend: Backend, csrf: string, t: ResetTarget) => t.compactEnabled
   ? `<form method="post" action="/${backend}/compact">${csrfField(csrf)}<input type="hidden" name="key" value="${esc(t.key)}"><button title="保留摘要，清理旧工具输出与图片；等待当前回合结束">压缩会话</button></form>` : '';
@@ -55,7 +59,7 @@ function agentCard(backend: Backend, c: AgentCardInput, csrf: string): string {
   const keys = [...new Set([...c.threads.map(t => t.key), ...(c.extraUsageKeys ?? [])])];
   const rows = keys.map(k => {
     const t = c.threads.find(x => x.key === k);
-    return `<div class="thread-row">${contextBar(backend, k, c.usage(k))}<a class="btn quiet" href="/context-usage?backend=${uri(backend)}&amp;key=${uri(k)}" title="上下文长度走势与缓存未命中">监控</a>${t ? resetForm(backend, csrf, t) + compactForm(backend, csrf, t) : ''}</div>`;
+    return `<div class="thread-row">${contextBar(backend, k, c.usage(k))}<a class="btn quiet" href="/context-usage?backend=${uri(backend)}&amp;key=${uri(k)}" title="上下文长度走势与缓存未命中">监控</a>${t ? stopForm(csrf, t) + resetForm(backend, csrf, t) + compactForm(backend, csrf, t) : ''}</div>`;
   }).join('');
   return `<section class="sheet pad flush agent-card" data-backend="${backend}"><h2><a href="${sessionsHref(backend)}">${esc(name)}</a> <small>${backend === 'codex' ? 'owner 与共享两条长期线程' : '每个会话域一个长期会话'}</small></h2>
 ${c.error ? `<div class="flash err">${esc(c.error)}</div>` : ''}<div class="agent-figs"><div><div class="figure">${s ? fmtInt(s.sessions_active) : '—'}</div><div class="muted">活动会话</div></div><div><div class="figure">${s ? fmtInt(s.sessions_archived) : '—'}</div><div class="muted">归档会话</div></div></div>

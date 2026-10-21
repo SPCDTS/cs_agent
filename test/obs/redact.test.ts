@@ -62,7 +62,7 @@ describe("临时秘密生命周期与长期容量", () => {
     try {
       for (const mode of ["revoke", "expire", "abort", "close"]) {
         const control = new AbortController();
-        const lease = tokens.issue({ access: { kind: "all" }, ticket: mode, deadline: Date.now() + 1000, signal: control.signal });
+        const lease = tokens.issue({ access: { kind: "all" }, threadKey: "owner", turnId: mode, deadline: Date.now() + 1000, signal: control.signal });
         expect(redactText(lease.token)).toBe("[已隐藏]");
         if (mode === "revoke") lease.revoke();
         if (mode === "expire") await vi.advanceTimersByTimeAsync(1000);

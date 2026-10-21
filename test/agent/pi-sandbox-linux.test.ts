@@ -35,7 +35,7 @@ describe.runIf(process.platform === "linux")("真实 bwrap（请以容器 node �
     expect(process.getuid!(), "必须以非 root 用户验证与生产一致的 user namespace 行为").not.toBe(0);
     const { dir, workspaceDir, env } = await fixture();
     const secret = "fixture-private-content";
-    const files = await Promise.all(["qq-messages.sqlite", "qq-messages.sqlite-wal", "obs-token", "pi.sqlite", "pi.sqlite-shm", "codex/auth.json", "pi-work/group_8/note", "images/ticket-7/a", "media/a", "incoming/ticket-7/a"].map(p => put(path.join(dir, p), secret)));
+    const files = await Promise.all(["qq-messages.sqlite", "qq-messages.sqlite-wal", "obs-token", "pi.sqlite", "pi.sqlite-shm", "codex/auth.json", "pi-work/group_8/note", "images/group_7/a", "media/a", "incoming/ticket-7/a"].map(p => put(path.join(dir, p), secret)));
     const crossScope = await Promise.all([
       put(path.join(workspaceDir, "group_8", "note"), secret), put(path.join(dir, "codex", "trace", "x.json"), secret),
     ]);

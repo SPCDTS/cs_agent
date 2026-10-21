@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Channel, InboundMessage } from "../../src/channel/types.js";
-import { inboundFromTicket } from "../../src/channel/ticket.js";
+import { inboundFromRecord } from "../../src/channel/ticket.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import type { OneBotClient } from "../../src/qq/onebot.js";
 import { groupEvent, privateEvent } from "./fake-onebot.js";
@@ -47,8 +47,8 @@ describe("入站群名缓存", () => {
     expect(call).toHaveBeenCalledWith("get_group_info", { group_id: 30001 }, { timeoutMs: 1500 });
     expect(s.messages.map(m => [m.message_id, m.group_name])).toEqual([["1", "家庭群"], ["2", "家庭群"]]);
     expect(s.raw.map(m => m.group_name)).toEqual(["家庭群", "家庭群"]);
-    const tickets = await s.bridge.listPendingTickets();
-    expect(tickets.map(t => inboundFromTicket(t).group_name)).toEqual(["家庭群", "家庭群"]);
+    const inputs = s.bridge.inbox.listInbound("queued");
+    expect(inputs.map(t => inboundFromRecord(t).group_name)).toEqual(["家庭群", "家庭群"]);
     await vi.advanceTimersByTimeAsync(6 * 60 * 60_000 - 1);
     s.push("3", "30001", false); await s.flush();
     expect(s.raw.at(-1)?.group_name).toBe("家庭群"); expect(call).toHaveBeenCalledOnce();
@@ -65,7 +65,7 @@ describe("入站群名缓存", () => {
     s.push("1");
     s.input.handleEvent(privateEvent("20001", "私聊", { message_id: "private" }));
     await s.flush();
-    expect((await s.bridge.listPendingTickets()).map(t => t.source_message_id)).toEqual(["1", "private"]);
+    expect(s.bridge.inbox.listInbound("queued").map(t => t.message_id)).toEqual(["1", "private"]);
     expect(s.messages.map(m => m.message_id)).toEqual(["private"]);
     await vi.advanceTimersByTimeAsync(1499); expect(s.raw).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);

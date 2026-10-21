@@ -13,7 +13,7 @@ async function setup(max = 5) {
   const tokens = new RecallTokens({ recall }, max);
   const server = await startMediaRecallServer(tokens, 0);
   closes.push(server.close);
-  const issue = (ticket = "ticket", deadline = Date.now() + 60_000) => tokens.issue({ access, ticket, deadline });
+  const issue = (turnId = "turn-1", deadline = Date.now() + 60_000) => tokens.issue({ access, threadKey: "group:7", turnId, deadline });
   const post = (token?: string, body: unknown = { message_id: "123" }) => fetch("http://127.0.0.1:" + server.port + "/recall", {
     method: "POST", headers: { ...(token ? { Authorization: "Bearer " + token } : {}), "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
@@ -42,21 +42,21 @@ describe("召回 loopback 与令牌", () => {
     const revoked = s.issue(); revoked.revoke();
     expect((await s.post(revoked.token)).status).toBe(401);
     const control = new AbortController();
-    const aborted = s.tokens.issue({ access, ticket: "abort", deadline: Date.now() + 60_000, signal: control.signal });
+    const aborted = s.tokens.issue({ access, threadKey: "group:7", turnId: "abort", deadline: Date.now() + 60_000, signal: control.signal });
     control.abort();
     expect((await s.post(aborted.token)).status).toBe(401);
     expect(s.recall).not.toHaveBeenCalled();
   });
-  it("额度同步扣减，并发最多五次；同票据新令牌不恢复额度", async () => {
+  it("额度按租约（每次 exec）同步扣减，并发最多五次；新租约重新计数；缺少会话或回合拒绝签发", async () => {
     const s = await setup(), lease = s.issue();
     const results = await Promise.all(Array.from({ length: 7 }, () => s.post(lease.token)));
     expect(results.filter(r => r.status === 200)).toHaveLength(5);
     expect(results.filter(r => r.status === 429)).toHaveLength(2);
     expect(s.recall).toHaveBeenCalledTimes(5);
     lease.revoke();
-    expect((await s.post(s.issue().token)).status).toBe(429);
-    expect((await s.post(s.issue("another").token)).status).toBe(200);
-    expect(() => s.tokens.issue({ access: { kind: "all" }, ticket: "ticket", deadline: Date.now() + 1000 })).toThrow("范围");
+    expect((await s.post(s.issue().token)).status).toBe(200);
+    expect(() => s.tokens.issue({ access, threadKey: "", turnId: "t", deadline: Date.now() + 1000 })).toThrow("绑定");
+    expect(() => s.tokens.issue({ access, threadKey: "group:7", turnId: "", deadline: Date.now() + 1000 })).toThrow("绑定");
   });
   it("撤销中止在途召回；关闭端点作废所有令牌", async () => {
     const s = await setup(), lease = s.issue();
@@ -76,41 +76,15 @@ describe("召回 loopback 与令牌", () => {
     for (const value of ["0", "65536", "abc"]) expect(() => loadConfig({ MEDIA_RECALL_PORT: value })).toThrow();
     expect(() => loadConfig({ MEDIA_RECALL_MAX_PER_TICKET: "0" })).toThrow();
   });
-  it("额度在最后一次作废后保留 30 分钟；活跃租约与重试不会重置预算", async () => {
-    vi.useFakeTimers();
-    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) }, 1);
-    const tickets = (tokens as unknown as { tickets: Map<string, unknown> }).tickets;
-    const issue = () => tokens.issue({ access, ticket: "retained", deadline: Date.now() + 2 * 60 * 60_000 });
-    try {
-      const first = issue(), active = issue();
-      await tokens.recall(first.token, "1"); first.revoke(); first.revoke();
-      await vi.advanceTimersByTimeAsync(31 * 60_000);
-      expect(tickets.size).toBe(1);
-      await expect(tokens.recall(active.token, "1")).rejects.toThrow("次数");
-      active.revoke();
-      await vi.advanceTimersByTimeAsync(29 * 60_000);
-      const retry = issue();
-      await expect(tokens.recall(retry.token, "1")).rejects.toThrow("次数");
-      await vi.advanceTimersByTimeAsync(2 * 60_000);
-      expect(tickets.size).toBe(1); retry.revoke();
-      await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
-      expect(tickets.size).toBe(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(tickets.size).toBe(0);
-      await expect(tokens.recall(issue().token, "1")).resolves.toMatchObject({ text: "ok" });
-    } finally { tokens.close(); }
-    expect(tickets.size).toBe(0); expect(vi.getTimerCount()).toBe(0);
-  });
-  it("自动到期后的额度会回收，close 清理回收定时器", async () => {
+  it("自动到期即作废，close 撤销所有租约且不留定时器", async () => {
     vi.useFakeTimers();
     const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) });
-    const tickets = (tokens as unknown as { tickets: Map<string, unknown> }).tickets;
-    tokens.issue({ access, ticket: "expiry", deadline: Date.now() + 1000 });
-    await vi.advanceTimersByTimeAsync(1000 + 30 * 60_000);
-    expect(tickets.size).toBe(0);
-    tokens.issue({ access, ticket: "close", deadline: Date.now() + 1000 }).revoke();
+    const expiring = tokens.issue({ access, threadKey: "group:7", turnId: "expiry", deadline: Date.now() + 1000 });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(tokens.valid(expiring.token)).toBe(false);
+    const open = tokens.issue({ access, threadKey: "group:7", turnId: "close", deadline: Date.now() + 1000 });
     tokens.close();
-    expect(tickets.size).toBe(0); expect(vi.getTimerCount()).toBe(0);
+    expect(tokens.valid(open.token)).toBe(false); expect(vi.getTimerCount()).toBe(0);
   });
 });
 
@@ -120,7 +94,7 @@ describe("会话列表 loopback", () => {
     const listChats = vi.fn<Channel["listChats"]>().mockResolvedValue({ groups: [{ group_id: "7", name: "家庭群" }], friends: [] });
     const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) }, 1, { listChats });
     const server = await startMediaRecallServer(tokens, 0); closes.push(server.close);
-    const issue = (access: Access, ticket: string) => tokens.issue({ access, ticket, deadline: Date.now() + 60_000 });
+    const issue = (access: Access, turnId: string) => tokens.issue({ access, threadKey: "owner", turnId, deadline: Date.now() + 60_000 });
     const post = (token?: string, body: unknown = {}) => fetch("http://127.0.0.1:" + server.port + "/chats", {
       method: "POST", headers: { ...(token ? { Authorization: "Bearer " + token } : {}), "Content-Type": "application/json" }, body: JSON.stringify(body),
     });

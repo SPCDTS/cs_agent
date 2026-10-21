@@ -43,7 +43,7 @@ const FLASH: Record<string, string> = {
   codexPrompt: 'codex.md 已保存，AGENTS.md 已重写，codex 下一条消息即使用新内容。',
   reset: '已重置：旧会话已归档，下一条消息会新建会话。', queued: '已排队：当前回合结束后立即重置，旧会话会归档。', unchanged: '没有可操作的会话。',
   compacted: '会话已压缩：保留摘要，旧工具输出与图片已从活动上下文中清理。', compactQueued: '压缩已排队或正在执行，完成结果请查看日志。',
-  compactFailed: '会话压缩失败，详见日志。',
+  compactFailed: '会话压缩失败，详见日志。', stopped: '已请求停止：当前回合与子 agent 会中止，排队的消息随后照常处理。',
 };
 
 const asObj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};

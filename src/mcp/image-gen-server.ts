@@ -6,7 +6,7 @@ import { imageRefsValue } from "../media/gen/image-references.js";
 import { validateReferencesWithMedia } from "../context/image-references.js";
 /**
  * image_gen MCP 服务（设计 §4.4）：供容器内 codex 生图，复用 src/media/gen/image-gen.ts 的同一实现。
- * 输出目录只来自环境变量 IMAGE_TICKET_DIR（cs-agent 每次 codex exec 以 -c 注入 ${DATA_DIR}/images/<ticket>），
+ * 输出目录只来自环境变量 IMAGE_TICKET_DIR（cs-agent 每次 codex exec 以 -c 注入 ${DATA_DIR}/images/<会话>），
  * 工具参数里不接受输出路径（参考图接受 IMAGE_REFS 或当前访问范围内的媒体库路径）；缺失、非法或不在 ${DATA_DIR}/images/ 的直接子目录时所有调用都拒绝。
  * 每次调用输出到新的子目录 <IMAGE_TICKET_DIR>/call-<n>/（同名输出不会互相覆盖），返回 call-<n>/<文件名>；
  * 图片由 cs-agent 在回合结束后从票据目录递归收集并随回复发送。
@@ -146,9 +146,15 @@ export function createImageGenServer(deps: ImageGenDeps): { server: Server; disp
       options = validateImageOptions(args);
       const allowed = (deps.imageRefs ?? '').split(',').filter(Boolean);
       imageRefsValue(allowed);
-      options.reference_images = await validateReferencesWithMedia(options.reference_images ?? [], allowed,
-        path.join(deps.dataDir, 'incoming', path.basename(dir)), { dataDir: deps.dataDir, access: deps.access,
-          openStore: () => store ??= new ContextStore(deps.dataDir, { readOnly: true }) });
+      // 输出目录按会话；本轮附件各在其输入的 incoming/<入站键> 目录内，逐张按所在目录校验。
+      const refs: string[] = [];
+      for (const file of options.reference_images ?? []) {
+        const key = path.relative(path.join(deps.dataDir, 'incoming'), path.resolve(file)).split(/[\\/]/)[0] ?? '';
+        refs.push(...await validateReferencesWithMedia([file], allowed,
+          path.join(deps.dataDir, 'incoming', /^[A-Za-z0-9_-]{1,128}$/.test(key) ? key : 'none'), { dataDir: deps.dataDir, access: deps.access,
+            openStore: () => store ??= new ContextStore(deps.dataDir, { readOnly: true }) }));
+      }
+      options.reference_images = refs;
     } catch (err) { return text('生图参数无效：' + (err as Error).message, true); }
     if (calls >= MAX_CALLS) return text(`本次回复最多生成 ${MAX_CALLS} 次图片，已达上限。`, true);
     calls++;

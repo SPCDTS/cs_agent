@@ -161,34 +161,35 @@ export interface PiSandboxOptions {
   /** Codex 的 WORKSPACE_DIR；必须由调用方传入，缺失时关闭工具权限。 */
   workspaceDir?: string;
   key: string;
-  request: { ticket: string; access: string; senderIsOwner?: boolean; actorIsOwner?: boolean };
+  /** 本轮绑定：读取范围、技能写权限与本轮输入键（只读其 incoming 目录） */
+  request: { access: string; senderIsOwner?: boolean; inputs: readonly string[] };
   store: Pick<ContextStore, "mediaPathAllowed">;
   requirementsFile?: string;
 }
 
 export class PiPathPolicy {
   readonly access: Access;
-  readonly ticket: string;
   readonly workspace: string;
   readonly workRoot: string;
   readonly skillsDir?: string;
+  /** 本会话的图片目录（生图输出与 Outbox 副本），可读写 */
   private readonly images: string;
-  private readonly incoming: string;
+  /** 本轮各输入的附件目录，只读 */
+  private readonly incoming: string[];
   private readonly media: string;
   constructor(readonly options: PiSandboxOptions) {
     const { key, request, dataDir } = options;
     const access = parseAccess(request.access);
     if ((key !== "owner" && !isScope(key)) || !access ||
-        (key === "owner" ? access.kind !== "all" : access.kind === "all" ? (request.actorIsOwner ?? request.senderIsOwner) !== true : access.scope !== key)) {
+        (key === "owner" ? access.kind !== "all" : access.kind === "all" ? request.senderIsOwner !== true : access.scope !== key)) {
       throw new Error("pi 工作目录缺少匹配的会话键与访问范围");
     }
-    if (!/^[A-Za-z0-9_-]+$/.test(request.ticket)) throw new Error("pi 缺少有效票据");
+    if (request.inputs.some(input => !/^[A-Za-z0-9_-]{1,128}$/.test(input))) throw new Error("pi 本轮输入键无效");
     this.access = Object.freeze({ ...access });
-    this.ticket = request.ticket;
     this.workRoot = path.resolve(dataDir, "pi-work");
     this.workspace = path.join(this.workRoot, key.replace(/:/g, "_"));
-    this.images = path.resolve(dataDir, "images", this.ticket);
-    this.incoming = path.resolve(dataDir, "incoming", this.ticket);
+    this.images = path.resolve(dataDir, "images", key.replace(/:/g, "_"));
+    this.incoming = request.inputs.map(input => path.resolve(dataDir, "incoming", input));
     this.media = path.resolve(dataDir, "media");
     this.skillsDir = options.skillsDir === "off" ? undefined : path.resolve(options.skillsDir || path.join(dataDir, "skills"));
   }
@@ -213,11 +214,11 @@ export class PiPathPolicy {
     const absolute = path.resolve(this.workspace, file);
     const canonical = await policyRealpath(absolute);
     const forbidden = () => { throw new Error(`pi 沙箱拒绝${mode === "read" ? "读取" : "写入"}：${file}`); };
-    // Codex 工作区整棵禁读写，优先于本票据图片、incoming 与媒体授权例外。
+    // Codex 工作区整棵禁读写，优先于本会话图片、本轮 incoming 与媒体授权例外。
     if ([absolute, canonical].some(p => deny.workspaceRoots.some(root => within(root, p)))) forbidden();
     // 在主进程内的文件接口不得读取宿主 proc、设备或内核接口。
     if ([absolute, canonical].some(p => ["/proc", "/sys", "/dev"].some(root => within(path.resolve(root), p)))) forbidden();
-    // 同时校验词法路径与 realpath：票据目录/工作区自身被换成链接也不能扩大授权根。
+    // 同时校验词法路径与 realpath：会话目录/工作区自身被换成链接也不能扩大授权根。
     const inRoot = (root: string) => within(root, absolute) && within(root, canonical);
     const otherWork = (p: string) => within(this.workRoot, p) && !within(this.workspace, p);
     if (otherWork(absolute) || otherWork(canonical)) forbidden();
@@ -226,9 +227,9 @@ export class PiPathPolicy {
     if (mode === "write") {
       const skillsWrite = this.options.request.senderIsOwner === true && this.skillsDir !== undefined && inRoot(this.skillsDir);
       if (!inRoot(this.workspace) && !inRoot(this.images) && !skillsWrite) forbidden();
-      // 本票据图片是 deny_read(images) 的明确例外；其他受管禁读目标仍不可覆写。
+      // 本会话图片是 deny_read(images) 的明确例外；其他受管禁读目标仍不可覆写。
       if (!inRoot(this.images) && (matchesDeny(absolute, deny) || matchesDeny(canonical, deny))) forbidden();
-    } else if (!inRoot(this.images) && !inRoot(this.incoming)) {
+    } else if (!inRoot(this.images) && !this.incoming.some(inRoot)) {
       if (inRoot(this.media)) {
         if (!(await fs.stat(canonical)).isFile() || !this.options.store.mediaPathAllowed(this.access, canonical)) forbidden();
       } else if (matchesDeny(absolute, deny) || matchesDeny(canonical, deny)) forbidden();

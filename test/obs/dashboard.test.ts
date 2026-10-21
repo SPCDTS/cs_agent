@@ -40,9 +40,10 @@ async function rig(extra: { validators?: SettingsValidators; contextUsage?: Cont
   const resetPi = vi.fn(async () => 42);
   const compactCodex = vi.fn(async (key: string): Promise<'compacted' | 'unchanged'> => key === 'owner' ? 'unchanged' : 'compacted');
   const compactPi = vi.fn(async (_key: string): Promise<'compacted' | 'unchanged'> => 'compacted');
+  const stopThread = vi.fn(async (_key: string) => {});
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
   const codexPrompt = extra.codexPrompt === null ? undefined : extra.codexPrompt ?? new CodexPromptStub();
-  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, compactCodex, compactPi, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog, sendBreakers: extra.sendBreakers,
+  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, compactCodex, compactPi, stopThread, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog, sendBreakers: extra.sendBreakers,
     health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, comfy: { ok: true }, codex: { ok: false }, deepseek_key_present: true }),
     queue: () => ({ active: 1, slots: 2, waiting: 1, scopes: { 'group:7': 1 } }),
     codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'group:7', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
@@ -56,7 +57,7 @@ async function rig(extra: { validators?: SettingsValidators; contextUsage?: Cont
   const get = (url: string, init: RequestInit = {}) => fetch(base + url, { ...init, headers: { Cookie: cookie, ...init.headers } });
   const post = (url: string, fields: Record<string, string>, headers: Record<string, string> = {}) => fetch(base + url, { method: 'POST', redirect: 'manual',
     headers: { Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded', ...headers }, body: new URLSearchParams(fields).toString() });
-  return { dir, store, live, settings, base, get, post, resetCodex, resetPi, compactCodex, compactPi, codexPrompt, close: () => dashboard.close(), csrf: csrfToken(TOKEN) };
+  return { dir, store, live, settings, base, get, post, resetCodex, resetPi, compactCodex, compactPi, stopThread, codexPrompt, close: () => dashboard.close(), csrf: csrfToken(TOKEN) };
 }
 
 /** 读 SSE 直到 predicate 满足（或超时）。 */
@@ -108,7 +109,7 @@ describe('面板二期页面', () => {
       '/logs': ['实时日志', 'src="/assets/logs.js"'],
       '/context': ['上下文检索', 'href="/memory"'],
       '/context-usage': ['上下文监控', 'name="limit"'],
-      '/agents': ['Agent', 'action="/codex/reset"', 'action="/pi/reset"', '群 7', 'href="/codex/agents-md"', 'href="/agents/codex/sessions"', 'href="/agents/pi/sessions"'],
+      '/agents': ['Agent', 'action="/codex/reset"', 'action="/pi/reset"', 'action="/thread/stop"', '群 7', 'href="/codex/agents-md"', 'href="/agents/codex/sessions"', 'href="/agents/pi/sessions"'],
       '/memory': ['记忆', '聊天记录整理', 'href="/memory/search"', 'href="/memory/archives"'],
       '/settings': ['设置', 'action="/settings"', 'name="agentBackend"', 'name="_csrf"', 'action="/settings/agent-md"', '受管规则'],
       '/config': ['生效配置'],
@@ -363,6 +364,13 @@ describe('面板二期页面', () => {
     expect((await r.post('/codex/reset', { _csrf: r.csrf, key: 'private:9' })).status).toBe(303);
     expect(r.resetCodex).toHaveBeenCalledWith('private:9');
     for (const key of ['group:0', 'private:01', '../owner']) expect((await r.post('/codex/reset', { _csrf: r.csrf, key })).status).toBe(400);
+    const stop = await r.post('/thread/stop', { _csrf: r.csrf, key: 'group:7' });
+    expect(stop.status).toBe(303); expect(stop.headers.get('location')).toBe('/agents?ok=stopped');
+    expect(r.stopThread).toHaveBeenCalledWith('group:7');
+    expect((await r.post('/thread/stop', { key: 'group:7' })).status).toBe(403);
+    for (const key of ['shared', '../owner', 'group:0']) expect((await r.post('/thread/stop', { _csrf: r.csrf, key })).status).toBe(400);
+    expect(r.stopThread).toHaveBeenCalledTimes(1);
+    expect(await (await r.get('/agents?ok=stopped')).text()).toContain('已请求停止');
     const pi = await r.post('/pi/reset', { _csrf: r.csrf, key: 'group:7' });
     expect(pi.headers.get('location')).toBe('/agents?ok=reset'); expect(r.resetPi).toHaveBeenCalledWith('group:7');
     expect((await r.post('/pi/reset', { _csrf: r.csrf, key: '../x' })).status).toBe(400);
@@ -393,33 +401,41 @@ describe('实时视图', () => {
     const runner = new CodexRunner({ command: [process.execPath, path.join(FIXTURES, 'fake-codex.mjs')], codexHome: path.join(dir, 'codex'), workspaceDir: path.join(dir, 'ws'),
       threadsFile: path.join(dir, 'codex-threads.json'), sandbox: 'workspace-write', timeoutMs: 20_000,
       env: { FAKE_CODEX_SLEEP_MS: '1500', FAKE_CODEX_TOOL_EVENTS: '1', FAKE_CODEX_THREAD: 'thread-live', FAKE_CODEX_TEXT: '好的' } });
-    const backend = new CodexBackend({ runner, imagesDir: path.join(dir, 'images'), ticketsDir: path.join(dir, 'tickets'), reasoningEffort: () => r.settings.current().codexReasoningEffort });
-    trace.event('tk-live', 'received', { scope: 'group:7', detail: { text: `帮我查一下 ${secret}`, sender: '小红', message_id: '1' } });
-    trace.event('tk-live', 'routed', { detail: { route: 'agent' } });
-    trace.event('tk-live', 'dispatched', { detail: { attempts: 1 } });
-    const turn = trace.span('tk-live', 'backend:codex', () => backend.handle({ ticket: 'tk-live', scope: 'group:7', access: 'group:7', threadKey: 'group:7', text: '帮我查一下',
-      source: { type: 'group', user_id: '1', group_id: '7', nickname: '小红' } }, { signal: new AbortController().signal, onEvent: () => {} }), { backend: 'codex' });
+    const turns = {
+      records: () => [],
+      render: async () => ({ text: '帮我查一下', images: [], source: { type: 'group' as const, user_id: '1', group_id: '7', nickname: '小红' } }),
+      binding: (threadKey: string) => ({ threadKey, identity: { kind: 'user' as const, sender: '1' }, scope: 'group:7', inputs: [] }),
+    };
+    const backend = new CodexBackend({ runner, imagesDir: path.join(dir, 'images'), turns, reasoningEffort: () => r.settings.current().codexReasoningEffort });
+    let finish!: () => void;
+    const turn = new Promise<void>(resolve => { finish = resolve; });
+    backend.attach({ onTurnStarted: () => {}, onActivity: () => {}, onTurnCompleted: () => finish() });
+    // 卡片按回合（turn:<id>）聚合；回合的输入正文由宿主事件记在同一键下。
+    const { turnId } = await backend.startTurn('group:7', [], { kind: 'user', sender: '1' });
+    const key = 'turn:' + turnId;
+    trace.event(key, 'received', { scope: 'group:7', detail: { text: `帮我查一下 ${secret}`, sender: '小红', message_id: '1' } });
     let settled = false; void turn.then(() => { settled = true; });
     const during = await readUntil(sse, t => frames(t, 'card').some(f => f.item.stage === 'tool:command_execution' && f.item.status === 'started') && frames(t, 'card').some(f => f.item.stage === 'tool:qq_recent' && f.item.status === 'started'));
     expect(settled).toBe(false); // 回合仍在进行
     const cards = frames(during, 'card');
     const last = cards.at(-1)!.card as LiveCard;
-    expect(last).toMatchObject({ ticket: 'tk-live', scope: 'group:7', route: 'agent', backend: 'codex', state: 'running', sender: '小红' });
+    expect(last).toMatchObject({ ticket: key, scope: 'group:7', backend: 'codex', state: 'running', sender: '小红' });
     expect(['tool:qq_recent', 'tool:command_execution']).toContain(last.phase);
     expect(cards.find(f => f.item.stage === 'tool:command_execution')!.item.summary).toContain('ls /workspace');
     expect(frames(during, 'snapshot')).toHaveLength(1);
     expect(during).not.toContain(secret); expect(during).toContain('[已隐藏]');
     // 服务端渲染的 /live 同样脱敏，并显示当前阶段
     const html = await (await r.get('/live')).text();
-    expect(html).toContain('data-ticket="tk-live"'); expect(html).toContain('当前：'); expect(html).not.toContain(secret);
+    expect(html).toContain(`data-ticket="${key}"`); expect(html).toContain('当前：'); expect(html).not.toContain(secret);
     await turn;
-    trace.event('tk-live', 'reply_sent', { detail: { terminal: true, reply: '好的' } });
-    const card = r.live.snapshot().find(c => c.ticket === 'tk-live')!;
+    trace.event(key, 'reply_sent', { detail: { terminal: true, reply: '好的' } });
+    const card = r.live.snapshot().find(c => c.ticket === key)!;
     expect(card).toMatchObject({ state: 'done', outcome: 'reply_sent', phase: '' });
     expect(card.finished).not.toBeNull();
     expect(card.items.map(i => i.stage)).toEqual(expect.arrayContaining(['thread_wait', 'model_turn', 'model_usage', 'tool:qq_recent']));
     const after = await (await r.get('/live')).text();
-    expect(after).toMatch(/<details data-ticket="tk-live">[\s\S]*href="\/tickets\/tk-live"/);
+    expect(after).toContain(`<details data-ticket="${key}">`);
+    expect(after).toContain(`href="/tickets/${encodeURIComponent(key)}"`);
   }, 20_000);
 
   it('快照分帧并等待 drain：5 张 × 80 事件的大快照完整送达慢读者；超过 100 张卡片也不丢', async () => {

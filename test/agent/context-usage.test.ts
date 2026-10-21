@@ -193,14 +193,14 @@ describe("codex 上下文采集", () => {
         seen.push({ ...e, turns: store.get("codex", "owner")?.turns ?? 0 });
     });
     try {
-      await runner.ask("one", { ticket: "multi-one", threadKey: "owner" });
-      await runner.ask("two", { ticket: "multi-two", threadKey: "owner" });
+      await runner.ask("one", { turnId: "multi-one", threadKey: "owner" });
+      await runner.ask("two", { turnId: "multi-two", threadKey: "owner" });
       expect(seen.map(e => [e.ticket, e.stage, e.turns])).toEqual([
-        ["multi-one", "model_request", 0], ["multi-one", "model_request", 0], ["multi-one", "context_usage", 1],
-        ["multi-two", "model_request", 1], ["multi-two", "model_request", 1], ["multi-two", "context_usage", 2],
+        ["turn:multi-one", "model_request", 0], ["turn:multi-one", "model_request", 0], ["turn:multi-one", "context_usage", 1],
+        ["turn:multi-two", "model_request", 1], ["turn:multi-two", "model_request", 1], ["turn:multi-two", "context_usage", 2],
       ]);
       expect(seen.filter(e => e.stage === "model_request").map(e => e.detail)).toEqual([1, 2].flatMap(turn =>
-        [1, 2].map(seq => ({ backend: "codex", key: "owner", ticket: turn === 1 ? "multi-one" : "multi-two", turn, seq,
+        [1, 2].map(seq => ({ backend: "codex", key: "owner", ticket: turn === 1 ? "turn:multi-one" : "turn:multi-two", turn, seq,
           input: seq === 1 ? 1000 : 1500, cached: seq === 1 ? 750 : 1000, output: seq === 1 ? 50 : 100,
           window: 500000, effective_window: 475000, at: expect.any(Number) }))));
       expect(store.get("codex", "owner")).toMatchObject({ usedTokens: 1500, cachedTokens: 1000, turns: 2 });
@@ -360,8 +360,8 @@ describe("codex 上下文采集", () => {
   it("启动与多个回合共用一次目录查询，JSONL 用量更新，不重复累加缓存", async () => {
     const { runner, store, catalogLog, dir } = runnerSetup();
     await Promise.all([runner.initializeContextUsage(), runner.initializeContextUsage()]);
-    await runner.ask("one", { ticket: "one", threadKey: "owner" });
-    await runner.ask("two", { ticket: "two", threadKey: "owner" });
+    await runner.ask("one", { turnId: "one", threadKey: "owner" });
+    await runner.ask("two", { turnId: "two", threadKey: "owner" });
     expect(store.get("codex", "owner")).toMatchObject({ usedTokens: 1000, cachedTokens: 750, windowTokens: 500000, turns: 2, source: "turn" });
     const calls = (await fs.readFile(catalogLog, "utf8")).trim().split("\n").map(line => JSON.parse(line));
     expect(calls).toEqual([{ argv: ["debug", "models"], codexHome: path.join(dir, "codex") }]);

@@ -5,7 +5,6 @@ import { AssistantEntry, CompactionEntry, DEFAULT_COMPACTION_POLICY, watchEvents
   type AgentEventStream, type Conversation, type Cursor, type EntryId, type EntryRecord, type Harness, type Storage } from "@earendil-works/pi-durable";
 import { usageCost, usageFields } from "../shared/usage.js";
 import { ContextUsageStore, type ContextUsage, type ContextUsageHistory, type ContextRequestUsage } from "./context-usage.js";
-import { PiRequestDoc } from "./pi-tools/request.js";
 
 /** pi-durable README / CompactionPolicy：backgroundTokens 是阻塞阈值以下的提前量。 */
 export function piContextCapacity(windowTokens: number, reserveTokens = DEFAULT_COMPACTION_POLICY.reserveTokens,
@@ -69,8 +68,9 @@ export class PiContextObserver {
     });
   }
 
+  /** keyOf 给出当前回合的观测键（turn:<id>），没有回合时记在 @context。 */
   static async open(harness: Harness, conv: Conversation, key: string, store: ContextUsageStore, storage: Storage,
-    capacity: Pick<ContextUsage, "windowTokens" | "compaction">, ticket?: string): Promise<PiContextObserver> {
+    capacity: Pick<ContextUsage, "windowTokens" | "compaction">, ticket?: string, keyOf?: () => string | undefined): Promise<PiContextObserver> {
     const stream = await watchEvents(harness, conv.id, BACKGROUND_CONTEXT);
     store.ensure("pi", key, capacity, ticket);
     // 快照与监听原子注册，历史不重新发请求事件。
@@ -82,8 +82,7 @@ export class PiContextObserver {
     observer.lastAssistant = stream.snapshot.entries.reduce((last, e) => AssistantEntry.is(e) ? Math.max(last, e.id) : last, 0);
     observer.lastCompaction = stream.snapshot.entries.reduce((last, e) => CompactionEntry.is(e) ? Math.max(last, e.id) : last, 0);
     stream.start(events => observer.enqueue(async () => {
-      const bound = await harness.snapshot(PiRequestDoc, conv.id, BACKGROUND_CONTEXT);
-      const ticket = bound?.ticket || "@context";
+      const ticket = keyOf?.() || "@context";
       for (const event of events) {
         if (event.type === "message_end" || event.type === "entry_appended") await observer.consume(event.entry, ticket);
         else if (event.type === "snapshot") for (const entry of event.entries) await observer.consume(entry, ticket);

@@ -24,7 +24,7 @@ const NOW = bj(2026, 10, 20, 12, 0);
 function schedule(overrides: Partial<Schedule> = {}): Schedule {
   return {
     id: "s1", revision: 3, name: "早报", prompt: "整理新闻发给我", conversation: "group:123",
-    rule: { kind: "rrule", rrule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=30", dtstart: NOW }, status: "active", mode: "thread",
+    rule: { kind: "rrule", rrule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=30", dtstart: NOW }, status: "active",
     options: { stale_after_ms: 600_000, timeout_ms: 300_000 }, created_by: "qq:1", created_at: NOW, updated_at: NOW,
     next_fire_at: bj(2026, 10, 21, 8, 30), failures: 0, runs: [], ...overrides,
   };

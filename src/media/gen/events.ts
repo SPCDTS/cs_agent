@@ -36,8 +36,11 @@ export class ImageEventSpool {
   }
 }
 
-/** 领取后有界读取，逐行校验，再由主进程秘密注册表脱敏入库；拒绝伪造票据与阶段。 */
-export async function ingestImageEvents(dir: string, observer: Trace = trace): Promise<void> {
+/**
+ * 领取后有界读取，逐行校验，再由主进程秘密注册表脱敏入库；拒绝伪造票据与阶段。
+ * 观测键由主进程决定：缺省为目录名（生图票据），会话目录传入回合键。
+ */
+export async function ingestImageEvents(dir: string, observer: Trace = trace, key = path.basename(dir)): Promise<void> {
   const file = path.join(dir, filename), claimed = file+'.'+randomUUID()+'.draining';
   try {
     const st = await fs.lstat(dir);
@@ -58,7 +61,7 @@ export async function ingestImageEvents(dir: string, observer: Trace = trace): P
     for (const line of raw.split('\n').slice(0,IMAGE_EVENT_LINES)) {
       try {
         const e=schema.parse(JSON.parse(line));
-        observer.event(path.basename(dir),e.stage,{ts:e.ts,status:e.status,durationMs:e.duration_ms ?? undefined,detail:e.detail});
+        observer.event(key,e.stage,{ts:e.ts,status:e.status,durationMs:e.duration_ms ?? undefined,detail:e.detail});
       } catch { /* 损坏或非白名单行忽略 */ }
     }
   } catch { /* 观测故障不影响图片收取 */ }

@@ -3,23 +3,27 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { Type } from "@earendil-works/pi-ai";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { defineTool, type Harness } from "@earendil-works/pi-durable";
+import { defineTool } from "@earendil-works/pi-durable";
 import { ASPECTS, SIZES, validateImageOptions, type ImageOptions } from "../../media/gen/image-options.js";
-import { referenceUploads, ticketImageDir, type ImageBackend } from "../../media/gen/image-gen.js";
+import { referenceUploads, type ImageBackend } from "../../media/gen/image-gen.js";
 import type { ContextStore } from "../../context/store.js";
 import { parseAccess } from "../../context/access.js";
 import { validateReferencesWithMedia } from "../../context/image-references.js";
 import { collectNewImages } from "../../media/gen/image-collect.js";
-import { readPendingImages, savePendingImage, type PendingImageJob } from "../../media/gen/image-pending.js";
+import { attachmentDirs } from "../../media/attach-paths.js";
 import { UnknownJobError } from "../../media/gen/image-gen.js";
 import { readImageFiles, validImageFile } from "../../media/gen/image-files.js";
-import { PiRequestDoc } from "./request.js";
+import { traceKey, type PiCallBinding } from "./request.js";
 
 export type PiImageBackend = Pick<ImageBackend, "name" | "submit" | "collect" | "reconcile" | "clearReferences">;
 
-/** 生图不是安全重放操作：中断后由 pi-durable 返回 interrupted，不盲目再提交。 */
-export function imageTool(dataDir: string, backend: PiImageBackend, getHarness: () => Harness, store: ContextStore) {
+const within = (root: string, file: string) => path.resolve(file).startsWith(path.resolve(root) + path.sep);
+
+/**
+ * 生图在回合内同步完成（没有单轮时限，只受生图收取超时约束）：每次调用一个目录 images/<会话>/call-<调用键摘要>。
+ * 不是安全重放操作：中断后由 pi-durable 返回 interrupted，不盲目再提交；崩溃中断的任务不再补收（第 2 阶段取消 late images）。
+ */
+export function imageTool(dataDir: string, backend: PiImageBackend, binding: (conversationId: number) => Promise<PiCallBinding | undefined>, store: ContextStore) {
   return defineTool({
     name: "generate_image", description: "按描述生成或编辑图片，返回路径后用 send_message 发送；参考图只能选本轮附件或当前会话范围内已召回的图片。",
     replay: "unsafe",
@@ -34,74 +38,48 @@ export function imageTool(dataDir: string, backend: PiImageBackend, getHarness: 
       transparent: Type.Optional(Type.Boolean()),
     }, { additionalProperties: false }),
     async execute(args, api, context) {
-      const request = await api.snapshot(PiRequestDoc, api.conversationId, context);
-      const call = request?.calls[String(api.taskId)];
-      if (!request?.ticket || !call || call.kind !== "generate_image") throw new Error("生图请求未绑定");
-      const signal = AbortSignal.any([AbortSignal.timeout(Math.max(1, request.deadline - Date.now())), ...(context.abortSignal ? [context.abortSignal] : [])]);
+      const bound = await binding(Number(api.conversationId));
+      if (!bound) throw new Error("生图请求未绑定");
+      const signal = context.abortSignal ?? new AbortController().signal;
       signal.throwIfAborted();
-      let opts: ImageOptions = validateImageOptions(args);
-      opts.reference_images = await validateReferencesWithMedia(opts.reference_images ?? [], request.images,
-        path.join(dataDir, "incoming", request.ticket), { dataDir, access: parseAccess(request.access), openStore: () => store });
+      const opts: ImageOptions = validateImageOptions(args);
+      const media = { dataDir, access: parseAccess(bound.access), openStore: () => store };
+      const refs: string[] = [];
+      for (const file of opts.reference_images ?? []) {
+        // 本轮附件按其所在输入的 incoming 目录校验；其余按读取范围走媒体库。
+        const key = bound.inputs.find(input => within(path.join(dataDir, "incoming", input), file)) ?? bound.inputs[0] ?? "none";
+        refs.push(...await validateReferencesWithMedia([file], bound.images, path.join(dataDir, "incoming", key), media));
+      }
+      opts.reference_images = refs;
       const root = path.resolve(dataDir, "images");
       await fs.mkdir(root, { recursive: true });
       if (await fs.realpath(root) !== path.join(await fs.realpath(dataDir), "images")) throw new Error("图片根目录不能是符号链接");
-      const ticketDir = ticketImageDir(root, request.ticket);
-      await fs.mkdir(ticketDir, { recursive: true });
-      if (await fs.realpath(ticketDir) !== ticketDir) throw new Error("票据图片目录不能是符号链接");
-      const markers = await readPendingImages(ticketDir);
-      const saved = request.imageJobs?.find(j => j.status !== "done") ?? request.imageJobs?.find(j => j.ordinal === call.ordinal);
-      const ordinal = saved?.ordinal ?? call.ordinal;
-      const dir = path.join(ticketDir, "call-" + ordinal);
+      const threadDir = attachmentDirs(dataDir, bound.threadKey).attachDir;
+      await fs.mkdir(threadDir, { recursive: true });
+      if (await fs.realpath(threadDir) !== threadDir) throw new Error("会话图片目录不能是符号链接");
+      const digest = createHash("sha256").update(bound.threadKey + "\n" + api.callId).digest("hex");
+      const dir = path.join(threadDir, "call-" + digest.slice(0, 16));
       await fs.mkdir(dir, { recursive: true });
       if (await fs.realpath(dir) !== dir) throw new Error("生图目录不能是符号链接");
-      const subfolder = "pi-" + createHash("sha256").update(request.ticket).digest("hex").slice(0, 24) + "-" + ordinal;
-      let job: PendingImageJob = markers.find(j => j.filenamePrefix === subfolder) ?? saved ?? {
-        filenamePrefix: subfolder, options: opts, callDir: dir, backend: backend.name, submittedAt: Date.now(), status: "intent",
-      };
-      const fresh = !saved && !markers.some(j => j.filenamePrefix === subfolder);
-      opts = job.options;
-      const persist = async () => {
-        // 文件镜像先写；即使 harness 正在关闭，prompt_id 也可由下一次工具或 lateImages 读回。
-        const { ordinal: _ordinal, ...value } = job as PendingImageJob & { ordinal?: number };
-        await savePendingImage(ticketDir, value);
-        await getHarness().commit(async tx => {
-          const doc = await tx.doc(PiRequestDoc, api.conversationId);
-          if (doc.ticket !== request.ticket) throw new Error("生图绑定已变更");
-          doc.imageJobs ??= [];
-          const index = doc.imageJobs.findIndex(j => j.ordinal === ordinal);
-          if (index < 0) doc.imageJobs.push({ ...job, ordinal }); else doc.imageJobs[index] = { ...job, ordinal };
-        }, BACKGROUND_CONTEXT);
-      };
+      const subfolder = "pi-" + digest.slice(0, 24);
       const uploads = referenceUploads(opts, subfolder);
       const manifest = path.join(dir, "remote-uploads.json");
       if (uploads.length && !backend.clearReferences) throw new Error("生图后端不支持参考图清理");
-      if (fresh) {
-        await persist();
-        if (uploads.length) await fs.writeFile(manifest, JSON.stringify(uploads), { encoding: "utf8", flag: "wx" });
-        job.prompt_id = await observeImages(backend, request.ticket).submit(opts, { filenamePrefix: subfolder, referenceSubfolder: subfolder, count: opts.count ?? 1, imageOptions: opts }, signal);
-        job.status = "submitted";
-        await persist();
+      if (uploads.length) await fs.writeFile(manifest, JSON.stringify(uploads), { encoding: "utf8" });
+      const observed = observeImages(backend, traceKey(bound));
+      const promptId = await observed.submit(opts, { filenamePrefix: subfolder, referenceSubfolder: subfolder, count: opts.count ?? 1, imageOptions: opts }, signal);
+      try {
+        await observed.collect(promptId, dir, signal, opts);
+      } catch (err) {
+        if (!(err instanceof UnknownJobError)) throw err;
+        await observed.reconcile({ filenamePrefix: subfolder, count: opts.count ?? 1, imageOptions: opts }, dir, signal, async () => {});
       }
-      if (job.status !== "done") {
-        try {
-          if (!job.prompt_id) throw new UnknownJobError("intent");
-          await observeImages(backend, request.ticket).collect(job.prompt_id, dir, signal, opts);
-        } catch (err) {
-          if (!(err instanceof UnknownJobError)) throw err;
-          await observeImages(backend, request.ticket).reconcile({ filenamePrefix: subfolder, count: opts.count ?? 1, imageOptions: opts }, dir, signal, async step => {
-            if (step.prompt_id) { job.prompt_id = step.prompt_id; job.status = "submitted"; await persist(); }
-          });
-        }
-        const images = await collectNewImages(dir, new Set());
-        const files = await readImageFiles(dir);
-        if (!images.length || (files && (files.some(f => !f.downloaded) ||
-            !(await Promise.all(files.map(f => validImageFile(path.join(dir, f.filename))))).every(Boolean)))) throw new Error("未完整收取有效图片");
-        job = { ...job, status: "done", remoteTerminal: true };
-        await persist();
-      }
+      const images = await collectNewImages(dir, new Set());
+      const files = await readImageFiles(dir);
+      if (!images.length || (files && (files.some(f => !f.downloaded) ||
+          !(await Promise.all(files.map(f => validImageFile(path.join(dir, f.filename))))).every(Boolean)))) throw new Error("未完整收取有效图片");
       // 仅确认任务完成后清理；中断/超时保留参考图供远端继续读取。
       if (uploads.length) { await backend.clearReferences!(uploads); await fs.unlink(manifest).catch(() => undefined); }
-      const images = await collectNewImages(dir, new Set());
       return { output: [{ type: "text" as const, text: JSON.stringify({ images, note: "请用 send_message 的 images 发送这些图片" }) }] };
     },
   });

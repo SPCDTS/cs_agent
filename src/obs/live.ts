@@ -1,5 +1,5 @@
 /**
- * 进行中会话的实时视图（设计 §8.4）：订阅 trace 的进程内总线（trace.tap），按票据维护内存卡片，
+ * 进行中会话的实时视图（设计 §8.4）：订阅 trace 的进程内总线（trace.tap），按回合（turn:<id>；生图前缀仍按票据）维护内存卡片，
  * 并把每个事件以增量推送给 /live 的 SSE 客户端。不读数据库、不轮询；事件已在 trace 内脱敏，
  * 这里只再做摘要与截断。卡片在终态后标记完成，保留最近若干张供页面收起显示；超出数量或过期的
  * 完成卡片在终态事件后与定时器里即时淘汰，并推送 remove 增量。每张卡片内的事件带单调递增的 seq，
@@ -100,7 +100,8 @@ export class LiveBus {
       const usage = toContextUsage(e.detail);
       if (usage) this.publish({ type: 'context', usage });
     }
-    if (e.ticket.startsWith('@')) return; // 设置变更、压缩等系统事件不是会话
+    // 设置变更、压缩等系统事件不是会话；输入（in:）与会话级（thr:）事件不单独成卡，回合卡片已带输入正文。
+    if (e.ticket.startsWith('@') || e.ticket.startsWith('in:') || e.ticket.startsWith('thr:')) return;
     const terminal = TERMINAL.has(e.stage) && e.detail.terminal === true;
     let card = this.cards.get(e.ticket);
     if (!card) {
@@ -116,8 +117,6 @@ export class LiveBus {
       card.text = s(d.text, 500); card.sender = s(d.sender, 60);
       if (typeof d.route === 'string') card.route = d.route;
     }
-    // 定时运行没有入站消息，用运行身份充当卡片正文。
-    if (!card.text && e.ticket.startsWith('run_')) card.text = '定时任务运行';
     if (e.stage === 'routed' && typeof d.route === 'string') card.route = d.route;
     if (e.stage === 'dispatched' && card.state === 'queued') card.state = 'running';
     if (typeof d.backend === 'string' && (e.stage.startsWith('backend:') || e.stage === 'dispatched' || (!card.backend && e.stage.startsWith('image:')))) card.backend = d.backend;

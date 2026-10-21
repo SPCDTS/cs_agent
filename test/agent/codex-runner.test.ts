@@ -1,6 +1,4 @@
 import { redactText } from "../../src/shared/redact.js";
-import { CodexBackend } from "../../src/agent/backends/codex.js";
-import { CodexDeliveryNotes, deliveryNoteText } from "../../src/agent/delivery-note.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { log } from "../../src/shared/log.js";
 import { RecallTokens } from "../../src/context/media-recall-server.js";
@@ -75,53 +73,6 @@ function setup(extra: { sleepMs?: number; timeoutMs?: number; thread?: string; i
       : [];
   return { dir, runner, calls };
 }
-
-it("Codex 提醒跨重启保留，只注入对应线程下一轮的来源行之后，开始后清除", async () => {
-  const f = setup(), notes = new CodexDeliveryNotes(f.dir);
-  const note = { ticket: "previous", threadKey: "group:1" as const, fallback: "原兜底\n第二行" };
-  const backend = new CodexBackend({ runner: f.runner, imagesDir: path.join(f.dir, "images"), ticketsDir: path.join(f.dir, "tickets") });
-  await backend.recordDeliveryNote(note);
-  await backend.recordDeliveryNote(note);
-  const prompt = buildCodexPrompt({ type: "group", group_id: "1", user_id: "2", nickname: "测试者" }, "继续",
-    { time: 1_760_000_000, quote: { message_id: "3", nickname: "引用者", text: "引用正文" } });
-  await f.runner.ask(prompt, { threadKey: "group:2" });
-  expect(await notes.pending(note.threadKey)).toMatchObject(note);
-  const restarted = new CodexRunner(setupOpts(f.dir));
-  await restarted.ask(prompt, { threadKey: note.threadKey });
-  expect(await notes.pending(note.threadKey)).toBeUndefined();
-  // 已消费的同票据重放不能重新挂起提醒。
-  await backend.recordDeliveryNote(note);
-  await restarted.ask(prompt, { threadKey: note.threadKey });
-  const calls = f.calls().filter(call => call.phase === "start");
-  expect(calls.map(call => call.stdin)).toEqual([prompt,
-    [prompt.split("\n")[0], deliveryNoteText(note.fallback).replace("\n", " "), ...prompt.split("\n").slice(1)].join("\n"), prompt]);
-});
-
-it("Codex 启动失败保留提醒，缺失线程回退的新回合仍能收到", async () => {
-  const f = setup(), notes = new CodexDeliveryNotes(f.dir);
-  const note = { ticket: "failed-before-start", threadKey: "group:1" as const, fallback: "兜底原文" };
-  await notes.record(note);
-  const failing = new CodexRunner({ ...setupOpts(f.dir), command: [path.join(f.dir, "missing-codex")] });
-  const prompt = buildCodexPrompt({ type: "group", group_id: "1", user_id: "2", nickname: "" }, "重试");
-  await expect(failing.ask(prompt, { threadKey: note.threadKey })).rejects.toThrow();
-  expect(await notes.pending(note.threadKey)).toMatchObject(note);
-  seedScope(f.dir, { thread_id: "missing-thread" });
-  await new CodexRunner(setupOpts(f.dir)).ask(prompt, { threadKey: note.threadKey });
-  expect(f.calls().filter(call => call.phase === "start").every(call => call.stdin.includes(deliveryNoteText(note.fallback)))).toBe(true);
-  expect(await notes.pending(note.threadKey)).toBeUndefined();
-});
-
-it("Codex turn.started 时清除提醒，结束前的新提醒不被旧回合清除", async () => {
-  const f = setup({ sleepMs: 500 }), notes = new CodexDeliveryNotes(f.dir);
-  const note = { ticket: "before-start", threadKey: "group:1" as const, fallback: "旧兜底" };
-  await notes.record(note);
-  const run = f.runner.ask("继续", { threadKey: note.threadKey });
-  await vi.waitFor(async () => expect(await notes.pending(note.threadKey)).toBeUndefined());
-  const next = { ...note, ticket: "after-start", fallback: "新兜底" };
-  await notes.record(next);
-  await run;
-  expect(await notes.pending(note.threadKey)).toMatchObject(next);
-});
 
 describe("extractThreadId", () => {
   it("reads thread.started thread_id and tolerates session_id variants", () => {
@@ -624,11 +575,11 @@ describe("qq_context access override and §3.2 header", () => {
     for (const call of calls().filter(c => c.phase === "start")) expect(call.argv.some((arg: string) => arg.includes("mcp_servers.image_gen"))).toBe(false);
   });
 
-  it("附件目录每轮注入当前票据和本会话工作区，并安全转义 Windows 路径", async () => {
+  it("附件目录每轮注入本会话目录和本会话工作区，并安全转义 Windows 路径", async () => {
     const { runner, calls, dir } = setup();
-    for (const ticket of ["t1", "t2"]) await runner.ask("hi", { threadKey: "group:1", ticket });
+    for (const turnId of ["t1", "t2"]) await runner.ask("hi", { threadKey: "group:1", turnId });
     const starts = calls().filter(c => c.phase === "start");
-    for (let i = 0; i < 2; i++) expect(starts[i].argv).toEqual(expect.arrayContaining(qqAttachmentArgs(path.join(dir, "images", `t${i + 1}`), path.join(dir, "files", `t${i + 1}`), path.join(dir, "ws", "group_1"))));
+    for (let i = 0; i < 2; i++) expect(starts[i].argv).toEqual(expect.arrayContaining(qqAttachmentArgs(path.join(dir, "images", "group_1"), path.join(dir, "files", "group_1"), path.join(dir, "ws", "group_1"))));
     for (const bad of ["relative", "/data/images/../codex", '/data/images/a"b', "/data/images/a b"]) expect(() => qqAttachmentArgs(bad, "/data/files/t1", "/workspace/owner")).toThrow();
   });
 
@@ -751,12 +702,12 @@ describe("codex 召回令牌生命周期", () => {
       timeoutMs: mode === "timeout" ? 500 : 10_000,
       env: { ...opts.env, FAKE_CODEX_SLEEP_MS: mode === "timeout" ? "20000" : "0" },
     });
-    try { await runner.ask("test", { threadKey: "group:1", ticket: "tk", qqAccess: "all", actor: "qq:1", actorIsOwner: true, source: { type: "group", user_id: "1", group_id: "1", nickname: "" } }); } catch { /* 生命周期同样覆盖异常 */ }
+    try { await runner.ask("test", { threadKey: "group:1", turnId: "tk", qqAccess: "all" }); } catch { /* 生命周期同样覆盖异常 */ }
     expect(issue).toHaveBeenCalledOnce();
     const lease = issue.mock.results[0]!.value;
     expect(tokens.valid(lease.token)).toBe(false);
     expect(redactText(lease.token)).toBe(lease.token);
-    expect(issue.mock.calls[0]![0]).toMatchObject({ ticket: "tk", access: { kind: "all" }, actor: "qq:1", actorIsOwner: true, source: { type: "group", user_id: "1", group_id: "1" } });
+    expect(issue.mock.calls[0]![0]).toMatchObject({ threadKey: "group:1", turnId: "tk", access: { kind: "all" } });
     if (mode !== "spawn") {
       const recorded = JSON.parse(readFileSync(path.join(dir, "calls.jsonl"), "utf8").split("\n")[0]!);
       const argv = recorded.argv as string[];
@@ -823,10 +774,10 @@ describe("codex 回合结束后的上下文用量", () => {
     store.recordTurn("codex", "group:1", { windowTokens: 500000, usedTokens: 42000, cachedTokens: 12000 });
     if (mode === "stale") writeRollout(dir, "rollout-thread-resumed.jsonl", "2000-01-01T00:00:00Z");
     const before = store.get("codex", "group:1")!, warn = vi.spyOn(log, "warn");
-    await runner.ask("没有新用量", { threadKey: "group:1", ticket: "usage-fallback" });
+    await runner.ask("没有新用量", { threadKey: "group:1", turnId: "usage-fallback" });
     expect(store.get("codex", "group:1")).toEqual({ ...before, turns: before.turns + 1 });
     expect(warn.mock.calls.filter(([message]) => message === warning)).toEqual([[warning, {
-      key: "group:1", thread_id: "thread-resumed", ticket: "usage-fallback",
+      key: "group:1", thread_id: "thread-resumed", ticket: "turn:usage-fallback",
       reason: mode === "stale" ? "stale rollout usage" : "missing rollout usage",
     }]]);
   });
@@ -852,8 +803,8 @@ describe("codex 回合结束后的上下文用量", () => {
 
 it("每轮覆盖召回归属，新线程 session 为空，resume 使用线程 ID", async () => {
   const s = setup();
-  await s.runner.ask('首轮', { ticket: 'ticket-a', qqAccess: 'group:7', threadKey: 'group:7' });
-  await s.runner.ask('续轮', { ticket: 'ticket-b', qqAccess: 'group:7', threadKey: 'group:7' });
+  await s.runner.ask('首轮', { turnId: 'ticket-a', qqAccess: 'group:7', threadKey: 'group:7' });
+  await s.runner.ask('续轮', { turnId: 'ticket-b', qqAccess: 'group:7', threadKey: 'group:7' });
   const starts = s.calls().filter(c => c.phase === 'start');
   expect(starts[0].argv).toEqual(expect.arrayContaining(['mcp_servers.qq_context.env.QQ_TICKET="ticket-a"',
     'mcp_servers.qq_context.env.QQ_BACKEND="codex"', 'mcp_servers.qq_context.env.QQ_SESSION=""']));
@@ -899,7 +850,7 @@ it("并发会话各自继承本轮令牌，argv 不含任一令牌，无绑定�
   const issue = vi.spyOn(tokens, "issue");
   try {
     const runner = new CodexRunner({ ...opts, recallTokens: tokens, env: { ...opts.env, IM_TOKEN: "stale", QQ_RECALL_TOKEN: "stale" } });
-    await Promise.all([1, 2].map(n => runner.ask("并行", { threadKey: `group:${n}`, ticket: "ticket-" + n, qqAccess: "group:" + n })));
+    await Promise.all([1, 2].map(n => runner.ask("并行", { threadKey: `group:${n}`, turnId: "ticket-" + n, qqAccess: "group:" + n })));
     const leases = issue.mock.results.map(r => r.value.token as string);
     expect(new Set(leases).size).toBe(2);
     const calls = readFileSync(path.join(dir, "calls.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(c => c.phase === "start");

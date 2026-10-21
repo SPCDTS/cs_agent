@@ -220,15 +220,17 @@ export class ContextStore {
     return Number(r.changes) > 0;
   }
 
-  /** 每条 Outbox 消息一行；真实 id 与完整正文可立即用于引用查找。 */
-  recordSent(row: import("../channel/outbox.js").OutboxRow, source: import("../channel/types.js").ReplyTicketRecord): void {
+  /**
+   * 每条 Outbox 消息一行；真实 id 与完整正文可立即用于引用查找。ticket 列存 Outbox 行键（图片召回据此核对发送）。
+   * selfId 为发出账号，replyTo 为本轮输入的 message_id（只在发往输入所在会话时）。
+   */
+  recordSent(row: import("../channel/outbox.js").OutboxRow, source: { selfId: string; replyTo: string | null }): void {
     if (row.status !== "sent" || !row.message_id) throw new Error("上下文仅接受已发送消息");
     const scope = row.message_type + ":" + row.target_id;
-    this.db.prepare("DELETE FROM messages WHERE ticket=? AND message_id=?").run(row.ticket, "self:" + row.ticket);
     this.db.prepare(`INSERT OR IGNORE INTO messages
       (scope,message_id,time,user_id,nickname,is_self,text,reply_to_id,ticket,status,action,image_count)
       VALUES (?,?,?,?,'我',1,?,?,?,'已回复',?,?)`).run(scope, row.message_id, Math.floor(Date.parse(row.sent_at ?? row.created_at) / 1000),
-      source.self_id, row.text, scope === scopeOf(source) ? source.source_message_id : null, row.key, row.key.endsWith("#fallback") ? "fallback" : "reply", row.images.length);
+      source.selfId, row.text, source.replyTo, row.key, row.system ? "notice" : "reply", row.images.length);
   }
 
   /** 收到消息即写入机器人"处理中"行（幂等：每个票据一行）。 */

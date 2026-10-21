@@ -8,9 +8,9 @@ import { cleanupIncoming, downloadIncoming, INCOMING_RETENTION_MS } from "../../
 import { log } from "../../src/shared/log.js";
 import { trace, type LiveEvent } from "../../src/shared/trace.js";
 import { hasUsableContent, normalizeMessage } from "../../src/qq/policy.js";
-import { ticketIdFor } from "../../src/qq/reply-store.js";
+import { inboundKey } from "../../src/qq/reply-store.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
-import { inboundFromTicket } from "../../src/channel/ticket.js";
+import { inboundFromRecord } from "../../src/channel/ticket.js";
 import type { InboundMessage, Channel } from "../../src/channel/types.js";
 import { tmp } from "../agent/helpers.js";
 import { FakeOneBot, groupEvent, privateEvent, SELF_ID, TOKEN, waitFor } from "./fake-onebot.js";
@@ -59,9 +59,9 @@ describe("触发消息参考图", () => {
     expect(message.images).toEqual([path.join(dir, "incoming", ticket, "1.png")]);
     expect(message.route_text).toBe("奶龙: 横 改成红色");
     expect(await fs.readFile(message.images[0]!)).toEqual(PNG);
-    const saved = (await bridge.getTicket(ticket))!;
-    expect(saved.source_images).toEqual(message.images);
-    expect(inboundFromTicket(saved).images).toEqual(message.images);
+    const saved = bridge.inbox.getInbound(ticket)!;
+    expect(saved.images).toEqual(message.images);
+    expect(inboundFromRecord(saved).images).toEqual(message.images);
   });
   it("图片在真实 at 前面时仍正确识别前缀文本", async () => {
     napcat.push(groupEvent("30001", "29999", "", true, { message: [
@@ -84,7 +84,7 @@ describe("触发消息参考图", () => {
     await waitFor(() => received.length === 1);
     expect(downloads).toHaveLength(0);
     expect(received[0]!.message.image_error).toContain("最多 3 张");
-    expect((await bridge.getTicket(received[0]!.ticket))?.source_image_error).toContain("最多 3 张");
+    expect(bridge.inbox.getInbound(received[0]!.ticket)?.image_error).toContain("最多 3 张");
   });
   it.each(["length", "stream", "magic", "local"])("拒绝 %s，流大小限制不能靠 Content-Length 绕过", async mode => {
     cdn.removeAllListeners('request');
@@ -115,17 +115,17 @@ describe("空内容过滤与入站观测", () => {
     const events: LiveEvent[] = []; const off = trace.tap(e => events.push(e));
     const info = vi.spyOn(log, "info");
     const event = privateEvent("20001", "", { message: parts });
-    const ticket = ticketIdFor(normalizeMessage(event)!);
+    const ticket = inboundKey(normalizeMessage(event)!);
     try {
       napcat.push(event);
       await waitFor(() => events.some(e => e.stage === "ignored"));
       expect(events.map(e => e.stage)).toEqual(["received", "ignored"]);
       const detail = { segments: parts.length ? ["text"] : [], message_id: String(event.message_id), sender: "nick-20001" };
-      expect(events[0]).toMatchObject({ ticket, scope: "private:20001", detail: { ...detail, text: parts.length ? " \n\t" : "" } });
-      expect(events[1]).toMatchObject({ ticket, scope: "private:20001", detail: { ...detail, reason: "empty content" } });
+      expect(events[0]).toMatchObject({ ticket: "in:" + ticket, scope: "private:20001", detail: { ...detail, text: parts.length ? " \n\t" : "" } });
+      expect(events[1]).toMatchObject({ ticket: "in:" + ticket, scope: "private:20001", detail: { ...detail, reason: "empty content" } });
       expect(info).toHaveBeenCalledWith("inbound ignored: empty content", detail);
       expect(received).toEqual([]); expect(downloads).toEqual([]);
-      expect(await bridge.getTicket(ticket)).toBeNull();
+      expect(bridge.inbox.getInbound(ticket)).toBeNull();
       expect(napcat.calls.some(c => c.action.startsWith("send_") || c.action.startsWith("upload_"))).toBe(false);
     } finally { off(); info.mockRestore(); }
   });

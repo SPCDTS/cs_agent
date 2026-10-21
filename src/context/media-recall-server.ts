@@ -1,5 +1,5 @@
 import { isScheduleTool, SCHEDULE_TOOLS, type ScheduleTool, type ScheduleToolPermissions } from "../shared/schedule-tools.js";
-import type { Channel, TurnIdentity } from "../channel/types.js";
+import type { Channel } from "../channel/types.js";
 import { CHATS_DENIED, listChatsText } from "./chats.js";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
@@ -8,17 +8,21 @@ import { registerTemporarySecrets } from "../shared/redact.js";
 import { accessToString, parseAccess, type Access } from "./access.js";
 import { abortable, type MediaRecall, type RecallResult } from "./media.js";
 
-export interface RecallBinding extends Partial<TurnIdentity> {
-  access: Access; ticket: string; deadline: number; signal?: AbortSignal;
-  source?: { type: "private" | "group"; user_id: string; group_id: string | null };
+/**
+ * codex 每次 exec 的租约（第 2 阶段）：令牌只证明"来自哪个会话的哪一轮"；发送者身份、目标授权由网关在每次调用时
+ * 从会话宿主求出（设计 §5.3、§7.3）。读取范围在 exec 开始时按本轮身份确定，回合内不变（codex 不插话）。
+ */
+export interface RecallBinding {
+  threadKey: string; turnId: string;
+  access: Access; deadline: number; signal?: AbortSignal;
   workdir?: string; session?: string;
 }
 export interface SendGateway {
   permissions?(binding: RecallBinding): Promise<{ actorIsOwner: boolean; target: boolean; auth: boolean } & Partial<ScheduleToolPermissions>>;
   auth?(binding: RecallBinding, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown): Promise<unknown>;
   schedule?(binding: RecallBinding, name: ScheduleTool, args: unknown): Promise<string>;
-  send(binding: RecallBinding, attempt: string, args: unknown, signal: AbortSignal): Promise<unknown>;
-  release(ticket: string, attempt: string): void;
+  /** callKey 为本回合内的稳定序号（`<turnId>#<n>`） */
+  send(binding: RecallBinding, callKey: string, args: unknown, signal: AbortSignal): Promise<unknown>;
 }
 interface Lease {
   binding: RecallBinding;
@@ -28,28 +32,18 @@ interface Lease {
   revoke(): void;
 }
 export const RECALL_QUOTA_MESSAGE = "本轮召回次数已用完";
-const QUOTA_RETENTION_MS = 30 * 60_000;
-interface TicketQuota { access: string; used: number; active: number; lastRevoke: number; timer?: NodeJS.Timeout }
 
-/** 令牌只在主进程保存；同票据重新 exec 不重置预算，结束时立即撤销所有在途请求。 */
+/** 令牌只在主进程保存；每次 exec 一个租约，召回额度按租约计，结束时立即撤销所有在途请求。 */
 export class RecallTokens {
   private readonly tokens = new Map<string, Lease>();
-  private readonly tickets = new Map<string, TicketQuota>();
+  /** 按回合计的发送序号：同一回合的多次 exec（如失效线程回退）不复用调用键 */
+  private readonly sends = new Map<string, number>();
   constructor(private readonly media: Pick<MediaRecall, "recall"> & Partial<Pick<MediaRecall, "view">>, readonly maxPerTicket = 5, private readonly channel?: Pick<Channel, "listChats">, private readonly gateway?: SendGateway) {}
 
   issue(binding: RecallBinding): { token: string; revoke(): void; session(value: string): void } {
     const access = accessToString(binding.access);
-    if (!parseAccess(access) || !binding.ticket || !Number.isFinite(binding.deadline) || binding.deadline <= Date.now()) throw new Error("召回绑定无效或已过期");
+    if (!parseAccess(access) || !binding.threadKey || !binding.turnId || !Number.isFinite(binding.deadline) || binding.deadline <= Date.now()) throw new Error("召回绑定无效或已过期");
     binding.signal?.throwIfAborted();
-    let quota = this.tickets.get(binding.ticket);
-    // 定时器可能因事件循环忙碌延迟；新租约同样按实际时间检查重试窗口。
-    if (quota && !quota.active && Date.now() - quota.lastRevoke >= QUOTA_RETENTION_MS) {
-      clearTimeout(quota.timer); this.tickets.delete(binding.ticket); quota = undefined;
-    }
-    quota ??= { access, used: 0, active: 0, lastRevoke: 0 };
-    if (quota.access !== access) throw new Error("召回票据范围不一致");
-    clearTimeout(quota.timer); quota.timer = undefined; quota.active++;
-    this.tickets.set(binding.ticket, quota);
     const token = randomBytes(32).toString("hex"), control = new AbortController();
     const disposeSecret = registerTemporarySecrets([token]);
     const revoke = () => {
@@ -57,20 +51,12 @@ export class RecallTokens {
       if (!lease) return;
       this.tokens.delete(token); clearTimeout(lease.timer);
       disposeSecret();
-      this.gateway?.release(binding.ticket, token);
-      quota.active--; quota.lastRevoke = Date.now();
-      if (!quota.active) {
-        quota.timer = setTimeout(() => {
-          if (!quota.active && this.tickets.get(binding.ticket) === quota) this.tickets.delete(binding.ticket);
-        }, QUOTA_RETENTION_MS);
-        quota.timer.unref();
-      }
       binding.signal?.removeEventListener("abort", revoke);
       control.abort(new Error("召回令牌已作废"));
     };
     const timer = setTimeout(revoke, Math.max(1, binding.deadline - Date.now()));
     timer.unref();
-    this.tokens.set(token, { binding: { ...binding, access: { ...binding.access }, ...(binding.source ? { source: { ...binding.source } } : {}) }, remaining: Math.max(0, this.maxPerTicket - quota.used), control, timer, revoke });
+    this.tokens.set(token, { binding: { ...binding, access: { ...binding.access } }, remaining: this.maxPerTicket, control, timer, revoke });
     binding.signal?.addEventListener("abort", revoke, { once: true });
     return { token, revoke, session: value => {
       const lease = this.tokens.get(token);
@@ -86,8 +72,13 @@ export class RecallTokens {
   async send(token: string, args: unknown): Promise<unknown> {
     if (!this.valid(token)) throw new Error("发送令牌无效或已过期");
     const lease = this.tokens.get(token)!;
-    if (!this.gateway || !lease.binding.source || !lease.binding.workdir) throw new Error("发送令牌未绑定本回合来源");
-    return this.gateway.send(lease.binding, token, args, lease.control.signal);
+    if (!this.gateway || !lease.binding.workdir) throw new Error("发送令牌未绑定本回合会话");
+    // 同一回合的调用依次编号；exec 不会重放，键在回合内唯一即可。
+    const n = (this.sends.get(lease.binding.turnId) ?? 0) + 1;
+    this.sends.delete(lease.binding.turnId);
+    this.sends.set(lease.binding.turnId, n);
+    if (this.sends.size > 1000) this.sends.delete(this.sends.keys().next().value!);
+    return this.gateway.send(lease.binding, `${lease.binding.turnId}#${n}`, args, lease.control.signal);
   }
 
   async permissions(token: string) {
@@ -100,7 +91,7 @@ export class RecallTokens {
   async auth(token: string, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown) {
     if (!this.valid(token)) throw new Error("发送令牌无效或已过期");
     const binding = this.tokens.get(token)!.binding;
-    if (!binding.actorIsOwner || !(await this.permissions(token)).auth || !this.gateway?.auth) throw new Error("授权工具仅限 owner 回合");
+    if (!(await this.permissions(token)).auth || !this.gateway?.auth) throw new Error("授权工具仅限 owner 回合");
     return this.gateway.auth(binding, name, args);
   }
 
@@ -117,9 +108,8 @@ export class RecallTokens {
   async recall(token: string, messageId: string): Promise<RecallResult> {
     if (!this.valid(token)) throw new Error("召回令牌无效或已过期");
     const lease = this.tokens.get(token)!;
-    const quota = this.tickets.get(lease.binding.ticket)!;
-    if (lease.remaining <= 0 || quota.used >= this.maxPerTicket) throw new Error(RECALL_QUOTA_MESSAGE);
-    lease.remaining--; quota.used++;
+    if (lease.remaining <= 0) throw new Error(RECALL_QUOTA_MESSAGE);
+    lease.remaining--;
     const result = await abortable(this.media.recall(lease.binding.access, messageId, lease.control.signal), lease.control.signal);
     if (!this.valid(token)) throw new Error("召回令牌已作废");
     return result;
@@ -144,8 +134,6 @@ export class RecallTokens {
 
   close(): void {
     for (const lease of this.tokens.values()) lease.revoke();
-    for (const quota of this.tickets.values()) clearTimeout(quota.timer);
-    this.tickets.clear();
   }
 }
 

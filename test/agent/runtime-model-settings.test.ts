@@ -4,8 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SettingsStore, settingsDefaults } from "../../src/agent/settings.js";
 import { loadAgentConfig } from "../../src/agent/config.js";
 import { loadCodexModelValidator } from "../../src/agent/codex/model-catalog.js";
-import { createTasks } from "../../src/agent/tasks.js";
-import { createBackendSelector } from "../../src/agent/backends/select.js";
+import { createTurnSettings } from "../../src/agent/turn-settings.js";
 import { log } from "../../src/shared/log.js";
 import { Trace } from "../../src/shared/trace.js";
 import { tmp } from "./helpers.js";
@@ -13,13 +12,11 @@ import { tmp } from "./helpers.js";
 const cfg = loadAgentConfig({ CODEX_MODEL: "codex/gpt-test", AGENT_MODEL_ID: "pi-test", AGENT_THINKING_LEVEL: "max" });
 const defaults = settingsDefaults(cfg);
 const input = { ticket: "t1", text: "帮我调试", hasImages: false, hasQuote: false };
+/** 每轮开始时的设置快照（createTurnSettings）；保留旧 snapshotSettings 的调用形状以便断言复用。 */
 function tasks(settings: SettingsStore, complete = vi.fn(async () => "HIGH")) {
-  return { complete, tasks: createTasks({ currentSettings: () => settings.currentForTurn(),
-    getBridge: () => { throw Error("unused"); }, imagesDir: tmp(),
-    imageBackend: { name: "fake", submit: vi.fn(), collect: vi.fn(), reconcile: vi.fn(), clearReferences: vi.fn() },
-    backends: createBackendSelector({ current: () => settings.current(), backends: {} }),
-    codexReasoningEffort: "medium", piThinkingLevel: "off", effortRouter: { complete },
-  }) };
+  const snapshot = createTurnSettings({ currentSettings: () => settings.currentForTurn(),
+    codexReasoningEffort: "medium", piThinkingLevel: "off", effortRouter: { complete } });
+  return { complete, tasks: { snapshotSettings: (scope: string, _effort: undefined, msg: typeof input) => snapshot(scope, msg) } };
 }
 
 describe("运行时模型与档位", () => {

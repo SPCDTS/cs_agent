@@ -15,12 +15,13 @@ afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn()
 async function setup() {
   const f = sendFixture();
   const tokens = new RecallTokens({ recall: async () => ({ text: "", images: [] }) }, 5, undefined, {
-    send: (b, attempt, args, signal) => f.service.send({ ...f.binding, ticket: b.ticket, source: b.source,
-      access: b.access, workdir: b.workdir! }, args, { attempt }, signal),
-    release: (ticket, attempt) => f.service.releaseAttempt(ticket, attempt),
+    // 网关按租约的会话求本轮绑定（测试中即 f.binding），调用键为租约内序号。
+    send: (b, callKey, args, signal) => f.service.send({ ...f.binding, access: b.access, workdir: b.workdir! }, args, callKey, signal),
   });
   const server = await startMediaRecallServer(tokens, 0); cleanup.push(() => server.close());
-  const lease = tokens.issue({ ...f.binding, deadline: Date.now() + 60_000 });
+  const issue = (deadline = Date.now() + 60_000, workdir: string | null = f.workdir) =>
+    tokens.issue({ threadKey: f.threadKey, turnId: "t1", access: f.binding.access, ...(workdir ? { workdir } : {}), deadline });
+  const lease = issue();
   const client = new Client({ name: "test", version: "1" });
   await client.connect(new StdioClientTransport({ command: process.execPath,
     args: [fileURLToPath(new URL("../../dist/mcp/im.js", import.meta.url))],
@@ -29,7 +30,7 @@ async function setup() {
   const post = (body: unknown, token = lease.token) => fetch(`http://127.0.0.1:${server.port}/send`, {
     method: "POST", headers: { Authorization: "Bearer " + token }, body: JSON.stringify(body),
   });
-  return { ...f, tokens, server, lease, client, post };
+  return { ...f, tokens, server, lease, client, post, issue };
 }
 it("独立 im stdio 工具立即发消息与附件，返回 message_id；qq_context 不再发送", async () => {
   const f = await setup();
@@ -41,16 +42,14 @@ it("独立 im stdio 工具立即发消息与附件，返回 message_id；qq_cont
   const old = await f.client.callTool({ name: "qq_send_file", arguments: { path: "file.txt" } });
   expect(old.isError).toBe(true);
 });
-it("令牌必需且绑定来源；撤销、过期、无发送绑定均拒绝；参数不能改目标", async () => {
+it("令牌必需且绑定会话；撤销、过期、无发送绑定均拒绝；参数不能改目标", async () => {
   const f = await setup();
   expect((await f.post({ text: "攻击" }, "f".repeat(64))).status).toBe(401);
   expect((await f.post({ text: "攻击", target: "group:8" })).status).toBe(400);
   expect((await f.post({ text: "攻击", ticket: "another" })).status).toBe(400);
-  const readOnly = f.tokens.issue({ ticket: f.ticket, access: f.binding.access, deadline: Date.now() + 60_000 });
+  const readOnly = f.issue(Date.now() + 60_000, null);
   expect((await f.post({ text: "攻击" }, readOnly.token)).status).toBe(400);
-  const wrong = f.tokens.issue({ ...f.binding, source: { type: "group", user_id: "9", group_id: "8" }, deadline: Date.now() + 60_000 });
-  expect((await f.post({ text: "攻击" }, wrong.token)).status).toBe(400);
-  const expired = f.tokens.issue({ ...f.binding, deadline: Date.now() + 10 });
+  const expired = f.issue(Date.now() + 10);
   await new Promise(r => setTimeout(r, 25));
   expect((await f.post({ text: "攻击" }, expired.token)).status).toBe(401);
   f.lease.revoke();
@@ -62,28 +61,28 @@ it("MCP 校验错误以文本返回；完整 4000 字中文不截断，超限不
   for (const args of [{ text: "" }, { text: "字".repeat(4001) }, { text: "x", files: [{ path: "../qq-bridge.sqlite" }] }]) {
     expect((await f.client.callTool({ name: "send_message", arguments: args })).isError).toBe(true);
   }
-  expect(f.service.rows(f.ticket)).toHaveLength(0);
+  expect(f.store.listOutboxByTurn("t1")).toHaveLength(0);
   expect((await f.client.callTool({ name: "send_message", arguments: { text: "字".repeat(4000) } })).isError).not.toBe(true);
-  expect(f.service.rows(f.ticket)[0]!.text).toHaveLength(4000);
+  expect(f.store.listOutboxByTurn("t1")[0]!.text).toHaveLength(4000);
 });
-it("同票据新令牌重启计数、映射第 n 条，不重复发送；跨范围媒体拒绝", async () => {
+it("同回合新租约重发同一内容映射到已发消息，不重复发送；跨范围媒体拒绝", async () => {
   const f = await setup();
   const media = await mediaFixture(f.history, f.dir, "group:8");
   expect((await f.post({ text: "图", images: [media] })).status).toBe(400);
   const first = await (await f.post({ text: "原文" })).json() as { message_id: string };
   f.lease.revoke();
-  const next = f.tokens.issue({ ...f.binding, deadline: Date.now() + 60_000 });
-  expect(await (await f.post({ text: "新措辞" }, next.token)).json()).toMatchObject({ message_id: first.message_id, already_sent: true });
+  const next = f.issue();
+  expect(await (await f.post({ text: "原文" }, next.token)).json()).toMatchObject({ message_id: first.message_id, already_sent: true });
   expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(1);
 });
 it("已召回同范围媒体允许；生成图片来源只允许可信绑定的当前线程根目录", async () => {
   const f = sendFixture(), own = await mediaFixture(f.history, f.dir, "group:7");
-  await f.service.send(f.binding, { text: "召回图", images: [own] }, { callId: "m" });
+  await f.service.send(f.binding, { text: "召回图", images: [own] }, "m");
   const generated = path.join(f.dir, "codex", "generated_images", "current");
   const other = path.join(f.dir, "codex", "generated_images", "other");
   for (const dir of [generated, other]) { await fs.mkdir(dir, { recursive: true }); await fs.writeFile(path.join(dir, "a.png"), TRANSPARENT_PNG); }
-  await f.service.send({ ...f.binding, extraRoots: [generated] }, { text: "生图", images: [path.join(generated, "a.png")] }, { callId: "g" });
-  await expect(f.service.send({ ...f.binding, extraRoots: [generated] }, { text: "其他线程", images: [path.join(other, "a.png")] }, { callId: "bad" })).rejects.toThrow();
+  await f.service.send({ ...f.binding, extraRoots: [generated] }, { text: "生图", images: [path.join(generated, "a.png")] }, "g");
+  await expect(f.service.send({ ...f.binding, extraRoots: [generated] }, { text: "其他线程", images: [path.join(other, "a.png")] }, "bad")).rejects.toThrow();
 });
 it("目录解析仍拒绝相对路径、注入字符、..、根目录、深层目录和链接", async () => {
   const f = sendFixture(), root = f.dir;
@@ -99,8 +98,9 @@ it("目录解析仍拒绝相对路径、注入字符、..、根目录、深层�
 
 it.each(["sent", "sending", "uncertain"] as const)("im 返回 %s 无 message_id 的明确非错误结果，不诱导再次发送", async status => {
   const f = await setup();
-  const row = f.store.reserveOutbox({ ticket: f.ticket, text: "原内容", images: [], files: [], call_id: null,
-    message_type: "group", target_id: "7", mention_user_id: "1" });
+  // 租约内第一次调用的键：<会话>:<回合>#1。
+  const row = f.store.reserveOutbox({ key: `${f.threadKey}:t1#1`, thread_key: f.threadKey, turn_id: "t1", input_key: f.key,
+    text: "原内容", images: [], files: [], message_type: "group", target_id: "7", mention_user_id: "1" });
   f.store.markOutboxSending(row.key);
   if (status === "sent") f.store.markOutboxSent(row.key, "");
   if (status === "uncertain") f.store.markOutboxUncertain(row.key);
@@ -122,6 +122,6 @@ it("im 首次发送响应丢失返回明确非错误结果；同文再次调用�
       status: "uncertain", already_sent: n === 2, note: expect.stringContaining("不要重发"),
     });
   }
-  expect(f.service.rows(f.ticket)).toHaveLength(1);
+  expect(f.store.listOutboxByTurn("t1")).toHaveLength(1);
   expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(1);
 });

@@ -188,11 +188,11 @@ export class ScheduleService implements ScheduleRunRecorder {
         return copy(result);
       }, this.ctx);
     } finally {
-      // 即使 revision/ordinal 冲突导致提交回滚，也必须结算未采用的预备票据。
+      // 即使 revision/ordinal 冲突导致提交回滚，也必须结束未采用的预备输入。
       if (prepared?.admitter.discard) await this.opts.harness.commit(tx => prepared.admitter.discard!(tx), this.ctx);
     }
     reportPaused(paused, this.opts.trace);
-    if (run.ticket && (run.status === "queued" || run.status === "running")) this.opts.admitter.dispatchScheduled(run.ticket);
+    if (run.ticket && (run.status === "queued" || run.status === "running")) this.opts.admitter.launch(run.ticket);
     return run;
   }
 

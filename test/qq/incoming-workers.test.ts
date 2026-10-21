@@ -5,7 +5,7 @@ import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { createQQBridge } from '../../src/qq/bridge.js';
 import type { Channel, InboundMessage } from '../../src/channel/types.js';
 import { normalizeMessage } from '../../src/qq/policy.js';
-import { ReplyStore, ticketIdFor } from '../../src/qq/reply-store.js';
+import { ReplyStore, inboundKey } from '../../src/qq/reply-store.js';
 import { FakeOneBot, privateEvent, TOKEN, waitFor } from './fake-onebot.js';
 import { tmp } from '../agent/helpers.js';
 
@@ -31,13 +31,13 @@ afterEach(async () => { held.forEach(r => r.end(PNG)); await bridge.stop(); awai
 describe('持久化入站下载 worker', () => {
   it('A 下载时 B 文本立即接纳派发，同 scope 保序且下载前已落盘', async () => {
     const a = picture('20001','101'); bot.push(a); await waitFor(() => held.length === 1);
-    const rec = await bridge.getTicket(ticketIdFor(normalizeMessage(a)!));
+    const rec = bridge.inbox.getInbound(inboundKey(normalizeMessage(a)!));
     expect(rec?.attachments).toMatchObject([{ status: 'pending', file: '101', url: 'http://public.test/hold' }]);
     bot.push(privateEvent('20001','同 scope 后续', { message_id: '102' }));
     bot.push(privateEvent('20002','B 文本', { message_id: '103' }));
     await waitFor(() => received.length === 1);
     expect(received[0]!.message_id).toBe('103');
-    expect((await bridge.listPendingTickets()).map(r => r.source_message_id)).toEqual(['101','102','103']);
+    expect(bridge.inbox.listInbound('queued').map(r => r.message_id)).toEqual(['101','102','103']);
     held[0]!.end(PNG); await waitFor(() => received.length === 3);
     expect(received.map(m => m.message_id)).toEqual(['103','101','102']);
   });
@@ -54,7 +54,7 @@ describe('持久化入站下载 worker', () => {
   it('发送者在途上限 2，超额附件 skipped 并继续处理文本', async () => {
     for (const id of ['301','302','303']) bot.push(picture('20001',id));
     await waitFor(() => held.length === 1);
-    const records = await bridge.listPendingTickets();
+    const records = bridge.inbox.listInbound('queued');
     expect(records[2]?.attachments?.[0]?.status).toBe('skipped');
     held[0]!.end(PNG); await waitFor(() => held.length === 2); held[1]!.end(PNG);
     await waitFor(() => received.length === 3);
@@ -71,7 +71,7 @@ describe('持久化入站下载 worker', () => {
   it('恢复不重置已落盘的下载截止时间', async () => {
     await bridge.stop(); const store = new ReplyStore(dir), m = normalizeMessage(picture('20001','601'))!;
     m.attachments = [{ status: 'pending', file: 'old', deadline: Date.now() - 1 }];
-    const ticket = store.admit(m)!; store.close(); bridge = makeBridge();
+    const ticket = store.admit(m, 'private:' + m.user_id)!; store.close(); bridge = makeBridge();
     expect((await bridge.prepareIncoming!(ticket))?.attachments?.[0]?.status).toBe('skipped');
     expect(held).toHaveLength(0);
   });
@@ -79,16 +79,16 @@ describe('持久化入站下载 worker', () => {
     await bridge.stop();
     const store = new ReplyStore(dir), m = normalizeMessage(picture('20001','501'))!;
     m.attachments = [{ status: 'pending', file: 'remote-file-id' }];
-    const ticket = store.admit(m)!; store.close();
+    const ticket = store.admit(m, 'private:' + m.user_id)!; store.close();
     bot.override = c => c.action === 'get_image' ? { body: { status: 'ok', retcode: 0, data: { url: 'http://public.test/hold' } } } : undefined;
     bridge = makeBridge();
     const ready = bridge.prepareIncoming!(ticket);
     await waitFor(() => held.length === 1);
-    expect((await bridge.getTicket(ticket))?.attachments?.[0]?.status).toBe('pending');
+    expect(bridge.inbox.getInbound(ticket)?.attachments[0]?.status).toBe('pending');
     expect(bot.calls.find(c => c.action === 'get_image')?.body).toEqual({ file: 'remote-file-id' });
     expect(received).toEqual([]);
     held[0]!.end(PNG);
     expect((await ready)?.attachments?.[0]?.status).toBe('ok');
-    expect((await bridge.getTicket(ticket))?.source_images).toHaveLength(1);
+    expect(bridge.inbox.getInbound(ticket)?.images).toHaveLength(1);
   });
 });

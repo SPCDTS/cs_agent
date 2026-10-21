@@ -132,12 +132,23 @@ describe("按会话域隔离 codex", () => {
 
   it("后端保留群与私聊动态键", async () => {
     const dir = tmp(), keys: string[] = [];
-    const backend = new CodexBackend({ imagesDir: path.join(dir, "images"), ticketsDir: path.join(dir, "tickets"),
+    const turns = {
+      binding: (threadKey: string) => ({ threadKey, identity: { kind: "user" as const, sender: "9" }, scope: threadKey, inputs: [] }),
+      records: () => [],
+      render: async () => ({ text: "问题", images: [], source: { type: "group" as const, user_id: "9", group_id: "7", nickname: "测试" } }),
+    };
+    const backend = new CodexBackend({ imagesDir: path.join(dir, "images"), turns,
       runner: { ask: async (_prompt, options) => { keys.push(options.threadKey); return "答复"; } } });
-    for (const key of ["group:7", "private:9"] as const) await backend.handle({ ticket: key.replace(":", "_"), scope: key, access: key,
-      threadKey: key, text: "问题", source: { type: key.startsWith("group") ? "group" : "private", group_id: "7", user_id: "9", nickname: "测试" } },
-    { signal: new AbortController().signal, onEvent: () => undefined });
+    const completed: string[] = [];
+    backend.attach({ onTurnStarted: () => undefined, onActivity: () => undefined,
+      onTurnCompleted: (threadKey, _turnId, result) => { completed.push(`${threadKey}:${result.status}`); } });
+    for (const key of ["group:7", "private:9"] as const) {
+      const { turnId } = await backend.startTurn(key, [], { kind: "user", sender: "9" });
+      expect(turnId).toMatch(/^codex:/);
+      await backend.idle();
+    }
     expect(keys).toEqual(["group:7", "private:9"]);
+    expect(completed).toEqual(["group:7:completed", "private:9:completed"]);
   });
 });
 

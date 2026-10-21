@@ -64,7 +64,7 @@ describe("Pi 文件策略", () => {
     const group = await codingEnvironment({ ...options, skillsDir });
     expect(await group.readTextFile(file, context)).toMatchObject({ ok: true, value: "技能" });
     expect(await group.writeFile(file, "不准", context)).toMatchObject({ ok: false });
-    const legacyOwner = await codingEnvironment({ ...options, key: "owner", request: { ticket: "legacy", access: "all" }, skillsDir });
+    const legacyOwner = await codingEnvironment({ ...options, key: "owner", request: { access: "all", inputs: [] }, skillsDir });
     expect(await legacyOwner.writeFile(file, "不准", context)).toMatchObject({ ok: false });
     const off = await codingEnvironment({ ...owner.policy.options, skillsDir: "off" });
     expect(await off.writeFile(file, "不准", context)).toMatchObject({ ok: false });
@@ -79,7 +79,7 @@ describe("Pi 文件策略", () => {
   });
   it("owner 技能写入不能覆盖 deny_read 的优先级", async () => {
     const { dir, options } = await sandboxFixture();
-    const owner = await codingEnvironment({ ...options, key: "owner", request: { ticket: "owner", access: "all", senderIsOwner: true }, skillsDir: path.join(dir, "codex", "trace") });
+    const owner = await codingEnvironment({ ...options, key: "owner", request: { access: "all", senderIsOwner: true, inputs: [] }, skillsDir: path.join(dir, "codex", "trace") });
     expect(await owner.writeFile(path.join(dir, "codex", "trace", "x"), "不准", context)).toMatchObject({ ok: false });
   });
   it("完整拒绝配置的 Codex 工作区与 trace，ID 归档仍可读", async () => {
@@ -105,9 +105,9 @@ describe("Pi 文件策略", () => {
     expect(deny.patterns).not.toContain(archive);
     expect(await env.readTextFile(await put(path.join(workspaceDir + "-public", "note"), "public"), context)).toMatchObject({ ok: true, value: "public" });
   });
-  it("Codex 工作区链接的真实目标同样禁读，票据例外不能覆盖它", async () => {
+  it("Codex 工作区链接的真实目标同样禁读，会话图片例外不能覆盖它", async () => {
     const { dir, workspaceDir, env, options } = await sandboxFixture();
-    const target = path.join(dir, "images", "ticket-7");
+    const target = path.join(dir, "images", "group_7");
     const file = await put(path.join(target, "secret"));
     await fs.symlink(target, workspaceDir, process.platform === "win32" ? "junction" : "dir");
     const deny = await env.policy.deny();
@@ -133,7 +133,7 @@ describe("Pi 文件策略", () => {
     expect(await env.readTextFile(publicFile, context)).toMatchObject({ ok: true, value: "public" });
     expect(await env.readTextFile(path.join(dir, "pi-work"), context)).toMatchObject({ ok: false });
   });
-  it("按范围授权媒体文件，不能列目录；只有当前票据 incoming/images 例外", async () => {
+  it("按范围授权媒体文件，不能列目录；只有本轮输入的 incoming 与本会话 images 例外", async () => {
     const { dir, env, store } = await sandboxFixture();
     const own = await put(path.join(dir, "media", "own.png"));
     const other = await put(path.join(dir, "media", "other.png"));
@@ -142,21 +142,21 @@ describe("Pi 文件策略", () => {
     expect(allowed).toHaveBeenCalledWith({ kind: "scope", scope: "group:7" }, own);
     expect(await env.readBinaryFile(other, context)).toMatchObject({ ok: false });
     expect(await env.listDir(path.join(dir, "media"), context)).toMatchObject({ ok: false });
-    for (const root of ["incoming", "images"]) {
-      expect(await env.readTextFile(await put(path.join(dir, root, "ticket-7", "a")), context)).toMatchObject({ ok: true });
-      expect(await env.readTextFile(await put(path.join(dir, root, "ticket-8", "a")), context)).toMatchObject({ ok: false });
+    for (const [own, other] of [["incoming/ticket-7", "incoming/ticket-8"], ["images/group_7", "images/group_8"]]) {
+      expect(await env.readTextFile(await put(path.join(dir, own!, "a")), context)).toMatchObject({ ok: true });
+      expect(await env.readTextFile(await put(path.join(dir, other!, "a")), context)).toMatchObject({ ok: false });
     }
-    const owner = await codingEnvironment({ ...env.policy.options, key: "owner", request: { access: "all", ticket: "owner-ticket" } });
+    const owner = await codingEnvironment({ ...env.policy.options, key: "owner", request: { access: "all", inputs: [] } });
     allowed.mockImplementation(access => (access as { kind: string }).kind === "all");
     expect(await owner.readBinaryFile(other, context)).toMatchObject({ ok: true });
   });
-  it("写入只限当前工作区与当前票据 images，缺失的嵌套目录可创建", async () => {
+  it("写入只限当前工作区与本会话 images，缺失的嵌套目录可创建", async () => {
     const { dir, env } = await sandboxFixture();
-    for (const file of [path.join(env.cwd, "new", "nested", "a.txt"), path.join(dir, "images", "ticket-7", "new.png")]) {
+    for (const file of [path.join(env.cwd, "new", "nested", "a.txt"), path.join(dir, "images", "group_7", "new.png")]) {
       expect(await env.writeFile(file, "ok", context)).toMatchObject({ ok: true });
       expect(await fs.readFile(file, "utf8")).toBe("ok");
     }
-    for (const file of ["prompts/agent.md", "incoming/ticket-7/a", "images/ticket-8/a", "pi-work/group_8/a", "pi-work/group_7-extra/a", "outside"]) {
+    for (const file of ["prompts/agent.md", "incoming/ticket-7/a", "images/group_8/a", "pi-work/group_8/a", "pi-work/group_7-extra/a", "outside"]) {
       expect(await env.writeFile(path.join(dir, file), "bad", context), file).toMatchObject({ ok: false });
     }
     expect(await env.writeFile("../group_8/a", "bad", context)).toMatchObject({ ok: false });
@@ -179,7 +179,7 @@ describe("Pi 文件策略", () => {
     expect(await env.createTempFile({ suffix: "/../../escape" }, context)).toMatchObject({ ok: false });
     expect(await env.watch([{ path: dir, recursive: true }], () => {}, context)).toMatchObject({ ok: false });
   });
-  it("realpath 阻止目录链接、票据根链接及悬空链接逃逸", async () => {
+  it("realpath 阻止目录链接、会话图片根链接及悬空链接逃逸", async () => {
     const { dir, env } = await sandboxFixture();
     const outside = path.join(dir, "private");
     await put(path.join(outside, "token"));
@@ -192,8 +192,8 @@ describe("Pi 文件策略", () => {
     await fs.symlink(deniedDir, alias, process.platform === "win32" ? "junction" : "dir");
     expect(await env.readTextFile(path.join(alias, "answer"), context)).toMatchObject({ ok: false });
     await fs.mkdir(path.join(dir, "images"), { recursive: true });
-    await fs.symlink(outside, path.join(dir, "images", "ticket-7"), process.platform === "win32" ? "junction" : "dir");
-    expect(await env.writeFile(path.join(dir, "images", "ticket-7", "new"), "bad", context)).toMatchObject({ ok: false });
+    await fs.symlink(outside, path.join(dir, "images", "group_7"), process.platform === "win32" ? "junction" : "dir");
+    expect(await env.writeFile(path.join(dir, "images", "group_7", "new"), "bad", context)).toMatchObject({ ok: false });
     const dangling = path.join(env.cwd, "dangling");
     await fs.symlink(path.join(dir, "not-yet-created"), dangling, process.platform === "win32" ? "junction" : "dir");
     expect(await env.writeFile(path.join(dangling, "new"), "bad", context)).toMatchObject({ ok: false });

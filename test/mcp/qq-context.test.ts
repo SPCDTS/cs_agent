@@ -48,8 +48,8 @@ describe("qq_context MCP over stdio (built dist)", () => {
     const listChats = vi.fn(async () => ({ groups: [{ group_id: "7", name: "家庭群", member_count: 6 }], friends: [{ user_id: "1", nickname: "家人" }] }));
     const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) }, 5, { listChats });
     const endpoint = await startMediaRecallServer(tokens, 0);
-    const owner = tokens.issue({ access: { kind: "all" }, ticket: "owner", deadline: Date.now() + 60_000 });
-    const group = tokens.issue({ access: { kind: "scope", scope: "group:7" }, ticket: "group", deadline: Date.now() + 60_000 });
+    const owner = tokens.issue({ access: { kind: "all" }, threadKey: "group:7", turnId: "owner", deadline: Date.now() + 60_000 });
+    const group = tokens.issue({ access: { kind: "scope", scope: "group:7" }, threadKey: "group:7", turnId: "group", deadline: Date.now() + 60_000 });
     const env = (token: string) => ({ QQ_RECALL_TOKEN: token, MEDIA_RECALL_PORT: String(endpoint.port) });
     try {
       const c = await connect(tmp(), "all", env(owner.token));
@@ -73,7 +73,7 @@ describe("qq_context MCP over stdio (built dist)", () => {
         expect(file).toBe("/data/media/not-local.png"); return picture;
       } });
     const endpoint = await startMediaRecallServer(tokens, 0);
-    const lease = tokens.issue({ access: { kind: "scope", scope: "group:7" }, ticket: "view", deadline: Date.now() + 60_000 });
+    const lease = tokens.issue({ access: { kind: "scope", scope: "group:7" }, threadKey: "group:7", turnId: "view", deadline: Date.now() + 60_000 });
     try {
       const c = await connect(tmp(), "group:7", { QQ_RECALL_TOKEN: lease.token, MEDIA_RECALL_PORT: String(endpoint.port) });
       expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png" } })).content).toEqual([picture]);
@@ -85,7 +85,7 @@ describe("qq_context MCP over stdio (built dist)", () => {
   it("qq_image 经主进程 loopback 召回，MCP 无库也不创建文件", async () => {
     const tokens = new RecallTokens({ recall: async (access, id) => ({ text: JSON.stringify({ access, id }), images: [] }) });
     const endpoint = await startMediaRecallServer(tokens, 0);
-    const lease = tokens.issue({ access: { kind: "scope", scope: "group:7" }, ticket: "tk", deadline: Date.now() + 60_000 });
+    const lease = tokens.issue({ access: { kind: "scope", scope: "group:7" }, threadKey: "group:7", turnId: "tk", deadline: Date.now() + 60_000 });
     try {
       const c = await connect(tmp(), "group:7", { QQ_RECALL_TOKEN: lease.token, MEDIA_RECALL_PORT: String(endpoint.port) });
       const result = await c.callTool({ name: "qq_image", arguments: { message_id: "123" } });

@@ -1,54 +1,31 @@
-import { isOwner } from "../shared/owners.js";
-import { fitReply } from "./reply-postprocess.js";
-import { SendService } from "./send-service.js";
-import { isModelOutboxRow } from "../channel/outbox.js";
-import { ticketTarget } from "../channel/ticket.js";
-import { createHash } from "node:crypto";
-import { resolveAutoEffort, type EffortRouterDeps, type EffortMessage } from "./effort-router.js";
-import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { attachmentDirs } from "../media/attach-paths.js";
-import { readFileAttachments, readAttachmentData, type FileAttachment } from "../media/attach.js";
-import { ingestImageEvents } from "../media/gen/events.js";
 import { trace } from "../shared/trace.js";
 import { observeImages } from "../media/gen/observed.js";
 import path from "node:path";
 import { imageTimeoutMs } from "../media/gen/image-options.js";
 import { validateReferences } from "../media/gen/image-references.js";
+import { ingestImageEvents } from "../media/gen/events.js";
 /**
- * 每条 QQ 消息的 durable 任务（pi-durable defineTask，设计 §4.2 / §4.3）：
- * - 生图任务 `cs.image`：submit（提交 ComfyUI，prompt_id 立即落盘）→ collect（按 prompt_id 等待并下载）→ reply
- * - agent 任务 `cs.agent`：handle → lateImages → settle
+ * 生图前缀路由的 durable 任务（pi-durable defineTask，设计 §4.2 / §11；第 2 阶段仍按票据回复）：
+ * 生图任务 `cs.image`：submit（提交 ComfyUI，prompt_id 立即落盘）→ collect（按 prompt_id 等待并下载）→ reply
  *
  * 检查点语义：每个阶段把结果写进会话文档 TicketDoc，并在**同一次 runtime.commit** 里把检查点推进到下一阶段。
- * 进程在阶段之间崩溃时，任务从已提交的检查点继续：已完成的生图 / 后端调用不会重跑；
+ * 进程在阶段之间崩溃时，任务从已提交的检查点继续：已完成的生图不会重跑；
  * 即使任务本身失败、由派发器新建任务重跑，新任务也先看 TicketDoc，已有结果的阶段直接跳过。
- * reply 阶段依赖 Channel 票据幂等：sent → already_sent 不重发；sending/uncertain → 不重发、任务以 failed 结束；
- * agent 的 Outbox 逐条幂等；settle 有任何 sent/sending/uncertain 行即终结入站票据，最终回答只留存。
+ * reply 阶段依赖 Channel 票据幂等：sent → already_sent 不重发；sending/uncertain → 不重发、任务以 failed 结束。
  * 只有发送前就失败（票据仍 pending）才在任务内退避重试（≤3 次，次数记在检查点里）。
  * 进程关闭（runtime.signal 中止）时阶段直接抛出、不提交任何结果，重启后该阶段重跑。
  */
 import type { Context } from "@earendil-works/chord";
 import { defineTask, type RunningTask, type TaskRuntime, type TaskDefinition } from "@earendil-works/pi-durable";
-import { accessForSource, accessToString } from "../context/access.js";
-import type { ContextStore } from "../context/store.js";
 import type { Channel } from "../channel/types.js";
 import { log } from "../shared/log.js";
-import { isReasoningEffort, threadKeyForSource } from "./codex/runner.js";
-import { DispatchDoc, TicketDoc, type AgentResult, type ImageResult, type TicketState } from "./docs.js";
-import { type AgentRequest, type TicketSettings } from "./backends/types.js";
+import { DispatchDoc, TicketDoc, type ImageResult, type TicketState } from "./docs.js";
 import { collectNewImages } from "../media/gen/image-collect.js";
-import { PENDING_IMAGE_JOBS, pendingCallDir, readPendingImages, quarantinePendingImages, savePendingImage, PendingImageMarkerError } from "../media/gen/image-pending.js";
-import { readImageFiles, prepareImageFiles, validImageFile } from "../media/gen/image-files.js";
 import { classifyImageError, referenceUploads, recoverRemoteUploads, imageFilenamePrefix, ticketImageDir, UnknownJobError, type ImageBackend, type RemoteUpload } from "../media/gen/image-gen.js";
-import { AGENT_INTERRUPTION_NOTICES, AGENT_FAILURE_REPLIES, FALLBACK_REPLY, IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
+import { IMAGE_FAILURE_REPLIES, IMAGE_SUCCESS_REPLY } from "./replies.js";
 import { IMAGE_USAGE_REPLY } from "./router.js";
-import { BackendTimeoutError } from "./backends/types.js";
-import { backendNameFor, type BackendSelector } from "./backends/select.js";
-import { ticketWorkDir } from "./backends/codex.js";
-import { promises as fs } from "node:fs";
 
 const IMAGE_TASK = "cs.image";
-const AGENT_TASK = "cs.agent";
 /** reply 阶段在票据仍 pending 时的最多尝试次数 */
 export const MAX_REPLY_ATTEMPTS = 3;
 
@@ -59,30 +36,16 @@ type ReplyCheckpoint = { phase: "reply"; attempt: number };
 export type ImageCheckpoint = { phase: "submit" } | { phase: "generate" } | { phase: "collect"; submits?: number; extensions?: number } | ReplyCheckpoint;
 /** 同一票据最多提交 ComfyUI 任务的次数（服务端丢失任务时重新提交 1 次） */
 const MAX_IMAGE_SUBMITS = 2;
-export type AgentCheckpoint = { phase: "handle" } | { phase: "lateImages"; job?: number; extensions?: number } | { phase: "settle"; attempt: number } | { phase: "postprocess" } | ReplyCheckpoint;
 
 export interface TaskDeps {
-  getBridge: () => Pick<Channel, "reply" | "getTicket" | "uploadFile" | "send" | "outbox" | "settleTicket">;
-  sendService?: SendService;
+  getBridge: () => Pick<Channel, "reply" | "getTicket">;
   imageBackend: Pick<ImageBackend, "submit" | "collect" | "reconcile" | "name" | "clearReferences">;
   imagesDir: string;
   imageTimeoutCapMs?: number;
   imageCollectExtensions?: number;
   imageCollectDelayMs?: number;
-  /** ${DATA_DIR}/tickets：票据工作目录的根；reply 结束后清理该票据的子目录 */
-  ticketsDir?: string;
-  backends: BackendSelector;
-  owner?: string;
-  owners?: readonly string[];
-  /** 统一上下文存储：查找 [引用] 正文 */
-  store?: Pick<ContextStore, "message">;
-  codexReasoningEffort?: string | (() => string);
-  /** 生产入口一次读取全部设置，避免分别采样。仅派发时调用。 */
-  currentSettings?: () => Readonly<import('./settings.js').RuntimeSettings>;
   /** reply 重试退避基数（毫秒），默认 2000 */
   replyRetryDelayMs?: number;
-  effortRouter?: EffortRouterDeps;
-  piThinkingLevel?: ModelThinkingLevel;
 }
 
 type Runtime<S extends { phase: string }> = TaskRuntime<TaskInput, S, TaskResult, object>;
@@ -104,7 +67,7 @@ function rethrowIfAborted(signal: AbortSignal, err: unknown): void {
 }
 
 /**
- * reply 阶段（两类任务共用）：compose 只读 TicketDoc 得到正文与图片。
+ * reply 阶段：compose 只读 TicketDoc 得到正文与图片。
  * 发送成功 → 记录正文并以 completed 结束；失败 → 票据仍 pending 且未到上限则推进 attempt 重试，否则 failed 结束。
  */
 async function replyPhase<S extends { phase: string }>(
@@ -123,18 +86,15 @@ async function replyPhase<S extends { phase: string }>(
   if (blocked && blocked !== "ticket sent") return failBlocked(runtime, context, doc.ticket, blocked, "reply");
   try {
     const res = await deps.getBridge().reply(doc.ticket, text, images, { signal: runtime.signal });
-    const files = doc.route === "agent" ? await uploadAttachments(deps, runtime, context) : [];
     await cleanupTicketWorkdir(deps, doc.ticket);
     await runtime.commit(async (tx) => {
       const d = await tx.doc(TicketDoc, runtime.conversationId);
       d.replyText = text;
       d.replyImages = images.length;
       d.replyMessageId = res.message_id;
-      d.replyCompleted = true;
       return { status: "terminal", outcome: { status: "completed", result: { sent: true, already_sent: res.already_sent } } };
     }, context);
-    if (doc.route === "agent") trace.event(doc.ticket, "reply", { detail: { files } });
-    trace.event(doc.ticket, "reply_sent", { detail: { files, message_id: res.message_id, images: images.length, reply: text,
+    trace.event(doc.ticket, "reply_sent", { detail: { message_id: res.message_id, images: images.length, reply: text,
       already_sent: res.already_sent, truncated: text.includes("…（内容过长，已截断）"), terminal: false } });
     log.info("reply sent", { ticket: short(doc.ticket), message_id: res.message_id, already_sent: res.already_sent, images: images.length });
   } catch (err) {
@@ -158,74 +118,18 @@ async function replyPhase<S extends { phase: string }>(
   }
 }
 
-/** 文字 markSent 之后逐个登记发送意图；中断中的 sending 永远不重发。 */
-async function uploadAttachments(deps: TaskDeps, runtime: AnyRuntime, context: Context) {
-  let doc = await ticketDoc(runtime, context);
-  const fileDir = attachmentDirs(path.dirname(deps.imagesDir), doc.ticket).fileDir;
-  let entries: FileAttachment[] = [];
-  try { entries = await readFileAttachments(fileDir); }
-  catch (error) {
-    log.warn("attachment manifest invalid", { ticket: short(doc.ticket), error });
-    await runtime.commit(async tx => { (await tx.doc(TicketDoc, runtime.conversationId)).fileManifestError = true; return undefined; }, context);
-  }
-  if (doc.fileUploads === undefined) {
-    await runtime.commit(async tx => {
-      (await tx.doc(TicketDoc, runtime.conversationId)).fileUploads = entries.map(({ name, bytes, sha256 }) => ({ name, bytes, sha256, status: "pending" }));
-      return undefined;
-    }, context);
-    doc = await ticketDoc(runtime, context);
-  }
-  for (const [index, upload] of doc.fileUploads!.entries()) {
-    if (upload.status === "sent" || upload.status === "uncertain") continue;
-    if (upload.status === "sending") {
-      await runtime.commit(async tx => { (await tx.doc(TicketDoc, runtime.conversationId)).fileUploads![index]!.status = "uncertain"; return undefined; }, context);
-      continue;
-    }
-    runtime.signal.throwIfAborted();
-    await runtime.commit(async tx => { (await tx.doc(TicketDoc, runtime.conversationId)).fileUploads![index]!.status = "sending"; return undefined; }, context);
-    let file_id: string | undefined;
-    try {
-      const entry = entries[index];
-      if (!entry || entry.name !== upload.name || entry.bytes !== upload.bytes || entry.sha256 !== upload.sha256) throw new Error("附件清单与票据不一致");
-      const file = await readAttachmentData(fileDir, entry);
-      const source = doc.source;
-      file_id = (await deps.getBridge().uploadFile(source.type, source.type === "group" ? source.group_id! : source.user_id, file, upload.name)).file_id;
-      if (!file_id) throw new Error("文件上传缺少 file_id");
-    } catch (error) { log.warn("attachment upload uncertain; will not retry", { ticket: short(doc.ticket), name: upload.name, error }); }
-    // 持久化失败不能被上传异常分支吞掉；重启时 sending 会转为 uncertain。
-    await runtime.commit(async tx => {
-      const row = (await tx.doc(TicketDoc, runtime.conversationId)).fileUploads![index]!;
-      row.status = file_id ? "sent" : "uncertain";
-      if (file_id) row.file_id = file_id;
-      return undefined;
-    }, context);
-  }
-  return (await ticketDoc(runtime, context)).fileUploads!.map(({ name, bytes, status }) => ({ name, bytes, status }));
-}
-
-/**
- * 回复阶段结束（发出或放弃）后删除票据工作目录 ${ticketsDir}/<ticket>（codex-last.txt 等）。
- * 此时后端结果已在 TicketDoc 里，重跑不会再用到它；图片目录另行管理，不在这里删除。
- */
+/** 回复阶段结束（发出或放弃）后收尾：图片事件入库、清理远端参考图。图片目录另行管理，不在这里删除。 */
 async function cleanupTicketWorkdir(deps: TaskDeps, ticket: string, uploads: readonly RemoteUpload[] = []): Promise<void> {
-  await deps.sendService?.cleanup(ticket);
   await ingestImageEvents(ticketImageDir(deps.imagesDir, ticket));
   if (uploads.length) {
     if (!deps.imageBackend.clearReferences) throw new Error('生图后端不支持参考图覆盖');
     await deps.imageBackend.clearReferences(uploads);
   }
   await recoverRemoteUploads(ticketImageDir(deps.imagesDir, ticket), deps.imageBackend);
-  const dirs = [attachmentDirs(path.dirname(deps.imagesDir), ticket).fileDir,
-    ...(deps.ticketsDir ? [ticketWorkDir(deps.ticketsDir, ticket)] : [])];
-  for (const dir of dirs) try {
-    await fs.rm(dir, { recursive: true, force: true });
-  } catch (err) {
-    log.warn("ticket dir cleanup failed", { ticket: short(ticket), error: (err as Error).message });
-  }
 }
 
 /**
- * 外部副作用（提交生图、codex 回合、发送回复）之前的检查：派发条目存在且未 givenUp / failed，票据仍 pending。
+ * 外部副作用（提交生图、发送回复）之前的检查：派发条目存在且未 givenUp / failed，票据仍 pending。
  * 返回不能继续的原因；undefined 表示可以继续。
  */
 async function blockedReason(deps: TaskDeps, runtime: AnyRuntime, context: Context, ticket: string): Promise<string | undefined> {
@@ -255,35 +159,12 @@ function phases<S extends { phase: string }>(handlers: TaskDefinition<TaskInput,
   return Object.fromEntries(Object.entries(handlers).map(([phase, handler]) => [phase, async (task: RunningTask<TaskInput, S, TaskResult>, runtime: Runtime<S>, context: Context) => {
     const fn = handler as (task: RunningTask<TaskInput, S, TaskResult>, runtime: Runtime<S>, context: Context) => Promise<void>;
     const doc = await ticketDoc(runtime, context);
-    const stage = phase === "lateImages" ? "late_images" : phase === "postprocess" ? "postprocess" : "phase:" + phase;
+    const stage = "phase:" + phase;
     return trace.span(doc.ticket, stage, () => fn(task, runtime, context), { checkpoint: task.state.checkpoint });
   }])) as typeof handlers;
 }
 
 export function createTasks(deps: TaskDeps) {
-  const sendService = deps.sendService ?? new SendService({ getChannel: deps.getBridge, dataDir: path.dirname(deps.imagesDir) });
-  deps = { ...deps, sendService };
-  const snapshotSettings = async (scope: string, fallbackEffort?: string, msg?: EffortMessage): Promise<TicketSettings> => {
-    // 必须在第一个 await 之前一次采样，排队期间的设置变更不影响本票据。
-    const current = deps.currentSettings?.();
-    const configured = fallbackEffort ?? (typeof deps.codexReasoningEffort === "function" ? deps.codexReasoningEffort() : deps.codexReasoningEffort);
-    const codexFallback = isReasoningEffort(configured) ? configured : "high";
-    const piFallback = deps.piThinkingLevel ?? "low";
-    const effort = current?.codexReasoningEffort ?? codexFallback;
-    const backend = current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : deps.backends.select(scope).name;
-    const snapshot: TicketSettings = { backend, codexReasoningEffort: isReasoningEffort(effort) ? effort : codexFallback,
-      ...(current ? { codexModel: current.codexModel, piModel: current.piModel,
-        piThinkingLevel: current.piThinkingLevel === "auto" ? piFallback : current.piThinkingLevel } : {}), effortSource: "fixed" };
-    const input = msg ?? { ticket: "@effort", text: "", hasImages: false, hasQuote: false };
-    if (backend === "codex" && effort === "auto") {
-      const routed = await resolveAutoEffort(deps.effortRouter ?? {}, input, codexFallback);
-      snapshot.codexReasoningEffort = routed.effort; snapshot.effortSource = routed.source;
-    } else if (backend === "pi" && current?.piThinkingLevel === "auto") {
-      const routed = await resolveAutoEffort(deps.effortRouter ?? {}, input, piFallback);
-      snapshot.piThinkingLevel = routed.effort; snapshot.effortSource = routed.source;
-    }
-    return snapshot;
-  };
   type ImageRuntime = Runtime<ImageCheckpoint>;
 
   /** 两条路径共用收取延期上限、退避和按参数计算的预算。 */
@@ -496,336 +377,7 @@ export function createTasks(deps: TaskDeps) {
     abort: (_task, runtime, context) => abortTask(runtime, context),
   });
 
-  async function recordDeliveryNote(runtime: AnyRuntime, context: Context): Promise<void> {
-    const doc = await ticketDoc(runtime, context), result = doc.agentResult;
-    if (doc.deliveryNoted || doc.replyDraft !== undefined || !result?.threadKey ||
-        (result.backend !== "pi" && result.backend !== "codex")) return;
-    const rec = await deps.getBridge().getTicket(doc.ticket);
-    if (!rec || rec.origin === "scheduled") return;
-    const rows = sendService.rows(doc.ticket), fallback = rows.find(row => row.key === doc.ticket + "#fallback");
-    if (!fallback || rows.some(row => row !== fallback && row.status !== "pending")) return;
-    if (result.backend === "pi" && doc.piTurn?.conversationId === undefined) return;
-    const backend = deps.backends.select(`${rec.message_type}:${ticketTarget(rec)}`, result.backend);
-    if (!backend.recordDeliveryNote) return;
-    await backend.recordDeliveryNote({ ticket: doc.ticket, threadKey: result.threadKey, fallback: fallback.text,
-      ...(doc.piTurn?.conversationId !== undefined ? { conversationId: doc.piTurn.conversationId } : {}) });
-    await runtime.commit(async tx => {
-      (await tx.doc(TicketDoc, runtime.conversationId)).deliveryNoted = true;
-      return undefined;
-    }, context);
-    trace.event(doc.ticket, "delivery_note", { detail: { backend: result.backend, thread_key: result.threadKey,
-      conversation: doc.piTurn?.conversationId, fallback: fallback.text } });
-  }
-
-  async function settleAgent(task: RunningTask<TaskInput, AgentCheckpoint, TaskResult>, runtime: Runtime<AgentCheckpoint>, context: Context) {
-    let doc = await ticketDoc(runtime, context);
-    const attempt = "attempt" in task.state.checkpoint ? task.state.checkpoint.attempt : 0;
-    if (attempt > 0) await runtime.sleep(runtime.now() + (deps.replyRetryDelayMs ?? 2000) * attempt, context);
-    const legacyPhase = task.state.checkpoint.phase === "postprocess" || task.state.checkpoint.phase === "reply";
-    if (legacyPhase && doc.replyDraft === undefined && doc.agentResult?.ok) {
-      const draft = fitReply(doc.agentResult.text);
-      // 兼容答案先与新检查点一并保存，后续对账或发送失败也不会失去旧阶段身份。
-      await runtime.commit(async tx => {
-        (await tx.doc(TicketDoc, runtime.conversationId)).replyDraft = draft;
-        return { status: "running", checkpoint: { phase: "settle", attempt } };
-      }, context);
-      doc = await ticketDoc(runtime, context);
-    }
-    const blocked = await blockedReason(deps, runtime, context, doc.ticket);
-    if (blocked && !["ticket sent", "ticket sending", "ticket uncertain"].includes(blocked)) return failBlocked(runtime, context, doc.ticket, blocked, "settle");
-    // 已确认模型发过消息的失败回合独立补发通知；已发送或状态不确定的通知不重发。
-    const needsFailureNotice = () => {
-      const rows = sendService.rows(doc.ticket);
-      return doc.agentResult?.ok === false && rows.some(row => isModelOutboxRow(row) && row.status === "sent") &&
-        !rows.some(row => row.key === doc.ticket + "#fallback" && row.status !== "pending");
-    };
-    // 预留后退出或发送已结束时，仍补齐提醒；不依赖再次调用 system。
-    await recordDeliveryNote(runtime, context);
-    try {
-      // 先恢复已发送正文后的附件；状态 uncertain 的消息仍算已发送，不补兜底。
-      await sendService.reconcile(doc.ticket, runtime.signal);
-      const existingTicket = await deps.getBridge().getTicket(doc.ticket);
-      // 旧版本 reply 已发送、但附件未提交的票据沿用旧 manifest 恢复，不重发正文。
-      if (existingTicket?.status === "sent" && !sendService.rows(doc.ticket).length) {
-        await uploadAttachments(deps, runtime, context);
-      } else if (existingTicket?.status === "pending") {
-        const legacy = !sendService.rows(doc.ticket).length && (legacyPhase || doc.replyDraft !== undefined) &&
-          (doc.replyDraft !== undefined || doc.agentResult?.ok);
-        if (legacy) {
-          const text = doc.replyDraft ?? fitReply(doc.agentResult?.ok ? doc.agentResult.text : "");
-          await sendService.system(doc.ticket, "fallback", text, doc.agentResult?.ok ? doc.agentResult.images.slice(0, 4) : [], runtime.signal);
-        }
-        const late = doc.lateImageJobs ?? [];
-        const candidates = [...new Set(late.flatMap(job => job.result?.ok ? job.result.images : []))];
-        const digest = async (file: string) => createHash("sha256").update(await fs.readFile(file)).digest("hex");
-        const sent = new Set<string>();
-        for (const row of sendService.rows(doc.ticket)) if (row.status !== "pending") {
-          for (const file of row.images) sent.add(await digest(file));
-        }
-        const images: string[] = [];
-        for (const file of candidates) {
-          if (file.split(path.sep).includes("outbox")) continue;
-          const hash = await digest(file);
-          if (!sent.has(hash)) images.push(file);
-        }
-        let lateText = images.length ? IMAGE_SUCCESS_REPLY : "";
-        if (doc.attachmentFailure) lateText += "\n附件收取失败，部分图片未能发送。";
-        if (late.some(job => job.result && !job.result.ok)) lateText += "\n有一张图生成超时未能发送";
-        const oldLate = sendService.rows(doc.ticket).find(row => row.key.endsWith("#late"));
-        if ((lateText || oldLate) && (!oldLate || oldLate.status === "pending")) {
-          await sendService.system(doc.ticket, "late", lateText.trim(), images.slice(0, 4), runtime.signal);
-        }
-        if (!sendService.rows(doc.ticket).some(row => row.status !== "pending")) {
-          const text = doc.agentResult && !doc.agentResult.ok ? AGENT_FAILURE_REPLIES[doc.agentResult.failure] : FALLBACK_REPLY;
-          await sendService.system(doc.ticket, "fallback", text, [], runtime.signal, doc.agentResult?.ok === true,
-            () => recordDeliveryNote(runtime, context));
-        } else if (doc.agentResult?.ok === false && needsFailureNotice()) {
-          await sendService.system(doc.ticket, "fallback", AGENT_INTERRUPTION_NOTICES[doc.agentResult.failure], [], runtime.signal);
-        }
-        await sendService.settle(doc.ticket);
-      }
-    } catch (err) {
-      rethrowIfAborted(runtime.signal, err);
-      // sending/uncertain 留作审计，永不重发；sent 后的存储故障交给派发恢复。
-      const rows = sendService.rows(doc.ticket);
-      if (rows.some(row => row.status !== "pending")) {
-        // 正文发出后的附件存储故障仍须恢复；系统补发在发送前失败最多重试三次。
-        try { await sendService.reconcile(doc.ticket, runtime.signal); }
-        catch (recoveryError) {
-          rethrowIfAborted(runtime.signal, recoveryError);
-          log.warn("outbox reconciliation failed during settle recovery", { ticket: short(doc.ticket), error: recoveryError });
-        }
-        const pendingTicket = (await deps.getBridge().getTicket(doc.ticket))?.status === "pending";
-        const unfinished = pendingTicket && needsFailureNotice() || sendService.rows(doc.ticket).some(row =>
-          pendingTicket && row.key.endsWith("#late") && row.status === "pending" ||
-          row.status === "sent" && row.files.some(file => file.status === "pending"));
-        if (unfinished && attempt + 1 < MAX_REPLY_ATTEMPTS) {
-          await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "settle", attempt: attempt + 1 } }), context);
-          return;
-        }
-        await sendService.settle(doc.ticket);
-      } else {
-        const retry = attempt + 1 < MAX_REPLY_ATTEMPTS;
-        await runtime.commit(async () => retry
-          ? { status: "running", checkpoint: { phase: "settle", attempt: attempt + 1 } }
-          : { status: "terminal", outcome: { status: "failed", error: { message: "settle failed: " + (err as Error).message } } }, context);
-        return;
-      }
-    }
-    const rows = sendService.rows(doc.ticket), last = rows.filter(row => row.status === "sent").at(-1);
-    await cleanupTicketWorkdir(deps, doc.ticket);
-    await runtime.commit(async tx => {
-      const d = await tx.doc(TicketDoc, runtime.conversationId);
-      if (last) { d.replyText = last.text; d.replyImages = last.images.length; d.replyMessageId = last.message_id ?? undefined; }
-      d.replyCompleted = true;
-      return { status: "terminal", outcome: { status: "completed", result: { sent: true } } };
-    }, context);
-    trace.event(doc.ticket, "final_answer", { detail: { text: doc.agentResult?.ok ? doc.agentResult.text : "",
-      sent_messages: rows.filter(row => row.status === "sent").length } });
-  }
-
-  /** 入站与定时任务共用后端调用、回合持久标记及结果检查点。 */
-  async function handleAgent(runtime: AnyRuntime, context: Context, options: {
-    scheduled?: boolean;
-    request?: Pick<AgentRequest, "scope" | "access" | "threadKey" | "senderIsOwner">;
-    signal?: AbortSignal;
-  } = {}): Promise<void> {
-    const doc = await ticketDoc(runtime, context);
-    // 文字已发出后的重启只恢复回复附件，不再运行后端或 lateImages。
-    if (doc.agentResult && (await deps.getBridge().getTicket(doc.ticket))?.status === "sent") {
-      await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "settle", attempt: 0 } }), context);
-      return;
-    }
-    let result: AgentResult | undefined = doc.agentResult;
-    if (!result) {
-      const record = await deps.getBridge().getTicket(doc.ticket);
-      if (!record) throw new Error("回合票据不存在");
-      // user_id 始终是实际发言人或定时创建者；私聊收件人由票据 target_id 独立确定。
-      const source = { ...doc.source, type: record.message_type, user_id: record.user_id, group_id: record.group_id };
-      const actor = `qq:${record.user_id}`;
-      const actorIsOwner = options.request?.senderIsOwner ?? isOwner(deps.owners ?? deps.owner, record.user_id);
-      const scope = options.request?.scope ?? `${record.message_type}:${ticketTarget(record)}`;
-      const threadKey = options.request?.threadKey ?? threadKeyForSource(source, deps.owners ?? deps.owner);
-      let quote: { message_id: string; nickname: string; text: string } | undefined;
-      if (doc.replyTo && deps.store) {
-        try {
-          const hit = deps.store.message({ kind: "scope", scope }, doc.replyTo);
-          if (hit) quote = { message_id: hit.row.message_id, nickname: hit.row.is_self ? "我" : hit.row.nickname || hit.row.user_id, text: hit.row.text };
-        } catch (err) {
-          log.warn("quote lookup failed", { ticket: short(doc.ticket), error: err });
-        }
-      }
-      const blocked = await blockedReason(deps, runtime, context, doc.ticket);
-      if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "handle");
-      let backendName = "unknown";
-      const started = Date.now();
-      try {
-        options.signal?.throwIfAborted();
-        if (doc.image_error) throw new Error(doc.image_error);
-        if (!doc.settings) throw new Error("票据缺少派发设置快照");
-        const backend = deps.backends.select(scope, doc.settings.backend);
-        backendName = backend.name;
-        const res = await trace.span(doc.ticket, "backend:" + backend.name, () => backend.handle(
-          {
-            ticket: doc.ticket, actor, actorIsOwner,
-            settings: doc.settings,
-            scope,
-            access: options.request?.access ?? accessToString(accessForSource(source, deps.owners ?? deps.owner)),
-            threadKey,
-            senderIsOwner: actorIsOwner,
-            source: { ...source },
-            text: doc.text,
-            images: doc.source_images ?? [],
-            ...(doc.time ? { time: doc.time } : {}),
-            ...(quote ? { quote } : {}),
-          },
-          {
-            signal: options.signal ?? runtime.signal,
-            onEvent: (e) => log.debug("agent backend event", { ticket: short(doc.ticket), ...e }),
-            piTurn: doc.piTurn,
-            persistPiTurn: state => runtime.commit(async tx => {
-              (await tx.doc(TicketDoc, runtime.conversationId)).piTurn = { ...state };
-              return undefined;
-            }, context),
-            ...(doc.codexTurn ? { turn: doc.codexTurn } : {}),
-            // 启动外部回合之前落盘"回合已开始"（不推进检查点）
-            persistTurn: (state) =>
-              runtime.commit(async (tx) => {
-                (await tx.doc(TicketDoc, runtime.conversationId)).codexTurn = { ...state };
-                return undefined;
-              }, context),
-          },
-        ), { backend: backend.name }, res => ({ raw_reply: res.text, images: res.images }));
-        options.signal?.throwIfAborted();
-        result = { ok: true, backend: backendName, threadKey, text: res.text, images: [...(res.images ?? [])].slice(0, 4) };
-      } catch (err) {
-        rethrowIfAborted(runtime.signal, err);
-        const failure = err instanceof BackendTimeoutError || options.signal?.aborted ? "timeout" : "failed";
-        log.warn("agent backend failed", { ticket: short(doc.ticket), backend: backendName, ms: Date.now() - started, failure, error: (err as Error).message });
-        result = { ok: false, backend: backendName, threadKey, failure };
-      }
-    }
-    await runtime.commit(async (tx) => {
-      (await tx.doc(TicketDoc, runtime.conversationId)).agentResult = result;
-      return { status: "running", checkpoint: options.scheduled ? { phase: "settle", attempt: 0 } : { phase: "lateImages" } };
-    }, context);
-  }
-
-  const AgentTask = defineTask<TaskInput, AgentCheckpoint, TaskResult>({
-    name: AGENT_TASK,
-    version: 1,
-    initial: () => ({ phase: "handle" }),
-    phases: phases<AgentCheckpoint>({
-      handle: (_task, runtime, context) => handleAgent(runtime, context),
-      lateImages: async (_task, runtime, context) => {
-        let doc = await ticketDoc(runtime, context);
-        await ingestImageEvents(ticketImageDir(deps.imagesDir, doc.ticket));
-        const blocked = await blockedReason(deps, runtime, context, doc.ticket);
-        if (blocked) return failBlocked(runtime, context, doc.ticket, blocked, "lateImages");
-        const dir = ticketImageDir(deps.imagesDir, doc.ticket);
-        if (doc.lateImageJobs === undefined) {
-          let jobs: Awaited<ReturnType<typeof readPendingImages>>;
-          try { jobs = await readPendingImages(dir); }
-          catch (err) {
-            if (!(err instanceof PendingImageMarkerError)) throw err;
-            await runtime.commit(async tx => {
-              (await tx.doc(TicketDoc, runtime.conversationId)).attachmentFailure = true;
-              return undefined;
-            }, context);
-            await quarantinePendingImages(dir);
-            jobs = [];
-          }
-          await runtime.commit(async tx => {
-            (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs = jobs.map(job => ({ ...job, extensions: 0 }));
-            return undefined;
-          }, context);
-          doc = await ticketDoc(runtime, context);
-        }
-        for (const [index, job] of doc.lateImageJobs!.entries()) {
-          if (job.result) continue;
-          const deadline = job.deadline ?? runtime.now() + imageTimeoutMs(job.options, deps.imageTimeoutCapMs ?? 300_000);
-          if (job.deadline === undefined) await runtime.commit(async tx => {
-            (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!.deadline = deadline;
-            return undefined;
-          }, context);
-          if (job.nextCollectAt) await runtime.sleep(job.nextCollectAt, context);
-          let result: ImageResult;
-          try {
-            runtime.signal.throwIfAborted();
-            const callDir = await pendingCallDir(dir, job.callDir);
-            let manifest = await readImageFiles(callDir);
-            const complete = manifest?.length && (await Promise.all(manifest.map(f =>
-              f.downloaded && validImageFile(path.join(callDir, f.filename))))).every(Boolean);
-            if (job.status !== "done" && !complete) {
-              const remaining = deadline - runtime.now();
-              if (remaining <= 0) throw new Error("生图超时");
-              const signal = AbortSignal.any([runtime.signal, AbortSignal.timeout(Math.ceil(remaining))]);
-              try {
-                if (!job.prompt_id) throw new UnknownJobError("intent");
-                await observeImages(deps.imageBackend, doc.ticket).collect(job.prompt_id, callDir, signal, job.options);
-              } catch (err) {
-                rethrowIfAborted(runtime.signal, err);
-                if (!(err instanceof UnknownJobError)) throw err;
-                await observeImages(deps.imageBackend, doc.ticket).reconcile({ filenamePrefix: job.filenamePrefix,
-                  count: job.options.count ?? 1, imageOptions: job.options }, callDir, signal, step =>
-                  runtime.commit(async tx => {
-                    const j = (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!;
-                    j.reconciliation = [...(j.reconciliation ?? []), step];
-                    if (step.prompt_id) j.prompt_id = step.prompt_id;
-                    return undefined;
-                  }, context));
-              }
-            }
-            const images = await collectNewImages(callDir, new Set());
-            manifest = await readImageFiles(callDir) ?? await prepareImageFiles(callDir, images.map(f => path.basename(f)));
-            if (!manifest.length || manifest.some(f => !f.downloaded) ||
-                !(await Promise.all(manifest.map(f => validImageFile(path.join(callDir, f.filename))))).every(Boolean)) {
-              throw new Error("图片批次尚未完整收取");
-            }
-            result = { ok: true, images: await Promise.all(manifest.map(f => fs.realpath(path.join(callDir, f.filename)))) };
-            await runtime.commit(async tx => {
-              const j = (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!;
-              j.files = manifest; j.remoteTerminal = true; j.status = "done";
-              return undefined;
-            }, context);
-          } catch (err) {
-            rethrowIfAborted(runtime.signal, err);
-            const window = nextCollectWindow(runtime.now(), job.extensions, job.options, err);
-            if (window) {
-              await runtime.commit(async tx => {
-                Object.assign((await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!, window);
-                return { status: "running", checkpoint: { phase: "lateImages", job: index, extensions: window.extensions } };
-              }, context);
-              return;
-            }
-            result = { ok: false, failure: classifyImageError(err) };
-          }
-          await runtime.commit(async tx => {
-            (await tx.doc(TicketDoc, runtime.conversationId)).lateImageJobs![index]!.result = result;
-            return undefined;
-          }, context);
-        }
-        // 保留未确认远端终态的条目，票据清理也不得提前覆盖参考图。
-        doc = await ticketDoc(runtime, context);
-        if (!doc.attachmentFailure) {
-          for (const job of doc.lateImageJobs ?? []) {
-            const { deadline: _deadline, extensions: _extensions, nextCollectAt: _next, reconciliation: _steps, result: _result, files: _files, ...marker } = job;
-            await savePendingImage(dir, marker);
-          }
-          await recoverRemoteUploads(dir, deps.imageBackend);
-          if (doc.lateImageJobs?.every(j => j.status === "done")) await fs.rm(path.join(dir, PENDING_IMAGE_JOBS), { force: true });
-        }
-        await runtime.commit(async () => ({ status: "running", checkpoint: { phase: "settle", attempt: 0 } }), context);
-      },
-      settle: settleAgent,
-      // 升级前落盘的阶段保留旧答案；新回合仍只通过 send_message 发送。
-      postprocess: settleAgent,
-      reply: settleAgent,
-    }),
-    abort: (_task, runtime, context) => abortTask(runtime, context),
-  });
-
-  return { ImageTask, AgentTask, handleAgent, snapshotSettings, sendService, cleanupTicketWorkdir: (ticket: string, uploads?: readonly RemoteUpload[]) => cleanupTicketWorkdir(deps, ticket, uploads) };
+  return { ImageTask, cleanupTicketWorkdir: (ticket: string, uploads?: readonly RemoteUpload[]) => cleanupTicketWorkdir(deps, ticket, uploads) };
 }
 
 export type CsTasks = ReturnType<typeof createTasks>;

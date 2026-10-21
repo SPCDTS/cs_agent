@@ -28,7 +28,8 @@ it("pi 监听延迟时按已提交历史补齐请求，随后重复事件不重�
     .mockResolvedValueOnce({ items: [last] });
   const conv = { id: 1, entries } as unknown as Conversation;
   const store = new ContextUsageStore(tmp("pi-observer-"));
-  const observer = await PiContextObserver.open(harness, conv, "owner", store, {} as Storage, piContextCapacity(200000));
+  // 当前回合的观测键由后端给出（turn:<id>），切换回合即重置 seq。
+  const observer = await PiContextObserver.open(harness, conv, "owner", store, {} as Storage, piContextCapacity(200000), undefined, () => ticket);
   const requests = vi.spyOn(store, "recordRequest"), turns = vi.spyOn(store, "recordTurn");
   try {
     expect(observer.lastRequest(ticket)).toBeUndefined();
