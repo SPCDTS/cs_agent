@@ -38,6 +38,9 @@ class FakeAdapter implements ThreadAdapter {
   backends: (string | undefined)[] = [];
   /** 插话挂起（模拟插话已提交给后端、宿主记账前进程崩溃） */
   hangSteer = false;
+  /** 这些输入的插话被拒 / 抛错（结果不确定） */
+  rejectSteer = new Set<string>();
+  throwSteer = new Set<string>();
   /** 开轮时后端内部重试前复核被拒 */
   denyOnRetry = false;
   private n = 0;
@@ -69,6 +72,8 @@ class FakeAdapter implements ThreadAdapter {
   }
   async steer(threadKey: ThreadKey, turnId: string, input: InputRef) {
     if (this.hangSteer) { this.steers.push({ threadKey, turnId, key: input.inboundKey, reply: "hang" }); return new Promise<never>(() => {}); }
+    if (this.throwSteer.has(input.inboundKey)) { this.steers.push({ threadKey, turnId, key: input.inboundKey, reply: "throw" }); throw new Error("插话结果不确定"); }
+    if (this.rejectSteer.has(input.inboundKey)) { this.steers.push({ threadKey, turnId, key: input.inboundKey, reply: "no_active_turn" }); return "no_active_turn" as const; }
     const reply = this.live.get(threadKey) === turnId ? "ok" as const : "no_active_turn" as const;
     this.steers.push({ threadKey, turnId, key: input.inboundKey, reply });
     return reply;
@@ -593,6 +598,57 @@ describe("ThreadHost 持久化与重启恢复", () => {
     r.adapter.planError = undefined;
     await vi.waitFor(() => expect(r.adapter.keysOf(H)).toEqual([["h1"]]), { timeout: 5000, interval: 20 });
     expect(r.host.thread(H)).toMatchObject({ backend: "pi" });
+  });
+
+  it("回归：插话被拒不抹掉先前的 starting（此前已交给后端），之后仍按会话原后端开轮", async () => {
+    const r = await rig();
+    r.adapter.planAs = "pi";
+    await r.user(G, "a1", "A"); await r.settle();
+    const t1 = r.adapter.endSilently(G);
+    await r.user(G, "a2", "A"); await r.user(G, "a3", "A");
+    // 模拟此前一次已被后端收下、记账前崩溃的插话：a3 已是 starting
+    await r.harness.commit(async tx => { (await tx.doc(HostInputDoc, "a3", G)).state = "starting"; }, ctx);
+    r.adapter.rejectSteer.add("a3");
+    r.host.onTurnCompleted(G, t1, { status: "completed" }); await r.settle();
+    expect(r.adapter.steers.at(-1)).toMatchObject({ key: "a3", reply: "no_active_turn" });
+    expect((await r.harness.snapshot(HostInputDoc, "a3", ctx))?.state).toBe("starting");
+    r.adapter.planAs = "codex";
+    r.adapter.complete(G); await r.settle();
+    expect(r.adapter.keysOf(G)).toEqual([["a1"], ["a2"], ["a3"]]);
+    expect(r.adapter.backends).toEqual(["pi", "pi", "pi"]);
+  });
+
+  it("回归：插话抛错（结果不确定）保留 starting，不允许换后端", async () => {
+    const r = await rig();
+    r.adapter.planAs = "pi";
+    await r.user(G, "a1", "A"); await r.settle();
+    r.adapter.throwSteer.add("a2");
+    expect(await r.user(G, "a2", "A")).toBe("queued");
+    expect((await r.harness.snapshot(HostInputDoc, "a2", ctx))?.state).toBe("starting");
+    r.adapter.planAs = "codex";
+    r.adapter.complete(G); await r.settle();
+    expect(r.adapter.backends).toEqual(["pi", "pi"]);
+    // 被拒（先前是 queued）的插话照常改回 queued
+    r.adapter.rejectSteer.add("a3");
+    expect(await r.user(G, "a3", "A")).toBe("queued");
+    expect((await r.harness.snapshot(HostInputDoc, "a3", ctx))?.state).toBe("queued");
+  });
+
+  it("回归：判断能否切换后端时读取失败 → 不开轮，稍后重试", async () => {
+    const r = await rig();
+    r.adapter.planAs = "pi";
+    await r.user(G, "a1", "A"); await r.settle();
+    r.adapter.complete(G); await r.settle();
+    const snapshot = r.harness.snapshot.bind(r.harness);
+    let fail = 1;
+    (r.harness as { snapshot: unknown }).snapshot = async (...args: Parameters<typeof snapshot>) => {
+      if ((args[0] as unknown) === HostInputDoc && fail-- > 0) throw new Error("读取失败");
+      return snapshot(...args);
+    };
+    await r.user(G, "b1", "B"); await r.settle();
+    expect(r.adapter.keysOf(G)).toEqual([["a1"]]);
+    await vi.waitFor(() => expect(r.adapter.keysOf(G)).toEqual([["a1"], ["b1"]]), { timeout: 5000, interval: 20 });
+    (r.harness as { snapshot: unknown }).snapshot = snapshot;
   });
 
   it("排队状态跨宿主重建保持", async () => {

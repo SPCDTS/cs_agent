@@ -165,19 +165,28 @@ export class ThreadHost implements HostCallbacks {
 
   /**
    * 插话一条输入：先把输入文档标为 starting（已交给后端）再提交——提交后、记账前崩溃时，恢复据此不换后端重跑；
-   * 被拒则改回 queued，留在队列。须在会话串行内调用。
+   * 被拒则改回此前的状态（此前是 queued 才改回 queued），抛错保留 starting；都留在队列。须在会话串行内调用。
    */
   private async steerOne(threadKey: ThreadKey, turnId: string, ref: InputRef): Promise<boolean> {
-    await this.opts.store.commit(tx => this.markInputs(tx, threadKey, [ref], "starting"), this.ctx);
-    let steered: "ok" | "no_active_turn";
+    // 记下这次之前的状态：此前已是 starting（更早的插话可能已被后端收下）的，被拒也不能改回 queued
+    const before = await this.opts.store.commit(async tx => {
+      const doc = await tx.doc(HostInputDoc, ref.inboundKey, threadKey);
+      const prior = doc.state;
+      doc.state = "starting";
+      return prior;
+    }, this.ctx);
+    let steered: "ok" | "no_active_turn" | "unknown";
     try {
       steered = await this.opts.adapter.steer(threadKey, turnId, ref);
     } catch (error) {
+      // 抛错 = 结果不确定（可能已提交）：保留 starting，留在队列
       log.warn("thread host steer failed, queued instead", { thread: threadKey, input: ref.inboundKey, error });
-      steered = "no_active_turn";
+      steered = "unknown";
     }
     if (steered !== "ok") {
-      await this.opts.store.commit(tx => this.markInputs(tx, threadKey, [ref], "queued"), this.ctx);
+      if (steered === "no_active_turn" && before === "queued") {
+        await this.opts.store.commit(tx => this.markInputs(tx, threadKey, [ref], "queued"), this.ctx);
+      }
       return false;
     }
     const cur = this.threads.get(threadKey)!;
@@ -217,9 +226,18 @@ export class ThreadHost implements HostCallbacks {
         const head = s.pending[0]!, inputs = [head], keys = [head.inboundKey];
         // 会话后端：首次按配置选定；之后只在可以切换时重新选择（plan 再确认旧后端不忙）；选择失败沿用当前后端
         let backend = s.backend;
-        if (this.opts.adapter.plan && (backend === undefined || await this.mayReselect(s))) {
+        let reselect: boolean;
+        try {
+          reselect = !!this.opts.adapter.plan && (backend === undefined || await this.mayReselect(s));
+        } catch (error) {
+          // 读不到输入状态就无法判断能否切换：不开轮，稍后重试
+          log.warn("thread host reselect check failed; retrying later", { thread: threadKey, error });
+          deferred = true;
+          return;
+        }
+        if (reselect) {
           try {
-            backend = await this.opts.adapter.plan(threadKey, head, s.backend);
+            backend = await this.opts.adapter.plan!(threadKey, head, s.backend);
           } catch (error) {
             log.warn("thread host plan failed; keeping thread backend", { thread: threadKey, backend: s.backend, error });
             // 新会话没有后端可沿用：不开轮，稍后重试
