@@ -251,8 +251,9 @@ docker compose exec cs-agent sh -c 'printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1
 ```powershell
 npm ci
 npm run typecheck
-npx vitest run            # 全部；MCP stdio 测试由 globalSetup 先 npm run build
-npx vitest run test/agent # Inbox、ThreadHost、假 codex app-server、pi faux provider、send_message
+npm test                  # 快速单元组（日常改动跑这个，约 1 分钟）
+npm run test:integration  # 集成组：entrypoint、NapCat 配置、bwrap、MCP stdio 冒烟（globalSetup 先 npm run build）
+npm run test:all          # 全部（合并前跑；等同 npx vitest run）
 docker build -t cs-agent:dev .
 docker compose config
 ```
