@@ -7,7 +7,7 @@ import { isScope } from "../../context/access.js";
  * args 为同一配置的 `-c` 形式（codex CLI 诊断脚本用）。
  */
 export function codexWorkspacePolicy(base: string, dataDir: string, key: string, sandbox: string, network = true,
-  codexHome = path.join(dataDir, "codex"), senderIsOwner = false) {
+  codexHome = path.join(dataDir, "codex")) {
   if (key !== "owner" && !isScope(key)) throw new Error("非法的 codex 线程键");
   if (sandbox !== "workspace-write" && sandbox !== "read-only") throw new Error("会话隔离不允许 danger-full-access");
   const root = path.resolve(base), data = path.resolve(dataDir);
@@ -18,8 +18,7 @@ export function codexWorkspacePolicy(base: string, dataDir: string, key: string,
   }
   const workspaceDir = path.join(root, key.replace(":", "_"));
   const writableRoots = sandbox === "read-only" ? [] : [workspaceDir,
-    ...(key === "owner" ? [path.join(data, "prompts")] : []),
-    ...(senderIsOwner === true ? [path.resolve(codexHome, "skills", "shared")] : [])];
+    ...(key === "owner" ? [path.join(data, "prompts")] : [])];
   const filesystem: Record<string, string> = {
     ":root": "read", [root]: "deny", [path.join(data, "pi-work")]: "deny",
     // 官方请求 trace 含各会话的完整输入，不能成为绕过线程隔离的读取入口。

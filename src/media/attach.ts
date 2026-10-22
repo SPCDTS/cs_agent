@@ -37,7 +37,7 @@ async function noSymlinks(file: string): Promise<void> {
   }
 }
 
-async function readBounded(file: string, min: number, max: number): Promise<Buffer> {
+export async function readBounded(file: string, min: number, max: number): Promise<Buffer> {
   await noSymlinks(file);
   const before = await fs.lstat(file);
   // FIFO/设备必须在 open 前拒绝，避免以只读方式打开管道时等待写入端。

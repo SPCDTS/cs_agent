@@ -43,6 +43,7 @@ export interface ThreadGateway {
   permissions?(binding: CallBinding): Promise<{ actorIsOwner: boolean; target: boolean; auth: boolean } & Partial<ScheduleToolPermissions>>;
   auth?(binding: CallBinding, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown): Promise<unknown>;
   schedule?(binding: CallBinding, name: ScheduleTool, args: unknown): Promise<string>;
+  skillPublish?(binding: CallBinding, args: unknown): Promise<unknown>;
   /** callKey 为 MCP 请求的 _meta.callId */
   send(binding: CallBinding, callKey: string, args: unknown, signal: AbortSignal): Promise<unknown>;
 }
@@ -52,6 +53,7 @@ interface Lease {
   control: AbortController;
   dispose(): void;
 }
+export const SKILL_OWNER_ONLY = "发布技能仅限 owner 本人发起的回合";
 export const RECALL_QUOTA_MESSAGE = "本轮召回次数已用完";
 
 /** qq_context 每次调用取用的上下文（/context 端点）。 */
@@ -126,6 +128,12 @@ export class ThreadTokens {
     return this.gateway.auth(binding, name, args);
   }
 
+  async skillPublish(token: string, meta: CallMeta, args: unknown): Promise<unknown> {
+    const { binding } = await this.bind(token, meta);
+    if (!(await this.gateway.permissions?.(binding))?.actorIsOwner || !this.gateway.skillPublish) throw new Error(SKILL_OWNER_ONLY);
+    return this.gateway.skillPublish(binding, args);
+  }
+
   async schedule(token: string, meta: CallMeta, name: ScheduleTool, args: unknown): Promise<string> {
     const { binding } = await this.bind(token, meta);
     const permissions = await this.gateway.permissions?.(binding);
@@ -191,7 +199,7 @@ export async function startMediaRecallServer(tokens: ThreadTokens, port = 8790) 
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }).end(JSON.stringify(body));
     };
-    if (req.method !== "POST" || !["/recall", "/view", "/chats", "/send", "/context", "/auth_grant", "/auth_revoke", "/auth_list", ...SCHEDULE_TOOLS.map(name => "/" + name)].includes(req.url ?? "")) { send(404, { error: "不存在的召回端点" }); return; }
+    if (req.method !== "POST" || !["/recall", "/view", "/chats", "/send", "/context", "/auth_grant", "/auth_revoke", "/auth_list", "/skill_publish", ...SCHEDULE_TOOLS.map(name => "/" + name)].includes(req.url ?? "")) { send(404, { error: "不存在的召回端点" }); return; }
     const auth = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization ?? "");
     if (!auth || !tokens.valid(auth[1]!)) { send(401, { error: "线程令牌无效或已作废" }); return; }
     try {
@@ -211,6 +219,7 @@ export async function startMediaRecallServer(tokens: ThreadTokens, port = 8790) 
       if (req.url === "/auth_grant" || req.url === "/auth_revoke" || req.url === "/auth_list") {
         send(200, await tokens.auth(auth[1]!, meta, req.url.slice(1) as "auth_grant" | "auth_revoke" | "auth_list", body)); return;
       }
+      if (req.url === "/skill_publish") { send(200, await tokens.skillPublish(auth[1]!, meta, body)); return; }
       const scheduleTool = req.url!.slice(1);
       if (isScheduleTool(scheduleTool)) {
         send(200, await tokens.schedule(auth[1]!, meta, scheduleTool, body)); return;

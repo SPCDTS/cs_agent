@@ -7,6 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
 import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prompt.js";
+import { SkillsStore } from "../../src/agent/skills-store.js";
+import { SkillsLoader } from "../../src/agent/pi-tools/skills.js";
 import { PI_SUBAGENT_RULE, PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
 import { PiContextObserver, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
 import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
@@ -83,20 +85,23 @@ describe("pi 常驻后端：工具身份随本轮绑定", () => {
     expect(toolResults(seen).find(m => m.toolName === "qq_chats")?.isError).toBe(!owner);
   });
 
-  it.each([true, false])("技能写权限与提示按本轮发送者接线（owner 私聊=%s），下一条非 owner 消息不可改", async privateOwner => {
+  it.each([true, false])("skill_publish 只在 owner 本人的回合注册与放行（owner 私聊=%s），沙箱不能直写技能目录", async privateOwner => {
     const dir = tmp("pi-skills-owner-"), skillsDir = path.join(dir, "custom-skills"), file = path.join(skillsDir, "hello", "SKILL.md");
+    const skills = new SkillsStore({ dir: skillsDir, loader: new SkillsLoader({ dir: skillsDir }) });
     const text = "---\nname: hello\ndescription: owner 新增技能\n---\n正文";
     const seen: TranscriptContext[] = [];
     const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
-    const r = await rig([call(["write", { path: file, content: text }]), inspect, call(["write", { path: file, content: "群改写" }]), inspect], { skillsDir });
+    const r = await rig([call(["write", { path: "hello/SKILL.md", content: text }], ["write", { path: file, content: "直写" }]),
+      call(["skill_publish", { path: "hello" }]), inspect,
+      call(["skill_publish", { path: "hello", overwrite: true }]), inspect], { skillsDir, skills });
     await turn(r, "1", "写个技能", privateOwner ? null : "7");
     expect(await fs.readFile(file, "utf8")).toBe(text);
-    expect(systemOf(seen[0]!)).toContain("技能写入规则");
-    expect(systemOf(seen[0]!)).toContain(skillsDir + "/<name>/");
+    expect(toolResults(seen[0]!).find(m => m.toolName === "write" && m.isError)).toBeDefined();
+    expect(systemOf(seen[0]!)).toContain("skill_publish");
     await turn(r, "5", "改技能");
-    expect(systemOf(seen[1]!)).toContain("owner 新增技能");
-    expect(systemOf(seen[1]!)).not.toContain("技能写入规则");
-    expect(toolResults(seen[1]!).some(m => m.isError)).toBe(true);
+    // 发布后的技能在下一条消息的 system 里（工具集变化另起一条无文本的 system 消息）
+    expect(seen[1]!.messages.filter(m => m.role === "system").map(m => getSystemMessageText(m as Parameters<typeof getSystemMessageText>[0])).join(" ")).toContain("owner 新增技能");
+    expect(toolResults(seen[1]!).at(-1)?.isError).toBe(true);
     expect(await fs.readFile(file, "utf8")).toBe(text);
     const ids = await r.pi.readThreadIds();
     expect(Object.keys(ids).sort()).toEqual(privateOwner ? ["group:7", "owner"] : ["group:7"]);
@@ -358,7 +363,7 @@ describe("pi system 提示热更新", () => {
     expect(systemOf(seen[1]!)).toContain("更新后的技能描述");
     await fs.unlink(file);
     await turn(r, "5", "三");
-    expect(systemOf(seen[2]!)).not.toContain("<available_skills>");
+    expect(systemOf(seen[2]!)).not.toContain("<skill>");
     await put(file, "---\ndescription: 恢复技能描述\n---\n按需读取的技能正文");
     await turn(r, "5", "四");
     expect(results(seen[3]!)).toContain("按需读取的技能正文");

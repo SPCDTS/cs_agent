@@ -30,7 +30,7 @@ import { createCsAgentExtension } from "./agent/extension.js";
 import { warnDeprecatedSystemPrompt } from "./agent/prompt.js";
 import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
 import { SkillsLoader } from "./agent/pi-tools/skills.js";
-import { SkillsStore } from "./agent/skills-store.js";
+import { publishSkill, SkillsStore } from "./agent/skills-store.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
 import { Inbox } from "./agent/inbox.js";
 import { ThreadHost } from "./agent/host/thread-host.js";
@@ -142,6 +142,8 @@ async function main(): Promise<void> {
     limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } });
   let schedules: ScheduleService;
   const scheduleTools = new ScheduleTools({ grants, getHarness: () => dispatchHarness, getSchedules: () => schedules });
+  // 共享技能目录：面板上传与 skill_publish 工具共用（两个后端写技能都只走这一个入口）。
+  const skills = cfg.PI_SKILLS_DIR === "off" ? undefined : new SkillsStore({ dir: cfg.PI_SKILLS_DIR, loader: new SkillsLoader({ dir: cfg.PI_SKILLS_DIR }) });
   // codex 线程令牌只证明来自哪个会话线程；每次调用由 codex 适配器确认属于宿主当前回合，身份从宿主求出（§4.1、§5.1）。
   let codexBackend!: CodexBackend;
   const threadTokens = new ThreadTokens(mediaRecall, {
@@ -149,6 +151,7 @@ async function main(): Promise<void> {
     permissions: async binding => ({ ...await grants.permissions(binding), ...await scheduleTools.permissions(binding) }),
     schedule: (binding, name, args) => scheduleTools.tool(binding, name, args),
     auth: (binding, name, args) => grants.tool(binding, name, args),
+    skillPublish: (binding, args) => publishSkill(skills, binding.workdir, args),
     send: (binding, callKey, args, signal) => sendService.send({ ...binding,
       extraRoots: [binding.imageDir,
         ...(/^[0-9a-f-]{36}$/i.test(binding.session) ? [path.join(cfg.codexHome, "generated_images", binding.session)] : [])],
@@ -262,7 +265,7 @@ async function main(): Promise<void> {
     sendService, grants, scheduleTools, turns: inbox, owners: cfg.owners,
     currentModel: currentPiModel,
     dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
-    skillsDir: cfg.PI_SKILLS_DIR,
+    skillsDir: cfg.PI_SKILLS_DIR, skills,
     channel: chatsChannel, mediaRecall,
     thinkingLevel, store, instrumentation, contextUsage,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
@@ -358,7 +361,6 @@ async function main(): Promise<void> {
   const piStatus = async () => ({ threads: await pi.readThreadIds(), ...await pi.threadHealth(),
     compaction: obs.degraded ? [] : obs.db.prepare("SELECT json_extract(detail_json,'$.conversation') conversation, COUNT(*) attempts, MAX(ts) last_at FROM events WHERE stage='compaction' GROUP BY conversation").all(),
     usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
-  const skills = cfg.PI_SKILLS_DIR === "off" ? undefined : new SkillsStore({ dir: cfg.PI_SKILLS_DIR, loader: new SkillsLoader({ dir: cfg.PI_SKILLS_DIR }) });
   const dashboardData = { contextUsage, codexPrompt, codexBasePrompt, modelCatalog, skills };
   const dashboard = createDashboard({
     grants, schedules, ...dashboardData, config: cfg, store: obs, context: store, queue: () => queueStatus(),

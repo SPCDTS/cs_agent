@@ -99,7 +99,7 @@ describe("按会话域隔离 codex", () => {
       expect(row.sandbox).toBeUndefined();
       expect(row.config).not.toHaveProperty("sandbox_mode");
       const roots = row.config["sandbox_workspace_write.writable_roots"] as string[];
-      expect(roots).toEqual(owner ? [ws, path.join(path.dirname(options.threadsFile), "prompts"), path.join(options.codexHome, "skills", "shared")] : [ws]);
+      expect(roots).toEqual(owner ? [ws, path.join(path.dirname(options.threadsFile), "prompts")] : [ws]);
       const permissions = row.config["permissions.cs_agent_scope"] as { filesystem: Record<string, string> };
       for (const root of roots) expect(permissions.filesystem[root]).toBe("write");
       expect(permissions.filesystem).not.toHaveProperty(path.join(path.dirname(options.threadsFile), "workflows"));
@@ -130,28 +130,26 @@ describe("按会话域隔离 codex", () => {
 });
 
 describe("scope 工作区权限", () => {
-  it("技能写权限按发送者身份，群内 owner 可写；prompts 仍只对 owner 线程开放", () => {
+  it("共享技能目录在任何线程都不可写；prompts 只对 owner 线程开放", () => {
     const root = tmp(), data = path.join(root, "data"), codexHome = path.join(root, "custom-codex");
-    for (const key of ["owner", "group:7", "private:8"]) for (const senderIsOwner of [true, false, undefined]) {
-      const policy = codexWorkspacePolicy(path.join(root, "ws"), data, key, "workspace-write", true, codexHome, senderIsOwner);
-      const skills = path.join(codexHome, "skills", "shared");
-      expect(policy.writableRoots.includes(skills)).toBe(senderIsOwner === true);
-      expect(policy.args.join(" ").includes(`${JSON.stringify(skills)}="write"`)).toBe(senderIsOwner === true);
+    const skills = path.join(codexHome, "skills", "shared");
+    for (const key of ["owner", "group:7", "private:8"]) {
+      const policy = codexWorkspacePolicy(path.join(root, "ws"), data, key, "workspace-write", true, codexHome);
+      expect(policy.writableRoots).not.toContain(skills);
+      expect(policy.args.join(" ")).not.toContain(`${JSON.stringify(skills)}="write"`);
       expect(policy.writableRoots.includes(path.join(data, "prompts"))).toBe(key === "owner");
-      expect(codexWorkspacePolicy(path.join(root, "ws"), data, key, "read-only", true, codexHome, senderIsOwner).writableRoots).toEqual([]);
+      expect(codexWorkspacePolicy(path.join(root, "ws"), data, key, "read-only", true, codexHome).writableRoots).toEqual([]);
     }
   });
-  it("常驻线程的技能写权限按线程：只有 owner 线程可写共享技能，群线程不可写（含 owner 在群里发言）", async () => {
+  it("常驻线程的受管规则：各线程都不能直接写共享技能，规则指向 skill_publish", async () => {
     const { dir, options } = rig();
     const { runner, loads } = await live(dir);
     await runner.openThread("owner", { mcpEnv });
     await runner.openThread("group:7", { mcpEnv });
     const skills = path.join(options.codexHome, "skills", "shared");
-    const [owner, group] = loads().map(row => row.config["sandbox_workspace_write.writable_roots"] as string[]);
-    expect(owner).toContain(skills); expect(group).not.toContain(skills);
-    expect(await fs.readFile(path.join(options.workspaceDir, "owner", "AGENTS.md"), "utf8")).toContain("只有当前这条消息的发送者是 owner 且明确要求时才写");
-    expect(await fs.readFile(path.join(options.workspaceDir, "group_7", "AGENTS.md"), "utf8")).not.toContain("## 技能");
-    expect(group).not.toContain(path.join(path.dirname(options.threadsFile), "prompts"));
+    for (const row of loads()) expect(row.config["sandbox_workspace_write.writable_roots"]).not.toContain(skills);
+    for (const ws of ["owner", "group_7"]) expect(await fs.readFile(path.join(options.workspaceDir, ws, "AGENTS.md"), "utf8")).toContain("skill_publish");
+    expect(loads()[1]!.config["sandbox_workspace_write.writable_roots"]).not.toContain(path.join(path.dirname(options.threadsFile), "prompts"));
   });
   it.each(["owner", "group:1", "private:1"])("%s 只读会话不宣称可写；禁止关闭沙箱或把数据目录放在 workspace 内", key => {
     const root = tmp();

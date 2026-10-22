@@ -169,3 +169,41 @@ describe("SkillsStore", () => {
     expect(await fs.readdir(outside)).toEqual(["SKILL.md"]);
   });
 });
+
+describe("SkillsStore.publishDir（skill_publish）", () => {
+  const ws = () => path.join(root, "ws");
+  it("发布工作区内的技能目录：保留子目录，跳过 .git，同名需 overwrite", async () => {
+    await put(path.join(ws(), "hello", "SKILL.md"), md()); await put(path.join(ws(), "hello", "scripts", "a.py"), "print(1)");
+    await put(path.join(ws(), "hello", ".git", "HEAD"), "ref");
+    expect(await store.publishDir("hello", ws(), { overwrite: false })).toEqual({ name: "hello", files: 2 });
+    expect(await fs.readFile(path.join(dir, "hello", "scripts", "a.py"), "utf8")).toBe("print(1)");
+    await expect(fs.access(path.join(dir, "hello", ".git"))).rejects.toThrow();
+    await expect(store.publishDir(path.join(ws(), "hello"), ws(), { overwrite: false })).rejects.toMatchObject({ status: 409 });
+    await put(path.join(ws(), "hello", "SKILL.md"), md("hello", "新说明"));
+    await store.publishDir("hello", ws(), { overwrite: true });
+    expect(await store.readSkillMd("hello")).toContain("新说明");
+  });
+
+  it("拒绝工作区外、工作区本身、链接、缺 SKILL.md 与目录名不符", async () => {
+    await put(path.join(root, "outside", "SKILL.md"), md("outside"));
+    await put(path.join(ws(), "SKILL.md"), md("ws"));
+    await put(path.join(ws(), "empty", "a.txt"), "x");
+    await put(path.join(ws(), "wrong", "SKILL.md"), md("other"));
+    await put(path.join(ws(), "inner", "SKILL.md"), md("inner"));
+    await fs.symlink(path.join(root, "outside"), path.join(ws(), "outside"), "junction");
+    await fs.symlink(path.join(root, "outside"), path.join(ws(), "inner", "link"), "junction");
+    for (const [source, status] of [["../outside", 400], [path.join(root, "outside"), 400], [".", 400], ["outside", 400],
+      ["inner", 400], ["empty", 400], ["wrong", 400], ["missing", 404]] as const) {
+      await expect(store.publishDir(source, ws(), { overwrite: true })).rejects.toMatchObject({ status });
+    }
+    expect(await fs.readdir(dir).catch(() => [])).toEqual([]);
+  });
+
+  it("文件数与大小受限", async () => {
+    const small = new SkillsStore({ dir, loader, limits: { maxEntries: 2, maxFileBytes: 8 } });
+    await put(path.join(ws(), "hello", "SKILL.md"), md());
+    await expect(small.publishDir("hello", ws(), { overwrite: false })).rejects.toMatchObject({ status: 413 });
+    await put(path.join(ws(), "many", "a"), ""); await put(path.join(ws(), "many", "b"), ""); await put(path.join(ws(), "many", "c"), "");
+    await expect(small.publishDir("many", ws(), { overwrite: false })).rejects.toMatchObject({ status: 413 });
+  });
+});

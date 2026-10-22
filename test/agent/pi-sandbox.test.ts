@@ -55,32 +55,14 @@ describe("受管 deny_read", () => {
 });
 
 describe("Pi 文件策略", () => {
-  it("群内 owner 可写自定义 skillsDir，其他发送者只读；off 禁写，链接和相似前缀不能越界", async () => {
+  it("技能目录对任何发送者都只读（写技能走 skill_publish）", async () => {
     const { dir, options } = await sandboxFixture();
-    const skillsDir = path.join(dir, "custom-skills");
-    const owner = await codingEnvironment({ ...options, request: { ...options.request, senderIsOwner: true }, skillsDir });
-    const file = path.join(skillsDir, "hello", "SKILL.md");
-    expect(await owner.writeFile(file, "技能", context)).toMatchObject({ ok: true });
-    const group = await codingEnvironment({ ...options, skillsDir });
-    expect(await group.readTextFile(file, context)).toMatchObject({ ok: true, value: "技能" });
-    expect(await group.writeFile(file, "不准", context)).toMatchObject({ ok: false });
-    const legacyOwner = await codingEnvironment({ ...options, key: "owner", request: { access: "all", inputs: [] }, skillsDir });
-    expect(await legacyOwner.writeFile(file, "不准", context)).toMatchObject({ ok: false });
-    const off = await codingEnvironment({ ...owner.policy.options, skillsDir: "off" });
-    expect(await off.writeFile(file, "不准", context)).toMatchObject({ ok: false });
-    expect(await owner.writeFile(path.join(skillsDir + "-other", "x"), "不准", context)).toMatchObject({ ok: false });
-    const outside = path.join(dir, "outside"); await fs.mkdir(outside);
-    await fs.symlink(outside, path.join(skillsDir, "escape"), "junction");
-    expect(await owner.writeFile(path.join(skillsDir, "escape", "x"), "不准", context)).toMatchObject({ ok: false });
-    const alias = path.join(dir, "skills-alias"); await fs.symlink(skillsDir, alias, "junction");
-    expect(await owner.writeFile(path.join(alias, "x"), "不准", context)).toMatchObject({ ok: false });
-    const linked = await codingEnvironment({ ...owner.policy.options, skillsDir: alias });
-    expect(await linked.writeFile(path.join(alias, "x"), "不准", context)).toMatchObject({ ok: false });
-  });
-  it("owner 技能写入不能覆盖 deny_read 的优先级", async () => {
-    const { dir, options } = await sandboxFixture();
-    const owner = await codingEnvironment({ ...options, key: "owner", request: { access: "all", senderIsOwner: true, inputs: [] }, skillsDir: path.join(dir, "codex", "trace") });
-    expect(await owner.writeFile(path.join(dir, "codex", "trace", "x"), "不准", context)).toMatchObject({ ok: false });
+    const file = path.join(dir, "skills", "hello", "SKILL.md");
+    await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, "技能");
+    for (const senderIsOwner of [true, false]) {
+      const env = await codingEnvironment({ ...options, request: { ...options.request, senderIsOwner } });
+      expect(await env.writeFile(file, "不准", context)).toMatchObject({ ok: false });
+    }
   });
   it("完整拒绝配置的 Codex 工作区与 trace，ID 归档仍可读", async () => {
     const { dir, workspaceDir, env } = await sandboxFixture();
@@ -217,16 +199,10 @@ describe("Pi 文件策略", () => {
 });
 
 describe("bwrap 参数", () => {
-  it("owner 发送者技能挂载在只读根之后、deny 之前，非 owner 与 off 无可写技能挂载", () => {
-    const denied = [{ path: "/data/skills/secret", directory: true }];
-    const args = bwrapArgs("/data/pi-work/group_7", "/data/pi-work", denied, "true", { senderIsOwner: true, skillsDir: "/data/skills" });
-    const joined = args.join(" ");
-    expect(joined).toContain("--bind /data/skills /data/skills");
-    expect(joined.indexOf("--bind /data/skills")).toBeGreaterThan(joined.indexOf("--ro-bind / /"));
-    expect(joined.indexOf("--bind /data/skills")).toBeLessThan(joined.indexOf("--tmpfs /data/skills/secret"));
-    for (const options of [{ senderIsOwner: false, skillsDir: "/data/skills" }, { skillsDir: "/data/skills" }, { senderIsOwner: true, skillsDir: "off" }]) {
-      expect(bwrapArgs("/data/pi-work/group_7", "/data/pi-work", [], "true", options).filter(a => a === "--bind")).toHaveLength(1);
-    }
+  it("没有可写的技能挂载：只挂回当前会话工作区", () => {
+    const args = bwrapArgs("/data/pi-work/group_7", "/data/pi-work", [], "true");
+    expect(args.filter(a => a === "--bind")).toHaveLength(1);
+    expect(args.join(" ")).not.toContain("/data/skills");
   });
   it("只挂回当前会话、隔离 pid/proc、保留网络，目录与文件分别遮蔽", () => {
     const args = bwrapArgs("/data/pi-work/group_7", "/data/pi-work", [

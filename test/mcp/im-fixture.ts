@@ -32,6 +32,7 @@ export async function imRig(threadKey: string, gateway: Omit<ThreadGateway, "res
     const im = createImServer({
       send: (args, meta) => sendViaLoopback(args, meta, token, port),
       auth: (name, args, meta) => imViaLoopback(name, args, meta, token, port),
+      skillPublish: (args, meta) => imViaLoopback("skill_publish", args, meta, token, port),
       schedule: async (name, args, meta) => {
         const result = await imViaLoopback(name, args, meta, token, port);
         if (typeof result !== "string") throw new Error("定时工具返回格式错误");

@@ -143,7 +143,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 | `./data/prompts/` | `codex.md`（codex 行为指引，首次播种，面板可编辑，保存后下次加载线程生效）、`agent.md`（pi 提示词，缺失才播种，每次模型请求热加载）、`codex-base/<slug>.md`（每模型基础指令，可在设置页「恢复目录默认」）。`system.md` 已弃用不再读取 |
 | `./data/settings.json` | 面板运行时设置；读取时剥离已废弃的 `codexReplyMode` |
 | `./data/context-usage.json` | 每线程上一轮输入占用（250 ms 防抖原子写，突发退出可能丢最后一次） |
-| `./data/skills/`（`SKILLS_DIR`） | 共享技能，挂到 `/data/skills` 与 `/data/codex/skills/shared`（读写） |
+| `./data/skills/`（`SKILLS_DIR`） | 共享技能，挂到 `/data/skills` 与 `/data/codex/skills/shared`（容器读写；agent 沙箱只读，经 `skill_publish` 写入） |
 | `./data/incoming/<入站键>/` | 触发消息的参考图，7 天清理；对 codex 命令禁读 |
 | `./data/images/<会话键>/outbox/` | `send_message` 的图片与文件副本，回合结束清理一小时前且已发完的 |
 | `./data/media/` | 按需召回的聊天图片，随原始消息保留，每日 GC 无引用文件 |

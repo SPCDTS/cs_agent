@@ -3,6 +3,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { unzipSync, zipSync } from "fflate";
 import { SkillsLoader, parseSkillFrontmatter, validateSkill } from "./pi-tools/skills.js";
+import { readBounded } from "../media/attach.js";
+import { z } from "zod";
 
 const MD_BYTES = 256 * 1024;
 export interface SkillEntry {
@@ -40,6 +42,13 @@ function metadata(bytes: Uint8Array, dirName?: string) {
   if (result.warnings.length) throw new SkillsStoreError(400, result.warnings.join("；"));
   if (dirName !== undefined && result.name !== dirName) throw new SkillsStoreError(400, "目录名必须等于 name");
   return result;
+}
+
+/** skill_publish 工具的执行（两个后端共用）；调用方先确认本轮由 owner 本人发起。 */
+export async function publishSkill(store: SkillsStore | undefined, workspace: string, args: unknown) {
+  if (!store) throw new Error("技能目录未启用");
+  const { path: dir, overwrite } = z.object({ path: z.string().min(1).max(1024), overwrite: z.boolean().optional() }).strict().parse(args);
+  return { ...await store.publishDir(dir, workspace, { overwrite: overwrite === true }), note: "已发布，下一条消息起生效" };
 }
 
 /** ZIP 使用跨平台路径子集，避免 Windows 盘符、ADS、设备名及大小写别名。 */
@@ -232,6 +241,44 @@ export class SkillsStore {
       for (const name of unmatched) result.skipped.push({ path: name, reason: "缺少 SKILL.md" });
       if (!roots.length && !unmatched.size) result.skipped.push({ path: "ZIP", reason: "缺少 SKILL.md" });
       return result;
+    });
+  }
+
+  /**
+   * agent 在本会话工作区写好的技能目录（目录名即技能名）发布到共享目录：只收普通文件，跳过 .git，
+   * 拒绝链接与工作区外的路径；校验与限额同 ZIP 导入。调用方负责确认本轮由 owner 发起。
+   */
+  publishDir(dir: string, workspace: string, opts: { overwrite: boolean }): Promise<{ name: string; files: number }> {
+    return this.mutate(async () => {
+      const base = path.resolve(workspace), source = path.resolve(base, dir);
+      const denied = () => new SkillsStoreError(400, "只能发布本会话工作区内的目录（不能是链接）：" + dir);
+      if (!inside(base, source) || samePath(base, source)) throw denied();
+      const realBase = await fs.realpath(base);
+      for (let current = source; !samePath(current, base); current = path.dirname(current)) {
+        const st = await fs.lstat(current).catch(error => { if (missing(error)) throw new SkillsStoreError(404, "目录不存在：" + dir); throw error; });
+        if (st.isSymbolicLink() || (current === source && !st.isDirectory())) throw denied();
+      }
+      const real = await fs.realpath(source);
+      if (!inside(realBase, real) || samePath(realBase, real)) throw denied();
+      const files: Record<string, Uint8Array> = Object.create(null);
+      let total = 0;
+      const visit = async (current: string): Promise<void> => {
+        for (const name of (await fs.readdir(current)).sort()) {
+          if (name === ".git") continue;
+          const file = path.join(current, name), relative = path.relative(real, file).split(path.sep).join("/"), st = await fs.lstat(file);
+          if (st.isSymbolicLink()) throw new SkillsStoreError(400, "技能目录不能含链接：" + relative);
+          if (Object.keys(files).length >= this.limits.maxEntries) throw new SkillsStoreError(413, "文件数超过上限");
+          if (st.isDirectory()) { files[relative + "/"] = new Uint8Array(); await visit(file); continue; }
+          if (!st.isFile()) throw new SkillsStoreError(400, "只能包含普通文件：" + relative);
+          if (st.size > this.limits.maxFileBytes || (total += st.size) > this.limits.maxZipBytes) throw new SkillsStoreError(413, "技能大小超过上限");
+          files[relative] = await readBounded(file, 0, this.limits.maxFileBytes).catch(() => { throw new SkillsStoreError(400, "读取失败或读取期间被改动：" + relative); });
+        }
+      };
+      await visit(real);
+      if (!files["SKILL.md"]) throw new SkillsStoreError(400, "缺少 SKILL.md");
+      const { name } = metadata(files["SKILL.md"], path.basename(real));
+      if (!await this.install(name, files, opts.overwrite)) throw new SkillsStoreError(409, `技能 ${name} 已存在；确认要覆盖时传 overwrite: true`);
+      return { name, files: Object.keys(files).filter(file => !file.endsWith("/")).length };
     });
   }
 

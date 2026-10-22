@@ -4,7 +4,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { validateSendArguments } from "../agent/send-service.js";
 import { AUTH_TOOLS, type AuthTool } from "../agent/grants.js";
-import { authDescriptions, authParameters, sendParameters } from "../agent/im-tools.js";
+import { authDescriptions, authParameters, sendParameters, SKILL_PUBLISH_DESCRIPTION, skillPublishParameters } from "../agent/im-tools.js";
 import { qqContextText } from "../context/qq-context-tool.js";
 import type { CallMeta } from "../context/media-recall-server.js";
 import { callMetaOf, loopbackJson, loopbackPost } from "./media-recall-client.js";
@@ -17,6 +17,7 @@ export interface ImHandlers {
   send(args: unknown, meta: CallMeta): Promise<unknown>;
   auth(name: AuthTool, args: unknown, meta: CallMeta): Promise<unknown>;
   schedule(name: ScheduleTool, args: unknown, meta: CallMeta): Promise<string>;
+  skillPublish(args: unknown, meta: CallMeta): Promise<unknown>;
 }
 
 export function createImServer(handlers: ImHandlers): Server {
@@ -28,7 +29,10 @@ export function createImServer(handlers: ImHandlers): Server {
   }, ...AUTH_TOOLS.map(name => ({
     name, description: authDescriptions[name] + "（仅限 owner 回合）", inputSchema: authParameters[name],
     annotations: { readOnlyHint: name === "auth_list", destructiveHint: name === "auth_revoke", openWorldHint: false },
-  })), ...SCHEDULE_TOOLS.map(name => ({
+  })), {
+    name: "skill_publish", description: SKILL_PUBLISH_DESCRIPTION, inputSchema: skillPublishParameters,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, ...SCHEDULE_TOOLS.map(name => ({
     name, description: scheduleDescriptions[name], inputSchema: scheduleParameters[name],
     annotations: { readOnlyHint: name === "schedule_list", destructiveHint: name === "schedule_delete", openWorldHint: false },
   }))] }));
@@ -41,6 +45,9 @@ export function createImServer(handlers: ImHandlers): Server {
       if (AUTH_TOOLS.includes(req.params.name as AuthTool)) {
         return qqContextText(JSON.stringify(await handlers.auth(req.params.name as AuthTool, req.params.arguments ?? {}, meta)));
       }
+      if (req.params.name === "skill_publish") {
+        return qqContextText(JSON.stringify(await handlers.skillPublish(req.params.arguments ?? {}, meta)));
+      }
       if (isScheduleTool(req.params.name)) {
         return qqContextText(await handlers.schedule(req.params.name, req.params.arguments ?? {}, meta));
       }
@@ -51,7 +58,7 @@ export function createImServer(handlers: ImHandlers): Server {
 }
 
 /** 经线程令牌向主进程提交 im 工具调用。 */
-export async function imViaLoopback(endpoint: AuthTool | ScheduleTool | "send", args: unknown, meta: CallMeta, token: string | undefined, port = 8790): Promise<unknown> {
+export async function imViaLoopback(endpoint: AuthTool | ScheduleTool | "send" | "skill_publish", args: unknown, meta: CallMeta, token: string | undefined, port = 8790): Promise<unknown> {
   return loopbackJson(await loopbackPost(endpoint, args, token, port, meta, endpoint === "send" ? 600_000 : 30_000), "IM 请求失败");
 }
 

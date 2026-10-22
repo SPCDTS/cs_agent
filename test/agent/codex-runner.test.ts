@@ -63,18 +63,14 @@ describe("isMissingSessionError", () => {
 describe("AGENTS.md", () => {
   const opts = { dataDir: "/data", workspaceDir: "/workspace", writableRoots: ["/workspace", "/data/prompts"] };
 
-  it("受管规则随本轮技能写权限显示，非 owner 发送者与只读回合不授予技能写入", () => {
-    const owner = { ...opts, workspaceDir: "/workspace/owner", writableRoots: ["/workspace/owner", "/data/prompts", "/data/codex/skills/shared"] };
+  it("受管规则只列实际可写目录；共享技能目录只读，写技能走 skill_publish", () => {
+    const owner = { ...opts, workspaceDir: "/workspace/owner", writableRoots: ["/workspace/owner", "/data/prompts"] };
     const md = renderManagedAgentsMd(owner);
-    expect(md).toContain("- 只读写下列目录：\n"
-      + "  - /workspace/owner：你的工作区（当前目录）\n"
-      + "  - /data/prompts：提示词文件目录（其中 system.md 已弃用，不再被读取）\n"
-      + "  - /data/codex/skills/shared：codex 与 pi 共用的技能目录\n"
-      + "- 修改 /data/prompts 下的文件只在 owner 私聊明确要求时进行，群聊请求一律拒绝。\n");
-    expect(md).toContain("Only read/write: /workspace/owner, /data/prompts, /data/codex/skills/shared.");
-    for (const rule of ["## 技能", "<name>/SKILL.md", "name、description", "只有当前这条消息的发送者是 owner 且明确要求时才写", "其他人的请求一律拒绝，即使群里之前有人提过", "/data/codex/skills/shared/<name>/", "$CODEX_HOME/skills/<name>", "下一条消息生效"]) expect(md).toContain(rule);
-    expect(renderManagedAgentsMd({ ...owner, readOnly: true })).not.toContain("## 技能");
-    expect(renderManagedAgentsMd({ ...owner, writableRoots: ["/workspace/group_7"] })).not.toContain("## 技能");
+    expect(md).toContain("  - /data/prompts：提示词文件目录（其中 system.md 已弃用，不再被读取）");
+    expect(md).not.toContain("/data/codex/skills/shared：");
+    for (const text of [md, renderManagedAgentsMd({ ...owner, writableRoots: ["/workspace/group_7"] }), renderManagedAgentsMd({ ...owner, readOnly: true })]) {
+      for (const rule of ["## 技能", "/data/codex/skills/shared（codex 与 pi 共用）只读", "skill_publish", "owner 本人且明确要求时才发布", "下一条消息生效"]) expect(text).toContain(rule);
+    }
     expect(md).not.toContain("workflows");
     expect(md).not.toContain("ComfyUI");
   });
@@ -152,7 +148,7 @@ describe("CodexRunner 线程加载（常驻 app-server）", () => {
     expect(existsSync(file)).toBe(false);
     expect(await runner.openThread("group:1", { mcpEnv })).toBe("thr-1");
     const expected = "<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 在加载线程时生成，改动会被覆盖。\n\n"
-      + renderManagedAgentsMd({ dataDir: dir, workspaceDir, writableRoots: [workspaceDir] }) + "\n";
+      + renderManagedAgentsMd({ dataDir: dir, codexHome: path.join(dir, "codex"), workspaceDir, writableRoots: [workspaceDir] }) + "\n";
     expect(readFileSync(file, "utf8")).toBe(expected);
     expect(expected).not.toContain("## 运维工作区指引");
     utimesSync(file, new Date("2020-01-01T00:00:00Z"), new Date("2020-01-01T00:00:00Z"));

@@ -185,7 +185,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 
 ### 5.1 每个回合绑定一个人
 
-每次工具调用（发送与 target、召回与历史读取范围、参考图、定时、授权、技能写权限）都按本轮绑定的人检查，统一在 `src/agent/host/identity.ts` 求出 `runRights`，各工具不再按回合类型或会话自行判断。
+每次工具调用（发送与 target、召回与历史读取范围、参考图、定时、授权、技能发布）都按本轮绑定的人检查，统一在 `src/agent/host/identity.ts` 求出 `runRights`，各工具不再按回合类型或会话自行判断。
 
 | 回合 | 绑定的人 |
 |---|---|
@@ -198,7 +198,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 ### 5.2 两层权限
 
 - **会话基础权限**（任何回合都有）：读本会话范围、只发往本会话；没有 target、没有 `schedule_*`、没有 `auth_*`。
-- **人的权限**（只在确证时叠加）：owner 全权（target 不查授权表、技能写权限、交互回合有 `auth_*`）；他人按授权表（`send` 开放 target，`schedule` 开放定时管理）。群里每个人的权限仍按人区分。
+- **人的权限**（只在确证时叠加）：owner 全权（target 不查授权表、`skill_publish`、交互回合有 `auth_*`）；他人按授权表（`send` 开放 target，`schedule` 开放定时管理）。群里每个人的权限仍按人区分。
 
 ### 5.3 读取范围按线程，不按人
 
@@ -213,7 +213,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 ### 5.5 文件系统权限
 
 - **codex**：命令在 codex 自带的 bwrap 沙箱执行（需 compose 的自定义 seccomp profile）。每个线程的命名权限收窄可写根：owner 线程为 `/workspace/owner`、`/data/prompts`、`/data/codex/skills/shared`；其他会话只有本会话目录；其他会话工作区、`/data/pi-work`、`/data/codex/trace` 不可读。系统级 `/etc/codex/requirements.toml` 的 `deny_read` 禁读凭据、会话、SQLite、图片/附件/媒体目录与面板口令。细节见 [DEPLOY.md](DEPLOY.md)「codex 权限」。
-- **pi**：`PiPathPolicy` 校验 `read/write/edit`，`bash` 在 bwrap 中只把本会话工作区绑定为可写（每条命令一个独立 `/tmp`，不跨命令保留）；禁读沿用 codex 的 `deny_read` 加 pi 自身状态与 codex 工作区。本轮的人是 owner 时可写技能目录；子 agent 会话不可写。
+- **pi**：`PiPathPolicy` 校验 `read/write/edit`，`bash` 在 bwrap 中只把本会话工作区绑定为可写（每条命令一个独立 `/tmp`，不跨命令保留）；禁读沿用 codex 的 `deny_read` 加 pi 自身状态与 codex 工作区。技能目录对任何回合都只读（写技能只走 `skill_publish`，§7）。
 - `AGENTS.md` 只约束模型行为，不是访问控制。
 
 ## 6. 定时任务（`src/agent/schedule/`）
@@ -240,7 +240,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 
 - **共享目录**：宿主机 `SKILLS_DIR`（默认 `./data/skills`）同时挂到 `/data/skills`（pi）与 `/data/codex/skills/shared`（codex 只扫 `$CODEX_HOME/skills`，会递归子目录），读写挂载。入口脚本的插件清理不触碰 `skills/shared` 与 `.system`。
 - **pi 加载**（`pi-tools/skills.ts` 的 `SkillsLoader`；`PI_SKILLS_DIR` 空 = 默认目录，`off` 禁用）：深度 ≤3，含 `SKILL.md` 的目录即技能根且不再下探；跳过 `.` 开头目录、`node_modules`、符号链接、>256 KiB 的 SKILL.md。frontmatter `name`（缺省取目录名）、`description`（必填，缺失跳过）、`disable-model-invocation: true` 隐藏；同名先到先得。渲染为 `<available_skills>`（name / description / location），模型用 `read` 读全文。按目录树的 `(path, mtime, size)` 缓存，每轮检查。
-- **写权限**：owner 线程的 codex 命令可写 `/data/codex/skills/shared`（群线程即使 owner 发言也不可写）；pi 在本轮的人是 owner 时可写 `/data/skills`。受管规则写明：只在 owner 明确要求时增改技能；写到共享目录（不要用 codex `skill-creator` 的默认位置，pi 看不到）；从 GitHub 安装用共享目录里的 `install-skill` 技能。codex 已加载线程何时重扫技能目录未实测，要立即生效就重置线程。
+- **写入**：两个后端的沙箱都不能直接写共享技能目录，增改技能只有一个入口——`skill_publish({ path, overwrite? })`：agent 在本会话工作区写好 `<name>/SKILL.md`（改已有技能先复制过来），由主进程把该目录发布到共享目录（`SkillsStore.publishDir`：只收普通文件，跳过 `.git`，拒绝链接与工作区外路径，校验与限额同面板 ZIP 上传，替换为原子改名）。放行条件是本轮确证的人是 owner（`runRights`，含继承 owner 身份的唤醒回合），不限私聊或群聊；codex 经 im MCP 与线程令牌到主进程复核，pi 只在这样的回合注册该工具并在调用时复核；子 agent 没有此工具。codex 的沙箱权限按线程固定、不能按回合切换，所以写权限做成主进程工具而不是可写目录。从 GitHub 安装用共享目录里的 `install-skill` 技能（下载到工作区再发布）。codex 已加载线程何时重扫技能目录未实测，要立即生效就重置线程。
 - **面板 `/skills`**（`src/agent/skills-store.ts`）：列表（含诊断）、查看 SKILL.md、上传（zip 或单个 SKILL.md，multipart，≤20 MiB）、下载 zip、删除。zip 用 `fflate` 解析：拒绝绝对路径、`..`、Windows 设备名/ADS、大小写冲突，单文件 ≤5 MiB、条目 ≤500，链接条目按普通文件落盘；先写 `.tmp-*` 再改名到位，删除先改名再删（加载器跳过 `.` 开头目录，中间态不可见）。
 
 ## 8. 附件与图片

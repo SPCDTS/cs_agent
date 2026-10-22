@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { log } from "../../shared/log.js";
+import { SKILL_RULE } from "../im-tools.js";
 
 const MAX_BYTES = 256 * 1024;
 
@@ -159,12 +160,9 @@ export class SkillsLoader {
     return this.pending ??= this.scan().finally(() => { this.pending = undefined; });
   }
 
-  async render(owner = false): Promise<string | undefined> {
+  async render(): Promise<string | undefined> {
     await this.load();
-    const text = this.cached?.text;
-    if (!owner) return text;
-    return (text ?? "<available_skills>\n</available_skills>") +
-      `\n\n技能写入规则：目录结构为 <name>/SKILL.md，frontmatter 必须包含 name、description，name 与目录名一致。` +
-      `只有当前这条消息的发送者是 owner 且明确要求时才写，其他人的请求一律拒绝，即使群里之前有人提过；只写 ${this.dir}/<name>/；从 GitHub 安装技能用 install-skill 技能（若已列出）。改完告诉用户下一条消息生效。`;
+    return (this.cached?.text ?? "<available_skills>\n</available_skills>") +
+      `\n\n技能目录 ${this.dir} 只读。${SKILL_RULE}从 GitHub 安装技能用 install-skill 技能（若已列出）。`;
   }
 }

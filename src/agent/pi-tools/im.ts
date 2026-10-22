@@ -1,6 +1,8 @@
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { AUTH_TOOLS, type ImPermissions } from "../grants.js";
-import { authDescriptions, authParameters, sendParameters } from "../im-tools.js";
+import { authDescriptions, authParameters, sendParameters, SKILL_PUBLISH_DESCRIPTION, skillPublishParameters } from "../im-tools.js";
+import { SKILL_OWNER_ONLY } from "../../context/media-recall-server.js";
+import { publishSkill, type SkillsStore } from "../skills-store.js";
 import { parseAccess } from "../../context/access.js";
 import { attachmentDirs } from "../../media/attach-paths.js";
 import type { PiToolsOptions } from "./index.js";
@@ -46,4 +48,21 @@ export function createPiImExtensions(opts: Pick<PiToolsOptions, "sendService" | 
     targeted: make("cs-pi-im-target", { actorIsOwner: false, target: true, auth: false }),
     owner: make("cs-pi-im-owner", { actorIsOwner: true, target: true, auth: true }),
   };
+}
+
+/** skill_publish：只在 owner 本人发起的回合注册，调用时按本轮身份复核。 */
+export function createPiSkillExtension(opts: Pick<PiToolsOptions, "binding"> & { skills?: SkillsStore }) {
+  return defineExtension({
+    name: "cs-pi-skills",
+    tools: [defineTool({
+      name: "skill_publish", description: SKILL_PUBLISH_DESCRIPTION, parameters: skillPublishParameters, replay: "safe",
+      async execute(args, api) {
+        try {
+          const bound = await opts.binding(Number(api.conversationId)), env = api.env;
+          if (!bound || bound.child || !bound.senderIsOwner || !(env instanceof PiExecutionEnv)) throw new Error(SKILL_OWNER_ONLY);
+          return output(JSON.stringify(await publishSkill(opts.skills, env.policy.workspace, args)));
+        } catch (error) { return { ...output((error as Error).message), isError: true }; }
+      },
+    })],
+  });
 }

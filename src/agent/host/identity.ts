@@ -29,7 +29,7 @@ export type RunRights = {
   actor?: string;
   /** 读取范围：owner 在自己的私聊线程为 all，其余（包括 owner 在群里）为本会话 */
   access: string;
-  /** owner 本人：免授权表、技能写权限 */
+  /** owner 本人：免授权表、skill_publish */
   owner: boolean;
   /** 授权工具：owner 的交互身份（定时身份没有） */
   auth: boolean;

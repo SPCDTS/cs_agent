@@ -60,6 +60,7 @@ export interface ResidentOptions {
   /** 以下透传给 PiBackend.open（缺省与原装置一致） */
   workspaceDir?: string;
   skillsDir?: string;
+  skills?: PiBackendOptions["skills"];
   mediaRecall?: PiBackendOptions["mediaRecall"];
   channel?: PiBackendOptions["channel"];
   scheduleTools?: PiBackendOptions["scheduleTools"];
@@ -134,6 +135,7 @@ export async function residentRig(options: ResidentOptions = {}) {
       models, model: { provider: model.provider, modelId: model.id }, thinkingLevel: "off", store: history,
       subagent: options.subagent ?? { maxConcurrent: 3 },
       ...(options.skillsDir !== undefined ? { skillsDir: options.skillsDir } : {}),
+      ...(options.skills ? { skills: options.skills } : {}),
       ...(options.mediaRecall ? { mediaRecall: options.mediaRecall } : {}),
       ...(options.channel ? { channel: options.channel } : {}),
       ...(options.scheduleTools ? { scheduleTools: options.scheduleTools } : {}),

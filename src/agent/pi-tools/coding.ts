@@ -25,13 +25,7 @@ export class PiExecutionEnv extends NodeExecutionEnv {
       await this.policy.check(this.cwd, "write", deny);
       if (options?.cwd && path.resolve(this.cwd, options.cwd) !== this.policy.workspace) throw new Error("bash cwd 必须是本会话工作区；请在沙箱命令内 cd");
       const timeout = options?.timeout;
-      const skillsDir = this.policy.options.request.senderIsOwner === true ? this.policy.skillsDir : undefined;
-      if (skillsDir) {
-        await this.policy.check(skillsDir, "write", deny);
-        await fs.mkdir(skillsDir, { recursive: true });
-      }
-      return await super.exec([BWRAP, ...bwrapArgs(this.policy.workspace, this.policy.workRoot, deny.paths, command,
-        { senderIsOwner: this.policy.options.request.senderIsOwner, skillsDir })], {
+      return await super.exec([BWRAP, ...bwrapArgs(this.policy.workspace, this.policy.workRoot, deny.paths, command)], {
         ...options, cwd: this.policy.workspace, inheritEnv: false,
         env: { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] =>
           SHELL_ENV.test(entry[0]) && entry[1] !== undefined)), ...options?.env },

@@ -13,7 +13,8 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { codingEnvironment, codingTools } from "../pi-tools/coding.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
 import { createPiScheduleExtensions } from "../pi-tools/schedule.js";
-import { createPiImExtensions } from "../pi-tools/im.js";
+import { createPiImExtensions, createPiSkillExtension } from "../pi-tools/im.js";
+import type { SkillsStore } from "../skills-store.js";
 import { PiChildDoc, traceKey, type PiCallBinding } from "../pi-tools/request.js";
 import { createSubagentExtension, isSubagentReportRequest, reportPerson, SUBAGENT_REPORT_KIND, SubagentDoc, type SubagentOptions, type SubagentSpawner } from "../pi-tools/subagent.js";
 import { mergePersons, runRights, validPerson, type RunPerson } from "../host/identity.js";
@@ -70,6 +71,8 @@ export interface PiTurns {
 }
 
 export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "workspaceDir" | "binding"> {
+  /** skill_publish 的目标；未设置时工具返回"技能目录未启用"。 */
+  skills?: SkillsStore;
   models: Models;
   /** 运维指引根目录；Pi 工具路径策略仍整体禁读此 Codex 工作区。 */
   workspaceDir?: string;
@@ -191,7 +194,8 @@ export class PiBackend implements ThreadAdapter {
       },
       // 派出那一轮的身份快照：汇报唤醒的回合继承它（§5.1）。
       spawner: parent => backend.spawner(Number(parent)) });
-    for (const item of [coding, extension, ...Object.values(im), ...Object.values(schedule), ...(subagent ? [subagent] : [])]) registry.install(item);
+    const skill = createPiSkillExtension({ ...opts, binding });
+    for (const item of [coding, extension, ...Object.values(im), ...Object.values(schedule), skill, ...(subagent ? [subagent] : [])]) registry.install(item);
     const storage = opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite"));
     harness = await Harness.open(storage, {
       models: opts.models, registry,
@@ -199,7 +203,7 @@ export class PiBackend implements ThreadAdapter {
         // 每次工具调用/恢复均从宿主当前回合重建身份；不从闭包或全局变量取当前回合。
         const bound = await backend.binding(Number(target.conversationId));
         if (!bound) return undefined;
-        return codingEnvironment({ dataDir: opts.dataDir, workspaceDir, skillsDir: opts.skillsDir, key: bound.threadKey,
+        return codingEnvironment({ dataDir: opts.dataDir, workspaceDir, key: bound.threadKey,
           request: { access: bound.access, senderIsOwner: bound.senderIsOwner, inputs: bound.inputs }, store: opts.store });
       },
       settings: { extensions: [coding, extension, im.basic, ...(subagent ? [subagent] : [])], toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
@@ -267,7 +271,7 @@ export class PiBackend implements ThreadAdapter {
 
   /**
    * 工具调用时的本轮绑定（§5.1）：主会话取宿主当前回合（见文件头 5）；子会话只有会话基础权限。
-   * 读取范围、技能写权限与授权工具都由 runRights 统一求出（owner 本人读全部，其余为本会话）。
+   * 读取范围、skill_publish 与授权工具都由 runRights 统一求出（owner 本人读全部，其余为本会话）。
    */
   async binding(conversationId: number): Promise<PiCallBinding | undefined> {
     let threadKey = this.keys.get(conversationId), child = false;
@@ -489,10 +493,11 @@ export class PiBackend implements ThreadAdapter {
     const schedule = createPiScheduleExtensions(id => this.binding(id), this.opts.scheduleTools);
     const available = await this.opts.scheduleTools?.permissions(binding);
     const scheduleExtension = available?.scheduleControl ? schedule.control : available?.schedule ? schedule.management : undefined;
+    const skill = createPiSkillExtension({ ...this.opts, binding: id => this.binding(id) });
     await conv.configure({ extensions: {
-      add: [selected, ...(scheduleExtension ? [scheduleExtension] : [])],
+      add: [selected, ...(scheduleExtension ? [scheduleExtension] : []), ...(permissions.actorIsOwner ? [skill] : [])],
       remove: [...Object.values(im).filter(e => e.name !== selected.name),
-        ...Object.values(schedule).filter(e => e.name !== scheduleExtension?.name)],
+        ...Object.values(schedule).filter(e => e.name !== scheduleExtension?.name), ...(permissions.actorIsOwner ? [] : [skill])],
     } }, context);
   }
 

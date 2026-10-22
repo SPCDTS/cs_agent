@@ -13,7 +13,7 @@ export const PiChildDoc = defineDoc<{ threadKey: string; parent: number }>({
 /**
  * 工具调用时由宿主求出的本轮绑定（§5.1）：身份、发送地址与本轮输入来自会话宿主，模型参数不能覆盖；
  * 下列权限均由 host/identity.ts 的 runRights 求出：access 为读取范围（owner 本人为 all，其余为本会话），
- * senderIsOwner 决定技能写权限，auth 为授权工具（owner 的交互身份，子会话没有）。
+ * senderIsOwner 决定 skill_publish，auth 为授权工具（owner 的交互身份，子会话没有）。
  */
 export interface PiCallBinding extends TurnBinding {
   access: string;

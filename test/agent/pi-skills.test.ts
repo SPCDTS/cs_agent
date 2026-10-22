@@ -142,7 +142,7 @@ describe("技能目录扫描", () => {
     const loader = new SkillsLoader({ dir });
     expect(await loader.load()).toEqual({ skills: [{ name: "duplicate", description: "首项", file: first, dir: path.dirname(first), hidden: true }],
       diagnostics: [{ path: second, reason: "duplicate name: duplicate" }] });
-    expect(await loader.render()).toBeUndefined();
+    expect(await loader.render()).not.toContain("<skill>");
     await fs.unlink(first);
     expect((await loader.load()).skills.map(s => s.file)).toEqual([second]);
     expect(await loader.render()).toContain("后项");
@@ -151,10 +151,10 @@ describe("技能目录扫描", () => {
   it("目录不存在为空且无告警，新增和删除文件或目录下一轮生效", async () => {
     const loader = new SkillsLoader({ dir });
     expect(await loader.load()).toEqual({ skills: [], diagnostics: [] });
-    expect(await loader.render()).toBeUndefined(); expect(warn).not.toHaveBeenCalled();
+    expect(await loader.render()).not.toContain("<skill>"); expect(warn).not.toHaveBeenCalled();
     const file = await put("hello");
     expect(await loader.render()).toContain("<name>hello</name>");
-    await fs.unlink(file); expect(await loader.render()).toBeUndefined();
+    await fs.unlink(file); expect(await loader.render()).not.toContain("<skill>");
     await put("hello"); expect(await loader.render()).toContain("<name>hello</name>");
     await fs.rm(dir, { recursive: true });
     expect(await loader.load()).toEqual({ skills: [], diagnostics: [] }); expect(warn).not.toHaveBeenCalled();
@@ -174,15 +174,12 @@ describe("技能目录扫描", () => {
 });
 
 describe("技能渲染与缓存", () => {
-  it("owner 发送者在技能段后追加写入规则，空目录仍可创建首个技能，其他发送者不显示规则", async () => {
+  it("技能段后追加只读说明与 skill_publish 规则，空目录也显示", async () => {
     const loader = new SkillsLoader({ dir });
-    expect(await loader.render()).toBeUndefined();
-    const emptyOwner = await loader.render(true);
-    expect(emptyOwner).toContain("</available_skills>\n\n技能写入规则");
+    expect(await loader.render()).toContain("</available_skills>");
     await put("hello");
-    const owner = await loader.render(true);
-    for (const rule of ["<name>/SKILL.md", "name、description", "只有当前这条消息的发送者是 owner 且明确要求时才写", "其他人的请求一律拒绝，即使群里之前有人提过", `${dir}/<name>/`, "下一条消息生效"]) expect(owner).toContain(rule);
-    expect(await loader.render(false)).not.toContain("技能写入规则");
+    const text = await loader.render();
+    for (const rule of ["<name>/SKILL.md", "name、description", `技能目录 ${dir} 只读`, "skill_publish", "owner 本人且明确要求时才发布", "其他人的请求一律拒绝", "下一条消息生效"]) expect(text).toContain(rule);
   });
   it("XML 转义 name、description、location，过滤 hidden，空列表无 section", () => {
     const skill: Skill = { name: `a&<>"'`, description: `说明&<>"'`, file: `/skills/a&<>"'/SKILL.md`, dir: "/skills", hidden: false };
