@@ -1,5 +1,7 @@
 # 执行 agent 的附件发送与生图工具下线（2026-10-19）
 
+> 2026-10：本地 ComfyUI 生图（生图前缀路由、generate_image、image_gen MCP）已移除，本文相关段落仅作历史记录。
+
 > 历史方案：附件发送已由 [统一发送设计 §3](DESIGN-scheduled-tasks.md#3-第-2-步outbox--send_message) 取代。当前只有 `send_message({ text, images?, files? })`，codex 使用独立 im MCP，pi 使用共用网关。下文的“旧图片登记工具 / 旧文件登记工具”仅描述旧实现与验收记录，不再暴露给模型。
 
 用户决定（2026-10-19，含同日澄清）：

@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import path from "node:path";
-import { collectNewImages } from "./gen/image-collect.js";
+import { collectNewImages } from "./image-collect.js";
 import { isSupportedImage, MAX_IMAGES, MIN_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from "./limits.js";
 
 export const DEFAULT_FILE_DENY_EXT = [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".scr", ".msi", ".com", ".lnk"];
@@ -167,7 +167,7 @@ export async function registerImageAttachment(o: AttachmentSource & { attachDir:
       total += data.length;
       if (digest(data) === source.sha256) return `已登记，将随回复发送（第 ${index + 1}/${MAX_IMAGES} 张）`;
     }
-    if (images.length >= MAX_IMAGES) throw new Error(`每次回复最多 ${MAX_IMAGES} 张图（含生图）`);
+    if (images.length >= MAX_IMAGES) throw new Error(`每次回复最多 ${MAX_IMAGES} 张图`);
     if (total + source.data.length > MAX_TOTAL_IMAGE_BYTES) throw new Error("每次回复图片合计不超过 20 MiB");
     let n = 1;
     let dir: string;

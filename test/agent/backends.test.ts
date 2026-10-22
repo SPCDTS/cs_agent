@@ -1,4 +1,3 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CodexBackend, type CodexBackendOptions } from "../../src/agent/backends/codex.js";
 import { tmp } from "./helpers.js";
@@ -8,13 +7,7 @@ import { backendNameFor, createBackendSelector, parseBackendOverrides } from "..
 import type { AgentBackend } from "../../src/agent/backends/types.js";
 import type { HostCallbacks, InputRef, TurnStatus } from "../../src/agent/host/types.js";
 import type { InboundRecord, TurnBinding } from "../../src/channel/types.js";
-import { IMAGE_SUCCESS_REPLY } from "../../src/agent/replies.js";
-import { PENDING_IMAGE_JOBS } from "../../src/media/gen/image-pending.js";
 
-const PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
-  "base64",
-);
 const codex: AgentBackend = { name: "codex" };
 
 describe("backend selection (§4.3)", () => {
@@ -175,7 +168,7 @@ describe("CodexBackend：常驻 app-server 适配器", () => {
     let n = 0;
     const call = (turn: typeof g) => { const callId = `exec-${++n}`; script.toolCall(turn!, callId); return { callId, threadId: turn!.threadId, turnId: turn!.turnId }; };
     expect(await s.backend.resolveCall("group:7", call(g))).toMatchObject({ access: { kind: "scope", scope: "group:7" },
-      session: g!.threadId, workdir: path.join(s.dir, "ws", "group_7"), imageDir: path.join(s.dir, "images", "group_7"), imageRefs: ["/data/incoming/k1/a.png"] });
+      session: g!.threadId, workdir: path.join(s.dir, "ws", "group_7"), imageDir: path.join(s.dir, "images", "group_7") });
     expect(await s.backend.resolveCall("owner", call(o))).toMatchObject({ access: { kind: "all" } });
     // owner 在群里只读本群（群线程历史对群里所有人可见，§7.5）
     s.current.set("group:7", { turnId: "codex:" + g!.turnId, identity: { kind: "user", sender: "9" }, inputs: ["k3"] });
@@ -260,64 +253,6 @@ describe("CodexBackend：常驻 app-server 适配器", () => {
     expect(await pending).toEqual({ backendTurnId: "codex:" + wake.turnId });
     expect(s.tokens.revoke).not.toHaveBeenCalled();
     expect(s.loads()).toHaveLength(1);
-  });
-
-  it("补收图片按会话串行、按任务幂等发送，只移除处理过的任务（新追加的留给下一次）", async () => {
-    const script = new CodexScript();
-    const dir = tmp("cs-codex-late2-");
-    const threadDir = path.join(dir, "images", "group_7");
-    const job = (id: string) => ({ prompt_id: id, backend: "stub", filenamePrefix: "cs-" + id, options: { prompt: id },
-      callDir: path.join(threadDir, "call-" + id.length), submittedAt: Date.now(), status: "submitted" as const });
-    const write = (jobs: ReturnType<typeof job>[]) => writeFileSync(path.join(threadDir, PENDING_IMAGE_JOBS), JSON.stringify(jobs));
-    script.onTurn = () => { mkdirSync(path.join(threadDir, "call-1"), { recursive: true }); write([job("a")]); };
-    let releaseA!: () => void;
-    const gateA = new Promise<void>(resolve => { releaseA = resolve; });
-    const collect = vi.fn(async (id: string, out: string) => {
-      if (id === "a") await gateA;
-      mkdirSync(out, { recursive: true }); const file = path.join(out, id + ".png"); writeFileSync(file, PNG); return [file];
-    });
-    const system = vi.fn(async (..._args: unknown[]) => ({ status: "sent" as const, already_sent: false, message_id: "1", message_type: "group" as const, target_id: "7" }));
-    const s = await setup({ script, extra: { imagesDir: path.join(dir, "images"), sendService: { system },
-      imageBackend: { name: "stub", submit: async () => "p", reconcile: async () => ({ images: [] }), collect } } });
-    await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" });
-    await vi.waitFor(() => expect(collect).toHaveBeenCalledTimes(1));
-    // A 还在收取时追加 B，并结束一个唤醒回合（第二次补收）
-    mkdirSync(path.join(threadDir, "call-2"), { recursive: true });
-    write([job("a"), job("bb")]);
-    const wake = script.wake(script.turns[0]!.child, script.turns[0]!.threadId);
-    script.complete(wake);
-    await new Promise(resolve => setTimeout(resolve, 100));
-    releaseA();
-    await vi.waitFor(() => expect(s.completed).toHaveLength(2));
-    await s.backend.idle();
-    expect(collect.mock.calls.map(c => c[0]).sort()).toEqual(["a", "bb"]);
-    const keys = system.mock.calls.map(c => (c[3] as { key?: string } | undefined)?.key);
-    expect(keys.sort()).toEqual(["group:7:sys:img:cs-a", "group:7:sys:img:cs-bb"]);
-    expect(existsSync(path.join(threadDir, PENDING_IMAGE_JOBS))).toBe(false);
-  });
-  it("image_gen 超时留下的任务在回合结束时补收，以系统消息发出并移除清单", async () => {
-    const script = new CodexScript();
-    const dir = tmp("cs-codex-late-");
-    const threadDir = path.join(dir, "images", "group_7");
-    const callDir = path.join(threadDir, "call-1");
-    script.onTurn = () => {
-      mkdirSync(callDir, { recursive: true });
-      writeFileSync(path.join(threadDir, PENDING_IMAGE_JOBS), JSON.stringify([{ prompt_id: "late-1", backend: "stub",
-        filenamePrefix: "cs-late-1", options: { prompt: "慢图" }, callDir, submittedAt: Date.now(), status: "submitted" }]));
-    };
-    const system = vi.fn(async () => ({ status: "sent" as const, already_sent: false, message_id: "1", message_type: "group" as const, target_id: "7" }));
-    const collect = vi.fn(async (_id: string, out: string) => {
-      mkdirSync(out, { recursive: true }); const file = path.join(out, "late.png"); writeFileSync(file, PNG); return [file];
-    });
-    const s = await setup({ script, extra: { imagesDir: path.join(dir, "images"), sendService: { system },
-      imageBackend: { name: "stub", submit: async () => "p", reconcile: async () => ({ images: [] }), collect } } });
-    const { turnId } = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" }) as { turnId: string };
-    await vi.waitFor(() => expect(s.completed).toHaveLength(1));
-    expect(collect).toHaveBeenCalledWith("late-1", expect.any(String), expect.any(AbortSignal), { prompt: "慢图" });
-    expect(system).toHaveBeenCalledWith(expect.objectContaining({ threadKey: "group:7", scope: "group:7", turnId }), IMAGE_SUCCESS_REPLY,
-      [expect.stringMatching(/late\.png$/)], { key: "group:7:sys:img:cs-late-1" });
-    expect(existsSync(path.join(threadDir, PENDING_IMAGE_JOBS))).toBe(false);
-    expect(s.completed).toEqual([{ threadKey: "group:7", turnId, status: "completed" }]);
   });
 
   it("条目与子 agent 活动刷新看门狗；app-server 掉线：回合按 lost 回报、令牌作废，下一轮 thread/resume 并重新签发", async () => {

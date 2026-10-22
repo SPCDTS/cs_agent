@@ -41,7 +41,7 @@
 - 校验失败（空文本、超过 4000 字、图片 >4、文件 >3 或 >20 MiB、路径不在允许范围、本回合已达 3 条）直接返回错误文本给模型，不截断、不改写。路径规则沿用 `media/attach.ts`。
 - 图片随该条消息发出；文件在该条文字发出后用 `uploadFile` 单独发送（与现在的附件顺序一致），状态各自记录。
 - `qq_send_image` / `qq_send_file` 删除（不做兼容），由 `send_message` 的 `images` / `files` 取代。
-- 生图路由（前缀分流的 `cs.image` 任务）不变，仍由网关直接回复。
+- 生图路由（前缀分流的 `cs.image` 任务）不变，仍由网关直接回复。（2026-10：生图前缀路由与 `cs.image` 已移除。）
 
 ### 3.2 Outbox
 
@@ -77,7 +77,7 @@ Channel 接口新增 `send(key, target, text, images, { mention?, signal })`：
 ### 3.4 回合结束规则（agent 任务）
 
 `cs.agent` 的阶段改为：handle → lateImages → **settle**（取代 postprocess + reply）：
-1. 迟到图片（包含已 done 但可能未将路径交给模型的任务）：保留与已发图片哈希不重复的完成图片，以 `#late` 发一条（文字用 `IMAGE_SUCCESS_REPLY`），附件收取失败或生图超时的提示也放在这条里。
+1. 迟到图片（包含已 done 但可能未将路径交给模型的任务）：保留与已发图片哈希不重复的完成图片，以 `#late` 发一条（文字用 `IMAGE_SUCCESS_REPLY`），附件收取失败或生图超时的提示也放在这条里。（2026-10：随本地生图移除。）
 2. 本票据 Outbox 中有任何 sent / sending / uncertain 行 → 票据 sent，任务完成。
 3. 一条都没有：后端成功 → 发 `FALLBACK_REPLY`（`#fallback`）并记 `no_send_fallback`；后端超时 / 失败 → 发 `AGENT_FAILURE_REPLIES[failure]`（`#fallback`）。
 4. 升级兼容：旧 postprocess/reply 检查点，或已有 replyDraft 且无 Outbox 行时，以 `#fallback` 发送 `replyDraft ?? fitReply(agentResult.text)` 及最多 4 张 agentResult.images，避免丢失旧回合答案。票据已非 pending 时，settle 跳过系统补发，仅恢复附件与终态。

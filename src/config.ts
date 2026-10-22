@@ -36,31 +36,16 @@ const EnvSchema = z.object({
   QQ_ALLOW_GROUPS: list,
   QQ_GROUP_MENTIONS: bool(true),
 
-  COMFYUI_URL: z.string().url().default("http://host.docker.internal:8188"),
-  COMFY_MODE: z.enum(["mcp", "http"]).default("mcp"),
-  COMFY_MCP_BIN: z.string().default("/opt/comfy/bin/comfy-mcp"),
-  COMFY_BIN: z.string().default("/opt/comfy/bin/comfy"),
-  COMFY_CHECKPOINT: z.string().default(""),
-  /** 显式设置时覆盖生成器；空值使用参数化 Qwen Image 2.1 Turbo 图。 */
-  COMFY_WORKFLOW_FILE: z.string().default(""),
-  COMFY_QWEN_CACHE: bool(false),
-  COMFY_PROMPT_NODE: z.string().default(""),
-  /** mcp 模式下容器内 loopback 转发端口（comfy-cli 仅对 loopback 获取 object_info） */
-  COMFY_LOOPBACK_PORT: int(8188),
-  COMFY_TIMEOUT_SEC: int(300),
   MEDIA_RECALL_PORT: z.coerce.number().int().min(1).max(65535).default(8790),
   MEDIA_RECALL_MAX_PER_TICKET: int(5),
   INCOMING_DOWNLOAD_CONCURRENCY: int(2),
   INCOMING_DOWNLOAD_DEADLINE_SEC: int(60),
-  IMAGE_COLLECT_EXTENSIONS: z.coerce.number().int().min(0).max(10).default(2),
-  IMAGE_GEN_MCP_WAIT_SEC: int(90),
 
   ATTACH_FILE_MAX_MB: int(20),
   ATTACH_FILES_MAX: int(3),
   ATTACH_FILE_DENY_EXT: z.string().default(".exe,.bat,.cmd,.ps1,.vbs,.js,.scr,.msi,.com,.lnk")
     .transform(v => v.split(",").map(ext => ext.trim().toLowerCase()).filter(Boolean)),
 
-  CODEX_IMAGE_GEN: z.enum(["off", "on"]).default("off"),
   CODEX_BIN: z.string().default("codex"),
   CODEX_PROVIDER: z.enum(["magpie", "openai"]).default("magpie"),
   /** codex 与 pi 共用的 magpie 网关地址。 */
@@ -76,9 +61,9 @@ const EnvSchema = z.object({
   CODEX_TRACE_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(14),
   /** 官方 trace 普通文件总量上限（MiB）；0 表示不限。 */
   CODEX_TRACE_MAX_MB: z.coerce.number().int().nonnegative().max(Math.floor(Number.MAX_SAFE_INTEGER / 1024 / 1024)).default(512),
-  /** 内置生图输出保留天数；0 禁用按天清理。 */
+  /** codex 内置生图（imagegen）输出保留天数；0 禁用按天清理。 */
   CODEX_GENERATED_IMAGES_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(7),
-  /** 内置生图输出普通文件总量上限（MiB）；0 表示不限。 */
+  /** codex 内置生图（imagegen）输出普通文件总量上限（MiB）；0 表示不限。 */
   CODEX_GENERATED_IMAGES_MAX_MB: z.coerce.number().int().nonnegative().max(Math.floor(Number.MAX_SAFE_INTEGER / 1024 / 1024)).default(1024),
 
   AGENT_MODEL_PROVIDER: z.string().default("deepseek"),
@@ -88,8 +73,6 @@ const EnvSchema = z.object({
   AUTO_EFFORT_MODEL: z.string().trim().default("deepseek/deepseek-flash"),
   AUTO_EFFORT_TIMEOUT_MS: int(4000),
   AGENT_CONCURRENCY: int(2),
-  /** 规则分流的生图前缀（逗号分隔，逐字匹配）；命中后前缀之后的全部文本作为提示词 */
-  IMAGE_PREFIXES: z.string().default("奶龙:,奶龙："),
   /** 执行 agent 后端：codex | pi */
   AGENT_BACKEND: z.enum(["codex", "pi"]).default("codex"),
   /** 按 scope 覆盖后端：group:<群号>=pi,private:<QQ号>=codex */

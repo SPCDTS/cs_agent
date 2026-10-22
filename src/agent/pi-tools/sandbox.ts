@@ -172,7 +172,7 @@ export class PiPathPolicy {
   readonly workspace: string;
   readonly workRoot: string;
   readonly skillsDir?: string;
-  /** 本会话的图片目录（生图输出与 Outbox 副本），可读写 */
+  /** 本会话的图片目录（Outbox 副本等），可读写 */
   private readonly images: string;
   /** 本轮各输入的附件目录，只读 */
   private readonly incoming: string[];

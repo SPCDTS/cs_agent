@@ -33,9 +33,8 @@ export interface CodexRunnerOptions {
   /** 主进程显式传入提供者；省略时保留独立 runner 原有的直连行为。 */
   provider?: "magpie" | "openai";
   magpieKey?: string;
-  imageGen?: "off" | "on";
   contextUsage?: ContextUsageStore;
-  /** im / qq_context / image_gen 访问主进程 loopback 服务的端口（按线程写入 MCP 环境） */
+  /** im / qq_context 访问主进程 loopback 服务的端口（按线程写入 MCP 环境） */
   mediaRecallPort?: number;
   model?: string;
   contextWindow?: number;
@@ -65,7 +64,7 @@ export interface CodexRunnerOptions {
 }
 
 /** 线程级 MCP 环境：服务名 → 变量 → 值（令牌等），写入 mcp_servers.<名>.env.<变量>。 */
-export type McpThreadEnv = Partial<Record<"im" | "qq_context" | "image_gen", Record<string, string>>>;
+export type McpThreadEnv = Partial<Record<"im" | "qq_context", Record<string, string>>>;
 
 /** 允许的推理强度（不含 ultra：会自动委派子任务，成本高）。 */
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -374,7 +373,7 @@ export class CodexRunner {
   private childEnv(): NodeJS.ProcessEnv {
     // 线程令牌只经线程 config 进入各自的 MCP 环境，app-server 的环境里不留任何令牌。
     const env = { ...buildCodexEnv(this.opts.codexHome), ...Object.fromEntries(Object.entries(this.opts.env ?? {})
-      .filter(([key]) => !["OBS_TOKEN", "IM_TOKEN", "QQ_RECALL_TOKEN", "IMAGE_GEN_TOKEN"].includes(key.toUpperCase()))) };
+      .filter(([key]) => !["OBS_TOKEN", "IM_TOKEN", "QQ_RECALL_TOKEN"].includes(key.toUpperCase()))) };
     // 只从显式配置注入 gateway key；直连时清除额外环境中的残留值及大小写别名。
     for (const key of Object.keys(env)) {
       const name = key.toUpperCase();
@@ -516,7 +515,6 @@ export class CodexRunner {
     const servers: McpThreadEnv = {
       im: { MEDIA_RECALL_PORT: String(port), ...mcpEnv.im },
       qq_context: { MEDIA_RECALL_PORT: String(port), ...qqAttachmentEnv(attachment.attachDir, attachment.fileDir, policy.workspaceDir), ...mcpEnv.qq_context },
-      ...(this.opts.imageGen === "on" ? { image_gen: { MEDIA_RECALL_PORT: String(port), ...mcpEnv.image_gen } } : {}),
     };
     const config: Record<string, unknown> = { ...policy.config, project_doc_max_bytes: 131072,
       "mcp_servers.qq_context.tool_timeout_sec": 70 };

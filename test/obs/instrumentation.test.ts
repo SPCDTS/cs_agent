@@ -1,32 +1,22 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { afterEach, expect, it, vi } from 'vitest';
-import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { createModels, createProvider, createAssistantMessageEventStream, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { MemoryStorage } from '@earendil-works/pi-durable';
 import { ObsStore } from '../../src/obs/store.js';
 import { trace } from '../../src/shared/trace.js';
-import { Dispatcher } from '../../src/agent/dispatch.js';
 import { CodexBackend } from '../../src/agent/backends/codex.js';
 import { PiBackend, type PiBackendOptions } from '../../src/agent/backends/pi.js';
-import { createTasks } from '../../src/agent/tasks.js';
-import { openHarness } from '../../src/agent/harness.js';
-import { createCsAgentExtension } from '../../src/agent/extension.js';
-import { TRANSPARENT_PNG, UnknownJobError } from '../../src/media/gen/image-gen.js';
 import { ContextStore } from '../../src/context/store.js';
 import { observeItem } from '../../src/agent/backends/codex.js';
 import { CodexScript, codexRunnerRig } from '../agent/codex-fixture.js';
-import { savePendingImage } from '../../src/media/gen/image-pending.js';
-import { observeImages } from '../../src/media/gen/observed.js';
-import type { InboundMessage, InboundRecord, ReplyTicketRecord } from '../../src/channel/types.js';
+import type { InboundMessage, InboundRecord } from '../../src/channel/types.js';
 import { DeepSeekWeb } from '../../src/agent/pi-tools/web.js';
 import { startAlerts } from '../../src/obs/alerts.js';
 import { runAging } from '../../src/context/aging.js';
 import { Metrics } from '../../src/obs/metrics.js';
 import { usageCost } from '../../src/shared/usage.js';
-import { ImageEventSpool } from '../../src/media/gen/events.js';
-import { Trace } from '../../src/shared/trace.js';
 const clean:(()=>Promise<unknown>|void)[]=[];
 afterEach(async()=>{trace.attach(undefined);for(const fn of clean.splice(0).reverse())await fn();});
 /**
@@ -56,7 +46,7 @@ async function piTurn(pi:PiBackend,stub:ReturnType<typeof hostStub>,key:string,t
 }
 async function openPi(r:Awaited<ReturnType<typeof rig>>,name:string,extra:Partial<PiBackendOptions>={}){
   const stub=hostStub(name),model=r.faux.getModel();
-  const pi=await PiBackend.open({dataDir:r.dir,models:r.models,model:{provider:model.provider,modelId:model.id},thinkingLevel:'off',store:r.context,imageBackend:r.image,storage:new MemoryStorage(),turns:stub.turns,...extra});
+  const pi=await PiBackend.open({dataDir:r.dir,models:r.models,model:{provider:model.provider,modelId:model.id},thinkingLevel:'off',store:r.context,storage:new MemoryStorage(),turns:stub.turns,...extra});
   clean.push(()=>pi.close());
   return {pi,stub,run:(key:string,text:string)=>piTurn(pi,stub,key,text)};
 }
@@ -82,10 +72,6 @@ async function rig(){
   const dir=mkdtempSync(path.join(os.tmpdir(),'cs-obs-flow-')),store=new ObsStore(dir),context=new ContextStore(dir);trace.attach(store);
   clean.push(()=>rmSync(dir,{recursive:true,force:true}),()=>{store.close();context.close();});
   const models=createModels(),faux=fauxProvider({tokensPerSecond:Infinity});models.setProvider(faux.provider);
-  const states=new Map<string,string>();
-  const bridge={uploadFile:async()=>({file_id:"unused"}),getTicket:async(ticket:string)=>({ticket_id:ticket,seq:1,status:states.get(ticket)??'pending'}) as ReplyTicketRecord,
-    listPendingTickets:async()=>[],reply:async(ticket:string)=>{states.set(ticket,'sent');return {message_id:'reply-'+ticket,already_sent:false,message_type:'private' as const,target_id:'1'};}};
-  const image={name:'fake-comfy',submit:async()=>'prompt-fake',collect:async(_id:string,out:string)=>{mkdirSync(out,{recursive:true});const file=path.join(out,'result.png');writeFileSync(file,TRANSPARENT_PNG);return [file];},reconcile:async()=>({images:[] as string[]}),clearReferences:async()=>{}};
   const script=new CodexScript();
   script.onTurn=t=>{
     t.child.notify('item/started',{threadId:t.threadId,turnId:t.turnId,item:{id:'call1',type:'mcpToolCall',tool:'qq_recent',server:'qq_context',status:'inProgress',arguments:{limit:2}}});
@@ -93,53 +79,22 @@ async function rig(){
     t.child.notify('item/completed',{threadId:t.threadId,turnId:t.turnId,item:{id:'msg1',type:'agentMessage',text:'## 假回答'}});
   };
   const codex=await codexBackend('agent',script,{reasoningEffort:'high'});
-  const tasks=createTasks({getBridge:()=>bridge,imageBackend:image,imagesDir:path.join(dir,'images'),replyRetryDelayMs:1});
-  const harness=await openHarness({models,extension:createCsAgentExtension(tasks),dbFile:path.join(dir,'agent.sqlite')},BACKGROUND_CONTEXT);clean.push(()=>harness.close(BACKGROUND_CONTEXT));
-  const dispatcher=new Dispatcher({harness,bridge,tasks,concurrency:2,retryDelayMs:1});
   const msg=(text:string):InboundMessage=>({message_id:'1',time:Math.floor(Date.now()/1000),message_type:'private',user_id:'1',group_id:null,self_id:'2',nickname:'测试',text,route_text:text,images:[],segments:[],truncated:false,mentioned_self:false});
-  return {dir,store,context,models,faux,bridge,image,dispatcher,msg,codex};
+  return {dir,store,context,models,faux,msg,codex};
 }
-it('前缀图片票据走真实 dispatcher/任务、Codex 回合走适配层，记录完整阶段与终态',async()=>{
-  const r=await rig();const complete=vi.spyOn(r.models,'completeSimple');await r.dispatcher.dispatch(r.msg('奶龙: 猫'),'image');
+it('Codex 回合走适配层，记录完整阶段',async()=>{
+  const r=await rig();const complete=vi.spyOn(r.models,'completeSimple');
   const agent=await codexTurn(r.codex);
   const stages=(t:string)=>r.store.events(t).map(e=>e.stage).filter((s,i,a)=>i===0||a[i-1]!==s);
-  expect(stages('image')).toEqual(['received','admitted','routed','dispatched','phase:submit','image:submit','phase:submit','phase:collect','image:collect','phase:collect','phase:reply','reply_sent','phase:reply','reply_sent']);
   // 回合键 turn:<id>：适配层只记后端事件；输入、终态与发送由宿主事件和 Outbox 另记。
   expect(stages(agent)).toEqual(['dispatched','model_turn','tool:qq_recent','final_answer','model_turn']);
-  expect(r.store.events('image').find(e=>e.stage==='image:submit'&&e.status==='ok')?.detail_json).toContain('prompt-fake');
   expect(r.store.events(agent).find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')?.duration_ms).toBe(12);
   expect(JSON.parse(r.store.events(agent).find(e=>e.stage==='dispatched')!.detail_json)).toMatchObject({backend:'codex',thread_key:'private:1',kind:'user',effort:'high'});
-  expect(r.store.tickets().find(t=>t.ticket==='image')?.status).toBe('sent');
   expect(complete).not.toHaveBeenCalled();expect(r.faux.state.callCount).toBe(0);
   const events=r.store.events(agent);
   expect(events.filter(e=>e.stage==='model_turn')).toHaveLength(2);
   expect(events.some(e=>e.stage==='fallback'||e.stage==='delivery_note')).toBe(false);
   expect(events.find(e=>e.stage==='final_answer'&&JSON.parse(e.detail_json).text)?.detail_json).toContain('假回答');
-  expect(r.dispatcher.status()).toMatchObject({active:0,waiting:0,scopes:{},tickets:[]});
-});
-it('业务生图失败但错误回复已送出时，票据仍统计为失败',async()=>{
-  const r=await rig();r.image.submit=async()=>{throw new Error('生图超时');};await r.dispatcher.dispatch(r.msg('奶龙: 猫'),'failed-image');
-  expect(r.store.events('failed-image').at(-1)?.stage).toBe('failed');expect(r.store.throughput(0)).toMatchObject({total:1,failed:1});
-  expect(r.store.tickets({status:'timeout'})).toHaveLength(1);
-});
-it('codex 回合结束前补收 image_gen 超时任务（prompt_id 可观测），图片以系统消息发出；对账事件保留 prompt_id',async()=>{
-  const r=await rig();
-  const root=path.join(r.dir,'images','private_1');
-  const system=vi.fn(async()=>({status:'sent' as const,already_sent:false,message_id:'m1',message_type:'private' as const,target_id:'1'}));
-  const script=new CodexScript();
-  script.onTurn=async()=>{
-    const callDir=path.join(root,'call-1');mkdirSync(callDir,{recursive:true});
-    await savePendingImage(root,{backend:'fake-comfy',filenamePrefix:'late',options:{prompt:'猫'},callDir,submittedAt:Date.now(),status:'submitted',prompt_id:'late-pid'});
-  };
-  const codex=await codexBackend('late',script,{imagesDir:path.join(r.dir,'images'),sendService:{system},imageBackend:observeImages(r.image,'late-images')});
-  await codexTurn(codex);
-  expect(r.store.events('late-images').some(e=>e.stage==='image:collect'&&e.detail_json.includes('late-pid'))).toBe(true);
-  expect(system).toHaveBeenCalledWith(expect.objectContaining({threadKey:'private:1',scope:'private:1'}),'图片生成好了',[expect.stringContaining('result.png')],{key:'private:1:sys:img:late'});
-  const observed=observeImages({...r.image,reconcile:async(_opts:unknown,_dir:string,_signal?:AbortSignal,onStep?:(step:{step:'history';status:'matched';prompt_id:string})=>Promise<void>)=>{
-    await onStep?.({step:'history',status:'matched',prompt_id:'recovered-pid'});return {images:[],prompt_id:'recovered-pid'};
-  }},'reconcile');
-  await observed.reconcile({filenamePrefix:'late'},r.dir);
-  expect(r.store.events('reconcile').map(e=>e.stage)).toEqual(['image:collect','recovered','image:collect']);
 });
 it('app-server 条目解析 MCP 工具状态和耗时，最终回答单独记录',async()=>{
   const r=await rig();
@@ -174,11 +129,6 @@ it('真实 pi-durable 工具抛错 diagnostics 触发结构化鉴权告警，正
   expect(send).toHaveBeenCalledTimes(1);
   observeItem('auth-codex','completed',{type:'mcpToolCall',id:'s1',tool:'search',server:'web',status:'failed',error:{message:'opaque',status:403}});
   expect(JSON.parse(r.store.events('auth-codex')[0]!.detail_json).failure.kind).toBe('auth');expect(send).toHaveBeenCalledTimes(1);
-  r.image.submit=async()=>{throw Object.assign(new Error('opaque image error'),{status:403});};
-  r.faux.setResponses([fauxAssistantMessage(fauxToolCall('generate_image',{prompt:'fake'}),{stopReason:'toolUse'}),fauxAssistantMessage('生图失败')]);
-  await p.run('in-2','画图');
-  const imageFailure=r.store.events('turn:'+p.stub.state.turnId).find(e=>e.stage==='tool:generate_image'&&e.status==='failed')!;
-  expect(JSON.parse(imageFailure.detail_json).failure).toEqual({kind:'auth',provider:'comfy',status:403});expect(send).toHaveBeenCalledTimes(1);
 });
 it('Codex 回合从 turn/start 到 turn/completed 记一次 model_turn 时长，结果写在 detail',async()=>{
   const r=await rig();
@@ -209,7 +159,7 @@ it('pi、衰老使用同一非零缓存 usage fixture，费用口径一致',asyn
   };
   r.models.setProvider(createProvider({id:model.provider,models:[model],auth:{apiKey:{name:'fixture',resolve:async()=>({auth:{}})}},api:{stream,streamSimple:stream}}));
   const stub=hostStub('usage-pi');
-  const pi=await PiBackend.open({dataDir:r.dir,models:r.models,model:{provider:model.provider,modelId:model.id},thinkingLevel:'off',store:r.context,imageBackend:r.image,storage:new MemoryStorage(),turns:stub.turns});clean.push(()=>pi.close());
+  const pi=await PiBackend.open({dataDir:r.dir,models:r.models,model:{provider:model.provider,modelId:model.id},thinkingLevel:'off',store:r.context,storage:new MemoryStorage(),turns:stub.turns});clean.push(()=>pi.close());
   await piTurn(pi,stub,'in-1','hello');
   const now=Date.UTC(2026,9,21,3),day=Date.UTC(2026,9,20)/1000;
   for(let i=0;i<5;i++)r.context.ingest({...r.msg('历史'+i),message_id:'history'+i,time:day+i});
@@ -222,19 +172,6 @@ it('pi、衰老使用同一非零缓存 usage fixture，费用口径一致',asyn
     expect(usageCost({input:d.input_tokens,output:d.output_tokens,cacheRead:d.cache_read_tokens,cacheWrite:d.cache_write_tokens},2,4).cost).toBe(.00036);
   }
 });
-// codex 回合结束前（补收图片时）摄取会话图片目录里 image_gen MCP 写下的旁路事件。
-it('codex 回合结束时摄取 MCP 旁路事件',async()=>{
-  const r=await rig();
-  const script=new CodexScript();
-  script.onTurn=()=>{
-    const dir=path.join(r.dir,'images','private_1');mkdirSync(dir,{recursive:true});
-    new Trace(new ImageEventSpool(dir)).event('spool-flow','image:submit',{detail:{prompt_id:'late-spool'}});
-  };
-  const codex=await codexBackend('spool',script,{imagesDir:path.join(r.dir,'images')});
-  const key=await codexTurn(codex);
-  expect(r.store.events(key).some(e=>e.stage==='image:submit'&&e.detail_json.includes('late-spool'))).toBe(true);
-});
-
 it('历史 relay 用量按通用模型事件聚合，缺缓存字段可读且重启不重复计费',async()=>{
   const r=await rig();
   const detail={operation:'relay',provider:'deepseek',model:'legacy-model',input_tokens:100,output_tokens:20};

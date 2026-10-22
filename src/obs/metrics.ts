@@ -3,7 +3,7 @@ import type { ObsStore } from './store.js';
 import type { ObsEvent } from '../shared/trace.js';
 export type Gauge = { name: string; labels?: Record<string, string>; value: number };
 type Aggregate = { count: number; success: number; durations: number[]; labels: Record<string, string> };
-/** 每个 60 秒窗口独立聚合；从事件游标读取，包含主进程摄取的 image_gen MCP 事件。 */
+/** 每个 60 秒窗口独立聚合；从事件游标读取。 */
 export class Metrics {
   private cursor = 0;
   private timer?: NodeJS.Timeout;
@@ -36,12 +36,7 @@ export class Metrics {
           const converted = usageCost({input:d.input_tokens,output:d.output_tokens,cacheRead:d.cache_read_tokens,cacheWrite:d.cache_write_tokens},this.options.inputPrice,this.options.outputPrice);
           usage.input += converted.input; usage.output += converted.output; usage.cost += converted.cost;
         }
-        if (e.stage === 'image:collect' && e.status === 'ok' && d.prompt_id) {
-          const submitted = this.store.db.prepare("SELECT MIN(ts) ts FROM events WHERE ticket=? AND stage='image:submit' AND status='ok' AND json_extract(detail_json,'$.prompt_id')=?")
-            .get(e.ticket, String(d.prompt_id)) as { ts: number | null };
-          if (submitted.ts !== null) gauges.push({ name: 'comfy_job_duration_ms', labels: { ticket: e.ticket, prompt_id: String(d.prompt_id) }, value: e.ts - submitted.ts });
-        }
-        if (!/^(tool:|backend:|image:|model_turn$)/.test(e.stage) || e.duration_ms === null) continue;
+        if (!/^(tool:|backend:|model_turn$)/.test(e.stage) || e.duration_ms === null) continue;
         const labels = { stage: e.stage, backend: String(d.backend ?? ''), model: String(d.model ?? '') };
         const key = JSON.stringify(labels);
         let a = aggregates.get(key);

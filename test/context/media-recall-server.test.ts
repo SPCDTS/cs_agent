@@ -83,14 +83,13 @@ describe("线程令牌与 loopback", () => {
     expect((await pending).status).toBe(401); release();
   });
 
-  it("/context 给出本次调用的范围、回合、线程、生图目录与参考图；不接受参数", async () => {
+  it("/context 给出本次调用的范围、回合与线程；不接受参数", async () => {
     const recall = vi.fn();
-    const { gateway } = staticGateway(() => ({ kind: "all" }), { binding: () => ({ imageRefs: ["/data/incoming/k/a.png"] }) });
+    const { gateway } = staticGateway(() => ({ kind: "all" }));
     const tokens = new ThreadTokens({ recall }, gateway);
     const server = await startMediaRecallServer(tokens, 0); closes.push(server.close);
     const token = tokens.issue("owner");
-    expect(await contextViaLoopback(token, server.port, { turnId: "t9" })).toEqual({ access: "all", turn_id: "codex:t9", session: "thread-1",
-      image_dir: "/data/images/x", image_refs: ["/data/incoming/k/a.png"] });
+    expect(await contextViaLoopback(token, server.port, { turnId: "t9" })).toEqual({ access: "all", turn_id: "codex:t9", session: "thread-1" });
     const bad = await fetch(`http://127.0.0.1:${server.port}/context`, { method: "POST", headers: { Authorization: "Bearer " + token }, body: '{"access":"all"}' });
     expect(bad.status).toBe(400);
   });

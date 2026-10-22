@@ -23,22 +23,20 @@ function rig(state: Partial<ThreadHostState> = {}, inputStates: Record<string, "
     deliver, thread: vi.fn(() => thread), inputState: vi.fn(async (key: string) => inputStates[key]),
     currentIdentity: vi.fn(() => thread.busy ? { kind: "user" as const, sender: thread.turnSender! } : undefined),
   };
-  const image = vi.fn(async () => {});
-  const inbox = new Inbox({ getChannel: () => ({ inbox: store }), getHost: () => host, owners: ["1", "9"], image, dataDir: dir });
+  const inbox = new Inbox({ getChannel: () => ({ inbox: store }), getHost: () => host, owners: ["1", "9"], dataDir: dir });
   const admit = (m: InboundMessage) => store.admit(m, threadKeyOf(m, ["1", "9"]))!;
-  return { dir, store, host, deliver, image, inbox, admit, thread };
+  return { dir, store, host, deliver, inbox, admit, thread };
 }
 
 describe("Inbox", () => {
-  it("agent 消息投递给会话宿主；生图前缀走票据路由", async () => {
+  it("触发消息一律投递给会话宿主：原生图前缀（奶龙:）也是普通 agent 输入", async () => {
     const r = rig();
-    const a = msg("1", "你好"), b = msg("2", "奶龙: 一只猫");
-    const ka = r.admit(a), kb = r.admit(b);
-    await r.inbox.receive(a, ka);
-    await r.inbox.receive(b, kb);
-    expect(r.deliver).toHaveBeenCalledWith("group:7", { inboundKey: ka, kind: "user", sender: "5" });
-    expect(r.image).toHaveBeenCalledWith(b, kb);
-    expect(r.deliver).toHaveBeenCalledTimes(1);
+    const a = msg("1", "你好"), b = msg("2", "奶龙: 一只猫"), c = msg("3", "奶龙：");
+    const ka = r.admit(a), kb = r.admit(b), kc = r.admit(c);
+    for (const [m, k] of [[a, ka], [b, kb], [c, kc]] as const) await r.inbox.receive(m, k);
+    expect(r.deliver.mock.calls.map(call => (call as unknown[])[1])).toEqual([
+      { inboundKey: ka, kind: "user", sender: "5" }, { inboundKey: kb, kind: "user", sender: "5" }, { inboundKey: kc, kind: "user", sender: "5" }]);
+    expect(r.store.getInbound(kb)).toMatchObject({ state: "queued", thread_key: "group:7", text: "奶龙: 一只猫" });
   });
 
   it("owner 的两个账号共用 owner 线程；会话地址取本轮最后一条输入", async () => {
@@ -58,16 +56,16 @@ describe("Inbox", () => {
     expect(r.inbox.binding("group:8")).toEqual({ threadKey: "group:8", identity: { kind: "wake" }, inputs: [], scope: "group:8" });
   });
 
-  it("恢复：queued 的用户输入按序重投；宿主已收下的只补齐状态；定时输入留给定时执行侧", async () => {
+  it("恢复：queued 的用户输入（含原生图前缀）按序重投；宿主已收下的只补齐状态；定时输入留给定时执行侧", async () => {
     const r0 = rig();
     const k1 = r0.admit(msg("1", "第一")), k2 = r0.admit(msg("2", "第二")), k3 = r0.admit(msg("3", "奶龙: 狗"));
     const run = r0.store.openScheduledInput({ key: "run_" + "a".repeat(40), scope: "group:7", thread_key: "group:7", creator: "qq:1", text: "[定时任务] x", time: 1 }).key;
     const r = { ...r0, inbox: new Inbox({ getChannel: () => ({ inbox: r0.store }), getHost: () => ({ ...r0.host, inputState: async (key: string) => key === k1 ? "delivered" as const : undefined }),
-      owners: ["1"], image: r0.image, dataDir: r0.dir }) };
+      owners: ["1"], dataDir: r0.dir }) };
     expect(await r.inbox.recover()).toBe(4);
     expect(r0.store.getInbound(k1)!.state).toBe("delivered");
-    expect(r0.deliver.mock.calls.map(c => (c as unknown[])[1])).toEqual([{ inboundKey: k2, kind: "user", sender: "5" }]);
-    expect(r0.image).toHaveBeenCalledWith(expect.objectContaining({ text: "奶龙: 狗" }), k3);
+    // 原生图前缀的 queued 输入同样按普通输入重投
+    expect(r0.deliver.mock.calls.map(c => (c as unknown[])[1])).toEqual([{ inboundKey: k2, kind: "user", sender: "5" }, { inboundKey: k3, kind: "user", sender: "5" }]);
     expect(r0.store.getInbound(run)!.state).toBe("queued");
   });
 

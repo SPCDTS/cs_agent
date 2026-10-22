@@ -14,7 +14,7 @@ async function setup(user = "1", grant = false, scheduled = false) {
   // 令牌只绑定会话；网关按调用所属回合取回宿主给出的本轮绑定（测试中由 turns 表模拟，缺省为 turn-1）。
   const turns = new Map<string, GrantBinding>([["turn-1", binding]]);
   const call = (turnId: string): CallBinding => ({ ...turns.get(turnId)!, turnId, access: { kind: "all" }, workdir: "/w", session: "thr-1",
-    imageDir: "/data/images/x", imageRefs: [] });
+    imageDir: "/data/images/x" });
   const rig = await imRig(binding.threadKey, {
     resolve: meta => { if (!turns.has(meta.turnId ?? "turn-1")) throw new Error("本回合已结束，工具调用不再有效"); return call(meta.turnId ?? "turn-1"); },
     permissions: async b => ({ ...await f.grants.permissions(b), ...await f.tools.permissions(b) }),

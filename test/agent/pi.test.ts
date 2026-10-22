@@ -14,13 +14,12 @@ import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
 import { threadKeyOf } from "../../src/channel/ticket.js";
 import type { Channel, InboundMessage } from "../../src/channel/types.js";
 import { inboundKey, type ReplyStore } from "../../src/qq/reply-store.js";
-import { TRANSPARENT_PNG, UnknownJobError } from "../../src/media/gen/image-gen.js";
 import { MemoryInstrumentation } from "../../src/obs/memory/instrumentation.js";
 import { ObsStore } from "../../src/obs/store.js";
 import { log } from "../../src/shared/log.js";
 import { trace, type LiveEvent } from "../../src/shared/trace.js";
 import { mediaFixture } from "../context/media-fixture.js";
-import { tmp } from "./helpers.js";
+import { TRANSPARENT_PNG, tmp } from "./helpers.js";
 import { put } from "./pi-sandbox-fixture.js";
 import { scheduleToolsFixture } from "./schedule-tools-fixture.js";
 import { call, context, reply, residentRig, type Brain, type ResidentOptions, type ResidentRig } from "./resident-fixture.js";
@@ -235,67 +234,6 @@ describe("pi 常驻后端：工具身份随本轮绑定", () => {
     expect(seen[2]).toContain("没有这条消息"); expect(seen[2]).not.toContain("私人秘密");
     await turn(r, "1", "owner 看看", null);
     expect(seen[3]).toContain("私人秘密");
-  });
-
-  it("参考图按本轮读取范围校验：允许本群与 owner，拒绝别群和未登记路径", async () => {
-    let seen = "";
-    const r = await rig([]);
-    const media = await mediaFixture(r.history, r.dir, "group:7");
-    const foreign = path.join(r.dir, "outside.png"); await fs.writeFile(foreign, TRANSPARENT_PNG);
-    r.script.push(call(["generate_image", { prompt: "编辑", reference_images: [media] }]), reply(),
-      call(["generate_image", { prompt: "编辑", reference_images: [media] }]), ctx => { seen = results(ctx); return reply(); },
-      call(["generate_image", { prompt: "编辑", reference_images: [foreign] }]), reply(),
-      call(["generate_image", { prompt: "编辑", reference_images: [media] }]), reply());
-    await turn(r, "5", "本群");
-    expect(r.imageBackend.submit).toHaveBeenCalledWith(expect.objectContaining({ reference_images: [media] }), expect.anything(), expect.anything());
-    await turn(r, "5", "别群", "8");
-    expect(seen).toContain("范围");
-    await turn(r, "5", "外部路径");
-    expect(r.imageBackend.submit).toHaveBeenCalledTimes(1);
-    // owner 在别群也不能引用本群的图（只读本群）
-    await turn(r, "1", "owner", "8");
-    expect(r.imageBackend.submit).toHaveBeenCalledTimes(1);
-  });
-
-  it("生图写入 images/<会话>/call-<摘要>/ 并返回校验过的文件", async () => {
-    let seen = "";
-    const r = await rig([call(["generate_image", { prompt: "写着“你好”的海报", aspect: "16:9", count: 2 }]), ctx => { seen = results(ctx); return reply("图片好了"); }]);
-    await turn(r, "5", "画图");
-    const [dir] = (await fs.readdir(path.join(r.dir, "images", "group_7"))).filter(name => name.startsWith("call-"));
-    expect(dir).toMatch(/^call-[0-9a-f]{16}$/);
-    const file = await fs.realpath(path.join(r.dir, "images", "group_7", dir!, "result.png"));
-    expect(JSON.parse(JSON.parse(seen.split("\n")[0]!)[0].text).images).toEqual([file]);
-    expect(r.imageBackend.submit).toHaveBeenCalledOnce();
-    expect(r.imageBackend.collect).toHaveBeenCalledOnce();
-  });
-
-  it("提交响应丢失时对账，不再次提交", async () => {
-    const r = await rig([call(["generate_image", { prompt: "猫" }]), reply()]);
-    r.imageBackend.collect.mockRejectedValueOnce(new UnknownJobError("lost"));
-    r.imageBackend.reconcile.mockImplementation(async (...args: unknown[]) => {
-      const dir = args[1] as string;
-      await fs.mkdir(dir, { recursive: true });
-      const file = path.join(dir, "reconciled.png"); await fs.writeFile(file, TRANSPARENT_PNG);
-      return { images: [file] };
-    });
-    await turn(r, "5", "画猫");
-    expect(r.imageBackend.submit).toHaveBeenCalledOnce(); expect(r.imageBackend.reconcile).toHaveBeenCalledOnce();
-  });
-
-  it("参考图只接受本轮输入的 incoming 附件，完成后清理远端上传", async () => {
-    let seen = "";
-    const r = await rig([]);
-    const other = path.join(r.dir, "incoming", "other", "ref.png");
-    await fs.mkdir(path.dirname(other), { recursive: true }); await fs.writeFile(other, TRANSPARENT_PNG);
-    r.script.push(call(["generate_image", { prompt: "编辑", reference_images: [other] }]), ctx => { seen = results(ctx); return reply(); });
-    await turn(r, "5", "改图");
-    expect(seen).toMatch(/参考图/); expect(r.imageBackend.submit).not.toHaveBeenCalled();
-    let own = "";
-    r.script.push(() => call(["generate_image", { prompt: "编辑", reference_images: [own] }]), reply());
-    await sayWithImages(r, "5", "改这张", async dir => {
-      own = path.join(dir, "ref.png"); await fs.mkdir(dir, { recursive: true }); await fs.writeFile(own, TRANSPARENT_PNG); return [own];
-    });
-    expect(r.imageBackend.submit).toHaveBeenCalledOnce(); expect(r.imageBackend.clearReferences).toHaveBeenCalledOnce();
   });
 });
 

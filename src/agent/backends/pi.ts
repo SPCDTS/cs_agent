@@ -296,8 +296,7 @@ export class PiBackend implements ThreadAdapter {
       if (active) turn.turnId = active.turnId; else delete turn.turnId;
     }
     const rights = runRights(turn, this.owners());
-    const images = turn.inputs.length ? this.opts.turns.records(turn.inputs.map(inboundKey => ({ inboundKey }))).flatMap(rec => rec.images) : [];
-    return { ...turn, images, child, ...(child ? { turnId: undefined } : {}),
+    return { ...turn, child, ...(child ? { turnId: undefined } : {}),
       access: rights.access, senderIsOwner: rights.owner && !child, auth: rights.auth && !child };
   }
 

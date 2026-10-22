@@ -44,7 +44,7 @@ async function rig(extra: { validators?: SettingsValidators; contextUsage?: Cont
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
   const codexPrompt = extra.codexPrompt === null ? undefined : extra.codexPrompt ?? new CodexPromptStub();
   const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, compactCodex, compactPi, stopThread, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog, sendBreakers: extra.sendBreakers,
-    health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, comfy: { ok: true }, codex: { ok: false }, deepseek_key_present: true }),
+    health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, codex: { ok: false }, deepseek_key_present: true }),
     queue: () => ({ active: 1, slots: 2, waiting: 1, scopes: { 'group:7': 1 } }),
     codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'group:7', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
     pi: async () => ({ threads: { 'group:7': 42 }, count: 1, keys: ['group:7'], compaction: [] }) });

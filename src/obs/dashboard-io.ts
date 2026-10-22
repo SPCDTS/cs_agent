@@ -8,23 +8,6 @@ const MAX_BODY = 512 * 1024;
 export const AGENT_MD_MAX_BYTES = 64 * 1024;
 
 export function equal(a: string, b: string): boolean { const x=Buffer.from(a),y=Buffer.from(b); return x.length===y.length && timingSafeEqual(x,y); }
-/** URL 每段与 realpath 双重限制，拒绝软链接和跨票据读取；只允许校验过的位图。 */
-export async function imageFile(root: string, segments: string[]): Promise<string> {
-  if (segments.length < 2 || segments.length > 5 || !/^[A-Za-z0-9_-]{1,128}$/.test(segments[0]!) ||
-      segments.some(s => !s || s === '.' || s === '..' || /[\\/:\0]/.test(s))) throw new Error('非法图片路径');
-  if (!/\.(png|jpe?g|webp|gif)$/i.test(segments.at(-1)!)) throw new Error('不支持的图片');
-  const realRoot = await fs.realpath(root);
-  if (realRoot !== path.resolve(root)) throw new Error('图片根目录不可为链接');
-  let current = realRoot;
-  for (const segment of segments) {
-    current = path.join(current, segment);
-    if ((await fs.lstat(current)).isSymbolicLink()) throw new Error('图片不可为链接');
-  }
-  const real = await fs.realpath(current);
-  if (path.relative(realRoot, real) !== path.join(...segments)) throw new Error('图片超出目录');
-  return real;
-}
-
 export class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 
 /** 表单与 JSON 写接口共用同源策略；Origin 缺省时仍须通过各自的 CSRF 校验。 */

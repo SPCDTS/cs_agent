@@ -7,11 +7,11 @@
 一个基于 **pi-durable** 的最小 agent，Docker 单容器部署，只做一件事：
 
 1. 通过内置 **QQBridge** 工具从 QQ（NapCat OneBot v11）接收消息；
-2. **规则分流**（无模型，v3）：消息以 `IMAGE_PREFIXES`（默认 `奶龙:` / `奶龙：`）开头 → 前缀之后解析内联选项，其余文本作为提示词；
-3. **生图路径** → 调用 **ComfyUI 的 MCP**（`comfy-mcp`）生成图片，以固定模板把图片回到原 QQ 会话；
-4. **其他消息** → 交给**执行 agent**：后端可切换（`AGENT_BACKEND=codex|pi`，可按会话覆盖），默认是**同一容器内**的 `codex` CLI，线程按来源会话确定；两后端通过 `send_message` 发送文字、图片或文件，默认回复来源会话，有授权时可指定 target；最终回答只留存，cs-agent 的 `image_gen` MCP 默认关闭。
+2. **触发消息**（私聊；允许群内真实 @）经 **Inbox** 落盘后按会话键交给 **ThreadHost**：每个会话（`group:<id>`、`private:<qq>`、owner 多账号共用的 `owner`）一个常驻 agent 线程，空闲开一轮、同一发送者插话、其余排队（详见 [常驻 agent 设计](DESIGN-resident-agent.md)）；
+3. **执行 agent** 后端可切换（`AGENT_BACKEND=codex|pi`，可按会话覆盖），默认是**同一容器内**常驻的 `codex app-server`；两后端通过 `send_message` 发送文字、图片或文件，默认回复来源会话，有授权时可指定 target；最终回答只留存，模型没发消息不兜底，只在出错时提示。
 
 > v2 的"意图识别模型选工具"（`generate_image` / `ask_codex` / `reply_qq` 三个模型工具与热加载 `system.md`）已在 v3 移除，见 §5.2 与 §10。
+> 2026-10：v3 的规则分流与本地 ComfyUI 生图（`IMAGE_PREFIXES` 前缀路由、派发器与 `cs.image` 任务、pi 的 `generate_image`、codex 的 `image_gen` MCP）已移除，所有触发消息（含以 `奶龙:` 开头的）都作为普通输入交给执行 agent；codex 自带的内置生图不受影响。§10 中相关条目仅作历史记录。
 
 ## 2. 外部依赖与事实（已核实，2026-10-17）
 
@@ -19,41 +19,39 @@
 |---|---|
 | `@earendil-works/pi-durable` | 1.3.0；依赖 `@earendil-works/pi-ai` 1.3.0、`@earendil-works/chord` 1.3.0；实验性 API |
 | `@earendil-works/pi-ai` | 内置 provider `openai-codex`（ChatGPT 订阅 OAuth，baseUrl `https://chatgpt.com/backend-api`）、`openai`、`anthropic` 等；`providers/faux` 可用于测试 |
-| `@openai/codex` | npm 0.163.0（本机 0.160.1）。`codex exec [PROMPT] --json -o <file> -C <dir> --skip-git-repo-check -s workspace-write`；`codex exec resume <SESSION_ID> [PROMPT]` 固定会话续聊；`CODEX_HOME` 决定 auth.json/config.toml/sessions 位置 |
-| `comfy-mcp` | PyPI 0.10.0，依赖 `mcp>=2,<3`、`pydantic>=2`、`anyio>=4.9`；入口 `comfy-mcp`（stdio MCP）。读取 `COMFYUI_URL` / `COMFYUI_HOST` / `COMFYUI_PORT` 指向远端 ComfyUI；`generate_image(prompt)` 内部走 `comfy run-template`（需要 `comfy-cli`，`COMFY_BIN`） |
+| `@openai/codex` | 镜像固定 `0.164.0-alpha.8`（子 agent 唤醒 `wake_on_agent_messages` 自此版本起才有）。cs-agent 常驻一个 `codex app-server`（stdio JSON-RPC），`thread/start` / `thread/resume`、`turn/start` / `turn/steer`；`CODEX_HOME` 决定 auth.json/config.toml/sessions 位置。早期的 `codex exec [resume]` 用法见 §5.3 与 §10 |
 | NapCat（Compose 服务，2026-10-19 方案） | `mlikiowa/napcat-docker` 按 index digest 固定；HTTP `agent-http` / WS `agent-ws` 在容器内监听 `0.0.0.0:3000/3001`，cs-agent 默认访问 `http://napcat:3000` / `ws://napcat:3001`，同一 Bearer token，`messagePostFormat: array`。3000/3001 不发布，WebUI 只发布 `127.0.0.1:6099`。环境变量仍可指向宿主机 NapCat（`host.docker.internal:3000/3001`），用于回退；真实迁移验收见 `DESIGN-napcat-container.md` §6 |
-| ComfyUI（宿主机） | `D:\Tools\ComfyLocal\start.ps1` 以 `--listen 127.0.0.1 --port 8188` 后台启动；容器经 `host.docker.internal:8188` 可达，无需改为 0.0.0.0 |
 | codex 模型提供者（2026-10-19） | 默认 `CODEX_PROVIDER=magpie`，容器经 `http://host.docker.internal:3425/v1` 访问宿主机 magpie，使用 Responses 与 `supports_websockets=false`；gateway key 仅经环境变量注入，目录用 `/v1/codex/models`。容器 NAT 被视为回环，key 归集与限定模型，不是这条路径的访问控制 |
 | 模型凭据 | codex 仅 `CODEX_PROVIDER=openai` 直连时需要容器内 `auth.json`；pi / 摘要默认 DeepSeek API key，可选 `openai-codex` OAuth 不受该开关影响 |
 
-## 3. 总体结构（v3）
+## 3. 总体结构（常驻 agent）
 
 ```
 QQ 用户 ──NapCat(OneBot v11)──► QQBridge(ws 收 / http 发)
-                                     │ 授权 + @检测 + 去重 + 票据(pending) + 消息库入库
+                                     │ 授权 + @检测 + 去重 + 消息库入库
+                                     │ 触发消息：inbound 行(queued) + 附件下载到 /data/incoming/<入站键>/
                                      ▼
-                     Dispatcher：规则分流（router.ts，无模型）→ 写 TicketDoc(route/prefix/prompt)
-                     同一 scope 严格 FIFO，不同 scope 并行（≤ AGENT_CONCURRENCY）
-                     pi-durable Harness（SQLite /data/agent.sqlite）：每条消息一个 ownerless 会话 + 一个 durable 任务
+                     Inbox：按会话键投递，记录 queued → delivered → done
+                                     ▼
+                     ThreadHost（每个会话键一份 cs.thread-host 文档，派发 harness /data/agent.sqlite）
+                     空闲 → 开一轮；忙且同一发送者 → 插话；其余（他人消息、定时输入）→ 排队
+                     不同会话并行，进行中的回合数 ≤ AGENT_CONCURRENCY
+                                     ▼
+                     BackendRouter：后端属于会话（AGENT_BACKEND / OVERRIDES，面板可改）
                  ┌───────────────────┴──────────────────────────────┐
-        route=image / image_usage                              route=agent
-        任务 cs.image：generate → reply                        任务 cs.agent：handle → lateImages → settle
-        generate：comfy-mcp(stdio) 或 HTTP                     handle：AgentBackend（AGENT_BACKEND / OVERRIDES）
-          COMFYUI_URL 经 127.0.0.1 loopback 转发                  codex：codex exec [resume] 固定线程 owner/shared
-          → /data/images/<ticket>/                                  -c QQ_ACCESS / QQ_ATTACH_DIR / QQ_FILE_DIR / QQ_WORKDIR
-        reply：固定模板（成功 / 服务不可用 / 超时 /              MCP：qq_context（只读）、im（发送）、browser
-               内容被拒 / 其他）+ 图                              send_message 即时发文字、图片与文件
-                                                                  pi：进程内 pi-durable（保留 generate_image）
-                                                                settle：迟到图片 #late；零发送才兜底 #fallback
+        codex：常驻 codex app-server                           pi：进程内 pi-durable（/data/pi.sqlite）
+          turn/start · turn/steer；子 agent 完成后唤醒             submit / steer；子 agent follow-up 唤醒
+          MCP（线程令牌）：qq_context（只读）、im、browser          工具：历史召回、联网、im、定时、子 agent 等
                  └───────────────────┬──────────────────────────────┘
                                      ▼
-                  图片路由 reply(ticket)；agent 路由 send(outboxKey)（sent 重放，uncertain 不重发）
+                  send_message → SendService → Outbox（sent 重放，uncertain 不重发）→ 发送规则
                                      ▼
                               QQ 原私聊 / 原群(@原发送者)
 ```
 
-每个阶段把结果写进 TicketDoc，并在同一次 `runtime.commit` 内推进任务检查点：进程在阶段之间崩溃时任务从检查点继续，
-已完成的生图 / 后端调用不会重跑，回复不会重发。
+TurnMonitor 处理宿主事件：更新 Inbox 状态、记录观测、回合结束后补传附件；只有回合失败、后端丢失回合或输入无法投递时才发出错提示，
+模型正常结束但没发消息不兜底。定时任务到点向来源会话投一条定时输入，线程忙时排队。重启后宿主先恢复回合（pi 续跑；codex 丢失 → 出错提示），
+再由 Inbox 按到达顺序重新投递 `queued` 输入。设计细节见 [常驻 agent 设计](DESIGN-resident-agent.md)。
 
 ## 4. 目录与模块归属
 
@@ -77,33 +75,33 @@ cs_agent/
 │  │  ├─ download.ts            安全下载、地址检查与 DownloadHooks
 │  │  ├─ attach.ts, attach-paths.ts  附件来源/大小/数量/去重、文件清单与票据目录校验
 │  │  ├─ limits.ts              图片数量/大小限制、魔数、根目录与文件读取校验
-│  │  └─ gen/                  生图后端、参考图、参数、收集、清单、Qwen 工作流与事件
-│  │     ├─ image-gen.ts        comfy-mcp(stdio) / HTTP，任务与 image_gen MCP 共用
-│  │     └─ observed.ts, events.ts  Trace 包装与票据旁路事件，不打开观测数据库
+│  │  ├─ image-collect.ts       collectNewImages：目录内新增图片收集（不跟随软链接，按魔数校验）
+│  │  └─ references.ts          validateReferences：入站参考图的允许列表与 realpath 范围校验
 │  ├─ qq/                        ★ Agent B 独占
 │  │  ├─ types.ts                ★ 主会话契约（只读）
 │  │  ├─ bridge.ts               createQQBridge：WS 收事件、HTTP 发送、重连、心跳、去重
 │  │  ├─ policy.ts               授权 / 触发规则（allowUsers、allowGroups、真实 at 段）
-│  │  ├─ reply-store.ts          票据持久化（node:sqlite），pending→sending→sent|uncertain
-│  │  ├─ ticket.ts               入站票据重建与旧 route_text 兼容转换
+│  │  ├─ reply-store.ts          入站输入（inbound）与 Outbox 持久化（node:sqlite）；旧 tickets 表只读保留
+│  │  ├─ incoming.ts             触发消息附件下载到 /data/incoming/<入站键>/
 │  │  ├─ image.ts                复用 media 校验，组装 OneBot base64:// 图片段
 │  │  └─ index.ts                导出 createQQBridge
 │  ├─ agent/                     ★ Agent A
 │  │  ├─ harness.ts              createModels + openai-codex provider + 注册表 + SQLite storage
-│  │  ├─ extension.ts            defineExtension("cs-agent")：注册两个 durable 任务（v3 无模型工具）
-│  │  ├─ config.ts               组合时解析 owner、IMAGE_PREFIXES 与后端覆盖表
-│  │  ├─ router.ts               规则分流（IMAGE_PREFIXES）
-│  │  ├─ tasks.ts                defineTask：cs.image（generate → reply）、cs.agent（handle → lateImages → settle）
+│  │  ├─ extension.ts            defineExtension("cs-agent")：只注册定时排程任务（无模型工具）
+│  │  ├─ config.ts               组合时解析 owner 与后端覆盖表
+│  │  ├─ inbox.ts                Inbox：触发消息与定时输入按会话键投递、恢复、工具绑定与输入呈现
+│  │  ├─ host/                   ThreadHost：每会话常驻线程的开轮 / 插话 / 排队、身份与持久文档
+│  │  ├─ turns.ts                BackendRouter（会话后端选择）与 TurnMonitor（出错提示、看门狗）
 │  │  ├─ backends/               纯请求契约、后端选择、Codex/Pi 实现与 Pi 只读会话源契约
 │  │  ├─ codex/                  runner、prompt、trace、context-usage、model-catalog、workspace、oauth
 │  │  │  ├─ runner.ts            owner/会话域线程、互斥队列、JSONL、线程持久化与 AGENTS.md
 │  │  │  └─ oauth.ts             将 Codex auth.json 的 ChatGPT tokens 映射为 pi-ai 凭据
-│  │  ├─ reply-postprocess.ts    回复发送保护（≤4000，不改格式）
-│  │  └─ dispatch.ts             admit（会话 + TicketDoc + 索引）→ scope FIFO → 建任务 → waitForTask → 兜底
+│  │  ├─ send-service.ts         send_message 的目标校验、授权与日额度，写 Outbox
+│  │  └─ replies.ts              出错提示文案（failed / lost / undeliverable）
 │  ├─ context/                   消息库、访问范围、格式化、衰老与媒体持久化
 │  │  ├─ access.ts               访问范围校验、owner 解析与 scopeLabel
 │  │  ├─ observer.ts             SummaryObserver/RecallObserver 与 DTO；由 main 注入存储实现
-│  │  ├─ image-references.ts    票据附件与媒体库参考图的访问权限校验
+│  │  ├─ media.ts, media-recall-server.ts  媒体库与按需图片召回；codex MCP 的 loopback 服务与线程令牌
 │  │  ├─ qq-context-tool.ts      QQ 召回与附件工具门面，媒体归属交给 ContextStore
 │  │  └─ recall-results.ts       按实际返回正文计算召回命中
 │  ├─ obs/                       观测存储、路由与面板
@@ -115,7 +113,7 @@ cs_agent/
 │  │  ├─ context/               上下文分析及独立的 /context 路由
 │  │  ├─ memory/                记忆读取、埋点和记忆路由
 │  │  └─ ui/                    HTML 与前端资源；dashboard-pages 接收只读数据，计算直引 shared
-│  └─ mcp/                       codex 的 stdio MCP：qq-context.ts（聊天记录）、image-gen.ts（生图）
+│  └─ mcp/                       codex 的 stdio MCP：qq-context.ts（聊天记录与图片召回）、im.ts（发送、授权与定时）
 │     └─ qq-context-server.ts   工具注册、回调注入与图片调用适配；查询委托 context
 ├─ test/                         vitest；qq/ 下的测试归 Agent B，其余归 Agent A
 └─ scripts/                      init-auth.ps1（把宿主机 ~/.codex/auth.json 复制进 ./data/codex/）
@@ -125,18 +123,16 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 
 ## 5. 关键设计决策
 
-### 5.1 每条消息一个 durable conversation
-- 不用单一 root 累积所有 QQ 消息（上下文无限增长、串话）。
-- 每条通过授权的消息：一个 ownerless 会话（v3：会话里不跑模型，只承载 TicketDoc 与一个 durable 任务）。
-- 会话文档（`defineDoc`）保存 `{ ticket, source, text, route, … }`，回复只从文档取 ticket，**后端无法指定回复目标**。
-- 进程崩溃后任务从最后提交的检查点继续（见 §3 末尾与 §10.1），避免重复生图、重复发消息。
+### 5.1 每个会话一个常驻线程
+- 不用单一 root 累积所有 QQ 消息（上下文无限增长、串话）；也不再每条消息一个 durable 会话（v3 的 TicketDoc / DispatchDoc 与派发器已移除）。
+- 会话键：owner 私聊为 `owner`，群为 `group:<id>`，其他私聊为 `private:<qq>`。每个键一份 `cs.thread-host` 文档，记录空闲/忙、当前回合、本轮输入与排队输入；每条输入以入站键幂等。
+- 发送者身份与默认发送地址由宿主当前回合求出（`Inbox.binding`），**模型无法冒充发送者**；跨会话目标需授权（§5.6）。
+- 重启后宿主恢复回合（pi 续跑；codex 丢失 → 出错提示，不自动重放有副作用的操作），Inbox 重新投递 `queued` 输入，Outbox 中 sending/uncertain 的消息不重发。
 
-### 5.2 规则分流（v3，取代意图识别模型）
-- `src/agent/router.ts`：去掉群消息开头由 bridge 渲染出的 `[at]` / `[reply]` 段占位与首尾空白后，逐字匹配 `IMAGE_PREFIXES`（逗号分隔，默认 `奶龙:,奶龙：`，较长前缀优先）。
-- 命中：前缀之后解析比例、尺寸、张数与透明选项，其余文本（去首尾空白，不翻译不改写）作为生图提示词；为空 → 固定用法提示"奶龙: 后面写要画的内容"。未命中：整条原文交给执行 agent。
-- 分流结果（`route: image | image_usage | agent`、`prefix`、`prompt`）在 admit 的同一 commit 写入 TicketDoc，日志 `message routed`。
-- 不经任何模型，没有系统提示；v2 的 `${DATA_DIR}/prompts/system.md` 不再读取，存在时启动记一行弃用 warn（文件保留）。
-- 执行 agent 的后端选择：`AGENT_BACKEND`（默认 codex）+ `AGENT_BACKEND_OVERRIDES`（`scope=backend`，非法项启动失败）。
+### 5.2 触发与后端选择（v3 规则分流已移除）
+- 不经任何模型分流：bridge 判定触发（私聊；允许群内真实 @）后，整条原文作为输入交给 ThreadHost。v3 的 `router.ts` 前缀分流（`IMAGE_PREFIXES`，默认 `奶龙:`）已于 2026-10 随本地生图移除，以 `奶龙:` 开头的消息不再特殊处理。
+- 没有意图层系统提示；v2 的 `${DATA_DIR}/prompts/system.md` 不再读取，存在时启动记一行弃用 warn（文件保留）。
+- 执行 agent 的后端选择：`AGENT_BACKEND`（默认 codex）+ `AGENT_BACKEND_OVERRIDES`（`scope=backend`，非法项启动失败）；后端属于会话，配置变更在会话空闲且旧后端没有后台工作后生效。
 
 ### 5.3 固定 codex 会话
 - `CODEX_HOME=/data/codex`（容器卷），工作目录 `/workspace`（容器卷）。
@@ -149,11 +145,10 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 - 上下文库以幂等迁移建立 `scope_names(scope PRIMARY KEY, name, updated_at)`，记录带群名的消息时 upsert；跨会话历史的消息、引用链与摘要标签附上清洗后的群名。
 - 只读工具 `qq_chats()` 列出群名/群号及好友备注，每类最多 200 条，仅限主人私聊（`access=all`）。pi 直接调用 Channel，codex 的 qq_context MCP 通过 `POST /chats` 回到 loopback 服务；主进程以同一回合 recall token 再次核验权限，令牌过期或撤销即取消查询。Channel 的 `listChats` 使用 `get_group_list/get_friend_list` 并刷新群名缓存，context 仅依赖通道契约。
 
-### 5.4 ComfyUI 经 MCP
-- 容器内以 stdio 启动 `comfy-mcp`（Python venv），`COMFYUI_URL=http://host.docker.internal:8188`，`COMFY_BIN=/opt/comfy/bin/comfy`。
-- 用 `@modelcontextprotocol/sdk` Client 调用：`server_info`（启动自检）→ `generate_image(prompt, wait=False)` → `job(action="wait")` → `fetch_outputs` 到 `/data/images/<ticket>/`。
-- 风险：`comfy run-template` 对远端目标是否需要本地 ComfyUI 工程目录（`COMFY_PROJECT`）**需实测**。若 MCP 路径在容器内不可行，实现 **fallback**：直接调 ComfyUI HTTP（`POST /prompt` 默认 t2i 工作流 → 轮询 `/history/<id>` → `GET /view`），并在报告中明确说明走了 fallback。
-- 生图超时默认 300 s；失败时按类别回复固定模板（服务不可用 / 超时 / 内容被拒 / 其他）。
+### 5.4 图片：只收发，不再本地生图
+- 入站：触发消息的图片下载到 `/data/incoming/<入站键>/`，经 `media/references.ts` 按允许列表与 realpath 校验后，以 `[本轮参考图]` 列给模型（每条输入 ≤3 张）；媒体库、`qq_image` 召回与 `qq_view_image` 照旧。
+- 出站：`send_message` 的 `images`。codex 自带的内置生图（imagegen）输出在 `/data/codex/generated_images/`，把工具返回的路径传给 `send_message` 即可发出；该目录按 `CODEX_GENERATED_IMAGES_RETENTION_DAYS` / `CODEX_GENERATED_IMAGES_MAX_MB` 清理。
+- 本地 ComfyUI 生图（`comfy-mcp` / HTTP 后端、Qwen 工作流、loopback 转发、`cs.image` 任务、pi 的 `generate_image`、codex 的 `image_gen` MCP、迟到图片 #late 收取）已于 2026-10 移除。
 
 ### 5.5 QQBridge（相对 D:\Tools\QQBridge 的取舍）
 保留：真实 `at` 段检测、自回声过滤、`self_id:type:group_id:user_id:message_id` 去重、授权模型（`allowUsers` 任意处可触发；`allowGroups` 内成员需真实 @）、票据决定性 ID 与 `pending→sending→sent|uncertain` 幂等机制、群回复 `[at][text "\n"+正文]`、图片 `base64://` 发送与魔数校验、"结果不确定不自动重试"。
@@ -164,16 +159,16 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 
 - codex 的模型提供者默认改为宿主机 magpie，受管配置使用 `env_key="CODEX_MAGPIE_KEY"`、`wire_api="responses"`、`supports_websockets=false` 与 `/codex/models` 目录。MCP 注册、附件路径与受管 AGENTS.md 不受提供者开关影响；MCP 不新增 key 透传，基础配置允许空 key，只有 CodexRunner 启动时检查 magpie key。设置页展示只读提供者与 URL。
 
-- 独立生图任务仍只由规则分流触发；pi 的 `generate_image` 保留。codex 的 `image_gen` MCP 由 `CODEX_IMAGE_GEN=off|on` 控制，默认 off；on 恢复旧注册与注入。受管 AGENTS.md 与新播种的 codex 提示词删除专用生图段，只保留聊天图片召回与附件用法。
+- cs-agent 不再提供生图工具（pi 的 `generate_image`、codex 的 `image_gen` MCP 与 `CODEX_IMAGE_GEN` 已于 2026-10 移除）；受管 AGENTS.md 与 codex 提示词只保留聊天图片召回、附件用法与 codex 内置生图输出的发送说明。
 - 统一工具 `send_message({ text, images?, files?, target? })` 默认发回本回合会话，文件项为 `{ path, name? }`。跨会话目标仅支持 `qq:group:<id>` / `qq:private:<QQ号>`，由 SendService 校验格式、owner 或有效授权（含 scopes / 到期时间）、群成员或好友关系（缓存 5 分钟）及 Asia/Shanghai 每 ref 每天 100 条额度。日额度按该 ref 的全部模型 Outbox 行计，系统行排除，SQLite 预留行时原子复核；被发送规则拒绝的行不计入。主动发送不 @，机器人历史及附件写向目标会话，跨会话正文去重包含目标。
 - pi 在进程内调用 SendService；codex 的独立 `im` MCP 通过 loopback `/send`、`/im-info`、`/auth_grant`、`/auth_revoke`、`/auth_list` 调用主进程。令牌与 `PiRequestDoc` 绑定票据、来源、真实 `actor=qq:<user_id>` 和 `actorIsOwner`，身份只取 Channel 票据，不读消息正文。pi 按回合选择固定工具配置；im 子进程启动时从令牌绑定查询权限，仅有权回合列出 `target`，仅 owner 回合列出 `auth_*`，服务端逐次复核。
 - `GrantsDoc` 是派发 harness（agent.sqlite）的 Session 文档，以 user 为键；`auth_grant` 替换该用户的授权，`auth_revoke` 可撤销部分能力或整条，过期授权只读展示但不生效。面板沿用 owner 运维令牌与同源 / CSRF 保护。`schedule` 授权由 ScheduleService 和模型工具共同复核，来源 scopes 与到期时间实时生效。`auth_changed` 记录 panel / tool、操作者及前后差异，`send_message` trace 带实际 target。
 - `agent/schedule/tools.ts` 是 pi 与 codex 共用的定时工具入口，复用 ScheduleService 管理定义；`shared/schedule-tools.ts` 仅存工具名与权限契约，context 回环层不依赖 agent。管理工具仅开放给有 schedule 权限的交互回合，来源与 created_by 取真实票据，非 owner 只能管理自己的定义。pi 按轮配置独立扩展；im 启动时查询 `/im-info` 并调用 `/schedule_*`，HTTP 和工具服务逐次复核授权。
 - 定时运行只开放 `schedule_control`，通过持久 admission / ScheduledRunDoc 将票据绑定到自身定义；pause / complete 停止后续触发，保留当前运行与结算。模型不能传入目标 id、actor 或来源。规则输入使用北京时间 `YYYY-MM-DD HH:mm`，工具说明要求将通知目的地解析为具体 ref 写入 prompt；`schedule_tool` trace 记录 action、id、actor 和控制原因。
 - owner 在群和私聊均读取 `all`；线程键独立按来源决定：owner 私聊为 `owner`，所有群消息为 `group:<id>`，其他私聊为 `private:<qq>`。用户接受 owner 读取的其他会话内容可能留在来源群线程历史中；Codex 与 pi 一致，派发 FIFO 仍按来源 scope。
-- ReplyStore 的 Outbox 按票据和序号持久化正文、图片及文件状态：pi 按稳定 call_id 重放，codex 按本次 exec 的第 n 次有效调用映射。不限每回合条数，所有出站消息（含系统 #late / #fallback 与生图前缀路由的旧回复路径，不含 owner 告警）在 bridge 统一过发送规则（`src/qq/send-rules.ts`：每会话每分钟 6 条拒绝、每会话每小时 60 条熔断该会话 60 分钟、全局每分钟 30 条熔断全部 10 分钟，数值在面板设置页可改；计数与熔断存于 qq-bridge.sqlite 的 send_log / send_breakers，熔断时私聊通知 owner 一次）；系统消息被拒只记告警，票据照常终结；同目标的相同正文哈希复用已发或不确定行，不确定结果不向模型报工具错误；群聊仅第一条 @ 提问者。图片、文件沿用 media/attach.ts 的来源与大小校验，副本保存在 `images/<ticket>/outbox/`。
+- ReplyStore 的 Outbox 按票据和序号持久化正文、图片及文件状态：pi 按稳定 call_id 重放，codex 按本次 exec 的第 n 次有效调用映射。不限每回合条数，所有出站消息（含出错提示等系统消息，不含 owner 告警）在 bridge 统一过发送规则（`src/qq/send-rules.ts`：每会话每分钟 6 条拒绝、每会话每小时 60 条熔断该会话 60 分钟、全局每分钟 30 条熔断全部 10 分钟，数值在面板设置页可改；计数与熔断存于 qq-bridge.sqlite 的 send_log / send_breakers，熔断时私聊通知 owner 一次）；系统消息被拒只记告警，票据照常终结；同目标的相同正文哈希复用已发或不确定行，不确定结果不向模型报工具错误；群聊仅第一条 @ 提问者。图片、文件沿用 media/attach.ts 的来源与大小校验，副本保存在 `images/<ticket>/outbox/`。
 - 正文 sent 后逐个上传文件，分别持久化 `pending → sending → sent|uncertain`；sending/uncertain 永不重发。每条成功消息立即写一条上下文机器人行，可按 message_id 引用。
-- agent 阶段为 handle → lateImages → settle；迟到图片使用 #late，零发送成功回合用 #fallback 并记录 no_send_fallback，零发送失败回合用对应失败提示。最终回答只保存到 TicketDoc.agentResult 并记录 final_answer。旧 postprocess/reply 检查点映射到 settle，尚未发出的旧草稿/答案及图片通过 #fallback 保留；已发送的旧附件继续恢复。派发普通尝试最多 3 次，确有未完成文件回复时总尝试最多 6 次；持续恢复故障不阻塞同 scope 的后续消息。结算与副本清理均进入票据串行队列，终态清理 Outbox 副本，仍有 pending/sending 文件的消息目录保留。cs.image 不变。
+- 回合结束不结算、不兜底：最终回答只记录 final_answer 留存；出错提示（failed / lost / undeliverable，同一会话 10 分钟内最多一条）由 TurnMonitor 作为系统消息发出，回合结束后补传未完成的附件。v3 票据时代的 handle → lateImages → settle 检查点、#late 迟到图片与 #fallback 兜底已随派发器与本地生图移除；迁移来的旧 Outbox 行保留系统消息标记。
 
 ### 5.7 模型凭据
 - `CODEX_PROVIDER=magpie|openai` 默认 magpie；`CODEX_MAGPIE_URL` 默认 `http://host.docker.internal:3425/v1`。runner 对目录查询及 exec/resume 注入 `CODEX_MAGPIE_KEY`，主进程注册脱敏，key 不落盘；magpie 不依赖容器 ChatGPT 凭据，直连仍保留原有 OAuth 行为。默认模型为 `codex/gpt-6.1-sol`，上下文、设置校验与面板均按完整目录 slug 精确匹配，离线缓存也不跨前缀匹配。Codex 0.163 的短名会落到默认模型元数据，丢失目录窗口与能力。无效 `codexModel` 保留原值并告警，新回合使用有效的 `CODEX_MODEL`，环境默认也无效则用内置默认；目录不可用时保留配置值。
@@ -199,8 +194,6 @@ NAPCAT_TOKEN=
 QQ_ALLOW_USERS=10000001          # 逗号分隔或 *
 QQ_ALLOW_GROUPS=200000001          # 逗号分隔
 QQ_GROUP_MENTIONS=true
-COMFYUI_URL=http://host.docker.internal:8188
-COMFY_TIMEOUT_SEC=300
 CODEX_PROVIDER=magpie
 CODEX_MAGPIE_URL=http://host.docker.internal:3425/v1
 CODEX_MAGPIE_KEY=
@@ -216,28 +209,29 @@ LOG_LEVEL=info
 
 ## 7. Docker
 
-- 基础镜像 `node:24-bookworm-slim`；安装 `python3 python3-venv`，`/opt/comfy` venv 内 `pip install comfy-cli comfy-mcp`；`npm i -g @openai/codex@0.163.0`。
-- 多阶段：builder 编译 TS → runtime 仅带 `dist/` 与生产依赖。
-- `docker-compose.yml`：两个服务 `cs-agent` 与 `napcat`，均 `restart: unless-stopped`。cs-agent 保留 `extra_hosts: ["host.docker.internal:host-gateway"]` 访问宿主机 ComfyUI，卷 `./data:/data`、`./workspace:/workspace`，`env_file: .env`，非 root 用户运行；用普通 `depends_on: [napcat]` 控制顺序，不等待 `service_healthy`，登录前通过现有 WS 重连等待。
+- 基础镜像 `node:24-bookworm-slim`；Dockerfile 以 `# syntax=docker/dockerfile:1` 开头，需要 BuildKit（apt 层挂缓存 `--mount=type=cache`）。
+- 多阶段：builder 编译 TS → runtime 仅带 `dist/` 与生产依赖。runtime 层按变动频率从低到高：apt 基础包（`python3 ca-certificates git tini bubblewrap`）→ `@playwright/mcp` 与 Chromium 系统依赖（失败重试）→ 固定版本 `@openai/codex@0.164.0-alpha.8`（装完以 `codex --version` 校验，最多重试 5 次）→ 应用文件。
+- `docker-compose.yml`：两个服务 `cs-agent` 与 `napcat`，均 `restart: unless-stopped`。cs-agent 保留 `extra_hosts: ["host.docker.internal:host-gateway"]` 访问宿主机 magpie（及回退时的宿主机 NapCat），卷 `./data:/data`、`./workspace:/workspace`，`env_file: .env`，非 root 用户运行；用普通 `depends_on: [napcat]` 控制顺序，不等待 `service_healthy`，登录前通过现有 WS 重连等待。
 - NapCat 固定镜像 `mlikiowa/napcat-docker@sha256:f611790ecffa23c3c182017d5cf68179dc24612403608cd835ad13d79642f1bd`（2026-10-19 index digest），`NAPCAT_UID/GID=1000`、固定 MAC `02:42:ac:11:00:02`，仅发布 `127.0.0.1:6099:6099`。`NAPCAT_WEBUI_TOKEN` 初始化 WebUI 口令，`QQ_BOT_ACCOUNT` 可选传给 `ACCOUNT`；不设 `MODE`。
 - NapCat 卷 `./napcat/config:/app/napcat/config` 与 `./napcat/qq:/app/.config/QQ` 持久化配置和登录态，整个目录忽略入库。宿主机脚本 `scripts/napcat-config.ps1` 从 `.env` 幂等播种通用及可选账号配置；token 相同不动，变化时先备份再仅改受管 token。OneBot 逻辑、图片 CDN 下载和附件 base64 传输不变，无需共享媒体卷。
-- 健康检查：cs-agent 的 `GET /healthz` 返回 WS 连接状态与 comfy/codex 自检结果（Compose 内监听 `0.0.0.0:8787`，仅发布宿主机 `127.0.0.1:8787`；本地直接运行仍默认回环）。NapCat 每 30 秒用 curl 检查 `http://127.0.0.1:6099/`，超时 5 秒、重试 5 次、启动宽限 60 秒，只代表 WebUI HTTP 就绪，不代表 QQ 已登录。
+- 健康检查：cs-agent 的 `GET /healthz` 返回 WS 连接状态与 codex 自检结果（Compose 内监听 `0.0.0.0:8787`，仅发布宿主机 `127.0.0.1:8787`；本地直接运行仍默认回环）。NapCat 每 30 秒用 curl 检查 `http://127.0.0.1:6099/`，超时 5 秒、重试 5 次、启动宽限 60 秒，只代表 WebUI HTTP 就绪，不代表 QQ 已登录。
 
 ## 8. 宿主机前置条件（写入 docs/DEPLOY.md）
 
 1. NapCat 保持现状（127.0.0.1:3000/3001 + token）；Docker Desktop 的 `host.docker.internal` 可直达宿主机 loopback 服务，已实测。`.env` 的 `NAPCAT_TOKEN` 取自 `D:\Tools\NapCat\config\onebot11_1670528780.json` 中 `agent-http` 条目的 token。
-2. ComfyUI 用 `D:\Tools\ComfyLocal\start.ps1` 启动即可（127.0.0.1:8188），无需改监听地址。
-3. 默认先配置宿主机 magpie 的局域网共享、cs-agent gateway key 和模型范围（见 DEPLOY「codex 经 magpie」）；仅 `CODEX_PROVIDER=openai` 时运行 `scripts/init-auth.ps1` 把 `~/.codex/auth.json` 复制到 `./data/codex/auth.json`；或在容器内执行 `codex login --device-auth`。
-4. `docker compose up -d --build`；查看 `docker compose logs -f`。
+2. 默认先配置宿主机 magpie 的局域网共享、cs-agent gateway key 和模型范围（见 DEPLOY「codex 经 magpie」）；仅 `CODEX_PROVIDER=openai` 时运行 `scripts/init-auth.ps1` 把 `~/.codex/auth.json` 复制到 `./data/codex/auth.json`；或在容器内执行 `codex login --device-auth`。
+3. `docker compose up -d --build`；查看 `docker compose logs -f`。
 
 ## 9. 测试要求
 
 - **qq/**：用本地假 OneBot 服务器（`ws` + `node:http`）测试：授权规则、@ 检测、去重、重连、票据幂等（sent / uncertain / 并发锁）、群回复段格式、图片校验。
-- **agent/**（v3）：规则分流（半/全角、前导空白与 `[at]`、空提示、未命中）；生图任务崩溃恢复（阶段间关闭 harness 后重开：一次生图、一次发送）；任务失败后重跑跳过已完成阶段；scope FIFO 与跨 scope 并行；codex 后端经假 `codex` 脚本（`QQ_ACCESS` / `IMAGE_TICKET_DIR` / 固定 effort、图片收集 ≤4）；`image_gen` MCP 经 stdio（假 ComfyUI HTTP）与假 comfy-mcp；后处理原文照发且不调用模型、旧设置与票据恢复兼容；后端选择与 pi 占位。
+- **agent/**：Inbox 投递与恢复（含以 `奶龙:` 开头的消息照常投递）；ThreadHost 开轮 / 插话 / 排队、跨会话并行与并发上限、重启恢复；codex 后端经假 app-server、pi 后端经 faux provider；send_message 绑定、Outbox 幂等与出错提示；后端选择与会话后端切换。
 - `docker build` 必须成功；`docker compose config` 校验通过。
 - 不向真实群发测试消息。
 
 ## 10. 实现阶段确认的偏离与补充（2026-10-18）
+
+> 本节及 10.1–10.4 是各阶段的实现记录。2026-10 起，其中涉及派发器 / TicketDoc / `cs.agent` 检查点、生图前缀路由、ComfyUI（comfy-mcp、loopback 转发、Qwen 工作流、`/data/workflows`）、`image_gen` MCP、迟到图片 `lateImages` / `#late` 与 `obs-events.jsonl` 的条目均已移除，仅作历史记录；当前结构见 §3 与 §5。
 
 上下文启动回填在面板服务前完成：codex 与轮换安全阀共用 rollout 发现逻辑，倒读末尾至多 2 MiB，以 `task_complete` 计回合、取此前最近 `token_count.info.last_token_usage` 和该记录时间；尾部截断只恢复可见回合数并保留既有更大计数；pi 按监听快照边界分页读取 harness 历史，恢复 assistant 输入及缓存、回合数与压缩消息时间，监听接续新提交；异常保留原记录，按后端记录汇总，重置后复查映射而不恢复归档。
 
@@ -282,10 +276,10 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | codex 线程安全阀 | 每条线程 resume 前检查 rollout 文件大小与线程年龄（记录含 `created_at`，旧记录用 `updated_at`），超限新建该线程并记 `codex thread rotated`（带 `key`） | 设计稿 §3.1 |
 | 受管 config.toml | entrypoint 写入 `web_search`、`[tools.web_search]`、`[mcp_servers.qq_context]`（env `DATA_DIR`、`QQ_CONTEXT_MAX_CHARS`）与可选 `[mcp_servers.browser]`；枚举/路径值经 `toml_enum` / `toml_path` 校验 | 设计稿 §3.4、§4.4 |
 | 容器内浏览器 | 镜像全局安装 `@playwright/mcp@0.0.83` + Chromium（`/opt/pw-browsers`，`--with-deps`）；codex 以 `--headless --isolated --browser chromium --blocked-origins <宿主机/内网阻止列表>` 启动，显式 `--sandbox` 开启 Chromium 沙箱（需 compose 的 seccomp-codex.json profile；`PLAYWRIGHT_NO_SANDBOX=1` 关闭）；`enabled_tools` 白名单 22 个工具，排除 `browser_run_code_unsafe`（vm 逃逸可读 auth.json、可 goto file:）、`browser_file_upload`、`browser_drop`；`file:` 靠 playwright-mcp 自带拦截 + Chromium（`--blocked-origins` 表达不了 file:） | egolite 不可容器化（设计稿 §4.4）；浏览器 MCP 不受 codex 沙箱约束，阻止列表不拦重定向/DNS 指向内网（DEPLOY 残余风险） |
-| codex 命令沙箱 | 受管 config.toml 写 `[sandbox_workspace_write] network_access`（`CODEX_SANDBOX_NETWORK`，默认 true）与 `writable_roots`（`CODEX_WRITABLE_ROOTS`，默认 `/workspace,/data/prompts`，逐项规范化 `//`、`/.`、末尾 `/` 后再比较，拒绝 `/`、`/data` 及其上级、`/data/codex*`、`/data/images*`、`/data/tickets*`、`*.sqlite`、含 `..`）；业务回合的命名权限 `filesystem` 与 `writable_roots` 按会话同步覆盖，owner 仅 `/workspace/owner` 与 `/data/prompts`，非 owner 仅本会话目录，read-only 没有可写根；`/data/workflows` 不再默认可写，受管 AGENTS.md 不再介绍它。entrypoint 在目录缺失时仍从 `/app/workflows` 播种 `/data/workflows`；历史自定义工作流默认位置 `/data/workflows/…` 保留可用，当前 `COMFY_WORKFLOW_FILE` 默认留空使用 Qwen 参数化生成器 | 用户 2026-10-18 决定：命令需联网；2026-10-19 起收窄 codex 写权限，保留规则分流的 `cs.image`、pi 的 `generate_image` 与 ComfyUI 本地生图；compose 自定义 seccomp profile（docker/seccomp-codex.json）才能运行 bwrap |
+| codex 命令沙箱 | 受管 config.toml 写 `[sandbox_workspace_write] network_access`（`CODEX_SANDBOX_NETWORK`，默认 true）与 `writable_roots`（`CODEX_WRITABLE_ROOTS`，默认 `/workspace,/data/prompts`，逐项规范化 `//`、`/.`、末尾 `/` 后再比较，拒绝 `/`、`/data` 及其上级、`/data/codex*`、`/data/images*`、`/data/tickets*`、`*.sqlite`、含 `..`）；业务回合的命名权限 `filesystem` 与 `writable_roots` 按会话同步覆盖，owner 仅 `/workspace/owner` 与 `/data/prompts`，非 owner 仅本会话目录，read-only 没有可写根；`/data/workflows` 不再默认可写，受管 AGENTS.md 不再介绍它（2026-10 起 entrypoint 也不再播种 `/data/workflows`，本地生图已移除） | 用户 2026-10-18 决定：命令需联网；2026-10-19 起收窄 codex 写权限；compose 自定义 seccomp profile（docker/seccomp-codex.json）才能运行 bwrap |
 | codex 命令禁读 | 入口脚本每次启动重写 `/etc/codex/requirements.toml` 的 `[permissions.filesystem] deny_read`（`/data/codex/auth.json`、`sessions`、`history.jsonl`、`log`、`shell_snapshots`、`memories`、`/data/codex/*.sqlite*`、`/data/*.sqlite*`、`/data/images`、`/data/tickets`、`/data/codex-session.json*`、`/data/codex-threads.json`）；镜像内 `/etc/codex` 归 node；写入失败则拒绝启动 | 评审 R2：沙箱原本可读凭据与数据库。codex 0.163 只认系统级 requirements（`$CODEX_HOME/requirements.toml` 无效，`default_permissions` 与 `sandbox_mode` 互斥）；不能禁读整个 CODEX_HOME（arg0 辅助程序在 `tmp/`）。实测见 DEPLOY §7 |
 | AGENTS.md 位置与版本 | `$CODEX_HOME/AGENTS.md` 承载可编辑的全局行为指引；`/workspace/<key>/AGENTS.md` 是受管文件，首行 `<!-- cs-agent-managed-workspace-agents v1 -->`，随后声明“由 cs-agent 每轮生成，改动会被覆盖。”。runner 每轮按实际会话权限渲染规则，拼入父工作区运维指引；文件缺失或全文不同时原子写入，相同不触碰 mtime。父目录 `/workspace/AGENTS.md` 保留给运维维护，不再生成占位说明；旧占位/V1/V2 识别逻辑已删除 | codex 0.163 实验表明 resume 不重新注入修改后的 developer_instructions，却会重新注入变化的 AGENTS.md；现已移除 developer_instructions 参数，全局与会话域文件均以 user 角色进入上下文。模型改写会话域文件后，下一轮恢复受管内容；访问控制仍由沙箱执行。详见 [设计稿 §8.12](DESIGN-codex-context.md#812-受管规则下发路径) |
-| 新增环境变量 | `COMFY_MODE`、`COMFY_MCP_BIN`、`COMFY_BIN`、`COMFY_CHECKPOINT`、`COMFY_WORKFLOW_FILE`、`COMFY_PROMPT_NODE`、`COMFY_LOOPBACK_PORT`、`CODEX_BIN`、`CODEX_SANDBOX`、`AGENT_THINKING_LEVEL`、`AGENT_CONCURRENCY`、`HEALTH_PORT`、`HEALTH_HOST`；设计 v2 第 1 组：`QQ_OWNER`、`HISTORY_RAW_DAYS`、`HISTORY_RAW_HARD_MAX_DAYS`、`HISTORY_SUMMARY_DAYS`、`HISTORY_SUMMARY_HOUR`、`QQ_CONTEXT_MAX_CHARS`、`CODEX_WEB_SEARCH`、`CODEX_WEB_SEARCH_CONTEXT`、`CODEX_ROLLOUT_MAX_MB`、`CODEX_THREAD_MAX_DAYS`、`CODEX_BROWSER` | 见 `.env.example` |
+| 新增环境变量 | `COMFY_MODE`、`COMFY_MCP_BIN`、`COMFY_BIN`、`COMFY_CHECKPOINT`、`COMFY_WORKFLOW_FILE`、`COMFY_PROMPT_NODE`、`COMFY_LOOPBACK_PORT`（`COMFY_*` 已于 2026-10 移除）、`CODEX_BIN`、`CODEX_SANDBOX`、`AGENT_THINKING_LEVEL`、`AGENT_CONCURRENCY`、`HEALTH_PORT`、`HEALTH_HOST`；设计 v2 第 1 组：`QQ_OWNER`、`HISTORY_RAW_DAYS`、`HISTORY_RAW_HARD_MAX_DAYS`、`HISTORY_SUMMARY_DAYS`、`HISTORY_SUMMARY_HOUR`、`QQ_CONTEXT_MAX_CHARS`、`CODEX_WEB_SEARCH`、`CODEX_WEB_SEARCH_CONTEXT`、`CODEX_ROLLOUT_MAX_MB`、`CODEX_THREAD_MAX_DAYS`、`CODEX_BROWSER` | 见 `.env.example` |
 
 ### 10.1 v3（设计稿 §4.1–4.4、§4.7，第 2 组）
 
@@ -310,11 +304,11 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | 结算 | `tasks.ts` 的 settle 保留 agentResult，记录 final_answer；零发送时按结果兜底，文本超限由 send_message 返回错误，不截断 | 定时任务设计 §3.4 |
 | 模型工具退场 | 删除 `generate_image` / `ask_codex` / `reply_qq` 工具、`claimBusinessCall` 与意图系统提示；`CodexRunner` 移至 `src/agent/codex-runner.ts`，生图实现移至 `src/agent/image-gen.ts` | 设计稿 §7 第 2 组 |
 | 消息库机器人行 | 生图保留 `recordPending/completeReply`；agent 每条 sent Outbox 消息独立写入真实 message_id 与正文，包含 #late / #fallback | 统一发送设计 §3.6 |
-| 新增环境变量 | `IMAGE_PREFIXES`、`AGENT_BACKEND`、`AGENT_BACKEND_OVERRIDES` | 见 `.env.example` |
+| 新增环境变量 | `IMAGE_PREFIXES`（2026-10 已移除）、`AGENT_BACKEND`、`AGENT_BACKEND_OVERRIDES` | 见 `.env.example` |
 
 已实测：容器内 `codex exec`（OAuth + workspace-write 沙箱）正常；容器内经 mcp 与 http 两条路径均生成真实 PNG（约 10–17 s）。
 
-### 10.2 生图工具 v2（2026-10-18，设计 §4.9）
+### 10.2 生图工具 v2（2026-10-18，设计 §4.9；2026-10 已移除）
 
 本节覆盖前文旧版静态工作流与 generate_image(prompt) 的说明。统一契约位于 `image-options.ts`；前缀路径与 image_gen MCP 共用校验、尺寸表及 `qwen-workflow.ts` 生成器。pi 后端的执行与恢复机制见 10.3；两条工具路径共用参数契约及图片恢复逻辑。
 
@@ -339,7 +333,7 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 - `image_qwen_image_2_1_background_removal.json`：VAEDecode 457（行 1011），SaveImageAdvanced 461（行 197）；link 651（行 1539）采样输出接 decode，649（行 1523）接 VAE，650（行 1531）接子图输出，顶层 672（行 390）接保存。使用同一 2.1 VAE，无单独 RGBA VAE。
 - `image_qwen_image_layered.json` 的 EmptyQwenImageLayeredLatentImage 128（行 2731）搭配另一 UNET/VAE 及 LatentCut/LatentCutToBatch；本实现不混用它。
 
-真实冒烟共 5 次，未访问真实 Codex、模型代理或 QQ；未改运行容器。透明 PNG 的 alpha 实测有 0–255。2K 冷启动超过一次 240 秒收取预算，重跑收取同一 prompt_id 成功，未重新提交；16 GiB 显存下不能承诺 2K 总在预算内完成。完整文件、耗时与验证尾部见 [验收记录](IMAGE-GEN-V2-ACCEPTANCE.md)。
+真实冒烟共 5 次，未访问真实 Codex、模型代理或 QQ；未改运行容器。透明 PNG 的 alpha 实测有 0–255。2K 冷启动超过一次 240 秒收取预算，重跑收取同一 prompt_id 成功，未重新提交；16 GiB 显存下不能承诺 2K 总在预算内完成。验收记录 `IMAGE-GEN-V2-ACCEPTANCE.md` 已随本地生图一并删除。
 
 ### 10.3 pi-durable 执行后端（第 3 组）
 
@@ -362,7 +356,7 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 
 ### 10.4 观测系统（第 4 组）
 
-观测路径不参与业务事务和检查点决策。trace.event / trace.span 写入独立 WAL 数据库 observability.sqlite；写入或订阅者失败只增加 dropped_events，不重试业务操作。主进程独占观测库写入；独立 image_gen MCP 仅向票据目录 obs-events.jsonl 追加经 schema 校验的事件（≤200 行、≤256 KiB），lateImages 和终态回收负责领取、校验、按主进程秘密注册表脱敏入库并删除。超大文件忽略，非法行跳过。事件按 ticket 关联，scope 从接收事件继承；所有 detail 经共享脱敏器后才进入 SQLite 或日志环形缓冲。
+观测路径不参与业务事务和检查点决策。trace.event / trace.span 写入独立 WAL 数据库 observability.sqlite；写入或订阅者失败只增加 dropped_events，不重试业务操作。主进程独占观测库写入（曾有的 image_gen MCP 旁路事件文件 obs-events.jsonl 已随本地生图移除）。事件按 ticket 关联，scope 从接收事件继承；所有 detail 经共享脱敏器后才进入 SQLite 或日志环形缓冲。
 
 | 层 | 实际事件与职责 |
 |---|---|
@@ -370,10 +364,10 @@ agent 延迟收图：image_gen 在提交前原子写入 pending-jobs.json 意图
 | durable tasks | phase:submit / generate / collect / handle / reply，late_images、phase:settle；每次执行或恢复记录开始与结束，checkpoint 含尝试次数 |
 | backend | backend:codex / pi 包围整个 handle；Codex model_turn 含线程键、effort、回复摘要与 model_ms，onAcquired 前等待另记 thread_wait_ms；backend span 保留总耗时。mcp_tool_call 映射 tool:&lt;name&gt;；内置 command_execution / web_search 每轮合计≤100 条，只提取命令/查询前 200 字、退出码、耗时，不存原始 JSONL |
 | pi hook | GenerationTask 的每次请求与响应记录 model_turn 和 usage；ToolTask 的 before/after 记录 tool:&lt;name&gt;；CompactionTask 记录 compaction 尝试 |
-| 图片 | 公共接口包装记录 image:submit / image:collect；对账归 image:collect(operation=reconcile)，查询步骤发 recovered，包含 prompt_id；三条生图入口共用 |
+| 图片 | 公共接口包装记录 image:submit / image:collect；对账归 image:collect(operation=reconcile)，查询步骤发 recovered，包含 prompt_id；三条生图入口共用（2026-10 随本地生图移除） |
 | 回复 | send_message 含序号、message_id、图片数、文件状态与 already_sent；final_answer 留存最终回答，no_send_fallback 标记成功但零发送的回合 |
 
-Metrics 每 60 秒从持久化游标读取新事件（包括主进程摄取的 MCP 事件），内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样 dispatcher 队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理普通事件与指标；管理事件仅按 OBS_ADMIN_RETENTION_DAYS（默认 365 天）清理。DeepSeek 用量由 pi、衰老共用 usageFields / usageCost 转换，包含 cacheRead 与 cacheWrite；只使用真实 usage，不发额外模型请求。
+Metrics 每 60 秒从持久化游标读取新事件，内存聚合调用数、成功率、p50/p95 后写 metrics 表；同步采样会话宿主队列和全局槽位、bridge.status()、Codex rollout、pi 会话数、衰老结果。每日按 OBS_RETENTION_DAYS 清理普通事件与指标；管理事件仅按 OBS_ADMIN_RETENTION_DAYS（默认 365 天）清理。DeepSeek 用量由 pi、衰老共用 usageFields / usageCost 转换，包含 cacheRead 与 cacheWrite；只使用真实 usage，不发额外模型请求。
 
 HTTP 面板由原健康服务器承载：/healthz 分支无需认证，仅返回白名单健康 JSON（连接状态、degraded、检查布尔值和线程信息），其余路由交给 obs/http.ts。SSR 中文 HTML + 内联 CSS / JS、SSE，无 CDN、框架或新增依赖；上下文直接调用共享工具格式化逻辑。图片经过段校验、真实路径约束、链接拒绝与位图魔数检查；所有渲染字符串先 redactText 再 HTML 转义并设置 CSP。强制口令覆盖所有面板出口，Compose 只向宿主机 loopback 发布端口。
 

@@ -41,7 +41,7 @@ export interface InboundMessage {
 
 export type TicketStatus = "pending" | "sending" | "sent" | "uncertain";
 
-/** 生图前缀路由的票据（第 2 阶段仍走票据回复，设计 §11）；ticket_id 与入站键相同。 */
+/** 旧版生图前缀路由留下的票据（只读：召回机器人旧回复时核对发出状态）；ticket_id 与入站键相同。 */
 export interface ReplyTicketRecord {
   ticket_id: string;
   self_id: string;
@@ -165,23 +165,12 @@ export interface Channel {
   status(): ChannelStatus;
   on<K extends keyof ChannelEvents>(event: K, listener: ChannelEvents[K]): this;
   off<K extends keyof ChannelEvents>(event: K, listener: ChannelEvents[K]): this;
-  /**
-   * 按票据回复原会话：群聊自动前置真实 at 段 + "\n"，私聊直接发；
-   * 幂等：sent 返回 already_sent=true；sending/uncertain 抛错且永不自动重试。
-   * text 1-4000 字符，纯文本（QQ 不渲染 Markdown）；images 0-4 张，base64:// 发送。
-   */
-  reply(ticket: string, text: string, imagePaths?: string[], opts?: { signal?: AbortSignal }): Promise<ReplyResult>;
   /** 文件作为独立 QQ 消息发送；调用者负责持久化幂等状态。 */
   uploadFile(type: ChatType, targetId: string, file: Buffer, name: string): Promise<{ file_id: string }>;
   /** 等待入站附件下载完成（恢复时补下载），返回最新的输入记录。 */
   prepareIncoming?(key: string): Promise<InboundRecord | null>;
-  /** 生图前缀路由：以入站记录开票（幂等），之后经 reply 回复。 */
-  openImageTicket(key: string): Promise<ReplyTicketRecord>;
-  /** 部署前遗留、不再处理的票据：结束为 uncertain 留作审计。 */
-  abandonTicket?(ticket: string): Promise<void>;
+  /** 旧票据（只读）；不存在返回 null。 */
   getTicket(ticket: string): Promise<ReplyTicketRecord | null>;
-  /** 列出仍为 pending 的票据（按 seq 升序，最多 limit 条，默认 200）；afterSeq 为分页游标（只取 seq 更大的），供启动时与派发索引对账 */
-  listPendingTickets(limit?: number, afterSeq?: number): Promise<ReplyTicketRecord[]>;
   /** 当前处于熔断的发送 scope（group:<id> / private:<qq> / global）；不支持发送规则的通道缺省。 */
   sendBreakers?(): import("./send-rules.js").SendBreaker[];
   /** 手动解除熔断；返回 false 表示该 scope 没有处于熔断。 */

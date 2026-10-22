@@ -16,14 +16,7 @@ for dir in "$DATA_DIR" "$WORKSPACE_DIR"; do
     exit 1
   fi
 done
-mkdir -p "$CODEX_HOME_DIR" "$DATA_DIR/images" "$DATA_DIR/files" "$DATA_DIR/tickets" "$DATA_DIR/prompts" "$DATA_DIR/incoming"
-
-# ComfyUI 本地生图工作流目录：缺失时从镜像内 /app/workflows 复制一份（已存在则绝不覆盖）
-WORKFLOWS_SRC="${WORKFLOWS_SRC:-/app/workflows}"
-if [ ! -d "$DATA_DIR/workflows" ] && [ -d "$WORKFLOWS_SRC" ]; then
-  cp -R "$WORKFLOWS_SRC" "$DATA_DIR/workflows.tmp.$$" && mv "$DATA_DIR/workflows.tmp.$$" "$DATA_DIR/workflows" \
-    && echo "entrypoint: seeded $DATA_DIR/workflows from $WORKFLOWS_SRC" >&2
-fi
+mkdir -p "$CODEX_HOME_DIR" "$DATA_DIR/images" "$DATA_DIR/files" "$DATA_DIR/prompts" "$DATA_DIR/incoming"
 
 # TOML 字符串值只允许安全字符，否则回退默认值
 toml_value() {
@@ -75,7 +68,6 @@ EFFORT="$(toml_value "${CODEX_REASONING_EFFORT:-high}" high CODEX_REASONING_EFFO
 WEB_SEARCH="$(toml_enum "${CODEX_WEB_SEARCH:-live}" live CODEX_WEB_SEARCH live cached disabled)"
 WEB_SEARCH_CONTEXT="$(toml_enum "${CODEX_WEB_SEARCH_CONTEXT:-low}" low CODEX_WEB_SEARCH_CONTEXT low medium high)"
 BROWSER="$(toml_enum "${CODEX_BROWSER:-playwright}" playwright CODEX_BROWSER playwright none)"
-IMAGE_GEN="$(toml_enum "${CODEX_IMAGE_GEN:-off}" off CODEX_IMAGE_GEN off on)"
 REMOTE_PLUGINS="$(toml_enum "${CODEX_REMOTE_PLUGINS:-off}" off CODEX_REMOTE_PLUGINS off on)"
 # MCP 工具调用审批：cs-agent 以非交互 codex exec（approval policy never）运行，需要审批的 MCP 调用会直接失败。
 # auto 按工具 annotations 决定，非只读（或未声明 readOnlyHint）的工具仍要求审批，非交互 exec 无法批准，
@@ -87,32 +79,19 @@ case "${QQ_CONTEXT_MAX_CHARS:-}" in
   ""|*[!0-9]*) CONTEXT_MAX_CHARS=2500 ;;
   *) CONTEXT_MAX_CHARS="$QQ_CONTEXT_MAX_CHARS" ;;
 esac
-# image_gen MCP：工具超时 = COMFY_TIMEOUT_SEC + 30（非数字回退 300）
-_ct="$(printf '%s' "${COMFY_TIMEOUT_SEC:-}" | sed 's/^0*//')"
-case "$_ct" in
-  ""|*[!0-9]*) _ct=300 ;;
-esac
-IMAGE_GEN_TOOL_TIMEOUT=$((_ct + 30))
-# 透传给 image_gen MCP 的环境变量（与 agent 主进程同一套 COMFY_* 配置）：只写已设置的；
-# 含双引号、反斜杠或非可打印字符的值不写入 TOML（告警跳过）
+# 透传给 MCP 的环境变量：只写已设置的；含双引号、反斜杠或非可打印字符的值不写入 TOML（告警跳过）
 toml_env_line() {
   eval "_v=\${$1:-}"
   [ -n "$_v" ] || return 0
   case "$_v" in
-    *'"'*|*'\'*) echo "entrypoint: WARNING $1 contains quotes or backslashes; not passed to image_gen" >&2; return 0 ;;
+    *'"'*|*'\'*) echo "entrypoint: WARNING $1 contains quotes or backslashes; not passed to MCP" >&2; return 0 ;;
   esac
   if [ -n "$(printf '%s' "$_v" | LC_ALL=C tr -d '[:print:]')" ]; then
-    echo "entrypoint: WARNING $1 contains non-printable characters; not passed to image_gen" >&2
+    echo "entrypoint: WARNING $1 contains non-printable characters; not passed to MCP" >&2
     return 0
   fi
   printf '%s = "%s"\n' "$1" "$_v"
 }
-IMAGE_GEN_ENV=""
-for _n in COMFY_MODE COMFYUI_URL COMFY_MCP_BIN COMFY_BIN COMFY_CHECKPOINT COMFY_WORKFLOW_FILE COMFY_PROMPT_NODE COMFY_QWEN_CACHE COMFY_TIMEOUT_SEC COMFY_LOOPBACK_PORT IMAGE_GEN_MCP_WAIT_SEC LOG_LEVEL; do
-  _line="$(toml_env_line "$_n")"
-  [ -n "$_line" ] && IMAGE_GEN_ENV="$IMAGE_GEN_ENV
-$_line"
-done
 ATTACH_ENV=""
 for _n in ATTACH_FILE_MAX_MB ATTACH_FILES_MAX ATTACH_FILE_DENY_EXT; do
   _line="$(toml_env_line "$_n")"
@@ -156,7 +135,7 @@ for _r in ${CODEX_WRITABLE_ROOTS:-$WORKSPACE_DIR,$DATA_DIR/prompts,$DATA_DIR/cod
 done
 IFS="$_old_ifs"
 PLAYWRIGHT_MCP_BIN="${PLAYWRIGHT_MCP_BIN:-/usr/local/bin/playwright-mcp}"
-# 浏览器 MCP 进程不受 codex 命令沙箱约束：阻止访问宿主机服务（ComfyUI 8188、NapCat 3000/3001、healthz）
+# 浏览器 MCP 进程不受 codex 命令沙箱约束：阻止访问宿主机服务（NapCat 3000/3001、healthz 等）
 # 与内网/链路本地地址。@playwright/mcp 0.0.83 语义：无协议的项变成 glob "*://<项>/**"，其中 * 匹配 [^/]*，
 # 所以 "10.*" 覆盖任意端口；"host" 只匹配无端口 URL，需另加 "host:*"。
 # 不是安全边界：不拦截重定向，也不拦截解析到内网 IP 的公网域名（见 DEPLOY.md 残余风险）。
@@ -184,12 +163,12 @@ CONFIG="$CODEX_HOME_DIR/config.toml"
 cat > "$CONFIG.tmp" <<TOML
 # 受管文件：由 entrypoint.sh 在每次容器启动时按环境变量重写（CODEX_MODEL / CODEX_REASONING_EFFORT /
 # CODEX_WEB_SEARCH / CODEX_WEB_SEARCH_CONTEXT / CODEX_BROWSER / CODEX_MCP_APPROVAL_MODE / QQ_CONTEXT_MAX_CHARS /
-# CODEX_PROVIDER / CODEX_MAGPIE_URL / CODEX_IMAGE_GEN / CODEX_REMOTE_PLUGINS；CODEX_PLUGIN_PRUNE 控制写完配置后的缓存清理）。
+# CODEX_PROVIDER / CODEX_MAGPIE_URL / CODEX_REMOTE_PLUGINS；CODEX_PLUGIN_PRUNE 控制写完配置后的缓存清理）。
 # 远程插件对 QQ 客服场景无用，默认关闭并清理 figma/gmail；其余已缓存插件仍会加载，全部清理设 CODEX_PLUGIN_PRUNE=all。
 # 不要手工修改——改动会在下次启动时被覆盖；请改 .env 后重启容器。不继承宿主机配置。
 # model_reasoning_effort 只是默认值：cs-agent 每轮在 turn/start 的 effort 字段按请求覆盖。
-# im / qq_context / image_gen 的线程令牌不写在这里：cs-agent 在 thread/start、thread/resume 的 config 里按线程注入
-# （mcp_servers.<名>.env.*）；身份、读取范围与生图目录由主进程在每次调用时按会话当前回合求出。
+# im / qq_context 的线程令牌不写在这里：cs-agent 在 thread/start、thread/resume 的 config 里按线程注入
+# （mcp_servers.<名>.env.*）；身份与读取范围由主进程在每次调用时按会话当前回合求出。
 model = "$MODEL"
 model_reasoning_effort = "$EFFORT"
 web_search = "$WEB_SEARCH"
@@ -235,21 +214,6 @@ env_key = "CODEX_MAGPIE_KEY"
 http_headers = { "x-openai-actor-authorization" = "cs-agent" }
 supports_websockets = false
 model_catalog_url = "$MAGPIE_URL/codex/models"
-TOML
-fi
-if [ "$IMAGE_GEN" = "on" ]; then
-  cat >> "$CONFIG.tmp" <<TOML
-
-# 生图（复用 agent 的生图实现）；mcp 模式经 agent 主进程的 127.0.0.1 loopback 转发访问 ComfyUI
-[mcp_servers.image_gen]
-command = "node"
-args = ["/app/dist/mcp/image-gen.js"]
-startup_timeout_sec = 10
-tool_timeout_sec = $IMAGE_GEN_TOOL_TIMEOUT
-default_tools_approval_mode = "$MCP_APPROVAL_MODE"
-
-[mcp_servers.image_gen.env]
-DATA_DIR = "$MCP_DATA_DIR"$IMAGE_GEN_ENV
 TOML
 fi
 # apps=false 始终写入：否则 codex 按登录的 ChatGPT 账号加载 Apps 连接器（Notion/GitHub/Drive/Gmail…），

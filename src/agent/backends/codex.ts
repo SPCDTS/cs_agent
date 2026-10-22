@@ -1,7 +1,7 @@
 /**
  * codex 后端：常驻 app-server 适配器（设计 §5、§14 第 3 步），实现 ThreadHost 的 ThreadAdapter。
  * - 线程：会话键 → codex 线程（CodexRunner 的映射与轮换）；进程代中首次使用时 thread/start 或 thread/resume，
- *   同时为该会话签发线程令牌，写入 im / qq_context / image_gen 的线程级 MCP 环境；重启后令牌作废、按需重新加载。
+ *   同时为该会话签发线程令牌，写入 im / qq_context 的线程级 MCP 环境；重启后令牌作废、按需重新加载。
  * - 回合簿记：线程上服务端的每个回合恰好判定一次种类，之后不再改判——
  *   user（本适配器开的：回合的首个条目是本输入的 userMessage，即其 clientId 等于 turn/start 的 clientUserMessageId——
  *   响应返回的 id 与开轮结果不确定时的认领都按这一条判定；响应返回的回合首个条目不是本输入（app-server 把输入插进了
@@ -24,8 +24,6 @@
  *   该回合须是宿主当前回合；子 agent 线程的调用、过期回合的调用一律拒绝。
  * - 停止：中止主回合与运行中的子 agent 回合，之后 STOP_WAKE_MS 内（直到下一次开轮）服务端开的唤醒回合判为 suppressed 并中止（§8.2）。
  * - 忙：有进行中的回合、子 agent 线程仍在运行或正在压缩时，后端切换须等待（busy）。
- * - 生图：image_gen 等待超时的任务留在会话目录的清单里，回合结束时按会话串行补收，每个任务以稳定键发一条系统消息
- *   （重试不重发），只移除处理过的任务（收取期间新追加的留给下一次）。
  * - 压缩：面板"压缩"在会话空闲时经同一 app-server 发 thread/compact/start；压缩期间服务端开的回合按首个条目判定
  *   （contextCompaction → compaction；其他 → wake；没有条目就结束 → compaction）。压缩锁持有到压缩回合结束（或掉线、超时）。
  */
@@ -42,32 +40,20 @@ import { RpcError } from "../codex/app-server/rpc.js";
 import { AppServerUnavailableError } from "../codex/app-server/supervisor.js";
 import { ThreadNotLoadedError, type ItemEvent, type ThreadItem, type TurnCompletedEvent, type UserInput } from "../codex/app-server/client.js";
 import type { ReasoningEffort, TicketSettings } from "./types.js";
-import { collectNewImages } from "../../media/gen/image-collect.js";
 import { attachmentDirs } from "../../media/attach-paths.js";
-import { imageTimeoutMs } from "../../media/gen/image-options.js";
-import { pendingCallDir, PendingImageMarkerError, quarantinePendingImages, readPendingImages, removePendingImages } from "../../media/gen/image-pending.js";
-import { recoverRemoteUploads, UnknownJobError, type ImageBackend } from "../../media/gen/image-gen.js";
-import { ingestImageEvents } from "../../media/gen/events.js";
-import { observeImages } from "../../media/gen/observed.js";
 import type { CallBinding, CallMeta, ThreadTokens } from "../../context/media-recall-server.js";
 import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome } from "../host/types.js";
 import type { PiTurns } from "./pi.js";
-import type { SendService } from "../send-service.js";
-import { IMAGE_SUCCESS_REPLY } from "../replies.js";
 
 export interface CodexBackendOptions {
   runner: Pick<CodexRunner, "client" | "supervisor" | "openThread" | "rotationDue" | "threadId" | "resetThread" | "recordTurnUsage" | "recordCompaction" | "workspaceOf">;
   tokens: Pick<ThreadTokens, "issue" | "revoke">;
-  /** ${DATA_DIR}/images：会话图片目录的根（须与 image_gen MCP 的 ${DATA_DIR}/images 一致） */
+  /** ${DATA_DIR}/images：会话图片目录的根（send_message 可发送其中的 Outbox 副本） */
   imagesDir: string;
   /** CODEX_REASONING_EFFORT；不在允许列表内时不传（沿用 config.toml）。函数形式每回合现读（运行时设置）。 */
   reasoningEffort?: string | (() => string | undefined);
   turns: PiTurns;
   owners?: OwnerIds | (() => OwnerIds);
-  /** 补收图片的发送（系统消息）；未接入时只记日志 */
-  sendService?: Pick<SendService, "system">;
-  imageBackend?: Pick<ImageBackend, "name" | "submit" | "collect" | "reconcile" | "clearReferences">;
-  imageTimeoutCapMs?: number;
   /** 工具调用等待回合事件（条目、宿主确认开轮）的上限，默认 5 秒 */
   callWaitMs?: number;
   /** turn/start 响应后等待该回合首个条目（判定是不是本输入）的上限，默认 3 秒；超时按并入处理（唤醒身份，更严格） */
@@ -144,8 +130,6 @@ export class CodexBackend implements ThreadAdapter {
   private readonly reports = new Map<string, (RunPerson | undefined)[]>();
   /** 已处理的 subAgentActivity 条目（started / completed 各以条目事件出现，去重；有界） */
   private readonly activities = new Set<string>();
-  /** 每个会话的补收图片串行 */
-  private readonly imageChains = new Map<ThreadKey, Promise<unknown>>();
   private readonly pending = new Set<Promise<unknown>>();
 
   constructor(private readonly opts: CodexBackendOptions) {
@@ -205,7 +189,7 @@ export class CodexBackend implements ThreadAdapter {
     }
     const token = this.opts.tokens.issue(threadKey);
     const threadId = await this.opts.runner.openThread(threadKey, { model,
-      mcpEnv: { im: { IM_TOKEN: token }, qq_context: { QQ_RECALL_TOKEN: token }, image_gen: { IMAGE_GEN_TOKEN: token } } });
+      mcpEnv: { im: { IM_TOKEN: token }, qq_context: { QQ_RECALL_TOKEN: token } } });
     this.threadIds.set(threadKey, threadId);
     this.keys.set(threadId, threadKey);
     return threadId;
@@ -464,9 +448,8 @@ export class CodexBackend implements ThreadAdapter {
         // 权限一律经 runRights（§7.3）：读全部只在 owner 私聊线程，唤醒回合按继承的人，求不出只有会话基础权限
         const rights = runRights(binding, this.owners());
         const access = rights.access === "all" ? { kind: "all" as const } : { kind: "scope" as const, scope: rights.access };
-        const images = binding.inputs.length ? this.opts.turns.records(binding.inputs.map(inboundKey => ({ inboundKey }))).flatMap(rec => rec.images) : [];
         return { ...binding, turnId: binding.turnId, access, workdir: this.opts.runner.workspaceOf(threadKey), session: threadId,
-          imageDir: attachmentDirs(path.dirname(this.opts.imagesDir), threadKey).attachDir, imageRefs: images.slice(-3) };
+          imageDir: attachmentDirs(path.dirname(this.opts.imagesDir), threadKey).attachDir };
       }
       if (Date.now() >= deadline) {
         throw new Error(codexTurnId ? "本回合已结束，工具调用不再有效" : "找不到这次调用的回合记录，拒绝");
@@ -638,8 +621,6 @@ export class CodexBackend implements ThreadAdapter {
       detail: { backend: "codex", thread_key: key, status: outcome.status, ...(outcome.error ? { reason: outcome.error } : {}) } });
     if (outcome.status === "completed") log.info("codex turn done", { thread: key, ms });
     else log.warn("codex turn ended", { thread: key, turn: turnId, status: outcome.status, error: outcome.error });
-    const dir = attachmentDirs(path.dirname(this.opts.imagesDir), key).attachDir;
-    await this.serialImages(key, () => this.lateImages(key, turnId, dir)).catch(error => log.warn("codex late images failed", { thread: key, error }));
     if (outcome.status !== "lost") {
       await this.opts.runner.recordTurnUsage(key, threadId, rec.startedAt, ticket, rec.model)
         .catch(error => log.warn("codex context usage failed", { thread: key, error }));
@@ -737,52 +718,9 @@ export class CodexBackend implements ThreadAdapter {
     return run;
   }
 
-  private serialImages<T>(threadKey: ThreadKey, work: () => Promise<T>): Promise<T> {
-    const run = (this.imageChains.get(threadKey) ?? Promise.resolve()).then(work);
-    const tail = run.then(() => undefined, () => undefined);
-    this.imageChains.set(threadKey, tail);
-    void tail.then(() => { if (this.imageChains.get(threadKey) === tail) this.imageChains.delete(threadKey); });
-    return run;
-  }
-
   private track(work: Promise<unknown>): void {
     const p = work.catch(error => log.warn("codex turn finish failed", { error })).finally(() => this.pending.delete(p));
     this.pending.add(p);
-  }
-
-  /**
-   * image_gen 等待超时只留下任务清单（prompt_id 已落盘）；回合结束时（按会话串行）按清单补收，每个任务以稳定键
-   * `<会话>:sys:img:<任务前缀>` 发一条系统消息（重复补收取回同一行，不重发），只移除这次处理过的任务。
-   */
-  private async lateImages(threadKey: ThreadKey, turnId: string, dir: string): Promise<void> {
-    // image_gen MCP 写在会话目录的旁路事件先入观测库。
-    await ingestImageEvents(dir, undefined, "turn:" + turnId);
-    let jobs: Awaited<ReturnType<typeof readPendingImages>>;
-    try { jobs = await readPendingImages(dir); }
-    catch (err) {
-      if (!(err instanceof PendingImageMarkerError)) throw err;
-      await quarantinePendingImages(dir).catch(() => undefined);
-      jobs = [];
-    }
-    if (!jobs.length) return;
-    const pending = jobs.filter(job => job.status !== "done");
-    for (const job of pending) {
-      let images: string[] = [];
-      try {
-        if (!job.prompt_id || !this.opts.imageBackend) throw new UnknownJobError("intent");
-        const callDir = await pendingCallDir(dir, job.callDir);
-        await observeImages(this.opts.imageBackend, "turn:" + turnId).collect(job.prompt_id, callDir, AbortSignal.timeout(Math.ceil(imageTimeoutMs(job.options, this.opts.imageTimeoutCapMs ?? 300_000))), job.options);
-        images = await collectNewImages(callDir, new Set());
-      } catch (err) {
-        log.warn("codex late image not collected", { thread: threadKey, prompt_id: job.prompt_id, error: err });
-      }
-      if (!this.opts.sendService) continue;
-      const binding = this.opts.turns.binding(threadKey);
-      await this.opts.sendService.system({ ...binding, turnId }, images.length ? IMAGE_SUCCESS_REPLY : "有图片生成超时未能发送", images.slice(0, 4),
-        { key: `${threadKey}:sys:img:${job.filenamePrefix}` });
-    }
-    if (this.opts.imageBackend) await recoverRemoteUploads(dir, this.opts.imageBackend).catch(() => undefined);
-    await removePendingImages(dir, new Set(jobs.map(job => job.filenamePrefix)));
   }
 }
 

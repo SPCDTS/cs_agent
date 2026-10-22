@@ -5,7 +5,7 @@ import { ReplyStore } from "../../src/qq/reply-store.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import { SendService, type SendBinding } from "../../src/agent/send-service.js";
 import { ContextStore } from "../../src/context/store.js";
-import { TRANSPARENT_PNG } from "../../src/media/gen/image-gen.js";
+import { TRANSPARENT_PNG } from "./helpers.js";
 import type { InboundMessage, TurnIdentity } from "../../src/channel/types.js";
 import { threadKeyOf } from "../../src/channel/ticket.js";
 import { DEFAULT_SEND_RULES, type SendRuleLimits } from "../../src/channel/send-rules.js";

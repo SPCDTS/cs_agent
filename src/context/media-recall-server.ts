@@ -10,7 +10,7 @@ import { abortable, type MediaRecall, type RecallResult } from "./media.js";
 
 /**
  * codex 的线程令牌（设计 §5.3）：每个会话线程一个令牌，经 thread/start、thread/resume 的 config 写进该线程的 MCP 环境，
- * 只证明"来自哪个会话线程"。身份、读取范围、发送地址与生图目录由网关在每次调用时按 MCP 请求的 `_meta`
+ * 只证明"来自哪个会话线程"。身份、读取范围与发送地址由网关在每次调用时按 MCP 请求的 `_meta`
  * （callId、x-codex-turn-metadata）从会话宿主的当前回合求出；调用不属于宿主当前回合（回合已结束、被取代、
  * 来自子 agent 线程）时网关拒绝——与第 2 阶段"回合租约须仍是宿主当前回合"同一保证。
  */
@@ -33,10 +33,8 @@ export interface CallBinding extends TurnBinding {
   workdir: string;
   /** codex 线程 id（内置生图 generated_images/<id> 可发送） */
   session: string;
-  /** 本会话的生图输出目录 ${DATA_DIR}/images/<会话> */
+  /** 本会话的图片目录 ${DATA_DIR}/images/<会话>（Outbox 副本，send_message 可发送） */
   imageDir: string;
-  /** 本轮输入的参考图（image_gen 允许列表） */
-  imageRefs: string[];
 }
 
 export interface ThreadGateway {
@@ -56,13 +54,11 @@ interface Lease {
 }
 export const RECALL_QUOTA_MESSAGE = "本轮召回次数已用完";
 
-/** image_gen / qq_context 每次调用取用的上下文（/context 端点）。 */
+/** qq_context 每次调用取用的上下文（/context 端点）。 */
 export interface CallContext {
   access: string;
   turn_id: string;
   session: string;
-  image_dir: string;
-  image_refs: string[];
 }
 
 /** 令牌只在主进程保存；同一会话重新签发（app-server 重启、线程重新加载）即作废旧令牌并中止其在途请求。 */
@@ -120,8 +116,7 @@ export class ThreadTokens {
 
   async context(token: string, meta: CallMeta): Promise<CallContext> {
     const { binding } = await this.bind(token, meta);
-    return { access: accessToString(binding.access), turn_id: binding.turnId, session: binding.session,
-      image_dir: binding.imageDir, image_refs: binding.imageRefs };
+    return { access: accessToString(binding.access), turn_id: binding.turnId, session: binding.session };
   }
 
   async auth(token: string, meta: CallMeta, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown) {

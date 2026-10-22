@@ -112,10 +112,10 @@ QQ bridge ──@消息──▶ Inbox ──▶ ThreadHost(会话键) ──▶
 
 ### 5.3 MCP 与令牌
 
-- `im`、`qq_context`、`image_gen` 三个 MCP 服务按线程启动。令牌改为**线程令牌**：`thread/start` / `thread/resume` 的 `config` 里写入 `mcp_servers.im.env.IM_TOKEN` 等，绑定 threadKey，线程存在期间有效，进程重启时重新签发。
+- `im`、`qq_context` 两个 MCP 服务按线程启动（原 `image_gen` 已随本地生图移除）。令牌改为**线程令牌**：`thread/start` / `thread/resume` 的 `config` 里写入 `mcp_servers.im.env.IM_TOKEN` 等，绑定 threadKey，线程存在期间有效，进程重启时重新签发。
   **已验证（2026-10-21，0.164.0-alpha.8）**：`thread/start` 的 `config` 用点号键（`{"mcp_servers.im.env.IM_TOKEN": "..."}`）即按线程生效；app-server 为每个线程单独起一个 MCP 进程（两个线程两个 pid、各自的 env），同一线程跨回合复用。MCP `tools/call` 请求带 `_meta.callId`（与 `mcpToolCall` 条目 id 相同，形如 `exec-<uuid>`）和 `_meta["x-codex-turn-metadata"]`（含 `session_id`、`thread_id`）。
 - 令牌只证明"来自哪个线程"；发送者身份、读取范围、目标授权由主进程在每次调用时从 ThreadHost 的当前状态求出（7.3），不再把 `QQ_ACCESS`、`IMAGE_TICKET_DIR` 烤进环境变量。
-- 生图输出与附件目录按线程：`/data/images/<threadKey>/`、`/data/files/<threadKey>/`，定期清理（保留 7 天）。
+- 图片（Outbox 副本）与附件目录按线程：`/data/images/<threadKey>/`、`/data/files/<threadKey>/`，定期清理（保留 7 天）。
 
 ### 5.4 崩溃与恢复
 
@@ -165,7 +165,7 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 
 ### 7.3 身份与授权
 
-**每个回合绑定一个人**，每次工具调用（发送与 target、召回与历史读取范围、生图参考图、定时、授权、技能写权限）都按这个人检查。权限分两层，在一处求出（`src/agent/host/identity.ts`：`base(threadKey, scope)` + `elevation(identity)` → `runRights`），各工具不再按回合类型或会话自行判断：
+**每个回合绑定一个人**，每次工具调用（发送与 target、召回与历史读取范围、定时、授权、技能写权限）都按这个人检查。权限分两层，在一处求出（`src/agent/host/identity.ts`：`base(threadKey, scope)` + `elevation(identity)` → `runRights`），各工具不再按回合类型或会话自行判断：
 
 - **会话基础权限**（任何回合都有）：读本会话范围、只发往本会话；没有 target、没有 `schedule_*`、没有 `auth_*`。
 - **人的权限**（只在确证时叠加）：owner 全权（target 不查授权表、技能写权限、交互身份有 `auth_*`；**读全部只在 owner 私聊线程**，在群里也只读本群——群线程历史对群里所有人可见，读进来的别处记录会被后来的人间接看到，见 7.5）；他人按授权表（send 授权开放 target，schedule 授权开放定时管理）。
@@ -230,9 +230,10 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 - 重叠判定：上一次运行的输入尚未 `done` 时跳过本次（沿用 skip 语义）。
 - 权限：创建者身份，无 `auth_*`（沿用）。
 
-## 11. 生图前缀路由
+## 11. 生图前缀路由（已移除）
 
-`奶龙:` 前缀走规则路由，不进 agent 线程，保持现有提交/收集/对账流程；状态从 `TicketDoc` 移到以 `inboundKey` 为键的 `cs.image-job` 文档；回复改走 Outbox（键 `<threadKey>:img:<inboundKey>`），去掉 `bridge.reply` 旧路径与 `self:<ticket>` 占位行。
+2026-10：本地 ComfyUI 生图整体移除，`奶龙:` 前缀路由随之取消。所有触发消息（包括以 `奶龙:` 开头的）都由 Inbox 作为普通输入投递给会话宿主；`Dispatcher`、`cs.image` 任务、`TicketDoc` / `DispatchDoc`、`bridge.reply` 旧路径、`generate_image` 工具与 `image_gen` MCP 均已删除。
+`qq-bridge.sqlite` 的 `tickets` 表只读保留（召回机器人旧回复时核对发出状态），不再写入；codex 自带的内置生图（imagegen，输出在 `/data/codex/generated_images`）不受影响。
 
 ## 12. 观测
 
@@ -283,6 +284,6 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 8. 按票据的目录：`/data/images|incoming|files/<ticket>`、`ticketsDir/<ticket>`。
 9. 定时运行的 `run_` 票据、`finish()` 按票据统计、各处 `origin === "scheduled"` 分支。
 10. 推理强度路由按入站消息快照（改为每轮输入时计算）。
-11. 消息库 `self:<ticket>` 占位行（生图路由）。
+11. 消息库 `self:<ticket>` 占位行（生图路由；已随生图路由移除，旧行只读保留）。
 12. 观测以票据为键：`events.ticket`、实时卡片、票据页、指标标签、`GrantsService.verify` 从票据行取身份。
-13. 生图路由的 `bridge.reply(ticket)` 旧路径。
+13. 生图路由的 `bridge.reply(ticket)` 旧路径（已删除）。

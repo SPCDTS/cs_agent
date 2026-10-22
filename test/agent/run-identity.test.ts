@@ -138,7 +138,7 @@ describe("唤醒回合继承派出者（pi）", () => {
     await r.idle();
     expect(r.texts("8")).toEqual(["转告"]);
     expect(seen[0]!.identity).toEqual({ kind: "wake", inherited: owner1 });
-    expect(seen[0]!.bound).toMatchObject({ identity: { kind: "wake", inherited: owner1 }, access: "group:7", senderIsOwner: true, auth: true, inputs: [], images: [] });
+    expect(seen[0]!.bound).toMatchObject({ identity: { kind: "wake", inherited: owner1 }, access: "group:7", senderIsOwner: true, auth: true, inputs: [] });
     expect((await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))!.children.w!.spawner)
       .toEqual({ turn: "user", as: owner1 });
   });
@@ -203,7 +203,7 @@ describe("唤醒回合继承派出者（pi）", () => {
     expect(results.length).toBeGreaterThanOrEqual(2);
     expect(bound.length).toBeGreaterThanOrEqual(2);
     // 读取范围、参考图、技能与授权都只是基础权限
-    for (const b of bound) expect(b).toMatchObject({ identity: { kind: "wake" }, access: "group:7", senderIsOwner: false, auth: false, inputs: [], images: [] });
+    for (const b of bound) expect(b).toMatchObject({ identity: { kind: "wake" }, access: "group:7", senderIsOwner: false, auth: false, inputs: [] });
     expect(bound.every(b => !("inherited" in b!.identity))).toBe(true);
   });
 

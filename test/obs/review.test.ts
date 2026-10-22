@@ -1,19 +1,16 @@
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, expect, it } from 'vitest';
 import { ObsStore } from '../../src/obs/store.js';
 import { Trace } from '../../src/shared/trace.js';
 import { Metrics } from '../../src/obs/metrics.js';
-import { redactText, registerSecrets } from '../../src/shared/redact.js';
+import { redactText } from '../../src/shared/redact.js';
 import { loadConfig } from '../../src/config.js';
 import { publicHealth, loadObsToken } from '../../src/obs/token.js';
-import { buildImageEnv } from '../../src/media/gen/image-gen.js';
 import { buildCodexEnv, CodexRunner } from '../../src/agent/codex/runner.js';
 import { fakeSpawn } from '../agent/codex-app-server/fake-app-server.js';
-import { ImageEventSpool, ingestImageEvents, IMAGE_EVENT_BYTES } from '../../src/media/gen/events.js';
 const clean: (()=>void)[]=[];
 afterEach(()=>{for(const fn of clean.splice(0).reverse())fn();});
 function rig(cap=500) {
@@ -33,12 +30,11 @@ it('口令原子发布仅记录一次，子进程白名单排除 OBS_TOKEN，健
   const tokens=await Promise.all(Array.from({length:4},()=>loadObsToken(dir,'',m=>logs.push(m))));
   expect(new Set(tokens).size).toBe(1);expect(logs).toEqual(['observability token generated at /data/obs-token']);
   expect(buildCodexEnv(dir,{OBS_TOKEN:'fake-secret',PATH:'fake-path'})).not.toHaveProperty('OBS_TOKEN');
-  expect(buildImageEnv({baseEnv:{OBS_TOKEN:'fake-secret',PATH:'path'},comfyUrl:'http://127.0.0.1',comfyBin:'fake'})).not.toHaveProperty('OBS_TOKEN');
   const fake=fakeSpawn();
   const runner=new CodexRunner({command:['codex'],codexHome:path.join(dir,'codex'),workspaceDir:path.join(dir,'ws'),threadsFile:path.join(dir,'threads.json'),sandbox:'read-only',spawn:fake.spawn,env:{OBS_TOKEN:'fake-secret'}});
   await runner.start();await runner.stop();
   expect(fake.calls[0]!.env).not.toHaveProperty('OBS_TOKEN');
-  const health=JSON.stringify(publicHealth({connected:true,degraded:true,comfy:{ok:false,error:'fake-secret',server:'http://private'},codex:{ok:true,error:'fake-secret'},threads:{owner:'thread-1'},pi:{count:0,keys:[]}}));
+  const health=JSON.stringify(publicHealth({connected:true,degraded:true,codex:{ok:true,error:'fake-secret',server:'http://private'},threads:{owner:'thread-1'},pi:{count:0,keys:[]}}));
   expect(health).not.toMatch(/fake-secret|private/);expect(health).toContain('thread-1');expect(health).toContain('"degraded":true');
 });
 it.each(['corrupt','unwritable','schema'] as const)('观测数据库 %s 初始化失败降级为无操作存储',async(kind)=>{
@@ -75,21 +71,4 @@ it('重复 Codex 进度保留首条、末条和更新次数',()=>{
   for(let i=0;i<1000;i++)trace.event('progress','tool:test',{status:'started',detail:{backend:'codex',call_id:'call',input:'first-'+i}});
   trace.event('progress','tool:test',{detail:{backend:'codex',call_id:'call',output:'done'}});
   const rows=store.events('progress');expect(rows).toHaveLength(3);expect(rows[0]!.detail_json).toContain('first-0');expect(JSON.parse(rows[1]!.detail_json).count).toBe(1000);expect(JSON.parse(rows[1]!.detail_json).input).toBe('first-999');
-});
-it('子进程旁路文件经主进程秘密表脱敏后入库并删除，且 schema 拒绝伪造终态',async()=>{
-  const {dir,store,trace}=rig();const ticket=path.join(dir,'images','child');mkdirSync(ticket,{recursive:true});
-  const secret='only-main-knows-this-secret';registerSecrets([secret]);
-  const event={ts:Date.now(),stage:'image:submit',status:'ok',duration_ms:3,detail:{prompt:'猫 '+secret,prompt_id:'p'}};
-  execFileSync(process.execPath,['-e',`require('node:fs').appendFileSync(process.argv[1],process.argv[2],'utf8')`,path.join(ticket,'obs-events.jsonl'),JSON.stringify(event)+'\n'+JSON.stringify({...event,stage:'reply_sent'})+'\n']);
-  await ingestImageEvents(ticket,trace);const rows=store.events('child');expect(rows).toHaveLength(1);expect(rows[0]!.ts).toBe(event.ts);expect(rows[0]!.detail_json).not.toContain(secret);expect(rows[0]!.detail_json).toContain('[已隐藏]');
-  expect(existsSync(path.join(ticket,'obs-events.jsonl'))).toBe(false);
-  expect(readFileSync(path.join(dir,'observability.sqlite-wal')).includes(Buffer.from(secret))).toBe(false);
-});
-it('MCP 事件写入最多 200 行 256 KiB，超大输入文件忽略并删除',async()=>{
-  const {dir,store,trace}=rig();const ticket=path.join(dir,'images','bounded');mkdirSync(ticket,{recursive:true});
-  const spool=new Trace(new ImageEventSpool(ticket));for(let i=0;i<400;i++)spool.event('ignored','image:collect',{detail:{i}});
-  const file=path.join(ticket,'obs-events.jsonl'),raw=readFileSync(file);expect(raw.length).toBeLessThanOrEqual(IMAGE_EVENT_BYTES);expect(raw.toString().trim().split('\n')).toHaveLength(200);
-  await ingestImageEvents(ticket,trace);expect(store.events('bounded')).toHaveLength(200);
-  writeFileSync(file,'x'.repeat(IMAGE_EVENT_BYTES+1));await ingestImageEvents(ticket,trace);expect(existsSync(file)).toBe(false);expect(store.events('bounded')).toHaveLength(200);
-  const denied=new Trace(new ImageEventSpool(path.join(dir,'missing','child')));expect(()=>denied.event('t','image:submit')).not.toThrow();
 });

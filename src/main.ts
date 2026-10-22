@@ -32,7 +32,6 @@ import { PiPromptLoader } from "./agent/pi-tools/prompt.js";
 import { SkillsLoader } from "./agent/pi-tools/skills.js";
 import { SkillsStore } from "./agent/skills-store.js";
 import { closeAgentHarnesses } from "./agent/shutdown.js";
-import { Dispatcher } from "./agent/dispatch.js";
 import { Inbox } from "./agent/inbox.js";
 import { ThreadHost } from "./agent/host/thread-host.js";
 import type { ThreadKey } from "./agent/host/types.js";
@@ -48,9 +47,6 @@ import { purgeCodexTrace } from "./agent/codex/trace.js";
 import { purgeGeneratedImages } from "./agent/codex/generated-images.js";
 import { CodexPromptStore } from "./agent/codex/prompt.js";
 import { CodexBasePromptStore } from "./agent/codex/base-prompt.js";
-import { createImageBackend } from "./media/gen/image-gen.js";
-import { isLoopbackUrl, startLoopbackProxy } from "./agent/loopback-proxy.js";
-import { createTasks } from "./agent/tasks.js";
 import { CodexBackend } from "./agent/backends/codex.js";
 import { PiBackend } from "./agent/backends/pi.js";
 import { ContextStore } from "./context/store.js";
@@ -70,11 +66,9 @@ async function main(): Promise<void> {
   log.info("starting cs-agent", {
     provider: cfg.AGENT_MODEL_PROVIDER,
     model: cfg.AGENT_MODEL_ID,
-    comfy_mode: cfg.COMFY_MODE,
     data_dir: cfg.DATA_DIR,
     agent_backend: cfg.AGENT_BACKEND,
     backend_overrides: cfg.backendOverrides,
-    image_prefixes: cfg.imagePrefixes,
   });
 
   // 数据卷必须可写（容器以 node 用户运行，宿主机目录权限不对时尽早给出明确错误）
@@ -153,25 +147,9 @@ async function main(): Promise<void> {
   }, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel);
   const recallServer = await startMediaRecallServer(threadTokens, cfg.MEDIA_RECALL_PORT);
 
-  // comfy-cli 只对 loopback 目标获取 object_info：非 loopback 的 COMFYUI_URL 经容器内转发
-  const comfyProxy =
-    cfg.COMFY_MODE === "mcp" && !isLoopbackUrl(cfg.COMFYUI_URL)
-      ? await startLoopbackProxy(cfg.COMFYUI_URL, cfg.COMFY_LOOPBACK_PORT)
-      : undefined;
-  const imageBackend = createImageBackend({
-    mode: cfg.COMFY_MODE,
-    comfyUrl: cfg.COMFY_MODE === "mcp" ? (comfyProxy?.url ?? cfg.COMFYUI_URL) : cfg.COMFYUI_URL,
-    mcpBin: cfg.COMFY_MCP_BIN,
-    comfyBin: cfg.COMFY_BIN,
-    timeoutMs: cfg.COMFY_TIMEOUT_SEC * 1000,
-    checkpoint: cfg.COMFY_CHECKPOINT || undefined,
-    workflowFile: cfg.COMFY_WORKFLOW_FILE || undefined,
-    promptNode: cfg.COMFY_PROMPT_NODE || undefined,
-  });
   const codex = new CodexRunner({
     command: [cfg.CODEX_BIN],
     provider: cfg.CODEX_PROVIDER, magpieKey: cfg.CODEX_MAGPIE_KEY,
-    imageGen: cfg.CODEX_IMAGE_GEN,
     mediaRecallPort: recallServer.port,
     contextUsage, model: cfg.CODEX_MODEL, contextWindow: cfg.CODEX_CONTEXT_WINDOW,
     codexHome: cfg.codexHome,
@@ -235,14 +213,6 @@ async function main(): Promise<void> {
       } } : {}),
     },
   });
-  // 生图前缀路由（第 2 阶段仍按票据）：派发 harness 上的生图任务。
-  const tasks = createTasks({
-    getBridge,
-    imageBackend,
-    imagesDir: cfg.imagesDir,
-    imageTimeoutCapMs: cfg.COMFY_TIMEOUT_SEC * 1000,
-    imageCollectExtensions: cfg.IMAGE_COLLECT_EXTENSIONS,
-  });
   // 定时运行（§10）：到点向来源会话的宿主投一条定时输入；先注册排程任务，再补齐服务与宿主，避免构造环。
   const canSchedule = grants.canSchedule.bind(grants);
   const scheduled = createScheduledRuntime({
@@ -257,7 +227,7 @@ async function main(): Promise<void> {
     launch: key => { void scheduled.launch(key).catch(error => log.error("scheduled run launch failed", { key, error })); },
   };
   const scheduleTask = createScheduleTask({ admitter: scheduledAdmitter });
-  const extension = createCsAgentExtension(tasks, [scheduleTask]);
+  const extension = createCsAgentExtension([scheduleTask]);
   const harness = dispatchHarness = await openHarness({ models, extension, dbFile: path.join(cfg.DATA_DIR, "agent.sqlite") }, ctx);
   schedules = new ScheduleService({ harness, task: scheduleTask, admitter: scheduledAdmitter, owner: cfg.owner, owners: cfg.owners, canSchedule });
 
@@ -275,17 +245,8 @@ async function main(): Promise<void> {
     incomingDownloadConcurrency: cfg.INCOMING_DOWNLOAD_CONCURRENCY,
     incomingDownloadDeadlineMs: cfg.INCOMING_DOWNLOAD_DEADLINE_SEC * 1000,
   });
-  const dispatcher = new Dispatcher({
-    harness,
-    bridge,
-    tasks,
-    concurrency: cfg.AGENT_CONCURRENCY,
-    imagePrefixes: cfg.imagePrefixes,
-    history: store,
-  });
-  // Inbox（§4.1）：触发消息按前缀分流，agent 消息投递给会话宿主；生图前缀以入站键开票后走派发器。
-  inbox = new Inbox({ getChannel: getBridge, getHost: () => host, owners: cfg.owners, imagePrefixes: cfg.imagePrefixes, store, dataDir: cfg.DATA_DIR,
-    image: async (message, key) => { await getBridge().openImageTicket(key); void dispatcher.dispatch(message, key); } });
+  // Inbox（§4.1）：触发消息一律投递给会话宿主。
+  inbox = new Inbox({ getChannel: getBridge, getHost: () => host, owners: cfg.owners, store, dataDir: cfg.DATA_DIR });
 
   // 恢复 pi 工具前，派发授权文档与 Channel 必须已就绪。
   const pi = await PiBackend.open({
@@ -294,13 +255,13 @@ async function main(): Promise<void> {
     dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     skillsDir: cfg.PI_SKILLS_DIR,
     channel: chatsChannel, mediaRecall,
-    thinkingLevel, store, instrumentation, contextUsage, imageBackend,
+    thinkingLevel, store, instrumentation, contextUsage,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
     attachmentLimits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT },
   });
   codexBackend = new CodexBackend({ runner: codex, tokens: threadTokens, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT,
-    turns: inbox, owners: cfg.owners, sendService, imageBackend, imageTimeoutCapMs: cfg.COMFY_TIMEOUT_SEC * 1000 });
+    turns: inbox, owners: cfg.owners });
   const router = new BackendRouter({ backends: { pi, codex: codexBackend }, settings: turnSettings, turns: inbox, owners: cfg.owners,
     backendFor: scope => { const current = settings.current(); return backendNameFor(scope, current.agentBackend, current.backendOverrides); } });
   const monitor = new TurnMonitor({ inbox, sendService, scheduled, getHost: () => host });
@@ -325,19 +286,18 @@ async function main(): Promise<void> {
   // 常驻 codex app-server：先启动（握手在后台进行），线程在首次开轮时加载。
   await codex.start();
   // 继续上次未完成的工作：宿主先恢复回合（pi 续跑；codex 丢失 → 中断提示），再接上 pi 事件流；
-  // 生图票据由派发器按 scope FIFO 接管；最后重新投递未送达的输入与在途的定时运行。
+  // 最后重新投递未送达的输入与在途的定时运行。
   const alerts = startAlerts({ enabled: () => settings.current().alertOwner, owner: cfg.owner, bridge, trace });
   await host.recover();
   await pi.attach();
   await sendService.reconcile().catch(error => log.warn("outbox reconciliation failed", { error }));
-  await dispatcher.recover();
   await schedules.start();
   harness.resume();
   await inbox.recover();
   await scheduled.recover();
   monitor.start();
 
-  // raw 先于 message 发出：入站消息先入库，派发器再写机器人"处理中"行
+  // raw 先于 message 发出：入站消息先入库，再投递给会话宿主
   bridge.on("raw", (msg) => {
     try {
       store.ingest(msg);
@@ -359,17 +319,7 @@ async function main(): Promise<void> {
   await bridge.start();
 
   // 自检（不阻塞启动）
-  const checks: Record<string, unknown> = { comfy: "pending", codex: "pending" };
-  imageBackend
-    .selfCheck()
-    .then((info) => {
-      checks.comfy = { ok: true, backend: info.backend, server: info.server, comfy_target: info.comfy_target, comfyui_version: info.comfyui_version, transparent: info.transparent };
-      log.info("comfy self-check ok", { info });
-    })
-    .catch((err) => {
-      checks.comfy = { ok: false, error: (err as Error).message };
-      log.warn("comfy self-check failed", { error: err });
-    });
+  const checks: Record<string, unknown> = { codex: "pending" };
   codex
     .readThreadIds()
     .then(async (threads) => {
@@ -383,12 +333,12 @@ async function main(): Promise<void> {
     })
     .catch((err) => (checks.codex = { ok: false, error: (err as Error).message }));
 
-  // 面板与指标的队列视图：会话宿主（进行中回合 / 等待槽位 / 各会话排队数）加生图派发器。
+  // 面板与指标的队列视图：会话宿主的进行中回合 / 等待槽位 / 各会话排队数。
   const queueStatus = () => {
-    const h = host.status(), image = dispatcher.status();
-    const scopes: Record<string, number> = { ...image.scopes };
-    for (const key of h.busy) scopes[key] = (scopes[key] ?? 0) + (host.thread(key as ThreadKey)?.pending.length ?? 0);
-    return { active: h.active + image.active, slots: cfg.AGENT_CONCURRENCY, waiting: h.waiting + image.waiting, scopes, busy: h.busy };
+    const h = host.status();
+    const scopes: Record<string, number> = {};
+    for (const key of h.busy) scopes[key] = host.thread(key as ThreadKey)?.pending.length ?? 0;
+    return { active: h.active, slots: cfg.AGENT_CONCURRENCY, waiting: h.waiting, scopes, busy: h.busy };
   };
   const codexStatus = async () => {
     const threads = await codex.readThreadIds();
@@ -451,7 +401,7 @@ async function main(): Promise<void> {
         ? { ...checks.codex, threads: await codex.readThreadIds().catch(() => null) }
         : checks.codex;
     const body = publicHealth({ connected: st.ws_connected, degraded: obs.degraded || !cfg.OBS_TOKEN,
-      comfy: checks.comfy, codex: codexCheck, threads: await codex.readThreadIds().catch(() => null),
+      codex: codexCheck, threads: await codex.readThreadIds().catch(() => null),
       pi: await pi.threadHealth().catch(() => null) });
     // 每条记录单独脱敏，避免通用脱敏器的数组上限截断超过 100 个 pi 会话。
     const health = { ...redact(body, 20_000) as Record<string, unknown>,
@@ -487,8 +437,6 @@ async function main(): Promise<void> {
     await metrics.stop().catch(() => undefined);
     trace.attach(undefined);
     obs.close();
-    await imageBackend.close().catch(() => undefined);
-    await comfyProxy?.close().catch(() => undefined);
     process.exit(0);
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

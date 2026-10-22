@@ -10,7 +10,7 @@ import { SendService } from "../../src/agent/send-service.js";
 import { DEFAULT_SEND_RULES, type SendRuleLimits } from "../../src/channel/send-rules.js";
 import type { InboundMessage } from "../../src/channel/types.js";
 import { ContextStore } from "../../src/context/store.js";
-import { TRANSPARENT_PNG } from "../../src/media/gen/image-gen.js";
+import { TRANSPARENT_PNG } from "./helpers.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import { ReplyStore } from "../../src/qq/reply-store.js";
 import { tmp } from "./helpers.js";

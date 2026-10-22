@@ -21,8 +21,7 @@ writeFileSync("/data/secret.txt", "SYSTEM_SECRET");
 writeFileSync("/data/codex/trace/other.json", "OTHER_SCOPE");
 writeFileSync("/etc/codex/requirements.toml", '[permissions.filesystem]\ndeny_read=["/data/secret.txt"]\n');
 writeFileSync("/data/codex/AGENTS.md", "GLOBAL_GUIDANCE");
-// runner 每轮注入 IMAGE_REFS；给它一个禁用的合法 MCP 传输，避免连接任何生图服务。
-writeFileSync("/data/codex/config.toml", '[sandbox_workspace_write]\nwritable_roots=["/workspace","/data/prompts","/data/workflows"]\nnetwork_access=true\n\n[mcp_servers.image_gen]\ncommand="node"\nargs=["--version"]\nenabled=false\n');
+writeFileSync("/data/codex/config.toml", '[sandbox_workspace_write]\nwritable_roots=["/workspace","/data/prompts","/data/workflows"]\nnetwork_access=true\n');
 writeFileSync("/workspace/group_7/AGENTS.md", "LOCAL_GUIDANCE");
 symlinkSync("/workspace/group_8", "/workspace/group_7/other");
 const env = { ...process.env, CODEX_HOME: "/data/codex" };

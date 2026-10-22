@@ -90,7 +90,7 @@ export interface HostCallbacks {
   onActivity(threadKey: ThreadKey): void;
 }
 
-/** 工具调用（发送、召回、生图、定时、授权）取用的本轮身份（§7.3）；契约定义在通道层，工具与通道共用。 */
+/** 工具调用（发送、召回、定时、授权）取用的本轮身份（§7.3）；契约定义在通道层，工具与通道共用。 */
 export type { RunPerson, TurnIdentity } from "../../channel/types.js";
 import type { RunPerson, TurnIdentity } from "../../channel/types.js";
 

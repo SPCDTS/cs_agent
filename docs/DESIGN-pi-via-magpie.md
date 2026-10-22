@@ -13,7 +13,7 @@
 ## 1. 目标与非目标
 
 目标：pi 后端（含衰老摘要）的模型调用全部经宿主机 magpie 出站，复用 `CODEX_MAGPIE_URL` / `CODEX_MAGPIE_KEY`；`AGENT_MODEL_ID` 可以是 key 开放的任一 magpie 模型（`deepseek/deepseek-flash`、`codex/gpt-6.1-sol`、…）。
-非目标：联网检索工具改道（magpie 不代理）；pi 的 ComfyUI 生图；仪表盘读 magpie 用量。
+非目标：联网检索工具改道（magpie 不代理）；pi 的 ComfyUI 生图（2026-10 已移除）；仪表盘读 magpie 用量。
 
 ## 2. 方案
 

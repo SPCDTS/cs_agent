@@ -1,8 +1,8 @@
 import { mkdirSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { collectNewImages, listFiles } from "../../src/media/gen/image-collect.js";
-import { tmp } from "./helpers.js";
+import { collectNewImages, listFiles } from "../../src/media/image-collect.js";
+import { tmp } from "../agent/helpers.js";
 
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",

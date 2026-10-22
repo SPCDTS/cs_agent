@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { attachmentName, DEFAULT_ATTACHMENT_LIMITS, readAttachmentData, readFileAttachments, registerFileAttachment, registerImageAttachment } from "../../src/media/attach.js";
-import { collectNewImages } from "../../src/media/gen/image-collect.js";
+import { collectNewImages } from "../../src/media/image-collect.js";
 import { MAX_IMAGE_BYTES } from "../../src/media/limits.js";
 import { loadConfig } from "../../src/config.js";
 
@@ -169,8 +169,8 @@ describe("附件登记", () => {
   });
 
   it("配置默认值与显式覆盖", () => {
-    expect(loadConfig({})).toMatchObject({ CODEX_IMAGE_GEN: "off", ATTACH_FILE_MAX_MB: 20, ATTACH_FILES_MAX: 3, ATTACH_FILE_DENY_EXT: DEFAULT_ATTACHMENT_LIMITS.denyExtensions });
+    expect(loadConfig({})).toMatchObject({ ATTACH_FILE_MAX_MB: 20, ATTACH_FILES_MAX: 3, ATTACH_FILE_DENY_EXT: DEFAULT_ATTACHMENT_LIMITS.denyExtensions });
     expect(loadConfig({ ATTACH_FILE_MAX_MB: "5", ATTACH_FILES_MAX: "2", ATTACH_FILE_DENY_EXT: ".ZIP, .Exe" })).toMatchObject({ ATTACH_FILE_MAX_MB: 5, ATTACH_FILES_MAX: 2, ATTACH_FILE_DENY_EXT: [".zip", ".exe"] });
-    expect(() => loadConfig({ CODEX_IMAGE_GEN: "invalid" })).toThrow();
+    expect(() => loadConfig({ ATTACH_FILES_MAX: "invalid" })).toThrow();
   });
 });

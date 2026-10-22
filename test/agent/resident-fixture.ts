@@ -24,7 +24,6 @@ import type { InboundMessage } from "../../src/channel/types.js";
 import { ContextStore } from "../../src/context/store.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import type { ReplyStore } from "../../src/qq/reply-store.js";
-import { TRANSPARENT_PNG, type ImageBackend } from "../../src/media/gen/image-gen.js";
 import { CodexRunner } from "../../src/agent/codex/runner.js";
 import { startMediaRecallServer, ThreadTokens, type CallMeta } from "../../src/context/media-recall-server.js";
 import { sendViaLoopback } from "../../src/mcp/im-server.js";
@@ -128,14 +127,6 @@ export async function residentRig(options: ResidentOptions = {}) {
     allowUsers: ["5", "6", "7"], owners, allowGroups: ["7", "8"], groupMentions: true, dataDir: dir,
     imageRoot: path.join(dir, "images") }, { client: { call } });
   const history = new ContextStore(dir);
-  const imageBackend = {
-    name: "fake-comfy", submit: vi.fn(async () => "image-job"),
-    collect: vi.fn(async (_id: string, outDir: string) => {
-      await fs.mkdir(outDir, { recursive: true }); const file = path.join(outDir, "result.png");
-      await fs.writeFile(file, TRANSPARENT_PNG); return [file];
-    }),
-    reconcile: vi.fn(async () => ({ images: [] as string[] })), clearReferences: vi.fn(async () => {}),
-  } satisfies Pick<ImageBackend, "name" | "submit" | "collect" | "reconcile" | "clearReferences">;
   const script = options.codex ?? new CodexScript();
   const codexSpawn = fakeSpawn(script.handlers);
 
@@ -160,7 +151,7 @@ export async function residentRig(options: ResidentOptions = {}) {
     harness = await Harness.open(await openNodeSqliteStorage(path.join(dir, "agent.sqlite")), { registry: createRegistry(), models: createModels() }, context);
     if (options.contextUsage) contextUsage = new ContextUsageStore(dir);
     pi = await PiBackend.open({ sendService, grants, turns: inbox, owners, dataDir: dir, workspaceDir: options.workspaceDir ?? path.join(dir, "codex-work"),
-      models, model: { provider: model.provider, modelId: model.id }, thinkingLevel: "off", store: history, imageBackend,
+      models, model: { provider: model.provider, modelId: model.id }, thinkingLevel: "off", store: history,
       subagent: options.subagent ?? { maxConcurrent: 3 },
       ...(options.skillsDir !== undefined ? { skillsDir: options.skillsDir } : {}),
       ...(options.mediaRecall ? { mediaRecall: options.mediaRecall } : {}),
@@ -177,7 +168,7 @@ export async function residentRig(options: ResidentOptions = {}) {
       sandbox: "workspace-write", mediaRecallPort: recallServer.port, spawn: codexSpawn.spawn,
       supervisor: { backoffInitialMs: 5, backoffMaxMs: 20, readyTimeoutMs: 5_000 } });
     await codexRunner.start();
-    codex = new CodexBackend({ runner: codexRunner, tokens, imagesDir: path.join(dir, "images"), turns: inbox, owners, sendService, imageBackend,
+    codex = new CodexBackend({ runner: codexRunner, tokens, imagesDir: path.join(dir, "images"), turns: inbox, owners,
       callWaitMs: options.callWaitMs ?? 1_000 });
     const settings = async (scope: string, _msg?: unknown, forced?: BackendName): Promise<TicketSettings> =>
       ({ backend: forced ?? backendOf(scope), codexReasoningEffort: "high", ...options.settings?.(scope) });
@@ -199,7 +190,7 @@ export async function residentRig(options: ResidentOptions = {}) {
   });
 
   const r = {
-    dir, bridge, history, grants, sendService, inbox, imageBackend, script, codexSpawn, tokens, sent, faux, brain, owners, model, call,
+    dir, bridge, history, grants, sendService, inbox, script, codexSpawn, tokens, sent, faux, brain, owners, model, call,
     get codexRunner() { return codexRunner; },
     get contextUsage() { return contextUsage; },
     get harness() { return harness; }, get host() { return host; }, get pi() { return pi; }, get codex() { return codex; }, get monitor() { return monitor; },

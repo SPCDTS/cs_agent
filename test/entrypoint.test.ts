@@ -30,12 +30,11 @@ function runEntrypointIn(
   for (const key of Object.keys(inheritedEnv)) {
     if (["CODEX_PROVIDER", "CODEX_MAGPIE_URL", "CODEX_MAGPIE_KEY", "CODEX_MODEL"].includes(key.toUpperCase())) delete inheritedEnv[key];
   }
-  delete inheritedEnv.CODEX_IMAGE_GEN;
   delete inheritedEnv.CODEX_REMOTE_PLUGINS;
   delete inheritedEnv.CODEX_PLUGIN_PRUNE;
   const r = spawnSync("sh", [posix(script), ...args], {
     env: {
-      ...inheritedEnv, DATA_DIR: shPath(data), WORKSPACE_DIR: shPath(ws), WORKFLOWS_SRC: "/nonexistent",
+      ...inheritedEnv, DATA_DIR: shPath(data), WORKSPACE_DIR: shPath(ws),
       CODEX_REQUIREMENTS_FILE: shPath(path.join(dir, "etc-codex", "requirements.toml")), ...env,
     },
     encoding: "utf8",
@@ -363,20 +362,6 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(r.stderr).toContain("cannot write");
   });
 
-  it("seeds DATA_DIR/workflows from WORKFLOWS_SRC once and never overwrites", () => {
-    const src = tmp("cs-wf-");
-    writeFileSync(path.join(src, "wf.json"), "{\"v\":1}");
-    const dir = tmp("cs-entry-");
-    const data = path.join(dir, "data");
-    const env = { WORKFLOWS_SRC: posix(src) };
-    runEntrypointIn(dir, env);
-    expect(readFileSync(path.join(data, "workflows", "wf.json"), "utf8")).toBe("{\"v\":1}");
-    writeFileSync(path.join(data, "workflows", "wf.json"), "edited by operator");
-    writeFileSync(path.join(src, "wf.json"), "{\"v\":2}");
-    runEntrypointIn(dir, env);
-    expect(readFileSync(path.join(data, "workflows", "wf.json"), "utf8")).toBe("edited by operator");
-  });
-
   it("drops --sandbox only when PLAYWRIGHT_NO_SANDBOX=1", () => {
     const binDir = tmp("cs-pwbin-");
     const bin = path.join(binDir, "playwright-mcp");
@@ -415,53 +400,19 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(bad.stderr).toContain("invalid value 'never' for CODEX_MCP_APPROVAL_MODE");
   });
 
-  it.each([undefined, "off", "", "invalid", 'on"\nx = 1'])("默认或无效开关不注册 image_gen：%j", value => {
-    const r = runEntrypoint(value === undefined ? {} : { CODEX_IMAGE_GEN: value });
+  it("不再注册 image_gen：旧的 CODEX_IMAGE_GEN=on 与 COMFY_* 被忽略", () => {
+    const r = runEntrypoint({ CODEX_IMAGE_GEN: "on", COMFYUI_URL: "http://host.docker.internal:8188", COMFY_TIMEOUT_SEC: "240" });
     expect(r.status).toBe(0);
-    expect(parse(r.toml)["[mcp_servers.image_gen]"]).toBeUndefined();
-    expect(parse(r.toml)["[mcp_servers.image_gen.env]"]).toBeUndefined();
+    expect(r.toml).not.toMatch(/image_gen|COMFY/);
   });
 
   it("透传附件限制与工作区根到 qq_context", () => {
     const r = runEntrypoint({ ATTACH_FILE_MAX_MB: "5", ATTACH_FILES_MAX: "2", ATTACH_FILE_DENY_EXT: ".zip,.exe" });
     expect(r.status).toBe(0);
     expect(parse(r.toml)).toMatchObject({ "mcp_servers.qq_context.env.ATTACH_FILE_MAX_MB": '"5"', "mcp_servers.qq_context.env.ATTACH_FILES_MAX": '"2"', "mcp_servers.qq_context.env.ATTACH_FILE_DENY_EXT": '".zip,.exe"', "mcp_servers.qq_context.env.WORKSPACE_DIR": `"${r.dataDir.replace(/data$/, "ws")}"` });
-  });
-
-  it("writes the image_gen MCP section with COMFY_* passthrough, timeout and approval mode", () => {
-    const r = runEntrypoint({
-      CODEX_IMAGE_GEN: "on", COMFY_QWEN_CACHE: "true", COMFY_MODE: "mcp", COMFYUI_URL: "http://host.docker.internal:8188", COMFY_TIMEOUT_SEC: "240", IMAGE_GEN_MCP_WAIT_SEC: "45",
-      COMFY_WORKFLOW_FILE: "/data/workflows/qwen-image-2.1-turbo-api.json", COMFY_PROMPT_NODE: "4",
-      COMFY_MCP_BIN: "/opt/comfy/bin/comfy-mcp", COMFY_CHECKPOINT: 'bad"value', CODEX_MCP_APPROVAL_MODE: "auto",
-    });
-    expect(r.status).toBe(0);
-    const t = parse(r.toml);
-    expect(t).toMatchObject({
-      "[mcp_servers.image_gen]": "",
-      "mcp_servers.image_gen.command": '"node"',
-      "mcp_servers.image_gen.args": '["/app/dist/mcp/image-gen.js"]',
-      "mcp_servers.image_gen.startup_timeout_sec": "10",
-      "mcp_servers.image_gen.tool_timeout_sec": "270",
-      "mcp_servers.image_gen.default_tools_approval_mode": '"auto"',
-      "mcp_servers.image_gen.env.DATA_DIR": `"${r.dataDir}"`,
-      "mcp_servers.image_gen.env.COMFY_QWEN_CACHE": '"true"',
-      "mcp_servers.image_gen.env.COMFY_MODE": '"mcp"',
-      "mcp_servers.image_gen.env.COMFYUI_URL": '"http://host.docker.internal:8188"',
-      "mcp_servers.image_gen.env.COMFY_TIMEOUT_SEC": '"240"',
-      "mcp_servers.image_gen.env.IMAGE_GEN_MCP_WAIT_SEC": '"45"',
-      "mcp_servers.image_gen.env.COMFY_WORKFLOW_FILE": '"/data/workflows/qwen-image-2.1-turbo-api.json"',
-      "mcp_servers.image_gen.env.COMFY_PROMPT_NODE": '"4"',
-      "mcp_servers.image_gen.env.COMFY_MCP_BIN": '"/opt/comfy/bin/comfy-mcp"',
-    });
-    // IMAGE_TICKET_DIR 每轮以 -c 注入，不写进受管文件；带引号的值不写入 TOML
-    expect(r.toml).not.toMatch(/^IMAGE_TICKET_DIR/m);
-    expect(r.toml).not.toMatch(/^IMAGE_REFS/m);
-    expect(t["mcp_servers.image_gen.env.COMFY_CHECKPOINT"]).toBeUndefined();
-    expect(r.stderr).toContain("COMFY_CHECKPOINT contains quotes or backslashes");
-  });
-
-  it("image_gen tool timeout falls back to 300+30 for a non-numeric COMFY_TIMEOUT_SEC", () => {
-    const t = parse(runEntrypoint({ CODEX_IMAGE_GEN: "on", COMFY_TIMEOUT_SEC: "abc" }).toml);
-    expect(t["mcp_servers.image_gen.tool_timeout_sec"]).toBe("330");
+    // 带引号的值不写入 TOML，告警跳过
+    const quoted = runEntrypoint({ ATTACH_FILE_DENY_EXT: '.zip"x' });
+    expect(parse(quoted.toml)["mcp_servers.qq_context.env.ATTACH_FILE_DENY_EXT"]).toBeUndefined();
+    expect(quoted.stderr).toContain("ATTACH_FILE_DENY_EXT contains quotes or backslashes");
   });
 });

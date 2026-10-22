@@ -15,7 +15,6 @@ import { CodexSessionAdapter } from './sessions/codex-adapter.js';
 import { PiSessionAdapter } from './sessions/pi-adapter.js';
 import { createSessionRoutes, sessionJson, type SessionAdapters } from './sessions/http.js';
 import { createMemoryRoutes } from './memory/http.js';
-import { loadImage } from '../media/limits.js';
 import { trace as defaultTrace } from '../shared/trace.js';
 import { summarize, type LiveMessage } from './live.js';
 import { formatBackendOverrides, SETTINGS_TICKET } from '../agent/settings.js';
@@ -24,7 +23,7 @@ import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
 import type { ContextUsage } from '../shared/format.js';
 import { empty, page } from './ui/html.js';
 import type { DashboardOptions } from './dashboard-types.js';
-import { equal, imageFile, readText, agentMdRevision, AGENT_MD_MAX_BYTES } from './dashboard-io.js';
+import { equal, readText, agentMdRevision, AGENT_MD_MAX_BYTES } from './dashboard-io.js';
 import { createDashboardPost } from './dashboard-post.js';
 import { createDashboardPages } from './ui/dashboard-pages.js';
 import { asContextUsageEvent } from './context-turns.js';
@@ -104,7 +103,7 @@ export function createDashboard(opts: DashboardOptions) {
     } },
     config, csrf, agentMd, agentsMd, api,
     contextResult: (scope, query) => callQQContextTool({access:scope?{kind:'scope',scope}:{kind:'all'},openStore:()=>opts.context,maxChars:config.QQ_CONTEXT_MAX_CHARS},query?'qq_search':'qq_recent',query?{query,days:180,limit:20}:{limit:30}),
-    isThreadKey, summarize, imageFile, readText, agentMdRevision, formatBackendOverrides,
+    isThreadKey, summarize, readText, agentMdRevision, formatBackendOverrides,
     reasoningEfforts: REASONING_EFFORTS, agentMdMaxBytes: AGENT_MD_MAX_BYTES, settingsTicket: SETTINGS_TICKET,
   });
   const schedulePanel = createSchedulePanel({ service: opts.schedules, owner: config.owner, csrf, context: opts.context });
@@ -253,15 +252,6 @@ export function createDashboard(opts: DashboardOptions) {
       for (const usage of usageList()) send(usage);
       const off = opts.live?.subscribe(m => { if (m.type === 'context') send(m.usage); });
       if (off) res.on('close', off); return;
-    }
-    if (url.pathname.startsWith('/images/')) {
-      try {
-        const segments = (req.url ?? '').split('?')[0]!.slice('/images/'.length).split('/').map(decodeURIComponent);
-        const file = await imageFile(config.imagesDir,segments);
-        const bytes = loadImage(file, config.imagesDir);
-        const ext=path.extname(file).toLowerCase();
-        res.writeHead(200,{'Content-Type':ext==='.jpg'||ext==='.jpeg'?'image/jpeg':'image/'+ext.slice(1)}).end(bytes);
-      } catch { res.writeHead(404).end('图片不存在'); } return;
     }
     // 旧 /codex、/pi 页并入 /agents/*（设计 §7）；/codex/agents-md 与重置 POST 保持原路径。
     if (url.pathname === '/codex' || url.pathname === '/pi') { res.writeHead(303, { Location: `/agents${url.pathname}/sessions` }).end(); return; }

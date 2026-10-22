@@ -3,7 +3,7 @@ import { expect, it } from "vitest";
 import { sendFixture } from "../agent/send-fixture.js";
 import { mediaFixture } from "../context/media-fixture.js";
 import { promises as fs } from "node:fs";
-import { TRANSPARENT_PNG } from "../../src/media/gen/image-gen.js";
+import { TRANSPARENT_PNG } from "../agent/helpers.js";
 import { resolveAttachmentDir } from "../../src/media/attach-paths.js";
 import type { CallBinding } from "../../src/context/media-recall-server.js";
 import { imRig } from "./im-fixture.js";
@@ -11,7 +11,7 @@ import { imRig } from "./im-fixture.js";
 async function setup() {
   const f = sendFixture();
   const current: { binding: CallBinding } = { binding: { ...f.binding, turnId: "t1", session: "thr-1",
-    imageDir: path.join(f.dir, "images", "group_7"), imageRefs: [] } };
+    imageDir: path.join(f.dir, "images", "group_7") } };
   const rig = await imRig(f.threadKey, {
     // 网关按会话当前回合求本次调用的绑定（测试中即 current）；调用键为 MCP 的 _meta.callId。
     resolve: () => current.binding,

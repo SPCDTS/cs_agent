@@ -18,14 +18,13 @@ import { defineExtension, defineTool, hook, section, ToolTask, GenerationTask, C
 import { parseAccess } from "../../context/access.js";
 import type { ContextStore } from "../../context/store.js";
 import { callQQContextTool } from "../../context/qq-context-tool.js";
-import { imageTool, type PiImageBackend } from "./images.js";
 import { traceKey, type PiCallBinding } from "./request.js";
 import { PiPromptLoader } from "./prompt.js";
 import { ProjectContextLoader } from "./project-context.js";
 import { SkillsLoader } from "./skills.js";
 import { DeepSeekWeb } from "./web.js";
 
-export const PI_WORKSPACE_RULE = "当前目录就是你的工作区，文件跨回合保留。普通文件一律用相对路径写在这里，不要尝试其他目录。bash 的 /tmp 每条命令结束即清空，文件工具也不能写入 /tmp；图片工具和有权限的技能操作使用各自指定的目录。";
+export const PI_WORKSPACE_RULE = "当前目录就是你的工作区，文件跨回合保留。普通文件一律用相对路径写在这里，不要尝试其他目录。bash 的 /tmp 每条命令结束即清空，文件工具也不能写入 /tmp；有权限的技能操作使用各自指定的目录。";
 export const PI_SUBAGENT_RULE = "耗时较长的任务（预计超过几分钟，或需要大量搜索、下载、批量处理）交给子 agent 在后台做：先用 send_message 简短告诉用户已经开始，用 subagent 派出后立即结束本轮，不要等待或反复查看。收到“[子 agent 完成]”或“[子 agent 失败]”后，把结果整理成结论用 send_message 发给用户。很快能做完的事直接做，不要派子 agent。";
 
 export interface PiToolsOptions {
@@ -37,7 +36,6 @@ export interface PiToolsOptions {
   /** 空值或未设置使用 dataDir/skills；off 禁用技能目录。 */
   skillsDir?: string;
   store: ContextStore;
-  imageBackend: PiImageBackend;
   getHarness: () => Harness;
   web?: DeepSeekWeb;
   maxContextChars?: number;
@@ -70,7 +68,6 @@ export function createPiExtension(opts: PiToolsOptions) {
     started.set(id, Date.now());
   };
   const recall = recallTool(opts.binding, opts.mediaRecall);
-  const image = imageTool(opts.dataDir, opts.imageBackend, opts.binding, opts.store);
   const web = opts.web ?? new DeepSeekWeb();
   const prompt = new PiPromptLoader(opts.dataDir);
   const projectContext = new ProjectContextLoader(opts);
@@ -141,7 +138,7 @@ export function createPiExtension(opts: PiToolsOptions) {
           detail: BUILTIN_TOOLS.has(call.name) ? { ...builtinSummary(call),
             exit_code: typeof exitCode === "number" ? exitCode : null,
             failure: result.isError ? diagnosticFailure(result, "local") : undefined,
-          } : { backend: "pi", failure: result.isError ? failures.get(api.taskId) ?? diagnosticFailure(result, call.name === "generate_image" ? "comfy" : call.name === "qq_image" ? "media_recall" : call.name.startsWith("qq_") ? "qq_context" : "deepseek") : undefined, output: result, error: result.isError ? result.output?.map(c => c.type === "text" ? c.text : "").join("\n") : undefined } });
+          } : { backend: "pi", failure: result.isError ? failures.get(api.taskId) ?? diagnosticFailure(result, call.name === "qq_image" ? "media_recall" : call.name.startsWith("qq_") ? "qq_context" : "deepseek") : undefined, output: result, error: result.isError ? result.output?.map(c => c.type === "text" ? c.text : "").join("\n") : undefined } });
         failures.delete(api.taskId);
         started.delete(api.taskId);
         return undefined;
@@ -165,7 +162,6 @@ export function createPiExtension(opts: PiToolsOptions) {
         query: Type.String(), days: Type.Optional(Type.Integer({ minimum: 1, maximum: 180 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
       }, { additionalProperties: false })),
       history("qq_message", "读取本次授权范围的一条消息全文及最多三层引用链。", Type.Object({ message_id: Type.String() }, { additionalProperties: false })),
-      defineTool({ ...image, execute: (args, api, context) => boundary(api.taskId,"comfy",async () => image.execute(args,api,context)) }),
     ],
   });
 }

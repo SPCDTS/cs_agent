@@ -74,12 +74,6 @@ describe("model config defaults", () => {
     expect(loadConfig({ QQ_ALLOW_USERS: "*" }).owner).toBeUndefined();
     expect(() => loadConfig({ CODEX_WEB_SEARCH: "always" })).toThrow(/CODEX_WEB_SEARCH/);
     expect(() => loadConfig({ HISTORY_SUMMARY_HOUR: "24" })).toThrow(/HISTORY_SUMMARY_HOUR/);
-    expect(c.COMFY_WORKFLOW_FILE).toBe("");
-    expect(c.COMFY_QWEN_CACHE).toBe(false);
-    expect(loadConfig({ COMFY_QWEN_CACHE: "true" }).COMFY_QWEN_CACHE).toBe(true);
-    expect(loadConfig({ COMFY_WORKFLOW_FILE: "/app/workflows/qwen-image-2.1-turbo-api.json" }).COMFY_WORKFLOW_FILE).toBe(
-      "/app/workflows/qwen-image-2.1-turbo-api.json",
-    );
     expect(c.CODEX_SANDBOX_NETWORK).toBe(true);
     expect(c.CODEX_WRITABLE_ROOTS).toBe("/workspace,/data/prompts");
   });
@@ -108,22 +102,19 @@ describe("Codex 内置生图清理配置", () => {
   });
 });
 
-describe("v3 router / backend config", () => {
-  it("defaults: 奶龙 prefixes, codex backend, no overrides", () => {
+describe("backend config", () => {
+  it("defaults: codex backend, no overrides", () => {
     const c = loadConfig({});
-    expect(c.imagePrefixes).toEqual(["奶龙:", "奶龙："]);
     expect(c.AGENT_BACKEND).toBe("codex");
     expect(c.backendOverrides).toEqual({});
     expect(c.CODEX_REASONING_EFFORT).toBe("high");
   });
 
-  it("parses IMAGE_PREFIXES, AGENT_BACKEND, AGENT_BACKEND_OVERRIDES", () => {
+  it("parses AGENT_BACKEND, AGENT_BACKEND_OVERRIDES", () => {
     const c = loadConfig({
-      IMAGE_PREFIXES: "画:, 画：",
       AGENT_BACKEND: "pi",
       AGENT_BACKEND_OVERRIDES: "group:200000001=codex",
     });
-    expect(c.imagePrefixes).toEqual(["画:", "画："]);
     expect(c.AGENT_BACKEND).toBe("pi");
     expect(c.backendOverrides).toEqual({ "group:200000001": "codex" });
     expect(() => loadConfig({ AGENT_BACKEND: "claude" })).toThrow(/AGENT_BACKEND/);

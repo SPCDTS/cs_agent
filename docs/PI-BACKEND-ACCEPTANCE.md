@@ -1,5 +1,7 @@
 # 第 3 组 pi-durable 后端验收（2026-10-18）
 
+> 2026-10：pi 的 `generate_image` 工具与本地 ComfyUI 生图已移除，本文涉及生图的段落（含默认提示词中的生图指引）仅作历史记录。
+
 实现提交：`b5fcb67`。最终 typecheck、全量 404 测试、build、`docker build -t cs-agent:g3 .` 全部通过。未停止、重启或重建运行容器；未调用真实模型、Codex、QQ、ComfyUI 或 DeepSeek Search/Fetch API；所有新模型测试使用 pi-ai faux provider。
 
 ## 文件

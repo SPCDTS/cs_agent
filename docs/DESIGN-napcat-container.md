@@ -20,7 +20,7 @@ docker compose
 ```
 
 - NapCat 的 3000/3001 **不发布到宿主机**，只在 compose 网络内对 cs-agent 可见；监听地址在容器内为 `0.0.0.0`（compose 网络隔离即边界）。
-- cs-agent 仍用 `host.docker.internal` 访问宿主机 ComfyUI 8188，不变。
+- cs-agent 仍用 `host.docker.internal` 访问宿主机 ComfyUI 8188，不变。（2026-10：本地 ComfyUI 生图已移除，此条不再适用。）
 - 宿主机 NapCat 停用（不卸载），作为回退手段保留一周后再清理。
 
 ## 2. 改动清单

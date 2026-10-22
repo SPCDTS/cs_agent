@@ -21,8 +21,6 @@ export interface PiCallBinding extends TurnBinding {
   auth: boolean;
   /** 子 agent 会话 */
   child: boolean;
-  /** 本轮输入的参考图（generate_image 允许列表） */
-  images: readonly string[];
 }
 
 /** 回合级观测键：回合内为 turn:<id>，没有回合（子 agent 在父回合结束后仍在工作）为 thr:<会话键>。 */

@@ -28,8 +28,8 @@ export async function loadObsToken(dataDir: string, envToken = '', generated: (m
 }
 
 /** 健康探针仅发布布尔状态、计数和线程 ID，不透出服务地址、错误正文或配置。 */
-export function publicHealth(input: { connected: boolean; degraded: boolean; comfy?: unknown; codex?: unknown; threads?: unknown; pi?: unknown }) {
+export function publicHealth(input: { connected: boolean; degraded: boolean; codex?: unknown; threads?: unknown; pi?: unknown }) {
   const ok = (value: unknown) => !!value && typeof value === 'object' && 'ok' in value && value.ok === true;
   return { ok: input.connected, ws_connected: input.connected, degraded: input.degraded,
-    comfy: { ok: ok(input.comfy) }, codex: { ok: ok(input.codex), threads: input.threads }, pi: input.pi };
+    codex: { ok: ok(input.codex), threads: input.threads }, pi: input.pi };
 }

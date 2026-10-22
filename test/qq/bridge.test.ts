@@ -1,8 +1,7 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ReplyStore } from "../../src/qq/reply-store.js";
 import { createQQBridge, inboundKey, type QQBridgeConfig } from "../../src/qq/index.js";
 import type { InboundMessage, Channel } from "../../src/channel/types.js";
 import { FakeOneBot, groupEvent, privateEvent, SELF_ID, TOKEN, waitFor } from "./fake-onebot.js";
@@ -11,7 +10,6 @@ const OWNER = "20001";
 const STRANGER = "29999";
 const GROUP = "30001";
 const OTHER_GROUP = "39999";
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16, 1)]);
 
 let server: FakeOneBot;
 let dataDir: string;
@@ -47,16 +45,6 @@ async function pushAndFlush(...events: unknown[]): Promise<InboundMessage[]> {
   await waitFor(() => received.some(r => r.message.message_id === String(sentinel.message_id)), 5000, "sentinel");
   await Promise.all(bridge.inbox.listInbound("queued").map(r => bridge.prepareIncoming?.(r.key)));
   return received.slice(before).map(r => r.message).filter(m => m.text !== "sentinel");
-}
-
-/** 触发一条私聊并以其入站键开生图票据（reply 只服务生图前缀路由）。 */
-async function triggerPrivate(text = "hello"): Promise<{ message: InboundMessage; ticket: string }> {
-  const event = privateEvent(OWNER, text);
-  server.push(event);
-  await waitFor(() => received.some(r => r.message.message_id === String(event.message_id)));
-  const hit = received.find(r => r.message.message_id === String(event.message_id))!;
-  await bridge.openImageTicket(hit.ticket);
-  return hit;
 }
 
 beforeEach(async () => {
@@ -224,178 +212,10 @@ describe("dedupe and tickets", () => {
       key, kind: "user", self_id: SELF_ID, user_id: OWNER, group_id: null, scope: "private:" + OWNER, thread_key: "private:" + OWNER,
       message_type: "private", message_id: message.message_id, text: "hello", state: "queued",
     });
-    // 只有生图前缀路由会开票。
+    // 不再开票：旧票据表只读。
     expect(await bridge.getTicket(key)).toBeNull();
-    expect(await bridge.openImageTicket(key)).toMatchObject({ ticket_id: key, source_text: "hello", status: "pending" });
-    expect(bridge.inbox.getInbound(key)!.state).toBe("done");
   });
 
-  it("lists pending image tickets in creation order and drops them once sent", async () => {
-    const a = await triggerPrivate("first");
-    const b = await triggerPrivate("second");
-    let pending = await bridge.listPendingTickets();
-    expect(pending.map(p => [p.ticket_id, p.source_text])).toEqual([[a.ticket, "first"], [b.ticket, "second"]]);
-    expect((await bridge.listPendingTickets(1)).length).toBe(1);
-    await bridge.reply(a.ticket, "ok");
-    pending = await bridge.listPendingTickets();
-    expect(pending.map(p => p.ticket_id)).toEqual([b.ticket]);
-  });
-});
-
-describe("reply", () => {
-  it("abort before login skips get_login_info and leaves the ticket pending (F4)", async () => {
-    const { ticket } = await triggerPrivate();
-    const before = server.calls.length;
-    const signal = AbortSignal.abort(new Error("aborted"));
-    await expect(bridge.reply(ticket, "answer", [], { signal })).rejects.toThrow("aborted");
-    expect(server.calls).toHaveLength(before);
-    expect(await bridge.getTicket(ticket)).toMatchObject({ status: "pending" });
-    expect((await bridge.getTicket(ticket))?.attempted_at).toBeUndefined();
-  });
-
-  it("abort during reply prep never marks sending; ticket stays pending (F4)", async () => {
-    const { ticket } = await triggerPrivate();
-    const controller = new AbortController();
-    server.override = c => {
-      if (c.action === "get_login_info") controller.abort(new Error("aborted"));
-      return undefined;
-    };
-    const mark = vi.spyOn(ReplyStore.prototype, "markSending");
-    try {
-      await expect(bridge.reply(ticket, "answer", [], { signal: controller.signal })).rejects.toThrow("aborted");
-      expect(mark).not.toHaveBeenCalled();
-      expect(await bridge.getTicket(ticket)).toMatchObject({ status: "pending" });
-      expect((await bridge.getTicket(ticket))?.attempted_at).toBeUndefined();
-      expect(server.sendCalls()).toHaveLength(0);
-    } finally {
-      mark.mockRestore();
-    }
-  });
-
-  it("abort immediately after markSending still sends and records sent (F4)", async () => {
-    const { ticket } = await triggerPrivate();
-    const controller = new AbortController();
-    const original = ReplyStore.prototype.markSending;
-    const mark = vi.spyOn(ReplyStore.prototype, "markSending").mockImplementation(function (this: ReplyStore, id) {
-      const marked = original.call(this, id);
-      controller.abort();
-      return marked;
-    });
-    try {
-      await expect(bridge.reply(ticket, "answer", [], { signal: controller.signal })).resolves.toMatchObject({ already_sent: false });
-      expect(server.sendCalls()).toHaveLength(1);
-      expect((await bridge.getTicket(ticket))?.status).toBe("sent");
-    } finally {
-      mark.mockRestore();
-    }
-  });
-
-  it("sends private reply, then returns already_sent on repeat", async () => {
-    const { ticket } = await triggerPrivate();
-    const result = await bridge.reply(ticket, "answer");
-    expect(result).toMatchObject({ already_sent: false, message_type: "private", target_id: OWNER });
-    const sends = server.sendCalls();
-    expect(sends).toHaveLength(1);
-    expect(sends[0]!.action).toBe("send_private_msg");
-    expect(sends[0]!.body).toEqual({ user_id: Number(OWNER), message: [{ type: "text", data: { text: "answer" } }] });
-
-    const again = await bridge.reply(ticket, "answer");
-    expect(again).toEqual({ ...result, already_sent: true });
-    expect(server.sendCalls()).toHaveLength(1);
-    const record = await bridge.getTicket(ticket);
-    expect(record).toMatchObject({ status: "sent", reply_message_id: result.message_id });
-    expect(record?.sent_at).toBeTruthy();
-    expect(record?.attempted_at).toBeTruthy();
-  });
-
-  it("group reply prepends a real at segment and newline", async () => {
-    const event = groupEvent(GROUP, STRANGER, "q", true);
-    server.push(event);
-    await waitFor(() => received.length === 1);
-    const { ticket } = received[0]!;
-    await bridge.openImageTicket(ticket);
-    const result = await bridge.reply(ticket, "a");
-    expect(result).toMatchObject({ message_type: "group", target_id: GROUP });
-    const send = server.sendCalls()[0]!;
-    expect(send.action).toBe("send_group_msg");
-    expect(send.body).toEqual({
-      group_id: Number(GROUP),
-      message: [{ type: "at", data: { qq: STRANGER } }, { type: "text", data: { text: "\na" } }],
-    });
-  });
-
-  it("marks uncertain on HTTP failure and never retries", async () => {
-    const { ticket } = await triggerPrivate();
-    server.override = c => (c.action === "send_private_msg" ? { http: 500 } : undefined);
-    await expect(bridge.reply(ticket, "x")).rejects.toMatchObject({ uncertain: true, message: expect.stringMatching(/uncertain/) });
-    expect((await bridge.getTicket(ticket))?.status).toBe("uncertain");
-    server.override = null;
-    await expect(bridge.reply(ticket, "x")).rejects.toThrow(/uncertain/);
-    expect(server.sendCalls()).toHaveLength(1);
-  });
-
-  it("marks uncertain on retcode failure", async () => {
-    const { ticket } = await triggerPrivate();
-    server.override = c => (c.action === "send_private_msg" ? { body: { status: "failed", retcode: 100 } } : undefined);
-    await expect(bridge.reply(ticket, "x")).rejects.toThrow();
-    expect((await bridge.getTicket(ticket))?.status).toBe("uncertain");
-  });
-
-  it("rejects concurrent reply on the same ticket", async () => {
-    const { ticket } = await triggerPrivate();
-    server.override = c => (c.action === "send_private_msg" ? { delayMs: 300, body: { status: "ok", retcode: 0, data: { message_id: 1 } } } : undefined);
-    const first = bridge.reply(ticket, "one");
-    await expect(bridge.reply(ticket, "two")).rejects.toThrow(/正在回复/);
-    await expect(first).resolves.toMatchObject({ already_sent: false, message_id: "1" });
-    expect(server.sendCalls()).toHaveLength(1);
-  });
-
-  it("refuses when NapCat login account differs; ticket stays pending", async () => {
-    const { ticket } = await triggerPrivate();
-    server.loginUserId = "10002";
-    await expect(bridge.reply(ticket, "x")).rejects.toThrow(/账号/);
-    expect((await bridge.getTicket(ticket))?.status).toBe("pending");
-    expect(server.sendCalls()).toHaveLength(0);
-  });
-
-  it("validates text and ticket", async () => {
-    const { ticket } = await triggerPrivate();
-    await expect(bridge.reply(ticket, "")).rejects.toThrow();
-    await expect(bridge.reply(ticket, "x".repeat(4001))).rejects.toThrow();
-    await expect(bridge.reply("nothex", "x")).rejects.toThrow(/凭据/);
-    await expect(bridge.reply("a".repeat(64), "x")).rejects.toThrow(/不存在/);
-  });
-
-  it("attaches validated images as base64 segments", async () => {
-    const { ticket } = await triggerPrivate();
-    const path = join(imageRoot, "out.png");
-    writeFileSync(path, PNG);
-    await bridge.reply(ticket, "pic", [path]);
-    expect(server.sendCalls()[0]!.body.message).toEqual([
-      { type: "text", data: { text: "pic" } },
-      { type: "image", data: { file: "base64://" + PNG.toString("base64") } },
-    ]);
-  });
-
-  it("image validation failure leaves ticket pending and sends nothing", async () => {
-    const { ticket } = await triggerPrivate();
-    const bad = join(imageRoot, "bad.png");
-    writeFileSync(bad, "this is not an image file");
-    const outsideDir = mkdtempSync(join(tmpdir(), "qq-outside-"));
-    const outside = join(outsideDir, "x.png");
-    writeFileSync(outside, PNG);
-    try {
-      await expect(bridge.reply(ticket, "x", [bad])).rejects.toThrow(/PNG/);
-      await expect(bridge.reply(ticket, "x", [outside])).rejects.toThrow(/目录/);
-      const ok = join(imageRoot, "ok.png");
-      writeFileSync(ok, PNG);
-      await expect(bridge.reply(ticket, "x", [ok, ok, ok, ok, ok])).rejects.toThrow(/4/);
-    } finally {
-      rmSync(outsideDir, { recursive: true, force: true });
-    }
-    expect((await bridge.getTicket(ticket))?.status).toBe("pending");
-    expect(server.sendCalls()).toHaveLength(0);
-  });
 });
 
 describe("send", () => {
@@ -470,8 +290,10 @@ it("不在 allowUsers 中的第二 owner 仍触发、入库、接收原账号回
   const receivedMessage = received.find(row => row.message.user_id === secondary)!;
   // owner 的多个账号共用 owner 线程，回复地址仍是原账号。
   expect(bridge.inbox.getInbound(receivedMessage.ticket)).toMatchObject({ thread_key: "owner", scope: "private:" + secondary });
-  await bridge.openImageTicket(receivedMessage.ticket);
-  expect(await bridge.reply(receivedMessage.ticket, "回复第二账号")).toMatchObject({ target_id: secondary, message_type: "private" });
+  const row = bridge.outbox.reserveOutbox({ key: "owner:r1", thread_key: "owner", turn_id: null, input_key: receivedMessage.ticket,
+    text: "回复第二账号", images: [], files: [], message_type: "private", target_id: secondary, mention_user_id: null });
+  expect(await bridge.send(row.key, { message_type: "private", target_id: secondary }, "回复第二账号"))
+    .toMatchObject({ target_id: secondary, message_type: "private", already_sent: false });
   server.push({ post_type: "notice", notice_type: "friend_recall", user_id: secondary, message_id: "recalled-owner" });
   server.push({ post_type: "notice", notice_type: "friend_recall", user_id: STRANGER, message_id: "recalled-stranger" });
   await pushAndFlush();

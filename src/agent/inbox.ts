@@ -1,7 +1,7 @@
 /**
  * Inbox（设计 §4.1）：触发消息与定时输入的持久化入口，把输入按会话键交给 ThreadHost。
- * 1. 入站：bridge 已去重、落盘（queued）并下载附件；这里按前缀分流——生图前缀交给票据路由（第 2 阶段保留），
- *    其余以 kind=user、发送者 = QQ 号投递给 ThreadHost（同一入站键重复投递是空操作）。
+ * 1. 入站：bridge 已去重、落盘（queued）并下载附件；这里以 kind=user、发送者 = QQ 号投递给 ThreadHost
+ *    （同一入站键重复投递是空操作）。
  * 2. 状态：后端收下（inputsDelivered）→ delivered；所在回合结束（turnEnded）→ done。
  * 3. 恢复：queued 的用户输入按到达顺序重新投递；宿主早已收下的输入只补齐状态（定时输入由定时执行侧恢复）。
  * 4. 工具绑定（§7.3）：工具调用时从宿主当前回合求出身份、发送地址与本轮输入，空闲或唤醒回合发往会话最近的输入地址。
@@ -9,10 +9,9 @@
  * 5. 呈现（§4.3）：每条输入一行来源头，引用、参考图照旧；定时输入原样（以 [定时任务] 开头）。
  */
 import path from "node:path";
-import { inboundFromRecord } from "../channel/ticket.js";
 import type { Channel, InboundMessage, InboundRecord, TurnBinding } from "../channel/types.js";
 import type { ContextStore } from "../context/store.js";
-import { validateReferences } from "../media/gen/image-references.js";
+import { validateReferences } from "../media/references.js";
 import { log } from "../shared/log.js";
 import type { OwnerIds } from "../shared/owners.js";
 import { trace } from "../shared/trace.js";
@@ -20,7 +19,6 @@ import type { TicketSource } from "./backends/types.js";
 import { buildCodexPrompt } from "./codex/runner.js";
 import type { InputRef, ThreadKey } from "./host/types.js";
 import type { ThreadHost } from "./host/thread-host.js";
-import { DEFAULT_IMAGE_PREFIXES, routeMessage } from "./router.js";
 
 export type InboxChannel = Pick<Channel, "inbox"> & Partial<Pick<Channel, "prepareIncoming">>;
 
@@ -28,9 +26,6 @@ export interface InboxOptions {
   getChannel(): InboxChannel;
   getHost(): Pick<ThreadHost, "deliver" | "currentIdentity" | "thread" | "inputState">;
   owners?: OwnerIds | (() => OwnerIds);
-  imagePrefixes?: readonly string[];
-  /** 生图前缀路由：以入站键开票后按票据回复 */
-  image?(message: InboundMessage, key: string): void | Promise<void>;
   /** 查找 [引用] 正文 */
   store?: Pick<ContextStore, "message">;
   dataDir: string;
@@ -48,21 +43,13 @@ export interface RenderedInputs {
 const PAGE = 200;
 
 export class Inbox {
-  private readonly prefixes: readonly string[];
-  constructor(private readonly opts: InboxOptions) {
-    this.prefixes = opts.imagePrefixes ?? DEFAULT_IMAGE_PREFIXES;
-  }
+  constructor(private readonly opts: InboxOptions) {}
 
   private get channel() { return this.opts.getChannel(); }
   private owners(): OwnerIds { return typeof this.opts.owners === "function" ? this.opts.owners() : this.opts.owners; }
 
-  /** bridge 的 message 事件：附件已就绪，按前缀分流后投递。 */
-  async receive(message: InboundMessage, key: string): Promise<void> {
-    if (routeMessage(message.route_text, this.prefixes, message.images).route !== "agent") {
-      if (!this.opts.image) throw new Error("生图路由未接入");
-      await this.opts.image(message, key);
-      return;
-    }
+  /** bridge 的 message 事件：附件已就绪，投递给会话宿主。 */
+  async receive(_message: InboundMessage, key: string): Promise<void> {
     const rec = this.channel.inbox.getInbound(key);
     if (!rec) throw new Error("入站记录不存在");
     await this.deliver(rec);
@@ -84,7 +71,7 @@ export class Inbox {
 
   /**
    * 启动时（宿主恢复之后）调用：queued 的输入按到达顺序重新投递。
-   * 宿主已有记录（投递后、标记前崩溃）的只补齐状态；未下载完的附件先补下载，生图前缀改走票据。
+   * 宿主已有记录（投递后、标记前崩溃）的只补齐状态；未下载完的附件先补下载。
    */
   async recover(): Promise<number> {
     const queued: InboundRecord[] = [];
@@ -105,10 +92,6 @@ export class Inbox {
         }
         const ready = rec.kind === "user" && rec.attachments.some(a => a.status === "pending")
           ? await this.channel.prepareIncoming?.(rec.key) ?? rec : rec;
-        if (ready.kind === "user" && routeMessage(ready.route_text, this.prefixes, ready.images).route !== "agent") {
-          await this.opts.image?.(inboundFromRecord(ready), ready.key);
-          continue;
-        }
         trace.event("in:" + rec.key, "recovered", { scope: rec.scope, detail: { text: rec.text, sender: rec.nickname } });
         await this.deliver(ready);
       } catch (error) {

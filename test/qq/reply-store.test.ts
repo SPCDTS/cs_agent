@@ -1,4 +1,3 @@
-import { inboundFromTicket } from "../../src/channel/ticket.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,13 +16,6 @@ function msg(id: string, text = "hi " + id): InboundMessage {
   };
 }
 const T = "private:20001";
-/** 入站后开生图票据（票据只服务生图前缀路由）。 */
-function ticket(s: ReplyStore, id: string, text?: string) {
-  const key = s.admit(msg(id, text), T)!;
-  s.openImageTicket(key);
-  return key;
-}
-
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "reply-store-")); store = null; });
 afterEach(() => { store?.close(); rmSync(dir, { recursive: true, force: true }); });
 
@@ -96,70 +88,21 @@ describe("ReplyStore Inbox", () => {
   });
 });
 
-describe("ReplyStore 生图票据", () => {
-  it("以入站记录开票（幂等），输入随即标记 done", () => {
-    store = new ReplyStore(dir);
-    const key = store.admit({ ...msg("g"), message_type: "group", group_id: "7", group_name: "家庭群" }, "group:7")!;
-    const rec = store.openImageTicket(key);
-    expect(rec).toMatchObject({ ticket_id: key, status: "pending", source_text: "hi g", group_name: "家庭群" });
-    expect(store.openImageTicket(key)).toEqual(rec);
-    expect(store.getInbound(key)!.state).toBe("done");
-    expect(inboundFromTicket(store.get(key)!).group_name).toBe("家庭群");
-  });
-
-  it("listPending returns pending only, oldest first, honouring limit", () => {
-    store = new ReplyStore(dir);
-    const a = ticket(store, "a"), b = ticket(store, "b"), c = ticket(store, "c");
-    expect(store.markSending(b)).toBe(true);
-    store.markSent(b, "99");
-    expect(store.listPending().map(r => r.ticket_id)).toEqual([a, c]);
-    expect(store.listPending(1).map(r => r.ticket_id)).toEqual([a]);
-  });
-
-  it("exposes seq (open order) and pages listPending with an afterSeq cursor (R6/R7)", () => {
-    store = new ReplyStore(dir);
-    const ids = Array.from({ length: 5 }, (_, i) => ticket(store!, `p${i}`));
-    const seqs = ids.map(t => store!.get(t)!.seq);
-    expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
-    expect(new Set(seqs).size).toBe(5);
-    store.markSending(ids[1]!);
-    const page1 = store.listPending(2);
-    expect(page1.map(r => r.ticket_id)).toEqual([ids[0], ids[2]]);
-    const page2 = store.listPending(2, page1[1]!.seq);
-    expect(page2.map(r => r.ticket_id)).toEqual([ids[3], ids[4]]);
-    expect(store.listPending(2, page2[1]!.seq)).toEqual([]);
-  });
-
-  it("abandonTicket 只结束 pending 票据", () => {
-    store = new ReplyStore(dir);
-    const a = ticket(store, "a"), b = ticket(store, "b");
-    store.markSending(b); store.markSent(b, "1");
-    store.abandonTicket(a); store.abandonTicket(b);
-    expect(store.get(a)!.status).toBe("uncertain");
-    expect(store.get(b)!.status).toBe("sent");
-    expect(store.listPending()).toEqual([]);
-  });
-
-  it("migrates an old database without source_text; legacy run_ tickets are no longer listed", () => {
+describe("ReplyStore 旧票据（只读）", () => {
+  it("旧库补列后可按票据号读取，非法票据号返回 null", () => {
     const raw = new DatabaseSync(join(dir, DB_FILE));
     raw.exec(`CREATE TABLE tickets (
       ticket_id TEXT PRIMARY KEY, self_id TEXT NOT NULL, user_id TEXT NOT NULL, group_id TEXT,
       message_type TEXT NOT NULL, source_message_id TEXT NOT NULL, source_nickname TEXT NOT NULL,
       created_at TEXT NOT NULL, status TEXT NOT NULL, attempted_at TEXT, sent_at TEXT, reply_message_id TEXT)`);
     const old = inboundKey(msg("old"));
-    const run = "run_" + "d".repeat(40);
-    for (const id of [old, run]) {
-      raw.prepare("INSERT INTO tickets (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, created_at, status) VALUES (?, '10001', '20001', NULL, 'private', 'old', 'n', '2026-01-01T00:00:00.000Z', 'pending')").run(id);
-    }
+    raw.prepare("INSERT INTO tickets (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, created_at, status, reply_message_id) VALUES (?, '10001', '20001', NULL, 'private', 'old', 'n', '2026-01-01T00:00:00.000Z', 'sent', '77')").run(old);
     raw.close();
 
     store = new ReplyStore(dir);
-    expect(store.get(old)?.source_text).toBe("");
-    expect(inboundFromTicket(store.get(old)!).group_name).toBeUndefined();
+    expect(store.get(old)).toMatchObject({ ticket_id: old, status: "sent", reply_message_id: "77", source_text: "", self_id: "10001" });
     expect(store.get(old)?.source_route_text).toBeUndefined();
-    const t = ticket(store, "new", "新消息");
-    expect(store.get(t)?.source_text).toBe("新消息");
-    expect(store.listPending().map(r => r.ticket_id)).toEqual([old, t]);
+    expect(store.get("not-a-ticket")).toBeNull();
   });
 });
 

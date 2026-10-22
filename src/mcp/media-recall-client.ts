@@ -78,12 +78,11 @@ export async function chatsViaLoopback(token: string | undefined, port = 8790, m
   return body.text;
 }
 
-/** 本次调用的上下文：读取范围、回合、线程与本会话生图目录、本轮参考图。调用不属于会话当前回合时主进程拒绝。 */
+/** 本次调用的上下文：读取范围、回合与线程。调用不属于会话当前回合时主进程拒绝。 */
 export async function contextViaLoopback(token: string | undefined, port = 8790, meta: CallMeta = {}): Promise<CallContext> {
   const body = await loopbackJson<Partial<CallContext>>(await loopbackPost("context", {}, token, port, meta, 30_000), "调用上下文查询失败");
-  if (typeof body.access !== "string" || typeof body.turn_id !== "string" || typeof body.session !== "string" ||
-      typeof body.image_dir !== "string" || !Array.isArray(body.image_refs) || !body.image_refs.every(ref => typeof ref === "string")) {
+  if (typeof body.access !== "string" || typeof body.turn_id !== "string" || typeof body.session !== "string") {
     throw new Error("调用上下文返回格式错误");
   }
-  return { access: body.access, turn_id: body.turn_id, session: body.session, image_dir: body.image_dir, image_refs: body.image_refs };
+  return { access: body.access, turn_id: body.turn_id, session: body.session };
 }

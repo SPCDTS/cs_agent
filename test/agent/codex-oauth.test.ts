@@ -68,10 +68,9 @@ describe("config", () => {
     expect(c.allowUsers).toEqual(["1", "2"]);
     expect(c.QQ_ALLOW_GROUPS).toEqual(["3"]);
     expect(c.AGENT_MODEL_ID).toBe("deepseek-flash");
-    expect(c.COMFY_MODE).toBe("mcp");
     expect(c.AGENT_CONCURRENCY).toBe(2);
     expect(c.codexHome).toBe(path.join("/d", "codex"));
     expect(loadConfig({ QQ_ALLOW_USERS: "*" }).allowUsers).toBe("*");
-    expect(() => loadConfig({ COMFY_MODE: "bogus" })).toThrow(/配置无效/);
+    expect(() => loadConfig({ CODEX_PROVIDER: "bogus" })).toThrow(/配置无效/);
   });
 });

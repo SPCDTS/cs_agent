@@ -1,11 +1,10 @@
 /**
- * 回合内生成图片的收集（设计 §4.3"图片附带"）：回合开始前记下票据图片目录里已有的文件，
- * 回合结束后取新出现的普通文件（不跟随软链接），按 QQBridge 同一口径校验大小与魔数，按修改时间取前 4 张。
+ * 图片目录的收集：取 before 之外新出现的普通文件（不跟随软链接），按 QQBridge 同一口径校验大小与魔数，按修改时间取前 limit 张。
  */
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { isSupportedImage, MAX_IMAGE_BYTES, MAX_IMAGES, MIN_IMAGE_BYTES } from "../limits.js";
-import { log } from "../../shared/log.js";
+import { isSupportedImage, MAX_IMAGE_BYTES, MAX_IMAGES, MIN_IMAGE_BYTES } from "./limits.js";
+import { log } from "../shared/log.js";
 
 /** 目录内全部文件的相对路径（递归，不跟随软链接）；目录不存在时为空。 */
 export async function listFiles(dir: string): Promise<Set<string>> {

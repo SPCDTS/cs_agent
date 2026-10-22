@@ -113,7 +113,7 @@ describe("codex 常驻：唤醒回合与工具调用的回合归属", () => {
       .rejects.toThrow("只能发往本会话");
     script.toolCall(wake, "exec-w2");
     expect(await r.codexContext(G, { callId: "exec-w2", threadId: wake.threadId }))
-      .toMatchObject({ access: G, turn_id: "codex:" + wake.turnId, session: wake.threadId, image_refs: [] });
+      .toMatchObject({ access: G, turn_id: "codex:" + wake.turnId, session: wake.threadId });
     script.toolCall(wake, "exec-w3");
     expect(await r.codexSend(G, { text: "子 agent 做完了" }, { callId: "exec-w3", threadId: wake.threadId })).toMatchObject({ status: "sent" });
     script.complete(wake);

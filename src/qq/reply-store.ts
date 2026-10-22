@@ -1,8 +1,8 @@
 /**
- * 入站输入、Outbox 与生图票据的持久化（node:sqlite，WAL）。
+ * 入站输入、Outbox 与旧票据的持久化（node:sqlite，WAL）。
  * - inbound（Inbox，设计 §4.1）：每条触发消息 / 定时输入一行，state 只前进：queued → delivered → done；
  * - outbox（§7.4）：pending → sending → sent | uncertain，状态迁移带条件更新，跨进程也不会重复发送；
- * - tickets：仅生图前缀路由（§11 尚未迁移，第 2 阶段保留）按票据回复。
+ * - tickets：旧版生图前缀路由留下的票据，只读保留（召回机器人旧回复时核对发出状态），不再写入。
  */
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
@@ -12,7 +12,6 @@ import type { ChatType, InboundMessage, InboundRecord, InboundState, ReplyTicket
 
 import type { OutboxInput, OutboxRow } from "../channel/outbox.js";
 import { isSendRuleError, type SendBreaker, type SendRuleLimits } from "../channel/send-rules.js";
-import { ticketTarget } from "../channel/ticket.js";
 import { SendRules } from "./send-rules.js";
 
 const SEEN_LIMIT = 2000;
@@ -168,7 +167,7 @@ export class ReplyStore {
 
   /**
    * 幂等迁移：
-   * - 旧票据表补列（生图路由仍读这些列）；
+   * - 旧票据表补列（只读保留，读取时按这些列解析）；
    * - 旧 outbox（按票据：ticket/ordinal/call_id，UNIQUE(ticket, ordinal)）整表重建为按会话的新表：
    *   thread_key 保留原票据号、#late/#fallback 行标为系统消息，主动额度所需的 proactive/created_at 原样保留。
    */
@@ -282,13 +281,6 @@ export class ReplyStore {
       reason => { this.db.prepare("UPDATE outbox SET rejected=? WHERE key=? AND status='pending'").run(reason, key); });
   }
 
-  /** 生图票据回复路径的同一套规则：检查 + pending → sending + 记数。 */
-  beginTicketSend(ticket: string, limits: SendRuleLimits, now: number): boolean {
-    const rec = this.get(ticket);
-    if (!rec) return false;
-    return this.admitSend(`${rec.message_type}:${ticketTarget(rec)}`, limits, now, () => this.markSending(ticket), () => {});
-  }
-
   private admitSend(scope: string, limits: SendRuleLimits, now: number, mark: () => boolean, reject: (reason: string) => void): boolean {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -398,62 +390,11 @@ export class ReplyStore {
       .run(JSON.stringify(attachments), JSON.stringify(attachments.flatMap(a => a.path ? [a.path] : [])), error ?? null, key);
   }
 
-  // ---------- 生图票据 ----------
-
-  /** 以入站记录开票（幂等）；输入随即标记 done，由票据接管。 */
-  openImageTicket(key: string): ReplyTicketRecord {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.prepare(`INSERT OR IGNORE INTO tickets
-        (ticket_id,self_id,user_id,group_id,message_type,source_message_id,source_nickname,source_text,source_route_text,
-         source_images,source_image_error,attachments,created_at,group_name,status)
-        SELECT key,self_id,user_id,group_id,message_type,message_id,nickname,text,route_text,images,image_error,attachments,created_at,group_name,'pending'
-        FROM inbound WHERE key = ? AND kind = 'user'`).run(key);
-      this.db.prepare("UPDATE inbound SET state = 'done' WHERE key = ?").run(key);
-      this.db.exec("COMMIT");
-    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
-    const rec = this.get(key);
-    if (!rec) throw new Error("生图票据对应的入站记录不存在");
-    return rec;
-  }
+  // ---------- 旧票据（只读） ----------
 
   get(ticket: string): ReplyTicketRecord | null {
     if (!isTicketId(ticket)) return null;
     const row = this.db.prepare("SELECT rowid AS seq, * FROM tickets WHERE ticket_id = ?").get(ticket) as TicketRow | undefined;
     return row ? toRecord(row) : null;
-  }
-
-  /**
-   * 仍为 pending 的生图票据，按开票顺序（seq = rowid 升序）。旧版定时出站票据（run_）不再列出。
-   * afterSeq 为游标：只返回 seq 大于它的行，用于分页直到取尽。
-   */
-  listPending(limit = 200, afterSeq = 0): ReplyTicketRecord[] {
-    const n = Number.isInteger(limit) && limit > 0 ? limit : 200;
-    const after = Number.isInteger(afterSeq) && afterSeq > 0 ? afterSeq : 0;
-    const rows = this.db.prepare(`SELECT rowid AS seq, * FROM tickets WHERE status = 'pending' AND rowid > ?
-      AND substr(ticket_id, 1, 4) <> 'run_' ORDER BY rowid ASC LIMIT ?`).all(after, n) as unknown as TicketRow[];
-    return rows.map(toRecord);
-  }
-
-  /** 部署前遗留的非生图票据：不再处理，结束为 uncertain 留作审计。 */
-  abandonTicket(ticket: string): void {
-    this.db.prepare("UPDATE tickets SET status = 'uncertain', attempted_at = ? WHERE ticket_id = ? AND status = 'pending'")
-      .run(new Date().toISOString(), ticket);
-  }
-
-  /** pending → sending；返回 false 表示状态已被改变（不可发送）。 */
-  markSending(ticket: string): boolean {
-    const result = this.db.prepare("UPDATE tickets SET status = 'sending', attempted_at = ? WHERE ticket_id = ? AND status = 'pending'")
-      .run(new Date().toISOString(), ticket);
-    return Number(result.changes) === 1;
-  }
-
-  markUncertain(ticket: string): void {
-    this.db.prepare("UPDATE tickets SET status = 'uncertain' WHERE ticket_id = ? AND status = 'sending'").run(ticket);
-  }
-
-  markSent(ticket: string, replyMessageId: string): void {
-    this.db.prepare("UPDATE tickets SET status = 'sent', reply_message_id = ?, sent_at = ? WHERE ticket_id = ? AND status = 'sending'")
-      .run(replyMessageId, new Date().toISOString(), ticket);
   }
 }

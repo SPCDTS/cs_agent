@@ -214,7 +214,7 @@ describe("CodexRunner 线程加载（常驻 app-server）", () => {
     rigs.push(r);
     return r;
   }
-  const mcpEnv = { im: { IM_TOKEN: "a".repeat(64) }, qq_context: { QQ_RECALL_TOKEN: "a".repeat(64) }, image_gen: { IMAGE_GEN_TOKEN: "a".repeat(64) } };
+  const mcpEnv = { im: { IM_TOKEN: "a".repeat(64) }, qq_context: { QQ_RECALL_TOKEN: "a".repeat(64) } };
 
   it("首次加载前写入会话域受管 AGENTS.md，再次加载内容不变时保留 mtime；thread/start 带工作区、命名权限与项目文档上限", async () => {
     const { dir, runner, loads } = await setup();
@@ -277,17 +277,17 @@ describe("CodexRunner 线程加载（常驻 app-server）", () => {
   it("app-server 子进程不继承父进程秘密，也不带任何线程令牌", async () => {
     process.env.NAPCAT_TOKEN = "napcat-secret";
     process.env.OPENAI_API_KEY = "sk-secret";
-    const { fake } = await setup({ env: { IM_TOKEN: "stale", QQ_RECALL_TOKEN: "stale", IMAGE_GEN_TOKEN: "stale" } });
+    const { fake } = await setup({ env: { IM_TOKEN: "stale", QQ_RECALL_TOKEN: "stale" } });
     const call = fake.calls[0]!;
     expect(call.args).toEqual([path.join(FIXTURES, "fake-codex.mjs"), "app-server"]);
     expect(call.env.NAPCAT_TOKEN).toBeUndefined();
     expect(call.env.OPENAI_API_KEY).toBeUndefined();
-    for (const key of ["IM_TOKEN", "QQ_RECALL_TOKEN", "IMAGE_GEN_TOKEN"]) expect(call.env[key]).toBeUndefined();
+    for (const key of ["IM_TOKEN", "QQ_RECALL_TOKEN"]) expect(call.env[key]).toBeUndefined();
     expect(call.env.NO_COLOR).toBe("1");
     expect(JSON.stringify(call.env)).not.toContain("secret");
   });
 
-  it("线程级 MCP 环境：令牌、loopback 端口与本会话附件目录按点号键写入 config；image_gen 只在开启时注入", async () => {
+  it("线程级 MCP 环境：令牌、loopback 端口与本会话附件目录按点号键写入 config", async () => {
     const { dir, runner, loads } = await setup({ mediaRecallPort: 8791 });
     await runner.openThread("group:1", { mcpEnv });
     const config = loads()[0]!.config;
@@ -299,10 +299,6 @@ describe("CodexRunner 线程加载（常驻 app-server）", () => {
       "mcp_servers.qq_context.env.QQ_FILE_DIR": path.join(dir, "files", "group_1"),
       "mcp_servers.qq_context.env.QQ_WORKDIR": path.join(dir, "ws", "group_1"),
     });
-    expect(Object.keys(config).some(key => key.startsWith("mcp_servers.image_gen"))).toBe(false);
-    const on = await setup({ dir: tmp(), imageGen: "on" });
-    await on.runner.openThread("group:1", { mcpEnv });
-    expect(on.loads()[0]!.config).toMatchObject({ "mcp_servers.image_gen.env.IMAGE_GEN_TOKEN": "a".repeat(64) });
     for (const bad of ["relative", "/data/images/../codex", '/data/images/a"b', "/data/images/a b"]) expect(() => qqAttachmentEnv(bad, "/data/files/t1", "/workspace/owner")).toThrow();
   });
 

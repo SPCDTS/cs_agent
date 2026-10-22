@@ -20,7 +20,7 @@ trace.event('example', 'image:submit', { durationMs: 12, detail: { backend: 'fak
 trace.event('example', 'image:collect', { durationMs: 100, detail: { backend: 'fake', prompt_id: 'example-job', images: [] } });
 trace.event('example', 'reply_sent', { detail: { terminal: true, message_id: 'reply-example', reply: '图片生成好了', images: 0 } });
 const dashboard = createDashboard({ config, store, context,
-  health: () => ({ bridge: { ws_connected: true, disconnect_count: 0 }, comfy: { ok: true }, codex: { ok: true }, deepseek_key_present: false, aging: '尚未运行（假数据）' }),
+  health: () => ({ bridge: { ws_connected: true, disconnect_count: 0 }, codex: { ok: true }, deepseek_key_present: false, aging: '尚未运行（假数据）' }),
   queue: () => ({ active: 0, slots: 2, waiting: 0, scopes: {}, tickets: [] }),
   codex: async () => [{ thread_key: 'shared', thread_id: 'fixture-thread', rollout_bytes: 2048, observed_turns: 1 }],
   pi: async () => ({ count: 1, keys: ['group:7'], compaction: [], usage: {} }),

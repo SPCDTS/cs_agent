@@ -55,12 +55,12 @@ function capture() {
   return { events, off, breakers: () => events.filter(e => e.stage === "send_breaker") };
 }
 
-/** 另开一张生图票据（旧回复路径同样受发送规则约束）。 */
-function otherTicket(f: Fixture, id: string, group = true) {
-  const m = { ...f.msg, message_id: id, ...(group ? {} : { message_type: "private" as const, group_id: null }) };
-  const key = f.store.admit(m, group ? "group:7" : "private:1")!;
-  f.store.openImageTicket(key);
-  return key;
+/** 另一条入站输入所在会话（默认私聊 1）经发送服务发一条，与 f.binding 的会话分开计数。 */
+function otherSend(f: Fixture, id: string, text: string, group = false) {
+  const m = { ...f.msg, message_id: id, ...(group ? {} : { message_type: "private" as const, group_id: null, mentioned_self: false }) };
+  const threadKey = group ? "group:7" : "private:1";
+  const key = f.store.admit(m, threadKey)!;
+  return f.service.send({ ...f.binding, threadKey, scope: threadKey, inputKey: key, inputs: [key], access: { kind: "scope", scope: threadKey } }, { text }, id);
 }
 
 describe("bridge 发送规则", () => {
@@ -107,9 +107,8 @@ describe("bridge 发送规则", () => {
       await expect(f.service.send(f.binding, { text: "群5" }, "g5")).rejects.toThrow("本会话发送已熔断");
       expect(cap.breakers()).toHaveLength(1);
       expect(cap.breakers()[0]!.detail).toMatchObject({ scope: "group:7", until: T0 + 3000 + 3_600_000, reason: "每小时超过 3 条" });
-      // 其他会话不受影响（生图票据回复路径同样受规则约束）。
-      const priv = otherTicket(f, "p1", false);
-      await expect(f.bridge.reply(priv, "私聊照常")).resolves.toMatchObject({ already_sent: false });
+      // 其他会话不受影响。
+      await expect(otherSend(f, "p1", "私聊照常")).resolves.toMatchObject({ status: "sent" });
     } finally { cap.off(); }
     const breakers = f.bridge.sendBreakers!();
     expect(breakers).toEqual([{ scope: "group:7", until: T0 + 3000 + 3_600_000, tripped_at: T0 + 3000, reason: "每小时超过 3 条" }]);
@@ -143,9 +142,9 @@ describe("bridge 发送规则", () => {
     const cap = capture();
     try {
       await f.service.send(f.binding, { text: "群一" }, "1");
-      await f.bridge.reply(otherTicket(f, "p1", false), "私聊一");
-      await f.bridge.reply(otherTicket(f, "p2", false), "私聊二");
-      await expect(f.bridge.reply(otherTicket(f, "p3", false), "私聊三"))
+      await otherSend(f, "p1", "私聊一");
+      await otherSend(f, "p2", "私聊二");
+      await expect(otherSend(f, "p3", "私聊三"))
         .rejects.toThrow("全局发送过多：每分钟最多 3 条，已暂停全部发送 10 分钟");
       await expect(f.service.send(f.binding, { text: "群二" }, "2")).rejects.toThrow("全部会话发送已熔断");
       expect(cap.breakers().map(e => e.detail.scope)).toEqual(["global"]);
@@ -157,14 +156,14 @@ describe("bridge 发送规则", () => {
     expect(f.bridge.sendBreakers!()).toEqual([]);
     // 解除前一分钟内的 3 条不再计入全局窗口。
     await f.service.send(f.binding, { text: "群二" }, "2");
-    await f.bridge.reply(otherTicket(f, "p4", false), "私聊四");
+    await otherSend(f, "p4", "私聊四");
   });
 
   it("系统消息被规则拒绝时只告警不抛出，行保持 pending 并记下原因", async () => {
     const f = fixture();
     Object.assign(f.rules, { perChatMinute: 1 });
     f.clock.now = T0;
-    await f.bridge.reply(otherTicket(f, "earlier"), "占满本分钟额度");
+    await otherSend(f, "earlier", "占满本分钟额度", true);
     await expect(f.service.system(f.binding, "出错提示")).resolves.toMatchObject({ status: "pending", note: expect.stringContaining("发送过快") });
     expect(sends(f)).toBe(1);
   });

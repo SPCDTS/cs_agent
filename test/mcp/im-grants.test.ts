@@ -7,7 +7,7 @@ import { imRig } from "./im-fixture.js";
 async function setup(owner: boolean, grant = false, mode: "user" | "scheduled" | "wake" = "user") {
   const f = await grantsFixture(owner ? "1" : "99");
   if (grant) await f.grants.panel("auth_grant", { user: "qq:1", caps: ["send"], targets: ["qq:group:8"] });
-  const binding = { ...f.binding, session: "thr-1", imageDir: path.join(f.dir, "images", "group_7"), imageRefs: [],
+  const binding = { ...f.binding, session: "thr-1", imageDir: path.join(f.dir, "images", "group_7"),
     identity: mode === "user" ? f.binding.identity : mode === "scheduled" ? { kind: "scheduled" as const, creator: "1" } : { kind: "wake" as const } };
   const rig = await imRig(binding.threadKey, {
     resolve: () => binding,

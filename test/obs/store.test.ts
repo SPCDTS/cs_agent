@@ -57,14 +57,14 @@ describe('观测存储',()=>{
     const {dir,store,trace}=rig();
     const metrics=new Metrics(store,{retentionDays:30,inputPrice:2,outputPrice:4,gauges:async()=>[{name:'queue_depth',value:2}]});
     for(const ms of [10,20,100])trace.event('t','tool:test',{durationMs:ms,status:ms===100?'failed':'ok'});
-    const writer=new ObsStore(dir);writer.append({ticket:'t',scope:'',ts:Date.now(),stage:'image:collect',status:'ok',duration_ms:80,detail:{prompt_id:'pid'}});writer.close();
+    const writer=new ObsStore(dir);writer.append({ticket:'t',scope:'',ts:Date.now(),stage:'tool:other_process',status:'ok',duration_ms:80,detail:{}});writer.close();
     trace.event('t','model_turn',{detail:{provider:'deepseek',input_tokens:100,output_tokens:20,cache_read_tokens:10}});
     await metrics.flush();
     const rows=store.db.prepare('SELECT * FROM metrics').all();
     const metric=(name:string)=>rows.find(r=>r.name===name && String(r.labels_json).includes('tool:test'))?.value;
     expect(metric('duration_p50_ms')).toBe(20);expect(metric('duration_p95_ms')).toBe(100);expect(metric('success_rate')).toBeCloseTo(2/3);
     expect(rows.find(r=>r.name==='deepseek_estimated_cost')?.value).toBeCloseTo(.0003);
-    expect(rows.some(r=>String(r.labels_json).includes('image:collect'))).toBe(true);
+    expect(rows.some(r=>String(r.labels_json).includes('tool:other_process'))).toBe(true);
     await metrics.flush();expect(store.db.prepare("SELECT COUNT(*) n FROM metrics WHERE name='calls'").get()).toMatchObject({n:2});
     const reopened=new Metrics(store,{retentionDays:30});await reopened.flush();
     expect(store.db.prepare("SELECT COUNT(*) n FROM metrics WHERE name='calls'").get()).toMatchObject({n:2});

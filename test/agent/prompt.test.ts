@@ -26,7 +26,7 @@ it("seeds agent.md once without rewriting existing Chinese BOM/CRLF", async () =
   const dir = tmp();
   await ensureAgentPrompt(dir);
   const file = path.join(dir, "prompts", "agent.md");
-  expect(readFileSync(file, "utf8")).toContain("reference_images");
+  expect(readFileSync(file, "utf8")).toContain("qq_image(message_id)");
   const original = Buffer.from("\ufeff自定义中文提示词\r\n", "utf8");
   writeFileSync(file, original);
   await ensureAgentPrompt(dir);

@@ -145,8 +145,6 @@ ol.trail::before{content:"";position:absolute;left:7px;top:6px;bottom:6px;border
 .trail details{margin-top:var(--s1)}
 summary{cursor:pointer;color:var(--ink-2);font-size:var(--t-xs)}
 blockquote.said{margin:0;padding:var(--s4) var(--s5);background:var(--sheet);border:1px solid var(--rule);border-left:4px solid var(--carbon);border-radius:var(--r-md);font-size:var(--t-lg);line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;max-width:var(--measure)}
-.thumbs{display:flex;flex-wrap:wrap;gap:var(--s3)}
-.thumbs img{width:180px;height:180px;object-fit:cover;border-radius:var(--r-md);border:1px solid var(--rule);background:var(--sheet-2)}
 
 /* ── 实时单据 ── */
 .scope-group{margin-top:var(--s5)}
@@ -464,7 +462,6 @@ ol.lin-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:colum
   h1{font-size:var(--t-lg)}
   .figure{font-size:var(--t-xl)}
   .list .hide-sm{display:none}
-  .thumbs img{width:44vw;height:44vw}
   .choice{min-width:100%}
   blockquote.said{font-size:var(--t-md)}
   .ctx-mini{max-width:none;flex-basis:100%}

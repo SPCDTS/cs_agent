@@ -78,13 +78,12 @@ export interface DashboardPageOptions {
 export interface ContextUsageEventView { ts: number; ticket: string; detail: ContextUsage }
 export interface DashboardPageDeps {
   opts: DashboardPageOptions;
-  config: { owner?: string; imagesDir: string; CODEX_PROVIDER: "magpie" | "openai"; CODEX_MAGPIE_URL: string; CODEX_MODEL?: string; AGENT_MODEL_PROVIDER: string };
+  config: { owner?: string; CODEX_PROVIDER: "magpie" | "openai"; CODEX_MAGPIE_URL: string; CODEX_MODEL?: string; AGENT_MODEL_PROVIDER: string };
   csrf: string; agentMd: string; agentsMd: string;
   api(pathQuery: string): Promise<{ status: number; body: unknown }>;
   contextResult(scope: string, query: string | null): { content: { type: string; text?: string }[] };
   isThreadKey(value: unknown): value is string;
   summarize(event: { stage: string; status: string | null; detail: Record<string, unknown> }): string;
-  imageFile(root: string, segments: string[]): Promise<string>;
   readText(file: string): Promise<string>;
   agentMdRevision(st: { mtimeMs: number; size: number } | null): string;
   reasoningEfforts: readonly string[];
@@ -201,7 +200,7 @@ const ticketStatus = (events: ObsEvent[]) => {
 
 export function createDashboardPages(deps: DashboardPageDeps) {
   const { opts, config, csrf, agentMd, agentsMd, api, contextResult, isThreadKey, summarize,
-    imageFile, readText, agentMdRevision, formatBackendOverrides,
+    readText, agentMdRevision, formatBackendOverrides,
     reasoningEfforts: REASONING_EFFORTS, agentMdMaxBytes: AGENT_MD_MAX_BYTES, settingsTicket: SETTINGS_TICKET } = deps;
   function usageList(): ContextUsage[] {
     try { return opts.contextUsage ? sortUsage(opts.contextUsage.all()) : []; } catch { return []; }
@@ -259,11 +258,10 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       ? `<div class="sheet pad"><div class="ctx-list ctx-list-mini">${usage.map(u => `<div class="ctx-item"><span class="ctx-item-label">${esc(ctxLabel(u.backend, u.key))}</span>${contextBar(u.backend, u.key, u, { mini: true })}</div>`).join('')}</div></div>`
       : empty(opts.contextUsage ? '还没有线程的占用记录。任一线程完成一个回合后，这里会显示它离上下文窗口还有多远。' : '上下文占用数据源未接入。')}</section>`;
 
-    const bridge = asObj(health.bridge), comfy = asObj(health.comfy), codex = asObj(health.codex), aging = asObj(health.aging);
+    const bridge = asObj(health.bridge), codex = asObj(health.codex), aging = asObj(health.aging);
     const lamp = (name: string, tone: 'ok' | 'fail' | 'warn' | '', note: string) => `<div class="lamp"><b><i class="dot ${tone}" aria-hidden="true"></i>${esc(name)}</b><small>${esc(note)}</small></div>`;
     const lamps = [
       lamp('QQ 连接', bridge.ws_connected === true ? 'ok' : bridge.ws_connected === false ? 'fail' : '', bridge.ws_connected === true ? `在线，累计断线 ${Number(bridge.disconnect_count ?? 0)} 次` : bridge.ws_connected === false ? '离线' : '未知'),
-      lamp('ComfyUI', comfy.ok === true ? 'ok' : comfy.ok === false ? 'fail' : 'warn', comfy.ok === true ? String(comfy.comfyui_version ?? comfy.backend ?? '可用') : comfy.ok === false ? '自检失败' : '自检中'),
       lamp('Codex 凭据', codex.ok === true ? 'ok' : codex.ok === false ? 'fail' : 'warn', codex.ok === true ? 'auth.json 就绪' : codex.ok === false ? '缺少或无法读取凭据' : '检查中'),
       lamp('DeepSeek 密钥', health.deepseek_key_present === true ? 'ok' : health.deepseek_key_present === false ? 'fail' : '', health.deepseek_key_present === true ? '已配置' : health.deepseek_key_present === false ? '未配置' : '未知'),
       lamp('聊天记录整理', aging.status === 'ok' ? 'ok' : aging.status === 'failed' ? 'fail' : '', agingNote(aging)),
@@ -361,17 +359,6 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     }).join('')}</ol>`;
     if (events.length === limit) body += `<p><a href="/tickets/${uri(ticket)}?after=${events.at(-1)!.id}&amp;limit=${limit}">下一页事件</a></p>`;
     body += '</section>';
-    if (/^[A-Za-z0-9_-]{1,128}$/.test(ticket)) {
-      const root = path.join(config.imagesDir,ticket);
-      const names = await fs.readdir(root,{recursive:true}).catch(()=>[] as string[]);
-      const thumbs: string[] = [];
-      for (const name of names.slice(0,200)) {
-        try { const parts = [ticket,...name.split(path.sep)]; await imageFile(config.imagesDir,parts);
-          const src = '/images/'+parts.map(uri).join('/'); thumbs.push(`<a href="${src}"><img loading="lazy" src="${src}" alt="生成图 ${esc(name)}"></a>`);
-        } catch { /* 只展示允许的位图 */ }
-      }
-      if (thumbs.length) body += `<section><h2>生成图片 <small>${thumbs.length} 张</small></h2><div class="thumbs">${thumbs.join('')}</div></section>`;
-    }
     return body;
   }
 

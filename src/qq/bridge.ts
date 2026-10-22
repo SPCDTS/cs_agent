@@ -1,14 +1,13 @@
 /**
  * createQQBridge：NapCat OneBot v11 —— WebSocket 收事件，HTTP 调 API。
- * 负责：重连与心跳、自回声过滤、去重、授权 / 触发、入站输入持久化（Inbox）、Outbox 幂等发送与发送规则；
- * 生图前缀路由仍按票据回复（第 2 阶段保留）。
+ * 负责：重连与心跳、自回声过滤、去重、授权 / 触发、入站输入持久化（Inbox）、Outbox 幂等发送与发送规则。
  */
 import { log } from "../shared/log.js";
 import { isOwner } from "../shared/owners.js";
 import { trace } from "../shared/trace.js";
 import { attachmentName } from "../media/attach.js";
 import type { DownloadHooks } from '../media/download.js';
-import { inboundFromRecord, threadKeyOf, ticketTarget } from '../channel/ticket.js';
+import { inboundFromRecord, threadKeyOf } from '../channel/ticket.js';
 import { downloadIncoming } from "./incoming.js";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
@@ -20,7 +19,7 @@ import type { QQBridge, QQBridgeConfig } from "./types.js";
 import { createOneBotClient, isRecord, numericId, isValidId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
 import { hasUsableContent, isAllowed, isTriggered, messageSegmentTypes, normalizeMessage, renderText, validatePolicy } from "./policy.js";
 import { prepareImages, type ImageSegment } from "./image.js";
-import { dedupeKey, inboundKey, isTicketId, ReplyStore } from "./reply-store.js";
+import { dedupeKey, inboundKey, ReplyStore } from "./reply-store.js";
 import { DEFAULT_SEND_RULES, isSendRuleError, type SendBreaker } from "../channel/send-rules.js";
 
 const GROUP_NAME_TTL_MS = 6 * 60 * 60_000;
@@ -113,7 +112,6 @@ class Bridge extends EventEmitter implements Channel {
   private readonly groupNameJobs = new Map<string, Promise<string | undefined>>();
   private readonly rawJobs = new Map<string, Promise<void>>();
   private readonly seen = new Set<string>();
-  private readonly locks = new Set<string>();
 
   constructor(config: QQBridgeConfig, internals: BridgeInternals = {}) {
     super();
@@ -550,20 +548,8 @@ class Bridge extends EventEmitter implements Channel {
 
   get inbox() { return this.requireStore(); }
 
-  async openImageTicket(key: string): Promise<ReplyTicketRecord> {
-    return this.requireStore().openImageTicket(key);
-  }
-
-  async abandonTicket(ticket: string): Promise<void> {
-    this.requireStore().abandonTicket(ticket);
-  }
-
   async getTicket(ticket: string): Promise<ReplyTicketRecord | null> {
     return this.requireStore().get(ticket);
-  }
-
-  async listPendingTickets(limit = 200, afterSeq = 0): Promise<ReplyTicketRecord[]> {
-    return this.requireStore().listPending(limit, afterSeq);
   }
 
   get outbox() { return this.requireStore(); }
@@ -627,62 +613,6 @@ class Bridge extends EventEmitter implements Channel {
     const current = stringField(login, "user_id");
     numericId(current);
     if (selfId && current !== selfId) throw new Error("NapCat 当前登录账号与收到消息的账号不一致。");
-  }
-
-  private async checkReplyIdentity(record: ReplyTicketRecord, signal?: AbortSignal): Promise<void> {
-    if (!isAllowed(this.config, record)) throw new Error("此发送者已不在允许回复的名单中。");
-    numericId(record.user_id);
-    await this.checkLogin(record.self_id, signal);
-  }
-
-  async reply(ticket: string, text: string, imagePaths: string[] = [], opts?: { signal?: AbortSignal }): Promise<ReplyResult> {
-    validateText(text);
-    if (!isTicketId(ticket)) throw new Error("回复凭据无效。");
-    if (this.locks.has(ticket)) throw new Error("此票据正在回复中，请勿重复发送。");
-    this.locks.add(ticket);
-    try {
-      return await this.replyLocked(ticket, text, imagePaths, opts?.signal);
-    } finally {
-      this.locks.delete(ticket);
-    }
-  }
-
-  private async replyLocked(ticket: string, text: string, imagePaths: string[], signal?: AbortSignal): Promise<ReplyResult> {
-    const store = this.requireStore();
-    const record = store.get(ticket);
-    if (!record) throw new Error("回复凭据不存在。");
-    const type = record.message_type;
-    const targetId = ticketTarget(record);
-    if (record.status === "sent") {
-      return { already_sent: true, message_id: record.reply_message_id ?? "", message_type: type, target_id: targetId };
-    }
-    if (record.status !== "pending") throw new Error("上一次回复结果不确定（previous result uncertain），请查看聊天记录，不要自动重发。");
-    const target = numericId(targetId);
-    numericId(record.user_id);
-    const images = prepareImages(imagePaths, this.config.imageRoot);
-
-    await this.checkReplyIdentity(record, signal);
-
-    signal?.throwIfAborted();
-    const limits = this.config.sendRules?.() ?? DEFAULT_SEND_RULES;
-    if (!this.underRules(ticket, `${type}:${targetId}`, () => store.beginTicketSend(ticket, limits, this.now()))) {
-      throw new Error("票据状态已改变，可能已在其他进程发送，请勿重发。");
-    }
-    // sending 已落盘后必须完成发送；此后不传 signal，失败仍按 uncertain 处理。
-    let data: unknown;
-    try {
-      data = await this.client.call(type === "group" ? "send_group_msg" : "send_private_msg", {
-        [type === "group" ? "group_id" : "user_id"]: target,
-        message: buildMessage(type, record.user_id, text, images),
-      }, { sending: true, timeoutMs: images.length ? Math.max(this.timeoutMs, IMAGE_TIMEOUT_MS) : this.timeoutMs });
-    } catch (error) {
-      store.markUncertain(ticket);
-      const detail = error instanceof OneBotError ? error.message : toError(error).message;
-      throw new OneBotError("QQ 回复结果不确定（uncertain），此票据不会自动重发：" + detail, true);
-    }
-    const messageId = stringField(data, "message_id");
-    store.markSent(ticket, messageId);
-    return { already_sent: false, message_id: messageId, message_type: type, target_id: targetId };
   }
 
   /** 发送规则拒绝时记观测事件；刚触发熔断时另记 send_breaker，由告警通知 owner（每次熔断一次）。 */

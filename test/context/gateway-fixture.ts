@@ -5,7 +5,7 @@ import type { CallBinding, CallMeta, ThreadGateway } from "../../src/context/med
 
 export function callBinding(threadKey: string, access: Access, extra: Partial<CallBinding> = {}): CallBinding {
   return { threadKey, turnId: "codex:t1", identity: { kind: "user", sender: "5" }, scope: threadKey === "owner" ? "private:1" : threadKey,
-    inputs: [], access, workdir: "/workspace/x", session: "thread-1", imageDir: "/data/images/x", imageRefs: [], ...extra };
+    inputs: [], access, workdir: "/workspace/x", session: "thread-1", imageDir: "/data/images/x", ...extra };
 }
 
 /** access：会话键 → 读取范围；turnOf：按调用元数据给出回合（缺省 codex:<meta.turnId ?? t1>）。 */

@@ -1,42 +1,23 @@
 # cs_agent 部署手册
 
-Compose 双服务：QQ（`napcat` 容器）→ `cs-agent` 规则分流 →（`奶龙:` 前缀）宿主机 ComfyUI 生图，或（其他消息）执行 agent（默认容器内 codex）→ 回到原 QQ 会话。设计见 `docs/ARCHITECTURE.md`。
+Compose 双服务：QQ（`napcat` 容器）→ `cs-agent` 的 Inbox / ThreadHost → 执行 agent（默认容器内常驻 codex app-server）→ 经 `send_message` 回到 QQ 会话。设计见 `docs/ARCHITECTURE.md` 与 `docs/DESIGN-resident-agent.md`。
 
-## 0. 使用方式（v3）
+## 0. 使用方式
 
-- **生图**：消息以 `奶龙:` 或 `奶龙：`（半角/全角冒号均可，`IMAGE_PREFIXES` 可改）开头，前缀后先解析空格分隔的内联选项，其余文字原样作为提示词，例如 `奶龙: 一只戴墨镜的柴犬，赛博朋克风`。群里照常 @机器人 后再写。前缀后为空时回复"奶龙: 后面写要画的内容"。成功回复"图片生成好了"+图；失败按类别回复：服务不可用 / 超时 / 内容被拒 / 其他。不经过任何模型。
-- **其他消息**：整条交给执行 agent（`AGENT_BACKEND`，默认 codex）。codex 可以联网搜索、检索聊天记录；cs-agent 自带的 `image_gen` MCP 默认关闭（`CODEX_IMAGE_GEN=off`），codex 内置技能不受影响。历史图片可通过 `qq_image` 召回，再用 `qq_view_image` 查看。
-- **顺序**：同一个群/私聊里严格按消息顺序逐条回复；不同会话并行（总数 ≤ `AGENT_CONCURRENCY`）。
+- **消息**：私聊直接发，群里 @机器人。整条交给执行 agent（`AGENT_BACKEND`，默认 codex）。codex 可以联网搜索、检索聊天记录；历史图片可通过 `qq_image` 召回，再用 `qq_view_image` 查看。
+- **生图**：本地 ComfyUI 生图（`奶龙:` 前缀路由、`generate_image`、`image_gen` MCP）已于 2026-10 移除，以 `奶龙:` 开头的消息也作为普通消息交给执行 agent。codex 自带的内置生图仍可用，输出见「Codex trace 与内置生图输出清理」。
+- **顺序**：每个群/私聊一个常驻线程：空闲时开一轮；同一发送者在回合进行中的新消息插话进当前回合，其他人的消息与定时任务排队到本轮结束。不同会话并行（进行中的回合数 ≤ `AGENT_CONCURRENCY`）。
 
 
-### 生图 v2 参数与参考图
+### 入站图片
 
-内联选项放在提示词之前，空格分隔、顺序任意；同类重复时最后一个生效，遇到第一个未知词后全部保留为提示词。
-
-| 选项 | 含义 |
-|---|---|
-| `16:9 / 9:16 / 4:3 / 3:4 / 3:2 / 2:3 / 1:1` | 宽高比，默认 1:1 |
-| `横 / 竖 / 方` | 16:9 / 9:16 / 1:1 的别名 |
-| `2mp / 2k` | 尺寸档位，默认 1mp；2k 方图是 2048×2048 |
-| `x2 / x3 / x4` | 张数，默认 1 |
-| `透明` | 生成带 alpha 的 PNG |
-
-例：`奶龙: 横 2k 一只在雪地里的橘猫`；`奶龙: 透明 x2 一只猫的贴纸`。附图编辑例：附上原图，再写 `奶龙: 把杯子改为红色，保留猫的姿态和背景`。图中文字加引号并说明位置、字体，不需要 SD 式咒语。
-
-只下载已授权且触发机器人的本条消息图片，最多 3 张、每张 10 MiB，并检查 PNG/JPEG/WebP/GIF 魔数。优先使用 OneBot array 图片段的 HTTP(S) `data.url`；缺失或失效时用 `data.file` 调 `get_image` 获取新 URL；不读 NapCat 返回的宿主机路径。校验或下载失败时明确报错；发送者超额及截止时间耗尽按 skipped 无图继续。正常 URL 字段见 [NapCat 图片段实现](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/api/msg.ts)，URL 过期刷新见 [文件文档](https://napneko.github.io/develop/file)。本次只用假 OneBot 验证，未调用真实 QQ；本机是否关闭图片 URL 上报仍需实际部署后确认。
-
-编辑遵循官方模板：编码器的 LATENT 接采样器，因此输出比例取首张参考图；size 控制像素预算，aspect 不会强行裁切参考图。前缀自动附上本票据全部图片；codex 可从 `IMAGE_REFS` 中选择，最多 3 张。图片原始 URL 不存入聊天历史，下载文件保留在 `DATA_DIR/incoming/<ticket>/`，目录超过 7 天由每日衰老任务清理（按目录 mtime，不跟随软链接）。
-
-**透明输出的设计偏差**：按用户后续决定，使用 Qwen 2.1 原生 RGBA：`KSampler → VAEDecode → SaveImageAdvanced(png, 8-bit, sRGB)`，沿用 `qwen_image_2.1_vae_bf16.safetensors`。没有采用设计 §4.9 的 `EmptyQwenImageLayeredLatentImage`：它为另一套 layered 模型创建 5D、16 通道 latent，而 2.1 使用 4D、64 通道，维度/通道不匹配。本机已有所需模型，不需要额外 RGBA VAE，也没有下载任何模型。启动自检在 healthz 的 comfy.transparent 中报告可用性；依赖缺失时返回 `透明输出未启用：缺少 <文件名>`，提交透明请求时再次检查。
-
-升级时若原环境已设置 `COMFY_WORKFLOW_FILE`，它仍是自定义覆盖。要启用上述参数化图，需由运维清空该值后部署；本次没有更改现用 .env 或重启运行容器。自定义图仅替换 prompt、seed，并为恢复对账更新保存节点前缀；其他尺寸、参考图、透明等行为由该图自行定义。
+只下载已授权且触发机器人的本条消息图片，最多 3 张、每张 10 MiB，并检查 PNG/JPEG/WebP/GIF 魔数。优先使用 OneBot array 图片段的 HTTP(S) `data.url`；缺失或失效时用 `data.file` 调 `get_image` 获取新 URL；不读 NapCat 返回的宿主机路径。下载完成的图片以 `[本轮参考图]` 列给模型；图片原始 URL 不存入聊天历史，文件保留在 `DATA_DIR/incoming/<入站键>/`，目录超过 7 天由每日衰老任务清理（按目录 mtime，不跟随软链接）。校验或下载失败时明确报错；发送者超额及截止时间耗尽按 skipped 无图继续。正常 URL 字段见 [NapCat 图片段实现](https://github.com/NapNeko/NapCatQQ/blob/main/packages/napcat-onebot/api/msg.ts)，URL 过期刷新见 [文件文档](https://napneko.github.io/develop/file)。本次只用假 OneBot 验证，未调用真实 QQ；本机是否关闭图片 URL 上报仍需实际部署后确认。
 
 ## 1. 宿主机前置条件
 
 1. **Docker Desktop**（Windows），能使用 `host.docker.internal`。
 2. **NapCat** 默认运行在 Compose 内网，地址为 `http://napcat:3000` / `ws://napcat:3001`，使用同一 `NAPCAT_TOKEN`，`messagePostFormat: array`。首次使用按下文「NapCat 容器」播种配置并扫码。也可通过环境变量指向宿主机 NapCat：`host.docker.internal:3000/3001`；原宿主机 `agent-http` / `agent-ws` 的 loopback 绑定可保留。迁移时沿用已有 `NAPCAT_TOKEN`。
-3. **ComfyUI** 用 `D:\Tools\ComfyLocal\start.ps1` 启动（127.0.0.1:8188），不需要改监听地址。
-4. **Codex 提供者**：默认经宿主机 magpie，按下文「codex 经 magpie」配置 gateway key。仅 `CODEX_PROVIDER=openai` 直连时需要容器内 ChatGPT 凭据，在仓库根目录运行
+3. **Codex 提供者**：默认经宿主机 magpie，按下文「codex 经 magpie」配置 gateway key。仅 `CODEX_PROVIDER=openai` 直连时需要容器内 ChatGPT 凭据，在仓库根目录运行
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\init-auth.ps1
    ```
@@ -62,27 +43,19 @@ Copy-Item .env.example .env
 | `NAPCAT_TOKEN` | 空 | HTTP/WS 共用的 OneBot token；播种脚本要求非空，迁移时保留原值 |
 | `NAPCAT_WEBUI_TOKEN` | 空 | 随机生成的 WebUI 登录口令，与 OneBot token 分开；已有 WebUI 配置不会被此变量覆盖 |
 | `QQ_BOT_ACCOUNT` | 空 | 可选 QQ 号，传给 NapCat `ACCOUNT` 快速登录；首次仍需扫码 |
-| `IMAGE_PREFIXES` | `奶龙:,奶龙：` | 生图前缀，逗号分隔，逐字匹配（大小写与全/半角按原样），较长的优先；留空用默认 |
-| `AGENT_BACKEND` | `codex` | 执行 agent 后端：`codex`（容器内 codex 固定线程）或 `pi`（进程内 pi-durable 长期会话，工具可联网检索、查历史、生图） |
+| `AGENT_BACKEND` | `codex` | 执行 agent 后端：`codex`（容器内常驻 codex app-server）或 `pi`（进程内 pi-durable 长期会话，工具可联网检索、查历史） |
 | `AGENT_BACKEND_OVERRIDES` | 空 | 按会话覆盖后端：`group:200000001=pi,private:10000001=codex`。格式错误时启动失败。后端按会话（线程）选择：owner 的所有账号共用 owner 线程，按**首个 owner 账号**（`QQ_OWNER` 列表第一个）的 `private:<QQ号>` 覆盖选择，其他 owner 账号的覆盖项对 owner 线程无效。切换（含面板修改）在会话空闲且旧后端在该会话没有后台工作（pi 子 agent 在跑、旧 exec 未退出）后的下一轮生效，两个后端的记忆互相独立 |
 | `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` | `deepseek` / `deepseek-flash` | 执行模型：用于 pi 后端与聊天记录日/周摘要（DeepSeek OpenAI 兼容接口 `https://api.deepseek.com`）。也可切换到 `openai-codex`（复用 `auth.json` 的 ChatGPT OAuth，如 `gpt-6-luna`）、`openai`、`anthropic` 等，后两者需设置对应的 `*_API_KEY` |
 | `DEEPSEEK_API_KEY` | 空 | DeepSeek API key；写作 `DEEPSEEK_APIKEY` 也可（启动时自动映射）。provider 为 `deepseek` 时缺少密钥，agent 启动即退出 |
 | `AGENT_THINKING_LEVEL` | `low` | 意图模型思考档位。deepseek-flash 支持 off/low/high/max，其他值就近调整（如 medium → high）并记 warn 日志 |
-| `AGENT_CONCURRENCY` | 2 | 同时处理的 QQ 消息数，多出来的排队（排队状态已持久化） |
-| `COMFY_MODE` | `mcp` | 两种模式共用参数化 Qwen 工作流；mcp 写临时 JSON 后调用 run_workflow，http 直接 POST /prompt |
-| `COMFY_WORKFLOW_FILE` / `COMFY_PROMPT_NODE` | 空 / `4` | 可选自定义 API 图覆盖；留空使用生成器，旧部署显式配置不会自动清除 |
-| `COMFY_CHECKPOINT` | 空 | 旧接口兼容项，内置 Qwen 生成器不使用 |
-| `COMFY_QWEN_CACHE` | `false` | `true` 时在 UNETLoader 后插入 QwenImage21Cache，需本机安装对应节点 |
+| `AGENT_CONCURRENCY` | 2 | 同时进行中的回合数上限（不同会话并行，同一会话一次一轮）；多出来的开轮请求排队，插话不占名额（排队状态已持久化） |
 | `CODEX_SANDBOX` | `workspace-write` | 如果容器内 codex 报 sandbox/landlock 错误，改为 `danger-full-access`（这时容器本身就是沙箱） |
 | `ATTACH_FILE_MAX_MB` / `ATTACH_FILES_MAX` | 20 / 3 | 单个文件上限（MiB）与每轮文件数；同内容按 sha256 去重 |
 | `ATTACH_FILE_DENY_EXT` | `.exe,.bat,.cmd,.ps1,.vbs,.js,.scr,.msi,.com,.lnk` | 附件扩展名黑名单，逗号分隔、不区分大小写 |
-| `CODEX_IMAGE_GEN` | `off` | cs-agent 的生图 MCP：`off` 不注册、不注入参数，`on` 恢复；不影响 pi 与规则分流 |
-| `COMFY_TIMEOUT_SEC` | 300 | codex 不设单轮时限（停滞由看门狗判定）；生图收取预算按 1mp/2mp/2k 分别为 120/240/600 秒 × count，上限 COMFY_TIMEOUT_SEC；默认额外收取 2 次，始终使用原 prompt_id |
-| `IMAGE_GEN_MCP_WAIT_SEC` / `IMAGE_COLLECT_EXTENSIONS` | 90 / 2 | MCP 最多等待参数预算与前者的较小值；超时交给 agent 的 lateImages 阶段，后者控制两条生图路径的额外收取窗口数 |
 | `CODEX_PROVIDER` | `magpie` | `magpie\|openai`；默认经宿主机网关，`openai` 恢复直连 |
 | `CODEX_MAGPIE_URL` | `http://host.docker.internal:3425/v1` | Responses API 根地址；入口脚本只接受安全字符组成的 HTTP(S) URL，不能含凭据、查询或片段；尾斜杠会移除 |
 | `CODEX_MAGPIE_KEY` | 空 | 基础配置解析允许为空，magpie runner 启动时必填；只经环境变量注入并注册脱敏 |
-| `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `codex/gpt-6.1-sol` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节）。`CODEX_REASONING_EFFORT`（`low/medium/high/xhigh/max`）固定使用，每轮也以 `-c model_reasoning_effort="…"` 显式传入（日志 `codex backend done` 的 `effort` 字段）；v3 不再按请求选择 |
+| `CODEX_MODEL` / `CODEX_REASONING_EFFORT` | `codex/gpt-6.1-sol` / `high` | 写入受管的 `./data/codex/config.toml`（见第 4 节）。旧部署 `.env` 中残留的 `COMFY_*`、`IMAGE_PREFIXES`、`CODEX_IMAGE_GEN`、`IMAGE_COLLECT_EXTENSIONS`、`IMAGE_GEN_MCP_WAIT_SEC` 已不再读取，可删除。`CODEX_REASONING_EFFORT`（`low/medium/high/xhigh/max`）固定使用，每轮也以 `-c model_reasoning_effort="…"` 显式传入（日志 `codex backend done` 的 `effort` 字段）；v3 不再按请求选择 |
 
 > codex 子进程只拿到最小环境变量：`PATH`、`HOME`、`LANG`/`LC_ALL`、`TERM`、`CODEX_HOME`、`NO_COLOR=1`，以及设置了的 `HTTP(S)_PROXY`/`NO_PROXY`。`NAPCAT_TOKEN`、`*_API_KEY` 等配置不会传给 codex；magpie 模式只额外注入专用 `CODEX_MAGPIE_KEY`，直连模式不传该 key。
 
@@ -103,7 +76,7 @@ CODEX_MODEL=codex/gpt-6.1-sol
 
 入口脚本写入 `model_provider = "magpie"` 与 Responses provider，指定 `supports_websockets = false`，直接使用 HTTP 流而不先尝试 WebSocket。容器到默认网关地址为 HTTP，magpie 到上游为 HTTPS。模型默认是 `codex/gpt-6.1-sol`。`CODEX_MODEL` 和运行时 `codexModel` 必须与 `GET $CODEX_MAGPIE_URL/codex/models` 返回的 `slug` 完全一致，不省略或自动补齐前缀。Codex 0.163 按完整 slug 查找模型元数据；短名即使能被网关路由，也会使 Codex 回退到默认 `ModelInfo`（例如 272k 而非目录中的 500k 上下文，缺少 Responses Lite 等能力）。
 
-配置文件仅保存 `env_key = "CODEX_MAGPIE_KEY"`。主进程构造 CodexRunner 时检查 key，缺失或纯空白会以「配置无效：CODEX_PROVIDER=magpie 需要 CODEX_MAGPIE_KEY」启动失败；目录查询、exec 和 resume 共用同一份受控环境。基础 `loadConfig` 不检查 key，以便 qq_context / image_gen MCP 继续读取自身配置；MCP 不新增 gateway key 透传。key 加入主进程脱敏表。由于 key 不落盘，`config.toml` 无需加入 deny_read，原有凭据和数据禁读规则不变。
+配置文件仅保存 `env_key = "CODEX_MAGPIE_KEY"`。主进程构造 CodexRunner 时检查 key，缺失或纯空白会以「配置无效：CODEX_PROVIDER=magpie 需要 CODEX_MAGPIE_KEY」启动失败；目录查询、exec 和 resume 共用同一份受控环境。基础 `loadConfig` 不检查 key，以便 qq_context / im MCP 继续读取自身配置；MCP 不新增 gateway key 透传。key 加入主进程脱敏表。由于 key 不落盘，`config.toml` 无需加入 deny_read，原有凭据和数据禁读规则不变。
 
 目录地址为 `<CODEX_MAGPIE_URL>/codex/models`（默认 `/v1/codex/models`）；`codex debug models` 的 slug 仅精确匹配完整名称，取 `context_window` 原值。保留离线目录签名与 `models_cache.json` 回退，缓存也只匹配相同 slug。设置页只读显示「codex：经 magpie（URL）」或「codex：直连」。
 
@@ -125,7 +98,6 @@ CODEX_MODEL=codex/gpt-6.1-sol
 | NapCat WS | `0.0.0.0:3001` | 不发布 | `cs-agent` 接收 OneBot 事件 |
 | NapCat WebUI | `6099` | `127.0.0.1:${NAPCAT_WEBUI_PORT:-6099}` | 登录、扫码与配置；宿主机旧 NapCat 仍占用 6099 时在 `.env` 设 `NAPCAT_WEBUI_PORT=6098` |
 | cs-agent HTTP | `0.0.0.0:8787` | `127.0.0.1:8787` | 观测面板与健康检查 |
-| 宿主机 ComfyUI | `host.docker.internal:8188` | 沿用宿主机 `127.0.0.1:8188` | 生图，迁移不改变此地址 |
 
 ### 首次登录与迁移
 
@@ -182,29 +154,26 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 
 Compose 将容器 HTTP 监听设为 0.0.0.0:8787，宿主机仅发布 127.0.0.1:8787；本地直接运行仍默认监听 127.0.0.1。`/healthz` 的 JSON 和状态码不变，返回：
 - `ws_connected`：NapCat WS 是否在线（离线时 HTTP 503，容器显示 unhealthy）
-- `comfy`：启动时 comfy 的自检结果（mcp：`server_info`；http：`/system_stats`）
 - `codex`：magpie 模式检查 key 已配置（不探测网关），openai 直连检查 `auth.json` 是否存在；同时报告当前固定会话 id
 - `pi.threads`：`{count, keys: [...]}`，仅显示启用的会话数量和键，不返回 id 或聊天内容
-
-> comfy-cli 1.22 在 local 模式下拒绝从非 loopback 主机获取 `/object_info`（SSRF 防护），所以 mcp 模式下 agent 会在容器内的 `127.0.0.1:${COMFY_LOOPBACK_PORT:-8188}` 启动一个 TCP 转发，指向 `COMFYUI_URL`，再把 comfy-mcp 指向这个 loopback 地址。日志中出现 `comfy loopback proxy listening` 即表示转发已启动。
 
 ## 4. 数据卷
 
 | 路径 | 内容 |
 |---|---|
 | `./data/pi.sqlite` / `./data/pi-threads.json` | pi 长期会话按 `owner`（owner 私聊）或 `group:<id>` / `private:<id>` 隔离；JSON 是 SQLite 映射的原子写出镜像。旧 owner 保留，旧 shared 停用且仅记录一次日志，绝不复用混合历史。同键串行、不同键并行，受 AGENT_CONCURRENCY 限制 |
-| `./data/agent.sqlite` | pi-durable 会话、任务和派发索引（崩溃后自动续跑） |
+| `./data/agent.sqlite` | 派发 harness：每会话的宿主文档 `cs.thread-host`（空闲/忙、当前回合、排队输入）、授权与定时任务（崩溃后自动恢复） |
 | `./data/codex/` | `CODEX_HOME`：`auth.json`（codex 仅直连时需要）、`config.toml`、sessions。**`config.toml` 是受管文件**：入口脚本每次启动都按 `CODEX_PROVIDER` / `CODEX_MAGPIE_URL` / `CODEX_MODEL` / `CODEX_REASONING_EFFORT` / `CODEX_WEB_SEARCH` / `CODEX_WEB_SEARCH_CONTEXT` / `CODEX_BROWSER` / `CODEX_MCP_APPROVAL_MODE` / `QQ_CONTEXT_MAX_CHARS` / `CODEX_REMOTE_PLUGINS` 重写（含 `web_search`、可选 `[features] plugins = false` 与 `remote_plugin = false`、`[mcp_servers.qq_context]`、可选 `[mcp_servers.browser]`），写完后按 `CODEX_PLUGIN_PRUNE` 清理远程插件缓存；手工修改会被覆盖；要改请改 `.env` 后重启 |
-| `./data/qq-messages.sqlite`（+ `-wal` / `-shm`） | 统一上下文消息库：允许范围内的全部 QQ 消息（含不触发的群消息）、机器人回复行（动作、生图提示词、codex 推理强度、状态）、日/周摘要。**按聊天记录保管**。撤回的消息会删除原始行 |
+| `./data/qq-messages.sqlite`（+ `-wal` / `-shm`） | 统一上下文消息库：允许范围内的全部 QQ 消息（含不触发的群消息）、机器人发出的消息、日/周摘要。**按聊天记录保管**。撤回的消息会删除原始行 |
 | `./data/prompts/system.md` | **已弃用**：v2 意图模型的系统提示。v3 规则分流不经模型，不再读取它；文件保留不删，存在时启动日志记一行 `system.md is deprecated and no longer used` |
 | `./data/codex-threads.json` | 两条固定 codex 线程：`{"owner": {thread_id, created_at, updated_at}, "shared": {…}}`。owner 私聊（`QQ_OWNER`）用 `owner`，所有群和其他私聊共用 `shared`；删掉某个键（或整个文件），对应线程下一条请求就新建。旧版的单线程 `codex-session.json` 在新文件不存在时自动迁移为 `owner`（日志 `codex thread migrated`），旧文件改名为 `codex-session.json.migrated` |
-| `./data/incoming/<ticket>/` | 本票据参考图（≤3×10 MiB），票据 source_images 保存绝对路径供恢复；7 天清理，对 codex 命令沙箱禁读、不可写 |
-| `./data/prompts/agent.md` | 启动时只播种缺失的模板，包含生图参数与提示词指引；pi 每次模型请求热加载，保留不跨会话转述私人内容的规则 |
+| `./data/incoming/<入站键>/` | 触发消息的参考图（≤3×10 MiB），入站记录保存绝对路径供恢复；7 天清理，对 codex 命令沙箱禁读、不可写 |
+| `./data/prompts/agent.md` | 启动时只播种缺失的模板（已部署文件中旧的 generate_image 生图指引需运维手工删除）；pi 每次模型请求热加载，保留不跨会话转述私人内容的规则 |
 | `./data/prompts/codex.md` | codex 自定义系统提示（`${DATA_DIR}/prompts/codex.md`）：首次启动创建默认回复规则、聊天记录工具纪律、联网与浏览器；已有文件不覆盖。已部署文件中的旧“生图提示词指引”需由运维手工删除。面板保存校验 revision、拒绝空白与超过 64 KB 的内容；当前文件或提交内容命中已注册秘密／凭据样式时拒绝保存。保存后立即原子重写全局 AGENTS.md，下一次 codex 调用生效，无需重启容器 |
-| `./data/images/<ticket>/` | 生成的图片。pi / image_gen 每次生图写独立 `call-<n>/`；pending-jobs.json 在提交前记录意图、提交后记录 prompt_id，image-files.json 逐张记录下载状态。重启只收取/对账，不重提；坏 marker 隔离为 .bad-<时间戳>，回复保留正文并提示附件失败。未确认远端完成时保留参考图清理清单 |
+| `./data/images/<会话键>/` | `send_message` 发送图片前复制的 Outbox 副本（会话键中的冒号换成下划线）。旧版本地生图留下的 `<ticket>/call-<n>/`、`pending-jobs.json` 等不再使用，可删除 |
 | `./data/files/<ticket>/` | 文件附件副本与 `manifest.json`（原路径、名字、大小、sha256、来源）；QQ 上传使用 base64，无需与 NapCat 共享卷。票据清理时删除，命令沙箱禁读、不可写 |
-| `./data/tickets/<ticket>/` | 票据工作目录：codex 回合的最后一条消息 `codex-last.txt`（崩溃恢复时据此不重复询问 codex）。reply 与派发终态对账均幂等清理；发送后、清理前崩溃会在恢复时补删，图片目录不动。入口脚本启动时创建。对 codex 命令沙箱禁读、不可设为可写目录 |
-| `./data/*`（QQBridge） | 票据与去重 SQLite |
+| `./data/tickets/<ticket>/` | 旧版票据工作目录（`codex exec` 时代的 `codex-last.txt`），当前不再使用，入口脚本也不再创建；仍对 codex 命令沙箱禁读、不可设为可写目录 |
+| `./data/qq-bridge.sqlite`（QQBridge） | 入站输入（inbound）、Outbox、去重与发送规则计数；旧 `tickets` 表只读保留（召回旧回复时核对发出状态），不再写入 |
 | `./data/codex/AGENTS.md` | codex 全局行为指引的**生成文件**：通用保密与会话隔离说明 + 两个换行 + 用户可编辑的 `prompts/codex.md`，保留标记 `<!-- cs-agent-agents-template v5 -->`。main 启动、store 保存和每轮 preparePrompt 时生成；编辑行为指引请通过面板或磁盘修改 `codex.md`，不要手改生成文件。具体安全规则、实际可写目录、聊天图片与发送图片/文件规则位于会话域 AGENTS.md |
 | `./workspace/` | codex 各会话工作区的父目录。运维可维护 `AGENTS.override.md` 或 `AGENTS.md`，runner 将选中的非空指引拼入每个会话的受管文件；服务不再播种占位说明，也不再识别替换旧 V1/V2 模板 |
 | `./workspace/<key>/AGENTS.md` | **受管规则文件**（key 中冒号换成下划线）。runner 每轮在 exec/resume 前生成，首行 `<!-- cs-agent-managed-workspace-agents v1 -->`，第二行“由 cs-agent 每轮生成，改动会被覆盖。”；包含按实际权限渲染的规则及可选的“运维工作区指引”。仅文件缺失或全文不同时原子写入，内容相同保留 mtime。模型改写后下一轮会恢复，不作为可编辑行为指引入口 |
@@ -215,7 +184,7 @@ Codex 每个模型的完整基础指令保存在 `DATA_DIR/prompts/codex-base/<�
 
 ### 聊天记录（统一上下文）
 
-- **入库**：QQBridge 把允许群的全部消息、允许用户的私聊写入 `qq-messages.sqlite`；收到触发消息时写入一行 `[我] → 处理中`，回复后更新为 `生图 prompt=… → 已发送 N 张图` / `codex(high) → "摘要"` / `失败`。
+- **入库**：QQBridge 把允许群的全部消息、允许用户的私聊写入 `qq-messages.sqlite`；机器人每条发出的消息（含出错提示）按真实 message_id 写入一行 `[我]`，可被引用和检索。
 - **衰老任务**：每天 `HISTORY_SUMMARY_HOUR`（默认 3）点运行，时间按**容器本地时区**——默认 UTC，即北京时间 11 点；想按北京时间 3 点运行，在 `docker-compose.yml` 的 `environment` 加 `TZ: Asia/Shanghai`（同时影响聊天记录里显示的 HH:MM）。任务内容：前一天（及更早未处理的日子）≥5 条消息的会话用意图模型生成 ≤400 字日摘要；已结束的自然周（周一起）的日摘要合并为周摘要；原始消息超过 `HISTORY_RAW_DAYS`（30）且所在日已被日/周摘要覆盖时删除——摘要失败的日子保留原始消息、下次重试，未被覆盖的（摘要一直失败或当天不足 5 条）最多保留 `HISTORY_RAW_HARD_MAX_DAYS`（90）天；摘要超过 `HISTORY_SUMMARY_DAYS`（180）删除。上次运行早于 24 小时时，启动后立即补跑。日志：`history aging done`（含 day_summaries / week_summaries / failed / purged_*）。模型失败只计数跳过，下次再试，不影响主流程。
 - **按需图片召回**：消息默认只存 `[image]`，不保存 URL、不下载到媒体库。两个后端的 `qq_image(message_id)` 只返回路径文本；查看图片使用文件工具。成功召回后正文变为 `[image:<路径>]`，媒体文件随原始消息保留，撤回/清理删除关联，每日 GC 回收超过一天且无引用的文件。
 - **召回配置**：`MEDIA_RECALL_PORT=8790`，主进程仅监听 `127.0.0.1`，无需发布容器端口；`MEDIA_RECALL_MAX_PER_TICKET=5`，正整数。Codex 每个会话线程一个随机令牌（经 thread/start、thread/resume 的 config 写入该线程的 MCP 环境，app-server 重启或线程重新加载即作废重发），每次调用由主进程按 `_meta` 确认属于会话当前回合后才按本轮身份求出范围，额度按回合计；MCP 仅持只读库连接，不持 NapCat 凭据。pi 直接调用同一召回服务，预算保存在本轮请求文档。
@@ -250,36 +219,22 @@ docker compose exec -e QQ_ACCESS=group:200000001 cs-agent sh -c 'printf "%s\n" "
 
 ### 残余风险
 
-- codex 执行的命令读不到 `auth.json`、会话、SQLite 库和图片（deny_read，见「7. codex 权限」），但 codex 进程本身（不受沙箱约束）持有这份 ChatGPT 凭据；不在 deny_read 中的 `/data` 文件（`config.toml`、`prompts/`、`workflows/`）命令仍可读取，其中 `/data/workflows` 不在默认可写根中，受管 AGENTS.md 也不再介绍它。MCP 服务进程（`qq_context`、浏览器）同样不受命令沙箱约束：浏览器的 `file:` 访问与任意代码执行工具已用工具白名单和 playwright-mcp 自带拦截封住（见上），但这依赖 playwright-mcp 与 Chromium 的实现，升级 `@playwright/mcp` 或 `@openai/codex` 后需要重新实测：`scripts/verify-browser-mcp.mjs` 在镜像内经 `codex app-server` 调用浏览器工具并检查（不调用模型；用法见脚本开头，务必挂假的 `/data`），全部通过时退出码为 0。`AGENTS.md` 只约束模型行为，不是访问控制。**只把能信任使用这个工作区的人加入 `QQ_ALLOW_USERS` / `QQ_ALLOW_GROUPS`**。
-- **浏览器 MCP 的网络访问**：`playwright-mcp` 进程由 codex 作为 MCP 服务启动，**不受 codex 命令沙箱约束**，可以访问容器能到达的任何网络。宿主机 ComfyUI（`host.docker.internal:8188`，无鉴权）、Compose 内网 NapCat（`napcat:3000/3001`，需要 token，也可指向宿主机）以及容器自身的 healthz 都在这个范围内。`--blocked-origins` 阻止列表覆盖宿主机地址和内网/链路本地 IP，但未列入 `napcat` 这个服务名；NapCat 仍靠 OneBot token 鉴权。@playwright/mcp 明确说明该列表**不是安全边界**：
-  - 不拦截重定向：公网页面 302 到 `http://host.docker.internal:8188/…` 时不会被阻止；
+- codex 执行的命令读不到 `auth.json`、会话、SQLite 库和图片（deny_read，见「7. codex 权限」），但 codex 进程本身（不受沙箱约束）持有这份 ChatGPT 凭据；不在 deny_read 中的 `/data` 文件（`config.toml`、`prompts/`）命令仍可读取。MCP 服务进程（`qq_context`、浏览器）同样不受命令沙箱约束：浏览器的 `file:` 访问与任意代码执行工具已用工具白名单和 playwright-mcp 自带拦截封住（见上），但这依赖 playwright-mcp 与 Chromium 的实现，升级 `@playwright/mcp` 或 `@openai/codex` 后需要重新实测：`scripts/verify-browser-mcp.mjs` 在镜像内经 `codex app-server` 调用浏览器工具并检查（不调用模型；用法见脚本开头，务必挂假的 `/data`），全部通过时退出码为 0。`AGENTS.md` 只约束模型行为，不是访问控制。**只把能信任使用这个工作区的人加入 `QQ_ALLOW_USERS` / `QQ_ALLOW_GROUPS`**。
+- **浏览器 MCP 的网络访问**：`playwright-mcp` 进程由 codex 作为 MCP 服务启动，**不受 codex 命令沙箱约束**，可以访问容器能到达的任何网络。宿主机上的服务（经 `host.docker.internal`）、Compose 内网 NapCat（`napcat:3000/3001`，需要 token，也可指向宿主机）以及容器自身的 healthz 都在这个范围内。`--blocked-origins` 阻止列表覆盖宿主机地址和内网/链路本地 IP，但未列入 `napcat` 这个服务名；NapCat 仍靠 OneBot token 鉴权。@playwright/mcp 明确说明该列表**不是安全边界**：
+  - 不拦截重定向：公网页面 302 到 `http://host.docker.internal:<端口>/…` 时不会被阻止；
   - 按 URL 主机名匹配，不看解析结果：解析到内网 IP 的公网域名（如 `127.0.0.1.nip.io` 之类、DNS rebinding）不会被阻止；
   - 只覆盖浏览器发出的请求，与 codex 自身的 web_search 无关。
   如需关闭浏览器访问，可设 `CODEX_BROWSER=none`；网络隔离需要按目标服务在宿主机或容器网络实施访问控制。
 - **`/data/prompts` 可写**（用户接受的风险）：codex 的 owner 会话命令可以改写 `/data/prompts` 下的文件。v3 中 `system.md` 已不再被读取；pi 后端从这里热加载 `agent.md`，修改会在下一次模型请求生效。会话域受管 AGENTS.md 规定只在 owner 私聊明确要求时才修改；是否得到明确要求仍靠模型遵守，非 owner 会话的写入由沙箱禁止。若要连 owner 也禁止，需收紧 `codexWorkspacePolicy`；仅修改 `CODEX_WRITABLE_ROOTS` 不会改变业务回合的固定权限。
-- **显式开启 image_gen 后可被群成员触发**：任何能让 codex 处理消息的发送者都可以间接让它生图（每回合最多 4 次，图片只写到本票据目录、只随本条回复发出）。
 - **聊天记录**：群成员可以让 codex 检索本群 30 天内的原始消息和 180 天内的摘要（与能翻群记录一致）；owner 私聊可以检索全部会话。`./data/qq-messages.sqlite` 按聊天记录保管。
 
 ### 统一发送工具（im）
 
-`send_message({ text, images: [path], files: [{ path, name? }] })` 立即发送文字和图片，再上传文件，name 缺省取原文件名。来源只能是本轮工作区普通文件或当前 QQ_ACCESS 范围已召回媒体，拒绝软链接；文件名取 basename、去控制字符、最多 120 字符。图片魔数、单张 10 MiB、合计 20 MiB、每条消息 4 张限制沿用回复通道。不限每回合条数；所有出站消息受 bridge 发送规则约束（默认每会话每分钟 6 条、每小时 60 条触发会话熔断 60 分钟、全局每分钟 30 条触发全局熔断 10 分钟），在面板设置页"发送规则"调整或解除熔断。当前票据的生成图片与绑定的 Codex 线程 generated_images 目录也可作为来源。
+`send_message({ text, images: [path], files: [{ path, name? }] })` 立即发送文字和图片，再上传文件，name 缺省取原文件名。来源只能是本轮工作区普通文件或当前 QQ_ACCESS 范围已召回媒体，拒绝软链接；文件名取 basename、去控制字符、最多 120 字符。图片魔数、单张 10 MiB、合计 20 MiB、每条消息 4 张限制沿用回复通道。不限每回合条数；所有出站消息受 bridge 发送规则约束（默认每会话每分钟 6 条、每小时 60 条触发会话熔断 60 分钟、全局每分钟 30 条触发全局熔断 10 分钟），在面板设置页"发送规则"调整或解除熔断。绑定的 Codex 线程 generated_images 目录（codex 内置生图输出）也可作为来源。
 
 文件在文字（含图片）确认发送后逐个上传到原会话，群聊放根目录。每次上传前持久化 Outbox 的文件状态 `sending`，成功保存 `sent` 和 `file_id`，异常保存 `uncertain`；恢复只发送 `pending`，遗留 `sending` 转 `uncertain`。文字已发出但附件未结束时保留派发索引；观测 `send_message` 的 files 字段记录名字、大小和状态；票据结束时删除 Outbox 副本，仍有 pending/sending 文件的消息目录保留，避免破坏恢复。上传超时至少 30 秒，每 MiB 加 2 秒，最高 120 秒。
 
 runner 每轮通过 Codex 子进程环境传入 `IM_TOKEN` 与 `QQ_RECALL_TOKEN`，受管 im / qq_context 配置各自用 env_vars 转发；令牌不进入 argv，端口仍通过非敏感配置注入。令牌在主进程绑定票据、来源与工作区，结束即撤销；模型不能选目标。发送网关通过 media/attach.ts 校验普通文件、软链接、realpath 与来源权限。旧附件目录参数仍由 runner 注入，但 qq_context 不再读取它们或提供发送工具。
-
-### 生图 MCP（image_gen）
-
-默认 `CODEX_IMAGE_GEN=off`，不写入两个 image_gen 配置段，也不注入 IMAGE_TICKET_DIR、IMAGE_REFS 或其 QQ_ACCESS。以下仅在 `CODEX_IMAGE_GEN=on` 时适用。受管 AGENTS.md 和新播种的 codex 提示词不再包含生图说明。
-
-- 生图提交前写入票据目录的 `pending-jobs.json`；慢任务在 MCP 等待上限后返回“图片仍在生成……无需重试”。agent 在 `handle → lateImages → settle` 中按原 prompt_id 收取到原 `call-<n>/`，结果通过 #late 消息发送（最多 4 张）；这期间同 scope 的后续消息继续排队。最终失败追加“有一张图生成超时未能发送”。
-- `lateImages` 将各任务的参数、期限、延期次数、对账步骤和结果保存到 TicketDoc；unknown 先按前缀对账，绝不重新提交。全部结果落盘后删除清单，恢复时复用已下载的有效图片或已保存的结果。参考图清单保留至最终收取结束再覆盖清理。`IMAGE_GEN_MCP_WAIT_SEC` 由启动脚本透传给 MCP；部署时需将该变量传入容器，未设置默认 90 秒。
-- 工具参数与前缀共用 ImageOptions：prompt、negative_prompt、aspect、size、count、seed、reference_images、transparent。每轮（含 resume）注入 IMAGE_REFS，没图时显式注入空串，防止旧轮次路径继承；只允许本票据 incoming 下的允许列表文件，校验绝对路径、字符、realpath、大小、魔数。
-- 参考图上传到 ComfyUI input 的每票据子目录。若 comfy-mcp 的 upload_file 支持 paths 和 subfolder 则使用它；本机安装版本只有 paths/overwrite，不能指定子目录，因而回退到同 COMFYUI_URL 的 HTTP /upload/image。真实冒烟覆盖 HTTP 上传，MCP 两种能力分支由假服务测试。
-
-- 受管 `config.toml` 中的 `[mcp_servers.image_gen]`：`node /app/dist/mcp/image-gen.js`，`tool_timeout_sec = COMFY_TIMEOUT_SEC + 30`，审批模式同 `CODEX_MCP_APPROVAL_MODE`；`[mcp_servers.image_gen.env]` 透传 `DATA_DIR` 与已设置的 `COMFY_MODE` / `COMFYUI_URL` / `COMFY_MCP_BIN` / `COMFY_BIN` / `COMFY_CHECKPOINT` / `COMFY_WORKFLOW_FILE` / `COMFY_PROMPT_NODE` / `COMFY_TIMEOUT_SEC` / `COMFY_LOOPBACK_PORT` / `COMFY_QWEN_CACHE` / `LOG_LEVEL`（含引号或反斜杠的值会被跳过并告警）。
-- 输出目录每轮由 cs-agent 以 `-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="/data/images/<ticket>"` 注入；没有注入、不是 `/data/images/` 的直接子目录（含软链接逃逸）时工具一律拒绝。每次调用输出到其下新的子目录 `call-<n>/`（工具返回 `call-<n>/<文件名>`）。回合结束后 cs-agent 从该目录（递归）收集本回合新出现的图片（最多 4 张，校验 PNG/JPEG/WebP/GIF 魔数）随回复发送；codex 只需在回复里写一句说明。
-- 访问 ComfyUI：与 agent 主进程同一套配置。mcp 模式下 `COMFYUI_URL` 不是 loopback 时，image_gen 连 `http://127.0.0.1:${COMFY_LOOPBACK_PORT}`——即主进程启动的 loopback 转发（日志 `comfy loopback proxy listening`）；codex 和它的 MCP 子进程与主进程在同一容器网络命名空间里。MCP 子进程不在 codex 命令沙箱里，可以写 `/data/images`（命令沙箱对它仍是禁读、不可写）。
 
 ## 5. 测试
 
@@ -287,24 +242,22 @@ runner 每轮通过 Codex 子进程环境传入 `IM_TOKEN` 与 `QQ_RECALL_TOKEN`
 npm ci
 npm run typecheck
 npx vitest run            # 全部（agent + qq + context + mcp + entrypoint；MCP stdio 测试会在 dist 过期时先编译）
-npx vitest run test/agent # 仅 agent：规则分流、durable 任务崩溃恢复、scope FIFO、假 codex、假 comfy-mcp、回复后处理
+npx vitest run test/agent # 仅 agent：Inbox 投递与恢复、ThreadHost 开轮/插话/排队、假 codex app-server、pi faux provider、send_message
 docker build -t cs-agent:dev .
 docker compose config
 ```
 
-Vitest 测试不访问真实 QQ、模型或 ComfyUI。另有显式宿主机冒烟：先 npm run build，再设置 COMFY_MODE=http 运行 node scripts/smoke-image-v2.mjs。该脚本固定连接 127.0.0.1:8188，只生成 5 个用例（1MP、16:9、2K、透明、单图编辑），结果与 prompt_id 保存在 data/imgv2-smoke；超时后重跑会继续收取原任务，已有结果不重复生成。验收记录见 [IMAGE-GEN-V2-ACCEPTANCE.md](IMAGE-GEN-V2-ACCEPTANCE.md)。
+Vitest 测试不访问真实 QQ 或模型。Dockerfile 以 `# syntax=docker/dockerfile:1` 开头，apt 层使用 BuildKit 缓存挂载（`--mount=type=cache`），必须用 BuildKit 构建：Docker Desktop 与 `docker compose build` 默认启用，旧版 `docker build` 需设 `DOCKER_BUILDKIT=1`。下载的 `.deb` 与 apt 索引保存在构建缓存里、不进镜像层，网络中断后重跑只补缺的包。
 
 `test/napcat-config.test.ts` 优先探测 `pwsh`，不可执行时尝试 `powershell`；均不可用则跳过并在用例名说明。播种只在临时目录执行，不触碰仓库 `.env` 或创建仓库 `napcat/`。检测到可用 Docker Compose 时另跑 `docker compose -f docker-compose.yml config --quiet`；命令不可用则跳过，不拉取镜像、不启动服务。
 
 ## 6. 排障
 
-- **comfy 自检失败 / 生图一直失败**：在 `.env` 设置 `COMFY_MODE=http` 后重启。这个模式直接调用 ComfyUI 的 `/prompt`、`/history`、`/view`。
 - **codex 一直失败**：`docker compose exec cs-agent codex exec --skip-git-repo-check -s read-only "hi"`，看具体报错（auth、sandbox、网络）。
-- **会话卡住 / 顺序**：同一会话（群或私聊）的消息严格按收到顺序处理：一条消息占据队首，直到进入终态——回复已发出（sent，含兜底）、发送结果不确定（uncertain），或失败（failed：重试 3 次后兜底也发不出）——下一条才开始。任务失败且兜底在发送前就失败（例如 NapCat 暂时不可用）时，这条消息留在队首、退避后重试（日志 `ticket still pending after attempt; retrying at the head of its scope`）；超过 3 次后先中止它的任务再发兜底（`ticket reached max attempts, giving up` → `ticket task aborted before fallback`），兜底仍发不出则标记 failed 并继续下一条（`ticket failed: fallback could not be sent after max attempts; moving on`；failed 条目留在 `agent.sqlite` 的派发索引里，重启不会重跑）。
-- **重启后的恢复**：未完成消息由派发索引与票据库按 seq 恢复（pending 分页取尽）；空原文孤儿票据登记 `fallbackOnly`，同样在 scope 队首重试至终态。codex 仅在取得线程锁、复查取消信号后才记录次数并启动；排队时重启不消耗回合次数。已有输出直接复用，中途被打断最多再问一次。已发送或 uncertain 的回复不重发。
-- **生图提交对账**：提交前在 TicketDoc 保存 `submitIntent={attempt,filenamePrefix}`，SaveImage 前缀为 `cs-<票据前12位hex>-<attempt>`。HTTP 与 MCP 自定义工作流都写入该前缀；默认 MCP 的 `generate_image` 若不支持 `filename_prefix`，改走可控的 `run_workflow`。意图已落盘但 prompt_id 丢失，或收取时报 unknown 时，两种模式均经 HTTP 查 `/history`、`/queue`，命中则认领；否则探测 `/view?filename=<前缀>_00001_.png&type=output`（多张按 count 递增，最多 4 张）。查询前后记录 `imageReconciliation`，只有确认无输出才用 attempt+1 重交，总提交上限 2 次；服务不可达不能证明未运行。mcp 模式对账也依赖同一 loopback 转发可达。
+- **会话卡住 / 顺序**：每个会话一个常驻线程：空闲时开一轮，同一发送者的新消息插话进当前回合，其他人的消息与定时输入排队到本轮结束；回合连续 30 分钟没有任何事件由看门狗中止，并向会话发出错提示。以下为 v3 派发器（2026-10 已移除）时期的行为，仅作历史参考：同一会话（群或私聊）的消息严格按收到顺序处理：一条消息占据队首，直到进入终态——回复已发出（sent，含兜底）、发送结果不确定（uncertain），或失败（failed：重试 3 次后兜底也发不出）——下一条才开始。任务失败且兜底在发送前就失败（例如 NapCat 暂时不可用）时，这条消息留在队首、退避后重试（日志 `ticket still pending after attempt; retrying at the head of its scope`）；超过 3 次后先中止它的任务再发兜底（`ticket reached max attempts, giving up` → `ticket task aborted before fallback`），兜底仍发不出则标记 failed 并继续下一条（`ticket failed: fallback could not be sent after max attempts; moving on`；failed 条目留在 `agent.sqlite` 的派发索引里，重启不会重跑）。
+- **重启后的恢复**：宿主先恢复回合（pi 续跑；codex app-server 丢失的回合发"处理中断了"提示、不自动重放），Inbox 再按到达顺序重新投递 `queued` 输入；已发送或 uncertain 的消息不重发。v3 派发器时期：未完成消息由派发索引与票据库按 seq 恢复（pending 分页取尽）；空原文孤儿票据登记 `fallbackOnly`，同样在 scope 队首重试至终态。codex 仅在取得线程锁、复查取消信号后才记录次数并启动；排队时重启不消耗回合次数。已有输出直接复用，中途被打断最多再问一次。已发送或 uncertain 的回复不重发。
 - **取消与发送**：任务在副作用前先检查 abort；QQBridge 在 `get_login_info` 前及 `markSending` 前再次检查。此前取消时票据保持 pending；一旦 `markSending` 成功便继续实际发送，发送失败仍记 uncertain，不因取消而重发。
-- **生图前缀没生效**：确认消息开头就是前缀（前面只能有空白、真实的 @ 或引用），全/半角与 `IMAGE_PREFIXES` 完全一致；手打的 "[at]" 字样不算 @；日志 `message routed` 的 `route` 字段显示分流结果。
+- **`奶龙:` 不再生图**：生图前缀路由已于 2026-10 移除，这类消息照常交给执行 agent；codex 后端可用其内置生图出图，pi 后端没有生图工具。
 
 ## 7. codex 权限
 
@@ -318,9 +271,8 @@ writable_roots = ["/workspace", "/data/prompts"] # CODEX_WRITABLE_ROOTS
 
 - **前提**：bwrap 需要非特权用户命名空间。Docker 默认的 seccomp 配置阻止 `CLONE_NEWUSER`，所以在 `docker-compose.yml` 加 `security_opt: [seccomp=./docker/seccomp-codex.json]`（Docker 默认 profile + 仅放开命名空间/挂载相关系统调用）之前，codex 在容器里**任何命令都无法执行**。
 - **身份**：容器进程与 codex 命令都以 `node`（uid 1000）运行。
-- **写入**：入口脚本的默认可写根为 `/workspace`、`/data/prompts`。业务回合通过命名权限 `filesystem` 与 `writable_roots` 同步收窄：owner 仅 `/workspace/owner`、`/data/prompts`（提示词目录；`system.md` 已弃用），非 owner 仅本会话目录，read-only 没有可写根。`/data/workflows` 不在默认可写列表；`CODEX_WRITABLE_ROOTS` 的显式配置也不会扩大业务回合的固定权限。`/data` 本身、`/data/codex`（auth.json、sessions）、`/data/*.sqlite`、`/data/images`、`/data/tickets` 都不可写；入口脚本先规范化每一项（合并重复的 `/`，去掉 `/./`、末尾的 `/.` 与 `/`），再与规范化后的 `DATA_DIR` / `CODEX_HOME` 比较，拒绝 `/`、`/data` 本身及其上级目录、`/data/codex` 及其子目录、`/data/images`、`/data/tickets` 及其子目录、`*.sqlite`、任何含 `..` 或非法字符的项，并打印 `rejected CODEX_WRITABLE_ROOTS entry`（例如 `/data//`、`/data/.`、`/data/codex/.`、`/data/images//x` 都会被拒绝）。
-- **工作流**：`/data/workflows/` 不存在时，启动会从镜像的 `/app/workflows/` 复制一份（已存在则绝不覆盖）。历史自定义工作流默认位置 `COMFY_WORKFLOW_FILE=/data/workflows/qwen-image-2.1-turbo-api.json` 保留可用；当前配置默认留空，使用 Qwen 参数化生成器。旧值 `/app/workflows/…` 仍然有效。目录播种与 ComfyUI 本地生图不变，codex 默认不可写 `/data/workflows`，受管 AGENTS.md 不再介绍其用途；显式将该路径传入渲染器时仅显示“运维开放的可写目录”。
-- **网络**：命令可以联网（`network_access = true`），因此能直接访问宿主机的 ComfyUI `host.docker.internal:8188`（无鉴权，可以提交任务、读取输出）。NapCat（3000/3001）需要 Bearer token，codex 拿不到。
+- **写入**：入口脚本的默认可写根为 `/workspace`、`/data/prompts`。业务回合通过命名权限 `filesystem` 与 `writable_roots` 同步收窄：owner 仅 `/workspace/owner`、`/data/prompts`（提示词目录；`system.md` 已弃用），非 owner 仅本会话目录，read-only 没有可写根。`CODEX_WRITABLE_ROOTS` 的显式配置也不会扩大业务回合的固定权限。`/data` 本身、`/data/codex`（auth.json、sessions）、`/data/*.sqlite`、`/data/images`、`/data/tickets` 都不可写；入口脚本先规范化每一项（合并重复的 `/`，去掉 `/./`、末尾的 `/.` 与 `/`），再与规范化后的 `DATA_DIR` / `CODEX_HOME` 比较，拒绝 `/`、`/data` 本身及其上级目录、`/data/codex` 及其子目录、`/data/images`、`/data/tickets` 及其子目录、`*.sqlite`、任何含 `..` 或非法字符的项，并打印 `rejected CODEX_WRITABLE_ROOTS entry`（例如 `/data//`、`/data/.`、`/data/codex/.`、`/data/images//x` 都会被拒绝）。
+- **网络**：命令可以联网（`network_access = true`），因此能直接访问宿主机经 `host.docker.internal` 暴露的服务（如 magpie，见「codex 经 magpie」的 NAT 例外）。NapCat（3000/3001）需要 Bearer token，codex 拿不到。
 - **规则文件**：codex 从 `$CODEX_HOME/AGENTS.md` 读取全局行为指引，再加载 cwd 的 `/workspace/<key>/AGENTS.md` 受管规则，二者均为 user 角色。父工作区的运维指引由 runner 显式拼入会话域文件。受管规则里的“只读写下列目录”按 `codexWorkspacePolicy` 的实际权限渲染：非 owner 仅本会话目录，owner 额外只包含 `/data/prompts`，read-only 不宣称任何目录可写。每轮文件缺失或内容变化才原子重写；不变不触碰 mtime，模型修改会在下一轮覆盖恢复。
 - **读取（deny_read）**：入口脚本每次启动重写 `/etc/codex/requirements.toml`（镜像内 `/etc/codex` 归 node 所有；写不进去时容器以退出码 1 退出）：
 
@@ -334,11 +286,11 @@ writable_roots = ["/workspace", "/data/prompts"] # CODEX_WRITABLE_ROOTS
   codex 0.163 只认系统级 `requirements.toml` 里的这个键（放在 `$CODEX_HOME/requirements.toml` 不生效；`config.toml` 的 `[permissions.<profile>]` 与 `sandbox_mode` 互斥，cs-agent 每轮要用 `-c sandbox_mode=…`）。命中的路径在 bwrap 里被空文件/空目录覆盖，`workspace-write` 与 `read-only` 都生效；glob 在每条命令启动时展开，所以之后新建的 `*.sqlite` 也会覆盖。不能整个禁读 `/data/codex`：codex 的 arg0 辅助程序在 `/data/codex/tmp`，整目录禁读时 codex 拒绝启动沙箱。`/data/codex/config.toml`、`/data/codex/AGENTS.md`、`skills/` 仍可读（不含秘密）。
 - **凭据**：codex 子进程的环境变量走白名单（PATH/HOME/LANG/TERM/TZ/代理变量），不含 NapCat token、API key 等任何秘密。codex 执行的命令读不到 `/data/codex/auth.json`（见上）。
 - **QQ**：codex 没有发送 QQ 消息的能力，回复只经 cs-agent 的 agent 任务发回原会话（目标来自票据，codex 无法指定）。
-- **实测**（`cs-agent:g1`，`codex sandbox -c sandbox_mode="workspace-write"`，seccomp=docker/seccomp-codex.json；unconfined 结果相同）：uid 1000；`/workspace`、`/data/prompts`、`/data/workflows`、`/tmp` 可写；`/data`、`/data/codex`、`/data/images`、`/data/qq-messages.sqlite` 写入被拒；`host.docker.internal:8188/system_stats` 返回 200，NapCat `:3000` 无 token 返回 403，公网 200；`CODEX_SANDBOX_NETWORK=false` 时三者都失败（EPERM / EAI_AGAIN）；沙箱内环境变量中没有 token / API key。默认 seccomp 下 bwrap 报 `No permissions to create a new namespace`。（2026-10-19 起 /data/workflows 不在默认可写列表）
-- **实测 deny_read**（`cs-agent:g1fix`，`--security-opt seccomp=./docker/seccomp-codex.json --user node -w /workspace`，假数据卷）：`codex sandbox -c sandbox_mode="workspace-write" -- cat <路径>` 对 `/data/codex/auth.json`、`sessions/**`、`/data/codex/state_5.sqlite(-wal)`、`/data/agent.sqlite`、`qq-bridge.sqlite`、`qq-messages.sqlite(-wal)`、`observability.sqlite`、`/data/images/**`、`/data/codex-session.json` 均为 `Permission denied`；`cp` 到工作区、软链接后读取同样被拒，硬链接到 `/data/workflows` 报 `Invalid cross-device link`；`python3 open()` 报 `PermissionError`；`read-only` 模式同样被拒；`/data/codex/config.toml` 可读；`/workspace`、`/data/workflows`、`/data/prompts` 可写，`/data/codex`、`/etc/codex` 只读。（2026-10-19 起 /data/workflows 不在默认可写列表）
+- **实测**（`cs-agent:g1`，`codex sandbox -c sandbox_mode="workspace-write"`，seccomp=docker/seccomp-codex.json；unconfined 结果相同）：uid 1000；`/workspace`、`/data/prompts`、`/data/workflows`、`/tmp` 可写；`/data`、`/data/codex`、`/data/images`、`/data/qq-messages.sqlite` 写入被拒；`host.docker.internal:8188/system_stats` 返回 200，NapCat `:3000` 无 token 返回 403，公网 200；`CODEX_SANDBOX_NETWORK=false` 时三者都失败（EPERM / EAI_AGAIN）；沙箱内环境变量中没有 token / API key。默认 seccomp 下 bwrap 报 `No permissions to create a new namespace`。（2026-10-19 起 /data/workflows 不在默认可写列表；2026-10 宿主机 ComfyUI 与 /data/workflows 均已移除）
+- **实测 deny_read**（`cs-agent:g1fix`，`--security-opt seccomp=./docker/seccomp-codex.json --user node -w /workspace`，假数据卷）：`codex sandbox -c sandbox_mode="workspace-write" -- cat <路径>` 对 `/data/codex/auth.json`、`sessions/**`、`/data/codex/state_5.sqlite(-wal)`、`/data/agent.sqlite`、`qq-bridge.sqlite`、`qq-messages.sqlite(-wal)`、`observability.sqlite`、`/data/images/**`、`/data/codex-session.json` 均为 `Permission denied`；`cp` 到工作区、软链接后读取同样被拒，硬链接到 `/data/workflows` 报 `Invalid cross-device link`；`python3 open()` 报 `PermissionError`；`read-only` 模式同样被拒；`/data/codex/config.toml` 可读；`/workspace`、`/data/workflows`、`/data/prompts` 可写，`/data/codex`、`/etc/codex` 只读。（2026-10-19 起 /data/workflows 不在默认可写列表；2026-10 已移除）
 - 关闭联网：`.env` 中设 `CODEX_SANDBOX_NETWORK=false` 后重启（web_search 是 codex 服务端的工具，不受影响）。
 
-## 生图 v2 审查修复（2026-10-18）
+## 入站图片下载（2026-10-18 审查修复）
 
 入站先在 SQLite 同步保存去重、pending 票据及附件的 URL/file id，再启动下载。URL 只用于票据恢复，不写入日志或消息历史；应按聊天附件敏感信息保管票据库。附件终态为 ok、skipped、failed，达到终态才派发；超额或超时标为 skipped，继续无图处理原文，校验失败为 failed 并保留原因。
 
@@ -348,11 +300,7 @@ writable_roots = ["/workspace", "/data/prompts"] # CODEX_WRITABLE_ROOTS
 
 参考图最多 3 张，每张 12 B～10 MiB，流式计数不依赖 Content-Length。下载及上传前只解析 PNG IHDR、JPEG SOF、WebP VP8/VP8L/VP8X、GIF LSD 与 GIF 块结构，不解码像素；边长不得超过 4096，像素不得超过 20 MP。拒绝多帧 GIF、NETSCAPE 循环块、带动画标志的 WebP。创建票据目录前先确认 incoming 父目录 realpath 位于 DATA_DIR，创建后复查；已有文件恢复前 lstat 检查普通文件与大小。
 
-生图基础收取预算：1mp 120 秒、2mp 240 秒、2k 600 秒，乘 count 后由 COMFY_TIMEOUT_SEC 截断。首次收取超时保留 imageJob.status=running、deadline、延期次数和下一次收取时间，使用 durable sleep 再次收取同一 prompt_id；IMAGE_COLLECT_EXTENSIONS 默认 2，即最多 3 次收取窗口。延期耗尽才回复“生图超时”。未知或丢失 id 仍按输出前缀查询 history/queue/view，不据超时重新提交。
-
-参考图上传前把远端 name/subfolder 清单写入 TicketDoc；独立 image_gen MCP 同时使用票据输出目录下的 remote-uploads.json 写前清单。整个收取过程结束（成功或最终失败）后，通过 /upload/image、type=input、overwrite=true，以同名同子目录的 1×1 透明 PNG 覆盖。清理失败保留清单，恢复或票据终态清理时重做；延期等待期间保留图片供排队任务读取。此操作覆盖 input 文件内容，但 ComfyUI history/queue 仍会列出文件名，已生成输出、服务端缓存和管理员备份也不受此覆盖操作清除；它不是删除历史记录或安全擦除。
-
-stdio 测试由 Vitest globalSetup 每次统一执行一次 npm run build，确保 image_gen 和 qq_context 都使用本次源码的 dist，不再维护手写依赖时间戳列表。
+stdio 测试由 Vitest globalSetup 每次统一执行一次 npm run build，确保 qq_context、im 等 MCP 都使用本次源码的 dist，不再维护手写依赖时间戳列表。
 
 ## pi 执行后端（第 3 组）
 
@@ -364,21 +312,19 @@ stdio 测试由 Vitest globalSetup 每次统一执行一次 npm run build，确�
 | `PI_COMPACTION_BACKGROUND_TOKENS` | 32768 | 距阻塞阈值此 token 数时开始后台压缩；0 关闭后台压缩 |
 | `AGENT_MODEL_PROVIDER/AGENT_MODEL_ID` | deepseek / deepseek-flash | pi 模型；`AGENT_THINKING_LEVEL=low` 由现有模型能力解析器收敛 |
 
-长期会话和工具检查点存 `DATA_DIR/pi.sqlite`（及 WAL/SHM），与票据任务的 `agent.sqlite` 分开。`pi-threads.json` 原子保存 `{owner, shared}`；SQLite 的会话创建事务同时保存映射，JSON 丢失或写回前崩溃时启动重建，勿单独删除 JSON 当作清空记忆。备份应包含数据库、相关 WAL 和映射。每个线程独立串行，owner 与 shared 可并行；恢复中的请求先占据线程锁，后来的请求不能覆盖其 access。压缩保留最近 20000 tokens（pi-durable 默认），不按天或大小轮换；压缩缩小模型上下文，不删除数据库原文。
+长期会话和工具检查点存 `DATA_DIR/pi.sqlite`（及 WAL/SHM），与派发 harness 的 `agent.sqlite` 分开。`pi-threads.json` 原子保存 `{owner, shared}`；SQLite 的会话创建事务同时保存映射，JSON 丢失或写回前崩溃时启动重建，勿单独删除 JSON 当作清空记忆。备份应包含数据库、相关 WAL 和映射。每个线程独立串行，owner 与 shared 可并行；恢复中的请求先占据线程锁，后来的请求不能覆盖其 access。压缩保留最近 20000 tokens（pi-durable 默认），不按天或大小轮换；压缩缩小模型上下文，不删除数据库原文。
 
-`DATA_DIR/prompts/agent.md` 缺失时写入代码内的默认中文提示词，已有文件绝不覆盖；每次模型请求按 mtime/size 热加载，改完无需重启。旧 `system.md` 仍弃用。默认全文位于 `src/agent/pi-tools/prompt.ts`，涵盖 QQ 纯文本、事实搜索、历史工具纪律及生图文字/编辑指引。
+`DATA_DIR/prompts/agent.md` 缺失时写入代码内的默认中文提示词，已有文件绝不覆盖；每次模型请求按 mtime/size 热加载，改完无需重启。旧 `system.md` 仍弃用。默认全文位于 `src/agent/pi-tools/prompt.ts`，涵盖 QQ 纯文本、事实搜索与历史工具纪律（生图指引已随 generate_image 移除）。
 
 pi 还读取两层项目指引：运维层 `WORKSPACE_DIR/AGENTS.md`（默认 `/workspace/AGENTS.md`），以及会话层 `DATA_DIR/pi-work/<key>/AGENTS.md`（默认 `/data/pi-work/<key>/AGENTS.md`，例如 `group_200000001`；冒号换成下划线）。提示词顺序为 `agent.md` → 运维指引 → 会话指引，全部进入 system 消息；codex 侧 AGENTS.md 以 user 角色注入。pi 会话指引位于 `pi-work/<key>`，该目录中的文件可由本会话 write/edit 工具修改。
 
 两层目录均按 `AGENTS.override.md` → `AGENTS.md` → `AGENTS.MD` → `CLAUDE.md` → `CLAUDE.MD` 选择第一个普通文件。请使用不超过 128 KiB 的 UTF-8 普通文件；支持 BOM，空白文件不注入。链接、超限或不可读文件会被跳过并记录去重告警。每次模型请求检查 mtime/size，更新后无需重启，内容未变不会重复写入 system 条目。不会向父目录搜索，也不会读取 `/data/AGENTS.md` 或 `/data/pi-work/AGENTS.md`；无 cwd 时只使用运维指引，非 pi-work 直接子目录的 cwd 会被忽略并告警。
 
-DeepSeek Search/Fetch 使用 `DEEPSEEK_API_KEY`（兼容 `DEEPSEEK_APIKEY`），即使执行模型是其他 provider，联网工具仍需要此密钥。未配置时仅联网工具返回不可用。Search 最多 8 条、2500 字，Fetch 最多 4000 字；仅 429 退避一次，其余 HTTP 错误不重试。每回合 web_search/fetch_page 各最多 4 次、三种 qq 工具合计 4 次、generate_image 最多 2 次，上限通过 ToolTask hook 持久化计数，模型不能修改。
+DeepSeek Search/Fetch 使用 `DEEPSEEK_API_KEY`（兼容 `DEEPSEEK_APIKEY`），即使执行模型是其他 provider，联网工具仍需要此密钥。未配置时仅联网工具返回不可用。Search 最多 8 条、2500 字，Fetch 最多 4000 字；仅 429 退避一次，其余 HTTP 错误不重试。每回合 web_search/fetch_page 各最多 4 次、三种 qq 工具合计 4 次，上限通过 ToolTask hook 持久化计数，模型不能修改。
 
 fetch_page 只接收无凭据的公开 HTTP(S) URL，复用入站下载的 IP 判定，解析全部 DNS 地址并拒绝任何内网地址。实际抓取发生在 DeepSeek 服务器，无法在本机固定其 DNS 结果或检查服务端重定向链；该部分依赖 DeepSeek 服务端策略，本次未执行真实 API 请求。
 
 pi 通过进程内 send_message 调用与 im 共用的 SendService，来源绑定 PiRequestDoc 与 PiExecutionEnv，文件按 Outbox 状态发送。
-
-图片写到 `DATA_DIR/images/<ticket>/call-<n>/`，工具成功返回路径后由模型用 send_message 显式发送；未完成的任务交给 lateImages 收取并以 #late 发送。参考图只能取本票据 incoming 清单。远端参考图清单在上传前保存，完成或失败时覆盖清理，清理失败保留供既有终态清理恢复。生图工具使用 pi-durable 的 unsafe 重放策略：崩溃中断的外部生图调用不自动重提，模型收到 interrupted；已保存图片仍可通过 send_message 发送。`requestId=ticket` 保证提交幂等，不等于外部生图服务的事务性 exactly-once。慢图受 pi 总回合期限限制；此次没有改动并行任务负责的 image_gen MCP 延迟收图逻辑。
 
 ## 观测面板
 
@@ -386,9 +332,9 @@ pi 通过进程内 send_message 调用与 im 共用的 SendService，来源绑�
 
 | 页面 | 内容 |
 |---|---|
-| / | WS 与断线数、ComfyUI / Codex 启动检查、DeepSeek 密钥存在性、衰老最近结果、1h / 24h 完成量和错误率、队列、在途票据及最近一分钟指标 |
+| / | WS 与断线数、Codex 启动检查、DeepSeek 密钥存在性、衰老最近结果、1h / 24h 完成量和错误率、队列、在途票据及最近一分钟指标 |
 | /tickets | 每页 50 条；status、scope、route、backend 筛选；状态为 processing / sent / failed / timeout / fallback |
-| /tickets/&lt;ticket&gt; | 原文摘要、路由、后端、阶段与重试、模型用量、工具调用、生图 prompt_id、原始/发送回复、票据终态和图片缩略图 |
+| /tickets/&lt;ticket&gt; | 原文摘要、路由、后端、阶段与重试、模型用量、工具调用、原始/发送回复与票据终态 |
 | /logs | 进程内最近 1000 行结构化日志，SSE 实时追加；ticket / level 筛选，浏览器最多保留 500 行 |
 | /context | 选择会话域，留空关键词看 recent，填写关键词看 search；直接复用 qq_context 与共享格式化器，包含原文和摘要 |
 | /codex | owner / shared 当前线程、rollout 字节数、保留期内观察到的回合数、全局 AGENTS.md |
@@ -411,17 +357,15 @@ docker compose exec cs-agent cat /data/obs-token
 
 普通票据默认最多 500 条事件，由 OBS_TICKET_EVENT_CAP 配置（8–10000）；detail 总量最多 256 KiB。普通事件为三种 terminal=true 终态（reply_sent / failed / fallback）及 events_dropped 摘要预留槽位和字节，终态单条 detail 最多 1 KiB；重复终态保留最新一条。摘要的 dropped 给出被预算拒绝的事件数。相同 Codex 工具调用的进度保留首条和末条，末条 count 为累计进度数。详情按 after=id&limit 游标分页（页面默认 100、最多 200）。Codex 内置命令与搜索每轮合计最多 100 条，只保存命令或搜索词前 200 字、退出码与耗时，不保存原始 JSONL。
 
-image_gen MCP 不打开观测库，只向本票据 obs-events.jsonl 追加经 schema 校验的事件（每个文件最多 200 行 / 256 KiB）。主进程在 lateImages 和终态回收时领取文件，逐行校验、用主进程秘密注册表脱敏后入库并删除；超大文件直接忽略并删除，非法行忽略。旁路文件仅为尽力观测，不参与业务恢复判定。
-
 观测事件先脱敏再保存：已配置凭据、敏感字段、Bearer / 常见 API key / JWT、带凭据 URL 都会隐藏；原文、prompt、reply 等字符串最多 500 字。票据详情保留摘要用于诊断，不是完整聊天归档。上下文页面通过既有消息库读取；正文、昵称、摘要、表单回显及其他渲染字符串均先脱敏再 HTML 转义，其存储保留策略不受 OBS_RETENTION_DAYS 影响。ws / wss 等任意协议 URL 的 userinfo 都会脱敏；NAPCAT_HTTP_URL / NAPCAT_WS_URL 禁止内嵌用户名和密码。
 
-指标每 60 秒按独立窗口记录调用数、成功数、成功率、耗时 p50 / p95；超过一万次采样的类别用有界随机抽样计算分位数。窗口从主进程事件库读取，也包含已摄取的 Codex image_gen MCP 提交与收取；摄取保留子进程事件时间。队列深度不含正在运行的请求；全局使用槽位、各 scope 等待数分别展示。ComfyUI 同时记录各次 submit / collect / reconcile 调用耗时，以及能匹配 prompt_id 时从提交成功到收取成功的任务总耗时（comfy_job_duration_ms），均不等同 GPU 纯计算时间。
+指标每 60 秒按独立窗口记录调用数、成功数、成功率、耗时 p50 / p95；超过一万次采样的类别用有界随机抽样计算分位数。窗口从主进程事件库读取。队列深度不含正在运行的请求；全局使用槽位、各 scope 等待数分别展示。
 
 DEEPSEEK_PRICE_IN_PER_M / DEEPSEEK_PRICE_OUT_PER_M 默认 0；填入 deepseek-flash 的每百万 token 单价后估算费用，两项使用相同币种。输入包括可获得的 cache read / write；该估算不区分缓存优惠，也不包含搜索/抓页费用。用量来自 pi-ai 返回的 usage（pi、衰老），两条路径使用同一 usage 字段转换和费用计算（含 cacheRead / cacheWrite），未提供的用量不会猜测。观测为尽力记录，崩溃边界可能重记响应，已写入的事件通过持久化游标恢复聚合，尚未写入的事件仍可能丢失；durable 业务检查点独立，不受观测写入失败影响。
 
 ALERT_OWNER=false 默认不发送。显式启用且存在 QQ_OWNER（或 allowUsers 的首项）时，WS 连续离线超过五分钟、模型鉴权失败、连续三条票据失败会经 bridge.send 向 owner 私聊告警；所有原因共用每 30 分钟一次限频。告警只带固定原因，不带用户原文或服务端错误正文。此功能仅使用 fake bridge 验证。
 
-健康含义：ComfyUI / Codex 是启动检查快照，不能证明当前网络或鉴权仍有效；DeepSeek 仅显示是否配置密钥。Pi 压缩统计表示 hook 观察到的尝试，不声明压缩成功；Codex 回合数仅覆盖观测保留期。现有 failed 派发索引必须保留以阻止 pending 票据在恢复时成为孤儿重跑，不随观测日志过期删除。
+健康含义：Codex 是启动检查快照，不能证明当前网络或鉴权仍有效；DeepSeek 仅显示是否配置密钥。Pi 压缩统计表示 hook 观察到的尝试，不声明压缩成功；Codex 回合数仅覆盖观测保留期。现有 failed 派发索引必须保留以阻止 pending 票据在恢复时成为孤儿重跑，不随观测日志过期删除。
 
 
 ### 运行时设置的票据快照

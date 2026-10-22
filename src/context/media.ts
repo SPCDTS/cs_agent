@@ -194,7 +194,7 @@ export class MediaRecall {
       return;
     }
     if (!row.ticket) return reject();
-    // 机器人消息：Outbox 行（键即消息库 ticket 列）或生图票据的回复，必须确认已发出且发出账号一致。
+    // 机器人消息：Outbox 行（键即消息库 ticket 列）或旧版生图票据的回复，必须确认已发出且发出账号一致。
     const outbox = this.opts.channel.outbox?.getOutbox(row.ticket);
     if (outbox) {
       if (outbox.status !== "sent" || outbox.message_id !== row.message_id || outbox.message_type + ":" + outbox.target_id !== row.scope ||
