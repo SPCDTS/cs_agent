@@ -187,9 +187,9 @@ cat > "$CONFIG.tmp" <<TOML
 # CODEX_PROVIDER / CODEX_MAGPIE_URL / CODEX_IMAGE_GEN / CODEX_REMOTE_PLUGINS；CODEX_PLUGIN_PRUNE 控制写完配置后的缓存清理）。
 # 远程插件对 QQ 客服场景无用，默认关闭并清理 figma/gmail；其余已缓存插件仍会加载，全部清理设 CODEX_PLUGIN_PRUNE=all。
 # 不要手工修改——改动会在下次启动时被覆盖；请改 .env 后重启容器。不继承宿主机配置。
-# model_reasoning_effort 只是默认值：cs-agent 每轮按请求以 -c model_reasoning_effort=... 覆盖。
-# qq_context 的访问范围 QQ_ACCESS 不写在这里：cs-agent 每轮以 -c mcp_servers.qq_context.env.QQ_ACCESS=... 注入；
-# CODEX_IMAGE_GEN=on 时 image_gen 的输出目录 IMAGE_TICKET_DIR 同样每轮以 -c mcp_servers.image_gen.env.IMAGE_TICKET_DIR=... 注入。
+# model_reasoning_effort 只是默认值：cs-agent 每轮在 turn/start 的 effort 字段按请求覆盖。
+# im / qq_context / image_gen 的线程令牌不写在这里：cs-agent 在 thread/start、thread/resume 的 config 里按线程注入
+# （mcp_servers.<名>.env.*）；身份、读取范围与生图目录由主进程在每次调用时按会话当前回合求出。
 model = "$MODEL"
 model_reasoning_effort = "$EFFORT"
 web_search = "$WEB_SEARCH"
@@ -205,7 +205,6 @@ writable_roots = [$WRITABLE_ROOTS]
 context_size = "$WEB_SEARCH_CONTEXT"
 
 [mcp_servers.im]
-env_vars = ["IM_TOKEN"]
 command = "node"
 args = ["/app/dist/mcp/im.js"]
 startup_timeout_sec = 10
@@ -213,7 +212,6 @@ tool_timeout_sec = 600
 default_tools_approval_mode = "$MCP_APPROVAL_MODE"
 
 [mcp_servers.qq_context]
-env_vars = ["QQ_RECALL_TOKEN"]
 command = "node"
 args = ["/app/dist/mcp/qq-context.js"]
 startup_timeout_sec = 10
@@ -256,10 +254,14 @@ TOML
 fi
 # apps=false 始终写入：否则 codex 按登录的 ChatGPT 账号加载 Apps 连接器（Notion/GitHub/Drive/Gmail…），
 # 每轮约 14 万 token 的工具定义，且群聊回合也能调用主人账号的连接器。
+# multi_agent + wake_on_agent_messages：主 agent 派子 agent 后可以结束本轮，子 agent 完成时 app-server 自行开一轮唤醒主 agent
+# （0.164.0-alpha.8 实测；后台终端命令跑完不会唤醒）。
 cat >> "$CONFIG.tmp" <<'TOML'
 
 [features]
 apps = false
+multi_agent = true
+wake_on_agent_messages = true
 TOML
 if [ "$REMOTE_PLUGINS" = "off" ]; then
   cat >> "$CONFIG.tmp" <<'TOML'

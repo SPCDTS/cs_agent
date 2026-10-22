@@ -5,7 +5,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MediaRecall, cleanupMedia } from "../../src/context/media.js";
-import { RecallTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
+import { ThreadTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
+import { staticGateway } from "./gateway-fixture.js";
 import { viewViaLoopback } from "../../src/mcp/media-recall-client.js";
 import { ContextStore } from "../../src/context/store.js";
 import { clipWithImages, formatMessage, formatMessageFull, formatRecent, withoutImagePaths } from "../../src/context/format.js";
@@ -67,15 +68,15 @@ describe("按需图片召回", () => {
   it("/view 按令牌范围读图，不占额度，拒绝无效令牌、跨范围和损坏/超大文件", async () => {
     ingest();
     const file = (await media.recall(access, "1")).images[0]!.path;
-    const tokens = new RecallTokens(media, 1);
+    const tokens = new ThreadTokens(media, staticGateway(threadKey => threadKey === "group:30001" ? access : privateAccess).gateway, 1);
     const server = await startMediaRecallServer(tokens, 0);
-    const lease = tokens.issue({ access, threadKey: "group:7", turnId: "view", deadline: Date.now() + 60_000 });
-    const foreign = tokens.issue({ access: privateAccess, threadKey: "group:7", turnId: "foreign", deadline: Date.now() + 60_000 });
+    const lease = { token: tokens.issue("group:30001") };
+    const foreign = { token: tokens.issue("private:20001") };
     try {
       for (let i = 0; i < 2; i++) expect(await viewViaLoopback(file, lease.token, server.port))
         .toEqual({ type: "image", data: PNG.toString("base64"), mimeType: "image/png" });
-      await tokens.recall(lease.token, "1");
-      await expect(tokens.recall(lease.token, "1")).rejects.toThrow("次数");
+      await tokens.recall(lease.token, {}, "1");
+      await expect(tokens.recall(lease.token, {}, "1")).rejects.toThrow("次数");
       expect((await viewViaLoopback(file, lease.token, server.port)).type).toBe("image");
       await expect(viewViaLoopback(file, foreign.token, server.port)).rejects.toThrow("范围");
       await expect(viewViaLoopback(file, "a".repeat(64), server.port)).rejects.toThrow("令牌");
@@ -84,7 +85,7 @@ describe("按需图片召回", () => {
       await expect(viewViaLoopback(file, lease.token, server.port)).rejects.toThrow("不安全");
       await fs.writeFile(file, Buffer.alloc(100));
       await expect(viewViaLoopback(file, lease.token, server.port)).rejects.toThrow();
-      lease.revoke();
+      tokens.revoke("group:30001");
       await expect(viewViaLoopback(file, lease.token, server.port)).rejects.toThrow("令牌");
     } finally { await server.close(); }
   });

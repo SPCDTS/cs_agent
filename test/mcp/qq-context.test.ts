@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { RecallTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
+import { ThreadTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -8,7 +8,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { callQQContextTool } from "../../src/context/qq-context-tool.js";
 import { ContextStore } from "../../src/context/store.js";
-import type { InboundMessage } from "../../src/channel/types.js";
+import type { Access } from "../../src/context/access.js";
+import type { Channel, InboundMessage } from "../../src/channel/types.js";
+import type { MediaRecall } from "../../src/context/media.js";
+import { callBinding } from "../context/gateway-fixture.js";
 import { tmp } from "../agent/helpers.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -24,79 +27,76 @@ function msg(text: string, o: Partial<InboundMessage> = {}): InboundMessage {
 }
 
 const clients: Client[] = [];
+const closes: (() => Promise<void>)[] = [];
 let writer: ContextStore | undefined;
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((c) => c.close().catch(() => undefined)));
+  for (const close of closes.splice(0)) await close();
   writer?.close();
   writer = undefined;
 });
 
-async function connect(dataDir: string, access: string | undefined, extra: Record<string, string> = {}): Promise<Client> {
-  const env: Record<string, string> = { ...extra, DATA_DIR: dataDir, PATH: process.env.PATH ?? "" };
+/**
+ * 启动线程令牌端点并连接 qq_context 子进程：读取范围由主进程按会话当前回合求出（这里固定为 access；
+ * undefined 表示调用不属于当前回合，网关拒绝）。
+ */
+async function connect(dataDir: string, access: Access | undefined,
+  extra: { media?: Partial<Pick<MediaRecall, "recall" | "view">>; channel?: Pick<Channel, "listChats"> } = {}) {
+  const tokens = new ThreadTokens({ recall: async () => ({ text: "ok", images: [] }), ...extra.media }, {
+    resolve: async threadKey => {
+      if (!access) throw new Error("本回合已结束，工具调用不再有效");
+      return callBinding(threadKey, access, { turnId: "codex:mcp-turn", session: "thr-sess" });
+    },
+    send: async () => ({}),
+  }, 5, extra.channel);
+  const endpoint = await startMediaRecallServer(tokens, 0);
+  closes.push(endpoint.close);
+  const token = tokens.issue(`group:${G}`);
+  const env: Record<string, string> = { DATA_DIR: dataDir, PATH: process.env.PATH ?? "", QQ_RECALL_TOKEN: token, MEDIA_RECALL_PORT: String(endpoint.port) };
   if (process.env.SYSTEMROOT) env.SYSTEMROOT = process.env.SYSTEMROOT;
-  if (access !== undefined) env.QQ_ACCESS = access;
   const client = new Client({ name: "test", version: "1.0.0" });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [ENTRY], env, stderr: "pipe" }));
   clients.push(client);
-  return client;
+  return { client, revoke: () => tokens.revoke(`group:${G}`) };
 }
 
 const textOf = (r: unknown) => ((r as { content: { text: string }[] }).content ?? []).map((c) => c.text).join("");
+const scope: Access = { kind: "scope", scope: `group:${G}` };
 
 describe("qq_context MCP over stdio (built dist)", () => {
-  it("qq_chats 通过回合令牌查询；MCP 拒绝非 all，伪造 all 仍被主进程拒绝", async () => {
+  it("qq_chats 经线程令牌查询：范围由主进程求出，本会话范围拒绝，参数不能提升权限，作废后拒绝", async () => {
     const listChats = vi.fn(async () => ({ groups: [{ group_id: "7", name: "家庭群", member_count: 6 }], friends: [{ user_id: "1", nickname: "家人" }] }));
-    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) }, 5, { listChats });
-    const endpoint = await startMediaRecallServer(tokens, 0);
-    const owner = tokens.issue({ access: { kind: "all" }, threadKey: "group:7", turnId: "owner", deadline: Date.now() + 60_000 });
-    const group = tokens.issue({ access: { kind: "scope", scope: "group:7" }, threadKey: "group:7", turnId: "group", deadline: Date.now() + 60_000 });
-    const env = (token: string) => ({ QQ_RECALL_TOKEN: token, MEDIA_RECALL_PORT: String(endpoint.port) });
-    try {
-      const c = await connect(tmp(), "all", env(owner.token));
-      expect(textOf(await c.callTool({ name: "qq_chats", arguments: {} }))).toBe("group:7 家庭群（6 人）\nprivate:1 家人");
-      expect(listChats).toHaveBeenCalledOnce(); listChats.mockClear();
-      const denied = await connect(tmp(), "group:7", env(owner.token));
-      expect((await denied.callTool({ name: "qq_chats", arguments: {} })).isError).toBe(true);
-      const forged = await connect(tmp(), "all", env(group.token));
-      expect((await forged.callTool({ name: "qq_chats", arguments: {} })).isError).toBe(true);
-      expect((await c.callTool({ name: "qq_chats", arguments: { access: "all" } })).isError).toBe(true);
-      owner.revoke();
-      expect((await c.callTool({ name: "qq_chats", arguments: {} })).isError).toBe(true);
-      expect(listChats).not.toHaveBeenCalled();
-    } finally { await endpoint.close(); }
+    const owner = await connect(tmp(), { kind: "all" }, { channel: { listChats } });
+    expect(textOf(await owner.client.callTool({ name: "qq_chats", arguments: {} }))).toBe("group:7 家庭群（6 人）\nprivate:1 家人");
+    expect(listChats).toHaveBeenCalledOnce(); listChats.mockClear();
+    const group = await connect(tmp(), scope, { channel: { listChats } });
+    expect((await group.client.callTool({ name: "qq_chats", arguments: {} })).isError).toBe(true);
+    expect((await owner.client.callTool({ name: "qq_chats", arguments: { access: "all" } })).isError).toBe(true);
+    owner.revoke();
+    expect((await owner.client.callTool({ name: "qq_chats", arguments: {} })).isError).toBe(true);
+    expect(listChats).not.toHaveBeenCalled();
   });
   it("qq_view_image 从 loopback 返回单张 MCP 图片，无本地媒体文件也可查看", async () => {
     const picture = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
-    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }),
-      view: async (access, file) => {
-        expect(access).toEqual({ kind: "scope", scope: "group:7" });
-        expect(file).toBe("/data/media/not-local.png"); return picture;
-      } });
-    const endpoint = await startMediaRecallServer(tokens, 0);
-    const lease = tokens.issue({ access: { kind: "scope", scope: "group:7" }, threadKey: "group:7", turnId: "view", deadline: Date.now() + 60_000 });
-    try {
-      const c = await connect(tmp(), "group:7", { QQ_RECALL_TOKEN: lease.token, MEDIA_RECALL_PORT: String(endpoint.port) });
-      expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png" } })).content).toEqual([picture]);
-      expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png", access: "all" } })).isError).toBe(true);
-      lease.revoke();
-      expect((await c.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png" } })).isError).toBe(true);
-    } finally { await endpoint.close(); }
+    const c = await connect(tmp(), scope, { media: { view: async (access, file) => {
+      expect(access).toEqual(scope);
+      expect(file).toBe("/data/media/not-local.png"); return picture;
+    } } });
+    expect((await c.client.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png" } })).content).toEqual([picture]);
+    expect((await c.client.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png", access: "all" } })).isError).toBe(true);
+    c.revoke();
+    expect((await c.client.callTool({ name: "qq_view_image", arguments: { path: "/data/media/not-local.png" } })).isError).toBe(true);
   });
   it("qq_image 经主进程 loopback 召回，MCP 无库也不创建文件", async () => {
-    const tokens = new RecallTokens({ recall: async (access, id) => ({ text: JSON.stringify({ access, id }), images: [] }) });
-    const endpoint = await startMediaRecallServer(tokens, 0);
-    const lease = tokens.issue({ access: { kind: "scope", scope: "group:7" }, threadKey: "group:7", turnId: "tk", deadline: Date.now() + 60_000 });
-    try {
-      const c = await connect(tmp(), "group:7", { QQ_RECALL_TOKEN: lease.token, MEDIA_RECALL_PORT: String(endpoint.port) });
-      const result = await c.callTool({ name: "qq_image", arguments: { message_id: "123" } });
-      expect(textOf(result)).toContain('"scope":"group:7"');
-      expect(textOf(result)).toContain('"id":"123"');
-      expect((result.content as { type: string }[]).every(c => c.type === "text")).toBe(true);
-      lease.revoke();
-      expect((await c.callTool({ name: "qq_image", arguments: { message_id: "123" } })).isError).toBe(true);
-    } finally { await endpoint.close(); }
+    const c = await connect(tmp(), scope, { media: { recall: async (access, id) => ({ text: JSON.stringify({ access, id }), images: [] }) } });
+    const result = await c.client.callTool({ name: "qq_image", arguments: { message_id: "123" } });
+    expect(textOf(result)).toContain(`"scope":"group:${G}"`);
+    expect(textOf(result)).toContain('"id":"123"');
+    expect((result.content as { type: string }[]).every(c => c.type === "text")).toBe(true);
+    c.revoke();
+    expect((await c.client.callTool({ name: "qq_image", arguments: { message_id: "123" } })).isError).toBe(true);
   });
-  it("lists the history and recall tools and serves recent / search / message within the injected scope", async () => {
+  it("lists the history and recall tools and serves recent / search / message within the scope resolved per call", async () => {
     const dir = tmp();
     writer = new ContextStore(dir);
     const quoted = msg("今晚有cs比赛吗", { message_id: "500" });
@@ -104,7 +104,7 @@ describe("qq_context MCP over stdio (built dist)", () => {
     writer.ingest(msg("那明天呢", { message_id: "501", nickname: "小明", images: [], segments: [{ type: "reply", data: { id: "500" } }, { type: "text", data: { text: "那明天呢" } }] }));
     writer.ingest(msg("别的群也在聊比赛", { message_id: "502", group_id: "39999" }));
 
-    const c = await connect(dir, `group:${G}`);
+    const { client: c } = await connect(dir, scope);
     const tools = await c.listTools();
     expect(tools.tools.map((t) => t.name).sort()).toEqual(["qq_chats", "qq_image", "qq_message", "qq_recent", "qq_search", "qq_view_image"]);
     for (const t of tools.tools.filter(t => !["qq_image"].includes(t.name))) expect(t.annotations).toEqual({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
@@ -119,29 +119,27 @@ describe("qq_context MCP over stdio (built dist)", () => {
     expect(textOf(await c.callTool({ name: "qq_message", arguments: { message_id: "502" } }))).toContain("不在当前会话范围内");
   });
 
-  it("QQ_ACCESS=all sees every scope with scope labels", async () => {
+  it("access=all sees every scope with scope labels", async () => {
     const dir = tmp();
     writer = new ContextStore(dir);
     writer.ingest(msg("本群", { message_id: "600" }));
     writer.ingest(msg("别群", { message_id: "601", group_id: "39999" }));
-    const c = await connect(dir, "all");
+    const { client: c } = await connect(dir, { kind: "all" });
     const recent = textOf(await c.callTool({ name: "qq_recent", arguments: {} }));
     expect(recent).toContain(`[群${G}]`);
     expect(recent).toContain("[群39999]");
   });
 
-  it("missing or invalid QQ_ACCESS → every tool returns an error text", async () => {
+  it("调用不属于会话当前回合（网关拒绝）→ 每个工具都返回错误文本，不泄露内容", async () => {
     const dir = tmp();
     writer = new ContextStore(dir);
     writer.ingest(msg("秘密"));
-    for (const access of [undefined, "everyone"]) {
-      const c = await connect(dir, access);
-      for (const [name, args] of [["qq_recent", {}], ["qq_search", { query: "秘密" }], ["qq_message", { message_id: "1" }]] as const) {
-        const r = await c.callTool({ name, arguments: args });
-        expect(r.isError).toBe(true);
-        expect(textOf(r)).toContain("QQ_ACCESS");
-        expect(textOf(r)).not.toContain("秘密");
-      }
+    const { client: c } = await connect(dir, undefined);
+    for (const [name, args] of [["qq_recent", {}], ["qq_search", { query: "秘密" }], ["qq_message", { message_id: "1" }], ["qq_image", { message_id: "1" }]] as const) {
+      const r = await c.callTool({ name, arguments: args });
+      expect(r.isError).toBe(true);
+      expect(textOf(r)).toContain("本回合已结束");
+      expect(textOf(r)).not.toContain("秘密");
     }
   });
 
@@ -150,12 +148,12 @@ describe("qq_context MCP over stdio (built dist)", () => {
     const w = new ContextStore(dir);
     w.ingest(msg("关闭后仍可读"));
     w.close();
-    const c = await connect(dir, `group:${G}`);
+    const { client: c } = await connect(dir, scope);
     expect(textOf(await c.callTool({ name: "qq_recent", arguments: {} }))).toContain("关闭后仍可读");
   });
 
   it("missing database file → error text, not a crash", async () => {
-    const c = await connect(path.join(tmp(), "nothing"), `group:${G}`);
+    const { client: c } = await connect(path.join(tmp(), "nothing"), scope);
     const r = await c.callTool({ name: "qq_recent", arguments: {} });
     expect(r.isError).toBe(true);
     expect(textOf(r)).toContain("消息库无法打开");
@@ -179,15 +177,15 @@ describe("callQQContextTool caps", () => {
   });
 });
 
-it("独立 MCP 写入召回归属，空 session 存 NULL，观测库不可写不影响工具", async () => {
+it("独立 MCP 按本次调用的回合与线程写入召回归属，观测库不可写不影响工具", async () => {
   for (const blocked of [false, true]) {
     const dir = tmp(); writer = new ContextStore(dir); writer.ingest(msg("独立进程历史"));
     if (blocked) mkdirSync(path.join(dir, "observability.sqlite"));
-    const c = await connect(dir, `group:${G}`, { QQ_TICKET: "mcp-ticket", QQ_BACKEND: "codex", QQ_SESSION: "" });
+    const { client: c } = await connect(dir, scope);
     expect(textOf(await c.callTool({ name: "qq_recent", arguments: {} }))).toContain("独立进程历史");
     if (!blocked) {
       const db = new DatabaseSync(path.join(dir, "observability.sqlite"), { readOnly: true });
-      try { expect(db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ backend: 'codex', ticket: 'mcp-ticket', session: null, returned_count: 1 }); }
+      try { expect(db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ backend: 'codex', ticket: 'codex:mcp-turn', session: 'thr-sess', returned_count: 1 }); }
       finally { db.close(); }
     }
     await c.close(); writer.close(); writer = undefined;

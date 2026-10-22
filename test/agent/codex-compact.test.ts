@@ -1,134 +1,144 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { log } from "../../src/shared/log.js";
-import { CodexRunner } from "../../src/agent/codex/runner.js";
-import { RecallTokens } from "../../src/context/media-recall-server.js";
-import { FIXTURES, tmp } from "./helpers.js";
+import { CodexBackend } from "../../src/agent/backends/codex.js";
+import type { InputRef } from "../../src/agent/host/types.js";
+import { CodexScript, codexRunnerRig } from "./codex-fixture.js";
+import { tmp } from "./helpers.js";
 
 const stores: ContextUsageStore[] = [];
-afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close(); });
+const rigs: { close(): Promise<void> }[] = [];
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const store of stores.splice(0)) await store.close();
+  for (const r of rigs.splice(0)) await r.close();
+});
 const compacted = { type: "compacted", payload: { message: "摘要" } };
 const tokenCount = { type: "event_msg", payload: { type: "token_count", info: {
   model_context_window: 475000, last_token_usage: { input_tokens: 0, total_tokens: 10701 },
 } } };
 
-function usageRig(rows?: unknown[]) {
-  const r = rig();
-  const store = new ContextUsageStore(r.dir); stores.push(store);
-  r.runner.opts.contextUsage = store;
-  writeFileSync(r.runner.opts.threadsFile, JSON.stringify({ owner: { thread_id: "existing" } }), "utf8");
-  for (let i = 0; i < 3; i++) store.recordTurn("codex", "owner", { usedTokens: 64000, cachedTokens: 60000, windowTokens: 500000 });
-  store.recordTurn("codex", "group:7", { usedTokens: 999, windowTokens: 500000 });
-  if (rows) r.runner.opts.env!.FAKE_COMPACT_ROLLOUT = JSON.stringify(rows);
-  return { ...r, store };
-}
-
-function rig(provider: "magpie" | "openai" = "openai") {
-  const dir = tmp("cs-compact-"), codexHome = path.join(dir, "codex"), logFile = path.join(dir, "calls.jsonl");
-  mkdirSync(codexHome);
-  writeFileSync(path.join(codexHome, "config.toml"), `model_provider="${provider}"\n`, "utf8");
-  const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) });
-  const issue = vi.spyOn(tokens, "issue");
-  const runner = new CodexRunner({
-    command: [process.execPath, path.join(FIXTURES, "fake-compact-codex.mjs")], provider, magpieKey: "test-gateway-key",
-    codexHome, workspaceDir: path.join(dir, "ws"), threadsFile: path.join(dir, "threads.json"),
-    sandbox: "workspace-write", timeoutMs: 10_000, recallTokens: tokens,
-    env: { FAKE_CODEX_LOG: logFile, FAKE_CODEX_THREAD: "compact-thread", FAKE_CODEX_SLEEP_MS: "80", OBS_TOKEN: "must-not-leak" },
+/**
+ * 面板压缩经常驻 app-server：thread/compact/start 后，服务端以一个压缩回合（或只发 contextCompaction 条目）完成；
+ * rows：压缩时追加到线程 rollout 的记录（缺省时间戳为当前）。
+ */
+async function rig(opts: { rows?: unknown[]; fail?: boolean; asTurn?: boolean; usage?: boolean } = {}) {
+  const dir = tmp("cs-compact-");
+  const store = opts.usage ? new ContextUsageStore(dir) : undefined;
+  if (store) stores.push(store);
+  const script = new CodexScript();
+  const base = script.handlers;
+  script.handlers = () => ({ ...base(),
+    "thread/compact/start": (m, child) => {
+      if (opts.fail) return { error: { code: -32603, message: "fake failure" } };
+      const threadId = String(m.params!.threadId);
+      setImmediate(() => {
+        if (opts.rows) {
+          const sessions = path.join(dir, "codex", "sessions");
+          mkdirSync(sessions, { recursive: true });
+          const rows = opts.rows.map(row => ({ timestamp: new Date().toISOString(), ...(row as object) }));
+          appendFileSync(path.join(sessions, `rollout-${threadId}.jsonl`), rows.map(row => JSON.stringify(row)).join("\n") + "\n", "utf8");
+        }
+        if (opts.asTurn) child.notify("turn/started", { threadId, turn: { id: "compact-turn", status: "inProgress" } });
+        child.notify("item/completed", { threadId, turnId: "compact-turn", item: { id: "compact-item", type: "contextCompaction" } });
+        if (opts.asTurn) child.notify("turn/completed", { threadId, turn: { id: "compact-turn", status: "completed" } });
+      });
+      return { result: {} };
+    },
   });
-  const calls = (): Record<string, any>[] => existsSync(logFile) ? readFileSync(logFile, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
-  return { runner, issue, calls, dir, codexHome };
+  const r = await codexRunnerRig({ dir, handlers: script.handlers, ...(store ? { contextUsage: store } : {}) });
+  rigs.push(r);
+  const host = { started: [] as string[], completed: [] as string[] };
+  const turns = {
+    binding: (threadKey: string) => ({ threadKey, identity: { kind: "user" as const, sender: "9" }, scope: "private:9", inputs: [] }),
+    records: () => [],
+    render: async () => ({ text: "问题", images: [], source: { type: "private" as const, user_id: "9", group_id: null, nickname: "测试" } }),
+  };
+  const tokens = { issue: vi.fn(() => "a".repeat(64)), revoke: vi.fn() };
+  const backend = new CodexBackend({ runner: r.runner, tokens, imagesDir: path.join(dir, "images"), turns, compactTimeoutMs: 2_000 });
+  backend.attach({ onTurnStarted: (_k, turnId) => host.started.push(turnId), onActivity: () => undefined,
+    onTurnCompleted: (_k, turnId) => host.completed.push(turnId) });
+  return { ...r, script, backend, host, store, tokens };
 }
+const input: InputRef = { inboundKey: "k", kind: "user", sender: "9", seq: 1, at: 0 };
 
-describe("CodexRunner.compactThread", () => {
-  it("压缩后立即读取 rollout 的 total_tokens，保留回合数并发布、持久化新估算", async () => {
-    const r = usageRig([
+describe("CodexBackend.compactThread", () => {
+  it("压缩后立即读取 rollout 的 total_tokens，保留回合数并发布、持久化新估算；压缩回合不交给宿主", async () => {
+    const r = await rig({ usage: true, asTurn: true, rows: [
       { timestamp: "2026-01-01T00:00:00Z", type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 64000 } } } },
       { timestamp: "2026-01-01T00:00:01Z", type: "event_msg", payload: { type: "task_complete" } },
       compacted, tokenCount,
-    ]);
-    const other = r.store.get("codex", "group:7");
-    const listener = vi.fn(); r.store.subscribe(listener);
-    expect(await r.runner.compactThread("owner")).toBe("compacted");
-    const usage = r.store.get("codex", "owner")!;
-    expect(usage).toMatchObject({ usedTokens: 10701, source: "compact", turns: 3, windowTokens: 500000,
-      effectiveWindowTokens: 475000, lastCompactionAt: expect.any(Number) });
+    ] });
+    await r.backend.startTurn("owner", [input], { kind: "user", sender: "9" });
+    await vi.waitFor(() => expect(r.host.completed).toHaveLength(1));
+    for (let i = 0; i < 3; i++) r.store!.recordTurn("codex", "owner", { usedTokens: 64000, cachedTokens: 60000, windowTokens: 500000 });
+    r.store!.recordTurn("codex", "group:7", { usedTokens: 999, windowTokens: 500000 });
+    const other = r.store!.get("codex", "group:7");
+    const turnsBefore = r.store!.get("codex", "owner")!.turns;
+    expect(await r.backend.compactThread("owner")).toBe("compacted");
+    const usage = r.store!.get("codex", "owner")!;
+    expect(usage).toMatchObject({ usedTokens: 10701, source: "compact", turns: turnsBefore, effectiveWindowTokens: 475000, lastCompactionAt: expect.any(Number) });
     expect(usage.cachedTokens).toBeUndefined();
-    expect(r.store.get("codex", "group:7")).toEqual(other);
-    expect(listener).toHaveBeenCalledExactlyOnceWith(usage);
-    await r.store.flush();
-    const reloaded = new ContextUsageStore(r.dir); stores.push(reloaded);
-    expect(reloaded.get("codex", "owner")).toEqual(usage);
-    await new CodexRunner({ ...r.runner.opts, contextUsage: reloaded }).initializeContextUsage();
-    expect(reloaded.get("codex", "owner")).toEqual(usage);
+    expect(r.store!.get("codex", "group:7")).toEqual(other);
+    expect(r.requests("thread/compact/start")).toMatchObject([{ params: { threadId: "thr-1" } }]);
+    await r.backend.idle();
+    expect(r.host.started).toEqual(["codex:turn-1"]);
+    expect(r.host.completed).toEqual(["codex:turn-1"]);
+    expect(await r.backend.busy("owner")).toBe(false);
   });
 
   it.each([
-    undefined, [compacted], [tokenCount], [tokenCount, compacted],
+    undefined, [compacted], [tokenCount],
     [{ ...compacted, timestamp: "2026-01-01T00:00:00Z" }, { ...tokenCount, timestamp: "2026-01-01T00:00:01Z" }],
     [compacted, { type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 0, total_tokens: -1 } } } }],
   ])("压缩后的用量缺失、无效或陈旧时保留原记录：%j", async rows => {
-    const r = usageRig(rows);
-    const before = r.store.get("codex", "owner"), info = vi.spyOn(log, "info");
-    expect(await r.runner.compactThread("owner")).toBe("compacted");
-    expect(r.store.get("codex", "owner")).toEqual(before);
+    const r = await rig({ usage: true, ...(rows ? { rows } : {}) });
+    writeFileSync(path.join(r.dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "existing" } }), "utf8");
+    r.store!.recordTurn("codex", "owner", { usedTokens: 64000, cachedTokens: 60000, windowTokens: 500000 });
+    const before = r.store!.get("codex", "owner"), info = vi.spyOn(log, "info");
+    expect(await r.backend.compactThread("owner")).toBe("compacted");
+    expect(r.store!.get("codex", "owner")).toEqual(before);
     expect(info).toHaveBeenCalledWith("codex context usage unavailable after compaction; keeping previous usage", expect.any(Object));
   });
 
   it("刷新异常不把已成功的压缩变为失败，原记录不变", async () => {
-    const r = usageRig([compacted, tokenCount]);
-    const before = r.store.get("codex", "owner");
-    vi.spyOn(r.store, "recordCompaction").mockImplementationOnce(() => { throw new Error("sample failed"); });
+    const r = await rig({ usage: true, rows: [compacted, tokenCount] });
+    writeFileSync(path.join(r.dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "existing" } }), "utf8");
+    r.store!.recordTurn("codex", "owner", { usedTokens: 64000, windowTokens: 500000 });
+    const before = r.store!.get("codex", "owner");
+    vi.spyOn(r.store!, "recordCompaction").mockImplementationOnce(() => { throw new Error("sample failed"); });
     const info = vi.spyOn(log, "info");
-    expect(await r.runner.compactThread("owner")).toBe("compacted");
-    expect(r.store.get("codex", "owner")).toEqual(before);
+    expect(await r.backend.compactThread("owner")).toBe("compacted");
+    expect(r.store!.get("codex", "owner")).toEqual(before);
     expect(info).toHaveBeenCalledWith("codex context usage refresh failed after compaction; keeping previous usage", expect.any(Object));
   });
 
-  it("没有对应线程时 unchanged，不启动进程或创建会话", async () => {
-    const r = rig();
-    expect(await r.runner.compactThread("owner")).toBe("unchanged");
-    expect(await r.runner.compactThread("private:9")).toBe("unchanged");
-    expect(r.calls()).toEqual([]);
-    expect(r.issue).not.toHaveBeenCalled();
-    await expect(r.runner.compactThread("shared" as "owner")).rejects.toThrow("非法");
+  it("没有对应线程时 unchanged，不加载线程也不签发令牌", async () => {
+    const r = await rig();
+    expect(await r.backend.compactThread("owner")).toBe("unchanged");
+    expect(await r.backend.compactThread("private:9")).toBe("unchanged");
+    expect(r.loads()).toEqual([]);
+    expect(r.tokens.issue).not.toHaveBeenCalled();
+    await expect(r.backend.compactThread("shared" as "owner")).rejects.toThrow("非法");
   });
 
-  it.each(["magpie", "openai"] as const)("在 %s 回合后串行压缩，复用配置和环境，不申请 MCP 令牌", async provider => {
-    const r = rig(provider);
-    const turn = r.runner.ask("first", { threadKey: "owner", turnId: "compact-before", qqAccess: "all" });
-    const compact = r.runner.compactThread("owner");
-    const next = r.runner.ask("second", { threadKey: "owner", turnId: "compact-after", qqAccess: "all" });
-    expect(await turn).toBe("answer to: first");
-    expect(await compact).toBe("compacted");
-    expect(await next).toBe("answer to: second");
-    const calls = r.calls(), start = calls.find(c => c.phase === "compact-start")!;
-    expect(calls.map(c => c.phase)).toEqual(["start", "end", "compact-start", "rpc", "rpc", "rpc", "start", "end"]);
-    expect(start.t).toBeGreaterThanOrEqual(calls[1].t);
-    expect(start.argv).toEqual(["app-server"]);
-    expect(start.config).toBe(`model_provider="${provider}"\n`);
-    expect(start.env.CODEX_HOME).toBe(r.codexHome);
-    expect(start.env.CODEX_MAGPIE_KEY).toBe(provider === "magpie" ? "test-gateway-key" : undefined);
-    expect(start.env.OBS_TOKEN).toBeUndefined();
-    expect(calls.filter(c => c.phase === "rpc")).toEqual([
-      { phase: "rpc", method: "initialize", params: { clientInfo: { name: "cs_agent_compact", version: "0.1.0" } } },
-      { phase: "rpc", method: "thread/resume", params: { threadId: "compact-thread" } },
-      { phase: "rpc", method: "thread/compact/start", params: { threadId: "compact-thread" } },
-    ]);
-    expect(r.issue).toHaveBeenCalledTimes(2);
-    expect(await r.runner.readThreadIds()).toEqual({ owner: "compact-thread" });
-    expect(calls.filter(c => c.phase === "start")[1].argv).toContain("resume");
-  });
+  it("会话有进行中的回合时拒绝压缩；压缩失败保留映射，之后仍可重置", async () => {
+    const r = await rig();
+    r.script.auto = false;
+    await r.backend.startTurn("owner", [input], { kind: "user", sender: "9" });
+    await expect(r.backend.compactThread("owner")).rejects.toThrow("正在处理");
+    await expect(r.backend.resetThread("owner")).rejects.toThrow("正在处理");
+    r.script.complete(r.script.turns[0]!);
+    await vi.waitFor(() => expect(r.host.completed).toHaveLength(1));
+    await r.backend.idle();
 
-  it("压缩失败保留映射，并释放同键队列供重置使用", async () => {
-    const r = rig();
-    writeFileSync(r.runner.opts.threadsFile, JSON.stringify({ owner: { thread_id: "existing" } }), "utf8");
-    r.runner.opts.env!.FAKE_COMPACT_FAIL = "1";
-    const failed = r.runner.compactThread("owner");
-    const reset = r.runner.resetThread("owner");
-    await expect(failed).rejects.toThrow("thread/compact/start");
-    expect(await reset).toBe("existing");
-    expect(await r.runner.compactThread("owner")).toBe("unchanged");
+    const failing = await rig({ fail: true });
+    writeFileSync(path.join(failing.dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "existing" } }), "utf8");
+    await expect(failing.backend.compactThread("owner")).rejects.toThrow("thread/compact/start");
+    expect(await failing.runner.readThreadIds()).toEqual({ owner: "existing" });
+    expect(await failing.backend.resetThread("owner")).toBe("existing");
+    expect(await failing.backend.compactThread("owner")).toBe("unchanged");
   });
 });

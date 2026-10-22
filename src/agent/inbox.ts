@@ -166,16 +166,6 @@ export class Inbox {
     };
   }
 
-  /**
-   * 按回合凭据（codex 每次 exec 的租约）取绑定：租约的回合必须仍是宿主的当前回合。
-   * 回合已结束或被取代（exec 仍在跑）时拒绝，不能落到下一轮（可能是 owner）的身份上。
-   */
-  bindingForTurn(threadKey: string, turnId: string): TurnBinding {
-    const binding = this.binding(threadKey);
-    if (binding.turnId !== turnId) throw new Error("本回合已结束，工具调用不再有效");
-    return binding;
-  }
-
   /** 每条输入的来源头与正文；多条之间空一行。参考图按输入各自的 incoming 目录校验。 */
   async render(records: readonly InboundRecord[]): Promise<RenderedInputs> {
     const parts: string[] = [], images: string[] = [];

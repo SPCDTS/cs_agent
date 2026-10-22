@@ -1,7 +1,7 @@
 import { loadCodexModelCatalog, loadCodexModelValidator } from "./agent/codex/model-catalog.js";
 import { backendNameFor } from "./agent/backends/select.js";
 import { MediaRecall } from "./context/media.js";
-import { RecallTokens, startMediaRecallServer } from "./context/media-recall-server.js";
+import { ThreadTokens, startMediaRecallServer } from "./context/media-recall-server.js";
 import { ContextUsageStore } from "./agent/context-usage.js";
 import { loadObsToken, publicHealth } from "./obs/token.js";
 import { MemoryInstrumentation, purgeMemoryInstrumentation } from "./obs/memory/instrumentation.js";
@@ -38,8 +38,6 @@ import { ThreadHost } from "./agent/host/thread-host.js";
 import type { ThreadKey } from "./agent/host/types.js";
 import { BackendRouter, TurnMonitor } from "./agent/turns.js";
 import { createTurnSettings } from "./agent/turn-settings.js";
-import { attachmentDirs } from "./media/attach-paths.js";
-import type { RecallBinding } from "./context/media-recall-server.js";
 import { ScheduleTools } from "./agent/schedule/tools.js";
 import { ScheduleService } from "./agent/schedule/service.js";
 import { createScheduleTask } from "./agent/schedule/task.js";
@@ -141,19 +139,19 @@ async function main(): Promise<void> {
     limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } });
   let schedules: ScheduleService;
   const scheduleTools = new ScheduleTools({ grants, getHarness: () => dispatchHarness, getSchedules: () => schedules });
-  // codex 的 IM / 召回租约只绑定会话与回合；身份在每次调用时从宿主求出，且租约的回合须仍是宿主的当前回合。
-  const turnOf = (lease: RecallBinding) => inbox.bindingForTurn(lease.threadKey, lease.turnId);
-  const recallTokens = new RecallTokens(mediaRecall, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel, {
-    permissions: async lease => ({ ...await grants.permissions(turnOf(lease)), ...await scheduleTools.permissions(turnOf(lease)) }),
-    schedule: (lease, name, args) => scheduleTools.tool(turnOf(lease), name, args),
-    auth: (lease, name, args) => grants.tool(turnOf(lease), name, args),
-    send: (lease, callKey, args, signal) => sendService.send({
-      ...turnOf(lease), access: lease.access, workdir: lease.workdir!,
-      extraRoots: [attachmentDirs(cfg.DATA_DIR, lease.threadKey).attachDir,
-        ...(/^[0-9a-f-]{36}$/i.test(lease.session ?? "") ? [path.join(cfg.codexHome, "generated_images", lease.session!)] : [])],
+  // codex 线程令牌只证明来自哪个会话线程；每次调用由 codex 适配器确认属于宿主当前回合，身份从宿主求出（§5.3、§7.3）。
+  let codexBackend!: CodexBackend;
+  const threadTokens = new ThreadTokens(mediaRecall, {
+    resolve: (threadKey, meta) => codexBackend.resolveCall(threadKey as ThreadKey, meta),
+    permissions: async binding => ({ ...await grants.permissions(binding), ...await scheduleTools.permissions(binding) }),
+    schedule: (binding, name, args) => scheduleTools.tool(binding, name, args),
+    auth: (binding, name, args) => grants.tool(binding, name, args),
+    send: (binding, callKey, args, signal) => sendService.send({ ...binding,
+      extraRoots: [binding.imageDir,
+        ...(/^[0-9a-f-]{36}$/i.test(binding.session) ? [path.join(cfg.codexHome, "generated_images", binding.session)] : [])],
     }, args, callKey, signal),
-  });
-  const recallServer = await startMediaRecallServer(recallTokens, cfg.MEDIA_RECALL_PORT);
+  }, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel);
+  const recallServer = await startMediaRecallServer(threadTokens, cfg.MEDIA_RECALL_PORT);
 
   // comfy-cli 只对 loopback 目标获取 object_info：非 loopback 的 COMFYUI_URL 经容器内转发
   const comfyProxy =
@@ -174,7 +172,7 @@ async function main(): Promise<void> {
     command: [cfg.CODEX_BIN],
     provider: cfg.CODEX_PROVIDER, magpieKey: cfg.CODEX_MAGPIE_KEY,
     imageGen: cfg.CODEX_IMAGE_GEN,
-    recallTokens, mediaRecallPort: recallServer.port,
+    mediaRecallPort: recallServer.port,
     contextUsage, model: cfg.CODEX_MODEL, contextWindow: cfg.CODEX_CONTEXT_WINDOW,
     codexHome: cfg.codexHome,
     workspaceDir: cfg.WORKSPACE_DIR,
@@ -184,9 +182,6 @@ async function main(): Promise<void> {
     sandboxNetwork: cfg.CODEX_SANDBOX_NETWORK,
     preparePrompt: () => codexPrompt.regenerate(),
     prepareBasePrompt: model => codexBasePrompt.prepare(model),
-    timeoutMs: cfg.CODEX_TIMEOUT_SEC * 1000,
-    closeGraceMs: cfg.CODEX_CLOSE_GRACE_MS,
-    exitGraceMs: cfg.CODEX_EXIT_GRACE_MS,
     rolloutMaxMb: cfg.CODEX_ROLLOUT_MAX_MB,
     threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,
     traceRetentionDays: cfg.CODEX_TRACE_RETENTION_DAYS,
@@ -304,7 +299,7 @@ async function main(): Promise<void> {
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
     attachmentLimits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT },
   });
-  const codexBackend = new CodexBackend({ runner: codex, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT,
+  codexBackend = new CodexBackend({ runner: codex, tokens: threadTokens, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT,
     turns: inbox, owners: cfg.owners, sendService, imageBackend, imageTimeoutCapMs: cfg.COMFY_TIMEOUT_SEC * 1000 });
   const router = new BackendRouter({ backends: { pi, codex: codexBackend }, settings: turnSettings, turns: inbox, owners: cfg.owners,
     backendFor: scope => { const current = settings.current(); return backendNameFor(scope, current.agentBackend, current.backendOverrides); } });
@@ -327,6 +322,8 @@ async function main(): Promise<void> {
     cleanup: () => cleanupIncoming(cfg.DATA_DIR),
   });
 
+  // 常驻 codex app-server：先启动（握手在后台进行），线程在首次开轮时加载。
+  await codex.start();
   // 继续上次未完成的工作：宿主先恢复回合（pi 续跑；codex 丢失 → 中断提示），再接上 pi 事件流；
   // 生图票据由派发器按 scope FIFO 接管；最后重新投递未送达的输入与在途的定时运行。
   const alerts = startAlerts({ enabled: () => settings.current().alertOwner, owner: cfg.owner, bridge, trace });
@@ -414,8 +411,8 @@ async function main(): Promise<void> {
       config: { rawDays: cfg.HISTORY_RAW_DAYS, summaryDays: cfg.HISTORY_SUMMARY_DAYS, hardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,
         dailyHour: cfg.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } },
     archives: { codex: path.join(cfg.DATA_DIR, 'codex-threads-archive.jsonl'), pi: path.join(cfg.DATA_DIR, 'pi-threads-archive.jsonl') },
-    resetCodex: (key) => codex.resetThread(key), resetPi: (key) => pi.resetThread(key), stopThread: key => monitor.stop(key as ThreadKey),
-    compactCodex: (key) => codex.compactThread(key, "dashboard", settings.currentForTurn().codexModel), compactPi: (key) => pi.compactThread(key) });
+    resetCodex: (key) => codexBackend.resetThread(key), resetPi: (key) => pi.resetThread(key), stopThread: key => monitor.stop(key as ThreadKey),
+    compactCodex: (key) => codexBackend.compactThread(key, settings.currentForTurn().codexModel), compactPi: (key) => pi.compactThread(key) });
   const metrics = new Metrics(obs, { retentionDays: cfg.OBS_RETENTION_DAYS, inputPrice: cfg.DEEPSEEK_PRICE_IN_PER_M, outputPrice: cfg.DEEPSEEK_PRICE_OUT_PER_M,
     onPurge: async now => {
       try { if (!obs.degraded) purgeMemoryInstrumentation(obs.db, cfg.OBS_MEMORY_RETENTION_DAYS, now); }
@@ -480,6 +477,7 @@ async function main(): Promise<void> {
     await recallServer.close();
     await bridge!.stop().catch(() => undefined);
     await closeAgentHarnesses(harness, pi);
+    await codex.stop().catch(() => undefined);
     await contextUsage.close().catch(() => log.warn("context usage shutdown flush failed"));
     try {
       store.close();

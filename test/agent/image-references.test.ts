@@ -1,11 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { imageRefsArgs } from "../../src/agent/codex/runner.js";
 import { ContextStore } from "../../src/context/store.js";
 import { mediaFixture } from "../context/media-fixture.js";
 import { validateReferencesWithMedia } from "../../src/context/image-references.js";
-import { validateReferences } from "../../src/media/gen/image-references.js";
+import { imageRefsValue, validateReferences } from "../../src/media/gen/image-references.js";
 import { tmp } from "./helpers.js";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
@@ -25,11 +24,11 @@ describe("本票据参考图范围", () => {
     await fs.writeFile(file, "not an image, definitely invalid");
     await expect(validateReferences([file], [file], root)).rejects.toThrow(/PNG/);
   });
-  it("无附件也覆盖 IMAGE_REFS；拒绝 TOML 注入、相对路径、遍历与逗号", () => {
-    expect(imageRefsArgs()).toEqual(["-c", 'mcp_servers.image_gen.env.IMAGE_REFS=""']);
+  it("参考图允许列表：无附件为空；拒绝注入字符、相对路径、遍历与逗号", () => {
+    expect(imageRefsValue([])).toBe("");
     const good = path.resolve("/data/incoming/t/1.png");
-    expect(imageRefsArgs([good])[1]).toBe('mcp_servers.image_gen.env.IMAGE_REFS=' + JSON.stringify(good.replace(/\\/g, "/")));
-    for (const bad of ['x', '/data/../key', '/data/a,b', '/data/a"', '/data/a\n', '/data/a b']) expect(() => imageRefsArgs([bad])).toThrow(/IMAGE_REFS/);
+    expect(imageRefsValue([good])).toBe(good.replace(/\\/g, "/"));
+    for (const bad of ['x', '/data/../key', '/data/a,b', '/data/a"', '/data/a\n', '/data/a b']) expect(() => imageRefsValue([bad])).toThrow(/IMAGE_REFS/);
   });
 });
 

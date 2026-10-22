@@ -64,12 +64,12 @@ export interface ThreadAdapter {
   /**
    * 宿主已不再跟踪这个回合（被唤醒回合取代）：仍在运行的后端工作不能再以该回合的身份行事。返回宿主应记下的该回合结果：
    * - 回合已在后端结束（结束事件还排在宿主队列里）→ 后端回报的真实结果（如 failed）；
-   * - codex exec 仍在跑 → 中止，lost；
+   * - codex 回合仍在跑 → turn/interrupt 中止，lost；
    * - pi run 降为唤醒身份、继续运行 → completed。
    * 之后到达的结束事件宿主按过期忽略。
    */
   abandon?(threadKey: ThreadKey, turnId: string): Promise<TurnOutcome>;
-  /** 后端在该会话是否仍有工作（run 未结束、pi 子 agent 在跑、被放弃的 exec 未退出）；后端切换须等它为 false。 */
+  /** 后端在该会话是否仍有工作（回合或 run 未结束、子 agent 在跑、codex 正在压缩）；后端切换须等它为 false。 */
   busy?(threadKey: ThreadKey): Promise<boolean>;
 }
 

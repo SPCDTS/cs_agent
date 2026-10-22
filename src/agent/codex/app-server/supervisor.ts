@@ -5,12 +5,29 @@
  * 稳定运行超过 stableMs 后退避归零。重启就绪后发出 "restarted"，由调用方对已知线程 thread/resume。
  * 不写 stderr 内容与协议正文到日志（可能含用户内容或密钥）。
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { Readable, Writable } from "node:stream";
 import { log } from "../../../shared/log.js";
-import { killTree as defaultKillTree } from "../runner.js";
 import { RpcConnection, type RequestOptions, type ServerRequestHandler } from "./rpc.js";
+
+/** 结束子进程树：Windows 用 taskkill /T，其他平台杀 detached 进程组；监管器掉线清理用。 */
+export function killTree(pid: number | undefined): void {
+  if (!pid) return;
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    } else {
+      process.kill(-pid, "SIGKILL"); // detached → 进程组
+    }
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* 已退出 */
+    }
+  }
+}
 
 /** 监管器需要的子进程最小接口；测试注入内存实现。 */
 export interface AppServerChild {
@@ -239,7 +256,7 @@ export class AppServerSupervisor extends EventEmitter<SupervisorEvents> {
     gen.conn?.close(reason);
     const child = gen.child;
     if (child) {
-      try { (this.opts.killTree ?? defaultKillTree)(child.pid); } catch { /* 已退出 */ }
+      try { (this.opts.killTree ?? killTree)(child.pid); } catch { /* 已退出 */ }
       try { child.kill("SIGKILL"); } catch { /* 已退出 */ }
       child.stdin.destroy();
       child.stdout.destroy();

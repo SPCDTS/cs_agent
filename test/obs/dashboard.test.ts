@@ -16,9 +16,9 @@ import { loadConfig } from '../../src/config.js';
 import { SettingsStore, SETTINGS_TICKET, type RuntimeSettings, type SettingsValidators } from '../../src/agent/settings.js';
 import { DEFAULT_SEND_RULES } from '../../src/channel/send-rules.js';
 import type { DashboardOptions } from '../../src/obs/dashboard-types.js';
-import { CodexRunner, REASONING_EFFORTS } from '../../src/agent/codex/runner.js';
+import { REASONING_EFFORTS } from '../../src/agent/codex/runner.js';
 import { CodexBackend } from '../../src/agent/backends/codex.js';
-import { FIXTURES } from '../agent/helpers.js';
+import { CodexScript, codexRunnerRig } from '../agent/codex-fixture.js';
 import { ContextUsageStub } from './fixtures/context-usage-stub.js';
 import { CodexPromptStub } from './fixtures/codex-prompt-stub.js';
 import { dispatchSettingsLine, type ModelCatalogView } from '../../src/obs/ui/dashboard-pages.js';
@@ -391,27 +391,33 @@ describe('面板二期页面', () => {
 });
 
 describe('实时视图', () => {
-  it('SSE 推送在途票据：假 codex 的 JSONL 工具事件在回合进行中到达；卡片脱敏；完成后收起', async () => {
+  it('SSE 推送在途回合：常驻 app-server 的工具条目在回合进行中到达；卡片脱敏；完成后收起', async () => {
     const r = await rig();
     const secret = 'live-card-secret-7788';
     registerSecrets([secret]);
     const sse = await r.get('/live/stream');
     expect(sse.headers.get('content-type')).toBe('text/event-stream');
     const dir = r.dir;
-    const runner = new CodexRunner({ command: [process.execPath, path.join(FIXTURES, 'fake-codex.mjs')], codexHome: path.join(dir, 'codex'), workspaceDir: path.join(dir, 'ws'),
-      threadsFile: path.join(dir, 'codex-threads.json'), sandbox: 'workspace-write', timeoutMs: 20_000,
-      env: { FAKE_CODEX_SLEEP_MS: '1500', FAKE_CODEX_TOOL_EVENTS: '1', FAKE_CODEX_THREAD: 'thread-live', FAKE_CODEX_TEXT: '好的' } });
+    const script = new CodexScript();
+    script.auto = false;
+    script.onTurn = t => {
+      t.child.notify('item/started', { threadId: t.threadId, turnId: t.turnId, item: { type: 'commandExecution', id: 'cmd-1', command: 'ls /workspace', status: 'inProgress' } });
+      t.child.notify('item/started', { threadId: t.threadId, turnId: t.turnId, item: { type: 'mcpToolCall', id: 'exec-1', server: 'qq_context', tool: 'qq_recent', status: 'inProgress', arguments: { limit: 2 } } });
+    };
+    const live = await codexRunnerRig({ dir, handlers: script.handlers });
+    const runner = live.runner;
     const turns = {
       records: () => [],
       render: async () => ({ text: '帮我查一下', images: [], source: { type: 'group' as const, user_id: '1', group_id: '7', nickname: '小红' } }),
       binding: (threadKey: string) => ({ threadKey, identity: { kind: 'user' as const, sender: '1' }, scope: 'group:7', inputs: [] }),
     };
-    const backend = new CodexBackend({ runner, imagesDir: path.join(dir, 'images'), turns, reasoningEffort: () => r.settings.current().codexReasoningEffort });
+    const backend = new CodexBackend({ runner, tokens: { issue: () => 'a'.repeat(64), revoke: () => undefined }, imagesDir: path.join(dir, 'images'), turns,
+      reasoningEffort: () => r.settings.current().codexReasoningEffort });
     let finish!: () => void;
     const turn = new Promise<void>(resolve => { finish = resolve; });
     backend.attach({ onTurnStarted: () => {}, onActivity: () => {}, onTurnCompleted: () => finish() });
     // 卡片按回合（turn:<id>）聚合；回合的输入正文由宿主事件记在同一键下。
-    const { turnId } = await backend.startTurn('group:7', [], { kind: 'user', sender: '1' });
+    const { turnId } = await backend.startTurn('group:7', [], { kind: 'user', sender: '1' }) as { turnId: string };
     const key = 'turn:' + turnId;
     trace.event(key, 'received', { scope: 'group:7', detail: { text: `帮我查一下 ${secret}`, sender: '小红', message_id: '1' } });
     let settled = false; void turn.then(() => { settled = true; });
@@ -427,12 +433,14 @@ describe('实时视图', () => {
     // 服务端渲染的 /live 同样脱敏，并显示当前阶段
     const html = await (await r.get('/live')).text();
     expect(html).toContain(`data-ticket="${key}"`); expect(html).toContain('当前：'); expect(html).not.toContain(secret);
+    script.complete(script.turns[0]!);
     await turn;
+    await live.close();
     trace.event(key, 'reply_sent', { detail: { terminal: true, reply: '好的' } });
     const card = r.live.snapshot().find(c => c.ticket === key)!;
     expect(card).toMatchObject({ state: 'done', outcome: 'reply_sent', phase: '' });
     expect(card.finished).not.toBeNull();
-    expect(card.items.map(i => i.stage)).toEqual(expect.arrayContaining(['thread_wait', 'model_turn', 'model_usage', 'tool:qq_recent']));
+    expect(card.items.map(i => i.stage)).toEqual(expect.arrayContaining(['dispatched', 'model_turn', 'tool:qq_recent', 'tool:command_execution']));
     const after = await (await r.get('/live')).text();
     expect(after).toContain(`<details data-ticket="${key}">`);
     expect(after).toContain(`href="/tickets/${encodeURIComponent(key)}"`);

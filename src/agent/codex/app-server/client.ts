@@ -26,14 +26,14 @@ export interface ThreadOptions {
   /** 配置覆盖，点号键，例如 { "mcp_servers.im.env.IM_TOKEN": "…" }；app-server 按线程启动 MCP 子进程并使用其 env。 */
   config?: Record<string, unknown>;
   model?: string;
-  /** 基础指令文件；写入 config.model_instructions_file（与 codex exec 的 -c 覆盖一致）。 */
+  /** 基础指令文件；写入 config.model_instructions_file。 */
   modelInstructionsFile?: string;
   baseInstructions?: string;
   developerInstructions?: string;
   /** 缺省 "never"。 */
   approvalPolicy?: ApprovalPolicy;
-  /** 缺省 "workspace-write"。 */
-  sandbox?: SandboxMode;
+  /** 缺省 "workspace-write"；null 不发送（由 config 里的命名权限 default_permissions 决定，二者互斥）。 */
+  sandbox?: SandboxMode | null;
 }
 
 export interface TurnOptions {
@@ -224,6 +224,20 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
     await this.supervisor.call("turn/interrupt", { threadId, turnId }, this.callOpts(call));
   }
 
+  /**
+   * thread/compact/start：压缩线程上下文。压缩以服务端开启的回合进行（turnStarted initiatedBy=server），
+   * 调用方据此区分压缩回合与唤醒回合。线程未加载时抛 ThreadNotLoadedError。
+   */
+  async compactThread(threadId: string, call: CallOptions = {}): Promise<void> {
+    const state = this.requireLoaded(threadId);
+    try {
+      await this.supervisor.call("thread/compact/start", { threadId }, this.callOpts(call));
+    } catch (error) {
+      if (errorMatches(error, THREAD_NOT_LOADED)) { state.loadedGeneration = undefined; throw new ThreadNotLoadedError(threadId); }
+      throw error;
+    }
+  }
+
   thread(threadId: string): ThreadSnapshot | undefined {
     const state = this.threads.get(threadId);
     return state && this.snapshot(state);
@@ -252,7 +266,7 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
     const config = { ...opts.config, ...(opts.modelInstructionsFile ? { model_instructions_file: opts.modelInstructionsFile } : {}) };
     return {
       approvalPolicy: opts.approvalPolicy ?? "never",
-      sandbox: opts.sandbox ?? "workspace-write",
+      ...(opts.sandbox === null ? {} : { sandbox: opts.sandbox ?? "workspace-write" }),
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
       ...(opts.model ? { model: opts.model } : {}),
       ...(opts.baseInstructions !== undefined ? { baseInstructions: opts.baseInstructions } : {}),

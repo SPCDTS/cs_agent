@@ -381,7 +381,7 @@ describe("一个会话同一时间只由一个后端服务（§4.3）", () => {
       brain: (ctx) => ctx.messages.at(-1)!.role === "toolResult" ? reply("结束") : call(["send_message", { text: "收到" }]) });
     const key = await r.say("9", "第二个号的消息", null);
     await r.idle();
-    expect(r.codexAsk).not.toHaveBeenCalled();
+    expect(r.script.turns).toEqual([]);
     expect(r.bridge.inbox.getInbound(key)!.turn_id).toMatch(/^pi:/);
     expect(r.texts()).toEqual(["收到"]);
   });

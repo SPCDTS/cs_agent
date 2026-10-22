@@ -2,7 +2,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { isScope } from "../../context/access.js";
 
-/** 0.163 的命名权限配置与 sandbox_mode 互斥，必须整份按轮注入。 */
+/**
+ * 会话的命名权限配置（与 sandbox_mode 互斥，必须整份注入）：config 为常驻 app-server thread/start、thread/resume 的点号键覆盖；
+ * args 为同一配置的 `-c` 形式（codex CLI 诊断脚本用）。
+ */
 export function codexWorkspacePolicy(base: string, dataDir: string, key: string, sandbox: string, network = true,
   codexHome = path.join(dataDir, "codex"), senderIsOwner = false) {
   if (key !== "owner" && !isScope(key)) throw new Error("非法的 codex 线程键");
@@ -24,13 +27,19 @@ export function codexWorkspacePolicy(base: string, dataDir: string, key: string,
     [workspaceDir]: sandbox === "read-only" ? "read" : "write",
   };
   for (const dir of writableRoots) filesystem[dir] = "write";
+  const config: Record<string, unknown> = {
+    "permissions.cs_agent_scope": { filesystem, network: { enabled: network } },
+    default_permissions: "cs_agent_scope",
+    // 同时清空 entrypoint 的旧全局写入列表；命名权限配置是实际安全边界。
+    "sandbox_workspace_write.writable_roots": writableRoots,
+    approval_policy: "never",
+  };
   const entries = Object.entries(filesystem).map(([dir, access]) => `${JSON.stringify(dir)}=${JSON.stringify(access)}`).join(",");
   const args = ["-c", `permissions.cs_agent_scope={filesystem={${entries}},network={enabled=${network}}}`,
     "-c", 'default_permissions="cs_agent_scope"',
-    // 同时清空 entrypoint 的旧全局写入列表；命名权限配置是实际安全边界。
     "-c", `sandbox_workspace_write.writable_roots=${JSON.stringify(writableRoots)}`,
     "-c", 'approval_policy="never"'];
-  return { workspaceDir, writableRoots, args };
+  return { workspaceDir, writableRoots, config, args };
 }
 
 /** 由父进程创建目录，拒绝 scope 目录链接；会话只能写自己的目录，无法替换父目录的子项。 */

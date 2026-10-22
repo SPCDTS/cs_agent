@@ -18,6 +18,9 @@ import { ObsStore } from '../../src/obs/store.js';
 import { Trace } from '../../src/shared/trace.js';
 import { registerSecrets } from '../../src/shared/redact.js';
 import { ingestImageEvents } from '../../src/media/gen/events.js';
+import { ThreadTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
+import type { Access } from "../../src/context/access.js";
+import { callBinding } from "../context/gateway-fixture.js";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ENTRY = path.join(ROOT, "dist", "mcp", "image-gen.js");
 const PNG = Buffer.from(
@@ -71,8 +74,10 @@ beforeAll(async () => {
 afterAll(() => new Promise<void>((r) => comfy.close(() => r())));
 
 const clients: Client[] = [];
+const closes: (() => Promise<void>)[] = [];
 afterEach(async () => {
   await Promise.all(clients.splice(0).map((c) => c.close().catch(() => undefined)));
+  for (const close of closes.splice(0)) await close();
 });
 
 function workflowFile(dir: string): string {
@@ -81,11 +86,26 @@ function workflowFile(dir: string): string {
   return f;
 }
 
-async function stdioClient(env: Record<string, string | undefined>): Promise<Client> {
+/**
+ * 启动线程令牌端点（/context 给出本次调用的生图目录、参考图与读取范围）并连接 image_gen 子进程。
+ * call.dir 缺省时网关拒绝（调用不属于会话当前回合）。
+ */
+async function stdioClient(env: Record<string, string | undefined>, call: { dir?: string; refs?: string[]; access?: Access } = {}): Promise<Client> {
+  const tokens = new ThreadTokens({ recall: async () => ({ text: "", images: [] }) }, {
+    resolve: async threadKey => {
+      if (!call.dir) throw new Error("本回合已结束，工具调用不再有效");
+      return callBinding(threadKey, call.access ?? { kind: "scope", scope: "group:7" }, { imageDir: call.dir, imageRefs: call.refs ?? [] });
+    },
+    send: async () => ({}),
+  });
+  const endpoint = await startMediaRecallServer(tokens, 0);
+  closes.push(endpoint.close);
   const base: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) base[k] = v;
-  for (const k of Object.keys(base)) if (k.startsWith("COMFY") || k === "IMAGE_TICKET_DIR" || k === "IMAGE_REFS" || k === "QQ_ACCESS") delete base[k];
+  for (const k of Object.keys(base)) if (k.startsWith("COMFY") || k === "IMAGE_GEN_TOKEN") delete base[k];
   for (const [k, v] of Object.entries(env)) if (v !== undefined) base[k] = v;
+  base.IMAGE_GEN_TOKEN = tokens.issue("group:7");
+  base.MEDIA_RECALL_PORT = String(endpoint.port);
   const client = new Client({ name: "test", version: "0" });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [ENTRY], env: base, stderr: "pipe" }));
   clients.push(client);
@@ -99,7 +119,7 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     const dir=tmp('cs-imggen-spool-'),ticketDir=path.join(dir,'images','spool');
     const secret='main-registry-only-fixture';registerSecrets([secret]);
     writeFileSync(path.join(dir,'observability.sqlite'),'corrupt sentinel','utf8');
-    const c=await stdioClient({DATA_DIR:dir,IMAGE_TICKET_DIR:ticketDir,COMFY_MODE:'http',COMFYUI_URL:comfyUrl,COMFY_TIMEOUT_SEC:'5',COMFY_WORKFLOW_FILE:workflowFile(dir)});
+    const c=await stdioClient({DATA_DIR:dir,COMFY_MODE:'http',COMFYUI_URL:comfyUrl,COMFY_TIMEOUT_SEC:'5',COMFY_WORKFLOW_FILE:workflowFile(dir)},{dir:ticketDir});
     const result=await c.callTool({name:'generate_image',arguments:{prompt:'猫 '+secret}});expect(result.isError).not.toBe(true);
     expect(readFileSync(path.join(dir,'observability.sqlite'),'utf8')).toBe('corrupt sentinel');
     const store=new ObsStore(tmp('cs-imggen-main-'));
@@ -112,8 +132,8 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
   it("慢 Comfy 任务在 MCP 等待上限后返回仍在生成，并追加 pending-jobs 清单", async () => {
     const dir = tmp("cs-imggen-");
     const ticketDir = path.join(dir, "images", "slow");
-    const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: ticketDir, IMAGE_GEN_MCP_WAIT_SEC: "1",
-      COMFY_MODE: "http", COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: "20" });
+    const c = await stdioClient({ DATA_DIR: dir, IMAGE_GEN_MCP_WAIT_SEC: "1",
+      COMFY_MODE: "http", COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: "20" }, { dir: ticketDir });
     const before = prompts.length;
     for (let i = 1; i <= 2; i++) {
       const r = await c.callTool({ name: "generate_image", arguments: { prompt: "SLOW 猫", aspect: "16:9", size: "1mp" } });
@@ -131,8 +151,8 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
   });
   it("killing the MCP process after submit leaves a collectable marker without resubmission", async () => {
     const dir = tmp("cs-imggen-kill-"), ticketDir = path.join(dir, "images", "killed");
-    const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: ticketDir, IMAGE_GEN_MCP_WAIT_SEC: "30",
-      COMFY_MODE: "http", COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: "30" });
+    const c = await stdioClient({ DATA_DIR: dir, IMAGE_GEN_MCP_WAIT_SEC: "30",
+      COMFY_MODE: "http", COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: "30" }, { dir: ticketDir });
     const before = prompts.length;
     const pending = c.callTool({ name: "generate_image", arguments: { prompt: "SLOW process-kill" } }).catch(() => undefined);
     const marker = path.join(ticketDir, "pending-jobs.json");
@@ -145,16 +165,17 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     expect(files).toHaveLength(1); expect(prompts.length - before).toBe(1);
   });
 
-  it("stdio 的 QQ_ACCESS 允许本域媒体，拒绝跨域、缺失权限和非媒体文件", async () => {
+  it("stdio 按本次调用的读取范围允许本域媒体，拒绝跨域、网关拒绝和非媒体文件", async () => {
     const dir = tmp(), store = new ContextStore(dir);
     const media = await mediaFixture(store, dir); store.close();
     const env = { DATA_DIR: dir, COMFY_MODE: "http", COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: "5" };
-    for (const [index, access] of ["group:7", "all", "group:8", undefined, "invalid"].entries()) {
-      const c = await stdioClient({ ...env, QQ_ACCESS: access, IMAGE_TICKET_DIR: path.join(dir, "images", "media-" + index) });
+    const cases: (Access | null)[] = [{ kind: "scope", scope: "group:7" }, { kind: "all" }, { kind: "scope", scope: "group:8" }, null];
+    for (const [index, access] of cases.entries()) {
+      const c = await stdioClient(env, access ? { dir: path.join(dir, "images", "media-" + index), access } : {});
       const result = await c.callTool({ name: "generate_image", arguments: { prompt: "编辑", reference_images: [media] } });
       expect(result.isError === true).toBe(index > 1);
     }
-    const c = await stdioClient({ ...env, QQ_ACCESS: "all", IMAGE_TICKET_DIR: path.join(dir, "images", "outside") });
+    const c = await stdioClient(env, { dir: path.join(dir, "images", "outside"), access: { kind: "all" } });
     const outside = path.join(dir, "outside.png"); writeFileSync(outside, PNG);
     const result = await c.callTool({ name: "generate_image", arguments: { prompt: "编辑", reference_images: [outside] } });
     expect(result.isError).toBe(true);
@@ -163,7 +184,7 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
 
   it("lists generate_image as a non-read-only tool", async () => {
     const dir = tmp("cs-imggen-");
-    const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: path.join(dir, "images", "t1") });
+    const c = await stdioClient({ DATA_DIR: dir }, { dir: path.join(dir, "images", "t1") });
     const { tools } = await c.listTools();
     expect(tools.map((t) => t.name)).toEqual(["generate_image"]);
     expect(tools[0]!.annotations).toMatchObject({ readOnlyHint: false });
@@ -171,13 +192,13 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     expect(tools[0]!.inputSchema.additionalProperties).toBe(false);
   });
 
-  it("generates into IMAGE_TICKET_DIR and returns the file names", async () => {
+  it("generates into the conversation image dir resolved per call and returns the file names", async () => {
     const dir = tmp("cs-imggen-");
     const ticketDir = path.join(dir, "images", "tkt_1");
     const c = await stdioClient({
-      DATA_DIR: dir, IMAGE_TICKET_DIR: ticketDir,
+      DATA_DIR: dir,
       COMFY_MODE: "http", COMFYUI_URL: comfyUrl, COMFY_WORKFLOW_FILE: workflowFile(dir), COMFY_PROMPT_NODE: "4", COMFY_TIMEOUT_SEC: "20",
-    });
+    }, { dir: ticketDir });
     const before = prompts.length;
     const r = await c.callTool({ name: "generate_image", arguments: { prompt: "一只橘猫" } });
     expect(r.isError).toBeFalsy();
@@ -190,12 +211,12 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     expect((prompts[before] as Record<string, { inputs: { text?: string } }>)["4"]!.inputs.text).toBe("一只橘猫");
   });
 
-  it('stdio IMAGE_REFS 允许列表仅能选择本票据文件，合法图片上传后进入编辑图', async () => {
+  it('本轮参考图允许列表（主进程按本轮输入给出）仅能选择其中的文件，合法图片上传后进入编辑图', async () => {
     const dir = tmp('cs-imggen-'); const ticket = 'refs'; const refsDir = path.join(dir, 'incoming', ticket);
     mkdirSync(refsDir, { recursive: true }); const allowed = path.join(refsDir, '1.png'); const denied = path.join(refsDir, '2.png');
     writeFileSync(allowed, PNG); writeFileSync(denied, PNG);
-    const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: path.join(dir, 'images', ticket), IMAGE_REFS: allowed,
-      COMFY_MODE: 'http', COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: '20' });
+    const c = await stdioClient({ DATA_DIR: dir, COMFY_MODE: 'http', COMFYUI_URL: comfyUrl, COMFY_TIMEOUT_SEC: '20' },
+      { dir: path.join(dir, 'images', ticket), refs: [allowed] });
     for (const args of [{ prompt: '猫', reference_images: [denied] }, { prompt: '猫', count: 5 }, { prompt: '猫', unlisted: true }]) {
       expect((await c.callTool({ name: 'generate_image', arguments: args })).isError).toBe(true);
     }
@@ -208,18 +229,18 @@ describe("image_gen MCP over stdio (built entry, fake ComfyUI over HTTP)", () =>
     expect(graph['6'].inputs.seed).toBe(7);
   });
 
-  it("refuses without IMAGE_TICKET_DIR", async () => {
+  it("refuses when the main process rejects the call (not the conversation's current turn)", async () => {
     const dir = tmp("cs-imggen-");
     const c = await stdioClient({ DATA_DIR: dir, COMFY_MODE: "http", COMFYUI_URL: comfyUrl });
     const r = await c.callTool({ name: "generate_image", arguments: { prompt: "x" } });
     expect(r.isError).toBe(true);
-    expect(textOf(r)).toMatch(/IMAGE_TICKET_DIR 未设置/);
+    expect(textOf(r)).toMatch(/image_gen 不可用：本回合已结束/);
   });
 
   it("refuses a dir outside ${DATA_DIR}/images", async () => {
     const dir = tmp("cs-imggen-");
     for (const bad of [path.join(dir, "elsewhere"), path.join(dir, "images"), path.join(dir, "images", "a", "b"), path.join(dir, "images", "..", "codex")]) {
-      const c = await stdioClient({ DATA_DIR: dir, IMAGE_TICKET_DIR: bad, COMFY_MODE: "http", COMFYUI_URL: comfyUrl });
+      const c = await stdioClient({ DATA_DIR: dir, COMFY_MODE: "http", COMFYUI_URL: comfyUrl }, { dir: bad });
       const r = await c.callTool({ name: "generate_image", arguments: { prompt: "x" } });
       expect(r.isError, bad).toBe(true);
       expect(textOf(r)).toMatch(/image_gen 不可用/);
@@ -238,7 +259,7 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
     const backend: ImageBackend = { name: "fake", selfCheck: async () => ({}), submit: async () => "slow",
       collect: async () => { throw new Error("生图超时"); }, reconcile: async () => ({ images: [] }),
       generate: async () => [], close: async () => {} };
-    const { server, dispose } = createImageGenServer({ dataDir: dir, ticketDir: path.join(dir, "images", "budget"),
+    const { server, dispose } = createImageGenServer({ dataDir: dir, context: async () => ({ dir: path.join(dir, "images", "budget"), refs: [], turnId: "t1" }),
       waitMs, imageTimeoutCapMs: cap, createBackend: () => backend });
     const [a, b] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "t", version: "0" });
@@ -249,11 +270,11 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
     } finally { timer.mockRestore(); await client.close(); await dispose(); }
   });
 
-  async function connect(dataDir: string, ticketDir: string | undefined) {
+  async function connect(dataDir: string, ticketDir: string, turn = { id: "t1" }) {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     const { server, dispose } = createImageGenServer({
-      ticketDir,
+      context: async () => ({ dir: ticketDir, refs: [], turnId: turn.id }),
       dataDir,
       createBackend: () => new McpImageBackend({ command: process.execPath, args: [path.join(FIXTURES, "fake-comfy-mcp.mjs")], env: { ...env, COMFYUI_URL: "http://comfy.test" }, timeoutMs: 20_000 }),
     });
@@ -265,12 +286,13 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
     return { client, dispose };
   }
 
-  it("each call writes into its own call-<n> subdir: same-named outputs are all kept and counted; MAX_CALLS enforced (R9)", async () => {
+  it("each call writes into its own call-<n> subdir: same-named outputs are all kept and counted; MAX_CALLS enforced per turn (R9)", async () => {
     const dir = tmp("cs-imggen-");
     const ticketDir = path.join(dir, "images", "t9");
     mkdirSync(ticketDir, { recursive: true });
     writeFileSync(path.join(ticketDir, "old.png"), PNG);
-    const { client, dispose } = await connect(dir, ticketDir);
+    const turn = { id: "t1" };
+    const { client, dispose } = await connect(dir, ticketDir, turn);
     try {
       const r = await client.callTool({ name: "generate_image", arguments: { prompt: "a dog" } });
       expect(JSON.parse(textOf(r)).files).toEqual([path.join(ticketDir, "call-1", "ComfyUI_00001_.png")]);
@@ -285,6 +307,9 @@ describe("image_gen server with the fake comfy-mcp fixture (in-memory transport)
       const over = await client.callTool({ name: "generate_image", arguments: { prompt: "too many" } });
       expect(over.isError).toBe(true);
       expect(textOf(over)).toMatch(/上限/);
+      // 同一 MCP 进程跨回合复用：下一回合重新计数
+      turn.id = "t2";
+      expect((await client.callTool({ name: "generate_image", arguments: { prompt: "next turn" } })).isError).toBeFalsy();
     } finally {
       await dispose();
     }
@@ -311,7 +336,7 @@ describe("resolveTicketDir / backendConfigFromEnv", () => {
     expect(path.basename(ok)).toBe("abc-1_2");
     await expect(resolveTicketDir(undefined, dir)).rejects.toThrow(/未设置/);
     await expect(resolveTicketDir("relative/images/x", dir)).rejects.toThrow(/绝对路径/);
-    await expect(resolveTicketDir(path.join(dir, "images", "a b"), dir)).rejects.toThrow(/票据目录/);
+    await expect(resolveTicketDir(path.join(dir, "images", "a b"), dir)).rejects.toThrow(/会话目录/);
     if (process.platform !== "win32") {
       mkdirSync(path.join(dir, "outside"));
       symlinkSync(path.join(dir, "outside"), path.join(dir, "images", "link"));

@@ -15,6 +15,15 @@ import { startAlerts } from "../../src/obs/alerts.js";
 import { log } from "../../src/shared/log.js";
 import { loadAgentConfig as loadConfig } from "../../src/agent/config.js";
 import type { InboundRecord } from "../../src/channel/types.js";
+import { CodexScript, codexRunnerRig } from "./codex-fixture.js";
+
+/** 常驻 codex 适配器（内存版 app-server）：script 记录每轮 turn/start 的推理强度与模型。 */
+async function codexBackend(dir: string, script: CodexScript, turns: ConstructorParameters<typeof CodexBackend>[0]["turns"], reasoningEffort?: string) {
+  const r = await codexRunnerRig({ dir, handlers: script.handlers });
+  clean.push(() => r.close());
+  return new CodexBackend({ runner: r.runner, tokens: { issue: () => "a".repeat(64), revoke: () => undefined }, imagesDir: path.join(dir, "images"), turns,
+    ...(reasoningEffort ? { reasoningEffort } : {}) });
+}
 
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
@@ -133,7 +142,6 @@ describe("每轮设置快照", () => {
   it("开轮时冻结后端与档位：回合中热更新不影响本轮，下一轮使用新设置", async () => {
     const dir = tmp();
     const settings = await SettingsStore.open(dir, defaults, new Trace());
-    const efforts: (string | undefined)[] = [];
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const current = vi.fn(() => settings.currentForTurn());
@@ -144,13 +152,10 @@ describe("每轮设置快照", () => {
       binding: (threadKey: string) => ({ threadKey, identity: { kind: "user" as const, sender: "1" }, scope: "private:1", inputs: [] }),
     };
     let block = true;
-    const codex = new CodexBackend({ imagesDir: path.join(dir, "images"), reasoningEffort: "low", turns,
-      runner: { ask: async (_prompt, options) => {
-        efforts.push(options?.reasoningEffort); await options?.onAcquired?.();
-        if (block) await gate;
-        return "原始回答";
-      } },
-    });
+    const script = new CodexScript();
+    script.onTurn = async () => { if (block) await gate; };
+    const codex = await codexBackend(dir, script, turns, "low");
+    const efforts = () => script.turns.map(t => t.effort);
     const done: string[] = [];
     codex.attach({ onTurnStarted: () => {}, onActivity: () => {}, onTurnCompleted: (_k, turnId, r) => { done.push(r.status); void turnId; } });
     const pi: BackendAdapter = { startTurn: async () => { throw new Error("pi 不应被选中"); }, steer: async () => "no_active_turn", interrupt: async () => {}, recoverTurn: async () => "lost" };
@@ -158,17 +163,17 @@ describe("每轮设置快照", () => {
     records.set("first", record("first", "private:1"));
     const first = await router.startTurn("private:1", [ref("first")], { kind: "user", sender: "1" });
     expect(first).toEqual({ turnId: expect.stringMatching(/^codex:/) });
-    await vi.waitFor(() => expect(efforts).toEqual(["high"]));
+    await vi.waitFor(() => expect(efforts()).toEqual(["high"]));
     await settings.update({ codexReasoningEffort: "low", agentBackend: "pi" }, "test");
     current.mockImplementation(() => { throw new Error("回合内不得读取当前设置"); });
-    release(); await codex.idle();
-    expect(efforts).toEqual(["high"]); expect(done).toEqual(["completed"]);
+    release(); await vi.waitFor(() => expect(done).toEqual(["completed"]));
+    expect(efforts()).toEqual(["high"]);
     await settings.update({ agentBackend: "codex" }, "test"); current.mockImplementation(() => settings.currentForTurn());
     block = false;
     records.set("next", record("next", "private:1"));
     await router.startTurn("private:1", [ref("next")], { kind: "user", sender: "1" });
-    await codex.idle();
-    expect(efforts.at(-1)).toBe("low");
+    await vi.waitFor(() => expect(done).toHaveLength(2));
+    expect(efforts().at(-1)).toBe("low");
   });
 });
 
@@ -178,17 +183,17 @@ describe("auto 档位", () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     clean.push(() => release());
-    const complete = vi.fn(async (_prompt: string, _signal: AbortSignal) => output), ask = vi.fn(async (_prompt: string, options: import("../../src/agent/codex/runner.js").AskOptions) => {
-      await options.onAcquired?.(); await gate; return "已完成";
-    });
+    const complete = vi.fn(async (_prompt: string, _signal: AbortSignal) => output);
+    const script = new CodexScript();
+    script.onTurn = () => gate;
     const rec = record("auto", "private:1", { text: "看看", reply_to: "quoted" });
     const turns = { records: () => [rec],
       render: async () => ({ text: "看看", images: [], source: { type: "private" as const, user_id: "1", group_id: null, nickname: "测试" } }),
       binding: (threadKey: string) => ({ threadKey, identity: { kind: "user" as const, sender: "1" }, scope: "private:1", inputs: [] }) };
-    const codex = new CodexBackend({ runner: { ask }, imagesDir: path.join(dir, "images"), turns });
+    const codex = await codexBackend(dir, script, turns);
     const seen: TicketSettings[] = [];
     const router = new BackendRouter({ backends: { codex: { startTurn: (k, i, c, snapshot) => { seen.push(snapshot!); return codex.startTurn(k, i, c, snapshot); },
-      steer: () => codex.steer(), interrupt: k => codex.interrupt(k), recoverTurn: () => codex.recoverTurn() } }, turns,
+      steer: (k, t, i) => codex.steer(k, t, i), interrupt: k => codex.interrupt(k), recoverTurn: () => codex.recoverTurn() } }, turns,
       settings: createTurnSettings({ currentSettings: () => settings.current(), codexReasoningEffort: "medium", effortRouter: { complete } }) });
     await router.startTurn("private:1", [ref("auto")], { kind: "user", sender: "1" });
     const effort = output === "high" ? "high" : "medium";
@@ -196,8 +201,8 @@ describe("auto 档位", () => {
     expect(complete).toHaveBeenCalledTimes(1); expect(complete.mock.calls[0]?.length).toBe(2);
     expect((complete.mock.calls[0] as unknown[] | undefined)?.[0]).toContain("有引用：true");
     await settings.update({ codexModel: "changed-after-start", codexReasoningEffort: "low" }, "test");
-    await vi.waitFor(() => expect(ask).toHaveBeenCalled());
+    await vi.waitFor(() => expect(script.turns).toHaveLength(1));
     release(); await codex.idle();
-    expect(ask).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ model: defaults.codexModel, reasoningEffort: effort }));
+    expect(script.turns[0]).toMatchObject({ model: defaults.codexModel, effort });
   });
 });

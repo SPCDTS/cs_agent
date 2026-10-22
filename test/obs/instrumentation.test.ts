@@ -15,8 +15,8 @@ import { openHarness } from '../../src/agent/harness.js';
 import { createCsAgentExtension } from '../../src/agent/extension.js';
 import { TRANSPARENT_PNG, UnknownJobError } from '../../src/media/gen/image-gen.js';
 import { ContextStore } from '../../src/context/store.js';
-import { CodexRunner } from '../../src/agent/codex/runner.js';
-import { codexObserver } from '../../src/agent/backends/codex.js';
+import { observeItem } from '../../src/agent/backends/codex.js';
+import { CodexScript, codexRunnerRig } from '../agent/codex-fixture.js';
 import { savePendingImage } from '../../src/media/gen/image-pending.js';
 import { observeImages } from '../../src/media/gen/observed.js';
 import type { InboundMessage, InboundRecord, ReplyTicketRecord } from '../../src/channel/types.js';
@@ -66,10 +66,16 @@ function codexStub(name:string){
     message_id:'1',nickname:'测试',text:'你好',route_text:'你好',time:1,images:[],attachments:[],created_at:new Date().toISOString(),state:'queued'});
   return stub;
 }
+/** 常驻 codex 适配器（内存版 app-server）；script.onTurn 在回合内发条目或写文件。 */
+async function codexBackend(name:string,script:CodexScript,extra:Partial<ConstructorParameters<typeof CodexBackend>[0]>={}){
+  const live=await codexRunnerRig({handlers:script.handlers});clean.push(()=>live.close());
+  return new CodexBackend({runner:live.runner,tokens:{issue:()=>'a'.repeat(64),revoke:()=>undefined},imagesDir:path.join(live.dir,'images'),
+    turns:codexStub(name).turns,...extra});
+}
 async function codexTurn(backend:CodexBackend){
   let done!:()=>void;const ended=new Promise<void>(r=>{done=r;});
   backend.attach({onTurnStarted:()=>{},onActivity:()=>{},onTurnCompleted:()=>done()});
-  const {turnId}=await backend.startTurn('private:1',[],{kind:'user',sender:'1'});
+  const {turnId}=await backend.startTurn('private:1',[],{kind:'user',sender:'1'}) as {turnId:string};
   await ended;return 'turn:'+turnId;
 }
 async function rig(){
@@ -80,10 +86,13 @@ async function rig(){
   const bridge={uploadFile:async()=>({file_id:"unused"}),getTicket:async(ticket:string)=>({ticket_id:ticket,seq:1,status:states.get(ticket)??'pending'}) as ReplyTicketRecord,
     listPendingTickets:async()=>[],reply:async(ticket:string)=>{states.set(ticket,'sent');return {message_id:'reply-'+ticket,already_sent:false,message_type:'private' as const,target_id:'1'};}};
   const image={name:'fake-comfy',submit:async()=>'prompt-fake',collect:async(_id:string,out:string)=>{mkdirSync(out,{recursive:true});const file=path.join(out,'result.png');writeFileSync(file,TRANSPARENT_PNG);return [file];},reconcile:async()=>({images:[] as string[]}),clearReferences:async()=>{}};
-  const codex=new CodexBackend({imagesDir:path.join(dir,'images'),reasoningEffort:'high',turns:codexStub('agent').turns,runner:{ask:async(_prompt,o)=>{
-    await o?.onAcquired?.();o?.onJsonEvent?.({type:'item.started',item:{id:'call1',type:'mcp_tool_call',tool:'qq_recent',server:'qq_context',arguments:{limit:2}}});
-    o?.onJsonEvent?.({type:'item.completed',item:{id:'call1',type:'mcp_tool_call',tool:'qq_recent',status:'completed',duration_ms:12}});return '## 假回答';
-  }}});
+  const script=new CodexScript();
+  script.onTurn=t=>{
+    t.child.notify('item/started',{threadId:t.threadId,turnId:t.turnId,item:{id:'call1',type:'mcpToolCall',tool:'qq_recent',server:'qq_context',status:'inProgress',arguments:{limit:2}}});
+    t.child.notify('item/completed',{threadId:t.threadId,turnId:t.turnId,item:{id:'call1',type:'mcpToolCall',tool:'qq_recent',server:'qq_context',status:'completed',durationMs:12}});
+    t.child.notify('item/completed',{threadId:t.threadId,turnId:t.turnId,item:{id:'msg1',type:'agentMessage',text:'## 假回答'}});
+  };
+  const codex=await codexBackend('agent',script,{reasoningEffort:'high'});
   const tasks=createTasks({getBridge:()=>bridge,imageBackend:image,imagesDir:path.join(dir,'images'),replyRetryDelayMs:1});
   const harness=await openHarness({models,extension:createCsAgentExtension(tasks),dbFile:path.join(dir,'agent.sqlite')},BACKGROUND_CONTEXT);clean.push(()=>harness.close(BACKGROUND_CONTEXT));
   const dispatcher=new Dispatcher({harness,bridge,tasks,concurrency:2,retryDelayMs:1});
@@ -96,10 +105,10 @@ it('前缀图片票据走真实 dispatcher/任务、Codex 回合走适配层，�
   const stages=(t:string)=>r.store.events(t).map(e=>e.stage).filter((s,i,a)=>i===0||a[i-1]!==s);
   expect(stages('image')).toEqual(['received','admitted','routed','dispatched','phase:submit','image:submit','phase:submit','phase:collect','image:collect','phase:collect','phase:reply','reply_sent','phase:reply','reply_sent']);
   // 回合键 turn:<id>：适配层只记后端事件；输入、终态与发送由宿主事件和 Outbox 另记。
-  expect(stages(agent)).toEqual(['dispatched','thread_wait','model_turn','tool:qq_recent','model_turn','final_answer']);
+  expect(stages(agent)).toEqual(['dispatched','model_turn','tool:qq_recent','final_answer','model_turn']);
   expect(r.store.events('image').find(e=>e.stage==='image:submit'&&e.status==='ok')?.detail_json).toContain('prompt-fake');
   expect(r.store.events(agent).find(e=>e.stage==='tool:qq_recent'&&e.status==='ok')?.duration_ms).toBe(12);
-  expect(JSON.parse(r.store.events(agent).find(e=>e.stage==='dispatched')!.detail_json)).toMatchObject({backend:'codex',thread_key:'private:1',kind:'user'});
+  expect(JSON.parse(r.store.events(agent).find(e=>e.stage==='dispatched')!.detail_json)).toMatchObject({backend:'codex',thread_key:'private:1',kind:'user',effort:'high'});
   expect(r.store.tickets().find(t=>t.ticket==='image')?.status).toBe('sent');
   expect(complete).not.toHaveBeenCalled();expect(r.faux.state.callCount).toBe(0);
   const events=r.store.events(agent);
@@ -117,12 +126,12 @@ it('codex 回合结束前补收 image_gen 超时任务（prompt_id 可观测）�
   const r=await rig();
   const root=path.join(r.dir,'images','private_1');
   const system=vi.fn(async()=>({status:'sent' as const,already_sent:false,message_id:'m1',message_type:'private' as const,target_id:'1'}));
-  const codex=new CodexBackend({imagesDir:path.join(r.dir,'images'),turns:codexStub('late').turns,sendService:{system},
-    imageBackend:observeImages(r.image,'late-images'),runner:{ask:async()=>{
-      const callDir=path.join(root,'call-1');mkdirSync(callDir,{recursive:true});
-      await savePendingImage(root,{backend:'fake-comfy',filenamePrefix:'late',options:{prompt:'猫'},callDir,submittedAt:Date.now(),status:'submitted',prompt_id:'late-pid'});
-      return '稍等';
-    }}});
+  const script=new CodexScript();
+  script.onTurn=async()=>{
+    const callDir=path.join(root,'call-1');mkdirSync(callDir,{recursive:true});
+    await savePendingImage(root,{backend:'fake-comfy',filenamePrefix:'late',options:{prompt:'猫'},callDir,submittedAt:Date.now(),status:'submitted',prompt_id:'late-pid'});
+  };
+  const codex=await codexBackend('late',script,{imagesDir:path.join(r.dir,'images'),sendService:{system},imageBackend:observeImages(r.image,'late-images')});
   await codexTurn(codex);
   expect(r.store.events('late-images').some(e=>e.stage==='image:collect'&&e.detail_json.includes('late-pid'))).toBe(true);
   expect(system).toHaveBeenCalledWith(expect.objectContaining({threadKey:'private:1',scope:'private:1'}),'图片生成好了',[expect.stringContaining('result.png')]);
@@ -132,22 +141,14 @@ it('codex 回合结束前补收 image_gen 超时任务（prompt_id 可观测）�
   await observed.reconcile({filenamePrefix:'late'},r.dir);
   expect(r.store.events('reconcile').map(e=>e.stage)).toEqual(['image:collect','recovered','image:collect']);
 });
-it('真实 runner 读取假子进程 JSONL，解析 MCP 工具状态和耗时',async()=>{
-  const r=await rig(),file=path.join(r.dir,'fake-cli.mjs');
-  writeFileSync(file,`process.stdin.resume();process.stdin.on('end',()=>{
-    console.log(JSON.stringify({type:'item.started',item:{id:'m1',type:'mcp_tool_call',tool:'test_tool',arguments:{prompt:'中文'}}}));
-    console.log(JSON.stringify({type:'item.completed',item:{id:'m1',type:'mcp_tool_call',tool:'test_tool',status:'failed',duration_ms:42,error:'fake failure'}}));
-    console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'假答案'}}));
-  });`,'utf8');
-  const runner=new CodexRunner({command:[process.execPath,file],codexHome:path.join(r.dir,'codex'),workspaceDir:path.join(r.dir,'ws'),threadsFile:path.join(r.dir,'threads.json'),sandbox:'read-only',timeoutMs:5000});
-  expect(await runner.ask('仅假 CLI',{threadKey:'group:1',onJsonEvent:codexObserver('jsonl')})).toBe('假答案');
-  expect(r.store.events('jsonl').at(-1)).toMatchObject({stage:'tool:test_tool',status:'failed',duration_ms:42});
-});
-it('Codex 用量观测保留线程累计量，不混入单次请求的 token 字段',async()=>{
+it('app-server 条目解析 MCP 工具状态和耗时，最终回答单独记录',async()=>{
   const r=await rig();
-  codexObserver('total-usage')({type:'turn.completed',usage:{input_tokens:3000000,cached_input_tokens:2000000,output_tokens:10000}});
-  const event=r.store.events('total-usage').find(e=>e.stage==='model_usage')!;
-  expect(JSON.parse(event.detail_json)).toEqual({backend:'codex',total_input_tokens:3000000,total_cached_input_tokens:2000000,total_output_tokens:10000});
+  observeItem('items','started',{id:'m1',type:'mcpToolCall',tool:'test_tool',server:'x',arguments:{prompt:'中文'}});
+  observeItem('items','completed',{id:'m1',type:'mcpToolCall',tool:'test_tool',server:'x',status:'failed',durationMs:42,error:'fake failure'});
+  observeItem('items','completed',{id:'a1',type:'agentMessage',text:'假答案'});
+  const rows=r.store.events('items');
+  expect(rows.map(e=>[e.stage,e.status])).toEqual([['tool:test_tool','started'],['tool:test_tool','failed'],['final_answer','ok']]);
+  expect(rows[1]).toMatchObject({duration_ms:42});
 });
 it('pi 每轮模型与工具 hook 记录用量、输入和结果，不需真实 API',async()=>{
   const r=await rig();r.faux.setResponses([fauxAssistantMessage(fauxToolCall('qq_recent',{}),{stopReason:'toolUse'}),fauxAssistantMessage('假模型完成')]);
@@ -171,7 +172,7 @@ it('真实 pi-durable 工具抛错 diagnostics 触发结构化鉴权告警，正
   const detail=JSON.parse(failed.detail_json);expect(detail.failure).toEqual({kind:'auth',provider:'deepseek',status:401});
   expect(detail.output.diagnostics[0]).toMatchObject({code:'tool_error',message:'HTTP 401 fake provider'});
   expect(send).toHaveBeenCalledTimes(1);
-  codexObserver('auth-codex')({type:'item.completed',item:{type:'mcp_tool_call',tool:'search',server:'web',status:'failed',error:{message:'opaque',status:403}}});
+  observeItem('auth-codex','completed',{type:'mcpToolCall',id:'s1',tool:'search',server:'web',status:'failed',error:{message:'opaque',status:403}});
   expect(JSON.parse(r.store.events('auth-codex')[0]!.detail_json).failure.kind).toBe('auth');expect(send).toHaveBeenCalledTimes(1);
   r.image.submit=async()=>{throw Object.assign(new Error('opaque image error'),{status:403});};
   r.faux.setResponses([fauxAssistantMessage(fauxToolCall('generate_image',{prompt:'fake'}),{stopReason:'toolUse'}),fauxAssistantMessage('生图失败')]);
@@ -179,24 +180,22 @@ it('真实 pi-durable 工具抛错 diagnostics 触发结构化鉴权告警，正
   const imageFailure=r.store.events('turn:'+p.stub.state.turnId).find(e=>e.stage==='tool:generate_image'&&e.status==='failed')!;
   expect(JSON.parse(imageFailure.detail_json).failure).toEqual({kind:'auth',provider:'comfy',status:403});expect(send).toHaveBeenCalledTimes(1);
 });
-it('Codex 排队时间与模型时间分别记录，backend span 保留总耗时',async()=>{
-  const r=await rig();let now=1000;const clock=vi.spyOn(Date,'now').mockImplementation(()=>now);clean.push(()=>clock.mockRestore());
-  const backend=new CodexBackend({imagesDir:path.join(r.dir,'images'),turns:codexStub('timing').turns,runner:{ask:async(_prompt,opts)=>{
-    now=1400;await opts?.onAcquired?.();now=1500;return '假答复';
-  }}});
-  const key=await codexTurn(backend);
-  const rows=r.store.events(key);expect(rows.find(e=>e.stage==='thread_wait'&&e.status==='ok')?.duration_ms).toBe(400);
-  const model=rows.find(e=>e.stage==='model_turn'&&e.status==='ok')!;expect(model.duration_ms).toBe(100);
-  expect(JSON.parse(model.detail_json)).toMatchObject({model_ms:100});
+it('Codex 回合从 turn/start 到 turn/completed 记一次 model_turn 时长，结果写在 detail',async()=>{
+  const r=await rig();
+  const script=new CodexScript();script.onTurn=()=>new Promise(resolve=>setTimeout(resolve,60));
+  const key=await codexTurn(await codexBackend('timing',script));
+  const model=r.store.events(key).find(e=>e.stage==='model_turn'&&e.status==='ok')!;
+  expect(model.duration_ms).toBeGreaterThanOrEqual(50);
+  expect(JSON.parse(model.detail_json)).toMatchObject({backend:'codex',thread_key:'private:1',status:'completed'});
 });
-it('Codex 内置命令和搜索只保存白名单摘要，每轮最多 100 条且不存原始 JSONL',async()=>{
-  const r=await rig(),observe=codexObserver('builtin');
-  observe({type:'item.started',item:{id:'cmd',type:'command_execution'}});
-  observe({type:'item.completed',raw:'forbidden-raw',item:{id:'cmd',type:'command_execution',command:'c'.repeat(300),exit_code:2,duration_ms:25,aggregated_output:'forbidden-output'}});
-  for(let i=0;i<130;i++)observe({type:'item.completed',item:{id:'search'+i,type:'web_search',query:'q'.repeat(300),results:'forbidden-results'}});
-  // 开始事件（实时视图用）单独一行，完成事件仍最多 100 条
+it('Codex 内置命令和搜索只保存白名单摘要，不存原始条目',async()=>{
+  const r=await rig();
+  observeItem('builtin','started',{id:'cmd',type:'commandExecution',command:'ls'});
+  observeItem('builtin','completed',{id:'cmd',type:'commandExecution',command:'c'.repeat(300),exitCode:2,durationMs:25,aggregatedOutput:'forbidden-output',raw:'forbidden-raw'});
+  observeItem('builtin','completed',{id:'search',type:'webSearch',query:'q'.repeat(300),results:'forbidden-results'});
   const all=r.store.events('builtin');expect(all[0]).toMatchObject({stage:'tool:command_execution',status:'started'});
-  const rows=all.filter(e=>e.status!=='started');expect(rows).toHaveLength(100);expect(rows[0]).toMatchObject({stage:'tool:command_execution',status:'failed',duration_ms:25});
+  const rows=all.filter(e=>e.status!=='started');expect(rows[0]).toMatchObject({stage:'tool:command_execution',status:'failed',duration_ms:25});
+  expect(JSON.parse(rows[0]!.detail_json)).toMatchObject({exit_code:2});
   expect(JSON.parse(rows[0]!.detail_json).command.length).toBe(200);expect(JSON.parse(rows[1]!.detail_json).query.length).toBe(200);
   expect(rows.map(e=>e.detail_json).join('')).not.toContain('forbidden-');
 });
@@ -226,11 +225,12 @@ it('pi、衰老使用同一非零缓存 usage fixture，费用口径一致',asyn
 // codex 回合结束前（补收图片时）摄取会话图片目录里 image_gen MCP 写下的旁路事件。
 it('codex 回合结束时摄取 MCP 旁路事件',async()=>{
   const r=await rig();
-  const codex=new CodexBackend({imagesDir:path.join(r.dir,'images'),turns:codexStub('spool').turns,runner:{ask:async()=>{
+  const script=new CodexScript();
+  script.onTurn=()=>{
     const dir=path.join(r.dir,'images','private_1');mkdirSync(dir,{recursive:true});
     new Trace(new ImageEventSpool(dir)).event('spool-flow','image:submit',{detail:{prompt_id:'late-spool'}});
-    return '完成';
-  }}});
+  };
+  const codex=await codexBackend('spool',script,{imagesDir:path.join(r.dir,'images')});
   const key=await codexTurn(codex);
   expect(r.store.events(key).some(e=>e.stage==='image:submit'&&e.detail_json.includes('late-spool'))).toBe(true);
 });

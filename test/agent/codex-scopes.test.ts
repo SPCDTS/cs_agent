@@ -1,31 +1,37 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { CodexRunner, isThreadKey } from "../../src/agent/codex/runner.js";
 import { type ThreadKey } from "../../src/agent/backends/types.js";
 import { codexWorkspacePolicy, prepareCodexWorkspace } from "../../src/agent/codex/workspace.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
-import { CodexBackend } from "../../src/agent/backends/codex.js";
+import { codexRunnerRig } from "./codex-fixture.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
+const rigs: { close(): Promise<void> }[] = [];
+afterEach(async () => { for (const r of rigs.splice(0)) await r.close(); });
+const mcpEnv = { im: { IM_TOKEN: "f".repeat(64) } };
+
+/** 线程映射与回填只读文件，不需要 app-server；加载线程用 codexRunnerRig。 */
 function rig() {
   const dir = tmp(), threadsFile = path.join(dir, "codex-threads.json");
   const options = { command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
     codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "ws"), threadsFile,
-    sandbox: "workspace-write" as const, timeoutMs: 5000,
-    env: { FAKE_CODEX_LOG: path.join(dir, "calls.jsonl"), FAKE_CODEX_SLEEP_MS: "80" } };
-  const calls = async () => (await fs.readFile(options.env.FAKE_CODEX_LOG, "utf8")).trim().split("\n")
-    .map(line => JSON.parse(line)).filter(row => row.phase === "start");
-  return { dir, options, threadsFile, calls };
+    sandbox: "workspace-write" as const };
+  return { dir, options, threadsFile };
+}
+async function live(dir: string, extra: Parameters<typeof codexRunnerRig>[0] = {}) {
+  const r = await codexRunnerRig({ dir, ...extra });
+  rigs.push(r);
+  return r;
 }
 
 describe("按会话域隔离 codex", () => {
   it("键校验拒绝 shared、空来源、路径和非法 QQ 号", async () => {
-    const { options } = rig();
-    const runner = new CodexRunner(options);
+    const { runner } = await live(tmp());
     for (const key of ["shared", "group:0", "private:01", "group:../owner", "group:1/2", "__proto__", "", undefined]) {
       expect(isThreadKey(key)).toBe(false);
-      await expect(runner.ask("拒绝", { threadKey: key as ThreadKey })).rejects.toThrow(/线程键/);
+      await expect(runner.openThread(key as ThreadKey, { mcpEnv })).rejects.toThrow(/线程键/);
       await expect(runner.resetThread(key as ThreadKey)).rejects.toThrow(/线程键/);
     }
     for (const key of ["owner", "group:1", "private:99999999999999999999"]) expect(isThreadKey(key)).toBe(true);
@@ -57,29 +63,22 @@ describe("按会话域隔离 codex", () => {
     const { dir, options, threadsFile } = rig();
     await fs.writeFile(threadsFile, JSON.stringify({ shared: { thread_id: "mixed" } }), "utf8");
     await fs.writeFile(path.join(dir, "codex-threads-archive.jsonl"), "损坏的归档", "utf8");
-    const runner = new CodexRunner(options);
-    await expect(runner.ask("不能执行", { threadKey: "private:9" })).rejects.toThrow();
+    const { runner, requests } = await live(dir, { threadsFile: options.threadsFile });
+    await expect(runner.openThread("private:9", { mcpEnv })).rejects.toThrow();
     expect(JSON.parse(await fs.readFile(threadsFile, "utf8")).shared.thread_id).toBe("mixed");
-    await expect(fs.access(options.env.FAKE_CODEX_LOG)).rejects.toThrow();
+    expect(requests("thread/start")).toHaveLength(0);
   });
 
-  it("群和私聊各自恢复、重置与回填；空闲和失败队列被清理", async () => {
-    const { options, calls, threadsFile, dir } = rig();
+  it("群和私聊各自恢复（各自工作区）、重置与回填", async () => {
+    const { options, threadsFile, dir } = rig();
     await fs.writeFile(threadsFile, JSON.stringify({ "group:7": { thread_id: "group-a" }, "group:8": { thread_id: "group-b" },
       "private:9": { thread_id: "private-c" } }), "utf8");
     const store = new ContextUsageStore(dir);
-    const runner = new CodexRunner({ ...options, contextUsage: store });
+    const { runner, loads } = await live(dir, { contextUsage: store });
     await runner.initializeContextUsage();
     expect(store.all().map(row => row.key).sort()).toEqual(["group:7", "group:8", "private:9"]);
-    await Promise.all([runner.ask("群 A 的私密标记", { threadKey: "group:7" }),
-      runner.ask("群 B 的问题", { threadKey: "group:8" }), runner.ask("私聊问题", { threadKey: "private:9" })]);
-    const rows = await calls();
-    expect(new Set(rows.map(row => row.argv.at(-2)))).toEqual(new Set(["group-a", "group-b", "private-c"]));
-    expect(rows.find(row => row.argv.at(-2) === "group-b").stdin).not.toContain("群 A");
-    const queueSize = () => (runner as unknown as { queues: Map<string, unknown> }).queues.size;
-    expect(queueSize()).toBe(0);
-    await expect(runner.ask("失败", { threadKey: "group:7", onAcquired: async () => { throw Error("fail"); } })).rejects.toThrow("fail");
-    expect(queueSize()).toBe(0);
+    await Promise.all((["group:7", "group:8", "private:9"] as const).map(key => runner.openThread(key, { mcpEnv })));
+    expect(new Map(loads().map(l => [l.threadId, path.basename(l.cwd)]))).toEqual(new Map([["group-a", "group_7"], ["group-b", "group_8"], ["private-c", "private_9"]]));
     await runner.resetThread("private:9");
     expect(await new CodexRunner(options).readThreadIds()).toEqual({ "group:7": "group-a", "group:8": "group-b" });
     expect(store.get("codex", "private:9")?.turns).toBe(0);
@@ -87,27 +86,26 @@ describe("按会话域隔离 codex", () => {
   });
 
   it("新建和 resume 使用同一 scope 工作区，按实际权限注入规则与父目录 AGENTS.md", async () => {
-    const { options, calls } = rig();
+    const { dir, options } = rig();
     await fs.mkdir(options.workspaceDir, { recursive: true });
     await fs.writeFile(path.join(options.workspaceDir, "AGENTS.md"), "运维自定义中文指引", "utf8");
-    const runner = new CodexRunner(options);
-    await Promise.all([runner.ask("owner", { threadKey: "owner", senderIsOwner: true }), runner.ask("群", { threadKey: "group:42" })]);
-    await runner.ask("继续", { threadKey: "group:42" });
-    for (const row of await calls()) {
-      const owner = row.stdin === "owner", ws = path.join(options.workspaceDir, owner ? "owner" : "group_42");
+    const { runner, loads } = await live(dir);
+    await Promise.all([runner.openThread("owner", { mcpEnv }), runner.openThread("group:42", { mcpEnv })]);
+    await runner.openThread("group:42", { mcpEnv });
+    expect(loads()).toHaveLength(3);
+    for (const row of loads()) {
+      const owner = row.cwd.endsWith("owner"), ws = path.join(options.workspaceDir, owner ? "owner" : "group_42");
       expect(row.cwd).toBe(ws);
-      expect(row.argv[row.argv.indexOf("-C") + 1]).toBe(ws);
-      expect(row.argv).not.toContain("-s");
-      expect(row.argv.some((arg: string) => arg.startsWith("sandbox_mode="))).toBe(false);
-      const roots = JSON.parse(row.argv.find((arg: string) => arg.startsWith("sandbox_workspace_write.writable_roots=")).split("=")[1]);
+      expect(row.sandbox).toBeUndefined();
+      expect(row.config).not.toHaveProperty("sandbox_mode");
+      const roots = row.config["sandbox_workspace_write.writable_roots"] as string[];
       expect(roots).toEqual(owner ? [ws, path.join(path.dirname(options.threadsFile), "prompts"), path.join(options.codexHome, "skills", "shared")] : [ws]);
-      const permissions = row.argv.find((arg: string) => arg.startsWith("permissions.cs_agent_scope="));
-      for (const root of roots) expect(permissions).toContain(`${JSON.stringify(root)}="write"`);
-      expect(permissions).not.toContain(JSON.stringify(path.join(path.dirname(options.threadsFile), "workflows")));
-      expect(row.argv.some((arg: string) => arg.startsWith("developer_instructions="))).toBe(false);
-      expect(row.argv).toContain("project_doc_max_bytes=131072");
-      const rules = row.workspaceAgentsMd;
-      expect(await fs.readFile(path.join(ws, "AGENTS.md"), "utf8")).toBe(rules);
+      const permissions = row.config["permissions.cs_agent_scope"] as { filesystem: Record<string, string> };
+      for (const root of roots) expect(permissions.filesystem[root]).toBe("write");
+      expect(permissions.filesystem).not.toHaveProperty(path.join(path.dirname(options.threadsFile), "workflows"));
+      expect(row).not.toHaveProperty("developerInstructions");
+      expect(row.config.project_doc_max_bytes).toBe(131072);
+      const rules = await fs.readFile(path.join(ws, "AGENTS.md"), "utf8");
       expect(rules).toContain("运维自定义中文指引");
       expect(rules).toContain(ws);
       expect(rules).not.toContain("workflows");
@@ -129,27 +127,6 @@ describe("按会话域隔离 codex", () => {
     expect(store.get("codex", "private:10")).toMatchObject({ usedTokens: 0, turns: 0 });
     await store.close();
   });
-
-  it("后端保留群与私聊动态键", async () => {
-    const dir = tmp(), keys: string[] = [];
-    const turns = {
-      binding: (threadKey: string) => ({ threadKey, identity: { kind: "user" as const, sender: "9" }, scope: threadKey, inputs: [] }),
-      records: () => [],
-      render: async () => ({ text: "问题", images: [], source: { type: "group" as const, user_id: "9", group_id: "7", nickname: "测试" } }),
-    };
-    const backend = new CodexBackend({ imagesDir: path.join(dir, "images"), turns,
-      runner: { ask: async (_prompt, options) => { keys.push(options.threadKey); return "答复"; } } });
-    const completed: string[] = [];
-    backend.attach({ onTurnStarted: () => undefined, onActivity: () => undefined,
-      onTurnCompleted: (threadKey, _turnId, result) => { completed.push(`${threadKey}:${result.status}`); } });
-    for (const key of ["group:7", "private:9"] as const) {
-      const { turnId } = await backend.startTurn(key, [], { kind: "user", sender: "9" });
-      expect(turnId).toMatch(/^codex:/);
-      await backend.idle();
-    }
-    expect(keys).toEqual(["group:7", "private:9"]);
-    expect(completed).toEqual(["group:7:completed", "private:9:completed"]);
-  });
 });
 
 describe("scope 工作区权限", () => {
@@ -164,17 +141,17 @@ describe("scope 工作区权限", () => {
       expect(codexWorkspacePolicy(path.join(root, "ws"), data, key, "read-only", true, codexHome, senderIsOwner).writableRoots).toEqual([]);
     }
   });
-  it("同一群线程 resume 时逐轮收回技能写权限和写入提示", async () => {
-    const { options, calls } = rig(), runner = new CodexRunner(options);
-    await runner.ask("owner 群消息", { threadKey: "group:7", senderIsOwner: true });
-    await runner.ask("其他人群消息", { threadKey: "group:7", senderIsOwner: false });
-    const rows = await calls(), skills = path.join(options.codexHome, "skills", "shared");
-    const roots = (row: { argv: string[] }) => JSON.parse(row.argv.find(arg => arg.startsWith("sandbox_workspace_write.writable_roots="))!.split("=")[1]);
-    expect(roots(rows[0])).toContain(skills); expect(roots(rows[1])).not.toContain(skills);
-    expect(rows[0].workspaceAgentsMd).toContain("只有当前这条消息的发送者是 owner 且明确要求时才写");
-    expect(rows[1].workspaceAgentsMd).not.toContain("## 技能");
-    expect(rows[1].argv).toContain("resume");
-    for (const row of rows) expect(roots(row)).not.toContain(path.join(path.dirname(options.threadsFile), "prompts"));
+  it("常驻线程的技能写权限按线程：只有 owner 线程可写共享技能，群线程不可写（含 owner 在群里发言）", async () => {
+    const { dir, options } = rig();
+    const { runner, loads } = await live(dir);
+    await runner.openThread("owner", { mcpEnv });
+    await runner.openThread("group:7", { mcpEnv });
+    const skills = path.join(options.codexHome, "skills", "shared");
+    const [owner, group] = loads().map(row => row.config["sandbox_workspace_write.writable_roots"] as string[]);
+    expect(owner).toContain(skills); expect(group).not.toContain(skills);
+    expect(await fs.readFile(path.join(options.workspaceDir, "owner", "AGENTS.md"), "utf8")).toContain("只有当前这条消息的发送者是 owner 且明确要求时才写");
+    expect(await fs.readFile(path.join(options.workspaceDir, "group_7", "AGENTS.md"), "utf8")).not.toContain("## 技能");
+    expect(group).not.toContain(path.join(path.dirname(options.threadsFile), "prompts"));
   });
   it.each(["owner", "group:1", "private:1"])("%s 只读会话不宣称可写；禁止关闭沙箱或把数据目录放在 workspace 内", key => {
     const root = tmp();

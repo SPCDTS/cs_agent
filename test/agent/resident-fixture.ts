@@ -25,10 +25,15 @@ import { ContextStore } from "../../src/context/store.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import type { ReplyStore } from "../../src/qq/reply-store.js";
 import { TRANSPARENT_PNG, type ImageBackend } from "../../src/media/gen/image-gen.js";
-import type { CodexRunner } from "../../src/agent/codex/runner.js";
+import { CodexRunner } from "../../src/agent/codex/runner.js";
+import { startMediaRecallServer, ThreadTokens, type CallMeta } from "../../src/context/media-recall-server.js";
+import { sendViaLoopback } from "../../src/mcp/im-server.js";
+import { contextViaLoopback } from "../../src/mcp/media-recall-client.js";
+import { CodexScript } from "./codex-fixture.js";
+import { fakeSpawn } from "./codex-app-server/fake-app-server.js";
 import type { SubagentOptions } from "../../src/agent/pi-tools/subagent.js";
 import { DEFAULT_SUBAGENT_INSTRUCTIONS } from "../../src/agent/pi-tools/subagent.js";
-import { tmp } from "./helpers.js";
+import { FIXTURES, tmp } from "./helpers.js";
 import { sandboxRequirements } from "./pi-sandbox-fixture.js";
 
 export const context = BACKGROUND_CONTEXT;
@@ -65,7 +70,10 @@ export interface ResidentOptions {
   owners?: string[];
   backend?: BackendName | ((scope: string) => BackendName);
   concurrency?: number;
-  codexAsk?: CodexRunner["ask"];
+  /** codex 回合脚本（内存版 app-server）；缺省每轮立即完成 */
+  codex?: CodexScript;
+  /** 工具调用等待回合事件的上限（缺省 1 秒） */
+  callWaitMs?: number;
   subagent?: Partial<Omit<SubagentOptions, "getHarness" | "initChild">> | false;
   noticeIntervalMs?: number;
   now?: () => number;
@@ -128,14 +136,24 @@ export async function residentRig(options: ResidentOptions = {}) {
     }),
     reconcile: vi.fn(async () => ({ images: [] as string[] })), clearReferences: vi.fn(async () => {}),
   } satisfies Pick<ImageBackend, "name" | "submit" | "collect" | "reconcile" | "clearReferences">;
-  const codexAsk = vi.fn(options.codexAsk ?? (async () => "完成"));
+  const script = options.codex ?? new CodexScript();
+  const codexSpawn = fakeSpawn(script.handlers);
 
   let harness!: Harness, host!: ThreadHost, pi!: PiBackend, codex!: CodexBackend, monitor!: TurnMonitor;
+  let codexRunner!: CodexRunner;
   let contextUsage: ContextUsageStore | undefined;
   const grants = new GrantsService({ getHarness: () => harness, owner: owners[0], owners });
   const sendService = new SendService({ grants, getChannel: () => bridge, dataDir: dir, store: history,
     mention: key => host.takeMention(key as ThreadKey) });
   const inbox = new Inbox({ getChannel: () => bridge, getHost: () => host, owners, store: history, dataDir: dir });
+  // codex 线程令牌与 loopback 网关（与 main.ts 一致）：每次调用由 codex 适配器确认属于宿主当前回合
+  const tokens = new ThreadTokens({ recall: async () => ({ text: "", images: [] }) }, {
+    resolve: (threadKey, meta) => codex.resolveCall(threadKey as ThreadKey, meta),
+    permissions: async binding => grants.permissions(binding),
+    auth: (binding, name, args) => grants.tool(binding, name, args),
+    send: (binding, callKey, args, signal) => sendService.send({ ...binding, extraRoots: [binding.imageDir] }, args, callKey, signal),
+  });
+  const recallServer = await startMediaRecallServer(tokens, 0);
   const backendOf = (scope: string): BackendName => typeof options.backend === "function" ? options.backend(scope) : options.backend ?? "pi";
 
   const open = async () => {
@@ -154,7 +172,13 @@ export async function residentRig(options: ResidentOptions = {}) {
       ...(contextUsage ? { contextUsage } : {}),
       ...(options.reserveTokens !== undefined ? { reserveTokens: options.reserveTokens } : {}),
       ...(options.backgroundTokens !== undefined ? { backgroundTokens: options.backgroundTokens } : {}) });
-    codex = new CodexBackend({ runner: { ask: codexAsk }, imagesDir: path.join(dir, "images"), turns: inbox, owners, sendService, imageBackend });
+    codexRunner = new CodexRunner({ command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
+      codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "codex-ws"), threadsFile: path.join(dir, "codex-threads.json"),
+      sandbox: "workspace-write", mediaRecallPort: recallServer.port, spawn: codexSpawn.spawn,
+      supervisor: { backoffInitialMs: 5, backoffMaxMs: 20, readyTimeoutMs: 5_000 } });
+    await codexRunner.start();
+    codex = new CodexBackend({ runner: codexRunner, tokens, imagesDir: path.join(dir, "images"), turns: inbox, owners, sendService, imageBackend,
+      callWaitMs: options.callWaitMs ?? 1_000 });
     const settings = async (scope: string, _msg?: unknown, forced?: BackendName): Promise<TicketSettings> =>
       ({ backend: forced ?? backendOf(scope), codexReasoningEffort: "high", ...options.settings?.(scope) });
     const router = new BackendRouter({ backends: { pi, codex }, settings, turns: inbox, owners, retryMs: 50, retryDelayMs: 10 });
@@ -175,7 +199,8 @@ export async function residentRig(options: ResidentOptions = {}) {
   });
 
   const r = {
-    dir, bridge, history, grants, sendService, inbox, imageBackend, codexAsk, sent, faux, brain, owners, model, call,
+    dir, bridge, history, grants, sendService, inbox, imageBackend, script, codexSpawn, tokens, sent, faux, brain, owners, model, call,
+    get codexRunner() { return codexRunner; },
     get contextUsage() { return contextUsage; },
     get harness() { return harness; }, get host() { return host; }, get pi() { return pi; }, get codex() { return codex; }, get monitor() { return monitor; },
     message,
@@ -189,6 +214,22 @@ export async function residentRig(options: ResidentOptions = {}) {
       await inbox.receive(msg, key);
       return key;
     },
+    /** 会话线程当前的令牌（最近一次 thread/start、thread/resume 写入的 IM_TOKEN）。 */
+    codexToken(threadKey: string): string {
+      const loads = codexSpawn.children.flatMap(child => child.received.filter(m => m.id !== undefined &&
+        (m.method === "thread/start" || m.method === "thread/resume")));
+      const load = loads.filter(m => String((m.params as { cwd: string }).cwd).endsWith(threadKey.replace(":", "_"))).at(-1);
+      if (!load) throw new Error("会话线程未加载：" + threadKey);
+      return String((load.params as { config: Record<string, unknown> }).config["mcp_servers.im.env.IM_TOKEN"]);
+    },
+    /** 模拟 im MCP：以会话线程令牌和调用归属发送 */
+    codexSend(threadKey: string, args: unknown, meta: CallMeta, token?: string) {
+      return sendViaLoopback(args, meta, token ?? r.codexToken(threadKey), recallServer.port);
+    },
+    /** 模拟 qq_context / image_gen 取调用上下文 */
+    codexContext(threadKey: string, meta: CallMeta, token?: string) {
+      return contextViaLoopback(token ?? r.codexToken(threadKey), recallServer.port, meta);
+    },
     /** 宿主空闲（没有进行中的回合与排队输入）且外层事件处理完毕。 */
     async idle(timeout = 10_000) {
       await vi.waitFor(async () => {
@@ -196,6 +237,7 @@ export async function residentRig(options: ResidentOptions = {}) {
         const busy = host.status().busy;
         if (busy.length) throw new Error("busy: " + busy.join(","));
       }, { timeout, interval: 20 });
+      await codex.idle();
       await monitor.idle();
     },
     texts(target?: string) {
@@ -213,6 +255,8 @@ export async function residentRig(options: ResidentOptions = {}) {
       await harness.close(context);
       await pi.close();
       await contextUsage?.close();
+      await codexRunner.stop();
+      tokens.close();
       await open();
       await inbox.recover();
     },
@@ -223,6 +267,8 @@ export async function residentRig(options: ResidentOptions = {}) {
       await pi.close().catch(() => undefined);
       await contextUsage?.close().catch(() => undefined);
       await bridge.stop().catch(() => undefined);
+      await codexRunner.stop().catch(() => undefined);
+      await recallServer.close().catch(() => undefined);
       history.close();
     },
   };

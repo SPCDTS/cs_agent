@@ -1,78 +1,68 @@
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { RecallTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
+import { expect, it } from "vitest";
 import { sendFixture } from "../agent/send-fixture.js";
 import { mediaFixture } from "../context/media-fixture.js";
 import { promises as fs } from "node:fs";
 import { TRANSPARENT_PNG } from "../../src/media/gen/image-gen.js";
 import { resolveAttachmentDir } from "../../src/media/attach-paths.js";
+import type { CallBinding } from "../../src/context/media-recall-server.js";
+import { imRig } from "./im-fixture.js";
 
-const cleanup: (() => Promise<unknown> | void)[] = [];
-afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 async function setup() {
   const f = sendFixture();
-  const tokens = new RecallTokens({ recall: async () => ({ text: "", images: [] }) }, 5, undefined, {
-    // 网关按租约的会话求本轮绑定（测试中即 f.binding），调用键为租约内序号。
-    send: (b, callKey, args, signal) => f.service.send({ ...f.binding, access: b.access, workdir: b.workdir! }, args, callKey, signal),
+  const current: { binding: CallBinding } = { binding: { ...f.binding, turnId: "t1", session: "thr-1",
+    imageDir: path.join(f.dir, "images", "group_7"), imageRefs: [] } };
+  const rig = await imRig(f.threadKey, {
+    // 网关按会话当前回合求本次调用的绑定（测试中即 current）；调用键为 MCP 的 _meta.callId。
+    resolve: () => current.binding,
+    send: (b, callKey, args, signal) => f.service.send(b, args, callKey, signal),
   });
-  const server = await startMediaRecallServer(tokens, 0); cleanup.push(() => server.close());
-  const issue = (deadline = Date.now() + 60_000, workdir: string | null = f.workdir) =>
-    tokens.issue({ threadKey: f.threadKey, turnId: "t1", access: f.binding.access, ...(workdir ? { workdir } : {}), deadline });
-  const lease = issue();
-  const client = new Client({ name: "test", version: "1" });
-  await client.connect(new StdioClientTransport({ command: process.execPath,
-    args: [fileURLToPath(new URL("../../dist/mcp/im.js", import.meta.url))],
-    env: { ...process.env, IM_TOKEN: lease.token, MEDIA_RECALL_PORT: String(server.port) } as Record<string, string>, stderr: "pipe" }));
-  cleanup.push(() => client.close());
-  const post = (body: unknown, token = lease.token) => fetch(`http://127.0.0.1:${server.port}/send`, {
-    method: "POST", headers: { Authorization: "Bearer " + token }, body: JSON.stringify(body),
-  });
-  return { ...f, tokens, server, lease, client, post, issue };
+  return { ...f, ...rig, current };
 }
-it("独立 im stdio 工具立即发消息与附件，返回 message_id；qq_context 不再发送", async () => {
+it("独立 im stdio 工具立即发消息与附件，返回 message_id；工具清单固定为全集；qq_context 不再发送", async () => {
   const f = await setup();
-  expect((await f.client.listTools()).tools.map(t => t.name)).toEqual(["send_message"]);
-  const result = await f.client.callTool({ name: "send_message", arguments: { text: "报告", images: ["image.png"], files: [{ path: "file.txt", name: "报告.txt" }] } });
+  const tools = (await f.client.listTools()).tools;
+  expect(tools.map(t => t.name)).toContain("send_message");
+  expect(tools.map(t => t.name)).toEqual(expect.arrayContaining(["auth_grant", "auth_list", "schedule_create", "schedule_control"]));
+  expect(Object.hasOwn(tools[0]!.inputSchema.properties!, "target")).toBe(true);
+  const result = await f.tool("send_message", { text: "报告", images: ["image.png"], files: [{ path: "file.txt", name: "报告.txt" }] });
   expect(result.isError).not.toBe(true);
   expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ message_id: "1" });
   expect(f.call.mock.calls.map(c => c[0])).toEqual(["get_login_info", "send_group_msg", "upload_group_file"]);
-  const old = await f.client.callTool({ name: "qq_send_file", arguments: { path: "file.txt" } });
+  expect(f.store.listOutboxByTurn("t1").map(row => row.key)).toEqual([`${f.threadKey}:exec-1`]);
+  const old = await f.tool("qq_send_file", { path: "file.txt" });
   expect(old.isError).toBe(true);
 });
-it("令牌必需且绑定会话；撤销、过期、无发送绑定均拒绝；参数不能改目标", async () => {
+it("令牌必需且绑定会话；撤销、缺少调用 id、网关拒绝均拒绝；参数不能改目标", async () => {
   const f = await setup();
-  expect((await f.post({ text: "攻击" }, "f".repeat(64))).status).toBe(401);
-  expect((await f.post({ text: "攻击", target: "group:8" })).status).toBe(400);
-  expect((await f.post({ text: "攻击", ticket: "another" })).status).toBe(400);
-  const readOnly = f.issue(Date.now() + 60_000, null);
-  expect((await f.post({ text: "攻击" }, readOnly.token)).status).toBe(400);
-  const expired = f.issue(Date.now() + 10);
-  await new Promise(r => setTimeout(r, 25));
-  expect((await f.post({ text: "攻击" }, expired.token)).status).toBe(401);
-  f.lease.revoke();
-  expect((await f.post({ text: "攻击" })).status).toBe(401);
+  expect((await f.post("send", { text: "攻击" }, { callId: "exec-x" }, "f".repeat(64))).status).toBe(401);
+  expect((await f.post("send", { text: "攻击", target: "group:8" })).status).toBe(400);
+  expect((await f.post("send", { text: "攻击", ticket: "another" })).status).toBe(400);
+  expect((await f.post("send", { text: "攻击" }, {})).status).toBe(400);
+  const resolve = f.current.binding;
+  f.current.binding = undefined as unknown as CallBinding;
+  expect((await f.post("send", { text: "攻击" })).status).toBe(400);
+  f.current.binding = resolve;
+  f.tokens.revoke(f.threadKey);
+  expect((await f.post("send", { text: "攻击" })).status).toBe(401);
   expect(f.call).not.toHaveBeenCalled();
 });
 it("MCP 校验错误以文本返回；完整 4000 字中文不截断，超限不发", async () => {
   const f = await setup();
   for (const args of [{ text: "" }, { text: "字".repeat(4001) }, { text: "x", files: [{ path: "../qq-bridge.sqlite" }] }]) {
-    expect((await f.client.callTool({ name: "send_message", arguments: args })).isError).toBe(true);
+    expect((await f.tool("send_message", args)).isError).toBe(true);
   }
   expect(f.store.listOutboxByTurn("t1")).toHaveLength(0);
-  expect((await f.client.callTool({ name: "send_message", arguments: { text: "字".repeat(4000) } })).isError).not.toBe(true);
+  expect((await f.tool("send_message", { text: "字".repeat(4000) })).isError).not.toBe(true);
   expect(f.store.listOutboxByTurn("t1")[0]!.text).toHaveLength(4000);
 });
-it("同回合新租约重发同一内容映射到已发消息，不重复发送；跨范围媒体拒绝", async () => {
+it("同一 callId 重放（含令牌重新签发后）映射到已发消息，不重复发送；跨范围媒体拒绝", async () => {
   const f = await setup();
   const media = await mediaFixture(f.history, f.dir, "group:8");
-  expect((await f.post({ text: "图", images: [media] })).status).toBe(400);
-  const first = await (await f.post({ text: "原文" })).json() as { message_id: string };
-  f.lease.revoke();
-  const next = f.issue();
-  expect(await (await f.post({ text: "原文" }, next.token)).json()).toMatchObject({ message_id: first.message_id, already_sent: true });
+  expect((await f.post("send", { text: "图", images: [media] })).status).toBe(400);
+  const first = await (await f.post("send", { text: "原文" }, { callId: "exec-same" })).json() as { message_id: string };
+  const next = f.tokens.issue(f.threadKey);
+  expect(await (await f.post("send", { text: "原文" }, { callId: "exec-same" }, next)).json()).toMatchObject({ message_id: first.message_id, already_sent: true });
   expect(f.call.mock.calls.filter(c => c[0] === "send_group_msg")).toHaveLength(1);
 });
 it("已召回同范围媒体允许；生成图片来源只允许可信绑定的当前线程根目录", async () => {
@@ -98,13 +88,13 @@ it("目录解析仍拒绝相对路径、注入字符、..、根目录、深层�
 
 it.each(["sent", "sending", "uncertain"] as const)("im 返回 %s 无 message_id 的明确非错误结果，不诱导再次发送", async status => {
   const f = await setup();
-  // 租约内第一次调用的键：<会话>:<回合>#1。
-  const row = f.store.reserveOutbox({ key: `${f.threadKey}:t1#1`, thread_key: f.threadKey, turn_id: "t1", input_key: f.key,
+  // 调用键为 MCP 的 _meta.callId：<会话>:<callId>。
+  const row = f.store.reserveOutbox({ key: `${f.threadKey}:exec-1`, thread_key: f.threadKey, turn_id: "t1", input_key: f.key,
     text: "原内容", images: [], files: [], message_type: "group", target_id: "7", mention_user_id: "1" });
   f.store.markOutboxSending(row.key);
   if (status === "sent") f.store.markOutboxSent(row.key, "");
   if (status === "uncertain") f.store.markOutboxUncertain(row.key);
-  const result = await f.client.callTool({ name: "send_message", arguments: { text: "原内容" } });
+  const result = await f.tool("send_message", { text: "原内容" }, "exec-1");
   expect(result.isError).not.toBe(true);
   expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({
     status, already_sent: true, message_id: null, note: expect.stringContaining("不要重发"),
@@ -112,11 +102,11 @@ it.each(["sent", "sending", "uncertain"] as const)("im 返回 %s 无 message_id 
   expect(f.call).not.toHaveBeenCalled();
 });
 
-it("im 首次发送响应丢失返回明确非错误结果；同文再次调用不新建消息", async () => {
+it("im 首次发送响应丢失返回明确非错误结果；同一调用再次提交不新建消息", async () => {
   const f = await setup();
   f.call.mockImplementationOnce(async () => ({ user_id: 2 })).mockRejectedValueOnce(new Error("连接断开"));
   for (const n of [1, 2]) {
-    const result = await f.client.callTool({ name: "send_message", arguments: { text: "可能送达" } });
+    const result = await f.tool("send_message", { text: "可能送达" }, "exec-lost");
     expect(result.isError).not.toBe(true);
     expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({
       status: "uncertain", already_sent: n === 2, note: expect.stringContaining("不要重发"),

@@ -3,14 +3,17 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { basePromptFilename, CodexBasePromptStore, MANAGED_QQ_INSTRUCTIONS } from "../../src/agent/codex/base-prompt.js";
 import { QQ_LINK_RULE } from "../../src/agent/send-service.js";
-import { CodexRunner } from "../../src/agent/codex/runner.js";
 import { log } from "../../src/shared/log.js";
-import { FIXTURES, tmp } from "./helpers.js";
+import { tmp } from "./helpers.js";
+import { codexRunnerRig } from "./codex-fixture.js";
+import { defaultHandlers } from "./codex-app-server/fake-app-server.js";
 
 const MODEL = "codex/gpt-6.1-sol", OTHER = "codex/gpt-6-astra";
 const dirs: string[] = [];
+const rigs: { close(): Promise<void> }[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
+  for (const r of rigs.splice(0)) await r.close();
   for (const dir of dirs.splice(0)) await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
@@ -25,17 +28,16 @@ async function rig(options: { magpie?: boolean; template?: string } = {}) {
     ...(options.magpie ? { magpieUrl: "http://magpie.test/v1/", magpieKey: "test-gateway-key" } : {}),
     containsSecret: text => text.includes("credential-secret") });
   const file = (model = MODEL) => path.join(dir, "prompts", "codex-base", basePromptFilename(model));
-  const runner = new CodexRunner({
-    command: [process.execPath, path.join(FIXTURES, "fake-compact-codex.mjs")],
-    model: MODEL, prepareBasePrompt: model => store.prepare(model),
-    codexHome, workspaceDir: path.join(dir, "ws"), threadsFile: path.join(dir, "threads.json"),
-    sandbox: "workspace-write", timeoutMs: 10_000,
-    env: { FAKE_CODEX_LOG: path.join(dir, "calls.jsonl"), FAKE_CODEX_THREAD: "base-thread" },
-  });
+  const missing = { thread: "" };
+  const live = await codexRunnerRig({ dir, model: MODEL, prepareBasePrompt: model => store.prepare(model),
+    handlers: () => defaultHandlers({
+      "thread/start": () => ({ result: { thread: { id: "base-thread" } } }),
+      "thread/resume": m => m.params!.threadId === missing.thread ? { error: { code: -32600, message: "no rollout found for thread id " + missing.thread } }
+        : { result: { thread: { id: m.params!.threadId } } },
+    }) });
+  rigs.push(live);
   await fs.writeFile(path.join(codexHome, "config.toml"), 'model_provider="openai"\n', "utf8");
-  const calls = async (): Promise<{ phase: string; argv: string[]; method?: string; params?: unknown }[]> =>
-    (await fs.readFile(path.join(dir, "calls.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
-  return { dir, codexHome, cache, store, file, runner, calls };
+  return { dir, codexHome, cache, store, file, runner: live.runner, loads: live.loads, missing };
 }
 
 describe("按模型基础指令存储", () => {
@@ -88,11 +90,11 @@ describe("按模型基础指令存储", () => {
         { status: failure === "http-error" ? 503 : 200 });
       });
       const warn = vi.spyOn(log, "warn");
-      await r.runner.ask("第一轮", { threadKey: "owner", model: MODEL });
-      await r.runner.ask("续聊", { threadKey: "owner", model: MODEL });
+      await r.runner.openThread("owner", { mcpEnv: {}, model: MODEL });
+      await r.runner.openThread("owner", { mcpEnv: {}, model: MODEL });
       expect(await r.store.read(MODEL)).toBeUndefined();
       await expect(fs.stat(r.file())).rejects.toMatchObject({ code: "ENOENT" });
-      expect((await r.calls()).filter(c => c.phase === "start").every(c => !c.argv.some(a => a.startsWith("model_instructions_file=")))).toBe(true);
+      expect(r.loads().every(l => !Object.hasOwn(l.config, "model_instructions_file"))).toBe(true);
       expect(warn.mock.calls.filter(c => c[0] === "codex base instructions template unavailable; using codex defaults")).toEqual([
         ["codex base instructions template unavailable; using codex defaults", { model: MODEL }],
       ]);
@@ -210,46 +212,37 @@ describe("安全文件名", () => {
 });
 
 describe("Codex 调用基础指令", () => {
-  it("新建、续聊、丢失线程回退均使用票据模型；手动压缩使用运行时模型与同一生效文件", async () => {
+  it("新建、恢复、丢失线程回退均按加载时的模型使用同一生效文件（thread/start、thread/resume 的 model_instructions_file）", async () => {
     const r = await rig({ template: "启动模型模板" });
     await r.store.prepare(MODEL);
     await r.cache("票据模型模板", OTHER);
-    const expected = `model_instructions_file=${JSON.stringify(path.join(r.codexHome, "base-instructions", basePromptFilename(OTHER)))}`;
-    await r.runner.ask("新建", { threadKey: "owner", model: OTHER });
-    await r.runner.ask("续聊", { threadKey: "owner", model: OTHER });
+    const expected = path.join(r.codexHome, "base-instructions", basePromptFilename(OTHER));
+    await r.runner.openThread("owner", { mcpEnv: {}, model: OTHER });
+    await r.runner.openThread("owner", { mcpEnv: {}, model: OTHER });
     await fs.writeFile(r.runner.opts.threadsFile, JSON.stringify({ owner: { thread_id: "missing-thread" } }), "utf8");
-    await r.runner.ask("回退", { threadKey: "owner", model: OTHER });
-    await r.runner.compactThread("owner", "dashboard", OTHER);
-    const calls = await r.calls(), turns = calls.filter(c => c.phase === "start");
-    expect(turns).toHaveLength(4);
-    expect(turns.map(c => c.argv.includes("resume"))).toEqual([false, true, true, false]);
-    for (const call of [...turns, calls.find(c => c.phase === "compact-start")!]) {
-      const index = call.argv.indexOf(expected);
-      expect(index).toBeGreaterThan(0);
-      expect(call.argv[index - 1]).toBe("-c");
-      expect(call.argv).toContain(`model="${OTHER}"`);
-    }
-    expect(calls.find(c => c.method === "thread/resume")!.params).toEqual({ threadId: "base-thread", model: OTHER });
-    expect(await fs.readFile(path.join(r.codexHome, "base-instructions", basePromptFilename(OTHER)), "utf8")).toBe(`票据模型模板\n\n${MANAGED_QQ_INSTRUCTIONS}`);
+    r.missing.thread = "missing-thread";
+    await r.runner.openThread("owner", { mcpEnv: {}, model: OTHER });
+    const loads = r.loads();
+    expect(loads.map(l => l.threadId ?? "new")).toEqual(["new", "base-thread", "missing-thread", "new"]);
+    for (const load of loads) expect(load).toMatchObject({ model: OTHER, config: { model_instructions_file: expected } });
+    expect(await fs.readFile(expected, "utf8")).toBe(`票据模型模板\n\n${MANAGED_QQ_INSTRUCTIONS}`);
   });
 
-  it("默认模型的基础指令用于未覆盖模型的回合；压缩缺少模板时省略覆盖参数", async () => {
+  it("未指定模型时用默认模型的基础指令；没有模板时省略覆盖", async () => {
     const r = await rig({ template: "默认模板" });
-    await r.runner.ask("默认", { threadKey: "owner" });
-    await r.runner.compactThread("owner", "dashboard", OTHER);
-    const calls = await r.calls();
-    expect(calls.find(c => c.phase === "start")!.argv).toContain(
-      `model_instructions_file=${JSON.stringify(path.join(r.codexHome, "base-instructions", basePromptFilename(MODEL)))}`);
-    expect(calls.find(c => c.phase === "compact-start")!.argv.some(a => a.startsWith("model_instructions_file="))).toBe(false);
+    await r.runner.openThread("owner", { mcpEnv: {} });
+    expect(r.loads()[0]!.config.model_instructions_file).toBe(path.join(r.codexHome, "base-instructions", basePromptFilename(MODEL)));
+    await r.runner.openThread("group:1", { mcpEnv: {}, model: OTHER });
+    expect(r.loads()[1]!.config).not.toHaveProperty("model_instructions_file");
   });
 
-  it("文件路径按 TOML 基本字符串转义，不产生额外配置", async () => {
+  it("文件路径原样作为 config 值传入（JSON，不经 TOML 转义），只有一项", async () => {
     const r = await rig();
     const file = 'C:\\目录\\quote"name\nbase.md';
     r.runner.opts.prepareBasePrompt = async () => file;
-    await r.runner.ask("转义", { threadKey: "owner", model: MODEL });
-    const args = (await r.calls()).find(c => c.phase === "start")!.argv;
-    expect(args).toContain(`model_instructions_file=${JSON.stringify(file)}`);
-    expect(args.filter(a => a.startsWith("model_instructions_file="))).toHaveLength(1);
+    await r.runner.openThread("owner", { mcpEnv: {}, model: MODEL });
+    const config = r.loads()[0]!.config;
+    expect(config.model_instructions_file).toBe(file);
+    expect(Object.keys(config).filter(k => k.includes("instructions"))).toEqual(["model_instructions_file"]);
   });
 });

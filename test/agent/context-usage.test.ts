@@ -3,6 +3,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { CodexRunner } from "../../src/agent/codex/runner.js";
+import type { ThreadKey } from "../../src/agent/backends/types.js";
+import { codexRunnerRig } from "./codex-fixture.js";
+import { defaultHandlers } from "./codex-app-server/fake-app-server.js";
 import { catalogContextWindow } from "../../src/agent/codex/model-catalog.js";
 import { readRolloutContextUsage, ROLLOUT_USAGE_MAX_BYTES } from "../../src/agent/codex/context-usage.js";
 import { log } from "../../src/shared/log.js";
@@ -152,14 +155,42 @@ describe("上下文占用存储", () => {
   });
 });
 
-function runnerSetup(env: NodeJS.ProcessEnv = {}, fallback?: number) {
+const rigs: { close(): Promise<void> }[] = [];
+afterEach(async () => { for (const r of rigs.splice(0)) await r.close(); });
+
+/**
+ * 常驻 runner（内存版 app-server）。ask 模拟一轮：加载线程，按 FAKE_CODEX_ROLLOUT_USAGE 向线程 rollout 追加本轮请求
+ * （与 app-server 写 rollout 一致），再按回合结束记录用量。thread/start 固定返回 thread-123；missing-* 线程 resume 报不存在。
+ */
+async function runnerSetup(env: NodeJS.ProcessEnv = {}, fallback?: number) {
   const dir = tmp("context-codex-"); const store = open(dir);
   const catalogLog = path.join(dir, "catalog.jsonl");
-  const runner = new CodexRunner({ command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
-    codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "ws"), threadsFile: path.join(dir, "codex-threads.json"),
-    sandbox: "workspace-write", timeoutMs: 10000, contextUsage: store, model: "codex/gpt-6.1-sol", contextWindow: fallback,
-    env: { FAKE_CODEX_ROLLOUT_USAGE: JSON.stringify({ input_tokens: 1000, cached_input_tokens: 750 }), FAKE_CODEX_CATALOG_LOG: catalogLog, FAKE_CODEX_USAGE: JSON.stringify({ input_tokens: 1000, cached_input_tokens: 750, output_tokens: 200 }), ...env } });
-  return { dir, store, runner, catalogLog };
+  const vars: NodeJS.ProcessEnv = { FAKE_CODEX_ROLLOUT_USAGE: JSON.stringify({ input_tokens: 1000, cached_input_tokens: 750 }), FAKE_CODEX_CATALOG_LOG: catalogLog,
+    FAKE_CODEX_USAGE: JSON.stringify({ input_tokens: 1000, cached_input_tokens: 750, output_tokens: 200 }), ...env };
+  const r = await codexRunnerRig({ dir, contextUsage: store, model: "codex/gpt-6.1-sol", contextWindow: fallback, env: vars,
+    handlers: () => defaultHandlers({
+      "thread/start": () => ({ result: { thread: { id: "thread-123" } } }),
+      "thread/resume": m => String(m.params!.threadId).startsWith("missing") ? { error: { code: -32600, message: "no rollout found for thread id x" } }
+        : { result: { thread: { id: m.params!.threadId } } },
+    }) });
+  rigs.push(r);
+  const ask = async (_prompt: string, o: { threadKey: ThreadKey; turnId?: string }) => {
+    const startedAt = Date.now();
+    const threadId = await r.runner.openThread(o.threadKey, { mcpEnv: {} });
+    if (vars.FAKE_CODEX_ROLLOUT_USAGE) {
+      const sessions = path.join(dir, "codex", "sessions", "2026", "10", "18");
+      await fs.mkdir(sessions, { recursive: true });
+      const usage = JSON.parse(vars.FAKE_CODEX_ROLLOUT_USAGE);
+      const timestamp = new Date().toISOString();
+      const rows = [{ type: "task_started" }, ...(Array.isArray(usage) ? usage : [usage]).map(last_token_usage => ({ type: "token_count", info: { last_token_usage,
+        total_token_usage: JSON.parse(vars.FAKE_CODEX_USAGE ?? "{}"),
+        ...(vars.FAKE_CODEX_MODEL_CONTEXT_WINDOW ? { model_context_window: Number(vars.FAKE_CODEX_MODEL_CONTEXT_WINDOW) } : {}) } })), { type: "task_complete" }]
+        .map(payload => JSON.stringify({ timestamp, type: "event_msg", payload }));
+      await fs.appendFile(path.join(sessions, "rollout-" + threadId + ".jsonl"), rows.join("\n") + "\n", "utf8");
+    }
+    await r.runner.recordTurnUsage(o.threadKey, threadId, startedAt, "turn:" + (o.turnId ?? "turn"));
+  };
+  return { dir, store, runner: Object.assign(r.runner, { ask }), catalogLog };
 }
 
 describe("codex 上下文采集", () => {
@@ -182,7 +213,7 @@ describe("codex 上下文采集", () => {
     });
 
   it("runner 按序记录本票据请求后只记一次回合，后续票据 seq 归一且不重复采集历史", async () => {
-    const { runner, store } = runnerSetup({ FAKE_CODEX_MODEL_CONTEXT_WINDOW: "475000",
+    const { runner, store } = await runnerSetup({ FAKE_CODEX_MODEL_CONTEXT_WINDOW: "475000",
       FAKE_CODEX_ROLLOUT_USAGE: JSON.stringify([
         { input_tokens: 1000, cached_input_tokens: 750, output_tokens: 50 },
         { input_tokens: 1500, cached_input_tokens: 1000, output_tokens: 100 },
@@ -226,7 +257,7 @@ describe("codex 上下文采集", () => {
   });
 
   it('回合结束和启动回填均保留 rollout 有效窗口与目录名义窗口', async () => {
-    const { runner, store } = runnerSetup({ FAKE_CODEX_MODEL_CONTEXT_WINDOW: '475000' });
+    const { runner, store } = await runnerSetup({ FAKE_CODEX_MODEL_CONTEXT_WINDOW: '475000' });
     await runner.ask('window', { threadKey: 'owner' });
     expect(store.get('codex', 'owner')).toMatchObject({ usedTokens: 1000, windowTokens: 500000, effectiveWindowTokens: 475000 });
     const copy = open(tmp('context-backfill-effective-'));
@@ -235,7 +266,7 @@ describe("codex 上下文采集", () => {
     expect(copy.get('codex', 'owner')).toMatchObject({ windowTokens: 500000, effectiveWindowTokens: 475000 });
   });
   it("启动恢复最后完成回合的用量和时间，重置不复活归档", async () => {
-    const { runner, store, dir } = runnerSetup();
+    const { runner, store, dir } = await runnerSetup();
     const sessions = path.join(dir, "codex", "sessions", "2026", "10", "17");
     await fs.mkdir(sessions, { recursive: true });
     const file = path.join(sessions, "rollout-history.jsonl");
@@ -252,7 +283,7 @@ describe("codex 上下文采集", () => {
   });
 
   it("rollout 缺失或无合法用量时保留估算记录", async () => {
-    const { runner, store, dir } = runnerSetup();
+    const { runner, store, dir } = await runnerSetup();
     await fs.writeFile(path.join(dir, "codex-threads.json"), JSON.stringify({ owner: { thread_id: "missing" }, "group:1": { thread_id: "empty" } }), "utf8");
     const sessions = path.join(dir, "codex", "sessions"); await fs.mkdir(sessions, { recursive: true });
     await fs.writeFile(path.join(sessions, "empty.jsonl"), '{"type":"turn.completed","usage":{"input_tokens":-1}}\n', "utf8");
@@ -310,7 +341,7 @@ describe("codex 上下文采集", () => {
     { FAKE_CODEX_CATALOG_FAIL: "1" },
     { FAKE_CODEX_CATALOG: JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window: 272000 }, { slug: "other", context_window: 272000 }] }) },
   ])("命令失败或离线目录时采用只读模型缓存：%j", async env => {
-    const { runner, dir } = runnerSetup(env, 654321);
+    const { runner, dir } = await runnerSetup(env, 654321);
     const home = path.join(dir, "codex"); await fs.mkdir(home, { recursive: true });
     const cacheFile = path.join(home, "models_cache.json");
     const cache = JSON.stringify({ fetched_at: "2026-10-18T00:00:00Z", etag: "fixture", client_version: "0.163.0", identity: "fixture",
@@ -325,7 +356,7 @@ describe("codex 上下文采集", () => {
   });
 
   it("正常目录的模型窗口不被不同的缓存值覆盖", async () => {
-    const { runner, dir } = runnerSetup({ FAKE_CODEX_CATALOG: JSON.stringify({ models: [
+    const { runner, dir } = await runnerSetup({ FAKE_CODEX_CATALOG: JSON.stringify({ models: [
       { slug: "codex/gpt-6.1-sol", context_window: 500000 }, { slug: "other", context_window: 272000 },
     ] }) });
     const home = path.join(dir, "codex"); await fs.mkdir(home, { recursive: true });
@@ -338,7 +369,7 @@ describe("codex 上下文采集", () => {
   it.each(['{broken', '{"models":[{"slug":"other","context_window":500000}]}',
     '{"models":[{"slug":"codex/gpt-6.1-sol","context_window":-1}]}'])('缓存不可用时保留目录值或配置回退：%s', async cache => {
     for (const failed of [false, true]) {
-      const { runner, dir } = runnerSetup(failed ? { FAKE_CODEX_CATALOG_FAIL: "1" } : {
+      const { runner, dir } = await runnerSetup(failed ? { FAKE_CODEX_CATALOG_FAIL: "1" } : {
         FAKE_CODEX_CATALOG: JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window: 272000 }] }),
       }, 654321);
       const home = path.join(dir, "codex"); await fs.mkdir(home, { recursive: true });
@@ -349,7 +380,7 @@ describe("codex 上下文采集", () => {
 
   it("离线目录与缓存值相同时仍标为目录来源", async () => {
     const catalog = JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window: 272000 }] });
-    const { runner, dir } = runnerSetup({ FAKE_CODEX_CATALOG: catalog });
+    const { runner, dir } = await runnerSetup({ FAKE_CODEX_CATALOG: catalog });
     const home = path.join(dir, "codex"); await fs.mkdir(home, { recursive: true });
     await fs.writeFile(path.join(home, "models_cache.json"), catalog, "utf8");
     const info = vi.spyOn(log, "info");
@@ -358,7 +389,7 @@ describe("codex 上下文采集", () => {
   });
 
   it("启动与多个回合共用一次目录查询，JSONL 用量更新，不重复累加缓存", async () => {
-    const { runner, store, catalogLog, dir } = runnerSetup();
+    const { runner, store, catalogLog, dir } = await runnerSetup();
     await Promise.all([runner.initializeContextUsage(), runner.initializeContextUsage()]);
     await runner.ask("one", { turnId: "one", threadKey: "owner" });
     await runner.ask("two", { turnId: "two", threadKey: "owner" });
@@ -372,7 +403,7 @@ describe("codex 上下文采集", () => {
   });
 
   it.each(["age", "size", "missing"])("%s 轮换时先归零，再记录新线程的首轮", async reason => {
-    const { dir, runner, store } = runnerSetup();
+    const { dir, runner, store } = await runnerSetup();
     await runner.ask("one", { threadKey: "group:1" });
     const zeroes: number[] = [];
     store.subscribe(u => zeroes.push(u.turns));
@@ -389,7 +420,7 @@ describe("codex 上下文采集", () => {
   });
 
   it("映射已清空而用量未刷盘时，启动修复旧占用，新线程从首轮计数", async () => {
-    const { runner, store } = runnerSetup();
+    const { runner, store } = await runnerSetup();
     store.recordTurn("codex", "owner", usage);
     await store.flush();
     await runner.initializeContextUsage();
@@ -400,13 +431,13 @@ describe("codex 上下文采集", () => {
 
   it.each([{ FAKE_CODEX_CATALOG_FAIL: "1" }, { FAKE_CODEX_CATALOG: "invalid-json" }, { FAKE_CODEX_CATALOG: '{"models":[]}' }])("目录失败回退环境配置 %j", async env => {
     const cfg = loadConfig({ CODEX_CONTEXT_WINDOW: "654321" });
-    const { runner, store } = runnerSetup(env, cfg.CODEX_CONTEXT_WINDOW);
+    const { runner, store } = await runnerSetup(env, cfg.CODEX_CONTEXT_WINDOW);
     await runner.ask("fallback", { threadKey: "group:1" });
     expect(store.get("codex", "group:1")!.windowTokens).toBe(654321);
   });
 
   it("没有目录与覆盖值时默认 400000，缺失用量仍统计已完成回合", async () => {
-    const { runner, store } = runnerSetup({ FAKE_CODEX_CATALOG_FAIL: "1", FAKE_CODEX_USAGE: "{}", FAKE_CODEX_ROLLOUT_USAGE: "" });
+    const { runner, store } = await runnerSetup({ FAKE_CODEX_CATALOG_FAIL: "1", FAKE_CODEX_USAGE: "{}", FAKE_CODEX_ROLLOUT_USAGE: "" });
     expect(await runner.initializeContextUsage()).toBe(400000);
     const request = vi.spyOn(store, "recordRequest"), warn = vi.spyOn(log, "warn");
     await runner.ask("no-usage", { threadKey: "group:1" });

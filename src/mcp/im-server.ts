@@ -1,46 +1,48 @@
-import { isScheduleTool, SCHEDULE_MANAGEMENT_TOOLS, type ScheduleTool, type ScheduleToolPermissions } from "../shared/schedule-tools.js";
+import { isScheduleTool, SCHEDULE_TOOLS, type ScheduleTool } from "../shared/schedule-tools.js";
 import { scheduleDescriptions, scheduleParameters } from "../agent/schedule/tool-schema.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { validateSendArguments } from "../agent/send-service.js";
-import { AUTH_TOOLS, type AuthTool, type ImPermissions } from "../agent/grants.js";
+import { AUTH_TOOLS, type AuthTool } from "../agent/grants.js";
 import { authDescriptions, authParameters, sendParameters } from "../agent/im-tools.js";
 import { qqContextText } from "../context/qq-context-tool.js";
+import type { CallMeta } from "../context/media-recall-server.js";
+import { callMetaOf, loopbackJson, loopbackPost } from "./media-recall-client.js";
 
-export function createImServer(send: (args: unknown) => Promise<unknown>, opts: {
-  permissions?: ImPermissions & Partial<ScheduleToolPermissions>;
-  schedule?: (name: ScheduleTool, args: unknown) => Promise<string>;
-  auth?: (name: AuthTool, args: unknown) => Promise<unknown>;
-} = {}): Server {
-  const permissions = opts.permissions ?? { actorIsOwner: false, target: false, auth: false };
-  const scheduleTools: readonly ScheduleTool[] = permissions.scheduleControl ? ["schedule_control"]
-    : permissions.schedule ? SCHEDULE_MANAGEMENT_TOOLS : [];
-  const server = new Server({ name: "im", version: "1.0.0" }, { capabilities: { tools: {} } });
+/**
+ * im MCP 服务（设计 §5.3、§7）：每个会话线程一个进程，跨回合复用，所以工具清单固定为全集；
+ * 每次调用连同 _meta（callId、回合元数据）交给主进程，由它按会话当前回合的身份校验 target、授权与定时权限。
+ */
+export interface ImHandlers {
+  send(args: unknown, meta: CallMeta): Promise<unknown>;
+  auth(name: AuthTool, args: unknown, meta: CallMeta): Promise<unknown>;
+  schedule(name: ScheduleTool, args: unknown, meta: CallMeta): Promise<string>;
+}
+
+export function createImServer(handlers: ImHandlers): Server {
+  const server = new Server({ name: "im", version: "2.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{
-    name: "send_message", description: "用户能看到你内容的唯一方式：立即发送消息，默认回复本回合会话，返回 message_id。",
-    inputSchema: sendParameters(permissions.target),
+    name: "send_message", description: "用户能看到你内容的唯一方式：立即发送消息，默认发往本会话，返回 message_id。target 须有授权。",
+    inputSchema: sendParameters(true),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  }, ...(permissions.auth ? AUTH_TOOLS.map(name => ({
-    name, description: authDescriptions[name], inputSchema: authParameters[name],
+  }, ...AUTH_TOOLS.map(name => ({
+    name, description: authDescriptions[name] + "（仅限 owner 回合）", inputSchema: authParameters[name],
     annotations: { readOnlyHint: name === "auth_list", destructiveHint: name === "auth_revoke", openWorldHint: false },
-  })) : []), ...scheduleTools.map(name => ({
+  })), ...SCHEDULE_TOOLS.map(name => ({
     name, description: scheduleDescriptions[name], inputSchema: scheduleParameters[name],
     annotations: { readOnlyHint: name === "schedule_list", destructiveHint: name === "schedule_delete", openWorldHint: false },
   }))] }));
   server.setRequestHandler(CallToolRequestSchema, async req => {
+    const meta = callMetaOf(req.params._meta);
     try {
       if (req.params.name === "send_message") {
-        const args = validateSendArguments(req.params.arguments);
-        if (args.target !== undefined && !permissions.target) throw new Error("本回合未开放 target 参数");
-        return qqContextText(JSON.stringify(await send(args)));
+        return qqContextText(JSON.stringify(await handlers.send(validateSendArguments(req.params.arguments), meta)));
       }
       if (AUTH_TOOLS.includes(req.params.name as AuthTool)) {
-        if (!permissions.auth || !opts.auth) throw new Error("授权工具仅限 owner 回合");
-        return qqContextText(JSON.stringify(await opts.auth(req.params.name as AuthTool, req.params.arguments ?? {})));
+        return qqContextText(JSON.stringify(await handlers.auth(req.params.name as AuthTool, req.params.arguments ?? {}, meta)));
       }
       if (isScheduleTool(req.params.name)) {
-        if (!scheduleTools.includes(req.params.name) || !opts.schedule) throw new Error("本回合无权使用此定时工具");
-        return qqContextText(await opts.schedule(req.params.name, req.params.arguments ?? {}));
+        return qqContextText(await handlers.schedule(req.params.name, req.params.arguments ?? {}, meta));
       }
       return qqContextText("未知工具：" + req.params.name, true);
     } catch (error) { return qqContextText((error as Error).message, true); }
@@ -48,31 +50,13 @@ export function createImServer(send: (args: unknown) => Promise<unknown>, opts: 
   return server;
 }
 
-/** schema 声明经真实令牌向主进程查询；环境里不接受可伪造的 owner 开关。 */
-export async function imViaLoopback(endpoint: "im-info" | AuthTool | ScheduleTool | "send", args: unknown, token: string | undefined, port = 8790): Promise<unknown> {
-  if (!token || !/^[a-f0-9]{64}$/.test(token)) throw new Error("IM_TOKEN 未配置");
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("MEDIA_RECALL_PORT 无效");
-  const res = await fetch(`http://127.0.0.1:${port}/${endpoint}`, {
-    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify(args), redirect: "error", signal: AbortSignal.timeout(endpoint === "send" ? 600_000 : 30_000),
-  });
-  const body = await res.json() as { error?: string };
-  if (!res.ok) throw new Error(body?.error ?? "IM 请求失败");
-  return body;
+/** 经线程令牌向主进程提交 im 工具调用。 */
+export async function imViaLoopback(endpoint: AuthTool | ScheduleTool | "send", args: unknown, meta: CallMeta, token: string | undefined, port = 8790): Promise<unknown> {
+  return loopbackJson(await loopbackPost(endpoint, args, token, port, meta, endpoint === "send" ? 600_000 : 30_000), "IM 请求失败");
 }
 
-export async function imPermissions(token: string | undefined, port = 8790): Promise<ImPermissions & Partial<ScheduleToolPermissions>> {
-  const result = await imViaLoopback("im-info", {}, token, port) as ImPermissions & Partial<ScheduleToolPermissions>;
-  if (!result || typeof result.actorIsOwner !== "boolean" || typeof result.target !== "boolean" || typeof result.auth !== "boolean") throw new Error("IM 权限返回格式错误");
-  if (["schedule", "scheduleControl"].some(key => {
-    const value = result[key as keyof ScheduleToolPermissions];
-    return value !== undefined && typeof value !== "boolean";
-  })) throw new Error("IM 定时权限返回格式错误");
-  return result;
-}
-
-export async function sendViaLoopback(args: unknown, token: string | undefined, port = 8790) {
-  const body = await imViaLoopback("send", args, token, port) as { message_id?: string | null; status?: string; note?: string };
+export async function sendViaLoopback(args: unknown, meta: CallMeta, token: string | undefined, port = 8790) {
+  const body = await imViaLoopback("send", args, meta, token, port) as { message_id?: string | null; status?: string; note?: string };
   if (!body.message_id && !["sent", "sending", "uncertain", "pending"].includes(body.status ?? "")) throw new Error("发送返回格式错误");
   if (!body.message_id && !body.note) body.note = "消息状态为 " + body.status + "，但缺少 message_id 回执；不要重发。";
   return body;

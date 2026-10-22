@@ -77,9 +77,7 @@ Copy-Item .env.example .env
 | `ATTACH_FILE_MAX_MB` / `ATTACH_FILES_MAX` | 20 / 3 | 单个文件上限（MiB）与每轮文件数；同内容按 sha256 去重 |
 | `ATTACH_FILE_DENY_EXT` | `.exe,.bat,.cmd,.ps1,.vbs,.js,.scr,.msi,.com,.lnk` | 附件扩展名黑名单，逗号分隔、不区分大小写 |
 | `CODEX_IMAGE_GEN` | `off` | cs-agent 的生图 MCP：`off` 不注册、不注入参数，`on` 恢复；不影响 pi 与规则分流 |
-| `CODEX_TIMEOUT_SEC` / `COMFY_TIMEOUT_SEC` | 600 / 300 | codex 单轮超时；生图收取预算按 1mp/2mp/2k 分别为 120/240/600 秒 × count，上限 COMFY_TIMEOUT_SEC；默认额外收取 2 次，始终使用原 prompt_id |
-| `CODEX_CLOSE_GRACE_MS` | 5000 | 可选，正整数毫秒。主进程 `exit` 后最多等待 `close` 冲完 stdout/stderr；到期清理遗留进程并释放管道，完成事件已收到且退出码为 0 时成功，非零退出码仍失败 |
-| `CODEX_EXIT_GRACE_MS` | 15000 | 可选，正整数毫秒。收到 `turn.completed` 后仍无 `exit`，到期检查 `-o` 文件；可读且非空时清理进程并成功返回，否则保留原总超时。取消与已发生的超时不会被完成事件覆盖 |
+| `COMFY_TIMEOUT_SEC` | 300 | codex 不设单轮时限（停滞由看门狗判定）；生图收取预算按 1mp/2mp/2k 分别为 120/240/600 秒 × count，上限 COMFY_TIMEOUT_SEC；默认额外收取 2 次，始终使用原 prompt_id |
 | `IMAGE_GEN_MCP_WAIT_SEC` / `IMAGE_COLLECT_EXTENSIONS` | 90 / 2 | MCP 最多等待参数预算与前者的较小值；超时交给 agent 的 lateImages 阶段，后者控制两条生图路径的额外收取窗口数 |
 | `CODEX_PROVIDER` | `magpie` | `magpie\|openai`；默认经宿主机网关，`openai` 恢复直连 |
 | `CODEX_MAGPIE_URL` | `http://host.docker.internal:3425/v1` | Responses API 根地址；入口脚本只接受安全字符组成的 HTTP(S) URL，不能含凭据、查询或片段；尾斜杠会移除 |
@@ -220,7 +218,7 @@ Codex 每个模型的完整基础指令保存在 `DATA_DIR/prompts/codex-base/<�
 - **入库**：QQBridge 把允许群的全部消息、允许用户的私聊写入 `qq-messages.sqlite`；收到触发消息时写入一行 `[我] → 处理中`，回复后更新为 `生图 prompt=… → 已发送 N 张图` / `codex(high) → "摘要"` / `失败`。
 - **衰老任务**：每天 `HISTORY_SUMMARY_HOUR`（默认 3）点运行，时间按**容器本地时区**——默认 UTC，即北京时间 11 点；想按北京时间 3 点运行，在 `docker-compose.yml` 的 `environment` 加 `TZ: Asia/Shanghai`（同时影响聊天记录里显示的 HH:MM）。任务内容：前一天（及更早未处理的日子）≥5 条消息的会话用意图模型生成 ≤400 字日摘要；已结束的自然周（周一起）的日摘要合并为周摘要；原始消息超过 `HISTORY_RAW_DAYS`（30）且所在日已被日/周摘要覆盖时删除——摘要失败的日子保留原始消息、下次重试，未被覆盖的（摘要一直失败或当天不足 5 条）最多保留 `HISTORY_RAW_HARD_MAX_DAYS`（90）天；摘要超过 `HISTORY_SUMMARY_DAYS`（180）删除。上次运行早于 24 小时时，启动后立即补跑。日志：`history aging done`（含 day_summaries / week_summaries / failed / purged_*）。模型失败只计数跳过，下次再试，不影响主流程。
 - **按需图片召回**：消息默认只存 `[image]`，不保存 URL、不下载到媒体库。两个后端的 `qq_image(message_id)` 只返回路径文本；查看图片使用文件工具。成功召回后正文变为 `[image:<路径>]`，媒体文件随原始消息保留，撤回/清理删除关联，每日 GC 回收超过一天且无引用的文件。
-- **召回配置**：`MEDIA_RECALL_PORT=8790`，主进程仅监听 `127.0.0.1`，无需发布容器端口；`MEDIA_RECALL_MAX_PER_TICKET=5`，正整数。Codex 每次 exec 注入绑定范围、票据、截止时间与预算的随机令牌，退出即作废；MCP 仅持只读库连接，不持 NapCat 凭据。pi 直接调用同一召回服务，预算保存在本轮请求文档。
+- **召回配置**：`MEDIA_RECALL_PORT=8790`，主进程仅监听 `127.0.0.1`，无需发布容器端口；`MEDIA_RECALL_MAX_PER_TICKET=5`，正整数。Codex 每个会话线程一个随机令牌（经 thread/start、thread/resume 的 config 写入该线程的 MCP 环境，app-server 重启或线程重新加载即作废重发），每次调用由主进程按 `_meta` 确认属于会话当前回合后才按本轮身份求出范围，额度按回合计；MCP 仅持只读库连接，不持 NapCat 凭据。pi 直接调用同一召回服务，预算保存在本轮请求文档。
 - **codex 检索**：codex 通过 stdio MCP `qq_context`（`node /app/dist/mcp/qq-context.js`，只读连接）调用 `qq_recent` / `qq_search` / `qq_message`。访问范围由 cs-agent 每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS=…` 注入：群聊只见本群，owner（`QQ_OWNER`，默认 `QQ_ALLOW_USERS` 第一项）私聊可见全部，其他私聊只见本人。返回文本单条正文通常 ≤120 字，完整媒体路径可附在省略号后，超额整行省略；总量 ≤`QQ_CONTEXT_MAX_CHARS`（2500）。
 - **查看消息库**（容器内有 node，无需 sqlite3）：
 

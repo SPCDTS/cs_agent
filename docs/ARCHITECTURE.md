@@ -206,7 +206,6 @@ CODEX_MAGPIE_URL=http://host.docker.internal:3425/v1
 CODEX_MAGPIE_KEY=
 CODEX_MODEL=codex/gpt-6.1-sol
 CODEX_REASONING_EFFORT=high        # 缺省值；每轮由意图模型选择的档位覆盖
-CODEX_TIMEOUT_SEC=600
 AGENT_MODEL_PROVIDER=deepseek
 AGENT_MODEL_ID=deepseek-flash
 DEEPSEEK_API_KEY=                  # 也可写作 DEEPSEEK_APIKEY

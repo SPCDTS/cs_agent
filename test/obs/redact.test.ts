@@ -54,22 +54,20 @@ describe("临时秘密生命周期与长期容量", () => {
     expect(redactText("active-ephemeral")).toBe("[已隐藏]");
     dispose(); expect(redactText("active-ephemeral")).toBe("active-ephemeral");
   });
-  it("召回令牌在手动撤销、到期、外部取消和关闭时移除临时秘密", async () => {
-    vi.useFakeTimers();
-    const { RecallTokens } = await import("../../src/context/media-recall-server.js");
+  it("线程令牌在撤销、同一会话重新签发和关闭时移除临时秘密", async () => {
+    const { ThreadTokens } = await import("../../src/context/media-recall-server.js");
     const { redactText } = await import("../../src/shared/redact.js");
-    const tokens = new RecallTokens({ recall: async () => ({ text: "ok", images: [] }) });
+    const tokens = new ThreadTokens({ recall: async () => ({ text: "ok", images: [] }) },
+      { resolve: async () => { throw new Error("unused"); }, send: async () => ({}) });
     try {
-      for (const mode of ["revoke", "expire", "abort", "close"]) {
-        const control = new AbortController();
-        const lease = tokens.issue({ access: { kind: "all" }, threadKey: "owner", turnId: mode, deadline: Date.now() + 1000, signal: control.signal });
-        expect(redactText(lease.token)).toBe("[已隐藏]");
-        if (mode === "revoke") lease.revoke();
-        if (mode === "expire") await vi.advanceTimersByTimeAsync(1000);
-        if (mode === "abort") control.abort();
+      for (const mode of ["revoke", "reissue", "close"]) {
+        const token = tokens.issue("owner");
+        expect(redactText(token)).toBe("[已隐藏]");
+        if (mode === "revoke") tokens.revoke("owner");
+        if (mode === "reissue") tokens.issue("owner");
         if (mode === "close") tokens.close();
-        expect(tokens.valid(lease.token)).toBe(false);
-        expect(redactText(lease.token)).toBe(lease.token);
+        expect(tokens.valid(token)).toBe(false);
+        expect(redactText(token)).toBe(token);
       }
     } finally { tokens.close(); }
   });

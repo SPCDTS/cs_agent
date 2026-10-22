@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { CodexBackend, codexObserver } from "../../src/agent/backends/codex.js";
-import { FIXTURES, tmp } from "./helpers.js";
-import { describe, expect, it, vi } from "vitest";
-import { CodexRunner, CodexTimeoutError, type AskOptions } from "../../src/agent/codex/runner.js";
+import { CodexBackend, type CodexBackendOptions } from "../../src/agent/backends/codex.js";
+import { tmp } from "./helpers.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CodexScript, codexRunnerRig } from "./codex-fixture.js";
 import { backendNameFor, createBackendSelector, parseBackendOverrides } from "../../src/agent/backends/select.js";
 import type { AgentBackend } from "../../src/agent/backends/types.js";
 import type { HostCallbacks, InputRef, TurnStatus } from "../../src/agent/host/types.js";
@@ -83,125 +83,165 @@ function fakeHost() {
 
 const ref = (inboundKey: string, sender: string): InputRef => ({ inboundKey, kind: "user", sender, seq: 1, at: Date.now() });
 
-describe("CodexBackend 适配层（第 2 阶段：每轮一次 codex exec）", () => {
-  const setup = (ask: (prompt: string, o: AskOptions) => Promise<string>, opts: { owners?: string[]; records?: InboundRecord[] } = {}) => {
-    const dir = tmp("cs-codex-be-");
+describe("CodexBackend：常驻 app-server 适配器", () => {
+  const rigs: { close(): Promise<void> }[] = [];
+  afterEach(async () => { for (const r of rigs.splice(0)) await r.close(); });
+
+  /** 宿主当前回合的桩：binding 按 current 表给出身份与回合 id。 */
+  const setup = async (opts: { owners?: string[]; records?: InboundRecord[]; script?: CodexScript; extra?: Partial<CodexBackendOptions> } = {}) => {
+    const script = opts.script ?? new CodexScript();
+    const r = await codexRunnerRig({ handlers: script.handlers });
+    rigs.push(r);
     const records = opts.records ?? [record("k1", "1", "7"), record("k2", "9", null, "owner")];
+    const turns = fakeTurns(records);
+    const current = new Map<string, { turnId?: string; identity: TurnBinding["identity"]; inputs?: string[] }>();
+    const binding = turns.binding;
+    turns.binding = (threadKey: string) => {
+      const c = current.get(threadKey);
+      return { ...binding(threadKey), ...(c ? { identity: c.identity, inputs: c.inputs ?? [], ...(c.turnId ? { turnId: c.turnId } : {}) } : {}) };
+    };
+    const tokens = { issue: vi.fn((key: string) => key.length.toString(16).padStart(64, "0")), revoke: vi.fn() };
     const h = fakeHost();
-    const backend = new CodexBackend({ runner: { ask: vi.fn(ask) }, imagesDir: path.join(dir, "images"), turns: fakeTurns(records), owners: opts.owners ?? ["9"] });
+    const backend = new CodexBackend({ runner: r.runner, tokens, imagesDir: path.join(r.dir, "images"), turns, owners: opts.owners ?? ["9"],
+      callWaitMs: 100, ...opts.extra });
     backend.attach(h.host);
-    return { dir, backend, ...h, ask: (backend as unknown as { opts: { runner: { ask: ReturnType<typeof vi.fn> } } }).opts.runner.ask };
+    return { ...r, script, backend, tokens, current, ...h };
   };
 
-  it("startTurn 立即返回 codex: 回合 id，exec 在后台完成后回报 completed", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>(r => { release = r; });
-    const s = setup(async () => { await gate; return "答复"; });
-    const { turnId } = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" });
-    expect(turnId).toMatch(/^codex:[0-9a-f-]{36}$/);
-    expect(s.completed).toEqual([]);
-    release();
-    await s.backend.idle();
-    expect(s.completed).toEqual([{ threadKey: "group:7", turnId, status: "completed" }]);
-    expect(s.ask).toHaveBeenCalledWith("问题 k1", expect.objectContaining({ turnId, threadKey: "group:7", senderIsOwner: false, qqAccess: "group:7" }));
-  });
-
-  it("codex 不插话：steer 一律 no_active_turn；重启后回合丢失", async () => {
-    const s = setup(async () => "x");
-    expect(await s.backend.steer()).toBe("no_active_turn");
-    expect(await s.backend.recoverTurn()).toBe("lost");
-  });
-
-  it("超时（CodexTimeoutError）按回合失败回报", async () => {
-    const s = setup(async () => { throw new CodexTimeoutError(10); });
-    const { turnId } = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" });
-    await s.backend.idle();
-    expect(s.completed).toEqual([{ threadKey: "group:7", turnId, status: "failed", error: "timeout" }]);
-  });
-
-  it("interrupt 中止 exec 的 signal，回合以 failed 结束", async () => {
-    const s = setup(async (_p, o) => new Promise<string>((_r, reject) => {
-      o.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-    }));
-    const { turnId } = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" });
-    await vi.waitFor(() => expect(s.ask).toHaveBeenCalled());
-    await s.backend.interrupt("group:7");
-    await s.backend.idle();
-    expect(s.completed).toEqual([{ threadKey: "group:7", turnId, status: "failed", error: "aborted" }]);
-  });
-
-  it("读取范围：owner 本人为 all 并可写技能，其余为本会话", async () => {
-    const s = setup(async () => "ok");
-    await s.backend.startTurn("owner", [ref("k2", "9")], { kind: "user", sender: "9" });
+  it("startTurn 加载线程（签发线程令牌）后 turn/start，返回 codex:<回合 id>；turn/completed 后回报 completed", async () => {
+    const script = new CodexScript();
+    script.auto = false;
+    const s = await setup({ script });
+    const started = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" },
+      { backend: "codex", codexReasoningEffort: "low", codexModel: "codex/gpt-6-astra" });
+    expect(started).toEqual({ turnId: "codex:turn-1" });
+    expect(s.tokens.issue).toHaveBeenCalledWith("group:7");
+    expect(s.loads()[0]!.config["mcp_servers.im.env.IM_TOKEN"]).toBe(s.tokens.issue.mock.results[0]!.value);
+    expect(script.turns[0]).toMatchObject({ text: "问题 k1", effort: "low", model: "codex/gpt-6-astra" });
+    expect(await s.backend.busy("group:7")).toBe(true);
+    script.complete(script.turns[0]!);
+    await vi.waitFor(() => expect(s.completed).toEqual([{ threadKey: "group:7", turnId: "codex:turn-1", status: "completed" }]));
+    expect(await s.backend.busy("group:7")).toBe(false);
+    // 同一会话下一轮复用已加载的线程，不再签发令牌
+    script.auto = true;
     await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" });
     await s.backend.idle();
-    const calls = s.ask.mock.calls.map(([, o]) => o as AskOptions);
-    expect(calls.find(o => o.threadKey === "owner")).toMatchObject({ qqAccess: "all", senderIsOwner: true });
-    expect(calls.find(o => o.threadKey === "group:7")).toMatchObject({ qqAccess: "group:7", senderIsOwner: false });
-    // owner 在群里发言时读取范围为 all
-    const g = setup(async () => "ok");
-    await g.backend.startTurn("group:7", [ref("k1", "9")], { kind: "user", sender: "9" });
-    await g.backend.idle();
-    expect(g.ask.mock.calls[0]![1]).toMatchObject({ qqAccess: "all", senderIsOwner: true });
+    expect(s.tokens.issue).toHaveBeenCalledTimes(1);
+    expect(s.loads()).toHaveLength(1);
   });
 
-  it("image_gen 超时留下的任务在回合结束前补收，以系统消息发出并移除清单", async () => {
+  it("插话：当前回合 turn/steer；回合 id 不符或不可插话回报 no_active_turn；重启后回合丢失", async () => {
+    const script = new CodexScript();
+    script.auto = false;
+    const s = await setup({ script });
+    const { turnId } = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" }) as { turnId: string };
+    expect(await s.backend.steer("group:7", turnId, ref("k1", "1"))).toBe("ok");
+    expect(script.steers).toMatchObject([{ turnId: "turn-1", text: "问题 k1" }]);
+    expect(await s.backend.steer("group:7", "codex:other", ref("k1", "1"))).toBe("no_active_turn");
+    script.steerReply = () => ({ error: { code: -32600, message: "cannot steer a compact turn" } });
+    expect(await s.backend.steer("group:7", turnId, ref("k1", "1"))).toBe("no_active_turn");
+    expect(await s.backend.recoverTurn()).toBe("lost");
+    script.complete(script.turns[0]!);
+    await vi.waitFor(() => expect(s.completed).toHaveLength(1));
+    expect(await s.backend.steer("group:7", turnId, ref("k1", "1"))).toBe("no_active_turn");
+  });
+
+  it("interrupt 发 turn/interrupt，回合以 failed（被中断）结束；不再重试的 error 并入失败", async () => {
+    const script = new CodexScript();
+    script.auto = false;
+    const s = await setup({ script });
+    const { turnId } = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" }) as { turnId: string };
+    await s.backend.interrupt("group:7");
+    await vi.waitFor(() => expect(s.completed).toEqual([{ threadKey: "group:7", turnId, status: "failed", error: "codex 回合被中断" }]));
+    expect(s.requests("turn/interrupt")).toMatchObject([{ params: { threadId: "thr-1", turnId: "turn-1" } }]);
+    const next = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" }) as { turnId: string };
+    const turn = script.turns[1]!;
+    turn.child.notify("error", { threadId: turn.threadId, turnId: turn.turnId, willRetry: false, error: { message: "boom" } });
+    script.complete(turn);
+    await vi.waitFor(() => expect(s.completed.at(-1)).toEqual({ threadKey: "group:7", turnId: next.turnId, status: "failed", error: "codex 回合出错" }));
+  });
+
+  it("工具调用的读取范围：owner 本人为 all（群里也是），其余为本会话；本轮参考图取本轮输入", async () => {
+    const script = new CodexScript();
+    script.auto = false;
+    const records = [{ ...record("k1", "1", "7"), images: ["/data/incoming/k1/a.png"] }, record("k2", "9", null, "owner"), record("k3", "9", "7")];
+    const s = await setup({ script, records });
+    await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" });
+    await s.backend.startTurn("owner", [ref("k2", "9")], { kind: "user", sender: "9" });
+    const [g, o] = script.turns;
+    s.current.set("group:7", { turnId: "codex:" + g!.turnId, identity: { kind: "user", sender: "1" }, inputs: ["k1"] });
+    s.current.set("owner", { turnId: "codex:" + o!.turnId, identity: { kind: "user", sender: "9" } });
+    expect(await s.backend.resolveCall("group:7", { turnId: g!.turnId })).toMatchObject({ access: { kind: "scope", scope: "group:7" },
+      session: g!.threadId, workdir: path.join(s.dir, "ws", "group_7"), imageDir: path.join(s.dir, "images", "group_7"), imageRefs: ["/data/incoming/k1/a.png"] });
+    expect(await s.backend.resolveCall("owner", { turnId: o!.turnId })).toMatchObject({ access: { kind: "all" } });
+    s.current.set("group:7", { turnId: "codex:" + g!.turnId, identity: { kind: "user", sender: "9" }, inputs: ["k3"] });
+    expect(await s.backend.resolveCall("group:7", { turnId: g!.turnId })).toMatchObject({ access: { kind: "all" } });
+    // owner 线程的唤醒回合读取 all；群的唤醒回合只读本会话
+    s.current.set("owner", { turnId: "codex:" + o!.turnId, identity: { kind: "wake" } });
+    expect(await s.backend.resolveCall("owner", { turnId: o!.turnId })).toMatchObject({ access: { kind: "all" } });
+    s.current.set("group:7", { turnId: "codex:" + g!.turnId, identity: { kind: "wake" } });
+    expect(await s.backend.resolveCall("group:7", { turnId: g!.turnId })).toMatchObject({ access: { kind: "scope", scope: "group:7" } });
+    // 条目归属：callId 对应的 mcpToolCall 条目所在回合
+    script.toolCall(g!, "exec-g");
+    expect(await s.backend.resolveCall("group:7", { callId: "exec-g" })).toMatchObject({ turnId: "codex:" + g!.turnId });
+    await expect(s.backend.resolveCall("owner", { callId: "exec-g" })).rejects.toThrow("本回合已结束");
+    await expect(s.backend.resolveCall("private:5", { callId: "exec-g" })).rejects.toThrow("未加载");
+  });
+
+  it("image_gen 超时留下的任务在回合结束时补收，以系统消息发出并移除清单", async () => {
+    const script = new CodexScript();
     const dir = tmp("cs-codex-late-");
     const threadDir = path.join(dir, "images", "group_7");
     const callDir = path.join(threadDir, "call-1");
+    script.onTurn = () => {
+      mkdirSync(callDir, { recursive: true });
+      writeFileSync(path.join(threadDir, PENDING_IMAGE_JOBS), JSON.stringify([{ prompt_id: "late-1", backend: "stub",
+        filenamePrefix: "cs-late-1", options: { prompt: "慢图" }, callDir, submittedAt: Date.now(), status: "submitted" }]));
+    };
     const system = vi.fn(async () => ({ status: "sent" as const, already_sent: false, message_id: "1", message_type: "group" as const, target_id: "7" }));
     const collect = vi.fn(async (_id: string, out: string) => {
       mkdirSync(out, { recursive: true }); const file = path.join(out, "late.png"); writeFileSync(file, PNG); return [file];
     });
-    const h = fakeHost();
-    const backend = new CodexBackend({
-      runner: { ask: async () => {
-        mkdirSync(callDir, { recursive: true });
-        writeFileSync(path.join(threadDir, PENDING_IMAGE_JOBS), JSON.stringify([{ prompt_id: "late-1", backend: "stub",
-          filenamePrefix: "cs-late-1", options: { prompt: "慢图" }, callDir, submittedAt: Date.now(), status: "submitted" }]));
-        return "图片稍后发";
-      } },
-      imagesDir: path.join(dir, "images"), turns: fakeTurns([record("k1", "1", "7")]), sendService: { system }, imageBackend: { name: "stub", submit: async () => "p", reconcile: async () => ({ images: [] }), collect },
-    });
-    backend.attach(h.host);
-    const { turnId } = await backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" });
-    await backend.idle();
+    const s = await setup({ script, extra: { imagesDir: path.join(dir, "images"), sendService: { system },
+      imageBackend: { name: "stub", submit: async () => "p", reconcile: async () => ({ images: [] }), collect } } });
+    const { turnId } = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" }) as { turnId: string };
+    await vi.waitFor(() => expect(s.completed).toHaveLength(1));
     expect(collect).toHaveBeenCalledWith("late-1", expect.any(String), expect.any(AbortSignal), { prompt: "慢图" });
     expect(system).toHaveBeenCalledWith(expect.objectContaining({ threadKey: "group:7", scope: "group:7", turnId }), IMAGE_SUCCESS_REPLY,
       [expect.stringMatching(/late\.png$/)]);
     expect(existsSync(path.join(threadDir, PENDING_IMAGE_JOBS))).toBe(false);
-    expect(h.completed).toEqual([{ threadKey: "group:7", turnId, status: "completed" }]);
+    expect(s.completed).toEqual([{ threadKey: "group:7", turnId, status: "completed" }]);
   });
 
-  it("codexObserver 每个事件都刷新活动时间", () => {
-    const onActivity = vi.fn();
-    const observe = codexObserver("turn:codex:x", onActivity);
-    observe({ type: "turn.started" });
-    observe({ type: "item.started", item: { type: "command_execution", id: "c1", command: "ls" } });
-    expect(onActivity).toHaveBeenCalledTimes(2);
+  it("条目与子 agent 活动刷新看门狗；app-server 掉线：回合按 lost 回报、令牌作废，下一轮 thread/resume 并重新签发", async () => {
+    const script = new CodexScript();
+    script.auto = false;
+    const s = await setup({ script });
+    const { turnId } = await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" }) as { turnId: string };
+    const turn = script.turns[0]!;
+    script.toolCall(turn, "exec-1");
+    turn.child.notify("item/completed", { threadId: turn.threadId, turnId: turn.turnId, item: { type: "commandExecution", id: "c1", command: "ls", status: "completed", exitCode: 0 } });
+    await vi.waitFor(() => expect(s.activity.length).toBeGreaterThanOrEqual(2));
+    turn.child.exit(1);
+    await vi.waitFor(() => expect(s.completed).toEqual([{ threadKey: "group:7", turnId, status: "lost", error: expect.stringContaining("掉线") }]));
+    expect(s.tokens.revoke).toHaveBeenCalledWith("group:7");
+    script.auto = true;
+    await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" });
+    await s.backend.idle();
+    expect(s.fake.last.requests("thread/resume")).toMatchObject([{ params: { threadId: "thr-1" } }]);
+    expect(s.tokens.issue).toHaveBeenCalledTimes(2);
   });
 
-  it("fake codex 端到端：附件目录按会话键，完成后进程滞留仍返回结果", async () => {
-    const dir = tmp("cs-codex-grace-be-");
-    const logFile = path.join(dir, "calls.jsonl");
-    const runner = new CodexRunner({
-      command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
-      codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "ws"),
-      threadsFile: path.join(dir, "threads.json"), sandbox: "workspace-write", timeoutMs: 10000, exitGraceMs: 150,
-      env: { FAKE_CODEX_LOG: logFile, FAKE_CODEX_SLEEP_AFTER_OUT_MS: "8000", FAKE_CODEX_IMAGES: "1" },
-    });
-    const h = fakeHost();
-    const backend = new CodexBackend({ runner, imagesDir: path.join(dir, "images"), turns: fakeTurns([record("k2", "9", null, "owner")]), owners: ["9"] });
-    backend.attach(h.host);
-    const { turnId } = await backend.startTurn("owner", [ref("k2", "9")], { kind: "user", sender: "9" });
-    await backend.idle();
-    expect(h.completed).toEqual([{ threadKey: "owner", turnId, status: "completed" }]);
-    const start = JSON.parse(readFileSync(logFile, "utf8").trim().split("\n")[0]!);
-    const arg = start.argv.find((a: string) => a.startsWith("mcp_servers.qq_context.env.QQ_ATTACH_DIR="));
-    const attachDir = JSON.parse(arg.slice(arg.indexOf("=") + 1));
-    expect(path.basename(attachDir)).toBe("owner");
-    expect(existsSync(path.join(attachDir, "img_0.png"))).toBe(true);
-    expect(start.argv).toContain('mcp_servers.qq_context.env.QQ_TICKET=' + JSON.stringify(turnId));
+  it("唤醒回合先到（宿主尚未确认）时开轮让给它：返回 backendTurnId", async () => {
+    const script = new CodexScript();
+    script.auto = false;
+    const s = await setup({ script });
+    await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" });
+    script.complete(script.turns[0]!);
+    await vi.waitFor(() => expect(s.completed).toHaveLength(1));
+    const wake = script.wake(script.turns[0]!.child, script.turns[0]!.threadId);
+    await vi.waitFor(async () => expect(await s.backend.busy("group:7")).toBe(true));
+    expect(await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" })).toEqual({ backendTurnId: "codex:" + wake.turnId });
+    expect(await s.backend.abandon("group:7", "codex:turn-1")).toEqual({ status: "completed" });
   });
 });
-

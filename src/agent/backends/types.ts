@@ -1,5 +1,5 @@
 /**
- * 执行 agent 的后端公共类型（设计 §4.3）。两后端：codex（每轮 codex exec，第 2 阶段经适配层）与 pi（进程内常驻会话）；
+ * 执行 agent 的后端公共类型（设计 §4.3）。两后端：codex（常驻 app-server，§5）与 pi（进程内常驻会话）；
  * 二者都实现 ThreadHost 的 ThreadAdapter，回复只经 send_message（Outbox）发出。
  */
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";

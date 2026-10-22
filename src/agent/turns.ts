@@ -3,7 +3,7 @@
  * - BackendRouter：ThreadHost 的适配器入口，按会话键选择后端（面板设置与覆盖表；owner 线程取首个 owner 账号私聊的覆盖），
  *   不按单条输入的 scope——一个会话同一时间只由一个后端服务（§4.3）。后端属于会话：plan 选定、宿主落盘在会话文档，
  *   开轮（含重启后恢复未确认的开轮）按会话后端执行；配置改为别的后端时，会话当前后端在该会话仍有工作
- *   （pi 子 agent 在跑、被放弃的 exec 未退出）时，本轮仍用旧后端，切换在它结束后生效。开轮时冻结设置快照；
+ *   （pi 子 agent 在跑、codex 回合或子 agent 线程未结束）时，本轮仍用旧后端，切换在它结束后生效。开轮时冻结设置快照；
  *   插话、恢复、放弃按回合 id 前缀（pi: / codex:）交给对应后端；后端不可用时开轮重试，超过 2 分钟才算投递失败。
  * - TurnMonitor：宿主事件的外层处理——Inbox 状态、观测、定时运行统计、出错提示（同一会话 10 分钟内最多一条）、
  *   回合结束后补传附件；看门狗：回合连续 30 分钟没有任何事件即中止（随后按回合失败提示）。
@@ -65,7 +65,7 @@ export class BackendRouter implements ThreadAdapter {
 
   /**
    * 选定会话后端（宿主在开新回合前、可以切换时调用）：按会话键的设置选择；会话当前后端（current）在该会话仍忙
-   * （pi 子 agent 在跑、run 未结束、被放弃的 exec 未退出）时仍用它。会话首次选定（没有 current）时，若某个后端在该会话
+   * （pi 子 agent 在跑、run 未结束、codex 回合或子 agent 线程未结束）时仍用它。会话首次选定（没有 current）时，若某个后端在该会话
    * 已有工作（升级前遗留、先到的唤醒回合），也选它。busy 抛错即本次选择失败，宿主沿用当前后端。
    */
   async plan(threadKey: ThreadKey, input: InputRef, current?: string): Promise<string> {

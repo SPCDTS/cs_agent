@@ -19,8 +19,9 @@ RUN echo 'Acquire::Retries "8";' > /etc/apt/apt.conf.d/80retries \
 RUN python3 -m venv /opt/comfy \
  && /opt/comfy/bin/pip install --no-cache-dir comfy-cli comfy-mcp
 
-# codex CLI（固定版本）
-RUN npm i -g @openai/codex@0.163.0 && npm cache clean --force
+# codex CLI（固定版本）：常驻 app-server 的子 agent 唤醒（features.wake_on_agent_messages）自 0.164.0-alpha.8 起才有，
+# 仍在开发中，升级前须按 docs/DESIGN-resident-agent.md §5.2 复测
+RUN npm i -g @openai/codex@0.164.0-alpha.8 && npm cache clean --force
 
 # codex 的浏览器 MCP：@playwright/mcp + headless Chromium（含系统依赖，需 root 安装；node 用户可读）
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers

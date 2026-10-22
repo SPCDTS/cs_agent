@@ -1,18 +1,27 @@
 /**
- * qq_context MCP 服务（设计 §2.3）：统一上下文存储的 stdio 外壳，供容器内 codex 检索 QQ 聊天记录。
- * 访问范围只来自环境变量 QQ_ACCESS（每次 codex exec 以 -c 注入），工具参数里不接受范围；
- * 缺失或非法时所有工具都返回错误文本。只读连接；输出一律经 src/context/format.ts。
+ * qq_context MCP 服务（设计 §2.3、§5.3）：统一上下文存储的 stdio 外壳，供容器内 codex 检索 QQ 聊天记录。
+ * 每个会话线程一个进程、跨回合复用：读取范围不在环境里，每次调用按 _meta 向主进程求本次调用的上下文
+ * （会话当前回合的发送者决定：owner 为 all，其余为本会话），调用不属于当前回合时主进程拒绝。
+ * 工具参数里不接受范围。只读连接；输出一律经 src/context/format.ts。
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { CHATS_DENIED } from "../context/chats.js";
-import { accessToString } from "../context/access.js";
+import type { Access } from "../context/access.js";
+import type { CallMeta } from "../context/media-recall-server.js";
+import type { RecallObservation } from "../context/observer.js";
 import { callQQContextTool, qqContextText as text, RECENT_MAX, SEARCH_LIMIT_MAX, SEARCH_DAYS_MAX, type QQContextToolDeps } from "../context/qq-context-tool.js";
+import { callMetaOf } from "./media-recall-client.js";
 
-export interface QQContextDeps extends QQContextToolDeps {
-  view?: (file: string) => Promise<{ type: "image"; data: string; mimeType: string }>;
-  chats?: () => Promise<string>;
-  recall?: (messageId: string) => Promise<string>;
+/** 主进程求出的本次调用上下文 */
+export interface QQCallContext { access: Access; turnId?: string; session?: string }
+
+export interface QQContextDeps extends Omit<QQContextToolDeps, "access" | "onRecall"> {
+  /** 本次调用的读取范围（抛错时工具返回错误文本） */
+  context(meta: CallMeta): Promise<QQCallContext>;
+  onRecall?: (event: RecallObservation, context: QQCallContext) => void;
+  view?: (file: string, meta: CallMeta) => Promise<{ type: "image"; data: string; mimeType: string }>;
+  chats?: (meta: CallMeta) => Promise<string>;
+  recall?: (messageId: string, meta: CallMeta) => Promise<string>;
 }
 
 // 只读工具声明统一注解（与审批模式无关，供客户端按注解判断）。
@@ -81,39 +90,33 @@ const TOOLS = [
 
 export function createQQContextServer(deps: QQContextDeps): Server {
   const server = new Server(
-    { name: "qq_context", version: "1.0.0" },
-    {
-      capabilities: { tools: {} },
-      instructions: deps.access
-        ? `只读访问 QQ 聊天记录，范围：${accessToString(deps.access)}。`
-        : "QQ_ACCESS 未配置，所有工具都会返回错误。",
-    },
+    { name: "qq_context", version: "2.0.0" },
+    { capabilities: { tools: {} }, instructions: "只读访问 QQ 聊天记录；范围随本轮发送者：owner 为全部会话，其他人为本会话。" },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS.map((t) => ({ ...t })) as never }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const args = req.params.arguments ?? {};
-    if (req.params.name === "qq_chats") {
-      if (deps.access?.kind !== "all") return text(CHATS_DENIED, true);
-      if (Object.keys(args).length) return text("qq_chats 不接受参数", true);
-      try {
-        if (!deps.chats) throw new Error("会话列表未启用");
-        return text(await deps.chats());
-      } catch (err) { return text((err as Error).message, true); }
-    }
-    if (req.params.name === "qq_view_image") {
-      if (!deps.access) return text("qq_context 不可用：未配置有效的访问范围（QQ_ACCESS）。", true);
-      if (Object.keys(args).length !== 1 || typeof args.path !== "string" || !args.path || args.path.length > 1024) return text("仅接受 path", true);
-      try {
-        if (!deps.view) throw new Error("图片查看未启用");
-        return { content: [await deps.view(args.path)] };
-      } catch (err) { return text((err as Error).message, true); }
-    }
-    if (req.params.name !== "qq_image") return callQQContextTool(deps, req.params.name, args);
-    if (!deps.access) return text("qq_context 不可用：未配置有效的访问范围（QQ_ACCESS）。", true);
-    if (Object.keys(args).length !== 1 || typeof args.message_id !== "string" || !args.message_id.trim() || args.message_id.length > 128) return text("仅接受 message_id", true);
+    const meta = callMetaOf(req.params._meta);
     try {
-      if (!deps.recall) throw new Error("图片召回未启用");
-      return text(await deps.recall(args.message_id));
+      if (req.params.name === "qq_chats") {
+        if (Object.keys(args).length) return text("qq_chats 不接受参数", true);
+        if (!deps.chats) throw new Error("会话列表未启用");
+        return text(await deps.chats(meta));
+      }
+      if (req.params.name === "qq_view_image") {
+        if (Object.keys(args).length !== 1 || typeof args.path !== "string" || !args.path || args.path.length > 1024) return text("仅接受 path", true);
+        if (!deps.view) throw new Error("图片查看未启用");
+        return { content: [await deps.view(args.path, meta)] };
+      }
+      if (req.params.name === "qq_image") {
+        if (Object.keys(args).length !== 1 || typeof args.message_id !== "string" || !args.message_id.trim() || args.message_id.length > 128) return text("仅接受 message_id", true);
+        if (!deps.recall) throw new Error("图片召回未启用");
+        return text(await deps.recall(args.message_id, meta));
+      }
+      const context = await deps.context(meta);
+      const onRecall = deps.onRecall;
+      return callQQContextTool({ openStore: deps.openStore, access: context.access, ...(deps.maxChars !== undefined ? { maxChars: deps.maxChars } : {}),
+        ...(onRecall ? { onRecall: (event: RecallObservation) => onRecall(event, context) } : {}) }, req.params.name, args);
     } catch (err) { return text((err as Error).message, true); }
   });
   return server;

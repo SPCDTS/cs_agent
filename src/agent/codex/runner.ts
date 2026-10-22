@@ -2,42 +2,40 @@ import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import { SEND_RULE } from "../send-service.js";
 import { attachmentDirs, validateAttachmentPath } from "../../media/attach-paths.js";
 import { codexWorkspacePolicy, prepareCodexWorkspace } from "./workspace.js";
-import type { RecallTokens } from "../../context/media-recall-server.js";
 import type { ContextUsageStore } from "../context-usage.js";
 import { loadCodexContextWindow } from "./model-catalog.js";
 import { readRolloutContextUsage } from "./context-usage.js";
 import { readThreadArchive, writeThreadArchive } from "../thread-archive.js";
-import { imageRefsValue } from "../../media/gen/image-references.js";
+import { AppServerSupervisor, killTree, type AppServerSupervisorOptions, type SpawnAppServer } from "./app-server/supervisor.js";
+import { CodexAppServerClient, type ThreadOptions } from "./app-server/client.js";
+import { RpcError } from "./app-server/rpc.js";
 /**
- * 按会话域隔离 codex 线程：owner（owner 私聊）、group:<id> 与 private:<qq>，记录在 ${DATA_DIR}/codex-threads.json。
- * 首轮 `codex exec --json`，收到 JSONL 的 `thread.started.thread_id` 立即原子持久化；
- * 之后 `codex exec resume <id>`；只有确认"会话不存在"的 resume 失败才新建线程。
- * 每个线程键一条互斥队列（不同会话可并行，同一键串行）；超时 kill 进程树。子进程只拿到最小环境变量，magpie 模式额外注入专用 gateway key。
- * 模型与推理强度取票据快照，缺省沿用启动设置（codex 后端每轮以 `-c model_reasoning_effort="<档位>"` 显式传入）。
- * 聊天记录访问范围每轮以 `-c mcp_servers.qq_context.env.QQ_ACCESS="<范围>"` 注入（owner 含群聊 → all，其他群 → 本群）；
- * 生图输出目录每轮以 `-c mcp_servers.image_gen.env.IMAGE_TICKET_DIR="<DATA_DIR>/images/<会话>"` 注入。
- * 安全阀：resume 前若线程 rollout 文件 > rolloutMaxMb 或线程年龄 > threadMaxDays，新建线程（历史靠 qq_context 找回）。
+ * codex 线程管理（常驻 app-server，设计 §5）：一个受监管的 `codex app-server` 进程承载所有会话线程。
+ * - 线程映射：owner（owner 私聊）、group:<id> 与 private:<qq> 各一条线程，记录在 ${DATA_DIR}/codex-threads.json；
+ *   首次 thread/start 后立即原子落盘，进程（重新）启动后 thread/resume；只有确认"线程不存在"的 resume 失败才归档并新建。
+ * - 线程级配置在 thread/start、thread/resume 的 config 里按点号键注入：会话工作区与命名权限、受管 AGENTS.md（每次加载前重写）、
+ *   基础指令文件（model_instructions_file，按加载时的模型）、MCP 的线程令牌与端口（mcp_servers.<名>.env.*）。
+ *   每轮参数（推理强度、模型）走 turn/start，由适配器传入。
+ * - 子进程只拿到最小环境变量，magpie 模式额外注入专用 gateway key；令牌不进 app-server 的环境。
+ * - 安全阀：加载或开轮前若线程 rollout 文件 > rolloutMaxMb 或线程年龄 > threadMaxDays，新建线程（历史靠 qq_context 找回）。
  */
-import { spawn, spawnSync } from "node:child_process";
-import { compactAppServer } from "./app-server-compact.js";
-import { randomUUID } from "node:crypto";
 import { constants, promises as fs, type Stats } from "node:fs";
-import os from "node:os";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { TicketSource } from "../backends/types.js";
 import { log } from "../../shared/log.js";
-import { isScope, parseAccess } from "../../context/access.js";
+import { isScope } from "../../context/access.js";
 import { headerField, headerNickname } from "../../shared/header.js";
 
 export interface CodexRunnerOptions {
-  /** 可执行文件及前置参数，例如 ["codex"] 或测试中的 [node, fake-codex.mjs] */
+  /** 可执行文件及前置参数，例如 ["codex"]；app-server 以 [...command, "app-server"] 启动 */
   command: string[];
   /** 主进程显式传入提供者；省略时保留独立 runner 原有的直连行为。 */
   provider?: "magpie" | "openai";
   magpieKey?: string;
   imageGen?: "off" | "on";
   contextUsage?: ContextUsageStore;
-  recallTokens?: RecallTokens;
+  /** im / qq_context / image_gen 访问主进程 loopback 服务的端口（按线程写入 MCP 环境） */
   mediaRecallPort?: number;
   model?: string;
   contextWindow?: number;
@@ -46,18 +44,13 @@ export interface CodexRunnerOptions {
   sandboxNetwork?: boolean;
   /** 热加载可编辑提示词；这里只更新全局通用指引，不写会话权限。 */
   preparePrompt?: () => Promise<void>;
-  /** 按本轮实际模型生成基础指令；没有目录模板时不覆盖 Codex 默认值。 */
+  /** 按线程加载时的模型生成基础指令；没有目录模板时不覆盖 Codex 默认值。 */
   prepareBasePrompt?: (model: string) => Promise<string | undefined>;
   /** ${DATA_DIR}/codex-threads.json：{ owner: {thread_id, created_at, updated_at}, "group:<id>": {...}, "private:<qq>": {...} } */
   threadsFile: string;
   /** 旧的单线程记录 ${DATA_DIR}/codex-session.json：新文件不存在时迁移到 owner 并改名为 *.migrated */
   legacySessionFile?: string;
   sandbox: "read-only" | "workspace-write" | "danger-full-access";
-  timeoutMs: number;
-  /** 主进程 exit 后等待输出管道 close 的上限，默认 5000 ms。 */
-  closeGraceMs?: number;
-  /** turn.completed 后等待主进程 exit 的上限，默认 15000 ms；需非空输出文件才能提前成功。 */
-  exitGraceMs?: number;
   /** 额外环境变量（测试用） */
   env?: NodeJS.ProcessEnv;
   /** 安全阀：rollout 文件超过该大小（MB）则新建线程，默认 50 */
@@ -66,7 +59,13 @@ export interface CodexRunnerOptions {
   threadMaxDays?: number;
   /** 官方 rollout trace 保留天数；默认 14，0 禁用。 */
   traceRetentionDays?: number;
+  /** 测试注入 app-server 启动器与监管参数 */
+  spawn?: SpawnAppServer;
+  supervisor?: Partial<Pick<AppServerSupervisorOptions, "backoffInitialMs" | "backoffMaxMs" | "readyTimeoutMs" | "requestTimeoutMs" | "initTimeoutMs" | "stableMs">>;
 }
+
+/** 线程级 MCP 环境：服务名 → 变量 → 值（令牌等），写入 mcp_servers.<名>.env.<变量>。 */
+export type McpThreadEnv = Partial<Record<"im" | "qq_context" | "image_gen", Record<string, string>>>;
 
 /** 允许的推理强度（不含 ultra：会自动委派子任务，成本高）。 */
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -76,28 +75,10 @@ export function isReasoningEffort(v: unknown): v is ReasoningEffort {
   return typeof v === "string" && (REASONING_EFFORTS as readonly string[]).includes(v);
 }
 
-/** 单轮的 codex 配置覆盖参数；未指定时沿用 config.toml 中的 CODEX_REASONING_EFFORT。 */
-function reasoningEffortArgs(effort: ReasoningEffort | undefined): string[] {
-  if (effort === undefined) return [];
-  if (!isReasoningEffort(effort)) throw new Error(`不支持的推理强度: ${String(effort)}`);
-  return ["-c", `model_reasoning_effort="${effort}"`];
-}
-
-/** 单轮的 qq_context / image_gen 访问范围覆盖参数（值必须是 group:<id> / private:<qq> / all）。 */
-export function qqAccessArgs(access: string | undefined, imageGen: "off" | "on" = "off"): string[] {
-  if (access === undefined) return [];
-  if (!parseAccess(access)) throw new Error(`非法的 QQ_ACCESS: ${String(access)}`);
-  return ["-c", `mcp_servers.qq_context.env.QQ_ACCESS="${access}"`,
-    ...(imageGen === "on" ? ["-c", `mcp_servers.image_gen.env.QQ_ACCESS="${access}"`] : [])];
-}
-
-/** 单轮的 image_gen 输出目录覆盖参数：绝对路径，只允许安全字符（与 entrypoint 的 toml_path 同一口径），不得含 ".."。 */
-export function imageTicketDirArgs(dir: string | undefined): string[] {
-  if (dir === undefined) return [];
-  // 容器内为 POSIX 路径；Windows 本地开发/测试时允许盘符路径
-  const ok = /^\/[A-Za-z0-9._/-]+$/.test(dir) || (process.platform === "win32" && /^[A-Za-z]:[\\/][A-Za-z0-9._\\/-]*$/.test(dir));
-  if (!ok || dir.split(/[\\/]/).includes("..")) throw new Error(`非法的 IMAGE_TICKET_DIR: ${dir}`);
-  return ["-c", `mcp_servers.image_gen.env.IMAGE_TICKET_DIR="${dir}"`];
+/** 模型 slug 只允许安全字符（写入 config 与 turn/start）。 */
+export function validModel(model: string): string {
+  if (!/^[A-Za-z0-9._/-]+$/.test(model)) throw new Error("非法的 codex 模型 slug");
+  return model;
 }
 
 /** 线程键与会话域一致；任何外部输入都必须通过 isThreadKey。 */
@@ -112,37 +93,6 @@ export function threadKeyForSource(source: TicketSource | undefined, owners: Own
     : isOwner(owners, source.user_id) ? "owner" : `private:${source.user_id}`;
   if (!isThreadKey(key)) throw new Error("非法的 codex 会话来源");
   return key;
-}
-
-export interface AskOptions {
-  /** 仅本轮发送者身份决定技能写权限；不可从线程键推断。 */
-  senderIsOwner?: boolean;
-  /** 本轮回合 id：召回 / IM 令牌绑定会话与回合，观测按回合归属 */
-  turnId?: string;
-  onJsonEvent?: (event: Record<string, unknown>) => void;
-  /** 本轮会话键，不允许缺省或复用 shared。 */
-  threadKey: ThreadKey;
-  signal?: AbortSignal;
-  reasoningEffort?: ReasoningEffort;
-  model?: string;
-  /** 本轮 qq_context MCP 的访问范围 */
-  qqAccess?: string;
-  /** 本轮 image_gen MCP 的输出目录（${DATA_DIR}/images/<会话>） */
-  imageTicketDir?: string;
-  imageRefs?: string[];
-  /**
-   * `-o` 最后一条消息的落盘位置（绝对路径，不含 ".."；由调用方放在票据工作目录里）。每次启动 codex 前先删除旧文件，
-   * 结束后保留（调用方据此判断回合是否已完成）。未设置时用临时目录并在结束后删除。
-   */
-  outputFile?: string;
-  /** 线程锁已获取且 signal 已检查，即将首次 spawn 时调用；排队不会消耗回合次数。 */
-  onAcquired?: () => Promise<void>;
-}
-
-/** 校验 outputFile：绝对路径且不含 ".." 段。 */
-function validateOutputFile(file: string): string {
-  if (!path.isAbsolute(file) || file.split(/[\\/]/).includes("..")) throw new Error(`非法的 codex 输出文件路径: ${file}`);
-  return file;
 }
 
 /** 传给 codex 子进程的环境变量白名单（其余一律不传，尤其是 NAPCAT_TOKEN、*_API_KEY 等配置） */
@@ -361,7 +311,7 @@ export async function writeManagedFile(file: string, content: string): Promise<"
   } finally { await fs.rm(tmp, { force: true }); }
 }
 
-/** 受管全局规则：每次启动按当前可写目录重写 $CODEX_HOME/AGENTS.md（codex exec 会读取它）。返回文件路径。 */
+/** 受管全局规则：每次启动按当前可写目录重写 $CODEX_HOME/AGENTS.md（codex 加载线程时读取）。返回文件路径。 */
 export async function writeGlobalAgentsMd(codexHome: string, o: AgentsMdOptions): Promise<string> {
   await fs.mkdir(codexHome, { recursive: true });
   const file = path.join(codexHome, "AGENTS.md");
@@ -369,51 +319,6 @@ export async function writeGlobalAgentsMd(codexHome: string, o: AgentsMdOptions)
   return file;
 }
 
-export class CodexTimeoutError extends Error {
-  constructor(ms: number) {
-    super(`codex 超时（${Math.round(ms / 1000)} s）`);
-  }
-}
-
-interface RunOutcome {
-  code: number | null;
-  threadId?: string;
-  turnStarted: boolean;
-  lastAgentMessage?: string;
-  failure?: string;
-  stderrTail: string;
-  outFileText?: string;
-}
-
-/** 从一行 JSONL 中提取会话 id：优先 thread.started.thread_id，兼容 session_id / session_configured。 */
-export function extractThreadId(event: unknown): string | undefined {
-  if (!event || typeof event !== "object") return undefined;
-  const e = event as Record<string, unknown>;
-  for (const key of ["thread_id", "session_id", "conversation_id"]) {
-    if (typeof e[key] === "string" && e[key]) return e[key] as string;
-  }
-  const msg = e.msg as Record<string, unknown> | undefined;
-  if (msg && typeof msg.session_id === "string") return msg.session_id;
-  return undefined;
-}
-
-/** 结束子进程树：Windows 用 taskkill /T，其他平台杀 detached 进程组；常驻 app-server 监管器复用。 */
-export function killTree(pid: number | undefined): void {
-  if (!pid) return;
-  try {
-    if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-    } else {
-      process.kill(-pid, "SIGKILL"); // detached → 进程组
-    }
-  } catch {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      /* 已退出 */
-    }
-  }
-}
 
 interface ThreadRecord {
   thread_id: string;
@@ -436,8 +341,8 @@ function parseThread(j: unknown): ThreadRecord | undefined {
 }
 
 export class CodexRunner {
-  /** 每个线程键一条互斥队列：不同会话可并行，同一键串行 */
-  private readonly queues = new Map<ThreadKey, Promise<unknown>>();
+  readonly supervisor: AppServerSupervisor;
+  readonly client: CodexAppServerClient;
   /** 线程文件的读-改-写串行化（所有键共用一个文件） */
   private fileChain: Promise<unknown> = Promise.resolve();
   private migrated: Promise<void> | undefined;
@@ -449,10 +354,27 @@ export class CodexRunner {
     if (opts.provider === "magpie" && !opts.magpieKey?.trim()) {
       throw new Error("配置无效：CODEX_PROVIDER=magpie 需要 CODEX_MAGPIE_KEY");
     }
+    this.supervisor = new AppServerSupervisor({
+      command: opts.command, cwd: opts.workspaceDir, env: this.childEnv(), killTree,
+      capabilities: { experimentalApi: true }, clientInfo: { name: "cs_agent", version: "0.1.0" },
+      ...(opts.spawn ? { spawn: opts.spawn } : {}), ...opts.supervisor,
+    });
+    this.client = new CodexAppServerClient(this.supervisor);
   }
 
+  /** 启动常驻 app-server（幂等）；失败自动退避重试。 */
+  async start(): Promise<void> {
+    await fs.mkdir(this.opts.workspaceDir, { recursive: true });
+    await this.prepareTraceDirectory();
+    this.supervisor.start();
+  }
+
+  stop(): Promise<void> { return this.supervisor.stop(); }
+
   private childEnv(): NodeJS.ProcessEnv {
-    const env = { ...buildCodexEnv(this.opts.codexHome), ...Object.fromEntries(Object.entries(this.opts.env ?? {}).filter(([key]) => key.toUpperCase() !== "OBS_TOKEN")) };
+    // 线程令牌只经线程 config 进入各自的 MCP 环境，app-server 的环境里不留任何令牌。
+    const env = { ...buildCodexEnv(this.opts.codexHome), ...Object.fromEntries(Object.entries(this.opts.env ?? {})
+      .filter(([key]) => !["OBS_TOKEN", "IM_TOKEN", "QQ_RECALL_TOKEN", "IMAGE_GEN_TOKEN"].includes(key.toUpperCase()))) };
     // 只从显式配置注入 gateway key；直连时清除额外环境中的残留值及大小写别名。
     for (const key of Object.keys(env)) {
       const name = key.toUpperCase();
@@ -524,84 +446,156 @@ export class CodexRunner {
     log.info("context usage backfilled", { backend: "codex", checked: keys.filter(key => threads[key]).length, backfilled, truncated });
   }
 
-  /** 队列仅保留仍在执行或等待的键；失败不阻塞下一轮。 */
-  private enqueue<T>(key: ThreadKey, fn: () => Promise<T>): Promise<T> {
-    if (!isThreadKey(key)) return Promise.reject(new Error("非法的 codex 线程键"));
-    const run = (this.queues.get(key) ?? Promise.resolve()).then(fn);
-    const tail = run.then(() => undefined, () => undefined);
-    this.queues.set(key, tail);
-    void tail.then(() => { if (this.queues.get(key) === tail) this.queues.delete(key); });
-    return run;
+  /**
+   * 加载会话线程（进程代中首次使用、重启后、轮换后）：重写受管 AGENTS.md 与基础指令，按需轮换；
+   * 有记录 → thread/resume（确认线程不存在才归档并新建）；没有 → thread/start 并立即落盘。返回线程 id。
+   */
+  async openThread(key: ThreadKey, opts: { mcpEnv: McpThreadEnv; model?: string }): Promise<string> {
+    if (!isThreadKey(key)) throw new Error("非法的 codex 线程键");
+    const model = opts.model ?? this.opts.model;
+    if (model !== undefined) validModel(model);
+    const thread = await this.threadOptions(key, opts.mcpEnv, model);
+    if (this.opts.contextUsage) await this.initializeContextUsage();
+    const windowTokens = this.opts.contextUsage ? await this.contextWindow(model) : 0;
+    this.opts.contextUsage?.ensure("codex", key, { windowTokens });
+    const session = await this.readThread(key);
+    let id = session?.thread_id;
+    if (session) {
+      const reason = await this.rotationReason(session);
+      if (reason) {
+        log.warn("codex thread rotated", { key, thread_id: session.thread_id, reason });
+        await this.writeThread(key, undefined);
+        this.opts.contextUsage?.reset("codex", key);
+        id = undefined;
+      }
+    }
+    if (id) {
+      try {
+        return await this.client.resumeThread(id, thread);
+      } catch (error) {
+        const message = error instanceof RpcError ? error.serverMessage : "";
+        if (!isMissingSessionError(message)) {
+          // 其他失败（进程掉线、鉴权……）：保留线程 id，下次继续 resume
+          log.warn("codex thread resume failed, keeping thread", { key, thread_id: id });
+          throw error;
+        }
+        // 已确认线程不存在：先归档旧映射，再新建。归档失败则保留映射并报错。
+        log.warn("codex thread missing, starting fresh thread", { key, thread_id: id });
+        await this.writeThread(key, undefined, message);
+        this.opts.contextUsage?.reset("codex", key);
+      }
+    }
+    const created = await this.client.startThread(thread);
+    await this.writeThread(key, created);
+    this.opts.contextUsage?.ensure("codex", key, { windowTokens });
+    log.info("codex thread created", { key, thread_id: created });
+    return created;
   }
 
-  /** 同一键串行，不同键并行。 */
-  ask(prompt: string, opts: AskOptions): Promise<string> {
-    return this.enqueue(opts?.threadKey, () => this.turn(opts.threadKey, prompt, opts));
+  /** 已加载的线程是否应轮换（开新一轮前由适配器检查）。 */
+  async rotationDue(key: ThreadKey): Promise<boolean> {
+    const session = await this.readThread(key);
+    return !!session && !!await this.rotationReason(session);
+  }
+
+  /** 线程级配置：会话工作区与命名权限、受管 AGENTS.md、基础指令文件与 MCP 环境。 */
+  private async threadOptions(key: ThreadKey, mcpEnv: McpThreadEnv, model: string | undefined): Promise<ThreadOptions> {
+    const dataDir = path.dirname(this.opts.threadsFile);
+    // 技能写权限按线程：owner 线程（只有 owner 本人与其唤醒回合）可写共享技能，群与他人私聊不可写。
+    const policy = codexWorkspacePolicy(this.opts.workspaceDir, dataDir, key, this.opts.sandbox, this.opts.sandboxNetwork, this.opts.codexHome, key === "owner");
+    const guidance = await prepareCodexWorkspace(this.opts.workspaceDir, policy.workspaceDir);
+    await this.opts.preparePrompt?.();
+    const managed = renderManagedAgentsMd({ dataDir, workspaceDir: policy.workspaceDir,
+      codexHome: this.opts.codexHome, writableRoots: policy.writableRoots, readOnly: this.opts.sandbox === "read-only" });
+    const instructions = managed + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
+    await writeManagedFile(path.join(policy.workspaceDir, "AGENTS.md"),
+      `<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 在加载线程时生成，改动会被覆盖。\n\n${instructions}\n`);
+    const attachment = attachmentDirs(dataDir, key);
+    const port = this.opts.mediaRecallPort ?? 8790;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("非法召回配置");
+    const servers: McpThreadEnv = {
+      im: { MEDIA_RECALL_PORT: String(port), ...mcpEnv.im },
+      qq_context: { MEDIA_RECALL_PORT: String(port), ...qqAttachmentEnv(attachment.attachDir, attachment.fileDir, policy.workspaceDir), ...mcpEnv.qq_context },
+      ...(this.opts.imageGen === "on" ? { image_gen: { MEDIA_RECALL_PORT: String(port), ...mcpEnv.image_gen } } : {}),
+    };
+    const config: Record<string, unknown> = { ...policy.config, project_doc_max_bytes: 131072,
+      "mcp_servers.qq_context.tool_timeout_sec": 70 };
+    for (const [server, env] of Object.entries(servers)) {
+      for (const [name, value] of Object.entries(env ?? {})) config[`mcp_servers.${server}.env.${name}`] = value;
+    }
+    const instructionsFile = model === undefined ? undefined : await this.opts.prepareBasePrompt?.(model);
+    // 命名权限与 sandbox_mode 互斥：不发 sandbox 参数，由 config 的 default_permissions 决定。
+    return { cwd: policy.workspaceDir, config, sandbox: null, approvalPolicy: "never",
+      ...(model !== undefined ? { model } : {}), ...(instructionsFile !== undefined ? { modelInstructionsFile: instructionsFile } : {}) };
+  }
+
+  /** 回合结束后用 rollout 的最新请求记录上下文用量；rollout 缺失或陈旧时只计数并保留旧快照。 */
+  async recordTurnUsage(key: ThreadKey, threadId: string, startedAt: number, ticket: string, model?: string): Promise<void> {
+    if (!this.opts.contextUsage) return;
+    const windowTokens = await this.contextWindow(model);
+    const usage = await this.latestRolloutContextUsage(threadId);
+    if (usage && usage.updatedAt >= startedAt) {
+      for (const [index, request] of usage.requests.entries()) {
+        this.opts.contextUsage.recordRequest("codex", key, {
+          ticket, seq: index + 1, usedTokens: request.input, cachedTokens: request.cached,
+          outputTokens: request.output, windowTokens, effectiveWindowTokens: usage.effectiveWindowTokens, at: request.at,
+        });
+      }
+      this.opts.contextUsage.recordTurn("codex", key, { windowTokens, usedTokens: usage.usedTokens, cachedTokens: usage.cachedTokens,
+        ...(usage.effectiveWindowTokens !== undefined ? { effectiveWindowTokens: usage.effectiveWindowTokens } : {}) }, ticket);
+    } else {
+      this.opts.contextUsage.recordTurn("codex", key, { windowTokens }, ticket);
+      log.warn("codex context usage unavailable after turn; keeping previous usage", {
+        key, thread_id: threadId, ticket, reason: usage ? "stale rollout usage" : "missing rollout usage",
+      });
+    }
+  }
+
+  /** 压缩完成后读取 rollout 的新占用；读取失败保留旧记录。 */
+  async recordCompaction(key: ThreadKey, threadId: string, startedAt: number): Promise<void> {
+    if (!this.opts.contextUsage) return;
+    const detail = { thread_key: key, thread_id: threadId };
+    try {
+      const usage = await this.latestRolloutContextUsage(threadId, startedAt);
+      if (usage) this.opts.contextUsage.recordCompaction("codex", key, "@context", {
+        usedTokens: usage.usedTokens,
+        ...(usage.effectiveWindowTokens !== undefined ? { effectiveWindowTokens: usage.effectiveWindowTokens } : {}),
+      });
+      else log.info("codex context usage unavailable after compaction; keeping previous usage", detail);
+    } catch {
+      log.info("codex context usage refresh failed after compaction; keeping previous usage", detail);
+    }
+  }
+
+  /** 会话工作区（线程 cwd，发送附件的根目录）。 */
+  workspaceOf(key: ThreadKey): string {
+    return codexWorkspacePolicy(this.opts.workspaceDir, path.dirname(this.opts.threadsFile), key, this.opts.sandbox,
+      this.opts.sandboxNetwork, this.opts.codexHome, key === "owner").workspaceDir;
+  }
+
+  /** 一个键当前记录的线程 id。 */
+  async threadId(key: ThreadKey): Promise<string | undefined> {
+    if (!isThreadKey(key)) throw new Error("非法的 codex 线程键");
+    return (await this.readThread(key))?.thread_id;
   }
 
   /**
-   * 面板"重置线程"：排在该键的回合队列之后（不打断进行中的回合），把当前记录追加到
-   * ${threadsFile 同目录}/codex-threads-archive.jsonl，再清除记录；下一轮新建线程。返回被归档的线程 id。
+   * 面板"重置线程"（适配器保证该会话空闲）：把当前记录追加到 ${threadsFile 同目录}/codex-threads-archive.jsonl，
+   * 再清除记录；下一轮新建线程。返回被归档的线程 id。
    */
-  resetThread(key: ThreadKey, reason = "dashboard"): Promise<string | null> {
-    return this.enqueue(key, async () => {
-      await this.migrate();
-      return this.serialized(async () => {
-        const doc = await this.readThreadsRaw();
-        const old = doc[key];
-        if (old) await this.archiveThread(key, old, reason);
-        delete doc[key];
-        await this.writeThreadsFile(doc);
-        this.opts.contextUsage?.reset("codex", key);
-        await this.backfillContextUsage(this.opts.contextUsage?.get("codex", key)?.windowTokens ?? this.opts.contextWindow ?? 400000, [key]);
-        log.info("codex thread reset", { thread_key: key, thread_id: old?.thread_id ?? null, reason });
-        return old?.thread_id ?? null;
-      });
-    });
-  }
-
-  /** 与回合、重置共用队列；压缩不轮换线程，也不申请本轮 MCP 令牌。 */
-  compactThread(key: ThreadKey, reason = "dashboard", model = this.opts.model): Promise<"compacted" | "unchanged"> {
-    return this.enqueue(key, async () => {
-      const session = await this.readThread(key);
-      if (!session) return "unchanged";
-      const startedAt = Date.now();
-      const detail = { thread_key: key, thread_id: session.thread_id, reason };
-      log.info("codex thread compaction started", detail);
-      let compacted = false;
-      try {
-        const [bin, ...prefix] = this.opts.command;
-        if (!bin) throw new Error("CODEX_BIN 未配置");
-        await fs.mkdir(this.opts.workspaceDir, { recursive: true });
-        await this.prepareTraceDirectory();
-        // commonArgs 仅含 exec 专用选项；提供者由同一 CODEX_HOME/config.toml 与 childEnv 决定。
-        const baseArgs = await this.baseInstructionsArgs(model);
-        await compactAppServer(session.thread_id, {
-          model,
-          start: () => spawn(bin, [...prefix, "app-server", ...baseArgs,
-            ...(model === undefined ? [] : ["-c", `model=${JSON.stringify(model)}`])], {
-            cwd: this.opts.workspaceDir, env: this.childEnv(), stdio: ["pipe", "pipe", "pipe"],
-            detached: process.platform !== "win32", windowsHide: true,
-          }),
-          killTree,
-        });
-        compacted = true;
-        if (this.opts.contextUsage) {
-          try {
-            const usage = await this.latestRolloutContextUsage(session.thread_id, startedAt);
-            if (usage) this.opts.contextUsage.recordCompaction("codex", key, "@context", {
-              usedTokens: usage.usedTokens,
-              ...(usage.effectiveWindowTokens !== undefined ? { effectiveWindowTokens: usage.effectiveWindowTokens } : {}),
-            });
-            else log.info("codex context usage unavailable after compaction; keeping previous usage", detail);
-          } catch {
-            log.info("codex context usage refresh failed after compaction; keeping previous usage", detail);
-          }
-        }
-        return "compacted";
-      } finally {
-        log.info("codex thread compaction ended", { ...detail, compacted, duration_ms: Date.now() - startedAt });
-      }
+  async resetThread(key: ThreadKey, reason = "dashboard"): Promise<string | null> {
+    if (!isThreadKey(key)) throw new Error("非法的 codex 线程键");
+    await this.migrate();
+    return this.serialized(async () => {
+      const doc = await this.readThreadsRaw();
+      const old = doc[key];
+      if (old) await this.archiveThread(key, old, reason);
+      delete doc[key];
+      await this.writeThreadsFile(doc);
+      this.opts.contextUsage?.reset("codex", key);
+      await this.backfillContextUsage(this.opts.contextUsage?.get("codex", key)?.windowTokens ?? this.opts.contextWindow ?? 400000, [key]);
+      log.info("codex thread reset", { thread_key: key, thread_id: old?.thread_id ?? null, reason });
+      return old?.thread_id ?? null;
     });
   }
 
@@ -769,309 +763,6 @@ export class CodexRunner {
     }
     return undefined;
   }
-
-  private async turn(key: ThreadKey, prompt: string, { signal, reasoningEffort, model, qqAccess, imageTicketDir, imageRefs, outputFile, onAcquired, onJsonEvent, turnId, senderIsOwner }: AskOptions): Promise<string> {
-    const ticket = turnId ? "turn:" + turnId : undefined;
-    if (signal?.aborted) throw new Error("aborted");
-    if (model !== undefined && !/^[A-Za-z0-9._/-]+$/.test(model)) throw new Error("非法的 codex 模型 slug");
-    const policy = codexWorkspacePolicy(this.opts.workspaceDir, path.dirname(this.opts.threadsFile), key, this.opts.sandbox, this.opts.sandboxNetwork, this.opts.codexHome, senderIsOwner === true);
-    const guidance = await prepareCodexWorkspace(this.opts.workspaceDir, policy.workspaceDir);
-    await this.opts.preparePrompt?.();
-    const managed = renderManagedAgentsMd({ dataDir: path.dirname(this.opts.threadsFile), workspaceDir: policy.workspaceDir,
-      codexHome: this.opts.codexHome, writableRoots: policy.writableRoots, readOnly: this.opts.sandbox === "read-only" });
-    const instructions = managed + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
-    const agentsFile = path.join(policy.workspaceDir, "AGENTS.md");
-    const agentsContent = `<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 每轮生成，改动会被覆盖。\n\n${instructions}\n`;
-    await writeManagedFile(agentsFile, agentsContent);
-    const attachment = attachmentDirs(path.dirname(this.opts.threadsFile), key);
-    const baseArgs = await this.baseInstructionsArgs(model ?? this.opts.model);
-    const effort = [...baseArgs, ...policy.args, ...qqAttachmentArgs(attachment.attachDir, attachment.fileDir, policy.workspaceDir),
-      "-c", "project_doc_max_bytes=131072", ...reasoningEffortArgs(reasoningEffort),
-      ...(model !== undefined ? ["-c", `model="${model}"`] : []), ...qqAccessArgs(qqAccess, this.opts.imageGen),
-      ...(this.opts.imageGen === "on" ? [...imageTicketDirArgs(imageTicketDir), ...imageRefsArgs(imageRefs)] : [])];
-    const outFile = outputFile === undefined ? undefined : validateOutputFile(outputFile);
-    if (this.opts.contextUsage) await this.initializeContextUsage();
-    const windowTokens = this.opts.contextUsage ? await this.contextWindow(model) : 0;
-    this.opts.contextUsage?.ensure("codex", key, { windowTokens }, ticket);
-    let completed = false;
-    const observe = (event: Record<string, unknown>) => {
-      if (event.type === "turn.completed") completed = true;
-      onJsonEvent?.(event);
-    };
-    const session = await this.readThread(key);
-    let id = session?.thread_id;
-    const startedAt = Date.now();
-    try {
-      if (session) {
-        const reason = await this.rotationReason(session);
-        if (reason) {
-          log.warn("codex thread rotated", { key, thread_id: session.thread_id, reason });
-          await this.writeThread(key, undefined);
-          this.opts.contextUsage?.reset("codex", key, ticket);
-          id = undefined;
-        }
-      }
-      if (id) {
-        const r = await this.exec(
-          ["exec", "-C", policy.workspaceDir, "resume", ...this.commonArgs(), ...effort, ...qqRecallContextArgs(turnId, id), id, "-"],
-          prompt,
-          signal,
-          undefined,
-          outFile,
-          onAcquired,
-          observe,
-          { access: qqAccess, threadKey: key, turnId, workdir: policy.workspaceDir, session: id },
-        );
-        if (r.code === 0) return this.result(r);
-        if (!r.turnStarted && isMissingSessionError(`${r.stderrTail}\n${r.failure ?? ""}`)) {
-          // 已确认会话不存在：先归档旧映射，再新建会话。归档失败则保留映射并报错。
-          log.warn("codex thread missing, starting fresh thread", { key, thread_id: id, stderr: r.stderrTail.slice(-300) });
-          await this.writeThread(key, undefined, r.stderrTail);
-          this.opts.contextUsage?.reset("codex", key, ticket);
-          id = undefined;
-          onAcquired = undefined; // 同一次回合的失效线程回退不重复计数
-        } else {
-          // 其他失败（网络、鉴权、限流……）：保留会话 id，下次继续 resume
-          log.warn("codex thread resume failed, keeping thread", { key, thread_id: id, code: r.code, stderr: r.stderrTail.slice(-300) });
-          throw new Error(`codex 执行失败: ${r.failure ?? `exit ${r.code}`}`);
-        }
-      }
-      const r = await this.exec(
-        ["exec", ...this.commonArgs(), ...effort, ...qqRecallContextArgs(turnId), "-C", policy.workspaceDir, "-"],
-        prompt,
-        signal,
-        async (threadId) => {
-          id = threadId;
-          // 一收到 thread.started 就落盘：即使本轮随后超时或进程崩溃，下一轮也能 resume 同一会话
-          await this.writeThread(key, threadId);
-          this.opts.contextUsage?.ensure("codex", key, { windowTokens }, ticket);
-          log.info("codex thread created", { key, thread_id: threadId });
-        },
-        outFile,
-        onAcquired,
-        observe,
-        { access: qqAccess, threadKey: key, turnId, workdir: policy.workspaceDir, session: id },
-      );
-      if (r.code !== 0) throw new Error(`codex 执行失败: ${r.failure ?? r.stderrTail.slice(-200) ?? `exit ${r.code}`}`);
-      return this.result(r);
-    } finally {
-      // exec 已等待 exit 与输出收尾；强制收尾时 rollout 可能缺失或陈旧，由下面的回退保留旧用量。
-      if (completed && this.opts.contextUsage) {
-        const usage = id ? await this.latestRolloutContextUsage(id) : undefined;
-        if (usage && usage.updatedAt >= startedAt) {
-          for (const [index, request] of usage.requests.entries()) {
-            this.opts.contextUsage.recordRequest("codex", key, {
-              ticket: ticket ?? "@context", seq: index + 1, usedTokens: request.input, cachedTokens: request.cached,
-              outputTokens: request.output, windowTokens, effectiveWindowTokens: usage.effectiveWindowTokens, at: request.at,
-            });
-          }
-          this.opts.contextUsage.recordTurn("codex", key, { windowTokens, usedTokens: usage.usedTokens, cachedTokens: usage.cachedTokens,
-            ...(usage.effectiveWindowTokens !== undefined ? { effectiveWindowTokens: usage.effectiveWindowTokens } : {}) }, ticket);
-        } else {
-          this.opts.contextUsage.recordTurn("codex", key, { windowTokens }, ticket);
-          log.warn("codex context usage unavailable after turn; keeping previous usage", {
-            key, thread_id: id, ticket, reason: usage ? "stale rollout usage" : "missing rollout usage",
-          });
-        }
-      }
-    }
-  }
-
-  private async baseInstructionsArgs(model: string | undefined): Promise<string[]> {
-    if (model === undefined) return [];
-    const file = await this.opts.prepareBasePrompt?.(model);
-    return file === undefined ? [] : ["-c", `model_instructions_file=${JSON.stringify(file)}`];
-  }
-
-  private commonArgs(): string[] {
-    return ["--json", "--strict-config", "--skip-git-repo-check", "-o", "__OUT__"];
-  }
-
-  /** 回复经 send_message 发出，最终回答可以为空；是否兜底由 settle 按 Outbox 判断。 */
-  private result(r: RunOutcome): string {
-    return (r.outFileText ?? "").trim() || (r.lastAgentMessage ?? "").trim();
-  }
-
-  private async exec(
-    args: string[],
-    prompt: string,
-    signal?: AbortSignal,
-    onThreadId?: (threadId: string) => Promise<void>,
-    outputFile?: string,
-    onAcquired?: () => Promise<void>,
-    onJsonEvent?: (event: Record<string, unknown>) => void,
-    recall?: { access?: string; threadKey: string; turnId?: string; workdir?: string; session?: string },
-  ): Promise<RunOutcome> {
-    const tmpDir = outputFile ? undefined : await fs.mkdtemp(path.join(os.tmpdir(), "cs-codex-"));
-    const outFile = outputFile ?? path.join(tmpDir!, "last.txt");
-    // 调用方指定的输出文件：先删掉旧内容，结束后保留（它是"回合已完成"的标志）
-    if (outputFile) await fs.rm(outputFile, { force: true });
-    const finalArgs = args.map((a) => (a === "__OUT__" ? outFile : a));
-    const [bin, ...prefix] = this.opts.command;
-    if (!bin) throw new Error("CODEX_BIN 未配置");
-    await fs.mkdir(this.opts.workspaceDir, { recursive: true });
-    await this.prepareTraceDirectory();
-
-    signal?.throwIfAborted();
-    await onAcquired?.();
-    signal?.throwIfAborted();
-    const access = parseAccess(recall?.access);
-    if (this.opts.recallTokens && (!access || !recall?.turnId)) throw new Error("召回请求缺少访问范围或回合");
-    const lease = this.opts.recallTokens?.issue({ access: access!, threadKey: recall!.threadKey, turnId: recall!.turnId!, workdir: recall?.workdir, session: recall?.session, deadline: Date.now() + this.opts.timeoutMs, signal });
-    try {
-      if (lease) {
-        finalArgs.splice(finalArgs.includes("resume") ? finalArgs.indexOf("resume") + 1 : 1, 0, ...recallArgs(this.opts.mediaRecallPort ?? 8790));
-      }
-      const env = this.childEnv();
-      delete env.IM_TOKEN; delete env.QQ_RECALL_TOKEN;
-      if (lease) { env.IM_TOKEN = lease.token; env.QQ_RECALL_TOKEN = lease.token; }
-      const child = spawn(bin, [...prefix, ...finalArgs], {
-        cwd: args[args.indexOf("-C") + 1],
-        env,
-        stdio: ["pipe", "pipe", "pipe"],
-        detached: process.platform !== "win32",
-        windowsHide: true,
-      });
-
-      const outcome: RunOutcome = { code: null, turnStarted: false, stderrTail: "" };
-      let persisted: Promise<void> | undefined;
-      let completed = false;
-      let exited = false;
-      let settled = false;
-      let forcedClose = false;
-      let exitCode: number | null = null;
-      let timedOut = false;
-      let aborted = false;
-      let closeTimer: ReturnType<typeof setTimeout> | undefined;
-      let exitTimer: ReturnType<typeof setTimeout> | undefined;
-      let finish: (code: number | null) => void;
-      const wait = new Promise<number | null>((resolve, reject) => {
-        finish = code => { if (!settled) { settled = true; resolve(code); } };
-        child.once("error", err => { if (!settled) { settled = true; reject(err); } });
-        child.once("exit", code => {
-          exited = true;
-          exitCode = code;
-          clearTimeout(exitTimer);
-          if (settled) return;
-          // 已拿到退出码后只等管道冲完，不再让总超时推翻主进程的结果。
-          clearTimeout(timer);
-          closeTimer = setTimeout(() => {
-            forcedClose = true;
-            log.warn("codex close grace expired; cleaning up descendants", { pid: child.pid, code });
-            stop(code);
-          }, this.opts.closeGraceMs ?? 5000);
-        });
-        child.once("close", code => finish(exited ? exitCode : code));
-      });
-      // 即使终止进程树被操作系统拒绝，也要释放本端管道，不能再次卡在 close。
-      const stop = (code: number | null) => {
-        if (settled) return;
-        killTree(child.pid);
-        child.stdin.destroy();
-        child.stdout.destroy();
-        child.stderr.destroy();
-        child.unref();
-        finish(code);
-      };
-      const onCompleted = () => {
-        if (completed) return;
-        completed = true;
-        if (exited || settled) return;
-        exitTimer = setTimeout(() => {
-          void fs.readFile(outFile, "utf8").catch(() => undefined).then(text => {
-            // 读文件期间可能 exit、超时或取消；已知退出码与失败状态优先。
-            if (settled || exited || timedOut || aborted || outcome.failure || !text?.trim()) return;
-            outcome.outFileText = text;
-            log.warn("codex exit grace expired after completed output; cleaning up process tree", { pid: child.pid });
-            stop(0);
-          });
-        }, this.opts.exitGraceMs ?? 15000);
-      };
-      const handle = (line: string) => {
-        const had = outcome.threadId;
-        this.onEvent(line, outcome);
-        try {
-          const event = JSON.parse(line) as Record<string, unknown>;
-          if (event.type === "turn.completed") onCompleted();
-          onJsonEvent?.(event);
-        } catch { /* 观测不影响 JSONL 执行 */ }
-        if (outcome.threadId) lease?.session(outcome.threadId);
-        if (!had && outcome.threadId && onThreadId && !persisted) {
-          persisted = onThreadId(outcome.threadId).catch((err) => log.error("persist codex session id failed", { error: err }));
-        }
-      };
-      let buf = "";
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => {
-        buf += chunk;
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (line) handle(line);
-        }
-      });
-      child.stderr.setEncoding("utf8");
-      child.stderr.on("data", (chunk: string) => {
-        outcome.stderrTail = (outcome.stderrTail + chunk).slice(-4000);
-      });
-      child.stdin.on("error", () => undefined);
-      child.stdin.end(prompt);
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        stop(exitCode);
-      }, this.opts.timeoutMs);
-      const onAbort = () => {
-        aborted = true;
-        stop(exitCode);
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      if (signal?.aborted) onAbort();
-
-      try {
-        outcome.code = await wait;
-      } finally {
-        clearTimeout(timer);
-        clearTimeout(closeTimer);
-        clearTimeout(exitTimer);
-        signal?.removeEventListener("abort", onAbort);
-      }
-      if (buf.trim()) handle(buf.trim());
-      await persisted;
-      if (timedOut) throw new CodexTimeoutError(this.opts.timeoutMs);
-      if (aborted) throw new Error("aborted");
-      if (forcedClose && outcome.code === 0 && !completed) {
-        outcome.code = 1;
-        outcome.failure = "output closed before turn.completed";
-      }
-      outcome.outFileText ??= await fs.readFile(outFile, "utf8").catch(() => undefined);
-      return outcome;
-    } finally {
-      lease?.revoke();
-      if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-    }
-  }
-
-  private onEvent(line: string, o: RunOutcome): void {
-    let ev: Record<string, unknown>;
-    try {
-      ev = JSON.parse(line);
-    } catch {
-      return;
-    }
-    const type = typeof ev.type === "string" ? ev.type : "";
-    if (!o.threadId) o.threadId = extractThreadId(ev);
-    if (type === "turn.started") o.turnStarted = true;
-    if (type === "turn.failed") {
-      const err = ev.error as { message?: string } | undefined;
-      o.failure = err?.message?.slice(0, 300) ?? "turn.failed";
-    }
-    if (type === "item.completed") {
-      const item = ev.item as { type?: string; text?: string } | undefined;
-      if (item?.type === "agent_message" && typeof item.text === "string") o.lastAgentMessage = item.text;
-    }
-  }
 }
 
 function groupLabel(s: TicketSource): string {
@@ -1118,30 +809,9 @@ export function buildCodexPrompt(
   return lines.join("\n");
 }
 
-/** 每次都注入（无附件时注入空串），避免 resume 沿用上一票据的参考图。 */
-export function imageRefsArgs(refs: readonly string[] = []): string[] {
-  return ['-c', 'mcp_servers.image_gen.env.IMAGE_REFS=' + JSON.stringify(imageRefsValue(refs))];
-}
-
-/** argv 仅传非敏感端口；令牌经子进程环境及受管 env_vars 转发。 */
-export function recallArgs(port: number): string[] {
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("非法召回配置");
-  return ["-c", 'mcp_servers.qq_context.env.MEDIA_RECALL_PORT="' + port + '"',
-    "-c", "mcp_servers.qq_context.tool_timeout_sec=70",
-    "-c", 'mcp_servers.im.env.MEDIA_RECALL_PORT="' + port + '"'];
-}
-
-/** 每轮显式覆盖附件目录；缺少票据时清空，避免续轮继承旧票据。 */
-export function qqAttachmentArgs(attachDir: string | undefined, fileDir: string | undefined, workdir: string): string[] {
-  return Object.entries({ QQ_ATTACH_DIR: attachDir ?? "", QQ_FILE_DIR: fileDir ?? "", QQ_WORKDIR: workdir })
-    .flatMap(([key, value]) => {
-      if (value) validateAttachmentPath(value, key);
-      return ["-c", `mcp_servers.qq_context.env.${key}=${JSON.stringify(value)}`];
-    });
-}
-
-/** 每次启动覆盖归属；新线程显式清空 session，避免继承旧环境。值按 TOML 基本字符串转义。 */
-export function qqRecallContextArgs(turnId?: string, session?: string): string[] {
-  return Object.entries({ QQ_TICKET: turnId ?? '', QQ_BACKEND: 'codex', QQ_SESSION: session ?? '' })
-    .flatMap(([key, value]) => ['-c', `mcp_servers.qq_context.env.${key}=${JSON.stringify(value)}`]);
+/** 线程级附件目录：本会话的图片、文件目录与工作区。值须为安全绝对路径（与 entrypoint 的 toml_path 同一口径）。 */
+export function qqAttachmentEnv(attachDir: string, fileDir: string, workdir: string): Record<string, string> {
+  const env = { QQ_ATTACH_DIR: attachDir, QQ_FILE_DIR: fileDir, QQ_WORKDIR: workdir };
+  for (const [key, value] of Object.entries(env)) validateAttachmentPath(value, key);
+  return env;
 }

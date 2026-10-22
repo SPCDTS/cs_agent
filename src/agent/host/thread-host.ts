@@ -325,7 +325,7 @@ export class ThreadHost implements HostCallbacks {
         // 没收到上一轮的结束事件就开了唤醒回合。会话按会话键固定一个后端（切换要等旧后端空闲）后不应再出现，
         // 仍作防线：上一轮交给适配器放弃——其后端工作不能再以该回合的身份行事，并按适配器给出的真实结果结束：
         // 已在后端结束（结束事件还排在本事件之后）→ 后端回报的结果（失败照常发出错提示）；
-        // 工作被中止（codex exec）→ lost，外层发中断提示（§8.1，照常限频），输入不自动重放（与重启丢失一致，避免重复副作用）；
+        // 工作被中止（codex 回合 turn/interrupt）→ lost，外层发中断提示（§8.1，照常限频），输入不自动重放（与重启丢失一致，避免重复副作用）；
         // 工作继续（pi run 降为唤醒身份）→ completed。
         log.warn("thread host wake turn superseded active turn", { thread: threadKey, previous: s.turnId, turnId });
         let outcome: TurnOutcome = { status: "completed" };

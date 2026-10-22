@@ -6,6 +6,7 @@ import { CodexRunner } from "../../src/agent/codex/runner.js";
 import { purgeCodexTrace } from "../../src/agent/codex/trace.js";
 import { loadConfig } from "../../src/config.js";
 import { FIXTURES, tmp } from "./helpers.js";
+import { fakeSpawn } from "./codex-app-server/fake-app-server.js";
 
 const dirs: string[] = [];
 const temp = () => { const dir = tmp("cs-trace-test-"); dirs.push(dir); return dir; };
@@ -14,18 +15,19 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 
-function runner(dir: string, traceRetentionDays?: number) {
-  return new CodexRunner({
+/** 启动常驻 app-server（内存版），返回它拿到的环境。 */
+async function appServerEnv(dir: string, traceRetentionDays?: number): Promise<NodeJS.ProcessEnv> {
+  const fake = fakeSpawn();
+  const runner = new CodexRunner({
     command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
     codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "ws"),
-    threadsFile: path.join(dir, "codex-threads.json"), sandbox: "workspace-write", timeoutMs: 10_000,
+    threadsFile: path.join(dir, "codex-threads.json"), sandbox: "workspace-write", spawn: fake.spawn,
     traceRetentionDays,
-    env: { FAKE_CODEX_LOG: path.join(dir, "calls.jsonl"), CODEX_ROLLOUT_TRACE_ROOT: "/wrong", Codex_Rollout_Trace_Root: "/also-wrong" },
+    env: { CODEX_ROLLOUT_TRACE_ROOT: "/wrong", Codex_Rollout_Trace_Root: "/also-wrong" },
   });
-}
-
-function childEnv(dir: string): NodeJS.ProcessEnv {
-  return JSON.parse(readFileSync(path.join(dir, "calls.jsonl"), "utf8").split("\n")[0]!).env as NodeJS.ProcessEnv;
+  await runner.start();
+  await runner.stop();
+  return fake.calls[0]!.env;
 }
 
 describe("Codex 官方 trace", () => {
@@ -92,17 +94,17 @@ describe("Codex 官方 trace", () => {
 
   it("创建 trace 目录并用精确环境变量将子进程限制在 CODEX_HOME 下", async () => {
     const dir = temp();
-    await runner(dir).ask("测试", { threadKey: "group:1" });
-    expect(childEnv(dir).CODEX_ROLLOUT_TRACE_ROOT).toBe(path.join(dir, "codex", "trace"));
-    expect(childEnv(dir).Codex_Rollout_Trace_Root).toBeUndefined();
+    const env = await appServerEnv(dir);
+    expect(env.CODEX_ROLLOUT_TRACE_ROOT).toBe(path.join(dir, "codex", "trace"));
+    expect(env.Codex_Rollout_Trace_Root).toBeUndefined();
     expect(existsSync(path.join(dir, "codex", "trace"))).toBe(true);
   });
 
   it("0 关闭 trace，清除父进程和额外环境中继承的大小写别名", async () => {
     vi.stubEnv("CODEX_ROLLOUT_TRACE_ROOT", "/inherited");
     const dir = temp();
-    await runner(dir, 0).ask("测试", { threadKey: "group:1" });
-    expect(Object.keys(childEnv(dir)).some(key => key.toUpperCase() === "CODEX_ROLLOUT_TRACE_ROOT")).toBe(false);
+    const env = await appServerEnv(dir, 0);
+    expect(Object.keys(env).some(key => key.toUpperCase() === "CODEX_ROLLOUT_TRACE_ROOT")).toBe(false);
     expect(existsSync(path.join(dir, "codex", "trace"))).toBe(false);
   });
 
