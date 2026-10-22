@@ -133,7 +133,7 @@ async function main(): Promise<void> {
     } });
   const chatsChannel: Pick<Channel, "listChats"> = { listChats: opts => getBridge().listChats(opts) };
   let dispatchHarness: Harness;
-  // 会话宿主与 Inbox 在派发 harness 打开后创建；工具与发送在调用时才通过它们求本轮身份（§7.3）。
+  // 会话宿主与 Inbox 在派发 harness 打开后创建；工具与发送在调用时才通过它们求本轮身份（docs/ARCHITECTURE.md §5.1）。
   let host!: ThreadHost;
   let inbox!: Inbox;
   const grants = new GrantsService({ getHarness: () => dispatchHarness, owner: cfg.owner, owners: cfg.owners });
@@ -142,7 +142,7 @@ async function main(): Promise<void> {
     limits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT } });
   let schedules: ScheduleService;
   const scheduleTools = new ScheduleTools({ grants, getHarness: () => dispatchHarness, getSchedules: () => schedules });
-  // codex 线程令牌只证明来自哪个会话线程；每次调用由 codex 适配器确认属于宿主当前回合，身份从宿主求出（§5.3、§7.3）。
+  // codex 线程令牌只证明来自哪个会话线程；每次调用由 codex 适配器确认属于宿主当前回合，身份从宿主求出（§4.1、§5.1）。
   let codexBackend!: CodexBackend;
   const threadTokens = new ThreadTokens(mediaRecall, {
     resolve: (threadKey, meta) => codexBackend.resolveCall(threadKey as ThreadKey, meta),
@@ -222,7 +222,7 @@ async function main(): Promise<void> {
       } } : {}),
     },
   });
-  // 定时运行（§10）：到点向来源会话的宿主投一条定时输入；先注册排程任务，再补齐服务与宿主，避免构造环。
+  // 定时运行（§6）：到点向来源会话的宿主投一条定时输入；先注册排程任务，再补齐服务与宿主，避免构造环。
   const canSchedule = grants.canSchedule.bind(grants);
   const scheduled = createScheduledRuntime({
     getChannel: getBridge, getHarness: () => dispatchHarness, owner: cfg.owner, owners: cfg.owners, canSchedule,
@@ -254,7 +254,7 @@ async function main(): Promise<void> {
     incomingDownloadConcurrency: cfg.INCOMING_DOWNLOAD_CONCURRENCY,
     incomingDownloadDeadlineMs: cfg.INCOMING_DOWNLOAD_DEADLINE_SEC * 1000,
   });
-  // Inbox（§4.1）：触发消息一律投递给会话宿主。
+  // Inbox（§2.2）：触发消息一律投递给会话宿主。
   inbox = new Inbox({ getChannel: getBridge, getHost: () => host, owners: cfg.owners, store, dataDir: cfg.DATA_DIR });
 
   // 恢复 pi 工具前，派发授权文档与 Channel 必须已就绪。
@@ -274,7 +274,7 @@ async function main(): Promise<void> {
   const router = new BackendRouter({ backends: { pi, codex: codexBackend }, settings: turnSettings, turns: inbox, owners: cfg.owners,
     backendFor: scope => { const current = settings.current(); return backendNameFor(scope, current.agentBackend, current.backendOverrides); } });
   const monitor = new TurnMonitor({ inbox, sendService, scheduled, getHost: () => host });
-  // 会话宿主（§4.2）：状态存于派发 harness 的 cs.thread-host 文档；并发上限只限进行中的回合数。
+  // 会话宿主（§2.3）：状态存于派发 harness 的 cs.thread-host 文档；并发上限只限进行中的回合数。
   host = new ThreadHost({ store: harness, adapter: router, concurrency: cfg.AGENT_CONCURRENCY, owners: cfg.owners, events: monitor.events,
     admit: (_threadKey, input) => scheduled.admit(input.inboundKey) });
   pi.bind(host);

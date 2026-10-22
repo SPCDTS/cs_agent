@@ -1,6 +1,6 @@
 /**
  * MCP 不接触 NapCat 或写连接，只向固定 loopback 地址提交线程令牌与本次调用的归属（tools/call 的 _meta），
- * 由主进程按会话当前回合求出身份与范围（设计 §5.3）。
+ * 由主进程按会话当前回合求出身份与范围（docs/ARCHITECTURE.md §9）。
  */
 import type { CallContext, CallMeta } from "../context/media-recall-server.js";
 

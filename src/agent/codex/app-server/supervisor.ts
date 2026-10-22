@@ -1,5 +1,5 @@
 /**
- * 常驻 `codex app-server` 子进程的监管器（设计稿 §5.1、§5.4）。
+ * 常驻 `codex app-server` 子进程的监管器（docs/ARCHITECTURE.md §4.1）。
  * 一个进程承载所有线程；每次（重新）启动称为一代（generation），完成 initialize 握手后才算就绪。
  * 进程退出、管道错误或握手失败都视为"掉线"：拒绝该代所有未完成请求、清理进程树，按 1s→2s→…→60s 退避重启；
  * 稳定运行超过 stableMs 后退避归零。重启就绪后发出 "restarted"，由调用方对已知线程 thread/resume。
@@ -58,7 +58,7 @@ export interface AppServerSupervisorOptions {
   capabilities?: Record<string, unknown>;
   initTimeoutMs?: number;
   requestTimeoutMs?: number;
-  /** 等待进程就绪的缺省上限（设计稿 §8.1："后端不可用超过 2 分钟"）。 */
+  /** 等待进程就绪的缺省上限（§3.4："后端不可用超过 2 分钟"）。 */
   readyTimeoutMs?: number;
   backoffInitialMs?: number;
   backoffMaxMs?: number;

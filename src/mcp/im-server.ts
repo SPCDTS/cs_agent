@@ -10,7 +10,7 @@ import type { CallMeta } from "../context/media-recall-server.js";
 import { callMetaOf, loopbackJson, loopbackPost } from "./media-recall-client.js";
 
 /**
- * im MCP 服务（设计 §5.3、§7）：每个会话线程一个进程，跨回合复用，所以工具清单固定为全集；
+ * im MCP 服务（docs/ARCHITECTURE.md §4.1、§3.1）：每个会话线程一个进程，跨回合复用，所以工具清单固定为全集；
  * 每次调用连同 _meta（callId、回合元数据）交给主进程，由它按会话当前回合的身份校验 target、授权与定时权限。
  */
 export interface ImHandlers {

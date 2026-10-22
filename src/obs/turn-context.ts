@@ -26,7 +26,7 @@ function requestEvent(traceKey: string, d: Record<string, unknown>): ContextRequ
 }
 
 /**
- * 回合页的命中判定（设计 §3、§8.4）：本回合的 model_request（旧数据退回 context_usage 的 turn 记录）按请求判定，
+ * 回合页的命中判定（docs/DASHBOARD.md §5）：本回合的 model_request（旧数据退回 context_usage 的 turn 记录）按请求判定，
  * 基准取该线程此回合之前最近一条请求。优先用与 /context-usage 同一条序列（从基准起，含期间压缩记录与
  * @settings 原因）；基准不在该有界序列开头或请求不全时，退回只分析"基准 + 本回合记录"。返回本回合全部请求，按 seq。
  */

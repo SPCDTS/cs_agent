@@ -1,142 +1,210 @@
-# 值守台（观测面板二期）
+# 观测面板（值守台）
 
-容器内 `127.0.0.1:8787`，服务端渲染 HTML + 原生 JS 模块（`/assets/live.js`、`logs.js`、`forms.js`、`usage.js` 等），无框架、无外部字体或 CDN。所有页面需要访问口令（`/data/obs-token` 或 `OBS_TOKEN`），首次以 `?token=` 登录后换成 HttpOnly cookie。
+容器内 `127.0.0.1:8787`（Compose 只发布宿主机回环，部署见 [DEPLOY.md](DEPLOY.md)「观测面板」）。服务端渲染 HTML + 原生 JS 模块（`/assets/*.js`），无框架、无外部字体或 CDN；唯一的第三方前端资源是随镜像分发的 vis-timeline（`/assets/vendor/vis-timeline.js` / `.css`，固定两项白名单，见 [THIRD-PARTY.md](THIRD-PARTY.md)）。入口 `src/obs/http.ts`，页面在 `src/obs/ui/`。
 
-## 页面
+## 1. 访问与安全
 
-| 路径 | 用途 | 写操作 |
+- **口令**：所有页面与接口都需要访问口令（`OBS_TOKEN`，留空则读 / 生成 `/data/obs-token`）。未登录返回 401 登录页；`?token=` 只用于 GET 登录，校验后 303 到去掉口令的 URL 并设 `obs_token` HttpOnly、SameSite=Strict cookie。口令常数时间比较。
+- **Host**：只接受 `localhost` / `127.0.0.1` / `[::1]`（防 DNS rebinding），其余 403；只接受 GET / POST，其余 405。
+- **响应头**：`Cache-Control: no-store`、`Referrer-Policy: same-origin`、`X-Content-Type-Options: nosniff`；CSP 为每请求 nonce（`style-src 'self' 'nonce-…'`、`script-src 'nonce-…'`、`img-src 'self'`、`connect-src 'self'`、`frame-ancestors 'none'`、`form-action 'self'`）。页面没有内联 `style=` 属性；宽度类数据用 `data-*` 整数加 `theme.ts` 生成的属性选择器。
+- **写操作**（面板表单）：只认 cookie（URL 口令不能写）；有 `Origin` 时必须同源，字面值 `null` 仅在 `Sec-Fetch-Site: same-origin` 时允许，有 `Sec-Fetch-Site` 时只接受 `same-origin` / `none`；表单隐藏字段 `_csrf` = HMAC-SHA256(口令, 固定标签)，常数时间比较；只接受 `application/x-www-form-urlencoded`（≤512 KB），技能上传为 multipart（≤20 MiB）。成功后 303 回原页并带 `?ok=<代码>` 提示。
+- **只读 JSON 接口**（`/api/agents/*`、`/api/memory/*`、`/agents/stream`）：只接受 GET（其余 405 并带 `Allow: GET`），错误统一为 `{error}`；先整体脱敏（`redactSessionValue` / `redactText`）再裁剪，编码后超过 1 MiB 返回 413，不静默丢数组项。时间一律 Unix 毫秒；字符上限按 UTF-16 计、不拆代理对。
+- **渲染**：服务端文本一律先脱敏再转义；客户端只改 `textContent` / `dataset` / `className`。
+- **SSE**：`/live/stream`、`/usage/stream`、`/logs/stream`、`/agents/stream` 共用 20 个连接上限（超出 503），15 秒心跳；帧经写队列按序写出，`write()` 返回 false 时等 `drain`，只有待写字节超过 2 MB 或一次 `drain` 等待超过 10 秒才断开该客户端。
+
+## 2. 页面
+
+顶栏：总览 · Agent · 记忆 · 上下文监控 · 回合 · 实时 · 定时任务 · 技能 · 设置（日志、配置从设置页进入；`/context` 归入记忆）。手机宽度（≤720px）导航改为横向滚动的第二行，表格隐藏次要列，375px 下无横向滚动。
+
+| 路径 | 内容 | 写操作 |
 |---|---|---|
-| `/` 总览 | 工作中的会话数与排队输入数、上下文占用（全部线程）、依赖信号灯、1h/24h 回合吞吐（结束 / 失败或中断 / 开轮输入）、并发与排队、当前设置、最近一分钟指标 | — |
-| `/live` 实时 | 每个会话一行（见下文"实时视图"），SSE 推送；工作中的会话可停止 | `POST /thread/stop`（`return=/live`） |
-| `/turns` 回合 | 回合列表（trace 键 `turn:<id>` 的聚合），按状态（进行中 / 已完成 / 失败 / 中断）、会话键、种类（用户消息 / 定时任务 / 唤醒）、后端筛选，每页 50 | — |
-| `/turns/<回合 id>` | 回合详情：印章与元数据（会话、种类、发送者、后端、设置快照、耗时、原因）→ 输入 → 发送 → 工具调用 → 子 agent 活动 → 错误 → 分页时间线（含缓存命中标注）；进行中的回合显示排队数、子 agent 数与停止按钮 | `POST /thread/stop`（`return=/conversations/<会话键>`） |
-| `/inputs/<入站键>` | 一条输入的流转：收到 → 入队 → 开轮设置 → 送达所在回合（链到回合页）；同时读取旧版票据记在入站键本身下的事件 | — |
-| `/conversations/<会话键>` | 会话页：当前状态（空闲 / 工作中、当前回合、排队输入、在跑子 agent、占用条、停止）与最近回合（分页） | `POST /thread/stop` |
-| `/tickets`、`/tickets/<键>` | 旧票据地址，301 跳转：列表 → `/turns`；`turn:<id>` → 回合页，`in:<键>` 与旧版入站键 → 输入页，`thr:<会话键>` → 会话页；`@` 系统键 404 | — |
-| `/logs` | 结构化日志实时尾随（SSE），按键（日志行的 `key` / `thread` / `turn` 字段前缀）或级别过滤 | — |
-| `/context` | 用 qq_context 工具浏览/检索消息库 | — |
-| `/codex` | owner / 共享线程：上下文占用条、id、rollout 大小、已观测回合、最近 10 轮摘要、全局 AGENTS.md | `POST /codex/reset` |
-| `/pi` | 每个会话键的上下文占用条（含两道压缩阈值）、会话 id、最近活动、最近 10 轮摘要、压缩记录 | `POST /pi/reset` |
-| `/codex/agents-md` | 当前全局 `$CODEX_HOME/AGENTS.md`（受管规则 + codex.md）的只读脱敏全文 | — |
-| `/settings` | 运行时设置、授权列表与增删、编辑 codex.md、当前模型基础指令（含只读受管规则）与 agent.md、线程入口、最近变更 | `POST /settings`、`POST /settings/codex-prompt`、`POST /settings/codex-base-prompt`、`POST /settings/codex-base-prompt/restore`、`POST /settings/agent-md`、`POST /settings/grants/add`、`POST /settings/grants/revoke` |
+| `/` 总览 | 依赖信号灯、1h / 24h 回合吞吐（结束 / 失败或中断 / 开轮输入，按 `in:` 键去重）、并发与排队、工作中会话数、全部线程的迷你占用条、当前设置、最近一分钟指标 | — |
+| `/live` | 每个会话一行（§3），SSE 推送 | `POST /thread/stop` |
+| `/turns` | 回合列表（`turn:<id>` 的聚合），按状态（进行中 / 已完成 / 失败 / 中断）、会话键、种类（用户消息 / 定时任务 / 唤醒）、后端筛选，每页 50 | — |
+| `/turns/<回合 id>` | 回合详情：印章与元数据（会话、种类、发送者、后端、设置快照、耗时、原因）→ 输入 → 发送 → 工具调用 → 子 agent 活动 → 错误 → 分页时间线；最后一个模型回合行按请求列缓存命中（§5）；进行中显示排队数、子 agent 数与停止按钮 | `POST /thread/stop` |
+| `/inputs/<入站键>` | 一条输入的流转：收到 → 入队 → 开轮设置 → 送达所在回合（链到回合页）；改造前以入站键本身为键的旧事件也在这里显示 | — |
+| `/conversations/<会话键>` | 当前状态（空闲 / 工作中、当前回合、排队输入、在跑子 agent、占用条、停止）与最近回合（分页） | `POST /thread/stop` |
+| `/tickets`、`/tickets/<键>` | 旧地址，301：列表 → `/turns`；`turn:<id>` → 回合页，`in:<键>` 与旧版入站键 → 输入页，`thr:<会话键>` → 会话页；`@` 系统键 404 | — |
+| `/agents` | Codex / Pi 两张卡：活动 / 归档会话数、索引进度、每条线程的占用条与"监控"链接 | `POST /{codex,pi}/{reset,compact}`、`POST /thread/stop` |
+| `/agents/<后端>/sessions[/…]` | 会话 → 回合浏览与上下文分析（§6、§7）；`/codex`、`/pi` 303 到对应会话列表 | — |
+| `/context-usage` | 上下文监控（§5） | — |
+| `/memory[/…]` | 记忆：总览、时间线、摘要、检索检查器、召回记录、图片、归档（§8） | — |
+| `/context` | 用 qq_context 工具浏览 / 检索消息库（与模型看到的格式一致） | — |
+| `/schedules`、`/schedules/new`、`/schedules/<id>` | 定时任务（§2.3） | `POST /schedules`、`POST /schedules/<id>/{update,pause,resume,run,delete}` |
+| `/skills`、`/skills/<名称>`、`/skills/<名称>.zip` | 技能列表（含诊断）、SKILL.md 与目录文件、zip 下载（[ARCHITECTURE.md](ARCHITECTURE.md) §7） | `POST /skills/upload`、`POST /skills/<名称>/delete` |
+| `/settings` | 运行时设置、发送规则与熔断、授权、codex.md、codex 基础指令、agent.md、最近变更（§2.1、§2.2） | 见 §2.1 |
+| `/logs` | 最近 1000 行结构化日志 + 实时尾随（`/logs/stream`），按键（日志行 `key` / `thread` / `turn` 字段前缀）或级别过滤 | — |
 | `/config` | 启动时生效配置（脱敏）与 agent.md 当前内容 | — |
-| `/schedules` 定时任务 | 运行中 / 已暂停 / 已结束计数；任务表（名称、会话含群名、人话规则、下次触发、状态与暂停原因、最近运行、连续失败、操作）；新建表单 | `POST /schedules`、`POST /schedules/<id>/{update,pause,resume,run,delete}` |
-| `/schedules/<id>` | 单个任务：完整提示词、规则与 RRULE 原文、超时、创建者、运行记录（新的在上）与编辑表单 | 同上 |
+| `/codex/agents-md` | 当前全局 `$CODEX_HOME/AGENTS.md`（受管规则 + codex.md）的只读脱敏全文 | — |
 
-### 授权管理
+### 2.1 设置
 
-设置页的“授权”一节显示用户、send / schedule 能力、目标 ref、来源 scopes、授权者及有效 / 已过期状态。添加会替换该用户的整条授权；目标留空表示不能主动发送，来源留空表示任何会话，时效留空表示长期。撤销删除整条授权；owner 回合的 auth_revoke 工具另支持按能力撤销。schedule 允许创建并管理自己的定时任务。
+- **运行时设置**（`POST /settings`）：`${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexModel`、`codexReasoningEffort`、`piModel`、`piThinkingLevel`、`alertOwner`。模型下拉来自 magpie 目录，档位含 `auto`。后端、模型与档位在开轮时冻结为本轮设置快照（记在首条输入的 `admitted` 与回合的 `dispatched` 事件，回合页显示）；告警开关现读。旧文件中的 `codexReplyMode` 读取时剥离。
+- **发送规则**（`POST /settings/send-rules`）：`sendRules` 的五项数值（每会话每分钟 / 每小时、会话熔断分钟、全局每分钟、全局熔断分钟），每次发送前现读；当前熔断可在同一节解除（`POST /settings/send-breakers/reset`，记 `send_breaker_reset`）。
+- **授权**（`POST /settings/grants/{add,revoke}`）：显示用户、send / schedule 能力、目标 ref、来源 scopes、授权者及有效 / 已过期。添加替换该用户的整条授权（目标留空 = 不能主动发送，来源留空 = 任何会话，时效留空 = 长期）；撤销删除整条。持有面板口令者代表 owner，未配置 owner 时只展示。变更记 `auth_changed`（`source=panel`）。
+- **codex.md**（`POST /settings/codex-prompt`）：经 `CodexPromptStore`（`read()` / `save(custom, revision)` / `subscribe()`）读写；提交前 CRLF / CR 规范为 LF；revision 不符 → 409"已在别处被修改"，存储拒绝（为空、超过 64 KB、含凭据样式内容）→ 409 并显示脱敏后的原因。当前内容含已注册秘密时只读展示脱敏版。受管段只读折叠，完整 AGENTS.md 在 `/codex/agents-md`。`prompt_changed`（`target: "codex"`）只由面板对存储的唯一订阅写入。
+- **codex 基础指令**（`POST /settings/codex-base-prompt[/restore]`）：编辑当前 `codexModel` 的 `DATA_DIR/prompts/codex-base/<slug>.md`，显示是否与目录默认不同及自动追加的 QQ 受管规则。校验 CSRF、模型（模型已变 → 409）和文件 revision；下一轮生效（含已有线程）；记 `prompt_changed`（`target: "codex-base"`）。Codex 升级不会更新已播种文件，用"恢复目录默认"。
+- **agent.md**（`POST /settings/agent-md`）：固定路径，目录与文件均拒绝软链接，LF 规范化，≤64 KB，临时文件 + rename；隐藏字段 `revision`（mtime + 大小摘要，不存在为 `none`）不符即 409；含已注册秘密时只读展示且拒绝覆盖。记 `prompt_changed`（`target: "pi"`）。
+- 所有设置变更写 `settings_changed`（trace 键 `@settings`，含前后值与来源）。
 
-持有面板 OBS_TOKEN 的运维者代表配置的 owner；增删仍要求登录、同源和 CSRF 令牌，没有配置 owner 时仅展示列表。变更记入 auth_changed（source=panel，含前后差异）；工具变更为 source=tool。send_message 轨迹显示实际 target，便于核对跨会话投递。
+### 2.2 线程重置、压缩与停止
 
-### 定时任务
+- **重置**（`POST /codex/reset`、`POST /pi/reset`，表单 `key` 为会话键）：排在该线程的回合队列之后，不打断进行中的回合；最多等 1.5 秒，否则提示"已排队"。旧会话归档，下一条消息新建；记 `thread_reset`（`@codex` / `@pi`）。
+- **压缩**（`POST /codex/compact`、`POST /pi/compact`）：保留摘要、清理活动上下文中的旧工具输出与图片，会话 ID 不变，磁盘历史不删。codex 在会话空闲时经常驻 app-server 发 `thread/compact/start`（会话忙则失败，最长等 5 分钟）；pi 调 `conv.compact()` 并检查任务终态。最多等 1.5 秒，跳回 `/agents?ok=compacted|compactQueued|unchanged|compactFailed`；成功记 `thread_compacted`。
+- **停止**（`POST /thread/stop`）：中止会话当前回合与子 agent，排队的输入随后照常开轮；记 `thr:<会话键>` 的 `thread_stopped`。`return` 只接受 `/live` 或 `/conversations/<该会话键>`，其余回 `/agents`。
 
-面板身份即 owner：列表显示全部任务，新建任务的创建者为 `qq:<owner>`；未配置 owner 或未接入 ScheduleService 时页面只显示未启用。表单 POST 与其他面板表单一样要求登录、同源与 CSRF，直接调用 ScheduleService（与 `/api/schedules` JSON 接口同一套校验）；校验失败时以错误提示重绘原页面并保留输入。
+### 2.3 定时任务
 
-触发方式按北京时间填写：一次性（日期 + 时刻）；每天 / 每周（时刻 + 星期多选，不选为每天，换算为 `FREQ=DAILY` 或 `FREQ=WEEKLY;BYDAY=…;BYHOUR;BYMINUTE`，起点取当前整分钟）；自定义 RRULE 正文。编辑时规则未改动则不提交 rule，保留原起点；会话创建后不可改。会话下拉为 owner 私聊加消息库里已有的群 / 私聊，群名来自 `scope_names`。删除用页内展开的确认按钮（不弹 `window.confirm`）。
+面板身份即 owner：列表显示全部任务，新建任务的创建者为 `qq:<owner>`；未配置 owner 或未接入 ScheduleService 时只显示未启用。表单 POST 与 JSON 接口同一套校验，失败时带错误提示重绘原页并保留输入。触发方式按北京时间填写：一次性（日期 + 时刻）；每天 / 每周（时刻 + 星期多选，换算为 `FREQ=DAILY` 或 `FREQ=WEEKLY;BYDAY=…;BYHOUR;BYMINUTE`）；自定义 RRULE。编辑时规则未改则不提交 rule；会话创建后不可改；会话下拉为 owner 私聊加消息库已有的群 / 私聊（群名来自 `scope_names`）。删除用页内展开的确认按钮。
 
-### 布局草图
+JSON 接口 `/api/schedules`：`GET` 返回 `{schedules, csrf}`；`POST /api/schedules`（创建）与 `POST /api/schedules/<id>/{update,pause,resume,run,delete}` 只接受 `application/json`（≤64 KiB），CSRF 令牌放 `X-CSRF-Token` 头或 `_csrf` 字段。
+
+## 3. 实时视图（`src/obs/live.ts`）
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│ ▤ cs-agent 值守台   总览 Agent 记忆 上下文监控 回合 ●实时 定时任务 技能 设置 │  ← 页头；当前页下划线
-├─────────────────────────────────────────────────────────────────────┤
-/  运行总览
-   依赖状态
-   │● QQ 连接 │● Codex 凭据 │● DeepSeek │● 聊天记录整理 │● 观测存储│
-   吞吐与队列
-   ┌ 近 1 小时   ┐ ┌ 近 24 小时  ┐ ┌ 并发槽位 ┐
-   │ 3 个回合结束 │ │ 4 个回合结束 │ │ 2 / 2    │
-   │ 失败或中断 1 │ │ 失败或中断 1 │ │ 群… 排队1 │
-   工作中 2 个会话 · 排队输入 1 条 · 实时页查看各会话
-   上下文占用  4 条线程，codex 在前，按占比排序
-   ┌───────────────────────────────────────────────────────────────┐
-   │ Codex · owner 线程  300,000 / 400,000 tokens  300k / 400k  75% │
-   │ ███████████████████████████████████████████░░░░░░░░░░░░░░░░░  │  ← 刻度尺：每 10% 一道细线
-   │ 第 20 回合，缓存命中 80,000，更新于 14:02:11                     │
-   │ Pi · 群 200000001   115,000 / 128,000 tokens  115k / 128k  90% │
-   │ ██████████████████████████████████████████┃██████████┃████░░  │  ← ┃ 后台压缩 / 阻塞压缩阈值（悬停说明）
-   └───────────────────────────────────────────────────────────────┘
-   当前设置（键值）   ▸ 最近一分钟指标（折叠）
+ThreadHost / TurnMonitor / Inbox / 两个后端 / send_message
+        │ trace.event(key, stage, {status, detail})   key = in:<入站键> | turn:<回合 id> | thr:<会话键> | @系统
+        ▼
+Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶段栈与事件流，已脱敏）──▶ /live/stream（SSE）──▶ live.js
+  │              ▲ 会话宿主只读快照（每 5 秒，仅有订阅者时；页面渲染与 SSE 首帧前各取一次）
+  │              │ 排队输入键、子 agent 数、会话后端、重启后仍在进行的回合
+  └──append──▶ ObsStore（events.key：回合、输入与会话的时间线、指标）
+```
 
-/live  实时会话                                        ● 实时连接中
-   2 个会话工作中
-   ┆┌──────────────────────────────────────────────────────────────┐
+- **会话行**（`LiveConversation`）：`thread`、`label`（群名）、`backend`、`state`（`working` / `idle`）、`turn`（当前回合）、`queued`（排队的入站键）、`subagents`（在跑子 agent 数；后端未知为 null，不显示）、`recent`（最近 5 个完成的回合，不带事件流）。
+- **当前回合**（`LiveTurn`）：`id`、`kind`（user / scheduled / wake）、`sender`、`started`、`inputs`（开轮与插话的输入，正文前 500 字）、`sends`（本轮 send_message：目标、正文前 200 字、状态、是否系统消息，最多 20 条）、`tools`、`phase` 与事件流 `items`。结束后 `outcome` 为 completed / failed / lost；被唤醒回合取代的旧回合记 `superseded`。
+- **事件归属**：`in:` 的 received / queued / delivered 维护输入正文与排队集合；`turn:` 事件按 `dispatched` / `received` 带出的会话键归属，未知的先暂存（每回合 80 条、最多 100 个回合、半小时过期）；`thr:` 事件（停滞、停止）进当前回合事件流；`@` 键与旧版键不进实时视图。重启前的回合只剩终态、或已结束回合的迟到事件，不重开会话行。
+- **子 agent 数**：pi 取会话 `SubagentDoc` 中未停止且有未结束汇报的子 agent；codex 取 app-server `subAgent` 通知维护的在跑子线程数；经 main.ts 的宿主快照汇总。
+- **SSE 帧**：`snapshot`（`{now, count}`，页面据此清空）→ 全部占用记录的 `context` → 每会话一帧 `snapconversation`（带当前回合事件流，逐会话脱敏，总数 ≤300）→ `snapshot_end`；随后增量 `conversation`（`{conversation, item?}`）、`remove`（`{thread}`）、`context`（`{usage}`）。服务端先订阅再取快照，期间的增量排在快照后（客户端按回合 id 与事件 `seq` 去重）；每回合只保留最近 80 条事件。
+- **淘汰**：空闲、无排队、无在跑子 agent 的会话在最后活动半小时后推 `remove`（每分钟检查）。
+- 页面不轮询；唯一的定时器在浏览器本地刷新"已耗时 / 空闲"文字。
+
+```
+/live  实时会话                                         ● 实时连接中
    ┆│[工作中] 群 家庭群(200000001) (Pi) (用户消息 · 阿杰)  已耗时 1 分 31 秒│
-   ┆│ ▬▬▬▬▬▬▬▬┃▬▬┃░░ 78% 100k / 128k                               │  ← 该线程的单行占用条
+   ┆│ ▬▬▬▬▬▬▬▬┃▬▬┃░░ 78% 100k / 128k                               │  ← 单行占用条
    ┆│ (本轮输入 2)(已发消息 1)(工具调用 3)(子 agent 1)(排队 1)         │
-   ┆│ 阿杰：能不能帮我查查明天上海的天气                               │  ← 本轮输入（开轮 + 插话）
-   ┆│ 阿杰：顺便整理成出行建议                                        │
+   ┆│ 阿杰：能不能帮我查查明天上海的天气                               │
    ┆│ ● 当前：工具 fetch_page   1 分 4 秒                           │
-   ┆│ - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -│
    ┆│ +8.0秒  工具 web_search 开始 query 上海 明天 天气              │
-   ┆│ +27秒   工具 fetch_page 开始 url https://weather.example/…      │
    ┆│ → qq:group:200000001 明天上海多云转晴…                          │  ← 本轮已发消息
-   ┆│ 回合详情  [停止]                                               │
-   ┆│ ▸ 最近完成 3 个回合                                            │  ← 展开：印章 · 种类与发送者 · 摘要 · 耗时
-   ┆└──────────────────────────────────────────────────────────────┘   ← 左缘虚线：蓝=工作中，灰=空闲
-   ┆┌──────────────────────────────────────────────────────────────┐
-   ┆│[空闲] owner 私聊 (Codex)                         空闲 4 分 2 秒 │
-   ┆│ (排队 0)   ▸ 最近完成 1 个回合                                 │
-   ┆└──────────────────────────────────────────────────────────────┘
-
-/turns/<id>  回合详情
-   ┌───────────────────────────────────────────────┐
-   │ ╔已完成╗ pi:42:1187                              │  ← 大印章（双框、微倾）
-   │ 会话 群 200000001   种类 用户消息   发送者 阿杰   │
-   │ 后端 Pi   设置 Pi · deepseek-flash · low   开始 …  总耗时 5.6 秒 │
-   └───────────────────────────────────────────────┘
-   输入 2 条   [用户消息] 阿杰 9f2c…  ▌这周末谁有空一起打 CS2？
-   发送 1 条   时间 | 目标 | 状态 | 正文
-   工具调用 3 次   时间 | 工具 | 结果 | 耗时 | 摘要
-   子 agent 活动 / 错误（有才显示）
-   时间线
-   ●  +0 毫秒   开始处理  dispatched
-   ●  +12 毫秒  收到  received        这周末谁有空… 来自 阿杰   ▸ 详情（脱敏 JSON）
-   ○  +1.6 秒   模型回合 开始  model_turn         ← 空心=开始事件
-   ●  +4.4 秒   发送消息  send_message
-   ◉  +5.6 秒   回合结束  reply_sent             ← 大圆点=终态
-
-/settings  设置
-   ┌ 执行后端 ─────────────────────────────────────┐
-   │ (●) Codex  容器内 codex CLI…  ( ) Pi  进程内…  │
-   │ 按会话覆盖  与 .env 不同                      │
-   │ [ group:200000001=pi                        ] │
-   │ Codex 推理强度 [high ▾]   owner 告警 [ ] 开启   │
-   │ [保存设置]                                     │
-   └───────────────────────────────────────────────┘
-   codex 系统提示 codex.md  修改于 …
-   [ 多行编辑框                                  ]  12 字，上限 64 KB  [保存 codex.md]
-   ▸ 受管规则（程序生成，不可编辑）    查看完整 AGENTS.md（→ /codex/agents-md）
-   pi 系统提示 agent.md  修改于 …
-   [ 多行编辑框                                  ]  27 字，上限 64 KB  [保存 agent.md]
-   线程（→ /codex、/pi）   最近变更（表格，含 codex.md / agent.md 字节变化）
-
-/codex  Codex 线程
-   ┌ owner 线程 ───────────┐ ┌ 共享线程 ─────────────┐
-   │ 上下文占用 ▬▬▬░░ 31%  │ │ 上下文占用 ▬░░░░ 8%    │
-   │ 线程 id  019a-…       │ │ 线程 id 019a-…        │
-   │ rollout 17.5 MB       │ │ rollout 3.0 MB        │
-   │ 已观测 41  最近 …     │ │ 已观测 12  最近 …      │
-   │ [重置线程]            │ │ [重置线程]             │
-   └───────────────────────┘ └───────────────────────┘
-   owner 线程最近 10 轮：状态 | 时间 | 收到 | 回复 | 耗时 | 工具/tokens
-   共享线程最近 10 轮：…        ▸ 全局 AGENTS.md
-
-/pi  Pi 会话
-   上下文占用：每个会话键一条（有记录的按占比降序，其余为"暂无数据"占位）
-   会话键 | 会话 id | 最近活动 | 已观测 | [重置线程]
-   每个会话键最近 10 轮（同上表）   上下文压缩表   ▸ 用量（原始数据）
-
-/turns     [状态▾][会话][种类▾][后端▾][筛选]  表格：状态印章 | 开始 | 会话/发送者 | 种类/后端 | 耗时 | 回合
-/logs      [键][级别▾][过滤]   等宽日志流，warn/error 左侧色条
+   ┆│ 回合详情  [停止]      ▸ 最近完成 3 个回合                       │
+   ┆└ 左缘虚线：蓝 = 工作中，灰 = 空闲
 ```
 
-手机宽度（≤720px）：导航改为横向滚动的第二行，表格隐藏次要列，单据与时间线单列排布；375px 下各页面无横向滚动。
+## 4. 上下文占用条
 
-## 设计令牌（`src/obs/ui/theme.ts`）
+数据由 `src/agent/context-usage.ts` 的 `ContextUsageStore` 维护（每线程一条 `ContextUsage`，持久化在 `data/context-usage.json`），面板只用 `all()` / `get(backend, key)`。组件 `contextBar(backend, key, usage, {mini?})`（`src/obs/ui/context-bar.ts`）与客户端 `ctxApply`（`usage.js` / `live.js`）产生同一结构：标签、`已用 / 窗口 tokens`、百分比、`role=progressbar` 轨道、回合数 / 缓存命中 / 压缩阈值 / 更新时间。
 
-方向是"调度单"：每个会话是一张在分拣台上流转的单据。冷灰蓝纸面、靛青墨水正文、复写纸蓝为唯一强调色；状态用描边"印章"；进行中的单据左缘是打孔虚线。
+- 分档：<60% 蓝、60–85% 琥珀、>85% 朱红；pi 记录带 `compaction` 时画后台压缩与阻塞压缩两道刻口；`source=estimate` 斜线虚填；超过 24 小时褪色；无记录显示占位，SSE 到达后原地换成完整条。
+- codex 优先用有效窗口 `effectiveWindowTokens`（已完成回合 rollout 的 `model_context_window`），提示同时显示名义值；无有效值时用名义窗口。新线程或名义容量变更后丢弃旧有效值。
+- 实时：每次更新写观测事件 `context_usage`（detail 即记录）→ `LiveBus` 推 `{type:'context', usage}` → `/live/stream` 与 `/usage/stream` 的 `event: context`。`/usage/stream`（总览、Agent 页、会话页）首帧发全部记录，之后只推增量。
+- 排序：总览 codex 在前，同后端按占比降序。脱敏：`key` 只有取值为 `owner` / `shared` / `group:N` / `private:N` 时才不被当作密钥隐藏。
+
+## 5. 上下文监控（`/context-usage`）
+
+按线程展示最近若干次模型请求的输入占用：一根竖条一次请求，同一回合的请求相邻成组（按钮），高度 = 占窗口比例，条内分缓存命中 / 未命中两段；异常的缓存未命中标红并给出原因推断。点一个回合组在下方面板查看该回合的会话、发送者、原文与回复摘要、每次请求的命中，并链到回合页（`/assets/context-usage.js` 只切换 `hidden` / `aria-*`；无脚本时明细表是完整信息）。页面不实时推送，刷新即更新。
+
+- **参数**：`?backend=`、`?key=`（单线程）、`?limit=`（每线程请求数，默认 40，≤200）、`?miss=` / `?partial=`（0–1，仅展示时覆盖阈值）。
+- **数据**（`ObsStore.contextSeries`，纯函数 `analyzeContextTurns` 在 `src/obs/context-turns.ts`，类型在 `src/shared/context-turns.ts`）：每次模型请求一条 `model_request` 事件（detail `{backend, key, trace_key, seq, turn, input, cached, output, window, effective_window?, at}`，记在所属回合的 trace 键下）；`context_usage` 中 `source=compact` 的记录作为压缩分隔；没有 `model_request` 的旧数据回退用 `source=turn` 的 `context_usage`（视为单请求回合），`@` 键下的启动回填快照排除；`estimate` 跳过。
+- **判定**（对每条请求，基准为同线程上一条请求 `prev`）：`prev.used < 4096` 不判定；上一条是压缩 → `compact`；线程重置后第一个回合的首个请求 → `reset`；无 prev → `first`；否则 `ratio = cached / min(prev.used, 本次输入)`，`< 0.5` → `miss`，`< 0.9` → `partial`。
+- **原因**（miss / partial 才给，可多条）：两次请求之间有改 `codexModel` / `piModel` / `agentBackend` 的 `settings_changed` → "切换模型"；`prompt_changed` → "提示词变更"；间隔超过 60 分钟 → "间隔 N 分钟"；窗口不同 → "窗口变化"；都没有 → "未知（可能是服务端缓存过期或驱逐）"。
+- 汇总表：每线程当前占用条、最近 24 小时回合数 / 请求数 / miss 数 / 平均命中率。回合页的模型回合行用同一判定（`ObsStore.previousContextTurn` 取该回合之前最近一条请求作基准）。
+
+## 6. Agent → 会话 → 回合
+
+以后端事实源浏览会话：codex 读 rollout JSONL（`/data/codex/sessions/**`），pi 读 pi-durable 公开接口；ObsStore 只补宿主回合关联与送达状态，不作正文来源。适配器在 `src/obs/sessions/`，统一模型 `SessionRef` / `TurnIndex` / `Block` / `ContentRef` / `Usage` 见 `src/obs/sessions/types.ts`。
+
+| 页面 | 内容 |
+|---|---|
+| `/agents/<后端>/sessions?status=&scope=&since=&page=` | 活动与归档会话（真实 ID），按更新时间倒序 |
+| `/agents/<后端>/sessions/<id>?page=` | 左侧回合目录、右侧回合流（最新在上）；活动会话订阅 `/agents/stream` 追加新块 |
+| `/agents/<后端>/sessions/<id>/turns/<回合>` | 输入 → 模型请求（可多次，带实测 usage）→ 工具调用（参数 / 结果折叠，按 call_id 配对）→ 助手文本 → 送达；"记忆调用"区（§8.2） |
+| `/agents/<后端>/sessions/<id>/context?at=&phase=` | 上下文结构分析（§7） |
+| `/agents/<后端>/sessions/<id>/content?offset=&length=&page=` | 大正文全文页，每页 256 KiB；codex 另支持 `?bundle=&payload=&select=` 读官方 trace 正文 |
+
+回合的上下文占用取回合内最后一次带实测 usage 的模型请求的输入；回合级 `usage` 是全部请求的累加。
+
+**接口**（全部 GET）：
+
+| 路由 | 返回 |
+|---|---|
+| `/api/agents` | `[{backend, sessions_active, sessions_archived, last_turn_at, indexing: {indexing, files, done}}]` |
+| `/api/agents/<后端>/sessions?status=active\|archived&scope=&since=&page=` | `SessionRef[]`；每页 50，page 从 0 起（≤1,000,000）；`since` 为毫秒或 ISO 时间 |
+| `/api/agents/<后端>/sessions/<id>` | `{session, turns}`；`turns` 为 `ObservedTurn[]`：`TurnIndex` + 关联的宿主回合 `traceKey`（`turn:<id>`）+ `delivery: {status, scope?, duration_ms?}` |
+| `/api/agents/<后端>/sessions/<id>/turns/<回合>` | `{turn, blocks}` |
+| `/api/agents/<后端>/sessions/<id>/content?offset=&length=` | `{text, truncated}` |
+| `/api/agents/codex/sessions/<id>/trace-content?bundle=&payload=&select=` | `{text, truncated}`（官方 trace 载荷正文；三个参数各一次） |
+| `/api/agents/<后端>/sessions/<id>/context?at=&phase=` | `ContextAnalysis`（§7） |
+| `/agents/stream?backend=&session=` | 活动会话的 SSE，`event: block`，`{session, turn, block}`；归档会话 409，单块超限发 `event: error` 后断开 |
+
+- 会话与回合 ID 逐段 URL 编码（≤256 字符，不含 `/`、`\`、控制符）。非法参数 400，未知资源或尚未索引的会话 404。
+- 正文 ≤8 KiB 内联 `text`，否则返回 `preview` + `ref`。`ContentRef.offset/length` 是适配器签发的**脱敏正文虚拟 UTF-8 字节区间**，不是磁盘偏移；请求区间须落在一个已索引正文块内，重建索引后旧 ref 可能失效（409）。正文先整体脱敏再截取，UTF-8 切片不拆汉字。
+- 宿主回合关联只用派发时的真实会话 ID（codex `thread_id` / pi `conversation`）与相邻回合时间窗口（±120 秒），歧义时不附加。
+- **索引**：codex 在 `observability.sqlite.session_index` 保存文件身份、大小、mtime、首尾指纹、回合 / 行偏移与用量；未变化不重解析，可信追加从上次位置继续，截断 / 替换 / 改写重建；单行最多解析 4 MiB；基础指令作为独立块索引（可懒加载）。pi 走公开 `scanConversations` / `entries` / `context` / `watchEvents`，索引在进程内，重启重建。SSE 无 `Last-Event-ID` 重放：断开后重取快照再订阅。codex reasoning 只公开摘要，加密体标"不可用"。
+
+## 7. 上下文结构分析
+
+入口 `src/obs/context/index.ts` 的 `analyzeContext`，HTTP 为 `GET /api/agents/<后端>/sessions/<id>/context?at=<回合>&phase=before|after`（参数不可重复；省略 `at` 为最后回合之后，`phase` 缺省 `after`）。返回 `ContextAnalysis`（`src/obs/context/types.ts`）：`window {tokens, source, nominalTokens?}`、`measured`（实测输入、缓存、是否 `stale`）、`estimated`（o200k 估算总计）、`unexplained`（实测与估算的差额，可为负）、六类构成 `categories`（指令 / 工具 / 历史 / 工具输出 / 压缩 / 其他）与逐消息 `messages`，每项带来源标签 `recorded` / `reconstructed` / `estimated` / `unavailable`。
+
+- **时点**：`before` = 该回合用户输入及首次模型输出前的窗口；`after` = 该回合结束后、下一回合开始前。
+- **codex**：优先官方 trace（`manifest.json` → `trace.jsonl` → `payloads/*.json`，按线程与真实 turn ID 关联，增量请求沿 `previous_response_id` 回溯），给出精确请求与实测用量；未知格式、链不完整、超限或请求后发生压缩 / 回滚时回退到 rollout 重建：选回滚后存活的压缩检查点，以 `replacement_history` 为基线重放后缀，工具配对规范化与模态过滤按上游顺序。当前受管 AGENTS 与自定义提示标 `reconstructed`；rollout 记录的基础指令标 `recorded`；工具定义按名字估算标 `estimated`。实测取阶段边界后最近的 `token_count`，跨压缩 / 回滚标 `stale`。
+- **pi**：公开 `context(id, at)` 的 `ContextView`、`getCurrentSystemPrompt` / `getCurrentTools`；实测为最后 assistant usage 的 input + cacheRead + cacheWrite；`estimateMessageTokens` 对照写在 notes。
+- **估算**：`js-tiktoken` + `o200k_base`（本地依赖），每条约 4 token 角色开销，单条 ≤2 MiB；词表不可用时明确报告回退。类别只计可见部分，部分不可用时单列 `unavailable_items`，不把未知占用当作零。
+- **窗口**：优先 rollout 记录的窗口，其次配置或占用存储，均无时回退 codex 400000 / pi 200000 并标 `source: default`；有同域 codex 名义窗口时另返回 `nominalTokens`。
+- **安全与上限**：预览 ≤240 字、先脱敏；不输出密文、媒体二进制或索引文件绝对路径；引用只由适配器签发。超过 1 MiB 时先把预览缩到 80 字再截断消息表并加说明，类别统计保持完整。无效参数 400，未知回合 404。
+
+## 8. 记忆
+
+数据来自消息库（只读连接）与观测库；页面在服务端内部调用同一组 `/api/memory/*` 路由，与浏览器拿到的是同一份脱敏 JSON。接口参数未知、重复或非法为 400，不存在为 404，工具或归档不可用为 503。类型见 `src/obs/memory/types.ts`。
+
+| 页面 | 内容 |
+|---|---|
+| `/memory` | 各会话域的消息 / 摘要计数、时间范围、体量、待生成日摘要、媒体数；整理状态（上次 / 下次、运行中、需补跑）与保留期；24 小时召回计数、图片总数 |
+| `/memory/scopes/<scope>?from=&to=` | vis-timeline 三轨时间线（原文桶 / 日摘要 / 周摘要）、空白区与保留边界，下方消息列表（点桶切换） |
+| `/memory/summaries/<id>` | 摘要正文、区间、尚存原文数、血缘版本与被替换的日摘要快照 |
+| `/memory/search?scope=&q=&days=&limit=` | 检索检查器：数据库命中与 `qq_search` 工具实际返回文本对照、关键词高亮 |
+| `/memory/recalls`、`/memory/recalls/<id>` | 召回记录与三级证据（§8.2） |
+| `/memory/images`、`/memory/images/<scope>/<message_id>/<ordinal>` | 图片画廊与详情（§8.3） |
+| `/memory/archives` | 重置归档的 Codex / Pi 会话（链到会话页）与 Pi 压缩记录 |
+
+### 8.1 消息库接口
+
+- `GET /api/memory` → `{scopes: ScopeSummary[], aging: {last_run, last_report?, next_run, running, catch_up_needed}, retention: {rawDays, summaryDays, hardMaxDays, dailyHour, tz}}`。`label` 规则：`owner` → `owner 私聊`、`group:N` → `群 N`、`private:N` → `私聊 N`。`bytes_estimate` 是 `sum(length(text))`，不是文件大小；`pending_day_summaries` 与整理器口径相同（今天之前、当日 ≥5 条、未被摘要覆盖）。`catch_up_needed` = 从未成功运行或已过 24 小时。
+- `GET /api/memory/scopes/<scope>?from=&to=` → `{scope, label, range, retention_edges: {raw_until, day_until, week_until}, tracks: {raw, day, week}, gaps}`。`from` / `to` 接受毫秒、`YYYY-MM-DD`（UTC）或带时区 ISO；区间 `[from, to)`，缺省覆盖全域。区间 ≤3 天按小时桶、≤60 天按日桶、否则按周桶（按 `tzOffsetSec` 对齐，周一起）；只返回非空桶（`count`、不同发送者数、≤80 字摘录）。保留边界是配置推算，不是删除证明；早于所有层保留边界的空白标 `purged`，其余 `no_records`。每类最多 10,000 项，超出 413。
+- `GET /api/memory/scopes/<scope>/messages?before=&before_id=&after=&after_id=&limit=` → `{items, next_before?, next_before_id?}`，按 `(time DESC, id DESC)`；`limit` 1–200（默认 50）；正文脱敏后 ≤2000 字（超出带 `truncated: true`）。续页把 `next_before` / `next_before_id`（messages 表主键）原样传回，同秒消息不重不漏；`*_id` 必须与对应时间同时给出。
+- `GET /api/memory/summaries/<id>` → `{id, scope, kind, period_start, period_end, created_at, text, surviving_raw, deleted?, lineage}`。`surviving_raw` 是同域同区间当前尚存的原文数。`lineage` 为 `{versions, replaced}`（`summary_versions` 表：每次整理一个 `batch_id`，记模型 / provider / usage、实际输入的消息或日摘要 ID、`input_chars` / `kept_chars`、原文 SHA-256；`replaced_by` 指向替换它的版本 ID）；无版本记录为 null，不代表没有来源。日摘要被周摘要合并删除后，只要版本还在仍返回 200 并带 `deleted: true`。
+- `GET /api/memory/search?scope=&q=&days=&limit=` → `{hits, tool_text, tool_text_chars, max_chars, dropped}`。`q` 截前 100 字、不可为空；`days` 1–180（默认 30）；`limit` 1–20（默认 10）；缺省 scope 为管理员全域视角（不代表某次会话的读取范围）。`hits` 来自 `ContextStore.search`（新到旧，无相关性分数）；`tool_text` 是**实际调用** `qq_search` 工具的输出再脱敏，`dropped` 为命中但未进入工具文本的条数。工具先裁剪留下凭据残片时整行替换为 `[已隐藏：原文含跨裁剪边界的凭据]`。
+- `GET /api/memory/archives` → `{codex: ArchiveRow[], pi: ArchiveRow[], compactions}`：读 codex 与 pi 的重置归档 JSONL 末尾 200 行（文件缺失为空、损坏 503、每文件 ≤4 MiB）；`compactions` 按 conversation 聚合观测库 `compaction` 事件（`attempts` 是事件数，不等于成功次数）。
+
+### 8.2 召回记录
+
+模型每次调用 `qq_recent` / `qq_search` / `qq_message` 都写一行 `recall_events`（观测库；pi 在主进程内写，codex 由 `qq_context` MCP 用独立 WAL 连接写，写失败只告警）：`backend`、`turn_id`（宿主回合 id）、`session`（codex 线程 ID / pi conversation ID）、原始参数、`access`、`scope_hint`、按实际进入工具文本的顺序记录的命中引用（只存 ID，不存正文）、`returned_count` / `dropped_count`、`chars` / `max_chars`、耗时、是否出错。
+
+- `GET /api/memory/recalls?scope=&session=&turn_id=&backend=&tool=&since=&page=&turn=` → `{items: RecallEvent[], page, has_more}`，每页 50，按 `(ts DESC, id DESC)`。`scope` 匹配 `scope_hint`；`turn` 必须与 `session` 同给，按该会话回合（§6）的时间窗筛选（下界 = max(回合开始 −120 秒, 上一回合开始 +1)，上界 = min(回合结束或开始 +120 秒, 下一回合开始 −1)）。每条带 `turn_href`（链到 `/agents/<后端>/sessions/<id>/turns/<回合>`，定位不到为 null）。
+- `GET /api/memory/recalls/<id>` 另带 `evidence` 三级证据：① `hits`：命中引用在当前库里的时间与 ≤240 字预览（已删除只给 `deleted: true`，不能重建当时正文）；② `tool_returned`：调用当时记录的条数、字数与丢弃数；③ `in_request`：在该回合正文里找同名工具（codex 也认 `mcp__qq_context__…`）、参数严格等价、时间差 ≤120 秒且有 callId 的调用，结果为 `confirmed` / `not_found` / `unavailable`。第三级只证明回合里出现了这次调用，**不等于结果进入了后续请求或被模型采用**。
+- 回合页"记忆调用"区用 `session` + `turn` 查询；接口出错只降级为一行提示。
+
+### 8.3 图片记忆
+
+画廊只展示模型通过 `qq_image` 召回并入库的图片（`message_media`），浏览不会触发下载或召回。
+
+- `GET /api/memory/images?scope=&status=ok|skipped&since=&page=` → `{items: ImageItem[], page, has_more, totals: {ok, skipped, bytes}}`，每页 50，按消息时间倒序；`totals` 覆盖整个筛选结果（`bytes` 为现存文件之和，按记录重复计）。`mime` / `width` / `height` 恒为 null（库里没有，不解码推测）。`present` 表示登记的文件在 `DATA_DIR/media` 下且不是链接；ok 且 present 时 `href` / `thumb_href` 为 `/media/<sha256>`。
+- `GET /api/memory/images/<scope>/<message_id>/<ordinal>` → `{item, message, other_media, timeline_href}`（同消息其它媒体按 ordinal；时间线链接为消息前后各一小时）。
+- `GET /media/<sha256>`：只接受 64 位十六进制；路径必须在 `message_media` 登记且位于媒体目录，经媒体读取器校验路径、链接、大小（≤10 MiB）、文件头与哈希；按魔数返回 png / jpeg / gif / webp（其他 415），`Cache-Control: private, max-age=3600`。
+
+## 9. 观测存储与保留
+
+- **事件**：`observability.sqlite` 的 `events` 表以 trace 键（`key` 列）存事件：`turn:<回合 id>`、`in:<入站键>`、`thr:<会话键>`、`@` 开头的系统键（`@settings`、`@codex`、`@pi`、`@context`、`@aging` 等）。回合聚合（`ObsStore.turns` / `turnBriefs`）只看 `turn:` 键：会话取终态或 received / dispatched 的 `thread_key`（pi 为 `conversation_key`），种类取 `kind`，结果取终态事件（`reply_sent` / `failed`，`terminal: true`）的 `detail.status`。
+- **发送观测**：`send_message` 记在所在回合（不属于回合的系统消息记在 `thr:<会话键>`），含目标、正文前 500 字、message_id、图片数、文件状态与 already_sent，只记首次尝试；被发送规则拒绝的记 `send_rejected`；`final_answer` 为仅留存、未发出的最终回答。
+- **上限**：每个普通 trace 键最多 `OBS_EVENT_CAP`（默认 500，8–10000；旧名 `OBS_TICKET_EVENT_CAP` 仍可用）条事件、detail 合计 256 KiB，为终态与丢弃摘要预留槽位；事件先脱敏，字符串最多 500 字。
+- **保留**（每日清理）：普通事件与指标 `OBS_RETENTION_DAYS`（30）；管理事件（`@` 键与 `settings_changed` / `prompt_changed` / `thread_reset`）`OBS_ADMIN_RETENTION_DAYS`（365，不受单键上限）；`summary_versions` 与 `recall_events` `OBS_MEMORY_RETENTION_DAYS`（90，0 = 不清理；版本独立过期可能让 `replaced_by` 指向已清理版本）；codex 官方 trace `CODEX_TRACE_RETENTION_DAYS`（14，0 = 不开启新 trace）与总量上限 `CODEX_TRACE_MAX_MB`（512）。
+- **列名迁移**（打开时一次性、幂等，同一写事务内 `RENAME COLUMN` 并重建索引，失败整体回滚、下次重做）：`events.ticket` → `events.key`（索引 `events_key`）；`recall_events.ticket` → `recall_events.turn_id`（索引 `recall_events_turn`，qq_context MCP 打开同一库时同样执行）；消息库 `messages.ticket` → `messages.outbox_key`（唯一索引 `messages_outbox_key`，只由主进程的读写连接执行）。`qq-bridge.sqlite` 的旧 `tickets` 表原样留在磁盘上，不再读写。
+- **降级**：观测库不可用时为无操作存储，总览与 `/healthz` 显示 `degraded: true`，业务照常；召回接口 503，摘要详情仍返回聊天库正文（`lineage: null`）。
+
+## 10. 设计令牌（`src/obs/ui/theme.ts`）
+
+方向是"调度单"：冷灰蓝纸面、靛青墨水正文、复写纸蓝为唯一强调色；状态用描边"印章"；进行中的单据左缘是打孔虚线。
 
 | 令牌 | 浅色 | 深色 | 用途 |
 |---|---|---|---|
@@ -147,86 +215,6 @@
 | `--carbon` | `#2b47b5` | `#8ea3ff` | 强调：链接、处理中、焦点环 |
 | `--ok` `--fail` `--warn` `--queued` | `#1d7549` `#b42f27` `#9c620f` `#5d4fa6` | `#5cc48d` `#f2786e` `#e2a94b` `#b4a7f3` | 已完成 / 失败或中断 / 被唤醒取代 / 排队 |
 
-- 字体：`"PingFang SC","Hiragino Sans GB","Microsoft YaHei UI","Microsoft YaHei","Noto Sans CJK SC",…,system-ui`；等宽只用于回合 id、入站键、代码与日志。数字启用 `tnum`。
-- 字号：12.5 / 13.5 / 15（正文，行高 1.65）/ 18 / 23 / 30。
-- 间距：4 / 8 / 12 / 16 / 24 / 32 / 48；圆角 3（印章）/ 6（控件、单据）/ 10（面板）。
-- 深浅色：`@media (prefers-color-scheme: dark)` 自动切换；动效只有处理中阶段的脉冲点与新单据的一次高亮，`prefers-reduced-motion` 下全部关闭。
-
-## 上下文占用条（设计 §8.5）
-
-数据由 `src/agent/context-usage.ts` 的 `ContextUsageStore` 维护（每线程一条 `ContextUsage`），通过 `createDashboard({ contextUsage })` 接入；面板只用 `all()` / `get(backend, key)`，类型在 `src/obs/ui/context-bar.ts` 以同构结构声明。未接入时总览显示"数据源未接入"，各页照常。
-
-- 组件 `contextBar(backend, key, usage, {mini?})`（服务端）与 `usage.js` / `live.js` 内的 `ctxApply`（客户端）产生同一结构：`.ctx[data-ctx="backend|key"]` → `.ctx-head`（标签、`已用 / 窗口 tokens` 千分位、`k`/`M` 简写、百分比）→ `.ctx-track`（`role=progressbar`）→ `.ctx-meta`（回合数、缓存命中、压缩阈值、估算/更新时间）。`mini` 为单行（轨道 + 百分比 + 简写），用在实时页会话行与会话页的页头。
-- 宽度与刻口位置：`.ctx-fill[data-w]`、`.ctx-tick[data-at]` 取 0–100 的整数，theme.ts 生成对应的 101 条属性选择器规则——不写内联 `style`，CSP 不变，无脚本时首屏也正确；超过 100% 时条满格、百分比如实显示。
-- 分档：占比 <60% 复写纸蓝（`ctx-t-ok`）、60–85% 琥珀（`ctx-t-warn`）、>85% 朱红（`ctx-t-hot`）。pi 记录带 `compaction` 时画两道刻口：`ctx-bg` 后台压缩阈值、`ctx-rs` 阻塞压缩阈值，`title` 为中文说明。`source=estimate` 斜线虚填（`ctx-est`）；`updatedAt` 超过 24 小时褪色（`ctx-stale`）并显示"上次更新 x 小时前"；无记录显示"暂无占用数据"占位（`ctx-none`），SSE 到达后原地换成完整条。
-- 排序：总览 codex 在前、pi 在后，同后端按占比降序；`/pi` 有记录的按占比降序，其余占位在后。
-
-数据路径：
-
-- 首屏：服务端渲染时调用 `contextUsage.all()` / `get()`。
-- 实时：`ContextUsageStore` 每次更新写观测事件 `context_usage`（detail 即记录）→ `Trace.tap` → `LiveBus` 取白名单字段推送 `{type:'context', usage}` → `/live/stream` 与 `/usage/stream` 的 SSE `event: context`（`data: {usage}`）。`/live/stream` 在快照头之后、会话之前先发全部记录；`/usage/stream`（总览、/codex、/pi 加载的 `usage.js`）首帧也发全部记录（重连补齐），之后只推增量。客户端只改 `textContent` / `dataset` / `className`。
-- 会话行就是会话键本身；后端（`dispatched` 事件或会话宿主快照）已知后页头才出现占用条。
-- 脱敏：记录字段 `key` 与 `thread_key` 一样，只有取值为 `owner` / `shared` / `group:N` / `private:N` 时才不被当作密钥隐藏。
-
-## 实时视图数据流
-
-```
-ThreadHost / TurnMonitor / Inbox / 两个后端 / send_message
-        │ trace.event(key, stage, {status, detail})   key = in:<入站键> | turn:<回合 id> | thr:<会话键> | @系统
-        ▼
-Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶段栈与事件流，已脱敏）──subscribe──▶ /live/stream（SSE）──▶ live.js
-  │              ▲ 会话宿主只读快照（每 5 秒，仅有订阅者时；页面渲染与 SSE 首帧前各取一次）
-  │              │ 排队输入键、子 agent 数、会话后端、重启后仍在进行的回合
-  │                                    snapshot → snapconversation × N → snapshot_end，随后 conversation / remove 增量
-  │                                    context_usage 事件另推 context 增量（也发往 /usage/stream）
-  └──append──▶ ObsStore（SQLite events.key：回合、输入与会话的时间线、指标）
-```
-
-- 会话行（`LiveConversation`）：`thread`（owner / group:<id> / private:<qq>）、`label`（群名，来自消息库 `scope_names`）、`backend`、`state`（`working` / `idle`）、`turn`（当前回合）、`queued`（排队等本轮结束的入站键）、`subagents`（在跑的子 agent 数）、`recent`（最近 5 个完成的回合，不带事件流）。
-- 当前回合（`LiveTurn`）：`id`、`kind`（user / scheduled / wake）、`sender`、`started`、`inputs`（开轮与插话的输入：键、发送者、正文前 500 字）、`sends`（本轮 send_message：目标、正文前 200 字、状态、是否系统消息，最多 20 条）、`tools`（已结束的工具调用数）、`phase`（阶段栈顶）与事件流 `items`。结束后 `outcome` 为 completed / failed / lost；被后端唤醒回合取代的旧回合记 `superseded`。
-- 事件归属：`in:` 的 received / queued / delivered 维护输入正文与排队集合（空闲会话的输入也先 queued 再开轮，delivered 可能先到，已送达的不再计入排队）；`turn:` 事件按 `dispatched` / `received` 带出的会话键归属，会话键未知的先暂存（每回合最多 80 条，最多 100 个回合，半小时过期）；`thr:` 事件（停滞、面板停止）进当前回合的事件流；`@` 系统键与旧版键不进实时视图。重启前的回合只剩终态、或已结束回合的迟到事件，不重开会话行。
-- 子 agent 数：pi 取会话 `SubagentDoc` 中未停止且有未结束汇报的子 agent；codex 取 app-server `subAgent` 通知维护的在跑子线程数。两者都经 main.ts 的会话宿主快照（`ThreadHost.keys()` + `thread()`）汇总；后端未知时为 null，界面不显示这一项。
-- 快照分帧：`snapshot`（`{now, count}`，页面据此清空）→ 每个会话一帧 `snapconversation`（`{conversation}`，带当前回合事件流，逐会话脱敏，不受数组 100 项截断影响；总数受 300 个会话上限约束）→ `snapshot_end`。服务端先订阅、再刷新宿主快照并取快照，期间的增量缓存后排在快照之后发出（客户端按回合 id 与事件 seq 去重）。
-- 增量：`conversation`（`{conversation, item?}`，会话头不带事件流，`item` 为新的一条事件）、`remove`（`{thread}`）、`context`。事件序号：每个回合内事件带单调递增的 `seq`，服务端每回合只保留最近 80 条；客户端同一回合按 `seq` 只追加更大的事件，换了回合清空事件流。
-- 淘汰：空闲、没有排队、没有在跑子 agent 的会话在最后活动半小时后淘汰（每分钟检查一次，`close()` 时清除），推送 `remove`。
-- 背压：所有 SSE 帧经写队列按序写出；`write()` 返回 false 时等待 `drain`。只有待写字节（队列 + socket 缓冲）超过 2 MB，或一次 `drain` 等待超过 10 秒，才断开该客户端。
-- 停止：会话行与回合页的"停止"按钮 `POST /thread/stop`（`key` 为会话键，`return` 只接受 `/live` 或该会话页，其余回 `/agents`），中止当前回合与子 agent，排队的输入随后照常开轮；记 `thr:<会话键>` 的 `thread_stopped`。
-- 页面不轮询；唯一的定时器在浏览器本地刷新"已耗时 / 空闲"文字。SSE 与日志流共用 20 个连接上限，慢客户端按上面的背压规则断开。
-
-## 观测存储
-
-- `observability.sqlite` 的 `events` 表按 trace 键存事件：`key` 列（旧库的 `ticket` 列在打开时改名，见下）。回合聚合（`ObsStore.turns` / `turnBriefs`）只看 `turn:` 键：会话取终态或 received / dispatched 的 `thread_key`（pi 为 `conversation_key`），种类取终态 → dispatched → received 的 `kind`，结果取终态事件（`reply_sent` / `failed`，`terminal: true`）的 `detail.status`，缺省按 stage。
-- 每个 trace 键最多保存 `OBS_EVENT_CAP`（旧名 `OBS_TICKET_EVENT_CAP` 仍可用）条事件、256 KiB detail；管理事件（`@` 键与设置 / 提示词 / 线程重置）独立按年龄保留。
-- 存储迁移（一次性、幂等、崩溃安全）：打开时用 `RENAME COLUMN` 在同一写事务里改列名并重建索引，中途失败整体回滚、下次打开重做；已是新列名时不做任何事。
-  - `observability.sqlite`：`events.ticket` → `events.key`（索引 `events_ticket` → `events_key`）；`recall_events.ticket` → `recall_events.turn_id`（索引 `recall_events_ticket` → `recall_events_turn`），qq_context MCP 进程打开同一库时同样执行（`BEGIN IMMEDIATE` 串行）。
-  - `qq-messages.sqlite`：`messages.ticket` → `messages.outbox_key`（唯一索引 `messages_ticket` → `messages_outbox_key`），只由主进程的读写连接执行；只读连接（qq_context MCP、面板记忆页）读主进程迁移后的库。
-  - `qq-bridge.sqlite` 的旧 `tickets` 表原样留在磁盘上，不再创建、补列、读或写；旧版生图路由留下、只在票据表里有记录的机器人图片不再能召回。
-
-## 运行时设置
-
-`${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexReasoningEffort`、`alertOwner`。后端与 Codex 推理强度在开轮时读取 `settings.current()` 并冻结为本轮设置快照（记在首条输入的 `admitted` 与回合的 `dispatched` 事件，回合页显示）；owner 告警开关独立现读。回复原文照发（仅 4000 字发送保护），面板不再提供回复方式选项。旧文件中的 `codexReplyMode` 读取时剥离，下次保存时移除，其它字段仍严格校验。每次变更写观测事件 `settings_changed`（trace 键 `@settings`，含变更前后值与来源 `dashboard`）；agent.md 保存记 `prompt_changed`（`target: "pi"`）；codex.md 保存记 `prompt_changed`（`target: "codex"`，`file: prompts/codex.md`，前后字节数）——由面板启动时对 `codexPrompt.subscribe` 的唯一订阅写入，POST 处理器本身不记，避免重复；线程重置记 `thread_reset`（`@codex` / `@pi`）。
-
-codex.md 编辑器旁的「codex 基础指令（当前 codexModel）」编辑 `DATA_DIR/prompts/codex-base/<安全 slug>.md`，显示「与目录默认不同」状态及自动追加的 QQ 受管规则。保存和「恢复目录默认」均校验 CSRF、模型和文件 revision，冲突返回 409；变更记录为 `prompt_changed`（`target: "codex-base"`）。下一轮即生效，包含已有线程续聊；Codex 升级不会更新已播种文件，请用「恢复目录默认」。模板缺失时沿用 Codex 默认行为，不创建空文件。
-
-## 安全
-
-- 所有写操作：仅 POST；只认 cookie 会话（URL 口令不可用于写）；表单隐藏字段 `_csrf` = HMAC-SHA256(口令, 固定标签)，常数时间比较；响应使用 `Referrer-Policy: same-origin`，保留浏览器同源表单的来源信息；有 `Origin` 时必须匹配当前源，唯独字面值 `null` 仅在浏览器提供 `Sec-Fetch-Site: same-origin` 时允许；有 `Sec-Fetch-Site` 时只接受 `same-origin` 或 `none`（`none` 不允许 `Origin: null`）；只接受 `application/x-www-form-urlencoded`，正文 ≤ 512 KB。
-- agent.md：固定路径、目录与文件均拒绝软链接、LF 规范化、≤ 64 KB、临时文件 + rename；若内容含已注册的秘密则只读展示脱敏版，且服务端同样拒绝覆盖（409）。表单带隐藏字段 `revision`（当前文件 mtime + 大小的摘要，不存在为 `none`），与提交时的文件不符或缺失即返回 409，防止覆盖容器内或其他标签页的修改。
-- codex.md（DESIGN-codex-context §8.6）：面板通过 `DashboardOptions.codexPrompt`（`CodexPromptStore` 的结构类型：`read()` / `save(custom, expectedRevision)` / `subscribe(fn)`）读写，不直接碰文件。表单带隐藏字段 `revision`（取自 `read()`），提交内容先把 CRLF / CR 规范为 LF 再交给 `save`；`StaleRevisionError` → 409"codex.md 已在别处被修改，请刷新后再保存"，存储的其他拒绝（为空、超过 64 KB、含凭据样式内容）→ 409 并显示存储给出的中文原因（先脱敏）；成功后 303 跳回 `/settings?ok=codexPrompt#codex-prompt`。当前自定义段含已注册秘密时只读展示脱敏版、不给表单。受管段只读折叠展示；完整 AGENTS.md 在 `/codex/agents-md` 只读脱敏查看。未接入存储时显示提示，POST 返回 404。
-- 渲染：服务端文本一律先脱敏再转义；客户端只用 `textContent`。CSP 为 nonce（样式与脚本），无内联 `style=` 属性；Host 白名单、图片路径段与 realpath 双重限制保持不变。
-- 线程重置排在该线程的回合队列之后，不打断进行中的回合；请求最多等 1.5 秒，否则提示"已排队"。
-
-
-## 临时手动压缩
-
-`/agents` 页在 Codex / Pi 的重置按钮旁提供“压缩会话”，分别调用 `POST /codex/compact` 和 `POST /pi/compact`。压缩保留摘要，清理活动上下文中的旧工具输出与图片；会话 ID 不变，磁盘历史不会因此删除。操作与回合、重置共用每会话队列，等待当前回合完成，不注入本轮 MCP 令牌。
-
-请求沿用同源、CSRF 和线程键校验，最多等待 1.5 秒：跳回 `/agents?ok=compacted|compactQueued|unchanged`；窗口内失败显示 `compactFailed` 错误提示，排队后的失败写日志。成功记录 `thread_compacted`（`@codex` / `@pi`）。
-
-Codex 使用同一二进制、`CODEX_HOME` 受管配置和提供者环境，启动一次性 `app-server`，依次初始化、恢复线程并调用 `thread/compact/start`，最长等待 5 分钟，结束后清理进程。Pi 调用已有会话的 `compact(undefined, context)` 并检查任务终态。压缩需要后端模型可用；操作完成不代表所有历史图片都必然移除，具体保留范围由后端决定。
-
-协议已用本机 `codex-cli 0.163.0-alpha.10.2` 的 `app-server generate-json-schema --experimental` 核对：`initialize` 要求 `clientInfo.name/version`，`thread/resume` 和 `thread/compact/start` 要求 `threadId`。完成依据为目标线程的 `item/completed`（`item.type=contextCompaction`）、成功的 `turn/completed`，或兼容已弃用的 `thread/compacted`；失败/中断的回合不会报成功。服务端请求中未实现的方法返回 JSON-RPC `-32601`。离线 smoke 仅验证握手和不存在的线程恢复；未调用真实模型验证压缩效果。协议概览见 [官方 App Server 文档](https://developers.openai.com/codex/app-server)。
-
-### 统一发送观测
-
-总览的吞吐按回合计：近 1 / 24 小时结束的回合数、其中失败或中断（`failed` / `lost`）的个数，以及开轮的输入数（`admitted`，按 `in:` 键去重）。回合页与时间线中的 `send_message` 记在所在回合（`turn:<id>`，不属于回合的系统消息记在 `thr:<会话键>`），含目标、正文前 500 字、message_id、图片数、文件状态与 already_sent，仅记录首次发送尝试，重放 / 对账不重复计数；被发送规则拒绝的记 `send_rejected`。`final_answer` 为仅留存、没有发出的最终回答。
+- 字体：`"PingFang SC","Hiragino Sans GB","Microsoft YaHei UI","Microsoft YaHei","Noto Sans CJK SC",…,system-ui`；等宽只用于 ID、代码与日志；数字启用 `tnum`。
+- 字号 12.5 / 13.5 / 15（正文，行高 1.65）/ 18 / 23 / 30；间距 4 / 8 / 12 / 16 / 24 / 32 / 48；圆角 3（印章）/ 6（控件、单据）/ 10（面板）。
+- `prefers-color-scheme: dark` 自动切换；动效只有处理中的脉冲点与新单据的一次高亮，`prefers-reduced-motion` 下关闭。

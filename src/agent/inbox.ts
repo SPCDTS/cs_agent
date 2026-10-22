@@ -1,12 +1,12 @@
 /**
- * Inbox（设计 §4.1）：触发消息与定时输入的持久化入口，把输入按会话键交给 ThreadHost。
+ * Inbox（docs/ARCHITECTURE.md §2.2）：触发消息与定时输入的持久化入口，把输入按会话键交给 ThreadHost。
  * 1. 入站：bridge 已去重、落盘（queued）并下载附件；这里以 kind=user、发送者 = QQ 号投递给 ThreadHost
  *    （同一入站键重复投递是空操作）。
  * 2. 状态：后端收下（inputsDelivered）→ delivered；所在回合结束（turnEnded）→ done。
  * 3. 恢复：queued 的用户输入按到达顺序重新投递；宿主早已收下的输入只补齐状态（定时输入由定时执行侧恢复）。
- * 4. 工具绑定（§7.3）：工具调用时从宿主当前回合求出身份、发送地址与本轮输入，空闲或唤醒回合发往会话最近的输入地址。
+ * 4. 工具绑定（§5.1）：工具调用时从宿主当前回合求出身份、发送地址与本轮输入，空闲或唤醒回合发往会话最近的输入地址。
  *    权限不在这里判断：由 host/identity.ts 的 runRights 按身份统一求出（会话基础权限 + 确证的人）。
- * 5. 呈现（§4.3）：每条输入一行来源头，引用、参考图照旧；定时输入原样（以 [定时任务] 开头）。
+ * 5. 呈现（§2.6）：每条输入一行来源头，引用、参考图照旧；定时输入原样（以 [定时任务] 开头）。
  */
 import path from "node:path";
 import type { Channel, InboundMessage, InboundRecord, TurnBinding } from "../channel/types.js";
@@ -62,7 +62,7 @@ export class Inbox {
     trace.event("in:" + rec.key, "queued", { scope: rec.scope, detail: { thread_key: rec.thread_key, kind: rec.kind, result } });
   }
 
-  /** 定时输入（§10）：由执行侧写入后投递，线程忙时排队等空闲。 */
+  /** 定时输入（§6）：由执行侧写入后投递，线程忙时排队等空闲。 */
   async deliverScheduled(key: string): Promise<void> {
     const rec = this.channel.inbox.getInbound(key);
     if (!rec || rec.kind !== "scheduled") throw new Error("定时输入不存在");
@@ -134,7 +134,7 @@ export class Inbox {
   }
 
   /**
-   * 工具调用时的本轮绑定（§7.3）：身份取自宿主当前回合（唤醒回合带确证继承的人）；
+   * 工具调用时的本轮绑定（§5.1）：身份取自宿主当前回合（唤醒回合带确证继承的人）；
    * 宿主空闲（后端仍在收尾）按没有继承的唤醒回合处理，即只有会话基础权限（只会更严格）。
    * 发送地址为本轮最后一条输入的会话，唤醒回合为会话最近一条输入的会话。
    */

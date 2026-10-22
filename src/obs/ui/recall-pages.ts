@@ -1,6 +1,6 @@
 /**
- * 召回记录页面（设计 §1 /memory/recalls、§5.3 三级证据，分组 O5）。数据来自 /api/memory/recalls[/:id]
- * （契约见 docs/O5-recall-api.md），http.ts 在服务端内部调用同一路由；这里只做渲染，所有文本经 esc。
+ * 召回记录页面（/memory/recalls 与三级证据，docs/DASHBOARD.md §8.2）。数据来自 /api/memory/recalls[/:id]
+ * http.ts 在服务端内部调用同一路由；这里只做渲染，所有文本经 esc。
  * 三级证据的颜色与检索检查器一致：① 检索命中 lv-1、② 工具实际返回 lv-2、③ 进入模型请求 lv-3。
  * 第三级只证明该回合里出现了匹配的工具调用，页面任何位置都不把"工具返回"写成"模型采用"。
  */

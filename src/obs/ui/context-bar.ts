@@ -1,5 +1,5 @@
 /**
- * 上下文占用进度条（设计 §8.5）。服务端渲染与 client.ts 的 CTX_JS 产生同一结构：
+ * 上下文占用进度条（docs/DASHBOARD.md §4）。服务端渲染与 client.ts 的 CTX_JS 产生同一结构：
  * 宽度与阈值位置用 data-w / data-at（整数百分比）+ theme.ts 中生成的属性选择器表达，
  * 不写内联 style（CSP 禁止），无脚本时首屏也正确。
  */

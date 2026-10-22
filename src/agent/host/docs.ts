@@ -2,7 +2,7 @@ import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
 import type { InputRef, RunPerson, TurnKind, TurnStatus } from "./types.js";
 
 /**
- * 每个会话键一份（family 成员键 = threadKey，§4.2）。
+ * 每个会话键一份（family 成员键 = threadKey，docs/ARCHITECTURE.md §2.3）。
  * 不同会话的状态互不读写：投递、插话、回合事件只改本会话的小文档，不重写全局大表。
  */
 export type ThreadHostState = {
@@ -13,18 +13,18 @@ export type ThreadHostState = {
   turnKind?: TurnKind;
   /** 本轮发送者：用户回合为 QQ 号，定时为创建者，唤醒回合为空 */
   turnSender?: string;
-  /** 唤醒回合确证继承的人（派出子 agent 那一轮的人，§7.3）；缺省为会话基础权限。随会话文档持久化，重启后保持 */
+  /** 唤醒回合确证继承的人（派出子 agent 那一轮的人，§5.1）；缺省为会话基础权限。随会话文档持久化，重启后保持 */
   turnInherited?: RunPerson;
   /** 本轮已送入的输入（开轮时的批次 + 之后的插话） */
   turnInputs: InputRef[];
   /** 等本轮结束的输入，按 seq 升序 */
   pending: InputRef[];
-  /** 本轮是否已 @ 过发送者（§7.2） */
+  /** 本轮是否已 @ 过发送者（§3.2） */
   mentioned: boolean;
   /** 开轮时写入；回合中的活动只在内存刷新，不逐条落盘 */
   lastActivityAt?: number;
   /**
-   * 会话后端（一个会话同一时间只由一个后端服务，§4.3）：开轮、插话、放弃与恢复都用它；空闲后保留。
+   * 会话后端（一个会话同一时间只由一个后端服务，§2.4）：开轮、插话、放弃与恢复都用它；空闲后保留。
    * 只在开新回合、会话空闲、队列里只有这一条且它从未交给过后端、旧后端不忙时才可能改变。
    */
   backend?: string;

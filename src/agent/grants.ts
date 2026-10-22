@@ -20,7 +20,7 @@ const grantSchema = z.object({
 const revokeSchema = z.object({ user: userSchema, caps: capsSchema.optional() }).strict();
 export type AuthTool = "auth_grant" | "auth_revoke" | "auth_list";
 export const AUTH_TOOLS: AuthTool[] = ["auth_grant", "auth_revoke", "auth_list"];
-/** 工具调用时由主进程求出的会话绑定（§7.3）；身份与范围不来自模型参数。 */
+/** 工具调用时由主进程求出的会话绑定（docs/ARCHITECTURE.md §5.1）；身份与范围不来自模型参数。 */
 export type GrantBinding = Pick<TurnBinding, "threadKey" | "identity" | "scope" | "turnId" | "inputs">;
 export interface ImPermissions { actorIsOwner: boolean; target: boolean; auth: boolean }
 /** 只有会话基础权限的回合（唤醒回合求不出派出者等）试图发往别处时的错误。 */
@@ -32,7 +32,7 @@ export function parseTarget(value: unknown): { message_type: "group" | "private"
   return { message_type: type, target_id: id, scope: `${type}:${id}` };
 }
 
-/** 身份取自会话宿主的当前回合，权限经 runRights 统一求出（§7.3）；授权存于派发 harness，两个后端共享同一份文档。 */
+/** 身份取自会话宿主的当前回合，权限经 runRights 统一求出（§5.1）；授权存于派发 harness，两个后端共享同一份文档。 */
 export class GrantsService {
   constructor(private readonly opts: {
     getHarness(): Harness;

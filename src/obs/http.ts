@@ -262,7 +262,7 @@ export function createDashboard(opts: DashboardOptions) {
       const off = opts.live?.subscribe(m => { if (m.type === 'context') send(m.usage); });
       if (off) res.on('close', off); return;
     }
-    // 旧票据页（设计 §12）：列表并入回合列表，详情按 trace 键前缀转到回合 / 输入 / 会话页（旧版键即入站键，进输入页）。
+    // 旧票据页（docs/DASHBOARD.md §2）：列表并入回合列表，详情按 trace 键前缀转到回合 / 输入 / 会话页（旧版键即入站键，进输入页）。
     if (url.pathname === '/tickets') { res.writeHead(301, { Location: '/turns' }).end(); return; }
     if (url.pathname.startsWith('/tickets/')) {
       let key: string; try { key = decodeURIComponent(url.pathname.slice(9)); } catch { res.writeHead(400).end(); return; }
@@ -270,7 +270,7 @@ export function createDashboard(opts: DashboardOptions) {
       if (!target) { res.writeHead(404).end(); return; }
       res.writeHead(301, { Location: target }).end(); return;
     }
-    // 旧 /codex、/pi 页并入 /agents/*（设计 §7）；/codex/agents-md 与重置 POST 保持原路径。
+    // 旧 /codex、/pi 页并入 /agents/*（§6）；/codex/agents-md 与重置 POST 保持原路径。
     if (url.pathname === '/codex' || url.pathname === '/pi') { res.writeHead(303, { Location: `/agents${url.pathname}/sessions` }).end(); return; }
     const flashCode = q.get('ok');
     const detail = flashCode === 'skillsUploaded' ? (q.get('detail') ?? '').slice(0, 16_000) : '';

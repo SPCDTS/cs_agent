@@ -1,5 +1,5 @@
 /**
- * 出站发送规则的公共契约（设计 docs/ARCHITECTURE.md §3.3）：限额由面板设置提供，执行在通道实现内。
+ * 出站发送规则的公共契约（docs/ARCHITECTURE.md §3.3）：限额由面板设置提供，执行在通道实现内。
  * 会话 scope 为 group:<id> / private:<qq>，全局熔断的 scope 为 global。
  */
 export interface SendRuleLimits {

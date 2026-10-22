@@ -1,5 +1,5 @@
 /**
- * 上下文监控页的回合预览（/assets/context-usage.js，DESIGN-context-monitor §9.3）。面板内容由服务端预渲染为
+ * 上下文监控页的回合预览（/assets/context-usage.js，docs/DASHBOARD.md §5）。面板内容由服务端预渲染为
  * `<div class="cu-pop" hidden>`，这里只切换 hidden / className / aria-expanded，不拼 HTML、不设 style：
  * - 点击 `.cu-group`：同一 `.cu-pane` 的其他 pop 收起、目标 pop 展开，组加 `.is-active`、`aria-expanded=true`；
  * - 再点同一组、点 pop 里的 `.cu-close`、按 Esc：收起，焦点回到对应的组按钮。

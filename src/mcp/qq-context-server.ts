@@ -1,5 +1,5 @@
 /**
- * qq_context MCP 服务（设计 §2.3、§5.3）：统一上下文存储的 stdio 外壳，供容器内 codex 检索 QQ 聊天记录。
+ * qq_context MCP 服务（docs/ARCHITECTURE.md §9）：统一上下文存储的 stdio 外壳，供容器内 codex 检索 QQ 聊天记录。
  * 每个会话线程一个进程、跨回合复用：读取范围不在环境里，每次调用按 _meta 向主进程求本次调用的上下文
  * （会话当前回合的发送者决定：owner 为 all，其余为本会话），调用不属于当前回合时主进程拒绝。
  * 工具参数里不接受范围。只读连接；输出一律经 src/context/format.ts。

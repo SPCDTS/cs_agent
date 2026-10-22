@@ -14,7 +14,7 @@ export function inboundFromRecord(rec: InboundRecord): InboundMessage {
   };
 }
 
-/** 会话线程键（设计 §4.2）：群为 group:<id>；owner 的任一账号私聊共用 owner；其余私聊为 private:<qq>。 */
+/** 会话线程键（docs/ARCHITECTURE.md §1）：群为 group:<id>；owner 的任一账号私聊共用 owner；其余私聊为 private:<qq>。 */
 export function threadKeyOf(m: { message_type: "group" | "private"; group_id: string | null; user_id: string }, owners: OwnerIds): string {
   if (m.message_type === "group") return `group:${m.group_id}`;
   return isOwner(owners, m.user_id) ? "owner" : `private:${m.user_id}`;

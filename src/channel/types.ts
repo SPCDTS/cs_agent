@@ -39,12 +39,12 @@ export interface InboundMessage {
   attachments?: IncomingAttachment[];
 }
 
-/** Outbox 行与附件的发送状态（§7.4）。 */
+/** Outbox 行与附件的发送状态（docs/ARCHITECTURE.md §3.2）。 */
 export type SendStatus = "pending" | "sending" | "sent" | "uncertain";
 
-/** 输入种类：QQ 消息或定时任务到点（设计 §4.1、§10）。 */
+/** 输入种类：QQ 消息或定时任务到点（§2.2、§6）。 */
 export type InboundKind = "user" | "scheduled";
-/** queued 未送达后端 → delivered 后端已收下 → done 所在回合结束（§4.1）。 */
+/** queued 未送达后端 → delivered 后端已收下 → done 所在回合结束（§2.2）。 */
 export type InboundState = "queued" | "delivered" | "done";
 
 /** Inbox 持久化的一条输入；键为确定性入站键（定时为 run_ 键）。 */
@@ -81,7 +81,7 @@ export interface InboundRecord {
   turn_id?: string;
 }
 
-/** 定时输入：到点由执行侧写入（§10）；重放保持首次内容。 */
+/** 定时输入：到点由执行侧写入（§6）；重放保持首次内容。 */
 export interface ScheduledInput {
   key: string;
   scope: string;
@@ -184,13 +184,13 @@ export interface RemoteMessage {
 }
 
 /**
- * 回合绑定的人（设计 §7.3）：kind 为此人以什么身份驱动回合（user 发送者 / scheduled 定时创建者），
+ * 回合绑定的人（§5.1）：kind 为此人以什么身份驱动回合（user 发送者 / scheduled 定时创建者），
  * owner 为快照时此人是否 owner（继承时只降不升：当前配置也须仍是 owner）。
  */
 export type RunPerson = { kind: "user" | "scheduled"; person: string; owner: boolean };
 
 /**
- * 本轮身份（设计 §7.3）：user 为发送者，scheduled 为创建者，wake 为没有新输入的唤醒回合。
+ * 本轮身份（§5.1）：user 为发送者，scheduled 为创建者，wake 为没有新输入的唤醒回合。
  * 唤醒回合的 inherited 为确证继承的人（派出子 agent 那一轮的人，随汇报带回）；缺省表示只有会话基础权限。
  * 权限一律经 `runRights`（src/agent/host/identity.ts）求出，不在各处按 kind 自行判断。
  */
@@ -200,7 +200,7 @@ export type TurnIdentity =
   | { kind: "wake"; inherited?: RunPerson };
 
 /**
- * 工具调用时由主进程从会话宿主求出的绑定（§7）：身份、发送地址与本轮输入，模型参数不能覆盖。
+ * 工具调用时由主进程从会话宿主求出的绑定（§3.1、§5.1）：身份、发送地址与本轮输入，模型参数不能覆盖。
  * 子 agent 会话固定为没有继承的 wake 身份（会话基础权限）。
  */
 export interface TurnBinding {

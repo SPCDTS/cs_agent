@@ -1,6 +1,6 @@
 import type { ChatType, SendStatus } from "./types.js";
 
-/** Outbox 的持久化契约（设计 §7.4）；agent 不依赖 QQ 的 SQLite 实现。 */
+/** Outbox 的持久化契约（docs/ARCHITECTURE.md §3.2）；agent 不依赖 QQ 的 SQLite 实现。 */
 export interface OutboxFile {
   filename: string; name: string; bytes: number; sha256: string;
   status: SendStatus; file_id?: string;

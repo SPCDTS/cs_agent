@@ -1,5 +1,5 @@
 /**
- * 观测 v2 回合视图（设计 §3）：服务端渲染回合头与正文块。所有文本经 esc（先脱敏再转义）；
+ * 观测 v2 回合视图（docs/DASHBOARD.md §6）：服务端渲染回合头与正文块。所有文本经 esc（先脱敏再转义）；
  * 块结构与 agents-client.ts 的客户端渲染保持同一类名，实时追加与懒加载复用同一套样式。
  */
 import type { Block, ContentRef, ObservedTurn, Usage } from '../sessions/types.js';
@@ -31,7 +31,7 @@ export function usageOf(meta: Record<string, unknown> | undefined): Usage | unde
 
 export interface TurnFacts { model?: string; effort?: string; requests: number; context?: Usage }
 /**
- * 上下文占用 = 回合内最后一次带实测 usage 的 model_request 的 input（设计 §9 O1 验收说明）；
+ * 上下文占用 = 回合内最后一次带实测 usage 的 model_request 的 input；
  * turn.usage 是全部请求累加，只能作为"回合累计"。
  */
 export function turnFacts(blocks: Block[]): TurnFacts {

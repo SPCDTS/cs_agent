@@ -6,7 +6,7 @@ import path from "node:path";
 import { usageFields } from "../shared/usage.js";
 import { trace } from "../shared/trace.js";
 /**
- * 聊天记录衰老任务（设计 §2.2）：每天本地 HISTORY_SUMMARY_HOUR 点（容器默认 UTC，设 TZ 可改）执行：
+ * 聊天记录衰老任务（docs/ARCHITECTURE.md §9）：每天本地 HISTORY_SUMMARY_HOUR 点（容器默认 UTC，设 TZ 可改）执行：
  * 1. 日摘要：每个 scope 今天之前、≥5 条且未被摘要覆盖的日子 → ≤400 字摘要（意图模型，pi-ai 直调）；
  * 2. 周摘要：已结束的自然周（周一起）内的日摘要合并为一条周摘要并删除日摘要；
  * 3. 清理：原始消息 > HISTORY_RAW_DAYS 且所在日已被日/周摘要覆盖（未覆盖的保留到 HISTORY_RAW_HARD_MAX_DAYS，

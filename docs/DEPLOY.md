@@ -135,7 +135,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 |---|---|
 | `./data/agent.sqlite` | 宿主 harness：会话宿主文档、授权表、定时任务（崩溃后自动恢复） |
 | `./data/pi.sqlite`（+WAL）/ `pi-threads.json` | pi 长期会话与子 agent；JSON 是 SQLite 映射的原子镜像，丢失时启动重建。**不要单独删 JSON 当作清空记忆**；备份须含数据库、WAL 与映射 |
-| `./data/qq-bridge.sqlite` | 入站输入（含附件 URL/file id，按聊天附件敏感信息保管）、Outbox、去重、发送规则计数与熔断；旧 `tickets` 表只读 |
+| `./data/qq-bridge.sqlite` | 入站输入（含附件 URL/file id，按聊天附件敏感信息保管）、Outbox、去重、发送规则计数与熔断；旧版 `tickets` 表留在磁盘上，不再读写 |
 | `./data/qq-messages.sqlite`（+WAL） | 消息库与摘要，**按聊天记录保管**。清空：停容器后删除 `qq-messages.sqlite*`，启动重建 |
 | `./data/observability.sqlite`（+WAL） | 观测事件与指标；备份用 SQLite 一致性备份或含 WAL |
 | `./data/codex/` | `CODEX_HOME`：受管 `config.toml`（手改会被覆盖，改 `.env` 后重启）、生成的 `AGENTS.md`（不要手改，编辑 `prompts/codex.md`）、`base-instructions/`、sessions、trace、`generated_images/`、`auth.json`（仅直连） |
@@ -147,7 +147,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 | `./data/incoming/<入站键>/` | 触发消息的参考图，7 天清理；对 codex 命令禁读 |
 | `./data/images/<会话键>/outbox/` | `send_message` 的图片与文件副本，回合结束清理一小时前且已发完的 |
 | `./data/media/` | 按需召回的聊天图片，随原始消息保留，每日 GC 无引用文件 |
-| `./data/files/`、`./data/tickets/`、`./data/images/<旧票据>/` | 旧版遗留目录，不再写入，可删除；仍在禁读名单 |
+| `./data/files/`、`./data/tickets/`、`./data/images/<旧版键>/` | 旧版遗留目录，不再写入，可删除；仍在禁读名单 |
 | `./data/pi-work/<键>/` | pi 会话工作区；可放会话层 `AGENTS.md` |
 | `./workspace/` | codex 会话工作区父目录；运维可维护 `AGENTS.override.md` / `AGENTS.md`，拼入每个会话的受管文件 |
 | `./workspace/<键>/AGENTS.md` | **受管规则文件**（首行 `<!-- cs-agent-managed-workspace-agents v1 -->`），加载线程时生成，改动会被覆盖 |
@@ -216,7 +216,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 ## 10. 聊天记录
 
 - **衰老任务**：每天 `HISTORY_SUMMARY_HOUR`（默认 3）点，按容器 `TZ`（compose 默认 Asia/Shanghai）。日志 `history aging done`（day_summaries / week_summaries / failed / purged_*）；模型失败只计数跳过，下次再试。
-- **召回配置**：`MEDIA_RECALL_PORT=8790`（主进程仅监听 127.0.0.1，无需发布）；`MEDIA_RECALL_MAX_PER_TICKET=5`（每回合）。
+- **召回配置**：`MEDIA_RECALL_PORT=8790`（主进程仅监听 127.0.0.1，无需发布）；`MEDIA_RECALL_MAX_PER_TURN=5`（每回合；旧名 `MEDIA_RECALL_MAX_PER_TICKET` 仍可用）。
 - **查看消息库**（容器内有 node，无需 sqlite3）：
 
 ```powershell
@@ -230,7 +230,7 @@ docker compose exec cs-agent sh -c 'printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1
 访问 `http://127.0.0.1:8787/`（Compose 只发布宿主机回环；面板只接受 localhost / 127.0.0.1 / [::1] 的 Host）。页面内容见 [DASHBOARD.md](DASHBOARD.md)。
 
 - **口令**：始终要求。优先 `OBS_TOKEN`；留空则读 `DATA_DIR/obs-token`，缺失时生成 32 字节随机口令（0600，原子发布），只记一行日志不含口令。读取：`docker compose exec cs-agent cat /data/obs-token`。登录表单或 `/?token=` 认证后跳转到去掉口令的 URL 并设 HttpOnly、SameSite=Strict cookie。口令文件在 codex 禁读名单，`OBS_TOKEN` 不进 codex/MCP 环境。口令无法读取或生成时面板拒绝访问，业务照常。
-- **保留**：普通事件与指标 `OBS_RETENTION_DAYS`（30），管理事件（`settings_changed`、`prompt_changed`、`thread_reset`、`@` 开头的键）`OBS_ADMIN_RETENTION_DAYS`（365，不受单键预算限制），记忆埋点数据 `OBS_MEMORY_RETENTION_DAYS`（90）。每个普通事件键默认最多 500 条（`OBS_TICKET_EVENT_CAP`，8–10000）、detail 256 KiB，为终态与丢弃摘要预留槽位。
+- **保留**：普通事件与指标 `OBS_RETENTION_DAYS`（30），管理事件（`settings_changed`、`prompt_changed`、`thread_reset`、`@` 开头的键）`OBS_ADMIN_RETENTION_DAYS`（365，不受单键预算限制），记忆埋点数据 `OBS_MEMORY_RETENTION_DAYS`（90）。每个普通事件键默认最多 500 条（`OBS_EVENT_CAP`，8–10000；旧名 `OBS_TICKET_EVENT_CAP` 仍可用）、detail 256 KiB，为终态与丢弃摘要预留槽位。观测库列名（`events.key`、`recall_events.turn_id`）与旧库迁移见 [DASHBOARD.md](DASHBOARD.md) §9。
 - **脱敏**：事件先脱敏再保存（已注册凭据、敏感字段、Bearer / API key / JWT、带凭据 URL），字符串最多 500 字；回合详情是诊断摘要，不是聊天归档。
 - **降级**：观测库损坏、不可写或初始化失败时降级为无操作存储，`/healthz` 与总览显示 `degraded: true`，消息处理继续；修复后在维护时重启恢复采集。不要据空图表判断没有业务流量。
 - **费用**：`DEEPSEEK_PRICE_IN_PER_M` / `DEEPSEEK_PRICE_OUT_PER_M`（默认 0）填入单价后估算 deepseek 用量费用（经 magpie 的 `deepseek/*` 也计入），不含搜索/抓页费用、不区分缓存优惠。codex 用量看 magpie Usage 页。

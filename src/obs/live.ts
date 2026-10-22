@@ -1,5 +1,5 @@
 /**
- * 实时视图（设计 §12）：每个会话（owner / group:<id> / private:<qq>）一行，订阅 trace 的进程内总线（trace.tap）
+ * 实时视图（docs/DASHBOARD.md §3）：每个会话（owner / group:<id> / private:<qq>）一行，订阅 trace 的进程内总线（trace.tap）
  * 在内存里维护：空闲 / 工作中、当前回合（种类、发送者、输入、本轮已发消息、事件流）、排队输入、在跑的子 agent、
  * 最近完成的回合，并把每次变化以增量推送给 /live 的 SSE 客户端。事件已在 trace 内脱敏，这里只再做摘要与截断。
  *

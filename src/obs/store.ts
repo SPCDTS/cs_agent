@@ -52,7 +52,7 @@ export class ObsStore {
       mkdirSync(dataDir, { recursive: true });
       this.database = new DatabaseSync(path.join(dataDir, 'observability.sqlite'));
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;');
-      // 旧库的 events.ticket 列改名 key（设计 §12），历史数据保留；须先于下面按新列名建索引。
+      // 旧库的 events.ticket 列改名 key（docs/DASHBOARD.md §9），历史数据保留；须先于下面按新列名建索引。
       renameColumn(this.db, 'events', 'ticket', 'key', { drop: ['events_ticket'], create: ['CREATE INDEX IF NOT EXISTS events_key ON events(key,id)'] });
       this.db.exec(`CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, scope TEXT NOT NULL, ts INTEGER NOT NULL,
         stage TEXT NOT NULL, status TEXT NOT NULL, duration_ms REAL, detail_json TEXT NOT NULL);

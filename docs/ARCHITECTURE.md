@@ -262,7 +262,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 - **消息库** `/data/qq-messages.sqlite`（WAL）：允许范围内的全部消息、机器人发出的每条消息、日/周摘要；trigram FTS5（2 字中文词回退 `LIKE`）。所有读取带访问范围过滤（`context/access.ts`）。撤回删除原始行。
 - **衰老**（`context/aging.ts`）：每天 `HISTORY_SUMMARY_HOUR` 点（容器 `TZ`，默认 Asia/Shanghai）：≥5 条消息的会话日生成 ≤400 字日摘要，已结束的自然周合并为周摘要；原始消息超过 `HISTORY_RAW_DAYS`（30）且已被摘要覆盖才删除，未覆盖的最多保留 `HISTORY_RAW_HARD_MAX_DAYS`（90）天；摘要保留 `HISTORY_SUMMARY_DAYS`（180）天。上次运行早于 24 小时则启动补跑。
 - **检索工具**：`qq_recent` / `qq_search` / `qq_message`（总量 ≤`QQ_CONTEXT_MAX_CHARS`，2500 字）、`qq_chats`。**按需检索，不自动注入**：只有消息指代此前内容或用户要求回顾时由模型自己调用；唯一自动带入的历史是 `[引用]` 行。
-- **图片按需召回**：消息默认只存 `[image]`，不存 URL、不下载。`qq_image(message_id)` 下载到媒体库并只返回路径文本，正文改为 `[image:<路径>]`；看图用各自的文件工具（pi `read`，codex `qq_view_image`）。每回合召回 ≤`MEDIA_RECALL_MAX_PER_TICKET`（5）。媒体随原始消息保留，每日 GC 回收无引用文件。
+- **图片按需召回**：消息默认只存 `[image]`，不存 URL、不下载。`qq_image(message_id)` 下载到媒体库并只返回路径文本，正文改为 `[image:<路径>]`；看图用各自的文件工具（pi `read`，codex `qq_view_image`）。每回合召回 ≤`MEDIA_RECALL_MAX_PER_TURN`（5；旧名 `MEDIA_RECALL_MAX_PER_TICKET` 仍可用）。媒体随原始消息保留，每日 GC 回收无引用文件。
 - **codex 接入**：`qq_context` MCP（只读库连接）经主进程 loopback 服务（`MEDIA_RECALL_PORT`，仅 127.0.0.1）完成召回与 `qq_chats`；主进程凭线程令牌与 `_meta.callId` 确认调用属于会话当前回合，再按本轮权限求出范围。pi 直接调用同一服务。
 
 ## 10. 存储
@@ -271,9 +271,9 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 |---|---|
 | `data/agent.sqlite` | 宿主 harness：`cs.thread-host*`（会话宿主与输入）、`cs.grants`、`cs.schedules` / `cs.schedule` / `cs.scheduled-run` / `cs.scheduled-admission` |
 | `data/pi.sqlite`、`pi-threads.json` | pi 长期会话与子 agent 会话、`cs.pi.threads(.archive)`；JSON 是映射镜像 |
-| `data/qq-bridge.sqlite` | `inbound`、`outbox`、`seen_messages`、`send_log` / `send_breakers`；旧 `tickets` 表只读保留（召回旧回复时核对发出状态） |
-| `data/qq-messages.sqlite` | 消息库、摘要、`scope_names`、媒体引用 |
-| `data/observability.sqlite` | 观测事件与指标（事件键 `turn:<id>`、`in:<入站键>`、`thr:<会话键>`；`@` 开头为管理事件） |
+| `data/qq-bridge.sqlite` | `inbound`、`outbox`、`seen_messages`、`send_log` / `send_breakers`；旧版遗留的 `tickets` 表原样留在磁盘上，不再读写 |
+| `data/qq-messages.sqlite` | 消息库（机器人消息带 Outbox 行键 `messages.outbox_key`）、摘要、`scope_names`、媒体引用 |
+| `data/observability.sqlite` | 观测事件（`events.key`：`turn:<id>`、`in:<入站键>`、`thr:<会话键>`；`@` 开头为管理事件）与指标、会话索引、摘要血缘与召回记录（`recall_events.turn_id`），见 [DASHBOARD.md](DASHBOARD.md) §9 |
 | `data/codex/`（`CODEX_HOME`） | 受管 `config.toml`、生成的 `AGENTS.md`、`base-instructions/`、sessions、trace、`generated_images/`、`skills/shared`（挂载） |
 | `data/codex-threads.json`、`codex-threads-archive.jsonl` | codex 会话线程映射与重置归档（保留 200 条） |
 | `data/prompts/` | `codex.md`、`agent.md`、`codex-base/<slug>.md`（可编辑提示词） |

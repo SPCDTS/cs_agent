@@ -1,5 +1,5 @@
 /**
- * 观测 v2 的 Agent → 会话 → 回合页面（设计 §1、§3）。数据来自 /api/agents/* 的同一份 JSON
+ * 观测 v2 的 Agent → 会话 → 回合页面（docs/DASHBOARD.md §6）。数据来自 /api/agents/* 的同一份 JSON
  * （http.ts 在服务端内部调用会话路由取得，已按会话脱敏规则处理）；这里只做渲染，所有文本经 esc。
  */
 import type { Block, ObservedTurn, SessionRef } from '../sessions/types.js';

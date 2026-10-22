@@ -10,7 +10,7 @@ import { AppServerSupervisor, killTree, type AppServerSupervisorOptions, type Sp
 import { CodexAppServerClient, type ThreadOptions } from "./app-server/client.js";
 import { RpcError } from "./app-server/rpc.js";
 /**
- * codex 线程管理（常驻 app-server，设计 §5）：一个受监管的 `codex app-server` 进程承载所有会话线程。
+ * codex 线程管理（常驻 app-server，docs/ARCHITECTURE.md §4.1）：一个受监管的 `codex app-server` 进程承载所有会话线程。
  * - 线程映射：owner（owner 私聊）、group:<id> 与 private:<qq> 各一条线程，记录在 ${DATA_DIR}/codex-threads.json；
  *   首次 thread/start 后立即原子落盘，进程（重新）启动后 thread/resume；只有确认"线程不存在"的 resume 失败才归档并新建。
  * - 线程级配置在 thread/start、thread/resume 的 config 里按点号键注入：会话工作区与命名权限、受管 AGENTS.md（每次加载前重写）、
@@ -783,7 +783,7 @@ function localStamp(sec: number): string {
 const QUOTE_MAX = 200;
 
 /**
- * 每轮注入的最小头部（设计 §3.2）：
+ * 每轮注入的最小头部（docs/ARCHITECTURE.md §2.6）：
  *   [来源] 群 200000001 · 昵称(QQ号) · 2026-10-17 22:41
  *   [引用] 昵称: 被引用消息正文（≤200 字，仅当带 reply 段且库中找得到）
  *   <正文>

@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked --mount=type=cache,t
  && rm -rf /tmp/*
 
 # codex CLI（固定版本）：常驻 app-server 的子 agent 唤醒（features.wake_on_agent_messages）自 0.164.0-alpha.8 起才有，
-# 仍在开发中，升级前须按 docs/ARCHITECTURE.md §4 的验证方法复测。
+# 仍在开发中，升级前须按 docs/ARCHITECTURE.md §4.3 的验证方法复测。
 # 平台包（@openai/codex-linux-x64，约 100 MB）是可选依赖：经代理下载中途断开时 npm 静默跳过，装出的 codex 无法运行；
 # 所以装完用 codex --version 校验，失败重试，最多 5 次仍失败则构建失败。
 RUN for i in 1 2 3 4 5; do npm i -g @openai/codex@0.164.0-alpha.8 && codex --version && break; [ "$i" = 5 ] && exit 1; echo "codex 安装校验第 $i 次失败，重试"; sleep 10; done \

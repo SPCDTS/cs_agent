@@ -21,7 +21,7 @@ export class ScheduleTools {
   }) {}
 
   /**
-   * 身份经 grants.identity（runRights，§7.3）：只有会话基础权限的回合不能使用定时工具；
+   * 身份经 grants.identity（runRights，docs/ARCHITECTURE.md §5.1）：只有会话基础权限的回合不能使用定时工具；
    * 定时身份只能控制本次运行的任务（须有本轮的定时输入绑定，继承了定时身份的唤醒回合没有）。
    */
   private async access(binding: GrantBinding) {

@@ -11,7 +11,7 @@ import { ScheduleRuntimeDoc } from "./docs.js";
 import type { ScheduleConversation, ScheduledFire, ScheduledRunAdmitter, ScheduleRun, ScheduleRunRecorder } from "./types.js";
 
 /**
- * 定时运行（设计 §10）：到点向来源会话的 ThreadHost 投一条定时输入（kind=scheduled，发送者 = 创建者），
+ * 定时运行（docs/ARCHITECTURE.md §6）：到点向来源会话的 ThreadHost 投一条定时输入（kind=scheduled，发送者 = 创建者），
  * 线程忙则排队等空闲。运行记录 cs.scheduled-run 保留；结果按该输入所在回合发出的消息数统计：
  * 有发送 → sent，无 → silent，回合失败 / 丢失或投递不确定 → failed。
  * 第 2 阶段只统计输入所在的那一个回合，不含其后由子 agent 唤醒的回合。

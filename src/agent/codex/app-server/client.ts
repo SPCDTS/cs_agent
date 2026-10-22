@@ -1,5 +1,5 @@
 /**
- * 常驻 app-server 的类型化门面（设计稿 §5.2、§5.4）：线程开启/恢复、开一轮、插话、中止，
+ * 常驻 app-server 的类型化门面（docs/ARCHITECTURE.md §4.1）：线程开启/恢复、开一轮、插话、中止，
  * 以及按线程跟踪空闲/当前回合（含服务端自行开启的唤醒回合）。
  *
  * - 回合状态只由 turn/started、turn/completed 推导；turnStarted 事件标注 initiatedBy：
@@ -71,7 +71,7 @@ export type ThreadItem = { type: string; id?: string } & Record<string, unknown>
 export interface ClientEvents {
   turnStarted: [TurnStartedEvent];
   turnCompleted: [TurnCompletedEvent];
-  /** 进程掉线导致进行中的回合丢失（§5.4）。 */
+  /** 进程掉线导致进行中的回合丢失（§4.1）。 */
   turnLost: [TurnLostEvent];
   /** error 通知；willRetry=false 表示该回合将失败。 */
   turnError: [TurnErrorEvent];

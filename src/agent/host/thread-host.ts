@@ -1,5 +1,5 @@
 /**
- * 常驻 agent 的会话宿主（设计 §4.2、§7.2、§7.3、§8.2）：
+ * 常驻 agent 的会话宿主（docs/ARCHITECTURE.md §2.3、§3.2、§5.1、§3.4）：
  * 1. 每个会话键一份 `cs.thread-host` 文档，记录空闲/忙、当前回合、本轮输入与排队输入；内存镜像是唯一写入者。
  * 2. 投递：空闲 → 开新一轮；忙且本轮是同一发送者（owner 多账号算同一人）的用户回合 → 插话；
  *    插话被拒（回合恰好结束）→ 按到达序号排队；其余（他人消息、定时任务、定时/唤醒回合中的消息）→ 排队。
@@ -15,7 +15,7 @@
  * 6. 重启：恢复集合里的会话，忙且有 turnId 的由适配器判定回合是否仍在（pi 续跑；codex 丢失 → lost 结束）；
  *    忙但没有 turnId（开轮请求未确认）的输入放回队列、按落盘的后端重新开轮；排队输入按 seq 重新驱动。
  * 7. 每条输入以 inboundKey 幂等：`cs.thread-host.input` 文档存在即为重复投递。
- * 8. 身份（§7.3）：每个回合绑定一个人。用户回合为发送者、定时回合为创建者；唤醒回合为适配器从带回的汇报求出的、
+ * 8. 身份（§5.1）：每个回合绑定一个人。用户回合为发送者、定时回合为创建者；唤醒回合为适配器从带回的汇报求出的、
  *    派出子 agent 那一轮的人（turnInherited，随会话文档持久化），求不出则只有会话基础权限。权限由 host/identity.ts 统一求出。
  */
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
@@ -29,7 +29,7 @@ import type {
   TurnEnded, TurnIdentity, TurnOutcome, TurnStatus,
 } from "./types.js";
 
-/** 看门狗默认阈值：回合连续 30 分钟没有任何事件视为卡死（§8.2） */
+/** 看门狗默认阈值：回合连续 30 分钟没有任何事件视为卡死（§3.4） */
 export const STALL_MS = 30 * 60_000;
 
 export interface ThreadHostOptions {
@@ -43,7 +43,7 @@ export interface ThreadHostOptions {
   planRetryMs?: number;
   events?: ThreadHostEvents;
   /**
-   * 定时输入开轮前的准入复核（§10）：排队期间创建者的授权可能已撤销或过期，开轮前（含重启恢复后）按当前授权重查。
+   * 定时输入开轮前的准入复核（§6）：排队期间创建者的授权可能已撤销或过期，开轮前（含重启恢复后）按当前授权重查。
    * 返回 false：不开轮，该输入按失败结束（拒绝记录与暂停由调用方在返回前持久化）。抛错按开轮失败处理。
    */
   admit?(threadKey: ThreadKey, input: InputRef): Promise<boolean>;
@@ -345,7 +345,7 @@ export class ThreadHost implements HostCallbacks {
         // 没收到上一轮的结束事件就开了唤醒回合。会话按会话键固定一个后端（切换要等旧后端空闲）后不应再出现，
         // 仍作防线：上一轮交给适配器放弃——其后端工作不能再以该回合的身份行事，并按适配器给出的真实结果结束：
         // 已在后端结束（结束事件还排在本事件之后）→ 后端回报的结果（失败照常发出错提示）；
-        // 工作被中止（codex 回合 turn/interrupt）→ lost，外层发中断提示（§8.1，照常限频），输入不自动重放（与重启丢失一致，避免重复副作用）；
+        // 工作被中止（codex 回合 turn/interrupt）→ lost，外层发中断提示（§3.4，照常限频），输入不自动重放（与重启丢失一致，避免重复副作用）；
         // 工作继续（pi run 降为会话基础权限）→ completed。
         log.warn("thread host wake turn superseded active turn", { thread: threadKey, previous: s.turnId, turnId });
         let outcome: TurnOutcome = { status: "completed" };
@@ -385,7 +385,7 @@ export class ThreadHost implements HostCallbacks {
   // ───────────── 工具与面板 ─────────────
 
   /**
-   * 本轮身份（§7.3）；空闲返回 undefined。开轮请求未确认时已可用（工具可能先于 startTurn 返回运行）。
+   * 本轮身份（§5.1）；空闲返回 undefined。开轮请求未确认时已可用（工具可能先于 startTurn 返回运行）。
    * 唤醒回合带上确证继承的人（没有则只有会话基础权限）；权限由 host/identity.ts 的 runRights 统一求出。
    */
   currentIdentity(threadKey: ThreadKey): TurnIdentity | undefined {
@@ -397,7 +397,7 @@ export class ThreadHost implements HostCallbacks {
   }
 
   /**
-   * 群会话本轮第一条发往本群的消息 @ 发送者（§7.2）：用户回合第一次调用返回发送者，之后返回 false；
+   * 群会话本轮第一条发往本群的消息 @ 发送者（§3.2）：用户回合第一次调用返回发送者，之后返回 false；
    * 定时与唤醒回合始终 false。只由"发往本群"的发送调用。
    */
   takeMention(threadKey: ThreadKey): Promise<string | false> {
@@ -409,7 +409,7 @@ export class ThreadHost implements HostCallbacks {
     });
   }
 
-  /** 看门狗：进行中的回合超过阈值没有任何事件。调用方随后 interrupt 并按 §8.1 提示。 */
+  /** 看门狗：进行中的回合超过阈值没有任何事件。调用方随后 interrupt 并按 §3.4 提示。 */
   stalled(now: number, thresholdMs = STALL_MS): ThreadKey[] {
     const out: ThreadKey[] = [];
     for (const [key, s] of this.threads) {

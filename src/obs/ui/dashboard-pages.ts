@@ -63,12 +63,12 @@ export interface DashboardPageOptions {
     turns(filters: { status?: string; thread?: string; backend?: string; kind?: string; page?: number }): TurnRowView[];
     events(key: string, options: { after?: number; limit: number }): ObsEvent[];
     systemEvents(key: string, limit: number): ObsEvent[];
-    /** 上下文监控（设计 DESIGN-context-monitor §2–3）：按线程的已判定回合序列。 */
+    /** 上下文监控（docs/DASHBOARD.md §5）：按线程的已判定回合序列。 */
     contextSeries(opts: { limit?: number; since?: number; backend?: string; key?: string; analysis?: ContextAnalysisOptions }): ThreadContextSeries[];
     previousContextTurn(backend: ContextUsage['backend'], key: string, beforeTs: number): ContextUsageEventView | undefined;
     /** 回合页：把本回合的 model_request / context_usage 事件交给数据层判定，返回本回合全部请求（按 seq）。 */
     analyzeTurnContext(key: string, events: ObsEvent[]): ContextTurn[];
-    /** 上下文监控预览面板（§9.2）：一次取页面上全部回合的摘要；过期清理的回合不在结果里。 */
+    /** 上下文监控预览面板（§5）：一次取页面上全部回合的摘要；过期清理的回合不在结果里。 */
     turnBriefs(keys: readonly string[]): Map<string, TurnBrief>;
   };
 }
@@ -121,7 +121,7 @@ export function agingNote(aging: Record<string, unknown>, now = Date.now()): str
   const ms = epochMs(raw);
   return ms === null ? `上次 ${String(raw)}` : `上次 ${fmtWhen(ms, now)}`;
 }
-/* 上下文监控（DESIGN-context-monitor §3）：标记文案、命中率与说明文字，页面与回合页共用。 */
+/* 上下文监控（§5）：标记文案、命中率与说明文字，页面与回合页共用。 */
 const MARKS: Record<NonNullable<ContextTurn['mark']>, string> = { miss: '未命中', partial: '部分命中', first: '首轮', compact: '压缩后', reset: '重建' };
 /** 本轮输入中缓存命中的百分数（0–100）。 */
 const hitPct = (t: { used: number; cached: number }) => t.used > 0 ? t.cached / t.used * 100 : 0;
@@ -154,7 +154,7 @@ const requestHits = (turns: ContextTurn[]) => turns.length === 1 ? { inline: tur
   list: `<ul class="cu-reqs">${turns.map(t => `<li>${turnHit(t, `第 ${t.seq} 次：`)}</li>`).join('')}</ul>`,
 };
 const usageHref = (backend: string, key: string) => `/context-usage?backend=${uri(backend)}&amp;key=${uri(key)}`;
-/* 上下文监控页（§9.3）：纵轴、时间轴、分隔标签与回合预览面板。 */
+/* 上下文监控页（§5）：纵轴、时间轴、分隔标签与回合预览面板。 */
 const SEP_LABELS = { compact: '压缩', reset: '重建' } as const;
 /** 明细表 / 预览请求表的标记列：miss / partial 用 missMark，其他标记灰字。 */
 const markCell = (t: ContextTurn) => !t.mark ? '—' : missMark(t) || `<span class="muted">${MARKS[t.mark]}</span>`;
@@ -341,7 +341,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       const rd = detailOf(received);
       inputs[0] = { ...inputs[0]!, text: String(rd.text ?? ''), sender: inputs[0]!.sender || String(rd.sender ?? '') };
     }
-    // 缓存命中（DESIGN-context-monitor §3、§8.4）：判定由数据层完成，按请求列在最后一个完成的模型回合行；
+    // 缓存命中（§5）：判定由数据层完成，按请求列在最后一个完成的模型回合行；
     // 没有模型回合时标在最后一条请求 / 占用事件行。
     const ctxTurns = opts.store.analyzeTurnContext(key, all);
     const hits = ctxTurns.length ? requestHits(ctxTurns) : undefined;
@@ -381,7 +381,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     return body;
   }
 
-  /** /context-usage：汇总表 + 每线程走势条与明细（设计 §3）；判定由数据层完成，这里只渲染。 */
+  /** /context-usage：汇总表 + 每线程走势条与明细（§5）；判定由数据层完成，这里只渲染。 */
   function contextUsageBody(q: URLSearchParams): string {
     const num = (k: string) => { const v = (q.get(k) ?? '').trim(); const n = v ? Number(v) : NaN; return Number.isFinite(n) ? n : undefined; };
     const rawLimit = num('limit');
@@ -482,7 +482,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
 
   type Shell = (title: string, body: string, extra?: { lead?: string; actions?: string; scripts?: string[]; head?: string }) => string;
 
-  /** /memory/*（设计 §1、§5）：数据取自 /api/memory/* 的同一路由；未知 scope / 摘要 / 子路由返回 null（404）。 */
+  /** /memory/*（§8）：数据取自 /api/memory/* 的同一路由；未知 scope / 摘要 / 子路由返回 null（404）。 */
   async function memoryPage(p: string, q: URLSearchParams, nonce: string, shell: Shell): Promise<string | null> {
     const now = Date.now();
     const overview = async () => { const r = await api('/api/memory'); return r.status === 200 ? r.body as MemoryOverview : null; };
@@ -497,7 +497,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       const f = recallFilters(q);
       const [scopes, r] = await Promise.all([overview().then(o => o?.scopes ?? []), api(`/api/memory/recalls?${recallQuery(f)}`)]);
       return shell('召回记录', recallsPageBody(f, scopes, r.status === 200 ? r.body as RecallList : { error: apiError(r) }),
-        { lead: '模型每次调用 qq_recent / qq_search / qq_message 的参数、返回条数与裁剪，最新在上；详情页给出三级证据（设计 §5.3）。' });
+        { lead: '模型每次调用 qq_recent / qq_search / qq_message 的参数、返回条数与裁剪，最新在上；详情页给出三级证据。' });
     }
     if (p.startsWith('/memory/recalls/')) {
       const key = p.slice('/memory/recalls/'.length);
@@ -563,7 +563,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     if (win.after !== undefined) mq.set('after', String(win.after));
     const mr = await api(`${base}/messages?${mq}`);
     const messages = mr.status === 200 ? mr.body as MessagePage : { error: apiError(mr), status: mr.status };
-    // vis-timeline 固定版本，同源提供（设计 §5.1）；defer 脚本与模块脚本按文档顺序执行，memory.js 运行时 vis 已就绪。
+    // vis-timeline 固定版本，同源提供（§8）；defer 脚本与模块脚本按文档顺序执行，memory.js 运行时 vis 已就绪。
     const vendor = !!vendorAsset('vis-timeline.js') && !!vendorAsset('vis-timeline.css');
     const head = vendor ? `<link rel="stylesheet" href="/assets/vendor/vis-timeline.css"><script nonce="${nonce}" defer src="/assets/vendor/vis-timeline.js"></script>` : '';
     return shell(timeline.label, scopePageBody({ timeline, messages, nonce, now, params, vendor }),
@@ -616,7 +616,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       if (tr.status !== 200) return shell('回合详情', `<div class="flash err" role="alert">读取回合失败：${esc(apiError(tr))}</div>`);
       const { turn, blocks } = tr.body as { turn: ObservedTurn; blocks: Block[] };
       const k = newest.findIndex(t => t.turn === turn.turn);
-      // 记忆调用（设计 §5.2）：召回接口出错或抛异常都只降级为一行提示，回合页照常渲染。
+      // 记忆调用（§8.2）：召回接口出错或抛异常都只降级为一行提示，回合页照常渲染。
       const mq = new URLSearchParams({ backend, session: session.id, turn: turn.turn });
       const rr = await api(`/api/memory/recalls?${mq}`).catch((e: unknown) => ({ status: 500, body: { error: e instanceof Error ? e.message : String(e) } }));
       const memory = turnRecallSection(rr.status === 200 && rr.body && Array.isArray((rr.body as RecallList).items) ? rr.body as RecallList : { error: apiError(rr) },
@@ -625,7 +625,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
         { lead: '输入 → 模型请求（可多次）→ 工具调用（参数与结果折叠）→ 助手文本 → 送达。', scripts: ['/assets/agents.js'] });
     }
     if (parts[5] === 'content') return contentPage(backend, id, session, title, q, shell);
-    // 上下文结构分析（设计 §4）：分析接口由 O3 提供；缺席（404/501/503）时给出不可用状态。
+    // 上下文结构分析（§7）：缺席（404/501/503）时给出不可用状态。
     const at = q.get('at') || newest[0]?.turn || '';
     const phase = q.get('phase') === 'before' ? 'before' : 'after';
     const head = crumbs([['Agent', '/agents'], [name, sessionsHref(backend)], [title, sessionHref(backend, session.id)], ['上下文分析']]);
@@ -691,7 +691,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     return shell('正文', `${head}<section class="sheet pad">${meta}</section>${warn}<section>${pre}</section>${nav}`, { lead });
   }
 
-  /** 设置页按 agent 分两组：模型下拉（magpie 目录）+ 思考档位（auto + 支持的档位），设计 §5。 */
+  /** 设置页按 agent 分两组：模型下拉（magpie 目录）+ 思考档位（auto + 支持的档位），docs/ARCHITECTURE.md §2.5。 */
   function agentModelFieldsets(s: Readonly<RuntimeSettings>, d: RuntimeSettingsView | undefined, diff: (k: keyof RuntimeSettings) => string): string {
     const catalog = <T,>(read: (() => T[]) | undefined): T[] => { try { return read?.() ?? []; } catch { return []; } };
     const option = (value: string, current: string, label = value) => `<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(label)}</option>`;
@@ -825,7 +825,7 @@ ${config.owner ? `<form method="post" action="/settings/grants/add" class="sheet
     return `${head(snap.updatedAt ? `修改于 ${esc(fmtTime(snap.updatedAt))}` : '尚未修改')}${editor}<details class="mt"><summary>受管规则（程序生成，不可编辑）</summary>${json(redactText(snap.managed, 1_000_000))}</details>${link}</section>`;
   }
 
-  /* ───────── 技能（设计 skills-admin §3）：上传、下载与删除由 HTTP 层处理，这里只渲染 ───────── */
+  /* ───────── 技能（docs/ARCHITECTURE.md §7）：上传、下载与删除由 HTTP 层处理，这里只渲染 ───────── */
 
   const skillOps = (name: string) => `<div class="ops"><a class="btn quiet" href="/skills/${uri(name)}.zip">下载</a><form method="post" action="/skills/${uri(name)}/delete">${csrfField(csrf)}<button class="danger">删除</button></form></div>`;
 

@@ -1,5 +1,5 @@
 /**
- * 会话与回合的页面（设计 §12）：/live 的每会话一行、/turns 回合列表、/turns/:id 回合详情、
+ * 会话与回合的页面（docs/DASHBOARD.md §2、§3）：/live 的每会话一行、/turns 回合列表、/turns/:id 回合详情、
  * /inputs/:key 输入页、/conversations/:thread 会话页。数据经只读视图传入；所有文本先脱敏再转义（esc）。
  */
 import type { ObsEvent } from '../../shared/trace.js';

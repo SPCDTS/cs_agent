@@ -9,7 +9,7 @@ import { accessToString, type Access } from "./access.js";
 import { abortable, type MediaRecall, type RecallResult } from "./media.js";
 
 /**
- * codex 的线程令牌（设计 §5.3）：每个会话线程一个令牌，经 thread/start、thread/resume 的 config 写进该线程的 MCP 环境，
+ * codex 的线程令牌（docs/ARCHITECTURE.md §4.1）：每个会话线程一个令牌，经 thread/start、thread/resume 的 config 写进该线程的 MCP 环境，
  * 只证明"来自哪个会话线程"。身份、读取范围与发送地址由网关在每次调用时按 MCP 请求的 `_meta`
  * （callId、x-codex-turn-metadata）从会话宿主的当前回合求出；调用不属于宿主当前回合（回合已结束、被取代、
  * 来自子 agent 线程）时网关拒绝——与第 2 阶段"回合租约须仍是宿主当前回合"同一保证。

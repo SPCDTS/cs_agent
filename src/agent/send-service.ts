@@ -22,7 +22,7 @@ export interface SendResult {
   message_type: OutboxRow["message_type"]; target_id: string; note?: string; original_text?: string;
 }
 export interface SendArguments { target?: string; text: string; images?: string[]; files?: { path: string; name?: string }[] }
-/** 发送绑定 = 会话绑定（§7）+ 本次调用可读的附件根；身份由主进程在调用时求出。 */
+/** 发送绑定 = 会话绑定（docs/ARCHITECTURE.md §3.1）+ 本次调用可读的附件根；身份由主进程在调用时求出。 */
 export interface SendBinding extends TurnBinding {
   access: Access; workdir: string; extraRoots?: string[];
 }
@@ -63,8 +63,8 @@ async function sameAttachments(row: OutboxRow, prepared: Awaited<ReturnType<type
 }
 
 /**
- * send_message 绑定会话（设计 §7）：行键 `<threadKey>:<callKey>`，同一调用重放取回同一行（永不重发）。
- * 没有"本回合已经结束"与每轮条数的校验；失控防护由 bridge 发送规则负责（§9）。按会话串行。
+ * send_message 绑定会话（§3.1）：行键 `<threadKey>:<callKey>`，同一调用重放取回同一行（永不重发）。
+ * 没有"本回合已经结束"与每轮条数的校验；失控防护由 bridge 发送规则负责（§3.3）。按会话串行。
  */
 export class SendService {
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -72,7 +72,7 @@ export class SendService {
   constructor(private readonly opts: {
     grants?: GrantsService; now?: () => number; getChannel(): SendChannel; dataDir: string;
     store?: Pick<ContextStore, "mediaPathAllowed" | "recordSent">; limits?: AttachmentLimits;
-    /** 群会话本轮第一条发往本群的消息 @ 发送者（§7.2，ThreadHost.takeMention） */
+    /** 群会话本轮第一条发往本群的消息 @ 发送者（§3.2，ThreadHost.takeMention） */
     mention?(threadKey: string): Promise<string | false>;
   }) {}
 
@@ -89,7 +89,7 @@ export class SendService {
       const args = validateSendArguments(input), channel = this.opts.getChannel();
       const sourceRef = `qq:${binding.scope}`;
       const targetRef = args.target ?? sourceRef, target = parseTarget(targetRef), targeted = targetRef !== sourceRef;
-      // 权限一律按 runRights（§7.3）：只有会话基础权限的回合发往别处由 authorizeSend 拒绝；定时身份的发送计主动额度。
+      // 权限一律按 runRights（§5.1）：只有会话基础权限的回合发往别处由 authorizeSend 拒绝；定时身份的发送计主动额度。
       const rights = this.opts.grants?.rights(binding) ?? runRights(binding, undefined);
       const proactive = targeted || rights.person?.kind === "scheduled";
       const existing = channel.outbox.getOutbox(key);
@@ -190,7 +190,7 @@ export class SendService {
   }
 
   /**
-   * 系统消息（§8.1 出错提示；codex 回合后补收的图片）：键 `<threadKey>:sys:<uuid>`，发往本会话，不 @、不计主动额度、不暴露给模型。
+   * 系统消息（§3.4 出错提示；codex 回合后补收的图片）：键 `<threadKey>:sys:<uuid>`，发往本会话，不 @、不计主动额度、不暴露给模型。
    * 被发送规则拒绝时不重试也不抛出：行保持 pending 并记下原因。
    */
   /** key：调用方给出的稳定键（同一事件重试取回同一行，不重发）；缺省随机。 */

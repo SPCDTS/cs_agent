@@ -1,5 +1,5 @@
 /**
- * 统一上下文存储（设计 §2.1–2.4）：`${DATA_DIR}/qq-messages.sqlite`，node:sqlite，WAL。
+ * 统一上下文存储（docs/ARCHITECTURE.md §9）：`${DATA_DIR}/qq-messages.sqlite`，node:sqlite，WAL。
  * 唯一读写入口：入库、撤回、机器人已发消息行、recent / search / message、衰老（摘要 + 清理）。
  * 所有读取都带访问过滤（Access）；意图层（进程内）与 qq_context MCP（只读连接）共用本模块。
  * 时间一律为 unix 秒；"日"按进程本地时区（容器默认 UTC，可设 TZ）。

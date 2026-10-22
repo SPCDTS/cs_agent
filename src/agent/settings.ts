@@ -1,5 +1,5 @@
 /**
- * 运行时设置（设计 §8.4）：`${DATA_DIR}/settings.json` 持久化面板可改的项，`.env` 只是初始默认值。
+ * 运行时设置（docs/DASHBOARD.md §2.1）：`${DATA_DIR}/settings.json` 持久化面板可改的项，`.env` 只是初始默认值。
  * 派发器在入队前冻结后端、档位与模型记录；Pi 模型在提交时现读，告警开关独立现读。
  * 文件原子写（临时文件 + rename），读写都经 zod 校验；文件损坏时记录告警并回退到 `.env` 默认值（不覆盖坏文件）。
  */
@@ -25,7 +25,7 @@ export interface RuntimeSettings {
   piModel: string;
   piThinkingLevel: ModelThinkingLevel | "auto";
   alertOwner: boolean;
-  /** bridge 出站发送规则（设计 docs/ARCHITECTURE.md §3.3），每次发送前现读 */
+  /** bridge 出站发送规则（docs/ARCHITECTURE.md §3.3），每次发送前现读 */
   sendRules: SendRuleLimits;
 }
 

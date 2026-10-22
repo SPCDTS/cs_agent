@@ -1,7 +1,7 @@
 /**
  * 入站输入与 Outbox 的持久化（node:sqlite，WAL）。
- * - inbound（Inbox，设计 §4.1）：每条触发消息 / 定时输入一行，state 只前进：queued → delivered → done；
- * - outbox（§7.4）：pending → sending → sent | uncertain，状态迁移带条件更新，跨进程也不会重复发送；
+ * - inbound（Inbox，docs/ARCHITECTURE.md §2.2）：每条触发消息 / 定时输入一行，state 只前进：queued → delivered → done；
+ * - outbox（§3.2）：pending → sending → sent | uncertain，状态迁移带条件更新，跨进程也不会重复发送；
  * 库里旧版遗留的 tickets 表原样留在磁盘上，不再读写。
  */
 import { createHash } from "node:crypto";
@@ -266,7 +266,7 @@ export class ReplyStore {
     }
   }
 
-  /** 定时输入（§10）：重放不改变首次写入的内容。 */
+  /** 定时输入（§6）：重放不改变首次写入的内容。 */
   openScheduledInput(input: ScheduledInput): InboundRecord {
     const match = /^(group|private):([1-9][0-9]{0,19})$/.exec(input.scope);
     const creator = /^qq:([1-9][0-9]{0,19})$/.exec(input.creator)?.[1];

@@ -1,5 +1,5 @@
 /**
- * codex 后端：常驻 app-server 适配器（设计 §5、§14 第 3 步），实现 ThreadHost 的 ThreadAdapter。
+ * codex 后端：常驻 app-server 适配器（docs/ARCHITECTURE.md §4.1），实现 ThreadHost 的 ThreadAdapter。
  * - 线程：会话键 → codex 线程（CodexRunner 的映射与轮换）；进程代中首次使用时 thread/start 或 thread/resume，
  *   同时为该会话签发线程令牌，写入 im / qq_context 的线程级 MCP 环境；重启后令牌作废、按需重新加载。
  * - 回合簿记：线程上服务端的每个回合恰好判定一次种类，之后不再改判——
@@ -12,17 +12,17 @@
  *   compaction / suppressed 的结束不交给宿主，除非宿主为排在它后面而接管了它（开轮让位），此时按完成交给宿主以放行排队输入。
  * - 开一轮：turn/start（effort、model、clientUserMessageId=输入键），回合 id 为 `codex:<codex 回合 id>`。
  *   线程上有非本适配器的回合进行中时不开轮，返回 backendTurnId 让宿主排在它后面。
- *   开轮结果不确定（请求已发出、连接断开或超时）：不重发这条输入；按 clientId 认领到回合就用它，否则以 lost 结束（§5.4）。
+ *   开轮结果不确定（请求已发出、连接断开或超时）：不重发这条输入；按 clientId 认领到回合就用它，否则以 lost 结束（§4.1）。
  * - 插话 turn/steer（no_active_turn、not_steerable 都回报 no_active_turn，宿主改为排队）。
  * - 结束：turn/completed（completed → completed；interrupted、failed 或此前有不再重试的 error → failed）、
- *   进程掉线 → lost（宿主发 §8.1 的中断提示）。不设单轮时限，停滞由宿主看门狗按事件判定（条目、子 agent 活动都算）。
- * - 唤醒身份（§6.2、§7.3）：子 agent 派出时（subAgentActivity kind=started，带派出它的父回合 id）快照那一轮的人
+ *   进程掉线 → lost（宿主发 §3.4 的中断提示）。不设单轮时限，停滞由宿主看门狗按事件判定（条目、子 agent 活动都算）。
+ * - 唤醒身份（§4.3、§5.1）：子 agent 派出时（subAgentActivity kind=started，带派出它的父回合 id）快照那一轮的人
  *   （用户回合的发送者、定时回合的创建者、唤醒回合继承的人；父回合不是宿主当前回合或求不出 → 没有）；
  *   它完成时（kind=completed，紧接在服务端开的唤醒回合之前到达）记入本线程待汇报的派出者。服务端开的回合的继承身份
  *   = 上一个回合开始以来本线程全部完成汇报的派出者合并（mergePersons：全部同一人、同一类型才保留，否则会话基础权限）。
- * - 工具调用（§5.3、§7.3）：resolveCall 只认服务端记录的归属（callId 对应的 mcpToolCall 条目所在线程与回合），
+ * - 工具调用（§4.1、§5.1）：resolveCall 只认服务端记录的归属（callId 对应的 mcpToolCall 条目所在线程与回合），
  *   该回合须是宿主当前回合；子 agent 线程的调用、过期回合的调用一律拒绝。
- * - 停止：中止主回合与运行中的子 agent 回合，之后 STOP_WAKE_MS 内（直到下一次开轮）服务端开的唤醒回合判为 suppressed 并中止（§8.2）。
+ * - 停止：中止主回合与运行中的子 agent 回合，之后 STOP_WAKE_MS 内（直到下一次开轮）服务端开的唤醒回合判为 suppressed 并中止（§3.4）。
  * - 忙：有进行中的回合、子 agent 线程仍在运行或正在压缩时，后端切换须等待（busy）。
  * - 压缩：面板"压缩"在会话空闲时经同一 app-server 发 thread/compact/start；压缩期间服务端开的回合按首个条目判定
  *   （contextCompaction → compaction；其他 → wake；没有条目就结束 → compaction）。压缩锁持有到压缩回合结束（或掉线、超时）。
@@ -382,7 +382,7 @@ export class CodexBackend implements ThreadAdapter {
   }
 
   /**
-   * 面板"停止"、看门狗（§8.2）：中止线程上进行中的回合与运行中的子 agent 回合；回合结束仍由 turn/completed 回报。
+   * 面板"停止"、看门狗（§3.4）：中止线程上进行中的回合与运行中的子 agent 回合；回合结束仍由 turn/completed 回报。
    * 之后 STOP_WAKE_MS 内（直到下一次开轮）服务端开的唤醒回合判为 suppressed 并中止。
    */
   async interrupt(threadKey: ThreadKey): Promise<void> {
@@ -423,7 +423,7 @@ export class CodexBackend implements ThreadAdapter {
     return this.children.get(threadKey)?.size ?? 0;
   }
 
-  /** 回合随 cs-agent 进程退出丢失（app-server 是子进程，§5.4）。 */
+  /** 回合随 cs-agent 进程退出丢失（app-server 是子进程，§4.1）。 */
   async recoverTurn(): Promise<"lost"> { return "lost"; }
 
   /** 等待回合结束的收尾（补收图片、用量）完成（测试与关闭用）。 */
@@ -434,7 +434,7 @@ export class CodexBackend implements ThreadAdapter {
   // ───────────── 工具调用 ─────────────
 
   /**
-   * 工具调用的绑定（§5.3、§7.3）：调用须来自会话主线程、属于宿主当前回合。归属只认服务端记录：
+   * 工具调用的绑定（§4.1、§5.1）：调用须来自会话主线程、属于宿主当前回合。归属只认服务端记录：
    * _meta 须带本线程的 thread_id 与 callId，callId 须是本线程某回合的 mcpToolCall 条目（来自 app-server 的条目事件），
    * 元数据里的 turn_id 若给出须与条目所在回合一致，该回合须是宿主当前回合。条目或宿主确认开轮的事件可能稍晚到达，最多等待 callWaitMs。
    */
@@ -450,7 +450,7 @@ export class CodexBackend implements ThreadAdapter {
       const codexTurnId = call?.turnId;
       const binding = this.opts.turns.binding(threadKey);
       if (codexTurnId && binding.turnId === hostTurnId(codexTurnId)) {
-        // 权限一律经 runRights（§7.3）：读全部只在 owner 私聊线程，唤醒回合按继承的人，求不出只有会话基础权限
+        // 权限一律经 runRights（§5.1）：读全部只在 owner 私聊线程，唤醒回合按继承的人，求不出只有会话基础权限
         const rights = runRights(binding, this.owners());
         const access = rights.access === "all" ? { kind: "all" as const } : { kind: "scope" as const, scope: rights.access };
         return { ...binding, turnId: binding.turnId, access, workdir: this.opts.runner.workspaceOf(threadKey), session: threadId,
@@ -554,7 +554,7 @@ export class CodexBackend implements ThreadAdapter {
     } else if (kind === "wake") {
       // 继承身份在判定为唤醒时取用并清空：上次唤醒以来本线程收到的全部完成汇报的派出者合并（没有 → 会话基础权限）。
       // 用户回合不清空——客户端可能暂存开始事件，按开始时机清空会漏掉之后到达却属于下次唤醒的汇报；
-      // 多算进来只会合并得更严，不会更宽（§7.3 fail closed）。
+      // 多算进来只会合并得更严，不会更宽（§5.1 fail closed）。
       const reports = this.reports.get(rec.threadId) ?? [];
       this.reports.delete(rec.threadId);
       const inherited = reports.length ? mergePersons(reports) : undefined;
@@ -672,7 +672,7 @@ export class CodexBackend implements ThreadAdapter {
   }
 
   /**
-   * 子 agent 的派出与完成（§6.2）：started → 快照派出它的父回合的人；completed → 记入本线程待汇报的派出者，
+   * 子 agent 的派出与完成（§4.3）：started → 快照派出它的父回合的人；completed → 记入本线程待汇报的派出者，
    * 紧随其后的服务端回合据此继承。started、completed 各按条目 id 去重（同一条可能以 item/started、item/completed 两次出现）。
    */
   private onSubAgentActivity(key: ThreadKey, threadId: string, turnId: string, item: ThreadItem): void {

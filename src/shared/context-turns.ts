@@ -1,5 +1,5 @@
 /**
- * 上下文监控的结构类型（设计 DESIGN-context-monitor §8）。判定函数在 src/obs/context-turns.ts；
+ * 上下文监控的结构类型（docs/DASHBOARD.md §5）。判定函数在 src/obs/context-turns.ts；
  * 这里只放类型，供面板 UI 层在不依赖观测实现的前提下渲染。
  */
 export interface ContextTurn {

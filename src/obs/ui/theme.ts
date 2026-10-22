@@ -1,5 +1,5 @@
 /**
- * 面板设计系统（设计 §8.4）。方向："调度单"——每条 QQ 消息是一张在分拣台上流转的单据：
+ * 面板设计系统（docs/DASHBOARD.md §10）。方向："调度单"——每条 QQ 消息是一张在分拣台上流转的单据：
  * 冷灰蓝的纸面、靛青墨水正文、复写纸蓝作为唯一强调色；状态用"印章"（描边双字戳）表达，
  * 详情页是一条竖向流转轨迹。无外部字体/CDN；深浅色由 prefers-color-scheme 自动切换。
  */
@@ -198,7 +198,7 @@ ol.conv-sends>li.failed{color:var(--fail)}
 .conn.on::before{content:"● ";color:var(--ok)}
 .conn.off::before{content:"● ";color:var(--fail)}
 
-/* ── 上下文占用条（设计 §8.5）：轨道是一把刻度尺，每 10% 一道细刻线；墨色按占比由复写纸蓝转为琥珀、朱红。
+/* ── 上下文占用条（docs/DASHBOARD.md §4）：轨道是一把刻度尺，每 10% 一道细刻线；墨色按占比由复写纸蓝转为琥珀、朱红。
    pi 的两道压缩阈值是贯穿轨道的刻口（悬停看说明）；估算值用斜线虚填，超过 24 小时未更新的整体褪色。 ── */
 .ctx-list{display:grid;gap:var(--s4) var(--s6);grid-template-columns:repeat(auto-fit,minmax(min(100%,380px),1fr))}
 .ctx{--ctx-ink:var(--carbon);min-width:0}
@@ -236,7 +236,7 @@ ol.conv-sends>li.failed{color:var(--fail)}
 .thread-ctx{margin-bottom:var(--s4);padding-bottom:var(--s4);border-bottom:1px dashed var(--rule-strong)}
 ${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.ctx-tick[data-at="${i}"]{left:${i}%}`).join('\n')}
 
-/* ── 上下文监控走势（DESIGN-context-monitor §3、§9.3）：竖条高度 = 占窗口比例（data-h），底部缓存命中段占条高 data-c，
+/* ── 上下文监控走势（docs/DASHBOARD.md §5）：竖条高度 = 占窗口比例（data-h），底部缓存命中段占条高 data-c，
    条的底色即未命中部分（miss 红、partial 琥珀，另有顶标）。同一回合的条装在一个 .cu-group 按钮里，底部 2 px 基线，
    点击在下方 .cu-pane 显示对应 .cu-pop（/assets/context-usage.js）。纵轴刻度与网格线、压缩 / 重建标签都只用 CSS，无内联 style。
    几何：图高 160 px = 顶部留白 16 px（顶标与分隔标签）+ 绘图区 143 px + 1 px 基线；网格线画在滚动容器上铺满宽度，
@@ -386,7 +386,7 @@ details.blk[open]>summary{margin-bottom:var(--s1)}
 .ctx-cats tr.unexplained td{color:var(--ink-2);border-top:1px dashed var(--rule-strong)}
 ul.notes{margin:0;padding-left:var(--s5);font-size:var(--t-sm);color:var(--ink-2)}
 
-/* ── 记忆（设计 §5）：时间线三条轨、空白、保留边界；检索两级证据 ── */
+/* ── 记忆（docs/DASHBOARD.md §8）：时间线三条轨、空白、保留边界；检索两级证据 ── */
 .aging-card h2 small{font-weight:400}
 .mem-tools .tool-link{display:flex;flex-direction:column;gap:2px;text-decoration:none;color:var(--ink)}
 .mem-tools .tool-link small{color:var(--ink-2)}
@@ -453,7 +453,7 @@ mark{background:var(--warn-soft);color:inherit;border-bottom:2px solid var(--war
 .tool-text{max-height:640px}
 .search-cols>section{margin-top:0}
 .flash.warn{border-color:var(--warn);background:var(--warn-soft)}
-/* ── 召回记录（设计 §5.3）：三级证据面板沿用 lv-1/2/3 的颜色 ── */
+/* ── 召回记录（docs/DASHBOARD.md §8.2）：三级证据面板沿用 lv-1/2/3 的颜色 ── */
 .rc-filter input{min-width:0}
 .rc-be.rc-codex{border-color:var(--carbon);color:var(--carbon)} .rc-be.rc-pi{border-color:var(--queued);color:var(--queued)}
 .rc-args code{display:inline-block;max-width:28ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}

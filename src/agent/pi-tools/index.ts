@@ -126,7 +126,7 @@ export function createPiExtension(opts: PiToolsOptions) {
           started.delete(api.taskId);
           return { block: reason };
         };
-        // 不按回合计调用次数（失控防护交给 bridge 发送规则，§9）；身份相关的限制在各工具执行时复核。
+        // 不按回合计调用次数（失控防护交给 bridge 发送规则，docs/ARCHITECTURE.md §3.3）；身份相关的限制在各工具执行时复核。
         if (call.name.startsWith("auth_")) return bound.auth ? undefined : block("授权工具仅限 owner 回合");
         return undefined;
       }, afterTool: async (call, result, api) => {

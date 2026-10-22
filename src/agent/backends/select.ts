@@ -1,5 +1,5 @@
 /**
- * 后端选择（设计 §4.3）：AGENT_BACKEND（全局默认 codex），AGENT_BACKEND_OVERRIDES 按 scope 覆盖，
+ * 后端选择（docs/ARCHITECTURE.md §2.4）：AGENT_BACKEND（全局默认 codex），AGENT_BACKEND_OVERRIDES 按 scope 覆盖，
  * 例如 `group:200000001=pi,private:10000001=codex`。切换只影响之后处理的消息。
  */
 import { isScope } from "../../context/access.js";

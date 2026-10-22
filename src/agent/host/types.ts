@@ -3,11 +3,11 @@ import type { ThreadKey } from "../backends/types.js";
 export type { ThreadKey };
 
 /**
- * ThreadHost 与后端适配器的契约（设计 §3、§4.2）。
+ * ThreadHost 与后端适配器的契约（docs/ARCHITECTURE.md §1、§2.3）。
  * 适配器只负责"把输入送进后端"并回报回合事件；开新一轮、插话还是排队由 ThreadHost 决定。
  */
 
-/** user：QQ 消息；scheduled：定时任务到点的输入（§10） */
+/** user：QQ 消息；scheduled：定时任务到点的输入（§6） */
 export type InputKind = "user" | "scheduled";
 /** wake：后端自己开的回合（子 agent 完成唤醒），没有新输入 */
 export type TurnKind = InputKind | "wake";
@@ -82,7 +82,7 @@ export interface ThreadAdapter {
 export interface HostCallbacks {
   /**
    * initiatedBy=backend 表示后端自己开的唤醒回合；host 表示 startTurn 开的回合（仅刷新活动时间）。
-   * identity：唤醒回合确证继承的人（由带回的汇报求出，§7.3）；缺省为会话基础权限。只在宿主新接管该回合时采用。
+   * identity：唤醒回合确证继承的人（由带回的汇报求出，§5.1）；缺省为会话基础权限。只在宿主新接管该回合时采用。
    */
   onTurnStarted(threadKey: ThreadKey, turnId: string, initiatedBy: "host" | "backend", identity?: RunPerson): void;
   onTurnCompleted(threadKey: ThreadKey, turnId: string, result: { status: TurnStatus; error?: string }): void;
@@ -90,7 +90,7 @@ export interface HostCallbacks {
   onActivity(threadKey: ThreadKey): void;
 }
 
-/** 工具调用（发送、召回、定时、授权）取用的本轮身份（§7.3）；契约定义在通道层，工具与通道共用。 */
+/** 工具调用（发送、召回、定时、授权）取用的本轮身份（§5.1）；契约定义在通道层，工具与通道共用。 */
 export type { RunPerson, TurnIdentity } from "../../channel/types.js";
 import type { RunPerson, TurnIdentity } from "../../channel/types.js";
 

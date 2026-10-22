@@ -1,5 +1,5 @@
 /**
- * 上下文结构分析页（设计 §4）的渲染。数据来自 GET /api/agents/:backend/sessions/:id/context（分组 O3 实现），
+ * 上下文结构分析页（docs/DASHBOARD.md §7）的渲染。数据来自 GET /api/agents/:backend/sessions/:id/context，
  * 这里按约定的 ContextAnalysis 结构渲染头部、构成表与逐消息表；实测与估算分开，来源用标签区分，
  * 没有来源的数字显示"—"而不是 0。分析接口缺席（404/501/503）时给出"分析引擎暂不可用"。
  */

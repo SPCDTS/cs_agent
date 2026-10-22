@@ -27,7 +27,7 @@ import type { RenderedInputs } from "../inbox.js";
 import type { SettingsSnapshot } from "./types.js";
 
 /**
- * pi 后端（设计 §6）：每个会话键一个常驻的 pi-durable 会话，回合 = pi 的一次 run（从输入到最终回答）。
+ * pi 后端（docs/ARCHITECTURE.md §4.2）：每个会话键一个常驻的 pi-durable 会话，回合 = pi 的一次 run（从输入到最终回答）。
  * 1. 开一轮：宿主每轮只送一条输入，whenBusy=followUp（requestId = 入站键，重放取回同一提交；已结束的提交其结果即本轮结果）；
  *    会话恰好已有 run（宿主尚未看到的唤醒回合）时输入不并入，回报 backendTurnId，宿主按唤醒回合接管、输入排到其后
  *    （例外：那次 run 正是这条输入开的——开轮请求未确认就重启——仍是宿主的这一轮）。
@@ -35,10 +35,10 @@ import type { SettingsSnapshot } from "./types.js";
  * 2. 插话：适配器自己判断回合是否仍在（回合首条提交未结束）才 steer，否则返回 no_active_turn 由宿主排队；
  *    判断与提交之间回合恰好结束时，插话会自己开一次 run，按唤醒回合回报（身份只会更严格）。
  * 3. 唤醒：会话事件流里出现宿主不知道的 run（子 agent 汇报 follow-up）→ onTurnStarted(backend, 身份)；
- *    身份由 run 的输入求出：全部是带派出者快照的子 agent 汇报、且是同一人同一类型 → 继承该人，否则会话基础权限（§7.3）。
+ *    身份由 run 的输入求出：全部是带派出者快照的子 agent 汇报、且是同一人同一类型 → 继承该人，否则会话基础权限（§5.1）。
  *    宿主有回合进行中时出现的 run 只刷新活动时间（同一会话一次只有一个回合），其工具调用只有基础权限（见 5）。
  * 4. 没有单轮时限、没有每轮工具配额；中止只来自面板"停止"与看门狗（连同子 agent 一起停）。
- * 5. 工具身份在调用时由 binding() 从宿主求出（§7.3），权限经 host/identity.ts 的 runRights 统一求出：
+ * 5. 工具身份在调用时由 binding() 从宿主求出（§5.1），权限经 host/identity.ts 的 runRights 统一求出：
  *    宿主开的那次 run（当前 run 的首条提交 = 宿主当前回合）取宿主的本轮身份；宿主接管的唤醒 run 取宿主记下的继承身份，
  *    且须与按 run 当前输入重新求出的身份一致；其余 run（宿主放弃的回合、事件尚未送达的 run、对不上的）只有会话基础权限。
  *    子会话由 initChild 写入父会话键，只有基础权限；派出时由 spawner 快照父会话这一轮的身份，随汇报带回。
@@ -189,7 +189,7 @@ export class PiBackend implements ThreadAdapter {
         if (!key || key === "shared") throw new Error("子 agent 只能由会话线程派出");
         Object.assign(await tx.doc(PiChildDoc, child), { threadKey: key, parent: Number(parent) });
       },
-      // 派出那一轮的身份快照：汇报唤醒的回合继承它（§7.3）。
+      // 派出那一轮的身份快照：汇报唤醒的回合继承它（§5.1）。
       spawner: parent => backend.spawner(Number(parent)) });
     for (const item of [coding, extension, ...Object.values(im), ...Object.values(schedule), ...(subagent ? [subagent] : [])]) registry.install(item);
     const storage = opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite"));
@@ -266,7 +266,7 @@ export class PiBackend implements ThreadAdapter {
   private owners(): OwnerIds { return typeof this.opts.owners === "function" ? this.opts.owners() : this.opts.owners; }
 
   /**
-   * 工具调用时的本轮绑定（§7.3）：主会话取宿主当前回合（见文件头 5）；子会话只有会话基础权限。
+   * 工具调用时的本轮绑定（§5.1）：主会话取宿主当前回合（见文件头 5）；子会话只有会话基础权限。
    * 读取范围、技能写权限与授权工具都由 runRights 统一求出（owner 本人读全部，其余为本会话）。
    */
   async binding(conversationId: number): Promise<PiCallBinding | undefined> {
@@ -345,7 +345,7 @@ export class PiBackend implements ThreadAdapter {
   }
 
   /**
-   * 子会话继承派出者的读取权限（§7.3）：取父会话登记里该子会话的派出者快照（message 时已与交代者合并、只降不升）；
+   * 子会话继承派出者的读取权限（§5.1）：取父会话登记里该子会话的派出者快照（message 时已与交代者合并、只降不升）；
    * 找不到父会话、登记或已停止的一律 undefined（基础权限）。发送、定时、授权工具对子会话本就不可用。
    */
   private async childIdentity(conversationId: number): Promise<RunPerson | undefined> {
@@ -357,7 +357,7 @@ export class PiBackend implements ThreadAdapter {
     return validPerson(as) ? { kind: as.kind, person: as.person, owner: as.owner } : undefined;
   }
 
-  /** 派出子 agent 时父会话这一轮的身份快照（§7.3）：turn 为回合类型，as 为本轮确证的人（基础权限则缺省）。 */
+  /** 派出子 agent 时父会话这一轮的身份快照（§5.1）：turn 为回合类型，as 为本轮确证的人（基础权限则缺省）。 */
   async spawner(conversationId: number): Promise<SubagentSpawner | undefined> {
     const bound = await this.binding(conversationId);
     if (!bound || bound.child) return undefined;
@@ -687,7 +687,7 @@ export class PiBackend implements ThreadAdapter {
   }
 
   /**
-   * 宿主不知道的 run（子 agent 汇报唤醒等）：按后端开的回合回报。身份由 run 的输入求出（汇报带回的派出者，§7.3），
+   * 宿主不知道的 run（子 agent 汇报唤醒等）：按后端开的回合回报。身份由 run 的输入求出（汇报带回的派出者，§5.1），
    * 求不出（不是汇报、没有派出记录、多人混合）为会话基础权限。
    */
   private async startWake(threadKey: string, state: ThreadState, first: SubmissionId): Promise<void> {

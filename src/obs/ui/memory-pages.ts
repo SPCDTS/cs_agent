@@ -1,6 +1,6 @@
 /**
- * 观测 v2 的记忆页面（设计 §1、§5.1、§5.3，分组 O4）。数据来自 /api/memory/* 的同一份已脱敏 JSON
- * （http.ts 在服务端内部调用记忆路由取得，契约见 docs/O4-memory-api.md）；这里只做渲染，所有文本经 esc。
+ * 观测 v2 的记忆页面（docs/DASHBOARD.md §8）。数据来自 /api/memory/* 的同一份已脱敏 JSON
+ * （http.ts 在服务端内部调用记忆路由取得）；这里只做渲染，所有文本经 esc。
  * 时间线由 /assets/memory.js 用本地 vis-timeline 绘制，数据经 <script type="application/json"> 传入。
  */
 import { redactText } from '../../shared/redact.js';

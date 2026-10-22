@@ -8,7 +8,7 @@ import { mergePersons, validPerson, type RunPerson } from "../host/identity.js";
  * 每个子会话由父会话里的后台锚定任务持有，父会话的中止与空闲等待都碰不到它；
  * 每条交给子会话的消息由一个汇报任务投递，子会话回答后把结果作为 follow-up 输入投回父会话，从而唤醒主 agent。
  * 投递与汇报都带 requestId，重启后重跑只会找回同一提交，不会重复派发或重复汇报。
- * 身份（§7.3）：派出时快照派出那一轮的身份（登记在子 agent 记录里），随每条汇报的条目数据带回；
+ * 身份（§5.1）：派出时快照派出那一轮的身份（登记在子 agent 记录里），随每条汇报的条目数据带回；
  * 宿主据此让汇报唤醒的回合继承派出者。之后由别的回合 message 给它时，快照与该回合的身份合并（不同人 → 基础权限）。
  */
 
@@ -63,7 +63,7 @@ export interface SubagentOptions {
   now?: () => number;
   /** 在创建子会话的同一提交中运行，供宿主写入子会话需要的文档（如身份绑定）。 */
   initChild?: (tx: Tx, parent: ConversationId, child: ConversationId) => void | Promise<void>;
-  /** 派出 / message 时调用：求出父会话当前这一轮的身份快照（§7.3）；未提供或返回 undefined 时汇报唤醒只有基础权限。 */
+  /** 派出 / message 时调用：求出父会话当前这一轮的身份快照（§5.1）；未提供或返回 undefined 时汇报唤醒只有基础权限。 */
   spawner?: (parent: ConversationId) => Promise<SubagentSpawner | undefined>;
 }
 
@@ -236,7 +236,7 @@ export function createSubagentExtension(opts: SubagentOptions) {
         if (!args.task) return output("spawn 需要 task", true);
         if (args.name !== undefined && !NAME.test(args.name)) return output("名字只能包含文字、数字、_ 与 -，最长 32 个字符", true);
         const parentAgent = await api.agent(context);
-        // 派出那一轮的身份快照（§7.3）：汇报唤醒的回合继承它。
+        // 派出那一轮的身份快照（§5.1）：汇报唤醒的回合继承它。
         const spawner = await opts.spawner?.(api.conversationId);
         // 子会话的工具集：父会话启用的工具减去排除名单，显式写成数组，宿主后续换扩展也不会带回被排除的工具。
         const seen = new Set<string>(), tools: ToolRegistration[] = [];

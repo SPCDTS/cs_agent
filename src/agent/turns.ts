@@ -1,7 +1,7 @@
 /**
- * 回合编排（设计 §4、§8）：
+ * 回合编排（docs/ARCHITECTURE.md §2.4、§3.4）：
  * - BackendRouter：ThreadHost 的适配器入口，按会话键选择后端（面板设置与覆盖表；owner 线程取首个 owner 账号私聊的覆盖），
- *   不按单条输入的 scope——一个会话同一时间只由一个后端服务（§4.3）。后端属于会话：plan 选定、宿主落盘在会话文档，
+ *   不按单条输入的 scope——一个会话同一时间只由一个后端服务（§2.4）。后端属于会话：plan 选定、宿主落盘在会话文档，
  *   开轮（含重启后恢复未确认的开轮）按会话后端执行；配置改为别的后端时，会话当前后端在该会话仍有工作
  *   （pi 子 agent 在跑、codex 回合或子 agent 线程未结束）时，本轮仍用旧后端，切换在它结束后生效。开轮时冻结设置快照；
  *   插话、恢复、放弃按回合 id 前缀（pi: / codex:）交给对应后端；后端不可用时开轮重试，超过 2 分钟才算投递失败。
@@ -25,7 +25,7 @@ export interface BackendAdapter extends ThreadAdapter {
   startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext, settings?: SettingsSnapshot): Promise<StartTurnResult>;
 }
 
-/** 后端不可用超过重试时长：输入无法投递（§8.1 第三种提示）。 */
+/** 后端不可用超过重试时长：输入无法投递（§3.4 第三种提示）。 */
 export class UndeliverableError extends Error {
   override readonly name = "UndeliverableError";
 }
@@ -207,7 +207,7 @@ export class TurnMonitor {
     },
   };
 
-  /** 出错提示（§8.1）：同一会话 10 分钟内最多一条，作为系统消息经 Outbox 发出。 */
+  /** 出错提示（§3.4）：同一会话 10 分钟内最多一条，作为系统消息经 Outbox 发出。 */
   private async notice(event: TurnEnded): Promise<void> {
     if (!this.opts.sendService) return;
     const last = this.notified.get(event.threadKey);
@@ -226,7 +226,7 @@ export class TurnMonitor {
     await this.opts.getHost().interrupt(threadKey);
   }
 
-  /** 看门狗（§8.2）：回合连续 30 分钟没有任何事件即中止；回合结束后按失败提示。 */
+  /** 看门狗（§3.4）：回合连续 30 分钟没有任何事件即中止；回合结束后按失败提示。 */
   async sweep(): Promise<ThreadKey[]> {
     const stalled = this.opts.getHost().stalled(this.now(), this.opts.stallMs ?? STALL_MS);
     for (const threadKey of stalled) {
