@@ -19,9 +19,10 @@ RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sou
  && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates git tini bubblewrap \
  && rm -rf /var/lib/apt/lists/*
 
-# comfy-cli + comfy-mcp（stdio MCP）装在独立 venv
+# comfy-cli + comfy-mcp（stdio MCP）装在独立 venv；pypi.org 在本机网络下连不上，走镜像（可用 PIP_INDEX_URL 构建参数改回）
+ARG PIP_INDEX_URL=https://mirrors.huaweicloud.com/repository/pypi/simple
 RUN python3 -m venv /opt/comfy \
- && /opt/comfy/bin/pip install --no-cache-dir comfy-cli comfy-mcp
+ && /opt/comfy/bin/pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" comfy-cli comfy-mcp
 
 # codex CLI（固定版本）：常驻 app-server 的子 agent 唤醒（features.wake_on_agent_messages）自 0.164.0-alpha.8 起才有，
 # 仍在开发中，升级前须按 docs/DESIGN-resident-agent.md §5.2 复测
