@@ -30,8 +30,11 @@ RUN npm i -g @openai/codex@0.164.0-alpha.8 && npm cache clean --force
 
 # codex 的浏览器 MCP：@playwright/mcp + headless Chromium（含系统依赖，需 root 安装；node 用户可读）
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+# 系统依赖单独装并重试：本机网络经代理访问镜像，长时间下载中途常断连；已下载的包留在 apt 缓存里，重试只补缺的。
 RUN npm i -g @playwright/mcp@0.0.83 \
- && node /usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright/cli.js install --with-deps chromium \
+ && PW=/usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright/cli.js \
+ && for i in 1 2 3 4 5; do node "$PW" install-deps chromium && break; [ "$i" = 5 ] && exit 1; echo "install-deps 第 $i 次失败，重试"; sleep 10; done \
+ && node "$PW" install chromium \
  && chmod -R a+rX /opt/pw-browsers \
  && npm cache clean --force \
  && rm -rf /var/lib/apt/lists/* /tmp/*
