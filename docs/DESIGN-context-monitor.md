@@ -1,5 +1,7 @@
 # 设计：面板上下文长度监控与缓存未命中标记
 
+> 2026-10-22 更新：文中的"票据"指当时"一条消息一次回合"的单位。常驻 agent 改造后（[常驻 agent 设计](DESIGN-resident-agent.md)），一个会话线程连续处理多轮，观测按回合 / 输入记录；观测库 `events.ticket` 列名与票据页的改造属于该设计第 5 阶段，当前页面以 [DASHBOARD.md](DASHBOARD.md) 为准。
+
 状态：已实现并部署（2026-10-20）。关联：设计 §8.5 上下文占用条（`src/obs/ui/context-bar.ts`、`src/agent/context-usage.ts`）。
 
 ## 0. 事实（2026-10-20）

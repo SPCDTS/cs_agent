@@ -1,5 +1,7 @@
 # 定时任务与统一发送（设计 v2，2026-10-20，取代 DESIGN-pi-heartbeat.md）
 
+> 状态（2026-10-22）：发送与运行部分已被 [常驻 agent 设计](DESIGN-resident-agent.md) 取代，下文保留原记录。D4 的兜底回复（`FALLBACK_REPLY` / `#fallback` / `no_send_fallback`）已取消：模型没发消息不兜底，只在出错时提示。D9 改为 owner 只在 owner 私聊线程读取全部，群里也只读本群（§4.1 的"owner 在群里 access=all"不再成立）。D11 的每回合 3 / 5 条上限取消，改由 QQ bridge 发送规则限速与熔断；主动发送每目标每天 100 条保留。§3.2–3.4 的票据、`#n` 序号与 settle 改为会话绑定的 Outbox（行键 `<threadKey>:<callKey>`）；第 6 步的 `DispatchDoc` 定时运行改为向会话投定时输入。D1–D3、D5–D8、D10、授权表（§4.2）与定时工具（§6）仍有效。
+
 > 页面版（含图）：https://claude.ai/artifact/NwwBzUGdCpoQo7TXFjAMHw 。本文件是实现依据，二者冲突时以本文件为准。
 
 ## 1. 已定的决策（用户 2026-10-20）

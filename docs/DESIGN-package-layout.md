@@ -2,6 +2,8 @@
 
 > 2026-10：本地 ComfyUI 生图（生图前缀路由、generate_image、image_gen MCP）已移除，本文相关段落仅作历史记录。
 
+> 2026-10-22：派发与分流模块（`agent/dispatch.ts`、`agent/router.ts`、`agent/tasks.ts`）已随常驻 agent 改造（[常驻 agent 设计](DESIGN-resident-agent.md)）删除，由 `agent/inbox.ts`、`agent/host/`、`agent/turns.ts` 取代。分层规则与依赖守卫仍有效，搬迁表只作记录。
+
 用户要求：在观测面板 v2 收尾后，顺手把"包之间耦合过度"的问题整理掉。本文是约束实施的设计，§7 记录验收。
 
 ## 0. 现状（2026-10-19，commit c856372）

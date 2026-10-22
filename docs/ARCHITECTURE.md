@@ -19,7 +19,7 @@
 |---|---|
 | `@earendil-works/pi-durable` | 1.3.0；依赖 `@earendil-works/pi-ai` 1.3.0、`@earendil-works/chord` 1.3.0；实验性 API |
 | `@earendil-works/pi-ai` | 内置 provider `openai-codex`（ChatGPT 订阅 OAuth，baseUrl `https://chatgpt.com/backend-api`）、`openai`、`anthropic` 等；`providers/faux` 可用于测试 |
-| `@openai/codex` | 镜像固定 `0.164.0-alpha.8`（子 agent 唤醒 `wake_on_agent_messages` 自此版本起才有）。cs-agent 常驻一个 `codex app-server`（stdio JSON-RPC），`thread/start` / `thread/resume`、`turn/start` / `turn/steer`；`CODEX_HOME` 决定 auth.json/config.toml/sessions 位置。早期的 `codex exec [resume]` 用法见 §5.3 与 §10 |
+| `@openai/codex` | 镜像固定 `0.164.0-alpha.8`（子 agent 唤醒 `wake_on_agent_messages` 自此版本起才有）。cs-agent 常驻一个 `codex app-server`（stdio JSON-RPC），`thread/start` / `thread/resume`、`turn/start` / `turn/steer`；`CODEX_HOME` 决定 auth.json/config.toml/sessions 位置。早期每轮一个 `codex exec [resume]` 的用法已废弃，只在 §10 历史记录中出现 |
 | NapCat（Compose 服务，2026-10-19 方案） | `mlikiowa/napcat-docker` 按 index digest 固定；HTTP `agent-http` / WS `agent-ws` 在容器内监听 `0.0.0.0:3000/3001`，cs-agent 默认访问 `http://napcat:3000` / `ws://napcat:3001`，同一 Bearer token，`messagePostFormat: array`。3000/3001 不发布，WebUI 只发布 `127.0.0.1:6099`。环境变量仍可指向宿主机 NapCat（`host.docker.internal:3000/3001`），用于回退；真实迁移验收见 `DESIGN-napcat-container.md` §6 |
 | codex 模型提供者（2026-10-19） | 默认 `CODEX_PROVIDER=magpie`，容器经 `http://host.docker.internal:3425/v1` 访问宿主机 magpie，使用 Responses 与 `supports_websockets=false`；gateway key 仅经环境变量注入，目录用 `/v1/codex/models`。容器 NAT 被视为回环，key 归集与限定模型，不是这条路径的访问控制 |
 | 模型凭据 | codex 仅 `CODEX_PROVIDER=openai` 直连时需要容器内 `auth.json`；pi / 摘要默认 DeepSeek API key，可选 `openai-codex` OAuth 不受该开关影响 |
@@ -33,7 +33,7 @@ QQ 用户 ──NapCat(OneBot v11)──► QQBridge(ws 收 / http 发)
                                      ▼
                      Inbox：按会话键投递，记录 queued → delivered → done
                                      ▼
-                     ThreadHost（每个会话键一份 cs.thread-host 文档，派发 harness /data/agent.sqlite）
+                     ThreadHost（每个会话键一份 cs.thread-host 文档，宿主 harness /data/agent.sqlite）
                      空闲 → 开一轮；忙且同一发送者 → 插话；其余（他人消息、定时输入）→ 排队
                      不同会话并行，进行中的回合数 ≤ AGENT_CONCURRENCY
                                      ▼
@@ -73,7 +73,7 @@ cs_agent/
 │  ├─ media/                     QQ 下层的通用媒体能力，不依赖 qq/context/agent/obs/mcp
 │  │  ├─ header.ts              图片容器头、动画与尺寸校验
 │  │  ├─ download.ts            安全下载、地址检查与 DownloadHooks
-│  │  ├─ attach.ts, attach-paths.ts  附件来源/大小/数量/去重、文件清单与票据目录校验
+│  │  ├─ attach.ts, attach-paths.ts  附件来源/大小/数量/去重、文件清单与按会话的附件目录校验
 │  │  ├─ limits.ts              图片数量/大小限制、魔数、根目录与文件读取校验
 │  │  ├─ image-collect.ts       collectNewImages：目录内新增图片收集（不跟随软链接，按魔数校验）
 │  │  └─ references.ts          validateReferences：入站参考图的允许列表与 realpath 范围校验
@@ -90,11 +90,12 @@ cs_agent/
 │  │  ├─ extension.ts            defineExtension("cs-agent")：只注册定时排程任务（无模型工具）
 │  │  ├─ config.ts               组合时解析 owner 与后端覆盖表
 │  │  ├─ inbox.ts                Inbox：触发消息与定时输入按会话键投递、恢复、工具绑定与输入呈现
-│  │  ├─ host/                   ThreadHost：每会话常驻线程的开轮 / 插话 / 排队、身份与持久文档
+│  │  ├─ host/                   ThreadHost：每会话常驻线程的开轮 / 插话 / 排队、持久文档；identity.ts 求每轮权限（runRights）
 │  │  ├─ turns.ts                BackendRouter（会话后端选择）与 TurnMonitor（出错提示、看门狗）
 │  │  ├─ backends/               纯请求契约、后端选择、Codex/Pi 实现与 Pi 只读会话源契约
-│  │  ├─ codex/                  runner、prompt、trace、context-usage、model-catalog、workspace、oauth
-│  │  │  ├─ runner.ts            owner/会话域线程、互斥队列、JSONL、线程持久化与 AGENTS.md
+│  │  ├─ codex/                  runner、app-server、prompt、trace、context-usage、model-catalog、workspace、oauth
+│  │  │  ├─ app-server/          常驻 codex app-server 的监管器（掉线退避重启）与 JSON-RPC 客户端
+│  │  │  ├─ runner.ts            会话线程映射（codex-threads.json）与轮换、线程级配置（命名权限、受管 AGENTS.md、MCP 线程令牌）
 │  │  │  └─ oauth.ts             将 Codex auth.json 的 ChatGPT tokens 映射为 pi-ai 凭据
 │  │  ├─ send-service.ts         send_message 的目标校验、授权与日额度，写 Outbox
 │  │  └─ replies.ts              出错提示文案（failed / lost / undeliverable）
@@ -134,16 +135,17 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 - 没有意图层系统提示；v2 的 `${DATA_DIR}/prompts/system.md` 不再读取，存在时启动记一行弃用 warn（文件保留）。
 - 执行 agent 的后端选择：`AGENT_BACKEND`（默认 codex）+ `AGENT_BACKEND_OVERRIDES`（`scope=backend`，非法项启动失败）；后端属于会话，配置变更在会话空闲且旧后端没有后台工作后生效。
 
-### 5.3 固定 codex 会话
-- `CODEX_HOME=/data/codex`（容器卷），工作目录 `/workspace`（容器卷）。
-- 首轮：`codex exec --json -o <out> -C /workspace --skip-git-repo-check -s workspace-write "<prompt>"`，从 JSONL 事件中取 thread/session id（`thread.started` 类事件；实现方以实际输出为准），持久化到 `/data/codex-session.json`。
-- 之后：`codex exec resume <id> --json -o <out> ... "<prompt>"`。
-- 每轮推理强度：v3 固定取 `CODEX_REASONING_EFFORT`，首轮与 resume 均追加 `-c model_reasoning_effort="<档位>"`（v2 曾由意图模型按请求选择）。若 resume 因会话丢失失败 → 新建会话并覆盖记录，回复中不暴露内部错误细节。
-- **互斥队列**：固定会话一次只跑一轮，其余排队；单轮超时可配（默认 600 s），超时后 kill 进程树并回复用户"处理超时"。
-- 容器内 `config.toml` 为受管文件，入口脚本每次启动按环境变量重写最小版本（`model`、`model_reasoning_effort` 来自环境变量，默认 `codex/gpt-6.1-sol` / `high`；后者只是缺省值，每轮被上面的 `-c` 覆盖），**不**继承宿主机的 Windows 路径配置。
-- codex 与 pi 共用的来源头部在群名已知时显示 `群 家庭群(123456)`，否则沿用群号；群名与昵称统一折成单行、中和来源/引用标签并限制 40 字，不赋予授权语义。QQBridge 的群名缓存来自 `get_group_info`（6 小时 TTL，硬超时 1500ms，失败退避 60 秒），随入站消息和恢复票据传递。
+### 5.3 codex 后端：常驻 app-server
+- `CODEX_HOME=/data/codex`（容器卷），每个会话的工作目录 `/workspace/<会话键>`（冒号换成下划线）。
+- cs-agent 启动并监管**一个**常驻 `codex app-server`（stdio JSON-RPC，`@openai/codex@0.164.0-alpha.8`），承载所有会话线程（`src/agent/codex/app-server/supervisor.ts`）。进程退出、管道错误或握手失败即视为掉线：按 1 s→60 s 退避重启，线程在下次使用时重新 `thread/resume`；掉线时进行中的回合与子 agent 丢失，向会话发"处理中断了"，不自动重放。
+- 线程映射：`owner`、`group:<id>`、`private:<qq>` 各一条线程，记录在 `/data/codex-threads.json`；首次 `thread/start` 后立即原子落盘，之后 `thread/resume`，只有确认线程不存在才归档并新建。线程空闲时检查安全阀（rollout 超过 `CODEX_ROLLOUT_MAX_MB` 或线程超过 `CODEX_THREAD_MAX_DAYS` 天）并轮换。
+- 线程级配置在 `thread/start` / `thread/resume` 的 `config` 里按点号键注入：命名权限（`src/agent/codex/workspace.ts`）、受管 AGENTS.md、`model_instructions_file`，以及 `im` / `qq_context` 两个 MCP 的线程令牌（`mcp_servers.<名>.env.IM_TOKEN` / `QQ_RECALL_TOKEN`）。app-server 为每个线程单独起 MCP 进程；令牌只证明"来自哪个线程"，身份与范围由主进程按会话当前回合求出（§5.6）。线程重新加载或进程重启时令牌作废重发。
+- 回合：开一轮 `turn/start`（`effort`、`model` 为本轮快照，`clientUserMessageId` = 入站键）；同一发送者插话 `turn/steer`（带 `expectedTurnId`）；面板"停止"用 `turn/interrupt`。子 agent 由受管配置的 `features.multi_agent` 与 `features.wake_on_agent_messages` 开启，子 agent 完成后 app-server 自行开一轮唤醒主 agent，该回合继承派出者的身份。
+- 不设单轮时限：回合连续 30 分钟没有任何事件由宿主看门狗中止并提示出错（`STALL_MS`，`src/agent/host/thread-host.ts`）。
+- 容器内 `config.toml` 为受管文件，入口脚本每次启动按环境变量重写（`model`、`model_reasoning_effort` 默认 `codex/gpt-6.1-sol` / `high`，后者只是缺省值，每轮被 `turn/start` 的 `effort` 覆盖），**不**继承宿主机的 Windows 路径配置。
+- codex 与 pi 共用的来源头部在群名已知时显示 `群 家庭群(123456)`，否则沿用群号；群名与昵称统一折成单行、中和来源/引用标签并限制 40 字，不赋予授权语义。QQBridge 的群名缓存来自 `get_group_info`（6 小时 TTL，硬超时 1500ms，失败退避 60 秒），随入站消息传递。
 - 上下文库以幂等迁移建立 `scope_names(scope PRIMARY KEY, name, updated_at)`，记录带群名的消息时 upsert；跨会话历史的消息、引用链与摘要标签附上清洗后的群名。
-- 只读工具 `qq_chats()` 列出群名/群号及好友备注，每类最多 200 条，仅限主人私聊（`access=all`）。pi 直接调用 Channel，codex 的 qq_context MCP 通过 `POST /chats` 回到 loopback 服务；主进程以同一回合 recall token 再次核验权限，令牌过期或撤销即取消查询。Channel 的 `listChats` 使用 `get_group_list/get_friend_list` 并刷新群名缓存，context 仅依赖通道契约。
+- 只读工具 `qq_chats()` 列出群名/群号及好友备注，每类最多 200 条，仅限主人私聊（`access=all`）。pi 直接调用 Channel，codex 的 qq_context MCP 通过 `POST /chats` 回到 loopback 服务；主进程凭线程令牌与调用所属回合重新求出本轮权限，令牌作废即拒绝。Channel 的 `listChats` 使用 `get_group_list/get_friend_list` 并刷新群名缓存，context 仅依赖通道契约。
 
 ### 5.4 图片：只收发，不再本地生图
 - 入站：触发消息的图片下载到 `/data/incoming/<入站键>/`，经 `media/references.ts` 按允许列表与 realpath 校验后，以 `[本轮参考图]` 列给模型（每条输入 ≤3 张）；媒体库、`qq_image` 召回与 `qq_view_image` 照旧。
@@ -151,9 +153,9 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 - 本地 ComfyUI 生图（`comfy-mcp` / HTTP 后端、Qwen 工作流、loopback 转发、`cs.image` 任务、pi 的 `generate_image`、codex 的 `image_gen` MCP、迟到图片 #late 收取）已于 2026-10 移除。
 
 ### 5.5 QQBridge（相对 D:\Tools\QQBridge 的取舍）
-保留：真实 `at` 段检测、自回声过滤、`self_id:type:group_id:user_id:message_id` 去重、授权模型（`allowUsers` 任意处可触发；`allowGroups` 内成员需真实 @）、票据决定性 ID 与 `pending→sending→sent|uncertain` 幂等机制、群回复 `[at][text "\n"+正文]`、图片 `base64://` 发送与魔数校验、"结果不确定不自动重试"。
+保留：真实 `at` 段检测、自回声过滤、`self_id:type:group_id:user_id:message_id` 去重、授权模型（`allowUsers` 任意处可触发；`allowGroups` 内成员需真实 @）、入站决定性 ID（入站键）与 Outbox 的 `pending→sending→sent|uncertain` 幂等机制、群回复 `[at][text "\n"+正文]`、图片 `base64://` 发送与魔数校验、"结果不确定不自动重试"。
 去掉：Codex 桌面管道、member-workspaces、group-context、MCP server 外壳、计划任务守护、loopback 限制（改为显式 URL + token 配置）。
-改进：票据与去重状态改用 `node:sqlite` 单文件；端点由环境变量直接给出；暴露为进程内模块而非 MCP。
+改进：入站、Outbox 与去重状态改用 `node:sqlite` 单文件；端点由环境变量直接给出；暴露为进程内模块而非 MCP。
 
 ### 5.6 附件发送与 codex 工具注册
 
@@ -161,21 +163,21 @@ P0/P1/P2 搬迁对照与分层澄清见 [包结构设计 §6.1](DESIGN-package-l
 
 - cs-agent 不再提供生图工具（pi 的 `generate_image`、codex 的 `image_gen` MCP 与 `CODEX_IMAGE_GEN` 已于 2026-10 移除）；受管 AGENTS.md 与 codex 提示词只保留聊天图片召回、附件用法与 codex 内置生图输出的发送说明。
 - 统一工具 `send_message({ text, images?, files?, target? })` 默认发回本回合会话，文件项为 `{ path, name? }`。跨会话目标仅支持 `qq:group:<id>` / `qq:private:<QQ号>`，由 SendService 校验格式、owner 或有效授权（含 scopes / 到期时间）、群成员或好友关系（缓存 5 分钟）及 Asia/Shanghai 每 ref 每天 100 条额度。日额度按该 ref 的全部模型 Outbox 行计，系统行排除，SQLite 预留行时原子复核；被发送规则拒绝的行不计入。主动发送不 @，机器人历史及附件写向目标会话，跨会话正文去重包含目标。
-- pi 在进程内调用 SendService；codex 的独立 `im` MCP 通过 loopback `/send`、`/im-info`、`/auth_grant`、`/auth_revoke`、`/auth_list` 调用主进程。令牌与 `PiRequestDoc` 绑定票据、来源、真实 `actor=qq:<user_id>` 和 `actorIsOwner`，身份只取 Channel 票据，不读消息正文。pi 按回合选择固定工具配置；im 子进程启动时从令牌绑定查询权限，仅有权回合列出 `target`，仅 owner 回合列出 `auth_*`，服务端逐次复核。
-- `GrantsDoc` 是派发 harness（agent.sqlite）的 Session 文档，以 user 为键；`auth_grant` 替换该用户的授权，`auth_revoke` 可撤销部分能力或整条，过期授权只读展示但不生效。面板沿用 owner 运维令牌与同源 / CSRF 保护。`schedule` 授权由 ScheduleService 和模型工具共同复核，来源 scopes 与到期时间实时生效。`auth_changed` 记录 panel / tool、操作者及前后差异，`send_message` trace 带实际 target。
-- `agent/schedule/tools.ts` 是 pi 与 codex 共用的定时工具入口，复用 ScheduleService 管理定义；`shared/schedule-tools.ts` 仅存工具名与权限契约，context 回环层不依赖 agent。管理工具仅开放给有 schedule 权限的交互回合，来源与 created_by 取真实票据，非 owner 只能管理自己的定义。pi 按轮配置独立扩展；im 启动时查询 `/im-info` 并调用 `/schedule_*`，HTTP 和工具服务逐次复核授权。
-- 定时运行只开放 `schedule_control`，通过持久 admission / ScheduledRunDoc 将票据绑定到自身定义；pause / complete 停止后续触发，保留当前运行与结算。模型不能传入目标 id、actor 或来源。规则输入使用北京时间 `YYYY-MM-DD HH:mm`，工具说明要求将通知目的地解析为具体 ref 写入 prompt；`schedule_tool` trace 记录 action、id、actor 和控制原因。
-- owner 在群和私聊均读取 `all`；线程键独立按来源决定：owner 私聊为 `owner`，所有群消息为 `group:<id>`，其他私聊为 `private:<qq>`。用户接受 owner 读取的其他会话内容可能留在来源群线程历史中；Codex 与 pi 一致，派发 FIFO 仍按来源 scope。
-- ReplyStore 的 Outbox 按票据和序号持久化正文、图片及文件状态：pi 按稳定 call_id 重放，codex 按本次 exec 的第 n 次有效调用映射。不限每回合条数，所有出站消息（含出错提示等系统消息，不含 owner 告警）在 bridge 统一过发送规则（`src/qq/send-rules.ts`：每会话每分钟 6 条拒绝、每会话每小时 60 条熔断该会话 60 分钟、全局每分钟 30 条熔断全部 10 分钟，数值在面板设置页可改；计数与熔断存于 qq-bridge.sqlite 的 send_log / send_breakers，熔断时私聊通知 owner 一次）；系统消息被拒只记告警，票据照常终结；同目标的相同正文哈希复用已发或不确定行，不确定结果不向模型报工具错误；群聊仅第一条 @ 提问者。图片、文件沿用 media/attach.ts 的来源与大小校验，副本保存在 `images/<ticket>/outbox/`。
+- pi 在进程内调用 SendService；codex 的独立 `im` MCP 通过 loopback `/send`、`/im-info`、`/auth_grant`、`/auth_revoke`、`/auth_list` 调用主进程。每次调用由主进程确认属于会话当前回合（codex 按 MCP 请求的 `_meta.callId` 找到所在回合，子 agent 线程与过期回合一律拒绝），再按本轮绑定的人求出权限（`runRights`，`src/agent/host/identity.ts`）：会话基础权限只读本会话、只发本会话；确证的人才叠加 target、定时、授权等能力，无法确证一律回落基础权限。身份只取 Channel 的真实发送者，不读消息正文。pi 按回合选择工具配置；im 子进程启动时查询 `/im-info`，仅有权回合列出 `target`，仅 owner 交互回合列出 `auth_*`，服务端逐次复核。
+- `GrantsDoc` 是宿主 harness（agent.sqlite）的 Session 文档，以 user 为键；`auth_grant` 替换该用户的授权，`auth_revoke` 可撤销部分能力或整条，过期授权只读展示但不生效。面板沿用 owner 运维令牌与同源 / CSRF 保护。`schedule` 授权由 ScheduleService 和模型工具共同复核，来源 scopes 与到期时间实时生效。`auth_changed` 记录 panel / tool、操作者及前后差异，`send_message` trace 带实际 target。
+- `agent/schedule/tools.ts` 是 pi 与 codex 共用的定时工具入口，复用 ScheduleService 管理定义；`shared/schedule-tools.ts` 仅存工具名与权限契约，context 回环层不依赖 agent。管理工具仅开放给有 schedule 权限的交互回合，来源与 created_by 取本轮会话与确证的人，非 owner 只能管理自己的定义。pi 按轮配置独立扩展；im 启动时查询 `/im-info` 并调用 `/schedule_*`，HTTP 和工具服务逐次复核授权。
+- 定时运行只开放 `schedule_control`，通过持久 admission / ScheduledRunDoc 将定时输入绑定到自身定义；pause / complete 停止后续触发，不中断当前回合。模型不能传入目标 id、actor 或来源。规则输入使用北京时间 `YYYY-MM-DD HH:mm`，工具说明要求将通知目的地解析为具体 ref 写入 prompt；`schedule_tool` trace 记录 action、id、actor 和控制原因。
+- 读取范围按线程：owner 只在 owner 私聊线程读取 `all`，在群里也只读本群（群线程历史对群里所有人可见，读进来的别处记录会被后来的人间接看到）；其他人读本会话。线程键按来源决定：owner 的所有账号私聊为 `owner`，群为 `group:<id>`，其他私聊为 `private:<qq>`；Codex 与 pi 一致。
+- ReplyStore 的 Outbox 行键为 `<threadKey>:<callKey>`，持久化正文、图片及文件状态：pi 用稳定的 `toolCallId`，codex 用 MCP 请求的 `_meta.callId`，崩溃重放取回同一行。不限每回合条数，所有出站消息（含出错提示等系统消息，不含 owner 告警）在 bridge 统一过发送规则（`src/qq/send-rules.ts`：每会话每分钟 6 条拒绝、每会话每小时 60 条熔断该会话 60 分钟、全局每分钟 30 条熔断全部 10 分钟，数值在面板设置页可改；计数与熔断存于 qq-bridge.sqlite 的 send_log / send_breakers，熔断时私聊通知 owner 一次）；系统消息（键 `<threadKey>:sys:<uuid>`）被拒只记告警；同目标的相同正文哈希复用已发或不确定行，不确定结果不向模型报工具错误；群里用户回合第一条发往本群的消息 @ 本轮发送者，定时与唤醒回合不 @。图片、文件沿用 media/attach.ts 的来源与大小校验，副本保存在 `images/<会话键>/outbox/<uuid>/`，回合结束时清理一小时前且已发完的副本。
 - 正文 sent 后逐个上传文件，分别持久化 `pending → sending → sent|uncertain`；sending/uncertain 永不重发。每条成功消息立即写一条上下文机器人行，可按 message_id 引用。
 - 回合结束不结算、不兜底：最终回答只记录 final_answer 留存；出错提示（failed / lost / undeliverable，同一会话 10 分钟内最多一条）由 TurnMonitor 作为系统消息发出，回合结束后补传未完成的附件。v3 票据时代的 handle → lateImages → settle 检查点、#late 迟到图片与 #fallback 兜底已随派发器与本地生图移除；迁移来的旧 Outbox 行保留系统消息标记。
 
 ### 5.7 模型凭据
-- `CODEX_PROVIDER=magpie|openai` 默认 magpie；`CODEX_MAGPIE_URL` 默认 `http://host.docker.internal:3425/v1`。runner 对目录查询及 exec/resume 注入 `CODEX_MAGPIE_KEY`，主进程注册脱敏，key 不落盘；magpie 不依赖容器 ChatGPT 凭据，直连仍保留原有 OAuth 行为。默认模型为 `codex/gpt-6.1-sol`，上下文、设置校验与面板均按完整目录 slug 精确匹配，离线缓存也不跨前缀匹配。Codex 0.163 的短名会落到默认模型元数据，丢失目录窗口与能力。无效 `codexModel` 保留原值并告警，新回合使用有效的 `CODEX_MODEL`，环境默认也无效则用内置默认；目录不可用时保留配置值。
-- 意图模型默认 provider `deepseek`、model `deepseek-flash`（pi-ai 内置 deepseek provider，OpenAI-completions 兼容接口 `https://api.deepseek.com`，支持工具调用）。密钥读环境变量 `DEEPSEEK_API_KEY`；`.env` 中写作 `DEEPSEEK_APIKEY` 也可，启动时映射为标准名，缺少密钥则启动失败。deepseek-flash 支持的思考档位为 off/low/high/max，`AGENT_THINKING_LEVEL` 不受支持时就近调整（如 medium → high）并记一条 warn 日志。
+- `CODEX_PROVIDER=magpie|openai` 默认 magpie；`CODEX_MAGPIE_URL` 默认 `http://host.docker.internal:3425/v1`。runner 对目录查询及 app-server 进程注入 `CODEX_MAGPIE_KEY`，主进程注册脱敏，key 不落盘；magpie 不依赖容器 ChatGPT 凭据，直连仍保留原有 OAuth 行为。默认模型为 `codex/gpt-6.1-sol`，上下文、设置校验与面板均按完整目录 slug 精确匹配，离线缓存也不跨前缀匹配。Codex 0.163 的短名会落到默认模型元数据，丢失目录窗口与能力。无效 `codexModel` 保留原值并告警，新回合使用有效的 `CODEX_MODEL`，环境默认也无效则用内置默认；目录不可用时保留配置值。
+- pi 与摘要模型默认 provider `deepseek`、model `deepseek-flash`（pi-ai 内置 deepseek provider，OpenAI-completions 兼容接口 `https://api.deepseek.com`，支持工具调用）。密钥读环境变量 `DEEPSEEK_API_KEY`；`.env` 中写作 `DEEPSEEK_APIKEY` 也可，启动时映射为标准名，缺少密钥则启动失败。deepseek-flash 支持的思考档位为 off/low/high/max，`AGENT_THINKING_LEVEL` 不受支持时就近调整（如 medium → high）并记一条 warn 日志。
 - `openai-codex` provider 仍可选（`AGENT_MODEL_PROVIDER=openai-codex`），凭据来自 `/data/codex/auth.json`（仅在 codex 也直连时共用同一份，由 `scripts/init-auth.ps1` 从宿主机复制一次）。实现方须查明 pi-ai `auth/oauth/openai-codex` 期望的 credential 字段（access/refresh/account_id/expires）并做映射；pi-ai 自行刷新时**写回**同一文件以保持与 codex 一致，若两者刷新策略冲突须在报告中指出。
 - 可通过 `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` / 对应 API Key 环境变量切换到 `openai` / `anthropic` 等 API-Key provider。
-- 意图识别用小/便宜模型即可。
+- 日/周摘要等辅助任务用小/便宜模型即可。
 
 ### 5.8 pi 项目指引与 system 消息
 
@@ -188,8 +190,8 @@ pi 的提示词按顺序由三部分组成：`DATA_DIR/prompts/agent.md`（默�
 ## 6. 环境变量（`.env.example`）
 
 ```
-NAPCAT_HTTP_URL=http://host.docker.internal:3000
-NAPCAT_WS_URL=ws://host.docker.internal:3001
+NAPCAT_HTTP_URL=http://napcat:3000          # 默认 Compose 内 NapCat；回退宿主机时改 host.docker.internal
+NAPCAT_WS_URL=ws://napcat:3001
 NAPCAT_TOKEN=
 QQ_ALLOW_USERS=10000001          # 逗号分隔或 *
 QQ_ALLOW_GROUPS=200000001          # 逗号分隔
@@ -198,7 +200,7 @@ CODEX_PROVIDER=magpie
 CODEX_MAGPIE_URL=http://host.docker.internal:3425/v1
 CODEX_MAGPIE_KEY=
 CODEX_MODEL=codex/gpt-6.1-sol
-CODEX_REASONING_EFFORT=high        # 缺省值；每轮由意图模型选择的档位覆盖
+CODEX_REASONING_EFFORT=high        # 缺省值；面板可改（含 auto），每轮快照经 turn/start 的 effort 传入
 AGENT_MODEL_PROVIDER=deepseek
 AGENT_MODEL_ID=deepseek-flash
 DEEPSEEK_API_KEY=                  # 也可写作 DEEPSEEK_APIKEY
@@ -218,20 +220,20 @@ LOG_LEVEL=info
 
 ## 8. 宿主机前置条件（写入 docs/DEPLOY.md）
 
-1. NapCat 保持现状（127.0.0.1:3000/3001 + token）；Docker Desktop 的 `host.docker.internal` 可直达宿主机 loopback 服务，已实测。`.env` 的 `NAPCAT_TOKEN` 取自 `D:\Tools\NapCat\config\onebot11_1670528780.json` 中 `agent-http` 条目的 token。
+1. NapCat 默认作为 Compose 服务运行（`napcat:3000/3001` + token，首次按 DEPLOY「NapCat 容器」播种配置并扫码）；也可回退到宿主机 NapCat（`host.docker.internal:3000/3001`）。迁移时 `NAPCAT_TOKEN` 沿用宿主机 `onebot11_<QQ号>.json` 中 `agent-http` 条目的 token。
 2. 默认先配置宿主机 magpie 的局域网共享、cs-agent gateway key 和模型范围（见 DEPLOY「codex 经 magpie」）；仅 `CODEX_PROVIDER=openai` 时运行 `scripts/init-auth.ps1` 把 `~/.codex/auth.json` 复制到 `./data/codex/auth.json`；或在容器内执行 `codex login --device-auth`。
 3. `docker compose up -d --build`；查看 `docker compose logs -f`。
 
 ## 9. 测试要求
 
-- **qq/**：用本地假 OneBot 服务器（`ws` + `node:http`）测试：授权规则、@ 检测、去重、重连、票据幂等（sent / uncertain / 并发锁）、群回复段格式、图片校验。
+- **qq/**：用本地假 OneBot 服务器（`ws` + `node:http`）测试：授权规则、@ 检测、去重、重连、Outbox 幂等（sent / uncertain / 并发锁）、发送规则与熔断、群回复段格式、图片校验。
 - **agent/**：Inbox 投递与恢复（含以 `奶龙:` 开头的消息照常投递）；ThreadHost 开轮 / 插话 / 排队、跨会话并行与并发上限、重启恢复；codex 后端经假 app-server、pi 后端经 faux provider；send_message 绑定、Outbox 幂等与出错提示；后端选择与会话后端切换。
 - `docker build` 必须成功；`docker compose config` 校验通过。
 - 不向真实群发测试消息。
 
 ## 10. 实现阶段确认的偏离与补充（2026-10-18）
 
-> 本节及 10.1–10.4 是各阶段的实现记录。2026-10 起，其中涉及派发器 / TicketDoc / `cs.agent` 检查点、生图前缀路由、ComfyUI（comfy-mcp、loopback 转发、Qwen 工作流、`/data/workflows`）、`image_gen` MCP、迟到图片 `lateImages` / `#late` 与 `obs-events.jsonl` 的条目均已移除，仅作历史记录；当前结构见 §3 与 §5。
+> 本节及 10.1–10.4 是各阶段的实现记录。已被[常驻 agent 设计](DESIGN-resident-agent.md)取代或已删除的部分只作历史：每轮一个 `codex exec [resume]`（`-c` 覆盖、`codex-last.txt`、单轮超时）、owner / shared 双线程、派发器 / TicketDoc / `cs.agent` 检查点与 FIFO 重试、兜底回复与 `#fallback`、`cs.pi.request` 与 pi 每回合工具配额、生图前缀路由、ComfyUI（comfy-mcp、loopback 转发、Qwen 工作流、`/data/workflows`）、`image_gen` MCP、迟到图片 `lateImages` / `#late` 与 `obs-events.jsonl`。当前结构见 §3 与 §5。
 
 上下文启动回填在面板服务前完成：codex 与轮换安全阀共用 rollout 发现逻辑，倒读末尾至多 2 MiB，以 `task_complete` 计回合、取此前最近 `token_count.info.last_token_usage` 和该记录时间；尾部截断只恢复可见回合数并保留既有更大计数；pi 按监听快照边界分页读取 harness 历史，恢复 assistant 输入及缓存、回合数与压缩消息时间，监听接续新提交；异常保留原记录，按后端记录汇总，重置后复查映射而不恢复归档。
 
@@ -380,16 +382,13 @@ HTTP 面板由原健康服务器承载：/healthz 分支无需认证，仅返回
 成员独立工作区、通用主动推送、可写的 Web 管理界面和多用户面板权限。只读观测面板、可选运维告警、上下文摘要与隔离会话已在前述分组实现。
 
 
-## 12. 派发设置一致性
+## 12. 运行时设置的每轮快照
 
-`TicketDoc.settings` 保存派发时的后端与 Codex 推理强度。生产入口通过单次 `SettingsStore.current()` 获取一致副本；快照在异步附件准备及 FIFO 排队之前取得，与 TicketDoc/DispatchDoc 同事务持久化。handle 按快照选择已注册后端，Codex 请求显式携带快照，历史机器人行只读票据值，恢复与重试不重新采样。
-
-旧版无快照票据采用固定兼容值（high，已有 pi 结果则 pi，否则 codex）并持久化。无法从现存记录推断的旧设置不声称能够还原；新登记的孤儿票据按新的派发处理。旧票据中的 `codexReplyMode` 被忽略；后处理原文照发，仅做长度保护。
-
+面板设置（后端、Codex 模型与推理强度、pi 模型与思考档位）在**每轮开始时**冻结一次（`src/agent/turn-settings.ts`）：在第一个 await 之前单次读取 `SettingsStore.current()`；档位为 `auto` 时按本轮输入文本路由（定时与唤醒回合同样适用）。codex 经 `turn/start` 的 `model` / `effort` 生效，pi 按快照选择模型与思考档位；排队期间改设置不影响已开的回合。会话仍由旧后端服务（切换被推迟）时，本轮强制沿用旧后端。
 
 ## 13. 管理审计预算
 
-`ObsStore` 按阶段（settings_changed、prompt_changed、thread_reset）或 `@` 票据前缀识别管理事件：直接追加脱敏后的行，跳过普通事件数量、累计字节预算及进度合并。普通预算聚合也排除管理行。`purge(days, now)` 接口保持不变，内部以构造时传入的管理保留天数分别清理；默认 365 天，普通事件与指标默认 30 天。主进程将已校验的 OBS_ADMIN_RETENTION_DAYS 传入，不改变面板查询契约。
+`ObsStore` 按阶段（settings_changed、prompt_changed、thread_reset）或以 `@` 开头的事件键识别管理事件：直接追加脱敏后的行，跳过普通事件数量、累计字节预算及进度合并。普通预算聚合也排除管理行。`purge(days, now)` 接口保持不变，内部以构造时传入的管理保留天数分别清理；默认 365 天，普通事件与指标默认 30 天。主进程将已校验的 OBS_ADMIN_RETENTION_DAYS 传入，不改变面板查询契约。
 
 
 ## 14. 重置事务与归档镜像

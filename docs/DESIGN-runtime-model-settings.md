@@ -1,5 +1,7 @@
 # 设计：面板按 agent 配置模型与思考档位（含 auto）
 
+> 状态（2026-10-22）：已实现（`src/agent/settings.ts`、`src/agent/turn-settings.ts`、`src/agent/effort-router.ts`）。快照不再写入票据：每轮开始时冻结一次（类型名仍为 `TicketSettings`），`auto` 按本轮输入选档，codex 经常驻 app-server 的 `turn/start`（`model`、`effort`）生效。文中的派发器、`TicketDoc.settings`、`-c` 覆盖与票据页已被 [常驻 agent 设计](DESIGN-resident-agent.md) 取代。
+
 状态：设计完成，待实现。关联：`docs/DESIGN-codex-via-magpie.md`、`docs/DESIGN-pi-via-magpie.md`、`src/agent/settings.ts`（运行时设置 §8.4）。
 
 ## 0. 事实（2026-10-19 实测）

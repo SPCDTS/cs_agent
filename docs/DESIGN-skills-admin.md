@@ -1,5 +1,7 @@
 # 设计：面板 skill 管理页 + agent 自行写入技能
 
+> 2026-10-22 更新：§4 的身份判定（按票据 `source.user_id` 算 `senderIsOwner`）已改为每轮权限 `runRights`（`src/agent/host/identity.ts`）。pi：本轮确证的人是 owner 时可写共享技能（子 agent 会话不可写）；codex：线程级权限在加载线程时注入，只有 `owner` 线程可写 `/data/codex/skills/shared`，群线程即使 owner 发言也不可写（`src/agent/codex/runner.ts` 的 `threadOptions`）。
+
 状态：已实现并部署（2026-10-20）。前置：`docs/DESIGN-skills.md`（共享目录已上线，只读挂载）。
 
 ## 0. 事实（2026-10-20）

@@ -1,5 +1,7 @@
 # 定时任务运行时（第 4–6 步，2026-10-20）
 
+> 状态（2026-10-22）：§4 的执行方式（`run_` 出站票据、`openOutbound`、`TicketDoc` / `DispatchDoc` 条目、`cs.scheduled` 任务与 settle、`dispatcher.recover()`）已被 [常驻 agent 设计](DESIGN-resident-agent.md) §10 取代：到点向来源会话的 ThreadHost 投一条定时输入（入站键仍以 `run_` 开头，发送者为创建者），线程忙则排队到空闲；结果按该输入所在回合发出的消息数记 sent / silent / failed，回合失败不向会话发出错提示；权限按创建者求出（`runRights`）。`options.timeout_ms` 仍保存，但不再限制回合时长。§1–§3 的定义、校验、管理接口与排程任务仍有效；下文保留原实现记录。
+
 > 总体设计与已定决策见 DESIGN-scheduled-tasks.md（§1 决策 D1–D11）。本文件是第 4–6 步的实现依据；共用类型在 `src/agent/schedule/types.ts`，两边都以它为契约。
 > 任务拆分：**A = 第 4+5 步**（定义、校验、管理接口、排程任务），**B = 第 6 步**（触发后的执行）。两边并行开发，互不实现对方的部分。
 

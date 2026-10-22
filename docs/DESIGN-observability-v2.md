@@ -1,5 +1,7 @@
 # 观测面板 v2 设计：Agent → 会话 → 回合，上下文结构分析，记忆可视化
 
+> 2026-10-22 更新：文中"票据"页、按票据关联的事件与 owner / shared 线程是当时的口径。常驻 agent 改造后（[常驻 agent 设计](DESIGN-resident-agent.md) §12），事件键为 `turn:<id>` / `in:<入站键>` / `thr:<会话键>`，每个会话一条线程；票据页与 `events.ticket` 列名的改造属于第 5 阶段。当前页面以 [DASHBOARD.md](DASHBOARD.md) 为准。
+
 状态：已确认（2026-10-18，用户拍板 §8 三项决策）。调研依据见 `docs/research/observability-viewer-research.md`。本设计一经确认即为约束性文档；实现分组见 §7，验收记录追加到 §9。
 
 ## 0. 目标与非目标

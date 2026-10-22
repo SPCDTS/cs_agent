@@ -4,6 +4,8 @@
 
 > 2026-10-19 更新：回复后处理已移除 relay，两后端均只做代码清洗；postprocess 阶段保留，不再发出 relay 模型调用或其 fallback 事件。下文保留原验收记录，历史事件与用量仍可读取、聚合。
 
+> 2026-10-22 更新：常驻 agent（[常驻 agent 设计](DESIGN-resident-agent.md)）取代了票据派发：dispatcher 与 durable 任务阶段事件、`fallback` / `no_send_fallback` 终态及"连续三条票据失败"告警的口径仅作历史记录；现在终态按回合记录，告警改为连续三个回合失败。
+
 > 2026-10 更新：本地 ComfyUI 生图已移除（pi 的 `generate_image`、codex 的 `image_gen` MCP、`image:submit / image:collect` 事件、ComfyUI 健康检查与 `comfy_job_duration_ms` 指标）；下文涉及生图的条目仅作历史记录。
 
 ## 文件

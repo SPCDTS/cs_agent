@@ -1,5 +1,7 @@
 # 容器内 codex 经宿主机 magpie 出站（2026-10-19，用户决定）
 
+> 2026-10-21 起 codex 不再每轮起一个 `codex exec`，改为 cs-agent 监管的常驻 `codex app-server`（[常驻 agent 设计](DESIGN-resident-agent.md) §5）。provider 配置、`CODEX_MAGPIE_KEY` 只经进程环境注入等约束不变；下文图中的 `codex exec` 即现在的 app-server 进程。
+
 用户原话："容器中的 codex 模型都不再直连，全都连到我宿主机的 magpie，codex 通过 `supports_websockets = false` 来关闭 websocket。"本文是实施约束；§6 记录验收。
 
 ## 0. 已核实的事实

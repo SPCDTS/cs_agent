@@ -2,6 +2,8 @@
 
 > 2026-10：pi 的 `generate_image` 工具与本地 ComfyUI 生图已移除，本文涉及生图的段落（含默认提示词中的生图指引）仅作历史记录。
 
+> 2026-10-22：pi 后端已改为常驻会话（[常驻 agent 设计](DESIGN-resident-agent.md) §6）：`requestId` = 入站键的 follow-up 开轮与 steer 插话、后台子 agent 完成后唤醒主 agent、无单轮时限与每回合工具配额。文中的票据、`cs.pi.request`、`whenBusy: reject`、超时中止与 shared 线程仅作历史记录。
+
 实现提交：`b5fcb67`。最终 typecheck、全量 404 测试、build、`docker build -t cs-agent:g3 .` 全部通过。未停止、重启或重建运行容器；未调用真实模型、Codex、QQ、ComfyUI 或 DeepSeek Search/Fetch API；所有新模型测试使用 pi-ai faux provider。
 
 ## 文件

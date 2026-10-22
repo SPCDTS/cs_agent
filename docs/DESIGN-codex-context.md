@@ -1,5 +1,7 @@
 # 设计 v2：聊天记录衰老与检索、意图层会话感知、联网检索、"先查再画"
 
+> 状态（2026-10-22）：本文是 v2 / v3 时期的设计与验收记录。codex 执行层（§3.1 owner / shared 双线程、每轮 `codex exec [resume]`、以 `-c` 注入 `QQ_ACCESS`、单轮超时）、意图层与规则分流（§4.1–4.2）、派发顺序（§4.7）已被 [常驻 agent 设计](DESIGN-resident-agent.md) 取代：每个会话一条线程，由一个常驻 `codex app-server` 承载，读取范围由主进程按本轮权限求出。消息库、衰老、检索与图片召回（§2）以及 §8 的多数条目仍有效；当前结构以 [ARCHITECTURE.md](ARCHITECTURE.md) 为准。
+
 > 2026-10：本地 ComfyUI 生图（生图前缀路由、generate_image、image_gen MCP）已移除，本文相关段落仅作历史记录。
 
 > 状态：v2，按用户反馈简化。未实现。

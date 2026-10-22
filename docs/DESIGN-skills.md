@@ -1,5 +1,7 @@
 # 设计：共享 skills 目录（codex 与 pi）
 
+> 2026-10-21 起 codex 为常驻 `codex app-server`，§0 中"每条消息是一次新的 `codex exec`，目录变化下一条消息即生效"不再成立。已加载线程何时重新扫描共享 skills 目录未重新实测；改动后需要立即生效时，在面板重置该会话线程或重启容器。
+
 状态：已实现并部署（2026-10-20）。关联：`docs/DESIGN-pi-agents-md.md`（pi 的 project-context 段，本设计沿用其加载器风格）、`docs/DESIGN-codex-context.md` §8.11（codex 插件 skills 的 token 代价）。
 
 ## 0. 事实（2026-10-20 实测/查证）

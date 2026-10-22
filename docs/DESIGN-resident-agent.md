@@ -1,7 +1,7 @@
 # 常驻 agent：消息即输入，send_message 即输出
 
-状态：设计稿（2026-10-21），待确认后分阶段实施。
-取代：`DESIGN-schedule-runtime.md` 中"定时运行 = 出站票据"的部分；票据（ticket）不再作为对话概念存在。
+状态：当前架构（2026-10-21 设计，已实施）。第 14 节第 1–4 阶段已落地；第 5 阶段（删除票据残留、观测改造）进行中，涉及的条目在文中标注。
+取代：`DESIGN-schedule-runtime.md` 中"定时运行 = 出站票据"的部分、`DESIGN-codex-context.md` 中每轮一个 `codex exec` 的执行方式；票据（ticket）不再作为对话概念存在。
 
 ## 1. 目标
 
@@ -21,9 +21,9 @@
 | 定时任务 | 到点向来源会话线程输入一条"定时任务：<提示词>"，线程忙则排队等空闲（不插话） |
 | 长任务 | 派子 agent 去做，主 agent 结束本轮；子 agent 完成时唤醒主 agent，由它汇报 |
 
-## 2. 现状与问题
+## 2. 改造前的问题（历史）
 
-现在一条入站消息 = 一张票据 = 一次 agent 回合 = 一次结算（详见附录 A 的耦合清单）：
+改造前一条入站消息 = 一张票据 = 一次 agent 回合 = 一次结算（详见附录 A 的耦合清单）：
 
 - 派发器为每张票据新建一个 pi-durable 会话（`TicketDoc` + `DispatchDoc.pending[ticket]`），按会话 FIFO 串行，最多重试 3 次，结算时没发过就兜底。
 - `send_message` 绑定票据：票据一结算就不能再发；每轮最多 3 条（定时 5 条）；群里第一条 @ 提问者。
@@ -115,7 +115,7 @@ QQ bridge ──@消息──▶ Inbox ──▶ ThreadHost(会话键) ──▶
 - `im`、`qq_context` 两个 MCP 服务按线程启动（原 `image_gen` 已随本地生图移除）。令牌改为**线程令牌**：`thread/start` / `thread/resume` 的 `config` 里写入 `mcp_servers.im.env.IM_TOKEN` 等，绑定 threadKey，线程存在期间有效，进程重启时重新签发。
   **已验证（2026-10-21，0.164.0-alpha.8）**：`thread/start` 的 `config` 用点号键（`{"mcp_servers.im.env.IM_TOKEN": "..."}`）即按线程生效；app-server 为每个线程单独起一个 MCP 进程（两个线程两个 pid、各自的 env），同一线程跨回合复用。MCP `tools/call` 请求带 `_meta.callId`（与 `mcpToolCall` 条目 id 相同，形如 `exec-<uuid>`）和 `_meta["x-codex-turn-metadata"]`（含 `session_id`、`thread_id`）。
 - 令牌只证明"来自哪个线程"；发送者身份、读取范围、目标授权由主进程在每次调用时从 ThreadHost 的当前状态求出（7.3），不再把 `QQ_ACCESS`、`IMAGE_TICKET_DIR` 烤进环境变量。
-- 图片（Outbox 副本）与附件目录按线程：`/data/images/<threadKey>/`、`/data/files/<threadKey>/`，定期清理（保留 7 天）。
+- 图片与文件的 Outbox 副本按线程存放在 `/data/images/<threadKey>/outbox/<uuid>/`（冒号换成下划线），回合结束时清理一小时前且已发送完毕的副本（`SendService.cleanup`）。
 
 ### 5.4 崩溃与恢复
 
@@ -226,7 +226,7 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 ## 10. 定时任务
 
 - 到点：`ScheduleTask` 照旧算时刻、判重叠、记运行；接纳时不再建出站票据，而是向来源会话的 ThreadHost 投一条定时输入（`pending`，等空闲）。
-- 运行记录：`cs.scheduled-run` 保留，结果改为统计"该输入所在回合（及其后的唤醒回合，直到线程空闲）发出的消息数"：有发送 → `sent`，无 → `silent`，回合失败 → `failed`。
+- 运行记录：`cs.scheduled-run` 保留，结果改为统计该输入所在回合发出的消息数：有发送 → `sent`，无 → `silent`，回合失败、丢失或投递不确定 → `failed`。原设计还要计入其后的唤醒回合，当前实现只统计输入所在的那一个回合（`src/agent/schedule/run.ts`）。定时回合失败不向会话发出错提示，只记入运行记录。
 - 重叠判定：上一次运行的输入尚未 `done` 时跳过本次（沿用 skip 语义）。
 - 权限：创建者身份，无 `auth_*`（沿用）。
 
@@ -237,7 +237,7 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 
 ## 12. 观测
 
-- trace 事件键：`turn:<turnId>`（回合）、`in:<inboundKey>`（输入）、`thr:<threadKey>`（线程级事件）。`events.ticket` 列改名 `key`。
+- trace 事件键：`turn:<turnId>`（回合）、`in:<inboundKey>`（输入）、`thr:<threadKey>`（线程级事件）。`events.ticket` 列改名 `key`（第 5 阶段，尚未完成）。
 - 实时视图：从"每票据一张卡片"改为"每会话一行"：空闲/工作中、当前回合已用时间、本轮输入、已发消息、子 agent 数，附"停止"按钮。
 - 回合详情页取代票据详情页：输入列表、工具调用、发送、子 agent 活动。
 - 上下文用量按线程（已是如此），不再挂票据。
@@ -251,13 +251,13 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 | `agent.sqlite` `cs.dispatch`、`cs.ticket` 会话 | 删除（迁移时先排空：部署前确认无进行中票据） |
 | `cs.thread-host` | 新增 |
 | `pi.sqlite` `cs.pi.request` | 改为每轮输入集合 |
-| `/data/images/<ticket>`、`/data/files/<ticket>` | 按线程目录；旧目录保留只读 7 天后清理 |
+| `/data/images/<ticket>`、`/data/files/<ticket>` | 按线程目录（Outbox 副本在 `images/<threadKey>/outbox/`）；旧票据目录不再使用 |
 | `codex-delivery-notes/` | 删除 |
-| `observability.sqlite` `events.ticket` | 改名 `key`，历史数据保留 |
+| `observability.sqlite` `events.ticket` | 改名 `key`，历史数据保留（第 5 阶段，尚未完成） |
 
 ## 14. 分阶段实施
 
-每阶段独立可上线、可回滚：
+每阶段独立可上线、可回滚（第 1–4 阶段已完成，第 5 阶段进行中）：
 
 1. **发送绑定会话 + bridge 规则**：`send_message` 改为会话绑定，去掉每轮条数上限，加 bridge 发送规则与熔断；仍在旧派发流程里运行。
 2. **pi 常驻**：ThreadHost + Inbox 落地，pi 改为 steer/follow-up 投递，去掉单轮时限、兜底与 delivery note，定时任务改为输入；codex 暂时走适配层（每轮 exec，输入排队）。
@@ -272,7 +272,7 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 - **群里他人排队**：主回合进行时，其他人要等这一轮结束。长任务交给子 agent 后主回合通常很短，等待可接受。
 - **成本**：常驻 + 子 agent 会增加 token 用量；面板按线程显示用量，bridge 规则兜底发送量。
 
-## 附录 A：现状耦合点（实现时逐项处理）
+## 附录 A：改造前的耦合点（实现时逐项处理，保留作记录）
 
 1. `Dispatcher`：每票据建会话、`DispatchDoc.pending`、重试/放弃/兜底、按票据序恢复（`src/agent/dispatch.ts`）。
 2. `TicketDoc` 与 `cs.agent` 的 handle / lateImages / settle 阶段（`src/agent/tasks.ts`、`docs.ts`）。
