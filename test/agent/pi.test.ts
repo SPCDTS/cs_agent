@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
 import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prompt.js";
-import { PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
+import { PI_SUBAGENT_RULE, PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
 import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
 import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
 import { threadKeyOf } from "../../src/channel/ticket.js";
@@ -444,7 +444,7 @@ describe("pi system 提示热更新", () => {
     await turn(r, "5", "二");
     expect(JSON.stringify(seen[1])).toContain("新系统提示：简短中文。");
     for (const transcript of seen) {
-      for (const system of transcript.messages.filter(m => m.role === "system")) expect(getSystemMessageText(system).split(PI_WORKSPACE_RULE)).toHaveLength(2);
+      for (const system of transcript.messages.filter(m => m.role === "system")) for (const rule of [PI_WORKSPACE_RULE, PI_SUBAGENT_RULE]) expect(getSystemMessageText(system).split(rule)).toHaveLength(2);
     }
     expect(await new PiPromptLoader(r.dir).read()).toBe("新系统提示：简短中文。");
   });
