@@ -31,12 +31,12 @@ export function startAlerts(opts: { enabled: boolean | (() => boolean); owner?: 
     if (e.status === 'failed' && /codex|pi|model_turn|model_error|tool:/.test(e.stage) && d.failure?.kind === 'auth')
       send('模型鉴权失败，请检查凭据。');
     if (d.terminal === true) {
-      for (const [ticket, ts] of terminal) if (now() - ts > 86400_000) terminal.delete(ticket);
-      if (terminal.has(e.ticket)) return;
-      terminal.set(e.ticket, now());
+      for (const [key, ts] of terminal) if (now() - ts > 86400_000) terminal.delete(key);
+      if (terminal.has(e.key)) return;
+      terminal.set(e.key, now());
       if (terminal.size > 10000) terminal.delete(terminal.keys().next().value!);
       failed = e.stage === 'failed' || e.stage === 'fallback' ? failed + 1 : 0;
-      if (failed >= 3) send('连续三条票据失败，请打开观测面板排查。');
+      if (failed >= 3) send('连续三个回合失败，请打开观测面板排查。');
     }
   });
   const check = () => {

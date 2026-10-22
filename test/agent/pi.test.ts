@@ -11,7 +11,7 @@ import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prom
 import { PI_SUBAGENT_RULE, PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
 import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
 import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
-import { threadKeyOf } from "../../src/channel/ticket.js";
+import { threadKeyOf } from "../../src/channel/inbound.js";
 import type { Channel, InboundMessage } from "../../src/channel/types.js";
 import { inboundKey, type ReplyStore } from "../../src/qq/reply-store.js";
 import { MemoryInstrumentation } from "../../src/obs/memory/instrumentation.js";
@@ -172,7 +172,7 @@ describe("pi 常驻后端：工具身份随本轮绑定", () => {
 
   it("内置调用只记录工具、前二百字的命令或路径、退出码和耗时，按回合键归属", async () => {
     const events: LiveEvent[] = [];
-    const untap = trace.tap(e => { if (e.ticket.startsWith("turn:pi:") && e.stage.startsWith("tool:")) events.push(e); });
+    const untap = trace.tap(e => { if (e.key.startsWith("turn:pi:") && e.stage.startsWith("tool:")) events.push(e); });
     const r = await rig([call(["write", { path: "trace.txt", content: "do-not-log-file-content" }]),
       call(["read", { path: "trace.txt" }]), call(["bash", { command: "printf do-not-log-stdout; #" + "x".repeat(300) }]),
       call(["bash", { command: "exit 7" }]), reply()]);
@@ -180,7 +180,7 @@ describe("pi 常驻后端：工具身份随本轮绑定", () => {
       const key = await turn(r, "5", "记录");
       const done = events.filter(e => e.status !== "started");
       expect(done).toHaveLength(4);
-      expect(new Set(done.map(e => e.ticket))).toEqual(new Set(["turn:" + turnOf(r, key)]));
+      expect(new Set(done.map(e => e.key))).toEqual(new Set(["turn:" + turnOf(r, key)]));
       expect(done.every(e => typeof e.duration_ms === "number" && !("output" in e.detail) && !("input" in e.detail))).toBe(true);
       expect(done[0]!.detail).toMatchObject({ tool: "write", path: "trace.txt", exit_code: null });
       expect(String(done[2]!.detail.command)).toHaveLength(200);
@@ -501,7 +501,7 @@ describe("pi 重置与压缩", () => {
 
 describe("pi 上下文占用", () => {
   it("每请求 recordRequest、每回合一次 recordTurn，按回合键归属", async () => {
-    const events: { ticket: string; stage: string; detail: Record<string, unknown> }[] = [];
+    const events: { key: string; stage: string; detail: Record<string, unknown> }[] = [];
     const untap = trace.tap(e => {
       if (e.stage === "model_request" || (e.stage === "context_usage" && e.detail.source === "turn")) events.push(e);
     });
@@ -510,7 +510,7 @@ describe("pi 上下文占用", () => {
       { contextUsage: true, web, reserveTokens: 16000, backgroundTokens: 32000 });
     try {
       const key = await turn(r, "5", "采集");
-      const ticket = "turn:" + turnOf(r, key);
+      const traceKey = "turn:" + turnOf(r, key);
       const conv = await convOf(r, "group:7");
       const messages = (await conv.context(context)).entries.flatMap(e => e.model ?? []).filter(m => m.role === "assistant");
       expect(messages).toHaveLength(2);
@@ -520,10 +520,10 @@ describe("pi 上下文占用", () => {
         compaction: { background: 152000, reserve: 184000 } }));
       expect(events.map(e => e.stage)).toEqual(["model_request", "model_request", "context_usage"]);
       expect(events.slice(0, 2).map(e => e.detail)).toEqual(messages.map((m, index) => expect.objectContaining({
-        backend: "pi", key: "group:7", ticket, seq: index + 1, turn: 1 })));
+        backend: "pi", key: "group:7", trace_key: traceKey, seq: index + 1, turn: 1 })));
       const next = await turn(r, "5", "下一条");
       await vi.waitFor(() => expect(events).toHaveLength(5));
-      expect(events[3]).toMatchObject({ ticket: "turn:" + turnOf(r, next), stage: "model_request", detail: { seq: 1, turn: 2 } });
+      expect(events[3]).toMatchObject({ key: "turn:" + turnOf(r, next), stage: "model_request", detail: { seq: 1, turn: 2 } });
       expect(events[4]).toMatchObject({ stage: "context_usage", detail: { turns: 2 } });
     } finally { untap(); }
   });
@@ -587,11 +587,11 @@ it("pi 历史工具记录回合与会话归属并发出轻量 trace", async () =
     const r = await rig([call(["qq_recent", {}]), reply()], { instrumentation: MemoryInstrumentation.fromDb(obs.db) });
     r.history.ingest(r.message("6", "历史记录", "7", { message_id: "m" }));
     const events: string[] = [];
-    const off = trace.tap(e => { if (e.ticket.startsWith("turn:pi:")) events.push(e.stage); });
+    const off = trace.tap(e => { if (e.key.startsWith("turn:pi:")) events.push(e.stage); });
     try {
       const key = await turn(r, "5", "回顾");
       const session = String((await r.pi.readThreadIds())["group:7"]);
-      expect(obs.db.prepare("SELECT * FROM recall_events").get()).toMatchObject({ backend: "pi", ticket: turnOf(r, key), session,
+      expect(obs.db.prepare("SELECT * FROM recall_events").get()).toMatchObject({ backend: "pi", turn_id: turnOf(r, key), session,
         task_id: expect.stringMatching(/^\d+$/), tool: "qq_recent", scope_hint: "group:7" });
       expect(events).toContain("memory_recall");
     } finally { off(); }

@@ -1,12 +1,12 @@
 /** 观测 v2 的统一模型；模型设计来源见 docs/THIRD-PARTY.md。 */
 export type SessionRef = { backend: 'codex' | 'pi'; id: string; label: string; scope?: string; status: 'active' | 'archived'; started: number; updated: number; turns: number };
-export type TurnIndex = { turn: string; started: number; ended?: number; ticket?: string; preview: string; tools: number; requests: number; usage?: Usage; status: 'ok' | 'failed' | 'running' };
+export type TurnIndex = { turn: string; started: number; ended?: number; /** 关联的宿主回合 trace 键（turn:<id>） */ traceKey?: string; preview: string; tools: number; requests: number; usage?: Usage; status: 'ok' | 'failed' | 'running' };
 export type Block = { kind: 'user' | 'assistant' | 'thinking' | 'tool_call' | 'tool_result' | 'image' | 'event' | 'compaction' | 'system_change'; ts?: number; callId?: string; text?: string; preview?: string; ref?: ContentRef; meta?: Record<string, unknown> };
 export type ContentRef = { session: string; offset: number; length: number; bytes: number };
 export type TraceContentRef = { bundle: string; payload: string; select: string };
 export type Usage = { input: number; output: number; cached?: number; reasoning?: number; measured: boolean };
 
-/** 送达是票据的补充事实，不替代模型回合的 status。 */
+/** 送达是宿主回合的补充事实，不替代模型回合的 status。 */
 export type ObservedTurn = TurnIndex & { delivery?: { status: string; scope?: string; duration_ms?: number } };
 export type SessionFilter = { status?: SessionRef['status']; scope?: string; since?: number; page?: number };
 export type IndexProgress = { indexing: boolean; files: number; done: number };

@@ -9,7 +9,7 @@ export type ScheduleRule = { kind: 'rrule'; rrule: string; dtstart: number } | {
 export interface ScheduleRun {
   fire_key: string; fire_at: number; status: 'queued' | 'running' | 'sent' | 'silent' | 'failed' | 'skipped';
   reason?: 'stale' | 'overlap' | 'interrupted' | 'paused' | 'revision' | 'timeout' | 'backend_failed';
-  skipped_count?: number; started_at?: number; ended_at?: number; sent?: number; note?: string; ticket?: string;
+  skipped_count?: number; started_at?: number; ended_at?: number; sent?: number; note?: string; input_key?: string;
 }
 export interface Schedule {
   id: string; revision: number; name: string; prompt: string; conversation: string; rule: ScheduleRule;
@@ -180,7 +180,7 @@ export function scheduleDetailBody(s: Schedule, v: Omit<SchedulePanelView, 'sche
   out += `<section><h2>运行记录 <small>最近 ${runs.length} 次，新的在上</small></h2>${runs.length
     ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>触发时间</th><th>状态</th><th>原因</th><th class="num">发出条数</th><th>耗时</th><th>记录</th></tr></thead><tbody>${runs.map(r => `<tr><td title="${esc(r.fire_key)}">${esc(fmtBeijing(r.fire_at))}</td><td>${runPill(r)}</td><td>${esc(reasonText(r)) || '<span class="faint">—</span>'}</td><td class="num">${r.sent ?? '—'}</td><td>${
       r.started_at && r.ended_at ? esc(fmtMs(r.ended_at - r.started_at)) : '<span class="faint">—</span>'}</td><td>${r.note ? `<span class="excerpt">${esc(r.note)}</span>` : '<span class="faint">—</span>'}${
-      r.ticket ? ` <a class="mono" href="/tickets/${uri(r.ticket)}">${esc(r.ticket.slice(0, 16))}</a>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`
+      r.input_key ? ` <a class="mono" href="/inputs/${uri(r.input_key)}">${esc(r.input_key.slice(0, 16))}</a>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`
     : empty('还没有运行过。')}</section>`;
   out += `<section id="edit"><h2>编辑</h2>${scheduleForm({ action: `/schedules/${uri(s.id)}/update`, draft, csrf: v.csrf, names: v.names, submit: '保存修改', fixedConversation: s.conversation })}
 <p class="hint">会话创建后不可修改。修改规则会从现在起重新计算下次触发；已暂停的任务保存后仍保持暂停。</p></section>`;

@@ -11,7 +11,7 @@ import { tmp } from '../agent/helpers.js';
 
 const closes: (() => void)[] = [];
 afterEach(() => { for (const close of closes.splice(0)) close(); });
-export const recallEvent = (ts = Date.now()): RecallRecord => ({ ts, backend: 'pi', ticket: 'tk', session: '1', task_id: '2',
+export const recallEvent = (ts = Date.now()): RecallRecord => ({ ts, backend: 'pi', turn_id: 'pi:1:2', session: '1', task_id: '2',
   tool: 'qq_search', args: { query: '中文' }, access: 'group:1', scope_hint: 'group:1', returned: [{ kind: 'message', id: 'm1' }],
   returned_count: 1, dropped_count: 2, chars: 20, max_chars: 100, duration_ms: 3, is_error: false });
 const summary = { id: 1, scope: 'group:1', level: 'day' as const, period_start: 1, period_end: 2, text: '中文摘要', msg_count: 5, created_at: 3 };
@@ -26,7 +26,30 @@ it('建表幂等并完整保存正文、来源、用量与有序召回引用', (
   writer.recordRecall(recallEvent());
   expect(db.prepare('SELECT * FROM summary_versions').get()).toMatchObject({ summary_id: 1, text: '中文摘要', kept_chars: 4,
     input_message_ids_json: '["m1"]', usage_json: '{"input":9}', input_chars: 70, text_sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
-  expect(db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ ticket: 'tk', task_id: '2', returned_json: '[{"kind":"message","id":"m1"}]', is_error: 0 });
+  expect(db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ turn_id: 'pi:1:2', task_id: '2', returned_json: '[{"kind":"message","id":"m1"}]', is_error: 0 });
+});
+it('旧库的 recall_events.ticket 改名 turn_id：数据保留、索引重建，重复打开不再改动', () => {
+  const dir = tmp(), file = path.join(dir, 'observability.sqlite');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE recall_events(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, backend TEXT NOT NULL, ticket TEXT, session TEXT,
+    task_id TEXT, tool TEXT NOT NULL, args_json TEXT NOT NULL, access TEXT NOT NULL, scope_hint TEXT, returned_json TEXT NOT NULL,
+    returned_count INTEGER NOT NULL, dropped_count INTEGER NOT NULL, chars INTEGER NOT NULL, max_chars INTEGER NOT NULL, duration_ms INTEGER NOT NULL, is_error INTEGER NOT NULL);
+    CREATE INDEX recall_events_ticket ON recall_events(ticket);
+    INSERT INTO recall_events(ts,backend,ticket,tool,args_json,access,returned_json,returned_count,dropped_count,chars,max_chars,duration_ms,is_error)
+      VALUES(1,'codex','codex:old','qq_search','{}','all','[]',0,0,0,0,0,0);`);
+  old.close();
+  for (let i = 0; i < 2; i++) {
+    const obs = new ObsStore(dir); expect(obs.degraded).toBe(false);
+    const db = obs.db;
+    expect((db.prepare('PRAGMA table_info(recall_events)').all() as { name: string }[]).map(c => c.name)).toEqual(expect.arrayContaining(['turn_id']));
+    expect((db.prepare('PRAGMA table_info(recall_events)').all() as { name: string }[]).map(c => c.name)).not.toContain('ticket');
+    expect((db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='recall_events'").all() as { name: string }[]).map(r => r.name))
+      .toEqual(expect.arrayContaining(['recall_events_turn']));
+    expect(db.prepare('SELECT turn_id FROM recall_events WHERE id=1').get()).toEqual({ turn_id: 'codex:old' });
+    obs.close();
+  }
+  // 独立进程（qq_context MCP）打开迁移后的库照常写入
+  const writer = MemoryInstrumentation.openOwn(dir); expect(writer.recordRecall(recallEvent())).toBe(2); writer.close();
 });
 it('快照复用已记录的同一版本；替换关系与周版本一起写入', () => {
   const { db, writer } = rig();
@@ -63,7 +86,7 @@ it('记忆保留期独立清理两张表，0 禁用，边界保留且不清理 e
   for (const ts of [cutoff - 1, cutoff]) {
     writer.recordRecall(recallEvent(ts)); writer.recordSummaryVersion(summary, { batch_id: 'a', created_at: ts });
   }
-  db.prepare("INSERT INTO events(ticket,scope,ts,stage,status,detail_json) VALUES('tk','',0,'test','ok','{}')").run();
+  db.prepare("INSERT INTO events(key,scope,ts,stage,status,detail_json) VALUES('turn:pi:1:2','',0,'test','ok','{}')").run();
   expect(purgeMemoryInstrumentation(db, 0, now)).toEqual({ versions: 0, recalls: 0 });
   expect(purgeMemoryInstrumentation(db, 90, now)).toEqual({ versions: 1, recalls: 1 });
   expect(db.prepare('SELECT COUNT(*) n FROM events').get()?.n).toBe(1);

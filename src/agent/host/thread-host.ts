@@ -437,6 +437,11 @@ export class ThreadHost implements HostCallbacks {
     return { status: doc.status, ...(doc.turnId ? { turnId: doc.turnId } : {}) };
   }
 
+  /** 观测用：本进程已知的全部会话键（启动后接触过的与恢复集合） */
+  keys(): ThreadKey[] {
+    return [...this.threads.keys()] as ThreadKey[];
+  }
+
   /** 观测用的只读副本 */
   thread(threadKey: ThreadKey): Readonly<ThreadHostState> | undefined {
     const s = this.threads.get(threadKey);

@@ -45,7 +45,7 @@ it.each(['corrupt','unwritable','schema'] as const)('观测数据库 %s 初始�
   if(kind==='schema'){const db=new DatabaseSync(path.join(isolated,'observability.sqlite'));db.exec('CREATE TABLE events(wrong TEXT)');db.close();}
   const store=new ObsStore(target);clean.push(()=>store.close());expect(store.degraded).toBe(true);
   const trace=new Trace(store);expect(()=>trace.event('t','received')).not.toThrow();expect(store.events('t')).toEqual([]);
-  expect(store.tickets()).toEqual([]);expect(store.latest('aging')).toBeUndefined();expect(store.throughput(0).total).toBe(0);
+  expect(store.turns()).toEqual([]);expect(store.latest('aging')).toBeUndefined();expect(store.throughput(0).total).toBe(0);
   const metrics=new Metrics(store,{retentionDays:30});await expect(metrics.flush()).resolves.toBeUndefined();await metrics.stop();
 });
 it('指标游标 schema 失败同样降级，不使构造或刷新抛出',async()=>{

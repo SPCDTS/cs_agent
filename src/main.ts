@@ -102,12 +102,22 @@ async function main(): Promise<void> {
 
   // 统一上下文消息库（${DATA_DIR}/qq-messages.sqlite）：意图层与 codex 的 qq_context MCP 共用
   const store = new ContextStore(cfg.DATA_DIR);
-  const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_TICKET_EVENT_CAP, cfg.OBS_ADMIN_RETENTION_DAYS);
+  const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_EVENT_CAP, cfg.OBS_ADMIN_RETENTION_DAYS);
   trace.attach(obs);
   const instrumentation = obs.degraded ? undefined : MemoryInstrumentation.fromDb(obs.db);
   const contextUsage = new ContextUsageStore(cfg.DATA_DIR);
-  // 进行中会话的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）
-  const live = new LiveBus(trace);
+  // 每会话一行的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）；
+  // 排队输入、子 agent 数与重启后仍在进行的回合从会话宿主与两个后端的只读快照补齐（宿主与后端随后才创建，调用时取用）。
+  const live = new LiveBus(trace, {
+    label: thread => thread === "owner" ? undefined : store.scopeNames()[thread],
+    threads: () => Promise.all(host.keys().map(async thread => {
+      const s = host.thread(thread)!;
+      const subagents = s.backend === "pi" ? await pi.liveSubagents(thread) : s.backend === "codex" ? codexBackend.liveSubagents(thread) : null;
+      return { thread, busy: s.busy, pending: s.pending.map(p => p.inboundKey), subagents,
+        ...(s.turnId ? { turnId: s.turnId } : {}), ...(s.turnKind ? { turnKind: s.turnKind } : {}),
+        ...(s.turnSender ? { turnSender: s.turnSender } : {}), ...(s.backend ? { backend: s.backend } : {}) };
+    })),
+  });
   if (obs.degraded) log.warn("observability storage degraded; agent continues");
   let bridge: Channel | undefined;
   const getBridge = () => {
@@ -120,7 +130,6 @@ async function main(): Promise<void> {
       get outbox() { return getBridge().outbox; },
       fetchMessage: (messageId, opts) => getBridge().fetchMessage(messageId, opts),
       refreshImageUrl: (file, opts) => getBridge().refreshImageUrl(file, opts),
-      getTicket: ticket => getBridge().getTicket(ticket),
     } });
   const chatsChannel: Pick<Channel, "listChats"> = { listChats: opts => getBridge().listChats(opts) };
   let dispatchHarness: Harness;
@@ -144,7 +153,7 @@ async function main(): Promise<void> {
       extraRoots: [binding.imageDir,
         ...(/^[0-9a-f-]{36}$/i.test(binding.session) ? [path.join(cfg.codexHome, "generated_images", binding.session)] : [])],
     }, args, callKey, signal),
-  }, cfg.MEDIA_RECALL_MAX_PER_TICKET, chatsChannel);
+  }, cfg.MEDIA_RECALL_MAX_PER_TURN, chatsChannel);
   const recallServer = await startMediaRecallServer(threadTokens, cfg.MEDIA_RECALL_PORT);
 
   const codex = new CodexRunner({

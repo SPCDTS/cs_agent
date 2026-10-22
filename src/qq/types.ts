@@ -20,7 +20,7 @@ export interface QQBridgeConfig {
   timeoutMs?: number;
   incomingDownloadConcurrency?: number;
   incomingDownloadDeadlineMs?: number;
-  /** 回复票据 / 去重状态持久化目录（SQLite 文件放在此处） */
+  /** Inbox / Outbox / 去重状态持久化目录（SQLite 文件放在此处） */
   dataDir: string;
   /** 允许作为回复附件的图片根目录；路径必须 realpath 后落在其下 */
   imageRoot: string;

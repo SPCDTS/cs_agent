@@ -71,9 +71,9 @@ export class MemoryInstrumentation implements SummaryObserver, RecallObserver {
   recordRecall(event: RecallRecord): number | undefined {
     return this.safe(() => {
       if (!this.db) return undefined;
-      return Number(this.db.prepare(`INSERT INTO recall_events(ts,backend,ticket,session,task_id,tool,args_json,access,scope_hint,
+      return Number(this.db.prepare(`INSERT INTO recall_events(ts,backend,turn_id,session,task_id,tool,args_json,access,scope_hint,
         returned_json,returned_count,dropped_count,chars,max_chars,duration_ms,is_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(event.ts, event.backend, event.ticket || null, event.session || null, event.task_id || null, event.tool,
+        .run(event.ts, event.backend, event.turn_id || null, event.session || null, event.task_id || null, event.tool,
           JSON.stringify(event.args), event.access, event.scope_hint, JSON.stringify(event.returned), event.returned_count,
           event.dropped_count, event.chars, event.max_chars, event.duration_ms, Number(event.is_error)).lastInsertRowid);
     });

@@ -20,7 +20,8 @@ export interface ContextUsage {
 }
 
 export interface ContextRequestUsage {
-  ticket: string;
+  /** 请求所属回合的 trace 键（turn:<id>） */
+  traceKey: string;
   seq: number;
   usedTokens: number;
   cachedTokens?: number;
@@ -90,41 +91,41 @@ export class ContextUsageStore {
   }
 
   /** 启动时刷新容量；无已知回合的新线程以零占用估算。 */
-  ensure(backend: Backend, key: string, capacity: Capacity, ticket = "@context"): void {
+  ensure(backend: Backend, key: string, capacity: Capacity, traceKey = "@context"): void {
     const old = this.get(backend, key);
     if (old && old.windowTokens === capacity.windowTokens && JSON.stringify(old.compaction) === JSON.stringify(capacity.compaction)) return;
     if (old && old.windowTokens !== capacity.windowTokens) delete old.effectiveWindowTokens;
-    this.update({ backend, key, usedTokens: 0, turns: 0, source: "estimate", ...old, ...capacity, updatedAt: old?.updatedAt ?? Date.now() }, ticket);
+    this.update({ backend, key, usedTokens: 0, turns: 0, source: "estimate", ...old, ...capacity, updatedAt: old?.updatedAt ?? Date.now() }, traceKey);
   }
 
   /** 每次模型请求只写事件；线程状态、订阅与持久化仍由回合完成路径维护。 */
   recordRequest(backend: Backend, key: string, req: ContextRequestUsage): void {
-    trace.event(req.ticket, "model_request", { detail: {
-      backend, key, ticket: req.ticket, seq: req.seq, turn: (this.get(backend, key)?.turns ?? 0) + 1,
+    trace.event(req.traceKey, "model_request", { detail: {
+      backend, key, trace_key: req.traceKey, seq: req.seq, turn: (this.get(backend, key)?.turns ?? 0) + 1,
       input: req.usedTokens, cached: req.cachedTokens, output: req.outputTokens, window: req.windowTokens,
       ...(req.effectiveWindowTokens !== undefined ? { effective_window: req.effectiveWindowTokens } : {}), at: req.at,
     } });
   }
 
   /** 每个完成回合只计数一次；缺少用量时保留原占用、来源和采样时间。 */
-  recordTurn(backend: Backend, key: string, usage: Capacity & Partial<Pick<ContextUsage, "usedTokens" | "cachedTokens" | "effectiveWindowTokens">>, ticket = "@context"): void {
+  recordTurn(backend: Backend, key: string, usage: Capacity & Partial<Pick<ContextUsage, "usedTokens" | "cachedTokens" | "effectiveWindowTokens">>, traceKey = "@context"): void {
     const old = this.get(backend, key);
     const sampled = usage.usedTokens !== undefined;
     this.update({ ...old, backend, key, ...usage, usedTokens: sampled ? usage.usedTokens! : old?.usedTokens ?? 0,
       cachedTokens: sampled ? usage.cachedTokens : old?.cachedTokens, turns: (old?.turns ?? 0) + 1,
-      source: sampled ? "turn" : old?.source ?? "estimate", updatedAt: sampled ? Date.now() : old?.updatedAt ?? Date.now() }, ticket);
+      source: sampled ? "turn" : old?.source ?? "estimate", updatedAt: sampled ? Date.now() : old?.updatedAt ?? Date.now() }, traceKey);
   }
 
   /** 压缩采样只替换占用，保留回合数；旧缓存命中量不适用于摘要后的上下文。 */
-  recordCompaction(backend: Backend, key: string, ticket = "@context",
+  recordCompaction(backend: Backend, key: string, traceKey = "@context",
     usage?: Pick<ContextUsage, "usedTokens"> & Partial<Pick<ContextUsage, "effectiveWindowTokens">>): void {
     const old = this.get(backend, key);
     if (old) this.update({ ...old, ...(usage ? { ...usage, cachedTokens: undefined, source: "compact" as const } : {}),
-      lastCompactionAt: Date.now(), updatedAt: Date.now() }, ticket);
+      lastCompactionAt: Date.now(), updatedAt: Date.now() }, traceKey);
   }
 
   /** 历史快照直接恢复计数；较新的已落盘用量优先，重复启动不累计回合。 */
-  backfill(backend: Backend, key: string, history: ContextUsageHistory, ticket = "@context"): boolean {
+  backfill(backend: Backend, key: string, history: ContextUsageHistory, traceKey = "@context"): boolean {
     const old = this.get(backend, key);
     if (!old) return false;
     if ((old.source === "turn" && old.updatedAt > history.updatedAt) ||
@@ -133,27 +134,27 @@ export class ContextUsageStore {
       if (old.effectiveWindowTokens !== undefined || history.effectiveWindowTokens === undefined) return false;
       const enriched = { ...old, effectiveWindowTokens: history.effectiveWindowTokens };
       if (!valid(enriched)) return false;
-      this.update(enriched, ticket);
+      this.update(enriched, traceKey);
       return true;
     }
     const next = { ...old, ...history, source: "turn" as const };
     if (!valid(next)) return false;
-    this.update(next, ticket);
+    this.update(next, traceKey);
     return true;
   }
 
-  reset(backend: Backend, key: string, ticket = "@context"): void {
+  reset(backend: Backend, key: string, traceKey = "@context"): void {
     const old = this.get(backend, key);
     if (!old) return;
     const { lastCompactionAt: _last, effectiveWindowTokens: _effective, ...capacity } = old;
-    this.update({ ...capacity, usedTokens: 0, cachedTokens: 0, turns: 0, source: "estimate", updatedAt: Date.now() }, ticket);
+    this.update({ ...capacity, usedTokens: 0, cachedTokens: 0, turns: 0, source: "estimate", updatedAt: Date.now() }, traceKey);
   }
 
-  private update(u: ContextUsage, ticket: string): void {
+  private update(u: ContextUsage, traceKey: string): void {
     if (!valid(u)) throw new Error("非法上下文用量");
     this.records.set(`${u.backend}:${u.key}`, structuredClone(u));
     this.revision++;
-    trace.event(ticket, "context_usage", { detail: u });
+    trace.event(traceKey, "context_usage", { detail: u });
     for (const fn of this.listeners) {
       try { fn(structuredClone(u)); } catch { /* 面板故障不影响回合 */ }
     }

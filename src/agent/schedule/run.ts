@@ -128,9 +128,9 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
         if (candidate.fire_key !== fire.fire_key) throw new Error("预备输入与触发标识不一致");
         const tx = transaction as Tx;
         const known = await tx.doc(AdmissionDoc, key, {});
-        if (known.conversationId !== undefined) return { ticket: key };
+        if (known.conversationId !== undefined) return { key };
         // 已结束的孤儿输入不得重新执行。
-        if (opts.getChannel().inbox.getInbound(key)?.state !== "queued") return { ticket: key, skipped: true };
+        if (opts.getChannel().inbox.getInbound(key)?.state !== "queued") return { key, skipped: true };
         const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
         Object.assign(await tx.doc(ScheduledRunDoc, conversation.id), {
           schedule_id: fire.schedule.id, fire_key: fire.fire_key, fire_at: fire.fire_at,
@@ -138,7 +138,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
           timeout_ms: fire.schedule.options.timeout_ms, input_key: key,
         });
         known.conversationId = conversation.id;
-        return { ticket: key };
+        return { key };
       },
     };
   }
@@ -163,7 +163,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
       const turnFailed = !run.denied && (outcome?.status ?? "completed") !== "completed";
       const failed = run.denied || turnFailed || deliveryFailed;
       const record: ScheduleRun = {
-        fire_key: run.fire_key, fire_at: run.fire_at, ticket: key, status: failed ? "failed" : sent ? "sent" : "silent",
+        fire_key: run.fire_key, fire_at: run.fire_at, input_key: key, status: failed ? "failed" : sent ? "sent" : "silent",
         sent, ...(run.started_at !== undefined ? { started_at: run.started_at } : {}), ended_at: Date.now(),
         ...(failed && !run.denied ? { reason: "backend_failed" as const } : {}),
         note: run.denied ? "无权：创建者已无定时任务权限" : turnFailed ? (outcome?.status === "lost" ? "回合中断" : "回合失败") : "",
@@ -234,7 +234,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
     if (!found || found.result) return;
     const run = await update(found.conversationId, s => { s.started_at ??= Date.now(); s.turn_id ??= turnId; });
     await opts.recorder.recordRun(run.schedule_id, {
-      fire_key: run.fire_key, fire_at: run.fire_at, status: "running", started_at: run.started_at, ticket: key,
+      fire_key: run.fire_key, fire_at: run.fire_at, status: "running", started_at: run.started_at, input_key: key,
     });
   }
 

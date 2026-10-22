@@ -30,12 +30,12 @@ describe("上下文占用存储", () => {
     store.subscribe(listener);
     const emit = vi.spyOn(trace, "event"), flush = vi.spyOn(store, "flush");
     const timer = vi.spyOn(globalThis, "setTimeout"), write = vi.spyOn(fs, "writeFile");
-    store.recordRequest("codex", "owner", { ...usage, ticket: "req", seq: 1, outputTokens: 42, effectiveWindowTokens: 475000, at: 123 });
-    store.recordRequest("codex", "owner", { ...usage, ticket: "req", seq: 2, at: 124 });
-    store.recordRequest("pi", "new", { ...usage, ticket: "new-req", seq: 1, at: 125 });
+    store.recordRequest("codex", "owner", { ...usage, traceKey: "req", seq: 1, outputTokens: 42, effectiveWindowTokens: 475000, at: 123 });
+    store.recordRequest("codex", "owner", { ...usage, traceKey: "req", seq: 2, at: 124 });
+    store.recordRequest("pi", "new", { ...usage, traceKey: "new-req", seq: 1, at: 125 });
     expect(emit).toHaveBeenCalledTimes(3);
     expect(emit).toHaveBeenNthCalledWith(1, "req", "model_request", { detail: {
-      backend: "codex", key: "owner", ticket: "req", seq: 1, turn: 2,
+      backend: "codex", key: "owner", trace_key: "req", seq: 1, turn: 2,
       input: 1234, cached: 1000, output: 42, window: 500000, effective_window: 475000, at: 123,
     } });
     expect(emit.mock.calls[1][2]?.detail).toMatchObject({ seq: 2, turn: 2, at: 124 });
@@ -83,12 +83,12 @@ describe("上下文占用存储", () => {
   });
   it("按 backend:key 隔离，订阅与 trace 每次更新发出副本，重置后保留容量", async () => {
     const store = open();
-    const events: { ticket: string; detail: unknown }[] = [];
+    const events: { key: string; detail: unknown }[] = [];
     const untap = trace.tap(e => { if (e.stage === "context_usage") events.push(e); });
     const listener = vi.fn(u => { u.usedTokens = 99999; });
     const unsubscribe = store.subscribe(listener);
     try {
-      store.recordTurn("codex", "owner", usage, "ticket-one");
+      store.recordTurn("codex", "owner", usage, "turn:one");
       store.recordTurn("pi", "owner", { ...usage, compaction: { background: 450000, reserve: 480000 } });
       store.recordCompaction("pi", "owner");
       expect(store.get("codex", "owner")).toMatchObject({ ...usage, turns: 1, source: "turn" });
@@ -100,7 +100,7 @@ describe("上下文占用存储", () => {
         windowTokens: 500000, compaction: { background: 450000, reserve: 480000 }, source: "estimate" });
       expect(store.get("pi", "owner")!.lastCompactionAt).toBeUndefined();
       expect(listener).toHaveBeenCalledTimes(4);
-      expect(events.map(e => e.ticket)).toEqual(["ticket-one", "@context", "@context", "@context"]);
+      expect(events.map(e => e.key)).toEqual(["turn:one", "@context", "@context", "@context"]);
       expect(events[0]!.detail).toMatchObject({ usedTokens: 1234, backend: "codex", key: "owner" });
       unsubscribe(); store.reset("codex", "owner"); expect(listener).toHaveBeenCalledTimes(4);
     } finally { unsubscribe(); untap(); }
@@ -218,7 +218,7 @@ describe("codex 上下文采集", () => {
         { input_tokens: 1000, cached_input_tokens: 750, output_tokens: 50 },
         { input_tokens: 1500, cached_input_tokens: 1000, output_tokens: 100 },
       ]) });
-    const seen: { ticket: string; stage: string; detail: Record<string, unknown>; turns: number }[] = [];
+    const seen: { key: string; stage: string; detail: Record<string, unknown>; turns: number }[] = [];
     const untap = trace.tap(e => {
       if (e.stage === "model_request" || (e.stage === "context_usage" && e.detail.source === "turn"))
         seen.push({ ...e, turns: store.get("codex", "owner")?.turns ?? 0 });
@@ -226,12 +226,12 @@ describe("codex 上下文采集", () => {
     try {
       await runner.ask("one", { turnId: "multi-one", threadKey: "owner" });
       await runner.ask("two", { turnId: "multi-two", threadKey: "owner" });
-      expect(seen.map(e => [e.ticket, e.stage, e.turns])).toEqual([
+      expect(seen.map(e => [e.key, e.stage, e.turns])).toEqual([
         ["turn:multi-one", "model_request", 0], ["turn:multi-one", "model_request", 0], ["turn:multi-one", "context_usage", 1],
         ["turn:multi-two", "model_request", 1], ["turn:multi-two", "model_request", 1], ["turn:multi-two", "context_usage", 2],
       ]);
       expect(seen.filter(e => e.stage === "model_request").map(e => e.detail)).toEqual([1, 2].flatMap(turn =>
-        [1, 2].map(seq => ({ backend: "codex", key: "owner", ticket: turn === 1 ? "turn:multi-one" : "turn:multi-two", turn, seq,
+        [1, 2].map(seq => ({ backend: "codex", key: "owner", trace_key: turn === 1 ? "turn:multi-one" : "turn:multi-two", turn, seq,
           input: seq === 1 ? 1000 : 1500, cached: seq === 1 ? 750 : 1000, output: seq === 1 ? 50 : 100,
           window: 500000, effective_window: 475000, at: expect.any(Number) }))));
       expect(store.get("codex", "owner")).toMatchObject({ usedTokens: 1500, cachedTokens: 1000, turns: 2 });

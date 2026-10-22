@@ -32,7 +32,7 @@ function msg(text: string, o: Partial<InboundMessage> & { replyTo?: string } = {
 }
 
 describe("access", () => {
-  it("parses QQ_ACCESS and derives access from a ticket source", () => {
+  it("parses QQ_ACCESS and derives access from an input source", () => {
     expect(parseAccess("all")).toEqual({ kind: "all" });
     expect(parseAccess(`group:${G}`)).toEqual(grp);
     expect(parseAccess("private:10000001")).toEqual({ kind: "scope", scope: "private:10000001" });
@@ -128,74 +128,67 @@ describe("ContextStore", () => {
     expect(hit.chain.map((r) => r.text)).toEqual(["d", "c", "b"]);
   });
 
-  it("bot rows: pending → completed with action/detail/excerpt/images; real reply id replaces placeholder", () => {
+  it("bot rows: recordSent writes one row per Outbox key; legacy rows from the old reply path still format", () => {
     const s = open();
     s.ingest(msg("画一只狗", { message_id: "40", time: T0 }));
-    s.recordPending(`group:${G}`, "tk1", T0, { replyTo: "40" });
-    s.recordPending(`group:${G}`, "tk1", T0, { replyTo: "40" }); // 幂等
-    let rows = s.recent(grp, { limit: 10 });
+    const row = { key: "group:1:call-1", thread_key: `group:${G}`, turn_id: "pi:1:2", input_key: null, system: false, message_type: "group" as const,
+      target_id: G, mention_user_id: null, proactive: false, status: "sent" as const, message_id: "5001", text: "图片生成好了",
+      text_sha256: "", images: ["/a.png"], files: [], created_at: new Date(T0 * 1000).toISOString(), sent_at: new Date(T0 * 1000).toISOString() };
+    s.recordSent(row, { selfId: "10001", replyTo: "40" });
+    s.recordSent(row, { selfId: "10001", replyTo: "40" }); // 幂等
+    const rows = s.recent(grp, { limit: 10 });
     expect(rows).toHaveLength(2);
-    expect(formatMessage(rows[1]!, { now: T0 })).toMatch(/^\d\d:\d\d \[我\] → 处理中$/);
-    s.completeReply("tk1", {
-      action: "generate_image", detail: "a cute dog, photorealistic", excerpt: "图片生成好了", image_count: 1, status: "已回复",
-      reply_message_id: "5001",
-    });
-    rows = s.recent(grp, { limit: 10 });
-    expect(rows[1]).toMatchObject({ message_id: "5001", is_self: 1, status: "已回复", image_count: 1 });
-    expect(formatMessage(rows[1]!, { now: T0 })).toMatch(/\[我\] → 生图 prompt="a cute dog, photorealistic" → 已发送 1 张图$/);
-    // 机器人行的提示词可被检索到
+    expect(rows[1]).toMatchObject({ message_id: "5001", is_self: 1, status: "已回复", image_count: 1, outbox_key: "group:1:call-1", reply_to_id: "40" });
+    expect(formatMessage(rows[1]!, { now: T0 })).toMatch(/\[我\] → "图片生成好了"$/);
+    // 旧版回复路径留下的行（处理中占位、生图、codex、失败）只读保留，照常格式化
+    const db = new DatabaseSync(s.file);
+    const legacy = db.prepare(`INSERT INTO messages (scope,message_id,time,user_id,nickname,is_self,text,outbox_key,status,action,detail,image_count)
+      VALUES (?,?,?,'10001','我',1,?,?,?,?,?,?)`);
+    legacy.run(`group:${G}`, "self:tk0", T0 + 1, "", "tk0", "处理中", null, null, null);
+    legacy.run(`group:${G}`, "5002", T0 + 2, "图片好了", "tk1", "已回复", "generate_image", "a cute dog", 1);
+    legacy.run(`group:${G}`, "5003", T0 + 3, "今晚有 ESL 决赛".repeat(20), "tk2", "已回复", "ask_codex", "high", 0);
+    legacy.run(`group:${G}`, "5004", T0 + 4, "抱歉", "tk3", "失败", "fallback", null, 0);
+    db.close();
+    const lines = s.recent(grp, { limit: 4 }).map(r => formatMessage(r, { now: T0 }));
+    expect(lines[0]).toMatch(/\[我\] → 处理中$/);
+    expect(lines[1]).toMatch(/\[我\] → 生图 prompt="a cute dog" → 已发送 1 张图$/);
+    expect(lines[2]).toContain('[我] → codex(high) → "今晚有 ESL 决赛');
+    expect(lines[2]!.length).toBeLessThanOrEqual(6 + 120);
+    expect(lines[3]).toMatch(/\[我\] → 失败$/);
     expect(s.search(grp, { query: "cute dog", days: 30, limit: 10, now: T0 })).toHaveLength(1);
-    s.recordPending(`group:${G}`, "tk2", T0 + 1);
-    s.completeReply("tk2", { action: "ask_codex", detail: "high", excerpt: "今晚有 ESL 决赛".repeat(20), status: "已回复" });
-    const codexLine = formatMessage(s.recent(grp, { limit: 1 })[0]!, { now: T0 });
-    expect(codexLine).toContain('[我] → codex(high) → "今晚有 ESL 决赛');
-    expect(codexLine.length).toBeLessThanOrEqual(6 + 120);
-    s.recordPending(`group:${G}`, "tk3", T0 + 2);
-    s.completeReply("tk3", { action: "fallback", excerpt: "抱歉", status: "失败" });
-    expect(formatMessage(s.recent(grp, { limit: 1 })[0]!, { now: T0 })).toMatch(/\[我\] → 失败$/);
   });
 
-  it("completeReply renames self:<ticket> atomically and logs (not throws) on rename conflicts", () => {
-    const s = open();
-    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-    try {
-      s.recordPending(`group:${G}`, "tkA", T0);
-      expect(s.completeReply("tkA", { action: "reply", excerpt: "好", status: "已回复", reply_message_id: "7001" })).toBe(true);
-      // 重放同一结果：幂等，不报冲突
-      expect(s.completeReply("tkA", { action: "reply", excerpt: "好", status: "已回复", reply_message_id: "7001" })).toBe(true);
-      // 冲突：同 scope 已有 message_id=7002 的入站消息 → 内容照常更新，占位 id 保留，记一条 warn
-      s.ingest(msg("别人的消息", { message_id: "7002" }));
-      s.recordPending(`group:${G}`, "tkB", T0 + 1);
-      expect(s.completeReply("tkB", { action: "reply", excerpt: "第二条", status: "已回复", reply_message_id: "7002" })).toBe(true);
-      const rows = s.recent(grp, { limit: 10 });
-      expect(rows.map((r) => [r.message_id, r.text])).toEqual([
-        ["7001", "好"], ["7002", "别人的消息"], ["self:tkB", "第二条"],
-      ]);
-      const logged = err.mock.calls.map((c) => String(c[0]));
-      expect(logged.filter((l) => l.includes("rename conflict"))).toHaveLength(1);
-      // 找不到机器人行：返回 false 并记日志
-      expect(s.completeReply("nope", { action: "reply", status: "失败", reply_message_id: "7003" })).toBe(false);
-      expect(err.mock.calls.map((c) => String(c[0])).some((l) => l.includes("no bot row"))).toBe(true);
-    } finally {
-      err.mockRestore();
+  it("old schema: messages.ticket is renamed to outbox_key once (index rebuilt, rows kept), reopening is a no-op", () => {
+    const dir = tmp();
+    const old = new DatabaseSync(`${dir}/qq-messages.sqlite`);
+    old.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, message_id TEXT NOT NULL, time INTEGER NOT NULL,
+      user_id TEXT NOT NULL, nickname TEXT NOT NULL DEFAULT '', is_self INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '', reply_to_id TEXT,
+      action TEXT, detail TEXT, ticket TEXT, status TEXT, image_count INTEGER, UNIQUE (scope, message_id));
+      CREATE UNIQUE INDEX messages_ticket ON messages(ticket) WHERE ticket IS NOT NULL;
+      INSERT INTO messages (scope,message_id,time,user_id,is_self,text,ticket,status,action) VALUES ('group:${G}','9001',${T0},'10001',1,'旧回复','private:1:call-9','已回复','reply');`);
+    old.close();
+    const columns = (db: DatabaseSync) => (db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).map(c => c.name);
+    const indexes = (db: DatabaseSync) => (db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='messages'").all() as { name: string }[]).map(i => i.name);
+    for (let i = 0; i < 2; i++) {
+      const s = new ContextStore(dir, { tzOffsetSec: 0 });
+      expect(s.message(grp, "9001")!.row).toMatchObject({ outbox_key: "private:1:call-9", text: "旧回复" });
+      s.close();
+      const check = new DatabaseSync(`${dir}/qq-messages.sqlite`, { readOnly: true });
+      expect(columns(check)).toContain("outbox_key");
+      expect(columns(check)).not.toContain("ticket");
+      expect(indexes(check)).toContain("messages_outbox_key");
+      expect(indexes(check)).not.toContain("messages_ticket");
+      check.close();
     }
-  });
-
-  it("completeReply rolls back the content update when the rename fails", () => {
-    const s = open();
-    s.recordPending(`group:${G}`, "tkC", T0);
-    const db = (s as unknown as { db: { prepare(sql: string): unknown } }).db;
-    const realPrepare = db.prepare.bind(db);
-    const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
-      if (sql.startsWith("UPDATE messages SET message_id")) throw new Error("disk I/O error");
-      return realPrepare(sql);
-    });
-    try {
-      expect(() => s.completeReply("tkC", { action: "reply", excerpt: "不应留下", status: "已回复", reply_message_id: "7100" })).toThrow(/disk I\/O/);
-    } finally {
-      spy.mockRestore();
-    }
-    expect(s.recent(grp, { limit: 1 })[0]).toMatchObject({ message_id: "self:tkC", text: "", status: "处理中" });
+    // 只读连接（qq_context MCP）不迁移，读到的是主进程迁移后的库
+    const ro = new ContextStore(dir, { readOnly: true });
+    expect(ro.message(grp, "9001")!.row.outbox_key).toBe("private:1:call-9");
+    ro.close();
+    // 唯一索引仍按行键生效
+    const s = new ContextStore(dir, { tzOffsetSec: 0 });
+    const db = new DatabaseSync(`${dir}/qq-messages.sqlite`);
+    expect(() => db.prepare("INSERT INTO messages (scope,message_id,time,user_id,outbox_key) VALUES ('group:1','x',1,'1','private:1:call-9')").run()).toThrow(/UNIQUE/);
+    db.close(); s.close();
   });
 
   it("purge drops covered raw rows older than rawDays and summaries older than summaryDays", () => {

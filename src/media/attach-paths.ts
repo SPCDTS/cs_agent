@@ -1,10 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-/** 票据命名与既有图片目录一致，供 codex、pi 和回复阶段共用。 */
-export function attachmentDirs(dataDir: string, ticket: string) {
-  const segment = ticket.replace(/[^a-zA-Z0-9_-]/g, "_");
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(segment)) throw new Error("非法附件票据");
+/** 按会话线程键命名的图片与文件目录（设计 §5.3），供 codex、pi 和发送共用。 */
+export function attachmentDirs(dataDir: string, key: string) {
+  const segment = key.replace(/[^a-zA-Z0-9_-]/g, "_");
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(segment)) throw new Error("非法附件目录键");
   return { attachDir: path.join(dataDir, "images", segment), fileDir: path.join(dataDir, "files", segment) };
 }
 

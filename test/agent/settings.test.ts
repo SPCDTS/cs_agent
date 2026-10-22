@@ -4,10 +4,10 @@ import os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ObsStore } from "../../src/obs/store.js";
 import { Trace, trace } from "../../src/shared/trace.js";
-import { SettingsStore, SETTINGS_TICKET, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
+import { SettingsStore, SETTINGS_KEY, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
 import { DEFAULT_SEND_RULES } from "../../src/channel/send-rules.js";
 import { CodexBackend } from "../../src/agent/backends/codex.js";
-import type { BackendName, TicketSettings } from "../../src/agent/backends/types.js";
+import type { BackendName, SettingsSnapshot } from "../../src/agent/backends/types.js";
 import { BackendRouter, type BackendAdapter } from "../../src/agent/turns.js";
 import { createTurnSettings } from "../../src/agent/turn-settings.js";
 import type { InputRef, ThreadKey } from "../../src/agent/host/types.js";
@@ -42,14 +42,14 @@ describe("运行时设置", () => {
     expect(file).toEqual({ version: 1, settings: { ...defaults, agentBackend: "pi", backendOverrides: { "group:7": "codex" }, alertOwner: true } });
     const reopened = await SettingsStore.open(dir, defaults, t);
     expect(reopened.current()).toMatchObject({ agentBackend: "pi", alertOwner: true, backendOverrides: { "group:7": "codex" } });
-    const ev = store.events(SETTINGS_TICKET).find(e => e.stage === "settings_changed")!;
+    const ev = store.events(SETTINGS_KEY).find(e => e.stage === "settings_changed")!;
     const detail = JSON.parse(ev.detail_json);
     expect(detail).toMatchObject({ source: "dashboard", before: { agentBackend: "codex", alertOwner: false }, after: { agentBackend: "pi", alertOwner: true } });
     expect(detail.changed.sort()).toEqual(["agentBackend", "alertOwner", "backendOverrides"]);
     // 无变化不记事件；@ 票据不进票据列表
     await s.update({ agentBackend: "pi" }, "dashboard");
-    expect(store.events(SETTINGS_TICKET).filter(e => e.stage === "settings_changed")).toHaveLength(1);
-    expect(store.tickets().map(r => r.ticket)).not.toContain(SETTINGS_TICKET);
+    expect(store.events(SETTINGS_KEY).filter(e => e.stage === "settings_changed")).toHaveLength(1);
+    expect(store.turns().map(r => r.key)).not.toContain(SETTINGS_KEY);
   });
 
   it("非法值被拒绝且不改动文件与当前值；损坏文件回退默认值", async () => {
@@ -191,7 +191,7 @@ describe("auto 档位", () => {
       render: async () => ({ text: "看看", images: [], source: { type: "private" as const, user_id: "1", group_id: null, nickname: "测试" } }),
       binding: (threadKey: string) => ({ threadKey, identity: { kind: "user" as const, sender: "1" }, scope: "private:1", inputs: [] }) };
     const codex = await codexBackend(dir, script, turns);
-    const seen: TicketSettings[] = [];
+    const seen: SettingsSnapshot[] = [];
     const router = new BackendRouter({ backends: { codex: { startTurn: (k, i, c, snapshot) => { seen.push(snapshot!); return codex.startTurn(k, i, c, snapshot); },
       steer: (k, t, i) => codex.steer(k, t, i), interrupt: k => codex.interrupt(k), recoverTurn: () => codex.recoverTurn() } }, turns,
       settings: createTurnSettings({ currentSettings: () => settings.current(), codexReasoningEffort: "medium", effortRouter: { complete } }) });

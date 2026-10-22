@@ -79,7 +79,7 @@ export function createPiExtension(opts: PiToolsOptions) {
       const bound = await opts.binding(Number(api.conversationId));
       const result = callQQContextTool({ access: parseAccess(bound?.access), openStore: () => opts.store,
         maxChars: Math.min(2500, opts.maxContextChars ?? 2500), onRecall: event => {
-          const attribution = { backend: 'pi', ticket: bound?.turnId, session: String(api.conversationId), task_id: String(api.taskId) };
+          const attribution = { backend: 'pi', turn_id: bound?.turnId, session: String(api.conversationId), task_id: String(api.taskId) };
           const id = opts.instrumentation?.recordRecall({ ...event, ...attribution });
           trace.event(traceKey(bound), 'memory_recall', { status: event.is_error ? 'failed' : 'ok', durationMs: event.duration_ms,
             detail: { ...attribution, recall_id: id, tool: event.tool, returned_count: event.returned_count,

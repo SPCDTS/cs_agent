@@ -300,6 +300,7 @@ export class SendService {
     } finally {
       if (!result.already_sent) trace.event(row.turn_id ? "turn:" + row.turn_id : "thr:" + row.thread_key, "send_message", { detail: {
         target: `qq:${row.message_type}:${row.target_id}`, key: row.key, system: row.system, message_id: result.message_id,
+        text: row.text.slice(0, 500),
         status: result.status, images: row.images.length, files: channel.outbox.getOutbox(row.key)!.files.map(({ name, bytes, status }) => ({ name, bytes, status })),
         already_sent: false } });
     }

@@ -3,7 +3,7 @@
  * 不拼接 HTML；数据来自服务端已脱敏的 SSE。不轮询：/live 与 /logs 都是 EventSource 推送，
  * 页面上唯一的定时器只在本地刷新"已耗时"文字。
  */
-import { BACKENDS, ROUTES, STAGES, TICKET_STATUS } from './html.js';
+import { BACKENDS, STAGES, STATUS, TURN_KINDS } from './html.js';
 import { STALE_MS } from '../../shared/format.js';
 import { AGENTS_JS } from './agents-client.js';
 import { MEMORY_JS } from './memory-client.js';
@@ -11,9 +11,9 @@ import { CONTEXT_USAGE_JS } from './context-usage-client.js';
 
 const shared = `
 const STAGES=${JSON.stringify(STAGES)};
-const ROUTES=${JSON.stringify(ROUTES)};
+const KINDS=${JSON.stringify(TURN_KINDS)};
 const BACKENDS=${JSON.stringify(BACKENDS)};
-const STATUS=${JSON.stringify(TICKET_STATUS)};
+const STATUS=${JSON.stringify(STATUS)};
 function stageLabel(s){if(STAGES[s])return STAGES[s];if(s.startsWith('backend:')){const b=s.slice(8);return b==='codex'?'Codex 回合':b==='pi'?'Pi 回合':'后端 '+b;}if(s.startsWith('tool:'))return '工具 '+s.slice(5);return s;}
 function scopeLabel(s){const m=/^(group|private):(\\d+)$/.exec(s||'');return m?(m[1]==='group'?'群 ':'私聊 ')+m[2]:(s||'未知会话');}
 function fmtMs(ms){if(ms==null||!isFinite(ms))return '';if(ms<1000)return Math.round(ms)+' 毫秒';if(ms<60000)return (ms/1000).toFixed(ms<10000?1:0)+' 秒';const m=Math.floor(ms/60000),s=Math.round(ms%60000/1000);return m<60?m+' 分 '+s+' 秒':Math.floor(m/60)+' 时 '+(m%60)+' 分';}
@@ -36,7 +36,7 @@ function tier(p){return p>85?'hot':p>=60?'warn':'ok';}
 function ctxLabel(b,k){const n=BACKENDS[b]||b;if(b==='codex')return n+' · '+(k==='owner'?'owner 线程':scopeLabel(k));return n+' · '+(k==='owner'?'owner 私聊':scopeLabel(k));}
 function tickTitle(kind,at,w){return (kind==='bg'?'后台压缩阈值':'阻塞压缩阈值')+'：'+fmtInt(at)+' tokens（'+fmtPct(ratio(at,w))+'）。'+(kind==='bg'?'越过后在回合结束时于后台压缩上下文，不阻塞回复。':'越过后下一回合开始前必须先压缩，回复会等待压缩完成。');}
 function hhmmss(ts){const d=new Date(ts);return [d.getHours(),d.getMinutes(),d.getSeconds()].map(x=>String(x).padStart(2,'0')).join(':');}
-// 骨架：mini=单行（实时卡片头部），否则为完整条（标签、数字、轨道、说明）。
+// 骨架：mini=单行（实时会话行头部），否则为完整条（标签、数字、轨道、说明）。
 function ctxNode(backend,key,mini){
   const n=el('div','ctx ctx-none'+(mini?' ctx-mini':''));n.dataset.ctx=backend+'|'+key;
   const track=el(mini?'span':'div','ctx-track');track.setAttribute('role','progressbar');track.setAttribute('aria-valuemin','0');track.setAttribute('aria-valuemax','100');
@@ -86,16 +86,15 @@ function ctxApply(n,u,nowTs){
 `;
 
 const live = `
-const inflight=document.getElementById('inflight'), done=document.getElementById('done'), conn=document.getElementById('conn'), count=document.getElementById('live-count');
-const cards=new Map(), nodes=new Map(), ctx=new Map();
+const list=document.getElementById('convs'), conn=document.getElementById('conn'), count=document.getElementById('live-count');
+const CSRF=list.dataset.csrf||'', STOP=list.dataset.stop==='1';
+const convs=new Map(), nodes=new Map(), ctx=new Map();
 const MAX_ITEMS=80;
 let skew=0;
 const now=()=>Date.now()+skew;
-function group(scope){
-  let g=inflight.querySelector('[data-scope="'+CSS.escape(scope)+'"]');
-  if(!g){g=el('div','scope-group');g.dataset.scope=scope;const h=el('h3');h.append(el('span',null,scopeLabel(scope)),el('span','pill','0'));g.append(h,el('div','slips'));inflight.append(g);}
-  return g;
-}
+function threadLabel(t,name){if(t==='owner')return 'owner 私聊';const m=/^(group|private):(\\d+)$/.exec(t||'');if(!m)return t||'未知会话';return m[1]==='group'?(name?'群 '+name+'('+m[2]+')':'群 '+m[2]):'私聊 '+m[2];}
+function turnHref(id){return '/turns/'+encodeURIComponent(id);}
+function kindText(t){return t?(KINDS[t.kind]||'回合')+(t.sender?' · '+t.sender:''):'';}
 function feedItem(it,t0){
   const li=el('li',it.status==='failed'?'failed':it.status==='started'?'started':'');
   li.append(el('span','faint',fmtOffset(Math.max(0,it.ts-t0))));
@@ -104,89 +103,95 @@ function feedItem(it,t0){
   if(extra)body.append(document.createTextNode('  '+extra));
   li.append(body);return li;
 }
-// 单据骨架只建一次；页头（状态、发送者、路由、后端）与原文在每次更新时刷新。
-function slip(card){
-  const n=el('article','slip');n.dataset.ticket=card.ticket;
+// 会话行骨架只建一次；页头、本轮输入、已发消息、事件流与最近回合在每次更新时刷新。
+function row(c){
+  const n=el('article','slip conv');n.dataset.thread=c.thread;
   const b=el('div','slip-body'), top=el('div','slip-top');
-  const h={top,stamp:stamp(card.state),who:el('span','who'),route:el('span','pill'),backend:el('span','pill'),elapsed:el('span','elapsed'),text:el('p','text')};
-  h.elapsed.dataset.prefix='已耗时 ';
-  top.append(h.stamp,h.who,h.route,h.backend,h.elapsed);h.ctx=null;
-  const phase=el('div','phase');
+  const h={top,stamp:stamp(c.state),who:el('a','who'),backend:el('span','pill'),kind:el('span','pill'),elapsed:el('span','elapsed'),ctx:null};
+  h.who.href='/conversations/'+encodeURIComponent(c.thread);
+  top.append(h.stamp,h.who,h.backend,h.kind,h.elapsed);
+  const facts=el('div','conv-facts'), inputs=el('ol','conv-inputs'), phase=el('div','phase');
   const feed=el('ol','feed');feed.setAttribute('aria-live','polite');
-  const link=el('a',null,'查看时间线');link.href='/tickets/'+encodeURIComponent(card.ticket);
-  const foot=el('div','hint');foot.append(link);
-  b.append(top,h.text,phase,feed,foot);n.append(b);
-  n._h=h;n._feed=feed;n._phase=phase;n._seq=0;
+  const sends=el('ol','conv-sends');
+  const foot=el('div','hint conv-foot'), link=el('a',null,'回合详情');foot.append(link);
+  if(STOP){const f=el('form');f.setAttribute('method','post');f.setAttribute('action','/thread/stop');f.dataset.confirm='停止'+threadLabel(c.thread)+'当前的回合？子 agent 会一起停止，排队的消息随后照常处理。';
+    for(const [k,v] of [['_csrf',CSRF],['key',c.thread],['return','/live']]){const i=el('input');i.setAttribute('type','hidden');i.setAttribute('name',k);i.setAttribute('value',v);f.append(i);}
+    const btn=el('button','quiet','停止');btn.setAttribute('title','中止当前回合与子 agent');f.append(btn);foot.append(f);h.stop=f;}
+  const recent=el('details','conv-recent'), rs=el('summary'), rl=el('ul');recent.append(rs,rl);
+  b.append(top,facts,inputs,phase,feed,sends,foot,recent);n.append(b);
+  n._h=h;n._facts=facts;n._inputs=inputs;n._phase=phase;n._feed=feed;n._sends=sends;n._link=link;n._foot=foot;n._recent=recent;n._rs=rs;n._rl=rl;n._seq=0;n._turn=null;
   return n;
 }
-function fill(n,card){
-  const h=n._h, st=stamp(card.state);h.top.replaceChild(st,h.stamp);h.stamp=st;
-  h.who.textContent=card.sender||'—';
-  h.route.textContent=card.route?(ROUTES[card.route]||card.route):'';h.route.hidden=!card.route;
-  h.backend.textContent=card.backend?(BACKENDS[card.backend]||card.backend):'';h.backend.hidden=!card.backend;
-  h.elapsed.dataset.since=card.started;
-  // 头部的单行占用条：后端与线程键都已知时才出现；数据来自 context 帧（首帧快照 + 增量）。
-  const ck=card.backend&&card.thread?card.backend+'|'+card.thread:'';
+function fill(n,c){
+  const h=n._h, t=c.turn, st=stamp(c.state);h.top.replaceChild(st,h.stamp);h.stamp=st;
+  h.who.textContent=c.label?threadLabel(c.thread,c.label):threadLabel(c.thread);
+  h.backend.textContent=c.backend?(BACKENDS[c.backend]||c.backend):'';h.backend.hidden=!c.backend;
+  h.kind.textContent=kindText(t);h.kind.hidden=!t;
+  if(t){h.elapsed.dataset.prefix='已耗时 ';h.elapsed.dataset.since=t.started;}else{h.elapsed.dataset.prefix='空闲 ';h.elapsed.dataset.since=c.updated;}
+  // 头部的单行占用条：后端已知时出现；数据来自 context 帧（首帧快照 + 增量）。
+  const ck=c.backend?c.backend+'|'+c.thread:'';
   if(h.ctx&&h.ctx.dataset.ctx!==ck){h.ctx.remove();h.ctx=null;}
-  if(ck&&!h.ctx){h.ctx=ctxNode(card.backend,card.thread,true);h.top.append(h.ctx);const u=ctx.get(ck);if(u)ctxApply(h.ctx,u,now());}
-  h.text.textContent=card.text||'（无原文）';
-  n.classList.toggle('queued',card.state==='queued');
-  n._phase.replaceChildren();
-  if(card.phase){const p=el('span','pulse');p.setAttribute('aria-hidden','true');const since=el('span','faint');since.dataset.since=card.phase_since;
-    n._phase.append(p,el('span',null,'当前：'+stageLabel(card.phase)),since);}
-  else n._phase.append(el('span','faint',card.state==='queued'?'排队等待同一会话的前一条消息':'阶段之间'));
-  // 按事件序号增量追加：服务端事件环形截断后条数不变，但 seq 单调递增。
-  const feed=n._feed, stick=feed.scrollTop+feed.clientHeight>=feed.scrollHeight-8;
-  for(const it of card.items)if(it.seq>n._seq){feed.append(feedItem(it,card.started));n._seq=it.seq;}
-  while(feed.children.length>MAX_ITEMS)feed.firstChild.remove();
-  if(stick)feed.scrollTop=feed.scrollHeight;
+  if(ck&&!h.ctx){h.ctx=ctxNode(c.backend,c.thread,true);h.top.append(h.ctx);const u=ctx.get(ck);if(u)ctxApply(h.ctx,u,now());}
+  n.classList.toggle('idle',!t);
+  const facts=[];
+  if(t)facts.push(['本轮输入',t.inputs.length],['已发消息',t.sends.length],['工具调用',t.tools]);
+  if(c.subagents!=null)facts.push(['子 agent',c.subagents]);
+  facts.push(['排队',c.queued.length]);
+  n._facts.replaceChildren(...facts.map(([k,v])=>el('span','pill'+(k==='排队'&&v?' queued':''),k+' '+v)));
+  n._inputs.replaceChildren(...(t?t.inputs:[]).map(i=>{const li=el('li');if(i.sender)li.append(el('b',null,i.sender+'：'));li.append(document.createTextNode(i.text||'（无正文）'));return li;}));
+  n._inputs.hidden=!t||!t.inputs.length;
+  n._phase.replaceChildren();n._phase.hidden=!t;
+  if(t&&t.phase){const p=el('span','pulse');p.setAttribute('aria-hidden','true');const since=el('span','faint');since.dataset.since=t.phase_since;
+    n._phase.append(p,el('span',null,'当前：'+stageLabel(t.phase)),since);}
+  else if(t)n._phase.append(el('span','faint','阶段之间'));
+  // 换了回合就清空事件流；同一回合按事件序号增量追加（服务端事件环形截断后 seq 仍单调递增）。
+  const feed=n._feed;
+  if(n._turn!==(t?t.id:null)){feed.replaceChildren();n._seq=0;n._turn=t?t.id:null;}
+  feed.hidden=!t;
+  if(t){const stick=feed.scrollTop+feed.clientHeight>=feed.scrollHeight-8;
+    for(const it of t.items||[])if(it.seq>n._seq){feed.append(feedItem(it,t.started));n._seq=it.seq;}
+    while(feed.children.length>MAX_ITEMS)feed.firstChild.remove();
+    if(stick)feed.scrollTop=feed.scrollHeight;}
+  n._sends.replaceChildren(...(t?t.sends:[]).map(s=>{const li=el('li',s.status==='sent'?'':'failed');li.append(el('span','faint',(s.system?'系统 ':'')+(s.target||'')),document.createTextNode(' '+(s.text||'（无正文）')));return li;}));
+  n._sends.hidden=!t||!t.sends.length;
+  n._link.hidden=!t;if(t)n._link.href=turnHref(t.id);
+  if(n._h.stop)n._h.stop.hidden=!t;
+  n._foot.hidden=!t;
+  n._rs.textContent='最近完成 '+c.recent.length+' 个回合';n._recent.hidden=!c.recent.length;
+  n._rl.replaceChildren(...c.recent.map(r=>{const li=el('li');const a=el('a',null,kindText(r)||'回合');a.href=turnHref(r.id);
+    li.append(stamp(r.outcome||'processing'),a,el('span','excerpt',(r.inputs[0]&&r.inputs[0].text)||(r.sends[0]&&r.sends[0].text)||''),el('span','faint',fmtMs((r.finished||r.updated)-r.started)));return li;}));
 }
-function finished(card){
-  const d=el('details');d.dataset.ticket=card.ticket;const s=el('summary');
-  s.append(stamp(card.outcome==='reply_sent'?'sent':card.outcome==='fallback'?'fallback':'failed'),el('span','excerpt',card.text||'（无原文）'),el('span','faint',scopeLabel(card.scope)+'  '+fmtMs((card.finished||card.updated)-card.started)));
-  const a=el('a',null,'时间线');a.href='/tickets/'+encodeURIComponent(card.ticket);s.append(a);
-  const feed=el('ol','feed');for(const it of card.items.slice(-12))feed.append(feedItem(it,card.started));
-  d.append(s,feed);return d;
+// 工作中的会话在前（按回合开始时间），空闲的按最近活动倒序。
+function order(){
+  const all=[...convs.values()].sort((a,b)=>(b.turn?1:0)-(a.turn?1:0)||(a.turn?a.turn.started-b.turn.started:b.updated-a.updated));
+  for(const c of all){const n=nodes.get(c.thread);if(n)list.append(n);}
 }
-// snapshot=true：快照按服务端顺序逐张到达（完成卡片新的在前），追加到末尾且不高亮。
-function place(card,fresh,snapshot){
-  const old=nodes.get(card.ticket);
-  if(card.finished!=null){
-    if(old&&old.tagName==='DETAILS')return;
-    if(old)old.remove();
-    const d=finished(card);
-    if(snapshot)done.append(d);else{d.classList.add('flashin');done.prepend(d);}
-    nodes.set(card.ticket,d);
-    while(done.children.length>30){const last=done.lastElementChild;nodes.delete(last.dataset.ticket);last.remove();}
-  }else{
-    let n=old;if(!n||n.tagName==='DETAILS'){if(n)n.remove();n=slip(card);if(fresh)n.classList.add('flashin');}
-    const slips=group(card.scope||'').querySelector('.slips');if(n.parentNode!==slips)slips.append(n);
-    nodes.set(card.ticket,n);fill(n,card);
-  }
-  tidy();
+function place(c,fresh){
+  let n=nodes.get(c.thread);
+  if(!n){n=row(c);nodes.set(c.thread,n);if(fresh)n.classList.add('flashin');}
+  fill(n,c);order();tidy();
 }
 function tidy(){
-  for(const g of [...inflight.querySelectorAll('.scope-group')]){const k=g.querySelector('.slips').children.length;if(!k)g.remove();else g.querySelector('.pill').textContent=k+' 条';}
-  const k=[...cards.values()].filter(c=>c.finished==null).length;
-  count.textContent=k?k+' 条进行中':'没有进行中的消息';
-  document.getElementById('inflight-empty').hidden=k>0;
-  document.getElementById('done-empty').hidden=done.children.length>0;
+  const k=[...convs.values()].filter(c=>c.turn).length;
+  count.textContent=k?k+' 个会话工作中':convs.size?'所有会话空闲':'没有活动的会话';
+  document.getElementById('convs-empty').hidden=convs.size>0;
 }
 function tick(){for(const e of document.querySelectorAll('[data-since]'))e.textContent=(e.dataset.prefix||'')+fmtMs(now()-Number(e.dataset.since));}
 setInterval(tick,1000);
 function connect(){
   const es=new EventSource('/live/stream');
-  // 快照分帧：snapshot（清空）→ 每张卡片一帧 snapcard → snapshot_end；随后是 card / remove 增量。
-  es.addEventListener('snapshot',e=>{const m=JSON.parse(e.data);skew=m.now-Date.now();cards.clear();for(const n of nodes.values())n.remove();nodes.clear();
-    inflight.querySelectorAll('.scope-group').forEach(g=>g.remove());done.replaceChildren();tidy();});
-  es.addEventListener('snapcard',e=>{const c=JSON.parse(e.data).card;cards.set(c.ticket,c);place(c,false,true);});
+  // 快照分帧：snapshot（清空）→ 每个会话一帧 snapconversation（带当前回合事件流）→ snapshot_end；随后是 conversation / remove 增量。
+  es.addEventListener('snapshot',e=>{const m=JSON.parse(e.data);skew=m.now-Date.now();convs.clear();for(const n of nodes.values())n.remove();nodes.clear();tidy();});
+  es.addEventListener('snapconversation',e=>{const c=JSON.parse(e.data).conversation;convs.set(c.thread,c);place(c,false);});
   es.addEventListener('snapshot_end',()=>{conn.className='conn on';conn.textContent='实时连接中';tidy();tick();});
-  es.addEventListener('card',e=>{const m=JSON.parse(e.data);const prev=cards.get(m.card.ticket);
-    if(prev&&m.item.seq<=prev.seq)return; // 已包含在快照里
-    const card={...m.card,items:[...(prev?prev.items:[]),m.item].slice(-MAX_ITEMS)};cards.set(card.ticket,card);place(card,!prev,false);tick();});
+  es.addEventListener('conversation',e=>{const m=JSON.parse(e.data), c=m.conversation, prev=convs.get(c.thread);
+    // 事件流只在增量里带新的一条：同一回合沿用已有事件，换了回合从空开始；已包含在快照里的事件跳过
+    let items=prev&&prev.turn&&c.turn&&prev.turn.id===c.turn.id?prev.turn.items||[]:[];
+    if(m.item&&c.turn&&!(items.length&&m.item.seq<=items[items.length-1].seq))items=[...items,m.item].slice(-MAX_ITEMS);
+    const next={...c,turn:c.turn?{...c.turn,items}:null};convs.set(c.thread,next);place(next,!prev);tick();});
   es.addEventListener('context',e=>{const u=JSON.parse(e.data).usage;if(!u||!u.backend||!u.key)return;const k=u.backend+'|'+u.key;ctx.set(k,u);
-    for(const n of inflight.querySelectorAll('[data-ctx="'+CSS.escape(k)+'"]'))ctxApply(n,u,now());});
-  es.addEventListener('remove',e=>{const m=JSON.parse(e.data);cards.delete(m.ticket);const n=nodes.get(m.ticket);if(n)n.remove();nodes.delete(m.ticket);tidy();});
+    for(const n of list.querySelectorAll('[data-ctx="'+CSS.escape(k)+'"]'))ctxApply(n,u,now());});
+  es.addEventListener('remove',e=>{const m=JSON.parse(e.data);convs.delete(m.thread);const n=nodes.get(m.thread);if(n)n.remove();nodes.delete(m.thread);tidy();});
   es.onerror=()=>{conn.className='conn off';conn.textContent='连接中断，浏览器会自动重连';};
 }
 connect();

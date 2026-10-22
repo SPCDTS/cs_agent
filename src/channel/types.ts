@@ -1,5 +1,5 @@
 /**
- * 通道公共契约；字段名与取值沿用现有票据和消息库格式。
+ * 通道公共契约；字段名与取值沿用 Inbox 与消息库格式。
  */
 
 export type IncomingAttachment = { status: 'pending' | 'ok' | 'skipped' | 'failed'; url?: string; file?: string; path?: string; reason?: string; deadline?: number };
@@ -33,37 +33,14 @@ export interface InboundMessage {
   /** 群聊中是否用真实 at 段 @ 了机器人（永不做文本匹配） */
   mentioned_self: boolean;
   segments: MessageSegment[];
-  /** 本票据已下载并校验的参考图绝对路径。 */
+  /** 本条输入已下载并校验的参考图绝对路径。 */
   images: string[];
   image_error?: string;
   attachments?: IncomingAttachment[];
 }
 
-export type TicketStatus = "pending" | "sending" | "sent" | "uncertain";
-
-/** 旧版生图前缀路由留下的票据（只读：召回机器人旧回复时核对发出状态）；ticket_id 与入站键相同。 */
-export interface ReplyTicketRecord {
-  ticket_id: string;
-  self_id: string;
-  user_id: string;
-  group_id: string | null;
-  message_type: ChatType;
-  source_message_id: string;
-  source_nickname: string;
-  group_name?: string;
-  source_text: string;
-  source_route_text?: string;
-  source_images?: string[];
-  attachments?: IncomingAttachment[];
-  source_image_error?: string;
-  created_at: string;
-  /** 开票顺序号（票据表 rowid）：派发与崩溃恢复的排序键 */
-  seq: number;
-  status: TicketStatus;
-  attempted_at?: string;
-  sent_at?: string;
-  reply_message_id?: string;
-}
+/** Outbox 行与附件的发送状态（§7.4）。 */
+export type SendStatus = "pending" | "sending" | "sent" | "uncertain";
 
 /** 输入种类：QQ 消息或定时任务到点（设计 §4.1、§10）。 */
 export type InboundKind = "user" | "scheduled";
@@ -169,8 +146,6 @@ export interface Channel {
   uploadFile(type: ChatType, targetId: string, file: Buffer, name: string): Promise<{ file_id: string }>;
   /** 等待入站附件下载完成（恢复时补下载），返回最新的输入记录。 */
   prepareIncoming?(key: string): Promise<InboundRecord | null>;
-  /** 旧票据（只读）；不存在返回 null。 */
-  getTicket(ticket: string): Promise<ReplyTicketRecord | null>;
   /** 当前处于熔断的发送 scope（group:<id> / private:<qq> / global）；不支持发送规则的通道缺省。 */
   sendBreakers?(): import("./send-rules.js").SendBreaker[];
   /** 手动解除熔断；返回 false 表示该 scope 没有处于熔断。 */

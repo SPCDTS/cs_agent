@@ -23,13 +23,14 @@ export interface RecallDetail extends RecallEvent {
 
 /* ───────── 过滤 → 接口参数 ───────── */
 
-export interface RecallFilters { backend: string; tool: string; scope: string; session: string; ticket: string; since: string; turn: string; page: number }
-const FILTER_KEYS = ['backend', 'tool', 'scope', 'session', 'ticket', 'since', 'turn'] as const;
+/** turn_id 为宿主回合 id（pi:… / codex:…）；turn 为后端会话内的回合 id，只在有 session 时生效。 */
+export interface RecallFilters { backend: string; tool: string; scope: string; session: string; turn_id: string; since: string; turn: string; page: number }
+const FILTER_KEYS = ['backend', 'tool', 'scope', 'session', 'turn_id', 'since', 'turn'] as const;
 
 /** 页面查询 → 过滤条件：空值视为未筛选（接口把显式空字符串当 400）；非法后端 / 工具丢弃；turn 只在有 session 时生效。 */
 export function recallFilters(q: URLSearchParams): RecallFilters {
   const g = (k: string) => (q.get(k) ?? '').trim();
-  const f: RecallFilters = { backend: g('backend'), tool: g('tool'), scope: g('scope'), session: g('session'), ticket: g('ticket'), since: g('since'), turn: g('turn'),
+  const f: RecallFilters = { backend: g('backend'), tool: g('tool'), scope: g('scope'), session: g('session'), turn_id: g('turn_id'), since: g('since'), turn: g('turn'),
     page: Math.max(0, Math.min(1_000_000, Math.floor(Number(q.get('page')) || 0))) };
   if (f.backend !== 'codex' && f.backend !== 'pi') f.backend = '';
   if (!(RECALL_TOOLS as readonly string[]).includes(f.tool)) f.tool = '';
@@ -83,14 +84,14 @@ function filterForm(f: RecallFilters, scopes: ScopeSummary[]): string {
 <label>工具<select name="tool">${opt('', '全部', f.tool)}${RECALL_TOOLS.map(t => opt(t, t, f.tool)).join('')}</select></label>
 <label>会话域<select name="scope">${opt('', '全部', f.scope)}${scopeOpts}</select></label>
 <label>会话<input name="session" value="${esc(f.session)}" placeholder="线程 ID / Pi 会话号"></label>
-<label>票据<input name="ticket" value="${esc(f.ticket)}" placeholder="完整票据"></label>
+<label>宿主回合<input name="turn_id" value="${esc(f.turn_id)}" placeholder="pi:… 或 codex:…"></label>
 <label>此后<input type="date" name="since" value="${esc(since)}"></label>${f.turn ? `<input type="hidden" name="turn" value="${esc(f.turn)}">` : ''}
 <button>筛选</button>${FILTER_KEYS.some(k => f[k]) ? '<a class="btn quiet" href="/memory/recalls">清除</a>' : ''}</form>${f.turn ? `<p class="hint">只看会话 <span class="mono">${esc(f.session)}</span> 的回合 <span class="mono">${esc(f.turn)}</span>（按回合时间窗关联）。<a href="${recallsHref({ ...f, turn: '' })}">看整个会话</a></p>` : ''}${f.since && !since ? `<p class="hint">起始时间按接口原样传递：<span class="mono">${esc(f.since)}</span></p>` : ''}`;
 }
 
 function recallRow(e: RecallEvent): string {
   const turn = safeTurnHref(e.turn_href);
-  const links = [e.ticket ? `<a class="mono" href="/tickets/${uri(e.ticket)}" title="${esc(e.ticket)}">${esc(e.ticket.slice(0, 12))}</a>` : '',
+  const links = [e.turn_id ? `<a class="mono" href="/turns/${uri(e.turn_id)}" title="${esc(e.turn_id)}">${esc(e.turn_id.slice(0, 16))}</a>` : '',
     turn ? `<a href="${turn}">回合</a>` : ''].filter(Boolean).join('<br>');
   return `<tr${e.is_error ? ' class="rc-err"' : ''}><td><a href="${recallHref(e.id)}">${esc(fmtTime(e.ts))}</a></td><td>${backendBadge(e.backend)}</td><td class="mono">${esc(e.tool)}</td>
 <td class="rc-args"><code>${esc(compactArgs(e.args))}</code></td><td class="hide-sm">${esc(accessLabel(e))}${e.scope_hint ? `<br><small class="mono">${esc(e.scope_hint)}</small>` : ''}</td>
@@ -102,7 +103,7 @@ export function recallsPageBody(f: RecallFilters, scopes: ScopeSummary[], list: 
   let out = crumbs([['记忆', '/memory'], ['召回记录']]) + filterForm(f, scopes);
   if ('error' in list) return out + `<div class="flash err" role="alert">读取召回记录失败：${esc(list.error)}</div>`;
   const filtered = FILTER_KEYS.some(k => f[k]);
-  out += list.items.length ? `<div class="sheet"><div class="wrap"><table class="list recalls"><thead><tr><th>时间</th><th>后端</th><th>工具</th><th>参数</th><th class="hide-sm">权限 / 域</th><th class="num">返回</th><th class="num">裁掉</th><th class="hide-sm">字数</th><th class="num hide-sm">耗时</th><th>错误</th><th>票据 / 回合</th><th>证据</th></tr></thead><tbody>${list.items.map(recallRow).join('')}</tbody></table></div></div>
+  out += list.items.length ? `<div class="sheet"><div class="wrap"><table class="list recalls"><thead><tr><th>时间</th><th>后端</th><th>工具</th><th>参数</th><th class="hide-sm">权限 / 域</th><th class="num">返回</th><th class="num">裁掉</th><th class="hide-sm">字数</th><th class="num hide-sm">耗时</th><th>错误</th><th>宿主回合 / 会话回合</th><th>证据</th></tr></thead><tbody>${list.items.map(recallRow).join('')}</tbody></table></div></div>
 <p class="hint">返回 / 裁掉：工具实际交给模型的条数，与查询到但因字数上限被裁掉的条数（不含被 limit 或时间条件排除的记录）。点"详情"查看三级证据。</p>`
     : list.page ? empty('这一页没有更多召回记录了。')
       : empty(filtered ? '没有符合条件的召回记录。换个条件或<a href="/memory/recalls">清除筛选</a>。'
@@ -146,7 +147,7 @@ export function recallDetailBody(d: RecallDetail): string {
     ['调用时间', esc(fmtTime(d.ts))], ['耗时', esc(fmtMs(d.duration_ms) || '0 毫秒')],
     ['权限', `${esc(accessLabel(d))}${d.access !== 'all' ? ` <small class="mono">${esc(d.access)}</small>` : ''}`],
     ['会话', d.session ? `<a class="mono" href="/agents/${uri(d.backend)}/sessions/${uri(d.session)}">${esc(d.session)}</a>` : '<span class="faint">未记录（新线程首轮）</span>'],
-    ['票据', d.ticket ? `<a class="mono" href="/tickets/${uri(d.ticket)}">${esc(d.ticket)}</a>` : '<span class="faint">—</span>'],
+    ['宿主回合', d.turn_id ? `<a class="mono" href="/turns/${uri(d.turn_id)}">${esc(d.turn_id)}</a>` : '<span class="faint">—</span>'],
     ['回合', turn ? `<a href="${turn}">打开回合</a>` : '<span class="faint">无法定位</span>'],
     ...(d.task_id ? [['任务', `<span class="mono">${esc(d.task_id)}</span>`] as [string, string]] : []),
   ], 'meta')}</div><details class="mt"><summary>调用参数</summary>${json(d.args)}</details>

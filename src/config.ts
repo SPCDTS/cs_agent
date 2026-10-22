@@ -37,7 +37,8 @@ const EnvSchema = z.object({
   QQ_GROUP_MENTIONS: bool(true),
 
   MEDIA_RECALL_PORT: z.coerce.number().int().min(1).max(65535).default(8790),
-  MEDIA_RECALL_MAX_PER_TICKET: int(5),
+  /** 每个回合的图片召回次数上限 */
+  MEDIA_RECALL_MAX_PER_TURN: int(5),
   INCOMING_DOWNLOAD_CONCURRENCY: int(2),
   INCOMING_DOWNLOAD_DEADLINE_SEC: int(60),
 
@@ -108,7 +109,8 @@ const EnvSchema = z.object({
 
   DATA_DIR: z.string().default("/data"),
   WORKSPACE_DIR: z.string().default("/workspace"),
-  OBS_TICKET_EVENT_CAP: z.coerce.number().int().min(8).max(10000).default(500),
+  /** 每个 trace 键（回合 / 输入 / 会话）最多保存的观测事件数 */
+  OBS_EVENT_CAP: z.coerce.number().int().min(8).max(10000).default(500),
   OBS_RETENTION_DAYS: int(30),
   OBS_MEMORY_RETENTION_DAYS: z.coerce.number().int().nonnegative().default(90),
   OBS_ADMIN_RETENTION_DAYS: int(365),
@@ -163,9 +165,16 @@ export function requireProviderApiKey(provider: string, env: NodeJS.ProcessEnv =
   throw new Error(`配置无效: AGENT_MODEL_PROVIDER=${provider} 需要设置 ${[keyEnv, ...aliases].join(" 或 ")}`);
 }
 
+/** 改名前的环境变量名 → 现名：旧部署的 .env 继续生效，现名优先。 */
+const RENAMED_ENV: [string, string][] = [["MEDIA_RECALL_MAX_PER_TICKET", "MEDIA_RECALL_MAX_PER_TURN"], ["OBS_TICKET_EVENT_CAP", "OBS_EVENT_CAP"]];
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // 通常将空字符串视为未设置；AUTO_EFFORT_MODEL 的空值专门表示禁用分类。
   const cleaned = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined && v !== ""));
+  for (const [legacy, name] of RENAMED_ENV) {
+    if (cleaned[name] === undefined && cleaned[legacy] !== undefined) cleaned[name] = cleaned[legacy];
+    delete cleaned[legacy];
+  }
   if (env.AUTO_EFFORT_MODEL !== undefined) cleaned.AUTO_EFFORT_MODEL = env.AUTO_EFFORT_MODEL;
   const parsed = EnvSchema.safeParse(cleaned);
   if (!parsed.success) {

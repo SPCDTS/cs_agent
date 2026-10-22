@@ -185,7 +185,7 @@ it("独立 MCP 按本次调用的回合与线程写入召回归属，观测库�
     expect(textOf(await c.callTool({ name: "qq_recent", arguments: {} }))).toContain("独立进程历史");
     if (!blocked) {
       const db = new DatabaseSync(path.join(dir, "observability.sqlite"), { readOnly: true });
-      try { expect(db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ backend: 'codex', ticket: 'codex:mcp-turn', session: 'thr-sess', returned_count: 1 }); }
+      try { expect(db.prepare('SELECT * FROM recall_events').get()).toMatchObject({ backend: 'codex', turn_id: 'codex:mcp-turn', session: 'thr-sess', returned_count: 1 }); }
       finally { db.close(); }
     }
     await c.close(); writer.close(); writer = undefined;

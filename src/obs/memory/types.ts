@@ -63,7 +63,7 @@ export interface SummaryVersion {
   text_sha256: string; text: string; replaced_by: number | null; replaced_at: number | null;
 }
 export interface RecallEvent extends RecallRecord {
-  id: number; ticket: string | null; session: string | null; task_id: string | null; turn_href: string | null;
+  id: number; turn_id: string | null; session: string | null; task_id: string | null; turn_href: string | null;
 }
 export interface RequestEvidence {
   status: 'confirmed' | 'not_found' | 'unavailable'; turn?: string; call_id?: string; note: string;

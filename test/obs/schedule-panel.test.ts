@@ -109,7 +109,7 @@ describe("页面渲染", () => {
 
   it("详情页显示完整提示词、规则、创建者、超时与倒序运行记录，并预填编辑表单", () => {
     const html = scheduleDetailBody(schedule({ runs: [
-      { fire_key: "s1@1", fire_at: bj(2026, 10, 18, 8, 30), status: "sent", sent: 2, note: "第一次记录", started_at: 1, ended_at: 4_001, ticket: "run_abc" },
+      { fire_key: "s1@1", fire_at: bj(2026, 10, 18, 8, 30), status: "sent", sent: 2, note: "第一次记录", started_at: 1, ended_at: 4_001, input_key: "run_abc" },
       { fire_key: "s1@2", fire_at: bj(2026, 10, 19, 8, 30), status: "skipped", reason: "stale", skipped_count: 3 },
     ] }), { names: view.names, csrf: "tok", now: NOW });
     expect(html).toContain("整理新闻发给我");
@@ -120,7 +120,7 @@ describe("页面渲染", () => {
     expect(html.indexOf("2026-10-19 08:30")).toBeLessThan(html.indexOf("2026-10-18 08:30"));
     expect(html).toContain("迟到或停机（合并 3 次）");
     expect(html).toContain("第一次记录");
-    expect(html).toContain('href="/tickets/run_abc"');
+    expect(html).toContain('href="/inputs/run_abc"');
     expect(html).toContain('action="/schedules/s1/update"');
     expect(html).toMatch(/name="time" value="08:30"/);
     expect(html).toMatch(/value="repeat" checked/);

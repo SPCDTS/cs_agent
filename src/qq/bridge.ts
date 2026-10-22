@@ -7,13 +7,13 @@ import { isOwner } from "../shared/owners.js";
 import { trace } from "../shared/trace.js";
 import { attachmentName } from "../media/attach.js";
 import type { DownloadHooks } from '../media/download.js';
-import { inboundFromRecord, threadKeyOf } from '../channel/ticket.js';
+import { inboundFromRecord, threadKeyOf } from '../channel/inbound.js';
 import { downloadIncoming } from "./incoming.js";
 import { EventEmitter } from "node:events";
 import WebSocket from "ws";
 import type {
   Channel, ChannelStatus, ChatType, InboundMessage, InboundRecord, ChannelEvents,
-  RemoteMessage, ReplyResult, ReplyTicketRecord,
+  RemoteMessage, ReplyResult,
 } from "../channel/types.js";
 import type { QQBridge, QQBridgeConfig } from "./types.js";
 import { createOneBotClient, isRecord, numericId, isValidId, OneBotError, stringField, type OneBotClient } from "./onebot.js";
@@ -437,8 +437,8 @@ class Bridge extends EventEmitter implements Channel {
     if (admitted) this.enqueueIncoming(message, admitted, true, named);
   }
 
-  private enqueueIncoming(message: InboundMessage, ticket: string, emit: boolean, named?: Promise<void>): Promise<void> {
-    const existing = this.incomingJobs.get(ticket);
+  private enqueueIncoming(message: InboundMessage, key: string, emit: boolean, named?: Promise<void>): Promise<void> {
+    const existing = this.incomingJobs.get(key);
     if (existing) return existing;
     const scope = message.message_type === 'group' ? 'group:' + message.group_id : 'private:' + message.user_id;
     const pending = message.attachments?.some(a => a.status === 'pending');
@@ -462,11 +462,11 @@ class Bridge extends EventEmitter implements Channel {
           } else { this.activeDownloads++; acquired = true; }
           signal.throwIfAborted();
           const event = { message: message.attachments!.map(a => ({ type: 'image', data: { url: a.url, file: a.file } })) };
-          // 即使 DNS / NapCat 不响应也必须按票据截止时间释放 worker。
+          // 即使 DNS / NapCat 不响应也必须按截止时间释放 worker。
           const paths = await new Promise<string[]>((resolve, reject) => {
             const abort = () => reject(signal.reason);
             signal.addEventListener('abort', abort, { once: true });
-            downloadIncoming(event, ticket, this.config.dataDir, this.client, signal, this.downloadHooks)
+            downloadIncoming(event, key, this.config.dataDir, this.client, signal, this.downloadHooks)
               .then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
           });
           message.images = paths;
@@ -481,17 +481,17 @@ class Bridge extends EventEmitter implements Channel {
           const left = (this.senderInflight.get(message.user_id) ?? 1) - 1;
           if (left > 0) this.senderInflight.set(message.user_id, left); else this.senderInflight.delete(message.user_id);
         }
-        store.finishAttachments(ticket, message.attachments!, message.image_error);
+        store.finishAttachments(key, message.attachments!, message.image_error);
       }
       if (named) {
         await named;
-        if (message.group_name) store.setGroupName(ticket, message.group_name);
+        if (message.group_name) store.setGroupName(key, message.group_name);
       }
-      if (emit && this.running) this.emit('message', message, ticket);
+      if (emit && this.running) this.emit('message', message, key);
     }).catch(err => this.emitError(toError(err)));
-    this.incomingJobs.set(ticket, run); this.scopeChains.set(scope, run);
+    this.incomingJobs.set(key, run); this.scopeChains.set(scope, run);
     void run.finally(() => {
-      this.incomingJobs.delete(ticket);
+      this.incomingJobs.delete(key);
       if (this.scopeChains.get(scope) === run) this.scopeChains.delete(scope);
     });
     return run;
@@ -547,10 +547,6 @@ class Bridge extends EventEmitter implements Channel {
   // ---------- 发送 ----------
 
   get inbox() { return this.requireStore(); }
-
-  async getTicket(ticket: string): Promise<ReplyTicketRecord | null> {
-    return this.requireStore().get(ticket);
-  }
 
   get outbox() { return this.requireStore(); }
 
@@ -616,13 +612,13 @@ class Bridge extends EventEmitter implements Channel {
   }
 
   /** 发送规则拒绝时记观测事件；刚触发熔断时另记 send_breaker，由告警通知 owner（每次熔断一次）。 */
-  private underRules(ticket: string, scope: string, begin: () => boolean): boolean {
+  private underRules(traceKey: string, scope: string, begin: () => boolean): boolean {
     try { return begin(); }
     catch (error) {
       if (isSendRuleError(error)) {
-        log.warn("outbound send rejected by send rules", { key: ticket.slice(0, 40), scope, rule: error.rule, breaker: error.scope });
-        trace.event(ticket, "send_rejected", { scope, status: "failed", detail: { rule: error.rule, breaker_scope: error.scope, error: error.message } });
-        if (error.tripped) trace.event(ticket, "send_breaker", { scope, detail: { ...error.tripped } });
+        log.warn("outbound send rejected by send rules", { key: traceKey.slice(0, 40), scope, rule: error.rule, breaker: error.scope });
+        trace.event(traceKey, "send_rejected", { scope, status: "failed", detail: { rule: error.rule, breaker_scope: error.scope, error: error.message } });
+        if (error.tripped) trace.event(traceKey, "send_breaker", { scope, detail: { ...error.tripped } });
       }
       throw error;
     }

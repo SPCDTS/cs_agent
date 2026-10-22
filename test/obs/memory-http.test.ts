@@ -1,3 +1,4 @@
+import { DatabaseSync } from 'node:sqlite';
 import { createServer, type ServerResponse } from 'node:http';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -70,7 +71,7 @@ describe('记忆只读 API', () => {
     const r = await rig();
     r.context.setMeta('aging_last_run', String((NOW - HOUR) / 1000));
     const report = { day_summaries: 1, week_summaries: 2, failed: 0, purged_messages: 3, purged_summaries: 4, ms: 50 };
-    r.store.append({ ticket: '@aging', scope: '', ts: NOW - HOUR, stage: 'aging', status: 'ok', duration_ms: 50, detail: report });
+    r.store.append({ key: '@aging', scope: '', ts: NOW - HOUR, stage: 'aging', status: 'ok', duration_ms: 50, detail: report });
     r.deps.aging = { config: r.deps.retention, nextRun: () => NOW + HOUR, running: () => true };
     const res = await r.get('/api/memory');
     expect(res.status).toBe(200);
@@ -160,10 +161,12 @@ describe('记忆只读 API', () => {
     const last = await r.get(`/api/memory/scopes/${G}/messages?before=${NOW - 2 * DAY}`);
     expect(last.body.next_before_id).toBeUndefined();
     expect(last.body.next_before).toBeUndefined(); expect(last.body.items[0]).toMatchObject({ message_id: 'm1', media: 1, text: 'match 第一日 token=[已隐藏]' });
-    r.context.recordPending(G, 'bot1', NOW / 1000, { replyTo: 'm1' });
-    r.context.completeReply('bot1', { action: 'reply', status: '已回复', excerpt: '匿名回复' });
+    const key = 'bot1';
+    r.context.recordSent({ key, thread_key: G, turn_id: null, input_key: null, system: false, message_type: 'group', target_id: G.slice(6), mention_user_id: null,
+      proactive: false, status: 'sent', message_id: 'm-bot1', text: '匿名回复', text_sha256: '', images: [], files: [],
+      created_at: new Date(NOW).toISOString(), sent_at: new Date(NOW).toISOString() }, { selfId: '10001', replyTo: 'm1' });
     expect((await r.get(`/api/memory/scopes/${G}/messages?after=${NOW - 1000}`)).body.items[0]).toMatchObject({
-      message_id: 'self:bot1', reply_to: 'm1', bot_status: '已回复', bot_action: 'reply', media: 0 });
+      message_id: 'm-bot1', reply_to: 'm1', bot_status: '已回复', bot_action: 'reply', media: 0 });
   });
 
   it('先整体脱敏再截断长正文与所有预览，不泄露跨边界凭据', async () => {
@@ -301,8 +304,11 @@ describe('记忆只读 API', () => {
   it('命中 detail 和正文末尾时返回正确字段和高亮片段，空匹配保留真实工具文本', async () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW);
     const r = await rig();
-    r.context.recordPending(G, 'detail', NOW / 1000);
-    r.context.completeReply('detail', { action: 'generate_image', status: '已回复', detail: 'Needle token=abc', excerpt: '成图' });
+    // 旧版生图回复行（只读保留）的 detail 字段也可检索
+    const db = new DatabaseSync(r.context.file);
+    db.prepare(`INSERT INTO messages (scope,message_id,time,user_id,nickname,is_self,text,outbox_key,status,action,detail)
+      VALUES (?,'self:detail',?,'','我',1,'成图','detail','已回复','generate_image','Needle token=abc')`).run(G, NOW / 1000);
+    db.close();
     expect((await r.get('/api/memory/search?q=needle')).body.hits[0]).toMatchObject({ matched_fields: ['detail'], excerpt: 'Needle token=[已隐藏]' });
     r.add('tail', NOW, '前言'.repeat(500) + 'needle 末尾');
     const tail = (await r.get('/api/memory/search?q=needle')).body.hits.find((h: { id: string }) => h.id === 'tail');
@@ -312,11 +318,9 @@ describe('记忆只读 API', () => {
 
   it('相同 formatter 行按出现次数统计裁剪', async () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(NOW);
-    const r = await rig({ maxChars: 75 }, true);
-    for (const ticket of ['a', 'b', 'c']) {
-      r.context.recordPending(G, ticket, NOW / 1000);
-      r.context.completeReply(ticket, { action: 'reply', status: '已回复', excerpt: 'match 重复正文' });
-    }
+    const r = await rig({ maxChars: 90 }, true);
+    for (const key of ['a', 'b', 'c'])
+      r.context.recordSent(({ key, thread_key: G, turn_id: null, input_key: null, system: false, message_type: 'group' as const, target_id: G.slice(6), mention_user_id: null, proactive: false, status: 'sent' as const, message_id: 'm-' + key, text: 'match 重复正文', text_sha256: '', images: [], files: [], created_at: new Date((NOW / 1000) * 1000).toISOString(), sent_at: new Date((NOW / 1000) * 1000).toISOString() }), { selfId: '10001', replyTo: null });
     const res = await r.get(`/api/memory/search?q=match&scope=${G}`);
     expect(res.body.hits).toHaveLength(3); expect(res.body.dropped).toBe(1);
   });
@@ -339,10 +343,10 @@ describe('记忆只读 API', () => {
     await fs.writeFile(r.deps.archives!.pi, JSON.stringify({ key: G, conversation: 42,
       archived_at: new Date(NOW).toISOString(), reason: 'dashboard' }), 'utf8');
     for (const [i, reason] of ['background', 'background', 'reserve'].entries()) r.store.append({
-      ticket: `@compaction${i}`, scope: G, ts: NOW + i, stage: 'compaction', status: 'ok', duration_ms: null,
+      key: `@compaction${i}`, scope: G, ts: NOW + i, stage: 'compaction', status: 'ok', duration_ms: null,
       detail: { conversation: 42, reason },
     });
-    r.store.append({ ticket: '@other', scope: G, ts: NOW, stage: 'compaction', status: 'ok', duration_ms: null,
+    r.store.append({ key: '@other', scope: G, ts: NOW, stage: 'compaction', status: 'ok', duration_ms: null,
       detail: { backend: 'codex', conversation: 42, reason: 'ignored' } });
     const res = await r.get('/api/memory/archives');
     expect(res.status).toBe(200);

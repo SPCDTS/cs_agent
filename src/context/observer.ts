@@ -8,7 +8,7 @@ export interface RecallObservation {
   duration_ms: number; is_error: boolean;
 }
 export interface RecallRecord extends RecallObservation {
-  backend: string; ticket?: string | null; session?: string | null; task_id?: string | null;
+  backend: string; /** 宿主回合 id（pi:… / codex:…） */ turn_id?: string | null; session?: string | null; task_id?: string | null;
 }
 export interface SummarySource {
   batch_id: string; model?: string | null; provider?: string | null; usage?: unknown;

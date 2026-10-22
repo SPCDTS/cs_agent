@@ -40,15 +40,15 @@ export async function admitRun(tx: Tx, schedule: Schedule, fireAt: number, now: 
   const ordinal = (meta.ordinals[schedule.id] ?? 0) + 1;
   if (!prepared || prepared.fire.schedule.revision !== schedule.revision || prepared.fire.ordinal !== ordinal) return undefined;
   await recordRunInTransaction(tx, schedule.id, { fire_key: fireKey, fire_at: fireAt, status: "queued" }, now);
-  const { ticket, skipped } = await prepared.admitter.admit(tx, prepared.fire);
+  const { key, skipped } = await prepared.admitter.admit(tx, prepared.fire);
   if (skipped) await recordRunInTransaction(tx, schedule.id, {
-    fire_key: fireKey, fire_at: fireAt, ticket, status: "skipped", reason: "interrupted", ended_at: now,
+    fire_key: fireKey, fire_at: fireAt, input_key: key, status: "skipped", reason: "interrupted", ended_at: now,
     note: "定时输入已结束，未重新执行",
   }, now);
   meta.ordinals[schedule.id] = ordinal;
   // admitter 可能拒绝已结束的孤儿输入，保留事务内写入的终态。
   const row = schedule.runs.find(run => run.fire_key === fireKey)!;
-  row.ticket = ticket;
+  row.input_key = key;
   return row;
 }
 
@@ -159,8 +159,8 @@ export function createScheduleTask(opts: { admitter: ScheduledRunLauncher; trace
           await commitFire();
         }
         reportPaused(paused, opts.trace);
-        if (admitted?.ticket && (admitted.status === "queued" || admitted.status === "running")) {
-          opts.admitter.launch(admitted.ticket);
+        if (admitted?.input_key && (admitted.status === "queued" || admitted.status === "running")) {
+          opts.admitter.launch(admitted.input_key);
         }
       },
     },

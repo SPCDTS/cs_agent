@@ -21,7 +21,7 @@ export interface ScheduleRun {
   fire_key: string;
   fire_at: number;
   status: ScheduleRunStatus;
-  /** skipped 的原因：stale（迟到/停机）、overlap（上一轮未完）、interrupted（开票后提交前中断）、paused、revision */
+  /** skipped 的原因：stale（迟到/停机）、overlap（上一轮未完）、interrupted（输入写入后提交前中断）、paused、revision */
   reason?: "stale" | "overlap" | "interrupted" | "paused" | "revision" | "timeout" | "backend_failed";
   /** 停机合并跳过的次数 */
   skipped_count?: number;
@@ -32,7 +32,7 @@ export interface ScheduleRun {
   /** 最终回答前 200 字，作为运行记录（相当于 Codex 的 memory.md） */
   note?: string;
   /** 定时输入的入站键（run_ 开头），用于 trace 与运行记录 */
-  ticket?: string;
+  input_key?: string;
 }
 
 export interface Schedule {
@@ -81,7 +81,7 @@ export interface ScheduledRunAdmitter {
   /** 未采用预备结果时结束预备的定时输入；必须先检查同一输入是否已被另一提交接管。 */
   discard?(tx: unknown): Promise<void>;
   /** skipped 表示已结束的孤儿输入不能重跑；排程侧须记 skipped(interrupted) 并解除 in_flight，不累计失败。 */
-  admit(tx: unknown, fire: ScheduledFire): Promise<{ ticket: string; skipped?: boolean }>;
+  admit(tx: unknown, fire: ScheduledFire): Promise<{ key: string; skipped?: boolean }>;
 }
 
 /**

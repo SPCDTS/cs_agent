@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { analyzeContextTurns, type ContextUsageEvent, type ContextRequestEvent, type SystemEvent } from '../../src/obs/context-turns.js';
 import type { ContextUsage } from '../../src/shared/format.js';
 
-function request(ts: number, ticket: string, seq = 1, patch: Partial<ContextRequestEvent['detail']> = {}): ContextRequestEvent {
-  return { ts, ticket, kind: 'request', detail: { backend: 'codex', key: 'owner', ticket, seq, turn: 2,
+function request(ts: number, key: string, seq = 1, patch: Partial<ContextRequestEvent['detail']> = {}): ContextRequestEvent {
+  return { ts, key, kind: 'request', detail: { backend: 'codex', key: 'owner', trace_key: key, seq, turn: 2,
     input: 10_000, cached: 0, window: 100_000, at: ts, ...patch } };
 }
 
 const minute = 60_000;
 function event(ts: number, detail: Partial<ContextUsage> = {}): ContextUsageEvent {
-  return { ts, ticket: `t${ts}`, detail: { backend: 'codex', key: 'owner', usedTokens: 10_000,
+  return { ts, key: `t${ts}`, detail: { backend: 'codex', key: 'owner', usedTokens: 10_000,
     cachedTokens: 0, windowTokens: 100_000, turns: 2, updatedAt: ts, source: 'turn', ...detail } };
 }
 function change(ts: number, stage: string, detail: Record<string, unknown> = {}): SystemEvent {
@@ -166,11 +166,11 @@ describe('上下文回合分析', () => {
 
 describe('每请求上下文分析', () => {
   it('混入 @ 伪票据 turn 快照不改变分析结果，compact 仍保留分隔', () => {
-    const compact = { ...event(30, { source: 'compact' }), ticket: '@context' };
+    const compact = { ...event(30, { source: 'compact' }), key: '@context' };
     const real = [event(10), request(20, 'new'), compact, request(50, 'new', 2), event(70)];
     const system = [change(15, 'prompt_changed'), change(65, 'settings_changed', { changed: ['codexModel'] })];
-    const snapshot = (ts: number, ticket = '@context'): ContextUsageEvent =>
-      ({ ...event(ts, { usedTokens: 1, turns: 1 }), ticket, kind: 'usage' });
+    const snapshot = (ts: number, key = '@context'): ContextUsageEvent =>
+      ({ ...event(ts, { usedTokens: 1, turns: 1 }), key, kind: 'usage' });
     const mixed = [snapshot(0), real[0], snapshot(11, '@backfill'), real[1], real[2],
       snapshot(40), real[3], { ...snapshot(60), kind: undefined }, real[4], snapshot(80)];
     const expected = analyzeContextTurns(real, system);
@@ -178,22 +178,22 @@ describe('每请求上下文分析', () => {
     expect(expected.map(turn => [turn.ts, turn.mark, turn.gapMs])).toEqual([
       [10, 'first', undefined], [20, 'miss', 10], [30, 'compact', 10], [50, 'compact', 30], [70, 'miss', 20],
     ]);
-    expect(expected[2]).toMatchObject({ ticket: '@context', seq: 0, requests: 0 });
+    expect(expected[2]).toMatchObject({ key: '@context', seq: 0, requests: 0 });
     expect(analyzeContextTurns([snapshot(0)], [])).toEqual([]);
   });
   it('request 透传 output（包括零），旧记录及未提供输出的请求不带 output 字段', () => {
     const turns = analyzeContextTurns([request(0, 'a', 1, { output: 123 }),
       request(1, 'a', 2, { output: 0 }), request(2, 'b', 1, { output: undefined }),
-      event(3), { ...event(4, { source: 'compact' }), ticket: '@context' }, request(5, '@request', 1, { output: 7 })], []);
+      event(3), { ...event(4, { source: 'compact' }), key: '@context' }, request(5, '@request', 1, { output: 7 })], []);
     expect(turns.map(turn => turn.output)).toEqual([123, 0, undefined, undefined, undefined, 7]);
     for (const turn of turns.slice(2, 5)) expect(turn).not.toHaveProperty('output');
-    expect(turns[5]).toMatchObject({ ticket: '@request', seq: 1, requests: 1, output: 7 });
+    expect(turns[5]).toMatchObject({ key: '@request', seq: 1, requests: 1, output: 7 });
   });
   it('纯新数据按票据统计请求数，票据内与跨票据都以上一请求为基准', () => {
     const turns = analyzeContextTurns([request(0, 'a', 1, { turn: 1 }),
       request(10, 'a', 2, { turn: 1, cached: 9000 }), request(20, 'a', 3, { turn: 1 }),
       request(30, 'b', 1, { cached: 5000 })], []);
-    expect(turns.map(t => [t.ticket, t.seq, t.requests, t.turn, t.mark, t.gapMs])).toEqual([
+    expect(turns.map(t => [t.key, t.seq, t.requests, t.turn, t.mark, t.gapMs])).toEqual([
       ['a', 1, 3, 1, 'first', undefined], ['a', 2, 3, 1, undefined, 10],
       ['a', 3, 3, 1, 'miss', 10], ['b', 1, 1, 2, 'partial', 10],
     ]);
@@ -206,9 +206,9 @@ describe('每请求上下文分析', () => {
   });
   it('混合数据按整票据优先请求，保留旧票据和压缩分隔，重复用量不改变基准', () => {
     const turns = analyzeContextTurns([event(0),
-      { ...event(1, { usedTokens: 999999 }), ticket: 'new' }, request(2, 'new'),
-      { ...event(3, { source: 'compact' }), ticket: 'new' }, request(4, 'new', 2),
-      { ...event(5, { usedTokens: 999999 }), ticket: 'new' }, event(6, { cachedTokens: 9000 })], []);
+      { ...event(1, { usedTokens: 999999 }), key: 'new' }, request(2, 'new'),
+      { ...event(3, { source: 'compact' }), key: 'new' }, request(4, 'new', 2),
+      { ...event(5, { usedTokens: 999999 }), key: 'new' }, event(6, { cachedTokens: 9000 })], []);
     expect(turns.map(t => [t.ts, t.seq, t.requests, t.mark])).toEqual([
       [0, 1, 1, 'first'], [2, 1, 2, 'miss'], [3, 0, 0, 'compact'], [4, 2, 2, 'compact'], [6, 1, 1, undefined],
     ]);

@@ -9,7 +9,7 @@ type RecallRow = Omit<RecallEvent, 'args' | 'returned' | 'is_error' | 'turn_href
   args_json: string; returned_json: string; is_error: number;
 };
 export interface RecallFilters {
-  scope?: string; session?: string; ticket?: string; backend?: 'codex' | 'pi'; tool?: string; since?: number; page: number; turn?: string;
+  scope?: string; session?: string; turn_id?: string; backend?: 'codex' | 'pi'; tool?: string; since?: number; page: number; turn?: string;
 }
 const backendOf = (backend: string): backend is SessionRef['backend'] => backend === 'codex' || backend === 'pi';
 function window(turns: ObservedTurn[], index: number) {
@@ -52,7 +52,7 @@ export class RecallReader {
   }
   async list(filters: RecallFilters) {
     const clauses: string[] = [], args: SQLInputValue[] = [];
-    for (const key of ['scope', 'session', 'ticket', 'backend', 'tool'] as const) if (filters[key] !== undefined) {
+    for (const key of ['scope', 'session', 'turn_id', 'backend', 'tool'] as const) if (filters[key] !== undefined) {
       clauses.push(`${key === 'scope' ? 'scope_hint' : key}=?`); args.push(filters[key]!);
     }
     if (filters.since !== undefined) { clauses.push('ts>=?'); args.push(filters.since); }

@@ -4,7 +4,7 @@
  */
 import type { Block, ContentRef, ObservedTurn, Usage } from '../sessions/types.js';
 import { fmtInt, fmtPct, ratio } from '../../shared/format.js';
-import { esc, fmtBytes, fmtMs, fmtTime, stamp, statusStamp, uri, type Tone } from './html.js';
+import { esc, fmtBytes, fmtMs, fmtTime, stamp, statusStamp, traceHref, uri, type Tone } from './html.js';
 import { scopeLabel } from '../../context/access.js';
 
 export const TURN_STATUS: Record<string, [string, Tone]> = { ok: ['完成', 'ok'], failed: ['失败', 'fail'], running: ['进行中', 'run'] };
@@ -62,9 +62,10 @@ export function turnMeta(c: SessionCtx, t: ObservedTurn, facts?: TurnFacts): str
 }
 
 export function qqLine(t: ObservedTurn): string {
-  if (!t.ticket) return '';
+  const href = t.traceKey ? traceHref(t.traceKey) : undefined;
+  if (!t.traceKey || !href) return '';
   const d = t.delivery;
-  return `<span class="tm-qq">QQ <a class="mono" href="/tickets/${uri(t.ticket)}">${esc(t.ticket.slice(0, 12))}</a>${d ? ` ${statusStamp(d.status)}${d.scope ? ` ${esc(scopeLabel(d.scope))}` : ''}${num(d.duration_ms) ? ` ${esc(fmtMs(d.duration_ms))}` : ''}` : ''}</span>`;
+  return `<span class="tm-qq">QQ 回合 <a class="mono" href="${href}">${esc(t.traceKey.replace(/^turn:/, '').slice(0, 24))}</a>${d ? ` ${statusStamp(d.status)}${d.scope ? ` ${esc(scopeLabel(d.scope))}` : ''}${num(d.duration_ms) ? ` ${esc(fmtMs(d.duration_ms))}` : ''}` : ''}</span>`;
 }
 
 export const contextLinks = (c: SessionCtx, turn: string) =>

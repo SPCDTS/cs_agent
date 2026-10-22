@@ -11,7 +11,7 @@ export function isOwnerActor(owners: OwnerIds, actor: string | undefined): boole
   return !!actor?.startsWith("qq:") && isOwner(owners, actor.slice(3));
 }
 
-/** 仅用于线程与互斥队列；存储范围、票据来源和投递目标保留实际 QQ 号。 */
+/** 仅用于线程与互斥队列；存储范围、输入来源和投递目标保留实际 QQ 号。 */
 export function ownerScope<T extends string>(owners: OwnerIds, scope: T): T | "owner" {
   return scope.startsWith("private:") && isOwner(owners, scope.slice(8)) ? "owner" : scope;
 }

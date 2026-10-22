@@ -31,11 +31,11 @@ export class AdmitterStub implements ScheduledRunAdmitter, ScheduledRunLauncher 
   async admit(tx: unknown, fire: ScheduledFire) {
     if (this.reject) throw new Error("admission failed");
     this.calls.push(fire);
-    const ticket = `run_test_${fire.fire_key}`;
+    const key = `run_test_${fire.fire_key}`;
     if (this.fail) await recordRunInTransaction(tx as Tx, fire.schedule.id, {
       fire_key: fire.fire_key, fire_at: fire.fire_at, status: "failed", reason: "backend_failed",
     }, Date.now());
-    return { ticket };
+    return { key };
   }
 }
 

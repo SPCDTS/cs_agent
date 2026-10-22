@@ -110,7 +110,7 @@ export class GrantsService {
     return this.mutate(name, args, `qq:${this.opts.owner}`, "panel", "@grants");
   }
 
-  private async mutate(name: "auth_grant" | "auth_revoke", input: unknown, actor: string, source: "panel" | "tool", ticket: string) {
+  private async mutate(name: "auth_grant" | "auth_revoke", input: unknown, actor: string, source: "panel" | "tool", traceKey: string) {
     const args = name === "auth_grant" ? grantSchema.parse(input) : revokeSchema.parse(input);
     const change = await this.opts.getHarness().commit(async tx => {
       const doc = await tx.doc(GrantsDoc), before = doc[args.user] ? JSON.parse(JSON.stringify(doc[args.user])) as Grant : null;
@@ -129,7 +129,7 @@ export class GrantsService {
       return { before, after: doc[args.user] ? JSON.parse(JSON.stringify(doc[args.user])) as Grant : null };
     }, BACKGROUND_CONTEXT);
     if (JSON.stringify(change.before) !== JSON.stringify(change.after)) {
-      (this.opts.trace ?? trace).event(ticket, "auth_changed", { detail: { source, actor, user: args.user, ...change } });
+      (this.opts.trace ?? trace).event(traceKey, "auth_changed", { detail: { source, actor, user: args.user, ...change } });
     }
     return change.after;
   }

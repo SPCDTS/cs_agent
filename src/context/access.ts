@@ -18,7 +18,7 @@ export function scopeOf(m: { message_type: ChatType; group_id: string | null; us
   return m.message_type === "group" ? `group:${m.group_id}` : `private:${m.user_id}`;
 }
 
-/** 票据来源 → 访问范围：owner → all；其他群消息 → 本群；其他私聊 → 本人。 */
+/** 输入来源 → 访问范围：owner → all；其他群消息 → 本群；其他私聊 → 本人。 */
 export function accessForSource(
   source: { type: ChatType; user_id: string; group_id: string | null },
   owners: OwnerIds,

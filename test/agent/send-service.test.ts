@@ -181,7 +181,7 @@ it("同一回合正文相同但图片或文件不同：照常发送新附件；�
 
 it("重放与 reconcile 不重复记录 send_message；观测按回合键", async () => {
   const f = sendFixture(), stages: string[] = [];
-  const untap = trace.tap(e => { if (e.ticket === "turn:t1") stages.push(e.stage); });
+  const untap = trace.tap(e => { if (e.key === "turn:t1") stages.push(e.stage); });
   try {
     await f.service.send(f.binding, { text: "一次" }, "same");
     await f.service.send(f.binding, { text: "一次" }, "same");

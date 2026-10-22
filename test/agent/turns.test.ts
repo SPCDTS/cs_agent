@@ -22,7 +22,7 @@ describe("BackendRouter", () => {
     const settings = vi.fn(async (scope: string) => ({ backend: scope === "group:7" ? "pi" as const : "codex" as const, codexReasoningEffort: "high" as const }));
     const router = new BackendRouter({ backends: { pi, codex }, settings, turns: { records: inputs => inputs.map(i => rec(i.inboundKey)) } });
     expect(await router.startTurn("group:7", [input("a"), input("b")], { kind: "user", sender: "5" })).toEqual({ turnId: "pi:1" });
-    expect(settings).toHaveBeenCalledWith("group:7", expect.objectContaining({ ticket: "a", text: "正文 a\n正文 b" }));
+    expect(settings).toHaveBeenCalledWith("group:7", expect.objectContaining({ key: "in:a", text: "正文 a\n正文 b" }));
     expect(pi.startTurn).toHaveBeenCalledWith("group:7", expect.any(Array), { kind: "user", sender: "5" }, expect.objectContaining({ backend: "pi" }));
     expect(await router.steer("group:7", "codex:9", input("c"))).toBe("ok");
     expect(codex.steer).toHaveBeenCalled();

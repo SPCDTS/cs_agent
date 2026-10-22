@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CodexBasePromptStore, MANAGED_QQ_INSTRUCTIONS } from "../../src/agent/codex/base-prompt.js";
-import { SettingsStore, settingsDefaults, SETTINGS_TICKET } from "../../src/agent/settings.js";
+import { SettingsStore, settingsDefaults, SETTINGS_KEY } from "../../src/agent/settings.js";
 import { createDashboard } from "../../src/obs/http.js";
 import { csrfToken } from "../../src/obs/http-util.js";
 import { ObsStore } from "../../src/obs/store.js";
@@ -84,7 +84,7 @@ describe("基础指令设置页", () => {
     const html = await r.get();
     expect(html).not.toContain("与目录默认不同");
     expect(html).toContain(`codex 基础指令（${MODEL}）`);
-    const events = r.store.events(SETTINGS_TICKET).filter(e => e.stage === "prompt_changed");
+    const events = r.store.events(SETTINGS_KEY).filter(e => e.stage === "prompt_changed");
     expect(events).toHaveLength(2);
     expect(JSON.parse(events[0].detail_json)).toMatchObject({ target: "codex-base", model: MODEL, source: "dashboard",
       bytes_before: Buffer.byteLength("\uFEFF目录默认\r\n"), bytes_after: Buffer.byteLength("\uFEFF新内容\r\n下一行\r\n") });
@@ -98,7 +98,7 @@ describe("基础指令设置页", () => {
     expect((await r.post({ ...form, content: "覆盖" }, restore, { "Sec-Fetch-Site": "cross-site" })).status).toBe(403);
     expect((await r.post({ ...form, content: "覆盖" }, restore, { Cookie: "" })).status).toBe(401);
     expect((await r.prompts.read(MODEL))!.custom).toBe("目录默认\n");
-    expect(r.store.events(SETTINGS_TICKET).filter(e => e.stage === "prompt_changed")).toHaveLength(0);
+    expect(r.store.events(SETTINGS_KEY).filter(e => e.stage === "prompt_changed")).toHaveLength(0);
   });
 
   it("模型切换后的旧表单不写错文件，新页面跟随当前模型", async () => {

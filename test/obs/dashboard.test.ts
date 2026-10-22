@@ -9,11 +9,11 @@ import { csrfToken, sseWriter } from '../../src/obs/http-util.js';
 import { ObsStore } from '../../src/obs/store.js';
 import { trace } from '../../src/shared/trace.js';
 import { log } from '../../src/shared/log.js';
-import { LiveBus, type LiveCard } from '../../src/obs/live.js';
+import { LiveBus, type ConversationHead, type LiveConversation } from '../../src/obs/live.js';
 import { registerSecrets } from '../../src/shared/redact.js';
 import { ContextStore } from '../../src/context/store.js';
 import { loadConfig } from '../../src/config.js';
-import { SettingsStore, SETTINGS_TICKET, type RuntimeSettings, type SettingsValidators } from '../../src/agent/settings.js';
+import { SettingsStore, SETTINGS_KEY, type RuntimeSettings, type SettingsValidators } from '../../src/agent/settings.js';
 import { DEFAULT_SEND_RULES } from '../../src/channel/send-rules.js';
 import type { DashboardOptions } from '../../src/obs/dashboard-types.js';
 import { REASONING_EFFORTS } from '../../src/agent/codex/runner.js';
@@ -101,11 +101,13 @@ describe('面板二期页面', () => {
   });
   it('所有页面 200，含设计令牌（深浅色）、导航高亮和关键元素；无内联 style 属性与外部资源', async () => {
     const r = await rig();
-    trace.event('t-live', 'received', { scope: 'group:7', detail: { text: '在途消息', sender: '小明' } });
+    trace.event('turn:pi:7:1', 'received', { scope: 'group:7', detail: { text: '在途消息', sender: '小明', thread_key: 'group:7', kind: 'user' } });
     for (const [url, marks] of Object.entries({
-      '/': ['运行总览', '依赖状态', 'class="lamps"', '并发槽位', '处理中 0 · 排队 1 · <a href="/live">'],
-      '/live': ['进行中的会话', 'id="inflight"', 'id="done"', 'src="/assets/live.js"', 'data-ticket="t-live"', '群 7'],
-      '/tickets': ['票据列表', 'name="status"'],
+      '/': ['运行总览', '依赖状态', 'class="lamps"', '并发槽位', '工作中 1 个会话 · 排队输入 0 条 · <a href="/live">'],
+      '/live': ['实时会话', 'id="convs"', 'src="/assets/live.js"', 'data-thread="group:7"', '群 7', '在途消息', 'action="/thread/stop"', 'name="return" value="/live"'],
+      '/turns': ['回合列表', 'name="status"', 'name="thread"', 'name="kind"', 'href="/turns/pi%3A7%3A1"'],
+      '/turns/pi%3A7%3A1': ['回合详情', '在途消息', '小明', 'href="/conversations/group%3A7"', '时间线'],
+      '/conversations/group%3A7': ['群 7', '最近回合', 'href="/turns/pi%3A7%3A1"', 'action="/thread/stop"'],
       '/logs': ['实时日志', 'src="/assets/logs.js"'],
       '/context': ['上下文检索', 'href="/memory"'],
       '/context-usage': ['上下文监控', 'name="limit"'],
@@ -127,9 +129,9 @@ describe('面板二期页面', () => {
       const nonce = /<style nonce="([^"]+)"/.exec(html)![1]!;
       expect(res.headers.get('content-security-policy')).toContain(`'nonce-${nonce}'`);
       for (const m of html.matchAll(/<script[^>]*>/g)) expect(m[0]).toContain(`nonce="${nonce}"`);
-      const navOf: Record<string, string> = { '/logs': '/settings', '/config': '/settings', '/context': '/memory' };
+      const navOf: Record<string, string> = { '/logs': '/settings', '/config': '/settings', '/context': '/memory', '/turns/pi%3A7%3A1': '/turns', '/conversations/group%3A7': '/live' };
       if (url !== '/') expect(html).toContain(`href="${navOf[url] ?? url}" aria-current="page"`);
-      expect(html).toMatch(/<nav class="tabs"[^>]*><a href="\/"[^>]*>总览<\/a><a href="\/agents"[^>]*>Agent<\/a><a href="\/memory"[^>]*>记忆<\/a><a href="\/context-usage"[^>]*>上下文监控<\/a><a href="\/tickets"[^>]*>票据<\/a><a href="\/live"[^>]*>(<i[^>]*><\/i>)?实时<\/a><a href="\/schedules"[^>]*>定时任务<\/a><a href="\/skills"[^>]*>技能<\/a><a href="\/settings"[^>]*>设置<\/a><\/nav>/);
+      expect(html).toMatch(/<nav class="tabs"[^>]*><a href="\/"[^>]*>总览<\/a><a href="\/agents"[^>]*>Agent<\/a><a href="\/memory"[^>]*>记忆<\/a><a href="\/context-usage"[^>]*>上下文监控<\/a><a href="\/turns"[^>]*>回合<\/a><a href="\/live"[^>]*>(<i[^>]*><\/i>)?实时<\/a><a href="\/schedules"[^>]*>定时任务<\/a><a href="\/skills"[^>]*>技能<\/a><a href="\/settings"[^>]*>设置<\/a><\/nav>/);
     }
     // 去重：总览不再列在途卡片（只给计数，详情在实时页）；设置页不再有"线程"区块（重置/压缩在 Agent 页）。
     const home = await (await r.get('/')).text();
@@ -145,22 +147,66 @@ describe('面板二期页面', () => {
     expect((await r.get('/nope')).status).toBe(404);
   });
 
-  it('历史 relay 事件、用量和非终态 fallback 仍可显示', async () => {
+  it('旧票据页：列表与详情 301 到回合 / 输入 / 会话页；旧版键（入站键）的事件在输入页显示，不进回合列表与实时页', async () => {
     const r = await rig();
     trace.event('legacy', 'received', { detail: { text: '旧票据' } });
     trace.event('legacy', 'model_turn', { status: 'ok', durationMs: 20,
       detail: { operation: 'relay', provider: 'deepseek', model: 'legacy-model', input_tokens: 100, output_tokens: 20 } });
-    trace.event('legacy', 'fallback', { status: 'failed', detail: { operation: 'relay', terminal: false } });
-    trace.event('legacy', 'postprocess', { detail: { mode: 'relay', relayed: false, raw_reply: '**原文**', sent_text: '原文' } });
-    for (const url of ['/tickets/legacy', '/live']) {
-      const res = await r.get(url), html = await res.text();
-      expect(res.status).toBe(200);
-      expect(html).toContain('输入 100 / 输出 20 tokens');
-      expect(html).toContain('原文');
-    }
     trace.event('legacy', 'reply_sent', { detail: { terminal: true, reply: '原文' } });
-    expect(r.store.tickets().find(t => t.ticket === 'legacy')?.status).toBe('sent');
-    expect(await (await r.get('/live')).text()).toContain('已回复');
+    const go = async (url: string) => { const res = await r.get(url, { redirect: 'manual' }); return [res.status, res.headers.get('location')]; };
+    expect(await go('/tickets')).toEqual([301, '/turns']);
+    expect(await go('/tickets/legacy')).toEqual([301, '/inputs/legacy']);
+    expect(await go('/tickets/' + encodeURIComponent('turn:pi:1:2'))).toEqual([301, '/turns/pi%3A1%3A2']);
+    expect(await go('/tickets/' + encodeURIComponent('in:abc'))).toEqual([301, '/inputs/abc']);
+    expect(await go('/tickets/' + encodeURIComponent('thr:group:7'))).toEqual([301, '/conversations/group%3A7']);
+    expect((await r.get('/tickets/%40settings', { redirect: 'manual' })).status).toBe(404);
+    const res = await r.get('/tickets/legacy'), html = await res.text();
+    expect(res.status).toBe(200); expect(res.url).toContain('/inputs/legacy');
+    expect(html).toContain('输入 100 / 输出 20 tokens'); expect(html).toContain('旧票据'); expect(html).toContain('含旧版票据记录');
+    expect(r.store.turns()).toEqual([]);
+    expect(await (await r.get('/live')).text()).not.toContain('旧票据');
+    for (const url of ['/inputs/%40settings', '/inputs/missing', '/turns/missing', '/conversations/bad', '/conversations/group%3Aabc']) expect((await r.get(url)).status, url).toBe(404);
+  });
+
+  it('回合页：输入、发送、工具、子 agent、错误与时间线；输入页链回所在回合；进行中的回合可停止', async () => {
+    const r = await rig();
+    trace.event('in:k1', 'received', { scope: 'group:7', detail: { text: '帮我查天气', sender: '小明' } });
+    trace.event('in:k1', 'queued', { scope: 'group:7', detail: { thread_key: 'group:7', kind: 'user', result: 'queued' } });
+    trace.event('in:k1', 'admitted', { scope: 'group:7', detail: { thread_key: 'group:7', settings: { backend: 'pi', piModel: 'deepseek-flash', piThinkingLevel: 'low', codexReasoningEffort: 'high', effortSource: 'fixed' } } });
+    trace.event('turn:pi:7:9', 'dispatched', { scope: 'group:7', detail: { backend: 'pi', conversation_key: 'group:7', kind: 'user', inputs: ['k1'] } });
+    trace.event('in:k1', 'delivered', { detail: { turn: 'pi:7:9' } });
+    trace.event('turn:pi:7:9', 'received', { scope: 'group:7', detail: { text: '帮我查天气', sender: '小明', thread_key: 'group:7', kind: 'user', inputs: ['k1'] } });
+    trace.event('in:k2', 'received', { scope: 'group:7', detail: { text: '顺便看看明天', sender: '小明' } });
+    trace.event('turn:pi:7:9', 'steered', { detail: { inputs: ['k2'], text: '顺便看看明天' } });
+    trace.event('turn:pi:7:9', 'tool:web_search', { status: 'started', detail: { backend: 'pi', input: { query: '天气' } } });
+    trace.event('turn:pi:7:9', 'tool:web_search', { durationMs: 1200, detail: { backend: 'pi' } });
+    trace.event('turn:pi:7:9', 'tool:subagent', { durationMs: 5, detail: { backend: 'pi', input: { action: 'spawn', name: 'researcher' } } });
+    trace.event('turn:pi:7:9', 'tool:read', { status: 'failed', durationMs: 3, detail: { backend: 'pi', error: '没有这个文件' } });
+    trace.event('turn:pi:7:9', 'send_message', { detail: { target: 'qq:group:7', text: '晴，25 度', status: 'sent', message_id: '501', system: false } });
+    const live = r.live.snapshot().find(c => c.thread === 'group:7')!;
+    expect(live.turn).toMatchObject({ id: 'pi:7:9', kind: 'user', sender: '小明', tools: 3 });
+    expect(live.turn!.inputs.map(i => [i.key, i.text])).toEqual([['k1', '帮我查天气'], ['k2', '顺便看看明天']]);
+    let html = await (await r.get('/turns/pi%3A7%3A9')).text();
+    expect(html).toContain('进行中'); expect(html).toContain('action="/thread/stop"'); expect(html).toContain('name="return" value="/conversations/group%3A7"');
+    expect(html).toContain('<h2>输入 <small>2 条');
+    expect(html).toContain('href="/inputs/k1"'); expect(html).toContain('帮我查天气'); expect(html).toContain('顺便看看明天');
+    expect(html).toContain('Pi · deepseek-flash · low');
+    expect(html).toContain('<h2>发送 <small>1 条'); expect(html).toContain('晴，25 度'); expect(html).toContain('qq:group:7');
+    expect(html).toContain('<h2>工具调用 <small>3 次'); expect(html).toContain('web_search');
+    expect(html).toContain('<h2>子 agent 活动 <small>1 条'); expect(html).toContain('researcher');
+    expect(html).toContain('<h2>错误 <small>1 条'); expect(html).toContain('没有这个文件');
+    expect(html).toContain('<h2>时间线');
+    trace.event('turn:pi:7:9', 'reply_sent', { detail: { terminal: true, status: 'completed', kind: 'user', thread_key: 'group:7', inputs: ['k1', 'k2'] } });
+    html = await (await r.get('/turns/pi%3A7%3A9')).text();
+    expect(html).toContain('已完成'); expect(html).not.toContain('action="/thread/stop"');
+    const input = await (await r.get('/inputs/k1')).text();
+    expect(input).toContain('帮我查天气'); expect(input).toContain('href="/turns/pi%3A7%3A9"'); expect(input).toContain('Pi · deepseek-flash · low');
+    const conv = await (await r.get('/conversations/group%3A7')).text();
+    expect(conv).toContain('href="/turns/pi%3A7%3A9"'); expect(conv).toContain('已完成'); expect(conv).not.toContain('action="/thread/stop"');
+    expect(r.live.snapshot().find(c => c.thread === 'group:7')).toMatchObject({ state: 'idle', turn: null, recent: [expect.objectContaining({ id: 'pi:7:9', outcome: 'completed' })] });
+    const list = await (await r.get('/turns?thread=group%3A7&status=completed')).text();
+    expect(list).toContain('href="/turns/pi%3A7%3A9"');
+    expect(await (await r.get('/turns?status=failed')).text()).toContain('没有符合条件的回合');
   });
 
   it('写操作要求 cookie 会话与 CSRF 令牌；跨站来源、错误令牌与 URL 口令都被拒绝', async () => {
@@ -232,7 +278,7 @@ describe('面板二期页面', () => {
     expect(ok.status).toBe(303); expect(ok.headers.get('location')).toBe('/settings?ok=breakerReset#send-rules');
     expect(reset).toHaveBeenCalledWith('group:7'); expect(breakers.map(b => b.scope)).toEqual(['global']);
     expect((await r.post('/settings/send-breakers/reset', { _csrf: r.csrf, scope: 'group:7' })).status).toBe(409);
-    expect(JSON.parse(r.store.events(SETTINGS_TICKET).find(e => e.stage === 'send_breaker_reset')!.detail_json)).toEqual({ source: 'dashboard', scope: 'group:7' });
+    expect(JSON.parse(r.store.events(SETTINGS_KEY).find(e => e.stage === 'send_breaker_reset')!.detail_json)).toEqual({ source: 'dashboard', scope: 'group:7' });
     const after = await (await r.get('/settings?ok=breakerReset')).text();
     expect(after).toContain('熔断已解除'); expect(after).toContain('解除发送熔断：'); expect(after).not.toContain('value="group:7"');
   });
@@ -244,7 +290,7 @@ describe('面板二期页面', () => {
     expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/settings?ok=saved');
     expect(r.settings.current()).toEqual({ ...defaults, agentBackend: 'pi', backendOverrides: { 'group:7': 'codex', 'private:5': 'pi' }, codexReasoningEffort: 'low', alertOwner: true });
     expect(JSON.parse(readFileSync(path.join(r.dir, 'settings.json'), 'utf8')).settings.agentBackend).toBe('pi');
-    const ev = r.store.events(SETTINGS_TICKET).find(e => e.stage === 'settings_changed')!;
+    const ev = r.store.events(SETTINGS_KEY).find(e => e.stage === 'settings_changed')!;
     expect(JSON.parse(ev.detail_json)).toMatchObject({ source: 'dashboard', before: { agentBackend: 'codex' }, after: { agentBackend: 'pi' } });
     const page = await (await r.get('/settings?ok=saved')).text();
     expect(page).toContain('设置已保存'); expect(page).toContain('与 .env 不同'); expect(page).toContain('agentBackend');
@@ -261,7 +307,7 @@ describe('面板二期页面', () => {
     const res = await r.post('/settings/agent-md', { _csrf: r.csrf, revision: await revisionOf(r), content: '新的系统提示\r\n第二行' });
     expect(res.status).toBe(303);
     expect(readFileSync(path.join(r.dir, 'prompts', 'agent.md'), 'utf8')).toBe('新的系统提示\n第二行');
-    expect(r.store.events(SETTINGS_TICKET).some(e => e.stage === 'prompt_changed')).toBe(true);
+    expect(r.store.events(SETTINGS_KEY).some(e => e.stage === 'prompt_changed')).toBe(true);
     const rev = await revisionOf(r);
     expect((await r.post('/settings/agent-md', { _csrf: r.csrf, revision: rev, content: 'x'.repeat(70_000) })).status).toBe(400);
     expect((await r.post('/settings/agent-md', { _csrf: r.csrf, revision: rev, content: '   ' })).status).toBe(400);
@@ -371,6 +417,12 @@ describe('面板二期页面', () => {
     for (const key of ['shared', '../owner', 'group:0']) expect((await r.post('/thread/stop', { _csrf: r.csrf, key })).status).toBe(400);
     expect(r.stopThread).toHaveBeenCalledTimes(1);
     expect(await (await r.get('/agents?ok=stopped')).text()).toContain('已请求停止');
+    // 停止后回到发起页：实时页与该会话页；其它返回地址（含别的会话、站外）一律回 Agent 页
+    for (const [ret, location] of [['/live', '/live?ok=stopped'], ['/conversations/group%3A7', '/conversations/group%3A7?ok=stopped'],
+      ['/conversations/group%3A8', '/agents?ok=stopped'], ['https://evil.example/', '/agents?ok=stopped']]) {
+      expect((await r.post('/thread/stop', { _csrf: r.csrf, key: 'group:7', return: ret! })).headers.get('location')).toBe(location);
+    }
+    expect(await (await r.get('/live?ok=stopped')).text()).toContain('已请求停止');
     const pi = await r.post('/pi/reset', { _csrf: r.csrf, key: 'group:7' });
     expect(pi.headers.get('location')).toBe('/agents?ok=reset'); expect(r.resetPi).toHaveBeenCalledWith('group:7');
     expect((await r.post('/pi/reset', { _csrf: r.csrf, key: '../x' })).status).toBe(400);
@@ -416,43 +468,47 @@ describe('实时视图', () => {
     let finish!: () => void;
     const turn = new Promise<void>(resolve => { finish = resolve; });
     backend.attach({ onTurnStarted: () => {}, onActivity: () => {}, onTurnCompleted: () => finish() });
-    // 卡片按回合（turn:<id>）聚合；回合的输入正文由宿主事件记在同一键下。
+    // 会话行按会话键聚合当前回合（turn:<id>）；回合的输入正文由宿主事件记在同一键下。
     const { turnId } = await backend.startTurn('group:7', [], { kind: 'user', sender: '1' }) as { turnId: string };
     const key = 'turn:' + turnId;
-    trace.event(key, 'received', { scope: 'group:7', detail: { text: `帮我查一下 ${secret}`, sender: '小红', message_id: '1' } });
+    trace.event(key, 'received', { scope: 'group:7', detail: { text: `帮我查一下 ${secret}`, sender: '小红', thread_key: 'group:7', kind: 'user' } });
     let settled = false; void turn.then(() => { settled = true; });
-    const during = await readUntil(sse, t => frames(t, 'card').some(f => f.item.stage === 'tool:command_execution' && f.item.status === 'started') && frames(t, 'card').some(f => f.item.stage === 'tool:qq_recent' && f.item.status === 'started'));
+    const item = (f: { item?: { stage: string; status: string } }, stage: string) => f.item?.stage === stage && f.item.status === 'started';
+    const during = await readUntil(sse, t => frames(t, 'conversation').some(f => item(f, 'tool:command_execution')) && frames(t, 'conversation').some(f => item(f, 'tool:qq_recent')));
     expect(settled).toBe(false); // 回合仍在进行
-    const cards = frames(during, 'card');
-    const last = cards.at(-1)!.card as LiveCard;
-    expect(last).toMatchObject({ ticket: key, scope: 'group:7', backend: 'codex', state: 'running', sender: '小红' });
-    expect(['tool:qq_recent', 'tool:command_execution']).toContain(last.phase);
-    expect(cards.find(f => f.item.stage === 'tool:command_execution')!.item.summary).toContain('ls /workspace');
+    const convs = frames(during, 'conversation');
+    const last = convs.at(-1)!.conversation as ConversationHead;
+    expect(last).toMatchObject({ thread: 'group:7', scope: 'group:7', backend: 'codex', state: 'working', turn: { id: turnId, sender: '小红', kind: 'user' } });
+    expect(['tool:qq_recent', 'tool:command_execution']).toContain(last.turn!.phase);
+    expect(convs.find(f => f.item?.stage === 'tool:command_execution')!.item.summary).toContain('ls /workspace');
     expect(frames(during, 'snapshot')).toHaveLength(1);
     expect(during).not.toContain(secret); expect(during).toContain('[已隐藏]');
     // 服务端渲染的 /live 同样脱敏，并显示当前阶段
     const html = await (await r.get('/live')).text();
-    expect(html).toContain(`data-ticket="${key}"`); expect(html).toContain('当前：'); expect(html).not.toContain(secret);
+    expect(html).toContain('data-thread="group:7"'); expect(html).toContain('当前：'); expect(html).not.toContain(secret);
+    expect(html).toContain(`href="/turns/${encodeURIComponent(turnId)}"`);
     script.complete(script.turns[0]!);
     await turn;
     await live.close();
-    trace.event(key, 'reply_sent', { detail: { terminal: true, reply: '好的' } });
-    const card = r.live.snapshot().find(c => c.ticket === key)!;
-    expect(card).toMatchObject({ state: 'done', outcome: 'reply_sent', phase: '' });
-    expect(card.finished).not.toBeNull();
-    expect(card.items.map(i => i.stage)).toEqual(expect.arrayContaining(['dispatched', 'model_turn', 'tool:qq_recent', 'tool:command_execution']));
+    const working = r.live.snapshot().find(c => c.thread === 'group:7')!;
+    expect(working.turn!.items.map(i => i.stage)).toEqual(expect.arrayContaining(['dispatched', 'model_turn', 'tool:qq_recent', 'tool:command_execution']));
+    trace.event(key, 'reply_sent', { detail: { terminal: true, status: 'completed', thread_key: 'group:7', kind: 'user' } });
+    const conv: LiveConversation = r.live.snapshot().find(c => c.thread === 'group:7')!;
+    expect(conv).toMatchObject({ state: 'idle', turn: null });
+    expect(conv.recent[0]).toMatchObject({ id: turnId, outcome: 'completed', phase: '' });
+    expect(conv.recent[0]!.finished).not.toBeNull();
     const after = await (await r.get('/live')).text();
-    expect(after).toContain(`<details data-ticket="${key}">`);
-    expect(after).toContain(`href="/tickets/${encodeURIComponent(key)}"`);
+    expect(after).toContain('最近完成 1 个回合');
+    expect(after).toContain(`href="/turns/${encodeURIComponent(turnId)}"`);
   }, 20_000);
 
-  it('快照分帧并等待 drain：5 张 × 80 事件的大快照完整送达慢读者；超过 100 张卡片也不丢', async () => {
+  it('快照分帧并等待 drain：5 个会话 × 80 事件的大快照完整送达慢读者；超过 100 个会话也不丢', async () => {
     const r = await rig();
     for (let c = 0; c < 5; c++) {
-      trace.event(`big-${c}`, 'received', { scope: 'group:7', detail: { text: '大卡片' } });
-      for (let i = 0; i < 90; i++) trace.event(`big-${c}`, 'tool:command_execution', { detail: { command: `第${i}步 ` + '长命令'.repeat(60) } });
+      trace.event(`turn:big-${c}`, 'received', { scope: `group:${c + 1}`, detail: { text: '大回合', thread_key: `group:${c + 1}` } });
+      for (let i = 0; i < 90; i++) trace.event(`turn:big-${c}`, 'tool:command_execution', { detail: { command: `第${i}步 ` + '长命令'.repeat(60) } });
     }
-    for (let c = 0; c < 120; c++) trace.event(`small-${c}`, 'received', { scope: 'private:5', detail: { text: `小卡片 ${c}` } });
+    for (let c = 0; c < 120; c++) trace.event(`turn:small-${c}`, 'received', { scope: `private:${100 + c}`, detail: { text: `小回合 ${c}`, thread_key: `private:${100 + c}` } });
     const raw = r.live.snapshot();
     expect(raw).toHaveLength(125);
     expect(Buffer.byteLength(JSON.stringify(raw))).toBeGreaterThan(200_000);
@@ -467,12 +523,12 @@ describe('实时视图', () => {
       req.on('error', reject); req.end();
     });
     expect(frames(text, 'snapshot')[0]).toMatchObject({ count: 125 });
-    const cards = frames(text, 'snapcard').map(f => f.card as LiveCard);
-    expect(cards).toHaveLength(125);
-    expect(new Set(cards.map(c => c.ticket)).size).toBe(125);
-    for (const c of cards.filter(c => c.ticket.startsWith('big-'))) {
-      expect(c.items).toHaveLength(80);
-      expect(c.items.at(-1)!.seq).toBe(91);
+    const convs = frames(text, 'snapconversation').map(f => f.conversation as LiveConversation);
+    expect(convs).toHaveLength(125);
+    expect(new Set(convs.map(c => c.thread)).size).toBe(125);
+    for (const c of convs.filter(c => c.turn!.id.startsWith('big-'))) {
+      expect(c.turn!.items).toHaveLength(80);
+      expect(c.turn!.items.at(-1)!.seq).toBe(91);
     }
     expect(frames(text, 'snapshot_end')[0]).toMatchObject({ count: 125 });
   }, 20_000);
@@ -553,17 +609,17 @@ describe('上下文占用条（§8.5）', () => {
     expect(await (await r.get('/agents')).text()).toMatch(/class="ctx ctx-none" data-ctx="codex\|owner"/);
   });
 
-  it('/live 卡片头部有该线程的小型占用条；SSE 首帧带全部占用记录，context_usage 事件推送 context 增量', async () => {
+  it('/live 会话行头部有该线程的小型占用条；SSE 首帧带全部占用记录，context_usage 事件推送 context 增量', async () => {
     const r = await rig({ contextUsage: stub() });
-    trace.event('tk-ctx', 'received', { scope: 'group:7', detail: { text: '在途', sender: '小明' } });
-    trace.event('tk-ctx', 'dispatched', { detail: { backend: 'pi', conversation_key: 'group:7' } });
+    trace.event('turn:pi:7:2', 'received', { scope: 'group:7', detail: { text: '在途', sender: '小明', thread_key: 'group:7' } });
+    trace.event('turn:pi:7:2', 'dispatched', { detail: { backend: 'pi', conversation_key: 'group:7' } });
     const html = await (await r.get('/live')).text();
     expect(html).toMatch(/<div class="ctx ctx-t-hot ctx-mini" data-ctx="pi\|group:7"/);
     const sse = collect(await r.get('/live/stream'));
     const first = await sse.until(t => t.includes('event: snapshot_end'));
     expect(frames(first, 'context').map(f => `${f.usage.backend}|${f.usage.key}`)).toEqual(['codex|owner', 'codex|group:7', 'pi|group:7', 'pi|owner']);
-    expect(first.indexOf('event: context')).toBeLessThan(first.indexOf('event: snapcard'));
-    expect(frames(first, 'snapcard')[0].card.thread).toBe('group:7');
+    expect(first.indexOf('event: context')).toBeLessThan(first.indexOf('event: snapconversation'));
+    expect(frames(first, 'snapconversation')[0].conversation).toMatchObject({ thread: 'group:7', backend: 'pi' });
     const usageSse = collect(await r.get('/usage/stream'));
     await usageSse.until(t => frames(t, 'context').length === 4);
     trace.event('@pi', 'context_usage', { detail: { backend: 'pi', key: 'group:7', usedTokens: 20_000, windowTokens: 128_000, turns: 10, updatedAt: Date.now(), source: 'turn' } });
@@ -626,8 +682,8 @@ describe('codex 系统提示 codex.md', () => {
       { Origin: r.base, 'Sec-Fetch-Site': 'same-origin' });
     expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/settings?ok=codexPrompt#codex-prompt');
     expect(stub.saves).toEqual([{ custom: '第一行\n第二行\n第三行', expectedRevision: 'rev-1' }]);
-    await vi.waitFor(() => expect(r.store.events(SETTINGS_TICKET).filter(e => e.stage === 'prompt_changed')).toHaveLength(1));
-    const ev = r.store.events(SETTINGS_TICKET).find(e => e.stage === 'prompt_changed')!;
+    await vi.waitFor(() => expect(r.store.events(SETTINGS_KEY).filter(e => e.stage === 'prompt_changed')).toHaveLength(1));
+    const ev = r.store.events(SETTINGS_KEY).find(e => e.stage === 'prompt_changed')!;
     expect(JSON.parse(ev.detail_json)).toMatchObject({ target: 'codex', source: 'dashboard', file: 'prompts/codex.md',
       bytes_before: Buffer.byteLength('自定义规则'), bytes_after: Buffer.byteLength('第一行\n第二行\n第三行') });
     const html = await (await r.get('/settings?ok=codexPrompt')).text();
@@ -640,15 +696,15 @@ describe('codex 系统提示 codex.md', () => {
     expect(stub.listeners).toBe(1);
     expect((await r.post('/settings/agent-md', { _csrf: r.csrf, revision: await revisionOf(r), content: 'pi 提示' })).status).toBe(303);
     expect(await (await r.get('/settings')).text()).toMatch(/<td>agent\.md [^<]*→ \d+ B<\/td>/);
-    expect(r.store.events(SETTINGS_TICKET).filter(e => e.stage === 'prompt_changed').map(e => JSON.parse(e.detail_json).target)).toEqual(['pi']);
+    expect(r.store.events(SETTINGS_KEY).filter(e => e.stage === 'prompt_changed').map(e => JSON.parse(e.detail_json).target)).toEqual(['pi']);
     r.close(); expect(stub.listeners).toBe(0);
   });
 
   it('存储通知自带 bytes_before / bytes_after 时直接记录', async () => {
     const r = await rig(); const stub = r.codexPrompt!;
     stub.notify({ target: 'codex', file: '/data/prompts/codex.md', revision: 'rev-9', bytes_before: 11, bytes_after: 22 });
-    await vi.waitFor(() => expect(r.store.events(SETTINGS_TICKET).filter(e => e.stage === 'prompt_changed')).toHaveLength(1));
-    expect(JSON.parse(r.store.events(SETTINGS_TICKET).find(e => e.stage === 'prompt_changed')!.detail_json)).toMatchObject({ target: 'codex', bytes_before: 11, bytes_after: 22 });
+    await vi.waitFor(() => expect(r.store.events(SETTINGS_KEY).filter(e => e.stage === 'prompt_changed')).toHaveLength(1));
+    expect(JSON.parse(r.store.events(SETTINGS_KEY).find(e => e.stage === 'prompt_changed')!.detail_json)).toMatchObject({ target: 'codex', bytes_before: 11, bytes_after: 22 });
   });
 
   it('版本过期返回 409 并提示刷新；存储拒绝（空 / 超限 / 秘密）返回 409 带原因', async () => {
@@ -667,7 +723,7 @@ describe('codex 系统提示 codex.md', () => {
     expect(leak.status).toBe(409);
     const leakText = await leak.text(); expect(leakText).toContain('凭据样式'); expect(leakText).not.toContain(secret);
     expect(stub.custom).toBe('自定义规则');
-    expect(r.store.events(SETTINGS_TICKET).some(e => e.stage === 'prompt_changed')).toBe(false);
+    expect(r.store.events(SETTINGS_KEY).some(e => e.stage === 'prompt_changed')).toBe(false);
   });
 
   it('/codex/agents-md 需要会话，渲染当前 AGENTS.md 的脱敏内容', async () => {
@@ -724,7 +780,7 @@ describe('运行时模型设置页（§5）', () => {
     expect(html).not.toContain('bare<x>');
     const codexEffort = select(html, 'codexReasoningEffort');
     expect(options(codexEffort)).toEqual(['auto', ...REASONING_EFFORTS]); expect(selected(codexEffort)).toBe('high');
-    expect(html).toContain('派发时按消息难度自动选档，结果见票据页');
+    expect(html).toContain('开轮时按本轮输入的难度自动选档，结果见回合页');
     const piModel = select(html, 'piModel');
     expect(options(piModel)).toEqual(['deepseek-flash', 'codex/gpt-6.1-sol']); expect(selected(piModel)).toBe('deepseek-flash');
     expect(piModel).toContain('deepseek-flash · 窗口 128k');
@@ -776,18 +832,22 @@ describe('运行时模型设置页（§5）', () => {
     expect(r.settings.current()).toMatchObject({ piModel: 'deepseek-flash', piThinkingLevel: 'auto' });
   });
 
-  it('票据页派发设置行显示后端 · 模型 · 档位与 auto 来源；旧票据不显示', async () => {
+  it('回合页设置行显示后端 · 模型 · 档位与 auto 来源（开轮事件的快照，缺省取首条输入的 admitted）；没有快照不显示', async () => {
     const r = await rig();
-    trace.event('t-auto', 'admitted', { scope: 'group:7', detail: { conversation: 'c1', settings: { backend: 'codex', codexReasoningEffort: 'low', codexModel: 'gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', effortSource: 'auto' } } });
-    trace.event('t-pi', 'admitted', { scope: 'group:7', detail: { conversation: 'c2', settings: { backend: 'pi', codexReasoningEffort: 'high', codexModel: 'gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'high', effortSource: 'auto-fallback' } } });
-    trace.event('t-fixed', 'admitted', { scope: 'group:7', detail: { conversation: 'c3', settings: { backend: 'codex', codexReasoningEffort: 'xhigh', codexModel: 'gpt-6.1-sol', effortSource: 'fixed' } } });
-    trace.event('t-old', 'admitted', { scope: 'group:7', detail: { conversation: 'c4' } });
-    const row = async (t: string) => /<dt>派发设置<\/dt><dd>([^<]*)<\/dd>/.exec(await (await r.get('/tickets/' + t)).text())?.[1];
-    expect(await row('t-auto')).toBe('Codex · gpt-6.1-sol · low（来源 auto）');
-    expect(await row('t-pi')).toBe('Pi · deepseek-flash · high（来源 auto-fallback）');
-    expect(await row('t-fixed')).toBe('Codex · gpt-6.1-sol · xhigh');
-    expect(await row('t-old')).toBeUndefined();
-    expect((await r.get('/tickets/t-old')).status).toBe(200);
+    const turn = (id: string, settings?: Record<string, unknown>) => {
+      trace.event('turn:' + id, 'dispatched', { scope: 'group:7', detail: { backend: 'codex', thread_key: 'group:7', inputs: ['in-' + id], ...(settings ? { settings } : {}) } });
+    };
+    turn('auto', { backend: 'codex', codexReasoningEffort: 'low', codexModel: 'gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', effortSource: 'auto' });
+    turn('pi', { backend: 'pi', codexReasoningEffort: 'high', codexModel: 'gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'high', effortSource: 'auto-fallback' });
+    turn('fixed');
+    trace.event('in:in-fixed', 'admitted', { scope: 'group:7', detail: { settings: { backend: 'codex', codexReasoningEffort: 'xhigh', codexModel: 'gpt-6.1-sol', effortSource: 'fixed' } } });
+    turn('old');
+    const row = async (t: string) => /<dt>设置<\/dt><dd>([^<]*)<\/dd>/.exec(await (await r.get('/turns/' + t)).text())?.[1];
+    expect(await row('auto')).toBe('Codex · gpt-6.1-sol · low（来源 auto）');
+    expect(await row('pi')).toBe('Pi · deepseek-flash · high（来源 auto-fallback）');
+    expect(await row('fixed')).toBe('Codex · gpt-6.1-sol · xhigh');
+    expect(await row('old')).toBeUndefined();
+    expect((await r.get('/turns/old')).status).toBe(200);
     // 旧快照缺模型字段时只显示已有部分。
     expect(dispatchSettingsLine({ backend: 'codex', codexReasoningEffort: 'high' })).toBe('Codex · high');
     expect(dispatchSettingsLine({ backend: 'pi', codexReasoningEffort: 'high' })).toBe('Pi');

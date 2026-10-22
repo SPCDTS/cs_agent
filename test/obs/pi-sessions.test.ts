@@ -224,11 +224,11 @@ describe('Pi 会话适配器', () => {
     const s = setup([user(2, '真实用户正文'), assistant(3, '真实助手正文')]);
     const adapter = new PiSessionAdapter({ source: s.source, store });
     cleanup.push(() => adapter.close());
-    store.append({ ticket: 'ticket-pi', scope: 'group:7', ts: 1900, stage: 'dispatched', status: 'ok', duration_ms: null,
+    store.append({ key: 'turn:pi:2:1', scope: 'group:7', ts: 1900, stage: 'dispatched', status: 'ok', duration_ms: null,
       detail: { backend: 'pi', conversation: 2, text: '不能读取的观测正文' } });
-    store.append({ ticket: 'ticket-pi', scope: 'group:7', ts: 3100, stage: 'reply_sent', status: 'ok', duration_ms: null,
+    store.append({ key: 'turn:pi:2:1', scope: 'group:7', ts: 3100, stage: 'reply_sent', status: 'ok', duration_ms: null,
       detail: { terminal: true, reply: '不能读取的观测回复' } });
-    expect((await adapter.turns('2'))[0]).toMatchObject({ ticket: 'ticket-pi', delivery: { status: 'sent', scope: 'group:7', duration_ms: 1200 } });
+    expect((await adapter.turns('2'))[0]).toMatchObject({ traceKey: 'turn:pi:2:1', delivery: { status: 'completed', scope: 'group:7', duration_ms: 1200 } });
     const text = JSON.stringify(await adapter.blocks('2', '2'));
     expect(text).toContain('真实用户正文');
     expect(text).toContain('真实助手正文');

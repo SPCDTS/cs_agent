@@ -15,7 +15,7 @@ import { validateReferences } from "../media/references.js";
 import { log } from "../shared/log.js";
 import type { OwnerIds } from "../shared/owners.js";
 import { trace } from "../shared/trace.js";
-import type { TicketSource } from "./backends/types.js";
+import type { InputSource } from "./backends/types.js";
 import { buildCodexPrompt } from "./codex/runner.js";
 import type { InputRef, ThreadKey } from "./host/types.js";
 import type { ThreadHost } from "./host/thread-host.js";
@@ -37,7 +37,7 @@ export interface RenderedInputs {
   /** 已校验的参考图（各输入 incoming 目录内） */
   images: string[];
   /** 最后一条输入的来源（codex 召回令牌、标题） */
-  source: TicketSource;
+  source: InputSource;
 }
 
 const PAGE = 200;
@@ -181,7 +181,7 @@ export class Inbox {
 }
 
 /** 输入记录 → 来源头所需的来源（定时输入的来源为创建者）。 */
-export function sourceOf(rec: InboundRecord): TicketSource {
+export function sourceOf(rec: InboundRecord): InputSource {
   return { type: rec.message_type, user_id: rec.user_id, group_id: rec.group_id,
     ...(rec.group_name ? { group_name: rec.group_name } : {}), nickname: rec.nickname };
 }

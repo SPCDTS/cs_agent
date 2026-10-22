@@ -2,7 +2,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Inbox } from "../../src/agent/inbox.js";
 import { ReplyStore } from "../../src/qq/reply-store.js";
-import { threadKeyOf } from "../../src/channel/ticket.js";
+import { threadKeyOf } from "../../src/channel/inbound.js";
 import type { InboundMessage } from "../../src/channel/types.js";
 import type { ThreadHostState } from "../../src/agent/host/docs.js";
 import { tmp } from "./helpers.js";

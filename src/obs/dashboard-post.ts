@@ -5,7 +5,7 @@ import { resolveAgentConfig } from '../agent/config.js';
 import { equal, readBody, readMultipart, HttpError, guardAgentMd, writeAgentMd, guardDashboardOrigin } from './dashboard-io.js';
 import { SkillsStoreError } from '../agent/skills-store.js';
 import { isThreadKey } from '../agent/codex/runner.js';
-import { SETTINGS_TICKET, type RuntimeSettings } from '../agent/settings.js';
+import { SETTINGS_KEY, type RuntimeSettings } from '../agent/settings.js';
 
 const SEND_RULE_FIELDS = ['perChatMinute', 'perChatHour', 'chatBreakerMinutes', 'globalMinute', 'globalBreakerMinutes'] as const;
 import { parseBackendOverrides } from '../agent/backends/select.js';
@@ -102,13 +102,13 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
         if (!opts.sendBreakers) throw new HttpError(404, '发送熔断不可用');
         const scope = form.get('scope') ?? '';
         if (!opts.sendBreakers.reset(scope)) throw new HttpError(409, '该熔断已结束或不存在，请刷新页面。');
-        tracer.event(SETTINGS_TICKET, 'send_breaker_reset', { detail: { source: 'dashboard', scope } });
+        tracer.event(SETTINGS_KEY, 'send_breaker_reset', { detail: { source: 'dashboard', scope } });
         back('/settings?ok=breakerReset#send-rules'); return;
       }
       if (url.pathname === '/settings/agent-md') {
         await guardAgentMd(agentMd, form.get('revision') ?? '');
         const r = await writeAgentMd(agentMd, form.get('content') ?? '');
-        tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { target: 'pi', source: 'dashboard', file: 'prompts/agent.md', bytes_before: r.before, bytes_after: r.after } });
+        tracer.event(SETTINGS_KEY, 'prompt_changed', { detail: { target: 'pi', source: 'dashboard', file: 'prompts/agent.md', bytes_before: r.before, bytes_after: r.after } });
         back('/settings?ok=prompt#prompt'); return;
       }
       if (url.pathname === '/settings/codex-base-prompt' || url.pathname === '/settings/codex-base-prompt/restore') {
@@ -166,7 +166,9 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
         if (!isThreadKey(key)) throw new HttpError(400, '非法的线程键');
         await opts.stopThread(key);
         tracer.event('thr:' + key, 'thread_stopped', { detail: { source: 'dashboard', thread_key: key } });
-        back('/agents?ok=stopped'); return;
+        // 停止后回到发起页：只接受实时页与该会话页，其余回 Agent 页
+        const from = form.get('return') ?? '';
+        back((from === '/live' || from === `/conversations/${encodeURIComponent(key)}` ? from : '/agents') + '?ok=stopped'); return;
       }
       if (url.pathname === '/codex/reset' || url.pathname === '/pi/reset') {
         const codex = url.pathname === '/codex/reset';

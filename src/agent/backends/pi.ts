@@ -24,7 +24,7 @@ import type { OwnerIds } from "../../shared/owners.js";
 import type { InboundRecord, TurnBinding } from "../../channel/types.js";
 import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome, TurnStatus } from "../host/types.js";
 import type { RenderedInputs } from "../inbox.js";
-import type { TicketSettings } from "./types.js";
+import type { SettingsSnapshot } from "./types.js";
 
 /**
  * pi 后端（设计 §6）：每个会话键一个常驻的 pi-durable 会话，回合 = pi 的一次 run（从输入到最终回答）。
@@ -445,7 +445,7 @@ export class PiBackend implements ThreadAdapter {
   }
 
   /** 会话键 → 常驻会话（首次使用时创建）；每轮按设置快照配置模型与思考档位。 */
-  private async conversation(key: string, settings?: TicketSettings): Promise<Conversation> {
+  private async conversation(key: string, settings?: SettingsSnapshot): Promise<Conversation> {
     // 仅创建和 JSON 写回用短全局锁。
     return this.serial("mapping", async () => {
       const id = (await this.readThreadIds())[key];
@@ -517,7 +517,7 @@ export class PiBackend implements ThreadAdapter {
 
   // ───────────── ThreadAdapter ─────────────
 
-  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turn: TurnContext, settings?: TicketSettings): Promise<StartTurnResult> {
+  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turn: TurnContext, settings?: SettingsSnapshot): Promise<StartTurnResult> {
     if (this.closing) return Promise.reject(new Error("pi 后端正在关闭"));
     return this.serial(threadKey, async () => {
       const conv = await this.conversation(threadKey, settings);
@@ -555,7 +555,7 @@ export class PiBackend implements ThreadAdapter {
         this.waitTurn(threadKey, active);
       }
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "pi", conversation_key: threadKey, conversation: conv.id,
-        kind: turn.kind, inputs: [record!.key] } });
+        kind: turn.kind, inputs: [record!.key], ...(settings ? { settings } : {}) } });
       return { turnId };
     });
   }
@@ -593,6 +593,14 @@ export class PiBackend implements ThreadAdapter {
       if (active?.turnId === turnId) active.owner = "backend";
       return { status: "completed" as const };
     });
+  }
+
+  /** 面板实时页：会话里在跑（有未结束汇报）的子 agent 数。 */
+  async liveSubagents(threadKey: ThreadKey): Promise<number> {
+    const id = (await this.readThreadIds())[threadKey];
+    if (id === undefined) return 0;
+    const doc = await this.harness.snapshot(SubagentDoc, id as ConversationId, context);
+    return Object.values(doc?.children ?? {}).filter(child => !child.stopped && child.pending.length > 0).length;
   }
 
   /** 会话仍有工作：宿主未确认的 run、未结束的 run、在跑（有未结束汇报）的子 agent。后端切换须等它为 false。 */

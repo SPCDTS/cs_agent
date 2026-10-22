@@ -4,12 +4,13 @@
  */
 export interface ContextTurn {
   ts: number;
-  ticket: string;
-  /** 票据内请求序号，从 1 起；压缩分隔为 0。 */
+  /** 请求所属的 trace 键（回合 turn:<id>；旧数据为旧版入站键）；压缩记录为线程级键。 */
+  key: string;
+  /** 回合内请求序号，从 1 起；压缩分隔为 0。 */
   seq: number;
-  /** 同票据请求总数；截断窗口至少保留已知最大 seq，压缩分隔为 0。 */
+  /** 同回合请求总数；截断窗口至少保留已知最大 seq，压缩分隔为 0。 */
   requests: number;
-  /** 线程中的票据回合序号。旧记录从 turns 恢复。 */
+  /** 线程中的回合序号。旧记录从 turns 恢复。 */
   turn?: number;
   used: number;
   cached: number;
@@ -32,8 +33,8 @@ export interface ThreadContextSeries {
   turns: ContextTurn[];
   /** 当前返回窗口内的请求数，不包含压缩分隔。 */
   requests: number;
-  /** 当前返回窗口内的不同票据数，不包含压缩分隔。 */
-  tickets: number;
+  /** 当前返回窗口内的不同回合数，不包含压缩分隔。 */
+  turnCount: number;
   misses: number;
   window: number;
 }
@@ -47,7 +48,8 @@ export interface ContextAnalysisOptions {
 export interface ModelRequestDetail {
   backend: 'codex' | 'pi';
   key: string;
-  ticket: string;
+  /** 所属回合的 trace 键；旧事件里字段名为 ticket，读取时一律取事件行的 key 列 */
+  trace_key: string;
   seq: number;
   turn: number;
   input: number;
@@ -57,18 +59,23 @@ export interface ModelRequestDetail {
   effective_window?: number;
   at: number;
 }
-/** 票据预览摘要；字段口径与票据列表、线程回合摘要一致。 */
-export interface TicketBrief {
-  ticket: string;
+/** 回合预览摘要；字段口径与回合列表、线程回合摘要一致。 */
+export interface TurnBrief {
+  key: string;
   scope: string;
+  /** 会话键 owner / group:<id> / private:<qq> */
+  thread: string | null;
+  /** 回合种类 user / scheduled / wake */
+  kind: string | null;
   ts: number;
   status: string;
   sender: string | null;
-  route: string | null;
   backend: string | null;
   duration_ms: number;
   text: string;
   reply: string;
   tools: number;
+  /** 本轮发出的消息条数 */
+  sends: number;
   settings?: Record<string, unknown>;
 }

@@ -1,13 +1,13 @@
-import type { ChatType, TicketStatus } from "./types.js";
+import type { ChatType, SendStatus } from "./types.js";
 
 /** Outbox 的持久化契约（设计 §7.4）；agent 不依赖 QQ 的 SQLite 实现。 */
 export interface OutboxFile {
   filename: string; name: string; bytes: number; sha256: string;
-  status: TicketStatus; file_id?: string;
+  status: SendStatus; file_id?: string;
 }
 /**
  * 行键 `<threadKey>:<callKey>`：模型发送的 callKey 为 pi toolCallId 或 codex 回合内序号；
- * 系统消息（出错提示）为 `<threadKey>:sys:<uuid>`。旧版票据行迁移后 thread_key 保留原票据号。
+ * 系统消息（出错提示）为 `<threadKey>:sys:<uuid>`。旧版按票据的行迁移后 thread_key 保留原入站键。
  */
 export interface OutboxRow {
   key: string; thread_key: string;
@@ -20,7 +20,7 @@ export interface OutboxRow {
   message_type: ChatType; target_id: string; mention_user_id: string | null;
   /** 显式跨会话发送或定时回合；旧行迁移为 false。 */
   proactive: boolean;
-  status: TicketStatus; message_id: string | null; text: string; text_sha256: string;
+  status: SendStatus; message_id: string | null; text: string; text_sha256: string;
   images: string[]; files: OutboxFile[]; created_at: string; sent_at: string | null;
 }
 export type OutboxInput = Omit<OutboxRow, "status" | "message_id" | "text_sha256" | "created_at" | "sent_at" | "proactive" | "system"> &
@@ -37,5 +37,5 @@ export interface OutboxStore {
   markOutboxSending(key: string): boolean;
   markOutboxSent(key: string, messageId: string): void;
   markOutboxUncertain(key: string): void;
-  updateOutboxFile(key: string, index: number, status: TicketStatus, fileId?: string): void;
+  updateOutboxFile(key: string, index: number, status: SendStatus, fileId?: string): void;
 }

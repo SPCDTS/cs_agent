@@ -143,12 +143,12 @@ it.each(["sent", "silent", "failed"] as const)("创建 → 到点 → 定时输�
   await r.recover();
   const result = await r.fire(s, START + 300_000), run = result.runs[0]!;
   expect(run).toMatchObject({ status: outcome, fire_at: START + 300_000, sent: outcome === "sent" ? 1 : 0 });
-  expect(run.ticket).toBe(scheduledInputKey(run.fire_key));
+  expect(run.input_key).toBe(scheduledInputKey(run.fire_key));
   expect(result.failures).toBe(outcome === "failed" ? 1 : 0);
   expect(result.next_fire_at).toBe(START + 600_000);
   expect(r.adapter.turns).toHaveLength(1);
-  expect(r.adapter.turns[0]).toMatchObject({ threadKey: "group:7", keys: [run.ticket], ctx: { kind: "scheduled", sender: "1" } });
-  const rec = r.store.getInbound(run.ticket!)!;
+  expect(r.adapter.turns[0]).toMatchObject({ threadKey: "group:7", keys: [run.input_key], ctx: { kind: "scheduled", sender: "1" } });
+  const rec = r.store.getInbound(run.input_key!)!;
   expect(rec).toMatchObject({ kind: "scheduled", scope: "group:7", thread_key: "group:7", user_id: "1", state: "done" });
   expect(rec.text).toContain("[定时任务]");
   const rows = r.store.listOutboxByTurn(r.adapter.turns[0]!.turnId);
@@ -228,12 +228,12 @@ it.each(["expired", "revoked"] as const)("排队后授权 %s：投递前按创�
   const queued = (await r.fire(s, START + 1_800_000, false)).runs[0]!;
   if (kind === "expired") vi.setSystemTime(START + 3_600_000);
   else await r.grants.panel("auth_revoke", { user: "qq:9", caps: ["schedule"] });
-  await r.scheduled.launch(queued.ticket!);
+  await r.scheduled.launch(queued.input_key!);
   const paused = (await r.service.get(s.id))!;
   expect(paused).toMatchObject({ status: "paused", failures: 1, pause_reason: expect.stringContaining("无权"),
     runs: [{ status: "failed", note: expect.stringContaining("无权") }] });
   expect(r.adapter.turns).toEqual([]);
-  expect(r.store.getInbound(queued.ticket!)!.state).toBe("done");
+  expect(r.store.getInbound(queued.input_key!)!.state).toBe("done");
   await expect(r.service.runNow("qq:1", s.id)).rejects.toMatchObject({ status: 403 });
 });
 
@@ -247,7 +247,7 @@ it.each(["release", "restart"] as const)("已在宿主排队的定时输入，�
   await r.host.idle();
   const queued = (await r.fire(s, START + 1_800_000, false)).runs[0]!;
   await r.settle().catch(() => undefined);
-  expect(await r.host.inputState(queued.ticket!)).toBe("queued");
+  expect(await r.host.inputState(queued.input_key!)).toBe("queued");
   await r.grants.panel("auth_revoke", { user: "qq:9", caps: ["schedule"] });
   if (mode === "restart") {
     await r.restart();
@@ -259,8 +259,8 @@ it.each(["release", "restart"] as const)("已在宿主排队的定时输入，�
   expect((await r.service.get(s.id))!).toMatchObject({ status: "paused", pause_reason: expect.stringContaining("无权"),
     runs: [{ status: "failed", note: expect.stringContaining("无权") }] });
   expect(r.adapter.turns.map(t => t.ctx.kind)).toEqual(["user"]);
-  expect(r.store.getInbound(queued.ticket!)!.state).toBe("done");
-  expect(await r.host.inputState(queued.ticket!)).toBe("done");
+  expect(r.store.getInbound(queued.input_key!)!.state).toBe("done");
+  expect(await r.host.inputState(queued.input_key!)).toBe("done");
 });
 
 it("定时回合失败、结果回写前崩溃：恢复按宿主持久化的失败结算，不清零连续失败计数", async () => {
@@ -295,7 +295,7 @@ it("启动恢复已提交但未投递的定时运行与普通消息，同时继�
   await r.settle();
   await flush(async () => (await r.service.get(s.id))?.runs[0]!.status === "sent");
   // 未投递的普通消息与定时输入都被重新投递
-  expect(r.adapter.turns.flatMap(t => t.keys).sort()).toEqual([queued.ticket, message].sort());
+  expect(r.adapter.turns.flatMap(t => t.keys).sort()).toEqual([queued.input_key, message].sort());
   const next = await r.fire(s, START + 600_000);
   expect(next.runs.map(run => run.status)).toEqual(["sent", "sent"]);
   expect(r.reports).toEqual([]);
@@ -405,9 +405,9 @@ it("同一 fire 并发 runNow 的清理不会结束已被另一次提交接管�
   r.launchEnabled = false;
   const results = await Promise.all([r.service.runNow("qq:1", s.id), r.service.runNow("qq:1", s.id)]);
   expect(results[0]).toEqual(results[1]);
-  expect(r.store.getInbound(results[0]!.ticket!)?.state).toBe("queued");
+  expect(r.store.getInbound(results[0]!.input_key!)?.state).toBe("queued");
   await r.recover();
-  await r.scheduled.launch(results[0]!.ticket!);
+  await r.scheduled.launch(results[0]!.input_key!);
   await r.settle();
   expect(r.adapter.turns.filter(t => t.ctx.kind === "scheduled")).toHaveLength(1);
 });

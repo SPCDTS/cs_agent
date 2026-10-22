@@ -12,14 +12,14 @@ import { afterEach, vi } from "vitest";
 import { PiBackend, type PiBackendOptions } from "../../src/agent/backends/pi.js";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { CodexBackend } from "../../src/agent/backends/codex.js";
-import type { BackendName, TicketSettings } from "../../src/agent/backends/types.js";
+import type { BackendName, SettingsSnapshot } from "../../src/agent/backends/types.js";
 import { GrantsService } from "../../src/agent/grants.js";
 import { ThreadHost } from "../../src/agent/host/thread-host.js";
 import type { ThreadKey } from "../../src/agent/host/types.js";
 import { Inbox } from "../../src/agent/inbox.js";
 import { SendService } from "../../src/agent/send-service.js";
 import { BackendRouter, TurnMonitor } from "../../src/agent/turns.js";
-import { threadKeyOf } from "../../src/channel/ticket.js";
+import { threadKeyOf } from "../../src/channel/inbound.js";
 import type { InboundMessage } from "../../src/channel/types.js";
 import { ContextStore } from "../../src/context/store.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
@@ -94,7 +94,7 @@ export interface ResidentOptions {
   reserveTokens?: number;
   backgroundTokens?: number;
   /** 开轮时的设置快照覆盖（模型、档位） */
-  settings?: (scope: string) => Partial<TicketSettings>;
+  settings?: (scope: string) => Partial<SettingsSnapshot>;
   /** 预先放进数据目录的文件（PiBackend 打开前） */
   dir?: string;
 }
@@ -170,7 +170,7 @@ export async function residentRig(options: ResidentOptions = {}) {
     await codexRunner.start();
     codex = new CodexBackend({ runner: codexRunner, tokens, imagesDir: path.join(dir, "images"), turns: inbox, owners,
       callWaitMs: options.callWaitMs ?? 1_000 });
-    const settings = async (scope: string, _msg?: unknown, forced?: BackendName): Promise<TicketSettings> =>
+    const settings = async (scope: string, _msg?: unknown, forced?: BackendName): Promise<SettingsSnapshot> =>
       ({ backend: forced ?? backendOf(scope), codexReasoningEffort: "high", ...options.settings?.(scope) });
     const router = new BackendRouter({ backends: { pi, codex }, settings, turns: inbox, owners, retryMs: 50, retryDelayMs: 10 });
     monitor = new TurnMonitor({ inbox, sendService, getHost: () => host, now: options.now,

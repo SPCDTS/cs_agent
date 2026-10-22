@@ -148,9 +148,9 @@ export function createMemoryRoutes(deps: MemoryDeps) {
       if (p === '/api/memory/recalls' || /^\/api\/memory\/recalls\/[^/]+$/.test(p)) {
         const recalls = new RecallReader(deps);
         if (p === '/api/memory/recalls') {
-          parameters(q, ['scope', 'session', 'ticket', 'backend', 'tool', 'since', 'page', 'turn']);
+          parameters(q, ['scope', 'session', 'turn_id', 'backend', 'tool', 'since', 'page', 'turn']);
           const filters: RecallFilters = { page: 0, since: timestamp(q.get('since'), 'since') };
-          for (const key of ['scope', 'session', 'ticket', 'turn'] as const) if (q.has(key)) filters[key] = scopeValue(q.get(key)!);
+          for (const key of ['scope', 'session', 'turn_id', 'turn'] as const) if (q.has(key)) filters[key] = scopeValue(q.get(key)!);
           if (q.has('backend')) {
             const backend = q.get('backend');
             if (backend !== 'pi' && backend !== 'codex') throw new SessionError(400, 'backend 必须是 codex 或 pi');

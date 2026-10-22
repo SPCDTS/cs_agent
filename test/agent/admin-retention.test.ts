@@ -24,20 +24,20 @@ describe("管理审计保留策略", () => {
     expect((store.db.prepare("SELECT SUM(length(CAST(detail_json AS BLOB))) bytes FROM events").get() as { bytes: number }).bytes).toBeGreaterThan(256 * 1024);
   });
 
-  it("管理阶段和任意 @ 票据仅按独立年龄清理，普通票据仍受预算限制", () => {
+  it("管理阶段和任意 @ 键仅按独立年龄清理，普通 trace 键仍受预算限制", () => {
     const { store } = open(); const now = 500 * day;
-    for (const [ticket, stage] of [["normal-settings", "settings_changed"], ["normal-prompt", "prompt_changed"], ["normal-reset", "thread_reset"], ["@future", "new_admin_event"]]) {
-      for (let i = 0; i < 600; i++) store.append({ ticket: ticket!, stage: stage!, scope: "", ts: now - 100 * day, status: "ok", duration_ms: null, detail: { i } });
-      store.append({ ticket: ticket!, stage: stage!, scope: "", ts: now - 366 * day, status: "ok", duration_ms: null });
+    for (const [key, stage] of [["normal-settings", "settings_changed"], ["normal-prompt", "prompt_changed"], ["normal-reset", "thread_reset"], ["@future", "new_admin_event"]]) {
+      for (let i = 0; i < 600; i++) store.append({ key: key!, stage: stage!, scope: "", ts: now - 100 * day, status: "ok", duration_ms: null, detail: { i } });
+      store.append({ key: key!, stage: stage!, scope: "", ts: now - 366 * day, status: "ok", duration_ms: null });
     }
-    for (let i = 0; i < 20; i++) store.append({ ticket: "ordinary", stage: "received", scope: "", ts: now - 31 * day, status: "ok", duration_ms: null });
+    for (let i = 0; i < 20; i++) store.append({ key: "ordinary", stage: "received", scope: "", ts: now - 31 * day, status: "ok", duration_ms: null });
     expect(store.events("ordinary").some(e => e.stage === "events_dropped")).toBe(true);
-    // 普通票据上的管理事件不能消耗它的普通事件预算。
-    expect(store.append({ ticket: "normal-settings", stage: "received", scope: "", ts: now, status: "ok", duration_ms: null })).toBeDefined();
+    // 普通键上的管理事件不能消耗它的普通事件预算。
+    expect(store.append({ key: "normal-settings", stage: "received", scope: "", ts: now, status: "ok", duration_ms: null })).toBeDefined();
     store.purge(30, now);
     expect(store.events("ordinary")).toHaveLength(0);
     expect(store.events("normal-settings", 2000)).toHaveLength(601);
-    for (const ticket of ["normal-prompt", "normal-reset", "@future"]) expect(store.events(ticket, 2000)).toHaveLength(600);
+    for (const key of ["normal-prompt", "normal-reset", "@future"]) expect(store.events(key, 2000)).toHaveLength(600);
   });
 
   it("配置默认值与自定义天数生效，非法保留期被拒绝", () => {
@@ -45,7 +45,7 @@ describe("管理审计保留策略", () => {
     const cfg = loadConfig({ OBS_ADMIN_RETENTION_DAYS: "7", PI_ARCHIVE_RETENTION_DAYS: "14" });
     expect(cfg.PI_ARCHIVE_RETENTION_DAYS).toBe(14);
     const { store } = open(cfg.OBS_ADMIN_RETENTION_DAYS);
-    store.append({ ticket: "@settings", stage: "settings_changed", scope: "", ts: 0, status: "ok", duration_ms: null });
+    store.append({ key: "@settings", stage: "settings_changed", scope: "", ts: 0, status: "ok", duration_ms: null });
     expect(store.purge(30, 8 * day).events).toBe(1);
     expect(() => loadConfig({ OBS_ADMIN_RETENTION_DAYS: "0" })).toThrow();
     expect(() => loadConfig({ PI_ARCHIVE_RETENTION_DAYS: "-1" })).toThrow();

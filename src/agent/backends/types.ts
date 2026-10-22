@@ -8,7 +8,7 @@ export type ThreadKey = "owner" | `group:${string}` | `private:${string}`;
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 /** 每轮开始时冻结；档位与后端按快照执行。Pi 的模型记录用于审计，提交时可读取当前模型。 */
-export type TicketSettings = {
+export type SettingsSnapshot = {
   backend: BackendName;
   codexReasoningEffort: ReasoningEffort;
   codexModel?: string;
@@ -18,7 +18,7 @@ export type TicketSettings = {
 };
 
 /** 输入来源（来源头用）：定时输入的 user_id 为创建者。 */
-export type TicketSource = {
+export type InputSource = {
   type: "private" | "group";
   user_id: string;
   group_id: string | null;

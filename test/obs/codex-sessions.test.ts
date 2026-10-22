@@ -310,7 +310,7 @@ describe('Codex 会话正文适配器', () => {
     cleanup.push(() => adapter.close());
     await adapter.refresh();
     expect(await adapter.listSessions()).toEqual([]);
-    r.store.append({ ticket: 'test-index-degraded', scope: 'group:1', ts: Date.now(), stage: 'received', status: 'ok', duration_ms: null });
+    r.store.append({ key: 'test-index-degraded', scope: 'group:1', ts: Date.now(), stage: 'received', status: 'ok', duration_ms: null });
     expect(r.store.events('test-index-degraded')).toHaveLength(1);
     expect(r.store.degraded).toBe(false);
   });

@@ -6,7 +6,7 @@ import { downloadImage, type DownloadHooks } from "../media/download.js";
 import { MAX_IMAGE_BYTES, MIN_IMAGE_BYTES } from "../media/limits.js";
 import { validateImageHeader } from "../media/header.js";
 import type { Channel, RemoteMessage } from "../channel/types.js";
-import { scopeOf, type Access } from "./access.js";
+import type { Access } from "./access.js";
 import type { ContextStore, MediaRow, MessageRow } from "./store.js";
 
 export interface RecalledImage { path: string; width: number; height: number }
@@ -15,7 +15,7 @@ interface RecallFlight { work: Promise<RecallResult>; control: AbortController; 
 export interface MediaRecallOptions {
   store: ContextStore;
   dataDir: string;
-  channel: Pick<Channel, "fetchMessage" | "refreshImageUrl" | "getTicket"> & Partial<Pick<Channel, "outbox">>;
+  channel: Pick<Channel, "fetchMessage" | "refreshImageUrl"> & Partial<Pick<Channel, "outbox">>;
   downloadHooks?: DownloadHooks;
 }
 
@@ -177,7 +177,7 @@ export class MediaRecall {
     if (!current || current.id !== row.id || current.text !== row.text) throw new Error("消息已撤回或变更");
   }
 
-  private async checkScope(row: MessageRow, remote: RemoteMessage | null, signal: AbortSignal): Promise<void> {
+  private checkScope(row: MessageRow, remote: RemoteMessage | null): void {
     const reject = () => {
       log.warn("media recall scope mismatch", { scope: row.scope, message_id: row.message_id });
       throw new Error("原消息不在当前会话范围内");
@@ -193,18 +193,12 @@ export class MediaRecall {
       if (kind === "private" && sender !== id) return reject();
       return;
     }
-    if (!row.ticket) return reject();
-    // 机器人消息：Outbox 行（键即消息库 ticket 列）或旧版生图票据的回复，必须确认已发出且发出账号一致。
-    const outbox = this.opts.channel.outbox?.getOutbox(row.ticket);
-    if (outbox) {
-      if (outbox.status !== "sent" || outbox.message_id !== row.message_id || outbox.message_type + ":" + outbox.target_id !== row.scope ||
-          !row.user_id || sender !== row.user_id) return reject();
-    } else {
-      const ticket = await abortable(this.opts.channel.getTicket(row.ticket), signal);
-      const sent = ticket?.status === "sent" && ticket.reply_message_id === row.message_id;
-      if (!ticket || scopeOf(ticket) !== row.scope || !sent || !ticket.self_id || sender !== ticket.self_id) return reject();
-    }
-    // NapCat 各版本的可选收件人字段；出现时必须与本地票据一致。
+    if (!row.outbox_key) return reject();
+    // 机器人消息只认 Outbox 行（键即消息库 outbox_key 列）：必须确认已发出且发出账号一致；旧版只留在票据表里的回复一律拒绝。
+    const outbox = this.opts.channel.outbox?.getOutbox(row.outbox_key);
+    if (!outbox || outbox.status !== "sent" || outbox.message_id !== row.message_id || outbox.message_type + ":" + outbox.target_id !== row.scope ||
+        !row.user_id || sender !== row.user_id) return reject();
+    // NapCat 各版本的可选收件人字段；出现时必须与本地记录的会话一致。
     for (const recipient of Object.values(remote.recipient_fields)) {
       if (recipient !== id) return reject();
     }
@@ -233,7 +227,7 @@ export class MediaRecall {
       if (cached.some(m => m.status === "ok")) return await this.result(cached, signal);
       if (row.is_self ? !row.image_count : !row.text.includes("[image]")) return { text: "这条消息没有图片", images: [] };
       const remote = await abortable(this.opts.channel.fetchMessage(row.message_id, { signal, timeoutMs: 60_000 }), signal);
-      await this.checkScope(row, remote, signal);
+      this.checkScope(row, remote);
       this.stillPresent(row);
       const segments = remote?.segments ?? [];
       const pictures = segments.filter(s => s.type === "image").slice(0, 6);

@@ -12,7 +12,6 @@ import { ContextStore } from "../../src/context/store.js";
 import { clipWithImages, formatMessage, formatMessageFull, formatRecent, withoutImagePaths } from "../../src/context/format.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import { normalizeMessage } from "../../src/qq/policy.js";
-import type { ReplyTicketRecord } from "../../src/channel/types.js";
 import type { Access } from "../../src/context/access.js";
 import { buildCodexPrompt } from "../../src/agent/codex/runner.js";
 import { tmp } from "../agent/helpers.js";
@@ -23,9 +22,9 @@ const privateAccess: Access = { kind: "scope", scope: "private:20001" };
 const image = { type: "image", data: { url: "https://public.test/a", file: "a.png" } };
 const text = (value: string) => ({ type: "text", data: { text: value } });
 let dir: string, store: ContextStore, cdn: Server, base: string, downloads: number, bytes: Buffer;
-let remote: Record<string, unknown>, ticket: ReplyTicketRecord | null;
+let remote: Record<string, unknown>;
 let media: MediaRecall, channel: ReturnType<typeof createQQBridge>;
-const call = vi.fn(), getTicket = vi.fn();
+const call = vi.fn();
 function event(id = "1", parts = [image] as Record<string, unknown>[], priv = false) {
   return { post_type: "message", message_type: priv ? "private" : "group", group_id: priv ? null : 30001,
     user_id: 20001, self_id: 10001, message_id: id, time: Math.floor(Date.now() / 1000), message: parts };
@@ -33,25 +32,24 @@ function event(id = "1", parts = [image] as Record<string, unknown>[], priv = fa
 function ingest(id = "1", parts = [image] as Record<string, unknown>[], priv = false) {
   remote = event(id, parts, priv); store.ingest(normalizeMessage(remote)!);
 }
-function bot(priv = true) {
-  const scope = priv ? "private:20001" : "group:30001";
-  store.recordPending(scope, "ticket", Math.floor(Date.now() / 1000), { selfId: "10001" });
-  store.completeReply("ticket", { action: "generate_image", excerpt: "图片好了", image_count: 1, status: "已回复", reply_message_id: "1" });
+/** 机器人发出的消息：Outbox 行已发出（message_id 1），消息库按行键记一行；返回行键。 */
+function bot(priv = true): string {
+  const scope = priv ? "private:20001" : "group:30001", key = `${scope}:call-1`;
+  channel.outbox.reserveOutbox({ key, thread_key: scope, turn_id: "t1", input_key: null, message_type: priv ? "private" : "group",
+    target_id: priv ? "20001" : "30001", mention_user_id: null, text: "图片好了", images: ["/unused.png"], files: [] });
+  channel.outbox.markOutboxSending(key); channel.outbox.markOutboxSent(key, "1");
+  store.recordSent(channel.outbox.getOutbox(key)!, { selfId: "10001", replyTo: null });
   remote = { ...event("1", [image], priv), user_id: 10001 };
-  ticket = { ticket_id: "ticket", self_id: "10001", user_id: "20001", group_id: priv ? null : "30001",
-    message_type: priv ? "private" : "group", status: "sent", reply_message_id: "1", source_message_id: "0",
-    source_nickname: "人", source_text: "", created_at: "", seq: 1 };
+  return key;
 }
 beforeEach(async () => {
-  dir = tmp("media-"); store = new ContextStore(dir); downloads = 0; bytes = PNG; ticket = null;
+  dir = tmp("media-"); store = new ContextStore(dir); downloads = 0; bytes = PNG;
   cdn = createServer((_req, res) => { downloads++; res.end(bytes); });
   await new Promise<void>(r => cdn.listen(0, "127.0.0.1", r));
   base = "http://127.0.0.1:" + (cdn.address() as AddressInfo).port;
   call.mockReset().mockImplementation(async action => action === "get_msg" ? remote : { url: "https://public.test/fresh" });
-  getTicket.mockReset().mockImplementation(async () => ticket);
   channel = createQQBridge({ httpUrl: "http://unused.test", wsUrl: "ws://unused.test", token: "",
     allowUsers: "*", allowGroups: [], groupMentions: true, dataDir: dir, imageRoot: dir }, { client: { call } });
-  channel.getTicket = getTicket;
   media = new MediaRecall({ dataDir: dir, store, channel,
     downloadHooks: { resolve: async () => [{ address: "93.184.216.34", family: 4 }],
       request: (url, opts, cb) => request(new URL(url.pathname, base), { ...opts, lookup: undefined }, cb) } });
@@ -103,16 +101,15 @@ describe("按需图片召回", () => {
       await expect(media.recall(priv ? privateAccess : access, "1")).rejects.toThrow("范围");
       expect(downloads).toBe(0); await noFiles();
     });
-  it.each(["missing", "no-ticket", "scope", "status", "reply", "sender", "peer", "type", "group"])(
-    "机器人票据校验拒绝 %s，且不落文件", async fault => {
-      bot();
-      if (fault === "missing") ticket = null;
-      if (fault === "no-ticket") {
-        const db = new DatabaseSync(store.file); db.exec("UPDATE messages SET ticket = NULL"); db.close();
-      }
-      if (fault === "scope") ticket!.user_id = "20002";
-      if (fault === "status") ticket!.status = "pending";
-      if (fault === "reply") ticket!.reply_message_id = "2";
+  it.each(["missing", "no-key", "legacy", "scope", "sender", "peer", "type", "group"])(
+    "机器人消息校验拒绝 %s，且不落文件", async fault => {
+      const key = bot();
+      const sql = (db: DatabaseSync, text: string, ...args: string[]) => { db.prepare(text).run(...args); db.close(); };
+      if (fault === "missing") sql(new DatabaseSync(path.join(dir, "qq-bridge.sqlite")), "DELETE FROM outbox WHERE key=?", key);
+      if (fault === "no-key") sql(new DatabaseSync(store.file), "UPDATE messages SET outbox_key = NULL");
+      // 旧版生图票据的回复只留在票据表里，没有 Outbox 行：一律拒绝
+      if (fault === "legacy") sql(new DatabaseSync(store.file), "UPDATE messages SET outbox_key = ?", "a".repeat(64));
+      if (fault === "scope") sql(new DatabaseSync(path.join(dir, "qq-bridge.sqlite")), "UPDATE outbox SET target_id='20002' WHERE key=?", key);
       if (fault === "sender") remote.user_id = 20001;
       if (fault === "peer") remote.peer_id = 20002;
       if (fault === "type") remote.message_type = "group";
@@ -120,7 +117,7 @@ describe("按需图片召回", () => {
       await expect(media.recall(privateAccess, "1")).rejects.toThrow("范围");
       expect(downloads).toBe(0); await noFiles();
     });
-  it.each(["ok", "status", "message", "sender"])("Outbox 行（消息库 ticket 列为行键）：已发出、id 与发出账号一致才可召回（%s）", async fault => {
+  it.each(["ok", "status", "message", "sender"])("Outbox 行（消息库 outbox_key 列为行键）：已发出、id 与发出账号一致才可召回（%s）", async fault => {
     const key = "private:20001:call-1";
     channel.outbox.reserveOutbox({ key, thread_key: "private:20001", turn_id: "t1", input_key: null, message_type: "private", target_id: "20001",
       mention_user_id: null, text: "图片好了", images: ["/unused.png"], files: [] });
@@ -140,12 +137,10 @@ describe("按需图片召回", () => {
       await expect(media.recall(privateAccess, "1")).rejects.toThrow("范围");
       expect(downloads).toBe(0);
     }
-    expect(getTicket).not.toHaveBeenCalled();
   });
-  it.each([true, false])("机器人正确票据可召回并追加（private=%s）", async priv => {
+  it.each([true, false])("机器人已发出的消息可召回并追加（private=%s）", async priv => {
     bot(priv);
     const result = await media.recall(priv ? privateAccess : access, "1");
-    expect(getTicket).toHaveBeenCalledWith("ticket");
     const row = store.message(priv ? privateAccess : access, "1")!.row;
     expect(row.text).toBe("图片好了 [image:" + result.images[0]!.path + "]");
     expect(formatMessage(row)).toContain(result.images[0]!.path);

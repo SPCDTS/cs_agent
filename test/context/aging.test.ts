@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, type FauxResponseFactory } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AGING_LAST_RUN_KEY, msUntilNextRun, needsCatchUp, runAging, startAgingScheduler, type AgingOptions } from "../../src/context/aging.js";
@@ -53,8 +54,11 @@ describe("runAging", () => {
     for (let i = 0; i < 5; i++) r.store.ingest(msg(d20 + 3600 + i, `今晚有cs比赛吗 ${i}`));
     for (let i = 0; i < 4; i++) r.store.ingest(msg(dayStart(2026, 10, 19) + 3600 + i, `小 ${i}`));
     for (let i = 0; i < 6; i++) r.store.ingest(msg(dayStart(2026, 10, 21) + 60 + i, `今天 ${i}`));
-    r.store.recordPending(G, "tk", d20 + 3700);
-    r.store.completeReply("tk", { action: "generate_image", detail: "a dog", excerpt: "好了", image_count: 1, status: "已回复" });
+    // 旧版回复路径留下的机器人行（只读保留）照常进入摘要输入
+    const db = new DatabaseSync(r.store.file);
+    db.prepare(`INSERT INTO messages (scope,message_id,time,user_id,nickname,is_self,text,outbox_key,status,action,detail,image_count)
+      VALUES (?,'self:tk',?,'','我',1,'好了','tk','已回复','generate_image','a dog',1)`).run(G, d20 + 3700);
+    db.close();
 
     const rep = await runAging(r.opts);
     expect(rep).toMatchObject({ day_summaries: 1, week_summaries: 0, failed: 0 });

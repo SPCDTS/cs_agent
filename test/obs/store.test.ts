@@ -2,7 +2,9 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
 import { ObsStore } from '../../src/obs/store.js';
+import { renameColumn } from '../../src/shared/sqlite-migrate.js';
 import { Trace } from '../../src/shared/trace.js';
 import { Metrics } from '../../src/obs/metrics.js';
 import { registerSecrets } from '../../src/shared/redact.js';
@@ -13,33 +15,72 @@ const clean: (()=>void)[]=[];
 afterEach(()=>{vi.useRealTimers(); for(const fn of clean.splice(0).reverse())fn();});
 function rig(){const dir=mkdtempSync(path.join(os.tmpdir(),'cs-obs-'));const store=new ObsStore(dir);clean.push(()=>rmSync(dir,{recursive:true,force:true}),()=>store.close());return {dir,store,trace:new Trace(store)};}
 describe('观测存储',()=>{
-  it('未发送兜底比例按 admitted 入站票据去重，空窗口为零', () => {
+  it('吞吐：开轮输入按 admitted 的 in: 键去重；回合按终态计数，failed / lost 计入失败，空窗口为零', () => {
     const { store, trace } = rig();
-    expect(store.throughput(Date.now())).toMatchObject({ inbound: 0, no_send_fallback: 0, no_send_ratio: 0 });
-    trace.event('a', 'admitted'); trace.event('a', 'admitted'); trace.event('b', 'admitted');
-    trace.event('a', 'no_send_fallback'); trace.event('a', 'no_send_fallback');
-    trace.event('legacy', 'no_send_fallback');
-    expect(store.throughput(0)).toMatchObject({ inbound: 2, no_send_fallback: 1, no_send_ratio: .5 });
+    expect(store.throughput(Date.now())).toMatchObject({ total: 0, failed: 0, error_rate: 0, inbound: 0 });
+    trace.event('in:a', 'admitted'); trace.event('in:a', 'admitted'); trace.event('in:b', 'admitted');
+    for (const [id, stage, status] of [['1', 'reply_sent', 'completed'], ['2', 'failed', 'failed'], ['3', 'failed', 'lost'], ['4', 'reply_sent', 'completed']])
+      trace.event('turn:' + id, stage!, { detail: { terminal: true, status } });
+    trace.event('turn:5', 'received', { detail: { text: '进行中' } });
+    expect(store.throughput(0)).toMatchObject({ inbound: 2, total: 4, failed: 2, error_rate: .5 });
   });
-  it('WAL 写入、跨连接读取、scope 继承、筛选、分页、保留清理',()=>{
+  it('WAL 写入、跨连接读取、scope 继承、回合聚合与筛选、分页、保留清理',()=>{
     const {dir,store,trace}=rig();
     expect(store.db.prepare('PRAGMA journal_mode').get()).toMatchObject({journal_mode:'wal'});
     for(let i=0;i<53;i++){
-      trace.event('t'+i,'received',{scope:'group:7',detail:{sender:'测试'}});
-      trace.event('t'+i,'routed',{detail:{route:'agent'}});
-      trace.event('t'+i,'backend:pi',{durationMs:10,detail:{backend:'pi'}});
-      trace.event('t'+i,'reply_sent',{detail:{terminal:true}});
+      trace.event('turn:pi:'+i,'dispatched',{scope:'group:7',detail:{backend:'pi',conversation_key:'group:7',kind:'user'}});
+      trace.event('turn:pi:'+i,'received',{detail:{sender:'测试',thread_key:'group:7',kind:'user',inputs:['k'+i]}});
+      trace.event('turn:pi:'+i,'tool:web_search',{durationMs:10,detail:{backend:'pi'}});
+      trace.event('turn:pi:'+i,'reply_sent',{detail:{terminal:true,status:'completed',kind:'user',thread_key:'group:7'}});
     }
-    const reader=new ObsStore(dir);try{expect(reader.events('t0')).toHaveLength(4);}finally{reader.close();}
-    expect(store.events('t0').every(e=>e.scope==='group:7')).toBe(true);
-    expect(store.tickets({scope:'group:7',status:'sent',route:'agent',backend:'pi'})).toHaveLength(50);
-    expect(store.tickets({page:1})).toHaveLength(3);
-    expect(store.tickets({scope:"' OR 1=1 --"})).toEqual([]);
+    trace.event('in:k0','received',{scope:'group:7',detail:{text:'输入不进回合列表'}});
+    const reader=new ObsStore(dir);try{expect(reader.events('turn:pi:0')).toHaveLength(4);}finally{reader.close();}
+    expect(store.events('turn:pi:0').every(e=>e.scope==='group:7')).toBe(true);
+    expect(store.turns({thread:'group:7',status:'completed',kind:'user',backend:'pi'})).toHaveLength(50);
+    expect(store.turns({page:1})).toHaveLength(3);
+    expect(store.turns({page:1})[0]).toMatchObject({thread:'group:7',kind:'user',backend:'pi',sender:'测试',status:'completed',scope:'group:7'});
+    expect(store.turns({thread:"' OR 1=1 --"})).toEqual([]);
     expect(store.throughput(0)).toMatchObject({total:53,failed:0,error_rate:0});
     store.metric(1,'old',{},1);
-    store.append({ticket:'old',scope:'',ts:1,stage:'failed',status:'failed',duration_ms:null});
+    store.append({key:'turn:old',scope:'',ts:1,stage:'failed',status:'failed',duration_ms:null});
     expect(store.purge(30)).toEqual({events:1,metrics:1});
-    expect(store.events('t0')).toHaveLength(4);
+    expect(store.events('turn:pi:0')).toHaveLength(4);
+  });
+  it('旧库的 events.ticket 列改名 key：历史事件保留、索引重建、中断可重做，重复打开不再改动', () => {
+    const dir=mkdtempSync(path.join(os.tmpdir(),'cs-obs-old-'));clean.push(()=>rmSync(dir,{recursive:true,force:true}));
+    const legacy='a'.repeat(64);
+    const old=new DatabaseSync(path.join(dir,'observability.sqlite'));
+    old.exec(`CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, ticket TEXT NOT NULL, scope TEXT NOT NULL, ts INTEGER NOT NULL,
+      stage TEXT NOT NULL, status TEXT NOT NULL, duration_ms REAL, detail_json TEXT NOT NULL);
+      CREATE INDEX events_ticket ON events(ticket,id); CREATE INDEX events_ts ON events(ts);`);
+    const insert=old.prepare('INSERT INTO events(ticket,scope,ts,stage,status,duration_ms,detail_json) VALUES(?,?,?,?,?,NULL,?)');
+    insert.run(legacy,'group:7',Date.now(),'received','ok','{"text":"旧票据"}');
+    insert.run('turn:pi:1:2','group:7',Date.now(),'reply_sent','ok','{"terminal":true,"status":"completed"}');
+    old.close();
+    const names=(db:DatabaseSync,sql:string)=>(db.prepare(sql).all() as {name:string}[]).map(r=>r.name);
+    const indexes="SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='events'";
+    for(let i=0;i<2;i++){
+      const store=new ObsStore(dir);
+      expect(store.degraded).toBe(false);
+      expect(names(store.db,'PRAGMA table_info(events)')).toContain('key');
+      expect(names(store.db,'PRAGMA table_info(events)')).not.toContain('ticket');
+      expect(names(store.db,indexes)).toEqual(expect.arrayContaining(['events_key','events_ts']));
+      expect(names(store.db,indexes)).not.toContain('events_ticket');
+      expect(store.events(legacy)[0]).toMatchObject({key:legacy,stage:'received'});
+      expect(store.turns()).toEqual([expect.objectContaining({key:'turn:pi:1:2',status:'completed'})]);
+      store.close();
+    }
+    // 事务内中断（模拟崩溃）整体回滚：列名与旧索引不变，下次打开按旧列名重做
+    const crash=mkdtempSync(path.join(os.tmpdir(),'cs-obs-crash-'));clean.push(()=>rmSync(crash,{recursive:true,force:true}));
+    const db=new DatabaseSync(path.join(crash,'observability.sqlite'));
+    db.exec(`CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT, ticket TEXT NOT NULL, scope TEXT NOT NULL, ts INTEGER NOT NULL,
+      stage TEXT NOT NULL, status TEXT NOT NULL, duration_ms REAL, detail_json TEXT NOT NULL); CREATE INDEX events_ticket ON events(ticket,id);`);
+    expect(()=>renameColumn(db,'events','ticket','key',{drop:['events_ticket'],create:['CREATE INDEX broken ON missing_table(x)']})).toThrow();
+    expect(db.isTransaction).toBe(false);
+    expect(names(db,'PRAGMA table_info(events)')).toContain('ticket');
+    expect(names(db,indexes)).toContain('events_ticket');
+    db.close();
+    const store=new ObsStore(crash);expect(store.degraded).toBe(false);expect(names(store.db,'PRAGMA table_info(events)')).toContain('key');store.close();
   });
   it('秘密先脱敏后截断，数据库和 WAL 不保存假 token',async()=>{
     const {dir,store,trace}=rig();const secret='fake-obs-credential-123456789';registerSecrets([secret]);
@@ -57,7 +98,7 @@ describe('观测存储',()=>{
     const {dir,store,trace}=rig();
     const metrics=new Metrics(store,{retentionDays:30,inputPrice:2,outputPrice:4,gauges:async()=>[{name:'queue_depth',value:2}]});
     for(const ms of [10,20,100])trace.event('t','tool:test',{durationMs:ms,status:ms===100?'failed':'ok'});
-    const writer=new ObsStore(dir);writer.append({ticket:'t',scope:'',ts:Date.now(),stage:'tool:other_process',status:'ok',duration_ms:80,detail:{}});writer.close();
+    const writer=new ObsStore(dir);writer.append({key:'t',scope:'',ts:Date.now(),stage:'tool:other_process',status:'ok',duration_ms:80,detail:{}});writer.close();
     trace.event('t','model_turn',{detail:{provider:'deepseek',input_tokens:100,output_tokens:20,cache_read_tokens:10}});
     await metrics.flush();
     const rows=store.db.prepare('SELECT * FROM metrics').all();
@@ -96,7 +137,7 @@ describe('观测存储',()=>{
     trace.event('a','backend:codex',{status:'failed',detail:{failure:{kind:'auth',provider:'test',status:401}}});expect(send).not.toHaveBeenCalled();disabled.stop();
     const alerts=startAlerts({enabled:true,owner:'1',bridge,trace});clean.push(()=>alerts.stop());
     for(const t of ['a','b','c'])trace.event(t,'failed',{detail:{terminal:true}});
-    expect(send).toHaveBeenCalledTimes(1);expect(send).toHaveBeenLastCalledWith('private','1',expect.stringContaining('连续三条'));
+    expect(send).toHaveBeenCalledTimes(1);expect(send).toHaveBeenLastCalledWith('private','1',expect.stringContaining('连续三个回合'));
     trace.event('auth','backend:codex',{status:'failed',detail:{failure:{kind:'auth',provider:'test',status:401}}});expect(send).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(31*60_000);expect(send).toHaveBeenCalledTimes(2);
     online=true;await vi.advanceTimersByTimeAsync(31*60_000);expect(send).toHaveBeenCalledTimes(2);
@@ -105,21 +146,21 @@ describe('观测存储',()=>{
 });
 
 describe('上下文历史查询', () => {
-  function record(store: ObsStore, ts: number, patch: Partial<ContextUsage> = {}, ticket = `turn-${ts}`) {
+  function record(store: ObsStore, ts: number, patch: Partial<ContextUsage> = {}, key = `turn-${ts}`) {
     const detail: ContextUsage = { backend: 'codex', key: 'owner', usedTokens: 10_000, cachedTokens: 0,
       windowTokens: 100_000, turns: 2, updatedAt: ts, source: 'turn', ...patch };
-    store.append({ ticket, ts, scope: '', stage: 'context_usage', status: 'ok', duration_ms: null, detail });
-    return { ts, ticket, kind: 'usage' as const, detail };
+    store.append({ key, ts, scope: '', stage: 'context_usage', status: 'ok', duration_ms: null, detail });
+    return { ts, key, kind: 'usage' as const, detail };
   }
-  function request(store: ObsStore, at: number, ticket: string, seq = 1,
+  function request(store: ObsStore, at: number, key: string, seq = 1,
     patch: Record<string, unknown> = {}, writtenAt = at) {
-    const detail = { backend: 'codex', key: 'owner', ticket, seq, turn: 2, input: 10_000, cached: 0,
+    const detail = { backend: 'codex', key: 'owner', trace_key: key, seq, turn: 2, input: 10_000, cached: 0,
       window: 100_000, at, ...patch };
-    store.append({ ticket, ts: writtenAt, scope: '', stage: 'model_request', status: 'ok', duration_ms: null, detail });
-    return { ts: at, ticket, kind: 'request' as const, detail };
+    store.append({ key, ts: writtenAt, scope: '', stage: 'model_request', status: 'ok', duration_ms: null, detail });
+    return { ts: at, key, kind: 'request' as const, detail };
   }
-  function system(store: ObsStore, ts: number, stage: string, detail: unknown = {}, ticket = '@settings') {
-    store.append({ ticket, ts, stage, detail, scope: '', status: 'ok', duration_ms: null });
+  function system(store: ObsStore, ts: number, stage: string, detail: unknown = {}, key = '@settings') {
+    store.append({ key, ts, stage, detail, scope: '', status: 'ok', duration_ms: null });
   }
 
   it('contextSeries 按 backend/key 分组，线程按最近活动倒序，回合按 ts/id 升序', () => {
@@ -134,7 +175,7 @@ describe('上下文历史查询', () => {
     expect(series.map(({ backend, key }) => [backend, key])).toEqual([
       ['codex', 'group:7'], ['codex', 'owner'], ['pi', 'owner'], ['pi', 'group:7'],
     ]);
-    expect(series[1].turns.map(turn => [turn.ts, turn.ticket])).toEqual([[10, 'turn-10'], [30, 'turn-30'], [30, 'same-ts-later']]);
+    expect(series[1].turns.map(turn => [turn.ts, turn.key])).toEqual([[10, 'turn-10'], [30, 'turn-30'], [30, 'same-ts-later']]);
   });
   it('contextSeries 统计 miss，不计 partial/compact/reset，window 取最后一条的有效窗口', () => {
     const { store } = rig();
@@ -298,10 +339,10 @@ describe('上下文历史查询', () => {
     request(store, 40, 'next', 1, {}, 110);
     system(store, 15, 'prompt_changed');
     const series = store.contextSeries();
-    expect(series.map(s => [s.backend, s.key, s.requests, s.tickets, s.misses])).toEqual([
+    expect(series.map(s => [s.backend, s.key, s.requests, s.turnCount, s.misses])).toEqual([
       ['codex', 'owner', 4, 3, 1], ['pi', 'group:7', 1, 1, 0],
     ]);
-    expect(series[0].turns.map(t => [t.ts, t.ticket, t.seq, t.requests, t.mark])).toEqual([
+    expect(series[0].turns.map(t => [t.ts, t.key, t.seq, t.requests, t.mark])).toEqual([
       [0, 'old', 1, 1, 'first'], [10, 'new', 1, 2, 'partial'], [20, 'new', 2, 2, 'miss'],
       [30, '@context', 0, 0, 'compact'], [40, 'next', 1, 1, 'compact'],
     ]);
@@ -317,7 +358,7 @@ describe('上下文历史查询', () => {
     record(store, 102, {}, 'b');
     const [series] = store.contextSeries({ limit: 2 });
     expect(series.turns.map(t => t.ts)).toEqual([20, 21, 30]);
-    expect(series).toMatchObject({ requests: 2, tickets: 2, misses: 0 });
+    expect(series).toMatchObject({ requests: 2, turnCount: 2, misses: 0 });
     expect(series.turns[0]).toMatchObject({ seq: 2, requests: 2 });
     expect(store.contextSeries({ since: 21 })[0].turns.map(t => t.ts)).toEqual([21, 30]);
     expect(store.contextSeries({ since: 31 })).toEqual([]);
@@ -346,7 +387,7 @@ describe('上下文历史查询', () => {
     record(store, 5, { source: 'compact' }, '@context');
     expect(store.contextSeries()[0].turns.map(t => [t.ts, t.seq])).toEqual([[1, 1], [1, 2], [5, 0]]);
     expect(store.previousContextTurn('codex', 'owner', 5)).toEqual(later);
-    expect(store.contextSeries({ since: 5 })[0]).toMatchObject({ requests: 0, tickets: 0, misses: 0 });
+    expect(store.contextSeries({ since: 5 })[0]).toMatchObject({ requests: 0, turnCount: 0, misses: 0 });
   });
   it('contextSeries 排除伪票据 turn 快照，不占请求预算且保留 compact 分隔与 output', () => {
     const { store } = rig();
@@ -362,8 +403,8 @@ describe('上下文历史查询', () => {
     for (let ts = 100; ts < 2101; ts++) record(store, ts, {}, '@context');
     expect(store.contextSeries({ limit: 3 })).toEqual(expected);
     expect(expected).toHaveLength(1);
-    expect(expected[0]).toMatchObject({ requests: 3, tickets: 2 });
-    expect(expected[0].turns.map(turn => [turn.ticket, turn.seq, turn.output])).toEqual([
+    expect(expected[0]).toMatchObject({ requests: 3, turnCount: 2 });
+    expect(expected[0].turns.map(turn => [turn.key, turn.seq, turn.output])).toEqual([
       ['old', 1, undefined], ['new', 1, 123], ['@context', 0, undefined], ['new', 2, 0],
     ]);
     expect(expected[0].turns[0]).not.toHaveProperty('output');

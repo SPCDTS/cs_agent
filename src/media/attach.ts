@@ -97,7 +97,7 @@ export function attachmentName(raw: string): string {
   return name;
 }
 
-// 同一票据的并行工具调用串行登记，数量校验和 manifest 更新属于同一临界区。
+// 同一目录的并行工具调用串行登记，数量校验和 manifest 更新属于同一临界区。
 const queues = new Map<string, Promise<unknown>>();
 async function serial<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   const key = path.resolve(dir);

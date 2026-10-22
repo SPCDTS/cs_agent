@@ -21,7 +21,7 @@ const TOKEN = 'recall-pages-test-token-0123';
 const clean: (() => unknown | Promise<unknown>)[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const fn of clean.splice(0).reverse()) await fn(); });
 
-const ev = (o: Partial<RecallEvent> = {}): RecallEvent => ({ id: 7, ts: T0, backend: 'codex', ticket: 'ticket-abcdef1234567', session: 'sess-1', task_id: null,
+const ev = (o: Partial<RecallEvent> = {}): RecallEvent => ({ id: 7, ts: T0, backend: 'codex', turn_id: 'codex:abcdef1234567', session: 'sess-1', task_id: null,
   tool: 'qq_search', args: { query: XSS, limit: 3 }, access: 'group:123', scope_hint: 'group:123', returned: [{ kind: 'message', id: 'm1' }],
   returned_count: 1, dropped_count: 2, chars: 117, max_chars: 2500, duration_ms: 4, is_error: false, turn_href: '/agents/codex/sessions/sess-1/turns/t2', ...o });
 const SCOPES = [{ scope: 'group:123', label: '群 123' }] as ScopeSummary[];
@@ -32,21 +32,21 @@ const detail = (status: 'confirmed' | 'not_found' | 'unavailable', o: Partial<Re
 
 describe('召回列表渲染', () => {
   it('页面查询 → 接口参数：空值省略、非法后端 / 工具丢弃、turn 需要 session、page 夹取', () => {
-    const f = recallFilters(new URLSearchParams('backend=pi&tool=qq_message&scope=group:1&session=&ticket=t1&since=2026-10-01&turn=3&page=2'));
-    expect(f).toMatchObject({ backend: 'pi', tool: 'qq_message', scope: 'group:1', session: '', ticket: 't1', since: '2026-10-01', turn: '', page: 2 });
-    expect(recallQuery(f).toString()).toBe('backend=pi&tool=qq_message&scope=group%3A1&ticket=t1&since=2026-10-01&page=2');
+    const f = recallFilters(new URLSearchParams('backend=pi&tool=qq_message&scope=group:1&session=&turn_id=pi:1:2&since=2026-10-01&turn=3&page=2'));
+    expect(f).toMatchObject({ backend: 'pi', tool: 'qq_message', scope: 'group:1', session: '', turn_id: 'pi:1:2', since: '2026-10-01', turn: '', page: 2 });
+    expect(recallQuery(f).toString()).toBe('backend=pi&tool=qq_message&scope=group%3A1&turn_id=pi%3A1%3A2&since=2026-10-01&page=2');
     expect(recallQuery(recallFilters(new URLSearchParams('backend=x&tool=rm&page=-4'))).toString()).toBe('');
     expect(recallQuery(recallFilters(new URLSearchParams('session=s&turn=t9'))).toString()).toBe('session=s&turn=t9');
   });
 
   it('表格：时间 / 后端 / 工具 / 参数转义 / 权限 / 返回 / 裁掉徽章 / 字数表 / 耗时 / 错误 / 票据与回合链接 / 详情；分页链接保留过滤', () => {
     const f = recallFilters(new URLSearchParams('backend=codex&scope=group:123&page=1'));
-    const html = recallsPageBody(f, SCOPES, { items: [ev(), ev({ id: 6, backend: 'pi', dropped_count: 0, is_error: true, ticket: null, turn_href: 'javascript:alert(1)', access: 'all', scope_hint: null })], page: 1, has_more: true });
+    const html = recallsPageBody(f, SCOPES, { items: [ev(), ev({ id: 6, backend: 'pi', dropped_count: 0, is_error: true, turn_id: null, turn_href: 'javascript:alert(1)', access: 'all', scope_hint: null })], page: 1, has_more: true });
     expect(html).not.toContain('<script>alert');
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).toContain('<option value="codex" selected>'); expect(html).toContain('<option value="group:123" selected>群 123</option>');
     expect(html).toContain('裁掉 2'); expect(html).toContain('<meter min="0" max="2500" value="117"');
-    expect(html).toContain('href="/tickets/ticket-abcdef1234567"'); expect(html).toContain('href="/agents/codex/sessions/sess-1/turns/t2"');
+    expect(html).toContain('href="/turns/codex%3Aabcdef1234567"'); expect(html).toContain('href="/agents/codex/sessions/sess-1/turns/t2"');
     expect(html).not.toContain('javascript:'); expect(html).toContain('全域'); expect(html).toContain('出错');
     expect(html).toContain('href="/memory/recalls/7"'); expect(html).toContain('href="/memory/recalls/6"');
     expect(html).toContain('href="/memory/recalls?backend=codex&amp;scope=group%3A123">较新</a>');
@@ -81,7 +81,7 @@ describe('召回详情渲染', () => {
     expect(html).toContain('href="/memory/summaries/5"');
     expect(html).toContain('预览 &lt;script&gt;'); expect(html).toContain('裁掉 2'); expect(html).toContain('117 / 2,500 字');
     expect(html).toContain('href="/memory/recalls">返回召回记录</a>');
-    expect(html).toContain('href="/tickets/ticket-abcdef1234567"'); expect(html).toContain('href="/agents/codex/sessions/sess-1"');
+    expect(html).toContain('href="/turns/codex%3Aabcdef1234567"'); expect(html).toContain('href="/agents/codex/sessions/sess-1"');
     expect(html).not.toContain('模型采用了这些');
   });
 
@@ -151,7 +151,7 @@ async function rig() {
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   clean.push(async () => { await dashboard.close(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); store.close(); context.close(); await fs.rm(dir, { recursive: true, force: true }); });
   const writer = MemoryInstrumentation.fromDb(store.db);
-  const record = (o: Partial<RecallRecord> = {}) => writer.recordRecall({ ts: NOW - 50_000, backend: 'codex', ticket: 'tk-1', session: 'sess-1', task_id: null, tool: 'qq_search',
+  const record = (o: Partial<RecallRecord> = {}) => writer.recordRecall({ ts: NOW - 50_000, backend: 'codex', turn_id: 'codex:tk-1', session: 'sess-1', task_id: null, tool: 'qq_search',
     args: { query: XSS }, access: 'group:123', scope_hint: 'group:123', returned: [], returned_count: 0, dropped_count: 0, chars: 10, max_chars: 2500, duration_ms: 3, is_error: false, ...o });
   const page = async (url: string) => { const res = await fetch(base + url, { redirect: 'manual', headers: { Cookie: `obs_token=${TOKEN}` } }); return { res, html: await res.text() }; };
   return { page, record, NOW };

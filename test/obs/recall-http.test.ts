@@ -21,7 +21,7 @@ import { tmp } from '../agent/helpers.js';
 const NOW = Date.UTC(2026, 9, 18, 12), SESSION = 'recall-fixture';
 const clean: (() => unknown | Promise<unknown>)[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const fn of clean.splice(0).reverse()) await fn(); });
-const event = (overrides: Partial<RecallRecord> = {}): RecallRecord => ({ ts: NOW + 3000, backend: 'codex', ticket: 'ticket',
+const event = (overrides: Partial<RecallRecord> = {}): RecallRecord => ({ ts: NOW + 3000, backend: 'codex', turn_id: 'codex:t1',
   session: SESSION, task_id: null, tool: 'qq_search', args: { query: '比赛', limit: 2 }, access: 'group:1', scope_hint: 'group:1',
   returned: [{ kind: 'message', id: 'm1' }], returned_count: 1, dropped_count: 2, chars: 55, max_chars: 2500,
   duration_ms: 4, is_error: false, ...overrides });
@@ -77,13 +77,13 @@ it('日摘要详情有不可变版本，周折叠后仍可查看已删除日摘�
 it('召回列表倒序、同毫秒以 ID 决胜、50 条分页及全部组合过滤', async () => {
   const r = await rig();
   for (let i = 0; i < 52; i++) r.writer.recordRecall(event());
-  r.writer.recordRecall(event({ backend: 'pi', session: 'other', ticket: 'different', scope_hint: 'group:2', tool: 'qq_recent', ts: NOW - 5000 }));
-  const first = await r.get('/api/memory/recalls?scope=group:1&session=recall-fixture&ticket=ticket&backend=codex&tool=qq_search&since=2026-10-18T12:00:00Z');
+  r.writer.recordRecall(event({ backend: 'pi', session: 'other', turn_id: 'pi:9:9', scope_hint: 'group:2', tool: 'qq_recent', ts: NOW - 5000 }));
+  const first = await r.get('/api/memory/recalls?scope=group:1&session=recall-fixture&turn_id=codex:t1&backend=codex&tool=qq_search&since=2026-10-18T12:00:00Z');
   expect(first.status).toBe(200); expect(first.body.items).toHaveLength(50); expect(first.body).toMatchObject({ page: 0, has_more: true });
   expect(first.body.items.map((e: { id: number }) => e.id)).toEqual(Array.from({ length: 50 }, (_, i) => 52 - i));
   const next = await r.get('/api/memory/recalls?scope=group:1&page=1');
   expect(next.body.items.map((e: { id: number }) => e.id)).toEqual([2, 1]); expect(next.body.has_more).toBe(false);
-  for (const filter of ['session=other', 'ticket=different', 'backend=pi', 'tool=qq_recent', 'scope=group:2'])
+  for (const filter of ['session=other', 'turn_id=pi:9:9', 'backend=pi', 'tool=qq_recent', 'scope=group:2'])
     expect((await r.get(`/api/memory/recalls?${filter}`)).body.items.map((e: { id: number }) => e.id)).toEqual([53]);
   expect((await r.get(`/api/memory/recalls?since=${NOW + 3001}`)).body.items).toEqual([]);
   expect((await r.get('/api/memory/recalls?page=2')).body).toEqual({ items: [], page: 2, has_more: false });
@@ -184,7 +184,7 @@ it('JSON 列表和详情按 UTF-8 编码后的 1 MiB 限制返回 413', async ()
   }
 });
 it.each(['page=-1', 'page=1.2', 'page=1000001', 'page=01', 'page=', 'backend=x', 'tool=x', 'scope=', 'session=..',
-  'session=a%2Fb', 'turn=1', 'ticket=', 'since=2026-02-30', 'since=-1', 'since=bad', 'x=1', 'page=1&page=2'])('召回参数校验：%s', async query => {
+  'session=a%2Fb', 'turn=1', 'turn_id=', 'since=2026-02-30', 'since=-1', 'since=bad', 'x=1', 'page=1&page=2'])('召回参数校验：%s', async query => {
   const r = await rig(); expect((await r.get(`/api/memory/recalls?${query}`)).status).toBe(400);
 });
 it('非法 ID、未知记录、降级和存储错误有明确状态且不泄露路径', async () => {

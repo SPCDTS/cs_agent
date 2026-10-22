@@ -460,7 +460,7 @@ describe("codex 回合结束后的上下文用量", () => {
     await runner.recordTurnUsage("group:1", "thread-resumed", Date.now(), "turn:usage-fallback");
     expect(store.get("codex", "group:1")).toEqual({ ...before, turns: before.turns + 1 });
     expect(warn.mock.calls.filter(([message]) => message === warning)).toEqual([[warning, {
-      key: "group:1", thread_id: "thread-resumed", ticket: "turn:usage-fallback",
+      key: "group:1", thread_id: "thread-resumed", trace_key: "turn:usage-fallback",
       reason: mode === "stale" ? "stale rollout usage" : "missing rollout usage",
     }]]);
   });

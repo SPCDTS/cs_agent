@@ -1,7 +1,7 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { resolveAutoEffort, type EffortMessage, type EffortRouterDeps } from "./effort-router.js";
 import { backendNameFor, type BackendSelector } from "./backends/select.js";
-import type { BackendName, TicketSettings } from "./backends/types.js";
+import type { BackendName, SettingsSnapshot } from "./backends/types.js";
 import { isReasoningEffort } from "./codex/runner.js";
 import type { RuntimeSettings } from "./settings.js";
 
@@ -20,7 +20,7 @@ export interface TurnSettingsDeps {
  * backend：指定本轮后端（会话仍由旧后端服务、切换推迟时），缺省按设置与覆盖表选择。
  */
 export function createTurnSettings(deps: TurnSettingsDeps) {
-  return async (scope: string, msg?: EffortMessage, forced?: BackendName): Promise<TicketSettings> => {
+  return async (scope: string, msg?: EffortMessage, forced?: BackendName): Promise<SettingsSnapshot> => {
     // 必须在第一个 await 之前一次采样，排队期间的设置变更不影响本轮。
     const current = deps.currentSettings?.();
     const configured = typeof deps.codexReasoningEffort === "function" ? deps.codexReasoningEffort() : deps.codexReasoningEffort;
@@ -28,10 +28,10 @@ export function createTurnSettings(deps: TurnSettingsDeps) {
     const piFallback = deps.piThinkingLevel ?? "low";
     const effort = current?.codexReasoningEffort ?? codexFallback;
     const backend = forced ?? (current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : deps.backends?.select(scope).name ?? "codex");
-    const snapshot: TicketSettings = { backend, codexReasoningEffort: isReasoningEffort(effort) ? effort : codexFallback,
+    const snapshot: SettingsSnapshot = { backend, codexReasoningEffort: isReasoningEffort(effort) ? effort : codexFallback,
       ...(current ? { codexModel: current.codexModel, piModel: current.piModel,
         piThinkingLevel: current.piThinkingLevel === "auto" ? piFallback : current.piThinkingLevel } : {}), effortSource: "fixed" };
-    const input = msg ?? { ticket: "@effort", text: "", hasImages: false, hasQuote: false };
+    const input = msg ?? { key: "@effort", text: "", hasImages: false, hasQuote: false };
     if (backend === "codex" && effort === "auto") {
       const routed = await resolveAutoEffort(deps.effortRouter ?? {}, input, codexFallback);
       snapshot.codexReasoningEffort = routed.effort; snapshot.effortSource = routed.source;

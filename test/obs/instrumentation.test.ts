@@ -179,6 +179,7 @@ it('历史 relay 用量按通用模型事件聚合，缺缓存字段可读且重
   trace.event('legacy-usage','model_turn',{status:'ok',durationMs:20,detail});
   trace.event('legacy-usage','fallback',{status:'failed',detail:{operation:'relay',terminal:false}});
   trace.event('legacy-usage','reply_sent',{detail:{terminal:true}});
+  trace.event('turn:pi:1:1','reply_sent',{detail:{terminal:true,status:'completed'}});
   const options={retentionDays:365,inputPrice:2,outputPrice:4};
   await new Metrics(r.store,options).flush();
   await new Metrics(r.store,options).flush(Date.now()+1);
@@ -187,5 +188,6 @@ it('历史 relay 用量按通用模型事件聚合，缺缓存字段可读且重
   expect(total('deepseek_output_tokens')).toBe(20);
   expect(total('deepseek_estimated_cost')).toBeCloseTo(.00028);
   expect(r.store.degraded).toBe(false);
+  // 吞吐只按回合（turn: 键）计；旧版键的终态不计入
   expect(r.store.throughput(0)).toMatchObject({total:1,failed:0});
 });

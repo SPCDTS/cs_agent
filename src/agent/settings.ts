@@ -57,8 +57,8 @@ const FileSettingsSchema = SettingsSchema.partial().extend({ codexReplyMode: z.u
 const FileSchema = z.object({ version: z.literal(1), settings: FileSettingsSchema }).strict();
 
 const SETTINGS_FILE = "settings.json";
-/** 记录设置变更的观测票据（以 @ 开头：不进票据列表） */
-export const SETTINGS_TICKET = "@settings";
+/** 记录设置变更的 trace 键（以 @ 开头：系统事件，不进回合列表） */
+export const SETTINGS_KEY = "@settings";
 
 export type SettingsSource = "dashboard" | "test";
 
@@ -140,7 +140,7 @@ export class SettingsStore {
       const after = this.current();
       const changed = (Object.keys(next) as (keyof RuntimeSettings)[]).filter(k => JSON.stringify(before[k]) !== JSON.stringify(after[k]));
       if (changed.length) {
-        this.trace.event(SETTINGS_TICKET, "settings_changed", { detail: { source, changed,
+        this.trace.event(SETTINGS_KEY, "settings_changed", { detail: { source, changed,
           before: Object.fromEntries(changed.map(k => [k, before[k]])), after: Object.fromEntries(changed.map(k => [k, after[k]])) } });
         log.info("runtime settings changed", { source, changed });
         for (const fn of this.listeners) { try { fn(after, before); } catch { /* 订阅者错误不影响保存 */ } }

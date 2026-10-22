@@ -11,7 +11,7 @@
 import type { InboundRecord, TurnBinding } from "../channel/types.js";
 import { log } from "../shared/log.js";
 import { trace } from "../shared/trace.js";
-import type { BackendName, TicketSettings } from "./backends/types.js";
+import type { BackendName, SettingsSnapshot } from "./backends/types.js";
 import type { ThreadHost } from "./host/thread-host.js";
 import { STALL_MS } from "./host/thread-host.js";
 import type { OwnerIds } from "../shared/owners.js";
@@ -22,7 +22,7 @@ import type { TurnSettings } from "./turn-settings.js";
 
 /** 后端适配器：开轮时额外接收本轮设置快照。 */
 export interface BackendAdapter extends ThreadAdapter {
-  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext, settings?: TicketSettings): Promise<StartTurnResult>;
+  startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], ctx: TurnContext, settings?: SettingsSnapshot): Promise<StartTurnResult>;
 }
 
 /** 后端不可用超过重试时长：输入无法投递（§8.1 第三种提示）。 */
@@ -94,7 +94,7 @@ export class BackendRouter implements ThreadAdapter {
         const head = records[0]!;
         const scope = this.threadScope(threadKey, head.scope);
         const msg = {
-          ticket: head.key, text: records.map(r => r.text).join("\n"),
+          key: "in:" + head.key, text: records.map(r => r.text).join("\n"),
           hasImages: records.some(r => r.images.length > 0), hasQuote: records.some(r => !!r.reply_to),
         };
         // 宿主已持久化本轮后端（plan）：按它执行，不按当前设置重新选择

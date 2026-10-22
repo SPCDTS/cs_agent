@@ -28,15 +28,15 @@ describe("auto 选档", () => {
   it.each(["high because code", "low/high", "ultra", "", "very high"])("非法输出回退且不记录正文：%s", async output => {
     const events: LiveEvent[] = [], trace = new Trace(); trace.tap(e => events.push(e));
     expect(await resolveAutoEffort({ complete: async () => output, model: "classifier", trace },
-      { ...hints, text: "请解释这份私密设计文档", ticket: "t1" }, "high")).toEqual({ effort: "high", source: "auto-fallback" });
+      { ...hints, text: "请解释这份私密设计文档", key: "t1" }, "high")).toEqual({ effort: "high", source: "auto-fallback" });
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ ticket: "t1", stage: "effort_route", status: "fallback",
+    expect(events[0]).toMatchObject({ key: "t1", stage: "effort_route", status: "fallback",
       detail: { effort: "high", source: "auto-fallback", model: "classifier", ms: expect.any(Number) } });
     expect(JSON.stringify(events)).not.toContain("私密");
   });
   it("快路径不调用分类，成功事件记录 auto", async () => {
     const complete = vi.fn(), event = vi.fn();
-    expect(await resolveAutoEffort({ complete, trace: { event } }, { ...hints, ticket: "fast", text: "你好" }, "high"))
+    expect(await resolveAutoEffort({ complete, trace: { event } }, { ...hints, key: "fast", text: "你好" }, "high"))
       .toEqual({ effort: "low", source: "auto" });
     expect(complete).not.toHaveBeenCalled();
     expect(event).toHaveBeenCalledWith("fast", "effort_route", expect.objectContaining({ status: "ok" }));
@@ -45,13 +45,13 @@ describe("auto 选档", () => {
     vi.useFakeTimers();
     let signal: AbortSignal | undefined;
     const result = resolveAutoEffort({ timeoutMs: 40, complete: async (_p, s) => { signal = s; return new Promise(() => {}); } },
-      { ...hints, ticket: "slow", text: "如何调试" }, "medium");
+      { ...hints, key: "slow", text: "如何调试" }, "medium");
     await vi.advanceTimersByTimeAsync(40);
     expect(await result).toEqual({ effort: "medium", source: "auto-fallback" });
     expect(signal?.aborted).toBe(true);
   });
   it("分类异常与禁用分类均保留配置中的 off/max", async () => {
-    const msg = { ...hints, ticket: "fallback", text: "如何调试" };
+    const msg = { ...hints, key: "fallback", text: "如何调试" };
     expect(await resolveAutoEffort({ complete: async () => { throw Error("unavailable"); } }, msg, "off"))
       .toEqual({ effort: "off", source: "auto-fallback" });
     expect(await resolveAutoEffort({}, msg, "max")).toEqual({ effort: "max", source: "auto-fallback" });

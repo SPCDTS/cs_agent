@@ -192,7 +192,7 @@ export class ScheduleService implements ScheduleRunRecorder {
       if (prepared?.admitter.discard) await this.opts.harness.commit(tx => prepared.admitter.discard!(tx), this.ctx);
     }
     reportPaused(paused, this.opts.trace);
-    if (run.ticket && (run.status === "queued" || run.status === "running")) this.opts.admitter.launch(run.ticket);
+    if (run.input_key && (run.status === "queued" || run.status === "running")) this.opts.admitter.launch(run.input_key);
     return run;
   }
 

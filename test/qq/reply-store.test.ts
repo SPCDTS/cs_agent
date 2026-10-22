@@ -88,8 +88,8 @@ describe("ReplyStore Inbox", () => {
   });
 });
 
-describe("ReplyStore 旧票据（只读）", () => {
-  it("旧库补列后可按票据号读取，非法票据号返回 null", () => {
+describe("ReplyStore 旧版 tickets 表", () => {
+  it("旧库的 tickets 表原样留在磁盘上（不补列、不读写）；新库不再建这张表", () => {
     const raw = new DatabaseSync(join(dir, DB_FILE));
     raw.exec(`CREATE TABLE tickets (
       ticket_id TEXT PRIMARY KEY, self_id TEXT NOT NULL, user_id TEXT NOT NULL, group_id TEXT,
@@ -97,12 +97,22 @@ describe("ReplyStore 旧票据（只读）", () => {
       created_at TEXT NOT NULL, status TEXT NOT NULL, attempted_at TEXT, sent_at TEXT, reply_message_id TEXT)`);
     const old = inboundKey(msg("old"));
     raw.prepare("INSERT INTO tickets (ticket_id, self_id, user_id, group_id, message_type, source_message_id, source_nickname, created_at, status, reply_message_id) VALUES (?, '10001', '20001', NULL, 'private', 'old', 'n', '2026-01-01T00:00:00.000Z', 'sent', '77')").run(old);
+    const before = raw.prepare("SELECT sql FROM sqlite_master WHERE name='tickets'").get();
     raw.close();
 
-    store = new ReplyStore(dir);
-    expect(store.get(old)).toMatchObject({ ticket_id: old, status: "sent", reply_message_id: "77", source_text: "", self_id: "10001" });
-    expect(store.get(old)?.source_route_text).toBeUndefined();
-    expect(store.get("not-a-ticket")).toBeNull();
+    store = new ReplyStore(dir); store.close(); store = null;
+    const check = new DatabaseSync(join(dir, DB_FILE), { readOnly: true });
+    expect(check.prepare("SELECT sql FROM sqlite_master WHERE name='tickets'").get()).toEqual(before);
+    expect(check.prepare("SELECT ticket_id, status, reply_message_id FROM tickets").all()).toEqual([{ ticket_id: old, status: "sent", reply_message_id: "77" }]);
+    check.close();
+
+    const fresh = mkdtempSync(join(tmpdir(), "reply-store-fresh-"));
+    try {
+      new ReplyStore(fresh).close();
+      const db = new DatabaseSync(join(fresh, DB_FILE), { readOnly: true });
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE name='tickets'").get()).toBeUndefined();
+      db.close();
+    } finally { rmSync(fresh, { recursive: true, force: true }); }
   });
 });
 

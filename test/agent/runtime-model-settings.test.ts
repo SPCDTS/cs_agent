@@ -11,7 +11,7 @@ import { tmp } from "./helpers.js";
 
 const cfg = loadAgentConfig({ CODEX_MODEL: "codex/gpt-test", AGENT_MODEL_ID: "pi-test", AGENT_THINKING_LEVEL: "max" });
 const defaults = settingsDefaults(cfg);
-const input = { ticket: "t1", text: "帮我调试", hasImages: false, hasQuote: false };
+const input = { key: "t1", text: "帮我调试", hasImages: false, hasQuote: false };
 /** 每轮开始时的设置快照（createTurnSettings）；保留旧 snapshotSettings 的调用形状以便断言复用。 */
 function tasks(settings: SettingsStore, complete = vi.fn(async () => "HIGH")) {
   const snapshot = createTurnSettings({ currentSettings: () => settings.currentForTurn(),

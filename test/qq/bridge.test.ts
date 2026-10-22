@@ -15,7 +15,7 @@ let server: FakeOneBot;
 let dataDir: string;
 let imageRoot: string;
 let bridge: Channel;
-let received: { message: InboundMessage; ticket: string }[];
+let received: { message: InboundMessage; key: string }[];
 let errors: Error[];
 
 function config(overrides: Partial<QQBridgeConfig> = {}): QQBridgeConfig {
@@ -28,7 +28,7 @@ function config(overrides: Partial<QQBridgeConfig> = {}): QQBridgeConfig {
 
 async function startBridge(overrides: Partial<QQBridgeConfig> = {}): Promise<Channel> {
   const b = createQQBridge(config(overrides), { reconnectBaseMs: 50, heartbeatMs: 60000 });
-  b.on("message", (message, ticket) => received.push({ message, ticket }));
+  b.on("message", (message, key) => received.push({ message, key }));
   b.on("error", e => errors.push(e));
   const connected = new Promise<void>(resolve => b.on("connection", resolve));
   await b.start();
@@ -190,7 +190,7 @@ describe("auth and trigger rules", () => {
   });
 });
 
-describe("dedupe and tickets", () => {
+describe("dedupe and inbound keys", () => {
   it("dedupes repeated events in memory and across restarts", async () => {
     const event = privateEvent(OWNER, "once");
     const first = await pushAndFlush(event, event);
@@ -206,14 +206,12 @@ describe("dedupe and tickets", () => {
     const event = privateEvent(OWNER, "hello");
     server.push(event);
     await waitFor(() => received.some(r => r.message.message_id === String(event.message_id)));
-    const { message, ticket: key } = received.find(r => r.message.message_id === String(event.message_id))!;
+    const { message, key } = received.find(r => r.message.message_id === String(event.message_id))!;
     expect(key).toBe(inboundKey(message));
     expect(bridge.inbox.getInbound(key)).toMatchObject({
       key, kind: "user", self_id: SELF_ID, user_id: OWNER, group_id: null, scope: "private:" + OWNER, thread_key: "private:" + OWNER,
       message_type: "private", message_id: message.message_id, text: "hello", state: "queued",
     });
-    // 不再开票：旧票据表只读。
-    expect(await bridge.getTicket(key)).toBeNull();
   });
 
 });
@@ -289,8 +287,8 @@ it("不在 allowUsers 中的第二 owner 仍触发、入库、接收原账号回
   expect(raw.mock.calls.some(([message]) => message.user_id === STRANGER)).toBe(false);
   const receivedMessage = received.find(row => row.message.user_id === secondary)!;
   // owner 的多个账号共用 owner 线程，回复地址仍是原账号。
-  expect(bridge.inbox.getInbound(receivedMessage.ticket)).toMatchObject({ thread_key: "owner", scope: "private:" + secondary });
-  const row = bridge.outbox.reserveOutbox({ key: "owner:r1", thread_key: "owner", turn_id: null, input_key: receivedMessage.ticket,
+  expect(bridge.inbox.getInbound(receivedMessage.key)).toMatchObject({ thread_key: "owner", scope: "private:" + secondary });
+  const row = bridge.outbox.reserveOutbox({ key: "owner:r1", thread_key: "owner", turn_id: null, input_key: receivedMessage.key,
     text: "回复第二账号", images: [], files: [], message_type: "private", target_id: secondary, mention_user_id: null });
   expect(await bridge.send(row.key, { message_type: "private", target_id: secondary }, "回复第二账号"))
     .toMatchObject({ target_id: secondary, message_type: "private", already_sent: false });

@@ -39,7 +39,7 @@ import { isReasoningEffort, type CodexRunner } from "../codex/runner.js";
 import { RpcError } from "../codex/app-server/rpc.js";
 import { AppServerUnavailableError } from "../codex/app-server/supervisor.js";
 import { ThreadNotLoadedError, type ItemEvent, type ThreadItem, type TurnCompletedEvent, type UserInput } from "../codex/app-server/client.js";
-import type { ReasoningEffort, TicketSettings } from "./types.js";
+import type { ReasoningEffort, SettingsSnapshot } from "./types.js";
 import { attachmentDirs } from "../../media/attach-paths.js";
 import type { CallBinding, CallMeta, ThreadTokens } from "../../context/media-recall-server.js";
 import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome } from "../host/types.js";
@@ -221,7 +221,7 @@ export class CodexBackend implements ThreadAdapter {
 
   // ───────────── ThreadAdapter ─────────────
 
-  async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turn: TurnContext, settings?: TicketSettings): Promise<StartTurnResult> {
+  async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turn: TurnContext, settings?: SettingsSnapshot): Promise<StartTurnResult> {
     // 先渲染：输入缺失等错误在开轮时就抛出，宿主按开轮失败处理。
     const rendered = await this.opts.turns.render(this.opts.turns.records(inputs));
     const model = settings?.codexModel;
@@ -289,7 +289,7 @@ export class CodexBackend implements ThreadAdapter {
       // 本轮已开出：在途期间服务端另开的回合判为 wake，但不交给宿主（否则宿主会以唤醒取代本轮）
       this.releaseObserved(others, false);
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "codex", thread_key: threadKey, thread_id: threadId, kind: turn.kind,
-        effort: effort ?? null, inputs: inputs.map(i => i.inboundKey) } });
+        effort: effort ?? null, inputs: inputs.map(i => i.inboundKey), ...(settings ? { settings } : {}) } });
       trace.event("turn:" + turnId, "model_turn", { status: "started", detail: { backend: "codex", thread_key: threadKey, effort: effort ?? null } });
       return { turnId };
     });
@@ -416,6 +416,11 @@ export class CodexBackend implements ThreadAdapter {
     const threadId = this.threadIds.get(threadKey);
     if (!threadId) return !!this.children.get(threadKey)?.size || [...this.turnRecs.values()].some(rec => rec.key === threadKey && !rec.ended);
     return this.threadBusy(threadKey, threadId) || this.compactions.has(threadId);
+  }
+
+  /** 面板实时页：会话下仍在运行的子 agent 线程数（来自 app-server 的 subAgent 通知）。 */
+  liveSubagents(threadKey: ThreadKey): number {
+    return this.children.get(threadKey)?.size ?? 0;
   }
 
   /** 回合随 cs-agent 进程退出丢失（app-server 是子进程，§5.4）。 */
@@ -615,14 +620,14 @@ export class CodexBackend implements ThreadAdapter {
 
   private async finish(rec: TurnRec, outcome: TurnOutcome): Promise<void> {
     const { key, threadId } = rec;
-    const turnId = hostTurnId(rec.codexTurnId), ticket = "turn:" + turnId;
+    const turnId = hostTurnId(rec.codexTurnId), traceKey = "turn:" + turnId;
     const ms = Date.now() - rec.startedAt;
-    trace.event(ticket, "model_turn", { status: outcome.status === "completed" ? "ok" : "failed", durationMs: ms,
+    trace.event(traceKey, "model_turn", { status: outcome.status === "completed" ? "ok" : "failed", durationMs: ms,
       detail: { backend: "codex", thread_key: key, status: outcome.status, ...(outcome.error ? { reason: outcome.error } : {}) } });
     if (outcome.status === "completed") log.info("codex turn done", { thread: key, ms });
     else log.warn("codex turn ended", { thread: key, turn: turnId, status: outcome.status, error: outcome.error });
     if (outcome.status !== "lost") {
-      await this.opts.runner.recordTurnUsage(key, threadId, rec.startedAt, ticket, rec.model)
+      await this.opts.runner.recordTurnUsage(key, threadId, rec.startedAt, traceKey, rec.model)
         .catch(error => log.warn("codex context usage failed", { thread: key, error }));
     }
     this.host?.onTurnCompleted(key, turnId, outcome);
@@ -678,6 +683,8 @@ export class CodexBackend implements ThreadAdapter {
     if (this.activities.has(id)) return;
     this.activities.add(id);
     if (this.activities.size > 2000) this.activities.delete(this.activities.values().next().value!);
+    // 回合页的子 agent 活动：记在父回合下（只记子线程 id 与活动种类）
+    trace.event("turn:" + hostTurnId(turnId), "subagent", { detail: { backend: "codex", agent: agent.slice(0, 64), kind: kind.slice(0, 32) } });
     if (kind === "started") {
       this.spawnedBy.set(agent, this.personOf(key, turnId));
       if (this.spawnedBy.size > 1000) this.spawnedBy.delete(this.spawnedBy.keys().next().value!);
@@ -725,17 +732,17 @@ export class CodexBackend implements ThreadAdapter {
 }
 
 /** app-server 条目 → 观测事件：只提取白名单字段，不把原始条目（可能含凭据）存入观测库。 */
-export function observeItem(ticket: string, phase: "started" | "completed", item: ThreadItem): void {
+export function observeItem(traceKey: string, phase: "started" | "completed", item: ThreadItem): void {
   const done = phase === "completed";
   const id = String(item.id ?? item.type).slice(0, 128);
   const duration = typeof item.durationMs === "number" ? item.durationMs : undefined;
   const failed = item.status === "failed" || (item.error !== undefined && item.error !== null);
   if (item.type === "agentMessage") {
-    if (done && typeof item.text === "string") trace.event(ticket, "final_answer", { detail: { text: item.text } });
+    if (done && typeof item.text === "string") trace.event(traceKey, "final_answer", { detail: { text: item.text } });
     return;
   }
   if (item.type === "mcpToolCall") {
-    trace.event(ticket, "tool:" + String(item.tool ?? "unknown").slice(0, 128), { status: done ? (failed ? "failed" : "ok") : "started",
+    trace.event(traceKey, "tool:" + String(item.tool ?? "unknown").slice(0, 128), { status: done ? (failed ? "failed" : "ok") : "started",
       durationMs: done ? duration : undefined, detail: { backend: "codex", server: item.server, call_id: id, input: item.arguments,
         output: item.result, error: item.error, failure: done && failed ? classifyFailure(item.error, String(item.server ?? "codex")) : undefined } });
     return;
@@ -744,7 +751,7 @@ export function observeItem(ticket: string, phase: "started" | "completed", item
   const command = item.type === "commandExecution";
   const summary = command ? { command: redactText(String(item.command ?? ""), 200) } : { query: redactText(String(item.query ?? ""), 200) };
   const exit = typeof item.exitCode === "number" ? item.exitCode : null;
-  trace.event(ticket, command ? "tool:command_execution" : "tool:web_search", {
+  trace.event(traceKey, command ? "tool:command_execution" : "tool:web_search", {
     status: !done ? "started" : failed || (command && exit !== null && exit !== 0) ? "failed" : "ok",
     durationMs: done ? duration : undefined, detail: { backend: "codex", call_id: id, ...summary, ...(command && done ? { exit_code: exit } : {}) } });
 }

@@ -49,7 +49,7 @@ export async function scheduleToolsFixture() {
   /** 立即运行后的定时回合绑定：身份为创建者，本轮输入为该次运行的定时输入。 */
   const scheduled = async (id: string, actor = "qq:1"): Promise<Bound> => {
     const run = await service.runNow(actor, id);
-    const input = f.bridge.inbox.getInbound(run.ticket!)!;
+    const input = f.bridge.inbox.getInbound(run.input_key!)!;
     return { threadKey: input.thread_key, identity: { kind: "scheduled", creator: actor.slice(3) }, scope: input.scope,
       inputs: [input.key], inputKey: input.key, actor };
   };

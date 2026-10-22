@@ -59,7 +59,7 @@ function adapters(): SessionAdapters {
   ], {
     'sess-1': [
       { turn: 't1', started: T0 - 60_000, ended: T0 - 50_000, preview: '第一问', tools: 0, requests: 1, status: 'ok', usage: { input: 900, output: 5, measured: true } },
-      { turn: 't2', started: T0 + 1000, ended: T0 + 3300, preview: `请看 ${XSS}`, tools: 1, requests: 2, status: 'ok', ticket: 'ticket-abcdef123456', delivery: { status: 'sent', scope: 'group:7', duration_ms: 4200 },
+      { turn: 't2', started: T0 + 1000, ended: T0 + 3300, preview: `请看 ${XSS}`, tools: 1, requests: 2, status: 'ok', traceKey: 'turn:pi:7:42', delivery: { status: 'completed', scope: 'group:7', duration_ms: 4200 },
         usage: { input: 6000, output: 50, cached: 800, measured: true } },
     ],
   }, { 'sess-1/t2': BLOCKS, 'sess-1/t1': [{ kind: 'user', text: '第一问' }] });
@@ -144,7 +144,7 @@ describe('Agent 页面', () => {
     expect(html).toContain('上下文 5,000 / 20,000（25%） tokens');
     expect(html).toContain('回合累计 输入 6,000（缓存 800） · 输出 50，2 次请求');
     expect(html).toContain('gpt-test · high');
-    expect(html).toContain('href="/tickets/ticket-abcdef123456"'); expect(html).toContain('已回复'); expect(html).toContain('群 7');
+    expect(html).toContain('href="/turns/pi%3A7%3A42"'); expect(html).toContain('已完成'); expect(html).toContain('群 7');
     expect(html).toContain('href="/agents/codex/sessions/sess-1/context?at=t2&amp;phase=before"');
     expect(html).toContain('href="/agents/codex/sessions/sess-1/context?at=t2&amp;phase=after"');
     expect(html).toContain('href="/agents/codex/sessions/sess-1/turns/t2"');

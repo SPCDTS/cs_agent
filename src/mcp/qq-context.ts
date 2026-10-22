@@ -27,7 +27,7 @@ const server = createQQContextServer({
   },
   onRecall: (event, context) => {
     (instrumentation ??= MemoryInstrumentation.openOwn(dataDir)).recordRecall({ ...event,
-      backend: "codex", ticket: context.turnId ?? null, session: context.session ?? null });
+      backend: "codex", turn_id: context.turnId ?? null, session: context.session ?? null });
   },
   chats: meta => chatsViaLoopback(token, port, meta),
   recall: (id, meta) => recallViaLoopback(id, token, port, meta),

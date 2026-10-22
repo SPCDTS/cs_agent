@@ -45,10 +45,11 @@ class El {
   querySelector(sel: string): El | null { return this.querySelectorAll(sel)[0] ?? null; }
 }
 
-function boot() {
+function boot(stop = true) {
   const root = new El('BODY');
   const ids: Record<string, El> = {};
-  for (const id of ['inflight', 'done', 'conn', 'live-count', 'inflight-empty', 'done-empty']) { ids[id] = new El('DIV'); root.append(ids[id]!); }
+  for (const id of ['convs', 'conn', 'live-count', 'convs-empty']) { ids[id] = new El('DIV'); root.append(ids[id]!); }
+  ids.convs!.dataset.csrf = 'csrf-token'; if (stop) ids.convs!.dataset.stop = '1';
   const listeners: Record<string, (e: { data: string }) => void> = {};
   const document = {
     getElementById: (id: string) => ids[id] ?? null,
@@ -59,65 +60,121 @@ function boot() {
   class EventSource { onerror: unknown; constructor(readonly url: string) {} addEventListener(type: string, fn: (e: { data: string }) => void) { listeners[type] = fn; } }
   vm.runInNewContext(ASSETS['live.js']!, { document, EventSource, CSS: { escape: (s: string) => s }, setInterval: () => 0, Date, Math, JSON, Number, String, isFinite, encodeURIComponent });
   const emit = (type: string, data: unknown) => listeners[type]!({ data: JSON.stringify(data) });
-  return { ids, emit };
+  const row = (thread = 'group:7') => ids.convs!.querySelector(`[data-thread="${thread}"]`);
+  return { ids, emit, row };
 }
 
-const head = (over: Record<string, unknown> = {}) => ({ ticket: 't1', scope: 'group:7', text: '你好', sender: '小明', route: '', backend: '', thread: '', state: 'running', phase: '',
-  phase_since: 0, started: 0, updated: 0, finished: null, outcome: '', late_images: 0, dropped: 0, seq: 0, ...over });
+const turn = (over: Record<string, unknown> = {}) => ({ id: 'pi:7:1', kind: 'user', sender: '小明', started: 0, updated: 0, finished: null, outcome: '',
+  inputs: [{ key: 'k1', kind: 'user', sender: '小明', text: '帮我查天气' }], sends: [], tools: 0, subagent_events: 0, phase: '', phase_since: 0, seq: 0, dropped: 0, ...over });
+const conv = (over: Record<string, unknown> = {}) => ({ thread: 'group:7', scope: 'group:7', label: '', backend: 'pi', state: 'working', turn: turn(),
+  queued: [], subagents: null, recent: [], updated: 0, ...over });
+const item = (seq: number, summary = `事件 ${seq}`) => ({ seq, ts: seq, stage: 'tool:shell', status: 'ok', duration_ms: null, summary });
 
-describe('live.js 客户端渲染', () => {
-  it('事件流超过 80 条后继续渲染新事件（按 seq 增量），并只保留最近 80 行', () => {
-    const { ids, emit } = boot();
+describe('live.js 客户端渲染（每会话一行）', () => {
+  it('事件流超过 80 条后继续渲染新事件（按 seq 增量），只保留最近 80 行；已在快照里的事件不重复', () => {
+    const { emit, row } = boot();
     emit('snapshot', { now: Date.now(), count: 0 }); emit('snapshot_end', { count: 0 });
-    for (let seq = 1; seq <= 100; seq++)
-      emit('card', { card: head({ seq, updated: seq }), item: { seq, ts: seq, stage: 'tool:shell', status: 'ok', duration_ms: null, summary: `事件 ${seq}` } });
-    const feed = ids.inflight!.querySelector('.feed')!;
+    for (let seq = 1; seq <= 100; seq++) emit('conversation', { conversation: conv({ turn: turn({ seq, updated: seq }) }), item: item(seq) });
+    const feed = row()!.querySelector('.feed')!;
     expect(feed.children).toHaveLength(80);
     expect(feed.lastElementChild!.textContent).toContain('事件 100');
     expect(feed.firstChild!.textContent).toContain('事件 21');
-    // 重复（已在快照中的）事件不再渲染
-    emit('card', { card: head({ seq: 100 }), item: { seq: 100, ts: 100, stage: 'tool:shell', status: 'ok', duration_ms: null, summary: '重复' } });
+    emit('conversation', { conversation: conv({ turn: turn({ seq: 100 }) }), item: item(100, '重复') });
     expect(feed.textContent).not.toContain('重复');
   });
 
-  it('快照逐卡到达后，增量从卡片已有 seq 之后续接', () => {
-    const { ids, emit } = boot();
-    const items = Array.from({ length: 80 }, (_, i) => ({ seq: i + 21, ts: i, stage: 'tool:shell', status: 'ok', duration_ms: null, summary: `事件 ${i + 21}` }));
+  it('快照逐会话到达后，增量从已有 seq 之后续接；换了回合清空事件流', () => {
+    const { ids, emit, row } = boot();
+    const items = Array.from({ length: 80 }, (_, i) => item(i + 21));
     emit('snapshot', { now: Date.now(), count: 2 });
-    emit('snapcard', { card: { ...head({ seq: 100 }), items } });
-    emit('snapcard', { card: { ...head({ ticket: 't2', finished: 5, state: 'done', outcome: 'reply_sent' }), items: [] } });
+    emit('snapconversation', { conversation: conv({ turn: { ...turn({ seq: 100 }), items } }) });
+    emit('snapconversation', { conversation: conv({ thread: 'private:5', scope: 'private:5', state: 'idle', turn: null, updated: 5 }) });
     emit('snapshot_end', { count: 2 });
-    expect(ids.done!.children).toHaveLength(1);
+    expect(ids.convs!.children).toHaveLength(2);
     expect(ids.conn!.textContent).toBe('实时连接中');
-    emit('card', { card: head({ seq: 101 }), item: { seq: 101, ts: 101, stage: 'tool:shell', status: 'ok', duration_ms: null, summary: '事件 101' } });
-    const feed = ids.inflight!.querySelector('.feed')!;
+    expect(ids['live-count']!.textContent).toBe('1 个会话工作中');
+    emit('conversation', { conversation: conv({ turn: turn({ seq: 101 }) }), item: item(101) });
+    const feed = row()!.querySelector('.feed')!;
     expect(feed.children).toHaveLength(80);
     expect(feed.lastElementChild!.textContent).toContain('事件 101');
+    emit('conversation', { conversation: conv({ turn: turn({ id: 'pi:7:2', seq: 1 }) }), item: item(1, '新回合') });
+    expect(feed.children).toHaveLength(1);
+    expect(feed.textContent).toContain('新回合');
+    expect(row()!.querySelector('.conv-foot')!.querySelector('A')!.href).toBe('/turns/pi%3A7%3A2');
   });
 
-  it('卡片页头的路由、后端、发送者在后续更新中刷新', () => {
-    const { ids, emit } = boot();
+  it('页头与数字随更新刷新：会话名（群名）、后端、回合种类与发送者、本轮输入、已发消息、子 agent、排队；空闲时收起回合部分', () => {
+    const { ids, emit, row } = boot();
     emit('snapshot', { now: Date.now(), count: 0 }); emit('snapshot_end', { count: 0 });
-    const item = (seq: number) => ({ seq, ts: seq, stage: 'routed', status: 'ok', duration_ms: null, summary: '' });
-    emit('card', { card: head({ seq: 1, sender: '' }), item: item(1) });
-    const top = ids.inflight!.querySelector('.slip-top')!;
-    const pills = () => top.querySelectorAll('.pill');
-    expect(pills().every(p => p.hidden)).toBe(true);
-    emit('card', { card: head({ seq: 2, route: 'agent' }), item: item(2) });
-    emit('card', { card: head({ seq: 3, route: 'agent', backend: 'pi', state: 'running' }), item: item(3) });
-    expect(pills().filter(p => !p.hidden).map(p => p.textContent)).toEqual(['执行 agent', 'Pi']);
-    expect(top.querySelector('.who')!.textContent).toBe('小明');
-    expect(ids.inflight!.querySelectorAll('.slip-top')).toHaveLength(1);
+    emit('conversation', { conversation: conv({ label: '家庭群', backend: '' }), item: item(1) });
+    const top = row()!.querySelector('.slip-top')!;
+    expect(top.querySelector('.who')!.textContent).toBe('群 家庭群(7)');
+    expect(top.querySelector('.who')!.href).toBe('/conversations/group%3A7');
+    const pills = () => top.querySelectorAll('.pill').filter(p => !p.hidden).map(p => p.textContent);
+    expect(pills()).toEqual(['用户消息 · 小明']);
+    emit('conversation', { conversation: conv({ subagents: 2, queued: ['k2'], turn: turn({ seq: 2, kind: 'scheduled', sender: '9', tools: 3,
+      inputs: [{ key: 'run_1', kind: 'scheduled', sender: '', text: '[定时任务] 早报' }], sends: [{ ts: 2, target: 'qq:group:7', text: '早报来了', status: 'sent', system: false }] }) }), item: item(2) });
+    expect(pills()).toEqual(['Pi', '定时任务 · 9']);
+    const facts = row()!.querySelector('.conv-facts')!.children.map(c => c.textContent);
+    expect(facts).toEqual(['本轮输入 1', '已发消息 1', '工具调用 3', '子 agent 2', '排队 1']);
+    expect(row()!.querySelector('.conv-inputs')!.textContent).toBe('[定时任务] 早报');
+    expect(row()!.querySelector('.conv-sends')!.textContent).toContain('早报来了');
+    expect(ids.convs!.querySelectorAll('.slip-top')).toHaveLength(1);
+    // 回合结束：空闲、没有回合部分，最近完成里出现这个回合
+    emit('conversation', { conversation: conv({ state: 'idle', turn: null, subagents: null, updated: 10,
+      recent: [{ ...turn({ kind: 'scheduled', sender: '9', finished: 9, outcome: 'completed', started: 1 }) }] }) });
+    const r = row()!;
+    expect(r.className).toContain('idle');
+    expect(r.querySelector('.conv-facts')!.children.map(c => c.textContent)).toEqual(['排队 0']);
+    expect(r.querySelector('.feed')!.hidden).toBe(true);
+    expect(r.querySelector('.conv-foot')!.hidden).toBe(true);
+    expect(r.querySelector('.conv-recent')!.hidden).toBe(false);
+    expect(r.querySelector('SUMMARY')!.textContent).toBe('最近完成 1 个回合');
+    expect(r.querySelector('.conv-recent')!.querySelector('A')!.href).toBe('/turns/pi%3A7%3A1');
+    expect(r.querySelector('.conv-recent')!.textContent).toContain('已完成');
+    expect(ids['live-count']!.textContent).toBe('所有会话空闲');
   });
 
-  it('卡片头部的小型占用条：首帧 context 快照填充，context 增量原地更新（档位、宽度、阈值、估算）', () => {
-    const { ids, emit } = boot();
+  it('停止按钮只在工作中出现，带 CSRF、会话键与返回实时页；未启用停止时没有表单', () => {
+    const { emit, row } = boot();
+    emit('snapshot', { now: Date.now(), count: 0 }); emit('snapshot_end', { count: 0 });
+    emit('conversation', { conversation: conv(), item: item(1) });
+    const form = row()!.querySelector('FORM')!;
+    expect(form.attrs.action).toBe('/thread/stop'); expect(form.attrs.method).toBe('post');
+    expect(form.dataset.confirm).toContain('群 7');
+    expect(form.querySelectorAll('INPUT').map(i => [i.attrs.name, i.attrs.value])).toEqual([['_csrf', 'csrf-token'], ['key', 'group:7'], ['return', '/live']]);
+    expect(form.hidden).toBe(false);
+    emit('conversation', { conversation: conv({ state: 'idle', turn: null }) });
+    expect(form.hidden).toBe(true);
+    const plain = boot(false);
+    plain.emit('snapshot', { now: Date.now(), count: 0 }); plain.emit('snapshot_end', { count: 0 });
+    plain.emit('conversation', { conversation: conv(), item: item(1) });
+    expect(plain.row()!.querySelector('FORM')).toBeNull();
+  });
+
+  it('remove 删除会话行；工作中的会话排在空闲会话前面', () => {
+    const { ids, emit, row } = boot();
+    emit('snapshot', { now: Date.now(), count: 0 }); emit('snapshot_end', { count: 0 });
+    emit('conversation', { conversation: conv({ thread: 'private:5', scope: 'private:5', state: 'idle', turn: null, updated: 5 }) });
+    emit('conversation', { conversation: conv(), item: item(1) });
+    expect(ids.convs!.children.map(c => c.dataset.thread)).toEqual(['group:7', 'private:5']);
+    emit('remove', { thread: 'private:5' });
+    expect(row('private:5')).toBeNull();
+    expect(ids.convs!.children).toHaveLength(1);
+    expect(ids['convs-empty']!.hidden).toBe(true);
+    emit('remove', { thread: 'group:7' });
+    expect(ids['convs-empty']!.hidden).toBe(false);
+    expect(ids['live-count']!.textContent).toBe('没有活动的会话');
+  });
+
+  it('会话行头部的小型占用条：首帧 context 快照填充，context 增量原地更新（档位、宽度、阈值、估算）', () => {
+    const { ids, emit, row } = boot();
     const u = (over: Record<string, unknown> = {}) => ({ backend: 'pi', key: 'group:7', usedTokens: 64_000, windowTokens: 128_000, turns: 3, updatedAt: Date.now(), source: 'turn', ...over });
     emit('snapshot', { now: Date.now(), count: 1 });
     emit('context', { usage: u() });
-    emit('snapcard', { card: { ...head({ seq: 1, backend: 'pi', thread: 'group:7' }), items: [] } });
+    emit('snapconversation', { conversation: { ...conv(), turn: { ...turn(), items: [] } } });
     emit('snapshot_end', { count: 1 });
-    const bar = () => ids.inflight!.querySelector('[data-ctx="pi|group:7"]')!;
+    const bar = () => ids.convs!.querySelector('[data-ctx="pi|group:7"]')!;
     const first = bar();
     expect(first.className).toBe('ctx ctx-t-ok ctx-mini');
     expect(first.querySelector('.ctx-fill')!.dataset.w).toBe('50');
@@ -128,35 +185,20 @@ describe('live.js 客户端渲染', () => {
     expect(bar()).toBe(first); // 原地更新，不重建
     expect(first.className).toBe('ctx ctx-t-hot ctx-mini');
     expect(first.querySelector('.ctx-fill')!.dataset.w).toBe('94');
-    expect(first.querySelector('.ctx-pct')!.textContent).toBe('94%');
     expect(first.querySelector('.ctx-bg')!.dataset.at).toBe('70');
     expect(first.querySelector('.ctx-rs')!.attrs.title).toContain('阻塞压缩阈值：112,000 tokens');
     emit('context', { usage: u({ usedTokens: 1_000, source: 'estimate', updatedAt: Date.now() - 48 * 3600_000 }) });
     expect(first.className).toBe('ctx ctx-t-ok ctx-est ctx-stale ctx-mini');
     expect(first.querySelector('.ctx-bg')).toBeNull();
-    // 别的线程的增量不影响本卡
+    // 别的线程的增量不影响本行；后端改变时换一条
     emit('context', { usage: u({ key: 'owner', usedTokens: 127_000 }) });
     expect(first.querySelector('.ctx-pct')!.textContent).toBe('<1%');
-  });
-
-  it('线程键在后续事件中才出现时补上占用条；没有记录时显示占位', () => {
-    const { ids, emit } = boot();
-    emit('snapshot', { now: Date.now(), count: 0 }); emit('snapshot_end', { count: 0 });
-    const item = (seq: number) => ({ seq, ts: seq, stage: 'thread_wait', status: 'started', duration_ms: null, summary: '' });
-    emit('card', { card: head({ seq: 1, backend: 'codex' }), item: item(1) });
-    expect(ids.inflight!.querySelector('.ctx')).toBeNull();
-    emit('card', { card: head({ seq: 2, backend: 'codex', thread: 'shared' }), item: item(2) });
-    const bar = ids.inflight!.querySelector('[data-ctx="codex|shared"]')!;
-    expect(bar.className).toContain('ctx-none'); expect(bar.textContent).toContain('暂无占用数据');
-    emit('context', { usage: { backend: 'codex', key: 'shared', usedTokens: 300_000, windowTokens: 400_000, turns: 1, updatedAt: Date.now(), source: 'turn' } });
-    expect(bar.className).toBe('ctx ctx-t-warn ctx-mini'); expect(bar.querySelector('.ctx-pct')!.textContent).toBe('75%');
-    emit('card', { card: head({ seq: 3, backend: 'codex', thread: 'shared' }), item: item(3) });
-    expect(ids.inflight!.querySelectorAll('.ctx')).toHaveLength(1);
-    emit('context', { usage: { backend: 'codex', key: 'shared', usedTokens: 237500, windowTokens: 500000, effectiveWindowTokens: 475000, turns: 2, updatedAt: Date.now(), source: 'turn' } });
-    expect(bar.querySelector('.ctx-pct')!.textContent).toBe('50%');
-    expect(bar.attrs.title).toContain('名义 500,000 / 有效 475,000');
+    emit('conversation', { conversation: conv({ backend: 'codex' }), item: item(1) });
+    expect(row()!.querySelector('[data-ctx="pi|group:7"]')).toBeNull();
+    expect(row()!.querySelector('[data-ctx="codex|group:7"]')!.className).toContain('ctx-none');
   });
 });
+
 
 describe('usage.js（总览 / Codex / Pi 页）', () => {
   it('context 帧把服务端的"暂无数据"占位换成完整条，再次到达时原地更新数字与说明', () => {

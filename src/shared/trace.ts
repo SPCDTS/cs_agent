@@ -1,8 +1,9 @@
 import { redact } from './redact.js';
 /** 实时视图收到的事件：与入库同一份脱敏，不经存储（存储降级或预算丢弃时实时视图仍可见）。 */
-export interface LiveEvent { ticket: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail: Record<string, unknown> }
+/** key 为 trace 键：turn:<回合 id>、in:<入站键>、thr:<会话键>，或 @ 开头的系统键（@settings 等）。 */
+export interface LiveEvent { key: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail: Record<string, unknown> }
 export interface EventOptions { ts?: number; status?: string; durationMs?: number; detail?: unknown; scope?: string }
-export interface ObsEvent { id: number; ticket: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail_json: string }
+export interface ObsEvent { id: number; key: string; scope: string; ts: number; stage: string; status: string; duration_ms: number | null; detail_json: string }
 export interface TraceStore {
   append(e: Omit<ObsEvent, 'id' | 'detail_json'> & { detail?: unknown }): ObsEvent | undefined;
 }
@@ -25,7 +26,7 @@ export class Trace {
   subscribe(fn: Listener): () => void { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
   /** 进程内实时事件总线：每次 event() 同步推送（先于入库），供面板 /live 的 SSE 使用。 */
   tap(fn: (e: LiveEvent) => void): () => void { this.taps.add(fn); return () => { this.taps.delete(fn); }; }
-  event(ticket: string, stage: string, opts: EventOptions = {}): void {
+  event(key: string, stage: string, opts: EventOptions = {}): void {
     if (!this.store && !this.taps.size) return;
     try {
       const detail = opts.status === 'failed' && opts.detail && typeof opts.detail === 'object'
@@ -34,24 +35,24 @@ export class Trace {
       const duration_ms = opts.durationMs !== undefined && Number.isFinite(opts.durationMs) ? Math.max(0, opts.durationMs) : null;
       if (this.taps.size) {
         const red = redact(detail ?? {});
-        const live: LiveEvent = { ticket, stage, scope: opts.scope ?? '', ts, status, duration_ms, detail: red && typeof red === 'object' && !Array.isArray(red) ? red as Record<string, unknown> : { value: red } };
+        const live: LiveEvent = { key, stage, scope: opts.scope ?? '', ts, status, duration_ms, detail: red && typeof red === 'object' && !Array.isArray(red) ? red as Record<string, unknown> : { value: red } };
         for (const fn of this.taps) { try { fn(live); } catch { /* 实时视图故障不影响业务 */ } }
       }
       if (!this.store) return;
-      const event = this.store.append({ ticket, stage, scope: opts.scope ?? '', ts, status, duration_ms, detail });
+      const event = this.store.append({ key, stage, scope: opts.scope ?? '', ts, status, duration_ms, detail });
       if (!event) { this.dropped++; return; }
       for (const fn of this.listeners) { try { fn(event); } catch { this.dropped++; } }
     } catch { this.dropped++; }
   }
-  async span<T>(ticket: string, stage: string, fn: () => Promise<T>, detail: Record<string, unknown> = {}, summarize?: (value: T) => object): Promise<T> {
+  async span<T>(key: string, stage: string, fn: () => Promise<T>, detail: Record<string, unknown> = {}, summarize?: (value: T) => object): Promise<T> {
     const start = Date.now();
-    this.event(ticket, stage, { status: 'started', detail });
+    this.event(key, stage, { status: 'started', detail });
     try {
       const value = await fn();
-      this.event(ticket, stage, { durationMs: Date.now() - start, detail: { ...detail, ...summarize?.(value) } });
+      this.event(key, stage, { durationMs: Date.now() - start, detail: { ...detail, ...summarize?.(value) } });
       return value;
     } catch (error) {
-      this.event(ticket, stage, { status: 'failed', durationMs: Date.now() - start, detail: { ...detail, error } });
+      this.event(key, stage, { status: 'failed', durationMs: Date.now() - start, detail: { ...detail, error } });
       throw error;
     }
   }

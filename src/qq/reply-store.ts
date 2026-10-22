@@ -1,14 +1,14 @@
 /**
- * 入站输入、Outbox 与旧票据的持久化（node:sqlite，WAL）。
+ * 入站输入与 Outbox 的持久化（node:sqlite，WAL）。
  * - inbound（Inbox，设计 §4.1）：每条触发消息 / 定时输入一行，state 只前进：queued → delivered → done；
  * - outbox（§7.4）：pending → sending → sent | uncertain，状态迁移带条件更新，跨进程也不会重复发送；
- * - tickets：旧版生图前缀路由留下的票据，只读保留（召回机器人旧回复时核对发出状态），不再写入。
+ * 库里旧版遗留的 tickets 表原样留在磁盘上，不再读写。
  */
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ChatType, InboundMessage, InboundRecord, InboundState, ReplyTicketRecord, ScheduledInput, TicketStatus } from "../channel/types.js";
+import type { ChatType, InboundMessage, InboundRecord, InboundState, ScheduledInput } from "../channel/types.js";
 
 import type { OutboxInput, OutboxRow } from "../channel/outbox.js";
 import { isSendRuleError, type SendBreaker, type SendRuleLimits } from "../channel/send-rules.js";
@@ -16,12 +16,6 @@ import { SendRules } from "./send-rules.js";
 
 const SEEN_LIMIT = 2000;
 export const DB_FILE = "qq-bridge.sqlite";
-const TICKET_PATTERN = /^(?:[a-f0-9]{64}|run_[a-f0-9]{40})$/;
-
-export function isTicketId(value: string): boolean {
-  return typeof value === "string" && TICKET_PATTERN.test(value);
-}
-
 /** 决定性入站键：sha256(self_id:group:group_id:user_id:message_id | self_id:private:user_id:message_id)。 */
 export function inboundKey(m: Pick<InboundMessage, "self_id" | "message_type" | "group_id" | "user_id" | "message_id">): string {
   const key = m.message_type === "group"
@@ -33,53 +27,6 @@ export function inboundKey(m: Pick<InboundMessage, "self_id" | "message_type" | 
 /** 去重键：self_id:message_type:group_id:user_id:message_id。 */
 export function dedupeKey(m: Pick<InboundMessage, "self_id" | "message_type" | "group_id" | "user_id" | "message_id">): string {
   return [m.self_id, m.message_type, m.group_id ?? "", m.user_id, m.message_id].join(":");
-}
-
-interface TicketRow {
-  ticket_id: string;
-  self_id: string;
-  user_id: string;
-  group_id: string | null;
-  group_name: string | null;
-  message_type: string;
-  source_message_id: string;
-  source_nickname: string;
-  source_text: string | null;
-  source_route_text: string | null;
-  source_images: string | null;
-  attachments: string | null;
-  source_image_error: string | null;
-  created_at: string;
-  seq: number;
-  status: string;
-  attempted_at: string | null;
-  sent_at: string | null;
-  reply_message_id: string | null;
-}
-
-function toRecord(row: TicketRow): ReplyTicketRecord {
-  const record: ReplyTicketRecord = {
-    ticket_id: row.ticket_id,
-    self_id: row.self_id,
-    user_id: row.user_id,
-    group_id: row.group_id,
-    ...(row.group_name ? { group_name: row.group_name } : {}),
-    message_type: row.message_type === "group" ? "group" : "private",
-    source_message_id: row.source_message_id,
-    source_nickname: row.source_nickname,
-    source_text: row.source_text ?? "",
-    attachments: row.attachments ? JSON.parse(row.attachments) : [],
-    source_images: row.source_images ? JSON.parse(row.source_images) : [],
-    ...(row.source_image_error ? { source_image_error: row.source_image_error } : {}),
-    created_at: row.created_at,
-    seq: Number(row.seq),
-    status: row.status as TicketStatus,
-  };
-  if (row.source_route_text !== null && row.source_route_text !== undefined) record.source_route_text = row.source_route_text;
-  if (row.attempted_at !== null) record.attempted_at = row.attempted_at;
-  if (row.sent_at !== null) record.sent_at = row.sent_at;
-  if (row.reply_message_id !== null) record.reply_message_id = row.reply_message_id;
-  return record;
 }
 
 interface InboundRow {
@@ -114,22 +61,6 @@ CREATE TABLE IF NOT EXISTS outbox (
 );`;
 
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS tickets (
-  ticket_id TEXT PRIMARY KEY,
-  self_id TEXT NOT NULL,
-  user_id TEXT NOT NULL,
-  group_id TEXT,
-  message_type TEXT NOT NULL CHECK (message_type IN ('private','group')),
-  source_message_id TEXT NOT NULL,
-  source_nickname TEXT NOT NULL,
-  source_text TEXT NOT NULL DEFAULT '',
-  source_route_text TEXT,
-  created_at TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('pending','sending','sent','uncertain')),
-  attempted_at TEXT,
-  sent_at TEXT,
-  reply_message_id TEXT
-);
 CREATE TABLE IF NOT EXISTS inbound (
   key TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('user','scheduled')),
   scope TEXT NOT NULL, thread_key TEXT NOT NULL, self_id TEXT NOT NULL DEFAULT '', user_id TEXT NOT NULL,
@@ -167,18 +98,10 @@ export class ReplyStore {
 
   /**
    * 幂等迁移：
-   * - 旧票据表补列（只读保留，读取时按这些列解析）；
    * - 旧 outbox（按票据：ticket/ordinal/call_id，UNIQUE(ticket, ordinal)）整表重建为按会话的新表：
-   *   thread_key 保留原票据号、#late/#fallback 行标为系统消息，主动额度所需的 proactive/created_at 原样保留。
+   *   thread_key 保留原入站键、#late/#fallback 行标为系统消息，主动额度所需的 proactive/created_at 原样保留。
    */
   private migrate(): void {
-    const columns = this.columns("tickets");
-    if (!columns.includes("group_name")) this.db.exec("ALTER TABLE tickets ADD COLUMN group_name TEXT");
-    if (!columns.includes("attachments")) this.db.exec("ALTER TABLE tickets ADD COLUMN attachments TEXT");
-    if (!columns.includes("source_images")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_images TEXT");
-    if (!columns.includes("source_image_error")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_image_error TEXT");
-    if (!columns.includes("source_text")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_text TEXT NOT NULL DEFAULT ''");
-    if (!columns.includes("source_route_text")) this.db.exec("ALTER TABLE tickets ADD COLUMN source_route_text TEXT");
     const outbox = this.columns("outbox");
     if (outbox.includes("ticket")) {
       if (!outbox.includes("proactive")) this.db.exec("ALTER TABLE outbox ADD COLUMN proactive INTEGER NOT NULL DEFAULT 0");
@@ -388,13 +311,5 @@ export class ReplyStore {
   finishAttachments(key: string, attachments: NonNullable<InboundMessage['attachments']>, error?: string): void {
     this.db.prepare('UPDATE inbound SET attachments = ?, images = ?, image_error = ? WHERE key = ?')
       .run(JSON.stringify(attachments), JSON.stringify(attachments.flatMap(a => a.path ? [a.path] : [])), error ?? null, key);
-  }
-
-  // ---------- 旧票据（只读） ----------
-
-  get(ticket: string): ReplyTicketRecord | null {
-    if (!isTicketId(ticket)) return null;
-    const row = this.db.prepare("SELECT rowid AS seq, * FROM tickets WHERE ticket_id = ?").get(ticket) as TicketRow | undefined;
-    return row ? toRecord(row) : null;
   }
 }

@@ -4,7 +4,8 @@ import type { ReasoningEffort } from "./backends/types.js";
 
 export type AutoEffort = "low" | "medium" | "high" | "xhigh";
 export interface EffortHints { hasImages: boolean; hasQuote: boolean }
-export interface EffortMessage extends EffortHints { ticket: string; text: string }
+/** key：选档事件记在哪个 trace 键下（本轮首条输入 in:<入站键>） */
+export interface EffortMessage extends EffortHints { key: string; text: string }
 export interface EffortRouterDeps {
   complete?: (prompt: string, signal: AbortSignal) => Promise<string>;
   model?: string;
@@ -60,7 +61,7 @@ export async function resolveAutoEffort<F extends ReasoningEffort | ModelThinkin
       } finally { clearTimeout(timer); }
     }
   } catch { /* 分类错误不可阻塞派发；不把正文或提供者错误写入观测。 */ }
-  (deps.trace ?? trace).event(msg.ticket, "effort_route", { status: source === "auto" ? "ok" : "fallback",
+  (deps.trace ?? trace).event(msg.key, "effort_route", { status: source === "auto" ? "ok" : "fallback",
     detail: { effort, source, ms: Date.now() - start, model: deps.model ?? "" } });
   return { effort, source };
 }

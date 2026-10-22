@@ -17,17 +17,17 @@ import { createSessionRoutes, sessionJson, type SessionAdapters } from './sessio
 import { createMemoryRoutes } from './memory/http.js';
 import { trace as defaultTrace } from '../shared/trace.js';
 import { summarize, type LiveMessage } from './live.js';
-import { formatBackendOverrides, SETTINGS_TICKET } from '../agent/settings.js';
+import { formatBackendOverrides, SETTINGS_KEY } from '../agent/settings.js';
 import { ASSETS } from './ui/client.js';
 import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
 import type { ContextUsage } from '../shared/format.js';
-import { empty, page } from './ui/html.js';
+import { empty, page, traceHref } from './ui/html.js';
 import type { DashboardOptions } from './dashboard-types.js';
 import { equal, readText, agentMdRevision, AGENT_MD_MAX_BYTES } from './dashboard-io.js';
 import { createDashboardPost } from './dashboard-post.js';
 import { createDashboardPages } from './ui/dashboard-pages.js';
 import { asContextUsageEvent } from './context-turns.js';
-import { ticketContextTurns } from './context-ticket.js';
+import { turnContextTurns } from './turn-context.js';
 import { createScheduleRoutes } from './schedules.js';
 import { createSchedulePanel, isSchedulePath } from './schedule-panel.js';
 
@@ -76,13 +76,13 @@ export function createDashboard(opts: DashboardOptions) {
       // 存储的通知自带前后字节数时直接用；否则用上次缓存的大小与重新读取的结果。
       const prev = typeof c.bytes_before === 'number' ? c.bytes_before : await before;
       const after = typeof c.bytes_after === 'number' ? c.bytes_after : typeof c.custom === 'string' ? Buffer.byteLength(c.custom) : await opts.codexPrompt!.read().then(s => Buffer.byteLength(s.custom), () => null);
-      tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { target: 'codex', source: typeof c.source === 'string' ? c.source : 'dashboard', file: 'prompts/codex.md', bytes_before: prev, bytes_after: after } });
+      tracer.event(SETTINGS_KEY, 'prompt_changed', { detail: { target: 'codex', source: typeof c.source === 'string' ? c.source : 'dashboard', file: 'prompts/codex.md', bytes_before: prev, bytes_after: after } });
       return after;
     })().catch(() => null);
   });
 
   const offCodexBasePrompt = opts.codexBasePrompt?.subscribe(change => {
-    tracer.event(SETTINGS_TICKET, 'prompt_changed', { detail: { ...change, target: 'codex-base', source: 'dashboard' } });
+    tracer.event(SETTINGS_KEY, 'prompt_changed', { detail: { ...change, target: 'codex-base', source: 'dashboard' } });
   });
 
   const { render, usageList } = createDashboardPages({
@@ -90,21 +90,21 @@ export function createDashboard(opts: DashboardOptions) {
       get degraded() { return opts.store.degraded; },
       throughput: since => opts.store.throughput(since),
       latestMetrics: () => opts.store.db.prepare('SELECT * FROM metrics WHERE ts=(SELECT MAX(ts) FROM metrics) ORDER BY name LIMIT 150').all() as { name: string; labels_json: string; value: number; ts: number }[],
-      tickets: filters => opts.store.tickets(filters),
-      events: (ticket, options) => opts.store.events(ticket, options),
-      systemEvents: (ticket, limit) => opts.store.systemEvents(ticket, limit),
+      turns: filters => opts.store.turns(filters),
+      events: (key, options) => opts.store.events(key, options),
+      systemEvents: (key, limit) => opts.store.systemEvents(key, limit),
       contextSeries: o => opts.store.contextSeries(o),
       previousContextTurn: (backend, key, beforeTs) => {
         const event = opts.store.previousContextTurn(backend, key, beforeTs);
         return event && asContextUsageEvent(event);
       },
-      analyzeTicketTurns: (ticket, events) => ticketContextTurns(opts.store, ticket, events),
-      ticketBriefs: tickets => opts.store.ticketBriefs(tickets),
+      analyzeTurnContext: (key, events) => turnContextTurns(opts.store, key, events),
+      turnBriefs: keys => opts.store.turnBriefs(keys),
     } },
     config, csrf, agentMd, agentsMd, api,
     contextResult: (scope, query) => callQQContextTool({access:scope?{kind:'scope',scope}:{kind:'all'},openStore:()=>opts.context,maxChars:config.QQ_CONTEXT_MAX_CHARS},query?'qq_search':'qq_recent',query?{query,days:180,limit:20}:{limit:30}),
     isThreadKey, summarize, readText, agentMdRevision, formatBackendOverrides,
-    reasoningEfforts: REASONING_EFFORTS, agentMdMaxBytes: AGENT_MD_MAX_BYTES, settingsTicket: SETTINGS_TICKET,
+    reasoningEfforts: REASONING_EFFORTS, agentMdMaxBytes: AGENT_MD_MAX_BYTES, settingsKey: SETTINGS_KEY,
   });
   const schedulePanel = createSchedulePanel({ service: opts.schedules, owner: config.owner, csrf, context: opts.context });
   const handlePost = createDashboardPost(opts, csrf, agentMd, tracer, render, schedulePanel.post);
@@ -218,10 +218,11 @@ export function createDashboard(opts: DashboardOptions) {
     }
     if (url.pathname === '/logs/stream') {
       const out = sse(res); if (!out) return;
-      const ticket = q.get('ticket'), level = q.get('level');
+      const key = q.get('key'), level = q.get('level');
       const emit = (line: LogLine) => {
-        const id = typeof line.ticket === 'string' ? line.ticket : '';
-        if (ticket && (!id || (!id.startsWith(ticket) && !ticket.startsWith(id)))) return;
+        // 按日志行的 key / thread / turn 字段前缀匹配（日志里的入站键常截断为前 12 位）
+        const ids = [line.key, line.thread, line.turn].filter((v): v is string => typeof v === 'string' && !!v);
+        if (key && !ids.some(id => id.startsWith(key) || key.startsWith(id))) return;
         if (level && line.level !== level) return;
         out.send('data: '+JSON.stringify(redact(line, 20_000))+'\n\n');
       };
@@ -233,17 +234,25 @@ export function createDashboard(opts: DashboardOptions) {
       if (!opts.live) { res.writeHead(404).end(); return; }
       const out = sse(res); if (!out) return;
       const send = (event: string, data: unknown) => out.send(`event: ${event}\ndata: ${JSON.stringify(redact(data, 2_000))}\n\n`);
-      // 快照分帧：snapshot 头（页面据此清空）→ 每张卡片一帧 snapcard → snapshot_end；之后的增量排在其后。
-      // 逐卡脱敏，避免 redact 对数组的 100 项截断吞掉多余卡片（总数由 LiveBus 的 maxCards 约束）。
-      const cards = opts.live.snapshot();
-      send('snapshot', { now: Date.now(), count: cards.length });
-      // 占用记录先于卡片到达，卡片头部的小型占用条在首帧即可填充。
+      // 快照分帧：snapshot 头（页面据此清空）→ 每个会话一帧 snapconversation → snapshot_end；之后的增量排在其后。
+      // 先订阅再取快照，期间的增量排在快照之后（客户端按回合 id 与事件 seq 去重）。
+      // 逐会话脱敏，避免 redact 对数组的 100 项截断吞掉多余会话（总数由 LiveBus 的 maxConversations 约束）。
+      const backlog: LiveMessage[] = [];
+      let ready = false;
+      const forward = (m: LiveMessage) => m.type === 'conversation' ? send('conversation', { conversation: m.conversation, ...(m.item ? { item: m.item } : {}) })
+        : m.type === 'context' ? send('context', { usage: m.usage }) : send('remove', { thread: m.thread });
+      const off = opts.live.subscribe(m => { if (ready) forward(m); else backlog.push(m); });
+      res.on('close', off);
+      await opts.live.refresh();
+      const conversations = opts.live.snapshot();
+      send('snapshot', { now: Date.now(), count: conversations.length });
+      // 占用记录先于会话到达，会话行头部的小型占用条在首帧即可填充。
       for (const usage of usageList()) send('context', { usage });
-      for (const card of cards) send('snapcard', { card });
-      send('snapshot_end', { count: cards.length });
-      const off = opts.live.subscribe((m: LiveMessage) => m.type === 'event' ? send('card', { card: m.card, item: m.item })
-        : m.type === 'context' ? send('context', { usage: m.usage }) : send('remove', { ticket: m.ticket }));
-      res.on('close', off); return;
+      for (const conversation of conversations) send('snapconversation', { conversation });
+      send('snapshot_end', { count: conversations.length });
+      ready = true;
+      for (const m of backlog.splice(0)) forward(m);
+      return;
     }
     if (url.pathname === '/usage/stream') {
       // 总览 / Codex / Pi 页的占用条：首帧当前全部记录（重连后补齐），之后只推 context 增量。
@@ -253,6 +262,14 @@ export function createDashboard(opts: DashboardOptions) {
       const off = opts.live?.subscribe(m => { if (m.type === 'context') send(m.usage); });
       if (off) res.on('close', off); return;
     }
+    // 旧票据页（设计 §12）：列表并入回合列表，详情按 trace 键前缀转到回合 / 输入 / 会话页（旧版键即入站键，进输入页）。
+    if (url.pathname === '/tickets') { res.writeHead(301, { Location: '/turns' }).end(); return; }
+    if (url.pathname.startsWith('/tickets/')) {
+      let key: string; try { key = decodeURIComponent(url.pathname.slice(9)); } catch { res.writeHead(400).end(); return; }
+      const target = traceHref(key);
+      if (!target) { res.writeHead(404).end(); return; }
+      res.writeHead(301, { Location: target }).end(); return;
+    }
     // 旧 /codex、/pi 页并入 /agents/*（设计 §7）；/codex/agents-md 与重置 POST 保持原路径。
     if (url.pathname === '/codex' || url.pathname === '/pi') { res.writeHead(303, { Location: `/agents${url.pathname}/sessions` }).end(); return; }
     const flashCode = q.get('ok');
@@ -260,7 +277,7 @@ export function createDashboard(opts: DashboardOptions) {
     const flash = flashCode && Object.hasOwn(FLASH, flashCode) ? { text: FLASH[flashCode]!, error: flashCode === 'compactFailed', ...(detail ? { detail } : {}) } : undefined;
     const html = isSchedulePath(url.pathname) ? await schedulePanel.render(url, nonce) : await render(url, nonce, flash);
     if (html === null) {
-      const notFound = isSchedulePath(url.pathname) ? '没有这个定时任务。可以从<a href="/schedules">定时任务列表</a>重新查找。' : url.pathname.startsWith('/skills/') ? '没有这个技能。可以从<a href="/skills">技能列表</a>重新查找。' : '地址不对或票据已过保留期。可以从<a href="/tickets">票据列表</a>重新查找。';
+      const notFound = isSchedulePath(url.pathname) ? '没有这个定时任务。可以从<a href="/schedules">定时任务列表</a>重新查找。' : url.pathname.startsWith('/skills/') ? '没有这个技能。可以从<a href="/skills">技能列表</a>重新查找。' : '地址不对或记录已过保留期。可以从<a href="/turns">回合列表</a>或<a href="/live">实时页</a>重新查找。';
       res.writeHead(404, {'Content-Type':'text/html; charset=utf-8'}).end(page({ title: '没有这个页面', path: url.pathname, nonce, body: empty(notFound) })); return;
     }
     res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(html);

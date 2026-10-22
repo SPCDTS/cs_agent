@@ -128,7 +128,7 @@ legend{font-weight:600;font-size:var(--t-md);margin-bottom:var(--s2);padding:0}
 .hint{font-size:var(--t-xs);color:var(--ink-3);margin-top:var(--s1)}
 .changed{color:var(--warn);font-size:var(--t-xs);font-weight:600}
 
-/* ── 流转轨迹（票据详情） ── */
+/* ── 流转轨迹（回合 / 输入详情） ── */
 ol.trail{list-style:none;margin:0;padding:0 0 0 var(--s5);position:relative}
 ol.trail::before{content:"";position:absolute;left:7px;top:6px;bottom:6px;border-left:2px solid var(--rule-strong)}
 .trail li{position:relative;padding:0 0 var(--s4) var(--s3)}
@@ -173,6 +173,25 @@ ol.feed{list-style:none;margin:var(--s3) 0 0;padding:var(--s2) 0 0;border-top:1p
 .done-list summary{display:flex;gap:var(--s3);align-items:center;font-size:var(--t-sm);color:var(--ink);list-style:none}
 .done-list summary::-webkit-details-marker{display:none}
 .done-list .excerpt{flex:1;min-width:0;-webkit-line-clamp:1}
+/* 实时页的会话行（每会话一行，沿用单据样式）：空闲会话的边条变灰；数字、本轮输入、已发消息与最近回合 */
+.slip.conv.idle::before{background:repeating-linear-gradient(to bottom,var(--rule-strong) 0 6px,transparent 6px 10px)}
+.slip-top a.who{color:var(--ink);font-weight:600;font-size:var(--t-sm)}
+.conv-facts{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s2);margin-top:var(--s2)}
+.pill.queued{color:var(--queued);border-color:var(--queued);background:var(--queued-soft)}
+ol.conv-inputs,ol.conv-sends{list-style:none;margin:var(--s2) 0 0;padding:0;display:grid;gap:2px;font-size:var(--t-sm);overflow-wrap:anywhere}
+ol.conv-inputs>li{white-space:pre-wrap}
+ol.conv-inputs.said-list{gap:var(--s3)}
+ol.conv-inputs.said-list .said{margin-top:var(--s1);font-size:var(--t-md)}
+ol.conv-sends{padding-top:var(--s2);border-top:1px dashed var(--rule-strong)}
+ol.conv-sends>li::before{content:"→ ";color:var(--ink-3)}
+ol.conv-sends>li.failed{color:var(--fail)}
+.conv-foot{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s3)}
+.conv-foot form,.slip-top form{display:inline}
+.conv-recent{margin-top:var(--s2);font-size:var(--t-sm)}
+.conv-recent summary{color:var(--ink-2);cursor:pointer}
+.conv-recent ul{list-style:none;margin:var(--s1) 0 0;padding:0;display:grid;gap:2px}
+.conv-recent li{display:flex;align-items:center;gap:var(--s2)}
+.conv-recent .excerpt{flex:1;min-width:0;-webkit-line-clamp:1;color:var(--ink-2)}
 .flashin{animation:flashin 1.2s ease-out}
 @keyframes flashin{from{background:var(--carbon-soft)}}
 .conn{font-size:var(--t-xs);color:var(--ink-3)}
@@ -218,7 +237,7 @@ ol.feed{list-style:none;margin:var(--s3) 0 0;padding:var(--s2) 0 0;border-top:1p
 ${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.ctx-tick[data-at="${i}"]{left:${i}%}`).join('\n')}
 
 /* ── 上下文监控走势（DESIGN-context-monitor §3、§9.3）：竖条高度 = 占窗口比例（data-h），底部缓存命中段占条高 data-c，
-   条的底色即未命中部分（miss 红、partial 琥珀，另有顶标）。同一票据的条装在一个 .cu-group 按钮里，底部 2 px 基线，
+   条的底色即未命中部分（miss 红、partial 琥珀，另有顶标）。同一回合的条装在一个 .cu-group 按钮里，底部 2 px 基线，
    点击在下方 .cu-pane 显示对应 .cu-pop（/assets/context-usage.js）。纵轴刻度与网格线、压缩 / 重建标签都只用 CSS，无内联 style。
    几何：图高 160 px = 顶部留白 16 px（顶标与分隔标签）+ 绘图区 143 px + 1 px 基线；网格线画在滚动容器上铺满宽度，
    .cu-track 收缩到条的宽度，时间轴首尾因此对齐首尾两根条。 ── */

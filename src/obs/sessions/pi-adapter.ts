@@ -22,7 +22,7 @@ const timestamp = (value: unknown): number | undefined =>
 const textContent = (message: Message): string => typeof message.content === 'string' ? message.content
   : message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n');
 
-/** entries 是正文事实源，ObsStore 只用于票据和送达补充。 */
+/** entries 是正文事实源，ObsStore 只用于关联宿主回合和送达补充。 */
 export class PiSessionAdapter implements SessionAdapter {
   readonly progress = { indexing: false, files: 0, done: 0 };
   private readonly states = new Map<string, SessionState>();

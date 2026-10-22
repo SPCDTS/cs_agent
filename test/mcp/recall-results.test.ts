@@ -39,10 +39,9 @@ it('search 消息摘要混排，按实际进入文本的顺序记录', () => {
 });
 it('重复的机器人行按出现次数匹配，recent 选最后一条，search 选最前一条', () => {
   const r = rig(55);
-  for (const ticket of ['a', 'b', 'c']) { store.recordPending('group:1', ticket, Math.floor(Date.now() / 1000));
-    store.completeReply(ticket, { action: 'reply', status: '已回复', excerpt: '重复正文' }); }
-  expect(r.call('qq_recent').event.returned).toEqual([{ kind: 'message', id: 'self:c' }]);
-  expect(r.call('qq_search', { query: '重复' }).event).toMatchObject({ returned: [{ kind: 'message', id: 'self:c' }], dropped_count: 2 });
+  for (const key of ['a', 'b', 'c']) store.recordSent(({ key, thread_key: 'group:1', turn_id: null, input_key: null, system: false, message_type: 'group' as const, target_id: 'group:1'.slice(6), mention_user_id: null, proactive: false, status: 'sent' as const, message_id: 'm-' + key, text: '重复正文', text_sha256: '', images: [], files: [], created_at: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString(), sent_at: new Date(Math.floor(Date.now() / 1000) * 1000).toISOString() }), { selfId: '10001', replyTo: null });
+  expect(r.call('qq_recent').event.returned).toEqual([{ kind: 'message', id: 'm-c' }]);
+  expect(r.call('qq_search', { query: '重复' }).event).toMatchObject({ returned: [{ kind: 'message', id: 'm-c' }], dropped_count: 2 });
 });
 it.each([false, true])('message 大正文与引用裁剪，图片分支=%s', image => {
   const r = rig(10); r.add('base', '引用'); r.add('head', '长'.repeat(1700) + (image ? ' [image:/x.png]' : ''), 'base');

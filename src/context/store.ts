@@ -1,6 +1,6 @@
 /**
  * 统一上下文存储（设计 §2.1–2.4）：`${DATA_DIR}/qq-messages.sqlite`，node:sqlite，WAL。
- * 唯一读写入口：入库、撤回、机器人回复行、recent / search / message、衰老（摘要 + 清理）。
+ * 唯一读写入口：入库、撤回、机器人已发消息行、recent / search / message、衰老（摘要 + 清理）。
  * 所有读取都带访问过滤（Access）；意图层（进程内）与 qq_context MCP（只读连接）共用本模块。
  * 时间一律为 unix 秒；"日"按进程本地时区（容器默认 UTC，可设 TZ）。
  */
@@ -8,16 +8,15 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type { InboundMessage } from "../channel/types.js";
-import { log } from "../shared/log.js";
 import { clip } from "../shared/header.js";
+import { renameColumn } from "../shared/sqlite-migrate.js";
 import { scopeOf, type Access } from "./access.js";
 
 export { clip } from "../shared/header.js";
 
 const CONTEXT_DB_FILE = "qq-messages.sqlite";
+/** 机器人行的状态文字；"处理中" 只出现在旧版遗留的占位行。 */
 export const BOT_STATUS = { pending: "处理中", replied: "已回复", failed: "失败" } as const;
-type BotStatus = (typeof BOT_STATUS)[keyof typeof BOT_STATUS];
-export type BotAction = "generate_image" | "research+generate_image" | "ask_codex" | "fallback" | "reply";
 
 export interface MessageRow {
   id: number;
@@ -32,7 +31,8 @@ export interface MessageRow {
   reply_to_id: string | null;
   action: string | null;
   detail: string | null;
-  ticket: string | null;
+  /** 机器人消息对应的 Outbox 行键（图片召回据此核对发送）；入站消息为空 */
+  outbox_key: string | null;
   status: string | null;
   image_count: number | null;
 }
@@ -62,17 +62,6 @@ export interface SummaryRow {
 
 export type ContextItem = { kind: "message"; row: MessageRow } | { kind: "summary"; row: SummaryRow };
 
-export interface CompleteReply {
-  action: BotAction;
-  detail?: string;
-  /** 回复正文摘要；超过 120 字截断 */
-  excerpt?: string;
-  image_count?: number;
-  status: BotStatus;
-  /** QQ 回复消息的 message_id；给出时替换占位 id，便于用户引用机器人回复时找回 */
-  reply_message_id?: string;
-}
-
 export interface ContextStoreOptions {
   readOnly?: boolean;
   /** 本地时区相对 UTC 的偏移秒数（默认取进程时区）；测试可固定 */
@@ -96,12 +85,12 @@ CREATE TABLE IF NOT EXISTS messages (
   reply_to_id TEXT,
   action TEXT,
   detail TEXT,
-  ticket TEXT,
+  outbox_key TEXT,
   status TEXT,
   image_count INTEGER,
   UNIQUE (scope, message_id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS messages_ticket ON messages(ticket) WHERE ticket IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS messages_outbox_key ON messages(outbox_key) WHERE outbox_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS messages_scope_time ON messages(scope, time);
 CREATE INDEX IF NOT EXISTS messages_time ON messages(time);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -188,6 +177,9 @@ export class ContextStore {
       mkdirSync(dataDir, { recursive: true });
       this.db = new DatabaseSync(this.file);
       this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;");
+      // 旧库的 messages.ticket 列（存 Outbox 行键）改名 outbox_key；须先于 SCHEMA 里按新列名建索引。
+      renameColumn(this.db, "messages", "ticket", "outbox_key", { drop: ["messages_ticket"],
+        create: ["CREATE UNIQUE INDEX IF NOT EXISTS messages_outbox_key ON messages(outbox_key) WHERE outbox_key IS NOT NULL"] });
       this.db.exec(SCHEMA);
     }
   }
@@ -221,68 +213,16 @@ export class ContextStore {
   }
 
   /**
-   * 每条 Outbox 消息一行；真实 id 与完整正文可立即用于引用查找。ticket 列存 Outbox 行键（图片召回据此核对发送）。
+   * 每条 Outbox 消息一行；真实 id 与完整正文可立即用于引用查找。outbox_key 列存 Outbox 行键（图片召回据此核对发送）。
    * selfId 为发出账号，replyTo 为本轮输入的 message_id（只在发往输入所在会话时）。
    */
   recordSent(row: import("../channel/outbox.js").OutboxRow, source: { selfId: string; replyTo: string | null }): void {
     if (row.status !== "sent" || !row.message_id) throw new Error("上下文仅接受已发送消息");
     const scope = row.message_type + ":" + row.target_id;
     this.db.prepare(`INSERT OR IGNORE INTO messages
-      (scope,message_id,time,user_id,nickname,is_self,text,reply_to_id,ticket,status,action,image_count)
+      (scope,message_id,time,user_id,nickname,is_self,text,reply_to_id,outbox_key,status,action,image_count)
       VALUES (?,?,?,?,'我',1,?,?,?,'已回复',?,?)`).run(scope, row.message_id, Math.floor(Date.parse(row.sent_at ?? row.created_at) / 1000),
       source.selfId, row.text, source.replyTo, row.key, row.system ? "notice" : "reply", row.images.length);
-  }
-
-  /** 收到消息即写入机器人"处理中"行（幂等：每个票据一行）。 */
-  recordPending(scope: string, ticket: string, time: number, opts: { replyTo?: string; selfId?: string } = {}): void {
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO messages (scope, message_id, time, user_id, nickname, is_self, text, reply_to_id, ticket, status)
-         VALUES (?, ?, ?, ?, '我', 1, '', ?, ?, ?)`,
-      )
-      .run(scope, `self:${ticket}`, time > 0 ? Math.floor(time) : nowSec(), opts.selfId ?? "", opts.replyTo ?? null, ticket,
-        BOT_STATUS.pending);
-  }
-
-  /** 回复后更新机器人行：动作、细节（生图提示词 / codex 强度）、正文摘要、图片数、状态。 */
-  /**
-   * 占位 id `self:<ticket>` 换成真实 message_id 与内容更新在同一事务内完成；改名冲突（同 scope 已有该
-   * message_id）或找不到行时记日志并保留占位 id，内容更新照常提交。
-   */
-  completeReply(ticket: string, r: CompleteReply): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const res = this.db
-        .prepare("UPDATE messages SET action = ?, detail = ?, text = ?, image_count = ?, status = ? WHERE ticket = ?")
-        .run(r.action, r.detail ?? null, clip(r.excerpt ?? "", EXCERPT_MAX), r.image_count ?? 0, r.status, ticket);
-      if (r.reply_message_id) this.renameSelfRow(ticket, r.reply_message_id);
-      this.db.exec("COMMIT");
-      return Number(res.changes) > 0;
-    } catch (err) {
-      if (this.db.isTransaction) this.db.exec("ROLLBACK");
-      throw err;
-    }
-  }
-
-  /** 事务内调用：把机器人行的占位 id 换成真实 message_id，结果写日志。 */
-  private renameSelfRow(ticket: string, messageId: string): void {
-    const row = this.db.prepare("SELECT scope, message_id FROM messages WHERE ticket = ?").get(ticket) as
-      | { scope: string; message_id: string }
-      | undefined;
-    if (!row) {
-      log.warn("context reply rename: no bot row for ticket", { ticket, message_id: messageId });
-      return;
-    }
-    if (row.message_id === messageId) return; // 重放：已改名
-    const taken = this.db
-      .prepare("SELECT ticket FROM messages WHERE scope = ? AND message_id = ?")
-      .get(row.scope, messageId) as { ticket: string | null } | undefined;
-    if (taken) {
-      log.warn("context reply rename conflict: message_id already stored", { ticket, scope: row.scope, message_id: messageId, owner_ticket: taken.ticket });
-      return;
-    }
-    const res = this.db.prepare("UPDATE messages SET message_id = ? WHERE ticket = ?").run(messageId, ticket);
-    if (Number(res.changes) !== 1) log.warn("context reply rename updated no row", { ticket, message_id: messageId });
   }
 
   // ------------------------------------------------------------------ 读取（带访问过滤）

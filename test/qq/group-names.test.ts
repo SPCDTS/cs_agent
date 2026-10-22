@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Channel, InboundMessage } from "../../src/channel/types.js";
-import { inboundFromRecord } from "../../src/channel/ticket.js";
+import { inboundFromRecord } from "../../src/channel/inbound.js";
 import { createQQBridge } from "../../src/qq/bridge.js";
 import type { OneBotClient } from "../../src/qq/onebot.js";
 import { groupEvent, privateEvent } from "./fake-onebot.js";
@@ -15,7 +15,7 @@ async function setup(call: OneBotClient["call"]) {
     allowUsers: ["20001"], allowGroups: ["30001"], groupMentions: true, dataDir: tmp(), imageRoot: tmp(),
   }, { client: { call } });
   bridges.push(bridge);
-  await bridge.getTicket("");
+  void bridge.inbox; // 打开存储
   const input = bridge as unknown as { running: boolean; handleEvent(event: unknown): void };
   input.running = true;
   const messages: InboundMessage[] = [], raw: InboundMessage[] = [], errors: Error[] = [];
@@ -39,7 +39,7 @@ describe("入站群名缓存", () => {
     expect(order).toEqual(["raw:1", "recall:1"]);
     expect(s.raw[0]?.group_name).toBe("家庭群");
   });
-  it("合并并发查询，命中缓存，6 小时到期后刷新；raw 与恢复票据携带群名", async () => {
+  it("合并并发查询，命中缓存，6 小时到期后刷新；raw 与 Inbox 记录携带群名", async () => {
     const call = vi.fn<OneBotClient["call"]>().mockResolvedValue({ group_name: "家庭群" });
     const s = await setup(call);
     s.push("1"); s.push("2"); await s.flush();

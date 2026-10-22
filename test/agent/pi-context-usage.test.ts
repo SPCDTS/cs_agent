@@ -11,12 +11,12 @@ vi.mock("@earendil-works/pi-durable", async importOriginal => ({
 }));
 afterEach(() => { vi.restoreAllMocks(); watch.mockReset(); });
 
-it("pi 监听延迟时按已提交历史补齐请求，随后重复事件不重复记录且票据切换重置 seq", async () => {
+it("pi 监听延迟时按已提交历史补齐请求，随后重复事件不重复记录且回合切换重置 seq", async () => {
   let listener!: (events: AgentEvent[]) => Promise<void>;
   watch.mockResolvedValue({ snapshot: { entries: [] },
     start: (fn: typeof listener) => { listener = fn; }, stop: async () => undefined });
-  let ticket = "first";
-  const harness = { snapshot: async () => ({ ticket }) } as unknown as Harness;
+  let traceKey = "first";
+  const harness = { snapshot: async () => ({ traceKey }) } as unknown as Harness;
   const entry = (id: number): EntryRecord => ({
     id: id as EntryId, conversationId: 1 as ConversationId, kind: AssistantEntry.kind,
     model: [{ ...fauxAssistantMessage(`answer-${id}`), timestamp: id * 100,
@@ -29,28 +29,28 @@ it("pi 监听延迟时按已提交历史补齐请求，随后重复事件不重�
   const conv = { id: 1, entries } as unknown as Conversation;
   const store = new ContextUsageStore(tmp("pi-observer-"));
   // 当前回合的观测键由后端给出（turn:<id>），切换回合即重置 seq。
-  const observer = await PiContextObserver.open(harness, conv, "owner", store, {} as Storage, piContextCapacity(200000), undefined, () => ticket);
+  const observer = await PiContextObserver.open(harness, conv, "owner", store, {} as Storage, piContextCapacity(200000), undefined, () => traceKey);
   const requests = vi.spyOn(store, "recordRequest"), turns = vi.spyOn(store, "recordTurn");
   try {
-    expect(observer.lastRequest(ticket)).toBeUndefined();
-    await observer.synchronize(ticket, 2 as EntryId);
+    expect(observer.lastRequest(traceKey)).toBeUndefined();
+    await observer.synchronize(traceKey, 2 as EntryId);
     expect(entries).toHaveBeenCalledTimes(2);
     expect(requests.mock.calls.map(call => call[2])).toEqual([1, 2].map(seq => ({
-      ticket: "first", seq, usedTokens: seq * 1000 + 550, cachedTokens: 500,
+      traceKey: "first", seq, usedTokens: seq * 1000 + 550, cachedTokens: 500,
       outputTokens: 100, windowTokens: 200000, at: seq * 100,
     })));
     await listener([{ type: "message_end", entry: first }, { type: "entry_appended", entry: last }]);
     expect(requests).toHaveBeenCalledTimes(2);
     expect(turns).not.toHaveBeenCalled();
     expect(store.get("pi", "owner")?.turns).toBe(0);
-    const copy = observer.lastRequest(ticket)!;
+    const copy = observer.lastRequest(traceKey)!;
     copy.seq = 999;
-    expect(observer.lastRequest(ticket)?.seq).toBe(2);
-    ticket = "second";
-    expect(observer.lastRequest(ticket)).toBeUndefined();
+    expect(observer.lastRequest(traceKey)?.seq).toBe(2);
+    traceKey = "second";
+    expect(observer.lastRequest(traceKey)).toBeUndefined();
     observer.updateCapacity(piContextCapacity(400000));
     await listener([{ type: "message_end", entry: entry(3) }]);
-    expect(requests.mock.calls[2][2]).toMatchObject({ ticket: "second", seq: 1, windowTokens: 400000 });
+    expect(requests.mock.calls[2][2]).toMatchObject({ traceKey: "second", seq: 1, windowTokens: 400000 });
     expect(observer.lastRequest("first")).toBeUndefined();
   } finally { await observer.close(); await store.close(); }
 });

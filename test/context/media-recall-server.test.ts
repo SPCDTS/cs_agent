@@ -95,9 +95,15 @@ describe("线程令牌与 loopback", () => {
   });
 
   it("配置有默认值并拒绝非法端口/预算", () => {
-    expect(loadConfig({})).toMatchObject({ MEDIA_RECALL_PORT: 8790, MEDIA_RECALL_MAX_PER_TICKET: 5 });
+    expect(loadConfig({})).toMatchObject({ MEDIA_RECALL_PORT: 8790, MEDIA_RECALL_MAX_PER_TURN: 5 });
     for (const value of ["0", "65536", "abc"]) expect(() => loadConfig({ MEDIA_RECALL_PORT: value })).toThrow();
+    expect(() => loadConfig({ MEDIA_RECALL_MAX_PER_TURN: "0" })).toThrow();
+    // 改名前的变量名仍生效，现名优先；结果里不保留旧名
+    expect(loadConfig({ MEDIA_RECALL_MAX_PER_TICKET: "7" })).toMatchObject({ MEDIA_RECALL_MAX_PER_TURN: 7 });
+    expect(loadConfig({ MEDIA_RECALL_MAX_PER_TICKET: "7", MEDIA_RECALL_MAX_PER_TURN: "3" })).toMatchObject({ MEDIA_RECALL_MAX_PER_TURN: 3 });
     expect(() => loadConfig({ MEDIA_RECALL_MAX_PER_TICKET: "0" })).toThrow();
+    expect(loadConfig({ OBS_TICKET_EVENT_CAP: "64" })).toMatchObject({ OBS_EVENT_CAP: 64 });
+    expect(loadConfig({ OBS_TICKET_EVENT_CAP: "64" })).not.toHaveProperty("OBS_TICKET_EVENT_CAP");
   });
 });
 

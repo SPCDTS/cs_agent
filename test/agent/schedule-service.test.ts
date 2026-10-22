@@ -201,7 +201,7 @@ it("第二 owner 可管理全部任务，享有五分钟规则且不受五条额
   await r.service.update(owner, secondary[0].id, { name: "主账号修改" });
   await r.service.pause(owner, secondary[0].id);
   await expect(r.service.resume("qq:2", secondary[0].id)).resolves.toMatchObject({ status: "active" });
-  await expect(r.service.runNow("qq:2", primary.id)).resolves.toHaveProperty("ticket");
+  await expect(r.service.runNow("qq:2", primary.id)).resolves.toHaveProperty("input_key");
   await r.service.pause("qq:2", other.id);
   await expect(r.service.resume("qq:2", other.id)).resolves.toMatchObject({ status: "active" });
   await r.service.remove("qq:2", other.id);

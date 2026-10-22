@@ -35,13 +35,13 @@ async function rig(o: { many?: boolean; running?: boolean } = {}) {
   context.writeSummary({ scope: XSCOPE, level: 'day', period_start: (NOW - 5 * DAY) / 1000, period_end: (NOW - 4 * DAY) / 1000,
     text: '奇怪的域', msg_count: 1, created_at: NOW / 1000 });
   context.setMeta('aging_last_run', String((NOW - 2 * HOUR) / 1000));
-  store.append({ ticket: '@aging', scope: '', ts: NOW - 2 * HOUR, stage: 'aging', status: 'ok', duration_ms: 50,
+  store.append({ key: '@aging', scope: '', ts: NOW - 2 * HOUR, stage: 'aging', status: 'ok', duration_ms: 50,
     detail: { day_summaries: 4, week_summaries: 2, failed: 1, purged_messages: 37, purged_summaries: 5, ms: 1500 } });
   const archives = { codex: path.join(dir, 'codex-threads-archive.jsonl'), pi: path.join(dir, 'pi-threads-archive.jsonl') };
   await fs.writeFile(archives.codex, JSON.stringify({ key: 'owner', thread_id: 'thread-a', reason: `手动 ${XSS}`, created_at: NOW - DAY, archived_at: NOW }) + '\n');
   await fs.writeFile(archives.pi, JSON.stringify({ key: G, conversation: 42, reason: 'reset', archived_at: NOW - HOUR }) + '\n');
   for (const [i, reason] of ['background', 'reserve', 'background'].entries())
-    store.append({ ticket: `@c${i}`, scope: G, ts: NOW - i, stage: 'compaction', status: 'ok', duration_ms: null, detail: { backend: 'pi', conversation: 42, reason } });
+    store.append({ key: `@c${i}`, scope: G, ts: NOW - i, stage: 'compaction', status: 'ok', duration_ms: null, detail: { backend: 'pi', conversation: 42, reason } });
   const config = loadConfig({ DATA_DIR: dir, OBS_TOKEN: TOKEN });
   const dashboard = createDashboard({ config, store, context, codex: async () => [], pi: async () => ({}), health: () => ({}), queue: () => ({}), sessionAdapters: {},
     archives, aging: { config: { rawDays: 30, summaryDays: 180, hardMaxDays: 90, dailyHour: 3, tz: 'UTC' }, nextRun: () => NOW + 5 * HOUR, running: () => o.running ?? false } });

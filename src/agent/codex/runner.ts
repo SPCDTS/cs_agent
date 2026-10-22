@@ -22,7 +22,7 @@ import { RpcError } from "./app-server/rpc.js";
 import { constants, promises as fs, type Stats } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import type { TicketSource } from "../backends/types.js";
+import type { InputSource } from "../backends/types.js";
 import { log } from "../../shared/log.js";
 import { isScope } from "../../context/access.js";
 import { headerField, headerNickname } from "../../shared/header.js";
@@ -85,7 +85,7 @@ export function isThreadKey(value: unknown): value is ThreadKey {
   return value === "owner" || isScope(value);
 }
 
-export function threadKeyForSource(source: TicketSource | undefined, owners: OwnerIds): ThreadKey {
+export function threadKeyForSource(source: InputSource | undefined, owners: OwnerIds): ThreadKey {
   if (!source) throw new Error("缺少 codex 会话来源");
   // 线程按来源隔离；owner 群回合读取 all，但仍使用来源群线程。
   const key = source.type === "group" ? `group:${source.group_id}`
@@ -528,23 +528,23 @@ export class CodexRunner {
   }
 
   /** 回合结束后用 rollout 的最新请求记录上下文用量；rollout 缺失或陈旧时只计数并保留旧快照。 */
-  async recordTurnUsage(key: ThreadKey, threadId: string, startedAt: number, ticket: string, model?: string): Promise<void> {
+  async recordTurnUsage(key: ThreadKey, threadId: string, startedAt: number, traceKey: string, model?: string): Promise<void> {
     if (!this.opts.contextUsage) return;
     const windowTokens = await this.contextWindow(model);
     const usage = await this.latestRolloutContextUsage(threadId);
     if (usage && usage.updatedAt >= startedAt) {
       for (const [index, request] of usage.requests.entries()) {
         this.opts.contextUsage.recordRequest("codex", key, {
-          ticket, seq: index + 1, usedTokens: request.input, cachedTokens: request.cached,
+          traceKey, seq: index + 1, usedTokens: request.input, cachedTokens: request.cached,
           outputTokens: request.output, windowTokens, effectiveWindowTokens: usage.effectiveWindowTokens, at: request.at,
         });
       }
       this.opts.contextUsage.recordTurn("codex", key, { windowTokens, usedTokens: usage.usedTokens, cachedTokens: usage.cachedTokens,
-        ...(usage.effectiveWindowTokens !== undefined ? { effectiveWindowTokens: usage.effectiveWindowTokens } : {}) }, ticket);
+        ...(usage.effectiveWindowTokens !== undefined ? { effectiveWindowTokens: usage.effectiveWindowTokens } : {}) }, traceKey);
     } else {
-      this.opts.contextUsage.recordTurn("codex", key, { windowTokens }, ticket);
+      this.opts.contextUsage.recordTurn("codex", key, { windowTokens }, traceKey);
       log.warn("codex context usage unavailable after turn; keeping previous usage", {
-        key, thread_id: threadId, ticket, reason: usage ? "stale rollout usage" : "missing rollout usage",
+        key, thread_id: threadId, trace_key: traceKey, reason: usage ? "stale rollout usage" : "missing rollout usage",
       });
     }
   }
@@ -763,12 +763,12 @@ export class CodexRunner {
   }
 }
 
-function groupLabel(s: TicketSource): string {
+function groupLabel(s: InputSource): string {
   const name = s.group_name ? headerNickname(s.group_name) : "";
   return name ? `群 ${name}(${s.group_id})` : `群 ${s.group_id}`;
 }
 
-export function sourceLabel(s: TicketSource): string {
+export function sourceLabel(s: InputSource): string {
   const nick = s.nickname ? headerNickname(s.nickname) : "";
   const who = nick ? `${nick}(${s.user_id})` : s.user_id;
   return s.type === "group" ? `QQ ${groupLabel(s)} 成员 ${who}` : `QQ 私聊用户 ${who}`;
@@ -791,7 +791,7 @@ const QUOTE_MAX = 200;
  * 正文里位于行首的 [来源]/[引用] 同样改写——这两个标签只出现在本函数生成的行首。
  */
 export function buildCodexPrompt(
-  source: TicketSource,
+  source: InputSource,
   body: string,
   opts: { time?: number; quote?: { message_id: string; nickname: string; text: string } } = {},
 ): string {

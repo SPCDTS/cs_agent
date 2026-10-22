@@ -14,14 +14,15 @@ const out = path.resolve(process.argv[2] ?? '.g4-results/html');
 await mkdir(out, { recursive: true });
 const config = loadConfig({ DATA_DIR: dir });
 const store = new ObsStore(dir), context = new ContextStore(dir), trace = new Trace(store);
-trace.event('example', 'received', { scope: 'group:7', detail: { text: '画一只猫', sender: '测试用户' } });
-trace.event('example', 'routed', { detail: { route: 'image', prompt: '一只猫' } });
-trace.event('example', 'image:submit', { durationMs: 12, detail: { backend: 'fake', prompt_id: 'example-job' } });
-trace.event('example', 'image:collect', { durationMs: 100, detail: { backend: 'fake', prompt_id: 'example-job', images: [] } });
-trace.event('example', 'reply_sent', { detail: { terminal: true, message_id: 'reply-example', reply: '图片生成好了', images: 0 } });
+trace.event('in:example', 'received', { scope: 'group:7', detail: { text: '查一下天气', sender: '测试用户' } });
+trace.event('turn:pi:7:1', 'dispatched', { scope: 'group:7', detail: { backend: 'pi', conversation_key: 'group:7', kind: 'user', inputs: ['example'] } });
+trace.event('turn:pi:7:1', 'received', { scope: 'group:7', detail: { text: '查一下天气', sender: '测试用户', thread_key: 'group:7', kind: 'user', inputs: ['example'] } });
+trace.event('turn:pi:7:1', 'tool:web_search', { durationMs: 100, detail: { backend: 'pi', input: { query: '天气' } } });
+trace.event('turn:pi:7:1', 'send_message', { detail: { target: 'qq:group:7', text: '晴', status: 'sent', message_id: 'reply-example' } });
+trace.event('turn:pi:7:1', 'reply_sent', { detail: { terminal: true, status: 'completed', thread_key: 'group:7', kind: 'user' } });
 const dashboard = createDashboard({ config, store, context,
   health: () => ({ bridge: { ws_connected: true, disconnect_count: 0 }, codex: { ok: true }, deepseek_key_present: false, aging: '尚未运行（假数据）' }),
-  queue: () => ({ active: 0, slots: 2, waiting: 0, scopes: {}, tickets: [] }),
+  queue: () => ({ active: 0, slots: 2, waiting: 0, scopes: {} }),
   codex: async () => [{ thread_key: 'shared', thread_id: 'fixture-thread', rollout_bytes: 2048, observed_turns: 1 }],
   pi: async () => ({ count: 1, keys: ['group:7'], compaction: [], usage: {} }),
 });
@@ -29,12 +30,12 @@ const server = createServer(dashboard.handle);
 try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const sizes = {};
-  for (const route of ['/', '/tickets', '/tickets/example', '/logs', '/context', '/codex', '/pi', '/config']) {
+  for (const route of ['/', '/turns', '/turns/pi%3A7%3A1', '/inputs/example', '/conversations/group%3A7', '/logs', '/context', '/config']) {
     const response = await fetch(`http://127.0.0.1:${server.address().port}${route}`);
     if (response.status !== 200) throw new Error(`${route}: HTTP ${response.status}`);
     const html = await response.text();
     sizes[route] = Buffer.byteLength(html);
-    await writeFile(path.join(out, route === '/' ? 'index.html' : route.slice(1).replaceAll('/', '-') + '.html'), html, 'utf8');
+    await writeFile(path.join(out, route === '/' ? 'index.html' : decodeURIComponent(route.slice(1)).replaceAll(/[/:]/g, '-') + '.html'), html, 'utf8');
     process.stdout.write(`HTML_BYTES ${route} ${sizes[route]}\n`);
   }
   await writeFile(path.join(out, 'sizes.json'), JSON.stringify(sizes, null, 2) + '\n', 'utf8');
