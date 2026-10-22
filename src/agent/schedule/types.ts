@@ -1,5 +1,5 @@
 /**
- * 定时任务共用类型（设计 docs/DESIGN-schedule-runtime.md）。
+ * 定时任务共用类型（设计 docs/ARCHITECTURE.md §6）。
  * 定义与排程（第 4、5 步）和触发后的执行（第 6 步）都以本文件为契约，改动须两边同步。
  */
 
@@ -74,7 +74,7 @@ export interface ScheduledFire {
 }
 
 /**
- * 执行侧实现、排程侧调用的接口（设计 DESIGN-resident-agent §10）。
+ * 执行侧实现、排程侧调用的接口（设计 docs/ARCHITECTURE.md §6）。
  * admit 必须只用传入的 tx 读写，并在同一次提交里登记运行文档；同一 fire_key 重复调用返回同一个输入键（幂等）。
  */
 export interface ScheduledRunAdmitter {

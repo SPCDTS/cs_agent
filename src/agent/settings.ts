@@ -25,7 +25,7 @@ export interface RuntimeSettings {
   piModel: string;
   piThinkingLevel: ModelThinkingLevel | "auto";
   alertOwner: boolean;
-  /** bridge 出站发送规则（设计 DESIGN-resident-agent §9），每次发送前现读 */
+  /** bridge 出站发送规则（设计 docs/ARCHITECTURE.md §3.3），每次发送前现读 */
   sendRules: SendRuleLimits;
 }
 

@@ -4,7 +4,7 @@ import { isScheduleTool } from "../../shared/schedule-tools.js";
 import { mergePersons, validPerson, type RunPerson } from "../host/identity.js";
 
 /**
- * 子 agent 扩展（DESIGN-resident-agent §6.2），仿 pi-durable 示例 23-subagent-background：
+ * 子 agent 扩展（docs/ARCHITECTURE.md §4.3），仿 pi-durable 示例 23-subagent-background：
  * 每个子会话由父会话里的后台锚定任务持有，父会话的中止与空闲等待都碰不到它；
  * 每条交给子会话的消息由一个汇报任务投递，子会话回答后把结果作为 follow-up 输入投回父会话，从而唤醒主 agent。
  * 投递与汇报都带 requestId，重启后重跑只会找回同一提交，不会重复派发或重复汇报。

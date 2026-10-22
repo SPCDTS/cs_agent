@@ -1,4 +1,4 @@
-/** 定时任务页（DESIGN-scheduled-tasks 第 8 步）：纯渲染；数据与写操作由 obs/schedule-panel.ts 提供。时间一律按北京时间显示。 */
+/** 定时任务页（docs/ARCHITECTURE.md §6）：纯渲染；数据与写操作由 obs/schedule-panel.ts 提供。时间一律按北京时间显示。 */
 import { redactText } from '../../shared/redact.js';
 import { scopeLabel } from '../../context/access.js';
 import { crumbs } from './agents-pages.js';

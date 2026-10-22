@@ -380,7 +380,7 @@ export class CodexRunner {
       if (name === "CODEX_MAGPIE_KEY" || (this.opts.provider === "magpie" && (name.startsWith("OPENAI_") || name === "CODEX_API_KEY"))) delete env[key];
     }
     if (this.opts.provider === "magpie") env.CODEX_MAGPIE_KEY = this.opts.magpieKey;
-    // Codex 0.163.0 官方开关，来源见 docs/research/observability-viewer-research.md §3。
+    // Codex 0.163.0 官方开关，说明见 docs/DEPLOY.md §7.1。
     // 不接受继承的路径；Windows 环境变量不区分大小写，关闭时也必须移除别名。
     for (const key of Object.keys(env)) if (key.toUpperCase() === "CODEX_ROLLOUT_TRACE_ROOT") delete env[key];
     if ((this.opts.traceRetentionDays ?? 14) > 0) env.CODEX_ROLLOUT_TRACE_ROOT = path.join(this.opts.codexHome, "trace");

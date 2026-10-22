@@ -31,7 +31,7 @@
 
 ## pi-coding-agent 项目指引加载语义
 
-- 参考版本：`@mariozechner/pi-coding-agent@0.73.1` 的 `src/core/resource-loader.ts`，核实依据见 [设计文档 §0](DESIGN-pi-agents-md.md#0-已核实的事实)。
+- 参考版本：`@mariozechner/pi-coding-agent@0.73.1` 的 `src/core/resource-loader.ts`，用法见 [ARCHITECTURE.md §4.2](ARCHITECTURE.md)。
 - 语义参照 pi-coding-agent `loadProjectContextFiles`（MIT），未复制代码。
 - 使用位置：`src/agent/pi-tools/project-context.ts`。独立实现候选文件名优先级、去重、运维层在前的顺序，以及 `<project_instructions path="…">` 渲染格式。
 - 本项目仅显式读取 `WORKSPACE_DIR` 和 `DATA_DIR/pi-work/<key>`，不采用上游向文件系统根遍历或 Git worktree 遮蔽逻辑；增加普通文件、128 KiB、UTF-8、目录边界校验与缓存，日志走 `shared/log`。未安装 pi-coding-agent，也未引入新依赖。
