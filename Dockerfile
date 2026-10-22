@@ -12,7 +12,7 @@ RUN npm run build && npm prune --omit=dev
 FROM node:24-bookworm-slim
 # apt 走国内镜像（deb.debian.org 在本机网络下常卡在拉索引）；可用 --build-arg APT_MIRROR=deb.debian.org 改回官方源。
 # 后面 playwright --with-deps 的 apt 也沿用这里改过的源。
-ARG APT_MIRROR=mirrors.tuna.tsinghua.edu.cn
+ARG APT_MIRROR=mirrors.huaweicloud.com
 RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
  && echo 'Acquire::Retries "8";' > /etc/apt/apt.conf.d/80retries \
  && apt-get update \
