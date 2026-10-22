@@ -141,6 +141,32 @@ describe("codex 常驻：唤醒回合与工具调用的回合归属", () => {
     expect(r.texts("7")).toEqual([]);
   });
 
+  it("回归：send_message 的条目先于 turn/start 响应到达——callId 照样记录，回合判定为本轮后发送成功", async () => {
+    const script = new CodexScript();
+    const base = script.handlers;
+    let early: { threadId: string } | undefined;
+    script.handlers = () => ({ ...base(), "turn/start": (m, child) => {
+      const threadId = String(m.params!.threadId);
+      const reply = base()["turn/start"]!(m, child) as { result: { turn: { id: string } } };
+      // 条目先写出，响应随后
+      child.notify("item/started", { threadId, turnId: reply.result.turn.id,
+        item: { type: "mcpToolCall", id: "exec-early", server: "im", tool: "send_message", status: "inProgress", arguments: {} } });
+      early = { threadId };
+      return reply;
+    } });
+    let result: unknown;
+    let r!: ResidentRig;
+    script.onTurn = async turn => {
+      result = await r.codexSend(G, { text: "早到的发送" }, { callId: "exec-early", threadId: turn.threadId, turnId: turn.turnId });
+    };
+    r = await codexRig(script);
+    await r.say("5", "问");
+    await r.idle();
+    expect(early).toBeDefined();
+    expect(result).toMatchObject({ status: "sent" });
+    expect(r.texts("7")).toEqual(["早到的发送"]);
+  });
+
   it("同一 callId 重放取回同一 Outbox 行，不重发", async () => {
     const slow = gate();
     const script = new CodexScript();

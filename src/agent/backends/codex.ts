@@ -85,6 +85,8 @@ interface TurnRec {
   hostVisible: boolean;
   /** 判定前已结束：判定后立即按此结果处理 */
   ended?: TurnOutcome;
+  /** 判定前到达的条目（观测用）：判为 user / wake 时补记，其他种类丢弃 */
+  buffered: { phase: "started" | "completed"; item: ThreadItem }[];
 }
 
 interface Compaction { done(error?: Error): void }
@@ -104,6 +106,8 @@ export class CodexBackend implements ThreadAdapter {
   private readonly keys = new Map<string, ThreadKey>();
   /** 进行中（含待判定）的回合：codex 回合 id → 簿记；结束即删除 */
   private readonly turnRecs = new Map<string, TurnRec>();
+  /** 最近结束回合的墓碑（codex 回合 id → 种类与结果，有界）：结束后到达的同 id 事件或开轮响应不再建立进行中的簿记 */
+  private readonly finished = new Map<string, { kind: TurnKind; outcome: TurnOutcome }>();
   /** 最近结束的 user / wake 回合结果（宿主放弃回合时结束事件可能还排在宿主队列里），按宿主回合 id */
   private readonly ended = new Map<string, TurnOutcome>();
   /** codex 回合 → 不再重试的 error（turn/completed 时并入结果） */
@@ -251,13 +255,19 @@ export class CodexBackend implements ThreadAdapter {
         }
         log.warn("codex turn/start result unknown; claimed turn by clientUserMessageId", { thread: threadKey, turn: codexTurnId });
       }
-      const rec = this.record(threadKey, threadId, codexTurnId);
-      rec.startedAt = startedAt;
-      if (model) rec.model = model;
-      if (rec.kind === undefined) this.classify(rec, "user");
+      const turnId = hostTurnId(codexTurnId);
+      const tomb = this.finished.get(codexTurnId);
+      if (tomb) {
+        // 本轮在响应之前就已开始并结束：不再建立进行中的簿记；结束已交给宿主（user），否则按记下的结果补交
+        if (tomb.kind !== "user") this.host?.onTurnCompleted(threadKey, turnId, tomb.outcome);
+      } else {
+        const rec = this.record(threadKey, threadId, codexTurnId);
+        rec.startedAt = startedAt;
+        if (model) rec.model = model;
+        if (rec.kind === undefined) this.classify(rec, "user");
+      }
       // 本轮已开出：在途期间服务端另开的回合判为 wake，但不交给宿主（否则宿主会以唤醒取代本轮）
       this.releaseObserved(started.observed.filter(id => id !== codexTurnId), false);
-      const turnId = hostTurnId(codexTurnId);
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "codex", thread_key: threadKey, thread_id: threadId, kind: turn.kind,
         effort: effort ?? null, inputs: inputs.map(i => i.inboundKey) } });
       trace.event("turn:" + turnId, "model_turn", { status: "started", detail: { backend: "codex", thread_key: threadKey, effort: effort ?? null } });
@@ -461,7 +471,7 @@ export class CodexBackend implements ThreadAdapter {
   private record(key: ThreadKey, threadId: string, codexTurnId: string): TurnRec {
     let rec = this.turnRecs.get(codexTurnId);
     if (!rec) {
-      rec = { key, threadId, codexTurnId, startedAt: Date.now(), hostVisible: false };
+      rec = { key, threadId, codexTurnId, startedAt: Date.now(), hostVisible: false, buffered: [] };
       this.turnRecs.set(codexTurnId, rec);
     }
     return rec;
@@ -469,7 +479,7 @@ export class CodexBackend implements ThreadAdapter {
 
   private onTurnStarted(threadId: string, codexTurnId: string, initiatedBy: "client" | "server"): void {
     const key = this.keys.get(threadId);
-    if (!key) return;
+    if (!key || this.finished.has(codexTurnId)) return;
     const known = this.turnRecs.get(codexTurnId);
     const rec = this.record(key, threadId, codexTurnId);
     if (rec.kind !== undefined) {
@@ -496,6 +506,7 @@ export class CodexBackend implements ThreadAdapter {
     if (rec.kind !== undefined) return;
     rec.kind = kind;
     const turnId = hostTurnId(rec.codexTurnId);
+    const buffered = rec.buffered.splice(0);
     if (kind === "user") {
       rec.hostVisible = true;
       this.host?.onTurnStarted(rec.key, turnId, "host");
@@ -509,6 +520,8 @@ export class CodexBackend implements ThreadAdapter {
       log.info("codex wake suppressed after stop", { thread: rec.key, turn: rec.codexTurnId });
       if (!rec.ended) void this.opts.runner.client.interrupt(rec.threadId, rec.codexTurnId).catch(error => log.warn("codex interrupt failed", { thread: rec.key, error }));
     }
+    // 判定前到达的条目：本轮或唤醒回合补记观测
+    if (kind === "user" || kind === "wake") for (const b of buffered) observeItem("turn:" + turnId, b.phase, b.item);
     if (rec.ended) this.complete(rec, rec.ended);
   }
 
@@ -529,7 +542,7 @@ export class CodexBackend implements ThreadAdapter {
   private endTurn(threadId: string, codexTurnId: string, outcome: TurnOutcome): void {
     this.failures.delete(codexTurnId);
     const key = this.keys.get(threadId) ?? this.turnRecs.get(codexTurnId)?.key;
-    if (!key) return;
+    if (!key || this.finished.has(codexTurnId)) return;
     const rec = this.record(key, threadId, codexTurnId);
     if (rec.ended) return;
     rec.ended = outcome;
@@ -541,6 +554,8 @@ export class CodexBackend implements ThreadAdapter {
   /** 已判定回合的结束：清掉簿记；user / wake 交给宿主；compaction 释放压缩锁；宿主接管的 compaction / suppressed 按完成交给宿主。 */
   private complete(rec: TurnRec, outcome: TurnOutcome): void {
     this.turnRecs.delete(rec.codexTurnId);
+    this.finished.set(rec.codexTurnId, { kind: rec.kind!, outcome });
+    if (this.finished.size > 200) this.finished.delete(this.finished.keys().next().value!);
     const turnId = hostTurnId(rec.codexTurnId);
     if (rec.kind === "user" || rec.kind === "wake") {
       this.ended.set(turnId, outcome);
@@ -576,6 +591,16 @@ export class CodexBackend implements ThreadAdapter {
     if (!key) return;
     this.host?.onActivity(key);
     if (!e.turnId) return;
+    // 调用归属不论回合是否已判定都记下：resolveCall 等到该回合判定并成为宿主当前回合
+    if (e.item.type === "mcpToolCall" && typeof e.item.id === "string") {
+      this.calls.set(e.item.id, { threadId: e.threadId, turnId: e.turnId });
+      if (this.calls.size > 2000) this.calls.delete(this.calls.keys().next().value!);
+    }
+    const tomb = this.finished.get(e.turnId);
+    if (tomb) {
+      if (tomb.kind === "user" || tomb.kind === "wake") observeItem("turn:" + hostTurnId(e.turnId), e.phase, e.item);
+      return;
+    }
     let rec = this.turnRecs.get(e.turnId);
     const start = this.starting.get(e.threadId);
     if (!rec && start) {
@@ -590,11 +615,11 @@ export class CodexBackend implements ThreadAdapter {
         this.classify(rec, e.item.type === "contextCompaction" ? "compaction" : "wake");
       }
     }
-    if (rec && rec.kind !== "user" && rec.kind !== "wake") return;
-    if (e.item.type === "mcpToolCall" && typeof e.item.id === "string") {
-      this.calls.set(e.item.id, { threadId: e.threadId, turnId: e.turnId });
-      if (this.calls.size > 2000) this.calls.delete(this.calls.keys().next().value!);
-    }
+    if (rec?.kind === undefined) {
+      // 未判定：先缓存，判定为本轮或唤醒回合时补记（有界）
+      if (rec && rec.buffered.length < 200) rec.buffered.push({ phase: e.phase, item: e.item });
+      if (rec) return;
+    } else if (rec.kind !== "user" && rec.kind !== "wake") return;
     observeItem("turn:" + hostTurnId(e.turnId), e.phase, e.item);
   }
 

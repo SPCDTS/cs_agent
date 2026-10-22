@@ -369,6 +369,25 @@ describe("CodexBackend：常驻 app-server 适配器", () => {
     expect(started).not.toContain("codex:turn-own:backend");
   });
 
+  it("回归：turn/started 与 turn/completed 都先于 turn/start 响应到达——回合按已结束交给宿主，下一轮照常开轮", async () => {
+    const script = new CodexScript();
+    const base = script.handlers;
+    let first = true;
+    script.handlers = () => ({ ...base(), "turn/start": (m, child) => {
+      if (!first) return base()["turn/start"]!(m, child);
+      first = false;
+      const threadId = String(m.params!.threadId);
+      child.notify("turn/started", { threadId, turn: { id: "fast-1", status: "inProgress" } });
+      child.notify("turn/completed", { threadId, turn: { id: "fast-1", status: "completed" } });
+      return { result: { turn: { id: "fast-1", status: "inProgress", items: [] } } };
+    } });
+    const s = await setup({ script });
+    expect(await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" })).toEqual({ turnId: "codex:fast-1" });
+    await vi.waitFor(() => expect(s.completed).toEqual([{ threadKey: "group:7", turnId: "codex:fast-1", status: "completed" }]));
+    expect(await s.backend.busy("group:7")).toBe(false);
+    expect(await s.backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" })).toEqual({ turnId: "codex:turn-1" });
+  });
+
   it("唤醒回合先到（宿主尚未确认）时开轮让给它：返回 backendTurnId", async () => {
     const script = new CodexScript();
     script.auto = false;
