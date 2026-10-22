@@ -75,6 +75,17 @@ export interface ThreadAdapter {
   busy?(threadKey: ThreadKey): Promise<boolean>;
 }
 
+/** 面板拓扑里的一个子 agent；session 是它的会话（pi）或线程（codex）id，用于链接会话页。 */
+export interface SubagentView {
+  session: string;
+  name: string;
+  state: "running" | "idle" | "done" | "failed" | "stopped";
+  task?: string;
+  /** 最近一次结果（pi 汇报正文） */
+  result?: string;
+  updated?: number;
+}
+
 /**
  * 适配器回报回合事件的入口（ThreadHost 实现）。
  * 调用立即返回，事件在该会话的串行队列里处理；适配器可以在 startTurn / steer 返回之前回调，但不能等待回调完成。

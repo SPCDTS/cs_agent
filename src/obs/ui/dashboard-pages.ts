@@ -10,7 +10,8 @@ import type { ContextAnalysisOptions, ContextTurn, ThreadContextSeries, TurnBrie
 import { BACKENDS, csrfField, empty, epochMs, esc, escFull, fmtBytes, fmtWhen, fmtMs, fmtTime, json, kv, page, statusStamp, threadLabel, time, traceHref, uri, type Flash } from './html.js';
 import { conversationPage, inputPage, liveBody, turnListBody, turnPage, type InputInfo, type LiveConversationView, type TurnListFilters, type TurnRowView } from './turn-pages.js';
 import { scopeLabel } from '../../context/access.js';
-import { PRELOAD_TURNS, agentsBody, byNewest, crumbs, dataScript, isBackend, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './agents-pages.js';
+import type { TopologyRow } from '../sessions/types.js';
+import { PRELOAD_TURNS, agentsBody, topologyHtml, byNewest, crumbs, dataScript, isBackend, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './agents-pages.js';
 import { contentHref, contextBody as contextAnalysisBody, contextError, contextUnavailable, type ContextAnalysis } from './context-view.js';
 import type { Block, ObservedTurn, SessionRef } from '../sessions/types.js';
 import { vendorAsset } from './vendor.js';
@@ -228,7 +229,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     }
     if (p === '/context') return shell('上下文检索', contextBody(q), { lead: '与 Codex / pi 的 qq_context 工具看到的内容一致。留空关键词查看最近记录。时间线、摘要与检索对照见<a href="/memory">记忆</a>。' });
     if (p === '/context-usage') return shell('上下文监控', contextUsageBody(q), { lead: '每条线程最近若干次模型请求的输入占用（一根竖条一次请求，同一回合的请求相邻成组；高度 = 占窗口比例），其中缓存命中与未命中分两色；异常的缓存未命中标红并给出原因推断。点一个回合组查看该回合每次请求的命中；刷新页面更新。', scripts: ['/assets/context-usage.js'] });
-    if (p === '/agents') return shell('Agent', await agentsPage(), { lead: '两个执行后端的会话、索引进度与每条线程的上下文占用。点进会话查看每个回合的输入、模型请求、工具调用与回复。', scripts: ['/assets/forms.js', '/assets/usage.js'] });
+    if (p === '/agents') return shell('Agent', await agentsPage(), { lead: '各会话的主 agent 与子 agent 在做什么；两个执行后端的会话、索引进度与每条线程的上下文占用。点进会话查看每个回合的输入、模型请求、工具调用与回复。', scripts: ['/assets/forms.js', '/assets/usage.js', '/assets/topology.js'] });
     if (p.startsWith('/agents/')) return agentsRoute(p, q, nonce, shell);
     if (p === '/memory' || p.startsWith('/memory/')) return memoryPage(p, q, nonce, shell);
     if (p === '/settings') return shell('设置', await settingsBody(), { lead: '修改立即对之后收到的消息生效，无需重启；.env 中的值只是初始默认。', scripts: ['/assets/forms.js'] });
@@ -477,7 +478,8 @@ export function createDashboardPages(deps: DashboardPageDeps) {
         threads: [...piUsage.filter(k => piKeys.includes(k)), ...piKeys.filter(k => !piUsage.includes(k))].map(key => ({ key, label: ` ${scopeLabel(key)} 的会话`, enabled: !!opts.resetPi, compactEnabled: !!opts.compactPi, stopEnabled: !!opts.stopThread })),
         extraUsageKeys: piUsage.filter(k => !piKeys.includes(k)) },
     };
-    return agentsBody(cards, csrf);
+    const topo = await api('/api/agents/topology');
+    return agentsBody(cards, csrf, topo.status === 200 && Array.isArray(topo.body) ? topologyHtml(topo.body as TopologyRow[], scopeNames()) : undefined);
   }
 
   type Shell = (title: string, body: string, extra?: { lead?: string; actions?: string; scripts?: string[]; head?: string }) => string;

@@ -223,6 +223,13 @@ document.addEventListener('submit',e=>{const m=e.target.dataset.confirm;if(m&&!c
 for(const t of document.querySelectorAll('textarea[data-count]')){const c=document.getElementById(t.dataset.count);const f=()=>{c.textContent=t.value.length+' 字';};t.addEventListener('input',f);f();}
 `;
 
+// /agents 拓扑区：页面可见时每 3 秒取服务端渲染的片段整块替换（片段已转义）；失败保留上次内容。
+const topology = `
+const box=document.getElementById('topology');
+if(box){let busy=false;setInterval(async()=>{if(document.hidden||busy)return;busy=true;
+  try{const r=await fetch('/agents/topology',{credentials:'same-origin',cache:'no-store'});if(r.ok)box.innerHTML=await r.text();}catch(e){}finally{busy=false;}},3000);}
+`;
+
 /** 每个模块自带共享工具函数（避免模块 import 受 CSP nonce 限制）。 */
 export const ASSETS: Record<string, string> = { 'live.js': shared + ctxShared + live, 'usage.js': shared + ctxShared + usage, 'logs.js': shared + logs, 'forms.js': forms,
-  'agents.js': shared + AGENTS_JS, 'memory.js': shared + MEMORY_JS, 'context-usage.js': CONTEXT_USAGE_JS };
+  'agents.js': shared + AGENTS_JS, 'memory.js': shared + MEMORY_JS, 'context-usage.js': CONTEXT_USAGE_JS, 'topology.js': topology };

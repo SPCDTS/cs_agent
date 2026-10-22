@@ -67,7 +67,7 @@ function adapters(): SessionAdapters {
   return { codex, pi };
 }
 
-async function rig() {
+async function rig(extra: Partial<Parameters<typeof createDashboard>[0]> = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cs-agents-pages-'));
   const store = new ObsStore(dir), context = new ContextStore(dir);
   const dispose = registerTemporarySecrets([TOKEN]);
@@ -75,14 +75,15 @@ async function rig() {
   const resetCodex = vi.fn(async () => 'old'), resetPi = vi.fn(async () => 1);
   const dashboard = createDashboard({ config: loadConfig({ DATA_DIR: dir, OBS_TOKEN: TOKEN }), store, context, contextUsage: usage, resetCodex, resetPi,
     codex: async () => [{ thread_key: 'owner', thread_id: null }, { thread_key: 'group:1', thread_id: 'sess-1' }, { thread_key: 'private:99', thread_id: 'sess-99' }],
-    pi: async () => ({ threads: { 'group:7': 2 }, keys: ['group:7'] }), health: () => ({}), queue: () => ({}), sessionAdapters: adapters() });
+    pi: async () => ({ threads: { 'group:7': 2 }, keys: ['group:7'] }), health: () => ({}), queue: () => ({}), sessionAdapters: adapters(), ...extra });
   const server = createServer(dashboard.handle);
   await new Promise<void>(r => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   clean.push(async () => { await dashboard.close(); server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())); dispose(); store.close(); context.close(); await fs.rm(dir, { recursive: true, force: true }); });
   const get = (url: string) => fetch(base + url, { redirect: 'manual', headers: { Cookie: `obs_token=${TOKEN}` } });
   const page = async (url: string) => { const res = await get(url); const html = await res.text(); return { res, html }; };
-  return { get, page };
+  const anonymous = (url: string) => fetch(base + url, { redirect: 'manual' });
+  return { get, page, anonymous };
 }
 
 /** 每页共同约束：无内联 style、所有 script 带 nonce、无外部资源、无未转义的注入。 */
@@ -248,4 +249,52 @@ describe('上下文分析渲染（O3 接口契约桩）', () => {
     expect(noMeasure).toContain('没有可用的实测值'); expect(noMeasure).not.toContain('未解释差额 <b');
   });
 
+});
+
+describe('Agent 拓扑', () => {
+  const topology = async () => [
+    { thread: 'group:1', backend: 'codex' as const, busy: true, turnId: 'codex:t2', session: 'sess-1', children: [
+      { session: 'sess-old', name: XSS, state: 'running' as const, task: `查 ${XSS} 用 ${TOKEN}`, updated: T0 },
+      { session: 'sess-x', name: 'done-one', state: 'done' as const, task: '旧任务', result: '结果正文', updated: T0 - 1000 },
+    ] },
+    { thread: 'owner', backend: 'pi' as const, busy: false, children: [] },
+  ];
+
+  it('/agents 顶部渲染会话 → 主 agent → 子 agent：状态、任务、最近动作与过程链接，文本转义并脱敏，空闲会话折成一行', async () => {
+    const r = await rig({ topology });
+    const { res, html } = await r.page('/agents');
+    expect(res.status).toBe(200); safe(html, res);
+    expect(html).toContain('id="topology"');
+    expect(html).toMatch(/<script[^>]*src="\/assets\/topology.js"/);
+    expect(html).toContain('href="/conversations/group%3A1"');
+    expect(html).toContain('href="/agents/codex/sessions/sess-1">主 agent 过程');
+    expect(html).toContain('href="/agents/codex/sessions/sess-old">查看过程');
+    expect(html).toContain('最近：</span>压缩上下文');
+    expect(html).toContain('结果：</span>结果正文');
+    expect(html).toMatch(/空闲：<a href="\/conversations\/owner">owner 私聊<\/a>/);
+    expect(html).not.toContain(TOKEN);
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    const topo = html.slice(html.indexOf('id="topology"'), html.indexOf('</section>', html.indexOf('id="topology"')));
+    expect(topo.indexOf('工作中')).toBeLessThan(topo.indexOf('已完成'));
+  });
+
+  it('/agents/topology 返回同一片段供轮询，/api/agents/topology 返回带最近动作的 JSON；都需要口令', async () => {
+    const r = await rig({ topology });
+    const frag = await r.get('/agents/topology');
+    expect(frag.status).toBe(200);
+    expect(frag.headers.get('cache-control')).toBe('no-store');
+    const text = await frag.text();
+    expect(text).not.toContain('<html'); expect(text).toContain('查看过程'); expect(text).not.toContain(TOKEN);
+    const json = await (await r.get('/api/agents/topology')).json() as { thread: string; activity?: { text: string } }[];
+    expect(json.map(row => row.thread)).toEqual(['group:1', 'owner']);
+    expect(json[0]!.activity?.text).toBe('压缩上下文');
+    expect((await r.anonymous('/agents/topology')).status).not.toBe(200);
+    expect((await r.anonymous('/api/agents/topology')).status).not.toBe(200);
+    expect(await (await r.get('/assets/topology.js')).text()).toContain("fetch('/agents/topology'");
+  });
+
+  it('没有拓扑数据源时不显示拓扑区', async () => {
+    const r = await rig();
+    expect((await r.page('/agents')).html).not.toContain('id="topology"');
+  });
 });

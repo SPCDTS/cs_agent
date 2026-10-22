@@ -25,6 +25,16 @@ export interface SessionAdapter {
   close?(): void | Promise<void>;
 }
 
+/** Agent 拓扑（/agents）：会话的主 agent 与它派出的子 agent；session 为会话（pi）或线程（codex）id。 */
+export type TopologyAgent = {
+  session: string; name: string; state: 'running' | 'idle' | 'done' | 'failed' | 'stopped';
+  task?: string; result?: string; updated?: number;
+};
+export type ThreadTopology = { thread: string; backend?: 'pi' | 'codex'; busy: boolean; turnId?: string; session?: string; children: TopologyAgent[] };
+export type Activity = { text: string; ts?: number };
+export type TopologyNode = TopologyAgent & { activity?: Activity };
+export type TopologyRow = Omit<ThreadTopology, 'children'> & { activity?: Activity; children: TopologyNode[] };
+
 export class SessionError extends Error {
   constructor(readonly status: number, message: string) { super(message); this.name = 'SessionError'; }
 }

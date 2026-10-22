@@ -25,7 +25,7 @@
 | `/inputs/<入站键>` | 一条输入的流转：收到 → 入队 → 开轮设置 → 送达所在回合（链到回合页）；改造前以入站键本身为键的旧事件也在这里显示 | — |
 | `/conversations/<会话键>` | 当前状态（空闲 / 工作中、当前回合、排队输入、在跑子 agent、占用条、停止）与最近回合（分页） | `POST /thread/stop` |
 | `/tickets`、`/tickets/<键>` | 旧地址，301：列表 → `/turns`；`turn:<id>` → 回合页，`in:<键>` 与旧版入站键 → 输入页，`thr:<会话键>` → 会话页；`@` 系统键 404 | — |
-| `/agents` | Codex / Pi 两张卡：活动 / 归档会话数、索引进度、每条线程的占用条与"监控"链接 | `POST /{codex,pi}/{reset,compact}`、`POST /thread/stop` |
+| `/agents` | 顶部"拓扑"：每个会话 → 主 agent → 它派出的子 agent（状态、任务、最近一个动作、结果与"查看过程"链接，空闲且没有子 agent 的会话折成一行；页面可见时每 3 秒取 `/agents/topology` 片段刷新）；下方 Codex / Pi 两张卡：活动 / 归档会话数、索引进度、每条线程的占用条与"监控"链接 | `POST /{codex,pi}/{reset,compact}`、`POST /thread/stop` |
 | `/agents/<后端>/sessions[/…]` | 会话 → 回合浏览与上下文分析（§6、§7）；`/codex`、`/pi` 303 到对应会话列表 | — |
 | `/context-usage` | 上下文监控（§5） | — |
 | `/memory[/…]` | 记忆：总览、时间线、摘要、检索检查器、召回记录、图片、归档（§8） | — |
@@ -122,6 +122,9 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 | `/agents/<后端>/sessions/<id>/turns/<回合>` | 输入 → 模型请求（可多次，带实测 usage）→ 工具调用（参数 / 结果折叠，按 call_id 配对）→ 助手文本 → 送达；"记忆调用"区（§8.2） |
 | `/agents/<后端>/sessions/<id>/context?at=&phase=` | 上下文结构分析（§7） |
 | `/agents/<后端>/sessions/<id>/content?offset=&length=&page=` | 大正文全文页，每页 256 KiB；codex 另支持 `?bundle=&payload=&select=` 读官方 trace 正文 |
+| `/api/agents/topology` | 拓扑 JSON：会话列表与主 agent 状态取会话宿主；子 agent 由后端给出（pi 读子 agent 登记，codex 记 app-server 的 `subAgentActivity` 与 `spawnAgent` 条目，随进程不持久化）；最近动作取各自会话最后一个回合里最后一个可描述的块；整体按会话正文规则脱敏 |
+
+子 agent 的会话在会话列表里标为"父会话 › 名称"并跟随父会话的会话域与活动状态（活动父会话的子 agent 可实时订阅）：pi 按子 agent 登记，codex 按 rollout `session_meta.source.subagent.thread_spawn.parent_thread_id`。
 
 回合的上下文占用取回合内最后一次带实测 usage 的模型请求的输入；回合级 `usage` 是全部请求的累加。
 

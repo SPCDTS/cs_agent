@@ -42,7 +42,7 @@ import { ThreadNotLoadedError, type ItemEvent, type ThreadItem, type TurnComplet
 import type { ReasoningEffort, SettingsSnapshot } from "./types.js";
 import { attachmentDirs } from "../../media/attach-paths.js";
 import type { CallBinding, CallMeta, ThreadTokens } from "../../context/media-recall-server.js";
-import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome } from "../host/types.js";
+import type { HostCallbacks, InputRef, StartTurnResult, SubagentView, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome } from "../host/types.js";
 import type { PiTurns } from "./pi.js";
 
 export interface CodexBackendOptions {
@@ -117,6 +117,8 @@ export class CodexBackend implements ThreadAdapter {
   private readonly calls = new Map<string, { threadId: string; turnId: string }>();
   /** 会话 → 仍在运行的子 agent 线程 → 其进行中的回合（未知为 undefined） */
   private readonly children = new Map<ThreadKey, Map<string, string | undefined>>();
+  /** 面板拓扑：各会话最近的子 agent（名称取 agentPath 末段，任务取 spawnAgent 的 prompt）；随进程，不持久化。 */
+  private readonly agents = new Map<ThreadKey, Map<string, { name: string; state: SubagentView["state"]; task?: string; updated: number }>>();
   private readonly compactions = new Map<string, Compaction>();
   /** 正在 turn/start 的线程 → 本输入键与期间服务端开出的回合 */
   private readonly starting = new Map<string, { clientId: string | undefined; observed: string[] }>();
@@ -148,7 +150,10 @@ export class CodexBackend implements ThreadAdapter {
       if (!e.willRetry) this.failures.set(e.turnId, "codex 回合出错");
     });
     client.on("item", e => this.onItem(e));
-    client.on("subAgent", e => this.onChild(e.parentThreadId, e.agentThreadId, !TERMINAL_CHILD.test(e.kind)));
+    client.on("subAgent", e => {
+      this.noteAgent(e.parentThreadId, e.agentThreadId, { kind: e.kind, ...(typeof e.item.agentPath === "string" ? { path: e.item.agentPath } : {}) });
+      this.onChild(e.parentThreadId, e.agentThreadId, !TERMINAL_CHILD.test(e.kind));
+    });
     client.on("childActivity", e => {
       const alive = e.method === "turn/started" ? true : e.method === "turn/completed" ? false : undefined;
       this.onChild(e.parentThreadId, e.agentThreadId, alive, e.turnId);
@@ -161,6 +166,7 @@ export class CodexBackend implements ThreadAdapter {
       this.threadIds.clear();
       this.keys.clear();
       this.children.clear();
+      for (const agents of this.agents.values()) for (const agent of agents.values()) if (agent.state === "running") agent.state = "stopped";
       for (const compaction of [...this.compactions.values()]) compaction.done(new Error("codex app-server 掉线"));
     });
   }
@@ -217,6 +223,7 @@ export class CodexBackend implements ThreadAdapter {
     this.opts.tokens.revoke(threadKey);
     if (threadId) { this.keys.delete(threadId); this.opts.runner.client.forgetThread(threadId); }
     this.children.delete(threadKey);
+    this.agents.delete(threadKey);
   }
 
   // ───────────── ThreadAdapter ─────────────
@@ -416,6 +423,28 @@ export class CodexBackend implements ThreadAdapter {
     const threadId = this.threadIds.get(threadKey);
     if (!threadId) return !!this.children.get(threadKey)?.size || [...this.turnRecs.values()].some(rec => rec.key === threadKey && !rec.ended);
     return this.threadBusy(threadKey, threadId) || this.compactions.has(threadId);
+  }
+
+  /** 面板拓扑：最近的子 agent 在前（最多 20 个）；有进行中回合的为 running，派出后在等待的为 idle。 */
+  subagents(threadKey: ThreadKey): SubagentView[] {
+    const live = this.children.get(threadKey);
+    return [...this.agents.get(threadKey) ?? []].reverse().map(([session, agent]) => ({ session, name: agent.name,
+      state: live?.has(session) ? "running" : agent.state === "running" ? "idle" : agent.state,
+      ...(agent.task ? { task: agent.task } : {}), updated: agent.updated }));
+  }
+
+  private noteAgent(parentThreadId: string, agentThreadId: string, update: { kind?: string; path?: string; task?: string }): void {
+    const key = this.keys.get(parentThreadId);
+    if (!key) return;
+    const agents = this.agents.get(key) ?? new Map<string, { name: string; state: SubagentView["state"]; task?: string; updated: number }>();
+    const agent = agents.get(agentThreadId) ?? { name: agentThreadId.slice(0, 8), state: "running" as const, updated: Date.now() };
+    if (update.path) agent.name = update.path.split("/").filter(Boolean).at(-1) ?? update.path;
+    if (update.task) agent.task = update.task;
+    if (update.kind) agent.state = /interrupt/i.test(update.kind) ? "stopped" : /error|fail/i.test(update.kind) ? "failed" : TERMINAL_CHILD.test(update.kind) ? "done" : "running";
+    agent.updated = Date.now();
+    agents.set(agentThreadId, agent);
+    while (agents.size > 20) agents.delete(agents.keys().next().value!);
+    this.agents.set(key, agents);
   }
 
   /** 面板实时页：会话下仍在运行的子 agent 线程数（来自 app-server 的 subAgent 通知）。 */
@@ -644,6 +673,9 @@ export class CodexBackend implements ThreadAdapter {
       if (this.calls.size > 2000) this.calls.delete(this.calls.keys().next().value!);
     }
     if (e.item.type === "subAgentActivity") this.onSubAgentActivity(key, e.threadId, e.turnId, e.item);
+    if (e.item.type === "collabAgentToolCall" && e.item.tool === "spawnAgent" && typeof e.item.prompt === "string" && Array.isArray(e.item.receiverThreadIds)) {
+      for (const child of e.item.receiverThreadIds) if (typeof child === "string") this.noteAgent(e.threadId, child, { task: e.item.prompt });
+    }
     const tomb = this.finished.get(e.turnId);
     if (tomb) {
       if (tomb.kind === "user" || tomb.kind === "wake") observeItem("turn:" + hostTurnId(e.turnId), e.phase, e.item);

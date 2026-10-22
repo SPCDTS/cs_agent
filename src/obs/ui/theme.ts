@@ -296,6 +296,17 @@ ${Array.from({ length: 101 }, (_, i) => `.cu-bar[data-h="${i}"]{height:${i}%}.cu
 .crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1) var(--s2);font-size:var(--t-sm);margin-bottom:var(--s4);color:var(--ink-2)}
 .crumbs .sep{color:var(--ink-3)}
 .crumbs [aria-current]{color:var(--ink);font-weight:600}
+.topo{margin-bottom:var(--s5)}
+.topo h2{margin-bottom:var(--s3);display:flex;align-items:baseline;gap:var(--s3);flex-wrap:wrap}
+.topo h2 small{font-size:var(--t-sm);font-weight:400}
+.topo-thread{padding:var(--s3) 0;border-top:1px solid var(--rule)}
+.topo-thread:first-child{border-top:0;padding-top:0}
+.topo-head{display:flex;align-items:baseline;gap:var(--s2) var(--s3);flex-wrap:wrap}
+.topo-main .topo-head>a:first-child{font-weight:600}
+.topo-act,.topo-task{font-size:var(--t-sm);color:var(--ink-2);overflow-wrap:anywhere}
+ul.topo-children{list-style:none;margin:var(--s2) 0 0;padding:0 0 0 var(--s4);border-left:2px solid var(--rule-strong)}
+ul.topo-children>li{position:relative;padding:var(--s2) 0 var(--s2) var(--s3)}
+ul.topo-children>li::before{content:"";position:absolute;left:calc(-1 * var(--s4));top:1.15em;width:calc(var(--s4) + var(--s2));border-top:2px solid var(--rule-strong)}
 .agent-card h2{margin-bottom:var(--s3);display:flex;align-items:baseline;gap:var(--s3)}
 .agent-card h2 a{color:var(--ink);text-decoration:none}
 .agent-card h2 small{font-size:var(--t-sm);font-weight:400}

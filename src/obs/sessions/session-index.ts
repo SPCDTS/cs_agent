@@ -29,6 +29,8 @@ export interface CodexIndexState {
   baselines?: IndexedBlock[];
   calls: Record<string, { turn: number; block: number; ts?: number }>;
   context?: { model?: string; effort?: string };
+  /** 子 agent 线程：派出它的父线程与名称（session_meta 的 source.subagent.thread_spawn） */
+  parent?: { thread: string; name?: string };
   lastUsageRecord?: string;
   pendingUsage?: boolean;
 }

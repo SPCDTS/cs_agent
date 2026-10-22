@@ -19,6 +19,8 @@ import { trace as defaultTrace } from '../shared/trace.js';
 import { summarize, type LiveMessage } from './live.js';
 import { formatBackendOverrides, SETTINGS_KEY } from '../agent/settings.js';
 import { ASSETS } from './ui/client.js';
+import { topologyRows } from './topology.js';
+import { topologyHtml } from './ui/agents-pages.js';
 import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
 import type { ContextUsage } from '../shared/format.js';
 import { empty, page, traceHref } from './ui/html.js';
@@ -54,7 +56,7 @@ export function createDashboard(opts: DashboardOptions) {
     codex: new CodexSessionAdapter({ store: opts.store, codexHome: config.codexHome, dataDir: config.DATA_DIR }),
     ...(opts.piSessions ? { pi: new PiSessionAdapter({ store: opts.store, source: opts.piSessions }) } : {}),
   });
-  const handleSessions = createSessionRoutes(adapters, sse);
+  const handleSessions = createSessionRoutes(adapters, sse, opts.topology);
   const handleContext = createContextRoutes(adapters, { codexHome: config.codexHome, dataDir: config.DATA_DIR, contextUsage: opts.contextUsage });
   const sessionRoute = (url: URL, res: ServerResponse) => url.pathname.split('/').length === 7 && url.pathname.endsWith('/context')
     ? handleContext(url, res) : handleSessions(url, res);
@@ -170,6 +172,12 @@ export function createDashboard(opts: DashboardOptions) {
     }
     if (url.pathname === '/api/schedules' || url.pathname.startsWith('/api/schedules/')) {
       await handleSchedules(req, res, url, host); return;
+    }
+    if (url.pathname === '/agents/topology') {
+      // /agents 页拓扑区的轮询片段：服务端渲染并转义，客户端整块替换
+      if (!opts.topology) { res.writeHead(404).end(); return; }
+      const rows = await topologyRows(await opts.topology(), adapters);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }).end(topologyHtml(rows, opts.context.scopeNames?.() ?? {})); return;
     }
     if (url.pathname === '/api/agents' || url.pathname.startsWith('/api/agents/') || url.pathname === '/agents/stream') {
       if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); sessionJson(res, 405, { error: '会话接口只支持 GET' }); return; }

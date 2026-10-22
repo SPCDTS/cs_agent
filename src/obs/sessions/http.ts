@@ -2,7 +2,8 @@ import type { ServerResponse } from 'node:http';
 import type { SseWriter } from '../http-util.js';
 import { redactSessionValue, RESPONSE_BYTES, utf8Slice } from './content.js';
 import { validateTraceRef } from './trace-content.js';
-import { SessionError, type SessionAdapter, type SessionFilter, type SessionRef } from './types.js';
+import { SessionError, type SessionAdapter, type SessionFilter, type SessionRef, type ThreadTopology } from './types.js';
+import { topologyRows } from '../topology.js';
 
 export type SessionAdapters = Partial<Record<SessionRef['backend'], SessionAdapter>>;
 const BACKENDS = ['codex', 'pi'] as const;
@@ -72,7 +73,7 @@ export function sessionLookup(adapters: SessionAdapters) {
 }
 
 /** 必须从 dashboard 已通过 cookie/Host 鉴权的分支调用。 */
-export function createSessionRoutes(adapters: SessionAdapters, sse: (res: ServerResponse) => SseWriter | null) {
+export function createSessionRoutes(adapters: SessionAdapters, sse: (res: ServerResponse) => SseWriter | null, topology?: () => Promise<ThreadTopology[]>) {
   const { getAdapter, findSession } = sessionLookup(adapters);
   return async function handleSessionRoute(url: URL, res: ServerResponse): Promise<void> {
     try {
@@ -86,6 +87,10 @@ export function createSessionRoutes(adapters: SessionAdapters, sse: (res: Server
             indexing: adapter?.progress ?? { indexing: false, files: 0, done: 0 } };
         }));
         sessionJson(res, 200, summaries); return;
+      }
+      if (p === '/api/agents/topology') {
+        if (!topology) throw new SessionError(404, '拓扑数据源未接入');
+        sessionJson(res, 200, await topologyRows(await topology(), adapters)); return;
       }
       if (p === '/agents/stream') {
         const id = segment(q.get('session') ?? '');

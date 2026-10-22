@@ -36,6 +36,20 @@ async function rig(initial?: string, map: unknown = { "group:1": { thread_id: 't
 }
 
 describe('Codex 会话正文适配器', () => {
+  it('子 agent 线程（session_meta.source.subagent.thread_spawn）跟随父线程的会话域与状态，标签为「父会话 › 名称」；父线程未映射时按普通未映射处理', async () => {
+    const r = await rig();
+    const child = (id: string, spawn: Record<string, unknown>) => record('session_meta', { id, source: { subagent: { thread_spawn: { depth: 1, ...spawn } } } }) + user('子任务');
+    await fs.writeFile(path.join(path.dirname(r.file), 'rollout-test-child-1.jsonl'), child('child-1', { parent_thread_id: 'thread-fixture', agent_nickname: 'researcher' }), 'utf8');
+    await fs.writeFile(path.join(path.dirname(r.file), 'rollout-test-child-2.jsonl'), child('child-2', { parent_thread_id: 'thread-fixture', agent_path: '/root/helper' }), 'utf8');
+    await fs.writeFile(path.join(path.dirname(r.file), 'rollout-test-child-3.jsonl'), child('child-3', { parent_thread_id: 'unknown-parent' }), 'utf8');
+    await r.adapter.refresh();
+    const sessions = await r.adapter.listSessions();
+    expect(sessions.find(s => s.id === 'child-1')).toMatchObject({ label: 'group:1 › researcher', scope: 'group:1', status: 'active' });
+    expect(sessions.find(s => s.id === 'child-2')).toMatchObject({ label: 'group:1 › helper', scope: 'group:1', status: 'active' });
+    expect(sessions.find(s => s.id === 'child-3')).toMatchObject({ label: 'child-3', status: 'archived' });
+    expect(sessions.find(s => s.id === 'child-3')?.scope).toBeUndefined();
+  });
+
   it('真实结构匿名样本：用户条目分轮、过滤重复事件、模型强度、工具配对及用量去重', async () => {
     const r = await rig();
     expect(await r.adapter.listSessions()).toEqual([expect.objectContaining({ backend: 'codex', id: 'thread-fixture', label: 'group:1', scope: 'group:1', status: 'active', turns: 1 })]);

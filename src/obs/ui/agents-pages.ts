@@ -5,7 +5,8 @@
 import type { Block, ObservedTurn, SessionRef } from '../sessions/types.js';
 import { contextBar } from './context-bar.js';
 import { fmtInt, type ContextUsage } from '../../shared/format.js';
-import { BACKENDS, csrfField, empty, esc, fmtTime, kv, stamp, statusStamp, time, uri } from './html.js';
+import { BACKENDS, csrfField, empty, esc, fmtTime, kv, stamp, statusStamp, threadLabel, time, uri, type Tone } from './html.js';
+import type { Activity, TopologyNode, TopologyRow } from '../sessions/types.js';
 import { scopeLabel } from '../../context/access.js';
 import { blocksHtml, contextHref, contextLinks, qqLine, turnFacts, turnHref, turnMeta, turnStamp, type SessionCtx } from './turn-view.js';
 
@@ -32,6 +33,33 @@ export const sessionStamp = (s: string) => { const [l, t] = SESSION_STATUS[s] ??
 export const copyId = (id: string) => `<span class="idbox"><code class="mono sel">${esc(id)}</code><button type="button" class="quiet copy" data-copy="${esc(id)}" aria-label="复制 ID">复制</button></span>`;
 /** codex 的 scope 是线程键（owner / scope），pi 是会话域。 */
 export const sessionScope = (backend: string, scope?: string) => !scope ? '—' : backend === 'codex' ? (scope === 'owner' ? 'owner 线程' : scope === 'shared' ? '共享线程（已归档）' : scopeLabel(scope)) : scopeLabel(scope);
+
+/* ───────── /agents 拓扑 ───────── */
+
+const AGENT_STATE: Record<TopologyNode['state'], [string, Tone]> = {
+  running: ['工作中', 'run'], idle: ['等待', 'queue'], done: ['已完成', 'ok'], failed: ['失败', 'fail'], stopped: ['已停止', 'idle'],
+};
+const clipText = (text: string, n: number) => text.length > n ? text.slice(0, n - 1) + '…' : text;
+const activityLine = (a?: Activity) => a ? `<div class="topo-act"><span class="faint">最近：</span>${esc(a.text)}${a.ts ? ` <span class="faint">· ${time(a.ts)}</span>` : ''}</div>` : '';
+
+function childNode(backend: Backend | undefined, c: TopologyNode): string {
+  const [label, tone] = AGENT_STATE[c.state] ?? [c.state, 'idle' as Tone];
+  return `<li class="topo-node"><div class="topo-head"><b>${esc(c.name)}</b>${stamp(label, tone)}${c.updated ? `<span class="faint">${time(c.updated)}</span>` : ''}${backend ? `<a href="${sessionHref(backend, c.session)}">查看过程</a>` : ''}</div>
+${c.task ? `<div class="topo-task" title="${esc(clipText(c.task, 1000))}"><span class="faint">任务：</span>${esc(clipText(c.task.replace(/\s+/g, ' '), 160))}</div>` : ''}${activityLine(c.activity)}${c.result && c.state !== 'running' ? `<div class="topo-task" title="${esc(clipText(c.result, 1000))}"><span class="faint">结果：</span>${esc(clipText(c.result.replace(/\s+/g, ' '), 160))}</div>` : ''}</li>`;
+}
+
+/** 拓扑片段：/agents 页首次渲染与 /agents/topology 轮询共用；空闲且没有子 agent 的会话折成一行。 */
+export function topologyHtml(rows: TopologyRow[], names: Record<string, string> = {}): string {
+  const shown = rows.filter(r => r.busy || r.children.length), quiet = rows.filter(r => !r.busy && !r.children.length);
+  const conv = (r: TopologyRow) => `<a href="/conversations/${uri(r.thread)}">${esc(threadLabel(r.thread, names[r.thread]))}</a>`;
+  const body = shown.map(r => {
+    const backend = r.backend && isBackend(r.backend) ? r.backend : undefined;
+    return `<div class="topo-thread"><div class="topo-node topo-main"><div class="topo-head">${conv(r)}${backend ? `<span class="pill">${esc(BACKENDS[backend] ?? backend)}</span>` : ''}${r.busy ? stamp('工作中', 'run') : stamp('空闲', 'idle')}${backend && r.session ? `<a href="${sessionHref(backend, r.session)}">主 agent 过程</a>` : ''}</div>${activityLine(r.activity)}</div>
+${r.children.length ? `<ul class="topo-children">${r.children.map(c => childNode(backend, c)).join('')}</ul>` : ''}</div>`;
+  }).join('');
+  return (body || '<p class="faint">现在没有会话在工作，也没有派出过子 agent。</p>')
+    + (quiet.length ? `<p class="hint mt">空闲：${quiet.map(conv).join('、')}</p>` : '');
+}
 
 /* ───────── /agents ───────── */
 
@@ -68,8 +96,8 @@ ${kv([['最近回合', s?.last_turn_at ? time(s.last_turn_at) : '—'], ['索引
 <p class="mt"><a class="btn" href="${sessionsHref(backend)}">查看会话列表</a>${backend === 'codex' ? ' <a class="btn quiet" href="/codex/agents-md">全局 AGENTS.md</a>' : ''}</p></section>`;
 }
 
-export function agentsBody(cards: Record<Backend, AgentCardInput>, csrf: string): string {
-  return `<div class="grid cols-2">${agentCard('codex', cards.codex, csrf)}${agentCard('pi', cards.pi, csrf)}</div>
+export function agentsBody(cards: Record<Backend, AgentCardInput>, csrf: string, topology?: string): string {
+  return `${topology === undefined ? '' : `<section class="sheet pad topo"><h2>拓扑 <small class="faint">主 agent 与它派出的子 agent，每 3 秒刷新</small></h2><div id="topology" aria-live="polite">${topology}</div></section>`}<div class="grid cols-2">${agentCard('codex', cards.codex, csrf)}${agentCard('pi', cards.pi, csrf)}</div>
 <p class="hint mt">占用条显示每条线程当前离上下文窗口还有多远；会话与回合正文来自 rollout / pi 公开接口的索引，只读。</p>`;
 }
 

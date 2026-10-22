@@ -9,6 +9,7 @@ import type { PiSessionSource } from '../agent/backends/pi-session-types.js';
 import type { MemoryAging, MemoryArchives } from './memory/types.js';
 import type { SettingsStore } from '../agent/settings.js';
 import type { LiveBus } from './live.js';
+import type { ThreadTopology } from './sessions/types.js';
 import type { ThreadKey } from '../agent/backends/types.js';
 import type { Trace } from '../shared/trace.js';
 import type { ContextUsageView } from '../shared/format.js';
@@ -36,6 +37,8 @@ export interface DashboardOptions {
   sendBreakers?: { list(): SendBreaker[]; reset(scope: string): boolean };
   /** 进行中会话的实时总线（/live） */
   live?: LiveBus;
+  /** Agent 拓扑：各会话的主 agent 与子 agent（/agents 页顶部） */
+  topology?: () => Promise<ThreadTopology[]>;
   resetCodex?: (key: ThreadKey) => Promise<string | null>;
   resetPi?: (key: string) => Promise<number | null>;
   compactCodex?: (key: ThreadKey) => Promise<'compacted' | 'unchanged'>;

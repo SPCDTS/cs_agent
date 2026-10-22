@@ -23,7 +23,7 @@ import { isScope } from "../../context/access.js";
 import { log } from "../../shared/log.js";
 import type { OwnerIds } from "../../shared/owners.js";
 import type { InboundRecord, TurnBinding } from "../../channel/types.js";
-import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome, TurnStatus } from "../host/types.js";
+import type { HostCallbacks, InputRef, StartTurnResult, SubagentView, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome, TurnStatus } from "../host/types.js";
 import type { RenderedInputs } from "../inbox.js";
 import type { SettingsSnapshot } from "./types.js";
 
@@ -158,14 +158,21 @@ export class PiBackend implements ThreadAdapter {
       .map(([key, id]) => [id, key]));
     const archived = new Map((archive?.rows ?? []).map(row => [row.conversation, row.key]));
     if (threads?.shared != null) archived.set(threads.shared, "shared");
+    // 活动会话派出的子 agent：标为"会话 › 名称"并随父会话活动（会话页可实时订阅），已停止的归档。
+    const children = new Map<number, { key: string; name: string; stopped: boolean }>();
+    for (const [id, key] of active) {
+      const doc = await this.harness.snapshot(SubagentDoc, id as ConversationId, context);
+      for (const child of Object.values(doc?.children ?? {})) children.set(child.conversation, { key, name: child.name, stopped: child.stopped });
+    }
     const result: PiConversation[] = [];
     let cursor: Cursor | undefined;
     do {
       const page = await this.harness.commit(tx => tx.scanConversations({ order: "ascending" }, 256, cursor), context);
       for (const row of page.items) {
         if (row.id === ROOT_CONVERSATION_ID) continue;
-        const key = active.get(row.id) ?? archived.get(row.id);
-        result.push({ id: String(row.id), label: key ?? String(row.id), status: active.has(row.id) ? "active" : "archived",
+        const key = active.get(row.id) ?? archived.get(row.id), child = children.get(row.id);
+        if (!key && child) result.push({ id: String(row.id), label: `${child.key} › ${child.name}`, scope: child.key, status: child.stopped ? "archived" : "active" });
+        else result.push({ id: String(row.id), label: key ?? String(row.id), status: active.has(row.id) ? "active" : "archived",
           ...(key ? { scope: key } : {}) });
       }
       cursor = page.next;
@@ -606,6 +613,19 @@ export class PiBackend implements ThreadAdapter {
     if (id === undefined) return 0;
     const doc = await this.harness.snapshot(SubagentDoc, id as ConversationId, context);
     return Object.values(doc?.children ?? {}).filter(child => !child.stopped && child.pending.length > 0).length;
+  }
+
+  /** 面板拓扑：会话派出的子 agent，最近派出的在前，最多 10 个（运行中的总在列）。 */
+  async subagents(threadKey: ThreadKey): Promise<SubagentView[]> {
+    const id = (await this.readThreadIds())[threadKey];
+    if (id === undefined) return [];
+    const doc = await this.harness.snapshot(SubagentDoc, id as ConversationId, context);
+    const views = Object.values(doc?.children ?? {}).sort((a, b) => b.createdAt - a.createdAt).map((child): SubagentView => ({
+      session: String(child.conversation), name: child.name, task: child.task,
+      state: child.stopped ? "stopped" : child.pending.length ? "running" : child.last?.status === "failed" ? "failed" : child.last ? "done" : "idle",
+      ...(child.last ? { result: child.last.text } : {}), updated: child.last?.at ?? child.createdAt,
+    }));
+    return views.filter((view, i) => i < 10 || view.state === "running");
   }
 
   /** 会话仍有工作：宿主未确认的 run、未结束的 run、在跑（有未结束汇报）的子 agent。后端切换须等它为 false。 */

@@ -265,8 +265,10 @@ export class CodexSessionAdapter implements SessionAdapter {
       }
     }
   }
+  /** 子 agent 线程跟随父线程的会话域与状态（活动父线程的子 agent 可实时订阅），标签为"父会话 › 名称"。 */
   private applyMapping(row: SessionIndexFile, mappings: Map<string, Mapping>): void {
-    const mapping = mappings.get(row.session.id);
+    const parent = row.state.parent, own = mappings.get(row.session.id), via = parent && mappings.get(parent.thread);
+    const mapping = own ?? (via && parent ? { ...via, label: `${via.label} › ${parent.name ?? row.session.id.slice(0, 8)}` } : undefined);
     delete row.session.scope;
     Object.assign(row.session, mapping ?? { label: row.session.id, status: 'archived' });
   }
@@ -276,6 +278,9 @@ export class CodexSessionAdapter implements SessionAdapter {
     if (record.type === 'session_meta') {
       const id = string(p.id) ?? string(p.session_id);
       if (id) { row.session.id = id; row.session.started = timestamp(p.timestamp) ?? ts; row.session.label = id; }
+      const spawn = object(object(object(p.source)?.subagent)?.thread_spawn);
+      const parent = string(spawn?.parent_thread_id), name = string(spawn?.agent_nickname) ?? string(spawn?.agent_path)?.split('/').filter(Boolean).at(-1);
+      if (parent) row.state.parent = { thread: parent, ...(name ? { name } : {}) };
     }
     row.session.updated = Math.max(row.session.updated, ts);
     const blocks = recordBlocks(record);
