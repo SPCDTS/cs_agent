@@ -327,6 +327,24 @@ describe("codex 唤醒回合继承派出者（§6.2、§7.3）", () => {
     await r.idle();
   });
 
+  it("回归：用户回合不清空未取用的汇报——成员汇报先到、用户回合后 owner 汇报到，下次唤醒合并两人 → 基础权限", async () => {
+    const script = new CodexScript();
+    const r = await residentRig({ backend: "codex", codex: script });
+    const m = await spawnIn(r, script, "5", "7", "child-m");
+    await spawnIn(r, script, "1", "7", "child-o");
+    // 成员的子 agent 先完成（此时客户端可能暂存了下一回合的开始事件），随后开了一个用户回合
+    activity(m.child, m.threadId, m.turnId, "child-m", "completed", "c-m");
+    await r.say("6", "随便聊聊", "7");
+    await r.idle();
+    activity(m.child, m.threadId, m.turnId, "child-o", "completed", "c-o");
+    const wake = script.wake(m.child, m.threadId);
+    await vi.waitFor(() => expect(r.host.thread(G)).toMatchObject({ turnId: "codex:" + wake.turnId, turnKind: "wake" }));
+    expect(r.host.thread(G)!.turnInherited).toBeUndefined();
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "wake" });
+    script.complete(wake);
+    await r.idle();
+  });
+
   it("输入并入继承了派出者身份的唤醒回合：按该唤醒回合的继承身份运行", async () => {
     const script = new CodexScript();
     const r = await residentRig({ backend: "codex", codex: script });

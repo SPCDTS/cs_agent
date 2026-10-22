@@ -94,10 +94,8 @@ interface TurnRec {
   awaitingStart?: boolean;
   /** 本适配器的输入并入了这个非本轮回合：结束时按真实结果交给宿主 */
   absorbed?: boolean;
-  /** 开始时求出的继承身份（服务端开的回合：本线程上一回合开始以来完成汇报的派出者合并）；缺省为会话基础权限 */
+  /** 判定为唤醒时求出的继承身份（本线程上次唤醒以来完成汇报的派出者合并）；缺省为会话基础权限 */
   inherited?: RunPerson;
-  /** 继承身份已在开始时求过 */
-  captured?: boolean;
   /** 宿主跟踪这个回合：user、wake，或宿主开轮让位接管的 compaction / suppressed */
   hostVisible: boolean;
   /** 判定前已结束：判定后立即按此结果处理 */
@@ -537,14 +535,6 @@ export class CodexBackend implements ThreadAdapter {
     if (!key || this.finished.has(codexTurnId)) return;
     const known = this.turnRecs.get(codexTurnId);
     const rec = this.record(key, threadId, codexTurnId);
-    if (!rec.captured) {
-      // 继承身份：上一回合开始以来本线程完成汇报的派出者合并（没有汇报 → 会话基础权限）；任何回合开始都清空
-      rec.captured = true;
-      const reports = this.reports.get(threadId) ?? [];
-      this.reports.delete(threadId);
-      const inherited = reports.length ? mergePersons(reports) : undefined;
-      if (inherited) rec.inherited = inherited;
-    }
     if (rec.kind !== undefined) {
       if (rec.kind === "user") this.host?.onTurnStarted(key, hostTurnId(codexTurnId), "host");
       return;
@@ -574,6 +564,13 @@ export class CodexBackend implements ThreadAdapter {
       rec.hostVisible = true;
       this.host?.onTurnStarted(rec.key, turnId, "host");
     } else if (kind === "wake") {
+      // 继承身份在判定为唤醒时取用并清空：上次唤醒以来本线程收到的全部完成汇报的派出者合并（没有 → 会话基础权限）。
+      // 用户回合不清空——客户端可能暂存开始事件，按开始时机清空会漏掉之后到达却属于下次唤醒的汇报；
+      // 多算进来只会合并得更严，不会更宽（§7.3 fail closed）。
+      const reports = this.reports.get(rec.threadId) ?? [];
+      this.reports.delete(rec.threadId);
+      const inherited = reports.length ? mergePersons(reports) : undefined;
+      if (inherited) rec.inherited = inherited;
       rec.hostVisible = toHost;
       rec.startedAt = Date.now();
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "codex", thread_key: rec.key, thread_id: rec.threadId, kind: "wake" } });
