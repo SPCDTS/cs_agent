@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadAgentConfig } from "../../src/agent/config.js";
-import { threadKeyForSource } from "../../src/agent/codex/runner.js";
-import { accessForSource, resolveOwner } from "../../src/context/access.js";
+import { resolveOwners } from "../../src/context/access.js";
 import { isAllowed, isTriggered, normalizeMessage, validatePolicy } from "../../src/qq/policy.js";
 import { isOwnerActor } from "../../src/shared/owners.js";
 import { groupEvent, privateEvent } from "../qq/fake-onebot.js";
@@ -12,7 +11,7 @@ describe("多 owner 配置与身份", () => {
   it("首项为主账号，列表去空白和重复项，allowUsers 独立保留", () => {
     const cfg = loadAgentConfig({ QQ_OWNER: ` ${owners[0]}, ${owners[1]},${owners[0]} `, QQ_ALLOW_USERS: "555,666" });
     expect(cfg).toMatchObject({ owner: owners[0], owners, allowUsers: ["555", "666"] });
-    expect(resolveOwner(owners.join(","), ["555"])).toBe(owners[0]);
+    expect(resolveOwners(owners.join(","), ["555"])).toEqual(owners);
   });
 
   it("空配置仅回退 allowUsers 第一项，通配符或空名单不产生 owner", () => {
@@ -30,21 +29,12 @@ describe("多 owner 配置与身份", () => {
     expect(() => validatePolicy({ owners: [owners[0], invalid], allowUsers: [], allowGroups: [], groupMentions: true })).toThrow(/owners/);
   });
 
-  it.each(owners)("账号 %s 私聊用 owner 线程；群聊仍用本群线程，两者都有 all 访问权", user_id => {
-    const source = { type: "private" as const, user_id, group_id: null, nickname: "测试" };
-    expect(accessForSource(source, owners)).toEqual({ kind: "all" });
-    expect(threadKeyForSource(source, owners)).toBe("owner");
-    const group = { ...source, type: "group" as const, group_id: "42" };
-    expect(accessForSource(group, owners)).toEqual({ kind: "all" });
-    expect(threadKeyForSource(group, owners)).toBe("group:42");
+  it.each(owners)("账号 %s 的 owner 身份按完整 qq: 前缀匹配", user_id => {
     expect(isOwnerActor(owners, `qq:${user_id}`)).toBe(true);
     expect(isOwnerActor(owners, user_id)).toBe(false);
   });
 
-  it("普通私聊保持隔离，owner 身份需要完整匹配", () => {
-    const source = { type: "private" as const, user_id: "555", group_id: null, nickname: "测试" };
-    expect(accessForSource(source, owners)).toEqual({ kind: "scope", scope: "private:555" });
-    expect(threadKeyForSource(source, owners)).toBe("private:555");
+  it("owner 身份需要完整匹配", () => {
     expect(isOwnerActor(owners, "qq:384563185")).toBe(false);
     expect(isOwnerActor([], "qq:undefined")).toBe(false);
   });

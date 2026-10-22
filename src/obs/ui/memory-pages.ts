@@ -290,5 +290,3 @@ export function archivesPageBody(a: ArchivesResult | { error: string }): string 
 <p class="hint">次数是观测到的压缩事件条数，不等于压缩成功次数；压缩摘要正文见对应会话的回合流。</p>` : empty('没有观测到 Pi 的上下文压缩事件。')}</section>`;
   return out;
 }
-
-export const placeholderBody = (what: string, group: string) => crumbs([['记忆', '/memory'], [what]]) + empty(`${esc(what)}：待 ${esc(group)}。路由已预留，数据落地后启用。`);

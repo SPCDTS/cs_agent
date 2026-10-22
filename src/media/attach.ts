@@ -2,7 +2,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import path from "node:path";
-import { collectNewImages } from "./image-collect.js";
 import { isSupportedImage, MAX_IMAGES, MIN_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from "./limits.js";
 
 export const DEFAULT_FILE_DENY_EXT = [".exe", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".scr", ".msi", ".com", ".lnk"];
@@ -97,87 +96,12 @@ export function attachmentName(raw: string): string {
   return name;
 }
 
-// 同一目录的并行工具调用串行登记，数量校验和 manifest 更新属于同一临界区。
-const queues = new Map<string, Promise<unknown>>();
-async function serial<T>(dir: string, fn: () => Promise<T>): Promise<T> {
-  const key = path.resolve(dir);
-  const task = (queues.get(key) ?? Promise.resolve()).catch(() => {}).then(fn);
-  queues.set(key, task);
-  try { return await task; } finally { if (queues.get(key) === task) queues.delete(key); }
-}
-
-export async function readFileAttachments(fileDir: string): Promise<FileAttachment[]> {
-  const file = path.join(fileDir, "manifest.json");
-  let data: Buffer;
-  try { data = await readBounded(file, 1, 1024 * 1024); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
-  const rows: unknown = JSON.parse(data.toString("utf8"));
-  if (!Array.isArray(rows) || rows.some((row, index) => !row || typeof row.originalPath !== "string" ||
-    typeof row.name !== "string" || attachmentName(row.name) !== row.name || row.filename !== `${index + 1}-${row.name}` ||
-    !Number.isSafeInteger(row.bytes) || row.bytes < 1 || !/^[a-f0-9]{64}$/.test(row.sha256) ||
-    !["workspace", "generated", "media"].includes(row.source))) throw new Error("附件 manifest 格式无效");
-  return rows as FileAttachment[];
-}
-
 /** 回复阶段只读副本，验证内容与登记时一致；不再读取原始路径。 */
 export async function readAttachmentData(fileDir: string, entry: FileAttachment): Promise<Buffer> {
   if (path.basename(entry.filename) !== entry.filename || /[\\/]/.test(entry.filename)) throw new Error("附件副本路径无效");
   const data = await readBounded(path.join(fileDir, entry.filename), entry.bytes, entry.bytes);
   if (digest(data) !== entry.sha256) throw new Error("附件副本校验失败");
   return data;
-}
-
-export async function registerFileAttachment(o: AttachmentSource & { name?: string; fileDir: string; limits?: AttachmentLimits }): Promise<string> {
-  const limits = o.limits ?? DEFAULT_ATTACHMENT_LIMITS;
-  const name = attachmentName(o.name ?? o.path);
-  if (limits.denyExtensions.map(ext => ext.trim().toLowerCase()).includes(path.extname(name).toLowerCase())) throw new Error("不允许发送此扩展名的文件");
-  const source = await sourceFile(o, 1, limits.maxBytes);
-  return serial(o.fileDir, async () => {
-    await fs.mkdir(o.fileDir, { recursive: true });
-    await noSymlinks(o.fileDir);
-    const rows = await readFileAttachments(o.fileDir);
-    let index = rows.findIndex(row => row.sha256 === source.sha256);
-    if (index < 0) {
-      if (rows.length >= limits.maxFiles) throw new Error(`每次回复最多 ${limits.maxFiles} 个文件`);
-      index = rows.length;
-      const filename = `${index + 1}-${name}`;
-      // 崩溃留下的未登记副本可安全替换；已登记副本从不重写。
-      const tmp = path.join(o.fileDir, `.attach-${randomUUID()}.tmp`);
-      await fs.writeFile(tmp, source.data, { flag: "wx" });
-      await fs.rename(tmp, path.join(o.fileDir, filename));
-      rows.push({ originalPath: source.canonical, filename, name, bytes: source.data.length, sha256: source.sha256, source: source.source });
-      const manifestTmp = path.join(o.fileDir, `.manifest-${randomUUID()}.tmp`);
-      await fs.writeFile(manifestTmp, JSON.stringify(rows, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
-      await fs.rename(manifestTmp, path.join(o.fileDir, "manifest.json"));
-    }
-    return `已登记，将随回复发送（第 ${index + 1}/${limits.maxFiles} 个，${(rows[index]!.bytes / 1024 / 1024).toFixed(2)} MiB）`;
-  });
-}
-
-export async function registerImageAttachment(o: AttachmentSource & { attachDir: string }): Promise<string> {
-  const source = await sourceFile(o, MIN_IMAGE_BYTES, MAX_IMAGE_BYTES);
-  if (!isSupportedImage(source.data)) throw new Error("仅支持 PNG、JPEG、WebP、GIF 图片");
-  return serial(o.attachDir, async () => {
-    await fs.mkdir(o.attachDir, { recursive: true });
-    await noSymlinks(o.attachDir);
-    const images = await collectNewImages(o.attachDir, new Set(), Number.MAX_SAFE_INTEGER);
-    let total = 0;
-    for (const [index, image] of images.entries()) {
-      const data = await readBounded(image, MIN_IMAGE_BYTES, MAX_IMAGE_BYTES);
-      total += data.length;
-      if (digest(data) === source.sha256) return `已登记，将随回复发送（第 ${index + 1}/${MAX_IMAGES} 张）`;
-    }
-    if (images.length >= MAX_IMAGES) throw new Error(`每次回复最多 ${MAX_IMAGES} 张图`);
-    if (total + source.data.length > MAX_TOTAL_IMAGE_BYTES) throw new Error("每次回复图片合计不超过 20 MiB");
-    let n = 1;
-    let dir: string;
-    for (;;) {
-      dir = path.join(o.attachDir, `attach-${n++}`);
-      try { await fs.mkdir(dir); break; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-    }
-    await fs.writeFile(path.join(dir, attachmentName(o.path)), source.data, { flag: "wx" });
-    return `已登记，将随回复发送（第 ${images.length + 1}/${MAX_IMAGES} 张）`;
-  });
 }
 
 /** send_message 与旧附件登记共用来源、符号链接、大小、格式及扩展名校验。 */

@@ -1,12 +1,11 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { resolveAutoEffort, type EffortMessage, type EffortRouterDeps } from "./effort-router.js";
-import { backendNameFor, type BackendSelector } from "./backends/select.js";
+import { backendNameFor } from "./backends/select.js";
 import type { BackendName, SettingsSnapshot } from "./backends/types.js";
 import { isReasoningEffort } from "./codex/runner.js";
 import type { RuntimeSettings } from "./settings.js";
 
 export interface TurnSettingsDeps {
-  backends?: Pick<BackendSelector, "select">;
   /** 生产入口一次读取全部设置，避免分别采样。 */
   currentSettings?: () => Readonly<RuntimeSettings>;
   codexReasoningEffort?: string | (() => string);
@@ -27,7 +26,7 @@ export function createTurnSettings(deps: TurnSettingsDeps) {
     const codexFallback = isReasoningEffort(configured) ? configured : "high";
     const piFallback = deps.piThinkingLevel ?? "low";
     const effort = current?.codexReasoningEffort ?? codexFallback;
-    const backend = forced ?? (current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : deps.backends?.select(scope).name ?? "codex");
+    const backend = forced ?? (current ? backendNameFor(scope, current.agentBackend, current.backendOverrides) : "codex");
     const snapshot: SettingsSnapshot = { backend, codexReasoningEffort: isReasoningEffort(effort) ? effort : codexFallback,
       ...(current ? { codexModel: current.codexModel, piModel: current.piModel,
         piThinkingLevel: current.piThinkingLevel === "auto" ? piFallback : current.piThinkingLevel } : {}), effortSource: "fixed" };

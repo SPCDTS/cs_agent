@@ -34,12 +34,6 @@ export function registerTemporarySecrets(values: Iterable<string | undefined>): 
     }
   };
 }
-/** 子进程不继承凭据名称，也不继承以普通变量名保存的已注册秘密。 */
-export function withoutSecretEnv(env: NodeJS.ProcessEnv): Record<string, string> {
-  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] =>
-    entry[1] !== undefined && !sensitive.test(entry[0]) &&
-    !allSecrets().some(secret => entry[1]!.includes(secret))));
-}
 export function redactText(text: string, limit = 500): string {
   let out = text;
   for (const secret of allSecrets().sort((a, b) => b.length - a.length)) out = out.split(secret).join('[已隐藏]');

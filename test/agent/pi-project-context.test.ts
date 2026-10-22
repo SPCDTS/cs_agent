@@ -1,9 +1,11 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { loadProjectContextFiles, ProjectContextLoader, renderProjectContext } from "../../src/agent/pi-tools/project-context.js";
+import { ProjectContextLoader, renderProjectContext, type ProjectContextOptions } from "../../src/agent/pi-tools/project-context.js";
 import { log } from "../../src/shared/log.js";
 import { tmp } from "./helpers.js";
+
+const loadProjectContextFiles = (o: ProjectContextOptions) => new ProjectContextLoader(o).load(o.cwd);
 
 const names = ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
 let root: string, dataDir: string, workspaceDir: string, cwd: string;

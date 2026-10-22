@@ -4,7 +4,6 @@ import { sendFixture } from "../agent/send-fixture.js";
 import { mediaFixture } from "../context/media-fixture.js";
 import { promises as fs } from "node:fs";
 import { TRANSPARENT_PNG } from "../agent/helpers.js";
-import { resolveAttachmentDir } from "../../src/media/attach-paths.js";
 import type { CallBinding } from "../../src/context/media-recall-server.js";
 import { imSendRig as setup } from "./im-fixture.js";
 
@@ -49,18 +48,6 @@ it("已召回同范围媒体允许；生成图片来源只允许可信绑定的�
   await f.service.send({ ...f.binding, extraRoots: [generated] }, { text: "生图", images: [path.join(generated, "a.png")] }, "g");
   await expect(f.service.send({ ...f.binding, extraRoots: [generated] }, { text: "其他线程", images: [path.join(other, "a.png")] }, "bad")).rejects.toThrow();
 });
-it("目录解析仍拒绝相对路径、注入字符、..、根目录、深层目录和链接", async () => {
-  const f = sendFixture(), root = f.dir;
-  for (const dir of ["relative", root, path.join(root, "a", "b"), `${root}/a/../x`, path.join(root, 'bad"'), path.join(root, "bad name")]) {
-    await expect(resolveAttachmentDir(dir, root, "QQ_FILE_DIR")).rejects.toThrow();
-  }
-  const valid = path.join(root, "ticket_1");
-  expect(await resolveAttachmentDir(valid, root, "QQ_FILE_DIR")).toBe(await fs.realpath(valid));
-  const link = path.join(root, "alias"); await fs.symlink(valid, link, "junction");
-  await expect(resolveAttachmentDir(link, root, "QQ_FILE_DIR")).rejects.toThrow();
-});
-
-
 it.each(["sent", "sending", "uncertain"] as const)("im 返回 %s 无 message_id 的明确非错误结果，不诱导再次发送", async status => {
   const f = await setup();
   // 调用键为 MCP 的 _meta.callId：<会话>:<callId>。

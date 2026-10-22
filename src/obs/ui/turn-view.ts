@@ -10,11 +10,6 @@ import { scopeLabel } from '../../context/access.js';
 export const TURN_STATUS: Record<string, [string, Tone]> = { ok: ['完成', 'ok'], failed: ['失败', 'fail'], running: ['进行中', 'run'] };
 export const turnStamp = (status: string) => { const [label, tone] = TURN_STATUS[status] ?? [status || '未知', 'idle' as Tone]; return stamp(label, tone); };
 
-export const KIND_LABEL: Record<string, string> = {
-  user: '用户', assistant: '助手', thinking: '思考', tool_call: '工具调用', tool_result: '工具结果', image: '图片',
-  event: '事件', compaction: '上下文压缩', system_change: '系统变更',
-};
-
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const str = (v: unknown): string | undefined => typeof v === 'string' && v ? v : undefined;
 export const isRequest = (b: Block) => b.kind === 'event' && b.meta?.type === 'model_request';

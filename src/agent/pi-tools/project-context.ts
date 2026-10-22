@@ -8,11 +8,6 @@ const MAX_BYTES = 128 * 1024;
 export interface ProjectContextFile { path: string; content: string }
 export interface ProjectContextOptions { dataDir: string; workspaceDir: string; cwd?: string }
 
-/** 单次加载；持续渲染应复用 ProjectContextLoader，以保留缓存与告警去重。 */
-export function loadProjectContextFiles(options: ProjectContextOptions): Promise<ProjectContextFile[]> {
-  return new ProjectContextLoader(options).load(options.cwd);
-}
-
 export function renderProjectContext(files: readonly ProjectContextFile[]): string | undefined {
   if (!files.length) return undefined;
   const attribute = (value: string) => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;")

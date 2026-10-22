@@ -1,6 +1,5 @@
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import { SEND_RULE } from "../send-service.js";
-import { attachmentDirs, validateAttachmentPath } from "../../media/attach-paths.js";
 import { codexWorkspacePolicy, prepareCodexWorkspace } from "./workspace.js";
 import type { ContextUsageStore } from "../context-usage.js";
 import { loadCodexContextWindow } from "./model-catalog.js";
@@ -83,15 +82,6 @@ export function validModel(model: string): string {
 /** 线程键与会话域一致；任何外部输入都必须通过 isThreadKey。 */
 export function isThreadKey(value: unknown): value is ThreadKey {
   return value === "owner" || isScope(value);
-}
-
-export function threadKeyForSource(source: InputSource | undefined, owners: OwnerIds): ThreadKey {
-  if (!source) throw new Error("缺少 codex 会话来源");
-  // 线程按来源隔离；owner 群回合读取 all，但仍使用来源群线程。
-  const key = source.type === "group" ? `group:${source.group_id}`
-    : isOwner(owners, source.user_id) ? "owner" : `private:${source.user_id}`;
-  if (!isThreadKey(key)) throw new Error("非法的 codex 会话来源");
-  return key;
 }
 
 /** 传给 codex 子进程的环境变量白名单（其余一律不传，尤其是 NAPCAT_TOKEN、*_API_KEY 等配置） */
@@ -212,20 +202,6 @@ export const DEFAULT_CODEX_PROMPT = `## 回复规则
 - 绝不登录任何账号，不填写或提交表单中的个人信息；用完立即关闭页面。
 `;
 
-/** 完整默认模板；运行时由 CodexPromptStore 拼入持久化的自定义内容。 */
-export function renderAgentsMd(o: AgentsMdOptions): string {
-  return `${renderManagedAgentsMd(o)}\n\n${DEFAULT_CODEX_PROMPT}`;
-}
-
-/**
- * codex 命令沙箱实际可写的目录：容器内取 entrypoint 导出的 CODEX_EFFECTIVE_WRITABLE_ROOTS（已规范化、校验）；
- * 本地开发没有 entrypoint 时退回 CODEX_WRITABLE_ROOTS 原值。
- */
-export function effectiveWritableRoots(env: NodeJS.ProcessEnv, configured: string): string[] {
-  const raw = env.CODEX_EFFECTIVE_WRITABLE_ROOTS ?? configured;
-  return raw.split(",").map((r) => r.trim()).filter((r) => r.startsWith("/"));
-}
-
 const MANAGED_FILE_MAX_BYTES = 256 * 1024;
 
 function managedReplacementKind(stat: Stats): string | undefined {
@@ -308,14 +284,6 @@ export async function writeManagedFile(file: string, content: string): Promise<"
     }
     return "written";
   } finally { await fs.rm(tmp, { force: true }); }
-}
-
-/** 受管全局规则：每次启动按当前可写目录重写 $CODEX_HOME/AGENTS.md（codex 加载线程时读取）。返回文件路径。 */
-export async function writeGlobalAgentsMd(codexHome: string, o: AgentsMdOptions): Promise<string> {
-  await fs.mkdir(codexHome, { recursive: true });
-  const file = path.join(codexHome, "AGENTS.md");
-  await writeManagedFile(file, renderAgentsMd(o));
-  return file;
 }
 
 
@@ -509,12 +477,11 @@ export class CodexRunner {
     const instructions = managed + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
     await writeManagedFile(path.join(policy.workspaceDir, "AGENTS.md"),
       `<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 在加载线程时生成，改动会被覆盖。\n\n${instructions}\n`);
-    const attachment = attachmentDirs(dataDir, key);
     const port = this.opts.mediaRecallPort ?? 8790;
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("非法召回配置");
     const servers: McpThreadEnv = {
       im: { MEDIA_RECALL_PORT: String(port), ...mcpEnv.im },
-      qq_context: { MEDIA_RECALL_PORT: String(port), ...qqAttachmentEnv(attachment.attachDir, attachment.fileDir, policy.workspaceDir), ...mcpEnv.qq_context },
+      qq_context: { MEDIA_RECALL_PORT: String(port), ...mcpEnv.qq_context },
     };
     const config: Record<string, unknown> = { ...policy.config, project_doc_max_bytes: 131072,
       "mcp_servers.qq_context.tool_timeout_sec": 70 };
@@ -768,12 +735,6 @@ function groupLabel(s: InputSource): string {
   return name ? `群 ${name}(${s.group_id})` : `群 ${s.group_id}`;
 }
 
-export function sourceLabel(s: InputSource): string {
-  const nick = s.nickname ? headerNickname(s.nickname) : "";
-  const who = nick ? `${nick}(${s.user_id})` : s.user_id;
-  return s.type === "group" ? `QQ ${groupLabel(s)} 成员 ${who}` : `QQ 私聊用户 ${who}`;
-}
-
 const pad2 = (n: number) => String(n).padStart(2, "0");
 function localStamp(sec: number): string {
   const d = new Date(sec * 1000);
@@ -807,9 +768,3 @@ export function buildCodexPrompt(
   return lines.join("\n");
 }
 
-/** 线程级附件目录：本会话的图片、文件目录与工作区。值须为安全绝对路径（与 entrypoint 的 toml_path 同一口径）。 */
-export function qqAttachmentEnv(attachDir: string, fileDir: string, workdir: string): Record<string, string> {
-  const env = { QQ_ATTACH_DIR: attachDir, QQ_FILE_DIR: fileDir, QQ_WORKDIR: workdir };
-  for (const [key, value] of Object.entries(env)) validateAttachmentPath(value, key);
-  return env;
-}

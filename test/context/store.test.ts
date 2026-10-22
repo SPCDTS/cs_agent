@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { accessForSource, parseAccess, resolveOwner, type Access } from "../../src/context/access.js";
+import { parseAccess, resolveOwners, type Access } from "../../src/context/access.js";
 import { formatMessage, formatMessageFull, formatRecent, formatSearch, formatSummary, joinCapped } from "../../src/context/format.js";
 import { ContextStore } from "../../src/context/store.js";
 import type { InboundMessage } from "../../src/channel/types.js";
@@ -37,13 +37,9 @@ describe("access", () => {
     expect(parseAccess(`group:${G}`)).toEqual(grp);
     expect(parseAccess("private:10000001")).toEqual({ kind: "scope", scope: "private:10000001" });
     for (const bad of [undefined, "", "group:", "group:abc", "everyone", "group:1;rm"]) expect(parseAccess(bad)).toBeUndefined();
-    expect(accessForSource({ type: "group", user_id: "1", group_id: G }, "1")).toEqual(all);
-    expect(accessForSource({ type: "group", user_id: "2", group_id: G }, "1")).toEqual(grp);
-    expect(accessForSource({ type: "private", user_id: "10000001", group_id: null }, "10000001")).toEqual(all);
-    expect(accessForSource({ type: "private", user_id: "555", group_id: null }, "10000001")).toEqual({ kind: "scope", scope: "private:555" });
-    expect(resolveOwner("", ["111", "222"])).toBe("111");
-    expect(resolveOwner("333", ["111"])).toBe("333");
-    expect(resolveOwner("", "*")).toBeUndefined();
+    expect(resolveOwners("", ["111", "222"])).toEqual(["111"]);
+    expect(resolveOwners("333", ["111"])).toEqual(["333"]);
+    expect(resolveOwners("", "*")).toEqual([]);
   });
 });
 

@@ -18,16 +18,6 @@ export function scopeOf(m: { message_type: ChatType; group_id: string | null; us
   return m.message_type === "group" ? `group:${m.group_id}` : `private:${m.user_id}`;
 }
 
-/** 输入来源 → 访问范围：owner → all；其他群消息 → 本群；其他私聊 → 本人。 */
-export function accessForSource(
-  source: { type: ChatType; user_id: string; group_id: string | null },
-  owners: OwnerIds,
-): Access {
-  if (isOwner(owners, source.user_id)) return { kind: "all" };
-  if (source.type === "group") return { kind: "scope", scope: `group:${source.group_id}` };
-  return { kind: "scope", scope: `private:${source.user_id}` };
-}
-
 export function accessToString(a: Access): string {
   return a.kind === "all" ? "all" : a.scope;
 }
@@ -44,11 +34,6 @@ export function parseAccess(value: string | undefined): Access | undefined {
 export function resolveOwners(qqOwner: string, allowUsers: string[] | "*"): string[] {
   const owners = qqOwner.split(",").map(id => id.trim()).filter(Boolean);
   return owners.length ? [...new Set(owners)] : allowUsers === "*" ? [] : allowUsers.slice(0, 1);
-}
-
-/** 需要单一投递目标或面板身份时使用首个 owner。 */
-export function resolveOwner(qqOwner: string, allowUsers: string[] | "*"): string | undefined {
-  return resolveOwners(qqOwner, allowUsers)[0];
 }
 
 export function scopeLabel(scope: string): string {
