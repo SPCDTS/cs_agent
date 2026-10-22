@@ -65,7 +65,7 @@ describe("定时工具", () => {
     expect((await f.tools.permissions(member)).schedule).toBe(false);
     const wake = { ...f.binding(), identity: { kind: "wake" as const } };
     expect(await f.tools.permissions(wake)).toEqual({ schedule: false, scheduleControl: false });
-    await expect(f.tools.tool(wake, "schedule_list", {})).rejects.toThrow("唤醒");
+    await expect(f.tools.tool(wake, "schedule_list", {})).rejects.toThrow("基础权限");
   });
 
   it("管理动作返回 id、状态和北京时间；run_now 不改计划，update 不改来源", async () => {

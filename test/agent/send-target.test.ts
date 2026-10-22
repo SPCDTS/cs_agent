@@ -161,7 +161,7 @@ it("即使 owner 有权且 bot 已入群，目标群也必须在 QQ_ALLOW_GROUPS
 
 it("唤醒回合不能主动发往别处；定时回合发往本会话也计主动额度且不 @", async () => {
   const f = await grantsFixture();
-  await expect(f.service.send({ ...f.binding, identity: { kind: "wake" } }, { target: "qq:group:8", text: "越权" }, "w")).rejects.toThrow("唤醒回合");
+  await expect(f.service.send({ ...f.binding, identity: { kind: "wake" } }, { target: "qq:group:8", text: "越权" }, "w")).rejects.toThrow("基础权限");
   await f.service.send({ ...f.binding, identity: { kind: "scheduled", creator: "1" } }, { text: "定时通知" }, "s");
   expect(f.store.getOutbox("group:7:s")).toMatchObject({ proactive: true, mention_user_id: null });
 });

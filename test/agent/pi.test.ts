@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
 import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prompt.js";
-import { PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
+import { PI_SUBAGENT_RULE, PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
 import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
 import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
 import { threadKeyOf } from "../../src/channel/ticket.js";
@@ -202,7 +202,8 @@ describe("pi 常驻后端：工具身份随本轮绑定", () => {
     expect(toolResults(seen!).every(m => m.content.every(c => c.type === "text"))).toBe(true);
     r.script.push(call(["qq_image", { message_id: "123" }]), reply());
     await turn(r, "1", "owner 召回");
-    expect(recall).toHaveBeenLastCalledWith({ kind: "all" }, "123", expect.any(AbortSignal));
+    // owner 在群里也只读本群
+    expect(recall).toHaveBeenLastCalledWith({ kind: "scope", scope: "group:7" }, "123", expect.any(AbortSignal));
   });
 
   it("web_search 经 faux 模型调用；输入带来源头与引用", async () => {
@@ -251,8 +252,9 @@ describe("pi 常驻后端：工具身份随本轮绑定", () => {
     expect(seen).toContain("范围");
     await turn(r, "5", "外部路径");
     expect(r.imageBackend.submit).toHaveBeenCalledTimes(1);
+    // owner 在别群也不能引用本群的图（只读本群）
     await turn(r, "1", "owner", "8");
-    expect(r.imageBackend.submit).toHaveBeenCalledTimes(2);
+    expect(r.imageBackend.submit).toHaveBeenCalledTimes(1);
   });
 
   it("生图写入 images/<会话>/call-<摘要>/ 并返回校验过的文件", async () => {
@@ -444,7 +446,7 @@ describe("pi system 提示热更新", () => {
     await turn(r, "5", "二");
     expect(JSON.stringify(seen[1])).toContain("新系统提示：简短中文。");
     for (const transcript of seen) {
-      for (const system of transcript.messages.filter(m => m.role === "system")) expect(getSystemMessageText(system).split(PI_WORKSPACE_RULE)).toHaveLength(2);
+      for (const system of transcript.messages.filter(m => m.role === "system")) for (const rule of [PI_WORKSPACE_RULE, PI_SUBAGENT_RULE]) expect(getSystemMessageText(system).split(rule)).toHaveLength(2);
     }
     expect(await new PiPromptLoader(r.dir).read()).toBe("新系统提示：简短中文。");
   });
@@ -740,7 +742,7 @@ describe("pi send_message 工具", () => {
 });
 
 describe("pi 身份随发言人切换（§7.3）", () => {
-  it("owner 群回合 all 读取但留在群线程；工具与身份随群内发言人切换", async () => {
+  it("owner 群回合只读本群且留在群线程；工具与身份随群内发言人切换", async () => {
     const observed: TranscriptContext[] = [];
     const inspect = (ctx: TranscriptContext) => { observed.push(ctx); return reply(); };
     const r = await rig([
@@ -755,7 +757,8 @@ describe("pi 身份随发言人切换（§7.3）", () => {
     await turn(r, "1", "owner 在群里");
     const ids = await r.pi.readThreadIds();
     expect(ids.owner).toBeUndefined();
-    expect(results(observed[0]!)).toContain("owner 可读取的私聊内容");
+    // owner 在群里只读本群：私聊内容不进群线程
+    expect(results(observed[0]!)).not.toContain("owner 可读取的私聊内容");
     expect(r.texts("8")).toEqual(["跨会话消息"]);
     expect(r.texts("7")).toEqual(["来源群回复"]);
     const conv = await convOf(r, "group:7");

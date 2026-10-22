@@ -26,6 +26,7 @@ import { SkillsLoader } from "./skills.js";
 import { DeepSeekWeb } from "./web.js";
 
 export const PI_WORKSPACE_RULE = "当前目录就是你的工作区，文件跨回合保留。普通文件一律用相对路径写在这里，不要尝试其他目录。bash 的 /tmp 每条命令结束即清空，文件工具也不能写入 /tmp；图片工具和有权限的技能操作使用各自指定的目录。";
+export const PI_SUBAGENT_RULE = "耗时较长的任务（预计超过几分钟，或需要大量搜索、下载、批量处理）交给子 agent 在后台做：先用 send_message 简短告诉用户已经开始，用 subagent 派出后立即结束本轮，不要等待或反复查看。收到“[子 agent 完成]”或“[子 agent 失败]”后，把结果整理成结论用 send_message 发给用户。很快能做完的事直接做，不要派子 agent。";
 
 export interface PiToolsOptions {
   sendService?: SendService;
@@ -44,7 +45,7 @@ export interface PiToolsOptions {
   instrumentation?: RecallObserver;
   channel?: Pick<Channel, "listChats">;
   mediaRecall?: Pick<MediaRecall, "recall">;
-  /** 工具调用时求出本轮绑定（会话宿主的当前回合；子会话固定为唤醒）；未绑定的会话返回 undefined。 */
+  /** 工具调用时求出本轮绑定（会话宿主的当前回合；子会话只有会话基础权限）；未绑定的会话返回 undefined。 */
   binding(conversationId: number): Promise<PiCallBinding | undefined>;
 }
 
@@ -94,7 +95,7 @@ export function createPiExtension(opts: PiToolsOptions) {
   return defineExtension({
     name: "cs-pi",
     sections: [
-      section("cs-pi", async () => SEND_RULE + "\n" + QQ_LINK_RULE + "\n" + PI_WORKSPACE_RULE + "\n\n" + await prompt.read(), { tag: false }),
+      section("cs-pi", async () => SEND_RULE + "\n" + QQ_LINK_RULE + "\n" + PI_WORKSPACE_RULE + "\n" + PI_SUBAGENT_RULE + "\n\n" + await prompt.read(), { tag: false }),
       section("project-context", input => projectContext.render(input.env?.cwd), { tag: false }),
       section("skills", input => skills?.render(input.env instanceof PiExecutionEnv && input.env.policy.options.request.senderIsOwner === true), { tag: false }),
     ],
@@ -129,10 +130,7 @@ export function createPiExtension(opts: PiToolsOptions) {
           return { block: reason };
         };
         // 不按回合计调用次数（失控防护交给 bridge 发送规则，§9）；身份相关的限制在各工具执行时复核。
-        if (call.name.startsWith("auth_")) {
-          const owner = bound.identity.kind === "user" && bound.senderIsOwner;
-          return owner ? undefined : block("授权工具仅限 owner 回合");
-        }
+        if (call.name.startsWith("auth_")) return bound.auth ? undefined : block("授权工具仅限 owner 回合");
         return undefined;
       }, afterTool: async (call, result, api) => {
         const bound = await opts.binding(Number(api.conversationId));

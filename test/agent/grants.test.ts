@@ -54,19 +54,20 @@ it("按 cap 撤销保留剩余授权，全撤销删除；不存在的授权撤�
   expect(f.event).toHaveBeenCalledTimes(3);
 });
 
-it("非 owner 直接调用全部 auth 工具均拒绝；非法身份或会话地址拒绝；唤醒回合没有任何主动权限", async () => {
+it("非 owner 直接调用全部 auth 工具均拒绝；非法身份只剩基础权限，非法会话地址拒绝；没有继承的唤醒回合没有任何主动权限", async () => {
   const f = await grantsFixture("99");
   for (const name of ["auth_grant", "auth_revoke", "auth_list"] as const) {
     await expect(f.grants.tool(f.binding, name, {})).rejects.toThrow("owner");
   }
-  await expect(f.grants.permissions({ ...f.binding, identity: { kind: "user", sender: "01" } })).rejects.toThrow("身份");
+  // 无法确证的身份不报错也不提升：只有会话基础权限（fail closed）
+  expect(await f.grants.permissions({ ...f.binding, identity: { kind: "user", sender: "01" } })).toEqual({ actorIsOwner: false, target: false, auth: false });
   await expect(f.grants.permissions({ ...f.binding, scope: "all" })).rejects.toThrow("地址");
-  // owner 线程的唤醒回合同样没有 target / 授权：需要别的权限时由模型在本会话请用户确认。
+  // 没有继承身份的唤醒回合（owner 线程也一样，不再有 owner 线程例外）没有 target / 授权：需要别的权限时由模型在本会话请用户确认。
   const owner = await grantsFixture();
   for (const g of [f, owner]) {
     const wake = { ...g.binding, identity: { kind: "wake" as const } };
     expect(await g.grants.permissions(wake)).toEqual({ actorIsOwner: false, target: false, auth: false });
-    await expect(g.grants.authorizeSend(wake, "qq:group:8")).rejects.toThrow("唤醒");
+    await expect(g.grants.authorizeSend(wake, "qq:group:8")).rejects.toThrow("基础权限");
     await expect(g.grants.tool(wake, "auth_list", {})).rejects.toThrow("owner");
   }
 });

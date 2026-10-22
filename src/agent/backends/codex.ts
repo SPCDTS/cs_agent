@@ -16,6 +16,10 @@
  * - 插话 turn/steer（no_active_turn、not_steerable 都回报 no_active_turn，宿主改为排队）。
  * - 结束：turn/completed（completed → completed；interrupted、failed 或此前有不再重试的 error → failed）、
  *   进程掉线 → lost（宿主发 §8.1 的中断提示）。不设单轮时限，停滞由宿主看门狗按事件判定（条目、子 agent 活动都算）。
+ * - 唤醒身份（§6.2、§7.3）：子 agent 派出时（subAgentActivity kind=started，带派出它的父回合 id）快照那一轮的人
+ *   （用户回合的发送者、定时回合的创建者、唤醒回合继承的人；父回合不是宿主当前回合或求不出 → 没有）；
+ *   它完成时（kind=completed，紧接在服务端开的唤醒回合之前到达）记入本线程待汇报的派出者。服务端开的回合的继承身份
+ *   = 上一个回合开始以来本线程全部完成汇报的派出者合并（mergePersons：全部同一人、同一类型才保留，否则会话基础权限）。
  * - 工具调用（§5.3、§7.3）：resolveCall 只认服务端记录的归属（callId 对应的 mcpToolCall 条目所在线程与回合），
  *   该回合须是宿主当前回合；子 agent 线程的调用、过期回合的调用一律拒绝。
  * - 停止：中止主回合与运行中的子 agent 回合，之后 STOP_WAKE_MS 内（直到下一次开轮）服务端开的唤醒回合判为 suppressed 并中止（§8.2）。
@@ -31,7 +35,8 @@ import { classifyFailure } from "../../shared/errors.js";
 import { redactText } from "../../shared/redact.js";
 import { trace } from "../../shared/trace.js";
 import { log } from "../../shared/log.js";
-import { isOwner, type OwnerIds } from "../../shared/owners.js";
+import type { OwnerIds } from "../../shared/owners.js";
+import { elevation, mergePersons, runRights, type RunPerson } from "../host/identity.js";
 import { isReasoningEffort, type CodexRunner } from "../codex/runner.js";
 import { RpcError } from "../codex/app-server/rpc.js";
 import { AppServerUnavailableError } from "../codex/app-server/supervisor.js";
@@ -89,6 +94,10 @@ interface TurnRec {
   awaitingStart?: boolean;
   /** 本适配器的输入并入了这个非本轮回合：结束时按真实结果交给宿主 */
   absorbed?: boolean;
+  /** 开始时求出的继承身份（服务端开的回合：本线程上一回合开始以来完成汇报的派出者合并）；缺省为会话基础权限 */
+  inherited?: RunPerson;
+  /** 继承身份已在开始时求过 */
+  captured?: boolean;
   /** 宿主跟踪这个回合：user、wake，或宿主开轮让位接管的 compaction / suppressed */
   hostVisible: boolean;
   /** 判定前已结束：判定后立即按此结果处理 */
@@ -115,7 +124,7 @@ export class CodexBackend implements ThreadAdapter {
   /** 进行中（含待判定）的回合：codex 回合 id → 簿记；结束即删除 */
   private readonly turnRecs = new Map<string, TurnRec>();
   /** 最近结束回合的墓碑（codex 回合 id → 种类与结果，有界）：结束后到达的同 id 事件或开轮响应不再建立进行中的簿记 */
-  private readonly finished = new Map<string, { kind: TurnKind; outcome: TurnOutcome }>();
+  private readonly finished = new Map<string, { kind: TurnKind; outcome: TurnOutcome; inherited?: RunPerson }>();
   /** 最近结束的 user / wake 回合结果（宿主放弃回合时结束事件可能还排在宿主队列里），按宿主回合 id */
   private readonly ended = new Map<string, TurnOutcome>();
   /** codex 回合 → 不再重试的 error（turn/completed 时并入结果） */
@@ -131,6 +140,12 @@ export class CodexBackend implements ThreadAdapter {
   private readonly stopped = new Map<ThreadKey, number>();
   /** 每个会话的加载、开轮、压缩、重置串行 */
   private readonly chains = new Map<ThreadKey, Promise<unknown>>();
+  /** 子 agent 线程 → 派出它那一轮的人（派出时快照，有界）；求不出为 undefined */
+  private readonly spawnedBy = new Map<string, RunPerson | undefined>();
+  /** 线程 → 上一回合开始以来完成汇报的子 agent 的派出者（下一个服务端回合据此继承） */
+  private readonly reports = new Map<string, (RunPerson | undefined)[]>();
+  /** 已处理的 subAgentActivity 条目（started / completed 各以条目事件出现，去重；有界） */
+  private readonly activities = new Set<string>();
   /** 每个会话的补收图片串行 */
   private readonly imageChains = new Map<ThreadKey, Promise<unknown>>();
   private readonly pending = new Set<Promise<unknown>>();
@@ -271,7 +286,7 @@ export class CodexBackend implements ThreadAdapter {
         this.releaseObserved(others, false);
         if (tomb.kind === "user") return { turnId };
         this.host?.onTurnCompleted(threadKey, turnId, tomb.outcome);
-        return { absorbedInto: turnId };
+        return { absorbedInto: turnId, ...(tomb.inherited ? { identity: tomb.inherited } : {}) };
       }
       const rec = this.record(threadKey, threadId, codexTurnId);
       rec.awaitingStart = true;
@@ -286,7 +301,7 @@ export class CodexBackend implements ThreadAdapter {
         rec.absorbed = true;
         this.releaseObserved(others, false);
         if (rec.kind === undefined) this.classify(rec, "wake");
-        return { absorbedInto: turnId };
+        return { absorbedInto: turnId, ...(rec.kind === "wake" && rec.inherited ? { identity: rec.inherited } : {}) };
       }
       this.classify(rec, "user");
       // 本轮已开出：在途期间服务端另开的回合判为 wake，但不交给宿主（否则宿主会以唤醒取代本轮）
@@ -321,7 +336,7 @@ export class CodexBackend implements ThreadAdapter {
     const live = this.liveTurns(threadId).at(-1);
     if (live) {
       live.hostVisible = true;
-      return { backendTurnId: hostTurnId(live.codexTurnId) };
+      return { backendTurnId: hostTurnId(live.codexTurnId), ...(live.kind === "wake" && live.inherited ? { identity: live.inherited } : {}) };
     }
     const running = this.opts.runner.client.thread(threadId)?.activeTurnId;
     if (!running) return undefined;
@@ -448,10 +463,9 @@ export class CodexBackend implements ThreadAdapter {
       const codexTurnId = call?.turnId;
       const binding = this.opts.turns.binding(threadKey);
       if (codexTurnId && binding.turnId === hostTurnId(codexTurnId)) {
-        const identity = binding.identity;
-        const person = identity.kind === "user" ? identity.sender : identity.kind === "scheduled" ? identity.creator : undefined;
-        const ownerPerson = !!person && isOwner(this.owners(), person);
-        const access = ownerPerson || (!person && threadKey === "owner") ? { kind: "all" as const } : { kind: "scope" as const, scope: binding.scope };
+        // 权限一律经 runRights（§7.3）：读全部只在 owner 私聊线程，唤醒回合按继承的人，求不出只有会话基础权限
+        const rights = runRights(binding, this.owners());
+        const access = rights.access === "all" ? { kind: "all" as const } : { kind: "scope" as const, scope: rights.access };
         const images = binding.inputs.length ? this.opts.turns.records(binding.inputs.map(inboundKey => ({ inboundKey }))).flatMap(rec => rec.images) : [];
         return { ...binding, turnId: binding.turnId, access, workdir: this.opts.runner.workspaceOf(threadKey), session: threadId,
           imageDir: attachmentDirs(path.dirname(this.opts.imagesDir), threadKey).attachDir, imageRefs: images.slice(-3) };
@@ -523,6 +537,14 @@ export class CodexBackend implements ThreadAdapter {
     if (!key || this.finished.has(codexTurnId)) return;
     const known = this.turnRecs.get(codexTurnId);
     const rec = this.record(key, threadId, codexTurnId);
+    if (!rec.captured) {
+      // 继承身份：上一回合开始以来本线程完成汇报的派出者合并（没有汇报 → 会话基础权限）；任何回合开始都清空
+      rec.captured = true;
+      const reports = this.reports.get(threadId) ?? [];
+      this.reports.delete(threadId);
+      const inherited = reports.length ? mergePersons(reports) : undefined;
+      if (inherited) rec.inherited = inherited;
+    }
     if (rec.kind !== undefined) {
       if (rec.kind === "user") this.host?.onTurnStarted(key, hostTurnId(codexTurnId), "host");
       return;
@@ -556,7 +578,7 @@ export class CodexBackend implements ThreadAdapter {
       rec.startedAt = Date.now();
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "codex", thread_key: rec.key, thread_id: rec.threadId, kind: "wake" } });
       trace.event("turn:" + turnId, "model_turn", { status: "started", detail: { backend: "codex", thread_key: rec.key } });
-      if (toHost) this.host?.onTurnStarted(rec.key, turnId, "backend");
+      if (toHost) this.host?.onTurnStarted(rec.key, turnId, "backend", rec.inherited);
     } else if (kind === "suppressed") {
       log.info("codex wake suppressed after stop", { thread: rec.key, turn: rec.codexTurnId });
       if (!rec.ended) void this.opts.runner.client.interrupt(rec.threadId, rec.codexTurnId).catch(error => log.warn("codex interrupt failed", { thread: rec.key, error }));
@@ -595,7 +617,7 @@ export class CodexBackend implements ThreadAdapter {
   /** 已判定回合的结束：清掉簿记；user / wake 交给宿主；compaction 释放压缩锁；宿主接管的 compaction / suppressed 按完成交给宿主。 */
   private complete(rec: TurnRec, outcome: TurnOutcome): void {
     this.turnRecs.delete(rec.codexTurnId);
-    this.finished.set(rec.codexTurnId, { kind: rec.kind!, outcome });
+    this.finished.set(rec.codexTurnId, { kind: rec.kind!, outcome, ...(rec.inherited ? { inherited: rec.inherited } : {}) });
     if (this.finished.size > 200) this.finished.delete(this.finished.keys().next().value!);
     const turnId = hostTurnId(rec.codexTurnId);
     if (rec.kind === "user" || rec.kind === "wake") {
@@ -638,6 +660,7 @@ export class CodexBackend implements ThreadAdapter {
       this.calls.set(e.item.id, { threadId: e.threadId, turnId: e.turnId });
       if (this.calls.size > 2000) this.calls.delete(this.calls.keys().next().value!);
     }
+    if (e.item.type === "subAgentActivity") this.onSubAgentActivity(key, e.threadId, e.turnId, e.item);
     const tomb = this.finished.get(e.turnId);
     if (tomb) {
       if (tomb.kind === "user" || tomb.kind === "wake") observeItem("turn:" + hostTurnId(e.turnId), e.phase, e.item);
@@ -663,6 +686,37 @@ export class CodexBackend implements ThreadAdapter {
       if (rec) return;
     } else if (rec.kind !== "user" && rec.kind !== "wake") return;
     observeItem("turn:" + hostTurnId(e.turnId), e.phase, e.item);
+  }
+
+  /**
+   * 子 agent 的派出与完成（§6.2）：started → 快照派出它的父回合的人；completed → 记入本线程待汇报的派出者，
+   * 紧随其后的服务端回合据此继承。started、completed 各按条目 id 去重（同一条可能以 item/started、item/completed 两次出现）。
+   */
+  private onSubAgentActivity(key: ThreadKey, threadId: string, turnId: string, item: ThreadItem): void {
+    const agent = typeof item.agentThreadId === "string" ? item.agentThreadId : undefined;
+    const kind = typeof item.kind === "string" ? item.kind : undefined;
+    if (!agent || !kind) return;
+    const id = `${threadId}:${String(item.id ?? agent + ":" + kind)}`;
+    if (this.activities.has(id)) return;
+    this.activities.add(id);
+    if (this.activities.size > 2000) this.activities.delete(this.activities.values().next().value!);
+    if (kind === "started") {
+      this.spawnedBy.set(agent, this.personOf(key, turnId));
+      if (this.spawnedBy.size > 1000) this.spawnedBy.delete(this.spawnedBy.keys().next().value!);
+    } else if (TERMINAL_CHILD.test(kind)) {
+      const list = this.reports.get(threadId) ?? [];
+      // 没有派出记录（未知的子 agent）→ undefined，合并后回落会话基础权限
+      list.push(this.spawnedBy.get(agent));
+      this.reports.set(threadId, list);
+      this.spawnedBy.delete(agent);
+    }
+  }
+
+  /** 父回合的人（派出时快照）：须是宿主当前回合，按其身份求出确证的人（含 owner 标记）；否则 undefined。 */
+  private personOf(key: ThreadKey, codexTurnId: string): RunPerson | undefined {
+    const binding = this.opts.turns.binding(key);
+    if (binding.turnId !== hostTurnId(codexTurnId)) return undefined;
+    return elevation(binding.identity, this.owners());
   }
 
   /** 子 agent：alive=true 运行中（turnId 为其进行中的回合），false 已结束，undefined 只刷新活动时间。 */

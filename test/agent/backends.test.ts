@@ -161,7 +161,7 @@ describe("CodexBackend：常驻 app-server 适配器", () => {
     await vi.waitFor(() => expect(s.completed.at(-1)).toEqual({ threadKey: "group:7", turnId: next.turnId, status: "failed", error: "codex 回合出错" }));
   });
 
-  it("工具调用的读取范围：owner 本人为 all（群里也是），其余为本会话；本轮参考图取本轮输入", async () => {
+  it("工具调用的读取范围经 runRights：owner 只在 owner 私聊线程读 all（群里只读本群），唤醒回合按继承的人，求不出只有会话基础权限", async () => {
     const script = new CodexScript();
     script.auto = false;
     const records = [{ ...record("k1", "1", "7"), images: ["/data/incoming/k1/a.png"] }, record("k2", "9", null, "owner"), record("k3", "9", "7")];
@@ -177,11 +177,17 @@ describe("CodexBackend：常驻 app-server 适配器", () => {
     expect(await s.backend.resolveCall("group:7", call(g))).toMatchObject({ access: { kind: "scope", scope: "group:7" },
       session: g!.threadId, workdir: path.join(s.dir, "ws", "group_7"), imageDir: path.join(s.dir, "images", "group_7"), imageRefs: ["/data/incoming/k1/a.png"] });
     expect(await s.backend.resolveCall("owner", call(o))).toMatchObject({ access: { kind: "all" } });
+    // owner 在群里只读本群（群线程历史对群里所有人可见，§7.5）
     s.current.set("group:7", { turnId: "codex:" + g!.turnId, identity: { kind: "user", sender: "9" }, inputs: ["k3"] });
-    expect(await s.backend.resolveCall("group:7", call(g))).toMatchObject({ access: { kind: "all" } });
-    // owner 线程的唤醒回合读取 all（owner 线程只有 owner 本人的输入与定时任务）；群的唤醒回合只读本会话
+    expect(await s.backend.resolveCall("group:7", call(g))).toMatchObject({ access: { kind: "scope", scope: "group:7" } });
+    // owner 线程没有继承的唤醒回合：会话基础权限（不再有"唤醒回合读全部"的例外）；继承 owner → all
     s.current.set("owner", { turnId: "codex:" + o!.turnId, identity: { kind: "wake" } });
+    expect(await s.backend.resolveCall("owner", call(o))).toMatchObject({ access: { kind: "scope", scope: "private:9" } });
+    s.current.set("owner", { turnId: "codex:" + o!.turnId, identity: { kind: "wake", inherited: { kind: "user", person: "9", owner: true } } });
     expect(await s.backend.resolveCall("owner", call(o))).toMatchObject({ access: { kind: "all" } });
+    // 快照 owner 标记与当前配置不一致（之后被移出 owner）：回落基础权限
+    s.current.set("owner", { turnId: "codex:" + o!.turnId, identity: { kind: "wake", inherited: { kind: "user", person: "8", owner: true } } });
+    expect(await s.backend.resolveCall("owner", call(o))).toMatchObject({ access: { kind: "scope", scope: "private:9" } });
     s.current.set("group:7", { turnId: "codex:" + g!.turnId, identity: { kind: "wake" } });
     expect(await s.backend.resolveCall("group:7", call(g))).toMatchObject({ access: { kind: "scope", scope: "group:7" } });
     const own = call(g);

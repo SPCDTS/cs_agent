@@ -38,12 +38,12 @@ export type TurnStatus = "completed" | "failed" | "lost";
  * 开轮结果：
  * - turnId：新回合（输入已送入）。
  * - backendTurnId：后端已有宿主尚未确认的回合（子 agent 唤醒等）——输入没有送入（并入会让唤醒工作拿到本轮发送者的身份），
- *   宿主按唤醒回合接管该回合，输入放回队列等它结束。
+ *   宿主按唤醒回合接管该回合（identity 为该唤醒回合确证继承的人，缺省为会话基础权限），输入放回队列等它结束。
  * - absorbedInto：输入已送入后端，但被并入后端自己开的回合（codex turn/start 遇到进行中的唤醒回合时插进该回合）——
- *   输入已交付、不再重排；宿主按唤醒回合跟踪该回合（身份为唤醒），输入随该回合结束，结果即该回合的结果。
+ *   输入已交付、不再重排；宿主按唤醒回合跟踪该回合（identity 同上），输入随该回合结束，结果即该回合的结果。
  * - denied：重试前准入复核被拒（见 TurnContext.admit），没有开轮。
  */
-export type StartTurnResult = { turnId: string } | { backendTurnId: string } | { absorbedInto: string } | { denied: true };
+export type StartTurnResult = { turnId: string } | { backendTurnId: string; identity?: RunPerson } | { absorbedInto: string; identity?: RunPerson } | { denied: true };
 
 /** 回合结果（与 onTurnCompleted 回报的一致）。 */
 export type TurnOutcome = { status: TurnStatus; error?: string };
@@ -67,7 +67,7 @@ export interface ThreadAdapter {
    * 宿主已不再跟踪这个回合（被唤醒回合取代）：仍在运行的后端工作不能再以该回合的身份行事。返回宿主应记下的该回合结果：
    * - 回合已在后端结束（结束事件还排在宿主队列里）→ 后端回报的真实结果（如 failed）；
    * - codex 回合仍在跑 → turn/interrupt 中止，lost；
-   * - pi run 降为唤醒身份、继续运行 → completed。
+   * - pi run 降为会话基础权限、继续运行 → completed。
    * 之后到达的结束事件宿主按过期忽略。
    */
   abandon?(threadKey: ThreadKey, turnId: string): Promise<TurnOutcome>;
@@ -80,16 +80,19 @@ export interface ThreadAdapter {
  * 调用立即返回，事件在该会话的串行队列里处理；适配器可以在 startTurn / steer 返回之前回调，但不能等待回调完成。
  */
 export interface HostCallbacks {
-  /** initiatedBy=backend 表示后端自己开的唤醒回合；host 表示 startTurn 开的回合（仅刷新活动时间）。 */
-  onTurnStarted(threadKey: ThreadKey, turnId: string, initiatedBy: "host" | "backend"): void;
+  /**
+   * initiatedBy=backend 表示后端自己开的唤醒回合；host 表示 startTurn 开的回合（仅刷新活动时间）。
+   * identity：唤醒回合确证继承的人（由带回的汇报求出，§7.3）；缺省为会话基础权限。只在宿主新接管该回合时采用。
+   */
+  onTurnStarted(threadKey: ThreadKey, turnId: string, initiatedBy: "host" | "backend", identity?: RunPerson): void;
   onTurnCompleted(threadKey: ThreadKey, turnId: string, result: { status: TurnStatus; error?: string }): void;
   /** 模型输出、工具调用、子 agent 活动；只刷新看门狗时间。 */
   onActivity(threadKey: ThreadKey): void;
 }
 
 /** 工具调用（发送、召回、生图、定时、授权）取用的本轮身份（§7.3）；契约定义在通道层，工具与通道共用。 */
-export type { TurnIdentity } from "../../channel/types.js";
-import type { TurnIdentity } from "../../channel/types.js";
+export type { RunPerson, TurnIdentity } from "../../channel/types.js";
+import type { RunPerson, TurnIdentity } from "../../channel/types.js";
 
 /** 回合结束（含开轮失败、重启后丢失）：外层据此发出错提示、把输入标记 done、统计定时运行结果。 */
 export type TurnEnded = {

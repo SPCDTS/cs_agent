@@ -1,12 +1,15 @@
 import { Type, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { configure, defineDoc, defineExtension, defineTask, defineTool, type ConversationId, type Harness, type ModelRef, type TaskId, type ToolRegistration, type Tx } from "@earendil-works/pi-durable";
 import { isScheduleTool } from "../../shared/schedule-tools.js";
+import { mergePersons, validPerson, type RunPerson } from "../host/identity.js";
 
 /**
  * 子 agent 扩展（DESIGN-resident-agent §6.2），仿 pi-durable 示例 23-subagent-background：
  * 每个子会话由父会话里的后台锚定任务持有，父会话的中止与空闲等待都碰不到它；
  * 每条交给子会话的消息由一个汇报任务投递，子会话回答后把结果作为 follow-up 输入投回父会话，从而唤醒主 agent。
  * 投递与汇报都带 requestId，重启后重跑只会找回同一提交，不会重复派发或重复汇报。
+ * 身份（§7.3）：派出时快照派出那一轮的身份（登记在子 agent 记录里），随每条汇报的条目数据带回；
+ * 宿主据此让汇报唤醒的回合继承派出者。之后由别的回合 message 给它时，快照与该回合的身份合并（不同人 → 基础权限）。
  */
 
 /** 汇报输入在父会话中的条目类型；宿主据此（或 requestId 前缀）识别唤醒回合。 */
@@ -14,7 +17,28 @@ export const SUBAGENT_REPORT_KIND = "cs.subagent.report";
 /** 汇报输入的 requestId 前缀：`subagent-report:<子会话>:<回答条目或提交>`。 */
 export const SUBAGENT_REPORT_REQUEST_PREFIX = "subagent-report:";
 export const isSubagentReportRequest = (requestId: string | undefined) => !!requestId?.startsWith(SUBAGENT_REPORT_REQUEST_PREFIX);
-export type SubagentReportData = { name: string; status: "done" | "failed"; child: number; anchor: number; reporter: number };
+/**
+ * 派出（或 message）子 agent 那一轮的身份快照：turn 为那一轮的类型；as 为它确证绑定的人
+ * （唤醒回合为它继承的人；缺省 = 那一轮只有会话基础权限，或多个不同的人交代过任务）。
+ */
+export type SubagentSpawner = { turn: "user" | "scheduled" | "wake"; as?: RunPerson };
+export type SubagentReportData = { name: string; status: "done" | "failed"; child: number; anchor: number; reporter: number; spawner?: SubagentSpawner };
+
+/** 汇报条目数据里确证的派出者；没有记录、形状不对都返回 undefined（基础权限）。 */
+export function reportPerson(data: unknown): RunPerson | undefined {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+  const spawner = (data as { spawner?: unknown }).spawner;
+  if (!spawner || typeof spawner !== "object" || Array.isArray(spawner)) return undefined;
+  const as = (spawner as { as?: unknown }).as;
+  return validPerson(as) ? { kind: as.kind, person: as.person, owner: as.owner } : undefined;
+}
+
+/** 子 agent 已登记的身份与新交代任务的回合身份合并：不是同一人就降为基础权限（只降不升）。 */
+function narrowSpawner(current: SubagentSpawner | undefined, requester: SubagentSpawner | undefined): SubagentSpawner | undefined {
+  if (!requester) return current && { turn: current.turn };
+  const as = mergePersons([current?.as, requester.as]);
+  return { turn: requester.turn, ...(as ? { as } : {}) };
+}
 
 /** 子会话不可用的工具：不能再派子 agent、不能授权或定时，也不能对外发消息（只有主 agent 对用户说话）。 */
 export const SUBAGENT_EXCLUDED_TOOLS = { exact: ["subagent", "send_message"], prefixes: ["auth_", "schedule_"] } as const;
@@ -39,6 +63,8 @@ export interface SubagentOptions {
   now?: () => number;
   /** 在创建子会话的同一提交中运行，供宿主写入子会话需要的文档（如身份绑定）。 */
   initChild?: (tx: Tx, parent: ConversationId, child: ConversationId) => void | Promise<void>;
+  /** 派出 / message 时调用：求出父会话当前这一轮的身份快照（§7.3）；未提供或返回 undefined 时汇报唤醒只有基础权限。 */
+  spawner?: (parent: ConversationId) => Promise<SubagentSpawner | undefined>;
 }
 
 type ChildRecord = {
@@ -50,6 +76,8 @@ type ChildRecord = {
   stopped: boolean;
   /** 尚未结束的汇报任务。 */
   pending: number[];
+  /** 派出者身份快照（之后 message 它的回合与之合并）；缺省 = 基础权限 */
+  spawner?: SubagentSpawner;
   last?: { status: "done" | "failed"; text: string; at: number };
 };
 
@@ -94,7 +122,8 @@ const Anchor = defineTask<{ name: string }, { phase: "hold" }, null>({
   },
 });
 
-type ReporterInput = { name: string; anchor: number; child: number; content: string; whenBusy: "steer" | "followUp" };
+/** spawner：交代这条消息时子 agent 登记的身份快照（创建任务时固定，重放不变），随汇报带回。 */
+type ReporterInput = { name: string; anchor: number; child: number; content: string; whenBusy: "steer" | "followUp"; spawner?: SubagentSpawner };
 type ReporterState = { phase: "deliver" } | { phase: "report"; status: "done" | "failed"; text: string; key: string };
 
 /** 汇报任务：把一条消息交给子会话、等它回答，再把结果作为 follow-up 输入投回父会话。 */
@@ -126,7 +155,11 @@ const Reporter = defineTask<ReporterInput, ReporterState, { status: "done" | "fa
       const { name, anchor, child } = task.input;
       const parent = await runtime.conversation(task.conversationId, context);
       if (!parent) throw new Error("父会话不存在");
-      const data: SubagentReportData = { name, status, child, anchor, reporter: Number(task.id) };
+      // 汇报时再与登记的当前身份合并（只降不升）：创建后有别人 message（转向会并入同一回答）时，旧汇报任务的快照不能单独带回。
+      const record = findByAnchor((await runtime.snapshot(SubagentDoc, task.conversationId, context))?.children ?? {}, anchor);
+      const spawner = task.input.spawner && record?.spawner ? narrowSpawner(record.spawner, task.input.spawner) : undefined;
+      const data: SubagentReportData = { name, status, child, anchor, reporter: Number(task.id),
+        ...(spawner ? { spawner } : {}) };
       await parent.submit({ type: "input", whenBusy: "followUp",
         requestId: `${SUBAGENT_REPORT_REQUEST_PREFIX}${child}:${key}`,
         content: `${status === "done" ? "[子 agent 完成]" : "[子 agent 失败]"} ${name}：${clip(text, MAX_REPORT_CHARS)}`,
@@ -203,6 +236,8 @@ export function createSubagentExtension(opts: SubagentOptions) {
         if (!args.task) return output("spawn 需要 task", true);
         if (args.name !== undefined && !NAME.test(args.name)) return output("名字只能包含文字、数字、_ 与 -，最长 32 个字符", true);
         const parentAgent = await api.agent(context);
+        // 派出那一轮的身份快照（§7.3）：汇报唤醒的回合继承它。
+        const spawner = await opts.spawner?.(api.conversationId);
         // 子会话的工具集：父会话启用的工具减去排除名单，显式写成数组，宿主后续换扩展也不会带回被排除的工具。
         const seen = new Set<string>(), tools: ToolRegistration[] = [];
         for (const tool of [...parentAgent.tools, ...parentAgent.callable]) {
@@ -229,10 +264,11 @@ export function createSubagentExtension(opts: SubagentOptions) {
             ...(instructions !== null ? { instructions } : {}),
           });
           await opts.initChild?.(tx, api.conversationId, created.id);
-          const reporter = await tx.createTask(Reporter, { name, anchor: Number(anchor), child: Number(created.id), content: args.task!, whenBusy: "followUp" } satisfies ReporterInput,
-            { ownership: { kind: "task", taskId: anchor } });
+          const reporter = await tx.createTask(Reporter, { name, anchor: Number(anchor), child: Number(created.id), content: args.task!, whenBusy: "followUp",
+            ...(spawner ? { spawner } : {}) } satisfies ReporterInput, { ownership: { kind: "task", taskId: anchor } });
           doc.seq++; doc.spawnedToday++;
-          doc.children[name] = { name, anchor: Number(anchor), conversation: Number(created.id), task: args.task!, createdAt: now(), stopped: false, pending: [Number(reporter)] };
+          doc.children[name] = { name, anchor: Number(anchor), conversation: Number(created.id), task: args.task!, createdAt: now(), stopped: false, pending: [Number(reporter)],
+            ...(spawner ? { spawner } : {}) };
           return { text: remember(doc.calls, call, `已派出子 agent ${name}，完成后结果会自动交回`), error: false, child: Number(created.id) };
         }, context);
         if ("child" in result && result.child !== undefined) await api.details({ conversationId: result.child }, context);
@@ -242,14 +278,18 @@ export function createSubagentExtension(opts: SubagentOptions) {
       const name = args.name;
       if (args.action === "message") {
         if (!args.task) return output("message 需要 task（消息内容）", true);
+        const requester = await opts.spawner?.(api.conversationId);
         const result = await api.commit(async tx => {
           const doc = await tx.doc(SubagentDoc, api.conversationId);
           if (doc.calls[call]) return { text: doc.calls[call], error: false };
           const child = doc.children[name];
           if (!child || child.stopped) return { text: `没有存活的子 agent ${name}`, error: true };
           const mode: ReporterInput["whenBusy"] = args.mode ?? "followUp";
-          const reporter = await tx.createTask(Reporter, { name, anchor: child.anchor, child: child.conversation, content: args.task!, whenBusy: mode },
-            { ownership: { kind: "task", taskId: taskId(child.anchor) } });
+          // 子 agent 的上下文里已有这一轮交代的内容：登记的身份与之合并（不同人 → 基础权限），此后的汇报都带合并后的身份。
+          const spawner = narrowSpawner(child.spawner, requester);
+          if (spawner) child.spawner = spawner; else delete child.spawner;
+          const reporter = await tx.createTask(Reporter, { name, anchor: child.anchor, child: child.conversation, content: args.task!, whenBusy: mode,
+            ...(spawner ? { spawner } : {}) } satisfies ReporterInput, { ownership: { kind: "task", taskId: taskId(child.anchor) } });
           child.pending.push(Number(reporter));
           return { text: remember(doc.calls, call, `已${mode === "steer" ? "转向" : "追加消息给"}子 agent ${name}，结果会自动交回`), error: false };
         }, context);

@@ -1,5 +1,5 @@
 import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
-import type { InputRef, TurnKind, TurnStatus } from "./types.js";
+import type { InputRef, RunPerson, TurnKind, TurnStatus } from "./types.js";
 
 /**
  * 每个会话键一份（family 成员键 = threadKey，§4.2）。
@@ -13,6 +13,8 @@ export type ThreadHostState = {
   turnKind?: TurnKind;
   /** 本轮发送者：用户回合为 QQ 号，定时为创建者，唤醒回合为空 */
   turnSender?: string;
+  /** 唤醒回合确证继承的人（派出子 agent 那一轮的人，§7.3）；缺省为会话基础权限。随会话文档持久化，重启后保持 */
+  turnInherited?: RunPerson;
   /** 本轮已送入的输入（开轮时的批次 + 之后的插话） */
   turnInputs: InputRef[];
   /** 等本轮结束的输入，按 seq 升序 */

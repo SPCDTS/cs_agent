@@ -110,7 +110,7 @@ describe("codex 常驻：唤醒回合与工具调用的回合归属", () => {
     expect(r.host.currentIdentity(G)).toEqual({ kind: "wake" });
     script.toolCall(wake, "exec-w1");
     await expect(r.codexSend(G, { text: "发往别处", target: "qq:group:8" }, { callId: "exec-w1", threadId: wake.threadId }))
-      .rejects.toThrow("唤醒回合只能发往本会话");
+      .rejects.toThrow("只能发往本会话");
     script.toolCall(wake, "exec-w2");
     expect(await r.codexContext(G, { callId: "exec-w2", threadId: wake.threadId }))
       .toMatchObject({ access: G, turn_id: "codex:" + wake.turnId, session: wake.threadId, image_refs: [] });
@@ -122,7 +122,7 @@ describe("codex 常驻：唤醒回合与工具调用的回合归属", () => {
     expect(r.mentions()).toEqual([null]);
   });
 
-  it("owner 回合读取范围 all；子 agent 线程的调用、回合结束后的同一调用（过期回合）、没有归属的调用都被拒绝", async () => {
+  it("owner 在群里只读本群；子 agent 线程的调用、回合结束后的同一调用（过期回合）、没有归属的调用都被拒绝", async () => {
     const slow = gate();
     const script = new CodexScript();
     script.onTurn = () => slow.wait();
@@ -131,7 +131,7 @@ describe("codex 常驻：唤醒回合与工具调用的回合归属", () => {
     await vi.waitFor(() => expect(r.host.thread(G)?.turnId).toBe("codex:turn-1"));
     const turn = script.turns[0]!;
     script.toolCall(turn, "exec-1");
-    expect(await r.codexContext(G, { callId: "exec-1", threadId: turn.threadId, turnId: turn.turnId })).toMatchObject({ access: "all", turn_id: "codex:turn-1" });
+    expect(await r.codexContext(G, { callId: "exec-1", threadId: turn.threadId, turnId: turn.turnId })).toMatchObject({ access: G, turn_id: "codex:turn-1" });
     await expect(r.codexContext(G, { callId: "exec-x", threadId: "child-thread" })).rejects.toThrow("子 agent");
     slow.open();
     await r.idle();
@@ -260,6 +260,94 @@ describe("codex 常驻：唤醒回合与工具调用的回合归属", () => {
     await r.idle();
     expect(r.texts("7")).toEqual([]);
     expect(r.texts("8")).toEqual(["群八回复"]);
+  });
+});
+
+describe("codex 唤醒回合继承派出者（§6.2、§7.3）", () => {
+  /** 在当前回合派出子 agent（started 带父回合 id），之后让它完成（completed 挂在旧回合上）并开唤醒回合 */
+  const activity = (child: import("./codex-app-server/fake-app-server.js").FakeAppServer, threadId: string, turnId: string, agent: string, kind: string, id: string) =>
+    child.notify("item/completed", { threadId, turnId, item: { type: "subAgentActivity", id, agentThreadId: agent, kind } });
+
+  async function spawnIn(r: ResidentRig, script: CodexScript, user: string, group: string | null, agent: string) {
+    const slow = gate();
+    script.onTurn = () => slow.wait();
+    const before = script.turns.length;
+    await r.say(user, "派子 agent " + agent, group);
+    await vi.waitFor(() => expect(script.turns).toHaveLength(before + 1));
+    const turn = script.turns.at(-1)!;
+    await vi.waitFor(() => expect(r.host.thread((group ? "group:" + group : "owner") as "owner")?.turnId).toBe("codex:" + turn.turnId));
+    activity(turn.child, turn.threadId, turn.turnId, agent, "started", "s-" + agent);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    slow.open();
+    await r.idle();
+    return turn;
+  }
+
+  it("owner 私聊派出的子 agent 唤醒：继承 owner，读全部；群成员派出的继承该成员，只读本群", async () => {
+    const script = new CodexScript();
+    const r = await residentRig({ backend: "codex", codex: script });
+    const own = await spawnIn(r, script, "1", null, "child-o");
+    activity(own.child, own.threadId, own.turnId, "child-o", "completed", "c-child-o");
+    const wake = script.wake(own.child, own.threadId);
+    await vi.waitFor(() => expect(r.host.thread("owner")).toMatchObject({ turnId: "codex:" + wake.turnId, turnKind: "wake",
+      turnInherited: { kind: "user", person: "1", owner: true } }));
+    script.toolCall(wake, "exec-o");
+    expect(await r.codexContext("owner", { callId: "exec-o", threadId: wake.threadId, turnId: wake.turnId })).toMatchObject({ access: "all" });
+    script.complete(wake);
+    await r.idle();
+
+    const member = await spawnIn(r, script, "5", "7", "child-m");
+    activity(member.child, member.threadId, member.turnId, "child-m", "completed", "c-child-m");
+    const wake2 = script.wake(member.child, member.threadId);
+    await vi.waitFor(() => expect(r.host.thread(G)).toMatchObject({ turnId: "codex:" + wake2.turnId, turnInherited: { kind: "user", person: "5", owner: false } }));
+    script.toolCall(wake2, "exec-m");
+    expect(await r.codexContext(G, { callId: "exec-m", threadId: wake2.threadId, turnId: wake2.turnId })).toMatchObject({ access: G });
+    script.complete(wake2);
+    await r.idle();
+  });
+
+  it("不同人派出的子 agent 一起汇报 → 会话基础权限；没有派出记录的子 agent → 会话基础权限", async () => {
+    const script = new CodexScript();
+    const r = await residentRig({ backend: "codex", codex: script });
+    const a = await spawnIn(r, script, "5", "7", "child-a");
+    await spawnIn(r, script, "6", "7", "child-b");
+    activity(a.child, a.threadId, a.turnId, "child-a", "completed", "c-a");
+    activity(a.child, a.threadId, a.turnId, "child-b", "completed", "c-b");
+    const wake = script.wake(a.child, a.threadId);
+    await vi.waitFor(() => expect(r.host.thread(G)).toMatchObject({ turnId: "codex:" + wake.turnId, turnKind: "wake" }));
+    expect(r.host.thread(G)!.turnInherited).toBeUndefined();
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "wake" });
+    script.complete(wake);
+    await r.idle();
+    activity(a.child, a.threadId, a.turnId, "child-unknown", "completed", "c-u");
+    const wake2 = script.wake(a.child, a.threadId);
+    await vi.waitFor(() => expect(r.host.thread(G)).toMatchObject({ turnId: "codex:" + wake2.turnId }));
+    expect(r.host.thread(G)!.turnInherited).toBeUndefined();
+    script.complete(wake2);
+    await r.idle();
+  });
+
+  it("输入并入继承了派出者身份的唤醒回合：按该唤醒回合的继承身份运行", async () => {
+    const script = new CodexScript();
+    const r = await residentRig({ backend: "codex", codex: script });
+    const spawner = await spawnIn(r, script, "5", "7", "child-s");
+    const base = script.handlers;
+    let absorbed = true;
+    r.codexSpawn.last.handlers["turn/start"] = (m, child) => {
+      if (!absorbed) return base()["turn/start"]!(m, child);
+      absorbed = false;
+      const threadId = String(m.params!.threadId);
+      activity(child, threadId, spawner.turnId, "child-s", "completed", "c-s");
+      child.notify("turn/started", { threadId, turn: { id: "wake-w", status: "inProgress" } });
+      child.notify("item/started", { threadId, turnId: "wake-w", item: { type: "userMessage", id: "u-sub", content: [], clientId: null } });
+      return { result: { turn: { id: "wake-w", status: "inProgress", items: [] } } };
+    };
+    const key = await r.say("6", "另一个人的消息");
+    await vi.waitFor(() => expect(r.host.thread(G)).toMatchObject({ turnId: "codex:wake-w", turnKind: "wake",
+      turnInherited: { kind: "user", person: "5", owner: false } }));
+    expect(r.bridge.inbox.getInbound(key)).toMatchObject({ state: "delivered", turn_id: "codex:wake-w" });
+    r.codexSpawn.last.notify("turn/completed", { threadId: spawner.threadId, turn: { id: "wake-w", status: "completed" } });
+    await r.idle();
   });
 });
 

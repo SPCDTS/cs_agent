@@ -3,7 +3,7 @@ import type { TurnBinding } from "../../channel/types.js";
 
 /**
  * 子 agent 会话的绑定（设计 §6.2）：创建子会话的同一提交写入父会话的会话键。
- * 子会话共用父会话的工作区与附件目录，身份固定为唤醒（只读本会话范围，不能主动发送、定时或授权）。
+ * 子会话共用父会话的工作区与附件目录，只有会话基础权限（只读本会话范围，不能主动发送、定时或授权）。
  */
 export const PiChildDoc = defineDoc<{ threadKey: string; parent: number }>({
   kind: "cs.pi.child", version: 1, scope: "conversation", history: "latest", fork: "initial",
@@ -12,11 +12,13 @@ export const PiChildDoc = defineDoc<{ threadKey: string; parent: number }>({
 
 /**
  * 工具调用时由宿主求出的本轮绑定（§7.3）：身份、发送地址与本轮输入来自会话宿主，模型参数不能覆盖；
- * access 为读取范围（owner 本人为 all，其余为本会话），senderIsOwner 决定技能写权限。
+ * 下列权限均由 host/identity.ts 的 runRights 求出：access 为读取范围（owner 本人为 all，其余为本会话），
+ * senderIsOwner 决定技能写权限，auth 为授权工具（owner 的交互身份，子会话没有）。
  */
 export interface PiCallBinding extends TurnBinding {
   access: string;
   senderIsOwner: boolean;
+  auth: boolean;
   /** 子 agent 会话 */
   child: boolean;
   /** 本轮输入的参考图（generate_image 允许列表） */

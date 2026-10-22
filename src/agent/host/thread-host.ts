@@ -15,14 +15,17 @@
  * 6. 重启：恢复集合里的会话，忙且有 turnId 的由适配器判定回合是否仍在（pi 续跑；codex 丢失 → lost 结束）；
  *    忙但没有 turnId（开轮请求未确认）的输入放回队列、按落盘的后端重新开轮；排队输入按 seq 重新驱动。
  * 7. 每条输入以 inboundKey 幂等：`cs.thread-host.input` 文档存在即为重复投递。
+ * 8. 身份（§7.3）：每个回合绑定一个人。用户回合为发送者、定时回合为创建者；唤醒回合为适配器从带回的汇报求出的、
+ *    派出子 agent 那一轮的人（turnInherited，随会话文档持久化），求不出则只有会话基础权限。权限由 host/identity.ts 统一求出。
  */
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Harness, Tx } from "@earendil-works/pi-durable";
 import { log } from "../../shared/log.js";
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
+import { mergePersons } from "./identity.js";
 import { HostInputDoc, ThreadHostDoc, ThreadHostIndexDoc, type ThreadHostState } from "./docs.js";
 import type {
-  DeliverResult, HostCallbacks, HostInput, InputRef, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey,
+  DeliverResult, HostCallbacks, HostInput, InputRef, RunPerson, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey,
   TurnEnded, TurnIdentity, TurnOutcome, TurnStatus,
 } from "./types.js";
 
@@ -49,12 +52,22 @@ export interface ThreadHostOptions {
 }
 
 /** 文档里可缺省的字段：写回时不在新状态里的要删除，不能残留上一轮的值。 */
-const OPTIONAL = ["turnId", "turnKind", "turnSender", "lastActivityAt", "backend"] as const;
+const OPTIONAL = ["turnId", "turnKind", "turnSender", "turnInherited", "lastActivityAt", "backend"] as const;
 
 /** 空闲状态：会话后端保留。 */
 function idleState(s: ThreadHostState, pending = s.pending): ThreadHostState {
   return { threadKey: s.threadKey, busy: false, turnInputs: [], pending, mentioned: false,
     ...(s.backend !== undefined ? { backend: s.backend } : {}) };
+}
+
+/** 宿主接管后端开的唤醒回合：身份只取适配器给出的继承身份（缺省为会话基础权限），不沿用上一轮的发送者。 */
+function wakeState(s: ThreadHostState, turnId: string, identity: RunPerson | undefined, now: number): ThreadHostState {
+  const inherited = mergePersons([identity]);
+  const wake: ThreadHostState = { ...s, busy: true, turnId, turnKind: "wake", turnInputs: [], mentioned: false, lastActivityAt: now,
+    ...(inherited ? { turnInherited: inherited } : {}) };
+  delete wake.turnSender;
+  if (!inherited) delete wake.turnInherited;
+  return wake;
 }
 
 function bySeq(refs: readonly InputRef[]): InputRef[] {
@@ -250,6 +263,7 @@ export class ThreadHost implements HostCallbacks {
           ...(backend !== undefined ? { backend } : {}),
         };
         delete begun.turnId;
+        delete begun.turnInherited;
         // 先落盘"开轮中"（连同会话后端，输入标为 starting）：崩溃后据缺少 turnId 判定未确认，输入放回队列，按同一后端重新开轮
         await this.save(threadKey, begun, tx => this.markInputs(tx, threadKey, inputs, "starting"));
         used = true;
@@ -273,22 +287,19 @@ export class ThreadHost implements HostCallbacks {
         }
         const cur = this.threads.get(threadKey)!;
         if ("backendTurnId" in started) {
-          // 后端已有本宿主尚未确认的回合（唤醒）：按唤醒回合接管（身份为唤醒，不升级为本轮发送者），输入放回队列等它结束
+          // 后端已有本宿主尚未确认的回合（唤醒）：按唤醒回合接管（身份为适配器求出的继承身份，不升级为本轮发送者），输入放回队列等它结束
           log.warn("thread host start yielded to backend turn", { thread: threadKey, turn: started.backendTurnId, inputs: keys });
-          const wake: ThreadHostState = {
-            ...cur, turnId: started.backendTurnId, turnKind: "wake", turnInputs: [],
-            pending: bySeq([...inputs, ...cur.pending]),
-            mentioned: false, lastActivityAt: this.now(),
-          };
-          delete wake.turnSender;
+          const wake = wakeState(cur, started.backendTurnId, started.identity, this.now());
+          wake.pending = bySeq([...inputs, ...cur.pending]);
           await this.save(threadKey, wake);
           return;
         }
         if ("absorbedInto" in started) {
-          // 输入已被后端并入它自己开的回合：已交付，按唤醒回合跟踪（身份为唤醒），输入随该回合结束
+          // 输入已被后端并入它自己开的回合：已交付，按唤醒回合跟踪（身份同 backendTurnId：适配器求出的继承身份，缺省为会话基础权限），
+          // 输入随该回合结束
           log.warn("thread host input absorbed into backend turn", { thread: threadKey, turn: started.absorbedInto, inputs: keys });
-          const wake: ThreadHostState = { ...cur, turnId: started.absorbedInto, turnKind: "wake", mentioned: false, lastActivityAt: this.now() };
-          delete wake.turnSender;
+          const wake = wakeState(cur, started.absorbedInto, started.identity, this.now());
+          wake.turnInputs = inputs;
           await this.save(threadKey, wake, tx => this.markInputs(tx, threadKey, inputs, "delivered"));
           this.emit("inputsDelivered", threadKey, started.absorbedInto, inputs);
           return;
@@ -325,7 +336,7 @@ export class ThreadHost implements HostCallbacks {
 
   // ───────────── 适配器回调 ─────────────
 
-  onTurnStarted(threadKey: ThreadKey, turnId: string, initiatedBy: "host" | "backend"): void {
+  onTurnStarted(threadKey: ThreadKey, turnId: string, initiatedBy: "host" | "backend", identity?: RunPerson): void {
     this.track(this.serial(threadKey, async () => {
       const s = await this.load(threadKey);
       if (s.busy && s.turnId === turnId) { this.touch(s); return; }
@@ -335,7 +346,7 @@ export class ThreadHost implements HostCallbacks {
         // 仍作防线：上一轮交给适配器放弃——其后端工作不能再以该回合的身份行事，并按适配器给出的真实结果结束：
         // 已在后端结束（结束事件还排在本事件之后）→ 后端回报的结果（失败照常发出错提示）；
         // 工作被中止（codex 回合 turn/interrupt）→ lost，外层发中断提示（§8.1，照常限频），输入不自动重放（与重启丢失一致，避免重复副作用）；
-        // 工作继续（pi run 降为唤醒身份）→ completed。
+        // 工作继续（pi run 降为会话基础权限）→ completed。
         log.warn("thread host wake turn superseded active turn", { thread: threadKey, previous: s.turnId, turnId });
         let outcome: TurnOutcome = { status: "completed" };
         if (s.turnId && this.opts.adapter.abandon) {
@@ -348,12 +359,7 @@ export class ThreadHost implements HostCallbacks {
         }
         await this.finish(threadKey, s, outcome.status, outcome.error ?? "superseded by backend turn");
       }
-      const cur = this.threads.get(threadKey)!;
-      const wake: ThreadHostState = {
-        ...cur, busy: true, turnId, turnKind: "wake", turnInputs: [], mentioned: false, lastActivityAt: this.now(),
-      };
-      delete wake.turnSender;
-      await this.save(threadKey, wake);
+      await this.save(threadKey, wakeState(this.threads.get(threadKey)!, turnId, identity, this.now()));
       if (!this.holding.has(threadKey)) { this.holding.add(threadKey); this.slots.force(); }
     }));
   }
@@ -378,13 +384,16 @@ export class ThreadHost implements HostCallbacks {
 
   // ───────────── 工具与面板 ─────────────
 
-  /** 本轮身份（§7.3）；空闲返回 undefined。开轮请求未确认时已可用（工具可能先于 startTurn 返回运行）。 */
+  /**
+   * 本轮身份（§7.3）；空闲返回 undefined。开轮请求未确认时已可用（工具可能先于 startTurn 返回运行）。
+   * 唤醒回合带上确证继承的人（没有则只有会话基础权限）；权限由 host/identity.ts 的 runRights 统一求出。
+   */
   currentIdentity(threadKey: ThreadKey): TurnIdentity | undefined {
     const s = this.threads.get(threadKey);
     if (!s?.busy) return undefined;
     if (s.turnKind === "user" && s.turnSender) return { kind: "user", sender: s.turnSender };
     if (s.turnKind === "scheduled" && s.turnSender) return { kind: "scheduled", creator: s.turnSender };
-    return { kind: "wake" };
+    return { kind: "wake", ...(s.turnKind === "wake" && s.turnInherited ? { inherited: structuredClone(s.turnInherited) } : {}) };
   }
 
   /**

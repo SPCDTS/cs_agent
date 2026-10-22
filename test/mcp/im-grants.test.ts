@@ -55,7 +55,7 @@ it("非 owner 回合调用授权工具在主进程拒绝；作废后令牌失效
   expect((await f.post("auth_list", {})).status).toBe(401);
 });
 
-it("owner 线程的唤醒回合只开放发往本会话：授权工具与跨会话发送在主进程拒绝", async () => {
+it("没有继承身份的唤醒回合（owner 线程也一样）只开放发往本会话：无 target、无授权工具，跨会话发送在主进程拒绝", async () => {
   const f = await setup(true, false, "wake");
   expect((await f.post("auth_list", {})).status).toBe(400);
   expect((await f.post("send", { target: "qq:group:8", text: "越权" })).status).toBe(400);

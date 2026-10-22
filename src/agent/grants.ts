@@ -1,4 +1,4 @@
-import { isOwner, isOwnerActor } from "../shared/owners.js";
+import { isOwnerActor, type OwnerIds } from "../shared/owners.js";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Harness } from "@earendil-works/pi-durable";
 import { z } from "zod";
@@ -6,6 +6,7 @@ import type { TurnBinding } from "../channel/types.js";
 import { isScope } from "../context/access.js";
 import { trace, type Trace } from "../shared/trace.js";
 import { GrantsDoc, type Grant } from "./docs.js";
+import { runRights, type RunRights } from "./host/identity.js";
 
 export const TARGET_PATTERN = "^qq:(group|private):[1-9][0-9]{0,19}$";
 const userSchema = z.string().regex(/^qq:[1-9][0-9]{0,19}$/, "user 必须是 qq:<QQ号>").refine(v => v === v.trim(), "user 不允许空白");
@@ -22,6 +23,8 @@ export const AUTH_TOOLS: AuthTool[] = ["auth_grant", "auth_revoke", "auth_list"]
 /** 工具调用时由主进程求出的会话绑定（§7.3）；身份与范围不来自模型参数。 */
 export type GrantBinding = Pick<TurnBinding, "threadKey" | "identity" | "scope" | "turnId" | "inputs">;
 export interface ImPermissions { actorIsOwner: boolean; target: boolean; auth: boolean }
+/** 只有会话基础权限的回合（唤醒回合求不出派出者等）试图发往别处时的错误。 */
+export const BASE_ONLY_SEND = "本轮只有会话基础权限（无法确认代表谁），只能发往本会话；需要发往别处请先在本会话请用户确认";
 
 export function parseTarget(value: unknown): { message_type: "group" | "private"; target_id: string; scope: string } {
   if (typeof value !== "string" || value !== value.trim() || !new RegExp(TARGET_PATTERN).test(value)) throw new Error("target 必须是 qq:group:<id> 或 qq:private:<QQ号>");
@@ -29,7 +32,7 @@ export function parseTarget(value: unknown): { message_type: "group" | "private"
   return { message_type: type, target_id: id, scope: `${type}:${id}` };
 }
 
-/** 身份取自会话宿主的当前回合（§7.3）；授权存于派发 harness，两个后端共享同一份文档。 */
+/** 身份取自会话宿主的当前回合，权限经 runRights 统一求出（§7.3）；授权存于派发 harness，两个后端共享同一份文档。 */
 export class GrantsService {
   constructor(private readonly opts: {
     getHarness(): Harness;
@@ -39,18 +42,19 @@ export class GrantsService {
     trace?: Pick<Trace, "event">;
   }) {}
   private now() { return (this.opts.now ?? Date.now)(); }
+  get owners(): OwnerIds { return this.opts.owners ?? this.opts.owner; }
+
+  /** 本轮权限（会话基础权限 + 确证的人），见 host/identity.ts。 */
+  rights(binding: GrantBinding): RunRights { return runRights(binding, this.owners); }
 
   /**
-   * 本轮身份：用户回合为发送者，定时回合为创建者；唤醒回合没有可代表的人，返回 undefined。
+   * 本轮确证的人：用户回合为发送者，定时回合为创建者，唤醒回合为继承的人；无法确证（只有会话基础权限）返回 undefined。
    * scope 为本会话的投递地址（授权表按来源会话限定）。
    */
   identity(binding: GrantBinding): { actor: string; actorIsOwner: boolean; scope: string; origin: "message" | "scheduled" } | undefined {
-    if (!isScope(binding.scope)) throw new Error("回合会话地址无效");
-    const user = binding.identity.kind === "user" ? binding.identity.sender : binding.identity.kind === "scheduled" ? binding.identity.creator : undefined;
-    if (!user) return undefined;
-    if (!/^[1-9][0-9]{0,19}$/.test(user)) throw new Error("回合身份无效");
-    return { actor: `qq:${user}`, actorIsOwner: isOwner(this.opts.owners ?? this.opts.owner, user),
-      origin: binding.identity.kind === "scheduled" ? "scheduled" : "message", scope: binding.scope };
+    const rights = this.rights(binding);
+    if (!rights.person || !rights.actor) return undefined;
+    return { actor: rights.actor, actorIsOwner: rights.owner, origin: rights.person.kind === "scheduled" ? "scheduled" : "message", scope: rights.scope };
   }
 
   async list() {
@@ -74,17 +78,17 @@ export class GrantsService {
   }
 
   async permissions(binding: GrantBinding): Promise<ImPermissions> {
-    // 唤醒回合只能发往本会话，不开放 target 与授权工具。
+    // 只有会话基础权限（无法确证的人）：只能发往本会话，不开放 target 与授权工具。
     const identity = this.identity(binding);
     if (!identity) return { actorIsOwner: false, target: false, auth: false };
-    if (identity.actorIsOwner) return { actorIsOwner: true, target: true, auth: identity.origin !== "scheduled" };
+    if (identity.actorIsOwner) return { actorIsOwner: true, target: true, auth: this.rights(binding).auth };
     const grant = await this.active(identity.actor, identity.scope);
     return { actorIsOwner: false, auth: false, target: !!grant?.caps.includes("send") && grant.targets.some(t => t !== `qq:${identity.scope}`) };
   }
 
   async authorizeSend(binding: GrantBinding, target: string): Promise<void> {
     const identity = this.identity(binding);
-    if (!identity) throw new Error("唤醒回合只能发往本会话");
+    if (!identity) throw new Error(BASE_ONLY_SEND);
     if (identity.actorIsOwner) return;
     const grant = await this.active(identity.actor, identity.scope);
     if (!grant?.caps.includes("send") || !grant.targets.includes(target)) throw new Error("没有发往该 target 的有效 send 授权");
@@ -92,7 +96,7 @@ export class GrantsService {
 
   async tool(binding: GrantBinding, name: AuthTool, args: unknown): Promise<unknown> {
     const identity = this.identity(binding);
-    if (!identity?.actorIsOwner || identity.origin === "scheduled") throw new Error("授权工具仅限 owner 交互回合");
+    if (!identity || !this.rights(binding).auth) throw new Error("授权工具仅限 owner 交互回合");
     if (name === "auth_list") {
       z.object({}).strict().parse(args);
       return this.list();

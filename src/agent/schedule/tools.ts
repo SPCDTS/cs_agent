@@ -20,10 +20,13 @@ export class ScheduleTools {
     trace?: Pick<Trace, "event">;
   }) {}
 
-  /** 唤醒回合没有身份，不能使用定时工具；定时回合只能控制本次运行的任务。 */
+  /**
+   * 身份经 grants.identity（runRights，§7.3）：只有会话基础权限的回合不能使用定时工具；
+   * 定时身份只能控制本次运行的任务（须有本轮的定时输入绑定，继承了定时身份的唤醒回合没有）。
+   */
   private async access(binding: GrantBinding) {
     const identity = this.opts.grants.identity(binding);
-    if (!identity) throw new Error("唤醒回合不能使用定时工具");
+    if (!identity) throw new Error("本轮只有会话基础权限，不能使用定时工具");
     // 会话即线程键：owner 私聊为 owner，群与其他私聊为来源 scope。
     const conversation = (identity.actorIsOwner && identity.scope.startsWith("private:") ? "owner" : identity.scope) as ScheduleConversation;
     if (identity.origin === "scheduled") {
@@ -40,7 +43,8 @@ export class ScheduleTools {
   }
 
   async permissions(binding: GrantBinding): Promise<ScheduleToolPermissions> {
-    if (binding.identity.kind === "wake") return { schedule: false, scheduleControl: false };
+    const identity = this.opts.grants.identity(binding);
+    if (!identity || (identity.origin === "scheduled" && !binding.inputs.length)) return { schedule: false, scheduleControl: false };
     const access = await this.access(binding);
     return { schedule: access.management, scheduleControl: access.scheduleId !== undefined };
   }
