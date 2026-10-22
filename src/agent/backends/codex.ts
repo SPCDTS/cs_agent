@@ -3,7 +3,9 @@
  * - 线程：会话键 → codex 线程（CodexRunner 的映射与轮换）；进程代中首次使用时 thread/start 或 thread/resume，
  *   同时为该会话签发线程令牌，写入 im / qq_context / image_gen 的线程级 MCP 环境；重启后令牌作废、按需重新加载。
  * - 回合簿记：线程上服务端的每个回合恰好判定一次种类，之后不再改判——
- *   user（本适配器开的：turn/start 响应返回的 id；或开轮结果不确定时，首条 userMessage 的 clientId 等于本输入键），
+ *   user（本适配器开的：回合的首个条目是本输入的 userMessage，即其 clientId 等于 turn/start 的 clientUserMessageId——
+ *   响应返回的 id 与开轮结果不确定时的认领都按这一条判定；响应返回的回合首个条目不是本输入（app-server 把输入插进了
+ *   进行中的唤醒回合）则该回合是 wake，本输入并入它：已交付、不重排，以唤醒身份运行，随它结束），
  *   wake（服务端自己开的，子 agent 完成唤醒），compaction（压缩回合），suppressed（停止后被中止的唤醒）。
  *   开轮请求在途期间、压缩期间服务端开的回合先待判定，不交给宿主；开轮在途期间的服务端回合不会判为 user。
  *   每个回合的结束（turn/completed、掉线 turnLost）都会处理：清掉该回合的簿记；user / wake 的结束交给宿主；
@@ -63,6 +65,8 @@ export interface CodexBackendOptions {
   imageTimeoutCapMs?: number;
   /** 工具调用等待回合事件（条目、宿主确认开轮）的上限，默认 5 秒 */
   callWaitMs?: number;
+  /** turn/start 响应后等待该回合首个条目（判定是不是本输入）的上限，默认 3 秒；超时按并入处理（唤醒身份，更严格） */
+  firstItemWaitMs?: number;
   /** 压缩等待上限，默认 5 分钟 */
   compactTimeoutMs?: number;
 }
@@ -79,8 +83,12 @@ interface TurnRec {
   kind?: TurnKind;
   startedAt: number;
   model?: string;
-  /** 首条 userMessage 条目的 clientId（= 开轮时的 clientUserMessageId） */
-  clientId?: string;
+  /** 该回合的首个条目：类型与 userMessage 的 clientId（= 开轮时的 clientUserMessageId） */
+  firstItem?: { type: string; clientId?: string };
+  /** turn/start 响应返回了这个 id：由开轮方判定（user 或并入），结束事件先记下 */
+  awaitingStart?: boolean;
+  /** 本适配器的输入并入了这个非本轮回合：结束时按真实结果交给宿主 */
+  absorbed?: boolean;
   /** 宿主跟踪这个回合：user、wake，或宿主开轮让位接管的 compaction / suppressed */
   hostVisible: boolean;
   /** 判定前已结束：判定后立即按此结果处理 */
@@ -243,7 +251,7 @@ export class CodexBackend implements ThreadAdapter {
       if (!codexTurnId) {
         if (definiteFailure(started.error)) { this.releaseObserved(started.observed); throw started.error; }
         // 结果不确定：只按 clientId 认领（首条 userMessage 带本输入键），不按时机
-        codexTurnId = clientId ? started.observed.find(id => this.turnRecs.get(id)?.clientId === clientId) : undefined;
+        codexTurnId = clientId ? started.observed.find(id => this.isOurs(this.turnRecs.get(id), clientId)) : undefined;
         if (!codexTurnId) {
           const turnId = "codex:unconfirmed-" + randomUUID();
           const outcome: TurnOutcome = { status: "lost", error: "codex 开轮结果未知：" + (started.error instanceof Error ? started.error.message : String(started.error)) };
@@ -256,23 +264,53 @@ export class CodexBackend implements ThreadAdapter {
         log.warn("codex turn/start result unknown; claimed turn by clientUserMessageId", { thread: threadKey, turn: codexTurnId });
       }
       const turnId = hostTurnId(codexTurnId);
+      const others = started.observed.filter(id => id !== codexTurnId);
       const tomb = this.finished.get(codexTurnId);
       if (tomb) {
-        // 本轮在响应之前就已开始并结束：不再建立进行中的簿记；结束已交给宿主（user），否则按记下的结果补交
-        if (tomb.kind !== "user") this.host?.onTurnCompleted(threadKey, turnId, tomb.outcome);
-      } else {
-        const rec = this.record(threadKey, threadId, codexTurnId);
-        rec.startedAt = startedAt;
-        if (model) rec.model = model;
-        if (rec.kind === undefined) this.classify(rec, "user");
+        // 返回的回合在判定前就已结束（只可能是已判定的别的回合）：不再建立簿记；并入它并补交它的结果
+        this.releaseObserved(others, false);
+        if (tomb.kind === "user") return { turnId };
+        this.host?.onTurnCompleted(threadKey, turnId, tomb.outcome);
+        return { absorbedInto: turnId };
       }
+      const rec = this.record(threadKey, threadId, codexTurnId);
+      rec.awaitingStart = true;
+      rec.startedAt = startedAt;
+      if (model) rec.model = model;
+      // 首个条目决定是不是本输入开的回合（响应可能先于条目）
+      if (rec.kind === undefined && !rec.firstItem && !rec.ended) await this.waitFirstItem(rec);
+      if (rec.kind !== undefined || !this.isOurs(rec, clientId)) {
+        // app-server 把本输入插进了进行中的别的回合（唤醒）：该回合是 wake，本输入并入它
+        log.warn("codex input absorbed into active backend turn", { thread: threadKey, turn: codexTurnId, first_item: rec.firstItem?.type ?? null });
+        rec.hostVisible = true;
+        rec.absorbed = true;
+        this.releaseObserved(others, false);
+        if (rec.kind === undefined) this.classify(rec, "wake");
+        return { absorbedInto: turnId };
+      }
+      this.classify(rec, "user");
       // 本轮已开出：在途期间服务端另开的回合判为 wake，但不交给宿主（否则宿主会以唤醒取代本轮）
-      this.releaseObserved(started.observed.filter(id => id !== codexTurnId), false);
+      this.releaseObserved(others, false);
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "codex", thread_key: threadKey, thread_id: threadId, kind: turn.kind,
         effort: effort ?? null, inputs: inputs.map(i => i.inboundKey) } });
       trace.event("turn:" + turnId, "model_turn", { status: "started", detail: { backend: "codex", thread_key: threadKey, effort: effort ?? null } });
       return { turnId };
     });
+  }
+
+  /** 回合的首个条目是本输入的 userMessage（clientId 一致；没有输入键时首个条目是 userMessage 即可）。 */
+  private isOurs(rec: TurnRec | undefined, clientId: string | undefined): boolean {
+    const first = rec?.firstItem;
+    if (first?.type !== "userMessage") return false;
+    return clientId === undefined || first.clientId === clientId;
+  }
+
+  /** 等该回合的首个条目（或它被判定、结束），最多 firstItemWaitMs。 */
+  private async waitFirstItem(rec: TurnRec): Promise<void> {
+    const deadline = Date.now() + (this.opts.firstItemWaitMs ?? 3_000);
+    while (rec.kind === undefined && !rec.firstItem && !rec.ended && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
   }
 
   /**
@@ -335,8 +373,11 @@ export class CodexBackend implements ThreadAdapter {
       result = await this.opts.runner.client.steer(current.threadId, current.codexTurnId, [{ type: "text", text: rendered.text }],
         { clientUserMessageId: input.inboundKey });
     } catch (error) {
-      if (error instanceof ThreadNotLoadedError) return "no_active_turn";
-      throw error;
+      // 明确被拒或请求没有发出：可以重排
+      if (definiteFailure(error)) return "no_active_turn";
+      // 已发出、结果不确定（连接断开、超时）：可能已被收下，不重排——按已插进本轮处理，随本轮结束（丢失则提示）
+      log.warn("codex turn/steer result unknown; treated as steered", { thread: threadKey, turn: turnId, input: input.inboundKey, error });
+      result = "ok";
     }
     if (result !== "ok") return "no_active_turn";
     trace.event("turn:" + turnId, "steered", { detail: { backend: "codex", input: input.inboundKey } });
@@ -486,8 +527,8 @@ export class CodexBackend implements ThreadAdapter {
       if (rec.kind === "user") this.host?.onTurnStarted(key, hostTurnId(codexTurnId), "host");
       return;
     }
-    // client：turn/start 响应返回的 id → user
-    if (initiatedBy === "client") return this.classify(rec, "user");
+    // client：turn/start 响应返回的 id → 由开轮方按首个条目判定（user 或并入）
+    if (initiatedBy === "client") { rec.awaitingStart = true; return; }
     if (known) {
       // 已在待判定中（开轮在途时由条目登记）
       const start = this.starting.get(threadId);
@@ -547,7 +588,7 @@ export class CodexBackend implements ThreadAdapter {
     if (rec.ended) return;
     rec.ended = outcome;
     if (rec.kind !== undefined) return this.complete(rec, outcome);
-    if (this.starting.get(threadId)?.observed.includes(codexTurnId)) return; // 由开轮结果判定
+    if (rec.awaitingStart || this.starting.get(threadId)?.observed.includes(codexTurnId)) return; // 由开轮结果判定
     this.classify(rec, this.compactions.has(threadId) ? "compaction" : this.serverKind(key, threadId));
   }
 
@@ -566,7 +607,8 @@ export class CodexBackend implements ThreadAdapter {
     if (rec.kind === "compaction") {
       this.compactions.get(rec.threadId)?.done(outcome.status === "completed" ? undefined : new Error("codex 压缩回合失败或被中断"));
     }
-    if (rec.hostVisible) this.host?.onTurnCompleted(rec.key, turnId, { status: "completed" });
+    // 宿主接管的（开轮让位）按完成放行排队输入；并入了本输入的按真实结果
+    if (rec.hostVisible) this.host?.onTurnCompleted(rec.key, turnId, rec.absorbed ? outcome : { status: "completed" });
   }
 
   private async finish(rec: TurnRec, outcome: TurnOutcome): Promise<void> {
@@ -609,7 +651,7 @@ export class CodexBackend implements ThreadAdapter {
       start.observed.push(e.turnId);
     } else if (!rec && e.item.type === "contextCompaction") rec = this.record(key, e.threadId, e.turnId);
     if (rec && rec.kind === undefined) {
-      if (e.item.type === "userMessage" && typeof e.item.clientId === "string" && rec.clientId === undefined) rec.clientId = e.item.clientId;
+      if (!rec.firstItem) rec.firstItem = { type: e.item.type, ...(typeof e.item.clientId === "string" ? { clientId: e.item.clientId } : {}) };
       // 压缩期间（且没有开轮在途）：首个条目决定
       if (this.compactions.has(e.threadId) && !this.starting.get(e.threadId)?.observed.includes(e.turnId)) {
         this.classify(rec, e.item.type === "contextCompaction" ? "compaction" : "wake");

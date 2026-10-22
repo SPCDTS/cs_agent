@@ -167,6 +167,50 @@ describe("codex 常驻：唤醒回合与工具调用的回合归属", () => {
     expect(r.texts("7")).toEqual(["早到的发送"]);
   });
 
+  it("回归：turn/start 被并入服务端已在进行的唤醒回合（Steered）——本输入按唤醒身份并入该回合，不判为本轮、不重排", async () => {
+    const script = new CodexScript();
+    const base = script.handlers;
+    let absorbed = true;
+    script.handlers = () => ({ ...base(), "turn/start": (m, child) => {
+      if (!absorbed) return base()["turn/start"]!(m, child);
+      absorbed = false;
+      const threadId = String(m.params!.threadId);
+      // 唤醒回合 W 先开始（首个条目是子 agent 的消息），本输入被插进 W，响应返回 W 的 id
+      child.notify("turn/started", { threadId, turn: { id: "wake-w", status: "inProgress" } });
+      child.notify("item/started", { threadId, turnId: "wake-w", item: { type: "userMessage", id: "u-sub", content: [], clientId: null } });
+      child.notify("item/started", { threadId, turnId: "wake-w", item: { type: "userMessage", id: "u-ours", content: [], clientId: m.params!.clientUserMessageId } });
+      child.notify("item/started", { threadId, turnId: "wake-w", item: { type: "mcpToolCall", id: "exec-w", server: "qq_context", tool: "qq_recent", status: "inProgress", arguments: {} } });
+      return { result: { turn: { id: "wake-w", status: "inProgress", items: [] } } };
+    } });
+    const r = await codexRig(script);
+    const key = await r.say("1", "owner 在群里问"); // owner 本人：若误判为本轮会得到 all
+    await vi.waitFor(() => expect(r.host.thread(G)).toMatchObject({ busy: true, turnId: "codex:wake-w", turnKind: "wake" }));
+    expect(r.bridge.inbox.getInbound(key)).toMatchObject({ state: "delivered", turn_id: "codex:wake-w" });
+    const threadId = script.turns.length ? script.turns[0]!.threadId : "thr-1";
+    expect(await r.codexContext(G, { callId: "exec-w", threadId, turnId: "wake-w" })).toMatchObject({ access: G });
+    r.codexSpawn.last.notify("turn/completed", { threadId, turn: { id: "wake-w", status: "failed" } });
+    await r.idle();
+    expect(await r.host.inputOutcome(key)).toEqual({ status: "failed", turnId: "codex:wake-w" });
+    expect(r.texts("7")).toEqual([TURN_NOTICES.failed]);
+    expect(r.codexSpawn.children.flatMap(c => c.requests("turn/start"))).toHaveLength(1);
+  });
+
+  it("回归：插话已发出但响应前 app-server 掉线——不重排这条插话，它随当前回合按丢失结束", async () => {
+    const script = new CodexScript();
+    script.auto = false;
+    const base = script.handlers;
+    script.handlers = () => ({ ...base(), "turn/steer": (_m, child) => { setImmediate(() => child.exit(1)); return undefined; } });
+    const r = await codexRig(script);
+    const first = await r.say("5", "第一条");
+    await vi.waitFor(() => expect(r.host.thread(G)?.turnId).toBe("codex:turn-1"));
+    const second = await r.say("5", "第二条");
+    await r.idle(20_000);
+    expect(r.codexSpawn.children.flatMap(c => c.requests("turn/start"))).toHaveLength(1);
+    expect((await r.host.inputOutcome(first))?.status).toBe("lost");
+    expect(await r.host.inputOutcome(second)).toEqual({ status: "lost", turnId: "codex:turn-1" });
+    expect(r.texts("7")).toEqual([TURN_NOTICES.lost]);
+  });
+
   it("同一 callId 重放取回同一 Outbox 行，不重发", async () => {
     const slow = gate();
     const script = new CodexScript();

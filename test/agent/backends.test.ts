@@ -378,6 +378,7 @@ describe("CodexBackend：常驻 app-server 适配器", () => {
       first = false;
       const threadId = String(m.params!.threadId);
       child.notify("turn/started", { threadId, turn: { id: "fast-1", status: "inProgress" } });
+      child.notify("item/started", { threadId, turnId: "fast-1", item: { type: "userMessage", id: "u", content: [], clientId: m.params!.clientUserMessageId } });
       child.notify("turn/completed", { threadId, turn: { id: "fast-1", status: "completed" } });
       return { result: { turn: { id: "fast-1", status: "inProgress", items: [] } } };
     } });

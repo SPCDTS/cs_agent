@@ -39,9 +39,11 @@ export type TurnStatus = "completed" | "failed" | "lost";
  * - turnId：新回合（输入已送入）。
  * - backendTurnId：后端已有宿主尚未确认的回合（子 agent 唤醒等）——输入没有送入（并入会让唤醒工作拿到本轮发送者的身份），
  *   宿主按唤醒回合接管该回合，输入放回队列等它结束。
+ * - absorbedInto：输入已送入后端，但被并入后端自己开的回合（codex turn/start 遇到进行中的唤醒回合时插进该回合）——
+ *   输入已交付、不再重排；宿主按唤醒回合跟踪该回合（身份为唤醒），输入随该回合结束，结果即该回合的结果。
  * - denied：重试前准入复核被拒（见 TurnContext.admit），没有开轮。
  */
-export type StartTurnResult = { turnId: string } | { backendTurnId: string } | { denied: true };
+export type StartTurnResult = { turnId: string } | { backendTurnId: string } | { absorbedInto: string } | { denied: true };
 
 /** 回合结果（与 onTurnCompleted 回报的一致）。 */
 export type TurnOutcome = { status: TurnStatus; error?: string };

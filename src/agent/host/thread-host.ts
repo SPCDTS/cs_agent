@@ -284,6 +284,15 @@ export class ThreadHost implements HostCallbacks {
           await this.save(threadKey, wake);
           return;
         }
+        if ("absorbedInto" in started) {
+          // 输入已被后端并入它自己开的回合：已交付，按唤醒回合跟踪（身份为唤醒），输入随该回合结束
+          log.warn("thread host input absorbed into backend turn", { thread: threadKey, turn: started.absorbedInto, inputs: keys });
+          const wake: ThreadHostState = { ...cur, turnId: started.absorbedInto, turnKind: "wake", mentioned: false, lastActivityAt: this.now() };
+          delete wake.turnSender;
+          await this.save(threadKey, wake, tx => this.markInputs(tx, threadKey, inputs, "delivered"));
+          this.emit("inputsDelivered", threadKey, started.absorbedInto, inputs);
+          return;
+        }
         const turnId = started.turnId;
         await this.save(threadKey, { ...cur, turnId }, tx => this.markInputs(tx, threadKey, inputs, "delivered"));
         this.emit("inputsDelivered", threadKey, turnId, inputs);

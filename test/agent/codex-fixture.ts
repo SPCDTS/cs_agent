@@ -32,12 +32,15 @@ export class CodexScript {
   handlers = (): Record<string, Handler> => defaultHandlers({
     "thread/start": () => ({ result: { thread: { id: `thr-${++this.threadSeq}` } } }),
     "turn/start": (m, child) => {
-      const params = m.params as { threadId: string; input: { text?: string }[]; effort?: string; model?: string };
+      const params = m.params as { threadId: string; input: { text?: string }[]; effort?: string; model?: string; clientUserMessageId?: string };
       const turn: ScriptTurn = { threadId: params.threadId, turnId: `turn-${++this.seq}`, text: params.input.map(i => i.text ?? "").join("\n"),
         ...(params.effort ? { effort: params.effort } : {}), ...(params.model ? { model: params.model } : {}), child };
       this.turns.push(turn);
       // turn/started 先于响应写出（真实 app-server 也可能如此），之后的条目与结束事件都排在它后面
       child.notify("turn/started", { threadId: turn.threadId, turn: { id: turn.turnId, status: "inProgress" } });
+      // 首个条目是本轮的用户消息，clientId 回显 turn/start 的 clientUserMessageId
+      child.notify("item/started", { threadId: turn.threadId, turnId: turn.turnId,
+        item: { type: "userMessage", id: "u-" + turn.turnId, content: [], clientId: params.clientUserMessageId ?? null } });
       setImmediate(() => { void Promise.resolve(this.onTurn?.(turn, this)).then(() => { if (this.auto) this.complete(turn); }); });
       return { result: { turn: { id: turn.turnId, status: "inProgress", items: [] } } };
     },
