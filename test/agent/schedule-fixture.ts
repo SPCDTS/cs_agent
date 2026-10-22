@@ -39,8 +39,9 @@ export class AdmitterStub implements ScheduledRunAdmitter, ScheduledRunLauncher 
   }
 }
 
+/** 逐个事件循环轮次等待检查点；上限按轮次计（假时钟下不能按时间），足够覆盖高负载时 SQLite I/O 的延迟。 */
 export async function flush(check: () => Promise<boolean> | boolean = () => true): Promise<void> {
-  for (let n = 0; n < 300; n++) {
+  for (let n = 0; n < 5000; n++) {
     await setImmediate();
     if (await check()) return;
   }

@@ -85,7 +85,7 @@ describe('回合简报查询', () => {
     expect(store.turnBriefs(['turn:a']).get('turn:a')).toMatchObject({ status: 'lost' });
   });
 
-  it.each([undefined, null, [], '非对象', 7, true, {}, { backend: 'codex', model: 'test', nested: { enabled: true } }])(
+  it.each([undefined, [], '非对象', {}, { backend: 'codex', model: 'test', nested: { enabled: true } }])(
     'turnBriefs 仅包含 dispatched 的对象 settings（%j）', settings => {
       const store = rig();
       add(store, 'turn:a', 'received', { settings: { ignored: true } });

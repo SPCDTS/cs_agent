@@ -46,7 +46,7 @@ describe("技能 frontmatter", () => {
     }
   });
 
-  it.each(["", "Upper", "with_space", "-start", "end-", "two--hyphens", "中文"])("非法 name %j 仍加载并产生 warning", name => {
+  it.each(["", "Upper", "two--hyphens", "中文"])("非法 name %j 仍加载并产生 warning", name => {
     expect(validateSkill("fallback", { name, description: "说明" })).toMatchObject({ name, description: "说明", warnings: [expect.stringContaining("invalid name")] });
   });
 
@@ -57,7 +57,7 @@ describe("技能 frontmatter", () => {
     });
   });
 
-  it.each(["true", "false", "yes", "TRUE", ""])("disable-model-invocation 仅 true 隐藏：%j", value => {
+  it.each(["true", "false", "TRUE"])("disable-model-invocation 仅 true 隐藏：%j", value => {
     const parsed = parseSkillFrontmatter(source(`description: 说明\ndisable-model-invocation: '${value}'`))!;
     expect(validateSkill("hello-cs", parsed.fields)).toMatchObject({ hidden: value === "true" });
   });

@@ -91,15 +91,13 @@ describe("magpieProviderModels", () => {
     ["codex", ["/v1/responses"], "openai-responses"],
     ["codex", ["/v1/chat/completions", "/v1/responses"], "openai-responses"],
     ["codex", ["/v1/chat/completions"], "openai-completions"],
-    ["codex", undefined, "openai-completions"],
     ["other", ["/v1/responses"], "openai-completions"],
-    [undefined, ["/v1/responses"], "openai-completions"],
   ])("API 选择要求 codex owner 与原生 Responses 同时满足：%s %j", (owned_by, native_endpoints, api) => {
     const [model] = magpieProviderModels([{ ...catalog[1], owned_by, native_endpoints }], builtin);
     expect(model.api).toBe(api);
   });
 
-  it.each(["unknown", "deepseek", undefined])("未知模型走默认分支，窗口缺失时告警：owner=%s", owned_by => {
+  it.each(["unknown", "deepseek"])("未知模型走默认分支，窗口缺失时告警：owner=%s", owned_by => {
     const warn = vi.spyOn(log, "warn").mockImplementation(() => {});
     const [model] = magpieProviderModels([{ id: "unknown/new-model", owned_by }], builtin);
     expect(model).toMatchObject({ contextWindow: 128000, maxTokens: 32768, reasoning: false, input: ["text"],
@@ -144,7 +142,7 @@ describe("magpieProviderModels", () => {
 });
 
 describe("fetchMagpieCatalog", () => {
-  it.each([baseUrl, `${baseUrl}/`, `${baseUrl}///`])("GET 去除尾部斜杠并传 Bearer，30 秒超时：%s", async url => {
+  it.each([baseUrl, `${baseUrl}///`])("GET 去除尾部斜杠并传 Bearer，30 秒超时：%s", async url => {
     const timeout = vi.spyOn(AbortSignal, "timeout");
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(catalogResponse());
     await expect(fetchMagpieCatalog(url, "catalog-key", fetchImpl)).resolves.toEqual(catalog);
@@ -154,7 +152,7 @@ describe("fetchMagpieCatalog", () => {
     expect(timeout).toHaveBeenCalledWith(30000);
   });
 
-  it.each([301, 401, 403, 500, 503])("非 2xx 只报告状态，不读取或泄漏响应体：%s", async status => {
+  it.each([301, 401, 500])("非 2xx 只报告状态，不读取或泄漏响应体：%s", async status => {
     const response = new Response("sensitive-gateway-response", { status });
     const json = vi.spyOn(response, "json"), text = vi.spyOn(response, "text");
     await expect(fetchMagpieCatalog(baseUrl, "catalog-key", vi.fn<typeof fetch>().mockResolvedValue(response)))

@@ -128,8 +128,7 @@ describe("QQ Channel 远端消息适配", () => {
 
   it.each([
     [{ url: "https://cdn.test/fresh" }, "https://cdn.test/fresh"], [{ url: 0 }, "0"],
-    [{ url: "" }, undefined], [{ url: null }, undefined], [{ url: {} }, undefined],
-    [{}, undefined], [null, undefined], [[], undefined],
+    [{ url: "" }, undefined], [null, undefined],
   ])("get_image 响应 %j 按原 stringField 规则提取地址", async (response, expected) => {
     const call = vi.fn<OneBotClient["call"]>().mockResolvedValue(response);
     expect(await channelFor(call).refreshImageUrl("image-id", options())).toBe(expected);

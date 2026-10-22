@@ -112,7 +112,7 @@ async function rig(options: { concurrency?: number; now?: () => number; admit?: 
       { registry: createRegistry(), models: createModels() }, ctx);
     adapter = fresh;
     host = new ThreadHost({
-      store: harness, adapter, concurrency: options.concurrency ?? 4, owners: OWNERS, now: options.now, admit: options.admit,
+      store: harness, adapter, concurrency: options.concurrency ?? 4, owners: OWNERS, now: options.now, admit: options.admit, planRetryMs: 20,
       events: {
         turnEnded: e => ended.push(e),
         inputsDelivered: (_t, turnId, inputs) => delivered.push({ turnId, keys: inputs.map(i => i.inboundKey) }),

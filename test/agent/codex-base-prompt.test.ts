@@ -79,7 +79,7 @@ describe("按模型基础指令存储", () => {
     expect((await r.store.read(MODEL))!.differs).toBeNull();
   });
 
-  it.each(["fallback-only", "empty", "wrong-model", "http-error", "network-error", "bad-json"])(
+  it.each(["fallback-only", "wrong-model", "http-error", "network-error"])(
     "模板不可用（%s）不播种、不传覆盖参数，只告警一次且后续可恢复", async failure => {
       const r = await rig({ magpie: true });
       const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {

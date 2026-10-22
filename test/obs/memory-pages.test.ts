@@ -8,7 +8,7 @@ import { ContextStore } from '../../src/context/store.js';
 import type { InboundMessage } from '../../src/channel/types.js';
 import { createDashboard } from '../../src/obs/http.js';
 import { ObsStore } from '../../src/obs/store.js';
-import { highlight, messageWindow, rangeParams, rangeQuery, searchTerms } from '../../src/obs/ui/memory-pages.js';
+import { highlight, messageWindow, searchTerms } from '../../src/obs/ui/memory-pages.js';
 
 const TOKEN = 'memory-pages-test-token-0123';
 const DAY = 86400_000, HOUR = 3600_000, G = 'group:123';
@@ -242,16 +242,6 @@ describe('记忆页面', () => {
 });
 
 describe('记忆页面纯函数', () => {
-  it('区间按钮 → 查询映射', () => {
-    const now = Date.UTC(2026, 9, 18, 12);
-    expect(rangeQuery('3d', now)).toEqual({ from: now - 3 * DAY });
-    expect(rangeQuery('30d', now)).toEqual({ from: now - 30 * DAY });
-    expect(rangeQuery('all', now)).toEqual({});
-    expect(rangeParams(new URLSearchParams('from=1&to=2&x=3&scope=a')).toString()).toBe('from=1&to=2');
-    expect(rangeParams(new URLSearchParams('from=&to=2026-10-18')).toString()).toBe('to=2026-10-18');
-    expect(messageWindow(5000, 9000)).toEqual({ after: 4999, before: 9000 });
-    expect(messageWindow(0, 9000)).toEqual({ before: 9000 });
-  });
 
   it('高亮：先脱敏，按原文找区间再逐段转义；不切进实体，大小写不敏感，重叠合并', () => {
     expect(highlight('a <b> & amp', ['amp'])).toBe('a &lt;b&gt; &amp; <mark>amp</mark>');

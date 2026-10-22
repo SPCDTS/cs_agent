@@ -1,12 +1,13 @@
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getSystemMessageText, Type, type FauxResponseFactory, type Message, type TranscriptContext } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, Type, type FauxResponseFactory, type Message, type TranscriptContext } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, Harness, type Conversation, type ConversationId, type EntryRecord, type JsonObject, type Storage, type TaskId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSubagentExtension, DEFAULT_SUBAGENT_INSTRUCTIONS, isSubagentExcludedTool, isSubagentReportRequest, SUBAGENT_REPORT_KIND,
+import { createSubagentExtension, isSubagentExcludedTool, isSubagentReportRequest, SUBAGENT_REPORT_KIND,
   SUBAGENT_REPORT_REQUEST_PREFIX, SubagentDoc, type SubagentOptions } from "../../src/agent/pi-tools/subagent.js";
 import { tmp } from "./helpers.js";
+import { call, gate, isChild, lastUser, text, toolResults } from "./faux-helpers.js";
 
 const context = BACKGROUND_CONTEXT;
 const cleanup: (() => Promise<unknown> | void)[] = [];
@@ -14,26 +15,7 @@ afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn()
 
 /** 父会话可见的全部工具；子会话应只剩 echo 与 web_search。 */
 const PARENT_TOOLS = ["echo", "web_search", "send_message", "auth_grant", "auth_list", "schedule_create", "schedule_control"];
-const text = (m: Message | undefined) => !m ? "" : m.role === "system" ? getSystemMessageText(m)
-  : typeof m.content === "string" ? m.content : m.content.map(c => c.type === "text" ? c.text : "").join("");
-const isChild = (ctx: TranscriptContext) => ctx.messages.some(m => m.role === "system" && text(m).includes(DEFAULT_SUBAGENT_INSTRUCTIONS));
-const lastUser = (ctx: TranscriptContext) => text(ctx.messages.filter(m => m.role === "user").at(-1));
 const last = (ctx: TranscriptContext) => ctx.messages.at(-1)!;
-const call = (...calls: [string, JsonObject][]) => fauxAssistantMessage(calls.map(([name, args]) => fauxToolCall(name, args)), { stopReason: "toolUse" });
-
-/** 可中止的闸门：faux 回应等它打开；生成被中止时随之拒绝，避免关闭 harness 时挂起。 */
-function gate() {
-  let open!: () => void;
-  const opened = new Promise<void>(resolve => { open = resolve; });
-  let entered = 0;
-  return { open, get entered() { return entered; }, wait: (signal?: AbortSignal) => {
-    entered++;
-    return new Promise<void>((resolve, reject) => {
-      void opened.then(resolve);
-      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-    });
-  } };
-}
 
 type Brain = (ctx: TranscriptContext, signal: AbortSignal | undefined) => Message | Promise<Message>;
 
@@ -65,7 +47,6 @@ const assistantTexts = async (conv: Conversation) => (await entries(conv)).filte
 const doc = async (harness: Harness, conv: Conversation) => (await harness.snapshot(SubagentDoc, conv.id, context))!;
 const child = async (harness: Harness, conv: Conversation, name: string) =>
   (await harness.conversation((await doc(harness, conv)).children[name]!.conversation as ConversationId, context))!;
-const toolResults = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => text(m));
 
 /** 父会话的默认脚本：收到用户指令就调用对应工具；工具结果后简短收尾；收到汇报就复述。 */
 function parentBrain(commands: Record<string, [string, JsonObject][]>, seen: string[][] = []) {
@@ -139,7 +120,7 @@ describe("pi 子 agent 扩展", () => {
   it("子 agent 失败时汇报失败原因", async () => {
     const parent = parentBrain({ 开始: [["subagent", { action: "spawn", name: "bad", task: "会失败" }]] });
     const brain = { current: ((ctx: TranscriptContext) => isChild(ctx)
-      ? fauxAssistantMessage("", { stopReason: "error", errorMessage: "上游 500" }) : parent(ctx)) as Brain };
+      ? fauxAssistantMessage("", { stopReason: "error", errorMessage: "上游拒绝请求" }) : parent(ctx)) as Brain };
     const { harness, model } = await rig(brain);
     const conv = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, context);
     await (await conv.submit({ type: "input", content: "开始" }, context)).wait(context);

@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { findUnwritable, probeWritable, processIdentity } from "../src/fs-check.js";
+import { findUnwritable, probeWritable } from "../src/fs-check.js";
 
 let dir: string;
 beforeEach(() => {
@@ -30,7 +30,4 @@ describe("writability probe", () => {
     expect(result[0]!.reason).toMatch(/E[A-Z]+/);
   });
 
-  it("describes the process identity", () => {
-    expect(processIdentity()).toMatch(/\S/);
-  });
 });

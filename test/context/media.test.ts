@@ -15,8 +15,8 @@ import { normalizeMessage } from "../../src/qq/policy.js";
 import type { Access } from "../../src/context/access.js";
 import { buildCodexPrompt } from "../../src/agent/codex/runner.js";
 import { tmp } from "../agent/helpers.js";
+import { PNG_1PX as PNG } from "../agent/helpers.js";
 
-const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const access: Access = { kind: "scope", scope: "group:30001" };
 const privateAccess: Access = { kind: "scope", scope: "private:20001" };
 const image = { type: "image", data: { url: "https://public.test/a", file: "a.png" } };

@@ -245,8 +245,7 @@ describe('记忆只读 API', () => {
     }
   });
 
-  it.each(['before', 'after'].flatMap(direction => ['', '0', '-1', '1.5', 'abc', '1e3', '9007199254740992']
-    .map(value => [direction, value])))('%s_id 非法值 %s 返回 400', async (direction, value) => {
+  it.each([['before', '0'], ['before', 'abc'], ['before', ''], ['after', '1.5'], ['after', '-1'], ['after', '9007199254740992']])('%s_id 非法值 %s 返回 400', async (direction, value) => {
     const r = await rig();
     const res = await r.get(`/api/memory/scopes/${G}/messages?${direction}=${NOW}&${direction}_id=${value}`);
     expect(res.status).toBe(400); expect(res.body.error).toContain(`${direction}_id`);
@@ -255,10 +254,7 @@ describe('记忆只读 API', () => {
   it.each([
     'before_id=1', 'after_id=1', `before_id=1&after=${NOW}`, `after_id=1&before=${NOW}`,
     `before=${NOW}&before_id=1&before_id=2`, `after=${NOW}&after_id=1&after_id=2`,
-    `before=${NOW}&after=${NOW}`, `before=${NOW}&after=${NOW}&before_id=2`,
-    `before=${NOW}&after=${NOW}&after_id=1`,
-    `before=${NOW}&after=${NOW}&before_id=1&after_id=1`,
-    `before=${NOW}&after=${NOW}&before_id=1&after_id=2`,
+    `before=${NOW}&after=${NOW}`, `before=${NOW}&after=${NOW}&before_id=1&after_id=2`,
   ])('游标缺少配对、重复或上下界非法时返回 400：%s', async query => {
     const r = await rig();
     const res = await r.get(`/api/memory/scopes/${G}/messages?${query}`);

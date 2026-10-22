@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,7 +6,7 @@ import { CodexRunner } from "../../src/agent/codex/runner.js";
 import { purgeCodexTrace } from "../../src/agent/codex/trace.js";
 import { loadConfig } from "../../src/config.js";
 import { FIXTURES, tmp } from "./helpers.js";
-import { fakeSpawn } from "./codex-app-server/fake-app-server.js";
+import { fakeSpawn, noKill } from "./codex-app-server/fake-app-server.js";
 
 const dirs: string[] = [];
 const temp = () => { const dir = tmp("cs-trace-test-"); dirs.push(dir); return dir; };
@@ -21,7 +21,7 @@ async function appServerEnv(dir: string, traceRetentionDays?: number): Promise<N
   const runner = new CodexRunner({
     command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
     codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "ws"),
-    threadsFile: path.join(dir, "codex-threads.json"), sandbox: "workspace-write", spawn: fake.spawn,
+    threadsFile: path.join(dir, "codex-threads.json"), sandbox: "workspace-write", spawn: fake.spawn, supervisor: { ...noKill },
     traceRetentionDays,
     env: { CODEX_ROLLOUT_TRACE_ROOT: "/wrong", Codex_Rollout_Trace_Root: "/also-wrong" },
   });

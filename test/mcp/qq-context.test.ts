@@ -1,69 +1,19 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { ThreadTokens, startMediaRecallServer } from "../../src/context/media-recall-server.js";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { callQQContextTool } from "../../src/context/qq-context-tool.js";
 import { ContextStore } from "../../src/context/store.js";
-import type { Access } from "../../src/context/access.js";
-import type { Channel, InboundMessage } from "../../src/channel/types.js";
-import type { MediaRecall } from "../../src/context/media.js";
-import { callBinding } from "../context/gateway-fixture.js";
 import { tmp } from "../agent/helpers.js";
+import { connect, G, msg, scope, textOf } from "./qq-context-fixture.js";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const ENTRY = path.join(ROOT, "dist", "mcp", "qq-context.js");
-const G = "200000001";
-let seq = 1;
-function msg(text: string, o: Partial<InboundMessage> = {}): InboundMessage {
-  return {
-    message_id: String(seq++), time: Math.floor(Date.now() / 1000), message_type: "group", user_id: "20001",
-    group_id: G, self_id: "10001", nickname: "De", text, route_text: text, truncated: false, mentioned_self: false,
-    images: [], segments: [{ type: "text", data: { text } }], ...o,
-  };
-}
-
-const clients: Client[] = [];
-const closes: (() => Promise<void>)[] = [];
 let writer: ContextStore | undefined;
-afterEach(async () => {
-  await Promise.all(clients.splice(0).map((c) => c.close().catch(() => undefined)));
-  for (const close of closes.splice(0)) await close();
+afterEach(() => {
   writer?.close();
   writer = undefined;
 });
 
-/**
- * 启动线程令牌端点并连接 qq_context 子进程：读取范围由主进程按会话当前回合求出（这里固定为 access；
- * undefined 表示调用不属于当前回合，网关拒绝）。
- */
-async function connect(dataDir: string, access: Access | undefined,
-  extra: { media?: Partial<Pick<MediaRecall, "recall" | "view">>; channel?: Pick<Channel, "listChats"> } = {}) {
-  const tokens = new ThreadTokens({ recall: async () => ({ text: "ok", images: [] }), ...extra.media }, {
-    resolve: async threadKey => {
-      if (!access) throw new Error("本回合已结束，工具调用不再有效");
-      return callBinding(threadKey, access, { turnId: "codex:mcp-turn", session: "thr-sess" });
-    },
-    send: async () => ({}),
-  }, 5, extra.channel);
-  const endpoint = await startMediaRecallServer(tokens, 0);
-  closes.push(endpoint.close);
-  const token = tokens.issue(`group:${G}`);
-  const env: Record<string, string> = { DATA_DIR: dataDir, PATH: process.env.PATH ?? "", QQ_RECALL_TOKEN: token, MEDIA_RECALL_PORT: String(endpoint.port) };
-  if (process.env.SYSTEMROOT) env.SYSTEMROOT = process.env.SYSTEMROOT;
-  const client = new Client({ name: "test", version: "1.0.0" });
-  await client.connect(new StdioClientTransport({ command: process.execPath, args: [ENTRY], env, stderr: "pipe" }));
-  clients.push(client);
-  return { client, revoke: () => tokens.revoke(`group:${G}`) };
-}
-
-const textOf = (r: unknown) => ((r as { content: { text: string }[] }).content ?? []).map((c) => c.text).join("");
-const scope: Access = { kind: "scope", scope: `group:${G}` };
-
-describe("qq_context MCP over stdio (built dist)", () => {
+describe("qq_context MCP（进程内，经线程令牌 loopback）", () => {
   it("qq_chats 经线程令牌查询：范围由主进程求出，本会话范围拒绝，参数不能提升权限，作废后拒绝", async () => {
     const listChats = vi.fn(async () => ({ groups: [{ group_id: "7", name: "家庭群", member_count: 6 }], friends: [{ user_id: "1", nickname: "家人" }] }));
     const owner = await connect(tmp(), { kind: "all" }, { channel: { listChats } });

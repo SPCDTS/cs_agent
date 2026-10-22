@@ -33,7 +33,7 @@ describe('multipart 上传解析', () => {
     expect((await readMultipart(request(bytes), { maxBytes: bytes.length })).file).toBeDefined();
     await expect(readMultipart(request(bytes), { maxBytes: bytes.length - 1 })).rejects.toMatchObject({ status: 413 });
   });
-  it.each(['bad.exe', 'bad.txt', 'bad.zip'])('非法类型或 ZIP 假签名返回 415：%s', async filename => {
+  it.each(['bad.txt'])('非法类型或 ZIP 假签名返回 415（.exe/.zip 见 dashboard-skills）：%s', async filename => {
     await expect(read(body(part('file', 'not zip', filename)))).rejects.toMatchObject({ status: 415 });
   });
   it('拒绝多个文件、错误文件字段、重复 CSRF 与路径文件名', async () => {

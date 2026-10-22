@@ -4,7 +4,8 @@ import path from "node:path";
 import type { ContextStore } from "../../src/context/store.js";
 import { normalizeMessage } from "../../src/qq/policy.js";
 
-export const MEDIA_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+import { PNG_1PX as MEDIA_PNG } from "../agent/helpers.js";
+export { MEDIA_PNG };
 
 /** 模拟已经完成召回的内容寻址文件与数据库行。 */
 export async function mediaFixture(store: ContextStore, dir: string, scope = "group:7", id = "media", status: "ok" | "skipped" = "ok") {

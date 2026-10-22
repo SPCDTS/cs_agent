@@ -3,8 +3,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { validateReferences } from "../../src/media/references.js";
 import { tmp } from "../agent/helpers.js";
+import { PNG_1PX as PNG } from "../agent/helpers.js";
 
-const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 describe("入站参考图范围", () => {
   it("允许列表、票据根目录与魔数同时校验；软链接不能逃逸", async () => {
     const base = tmp(); const root = path.join(base, "incoming", "a"); const other = path.join(base, "incoming", "b");

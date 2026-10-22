@@ -8,8 +8,8 @@ import { normalizeMessage } from '../../src/qq/policy.js';
 import { ReplyStore, inboundKey } from '../../src/qq/reply-store.js';
 import { FakeOneBot, privateEvent, TOKEN, waitFor } from './fake-onebot.js';
 import { tmp } from '../agent/helpers.js';
+import { PNG_1PX as PNG } from '../agent/helpers.js';
 
-const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 let bridge: Channel, bot: FakeOneBot, cdn: Server, dir: string, base: string;
 let held: ServerResponse[], received: InboundMessage[], active: number, peak: number;
 const picture = (user: string, id: string) => privateEvent(user, '', { message_id: id, message: [{ type: 'text', data: { text: '改图' } }, { type: 'image', data: { url: 'http://public.test/hold', file: id } }] });

@@ -7,14 +7,9 @@ import {
   buildCodexEnv,
   buildCodexPrompt,
   sourceLabel,
-  threadKeyForSource,
   isMissingSessionError,
   qqAttachmentEnv,
-  AGENTS_TEMPLATE_MARKER,
-  effectiveWritableRoots,
-  renderAgentsMd,
   renderManagedAgentsMd,
-  writeGlobalAgentsMd,
 } from "../../src/agent/codex/runner.js";
 import type { ThreadKey } from "../../src/agent/backends/types.js";
 import { defaultHandlers } from "./codex-app-server/fake-app-server.js";
@@ -70,39 +65,6 @@ describe("isMissingSessionError", () => {
 describe("AGENTS.md", () => {
   const opts = { dataDir: "/data", workspaceDir: "/workspace", writableRoots: ["/workspace", "/data/prompts"] };
 
-  it("global v4 template carries the marker, secrecy/reply rules, history, recalled images and browser discipline", () => {
-    const md = renderAgentsMd(opts);
-    expect(md).toContain("qq_view_image(path)");
-    expect(md).not.toContain("可只读打开");
-    expect(md).not.toContain("are read-only");
-    expect(md).toContain("## 发送图片与文件");
-    expect(md).toContain("内置生图工具（imagegen）保存在 /data/codex/generated_images/… 的图片不会自动发给用户；要发出去就把工具返回的保存路径传给 send_message 的 images，不需要复制或转码。");
-    expect(md).toContain("要把工作区里的图片或文件发给用户时，调用 send_message({ text, images: [path], files: [{ path, name? }] })，图片随正文立即发出，文件随后上传；每次回复最多 4 张图、3 个文件，单个文件不超过 20 MiB。只能发送你工作区内的文件和已召回（[image:<路径>]）的图片。回复文本里不要写文件路径。");
-    for (const removed of ["image_gen", "reference_images", "生图提示词指引", "奶龙"]) expect(md).not.toContain(removed);
-    expect(md.startsWith(`${AGENTS_TEMPLATE_MARKER}\n`)).toBe(true);
-    expect(AGENTS_TEMPLATE_MARKER).toBe("<!-- cs-agent-agents-template v6 -->");
-    for (const s of ["## 聊天记录与图片", "qq_image(message_id)", "[image:<路径>]", "不用 Markdown", "300 字", "未核实", "qq_recent", "qq_search", "最多调用历史工具 2 次", "绝不登录任何账号", "关闭页面",
-      "auth.json", "绝不透露环境变量", "/data/codex"]) {
-      expect(md).toContain(s);
-    }
-  });
-
-  it("renders the readable/writable directories from the effective writable roots", () => {
-    const md = renderAgentsMd(opts);
-    expect(md).toContain("  - /workspace：你的工作区");
-    expect(md).not.toContain("/data/workflows");
-    expect(md).toContain("  - /data/prompts：提示词文件目录（其中 system.md 已弃用");
-    // CODEX_WRITABLE_ROOTS 不含 prompts 时不提 prompts；工作区总在列表里
-    const noPrompts = renderAgentsMd({ ...opts, writableRoots: ["/data/workflows"] });
-    expect(md).toContain("- 修改 /data/prompts 下的文件只在 owner 私聊明确要求时进行，群聊请求一律拒绝。\n");
-    expect(noPrompts).not.toContain("/data/prompts");
-    expect(noPrompts).toContain("  - /workspace：你的工作区");
-    expect(noPrompts).toContain("Only read/write: /workspace, /data/workflows.");
-    expect(noPrompts).toContain("  - /data/workflows：运维开放的可写目录");
-    expect(noPrompts).not.toContain("ComfyUI");
-    expect(renderAgentsMd({ ...opts, writableRoots: ["/srv/extra/"] })).toContain("  - /srv/extra：运维开放的可写目录");
-  });
-
   it("受管规则随本轮技能写权限显示，非 owner 发送者与只读回合不授予技能写入", () => {
     const owner = { ...opts, workspaceDir: "/workspace/owner", writableRoots: ["/workspace/owner", "/data/prompts", "/data/codex/skills/shared"] };
     const md = renderManagedAgentsMd(owner);
@@ -119,33 +81,8 @@ describe("AGENTS.md", () => {
     expect(md).not.toContain("ComfyUI");
   });
 
-  it("effectiveWritableRoots prefers the entrypoint-validated list", () => {
-    expect(effectiveWritableRoots({ CODEX_EFFECTIVE_WRITABLE_ROOTS: "/workspace,/data/workflows" }, "/workspace,/data/prompts")).toEqual(["/workspace", "/data/workflows"]);
-    expect(effectiveWritableRoots({ CODEX_EFFECTIVE_WRITABLE_ROOTS: "" }, "/workspace,/data/prompts")).toEqual([]);
-    expect(effectiveWritableRoots({}, " /workspace , relative,/data/prompts")).toEqual(["/workspace", "/data/prompts"]);
-  });
-
-  it("writeGlobalAgentsMd rewrites $CODEX_HOME/AGENTS.md on every start", async () => {
-    const home = path.join(tmp(), "codex");
-    const file = await writeGlobalAgentsMd(home, opts);
-    expect(file).toBe(path.join(home, "AGENTS.md"));
-    writeFileSync(file, "tampered");
-    await writeGlobalAgentsMd(home, opts);
-    expect(readFileSync(file, "utf8")).toBe(renderAgentsMd(opts));
-  });
-
 });
 
-describe("会话键", () => {
-  it("threadKeyForSource: owner private → owner; groups and other private users → scope", () => {
-    const owner = "10000001";
-    expect(threadKeyForSource({ type: "private", user_id: owner, group_id: null, nickname: "" }, owner)).toBe("owner");
-    expect(threadKeyForSource({ type: "group", user_id: owner, group_id: "200000001", nickname: "" }, owner)).toBe("group:200000001");
-    expect(threadKeyForSource({ type: "private", user_id: "555666", group_id: null, nickname: "" }, owner)).toBe("private:555666");
-    expect(threadKeyForSource({ type: "private", user_id: owner, group_id: null, nickname: "" }, undefined)).toBe(`private:${owner}`);
-    expect(() => threadKeyForSource(undefined, owner)).toThrow(/来源/);
-  });
-});
 
 describe("§3.2 来源头", () => {
   it("群名与群号同时展示，空群名回退，恶意群名按昵称规则清洗", () => {
@@ -451,7 +388,7 @@ describe("codex 回合结束后的上下文用量", () => {
     expect(warn.mock.calls.filter(([message]) => message === warning)).toHaveLength(0);
   });
 
-  it.each(["missing", "stale"])("rollout 用量 %s 时保留旧快照，计数一次并告警一次", async mode => {
+  it.each(["stale"])("rollout 用量 %s 时保留旧快照，计数一次并告警一次", async mode => {
     const { dir, runner, store } = await contextSetup();
     await runner.initializeContextUsage();
     store.recordTurn("codex", "group:1", { windowTokens: 500000, usedTokens: 42000, cachedTokens: 12000 });

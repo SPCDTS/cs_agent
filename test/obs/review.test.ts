@@ -10,7 +10,7 @@ import { redactText } from '../../src/shared/redact.js';
 import { loadConfig } from '../../src/config.js';
 import { publicHealth, loadObsToken } from '../../src/obs/token.js';
 import { buildCodexEnv, CodexRunner } from '../../src/agent/codex/runner.js';
-import { fakeSpawn } from '../agent/codex-app-server/fake-app-server.js';
+import { fakeSpawn, noKill } from '../agent/codex-app-server/fake-app-server.js';
 const clean: (()=>void)[]=[];
 afterEach(()=>{for(const fn of clean.splice(0).reverse())fn();});
 function rig(cap=500) {
@@ -31,7 +31,7 @@ it('口令原子发布仅记录一次，子进程白名单排除 OBS_TOKEN，健
   expect(new Set(tokens).size).toBe(1);expect(logs).toEqual(['observability token generated at /data/obs-token']);
   expect(buildCodexEnv(dir,{OBS_TOKEN:'fake-secret',PATH:'fake-path'})).not.toHaveProperty('OBS_TOKEN');
   const fake=fakeSpawn();
-  const runner=new CodexRunner({command:['codex'],codexHome:path.join(dir,'codex'),workspaceDir:path.join(dir,'ws'),threadsFile:path.join(dir,'threads.json'),sandbox:'read-only',spawn:fake.spawn,env:{OBS_TOKEN:'fake-secret'}});
+  const runner=new CodexRunner({command:['codex'],codexHome:path.join(dir,'codex'),workspaceDir:path.join(dir,'ws'),threadsFile:path.join(dir,'threads.json'),sandbox:'read-only',spawn:fake.spawn,supervisor:{...noKill},env:{OBS_TOKEN:'fake-secret'}});
   await runner.start();await runner.stop();
   expect(fake.calls[0]!.env).not.toHaveProperty('OBS_TOKEN');
   const health=JSON.stringify(publicHealth({connected:true,degraded:true,codex:{ok:true,error:'fake-secret',server:'http://private'},threads:{owner:'thread-1'},pi:{count:0,keys:[]}}));

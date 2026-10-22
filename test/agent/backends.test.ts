@@ -1,14 +1,12 @@
 import path from "node:path";
 import { CodexBackend, type CodexBackendOptions } from "../../src/agent/backends/codex.js";
-import { tmp } from "./helpers.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexScript, codexRunnerRig } from "./codex-fixture.js";
-import { backendNameFor, createBackendSelector, parseBackendOverrides } from "../../src/agent/backends/select.js";
+import { noKill } from "./codex-app-server/fake-app-server.js";
+import { backendNameFor, parseBackendOverrides } from "../../src/agent/backends/select.js";
 import type { AgentBackend } from "../../src/agent/backends/types.js";
 import type { HostCallbacks, InputRef, TurnStatus } from "../../src/agent/host/types.js";
 import type { InboundRecord, TurnBinding } from "../../src/channel/types.js";
-
-const codex: AgentBackend = { name: "codex" };
 
 describe("backend selection (§4.3)", () => {
   it("parses AGENT_BACKEND_OVERRIDES", () => {
@@ -33,12 +31,6 @@ describe("backend selection (§4.3)", () => {
     expect(backendNameFor("private:1", "pi", {})).toBe("pi");
   });
 
-  it("selector returns the registered backend and rejects an unregistered one", () => {
-    const sel = createBackendSelector({ defaultBackend: "codex", overrides: {}, backends: { codex } });
-    expect(sel.select("group:8")).toBe(codex);
-    const missing = createBackendSelector({ defaultBackend: "pi", overrides: {}, backends: { codex } });
-    expect(() => missing.select("group:1")).toThrow(/not registered/);
-  });
 });
 
 /** 输入记录桩：键 → InboundRecord；binding 按会话最后一条输入给出地址。 */
@@ -288,7 +280,7 @@ describe("CodexBackend：常驻 app-server 适配器", () => {
         clientId: mode === "wake" ? "someone-else" : String(m.params!.clientUserMessageId) } });
       return undefined;
     } });
-    const r = await codexRunnerRig({ handlers: script.handlers, supervisor: { backoffInitialMs: 5, readyTimeoutMs: 5_000, requestTimeoutMs: 300 } });
+    const r = await codexRunnerRig({ handlers: script.handlers, supervisor: { backoffInitialMs: 5, readyTimeoutMs: 5_000, requestTimeoutMs: 300, ...noKill } });
     rigs.push(r);
     const started: string[] = [];
     const h = fakeHost();

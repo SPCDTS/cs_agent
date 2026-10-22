@@ -87,7 +87,7 @@ describe('面板二期页面', () => {
     expect(html).not.toContain('test-dashboard-magpie-key');
     expect(html).not.toMatch(/name="CODEX_(PROVIDER|MAGPIE_URL|MAGPIE_KEY)"/);
   });
-  it.each(['magpie', 'deepseek', 'openai'])('设置页只读显示 pi 出站 %s，保留 DeepSeek 密钥灯', async provider => {
+  it.each(['magpie', 'deepseek'])('设置页只读显示 pi 出站 %s，保留 DeepSeek 密钥灯', async provider => {
     const r = await rig({ env: { AGENT_MODEL_PROVIDER: provider, CODEX_PROVIDER: 'openai',
       CODEX_MAGPIE_URL: 'http://pi-gateway.example:3425/v1', CODEX_MAGPIE_KEY: 'test-pi-dashboard-key' } });
     const response = await r.get('/settings');

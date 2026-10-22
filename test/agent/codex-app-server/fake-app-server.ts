@@ -73,6 +73,13 @@ export function defaultHandlers(extra: Record<string, Handler> = {}): Record<str
   };
 }
 
+/**
+ * 假子进程的 pid 不是真实进程：监督器停止时不得调用真实 killTree（Windows 上会同步运行 taskkill，每次约 0.3 秒，
+ * 且可能误杀同 pid 的真实进程）。CodexRunnerOptions.supervisor 的类型不含 killTree，但运行时会整体展开给监督器，
+ * 所以以无类型对象展开：`supervisor: { ...noKill }`。
+ */
+export const noKill: object = { killTree: (_pid: number | undefined): void => undefined };
+
 /** 每次启动生成一个新的 FakeAppServer；children 记录各代。 */
 export function fakeSpawn(handlers: () => Record<string, Handler> = () => defaultHandlers()) {
   const children: FakeAppServer[] = [];

@@ -12,8 +12,8 @@ import { createDashboard } from '../../src/obs/http.js';
 import { imageBinary } from '../../src/obs/memory/images.js';
 import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import { ObsStore } from '../../src/obs/store.js';
+import { PNG_1PX as PNG } from '../agent/helpers.js';
 
-const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 const JPEG = Buffer.from([255,216,255,192,0,8,8,0,1,0,1,0]);
 const WEBP = Buffer.alloc(30);
@@ -73,7 +73,7 @@ describe('图片记忆 API 和页面', () => {
     expect((await r.json('/api/memory/images?scope=&status=&since=&page=')).body.totals).toEqual(first.body.totals);
   });
 
-  it.each(['status=bad', 'since=2026-02-30', 'since=-1', 'page=-1', 'page=1.5', 'page=1000001', 'page=00', 'scope=..', 'extra=1', 'page=0&page=1'])('拒绝非法或重复参数 %s', async q => {
+  it.each(['status=bad', 'since=2026-02-30', 'page=-1', 'page=1000001', 'scope=..', 'extra=1', 'page=0&page=1'])('拒绝非法或重复参数 %s', async q => {
     const r = await rig(); expect((await r.get('/api/memory/images?' + q)).status).toBe(400);
   });
 

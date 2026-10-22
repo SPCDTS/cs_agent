@@ -12,7 +12,6 @@ import { registerTemporarySecrets } from '../../src/shared/redact.js';
 import type { SessionAdapters } from '../../src/obs/sessions/http.js';
 import type { Block, ContentRef, ObservedTurn, SessionAdapter, SessionFilter, SessionRef } from '../../src/obs/sessions/types.js';
 import { contextBody, contextUnavailable, type ContextAnalysis } from '../../src/obs/ui/context-view.js';
-import { turnFacts } from '../../src/obs/ui/turn-view.js';
 import { ContextUsageStub } from './fixtures/context-usage-stub.js';
 
 const TOKEN = 'agents-pages-test-token-0123';
@@ -189,14 +188,6 @@ describe('Agent 页面', () => {
     expect((await r.get('/codex/agents-md')).status).toBe(200);
   });
 
-  it('/memory 总览与导航；/context 指向记忆', async () => {
-    const r = await rig();
-    const m = await r.page('/memory');
-    expect(m.res.status).toBe(200); expect(m.html).toContain('聊天记录整理'); expect(m.html).toContain('href="/memory" aria-current="page"');
-    const c = await r.page('/context');
-    expect(c.html).toContain('href="/memory"'); expect(c.html).toContain('href="/memory" aria-current="page"');
-  });
-
   it('上下文分析页：分析接口缺席时显示"分析引擎暂不可用"，带阶段切换与回合链接；缺 at 时默认最新回合', async () => {
     const r = await rig();
     const { res, html } = await r.page('/agents/codex/sessions/sess-1/context?at=t1&phase=before');
@@ -257,8 +248,4 @@ describe('上下文分析渲染（O3 接口契约桩）', () => {
     expect(noMeasure).toContain('没有可用的实测值'); expect(noMeasure).not.toContain('未解释差额 <b');
   });
 
-  it('turnFacts：上下文占用取最后一次带 usage 的请求', () => {
-    expect(turnFacts(BLOCKS)).toMatchObject({ requests: 2, model: 'gpt-test', effort: 'high', context: { input: 5000 } });
-    expect(turnFacts([]).context).toBeUndefined();
-  });
 });

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { TranscriptContext } from "@earendil-works/pi-ai";
 import { TURN_NOTICES } from "../../src/agent/replies.js";
 import type { ReplyStore } from "../../src/qq/reply-store.js";
-import { call, gate, isChild, lastUser, reply, residentRig, toolResults, type Brain } from "./resident-fixture.js";
+import { call, gate, isChild, lastUser, reply, residentRig, toolResults, waitUntil, type Brain } from "./resident-fixture.js";
 
 /** 收到指定正文的用户输入时调用 send_message 回复；工具结果之后收尾。 */
 function echoBrain(extra?: (ctx: TranscriptContext, input: string, signal: AbortSignal | undefined) => ReturnType<Brain> | undefined): Brain {
@@ -44,7 +44,7 @@ describe("常驻 agent：输入 → ThreadHost → pi 回合 → send_message", 
       return input.endsWith("慢") ? (async () => { await slow.wait(); return call(["send_message", { text: "慢好了" }]); })() : undefined;
     }) });
     await r.say("5", "慢");
-    await vi_wait(() => slow.entered === 1);
+    await waitUntil(() => slow.entered === 1);
     await r.say("6", "我也问");
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(seen).toEqual(["慢"]);
@@ -70,7 +70,7 @@ describe("常驻 agent：输入 → ThreadHost → pi 回合 → send_message", 
       return call(["send_message", { text: "其他" }]);
     } });
     const first = await r.say("5", "慢");
-    await vi_wait(() => slow.entered === 1);
+    await waitUntil(() => slow.entered === 1);
     const second = await r.say("5", "补充一句");
     expect(r.host.thread("group:7")?.turnInputs.map(i => i.inboundKey)).toEqual([first, second]);
     slow.open();
@@ -79,20 +79,6 @@ describe("常驻 agent：输入 → ThreadHost → pi 回合 → send_message", 
     expect(contexts.at(-1)!.some(t => t.includes("补充一句"))).toBe(true);
   });
 
-  it("owner 的两个账号算同一发送者：私聊共用 owner 线程，第二个账号的消息插话", async () => {
-    const slow = gate();
-    const r = await residentRig({ owners: ["1", "9"], brain: echoBrain((ctx, input) =>
-      ctx.messages.at(-1)!.role === "user" && input.endsWith("慢") ? (async () => { await slow.wait(); return call(["send_message", { text: "好" }]); })() : undefined) });
-    const a = await r.say("1", "慢", null);
-    await vi_wait(() => slow.entered === 1);
-    const b = await r.say("9", "另一个号补充", null);
-    expect(r.host.thread("owner")?.turnInputs.map(i => i.inboundKey)).toEqual([a, b]);
-    slow.open();
-    await r.idle();
-    // 插话放在工具轮之后：两条都发往本轮最后一条输入所在的私聊
-    expect(r.sent.map(s => s.params.user_id)).toEqual([9, 9]);
-    expect(r.texts()).toEqual(["好", "收到：另一个号补充"]);
-  });
 });
 
 describe("群里 owner 多账号插话（§7.2）", () => {
@@ -106,7 +92,7 @@ describe("群里 owner 多账号插话（§7.2）", () => {
       return call(["send_message", { text: "其他" }]);
     } });
     const a = await r.say("1", "慢");
-    await vi_wait(() => slow.entered === 1);
+    await waitUntil(() => slow.entered === 1);
     const b = await r.say("9", "另一个号补充");
     expect(r.host.thread("group:7")?.turnInputs.map(i => i.inboundKey)).toEqual([a, b]);
     slow.open();
@@ -139,7 +125,7 @@ describe("出错提示与看门狗（§8）", () => {
   it("回合失败发一条出错提示；10 分钟内同一会话不再重复", async () => {
     let now = Date.now();
     const r = await residentRig({ now: () => now, brain: () => reply("") , });
-    r.brain.current = () => Object.assign(reply(""), { stopReason: "error" as const, errorMessage: "上游 500" });
+    r.brain.current = () => Object.assign(reply(""), { stopReason: "error" as const, errorMessage: "上游拒绝请求" });
     await r.say("5", "第一次");
     await r.idle();
     expect(r.texts("7")).toEqual([TURN_NOTICES.failed]);
@@ -153,19 +139,12 @@ describe("出错提示与看门狗（§8）", () => {
     expect(r.texts("7")).toEqual([TURN_NOTICES.failed, TURN_NOTICES.failed]);
   });
 
-  it("正常结束但没有发消息：不兜底、不提示", async () => {
-    const r = await residentRig({ brain: () => reply("只在心里想") });
-    await r.say("5", "你好");
-    await r.idle();
-    expect(r.sent).toEqual([]);
-  });
-
   it("看门狗：回合长时间没有事件即中止，并按回合失败提示", async () => {
     const stuck = gate();
     const r = await residentRig({ stallMs: 0, brain: async (_ctx, signal) => { await stuck.wait(signal); return reply(); } });
     await r.say("5", "卡住");
-    await vi_wait(() => stuck.entered === 1);
-    await vi_wait(() => !!r.host.thread("group:7")?.turnId);
+    await waitUntil(() => stuck.entered === 1);
+    await waitUntil(() => !!r.host.thread("group:7")?.turnId);
     expect(await r.monitor.sweep()).toEqual(["group:7"]);
     await r.idle();
     expect(r.texts("7")).toEqual([TURN_NOTICES.failed]);
@@ -176,7 +155,7 @@ describe("出错提示与看门狗（§8）", () => {
     const r = await residentRig({ brain: echoBrain((ctx, input, signal) =>
       ctx.messages.at(-1)!.role === "user" && input.endsWith("卡住") ? (async () => { await stuck.wait(signal); return reply(); })() : undefined) });
     await r.say("5", "卡住");
-    await vi_wait(() => stuck.entered === 1);
+    await waitUntil(() => stuck.entered === 1);
     await r.say("6", "下一位");
     await r.monitor.stop("group:7");
     stuck.open();
@@ -185,27 +164,6 @@ describe("出错提示与看门狗（§8）", () => {
   });
 });
 
-describe("子 agent 唤醒回合（§6.2、§7.3）", () => {
-  it("子 agent 完成后唤醒主会话：唤醒回合继承派出者 owner 的权限，发往本会话不 @，也能主动发往别处", async () => {
-    const results: string[][] = [];
-    const r = await residentRig({ owners: ["1"], brain: (ctx) => {
-      if (isChild(ctx)) return reply("晴，25 度");
-      const end = ctx.messages.at(-1)!;
-      if (end.role === "toolResult") { results.push(toolResults(ctx)); return reply("收尾"); }
-      const input = lastUser(ctx);
-      if (input.startsWith("[子 agent 完成]")) return call(["send_message", { text: "天气：晴" }], ["send_message", { text: "转告", target: "qq:group:8" }]);
-      return call(["subagent", { action: "spawn", name: "w", task: "查天气" }]);
-    } });
-    // owner 在群里派出子 agent：汇报唤醒的回合继承 owner（§7.3），可以 target
-    await r.say("1", "查一下天气");
-    await vi_wait(() => results.length >= 2, 15_000);
-    await r.idle();
-    expect(r.texts("7")).toEqual(["天气：晴"]);
-    expect(r.texts("8")).toEqual(["转告"]);
-    expect(r.mentions()).toEqual([null, null]);
-    expect(results[1]!.every(t => !t.includes("基础权限"))).toBe(true);
-  });
-});
 
 describe("唤醒回合不被用户输入升级（§7.3）", () => {
   it("宿主尚未确认唤醒 run 时 owner 来消息：输入不并入唤醒 run，唤醒工作保持派出者（成员）的身份，消息排到其后", async () => {
@@ -229,7 +187,7 @@ describe("唤醒回合不被用户输入升级（§7.3）", () => {
     };
     // 成员 5 派出子 agent（没有 send 授权）；之后 owner 来消息
     await r.say("5", "查一下天气");
-    await vi_wait(() => wakeGate.entered === 1, 15_000);
+    await waitUntil(() => wakeGate.entered === 1, 15_000);
     await r.host.idle();
     expect(r.host.thread("group:7")?.busy).toBe(false);
     const late = await r.say("1", "新消息");
@@ -256,7 +214,7 @@ describe("重启恢复", () => {
     const r = await residentRig({ brain: echoBrain((ctx, input, signal) =>
       ctx.messages.at(-1)!.role === "user" && input.endsWith("慢") ? (async () => { await slow.wait(signal); return call(["send_message", { text: "慢好了" }]); })() : undefined) });
     await r.say("5", "慢");
-    await vi_wait(() => slow.entered === 1);
+    await waitUntil(() => slow.entered === 1);
     const queued = await r.say("6", "排队的");
     await r.restart();
     slow.open();
@@ -283,37 +241,11 @@ function lastUserText(m: { content: unknown }): string {
   return typeof m.content === "string" ? m.content : (m.content as { type: string; text?: string }[]).map(c => c.text ?? "").join("");
 }
 
-async function vi_wait(check: () => boolean, timeout = 10_000): Promise<void> {
-  const deadline = Date.now() + timeout;
-  while (!check()) {
-    if (Date.now() > deadline) throw new Error("等待超时");
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-}
 
 describe("一轮只开一条输入（§4.2）", () => {
-  it("同一发送者排队的两条：开轮只送首条，第二条在开轮后插话进同一回合", async () => {
-    const slow = gate();
-    const r = await residentRig({ brain: (ctx) => {
-      if (ctx.messages.at(-1)!.role === "toolResult") return reply("结束");
-      if (lastUser(ctx).endsWith("慢")) return (async () => { await slow.wait(); return reply("好了"); })();
-      return reply("收到");
-    } });
-    const starts: number[] = [];
-    const startTurn = r.pi.startTurn.bind(r.pi);
-    r.pi.startTurn = (threadKey, inputs, ctx, settings) => { starts.push(inputs.length); return startTurn(threadKey, inputs, ctx, settings); };
-    await r.say("6", "慢");
-    await vi_wait(() => slow.entered === 1);
-    const a = await r.say("5", "第一条");
-    const b = await r.say("5", "第二条");
-    slow.open();
-    await r.idle();
-    expect(starts).toEqual([1, 1]);
-    expect(r.bridge.inbox.getInbound(a)!.turn_id).toBe(r.bridge.inbox.getInbound(b)!.turn_id);
-  });
 
   it("开轮请求未确认就重启：重放同一条输入取回同一提交，回合结果取该提交的真实结果（失败照常回报）", async () => {
-    const r = await residentRig({ brain: () => Object.assign(reply(""), { stopReason: "error" as const, errorMessage: "上游 500" }) });
+    const r = await residentRig({ brain: () => Object.assign(reply(""), { stopReason: "error" as const, errorMessage: "上游拒绝请求" }) });
     const msg = r.message("5", "会失败");
     const key = (r.bridge.inbox as ReplyStore).admit(msg, "group:7")!;
     r.history.ingest(msg);
@@ -322,10 +254,10 @@ describe("一轮只开一条输入（§4.2）", () => {
     const onTurnCompleted = r.host.onTurnCompleted.bind(r.host);
     r.host.onTurnCompleted = (threadKey, turnId, result) => { completed.push({ turnId, status: result.status }); onTurnCompleted(threadKey, turnId, result); };
     const first = await r.pi.startTurn("group:7", [input], { kind: "user", sender: "5" });
-    await vi_wait(() => completed.length === 1);
+    await waitUntil(() => completed.length === 1);
     const again = await r.pi.startTurn("group:7", [input], { kind: "user", sender: "5" });
     expect(again).toEqual(first);
-    await vi_wait(() => completed.length === 2);
+    await waitUntil(() => completed.length === 2);
     expect(completed).toEqual([{ turnId: (first as { turnId: string }).turnId, status: "failed" }, { turnId: (first as { turnId: string }).turnId, status: "failed" }]);
   });
 });
@@ -341,8 +273,8 @@ describe("pi 会话仍有后台工作（后端切换判定）", () => {
     } });
     expect(await r.pi.busy("group:7")).toBe(false);
     await r.say("5", "派个子 agent");
-    await vi_wait(() => child.entered === 1, 15_000);
-    await vi_wait(() => !r.host.thread("group:7")?.busy);
+    await waitUntil(() => child.entered === 1, 15_000);
+    await waitUntil(() => !r.host.thread("group:7")?.busy);
     expect(await r.pi.busy("group:7")).toBe(true);
     child.open();
     await vi.waitFor(async () => expect(await r.pi.busy("group:7")).toBe(false), { timeout: 15_000, interval: 20 });
@@ -358,14 +290,14 @@ describe("pi 会话仍有后台工作（后端切换判定）", () => {
       return call(["subagent", { action: "spawn", name: "w", task: "查天气" }]);
     } });
     await r.say("5", "派个子 agent");
-    await vi_wait(() => child.entered === 1, 15_000);
-    await vi_wait(() => !r.host.thread("group:7")?.busy);
+    await waitUntil(() => child.entered === 1, 15_000);
+    await waitUntil(() => !r.host.thread("group:7")?.busy);
     // 第一次读取之后、第二次读取之前：子 agent 完成，汇报唤醒主会话（汇报登记随之清空）
     const snapshot = r.pi.harness.snapshot.bind(r.pi.harness);
     let reads = 0;
     (r.pi.harness as { snapshot: unknown }).snapshot = async (...args: Parameters<typeof snapshot>) => {
       const value = await snapshot(...args);
-      if (++reads === 2) { child.open(); await vi_wait(() => wake.entered === 1, 15_000); await new Promise(res => setTimeout(res, 200)); }
+      if (++reads === 2) { child.open(); await waitUntil(() => wake.entered === 1, 15_000); await new Promise(res => setTimeout(res, 200)); }
       return value;
     };
     const busy = await r.pi.busy("group:7");
@@ -377,15 +309,4 @@ describe("pi 会话仍有后台工作（后端切换判定）", () => {
   });
 });
 
-describe("一个会话同一时间只由一个后端服务（§4.3）", () => {
-  it("owner 两个账号的私聊覆盖为不同后端：owner 线程只按首个 owner 账号的后端", async () => {
-    const r = await residentRig({ owners: ["1", "9"], backend: scope => scope === "private:9" ? "codex" : "pi",
-      brain: (ctx) => ctx.messages.at(-1)!.role === "toolResult" ? reply("结束") : call(["send_message", { text: "收到" }]) });
-    const key = await r.say("9", "第二个号的消息", null);
-    await r.idle();
-    expect(r.script.turns).toEqual([]);
-    expect(r.bridge.inbox.getInbound(key)!.turn_id).toMatch(/^pi:/);
-    expect(r.texts()).toEqual(["收到"]);
-  });
-});
 

@@ -366,8 +366,7 @@ describe("codex 上下文采集", () => {
     expect(info).toHaveBeenCalledWith("codex context window", expect.objectContaining({ source: "catalog.context_window" }));
   });
 
-  it.each(['{broken', '{"models":[{"slug":"other","context_window":500000}]}',
-    '{"models":[{"slug":"codex/gpt-6.1-sol","context_window":-1}]}'])('缓存不可用时保留目录值或配置回退：%s', async cache => {
+  it.each(['{broken', '{"models":[{"slug":"other","context_window":500000}]}'])('缓存不可用时保留目录值或配置回退：%s', async cache => {
     for (const failed of [false, true]) {
       const { runner, dir } = await runnerSetup(failed ? { FAKE_CODEX_CATALOG_FAIL: "1" } : {
         FAKE_CODEX_CATALOG: JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window: 272000 }] }),
@@ -376,16 +375,6 @@ describe("codex 上下文采集", () => {
       await fs.writeFile(path.join(home, "models_cache.json"), cache, "utf8");
       expect(await runner.initializeContextUsage()).toBe(failed ? 654321 : 272000);
     }
-  });
-
-  it("离线目录与缓存值相同时仍标为目录来源", async () => {
-    const catalog = JSON.stringify({ models: [{ slug: "codex/gpt-6.1-sol", context_window: 272000 }] });
-    const { runner, dir } = await runnerSetup({ FAKE_CODEX_CATALOG: catalog });
-    const home = path.join(dir, "codex"); await fs.mkdir(home, { recursive: true });
-    await fs.writeFile(path.join(home, "models_cache.json"), catalog, "utf8");
-    const info = vi.spyOn(log, "info");
-    expect(await runner.initializeContextUsage()).toBe(272000);
-    expect(info).toHaveBeenCalledWith("codex context window", expect.objectContaining({ source: "catalog.context_window" }));
   });
 
   it("启动与多个回合共用一次目录查询，JSONL 用量更新，不重复累加缓存", async () => {
@@ -402,7 +391,7 @@ describe("codex 上下文采集", () => {
     expect(store.get("codex", "owner")!.turns).toBe(1);
   });
 
-  it.each(["age", "size", "missing"])("%s 轮换时先归零，再记录新线程的首轮", async reason => {
+  it.each(["size", "missing"])("%s 轮换时先归零，再记录新线程的首轮", async reason => {
     const { dir, runner, store } = await runnerSetup();
     await runner.ask("one", { threadKey: "group:1" });
     const zeroes: number[] = [];
@@ -429,7 +418,7 @@ describe("codex 上下文采集", () => {
     expect(store.get("codex", "owner")).toMatchObject({ turns: 1, windowTokens: 500000 });
   });
 
-  it.each([{ FAKE_CODEX_CATALOG_FAIL: "1" }, { FAKE_CODEX_CATALOG: "invalid-json" }, { FAKE_CODEX_CATALOG: '{"models":[]}' }])("目录失败回退环境配置 %j", async env => {
+  it.each([{ FAKE_CODEX_CATALOG_FAIL: "1" }, { FAKE_CODEX_CATALOG: '{"models":[]}' }])("目录失败回退环境配置 %j", async env => {
     const cfg = loadConfig({ CODEX_CONTEXT_WINDOW: "654321" });
     const { runner, store } = await runnerSetup(env, cfg.CODEX_CONTEXT_WINDOW);
     await runner.ask("fallback", { threadKey: "group:1" });

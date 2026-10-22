@@ -3,11 +3,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { collectNewImages, listFiles } from "../../src/media/image-collect.js";
 import { tmp } from "../agent/helpers.js";
+import { PNG_1PX as PNG } from "../agent/helpers.js";
 
-const PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
-  "base64",
-);
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(20)]);
 
 describe("collectNewImages", () => {

@@ -38,7 +38,6 @@ it('八个页面和回合详情可离线渲染；HTML 转义；共享上下文�
     const res=await fetch(base+url);const text=await res.text();expect(res.status).toBe(200);expect(text).toContain(title);expect(text).not.toContain('fake-napcat-secret');expect(text).not.toMatch(/https:\/\/.*(?:cdn|unpkg)/);sizes[url]=Buffer.byteLength(text);
     if(url==='/turns/pi%3A7%3A1')expect(text).toContain('&lt;script&gt;');
   }
-  console.log('HTML_BYTES '+JSON.stringify(sizes));
   const text=await (await fetch(base+'/context?scope=group%3A7')).text();expect(text).toContain(formatRecent(context.recent({kind:'scope',scope:'group:7'},{limit:30}),2500,{ids:true}));
 });
 it('favicon 无需鉴权且缓存一天，页面 head 引用同一个内嵌 SVG',async()=>{

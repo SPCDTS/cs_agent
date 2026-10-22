@@ -5,8 +5,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, getSystemMessageText, type FauxResponseFactory, type Message, type TranscriptContext } from "@earendil-works/pi-ai";
-import { createRegistry, Harness, type JsonObject, type ModelRef } from "@earendil-works/pi-durable";
+import { createModels, fauxAssistantMessage, fauxProvider, type FauxResponseFactory, type Message, type TranscriptContext } from "@earendil-works/pi-ai";
+import { createRegistry, Harness, type ModelRef } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { afterEach, vi } from "vitest";
 import { PiBackend, type PiBackendOptions } from "../../src/agent/backends/pi.js";
@@ -29,9 +29,8 @@ import { startMediaRecallServer, ThreadTokens, type CallMeta } from "../../src/c
 import { sendViaLoopback } from "../../src/mcp/im-server.js";
 import { contextViaLoopback } from "../../src/mcp/media-recall-client.js";
 import { CodexScript } from "./codex-fixture.js";
-import { fakeSpawn } from "./codex-app-server/fake-app-server.js";
+import { fakeSpawn, noKill } from "./codex-app-server/fake-app-server.js";
 import type { SubagentOptions } from "../../src/agent/pi-tools/subagent.js";
-import { DEFAULT_SUBAGENT_INSTRUCTIONS } from "../../src/agent/pi-tools/subagent.js";
 import { FIXTURES, tmp } from "./helpers.js";
 import { sandboxRequirements } from "./pi-sandbox-fixture.js";
 
@@ -39,30 +38,11 @@ export const context = BACKGROUND_CONTEXT;
 const rigs: { close(): Promise<void> }[] = [];
 afterEach(async () => { for (const r of rigs.splice(0).reverse()) await r.close(); vi.unstubAllEnvs(); });
 
-export const text = (m: Message | undefined) => !m ? "" : m.role === "system" ? getSystemMessageText(m)
-  : typeof m.content === "string" ? m.content : m.content.map(c => c.type === "text" ? c.text : "").join("");
-export const lastUser = (ctx: TranscriptContext) => text(ctx.messages.filter(m => m.role === "user").at(-1));
-export const isChild = (ctx: TranscriptContext) => ctx.messages.some(m => m.role === "system" && text(m).includes(DEFAULT_SUBAGENT_INSTRUCTIONS));
-export const call = (...calls: [string, JsonObject][]) => fauxAssistantMessage(calls.map(([name, args]) => fauxToolCall(name, args)), { stopReason: "toolUse" });
-export const reply = (body = "好的") => fauxAssistantMessage(body);
-export const toolResults = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => text(m));
+import { reply } from "./faux-helpers.js";
+export { call, gate, isChild, lastUser, reply, text, toolResults, waitUntil } from "./faux-helpers.js";
 
 /** extra：本次请求的模型与选项（运行时模型设置测试用）。 */
 export type Brain = (ctx: TranscriptContext, signal: AbortSignal | undefined, extra?: { model: string; reasoning: unknown }) => Message | Promise<Message>;
-
-/** 可中止的闸门：faux 回应等它打开；生成被中止时随之拒绝，避免关闭 harness 时挂起。 */
-export function gate() {
-  let open!: () => void;
-  const opened = new Promise<void>(resolve => { open = resolve; });
-  let entered = 0;
-  return { open, get entered() { return entered; }, wait: (signal?: AbortSignal) => {
-    entered++;
-    return new Promise<void>((resolve, reject) => {
-      void opened.then(resolve);
-      signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-    });
-  } };
-}
 
 export interface ResidentOptions {
   brain?: Brain;
@@ -166,7 +146,7 @@ export async function residentRig(options: ResidentOptions = {}) {
     codexRunner = new CodexRunner({ command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
       codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "codex-ws"), threadsFile: path.join(dir, "codex-threads.json"),
       sandbox: "workspace-write", mediaRecallPort: recallServer.port, spawn: codexSpawn.spawn,
-      supervisor: { backoffInitialMs: 5, backoffMaxMs: 20, readyTimeoutMs: 5_000 } });
+      supervisor: { backoffInitialMs: 5, backoffMaxMs: 20, readyTimeoutMs: 5_000, ...noKill } });
     await codexRunner.start();
     codex = new CodexBackend({ runner: codexRunner, tokens, imagesDir: path.join(dir, "images"), turns: inbox, owners,
       callWaitMs: options.callWaitMs ?? 1_000 });

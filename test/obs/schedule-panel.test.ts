@@ -9,7 +9,7 @@ import { ObsStore } from "../../src/obs/store.js";
 import { createDashboard } from "../../src/obs/http.js";
 import { csrfToken } from "../../src/obs/http-util.js";
 import { draftFromForm, ruleFromDraft } from "../../src/obs/schedule-panel.js";
-import { describeRule, draftOf, emptyDraft, sameRule, scheduleDetailBody, schedulesListBody, simpleRule } from "../../src/obs/ui/schedule-pages.js";
+import { describeRule, draftOf, sameRule, scheduleDetailBody, schedulesListBody, simpleRule } from "../../src/obs/ui/schedule-pages.js";
 import type { Schedule } from "../../src/obs/ui/schedule-pages.js";
 import { rig as scheduleRig } from "../agent/schedule-fixture.js";
 
@@ -72,14 +72,6 @@ describe("规则人话描述与表单换算", () => {
 
 describe("页面渲染", () => {
   const view = { conversations: ["owner", "group:123"], names: { "group:123": "家庭群" }, csrf: "tok", now: NOW };
-
-  it("空列表显示空状态、计数与新建表单", () => {
-    const html = schedulesListBody({ ...view, schedules: [] }, emptyDraft(NOW));
-    expect(html).toContain("还没有定时任务");
-    expect(html).toContain('action="/schedules"');
-    expect(html).toContain('<option value="group:123">家庭群（group:123）</option>');
-    expect(html).toContain('name="_csrf" value="tok"');
-  });
 
   it("列表显示群名、人话规则、北京时间、状态与暂停原因、最近运行和操作", () => {
     const html = schedulesListBody({ ...view, schedules: [

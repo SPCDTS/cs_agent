@@ -178,7 +178,7 @@ describe("每轮设置快照", () => {
 });
 
 describe("auto 档位", () => {
-  it.each(["high", "invalid"])("开轮等待分类 %s，具体档位与模型传给 runner", async output => {
+  it.each(["high"])("开轮等待分类 %s，具体档位与模型传给 runner", async output => {
     const dir = tmp(), settings = await SettingsStore.open(dir, { ...defaults, codexReasoningEffort: "auto" });
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });

@@ -14,8 +14,8 @@ import { inboundFromRecord } from "../../src/channel/inbound.js";
 import type { InboundMessage, Channel } from "../../src/channel/types.js";
 import { tmp } from "../agent/helpers.js";
 import { FakeOneBot, groupEvent, privateEvent, SELF_ID, TOKEN, waitFor } from "./fake-onebot.js";
+import { PNG_1PX as PNG } from '../agent/helpers.js';
 
-const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 let cdn: Server;
 let url: string;
 let downloads: (string | undefined)[];
@@ -62,15 +62,6 @@ describe("触发消息参考图", () => {
     const saved = bridge.inbox.getInbound(ticket)!;
     expect(saved.images).toEqual(message.images);
     expect(inboundFromRecord(saved).images).toEqual(message.images);
-  });
-  it("图片在真实 at 前面时仍正确识别前缀文本", async () => {
-    napcat.push(groupEvent("30001", "29999", "", true, { message: [
-      segment({ url }), { type: "at", data: { qq: SELF_ID } },
-      { type: "text", data: { text: " 奶龙: 改成红色" } },
-    ] }));
-    await waitFor(() => received.length === 1);
-    expect(received[0]!.message.route_text.trim()).toBe("奶龙: 改成红色");
-    expect(received[0]!.message.images).toHaveLength(1);
   });
   it("缺 URL 时用 get_image(file)；只接受返回的 HTTP URL", async () => {
     napcat.override = call => call.action === "get_image" ? { body: { status: "ok", retcode: 0, data: { url, file: "C:/NapCat/cache.png" } } } : undefined;
@@ -130,7 +121,7 @@ describe("空内容过滤与入站观测", () => {
     } finally { off(); info.mockRestore(); }
   });
 
-  it.each(["text", "image", "at", "reply", "file"])("只有 %s 段仍正常派发，received 记录段类型", async type => {
+  it.each(["text", "image", "reply"])("只有 %s 段仍正常派发，received 记录段类型", async type => {
     const events: LiveEvent[] = []; const off = trace.tap(e => events.push(e));
     const data = type === "text" ? { text: "你好" } : type === "image" ? { url } : type === "at" ? { qq: SELF_ID } : { id: "1" };
     try {

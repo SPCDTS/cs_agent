@@ -64,8 +64,22 @@ function seedPluginCache(names = ["figma", "gmail", "notion"]) {
   for (const name of names) mkdirSync(path.join(cache, name, "x"), { recursive: true });
   mkdirSync(otherCache, { recursive: true });
   mkdirSync(path.join(staging, "pending"), { recursive: true });
-  return { dir, cache, otherCache, staging };
+  // 插件清理不得波及技能目录（skills/shared 与内置 .system）
+  const skills = ["shared/hello/SKILL.md", ".system/builtin/SKILL.md"].map(name => path.join(dir, "data", "codex", "skills", name));
+  for (const file of skills) { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, "保留技能", "utf8"); }
+  return { dir, cache, otherCache, staging, skills };
 }
+
+/** 可执行的假 playwright-mcp（只需存在且可执行）。 */
+function fakePlaywrightBin(): string {
+  const bin = path.join(tmp("cs-pwbin-"), "playwright-mcp");
+  writeFileSync(bin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  return posix(bin);
+}
+
+/** 默认环境只跑一次，供只读断言的用例共用。 */
+let defaultRun: ReturnType<typeof runEntrypoint> | undefined;
+const runDefaults = () => (defaultRun ??= runEntrypoint({}));
 
 /** 极简 TOML 读取：返回 { "section.key": value }，只覆盖本文件用到的语法。 */
 function parse(toml: string): Record<string, string> {
@@ -89,10 +103,8 @@ function parse(toml: string): Record<string, string> {
 
 describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
   it("writes model, web_search, qq_context and browser MCP sections with defaults", () => {
-    const binDir = tmp("cs-pwbin-");
-    const bin = path.join(binDir, "playwright-mcp");
-    writeFileSync(bin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    const { toml, status } = runEntrypoint({ PLAYWRIGHT_MCP_BIN: posix(bin), CODEX_MODEL: "", CODEX_WEB_SEARCH: "", CODEX_BROWSER: "" });
+    const bin = fakePlaywrightBin();
+    const { toml, status } = runEntrypoint({ PLAYWRIGHT_MCP_BIN: bin, CODEX_MODEL: "", CODEX_WEB_SEARCH: "", CODEX_BROWSER: "" });
     expect(status).toBe(0);
     const t = parse(toml);
     expect(t).toMatchObject({
@@ -144,8 +156,8 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(t["mcp_servers.browser.command"]).toMatch(/playwright-mcp"$/);
   });
 
-  it.each<Record<string, string>>([{}, { CODEX_MODEL: "" }, { CODEX_MODEL: 'bad"slug' }])("未设置、空值和非法模型均写入完整默认 slug：%j", env => {
-    const r = runEntrypoint(env);
+  it.each<Record<string, string>>([{}, { CODEX_MODEL: 'bad"slug' }])("未设置和非法模型均写入完整默认 slug（空值见首个用例）：%j", env => {
+    const r = Object.keys(env).length ? runEntrypoint(env) : runDefaults();
     expect(r.status).toBe(0);
     expect(parse(r.toml).model).toBe('"codex/gpt-6.1-sol"');
     if (env.CODEX_MODEL) expect(r.stderr).toContain("WARNING invalid CODEX_MODEL, using codex/gpt-6.1-sol");
@@ -171,14 +183,16 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(r.toml).not.toContain("env_key =");
   });
 
-  it.each(['http://host/"\nx=1', "http://user:secret@host/v1", "http://host/v1?key=x", "http://host/v1#x", "ftp://host/v1", "http://"])("非法 URL 不覆盖现有配置且不输出原值：%j", url => {
+  it("非法 URL 不覆盖现有配置且不输出原值", () => {
     const dir = tmp("cs-entry-");
     const before = runEntrypointIn(dir, {});
-    const r = runEntrypointIn(dir, { CODEX_MAGPIE_URL: url });
-    expect(r.status).not.toBe(0);
-    expect(r.toml).toBe(before.toml);
-    expect(r.stderr).toContain("ERROR");
-    expect(r.stderr).not.toContain(url);
+    for (const url of ['http://host/"\nx=1', "http://user:secret@host/v1", "http://host/v1?key=x", "http://host/v1#x", "ftp://host/v1", "http://"]) {
+      const r = runEntrypointIn(dir, { CODEX_MAGPIE_URL: url });
+      expect(r.status, url).not.toBe(0);
+      expect(r.toml, url).toBe(before.toml);
+      expect(r.stderr, url).toContain("ERROR");
+      expect(r.stderr, url).not.toContain(url);
+    }
   });
 
   it("缺 key 仍可生成配置，鉴权由真正启动 codex 的 runner 校验", () => {
@@ -189,7 +203,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
   });
 
   it("does not write developer_instructions (QQ rules are appended to per-model base instructions)", () => {
-    const r = runEntrypoint({});
+    const r = runDefaults();
     expect(r.status).toBe(0);
     expect(r.toml).not.toMatch(/^\s*developer_instructions\s*=/m);
   });
@@ -203,7 +217,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     expect(r.toml).not.toMatch(/^remote_plugin\s*=/m);
   });
 
-  it.each(["off", "", "invalid", 'on"\nx = 1'])("defaults remote plugins to off for %j", (value) => {
+  it.each(["off", 'on"\nx = 1'])("defaults remote plugins to off for %j", (value) => {
     const r = runEntrypoint({ CODEX_REMOTE_PLUGINS: value });
     expect(r.status).toBe(0);
     expect(parse(r.toml)["features.remote_plugin"]).toBe("false");
@@ -215,17 +229,8 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
     }
   });
 
-  it.each([undefined, "all", "", "figma,gmail"])("插件清理 %s 保留 skills/shared 与 .system", prune => {
-    const { dir } = seedPluginCache();
-    const files = ["shared/hello/SKILL.md", ".system/builtin/SKILL.md"].map(name => path.join(dir, "data", "codex", "skills", name));
-    for (const file of files) { mkdirSync(path.dirname(file), { recursive: true }); writeFileSync(file, "保留技能", "utf8"); }
-    const result = runEntrypointIn(dir, prune === undefined ? {} : { CODEX_PLUGIN_PRUNE: prune });
-    expect(result.status, result.stderr).toBe(0);
-    for (const file of files) expect(readFileSync(file, "utf8")).toBe("保留技能");
-  });
-
-  it("prunes figma and gmail by default on each startup while retaining notion", () => {
-    const { dir, cache, otherCache, staging } = seedPluginCache();
+  it("prunes figma and gmail by default on each startup while retaining notion and skills", () => {
+    const { dir, cache, otherCache, staging, skills } = seedPluginCache();
     for (let startup = 0; startup < 2; startup++) {
       if (startup) mkdirSync(path.join(cache, "figma", "x"), { recursive: true });
       const r = runEntrypointIn(dir, {});
@@ -235,11 +240,12 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
       expect(existsSync(path.join(cache, "notion", "x"))).toBe(true);
       expect(existsSync(otherCache)).toBe(true);
       expect(existsSync(staging)).toBe(false);
+      for (const file of skills) expect(readFileSync(file, "utf8")).toBe("保留技能");
     }
   });
 
-  it("removes the whole curated cache for all and tolerates missing directories", () => {
-    const { dir, cache, otherCache, staging } = seedPluginCache();
+  it("removes the whole curated cache for all and tolerates missing directories; skills/shared and .system stay", () => {
+    const { dir, cache, otherCache, staging, skills } = seedPluginCache();
     for (let startup = 0; startup < 2; startup++) {
       const r = runEntrypointIn(dir, { CODEX_PLUGIN_PRUNE: "all" });
       expect(r.status).toBe(0);
@@ -247,6 +253,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
       expect(existsSync(otherCache)).toBe(true);
       expect(existsSync(staging)).toBe(false);
       expect(existsSync(path.join(dir, "data", "codex", "config.toml"))).toBe(true);
+      for (const file of skills) expect(readFileSync(file, "utf8")).toBe("保留技能");
     }
   });
 
@@ -273,10 +280,8 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
   });
 
   it("restricts the browser MCP to an enabled_tools allowlist without the RCE / local-file tools", () => {
-    const binDir = tmp("cs-pwbin-");
-    const bin = path.join(binDir, "playwright-mcp");
-    writeFileSync(bin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    const t = parse(runEntrypoint({ PLAYWRIGHT_MCP_BIN: posix(bin) }).toml);
+    const bin = fakePlaywrightBin();
+    const t = parse(runEntrypoint({ PLAYWRIGHT_MCP_BIN: bin }).toml);
     const enabled = JSON.parse(t["mcp_servers.browser.enabled_tools"]!) as string[];
     for (const must of ["browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_evaluate", "browser_tabs", "browser_close"]) {
       expect(enabled).toContain(must);
@@ -297,7 +302,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
       "sandbox_workspace_write.writable_roots": '["/workspace", "/data/prompts", "/data/workflows"]',
     });
     // 默认值按实际 DATA_DIR / WORKSPACE_DIR 展开
-    const d = runEntrypoint({});
+    const d = runDefaults();
     expect(parse(d.toml)["sandbox_workspace_write.writable_roots"]).toBe(
       `["${d.dataDir.replace(/data$/, "ws")}", "${d.dataDir}/prompts", "${d.dataDir}/codex/skills/shared"]`,
     );
@@ -338,7 +343,7 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
   });
 
   it("writes the managed requirements.toml deny_read list for the codex command sandbox", () => {
-    const r = runEntrypoint({});
+    const r = runDefaults();
     expect(r.status).toBe(0);
     const d = r.dataDir;
     expect(r.requirements).toContain("[permissions.filesystem]");
@@ -363,10 +368,8 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
   });
 
   it("drops --sandbox only when PLAYWRIGHT_NO_SANDBOX=1", () => {
-    const binDir = tmp("cs-pwbin-");
-    const bin = path.join(binDir, "playwright-mcp");
-    writeFileSync(bin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    const t = parse(runEntrypoint({ PLAYWRIGHT_MCP_BIN: posix(bin), PLAYWRIGHT_NO_SANDBOX: "1" }).toml);
+    const bin = fakePlaywrightBin();
+    const t = parse(runEntrypoint({ PLAYWRIGHT_MCP_BIN: bin, PLAYWRIGHT_NO_SANDBOX: "1" }).toml);
     const args = JSON.parse(t["mcp_servers.browser.args"]!) as string[];
     expect(args).not.toContain("--sandbox");
     expect(args.at(-2)).toBe("--blocked-origins");
@@ -387,13 +390,11 @@ describe.skipIf(!hasSh)("entrypoint.sh managed codex config", () => {
   });
 
   it("makes the MCP approval mode configurable and validated", () => {
-    const binDir = tmp("cs-pwbin-");
-    const bin = path.join(binDir, "playwright-mcp");
-    writeFileSync(bin, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    const ok = parse(runEntrypoint({ PLAYWRIGHT_MCP_BIN: posix(bin), CODEX_MCP_APPROVAL_MODE: "auto" }).toml);
+    const bin = fakePlaywrightBin();
+    const ok = parse(runEntrypoint({ PLAYWRIGHT_MCP_BIN: bin, CODEX_MCP_APPROVAL_MODE: "auto" }).toml);
     expect(ok["mcp_servers.qq_context.default_tools_approval_mode"]).toBe('"auto"');
     expect(ok["mcp_servers.browser.default_tools_approval_mode"]).toBe('"auto"');
-    const bad = runEntrypoint({ PLAYWRIGHT_MCP_BIN: posix(bin), CODEX_MCP_APPROVAL_MODE: "never" });
+    const bad = runEntrypoint({ PLAYWRIGHT_MCP_BIN: bin, CODEX_MCP_APPROVAL_MODE: "never" });
     const b = parse(bad.toml);
     expect(b["mcp_servers.qq_context.default_tools_approval_mode"]).toBe('"approve"');
     expect(b["mcp_servers.browser.default_tools_approval_mode"]).toBe('"approve"');

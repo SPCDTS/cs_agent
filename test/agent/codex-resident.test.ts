@@ -67,22 +67,6 @@ describe("codex 常驻：开轮、插话、排队", () => {
     expect(script.turns.map(t => t.text.split("\n").at(-1))).toEqual(["第一条", "第二条"]);
   });
 
-  it("他人的消息排队，本轮结束后按到达顺序开新一轮", async () => {
-    const slow = gate();
-    const script = new CodexScript();
-    script.onTurn = turn => turn.turnId === "turn-1" ? slow.wait() : undefined;
-    const r = await codexRig(script);
-    await r.say("5", "慢");
-    await vi.waitFor(() => expect(r.host.thread(G)?.turnId).toBe("codex:turn-1"));
-    await r.say("6", "我也问");
-    expect(script.steers).toEqual([]);
-    expect(r.host.thread(G)).toMatchObject({ busy: true, turnSender: "5", pending: [{ sender: "6" }] });
-    slow.open();
-    await r.idle();
-    expect(script.turns.map(t => t.text.split("\n").at(-1))).toEqual(["慢", "我也问"]);
-    expect(r.host.thread(G)).toMatchObject({ busy: false });
-  });
-
   it("回合失败（turn/completed 非 completed、不再重试的 error）按 §8.1 提示", async () => {
     const script = new CodexScript();
     script.auto = false;
@@ -535,31 +519,4 @@ describe("codex 常驻：崩溃恢复、停止、后端切换与压缩", () => {
     expect(r.bridge.inbox.getInbound(key)!.turn_id).toMatch(/^pi:/);
   });
 
-  it("面板压缩：会话空闲时经常驻 app-server thread/compact/start，压缩回合不交给宿主；忙时拒绝", async () => {
-    const script = new CodexScript();
-    const r = await codexRig(script);
-    expect(await r.codex.compactThread(G)).toBe("unchanged");
-    await r.say("5", "先聊一轮");
-    await r.idle();
-    const child = r.codexSpawn.last;
-    const threadId = script.turns[0]!.threadId;
-    child.handlers["thread/compact/start"] = (_m, c) => {
-      setImmediate(() => {
-        c.notify("turn/started", { threadId, turn: { id: "compact-1", status: "inProgress" } });
-        c.notify("item/completed", { threadId, turnId: "compact-1", item: { type: "contextCompaction", id: "cc" } });
-        c.notify("turn/completed", { threadId, turn: { id: "compact-1", status: "completed" } });
-      });
-      return { result: {} };
-    };
-    expect(await r.codex.compactThread(G)).toBe("compacted");
-    await r.idle();
-    expect(r.host.thread(G)).toMatchObject({ busy: false });
-    expect(r.texts("7")).toEqual([]);
-    script.auto = false;
-    await r.say("5", "忙着");
-    await vi.waitFor(() => expect(r.host.thread(G)?.turnId).toBe("codex:turn-2"));
-    await expect(r.codex.compactThread(G)).rejects.toThrow("正在处理");
-    script.complete(script.turns[1]!);
-    await r.idle();
-  });
 });

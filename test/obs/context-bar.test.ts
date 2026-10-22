@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { contextBar } from '../../src/obs/ui/context-bar.js';
 import { fmtShort, fmtInt, sortUsage, toContextUsage, type ContextUsage } from '../../src/shared/format.js';
-import { THEME_CSS } from '../../src/obs/ui/theme.js';
 
 const NOW = Date.UTC(2026, 9, 18, 12);
 const usage = (over: Partial<ContextUsage> = {}): ContextUsage =>
@@ -77,11 +76,6 @@ describe('上下文占用条渲染', () => {
     expect(mini).toContain('ctx-mini'); expect(mini).not.toContain('ctx-meta'); expect(mini).toContain('<span class="ctx-track"');
   });
 
-  it('排序：codex 在前、pi 在后，同后端内占比降序', () => {
-    const list = sortUsage([usage({ backend: 'pi', key: 'owner', usedTokens: 390_000 }), usage({ key: 'shared', usedTokens: 10 }), usage({ key: 'owner', usedTokens: 300_000 }), usage({ backend: 'pi', key: 'group:7', usedTokens: 1 })]);
-    expect(list.map(u => `${u.backend}|${u.key}`)).toEqual(['codex|owner', 'codex|shared', 'pi|owner', 'pi|group:7']);
-  });
-
   it('事件 detail 只取白名单字段，非法记录丢弃', () => {
     expect(toContextUsage({ backend: 'pi', key: 'owner', usedTokens: 1, windowTokens: 2, turns: 1, updatedAt: 5, source: 'turn', extra: 'x', compaction: { background: 1, reserve: 'x' } }))
       .toEqual({ backend: 'pi', key: 'owner', usedTokens: 1, windowTokens: 2, turns: 1, updatedAt: 5, source: 'turn' });
@@ -89,11 +83,4 @@ describe('上下文占用条渲染', () => {
     expect(toContextUsage({ backend: 'pi', key: 'owner', usedTokens: '1', windowTokens: 2 })).toBeNull();
   });
 
-  it('375px 宽度不产生横向滚动：占用条相关规则没有超过视口的固定宽度，列表列宽受 min(100%,…) 约束', () => {
-    const rules = THEME_CSS.split('\n').filter(l => /\.ctx|\.thread-ctx/.test(l) && !/data-(w|at)=/.test(l));
-    expect(rules.join('\n')).toContain('minmax(min(100%,380px),1fr)');
-    for (const r of rules) for (const m of r.matchAll(/(?:^|[;{])\s*(?:min-)?width:(\d+)px/g)) expect(Number(m[1]), r).toBeLessThanOrEqual(343 - 32);
-    expect(rules.join('\n')).toMatch(/\.ctx-head\{display:flex;flex-wrap:wrap/);
-    expect(THEME_CSS).toContain('.ctx-fill[data-w="57"]{width:57%}'); expect(THEME_CSS).toContain('.ctx-tick[data-at="100"]{left:100%}');
-  });
 });

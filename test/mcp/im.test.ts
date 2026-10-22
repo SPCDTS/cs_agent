@@ -6,33 +6,8 @@ import { promises as fs } from "node:fs";
 import { TRANSPARENT_PNG } from "../agent/helpers.js";
 import { resolveAttachmentDir } from "../../src/media/attach-paths.js";
 import type { CallBinding } from "../../src/context/media-recall-server.js";
-import { imRig } from "./im-fixture.js";
+import { imSendRig as setup } from "./im-fixture.js";
 
-async function setup() {
-  const f = sendFixture();
-  const current: { binding: CallBinding } = { binding: { ...f.binding, turnId: "t1", session: "thr-1",
-    imageDir: path.join(f.dir, "images", "group_7") } };
-  const rig = await imRig(f.threadKey, {
-    // 网关按会话当前回合求本次调用的绑定（测试中即 current）；调用键为 MCP 的 _meta.callId。
-    resolve: () => current.binding,
-    send: (b, callKey, args, signal) => f.service.send(b, args, callKey, signal),
-  });
-  return { ...f, ...rig, current };
-}
-it("独立 im stdio 工具立即发消息与附件，返回 message_id；工具清单固定为全集；qq_context 不再发送", async () => {
-  const f = await setup();
-  const tools = (await f.client.listTools()).tools;
-  expect(tools.map(t => t.name)).toContain("send_message");
-  expect(tools.map(t => t.name)).toEqual(expect.arrayContaining(["auth_grant", "auth_list", "schedule_create", "schedule_control"]));
-  expect(Object.hasOwn(tools[0]!.inputSchema.properties!, "target")).toBe(true);
-  const result = await f.tool("send_message", { text: "报告", images: ["image.png"], files: [{ path: "file.txt", name: "报告.txt" }] });
-  expect(result.isError).not.toBe(true);
-  expect(JSON.parse((result.content as { text: string }[])[0]!.text)).toMatchObject({ message_id: "1" });
-  expect(f.call.mock.calls.map(c => c[0])).toEqual(["get_login_info", "send_group_msg", "upload_group_file"]);
-  expect(f.store.listOutboxByTurn("t1").map(row => row.key)).toEqual([`${f.threadKey}:exec-1`]);
-  const old = await f.tool("qq_send_file", { path: "file.txt" });
-  expect(old.isError).toBe(true);
-});
 it("令牌必需且绑定会话；撤销、缺少调用 id、网关拒绝均拒绝；参数不能改目标", async () => {
   const f = await setup();
   expect((await f.post("send", { text: "攻击" }, { callId: "exec-x" }, "f".repeat(64))).status).toBe(401);

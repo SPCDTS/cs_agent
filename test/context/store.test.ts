@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { accessForSource, parseAccess, resolveOwner, type Access } from "../../src/context/access.js";
 import { formatMessage, formatMessageFull, formatRecent, formatSearch, formatSummary, joinCapped } from "../../src/context/format.js";
 import { ContextStore } from "../../src/context/store.js";

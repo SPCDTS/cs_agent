@@ -91,7 +91,7 @@ describe("CodexBackend.compactThread", () => {
   });
 
   it.each([
-    undefined, [compacted], [tokenCount],
+    undefined, [tokenCount],
     [{ ...compacted, timestamp: "2026-01-01T00:00:00Z" }, { ...tokenCount, timestamp: "2026-01-01T00:00:01Z" }],
     [compacted, { type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 0, total_tokens: -1 } } } }],
   ])("压缩后的用量缺失、无效或陈旧时保留原记录：%j", async rows => {

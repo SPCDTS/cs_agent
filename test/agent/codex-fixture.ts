@@ -4,7 +4,7 @@
  */
 import path from "node:path";
 import { CodexRunner, type CodexRunnerOptions } from "../../src/agent/codex/runner.js";
-import { defaultHandlers, fakeSpawn, flush, type FakeAppServer, type Handler, type Message } from "./codex-app-server/fake-app-server.js";
+import { defaultHandlers, fakeSpawn, flush, noKill, type FakeAppServer, type Handler, type Message } from "./codex-app-server/fake-app-server.js";
 import { FIXTURES, tmp } from "./helpers.js";
 
 export interface ScriptTurn {
@@ -90,7 +90,7 @@ export async function codexRunnerRig(extra: Partial<CodexRunnerOptions> & { hand
     command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
     codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "ws"), threadsFile: path.join(dir, "codex-threads.json"),
     legacySessionFile: path.join(dir, "codex-session.json"), sandbox: "workspace-write",
-    spawn: fake.spawn, supervisor: { backoffInitialMs: 5, backoffMaxMs: 20, readyTimeoutMs: 5_000 },
+    spawn: fake.spawn, supervisor: { backoffInitialMs: 5, backoffMaxMs: 20, readyTimeoutMs: 5_000, ...noKill },
     ...opts,
   });
   await runner.start();

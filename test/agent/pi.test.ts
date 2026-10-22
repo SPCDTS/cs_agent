@@ -1,7 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 import { getSystemMessageText, type Message, type TranscriptContext } from "@earendil-works/pi-ai";
 import { CompactionEntry, defineDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { describe, expect, it, vi } from "vitest";
@@ -9,7 +8,7 @@ import { PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
 import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prompt.js";
 import { PI_SUBAGENT_RULE, PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
-import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
+import { PiContextObserver, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
 import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
 import { threadKeyOf } from "../../src/channel/inbound.js";
 import type { Channel, InboundMessage } from "../../src/channel/types.js";
@@ -103,7 +102,7 @@ describe("pi 常驻后端：工具身份随本轮绑定", () => {
     expect(Object.keys(ids).sort()).toEqual(privateOwner ? ["group:7", "owner"] : ["group:7"]);
   });
 
-  it.each(["group", "owner", "private"])("%s 会话注册四个内置工具并在独立工作目录执行", async kind => {
+  it.each(["group"])("%s 会话注册四个内置工具并在独立工作目录执行（各会话键的目录映射见 pi-coding.test）", async kind => {
     let seen: TranscriptContext | undefined;
     const r = await rig([call(["write", { path: "note.txt", content: "原文" }]),
       call(["edit", { path: "note.txt", edits: [{ oldText: "原文", newText: "改后" }] }]),
@@ -574,11 +573,6 @@ describe("pi 上下文占用", () => {
     expect(r.faux.state.callCount).toBe(calls);
   });
 
-  it("deepseek-flash 使用 pi-ai 的 1000000 窗口与默认实际压缩位置", () => {
-    const model = builtinModels().getModel("deepseek", "deepseek-flash")!;
-    expect(piContextCapacity(model.contextWindow)).toEqual({ windowTokens: 1000000,
-      compaction: { background: 950848, reserve: 983616 } });
-  });
 });
 
 it("pi 历史工具记录回合与会话归属并发出轻量 trace", async () => {

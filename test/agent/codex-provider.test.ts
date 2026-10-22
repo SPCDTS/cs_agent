@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexRunner, type CodexRunnerOptions } from "../../src/agent/codex/runner.js";
 import { FIXTURES, tmp } from "./helpers.js";
-import { fakeSpawn } from "./codex-app-server/fake-app-server.js";
+import { fakeSpawn, noKill } from "./codex-app-server/fake-app-server.js";
 
 const runners: CodexRunner[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); for (const r of runners.splice(0)) await r.stop(); });
@@ -32,7 +32,7 @@ describe("Codex 提供者凭据", () => {
 if (process.argv[2] === 'debug') writeFileSync(${JSON.stringify(catalogLog)}, JSON.stringify(process.env));
 await import(${JSON.stringify(pathToFileURL(path.join(FIXTURES, "fake-codex.mjs")).href)});`, "utf8");
     const fake = fakeSpawn();
-    const runner = new CodexRunner({ ...opts, command: [process.execPath, wrapper], provider, magpieKey: "test-explicit-gateway-key", spawn: fake.spawn,
+    const runner = new CodexRunner({ ...opts, command: [process.execPath, wrapper], provider, magpieKey: "test-explicit-gateway-key", spawn: fake.spawn, supervisor: { ...noKill },
       env: { ...opts.env, CODEX_MAGPIE_KEY: "wrong", Codex_Magpie_Key: "wrong-alias", OPENAI_BASE_URL: "https://wrong.example", Openai_Api_Key: "wrong-openai", CODEX_API_KEY: "wrong-codex", OBS_TOKEN: "must-not-leak" } });
     runners.push(runner);
     await runner.initializeContextUsage();

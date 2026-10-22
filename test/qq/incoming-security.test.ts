@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { downloadImage, forbiddenAddress, type DownloadHooks } from '../../src/media/download.js';
 import { downloadIncoming } from '../../src/qq/incoming.js';
 import { tmp } from '../agent/helpers.js';
+import { PNG_1PX as PNG } from '../agent/helpers.js';
 
-const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 let server: Server, base: string, hits: number;
 const hooks: DownloadHooks = {
   resolve: async () => [{ address: '93.184.216.34', family: 4 }],

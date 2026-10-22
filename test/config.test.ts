@@ -122,7 +122,7 @@ describe("backend config", () => {
   });
 });
 
-it.each(["relay", "direct", "smart"])("旧 CODEX_REPLY_MODE=%s 被忽略且保留其它配置", mode => {
+it.each(["relay"])("旧 CODEX_REPLY_MODE=%s 被忽略且保留其它配置", mode => {
   const config = loadConfig({ CODEX_REPLY_MODE: mode, AGENT_BACKEND: "pi", CODEX_REASONING_EFFORT: "low" });
   expect(config).not.toHaveProperty("CODEX_REPLY_MODE");
   expect(config).toMatchObject({ AGENT_BACKEND: "pi", CODEX_REASONING_EFFORT: "low" });

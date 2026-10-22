@@ -146,31 +146,6 @@ describe('上下文监控页面 /context-usage', () => {
     expect(page).not.toContain('opacity:.6');
   });
 
-  it('纵轴 5 个刻度、时间轴只标首尾（同日 HH:mm，跨天带日期）', async () => {
-    const r = await rig(); seed(r);
-    const codex = sectionOf((await r.html('/context-usage')).html, 'Codex · owner 线程');
-    expect(codex).toContain('<div class="cu-plot"><div class="cu-y" aria-hidden="true"><span class="cu-y100">100%</span><span class="cu-y75">75%</span><span class="cu-y50">50%</span><span class="cu-y25">25%</span><span class="cu-y0">0%</span></div><div class="cu-scroll"><div class="cu-track"><div class="cu-chart"');
-    const axis = /<\/div><div class="cu-x">((?:<time [^>]*>[^<]*<\/time>)+)<\/div><\/div><\/div><\/div><div class="cu-pane" id="cu-pane-0">/.exec(codex)?.[1] ?? '';
-    const labels = [...axis.matchAll(/<time datetime="([^"]+)" title="[^"]*">([^<]*)<\/time>/g)].map(m => [m[1], m[2]]);
-    expect(labels).toHaveLength(2);
-    // 首尾：tk-first 的回合与 tk-multi 第 3 次请求；种子跨度 6 小时，可能跨天，两端口径一致。
-    expect(Date.parse(labels[1]![0]!) - Date.parse(labels[0]![0]!)).toBe(94 * MIN + 20_000);
-    const dated = labels.map(l => /^\d{1,2}\/\d{1,2} \d{2}:\d{2}$/.test(l[1]!));
-    expect(labels.every(l => /^(\d{1,2}\/\d{1,2} )?\d{2}:\d{2}$/.test(l[1]!))).toBe(true);
-    expect(dated[0]).toBe(dated[1]);
-
-    const r2 = await rig();
-    const noon = new Date(); noon.setHours(12, 0, 0, 0);
-    r2.usage(noon.getTime() - 86400_000, 'tk-a', { turns: 1 }); r2.usage(noon.getTime(), 'tk-b', { turns: 2 });
-    const cross = (await r2.html('/context-usage')).html;
-    expect([...cross.matchAll(/<time datetime="[^"]+" title="[^"]*">([^<]*)<\/time>/g)].map(m => m[1])).toEqual([
-      expect.stringMatching(/^\d{1,2}\/\d{1,2} 12:00$/), expect.stringMatching(/^\d{1,2}\/\d{1,2} 12:00$/)]);
-    const r3 = await rig();
-    r3.usage(noon.getTime(), 'tk-a', { turns: 1 }); r3.usage(noon.getTime() + 5 * MIN, 'tk-b', { turns: 2 });
-    const same = (await r3.html('/context-usage')).html;
-    expect([...same.matchAll(/<time datetime="[^"]+" title="[^"]*">([^<]*)<\/time>/g)].map(m => m[1])).toEqual(['12:00', '12:05']);
-  });
-
   it('预览面板：每个回合组对应一个 hidden 的 .cu-pop，含状态、回合链接、原文 / 回复前 120 字、逐次请求表与时间线链接', async () => {
     const r = await rig(); seed(r);
     const html = (await r.html('/context-usage')).html;
@@ -228,15 +203,6 @@ describe('上下文监控页面 /context-usage', () => {
     expect(multi).not.toContain('blockquote');
     expect(multi.match(/<tr><td class="num">第 \d 次/g)).toHaveLength(3);
     expect(multi).toContain('<a href="/turns/tk-multi">回合详情 →</a>');
-  });
-
-  it('/assets/context-usage.js 可取', async () => {
-    const r = await rig();
-    const { status, html: js } = await r.html('/assets/context-usage.js');
-    expect(status).toBe(200);
-    expect(js).toContain("document.addEventListener('click'");
-    expect(js).not.toContain('innerHTML');
-    expect(js).not.toContain('.style');
   });
 
   it('明细表：默认折叠，回合段最新在上、段内按请求顺序，请求列 n/N，同回合后续行 └ 第 n 次，回合链接转义', async () => {

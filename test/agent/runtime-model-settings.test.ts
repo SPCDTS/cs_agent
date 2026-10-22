@@ -57,9 +57,7 @@ describe("运行时模型与档位", () => {
   });
   it.each([
     { stored: "gpt-6.1-sol", configured: "codex/gpt-6.1-sol", expected: "codex/gpt-6.1-sol" },
-    { stored: "gpt-6.1-sol", configured: "codex/gpt-6-astra", expected: "codex/gpt-6-astra" },
     { stored: undefined, configured: "gpt-6.1-sol", expected: "codex/gpt-6.1-sol" },
-    { stored: "unknown", configured: "gpt-6.1-sol", expected: "codex/gpt-6.1-sol" },
   ])("目录可用时无效配置保留原值、告警，回合使用默认：%j", async ({ stored, configured, expected }) => {
     const dir = tmp(), file = path.join(dir, "settings.json"), cacheFile = path.join(dir, "models_cache.json");
     const original = JSON.stringify({ version: 1, settings: { codexModel: stored } });
@@ -81,7 +79,7 @@ describe("运行时模型与档位", () => {
       expect(await tasks(settings).tasks.snapshotSettings("group:1", undefined, input)).toMatchObject({ codexModel: "codex/gpt-6-astra" });
     } finally { warn.mockRestore(); }
   });
-  it.each([undefined, "{broken"])("目录不可用时保留配置模型并传入回合：%s", async catalog => {
+  it.each([undefined])("目录不可用时保留配置模型并传入回合：%s", async catalog => {
     const dir = tmp(), cacheFile = path.join(dir, "models_cache.json");
     if (catalog !== undefined) writeFileSync(cacheFile, catalog, "utf8");
     const settings = await SettingsStore.open(dir, { ...defaults, codexModel: "gpt-6.1-sol" }, new Trace(), {

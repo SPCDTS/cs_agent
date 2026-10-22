@@ -6,33 +6,14 @@ import { WebSocketServer, type WebSocket } from "ws";
 export const TOKEN = "test-token";
 export const SELF_ID = "10001";
 
-// Fetch 的 bad ports 中高于 1023 的端口；低端口统一跳过。
-// listen(0) 只保证端口空闲，不保证 Node fetch 允许访问它。
-const FETCH_BLOCKED_PORTS = new Set([
-  1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000,
-  6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
-]);
-
-/** 保留被拒绝的监听端口直到选到可用端口，避免系统立即分配回同一个端口。 */
-async function listenForFetch(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<Server> {
-  const rejected: Server[] = [];
-  try {
-    for (;;) {
-      const server = createServer(handler);
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(0, "127.0.0.1", () => {
-          server.off("error", reject);
-          resolve();
-        });
-      });
-      const port = (server.address() as AddressInfo).port;
-      if (port >= 1024 && !FETCH_BLOCKED_PORTS.has(port)) return server;
-      rejected.push(server);
-    }
-  } finally {
-    await Promise.all(rejected.map(server => new Promise<void>(resolve => server.close(() => resolve()))));
-  }
+/** 监听 127.0.0.1 的随机端口（fetch 禁用端口由 test/setup-fetchable-ports.ts 统一跳过）。 */
+async function listenLocal(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<Server> {
+  const server = createServer(handler);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => { server.off("error", reject); resolve(); });
+  });
+  return server;
 }
 
 export interface ApiCall {
@@ -60,7 +41,7 @@ export class FakeOneBot {
   wsUrl = "";
 
   async start(): Promise<void> {
-    this.http = await listenForFetch((req, res) => void this.handleHttp(req, res));
+    this.http = await listenLocal((req, res) => void this.handleHttp(req, res));
     this.httpUrl = "http://127.0.0.1:" + (this.http.address() as AddressInfo).port;
 
     this.wss = new WebSocketServer({

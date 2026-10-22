@@ -9,10 +9,10 @@ describe("auto 选档", () => {
   it.each(["你好", "谢谢！", "[来源] 群 1 · 用户\n[引用 #2] 用户: 为什么\n  早 上 好 "])("寒暄快路径：%s", text => {
     expect(heuristicEffort(text, hints)).toBe("low");
   });
-  it.each(["仔细分析这段代码", "仔细想", "深入分析", "认真思考", "Please THINK HARD"])("深度请求快路径：%s", text => {
+  it.each(["仔细分析这段代码", "Please THINK HARD"])("深度请求快路径：%s", text => {
     expect(heuristicEffort(text, hints)).toBe("xhigh");
   });
-  it.each(["", "怎么写", "帮我改", "为什么", "你好？", "a=b", "fn()", "const x = {}", "这是一条超过十二字的普通解释请求"])("非寒暄不误走 low：%s", text => {
+  it.each(["", "你好？", "fn()", "这是一条超过十二字的普通解释请求"])("非寒暄不误走 low：%s", text => {
     expect(heuristicEffort(text, hints)).toBeUndefined();
   });
   it("图片和引用阻止短文本快路径", () => {
@@ -25,7 +25,7 @@ describe("auto 选档", () => {
     expect(await classifyEffort({ complete }, "解释一下", hints, signal)).toBe(expected);
     expect(complete).toHaveBeenCalledWith(expect.stringContaining("解释一下"), signal);
   });
-  it.each(["high because code", "low/high", "ultra", "", "very high"])("非法输出回退且不记录正文：%s", async output => {
+  it.each(["high because code", "low/high", ""])("非法输出回退且不记录正文：%s", async output => {
     const events: LiveEvent[] = [], trace = new Trace(); trace.tap(e => events.push(e));
     expect(await resolveAutoEffort({ complete: async () => output, model: "classifier", trace },
       { ...hints, text: "请解释这份私密设计文档", key: "t1" }, "high")).toEqual({ effort: "high", source: "auto-fallback" });

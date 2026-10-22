@@ -8,7 +8,7 @@ import { SUBAGENT_REPORT_KIND, SUBAGENT_REPORT_REQUEST_PREFIX, SubagentDoc, type
 import type { PiCallBinding } from "../../src/agent/pi-tools/request.js";
 import type { TurnIdentity } from "../../src/channel/types.js";
 import { grantsFixture } from "./grants-fixture.js";
-import { call, context, gate, isChild, lastUser, reply, residentRig, toolResults, type Brain, type ResidentRig } from "./resident-fixture.js";
+import { call, context, gate, isChild, lastUser, reply, residentRig, toolResults, waitUntil, type Brain, type ResidentRig } from "./resident-fixture.js";
 import { scheduleToolsFixture } from "./schedule-tools-fixture.js";
 
 const OWNERS = ["1", "9"];
@@ -115,13 +115,6 @@ function script(onWake: (input: string, ctx: Parameters<Brain>[0], signal: Abort
   };
 }
 
-async function waitFor(check: () => boolean | Promise<boolean>, timeout = 15_000): Promise<void> {
-  const deadline = Date.now() + timeout;
-  while (!await Promise.resolve().then(check).catch(() => false)) {
-    if (Date.now() > deadline) throw new Error("等待超时");
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-}
 const target = (text: string) => call(["send_message", { text, target: "qq:group:8" }]);
 const denied = (results: string[][]) => results.some(rs => rs.some(t => t.includes("基础权限")));
 
@@ -134,7 +127,7 @@ describe("唤醒回合继承派出者（pi）", () => {
       return target("转告");
     }, results) });
     await r.say("1", "派");
-    await waitFor(() => results.length >= 2);
+    await waitUntil(() => results.length >= 2);
     await r.idle();
     expect(r.texts("8")).toEqual(["转告"]);
     expect(seen[0]!.identity).toEqual({ kind: "wake", inherited: owner1 });
@@ -148,7 +141,7 @@ describe("唤醒回合继承派出者（pi）", () => {
     const r = await residentRig({ owners: OWNERS, brain: script(() => target("转告"), results) });
     await r.grants.panel("auth_grant", SEND_GRANT);
     await r.say("5", "派");
-    await waitFor(() => results.length >= 2);
+    await waitUntil(() => results.length >= 2);
     await r.idle();
     expect(r.texts("8")).toEqual(["转告"]);
     expect(denied(results)).toBe(false);
@@ -164,7 +157,7 @@ describe("唤醒回合继承派出者（pi）", () => {
     await r.grants.panel("auth_grant", SEND_GRANT);
     await r.grants.panel("auth_grant", { user: "qq:6", caps: ["send"], targets: ["qq:group:8"] });
     await r.say("5", "派");
-    await waitFor(() => hold.entered === 1 && r.host.currentIdentity("group:7")?.kind === "wake");
+    await waitUntil(() => hold.entered === 1 && r.host.currentIdentity("group:7")?.kind === "wake");
     expect(r.host.currentIdentity("group:7")).toEqual({ kind: "wake", inherited: member5 });
     // 6 派出的子 agent 的汇报以插话并入同一个唤醒 run
     const data: SubagentReportData = { name: "x", status: "done", child: 999, anchor: 1, reporter: 1,
@@ -172,7 +165,7 @@ describe("唤醒回合继承派出者（pi）", () => {
     await (await conversation(r)).submit({ type: "input", whenBusy: "steer", requestId: SUBAGENT_REPORT_REQUEST_PREFIX + "999:e1",
       content: "[子 agent 完成] x：混入", entry: { kind: SUBAGENT_REPORT_KIND, data } }, context);
     hold.open();
-    await waitFor(() => denied(results));
+    await waitUntil(() => denied(results));
     await r.idle();
     expect(r.texts("8")).toEqual(["第一次"]);
     expect(denied(results)).toBe(true);
@@ -193,10 +186,10 @@ describe("唤醒回合继承派出者（pi）", () => {
     const legacy: SubagentReportData = { name: "旧", status: "done", child: 998, anchor: 1, reporter: 1 };
     await conv.submit({ type: "input", requestId: SUBAGENT_REPORT_REQUEST_PREFIX + "998:e1", content: "[子 agent 完成] 旧：结果",
       entry: { kind: SUBAGENT_REPORT_KIND, data: legacy } }, context);
-    await waitFor(() => results.length >= 1);
+    await waitUntil(() => results.length >= 1);
     await r.idle();
     await conv.submit({ type: "input", requestId: "other-1", content: "随便" }, context);
-    await waitFor(() => results.length >= 2);
+    await waitUntil(() => results.length >= 2);
     await r.idle();
     expect(r.texts("8")).toEqual([]);
     // 基础权限的唤醒回合只配基础工具集（没有 target 参数），越权调用在参数校验或权限复核处被拒；以实际未发出为准
@@ -213,7 +206,7 @@ describe("唤醒回合继承派出者（pi）", () => {
       input.includes("w2：") ? target("链") : call(["subagent", { action: "spawn", name: "w2", task: "再查" }]), results) });
     await r.grants.panel("auth_grant", SEND_GRANT);
     await r.say("5", "派");
-    await waitFor(() => r.texts("8").length >= 1 || results.length >= 4);
+    await waitUntil(() => r.texts("8").length >= 1 || results.length >= 4);
     await r.idle();
     expect(r.texts("8")).toEqual(["链"]);
     const children = (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))!.children;
@@ -227,10 +220,10 @@ describe("唤醒回合继承派出者（pi）", () => {
       ctx => lastUser(ctx) === "再查" ? "雨" : "晴") });
     await r.grants.panel("auth_grant", SEND_GRANT);
     await r.say("1", "派");
-    await waitFor(async () => (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))?.children.w?.last !== undefined);
+    await waitUntil(async () => (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))?.children.w?.last !== undefined);
     await r.idle();
     await r.say("5", "追问");
-    await waitFor(() => results.length >= 1);
+    await waitUntil(() => results.length >= 1);
     await r.idle();
     expect(r.texts("8")).toEqual([]);
     expect((await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))!.children.w!.spawner).toEqual({ turn: "user" });
@@ -241,12 +234,12 @@ describe("唤醒回合继承派出者（pi）", () => {
     const r = await residentRig({ owners: OWNERS, brain: script(async (_input, _ctx, signal) => { await hold.wait(signal); return target("重启后"); }, results) });
     await r.grants.panel("auth_grant", SEND_GRANT);
     await r.say("5", "派");
-    await waitFor(() => hold.entered === 1 && r.host.currentIdentity("group:7")?.kind === "wake");
+    await waitUntil(() => hold.entered === 1 && r.host.currentIdentity("group:7")?.kind === "wake");
     await r.restart();
     expect(r.host.currentIdentity("group:7")).toEqual({ kind: "wake", inherited: member5 });
     expect(r.host.thread("group:7")).toMatchObject({ turnKind: "wake", turnInherited: member5 });
     hold.open();
-    await waitFor(() => r.texts("8").length >= 1 || denied(results), 20_000);
+    await waitUntil(() => r.texts("8").length >= 1 || denied(results), 20_000);
     await r.idle(20_000);
     expect(r.texts("8")).toEqual(["重启后"]);
   });
@@ -262,13 +255,13 @@ describe("子 agent 与唤醒工具集按派出者身份（pi）", () => {
     const results: string[][] = [];
     const r = await residentRig({ owners: OWNERS, brain: script(() => reply("知道了"), results) });
     await r.say("1", "派");
-    await waitFor(async () => (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))?.children.w?.last !== undefined);
+    await waitUntil(async () => (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))?.children.w?.last !== undefined);
     await r.idle();
     expect(await childBinding(r)).toMatchObject({ child: true, identity: { kind: "wake", inherited: owner1 }, access: "group:7", senderIsOwner: false, auth: false });
 
     const m = await residentRig({ owners: OWNERS, brain: script(() => reply("知道了"), []) });
     await m.say("5", "派");
-    await waitFor(async () => (await m.pi.harness.snapshot(SubagentDoc, (await conversation(m)).id, context))?.children.w?.last !== undefined);
+    await waitUntil(async () => (await m.pi.harness.snapshot(SubagentDoc, (await conversation(m)).id, context))?.children.w?.last !== undefined);
     await m.idle();
     expect(await childBinding(m)).toMatchObject({ child: true, identity: { kind: "wake", inherited: member5 }, access: "group:7", auth: false });
   });
@@ -276,10 +269,10 @@ describe("子 agent 与唤醒工具集按派出者身份（pi）", () => {
   it("另一人 message 后子会话降为基础权限；登记缺失时子会话只有基础权限", async () => {
     const r = await residentRig({ owners: OWNERS, brain: script(() => reply("知道了"), []) });
     await r.say("1", "派");
-    await waitFor(async () => (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))?.children.w?.last !== undefined);
+    await waitUntil(async () => (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))?.children.w?.last !== undefined);
     await r.idle();
     await r.say("5", "追问");
-    await waitFor(async () => (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))?.children.w?.spawner?.as === undefined);
+    await waitUntil(async () => (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))?.children.w?.spawner?.as === undefined);
     await r.idle();
     const bound = await childBinding(r);
     expect(bound).toMatchObject({ child: true, access: "group:7", auth: false });
@@ -295,7 +288,7 @@ describe("子 agent 与唤醒工具集按派出者身份（pi）", () => {
       if (end.role === "toolResult") return reply("收尾");
       const input = lastUser(ctx);
       if (input.startsWith("[子 agent")) {
-        await waitFor(() => r.host.currentIdentity("group:7")?.kind === "wake");
+        await waitUntil(() => r.host.currentIdentity("group:7")?.kind === "wake");
         seen.push((await (await conversation(r)).agent(context)).extensions.map(e => e.name));
         return reply("收到");
       }
@@ -305,12 +298,12 @@ describe("子 agent 与唤醒工具集按派出者身份（pi）", () => {
     };
     r = await residentRig({ owners: OWNERS, brain });
     await r.say("1", "派");
-    await waitFor(() => childGate.entered === 1);
+    await waitUntil(() => childGate.entered === 1);
     await r.idle();
     await r.say("5", "随口一问");
     await r.idle();
     childGate.open();
-    await waitFor(() => seen.length >= 2);
+    await waitUntil(() => seen.length >= 2);
     await r.idle();
     expect(seen[0]).toContain("cs-pi-im");
     expect(seen[1]).toContain("cs-pi-im-owner");
@@ -328,7 +321,7 @@ describe("安全回归（§7.3）", () => {
       if (end.role === "toolResult") return reply("收尾");
       const input = lastUser(ctx);
       if (input.startsWith("[子 agent")) {
-        await waitFor(() => r.host.currentIdentity("group:7")?.kind === "wake");
+        await waitUntil(() => r.host.currentIdentity("group:7")?.kind === "wake");
         wakes.push(r.host.currentIdentity("group:7"));
         return target("越权");
       }
@@ -340,12 +333,12 @@ describe("安全回归（§7.3）", () => {
     await r.grants.panel("auth_grant", SEND_GRANT);
     await r.grants.panel("auth_grant", { user: "qq:6", caps: ["send"], targets: ["qq:group:8"] });
     await r.say("5", "派");
-    await waitFor(() => childGate.entered >= 1);
+    await waitUntil(() => childGate.entered >= 1);
     await r.idle();
     await r.say("6", "插话");
     await r.idle();
     childGate.open();
-    await waitFor(() => wakes.length >= 1);
+    await waitUntil(() => wakes.length >= 1);
     await r.idle();
     expect(wakes.every(w => !("inherited" in (w as object)))).toBe(true);
     expect(r.texts("8")).toEqual([]);

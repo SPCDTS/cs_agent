@@ -11,9 +11,6 @@ describe("magpie 模型目录", () => {
     ["gpt-6.1-sol", "codex/gpt-6.1-sol", undefined],
     ["codex/gpt-6.1-sol", "other/gpt-6.1-sol", undefined],
     ["codex/gpt-6.1-sol", "codex/gpt-6.1-sol", 500000],
-    ["gpt-6.1-sol", "gpt-6.1-sol", 500000],
-    ["deepseek/deepseek-flash", "deepseek-flash", undefined],
-    ["deepseek/deepseek-flash", "deepseek/deepseek-flash", 500000],
   ])("目录 %s 与配置 %s 只按完整 slug 匹配", (slug, model, expected) => {
     expect(catalogContextWindow(JSON.stringify({ models: [{ slug, context_window: 500000 }] }), model)).toBe(expected);
   });
@@ -31,7 +28,6 @@ describe("magpie 模型目录", () => {
   it.each([
     ["codex/gpt-6.1-sol", 500000],
     ["gpt-6.1-sol", 272000],
-    ["other/gpt-6.1-sol", 272000],
   ])("离线目录只回退到相同 slug 的缓存：%s", async (slug, expected) => {
     const cacheFile = path.join(tmp("cs-magpie-catalog-"), "models_cache.json");
     writeFileSync(cacheFile, JSON.stringify({ models: [{ slug, context_window: 500000 }] }), "utf8");

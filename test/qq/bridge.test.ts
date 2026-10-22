@@ -102,13 +102,14 @@ describe("connection", () => {
     expect(existsSync(join(dataDir, "qq-bridge.sqlite"))).toBe(true);
   });
 
-  it("reconnects after the server closes the socket", async () => {
+  it("reconnects after the server closes the socket; reports connected→down once, not on every retry", async () => {
     const reasons: string[] = [];
     bridge.on("disconnect", r => reasons.push(r));
     const reconnected = new Promise<void>(resolve => bridge.on("connection", resolve));
     server.dropAll();
     await waitFor(() => reasons.length === 1, 5000, "disconnect");
     expect(reasons[0]).toBe("server going away");
+    expect(errors.filter(e => e.message.includes("连接断开")).length).toBe(1);
     await reconnected;
     expect(server.connections).toBe(2);
     expect(bridge.status()).toMatchObject({ ws_connected: true, disconnect_count: 1 });
@@ -135,14 +136,6 @@ describe("connection", () => {
     await waitFor(() => server.wsAuthFailures - mark >= 3, 5000, "reconnect attempts");
     await noisy.stop();
     expect(noisyErrors.filter(e => e.message.includes("WebSocket")).length).toBeGreaterThanOrEqual(3);
-  });
-
-  it("reports connected→down once, not on every retry", async () => {
-    const reasons: string[] = [];
-    bridge.on("disconnect", r => reasons.push(r));
-    server.dropAll();
-    await waitFor(() => reasons.length === 1, 5000, "disconnect");
-    expect(errors.filter(e => e.message.includes("连接断开")).length).toBe(1);
   });
 
   it("survives malformed frames", async () => {

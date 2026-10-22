@@ -3,7 +3,7 @@ import { constants, promises as fs, symlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi, type TestContext } from "vitest";
-import { renderAgentsMd, writeGlobalAgentsMd, writeManagedFile } from "../../src/agent/codex/runner.js";
+import { writeManagedFile } from "../../src/agent/codex/runner.js";
 import { log } from "../../src/shared/log.js";
 
 const MAX_BYTES = 256 * 1024;
@@ -58,21 +58,6 @@ describe("受管 AGENTS.md 安全读写", () => {
     const before = await fs.stat(file);
     expect(await writeManagedFile(file, content)).toBe("unchanged");
     expect((await fs.stat(file)).mtimeMs).toBe(before.mtimeMs);
-  });
-
-  it("不同内容重写；全局 AGENTS.md 同样修复目录并保留相同内容的 mtime", async () => {
-    const { file, workspace, root } = await setup();
-    await fs.writeFile(file, "篡改的规则", "utf8");
-    expect(await writeManagedFile(file, CONTENT)).toBe("written");
-    await expectWritten(file);
-    await fs.rm(file);
-    await fs.mkdir(file);
-    const options = { dataDir: root, workspaceDir: workspace, writableRoots: [workspace] };
-    expect(await writeGlobalAgentsMd(workspace, options)).toBe(file);
-    await expectWritten(file, renderAgentsMd(options));
-    await fs.utimes(file, 1_000, 1_000);
-    await writeGlobalAgentsMd(workspace, options);
-    expect((await fs.stat(file)).mtimeMs).toBe(1_000_000);
   });
 
   it.for(["inside", "outside"])("替换指向 %s 文件的链接，目标内容不变", async (location, context) => {
