@@ -27,7 +27,7 @@ export type RunRights = {
   person?: RunPerson;
   /** 授权表与定时按它查：qq:<person> */
   actor?: string;
-  /** 读取范围：owner 本人为 all，其余为本会话 */
+  /** 读取范围：owner 在自己的私聊线程为 all，其余（包括 owner 在群里）为本会话 */
   access: string;
   /** owner 本人：免授权表、技能写权限 */
   owner: boolean;
@@ -50,6 +50,8 @@ export function elevation(identity: TurnIdentity, owners: OwnerIds): RunPerson |
     : identity.kind === "scheduled" ? { kind: "scheduled", person: identity.creator, owner: true }
     : identity.inherited;
   if (!validPerson(claimed)) return undefined;
+  // 继承来的快照与当前 owner 配置不一致（之后被加入或移出 owner）：下游按 actor 重新判断 owner 的地方会与快照冲突，回落基础权限。
+  if (identity.kind === "wake" && claimed.owner !== isOwner(owners, claimed.person)) return undefined;
   return { kind: claimed.kind, person: claimed.person, owner: claimed.owner === true && isOwner(owners, claimed.person) };
 }
 
@@ -58,7 +60,8 @@ export function runRights(binding: { threadKey: string; scope: string; identity:
   const rights = base(binding.threadKey, binding.scope);
   const person = elevation(binding.identity, owners);
   if (!person) return rights;
-  return { ...rights, person, actor: `qq:${person.person}`, access: person.owner ? "all" : rights.scope,
+  // 读取全部只在 owner 私聊线程：共享会话（群）的线程历史对会话里所有人可见，读进来的别处记录会被后来的人间接看到。
+  return { ...rights, person, actor: `qq:${person.person}`, access: person.owner && binding.threadKey === "owner" ? "all" : rights.scope,
     owner: person.owner, auth: person.owner && person.kind === "user" };
 }
 

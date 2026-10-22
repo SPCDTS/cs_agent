@@ -202,7 +202,8 @@ describe("pi 常驻后端：工具身份随本轮绑定", () => {
     expect(toolResults(seen!).every(m => m.content.every(c => c.type === "text"))).toBe(true);
     r.script.push(call(["qq_image", { message_id: "123" }]), reply());
     await turn(r, "1", "owner 召回");
-    expect(recall).toHaveBeenLastCalledWith({ kind: "all" }, "123", expect.any(AbortSignal));
+    // owner 在群里也只读本群
+    expect(recall).toHaveBeenLastCalledWith({ kind: "scope", scope: "group:7" }, "123", expect.any(AbortSignal));
   });
 
   it("web_search 经 faux 模型调用；输入带来源头与引用", async () => {
@@ -251,8 +252,9 @@ describe("pi 常驻后端：工具身份随本轮绑定", () => {
     expect(seen).toContain("范围");
     await turn(r, "5", "外部路径");
     expect(r.imageBackend.submit).toHaveBeenCalledTimes(1);
+    // owner 在别群也不能引用本群的图（只读本群）
     await turn(r, "1", "owner", "8");
-    expect(r.imageBackend.submit).toHaveBeenCalledTimes(2);
+    expect(r.imageBackend.submit).toHaveBeenCalledTimes(1);
   });
 
   it("生图写入 images/<会话>/call-<摘要>/ 并返回校验过的文件", async () => {
@@ -740,7 +742,7 @@ describe("pi send_message 工具", () => {
 });
 
 describe("pi 身份随发言人切换（§7.3）", () => {
-  it("owner 群回合 all 读取但留在群线程；工具与身份随群内发言人切换", async () => {
+  it("owner 群回合只读本群且留在群线程；工具与身份随群内发言人切换", async () => {
     const observed: TranscriptContext[] = [];
     const inspect = (ctx: TranscriptContext) => { observed.push(ctx); return reply(); };
     const r = await rig([
@@ -755,7 +757,8 @@ describe("pi 身份随发言人切换（§7.3）", () => {
     await turn(r, "1", "owner 在群里");
     const ids = await r.pi.readThreadIds();
     expect(ids.owner).toBeUndefined();
-    expect(results(observed[0]!)).toContain("owner 可读取的私聊内容");
+    // owner 在群里只读本群：私聊内容不进群线程
+    expect(results(observed[0]!)).not.toContain("owner 可读取的私聊内容");
     expect(r.texts("8")).toEqual(["跨会话消息"]);
     expect(r.texts("7")).toEqual(["来源群回复"]);
     const conv = await convOf(r, "group:7");

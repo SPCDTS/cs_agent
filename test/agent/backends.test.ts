@@ -138,11 +138,11 @@ describe("CodexBackend 适配层（第 2 阶段：每轮一次 codex exec）", (
     const calls = s.ask.mock.calls.map(([, o]) => o as AskOptions);
     expect(calls.find(o => o.threadKey === "owner")).toMatchObject({ qqAccess: "all", senderIsOwner: true });
     expect(calls.find(o => o.threadKey === "group:7")).toMatchObject({ qqAccess: "group:7", senderIsOwner: false });
-    // owner 在群里发言时读取范围为 all
+    // owner 在群里发言时也只读本群（群线程历史对群里所有人可见）
     const g = setup(async () => "ok");
     await g.backend.startTurn("group:7", [ref("k1", "9")], { kind: "user", sender: "9" });
     await g.backend.idle();
-    expect(g.ask.mock.calls[0]![1]).toMatchObject({ qqAccess: "all", senderIsOwner: true });
+    expect(g.ask.mock.calls[0]![1]).toMatchObject({ qqAccess: "group:7", senderIsOwner: true });
   });
 
   it("image_gen 超时留下的任务在回合结束前补收，以系统消息发出并移除清单", async () => {

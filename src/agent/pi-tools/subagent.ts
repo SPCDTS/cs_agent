@@ -155,8 +155,11 @@ const Reporter = defineTask<ReporterInput, ReporterState, { status: "done" | "fa
       const { name, anchor, child } = task.input;
       const parent = await runtime.conversation(task.conversationId, context);
       if (!parent) throw new Error("父会话不存在");
+      // 汇报时再与登记的当前身份合并（只降不升）：创建后有别人 message（转向会并入同一回答）时，旧汇报任务的快照不能单独带回。
+      const record = findByAnchor((await runtime.snapshot(SubagentDoc, task.conversationId, context))?.children ?? {}, anchor);
+      const spawner = task.input.spawner && record?.spawner ? narrowSpawner(record.spawner, task.input.spawner) : undefined;
       const data: SubagentReportData = { name, status, child, anchor, reporter: Number(task.id),
-        ...(task.input.spawner ? { spawner: task.input.spawner } : {}) };
+        ...(spawner ? { spawner } : {}) };
       await parent.submit({ type: "input", whenBusy: "followUp",
         requestId: `${SUBAGENT_REPORT_REQUEST_PREFIX}${child}:${key}`,
         content: `${status === "done" ? "[子 agent 完成]" : "[子 agent 失败]"} ${name}：${clip(text, MAX_REPORT_CHARS)}`,

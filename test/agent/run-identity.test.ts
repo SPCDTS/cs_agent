@@ -17,9 +17,10 @@ const member5: RunPerson = { kind: "user", person: "5", owner: false };
 const wake = (inherited?: RunPerson): TurnIdentity => ({ kind: "wake", ...(inherited ? { inherited } : {}) });
 
 describe("身份两层：base + elevation", () => {
-  it("用户与定时回合确证为本人；owner 读全部；授权工具只给 owner 的交互身份", () => {
+  it("用户与定时回合确证为本人；owner 只在私聊线程读全部，群里只读本群；授权工具只给 owner 的交互身份", () => {
     expect(runRights({ threadKey: "group:7", scope: "group:7", identity: { kind: "user", sender: "1" } }, OWNERS))
-      .toEqual({ threadKey: "group:7", scope: "group:7", person: owner1, actor: "qq:1", access: "all", owner: true, auth: true });
+      .toEqual({ threadKey: "group:7", scope: "group:7", person: owner1, actor: "qq:1", access: "group:7", owner: true, auth: true });
+    expect(runRights({ threadKey: "owner", scope: "private:1", identity: { kind: "user", sender: "1" } }, OWNERS)).toMatchObject({ access: "all" });
     expect(runRights({ threadKey: "group:7", scope: "group:7", identity: { kind: "user", sender: "5" } }, OWNERS))
       .toMatchObject({ person: member5, access: "group:7", owner: false, auth: false });
     expect(runRights({ threadKey: "owner", scope: "private:1", identity: { kind: "scheduled", creator: "1" } }, OWNERS))
@@ -35,9 +36,9 @@ describe("身份两层：base + elevation", () => {
     for (const bad of [{ kind: "user", person: "01", owner: true }, { kind: "admin", person: "1", owner: true }, { kind: "user", person: "1" }, null]) {
       expect(elevation(wake(bad as RunPerson), OWNERS)).toBeUndefined();
     }
-    // 快照时不是 owner、现在才是 → 不升；快照时是 owner、现在不是 → 降
-    expect(elevation(wake({ kind: "user", person: "1", owner: false }), OWNERS)).toEqual({ kind: "user", person: "1", owner: false });
-    expect(elevation(wake({ kind: "user", person: "5", owner: true }), OWNERS)).toEqual(member5);
+    // 快照与当前 owner 配置不一致（之后被加入或移出 owner）→ 基础权限（下游按 actor 重新判断 owner 的地方不会与快照冲突）
+    expect(elevation(wake({ kind: "user", person: "1", owner: false }), OWNERS)).toBeUndefined();
+    expect(elevation(wake({ kind: "user", person: "5", owner: true }), OWNERS)).toBeUndefined();
     expect(() => base("group:7", "all")).toThrow("地址");
   });
 
@@ -125,7 +126,7 @@ const target = (text: string) => call(["send_message", { text, target: "qq:group
 const denied = (results: string[][]) => results.some(rs => rs.some(t => t.includes("基础权限")));
 
 describe("唤醒回合继承派出者（pi）", () => {
-  it("owner 派出 → 唤醒回合为 owner：可 target，读全部，技能与授权可用", async () => {
+  it("owner 派出 → 唤醒回合为 owner：可 target，技能与授权可用（群里只读本群）", async () => {
     const results: string[][] = [], seen: { identity: unknown; bound: PiCallBinding | undefined }[] = [];
     let r!: ResidentRig;
     r = await residentRig({ owners: OWNERS, brain: script(async () => {
@@ -137,7 +138,7 @@ describe("唤醒回合继承派出者（pi）", () => {
     await r.idle();
     expect(r.texts("8")).toEqual(["转告"]);
     expect(seen[0]!.identity).toEqual({ kind: "wake", inherited: owner1 });
-    expect(seen[0]!.bound).toMatchObject({ identity: { kind: "wake", inherited: owner1 }, access: "all", senderIsOwner: true, auth: true, inputs: [], images: [] });
+    expect(seen[0]!.bound).toMatchObject({ identity: { kind: "wake", inherited: owner1 }, access: "group:7", senderIsOwner: true, auth: true, inputs: [], images: [] });
     expect((await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))!.children.w!.spawner)
       .toEqual({ turn: "user", as: owner1 });
   });
@@ -257,13 +258,13 @@ describe("子 agent 与唤醒工具集按派出者身份（pi）", () => {
     return r.pi.binding(record.conversation);
   }
 
-  it("子会话继承派出者的读取权限：owner 派出读全部，成员派出只读本会话；仍无技能写与授权", async () => {
+  it("子会话继承派出者的读取权限（群里 owner 派出也只读本群）；仍无技能写与授权", async () => {
     const results: string[][] = [];
     const r = await residentRig({ owners: OWNERS, brain: script(() => reply("知道了"), results) });
     await r.say("1", "派");
     await waitFor(async () => (await r.pi.harness.snapshot(SubagentDoc, (await conversation(r)).id, context))?.children.w?.last !== undefined);
     await r.idle();
-    expect(await childBinding(r)).toMatchObject({ child: true, identity: { kind: "wake", inherited: owner1 }, access: "all", senderIsOwner: false, auth: false });
+    expect(await childBinding(r)).toMatchObject({ child: true, identity: { kind: "wake", inherited: owner1 }, access: "group:7", senderIsOwner: false, auth: false });
 
     const m = await residentRig({ owners: OWNERS, brain: script(() => reply("知道了"), []) });
     await m.say("5", "派");
@@ -314,5 +315,39 @@ describe("子 agent 与唤醒工具集按派出者身份（pi）", () => {
     expect(seen[0]).toContain("cs-pi-im");
     expect(seen[1]).toContain("cs-pi-im-owner");
     expect(seen[1]).not.toContain("cs-pi-im");
+  });
+});
+
+describe("安全回归（§7.3）", () => {
+  it("子 agent 运行中被另一人转向（steer）：原汇报任务的快照也随登记降级，唤醒不继承派出者", async () => {
+    const childGate = gate(), wakes: unknown[] = [];
+    let r!: ResidentRig;
+    const brain: Brain = async (ctx, signal) => {
+      if (isChild(ctx)) { await childGate.wait(signal); return reply("结果"); }
+      const end = ctx.messages.at(-1)!;
+      if (end.role === "toolResult") return reply("收尾");
+      const input = lastUser(ctx);
+      if (input.startsWith("[子 agent")) {
+        await waitFor(() => r.host.currentIdentity("group:7")?.kind === "wake");
+        wakes.push(r.host.currentIdentity("group:7"));
+        return target("越权");
+      }
+      if (input.endsWith("派")) return call(["subagent", { action: "spawn", name: "w", task: "查天气" }]);
+      if (input.endsWith("插话")) return call(["subagent", { action: "message", name: "w", task: "顺便查别的", mode: "steer" }]);
+      return reply("好");
+    };
+    r = await residentRig({ owners: OWNERS, brain });
+    await r.grants.panel("auth_grant", SEND_GRANT);
+    await r.grants.panel("auth_grant", { user: "qq:6", caps: ["send"], targets: ["qq:group:8"] });
+    await r.say("5", "派");
+    await waitFor(() => childGate.entered >= 1);
+    await r.idle();
+    await r.say("6", "插话");
+    await r.idle();
+    childGate.open();
+    await waitFor(() => wakes.length >= 1);
+    await r.idle();
+    expect(wakes.every(w => !("inherited" in (w as object)))).toBe(true);
+    expect(r.texts("8")).toEqual([]);
   });
 });
