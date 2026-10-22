@@ -42,22 +42,53 @@ export async function quarantinePendingImages(dir: string): Promise<void> {
   await fs.rename(file, file + ".bad-" + Date.now());
 }
 
-/** 单票据工具串行执行；意图与 prompt_id 都原子更新，不等超时才记账。 */
-export async function savePendingImage(dir: string, job: PendingImageJob): Promise<void> {
-  const jobs = await readPendingImages(dir);
-  const index = jobs.findIndex(j => j.filenamePrefix === job.filenamePrefix);
-  if (index < 0) jobs.push(job); else jobs[index] = job;
-  const validated = jobsSchema.parse(jobs);
-  if (Buffer.byteLength(JSON.stringify(validated), "utf8") > 65536) throw new Error("附件任务清单过大");
-  await atomicJson(path.join(dir, PENDING_IMAGE_JOBS), validated);
+/** 清单锁的过期时间：持锁进程崩溃后留下的锁文件超过它即视为失效 */
+const LOCK_STALE_MS = 30_000;
+const LOCK_WAIT_MS = 15_000;
+
+/**
+ * 清单的读改写在锁内进行：image_gen MCP 进程追加任务与主进程补收后移除共用同一把锁（<清单>.lock，独占创建），
+ * 互不覆盖对方的改动。锁文件过期（持锁进程崩溃）则清掉重试。
+ */
+async function withPendingLock<T>(dir: string, work: () => Promise<T>): Promise<T> {
+  const lock = path.join(dir, PENDING_IMAGE_JOBS + ".lock");
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      await (await fs.open(lock, "wx")).close();
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const st = await fs.stat(lock).catch(() => undefined);
+      if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) { await fs.rm(lock, { force: true }); continue; }
+      if (Date.now() >= deadline) throw new Error("附件任务清单正被占用");
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+  try { return await work(); }
+  finally { await fs.rm(lock, { force: true }); }
 }
 
-/** 移除已处理的任务（按 filenamePrefix），保留期间新追加的；清单空了就删除文件。 */
+/** 意图与 prompt_id 都原子更新，不等超时才记账；与补收的移除共用清单锁。 */
+export async function savePendingImage(dir: string, job: PendingImageJob): Promise<void> {
+  await withPendingLock(dir, async () => {
+    const jobs = await readPendingImages(dir);
+    const index = jobs.findIndex(j => j.filenamePrefix === job.filenamePrefix);
+    if (index < 0) jobs.push(job); else jobs[index] = job;
+    const validated = jobsSchema.parse(jobs);
+    if (Buffer.byteLength(JSON.stringify(validated), "utf8") > 65536) throw new Error("附件任务清单过大");
+    await atomicJson(path.join(dir, PENDING_IMAGE_JOBS), validated);
+  });
+}
+
+/** 移除已处理的任务（按 filenamePrefix），保留期间新追加的；清单空了就删除文件。与追加共用清单锁。 */
 export async function removePendingImages(dir: string, prefixes: ReadonlySet<string>): Promise<void> {
-  const file = path.join(dir, PENDING_IMAGE_JOBS);
-  const rest = (await readPendingImages(dir)).filter(job => !prefixes.has(job.filenamePrefix));
-  if (rest.length) await atomicJson(file, jobsSchema.parse(rest));
-  else await fs.rm(file, { force: true });
+  await withPendingLock(dir, async () => {
+    const file = path.join(dir, PENDING_IMAGE_JOBS);
+    const rest = (await readPendingImages(dir)).filter(job => !prefixes.has(job.filenamePrefix));
+    if (rest.length) await atomicJson(file, jobsSchema.parse(rest));
+    else await fs.rm(file, { force: true });
+  });
 }
 
 /** 收取只允许写入当前票据的 call-N 目录，恢复时再次检查软链接。 */

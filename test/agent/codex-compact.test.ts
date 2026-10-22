@@ -24,7 +24,7 @@ const tokenCount = { type: "event_msg", payload: { type: "token_count", info: {
  * 面板压缩经常驻 app-server：thread/compact/start 后，服务端以一个压缩回合（或只发 contextCompaction 条目）完成；
  * rows：压缩时追加到线程 rollout 的记录（缺省时间戳为当前）。
  */
-async function rig(opts: { rows?: unknown[]; fail?: boolean; asTurn?: boolean; usage?: boolean } = {}) {
+async function rig(opts: { rows?: unknown[]; fail?: boolean; usage?: boolean } = {}) {
   const dir = tmp("cs-compact-");
   const store = opts.usage ? new ContextUsageStore(dir) : undefined;
   if (store) stores.push(store);
@@ -41,9 +41,10 @@ async function rig(opts: { rows?: unknown[]; fail?: boolean; asTurn?: boolean; u
           const rows = opts.rows.map(row => ({ timestamp: new Date().toISOString(), ...(row as object) }));
           appendFileSync(path.join(sessions, `rollout-${threadId}.jsonl`), rows.map(row => JSON.stringify(row)).join("\n") + "\n", "utf8");
         }
-        if (opts.asTurn) child.notify("turn/started", { threadId, turn: { id: "compact-turn", status: "inProgress" } });
+        // 压缩以服务端回合进行：压缩锁持有到该回合结束
+        child.notify("turn/started", { threadId, turn: { id: "compact-turn", status: "inProgress" } });
         child.notify("item/completed", { threadId, turnId: "compact-turn", item: { id: "compact-item", type: "contextCompaction" } });
-        if (opts.asTurn) child.notify("turn/completed", { threadId, turn: { id: "compact-turn", status: "completed" } });
+        child.notify("turn/completed", { threadId, turn: { id: "compact-turn", status: "completed" } });
       });
       return { result: {} };
     },
@@ -66,7 +67,7 @@ const input: InputRef = { inboundKey: "k", kind: "user", sender: "9", seq: 1, at
 
 describe("CodexBackend.compactThread", () => {
   it("压缩后立即读取 rollout 的 total_tokens，保留回合数并发布、持久化新估算；压缩回合不交给宿主", async () => {
-    const r = await rig({ usage: true, asTurn: true, rows: [
+    const r = await rig({ usage: true, rows: [
       { timestamp: "2026-01-01T00:00:00Z", type: "event_msg", payload: { type: "token_count", info: { last_token_usage: { input_tokens: 64000 } } } },
       { timestamp: "2026-01-01T00:00:01Z", type: "event_msg", payload: { type: "task_complete" } },
       compacted, tokenCount,

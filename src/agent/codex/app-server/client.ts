@@ -39,6 +39,8 @@ export interface ThreadOptions {
 export interface TurnOptions {
   effort?: string;
   model?: string;
+  /** 客户端给这条用户消息的 id：出现在该回合 userMessage 条目的 clientId 上（开轮结果不确定时据此认领回合）。 */
+  clientUserMessageId?: string;
 }
 
 export interface CallOptions {
@@ -190,6 +192,7 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
         threadId, input: this.input(input),
         ...(opts.effort ? { effort: opts.effort } : {}),
         ...(opts.model ? { model: opts.model } : {}),
+        ...(opts.clientUserMessageId ? { clientUserMessageId: opts.clientUserMessageId } : {}),
       }, this.callOpts(opts));
       turnId = str(object(object(result).turn).id);
       if (!turnId) throw new Error("codex app-server turn/start 响应缺少回合 id");
@@ -205,10 +208,11 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
   }
 
   /** turn/steer：把输入送进 expectedTurnId 对应的进行中回合。 */
-  async steer(threadId: string, expectedTurnId: string, input: UserInput[], call: CallOptions = {}): Promise<SteerResult> {
+  async steer(threadId: string, expectedTurnId: string, input: UserInput[], call: CallOptions & { clientUserMessageId?: string } = {}): Promise<SteerResult> {
     const state = this.requireLoaded(threadId);
     try {
-      await this.supervisor.call("turn/steer", { threadId, expectedTurnId, input: this.input(input) }, this.callOpts(call));
+      await this.supervisor.call("turn/steer", { threadId, expectedTurnId, input: this.input(input),
+        ...(call.clientUserMessageId ? { clientUserMessageId: call.clientUserMessageId } : {}) }, this.callOpts(call));
       state.lastActivityAt = this.now();
       return "ok";
     } catch (error) {

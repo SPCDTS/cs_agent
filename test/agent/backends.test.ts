@@ -333,6 +333,42 @@ describe("CodexBackend：常驻 app-server 适配器", () => {
     expect(s.tokens.issue).toHaveBeenCalledTimes(2);
   });
 
+  it("turn/start 带 clientUserMessageId（= 输入键）；结果不确定时只认首条 userMessage 的 clientId，不按时机认领", async () => {
+    const script = new CodexScript();
+    script.auto = false;
+    const base = script.handlers;
+    let mode: "wake" | "own" = "wake";
+    script.handlers = () => ({ ...base(), "turn/start": (m, child) => {
+      const threadId = String(m.params!.threadId);
+      const id = mode === "wake" ? "wake-x" : "turn-own";
+      // 开轮请求在途时服务端开出一轮，随后请求超时（没有响应）
+      child.notify("turn/started", { threadId, turn: { id, status: "inProgress" } });
+      child.notify("item/started", { threadId, turnId: id, item: { type: "userMessage", id: "u-" + id, content: [],
+        clientId: mode === "wake" ? "someone-else" : String(m.params!.clientUserMessageId) } });
+      return undefined;
+    } });
+    const r = await codexRunnerRig({ handlers: script.handlers, supervisor: { backoffInitialMs: 5, readyTimeoutMs: 5_000, requestTimeoutMs: 300 } });
+    rigs.push(r);
+    const started: string[] = [];
+    const h = fakeHost();
+    const turns = fakeTurns([record("k1", "1", "7")]);
+    const backend = new CodexBackend({ runner: r.runner, tokens: { issue: () => "a".repeat(64), revoke: () => undefined }, imagesDir: path.join(r.dir, "images"), turns });
+    backend.attach({ ...h.host, onTurnStarted: (_k, turnId, by) => { started.push(`${turnId}:${by}`); } });
+    // 1) 无关的唤醒回合：不认领，这条输入按 lost 结束（不重发），唤醒回合照常交给宿主
+    const lost = await backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" }) as { turnId: string };
+    expect(r.requests("turn/start")[0]!.params).toMatchObject({ clientUserMessageId: "k1" });
+    expect(lost.turnId).toMatch(/^codex:unconfirmed-/);
+    expect(h.completed).toEqual([{ threadKey: "group:7", turnId: lost.turnId, status: "lost", error: expect.any(String) }]);
+    await vi.waitFor(() => expect(started).toContain("codex:wake-x:backend"));
+    expect(r.requests("turn/start")).toHaveLength(1);
+    r.fake.last.notify("turn/completed", { threadId: "thr-1", turn: { id: "wake-x", status: "completed" } });
+    await vi.waitFor(() => expect(h.completed.map(c => c.turnId)).toContain("codex:wake-x"));
+    // 2) 首条 userMessage 带本输入的 clientId：认领为本轮
+    mode = "own";
+    expect(await backend.startTurn("group:7", [ref("k1", "1")], { kind: "user", sender: "1" })).toEqual({ turnId: "codex:turn-own" });
+    expect(started).not.toContain("codex:turn-own:backend");
+  });
+
   it("唤醒回合先到（宿主尚未确认）时开轮让给它：返回 backendTurnId", async () => {
     const script = new CodexScript();
     script.auto = false;

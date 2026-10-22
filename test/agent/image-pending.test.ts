@@ -36,3 +36,22 @@ describe("附件 marker 边界校验", () => {
     expect(await fs.readdir(target)).toEqual([]);
   });
 });
+
+it("清单的读改写与 MCP 追加共用锁：锁被占用时移除等待，释放后只移除指定任务、保留并发追加的任务", async () => {
+  const { savePendingImage, removePendingImages, readPendingImages, PENDING_IMAGE_JOBS } = await import("../../src/media/gen/image-pending.js");
+  const { promises: fsp } = await import("node:fs");
+  const pathMod = (await import("node:path")).default;
+  const { tmp: mk } = await import("./helpers.js");
+  const dir = mk("cs-pending-lock-");
+  const job = (id: string) => ({ prompt_id: id, backend: "stub", filenamePrefix: "cs-" + id, options: { prompt: id }, callDir: pathMod.join(dir, "call-1"), submittedAt: 1, status: "submitted" as const });
+  await savePendingImage(dir, job("a"));
+  const lock = pathMod.join(dir, PENDING_IMAGE_JOBS + ".lock");
+  await fsp.writeFile(lock, "held");
+  let removed = false;
+  const removal = removePendingImages(dir, new Set(["cs-a"])).then(() => { removed = true; });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  expect(removed).toBe(false);
+  await fsp.rm(lock);
+  await Promise.all([removal, savePendingImage(dir, job("b")), savePendingImage(dir, job("c"))]);
+  expect((await readPendingImages(dir)).map(j => j.prompt_id).sort()).toEqual(["b", "c"]);
+});

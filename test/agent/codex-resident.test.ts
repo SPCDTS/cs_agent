@@ -263,6 +263,58 @@ describe("codex 常驻：崩溃恢复、停止、后端切换与压缩", () => {
     expect(r.texts("7")).toEqual([]);
   });
 
+  it("回归：停止后被抑制的唤醒回合仍在跑时来了新消息——等它结束再开轮，不接管、不卡死", async () => {
+    const script = new CodexScript();
+    const base = script.handlers;
+    // 中止请求只记录，不立刻结束回合（模拟子 agent 收尾慢）
+    script.handlers = () => ({ ...base(), "turn/interrupt": () => ({ result: {} }) });
+    const r = await codexRig(script);
+    await r.say("5", "先聊一轮");
+    await r.idle();
+    const first = script.turns[0]!;
+    await r.monitor.stop(G);
+    const wake = script.wake(first.child, first.threadId);
+    await vi.waitFor(() => expect(first.child.requests("turn/interrupt").map(m => m.params)).toContainEqual({ threadId: first.threadId, turnId: wake.turnId }));
+    const key = await r.say("5", "新消息");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(script.turns.filter(t => t.text.includes("新消息"))).toHaveLength(0);
+    script.complete(wake, "interrupted");
+    await r.idle(20_000);
+    expect(script.turns.at(-1)!.text).toContain("新消息");
+    expect(r.bridge.inbox.getInbound(key)).toMatchObject({ state: "done" });
+    expect(r.host.thread(G)).toMatchObject({ busy: false });
+    expect(r.texts("7")).toEqual([]);
+  });
+
+  it("回归：压缩条目已完成而压缩回合还没结束时，排队的消息等压缩回合结束再开轮，不接管它", async () => {
+    const script = new CodexScript();
+    const r = await codexRig(script);
+    await r.say("5", "先聊一轮");
+    await r.idle();
+    const child = r.codexSpawn.last, threadId = script.turns[0]!.threadId;
+    let finish!: () => void;
+    const gateEnd = new Promise<void>(resolve => { finish = resolve; });
+    child.handlers["thread/compact/start"] = (_m, c) => {
+      setImmediate(() => {
+        c.notify("turn/started", { threadId, turn: { id: "compact-1", status: "inProgress" } });
+        c.notify("item/completed", { threadId, turnId: "compact-1", item: { type: "contextCompaction", id: "cc" } });
+        void gateEnd.then(() => c.notify("turn/completed", { threadId, turn: { id: "compact-1", status: "completed" } }));
+      });
+      return { result: {} };
+    };
+    const compacted = r.codex.compactThread(G);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const key = await r.say("5", "压缩时的消息");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(script.turns).toHaveLength(1);
+    finish();
+    expect(await compacted).toBe("compacted");
+    await r.idle(20_000);
+    expect(script.turns.at(-1)!.text).toContain("压缩时的消息");
+    expect(r.bridge.inbox.getInbound(key)).toMatchObject({ state: "done" });
+    expect(r.host.thread(G)).toMatchObject({ busy: false });
+  });
+
   it("面板停止：turn/interrupt，回合结束不发出错提示；看门狗中止按失败提示", async () => {
     const script = new CodexScript();
     script.auto = false;
