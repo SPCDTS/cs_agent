@@ -397,7 +397,8 @@ export function extractThreadId(event: unknown): string | undefined {
   return undefined;
 }
 
-function killTree(pid: number | undefined): void {
+/** 结束子进程树：Windows 用 taskkill /T，其他平台杀 detached 进程组；常驻 app-server 监管器复用。 */
+export function killTree(pid: number | undefined): void {
   if (!pid) return;
   try {
     if (process.platform === "win32") {
