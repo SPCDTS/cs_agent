@@ -24,6 +24,16 @@ describe("Agent 拓扑：后端给出的子 agent", () => {
     await r.idle(15_000);
   });
 
+  it("重启后宿主还没接触过的会话也能读出它持有的后端（拓扑列出全部会话）", async () => {
+    const r = await residentRig({ backend: "codex", codex: new CodexScript() });
+    await r.say("5", "你好");
+    await r.idle();
+    await r.restart();
+    expect(r.host.keys()).not.toContain(G);
+    expect(await r.host.recordedBackend(G)).toBe("codex");
+    expect(await r.host.recordedBackend("group:9")).toBeUndefined();
+  });
+
   it("codex：spawnAgent 的 prompt 为任务，agentPath 末段为名称；运行中、完成、中断分别显示", async () => {
     const script = new CodexScript();
     const r = await residentRig({ backend: "codex", codex: script });

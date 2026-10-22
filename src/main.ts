@@ -362,13 +362,17 @@ async function main(): Promise<void> {
   const piStatus = async () => ({ threads: await pi.readThreadIds(), ...await pi.threadHealth(),
     compaction: obs.degraded ? [] : obs.db.prepare("SELECT json_extract(detail_json,'$.conversation') conversation, COUNT(*) attempts, MAX(ts) last_at FROM events WHERE stage='compaction' GROUP BY conversation").all(),
     usage: await pi.harness.usage(ctx), compaction_policy: { reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS } });
-  // Agent 拓扑：会话按宿主记录的后端，主 agent 状态取宿主，子 agent 取后端（pi 来自子 agent 登记，codex 来自 app-server 通知）。
+  // Agent 拓扑：会话取宿主接触过的与两个后端已有线程的并集，按宿主记录的后端；主 agent 状态取宿主，
+  // 子 agent 取后端（pi 来自子 agent 登记，codex 来自 app-server 通知）。
   const topology = async (): Promise<ThreadTopology[]> => {
     const [piThreads, codexThreads] = await Promise.all([pi.readThreadIds(), codex.readThreadIds().catch(() => ({}) as Partial<Record<ThreadKey, string>>)]);
-    return Promise.all(host.keys().map(async thread => {
-      const s = host.thread(thread)!, backend: ThreadTopology["backend"] = s.backend === "pi" || s.backend === "codex" ? s.backend : undefined;
+    const keys = [...new Set([...host.keys(), ...Object.keys(piThreads), ...Object.keys(codexThreads)])].filter(k => k !== "shared") as ThreadKey[];
+    return Promise.all(keys.map(async thread => {
+      const s = host.thread(thread), owned = await host.recordedBackend(thread);
+      const backend: ThreadTopology["backend"] = owned === "pi" || owned === "codex" ? owned
+        : thread in piThreads ? "pi" : thread in codexThreads ? "codex" : undefined;
       const session = backend === "pi" ? piThreads[thread] : backend === "codex" ? codexThreads[thread] : undefined;
-      return { thread, busy: s.busy, ...(backend ? { backend } : {}), ...(s.turnId ? { turnId: s.turnId } : {}),
+      return { thread, busy: s?.busy ?? false, ...(backend ? { backend } : {}), ...(s?.turnId ? { turnId: s.turnId } : {}),
         ...(session !== undefined ? { session: String(session) } : {}),
         children: backend === "pi" ? await pi.subagents(thread) : backend === "codex" ? codexBackend.subagents(thread) : [] };
     }));

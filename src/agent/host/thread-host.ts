@@ -442,6 +442,11 @@ export class ThreadHost implements HostCallbacks {
     return [...this.threads.keys()] as ThreadKey[];
   }
 
+  /** 观测用：会话持有的后端（本进程未接触过的会话读持久化记录） */
+  async recordedBackend(threadKey: ThreadKey): Promise<string | undefined> {
+    return this.threads.get(threadKey)?.backend ?? (await this.opts.store.snapshot(ThreadHostDoc, threadKey, this.ctx))?.backend;
+  }
+
   /** 观测用的只读副本 */
   thread(threadKey: ThreadKey): Readonly<ThreadHostState> | undefined {
     const s = this.threads.get(threadKey);
