@@ -58,7 +58,8 @@ export interface TurnLostEvent { threadId: string; turnId: string; reason: strin
 export interface TurnErrorEvent { threadId: string; turnId?: string; willRetry: boolean; error?: TurnError }
 export interface ItemEvent { threadId: string; turnId?: string; phase: "started" | "completed"; item: ThreadItem }
 export interface SubAgentEvent { parentThreadId: string; kind: string; agentThreadId: string; item: ThreadItem }
-export interface ChildActivityEvent { parentThreadId: string; agentThreadId: string; method: string }
+/** 子 agent 线程的事件；turnId：turn/started、turn/completed 的回合 id（中止子 agent 用）。 */
+export interface ChildActivityEvent { parentThreadId: string; agentThreadId: string; method: string; turnId?: string }
 
 /** 服务端 TurnError：message 可能包含提供方返回的文本，只交给调用方判定，不写日志。 */
 export interface TurnError { message: string; codexErrorInfo?: unknown; additionalDetails?: string | null }
@@ -238,6 +239,11 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
     }
   }
 
+  /** 中止子 agent 线程的回合（子线程不经 start/resume 加载，不做已加载检查）。 */
+  async interruptChild(threadId: string, turnId: string, call: CallOptions = {}): Promise<void> {
+    await this.supervisor.call("turn/interrupt", { threadId, turnId }, this.callOpts(call));
+  }
+
   thread(threadId: string): ThreadSnapshot | undefined {
     const state = this.threads.get(threadId);
     return state && this.snapshot(state);
@@ -343,7 +349,8 @@ export class CodexAppServerClient extends EventEmitter<ClientEvents> {
         const grandchild = str(item.agentThreadId);
         if (item.type === "subAgentActivity" && grandchild && !this.threads.has(grandchild)) this.parents.set(grandchild, threadId);
         this.threads.get(root)!.lastActivityAt = this.now();
-        this.emit("childActivity", { parentThreadId: root, agentThreadId: threadId, method });
+        const turnId = str(object(params.turn).id) ?? str(params.turnId);
+        this.emit("childActivity", { parentThreadId: root, agentThreadId: threadId, method, ...(turnId ? { turnId } : {}) });
       }
       return;
     }

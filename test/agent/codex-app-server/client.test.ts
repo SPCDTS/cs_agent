@@ -149,9 +149,10 @@ describe("app-server 客户端", () => {
       ["turnStarted", { threadId: thread, turnId, initiatedBy: "client" }],
       ["subAgent", expect.objectContaining({ parentThreadId: thread, kind: "started", agentThreadId: "child-1" })],
       ["turnCompleted", { threadId: thread, turnId, status: "completed" }],
-      ["childActivity", { parentThreadId: thread, agentThreadId: "child-1", method: "turn/started" }],
-      ["childActivity", { parentThreadId: thread, agentThreadId: "child-1", method: "item/completed" }],
-      ["childActivity", { parentThreadId: thread, agentThreadId: "child-2", method: "item/completed" }],
+      // 子线程事件带上其回合 id（中止子 agent 用）
+      ["childActivity", { parentThreadId: thread, agentThreadId: "child-1", method: "turn/started", turnId: "child-turn" }],
+      ["childActivity", { parentThreadId: thread, agentThreadId: "child-1", method: "item/completed", turnId: "child-turn" }],
+      ["childActivity", { parentThreadId: thread, agentThreadId: "child-2", method: "item/completed", turnId: "gc" }],
       ["subAgent", expect.objectContaining({ parentThreadId: thread, kind: "completed", agentThreadId: "child-1" })],
       ["turnStarted", { threadId: thread, turnId: "wake-1", initiatedBy: "server" }],
     ]);

@@ -192,11 +192,14 @@ export class SendService {
    * 系统消息（§8.1 出错提示；codex 回合后补收的图片）：键 `<threadKey>:sys:<uuid>`，发往本会话，不 @、不计主动额度、不暴露给模型。
    * 被发送规则拒绝时不重试也不抛出：行保持 pending 并记下原因。
    */
-  async system(binding: Pick<TurnBinding, "threadKey" | "scope" | "inputKey" | "turnId">, text: string, images: string[] = [], signal?: AbortSignal): Promise<SendResult> {
+  /** key：调用方给出的稳定键（同一事件重试取回同一行，不重发）；缺省随机。 */
+  async system(binding: Pick<TurnBinding, "threadKey" | "scope" | "inputKey" | "turnId">, text: string, images: string[] = [],
+    options: { signal?: AbortSignal; key?: string } = {}): Promise<SendResult> {
+    const signal = options.signal;
     return this.serial(binding.threadKey, async () => {
       const target = parseTarget(`qq:${binding.scope}`), channel = this.opts.getChannel();
       const row = channel.outbox.reserveOutbox({
-        key: `${binding.threadKey}:sys:${randomUUID()}`, thread_key: binding.threadKey, turn_id: binding.turnId ?? null,
+        key: options.key ?? `${binding.threadKey}:sys:${randomUUID()}`, thread_key: binding.threadKey, turn_id: binding.turnId ?? null,
         input_key: binding.inputKey ?? null, system: true, message_type: target.message_type, target_id: target.target_id,
         mention_user_id: null, text, images, files: [],
       });

@@ -134,7 +134,7 @@ it('codex 回合结束前补收 image_gen 超时任务（prompt_id 可观测）�
   const codex=await codexBackend('late',script,{imagesDir:path.join(r.dir,'images'),sendService:{system},imageBackend:observeImages(r.image,'late-images')});
   await codexTurn(codex);
   expect(r.store.events('late-images').some(e=>e.stage==='image:collect'&&e.detail_json.includes('late-pid'))).toBe(true);
-  expect(system).toHaveBeenCalledWith(expect.objectContaining({threadKey:'private:1',scope:'private:1'}),'图片生成好了',[expect.stringContaining('result.png')]);
+  expect(system).toHaveBeenCalledWith(expect.objectContaining({threadKey:'private:1',scope:'private:1'}),'图片生成好了',[expect.stringContaining('result.png')],{key:'private:1:sys:img:late'});
   const observed=observeImages({...r.image,reconcile:async(_opts:unknown,_dir:string,_signal?:AbortSignal,onStep?:(step:{step:'history';status:'matched';prompt_id:string})=>Promise<void>)=>{
     await onStep?.({step:'history',status:'matched',prompt_id:'recovered-pid'});return {images:[],prompt_id:'recovered-pid'};
   }},'reconcile');

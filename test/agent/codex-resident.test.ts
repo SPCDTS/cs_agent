@@ -131,14 +131,12 @@ describe("codex 常驻：唤醒回合与工具调用的回合归属", () => {
     await vi.waitFor(() => expect(r.host.thread(G)?.turnId).toBe("codex:turn-1"));
     const turn = script.turns[0]!;
     script.toolCall(turn, "exec-1");
-    expect(await r.codexContext(G, { callId: "exec-1", threadId: turn.threadId })).toMatchObject({ access: "all", turn_id: "codex:turn-1" });
-    // 回合元数据直接给出 turn_id 时不必等条目
-    expect(await r.codexContext(G, { turnId: turn.turnId, threadId: turn.threadId })).toMatchObject({ access: "all" });
+    expect(await r.codexContext(G, { callId: "exec-1", threadId: turn.threadId, turnId: turn.turnId })).toMatchObject({ access: "all", turn_id: "codex:turn-1" });
     await expect(r.codexContext(G, { callId: "exec-x", threadId: "child-thread" })).rejects.toThrow("子 agent");
     slow.open();
     await r.idle();
     await expect(r.codexSend(G, { text: "迟到的发送" }, { callId: "exec-1", threadId: turn.threadId })).rejects.toThrow("本回合已结束");
-    await expect(r.codexContext(G, { turnId: turn.turnId })).rejects.toThrow("本回合已结束");
+    await expect(r.codexContext(G, { callId: "exec-1", threadId: turn.threadId, turnId: turn.turnId })).rejects.toThrow("本回合已结束");
     await expect(r.codexContext(G, {})).rejects.toThrow("缺少调用归属");
     expect(r.texts("7")).toEqual([]);
   });
@@ -208,7 +206,7 @@ describe("codex 常驻：崩溃恢复、停止、后端切换与压缩", () => {
     await r.idle();
     expect(r.texts("7")).toEqual([TURN_NOTICES.lost]);
     expect(await r.host.inputOutcome(key)).toEqual({ status: "lost", turnId: "codex:turn-1" });
-    await expect(r.codexContext(G, { turnId: turn.turnId }, oldToken)).rejects.toThrow("令牌");
+    await expect(r.codexContext(G, { callId: "exec-x", threadId: turn.threadId, turnId: turn.turnId }, oldToken)).rejects.toThrow("令牌");
     script.auto = true;
     script.onTurn = async next => {
       script.toolCall(next, "exec-after");
@@ -220,6 +218,49 @@ describe("codex 常驻：崩溃恢复、停止、后端切换与压缩", () => {
     expect(r.codexSpawn.last.requests("thread/resume").map(m => (m.params as { threadId: string }).threadId)).toEqual([turn.threadId]);
     expect(r.codexToken(G)).not.toBe(oldToken);
     expect(r.texts("7")).toEqual([TURN_NOTICES.lost, "恢复了"]);
+  });
+
+  it.each([true, false])("turn/start 发出后连接断开（turn/started 已到=%s）：不重发这条输入，按中断结束并提示，不当作唤醒", async started => {
+    const script = new CodexScript();
+    const base = script.handlers;
+    let drops = 1;
+    script.handlers = () => ({ ...base(), "turn/start": (m, child) => {
+      if (drops-- <= 0) return base()["turn/start"]!(m, child);
+      const threadId = String(m.params!.threadId);
+      if (started) child.notify("turn/started", { threadId, turn: { id: "turn-dropped", status: "inProgress" } });
+      setImmediate(() => child.exit(1));
+      return undefined;
+    } });
+    const r = await codexRig(script);
+    const key = await r.say("5", "只交一次");
+    await r.idle(20_000);
+    expect(r.codexSpawn.children.flatMap(c => c.requests("turn/start"))).toHaveLength(1);
+    expect(r.texts("7")).toEqual([TURN_NOTICES.lost]);
+    expect((await r.host.inputOutcome(key))?.status).toBe("lost");
+    expect(r.host.thread(G)).toMatchObject({ busy: false });
+    // 之后的消息照常（thread/resume 后开新一轮）
+    await r.say("5", "下一条");
+    await r.idle(20_000);
+    expect(script.turns.at(-1)!.text).toContain("下一条");
+  });
+
+  it("面板停止连同子 agent：主回合空闲时中止运行中的子 agent 回合，其结束引起的唤醒被抑制", async () => {
+    const script = new CodexScript();
+    const r = await codexRig(script);
+    await r.say("5", "派子 agent 后结束");
+    await r.idle();
+    const parent = script.turns[0]!, child = parent.child;
+    child.notify("thread/started", { thread: { id: "child-1", parentThreadId: parent.threadId } });
+    child.notify("turn/started", { threadId: "child-1", turn: { id: "cturn-1", status: "inProgress" } });
+    await vi.waitFor(async () => expect(await r.codex.busy(G)).toBe(true));
+    await r.monitor.stop(G);
+    await vi.waitFor(() => expect(child.requests("turn/interrupt").map(m => m.params)).toContainEqual({ threadId: "child-1", turnId: "cturn-1" }));
+    child.notify("turn/completed", { threadId: "child-1", turn: { id: "cturn-1", status: "interrupted" } });
+    const wake = script.wake(child, parent.threadId);
+    await vi.waitFor(() => expect(child.requests("turn/interrupt").map(m => m.params)).toContainEqual({ threadId: parent.threadId, turnId: wake.turnId }));
+    await r.idle();
+    expect(r.host.thread(G)).toMatchObject({ busy: false });
+    expect(r.texts("7")).toEqual([]);
   });
 
   it("面板停止：turn/interrupt，回合结束不发出错提示；看门狗中止按失败提示", async () => {

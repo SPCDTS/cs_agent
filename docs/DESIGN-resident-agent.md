@@ -161,6 +161,7 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 - 用户输入：按此人的权限（owner 全权；他人按授权表）。
 - 定时输入：创建者身份，且不提供 `auth_*`（沿用现规则）。
 - 唤醒回合（没有新输入）：只允许发往本会话、读取本会话范围；不允许主动发往别处、不允许定时与授权工具。需要别的权限时，模型在汇报里请用户确认。
+  例外：owner 线程（`owner`）的唤醒回合读取范围为 all——owner 线程只接收 owner 本人的输入与 owner 创建的定时任务，其唤醒工作就是 owner 自己的工作（codex 与 pi 一致）；发送、定时与授权的限制不变。
 
 读取范围（`qq_context`、`qq_image`）同理：owner 为 all，其他为本会话。
 

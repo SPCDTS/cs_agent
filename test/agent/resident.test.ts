@@ -386,3 +386,16 @@ describe("一个会话同一时间只由一个后端服务（§4.3）", () => {
     expect(r.texts()).toEqual(["收到"]);
   });
 });
+
+describe("唤醒身份的读取范围（§7.3）", () => {
+  it("pi：owner 线程的唤醒回合读取 all（owner 线程只有 owner 本人的输入与定时），群的唤醒回合只读本会话", async () => {
+    const r = await residentRig({ brain: () => reply("好") });
+    await r.say("1", "owner 私聊", null);
+    await r.say("5", "群消息");
+    await r.idle();
+    const ids = await r.pi.readThreadIds();
+    // 宿主空闲时工具调用按唤醒身份
+    expect(await r.pi.binding(ids.owner!)).toMatchObject({ identity: { kind: "wake" }, access: "all" });
+    expect(await r.pi.binding(ids["group:7"]!)).toMatchObject({ identity: { kind: "wake" }, access: "group:7" });
+  });
+});

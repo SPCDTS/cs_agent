@@ -52,6 +52,14 @@ export async function savePendingImage(dir: string, job: PendingImageJob): Promi
   await atomicJson(path.join(dir, PENDING_IMAGE_JOBS), validated);
 }
 
+/** 移除已处理的任务（按 filenamePrefix），保留期间新追加的；清单空了就删除文件。 */
+export async function removePendingImages(dir: string, prefixes: ReadonlySet<string>): Promise<void> {
+  const file = path.join(dir, PENDING_IMAGE_JOBS);
+  const rest = (await readPendingImages(dir)).filter(job => !prefixes.has(job.filenamePrefix));
+  if (rest.length) await atomicJson(file, jobsSchema.parse(rest));
+  else await fs.rm(file, { force: true });
+}
+
 /** 收取只允许写入当前票据的 call-N 目录，恢复时再次检查软链接。 */
 export async function pendingCallDir(dir: string, callDir: string): Promise<string> {
   const root = await fs.realpath(dir);
