@@ -1,4 +1,5 @@
 import { parseTarget, type GrantsService } from "./grants.js";
+import { runRights } from "./host/identity.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -88,7 +89,9 @@ export class SendService {
       const args = validateSendArguments(input), channel = this.opts.getChannel();
       const sourceRef = `qq:${binding.scope}`;
       const targetRef = args.target ?? sourceRef, target = parseTarget(targetRef), targeted = targetRef !== sourceRef;
-      const proactive = targeted || binding.identity.kind === "scheduled";
+      // 权限一律按 runRights（§7.3）：只有会话基础权限的回合发往别处由 authorizeSend 拒绝；定时身份的发送计主动额度。
+      const rights = this.opts.grants?.rights(binding) ?? runRights(binding, undefined);
+      const proactive = targeted || rights.person?.kind === "scheduled";
       const existing = channel.outbox.getOutbox(key);
       // 已绑定的调用键原样重放；仍待发送的行使用原目标，不能通过更换参数绕过授权。
       if (existing && (existing.message_type !== target.message_type || existing.target_id !== target.target_id)) {
@@ -98,7 +101,6 @@ export class SendService {
         // 仍待发送的跨会话行每次重试都按当前身份重新授权（撤销即时生效）；已发出的行只取回执。
         const existingRef = `qq:${existing.message_type}:${existing.target_id}`;
         if (existing.status === "pending" && existingRef !== sourceRef) {
-          if (binding.identity.kind === "wake") throw new Error("唤醒回合只能发往本会话；需要发往别处请先在本会话请用户确认");
           if (!this.opts.grants) throw new Error("主动发送授权未启用");
           await this.opts.grants.authorizeSend(binding, existingRef);
         }
@@ -116,7 +118,6 @@ export class SendService {
         }
       }
       if (targeted) {
-        if (binding.identity.kind === "wake") throw new Error("唤醒回合只能发往本会话；需要发往别处请先在本会话请用户确认");
         if (!this.opts.grants) throw new Error("主动发送授权未启用");
         await this.opts.grants.authorizeSend(binding, targetRef);
         await this.checkMembership(target, signal);

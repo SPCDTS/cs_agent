@@ -25,7 +25,8 @@ import { recoverRemoteUploads, UnknownJobError, type ImageBackend } from "../../
 import { ingestImageEvents } from "../../media/gen/events.js";
 import { observeImages } from "../../media/gen/observed.js";
 import { log } from "../../shared/log.js";
-import { isOwner, type OwnerIds } from "../../shared/owners.js";
+import type { OwnerIds } from "../../shared/owners.js";
+import { runRights } from "../host/identity.js";
 import type { HostCallbacks, InputRef, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome, TurnStatus } from "../host/types.js";
 import type { PiTurns } from "./pi.js";
 import type { SendService } from "../send-service.js";
@@ -124,9 +125,10 @@ export class CodexBackend implements ThreadAdapter {
     settings: TicketSettings | undefined, signal: AbortSignal): Promise<{ status: TurnStatus; error?: string }> {
     const key = "turn:" + turnId;
     const binding = this.opts.turns.binding(threadKey);
-    const person = turn.kind === "user" || turn.kind === "scheduled" ? turn.sender : undefined;
-    const ownerPerson = !!person && isOwner(this.owners(), person);
-    const access = ownerPerson || threadKey === "owner" ? "all" : binding.scope;
+    // 读取范围与技能权限按本轮的人统一求出（§7.3）：codex 回合只由宿主开，身份即本轮输入的发送者或定时创建者。
+    const rights = runRights({ threadKey, scope: binding.scope,
+      identity: turn.kind === "user" ? { kind: "user", sender: turn.sender } : { kind: "scheduled", creator: turn.sender } }, this.owners());
+    const ownerPerson = rights.owner, access = rights.access;
     const dir = attachmentDirs(path.dirname(this.opts.imagesDir), threadKey).attachDir;
     const started = Date.now();
     let modelStarted: number | undefined;

@@ -67,6 +67,7 @@ QQ bridge ──@消息──▶ Inbox ──▶ ThreadHost(会话键) ──▶
 ```ts
 { threadKey, busy: boolean, turnId?: string,
   turnSender?: string,        // 本轮发送者（用户输入）；定时为创建者；唤醒回合为空
+  turnInherited?: RunPerson,  // 唤醒回合继承的人（派出子 agent 那一轮的人，见 7.3）；缺省 = 会话基础权限
   turnInputs: InputRef[],     // 本轮已送入的输入
   pending: InputRef[],        // 等本轮结束的输入（他人消息、定时任务）
   mentioned: boolean,         // 本轮是否已 @ 过发送者，见 7.2
@@ -106,7 +107,7 @@ QQ bridge ──@消息──▶ Inbox ──▶ ThreadHost(会话键) ──▶
 - 每轮参数（推理强度、模型）走 `turn/start` 的 `effort`、`model` 字段，不再用 `-c` 覆盖。
 - 开一轮：`turn/start`；插话：`turn/steer`（带 `expectedTurnId`）；中止（面板"停止"）：`turn/interrupt`。
 - 回合结束：`turn/completed`。`status != completed` 或有 `error` 通知 → 回合失败，走 8.1 的出错提示。
-- 唤醒：子 agent 完成后 app-server 自己开一轮（实测 0.164.0-alpha.8，父线程收到 `subAgentActivity kind=completed` 后 0.1 s 内 `turn/started`）。ThreadHost 从 `turn/started` 得知"这是一轮没有新输入的唤醒回合"。
+- 唤醒：子 agent 完成后 app-server 自己开一轮（实测 0.164.0-alpha.8，父线程收到 `subAgentActivity kind=completed` 后 0.1 s 内 `turn/started`）。ThreadHost 从 `turn/started` 得知"这是一轮没有新输入的唤醒回合"。codex 唤醒回合要继承派出者（7.3），须由适配器求出派出者并随 `onTurnStarted` 交给宿主；求不出就只有会话基础权限。
 - 后台终端命令跑完**不会**唤醒（实测）。提示词要求长任务派子 agent。
 
 ### 5.3 MCP 与令牌
@@ -132,7 +133,15 @@ QQ bridge ──@消息──▶ Inbox ──▶ ThreadHost(会话键) ──▶
 
 ### 6.2 子 agent
 
-按 pi-durable 示例 `23-subagent-background` 实现 `subagent` 扩展：后台锚定任务持有子会话，完成后由汇报任务把结果作为 follow-up 输入投回父会话，从而唤醒主 agent。子会话工具集与父相同但不含 `subagent`、`auth_*`、`schedule_*`；`send_message` 对子会话不可用（只有主 agent 对外说话）。
+按 pi-durable 示例 `23-subagent-background` 实现 `subagent` 扩展：后台锚定任务持有子会话，完成后由汇报任务把结果作为 follow-up 输入投回父会话，从而唤醒主 agent。子会话工具集与父相同但不含 `subagent`、`auth_*`、`schedule_*`；`send_message` 对子会话不可用（只有主 agent 对外说话）。子会话继承派出者的读取权限（取父会话登记里它的派出者快照：owner 派出的可读全部，成员派出的只读本会话；被另一人 message 后随登记降为基础权限，登记缺失或已停止一律基础权限）。
+
+身份随汇报带回（7.3）：
+
+- `spawn` 时快照父会话这一轮的身份 `{ turn: user|scheduled|wake, as?: { kind, person, owner } }`（`as` 为本轮确证的人，基础权限则缺省），登记在 `cs.subagent.children` 的子 agent 记录里，并写进汇报任务的输入。
+- 汇报输入的条目（`cs.subagent.report`）数据带上该快照；适配器在唤醒 run 开始时按 run 的全部输入求出身份：全部是带确证派出者的汇报、且是同一人同一类型 → 继承该人，否则基础权限；随 `onTurnStarted`（或开轮时让出的 `backendTurnId`）交给宿主，宿主写入会话文档的 `turnInherited`，重启保持。
+- 工具调用时再按 run 当前的输入核对一次（有汇报插进同一 run 就重新合并），与宿主记下的不一致即基础权限。
+- 唤醒 run 开始（及重启恢复）时按继承的身份重新选择 IM 与定时工具集（与用户回合同一套选择逻辑）；配置从下一次模型请求起生效，调用仍逐次按唤醒身份复核。
+- `message` 给已有子 agent 时，把登记的快照与这一轮的身份合并：不是同一人就降为基础权限（子 agent 上下文里已有两人交代的内容），之后的汇报都带合并后的身份。
 
 ### 6.3 恢复
 
@@ -156,13 +165,19 @@ send_message({ text, images?, files?, target? }) → { status, message_id, alrea
 
 ### 7.3 身份与授权
 
-每次工具调用（发送、召回、生图、定时、授权）的身份取自**本轮发送者**（一轮只有一个发送者，见 4.2）：
+**每个回合绑定一个人**，每次工具调用（发送与 target、召回与历史读取范围、生图参考图、定时、授权、技能写权限）都按这个人检查。权限分两层，在一处求出（`src/agent/host/identity.ts`：`base(threadKey, scope)` + `elevation(identity)` → `runRights`），各工具不再按回合类型或会话自行判断：
 
-- 用户输入：按此人的权限（owner 全权；他人按授权表）。
-- 定时输入：创建者身份，且不提供 `auth_*`（沿用现规则）。
-- 唤醒回合（没有新输入）：只允许发往本会话、读取本会话范围；不允许主动发往别处、不允许定时与授权工具。需要别的权限时，模型在汇报里请用户确认。
+- **会话基础权限**（任何回合都有）：读本会话范围、只发往本会话；没有 target、没有 `schedule_*`、没有 `auth_*`。
+- **人的权限**（只在确证时叠加）：owner 全权（读全部、target 不查授权表、技能写权限、交互身份有 `auth_*`）；他人按授权表（send 授权开放 target，schedule 授权开放定时管理）。
 
-读取范围（`qq_context`、`qq_image`）同理：owner 为 all，其他为本会话。
+这个人是谁：
+
+- 用户输入：发送者（一轮只有一个发送者，见 4.2；owner 的多个账号算同一人）。
+- 定时输入：创建者，不提供 `auth_*`，授权照常按当前授权表复核（沿用现规则）。
+- 唤醒回合（子 agent 汇报）：**派出该子 agent 的那一轮的人**（派出时快照，见 6.2）。唤醒回合派出的子 agent 再唤醒时沿链继承。同一唤醒回合带回多个汇报而派出者不是同一人（或类型不同）时取最严格：回落到会话基础权限。owner 标记只降不升：快照时与当前配置都必须是 owner。
+- **无法确证就只有会话基础权限（fail closed）**：没有派出记录（升级前派出的子 agent）、不是汇报的后端 run、宿主尚未确认的 run、宿主放弃的回合、数据缺失或不一致，一律回落到基础权限，绝不向上回落。owner 线程不再有"唤醒回合读全部"的例外——owner 派出的子 agent 唤醒时本来就继承 owner。
+
+一轮只有一个人：其他人的消息排队到本轮结束；同一人的消息只插话进他自己的用户回合，**不插话进唤醒回合**（排队，唤醒回合结束后单独开轮）。子会话始终没有 `send_message`、`auth_*`、`schedule_*`。
 
 ### 7.4 Outbox
 

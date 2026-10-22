@@ -8,7 +8,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostInputDoc, ThreadHostDoc } from "../../../src/agent/host/docs.js";
 import { ThreadHost, STALL_MS } from "../../../src/agent/host/thread-host.js";
-import type { HostCallbacks, InputRef, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnEnded } from "../../../src/agent/host/types.js";
+import type { HostCallbacks, InputRef, RunPerson, StartTurnResult, ThreadAdapter, ThreadKey, TurnContext, TurnEnded } from "../../../src/agent/host/types.js";
 
 const ctx = BACKGROUND_CONTEXT;
 const G = "group:42" as ThreadKey, H = "group:43" as ThreadKey, P = "private:7" as ThreadKey;
@@ -28,6 +28,8 @@ class FakeAdapter implements ThreadAdapter {
   hangStart = false;
   /** 后端已有宿主尚未确认的唤醒回合：开轮时不收输入，回报该回合 */
   busyWake?: string;
+  /** busyWake 回合的继承身份 */
+  busyWakeIdentity?: RunPerson;
   abandoned: { threadKey: ThreadKey; turnId: string }[] = [];
   /** 放弃回合时后端的处理：aborted = 工作被中止 */
   abandonAs: { status: "completed" | "failed" | "lost"; error?: string } = { status: "completed" };
@@ -51,11 +53,11 @@ class FakeAdapter implements ThreadAdapter {
     if (this.denyOnRetry && turnCtx.admit && !await turnCtx.admit()) return { denied: true };
     this.backends.push(turnCtx.backend);
     if (this.busyWake) {
-      const turnId = this.busyWake;
+      const turnId = this.busyWake, identity = this.busyWakeIdentity;
       this.busyWake = undefined;
       this.live.set(threadKey, turnId);
-      this.host.onTurnStarted(threadKey, turnId, "backend");
-      return { backendTurnId: turnId };
+      this.host.onTurnStarted(threadKey, turnId, "backend", identity);
+      return { backendTurnId: turnId, ...(identity ? { identity } : {}) };
     }
     const turnId = `t${++this.n}`;
     this.live.set(threadKey, turnId);
@@ -88,10 +90,10 @@ class FakeAdapter implements ThreadAdapter {
     this.live.delete(threadKey);
     this.host.onTurnCompleted(threadKey, turnId, { status });
   }
-  wake(threadKey: ThreadKey) {
+  wake(threadKey: ThreadKey, identity?: RunPerson) {
     const turnId = `w${++this.n}`;
     this.live.set(threadKey, turnId);
-    this.host.onTurnStarted(threadKey, turnId, "backend");
+    this.host.onTurnStarted(threadKey, turnId, "backend", identity);
     return turnId;
   }
   keysOf(threadKey?: ThreadKey) { return this.starts.filter(s => !threadKey || s.threadKey === threadKey).map(s => s.keys); }
@@ -661,5 +663,67 @@ describe("ThreadHost 持久化与重启恢复", () => {
     r.host.onTurnCompleted(G, "t1", { status: "completed" }); await r.settle();
     expect(r.adapter.keysOf(G)).toEqual([["a1"]]);
     expect(r.host.thread(G)!.turnInputs.map(i => i.inboundKey)).toEqual(["a1", "a2"]);
+  });
+});
+
+describe("ThreadHost 唤醒回合的继承身份（§7.3）", () => {
+  const member: RunPerson = { kind: "user", person: "5", owner: false };
+  const owner: RunPerson = { kind: "user", person: "1001", owner: true };
+
+  it("唤醒回合带继承身份：currentIdentity 给出继承的人；没有身份或形状不对的为基础权限", async () => {
+    const r = await rig();
+    r.adapter.wake(G, member); await r.settle();
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "wake", inherited: member });
+    expect(r.host.thread(G)).toMatchObject({ turnKind: "wake", turnInherited: member });
+    expect(r.host.thread(G)!.turnSender).toBeUndefined();
+    expect(await r.host.takeMention(G)).toBe(false);
+    r.adapter.complete(G); await r.settle();
+    expect(r.host.thread(G)!.turnInherited).toBeUndefined();
+    r.adapter.wake(G); await r.settle();
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "wake" });
+    r.adapter.complete(G); await r.settle();
+    r.adapter.wake(G, { kind: "user", person: "01", owner: true } as RunPerson); await r.settle();
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "wake" });
+  });
+
+  it("回归：同一人的用户消息也不插话进唤醒回合，排队到它结束后单独开轮", async () => {
+    const r = await rig();
+    r.adapter.wake(G, owner); await r.settle();
+    expect(await r.user(G, "m1", "1001")).toBe("queued");
+    expect(await r.user(G, "m2", "1002")).toBe("queued");
+    expect(r.adapter.steers).toEqual([]);
+    r.adapter.complete(G); await r.settle();
+    expect(r.adapter.keysOf(G)).toEqual([["m1"]]);
+    expect(r.adapter.steers).toMatchObject([{ key: "m2", reply: "ok" }]);
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "user", sender: "1001" });
+  });
+
+  it("开轮时后端回报已有唤醒回合：按适配器给出的继承身份接管，输入排到其后", async () => {
+    const r = await rig();
+    r.adapter.busyWake = "w9"; r.adapter.busyWakeIdentity = member;
+    await r.user(G, "m1", "1001"); await r.settle();
+    expect(r.host.thread(G)).toMatchObject({ busy: true, turnId: "w9", turnKind: "wake", pending: [{ inboundKey: "m1" }] });
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "wake", inherited: member });
+  });
+
+  it("新的唤醒回合取代上一个：身份只取新回合的（没有则基础权限），不沿用", async () => {
+    const r = await rig();
+    r.adapter.wake(G, owner); await r.settle();
+    r.adapter.wake(G); await r.settle();
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "wake" });
+  });
+
+  it("重启后继承身份保持（随会话文档持久化）", async () => {
+    const r = await rig();
+    const turnId = r.adapter.wake(G, member); await r.settle();
+    expect(await r.harness.snapshot(ThreadHostDoc, G, ctx)).toMatchObject({ turnId, turnInherited: member });
+    const next = new FakeAdapter();
+    next.live.set(G, turnId);
+    await r.restart(next);
+    expect(r.host.currentIdentity(G)).toEqual({ kind: "wake", inherited: member });
+    expect(await r.user(G, "m1", "5")).toBe("queued");
+    next.complete(G); await r.settle();
+    expect(r.host.thread(G)).toMatchObject({ turnKind: "user", turnSender: "5" });
+    expect(r.host.thread(G)!.turnInherited).toBeUndefined();
   });
 });

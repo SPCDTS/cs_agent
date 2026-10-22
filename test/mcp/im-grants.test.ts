@@ -68,7 +68,7 @@ it("非 owner 不能直接调用隐藏工具或回环端点；撤销后令牌失
   expect((await f.post("auth_list", {})).status).toBe(401);
 });
 
-it("owner 线程的唤醒回合只开放发往本会话：无 target、无授权工具，跨会话发送在主进程拒绝", async () => {
+it("没有继承身份的唤醒回合（owner 线程也一样）只开放发往本会话：无 target、无授权工具，跨会话发送在主进程拒绝", async () => {
   const f = await setup(true, false, "wake");
   const tools = (await f.client.listTools()).tools;
   expect(tools.map(t => t.name)).toEqual(["send_message"]);

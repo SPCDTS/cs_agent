@@ -45,7 +45,7 @@ export interface PiToolsOptions {
   instrumentation?: RecallObserver;
   channel?: Pick<Channel, "listChats">;
   mediaRecall?: Pick<MediaRecall, "recall">;
-  /** 工具调用时求出本轮绑定（会话宿主的当前回合；子会话固定为唤醒）；未绑定的会话返回 undefined。 */
+  /** 工具调用时求出本轮绑定（会话宿主的当前回合；子会话只有会话基础权限）；未绑定的会话返回 undefined。 */
   binding(conversationId: number): Promise<PiCallBinding | undefined>;
 }
 
@@ -130,10 +130,7 @@ export function createPiExtension(opts: PiToolsOptions) {
           return { block: reason };
         };
         // 不按回合计调用次数（失控防护交给 bridge 发送规则，§9）；身份相关的限制在各工具执行时复核。
-        if (call.name.startsWith("auth_")) {
-          const owner = bound.identity.kind === "user" && bound.senderIsOwner;
-          return owner ? undefined : block("授权工具仅限 owner 回合");
-        }
+        if (call.name.startsWith("auth_")) return bound.auth ? undefined : block("授权工具仅限 owner 回合");
         return undefined;
       }, afterTool: async (call, result, api) => {
         const bound = await opts.binding(Number(api.conversationId));

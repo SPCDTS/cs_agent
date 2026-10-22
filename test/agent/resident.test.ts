@@ -186,7 +186,7 @@ describe("出错提示与看门狗（§8）", () => {
 });
 
 describe("子 agent 唤醒回合（§6.2、§7.3）", () => {
-  it("子 agent 完成后唤醒主会话：唤醒回合可以发往本会话（不 @），不能主动发往别处", async () => {
+  it("子 agent 完成后唤醒主会话：唤醒回合继承派出者 owner 的权限，发往本会话不 @，也能主动发往别处", async () => {
     const results: string[][] = [];
     const r = await residentRig({ owners: ["1"], brain: (ctx) => {
       if (isChild(ctx)) return reply("晴，25 度");
@@ -196,19 +196,19 @@ describe("子 agent 唤醒回合（§6.2、§7.3）", () => {
       if (input.startsWith("[子 agent 完成]")) return call(["send_message", { text: "天气：晴" }], ["send_message", { text: "转告", target: "qq:group:8" }]);
       return call(["subagent", { action: "spawn", name: "w", task: "查天气" }]);
     } });
-    // owner 在群里发起（有 target 权限）；唤醒回合仍不能 target
+    // owner 在群里派出子 agent：汇报唤醒的回合继承 owner（§7.3），可以 target
     await r.say("1", "查一下天气");
     await vi_wait(() => results.length >= 2, 15_000);
     await r.idle();
     expect(r.texts("7")).toEqual(["天气：晴"]);
-    expect(r.texts("8")).toEqual([]);
-    expect(r.mentions()).toEqual([null]);
-    expect(results[1]!.some(t => t.includes("唤醒回合只能发往本会话"))).toBe(true);
+    expect(r.texts("8")).toEqual(["转告"]);
+    expect(r.mentions()).toEqual([null, null]);
+    expect(results[1]!.every(t => !t.includes("基础权限"))).toBe(true);
   });
 });
 
 describe("唤醒回合不被用户输入升级（§7.3）", () => {
-  it("宿主尚未确认唤醒 run 时 owner 来消息：输入不并入唤醒 run，唤醒工作保持唤醒身份，消息排到其后", async () => {
+  it("宿主尚未确认唤醒 run 时 owner 来消息：输入不并入唤醒 run，唤醒工作保持派出者（成员）的身份，消息排到其后", async () => {
     const wakeGate = gate();
     const results: string[][] = [];
     const r = await residentRig({ owners: ["1"], brain: (ctx) => {
@@ -223,24 +223,26 @@ describe("唤醒回合不被用户输入升级（§7.3）", () => {
     // 宿主暂不处理后端开的回合（模拟唤醒事件还在路上）
     const deferred: (() => void)[] = [];
     const onTurnStarted = r.host.onTurnStarted.bind(r.host);
-    r.host.onTurnStarted = (threadKey, turnId, by) => {
-      if (by === "backend") deferred.push(() => onTurnStarted(threadKey, turnId, by));
-      else onTurnStarted(threadKey, turnId, by);
+    r.host.onTurnStarted = (threadKey, turnId, by, identity) => {
+      if (by === "backend") deferred.push(() => onTurnStarted(threadKey, turnId, by, identity));
+      else onTurnStarted(threadKey, turnId, by, identity);
     };
-    await r.say("1", "查一下天气");
+    // 成员 5 派出子 agent（没有 send 授权）；之后 owner 来消息
+    await r.say("5", "查一下天气");
     await vi_wait(() => wakeGate.entered === 1, 15_000);
     await r.host.idle();
     expect(r.host.thread("group:7")?.busy).toBe(false);
     const late = await r.say("1", "新消息");
     await r.host.idle();
-    // 输入没有并入唤醒 run：宿主按唤醒回合接管，消息排队
+    // 输入没有并入唤醒 run：宿主按唤醒回合接管（继承派出者 5，不升级为 owner），消息排队
     expect(r.host.thread("group:7")).toMatchObject({ busy: true, turnKind: "wake", pending: [{ inboundKey: late }] });
-    expect(r.host.currentIdentity("group:7")).toEqual({ kind: "wake" });
+    expect(r.host.currentIdentity("group:7")).toEqual({ kind: "wake", inherited: { kind: "user", person: "5", owner: false } });
     wakeGate.open();
     for (const fire of deferred.splice(0)) fire();
     await r.idle(15_000);
     expect(r.texts("8")).toEqual([]);
-    expect(results.some(rs => rs.some(t => t.includes("唤醒回合只能发往本会话")))).toBe(true);
+    // 成员没有 send 授权：本轮工具 schema 不含 target（执行时也会按继承身份拒绝），发往别处失败
+    expect(results.some(rs => rs.some(t => t.includes("target") && !t.startsWith("{")))).toBe(true);
     // 新消息在唤醒回合结束后单独一轮，身份为 owner
     expect(r.texts("7")).toEqual(["收到新消息"]);
     expect(r.mentions()).toEqual(["1"]);

@@ -219,15 +219,25 @@ export interface RemoteMessage {
   segments: { type: string; rendered: string; image?: { url: string; file: string } }[];
 }
 
-/** 本轮身份（设计 §7.3）：user 为发送者，scheduled 为创建者，wake 为没有新输入的唤醒回合。 */
+/**
+ * 回合绑定的人（设计 §7.3）：kind 为此人以什么身份驱动回合（user 发送者 / scheduled 定时创建者），
+ * owner 为快照时此人是否 owner（继承时只降不升：当前配置也须仍是 owner）。
+ */
+export type RunPerson = { kind: "user" | "scheduled"; person: string; owner: boolean };
+
+/**
+ * 本轮身份（设计 §7.3）：user 为发送者，scheduled 为创建者，wake 为没有新输入的唤醒回合。
+ * 唤醒回合的 inherited 为确证继承的人（派出子 agent 那一轮的人，随汇报带回）；缺省表示只有会话基础权限。
+ * 权限一律经 `runRights`（src/agent/host/identity.ts）求出，不在各处按 kind 自行判断。
+ */
 export type TurnIdentity =
   | { kind: "user"; sender: string }
   | { kind: "scheduled"; creator: string }
-  | { kind: "wake" };
+  | { kind: "wake"; inherited?: RunPerson };
 
 /**
  * 工具调用时由主进程从会话宿主求出的绑定（§7）：身份、发送地址与本轮输入，模型参数不能覆盖。
- * 子 agent 会话固定为 wake 身份。
+ * 子 agent 会话固定为没有继承的 wake 身份（会话基础权限）。
  */
 export interface TurnBinding {
   threadKey: string;
