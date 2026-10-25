@@ -1,8 +1,8 @@
 import { BACKGROUND_CONTEXT, awaitWithContext, withAbortSignal, type Context } from "@earendil-works/chord/context";
-import { Type, type Message } from "@earendil-works/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
 import { AgentDoc, AssistantEntry, GenerationTask, ToolResultEntry, ToolTask, defineExtension, defineTool, hook, section,
   type AgentEvent, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Extension, type Harness, type Page, type Registry,
-  type HookApi, type ToolExecutionApi, type ToolExecutionResult, type ToolTaskInput } from "@earendil-works/pi-durable";
+  type ToolExecutionApi, type ToolExecutionResult, type ToolTaskInput } from "@earendil-works/pi-durable";
 import { z } from "zod";
 import type { TurnBinding } from "../../channel/types.js";
 import type { OwnerIds } from "../../shared/owners.js";
@@ -72,8 +72,7 @@ export class PiMcp {
           return { output: [{ type: "text", text: names.length ? `当前可用 MCP 工具：\n${names.join("\n")}\n请使用当前参数定义；本次仅刷新目录。`
             : "当前没有可用的 MCP 业务工具，请检查服务状态。" }] };
         } })],
-      hooks: [hook(GenerationTask, { beforeRequest: (request, api, context) => this.recoveryHints(request.messages, api, context),
-        afterTools: async (_assistant, _results, api, context) => {
+      hooks: [hook(GenerationTask, { afterTools: async (_assistant, _results, api, context) => {
         const binding = await opts.binding(Number(api.conversationId));
         const conversation = await opts.harness.conversation(api.conversationId, context);
         if (binding && conversation) await this.configure({ conversation, turn: binding }, context);
@@ -405,43 +404,6 @@ export class PiMcp {
       return failure(code, dispatched ? "MCP 操作结果未知，可能已执行。请先核对外部状态，不要自动重复调用。"
         : `MCP 操作未发送（${code}）。请检查权限、服务状态或获取最新工具。`);
     } finally { budget.done(); }
-  }
-
-  /** 只增强本次模型输入；以持久化诊断确认未派发，绝不改写原始结果或重放工具。 */
-  private async recoveryHints(messages: readonly Message[], api: HookApi, context: Context) {
-    const lastAssistant = messages.findLastIndex(message => message.role === "assistant");
-    const candidates = messages.slice(lastAssistant + 1).filter(message => message.role === "toolResult" && message.isError && this.installed.has(message.toolName));
-    if (!candidates.length || this.opts.config.kind !== "enabled") return;
-    const bound = await this.opts.binding(Number(api.conversationId));
-    if (!bound) return;
-    const conversation = await this.opts.harness.conversation(api.conversationId, context);
-    if (!conversation) return;
-    const available = (await conversation.agent(context)).tools;
-    const recent = (await conversation.entries({ order: "descending" }, 256, undefined, context)).items;
-    const hints = new Map<string, string>();
-    for (const message of candidates) {
-      if (message.role !== "toolResult") continue;
-      const record = recent.find(entry => ToolResultEntry.is(entry) && entry.model?.some(result =>
-        result.role === "toolResult" && result.toolCallId === message.toolCallId && result.toolName === message.toolName));
-      if (!record || !ToolResultEntry.is(record) || !record.data?.diagnostics.some(d => d.code === "tool_unavailable" || d.code === "mcp_tool_retired")) continue;
-      const old = this.installed.get(message.toolName);
-      if (!old) continue;
-      const server = this.opts.config.value.servers.find(item => item.id === old.identity.serverId);
-      const principal = server && this.authorize(server, bound);
-      if (!server || !principal || !server.tools.allow.includes(old.identity.remoteName) ||
-        old.revision.scopeDigest !== digest({ conversation: Number(api.conversationId), thread: bound.threadKey, principal })) continue;
-      const current = available.find(tool => {
-        const installed = this.installed.get(tool.name);
-        return installed?.identity.serverId === server.id && installed.identity.remoteName === old.identity.remoteName &&
-          installed.revision.configDigest === serverDigest(server) && installed.revision.scopeDigest === old.revision.scopeDigest;
-      });
-      hints.set(message.toolCallId, `\n[MCP 工具版本提示] 本次调用未派发（not_started）；这不改变此前同一操作的未知结果。${current
-        ? `当前工具为 ${current.name}，请按当前工具定义重新构造参数，不要照抄历史字段。`
-        : "当前没有可用版本，可调用 mcp_refresh_tools 刷新目录。"} 不会自动转换参数或重放写操作。`);
-    }
-    if (!hints.size) return;
-    return { messages: messages.map(message => message.role === "toolResult" && hints.has(message.toolCallId)
-      ? { ...message, content: [...message.content, { type: "text" as const, text: hints.get(message.toolCallId)! }] } : message) };
   }
 
   private budget(parent?: AbortSignal): { signal: AbortSignal; done(): void } {

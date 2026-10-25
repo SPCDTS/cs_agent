@@ -44,7 +44,7 @@ Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器�
 
 工具名称形如 `mcp_docs_search_<hash>`。新目录使用 v2 单工具身份：只有服务器配置、权限范围或该工具的输入/输出契约变化才改变名称。其他工具及纯描述变化不影响名称；schema 节点的 `description`、`title`、`$comment` 不参与身份计算，同名业务属性和常量数据保留。更新描述后下一次模型请求可见新文字。
 
-旧定义继续留在 `pi.sqlite`，v1 历史目录按原算法恢复。执行前核对当前目标工具的契约与实际权限，不能靠旧名称恢复已撤销权限。模型调用历史旧名称时，会在后续请求中得到当前工具指引；提示只针对结构化诊断确认尚未派发的本次调用，不改写原日志、不自动转换参数，也不改变此前操作的未知结果。
+旧定义继续留在 `pi.sqlite`，v1 历史目录按原算法恢复。执行前核对当前目标工具的契约与实际权限，不能靠旧名称恢复已撤销权限。模型调用历史旧名称时得到 `tool_unavailable` 或 `tool_retired` 失败结果，本次调用未发送；当前工具已在模型的工具列表中，也可调用 `mcp_refresh_tools` 刷新。不自动转换参数，也不改变此前操作的未知结果。
 
 连接或重连会重新发现目录，另有默认五分钟 TTL。支持 `list_changed` 的服务会在工具轮结束或下次调用前刷新；没有通知能力的静态服务仍可使用。owner 私聊可调用 `mcp_refresh_tools` 显式刷新当前授权范围；它只读取目录，不调用远端业务工具。现有 IM、定时和本地工具选择会保留。
 
@@ -64,7 +64,7 @@ Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器�
 | --- | --- |
 | 配置 invalid / 工具未出现 | JSON 字段、实际后端、owner 私聊身份、精确白名单 |
 | `missing_secret` / `auth_failed` | 引用变量是否注入、请求头完整值、外部账号权限 |
-| `tool_unavailable` / `tool_retired` | 历史名称、目标工具契约或账号配置已变，按迁移提示使用当前工具；必要时调用 `mcp_refresh_tools` |
+| `tool_unavailable` / `tool_retired` | 历史名称、目标工具契约或账号配置已变，改用工具列表中的当前工具；必要时调用 `mcp_refresh_tools` |
 | `catalog_storage_limit` | 回收后仍超出目录容量：仍被引用的版本过多。核对限额与频繁变化的远端 schema；trace 中 `mcp_catalog` 的 `pruned` 记录回收数量，`prune_*` 降级码表示本轮未回收 |
 | `connections_busy` / `queue_busy` | 并发量或长时间调用占满额度 |
 | `outcome_unknown` / `interrupted` | 先查远端是否已执行；不会自动重试原操作 |

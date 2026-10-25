@@ -34,34 +34,36 @@ const nodeSchema = z.strictObject({
 
 function reject(): never { throw new Error("MCP schema 不受支持、无效或超过限额"); }
 
-/** 先限制深度和占用，再复制严格 JSON；不执行 toJSON 或访问器。 */
-function snapshot(input: unknown, maxBytes: number, maxDepth: number): JsonValue {
+function fail(): never { throw new Error("MCP JSON 无效或超过限额"); }
+
+/** 先限制深度和占用，再复制严格 JSON；不执行 toJSON 或访问器。超限或非 JSON 时抛错。 */
+export function boundedJson(input: unknown, maxBytes: number, maxDepth: number): JsonValue {
   let bytes = 0;
   const active = new Set<object>();
   function visit(value: unknown, depth: number): void {
-    if (depth > maxDepth) reject();
+    if (depth > maxDepth) fail();
     if (typeof value === "string") bytes += Buffer.byteLength(value, "utf8") + 2;
     else if (value === null || typeof value === "boolean" || typeof value === "number") bytes += 8;
     else if (typeof value === "object") {
-      if (active.has(value)) reject();
+      if (active.has(value)) fail();
       active.add(value);
       bytes += 2;
       for (const key of Reflect.ownKeys(value)) {
         if (Array.isArray(value) && key === "length") continue;
-        if (typeof key !== "string") reject();
+        if (typeof key !== "string") fail();
         bytes += Buffer.byteLength(key, "utf8") + 4;
-        if (bytes > maxBytes * 2) reject();
+        if (bytes > maxBytes * 2) fail();
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
-        if (!descriptor || !("value" in descriptor)) reject();
+        if (!descriptor || !("value" in descriptor)) fail();
         visit(descriptor.value, depth + 1);
       }
       active.delete(value);
-    } else reject();
-    if (bytes > maxBytes * 2) reject();
+    } else fail();
+    if (bytes > maxBytes * 2) fail();
   }
   visit(input, 0);
   const result = copyJson(input);
-  if (Buffer.byteLength(JSON.stringify(result), "utf8") > maxBytes) reject();
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > maxBytes) fail();
   return result;
 }
 
@@ -73,7 +75,7 @@ function isObject(value: JsonValue): value is { [key: string]: JsonValue } {
 export function compileMcpSchema(input: unknown, limits: McpLimits): { schema: TSchema; check(value: unknown): boolean } {
   try {
     // 数据树层数包含 properties/数组容器；schema 深度另外计算引用与子 schema。
-    const schema = snapshot(input, limits.schemaBytes, limits.schemaDepth * 3 + 3);
+    const schema = boundedJson(input, limits.schemaBytes, limits.schemaDepth * 3 + 3);
     if (!isObject(schema) || schema.type !== "object") reject();
     const active = new Set<object>();
     let visits = 0;
@@ -137,7 +139,7 @@ export function compileMcpSchema(input: unknown, limits: McpLimits): { schema: T
       schema,
       check(value: unknown): boolean {
         try {
-          const owned = snapshot(value, Math.max(limits.argumentBytes, limits.structuredBytes), limits.schemaDepth * 3 + 3);
+          const owned = boundedJson(value, Math.max(limits.argumentBytes, limits.structuredBytes), limits.schemaDepth * 3 + 3);
           return validator.Check(owned);
         } catch { return false; }
       },

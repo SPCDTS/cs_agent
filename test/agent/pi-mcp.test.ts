@@ -195,9 +195,6 @@ describe("Pi MCP 原生工具与持久目录", () => {
     await new Promise(resolve => setTimeout(resolve, 5));
     await r.run(c, name!); expect(s.state.calls).toBe(0);
     expect((await results(c))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_tool_retired" })]));
-    expect(r.requests.at(-1)).toContain("not_started");
-    expect(r.requests.at(-1)).toContain((await mcpNames(c))[0]);
-    expect(JSON.stringify(await results(c))).not.toContain("MCP 工具版本提示");
   });
 
   it("无关工具变更不影响已排队的工具，复用扩展并更新描述", async () => {
@@ -217,30 +214,25 @@ describe("Pi MCP 原生工具与持久目录", () => {
     expect(r.mcp.toolIdentity(lookup)?.catalogDigest).toBe(revisions.at(-1)?.digest);
   });
 
-  it("历史旧名称得到当前工具提示，但远端未执行且原日志不变", async () => {
+  it("刷新后调用历史旧名称得到 tool_unavailable，远端未执行", async () => {
     const s = await server(), r = await rig(s.config()), c = await r.create();
     await r.configure(c); const [old] = await mcpNames(c);
     s.state.version++;
     await r.mcp.configure({ conversation: c, turn: owner(), refresh: true }, context);
-    const [current] = await mcpNames(c);
+    expect(await mcpNames(c)).not.toContain(old);
     await r.run(c, old!);
     expect(s.state.calls).toBe(0);
     expect((await results(c))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "tool_unavailable" })]));
-    expect(r.requests.at(-1)).toContain("not_started");
-    expect(r.requests.at(-1)).toContain(current);
-    expect(JSON.stringify(await results(c))).not.toContain("not_started");
   });
 
-  it("旧名称提示不跨会话传播，也不在撤权后泄露新定义", async () => {
+  it("另一会话的工具名与撤权后的旧名称都不发送", async () => {
     const s = await server(), r = await rig(s.config()), a = await r.create(), b = await r.create();
     await r.configure(a); await r.configure(b);
     const [foreign] = await mcpNames(a);
     await r.run(b, foreign!);
-    expect(r.requests.at(-1)).not.toContain("MCP 工具版本提示");
     s.state.version++;
     await r.mcp.configure({ conversation: a, turn: owner(), refresh: true }, context);
     r.revoke(); await r.run(a, foreign!);
-    expect(r.requests.at(-1)).not.toContain("MCP 工具版本提示");
     expect(s.state.calls).toBe(0);
   });
 
@@ -271,7 +263,7 @@ describe("Pi MCP 原生工具与持久目录", () => {
     expect(await mcpNames(restored)).toEqual([old.nativeName]);
     await second.configure(restored); expect(await mcpNames(restored)).not.toContain(old.nativeName);
     await second.run(restored, old.nativeName);
-    expect(s.state.calls).toBe(0); expect(second.requests.at(-1)).toContain("not_started");
+    expect(s.state.calls).toBe(0);
   });
 
   it("超时报告 outcome_unknown，不重发业务请求", async () => {
@@ -279,7 +271,6 @@ describe("Pi MCP 原生工具与持久目录", () => {
     await r.configure(c); const [name] = await mcpNames(c); s.state.hang = true;
     await r.run(c, name!); expect(s.state.calls).toBe(1);
     expect((await results(c))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_outcome_unknown" })]));
-    expect(r.requests.at(-1)).not.toContain("MCP 工具版本提示");
   });
 
   it("故障后同会话重连等待旧连接关闭，不绕过连接上限", async () => {

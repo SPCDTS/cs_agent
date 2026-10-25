@@ -3,7 +3,7 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { ToolDiagnostic, ToolExecutionResult } from "@earendil-works/pi-durable";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { McpLimits } from "./config.js";
-import type { compileMcpSchema } from "./schema.js";
+import { boundedJson, type compileMcpSchema } from "./schema.js";
 
 function rejected(limits: McpLimits): ToolExecutionResult {
   return {
@@ -11,35 +11,6 @@ function rejected(limits: McpLimits): ToolExecutionResult {
     output: [{ type: "text", text: utf8Prefix("result_rejected：远端响应格式、schema 或大小不符合契约。操作可能已完成，请先查询实际状态，不要自动重复。", limits.textBytes) }],
     diagnostics: [{ severity: "error", code: "result_rejected", message: "MCP 结果已拒绝；远端操作可能已完成" }],
   };
-}
-
-function boundedJson(input: unknown, limits: McpLimits): JsonValue {
-  let estimated = 0;
-  const active = new Set<object>();
-  function visit(value: unknown, depth: number): void {
-    if (depth > limits.schemaDepth * 3 + 3) throw new Error("depth");
-    if (typeof value === "string") estimated += Buffer.byteLength(value, "utf8") + 2;
-    else if (value === null || typeof value === "number" || typeof value === "boolean") estimated += 8;
-    else if (typeof value === "object") {
-      if (active.has(value)) throw new Error("cycle");
-      active.add(value);
-      for (const key of Reflect.ownKeys(value)) {
-        if (Array.isArray(value) && key === "length") continue;
-        if (typeof key !== "string") throw new Error("key");
-        estimated += Buffer.byteLength(key, "utf8") + 4;
-        if (estimated > limits.messageBytes * 2) throw new Error("size");
-        const descriptor = Object.getOwnPropertyDescriptor(value, key);
-        if (!descriptor || !("value" in descriptor)) throw new Error("accessor");
-        visit(descriptor.value, depth + 1);
-      }
-      active.delete(value);
-    } else throw new Error("json");
-    if (estimated > limits.messageBytes * 2) throw new Error("size");
-  }
-  visit(input, 0);
-  const result = copyJson(input);
-  if (Buffer.byteLength(JSON.stringify(result), "utf8") > limits.messageBytes) throw new Error("size");
-  return result;
 }
 
 function utf8Prefix(value: string, maxBytes: number): string {
@@ -92,7 +63,7 @@ function imageSize(bytes: Buffer, mime: string): { width: number; height: number
 /** 收到响应后只做纯转换；不重试、不取资源，也不回传第三方错误栈。 */
 export function convertMcpResult(input: unknown, outputSchema: ReturnType<typeof compileMcpSchema> | undefined, limits: McpLimits): ToolExecutionResult {
   try {
-    const parsed = CallToolResultSchema.safeParse(boundedJson(input, limits));
+    const parsed = CallToolResultSchema.safeParse(boundedJson(input, limits.messageBytes, limits.schemaDepth * 3 + 3));
     if (!parsed.success) return rejected(limits);
     const result = parsed.data;
     const texts: string[] = [];

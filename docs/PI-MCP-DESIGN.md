@@ -70,7 +70,7 @@ flowchart TB
 
 这是模块地图，不要求为每个概念新建 class。只有 PiMcp 拥有可变目录与连接生命周期，其他文件提供其私有实现，外部不能取得 SDK Client。
 
-调用方形状如下，生产类型索引见 [interfaces.ts](design/pi-mcp/interfaces.ts)：
+调用方形状如下：
 
 ```ts
 // PiBackend.open：Harness.open 后，但还没有 resume。
@@ -172,7 +172,7 @@ schema 进入模块时是 `unknown`。首版支持经过契约测试的 draft-07
 
 旧契约不会被新契约同名覆盖。旧调用尚未发送时，包装器检查 dirty 状态与目标工具当前契约：工具已删除、契约已变、服务配置目标已变时返回 `tool_retired`；无关工具与纯描述变化允许继续调用。刷新失败时保留旧目录用于历史解释；dirty 或过期目录不再发出新调用，返回有界的失败码（如 `protocol_error`、`catalog_limit`、`reconnect_backoff`）。调用审计记录实际检查的目录摘要。
 
-owner 私聊中的 `mcp_refresh_tools` 提供显式刷新，只有已授权服务才参与。Pi 在工具任务创建前生成的 `tool_unavailable` 也需要恢复提示：beforeRequest 读取有界的持久化结果，核对结构化诊断、调用标识与当前权限后增强本次模型输入。只对 tool_unavailable/mcp_tool_retired 表示本次 not_started，不根据远端文本推断，不改变历史记录或此前未知结果，不转发旧写调用。
+owner 私聊中的 `mcp_refresh_tools` 提供显式刷新，只有已授权服务才参与。调用历史旧名称时，Pi 在工具任务创建前返回 `tool_unavailable`，包装器核对失败时返回 `tool_retired`；两者都表示本次未发送，模型从当前工具列表中选新工具，不额外改写模型输入，也不转发旧写调用。
 
 目录更新由 PiMcp 串行发布，会话配置沿用 PiBackend 按 threadKey 的串行边界。避免异步刷新直接写全局“当前会话”或重置非 MCP 工具。身份切换不能被“整轮固定目录”阻止，撤权优先于可见目录的稳定。
 
