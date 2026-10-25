@@ -1,8 +1,8 @@
 import { BACKGROUND_CONTEXT, awaitWithContext, withAbortSignal, type Context } from "@earendil-works/chord/context";
 import { Type, type Message } from "@earendil-works/pi-ai";
-import { AgentDoc, GenerationTask, ToolResultEntry, defineExtension, defineTool, hook, section,
-  type AgentEvent, type Conversation, type EntryRecord, type Extension, type Harness, type Registry,
-  type HookApi, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
+import { AgentDoc, AssistantEntry, GenerationTask, ToolResultEntry, ToolTask, defineExtension, defineTool, hook, section,
+  type AgentEvent, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Extension, type Harness, type Page, type Registry,
+  type HookApi, type ToolExecutionApi, type ToolExecutionResult, type ToolTaskInput } from "@earendil-works/pi-durable";
 import { z } from "zod";
 import type { TurnBinding } from "../../channel/types.js";
 import type { OwnerIds } from "../../shared/owners.js";
@@ -35,6 +35,11 @@ class McpFailure extends Error { constructor(readonly code: string) { super(code
 const failure = (code: string, text: string): ToolExecutionResult => ({ isError: true,
   output: [{ type: "text", text }], diagnostics: [{ severity: "error", code: `mcp_${code}`, message: text }] });
 const argsSchema = z.record(z.string(), z.unknown());
+const LIVE_TASK_STATUSES = ["pending", "running", "waiting", "completing"] as const;
+async function* scan<T>(page: (cursor?: Cursor) => Promise<Page<T, Cursor>>): AsyncGenerator<T> {
+  let cursor: Cursor | undefined;
+  do { const current = await page(cursor); yield* current.items; cursor = current.next; } while (cursor);
+}
 
 /** 目录定义持久化，连接与队列只在进程内存在；不保存另一份工具调用状态。 */
 export class PiMcp {
@@ -42,6 +47,8 @@ export class PiMcp {
   private readonly installed = new Map<string, Installed>();
   private readonly revisions = new Map<string, CatalogRevision>();
   private readonly pool = new Map<string, PoolEntry>();
+  /** 发现完成到选择写入 AgentDoc 之间，目录尚无持久引用，回收须视同在用。 */
+  private readonly selecting = new Set<CatalogRevision[]>();
   private readonly disposals = new Set<Promise<void>>();
   private readonly controllers = new Set<AbortController>();
   private readonly observed = new Set<string>();
@@ -81,6 +88,7 @@ export class PiMcp {
   static async attach(opts: Options): Promise<PiMcp> {
     const mcp = new PiMcp(opts);
     try {
+      await mcp.prune(BACKGROUND_CONTEXT);
       const stored = await opts.harness.snapshot(McpCatalogsDoc, BACKGROUND_CONTEXT);
       let bytes = 0, count = 0;
       for (const [key, value] of Object.entries(stored?.revisions ?? {})) {
@@ -104,9 +112,10 @@ export class PiMcp {
 
   /** 原有 configure({extensions:{add}}) 会替换选择；此处在公开文档事务中保留非 MCP 字段。 */
   async configure({ conversation, turn, refresh = false }: { conversation: Conversation; turn: TurnBinding; refresh?: boolean }, context: Context): Promise<void> {
-    const selected: string[] = [];
+    const selected: string[] = [], pinned: CatalogRevision[] = [];
     let authorized = false;
     const budget = this.budget(context.abortSignal);
+    this.selecting.add(pinned);
     try {
       if (!this.stopping && this.opts.config.kind === "enabled") {
         let tools = 0, bytes = 0;
@@ -120,6 +129,7 @@ export class PiMcp {
               if (refresh) entry.discovered = -1;
               return this.catalog(entry, budget.signal);
             });
+            pinned.push(catalog);
             const size = catalog.tools.reduce((sum, tool) => sum + jsonBytes({
               name: toolNames(catalog, tool).nativeName, description: tool.description, inputSchema: tool.inputSchema,
             }), 0);
@@ -147,7 +157,7 @@ export class PiMcp {
             remove: (state.extensions?.remove ?? []).filter(name => !isMcpExtensionName(name)) };
         }
       }, context);
-    } finally { budget.done(); }
+    } finally { budget.done(); this.selecting.delete(pinned); }
   }
 
   private authorize(server: McpServerConfig, binding: TurnBinding | PiCallBinding | undefined): string | undefined {
@@ -239,16 +249,87 @@ export class PiMcp {
   private async publish(revision: CatalogRevision, signal: AbortSignal): Promise<void> {
     if (this.revisions.has(revision.digest)) { this.install(revision); return; }
     this.checkNames(revision);
-    await this.opts.harness.commit(async tx => {
+    const context = withAbortSignal(signal, BACKGROUND_CONTEXT);
+    const store = () => this.opts.harness.commit(async tx => {
       const doc = await tx.doc(McpCatalogsDoc);
-      if (doc.revisions[revision.digest]) return;
+      if (doc.revisions[revision.digest]) return true;
       if (Object.keys(doc.revisions).length >= this.limits.retainedRevisions ||
-        jsonBytes(doc.revisions) + jsonBytes(revision) + revision.digest.length + 4 > this.limits.retainedCatalogBytes) {
-        throw new McpFailure("catalog_storage_limit");
-      }
+        jsonBytes(doc.revisions) + jsonBytes(revision) + revision.digest.length + 4 > this.limits.retainedCatalogBytes) return false;
       doc.revisions[revision.digest] = revision;
-    }, withAbortSignal(signal, BACKGROUND_CONTEXT));
+      return true;
+    }, context);
+    if (!await store()) {
+      await this.prune(context, revision);
+      if (!await store()) throw new McpFailure("catalog_storage_limit");
+    }
     this.install(revision);
+  }
+
+  /**
+   * 版本只在提供被引用的工具扩展时保留：会话 AgentDoc 选择、活工具任务、连接池与进行中的选择。
+   * 只说明文字不同的 v2 版本共享扩展名，保留一个即可。任何引用无法证明时整轮不删；
+   * 运行期只删持久记录，已安装的扩展留到进程结束。
+   */
+  private async prune(context: Context, publishing?: CatalogRevision): Promise<void> {
+    try {
+      const stored = Object.entries((await this.opts.harness.snapshot(McpCatalogsDoc, context))?.revisions ?? {});
+      const provides = (revision: CatalogRevision) => revision.tools.map(tool => toolNames(revision, tool));
+      const extensionOf = new Map([...this.installed].map(([name, item]) => [name, item.extension.name]));
+      const candidates: [string, string[]][] = [];
+      for (const [key, value] of stored) {
+        let revision: CatalogRevision;
+        // 当前限额下无法恢复的版本不能证明无用，原样保留。
+        try { revision = restoreCatalog(value, this.limits); } catch { continue; }
+        if (key !== revision.digest) continue;
+        const names = provides(revision);
+        for (const name of names) extensionOf.set(name.nativeName, name.extensionName);
+        candidates.push([key, names.map(name => name.extensionName)]);
+      }
+      const { conversations, calls } = await this.opts.harness.commit(async tx => {
+        const conversations: ConversationId[] = [], calls: string[] = [];
+        for await (const record of scan(cursor => tx.scanConversations({}, 256, cursor))) conversations.push(record.id);
+        for (const status of LIVE_TASK_STATUSES) {
+          for await (const task of scan(cursor => tx.scanTasks({ kind: ToolTask.definition.name, status }, 256, cursor))) {
+            const input = task.input as ToolTaskInput;
+            if (input.kind === "nested") { calls.push(input.call.name); continue; }
+            const message = (await tx.entry(AssistantEntry, input.assistant))?.model?.[0];
+            const call = message?.role === "assistant" ? message.content.find(item => item.type === "toolCall" && item.id === input.callId) : undefined;
+            if (call?.type !== "toolCall") throw new McpFailure("catalog_reference_unresolved");
+            calls.push(call.name);
+          }
+        }
+        return { conversations, calls };
+      }, context);
+      const referenced = new Set<string>();
+      for (const name of calls) {
+        if (!isMcpToolName(name) || name === "mcp_refresh_tools") continue;
+        const extension = extensionOf.get(name);
+        if (!extension) throw new McpFailure("catalog_reference_unresolved");
+        referenced.add(extension);
+      }
+      for (const id of conversations) {
+        const extensions = (await this.opts.harness.snapshot(AgentDoc, id, context))?.extensions;
+        for (const name of Array.isArray(extensions) ? extensions : extensions?.add ?? []) referenced.add(name);
+      }
+      const held = [...[...this.pool.values()].flatMap(entry => entry.catalog ? [entry.catalog] : []),
+        ...[...this.selecting].flat(), ...publishing ? [publishing] : []];
+      const kept = new Set(held.map(revision => revision.digest));
+      const covered = new Set(held.flatMap(revision => provides(revision).map(names => names.extensionName)));
+      const removed: string[] = [];
+      for (const [key, extensions] of candidates.reverse()) {
+        if (kept.has(key)) continue;
+        const fresh = extensions.filter(name => referenced.has(name) && !covered.has(name));
+        if (!fresh.length) { removed.push(key); continue; }
+        for (const name of fresh) covered.add(name);
+      }
+      if (!removed.length) return;
+      await this.opts.harness.commit(async tx => {
+        const doc = await tx.doc(McpCatalogsDoc);
+        for (const key of removed) delete doc.revisions[key];
+      }, context);
+      for (const key of removed) this.revisions.delete(key);
+      this.event("catalog", "pruned", { removed: removed.length, kept: stored.length - removed.length });
+    } catch (error) { this.event("catalog", "degraded", { code: `prune_${this.code(error)}` }); }
   }
 
   private checkNames(revision: CatalogRevision): void {

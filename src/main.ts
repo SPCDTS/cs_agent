@@ -273,7 +273,6 @@ async function main(): Promise<void> {
       const references = Object.values(transport.kind === "stdio" ? transport.secretEnv : transport.secretHeaders);
       for (const name of references) mcpEnvironment.set(name, process.env[name]);
       registerSecrets(references.map(name => mcpEnvironment.get(name)));
-      if (transport.kind === "stdio") for (const name of transport.inheritEnv) mcpEnvironment.set(name, process.env[name]);
     }
   }
   const mcpSecrets: EnvironmentSecrets = { readReferencedVariable: name => mcpEnvironment.get(name) };

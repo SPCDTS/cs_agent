@@ -334,3 +334,105 @@ describe("Pi MCP 原生工具与持久目录", () => {
     expect(await mcpNames(restored)).toEqual([name]); expect(s.state.sessions).toBe(count);
   });
 });
+
+describe("Pi MCP 目录保留", () => {
+  const agentWrites = (r: Awaited<ReturnType<typeof rig>>, id: Conversation["id"]) => {
+    const seen: number[] = [];
+    cleanup.push(async () => stop());
+    const stop = r.harness.subscribeCommits(publication => {
+      if (publication.changes.some(change => change.type === "document" && change.record.kind === "pi.agent" && change.conversationId === id)) seen.push(publication.seq);
+    });
+    return seen;
+  };
+
+  it("禁用配置或选择不变时不写 AgentDoc", async () => {
+    const s = await server(), enabled = await rig(s.config()), c = await enabled.create();
+    await enabled.configure(c);
+    const writes = agentWrites(enabled, c.id);
+    await enabled.configure(c);
+    expect(writes).toEqual([]);
+    s.state.version++; await enabled.mcp.configure({ conversation: c, turn: owner(), refresh: true }, context);
+    expect(writes).toHaveLength(1);
+    const disabled = await rig({ kind: "disabled", reason: "停用" }), d = await disabled.create();
+    await disabled.configure(d);
+    const idle = agentWrites(disabled, d.id);
+    await disabled.configure(d); await disabled.configure(d);
+    expect(idle).toEqual([]);
+  });
+
+  const stored = async (r: Awaited<ReturnType<typeof rig>>) => Object.keys((await r.harness.snapshot(McpCatalogsDoc, context))!.revisions).sort();
+  const refresh = (r: Awaited<ReturnType<typeof rig>>, conversation: Conversation) =>
+    r.mcp.configure({ conversation, turn: r.bindings.get(Number(conversation.id))!, refresh: true }, context);
+  const strip = (r: Awaited<ReturnType<typeof rig>>, ...ids: Conversation["id"][]) => r.harness.commit(async tx => {
+    for (const id of ids) (await tx.doc(AgentDoc, id)).extensions = ["base"];
+  }, context);
+
+  it("远端目录反复变化回收旧版本，不再撞上存储上限", async () => {
+    const s = await server(), r = await rig(s.config({ retainedRevisions: 2 })), c = await r.create();
+    await r.configure(c);
+    for (let i = 0; i < 5; i++) { s.state.version++; await refresh(r, c); }
+    const [name] = await mcpNames(c);
+    expect(name).toBeDefined();
+    expect(await stored(r)).toHaveLength(2);
+    expect(await r.run(c, name!, { value: 6 })).toMatchObject({ status: "done" });
+    expect(s.state.calls).toBe(1);
+  });
+
+  it("重启回收：别的会话仍选择的版本保留，无人引用的删除", async () => {
+    const s = await server(), first = await rig(s.config()), a = await first.create(), b = await first.create();
+    await first.configure(a); await first.configure(b);
+    const [old] = await mcpNames(a), [kept] = await mcpNames(b);
+    s.state.version++; await refresh(first, a);
+    const [current] = await mcpNames(a);
+    expect(await stored(first)).toHaveLength(3);
+    await first.close();
+    const second = await rig(s.config(), first.db);
+    const restored = { a: (await second.harness.conversation(a.id, context))!, b: (await second.harness.conversation(b.id, context))! };
+    expect(await stored(second)).toEqual([second.mcp.toolIdentity(current!)!.catalogDigest, second.mcp.toolIdentity(kept!)!.catalogDigest].sort());
+    expect(second.mcp.toolIdentity(old!)).toBeUndefined();
+    expect(await mcpNames(restored.b)).toEqual([kept]);
+    second.bindings.set(Number(a.id), owner());
+    expect(await second.run(restored.a, current!, { value: 2 })).toMatchObject({ status: "done" });
+    expect(s.state.calls).toBe(1);
+  });
+
+  it("只改描述的目录在重启后收敛为每个契约一个版本", async () => {
+    const s = await server(), first = await rig(s.config()), c = await first.create();
+    await first.configure(c); const [name] = await mcpNames(c);
+    for (const text of ["一", "二", "三"]) { s.state.description = text; await refresh(first, c); }
+    expect(await mcpNames(c)).toEqual([name]);
+    expect(await stored(first)).toHaveLength(4);
+    await first.close();
+    const second = await rig(s.config(), first.db), restored = (await second.harness.conversation(c.id, context))!;
+    second.bindings.set(Number(c.id), owner());
+    expect(await stored(second)).toHaveLength(1);
+    expect(await mcpNames(restored)).toEqual([name]);
+    expect(await second.run(restored, name!)).toMatchObject({ status: "done" });
+    expect(s.state.calls).toBe(1);
+  });
+
+  const interrupted = async (dropLiveRevision: boolean) => {
+    const s = await server(), first = await rig(s.config()), a = await first.create(), b = await first.create();
+    await first.configure(a); await first.configure(b);
+    const [live] = await mcpNames(a), [idle] = await mcpNames(b);
+    const liveDigest = first.mcp.toolIdentity(live!)!.catalogDigest, idleDigest = first.mcp.toolIdentity(idle!)!.catalogDigest;
+    s.state.hang = true;
+    const running = first.run(a, live!).catch(() => undefined);
+    await vi.waitFor(() => expect(s.state.calls).toBe(1));
+    await strip(first, a.id, b.id);
+    if (dropLiveRevision) await first.harness.commit(async tx => { delete (await tx.doc(McpCatalogsDoc)).revisions[liveDigest]; }, context);
+    await first.close(); await running;
+    const second = await rig(s.config(), first.db);
+    return { stored: await stored(second), liveDigest, idleDigest };
+  };
+
+  it("活工具任务引用的旧版本在回收中保留", async () => {
+    const { stored, liveDigest } = await interrupted(false);
+    expect(stored).toEqual([liveDigest]);
+  });
+
+  it("活工具任务的名字找不到版本时整轮不删", async () => {
+    const { stored, idleDigest } = await interrupted(true);
+    expect(stored).toEqual([idleDigest]);
+  });
+});

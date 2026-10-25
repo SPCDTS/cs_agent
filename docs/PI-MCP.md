@@ -66,7 +66,7 @@ Windows 使用 Windows PowerShell 的静态辅助脚本与 Job Object，要求 `
 
 连接按会话、真实账号身份、服务配置和工作目录隔离；每条连接串行，等待队列、活跃连接及关闭连接受限。默认总调用预算 60 秒、初始化 10 秒、最多 16 条连接、每条连接最多 16 个等待项，闲置五分钟回收。配置缺失、无效或服务离线不会阻塞整个 Pi 启动。
 
-目录默认最多保留 128 个版本、合计 32 MiB。达到上限时拒绝发布新版本并降级服务，不自动删除历史引用。限制在配置的 `limits` 中调整，有硬上限；不要靠删除整个 `pi.sqlite` 清理目录，那会丢失 Pi 会话与调用记录。
+目录默认最多保留 128 个版本、合计 32 MiB。启动时、以及发布新版本将超限时回收旧版本：只保留仍被会话工具选择、非终态工具任务或当前连接引用的版本，只改描述的版本合并为一个。任何引用无法确认时整轮不删。回收后仍超限才拒绝发布并降级服务。限制在配置的 `limits` 中调整，有硬上限；不要靠删除整个 `pi.sqlite` 清理目录，那会丢失 Pi 会话与调用记录。
 
 ## 排查与验证
 
@@ -75,7 +75,7 @@ Windows 使用 Windows PowerShell 的静态辅助脚本与 Job Object，要求 `
 | 配置 invalid / 工具未出现 | JSON 字段、实际后端、owner 私聊身份、精确白名单 |
 | `missing_secret` / `auth_failed` | 引用变量是否注入、请求头完整值、外部账号权限 |
 | `tool_unavailable` / `tool_retired` | 历史名称、目标工具契约或账号配置已变，按迁移提示使用当前工具；必要时调用 `mcp_refresh_tools` |
-| `catalog_storage_limit` | 历史目录容量；核对限额与频繁变化的远端 schema |
+| `catalog_storage_limit` | 回收后仍超出目录容量：仍被引用的版本过多。核对限额与频繁变化的远端 schema；trace 中 `mcp_catalog` 的 `pruned` 记录回收数量，`prune_*` 降级码表示本轮未回收 |
 | `connections_busy` / `queue_busy` | 并发量或长时间调用占满额度 |
 | `outcome_unknown` / `interrupted` | 先查远端是否已执行；不会自动重试原操作 |
 | `remote_state_lost` | 原 HTTP 会话消失，浏览器页面等远端状态需要重建；发送后的调用仍算未知结果 |
