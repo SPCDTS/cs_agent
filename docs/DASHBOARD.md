@@ -30,7 +30,7 @@
 | `/context-usage` | 上下文监控（§5） | — |
 | `/memory[/…]` | 记忆：总览、时间线、摘要、检索检查器、召回记录、图片、归档（§8） | — |
 | `/context` | 用 qq_context 工具浏览 / 检索消息库（与模型看到的格式一致） | — |
-| `/schedules`、`/schedules/new`、`/schedules/<id>` | 定时任务（§2.3） | `POST /schedules`、`POST /schedules/<id>/{update,pause,resume,run,delete}` |
+| `/schedules`、`/schedules/<id>` | 定时任务（§2.3） | `POST /schedules/<id>/{pause,resume,run,delete}` |
 | `/skills`、`/skills/<名称>`、`/skills/<名称>.zip` | 技能列表（含诊断）、SKILL.md 与目录文件、zip 下载（[ARCHITECTURE.md](ARCHITECTURE.md) §7） | `POST /skills/upload`、`POST /skills/<名称>/delete` |
 | `/settings` | 运行时设置、发送规则与熔断、授权、codex.md、codex 基础指令、agent.md、最近变更（§2.1、§2.2） | 见 §2.1 |
 | `/logs` | 最近 1000 行结构化日志 + 实时尾随（`/logs/stream`），按键（日志行 `key` / `thread` / `turn` 字段前缀）或级别过滤 | — |
@@ -55,9 +55,9 @@
 
 ### 2.3 定时任务
 
-面板身份即 owner：列表显示全部任务，新建任务的创建者为 `qq:<owner>`；未配置 owner 或未接入 ScheduleService 时只显示未启用。表单 POST 与 JSON 接口同一套校验，失败时带错误提示重绘原页并保留输入。触发方式按北京时间填写：一次性（日期 + 时刻）；每天 / 每周（时刻 + 星期多选，换算为 `FREQ=DAILY` 或 `FREQ=WEEKLY;BYDAY=…;BYHOUR;BYMINUTE`）；自定义 RRULE。编辑时规则未改则不提交 rule；会话创建后不可改；会话下拉为 owner 私聊加消息库已有的群 / 私聊（群名来自 `scope_names`）。删除用页内展开的确认按钮。
+面板身份即 owner：支持查看全部任务及详情、暂停、恢复、立即运行和删除；创建与修改任务在聊天里让 agent 通过 `schedule_create`、`schedule_update` 完成。未配置 owner 或未接入 ScheduleService 时只显示未启用。表单 POST 与 JSON 接口使用同一套校验，失败时在列表或详情页显示错误提示，任务不存在时回到列表。时间均按北京时间显示，群名来自 `scope_names`。删除用页内展开的确认按钮。
 
-JSON 接口 `/api/schedules`：`GET` 返回 `{schedules, csrf}`；`POST /api/schedules`（创建）与 `POST /api/schedules/<id>/{update,pause,resume,run,delete}` 只接受 `application/json`（≤64 KiB），CSRF 令牌放 `X-CSRF-Token` 头或 `_csrf` 字段。
+JSON 接口 `/api/schedules`：`GET` 返回 `{schedules, csrf}`；`POST /api/schedules/<id>/{pause,resume,run,delete}` 只接受 `application/json`（≤64 KiB），CSRF 令牌放 `X-CSRF-Token` 头或 `_csrf` 字段。
 
 ## 3. 实时视图（`src/obs/live.ts`）
 

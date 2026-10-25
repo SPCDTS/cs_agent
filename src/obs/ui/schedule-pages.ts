@@ -1,5 +1,4 @@
 /** 定时任务页（docs/ARCHITECTURE.md §6）：纯渲染；数据与写操作由 obs/schedule-panel.ts 提供。时间一律按北京时间显示。 */
-import { redactText } from '../../shared/redact.js';
 import { scopeLabel } from '../../context/access.js';
 import { crumbs } from './agents-pages.js';
 import { csrfField, empty, esc, fmtMs, kv, stamp, uri, type Tone } from './html.js';
@@ -18,7 +17,7 @@ export interface Schedule {
 }
 
 const BJ_OFFSET_MS = 8 * 3600_000;
-export const WEEKDAYS = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'] as const;
+const WEEKDAYS = ['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU'] as const;
 const WEEKDAY_CN = ['一', '二', '三', '四', '五', '六', '日'];
 
 /** 北京墙钟 ISO 片段：YYYY-MM-DDTHH:MM。 */
@@ -67,37 +66,6 @@ export function describeRule(rule: ScheduleRule, now = Date.now()): string {
   return rule.rrule;
 }
 
-/** 表单状态：创建、编辑与校验失败回显共用；字段均为原始字符串。 */
-export interface ScheduleDraft {
-  name: string; prompt?: string; conversation: string;
-  type: 'once' | 'repeat' | 'rrule'; date: string; time: string; days: string[]; rrule: string;
-  /** 超时秒数；空表示沿用 / 默认 */
-  timeout: string;
-}
-
-export function emptyDraft(now = Date.now()): ScheduleDraft {
-  const next = bjIso(now + 3600_000);
-  return { name: '', prompt: '', conversation: 'owner', type: 'repeat', date: next.slice(0, 10), time: '09:00', days: [], rrule: '', timeout: '' };
-}
-
-/** 把已有任务展开成表单状态，用于编辑页预填与"规则是否改动"的比较。 */
-export function draftOf(s: Schedule): ScheduleDraft {
-  const base = { name: s.name, prompt: s.prompt, conversation: s.conversation, timeout: String(Math.round(s.options.timeout_ms / 1000)),
-    date: '', time: '', days: [] as string[], rrule: '' };
-  if (s.rule.kind === 'at') { const iso = bjIso(s.rule.at); return { ...base, type: 'once', date: iso.slice(0, 10), time: iso.slice(11, 16) }; }
-  const simple = simpleRule(s.rule.rrule);
-  if (simple) return { ...base, type: 'repeat', time: `${pad(simple.hour)}:${pad(simple.minute)}`, days: simple.days };
-  return { ...base, type: 'rrule', rrule: s.rule.rrule };
-}
-
-/** 两份表单状态是否描述同一条规则（编辑时未改规则就不提交 rule，保留原 dtstart）。 */
-export function sameRule(a: ScheduleDraft, b: ScheduleDraft): boolean {
-  if (a.type !== b.type) return false;
-  if (a.type === 'once') return a.date === b.date && a.time === b.time;
-  if (a.type === 'repeat') return a.time === b.time && a.days.join(',') === b.days.join(',');
-  return a.rrule.trim() === b.rrule.trim();
-}
-
 const STATUS: Record<Schedule['status'], [string, Tone]> = { active: ['运行中', 'ok'], paused: ['已暂停', 'warn'], completed: ['已结束', 'idle'] };
 const RUN_STATUS: Record<ScheduleRun['status'], [string, Tone]> = {
   queued: ['排队', 'queue'], running: ['执行中', 'run'], sent: ['已发送', 'ok'], silent: ['未发送', 'idle'], failed: ['失败', 'fail'], skipped: ['跳过', 'warn'],
@@ -118,13 +86,9 @@ export function conversationLabel(conversation: string, names: Record<string, st
   if (conversation === 'owner') return 'owner 私聊';
   return name ? `${esc(name)} <small class="faint mono">${esc(conversation)}</small>` : esc(scopeLabel(conversation));
 }
-const conversationText = (conversation: string, names: Record<string, string>) =>
-  conversation === 'owner' ? 'owner 私聊' : names[conversation] ? `${names[conversation]}（${conversation}）` : scopeLabel(conversation);
-
 export interface SchedulePanelView {
   schedules: Schedule[];
-  /** 会话下拉的候选（owner 与已知会话域）与群名 */
-  conversations: string[]; names: Record<string, string>;
+  names: Record<string, string>;
   csrf: string; now: number;
 }
 
@@ -132,8 +96,7 @@ const back = (where: 'list' | 'detail') => `<input type="hidden" name="back" val
 function ops(s: Schedule, csrf: string, where: 'list' | 'detail'): string {
   const form = (action: string, label: string, cls = 'quiet') =>
     `<form method="post" action="/schedules/${uri(s.id)}/${action}">${csrfField(csrf)}${back(where)}<button class="${cls}">${label}</button></form>`;
-  return `<div class="ops">${form('run', '立即运行')}${s.status === 'active' ? form('pause', '暂停') : s.status === 'paused' ? form('resume', '恢复') : ''}${
-    where === 'list' ? `<a class="btn quiet" href="/schedules/${uri(s.id)}">编辑</a>` : ''}<details class="gate"><summary>删除</summary><div class="gate-pop">确认删除「${esc(s.name)}」？运行记录一并删除，不可恢复。<form method="post" action="/schedules/${uri(s.id)}/delete">${csrfField(csrf)}${back('list')}<button class="danger">确认删除</button></form></div></details></div>`;
+  return `<div class="ops">${form('run', '立即运行')}${s.status === 'active' ? form('pause', '暂停') : s.status === 'paused' ? form('resume', '恢复') : ''}<details class="gate"><summary>删除</summary><div class="gate-pop">确认删除「${esc(s.name)}」？运行记录一并删除，不可恢复。<form method="post" action="/schedules/${uri(s.id)}/delete">${csrfField(csrf)}${back('list')}<button class="danger">确认删除</button></form></div></details></div>`;
 }
 
 const lastRun = (s: Schedule, now: number) => {
@@ -144,7 +107,7 @@ const ORDER: Record<Schedule['status'], number> = { active: 0, paused: 1, comple
 const byStatus = (a: Schedule, b: Schedule) => ORDER[a.status] - ORDER[b.status] ||
   (a.status === 'active' ? (a.next_fire_at ?? Infinity) - (b.next_fire_at ?? Infinity) : b.updated_at - a.updated_at);
 
-export function schedulesListBody(v: SchedulePanelView, draft: ScheduleDraft = emptyDraft(v.now)): string {
+export function schedulesListBody(v: SchedulePanelView): string {
   const count = (status: Schedule['status']) => v.schedules.filter(s => s.status === status).length;
   const fig = (label: string, n: number, tone: string) => `<div class="sheet pad"><div class="muted">${label}</div><div class="figure${n && tone ? ' ' + tone : ''}">${n}<small class="muted"> 条</small></div></div>`;
   let out = `<section><div class="grid cols-3">${fig('运行中', count('active'), 's-ok')}${fig('已暂停', count('paused'), 's-warn')}${fig('已结束', count('completed'), '')}</div></section>`;
@@ -154,12 +117,11 @@ export function schedulesListBody(v: SchedulePanelView, draft: ScheduleDraft = e
     s.failures ? `<span class="s-fail">${s.failures}</span>` : '0'}</td><td>${ops(s, v.csrf, 'list')}</td></tr>`).join('');
   out += `<section><h2>全部任务 <small>${v.schedules.length ? `${v.schedules.length} 条 · 时间均为北京时间` : ''}</small></h2>${v.schedules.length
     ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>名称</th><th>会话</th><th>规则</th><th>下次触发</th><th>状态</th><th>最近运行</th><th class="num">连续失败</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div></div>`
-    : empty('还没有定时任务。在下方新建一条，或在 owner 私聊里让 agent 创建。')}</section>`;
-  out += `<section id="new"><h2>新建定时任务</h2>${scheduleForm({ action: '/schedules', draft, csrf: v.csrf, conversations: v.conversations, names: v.names, submit: '创建' })}</section>`;
+    : empty('还没有定时任务。在聊天里让 agent 创建。')}</section>`;
   return out;
 }
 
-export function scheduleDetailBody(s: Schedule, v: Omit<SchedulePanelView, 'schedules' | 'conversations'>, draft: ScheduleDraft = draftOf(s)): string {
+export function scheduleDetailBody(s: Schedule, v: Omit<SchedulePanelView, 'schedules'>): string {
   let out = crumbs([['定时任务', '/schedules'], [s.name]]);
   const rule = s.rule.kind === 'at' ? esc(describeRule(s.rule, v.now))
     : `${esc(describeRule(s.rule, v.now))}<br><code>${esc(s.rule.rrule)}</code> <small class="muted">起点 ${esc(fmtBeijing(s.rule.dtstart))}</small>`;
@@ -182,39 +144,7 @@ export function scheduleDetailBody(s: Schedule, v: Omit<SchedulePanelView, 'sche
       r.started_at && r.ended_at ? esc(fmtMs(r.ended_at - r.started_at)) : '<span class="faint">—</span>'}</td><td>${r.note ? `<span class="excerpt">${esc(r.note)}</span>` : '<span class="faint">—</span>'}${
       r.input_key ? ` <a class="mono" href="/inputs/${uri(r.input_key)}">${esc(r.input_key.slice(0, 16))}</a>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`
     : empty('还没有运行过。')}</section>`;
-  out += `<section id="edit"><h2>编辑</h2>${scheduleForm({ action: `/schedules/${uri(s.id)}/update`, draft, csrf: v.csrf, names: v.names, submit: '保存修改', fixedConversation: s.conversation })}
-<p class="hint">会话创建后不可修改。修改规则会从现在起重新计算下次触发；已暂停的任务保存后仍保持暂停。</p></section>`;
   return out;
-}
-
-interface FormOptions {
-  action: string; draft: ScheduleDraft; csrf: string; names: Record<string, string>; submit: string;
-  conversations?: string[]; fixedConversation?: string;
-}
-
-function scheduleForm(o: FormOptions): string {
-  const d = o.draft;
-  const radio = (value: ScheduleDraft['type'], label: string, note: string) =>
-    `<label class="choice"><input type="radio" name="type" value="${value}"${d.type === value ? ' checked' : ''}><span>${label}<small>${note}</small></span></label>`;
-  const conversation = o.fixedConversation !== undefined
-    ? `<label>会话<input value="${esc(conversationText(o.fixedConversation, o.names))}" disabled></label>`
-    : `<label>会话<select name="conversation">${[...new Set([...(o.conversations ?? ['owner']), ...(d.conversation ? [d.conversation] : [])])].map(c =>
-      `<option value="${esc(c)}"${c === d.conversation ? ' selected' : ''}>${esc(conversationText(c, o.names))}</option>`).join('')}</select></label>`;
-  // 提示词含凭据样式内容时不可在面板编辑（脱敏后回填会破坏原文），保存时不提交该字段。
-  const prompt = d.prompt === undefined || redactText(d.prompt, 1_000_000) !== d.prompt
-    ? `<div class="flash err">提示词包含凭据样式的内容，面板不显示原文也不修改它。</div>`
-    : `<label>提示词（到点时交给 agent 的任务说明）<textarea name="prompt" rows="6" maxlength="8000" required>${esc(d.prompt)}</textarea></label>`;
-  return `<form method="post" action="${o.action}" class="sheet pad sch-form">${csrfField(o.csrf)}
-<label>名称<input name="name" value="${esc(d.name)}" maxlength="64" required></label>
-${prompt}
-${conversation}
-<fieldset><legend>触发方式（北京时间）</legend><div class="choices">${radio('once', '一次性', '指定日期与时刻触发一次')}${radio('repeat', '每天 / 每周', '不勾选星期即每天')}${radio('rrule', '自定义 RRULE', '高级：RRULE 正文')}</div>
-<div class="sch-once"><label>日期<input type="date" name="date" value="${esc(d.date)}"></label></div>
-<div class="sch-repeat"><div class="choices">${WEEKDAYS.map((day, i) => `<label class="choice"><input type="checkbox" name="days" value="${day}"${d.days.includes(day) ? ' checked' : ''}><span>周${WEEKDAY_CN[i]}</span></label>`).join('')}</div></div>
-<div class="sch-time"><label>时刻<input type="time" name="time" value="${esc(d.time)}"></label></div>
-<div class="sch-rrule"><label>RRULE（不含 DTSTART，例如 FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=9;BYMINUTE=0）<input name="rrule" value="${esc(d.rrule)}" spellcheck="false" class="mono"></label></div></fieldset>
-<label>超时（秒，留空为默认 300，最长 900）<input type="number" name="timeout" min="1" max="900" step="1" value="${esc(d.timeout)}"></label>
-<p class="mt"><button>${esc(o.submit)}</button></p></form>`;
 }
 
 export const SCHEDULES_LEAD = '到点在对应会话线程里运行一轮 agent，回复须经 send_message 发出。连续失败 3 次自动暂停。';

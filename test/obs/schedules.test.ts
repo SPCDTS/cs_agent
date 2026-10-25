@@ -42,17 +42,14 @@ async function rig(enabled = true) {
   return { ...schedule, service: schedule.service, base, server, get, post, csrf, definition };
 }
 
-it("真实服务的 JSON 创建、列表、修改、暂停、恢复、立即运行、删除", async () => {
+it("服务创建的任务可通过 JSON 列表、暂停、恢复、立即运行和删除", async () => {
   const r = await rig();
-  const created = await r.post("/api/schedules", r.definition());
-  expect(created.status).toBe(201);
-  expect(created.headers.get("content-type")).toContain("application/json");
-  const { schedule } = await created.json();
-  expect(schedule).toMatchObject({ name: "日报", created_by: "qq:1", revision: 1 });
-  expect((await (await r.get()).json()).schedules).toHaveLength(1);
+  const schedule = await r.service.create("qq:1", r.definition());
+  const list = await r.get();
+  expect(list.status).toBe(200);
+  expect(list.headers.get("content-type")).toContain("application/json");
+  expect((await list.json()).schedules).toEqual([schedule]);
   const route = `/api/schedules/${schedule.id}`;
-  const updated = await r.post(route + "/update", { name: "新名称" });
-  expect((await updated.json()).schedule).toMatchObject({ name: "新名称", revision: 2 });
   expect((await (await r.post(route + "/pause", {})).json()).schedule.status).toBe("paused");
   const resumed = (await (await r.post(route + "/resume", {})).json()).schedule;
   expect(resumed.status).toBe("active");
@@ -64,50 +61,68 @@ it("真实服务的 JSON 创建、列表、修改、暂停、恢复、立即运�
   expect((await r.post(route + "/pause", {})).status).toBe(404);
 });
 
+it("JSON 创建和更新路由返回 404，不创建或修改任务", async () => {
+  const r = await rig();
+  const create = await r.post("/api/schedules", r.definition());
+  expect(create.status).toBe(404);
+  expect(await create.json()).toEqual({ error: "接口不存在" });
+  expect(await r.service.list()).toEqual([]);
+  const s = await r.service.create("qq:1", r.definition());
+  const update = await r.post(`/api/schedules/${s.id}/update`, { name: "改名", prompt: "改提示词" });
+  expect(update.status).toBe(404);
+  expect(await update.json()).toEqual({ error: "接口不存在" });
+  expect(await r.service.list()).toEqual([s]);
+});
+
 it("鉴权来自 cookie，URL 口令只能 GET 换 cookie；Host 防重绑定", async () => {
   const r = await rig();
   expect((await r.get("/api/schedules", false)).status).toBe(401);
   const login = await r.get(`/api/schedules?token=${TOKEN}`, false);
   expect(login.status).toBe(303);
   expect(login.headers.get("set-cookie")).toContain("HttpOnly");
-  expect((await r.post(`/api/schedules?token=${TOKEN}`, r.definition(), { Cookie: "" })).status).toBe(401);
+  const s = await r.service.create("qq:1", r.definition());
+  expect((await r.post(`/api/schedules/${s.id}/pause?token=${TOKEN}`, {}, { Cookie: "" })).status).toBe(401);
   const status = await new Promise<number | undefined>((resolve, reject) => {
     const req = request(r.base + "/api/schedules", { headers: { Host: "attacker.example", Cookie: `obs_token=${TOKEN}` } },
       res => { res.resume(); resolve(res.statusCode); });
     req.on("error", reject); req.end();
   });
   expect(status).toBe(403);
-  expect(await r.service.list()).toEqual([]);
+  expect(await r.service.list()).toEqual([s]);
 });
 
 it("同源与 CSRF 同时校验；允许 same-origin 的 null Origin 与 JSON _csrf", async () => {
   const r = await rig();
+  const s = await r.service.create("qq:1", r.definition());
+  const route = `/api/schedules/${s.id}`;
   const rejectedHeaders: Record<string, string>[] = [
     { Origin: "https://attacker.example" },
     { "Sec-Fetch-Site": "cross-site" },
     { Origin: "null" },
     { "X-CSRF-Token": "" },
   ];
-  for (const headers of rejectedHeaders) expect((await r.post("/api/schedules", r.definition(), headers)).status).toBe(403);
-  expect((await r.post("/api/schedules", r.definition(), { Origin: "null", "Sec-Fetch-Site": "same-origin" })).status).toBe(201);
-  const res = await fetch(r.base + "/api/schedules", { method: "POST", headers: {
+  for (const headers of rejectedHeaders) expect((await r.post(route + "/pause", {}, headers)).status).toBe(403);
+  expect(await r.service.list()).toEqual([s]);
+  expect((await r.post(route + "/pause", {}, { Origin: "null", "Sec-Fetch-Site": "same-origin" })).status).toBe(200);
+  expect((await r.service.get(s.id))!.status).toBe("paused");
+  const res = await fetch(r.base + route + "/resume", { method: "POST", headers: {
     Cookie: `obs_token=${TOKEN}`, "Content-Type": "application/json", "Sec-Fetch-Site": "same-origin",
-  }, body: JSON.stringify({ ...r.definition(), _csrf: r.csrf }) });
-  expect(res.status).toBe(201);
-  expect(await r.service.list()).toHaveLength(2);
+  }, body: JSON.stringify({ _csrf: r.csrf }) });
+  expect(res.status).toBe(200);
+  expect((await r.service.get(s.id))!.status).toBe("active");
+  expect(await r.service.list()).toHaveLength(1);
 });
 
-it("错误 JSON、字段、会话、越权身份、额外操作字段、Content-Type 与大小限制", async () => {
+it("错误 JSON、额外操作字段、Content-Type 与大小限制", async () => {
   const r = await rig();
-  for (const body of ["{", "[]", "null", { ...r.definition(), actor: "qq:2" },
-    { ...r.definition(), created_by: "qq:2" }, { ...r.definition(), conversation: "group:invalid" }]) {
-    expect((await r.post("/api/schedules", body)).status).toBe(400);
+  const s = await r.service.create("qq:1", r.definition());
+  const route = `/api/schedules/${s.id}/pause`;
+  for (const body of ["{", "[]", "null", { actor: "qq:2" }, { created_by: "qq:2" }, { conversation: "group:2" }]) {
+    expect((await r.post(route, body)).status).toBe(400);
   }
-  expect((await r.post("/api/schedules", r.definition(), { "Content-Type": "text/plain" })).status).toBe(415);
-  expect((await r.post("/api/schedules", { text: "a".repeat(65 * 1024) })).status).toBe(413);
-  const s = (await (await r.post("/api/schedules", r.definition())).json()).schedule;
-  expect((await r.post(`/api/schedules/${s.id}/pause`, { actor: "qq:2" })).status).toBe(400);
-  expect((await r.post(`/api/schedules/${s.id}/update`, { conversation: "group:2" })).status).toBe(400);
+  expect((await r.post(route, {}, { "Content-Type": "text/plain" })).status).toBe(415);
+  expect((await r.post(route, { text: "a".repeat(65 * 1024) })).status).toBe(413);
+  expect(await r.service.list()).toEqual([s]);
   expect((await r.get(`/api/schedules/${s.id}/delete`)).status).toBe(404);
   expect((await r.post(`/api/schedules/${s.id}/unknown`, {})).status).toBe(404);
   expect((await fetch(r.base + "/api/schedules", { method: "PUT", headers: { Cookie: `obs_token=${TOKEN}` } })).status).toBe(405);
@@ -115,15 +130,16 @@ it("错误 JSON、字段、会话、越权身份、额外操作字段、Content-
 
 it("非法 UTF-8 拒绝，业务状态不变", async () => {
   const r = await rig();
+  const s = await r.service.create("qq:1", r.definition());
   const status = await new Promise<number | undefined>((resolve, reject) => {
-    const req = request(r.base + "/api/schedules", { method: "POST", headers: {
+    const req = request(r.base + `/api/schedules/${s.id}/pause`, { method: "POST", headers: {
       Cookie: `obs_token=${TOKEN}`, "Content-Type": "application/json", "X-CSRF-Token": r.csrf,
     } }, res => { res.resume(); resolve(res.statusCode); });
     req.on("error", reject);
     req.end(Buffer.from([123, 34, 120, 34, 58, 34, 255, 34, 125]));
   });
   expect(status).toBe(400);
-  expect(await r.service.list()).toEqual([]);
+  expect(await r.service.list()).toEqual([s]);
 });
 
 it("未注入管理服务返回 JSON 404", async () => {

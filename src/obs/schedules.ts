@@ -5,7 +5,7 @@ import { ScheduleError } from "../agent/schedule/model.js";
 import { equal, guardDashboardOrigin, HttpError } from "./dashboard-io.js";
 import { log } from "../shared/log.js";
 
-export type ScheduleManagement = Pick<ScheduleService, "list" | "create" | "update" | "pause" | "resume" | "runNow" | "remove">;
+export type ScheduleManagement = Pick<ScheduleService, "list" | "pause" | "resume" | "runNow" | "remove">;
 const json = (res: ServerResponse, status: number, body: unknown) =>
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" }).end(JSON.stringify(body));
 
@@ -39,15 +39,11 @@ export function createScheduleRoutes(service: ScheduleManagement | undefined, ow
       const supplied = req.headers["x-csrf-token"] ?? body._csrf;
       if (!csrf || typeof supplied !== "string" || !equal(supplied, csrf)) throw new HttpError(403, "CSRF 令牌无效，请刷新页面后重试");
       delete body._csrf;
-      if (url.pathname === "/api/schedules") {
-        json(res, 201, { schedule: await service.create(actor, body) }); return;
-      }
-      const match = /^\/api\/schedules\/([a-zA-Z0-9_-]+)\/(update|pause|resume|run|delete)$/.exec(url.pathname);
+      const match = /^\/api\/schedules\/([a-zA-Z0-9_-]+)\/(pause|resume|run|delete)$/.exec(url.pathname);
       if (!match) throw new HttpError(404, "接口不存在");
       const [, id, action] = match;
-      if (action !== "update" && Object.keys(body).length) throw new HttpError(400, "此操作不接受额外字段");
-      if (action === "update") json(res, 200, { schedule: await service.update(actor, id, body) });
-      else if (action === "pause") json(res, 200, { schedule: await service.pause(actor, id) });
+      if (Object.keys(body).length) throw new HttpError(400, "此操作不接受额外字段");
+      if (action === "pause") json(res, 200, { schedule: await service.pause(actor, id) });
       else if (action === "resume") json(res, 200, { schedule: await service.resume(actor, id) });
       else if (action === "run") json(res, 200, { run: await service.runNow(actor, id) });
       else { await service.remove(actor, id); json(res, 200, { deleted: id }); }

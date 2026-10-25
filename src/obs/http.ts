@@ -108,7 +108,7 @@ export function createDashboard(opts: DashboardOptions) {
     isThreadKey, summarize, readText, agentMdRevision, formatBackendOverrides,
     reasoningEfforts: REASONING_EFFORTS, agentMdMaxBytes: AGENT_MD_MAX_BYTES, settingsKey: SETTINGS_KEY,
   });
-  const schedulePanel = createSchedulePanel({ service: opts.schedules, owner: config.owner, csrf, context: opts.context });
+  const schedulePanel = createSchedulePanel({ service: opts.schedules, owner: config.owner, csrf, scopeNames: () => opts.context.scopeNames() });
   const handlePost = createDashboardPost(opts, csrf, agentMd, tracer, render, schedulePanel.post);
   const handleSchedules = createScheduleRoutes(opts.schedules, config.owner, csrf);
 

@@ -234,7 +234,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 
   `send_message` 不带 target 时发回该会话，不 @。权限按创建者求出，无 `auth_*`；创建者已失去权限则本次记 failed 并暂停。
 - **结果**（`run.ts`）：统计该输入所在回合发出的消息：有发送 → `sent`，无 → `silent`（静默，不兜底），回合失败/丢失/投递不确定 → `failed`。sent / silent 清零失败计数；连续 3 次 failed 自动暂停（`pause_reason = 连续 3 次失败`）并告警。
-- **管理**：面板"定时任务"页与 JSON 接口 `/api/schedules`；聊天里 `schedule_create / list / update / pause / resume / delete / run_now`（仅当前的人通过 `canSchedule` 的交互回合可见；owner 管理全部，他人只管自己的）。来源与 `created_by` 取本轮会话与确证的人，模型不能指定。规则使用北京时间 `YYYY-MM-DD HH:mm`；工具说明要求把"家庭群"等目的地先用 `qq_chats` 解析为具体 ref 写进提示词，按需静默的监控注明"无新内容则静默"。定时回合内只开放 `schedule_control({ action: pause | complete, reason })`，目标从本次运行的持久 admission 读取，不打断当前回合。
+- **管理**：面板"定时任务"页与 JSON 接口 `/api/schedules` 只支持查看、暂停、恢复、立即运行和删除；创建与修改任务通过聊天工具完成。聊天里 `schedule_create / list / update / pause / resume / delete / run_now`（仅当前的人通过 `canSchedule` 的交互回合可见；owner 管理全部，他人只管自己的）。来源与 `created_by` 取本轮会话与确证的人，模型不能指定。规则使用北京时间 `YYYY-MM-DD HH:mm`；工具说明要求把"家庭群"等目的地先用 `qq_chats` 解析为具体 ref 写进提示词，按需静默的监控注明"无新内容则静默"。定时回合内只开放 `schedule_control({ action: pause | complete, reason })`，目标从本次运行的持久 admission 读取，不打断当前回合。
 
 ## 7. 技能（skills）
 

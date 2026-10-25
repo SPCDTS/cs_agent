@@ -8,8 +8,7 @@ import { ContextStore } from "../../src/context/store.js";
 import { ObsStore } from "../../src/obs/store.js";
 import { createDashboard } from "../../src/obs/http.js";
 import { csrfToken } from "../../src/obs/http-util.js";
-import { draftFromForm, ruleFromDraft } from "../../src/obs/schedule-panel.js";
-import { describeRule, draftOf, sameRule, scheduleDetailBody, schedulesListBody, simpleRule } from "../../src/obs/ui/schedule-pages.js";
+import { describeRule, scheduleDetailBody, schedulesListBody, simpleRule } from "../../src/obs/ui/schedule-pages.js";
 import type { Schedule } from "../../src/obs/ui/schedule-pages.js";
 import { rig as scheduleRig } from "../agent/schedule-fixture.js";
 
@@ -30,7 +29,7 @@ function schedule(overrides: Partial<Schedule> = {}): Schedule {
   };
 }
 
-describe("规则人话描述与表单换算", () => {
+describe("规则人话描述", () => {
   it("describeRule 覆盖每天、每周、工作日、一次性、间隔与原文回退", () => {
     const r = (rrule: string) => describeRule({ kind: "rrule", rrule, dtstart: NOW }, NOW);
     expect(r("FREQ=DAILY;BYHOUR=8;BYMINUTE=30")).toBe("每天 08:30");
@@ -46,32 +45,10 @@ describe("规则人话描述与表单换算", () => {
     expect(describeRule({ kind: "at", at: bj(2027, 1, 2, 3, 4) }, NOW)).toBe("一次 2027-01-02 03:04");
     expect(simpleRule("FREQ=WEEKLY;BYHOUR=9;BYMINUTE=0")).toBeNull();
   });
-
-  it("表单按北京时间换算为一次性时刻与 DAILY / WEEKLY RRULE，起点取整分钟", () => {
-    const form = (fields: Record<string, string | string[]>) => {
-      const f = new URLSearchParams();
-      for (const [k, v] of Object.entries(fields)) for (const x of [v].flat()) f.append(k, x);
-      return draftFromForm(f);
-    };
-    const now = NOW + 12_345;
-    expect(ruleFromDraft(form({ type: "once", date: "2026-10-21", time: "14:00" }), now)).toEqual({ kind: "at", at: bj(2026, 10, 21, 14, 0) });
-    expect(ruleFromDraft(form({ type: "repeat", time: "08:30" }), now)).toEqual({ kind: "rrule", rrule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=30", dtstart: NOW });
-    expect(ruleFromDraft(form({ type: "repeat", time: "09:05", days: ["WE", "MO", "XX"] }), now))
-      .toEqual({ kind: "rrule", rrule: "FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=9;BYMINUTE=5", dtstart: NOW });
-    expect(ruleFromDraft(form({ type: "rrule", rrule: " RRULE:FREQ=MONTHLY;BYMONTHDAY=1 " }), now))
-      .toEqual({ kind: "rrule", rrule: "FREQ=MONTHLY;BYMONTHDAY=1", dtstart: NOW });
-    expect(() => ruleFromDraft(form({ type: "once", date: "2026-02-30", time: "10:00" }), now)).toThrow("日期");
-    expect(() => ruleFromDraft(form({ type: "repeat", time: "25:00" }), now)).toThrow("时刻");
-    const s = schedule({ rule: { kind: "rrule", rrule: "FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=9;BYMINUTE=5", dtstart: 0 } });
-    expect(draftOf(s)).toMatchObject({ type: "repeat", time: "09:05", days: ["MO", "WE"], timeout: "300" });
-    expect(sameRule(form({ type: "repeat", time: "09:05", days: ["MO", "WE"] }), draftOf(s))).toBe(true);
-    expect(sameRule(form({ type: "repeat", time: "09:05", days: ["MO"] }), draftOf(s))).toBe(false);
-    expect(draftOf(schedule({ rule: { kind: "at", at: bj(2026, 10, 21, 14, 0) } }))).toMatchObject({ type: "once", date: "2026-10-21", time: "14:00" });
-  });
 });
 
 describe("页面渲染", () => {
-  const view = { conversations: ["owner", "group:123"], names: { "group:123": "家庭群" }, csrf: "tok", now: NOW };
+  const view = { names: { "group:123": "家庭群" }, csrf: "tok", now: NOW };
 
   it("列表显示群名、人话规则、北京时间、状态与暂停原因、最近运行和操作", () => {
     const html = schedulesListBody({ ...view, schedules: [
@@ -99,7 +76,7 @@ describe("页面渲染", () => {
     expect(html).not.toContain("confirm(");
   });
 
-  it("详情页显示完整提示词、规则、创建者、超时与倒序运行记录，并预填编辑表单", () => {
+  it("详情页显示完整提示词、规则、创建者、超时与倒序运行记录，不提供编辑", () => {
     const html = scheduleDetailBody(schedule({ runs: [
       { fire_key: "s1@1", fire_at: bj(2026, 10, 18, 8, 30), status: "sent", sent: 2, note: "第一次记录", started_at: 1, ended_at: 4_001, input_key: "run_abc" },
       { fire_key: "s1@2", fire_at: bj(2026, 10, 19, 8, 30), status: "skipped", reason: "stale", skipped_count: 3 },
@@ -113,9 +90,9 @@ describe("页面渲染", () => {
     expect(html).toContain("迟到或停机（合并 3 次）");
     expect(html).toContain("第一次记录");
     expect(html).toContain('href="/inputs/run_abc"');
-    expect(html).toContain('action="/schedules/s1/update"');
-    expect(html).toMatch(/name="time" value="08:30"/);
-    expect(html).toMatch(/value="repeat" checked/);
+    expect(html).not.toContain('action="/schedules/s1/update"');
+    expect(html).not.toContain('id="edit"');
+    expect(html).not.toContain("保存修改");
   });
 });
 
@@ -138,115 +115,100 @@ async function rig(owner = "1") {
   });
   const csrf = csrfToken(TOKEN);
   const get = (route: string) => fetch(base + route, { headers: { Cookie: `obs_token=${TOKEN}` }, redirect: "manual" });
-  const post = (route: string, fields: Record<string, string | string[]>, headers: Record<string, string> = {}) => {
-    const body = new URLSearchParams();
-    for (const [k, v] of Object.entries({ _csrf: csrf, ...fields })) for (const x of [v].flat()) body.append(k, x);
+  const post = (route: string, fields: Record<string, string>, headers: Record<string, string> = {}) => {
+    const body = new URLSearchParams({ _csrf: csrf, ...fields });
     return fetch(base + route, { method: "POST", redirect: "manual", body, headers: {
       Cookie: `obs_token=${TOKEN}`, "Content-Type": "application/x-www-form-urlencoded", Origin: base, ...headers } });
   };
   return { ...schedule, service: schedule.service, get, post };
 }
 
-const tomorrow = () => new Date(Date.now() + 86400_000 + BJ).toISOString().slice(0, 10);
-
 describe("面板路由", () => {
-  it("导航含定时任务；空列表；会话下拉显示已知群名", async () => {
+  it("导航含定时任务；空列表引导聊天创建，不提供创建表单或路由", async () => {
     const r = await rig();
     const res = await r.get("/schedules");
     expect(res.status).toBe(200);
     const html = await res.text();
     expect(html).toContain('<a href="/schedules" aria-current="page">定时任务</a>');
-    expect(html).toContain("还没有定时任务");
-    expect(html).toContain("家庭群（group:123）");
-    expect((await r.get("/schedules/new")).status).toBe(200);
+    expect(html).toContain("还没有定时任务。在聊天里让 agent 创建。");
+    expect(html).not.toContain('action="/schedules"');
+    expect(html).not.toContain("新建定时任务");
+    expect((await r.get("/schedules/new")).status).toBe(404);
     expect((await r.get("/schedules/nope")).status).toBe(404);
+    const rejected = await r.post("/schedules", { name: "早报", prompt: "整理新闻", conversation: "owner", type: "repeat", time: "08:30" });
+    expect(rejected.status).toBe(404);
+    expect(await rejected.text()).toContain("没有这个操作");
+    expect(await r.service.list()).toEqual([]);
   });
 
-  it("表单创建、编辑、暂停、恢复、立即运行、删除", async () => {
+  it("服务创建的任务可查看、暂停、恢复、立即运行和删除", async () => {
     const r = await rig();
-    const created = await r.post("/schedules", { name: "早报", prompt: "整理新闻", conversation: "group:123", type: "repeat", time: "08:30", days: ["MO", "WE"], timeout: "120" });
-    expect(created.status).toBe(303);
-    expect(created.headers.get("location")).toBe("/schedules?ok=created");
-    const [s] = await r.service.list();
-    expect(s).toMatchObject({ name: "早报", conversation: "group:123", created_by: "qq:1", options: { timeout_ms: 120_000 },
-      rule: { kind: "rrule", rrule: "FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=8;BYMINUTE=30" } });
-    const list = await (await r.get("/schedules?ok=created")).text();
-    expect(list).toContain("定时任务已创建");
+    const s = await r.service.create("qq:1", { name: "早报", prompt: "整理新闻", conversation: "group:123",
+      rule: { kind: "rrule", rrule: "FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=8;BYMINUTE=30", dtstart: Date.now() }, options: { timeout_ms: 120_000 } });
+    const list = await (await r.get("/schedules")).text();
     expect(list).toContain("每周一、三 08:30");
     expect(list).toContain("家庭群");
+    expect(list).not.toContain('action="/schedules"');
+    expect(list).not.toContain("新建定时任务");
+    expect(list).not.toContain("编辑</a>");
 
-    const detail = await r.get(`/schedules/${s!.id}`);
+    const detail = await r.get(`/schedules/${s.id}`);
     expect(detail.status).toBe(200);
-    expect(await detail.text()).toContain("整理新闻");
+    const html = await detail.text();
+    expect(html).toContain("整理新闻");
+    expect(html).toContain("家庭群");
+    expect(html).not.toContain(`action="/schedules/${s.id}/update"`);
+    expect(html).not.toContain('id="edit"');
+    expect(html).not.toContain("保存修改");
 
-    const edited = await r.post(`/schedules/${s!.id}/update`, { name: "晨报", prompt: "整理要闻", type: "repeat", time: "08:30", days: ["MO", "WE"], timeout: "120" });
-    expect(edited.status).toBe(303);
-    expect(edited.headers.get("location")).toBe(`/schedules/${s!.id}?ok=saved`);
-    const after = (await r.service.get(s!.id))!;
-    expect(after).toMatchObject({ name: "晨报", prompt: "整理要闻", rule: s!.rule, conversation: "group:123" });
-
-    expect((await r.post(`/schedules/${s!.id}/update`, { name: "晨报", prompt: "整理要闻", type: "once", date: tomorrow(), time: "07:00" })).status).toBe(303);
-    expect((await r.service.get(s!.id))!.rule.kind).toBe("at");
-
-    const paused = await r.post(`/schedules/${s!.id}/pause`, { back: "detail" });
-    expect(paused.headers.get("location")).toBe(`/schedules/${s!.id}?ok=paused`);
-    expect((await r.service.get(s!.id))!.status).toBe("paused");
-    expect((await r.post(`/schedules/${s!.id}/resume`, { back: "list" })).headers.get("location")).toBe("/schedules?ok=resumed");
-    expect((await r.service.get(s!.id))!.status).toBe("active");
-    expect((await r.post(`/schedules/${s!.id}/run`, {})).status).toBe(303);
+    const paused = await r.post(`/schedules/${s.id}/pause`, { back: "detail" });
+    expect(paused.status).toBe(303);
+    expect(paused.headers.get("location")).toBe(`/schedules/${s.id}?ok=paused`);
+    expect((await r.service.get(s.id))!.status).toBe("paused");
+    expect(await (await r.get(`/schedules/${s.id}?ok=paused`)).text()).toContain("定时任务已暂停");
+    expect((await r.post(`/schedules/${s.id}/resume`, { back: "list" })).headers.get("location")).toBe("/schedules?ok=resumed");
+    expect((await r.service.get(s.id))!.status).toBe("active");
+    expect((await r.post(`/schedules/${s.id}/run`, {})).status).toBe(303);
     expect(r.admitter.calls).toHaveLength(1);
-    const withRun = await (await r.get(`/schedules/${s!.id}`)).text();
+    const withRun = await (await r.get(`/schedules/${s.id}`)).text();
     expect(withRun).toContain("排队");
-    const deleted = await r.post(`/schedules/${s!.id}/delete`, { back: "detail" });
+    const deleted = await r.post(`/schedules/${s.id}/delete`, { back: "detail" });
     expect(deleted.headers.get("location")).toBe("/schedules?ok=deleted");
     expect(await r.service.list()).toEqual([]);
+    const missing = await r.post(`/schedules/${s.id}/pause`, { back: "detail" });
+    expect(missing.status).toBe(404);
+    const missingHtml = await missing.text();
+    expect(missingHtml).toContain('class="flash err"');
+    expect(missingHtml).toContain("定时任务不存在");
+    expect(missingHtml).toContain("还没有定时任务");
+  });
+
+  it("更新表单路由返回 404，任务保持不变", async () => {
+    const r = await rig();
+    const s = await r.service.create("qq:1", { name: "a", prompt: "b", conversation: "owner", rule: { kind: "at", at: Date.now() + 3600_000 } });
+    const res = await r.post(`/schedules/${s.id}/update`, { name: "改名", prompt: "改提示词", type: "repeat", time: "08:00", back: "detail" });
+    expect(res.status).toBe(404);
+    expect(await res.text()).toContain("没有这个操作");
+    expect(await r.service.list()).toEqual([s]);
   });
 
   it("CSRF 与同源校验失败时不写入", async () => {
     const r = await rig();
-    const fields = { name: "x", prompt: "y", conversation: "owner", type: "repeat", time: "08:00" };
-    expect((await r.post("/schedules", { ...fields, _csrf: "bad" })).status).toBe(403);
-    expect((await r.post("/schedules", fields, { Origin: "https://evil.test" })).status).toBe(403);
-    expect((await r.post("/schedules", fields, { "Sec-Fetch-Site": "cross-site" })).status).toBe(403);
-    expect(await r.service.list()).toEqual([]);
     const s = await r.service.create("qq:1", { name: "a", prompt: "b", conversation: "owner", rule: { kind: "at", at: Date.now() + 3600_000 } });
-    for (const action of ["pause", "run", "delete"]) expect((await r.post(`/schedules/${s.id}/${action}`, { _csrf: "" })).status).toBe(403);
-    expect((await r.service.get(s.id))!.status).toBe("active");
+    expect((await r.post(`/schedules/${s.id}/pause`, { _csrf: "bad" })).status).toBe(403);
+    expect((await r.post(`/schedules/${s.id}/pause`, {}, { Origin: "https://evil.test" })).status).toBe(403);
+    expect((await r.post(`/schedules/${s.id}/pause`, {}, { "Sec-Fetch-Site": "cross-site" })).status).toBe(403);
+    for (const action of ["pause", "resume", "run", "delete"]) expect((await r.post(`/schedules/${s.id}/${action}`, { _csrf: "" })).status).toBe(403);
+    expect(await r.service.list()).toEqual([s]);
     expect(r.admitter.calls).toHaveLength(0);
-  });
-
-  it("服务校验错误以 flash 显示并保留表单输入", async () => {
-    const r = await rig();
-    const past = await r.post("/schedules", { name: "过去的提醒", prompt: "保留这段提示词", conversation: "group:123", type: "once", date: "2020-01-01", time: "08:00" });
-    expect(past.status).toBe(400);
-    const html = await past.text();
-    expect(html).toContain('class="flash err"');
-    expect(html).toContain("规则必须包含未来的触发时刻");
-    expect(html).toContain('value="过去的提醒"');
-    expect(html).toContain("保留这段提示词");
-    expect(html).toContain('<option value="group:123" selected>');
-    expect(html).toMatch(/value="once" checked/);
-    const bad = await r.post("/schedules", { name: "坏规则", prompt: "p", conversation: "owner", type: "rrule", rrule: "FREQ=MINUTELY;INTERVAL=1" });
-    expect(bad.status).toBe(400);
-    const badHtml = await bad.text();
-    expect(badHtml).toContain("触发间隔不得少于 5 分钟");
-    expect(badHtml).toContain('value="FREQ=MINUTELY;INTERVAL=1"');
-    expect((await r.post("/schedules", { name: "", prompt: "p", conversation: "owner", type: "repeat", time: "08:00" })).status).toBe(400);
-    expect(await r.service.list()).toEqual([]);
-
-    const s = await r.service.create("qq:1", { name: "a", prompt: "b", conversation: "owner", rule: { kind: "at", at: Date.now() + 3600_000 } });
-    const editBad = await r.post(`/schedules/${s.id}/update`, { name: "改了名字", prompt: "b", type: "rrule", rrule: "NOPE" });
-    expect(editBad.status).toBe(400);
-    const editHtml = await editBad.text();
-    expect(editHtml).toContain("RRULE");
-    expect(editHtml).toContain('value="改了名字"');
-    expect((await r.service.get(s.id))!.name).toBe("a");
-    expect((await r.post("/schedules/missing/pause", {})).status).toBe(404);
   });
 
   it("未配置 owner 时页面只读提示，写操作 404", async () => {
     const r = await rig("");
+    const s = await r.service.create("qq:1", { name: "a", prompt: "b", conversation: "owner", rule: { kind: "at", at: Date.now() + 3600_000 } });
     expect(await (await r.get("/schedules")).text()).toContain("定时任务管理未启用");
-    expect((await r.post("/schedules", { name: "x" })).status).toBe(404);
+    expect((await r.get("/schedules/new")).status).toBe(404);
+    expect((await r.post(`/schedules/${s.id}/pause`, {})).status).toBe(404);
+    expect(await r.service.list()).toEqual([s]);
   });
 });
