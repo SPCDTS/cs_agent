@@ -66,6 +66,7 @@ export interface ResidentOptions {
   scheduleTools?: PiBackendOptions["scheduleTools"];
   instrumentation?: PiBackendOptions["instrumentation"];
   web?: PiBackendOptions["web"];
+  mcp?: PiBackendOptions["mcp"];
   currentModel?: (provider: string) => ModelRef;
   /** 额外的 faux 模型（运行时模型设置） */
   extraModels?: { id: string; contextWindow?: number; reasoning?: boolean }[];
@@ -141,6 +142,7 @@ export async function residentRig(options: ResidentOptions = {}) {
       ...(options.scheduleTools ? { scheduleTools: options.scheduleTools } : {}),
       ...(options.instrumentation ? { instrumentation: options.instrumentation } : {}),
       ...(options.web ? { web: options.web } : {}),
+      ...(options.mcp ? { mcp: options.mcp } : {}),
       ...(options.currentModel ? { currentModel: () => options.currentModel!(model.provider) } : {}),
       ...(contextUsage ? { contextUsage } : {}),
       ...(options.reserveTokens !== undefined ? { reserveTokens: options.reserveTokens } : {}),

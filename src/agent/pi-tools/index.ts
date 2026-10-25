@@ -23,6 +23,7 @@ import { PiPromptLoader } from "./prompt.js";
 import { ProjectContextLoader } from "./project-context.js";
 import { SkillsLoader } from "./skills.js";
 import { DeepSeekWeb } from "./web.js";
+import { isMcpToolName, type McpToolIdentity } from "../pi-mcp/names.js";
 
 export const PI_WORKSPACE_RULE = "当前目录就是你的工作区，文件跨回合保留。普通文件一律用相对路径写在这里，不要尝试其他目录。bash 的 /tmp 每条命令结束即清空，文件工具也不能写入 /tmp；有权限的技能操作使用各自指定的目录。";
 export const PI_SUBAGENT_RULE = "耗时较长的任务（预计超过几分钟，或需要大量搜索、下载、批量处理）交给子 agent 在后台做：先用 send_message 简短告诉用户已经开始，用 subagent 派出后立即结束本轮，不要等待或反复查看。收到“[子 agent 完成]”或“[子 agent 失败]”后，把结果整理成结论用 send_message 发给用户。很快能做完的事直接做，不要派子 agent。";
@@ -45,6 +46,8 @@ export interface PiToolsOptions {
   mediaRecall?: Pick<MediaRecall, "recall">;
   /** 工具调用时求出本轮绑定（会话宿主的当前回合；子会话只有会话基础权限）；未绑定的会话返回 undefined。 */
   binding(conversationId: number): Promise<PiCallBinding | undefined>;
+  /** 只提供已验证目录的元数据，未知 MCP 历史名称同样不采正文。 */
+  mcpToolIdentity?: (name: string) => McpToolIdentity | undefined;
 }
 
 const builtinSummary = (call: { name: string; arguments: Record<string, unknown> }) => ({
@@ -55,6 +58,10 @@ const builtinSummary = (call: { name: string; arguments: Record<string, unknown>
 const output = (text: string) => ({ output: [{ type: "text" as const, text }] });
 
 export function createPiExtension(opts: PiToolsOptions) {
+  const mcpSummary = (call: { name: string; id: string }, api: { conversationId: number; taskId: number }) => ({
+    backend: "pi", provider: "mcp", nativeName: call.name, ...opts.mcpToolIdentity?.(call.name),
+    conversation: Number(api.conversationId), taskId: Number(api.taskId), callId: call.id,
+  });
   const failures = new Map<number, Failure>();
   const boundary = async <T>(id: number, provider: string, run: () => Promise<T>): Promise<T> => {
     try { return await run(); } catch (error) {
@@ -120,9 +127,11 @@ export function createPiExtension(opts: PiToolsOptions) {
         const bound = await opts.binding(Number(api.conversationId));
         if (!bound || !parseAccess(bound.access)) return { block: "工具请求未绑定有效访问范围" };
         start(api.taskId);
-        trace.event(traceKey(bound), "tool:" + call.name, { status: "started", detail: BUILTIN_TOOLS.has(call.name) ? builtinSummary(call) : { backend: "pi", input: call.arguments } });
+        trace.event(traceKey(bound), "tool:" + call.name, { status: "started", detail: isMcpToolName(call.name) ? mcpSummary(call, api)
+          : BUILTIN_TOOLS.has(call.name) ? builtinSummary(call) : { backend: "pi", input: call.arguments } });
         const block = (reason: string) => {
-          trace.event(traceKey(bound), "tool:" + call.name, { status: "failed", durationMs: Date.now() - started.get(api.taskId)!, detail: { backend: "pi", error: reason } });
+          trace.event(traceKey(bound), "tool:" + call.name, { status: "failed", durationMs: Date.now() - started.get(api.taskId)!,
+            detail: isMcpToolName(call.name) ? { ...mcpSummary(call, api), error_code: "tool_blocked" } : { backend: "pi", error: reason } });
           started.delete(api.taskId);
           return { block: reason };
         };
@@ -131,6 +140,14 @@ export function createPiExtension(opts: PiToolsOptions) {
         return undefined;
       }, afterTool: async (call, result, api) => {
         const bound = await opts.binding(Number(api.conversationId));
+        if (isMcpToolName(call.name)) {
+          if (bound) trace.event(traceKey(bound), "tool:" + call.name, { status: result.isError ? "failed" : "ok",
+            durationMs: started.has(api.taskId) ? Date.now() - started.get(api.taskId)! : undefined,
+            detail: { ...mcpSummary(call, api), failure: result.isError ? diagnosticFailure(result, "mcp") : undefined } });
+          failures.delete(api.taskId);
+          started.delete(api.taskId);
+          return undefined;
+        }
         const structured = result.structuredOutput;
         const exitCode = structured && typeof structured === "object" && !Array.isArray(structured) ? structured.exitCode : undefined;
         if (bound) trace.event(traceKey(bound), "tool:" + call.name, { status: result.isError ? "failed" : "ok",

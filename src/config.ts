@@ -80,6 +80,8 @@ const EnvSchema = z.object({
   AGENT_BACKEND_OVERRIDES: z.string().default(""),
   /** 空值使用 DATA_DIR/skills；off 显式禁用。 */
   PI_SKILLS_DIR: z.string().default(""),
+  /** 管理员维护的 MCP JSON 配置路径；空值禁用新调用。 */
+  PI_MCP_CONFIG: z.string().default(""),
   PI_ARCHIVE_RETENTION_DAYS: int(90),
   PI_COMPACTION_RESERVE_TOKENS: int(DEFAULT_COMPACTION_POLICY.reserveTokens),
   PI_COMPACTION_BACKGROUND_TOKENS: z.coerce.number().int().min(0).default(DEFAULT_COMPACTION_POLICY.backgroundTokens),

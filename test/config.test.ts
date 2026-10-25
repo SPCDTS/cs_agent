@@ -17,6 +17,14 @@ describe("pi 技能目录配置", () => {
   });
 });
 
+describe("pi MCP 配置路径", () => {
+  it("默认和空值禁用新调用，显式路径原样传给 Pi 配置边界", () => {
+    expect(loadConfig({}).PI_MCP_CONFIG).toBe("");
+    expect(loadConfig({ PI_MCP_CONFIG: "" }).PI_MCP_CONFIG).toBe("");
+    expect(loadConfig({ PI_MCP_CONFIG: "/data/config/pi-mcp.json" }).PI_MCP_CONFIG).toBe("/data/config/pi-mcp.json");
+  });
+});
+
 describe("NapCat 服务地址", () => {
   it("默认使用 compose 内网，空值沿用默认，保留宿主机覆盖与凭据校验", () => {
     const defaults = { NAPCAT_HTTP_URL: "http://napcat:3000", NAPCAT_WS_URL: "ws://napcat:3001" };

@@ -50,6 +50,7 @@ import { CodexPromptStore } from "./agent/codex/prompt.js";
 import { CodexBasePromptStore } from "./agent/codex/base-prompt.js";
 import { CodexBackend } from "./agent/backends/codex.js";
 import { PiBackend } from "./agent/backends/pi.js";
+import { loadMcpConfig, type EnvironmentSecrets } from "./agent/pi-mcp/config.js";
 import { ContextStore } from "./context/store.js";
 import { SettingsStore, settingsDefaults } from "./agent/settings.js";
 import { msUntilNextRun, startAgingScheduler } from "./context/aging.js";
@@ -262,6 +263,20 @@ async function main(): Promise<void> {
   inbox = new Inbox({ getChannel: getBridge, getHost: () => host, owners: cfg.owners, store, dataDir: cfg.DATA_DIR });
 
   // 恢复 pi 工具前，派发授权文档与 Channel 必须已就绪。
+  const mcpConfig = await loadMcpConfig(cfg.PI_MCP_CONFIG).catch(() => ({
+    kind: "invalid" as const, issues: [{ path: "", code: "config_load_failed", message: "MCP 配置读取失败" }],
+  }));
+  if (mcpConfig.kind === "invalid") log.warn("pi MCP disabled: invalid configuration", { issues: mcpConfig.issues });
+  const mcpEnvironment = new Map<string, string | undefined>();
+  if (mcpConfig.kind === "enabled") {
+    for (const { transport } of mcpConfig.value.servers) {
+      const references = Object.values(transport.kind === "stdio" ? transport.secretEnv : transport.secretHeaders);
+      for (const name of references) mcpEnvironment.set(name, process.env[name]);
+      registerSecrets(references.map(name => mcpEnvironment.get(name)));
+      if (transport.kind === "stdio") for (const name of transport.inheritEnv) mcpEnvironment.set(name, process.env[name]);
+    }
+  }
+  const mcpSecrets: EnvironmentSecrets = { readReferencedVariable: name => mcpEnvironment.get(name) };
   const pi = await PiBackend.open({
     sendService, grants, scheduleTools, turns: inbox, owners: cfg.owners,
     currentModel: currentPiModel,
@@ -271,6 +286,7 @@ async function main(): Promise<void> {
     thinkingLevel, store, instrumentation, contextUsage,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
+    mcp: { config: mcpConfig, secrets: mcpSecrets },
     attachmentLimits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT },
   });
   codexBackend = new CodexBackend({ runner: codex, tokens: threadTokens, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT,

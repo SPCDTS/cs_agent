@@ -1,15 +1,18 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { getSystemMessageText, type Message, type TranscriptContext } from "@earendil-works/pi-ai";
-import { CompactionEntry, defineDoc, type ConversationId } from "@earendil-works/pi-durable";
+import { createModels, fauxProvider, getSystemMessageText, Type, type Message, type TranscriptContext } from "@earendil-works/pi-ai";
+import { CompactionEntry, createRegistry, defineDoc, defineExtension, defineTool, Harness, type ConversationId } from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { describe, expect, it, vi } from "vitest";
 import { PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
 import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prompt.js";
 import { SkillsStore } from "../../src/agent/skills-store.js";
 import { SkillsLoader } from "../../src/agent/pi-tools/skills.js";
-import { PI_SUBAGENT_RULE, PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
+import { createPiExtension, PI_SUBAGENT_RULE, PI_WORKSPACE_RULE } from "../../src/agent/pi-tools/index.js";
+import type { PiCallBinding } from "../../src/agent/pi-tools/request.js";
+import { ContextStore } from "../../src/context/store.js";
 import { PiContextObserver, refreshPiCompactionUsage } from "../../src/agent/pi-context-usage.js";
 import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
 import { threadKeyOf } from "../../src/channel/inbound.js";
@@ -73,6 +76,44 @@ async function sayWithImages(r: ResidentRig, user: string, text: string, files: 
   await r.idle();
   return key;
 }
+
+describe("pi MCP 通用审计边界", () => {
+  it.each([true, false])("目录元数据可用=%s 时，真实 ToolTask 钩子均不记录 MCP 正文", async mapped => {
+    const dir = tmp("pi-mcp-hooks-"), store = new ContextStore(dir);
+    const nativeName = "mcp_docs_lookup_123456789abc";
+    const bound: PiCallBinding = { threadKey: "owner", turnId: "pi:mcp-audit", identity: { kind: "user", sender: "1" },
+      scope: "private:1", inputs: [], access: "all", senderIsOwner: true, auth: true, child: false };
+    const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
+    faux.setResponses([call([nativeName, { query: "mcp-input-sentinel" }]), reply()]);
+    const models = createModels(); models.setProvider(faux.provider);
+    const registry = createRegistry();
+    let harness!: Harness;
+    registry.install(createPiExtension({ dataDir: dir, workspaceDir: path.join(dir, "workspace"), skillsDir: "off", store,
+      getHarness: () => harness, binding: async () => bound,
+      ...(mapped ? { mcpToolIdentity: () => ({ nativeName, serverId: "docs", remoteName: "lookup", catalogDigest: "digest" }) } : {}),
+    }));
+    registry.install(defineExtension({ name: "test-mcp", tools: [defineTool({ name: nativeName, description: "审计测试", replay: "unsafe",
+      parameters: Type.Object({ query: Type.String() }),
+      execute: async () => ({ isError: true, output: [{ type: "text", text: "mcp-output-sentinel" }],
+        structuredOutput: { secret: "mcp-structured-sentinel" }, diagnostics: [{ severity: "error", message: "401 mcp-error-sentinel" }] }),
+    })] }));
+    const events: LiveEvent[] = [];
+    const off = trace.tap(event => { if (event.stage === "tool:" + nativeName) events.push(event); });
+    try {
+      harness = await Harness.open(await openNodeSqliteStorage(path.join(dir, "pi.sqlite")), { models, registry }, context);
+      const model = faux.getModel();
+      const conv = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: model.provider, modelId: model.id } } }, context);
+      expect((await (await conv.submit({ type: "input", content: "开始" }, context)).wait(context)).status).toBe("done");
+      expect(events).toHaveLength(2);
+      expect(events.map(event => event.status)).toEqual(["started", "failed"]);
+      expect(events.every(event => event.detail.provider === "mcp")).toBe(true);
+      expect(events[1]!.detail).toMatchObject({ nativeName, failure: { kind: "auth", provider: "mcp", status: 401 } });
+      if (mapped) expect(events[1]!.detail).toMatchObject({ serverId: "docs", remoteName: "lookup", catalogDigest: "digest" });
+      expect(JSON.stringify(events)).not.toMatch(/mcp-(?:input|output|structured|error)-sentinel/);
+      expect(JSON.stringify((await conv.context(context)).entries)).toContain("mcp-output-sentinel");
+    } finally { off(); await harness?.close(context); store.close(); }
+  });
+});
 
 describe("pi 常驻后端：工具身份随本轮绑定", () => {
   it.each([false, true])("qq_chats 仅在 all 范围调用通道（owner=%s）", async owner => {

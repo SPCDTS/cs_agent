@@ -11,6 +11,8 @@ import { clampThinkingLevel, type Models, type ModelThinkingLevel } from "@earen
 import { createRegistry, defineDoc, Harness, LiveDoc, ROOT_CONVERSATION_ID, watchEvents, type AgentEvent, type AgentEventStream, type Conversation, type ConversationId, type Cursor, type EntryId, type ModelRef, type Storage, type SubmissionId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { codingEnvironment, codingTools } from "../pi-tools/coding.js";
+import { PiMcp } from "../pi-mcp/index.js";
+import type { EnvironmentSecrets, McpConfigState } from "../pi-mcp/config.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
 import { createPiScheduleExtensions } from "../pi-tools/schedule.js";
 import { createPiImExtensions, createPiSkillExtension } from "../pi-tools/im.js";
@@ -70,7 +72,7 @@ export interface PiTurns {
   render(records: readonly InboundRecord[]): Promise<RenderedInputs>;
 }
 
-export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "workspaceDir" | "binding"> {
+export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "workspaceDir" | "binding" | "mcpToolIdentity"> {
   /** skill_publish 的目标；未设置时工具返回"技能目录未启用"。 */
   skills?: SkillsStore;
   models: Models;
@@ -86,6 +88,8 @@ export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "w
   storage?: Storage;
   turns: PiTurns;
   owners?: OwnerIds | (() => OwnerIds);
+  /** 已验证的管理员配置与秘密解析边界；缺省仍恢复历史目录。 */
+  mcp?: { config: McpConfigState; secrets: EnvironmentSecrets };
   /** 子 agent 扩展的选项；false 不安装 */
   subagent?: Partial<Omit<SubagentOptions, "getHarness" | "initChild" | "spawner">> | false;
 }
@@ -104,6 +108,8 @@ export class PiBackend implements ThreadAdapter {
   readonly name = "pi" as const;
   private readonly tails = new Map<string, Promise<unknown>>();
   private closing = false;
+  private closePromise?: Promise<void>;
+  private mcp?: PiMcp;
   private host?: HostCallbacks;
   private attached = false;
   private readonly threads = new Map<string, ThreadState>();
@@ -188,7 +194,8 @@ export class PiBackend implements ThreadAdapter {
     let harness!: Harness;
     let backend!: PiBackend;
     const binding = (id: number) => backend.binding(id);
-    const coding = await codingTools(), extension = createPiExtension({ ...opts, workspaceDir, getHarness: () => harness, binding });
+    const coding = await codingTools(), extension = createPiExtension({ ...opts, workspaceDir, getHarness: () => harness, binding,
+      mcpToolIdentity: name => backend.mcp?.toolIdentity(name) });
     const im = createPiImExtensions({ ...opts, binding });
     const schedule = createPiScheduleExtensions(binding, opts.scheduleTools);
     const subagent = opts.subagent === false ? undefined : createSubagentExtension({ ...opts.subagent, getHarness: () => harness,
@@ -222,6 +229,17 @@ export class PiBackend implements ThreadAdapter {
     }, context);
     backend = new PiBackend(harness, { ...opts, storage });
     try {
+      backend.mcp = await PiMcp.attach({
+        registry, harness,
+        config: opts.mcp?.config ?? { kind: "disabled", reason: "PI_MCP_CONFIG 未设置" },
+        secrets: opts.mcp?.secrets ?? { readReferencedVariable: () => undefined },
+        owners: () => backend.owners(), binding,
+        workspaceDir: async (_id, turn) => {
+          const rights = runRights(turn, backend.owners());
+          return (await codingEnvironment({ dataDir: opts.dataDir, workspaceDir, key: turn.threadKey,
+            request: { access: rights.access, senderIsOwner: rights.owner, inputs: turn.inputs }, store: opts.store })).cwd;
+        },
+      });
       const retired = await harness.commit(async tx => {
         const threads = await tx.doc(PiThreadsDoc);
         const migration = await tx.doc(PiMigrationDoc);
@@ -247,7 +265,7 @@ export class PiBackend implements ThreadAdapter {
       }
       log.info("context usage backfilled", { backend: "pi", checked: Object.keys(threadIds).length, backfilled });
       return backend;
-    } catch (err) { await harness.close(context); throw err; }
+    } catch (err) { await backend.close().catch(() => log.warn("pi initialization cleanup failed")); throw err; }
   }
 
   /** 宿主创建后立即绑定（恢复回合的结束事件需要回报）。 */
@@ -506,6 +524,7 @@ export class PiBackend implements ThreadAdapter {
       remove: [...Object.values(im).filter(e => e.name !== selected.name),
         ...Object.values(schedule).filter(e => e.name !== scheduleExtension?.name), ...(permissions.actorIsOwner ? [] : [skill])],
     } }, context);
+    await this.mcp?.configure({ conversation: conv, turn: binding }, context);
   }
 
   /** 唤醒回合按继承的身份（无则会话基础权限）配置工具；失败只记日志，调用照常按唤醒身份复核。 */
@@ -740,6 +759,7 @@ export class PiBackend implements ThreadAdapter {
     state.stream = stream;
     const handle = async (events: readonly AgentEvent[]) => {
       for (const event of events) {
+        this.mcp?.observeEvent(Number(conv), event);
         const run = event.type === "run_start" ? event.inputs : event.type === "snapshot" ? event.run?.inputs : undefined;
         if (run?.length) {
           const current = this.threads.get(threadKey);
@@ -803,15 +823,26 @@ export class PiBackend implements ThreadAdapter {
   }
 
   /** 关闭前调用：之后的回合结束不再回报（重启后由宿主恢复），pi 回合与子 agent 保留检查点。 */
-  beginShutdown(): void { this.closing = true; }
+  beginShutdown(): void { this.closing = true; this.mcp?.beginShutdown(); }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.beginShutdown();
-    await Promise.all([...this.threads.values()].map(state => state.stream?.stop().catch(() => undefined)));
-    await Promise.all([...this.contextObservers.values()].map(observer => observer.close()));
-    this.contextObservers.clear();
-    await this.harness.close(context);
-    await Promise.allSettled([...this.tails.values()]);
+    this.closePromise = (async () => {
+      try {
+        try {
+          await Promise.all([...this.threads.values()].map(state => state.stream?.stop().catch(() => undefined)));
+          await Promise.all([...this.contextObservers.values()].map(observer => observer.close()));
+        } finally {
+          this.contextObservers.clear();
+          await this.harness.close(context);
+        }
+      } finally {
+        try { await this.mcp?.close(); }
+        finally { await Promise.allSettled([...this.tails.values()]); }
+      }
+    })();
+    return this.closePromise;
   }
 }
 

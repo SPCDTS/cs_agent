@@ -1,6 +1,7 @@
 import { Type, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { configure, defineDoc, defineExtension, defineTask, defineTool, type ConversationId, type Harness, type ModelRef, type TaskId, type ToolRegistration, type Tx } from "@earendil-works/pi-durable";
 import { isScheduleTool } from "../../shared/schedule-tools.js";
+import { isMcpToolName } from "../pi-mcp/names.js";
 import { mergePersons, validPerson, type RunPerson } from "../host/identity.js";
 
 /**
@@ -44,7 +45,7 @@ function narrowSpawner(current: SubagentSpawner | undefined, requester: Subagent
 export const SUBAGENT_EXCLUDED_TOOLS = { exact: ["subagent", "send_message", "skill_publish"], prefixes: ["auth_", "schedule_"] } as const;
 export function isSubagentExcludedTool(name: string): boolean {
   return (SUBAGENT_EXCLUDED_TOOLS.exact as readonly string[]).includes(name) ||
-    SUBAGENT_EXCLUDED_TOOLS.prefixes.some(prefix => name.startsWith(prefix)) || isScheduleTool(name);
+    SUBAGENT_EXCLUDED_TOOLS.prefixes.some(prefix => name.startsWith(prefix)) || isScheduleTool(name) || isMcpToolName(name);
 }
 
 export const DEFAULT_SUBAGENT_INSTRUCTIONS = "你是主 agent 派出的子 agent，只负责完成交给你的任务。你不能直接联系用户；把最终结果写在回答里，它会原样交回主 agent。";

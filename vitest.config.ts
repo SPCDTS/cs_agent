@@ -13,6 +13,8 @@ const INTEGRATION = [
   "test/mcp/im-stdio.test.ts",
   "test/mcp/qq-context-stdio.test.ts",
   "test/agent/pi-sandbox-linux.test.ts",
+  "test/agent/pi-mcp-stdio.test.ts",
+  "test/agent/pi-mcp-recovery.test.ts",
 ];
 
 export default defineConfig({

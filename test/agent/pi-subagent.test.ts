@@ -14,7 +14,8 @@ const cleanup: (() => Promise<unknown> | void)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 
 /** 父会话可见的全部工具；子会话应只剩 echo 与 web_search。 */
-const PARENT_TOOLS = ["echo", "web_search", "send_message", "auth_grant", "auth_list", "schedule_create", "schedule_control"];
+const PARENT_TOOLS = ["echo", "web_search", "send_message", "auth_grant", "auth_list", "schedule_create", "schedule_control", "mcp_docs_lookup_123456789abc"];
+const MCP_CALLABLE = "mcp_docs_internal_123456789abc";
 const last = (ctx: TranscriptContext) => ctx.messages.at(-1)!;
 
 type Brain = (ctx: TranscriptContext, signal: AbortSignal | undefined) => Message | Promise<Message>;
@@ -26,7 +27,7 @@ async function rig(brain: { current: Brain }, opts: { storage?: Storage; subagen
   const models = createModels(); models.setProvider(faux.provider);
   const registry = createRegistry();
   const stub = (name: string) => defineTool({ name, description: name, parameters: Type.Object({}), execute: async () => ({ output: [{ type: "text" as const, text: name + " ok" }] }) });
-  const base = defineExtension({ name: "base", tools: PARENT_TOOLS.map(stub) });
+  const base = defineExtension({ name: "base", tools: [...PARENT_TOOLS.map(stub), defineTool({ ...stub(MCP_CALLABLE), callers: ["tools"] })] });
   let harness!: Harness;
   const subagent = createSubagentExtension({ getHarness: () => harness, ...opts.subagent });
   registry.install(base); registry.install(subagent);
@@ -62,7 +63,7 @@ function parentBrain(commands: Record<string, [string, JsonObject][]>, seen: str
 
 describe("pi 子 agent 扩展", () => {
   it("排除名单：subagent、send_message、auth_*、schedule_* 不给子会话", () => {
-    for (const name of ["subagent", "send_message", "auth_grant", "auth_revoke", "auth_list", "schedule_create", "schedule_control", "schedule_whatever"])
+    for (const name of ["subagent", "send_message", "auth_grant", "auth_revoke", "auth_list", "schedule_create", "schedule_control", "schedule_whatever", "mcp_unknown_history", MCP_CALLABLE])
       expect(isSubagentExcludedTool(name), name).toBe(true);
     for (const name of ["echo", "web_search", "qq_recent", "generate_image", "bash", "read"]) expect(isSubagentExcludedTool(name), name).toBe(false);
     expect(isSubagentReportRequest(SUBAGENT_REPORT_REQUEST_PREFIX + "3:e9")).toBe(true);
@@ -95,6 +96,7 @@ describe("pi 子 agent 扩展", () => {
     const agent = await sub.agent(context);
     expect(agent.model).toEqual(model);
     expect(agent.tools.map(t => t.name)).toEqual(["echo", "web_search"]);
+    expect(agent.callable.map(t => t.name)).toEqual(["echo", "web_search"]);
     expect(childSeen[0]!.messages.some(m => m.role === "user" && text(m) === "查一下天气")).toBe(true);
     expect((await doc(harness, conv)).children.r1).toMatchObject({ stopped: false, pending: [], last: { status: "done", text: "晴，25 度" } });
   });
