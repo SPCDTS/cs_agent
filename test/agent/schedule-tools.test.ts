@@ -100,7 +100,7 @@ describe("定时工具", () => {
     expect((await f.service.get(first.id))?.status).toBe(updated.status);
   });
 
-  it("授权人失权后仍能停止自己的在途任务；不存在 admission 的定时输入不能控制", async () => {
+  it("授权人失权后仍能停止自己的在途任务；不存在运行记录的定时输入不能控制", async () => {
     const f = await scheduleToolsFixture(), member = f.binding("9");
     await f.grants.panel("auth_grant", { user: "qq:9", caps: ["schedule"] });
     const own = await f.create(member), run = await f.scheduled(own.id, "qq:9");

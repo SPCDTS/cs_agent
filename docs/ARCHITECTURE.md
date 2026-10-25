@@ -223,7 +223,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 - **定义** `SchedulesDoc`（`cs.schedules`，宿主 harness）：`id`、`revision`、`name`（1–64 字）、`prompt`（1–8000 字）、`conversation`（来源会话，不可改）、`rule`（`rrule` 或一次性 `at`，Asia/Shanghai）、`status`（active / paused / completed）、`options`（`stale_after_ms` 默认 10 分钟；`timeout_ms` 仍保存但不限制回合时长）、`next_fire_at`、`runs`（最近 20 条，在途的不裁剪）、`failures`、`created_by`。
 - **校验**：`rrule@2.8.1`，`DTSTART;TZID=Asia/Shanghai`（rrule.js 把北京墙钟放进 UTC 字段，`nextFireAt` 统一减 8 小时）；RRULE 字段白名单、禁止嵌入 DTSTART/TZID、UNTIL 须为 UTC、遍历限时 250 ms；最小间隔 owner 5 分钟、被授权人 30 分钟；被授权人最多 5 条 active；`at` 必须在未来。创建者须是 owner 或持有覆盖来源会话的 `schedule` 授权，非 owner 不得在 owner 线程建任务。
 - **排程**：每条 active 定义一个 background durable 任务 `cs.schedule`：`wait`（检查点 `next_fire_at`，`runtime.sleep`）→ `fire`（一次提交内：重读定义，失效则退出；迟到超过 `stale_after_ms` 记 skipped(stale)，停机期间错过的合并为一条；上一轮仍未结束记 skipped(overlap)；否则接纳并记 queued；从"现在"往后算下一次）。**错过的不补跑。** 服务启动及每 10 分钟巡检，缺失或已终结的排程任务重建。`run_now` 不改 `next_fire_at`。
-- **运行**：接纳时向来源会话投一条定时输入（入站键 `run_` + fire_key 哈希，发送者为创建者），线程忙则排队到空闲。输入外壳：
+- **运行**：接纳时向来源会话投一条定时输入（入站键 `run_` + fire_key 哈希，发送者为创建者），线程忙则排队到空闲；运行记录保存在 session 文档族 `cs.schedule.run`，成员键为入站键，不另建会话。输入外壳：
 
   ```
   [定时任务] <名称> · 计划时间 <MM-DD HH:mm>（北京时间）· 第 n 次 · 创建者 qq:<id>
@@ -234,7 +234,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 
   `send_message` 不带 target 时发回该会话，不 @。权限按创建者求出，无 `auth_*`；创建者已失去权限则本次记 failed 并暂停。
 - **结果**（`run.ts`）：统计该输入所在回合发出的消息：有发送 → `sent`，无 → `silent`（静默，不兜底），回合失败/丢失/投递不确定 → `failed`。sent / silent 清零失败计数；连续 3 次 failed 自动暂停（`pause_reason = 连续 3 次失败`）并告警。
-- **管理**：面板"定时任务"页与 JSON 接口 `/api/schedules` 只支持查看、暂停、恢复、立即运行和删除；创建与修改任务通过聊天工具完成。聊天里 `schedule_create / list / update / pause / resume / delete / run_now`（仅当前的人通过 `canSchedule` 的交互回合可见；owner 管理全部，他人只管自己的）。来源与 `created_by` 取本轮会话与确证的人，模型不能指定。规则使用北京时间 `YYYY-MM-DD HH:mm`；工具说明要求把"家庭群"等目的地先用 `qq_chats` 解析为具体 ref 写进提示词，按需静默的监控注明"无新内容则静默"。定时回合内只开放 `schedule_control({ action: pause | complete, reason })`，目标从本次运行的持久 admission 读取，不打断当前回合。
+- **管理**：面板"定时任务"页与 JSON 接口 `/api/schedules` 只支持查看、暂停、恢复、立即运行和删除；创建与修改任务通过聊天工具完成。聊天里 `schedule_create / list / update / pause / resume / delete / run_now`（仅当前的人通过 `canSchedule` 的交互回合可见；owner 管理全部，他人只管自己的）。来源与 `created_by` 取本轮会话与确证的人，模型不能指定。规则使用北京时间 `YYYY-MM-DD HH:mm`；工具说明要求把"家庭群"等目的地先用 `qq_chats` 解析为具体 ref 写进提示词，按需静默的监控注明"无新内容则静默"。定时回合内只开放 `schedule_control({ action: pause | complete, reason })`，目标按本轮定时输入键从运行文档读取，不打断当前回合。
 
 ## 7. 技能（skills）
 
@@ -269,7 +269,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 
 | 位置 | 内容 |
 |---|---|
-| `data/agent.sqlite` | 宿主 harness：`cs.thread-host*`（会话宿主与输入）、`cs.grants`、`cs.schedules` / `cs.schedule` / `cs.scheduled-run` / `cs.scheduled-admission` |
+| `data/agent.sqlite` | 宿主 harness：`cs.thread-host*`（会话宿主与输入）、`cs.grants`、`cs.schedules` / `cs.schedule` / `cs.schedule.run` |
 | `data/pi.sqlite`、`pi-threads.json` | pi 长期会话与子 agent 会话、`cs.pi.threads(.archive)`；JSON 是映射镜像 |
 | `data/qq-bridge.sqlite` | `inbound`、`outbox`、`seen_messages`、`send_log` / `send_breakers`；旧版遗留的 `tickets` 表原样留在磁盘上，不再读写 |
 | `data/qq-messages.sqlite` | 消息库（机器人消息带 Outbox 行键 `messages.outbox_key`）、摘要、`scope_names`、媒体引用 |

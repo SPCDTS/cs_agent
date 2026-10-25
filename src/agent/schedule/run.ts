@@ -1,7 +1,7 @@
 import { isOwnerActor } from "../../shared/owners.js";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { createHash } from "node:crypto";
-import { defineDoc, defineDocFamily, type ConversationId, type Harness, type Tx } from "@earendil-works/pi-durable";
+import { defineDocFamily, type Harness, type Tx } from "@earendil-works/pi-durable";
 import type { Channel } from "../../channel/types.js";
 import { isScope } from "../../context/access.js";
 import { log } from "../../shared/log.js";
@@ -12,7 +12,7 @@ import type { ScheduleConversation, ScheduledFire, ScheduledRunAdmitter, Schedul
 
 /**
  * 定时运行（docs/ARCHITECTURE.md §6）：到点向来源会话的 ThreadHost 投一条定时输入（kind=scheduled，发送者 = 创建者），
- * 线程忙则排队等空闲。运行记录 cs.scheduled-run 保留；结果按该输入所在回合发出的消息数统计：
+ * 线程忙则排队等空闲。运行记录 cs.schedule.run 按输入键保留；结果按该输入所在回合发出的消息数统计：
  * 有发送 → sent，无 → silent，回合失败 / 丢失或投递不确定 → failed。
  * 第 2 阶段只统计输入所在的那一个回合，不含其后由子 agent 唤醒的回合。
  */
@@ -24,7 +24,7 @@ type RunState = {
   conversation: ScheduleConversation;
   created_by: string;
   timeout_ms: number;
-  /** 定时输入的入站键（run_ 开头），也是 admission 的成员键 */
+  /** 定时输入的入站键（run_ 开头），也是运行文档的成员键 */
   input_key?: string;
   started_at?: number;
   /** 输入所在回合（送达后端时写入） */
@@ -36,15 +36,11 @@ type RunState = {
   paused?: boolean;
 };
 
-export const ScheduledRunDoc = defineDoc<RunState>({
-  kind: "cs.scheduled-run", version: 1, scope: "conversation", history: "latest", fork: "initial",
+// tx.doc 会创建缺失的成员；空 schedule_id 表示尚未登记，不能当作已有运行。
+export const ScheduleRunDoc = defineDocFamily<RunState, Record<string, never>>({
+  kind: "cs.schedule.run", version: 1, scope: "session", family: true,
   initial: () => ({ schedule_id: "", fire_key: "", fire_at: 0, ordinal: 0,
     conversation: "owner", created_by: "", timeout_ms: 300_000 }),
-});
-
-/** 每次触发一份幂等凭据（成员键 = 定时输入键），指向保存运行文档的会话。 */
-const AdmissionDoc = defineDocFamily<{ conversationId?: number }, Record<string, never>>({
-  kind: "cs.scheduled-admission", version: 1, scope: "session", family: true, initial: () => ({}),
 });
 
 /** 定时输入的确定性键：run_ + sha256(fire_key) 前 40 位。 */
@@ -52,14 +48,12 @@ export function scheduledInputKey(fireKey: string): string {
   return "run_" + createHash("sha256").update(fireKey).digest("hex").slice(0, 40);
 }
 
-/** 从已提交 admission 反查本次运行；工具参数不能指定或覆盖目标。 */
+/** 按定时输入键读取已登记的运行；工具参数不能指定或覆盖目标。 */
 export async function readScheduledRun(harness: Pick<Harness, "snapshot">, key: string) {
   if (!/^run_[a-f0-9]{40}$/.test(key)) return undefined;
-  const admission = await harness.snapshot(AdmissionDoc, key, BACKGROUND_CONTEXT);
-  if (admission?.conversationId === undefined) return undefined;
-  const run = await harness.snapshot(ScheduledRunDoc, admission.conversationId as ConversationId, BACKGROUND_CONTEXT);
+  const run = await harness.snapshot(ScheduleRunDoc, key, BACKGROUND_CONTEXT);
   return run?.schedule_id && run.fire_key === `${run.schedule_id}@${run.fire_at}` && scheduledInputKey(run.fire_key) === key
-    ? { ...run, conversationId: admission.conversationId as ConversationId } : undefined;
+    ? run : undefined;
 }
 
 function beijingTime(ms: number): string {
@@ -76,7 +70,7 @@ export function scheduledInput(fire: ScheduledFire): string {
 
 export interface ScheduledRuntimeOptions {
   getChannel(): Pick<Channel, "inbox" | "outbox">;
-  /** 保存运行文档与 admission 的派发 harness */
+  /** 保存运行文档的派发 harness */
   getHarness(): Pick<Harness, "snapshot" | "commit">;
   /** 投递定时输入（Inbox → ThreadHost） */
   deliver(key: string): Promise<void>;
@@ -120,39 +114,35 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
       text: scheduledInput(fire), time: Math.floor(fire.fire_at / 1000) });
     return {
       async discard(transaction) {
-        const known = await (transaction as Tx).doc(AdmissionDoc, key, {});
+        const known = await (transaction as Tx).doc(ScheduleRunDoc, key, {});
         // 未被采用的预备输入直接结束，恢复不会把它当作待投递输入。
-        if (known.conversationId === undefined) opts.getChannel().inbox.markInbound([key], "done");
+        if (known.schedule_id === "") opts.getChannel().inbox.markInbound([key], "done");
       },
       async admit(transaction, candidate) {
         if (candidate.fire_key !== fire.fire_key) throw new Error("预备输入与触发标识不一致");
-        const tx = transaction as Tx;
-        const known = await tx.doc(AdmissionDoc, key, {});
-        if (known.conversationId !== undefined) return { key };
+        const known = await (transaction as Tx).doc(ScheduleRunDoc, key, {});
+        if (known.schedule_id !== "") return { key };
         // 已结束的孤儿输入不得重新执行。
         if (opts.getChannel().inbox.getInbound(key)?.state !== "queued") return { key, skipped: true };
-        const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-        Object.assign(await tx.doc(ScheduledRunDoc, conversation.id), {
+        Object.assign(known, {
           schedule_id: fire.schedule.id, fire_key: fire.fire_key, fire_at: fire.fire_at,
           ordinal: fire.ordinal, conversation: fire.schedule.conversation, created_by: fire.schedule.created_by,
           timeout_ms: fire.schedule.options.timeout_ms, input_key: key,
         });
-        known.conversationId = conversation.id;
         return { key };
       },
     };
   }
 
-  async function update(id: ConversationId, change: (run: RunState) => void): Promise<RunState> {
-    await opts.getHarness().commit(async tx => { change(await tx.doc(ScheduledRunDoc, id)); }, ctx);
-    return (await opts.getHarness().snapshot(ScheduledRunDoc, id, ctx))!;
+  async function update(key: string, change: (run: RunState) => void): Promise<RunState> {
+    await opts.getHarness().commit(async tx => { change(await tx.doc(ScheduleRunDoc, key, {})); }, ctx);
+    return (await opts.getHarness().snapshot(ScheduleRunDoc, key, ctx))!;
   }
 
   /** 计算并回写结果；recordRun 按 fire_key 幂等覆盖，暂停回调也必须幂等。 */
   async function finish(key: string, outcome?: { status: TurnStatus; turnId?: string }): Promise<void> {
     const found = await readScheduledRun(opts.getHarness(), key);
     if (!found) return;
-    const { conversationId: id } = found;
     let run: RunState = found;
     if (!run.result) {
       const turnId = outcome?.turnId ?? run.turn_id;
@@ -168,15 +158,15 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
         ...(failed && !run.denied ? { reason: "backend_failed" as const } : {}),
         note: run.denied ? "无权：创建者已无定时任务权限" : turnFailed ? (outcome?.status === "lost" ? "回合中断" : "回合失败") : "",
       };
-      run = await update(id, state => { state.result = record; });
+      run = await update(key, state => { state.result = record; });
     }
     if (run.denied && !run.paused) {
       await opts.pauseSchedule(run.schedule_id, "无权：创建者已无定时任务权限");
-      run = await update(id, state => { state.paused = true; });
+      run = await update(key, state => { state.paused = true; });
     }
     if (!run.recorded) {
       await opts.recorder.recordRun(run.schedule_id, run.result!);
-      run = await update(id, state => { state.recorded = true; });
+      run = await update(key, state => { state.recorded = true; });
       trace.event(run.turn_id ? "turn:" + run.turn_id : "in:" + key, "schedule_run", { status: run.result!.status, detail: {
         fire_key: run.fire_key, ordinal: run.ordinal, status: run.result!.status, sent: run.result!.sent, terminal: true,
       } });
@@ -191,7 +181,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
     const run = await readScheduledRun(opts.getHarness(), key);
     if (!run) return;
     if (run.result || run.denied) { await finish(key); return; }
-    // 升级前登记的运行没有定时输入：按中断结束，避免永久占用重叠判定。
+    // 已登记的运行丢失定时输入时按中断结束，避免永久占用重叠判定。
     if (!opts.getChannel().inbox.getInbound(key)) { await finish(key, { status: "lost" }); return; }
     const state = await opts.inputState?.(key);
     if (state === "done") {
@@ -221,7 +211,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
     // 已结算的运行不再执行
     if (!run.denied && !run.result) {
       if (await allowed(run)) return true;
-      await update(run.conversationId, s => { s.denied = true; s.started_at ??= Date.now(); });
+      await update(key, s => { s.denied = true; s.started_at ??= Date.now(); });
     }
     opts.getChannel().inbox.markInbound([key], "done");
     await finish(key);
@@ -232,7 +222,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
   async function delivered(key: string, turnId: string): Promise<void> {
     const found = await readScheduledRun(opts.getHarness(), key);
     if (!found || found.result) return;
-    const run = await update(found.conversationId, s => { s.started_at ??= Date.now(); s.turn_id ??= turnId; });
+    const run = await update(key, s => { s.started_at ??= Date.now(); s.turn_id ??= turnId; });
     await opts.recorder.recordRun(run.schedule_id, {
       fire_key: run.fire_key, fire_at: run.fire_at, status: "running", started_at: run.started_at, input_key: key,
     });

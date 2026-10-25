@@ -349,7 +349,7 @@ it("prepare 不占提交锁；准备期间定义变更，立即运行拒绝旧�
   expect((await r.service.get(s.id))?.runs).toEqual([]);
 });
 
-it.each(["binding", "admit"] as const)("真实 %s 异常不会终结排程，也不留下待投递输入或部分 admission", async stage => {
+it.each(["binding", "admit"] as const)("真实 %s 异常不会终结排程，也不留下待投递输入或部分运行记录", async stage => {
   const r = await rig(), s = await r.service.create("qq:1", input({ conversation: "group:7" }));
   if (stage === "binding") await r.harness.commit(async tx => {
     (await tx.doc(SchedulesDoc)).schedules[s.id]!.conversation = "group:invalid" as never;
@@ -361,7 +361,7 @@ it.each(["binding", "admit"] as const)("真实 %s 异常不会终结排程，也
       r.launcher.prepare = prepare;
       return { ...prepared, admit: async (tx, fire) => {
         await prepared.admit(tx, fire);
-        throw new Error("admission 写入后失败");
+        throw new Error("运行记录写入后失败");
       } };
     };
   }
@@ -397,6 +397,7 @@ it.each(["revision", "stale", "overlap"] as const)("自动 fire 在准备后判�
     commit: (change: Parameters<typeof r.harness.commit>[0]) => r.harness.commit(change, ctx),
   } as never, ctx);
   expect(r.store.getInbound(scheduledInputKey(`${s.id}@${at}`))?.state).toBe("done");
+  expect(await readScheduledRun(r.harness, scheduledInputKey(`${s.id}@${at}`))).toBeUndefined();
   expect(r.adapter.turns).toEqual([]);
 });
 
@@ -410,4 +411,41 @@ it("同一 fire 并发 runNow 的清理不会结束已被另一次提交接管�
   await r.scheduled.launch(results[0]!.input_key!);
   await r.settle();
   expect(r.adapter.turns.filter(t => t.ctx.kind === "scheduled")).toHaveLength(1);
+});
+
+it("同一 fire 重复登记只保留一份运行，不创建会话或重复执行", async () => {
+  const r = await rig(), s = await r.service.create("qq:1", input({ conversation: "group:7" }));
+  r.launchEnabled = false;
+  const before = await r.harness.commit(tx => tx.scanConversations({}, 100), ctx);
+  const queued = await r.service.runNow("qq:1", s.id), key = queued.input_key!;
+  const first = await readScheduledRun(r.harness, key);
+  expect(first).toMatchObject({ schedule_id: s.id, fire_key: queued.fire_key, input_key: key, ordinal: 1 });
+  expect(first).not.toHaveProperty("conversationId");
+  const prepared = await r.scheduled.prepare({ schedule: s, fire_at: START, fire_key: queued.fire_key, ordinal: 2 });
+  await r.harness.commit(async tx => {
+    expect(await prepared.admit(tx, { schedule: s, fire_at: START, fire_key: queued.fire_key, ordinal: 2 })).toEqual({ key });
+    await prepared.discard?.(tx);
+  }, ctx);
+  expect(await readScheduledRun(r.harness, key)).toEqual(first);
+  expect(r.store.getInbound(key)?.state).toBe("queued");
+  const after = await r.harness.commit(tx => tx.scanConversations({}, 100), ctx);
+  expect(after.items).toHaveLength(before.items.length);
+  expect(after).toEqual(before);
+  await r.scheduled.launch(key);
+  await r.scheduled.launch(key);
+  await r.settle();
+  expect(r.adapter.turns).toHaveLength(1);
+  expect((await r.service.get(s.id))?.runs).toEqual([expect.objectContaining({ fire_key: queued.fire_key, status: "sent" })]);
+});
+
+it("丢弃未登记的预备输入后重复丢弃、登记都不会重新执行", async () => {
+  const r = await rig(), s = await r.service.create("qq:1", input({ conversation: "group:7" }));
+  const fire = { schedule: s, fire_at: START, fire_key: s.id + "@" + START, ordinal: 1 };
+  const key = scheduledInputKey(fire.fire_key), prepared = await r.scheduled.prepare(fire);
+  await r.harness.commit(async tx => { await prepared.discard?.(tx); await prepared.discard?.(tx); }, ctx);
+  expect(r.store.getInbound(key)?.state).toBe("done");
+  expect(await r.harness.commit(tx => prepared.admit(tx, fire), ctx)).toEqual({ key, skipped: true });
+  expect(await readScheduledRun(r.harness, key)).toBeUndefined();
+  await r.scheduled.launch(key);
+  expect(r.adapter.turns).toEqual([]);
 });
