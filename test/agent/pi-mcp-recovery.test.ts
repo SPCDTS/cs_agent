@@ -80,5 +80,12 @@ describe("Pi MCP 真进程强杀恢复", () => {
     }
     expect(server.calls).toBe(1);
     expect(server.messages.filter(message => "method" in message && message.method === "tools/call")).toHaveLength(1);
+    // 再次重启：快照里仍有这条恢复结果，但终态已由产生它的进程报告过。
+    const restarted = worker("recover", directory, server.config.transport.url);
+    await restarted.wait("recovered");
+    await restarted.exit;
+    expect(restarted.messages.find(message => message.phase === "recovered")).toMatchObject({
+      results: result.results, terminals: [] });
+    expect(server.calls).toBe(1);
   });
 });

@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels, fauxProvider, Type, type FauxResponseFactory } from "@earendil-works/pi-ai";
-import { AgentDoc, createRegistry, defineExtension, defineTool, Harness, ToolResultEntry, type Conversation, type JsonObject } from "@earendil-works/pi-durable";
+import { AgentDoc, createRegistry, defineExtension, defineTool, Harness, ToolResultEntry, watchEvents, type Conversation, type JsonObject } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -83,11 +83,12 @@ async function rig(config: McpConfigState, db = path.join(tmp("cs-pi-mcp-"), "pi
   const base = defineExtension({ name: "base", tools: [defineTool({ name: "local", description: "本地工具", parameters: Type.Object({}),
     execute: async () => ({ output: [{ type: "text", text: "本地" }] }) })] });
   registry.install(base);
-  const harness = await Harness.open(await openNodeSqliteStorage(db), { models, registry,
+  const storage = await openNodeSqliteStorage(db);
+  const harness = await Harness.open(storage, { models, registry,
     settings: { extensions: [base], toolExecution: "sequential", retry: { maxRetries: 0 } } }, context);
   const bindings = new Map<number, PiCallBinding>();
   let owners = ["123"];
-  const mcp = await PiMcp.attach({ registry, harness, config, secrets: { readReferencedVariable: () => undefined }, owners: () => owners,
+  const mcp = await PiMcp.attach({ registry, harness, storage, config, secrets: { readReferencedVariable: () => undefined }, owners: () => owners,
     binding: async id => bindings.get(id) });
   let closed = false;
   const close = async () => { if (closed) return; closed = true; mcp.beginShutdown(); await harness.close(context); await mcp.close(); };
@@ -306,6 +307,34 @@ describe("Pi MCP 原生工具与持久目录", () => {
     expect(await mcpNames(restored)).toEqual([name]); expect(s.state.sessions).toBe(connects);
     await second.run(restored, name!); expect(s.state.calls).toBe(0);
     expect((await results(restored))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_denied" })]));
+  });
+
+  it("重启后历史 tool_unavailable 不再报告终态，本进程新结果只报告一次", async () => {
+    const s = await server(), first = await rig(s.config()), c = await first.create();
+    await first.configure(c); const [old] = await mcpNames(c), id = c.id;
+    s.state.version++;
+    await first.mcp.configure({ conversation: c, turn: owner(), refresh: true }, context);
+    await first.run(c, old!);
+    await first.close();
+    const terminals: Record<string, unknown>[] = [];
+    const untap = trace.tap(event => { if (event.stage === "mcp_recovered_terminal") terminals.push(event.detail); });
+    cleanup.push(async () => untap());
+    const second = await rig(s.config(), first.db), restored = (await second.harness.conversation(id, context))!;
+    second.bindings.set(Number(id), owner());
+    const stream = await watchEvents(second.harness, id, context);
+    cleanup.push(() => stream.stop());
+    expect(stream.snapshot.entries.filter(ToolResultEntry.is)).toHaveLength(1);
+    second.mcp.observeEvent(Number(id), stream.snapshot);
+    stream.start(async events => { for (const event of events) second.mcp.observeEvent(Number(id), event); });
+    await second.run(restored, old!);
+    const [historical, fresh] = await results(restored);
+    for (const entry of [historical, fresh]) {
+      expect(entry?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "tool_unavailable" })]));
+    }
+    await vi.waitFor(() => expect(terminals).toHaveLength(1));
+    second.mcp.observeEvent(Number(id), { type: "entry_appended", entry: fresh! });
+    expect(terminals).toEqual([expect.objectContaining({ entryId: fresh!.id, code: "tool_unavailable" })]);
+    expect(s.state.calls).toBe(0);
   });
 
   it("更新 MCP 选择保留已有 add/remove 内容", async () => {

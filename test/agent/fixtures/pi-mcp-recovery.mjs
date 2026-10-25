@@ -26,7 +26,8 @@ async function main() {
       credential: { kind: "none" }, tools: { allow: ["first"] }, access: { kind: "owner-private" }, replay: "unsafe" }],
   });
   if (config.kind === "invalid") throw new Error("fixture_config_invalid");
-  const harness = await Harness.open(await openNodeSqliteStorage(path.join(directory, "pi.sqlite")), {
+  const storage = await openNodeSqliteStorage(path.join(directory, "pi.sqlite"));
+  const harness = await Harness.open(storage, {
     models, registry, settings: { extensions: [], retry: { maxRetries: 0 } },
   }, context);
   let mcp, stream;
@@ -35,7 +36,7 @@ async function main() {
     if (event.stage === "mcp_recovered_terminal") terminals.push(event.detail.code);
   });
   try {
-    mcp = await PiMcp.attach({ registry, harness, config, secrets: { readReferencedVariable: () => undefined },
+    mcp = await PiMcp.attach({ registry, harness, storage, config, secrets: { readReferencedVariable: () => undefined },
       owners: () => ["1"], binding: async () => binding });
     const metadataFile = path.join(directory, "conversation.json");
     let conversation;

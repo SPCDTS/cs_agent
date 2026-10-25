@@ -230,7 +230,7 @@ export class PiBackend implements ThreadAdapter {
     backend = new PiBackend(harness, { ...opts, storage });
     try {
       backend.mcp = await PiMcp.attach({
-        registry, harness,
+        registry, harness, storage,
         config: opts.mcp?.config ?? { kind: "disabled", reason: "PI_MCP_CONFIG 未设置" },
         secrets: opts.mcp?.secrets ?? { readReferencedVariable: () => undefined },
         owners: () => backend.owners(), binding,
