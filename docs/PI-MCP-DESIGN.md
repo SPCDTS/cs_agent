@@ -1,12 +1,12 @@
 # Pi MCP 接入设计
 
-状态：首版已实现，完成本地协议、恢复测试及实际局域网服务接入验证。更新：2026-10-24。设计基线：cs-agent `7372dcf`、pi-durable `1.3.0` 与 MCP TypeScript SDK `1.32.1`。启用步骤见 [使用说明](PI-MCP.md)。
+状态：首版已实现，完成本地协议、恢复测试及实际局域网服务接入验证。更新：2026-10-25（移除 stdio 传输）。设计基线：cs-agent `7372dcf`、pi-durable `1.3.0` 与 MCP TypeScript SDK `1.32.1`。启用步骤见 [使用说明](PI-MCP.md)。
 
 ## 1. 设计结论
 
 在 Pi 后端内部增加 `PiMcp` 模块，把 MCP Server 提供的每个工具包装成一个带原始参数 schema 的 Pi 原生工具。连接、目录、凭据、权限与结果转换由这个模块管理；调用执行、检查点和恢复终态继续交给 Pi ToolTask。
 
-首版支持 **stdio + Streamable HTTP、静态凭据、tools 发现与调用、目录刷新、会话隔离、取消、故障恢复和可观测性**。不实现 OAuth。所有 MCP 工具固定为 `replay: "unsafe"`，不新增调用账本或第二套任务状态机。
+首版支持 **Streamable HTTP、静态凭据、tools 发现与调用、目录刷新、会话隔离、取消、故障恢复和可观测性**。不实现 stdio 与 OAuth。所有 MCP 工具固定为 `replay: "unsafe"`，不新增调用账本或第二套任务状态机。
 
 权限首版限定为 **owner 私聊主会话**，子 agent、普通私聊和群聊均不自动获得外部账号能力。后续授权与委派的接口约束见第 13 节。这是首版范围选择，不是 Pi 或 MCP 的技术限制。
 
@@ -27,16 +27,16 @@ flowchart TB
   A --> D
 ```
 
-图中 PiMcp 写入的是目录定义；ToolTask 写入的是调用检查点和结果。Client、socket、进程、HTTP session 和浏览器状态不持久化。该图仅表达主要调用关系，具体模块归属见第 3 节。
+图中 PiMcp 写入的是目录定义；ToolTask 写入的是调用检查点和结果。Client、socket、HTTP session 和浏览器状态不持久化。该图仅表达主要调用关系，具体模块归属见第 3 节。
 
 ## 2. 能力范围
 
 | 能力 | 本设计首版行为 |
 | --- | --- |
 | 初始化与版本协商 | 使用已锁定版本的 SDK；协商不兼容时停止该连接 |
-| stdio | 启动管理员配置的本地命令，管理进程树与关闭 |
+| stdio | 不支持；配置中 `kind: "stdio"` 按无效配置拒绝 |
 | Streamable HTTP | 支持 JSON 和 SSE 响应；SSE 是此传输的一部分 |
-| 认证 | 无认证、固定 Bearer/API key/请求头、stdio 环境变量秘密 |
+| 认证 | 无认证、固定 Bearer/API key/请求头 |
 | tools | 完整分页发现、白名单筛选、调用、目录变更通知 |
 | 结果 | text、image、structuredContent；其他内容明确降级 |
 | 取消与进度 | 传播取消信号；进度有界接收，不能作为成功依据 |
@@ -59,7 +59,7 @@ flowchart TB
 | `src/agent/pi-mcp/config.ts` | 严格解析配置、默认值、限额和秘密引用；从 schema 推导类型 |
 | `src/agent/pi-mcp/catalog.ts` | 不可变目录、命名、schema 兼容验证、持久化与版本选择 |
 | `src/agent/pi-mcp/connection.ts` | 单连接 SDK Client、分页与初始化；队列和连接隔离在 index.ts 中管理 |
-| `src/agent/pi-mcp/transport-*.ts` | HTTP/stdio 原始消息限额、进程回收；Windows Job 为静态辅助脚本 |
+| `src/agent/pi-mcp/transport-http.ts` | HTTP JSON/SSE 原始消息限额、拒绝重定向与跨源 |
 | `src/agent/pi-mcp/schema.ts` | 严格 draft-07 子集验证与编译 |
 | `src/agent/pi-mcp/result.ts` | MCP 结果验证、Pi 输出转换、内容预算与错误分类；纯边界函数 |
 | `src/config.ts` | 只增加 `PI_MCP_CONFIG` 路径，不导入 agent 实现 |
@@ -77,7 +77,6 @@ flowchart TB
 const mcp = await PiMcp.attach({
   registry, harness, config, secrets, owners: currentOwners,
   binding: id => backend.binding(id),
-  workspaceDir: resolveSessionWorkspace,
 });
 
 // configureTools：已有会话、新会话及获准的唤醒回合都经过这里。
@@ -89,37 +88,19 @@ await harness.close(context);
 await mcp.close();
 ```
 
-这是调用形状，具体工作目录由后端的执行环境函数提供。`backend.binding` 必须在第一次使用前完成实例绑定，不能在构造期间触发尚未赋值的 backend。
+这是调用形状。`backend.binding` 必须在第一次使用前完成实例绑定，不能在构造期间触发尚未赋值的 backend。
 
 ## 4. 配置契约：不依赖 OAuth 或新密钥平台
 
 `PI_MCP_CONFIG` 未设置时不开启新 MCP 调用。设置后读取管理员维护的 UTF-8 JSON 文件；不从聊天消息、模型参数或工作区生成物加载服务配置。
 
-完整示例保存在 [config.example.json](design/pi-mcp/config.example.json)。以下是其中两种传输的核心配置；服务路径与域名都是占位示例。
+完整示例保存在 [config.example.json](design/pi-mcp/config.example.json)。以下是其核心配置；域名是占位示例。
 
 ```json
 {
   "version": 1,
   "enabled": true,
   "servers": [
-    {
-      "id": "workspace",
-      "enabled": true,
-      "transport": {
-        "kind": "stdio",
-        "command": "D:/tools/mcp-files/server.exe",
-        "args": ["--root", "${sessionWorkspace}"],
-        "cwd": "${sessionWorkspace}",
-        "inheritEnv": ["SystemRoot", "TEMP", "TMP"],
-        "env": {},
-        "secretEnv": {},
-        "execution": "trusted-host"
-      },
-      "credential": { "kind": "none" },
-      "tools": { "allow": ["read_file", "list_directory"] },
-      "access": { "kind": "owner-private", "allowScheduled": false, "allowWake": false },
-      "replay": "unsafe"
-    },
     {
       "id": "docs",
       "enabled": true,
@@ -141,16 +122,14 @@ await mcp.close();
 
 配置语义：
 
-1. `secretHeaders` / `secretEnv` 的值是宿主环境变量名，解析函数仅读取配置引用的变量。示例 `DOCS_AUTH_HEADER` 存完整的 `Bearer …` 值；API key 同理。秘密值不写入配置快照、工具参数、目录或审计。
+1. `secretHeaders` 的值是宿主环境变量名，解析函数仅读取配置引用的变量。示例 `DOCS_AUTH_HEADER` 存完整的 `Bearer …` 值；API key 同理。秘密值不写入配置快照、工具参数、目录或审计。
 2. `credential.accountId` 是管理员声明的逻辑账号，`revision` 是凭据/账号轮换版本。替换账号、token 或改变权限时递增版本并重启；首版不在进程中自动刷新环境秘密。该字段不验证第三方账号归属，归属由管理员配置保证。
 3. `tools.allow` 是远端原名的精确白名单；空列表表示无工具，不支持隐式全部放行。发现新工具不会自动增加权限。
 4. `owner-private` 同时要求真实 owner 身份、`threadKey === "owner"`、主会话。owner 在群中说话也不满足；未知身份不得回退成 owner。
 5. 定时和唤醒默认拒绝。启用对应选项后仍要求宿主可验证的原 owner 身份、当前 owner 配置和 owner 私聊范围全部匹配。继承定时身份的 wake 必须同时满足两个开关。不能仅按线程名信任唤醒。
 6. 首版子 agent 始终拒绝，无配置开关可绕过。扩展委派必须先完成第 13 节的身份快照与工具过滤。
-7. `trusted-host` 表示管理员允许该 MCP 程序按宿主 OS 用户权限运行。`cwd`、`--root` 和 MCP roots 都不是 OS 沙箱；Pi bash 的 bwrap 不覆盖此进程。需要强隔离时由管理员提供已隔离的可执行包装器或容器入口；将来增加 sandbox profile 必须真实验证，不能静默退回宿主执行。
-8. stdio 使用绝对可执行路径、参数数组及 `shell:false`，不自动安装包或运行 `npx …@latest`。只有整个参数或 cwd 的 `${sessionWorkspace}` 占位符可展开，值来自宿主会话目录；不做任意模板执行。仅继承列出的环境变量，SDK 默认环境合并行为也必须验证。
-9. HTTP 默认 HTTPS；loopback 需显式设置 `allowLoopbackHttp`，局域网 RFC1918 IPv4 字面地址需显式设置 `allowPrivateNetworkHttp`。私网开关不允许公网、链路本地地址或域名。禁止 URL 内嵌密码；固定 origin，不跟随重定向，不能把认证头发送到其他来源。禁止覆盖 SDK 管理的协议、session、Host、Content-Length 等 header。敏感 header 只能用秘密引用。
-10. Zod 严格拒绝未知字段、重复 id、非法限额、非法路径、`replay: safe` 和 OAuth 配置。全局结构错误时整个 MCP 禁用并明确告警；单服务缺秘密/连不上只降级该服务。本地 Pi 工具继续工作，不静默改用别的账号。文件未设置、禁用或损坏时仍恢复已有目录以结算旧任务，但不给新回合选择工具。
+7. HTTP 默认 HTTPS；loopback 需显式设置 `allowLoopbackHttp`，局域网 RFC1918 IPv4 字面地址需显式设置 `allowPrivateNetworkHttp`。私网开关不允许公网、链路本地地址或域名。禁止 URL 内嵌密码；固定 origin，不跟随重定向，不能把认证头发送到其他来源。禁止覆盖 SDK 管理的协议、session、Host、Content-Length 等 header。敏感 header 只能用秘密引用。
+8. Zod 严格拒绝未知字段、重复 id、非法限额、stdio 传输、`replay: safe` 和 OAuth 配置。全局结构错误时整个 MCP 禁用并明确告警；单服务缺秘密/连不上只降级该服务。本地 Pi 工具继续工作，不静默改用别的账号。文件未设置、禁用或损坏时仍恢复已有目录以结算旧任务，但不给新回合选择工具。
 
 配置文件、秘密注入和服务发布由运维管理；首版不增加聊天内的“安装 MCP”或“修改命令”入口。
 
@@ -207,7 +186,7 @@ MCP tools/call 不携带可强制服务端校验的 schema 版本。客户端能
 
 在 `pi.sqlite` 中新增 session-scoped 的 `cs.pi.mcp.catalogs` 文档，version=1，由 PiMcp 单独写入。首版可以用一个有界的 revision map，减少索引与定义之间的同步状态；规模确有需要时再改 doc family，并提供迁移。
 
-每版保存目录摘要、作用域摘要、服务 id、配置摘要、原始 schema、原名、描述和适配版本。配置摘要包含服务/账号引用版本；adapterVersion=1 按旧的整目录命名算法恢复，adapterVersion=2 按单工具契约恢复，不能用新算法重算旧名称。外部业务工具统一指定 `replay: unsafe`，本地目录刷新工具为 safe。不保存秘密值、HTTP sessionId、socket 或 OS 进程。会话的 extension 选择继续使用 Pi 自带配置文档，不复制一套选择状态。
+每版保存目录摘要、作用域摘要、服务 id、配置摘要、原始 schema、原名、描述和适配版本。配置摘要包含服务/账号引用版本；adapterVersion=1 按旧的整目录命名算法恢复，adapterVersion=2 按单工具契约恢复，不能用新算法重算旧名称。外部业务工具统一指定 `replay: unsafe`，本地目录刷新工具为 safe。不保存秘密值、HTTP sessionId 或 socket。会话的 extension 选择继续使用 Pi 自带配置文档，不复制一套选择状态。
 
 ToolTask 检查点与结果继续由 Pi 保存。正常工具参数/有界结果会进入 Pi 对话历史，因此必须按现有会话历史的访问控制和备份规则管理；“审计不采正文”不代表数据库没有工具内容。
 
@@ -265,9 +244,9 @@ AbortSignal 传播到 SDK，并尽力发 MCP cancellation；本地等待有截�
 1. `pi.beginShutdown()` 同时关闭 MCP 新准入、发现及后台刷新。
 2. 关闭派发 Harness，防止 Pi 退出造成的等待错误被保存为派发失败。
 3. 关闭 Pi Harness，让运行中的 ToolTask 按既有规则停止/保留检查点。
-4. 最后限时关闭 MCP Client/transport；HTTP session 终止为 best effort；stdio 先正常关闭，再终止专属进程树。
+4. 最后限时关闭 MCP Client/transport；HTTP session 终止为 best effort。
 
-`close()` 必须可重复；初始化中途失败也进入同一路径清理。Windows 与 Linux 分别验证进程树清理，不以杀死直接子进程代替回收整棵树。
+`close()` 必须可重复；初始化中途失败也进入同一路径清理。
 
 ## 10. 内容转换与资源限额
 
@@ -285,7 +264,7 @@ Pi 模型主要读取 `output`，不能只保存 structuredContent。结构化�
 
 远端描述、instructions、日志和结果均是不可信资料。远端 instructions 不直接拼入系统提示，结果中的指令不能修改权限、服务配置或安全策略。
 
-建议初始限额如下。这些是工程起始值，用于限制进程数、内存和模型上下文；不是性能测量结论，实现时用边界测试验证。
+建议初始限额如下。这些是工程起始值，用于限制连接数、内存和模型上下文；不是性能测量结论，实现时用边界测试验证。
 
 | 项目 | 默认值 | 达限行为 |
 | --- | --- | --- |
@@ -301,11 +280,11 @@ Pi 模型主要读取 `output`，不能只保存 structuredContent。结构化�
 | 输出文本 / 结构化结果 | 32 KiB / 256 KiB | 文本标截断 / 结构化拒绝 |
 | 图片 | 最多 2 张，每张 5 MiB，内容解码总量 8 MiB | 省略超额内容并提示 |
 | 持久目录 | 最多 128 版、总计 32 MiB | 先按引用回收；仍超限则拒绝新版本并告警 |
-| 关闭宽限 | 每连接 3 秒，总体 10 秒 | 强制回收专属进程，不无限阻塞 |
+| 关闭宽限 | 每连接 3 秒，总体 10 秒 | 放弃等待并释放连接，不无限阻塞 |
 
-原始大小限制必须在 JSON 解析之前生效：stdio 限制单行协议帧，HTTP 限制读取的 JSON/SSE event，同时约束缓冲区。仅在 `client.callTool()` 返回后检查不构成内存上限。SDK 没有可用钩子时实现小型受限 transport 包装器；不要访问 SDK 私有字段来假装已经限制。
+原始大小限制必须在 JSON 解析之前生效：HTTP 限制读取的 JSON/SSE event，同时约束缓冲区。仅在 `client.callTool()` 返回后检查不构成内存上限。SDK 没有可用钩子时实现小型受限 transport 包装器；不要访问 SDK 私有字段来假装已经限制。
 
-stdio stderr 只排空，不存储；协议进度不写正文日志。单帧在解析前限量，连续进度不能重置总调用超时。
+协议进度不写正文日志。单条消息在解析前限量，连续进度不能重置总调用超时。
 
 ## 11. 审计与运维
 
@@ -315,7 +294,7 @@ stdio stderr 只排空，不存储；协议进度不写正文日志。单帧在�
 
 unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterTool。恢复中断指标由现有会话 entry/event observer 识别 MCP ToolResult 的终态补齐，按 taskId/结果 entryId 去重；不能只统计 afterTool。
 
-服务状态至少包含：disabled、connecting、ready、degraded、auth_failed；附工具数、目录版本、最后成功时间、脱敏错误类别与连接数。告警关注持续不可用、unknown、目录/连接上限、进程清理失败。面板只读展示，不增加能直接改命令或释放未知操作的普通聊天权限。
+服务状态至少包含：disabled、connecting、ready、degraded、auth_failed；附工具数、目录版本、最后成功时间、脱敏错误类别与连接数。告警关注持续不可用、unknown、目录/连接上限、连接关闭失败。面板只读展示，不增加能直接改命令或释放未知操作的普通聊天权限。
 
 运维流程：维护配置和秘密 → 校验配置 → 重启 → 查看服务与目录状态 → owner 私聊运行指定的无副作用 smoke 工具。校验配置本身不得调用业务工具。回滚可以禁用服务并重启，保留历史目录与已提交结果；回滚不会撤销远端已经发生的操作。
 
@@ -325,7 +304,7 @@ unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterToo
 
 | 测试组 | 必须证明的行为 |
 | --- | --- |
-| 配置与认证 | 两种 transport；无 OAuth provider；秘密缺失、非法 header/URL/路径；401/403 不开启认证流程或换账号 |
+| 配置与认证 | Streamable HTTP，拒绝 stdio；无 OAuth provider；秘密缺失、非法 header/URL；401/403 不开启认证流程或换账号 |
 | 发现与命名 | 全分页、重复 cursor/名称、半目录失败、短 hash 碰撞、同名跨服务；新工具不会突破白名单 |
 | schema | 普通 JSON Schema、局部引用、拒绝外部/循环引用、Pi 参数修复后再校验；无静默放宽 |
 | 权限 | owner 私聊允许；owner 群聊、非 owner、子 agent、未知 wake 均零外部请求；队列等待后撤权仍拒绝 |
@@ -335,20 +314,20 @@ unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterToo
 | 超时与取消 | 排队取消、已发送取消、迟到响应、SSE 断线/session 丢失；不重发 tools/call |
 | 真正崩溃恢复 | 在执行意图提交前后、远端成功后、本地提交后强杀子进程；计数器证明 unsafe 不自动重复执行 |
 | 历史兼容 | 删除服务、改 schema、关 MCP、损坏目录后旧任务均有终态；重启不永久 pending |
-| 关闭与泄漏 | 保持两 Harness 关闭顺序；初始化失败清理；两平台进程树与句柄回收；close 幂等 |
+| 关闭与泄漏 | 保持两 Harness 关闭顺序；初始化失败清理；连接与句柄回收；close 幂等 |
 | 审计 | 秘密哨兵值不出现在 hooks/日志/配置快照；恢复 interrupted 不依赖 afterTool；允许的历史正文单独验证 |
 
 实施按以下三个完整变更推进，每阶段都能独立验证：
 
 1. **目录与隔离边界。** 配置、身份判定、命名/schema、模块接口；用 fixture 和真实 Registry 验证旧/新目录、子工具复制过滤与日志边界。不开启生产服务。
-2. **首版能力交付。** 两种 transport、原生工具注册、结果转换、会话连接、限额、关闭、全 unsafe 恢复；完成上述故障矩阵后，开放指定 owner 私聊白名单。
+2. **首版能力交付。** Streamable HTTP、原生工具注册、结果转换、会话连接、限额、关闭、全 unsafe 恢复；完成上述故障矩阵后，开放指定 owner 私聊白名单。
 3. **运维与规模验证。** 状态展示、目录保留容量、长时间连接回收、真实但无副作用的服务 smoke；通过后扩大服务白名单。大量工具确有需求时再接 Pi `deferred` 与 tool_search。
 
-发布门槛：非授权场景零外部请求；unsafe 崩溃窗口无自动重复；历史调用能进入终态；日志无秘密；目录和进程资源有界。
+发布门槛：非授权场景零外部请求；unsafe 崩溃窗口无自动重复；历史调用能进入终态；日志无秘密；目录和连接资源有界。
 
-2026-10-24 本地验证：全量单元测试 125 个文件、1861 项通过、3 项跳过（Windows worker 曾异常退出，单 worker 复跑完整通过）。随后新增的宿主接线和同会话关闭后重连场景，与运行时测试一起 24 项通过。Windows stdio 5 项与真正 SIGKILL 后重开 SQLite 的恢复测试 2 项通过；Linux 无网络容器进程树冒烟 5 个场景通过。生产与测试类型检查通过。新增测试包括严格配置/schema/内容边界、HTTP 分页与错误、权限撤回、队列取消、目录变更、连接容量、历史定义恢复及审计脱敏。
+2026-10-24 本地验证：全量单元测试 125 个文件、1861 项通过、3 项跳过（Windows worker 曾异常退出，单 worker 复跑完整通过）。随后新增的宿主接线和同会话关闭后重连场景，与运行时测试一起 24 项通过。真正 SIGKILL 后重开 SQLite 的恢复测试 2 项通过。生产与测试类型检查通过。新增测试包括严格配置/schema/内容边界、HTTP 分页与错误、权限撤回、队列取消、目录变更、连接容量、历史定义恢复及审计脱敏。
 
-首版具体限制：不自动恢复 SSE 断点；schema 暂拒绝 `$defs`、`$id` 和未知 format；图片检查头、尺寸和字节数，不做完整像素解码；Windows 依赖 PowerShell `Add-Type`。状态通过已有 trace 展示，尚无 MCP 专用管理界面；生产服务的凭据、实际 schema、长期容量与部署验证由启用方按 [使用说明](PI-MCP.md) 完成。
+首版具体限制：不自动恢复 SSE 断点；schema 暂拒绝 `$defs`、`$id` 和未知 format；图片检查头、尺寸和字节数，不做完整像素解码。状态通过已有 trace 展示，尚无 MCP 专用管理界面；生产服务的凭据、实际 schema、长期容量与部署验证由启用方按 [使用说明](PI-MCP.md) 完成。
 
 ## 13. 后续扩展的明确边界
 

@@ -19,10 +19,11 @@ async function main() {
   models.setProvider(faux.provider);
   const binding = { threadKey: "owner", scope: "private:1", identity: { kind: "user", sender: "1" },
     inputs: [], access: "all", senderIsOwner: true, auth: true, child: false };
-  const config = mode === "recover" ? { kind: "disabled", reason: "恢复时禁止新连接" } : parseMcpConfig({
+  // 恢复进程使用同一份可用配置：重发与否只取决于 Pi 的 unsafe 恢复，而不是连接被禁用。
+  const config = parseMcpConfig({
     version: 1, enabled: true, servers: [{ id: "fixture", enabled: true,
       transport: { kind: "streamable-http", url, allowLoopbackHttp: true },
-      credential: { kind: "none" }, tools: { allow: ["increment"] }, access: { kind: "owner-private" }, replay: "unsafe" }],
+      credential: { kind: "none" }, tools: { allow: ["first"] }, access: { kind: "owner-private" }, replay: "unsafe" }],
   });
   if (config.kind === "invalid") throw new Error("fixture_config_invalid");
   const harness = await Harness.open(await openNodeSqliteStorage(path.join(directory, "pi.sqlite")), {
@@ -35,7 +36,7 @@ async function main() {
   });
   try {
     mcp = await PiMcp.attach({ registry, harness, config, secrets: { readReferencedVariable: () => undefined },
-      owners: () => ["1"], binding: async () => binding, workspaceDir: () => directory });
+      owners: () => ["1"], binding: async () => binding });
     const metadataFile = path.join(directory, "conversation.json");
     let conversation;
     if (mode === "recover") {

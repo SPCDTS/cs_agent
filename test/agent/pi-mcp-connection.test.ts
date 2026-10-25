@@ -11,7 +11,7 @@ async function open(mode: HttpMode = "json", limits: Partial<McpLimits> = {}, on
   const fixture = await httpFixture(mode);
   cleanup.push(fixture.close);
   const connection = await McpConnection.open({ server: fixture.config, limits: { ...DEFAULT_MCP_LIMITS, ...limits },
-    secrets: { readReferencedVariable: () => "Bearer SECRET_SENTINEL" }, workspaceDir: process.cwd(), signal: live(), onToolsChanged });
+    secrets: { readReferencedVariable: () => "Bearer SECRET_SENTINEL" }, signal: live(), onToolsChanged });
   cleanup.push(() => connection.close());
   return { fixture, connection };
 }
@@ -49,7 +49,7 @@ describe("Pi MCP Streamable HTTP 单连接", () => {
   it.each(["redirect", "cross-origin"] satisfies HttpMode[])("拒绝 %s 且不发送第二个请求", async mode => {
     const fixture = await httpFixture(mode); cleanup.push(fixture.close);
     await expect(McpConnection.open({ server: fixture.config, limits: DEFAULT_MCP_LIMITS, secrets: { readReferencedVariable: () => "Bearer SECRET_SENTINEL" },
-      workspaceDir: process.cwd(), signal: live(), onToolsChanged: () => {} })).rejects.toMatchObject({ code: "transport_error" });
+      signal: live(), onToolsChanged: () => {} })).rejects.toMatchObject({ code: "transport_error" });
     expect(fixture.paths).toEqual(["/mcp"]);
   });
 
@@ -75,7 +75,7 @@ describe("Pi MCP Streamable HTTP 单连接", () => {
   it("缺少秘密引用时零网络请求", async () => {
     const fixture = await httpFixture(); cleanup.push(fixture.close);
     await expect(McpConnection.open({ server: fixture.config, limits: DEFAULT_MCP_LIMITS, secrets: { readReferencedVariable: () => undefined },
-      workspaceDir: process.cwd(), signal: live(), onToolsChanged: () => {} })).rejects.toMatchObject({ code: "missing_secret" });
+      signal: live(), onToolsChanged: () => {} })).rejects.toMatchObject({ code: "missing_secret" });
     expect(fixture.paths).toEqual([]);
   });
 
@@ -83,7 +83,7 @@ describe("Pi MCP Streamable HTTP 单连接", () => {
     const fixture = await httpFixture(); cleanup.push(fixture.close);
     const controller = new AbortController();
     const connection = await McpConnection.open({ server: fixture.config, limits: DEFAULT_MCP_LIMITS, secrets: { readReferencedVariable: () => "Bearer SENTINEL" },
-      workspaceDir: process.cwd(), signal: controller.signal, onToolsChanged: () => {} });
+      signal: controller.signal, onToolsChanged: () => {} });
     cleanup.push(() => connection.close());
     controller.abort();
     expect(await connection.callTool("first", {}, live())).toMatchObject({ content: [{ text: "done" }] });

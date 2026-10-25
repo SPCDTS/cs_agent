@@ -29,24 +29,6 @@
   },
   "servers": [
     {
-      "id": "workspace",
-      "enabled": true,
-      "transport": {
-        "kind": "stdio",
-        "command": "D:/tools/mcp-files/server.exe",
-        "args": ["--root", "${sessionWorkspace}"],
-        "cwd": "${sessionWorkspace}",
-        "inheritEnv": ["SystemRoot", "TEMP", "TMP"],
-        "env": {},
-        "secretEnv": {},
-        "execution": "trusted-host"
-      },
-      "credential": { "kind": "none" },
-      "tools": { "allow": ["read_file", "list_directory"] },
-      "access": { "kind": "owner-private", "allowScheduled": false, "allowWake": false },
-      "replay": "unsafe"
-    },
-    {
       "id": "docs",
       "enabled": true,
       "transport": {

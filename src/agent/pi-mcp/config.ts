@@ -1,6 +1,5 @@
 import { readFile } from "node:fs/promises";
 import { isIPv4 } from "node:net";
-import { posix } from "node:path";
 import { z } from "zod";
 
 const limit = (value: number, max: number) => z.number().int().min(1).max(max).default(value);
@@ -23,26 +22,10 @@ export const DEFAULT_MCP_LIMITS: McpLimits = Object.freeze(limitsSchema.parse({}
 
 const cleanText = z.string().max(8_192).refine(value => !/[\u0000-\u001f\u007f]/u.test(value));
 const variable = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u);
-const absolutePath = cleanText.min(1).refine(value => posix.isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\]+\\[^\\]+\\/u.test(value));
-const workspace = "${sessionWorkspace}";
-const argument = cleanText.refine(value => value === workspace || !value.includes("${"));
-const environment = z.record(variable, cleanText);
-const secretEnvironment = z.record(variable, variable);
 const headerName = z.string().max(128).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u);
 const sensitiveHeader = /(?:^|[-_])(?:auth|authorization|cookie|token|key|secret)(?:$|[-_])/iu;
 const reservedHeader = /^(accept|content-type|host|content-length|connection|transfer-encoding|upgrade|te|trailer|keep-alive|mcp-.*|last-event-id|proxy-.*|sec-.*)$/iu;
 
-const stdioSchema = z.strictObject({
-  kind: z.literal("stdio"), command: absolutePath.refine(value => !value.includes("${")),
-  args: z.array(argument).max(128).default([]),
-  cwd: z.union([z.literal(workspace), absolutePath.refine(value => !value.includes("${"))]),
-  inheritEnv: z.array(variable).max(128).default([]),
-  env: environment.default({}), secretEnv: secretEnvironment.default({}),
-  execution: z.literal("trusted-host"),
-}).superRefine((value, ctx) => {
-  const names = [...value.inheritEnv, ...Object.keys(value.env), ...Object.keys(value.secretEnv)].map(name => name.toUpperCase());
-  if (new Set(names).size !== names.length) ctx.addIssue({ code: "custom", path: ["env"], message: "环境变量重复" });
-});
 const httpSchema = z.strictObject({
   kind: z.literal("streamable-http"), url: cleanText.min(1).max(4_096),
   headers: z.record(headerName, cleanText).default({}),
@@ -68,7 +51,7 @@ const httpSchema = z.strictObject({
 });
 const serverSchema = z.strictObject({
   id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u), enabled: z.boolean().default(true),
-  transport: z.discriminatedUnion("kind", [stdioSchema, httpSchema]),
+  transport: httpSchema,
   credential: z.discriminatedUnion("kind", [
     z.strictObject({ kind: z.literal("none") }),
     z.strictObject({ kind: z.literal("external-account"), accountId: cleanText.min(1).max(128), revision: cleanText.min(1).max(128) }),

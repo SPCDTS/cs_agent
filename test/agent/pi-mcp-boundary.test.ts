@@ -8,21 +8,18 @@ import { compileMcpSchema } from "../../src/agent/pi-mcp/schema.js";
 import { convertMcpResult } from "../../src/agent/pi-mcp/result.js";
 
 const limits = { ...DEFAULT_MCP_LIMITS };
-function stdio() {
+function http() {
   return {
-    id: "files", transport: { kind: "stdio", command: "D:/tools/server.exe", cwd: "${sessionWorkspace}", args: ["--root", "${sessionWorkspace}"], execution: "trusted-host" },
+    id: "docs", transport: { kind: "streamable-http", url: "https://example.test/mcp", secretHeaders: { Authorization: "MCP_TOKEN" } },
     credential: { kind: "none" }, tools: { allow: ["read"] }, access: { kind: "owner-private" }, replay: "unsafe",
   };
 }
-function http() {
-  return { ...stdio(), transport: { kind: "streamable-http", url: "https://example.test/mcp", secretHeaders: { Authorization: "MCP_TOKEN" } } };
-}
-function config(server: unknown = stdio()) { return { version: 1, enabled: true, servers: [server] }; }
+function config(server: unknown = http()) { return { version: 1, enabled: true, servers: [server] }; }
 const directories: string[] = [];
 afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
 describe("Pi MCP 配置边界", () => {
-  it("严格解析双传输并补齐默认值，不读取环境秘密", async () => {
+  it("严格解析 HTTP 传输并补齐默认值，不读取环境秘密", async () => {
     const example = JSON.parse(await readFile("docs/design/pi-mcp/config.example.json", "utf8"));
     expect(parseMcpConfig(example).kind).toBe("enabled");
     const parsed = parseMcpConfig(config(http()));
@@ -36,25 +33,23 @@ describe("Pi MCP 配置边界", () => {
 
   it.each([
     { ...config(), oauth: { token: "SECRET_SENTINEL" } },
-    config({ ...stdio(), replay: "safe" }),
-    config({ ...stdio(), access: { kind: "public" } }),
-    config({ ...stdio(), credential: { kind: "oauth" } }),
-    { ...config(), servers: [stdio(), stdio()] },
+    config({ ...http(), replay: "safe" }),
+    config({ ...http(), access: { kind: "public" } }),
+    config({ ...http(), credential: { kind: "oauth" } }),
+    { ...config(), servers: [http(), http()] },
     { ...config(), limits: { callMs: 300_001 } },
     { ...config(), limits: { schemaDepth: 0 } },
     { ...config(), limits: { unknown: 1 } },
-    config({ ...stdio(), tools: { allow: ["read", "read"] } }),
-    config({ ...stdio(), transport: { ...stdio().transport, command: "npx" } }),
-    config({ ...stdio(), transport: { ...stdio().transport, command: "C:server.exe" } }),
-    config({ ...stdio(), transport: { ...stdio().transport, command: "\\tools\\server.exe" } }),
-    config({ ...stdio(), transport: { ...stdio().transport, cwd: "relative" } }),
-    config({ ...stdio(), transport: { ...stdio().transport, args: ["--root=${sessionWorkspace}"] } }),
-    config({ ...stdio(), transport: { ...stdio().transport, inheritEnv: ["PATH"], env: { Path: "override" } } }),
-    config({ ...stdio(), transport: { ...stdio().transport, secretEnv: { TOKEN: "Bearer SECRET_SENTINEL" } } }),
+    config({ ...http(), tools: { allow: ["read", "read"] } }),
   ])("拒绝非法配置且错误不包含秘密值 %#", input => {
     const result = parseMcpConfig(input);
     expect(result.kind).toBe("invalid");
     expect(JSON.stringify(result)).not.toContain("SECRET_SENTINEL");
+  });
+
+  it("stdio 传输不再支持，按无效配置拒绝", () => {
+    const transport = { kind: "stdio", command: "/usr/local/bin/server", args: [], cwd: "/tmp", execution: "trusted-host" };
+    expect(parseMcpConfig(config({ ...http(), transport })).kind).toBe("invalid");
   });
 
   it.each([
@@ -91,7 +86,7 @@ describe("Pi MCP 配置边界", () => {
   });
 
   it("空白名单保持无工具，未设置与禁用不启动 MCP", async () => {
-    expect(parseMcpConfig(config({ ...stdio(), tools: { allow: [] } })).kind).toBe("enabled");
+    expect(parseMcpConfig(config({ ...http(), tools: { allow: [] } })).kind).toBe("enabled");
     expect(parseMcpConfig({ ...config(), enabled: false }).kind).toBe("disabled");
     expect((await loadMcpConfig()).kind).toBe("disabled");
   });

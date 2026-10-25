@@ -1,15 +1,15 @@
 # Pi 外部 MCP 使用说明
 
-Pi 后端可以把外部 MCP 的每个工具注册为 Pi 原生工具，保留参数 schema，并通过现有 ToolTask 保存调用检查点和结果。支持 stdio 与 Streamable HTTP、静态凭据，不支持 OAuth。
+Pi 后端可以把外部 MCP 的每个工具注册为 Pi 原生工具，保留参数 schema，并通过现有 ToolTask 保存调用检查点和结果。只支持 Streamable HTTP 与静态凭据，不支持 stdio 和 OAuth。
 
 ## 启用
 
-1. 从 [配置示例](design/pi-mcp/config.example.json) 复制管理员配置，只保留需要的服务，替换绝对程序路径或 HTTP 地址，并填写远端工具原名的 `tools.allow`。
+1. 从 [配置示例](design/pi-mcp/config.example.json) 复制管理员配置，只保留需要的服务，替换 HTTP 地址，并填写远端工具原名的 `tools.allow`。
 2. 将配置放到管理员维护的位置，设置 `PI_MCP_CONFIG` 为该 JSON 文件的绝对路径。文件必须是 UTF-8，支持 BOM。不要把密钥写入配置。
 3. 确认 owner 私聊使用 Pi 后端：设置 `AGENT_BACKEND=pi`，或在现有后端覆盖设置中将 owner 私聊分配给 Pi。
 4. 将配置引用的秘密环境变量注入 cs-agent 进程，重启服务。修改 MCP 配置、账号或凭据后需要重启；更换账号、token 或权限时同时递增 `credential.revision`。
 
-Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器，`PI_MCP_CONFIG`、stdio 的 `command` 和固定 `cwd` 均填写容器内路径。默认 `.env` 会注入容器，但不会自动挂载任意宿主文件；宿主 Windows 可执行文件也不能直接作为 Linux 容器中的 stdio 命令。
+Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器，`PI_MCP_CONFIG` 填写容器内路径。默认 `.env` 会注入容器，但不会自动挂载任意宿主文件。
 
 最小 HTTP 示例：
 
@@ -36,16 +36,6 @@ Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器�
 
 局域网服务使用 HTTP 时，管理员可为该服务设置 `transport.allowPrivateNetworkHttp: true`，仅放行 RFC1918 私网 IPv4 字面地址（`10/8`、`172.16/12`、`192.168/16`）。该开关不放开公网、链路本地地址或域名；请求仍只发往配置的固定来源，不跟随重定向。
 
-## stdio 与运行环境
-
-stdio 的 `command` 必须是绝对可执行路径，`args` 是参数数组，不经过 shell，也不自动安装包。`cwd` 和整个参数可以使用 `${sessionWorkspace}`，其值由宿主为当前会话提供。其他模板形式会被拒绝。
-
-只继承 `inheritEnv` 中列出的环境变量；普通值写到 `env`，秘密用 `secretEnv` 将子进程变量名映射到宿主环境变量名。不要把秘密放进 `args`、URL 或普通配置字段。Windows 的 Node MCP 通常需要显式继承 `SystemRoot`；按程序需要增加 `TEMP`、`TMP` 或 `PATH`。
-
-Windows 使用 Windows PowerShell 的静态辅助脚本与 Job Object，要求 `Add-Type` 可用；Linux 使用独立进程组。两者都会在正常关闭、初始化失败及直接子进程先退出时回收后代进程。
-
-`execution: "trusted-host"` 表示按 cs-agent 的 OS 用户权限运行。工作目录和 `--root` 不是操作系统沙箱，Pi bash 的 bwrap 配置也不覆盖 MCP。需要更强隔离时，管理员应提供隔离后的可执行入口。
-
 ## 权限与结果
 
 首版仅给 owner 私聊主会话选择工具，普通用户、群聊和子 agent 均拒绝。执行前再次读取真实回合身份，排队后继续复核当前 owner。定时和唤醒默认关闭；可分别设置 `access.allowScheduled`、`access.allowWake`，继承定时身份的唤醒需要两个选项都开启。
@@ -64,7 +54,7 @@ Windows 使用 Windows PowerShell 的静态辅助脚本与 Job Object，要求 `
 
 所有外部工具固定 `replay: "unsafe"`。网络超时或断线发生在发送后时，返回 `outcome_unknown`；进程崩溃时，已有 execute 检查点按 Pi 的 `interrupted` 结算。已提交结果恢复后直接复用。任何这些情况都不会自动重发原工具调用，但也不能据此断定远端未执行，后续操作应先核对外部状态。
 
-连接按会话、真实账号身份、服务配置和工作目录隔离；每条连接串行，等待队列、活跃连接及关闭连接受限。默认总调用预算 60 秒、初始化 10 秒、最多 16 条连接、每条连接最多 16 个等待项，闲置五分钟回收。配置缺失、无效或服务离线不会阻塞整个 Pi 启动。
+连接按会话、真实账号身份和服务配置隔离；每条连接串行，等待队列、活跃连接及关闭连接受限。默认总调用预算 60 秒、初始化 10 秒、最多 16 条连接、每条连接最多 16 个等待项，闲置五分钟回收。配置缺失、无效或服务离线不会阻塞整个 Pi 启动。
 
 目录默认最多保留 128 个版本、合计 32 MiB。启动时、以及发布新版本将超限时回收旧版本：只保留仍被会话工具选择、非终态工具任务或当前连接引用的版本，只改描述的版本合并为一个。任何引用无法确认时整轮不删。回收后仍超限才拒绝发布并降级服务。限制在配置的 `limits` 中调整，有硬上限；不要靠删除整个 `pi.sqlite` 清理目录，那会丢失 Pi 会话与调用记录。
 
@@ -85,9 +75,9 @@ Windows 使用 Windows PowerShell 的静态辅助脚本与 Job Object，要求 `
 ```text
 npm run typecheck
 npm test
-npm run test:integration -- test/agent/pi-mcp-stdio.test.ts test/agent/pi-mcp-recovery.test.ts
+npm run test:integration -- test/agent/pi-mcp-recovery.test.ts
 ```
 
-测试使用本机 HTTP 桩、真实 stdio 子进程和 Pi SQLite；崩溃测试真正杀死调用进程，再打开相同数据库验证未重发。Linux 进程树的独立无网络容器冒烟脚本为 `test/agent/fixtures/pi-mcp-linux-smoke.mjs`。这些验证不依赖生产账号；接入具体服务后仍需针对它的 schema、凭据和运行环境做部署验证。
+测试使用本机 HTTP 桩和 Pi SQLite；崩溃测试真正杀死持有 SQLite 的调用进程，再打开相同数据库，由父进程中的 HTTP 桩计数验证未重发。这些验证不依赖生产账号；接入具体服务后仍需针对它的 schema、凭据和运行环境做部署验证。
 
 完整架构与后续范围见 [设计文档](PI-MCP-DESIGN.md)。

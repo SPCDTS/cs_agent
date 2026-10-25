@@ -270,7 +270,7 @@ async function main(): Promise<void> {
   const mcpEnvironment = new Map<string, string | undefined>();
   if (mcpConfig.kind === "enabled") {
     for (const { transport } of mcpConfig.value.servers) {
-      const references = Object.values(transport.kind === "stdio" ? transport.secretEnv : transport.secretHeaders);
+      const references = Object.values(transport.secretHeaders);
       for (const name of references) mcpEnvironment.set(name, process.env[name]);
       registerSecrets(references.map(name => mcpEnvironment.get(name)));
     }

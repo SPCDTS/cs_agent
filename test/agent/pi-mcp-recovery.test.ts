@@ -1,12 +1,11 @@
 import { fork } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
+import { httpFixture } from "./fixtures/pi-mcp-http.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/pi-mcp-recovery.mjs", import.meta.url));
 const cleanup: (() => Promise<void>)[] = [];
@@ -18,41 +17,6 @@ const messageSchema = z.discriminatedUnion("phase", [
     results: z.array(z.object({ isError: z.boolean(), codes: z.array(z.string()), text: z.string() })) }),
 ]);
 type ChildMessage = z.infer<typeof messageSchema>;
-
-/** 父进程持有远端计数，强杀 Pi 子进程不会丢失这份证据。 */
-async function serverFixture(hang: boolean) {
-  let calls = 0, requests = 0;
-  const server = createServer(async (request, response) => {
-    request.on("error", () => {}); response.on("error", () => {});
-    requests++;
-    if (request.method === "GET") { response.writeHead(405).end(); return; }
-    if (request.method === "DELETE") { response.writeHead(202).end(); return; }
-    const chunks: Buffer[] = [];
-    for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    const input: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    const message = JSONRPCMessageSchema.parse(input);
-    if (!("method" in message) || !("id" in message)) { response.writeHead(202).end(); return; }
-    let result: unknown;
-    if (message.method === "initialize") {
-      result = { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "recovery-fixture", version: "1" } };
-    } else if (message.method === "tools/list") {
-      result = { tools: [{ name: "increment", inputSchema: { type: "object", additionalProperties: false } }] };
-    } else if (message.method === "tools/call") {
-      calls++;
-      if (hang) return;
-      result = { content: [{ type: "text", text: "committed-success" }] };
-    } else { response.writeHead(202).end(); return; }
-    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
-  });
-  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
-  cleanup.push(async () => {
-    server.closeAllConnections();
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  });
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("fixture_address");
-  return { url: `http://127.0.0.1:${address.port}/mcp`, get calls() { return calls; }, get requests() { return requests; } };
-}
 
 function worker(mode: "hang" | "committed" | "recover", directory: string, url: string) {
   const child = fork(fixture, [mode, directory, url], { execArgv: [], windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
@@ -86,19 +50,20 @@ function worker(mode: "hang" | "committed" | "recover", directory: string, url: 
 
 describe("Pi MCP 真进程强杀恢复", () => {
   it.each([true, false])("远端挂起=%s：同 SQLite 恢复不重发 tools/call", async hang => {
-    const server = await serverFixture(hang);
+    // 远端计数在父进程的 HTTP 桩里，强杀 Pi 子进程不会丢失这份证据。
+    const server = await httpFixture(hang ? "hang" : "json");
+    cleanup.push(server.close);
     const directory = await mkdtemp(path.join(tmpdir(), "pi-mcp-recovery-"));
     cleanup.push(async () => {
       if (path.dirname(directory) !== path.resolve(tmpdir()) || !path.basename(directory).startsWith("pi-mcp-recovery-")) throw new Error("fixture_cleanup_path");
       await rm(directory, { recursive: true, force: true });
     });
-    const first = worker(hang ? "hang" : "committed", directory, server.url);
+    const first = worker(hang ? "hang" : "committed", directory, server.config.transport.url);
     await first.wait("ready");
     await expect.poll(() => server.calls, { timeout: 10_000 }).toBe(1);
     if (!hang) await first.wait("committed");
     await first.kill();
-    const beforeRecovery = server.requests;
-    const recovered = worker("recover", directory, server.url);
+    const recovered = worker("recover", directory, server.config.transport.url);
     await recovered.wait("recovered");
     await recovered.exit;
     const result = recovered.messages.find(message => message.phase === "recovered");
@@ -109,10 +74,11 @@ describe("Pi MCP 真进程强杀恢复", () => {
       expect(result.results[0]).toMatchObject({ isError: true, codes: ["interrupted"] });
       expect(result.terminals).toEqual(["interrupted"]);
     } else {
-      expect(result.results[0]).toMatchObject({ isError: false, codes: [], text: "committed-success" });
+      // 桩故意返回不符输出 schema 的结构化结果；恢复复用这条已提交的拒绝结果。
+      expect(result.results[0]).toMatchObject({ isError: true, codes: ["result_rejected"] });
       expect(result.terminals).toEqual([]);
     }
     expect(server.calls).toBe(1);
-    expect(server.requests).toBe(beforeRecovery);
+    expect(server.messages.filter(message => "method" in message && message.method === "tools/call")).toHaveLength(1);
   });
 });

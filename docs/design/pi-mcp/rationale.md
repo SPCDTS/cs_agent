@@ -33,10 +33,9 @@ PiBackend 在 Harness 暂停调度时 attach PiMcp，在每轮 configureTools �
 ## 评审后修订
 
 1. owner 权限精确限定在 owner 私聊主会话；owner 群聊仍拒绝。
-2. stdio 首版允许管理员显式 trusted-host，诚实说明宿主权限；不要求先建设新的沙箱平台。沙箱扩展必须真实验证，不能静默 fallback。
-3. 秘密来自显式环境引用，配置/凭据版本通过管理员更新后重启生效；不引入自动轮换平台，不暗示热重载已实现。
-4. 调用、目录、连接及恢复终态使用不同审计事件形状。unsafe 恢复绕过 afterTool，靠既有事件观察补齐；MCP 的通用输入/输出日志分支必须收紧。
-5. 子 agent 的父工具复制过程显式过滤 MCP；不能仅靠 execute 拒绝来避免泄漏 schema。
+2. 秘密来自显式环境引用，配置/凭据版本通过管理员更新后重启生效；不引入自动轮换平台，不暗示热重载已实现。
+3. 调用、目录、连接及恢复终态使用不同审计事件形状。unsafe 恢复绕过 afterTool，靠既有事件观察补齐；MCP 的通用输入/输出日志分支必须收紧。
+4. 子 agent 的父工具复制过程显式过滤 MCP；不能仅靠 execute 拒绝来避免泄漏 schema。
 
 ## 接受的代价
 
@@ -48,6 +47,6 @@ PiBackend 在 Harness 暂停调度时 attach PiMcp，在每轮 configureTools �
 
 ## 验证与后续
 
-实现已用本机 HTTP/stdio fixture、真实 ThreadHost/PiBackend 与 pi.sqlite 验证权限、目录版本、关闭顺序、审计脱敏及 unsafe 崩溃后不自动重发。真实 SIGKILL 测试覆盖未收到响应和已提交成功结果两个窗口。
+实现已用本机 HTTP fixture、真实 ThreadHost/PiBackend 与 pi.sqlite 验证权限、目录版本、关闭顺序、审计脱敏及 unsafe 崩溃后不自动重发。真实 SIGKILL 测试覆盖未收到响应和已提交成功结果两个窗口。
 
-严格 schema 子集、解析前消息限额、Windows Job 与 Linux 进程组回收均有契约测试。模型工具定义预算包含名称、描述和输入 schema；目录达到容量上限后拒绝新版本。剩余部署工作是针对实际服务配置凭据和白名单，并确认长期目录规模；本次未连接生产服务。
+严格 schema 子集与解析前消息限额均有契约测试。模型工具定义预算包含名称、描述和输入 schema；目录达到容量上限后拒绝新版本。剩余部署工作是针对实际服务配置凭据和白名单，并确认长期目录规模；本次未连接生产服务。

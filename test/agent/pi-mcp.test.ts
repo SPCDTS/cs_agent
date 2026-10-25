@@ -87,7 +87,7 @@ async function rig(config: McpConfigState, db = path.join(tmp("cs-pi-mcp-"), "pi
   const bindings = new Map<number, PiCallBinding>();
   let owners = ["123"];
   const mcp = await PiMcp.attach({ registry, harness, config, secrets: { readReferencedVariable: () => undefined }, owners: () => owners,
-    binding: async id => bindings.get(id), workspaceDir: () => path.dirname(db) });
+    binding: async id => bindings.get(id) });
   let closed = false;
   const close = async () => { if (closed) return; closed = true; mcp.beginShutdown(); await harness.close(context); await mcp.close(); };
   cleanup.push(close);

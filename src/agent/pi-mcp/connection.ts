@@ -1,9 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolResultSchema, ErrorCode, ListToolsResultSchema, McpError, ToolListChangedNotificationSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { EnvironmentSecrets, McpLimits, McpServerConfig } from "./config.js";
-import { BoundedStdioTransport } from "./transport-stdio.js";
 import { boundedFetch, McpConnectionError } from "./transport-http.js";
 
 export { McpConnectionError } from "./transport-http.js";
@@ -12,7 +10,6 @@ type OpenOptions = {
   server: McpServerConfig;
   limits: McpLimits;
   secrets: EnvironmentSecrets;
-  workspaceDir: string;
   signal: AbortSignal;
   onToolsChanged: () => void;
 };
@@ -25,7 +22,7 @@ export class McpConnection {
 
   private constructor(
     private readonly client: Client,
-    private readonly transport: Transport,
+    private readonly transport: StreamableHTTPClientTransport,
     private readonly limits: McpLimits,
   ) {}
 
@@ -40,36 +37,20 @@ export class McpConnection {
       void connection.close();
     };
     const settings = server.transport;
-    let transport: Transport;
-    if (settings.kind === "stdio") {
-      const environment: [string, string][] = [];
-      for (const name of settings.inheritEnv) {
-        const value = Object.hasOwn(process.env, name) ? process.env[name] : undefined;
-        if (value !== undefined) environment.push([name, value]);
-      }
-      environment.push(...Object.entries(settings.env));
-      for (const [name, reference] of Object.entries(settings.secretEnv)) environment.push([name, secret(secrets, reference)]);
-      const expand = (value: string) => value === "${sessionWorkspace}" ? options.workspaceDir : value;
-      transport = new BoundedStdioTransport({
-        command: settings.command, args: settings.args.map(expand), cwd: expand(settings.cwd), env: Object.fromEntries(environment),
-        messageBytes: limits.messageBytes, closeMs: limits.closePerConnectionMs,
-      });
-    } else {
-      const headers = new Headers();
-      try {
-        for (const [name, value] of Object.entries(settings.headers)) headers.set(name, value);
-        for (const [name, reference] of Object.entries(settings.secretHeaders)) headers.set(name, secret(secrets, reference));
-      } catch (error) {
-        if (error instanceof McpConnectionError) throw error;
-        throw new McpConnectionError("auth_failed", "MCP 凭据请求头无效");
-      }
-      transport = new StreamableHTTPClientTransport(new URL(settings.url), {
-        requestInit: { headers, redirect: "manual", credentials: "omit" },
-        fetch: boundedFetch(new URL(settings.url), limits.messageBytes, fail),
-        // 不安排 SDK 后台重连；断流按本次调用预算结算，避免关闭后残留恢复计时器。
-        reconnectionOptions: { initialReconnectionDelay: 250, maxReconnectionDelay: 1000, reconnectionDelayGrowFactor: 2, maxRetries: 0 },
-      });
+    const headers = new Headers();
+    try {
+      for (const [name, value] of Object.entries(settings.headers)) headers.set(name, value);
+      for (const [name, reference] of Object.entries(settings.secretHeaders)) headers.set(name, secret(secrets, reference));
+    } catch (error) {
+      if (error instanceof McpConnectionError) throw error;
+      throw new McpConnectionError("auth_failed", "MCP 凭据请求头无效");
     }
+    const transport = new StreamableHTTPClientTransport(new URL(settings.url), {
+      requestInit: { headers, redirect: "manual", credentials: "omit" },
+      fetch: boundedFetch(new URL(settings.url), limits.messageBytes, fail),
+      // 不安排 SDK 后台重连；断流按本次调用预算结算，避免关闭后残留恢复计时器。
+      reconnectionOptions: { initialReconnectionDelay: 250, maxReconnectionDelay: 1000, reconnectionDelayGrowFactor: 2, maxRetries: 0 },
+    });
     connection = new McpConnection(client, transport, limits);
     client.onerror = error => {
       // 只保留本模块产生的有界错误，不保存第三方消息或堆栈。
@@ -147,9 +128,7 @@ export class McpConnection {
     this.closePromise = (async () => {
       const deadline = Date.now() + this.limits.closePerConnectionMs;
       // DELETE 只是尽力终止会话，失败不得阻止本地关闭。
-      if (this.transport instanceof StreamableHTTPClientTransport) {
-        await boundedWait(this.transport.terminateSession().catch(() => {}), Math.min(250, this.limits.closePerConnectionMs / 4));
-      }
+      await boundedWait(this.transport.terminateSession().catch(() => {}), Math.min(250, this.limits.closePerConnectionMs / 4));
       await boundedWait(Promise.allSettled([this.client.close(), this.transport.close()]).then(() => {}), Math.max(1, deadline - Date.now()));
     })();
     return this.closePromise;

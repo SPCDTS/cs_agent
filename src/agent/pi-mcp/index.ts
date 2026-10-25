@@ -21,10 +21,9 @@ export { isMcpToolName } from "./names.js";
 type Options = {
   registry: Registry; harness: Harness; config: McpConfigState; secrets: EnvironmentSecrets;
   owners: () => OwnerIds; binding: (id: number) => Promise<PiCallBinding | undefined>;
-  workspaceDir: (id: number, turn: TurnBinding) => Promise<string> | string;
 };
 type PoolEntry = {
-  key: string; server: McpServerConfig; scope: string; workspace: string;
+  key: string; server: McpServerConfig; scope: string;
   connection?: McpConnection; closing?: Promise<void>; catalog?: CatalogRevision;
   changed: number; discovered: number; listedAt: number; lastUsed: number;
   tail: Promise<void>; pending: number; failures: number; retryAt: number;
@@ -174,10 +173,9 @@ export class PiMcp {
     signal: AbortSignal, work: (entry: PoolEntry) => Promise<T>): Promise<T> {
     const scope = digest({ conversation: id, thread: turn.threadKey, principal });
     const waitContext = withAbortSignal(signal, BACKGROUND_CONTEXT);
-    const workspace = await awaitWithContext(Promise.resolve(this.opts.workspaceDir(id, turn)), waitContext);
     signal.throwIfAborted();
     if (this.stopping) throw new McpFailure("closing");
-    const key = digest([serverDigest(server), scope, workspace]);
+    const key = digest([serverDigest(server), scope]);
     const known = this.pool.get(key);
     if (known) return this.queue(known, signal, () => work(known));
     this.expireIdle();
@@ -191,7 +189,7 @@ export class PiMcp {
       // 等旧资源关闭后重新争用容量；等待期间另一会话可能已经获得空位。
       return this.withEntry(server, id, turn, principal, signal, work);
     }
-    const value: PoolEntry = { key, server, scope, workspace, changed: 0, discovered: -1, listedAt: 0,
+    const value: PoolEntry = { key, server, scope, changed: 0, discovered: -1, listedAt: 0,
       lastUsed: Date.now(), tail: Promise.resolve(), pending: 0, failures: 0, retryAt: 0 };
     this.pool.set(key, value);
     // 查池、创建和占用在同一同步段完成，避免尚未入队的连接被并发配置逐出。
@@ -221,7 +219,7 @@ export class PiMcp {
       this.event("connection", "connecting", { server: entry.server.id, scope: entry.scope });
       try {
         entry.connection = await McpConnection.open({ server: entry.server, limits: this.limits, secrets: this.opts.secrets,
-          workspaceDir: entry.workspace, signal, onToolsChanged: () => { entry.changed++; } });
+          signal, onToolsChanged: () => { entry.changed++; } });
         entry.discovered = -1; entry.failures = 0;
         this.event("connection", "ready", { server: entry.server.id, scope: entry.scope });
       } catch (error) {

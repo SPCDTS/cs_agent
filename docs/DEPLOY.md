@@ -43,7 +43,7 @@ Copy-Item .env.example .env
 | `AUTO_EFFORT_MODEL` / `AUTO_EFFORT_TIMEOUT_MS` | `deepseek/deepseek-flash` / 4000 | `auto` 档位的分类模型（magpie 提供者下）；空值只走规则快路径 |
 | `DEEPSEEK_API_KEY` | 空 | 也可写作 `DEEPSEEK_APIKEY`。provider 为 `deepseek` 时缺失即启动失败；pi 的联网检索始终需要它 |
 | `SKILLS_DIR` / `PI_SKILLS_DIR` | `./data/skills` / 空 | 共享技能目录（宿主机路径，可指向 magpie Library 的 skills 目录，Windows 写 `C:/…`）；`PI_SKILLS_DIR=off` 关闭 pi 的技能段 |
-| `PI_MCP_CONFIG` | 空 | Pi 外部 MCP 管理员 JSON 配置绝对路径；留空禁用。双传输、静态凭据、owner 私聊，见 [PI-MCP.md](PI-MCP.md) |
+| `PI_MCP_CONFIG` | 空 | Pi 外部 MCP 管理员 JSON 配置绝对路径；留空禁用。Streamable HTTP、静态凭据、owner 私聊，见 [PI-MCP.md](PI-MCP.md) |
 | `ATTACH_FILE_MAX_MB` / `ATTACH_FILES_MAX` / `ATTACH_FILE_DENY_EXT` | 20 / 3 / `.exe,.bat,…,.lnk` | 发送文件的单个上限、每条数量与扩展名黑名单 |
 | `CODEX_SANDBOX` | `workspace-write` | `workspace-write` 或 `read-only`；`danger-full-access` 无法做会话隔离，codex 回合会被拒绝执行 |
 | `TZ`（compose） | `Asia/Shanghai` | 影响衰老任务时刻与聊天记录里显示的时间 |
