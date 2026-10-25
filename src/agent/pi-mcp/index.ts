@@ -264,7 +264,7 @@ export class PiMcp {
 
   /**
    * 版本只在提供被引用的工具扩展时保留：会话 AgentDoc 选择、活工具任务、连接池与进行中的选择。
-   * 只说明文字不同的 v2 版本共享扩展名，保留一个即可。任何引用无法证明时整轮不删；
+   * 只说明文字不同的版本共享扩展名，保留一个即可。任何引用无法证明时整轮不删；
    * 运行期只删持久记录，已安装的扩展留到进程结束。
    */
   private async prune(context: Context, publishing?: CatalogRevision): Promise<void> {

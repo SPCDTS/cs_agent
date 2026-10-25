@@ -7,9 +7,10 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiMcp } from "../../src/agent/pi-mcp/index.js";
-import { McpCatalogsDoc, digest, toolNames } from "../../src/agent/pi-mcp/catalog.js";
+import { McpCatalogsDoc, digest } from "../../src/agent/pi-mcp/catalog.js";
 import { parseMcpConfig, type McpConfigState } from "../../src/agent/pi-mcp/config.js";
 import type { PiCallBinding } from "../../src/agent/pi-tools/request.js";
+import { trace } from "../../src/shared/trace.js";
 import { call, reply } from "./faux-helpers.js";
 import { tmp } from "./helpers.js";
 
@@ -245,25 +246,26 @@ describe("Pi MCP 原生工具与持久目录", () => {
     expect(await mcpNames(c)).not.toEqual(before);
   });
 
-  it("真实 v1 SQLite 升级识别旧调用，不能把新名称套到历史目录", async () => {
+  it("存储的 v1 目录被拒绝并原样保留，不影响 v2 目录恢复与调用", async () => {
     const s = await server(), first = await rig(s.config()), c = await first.create();
-    await first.configure(c);
-    const original = Object.values((await first.harness.snapshot(McpCatalogsDoc, context))!.revisions)[0]!;
-    const { digest: _ignored, ...payload } = original;
-    const legacy = { ...payload, adapterVersion: 1 as const };
-    const revision = { ...legacy, digest: digest(legacy) }, tool = revision.tools[0]!;
-    const old = toolNames(revision, tool);
+    await first.configure(c); const [name] = await mcpNames(c), id = c.id;
+    const valid = Object.values((await first.harness.snapshot(McpCatalogsDoc, context))!.revisions)[0]!;
+    const { digest: _ignored, ...payload } = valid;
+    const legacy = { ...payload, adapterVersion: 1 }, legacyDigest = digest(legacy);
     await first.harness.commit(async tx => {
-      (await tx.doc(McpCatalogsDoc)).revisions = { [revision.digest]: revision };
-      (await tx.doc(AgentDoc, c.id)).extensions = ["base", "cs.mcp.control", old.extensionName];
+      (await tx.doc(McpCatalogsDoc)).revisions = { [legacyDigest]: { ...legacy, digest: legacyDigest } as never, [valid.digest]: valid };
     }, context);
-    const id = c.id; await first.close();
+    await first.close();
+    const rejected: unknown[] = [];
+    const untap = trace.tap(event => { if (event.detail.code === "catalog_restore_rejected") rejected.push(event); });
+    cleanup.push(async () => untap());
     const second = await rig(s.config(), first.db), restored = (await second.harness.conversation(id, context))!;
     second.bindings.set(Number(id), owner());
-    expect(await mcpNames(restored)).toEqual([old.nativeName]);
-    await second.configure(restored); expect(await mcpNames(restored)).not.toContain(old.nativeName);
-    await second.run(restored, old.nativeName);
-    expect(s.state.calls).toBe(0);
+    expect(rejected).toHaveLength(1);
+    expect(Object.keys((await second.harness.snapshot(McpCatalogsDoc, context))!.revisions).sort()).toEqual([legacyDigest, valid.digest].sort());
+    expect(await mcpNames(restored)).toEqual([name]);
+    expect(await second.run(restored, name!)).toMatchObject({ status: "done" });
+    expect(s.state.calls).toBe(1);
   });
 
   it("超时报告 outcome_unknown，不重发业务请求", async () => {

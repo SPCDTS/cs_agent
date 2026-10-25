@@ -39,13 +39,11 @@ describe("MCP 单工具契约身份与历史算法", () => {
     expect(toolContract(first, { ...tool, outputSchema: { type: "object" } })).not.toBe(toolContract(first, tool));
   });
 
-  it("v1 目录恢复原名称，新目录按 v2 发布", () => {
-    const { digest: _ignored, ...payload } = catalog();
-    const legacy = { ...payload, adapterVersion: 1 as const };
-    const revision = restoreCatalog({ ...legacy, digest: digest(legacy) }, limits);
-    expect(toolNames(revision, tool).fullDigest).toBe(digest([revision.digest, tool]));
-    expect(catalog().adapterVersion).toBe(2);
-    expect(toolNames(catalog(), tool).nativeName).not.toBe(toolNames(revision, tool).nativeName);
+  it("只恢复 v2 目录，v1 目录被拒绝", () => {
+    const current = catalog(), { digest: _ignored, ...payload } = current;
+    expect(restoreCatalog(current, limits)).toEqual(current);
+    const legacy = { ...payload, adapterVersion: 1 };
+    expect(() => restoreCatalog({ ...legacy, digest: digest(legacy) }, limits)).toThrow();
   });
 
   it("嵌套组合、引用、数组和依赖中的展示注解不参与身份", () => {

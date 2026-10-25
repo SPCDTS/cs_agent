@@ -12,7 +12,7 @@ const storedTool = z.strictObject({
   inputSchema: schemaJson, outputSchema: schemaJson.optional(),
 });
 const revisionPayload = z.strictObject({
-  adapterVersion: z.union([z.literal(1), z.literal(2)]), serverId: z.string(), configDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  adapterVersion: z.literal(2), serverId: z.string(), configDigest: z.string().regex(/^[a-f0-9]{64}$/),
   scopeDigest: z.string().regex(/^[a-f0-9]{64}$/), tools: z.array(storedTool),
 });
 const revisionSchema = revisionPayload.extend({ digest: z.string().regex(/^[a-f0-9]{64}$/) });
@@ -74,7 +74,7 @@ export function compileStoredTool(tool: StoredTool, limits: McpLimits) {
 
 export function toolNames(revision: CatalogRevision, tool: StoredTool): McpToolIdentity & { extensionName: string; fullDigest: string } {
   const slug = (value: string, length: number) => value.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, length) || "tool";
-  const fullDigest = revision.adapterVersion === 1 ? digest([revision.digest, tool]) : toolContract(revision, tool);
+  const fullDigest = toolContract(revision, tool);
   return { serverId: revision.serverId, remoteName: tool.name, catalogDigest: revision.digest, fullDigest,
     nativeName: `mcp_${slug(revision.serverId, 16)}_${slug(tool.name, 24)}_${fullDigest.slice(0, 12)}`,
     extensionName: `cs.mcp.tool.${fullDigest}` };

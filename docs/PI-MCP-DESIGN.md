@@ -153,7 +153,7 @@ await mcp.close();
 
 每个远端工具契约对应一个版本化 extension。全局 Registry 保存定义；会话只选择本轮可用的 MCP extensions，同时保留原有 coding/IM/schedule 扩展。同一契约复用 extension，纯描述更新可以替换展示定义。
 
-原生名称格式为 `mcp_<serverSlug>_<toolSlug>_<hash12>`：ASCII，最长 64 字符。slug 只用于阅读，完整 SHA-256 才是身份；短 hash 冲突必须拒绝发布。catalogDigest 仍标识整个目录快照；v2 工具 hash 独立依据服务器 id、配置与账号引用版本、权限范围、远端工具名及输入/输出 schema。排除目录摘要、工具描述及 schema 节点中的 description/title/$comment；规范化只遍历 schema 节点，保留同名业务属性、const/default/enum 数据。其他工具变化不再导致当前工具改名。摘要不包含密钥明文。
+原生名称格式为 `mcp_<serverSlug>_<toolSlug>_<hash12>`：ASCII，最长 64 字符。slug 只用于阅读，完整 SHA-256 才是身份；短 hash 冲突必须拒绝发布。catalogDigest 仍标识整个目录快照；工具 hash 独立依据服务器 id、配置与账号引用版本、权限范围、远端工具名及输入/输出 schema。排除目录摘要、工具描述及 schema 节点中的 description/title/$comment；规范化只遍历 schema 节点，保留同名业务属性、const/default/enum 数据。其他工具变化不再导致当前工具改名。摘要不包含密钥明文。
 
 发现流程：
 
@@ -186,11 +186,11 @@ MCP tools/call 不携带可强制服务端校验的 schema 版本。客户端能
 
 在 `pi.sqlite` 中新增 session-scoped 的 `cs.pi.mcp.catalogs` 文档，version=1，由 PiMcp 单独写入。首版可以用一个有界的 revision map，减少索引与定义之间的同步状态；规模确有需要时再改 doc family，并提供迁移。
 
-每版保存目录摘要、作用域摘要、服务 id、配置摘要、原始 schema、原名、描述和适配版本。配置摘要包含服务/账号引用版本；adapterVersion=1 按旧的整目录命名算法恢复，adapterVersion=2 按单工具契约恢复，不能用新算法重算旧名称。外部业务工具统一指定 `replay: unsafe`，本地目录刷新工具为 safe。不保存秘密值、HTTP sessionId 或 socket。会话的 extension 选择继续使用 Pi 自带配置文档，不复制一套选择状态。
+每版保存目录摘要、作用域摘要、服务 id、配置摘要、原始 schema、原名、描述和适配版本。配置摘要包含服务/账号引用版本；只恢复 adapterVersion=2（单工具契约命名），其他版本的记录在启动时按损坏目录隔离并记 `catalog_restore_rejected`，回收也不删除它们。外部业务工具统一指定 `replay: unsafe`，本地目录刷新工具为 safe。不保存秘密值、HTTP sessionId 或 socket。会话的 extension 选择继续使用 Pi 自带配置文档，不复制一套选择状态。
 
 ToolTask 检查点与结果继续由 Pi 保存。正常工具参数/有界结果会进入 Pi 对话历史，因此必须按现有会话历史的访问控制和备份规则管理；“审计不采正文”不代表数据库没有工具内容。
 
-目录设总大小与版本数上限，按引用回收，不按年龄盲删。版本只在提供被引用的工具 extension 时保留，引用来自三处：任一会话 `pi.agent` 的 extension 选择（数组或 `add`）、非终态 `pi.tool` 任务所调工具名（模型调用从 assistant 条目按 callId 读取，嵌套调用取输入中的名称）、当前连接池持有及正在写入选择的目录。纯描述不同的 v2 版本共享 extension 名，先保留连接持有的版本，其余仅在提供尚未覆盖的引用时保留。
+目录设总大小与版本数上限，按引用回收，不按年龄盲删。版本只在提供被引用的工具 extension 时保留，引用来自三处：任一会话 `pi.agent` 的 extension 选择（数组或 `add`）、非终态 `pi.tool` 任务所调工具名（模型调用从 assistant 条目按 callId 读取，嵌套调用取输入中的名称）、当前连接池持有及正在写入选择的目录。纯描述不同的版本共享 extension 名，先保留连接持有的版本，其余仅在提供尚未覆盖的引用时保留。
 
 回收在启动恢复前执行一次；运行期仅在发布新版本将超限时执行，回收后仍超限则拒绝发布并降级受影响服务。任何引用无法证明（活任务的 `mcp_` 工具名找不到存储版本、读取失败）时整轮不删；当前限额下无法恢复的版本也原样保留。运行期回收只删持久记录，已安装的 Registry extension 留到进程结束。文档形状与版本不变。
 
