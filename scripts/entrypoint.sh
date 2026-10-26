@@ -307,6 +307,7 @@ deny_read = [
   "$D/images",
   "$D/files",
   "$D/media",
+  "$D/memory",
   "$D/incoming",
   "$D/tickets",
   "$D/codex-session.json*",

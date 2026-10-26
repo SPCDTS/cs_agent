@@ -151,6 +151,25 @@ describe("scope 工作区权限", () => {
     for (const ws of ["owner", "group_7"]) expect(await fs.readFile(path.join(options.workspaceDir, ws, "AGENTS.md"), "utf8")).toContain("skill_publish");
     expect(loads()[1]!.config["sandbox_workspace_write.writable_roots"]).not.toContain(path.join(path.dirname(options.threadsFile), "prompts"));
   });
+  it("记忆段（画像与未完成承诺）随加载线程写进会话域 AGENTS.md；内容不变不重写，读不到不阻塞加载", async () => {
+    const { dir, options } = rig();
+    const sections: Record<string, string | undefined> = { owner: '<memory ns="owner" profile_revision="none">\n未完成的承诺：\n- #1 周报\n</memory>' };
+    const { runner } = await live(dir, { memoryPrompt: async key => {
+      if (key === "private:9") throw new Error("坏了");
+      return sections[key];
+    } });
+    const file = (ws: string) => path.join(options.workspaceDir, ws, "AGENTS.md");
+    await runner.openThread("owner", { mcpEnv });
+    const first = await fs.readFile(file("owner"), "utf8");
+    expect(first).toContain("## 记忆（画像与未完成的承诺）\n" + sections.owner);
+    const { mtimeMs } = await fs.stat(file("owner"));
+    await runner.openThread("owner", { mcpEnv });
+    expect((await fs.stat(file("owner"))).mtimeMs).toBe(mtimeMs);
+    await runner.openThread("group:7", { mcpEnv });
+    expect(await fs.readFile(file("group_7"), "utf8")).not.toContain("<memory");
+    await runner.openThread("private:9", { mcpEnv });
+    expect(await fs.readFile(file("private_9"), "utf8")).not.toContain("<memory");
+  });
   it.each(["owner", "group:1", "private:1"])("%s 只读会话不宣称可写；禁止关闭沙箱或把数据目录放在 workspace 内", key => {
     const root = tmp();
     const policy = codexWorkspacePolicy(path.join(root, "ws"), path.join(root, "data"), key, "read-only", false);

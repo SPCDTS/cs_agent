@@ -6,6 +6,7 @@ import { validateSendArguments } from "../agent/send-service.js";
 import { AUTH_TOOLS, type AuthTool } from "../agent/grants.js";
 import { authDescriptions, authParameters, sendParameters, SKILL_PUBLISH_DESCRIPTION, skillPublishParameters } from "../agent/im-tools.js";
 import { qqContextText } from "../context/qq-context-tool.js";
+import { MEMORY_RULE, MEMORY_TOOLS, isMemoryTool, memoryDescriptions, memoryParameters, type MemoryTool } from "../agent/memory/tools.js";
 import type { CallMeta } from "../context/media-recall-server.js";
 import { callMetaOf, loopbackJson, loopbackPost } from "./media-recall-client.js";
 
@@ -18,6 +19,7 @@ export interface ImHandlers {
   auth(name: AuthTool, args: unknown, meta: CallMeta): Promise<unknown>;
   schedule(name: ScheduleTool, args: unknown, meta: CallMeta): Promise<string>;
   skillPublish(args: unknown, meta: CallMeta): Promise<unknown>;
+  memory(name: MemoryTool, args: unknown, meta: CallMeta): Promise<string>;
 }
 
 export function createImServer(handlers: ImHandlers): Server {
@@ -32,7 +34,11 @@ export function createImServer(handlers: ImHandlers): Server {
   })), {
     name: "skill_publish", description: SKILL_PUBLISH_DESCRIPTION, inputSchema: skillPublishParameters,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, ...SCHEDULE_TOOLS.map(name => ({
+  }, ...MEMORY_TOOLS.map(name => ({
+    // 使用规则只在 MEMORY_RULE 定义一次，挂在 mem_remember 的说明里；可见性固定为全集，主进程每次调用按本轮权限复核。
+    name, description: memoryDescriptions[name] + (name === "mem_remember" ? MEMORY_RULE : ""), inputSchema: memoryParameters[name],
+    annotations: { readOnlyHint: name === "mem_search" || name === "mem_list", destructiveHint: false, idempotentHint: name !== "mem_update", openWorldHint: false },
+  })), ...SCHEDULE_TOOLS.map(name => ({
     name, description: scheduleDescriptions[name], inputSchema: scheduleParameters[name],
     annotations: { readOnlyHint: name === "schedule_list", destructiveHint: name === "schedule_delete", openWorldHint: false },
   }))] }));
@@ -48,6 +54,9 @@ export function createImServer(handlers: ImHandlers): Server {
       if (req.params.name === "skill_publish") {
         return qqContextText(JSON.stringify(await handlers.skillPublish(req.params.arguments ?? {}, meta)));
       }
+      if (isMemoryTool(req.params.name)) {
+        return qqContextText(await handlers.memory(req.params.name, req.params.arguments ?? {}, meta));
+      }
       if (isScheduleTool(req.params.name)) {
         return qqContextText(await handlers.schedule(req.params.name, req.params.arguments ?? {}, meta));
       }
@@ -58,7 +67,7 @@ export function createImServer(handlers: ImHandlers): Server {
 }
 
 /** 经线程令牌向主进程提交 im 工具调用。 */
-export async function imViaLoopback(endpoint: AuthTool | ScheduleTool | "send" | "skill_publish", args: unknown, meta: CallMeta, token: string | undefined, port = 8790): Promise<unknown> {
+export async function imViaLoopback(endpoint: AuthTool | ScheduleTool | MemoryTool | "send" | "skill_publish", args: unknown, meta: CallMeta, token: string | undefined, port = 8790): Promise<unknown> {
   return loopbackJson(await loopbackPost(endpoint, args, token, port, meta, endpoint === "send" ? 600_000 : 30_000), "IM 请求失败");
 }
 

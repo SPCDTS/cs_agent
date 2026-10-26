@@ -43,6 +43,8 @@ export interface CodexRunnerOptions {
   sandboxNetwork?: boolean;
   /** 热加载可编辑提示词；这里只更新全局通用指引，不写会话权限。 */
   preparePrompt?: () => Promise<void>;
+  /** 会话的记忆提示段（画像与未完成承诺，docs/MEMORY-DESIGN.md §7），随受管 AGENTS.md 生成；为空时不写。 */
+  memoryPrompt?: (key: ThreadKey) => Promise<string | undefined>;
   /** 按线程加载时的模型生成基础指令；没有目录模板时不覆盖 Codex 默认值。 */
   prepareBasePrompt?: (model: string) => Promise<string | undefined>;
   /** ${DATA_DIR}/codex-threads.json：{ owner: {thread_id, created_at, updated_at}, "group:<id>": {...}, "private:<qq>": {...} } */
@@ -469,7 +471,9 @@ export class CodexRunner {
     await this.opts.preparePrompt?.();
     const managed = renderManagedAgentsMd({ dataDir, workspaceDir: policy.workspaceDir,
       codexHome: this.opts.codexHome, writableRoots: policy.writableRoots, readOnly: this.opts.sandbox === "read-only" });
-    const instructions = managed + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
+    // 记忆段读不到时不阻塞加载线程，模型仍可用 mem_search / mem_list 查。
+    const memory = await this.opts.memoryPrompt?.(key).catch((error: unknown) => { log.warn("codex memory prompt failed", { key, error }); return undefined; });
+    const instructions = managed + (memory ? "\n\n## 记忆（画像与未完成的承诺）\n" + memory : "") + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
     await writeManagedFile(path.join(policy.workspaceDir, "AGENTS.md"),
       `<!-- cs-agent-managed-workspace-agents v1 -->\n由 cs-agent 在加载线程时生成，改动会被覆盖。\n\n${instructions}\n`);
     const port = this.opts.mediaRecallPort ?? 8790;

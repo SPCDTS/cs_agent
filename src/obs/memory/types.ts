@@ -4,6 +4,7 @@ import type { AgingReport } from '../../context/aging.js';
 export type { AgingReport } from '../../context/aging.js';
 import type { ContextStore } from '../../context/store.js';
 import type { ObsStore } from '../store.js';
+import type { MemoryStore } from '../../context/memory/store.js';
 
 export interface Retention {
   rawDays: number; summaryDays: number; hardMaxDays: number; dailyHour: number; tz: string;
@@ -21,6 +22,30 @@ export interface MemoryDeps {
   aging?: MemoryAging; archives?: MemoryArchives; maxChars?: number;
   now?: () => number;
   sessionAdapters?: SessionAdapters;
+  /** 记忆条目（docs/MEMORY-DESIGN.md §10）；未接入时 /api/memory/entries* 为 404 */
+  entries?: MemoryEntriesSource;
+}
+/** 面板读写记忆条目的入口：读走存储，遗忘 / 恢复走记忆服务（作者记为 dashboard）。 */
+export interface MemoryEntriesSource {
+  store: Pick<MemoryStore, 'browse' | 'get' | 'versions' | 'links' | 'namespaces'>;
+  forget(id: number): unknown;
+  restore(id: number): unknown;
+  scopeLabel?(scope: string): string;
+}
+/** 时间均为毫秒；source 为写入时本轮最后一条输入。 */
+export interface MemoryEntry {
+  id: number; ns: string; ns_label: string; kind: string; subject: string | null; text: string; status: string; author: string;
+  since: number | null; until: number | null; due_at: number | null; done_at: number | null; confidence: number;
+  created_at: number; updated_at: number; last_recalled_at: number | null; recall_count: number;
+  source: { scope: string; label: string; message_id: string | null; turn_id: string | null; timeline_href: string } | null;
+}
+export interface MemoryEntryPage {
+  items: MemoryEntry[]; total: number; page: number; has_more: boolean; namespaces: { ns: string; label: string }[];
+}
+export interface MemoryEntryVersion { id: number; at: number; by: string; reason: string | null; status_before: string | null; status_after: string; text_changed: boolean }
+export interface MemoryEntryDetail {
+  entry: MemoryEntry; versions: MemoryEntryVersion[];
+  links: { from_id: number; to_id: number; rel: string; created_at: number }[];
 }
 export interface ScopeSummary {
   scope: string; label: string; messages: number; summaries: { day: number; week: number };

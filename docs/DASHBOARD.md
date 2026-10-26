@@ -8,7 +8,7 @@
 - **Host**：只接受 `localhost` / `127.0.0.1` / `[::1]`（防 DNS rebinding），其余 403；只接受 GET / POST，其余 405。
 - **响应头**：`Cache-Control: no-store`、`Referrer-Policy: same-origin`、`X-Content-Type-Options: nosniff`；CSP 为每请求 nonce（`style-src 'self' 'nonce-…'`、`script-src 'nonce-…'`、`img-src 'self'`、`connect-src 'self'`、`frame-ancestors 'none'`、`form-action 'self'`）。页面没有内联 `style=` 属性；宽度类数据用 `data-*` 整数加 `theme.ts` 生成的属性选择器。
 - **写操作**（面板表单）：只认 cookie（URL 口令不能写）；有 `Origin` 时必须同源，字面值 `null` 仅在 `Sec-Fetch-Site: same-origin` 时允许，有 `Sec-Fetch-Site` 时只接受 `same-origin` / `none`；表单隐藏字段 `_csrf` = HMAC-SHA256(口令, 固定标签)，常数时间比较；只接受 `application/x-www-form-urlencoded`（≤512 KB），技能上传为 multipart（≤20 MiB）。成功后 303 回原页并带 `?ok=<代码>` 提示。
-- **只读 JSON 接口**（`/api/agents/*`、`/api/memory/*`、`/agents/stream`）：只接受 GET（其余 405 并带 `Allow: GET`），错误统一为 `{error}`；先整体脱敏（`redactSessionValue` / `redactText`）再裁剪，编码后超过 1 MiB 返回 413，不静默丢数组项。时间一律 Unix 毫秒；字符上限按 UTF-16 计、不拆代理对。
+- **只读 JSON 接口**（`/api/agents/*`、`/api/memory/*`、`/agents/stream`）：只接受 GET（其余 405 并带 `Allow: GET`；记忆条目的遗忘 / 恢复除外，见 §8.4），错误统一为 `{error}`；先整体脱敏（`redactSessionValue` / `redactText`）再裁剪，编码后超过 1 MiB 返回 413，不静默丢数组项。时间一律 Unix 毫秒；字符上限按 UTF-16 计、不拆代理对。
 - **渲染**：服务端文本一律先脱敏再转义；客户端只改 `textContent` / `dataset` / `className`。
 - **SSE**：`/live/stream`、`/usage/stream`、`/logs/stream`、`/agents/stream` 共用 20 个连接上限（超出 503），15 秒心跳；帧经写队列按序写出，`write()` 返回 false 时等 `drain`，只有待写字节超过 2 MB 或一次 `drain` 等待超过 10 秒才断开该客户端。
 
@@ -28,7 +28,7 @@
 | `/agents` | 顶部"拓扑"概览：每个会话一张卡，主 agent 一行（会话、后端、状态），未结束的子 agent 是小节点，已结束的合成一个计数（完成 / 失败 / 停止）；空闲且没有子 agent 的会话折成一行。页面可见时每 3 秒取 `/agents/topology` 概览片段刷新（不读会话正文）；展开一张卡时才读 `/agents/topology/:thread`（主 agent 最近动作，以及全部子 agent 的任务、最近动作、结果与"查看过程"链接），已展开的卡在刷新后保持展开；下方 Codex / Pi 两张卡：活动 / 归档会话数、索引进度、每条线程的占用条与"监控"链接 | `POST /{codex,pi}/{reset,compact}`、`POST /thread/stop` |
 | `/agents/<后端>/sessions[/…]` | 会话 → 回合浏览与上下文分析（§6、§7）；`/codex`、`/pi` 303 到对应会话列表 | — |
 | `/context-usage` | 上下文监控（§5） | — |
-| `/memory[/…]` | 记忆：总览、时间线、摘要、检索检查器、召回记录、图片、归档（§8） | — |
+| `/memory[/…]` | 记忆：总览、时间线、摘要、检索检查器、召回记录、图片、归档、记忆条目（§8） | `POST /memory/entries/<id>/{forget,restore}` |
 | `/context` | 用 qq_context 工具浏览 / 检索消息库（与模型看到的格式一致） | — |
 | `/schedules`、`/schedules/<id>` | 定时任务（§2.3） | `POST /schedules/<id>/{pause,resume,run,delete}` |
 | `/skills`、`/skills/<名称>`、`/skills/<名称>.zip` | 技能列表（含诊断）、SKILL.md 与目录文件、zip 下载（[ARCHITECTURE.md](ARCHITECTURE.md) §7） | `POST /skills/upload`、`POST /skills/<名称>/delete` |
@@ -170,6 +170,7 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 | `/memory/recalls`、`/memory/recalls/<id>` | 召回记录与三级证据（§8.2） |
 | `/memory/images`、`/memory/images/<scope>/<message_id>/<ordinal>` | 图片画廊与详情（§8.3） |
 | `/memory/archives` | 重置归档的 Codex / Pi 会话（链到会话页）与 Pi 压缩记录 |
+| `/memory/entries?ns=&kind=&status=&q=`、`/memory/entries/<id>` | 记忆条目列表与详情，可遗忘 / 恢复（§8.4） |
 
 ### 8.1 消息库接口
 
@@ -195,6 +196,15 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 - `GET /api/memory/images?scope=&status=ok|skipped&since=&page=` → `{items: ImageItem[], page, has_more, totals: {ok, skipped, bytes}}`，每页 50，按消息时间倒序；`totals` 覆盖整个筛选结果（`bytes` 为现存文件之和，按记录重复计）。`mime` / `width` / `height` 恒为 null（库里没有，不解码推测）。`present` 表示登记的文件在 `DATA_DIR/media` 下且不是链接；ok 且 present 时 `href` / `thumb_href` 为 `/media/<sha256>`。
 - `GET /api/memory/images/<scope>/<message_id>/<ordinal>` → `{item, message, other_media, timeline_href}`（同消息其它媒体按 ordinal；时间线链接为消息前后各一小时）。
 - `GET /media/<sha256>`：只接受 64 位十六进制；路径必须在 `message_media` 登记且位于媒体目录，经媒体读取器校验路径、链接、大小（≤10 MiB）、文件头与哈希；按魔数返回 png / jpeg / gif / webp（其他 415），`Cache-Control: private, max-age=3600`。
+
+### 8.4 记忆条目
+
+数据来自记忆库 `memory.sqlite`（[ARCHITECTURE.md](ARCHITECTURE.md) §9.1），面板是管理员视角：可见全部命名空间与状态，与某次会话的读取范围无关。类型见 `src/obs/memory/types.ts`，接口在 `src/obs/memory/entries.ts`。
+
+- `GET /api/memory/entries?ns=&kind=&status=&q=&page=` → `{items: MemoryEntry[], total, page, has_more, namespaces}`，每页 50，按更新时间倒序。`ns` 为 `owner` / `group:<id>` / `private:<qq>`，`kind` 五种之一，`status` 缺省为全部状态；`q` 截前 100 字，按空白切词、全部命中正文或 subject（与 `mem_search` 同一 FTS）。条目的时间字段为毫秒，`source` 为写入时本轮最后一条输入（会话、显示名、消息 id、回合 id、前后一小时的时间线链接），面板写入或无来源为 null。
+- `GET /api/memory/entries/<id>` → `{entry, versions, links}`：`versions` 每次正文或状态变化一行（时间、操作者、前后状态、正文是否改动、原因），不返回快照正文；`links` 为取代链。不存在 404。
+- `POST /api/memory/entries/<id>/forget`、`/restore`：只接受 `application/json`（≤4 KiB、不带其它字段），同源检查与 CSRF（`X-CSRF-Token` 头或 `_csrf` 字段）与 `/api/schedules` 相同，返回更新后的详情。遗忘只标 `forgotten`，不删行；恢复回到遗忘前的状态（取最近一次遗忘版本的前状态，查不到为 active），未遗忘的条目恢复为 409。操作者记为 `dashboard`，写 `@memory` 的 `memory_write` 事件。
+- 页面：`/memory/entries` 筛选表单（命名空间、种类、状态、关键词）与表格，每行一个"遗忘"或"恢复"按钮；`/memory/entries/<id>` 显示元数据、正文、取代链与版本历史。按钮是表单 POST 到 `/memory/entries/<id>/{forget,restore}`（面板写操作的 cookie、同源与 `_csrf` 约束），成功 303 回详情页并带 `?ok=memoryForgotten` / `memoryRestored`。画像编辑、抽取与整理状态尚未提供。
 
 ## 9. 观测存储与保留
 

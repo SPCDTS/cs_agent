@@ -6,7 +6,7 @@ import { tmp } from "./helpers.js";
 export async function sandboxRequirements(dir: string): Promise<string> {
   const file = path.join(dir, "requirements.toml");
   await fs.writeFile(file, `[permissions.filesystem]\ndeny_read = [\n${[
-    "*.sqlite*", "logs", "obs-token", "codex/auth.json", "codex/trace", "images", "media", "incoming", "tickets",
+    "*.sqlite*", "logs", "obs-token", "codex/auth.json", "codex/trace", "images", "media", "memory", "incoming", "tickets",
   ].map(p => JSON.stringify(path.join(dir, p))).join(",\n")}\n]\n`, "utf8");
   return file;
 }

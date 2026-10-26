@@ -26,7 +26,7 @@ import { createQQBridge } from "../../src/qq/bridge.js";
 import type { ReplyStore } from "../../src/qq/reply-store.js";
 import { CodexRunner } from "../../src/agent/codex/runner.js";
 import { startMediaRecallServer, ThreadTokens, type CallMeta } from "../../src/context/media-recall-server.js";
-import { sendViaLoopback } from "../../src/mcp/im-server.js";
+import { imViaLoopback, sendViaLoopback } from "../../src/mcp/im-server.js";
 import { contextViaLoopback } from "../../src/mcp/media-recall-client.js";
 import { CodexScript } from "./codex-fixture.js";
 import { fakeSpawn, noKill } from "./codex-app-server/fake-app-server.js";
@@ -67,6 +67,8 @@ export interface ResidentOptions {
   instrumentation?: PiBackendOptions["instrumentation"];
   web?: PiBackendOptions["web"];
   mcp?: PiBackendOptions["mcp"];
+  /** 记忆服务：pi 工具与 codex 的 im 网关共用 */
+  memory?: PiBackendOptions["memory"];
   currentModel?: (provider: string) => ModelRef;
   /** 额外的 faux 模型（运行时模型设置） */
   extraModels?: { id: string; contextWindow?: number; reasoning?: boolean }[];
@@ -125,6 +127,8 @@ export async function residentRig(options: ResidentOptions = {}) {
     permissions: async binding => grants.permissions(binding),
     auth: (binding, name, args) => grants.tool(binding, name, args),
     send: (binding, callKey, args, signal) => sendService.send({ ...binding, extraRoots: [binding.imageDir] }, args, callKey, signal),
+    ...(options.memory ? { memory: (binding: Parameters<NonNullable<PiBackendOptions["memory"]>["tool"]>[0], name: string, args: unknown) =>
+      options.memory!.tool({ ...binding, backend: "codex" }, name, args) } : {}),
   });
   const recallServer = await startMediaRecallServer(tokens, 0);
   const backendOf = (scope: string): BackendName => typeof options.backend === "function" ? options.backend(scope) : options.backend ?? "pi";
@@ -143,6 +147,7 @@ export async function residentRig(options: ResidentOptions = {}) {
       ...(options.instrumentation ? { instrumentation: options.instrumentation } : {}),
       ...(options.web ? { web: options.web } : {}),
       ...(options.mcp ? { mcp: options.mcp } : {}),
+      ...(options.memory ? { memory: options.memory } : {}),
       ...(options.currentModel ? { currentModel: () => options.currentModel!(model.provider) } : {}),
       ...(contextUsage ? { contextUsage } : {}),
       ...(options.reserveTokens !== undefined ? { reserveTokens: options.reserveTokens } : {}),
@@ -200,6 +205,10 @@ export async function residentRig(options: ResidentOptions = {}) {
     /** 模拟 im MCP：以会话线程令牌和调用归属发送 */
     codexSend(threadKey: string, args: unknown, meta: CallMeta, token?: string) {
       return sendViaLoopback(args, meta, token ?? r.codexToken(threadKey), recallServer.port);
+    },
+    /** 模拟 im MCP 的 mem_* 调用（经线程令牌 loopback） */
+    codexMemory(threadKey: string, name: "mem_search" | "mem_list", args: unknown, meta: CallMeta, token?: string) {
+      return imViaLoopback(name, args, meta, token ?? r.codexToken(threadKey), recallServer.port);
     },
     /** 模拟 qq_context / image_gen 取调用上下文 */
     codexContext(threadKey: string, meta: CallMeta, token?: string) {

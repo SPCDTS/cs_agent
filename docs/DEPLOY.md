@@ -138,6 +138,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 | `./data/pi.sqlite`（+WAL）/ `pi-threads.json` | pi 长期会话与子 agent；JSON 是 SQLite 映射的原子镜像，丢失时启动重建。**不要单独删 JSON 当作清空记忆**；备份须含数据库、WAL 与映射 |
 | `./data/qq-bridge.sqlite` | 入站输入（含附件 URL/file id，按聊天附件敏感信息保管）、Outbox、去重、发送规则计数与熔断；旧版 `tickets` 表留在磁盘上，不再读写 |
 | `./data/qq-messages.sqlite`（+WAL） | 消息库与摘要，**按聊天记录保管**。清空：停容器后删除 `qq-messages.sqlite*`，启动重建 |
+| `./data/memory.sqlite`（+WAL）、`./data/memory/<ns>/profile.md` | 记忆条目与各会话画像（ns 的冒号换下划线）；对 codex 命令与 pi 文件工具禁读，只经记忆工具与面板读写 |
 | `./data/observability.sqlite`（+WAL） | 观测事件与指标；备份用 SQLite 一致性备份或含 WAL |
 | `./data/codex/` | `CODEX_HOME`：受管 `config.toml`（手改会被覆盖，改 `.env` 后重启）、生成的 `AGENTS.md`（不要手改，编辑 `prompts/codex.md`）、`base-instructions/`、sessions、trace、`generated_images/`、`auth.json`（仅直连） |
 | `./data/codex-threads.json`、`codex-threads-archive.jsonl` | 每个会话一条 codex 线程；重置请用面板（空闲时归档并清除，下一轮新建） |
@@ -192,7 +193,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
   deny_read = ["/data/codex/auth.json", "/data/codex/.credentials.json", "/data/codex/sessions", "/data/codex/archived_sessions",
     "/data/codex/history.jsonl", "/data/codex/log", "/data/codex/trace", "/data/codex/shell_snapshots", "/data/codex/memories",
     "/data/codex/*.sqlite*", "/data/*.sqlite*", "/data/logs", "/data/obs-token", "/data/obs-token.*.tmp", "/data/images", "/data/files",
-    "/data/media", "/data/incoming", "/data/tickets", "/data/codex-session.json*", "/data/codex-threads.json"]
+    "/data/media", "/data/memory", "/data/incoming", "/data/tickets", "/data/codex-session.json*", "/data/codex-threads.json"]
   ```
 
   codex 只认系统级 `requirements.toml` 里的这个键（`$CODEX_HOME/requirements.toml` 无效，`[permissions.<profile>]` 与 `sandbox_mode` 互斥）。命中路径在 bwrap 里被空文件/空目录覆盖，glob 在每条命令启动时展开。不能整个禁读 `/data/codex`（arg0 辅助程序在 `/data/codex/tmp`）；`config.toml`、`AGENTS.md`、`skills/` 可读，不含秘密。另外其他会话工作区、`/data/pi-work`、`/data/codex/trace` 对命令不可读。

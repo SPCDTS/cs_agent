@@ -11,7 +11,7 @@ import { Metrics, type Gauge } from "./obs/metrics.js";
 import { createDashboard } from "./obs/http.js";
 import { LiveBus } from "./obs/live.js";
 import { startAlerts } from "./obs/alerts.js";
-import { registerSecrets, redact, redactText } from "./shared/redact.js";
+import { containsSecret, registerSecrets, redact } from "./shared/redact.js";
 import { cleanupIncoming } from "./qq/incoming.js";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -53,6 +53,11 @@ import { CodexBackend } from "./agent/backends/codex.js";
 import { PiBackend } from "./agent/backends/pi.js";
 import { loadMcpConfig, type EnvironmentSecrets } from "./agent/pi-mcp/config.js";
 import { ContextStore } from "./context/store.js";
+import { MemoryStore } from "./context/memory/store.js";
+import { ProfileStore } from "./context/memory/profile.js";
+import { MemoryService } from "./agent/memory/service.js";
+import { isOwner } from "./shared/owners.js";
+import { scopeLabel } from "./context/access.js";
 import { SettingsStore, settingsDefaults } from "./agent/settings.js";
 import { msUntilNextRun, startAgingScheduler } from "./context/aging.js";
 
@@ -100,10 +105,10 @@ async function main(): Promise<void> {
   // 父工作区的运维 AGENTS.md 保留，runner 拼入每个子工作区的受管规则。
   const writableRoots: string[] = []; // 实际可写目录由 runner 每轮按会话权限计算。
   const codexPrompt = new CodexPromptStore({ codexHome: cfg.codexHome, dataDir: cfg.DATA_DIR,
-    workspaceDir: cfg.WORKSPACE_DIR, writableRoots, containsSecret: text => redactText(text, Number.MAX_SAFE_INTEGER) !== text });
+    workspaceDir: cfg.WORKSPACE_DIR, writableRoots, containsSecret });
   const codexBasePrompt = new CodexBasePromptStore({ codexHome: cfg.codexHome, dataDir: cfg.DATA_DIR,
     ...(cfg.CODEX_PROVIDER === "magpie" ? { magpieUrl: cfg.CODEX_MAGPIE_URL, magpieKey: cfg.CODEX_MAGPIE_KEY } : {}),
-    containsSecret: text => redactText(text, Number.MAX_SAFE_INTEGER) !== text });
+    containsSecret });
   await codexPrompt.read();
   await codexPrompt.regenerate();
   log.info("wrote codex global AGENTS.md", { file: codexPrompt.agentsFile, writable_roots: writableRoots });
@@ -116,6 +121,12 @@ async function main(): Promise<void> {
   const obs = new ObsStore(cfg.DATA_DIR, cfg.OBS_EVENT_CAP, cfg.OBS_ADMIN_RETENTION_DAYS);
   trace.attach(obs);
   const instrumentation = obs.degraded ? undefined : MemoryInstrumentation.fromDb(obs.db);
+  // 记忆层（docs/MEMORY-DESIGN.md）：${DATA_DIR}/memory.sqlite 与 memory/<ns>/profile.md；两个后端与面板共用一个服务。
+  const memoryStore = new MemoryStore(cfg.DATA_DIR);
+  const memory = new MemoryService({ store: memoryStore, profiles: new ProfileStore(cfg.DATA_DIR), owners: cfg.owners,
+    maxChars: cfg.QQ_CONTEXT_MAX_CHARS, inbound: key => inbox.get(key),
+    scopeLabel: scope => scope.startsWith("group:") ? "群 " + (store.scopeNames()[scope] ?? scope.slice(6))
+      : scope.startsWith("private:") && isOwner(cfg.owners, scope.slice(8)) ? "owner 私聊" : scopeLabel(scope) });
   const contextUsage = new ContextUsageStore(cfg.DATA_DIR);
   // 每会话一行的实时总线：在派发器开始产生事件之前订阅 trace（/live 的 SSE 数据源）；
   // 排队输入、子 agent 数与重启后仍在进行的回合从会话宿主与两个后端的只读快照补齐（宿主与后端随后才创建，调用时取用）。
@@ -163,6 +174,7 @@ async function main(): Promise<void> {
     schedule: (binding, name, args) => scheduleTools.tool(binding, name, args),
     auth: (binding, name, args) => grants.tool(binding, name, args),
     skillPublish: (binding, args) => publishSkill(skills, binding.workdir, args),
+    memory: (binding, name, args) => memory.tool({ ...binding, backend: "codex" }, name, args),
     send: (binding, callKey, args, signal) => sendService.send({ ...binding,
       extraRoots: [binding.imageDir,
         ...(/^[0-9a-f-]{36}$/i.test(binding.session) ? [path.join(cfg.codexHome, "generated_images", binding.session)] : [])],
@@ -182,6 +194,7 @@ async function main(): Promise<void> {
     sandbox: cfg.CODEX_SANDBOX,
     sandboxNetwork: cfg.CODEX_SANDBOX_NETWORK,
     preparePrompt: () => codexPrompt.regenerate(),
+    memoryPrompt: key => memory.render(key),
     prepareBasePrompt: model => codexBasePrompt.prepare(model),
     rolloutMaxMb: cfg.CODEX_ROLLOUT_MAX_MB,
     threadMaxDays: cfg.CODEX_THREAD_MAX_DAYS,
@@ -286,7 +299,7 @@ async function main(): Promise<void> {
   }
   const mcpSecrets: EnvironmentSecrets = { readReferencedVariable: name => mcpEnvironment.get(name) };
   const pi = await PiBackend.open({
-    sendService, grants, scheduleTools, turns: inbox, owners: cfg.owners,
+    sendService, grants, scheduleTools, turns: inbox, owners: cfg.owners, memory,
     currentModel: currentPiModel,
     dataDir: cfg.DATA_DIR, workspaceDir: cfg.WORKSPACE_DIR, models, model: { provider: cfg.AGENT_MODEL_PROVIDER, modelId: cfg.AGENT_MODEL_ID },
     skillsDir: cfg.PI_SKILLS_DIR, skills,
@@ -401,7 +414,9 @@ async function main(): Promise<void> {
         children: backend === "pi" ? await pi.subagents(thread) : backend === "codex" ? codexBackend.subagents(thread) : [] };
     }));
   };
-  const dashboardData = { contextUsage, codexPrompt, codexBasePrompt, modelCatalog, skills, topology };
+  const dashboardData = { contextUsage, codexPrompt, codexBasePrompt, modelCatalog, skills, topology,
+    memoryEntries: { store: memoryStore, forget: (id: number) => memory.forgetFromDashboard(id), restore: (id: number) => memory.restoreFromDashboard(id),
+      scopeLabel: (scope: string) => memory.label(scope) } };
   const dashboard = createDashboard({
     grants, schedules, ...dashboardData, config: cfg, store: obs, context: store, queue: () => queueStatus(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
@@ -482,6 +497,7 @@ async function main(): Promise<void> {
     await contextUsage.close().catch(() => log.warn("context usage shutdown flush failed"));
     try {
       store.close();
+      memoryStore.close();
     } catch {
       /* ignore */
     }

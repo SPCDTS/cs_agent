@@ -80,6 +80,7 @@ export function memoryHomeBody(o: MemoryOverview, now: number, recalls?: RecallC
   out += '</section>';
   out += `<section><h2>工具</h2><div class="grid cols-3 mem-tools">
 <a class="sheet pad tool-link" href="/memory/search"><b>检索检查器</b><small>检索命中 → 工具实际返回的对照</small></a>
+<a class="sheet pad tool-link" href="/memory/entries"><b>记忆条目</b><small>mem_remember 记下的事实与承诺，可遗忘 / 恢复</small></a>
 <a class="sheet pad tool-link" href="/memory/archives"><b>线程归档</b><small>Codex / Pi 归档线程与 Pi 压缩记录</small></a>
 <a class="sheet pad tool-link" href="/context"><b>上下文检索（旧）</b><small>qq_context 工具原样输出</small></a>
 <a class="sheet pad tool-link" href="/memory/recalls"><b>召回记录</b><small>${recalls ? `最近 24 小时 ${fmtInt(recalls.count)}${recalls.more ? '+' : ''} 次工具召回` : recalls === null ? '最近 24 小时的数量暂不可用' : 'qq_recent / qq_search / qq_message 每次调用与三级证据'}</small></a>

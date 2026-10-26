@@ -4,6 +4,7 @@ import type { DashboardOptions } from './dashboard-types.js';
 import { resolveAgentConfig } from '../agent/config.js';
 import { equal, readBody, readMultipart, HttpError, guardAgentMd, writeAgentMd, guardDashboardOrigin } from './dashboard-io.js';
 import { SkillsStoreError } from '../agent/skills-store.js';
+import { applyMemoryEntryAction } from './memory/entries.js';
 import { isThreadKey } from '../agent/codex/runner.js';
 import { SETTINGS_KEY, type RuntimeSettings } from '../agent/settings.js';
 
@@ -35,6 +36,13 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
     if (schedulePost && (url.pathname === '/schedules' || url.pathname.startsWith('/schedules/'))) { await schedulePost(form, url, res, nonce); return; }
     const back = (location: string) => res.writeHead(303, { Location: location }).end();
     try {
+      // 记忆条目的遗忘 / 恢复（docs/DASHBOARD.md §8.4）：成功回到详情页。
+      const memoryAction = /^\/memory\/entries\/([1-9]\d{0,15})\/(forget|restore)$/.exec(url.pathname);
+      if (memoryAction) {
+        if (!opts.memoryEntries) throw new HttpError(404, '记忆条目未启用');
+        applyMemoryEntryAction(opts.memoryEntries, Number(memoryAction[1]), memoryAction[2] as 'forget' | 'restore');
+        back(`/memory/entries/${memoryAction[1]}?ok=${memoryAction[2] === 'forget' ? 'memoryForgotten' : 'memoryRestored'}`); return;
+      }
       if (url.pathname === '/skills/upload') {
         if (!opts.skills) throw new HttpError(404, '技能管理未启用');
         if (!file) throw new HttpError(400, '请选择技能文件');
@@ -191,7 +199,7 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
       const status = expected ? e.status : 500;
       const message = expected ? e.message : '操作失败，详见日志';
       const html = url.pathname.startsWith('/settings') ? await render(new URL('http://localhost/settings'), nonce, { text: message, error: true }) : null;
-      res.writeHead(status, {'Content-Type':'text/html; charset=utf-8'}).end(html ?? page({ title: '操作未完成', path: url.pathname, nonce, flash: { text: message, error: true }, body: `<p><a href="${url.pathname.startsWith('/skills/') ? '/skills' : '/agents'}">返回</a></p>` }));
+      res.writeHead(status, {'Content-Type':'text/html; charset=utf-8'}).end(html ?? page({ title: '操作未完成', path: url.pathname, nonce, flash: { text: message, error: true }, body: `<p><a href="${url.pathname.startsWith('/skills/') ? '/skills' : url.pathname.startsWith('/memory/') ? '/memory/entries' : '/agents'}">返回</a></p>` }));
     }
   }
 

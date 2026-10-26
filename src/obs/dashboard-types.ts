@@ -6,7 +6,7 @@ import type { ContextStore } from '../context/store.js';
 import type { ObsStore } from './store.js';
 import type { SessionAdapters } from './sessions/http.js';
 import type { PiSessionSource } from '../agent/backends/pi-session-types.js';
-import type { MemoryAging, MemoryArchives } from './memory/types.js';
+import type { MemoryAging, MemoryArchives, MemoryEntriesSource } from './memory/types.js';
 import type { SettingsStore } from '../agent/settings.js';
 import type { LiveBus } from './live.js';
 import type { ThreadTopology } from './sessions/types.js';
@@ -31,6 +31,8 @@ export interface DashboardOptions {
   sessionAdapters?: SessionAdapters;
   aging?: MemoryAging;
   archives?: MemoryArchives;
+  /** 记忆条目（/memory/entries，可遗忘 / 恢复）；未接入时页面与接口为 404 */
+  memoryEntries?: MemoryEntriesSource;
   /** 运行时设置（/settings 可写）；缺省时设置页只读展示配置 */
   settings?: SettingsStore;
   /** bridge 发送熔断：设置页列出并可手动解除 */

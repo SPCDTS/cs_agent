@@ -1,5 +1,7 @@
 /** 面板页面与页面路由；数据经只读契约传入，HTML 保持原样。 */
 import { imagesPageBody, imageDetailBody, IMAGES_NOTE } from './images-pages.js';
+import { entriesPageBody, entryFilters, entryPageBody, entryQuery } from './memory-entries-pages.js';
+import type { MemoryEntryDetail, MemoryEntryPage } from '../memory/types.js';
 import type { ImagePage, ImageDetail } from '../memory/types.js';
 import { redact, redactText } from '../../shared/redact.js';
 import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnRecallSection, type RecallDetail, type RecallList } from './recall-pages.js';
@@ -49,6 +51,8 @@ export interface DashboardPageOptions {
   compactCodex?: unknown; compactPi?: unknown; stopThread?: unknown;
   /** 每会话一行的实时视图（src/obs/live.ts 的 LiveBus） */
   live?: { snapshot(): LiveConversationView[] };
+  /** 记忆条目已接入（数据经 /api/memory/entries* 读取） */
+  memoryEntries?: unknown;
   context: { scopes(): string[]; scopeNames?(): Record<string, string> };
   contextUsage?: ContextUsageView;
   settings?: { current(): Readonly<RuntimeSettingsView>; defaults: RuntimeSettingsView };
@@ -520,6 +524,20 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       const r = await api('/api' + p);
       if (r.status === 404 || r.status === 400) return null;
       return shell('图片详情', r.status === 200 ? imageDetailBody(r.body as ImageDetail, nonce) : '<p class="flash err">图片详情暂不可用</p>', { lead: IMAGES_NOTE });
+    }
+    if (p === '/memory/entries') {
+      if (!opts.memoryEntries) return null;
+      const f = entryFilters(q), r = await api('/api/memory/entries?' + entryQuery(f));
+      return shell('记忆条目', entriesPageBody(f, r.status === 200 ? r.body as MemoryEntryPage : { error: apiError(r) }, csrf),
+        { lead: '模型用 mem_remember 记下的事实、偏好、要求、承诺与经历；可按命名空间、种类、状态与关键词筛选，遗忘与恢复都可逆。' });
+    }
+    if (p.startsWith('/memory/entries/')) {
+      const key = p.slice('/memory/entries/'.length);
+      if (!opts.memoryEntries || !/^[1-9]\d{0,15}$/.test(key)) return null;
+      const r = await api(`/api/memory/entries/${key}`);
+      if (r.status === 404 || r.status === 400) return null;
+      if (r.status !== 200) return shell('记忆条目', `<div class="flash err" role="alert">读取记忆条目失败：${esc(apiError(r))}</div><p class="mt"><a href="/memory/entries">返回记忆条目</a></p>`);
+      return shell(`记忆 #${key}`, entryPageBody(r.body as MemoryEntryDetail, csrf), { lead: '条目正文、来源、取代链与版本历史；遗忘只做标记，可恢复到遗忘前的状态。' });
     }
     if (p === '/memory/archives') {
       const r = await api('/api/memory/archives');

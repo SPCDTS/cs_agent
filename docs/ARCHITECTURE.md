@@ -151,7 +151,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 - **提示词层次**（全部以 user 角色进入上下文；不用无法更新已有线程的 `developer_instructions`）：
   1. 基础指令：`DATA_DIR/prompts/codex-base/<slug>.md`（每个模型一份，首次从模型目录的 `instructions_template` 播种，可在设置页编辑或恢复目录默认）+ 固定的 QQ 受管规则，拼成 `CODEX_HOME/base-instructions/<slug>.md`，经 `model_instructions_file` 生效。
   2. 全局指引 `CODEX_HOME/AGENTS.md`：通用保密与会话隔离说明 + 用户可编辑的 `DATA_DIR/prompts/codex.md`（面板保存，校验 revision、≤64 KB、拒绝含秘密的内容）。
-  3. 会话域受管 `AGENTS.md`（`/workspace/<key>/AGENTS.md`，首行受管标记）：按该线程实际权限渲染可写目录、聊天记录与图片、发送图片与文件、技能规则，并拼入运维维护的 `/workspace/AGENTS(.override).md`。加载线程前生成，内容不变不重写；模型改写后下次加载线程时恢复。
+  3. 会话域受管 `AGENTS.md`（`/workspace/<key>/AGENTS.md`，首行受管标记）：按该线程实际权限渲染可写目录、聊天记录与图片、发送图片与文件、技能规则，以及本会话的记忆段（画像与未完成承诺，§9.1），并拼入运维维护的 `/workspace/AGENTS(.override).md`。加载线程前生成，内容不变不重写；模型改写后下次加载线程时恢复。
 
   已加载线程是否在同一 app-server 进程内重读改动后的 AGENTS.md 取决于 codex；要立即生效就重置该会话线程或重启容器。
 - **崩溃**：app-server 不可持久恢复。掉线时进行中的回合、子 agent、后台进程丢失；其中已 `delivered` 的输入标 `done`，向会话发"处理中断了"，不自动重放（避免重复执行有副作用的操作）。长任务用 pi 更稳。
@@ -160,11 +160,12 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 
 - **会话**：独立 `Harness.open`（`DATA_DIR/pi.sqlite`），每个会话键一条 ownerless 长期会话；映射写在 session 文档 `cs.pi.threads`，`pi-threads.json` 是其原子镜像，启动从 SQLite 重建。工作区 `DATA_DIR/pi-work/<key>`。
 - **回合**：开轮 `conv.submit({ type: "input", requestId: 入站键, whenBusy: "followUp" })`，同一发送者插话 `whenBusy: "steer"`；回合结束由会话 idle 事件驱动宿主。
-- **工具**：`read` / `write` / `edit` / `bash`（`PiPathPolicy` + bwrap 沙箱，§5.5）、`web_search` / `fetch_page`（DeepSeek Search/Fetch API 直连，需 `DEEPSEEK_API_KEY`）、`qq_recent` / `qq_search` / `qq_message` / `qq_image` / `qq_chats`、`send_message`、按本轮权限出现的 `auth_*` / `schedule_*`、`subagent`。工具调用不按回合计次。每轮开始（含唤醒与重启恢复）时按本轮的人重新选择 IM 与定时工具集；调用时服务端逐次复核。
+- **工具**：`read` / `write` / `edit` / `bash`（`PiPathPolicy` + bwrap 沙箱，§5.5）、`web_search` / `fetch_page`（DeepSeek Search/Fetch API 直连，需 `DEEPSEEK_API_KEY`）、`qq_recent` / `qq_search` / `qq_message` / `qq_image` / `qq_chats`、`send_message`、按本轮权限出现的 `auth_*` / `schedule_*`、`mem_*`（§9.1）、`subagent`。工具调用不按回合计次。每轮开始（含唤醒与重启恢复）时按本轮的人重新选择 IM、定时与记忆工具集；调用时服务端逐次复核。
 - **提示词**：pi-durable 把各 section 合成为最前面的一条 system 消息，内容不变不重发（保住提示缓存）：
-  1. `cs-pi`：受管规则（发送、链接、安全、工作区、子 agent 用法）+ `DATA_DIR/prompts/agent.md`（仅人设、语气与输出格式；缺失时播种，已有不覆盖，按 mtime/size 热加载）。工具使用指引放在各工具描述中。
+  1. `cs-pi`：受管规则（发送、链接、安全、工作区、子 agent 用法、记忆工具的使用规则）+ `DATA_DIR/prompts/agent.md`（仅人设、语气与输出格式；缺失时播种，已有不覆盖，按 mtime/size 热加载）。工具使用指引放在各工具描述中。
   2. `project-context`：运维层 `WORKSPACE_DIR/AGENTS.md` 与会话层 `DATA_DIR/pi-work/<key>/AGENTS.md`，各按 `AGENTS.override.md → AGENTS.md → AGENTS.MD → CLAUDE.md → CLAUDE.MD` 取第一个普通文件（≤128 KiB、严格 UTF-8、去 BOM、拒绝链接），渲染为 `<project_instructions path="…">`。主进程直接读取，不向上遍历，不读 `/data/AGENTS.md`；cwd 不是 `pi-work` 的直接子目录时只用运维层并告警一次。语义参照 pi-coding-agent 的 `loadProjectContextFiles`，未引入该包（[THIRD-PARTY.md](THIRD-PARTY.md)）。
-  3. `skills`：可用技能列表（§7）。
+  3. `memory`：本会话的画像与未完成承诺（§9.1），空则不渲染。
+  4. `skills`：可用技能列表（§7）。
 - **压缩**：harness 级自动压缩开启，`PI_COMPACTION_RESERVE_TOKENS`（16384）/ `PI_COMPACTION_BACKGROUND_TOKENS`（32768）/ keepRecentTokens 20000；不轮换，压缩不删除数据库原文。
 - **模型**：`AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID`；为 `magpie` 时启动拉一次 magpie 目录注册为 pi-ai provider（`src/agent/magpie-models.ts`）：codex 模型走 `openai-responses`，其余走 `openai-completions`；pi-ai 有内置定义的模型（如 deepseek-flash）继承其 `thinkingLevelMap`、`compat`、价格，窗口以 magpie 为准。日/周摘要用同一模型。
 - **恢复**：pi-durable 持久化，进程重启后进行中的回合与子 agent 自动续跑，`delivered` 输入无需处理。
@@ -173,8 +174,8 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 
 长任务派子 agent，主 agent 结束本轮；子 agent 完成时唤醒主 agent，由它汇报。两个后端的受管提示都写明"长任务先告知用户、派子 agent 后结束本轮，收到结果再汇报"。模型漏发结论时系统不自动补一步。
 
-- **codex**：受管配置开启 `features.multi_agent` 与 `features.wake_on_agent_messages`；子 agent 完成后 app-server 自己开一轮（`turn/started`），宿主据此识别"没有新输入的唤醒回合"。适配器求出派出者并随 `onTurnStarted` 交给宿主；求不出就只有会话基础权限。后台终端命令跑完**不会**唤醒。升级 codex 前须复测：父线程收到 `subAgentActivity kind=completed` 后应很快出现 `turn/started`。
-- **pi**：`subagent` 扩展（`pi-tools/subagent.ts`，仿 pi-durable 示例 `23-subagent-background`），动作 `spawn / message / status / list / stop`，每会话同时存活 ≤3 个、每天派出 ≤20 个。后台锚定任务持有子会话，完成后汇报任务把结果作为 follow-up 输入（`[子 agent 完成]`）投回父会话。子会话工具集与父相同但不含 `subagent`、`send_message`、`auth_*`、`schedule_*`；读取权限继承派出者在本会话的权限。
+- **codex**：受管配置开启 `features.multi_agent` 与 `features.wake_on_agent_messages`；子 agent 完成后 app-server 自己开一轮（`turn/started`），宿主据此识别"没有新输入的唤醒回合"。适配器求出派出者并随 `onTurnStarted` 交给宿主；求不出就只有会话基础权限。后台终端命令跑完**不会**唤醒。codex 子 agent 线程调用 cs-agent 的 MCP 工具（`qq_context` 召回、`im` 的发送与记忆工具）一律在主进程求绑定时被拒绝（"子 agent 不能使用此工具"），所以 codex 子 agent 没有记忆工具。升级 codex 前须复测：父线程收到 `subAgentActivity kind=completed` 后应很快出现 `turn/started`。
+- **pi**：`subagent` 扩展（`pi-tools/subagent.ts`，仿 pi-durable 示例 `23-subagent-background`），动作 `spawn / message / status / list / stop`，每会话同时存活 ≤3 个、每天派出 ≤20 个。后台锚定任务持有子会话，完成后汇报任务把结果作为 follow-up 输入（`[子 agent 完成]`）投回父会话。子会话工具集与父相同但不含 `subagent`、`send_message`、`auth_*`、`schedule_*` 与记忆写工具（只留 `mem_search` / `mem_list`）；读取权限继承派出者在本会话的权限。
 - **身份随汇报带回**：spawn 时快照这一轮的人，登记在 `cs.subagent.children` 并写入汇报输入；唤醒回合继承它（§5.1）。`message` 给已有子 agent 时与这一轮的人合并，不是同一人就降为基础权限，之后的汇报都带合并后的身份。
 
 ### 4.4 重启顺序
@@ -265,6 +266,18 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 - **图片按需召回**：消息默认只存 `[image]`，不存 URL、不下载。`qq_image(message_id)` 下载到媒体库并只返回路径文本，正文改为 `[image:<路径>]`；看图用各自的文件工具（pi `read`，codex `qq_view_image`）。codex 每回合召回 ≤`MEDIA_RECALL_MAX_PER_TURN`（默认 5；旧名 `MEDIA_RECALL_MAX_PER_TICKET` 仍可用）；pi 不按回合计次。媒体随原始消息保留，每日 GC 回收无引用文件。
 - **codex 接入**：`qq_context` MCP（只读库连接）经主进程 loopback 服务（`MEDIA_RECALL_PORT`，仅 127.0.0.1）完成召回与 `qq_chats`；主进程凭线程令牌与 `_meta.callId` 确认调用属于会话当前回合，再按本轮权限求出范围。pi 直接调用同一服务。
 
+### 9.1 记忆（`src/context/memory/`、`src/agent/memory/`）
+
+消息库之上的派生层：回答"你是谁、偏好什么、定过什么、答应过什么"，不回答"某天聊了什么"。设计与后续分期见 [MEMORY-DESIGN.md](MEMORY-DESIGN.md)；现在只有回合内的显式工具与面板，没有回合后抽取与夜间整理。
+
+- **存储**：`/data/memory.sqlite`（WAL，`context/memory/store.ts`；与 `/data/memory/` 一样在 codex 与 pi 的禁读名单里，只能经记忆工具与面板读写）：`memories`（命名空间、种类 fact / preference / rule / commitment / episode、subject、一句话正文 ≤500 字、生效与失效时间、承诺的截止与完成时间、状态 active / superseded / retired / orphaned / forgotten、作者、来源会话与消息 id、回合 id、召回统计、去重哈希）、`memory_versions`（每次正文或状态变化一行，前后快照与原因）、`memory_links`（`supersedes` 取代链）；`memories_fts` 为 trigram FTS5，content 表触发器同步。命名空间与会话键一致（`owner`、`group:<id>`、`private:<qq>`）。哈希为 `ns + kind + 规整后正文` 的 SHA-256，同命名空间的 active 条目重复写入时返回已有条目。存储不认识权限，与消息库互不 import。
+- **画像**：每个命名空间一份 `/data/memory/<ns>/profile.md`（冒号换下划线），纯文本 ≤4 KiB（超限的不进入提示，`mem_profile` 提示重写）；画像目录与文件不可为链接、真实路径须在画像根目录内；revision = mtime + size + 内容哈希，写入必须带读到的 revision（CAS），含凭据样式内容拒绝（与提示词编辑器同一条规则，`shared/redact.ts` 的 `containsSecret`）。
+- **权限**（`agent/memory/service.ts`，每次调用按 `runRights` 重新求出）：owner 私聊且读全部的回合读全部命名空间、写 `owner`，`subject` 写成 `group:<id>` / `private:<qq>` 时记入那个会话，并可管理任意命名空间的条目；群线程（含 owner 在群里）只读写本群；其他私聊只读写本人；本轮没有确证的人时只读不写；pi 子 agent 只读；codex 子 agent 没有记忆工具（与 `qq_context` 相同，子线程的 MCP 调用一律拒绝，§4.3）。画像只在 owner 本人的回合、只写本线程命名空间。
+- **工具**：`mem_search`（关键词子串匹配，最近召回优先、其次最新；命中记召回统计）、`mem_list`（承诺按截止排序）、`mem_remember`（可带 `supersedes`，同事务取代旧条目）、`mem_update`、`mem_forget`（只标记）、`mem_profile`。输出每条一行 `#id [kind] (时效) 正文 ← 来源 会话 #消息`，总量 ≤`QQ_CONTEXT_MAX_CHARS`；写入前过秘密检测；每轮写入 ≤20 次。使用规则只定义在 `agent/memory/tools.ts` 的 `MEMORY_RULE`，pi 放在 `cs-pi` 受管段，codex 放在 `mem_remember` 的说明里。trace 事件 `memory_recall`（工具名与命中 id，不记正文）、`memory_write`（作者、命名空间、种类、是否取代）。
+- **两个后端**：pi 由 `pi-tools/memory.ts` 注册（读工具一个扩展，写工具按本轮权限分两档，`mem_profile` 只在 owner 档）。codex 的 `im` MCP 固定列出六个 `mem_*`，经线程令牌 loopback（`/mem_*` 端点）回主进程，`ThreadTokens` 求出本次调用的绑定后交给同一个服务复核。
+- **提示注入**：只注入画像全文与未完成承诺的前 10 条（按截止升序，无截止的在后），渲染为 `<memory ns="…" profile_revision="…">` 段（`agent/memory/render.ts`），两者都空时不渲染。pi 为 `memory` section；codex 写进会话域受管 `AGENTS.md` 的"记忆"一节，随加载线程生成，已加载的线程何时重读取决于 codex（§4.1）。其余条目不自动注入，由模型按需 `mem_search`。
+- **面板**：`/memory/entries`（列表与筛选）、`/memory/entries/<id>`（正文、来源、取代链、版本历史），可遗忘与恢复（[DASHBOARD.md](DASHBOARD.md) §8.4）。
+
 ## 10. 存储
 
 镜像内 `/app/source/` 保存本次构建的源码、测试与文档，只读；`COMMIT` 记录部署提交与构建时间（`CS_AGENT_COMMIT` / `CS_AGENT_BUILT_AT`），启动日志记录同一版本。主人线程的固定系统提示给出自查路径，权限仍逐回合校验。
@@ -275,6 +288,8 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 | `data/pi.sqlite`、`pi-threads.json` | pi 长期会话与子 agent 会话、`cs.pi.threads(.archive)`；JSON 是映射镜像 |
 | `data/qq-bridge.sqlite` | `inbound`、`outbox`、`seen_messages`、`send_log` / `send_breakers`；旧版遗留的 `tickets` 表原样留在磁盘上，不再读写 |
 | `data/qq-messages.sqlite` | 消息库（机器人消息带 Outbox 行键 `messages.outbox_key`）、摘要、`scope_names`、媒体引用 |
+| `data/memory.sqlite` | 记忆条目 `memories`、版本 `memory_versions`、取代链 `memory_links`、`memories_fts`（§9.1） |
+| `data/memory/<ns>/profile.md` | 各命名空间的核心画像（ns 的冒号换下划线，≤4 KiB） |
 | `data/observability.sqlite` | 观测事件（`events.key`：`turn:<id>`、`in:<入站键>`、`thr:<会话键>`；`@` 开头为管理事件）与指标、会话索引、摘要血缘与召回记录（`recall_events.turn_id`），见 [DASHBOARD.md](DASHBOARD.md) §9 |
 | `data/logs/` | `cs-agent.jsonl`：与 stderr 同级别、同脱敏对象的 JSON 行；10 MiB 轮转，保留 `.1`～`.3`，正常退出前排空写入 |
 | `data/codex/`（`CODEX_HOME`） | 受管 `config.toml`、生成的 `AGENTS.md`、`base-instructions/`、sessions、trace、`generated_images/`、`skills/shared`（挂载） |
@@ -293,15 +308,15 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 
 | 层 | 目录 | 职责 |
 |---|---|---|
-| 0 | `shared/` | 日志、脱敏、trace 事件总线、usage/错误归一化、格式化、来源头字段清洗、owner 判定、定时工具名契约 |
+| 0 | `shared/` | 日志、脱敏、trace 事件总线、usage/错误归一化、格式化、来源头字段清洗、owner 判定、定时与记忆工具名契约 |
 | 1 | `config.ts` | 环境变量 → 原始配置（zod），不 import 业务模块 |
 | 2 | `media/` | 下载与 SSRF 防护、图片头与限额、附件来源校验、参考图校验 |
 | 3 | `channel/` | 通道公共契约：入站记录、Outbox、发送规则、回合身份类型（不依赖 qq / context / agent） |
 | 4 | `qq/` | OneBot 传输（`bridge.ts`）、授权与触发（`policy.ts`）、`inbound` / `outbox` 持久化（`reply-store.ts`）、入站附件（`incoming.ts`）、发送规则执行（`send-rules.ts`）；`qq/types.ts` 是契约 |
-| 5 | `context/` | 消息库、衰老、访问范围、格式化、媒体库与召回服务、`qq_context` 工具门面、观察者接口 |
-| 6 | `agent/` | `inbox.ts`、`host/`（ThreadHost、`identity.ts`）、`turns.ts`（BackendRouter / TurnMonitor）、`backends/`（codex / pi 适配）、`codex/`（app-server 客户端与监管、runner、提示词、工作区权限、模型目录）、`pi-tools/`（pi 扩展、沙箱、子 agent、技能、项目指引）、`schedule/`、`send-service.ts`、`grants.ts`、`settings.ts`、`turn-settings.ts`、`effort-router.ts`、`skills-store.ts`、`magpie-models.ts` |
+| 5 | `context/` | 消息库、衰老、访问范围、格式化、媒体库与召回服务、`qq_context` 工具门面、观察者接口；`memory/`：记忆库与画像文件（只依赖 shared，与消息库互不 import） |
+| 6 | `agent/` | `inbox.ts`、`host/`（ThreadHost、`identity.ts`）、`turns.ts`（BackendRouter / TurnMonitor）、`backends/`（codex / pi 适配）、`codex/`（app-server 客户端与监管、runner、提示词、工作区权限、模型目录）、`pi-tools/`（pi 扩展、沙箱、子 agent、技能、项目指引、记忆工具）、`memory/`（记忆服务：权限、工具语义、提示段渲染，不依赖后端实现）、`schedule/`、`send-service.ts`、`grants.ts`、`settings.ts`、`turn-settings.ts`、`effort-router.ts`、`skills-store.ts`、`magpie-models.ts` |
 | 7 | `obs/` | 观测存储与指标、面板路由与页面（`ui/`）、会话 / 上下文 / 记忆视图、告警 |
-| 8 | `mcp/` | codex 的 stdio MCP 入口：`qq-context.ts`（检索、召回、`qq_chats`）、`im.ts`（发送、授权、定时） |
+| 8 | `mcp/` | codex 的 stdio MCP 入口：`qq-context.ts`（检索、召回、`qq_chats`）、`im.ts`（发送、授权、定时、技能发布、记忆） |
 | 9 | `main.ts` | 组合根：加载配置 → 打开 harness → 恢复 → 启动 bridge、宿主、排程、面板 |
 
 `src/main.ts`、`src/mcp/qq-context.ts`、`src/mcp/im.ts` 被入口脚本与受管 `config.toml` 以 `dist/...` 路径引用，移动时须同步。

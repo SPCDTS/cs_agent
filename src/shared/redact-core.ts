@@ -53,6 +53,10 @@ export function redactText(text: string, limit = 500): string {
     });
   return out.length > limit ? out.slice(0, limit - 1).replace(/[\uD800-\uDBFF]$/, '') + '…' : out;
 }
+/** 提示词编辑器与记忆写入共用的拒绝规则：脱敏会改动原文（含已注册秘密或凭据形态）即视为含秘密。 */
+export function containsSecret(text: string): boolean {
+  return redactText(text, Number.MAX_SAFE_INTEGER) !== text;
+}
 export function redact(value: unknown, limit = 500, depth = 0): unknown {
   if (depth > 8) return '[深度上限]';
   if (value instanceof Error) return redactText(value.message, limit);

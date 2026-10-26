@@ -1,5 +1,6 @@
 import { isScheduleTool, SCHEDULE_TOOLS, type ScheduleTool, type ScheduleToolPermissions } from "../shared/schedule-tools.js";
 import type { Channel, TurnBinding } from "../channel/types.js";
+import { MEMORY_TOOLS } from "../shared/memory-tools.js";
 import { CHATS_DENIED, listChatsText } from "./chats.js";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
@@ -44,6 +45,8 @@ export interface ThreadGateway {
   auth?(binding: CallBinding, name: "auth_grant" | "auth_revoke" | "auth_list", args: unknown): Promise<unknown>;
   schedule?(binding: CallBinding, name: ScheduleTool, args: unknown): Promise<string>;
   skillPublish?(binding: CallBinding, args: unknown): Promise<unknown>;
+  /** mem_* 工具：权限由网关按本次调用的绑定求出（docs/MEMORY-DESIGN.md §5），返回工具文本 */
+  memory?(binding: CallBinding, name: string, args: unknown): Promise<string>;
   /** callKey 为 MCP 请求的 _meta.callId */
   send(binding: CallBinding, callKey: string, args: unknown, signal: AbortSignal): Promise<unknown>;
 }
@@ -134,6 +137,12 @@ export class ThreadTokens {
     return this.gateway.skillPublish(binding, args);
   }
 
+  async memory(token: string, meta: CallMeta, name: string, args: unknown): Promise<string> {
+    const { binding } = await this.bind(token, meta);
+    if (!this.gateway.memory) throw new Error("记忆未启用");
+    return this.gateway.memory(binding, name, args);
+  }
+
   async schedule(token: string, meta: CallMeta, name: ScheduleTool, args: unknown): Promise<string> {
     const { binding } = await this.bind(token, meta);
     const permissions = await this.gateway.permissions?.(binding);
@@ -175,6 +184,9 @@ export class ThreadTokens {
   }
 }
 
+/** mem_* 工具的 loopback 端点 */
+const MEMORY_ENDPOINTS: readonly string[] = MEMORY_TOOLS.map(name => "/" + name);
+
 /** 调用元数据经请求头传入（JSON，有界）；只取字符串字段。 */
 export const CALL_META_HEADER = "x-cs-call-meta";
 
@@ -199,7 +211,7 @@ export async function startMediaRecallServer(tokens: ThreadTokens, port = 8790) 
     const send = (status: number, body: unknown) => {
       res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }).end(JSON.stringify(body));
     };
-    if (req.method !== "POST" || !["/recall", "/view", "/chats", "/send", "/context", "/auth_grant", "/auth_revoke", "/auth_list", "/skill_publish", ...SCHEDULE_TOOLS.map(name => "/" + name)].includes(req.url ?? "")) { send(404, { error: "不存在的召回端点" }); return; }
+    if (req.method !== "POST" || !["/recall", "/view", "/chats", "/send", "/context", "/auth_grant", "/auth_revoke", "/auth_list", "/skill_publish", ...SCHEDULE_TOOLS.map(name => "/" + name), ...MEMORY_ENDPOINTS].includes(req.url ?? "")) { send(404, { error: "不存在的召回端点" }); return; }
     const auth = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization ?? "");
     if (!auth || !tokens.valid(auth[1]!)) { send(401, { error: "线程令牌无效或已作废" }); return; }
     try {
@@ -207,7 +219,7 @@ export async function startMediaRecallServer(tokens: ThreadTokens, port = 8790) 
       let size = 0; const chunks: Buffer[] = [];
       for await (const chunk of req) {
         size += chunk.length;
-        if (size > (["/send", "/auth_grant", "/schedule_create", "/schedule_update"].includes(req.url!) ? 64 * 1024 : 2048)) { send(413, { error: "请求过大" }); return; }
+        if (size > (["/send", "/auth_grant", "/schedule_create", "/schedule_update", "/mem_remember", "/mem_update", "/mem_profile"].includes(req.url!) ? 64 * 1024 : 2048)) { send(413, { error: "请求过大" }); return; }
         chunks.push(Buffer.from(chunk));
       }
       const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -220,6 +232,7 @@ export async function startMediaRecallServer(tokens: ThreadTokens, port = 8790) 
         send(200, await tokens.auth(auth[1]!, meta, req.url.slice(1) as "auth_grant" | "auth_revoke" | "auth_list", body)); return;
       }
       if (req.url === "/skill_publish") { send(200, await tokens.skillPublish(auth[1]!, meta, body)); return; }
+      if (MEMORY_ENDPOINTS.includes(req.url!)) { send(200, await tokens.memory(auth[1]!, meta, req.url!.slice(1), body)); return; }
       const scheduleTool = req.url!.slice(1);
       if (isScheduleTool(scheduleTool)) {
         send(200, await tokens.schedule(auth[1]!, meta, scheduleTool, body)); return;

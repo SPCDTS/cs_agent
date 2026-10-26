@@ -3,7 +3,7 @@ import type { IncomingMessage } from 'node:http';
 import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { redactText } from '../shared/redact.js';
+import { containsSecret, redactText } from '../shared/redact.js';
 const MAX_BODY = 512 * 1024;
 export const AGENT_MD_MAX_BYTES = 64 * 1024;
 
@@ -115,7 +115,7 @@ export async function guardAgentMd(file: string, revision: string): Promise<void
   try { st = await fs.lstat(file); } catch { /* 不存在 */ }
   if (st && st.isFile() && !st.isSymbolicLink() && st.size <= 256_000) {
     const current = await fs.readFile(file, 'utf8');
-    if (redactText(current, 1_000_000) !== current) throw new HttpError(409, 'agent.md 中包含凭据样式的内容，面板禁止覆盖；请在容器内直接编辑。');
+    if (containsSecret(current)) throw new HttpError(409, 'agent.md 中包含凭据样式的内容，面板禁止覆盖；请在容器内直接编辑。');
   }
   if (revision !== agentMdRevision(st)) throw new HttpError(409, 'agent.md 已在别处被修改，请刷新页面查看最新内容后再保存。');
 }

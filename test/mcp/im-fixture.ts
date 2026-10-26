@@ -33,6 +33,11 @@ export async function imRig(threadKey: string, gateway: Omit<ThreadGateway, "res
       send: (args, meta) => sendViaLoopback(args, meta, token, port),
       auth: (name, args, meta) => imViaLoopback(name, args, meta, token, port),
       skillPublish: (args, meta) => imViaLoopback("skill_publish", args, meta, token, port),
+      memory: async (name, args, meta) => {
+        const result = await imViaLoopback(name, args, meta, token, port);
+        if (typeof result !== "string") throw new Error("记忆工具返回格式错误");
+        return result;
+      },
       schedule: async (name, args, meta) => {
         const result = await imViaLoopback(name, args, meta, token, port);
         if (typeof result !== "string") throw new Error("定时工具返回格式错误");

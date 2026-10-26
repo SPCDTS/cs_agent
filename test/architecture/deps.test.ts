@@ -60,6 +60,10 @@ function violations([from, to]: Edge): string[] {
   if (from.startsWith('src/obs/sessions/') && to.startsWith('src/obs/context/')) reasons.push('sessions 反向依赖 context');
   if (['src/agent/backends/types.ts', 'src/agent/backends/select.ts'].includes(from) && b === 'agent' &&
       !to.endsWith('/types.ts')) reasons.push('后端接口/选择器依赖实现文件');
+  // 记忆层（docs/MEMORY-DESIGN.md §3）：存储只依赖 shared 与本目录，与消息库互不 import；服务不依赖任何后端实现。
+  if (from.startsWith('src/context/memory/') && !to.startsWith('src/context/memory/') && b !== 'shared') reasons.push('context/memory 只依赖 shared 与本目录');
+  if (b === 'context' && a === 'context' && !from.startsWith('src/context/memory/') && to.startsWith('src/context/memory/')) reasons.push('消息库不依赖记忆库');
+  if (from.startsWith('src/agent/memory/') && /^src\/agent\/(backends|pi-tools|pi-mcp|codex)\//.test(to)) reasons.push('记忆服务不依赖后端实现');
   return reasons;
 }
 
@@ -117,6 +121,13 @@ describe('包结构与分层', () => {
     ['src/obs/memory/new.ts', 'src/obs/ui/html.ts'],
     ['src/obs/sessions/new.ts', 'src/obs/context/types.ts'],
     ['src/agent/backends/select.ts', 'src/agent/backends/codex.ts'],
+    ['src/context/memory/store.ts', 'src/context/store.ts'],
+    ['src/context/memory/store.ts', 'src/context/access.ts'],
+    ['src/context/memory/new.ts', 'src/agent/memory/service.ts'],
+    ['src/context/store.ts', 'src/context/memory/store.ts'],
+    ['src/agent/memory/new.ts', 'src/agent/pi-tools/memory.ts'],
+    ['src/agent/memory/new.ts', 'src/agent/codex/runner.ts'],
+    ['src/agent/memory/new.ts', 'src/agent/backends/pi.ts'],
   ])('拒绝新增的违规边 %s → %s', (from, to) => {
     expect(violations([from, to]).length).toBeGreaterThan(0);
     expect(exceptions.has(edgeKey([from, to]))).toBe(false);
@@ -143,6 +154,20 @@ describe('包结构与分层', () => {
       (from.startsWith('src/obs/') && to.startsWith('src/mcp/')) ||
       (from === 'src/obs/store.ts' && to.startsWith('src/obs/memory/')));
     expect(forbidden.map(edgeKey)).toEqual([]);
+  });
+
+  it('记忆层两个目录存在，且实际依赖符合层级：context/memory 只到 shared，agent/memory 只到 context 与 agent 的非后端模块', () => {
+    const memoryEdges = edges.filter(([from]) => from.startsWith('src/context/memory/') || from.startsWith('src/agent/memory/'));
+    expect(sourceFiles.filter(f => f.startsWith('src/context/memory/'))).toEqual(['src/context/memory/profile.ts', 'src/context/memory/store.ts', 'src/context/memory/types.ts']);
+    expect(sourceFiles.filter(f => f.startsWith('src/agent/memory/'))).toEqual(['src/agent/memory/render.ts', 'src/agent/memory/service.ts', 'src/agent/memory/tools.ts']);
+    for (const [from, to] of memoryEdges) {
+      const ok = from.startsWith('src/context/memory/') ? to.startsWith('src/context/memory/') || packageOf(to) === 'shared'
+        : ['shared', 'channel', 'context', 'agent'].includes(packageOf(to)) && !violations([from, to]).length;
+      expect(ok, `${from} → ${to}`).toBe(true);
+    }
+    // 两个后端都只经 agent/memory 使用记忆（mcp 层只取工具契约）
+    expect(edges.filter(([from, to]) => to.startsWith('src/context/memory/') && !/^src\/(context|agent)\/memory\//.test(from) && from !== 'src/main.ts' && !from.startsWith('src/obs/'))
+      .map(edgeKey)).toEqual([]);
   });
 
   it('shared 内部没有文件级依赖环', () => {

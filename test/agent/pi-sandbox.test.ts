@@ -81,6 +81,14 @@ describe("Pi 文件策略", () => {
     else await expect(env.policy.check(future, "read")).rejects.toThrow("拒绝");
     await expect(env.policy.check(path.join(dir, "new.sqlite"), "read")).rejects.toThrow("拒绝");
   });
+  it.each(["group:7", "private:5", "owner"])("%s 的文件工具与 bash 都不能直接读记忆库的画像（只经 MemoryService）", async key => {
+    const { dir, env } = await sandboxFixture(key);
+    const profile = await put(path.join(dir, "memory", "owner", "profile.md"), "称呼：老王");
+    const deny = await env.policy.deny();
+    await expect(env.policy.check(profile, "read", deny)).rejects.toThrow("拒绝");
+    await expect(env.policy.check(path.join(dir, "memory", "group_7", "profile.md"), "read", deny)).rejects.toThrow("拒绝");
+    expect(bwrapArgs(env.cwd, env.policy.workRoot, deny.paths, "true")).toContain(path.join(dir, "memory"));
+  });
   it("观测库例外仅限文件，不能放出同名目录的内容", async () => {
     const { dir, env } = await sandboxFixture("owner");
     const root = path.join(dir, "observability.sqlite"), file = await put(path.join(root, "private"));

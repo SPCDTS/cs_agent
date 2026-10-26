@@ -16,6 +16,8 @@ import type { EnvironmentSecrets, McpConfigState } from "../pi-mcp/config.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
 import { createPiScheduleExtensions } from "../pi-tools/schedule.js";
 import { createPiImExtensions, createPiSkillExtension } from "../pi-tools/im.js";
+import { createPiMemoryExtensions, selectMemoryWriteExtension } from "../pi-tools/memory.js";
+import { memoryAccess } from "../memory/service.js";
 import type { SkillsStore } from "../skills-store.js";
 import { PiChildDoc, traceKey, type PiCallBinding } from "../pi-tools/request.js";
 import { createSubagentExtension, isSubagentReportRequest, reportPerson, SUBAGENT_REPORT_KIND, SubagentDoc, type SubagentOptions, type SubagentSpawner } from "../pi-tools/subagent.js";
@@ -209,7 +211,9 @@ export class PiBackend implements ThreadAdapter {
       // 派出那一轮的身份快照：汇报唤醒的回合继承它（§5.1）。
       spawner: parent => backend.spawner(Number(parent)) });
     const skill = createPiSkillExtension({ ...opts, binding });
-    for (const item of [coding, extension, ...Object.values(im), ...Object.values(schedule), skill, ...(subagent ? [subagent] : [])]) registry.install(item);
+    const memory = createPiMemoryExtensions(binding, opts.memory);
+    for (const item of [coding, extension, ...Object.values(im), ...Object.values(schedule), skill, ...Object.values(memory),
+      ...(subagent ? [subagent] : [])]) registry.install(item);
     const storage = opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite"));
     harness = await Harness.open(storage, {
       models: opts.models, registry,
@@ -220,7 +224,7 @@ export class PiBackend implements ThreadAdapter {
         return codingEnvironment({ dataDir: opts.dataDir, workspaceDir, key: bound.threadKey,
           request: { access: bound.access, senderIsOwner: bound.senderIsOwner, inputs: bound.inputs }, store: opts.store });
       },
-      settings: { extensions: [coding, extension, im.basic, ...(subagent ? [subagent] : [])], toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
+      settings: { extensions: [coding, extension, im.basic, ...(opts.memory ? [memory.read] : []), ...(subagent ? [subagent] : [])], toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
         enabled: true,
         ...(opts.reserveTokens !== undefined ? { reserveTokens: opts.reserveTokens } : {}),
         ...(opts.backgroundTokens !== undefined ? { backgroundTokens: opts.backgroundTokens } : {}),
@@ -514,10 +518,15 @@ export class PiBackend implements ThreadAdapter {
     const available = await this.opts.scheduleTools?.permissions(binding);
     const scheduleExtension = available?.scheduleControl ? schedule.control : available?.schedule ? schedule.management : undefined;
     const skill = createPiSkillExtension({ ...this.opts, binding: id => this.binding(id) });
+    // 记忆：读工具恒有，写工具按本轮权限（host/identity.ts 的 runRights）选档，没有确证的人就没有写工具。
+    const memory = createPiMemoryExtensions(id => this.binding(id), this.opts.memory);
+    const memoryWrite = this.opts.memory ? selectMemoryWriteExtension(memory, memoryAccess(runRights(binding, this.owners()))) : undefined;
     await conv.configure({ extensions: {
-      add: [selected, ...(scheduleExtension ? [scheduleExtension] : []), ...(permissions.actorIsOwner ? [skill] : [])],
+      add: [selected, ...(scheduleExtension ? [scheduleExtension] : []), ...(permissions.actorIsOwner ? [skill] : []),
+        ...(this.opts.memory ? [memory.read] : []), ...(memoryWrite ? [memoryWrite] : [])],
       remove: [...Object.values(im).filter(e => e.name !== selected.name),
-        ...Object.values(schedule).filter(e => e.name !== scheduleExtension?.name), ...(permissions.actorIsOwner ? [] : [skill])],
+        ...Object.values(schedule).filter(e => e.name !== scheduleExtension?.name), ...(permissions.actorIsOwner ? [] : [skill]),
+        ...[memory.write, memory.owner].filter(e => e.name !== memoryWrite?.name), ...(this.opts.memory ? [] : [memory.read])],
     } }, context);
     await this.mcp?.configure({ conversation: conv, turn: binding }, context);
   }

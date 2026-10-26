@@ -117,6 +117,8 @@ describe("codex 常驻：唤醒回合与工具调用的回合归属", () => {
     script.toolCall(turn, "exec-1");
     expect(await r.codexContext(G, { callId: "exec-1", threadId: turn.threadId, turnId: turn.turnId })).toMatchObject({ access: G, turn_id: "codex:turn-1" });
     await expect(r.codexContext(G, { callId: "exec-x", threadId: "child-thread" })).rejects.toThrow("子 agent");
+    // 记忆工具与 qq_context 同一限制：codex 子 agent 线程的调用在网关求绑定时就被拒绝
+    await expect(r.codexMemory(G, "mem_search", { query: "x" }, { callId: "exec-y", threadId: "child-thread" })).rejects.toThrow("子 agent");
     slow.open();
     await r.idle();
     await expect(r.codexSend(G, { text: "迟到的发送" }, { callId: "exec-1", threadId: turn.threadId })).rejects.toThrow("本回合已结束");

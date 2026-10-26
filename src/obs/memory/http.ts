@@ -10,6 +10,7 @@ import { sessionJson } from '../sessions/http.js';
 import { redactSessionValue } from '../sessions/content.js';
 import { SessionError } from '../sessions/types.js';
 import { memoryArchives } from './archives.js';
+import { memoryEntryDetail, memoryEntryList } from './entries.js';
 import { MemoryReader, preview, safeText } from './read.js';
 import type { AgingStatus, Hit, MemoryDeps } from './types.js';
 
@@ -141,6 +142,11 @@ export function createMemoryRoutes(deps: MemoryDeps) {
         const parts = p.split('/'), ordinal = segment(parts[6]);
         sessionJson(res, 200, await images.detail(segment(parts[4]), segment(parts[5]),
           ordinal === '0' ? 0 : integer(ordinal, 'ordinal', 0, Number.MAX_SAFE_INTEGER))); return;
+      }
+      if (p === '/api/memory/entries' || /^\/api\/memory\/entries\/[^/]+$/.test(p)) {
+        if (!deps.entries) throw new SessionError(404, '记忆条目未启用');
+        if (p === '/api/memory/entries') { sessionJson(res, 200, memoryEntryList(deps.entries, q)); return; }
+        parameters(q, []); sessionJson(res, 200, memoryEntryDetail(deps.entries, segment(p.split('/')[4]))); return;
       }
       if (p === '/api/memory/archives') {
         parameters(q, []); sessionJson(res, 200, await memoryArchives(deps.archives, deps.store)); return;
