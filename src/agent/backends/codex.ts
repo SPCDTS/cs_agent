@@ -230,7 +230,7 @@ export class CodexBackend implements ThreadAdapter {
 
   async startTurn(threadKey: ThreadKey, inputs: readonly InputRef[], turn: TurnContext, settings?: SettingsSnapshot): Promise<StartTurnResult> {
     // 先渲染：输入缺失等错误在开轮时就抛出，宿主按开轮失败处理。
-    const rendered = await this.opts.turns.render(this.opts.turns.records(inputs));
+    const rendered = await this.opts.turns.render(this.opts.turns.records(inputs), "codex");
     const model = settings?.codexModel;
     const effort = settings ? settings.codexReasoningEffort : this.effort;
     // 宿主每轮只送一条输入；其输入键作为 clientUserMessageId（开轮结果不确定时据此认领回合）
@@ -371,7 +371,7 @@ export class CodexBackend implements ThreadAdapter {
   async steer(threadKey: ThreadKey, turnId: string, input: InputRef): Promise<"ok" | "no_active_turn"> {
     const current = this.hostTurn(threadKey);
     if (current?.kind !== "user" || hostTurnId(current.codexTurnId) !== turnId) return "no_active_turn";
-    const rendered = await this.opts.turns.render(this.opts.turns.records([input]));
+    const rendered = await this.opts.turns.render(this.opts.turns.records([input]), "codex");
     let result: Awaited<ReturnType<CodexRunner["client"]["steer"]>>;
     try {
       result = await this.opts.runner.client.steer(current.threadId, current.codexTurnId, [{ type: "text", text: rendered.text }],

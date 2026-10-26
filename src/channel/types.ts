@@ -98,6 +98,8 @@ export interface InboxStore {
   listInbound(state: InboundState, limit?: number, afterSeq?: number): InboundRecord[];
   /** 会话最近一条输入（唤醒回合取发送地址与引用） */
   latestInbound(threadKey: string): InboundRecord | null;
+  /** 会话在 beforeSeq 之前、回合 id 以 turnPrefix 开头的最近一条用户输入（某后端上次看到哪里） */
+  lastUserInput(threadKey: string, turnPrefix: string, beforeSeq: number): InboundRecord | null;
   markInbound(keys: readonly string[], state: InboundState, turnId?: string): void;
   openScheduledInput(input: ScheduledInput): InboundRecord;
 }

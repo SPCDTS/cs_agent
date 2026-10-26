@@ -27,7 +27,7 @@ import type { OwnerIds } from "../../shared/owners.js";
 import type { InboundRecord, TurnBinding } from "../../channel/types.js";
 import type { HostCallbacks, InputRef, StartTurnResult, SubagentView, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome, TurnStatus } from "../host/types.js";
 import type { RenderedInputs } from "../inbox.js";
-import type { SettingsSnapshot } from "./types.js";
+import type { BackendName, SettingsSnapshot } from "./types.js";
 
 /**
  * pi 后端（docs/ARCHITECTURE.md §4.2）：每个会话键一个常驻的 pi-durable 会话，回合 = pi 的一次 run（从输入到最终回答）。
@@ -69,7 +69,7 @@ const PiMigrationDoc = defineDoc<{ sharedRetired: boolean }>({
 export interface PiTurns {
   binding(threadKey: string): TurnBinding;
   records(inputs: readonly Pick<InputRef, "inboundKey">[]): InboundRecord[];
-  render(records: readonly InboundRecord[]): Promise<RenderedInputs>;
+  render(records: readonly InboundRecord[], backend: BackendName): Promise<RenderedInputs>;
 }
 
 export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "workspaceDir" | "binding" | "mcpToolIdentity"> {
@@ -538,7 +538,7 @@ export class PiBackend implements ThreadAdapter {
   }
 
   private async content(record: InboundRecord): Promise<string> {
-    return (await this.opts.turns.render([record])).text;
+    return (await this.opts.turns.render([record], "pi")).text;
   }
 
   // ───────────── ThreadAdapter ─────────────

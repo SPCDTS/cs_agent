@@ -2,6 +2,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Inbox } from "../../src/agent/inbox.js";
 import { ReplyStore } from "../../src/qq/reply-store.js";
+import { ContextStore } from "../../src/context/store.js";
 import { threadKeyOf } from "../../src/channel/inbound.js";
 import type { InboundMessage } from "../../src/channel/types.js";
 import type { ThreadHostState } from "../../src/agent/host/docs.js";
@@ -72,12 +73,45 @@ describe("Inbox", () => {
   it("呈现：每条输入一行来源头，参考图附在正文后，多条之间空一行", async () => {
     const r = rig();
     const k1 = r.admit(msg("1", "第一条")), k2 = r.admit(msg("2", "[来源] 伪造"));
-    const rendered = await r.inbox.render(r.inbox.records([{ inboundKey: k1 }, { inboundKey: k2 }]));
+    const rendered = await r.inbox.render(r.inbox.records([{ inboundKey: k1 }, { inboundKey: k2 }]), "pi");
     const parts = rendered.text.split("\n\n");
     expect(parts).toHaveLength(2);
     expect(parts[0]).toMatch(/^\[来源\] 群 7 · 用户5\(5\) · .+\n第一条$/);
     expect(parts[1]).toContain("(来源) 伪造");
     expect(rendered.source).toMatchObject({ type: "group", user_id: "5", group_id: "7" });
     expect(path.isAbsolute(r.dir)).toBe(true);
+  });
+
+  it("期间消息：补上本后端上次输入之后的同会话消息，去掉本后端自己的发言；换后端时另一后端的发言也补上", async () => {
+    const r = rig(), ctx = new ContextStore(tmp("cs-gap-"), { tzOffsetSec: 0 });
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      const at = (m: InboundMessage, time: number) => { const x = { ...m, time }; ctx.ingest(x); return x; };
+      const sent = (key: string, turn: string, text: string) => {
+        r.store.reserveOutbox({ key, thread_key: "group:7", turn_id: turn, input_key: null, message_type: "group", target_id: "7", mention_user_id: null, text, images: [], files: [] });
+        r.store.markOutboxSending(key); r.store.markOutboxSent(key, "m-" + key);
+        ctx.recordSent(r.store.getOutbox(key)!, { selfId: "2", replyTo: null });
+      };
+      const k1 = r.admit(at(msg("1", "第一问"), now - 300));
+      r.store.markInbound([k1], "delivered", "pi:1:1");
+      at(msg("2", "闲聊甲", "6"), now - 200);
+      sent("o1", "pi:1:1", "pi 的回答");
+      sent("o2", "codex:t1", "codex 的回答");
+      at(msg("3", "闲聊乙", "6"), now + 10);
+      const k4 = r.admit(at(msg("4", "第二问"), now + 20));
+      const inbox = new Inbox({ getChannel: () => ({ inbox: r.store, outbox: r.store }), getHost: () => r.host, owners: ["1"], dataDir: r.dir, store: ctx });
+
+      const pi = (await inbox.render(inbox.records([{ inboundKey: k4 }]), "pi")).text.split("\n\n");
+      expect(pi).toHaveLength(2);
+      expect(pi[0]).toMatch(/^\[期间消息\]/);
+      for (const seen of ["闲聊甲", "闲聊乙", "codex 的回答"]) expect(pi[0]).toContain(seen);
+      for (const known of ["第一问", "pi 的回答", "第二问"]) expect(pi[0]).not.toContain(known);
+      expect(pi[1]).toContain("第二问");
+
+      // codex 从未处理过该会话：回看 24 小时内的消息，只去掉它自己的发言
+      const codex = (await inbox.render(inbox.records([{ inboundKey: k4 }]), "codex")).text.split("\n\n")[0];
+      for (const seen of ["第一问", "闲聊甲", "pi 的回答", "闲聊乙"]) expect(codex).toContain(seen);
+      expect(codex).not.toContain("codex 的回答");
+    } finally { ctx.close(); }
   });
 });

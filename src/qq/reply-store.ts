@@ -297,6 +297,12 @@ export class ReplyStore {
     return row ? toInbound(row) : null;
   }
 
+  lastUserInput(threadKey: string, turnPrefix: string, beforeSeq: number): InboundRecord | null {
+    const row = this.db.prepare(`SELECT rowid AS seq, * FROM inbound WHERE thread_key = ? AND kind = 'user' AND rowid < ?
+      AND substr(turn_id, 1, ?) = ? ORDER BY rowid DESC LIMIT 1`).get(threadKey, beforeSeq, turnPrefix.length, turnPrefix) as InboundRow | undefined;
+    return row ? toInbound(row) : null;
+  }
+
   /** 状态只前进；turnId 首次写入后保留。 */
   markInbound(keys: readonly string[], state: InboundState, turnId?: string): void {
     const update = this.db.prepare(`UPDATE inbound SET state = ?, turn_id = COALESCE(turn_id, ?) WHERE key = ? AND

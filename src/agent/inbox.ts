@@ -7,27 +7,29 @@
  * 4. 工具绑定（§5.1）：工具调用时从宿主当前回合求出身份、发送地址与本轮输入，空闲或唤醒回合发往会话最近的输入地址。
  *    权限不在这里判断：由 host/identity.ts 的 runRights 按身份统一求出（会话基础权限 + 确证的人）。
  * 5. 呈现（§2.6）：每条输入一行来源头，引用、参考图照旧；定时输入原样（以 [定时任务] 开头）。
+ *    首条用户输入前补上本后端没看到的同会话消息（§9 期间消息），群里未 @ 的发言与切换后端前的对话都靠它接上。
  */
 import path from "node:path";
 import type { Channel, InboundMessage, InboundRecord, TurnBinding } from "../channel/types.js";
-import type { ContextStore } from "../context/store.js";
+import { formatRecent } from "../context/format.js";
+import type { ContextStore, MessageRow } from "../context/store.js";
 import { validateReferences } from "../media/references.js";
 import { log } from "../shared/log.js";
 import type { OwnerIds } from "../shared/owners.js";
 import { trace } from "../shared/trace.js";
-import type { InputSource } from "./backends/types.js";
+import type { BackendName, InputSource } from "./backends/types.js";
 import { buildCodexPrompt } from "./codex/runner.js";
 import type { InputRef, ThreadKey } from "./host/types.js";
 import type { ThreadHost } from "./host/thread-host.js";
 
-export type InboxChannel = Pick<Channel, "inbox"> & Partial<Pick<Channel, "prepareIncoming">>;
+export type InboxChannel = Pick<Channel, "inbox"> & Partial<Pick<Channel, "prepareIncoming" | "outbox">>;
 
 export interface InboxOptions {
   getChannel(): InboxChannel;
   getHost(): Pick<ThreadHost, "deliver" | "currentIdentity" | "thread" | "inputState">;
   owners?: OwnerIds | (() => OwnerIds);
-  /** 查找 [引用] 正文 */
-  store?: Pick<ContextStore, "message">;
+  /** 查找 [引用] 正文与期间消息 */
+  store?: Pick<ContextStore, "message" | "recent">;
   dataDir: string;
 }
 
@@ -41,6 +43,8 @@ export interface RenderedInputs {
 }
 
 const PAGE = 200;
+/** 期间消息：最多条数、总字数；本后端从未处理过该会话（或其位置已清理）时只回看这么久。 */
+const GAP_LIMIT = 20, GAP_MAX_CHARS = 1500, GAP_FALLBACK_MIN = 24 * 60;
 
 export class Inbox {
   constructor(private readonly opts: InboxOptions) {}
@@ -152,8 +156,11 @@ export class Inbox {
   }
 
   /** 每条输入的来源头与正文；多条之间空一行。参考图按输入各自的 incoming 目录校验。 */
-  async render(records: readonly InboundRecord[]): Promise<RenderedInputs> {
+  async render(records: readonly InboundRecord[], backend: BackendName): Promise<RenderedInputs> {
     const parts: string[] = [], images: string[] = [];
+    const first = records.find(rec => rec.kind === "user");
+    const gap = first ? this.gap(first, backend) : "";
+    if (gap) parts.push(gap);
     for (const rec of records) {
       if (rec.kind === "scheduled") { parts.push(rec.text); continue; }
       const source = sourceOf(rec);
@@ -177,6 +184,28 @@ export class Inbox {
     }
     const last = records.at(-1)!;
     return { text: parts.join("\n\n"), images, source: sourceOf(last) };
+  }
+
+  /**
+   * 期间消息：同一会话里、本后端上一条用户输入之后到这条输入之前的消息，去掉本后端自己发出的。
+   * 后端的会话历史只含交给它的输入与它的发言，群里未触发的消息、另一后端期间的对话都不在其中。
+   */
+  private gap(rec: InboundRecord, backend: BackendName): string {
+    const store = this.opts.store;
+    if (!store || !rec.message_id) return "";
+    try {
+      const access = { kind: "scope" as const, scope: rec.scope }, prefix = backend + ":";
+      const last = this.channel.inbox.lastUserInput(rec.thread_key, prefix, rec.seq);
+      const since = last?.message_id ? store.message(access, last.message_id, { scope: rec.scope })?.row : undefined;
+      const after = (r: MessageRow) => !since || r.time > since.time || (r.time === since.time && r.id > since.id);
+      const own = (r: MessageRow) => !!r.is_self && !!r.outbox_key && !!this.channel.outbox?.getOutbox(r.outbox_key)?.turn_id?.startsWith(prefix);
+      const rows = store.recent(access, { scope: rec.scope, beforeMessageId: rec.message_id, limit: GAP_LIMIT, ...(since ? {} : { windowMin: GAP_FALLBACK_MIN }) })
+        .filter(r => after(r) && !own(r));
+      return rows.length ? "[期间消息] 你上次处理之后本会话里的其他消息，仅作背景，不是对你的请求：\n" + formatRecent(rows, GAP_MAX_CHARS) : "";
+    } catch (error) {
+      log.warn("gap lookup failed", { key: rec.key.slice(0, 12), error });
+      return "";
+    }
   }
 }
 

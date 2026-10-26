@@ -64,7 +64,7 @@ QQ ─NapCat(OneBot v11)─▶ QQBridge ──@消息──▶ Inbox ──▶ T
 
 后端属于会话，不属于输入：会话文档的 `backend` 是唯一来源，开轮、插话、放弃、恢复都用它。首次见到会话时按配置选定：`AGENT_BACKEND`（默认 `codex`）+ `AGENT_BACKEND_OVERRIDES`（`group:<id>=pi,private:<qq>=codex`；owner 线程按 `QQ_OWNER` 首个账号的 `private:<qq>` 项），面板设置页可改。
 
-之后只有同时满足以下条件才切换（宿主串行内、开新回合之前判断）：会话空闲；队列里只有将开轮的这一条；这条输入从未交给过后端；旧后端在该会话不忙（pi run 或子 agent 汇报未结束；codex 有进行中的回合、子 agent 或压缩）。任一不满足就沿用旧后端。不需要实时切换。两个后端的记忆互相独立。
+之后只有同时满足以下条件才切换（宿主串行内、开新回合之前判断）：会话空闲；队列里只有将开轮的这一条；这条输入从未交给过后端；旧后端在该会话不忙（pi run 或子 agent 汇报未结束；codex 有进行中的回合、子 agent 或压缩）。任一不满足就沿用旧后端。不需要实时切换。两个后端的记忆互相独立；切换不压缩、不搬运历史，新后端靠期间消息（§9）接上切换前的对话。
 
 ### 2.5 每轮设置快照（`src/agent/turn-settings.ts`）
 
@@ -261,7 +261,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 
 - **消息库** `/data/qq-messages.sqlite`（WAL）：允许范围内的全部消息、机器人发出的每条消息、日/周摘要；trigram FTS5（2 字中文词回退 `LIKE`）。所有读取带访问范围过滤（`context/access.ts`）。撤回删除原始行。
 - **衰老**（`context/aging.ts`）：每天 `HISTORY_SUMMARY_HOUR` 点（容器 `TZ`，默认 Asia/Shanghai）：≥5 条消息的会话日生成 ≤400 字日摘要，已结束的自然周合并为周摘要；原始消息超过 `HISTORY_RAW_DAYS`（30）且已被摘要覆盖才删除，未覆盖的最多保留 `HISTORY_RAW_HARD_MAX_DAYS`（90）天；摘要保留 `HISTORY_SUMMARY_DAYS`（180）天。上次运行早于 24 小时则启动补跑。
-- **检索工具**：`qq_recent` / `qq_search` / `qq_message`（总量 ≤`QQ_CONTEXT_MAX_CHARS`，2500 字）、`qq_chats`。**按需检索，不自动注入**：只有消息指代此前内容或用户要求回顾时由模型自己调用；唯一自动带入的历史是 `[引用]` 行。
+- **检索工具**：`qq_recent` / `qq_search` / `qq_message`（总量 ≤`QQ_CONTEXT_MAX_CHARS`，2500 字）、`qq_chats`。**按需检索**：只有消息指代此前内容或用户要求回顾时由模型自己调用。自动带入的历史只有两种：`[引用]` 行，与首条用户输入前的 `[期间消息]`，即同会话里本后端上一条用户输入之后、这条输入之前的消息，去掉本后端自己的发言（按 Outbox 回合 id 前缀判断），最多 20 条、1500 字；本后端从未处理过该会话或其位置已清理时回看 24 小时（`src/agent/inbox.ts`）。群里未触发的发言与另一后端期间的对话由此进入上下文。
 - **图片按需召回**：消息默认只存 `[image]`，不存 URL、不下载。`qq_image(message_id)` 下载到媒体库并只返回路径文本，正文改为 `[image:<路径>]`；看图用各自的文件工具（pi `read`，codex `qq_view_image`）。codex 每回合召回 ≤`MEDIA_RECALL_MAX_PER_TURN`（默认 5；旧名 `MEDIA_RECALL_MAX_PER_TICKET` 仍可用）；pi 不按回合计次。媒体随原始消息保留，每日 GC 回收无引用文件。
 - **codex 接入**：`qq_context` MCP（只读库连接）经主进程 loopback 服务（`MEDIA_RECALL_PORT`，仅 127.0.0.1）完成召回与 `qq_chats`；主进程凭线程令牌与 `_meta.callId` 确认调用属于会话当前回合，再按本轮权限求出范围。pi 直接调用同一服务。
 
