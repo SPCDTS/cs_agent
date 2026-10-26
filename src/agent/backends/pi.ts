@@ -95,7 +95,7 @@ export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "w
   /** 已验证的管理员配置与秘密解析边界；缺省仍恢复历史目录。 */
   mcp?: { config: McpConfigState; secrets: EnvironmentSecrets };
   /** 子 agent 扩展的选项；false 不安装 */
-  subagent?: Partial<Omit<SubagentOptions, "getHarness" | "initChild" | "spawner">> | false;
+  subagent?: Partial<Omit<SubagentOptions, "getHarness" | "initChild" | "spawner" | "mcp">> | false;
 }
 
 /** identity：唤醒 run 开始时由其输入求出的继承身份（宿主开的 run 不用它）。 */
@@ -203,6 +203,7 @@ export class PiBackend implements ThreadAdapter {
     const im = createPiImExtensions({ ...opts, binding });
     const schedule = createPiScheduleExtensions(binding, opts.scheduleTools);
     const subagent = opts.subagent === false ? undefined : createSubagentExtension({ ...opts.subagent, getHarness: () => harness,
+      mcp: () => backend.mcp,
       // 子会话与父会话共用会话键（工作区、附件目录），只有会话基础权限。
       initChild: async (tx, parent, child) => {
         const threads = await tx.doc(PiThreadsDoc);
@@ -279,6 +280,13 @@ export class PiBackend implements ThreadAdapter {
     this.attached = true;
     for (const [key, id] of Object.entries(await this.readThreadIds())) {
       await this.serial(key, async () => { await this.watchThread(key, id as ConversationId); });
+      // 已提交的子 run 可能先于 Reporter 恢复，恢复调度前先清理或重建其 MCP 选择。
+      const children = await this.harness.snapshot(SubagentDoc, id as ConversationId, context);
+      for (const child of Object.values(children?.children ?? {})) {
+        if (child.stopped) continue;
+        const conversation = await this.harness.conversation(child.conversation as ConversationId, context);
+        if (conversation) await this.mcp?.configureChild(conversation, context);
+      }
     }
     this.harness.resume();
   }

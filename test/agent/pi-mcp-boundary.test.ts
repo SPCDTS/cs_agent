@@ -26,7 +26,7 @@ describe("Pi MCP 配置边界", () => {
     expect(parsed.kind).toBe("enabled");
     if (parsed.kind !== "enabled") throw new Error("fixture");
     expect(parsed.value.limits).toEqual(limits);
-    expect(parsed.value.servers[0].access).toEqual({ kind: "owner-private", allowScheduled: false, allowWake: false });
+    expect(parsed.value.servers[0].access).toEqual({ kind: "owner-private", allowScheduled: false, allowWake: false, allowSubagent: false });
     expect(JSON.stringify(parsed)).toContain("MCP_TOKEN");
     expect(JSON.stringify(parsed)).not.toContain("Bearer ");
   });
@@ -35,6 +35,7 @@ describe("Pi MCP 配置边界", () => {
     { ...config(), oauth: { token: "SECRET_SENTINEL" } },
     config({ ...http(), replay: "safe" }),
     config({ ...http(), access: { kind: "public" } }),
+    config({ ...http(), access: { kind: "owner-private", allowSubagent: "true" } }),
     config({ ...http(), credential: { kind: "oauth" } }),
     { ...config(), servers: [http(), http()] },
     { ...config(), limits: { callMs: 300_001 } },

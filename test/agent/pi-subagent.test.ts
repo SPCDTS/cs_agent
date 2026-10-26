@@ -66,6 +66,10 @@ describe("pi 子 agent 扩展", () => {
     for (const name of ["subagent", "send_message", "auth_grant", "auth_revoke", "auth_list", "schedule_create", "schedule_control", "schedule_whatever", "mcp_unknown_history", MCP_CALLABLE])
       expect(isSubagentExcludedTool(name), name).toBe(true);
     for (const name of ["echo", "web_search", "qq_recent", "generate_image", "bash", "read"]) expect(isSubagentExcludedTool(name), name).toBe(false);
+    const allowed = new Set([PARENT_TOOLS.at(-1)!, MCP_CALLABLE, "mcp_refresh_tools"]);
+    for (const name of allowed) expect(isSubagentExcludedTool(name, name => allowed.has(name))).toBe(false);
+    expect(isSubagentExcludedTool("mcp_other_secret", name => allowed.has(name))).toBe(true);
+    expect(isSubagentExcludedTool("send_message", () => true)).toBe(true);
     expect(isSubagentReportRequest(SUBAGENT_REPORT_REQUEST_PREFIX + "3:e9")).toBe(true);
     expect(isSubagentReportRequest("ticket_1")).toBe(false);
   });

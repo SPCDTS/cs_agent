@@ -69,7 +69,7 @@ export async function httpFixture(mode: HttpMode = "json") {
   const config: McpServerConfig = {
     id: "fixture", enabled: true, transport: { kind: "streamable-http", url: `http://127.0.0.1:${address.port}/mcp`, headers: {}, secretHeaders: { Authorization: "FIXTURE_SECRET" }, allowLoopbackHttp: true, allowPrivateNetworkHttp: false },
     credential: { kind: "none" }, tools: { allow: ["first", "second"] },
-    access: { kind: "owner-private", allowScheduled: false, allowWake: false }, replay: "unsafe",
+    access: { kind: "owner-private", allowScheduled: false, allowWake: false, allowSubagent: false }, replay: "unsafe",
   };
   return {
     config, messages, paths, headers, get calls() { return calls; },

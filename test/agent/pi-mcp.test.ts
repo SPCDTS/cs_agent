@@ -6,6 +6,8 @@ import { AgentDoc, createRegistry, defineExtension, defineTool, Harness, ToolRes
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { McpDelegationDoc, narrowDelegation } from "../../src/agent/pi-mcp/delegation.js";
+import { runRights } from "../../src/agent/host/identity.js";
 import { PiMcp } from "../../src/agent/pi-mcp/index.js";
 import { McpCatalogsDoc, digest } from "../../src/agent/pi-mcp/catalog.js";
 import { parseMcpConfig, type McpConfigState } from "../../src/agent/pi-mcp/config.js";
@@ -456,5 +458,98 @@ describe("Pi MCP 目录保留", () => {
   it("活工具任务的名字找不到版本时整轮不删", async () => {
     const { stored, idleDigest } = await interrupted(true);
     expect(stored).toEqual([idleDigest]);
+  });
+});
+
+async function delegated(r: Awaited<ReturnType<typeof rig>>, parent: Conversation) {
+  const bound = r.bindings.get(Number(parent.id))!;
+  const inherited = runRights(bound, ["123"]).person;
+  const child = await r.create({ ...bound, child: true, identity: { kind: "wake", ...(inherited ? { inherited } : {}) } });
+  const grant = await r.mcp.delegation(parent.id);
+  await r.harness.commit(async tx => { (await tx.doc(McpDelegationDoc, child.id)).grant = grant; }, context);
+  await r.configure(child);
+  return child;
+}
+
+describe("Pi MCP 委派授权交集", () => {
+  it.each([
+    { identity: { kind: "user", sender: "123" }, access: {}, allowed: true },
+    { identity: { kind: "scheduled", creator: "123" }, access: {}, allowed: false },
+    { identity: { kind: "scheduled", creator: "123" }, access: { allowScheduled: true }, allowed: true },
+    { identity: { kind: "wake" }, access: { allowWake: true }, allowed: false },
+    { identity: { kind: "wake", inherited: { kind: "user", person: "123", owner: true } }, access: {}, allowed: false },
+    { identity: { kind: "wake", inherited: { kind: "user", person: "123", owner: true } }, access: { allowWake: true }, allowed: true },
+    { identity: { kind: "wake", inherited: { kind: "scheduled", person: "123", owner: true } }, access: { allowWake: true }, allowed: false },
+    { identity: { kind: "wake", inherited: { kind: "scheduled", person: "123", owner: true } }, access: { allowWake: true, allowScheduled: true }, allowed: true },
+  ] satisfies { identity: PiCallBinding["identity"]; access: object; allowed: boolean }[])("按派出回合检查 scheduled/wake：%j", async ({ identity, access, allowed }) => {
+    const s = await server(), r = await rig(s.config({}, { allowSubagent: true, ...access }));
+    const parent = await r.create({ ...owner(), identity }), child = await delegated(r, parent);
+    expect(await mcpNames(child)).toHaveLength(allowed ? 1 : 0);
+    const grant = (await r.harness.snapshot(McpDelegationDoc, child.id, context))?.grant;
+    if (allowed) {
+      expect(grant?.principal).toBe("123");
+      await r.run(child, (await mcpNames(child))[0]!);
+      expect((await results(child))[0]?.model?.[0]).toMatchObject({ role: "toolResult", isError: false });
+      expect(s.state.calls).toBe(1);
+    } else { expect(grant).toBeNull(); expect(s.state.sessions).toBe(0); }
+  });
+
+  it.each(["missing", "principal", "scope", "allowSubagent"] as const)("工具已选中但 %s 失效，执行与刷新均拒绝", async revoke => {
+    const s = await server(), config = s.config({}, { allowSubagent: true }), r = await rig(config);
+    const parent = await r.create(), child = await delegated(r, parent), name = (await mcpNames(child))[0]!;
+    const selection = await r.harness.snapshot(AgentDoc, child.id, context);
+    if (config.kind !== "enabled") throw new Error("config");
+    if (revoke === "missing") await r.harness.commit(async tx => { (await tx.doc(McpDelegationDoc, child.id)).grant = null; }, context);
+    else if (revoke === "principal") r.revoke();
+    else if (revoke === "scope") r.bindings.set(Number(child.id), { ...owner(), child: true, scope: "group:123", threadKey: "group:123" });
+    else config.value.servers[0]!.access.allowSubagent = false;
+    await r.run(child, name);
+    expect((await results(child))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_denied" })]));
+    await r.harness.commit(async tx => { Object.assign(await tx.doc(AgentDoc, child.id), selection); }, context);
+    await r.run(child, "mcp_refresh_tools", {});
+    expect((await results(child))[1]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_denied" })]));
+    expect(s.state.calls).toBe(0); expect(s.state.lists).toBe(1);
+  });
+
+  it.each(["replace", "remove"] as const)("读取调用身份期间配置 %s 撤服，不能沿用旧服务引用", async change => {
+    const s = await server(), config = s.config({}, { allowSubagent: true }), r = await rig(config);
+    const parent = await r.create(), child = await delegated(r, parent), name = (await mcpNames(child))[0]!;
+    if (config.kind !== "enabled") throw new Error("config");
+    const lookup = r.bindings.get.bind(r.bindings);
+    vi.spyOn(r.bindings, "get").mockImplementation(id => {
+      config.value.servers = change === "remove" ? [] : config.value.servers.map(server => ({ ...server, enabled: false }));
+      return lookup(id);
+    });
+    await r.run(child, name);
+    expect((await results(child))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_denied" })]));
+    expect(s.state.calls).toBe(0);
+  });
+
+  it("父目录工具名即使被复制进子选择，也不能使用父连接", async () => {
+    const s = await server(), r = await rig(s.config({}, { allowSubagent: true })), parent = await r.create();
+    await r.configure(parent);
+    const child = await delegated(r, parent), foreign = (await mcpNames(parent))[0]!;
+    const parentState = await r.harness.snapshot(AgentDoc, parent.id, context);
+    await r.harness.commit(async tx => { Object.assign(await tx.doc(AgentDoc, child.id), parentState); }, context);
+    await r.run(child, foreign);
+    expect((await results(child))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_denied" })]));
+    expect(s.state.calls).toBe(0); expect(s.state.sessions).toBe(2);
+  });
+
+  it("未知 wake 的续发撤掉快照，之后 owner 交代也不会重新获得工具", async () => {
+    const s = await server(), r = await rig(s.config({}, { allowSubagent: true })), parent = await r.create(), child = await delegated(r, parent);
+    r.bindings.set(Number(parent.id), { ...owner(), identity: { kind: "wake" } });
+    const next = await r.mcp.delegation(parent.id);
+    await r.harness.commit(async tx => {
+      const doc = await tx.doc(McpDelegationDoc, child.id); doc.grant = narrowDelegation(doc.grant, next);
+    }, context);
+    await r.mcp.configureChild(child, context); expect(await mcpNames(child)).toHaveLength(0);
+    r.bindings.set(Number(parent.id), owner());
+    const restored = await r.mcp.delegation(parent.id);
+    await r.harness.commit(async tx => {
+      const doc = await tx.doc(McpDelegationDoc, child.id); doc.grant = narrowDelegation(doc.grant, restored);
+    }, context);
+    await r.mcp.configureChild(child, context); expect(await mcpNames(child)).toHaveLength(0);
+    expect(s.state.calls).toBe(0);
   });
 });

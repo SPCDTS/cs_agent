@@ -1,5 +1,6 @@
 import { BACKGROUND_CONTEXT, awaitWithContext, withAbortSignal, type Context } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { getCurrentTools, getToolStateChanges } from "@earendil-works/pi-ai/utils/transcript";
+import { Type, type Message } from "@earendil-works/pi-ai";
 import { AgentDoc, AssistantEntry, GenerationTask, ToolResultEntry, ToolTask, defineExtension, defineTool, hook, section,
   type AgentEvent, type Conversation, type ConversationId, type Cursor, type EntryRecord, type Extension, type Harness, type Page, type Registry,
   type EntryId, type Storage, type ToolExecutionApi, type ToolExecutionResult, type ToolTaskInput } from "@earendil-works/pi-durable";
@@ -14,6 +15,7 @@ import { McpConnection, McpConnectionError } from "./connection.js";
 import { McpCatalogsDoc, compileStoredTool, digest, jsonBytes, makeCatalog, restoreCatalog, serverDigest, toolContract, toolNames,
   type CatalogRevision } from "./catalog.js";
 import { MCP_CONTROL_EXTENSION, isMcpExtensionName, isMcpToolName, type McpToolIdentity } from "./names.js";
+import { McpDelegationDoc, readDelegation, type McpDelegation } from "./delegation.js";
 import { convertMcpResult } from "./result.js";
 
 export { isMcpToolName } from "./names.js";
@@ -66,7 +68,7 @@ export class PiMcp {
           const binding = await opts.binding(Number(api.conversationId));
           const conversation = await opts.harness.conversation(api.conversationId, context);
           if (!binding || !conversation || opts.config.kind !== "enabled" ||
-            !opts.config.value.servers.some(server => this.authorize(server, binding))) return failure("denied", "无权刷新 MCP 工具。");
+            !(await Promise.all(opts.config.value.servers.map(server => this.authorize(server, binding, api.conversationId)))).some(Boolean)) return failure("denied", "无权刷新 MCP 工具。");
           await this.configure({ conversation, turn: binding, refresh: true }, context);
           const names = (await conversation.agent(context)).tools.filter(tool => this.installed.has(tool.name)).map(tool => tool.name);
           return { output: [{ type: "text", text: names.length ? `当前可用 MCP 工具：\n${names.join("\n")}\n请使用当前参数定义；本次仅刷新目录。`
@@ -108,9 +110,50 @@ export class PiMcp {
 
   toolIdentity(name: string): McpToolIdentity | undefined { return this.installed.get(name)?.identity; }
 
+  /** 只从父回合的真实绑定生成授权；服务摘要固定账号、白名单和委派时的配置。 */
+  async delegation(parent: ConversationId): Promise<McpDelegation | null> {
+    const binding = await this.opts.binding(Number(parent));
+    if (!binding || binding.child || this.opts.config.kind !== "enabled") return null;
+    const servers: Record<string, string> = {};
+    let principal: string | undefined;
+    for (const server of this.opts.config.value.servers) {
+      const person = this.authorizeParent(server, binding);
+      if (!person || !server.access.allowSubagent) continue;
+      principal = person; servers[server.id] = serverDigest(server);
+    }
+    return principal ? { principal, servers, wake: binding.identity.kind === "wake",
+      scheduled: runRights(binding, this.opts.owners()).person?.kind === "scheduled" } : null;
+  }
+
+  allowsDelegationTool(grant: McpDelegation | null | undefined, name: string): boolean {
+    if (!grant) return false;
+    if (name === "mcp_refresh_tools") return Object.keys(grant.servers).length > 0;
+    const tool = this.installed.get(name);
+    return !!tool && grant.servers[tool.revision.serverId] === tool.revision.configDigest;
+  }
+
+  async configureChild(conversation: Pick<Conversation, "id">, context: Context): Promise<void> {
+    await this.configure({ conversation, turn: await this.opts.binding(Number(conversation.id)) }, context);
+  }
+
+  /** 恢复可能从已保存的 request 开始，AgentDoc 的新选择不会重写该请求的历史 cutoff。 */
+  async childRequest(messages: readonly Message[], id: ConversationId, context: Context): Promise<{ messages: readonly Message[] } | undefined> {
+    const binding = await this.opts.binding(Number(id));
+    if (!binding?.child) return;
+    const conversation = await this.opts.harness.conversation(id, context);
+    if (!conversation) return;
+    await this.configure({ conversation, turn: binding }, context);
+    const offered = getCurrentTools(messages).filter(tool => isMcpToolName(tool.name));
+    // Pi 仍按 cutoff 校验可调用名称；这里只收紧，新名称由下一次 prepare 正式提供。
+    const current = (await conversation.agent(context)).tools.filter(tool => offered.some(previous => previous.name === tool.name));
+    const changes = getToolStateChanges(offered, current);
+    if (!changes.toolsAdded.length && !changes.toolsRemoved.length) return;
+    return { messages: [...messages, { role: "system", content: "", ...changes, timestamp: Date.now() }] };
+  }
+
   /** 原有 configure({extensions:{add}}) 会替换选择；此处在公开文档事务中保留非 MCP 字段。 */
-  async configure({ conversation, turn, refresh = false }: { conversation: Conversation; turn: TurnBinding; refresh?: boolean }, context: Context): Promise<void> {
-    const selected: string[] = [], pinned: CatalogRevision[] = [];
+  async configure({ conversation, turn, refresh = false }: { conversation: Pick<Conversation, "id">; turn: TurnBinding | PiCallBinding | undefined; refresh?: boolean }, context: Context): Promise<void> {
+    const selected: string[] = [], selectedTools: string[] = [], pinned: CatalogRevision[] = [];
     let authorized = false;
     const budget = this.budget(context.abortSignal);
     this.selecting.add(pinned);
@@ -118,12 +161,12 @@ export class PiMcp {
       if (!this.stopping && this.opts.config.kind === "enabled") {
         let tools = 0, bytes = 0;
         for (const server of this.opts.config.value.servers) {
-          const principal = this.authorize(server, turn);
-          if (!principal) continue;
+          const principal = await this.authorize(server, turn, conversation.id);
+          if (!principal || !turn) continue;
           authorized = true;
           try {
-            const catalog = await this.withEntry(server, Number(conversation.id), turn, principal, budget.signal, entry => {
-              if (this.authorize(server, turn) !== principal) throw new McpFailure("denied");
+            const catalog = await this.withEntry(server, Number(conversation.id), turn, principal, budget.signal, async entry => {
+              if (await this.authorize(server, turn, conversation.id) !== principal) throw new McpFailure("denied");
               if (refresh) entry.discovered = -1;
               return this.catalog(entry, budget.signal);
             });
@@ -135,8 +178,9 @@ export class PiMcp {
               throw new McpFailure("visible_tools_limit");
             }
             // 发现可能等待网络；提交选择前再次核对动态 owner 配置。
-            if (!this.authorize(server, turn) || this.stopping) continue;
+            if (await this.authorize(server, turn, conversation.id) !== principal || this.stopping) continue;
             selected.push(...catalog.tools.map(tool => toolNames(catalog, tool).extensionName));
+            selectedTools.push(...catalog.tools.map(tool => toolNames(catalog, tool).nativeName));
             tools += catalog.tools.length; bytes += size;
           } catch (error) {
             if (context.abortSignal?.aborted) throw error;
@@ -145,9 +189,16 @@ export class PiMcp {
         }
       }
       if (authorized && !this.stopping && this.opts.config.kind === "enabled" &&
-        this.opts.config.value.servers.some(server => this.authorize(server, turn))) selected.unshift(this.control.name);
+        (await Promise.all(this.opts.config.value.servers.map(server => this.authorize(server, turn, conversation.id)))).some(Boolean)) {
+        selected.unshift(this.control.name); selectedTools.unshift("mcp_refresh_tools");
+      }
       await this.opts.harness.commit(async tx => {
         const state = await tx.doc(AgentDoc, conversation.id);
+        // 子会话有显式工具白名单，必须把父目录名称替换成子会话自己的名称。
+        if (turn && "child" in turn && turn.child) {
+          if (Array.isArray(state.tools)) state.tools = [...state.tools.filter(name => !isMcpToolName(name)), ...selectedTools];
+          if (Array.isArray(state.modelTools)) state.modelTools = [...state.modelTools.filter(name => !isMcpToolName(name)), ...selectedTools];
+        }
         if (Array.isArray(state.extensions)) {
           state.extensions = [...state.extensions.filter(name => !isMcpExtensionName(name)), ...selected];
         } else {
@@ -158,8 +209,23 @@ export class PiMcp {
     } finally { budget.done(); this.selecting.delete(pinned); }
   }
 
-  private authorize(server: McpServerConfig, binding: TurnBinding | PiCallBinding | undefined): string | undefined {
-    if (!binding || !server.enabled || this.stopping || binding.threadKey !== "owner" ||
+  private async authorize(server: McpServerConfig, binding: TurnBinding | PiCallBinding | undefined, id: ConversationId): Promise<string | undefined> {
+    if (!binding) return;
+    const grant = "child" in binding && binding.child
+      ? readDelegation((await this.opts.harness.snapshot(McpDelegationDoc, id, BACKGROUND_CONTEXT))?.grant) : null;
+    const current = this.opts.config.kind === "enabled" ? this.opts.config.value.servers.find(value => value.id === server.id) : undefined;
+    if (!current?.enabled || serverDigest(current) !== serverDigest(server)) return;
+    if (!("child" in binding && binding.child)) return this.authorizeParent(server, binding);
+    if (this.opts.config.kind !== "enabled" || this.stopping || !server.enabled || !server.access.allowSubagent ||
+      binding.threadKey !== "owner" || !binding.scope.startsWith("private:")) return;
+    if (!grant || grant.servers[server.id] !== serverDigest(server) ||
+      (grant.wake && !server.access.allowWake) || (grant.scheduled && !server.access.allowScheduled)) return;
+    const rights = runRights(binding, this.opts.owners());
+    if (rights.owner && rights.access === "all" && rights.person?.person === grant.principal) return grant.principal;
+  }
+
+  private authorizeParent(server: McpServerConfig, binding: TurnBinding | PiCallBinding | undefined): string | undefined {
+    if (this.opts.config.kind !== "enabled" || !binding || !server.enabled || this.stopping || binding.threadKey !== "owner" ||
       !binding.scope.startsWith("private:") || ("child" in binding && binding.child)) return;
     const rights = runRights(binding, this.opts.owners());
     if (!rights.owner || !rights.person || rights.access !== "all") return;
@@ -368,7 +434,7 @@ export class PiMcp {
     try {
       const server = this.opts.config.kind === "enabled" ? this.opts.config.value.servers.find(s => s.id === revision.serverId) : undefined;
       bound = await this.opts.binding(Number(api.conversationId));
-      const principal = server && this.authorize(server, bound);
+      const principal = server && await this.authorize(server, bound, api.conversationId);
       if (!server || !bound || !principal || !server.tools.allow.includes(tool.name)) throw new McpFailure("denied");
       if (serverDigest(server) !== revision.configDigest) throw new McpFailure("tool_retired");
       const parsed = argsSchema.safeParse(args);
@@ -376,7 +442,7 @@ export class PiMcp {
       inputBytes = jsonBytes(parsed.data);
       if (inputBytes > this.limits.argumentBytes) throw new McpFailure("arguments_too_large");
       const result = await this.withEntry(server, Number(api.conversationId), bound, principal, budget.signal, async entry => {
-        if (entry.scope !== revision.scopeDigest || this.authorize(server, await this.opts.binding(Number(api.conversationId))) !== principal) {
+        if (entry.scope !== revision.scopeDigest || await this.authorize(server, await this.opts.binding(Number(api.conversationId)), api.conversationId) !== principal) {
           throw new McpFailure("denied");
         }
         const current = await this.catalog(entry, budget.signal);
@@ -384,7 +450,7 @@ export class PiMcp {
         if (!currentTool || toolContract(current, currentTool) !== toolContract(revision, tool)) throw new McpFailure("tool_retired");
         names = { ...names, catalogDigest: current.digest };
         const live = await this.opts.binding(Number(api.conversationId));
-        if (this.authorize(server, live) !== principal) throw new McpFailure("denied");
+        if (await this.authorize(server, live, api.conversationId) !== principal) throw new McpFailure("denied");
         if (entry.discovered !== entry.changed) throw new McpFailure("tool_retired");
         budget.signal.throwIfAborted();
         if (!entry.connection) throw new McpFailure("connection_unavailable");

@@ -1,6 +1,8 @@
 import { Type, type ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { configure, defineDoc, defineExtension, defineTask, defineTool, type ConversationId, type Harness, type ModelRef, type TaskId, type ToolRegistration, type Tx } from "@earendil-works/pi-durable";
+import { GenerationTask, hook, configure, defineDoc, defineExtension, defineTask, defineTool, type ConversationId, type Harness, type ModelRef, type TaskId, type ToolRegistration, type Tx } from "@earendil-works/pi-durable";
 import { isScheduleTool } from "../../shared/schedule-tools.js";
+import type { PiMcp } from "../pi-mcp/index.js";
+import { McpDelegationDoc, narrowDelegation } from "../pi-mcp/delegation.js";
 import { isMcpToolName } from "../pi-mcp/names.js";
 import { mergePersons, validPerson, type RunPerson } from "../host/identity.js";
 
@@ -44,15 +46,17 @@ function narrowSpawner(current: SubagentSpawner | undefined, requester: Subagent
 /** 子会话不可用的工具：不能再派子 agent、不能授权或定时，也不能对外发消息（只有主 agent 对用户说话），记忆只读。 */
 export const SUBAGENT_EXCLUDED_TOOLS = { exact: ["subagent", "send_message", "skill_publish", "mem_remember", "mem_update", "mem_forget", "mem_profile"],
   prefixes: ["auth_", "schedule_"] } as const;
-export function isSubagentExcludedTool(name: string): boolean {
+export function isSubagentExcludedTool(name: string, allowMcp?: (name: string) => boolean): boolean {
   return (SUBAGENT_EXCLUDED_TOOLS.exact as readonly string[]).includes(name) ||
-    SUBAGENT_EXCLUDED_TOOLS.prefixes.some(prefix => name.startsWith(prefix)) || isScheduleTool(name) || isMcpToolName(name);
+    SUBAGENT_EXCLUDED_TOOLS.prefixes.some(prefix => name.startsWith(prefix)) || isScheduleTool(name) ||
+    (isMcpToolName(name) && !allowMcp?.(name));
 }
 
 export const DEFAULT_SUBAGENT_INSTRUCTIONS = "你是主 agent 派出的子 agent，只负责完成交给你的任务。你不能直接联系用户；把最终结果写在回答里，它会原样交回主 agent。";
 
 export interface SubagentOptions {
   getHarness: () => Harness;
+  mcp?: () => PiMcp | undefined;
   /** 未设置时沿用父会话的模型与思考等级。 */
   model?: ModelRef;
   thinkingLevel?: ModelThinkingLevel;
@@ -129,13 +133,14 @@ type ReporterInput = { name: string; anchor: number; child: number; content: str
 type ReporterState = { phase: "deliver" } | { phase: "report"; status: "done" | "failed"; text: string; key: string };
 
 /** 汇报任务：把一条消息交给子会话、等它回答，再把结果作为 follow-up 输入投回父会话。 */
-const Reporter = defineTask<ReporterInput, ReporterState, { status: "done" | "failed" }>({
+const createReporter = (opts: SubagentOptions) => defineTask<ReporterInput, ReporterState, { status: "done" | "failed" }>({
   name: "cs.subagent.reporter", version: 1,
   initial: () => ({ phase: "deliver" }),
   phases: {
     deliver: async (task, runtime, context) => {
       const child = await runtime.conversation(conversationId(task.input.child), context);
       if (!child) throw new Error("子会话不存在");
+      await opts.mcp?.()?.configureChild(child, context);
       // requestId 绑定本任务：重启后重跑拿回同一提交，不会把消息再交一次。
       const submission = await child.submit({ type: "input", content: task.input.content,
         requestId: `subagent:${task.id}`, whenBusy: task.input.whenBusy }, context);
@@ -206,6 +211,7 @@ function describe(child: ChildRecord, full = false): string {
 
 /** 子 agent 扩展；仅导出工厂，由宿主决定安装与选择。 */
 export function createSubagentExtension(opts: SubagentOptions) {
+  const Reporter = createReporter(opts);
   const maxConcurrent = opts.maxConcurrent ?? 3, maxPerDay = opts.maxPerDay ?? 20;
   const now = opts.now ?? Date.now;
   const instructions = opts.instructions === undefined ? DEFAULT_SUBAGENT_INSTRUCTIONS : opts.instructions;
@@ -240,10 +246,11 @@ export function createSubagentExtension(opts: SubagentOptions) {
         const parentAgent = await api.agent(context);
         // 派出那一轮的身份快照（§5.1）：汇报唤醒的回合继承它。
         const spawner = await opts.spawner?.(api.conversationId);
+        const mcp = opts.mcp?.(), grant = await mcp?.delegation(api.conversationId) ?? null;
         // 子会话的工具集：父会话启用的工具减去排除名单，显式写成数组，宿主后续换扩展也不会带回被排除的工具。
         const seen = new Set<string>(), tools: ToolRegistration[] = [];
         for (const tool of [...parentAgent.tools, ...parentAgent.callable]) {
-          if (seen.has(tool.name) || isSubagentExcludedTool(tool.name)) continue;
+          if (seen.has(tool.name) || isSubagentExcludedTool(tool.name, name => mcp?.allowsDelegationTool(grant, name) ?? false)) continue;
           seen.add(tool.name); tools.push(tool);
         }
         const result = await api.commit(async tx => {
@@ -266,6 +273,7 @@ export function createSubagentExtension(opts: SubagentOptions) {
             ...(instructions !== null ? { instructions } : {}),
           });
           await opts.initChild?.(tx, api.conversationId, created.id);
+          (await tx.doc(McpDelegationDoc, created.id)).grant = grant;
           const reporter = await tx.createTask(Reporter, { name, anchor: Number(anchor), child: Number(created.id), content: args.task!, whenBusy: "followUp",
             ...(spawner ? { spawner } : {}) } satisfies ReporterInput, { ownership: { kind: "task", taskId: anchor } });
           doc.seq++; doc.spawnedToday++;
@@ -281,11 +289,14 @@ export function createSubagentExtension(opts: SubagentOptions) {
       if (args.action === "message") {
         if (!args.task) return output("message 需要 task（消息内容）", true);
         const requester = await opts.spawner?.(api.conversationId);
+        const grant = await opts.mcp?.()?.delegation(api.conversationId) ?? null;
         const result = await api.commit(async tx => {
           const doc = await tx.doc(SubagentDoc, api.conversationId);
           if (doc.calls[call]) return { text: doc.calls[call], error: false };
           const child = doc.children[name];
           if (!child || child.stopped) return { text: `没有存活的子 agent ${name}`, error: true };
+          const delegation = await tx.doc(McpDelegationDoc, conversationId(child.conversation));
+          delegation.grant = narrowDelegation(delegation.grant, grant);
           const mode: ReporterInput["whenBusy"] = args.mode ?? "followUp";
           // 子 agent 的上下文里已有这一轮交代的内容：登记的身份与之合并（不同人 → 基础权限），此后的汇报都带合并后的身份。
           const spawner = narrowSpawner(child.spawner, requester);
@@ -310,5 +321,7 @@ export function createSubagentExtension(opts: SubagentOptions) {
     },
   });
 
-  return defineExtension({ name: "cs-pi-subagent", tools: [tool], tasks: [Anchor, Reporter] });
+  return defineExtension({ name: "cs-pi-subagent", tools: [tool], tasks: [Anchor, Reporter],
+    hooks: [hook(GenerationTask, { beforeRequest: (request, api, context) =>
+      opts.mcp?.()?.childRequest(request.messages, api.conversationId, context) })] });
 }
