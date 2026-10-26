@@ -19,7 +19,7 @@ import { createMemoryEntryActions } from './memory/entries.js';
 import { createMemoryJobActions, isMemoryJobPost } from './memory/jobs.js';
 import { trace as defaultTrace } from '../shared/trace.js';
 import { summarize, type LiveMessage } from './live.js';
-import { formatBackendOverrides, SETTINGS_KEY } from '../agent/settings.js';
+import { formatBackendOverrides, historyRawDays, SETTINGS_KEY } from '../agent/settings.js';
 import { ASSETS } from './ui/client.js';
 import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
 import type { ContextUsage } from '../shared/format.js';
@@ -63,7 +63,10 @@ export function createDashboard(opts: DashboardOptions) {
   const sessionRoute = (url: URL, res: ServerResponse) => url.pathname.split('/').length === 7 && url.pathname.endsWith('/context')
     ? handleContext(url, res) : handleSessions(url, res);
   const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, sessionAdapters: adapters, aging: opts.aging, archives: opts.archives, entries: opts.memoryEntries, extract: opts.memoryExtract, jobs: opts.memoryJobs,
-    maxChars: config.QQ_CONTEXT_MAX_CHARS, retention: { rawDays: config.HISTORY_RAW_DAYS,
+    maxChars: config.QQ_CONTEXT_MAX_CHARS,
+    ...(opts.settings ? { rawDays: { overrides: () => ({ ...opts.settings!.current().history.rawDays }),
+      forScope: (scope: string) => historyRawDays(opts.settings!.current(), scope, config.HISTORY_RAW_DAYS, config.owners) } } : {}),
+    retention: { rawDays: config.HISTORY_RAW_DAYS,
       summaryDays: config.HISTORY_SUMMARY_DAYS, hardMaxDays: config.HISTORY_RAW_HARD_MAX_DAYS,
       dailyHour: config.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
   const token = config.OBS_TOKEN;

@@ -31,6 +31,8 @@ export interface RuntimeSettingsView {
   sendRules?: SendRulesView;
   /** 记忆：各命名空间的回合后抽取开关（缺键的只有 owner 开启）与夜间整理开关（缺省开） */
   memory?: { extract: Record<string, boolean>; consolidate?: boolean };
+  /** 聊天记录：各会话的原文保留天数覆盖（0 = 永不清理；缺键用 HISTORY_RAW_DAYS） */
+  history?: { rawDays: Record<string, number> };
 }
 /** bridge 发送规则的五个限额（与 channel/send-rules 的 SendRuleLimits 同形）。 */
 export interface SendRulesView { perChatMinute: number; perChatHour: number; chatBreakerMinutes: number; globalMinute: number; globalBreakerMinutes: number }
@@ -91,7 +93,7 @@ export interface DashboardPageOptions {
 export interface ContextUsageEventView { ts: number; key: string; detail: ContextUsage }
 export interface DashboardPageDeps {
   opts: DashboardPageOptions;
-  config: { owner?: string; CODEX_PROVIDER: "magpie" | "openai"; CODEX_MAGPIE_URL: string; CODEX_MODEL?: string; AGENT_MODEL_PROVIDER: string };
+  config: { owner?: string; owners?: readonly string[]; HISTORY_RAW_DAYS?: number; CODEX_PROVIDER: "magpie" | "openai"; CODEX_MAGPIE_URL: string; CODEX_MODEL?: string; AGENT_MODEL_PROVIDER: string };
   csrf: string; agentMd: string; agentsMd: string;
   api(pathQuery: string): Promise<{ status: number; body: unknown }>;
   contextResult(scope: string, query: string | null): { content: { type: string; text?: string }[] };
@@ -109,7 +111,7 @@ type RuntimeSettings = RuntimeSettingsView;
 const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
 
 const SETTING_LABELS: Record<string, string> = { agentBackend: '默认后端', backendOverrides: '按会话覆盖', codexModel: 'Codex 模型', codexReasoningEffort: 'Codex 推理强度',
-  piModel: 'Pi 模型', piThinkingLevel: 'Pi 思考档位', alertOwner: 'owner 告警', sendRules: '发送规则', memory: '记忆' };
+  piModel: 'Pi 模型', piThinkingLevel: 'Pi 思考档位', alertOwner: 'owner 告警', sendRules: '发送规则', memory: '记忆', history: '聊天记录保留' };
 const SEND_RULE_INPUTS: [keyof SendRulesView, string, number][] = [
   ['perChatMinute', '每会话每分钟（条）', 600], ['perChatHour', '每会话每小时（条）', 36_000], ['chatBreakerMinutes', '会话熔断时长（分钟）', 1440],
   ['globalMinute', '全局每分钟（条）', 6000], ['globalBreakerMinutes', '全局熔断时长（分钟）', 1440],
@@ -793,6 +795,7 @@ ${agentModelFieldsets(s, d, diff)}
     }
     body += sendRulesCard(s?.sendRules, d?.sendRules);
     body += memoryExtractCard(s?.memory);
+    body += historyRetentionCard(s?.history);
     body += await grantsCard();
     body += await codexPromptCard();
     body += await codexBasePromptCard(s?.codexModel ?? config.CODEX_MODEL);
@@ -841,6 +844,23 @@ ${defaults ? `<div class="hint">默认：${SEND_RULE_INPUTS.map(([k, label]) => 
 <form method="post" action="/settings/memory-extract" class="sheet pad">${csrfField(csrf)}<fieldset><legend>回合后抽取</legend><div class="choices">${all.map(ns =>
       `<input type="hidden" name="ns" value="${esc(ns)}"><label class="choice"><input type="checkbox" name="extract:${esc(ns)}"${(memory.extract[ns] ?? ns === 'owner') ? ' checked' : ''}><span>${esc(label(ns))}<small class="mono">${esc(ns)}</small></span></label>`).join('')}</div></fieldset>${consolidate}
 <p class="mt"><button>保存记忆设置</button></p></form></section>`;
+  }
+
+  /** 聊天记录原文保留期（docs/ARCHITECTURE.md §9）：每个出现过的会话一行，空或 0 = 永不清理；只保存与全局缺省不同的天数。 */
+  function historyRetentionCard(history: RuntimeSettingsView['history']): string {
+    if (!history || !opts.settings) return '';
+    const global = config.HISTORY_RAW_DAYS ?? 0;
+    const names = opts.context.scopeNames?.() ?? {};
+    // owner 的私聊由 owner 一行代表；只有单独设置过的才另列一行。
+    const ownerChat = (scope: string) => scope.startsWith('private:') && (config.owners ?? []).includes(scope.slice(8)) && history.rawDays[scope] === undefined;
+    const all = [...new Set(['owner', ...Object.keys(history.rawDays), ...opts.context.scopes(), ...(opts.memoryExtract?.namespaces() ?? [])])]
+      .filter(scope => !ownerChat(scope)).sort((a, b) => a === 'owner' ? -1 : b === 'owner' ? 1 : a.localeCompare(b));
+    const label = (scope: string) => scope === 'owner' ? 'owner 私聊' : names[scope] ? `群 ${names[scope]}` : scopeLabel(scope);
+    const value = (scope: string) => { const days = history.rawDays[scope] ?? global; return days > 0 ? String(days) : ''; };
+    return `<section id="history-retention"><h2>聊天记录保留</h2><p class="hint">消息库原文的保留天数，空或 0 = 永不清理（全局缺省：${global > 0 ? `${global} 天` : '永不清理'}，来自 HISTORY_RAW_DAYS）。到期且已被日 / 周摘要覆盖的原文在每天的聊天记录整理时删除；摘要的生成与保留不受影响。原文是记忆条目来源链接的依据，删掉后来源无法再查看。owner 一行作用于 owner 私聊（没有单独设置 private:&lt;owner QQ&gt; 时）。</p>
+<form method="post" action="/settings/history-retention" class="sheet pad">${csrfField(csrf)}<div class="choices">${all.map(scope =>
+      `<input type="hidden" name="scope" value="${esc(scope)}"><label><span>${esc(label(scope))} <small class="mono">${esc(scope)}</small>${history.rawDays[scope] !== undefined ? ' <span class="changed">单独设置</span>' : ''}</span><input type="number" name="days:${esc(scope)}" value="${value(scope)}" min="0" max="3650" step="1" placeholder="永不"></label>`).join('')}</div>
+<p class="mt"><button>保存保留期</button></p></form></section>`;
   }
 
   async function grantsCard(): Promise<string> {

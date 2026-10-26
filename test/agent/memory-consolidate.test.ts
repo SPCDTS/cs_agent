@@ -27,7 +27,7 @@ function rig(o: { complete?: ExtractComplete; messages?: Set<string>; enabled?: 
   const complete = o.complete ? vi.fn(o.complete) : undefined;
   const opts: MemoryConsolidatorOptions = {
     store, profiles, trace, model: "deepseek/deepseek-flash", timeoutMs: 1000, now: () => clock.sec * 1000,
-    sourceRetentionDays: o.retentionDays ?? 30, messageExists: (scope, id) => messages.has(`${scope}#${id}`),
+    rawDaysFor: () => o.retentionDays ?? 30, messageExists: (scope, id) => messages.has(`${scope}#${id}`),
     enabled: () => o.enabled ?? true, ...(complete ? { complete } : {}),
   };
   const c = new MemoryConsolidator(opts);
@@ -129,11 +129,16 @@ describe("夜间整理", () => {
     expect(r.store.get(explicit.id)!.status).toBe("active");
   });
 
-  it("孤立：早于原文保留期的来源可能是被清理而不是撤回，不检查", async () => {
+  it("孤立：早于原文保留期的来源可能是被清理而不是撤回，不检查；来源会话永不清理（保留天数 0）时不限时间", async () => {
     const r = rig({ retentionDays: 30 });
     const old = r.add({ text: "下周三去杭州出差", source_scope: "private:1", source_message_id: "m1" }, Math.floor(NOW / 1000) - 40 * DAY);
     await r.c.run();
     expect(r.store.get(old.id)!.status).toBe("active");
+
+    const never = rig({ retentionDays: 0 });
+    const gone = never.add({ text: "下周三去杭州出差", source_scope: "private:1", source_message_id: "m1" }, Math.floor(NOW / 1000) - 400 * DAY);
+    expect((await never.c.run())!.batches[0]!.orphaned).toBe(1);
+    expect(never.store.get(gone.id)!.status).toBe("orphaned");
   });
 
   it("降级：episode 超过 180 天未召回标 retired（未召回看创建时间、召回过看最近召回），恰好 180 天与其他种类不动", async () => {

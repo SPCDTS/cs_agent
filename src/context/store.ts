@@ -438,18 +438,24 @@ export class ContextStore {
   }
 
   /**
-   * 清理：原始消息超过 rawDays 且其时间已被同 scope 的日/周摘要覆盖时删除；未被覆盖（摘要失败、
-   * 条数不足未做摘要）的原始消息保留到 hardMaxDays 为止（兜底上限，默认 90）。摘要超过 summaryDays 删除。
+   * 清理：原始消息超过该会话的保留天数且其时间已被同 scope 的日/周摘要覆盖时删除；未被覆盖（摘要失败、
+   * 条数不足未做摘要）的原始消息保留到 hardMaxDays 为止（兜底上限，默认 90）。保留天数按 scope 取（rawDays 为数字时
+   * 所有会话相同），0 表示该会话原文永不清理，兜底上限也不适用。摘要超过 summaryDays 删除。
    */
-  purge(now: number, rawDays: number, summaryDays: number, hardMaxDays = 90): { messages: number; summaries: number } {
-    const m = this.db
-      .prepare(
-        `DELETE FROM messages WHERE time < ? AND (time < ? OR EXISTS (
-           SELECT 1 FROM summaries s WHERE s.scope = messages.scope AND s.period_start <= messages.time AND s.period_end > messages.time))`,
-      )
-      .run(now - rawDays * DAY, now - Math.max(hardMaxDays, rawDays) * DAY);
+  purge(now: number, rawDays: number | ((scope: string) => number), summaryDays: number, hardMaxDays = 90): { messages: number; summaries: number } {
+    const daysFor = typeof rawDays === "number" ? () => rawDays : rawDays;
+    const del = this.db.prepare(
+      `DELETE FROM messages WHERE scope = ? AND time < ? AND (time < ? OR EXISTS (
+         SELECT 1 FROM summaries s WHERE s.scope = messages.scope AND s.period_start <= messages.time AND s.period_end > messages.time))`,
+    );
+    let messages = 0;
+    for (const { scope } of this.db.prepare("SELECT DISTINCT scope FROM messages").all() as { scope: string }[]) {
+      const days = daysFor(scope);
+      if (!(days > 0)) continue;
+      messages += Number(del.run(scope, now - days * DAY, now - Math.max(hardMaxDays, days) * DAY).changes);
+    }
     const s = this.db.prepare("DELETE FROM summaries WHERE period_end < ?").run(now - summaryDays * DAY);
-    return { messages: Number(m.changes), summaries: Number(s.changes) };
+    return { messages, summaries: Number(s.changes) };
   }
 
   getMeta(key: string): string | undefined {

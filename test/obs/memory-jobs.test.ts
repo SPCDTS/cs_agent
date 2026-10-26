@@ -27,7 +27,7 @@ async function rig(enabled = true) {
   const config = loadConfig({ DATA_DIR: dir, OBS_TOKEN: TOKEN, QQ_OWNER: "1" });
   const settings = await SettingsStore.open(dir, settingsDefaults({ ...config, backendOverrides: {} }), new Trace());
   const memory = new MemoryService({ store, profiles, owners: ["1"] });
-  const consolidator = new MemoryConsolidator({ store, profiles, sourceRetentionDays: 30, model: "flash",
+  const consolidator = new MemoryConsolidator({ store, profiles, rawDaysFor: () => 30, model: "flash",
     enabled: () => memoryConsolidateEnabled(settings.current()),
     complete: async prompt => prompt.startsWith(CONSOLIDATE_CONFLICT_PROMPT) ? "[]" : '{"profile":"称呼：主人"}' });
   const dashboard = createDashboard({ config, store: obs, context, settings, health: () => ({}), queue: () => ({}), codex: async () => ({}), pi: async () => ({}),

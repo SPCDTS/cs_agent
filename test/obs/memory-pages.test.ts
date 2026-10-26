@@ -78,7 +78,7 @@ describe('记忆页面', () => {
     expect(html).toContain('日摘要 4 · 周摘要 2 · 失败 1 · 清理原文 37 · 清理摘要 5 · 耗时 1.5 秒');
     expect(html).toContain('约 5 小时后'); expect(html).toContain('执行中可能顺延');
     expect(html).toContain('正常'); expect(html).not.toContain('需要补跑');
-    expect(html).toContain('原文 30 天（未被摘要覆盖的最长 90 天），摘要 180 天');
+    expect(html).toContain('原文 30 天（未被摘要覆盖的最长 90 天）为全局缺省，0 个会话有单独设置；摘要 180 天');
     expect(html).toContain('每天 3 点（UTC）');
     // 会话域表：字典序，XSS 标签转义，链接到时间线
     expect(html).toContain('href="/memory/scopes/group%3A123"');

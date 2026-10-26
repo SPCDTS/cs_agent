@@ -220,6 +220,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 ## 10. 聊天记录
 
 - **衰老任务**：每天 `HISTORY_SUMMARY_HOUR`（默认 3）点，按容器 `TZ`（compose 默认 Asia/Shanghai）。日志 `history aging done`（day_summaries / week_summaries / failed / purged_*）；模型失败只计数跳过，下次再试。
+- **原文保留期**：`HISTORY_RAW_DAYS` 是全局缺省，默认 `0` = 永不清理原始消息；面板设置页"聊天记录保留"可按会话覆盖（`settings.json` 的 `history.rawDays`，0 = 永不，上限 3650）。保留天数大于 0 的会话按 [ARCHITECTURE.md](ARCHITECTURE.md) §9 在衰老任务中清理已被摘要覆盖的原文；日 / 周摘要的生成与 `HISTORY_SUMMARY_DAYS` 不受影响。
 - **召回配置**：`MEDIA_RECALL_PORT=8790`（主进程仅监听 127.0.0.1，无需发布）；`MEDIA_RECALL_MAX_PER_TURN=5`（每回合；旧名 `MEDIA_RECALL_MAX_PER_TICKET` 仍可用）。
 - **查看消息库**（容器内有 node，无需 sqlite3）：
 

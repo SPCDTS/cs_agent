@@ -8,7 +8,7 @@ import { applyMemoryEntryAction } from './memory/entries.js';
 import { applyMemoryJobAction, memoryJobError, type MemoryJobAction } from './memory/jobs.js';
 import { isMemoryNs } from '../context/memory/types.js';
 import { isThreadKey } from '../agent/codex/runner.js';
-import { SETTINGS_KEY, normalizeMemoryExtract, type RuntimeSettings } from '../agent/settings.js';
+import { SETTINGS_KEY, normalizeHistoryRawDays, normalizeMemoryExtract, type RuntimeSettings } from '../agent/settings.js';
 
 const SEND_RULE_FIELDS = ['perChatMinute', 'perChatHour', 'chatBreakerMinutes', 'globalMinute', 'globalBreakerMinutes'] as const;
 import { parseBackendOverrides } from '../agent/backends/select.js';
@@ -152,6 +152,15 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
         try { await opts.settings.update({ memory: { extract: normalizeMemoryExtract(extract) as Record<string, boolean>, consolidate } }, 'dashboard'); }
         catch (e) { throw new HttpError(400, '抽取开关未保存：命名空间无效。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
         back('/settings?ok=saved#memory-extract'); return;
+      }
+      if (url.pathname === '/settings/history-retention') {
+        if (!opts.settings) throw new HttpError(404, '运行时设置不可用');
+        // 只改本次表单列出的会话，其余已保存的覆盖保留；空或 0 = 永不清理。只保存与全局缺省不同的天数。
+        const rawDays: Record<string, unknown> = { ...opts.settings.current().history.rawDays };
+        for (const scope of form.getAll('scope')) { const v = (form.get(`days:${scope}`) ?? '').trim(); rawDays[scope] = v === '' ? 0 : Number(v); }
+        try { await opts.settings.update({ history: { rawDays: normalizeHistoryRawDays(rawDays, resolveAgentConfig(opts.config).HISTORY_RAW_DAYS) as Record<string, number> } }, 'dashboard'); }
+        catch (e) { throw new HttpError(400, '保留期未保存：天数须为 0 到 3650 的整数，会话须为 owner、group:群号 或 private:QQ号。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
+        back('/settings?ok=saved#history-retention'); return;
       }
       if (url.pathname === '/settings/send-breakers/reset') {
         if (!opts.sendBreakers) throw new HttpError(404, '发送熔断不可用');

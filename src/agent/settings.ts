@@ -13,6 +13,7 @@ import { DEFAULT_SEND_RULES, type SendRuleLimits } from "../channel/send-rules.j
 import { isScope } from "../context/access.js";
 import { isMemoryNs } from "../context/memory/types.js";
 import { log } from "../shared/log.js";
+import { isOwner, type OwnerIds } from "../shared/owners.js";
 import { trace as defaultTrace, type Trace } from "../shared/trace.js";
 import { REASONING_EFFORTS } from "./codex/runner.js";
 import { type ReasoningEffort } from "./backends/types.js";
@@ -30,6 +31,26 @@ export interface RuntimeSettings {
   sendRules: SendRuleLimits;
   /** 记忆（docs/MEMORY-DESIGN.md §8.1、§9）：extract 为各命名空间的回合后抽取开关，没有键的命名空间按 memoryExtractEnabled 的缺省；consolidate 为夜间整理开关 */
   memory: MemorySettings;
+  /** 聊天记录（docs/ARCHITECTURE.md §9）：rawDays 为各会话的原文保留天数（0 = 永不清理），没有键的会话用 HISTORY_RAW_DAYS */
+  history: HistorySettings;
+}
+
+export interface HistorySettings { rawDays: Record<string, number> }
+/** 原文保留天数上限（约 10 年） */
+export const HISTORY_RAW_DAYS_MAX = 3650;
+
+/**
+ * 该会话的原文保留天数：有键按键；owner 的私聊（private:<owner QQ>）没有单独的键时用 owner 键；都没有用全局缺省。
+ * 0 表示永不清理。
+ */
+export function historyRawDays(settings: Pick<RuntimeSettings, "history">, scope: string, globalDefault: number, owners: OwnerIds): number {
+  const o = settings.history.rawDays;
+  return o[scope] ?? (scope.startsWith("private:") && isOwner(owners, scope.slice(8)) ? o.owner : undefined) ?? globalDefault;
+}
+
+/** 只留与全局缺省不同的保留天数：面板每次提交全部会话也只保存覆盖项。非数字原样留给校验拒绝。 */
+export function normalizeHistoryRawDays(rawDays: Readonly<Record<string, unknown>>, globalDefault: number): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(rawDays).filter(([, days]) => days !== globalDefault));
 }
 
 export interface MemorySettings { extract: Record<string, boolean>; consolidate: boolean }
@@ -75,6 +96,10 @@ const MemorySchema = z.object({
     .refine(v => Object.keys(v).length <= 500, "抽取开关最多 500 项"),
   consolidate: z.boolean().default(DEFAULT_MEMORY_SETTINGS.consolidate),
 }).strict();
+const HistorySchema = z.object({
+  rawDays: z.record(z.string().refine(isMemoryNs, "会话必须是 owner、group:<群号> 或 private:<QQ号>"), z.number().int().min(0).max(HISTORY_RAW_DAYS_MAX))
+    .refine(v => Object.keys(v).length <= 500, "保留期覆盖最多 500 项"),
+}).strict();
 const SettingsSchema = z.object({
   agentBackend: backend,
   backendOverrides: z.record(z.string().refine(isScope, "scope 必须是 group:<群号> 或 private:<QQ号>"), backend)
@@ -86,10 +111,11 @@ const SettingsSchema = z.object({
   alertOwner: z.boolean(),
   sendRules: SendRulesSchema,
   memory: MemorySchema,
+  history: HistorySchema,
 }).strict();
 // 只在读取旧文件时剥离已移除的字段；其余未知键及运行时更新仍严格校验。发送规则逐项缺省为默认值。
 const FileSettingsSchema = SettingsSchema.partial().extend({ codexReplyMode: z.unknown().optional(), sendRules: SendRulesSchema.partial().optional(),
-  memory: MemorySchema.partial().optional() })
+  memory: MemorySchema.partial().optional(), history: HistorySchema.partial().optional() })
   .transform(({ codexReplyMode: _legacy, ...settings }) => settings);
 const FileSchema = z.object({ version: z.literal(1), settings: FileSettingsSchema }).strict();
 
@@ -109,7 +135,7 @@ export function settingsDefaults(cfg: {
   return { agentBackend: cfg.AGENT_BACKEND, backendOverrides: { ...cfg.backendOverrides },
     codexModel: cfg.CODEX_MODEL, codexReasoningEffort: effort, piModel: cfg.AGENT_MODEL_ID,
     piThinkingLevel: cfg.AGENT_THINKING_LEVEL, alertOwner: cfg.ALERT_OWNER, sendRules: { ...DEFAULT_SEND_RULES },
-    memory: { extract: { ...DEFAULT_MEMORY_SETTINGS.extract }, consolidate: DEFAULT_MEMORY_SETTINGS.consolidate } };
+    memory: { extract: { ...DEFAULT_MEMORY_SETTINGS.extract }, consolidate: DEFAULT_MEMORY_SETTINGS.consolidate }, history: { rawDays: {} } };
 }
 
 /** 设置补丁：memory 按字段合并，可只给 extract 或 consolidate。 */
@@ -139,7 +165,8 @@ export class SettingsStore {
       const parsed = FileSchema.parse(JSON.parse(await fs.readFile(file, "utf8")));
       initial = SettingsSchema.parse(normalized({ ...base, ...parsed.settings, sendRules: { ...base.sendRules, ...parsed.settings.sendRules },
         memory: { extract: { ...base.memory.extract, ...parsed.settings.memory?.extract },
-          consolidate: parsed.settings.memory?.consolidate ?? base.memory.consolidate } }));
+          consolidate: parsed.settings.memory?.consolidate ?? base.memory.consolidate },
+        history: { rawDays: { ...base.history.rawDays, ...parsed.settings.history?.rawDays } } }));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") log.warn("settings.json invalid; using .env defaults", { error: err instanceof Error ? err.message : String(err) });
     }
@@ -156,7 +183,8 @@ export class SettingsStore {
   current(): Readonly<RuntimeSettings> {
     return Object.freeze({ ...this.value, backendOverrides: Object.freeze({ ...this.value.backendOverrides }),
       sendRules: Object.freeze({ ...this.value.sendRules }),
-      memory: Object.freeze({ extract: Object.freeze({ ...this.value.memory.extract }), consolidate: this.value.memory.consolidate }) }) as Readonly<RuntimeSettings>;
+      memory: Object.freeze({ extract: Object.freeze({ ...this.value.memory.extract }), consolidate: this.value.memory.consolidate }),
+      history: Object.freeze({ rawDays: Object.freeze({ ...this.value.history.rawDays }) }) }) as Readonly<RuntimeSettings>;
   }
 
   /** 回合快照：目录可用时无效模型回退到 CODEX_MODEL；环境默认也无效则用内置默认，不改配置。 */

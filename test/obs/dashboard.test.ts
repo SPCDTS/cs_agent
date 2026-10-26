@@ -26,7 +26,7 @@ import { dispatchSettingsLine, type ModelCatalogView } from '../../src/obs/ui/da
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
-const defaults: RuntimeSettings = { codexModel: 'codex/gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES }, memory: { extract: {}, consolidate: true } };
+const defaults: RuntimeSettings = { codexModel: 'codex/gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES }, memory: { extract: {}, consolidate: true }, history: { rawDays: {} } };
 
 async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv; modelCatalog?: ModelCatalogView; sendBreakers?: DashboardOptions['sendBreakers']; memoryExtract?: DashboardOptions['memoryExtract'] } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
@@ -355,6 +355,17 @@ describe('面板二期页面', () => {
     const home = await (await r.get('/memory')).text();
     expect(home).toContain('记忆任务'); expect(home).toContain('href="/memory/jobs"'); expect(home).toContain('2 条排队'); expect(home).toContain('owner 私聊 3/200');
     expect(home).toContain('重复 1'); expect(home).toContain('材料过短'); expect(home).toContain('href="/turns/pi%3At8"');
+  });
+
+  it('聊天记录保留：每个出现过的会话一行；保存走口令，空为永不清理，与全局缺省相同的天数不保存', async () => {
+    const r = await rig({ env: { HISTORY_RAW_DAYS: '30' }, memoryExtract: { status: () => ({}) as never, namespaces: () => ['group:7', 'private:5'] } });
+    const html = await (await r.get('/settings')).text();
+    expect(html).toContain('id="history-retention"'); expect(html).toMatch(/name="days:group:7" value="30"/);
+    const body = new URLSearchParams([['_csrf', r.csrf], ['scope', 'group:7'], ['days:group:7', ''], ['scope', 'private:5'], ['days:private:5', '30']]).toString();
+    const res = await r.get('/settings/history-retention', { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/settings?ok=saved#history-retention');
+    expect(r.settings.current().history.rawDays).toEqual({ 'group:7': 0 });
+    expect(JSON.parse(await (await r.get('/api/memory')).text()).retention).toMatchObject({ rawDays: 30, overrides: { 'group:7': 0 } });
   });
 
   it('保存设置立即生效、落盘并记录事件；非法覆盖表返回 400 且不改动', async () => {

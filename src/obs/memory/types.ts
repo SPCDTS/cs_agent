@@ -8,7 +8,15 @@ import type { MemoryProposalRow, MemoryStore } from '../../context/memory/store.
 import type { ProfileSnapshot } from '../../context/memory/profile.js';
 
 export interface Retention {
+  /** 原文保留天数的全局缺省（0 = 永不清理） */
   rawDays: number; summaryDays: number; hardMaxDays: number; dailyHour: number; tz: string;
+  /** 按会话覆盖的原文保留天数（settings.json 的 history.rawDays）；只在 /api/memory 的输出里出现 */
+  overrides?: Record<string, number>;
+}
+/** 按会话的原文保留天数（由 http.ts 从运行时设置构造，现读） */
+export interface RawDaysSource {
+  overrides(): Record<string, number>;
+  forScope(scope: string): number;
 }
 export interface MemoryAging {
   /** 时间统一为毫秒；未提供调度器时 next_run 为 null。 */
@@ -20,6 +28,8 @@ export interface MemoryAging {
 export interface MemoryArchives { codex: string; pi: string }
 export interface MemoryDeps {
   context: ContextStore; store: ObsStore; retention: Retention;
+  /** 按会话的原文保留天数；未提供时所有会话用 retention.rawDays */
+  rawDays?: RawDaysSource;
   aging?: MemoryAging; archives?: MemoryArchives; maxChars?: number;
   now?: () => number;
   sessionAdapters?: SessionAdapters;
@@ -130,7 +140,8 @@ export interface SummaryItem {
 }
 export interface ScopeTimeline {
   scope: string; label: string; range: { first_ts: number; last_ts: number };
-  retention_edges: { raw_until: number; day_until: number; week_until: number };
+  /** raw_until 为 null 表示该会话原文永不清理 */
+  retention_edges: { raw_until: number | null; day_until: number; week_until: number };
   tracks: { raw: TrackBucket[]; day: SummaryItem[]; week: SummaryItem[] };
   gaps: { from: number; to: number; reason: 'purged' | 'no_records' }[];
 }

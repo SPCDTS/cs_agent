@@ -83,7 +83,7 @@ describe('记忆只读 API', () => {
     expect(res.body.scopes[0].bytes_estimate).toBe(text.reduce((n, s) => n + [...s].length, 0));
     expect(res.body.scopes[1].label).toBe('私聊 456');
     expect(res.body.aging).toEqual({ last_run: NOW - HOUR, last_report: report, next_run: NOW + HOUR, running: true, catch_up_needed: false });
-    expect(res.body.retention).toEqual(r.deps.retention);
+    expect(res.body.retention).toEqual({ ...r.deps.retention, overrides: {} });
   });
 
   it('空库和损坏整理标记不伪造记录或运行时间', async () => {
@@ -135,6 +135,12 @@ describe('记忆只读 API', () => {
     r.deps.retention = { ...r.deps.retention, rawDays: 200, hardMaxDays: 5 };
     const second = await r.get(`/api/memory/scopes/${G}?from=${NOW - 300 * DAY}&to=${NOW}`);
     expect(second.body.gaps).toContainEqual(expect.objectContaining({ to: NOW - 200 * DAY, reason: 'purged' }));
+    // 该会话在设置页设为永不清理：原文边界为 null，任何时段都不推算为已清理；总览带出覆盖表，全局缺省不变
+    r.deps.rawDays = { overrides: () => ({ [G]: 0 }), forScope: scope => scope === G ? 0 : 200 };
+    const never = await r.get(`/api/memory/scopes/${G}?from=${NOW - 300 * DAY}&to=${NOW}`);
+    expect(never.body.retention_edges.raw_until).toBeNull();
+    expect(never.body.gaps.some((g: { reason: string }) => g.reason === 'purged')).toBe(false);
+    expect((await r.get('/api/memory')).body.retention).toMatchObject({ rawDays: 200, overrides: { [G]: 0 } });
   });
 
   it('ISO 日期与毫秒给出相同结果，时区偏移及周一正确', async () => {

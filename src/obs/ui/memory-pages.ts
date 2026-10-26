@@ -64,7 +64,8 @@ ${kv([
     ['上次报告', a.last_report ? esc(reportLine(a.last_report)) : '<span class="faint">没有完整的整理报告</span>'],
     ['下次计划', a.next_run === null ? '<span class="faint">未接入调度器</span>' : esc(fmtUntil(a.next_run, now)) + (a.running ? ' <small>（执行中可能顺延）</small>' : '')],
     ['补跑', catchUp],
-    ['保留策略', esc(`原文 ${r.rawDays} 天（未被摘要覆盖的最长 ${Math.max(r.rawDays, r.hardMaxDays)} 天），摘要 ${r.summaryDays} 天`)],
+    ['保留策略', esc(`原文${r.rawDays > 0 ? ` ${r.rawDays} 天（未被摘要覆盖的最长 ${Math.max(r.rawDays, r.hardMaxDays)} 天）` : '永久保留'}为全局缺省，${Object.keys(r.overrides ?? {}).length} 个会话有单独设置；摘要 ${r.summaryDays} 天`)
+      + ' <small><a href="/settings#history-retention">设置</a></small>'],
   ], 'meta')}</section>`;
 }
 
@@ -167,7 +168,7 @@ export function scopePageBody(i: ScopePageInput): string {
   const t = i.timeline, e = t.retention_edges;
   let out = crumbs([['记忆', '/memory'], [t.label]]);
   out += `<div class="sheet pad">${kv([['scope', `<span class="mono">${esc(t.scope)}</span>`], ['查询区间', `${span(t.range.first_ts, t.range.last_ts)} <small>（左闭右开）</small>`],
-    ['原文保留边界', esc(fmtTime(e.raw_until))], ['摘要保留边界', esc(fmtTime(e.day_until))],
+    ['原文保留边界', e.raw_until === null ? '永不清理' : esc(fmtTime(e.raw_until))], ['摘要保留边界', esc(fmtTime(e.day_until))],
     ['本区间', esc(`原文 ${fmtInt(t.tracks.raw.reduce((n, b) => n + b.count, 0))} 条（${t.tracks.raw.length} 个桶），日摘要 ${t.tracks.day.length}，周摘要 ${t.tracks.week.length}`)]], 'meta')}</div>`;
   out += rangeControls(t.scope, i.params, i.now);
   out += `<section class="flush"><div id="mtl" class="sheet mtl" aria-label="记忆时间线">${i.vendor ? '<p class="faint placeholder">正在绘制时间线…</p>' : '<p class="flash err">时间线组件（vis-timeline）未安装，下面仍可查看摘要与消息列表。</p>'}</div>

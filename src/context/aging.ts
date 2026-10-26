@@ -9,8 +9,8 @@ import { trace } from "../shared/trace.js";
  * 聊天记录衰老任务（docs/ARCHITECTURE.md §9）：每天本地 HISTORY_SUMMARY_HOUR 点（容器默认 UTC，设 TZ 可改）执行：
  * 1. 日摘要：每个 scope 今天之前、≥5 条且未被摘要覆盖的日子 → ≤400 字摘要（意图模型，pi-ai 直调）；
  * 2. 周摘要：已结束的自然周（周一起）内的日摘要合并为一条周摘要并删除日摘要；
- * 3. 清理：原始消息 > HISTORY_RAW_DAYS 且所在日已被日/周摘要覆盖（未覆盖的保留到 HISTORY_RAW_HARD_MAX_DAYS，
- *    摘要失败的日子下次重试）、摘要 > HISTORY_SUMMARY_DAYS。
+ * 3. 清理：原始消息超过该会话的保留天数（rawDaysFor，缺省 HISTORY_RAW_DAYS；0 = 永不清理）且所在日已被日/周摘要覆盖
+ *    （未覆盖的保留到 HISTORY_RAW_HARD_MAX_DAYS，摘要失败的日子下次重试；保留天数为 0 时兜底也不适用）、摘要 > HISTORY_SUMMARY_DAYS。
  * 启动时若上次运行（meta.aging_last_run）早于 24h 立即补跑一次。任何错误只记日志，绝不使进程崩溃。
  * after 钩子（记忆夜间整理，docs/MEMORY-DESIGN.md §9）在每次衰老之后串行运行，不论衰老成败；启动时衰老不需补跑而
  * 钩子自己需要补跑（after.needsCatchUp）时只跑钩子。钩子不计入 running()。
@@ -42,7 +42,10 @@ export interface AgingOptions {
   instrumentation?: SummaryObserver;
   models: Models;
   model: () => Model<Api>;
+  /** 原文保留天数的全局缺省（0 = 永不清理） */
   rawDays: number;
+  /** 按会话的原文保留天数（settings.json 的 history.rawDays，由 main 注入）；未提供时所有会话用 rawDays */
+  rawDaysFor?: (scope: string) => number;
   summaryDays: number;
   /** 未被摘要覆盖的原始消息最长保留天数（默认 90） */
   rawHardMaxDays?: number;
@@ -149,7 +152,7 @@ export async function runAging(opts: AgingOptions): Promise<AgingReport> {
   }
 
   // 3. 清理
-  const purged = store.purge(nowSec, opts.rawDays, opts.summaryDays, opts.rawHardMaxDays ?? 90);
+  const purged = store.purge(nowSec, opts.rawDaysFor ?? opts.rawDays, opts.summaryDays, opts.rawHardMaxDays ?? 90);
   report.purged_messages = purged.messages;
   report.purged_summaries = purged.summaries;
   await cleanupMedia(path.dirname(store.file), store, nowSec * 1000);

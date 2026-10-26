@@ -61,7 +61,7 @@ import { MemoryExtractor } from "./agent/memory/extractor.js";
 import { MemoryConsolidator } from "./agent/memory/consolidate.js";
 import { isOwner } from "./shared/owners.js";
 import { scopeLabel } from "./context/access.js";
-import { SettingsStore, memoryConsolidateEnabled, memoryExtractEnabled, settingsDefaults } from "./agent/settings.js";
+import { SettingsStore, historyRawDays, memoryConsolidateEnabled, memoryExtractEnabled, settingsDefaults } from "./agent/settings.js";
 import { msUntilNextRun, startAgingScheduler } from "./context/aging.js";
 
 let closeLogs = async () => {};
@@ -339,9 +339,11 @@ async function main(): Promise<void> {
     enabled: ns => memoryExtractEnabled(settings.current(), ns),
     ...(extractModel ? { complete: memoryComplete(2000) } : {}),
   });
+  // 各会话的原文保留天数（settings.json 的 history.rawDays，现读；0 = 永不清理）：衰老清理与整理的孤立检查共用
+  const rawDaysFor = (scope: string) => historyRawDays(settings.current(), scope, cfg.HISTORY_RAW_DAYS, cfg.owners);
   // 夜间整理（docs/MEMORY-DESIGN.md §9）：挂在衰老调度器之后串行运行，与抽取同一个模型；孤立检查按消息 id 查消息库。
   const consolidator = new MemoryConsolidator({
-    store: memoryStore, profiles, model: cfg.MEMORY_EXTRACT_MODEL, sourceRetentionDays: cfg.HISTORY_RAW_DAYS,
+    store: memoryStore, profiles, model: cfg.MEMORY_EXTRACT_MODEL, rawDaysFor: rawDaysFor,
     messageExists: (scope, messageId) => store.message({ kind: "scope", scope }, messageId) !== null,
     enabled: () => memoryConsolidateEnabled(settings.current()),
     ...(extractModel ? { complete: memoryComplete(6000) } : {}),
@@ -359,6 +361,7 @@ async function main(): Promise<void> {
     models,
     model: () => { const ref = currentPiModel(); return models.getModel(ref.provider, ref.modelId) ?? agentModel; },
     rawDays: cfg.HISTORY_RAW_DAYS,
+    rawDaysFor,
     summaryDays: cfg.HISTORY_SUMMARY_DAYS,
     rawHardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,
     hour: cfg.HISTORY_SUMMARY_HOUR,

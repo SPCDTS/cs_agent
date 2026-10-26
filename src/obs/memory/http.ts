@@ -190,7 +190,7 @@ export function createMemoryRoutes(deps: MemoryDeps) {
       reader = new MemoryReader(deps.context);
       if (p === '/api/memory') {
         parameters(q, []);
-        sessionJson(res, 200, { scopes: reader.overview(now), aging: agingStatus(deps, now), retention }); return;
+        sessionJson(res, 200, { scopes: reader.overview(now), aging: agingStatus(deps, now), retention: { ...retention, overrides: deps.rawDays?.overrides() ?? {} } }); return;
       }
       if (p === '/api/memory/search') { sessionJson(res, 200, search(deps, q, reader)); return; }
       const parts = p.split('/');
@@ -213,7 +213,7 @@ export function createMemoryRoutes(deps: MemoryDeps) {
       const from = timestamp(q.get('from'), 'from') ?? extent.first_ts;
       const to = timestamp(q.get('to'), 'to') ?? extent.last_ts + 1;
       if (from >= to) throw new SessionError(400, 'from 必须早于 to');
-      sessionJson(res, 200, reader.timeline(scope, from, to, retention, now));
+      sessionJson(res, 200, reader.timeline(scope, from, to, { ...retention, rawDays: deps.rawDays?.forScope(scope) ?? retention.rawDays }, now));
     } catch (error) {
       sessionJson(res, error instanceof SessionError ? error.status : 500,
         { error: error instanceof SessionError ? error.message : '记忆读取暂不可用' });

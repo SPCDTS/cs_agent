@@ -75,11 +75,12 @@ export class MemoryReader {
     const items: SummaryItem[] = rows.map(s => ({ id: s.id, kind: s.level, period_start: s.period_start * 1000,
       period_end: s.period_end * 1000, created_at: s.created_at * 1000, chars: [...s.text].length,
       preview: preview(s.text, 120), source_messages: s.msg_count ?? null }));
-    const retention_edges = { raw_until: now - retention.rawDays * DAY * 1000,
+    const retention_edges = { raw_until: retention.rawDays > 0 ? now - retention.rawDays * DAY * 1000 : null,
       day_until: now - retention.summaryDays * DAY * 1000, week_until: now - retention.summaryDays * DAY * 1000 };
     const gaps: ScopeTimeline['gaps'] = [];
     // 没有删除日志：purged 只表示所有存储层均已超保留期，不能证明历史上确有记录。
-    const purgedBefore = Math.min(now - Math.max(retention.rawDays, retention.hardMaxDays) * DAY * 1000, retention_edges.week_until);
+    // 原文永不清理（rawDays = 0）时没有任何时段可推算为已清理。
+    const purgedBefore = retention.rawDays > 0 ? Math.min(now - Math.max(retention.rawDays, retention.hardMaxDays) * DAY * 1000, retention_edges.week_until) : -Infinity;
     const gap = (start: number, end: number) => {
       if (start < Math.min(end, purgedBefore)) gaps.push({ from: start, to: Math.min(end, purgedBefore), reason: 'purged' });
       if (Math.max(start, purgedBefore) < end) gaps.push({ from: Math.max(start, purgedBefore), to: end, reason: 'no_records' });

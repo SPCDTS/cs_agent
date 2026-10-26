@@ -4,7 +4,7 @@ import os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ObsStore } from "../../src/obs/store.js";
 import { Trace, trace } from "../../src/shared/trace.js";
-import { SettingsStore, SETTINGS_KEY, memoryConsolidateEnabled, memoryExtractEnabled, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
+import { SettingsStore, SETTINGS_KEY, historyRawDays, memoryConsolidateEnabled, memoryExtractEnabled, normalizeHistoryRawDays, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
 import { DEFAULT_SEND_RULES } from "../../src/channel/send-rules.js";
 import { CodexBackend } from "../../src/agent/backends/codex.js";
 import type { BackendName, SettingsSnapshot } from "../../src/agent/backends/types.js";
@@ -28,7 +28,7 @@ async function codexBackend(dir: string, script: CodexScript, turns: Constructor
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const tmp = () => { const dir = mkdtempSync(path.join(os.tmpdir(), "cs-settings-")); clean.push(() => rmSync(dir, { recursive: true, force: true })); return dir; };
-const defaults: RuntimeSettings = { codexModel: "codex/gpt-6.1-sol", piModel: "deepseek-flash", piThinkingLevel: "low", agentBackend: "codex", backendOverrides: {}, codexReasoningEffort: "high", alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES }, memory: { extract: {}, consolidate: true } };
+const defaults: RuntimeSettings = { codexModel: "codex/gpt-6.1-sol", piModel: "deepseek-flash", piThinkingLevel: "low", agentBackend: "codex", backendOverrides: {}, codexReasoningEffort: "high", alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES }, memory: { extract: {}, consolidate: true }, history: { rawDays: {} } };
 
 describe("运行时设置", () => {
   it(".env 为默认；修改原子落盘并在重开后保留；记录 settings_changed 事件", async () => {
@@ -120,6 +120,22 @@ describe("运行时设置", () => {
     expect(JSON.parse(readFileSync(file, "utf8")).settings.memory).toEqual({ extract: {}, consolidate: false });
     expect((await SettingsStore.open(dir, defaults, new Trace())).current().memory.consolidate).toBe(false);
     await expect(s.update({ memory: { consolidate: "yes" } as never }, "test")).rejects.toThrow();
+  });
+
+  it("聊天记录保留期：缺省没有覆盖；旧文件缺 history 时补空表，已保存的键与默认合并；只保存与全局缺省不同的天数；owner 键作用于 owner 私聊", async () => {
+    const dir = tmp(), file = path.join(dir, "settings.json");
+    writeFileSync(file, JSON.stringify({ version: 1, settings: { agentBackend: "pi" } }), "utf8");
+    expect((await SettingsStore.open(dir, defaults, new Trace())).current().history).toEqual({ rawDays: {} });
+    writeFileSync(file, JSON.stringify({ version: 1, settings: { history: { rawDays: { "group:7": 0 } } } }), "utf8");
+    const s = await SettingsStore.open(dir, defaults, new Trace());
+    expect(historyRawDays(s.current(), "group:7", 30, ["1"])).toBe(0);
+    expect(historyRawDays(s.current(), "group:8", 30, ["1"])).toBe(30);
+    // 面板提交全部会话：与全局缺省 30 相同的不保存
+    await s.update({ history: { rawDays: normalizeHistoryRawDays({ "group:7": 0, "group:8": 30, owner: 365 }, 30) as Record<string, number> } }, "test");
+    expect(JSON.parse(readFileSync(file, "utf8")).settings.history).toEqual({ rawDays: { "group:7": 0, owner: 365 } });
+    expect(historyRawDays(s.current(), "private:1", 30, ["1"])).toBe(365);
+    expect(historyRawDays(s.current(), "private:2", 30, ["1"])).toBe(30);
+    await expect(s.update({ history: { rawDays: { "group:7": 3651 } } }, "test")).rejects.toThrow();
   });
 
   it("settingsDefaults 取自 .env；不在允许列表的推理强度回落 high", () => {

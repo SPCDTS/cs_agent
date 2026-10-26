@@ -127,8 +127,8 @@ export interface MemoryConsolidatorOptions {
   profiles: Pick<ProfileStore, "read" | "write">;
   /** 来源消息是否还在消息库（ContextStore.message）；未提供时跳过孤立检查 */
   messageExists?(scope: string, messageId: string): boolean;
-  /** 消息库原文保留天数（HISTORY_RAW_DAYS）：更早的来源可能被清理而非撤回，不做孤立检查 */
-  sourceRetentionDays: number;
+  /** 来源会话的原文保留天数（settings.json 的 history.rawDays，缺省 HISTORY_RAW_DAYS）：更早的来源可能被清理而非撤回，不做孤立检查；0 = 永不清理，不限时间 */
+  rawDaysFor(scope: string): number;
   complete?: ExtractComplete;
   model?: string;
   timeoutMs?: number;
@@ -417,12 +417,14 @@ export class MemoryConsolidator {
   /** 第 3 步：来源消息已撤回的抽取条目标 orphaned。 */
   private orphans(ns: string, by: string): number {
     const exists = this.opts.messageExists;
-    const days = this.opts.sourceRetentionDays;
-    // 7 天是抽取延迟的保守余量：条目的创建时间可能晚于来源消息（排队、回合较长），更早的来源可能已被保留期清理
-    if (!exists || !(days > ORPHAN_MARGIN_DAYS)) return 0;
-    const since = Math.floor(this.now() / 1000) - (days - ORPHAN_MARGIN_DAYS) * DAY;
+    if (!exists) return 0;
+    const nowSec = Math.floor(this.now() / 1000);
     let n = 0;
-    for (const row of this.opts.store.orphanCandidates(ns, since)) {
+    for (const row of this.opts.store.orphanCandidates(ns, 0)) {
+      // 保留天数按来源会话取；0 表示原文永不清理，来源消失只可能是撤回，不限时间。
+      // 否则只查创建不早于"保留天数 − 7"天的条目：7 天是抽取延迟的保守余量（条目的创建时间可能晚于来源消息），更早的来源可能已被保留期清理
+      const days = this.opts.rawDaysFor(row.source_scope!);
+      if (days > 0 && (days <= ORPHAN_MARGIN_DAYS || row.created_at < nowSec - (days - ORPHAN_MARGIN_DAYS) * DAY)) continue;
       if (exists(row.source_scope!, row.source_message_id!)) continue;
       this.opts.store.setStatus(row.id, "orphaned", by, "consolidate_orphan");
       n++;

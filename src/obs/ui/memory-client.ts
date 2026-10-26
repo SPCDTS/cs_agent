@@ -110,8 +110,8 @@ function buildTimeline(){
     format:{minorLabels:{millisecond:'SSS',second:'s',minute:'HH:mm',hour:'HH:mm',weekday:'M/D',day:'D',week:'w',month:'M月',year:'YYYY'},
       majorLabels:{millisecond:'HH:mm:ss',second:'M/D HH:mm',minute:'YYYY/M/D',hour:'YYYY/M/D',weekday:'YYYY/M',day:'YYYY/M',week:'YYYY/M',month:'YYYY',year:''}}});
   const e=D.retention_edges;
-  EDGES['edge-raw']=e.raw_until;
-  tl.addCustomTime(e.raw_until,'edge-raw');tl.setCustomTimeMarker('原文保留边界','edge-raw',false);
+  if(e.raw_until!==null){EDGES['edge-raw']=e.raw_until;
+  tl.addCustomTime(e.raw_until,'edge-raw');tl.setCustomTimeMarker('原文保留边界','edge-raw',false);}
   EDGES['edge-sum']=e.day_until;
   tl.addCustomTime(e.day_until,'edge-sum');tl.setCustomTimeMarker(e.week_until===e.day_until?'摘要保留边界':'日摘要保留边界','edge-sum',false);
   if(e.week_until!==e.day_until){EDGES['edge-week']=e.week_until;tl.addCustomTime(e.week_until,'edge-week');tl.setCustomTimeMarker('周摘要保留边界','edge-week',false);}

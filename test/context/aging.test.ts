@@ -127,6 +127,18 @@ describe("runAging", () => {
     expect(rep.purged_messages).toBe(1);
     expect(r.store.recent({ kind: "all" }, { limit: 10 }).map((m) => m.text)).toEqual(["未覆盖 40 天"]);
   });
+
+  it("原文保留期按会话取：0 永不清理（兜底上限也不适用），覆盖值替代全局缺省，没有覆盖的会话用全局缺省", async () => {
+    const r = rig([]);
+    const nowSec = NOW / 1000;
+    r.store.ingest(msg(nowSec - 100 * DAY, "永不清理的群", "200000001"));
+    r.store.ingest(msg(nowSec - 100 * DAY, "保留 120 天的群", "2"));
+    r.store.ingest(msg(nowSec - 100 * DAY, "用全局缺省的群", "3"));
+    const days: Record<string, number> = { [G]: 0, "group:2": 120 };
+    const rep = await runAging({ ...r.opts, rawDaysFor: (scope) => days[scope] ?? r.opts.rawDays, rawHardMaxDays: 90 });
+    expect(rep.purged_messages).toBe(1);
+    expect(r.store.recent({ kind: "all" }, { limit: 10 }).map((m) => m.text).sort()).toEqual(["保留 120 天的群", "永不清理的群"]);
+  });
 });
 
 describe("scheduler", () => {
