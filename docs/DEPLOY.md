@@ -240,6 +240,7 @@ docker compose exec cs-agent sh -c 'printf "%s\n" "{\"jsonrpc\":\"2.0\",\"id\":1
 - **降级**：观测库损坏、不可写或初始化失败时降级为无操作存储，`/healthz` 与总览显示 `degraded: true`，消息处理继续；修复后在维护时重启恢复采集。不要据空图表判断没有业务流量。
 - **费用**：`DEEPSEEK_PRICE_IN_PER_M` / `DEEPSEEK_PRICE_OUT_PER_M`（默认 0）填入单价后估算 deepseek 用量费用（经 magpie 的 `deepseek/*` 也计入），不含搜索/抓页费用、不区分缓存优惠。codex 用量看 magpie Usage 页。
 - **告警**：`ALERT_OWNER=false` 默认关闭。开启且有 owner 时，WS 连续离线超过 5 分钟、模型鉴权失败、连续三个回合失败、定时任务连续失败被自动暂停时私聊 owner（共用每 30 分钟一次限频）；发送规则熔断时另发一条通知。告警只带固定原因。
+- **SQLite 浏览**：Compose 的 `datasette` 服务以只读挂载 `./data`，在 `http://127.0.0.1:${DATASETTE_PORT:-8001}/` 浏览六个库、跑只读 SQL（单条 5 秒、最多 1000 行）。无登录，只绑回环，不要改成局域网地址：库里有全部聊天记录与长期对话。官方镜像的 SQLite 3.34 读不了 pi-durable 的 STRICT 表，`docker/datasette.Dockerfile` 补装 `pysqlite3-binary`。`agent.sqlite`、`pi.sqlite` 的文档按基础版本 + 增量保存，这里只能看到原始 JSON。不需要时 `docker compose stop datasette`。
 - **上下文占用**：启动时在面板开放前回填（codex 倒读 rollout 末尾至多 2 MiB 取最近 `token_count`；pi 从 harness 历史恢复）。codex 窗口来自模型目录的 `context_window`（`codex/gpt-6.1-sol` 为 500,000），失败回退 `CODEX_CONTEXT_WINDOW`（400,000），日志 `codex context window` 标明来源。重置或轮换后归零。
 
 ## 12. 残余风险

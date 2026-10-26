@@ -61,3 +61,18 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
+
+  datasette:
+    # 只读浏览各 SQLite 库；无登录，只绑本机。pi-durable 的文档存为基础版本 + 增量，这里只能看到原始 JSON。
+    build: { context: ., dockerfile: docker/datasette.Dockerfile }
+    image: cs-datasette:0.65.1
+    container_name: datasette
+    restart: unless-stopped
+    ports: ["127.0.0.1:${DATASETTE_PORT:-8001}:8001"]
+    volumes:
+      - ./data:/data:ro
+    command: >-
+      datasette serve -h 0.0.0.0 -p 8001
+      /data/observability.sqlite /data/qq-messages.sqlite /data/qq-bridge.sqlite
+      /data/memory.sqlite /data/agent.sqlite /data/pi.sqlite
+      --setting sql_time_limit_ms 5000 --setting max_returned_rows 1000
