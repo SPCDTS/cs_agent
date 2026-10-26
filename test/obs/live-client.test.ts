@@ -1,6 +1,7 @@
 import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { ASSETS } from '../../src/obs/ui/client.js';
+import { THEME_CSS } from '../../src/obs/ui/theme.js';
 
 /** 足够 live.js 运行的最小 DOM：元素树、textContent、dataset、简单选择器。 */
 class El {
@@ -101,6 +102,21 @@ describe('live.js 客户端渲染（每会话一行）', () => {
     expect(feed.children).toHaveLength(1);
     expect(feed.textContent).toContain('新回合');
     expect(row()!.querySelector('.conv-foot')!.querySelector('A')!.href).toBe('/turns/pi%3A7%3A2');
+  });
+
+  it('快照替换服务端渲染的会话行，不留下重复行', () => {
+    const { ids, emit } = boot();
+    const ssr = new El('ARTICLE'); ssr.className = 'slip conv'; ssr.dataset.thread = 'group:7'; ids.convs!.append(ssr);
+    emit('snapshot', { now: Date.now(), count: 1 });
+    expect(ids.convs!.children).toHaveLength(0);
+    emit('snapconversation', { conversation: { ...conv(), turn: { ...turn(), items: [] } } });
+    emit('snapshot_end', { count: 1 });
+    expect(ids.convs!.querySelectorAll('[data-thread="group:7"]')).toHaveLength(1);
+    expect(ids.convs!.children[0]).not.toBe(ssr);
+  });
+
+  it('空闲行用 hidden 收起的元素（.pill、.conv-foot）自带 display，主题需让 [hidden] 优先', () => {
+    expect(THEME_CSS).toContain('[hidden]{display:none!important}');
   });
 
   it('页头与数字随更新刷新：会话名（群名）、后端、回合种类与发送者、本轮输入、已发消息、子 agent、排队；空闲时收起回合部分', () => {

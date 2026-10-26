@@ -28,6 +28,7 @@ export const THEME_CSS = String.raw`
   --shadow:0 1px 0 rgba(0,0,0,.4),0 8px 22px -12px rgba(0,0,0,.7);
 }}
 *,*::before,*::after{box-sizing:border-box}
+[hidden]{display:none!important}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--paper);color:var(--ink);font:400 var(--t-md)/1.65 var(--font);font-feature-settings:"tnum" 1;}
 a{color:var(--carbon);text-decoration-thickness:1px;text-underline-offset:3px}
@@ -274,7 +275,6 @@ ${Array.from({ length: 101 }, (_, i) => `.ctx-fill[data-w="${i}"]{width:${i}%}.c
 .cu-group.is-active{box-shadow:0 0 0 2px var(--carbon);background:var(--carbon-soft)}
 .cu-pane{margin-top:var(--s3)}
 .cu-pop{padding:var(--s3) var(--s4);background:var(--sheet-2);border:1px solid var(--rule);border-left:3px solid var(--carbon);border-radius:var(--r-md)}
-.cu-pop[hidden]{display:none}
 .cu-pop-head{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1) var(--s3);font-size:var(--t-sm);margin-bottom:var(--s2)}
 .cu-pop-head .cu-close{margin-left:auto;padding:2px 10px;font-size:var(--t-xs)}
 .cu-pop .said{font-size:var(--t-sm);padding:var(--s2) var(--s3);margin-bottom:var(--s2)}

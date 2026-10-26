@@ -180,8 +180,8 @@ function tick(){for(const e of document.querySelectorAll('[data-since]'))e.textC
 setInterval(tick,1000);
 function connect(){
   const es=new EventSource('/live/stream');
-  // 快照分帧：snapshot（清空）→ 每个会话一帧 snapconversation（带当前回合事件流）→ snapshot_end；随后是 conversation / remove 增量。
-  es.addEventListener('snapshot',e=>{const m=JSON.parse(e.data);skew=m.now-Date.now();convs.clear();for(const n of nodes.values())n.remove();nodes.clear();tidy();});
+  // 快照分帧：snapshot（清空，含服务端渲染的行）→ 每个会话一帧 snapconversation（带当前回合事件流）→ snapshot_end；随后是 conversation / remove 增量。
+  es.addEventListener('snapshot',e=>{const m=JSON.parse(e.data);skew=m.now-Date.now();convs.clear();list.replaceChildren();nodes.clear();tidy();});
   es.addEventListener('snapconversation',e=>{const c=JSON.parse(e.data).conversation;convs.set(c.thread,c);place(c,false);});
   es.addEventListener('snapshot_end',()=>{conn.className='conn on';conn.textContent='实时连接中';tidy();tick();});
   es.addEventListener('conversation',e=>{const m=JSON.parse(e.data), c=m.conversation, prev=convs.get(c.thread);
