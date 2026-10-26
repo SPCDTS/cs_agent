@@ -18,7 +18,8 @@ import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { applyEnvAliases, requireProviderApiKey, type Config } from "./config.js";
 import { loadAgentConfig as loadConfig } from "./agent/config.js";
-import { log, setLogLevel } from "./shared/log.js";
+import { log, logBuffer, setLogLevel } from "./shared/log.js";
+import { createLogFileSink } from "./shared/log-file.js";
 import { findUnwritable, processIdentity } from "./fs-check.js";
 import { createQQBridge } from "./qq/index.js";
 import { GrantsService } from "./agent/grants.js";
@@ -55,17 +56,24 @@ import { ContextStore } from "./context/store.js";
 import { SettingsStore, settingsDefaults } from "./agent/settings.js";
 import { msUntilNextRun, startAgingScheduler } from "./context/aging.js";
 
+let closeLogs = async () => {};
+
 async function main(): Promise<void> {
   // DEEPSEEK_APIKEY 等别名 → pi-ai 读取的标准变量名（须在创建 models 之前）
   applyEnvAliases(process.env);
   const cfg = loadConfig();
   requireProviderApiKey(cfg.AGENT_MODEL_PROVIDER);
   setLogLevel(cfg.LOG_LEVEL);
+  const fileLog = createLogFileSink(path.join(cfg.DATA_DIR, "logs", "cs-agent.jsonl"));
+  const unsubscribeLog = logBuffer.subscribe(fileLog.write);
+  closeLogs = () => { unsubscribeLog(); return fileLog.close(); };
   try { cfg.OBS_TOKEN = await loadObsToken(cfg.DATA_DIR, cfg.OBS_TOKEN, message => log.info(message)); }
   catch { log.warn("observability token unavailable; dashboard access disabled"); }
   registerSecrets([cfg.OBS_TOKEN, cfg.NAPCAT_TOKEN, cfg.CODEX_MAGPIE_KEY]);
   const ctx = BACKGROUND_CONTEXT;
   log.info("starting cs-agent", {
+    commit: process.env.CS_AGENT_COMMIT || "unknown",
+    built_at: process.env.CS_AGENT_BUILT_AT || "",
     provider: cfg.AGENT_MODEL_PROVIDER,
     model: cfg.AGENT_MODEL_ID,
     data_dir: cfg.DATA_DIR,
@@ -84,6 +92,7 @@ async function main(): Promise<void> {
         hint: "fix ownership/permissions of the mounted volume on the host (container runs as the node user)",
       });
     }
+    await closeLogs();
     process.exit(1);
   }
 
@@ -479,13 +488,15 @@ async function main(): Promise<void> {
     await metrics.stop().catch(() => undefined);
     trace.attach(undefined);
     obs.close();
+    await closeLogs();
     process.exit(0);
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   log.error("fatal", { error: err instanceof Error ? (err.stack ?? err.message) : String(err) });
+  await closeLogs();
   process.exit(1);
 });

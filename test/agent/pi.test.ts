@@ -359,6 +359,22 @@ describe("pi 会话隔离与映射", () => {
 });
 
 describe("pi system 提示热更新", () => {
+  it("只有 owner 线程包含固定自查指引，群中主人回合也不注入", async () => {
+    const seen: TranscriptContext[] = [];
+    const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
+    const r = await rig([inspect, inspect, inspect, inspect]);
+    await turn(r, "1", "自查", null);
+    await turn(r, "1", "再查", null);
+    await turn(r, "1", "群里", "7");
+    await turn(r, "5", "私聊", null);
+    const owner = systemOf(seen[0]!);
+    for (const text of ["排查自身问题时先看证据", "/app/source", "COMMIT", path.join(r.dir, "logs", "cs-agent.jsonl"),
+      path.join(r.dir, "observability.sqlite"), "node:sqlite", "readOnly: true", "/app/source/src/obs/schema.ts"]) expect(owner).toContain(text);
+    expect(systemOf(seen[1]!)).toBe(owner);
+    for (const transcript of seen.slice(2)) expect(systemOf(transcript)).not.toContain("排查自身问题时先看证据");
+    const id = String((await r.pi.readThreadIds()).owner);
+    expect((await r.pi.sessionSource.entries(id, undefined, 256)).items.filter(e => e.kind === "pi.system")).toHaveLength(1);
+  });
   it("项目指引通过配置的工作区注入 system，热更新且不重复写入相同 system 条目", async () => {
     const dir = tmp("cs-pi-project-");
     const workspaceDir = path.join(dir, "workspace");

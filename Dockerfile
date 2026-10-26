@@ -57,6 +57,17 @@ COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 COPY --from=build /app/dist ./dist
 
+# 部署源码与编译产物来自同一构建上下文，node 只能读取。
+ARG GIT_COMMIT=unknown
+ARG BUILD_TIME=
+ENV CS_AGENT_COMMIT=${GIT_COMMIT} CS_AGENT_BUILT_AT=${BUILD_TIME}
+COPY src /app/source/src
+COPY test /app/source/test
+COPY docs /app/source/docs
+COPY package.json tsconfig.json /app/source/
+RUN printf 'commit=%s\nbuilt_at=%s\n' "$GIT_COMMIT" "$BUILD_TIME" > /app/source/COMMIT \
+ && chown -R root:root /app/source && chmod -R a+rX,go-w /app/source
+
 USER node
 # 确认非 root 用户可执行系统 bwrap；命名空间实测需运行容器时使用 compose 的 seccomp profile。
 RUN test -x /usr/bin/bwrap && /usr/bin/bwrap --version

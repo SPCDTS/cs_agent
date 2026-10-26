@@ -191,7 +191,7 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
   [permissions.filesystem]
   deny_read = ["/data/codex/auth.json", "/data/codex/.credentials.json", "/data/codex/sessions", "/data/codex/archived_sessions",
     "/data/codex/history.jsonl", "/data/codex/log", "/data/codex/trace", "/data/codex/shell_snapshots", "/data/codex/memories",
-    "/data/codex/*.sqlite*", "/data/*.sqlite*", "/data/obs-token", "/data/obs-token.*.tmp", "/data/images", "/data/files",
+    "/data/codex/*.sqlite*", "/data/*.sqlite*", "/data/logs", "/data/obs-token", "/data/obs-token.*.tmp", "/data/images", "/data/files",
     "/data/media", "/data/incoming", "/data/tickets", "/data/codex-session.json*", "/data/codex-threads.json"]
   ```
 
@@ -255,7 +255,12 @@ npm run typecheck
 npm test                  # 快速单元组（日常改动跑这个，约 1 分钟）
 npm run test:integration  # 集成组：entrypoint、NapCat 配置、bwrap、MCP stdio 冒烟（globalSetup 先 npm run build）
 npm run test:all          # 全部（合并前跑；等同 npx vitest run）
-docker build -t cs-agent:dev .
+```
+
+镜像构建命令在 Bash / WSL 执行，写入实际提交与 UTC 构建时间；Compose 构建从同名环境变量 `GIT_COMMIT` / `BUILD_TIME` 取值，未设置时分别为 `unknown` / 空。
+
+```bash
+docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) --build-arg BUILD_TIME=$(date -u +%FT%TZ) -t cs-agent:dev .
 docker compose config
 ```
 

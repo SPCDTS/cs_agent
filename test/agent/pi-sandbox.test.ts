@@ -14,7 +14,7 @@ describe("受管 deny_read", () => {
     const managed = script.match(/\[permissions\.filesystem\]\r?\ndeny_read\s*=\s*\[[\s\S]*?\r?\n\]/)?.[0];
     expect(managed).toBeDefined();
     const rules = parseDenyRead(managed!.replaceAll("$C", "/fixture-data/codex").replaceAll("$D", "/fixture-data"));
-    for (const file of ["/fixture-data/*.sqlite*", "/fixture-data/codex/*.sqlite*", "/fixture-data/obs-token", "/fixture-data/media", "/fixture-data/codex/trace"]) {
+    for (const file of ["/fixture-data/logs", "/fixture-data/*.sqlite*", "/fixture-data/codex/*.sqlite*", "/fixture-data/obs-token", "/fixture-data/media", "/fixture-data/codex/trace"]) {
       expect(rules).toContain(path.normalize(file));
     }
   });
@@ -55,6 +55,60 @@ describe("受管 deny_read", () => {
 });
 
 describe("Pi 文件策略", () => {
+  it.each(["owner", "group:7", "private:5"])("%s 的读例外同时作用于路径检查与 bwrap，不能扩大写权限", async key => {
+    const { dir, env, requirementsFile } = await sandboxFixture(key);
+    const readable = ["observability.sqlite", "observability.sqlite-wal", "observability.sqlite-shm", "logs/cs-agent.jsonl", "logs/cs-agent.jsonl.1", "logs/nested/old"];
+    const protectedFiles = ["pi.sqlite", "pi.sqlite-wal", "agent.sqlite", "qq-messages.sqlite", "obs-token", "codex/auth.json", "media/private", "observability.sqlite.bak", "logs-private/a"];
+    const files = await Promise.all([...readable, ...protectedFiles].map(file => put(path.join(dir, file))));
+    // logs 的近似名称本来不在全局禁读里，另加一条来证明例外不会按字符串前缀扩张。
+    await fs.writeFile(requirementsFile, (await fs.readFile(requirementsFile, "utf8")).replace("deny_read = [", "deny_read = [" + JSON.stringify(path.join(dir, "logs-private")) + ","), "utf8");
+    const deny = await env.policy.deny();
+    const args = bwrapArgs(env.cwd, env.policy.workRoot, deny.paths, "true");
+    for (const [i, file] of files.entries()) {
+      if (key === "owner" && i < readable.length) await expect(env.policy.check(file, "read", deny)).resolves.toBe(file);
+      else await expect(env.policy.check(file, "read", deny)).rejects.toThrow("拒绝");
+      await expect(env.policy.check(file, "write", deny)).rejects.toThrow("拒绝");
+    }
+    for (const file of ["observability.sqlite", "observability.sqlite-wal", "observability.sqlite-shm", "logs"]) {
+      expect(args.includes(path.join(dir, file)), file).toBe(key !== "owner");
+    }
+    for (const file of ["pi.sqlite", "pi.sqlite-wal", "agent.sqlite", "qq-messages.sqlite", "obs-token", "codex/auth.json", "media", "observability.sqlite.bak", "logs-private"]) {
+      expect(args, file).toContain(path.join(dir, file));
+    }
+    // 文件还未出现时，glob 检查同样遵守例外。
+    const future = path.join(dir, "logs", "future.jsonl");
+    if (key === "owner") await expect(env.policy.check(future, "read")).resolves.toBe(future);
+    else await expect(env.policy.check(future, "read")).rejects.toThrow("拒绝");
+    await expect(env.policy.check(path.join(dir, "new.sqlite"), "read")).rejects.toThrow("拒绝");
+  });
+  it("观测库例外仅限文件，不能放出同名目录的内容", async () => {
+    const { dir, env } = await sandboxFixture("owner");
+    const root = path.join(dir, "observability.sqlite"), file = await put(path.join(root, "private"));
+    const deny = await env.policy.deny();
+    await expect(env.policy.check(file, "read", deny)).rejects.toThrow("拒绝");
+    expect(bwrapArgs(env.cwd, env.policy.workRoot, deny.paths, "true")).toContain(root);
+  });
+  it("owner 线程回落到私聊基础权限时仍拒绝日志与观测库", async () => {
+    const { dir, options } = await sandboxFixture("owner");
+    const env = await codingEnvironment({ ...options, request: { access: "private:1", inputs: [] } });
+    for (const name of ["observability.sqlite", "logs/cs-agent.jsonl"]) {
+      await expect(env.policy.check(await put(path.join(dir, name)), "read")).rejects.toThrow("拒绝");
+    }
+  });
+  it("日志例外不能经链接读取凭据，DATA_DIR 本身的链接仍可正常自查", async () => {
+    const { dir, options, env } = await sandboxFixture("owner");
+    const secret = await put(path.join(dir, "codex", "auth.json"));
+    const logs = path.join(dir, "logs");
+    await fs.symlink(path.dirname(secret), logs, process.platform === "win32" ? "junction" : "dir");
+    await expect(env.policy.check(path.join(logs, "auth.json"), "read")).rejects.toThrow("拒绝");
+    expect(bwrapArgs(env.cwd, env.policy.workRoot, (await env.policy.deny()).paths, "true")).toContain(path.dirname(secret));
+    const alias = path.join(dir, "alias");
+    await fs.symlink(dir, alias, process.platform === "win32" ? "junction" : "dir");
+    const linked = await codingEnvironment({ ...options, dataDir: alias });
+    const db = await put(path.join(dir, "observability.sqlite"));
+    await expect(linked.policy.check(path.join(alias, "observability.sqlite"), "read")).resolves.toBe(db);
+    expect(bwrapArgs(linked.cwd, linked.policy.workRoot, (await linked.policy.deny()).paths, "true")).not.toContain(db);
+  });
   it("技能目录对任何发送者都只读（写技能走 skill_publish）", async () => {
     const { dir, options } = await sandboxFixture();
     const file = path.join(dir, "skills", "hello", "SKILL.md");

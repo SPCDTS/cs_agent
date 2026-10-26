@@ -5,5 +5,3 @@ workspace
 .git
 .env
 *.log
-test
-docs

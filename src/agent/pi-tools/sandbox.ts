@@ -109,7 +109,7 @@ async function globPaths(pattern: string): Promise<string[]> {
 }
 
 /** 每次调用重读、重新展开；配置丢失及展开失败均不能复用旧权限。 */
-export async function loadDenyRead(requirementsFile = process.env.CODEX_REQUIREMENTS_FILE || REQUIREMENTS): Promise<DenyRead> {
+export async function loadDenyRead(requirementsFile = process.env.CODEX_REQUIREMENTS_FILE || REQUIREMENTS, readExceptions: readonly DeniedPath[] = []): Promise<DenyRead> {
   const patterns = parseDenyRead(new TextDecoder("utf-8", { fatal: true }).decode(await fs.readFile(requirementsFile)));
   // DATA_DIR 等前缀可能是符号链接；保留原模式，并补上规范路径的模式，覆盖之后新建的目标。
   for (const pattern of [...patterns]) {
@@ -121,10 +121,14 @@ export async function loadDenyRead(requirementsFile = process.env.CODEX_REQUIREM
     }
   }
   const unique = [...new Set(patterns)];
-  return { patterns: unique, paths: await expandDenyRead(unique) };
+  return { patterns: unique, paths: await expandDenyRead(unique, readExceptions) };
 }
 
-export async function expandDenyRead(patterns: readonly string[]): Promise<DeniedPath[]> {
+function isReadException(file: string, exceptions: readonly DeniedPath[], directory = false): boolean {
+  return exceptions.some(item => item.directory ? within(item.path, file) : !directory && path.relative(item.path, file) === "");
+}
+
+export async function expandDenyRead(patterns: readonly string[], readExceptions: readonly DeniedPath[] = []): Promise<DeniedPath[]> {
   const found = new Map<string, DeniedPath>();
   for (const pattern of patterns) {
     const candidates = /[*?]/.test(pattern) ? await globPaths(pattern) : [pattern];
@@ -132,6 +136,8 @@ export async function expandDenyRead(patterns: readonly string[]): Promise<Denie
       try {
         const canonical = await fs.realpath(file);
         const stat = await fs.stat(canonical);
+        // 词法路径和真实目标都须属于例外；logs 的链接不能放出其他受保护目录。
+        if (isReadException(file, readExceptions, stat.isDirectory()) && isReadException(canonical, readExceptions, stat.isDirectory())) continue;
         found.set(canonical, { path: canonical, directory: stat.isDirectory() });
       } catch (error) {
         // 尚未创建的受管文件仍由 patterns 拒绝；只忽略不存在，不能忽略 EACCES 等展开错误。
@@ -143,16 +149,17 @@ export async function expandDenyRead(patterns: readonly string[]): Promise<Denie
     .filter((item, index, all) => !all.slice(0, index).some(parent => parent.directory && within(parent.path, item.path)));
 }
 
-function matchesDeny(file: string, deny: DenyRead): boolean {
+function matchesDeny(file: string, deny: DenyRead, readExceptions: readonly DeniedPath[] = []): boolean {
   if (deny.paths.some(item => within(item.path, file))) return true;
   // 匹配每级父路径，使 *.sqlite* 命中目录时其子文件也被拒绝；新建文件也不会漏掉。
   for (let current = file; ; current = path.dirname(current)) {
-    if (deny.patterns.some(pattern => globMatch(current, pattern))) return true;
+    if (deny.patterns.some(pattern => globMatch(current, pattern)) &&
+        !(isReadException(file, readExceptions) && isReadException(current, readExceptions))) return true;
     if (path.dirname(current) === current) return false;
   }
 }
 
-interface PiDenyRead extends DenyRead { workspaceRoots: string[] }
+interface PiDenyRead extends DenyRead { workspaceRoots: string[]; readExceptions: DeniedPath[] }
 
 export interface PiSandboxOptions {
   dataDir: string;
@@ -201,9 +208,13 @@ export class PiPathPolicy {
     if (workspaceRoots.some(root => root === path.parse(root).root || dataRoots.some(dir => within(root, dir)))) {
       throw new Error("pi 沙箱 WORKSPACE_DIR 不能是根目录或包含 DATA_DIR");
     }
-    const deny = await loadDenyRead(this.options.requirementsFile);
+    const readExceptions: DeniedPath[] = this.access.kind === "all" ? dataRoots.flatMap(root => [
+      ...["observability.sqlite", "observability.sqlite-wal", "observability.sqlite-shm"].map(file => ({ path: path.join(root, file), directory: false })),
+      { path: path.join(root, "logs"), directory: true },
+    ]) : [];
+    const deny = await loadDenyRead(this.options.requirementsFile, readExceptions);
     const extra = [path.resolve(dataDir, "pi.sqlite*"), path.resolve(dataDir, "pi-threads*"), ...workspaceRoots];
-    return { workspaceRoots, patterns: [...deny.patterns, ...extra], paths: [...deny.paths, ...await expandDenyRead(extra)] };
+    return { workspaceRoots, readExceptions, patterns: [...deny.patterns, ...extra], paths: [...deny.paths, ...await expandDenyRead(extra, readExceptions)] };
   }
 
   async check(file: string, mode: "read" | "write", deny?: PiDenyRead): Promise<string> {
@@ -228,7 +239,7 @@ export class PiPathPolicy {
     } else if (!inRoot(this.images) && !this.incoming.some(inRoot)) {
       if (inRoot(this.media)) {
         if (!(await fs.stat(canonical)).isFile() || !this.options.store.mediaPathAllowed(this.access, canonical)) forbidden();
-      } else if (matchesDeny(absolute, deny) || matchesDeny(canonical, deny)) forbidden();
+      } else if (matchesDeny(absolute, deny, deny.readExceptions) || matchesDeny(canonical, deny, deny.readExceptions)) forbidden();
     }
     return canonical;
   }

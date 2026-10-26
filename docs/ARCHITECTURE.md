@@ -212,8 +212,8 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 
 ### 5.5 文件系统权限
 
-- **codex**：命令在 codex 自带的 bwrap 沙箱执行（需 compose 的自定义 seccomp profile）。每个线程的命名权限收窄可写根：owner 线程为 `/workspace/owner`、`/data/prompts`、`/data/codex/skills/shared`；其他会话只有本会话目录；其他会话工作区、`/data/pi-work`、`/data/codex/trace` 不可读。系统级 `/etc/codex/requirements.toml` 的 `deny_read` 禁读凭据、会话、SQLite、图片/附件/媒体目录与面板口令。细节见 [DEPLOY.md](DEPLOY.md)「codex 权限」。
-- **pi**：`PiPathPolicy` 校验 `read/write/edit`，`bash` 在 bwrap 中只把本会话工作区绑定为可写（每条命令一个独立 `/tmp`，不跨命令保留）；禁读沿用 codex 的 `deny_read` 加 pi 自身状态与 codex 工作区。技能目录对任何回合都只读（写技能只走 `skill_publish`，§7）。
+- **codex**：命令在 codex 自带的 bwrap 沙箱执行（需 compose 的自定义 seccomp profile）。每个线程的命名权限收窄可写根：owner 线程为 `/workspace/owner`、`/data/prompts`、`/data/codex/skills/shared`；其他会话只有本会话目录；其他会话工作区、`/data/pi-work`、`/data/codex/trace` 不可读。系统级 `/etc/codex/requirements.toml` 的 `deny_read` 禁读凭据、会话、SQLite、运行日志、图片/附件/媒体目录与面板口令。细节见 [DEPLOY.md](DEPLOY.md)「codex 权限」。
+- **pi**：`PiPathPolicy` 校验 `read/write/edit`，`bash` 在 bwrap 中只把本会话工作区绑定为可写（每条命令一个独立 `/tmp`，不跨命令保留）；禁读沿用 codex 的 `deny_read` 加 pi 自身状态与 codex 工作区。仅 `access.kind = "all"` 的主人回合可只读访问 `DATA_DIR/observability.sqlite`（含 `-wal/-shm`）与 `DATA_DIR/logs/`；路径检查与 bwrap 展开使用同一例外，其余库和凭据仍禁读。观测库用 `node:sqlite` 的 `{ readOnly: true }` 打开，WAL 侧文件须已存在且可读。技能目录对任何回合都只读（写技能只走 `skill_publish`，§7）。
 - `AGENTS.md` 只约束模型行为，不是访问控制。
 
 ## 6. 定时任务（`src/agent/schedule/`）
@@ -267,6 +267,8 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 
 ## 10. 存储
 
+镜像内 `/app/source/` 保存本次构建的源码、测试与文档，只读；`COMMIT` 记录部署提交与构建时间（`CS_AGENT_COMMIT` / `CS_AGENT_BUILT_AT`），启动日志记录同一版本。主人线程的固定系统提示给出自查路径，权限仍逐回合校验。
+
 | 位置 | 内容 |
 |---|---|
 | `data/agent.sqlite` | 宿主 harness：`cs.thread-host*`（会话宿主与输入）、`cs.grants`、`cs.schedules` / `cs.schedule` / `cs.schedule.run` |
@@ -274,6 +276,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 | `data/qq-bridge.sqlite` | `inbound`、`outbox`、`seen_messages`、`send_log` / `send_breakers`；旧版遗留的 `tickets` 表原样留在磁盘上，不再读写 |
 | `data/qq-messages.sqlite` | 消息库（机器人消息带 Outbox 行键 `messages.outbox_key`）、摘要、`scope_names`、媒体引用 |
 | `data/observability.sqlite` | 观测事件（`events.key`：`turn:<id>`、`in:<入站键>`、`thr:<会话键>`；`@` 开头为管理事件）与指标、会话索引、摘要血缘与召回记录（`recall_events.turn_id`），见 [DASHBOARD.md](DASHBOARD.md) §9 |
+| `data/logs/` | `cs-agent.jsonl`：与 stderr 同级别、同脱敏对象的 JSON 行；10 MiB 轮转，保留 `.1`～`.3`，正常退出前排空写入 |
 | `data/codex/`（`CODEX_HOME`） | 受管 `config.toml`、生成的 `AGENTS.md`、`base-instructions/`、sessions、trace、`generated_images/`、`skills/shared`（挂载） |
 | `data/codex-threads.json`、`codex-threads-archive.jsonl` | codex 会话线程映射与重置归档（保留 200 条） |
 | `data/prompts/` | `codex.md`、`agent.md`、`codex-base/<slug>.md`（可编辑提示词） |

@@ -77,6 +77,13 @@ export function createPiExtension(opts: PiToolsOptions) {
   const recall = recallTool(opts.binding, opts.mediaRecall);
   const web = opts.web ?? new DeepSeekWeb();
   const prompt = new PiPromptLoader(opts.dataDir);
+  const ownerWorkspace = path.resolve(opts.dataDir, "pi-work", "owner");
+  const selfInspection = "排查自身问题时先看证据，不要猜：正在运行的源码在 /app/source（只读，COMMIT 为部署提交与构建时间）；运行日志在 " +
+    path.join(opts.dataDir, "logs", "cs-agent.jsonl") + "（JSON 行，含轮转的 .1~.3）；观测库 " + path.join(opts.dataDir, "observability.sqlite") +
+    "（回合、事件、上下文占用、召回记录；表结构见 /app/source/src/obs/schema.ts），用 node:sqlite 只读打开：" +
+    "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(" + JSON.stringify(path.join(opts.dataDir, "observability.sqlite")) +
+    ", { readOnly: true }); try { console.log(db.prepare('SELECT name, type FROM sqlite_schema').all()); } finally { db.close(); }。" +
+    "WAL 模式需已有且可读的 -wal/-shm；打开失败先重试，仍失败改查日志，待运维提供一致性备份后在工作区查询，勿对正在写入的库用 immutable=1 或直接复制。日志和观测库只在主人私聊的主人回合可读。";
   const projectContext = new ProjectContextLoader(opts);
   const skills = opts.skillsDir === "off" ? undefined : new SkillsLoader({ dir: opts.skillsDir || path.join(opts.dataDir, "skills") });
   const history = (name: string, description: string, parameters: ReturnType<typeof Type.Object>) => defineTool({
@@ -99,7 +106,9 @@ export function createPiExtension(opts: PiToolsOptions) {
   return defineExtension({
     name: "cs-pi",
     sections: [
-      section("cs-pi", async () => SEND_RULE + "\n" + QQ_LINK_RULE + "\n" + PI_WORKSPACE_RULE + "\n" + PI_SUBAGENT_RULE + "\n\n" + await prompt.read(), { tag: false }),
+      // cwd 固定于会话；不能按本轮 access 切换系统文本，避免破坏 prompt 缓存。
+      section("cs-pi", async input => SEND_RULE + "\n" + QQ_LINK_RULE + "\n" + PI_WORKSPACE_RULE + "\n" + PI_SUBAGENT_RULE +
+        (input.env?.cwd && path.relative(ownerWorkspace, input.env.cwd) === "" ? "\n" + selfInspection : "") + "\n\n" + await prompt.read(), { tag: false }),
       section("project-context", input => projectContext.render(input.env?.cwd), { tag: false }),
       section("skills", () => skills?.render(), { tag: false }),
     ],

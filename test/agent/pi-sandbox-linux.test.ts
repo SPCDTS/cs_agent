@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createServer } from "node:http";
@@ -20,7 +21,7 @@ describe.runIf(process.platform === "linux")("真实 bwrap（请以容器 node �
       const script = `const fs = require('node:fs'); try { fs.writeFileSync(${JSON.stringify(file)}, 'owner'); } catch { process.exit(3); }`;
       expect(await env.exec([process.execPath, "-e", script], undefined, context)).toMatchObject({ ok: true, value: { exitCode: 3 } });
     }
-    expect(await fs.readFile(file, "utf8")).toBe("owner");
+    expect(await fs.readFile(file, "utf8")).toBe("初始内容");
   });
   async function fixture() {
     // 不放 /tmp：该目录整体被 tmpfs 覆盖，会掩盖 deny_read 挂载本身的错误。
@@ -30,6 +31,37 @@ describe.runIf(process.platform === "linux")("真实 bwrap（请以容器 node �
     cleanup.push(() => s.env.cleanup(context));
     return s;
   }
+
+  it("主人在只读挂载中查询持续写入的 WAL 库与日志，其他会话仍被遮蔽且任何回合都不能写", async () => {
+    const { dir, options } = await fixture();
+    const file = path.join(dir, "observability.sqlite"), log = await put(path.join(dir, "logs", "cs-agent.jsonl"), "log-evidence");
+    const writer = new DatabaseSync(file);
+    try {
+      writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE evidence (n INTEGER); INSERT INTO evidence VALUES (1)");
+      await fs.access(file + "-wal"); await fs.access(file + "-shm");
+      const owner = await codingEnvironment({ ...options, key: "owner", request: { access: "all", inputs: [] } });
+      cleanup.push(() => owner.cleanup(context));
+      for (const n of [1, 2]) {
+        if (n === 2) writer.exec("INSERT INTO evidence VALUES (2)");
+        let output = "";
+        const script = "const fs = require('node:fs'); const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(" + JSON.stringify(file) + ", { readOnly: true }); " +
+          "const writable = p => { try { fs.appendFileSync(p, 'bad'); return true; } catch { return false; } }; " +
+          "console.log(JSON.stringify({ count: db.prepare('SELECT count(*) AS n FROM evidence').get().n, log: fs.readFileSync(" + JSON.stringify(log) + ", 'utf8'), writable: " +
+          JSON.stringify([file, file + "-wal", file + "-shm", log]) + ".map(writable) })); db.close();";
+        expect(await owner.exec([process.execPath, "-e", script], { onOutput: text => { output += text; } }, context), output).toMatchObject({ ok: true, value: { exitCode: 0 } });
+        expect(JSON.parse(output.trim())).toEqual({ count: n, log: "log-evidence", writable: [false, false, false, false] });
+      }
+      for (const key of ["group:7", "private:5"]) {
+        const env = await codingEnvironment({ ...options, key, request: { access: key, inputs: [] } });
+        cleanup.push(() => env.cleanup(context));
+        let output = "";
+        const script = "const fs = require('node:fs'); const read = p => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } }; console.log(JSON.stringify(" +
+          JSON.stringify([file, file + "-wal", file + "-shm", log]) + ".map(read)));";
+        expect(await env.exec([process.execPath, "-e", script], { onOutput: text => { output += text; } }, context), output).toMatchObject({ ok: true, value: { exitCode: 0 } });
+        expect(JSON.parse(output.trim())).toEqual(["", "", "", ""]);
+      }
+    } finally { writer.close(); }
+  });
 
   it("遮蔽库/令牌/其他会话；仅工作区和临时 /tmp 可写，proc 为新 PID 空间", async () => {
     expect(process.getuid!(), "必须以非 root 用户验证与生产一致的 user namespace 行为").not.toBe(0);

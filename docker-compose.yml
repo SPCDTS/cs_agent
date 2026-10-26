@@ -1,7 +1,11 @@
 services:
   cs-agent:
     depends_on: [napcat]
-    build: .
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-}
     image: cs-agent:dev
     container_name: cs-agent
     env_file:

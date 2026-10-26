@@ -301,6 +301,7 @@ deny_read = [
   "$C/memories",
   "$C/*.sqlite*",
   "$D/*.sqlite*",
+  "$D/logs",
   "$D/obs-token",
   "$D/obs-token.*.tmp",
   "$D/images",
