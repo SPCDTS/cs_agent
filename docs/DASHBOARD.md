@@ -20,12 +20,12 @@
 |---|---|---|
 | `/` 总览 | 依赖信号灯、1h / 24h 回合吞吐（结束 / 失败或中断 / 开轮输入，按 `in:` 键去重）、并发与排队、工作中会话数、全部线程的迷你占用条、当前设置、最近一分钟指标 | — |
 | `/live` | 每个会话一行（§3），SSE 推送 | `POST /thread/stop` |
-| `/turns` | 回合列表（`turn:<id>` 的聚合），按状态（进行中 / 已完成 / 失败 / 中断）、会话键、种类（用户消息 / 定时任务 / 唤醒）、后端筛选，每页 50 | — |
+| `/turns` | 聊天视图：左侧有回合的会话（最近活动在前），右侧选中会话的聊天记录（`?thread=`，缺省最近活动的会话）。收到的输入（用户消息、定时任务，定时任务另标）在左，本轮 `send_message` 在右，按回合成组、最新在下；每组的状态、设置、耗时、请求 / 工具 / 发送计数折叠在气泡之间，展开时读 `/turns/:id?part=1`（回合详情正文片段）。每页 50 个回合，顶部"加载更早"取 `?page=n&part=1` 片段插到上方 | — |
 | `/turns/<回合 id>` | 回合详情：印章与元数据（会话、种类、发送者、后端、设置快照、耗时、原因）→ 输入 → 发送 → 工具调用 → 子 agent 活动 → 错误 → 分页时间线；最后一个模型回合行按请求列缓存命中（§5）；进行中显示排队数、子 agent 数与停止按钮 | `POST /thread/stop` |
 | `/inputs/<入站键>` | 一条输入的流转：收到 → 入队 → 开轮设置 → 送达所在回合（链到回合页）；改造前以入站键本身为键的旧事件也在这里显示 | — |
 | `/conversations/<会话键>` | 当前状态（空闲 / 工作中、当前回合、排队输入、在跑子 agent、占用条、停止）与最近回合（分页） | `POST /thread/stop` |
 | `/tickets`、`/tickets/<键>` | 旧地址，301：列表 → `/turns`；`turn:<id>` → 回合页，`in:<键>` 与旧版入站键 → 输入页，`thr:<会话键>` → 会话页；`@` 系统键 404 | — |
-| `/agents` | 顶部"拓扑"：每个会话 → 主 agent → 它派出的子 agent（状态、任务、最近一个动作、结果与"查看过程"链接，空闲且没有子 agent 的会话折成一行；页面可见时每 3 秒取 `/agents/topology` 片段刷新）；下方 Codex / Pi 两张卡：活动 / 归档会话数、索引进度、每条线程的占用条与"监控"链接 | `POST /{codex,pi}/{reset,compact}`、`POST /thread/stop` |
+| `/agents` | 顶部"拓扑"概览：每个会话一张卡，主 agent 一行（会话、后端、状态），未结束的子 agent 是小节点，已结束的合成一个计数（完成 / 失败 / 停止）；空闲且没有子 agent 的会话折成一行。页面可见时每 3 秒取 `/agents/topology` 概览片段刷新（不读会话正文）；展开一张卡时才读 `/agents/topology/:thread`（主 agent 最近动作，以及全部子 agent 的任务、最近动作、结果与"查看过程"链接），已展开的卡在刷新后保持展开；下方 Codex / Pi 两张卡：活动 / 归档会话数、索引进度、每条线程的占用条与"监控"链接 | `POST /{codex,pi}/{reset,compact}`、`POST /thread/stop` |
 | `/agents/<后端>/sessions[/…]` | 会话 → 回合浏览与上下文分析（§6、§7）；`/codex`、`/pi` 303 到对应会话列表 | — |
 | `/context-usage` | 上下文监控（§5） | — |
 | `/memory[/…]` | 记忆：总览、时间线、摘要、检索检查器、召回记录、图片、归档（§8） | — |
@@ -122,7 +122,7 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 | `/agents/<后端>/sessions/<id>/turns/<回合>` | 输入 → 模型请求（可多次，带实测 usage）→ 工具调用（参数 / 结果折叠，按 call_id 配对）→ 助手文本 → 送达；"记忆调用"区（§8.2） |
 | `/agents/<后端>/sessions/<id>/context?at=&phase=` | 上下文结构分析（§7） |
 | `/agents/<后端>/sessions/<id>/content?offset=&length=&page=` | 大正文全文页，每页 256 KiB；codex 另支持 `?bundle=&payload=&select=` 读官方 trace 正文 |
-| `/api/agents/topology` | 拓扑 JSON：会话列表与主 agent 状态取会话宿主；子 agent 由后端给出（pi 读子 agent 登记，codex 记 app-server 的 `subAgentActivity` 与 `spawnAgent` 条目，随进程不持久化）；最近动作取各自会话最后一个回合里最后一个可描述的块；整体按会话正文规则脱敏 |
+| `/api/agents/topology` | 拓扑 JSON：会话列表与主 agent 状态取会话宿主；子 agent 由后端给出（pi 读子 agent 登记，codex 记 app-server 的 `subAgentActivity` 与 `spawnAgent` 条目，随进程不持久化）；最近动作取各自会话最后一个回合里最后一个可描述的块；整体按会话正文规则脱敏。`?brief=1` 不读正文、不带任务与结果；`?thread=<会话键>` 只返回该会话（没有时 404） |
 
 子 agent 的会话在会话列表里标为"父会话 › 名称"并跟随父会话的会话域与活动状态（活动父会话的子 agent 可实时订阅）：pi 按子 agent 登记，codex 按 rollout `session_meta.source.subagent.thread_spawn.parent_thread_id`。
 

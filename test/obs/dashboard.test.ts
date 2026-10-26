@@ -105,7 +105,7 @@ describe('面板二期页面', () => {
     for (const [url, marks] of Object.entries({
       '/': ['运行总览', '依赖状态', 'class="lamps"', '并发槽位', '工作中 1 个会话 · 排队输入 0 条 · <a href="/live">'],
       '/live': ['实时会话', 'id="convs"', 'src="/assets/live.js"', 'data-thread="group:7"', '群 7', '在途消息', 'action="/thread/stop"', 'name="return" value="/live"'],
-      '/turns': ['回合列表', 'name="status"', 'name="thread"', 'name="kind"', 'href="/turns/pi%3A7%3A1"'],
+      '/turns': ['回合', 'class="chat-layout"', 'href="/turns?thread=group%3A7" aria-current="page"', '在途消息', 'href="/turns/pi%3A7%3A1"', 'src="/assets/chat.js"'],
       '/turns/pi%3A7%3A1': ['回合详情', '在途消息', '小明', 'href="/conversations/group%3A7"', '时间线'],
       '/conversations/group%3A7': ['群 7', '最近回合', 'href="/turns/pi%3A7%3A1"', 'action="/thread/stop"'],
       '/logs': ['实时日志', 'src="/assets/logs.js"'],
@@ -204,9 +204,57 @@ describe('面板二期页面', () => {
     const conv = await (await r.get('/conversations/group%3A7')).text();
     expect(conv).toContain('href="/turns/pi%3A7%3A9"'); expect(conv).toContain('已完成'); expect(conv).not.toContain('action="/thread/stop"');
     expect(r.live.snapshot().find(c => c.thread === 'group:7')).toMatchObject({ state: 'idle', turn: null, recent: [expect.objectContaining({ id: 'pi:7:9', outcome: 'completed' })] });
-    const list = await (await r.get('/turns?thread=group%3A7&status=completed')).text();
-    expect(list).toContain('href="/turns/pi%3A7%3A9"');
-    expect(await (await r.get('/turns?status=failed')).text()).toContain('没有符合条件的回合');
+    // 聊天视图：输入（含插话）在左、发送在右，回合详情折叠在两者之间，展开时读 part=1 片段。
+    const chat = await (await r.get('/turns?thread=group%3A7')).text();
+    const turn = chat.slice(chat.indexOf('id="turn-pi:7:9"'));
+    expect(turn).toMatch(/class="bubble in"><div class="b-who"><b>小明<\/b>[^]*帮我查天气/);
+    expect(turn.indexOf('帮我查天气')).toBeLessThan(turn.indexOf('顺便看看明天'));
+    expect(turn.indexOf('顺便看看明天')).toBeLessThan(turn.indexOf('class="chat-meta"'));
+    expect(turn.indexOf('class="chat-meta"')).toBeLessThan(turn.indexOf('class="bubble out"'));
+    expect(turn).toMatch(/<details class="chat-meta" data-src="\/turns\/pi%3A7%3A9\?part=1"><summary><span class="stamp s-ok">已完成<\/span>/);
+    expect(turn).toContain('Pi · deepseek-flash · low'); expect(turn).toContain('工具 3'); expect(turn).toContain('发送 1');
+    expect(turn).not.toContain('<details class="chat-meta" data-src="/turns/pi%3A7%3A9?part=1" open');
+    const part = await r.get('/turns/pi%3A7%3A9?part=1');
+    expect(part.status).toBe(200);
+    const partHtml = await part.text();
+    expect(partHtml).not.toContain('<html'); expect(partHtml).toContain('<h2>工具调用 <small>3 次'); expect(partHtml).toContain('<h2>时间线');
+  });
+
+  it('回合页是聊天视图：会话按最近活动排列，定时任务标出，更早的回合按页加载；深链接仍是完整页面', async () => {
+    const r = await rig();
+    const t0 = Date.now() - 3600_000 * 60;
+    for (let i = 0; i < 52; i++) {
+      const key = `turn:pi:7:${100 + i}`;
+      trace.event(key, 'dispatched', { ts: t0 + i * 60_000, scope: 'group:7', detail: { backend: 'pi', conversation_key: 'group:7', kind: 'user', inputs: [] } });
+      trace.event(key, 'received', { ts: t0 + i * 60_000 + 1, scope: 'group:7', detail: { text: `第 ${i} 条 <b>`, sender: '小明', thread_key: 'group:7', kind: 'user' } });
+      trace.event(key, 'reply_sent', { ts: t0 + i * 60_000 + 2, detail: { terminal: true, status: 'completed', thread_key: 'group:7', kind: 'user' } });
+    }
+    trace.event('turn:pi:9:1', 'dispatched', { scope: 'owner', detail: { backend: 'pi', conversation_key: 'owner', kind: 'scheduled', inputs: ['run_abc'] } });
+    trace.event('turn:pi:9:1', 'received', { scope: 'owner', detail: { text: '[定时任务] 早报', sender: '1', thread_key: 'owner', kind: 'scheduled', inputs: ['run_abc'] } });
+    trace.event('turn:pi:9:1', 'send_rejected', { scope: 'owner', detail: { target: 'qq:private:1', error: '超出每分钟限额' } });
+    trace.event('turn:pi:9:1', 'reply_sent', { detail: { terminal: true, status: 'completed', thread_key: 'owner', kind: 'scheduled' } });
+
+    const html = await (await r.get('/turns')).text();
+    const nav = html.slice(html.indexOf('class="chat-convs'), html.indexOf('</nav>', html.indexOf('class="chat-convs')));
+    expect(nav.indexOf('owner 私聊')).toBeLessThan(nav.indexOf('群 7'));
+    expect(html).toContain('href="/turns?thread=owner" aria-current="page"');
+    expect(html).toMatch(/class="bubble in sched"><div class="b-who"><span class="stamp s-queue">定时任务<\/span>/);
+    expect(html).toContain('<span class="pill">定时任务</span>');
+    expect(html).toMatch(/class="bubble out failed"><div class="b-who"><span class="stamp s-fail">被规则拒绝<\/span>[^]*超出每分钟限额/);
+    expect(html).toContain('已到最早的回合');
+
+    const group = await (await r.get('/turns?thread=group%3A7')).text();
+    expect(group).toContain('href="/turns?thread=group%3A7&amp;page=1">加载更早的回合');
+    expect(group).toContain('第 51 条 &lt;b&gt;'); expect(group).not.toContain('第 1 条 &lt;b&gt;'); expect(group).not.toContain('<b>第');
+    expect(group.indexOf('第 2 条')).toBeLessThan(group.indexOf('第 51 条'));
+    const older = await (await r.get('/turns?thread=group%3A7&page=1&part=1')).text();
+    expect(older).not.toContain('<html'); expect(older).toContain('第 0 条'); expect(older).toContain('第 1 条'); expect(older).toContain('已到最早的回合');
+    expect(await (await r.get('/turns?thread=group%3A7&page=5&part=1')).text()).toBe('');
+
+    for (const url of ['/turns/pi%3A7%3A100', '/turns/pi%3A9%3A1', '/conversations/owner']) {
+      const res = await r.get(url);
+      expect(res.status, url).toBe(200); expect(await res.text(), url).toContain('<html');
+    }
   });
 
   it('写操作要求 cookie 会话与 CSRF 令牌；跨站来源、错误令牌与 URL 口令都被拒绝', async () => {
@@ -584,10 +632,10 @@ describe('上下文占用条（§8.5）', () => {
     const home = await (await r.get('/')).text();
     expect(home).toContain('上下文占用'); expect(home).toContain('src="/assets/usage.js"');
     expect(home).toContain('<a href="/context-usage">上下文监控 →</a>');
-    expect(home).toContain('<div class="ctx-list ctx-list-mini">');
+    expect(home).toContain('<div class="ctx-rows">');
     const order = [...home.matchAll(/data-ctx="([^"]+)"/g)].map(m => m[1]);
     expect(order).toEqual(['codex|owner', 'codex|group:7', 'pi|group:7', 'pi|owner']);
-    expect(home).toMatch(/<span class="ctx-item-label">Codex · owner 线程<\/span><div class="ctx ctx-t-warn ctx-stale ctx-mini" data-ctx="codex\|owner"/);
+    expect(home).toMatch(/<span class="ctx-row-label" title="Codex · owner 线程">Codex · owner 线程<\/span><div class="ctx ctx-t-warn ctx-stale ctx-mini" data-ctx="codex\|owner"/);
     expect(home).toMatch(/class="ctx ctx-t-hot ctx-mini" data-ctx="pi\|group:7"/);
     expect(home).toMatch(/class="ctx ctx-t-ok ctx-est ctx-mini" data-ctx="pi\|owner"/);
     // 完整条（标签头、说明行）只在 Agent 页。

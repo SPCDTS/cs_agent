@@ -8,10 +8,11 @@ import { contextBar, ctxLabel } from './context-bar.js';
 import { clampPct, fmtInt, fmtPct, ratio, sortUsage, toContextUsage, usageWindow, type ContextUsage, type ContextUsageView } from '../../shared/format.js';
 import type { ContextAnalysisOptions, ContextTurn, ThreadContextSeries, TurnBrief } from '../../shared/context-turns.js';
 import { BACKENDS, csrfField, empty, epochMs, esc, escFull, fmtBytes, fmtWhen, fmtMs, fmtTime, json, kv, page, statusStamp, threadLabel, time, traceHref, uri, type Flash } from './html.js';
-import { conversationPage, inputPage, liveBody, turnListBody, turnPage, type InputInfo, type LiveConversationView, type TurnListFilters, type TurnRowView } from './turn-pages.js';
+import { conversationPage, inputPage, liveBody, turnInputs, turnPage, type LiveConversationView, type TurnRowView } from './turn-pages.js';
+import { chatBody, chatTurns, chatTurnsHtml, olderHtml } from './chat-pages.js';
 import { scopeLabel } from '../../context/access.js';
 import type { TopologyRow } from '../sessions/types.js';
-import { PRELOAD_TURNS, agentsBody, topologyHtml, byNewest, crumbs, dataScript, isBackend, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './agents-pages.js';
+import { PRELOAD_TURNS, agentsBody, topologyDetailHtml, topologyHtml, byNewest, crumbs, dataScript, isBackend, sessionHref, sessionListBody, sessionPageBody, sessionScope, sessionsHref, turnPageBody, type AgentCardInput, type AgentSummary, type ResetTarget } from './agents-pages.js';
 import { contentHref, contextBody as contextAnalysisBody, contextError, contextUnavailable, type ContextAnalysis } from './context-view.js';
 import type { Block, ObservedTurn, SessionRef } from '../sessions/types.js';
 import { vendorAsset } from './vendor.js';
@@ -71,6 +72,9 @@ export interface DashboardPageOptions {
     analyzeTurnContext(key: string, events: ObsEvent[]): ContextTurn[];
     /** 上下文监控预览面板（§5）：一次取页面上全部回合的摘要；过期清理的回合不在结果里。 */
     turnBriefs(keys: readonly string[]): Map<string, TurnBrief>;
+    /** 回合页（聊天视图）：有回合的会话，以及一批回合 / 输入键的聊天相关事件（工具与模型请求只计数）。 */
+    threads(): { thread: string; updated: number; turns: number }[];
+    chatEvents(keys: readonly string[]): ObsEvent[];
   };
 }
 export interface ContextUsageEventView { ts: number; key: string; detail: ContextUsage }
@@ -207,11 +211,17 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     if (p === '/') return shell('运行总览', await overview(), { lead: '现在在处理什么、各依赖是否正常、最近的吞吐与失败。', scripts: ['/assets/usage.js'] });
     if (p === '/live') return shell('实时会话', liveBody(opts.live?.snapshot(), { csrf, stop: !!opts.stopThread, ctxBar: miniBar }), { lead: '每个会话一行：空闲或工作中、当前回合的输入、已发消息、子 agent 与排队输入；事件由服务器实时推送，最近完成的回合收在每行下方。', scripts: ['/assets/live.js', '/assets/forms.js'],
       actions: '<span id="conn" class="conn">正在连接…</span>' });
-    if (p === '/turns') return shell('回合列表', turnsList(q), { lead: '会话每开一轮记一行：用户消息、定时任务与子 agent 完成的唤醒。点开查看输入、工具调用、发送与完整时间线。' });
+    if (p === '/turns') {
+      const chat = chatData(q);
+      // part=1：chat.js"加载更早"取的片段（顶部提示 + 这一页的回合），不带页面外壳。
+      if (q.get('part') === '1') return chat.thread && chat.turns.length ? olderHtml(chat.thread, chat.page, chat.more) + chatTurnsHtml(chat.turns) : '';
+      return shell('回合', chatBody({ ...chat, names: scopeNames() }), { lead: '按会话查看聊天记录：左边是收到的消息与定时任务，右边是发出的消息；每个回合的状态、设置、模型请求与工具调用收在气泡之间，点开读取。', scripts: ['/assets/chat.js', '/assets/forms.js'] });
+    }
     const segment = (prefix: string) => { try { return decodeURIComponent(p.slice(prefix.length)); } catch { return null; } };
     if (p.startsWith('/turns/')) {
       const id = segment('/turns/'); if (!id) return null;
       const body = turnDetail(id, q); if (body === null) return null;
+      if (q.get('part') === '1') return body;
       return shell('回合详情', body, { lead: '本轮的输入 → 工具调用与子 agent → 发送；下方是完整时间线。', scripts: ['/assets/forms.js'] });
     }
     if (p.startsWith('/inputs/')) {
@@ -230,6 +240,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     if (p === '/context') return shell('上下文检索', contextBody(q), { lead: '与 Codex / pi 的 qq_context 工具看到的内容一致。留空关键词查看最近记录。时间线、摘要与检索对照见<a href="/memory">记忆</a>。' });
     if (p === '/context-usage') return shell('上下文监控', contextUsageBody(q), { lead: '每条线程最近若干次模型请求的输入占用（一根竖条一次请求，同一回合的请求相邻成组；高度 = 占窗口比例），其中缓存命中与未命中分两色；异常的缓存未命中标红并给出原因推断。点一个回合组查看该回合每次请求的命中；刷新页面更新。', scripts: ['/assets/context-usage.js'] });
     if (p === '/agents') return shell('Agent', await agentsPage(), { lead: '各会话的主 agent 与子 agent 在做什么；两个执行后端的会话、索引进度与每条线程的上下文占用。点进会话查看每个回合的输入、模型请求、工具调用与回复。', scripts: ['/assets/forms.js', '/assets/usage.js', '/assets/topology.js'] });
+    if (p === '/agents/topology' || p.startsWith('/agents/topology/')) return topologyFragment(p);
     if (p.startsWith('/agents/')) return agentsRoute(p, q, nonce, shell);
     if (p === '/memory' || p.startsWith('/memory/')) return memoryPage(p, q, nonce, shell);
     if (p === '/settings') return shell('设置', await settingsBody(), { lead: '修改立即对之后收到的消息生效，无需重启；.env 中的值只是初始默认。', scripts: ['/assets/forms.js'] });
@@ -257,7 +268,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     // 一行迷你条（悬停看完整数字）；完整条在 Agent 页，走势在上下文监控页。
     const usage = usageList();
     out += `<section><h2>上下文占用 <small>${usage.length ? `${usage.length} 条线程 · ` : ''}<a href="/context-usage">上下文监控 →</a></small></h2>${usage.length
-      ? `<div class="sheet pad"><div class="ctx-list ctx-list-mini">${usage.map(u => `<div class="ctx-item"><span class="ctx-item-label">${esc(ctxLabel(u.backend, u.key))}</span>${contextBar(u.backend, u.key, u, { mini: true })}</div>`).join('')}</div></div>`
+      ? `<div class="sheet pad"><div class="ctx-rows">${usage.map(u => `<div class="ctx-row"><span class="ctx-row-label" title="${esc(ctxLabel(u.backend, u.key))}">${esc(ctxLabel(u.backend, u.key))}</span>${contextBar(u.backend, u.key, u, { mini: true })}</div>`).join('')}</div></div>`
       : empty(opts.contextUsage ? '还没有线程的占用记录。任一线程完成一个回合后，这里会显示它离上下文窗口还有多远。' : '上下文占用数据源未接入。')}</section>`;
 
     const bridge = asObj(health.bridge), codex = asObj(health.codex), aging = asObj(health.aging);
@@ -306,10 +317,13 @@ export function createDashboardPages(deps: DashboardPageDeps) {
   const pageLink = (base: string, q: URLSearchParams) => (n: number) => { const next = new URLSearchParams(q); next.set('page', String(n)); return `${base}?${esc(queryLink(next))}`; };
   const detailOf = (e: ObsEvent) => { try { return asObj(JSON.parse(e.detail_json)); } catch { return {}; } };
 
-  function turnsList(q: URLSearchParams): string {
-    const f: TurnListFilters = { status: (q.get('status') ?? '').trim(), thread: (q.get('thread') ?? '').trim(), backend: (q.get('backend') ?? '').trim(), kind: (q.get('kind') ?? '').trim() };
-    const n = pageNo(q);
-    return turnListBody(opts.store.turns({ ...f, page: n }), f, n, pageLink('/turns', q), scopeNames());
+  /** /turns 聊天视图的数据：会话列表、选中会话（缺省为最近活动的会话）与这一页的回合（每页 50 个，最早在前）。 */
+  function chatData(q: URLSearchParams) {
+    const threads = opts.store.threads(), page = pageNo(q);
+    const thread = (q.get('thread') ?? '').trim() || threads[0]?.thread || '';
+    const rows = thread ? opts.store.turns({ thread, page }) : [];
+    return { threads, thread, page, more: rows.length === 50, backend: rows.find(r => r.backend)?.backend ?? '',
+      turns: chatTurns(rows, keys => opts.store.chatEvents(keys), dispatchSettingsLine) };
   }
 
   /** /turns/:id：回合（trace 键 turn:<id>）的输入、发送、工具、子 agent、错误与分页时间线；没有事件返回 null（404）。 */
@@ -319,29 +333,7 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     const events = opts.store.events(key, { after, limit });
     if (!events.length) return null;
     const all = opts.store.events(key, { limit: 2000 });
-    // 本轮输入：开轮（received / dispatched）与插话（steered）记下的入站键，按出现顺序去重
-    const keys: string[] = [];
-    for (const e of all) {
-      if (!['received', 'dispatched', 'steered'].includes(e.stage)) continue;
-      const d = detailOf(e), list: unknown[] = Array.isArray(d.inputs) ? d.inputs : typeof d.input === 'string' ? [d.input] : [];
-      for (const k of list) if (typeof k === 'string' && !keys.includes(k)) keys.push(k);
-    }
-    const received = all.find(e => e.stage === 'received');
-    let settings = all.filter(e => e.stage === 'dispatched').map(e => asObj(detailOf(e).settings)).find(v => typeof v.backend === 'string');
-    const inputs: InputInfo[] = keys.slice(0, 50).map(k => {
-      const evs = opts.store.events('in:' + k, { limit: 50 });
-      const rec = evs.find(e => e.stage === 'received' || e.stage === 'recovered'), queued = evs.find(e => e.stage === 'queued');
-      const admitted = evs.find(e => e.stage === 'admitted');
-      if (!settings && admitted) { const snap = asObj(detailOf(admitted).settings); if (typeof snap.backend === 'string') settings = snap; }
-      const rd = rec ? detailOf(rec) : {};
-      return { key: k, kind: queued ? String(detailOf(queued).kind ?? '') : k.startsWith('run_') ? 'scheduled' : '',
-        sender: String(rd.sender ?? ''), text: String(rd.text ?? ''), scope: rec?.scope ?? queued?.scope ?? '' };
-    });
-    // 定时输入没有 in: 收到事件：只有一条输入时用开轮事件里的正文与发送者
-    if (inputs.length === 1 && !inputs[0]!.text && received) {
-      const rd = detailOf(received);
-      inputs[0] = { ...inputs[0]!, text: String(rd.text ?? ''), sender: inputs[0]!.sender || String(rd.sender ?? '') };
-    }
+    const { inputs, settings } = turnInputs(all, k => opts.store.events('in:' + k, { limit: 50 }));
     // 缓存命中（§5）：判定由数据层完成，按请求列在最后一个完成的模型回合行；
     // 没有模型回合时标在最后一条请求 / 占用事件行。
     const ctxTurns = opts.store.analyzeTurnContext(key, all);
@@ -478,8 +470,19 @@ export function createDashboardPages(deps: DashboardPageDeps) {
         threads: [...piUsage.filter(k => piKeys.includes(k)), ...piKeys.filter(k => !piUsage.includes(k))].map(key => ({ key, label: ` ${scopeLabel(key)} 的会话`, enabled: !!opts.resetPi, compactEnabled: !!opts.compactPi, stopEnabled: !!opts.stopThread })),
         extraUsageKeys: piUsage.filter(k => !piKeys.includes(k)) },
     };
-    const topo = await api('/api/agents/topology');
+    const topo = await api('/api/agents/topology?brief=1');
     return agentsBody(cards, csrf, topo.status === 200 && Array.isArray(topo.body) ? topologyHtml(topo.body as TopologyRow[], scopeNames()) : undefined);
+  }
+
+  /** /agents 拓扑区的轮询片段（概览）与按需读取的单会话详情；服务端渲染并转义，客户端整块替换。 */
+  async function topologyFragment(p: string): Promise<string | null> {
+    let thread: string | undefined;
+    try { thread = p === '/agents/topology' ? undefined : decodeURIComponent(p.slice('/agents/topology/'.length)); } catch { return null; }
+    if (thread === '') return null;
+    const r = await api(`/api/agents/topology?${thread === undefined ? 'brief=1' : 'thread=' + encodeURIComponent(thread)}`);
+    if (r.status !== 200 || !Array.isArray(r.body)) return null;
+    const rows = r.body as TopologyRow[];
+    return thread === undefined ? topologyHtml(rows, scopeNames()) : rows[0] ? topologyDetailHtml(rows[0]) : null;
   }
 
   type Shell = (title: string, body: string, extra?: { lead?: string; actions?: string; scripts?: string[]; head?: string }) => string;

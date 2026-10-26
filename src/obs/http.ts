@@ -19,8 +19,6 @@ import { trace as defaultTrace } from '../shared/trace.js';
 import { summarize, type LiveMessage } from './live.js';
 import { formatBackendOverrides, SETTINGS_KEY } from '../agent/settings.js';
 import { ASSETS } from './ui/client.js';
-import { topologyRows } from './topology.js';
-import { topologyHtml } from './ui/agents-pages.js';
 import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
 import type { ContextUsage } from '../shared/format.js';
 import { empty, page, traceHref } from './ui/html.js';
@@ -102,6 +100,7 @@ export function createDashboard(opts: DashboardOptions) {
       },
       analyzeTurnContext: (key, events) => turnContextTurns(opts.store, key, events),
       turnBriefs: keys => opts.store.turnBriefs(keys),
+      threads: () => opts.store.threads(), chatEvents: keys => opts.store.chatEvents(keys),
     } },
     config, csrf, agentMd, agentsMd, api,
     contextResult: (scope, query) => callQQContextTool({access:scope?{kind:'scope',scope}:{kind:'all'},openStore:()=>opts.context,maxChars:config.QQ_CONTEXT_MAX_CHARS},query?'qq_search':'qq_recent',query?{query,days:180,limit:20}:{limit:30}),
@@ -172,12 +171,6 @@ export function createDashboard(opts: DashboardOptions) {
     }
     if (url.pathname === '/api/schedules' || url.pathname.startsWith('/api/schedules/')) {
       await handleSchedules(req, res, url, host); return;
-    }
-    if (url.pathname === '/agents/topology') {
-      // /agents 页拓扑区的轮询片段：服务端渲染并转义，客户端整块替换
-      if (!opts.topology) { res.writeHead(404).end(); return; }
-      const rows = await topologyRows(await opts.topology(), adapters);
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }).end(topologyHtml(rows, opts.context.scopeNames?.() ?? {})); return;
     }
     if (url.pathname === '/api/agents' || url.pathname.startsWith('/api/agents/') || url.pathname === '/agents/stream') {
       if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); sessionJson(res, 405, { error: '会话接口只支持 GET' }); return; }

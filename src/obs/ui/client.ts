@@ -223,13 +223,55 @@ document.addEventListener('submit',e=>{const m=e.target.dataset.confirm;if(m&&!c
 for(const t of document.querySelectorAll('textarea[data-count]')){const c=document.getElementById(t.dataset.count);const f=()=>{c.textContent=t.value.length+' 字';};t.addEventListener('input',f);f();}
 `;
 
-// /agents 拓扑区：页面可见时每 3 秒取服务端渲染的片段整块替换（片段已转义）；失败保留上次内容。
+// /agents 拓扑区：页面可见时每 3 秒取服务端渲染的概览片段整块替换（片段已转义）；失败保留上次内容。
+// 详情在展开时读 /agents/topology/:thread；已展开的会话在替换后保持展开，签名（data-sig）未变时直接用缓存。
 const topology = `
 const box=document.getElementById('topology');
-if(box){let busy=false;setInterval(async()=>{if(document.hidden||busy)return;busy=true;
-  try{const r=await fetch('/agents/topology',{credentials:'same-origin',cache:'no-store'});if(r.ok)box.innerHTML=await r.text();}catch(e){}finally{busy=false;}},3000);}
+if(box){
+  const opened=new Set(),cache=new Map();
+  const more=t=>box.querySelector('details.topo-more[data-thread="'+CSS.escape(t)+'"]');
+  const fill=(d,html,sig)=>{const b=d.querySelector('.topo-detail');if(b&&b.dataset.sig!==sig){b.innerHTML=html;b.dataset.sig=sig;}};
+  async function load(d){
+    const t=d.dataset.thread,sig=d.dataset.sig,c=cache.get(t);
+    if(c){fill(d,c.html,c.sig);if(c.sig===sig)return;}
+    try{const r=await fetch('/agents/topology/'+encodeURIComponent(t),{credentials:'same-origin',cache:'no-store'});
+      const cur=more(t);if(!cur)return;
+      if(!r.ok){if(!c)cur.querySelector('.topo-detail').textContent='读取失败（HTTP '+r.status+'），收起后再展开可重试';return;}
+      const html=await r.text();cache.set(t,{html,sig});if(cur.open)fill(cur,html,sig);
+    }catch(e){if(!c){const cur=more(t);if(cur)cur.querySelector('.topo-detail').textContent='读取失败，收起后再展开可重试';}}
+  }
+  box.addEventListener('toggle',e=>{const d=e.target;if(!d.matches||!d.matches('details.topo-more'))return;
+    if(d.open){opened.add(d.dataset.thread);load(d);}else opened.delete(d.dataset.thread);},true);
+  box.addEventListener('click',e=>{const k=e.target.closest&&e.target.closest('[data-open-thread]');if(!k)return;
+    const d=more(k.dataset.openThread);if(d){d.open=true;d.scrollIntoView({block:'nearest'});}});
+  let busy=false;setInterval(async()=>{if(document.hidden||busy)return;busy=true;
+    try{const r=await fetch('/agents/topology',{credentials:'same-origin',cache:'no-store'});
+      if(r.ok){box.innerHTML=await r.text();for(const t of opened){const d=more(t);if(!d)continue;const c=cache.get(t);if(c)fill(d,c.html,c.sig);d.open=true;}}
+    }catch(e){}finally{busy=false;}},3000);
+}
+`;
+
+// /turns 聊天视图：首屏滚到最新（或 #turn-<id> 指定的回合）；"加载更早"取 part=1 片段插到顶部并保持视口位置；
+// 回合折叠块展开时读 /turns/:id?part=1（服务端渲染并转义的回合详情）。
+const chat = `
+const log=document.getElementById('chat-log');
+if(log){
+  let target=null;try{target=location.hash?document.getElementById(decodeURIComponent(location.hash.slice(1))):null;}catch(e){}
+  if(target&&log.contains(target)){log.scrollTop+=target.getBoundingClientRect().top-log.getBoundingClientRect().top-40;const m=target.querySelector('details.chat-meta');if(m)m.open=true;}else log.scrollTop=log.scrollHeight;
+  const dedupeDays=()=>{let prev='';for(const d of log.querySelectorAll('.chat-day')){if(d.textContent===prev)d.remove();else prev=d.textContent;}};
+  log.addEventListener('click',async e=>{const a=e.target.closest&&e.target.closest('a.chat-more');if(!a||a.dataset.busy)return;e.preventDefault();a.dataset.busy='1';const label=a.textContent;a.textContent='读取中…';
+    try{const r=await fetch(a.getAttribute('href')+'&part=1',{credentials:'same-origin',cache:'no-store'});if(!r.ok)throw new Error(String(r.status));
+      const html=await r.text(),h=log.scrollHeight,top=log.scrollTop;a.remove();
+      log.insertAdjacentHTML('afterbegin',html||'<p class="chat-start faint">已到最早的回合</p>');dedupeDays();log.scrollTop=top+log.scrollHeight-h;
+    }catch(x){a.textContent=label+'（读取失败，点击重试）';delete a.dataset.busy;}});
+  log.addEventListener('toggle',async e=>{const d=e.target;if(!d.matches||!d.matches('details.chat-meta')||!d.open||d.dataset.loaded)return;d.dataset.loaded='1';
+    const body=d.querySelector('.chat-meta-body');
+    try{const r=await fetch(d.dataset.src,{credentials:'same-origin',cache:'no-store'});
+      if(!r.ok){body.textContent='读取失败（HTTP '+r.status+'），收起后再展开可重试';delete d.dataset.loaded;return;}body.innerHTML=await r.text();
+    }catch(x){body.textContent='读取失败，收起后再展开可重试';delete d.dataset.loaded;}},true);
+}
 `;
 
 /** 每个模块自带共享工具函数（避免模块 import 受 CSP nonce 限制）。 */
 export const ASSETS: Record<string, string> = { 'live.js': shared + ctxShared + live, 'usage.js': shared + ctxShared + usage, 'logs.js': shared + logs, 'forms.js': forms,
-  'agents.js': shared + AGENTS_JS, 'memory.js': shared + MEMORY_JS, 'context-usage.js': CONTEXT_USAGE_JS, 'topology.js': topology };
+  'agents.js': shared + AGENTS_JS, 'memory.js': shared + MEMORY_JS, 'context-usage.js': CONTEXT_USAGE_JS, 'topology.js': topology, 'chat.js': chat };

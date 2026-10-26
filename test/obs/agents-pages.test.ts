@@ -260,7 +260,7 @@ describe('Agent 拓扑', () => {
     { thread: 'owner', backend: 'pi' as const, busy: false, children: [] },
   ];
 
-  it('/agents 顶部渲染会话 → 主 agent → 子 agent：状态、任务、最近动作与过程链接，文本转义并脱敏，空闲会话折成一行', async () => {
+  it('/agents 顶部是概览：主 agent 一个节点，未结束的子 agent 是小节点，已结束的合成计数；任务与结果不在页面上，文本转义并脱敏', async () => {
     const r = await rig({ topology });
     const { res, html } = await r.page('/agents');
     expect(res.status).toBe(200); safe(html, res);
@@ -268,29 +268,49 @@ describe('Agent 拓扑', () => {
     expect(html).toMatch(/<script[^>]*src="\/assets\/topology.js"/);
     expect(html).toContain('href="/conversations/group%3A1"');
     expect(html).toContain('href="/agents/codex/sessions/sess-1">主 agent 过程');
-    expect(html).toContain('href="/agents/codex/sessions/sess-old">查看过程');
-    expect(html).toContain('最近：</span>压缩上下文');
-    expect(html).toContain('结果：</span>结果正文');
+    expect(html).toMatch(/<button type="button" class="topo-kid" data-open-thread="group:1"[^>]*><span class="topo-kid-name">&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/span><span class="stamp s-run">工作中/);
+    expect(html).toContain('<details class="topo-more" data-thread="group:1"');
+    expect(html).toContain('<summary>已结束子 agent 1 个（完成 1）</summary>');
     expect(html).toMatch(/空闲：<a href="\/conversations\/owner">owner 私聊<\/a>/);
-    expect(html).not.toContain(TOKEN);
-    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
-    const topo = html.slice(html.indexOf('id="topology"'), html.indexOf('</section>', html.indexOf('id="topology"')));
-    expect(topo.indexOf('工作中')).toBeLessThan(topo.indexOf('已完成'));
+    for (const detail of ['旧任务', '结果正文', '查看过程', '最近：', 'done-one', TOKEN]) expect(html).not.toContain(detail);
   });
 
-  it('/agents/topology 返回同一片段供轮询，/api/agents/topology 返回带最近动作的 JSON；都需要口令', async () => {
+  it('/agents/topology 是轮询用的概览片段；/agents/topology/:thread 按需返回该会话的任务、最近动作与结果；都需要口令', async () => {
     const r = await rig({ topology });
     const frag = await r.get('/agents/topology');
     expect(frag.status).toBe(200);
     expect(frag.headers.get('cache-control')).toBe('no-store');
     const text = await frag.text();
-    expect(text).not.toContain('<html'); expect(text).toContain('查看过程'); expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain('<html'); expect(text).toContain('已结束子 agent 1 个'); expect(text).not.toContain('结果正文');
+    const detail = await r.get('/agents/topology/group%3A1');
+    expect(detail.status).toBe(200);
+    const body = await detail.text();
+    expect(body).not.toContain('<html'); expect(body).not.toContain(TOKEN);
+    expect(body).toContain('最近：</span>压缩上下文');
+    expect(body).toContain('href="/agents/codex/sessions/sess-old">查看过程');
+    expect(body).toContain('结果：</span>结果正文');
+    expect(body).toContain('&lt;script&gt;alert(1)&lt;/script&gt;'); expect(body).not.toContain('<script>alert');
+    expect(body.indexOf('工作中')).toBeLessThan(body.indexOf('已完成'));
+    expect((await r.get('/agents/topology/group%3A404')).status).toBe(404);
     const json = await (await r.get('/api/agents/topology')).json() as { thread: string; activity?: { text: string } }[];
     expect(json.map(row => row.thread)).toEqual(['group:1', 'owner']);
     expect(json[0]!.activity?.text).toBe('压缩上下文');
-    expect((await r.anonymous('/agents/topology')).status).not.toBe(200);
-    expect((await r.anonymous('/api/agents/topology')).status).not.toBe(200);
-    expect(await (await r.get('/assets/topology.js')).text()).toContain("fetch('/agents/topology'");
+    const brief = await (await r.get('/api/agents/topology?brief=1')).json() as { activity?: unknown; children: { task?: string }[] }[];
+    expect(brief[0]!.activity).toBeUndefined(); expect(brief[0]!.children.every(c => c.task === undefined)).toBe(true);
+    for (const url of ['/agents/topology', '/agents/topology/group%3A1', '/api/agents/topology']) expect((await r.anonymous(url)).status, url).toBe(401);
+    const js = await (await r.get('/assets/topology.js')).text();
+    expect(js).toContain("fetch('/agents/topology'"); expect(js).toContain("'/agents/topology/'+encodeURIComponent(t)");
+  });
+
+  it('大量已结束的子 agent 只合成一个计数，概览片段不随子 agent 数增长正文', async () => {
+    const many = async () => [{ thread: 'owner', backend: 'pi' as const, busy: true, session: 'm', children: Array.from({ length: 30 }, (_, i) => ({
+      session: `s${i}`, name: `job-${i}`, state: (['done', 'failed', 'stopped'] as const)[i % 3], task: '长任务'.repeat(300), result: '长结果'.repeat(300), updated: T0 + i })) }];
+    const r = await rig({ topology: many });
+    const text = await (await r.get('/agents/topology')).text();
+    expect(text).toContain('已结束子 agent 30 个（完成 10 · 失败 10 · 停止 10）');
+    expect(text).not.toContain('job-'); expect(text).not.toContain('长任务');
+    expect(Buffer.byteLength(text)).toBeLessThan(2000);
+    expect((await (await r.get('/agents/topology/owner')).text()).match(/class="topo-node"/g)).toHaveLength(30);
   });
 
   it('没有拓扑数据源时不显示拓扑区', async () => {

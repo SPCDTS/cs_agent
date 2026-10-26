@@ -14,6 +14,7 @@ export interface TurnRow { key: string; scope: string; thread: string | null; ki
 export interface TurnFilters { status?: string; thread?: string; backend?: string; kind?: string; page?: number }
 /** 管理事件独立按年龄保留，不参与普通 trace 键的预算。 */
 const ADMIN_EVENT_SQL = "(key LIKE '@%' OR stage IN ('settings_changed','prompt_changed','thread_reset'))";
+const CHAT_STAGES = ['received', 'recovered', 'queued', 'admitted', 'dispatched', 'steered', 'send_message', 'send_rejected', 'reply_sent', 'failed'].map(s => `'${s}'`).join(',');
 type ContextRow = Pick<ObsEvent, 'ts' | 'key' | 'stage' | 'detail_json'>;
 // 请求在回合结束时批量入库；排序、since 和原因区间必须使用请求自身时间。
 const CONTEXT_TS_SQL = "CASE WHEN stage='model_request' THEN json_extract(detail_json,'$.at') ELSE ts END";
@@ -143,6 +144,22 @@ export class ObsStore {
     for (const key of ['status', 'thread', 'backend', 'kind'] as const) if (filters[key]) { clauses.push(`${key}=?`); args.push(filters[key]!); }
     return this.db.prepare(`SELECT * FROM (${this.turnQuery()}) WHERE ${clauses.join(' AND ')} ORDER BY ts DESC LIMIT 50 OFFSET ?`)
       .all(...args, Math.max(0, Math.floor(filters.page ?? 0)) * 50) as unknown as TurnRow[];
+  }
+  /** 有回合记录的会话，最近活动在前（回合页的会话列表）。 */
+  threads(limit = 100): { thread: string; updated: number; turns: number }[] {
+    if (this.degraded) return [];
+    return this.db.prepare(`SELECT thread, MAX(updated) updated, COUNT(*) turns FROM (${this.turnQuery()}) WHERE thread IS NOT NULL GROUP BY thread ORDER BY updated DESC LIMIT ?`)
+      .all(Math.max(1, Math.min(500, Math.floor(limit)))) as unknown as { thread: string; updated: number; turns: number }[];
+  }
+  /**
+   * 聊天视图：一批键（turn: / in:，最多 300 个）的输入、开轮、发送与终态事件；模型请求与已结束的工具调用只用于计数，
+   * 正文换成 {}，避免整页读入工具输出。
+   */
+  chatEvents(keys: readonly string[]): ObsEvent[] {
+    if (this.degraded || !keys.length) return [];
+    const ids = [...new Set(keys)].slice(0, 300);
+    return this.db.prepare(`SELECT id,key,scope,ts,stage,status,duration_ms,CASE WHEN stage IN (${CHAT_STAGES}) THEN detail_json ELSE '{}' END detail_json FROM events
+      WHERE key IN (${ids.map(() => '?').join(',')}) AND (stage IN (${CHAT_STAGES}) OR stage='model_request' OR (stage LIKE 'tool:%' AND status<>'started')) ORDER BY id`).all(...ids) as unknown as ObsEvent[];
   }
   /** 最多 300 个不同回合；先限定聚合范围，再批量读取事件并在内存归并。旧版键（非 turn:）没有聚合行，不在结果里。 */
   turnBriefs(keys: readonly string[]): Map<string, TurnBrief> {

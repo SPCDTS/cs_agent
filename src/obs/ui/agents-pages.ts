@@ -48,17 +48,42 @@ function childNode(backend: Backend | undefined, c: TopologyNode): string {
 ${c.task ? `<div class="topo-task" title="${esc(clipText(c.task, 1000))}"><span class="faint">任务：</span>${esc(clipText(c.task.replace(/\s+/g, ' '), 160))}</div>` : ''}${activityLine(c.activity)}${c.result && c.state !== 'running' ? `<div class="topo-task" title="${esc(clipText(c.result, 1000))}"><span class="faint">结果：</span>${esc(clipText(c.result.replace(/\s+/g, ' '), 160))}</div>` : ''}</li>`;
 }
 
-/** 拓扑片段：/agents 页首次渲染与 /agents/topology 轮询共用；空闲且没有子 agent 的会话折成一行。 */
+const ENDED: TopologyNode['state'][] = ['done', 'failed', 'stopped'];
+const ENDED_LABEL: [TopologyNode['state'], string][] = [['done', '完成'], ['failed', '失败'], ['stopped', '停止']];
+/** 子 agent 状态的短签名：变化时客户端才重新读取已展开的详情。 */
+function topoSig(r: TopologyRow): string {
+  let h = 5381;
+  for (const ch of `${r.busy}|${r.session ?? ''}|${r.children.map(c => `${c.session}:${c.state}:${c.updated ?? ''}`).join(',')}`) h = (h * 33 + ch.charCodeAt(0)) >>> 0;
+  return h.toString(36);
+}
+
+/**
+ * 拓扑概览：/agents 页首次渲染与 /agents/topology 轮询共用。每个会话一张卡：主 agent 一行，
+ * 未结束的子 agent 是小节点，已结束的合成一个计数；任务、最近动作与结果在展开时读 /agents/topology/:thread。
+ */
 export function topologyHtml(rows: TopologyRow[], names: Record<string, string> = {}): string {
   const shown = rows.filter(r => r.busy || r.children.length), quiet = rows.filter(r => !r.busy && !r.children.length);
   const conv = (r: TopologyRow) => `<a href="/conversations/${uri(r.thread)}">${esc(threadLabel(r.thread, names[r.thread]))}</a>`;
   const body = shown.map(r => {
     const backend = r.backend && isBackend(r.backend) ? r.backend : undefined;
-    return `<div class="topo-thread"><div class="topo-node topo-main"><div class="topo-head">${conv(r)}${backend ? `<span class="pill">${esc(BACKENDS[backend] ?? backend)}</span>` : ''}${r.busy ? stamp('工作中', 'run') : stamp('空闲', 'idle')}${backend && r.session ? `<a href="${sessionHref(backend, r.session)}">主 agent 过程</a>` : ''}</div>${activityLine(r.activity)}</div>
-${r.children.length ? `<ul class="topo-children">${r.children.map(c => childNode(backend, c)).join('')}</ul>` : ''}</div>`;
+    const live = r.children.filter(c => !ENDED.includes(c.state)), ended = r.children.filter(c => ENDED.includes(c.state));
+    const counts = ENDED_LABEL.map(([s, l]) => [l, ended.filter(c => c.state === s).length] as const).filter(([, n]) => n).map(([l, n]) => `${l} ${n}`).join(' · ');
+    const kids = live.map(c => { const [label, tone] = AGENT_STATE[c.state] ?? [c.state, 'idle' as Tone];
+      return `<li><button type="button" class="topo-kid" data-open-thread="${esc(r.thread)}" title="展开详情"><span class="topo-kid-name">${esc(c.name)}</span>${stamp(label, tone)}</button></li>`; }).join('');
+    const summary = ended.length ? `已结束子 agent ${ended.length} 个（${counts}）` : live.length ? '子 agent 详情' : '主 agent 最近动作';
+    return `<div class="topo-thread"><div class="topo-head topo-main">${conv(r)}${backend ? `<span class="pill">${esc(BACKENDS[backend] ?? backend)}</span>` : ''}${r.busy ? stamp('工作中', 'run') : stamp('空闲', 'idle')}${backend && r.session ? `<a class="topo-proc" href="${sessionHref(backend, r.session)}">主 agent 过程</a>` : ''}</div>
+${kids ? `<ul class="topo-kids">${kids}</ul>` : ''}<details class="topo-more" data-thread="${esc(r.thread)}" data-sig="${topoSig(r)}"><summary>${esc(summary)}</summary><div class="topo-detail"><p class="faint">读取中…</p></div></details></div>`;
   }).join('');
-  return (body || '<p class="faint">现在没有会话在工作，也没有派出过子 agent。</p>')
+  return (body ? `<div class="topo-grid">${body}</div>` : '<p class="faint">现在没有会话在工作，也没有派出过子 agent。</p>')
     + (quiet.length ? `<p class="hint mt">空闲：${quiet.map(conv).join('、')}</p>` : '');
+}
+
+/** 一个会话的拓扑详情（/agents/topology/:thread）：主 agent 最近动作与全部子 agent 的任务、最近动作、结果；未结束的在前，其余按更新时间倒序。 */
+export function topologyDetailHtml(r: TopologyRow): string {
+  const backend = r.backend && isBackend(r.backend) ? r.backend : undefined;
+  const order = (c: TopologyNode) => ENDED.includes(c.state) ? 1 : 0;
+  const children = [...r.children].sort((a, b) => order(a) - order(b) || (b.updated ?? 0) - (a.updated ?? 0));
+  return `${r.activity ? activityLine(r.activity) : r.busy ? '' : '<p class="faint topo-act">主 agent 空闲。</p>'}${children.length ? `<ul class="topo-children">${children.map(c => childNode(backend, c)).join('')}</ul>` : ''}`;
 }
 
 /* ───────── /agents ───────── */

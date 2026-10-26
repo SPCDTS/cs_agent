@@ -39,10 +39,14 @@ async function lastActivity(adapters: SessionAdapters, backend: 'pi' | 'codex' |
   return undefined;
 }
 
-/** 补上工作中或派出过子 agent 的会话的最近动作，并按会话正文规则脱敏；会话按工作中优先、再按标签排序。 */
-export async function topologyRows(rows: ThreadTopology[], adapters: SessionAdapters): Promise<TopologyRow[]> {
-  const out = await Promise.all(rows.map(async row => {
-    // 空闲且没有子 agent 的会话在页面上只列名称，不读正文
+/**
+ * 补上工作中或派出过子 agent 的会话的最近动作，并按会话正文规则脱敏；会话按工作中优先、再按标签排序。
+ * brief：/agents 页每 3 秒轮询的概览不读正文；thread：只取一个会话（展开详情时按需读取）。
+ */
+export async function topologyRows(rows: ThreadTopology[], adapters: SessionAdapters, o: { brief?: boolean; thread?: string } = {}): Promise<TopologyRow[]> {
+  const out = await Promise.all(rows.filter(row => o.thread === undefined || row.thread === o.thread).map(async row => {
+    // 概览不带任务与结果正文；空闲且没有子 agent 的会话在页面上只列名称，不读正文
+    if (o.brief) return { ...row, children: row.children.map(({ task: _t, result: _r, ...c }) => c) };
     if (!row.busy && !row.children.length) return { ...row, children: [] };
     const [activity, children] = await Promise.all([
       lastActivity(adapters, row.backend, row.session),

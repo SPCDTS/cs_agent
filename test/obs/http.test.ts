@@ -34,7 +34,7 @@ async function rig(token?: string){
 }
 it('八个页面和回合详情可离线渲染；HTML 转义；共享上下文与配置脱敏',async()=>{
   const {base,context}=await rig();const sizes:Record<string,number>={};
-  for(const [url,title] of Object.entries({'/':'运行总览','/turns':'回合列表','/turns/pi%3A7%3A1':'回合详情','/conversations/group%3A7':'最近回合','/logs':'实时日志','/context':'上下文检索','/agents':'Agent','/agents/codex/sessions':'Codex 会话','/config':'生效配置'})){
+  for(const [url,title] of Object.entries({'/':'运行总览','/turns':'chat-layout','/turns/pi%3A7%3A1':'回合详情','/conversations/group%3A7':'最近回合','/logs':'实时日志','/context':'上下文检索','/agents':'Agent','/agents/codex/sessions':'Codex 会话','/config':'生效配置'})){
     const res=await fetch(base+url);const text=await res.text();expect(res.status).toBe(200);expect(text).toContain(title);expect(text).not.toContain('fake-napcat-secret');expect(text).not.toMatch(/https:\/\/.*(?:cdn|unpkg)/);sizes[url]=Buffer.byteLength(text);
     if(url==='/turns/pi%3A7%3A1')expect(text).toContain('&lt;script&gt;');
   }

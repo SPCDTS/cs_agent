@@ -1,5 +1,5 @@
 /**
- * 会话与回合的页面（docs/DASHBOARD.md §2、§3）：/live 的每会话一行、/turns 回合列表、/turns/:id 回合详情、
+ * 会话与回合的页面（docs/DASHBOARD.md §2、§3）：/live 的每会话一行、/turns/:id 回合详情（/turns 聊天视图见 chat-pages.ts）、
  * /inputs/:key 输入页、/conversations/:thread 会话页。数据经只读视图传入；所有文本先脱敏再转义（esc）。
  */
 import type { ObsEvent } from '../../shared/trace.js';
@@ -67,23 +67,6 @@ export function liveBody(convs: LiveConversationView[] | undefined, o: { csrf: s
 <p class="hint mt">每个会话（群、私聊、owner）一行。空闲会话在最后一个回合结束后保留半小时；全部回合见<a href="/turns">回合列表</a>。</p></section>`;
 }
 
-/* ───────── /turns ───────── */
-
-export interface TurnListFilters { status: string; thread: string; backend: string; kind: string }
-
-export function turnListBody(rows: TurnRowView[], f: TurnListFilters, page: number, link: (page: number) => string, names: Record<string, string> = {}): string {
-  const opt = (name: keyof TurnListFilters, choices: [string, string][]) => `<select name="${name}"><option value="">全部</option>${choices.map(([v, l]) => `<option value="${esc(v)}"${f[name] === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
-  let body = `<form class="bar"><label>状态${opt('status', [['processing', '进行中'], ['completed', '已完成'], ['failed', '失败'], ['lost', '中断']])}</label>
-<label>会话<input name="thread" placeholder="owner、group:123 或 private:456" value="${esc(f.thread)}"></label><label>种类${opt('kind', Object.entries(TURN_KINDS))}</label><label>后端${opt('backend', Object.entries(BACKENDS))}</label><button>筛选</button>${Object.values(f).some(Boolean) ? '<a class="btn quiet" href="/turns">清除</a>' : ''}</form>`;
-  body += rows.length ? `<div class="sheet"><div class="wrap"><table class="list"><thead><tr><th>状态</th><th>开始</th><th>会话 / 发送者</th><th class="hide-sm">种类 / 后端</th><th class="num">耗时</th><th class="hide-sm">回合</th></tr></thead><tbody>${rows.map(r => {
-    const id = r.key.slice(5);
-    return `<tr><td>${statusStamp(r.status)}</td><td>${time(r.ts)}</td><td>${r.thread ? `<a href="${conversationHref(r.thread)}">${esc(threadLabel(r.thread, names[r.thread]))}</a>` : esc(threadLabel(r.scope))}<br><small>${esc(r.sender ?? '')}</small></td><td class="hide-sm">${esc(kindText(r.kind))}<br><small>${esc(backendName(r.backend))}</small></td><td class="num">${esc(fmtMs(r.duration_ms))}</td><td class="hide-sm"><a class="mono" href="${turnHref(id)}">${esc(id.slice(0, 24))}</a></td></tr>`;
-  }).join('')}</tbody></table></div></div>`
-    : empty(page ? '这一页没有更多回合了。' : '没有符合条件的回合。换个筛选条件，或清除筛选查看全部。');
-  body += `<p class="hint mt">${page ? `<a href="${link(page - 1)}">上一页</a>　` : ''}第 ${page + 1} 页${rows.length === 50 ? `　<a href="${link(page + 1)}">下一页</a>` : ''}</p>`;
-  return body;
-}
-
 /* ───────── 事件时间线（回合页、输入页共用） ───────── */
 
 export interface TrailOptions {
@@ -102,7 +85,37 @@ export function trail(events: ObsEvent[], t0: number, o: TrailOptions): string {
 
 /* ───────── /turns/:id ───────── */
 
-export interface InputInfo { key: string; kind: string; sender: string; text: string; scope: string }
+export interface InputInfo { key: string; kind: string; sender: string; text: string; scope: string; ts?: number }
+
+/**
+ * 本轮输入：开轮（received / dispatched）与插话（steered）记下的入站键，按出现顺序去重，正文与发送者取 in:<键> 的收到事件；
+ * 定时输入没有 in: 收到事件，只有一条输入时用开轮事件里的正文。settings 为开轮设置快照，缺失时取输入的 admitted 快照。
+ */
+export function turnInputs(all: ObsEvent[], inputEvents: (key: string) => ObsEvent[]): { inputs: InputInfo[]; settings?: Record<string, unknown> } {
+  const keys: string[] = [];
+  for (const e of all) {
+    if (!['received', 'dispatched', 'steered'].includes(e.stage)) continue;
+    const d = detail(e), list: unknown[] = Array.isArray(d.inputs) ? d.inputs : typeof d.input === 'string' ? [d.input] : [];
+    for (const k of list) if (typeof k === 'string' && !keys.includes(k)) keys.push(k);
+  }
+  const received = all.find(e => e.stage === 'received');
+  let settings = all.filter(e => e.stage === 'dispatched').map(e => asObj(detail(e).settings)).find(v => typeof v.backend === 'string');
+  const inputs: InputInfo[] = keys.slice(0, 50).map(k => {
+    const evs = inputEvents(k);
+    const rec = evs.find(e => e.stage === 'received' || e.stage === 'recovered'), queued = evs.find(e => e.stage === 'queued');
+    const admitted = evs.find(e => e.stage === 'admitted');
+    if (!settings && admitted) { const snap = asObj(detail(admitted).settings); if (typeof snap.backend === 'string') settings = snap; }
+    const rd = rec ? detail(rec) : {};
+    const ts = rec?.ts ?? queued?.ts ?? received?.ts;
+    return { key: k, kind: queued ? str(detail(queued).kind) : k.startsWith('run_') ? 'scheduled' : '',
+      sender: str(rd.sender), text: str(rd.text), scope: rec?.scope ?? queued?.scope ?? '', ...(ts !== undefined ? { ts } : {}) };
+  });
+  if (inputs.length === 1 && !inputs[0]!.text && received) {
+    const rd = detail(received);
+    inputs[0] = { ...inputs[0]!, text: str(rd.text), sender: inputs[0]!.sender || str(rd.sender) };
+  }
+  return { inputs, ...(settings ? { settings } : {}) };
+}
 export interface TurnPageData {
   id: string;
   /** 本回合全部事件（最多 2000 条），用于汇总 */

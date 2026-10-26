@@ -90,7 +90,10 @@ export function createSessionRoutes(adapters: SessionAdapters, sse: (res: Server
       }
       if (p === '/api/agents/topology') {
         if (!topology) throw new SessionError(404, '拓扑数据源未接入');
-        sessionJson(res, 200, await topologyRows(await topology(), adapters)); return;
+        const thread = q.get('thread') ?? undefined;
+        const rows = await topologyRows(await topology(), adapters, { brief: q.get('brief') === '1', ...(thread !== undefined ? { thread } : {}) });
+        if (thread !== undefined && !rows.length) throw new SessionError(404, '没有这个会话的拓扑');
+        sessionJson(res, 200, rows); return;
       }
       if (p === '/agents/stream') {
         const id = segment(q.get('session') ?? '');
