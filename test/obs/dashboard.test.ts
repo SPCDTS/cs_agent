@@ -26,7 +26,7 @@ import { dispatchSettingsLine, type ModelCatalogView } from '../../src/obs/ui/da
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
-const defaults: RuntimeSettings = { codexModel: 'codex/gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES }, memory: { extract: {} } };
+const defaults: RuntimeSettings = { codexModel: 'codex/gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES }, memory: { extract: {}, consolidate: true } };
 
 async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv; modelCatalog?: ModelCatalogView; sendBreakers?: DashboardOptions['sendBreakers']; memoryExtract?: DashboardOptions['memoryExtract'] } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
@@ -358,7 +358,7 @@ describe('面板二期页面', () => {
     expect(bad.status).toBe(400); expect(await bad.text()).toContain('抽取开关未保存');
     expect(JSON.parse((await (await r.get('/api/memory/extract')).text()))).toMatchObject({ queue: 2, running: 'pi:t9', today: { counts: { owner: 3 } } });
     const home = await (await r.get('/memory')).text();
-    expect(home).toContain('记忆抽取'); expect(home).toContain('2 条排队'); expect(home).toContain('owner 私聊 3/200');
+    expect(home).toContain('记忆任务'); expect(home).toContain('href="/memory/jobs"'); expect(home).toContain('2 条排队'); expect(home).toContain('owner 私聊 3/200');
     expect(home).toContain('重复 1'); expect(home).toContain('材料过短'); expect(home).toContain('href="/turns/pi%3At8"');
   });
 

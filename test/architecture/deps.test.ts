@@ -159,10 +159,13 @@ describe('包结构与分层', () => {
   it('记忆层两个目录存在，且实际依赖符合层级：context/memory 只到 shared，agent/memory 只到 context 与 agent 的非后端模块', () => {
     const memoryEdges = edges.filter(([from]) => from.startsWith('src/context/memory/') || from.startsWith('src/agent/memory/'));
     expect(sourceFiles.filter(f => f.startsWith('src/context/memory/'))).toEqual(['src/context/memory/profile.ts', 'src/context/memory/store.ts', 'src/context/memory/types.ts']);
-    expect(sourceFiles.filter(f => f.startsWith('src/agent/memory/'))).toEqual(['src/agent/memory/extractor.ts', 'src/agent/memory/render.ts', 'src/agent/memory/service.ts', 'src/agent/memory/tools.ts']);
+    expect(sourceFiles.filter(f => f.startsWith('src/agent/memory/'))).toEqual(['src/agent/memory/consolidate.ts', 'src/agent/memory/extractor.ts', 'src/agent/memory/render.ts', 'src/agent/memory/service.ts', 'src/agent/memory/tools.ts']);
     // 回合后抽取不改画像、不发消息（docs/MEMORY-DESIGN.md §8.0）：不依赖画像存储与发送服务
     expect(edges.filter(([from, to]) => from === 'src/agent/memory/extractor.ts' &&
       (to === 'src/context/memory/profile.ts' || to === 'src/agent/send-service.ts' || packageOf(to) === 'qq')).map(edgeKey)).toEqual([]);
+    // 夜间整理（§9）不发消息、不直接读消息库：来源是否尚存经 main 注入的 messageExists 查询
+    expect(edges.filter(([from, to]) => from === 'src/agent/memory/consolidate.ts' &&
+      (to === 'src/agent/send-service.ts' || to === 'src/context/store.ts' || packageOf(to) === 'qq' || packageOf(to) === 'channel')).map(edgeKey)).toEqual([]);
     for (const [from, to] of memoryEdges) {
       const ok = from.startsWith('src/context/memory/') ? to.startsWith('src/context/memory/') || packageOf(to) === 'shared'
         : ['shared', 'channel', 'context', 'agent'].includes(packageOf(to)) && !violations([from, to]).length;

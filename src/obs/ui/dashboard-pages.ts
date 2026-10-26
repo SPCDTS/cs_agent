@@ -1,7 +1,8 @@
 /** 面板页面与页面路由；数据经只读契约传入，HTML 保持原样。 */
 import { imagesPageBody, imageDetailBody, IMAGES_NOTE } from './images-pages.js';
 import { entriesPageBody, entryFilters, entryPageBody, entryQuery } from './memory-entries-pages.js';
-import type { MemoryEntryDetail, MemoryEntryPage, MemoryExtractStatus } from '../memory/types.js';
+import type { MemoryEntryDetail, MemoryEntryPage, MemoryExtractStatus, MemoryJobsStatus, MemoryProfileView } from '../memory/types.js';
+import { jobsPageBody, profilePageBody } from './memory-jobs-pages.js';
 import type { ImagePage, ImageDetail } from '../memory/types.js';
 import { redact, redactText } from '../../shared/redact.js';
 import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnRecallSection, type RecallDetail, type RecallList } from './recall-pages.js';
@@ -28,8 +29,8 @@ export interface RuntimeSettingsView {
   agentBackend: string; backendOverrides: Record<string, string>; codexReasoningEffort: string; alertOwner: boolean;
   codexModel: string; piModel: string; piThinkingLevel: string;
   sendRules?: SendRulesView;
-  /** 记忆：各命名空间的回合后抽取开关（缺键的只有 owner 开启） */
-  memory?: { extract: Record<string, boolean> };
+  /** 记忆：各命名空间的回合后抽取开关（缺键的只有 owner 开启）与夜间整理开关（缺省开） */
+  memory?: { extract: Record<string, boolean>; consolidate?: boolean };
 }
 /** bridge 发送规则的五个限额（与 channel/send-rules 的 SendRuleLimits 同形）。 */
 export interface SendRulesView { perChatMinute: number; perChatHour: number; chatBreakerMinutes: number; globalMinute: number; globalBreakerMinutes: number }
@@ -57,6 +58,8 @@ export interface DashboardPageOptions {
   memoryEntries?: unknown;
   /** 回合后记忆抽取已接入：设置页列出这些命名空间的开关（状态经 /api/memory/extract 读取） */
   memoryExtract?: { namespaces(): string[] };
+  /** 画像编辑与夜间整理已接入（数据经 /api/memory/profile/*、/api/memory/jobs 读取） */
+  memoryJobs?: unknown;
   context: { scopes(): string[]; scopeNames?(): Record<string, string> };
   contextUsage?: ContextUsageView;
   settings?: { current(): Readonly<RuntimeSettingsView>; defaults: RuntimeSettingsView };
@@ -545,6 +548,22 @@ export function createDashboardPages(deps: DashboardPageDeps) {
       if (r.status !== 200) return shell('记忆条目', `<div class="flash err" role="alert">读取记忆条目失败：${esc(apiError(r))}</div><p class="mt"><a href="/memory/entries">返回记忆条目</a></p>`);
       return shell(`记忆 #${key}`, entryPageBody(r.body as MemoryEntryDetail, csrf), { lead: '条目正文、来源、取代链与版本历史；遗忘只做标记，可恢复到遗忘前的状态。' });
     }
+    if (p === '/memory/jobs') {
+      if (!opts.memoryJobs) return null;
+      const r = await api('/api/memory/jobs');
+      return shell('记忆任务', jobsPageBody(r.status === 200 ? r.body as MemoryJobsStatus : { error: apiError(r) }, csrf, now),
+        { lead: '回合后抽取、夜间整理的报告与下次计划、待确认的画像提议，以及按批次回退整理。' });
+    }
+    if (p === '/memory/profile' || p.startsWith('/memory/profile/')) {
+      if (!opts.memoryJobs) return null;
+      const raw = p === '/memory/profile' ? encodeURIComponent((q.get('ns') ?? '').trim() || 'owner') : p.slice('/memory/profile/'.length);
+      const r = await api(`/api/memory/profile/${raw}`);
+      if (r.status === 400 || r.status === 404) return null;
+      if (r.status !== 200) return shell('画像', `<div class="flash err" role="alert">读取画像失败：${esc(apiError(r))}</div><p class="mt"><a href="/memory/jobs">返回记忆任务</a></p>`);
+      const v = r.body as MemoryProfileView, draft = q.get('draft');
+      return shell(`画像 · ${v.ns_label}`, profilePageBody(v, csrf, draft ?? undefined),
+        { lead: '核心画像 profile.md：称呼、长期项目、沟通偏好、对助手的固定要求等每轮都该知道的内容；保存按 revision 检查冲突。' });
+    }
     if (p === '/memory/archives') {
       const r = await api('/api/memory/archives');
       return shell('线程归档', archivesPageBody(r.status === 200 ? r.body as ArchivesResult : { error: apiError(r) }), { lead: '重置线程时归档的 Codex / Pi 会话，以及 Pi 的上下文压缩记录；点会话 ID 进入回合流。' });
@@ -817,10 +836,11 @@ ${defaults ? `<div class="hint">默认：${SEND_RULE_INPUTS.map(([k, label]) => 
     const all = [...new Set(['owner', ...Object.keys(memory.extract), ...opts.memoryExtract.namespaces()])]
       .sort((a, b) => a === 'owner' ? -1 : b === 'owner' ? 1 : a.localeCompare(b));
     const label = (ns: string) => ns === 'owner' ? 'owner 私聊' : names[ns] ? `群 ${names[ns]}` : scopeLabel(ns);
-    return `<section id="memory-extract"><h2>记忆抽取</h2><p class="hint">用户回合正常结束后，用廉价模型把本轮对话（输入与发出的消息）提炼成记忆条目，作者记为 extractor，可在<a href="/memory/entries">记忆条目</a>遗忘。缺省只对 owner 私聊开启；群与其他私聊需在这里打开。只对能确证发送者的用户回合生效，定时与唤醒回合不抽取。运行状态见<a href="/memory">记忆</a>首页。</p>
-<form method="post" action="/settings/memory-extract" class="sheet pad">${csrfField(csrf)}<div class="choices">${all.map(ns =>
-      `<input type="hidden" name="ns" value="${esc(ns)}"><label class="choice"><input type="checkbox" name="extract:${esc(ns)}"${(memory.extract[ns] ?? ns === 'owner') ? ' checked' : ''}><span>${esc(label(ns))}<small class="mono">${esc(ns)}</small></span></label>`).join('')}</div>
-<p class="mt"><button>保存抽取开关</button></p></form></section>`;
+    const consolidate = opts.memoryJobs ? `<fieldset class="mt"><legend>记忆整理</legend><input type="hidden" name="consolidate_field" value="1"><label class="choice"><input type="checkbox" name="consolidate"${memory.consolidate !== false ? ' checked' : ''}><span>每天在聊天记录整理之后运行夜间整理<small>去重、近似冲突判断、来源撤回标孤立、180 天未召回的经历降级、owner 画像改写提议（只提议不写入）；每个命名空间一个批次，可在<a href="/memory/jobs">记忆任务</a>按批次回退。</small></span></label></fieldset>` : '';
+    return `<section id="memory-extract"><h2>记忆抽取与整理</h2><p class="hint">用户回合正常结束后，用廉价模型把本轮对话（输入与发出的消息）提炼成记忆条目，作者记为 extractor，可在<a href="/memory/entries">记忆条目</a>遗忘。缺省只对 owner 私聊开启；群与其他私聊需在这里打开。只对能确证发送者的用户回合生效，定时与唤醒回合不抽取。运行状态见<a href="/memory/jobs">记忆任务</a>。</p>
+<form method="post" action="/settings/memory-extract" class="sheet pad">${csrfField(csrf)}<fieldset><legend>回合后抽取</legend><div class="choices">${all.map(ns =>
+      `<input type="hidden" name="ns" value="${esc(ns)}"><label class="choice"><input type="checkbox" name="extract:${esc(ns)}"${(memory.extract[ns] ?? ns === 'owner') ? ' checked' : ''}><span>${esc(label(ns))}<small class="mono">${esc(ns)}</small></span></label>`).join('')}</div></fieldset>${consolidate}
+<p class="mt"><button>保存记忆设置</button></p></form></section>`;
   }
 
   async function grantsCard(): Promise<string> {

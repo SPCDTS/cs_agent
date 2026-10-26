@@ -4,7 +4,7 @@ import os from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ObsStore } from "../../src/obs/store.js";
 import { Trace, trace } from "../../src/shared/trace.js";
-import { SettingsStore, SETTINGS_KEY, memoryExtractEnabled, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
+import { SettingsStore, SETTINGS_KEY, memoryConsolidateEnabled, memoryExtractEnabled, settingsDefaults, type RuntimeSettings } from "../../src/agent/settings.js";
 import { DEFAULT_SEND_RULES } from "../../src/channel/send-rules.js";
 import { CodexBackend } from "../../src/agent/backends/codex.js";
 import type { BackendName, SettingsSnapshot } from "../../src/agent/backends/types.js";
@@ -28,7 +28,7 @@ async function codexBackend(dir: string, script: CodexScript, turns: Constructor
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const tmp = () => { const dir = mkdtempSync(path.join(os.tmpdir(), "cs-settings-")); clean.push(() => rmSync(dir, { recursive: true, force: true })); return dir; };
-const defaults: RuntimeSettings = { codexModel: "codex/gpt-6.1-sol", piModel: "deepseek-flash", piThinkingLevel: "low", agentBackend: "codex", backendOverrides: {}, codexReasoningEffort: "high", alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES }, memory: { extract: {} } };
+const defaults: RuntimeSettings = { codexModel: "codex/gpt-6.1-sol", piModel: "deepseek-flash", piThinkingLevel: "low", agentBackend: "codex", backendOverrides: {}, codexReasoningEffort: "high", alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES }, memory: { extract: {}, consolidate: true } };
 
 describe("运行时设置", () => {
   it(".env 为默认；修改原子落盘并在重开后保留；记录 settings_changed 事件", async () => {
@@ -87,14 +87,14 @@ describe("运行时设置", () => {
     expect(memoryExtractEnabled(defaults, "group:7")).toBe(false);
     expect(memoryExtractEnabled(defaults, "private:5")).toBe(false);
     writeFileSync(file, JSON.stringify({ version: 1, settings: { agentBackend: "pi" } }), "utf8");
-    expect((await SettingsStore.open(dir, defaults, new Trace())).current().memory).toEqual({ extract: {} });
+    expect((await SettingsStore.open(dir, defaults, new Trace())).current().memory).toEqual({ extract: {}, consolidate: true });
     writeFileSync(file, JSON.stringify({ version: 1, settings: { memory: { extract: { "group:7": true } } } }), "utf8");
     const s = await SettingsStore.open(dir, defaults, new Trace());
     expect(s.current().memory.extract).toEqual({ "group:7": true });
     expect(memoryExtractEnabled(s.current(), "group:7")).toBe(true);
     await s.update({ memory: { extract: { owner: false, "group:7": true } } }, "test");
     expect(memoryExtractEnabled(s.current(), "owner")).toBe(false);
-    expect(JSON.parse(readFileSync(file, "utf8")).settings.memory).toEqual({ extract: { owner: false, "group:7": true } });
+    expect(JSON.parse(readFileSync(file, "utf8")).settings.memory).toEqual({ extract: { owner: false, "group:7": true }, consolidate: true });
     await expect(s.update({ memory: { extract: { "group:abc": true } } }, "test")).rejects.toThrow();
     // 与缺省相同的键（owner 开、其余关）不保存：600 个关闭的群加 owner 关闭，只剩 { owner: false }
     const many = Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`group:${i + 1}`, false]));
@@ -103,8 +103,24 @@ describe("运行时设置", () => {
     await s.update({ memory: { extract: { owner: true } } }, "test");
     expect(s.current().memory.extract).toEqual({});
     expect(memoryExtractEnabled(s.current(), "owner")).toBe(true);
-    await expect(s.update({ memory: { extract: { owner: true }, consolidate: true } as never }, "test")).rejects.toThrow();
+    await expect(s.update({ memory: { extract: { owner: true }, other: true } as never }, "test")).rejects.toThrow();
     expect(() => { (s.current().memory.extract as Record<string, boolean>).owner = true; }).toThrow();
+  });
+
+  it("记忆整理开关：缺省开；只改 consolidate 不动抽取开关，只改抽取开关不把整理复位；旧文件缺键补缺省；非布尔拒绝", async () => {
+    const dir = tmp(), file = path.join(dir, "settings.json");
+    expect(memoryConsolidateEnabled(defaults)).toBe(true);
+    writeFileSync(file, JSON.stringify({ version: 1, settings: { memory: { extract: { "group:7": true } } } }), "utf8");
+    const s = await SettingsStore.open(dir, defaults, new Trace());
+    expect(s.current().memory).toEqual({ extract: { "group:7": true }, consolidate: true });
+    await s.update({ memory: { consolidate: false } }, "test");
+    expect(memoryConsolidateEnabled(s.current())).toBe(false);
+    expect(s.current().memory.extract).toEqual({ "group:7": true });
+    await s.update({ memory: { extract: {} } }, "test");
+    expect(s.current().memory).toEqual({ extract: {}, consolidate: false });
+    expect(JSON.parse(readFileSync(file, "utf8")).settings.memory).toEqual({ extract: {}, consolidate: false });
+    expect((await SettingsStore.open(dir, defaults, new Trace())).current().memory.consolidate).toBe(false);
+    await expect(s.update({ memory: { consolidate: "yes" } as never }, "test")).rejects.toThrow();
   });
 
   it("settingsDefaults 取自 .env；不在允许列表的推理强度回落 high", () => {

@@ -28,7 +28,7 @@
 | `/agents` | 顶部"拓扑"概览：每个会话一张卡，主 agent 一行（会话、后端、状态），未结束的子 agent 是小节点，已结束的合成一个计数（完成 / 失败 / 停止）；空闲且没有子 agent 的会话折成一行。页面可见时每 3 秒取 `/agents/topology` 概览片段刷新（不读会话正文）；展开一张卡时才读 `/agents/topology/:thread`（主 agent 最近动作，以及全部子 agent 的任务、最近动作、结果与"查看过程"链接），已展开的卡在刷新后保持展开；下方 Codex / Pi 两张卡：活动 / 归档会话数、索引进度、每条线程的占用条与"监控"链接 | `POST /{codex,pi}/{reset,compact}`、`POST /thread/stop` |
 | `/agents/<后端>/sessions[/…]` | 会话 → 回合浏览与上下文分析（§6、§7）；`/codex`、`/pi` 303 到对应会话列表 | — |
 | `/context-usage` | 上下文监控（§5） | — |
-| `/memory[/…]` | 记忆：总览、时间线、摘要、检索检查器、召回记录、图片、归档、记忆条目（§8） | `POST /memory/entries/<id>/{forget,restore}` |
+| `/memory[/…]` | 记忆：总览、时间线、摘要、检索检查器、召回记录、图片、归档、记忆条目、画像、记忆任务（§8） | `POST /memory/entries/<id>/{forget,restore}`、`POST /memory/profile/<ns>`、`POST /memory/proposals/<id>/{accept,reject}`、`POST /memory/consolidate/run`、`POST /memory/consolidate/<batch_id>/rollback` |
 | `/context` | 用 qq_context 工具浏览 / 检索消息库（与模型看到的格式一致） | — |
 | `/schedules`、`/schedules/<id>` | 定时任务（§2.3） | `POST /schedules/<id>/{pause,resume,run,delete}` |
 | `/skills`、`/skills/<名称>`、`/skills/<名称>.zip` | 技能列表（含诊断）、SKILL.md 与目录文件、zip 下载（[ARCHITECTURE.md](ARCHITECTURE.md) §7） | `POST /skills/upload`、`POST /skills/<名称>/delete` |
@@ -40,7 +40,7 @@
 ### 2.1 设置
 
 - **运行时设置**（`POST /settings`）：`${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexModel`、`codexReasoningEffort`、`piModel`、`piThinkingLevel`、`alertOwner`（发送规则 `sendRules` 与记忆抽取开关 `memory` 各有独立表单，见下）。模型下拉来自 magpie 目录，档位含 `auto`。后端、模型与档位在开轮时冻结为本轮设置快照（记在首条输入的 `admitted` 与回合的 `dispatched` 事件，回合页显示）；告警开关现读。旧文件中的 `codexReplyMode` 读取时剥离。
-- **记忆抽取**（`POST /settings/memory-extract`）：`memory.extract` 为各命名空间的回合后抽取开关（[MEMORY-DESIGN.md](MEMORY-DESIGN.md) §8.1）。每个出现过的命名空间一行（宿主见过的会话键、已有记忆的命名空间与已保存的键，owner 在首行）；没有键的命名空间只有 `owner` 开启。表单以隐藏字段 `ns` 列出本次的命名空间、勾选的为 `extract:<ns>=on`，保存只改列出的键，其余保留；只存与缺省不同的覆盖项（owner 缺省开、其余缺省关，等于缺省的键删掉，所以提交再多关闭的命名空间也不会撞 500 项上限）；命名空间不合法 400。抽取器每次现读。
+- **记忆抽取与整理**（`POST /settings/memory-extract`）：同一表单两组开关。`memory.consolidate` 为夜间整理开关（缺省开，[MEMORY-DESIGN.md](MEMORY-DESIGN.md) §9）：表单带隐藏字段 `consolidate_field` 时按复选框 `consolidate` 保存，不带时保持原值；`memory` 按字段合并，只改一组开关不会把另一组复位。`memory.extract` 为各命名空间的回合后抽取开关（[MEMORY-DESIGN.md](MEMORY-DESIGN.md) §8.1）。每个出现过的命名空间一行（宿主见过的会话键、已有记忆的命名空间与已保存的键，owner 在首行）；没有键的命名空间只有 `owner` 开启。表单以隐藏字段 `ns` 列出本次的命名空间、勾选的为 `extract:<ns>=on`，保存只改列出的键，其余保留；只存与缺省不同的覆盖项（owner 缺省开、其余缺省关，等于缺省的键删掉，所以提交再多关闭的命名空间也不会撞 500 项上限）；命名空间不合法 400。抽取器每次现读。
 - **发送规则**（`POST /settings/send-rules`）：`sendRules` 的五项数值（每会话每分钟 / 每小时、会话熔断分钟、全局每分钟、全局熔断分钟），每次发送前现读；当前熔断可在同一节解除（`POST /settings/send-breakers/reset`，记 `send_breaker_reset`）。
 - **授权**（`POST /settings/grants/{add,revoke}`）：显示用户、send / schedule 能力、目标 ref、来源 scopes、授权者及有效 / 已过期。添加替换该用户的整条授权（目标留空 = 不能主动发送，来源留空 = 任何会话，时效留空 = 长期）；撤销删除整条。持有面板口令者代表 owner，未配置 owner 时只展示。变更记 `auth_changed`（`source=panel`）。
 - **codex.md**（`POST /settings/codex-prompt`）：经 `CodexPromptStore`（`read()` / `save(custom, revision)` / `subscribe()`）读写；提交前 CRLF / CR 规范为 LF；revision 不符 → 409"已在别处被修改"，存储拒绝（为空、超过 64 KB、含凭据样式内容）→ 409 并显示脱敏后的原因。当前内容含已注册秘密时只读展示脱敏版。受管段只读折叠，完整 AGENTS.md 在 `/codex/agents-md`。`prompt_changed`（`target: "codex"`）只由面板对存储的唯一订阅写入。
@@ -172,6 +172,8 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 | `/memory/images`、`/memory/images/<scope>/<message_id>/<ordinal>` | 图片画廊与详情（§8.3） |
 | `/memory/archives` | 重置归档的 Codex / Pi 会话（链到会话页）与 Pi 压缩记录 |
 | `/memory/entries?ns=&kind=&status=&q=`、`/memory/entries/<id>` | 记忆条目列表与详情，可遗忘 / 恢复（§8.4） |
+| `/memory/profile/<ns>`（`/memory/profile?ns=` 同） | 画像编辑器：当前 `profile.md`、revision、大小与上限，保存走 CAS（§8.6） |
+| `/memory/jobs` | 记忆任务：回合后抽取状态、夜间整理报告（上次 / 下次 / 各步计数）与立即运行、待确认画像提议（当前画像与建议并排，采纳 / 拒绝）、最近 10 个整理批次与回退（§8.6） |
 
 ### 8.1 消息库接口
 
@@ -205,14 +207,26 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 - `GET /api/memory/entries?ns=&kind=&status=&q=&page=` → `{items: MemoryEntry[], total, page, has_more, namespaces}`，每页 50，按更新时间倒序。`ns` 为 `owner` / `group:<id>` / `private:<qq>`，`kind` 五种之一，`status` 缺省为全部状态；`q` 截前 100 字，按空白切词、全部命中正文或 subject（与 `mem_search` 同一 FTS）。条目的时间字段为毫秒，`source` 为写入时本轮最后一条输入（会话、显示名、消息 id、回合 id、前后一小时的时间线链接），面板写入或无来源为 null。
 - `GET /api/memory/entries/<id>` → `{entry, versions, links}`：`versions` 每次正文或状态变化一行（时间、操作者、前后状态、正文是否改动、原因），不返回快照正文；`links` 为取代链。不存在 404。
 - `POST /api/memory/entries/<id>/forget`、`/restore`：只接受 `application/json`（≤4 KiB、不带其它字段），同源检查与 CSRF（`X-CSRF-Token` 头或 `_csrf` 字段）与 `/api/schedules` 相同，返回更新后的详情。遗忘只标 `forgotten`，不删行；恢复回到遗忘前的状态（取最近一次遗忘版本的前状态，查不到为 active），未遗忘的条目恢复为 409。操作者记为 `dashboard`，写 `@memory` 的 `memory_write` 事件。
-- 页面：`/memory/entries` 筛选表单（命名空间、种类、状态、关键词）与表格，每行一个"遗忘"或"恢复"按钮；`/memory/entries/<id>` 显示元数据、正文、取代链与版本历史。按钮是表单 POST 到 `/memory/entries/<id>/{forget,restore}`（面板写操作的 cookie、同源与 `_csrf` 约束），成功 303 回详情页并带 `?ok=memoryForgotten` / `memoryRestored`。画像编辑与整理状态尚未提供。
+- 页面：`/memory/entries` 筛选表单（命名空间、种类、状态、关键词）与表格，每行一个"遗忘"或"恢复"按钮；`/memory/entries/<id>` 显示元数据、正文、取代链与版本历史。按钮是表单 POST 到 `/memory/entries/<id>/{forget,restore}`（面板写操作的 cookie、同源与 `_csrf` 约束），成功 303 回详情页并带 `?ok=memoryForgotten` / `memoryRestored`。画像编辑与整理见 §8.6。
 
 ### 8.5 记忆抽取
 
 回合后抽取（[ARCHITECTURE.md](ARCHITECTURE.md) §9.1）的运行状态在进程内存里，重启清零；每次结果另记回合的 `memory_extract` 事件（回合页可见，`turn:<id>`）。
 
 - `GET /api/memory/extract` → `{model, available, queue, running, daily_limit, today: {date, counts}, recent}`：`available` 为抽取模型可用；`queue` 为排队条数（不含正在跑的），`running` 为正在处理的回合 id；`today.counts` 为今天（北京时间）各命名空间的模型调用次数，上限 `daily_limit`（200）；`recent` 为最近 10 次结果（最新在前）：`{turn_id, ns, at, status: ok|skipped|failed, reason?, candidates, written, superseded, dropped, ms}`，`reason` 为 `too_short` / `disabled` / `quota` / `queue_full` / `invalid_json` / `timeout` / `no_model` / `model_error` / `closed`（关闭超时后才返回），`dropped` 为按原因计数（`low_confidence` / `duplicate` / `secret` / `invalid_time` / `over_limit` / `supersedes_ignored` / `store_error`）。未接入时 404。
-- `/memory` 首页"记忆抽取"卡：模型、队列、今日次数与最近 10 次结果（链到回合页）；开关在设置页（§2.1）。
+- `/memory` 首页"记忆任务"卡：模型、队列、今日次数与最近 10 次结果（链到回合页），并链到 `/memory/jobs`（§8.6）；开关在设置页（§2.1）。
+
+### 8.6 画像与记忆任务
+
+画像是 `${DATA_DIR}/memory/<ns>/profile.md`，夜间整理见 [ARCHITECTURE.md](ARCHITECTURE.md) §9.1；接口在 `src/obs/memory/jobs.ts`，类型见 `src/obs/memory/types.ts`。写接口与 §8.4 相同：只接受 `application/json`、同源与 CSRF（`X-CSRF-Token` 头或 `_csrf` 字段），多余字段 400。
+
+- `GET /api/memory/profile/<ns>` → `{ns, ns_label, text, revision, updated_at, bytes, max_bytes, oversize, redacted_inside}`：`ns` 为 URL 编码的 `owner` / `group:<id>` / `private:<qq>`，其余 400；不存在为空文本、`revision: "none"`；`oversize` 为超过 4 KiB（不进入提示）；`redacted_inside` 为原文含凭据样式内容（页面只读展示脱敏版）。
+- `POST /api/memory/profile/<ns>` `{text, revision}`（≤64 KiB）：整体替换，CAS；revision 不符 409 并带 `current: {text, revision}`；超限或含凭据样式内容 400。作者记为 `dashboard`，写 `@memory` 的 `memory_write`（`tool: dashboard_profile`，只记字节数）。
+- `GET /api/memory/jobs` → `{extract, consolidate, proposals, batches}`：`extract` 同 `/api/memory/extract`（未接入为 null）；`consolidate` 为 `{enabled, running, available, model, last_run, next_run, last_report}`，`last_report` 为上次完成运行的报告 `{status, started_at, ms, batches, totals}`（每个批次：`ns`、`batch_id`、`dedup`、`conflicts`（`pairs` / `superseded` / `coexist` / `keep` / `protected` / `skipped?`）、`orphaned`、`retired`、`proposal`、`usage`、`ms`、`errors`），`next_run` 随衰老调度；`proposals` 为待确认的画像提议，带该命名空间的当前画像与 `stale`（画像在提议生成后已改过，采纳会 409）；`batches` 为最近 10 个有变更的整理批次（`changes`、`at`、`rolled_back`）。未接入 404。
+- `POST /api/memory/proposals/<id>/accept`：以提议的 `based_on_revision` 做 CAS 写入画像，画像已变 409（先刷新对照）；`/reject`：标拒绝。不存在 404，已处理 409。
+- `POST /api/memory/consolidate/run` → 202 `{result: started | running}`，不等结果；整理开关关闭时 409。
+- `POST /api/memory/consolidate/<batch_id>/rollback` → `{batch_id, restored, skipped}`：未知批次 404，已回退或仍在运行 409；写 `@memory` 的 `memory_write`（`tool: consolidate_rollback`）。
+- 页面：`/memory/profile/<ns>` 是表单 POST 到同一路径（字段 `content`、`revision`，CRLF 规范为 LF），成功 303 回画像页并带 `?ok=profileSaved`；失败时以原状态码（冲突 409、校验 400）重新渲染画像页，上面是当前内容与新 revision，下面保留提交的草稿（脱敏展示）。`/memory/jobs` 的采纳 / 拒绝、立即运行与回退是表单 POST 到 `/memory/proposals/<id>/{accept,reject}`、`/memory/consolidate/run`、`/memory/consolidate/<batch_id>/rollback`，成功 303 回 `/memory/jobs`，失败为带"返回"链接的错误页。
 
 ## 9. 观测存储与保留
 

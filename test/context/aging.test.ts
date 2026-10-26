@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, type FauxResponseFactory } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGING_LAST_RUN_KEY, msUntilNextRun, needsCatchUp, runAging, startAgingScheduler, type AgingOptions } from "../../src/context/aging.js";
 import { ContextStore } from "../../src/context/store.js";
 import type { InboundMessage } from "../../src/channel/types.js";
@@ -147,6 +147,22 @@ describe("scheduler", () => {
     expect(rep).toMatchObject({ day_summaries: 0, failed: 0 });
     expect(needsCatchUp(r.store, NOW + 3600_000)).toBe(false);
     expect(needsCatchUp(r.store, NOW + 25 * 3600_000)).toBe(true);
+  });
+
+  it("记忆整理挂在衰老之后：补跑衰老时随后跑整理；衰老不需补跑而整理需要时只跑整理", async () => {
+    const r = rig([]);
+    const order: string[] = [];
+    let due = true;
+    const after = { run: async () => { order.push(r.store.getMeta(AGING_LAST_RUN_KEY) ? "after-aging" : "before-aging"); due = false; }, needsCatchUp: () => due };
+    const s = startAgingScheduler({ ...r.opts, after });
+    await vi.waitFor(() => expect(order).toEqual(["after-aging"]));
+    s.stop();
+    // 衰老刚跑过，整理却超过 24 小时没跑（例如上次被关闭打断）：启动只补跑整理
+    due = true;
+    const s2 = startAgingScheduler({ ...r.opts, after });
+    expect(s2.running()).toBe(false);
+    await vi.waitFor(() => expect(order).toEqual(["after-aging", "after-aging"]));
+    s2.stop();
   });
 
   it("a crashing store never throws out of the scheduler", async () => {

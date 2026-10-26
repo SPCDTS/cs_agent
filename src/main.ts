@@ -58,9 +58,10 @@ import { isMemoryNs } from "./context/memory/types.js";
 import { ProfileStore } from "./context/memory/profile.js";
 import { MemoryService } from "./agent/memory/service.js";
 import { MemoryExtractor } from "./agent/memory/extractor.js";
+import { MemoryConsolidator } from "./agent/memory/consolidate.js";
 import { isOwner } from "./shared/owners.js";
 import { scopeLabel } from "./context/access.js";
-import { SettingsStore, memoryExtractEnabled, settingsDefaults } from "./agent/settings.js";
+import { SettingsStore, memoryConsolidateEnabled, memoryExtractEnabled, settingsDefaults } from "./agent/settings.js";
 import { msUntilNextRun, startAgingScheduler } from "./context/aging.js";
 
 let closeLogs = async () => {};
@@ -125,7 +126,8 @@ async function main(): Promise<void> {
   const instrumentation = obs.degraded ? undefined : MemoryInstrumentation.fromDb(obs.db);
   // 记忆层（docs/MEMORY-DESIGN.md）：${DATA_DIR}/memory.sqlite 与 memory/<ns>/profile.md；两个后端与面板共用一个服务。
   const memoryStore = new MemoryStore(cfg.DATA_DIR);
-  const memory = new MemoryService({ store: memoryStore, profiles: new ProfileStore(cfg.DATA_DIR), owners: cfg.owners,
+  const profiles = new ProfileStore(cfg.DATA_DIR);
+  const memory = new MemoryService({ store: memoryStore, profiles, owners: cfg.owners,
     maxChars: cfg.QQ_CONTEXT_MAX_CHARS, inbound: key => inbox.get(key),
     scopeLabel: scope => scope.startsWith("group:") ? "群 " + (store.scopeNames()[scope] ?? scope.slice(6))
       : scope.startsWith("private:") && isOwner(cfg.owners, scope.slice(8)) ? "owner 私聊" : scopeLabel(scope) });
@@ -319,6 +321,14 @@ async function main(): Promise<void> {
   // 回合后记忆抽取（docs/MEMORY-DESIGN.md §8）：接在回合结束通知上的独立异步队列；模型与 auto 选档一样经 magpie 直调。
   const extractModel = cfg.MEMORY_EXTRACT_MODEL ? models.getModel("magpie", cfg.MEMORY_EXTRACT_MODEL) : undefined;
   if (cfg.MEMORY_EXTRACT_MODEL && !extractModel) log.warn("memory extract model unavailable; extraction skipped", { model: cfg.MEMORY_EXTRACT_MODEL });
+  /** 抽取与整理共用的模型调用：complete(prompt, signal)，输出上限各自给。 */
+  const memoryComplete = (maxTokens: number) => async (prompt: string, signal: AbortSignal) => {
+    const result = await models.completeSimple(extractModel!,
+      { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+      { signal, reasoning: undefined, maxTokens });
+    if (result.stopReason === "error" || result.stopReason === "aborted") throw new Error("记忆模型调用失败");
+    return { text: result.content.map(c => c.type === "text" ? c.text : "").join(""), usage: result.usage };
+  };
   const extractor = new MemoryExtractor({
     store: memoryStore, owners: cfg.owners, model: cfg.MEMORY_EXTRACT_MODEL, timeoutMs: cfg.MEMORY_EXTRACT_TIMEOUT_MS,
     inbound: turnId => getBridge().inbox.listInboundByTurn(turnId), outbox: turnId => getBridge().outbox.listOutboxByTurn(turnId),
@@ -327,13 +337,14 @@ async function main(): Promise<void> {
       return hit ? { nickname: hit.row.is_self ? "我" : hit.row.nickname || hit.row.user_id, text: hit.row.text } : undefined;
     },
     enabled: ns => memoryExtractEnabled(settings.current(), ns),
-    ...(extractModel ? { complete: async (prompt: string, signal: AbortSignal) => {
-      const result = await models.completeSimple(extractModel,
-        { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-        { signal, reasoning: undefined, maxTokens: 2000 });
-      if (result.stopReason === "error" || result.stopReason === "aborted") throw new Error("抽取模型失败");
-      return { text: result.content.map(c => c.type === "text" ? c.text : "").join(""), usage: result.usage };
-    } } : {}),
+    ...(extractModel ? { complete: memoryComplete(2000) } : {}),
+  });
+  // 夜间整理（docs/MEMORY-DESIGN.md §9）：挂在衰老调度器之后串行运行，与抽取同一个模型；孤立检查按消息 id 查消息库。
+  const consolidator = new MemoryConsolidator({
+    store: memoryStore, profiles, model: cfg.MEMORY_EXTRACT_MODEL, sourceRetentionDays: cfg.HISTORY_RAW_DAYS,
+    messageExists: (scope, messageId) => store.message({ kind: "scope", scope }, messageId) !== null,
+    enabled: () => memoryConsolidateEnabled(settings.current()),
+    ...(extractModel ? { complete: memoryComplete(6000) } : {}),
   });
   const monitor = new TurnMonitor({ inbox, sendService, scheduled, getHost: () => host, observers: [event => extractor.observe(event)] });
   // 会话宿主（§2.3）：状态存于派发 harness 的 cs.thread-host 文档；并发上限只限进行中的回合数。
@@ -352,6 +363,7 @@ async function main(): Promise<void> {
     rawHardMaxDays: cfg.HISTORY_RAW_HARD_MAX_DAYS,
     hour: cfg.HISTORY_SUMMARY_HOUR,
     cleanup: () => cleanupIncoming(cfg.DATA_DIR),
+    after: { run: () => consolidator.run(), needsCatchUp: now => consolidator.needsCatchUp(now) },
   });
 
   // 常驻 codex app-server：先启动（握手在后台进行），线程在首次开轮时加载。
@@ -440,7 +452,12 @@ async function main(): Promise<void> {
       scopeLabel: (scope: string) => memory.label(scope) },
     // 设置页列出的命名空间：宿主见过的会话与已有记忆的命名空间
     memoryExtract: { status: () => extractor.status(),
-      namespaces: () => [...new Set([...host.keys().filter(isMemoryNs), ...memoryStore.namespaces()])] } };
+      namespaces: () => [...new Set([...host.keys().filter(isMemoryNs), ...memoryStore.namespaces()])] },
+    // 画像编辑与夜间整理（/memory/profile/<ns>、/memory/jobs）：下次整理随衰老调度
+    memoryJobs: { profiles, store: memoryStore, consolidator,
+      saveProfile: (ns: string, text: string, revision: string) => memory.saveProfileFromDashboard(ns, text, revision),
+      nextRun: () => { const now = Date.now(); return now + msUntilNextRun(cfg.HISTORY_SUMMARY_HOUR, now); },
+      scopeLabel: (scope: string) => memory.label(scope) } };
   const dashboard = createDashboard({
     grants, schedules, ...dashboardData, config: cfg, store: obs, context: store, queue: () => queueStatus(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
@@ -514,14 +531,16 @@ async function main(): Promise<void> {
     aging.stop();
     schedules.stop();
     monitor.stopWatchdog();
-    // 记忆抽取：不再收新回合，正在跑的那一条在关闭记忆库前最多再等 8 秒
+    // 记忆抽取：不再收新回合，正在跑的那一条在关闭记忆库前最多再等 8 秒；整理同样有界等待，超时中止模型请求、结果不落库
     const extractDrained = extractor.close(8000);
+    const consolidateDrained = consolidator.close(8000);
     await recallServer.close();
     await bridge!.stop().catch(() => undefined);
     await closeAgentHarnesses(harness, pi);
     await codex.stop().catch(() => undefined);
     await contextUsage.close().catch(() => log.warn("context usage shutdown flush failed"));
     await extractDrained.catch(() => undefined);
+    await consolidateDrained.catch(() => undefined);
     try {
       store.close();
       memoryStore.close();

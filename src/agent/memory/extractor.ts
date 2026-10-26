@@ -128,12 +128,20 @@ export type ExtractItem = z.infer<typeof itemSchema>;
  * 唯一的宽容：整段被一对 ``` 或 ```json 围栏包住时去掉围栏；项里多出的未知键忽略。
  */
 export function parseExtraction(raw: string): ExtractItem[] | null {
+  return parseStrictJson(raw, z.array(itemSchema));
+}
+
+/**
+ * 记忆层模型输出的严格解析（抽取与整理共用）：整段须是符合 schema 的 JSON，否则返回 null。
+ * 唯一的宽容：整段被一对 ``` 或 ```json 围栏包住时去掉围栏。
+ */
+export function parseStrictJson<T>(raw: string, schema: z.ZodType<T>): T | null {
   let text = raw.trim();
   const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```$/i.exec(text);
   if (fenced) text = fenced[1]!.trim();
   let value: unknown;
   try { value = JSON.parse(text); } catch { return null; }
-  const parsed = z.array(itemSchema).safeParse(value);
+  const parsed = schema.safeParse(value);
   return parsed.success ? parsed.data : null;
 }
 
@@ -263,7 +271,21 @@ export function buildExtractPrompt(o: { ns: string; at: number; known: readonly 
     "<对话>", o.material, "</对话>"].join("\n");
 }
 
-class ExtractTimeout extends Error {}
+/** 模型调用超时（抽取与整理共用）。 */
+export class ExtractTimeout extends Error {}
+
+/** 有界的模型调用：超时即中止请求并抛 ExtractTimeout；提供者忽略 signal 也保证返回。抽取与整理共用。 */
+export async function completeWithin(complete: ExtractComplete, prompt: string, abort: AbortController, timeoutMs: number): Promise<{ text: string; usage?: Usage }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    // 即使提供者忽略 signal 也保证有界；同时通知正常提供者取消请求
+    timer = setTimeout(() => { abort.abort(); reject(new ExtractTimeout()); }, timeoutMs);
+  });
+  try {
+    const out = await Promise.race([complete(prompt, abort.signal), timeout]);
+    return typeof out === "string" ? { text: out } : out;
+  } finally { clearTimeout(timer); }
+}
 const today = (ms: number) => formatBeijingTime(ms).slice(0, 10);
 
 export class MemoryExtractor {
@@ -380,17 +402,8 @@ export class MemoryExtractor {
     return out;
   }
 
-  private async call(prompt: string, abort: AbortController): Promise<{ text: string; usage?: Usage }> {
-    const complete = this.opts.complete!;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      // 即使提供者忽略 signal 也保证有界；同时通知正常提供者取消请求
-      timer = setTimeout(() => { abort.abort(); reject(new ExtractTimeout()); }, this.opts.timeoutMs ?? 20_000);
-    });
-    try {
-      const out = await Promise.race([complete(prompt, abort.signal), timeout]);
-      return typeof out === "string" ? { text: out } : out;
-    } finally { clearTimeout(timer); }
+  private call(prompt: string, abort: AbortController): Promise<{ text: string; usage?: Usage }> {
+    return completeWithin(this.opts.complete!, prompt, abort, this.opts.timeoutMs ?? 20_000);
   }
 
   private async run(job: Job): Promise<ExtractRecord> {

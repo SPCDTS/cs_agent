@@ -12,6 +12,8 @@ import { trace } from "../shared/trace.js";
  * 3. 清理：原始消息 > HISTORY_RAW_DAYS 且所在日已被日/周摘要覆盖（未覆盖的保留到 HISTORY_RAW_HARD_MAX_DAYS，
  *    摘要失败的日子下次重试）、摘要 > HISTORY_SUMMARY_DAYS。
  * 启动时若上次运行（meta.aging_last_run）早于 24h 立即补跑一次。任何错误只记日志，绝不使进程崩溃。
+ * after 钩子（记忆夜间整理，docs/MEMORY-DESIGN.md §9）在每次衰老之后串行运行，不论衰老成败；启动时衰老不需补跑而
+ * 钩子自己需要补跑（after.needsCatchUp）时只跑钩子。钩子不计入 running()。
  */
 import type { Api, AssistantMessage, Model, Models } from "@earendil-works/pi-ai";
 import { log } from "../shared/log.js";
@@ -50,6 +52,8 @@ export interface AgingOptions {
   /** 当前时间（毫秒），测试可注入 */
   now?: () => number;
   cleanup?: () => Promise<unknown>;
+  /** 每次衰老之后串行运行的任务（记忆夜间整理）；context 不 import 上层，由 main 注入 */
+  after?: { run(): Promise<unknown>; needsCatchUp(nowMs: number): boolean };
 }
 
 export interface AgingReport {
@@ -192,14 +196,17 @@ export function startAgingScheduler(opts: AgingOptions): { stop(): void; runNow(
       });
     return running;
   };
+  const runAfter = (): Promise<unknown> => stopped || !opts.after ? Promise.resolve() : Promise.resolve().then(() => opts.after!.run())
+    .catch((err: unknown) => { log.error("post-aging task failed", { error: err }); });
   const schedule = () => {
     if (stopped) return;
-    timer = setTimeout(() => void runSafe().finally(schedule), msUntilNextRun(opts.hour, now()));
+    timer = setTimeout(() => void runSafe().then(runAfter).finally(schedule), msUntilNextRun(opts.hour, now()));
     timer.unref();
   };
 
   try {
-    if (needsCatchUp(opts.store, now())) void runSafe();
+    if (needsCatchUp(opts.store, now())) void runSafe().then(runAfter);
+    else if (opts.after?.needsCatchUp(now())) void runAfter();
   } catch (err) {
     log.error("history aging check failed", { error: err });
   }
@@ -209,7 +216,7 @@ export function startAgingScheduler(opts: AgingOptions): { stop(): void; runNow(
       stopped = true;
       if (timer) clearTimeout(timer);
     },
-    runNow: runSafe,
+    runNow: () => runSafe().then(async r => { await runAfter(); return r; }),
     running: () => running !== undefined,
   };
 }

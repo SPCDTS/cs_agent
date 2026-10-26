@@ -1,6 +1,7 @@
 /**
  * 记忆库（docs/MEMORY-DESIGN.md §4）：`${DATA_DIR}/memory.sqlite`，node:sqlite，WAL。
  * 条目 memories、版本 memory_versions、关系 memory_links；memories_fts 为 trigram FTS5，content 表同步触发器写法与消息库一致。
+ * 夜间整理（§9）另用 memory_proposals（画像提议）、memory_pair_checks（近似冲突已判过的对）、memory_meta（上次整理时间与报告）。
  * 只负责存取、版本与去重，不认识权限：调用方（agent/memory/service.ts）先按本轮权限求出命名空间范围再传入。
  * 时间一律为 unix 秒。与 ContextStore 同层但互不 import。
  */
@@ -74,6 +75,34 @@ CREATE TABLE IF NOT EXISTS memory_links (
   PRIMARY KEY (from_id, to_id, rel)
 );
 CREATE INDEX IF NOT EXISTS memory_links_to ON memory_links(to_id);
+CREATE INDEX IF NOT EXISTS memory_versions_by ON memory_versions(by);
+
+CREATE TABLE IF NOT EXISTS memory_proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ns TEXT NOT NULL,
+  text TEXT NOT NULL,
+  based_on_revision TEXT NOT NULL,
+  batch_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','rejected')),
+  decided_at INTEGER,
+  applied_revision TEXT,
+  entries_hash TEXT
+);
+CREATE INDEX IF NOT EXISTS memory_proposals_ns ON memory_proposals(ns, status, id);
+
+CREATE TABLE IF NOT EXISTS memory_pair_checks (
+  a_id INTEGER NOT NULL,
+  b_id INTEGER NOT NULL,
+  verdict TEXT NOT NULL,
+  batch_id TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  a_updated INTEGER NOT NULL,
+  b_updated INTEGER NOT NULL,
+  PRIMARY KEY (a_id, b_id)
+);
+
+CREATE TABLE IF NOT EXISTS memory_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `;
 
 /** 规整：NFKC、折叠空白、ASCII 小写、去掉句末标点；只用于去重哈希，不改存储的正文。 */
@@ -107,8 +136,32 @@ function termsMatch(terms: readonly string[]): { sql: string; args: string[] } {
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 export class MemoryStoreError extends Error {
-  constructor(message: string) { super(message); this.name = "MemoryStoreError"; }
+  /** invalid：参数或状态不允许；not_found：对象不存在；conflict：已处理过或状态已变 */
+  constructor(message: string, readonly code: "invalid" | "not_found" | "conflict" = "invalid") { super(message); this.name = "MemoryStoreError"; }
 }
+
+/** 整理生成的画像改写提议（docs/MEMORY-DESIGN.md §9 第 5 步）：待确认，采纳时以 based_on_revision 做 CAS 写入画像。时间为秒。 */
+export interface MemoryProposalRow {
+  id: number;
+  ns: string;
+  text: string;
+  based_on_revision: string;
+  batch_id: string;
+  created_at: number;
+  status: "pending" | "accepted" | "rejected";
+  decided_at: number | null;
+  /** 采纳后写入画像得到的 revision */
+  applied_revision: string | null;
+  /** 生成时 active 候选集合（preference / rule 的 id 与 updated_at）的指纹 */
+  entries_hash: string | null;
+}
+
+/** 一个整理批次（按版本记录聚合）：变更条数、最近变更时间（秒）、是否已回退。 */
+export interface MemoryBatchRow { batch_id: string; ns: string; changes: number; at: number; rolled_back: boolean }
+
+/** 版本 by 字段的整理与回退前缀（§4.2）。 */
+export const CONSOLIDATE_BY = "consolidate:";
+export const ROLLBACK_BY = "rollback:";
 
 export interface RememberResult { row: MemoryRow; duplicate: boolean; superseded?: MemoryRow }
 
@@ -140,9 +193,9 @@ export class MemoryStore {
     }
   }
 
-  private version(id: number, by: string, before: MemoryRow | undefined, after: MemoryRow, reason?: string | null): void {
+  private version(id: number, by: string, before: MemoryRow | undefined, after: MemoryRow, reason?: string | null, at = this.now()): void {
     this.db.prepare("INSERT INTO memory_versions (memory_id, at, by, before_json, after_json, reason) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(id, this.now(), by, before ? JSON.stringify(before) : null, JSON.stringify(after), reason ?? null);
+      .run(id, at, by, before ? JSON.stringify(before) : null, JSON.stringify(after), reason ?? null);
   }
 
   get(id: number): MemoryRow | undefined {
@@ -324,5 +377,172 @@ export class MemoryStore {
   /** 面板命名空间筛选。 */
   namespaces(): string[] {
     return (this.db.prepare("SELECT DISTINCT ns FROM memories ORDER BY ns").all() as { ns: string }[]).map(r => r.ns);
+  }
+
+  // ───────────── 夜间整理（§9） ─────────────
+
+  /**
+   * 取代：把 loser 标 superseded（until = 取代时间）并建 winner → loser 的 supersedes 链，写一行版本。
+   * 两条须同命名空间、都为 active 且不是同一条；版本时间与链接时间相同，整批回退据此删去本次建的链。
+   */
+  supersede(winnerId: number, loserId: number, by: string, reason?: string): MemoryRow {
+    return this.tx(() => {
+      const winner = this.get(winnerId), loser = this.get(loserId);
+      if (!winner || !loser || winnerId === loserId) throw new MemoryStoreError(`条目 #${winnerId} 或 #${loserId} 不存在`, "not_found");
+      if (winner.ns !== loser.ns) throw new MemoryStoreError("取代只能发生在同一命名空间");
+      if (winner.status !== "active" || loser.status !== "active")
+        throw new MemoryStoreError(`条目 #${winner.status !== "active" ? winner.id : loser.id} 已不是 active`, "conflict");
+      const now = this.now();
+      this.db.prepare("UPDATE memories SET status = 'superseded', until = ?, updated_at = ? WHERE id = ?").run(now, now, loser.id);
+      this.db.prepare("INSERT OR IGNORE INTO memory_links (from_id, to_id, rel, created_at) VALUES (?, ?, 'supersedes', ?)").run(winner.id, loser.id, now);
+      const after = this.get(loser.id)!;
+      this.version(loser.id, by, loser, after, reason ?? "superseded", now);
+      return after;
+    });
+  }
+
+  /** 建一条 related 关系（整理判定"并存"）。 */
+  relate(fromId: number, toId: number): void {
+    this.db.prepare("INSERT OR IGNORE INTO memory_links (from_id, to_id, rel, created_at) VALUES (?, ?, 'related', ?)").run(fromId, toId, this.now());
+  }
+
+  /** 同 hash 的 active 条目组（≥2 条），组内按创建先后。 */
+  duplicateGroups(ns: string): MemoryRow[][] {
+    const rows = this.db.prepare(`SELECT m.* FROM memories m JOIN (SELECT hash FROM memories WHERE ns = ? AND status = 'active'
+        GROUP BY hash HAVING COUNT(*) > 1) d ON d.hash = m.hash WHERE m.ns = ? AND m.status = 'active' ORDER BY m.hash, m.created_at, m.id`)
+      .all(ns, ns) as unknown as MemoryRow[];
+    const groups = new Map<string, MemoryRow[]>();
+    for (const row of rows) groups.set(row.hash, [...(groups.get(row.hash) ?? []), row]);
+    return [...groups.values()];
+  }
+
+  /** 带 subject 的 active 条目（近似冲突的候选），按 subject 排、同 subject 最新在前。 */
+  activeWithSubject(ns: string): MemoryRow[] {
+    return this.db.prepare("SELECT * FROM memories WHERE ns = ? AND status = 'active' AND subject IS NOT NULL ORDER BY subject, updated_at DESC, id DESC")
+      .all(ns) as unknown as MemoryRow[];
+  }
+
+  /** 来源可查的抽取条目：active、author = extractor、来源会话与消息 id 齐全、创建不早于 since（秒）。 */
+  orphanCandidates(ns: string, since: number): MemoryRow[] {
+    return this.db.prepare(`SELECT * FROM memories WHERE ns = ? AND status = 'active' AND author = 'extractor' AND source_scope IS NOT NULL
+        AND source_message_id IS NOT NULL AND source_message_id <> '' AND created_at >= ? ORDER BY id`).all(ns, since) as unknown as MemoryRow[];
+  }
+
+  /** 长期未召回的经历：active 的 episode，最近召回（没有召回看创建时间）早于 before（秒）。 */
+  staleEpisodes(ns: string, before: number): MemoryRow[] {
+    return this.db.prepare(`SELECT * FROM memories WHERE ns = ? AND kind = 'episode' AND status = 'active'
+        AND COALESCE(last_recalled_at, created_at) < ? ORDER BY id`).all(ns, before) as unknown as MemoryRow[];
+  }
+
+  /** 某几种 active 条目，最新更新在前。 */
+  activeOfKinds(ns: string, kinds: readonly MemoryKind[], limit = 1000): MemoryRow[] {
+    if (!kinds.length) return [];
+    return this.db.prepare(`SELECT * FROM memories WHERE ns = ? AND status = 'active' AND kind IN (${kinds.map(() => "?").join(", ")})
+        ORDER BY updated_at DESC, id DESC LIMIT ?`).all(ns, ...kinds, limit) as unknown as MemoryRow[];
+  }
+
+  /**
+   * 这一对条目上次的整理判定（a、b 不分先后）。指纹为送审时双方的 updated_at：任一方之后改过（正文、时效、状态）指纹就对不上，
+   * 调用方据此重新送审。
+   */
+  pairCheck(a: Pick<MemoryRow, "id" | "updated_at">, b: Pick<MemoryRow, "id" | "updated_at">): { verdict: string; unchanged: boolean } | undefined {
+    const [x, y] = a.id < b.id ? [a, b] : [b, a];
+    const row = this.db.prepare("SELECT verdict, a_updated, b_updated FROM memory_pair_checks WHERE a_id = ? AND b_id = ?")
+      .get(x.id, y.id) as { verdict: string; a_updated: number; b_updated: number } | undefined;
+    return row && { verdict: row.verdict, unchanged: row.a_updated === x.updated_at && row.b_updated === y.updated_at };
+  }
+
+  /** 记一对条目的判定，指纹取送审时双方的 updated_at。 */
+  recordPairCheck(a: Pick<MemoryRow, "id" | "updated_at">, b: Pick<MemoryRow, "id" | "updated_at">, verdict: string, batchId: string): void {
+    const [x, y] = a.id < b.id ? [a, b] : [b, a];
+    this.db.prepare(`INSERT INTO memory_pair_checks (a_id, b_id, verdict, batch_id, at, a_updated, b_updated) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(a_id, b_id) DO UPDATE SET verdict = excluded.verdict, batch_id = excluded.batch_id, at = excluded.at,
+        a_updated = excluded.a_updated, b_updated = excluded.b_updated`)
+      .run(x.id, y.id, verdict, batchId, this.now(), x.updated_at, y.updated_at);
+  }
+
+  /** 清理任一方已不是 active 的判定记录（不会再参与配对），返回删除行数。 */
+  prunePairChecks(): number {
+    return Number(this.db.prepare(`DELETE FROM memory_pair_checks WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = a_id AND m.status = 'active')
+      OR NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = b_id AND m.status = 'active')`).run().changes);
+  }
+
+  /**
+   * 整批回退（§9）：把 by = consolidate:<batch_id> 的版本按逆序恢复到 before 的状态与 until（正文不动），写新版本 by = rollback:<batch_id>。
+   * 条目在该版本之后还有任何版本（不论谁写的）时跳过，不覆盖后来的变更；取代时建的 supersedes 链一并删去。
+   * 批次没有任何版本 → not_found；已回退过 → conflict。
+   */
+  rollbackBatch(batchId: string): { restored: number; skipped: number } {
+    const by = CONSOLIDATE_BY + batchId, rb = ROLLBACK_BY + batchId;
+    return this.tx(() => {
+      const rows = this.db.prepare("SELECT * FROM memory_versions WHERE by = ? ORDER BY id DESC").all(by) as unknown as MemoryVersionRow[];
+      if (!rows.length) throw new MemoryStoreError(`批次 ${batchId} 没有可回退的变更`, "not_found");
+      if (this.db.prepare("SELECT 1 FROM memory_versions WHERE by = ? LIMIT 1").get(rb)) throw new MemoryStoreError(`批次 ${batchId} 已经回退过`, "conflict");
+      let restored = 0, skipped = 0;
+      for (const v of rows) {
+        const cur = this.get(v.memory_id);
+        if (!v.before_json || !cur) { skipped++; continue; }
+        if (this.db.prepare("SELECT 1 FROM memory_versions WHERE memory_id = ? AND id > ? LIMIT 1").get(cur.id, v.id)) { skipped++; continue; }
+        const before = JSON.parse(v.before_json) as MemoryRow, after = JSON.parse(v.after_json) as MemoryRow;
+        this.db.prepare("UPDATE memories SET status = ?, until = ?, updated_at = ? WHERE id = ?").run(before.status, before.until, this.now(), cur.id);
+        if (after.status === "superseded" && before.status !== "superseded")
+          this.db.prepare("DELETE FROM memory_links WHERE to_id = ? AND rel = 'supersedes' AND created_at = ?").run(cur.id, v.at);
+        this.version(cur.id, rb, cur, this.get(cur.id)!, "rollback");
+        restored++;
+      }
+      return { restored, skipped };
+    });
+  }
+
+  /** 最近的整理批次（有版本记录的），最新在前；时间为秒。 */
+  consolidateBatches(limit = 10): MemoryBatchRow[] {
+    const rows = this.db.prepare(`SELECT substr(v.by, ${CONSOLIDATE_BY.length + 1}) AS batch_id, MIN(m.ns) AS ns, COUNT(*) AS changes, MAX(v.at) AS at, MAX(v.id) AS last
+        FROM memory_versions v JOIN memories m ON m.id = v.memory_id WHERE v.by LIKE '${CONSOLIDATE_BY}%' GROUP BY v.by ORDER BY last DESC LIMIT ?`)
+      .all(Math.max(1, Math.floor(limit))) as { batch_id: string; ns: string; changes: number; at: number }[];
+    const done = this.db.prepare("SELECT 1 FROM memory_versions WHERE by = ? LIMIT 1");
+    return rows.map(r => ({ batch_id: r.batch_id, ns: r.ns, changes: Number(r.changes), at: Number(r.at), rolled_back: !!done.get(ROLLBACK_BY + r.batch_id) }));
+  }
+
+  /** 新的画像提议：同一命名空间只保留一条 pending，新的覆盖旧的。 */
+  putProposal(p: { ns: string; text: string; based_on_revision: string; batch_id: string; entries_hash: string }): MemoryProposalRow {
+    if (!isMemoryNs(p.ns)) throw new MemoryStoreError("命名空间无效");
+    return this.tx(() => {
+      this.db.prepare("DELETE FROM memory_proposals WHERE ns = ? AND status = 'pending'").run(p.ns);
+      return this.db.prepare("INSERT INTO memory_proposals (ns, text, based_on_revision, batch_id, created_at, entries_hash) VALUES (?, ?, ?, ?, ?, ?) RETURNING *")
+        .get(p.ns, p.text, p.based_on_revision, p.batch_id, this.now(), p.entries_hash) as unknown as MemoryProposalRow;
+    });
+  }
+
+  proposal(id: number): MemoryProposalRow | undefined {
+    return this.db.prepare("SELECT * FROM memory_proposals WHERE id = ?").get(id) as MemoryProposalRow | undefined;
+  }
+
+  /** 提议列表，最新在前；status 缺省为 pending。 */
+  proposals(status: MemoryProposalRow["status"] = "pending", limit = 20): MemoryProposalRow[] {
+    return this.db.prepare("SELECT * FROM memory_proposals WHERE status = ? ORDER BY id DESC LIMIT ?").all(status, limit) as unknown as MemoryProposalRow[];
+  }
+
+  /** 该命名空间最近的一条提议（任何状态）。 */
+  latestProposal(ns: string): MemoryProposalRow | undefined {
+    return this.db.prepare("SELECT * FROM memory_proposals WHERE ns = ? ORDER BY id DESC LIMIT 1").get(ns) as MemoryProposalRow | undefined;
+  }
+
+  /** 采纳或拒绝一条 pending 提议；已处理过 → conflict。 */
+  decideProposal(id: number, status: "accepted" | "rejected", appliedRevision?: string): MemoryProposalRow {
+    return this.tx(() => {
+      const row = this.proposal(id);
+      if (!row) throw new MemoryStoreError(`提议 #${id} 不存在`, "not_found");
+      if (row.status !== "pending") throw new MemoryStoreError(`提议 #${id} 已${row.status === "accepted" ? "采纳" : "拒绝"}`, "conflict");
+      this.db.prepare("UPDATE memory_proposals SET status = ?, decided_at = ?, applied_revision = ? WHERE id = ?").run(status, this.now(), appliedRevision ?? null, id);
+      return this.proposal(id)!;
+    });
+  }
+
+  getMeta(key: string): string | undefined {
+    return (this.db.prepare("SELECT value FROM memory_meta WHERE key = ?").get(key) as { value: string } | undefined)?.value;
+  }
+
+  setMeta(key: string, value: string): void {
+    this.db.prepare("INSERT INTO memory_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 }

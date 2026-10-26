@@ -74,16 +74,21 @@ const DROP_REASONS: Record<string, string> = { low_confidence: '低置信', dupl
   over_limit: '超出每轮 5 条', supersedes_ignored: '取代目标无效', store_error: '写入失败' };
 const nsLabel = (ns: string) => ns === 'owner' ? 'owner 私聊' : scopeLabel(ns);
 
-/** 回合后记忆抽取（docs/MEMORY-DESIGN.md §8）：队列、今日各命名空间次数、最近 10 次结果；null 表示读取失败，undefined 表示未接入。 */
-export function extractCard(st: MemoryExtractStatus | null | undefined, now: number): string {
+/**
+ * 回合后记忆抽取（docs/MEMORY-DESIGN.md §8）：队列、今日各命名空间次数、最近 10 次结果；null 表示读取失败，undefined 表示未接入。
+ * /memory 首页以"记忆任务"为题并链到 /memory/jobs（整理报告、画像提议与批次回退在那里）；/memory/jobs 页传入自己的标题。
+ */
+export function extractCard(st: MemoryExtractStatus | null | undefined, now: number, o: { title?: string } = {}): string {
   if (st === undefined) return '';
-  if (st === null) return `<section class="sheet pad flush"><h2>记忆抽取</h2>${empty('抽取状态暂不可用。')}</section>`;
+  const home = o.title === undefined, title = o.title ?? '记忆任务';
+  const more = home ? ' · <a href="/memory/jobs">整理报告、画像提议与回退</a>' : '';
+  if (st === null) return `<section class="sheet pad flush"><h2>${esc(title)}${home ? ' <small><a href="/memory/jobs">整理报告、画像提议与回退</a></small>' : ''}</h2>${empty('抽取状态暂不可用。')}</section>`;
   const counts = Object.entries(st.today.counts);
   const result = (r: MemoryExtractStatus['recent'][number]) => r.status === 'ok'
     ? `${stamp('完成', 'ok')} 候选 ${fmtInt(r.candidates)} · 写入 ${fmtInt(r.written)} · 取代 ${fmtInt(r.superseded)}${Object.keys(r.dropped).length
       ? ` · 丢弃 ${esc(Object.entries(r.dropped).map(([k, n]) => `${DROP_REASONS[k] ?? k} ${n}`).join('、'))}` : ''}`
     : `${stamp(r.status === 'failed' ? '失败' : '跳过', r.status === 'failed' ? 'fail' : 'idle')} ${esc(EXTRACT_REASONS[r.reason ?? ''] ?? r.reason ?? '')}`;
-  return `<section class="sheet pad flush"><h2>记忆抽取 <small>用户回合结束后用 ${esc(st.model || '（未配置模型）')} 提炼记忆条目；开关在<a href="/settings#memory-extract">设置页</a></small></h2>
+  return `<section class="sheet pad flush"><h2>${esc(title)} <small>用户回合结束后用 ${esc(st.model || '（未配置模型）')} 提炼记忆条目；开关在<a href="/settings#memory-extract">设置页</a>${more}</small></h2>
 ${kv([
     ['模型', st.available ? esc(st.model) : `${stamp('不可用', 'warn')} <small>MEMORY_EXTRACT_MODEL 未配置或不在 magpie 目录中</small>`],
     ['队列', `${fmtInt(st.queue)} 条排队${st.running ? ` · 正在处理 <a class="mono" href="/turns/${uri(st.running)}">${esc(st.running)}</a>` : ''}`],
@@ -107,6 +112,7 @@ export function memoryHomeBody(o: MemoryOverview, now: number, recalls?: RecallC
   out += `<section><h2>工具</h2><div class="grid cols-3 mem-tools">
 <a class="sheet pad tool-link" href="/memory/search"><b>检索检查器</b><small>检索命中 → 工具实际返回的对照</small></a>
 <a class="sheet pad tool-link" href="/memory/entries"><b>记忆条目</b><small>mem_remember 与回合后抽取记下的事实与承诺，可遗忘 / 恢复</small></a>
+<a class="sheet pad tool-link" href="/memory/profile/owner"><b>画像</b><small>各命名空间的 profile.md，每轮进入提示，可直接编辑</small></a>
 <a class="sheet pad tool-link" href="/memory/archives"><b>线程归档</b><small>Codex / Pi 归档线程与 Pi 压缩记录</small></a>
 <a class="sheet pad tool-link" href="/context"><b>上下文检索（旧）</b><small>qq_context 工具原样输出</small></a>
 <a class="sheet pad tool-link" href="/memory/recalls"><b>召回记录</b><small>${recalls ? `最近 24 小时 ${fmtInt(recalls.count)}${recalls.more ? '+' : ''} 次工具召回` : recalls === null ? '最近 24 小时的数量暂不可用' : 'qq_recent / qq_search / qq_message 每次调用与三级证据'}</small></a>

@@ -5,6 +5,8 @@ import { resolveAgentConfig } from '../agent/config.js';
 import { equal, readBody, readMultipart, HttpError, guardAgentMd, writeAgentMd, guardDashboardOrigin } from './dashboard-io.js';
 import { SkillsStoreError } from '../agent/skills-store.js';
 import { applyMemoryEntryAction } from './memory/entries.js';
+import { applyMemoryJobAction, memoryJobError, type MemoryJobAction } from './memory/jobs.js';
+import { isMemoryNs } from '../context/memory/types.js';
 import { isThreadKey } from '../agent/codex/runner.js';
 import { SETTINGS_KEY, normalizeMemoryExtract, type RuntimeSettings } from '../agent/settings.js';
 
@@ -42,6 +44,39 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
         if (!opts.memoryEntries) throw new HttpError(404, '记忆条目未启用');
         applyMemoryEntryAction(opts.memoryEntries, Number(memoryAction[1]), memoryAction[2] as 'forget' | 'restore');
         back(`/memory/entries/${memoryAction[1]}?ok=${memoryAction[2] === 'forget' ? 'memoryForgotten' : 'memoryRestored'}`); return;
+      }
+      // 画像编辑（docs/DASHBOARD.md §8.6）：失败时重新渲染画像页，带当前内容与提交的草稿；冲突 409。
+      const profileSave = /^\/memory\/profile\/([^/]+)$/.exec(url.pathname);
+      if (profileSave) {
+        if (!opts.memoryJobs) throw new HttpError(404, '画像编辑未启用');
+        let ns = '';
+        try { ns = decodeURIComponent(profileSave[1]!); } catch { /* 下面按无效处理 */ }
+        if (!isMemoryNs(ns)) throw new HttpError(400, '命名空间无效');
+        const content = (form.get('content') ?? '').replace(/\r\n?/g, '\n');
+        try { await applyMemoryJobAction(opts.memoryJobs, { kind: 'profile', ns, text: content, revision: form.get('revision') ?? '' }); }
+        catch (e) {
+          const known = memoryJobError(e);
+          if (!known) throw e;
+          const again = new URL(`http://localhost/memory/profile/${encodeURIComponent(ns)}`);
+          again.searchParams.set('draft', content);
+          const html = await render(again, nonce, { text: known.status === 409 ? '画像已在别处被修改，没有保存。上面是当前内容，你提交的草稿在下方，合并后再保存。' : '画像未保存：' + known.message, error: true });
+          res.writeHead(known.status, { 'Content-Type': 'text/html; charset=utf-8' }).end(html ?? known.message); return;
+        }
+        back(`/memory/profile/${encodeURIComponent(ns)}?ok=profileSaved`); return;
+      }
+      // 画像提议、立即整理与整批回退（§8.6）：成功回到 /memory/jobs。
+      const proposal = /^\/memory\/proposals\/([1-9]\d{0,15})\/(accept|reject)$/.exec(url.pathname);
+      const rollback = /^\/memory\/consolidate\/([^/]+)\/rollback$/.exec(url.pathname);
+      const job: MemoryJobAction | undefined = proposal ? { kind: 'proposal', id: Number(proposal[1]), action: proposal[2] as 'accept' | 'reject' }
+        : url.pathname === '/memory/consolidate/run' ? { kind: 'run' } : rollback ? { kind: 'rollback', batchId: rollback[1]! } : undefined;
+      if (job) {
+        if (!opts.memoryJobs) throw new HttpError(404, '记忆整理未启用');
+        let result: Record<string, unknown>;
+        try { result = await applyMemoryJobAction(opts.memoryJobs, job); }
+        catch (e) { throw memoryJobError(e) ?? e; }
+        const ok = job.kind === 'proposal' ? (job.action === 'accept' ? 'proposalAccepted' : 'proposalRejected')
+          : job.kind === 'run' ? (result.result === 'running' ? 'consolidateRunning' : 'consolidateStarted') : 'batchRolledBack';
+        back(`/memory/jobs?ok=${ok}`); return;
       }
       if (url.pathname === '/skills/upload') {
         if (!opts.skills) throw new HttpError(404, '技能管理未启用');
@@ -109,9 +144,12 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
       if (url.pathname === '/settings/memory-extract') {
         if (!opts.settings) throw new HttpError(404, '运行时设置不可用');
         // 只改本次表单列出的命名空间，其余已保存的开关保留；未勾选的复选框不提交，记为关闭。只保存与缺省不同的覆盖项。
-        const extract: Record<string, boolean> = { ...opts.settings.current().memory.extract };
+        // 整理开关只在表单带 consolidate_field 时改（未接入整理时表单没有这一项）。
+        const current = opts.settings.current().memory;
+        const extract: Record<string, boolean> = { ...current.extract };
         for (const ns of form.getAll('ns')) extract[ns] = form.get(`extract:${ns}`) === 'on';
-        try { await opts.settings.update({ memory: { extract: normalizeMemoryExtract(extract) as Record<string, boolean> } }, 'dashboard'); }
+        const consolidate = form.has('consolidate_field') ? form.get('consolidate') === 'on' : current.consolidate;
+        try { await opts.settings.update({ memory: { extract: normalizeMemoryExtract(extract) as Record<string, boolean>, consolidate } }, 'dashboard'); }
         catch (e) { throw new HttpError(400, '抽取开关未保存：命名空间无效。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
         back('/settings?ok=saved#memory-extract'); return;
       }
@@ -208,7 +246,7 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
       const status = expected ? e.status : 500;
       const message = expected ? e.message : '操作失败，详见日志';
       const html = url.pathname.startsWith('/settings') ? await render(new URL('http://localhost/settings'), nonce, { text: message, error: true }) : null;
-      res.writeHead(status, {'Content-Type':'text/html; charset=utf-8'}).end(html ?? page({ title: '操作未完成', path: url.pathname, nonce, flash: { text: message, error: true }, body: `<p><a href="${url.pathname.startsWith('/skills/') ? '/skills' : url.pathname.startsWith('/memory/') ? '/memory/entries' : '/agents'}">返回</a></p>` }));
+      res.writeHead(status, {'Content-Type':'text/html; charset=utf-8'}).end(html ?? page({ title: '操作未完成', path: url.pathname, nonce, flash: { text: message, error: true }, body: `<p><a href="${url.pathname.startsWith('/skills/') ? '/skills' : url.pathname.startsWith('/memory/entries/') ? '/memory/entries' : url.pathname.startsWith('/memory/') ? '/memory/jobs' : '/agents'}">返回</a></p>` }));
     }
   }
 

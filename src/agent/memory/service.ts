@@ -289,6 +289,17 @@ export class MemoryService {
     return after;
   }
 
+  /**
+   * 面板编辑画像（§10）：整体替换，CAS；超限、含凭据样式内容与 revision 不符由 ProfileStore 拒绝（ProfileError，code 为 invalid / secret / stale）。
+   * 作者记为 dashboard，写 @memory 的 memory_write 事件（只记字节数，不记正文）。
+   */
+  async saveProfileFromDashboard(ns: string, text: string, revision: string): Promise<{ revision: string }> {
+    if (!isMemoryNs(ns)) throw new ProfileError("命名空间无效");
+    const result = await this.opts.profiles.write(ns, text, revision);
+    this.tracer.event("@memory", "memory_write", { detail: { tool: "dashboard_profile", author: "dashboard", ns, bytes: Buffer.byteLength(text, "utf8") } });
+    return result;
+  }
+
   /** 面板恢复：回到遗忘前的状态（查不到为 active）。 */
   restoreFromDashboard(id: number): MemoryRow {
     const row = this.opts.store.get(id);

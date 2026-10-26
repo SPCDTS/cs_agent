@@ -16,6 +16,7 @@ import { PiSessionAdapter } from './sessions/pi-adapter.js';
 import { createSessionRoutes, sessionJson, type SessionAdapters } from './sessions/http.js';
 import { createMemoryRoutes } from './memory/http.js';
 import { createMemoryEntryActions } from './memory/entries.js';
+import { createMemoryJobActions, isMemoryJobPost } from './memory/jobs.js';
 import { trace as defaultTrace } from '../shared/trace.js';
 import { summarize, type LiveMessage } from './live.js';
 import { formatBackendOverrides, SETTINGS_KEY } from '../agent/settings.js';
@@ -43,7 +44,9 @@ const FLASH: Record<string, string> = {
   codexPrompt: 'codex.md 已保存，AGENTS.md 已重写，codex 下一条消息即使用新内容。',
   reset: '已重置：旧会话已归档，下一条消息会新建会话。', queued: '已排队：当前回合结束后立即重置，旧会话会归档。', unchanged: '没有可操作的会话。',
   compacted: '会话已压缩：保留摘要，旧工具输出与图片已从活动上下文中清理。', compactQueued: '压缩已排队或正在执行，完成结果请查看日志。',
-  compactFailed: '会话压缩失败，详见日志。', memoryForgotten: '记忆已遗忘，不再进入检索与提示；可随时恢复。', memoryRestored: '记忆已恢复到遗忘前的状态。', stopped: '已请求停止：当前回合与子 agent 会中止，排队的消息随后照常处理。',
+  compactFailed: '会话压缩失败，详见日志。', memoryForgotten: '记忆已遗忘，不再进入检索与提示；可随时恢复。', memoryRestored: '记忆已恢复到遗忘前的状态。',
+  profileSaved: '画像已保存，下一轮起进入提示。', proposalAccepted: '已采纳画像提议并写入画像，下一轮起进入提示。', proposalRejected: '已拒绝画像提议。',
+  consolidateStarted: '记忆整理已开始，完成后刷新查看报告。', consolidateRunning: '记忆整理已在运行，完成后刷新查看报告。', batchRolledBack: '该整理批次已回退。', stopped: '已请求停止：当前回合与子 agent 会中止，排队的消息随后照常处理。',
 };
 
 const asObj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
@@ -59,7 +62,7 @@ export function createDashboard(opts: DashboardOptions) {
   const handleContext = createContextRoutes(adapters, { codexHome: config.codexHome, dataDir: config.DATA_DIR, contextUsage: opts.contextUsage });
   const sessionRoute = (url: URL, res: ServerResponse) => url.pathname.split('/').length === 7 && url.pathname.endsWith('/context')
     ? handleContext(url, res) : handleSessions(url, res);
-  const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, sessionAdapters: adapters, aging: opts.aging, archives: opts.archives, entries: opts.memoryEntries, extract: opts.memoryExtract,
+  const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, sessionAdapters: adapters, aging: opts.aging, archives: opts.archives, entries: opts.memoryEntries, extract: opts.memoryExtract, jobs: opts.memoryJobs,
     maxChars: config.QQ_CONTEXT_MAX_CHARS, retention: { rawDays: config.HISTORY_RAW_DAYS,
       summaryDays: config.HISTORY_SUMMARY_DAYS, hardMaxDays: config.HISTORY_RAW_HARD_MAX_DAYS,
       dailyHour: config.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
@@ -111,6 +114,7 @@ export function createDashboard(opts: DashboardOptions) {
   const schedulePanel = createSchedulePanel({ service: opts.schedules, owner: config.owner, csrf, scopeNames: () => opts.context.scopeNames() });
   const handlePost = createDashboardPost(opts, csrf, agentMd, tracer, render, schedulePanel.post);
   const handleSchedules = createScheduleRoutes(opts.schedules, config.owner, csrf), memoryEntryActions = createMemoryEntryActions(opts.memoryEntries, csrf);
+  const memoryJobActions = createMemoryJobActions(opts.memoryJobs, csrf);
 
   /** 在服务端内部调用会话 JSON 路由：与浏览器拿到的是同一份已脱敏 JSON、同样的校验与错误码。 */
   async function api(pathQuery: string): Promise<{ status: number; body: unknown }> {
@@ -179,7 +183,8 @@ export function createDashboard(opts: DashboardOptions) {
     }
     if (url.pathname === '/api/memory' || url.pathname.startsWith('/api/memory/')) {
       if (req.method === 'POST' && /^\/api\/memory\/entries\/[^/]+\/[^/]+$/.test(url.pathname)) { await memoryEntryActions(req, res, url, host); return; }
-      if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); sessionJson(res, 405, { error: '记忆接口只支持 GET（条目的遗忘 / 恢复除外）' }); return; }
+      if (req.method === 'POST' && isMemoryJobPost(url.pathname)) { await memoryJobActions(req, res, url, host); return; }
+      if (req.method !== 'GET') { res.setHeader('Allow', 'GET'); sessionJson(res, 405, { error: '记忆接口只支持 GET（条目、画像、提议与整理的写操作除外）' }); return; }
       await memoryRoute(url, res); return;
     }
     if (url.pathname.startsWith('/media/')) {

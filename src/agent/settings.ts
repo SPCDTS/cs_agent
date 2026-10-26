@@ -28,19 +28,24 @@ export interface RuntimeSettings {
   alertOwner: boolean;
   /** bridge 出站发送规则（docs/ARCHITECTURE.md §3.3），每次发送前现读 */
   sendRules: SendRuleLimits;
-  /** 记忆（docs/MEMORY-DESIGN.md §8.1）：extract 为各命名空间的回合后抽取开关，没有键的命名空间按 memoryExtractEnabled 的缺省 */
+  /** 记忆（docs/MEMORY-DESIGN.md §8.1、§9）：extract 为各命名空间的回合后抽取开关，没有键的命名空间按 memoryExtractEnabled 的缺省；consolidate 为夜间整理开关 */
   memory: MemorySettings;
 }
 
-export interface MemorySettings { extract: Record<string, boolean> }
+export interface MemorySettings { extract: Record<string, boolean>; consolidate: boolean }
 
 /** 抽取开关缺省：只有 owner 命名空间开启；群与其他私聊需在设置页打开。extract 只存与缺省不同的覆盖项。 */
-export const DEFAULT_MEMORY_SETTINGS: MemorySettings = { extract: {} };
+export const DEFAULT_MEMORY_SETTINGS: MemorySettings = { extract: {}, consolidate: true };
 const extractDefault = (ns: string) => ns === "owner";
 
 /** 该命名空间是否开启回合后抽取：设置里有键按键，否则只有 owner 开启。 */
 export function memoryExtractEnabled(settings: Pick<RuntimeSettings, "memory">, ns: string): boolean {
   return settings.memory.extract[ns] ?? extractDefault(ns);
+}
+
+/** 夜间整理是否开启（缺省开）。 */
+export function memoryConsolidateEnabled(settings: Pick<RuntimeSettings, "memory">): boolean {
+  return settings.memory.consolidate !== false;
 }
 
 /** 只留与缺省不同的抽取开关（owner 缺省开、其余缺省关）：面板每次提交全部命名空间也不会把覆盖表撑到上限。非布尔值原样留给校验拒绝。 */
@@ -68,6 +73,7 @@ const SendRulesSchema = z.object({
 const MemorySchema = z.object({
   extract: z.record(z.string().refine(isMemoryNs, "命名空间必须是 owner、group:<群号> 或 private:<QQ号>"), z.boolean())
     .refine(v => Object.keys(v).length <= 500, "抽取开关最多 500 项"),
+  consolidate: z.boolean().default(DEFAULT_MEMORY_SETTINGS.consolidate),
 }).strict();
 const SettingsSchema = z.object({
   agentBackend: backend,
@@ -103,8 +109,11 @@ export function settingsDefaults(cfg: {
   return { agentBackend: cfg.AGENT_BACKEND, backendOverrides: { ...cfg.backendOverrides },
     codexModel: cfg.CODEX_MODEL, codexReasoningEffort: effort, piModel: cfg.AGENT_MODEL_ID,
     piThinkingLevel: cfg.AGENT_THINKING_LEVEL, alertOwner: cfg.ALERT_OWNER, sendRules: { ...DEFAULT_SEND_RULES },
-    memory: { extract: { ...DEFAULT_MEMORY_SETTINGS.extract } } };
+    memory: { extract: { ...DEFAULT_MEMORY_SETTINGS.extract }, consolidate: DEFAULT_MEMORY_SETTINGS.consolidate } };
 }
+
+/** 设置补丁：memory 按字段合并，可只给 extract 或 consolidate。 */
+export type SettingsPatch = Omit<Partial<RuntimeSettings>, "memory"> & { memory?: Partial<MemorySettings> };
 
 type Listener = (next: Readonly<RuntimeSettings>, before: Readonly<RuntimeSettings>) => void;
 
@@ -129,7 +138,8 @@ export class SettingsStore {
       if (!st.isFile() || st.size > 256 * 1024) throw new Error("settings.json 不是普通文件或过大");
       const parsed = FileSchema.parse(JSON.parse(await fs.readFile(file, "utf8")));
       initial = SettingsSchema.parse(normalized({ ...base, ...parsed.settings, sendRules: { ...base.sendRules, ...parsed.settings.sendRules },
-        memory: { extract: { ...base.memory.extract, ...parsed.settings.memory?.extract } } }));
+        memory: { extract: { ...base.memory.extract, ...parsed.settings.memory?.extract },
+          consolidate: parsed.settings.memory?.consolidate ?? base.memory.consolidate } }));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") log.warn("settings.json invalid; using .env defaults", { error: err instanceof Error ? err.message : String(err) });
     }
@@ -146,7 +156,7 @@ export class SettingsStore {
   current(): Readonly<RuntimeSettings> {
     return Object.freeze({ ...this.value, backendOverrides: Object.freeze({ ...this.value.backendOverrides }),
       sendRules: Object.freeze({ ...this.value.sendRules }),
-      memory: Object.freeze({ extract: Object.freeze({ ...this.value.memory.extract }) }) }) as Readonly<RuntimeSettings>;
+      memory: Object.freeze({ extract: Object.freeze({ ...this.value.memory.extract }), consolidate: this.value.memory.consolidate }) }) as Readonly<RuntimeSettings>;
   }
 
   /** 回合快照：目录可用时无效模型回退到 CODEX_MODEL；环境默认也无效则用内置默认，不改配置。 */
@@ -160,10 +170,11 @@ export class SettingsStore {
   subscribe(fn: Listener): () => void { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; }
 
   /** 校验 → 原子落盘 → 生效 → 记观测事件。串行化，落盘失败时不生效。 */
-  update(patch: Partial<RuntimeSettings>, source: SettingsSource): Promise<Readonly<RuntimeSettings>> {
+  update(patch: SettingsPatch, source: SettingsSource): Promise<Readonly<RuntimeSettings>> {
     const run = this.chain.then(async () => {
       const before = this.current();
-      const next = SettingsSchema.parse(normalized({ ...this.value, ...patch }));
+      // memory 按字段合并：只改抽取开关的提交不会把整理开关复位到缺省
+      const next = SettingsSchema.parse(normalized({ ...this.value, ...patch, ...(patch.memory ? { memory: { ...this.value.memory, ...patch.memory } } : {}) }));
       for (const field of ["codexModel", "piModel"] as const) {
         if (this.validators && !this.validators[field](next[field])) {
           throw new z.ZodError([{ code: "custom", path: [field], message: "模型不在可用目录中" }]);

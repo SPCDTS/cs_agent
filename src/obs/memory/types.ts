@@ -4,7 +4,8 @@ import type { AgingReport } from '../../context/aging.js';
 export type { AgingReport } from '../../context/aging.js';
 import type { ContextStore } from '../../context/store.js';
 import type { ObsStore } from '../store.js';
-import type { MemoryStore } from '../../context/memory/store.js';
+import type { MemoryProposalRow, MemoryStore } from '../../context/memory/store.js';
+import type { ProfileSnapshot } from '../../context/memory/profile.js';
 
 export interface Retention {
   rawDays: number; summaryDays: number; hardMaxDays: number; dailyHour: number; tz: string;
@@ -26,6 +27,8 @@ export interface MemoryDeps {
   entries?: MemoryEntriesSource;
   /** 回合后抽取状态（/api/memory/extract）；未接入时为 404 */
   extract?: MemoryExtractSource;
+  /** 画像编辑与夜间整理（/api/memory/profile/*、/api/memory/jobs）；未接入时为 404 */
+  jobs?: MemoryJobsSource;
 }
 /** 面板读写记忆条目的入口：读走存储，遗忘 / 恢复走记忆服务（作者记为 dashboard）。 */
 export interface MemoryEntriesSource {
@@ -48,6 +51,55 @@ export interface MemoryExtractStatus {
 export interface MemoryExtractSource {
   status(): MemoryExtractStatus;
   namespaces(): string[];
+}
+/** 夜间整理一个批次的报告（agent/memory/consolidate.ts 的 ConsolidateBatchReport，同形）。 */
+export interface MemoryConsolidateBatch {
+  ns: string; batch_id: string; status: 'ok' | 'failed'; dedup: number;
+  conflicts: { pairs: number; superseded: number; coexist: number; keep: number; protected: number; skipped?: string };
+  orphaned: number; retired: number; proposal: string | null; usage: Record<string, number>; ms: number; errors: string[];
+}
+/** 一次整理运行的报告；时间为毫秒。 */
+export interface MemoryConsolidateReport {
+  status: 'ok' | 'failed' | 'closed'; started_at: number; ms: number; batches: MemoryConsolidateBatch[];
+  totals: { dedup: number; superseded: number; orphaned: number; retired: number; proposals: number };
+}
+export interface MemoryConsolidateStatus {
+  enabled: boolean; running: boolean; available: boolean; model: string; last_run: number | null; last_report: MemoryConsolidateReport | null;
+}
+/** 待确认的画像提议；current 为该命名空间当前画像，stale 表示画像已在提议生成后改过（采纳会 409）。时间为毫秒。 */
+export interface MemoryProposalView {
+  id: number; ns: string; ns_label: string; text: string; based_on_revision: string; batch_id: string; created_at: number;
+  current: { text: string; revision: string } | null; stale: boolean;
+}
+export interface MemoryBatchView { batch_id: string; ns: string; ns_label: string; changes: number; at: number; rolled_back: boolean }
+/** GET /api/memory/jobs：抽取状态、整理状态与下次计划、待确认提议、最近 10 个整理批次。 */
+export interface MemoryJobsStatus {
+  extract: MemoryExtractStatus | null;
+  consolidate: MemoryConsolidateStatus & { next_run: number | null };
+  proposals: MemoryProposalView[];
+  batches: MemoryBatchView[];
+}
+/** GET /api/memory/profile/<ns>：画像原文（经统一脱敏）与 revision；redacted_inside 为原文含凭据样式内容（面板只读展示）。 */
+export interface MemoryProfileView {
+  ns: string; ns_label: string; text: string; revision: string; updated_at: number | null; bytes: number; max_bytes: number;
+  oversize: boolean; redacted_inside: boolean;
+}
+/** 面板的画像编辑与夜间整理入口：读画像走 ProfileStore，写画像走记忆服务（作者 dashboard），整理与提议走整理器。 */
+export interface MemoryJobsSource {
+  profiles: { read(ns: string): Promise<ProfileSnapshot> };
+  saveProfile(ns: string, text: string, revision: string): Promise<{ revision: string }>;
+  consolidator: {
+    status(): MemoryConsolidateStatus;
+    trigger(): 'started' | 'running' | 'disabled';
+    rollback(batchId: string): { restored: number; skipped: number };
+    proposals(): MemoryProposalRow[];
+    acceptProposal(id: number): Promise<{ revision: string }>;
+    rejectProposal(id: number): Promise<void>;
+  };
+  store: Pick<MemoryStore, 'consolidateBatches'>;
+  /** 下次整理的计划时间（毫秒，随衰老调度） */
+  nextRun(): number | null;
+  scopeLabel?(scope: string): string;
 }
 /** 时间均为毫秒；source 为写入时本轮最后一条输入。 */
 export interface MemoryEntry {

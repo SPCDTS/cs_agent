@@ -11,6 +11,7 @@ import { redactSessionValue } from '../sessions/content.js';
 import { SessionError } from '../sessions/types.js';
 import { memoryArchives } from './archives.js';
 import { memoryEntryDetail, memoryEntryList } from './entries.js';
+import { MEMORY_PROFILE_PATH, memoryJobsStatus, memoryProfileView, profileNs } from './jobs.js';
 import { MemoryReader, preview, safeText } from './read.js';
 import type { AgingStatus, Hit, MemoryDeps } from './types.js';
 
@@ -151,6 +152,11 @@ export function createMemoryRoutes(deps: MemoryDeps) {
       if (p === '/api/memory/extract') {
         if (!deps.extract) throw new SessionError(404, '记忆抽取未启用');
         parameters(q, []); sessionJson(res, 200, deps.extract.status()); return;
+      }
+      if (p === '/api/memory/jobs' || MEMORY_PROFILE_PATH.test(p)) {
+        if (!deps.jobs) throw new SessionError(404, '记忆整理未启用');
+        parameters(q, []);
+        sessionJson(res, 200, p === '/api/memory/jobs' ? await memoryJobsStatus(deps.jobs, deps.extract) : await memoryProfileView(deps.jobs, profileNs(p.split('/')[4]!))); return;
       }
       if (p === '/api/memory/archives') {
         parameters(q, []); sessionJson(res, 200, await memoryArchives(deps.archives, deps.store)); return;

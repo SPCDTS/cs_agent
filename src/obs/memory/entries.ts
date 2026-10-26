@@ -70,6 +70,32 @@ export function applyMemoryEntryAction(src: MemoryEntriesSource, id: number, act
   if (action === 'forget') src.forget(id); else src.restore(id);
 }
 
+/**
+ * 记忆写接口的公共校验（条目、画像、整理共用）：同源、只接受 application/json、请求体有界且为 JSON 对象、
+ * CSRF 放 X-CSRF-Token 头或 _csrf 字段（与 /api/schedules 相同）。返回去掉 _csrf 的请求体。
+ */
+export async function readMemoryJsonPost(req: IncomingMessage, host: string, csrf: string, maxBytes = 4096): Promise<Record<string, unknown>> {
+  guardDashboardOrigin(req, host);
+  if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')) throw new HttpError(415, '只接受 application/json');
+  const chunks: Buffer[] = []; let size = 0;
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.length;
+    if (size > maxBytes) { req.resume(); throw new HttpError(413, '提交内容过大'); }
+    chunks.push(bytes);
+  }
+  let body: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+    body = parsed as Record<string, unknown>;
+  } catch { throw new HttpError(400, '请求体必须是 JSON 对象'); }
+  const supplied = req.headers['x-csrf-token'] ?? body._csrf;
+  if (!csrf || typeof supplied !== 'string' || !equal(supplied, csrf)) throw new HttpError(403, 'CSRF 令牌无效，请刷新页面后重试');
+  delete body._csrf;
+  return body;
+}
+
 /** POST /api/memory/entries/<id>/{forget,restore}：只接受 application/json，CSRF 放 X-CSRF-Token 头或 _csrf 字段。 */
 export function createMemoryEntryActions(src: MemoryEntriesSource | undefined, csrf: string) {
   return async (req: IncomingMessage, res: ServerResponse, url: URL, host: string): Promise<void> => {
@@ -77,24 +103,7 @@ export function createMemoryEntryActions(src: MemoryEntriesSource | undefined, c
       if (!src) throw new HttpError(404, '记忆条目未启用');
       const match = MEMORY_ENTRY_ACTION.exec(url.pathname);
       if (!match) throw new HttpError(404, '接口不存在');
-      guardDashboardOrigin(req, host);
-      if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')) throw new HttpError(415, '只接受 application/json');
-      const chunks: Buffer[] = []; let size = 0;
-      for await (const chunk of req.iterator({ destroyOnReturn: false })) {
-        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-        size += bytes.length;
-        if (size > 4096) { req.resume(); throw new HttpError(413, '提交内容过大'); }
-        chunks.push(bytes);
-      }
-      let body: Record<string, unknown>;
-      try {
-        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
-        body = parsed as Record<string, unknown>;
-      } catch { throw new HttpError(400, '请求体必须是 JSON 对象'); }
-      const supplied = req.headers['x-csrf-token'] ?? body._csrf;
-      if (!csrf || typeof supplied !== 'string' || !equal(supplied, csrf)) throw new HttpError(403, 'CSRF 令牌无效，请刷新页面后重试');
-      delete body._csrf;
+      const body = await readMemoryJsonPost(req, host, csrf);
       if (Object.keys(body).length) throw new HttpError(400, '此操作不接受额外字段');
       const id = Number(match[1]);
       applyMemoryEntryAction(src, id, match[2] as 'forget' | 'restore');
