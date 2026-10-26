@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS inbound (
 );
 CREATE INDEX IF NOT EXISTS inbound_state ON inbound(state);
 CREATE INDEX IF NOT EXISTS inbound_thread ON inbound(thread_key);
+CREATE INDEX IF NOT EXISTS inbound_turn ON inbound(turn_id);
 CREATE TABLE IF NOT EXISTS seen_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   key TEXT NOT NULL UNIQUE,
@@ -301,6 +302,12 @@ export class ReplyStore {
     const row = this.db.prepare(`SELECT rowid AS seq, * FROM inbound WHERE thread_key = ? AND kind = 'user' AND rowid < ?
       AND substr(turn_id, 1, ?) = ? ORDER BY rowid DESC LIMIT 1`).get(threadKey, beforeSeq, turnPrefix.length, turnPrefix) as InboundRow | undefined;
     return row ? toInbound(row) : null;
+  }
+
+  /** 某回合的全部输入（开轮与插话，宿主交给后端时写入 turn_id），按到达顺序；回合后抽取的材料（docs/MEMORY-DESIGN.md §8.1）。 */
+  listInboundByTurn(turnId: string): InboundRecord[] {
+    return (this.db.prepare("SELECT rowid AS seq, * FROM inbound WHERE turn_id = ? ORDER BY rowid")
+      .all(turnId) as unknown as InboundRow[]).map(toInbound);
   }
 
   /** 状态只前进；turnId 首次写入后保留。 */

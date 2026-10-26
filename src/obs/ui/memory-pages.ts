@@ -4,7 +4,7 @@
  * 时间线由 /assets/memory.js 用本地 vis-timeline 绘制，数据经 <script type="application/json"> 传入。
  */
 import { redactText } from '../../shared/redact.js';
-import type { AgingReport, AgingStatus, ArchiveRow, CompactionRow, Hit, MessageItem, Retention, ScopeSummary, ScopeTimeline, SummaryVersion } from '../memory/types.js';
+import type { AgingReport, AgingStatus, ArchiveRow, CompactionRow, Hit, MemoryExtractStatus, MessageItem, Retention, ScopeSummary, ScopeTimeline, SummaryVersion } from '../memory/types.js';
 import { crumbs, dataScript } from './agents-pages.js';
 import { fmtInt } from '../../shared/format.js';
 import { empty, esc, fmtMs, fmtTime, fmtWhen, kv, stamp, uri } from './html.js';
@@ -68,8 +68,34 @@ ${kv([
   ], 'meta')}</section>`;
 }
 
-export function memoryHomeBody(o: MemoryOverview, now: number, recalls?: RecallCount | null): string {
-  let out = agingCard(o, now);
+const EXTRACT_REASONS: Record<string, string> = { too_short: '材料过短', disabled: '开关关闭', quota: '超出当日上限', queue_full: '队列已满被丢弃',
+  invalid_json: '输出不是合法 JSON', timeout: '模型超时', no_model: '模型不可用', model_error: '模型出错' };
+const DROP_REASONS: Record<string, string> = { low_confidence: '低置信', duplicate: '重复', secret: '含凭据', invalid_time: '时间无效',
+  over_limit: '超出每轮 5 条', supersedes_ignored: '取代目标无效', store_error: '写入失败' };
+const nsLabel = (ns: string) => ns === 'owner' ? 'owner 私聊' : scopeLabel(ns);
+
+/** 回合后记忆抽取（docs/MEMORY-DESIGN.md §8）：队列、今日各命名空间次数、最近 10 次结果；null 表示读取失败，undefined 表示未接入。 */
+export function extractCard(st: MemoryExtractStatus | null | undefined, now: number): string {
+  if (st === undefined) return '';
+  if (st === null) return `<section class="sheet pad flush"><h2>记忆抽取</h2>${empty('抽取状态暂不可用。')}</section>`;
+  const counts = Object.entries(st.today.counts);
+  const result = (r: MemoryExtractStatus['recent'][number]) => r.status === 'ok'
+    ? `${stamp('完成', 'ok')} 候选 ${fmtInt(r.candidates)} · 写入 ${fmtInt(r.written)} · 取代 ${fmtInt(r.superseded)}${Object.keys(r.dropped).length
+      ? ` · 丢弃 ${esc(Object.entries(r.dropped).map(([k, n]) => `${DROP_REASONS[k] ?? k} ${n}`).join('、'))}` : ''}`
+    : `${stamp(r.status === 'failed' ? '失败' : '跳过', r.status === 'failed' ? 'fail' : 'idle')} ${esc(EXTRACT_REASONS[r.reason ?? ''] ?? r.reason ?? '')}`;
+  return `<section class="sheet pad flush"><h2>记忆抽取 <small>用户回合结束后用 ${esc(st.model || '（未配置模型）')} 提炼记忆条目；开关在<a href="/settings#memory-extract">设置页</a></small></h2>
+${kv([
+    ['模型', st.available ? esc(st.model) : `${stamp('不可用', 'warn')} <small>MEMORY_EXTRACT_MODEL 未配置或不在 magpie 目录中</small>`],
+    ['队列', `${fmtInt(st.queue)} 条排队${st.running ? ` · 正在处理 <a class="mono" href="/turns/${uri(st.running)}">${esc(st.running)}</a>` : ''}`],
+    [`今日（${esc(st.today.date)}）`, counts.length ? esc(counts.map(([ns, n]) => `${nsLabel(ns)} ${n}/${st.daily_limit}`).join('，')) : '<span class="faint">还没有调用</span>'],
+  ], 'meta')}
+${st.recent.length ? `<div class="wrap mt"><table class="list"><thead><tr><th>时间</th><th>命名空间</th><th>回合</th><th>结果</th><th class="num">耗时</th></tr></thead><tbody>${st.recent.map(r =>
+    `<tr><td>${esc(fmtWhen(r.at, now))}</td><td>${esc(nsLabel(r.ns))}</td><td><a class="mono" href="/turns/${uri(r.turn_id)}">${esc(r.turn_id)}</a></td><td>${result(r)}</td><td class="num">${esc(fmtMs(r.ms) || '0 毫秒')}</td></tr>`).join('')}</tbody></table></div>`
+    : empty('本次启动后还没有抽取记录。')}</section>`;
+}
+
+export function memoryHomeBody(o: MemoryOverview, now: number, recalls?: RecallCount | null, extract?: MemoryExtractStatus | null): string {
+  let out = agingCard(o, now) + extractCard(extract, now);
   out += `<section><h2>会话域 <small>${o.scopes.length ? `${o.scopes.length} 个，按 scope 排序` : ''}</small></h2>`;
   out += o.scopes.length ? `<div class="sheet"><div class="wrap"><table class="list mem-scopes"><thead><tr><th>会话域</th><th class="num">消息</th><th class="num">日 / 周摘要</th><th class="num">待整理日</th><th class="num hide-sm">媒体</th><th class="hide-sm">时间范围</th><th class="num hide-sm">体量</th><th>时间线</th></tr></thead><tbody>${o.scopes.map(s => `<tr>
 <td><a href="${memoryScopeHref(s.scope)}">${esc(s.label)}</a><br><small class="mono">${esc(s.scope)}</small></td><td class="num">${fmtInt(s.messages)}</td><td class="num">${fmtInt(s.summaries.day)} / ${fmtInt(s.summaries.week)}</td>
@@ -80,7 +106,7 @@ export function memoryHomeBody(o: MemoryOverview, now: number, recalls?: RecallC
   out += '</section>';
   out += `<section><h2>工具</h2><div class="grid cols-3 mem-tools">
 <a class="sheet pad tool-link" href="/memory/search"><b>检索检查器</b><small>检索命中 → 工具实际返回的对照</small></a>
-<a class="sheet pad tool-link" href="/memory/entries"><b>记忆条目</b><small>mem_remember 记下的事实与承诺，可遗忘 / 恢复</small></a>
+<a class="sheet pad tool-link" href="/memory/entries"><b>记忆条目</b><small>mem_remember 与回合后抽取记下的事实与承诺，可遗忘 / 恢复</small></a>
 <a class="sheet pad tool-link" href="/memory/archives"><b>线程归档</b><small>Codex / Pi 归档线程与 Pi 压缩记录</small></a>
 <a class="sheet pad tool-link" href="/context"><b>上下文检索（旧）</b><small>qq_context 工具原样输出</small></a>
 <a class="sheet pad tool-link" href="/memory/recalls"><b>召回记录</b><small>${recalls ? `最近 24 小时 ${fmtInt(recalls.count)}${recalls.more ? '+' : ''} 次工具召回` : recalls === null ? '最近 24 小时的数量暂不可用' : 'qq_recent / qq_search / qq_message 每次调用与三级证据'}</small></a>

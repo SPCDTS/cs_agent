@@ -17,6 +17,15 @@ describe("pi 技能目录配置", () => {
   });
 });
 
+describe("记忆抽取配置", () => {
+  it("模型缺省取 AUTO_EFFORT_MODEL，显式值优先；超时缺省 20 秒", () => {
+    expect(loadConfig({})).toMatchObject({ MEMORY_EXTRACT_MODEL: "deepseek/deepseek-flash", MEMORY_EXTRACT_TIMEOUT_MS: 20000 });
+    expect(loadConfig({ AUTO_EFFORT_MODEL: "x/y" }).MEMORY_EXTRACT_MODEL).toBe("x/y");
+    expect(loadConfig({ AUTO_EFFORT_MODEL: "", MEMORY_EXTRACT_MODEL: "" }).MEMORY_EXTRACT_MODEL).toBe("");
+    expect(loadConfig({ MEMORY_EXTRACT_MODEL: "a/b", MEMORY_EXTRACT_TIMEOUT_MS: "5000" })).toMatchObject({ MEMORY_EXTRACT_MODEL: "a/b", MEMORY_EXTRACT_TIMEOUT_MS: 5000 });
+  });
+});
+
 describe("pi MCP 配置路径", () => {
   it("默认和空值禁用新调用，显式路径原样传给 Pi 配置边界", () => {
     expect(loadConfig({}).PI_MCP_CONFIG).toBe("");

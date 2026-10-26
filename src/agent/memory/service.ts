@@ -72,6 +72,18 @@ export interface MemoryServiceOptions {
   trace?: Pick<Trace, "event">;
 }
 
+/**
+ * 写入新条目后检查命名空间的 active 条目软上限（§11）：超过只告警、不拒写，每个 warned 集合按命名空间只告警一次。
+ * 显式工具（mem_remember）与回合后抽取两条写入路径共用。
+ */
+export function warnActiveSoftCap(store: Pick<MemoryStore, "activeCount">, ns: string, warned: Set<string>): void {
+  if (warned.has(ns)) return;
+  const count = store.activeCount(ns);
+  if (count <= MEMORY_ACTIVE_SOFT_CAP) return;
+  warned.add(ns);
+  log.warn("memory active entries over soft cap", { ns, count, cap: MEMORY_ACTIVE_SOFT_CAP });
+}
+
 export class MemoryError extends Error {
   constructor(message: string) { super(message); this.name = "MemoryError"; }
 }
@@ -215,11 +227,7 @@ export class MemoryService {
     const line = formatMemoryLine(result.row, scope => this.label(scope)), replaced = result.superseded ? `（取代 #${result.superseded.id}）` : "";
     if (result.superseded || !result.duplicate) this.written(binding, "mem_remember", rights, result.row, { superseded: result.superseded?.id ?? null, duplicate: result.duplicate });
     if (result.duplicate) return "已有相同的记忆，未重复记录：" + line + replaced;
-    const count = this.opts.store.activeCount(ns);
-    if (count > MEMORY_ACTIVE_SOFT_CAP && !this.capWarned.has(ns)) {
-      this.capWarned.add(ns);
-      log.warn("memory active entries over soft cap", { ns, count, cap: MEMORY_ACTIVE_SOFT_CAP });
-    }
+    warnActiveSoftCap(this.opts.store, ns, this.capWarned);
     return "已记住：" + line + replaced;
   }
 

@@ -39,7 +39,8 @@
 
 ### 2.1 设置
 
-- **运行时设置**（`POST /settings`）：`${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexModel`、`codexReasoningEffort`、`piModel`、`piThinkingLevel`、`alertOwner`。模型下拉来自 magpie 目录，档位含 `auto`。后端、模型与档位在开轮时冻结为本轮设置快照（记在首条输入的 `admitted` 与回合的 `dispatched` 事件，回合页显示）；告警开关现读。旧文件中的 `codexReplyMode` 读取时剥离。
+- **运行时设置**（`POST /settings`）：`${DATA_DIR}/settings.json`（`{version:1, settings:{…}}`，原子写，zod 严格校验）覆盖 `.env` 默认值：`agentBackend`、`backendOverrides`、`codexModel`、`codexReasoningEffort`、`piModel`、`piThinkingLevel`、`alertOwner`（发送规则 `sendRules` 与记忆抽取开关 `memory` 各有独立表单，见下）。模型下拉来自 magpie 目录，档位含 `auto`。后端、模型与档位在开轮时冻结为本轮设置快照（记在首条输入的 `admitted` 与回合的 `dispatched` 事件，回合页显示）；告警开关现读。旧文件中的 `codexReplyMode` 读取时剥离。
+- **记忆抽取**（`POST /settings/memory-extract`）：`memory.extract` 为各命名空间的回合后抽取开关（[MEMORY-DESIGN.md](MEMORY-DESIGN.md) §8.1）。每个出现过的命名空间一行（宿主见过的会话键、已有记忆的命名空间与已保存的键，owner 在首行）；没有键的命名空间只有 `owner` 开启。表单以隐藏字段 `ns` 列出本次的命名空间、勾选的为 `extract:<ns>=on`，保存只改列出的键，其余保留；只存与缺省不同的覆盖项（owner 缺省开、其余缺省关，等于缺省的键删掉，所以提交再多关闭的命名空间也不会撞 500 项上限）；命名空间不合法 400。抽取器每次现读。
 - **发送规则**（`POST /settings/send-rules`）：`sendRules` 的五项数值（每会话每分钟 / 每小时、会话熔断分钟、全局每分钟、全局熔断分钟），每次发送前现读；当前熔断可在同一节解除（`POST /settings/send-breakers/reset`，记 `send_breaker_reset`）。
 - **授权**（`POST /settings/grants/{add,revoke}`）：显示用户、send / schedule 能力、目标 ref、来源 scopes、授权者及有效 / 已过期。添加替换该用户的整条授权（目标留空 = 不能主动发送，来源留空 = 任何会话，时效留空 = 长期）；撤销删除整条。持有面板口令者代表 owner，未配置 owner 时只展示。变更记 `auth_changed`（`source=panel`）。
 - **codex.md**（`POST /settings/codex-prompt`）：经 `CodexPromptStore`（`read()` / `save(custom, revision)` / `subscribe()`）读写；提交前 CRLF / CR 规范为 LF；revision 不符 → 409"已在别处被修改"，存储拒绝（为空、超过 64 KB、含凭据样式内容）→ 409 并显示脱敏后的原因。当前内容含已注册秘密时只读展示脱敏版。受管段只读折叠，完整 AGENTS.md 在 `/codex/agents-md`。`prompt_changed`（`target: "codex"`）只由面板对存储的唯一订阅写入。
@@ -163,7 +164,7 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 
 | 页面 | 内容 |
 |---|---|
-| `/memory` | 各会话域的消息 / 摘要计数、时间范围、体量、待生成日摘要、媒体数；整理状态（上次 / 下次、运行中、需补跑）与保留期；24 小时召回计数、图片总数 |
+| `/memory` | 各会话域的消息 / 摘要计数、时间范围、体量、待生成日摘要、媒体数；整理状态（上次 / 下次、运行中、需补跑）与保留期；记忆抽取状态（§8.5）；24 小时召回计数、图片总数 |
 | `/memory/scopes/<scope>?from=&to=` | vis-timeline 三轨时间线（原文桶 / 日摘要 / 周摘要）、空白区与保留边界，下方消息列表（点桶切换） |
 | `/memory/summaries/<id>` | 摘要正文、区间、尚存原文数、血缘版本与被替换的日摘要快照 |
 | `/memory/search?scope=&q=&days=&limit=` | 检索检查器：数据库命中与 `qq_search` 工具实际返回文本对照、关键词高亮 |
@@ -204,7 +205,14 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 - `GET /api/memory/entries?ns=&kind=&status=&q=&page=` → `{items: MemoryEntry[], total, page, has_more, namespaces}`，每页 50，按更新时间倒序。`ns` 为 `owner` / `group:<id>` / `private:<qq>`，`kind` 五种之一，`status` 缺省为全部状态；`q` 截前 100 字，按空白切词、全部命中正文或 subject（与 `mem_search` 同一 FTS）。条目的时间字段为毫秒，`source` 为写入时本轮最后一条输入（会话、显示名、消息 id、回合 id、前后一小时的时间线链接），面板写入或无来源为 null。
 - `GET /api/memory/entries/<id>` → `{entry, versions, links}`：`versions` 每次正文或状态变化一行（时间、操作者、前后状态、正文是否改动、原因），不返回快照正文；`links` 为取代链。不存在 404。
 - `POST /api/memory/entries/<id>/forget`、`/restore`：只接受 `application/json`（≤4 KiB、不带其它字段），同源检查与 CSRF（`X-CSRF-Token` 头或 `_csrf` 字段）与 `/api/schedules` 相同，返回更新后的详情。遗忘只标 `forgotten`，不删行；恢复回到遗忘前的状态（取最近一次遗忘版本的前状态，查不到为 active），未遗忘的条目恢复为 409。操作者记为 `dashboard`，写 `@memory` 的 `memory_write` 事件。
-- 页面：`/memory/entries` 筛选表单（命名空间、种类、状态、关键词）与表格，每行一个"遗忘"或"恢复"按钮；`/memory/entries/<id>` 显示元数据、正文、取代链与版本历史。按钮是表单 POST 到 `/memory/entries/<id>/{forget,restore}`（面板写操作的 cookie、同源与 `_csrf` 约束），成功 303 回详情页并带 `?ok=memoryForgotten` / `memoryRestored`。画像编辑、抽取与整理状态尚未提供。
+- 页面：`/memory/entries` 筛选表单（命名空间、种类、状态、关键词）与表格，每行一个"遗忘"或"恢复"按钮；`/memory/entries/<id>` 显示元数据、正文、取代链与版本历史。按钮是表单 POST 到 `/memory/entries/<id>/{forget,restore}`（面板写操作的 cookie、同源与 `_csrf` 约束），成功 303 回详情页并带 `?ok=memoryForgotten` / `memoryRestored`。画像编辑与整理状态尚未提供。
+
+### 8.5 记忆抽取
+
+回合后抽取（[ARCHITECTURE.md](ARCHITECTURE.md) §9.1）的运行状态在进程内存里，重启清零；每次结果另记回合的 `memory_extract` 事件（回合页可见，`turn:<id>`）。
+
+- `GET /api/memory/extract` → `{model, available, queue, running, daily_limit, today: {date, counts}, recent}`：`available` 为抽取模型可用；`queue` 为排队条数（不含正在跑的），`running` 为正在处理的回合 id；`today.counts` 为今天（北京时间）各命名空间的模型调用次数，上限 `daily_limit`（200）；`recent` 为最近 10 次结果（最新在前）：`{turn_id, ns, at, status: ok|skipped|failed, reason?, candidates, written, superseded, dropped, ms}`，`reason` 为 `too_short` / `disabled` / `quota` / `queue_full` / `invalid_json` / `timeout` / `no_model` / `model_error` / `closed`（关闭超时后才返回），`dropped` 为按原因计数（`low_confidence` / `duplicate` / `secret` / `invalid_time` / `over_limit` / `supersedes_ignored` / `store_error`）。未接入时 404。
+- `/memory` 首页"记忆抽取"卡：模型、队列、今日次数与最近 10 次结果（链到回合页）；开关在设置页（§2.1）。
 
 ## 9. 观测存储与保留
 

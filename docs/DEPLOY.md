@@ -41,6 +41,8 @@ Copy-Item .env.example .env
 | `AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID` | `deepseek` / `deepseek-flash` | pi 与日/周摘要的模型；经 magpie 时设 `magpie` / `deepseek/deepseek-flash`（§3.2）；也可 `openai-codex`、`openai`、`anthropic`（后两者需 `*_API_KEY`） |
 | `AGENT_THINKING_LEVEL` | `low` | pi 缺省思考档位；模型不支持的档位就近调整并告警 |
 | `AUTO_EFFORT_MODEL` / `AUTO_EFFORT_TIMEOUT_MS` | `deepseek/deepseek-flash` / 4000 | `auto` 档位的分类模型（magpie 提供者下）；空值只走规则快路径 |
+| `MEMORY_EXTRACT_MODEL` | 同 `AUTO_EFFORT_MODEL` | 回合后记忆抽取的模型（magpie 提供者下，[MEMORY-DESIGN.md](MEMORY-DESIGN.md) §8）；两者都为空或不在目录中时不抽取（面板记 `no_model`）。各命名空间的开关在面板设置页 |
+| `MEMORY_EXTRACT_TIMEOUT_MS` | 20000 | 单次抽取的模型超时；超时放弃本轮，不重试 |
 | `DEEPSEEK_API_KEY` | 空 | 也可写作 `DEEPSEEK_APIKEY`。provider 为 `deepseek` 时缺失即启动失败；pi 的联网检索始终需要它 |
 | `SKILLS_DIR` / `PI_SKILLS_DIR` | `./data/skills` / 空 | 共享技能目录（宿主机路径，可指向 magpie Library 的 skills 目录，Windows 写 `C:/…`）；`PI_SKILLS_DIR=off` 关闭 pi 的技能段 |
 | `PI_MCP_CONFIG` | 空 | Pi 外部 MCP 管理员 JSON 配置绝对路径；留空禁用。Streamable HTTP、静态凭据、owner 私聊，见 [PI-MCP.md](PI-MCP.md) |

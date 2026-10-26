@@ -100,6 +100,8 @@ export interface InboxStore {
   latestInbound(threadKey: string): InboundRecord | null;
   /** 会话在 beforeSeq 之前、回合 id 以 turnPrefix 开头的最近一条用户输入（某后端上次看到哪里） */
   lastUserInput(threadKey: string, turnPrefix: string, beforeSeq: number): InboundRecord | null;
+  /** 某回合的全部输入（含插话），按到达顺序 */
+  listInboundByTurn(turnId: string): InboundRecord[];
   markInbound(keys: readonly string[], state: InboundState, turnId?: string): void;
   openScheduledInput(input: ScheduledInput): InboundRecord;
 }

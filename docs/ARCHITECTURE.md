@@ -270,7 +270,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 
 ### 9.1 记忆（`src/context/memory/`、`src/agent/memory/`）
 
-消息库之上的派生层：回答"你是谁、偏好什么、定过什么、答应过什么"，不回答"某天聊了什么"。设计与后续分期见 [MEMORY-DESIGN.md](MEMORY-DESIGN.md)；现在只有回合内的显式工具与面板，没有回合后抽取与夜间整理。
+消息库之上的派生层：回答"你是谁、偏好什么、定过什么、答应过什么"，不回答"某天聊了什么"。设计与后续分期见 [MEMORY-DESIGN.md](MEMORY-DESIGN.md)；现在有回合内的显式工具、回合后抽取与面板，没有夜间整理。
 
 - **存储**：`/data/memory.sqlite`（WAL，`context/memory/store.ts`；与 `/data/memory/` 一样在 codex 与 pi 的禁读名单里，只能经记忆工具与面板读写）：`memories`（命名空间、种类 fact / preference / rule / commitment / episode、subject、一句话正文 ≤500 字、生效与失效时间、承诺的截止与完成时间、状态 active / superseded / retired / orphaned / forgotten、作者、来源会话与消息 id、回合 id、召回统计、去重哈希）、`memory_versions`（每次正文或状态变化一行，前后快照与原因）、`memory_links`（`supersedes` 取代链）；`memories_fts` 为 trigram FTS5，content 表触发器同步。命名空间与会话键一致（`owner`、`group:<id>`、`private:<qq>`）。哈希为 `ns + kind + 规整后正文` 的 SHA-256，同命名空间的 active 条目重复写入时返回已有条目。存储不认识权限，与消息库互不 import。
 - **画像**：每个命名空间一份 `/data/memory/<ns>/profile.md`（冒号换下划线），纯文本 ≤4 KiB（超限的不进入提示，`mem_profile` 提示重写）；画像目录与文件不可为链接、真实路径须在画像根目录内；revision = mtime + size + 内容哈希，写入必须带读到的 revision（CAS），含凭据样式内容拒绝（与提示词编辑器同一条规则，`shared/redact.ts` 的 `containsSecret`）。
@@ -278,7 +278,8 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 - **工具**：`mem_search`（关键词子串匹配，最近召回优先、其次最新；命中记召回统计）、`mem_list`（承诺按截止排序）、`mem_remember`（可带 `supersedes`，同事务取代旧条目）、`mem_update`、`mem_forget`（只标记）、`mem_profile`。输出每条一行 `#id [kind] (时效) 正文 ← 来源 会话 #消息`，总量 ≤`QQ_CONTEXT_MAX_CHARS`；写入前过秘密检测；每轮写入 ≤20 次。使用规则只定义在 `agent/memory/tools.ts` 的 `MEMORY_RULE`，pi 放在 `cs-pi` 受管段，codex 放在 `mem_remember` 的说明里。trace 事件 `memory_recall`（工具名与命中 id，不记正文）、`memory_write`（作者、命名空间、种类、是否取代）。
 - **两个后端**：pi 由 `pi-tools/memory.ts` 注册（读工具一个扩展，写工具按本轮权限分两档，`mem_profile` 只在 owner 档）。codex 的 `im` MCP 固定列出六个 `mem_*`，经线程令牌 loopback（`/mem_*` 端点）回主进程，`ThreadTokens` 求出本次调用的绑定后交给同一个服务复核。
 - **提示注入**：只注入画像全文与未完成承诺的前 10 条（按截止升序，无截止的在后），渲染为 `<memory ns="…" profile_revision="…">` 段（`agent/memory/render.ts`），两者都空时不渲染。pi 为 `memory` section；codex 写进会话域受管 `AGENTS.md` 的"记忆"一节，随加载线程生成，已加载的线程何时重读取决于 codex（§4.1）。其余条目不自动注入，由模型按需 `mem_search`。
-- **面板**：`/memory/entries`（列表与筛选）、`/memory/entries/<id>`（正文、来源、取代链、版本历史），可遗忘与恢复（[DASHBOARD.md](DASHBOARD.md) §8.4）。
+- **回合后抽取**（`agent/memory/extractor.ts`）：TurnMonitor 的回合结束通知（与定时运行统计同一条）交给抽取器的观察者。只收 `completed` 的用户回合，且本轮确证的人按上面的权限表能写该命名空间、该命名空间的开关打开（面板设置页 `memory.extract`，缺省只有 `owner`）；定时、唤醒、失败的回合不抽取。满足即入独立队列立即返回（下一轮事件循环才读材料），不阻塞宿主；一次只跑一条，积压超过 50 条丢最旧的并告警，每命名空间每天（北京时间）最多 200 次模型调用。材料只取 `qq-bridge.sqlite`：`inbound` 按 `turn_id`（有索引）取本轮全部输入（含插话）、Outbox 按回合取发出的行（去掉系统消息，只留 `sent` / `uncertain`，主动发送标注目标，图片与文件只留标记），两列按时间各自保序交错成一段对话，"[我]"为助手；引用行原文按消息 id 从消息库取（与输入呈现同一查找）。不用 `final_answer`、不读后端会话与观测库、不读工具输出。单条正文先截到 2,000 字，归并累计超过 12,000 字即停（关键词只扫进入材料的正文）；正文合计不足 80 字跳过。说话人标签只由抽取器生成：正文行首（含前导空白）的 `[` 换成 `(`，昵称去掉方括号、尖括号与控制字符。模型为 `MEMORY_EXTRACT_MODEL`（缺省同 `AUTO_EFFORT_MODEL`，经 magpie 直调，与选档同一方式），超时 `MEMORY_EXTRACT_TIMEOUT_MS`（20 s）即放弃、不重试；提示词 `MEMORY_EXTRACT_PROMPT` 只在 `extractor.ts` 定义，对话是待分析数据，并附上该命名空间里与材料关键词（英文词与汉字二字片段，去虚词，按频次取 8 个，逐个 FTS 检索）相关的 active 条目 ≤20 条作"已知信息"。输出须为严格 JSON 数组，形状不对整批丢弃；`confidence < 0.6`、含凭据样式、时间无效的项丢弃；与 active 条目同正文的不写只记召回、不占写入额度，但带 `supersedes` 时仍同事务取代；`supersedes` 指向同命名空间的 active 条目时取代；每轮最多写 5 条，`author = extractor`，来源为本轮最后一条输入，`confidence` 存模型给的值。永远不改画像、不发消息。每轮记 `memory_extract`（`turn:<id>`：候选、写入、取代、丢弃原因计数、用量、耗时或跳过原因），写入的条目另记 `memory_write`，超过 active 软上限与显式工具同一处告警。关闭时不再收新回合、丢弃排队的，正在跑的一条在关闭记忆库前最多等 8 秒；超时则中止并标记取消，模型之后才返回也不落库（`closed`）。状态见面板 `/memory` 与 `/api/memory/extract`（[DASHBOARD.md](DASHBOARD.md) §8.5）。
+- **面板**：`/memory/entries`（列表与筛选）、`/memory/entries/<id>`（正文、来源、取代链、版本历史），可遗忘与恢复（[DASHBOARD.md](DASHBOARD.md) §8.4）；`/memory` 首页的抽取状态与设置页的抽取开关（§8.5、§2.1）。
 
 ## 10. 存储
 
@@ -297,7 +298,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 | `data/codex/`（`CODEX_HOME`） | 受管 `config.toml`、生成的 `AGENTS.md`、`base-instructions/`、sessions、trace、`generated_images/`、`skills/shared`（挂载） |
 | `data/codex-threads.json`、`codex-threads-archive.jsonl` | codex 会话线程映射与重置归档（保留 200 条） |
 | `data/prompts/` | `codex.md`、`agent.md`、`codex-base/<slug>.md`（可编辑提示词） |
-| `data/settings.json` | 面板运行时设置（后端、模型、档位、发送规则、告警） |
+| `data/settings.json` | 面板运行时设置（后端、模型、档位、发送规则、告警、记忆抽取开关） |
 | `data/context-usage.json` | 每线程上一轮输入占用（`backend:key`） |
 | `data/incoming/`、`data/images/<键>/outbox/`、`data/media/` | 入站参考图、出站副本、召回媒体 |
 | `workspace/<键>/`、`data/pi-work/<键>/` | codex / pi 会话工作区 |

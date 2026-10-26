@@ -29,6 +29,21 @@ describe("ReplyStore Inbox", () => {
       reply_to: "99", state: "queued", message_id: "group", self_id: "10001" });
   });
 
+  it("listInboundByTurn 按到达顺序取某回合的全部输入（含插话），turn_id 有索引", () => {
+    store = new ReplyStore(dir);
+    const a = store.admit(msg("a", "第一条"), T)!, b = store.admit(msg("b", "插话"), T)!, c = store.admit(msg("c", "下一轮"), T)!;
+    store.markInbound([a], "delivered", "pi:t1");
+    store.markInbound([b], "delivered", "pi:t1");
+    store.markInbound([c], "delivered", "pi:t2");
+    expect(store.listInboundByTurn("pi:t1").map(r => [r.key, r.text, r.turn_id])).toEqual([[a, "第一条", "pi:t1"], [b, "插话", "pi:t1"]]);
+    expect(store.listInboundByTurn("pi:t2").map(r => r.key)).toEqual([c]);
+    expect(store.listInboundByTurn("pi:none")).toEqual([]);
+    store.close(); store = null;
+    const db = new DatabaseSync(join(dir, DB_FILE));
+    try { expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'inbound_turn'").get()).toBeTruthy(); }
+    finally { db.close(); }
+  });
+
   it("admit 以确定性入站键保存原文，重复消息返回 null", () => {
     store = new ReplyStore(dir);
     const key = store.admit(msg("1", "画一只猫"), T);

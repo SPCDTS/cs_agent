@@ -54,11 +54,13 @@ import { PiBackend } from "./agent/backends/pi.js";
 import { loadMcpConfig, type EnvironmentSecrets } from "./agent/pi-mcp/config.js";
 import { ContextStore } from "./context/store.js";
 import { MemoryStore } from "./context/memory/store.js";
+import { isMemoryNs } from "./context/memory/types.js";
 import { ProfileStore } from "./context/memory/profile.js";
 import { MemoryService } from "./agent/memory/service.js";
+import { MemoryExtractor } from "./agent/memory/extractor.js";
 import { isOwner } from "./shared/owners.js";
 import { scopeLabel } from "./context/access.js";
-import { SettingsStore, settingsDefaults } from "./agent/settings.js";
+import { SettingsStore, memoryExtractEnabled, settingsDefaults } from "./agent/settings.js";
 import { msUntilNextRun, startAgingScheduler } from "./context/aging.js";
 
 let closeLogs = async () => {};
@@ -314,7 +316,26 @@ async function main(): Promise<void> {
     turns: inbox, owners: cfg.owners });
   const router = new BackendRouter({ backends: { pi, codex: codexBackend }, settings: turnSettings, turns: inbox, owners: cfg.owners,
     backendFor: scope => { const current = settings.current(); return backendNameFor(scope, current.agentBackend, current.backendOverrides); } });
-  const monitor = new TurnMonitor({ inbox, sendService, scheduled, getHost: () => host });
+  // 回合后记忆抽取（docs/MEMORY-DESIGN.md §8）：接在回合结束通知上的独立异步队列；模型与 auto 选档一样经 magpie 直调。
+  const extractModel = cfg.MEMORY_EXTRACT_MODEL ? models.getModel("magpie", cfg.MEMORY_EXTRACT_MODEL) : undefined;
+  if (cfg.MEMORY_EXTRACT_MODEL && !extractModel) log.warn("memory extract model unavailable; extraction skipped", { model: cfg.MEMORY_EXTRACT_MODEL });
+  const extractor = new MemoryExtractor({
+    store: memoryStore, owners: cfg.owners, model: cfg.MEMORY_EXTRACT_MODEL, timeoutMs: cfg.MEMORY_EXTRACT_TIMEOUT_MS,
+    inbound: turnId => getBridge().inbox.listInboundByTurn(turnId), outbox: turnId => getBridge().outbox.listOutboxByTurn(turnId),
+    quote: (scope, messageId) => {
+      const hit = store.message({ kind: "scope", scope }, messageId);
+      return hit ? { nickname: hit.row.is_self ? "我" : hit.row.nickname || hit.row.user_id, text: hit.row.text } : undefined;
+    },
+    enabled: ns => memoryExtractEnabled(settings.current(), ns),
+    ...(extractModel ? { complete: async (prompt: string, signal: AbortSignal) => {
+      const result = await models.completeSimple(extractModel,
+        { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+        { signal, reasoning: undefined, maxTokens: 2000 });
+      if (result.stopReason === "error" || result.stopReason === "aborted") throw new Error("抽取模型失败");
+      return { text: result.content.map(c => c.type === "text" ? c.text : "").join(""), usage: result.usage };
+    } } : {}),
+  });
+  const monitor = new TurnMonitor({ inbox, sendService, scheduled, getHost: () => host, observers: [event => extractor.observe(event)] });
   // 会话宿主（§2.3）：状态存于派发 harness 的 cs.thread-host 文档；并发上限只限进行中的回合数。
   host = new ThreadHost({ store: harness, adapter: router, concurrency: cfg.AGENT_CONCURRENCY, owners: cfg.owners, events: monitor.events,
     admit: (_threadKey, input) => scheduled.admit(input.inboundKey) });
@@ -416,7 +437,10 @@ async function main(): Promise<void> {
   };
   const dashboardData = { contextUsage, codexPrompt, codexBasePrompt, modelCatalog, skills, topology,
     memoryEntries: { store: memoryStore, forget: (id: number) => memory.forgetFromDashboard(id), restore: (id: number) => memory.restoreFromDashboard(id),
-      scopeLabel: (scope: string) => memory.label(scope) } };
+      scopeLabel: (scope: string) => memory.label(scope) },
+    // 设置页列出的命名空间：宿主见过的会话与已有记忆的命名空间
+    memoryExtract: { status: () => extractor.status(),
+      namespaces: () => [...new Set([...host.keys().filter(isMemoryNs), ...memoryStore.namespaces()])] } };
   const dashboard = createDashboard({
     grants, schedules, ...dashboardData, config: cfg, store: obs, context: store, queue: () => queueStatus(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
@@ -490,11 +514,14 @@ async function main(): Promise<void> {
     aging.stop();
     schedules.stop();
     monitor.stopWatchdog();
+    // 记忆抽取：不再收新回合，正在跑的那一条在关闭记忆库前最多再等 8 秒
+    const extractDrained = extractor.close(8000);
     await recallServer.close();
     await bridge!.stop().catch(() => undefined);
     await closeAgentHarnesses(harness, pi);
     await codex.stop().catch(() => undefined);
     await contextUsage.close().catch(() => log.warn("context usage shutdown flush failed"));
+    await extractDrained.catch(() => undefined);
     try {
       store.close();
       memoryStore.close();

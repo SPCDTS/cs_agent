@@ -148,6 +148,10 @@ export function createMemoryRoutes(deps: MemoryDeps) {
         if (p === '/api/memory/entries') { sessionJson(res, 200, memoryEntryList(deps.entries, q)); return; }
         parameters(q, []); sessionJson(res, 200, memoryEntryDetail(deps.entries, segment(p.split('/')[4]))); return;
       }
+      if (p === '/api/memory/extract') {
+        if (!deps.extract) throw new SessionError(404, '记忆抽取未启用');
+        parameters(q, []); sessionJson(res, 200, deps.extract.status()); return;
+      }
       if (p === '/api/memory/archives') {
         parameters(q, []); sessionJson(res, 200, await memoryArchives(deps.archives, deps.store)); return;
       }

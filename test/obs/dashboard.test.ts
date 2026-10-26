@@ -26,9 +26,9 @@ import { dispatchSettingsLine, type ModelCatalogView } from '../../src/obs/ui/da
 const clean: (() => unknown)[] = [];
 afterEach(async () => { trace.attach(undefined); for (const fn of clean.splice(0).reverse()) await fn(); });
 const TOKEN = 'fake-dashboard-token-0123456789';
-const defaults: RuntimeSettings = { codexModel: 'codex/gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES } };
+const defaults: RuntimeSettings = { codexModel: 'codex/gpt-6.1-sol', piModel: 'deepseek-flash', piThinkingLevel: 'low', agentBackend: 'codex', backendOverrides: {}, codexReasoningEffort: 'high', alertOwner: false, sendRules: { ...DEFAULT_SEND_RULES }, memory: { extract: {} } };
 
-async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv; modelCatalog?: ModelCatalogView; sendBreakers?: DashboardOptions['sendBreakers'] } = {}) {
+async function rig(extra: { validators?: SettingsValidators; contextUsage?: ContextUsageStub; codexPrompt?: CodexPromptStub | null; env?: NodeJS.ProcessEnv; modelCatalog?: ModelCatalogView; sendBreakers?: DashboardOptions['sendBreakers']; memoryExtract?: DashboardOptions['memoryExtract'] } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cs-dash-'));
   const store = new ObsStore(dir), context = new ContextStore(dir);
   trace.attach(store);
@@ -43,7 +43,7 @@ async function rig(extra: { validators?: SettingsValidators; contextUsage?: Cont
   const stopThread = vi.fn(async (_key: string) => {});
   mkdirSync(path.join(dir, 'codex'), { recursive: true }); writeFileSync(path.join(dir, 'codex', 'AGENTS.md'), '# 受管规则');
   const codexPrompt = extra.codexPrompt === null ? undefined : extra.codexPrompt ?? new CodexPromptStub();
-  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, compactCodex, compactPi, stopThread, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog, sendBreakers: extra.sendBreakers,
+  const dashboard = createDashboard({ config, store, context, settings, live, resetCodex, resetPi, compactCodex, compactPi, stopThread, contextUsage: extra.contextUsage, codexPrompt, modelCatalog: extra.modelCatalog, sendBreakers: extra.sendBreakers, memoryExtract: extra.memoryExtract,
     health: () => ({ bridge: { ws_connected: true, disconnect_count: 2 }, codex: { ok: false }, deepseek_key_present: true }),
     queue: () => ({ active: 1, slots: 2, waiting: 1, scopes: { 'group:7': 1 } }),
     codex: async () => [{ thread_key: 'owner', thread_id: null, rollout_bytes: null, observed_turns: 0 }, { thread_key: 'group:7', thread_id: 'thread-old', rollout_bytes: 2_500_000, observed_turns: 3 }],
@@ -329,6 +329,37 @@ describe('面板二期页面', () => {
     expect(JSON.parse(r.store.events(SETTINGS_KEY).find(e => e.stage === 'send_breaker_reset')!.detail_json)).toEqual({ source: 'dashboard', scope: 'group:7' });
     const after = await (await r.get('/settings?ok=breakerReset')).text();
     expect(after).toContain('熔断已解除'); expect(after).toContain('解除发送熔断：'); expect(after).not.toContain('value="group:7"');
+  });
+
+  it('记忆抽取开关：每个出现过的命名空间一行，缺省只有 owner 勾选；保存只改表单列出的命名空间并校验口令', async () => {
+    const status = { model: 'deepseek/deepseek-flash', available: true, queue: 2, running: 'pi:t9', daily_limit: 200,
+      today: { date: '2026-10-26', counts: { owner: 3 } },
+      recent: [{ turn_id: 'pi:t8', ns: 'owner', at: Date.now(), status: 'ok' as const, candidates: 2, written: 1, superseded: 0, dropped: { duplicate: 1 }, ms: 1200 },
+        { turn_id: 'pi:t7', ns: 'group:7', at: Date.now(), status: 'skipped' as const, reason: 'too_short', candidates: 0, written: 0, superseded: 0, dropped: {} as Record<string, number>, ms: 1 }] };
+    const r = await rig({ memoryExtract: { status: () => status, namespaces: () => ['group:7', 'private:5'] } });
+    const html = await (await r.get('/settings')).text();
+    expect(html).toContain('id="memory-extract"'); expect(html).toContain('action="/settings/memory-extract"');
+    expect(html).toMatch(/name="extract:owner" checked/); expect(html).toMatch(/name="extract:group:7">/); expect(html).toMatch(/name="extract:private:5">/);
+    expect((await r.post('/settings/memory-extract', { ns: 'group:7', 'extract:group:7': 'on' })).status).toBe(403);
+    expect(r.settings.current().memory.extract).toEqual({});
+    const res = await r.post('/settings/memory-extract', { _csrf: r.csrf, ns: 'group:7', 'extract:group:7': 'on' });
+    expect(res.status).toBe(303); expect(res.headers.get('location')).toBe('/settings?ok=saved#memory-extract');
+    expect(r.settings.current().memory.extract).toEqual({ 'group:7': true });
+    const body = new URLSearchParams([['_csrf', r.csrf], ['ns', 'owner'], ['ns', 'group:7']]).toString();
+    const off = await r.get('/settings/memory-extract', { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    expect(off.status).toBe(303);
+    expect(r.settings.current().memory.extract).toEqual({ owner: false });
+    // 600 个未勾选的群 + owner 取消勾选：只存与缺省不同的覆盖项，不触发 500 项上限
+    const many = new URLSearchParams([['_csrf', r.csrf], ['ns', 'owner'], ...Array.from({ length: 600 }, (_, i): [string, string] => ['ns', `group:${i + 1}`])]).toString();
+    const saved = await r.get('/settings/memory-extract', { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: many });
+    expect(saved.status).toBe(303);
+    expect(r.settings.current().memory.extract).toEqual({ owner: false });
+    const bad = await r.post('/settings/memory-extract', { _csrf: r.csrf, ns: 'group:abc', 'extract:group:abc': 'on' });
+    expect(bad.status).toBe(400); expect(await bad.text()).toContain('抽取开关未保存');
+    expect(JSON.parse((await (await r.get('/api/memory/extract')).text()))).toMatchObject({ queue: 2, running: 'pi:t9', today: { counts: { owner: 3 } } });
+    const home = await (await r.get('/memory')).text();
+    expect(home).toContain('记忆抽取'); expect(home).toContain('2 条排队'); expect(home).toContain('owner 私聊 3/200');
+    expect(home).toContain('重复 1'); expect(home).toContain('材料过短'); expect(home).toContain('href="/turns/pi%3At8"');
   });
 
   it('保存设置立即生效、落盘并记录事件；非法覆盖表返回 400 且不改动', async () => {

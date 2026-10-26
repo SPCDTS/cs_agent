@@ -59,7 +59,7 @@ export function createDashboard(opts: DashboardOptions) {
   const handleContext = createContextRoutes(adapters, { codexHome: config.codexHome, dataDir: config.DATA_DIR, contextUsage: opts.contextUsage });
   const sessionRoute = (url: URL, res: ServerResponse) => url.pathname.split('/').length === 7 && url.pathname.endsWith('/context')
     ? handleContext(url, res) : handleSessions(url, res);
-  const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, sessionAdapters: adapters, aging: opts.aging, archives: opts.archives, entries: opts.memoryEntries,
+  const memoryRoute = createMemoryRoutes({ context: opts.context, store: opts.store, sessionAdapters: adapters, aging: opts.aging, archives: opts.archives, entries: opts.memoryEntries, extract: opts.memoryExtract,
     maxChars: config.QQ_CONTEXT_MAX_CHARS, retention: { rawDays: config.HISTORY_RAW_DAYS,
       summaryDays: config.HISTORY_SUMMARY_DAYS, hardMaxDays: config.HISTORY_RAW_HARD_MAX_DAYS,
       dailyHour: config.HISTORY_SUMMARY_HOUR, tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });

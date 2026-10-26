@@ -1,7 +1,7 @@
 /** 面板页面与页面路由；数据经只读契约传入，HTML 保持原样。 */
 import { imagesPageBody, imageDetailBody, IMAGES_NOTE } from './images-pages.js';
 import { entriesPageBody, entryFilters, entryPageBody, entryQuery } from './memory-entries-pages.js';
-import type { MemoryEntryDetail, MemoryEntryPage } from '../memory/types.js';
+import type { MemoryEntryDetail, MemoryEntryPage, MemoryExtractStatus } from '../memory/types.js';
 import type { ImagePage, ImageDetail } from '../memory/types.js';
 import { redact, redactText } from '../../shared/redact.js';
 import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnRecallSection, type RecallDetail, type RecallList } from './recall-pages.js';
@@ -28,6 +28,8 @@ export interface RuntimeSettingsView {
   agentBackend: string; backendOverrides: Record<string, string>; codexReasoningEffort: string; alertOwner: boolean;
   codexModel: string; piModel: string; piThinkingLevel: string;
   sendRules?: SendRulesView;
+  /** 记忆：各命名空间的回合后抽取开关（缺键的只有 owner 开启） */
+  memory?: { extract: Record<string, boolean> };
 }
 /** bridge 发送规则的五个限额（与 channel/send-rules 的 SendRuleLimits 同形）。 */
 export interface SendRulesView { perChatMinute: number; perChatHour: number; chatBreakerMinutes: number; globalMinute: number; globalBreakerMinutes: number }
@@ -53,6 +55,8 @@ export interface DashboardPageOptions {
   live?: { snapshot(): LiveConversationView[] };
   /** 记忆条目已接入（数据经 /api/memory/entries* 读取） */
   memoryEntries?: unknown;
+  /** 回合后记忆抽取已接入：设置页列出这些命名空间的开关（状态经 /api/memory/extract 读取） */
+  memoryExtract?: { namespaces(): string[] };
   context: { scopes(): string[]; scopeNames?(): Record<string, string> };
   contextUsage?: ContextUsageView;
   settings?: { current(): Readonly<RuntimeSettingsView>; defaults: RuntimeSettingsView };
@@ -102,7 +106,7 @@ type RuntimeSettings = RuntimeSettingsView;
 const queryLink = (q: URLSearchParams) => new URLSearchParams([...q].map(([k,v])=>[redactText(k,100_000),redactText(v,100_000)])).toString();
 
 const SETTING_LABELS: Record<string, string> = { agentBackend: '默认后端', backendOverrides: '按会话覆盖', codexModel: 'Codex 模型', codexReasoningEffort: 'Codex 推理强度',
-  piModel: 'Pi 模型', piThinkingLevel: 'Pi 思考档位', alertOwner: 'owner 告警', sendRules: '发送规则' };
+  piModel: 'Pi 模型', piThinkingLevel: 'Pi 思考档位', alertOwner: 'owner 告警', sendRules: '发送规则', memory: '记忆' };
 const SEND_RULE_INPUTS: [keyof SendRulesView, string, number][] = [
   ['perChatMinute', '每会话每分钟（条）', 600], ['perChatHour', '每会话每小时（条）', 36_000], ['chatBreakerMinutes', '会话熔断时长（分钟）', 1440],
   ['globalMinute', '全局每分钟（条）', 6000], ['globalBreakerMinutes', '全局熔断时长（分钟）', 1440],
@@ -121,7 +125,7 @@ export function dispatchSettingsLine(snap: Record<string, unknown>): string {
   const parts = [BACKENDS[backend] ?? backend, model, effort].filter(Boolean);
   return parts.join(' · ') + (source === 'auto' || source === 'auto-fallback' ? `（来源 ${source}）` : '');
 }
-const showSetting = (v: unknown) => typeof v === 'boolean' ? (v ? '开启' : '关闭') : v && typeof v === 'object' ? (Object.entries(v).map(([k, b]) => `${k}=${String(b)}`).join(', ') || '无') : String(v);
+const showSetting = (v: unknown): string => typeof v === 'boolean' ? (v ? '开启' : '关闭') : v && typeof v === 'object' ? (Object.entries(v).map(([k, b]) => `${k}=${b && typeof b === 'object' ? `{${showSetting(b)}}` : String(b)}`).join(', ') || '无') : String(v);
 const asObj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
 /** 聊天记录整理灯的说明：观测事件 ts（毫秒）或消息库 meta aging_last_run（秒）统一格式化。 */
 export function agingNote(aging: Record<string, unknown>, now = Date.now()): string {
@@ -496,10 +500,12 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     const now = Date.now();
     const overview = async () => { const r = await api('/api/memory'); return r.status === 200 ? r.body as MemoryOverview : null; };
     if (p === '/memory') {
-      const [r, rc] = await Promise.all([api('/api/memory'), api(`/api/memory/recalls?since=${now - 86400_000}`).catch(() => null)]);
+      const [r, rc, ex] = await Promise.all([api('/api/memory'), api(`/api/memory/recalls?since=${now - 86400_000}`).catch(() => null),
+        opts.memoryExtract ? api('/api/memory/extract').catch(() => null) : Promise.resolve(undefined)]);
+      const extract = ex === undefined ? undefined : ex && ex.status === 200 ? ex.body as MemoryExtractStatus : null;
       // 一次请求只取一页（50 条），超过时显示 50+；读取失败只让卡片退化为纯链接说明。
       const recalls: RecallCount | null = rc && rc.status === 200 ? { count: (rc.body as RecallList).items.length, more: (rc.body as RecallList).has_more } : null;
-      const body = r.status === 200 ? memoryHomeBody(r.body as MemoryOverview, now, recalls) : `<div class="flash err" role="alert">读取记忆总览失败：${esc(apiError(r))}</div>`;
+      const body = r.status === 200 ? memoryHomeBody(r.body as MemoryOverview, now, recalls, extract) : `<div class="flash err" role="alert">读取记忆总览失败：${esc(apiError(r))}</div>`;
       return shell('记忆', body, { lead: '聊天记录库的会话域、日 / 周摘要、整理与保留期；从这里进入时间线、检索检查器和线程归档。' });
     }
     if (p === '/memory/recalls') {
@@ -767,6 +773,7 @@ ${agentModelFieldsets(s, d, diff)}
 <button>保存设置</button></form></section>`;
     }
     body += sendRulesCard(s?.sendRules, d?.sendRules);
+    body += memoryExtractCard(s?.memory);
     body += await grantsCard();
     body += await codexPromptCard();
     body += await codexBasePromptCard(s?.codexModel ?? config.CODEX_MODEL);
@@ -801,6 +808,19 @@ ${defaults ? `<div class="hint">默认：${SEND_RULE_INPUTS.map(([k, label]) => 
       `<tr><td>${b.scope === 'global' ? '全部会话' : `<span class="mono">${esc(b.scope)}</span>`}</td><td>${esc(b.reason)}</td><td>${esc(fmtTime(b.tripped_at))}</td><td>${esc(fmtTime(b.until))}</td><td><form method="post" action="/settings/send-breakers/reset">${csrfField(csrf)}<input type="hidden" name="scope" value="${esc(b.scope)}"><button class="danger">解除</button></form></td></tr>`).join('')}</tbody></table></div>`
       : empty(opts.sendBreakers ? '当前没有熔断。' : '发送熔断状态不可用。')}</section>`;
     return body;
+  }
+
+  /** 回合后记忆抽取的开关（docs/MEMORY-DESIGN.md §8.1）：每个出现过的命名空间一行；缺键时只有 owner 开启。 */
+  function memoryExtractCard(memory: RuntimeSettings['memory']): string {
+    if (!memory || !opts.memoryExtract) return '';
+    const names = opts.context.scopeNames?.() ?? {};
+    const all = [...new Set(['owner', ...Object.keys(memory.extract), ...opts.memoryExtract.namespaces()])]
+      .sort((a, b) => a === 'owner' ? -1 : b === 'owner' ? 1 : a.localeCompare(b));
+    const label = (ns: string) => ns === 'owner' ? 'owner 私聊' : names[ns] ? `群 ${names[ns]}` : scopeLabel(ns);
+    return `<section id="memory-extract"><h2>记忆抽取</h2><p class="hint">用户回合正常结束后，用廉价模型把本轮对话（输入与发出的消息）提炼成记忆条目，作者记为 extractor，可在<a href="/memory/entries">记忆条目</a>遗忘。缺省只对 owner 私聊开启；群与其他私聊需在这里打开。只对能确证发送者的用户回合生效，定时与唤醒回合不抽取。运行状态见<a href="/memory">记忆</a>首页。</p>
+<form method="post" action="/settings/memory-extract" class="sheet pad">${csrfField(csrf)}<div class="choices">${all.map(ns =>
+      `<input type="hidden" name="ns" value="${esc(ns)}"><label class="choice"><input type="checkbox" name="extract:${esc(ns)}"${(memory.extract[ns] ?? ns === 'owner') ? ' checked' : ''}><span>${esc(label(ns))}<small class="mono">${esc(ns)}</small></span></label>`).join('')}</div>
+<p class="mt"><button>保存抽取开关</button></p></form></section>`;
   }
 
   async function grantsCard(): Promise<string> {

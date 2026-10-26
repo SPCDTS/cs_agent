@@ -6,7 +6,7 @@ import { equal, readBody, readMultipart, HttpError, guardAgentMd, writeAgentMd, 
 import { SkillsStoreError } from '../agent/skills-store.js';
 import { applyMemoryEntryAction } from './memory/entries.js';
 import { isThreadKey } from '../agent/codex/runner.js';
-import { SETTINGS_KEY, type RuntimeSettings } from '../agent/settings.js';
+import { SETTINGS_KEY, normalizeMemoryExtract, type RuntimeSettings } from '../agent/settings.js';
 
 const SEND_RULE_FIELDS = ['perChatMinute', 'perChatHour', 'chatBreakerMinutes', 'globalMinute', 'globalBreakerMinutes'] as const;
 import { parseBackendOverrides } from '../agent/backends/select.js';
@@ -105,6 +105,15 @@ export function createDashboardPost(opts: DashboardOptions, csrf: string, agentM
         try { await opts.settings.update({ sendRules }, 'dashboard'); }
         catch (e) { throw new HttpError(400, '发送规则未保存：每项必须是范围内的正整数。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
         back('/settings?ok=saved#send-rules'); return;
+      }
+      if (url.pathname === '/settings/memory-extract') {
+        if (!opts.settings) throw new HttpError(404, '运行时设置不可用');
+        // 只改本次表单列出的命名空间，其余已保存的开关保留；未勾选的复选框不提交，记为关闭。只保存与缺省不同的覆盖项。
+        const extract: Record<string, boolean> = { ...opts.settings.current().memory.extract };
+        for (const ns of form.getAll('ns')) extract[ns] = form.get(`extract:${ns}`) === 'on';
+        try { await opts.settings.update({ memory: { extract: normalizeMemoryExtract(extract) as Record<string, boolean> } }, 'dashboard'); }
+        catch (e) { throw new HttpError(400, '抽取开关未保存：命名空间无效。' + ((e as { issues?: { path: unknown[] }[] }).issues?.map(i => i.path.join('.')).join('、') ?? '')); }
+        back('/settings?ok=saved#memory-extract'); return;
       }
       if (url.pathname === '/settings/send-breakers/reset') {
         if (!opts.sendBreakers) throw new HttpError(404, '发送熔断不可用');

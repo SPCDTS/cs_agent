@@ -24,6 +24,8 @@ export interface MemoryDeps {
   sessionAdapters?: SessionAdapters;
   /** 记忆条目（docs/MEMORY-DESIGN.md §10）；未接入时 /api/memory/entries* 为 404 */
   entries?: MemoryEntriesSource;
+  /** 回合后抽取状态（/api/memory/extract）；未接入时为 404 */
+  extract?: MemoryExtractSource;
 }
 /** 面板读写记忆条目的入口：读走存储，遗忘 / 恢复走记忆服务（作者记为 dashboard）。 */
 export interface MemoryEntriesSource {
@@ -31,6 +33,21 @@ export interface MemoryEntriesSource {
   forget(id: number): unknown;
   restore(id: number): unknown;
   scopeLabel?(scope: string): string;
+}
+/** 回合后抽取的一次结果（agent/memory/extractor.ts 的 ExtractRecord，同形）；时间为毫秒。 */
+export interface MemoryExtractRecord {
+  turn_id: string; ns: string; at: number; status: 'ok' | 'skipped' | 'failed'; reason?: string;
+  candidates: number; written: number; superseded: number; dropped: Record<string, number>; ms: number;
+}
+/** GET /api/memory/extract：队列长度、今日各命名空间次数、最近 10 次结果（最新在前）。 */
+export interface MemoryExtractStatus {
+  model: string; available: boolean; queue: number; running: string | null; daily_limit: number;
+  today: { date: string; counts: Record<string, number> }; recent: MemoryExtractRecord[];
+}
+/** 面板读取抽取状态与设置页列出的命名空间（出现过的会话与已有记忆的命名空间）。 */
+export interface MemoryExtractSource {
+  status(): MemoryExtractStatus;
+  namespaces(): string[];
 }
 /** 时间均为毫秒；source 为写入时本轮最后一条输入。 */
 export interface MemoryEntry {

@@ -6,7 +6,7 @@
  *   （pi 子 agent 在跑、codex 回合或子 agent 线程未结束）时，本轮仍用旧后端，切换在它结束后生效。开轮时冻结设置快照；
  *   插话、恢复、放弃按回合 id 前缀（pi: / codex:）交给对应后端；后端不可用时开轮重试，超过 2 分钟才算投递失败。
  * - TurnMonitor：宿主事件的外层处理——Inbox 状态、观测、定时运行统计、出错提示（同一会话 10 分钟内最多一条）、
- *   回合结束后补传附件；看门狗：回合连续 30 分钟没有任何事件即中止（随后按回合失败提示）。
+ *   回合结束后补传附件、通知回合结束观察者（记忆抽取）；看门狗：回合连续 30 分钟没有任何事件即中止（随后按回合失败提示）。
  */
 import type { InboundRecord, TurnBinding } from "../channel/types.js";
 import { log } from "../shared/log.js";
@@ -141,6 +141,8 @@ export interface TurnMonitorOptions {
     finish(key: string, outcome: { status: TurnEnded["status"]; turnId?: string }): Promise<void>;
   };
   getHost(): Pick<ThreadHost, "stalled" | "interrupt">;
+  /** 回合结束观察者（回合后记忆抽取，docs/MEMORY-DESIGN.md §8.1）：与定时运行统计同一条通知；须立即返回，自行异步处理 */
+  observers?: readonly ((event: TurnEnded) => void)[];
   now?: () => number;
   /** 同一会话出错提示的最小间隔，默认 10 分钟 */
   noticeIntervalMs?: number;
@@ -203,6 +205,9 @@ export class TurnMonitor {
       if (this.opts.sendService) {
         const service = this.opts.sendService;
         this.track(service.reconcile().then(() => service.cleanup(event.threadKey)), "outbox maintenance failed");
+      }
+      for (const observe of this.opts.observers ?? []) {
+        try { observe(event); } catch (error) { log.warn("turn ended observer failed", { error }); }
       }
     },
   };

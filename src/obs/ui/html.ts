@@ -53,7 +53,7 @@ export const STAGES: Record<string, string> = {
   dispatched: '开始处理', steered: '插话', subagent: '子 agent', stalled: '停滞', thread_stopped: '面板停止', schedule_run: '定时运行',
   model_turn: '模型回合', model_usage: '用量', model_request: '模型请求', model_error: '模型错误', final_answer: '最终回答（未发送）', send_message: '发送消息', send_rejected: '发送被规则拒绝', send_breaker: '发送熔断', auth_changed: '授权变更',
   reply_sent: '回合结束', failed: '回合失败',
-  compaction: '上下文压缩', context_usage: '上下文占用', events_dropped: '事件超出上限', settings_changed: '设置变更', thread_reset: '重置线程',
+  compaction: '上下文压缩', context_usage: '上下文占用', memory_extract: '记忆抽取', events_dropped: '事件超出上限', settings_changed: '设置变更', thread_reset: '重置线程',
 };
 export function stageLabel(stage: string): string {
   if (STAGES[stage]) return STAGES[stage]!;

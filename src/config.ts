@@ -73,6 +73,9 @@ const EnvSchema = z.object({
   /** auto 选档模型始终取 magpie 提供者；空值禁用分类调用。 */
   AUTO_EFFORT_MODEL: z.string().trim().default("deepseek/deepseek-flash"),
   AUTO_EFFORT_TIMEOUT_MS: int(4000),
+  /** 回合后记忆抽取的模型（magpie 提供者，docs/MEMORY-DESIGN.md §8.2）；未设置时取 AUTO_EFFORT_MODEL，两者都空则不抽取。 */
+  MEMORY_EXTRACT_MODEL: z.string().trim().optional(),
+  MEMORY_EXTRACT_TIMEOUT_MS: int(20000),
   AGENT_CONCURRENCY: int(2),
   /** 执行 agent 后端：codex | pi */
   AGENT_BACKEND: z.enum(["codex", "pi"]).default("codex"),
@@ -127,7 +130,9 @@ const EnvSchema = z.object({
 
 type Env = z.infer<typeof EnvSchema>;
 
-export interface Config extends Env {
+export interface Config extends Omit<Env, "MEMORY_EXTRACT_MODEL"> {
+  /** 已按缺省取 AUTO_EFFORT_MODEL；空字符串表示不抽取 */
+  MEMORY_EXTRACT_MODEL: string;
   allowUsers: string[] | "*";
   /** ${DATA_DIR}/codex，容器内 codex 与 pi-ai 共用的 CODEX_HOME */
   codexHome: string;
@@ -195,6 +200,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     ...e,
     PI_SKILLS_DIR: e.PI_SKILLS_DIR || path.join(e.DATA_DIR, "skills"),
+    MEMORY_EXTRACT_MODEL: e.MEMORY_EXTRACT_MODEL ?? e.AUTO_EFFORT_MODEL,
     allowUsers,
     codexHome: path.join(e.DATA_DIR, "codex"),
     imagesDir: path.join(e.DATA_DIR, "images"),
