@@ -30,6 +30,7 @@ export interface InboxOptions {
   owners?: OwnerIds | (() => OwnerIds);
   /** 查找 [引用] 正文与期间消息 */
   store?: Pick<ContextStore, "message" | "recent">;
+  intercept?(record: InboundRecord, consume: () => void): Promise<boolean>;
   dataDir: string;
 }
 
@@ -60,6 +61,8 @@ export class Inbox {
   }
 
   private async deliver(rec: InboundRecord): Promise<void> {
+    if (rec.state === "done") return;
+    if (await this.opts.intercept?.(rec, () => this.channel.inbox.markInbound([rec.key], "done"))) return;
     const result = await this.opts.getHost().deliver(rec.thread_key as ThreadKey, {
       inboundKey: rec.key, kind: rec.kind, sender: rec.user_id,
     });

@@ -9,7 +9,7 @@ import type { McpToolIdentity } from "./names.js";
 const schemaJson = z.record(z.string(), z.json());
 const storedTool = z.strictObject({
   name: z.string().min(1).max(256), description: z.string(),
-  inputSchema: schemaJson, outputSchema: schemaJson.optional(),
+  inputSchema: schemaJson, outputSchema: schemaJson.optional(), approval: z.literal(true).optional(),
 });
 const revisionPayload = z.strictObject({
   adapterVersion: z.literal(2), serverId: z.string(), configDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -54,6 +54,15 @@ export function makeCatalog(server: McpServerConfig, scopeDigest: string, tools:
   const revision = { ...payload, digest: digest(payload) };
   if (jsonBytes(revision) > limits.catalogBytes) throw new Error("catalog_too_large");
   return { revision, rejected };
+}
+
+/** 成员使用独立权限范围；审批回执不是远端业务结果，不能套用远端输出 schema。 */
+export function approvalCatalog(revision: CatalogRevision, approval: readonly string[]): CatalogRevision {
+  const { digest: _digest, ...original } = revision;
+  const payload = { ...original, scopeDigest: digest([revision.scopeDigest, "group-member"]), tools: revision.tools.map(tool =>
+    approval.includes(tool.name) ? { ...tool, approval: true as const,
+      description: tool.description + "\n群成员调用需主人审批：调用后只返回审批编号，不会立即执行，不要重复调用。" } : tool) };
+  return { ...payload, digest: digest(payload) };
 }
 
 export function restoreCatalog(input: unknown, limits: McpLimits): CatalogRevision {

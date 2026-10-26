@@ -190,19 +190,19 @@ export class SendService {
   }
 
   /**
-   * 系统消息（§3.4 出错提示；codex 回合后补收的图片）：键 `<threadKey>:sys:<uuid>`，发往本会话，不 @、不计主动额度、不暴露给模型。
+   * 系统消息（§3.4 出错提示；codex 回合后补收的图片）：键 `<threadKey>:sys:<uuid>`，发往本会话，默认不 @；宿主审批通知可显式 @，不计主动额度、不暴露给模型。
    * 被发送规则拒绝时不重试也不抛出：行保持 pending 并记下原因。
    */
   /** key：调用方给出的稳定键（同一事件重试取回同一行，不重发）；缺省随机。 */
   async system(binding: Pick<TurnBinding, "threadKey" | "scope" | "inputKey" | "turnId">, text: string, images: string[] = [],
-    options: { signal?: AbortSignal; key?: string } = {}): Promise<SendResult> {
+    options: { signal?: AbortSignal; key?: string; mention?: string } = {}): Promise<SendResult> {
     const signal = options.signal;
     return this.serial(binding.threadKey, async () => {
       const target = parseTarget(`qq:${binding.scope}`), channel = this.opts.getChannel();
       const row = channel.outbox.reserveOutbox({
         key: options.key ?? `${binding.threadKey}:sys:${randomUUID()}`, thread_key: binding.threadKey, turn_id: binding.turnId ?? null,
         input_key: binding.inputKey ?? null, system: true, message_type: target.message_type, target_id: target.target_id,
-        mention_user_id: null, text, images, files: [],
+        mention_user_id: options.mention ?? null, text, images, files: [],
       });
       try { return await this.deliver(row, signal); }
       catch (error) {
@@ -300,7 +300,7 @@ export class SendService {
     } finally {
       if (!result.already_sent) trace.event(row.turn_id ? "turn:" + row.turn_id : "thr:" + row.thread_key, "send_message", { detail: {
         target: `qq:${row.message_type}:${row.target_id}`, key: row.key, system: row.system, message_id: result.message_id,
-        text: row.text.slice(0, 500),
+        ...(!row.key.startsWith(`${row.thread_key}:sys:mcp:`) ? { text: row.text.slice(0, 500) } : {}),
         status: result.status, images: row.images.length, files: channel.outbox.getOutbox(row.key)!.files.map(({ name, bytes, status }) => ({ name, bytes, status })),
         already_sent: false } });
     }

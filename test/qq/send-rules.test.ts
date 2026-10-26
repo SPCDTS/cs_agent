@@ -184,13 +184,11 @@ describe("bridge 发送规则", () => {
     expect(f.store.countModelOutbox("group", "8", "2000", "2100")).toBe(2);
   });
 
-  it("@ 只能给本轮输入的发送者：主动、系统行与非本群目标一律拒绝，不发送", async () => {
+  it("模型 @ 仅限本轮发送者；系统通知可显式 @ 审批参与人", async () => {
     const f = fixture();
     const base = { thread_key: "group:7", turn_id: "t1", input_key: f.key, images: [], files: [], message_type: "group" as const, target_id: "7" };
-    for (const [key, extra] of [["group:7:a", { proactive: true }], ["group:7:b", { system: true }]] as const) {
-      const row = f.store.reserveOutbox({ ...base, ...extra, key, text: "禁止 @", mention_user_id: "1" });
-      await expect(f.bridge.send(row.key, row, row.text, [], { mention: "1" })).rejects.toThrow("定时或主动发送不能 @");
-    }
+    const proactive = f.store.reserveOutbox({ ...base, proactive: true, key: "group:7:a", text: "禁止 @", mention_user_id: "1" });
+    await expect(f.bridge.send(proactive.key, proactive, proactive.text, [], { mention: "1" })).rejects.toThrow("定时或主动发送不能 @");
     const other = f.store.reserveOutbox({ ...base, key: "group:7:c", text: "@ 别人", mention_user_id: "9" });
     await expect(f.bridge.send(other.key, other, other.text, [], { mention: "9" })).rejects.toThrow("回复只能 @ 本轮发送者");
     const elsewhere = f.store.reserveOutbox({ ...base, key: "group:7:d", target_id: "8", text: "@ 外群", mention_user_id: "1" });
@@ -200,6 +198,10 @@ describe("bridge 发送规则", () => {
     await expect(f.bridge.send(ok.key, ok, ok.text, [], { mention: "1" })).resolves.toMatchObject({ already_sent: false });
     const sent = f.call.mock.calls.find(c => c[0] === "send_group_msg")![1] as { message: { type: string; data: Record<string, unknown> }[] };
     expect(sent.message[0]).toEqual({ type: "at", data: { qq: "1" } });
+    const system = f.store.reserveOutbox({ ...base, system: true, key: "group:7:sys:approval", text: "待审批", mention_user_id: "9" });
+    await expect(f.bridge.send(system.key, system, system.text, [], { mention: "9" })).resolves.toMatchObject({ already_sent: false });
+    const notice = f.call.mock.calls.filter(c => c[0] === "send_group_msg").at(-1)![1] as { message: { type: string; data: Record<string, unknown> }[] };
+    expect(notice.message).toEqual(expect.arrayContaining([{ type: "at", data: { qq: "9" } }]));
   });
 
   it("登录账号与收到输入的账号不一致时拒绝发送，行保持 pending", async () => {

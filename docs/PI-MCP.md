@@ -6,7 +6,7 @@ Pi 后端可以把外部 MCP 的每个工具注册为 Pi 原生工具，保留�
 
 1. 从 [配置示例](design/pi-mcp/config.example.json) 复制管理员配置，只保留需要的服务，替换 HTTP 地址，并填写远端工具原名的 `tools.allow`。
 2. 将配置放到管理员维护的位置，设置 `PI_MCP_CONFIG` 为该 JSON 文件的绝对路径。文件必须是 UTF-8，支持 BOM。不要把密钥写入配置。
-3. 确认 owner 私聊使用 Pi 后端：设置 `AGENT_BACKEND=pi`，或在现有后端覆盖设置中将 owner 私聊分配给 Pi。
+3. 确认目标会话使用 Pi 后端：设置 `AGENT_BACKEND=pi`，或在后端覆盖设置中将 owner 私聊 / 指定群分配给 Pi。
 4. 将配置引用的秘密环境变量注入 cs-agent 进程，重启服务。修改 MCP 配置、账号或凭据后需要重启；更换账号、token 或权限时同时递增 `credential.revision`。
 
 Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器，`PI_MCP_CONFIG` 填写容器内路径。默认 `.env` 会注入容器，但不会自动挂载任意宿主文件。
@@ -38,9 +38,35 @@ Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器�
 
 ## 权限与结果
 
-owner 私聊主会话可以使用 MCP，普通用户与群聊仍拒绝。执行前再次读取真实回合身份，排队后继续复核当前 owner。定时和唤醒默认关闭；可分别设置 `access.allowScheduled`、`access.allowWake`，继承定时身份的唤醒需要两个选项都开启。
+owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通私聊与未配置的群拒绝。执行前及排队后按 `runRights` 复核真实身份。定时和唤醒默认关闭；可分别设置 `access.allowScheduled`、`access.allowWake`，继承定时身份的唤醒需要两个选项都开启。群内也按回合代表的人授权：owner 直接执行，成员适用审批；只有基础权限、无法确证人的回合拒绝。
 
-子 agent 在服务的 `access.allowSubagent: true` 开启时继承派出时的授权快照；该布尔选项默认 `false`。父回合本身必须已获该服务授权，不能仅凭 owner 派出或父工具列表获得账号权限。快照与子会话在同一次 Pi 提交中保存，包含 owner 身份、派出回合的定时/唤醒限制和服务配置摘要（固定账号、凭据版本及工具白名单）。配置改变后已有子任务不会自动获得新能力，需要重新派出。
+### 群内使用与审批
+
+群使用 Pi 后端，且必须在 `QQ_ALLOW_GROUPS` 与服务的 `access.groups` 中。群消息仍需真实 @机器人（`QQ_GROUP_MENTIONS`）；引用审批消息时也要 @，文本写“@昵称”无效。
+
+`access.groups`、`tools.approval` 默认均为 `[]`；`approval` 必须是 `allow` 的子集，名称使用远端原名。cs2-workshop 的服务配置可使用：
+
+```json
+{
+"tools": {
+  "allow": ["workshop_browse", "workshop_context", "workshop_status", "workshop_results", "workshop_prepare", "workshop_edit", "workshop_mode", "workshop_trial", "workshop_produce"],
+  "approval": ["workshop_prepare", "workshop_edit", "workshop_mode", "workshop_trial", "workshop_produce"]
+},
+"access": { "kind": "owner-private", "groups": ["123456"] }
+}
+```
+
+- owner 在允许群中可直接调用全部白名单工具；其他成员可直接调用 `allow` 中不在 `approval` 的工具。
+- 成员调用审批工具时只登记已校验的调用，群里 @首个 owner，模型拿到四位编号。每群最多 5 条、每人最多 3 条待审批，有效期 30 分钟；同一会话的同一 call_id 重放返回原编号。
+- owner 引用通知回复“批准 / 同意 / 通过”或“拒绝 / 驳回”，也可发“批准 #A7K2”“拒绝 #A7K2”。裸命令要求补引用或编号。宿主消费这些输入，不交给模型；非 owner 的同样文字仍是普通聊天。
+- 批准后系统执行保存的原参数，在群里引用 owner 的决定并 @申请人报告结果。通知发送失败仍保留请求，可按编号审批。执行时配置摘要、群、白名单、审批名单或 owner 身份不再匹配，则拒绝执行。
+- 执行前持久提交 `executing`；重启后改为 `unknown` 并通知先用 `workshop_status` 核对，绝不自动重试。系统消息进入普通消息库，后续回合可通过“期间消息”看到。
+
+外部账号始终属于 owner；连接按 Pi 会话隔离，群与私聊、子会话互不共用。成员审批工具有独立权限范围的名称及审批说明；审批回执不套用远端输出 schema，真正执行仍校验远端结果。群内有权的人也可使用 `mcp_refresh_tools`。
+
+### 子 agent 与工具结果
+
+子 agent 在服务的 `access.allowSubagent: true` 开启时继承派出时的授权快照；该布尔选项默认 `false`。父回合必须是已获该服务授权的 owner（私聊或允许群），不能仅凭父工具列表获得账号权限。成员派出的子 agent 不获得任何 MCP 工具。快照与子会话在同一次 Pi 提交中保存，包含 owner 身份、派出回合的定时/唤醒限制和服务配置摘要（固定账号、凭据版本及工具白名单）。配置改变后已有子任务不会自动获得新能力，需要重新派出。
 
 每次 spawn/message 投递前及重启恢复调度前，用子会话自己的 ID 重配 MCP 工具与连接；请求前 hook 从已经持久化的模型请求中移除失效工具，新名称在下一次准备模型请求时提供。message 只收紧快照，不增加服务或重新授权；未经授权的续发会撤掉对应能力。执行时取“派出快照 ∩ 当前有效授权 ∩ 子任务范围”：owner 被移除、服务在当前配置中禁用或 `allowSubagent` 关闭，后续调用立即拒绝。配置文件仍在启动时读取，修改磁盘文件须重启后生效。
 
@@ -50,7 +76,7 @@ owner 私聊主会话可以使用 MCP，普通用户与群聊仍拒绝。执行�
 
 旧定义继续留在 `pi.sqlite`。执行前核对当前目标工具的契约与实际权限，不能靠旧名称恢复已撤销权限。模型调用历史旧名称时得到 `tool_unavailable` 或 `tool_retired` 失败结果，本次调用未发送；当前工具已在模型的工具列表中，也可调用 `mcp_refresh_tools` 刷新。不自动转换参数，也不改变此前操作的未知结果。
 
-连接或重连会重新发现目录，另有默认五分钟 TTL。支持 `list_changed` 的服务会在工具轮结束或下次调用前刷新；没有通知能力的静态服务仍可使用。owner 私聊及已获委派的子 agent 可调用 `mcp_refresh_tools` 显式刷新当前授权范围（子 agent 仅限快照内服务）；它只读取目录，不调用远端业务工具。现有 IM、定时和本地工具选择会保留。
+连接或重连会重新发现目录，另有默认五分钟 TTL。支持 `list_changed` 的服务会在工具轮结束或下次调用前刷新；没有通知能力的静态服务仍可使用。owner 私聊、允许群内有权的人及已获委派的子 agent 可调用 `mcp_refresh_tools` 显式刷新当前授权范围（子 agent 仅限快照内服务）；它只读取目录，不调用远端业务工具。现有 IM、定时和本地工具选择会保留。
 
 文本、图片和结构化数据均有大小限制。图片验证 base64、格式头、声明尺寸及字节限额，不做完整像素解码；资源与音频等内容给出省略说明，不自动下载。工具参数和有界结果进入 Pi 正常历史；MCP 审计只记录身份、目录摘要、调用标识、耗时、大小与错误码，不记录正文或凭据。
 

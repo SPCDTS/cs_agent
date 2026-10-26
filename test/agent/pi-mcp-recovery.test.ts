@@ -13,13 +13,15 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 const messageSchema = z.discriminatedUnion("phase", [
   z.object({ phase: z.literal("ready") }), z.object({ phase: z.literal("committed") }),
   z.object({ phase: z.literal("error"), message: z.string() }),
+  z.object({ phase: z.literal("approval_recovered"), states: z.array(z.string()), notices: z.array(z.string()) }),
   z.object({ phase: z.literal("recovered"), pending: z.number(), terminals: z.array(z.string()),
     results: z.array(z.object({ isError: z.boolean(), codes: z.array(z.string()), text: z.string() })) }),
 ]);
 type ChildMessage = z.infer<typeof messageSchema>;
 
-function worker(mode: "hang" | "committed" | "recover", directory: string, url: string) {
-  const child = fork(fixture, [mode, directory, url], { execArgv: [], windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
+function worker(mode: "hang" | "committed" | "recover" | "approval-run" | "approval-recover", directory: string, url: string) {
+  const script = mode.startsWith("approval-") ? fileURLToPath(new URL("./fixtures/pi-mcp-approval-recovery.mjs", import.meta.url)) : fixture;
+  const child = fork(script, [mode, directory, url], { execArgv: [], windowsHide: true, stdio: ["ignore", "pipe", "pipe", "ipc"] });
   const messages: ChildMessage[] = [];
   let output = "", exited = false;
   const capture = (data: Buffer) => { output = (output + data.toString("utf8")).slice(-16_384); };
@@ -88,4 +90,25 @@ describe("Pi MCP 真进程强杀恢复", () => {
       results: result.results, terminals: [] });
     expect(server.calls).toBe(1);
   });
+});
+
+it("群审批 executing 时强杀进程：重启记 unknown、通知核对状态，不重发保存的调用", async () => {
+  const server = await httpFixture("hang"); cleanup.push(server.close);
+  const directory = await mkdtemp(path.join(tmpdir(), "pi-mcp-approval-recovery-"));
+  cleanup.push(async () => {
+    if (path.dirname(directory) !== path.resolve(tmpdir()) || !path.basename(directory).startsWith("pi-mcp-approval-recovery-")) throw new Error("fixture_cleanup_path");
+    await rm(directory, { recursive: true, force: true });
+  });
+  const first = worker("approval-run", directory, server.config.transport.url);
+  await first.wait("ready"); await expect.poll(() => server.calls, { timeout: 10_000 }).toBe(1);
+  expect(server.messages.find(m => "method" in m && m.method === "tools/call")).toMatchObject({ params: { name: "first", arguments: { project: "stored-approval" } } });
+  await first.kill();
+  const recovered = worker("approval-recover", directory, server.config.transport.url);
+  await recovered.wait("approval_recovered"); await recovered.exit;
+  expect(recovered.messages.find(m => m.phase === "approval_recovered")).toMatchObject({ states: ["unknown"], notices: [expect.stringContaining("workshop_status")] });
+  expect(server.calls).toBe(1);
+  const again = worker("approval-recover", directory, server.config.transport.url);
+  await again.wait("approval_recovered"); await again.exit;
+  expect(again.messages.find(m => m.phase === "approval_recovered")).toMatchObject({ states: ["unknown"] });
+  expect(server.calls).toBe(1);
 });

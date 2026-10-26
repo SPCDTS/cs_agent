@@ -26,7 +26,7 @@ describe("Pi MCP 配置边界", () => {
     expect(parsed.kind).toBe("enabled");
     if (parsed.kind !== "enabled") throw new Error("fixture");
     expect(parsed.value.limits).toEqual(limits);
-    expect(parsed.value.servers[0].access).toEqual({ kind: "owner-private", allowScheduled: false, allowWake: false, allowSubagent: false });
+    expect(parsed.value.servers[0].access).toEqual({ kind: "owner-private", allowScheduled: false, allowWake: false, allowSubagent: false, groups: [] });
     expect(JSON.stringify(parsed)).toContain("MCP_TOKEN");
     expect(JSON.stringify(parsed)).not.toContain("Bearer ");
   });
@@ -42,6 +42,7 @@ describe("Pi MCP 配置边界", () => {
     { ...config(), limits: { schemaDepth: 0 } },
     { ...config(), limits: { unknown: 1 } },
     config({ ...http(), tools: { allow: ["read", "read"] } }),
+    config({ ...http(), tools: { allow: ["read"], approval: ["write"] } }),
   ])("拒绝非法配置且错误不包含秘密值 %#", input => {
     const result = parseMcpConfig(input);
     expect(result.kind).toBe("invalid");

@@ -164,7 +164,7 @@ function docker(args: string[], env = process.env) {
     ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `docker ${args.join(" ")}`], options)
     : spawnSync("docker", args, options);
 }
-const hasCompose = docker(["compose", "version"]).status === 0;
+const hasCompose = process.env.CS_TEST_SKIP_DOCKER !== "1" && docker(["compose", "version"]).status === 0;
 it.skipIf(!hasCompose)("docker compose config --quiet 可解析（无可用 Docker Compose 时跳过）", () => {
   const result = docker(["compose", "-f", "docker-compose.yml", "config", "--quiet"], { ...process.env, NAPCAT_WEBUI_TOKEN: "test-webui-token" });
   expect(result.error).toBeUndefined();

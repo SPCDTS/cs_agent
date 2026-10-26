@@ -17,6 +17,7 @@ import { GrantsService } from "../../src/agent/grants.js";
 import { ThreadHost } from "../../src/agent/host/thread-host.js";
 import type { ThreadKey } from "../../src/agent/host/types.js";
 import { Inbox } from "../../src/agent/inbox.js";
+import { McpApprovals } from "../../src/agent/pi-mcp/approval.js";
 import { SendService } from "../../src/agent/send-service.js";
 import { BackendRouter, TurnMonitor } from "../../src/agent/turns.js";
 import { threadKeyOf } from "../../src/channel/inbound.js";
@@ -121,7 +122,10 @@ export async function residentRig(options: ResidentOptions = {}) {
   const grants = new GrantsService({ getHarness: () => harness, owner: owners[0], owners });
   const sendService = new SendService({ grants, getChannel: () => bridge, dataDir: dir, store: history,
     mention: key => host.takeMention(key as ThreadKey) });
-  const inbox = new Inbox({ getChannel: () => bridge, getHost: () => host, owners, store: history, dataDir: dir });
+  const approvals = options.mcp ? new McpApprovals({ getHarness: () => harness, owners: () => owners, config: options.mcp.config,
+    send: sendService, input: key => bridge.inbox.getInbound(key), invoke: record => pi.executeMcpApproval(record), now: options.now }) : undefined;
+  const inbox = new Inbox({ getChannel: () => bridge, getHost: () => host, owners, store: history, dataDir: dir,
+    intercept: (rec, consume) => approvals?.handle(rec, consume) ?? Promise.resolve(false) });
   // codex 线程令牌与 loopback 网关（与 main.ts 一致）：每次调用由 codex 适配器确认属于宿主当前回合
   const tokens = new ThreadTokens({ recall: async () => ({ text: "", images: [] }) }, {
     resolve: (threadKey, meta) => codex.resolveCall(threadKey as ThreadKey, meta),
@@ -147,7 +151,7 @@ export async function residentRig(options: ResidentOptions = {}) {
       ...(options.scheduleTools ? { scheduleTools: options.scheduleTools } : {}),
       ...(options.instrumentation ? { instrumentation: options.instrumentation } : {}),
       ...(options.web ? { web: options.web } : {}),
-      ...(options.mcp ? { mcp: options.mcp } : {}),
+      ...(options.mcp ? { mcp: { ...options.mcp, approvals } } : {}),
       ...(options.memory ? { memory: options.memory } : {}),
       ...(options.currentModel ? { currentModel: () => options.currentModel!(model.provider) } : {}),
       ...(contextUsage ? { contextUsage } : {}),
@@ -171,6 +175,7 @@ export async function residentRig(options: ResidentOptions = {}) {
     codex.attach(host);
     await host.recover();
     await pi.attach();
+    await approvals?.recover();
   };
   await open();
 
@@ -181,7 +186,7 @@ export async function residentRig(options: ResidentOptions = {}) {
   });
 
   const r = {
-    dir, bridge, history, grants, sendService, inbox, script, codexSpawn, tokens, sent, faux, brain, owners, model, models, call,
+    dir, bridge, history, grants, sendService, inbox, approvals, script, codexSpawn, tokens, sent, faux, brain, owners, model, models, call,
     get codexRunner() { return codexRunner; },
     get contextUsage() { return contextUsage; },
     get harness() { return harness; }, get host() { return host; }, get pi() { return pi; }, get codex() { return codex; }, get monitor() { return monitor; },

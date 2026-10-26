@@ -12,6 +12,7 @@ import { createRegistry, defineDoc, Harness, LiveDoc, ROOT_CONVERSATION_ID, watc
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { codingEnvironment, codingTools } from "../pi-tools/coding.js";
 import { PiMcp } from "../pi-mcp/index.js";
+import type { McpApproval, McpApprovals } from "../pi-mcp/approval.js";
 import type { EnvironmentSecrets, McpConfigState } from "../pi-mcp/config.js";
 import { createPiExtension, type PiToolsOptions } from "../pi-tools/index.js";
 import { createPiScheduleExtensions } from "../pi-tools/schedule.js";
@@ -93,7 +94,7 @@ export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "w
   turns: PiTurns;
   owners?: OwnerIds | (() => OwnerIds);
   /** 已验证的管理员配置与秘密解析边界；缺省仍恢复历史目录。 */
-  mcp?: { config: McpConfigState; secrets: EnvironmentSecrets };
+  mcp?: { config: McpConfigState; secrets: EnvironmentSecrets; approvals?: McpApprovals };
   /** 子 agent 扩展的选项；false 不安装 */
   subagent?: Partial<Omit<SubagentOptions, "getHarness" | "initChild" | "spawner" | "mcp">> | false;
 }
@@ -240,7 +241,7 @@ export class PiBackend implements ThreadAdapter {
         registry, harness, storage,
         config: opts.mcp?.config ?? { kind: "disabled", reason: "PI_MCP_CONFIG 未设置" },
         secrets: opts.mcp?.secrets ?? { readReferencedVariable: () => undefined },
-        owners: () => backend.owners(), binding,
+        owners: () => backend.owners(), binding, approvals: opts.mcp?.approvals,
       });
       const retired = await harness.commit(async tx => {
         const threads = await tx.doc(PiThreadsDoc);
@@ -307,6 +308,11 @@ export class PiBackend implements ThreadAdapter {
    * 工具调用时的本轮绑定（§5.1）：主会话取宿主当前回合（见文件头 5）；子会话只有会话基础权限。
    * 读取范围、skill_publish 与授权工具都由 runRights 统一求出（owner 本人读全部，其余为本会话）。
    */
+  async executeMcpApproval(record: Extract<McpApproval, { state: "executing" }>) {
+    if (!this.mcp) throw new Error("MCP 未就绪");
+    return this.mcp.executeApproval(record);
+  }
+
   async binding(conversationId: number): Promise<PiCallBinding | undefined> {
     let threadKey = this.keys.get(conversationId), child = false;
     if (!threadKey) {

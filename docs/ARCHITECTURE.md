@@ -40,6 +40,7 @@ QQ ─NapCat(OneBot v11)─▶ QQBridge ──@消息──▶ Inbox ──▶ T
 ### 2.2 Inbox（`src/agent/inbox.ts`）
 
 - 入站键由消息确定性生成；`qq-bridge.sqlite` 表 `inbound` 记录每条输入：`queued`（未交给后端）→ `delivered`（后端已确认收下）→ `done`（所在回合结束）。
+- 配置群的 MCP 审批命令在投递 ThreadHost 前由 `pi-mcp/approval.ts` 确定性处理：只认已验证 owner 的引用/编号决定，入站直接标 done；其余消息照常投递。恢复 queued 输入也走此入口。
 - 定时任务到点同样作为一条输入投递（入站键以 `run_` 开头，发送者为创建者，§6）。
 - 重启后宿主先恢复回合（§4.4），Inbox 再按 `seq` 重新投递 `queued` 输入；输入以入站键幂等。
 
@@ -109,7 +110,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 - 行键 `<threadKey>:<callKey>`：pi 用稳定的 `toolCallId`，codex 用 MCP 请求的 `_meta.callId`，崩溃重放取回同一行。系统消息（出错提示、熔断通知）键为 `<threadKey>:sys:<uuid>`，不计主动额度。
 - 状态机 `pending → sending → sent | uncertain`；sending / uncertain **永不自动重发**。同目标相同正文哈希复用已有行；结果不确定时以非错误结果告诉模型"可能已送达，不要重发"。
 - 文字（含图片段，`base64://`）发出后逐个上传文件（`upload_private_file` / `upload_group_file`，`base64://`，群里放根目录），每个文件单独持久化状态；启动与每个回合结束时补传 `pending` 的文件。
-- 每条成功消息立即写一行机器人消息进消息库，可按 message_id 引用与检索。
+- 每条成功消息立即写一行机器人消息进消息库，可按 message_id 引用与检索。MCP 审批使用系统发送，显式 @owner / 申请人；决定答复引用 owner 输入，系统消息无模型 turn_id，后续“期间消息”可见。
 
 ### 3.3 发送规则（防失控，`src/qq/send-rules.ts`）
 
@@ -172,6 +173,8 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 - **模型**：`AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID`；为 `magpie` 时启动拉一次 magpie 目录注册为 pi-ai provider（`src/agent/magpie-models.ts`）：codex 模型走 `openai-responses`，其余走 `openai-completions`；pi-ai 有内置定义的模型（如 deepseek-flash）继承其 `thinkingLevelMap`、`compat`、价格，窗口以 magpie 为准。日/周摘要用同一模型。
 - **恢复**：pi-durable 持久化，进程重启后进行中的回合与子 agent 自动续跑，`delivered` 输入无需处理。
 
+Pi 外部 MCP（`agent/pi-mcp/`）默认限 owner 私聊；服务 `access.groups` 可开放指定群。群内 owner 直调；成员调用 `tools.approval` 先申请主人审批，其余白名单工具直调。定时/唤醒仍按确证的人及开关复核；成员派出的子 agent 无 MCP，owner 可按 `allowSubagent` 委派。详见 [使用说明](PI-MCP.md)。
+
 ### 4.3 子 agent 与唤醒
 
 长任务派子 agent，主 agent 结束本轮；子 agent 完成时唤醒主 agent，由它汇报。两个后端的受管提示都写明"长任务先告知用户、派子 agent 后结束本轮，收到结果再汇报"。模型漏发结论时系统不自动补一步。
@@ -212,6 +215,8 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 - `GrantsDoc`（`cs.grants`，宿主 harness 的 session 文档，`src/agent/grants.ts`）以 `qq:<号>` 为键：`caps`（`send` / `schedule`）、`targets`（可主动发往的 ref）、可选 `scopes`（在哪些来源会话生效）、`expires_at`。过期授权只读展示、不生效。
 - 只能由 owner 修改：面板设置页"授权"（owner 运维口令 + 同源/CSRF），或 owner 交互回合里的 `auth_grant` / `auth_revoke` / `auth_list`。变更记 `auth_changed`（来源、操作者、前后差异）。
 - 工具可见性：pi 按回合配置工具；codex 的 `im` 子进程启动时查询 `/im-info`，仅有权回合列出 `target`，仅 owner 交互回合列出 `auth_*`；服务端每次调用都复核。
+
+MCP 群审批独立于 send/schedule grants：审批单存宿主 `cs.mcp.approval`，只授权保存的那一次调用；执行前提交 executing，重启结算 unknown，不自动重试。
 
 ### 5.5 文件系统权限
 
@@ -288,7 +293,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 
 | 位置 | 内容 |
 |---|---|
-| `data/agent.sqlite` | 宿主 harness：`cs.thread-host*`（会话宿主与输入）、`cs.grants`、`cs.schedules` / `cs.schedule` / `cs.schedule.run` |
+| `data/agent.sqlite` | 宿主 harness：`cs.thread-host*`（会话宿主与输入）、`cs.grants`、`cs.schedules` / `cs.schedule` / `cs.schedule.run`、`cs.mcp.approval`（按 code 的审批文档族）及 `.index`（调用去重与引用查找） |
 | `data/pi.sqlite`、`pi-threads.json` | pi 长期会话与子 agent 会话、`cs.pi.threads(.archive)`；JSON 是映射镜像 |
 | `data/qq-bridge.sqlite` | `inbound`、`outbox`、`seen_messages`、`send_log` / `send_breakers`；旧版遗留的 `tickets` 表原样留在磁盘上，不再读写 |
 | `data/qq-messages.sqlite` | 消息库（机器人消息带 Outbox 行键 `messages.outbox_key`）、摘要、`scope_names`、媒体引用 |

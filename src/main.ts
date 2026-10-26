@@ -22,6 +22,7 @@ import { log, logBuffer, setLogLevel } from "./shared/log.js";
 import { createLogFileSink } from "./shared/log-file.js";
 import { findUnwritable, processIdentity } from "./fs-check.js";
 import { createQQBridge } from "./qq/index.js";
+import { McpApprovals } from "./agent/pi-mcp/approval.js";
 import { GrantsService } from "./agent/grants.js";
 import type { Harness } from "@earendil-works/pi-durable";
 import { SendService } from "./agent/send-service.js";
@@ -285,8 +286,10 @@ async function main(): Promise<void> {
     incomingDownloadConcurrency: cfg.INCOMING_DOWNLOAD_CONCURRENCY,
     incomingDownloadDeadlineMs: cfg.INCOMING_DOWNLOAD_DEADLINE_SEC * 1000,
   });
-  // Inbox（§2.2）：触发消息一律投递给会话宿主。
-  inbox = new Inbox({ getChannel: getBridge, getHost: () => host, owners: cfg.owners, store, dataDir: cfg.DATA_DIR });
+  let mcpApprovals: McpApprovals;
+  // Inbox 先处理已验证 owner 的审批命令，其余输入交给会话宿主。
+  inbox = new Inbox({ getChannel: getBridge, getHost: () => host, owners: cfg.owners, store, dataDir: cfg.DATA_DIR,
+    intercept: (rec, consume) => mcpApprovals.handle(rec, consume) });
 
   // 恢复 pi 工具前，派发授权文档与 Channel 必须已就绪。
   const mcpConfig = await loadMcpConfig(cfg.PI_MCP_CONFIG).catch(() => ({
@@ -302,6 +305,8 @@ async function main(): Promise<void> {
     }
   }
   const mcpSecrets: EnvironmentSecrets = { readReferencedVariable: name => mcpEnvironment.get(name) };
+  mcpApprovals = new McpApprovals({ getHarness: () => dispatchHarness, owners: () => cfg.owners, config: mcpConfig,
+    send: sendService, input: key => getBridge().inbox.getInbound(key), invoke: record => pi.executeMcpApproval(record) });
   const pi = await PiBackend.open({
     sendService, grants, scheduleTools, turns: inbox, owners: cfg.owners, memory,
     currentModel: currentPiModel,
@@ -311,7 +316,7 @@ async function main(): Promise<void> {
     thinkingLevel, store, instrumentation, contextUsage,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
-    mcp: { config: mcpConfig, secrets: mcpSecrets },
+    mcp: { config: mcpConfig, secrets: mcpSecrets, approvals: mcpApprovals },
     attachmentLimits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT },
   });
   codexBackend = new CodexBackend({ runner: codex, tokens: threadTokens, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT,
@@ -379,6 +384,7 @@ async function main(): Promise<void> {
   await sendService.reconcile().catch(error => log.warn("outbox reconciliation failed", { error }));
   await schedules.start();
   harness.resume();
+  await mcpApprovals.recover();
   await inbox.recover();
   await scheduled.recover();
   monitor.start();

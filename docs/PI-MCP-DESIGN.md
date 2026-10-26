@@ -6,9 +6,9 @@
 
 在 Pi 后端内部增加 `PiMcp` 模块，把 MCP Server 提供的每个工具包装成一个带原始参数 schema 的 Pi 原生工具。连接、目录、凭据、权限与结果转换由这个模块管理；调用执行、检查点和恢复终态继续交给 Pi ToolTask。
 
-首版支持 **Streamable HTTP、静态凭据、tools 发现与调用、目录刷新、会话隔离、取消、故障恢复和可观测性**。不实现 stdio 与 OAuth。所有 MCP 工具固定为 `replay: "unsafe"`，不新增调用账本或第二套任务状态机。
+首版支持 **Streamable HTTP、静态凭据、tools 发现与调用、目录刷新、会话隔离、取消、故障恢复和可观测性**。不实现 stdio 与 OAuth。所有 MCP 工具固定为 `replay: "unsafe"`，直接调用不新增调用账本；群成员的待审批调用另存宿主审批文档（第 16 节）。
 
-权限限定为 **owner 私聊主会话及显式获委派的子 agent**；子 agent 默认关闭，按服务设置 `access.allowSubagent`，不能自动继承外部账号能力。普通私聊和群聊仍拒绝。已实现的委派边界及后续授权约束见第 13 节。
+权限覆盖 **owner 私聊、显式配置的群及 owner 显式委派的子 agent**；群成员的指定工具须主人审批。子 agent 默认关闭，按服务设置 `access.allowSubagent`；成员派出的子 agent 没有 MCP 工具。普通私聊与未配置群拒绝。已实现的委派边界及后续授权约束见第 13 节。
 
 调用关系：
 
@@ -125,8 +125,8 @@ await mcp.close();
 1. `secretHeaders` 的值是宿主环境变量名，解析函数仅读取配置引用的变量。示例 `DOCS_AUTH_HEADER` 存完整的 `Bearer …` 值；API key 同理。秘密值不写入配置快照、工具参数、目录或审计。
 2. `credential.accountId` 是管理员声明的逻辑账号，`revision` 是凭据/账号轮换版本。替换账号、token 或改变权限时递增版本并重启；首版不在进程中自动刷新环境秘密。该字段不验证第三方账号归属，归属由管理员配置保证。
 3. `tools.allow` 是远端原名的精确白名单；空列表表示无工具，不支持隐式全部放行。发现新工具不会自动增加权限。
-4. `owner-private` 的主会话授权同时要求真实 owner 身份、`threadKey === "owner"`、主会话。owner 在群中说话也不满足；未知身份不得回退成 owner。
-5. 定时和唤醒默认拒绝。启用对应选项后仍要求宿主可验证的原 owner 身份、当前 owner 配置和 owner 私聊范围全部匹配。继承定时身份的 wake 必须同时满足两个开关。不能仅按线程名信任唤醒。
+4. `owner-private` 保留 owner 私聊入口；`access.groups`（默认 `[]`）额外开放指定群。群内 owner 直接执行，成员调用 `tools.approval`（默认 `[]`，必须属于 `allow`）中的工具先申请审批；其他白名单工具直接执行。
+5. 定时和唤醒默认拒绝。启用对应选项后仍按宿主确证的人和会话范围授权；群成员继承身份仍须审批，owner 继承身份直接执行。继承定时身份的 wake 必须同时满足两个开关。不能仅按线程名信任唤醒。
 6. 子 agent 默认拒绝；服务设置 `allowSubagent: true` 后，仅限父回合本身获准的服务与身份，按第 13 节保存快照、配置子工具并逐次复核。
 7. HTTP 默认 HTTPS；loopback 需显式设置 `allowLoopbackHttp`，局域网 RFC1918 IPv4 字面地址需显式设置 `allowPrivateNetworkHttp`。私网开关不允许公网、链路本地地址或域名。禁止 URL 内嵌密码；固定 origin，不跟随重定向，不能把认证头发送到其他来源。禁止覆盖 SDK 管理的协议、session、Host、Content-Length 等 header。敏感 header 只能用秘密引用。
 8. Zod 严格拒绝未知字段、重复 id、非法限额、stdio 传输、`replay: safe` 和 OAuth 配置。全局结构错误时整个 MCP 禁用并明确告警；单服务缺秘密/连不上只降级该服务。本地 Pi 工具继续工作，不静默改用别的账号。文件未设置、禁用或损坏时仍恢复已有目录以结算旧任务，但不给新回合选择工具。
@@ -307,7 +307,7 @@ unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterToo
 | 配置与认证 | Streamable HTTP，拒绝 stdio；无 OAuth provider；秘密缺失、非法 header/URL；401/403 不开启认证流程或换账号 |
 | 发现与命名 | 全分页、重复 cursor/名称、半目录失败、短 hash 碰撞、同名跨服务；新工具不会突破白名单 |
 | schema | 普通 JSON Schema、局部引用、拒绝外部/循环引用、Pi 参数修复后再校验；无静默放宽 |
-| 权限 | owner 私聊允许；owner 群聊、非 owner、未获委派的子 agent、未知 wake 均零外部请求；子委派、续发、撤权及重启复测；队列等待后撤权仍拒绝 |
+| 权限 | owner 私聊允许；未配置群、普通私聊、未获委派的子 agent、未知 wake 均零外部请求；允许群覆盖 owner 直调与成员审批；子委派、续发、撤权及重启复测；队列等待后撤权仍拒绝 |
 | 隔离 | 两会话不能复用状态；重置会话换连接；账号/凭据版本变化不复用旧连接 |
 | 目录并发 | list_changed 风暴合并；旧请求/新目录共存；旧 schema 不被同名覆盖；刷新失败不调用过期工具 |
 | 结果 | text/image/structured/error/不支持内容；大小限制在解析前生效；JSON 不被截断成伪完整结构 |
@@ -331,9 +331,9 @@ unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterToo
 
 ## 13. 后续扩展的明确边界
 
-**非 owner 授权。** 新增独立 MCP grant，包含 actor、thread/scope、server、credential account、精确 tools、有效期及是否可委派；与现有 send/schedule grants 分开。群服务使用适合群共享历史的账号，不能因为 owner 在群中发话就把私人账号结果写入群历史。目录可见集合与实际执行都取当前有效 grant 交集。
+**非 owner 授权。** 已实现管理员配置群范围与逐次主人审批（第 16 节），外部账号仍属 owner，结果进入本群共享历史。若以后需要个人长期授权，再引入独立 MCP grant，限定 actor、scope、server、账号、精确 tools、有效期与委派范围，与 send/schedule grants 分开。
 
-**子 agent 委派（已实现）。** 默认 deny，逐服务显式开启 `access.allowSubagent`。创建子会话的同一 Pi 提交保存 conversation-scoped 的 `cs.pi.mcp.delegation`：principal、服务 id → 配置摘要、派出时的 wake/scheduled 限制；缺失或损坏按无授权处理。摘要固定账号与工具白名单，配置变化不自动扩大子任务范围。`subagent.ts` 按快照过滤父 tools/callable；message 将快照与本次父回合授权取交集，只降不升。Reporter 每次投递前重配子工具；PiBackend 在重启 resume 前重配存活子会话，覆盖已经提交的子 run；子扩展的 beforeRequest hook 同步旧 request 的工具声明，覆盖恢复时保存的历史 cutoff。执行、排队后及发现后均求“派出授权快照 ∩ 当前有效授权 ∩ 子任务允许范围”，以子 conversationId 建立独立连接/目录；`mcp_refresh_tools` 同样仅限该交集。不能因为继承 parent tools 或 owner 派出就继承账号权限。已覆盖续发、动态撤权、父子隔离与 SQLite 重开恢复。
+**子 agent 委派（已实现）。** 只允许 owner 私聊或允许群中的 owner 父回合，成员派出不委派。默认 deny，逐服务显式开启 `access.allowSubagent`。创建子会话的同一 Pi 提交保存 conversation-scoped 的 `cs.pi.mcp.delegation`：principal、服务 id → 配置摘要、派出时的 wake/scheduled 限制；缺失或损坏按无授权处理。摘要固定账号与工具白名单，配置变化不自动扩大子任务范围。`subagent.ts` 按快照过滤父 tools/callable；message 将快照与本次父回合授权取交集，只降不升。Reporter 每次投递前重配子工具；PiBackend 在重启 resume 前重配存活子会话，覆盖已经提交的子 run；子扩展的 beforeRequest hook 同步旧 request 的工具声明，覆盖恢复时保存的历史 cutoff。执行、排队后及发现后均求“派出授权快照 ∩ 当前有效授权 ∩ 子任务允许范围”，以子 conversationId 建立独立连接/目录；`mcp_refresh_tools` 同样仅限该交集。不能因为继承 parent tools 或 owner 派出就继承账号权限。已覆盖续发、动态撤权、父子隔离与 SQLite 重开恢复。
 
 **safe 与幂等。** 普通工具只有在经审核、无副作用且不依赖失落远端会话状态时才可开启 safe。外部写操作要求专用服务端幂等契约：稳定调用键、字段映射、去重期限、参数冲突与可查询结果都要明确。历史和当前策略均 safe、身份与契约仍匹配才恢复；annotations 只能作提示。
 
@@ -366,3 +366,11 @@ Gateway 在大量动态工具场景有价值，但模型需要额外发现与描
 | `node_modules/@earendil-works/pi-ai/dist/utils/validation.js:280` | 普通 schema 参数验证入口 |
 
 SDK API 以本地锁定安装版本和 [TypeScript SDK v1 官方源码](https://github.com/modelcontextprotocol/typescript-sdk/tree/v1.x)为准。升级 Pi 或 SDK 时重跑接口、schema、自动重试与崩溃契约测试。
+
+## 16. 群内审批（已实现）
+
+`approval.ts` 持有宿主 harness（与 GrantsService 同源），`cs.mcp.approval` 为 session 文档族、键为四位 code；`cs.mcp.approval.index` 按 conversation_id + call_id 去重并查找引用。记录包含服务/参数摘要、远端工具、原 JSON 参数、申请人、群/线程/Pi 会话、申请与到期时间、通知消息 ID。状态为 pending、rejected、expired、executing、done、failed、unknown；执行态必须带 owner 决定，执行终态必须带脱敏结果摘要。
+
+Inbox 在 ThreadHost 投递前截获已验证 owner 的引用/编号命令，恢复 queued 输入时经过同一入口。pending → executing 先提交事务，再消费入站、调用 PiBackend → PiMcp.invoke；不运行模型，不在事务内访问网络。每次执行复核配置摘要、群与工具名单、owner 身份及参数摘要；复用原连接池、队列、预算、schema 与 convertMcpResult。重启将 executing 结算为 unknown，不重放。
+
+成员工具目录使用独立权限摘要，审批工具只返回回执；owner 与成员实际连接都使用 owner principal，按 conversation 隔离。申请通知、拒绝及结果走 SendService.system / Outbox，显式 @owner 或申请人，决定答复引用 owner 消息；普通消息库与期间消息承接后续上下文。审计为 mcp_approval_requested / decided / executed，仅记录编号、工具、群、申请人、参数摘要与大小，发送审计也不采审批正文。

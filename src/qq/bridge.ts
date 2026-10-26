@@ -573,8 +573,8 @@ class Bridge extends EventEmitter implements Channel {
       throw new Error("此发送者已不在允许回复的名单中。");
     }
     // @ 对象是本轮发送者（宿主 takeMention）；行的 input_key 是本轮最新输入。owner 多账号插话时二者可能是同一人的不同账号。
-    if (opts?.mention && (row.proactive || row.system || target.message_type !== "group" || input?.kind !== "user" ||
-        input.scope !== scope || !this.samePerson(opts.mention, input.user_id))) throw new Error("定时或主动发送不能 @，回复只能 @ 本轮发送者");
+    if (opts?.mention && (!isValidId(opts.mention) || row.proactive || target.message_type !== "group" || (!row.system &&
+        (input?.kind !== "user" || input.scope !== scope || !this.samePerson(opts.mention, input.user_id))))) throw new Error("定时或主动发送不能 @，回复只能 @ 本轮发送者");
     if (text !== row.text || JSON.stringify(imagePaths) !== JSON.stringify(row.images) || (opts?.mention ?? null) !== row.mention_user_id) throw new Error("Outbox 内容不一致");
     validateText(text);
     const images = prepareImages(imagePaths, this.config.imageRoot);
@@ -588,7 +588,10 @@ class Bridge extends EventEmitter implements Channel {
     try {
       const data = await this.client.call(target.message_type === "group" ? "send_group_msg" : "send_private_msg", {
         [target.message_type === "group" ? "group_id" : "user_id"]: numericId(target.target_id),
-        message: buildMessage(target.message_type, store.getOutbox(key)!.mention_user_id ?? "", text, images),
+        message: [
+          ...(row.system && input?.kind === "user" && input.scope === scope ? [{ type: "reply", data: { id: input.message_id } }] : []),
+          ...buildMessage(target.message_type, store.getOutbox(key)!.mention_user_id ?? "", text, images),
+        ],
       }, { sending: true, timeoutMs: images.length ? Math.max(this.timeoutMs, IMAGE_TIMEOUT_MS) : this.timeoutMs });
       const messageId = stringField(data, "message_id");
       if (!messageId) throw new Error("发送缺少 message_id");

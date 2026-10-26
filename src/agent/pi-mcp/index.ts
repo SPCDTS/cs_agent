@@ -6,22 +6,24 @@ import { AgentDoc, AssistantEntry, GenerationTask, ToolResultEntry, ToolTask, de
   type EntryId, type Storage, type ToolExecutionApi, type ToolExecutionResult, type ToolTaskInput } from "@earendil-works/pi-durable";
 import { z } from "zod";
 import type { TurnBinding } from "../../channel/types.js";
-import type { OwnerIds } from "../../shared/owners.js";
+import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import { trace } from "../../shared/trace.js";
 import { runRights } from "../host/identity.js";
 import { traceKey, type PiCallBinding } from "../pi-tools/request.js";
 import { DEFAULT_MCP_LIMITS, type EnvironmentSecrets, type McpConfigState, type McpServerConfig } from "./config.js";
 import { McpConnection, McpConnectionError } from "./connection.js";
-import { McpCatalogsDoc, compileStoredTool, digest, jsonBytes, makeCatalog, restoreCatalog, serverDigest, toolContract, toolNames,
+import { McpCatalogsDoc, approvalCatalog, compileStoredTool, digest, jsonBytes, makeCatalog, restoreCatalog, serverDigest, toolContract, toolNames,
   type CatalogRevision } from "./catalog.js";
 import { MCP_CONTROL_EXTENSION, isMcpExtensionName, isMcpToolName, type McpToolIdentity } from "./names.js";
 import { McpDelegationDoc, readDelegation, type McpDelegation } from "./delegation.js";
 import { convertMcpResult } from "./result.js";
+import type { McpApproval, McpApprovals } from "./approval.js";
 
 export { isMcpToolName } from "./names.js";
 
 type Options = {
   registry: Registry; harness: Harness; storage: Pick<Storage, "mintId">; config: McpConfigState; secrets: EnvironmentSecrets;
+  approvals?: Pick<McpApprovals, "request">;
   owners: () => OwnerIds; binding: (id: number) => Promise<PiCallBinding | undefined>;
 };
 type PoolEntry = {
@@ -113,13 +115,13 @@ export class PiMcp {
   /** 只从父回合的真实绑定生成授权；服务摘要固定账号、白名单和委派时的配置。 */
   async delegation(parent: ConversationId): Promise<McpDelegation | null> {
     const binding = await this.opts.binding(Number(parent));
-    if (!binding || binding.child || this.opts.config.kind !== "enabled") return null;
+    if (!binding || binding.child || !runRights(binding, this.opts.owners()).owner || this.opts.config.kind !== "enabled") return null;
     const servers: Record<string, string> = {};
     let principal: string | undefined;
     for (const server of this.opts.config.value.servers) {
       const person = this.authorizeParent(server, binding);
       if (!person || !server.access.allowSubagent) continue;
-      principal = person; servers[server.id] = serverDigest(server);
+      principal = runRights(binding, this.opts.owners()).person?.person; servers[server.id] = serverDigest(server);
     }
     return principal ? { principal, servers, wake: binding.identity.kind === "wake",
       scheduled: runRights(binding, this.opts.owners()).person?.kind === "scheduled" } : null;
@@ -165,11 +167,12 @@ export class PiMcp {
           if (!principal || !turn) continue;
           authorized = true;
           try {
-            const catalog = await this.withEntry(server, Number(conversation.id), turn, principal, budget.signal, async entry => {
+            let catalog = await this.withEntry(server, Number(conversation.id), turn, principal, budget.signal, async entry => {
               if (await this.authorize(server, turn, conversation.id) !== principal) throw new McpFailure("denied");
               if (refresh) entry.discovered = -1;
               return this.catalog(entry, budget.signal);
             });
+            catalog = await this.selection(catalog, server, turn, budget.signal);
             pinned.push(catalog);
             const size = catalog.tools.reduce((sum, tool) => sum + jsonBytes({
               name: toolNames(catalog, tool).nativeName, description: tool.description, inputSchema: tool.inputSchema,
@@ -217,21 +220,32 @@ export class PiMcp {
     if (!current?.enabled || serverDigest(current) !== serverDigest(server)) return;
     if (!("child" in binding && binding.child)) return this.authorizeParent(server, binding);
     if (this.opts.config.kind !== "enabled" || this.stopping || !server.enabled || !server.access.allowSubagent ||
-      binding.threadKey !== "owner" || !binding.scope.startsWith("private:")) return;
+      !this.allowedScope(server, binding)) return;
     if (!grant || grant.servers[server.id] !== serverDigest(server) ||
       (grant.wake && !server.access.allowWake) || (grant.scheduled && !server.access.allowScheduled)) return;
     const rights = runRights(binding, this.opts.owners());
-    if (rights.owner && rights.access === "all" && rights.person?.person === grant.principal) return grant.principal;
+    if (rights.owner && rights.person?.person === grant.principal) return this.principal(binding, grant.principal);
+  }
+
+  private allowedScope(server: McpServerConfig, binding: TurnBinding): boolean {
+    return binding.scope.startsWith("group:")
+      ? binding.threadKey === binding.scope && server.access.groups.includes(binding.scope.slice(6))
+      : binding.threadKey === "owner" && binding.scope.startsWith("private:");
+  }
+
+  private principal(binding: TurnBinding, person: string): string | undefined {
+    const owners = this.opts.owners();
+    return binding.scope.startsWith("group:") ? typeof owners === "string" ? owners : owners?.[0] : person;
   }
 
   private authorizeParent(server: McpServerConfig, binding: TurnBinding | PiCallBinding | undefined): string | undefined {
-    if (this.opts.config.kind !== "enabled" || !binding || !server.enabled || this.stopping || binding.threadKey !== "owner" ||
-      !binding.scope.startsWith("private:") || ("child" in binding && binding.child)) return;
+    if (this.opts.config.kind !== "enabled" || !binding || !server.enabled || this.stopping ||
+      !this.allowedScope(server, binding) || ("child" in binding && binding.child)) return;
     const rights = runRights(binding, this.opts.owners());
-    if (!rights.owner || !rights.person || rights.access !== "all") return;
+    if (!rights.person || (!binding.scope.startsWith("group:") && !rights.owner)) return;
     if (binding.identity.kind === "wake" && !server.access.allowWake) return;
     if (rights.person.kind === "scheduled" && !server.access.allowScheduled) return;
-    return rights.person.person;
+    return this.principal(binding, rights.person.person);
   }
 
   private async withEntry<T>(server: McpServerConfig, id: number, turn: TurnBinding, principal: string,
@@ -307,6 +321,14 @@ export class PiMcp {
       } catch (error) { entry.discovered = -1; this.dispose(entry); throw error; }
     }
     return entry.catalog;
+  }
+
+  private async selection(revision: CatalogRevision, server: McpServerConfig, turn: TurnBinding, signal: AbortSignal): Promise<CatalogRevision> {
+    if (!turn.scope.startsWith("group:") || runRights(turn, this.opts.owners()).owner) return revision;
+    const selected = approvalCatalog(revision, server.tools.approval);
+    if (jsonBytes(selected) > this.limits.catalogBytes) throw new McpFailure("catalog_too_large");
+    await this.publish(selected, signal);
+    return selected;
   }
 
   private async publish(revision: CatalogRevision, signal: AbortSignal): Promise<void> {
@@ -416,7 +438,7 @@ export class PiMcp {
       const names = toolNames(revision, tool), schemas = compileStoredTool(tool, this.limits);
       const extension = defineExtension({ name: names.extensionName, tools: [defineTool({
         name: names.nativeName, description: `[MCP ${revision.serverId}] ${tool.description}`,
-        parameters: schemas.input.schema, ...(schemas.output ? { structuredOutputSchema: schemas.output.schema } : {}),
+        parameters: schemas.input.schema, ...(schemas.output && !tool.approval ? { structuredOutputSchema: schemas.output.schema } : {}),
         replay: "unsafe", executionMode: "sequential", outputLimits: { maxBytes: this.limits.textBytes },
         execute: async (args, api, context) => this.execute(this.installed.get(names.nativeName)?.revision ?? revision, tool, schemas, args, api, context),
       })] });
@@ -426,47 +448,87 @@ export class PiMcp {
     this.revisions.set(revision.digest, revision);
   }
 
-  private async execute(revision: CatalogRevision, tool: CatalogRevision["tools"][number],
+  private execute(revision: CatalogRevision, tool: CatalogRevision["tools"][number],
     schemas: ReturnType<typeof compileStoredTool>, args: unknown, api: ToolExecutionApi, context: Context): Promise<ToolExecutionResult> {
-    let names = toolNames(revision, tool);
+    return this.invoke({ serverId: revision.serverId, toolName: tool.name, args, conversationId: api.conversationId,
+      callId: api.callId, taskId: api.taskId, resolve: () => this.opts.binding(Number(api.conversationId)), expected: { revision, tool, schemas } }, context);
+  }
+
+  /** 审批与当前模型回合独立：身份只来自已验证的 owner 决定，连接仍使用申请时的群会话。 */
+  executeApproval(record: Extract<McpApproval, { state: "executing" }>): Promise<ToolExecutionResult> {
+    const binding: PiCallBinding = { threadKey: record.thread_key, scope: record.scope,
+      identity: { kind: "user", sender: record.decided_by }, inputs: [], child: false, access: record.scope,
+      senderIsOwner: true, auth: true };
+    return this.invoke({ serverId: record.server_id, toolName: record.tool, args: record.args,
+      conversationId: record.conversation_id as ConversationId, callId: record.call_id,
+      resolve: async () => binding, approved: record }, BACKGROUND_CONTEXT);
+  }
+
+  private async invoke(call: {
+    serverId: string; toolName: string; args: unknown; conversationId: ConversationId; callId: string; taskId?: ToolExecutionApi["taskId"];
+    resolve(): Promise<PiCallBinding | undefined>;
+    expected?: { revision: CatalogRevision; tool: CatalogRevision["tools"][number]; schemas: ReturnType<typeof compileStoredTool> };
+    approved?: Extract<McpApproval, { state: "executing" }>;
+  }, context: Context): Promise<ToolExecutionResult> {
+    const { expected, approved } = call;
+    let names: Partial<McpToolIdentity> = expected ? toolNames(expected.revision, expected.tool) : { serverId: call.serverId, remoteName: call.toolName };
     const started = Date.now(), budget = this.budget(context.abortSignal);
     let dispatched = false, bound: PiCallBinding | undefined, inputBytes = 0;
     try {
-      const server = this.opts.config.kind === "enabled" ? this.opts.config.value.servers.find(s => s.id === revision.serverId) : undefined;
-      bound = await this.opts.binding(Number(api.conversationId));
-      const principal = server && await this.authorize(server, bound, api.conversationId);
-      if (!server || !bound || !principal || !server.tools.allow.includes(tool.name)) throw new McpFailure("denied");
-      if (serverDigest(server) !== revision.configDigest) throw new McpFailure("tool_retired");
-      const parsed = argsSchema.safeParse(args);
-      if (!parsed.success || !schemas.input.check(args)) throw new McpFailure("invalid_arguments");
-      inputBytes = jsonBytes(parsed.data);
+      const server = this.opts.config.kind === "enabled" ? this.opts.config.value.servers.find(s => s.id === call.serverId) : undefined;
+      bound = await call.resolve();
+      const principal = server && await this.authorize(server, bound, call.conversationId);
+      if (!server || !bound || !principal || !server.tools.allow.includes(call.toolName)) throw new McpFailure("denied");
+      const validApproval = () => !approved || (isOwner(this.opts.owners(), approved.decided_by) &&
+        serverDigest(server) === approved.server_digest && server.tools.approval.includes(call.toolName) &&
+        server.access.groups.includes(approved.scope.slice(6)) && digest(call.args) === approved.args_digest);
+      if (!validApproval()) throw new McpFailure("approval_changed");
+      if (expected && serverDigest(server) !== expected.revision.configDigest) throw new McpFailure("tool_retired");
+      const parsed = argsSchema.safeParse(call.args);
+      if (!parsed.success || (expected && !expected.schemas.input.check(call.args))) throw new McpFailure("invalid_arguments");
+      const args = z.record(z.string(), z.json()).parse(parsed.data);
+      inputBytes = jsonBytes(args);
       if (inputBytes > this.limits.argumentBytes) throw new McpFailure("arguments_too_large");
-      const result = await this.withEntry(server, Number(api.conversationId), bound, principal, budget.signal, async entry => {
-        if (entry.scope !== revision.scopeDigest || await this.authorize(server, await this.opts.binding(Number(api.conversationId)), api.conversationId) !== principal) {
-          throw new McpFailure("denied");
-        }
-        const current = await this.catalog(entry, budget.signal);
-        const currentTool = current.tools.find(candidate => candidate.name === tool.name);
-        if (!currentTool || toolContract(current, currentTool) !== toolContract(revision, tool)) throw new McpFailure("tool_retired");
-        names = { ...names, catalogDigest: current.digest };
-        const live = await this.opts.binding(Number(api.conversationId));
-        if (await this.authorize(server, live, api.conversationId) !== principal) throw new McpFailure("denied");
+      const person = runRights(bound, this.opts.owners()).person;
+      const verify = async () => {
+        const live = await call.resolve();
+        if (await this.authorize(server, live, call.conversationId) !== principal || !live || !validApproval() ||
+          digest(runRights(live, this.opts.owners()).person ?? null) !== digest(person ?? null)) throw new McpFailure("denied");
+        return live;
+      };
+      const output = await this.withEntry(server, Number(call.conversationId), bound, principal, budget.signal, async entry => {
+        const turn = await verify();
+        const current = await this.selection(await this.catalog(entry, budget.signal), server, turn, budget.signal);
+        if (expected && current.scopeDigest !== expected.revision.scopeDigest) throw new McpFailure("denied");
+        const tool = current.tools.find(candidate => candidate.name === call.toolName);
+        if (!tool || (expected && toolContract(current, tool) !== toolContract(expected.revision, expected.tool))) throw new McpFailure("tool_retired");
+        names = toolNames(current, tool);
+        const schemas = compileStoredTool(tool, this.limits);
+        if (!schemas.input.check(args)) throw new McpFailure("invalid_arguments");
+        const live = await verify();
         if (entry.discovered !== entry.changed) throw new McpFailure("tool_retired");
         budget.signal.throwIfAborted();
         if (!entry.connection) throw new McpFailure("connection_unavailable");
+        if (!approved && live.scope.startsWith("group:") && !runRights(live, this.opts.owners()).owner && server.tools.approval.includes(tool.name)) {
+          if (!this.opts.approvals || !person) throw new McpFailure("approval_unavailable");
+          return this.opts.approvals.request({ server_id: server.id, server_digest: serverDigest(server), tool: tool.name, args,
+            requester: person.person, scope: `group:${live.scope.slice(6)}`, thread_key: live.threadKey,
+            conversation_id: Number(call.conversationId), call_id: call.callId }, live.inputKey);
+        }
         dispatched = true;
-        try { return await entry.connection.callTool(tool.name, parsed.data, budget.signal); }
+        let result;
+        try { result = await entry.connection.callTool(tool.name, args, budget.signal); }
         catch (error) { this.dispose(entry); throw error; }
+        return convertMcpResult(result, schemas.output, this.limits);
       });
-      const output = convertMcpResult(result, schemas.output, this.limits);
       trace.event(traceKey(bound), "mcp_call", { status: output.isError ? "failed" : "ok", durationMs: Date.now() - started,
-        detail: { ...names, taskId: api.taskId, callId: api.callId, inputBytes, outputBytes: jsonBytes(output), outcome: "response_received" } });
+        detail: { ...names, taskId: call.taskId, callId: call.callId, inputBytes, outputBytes: jsonBytes(output), outcome: dispatched ? "response_received" : "approval_requested" } });
       return output;
     } catch (error) {
       if (context.abortSignal?.aborted) throw error;
       const code = dispatched ? "outcome_unknown" : this.code(error);
       trace.event(traceKey(bound), "mcp_call", { status: "failed", durationMs: Date.now() - started,
-        detail: { ...names, taskId: api.taskId, callId: api.callId, inputBytes, code, cause: this.code(error), outcome: dispatched ? "unknown" : "not_started" } });
+        detail: { ...names, taskId: call.taskId, callId: call.callId, inputBytes, code, cause: this.code(error), outcome: dispatched ? "unknown" : "not_started" } });
       return failure(code, dispatched ? "MCP 操作结果未知，可能已执行。请先核对外部状态，不要自动重复调用。"
         : `MCP 操作未发送（${code}）。请检查权限、服务状态或获取最新工具。`);
     } finally { budget.done(); }
