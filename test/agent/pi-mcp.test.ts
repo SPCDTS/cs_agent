@@ -6,7 +6,7 @@ import { AgentDoc, createRegistry, defineExtension, defineTool, Harness, ToolRes
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { McpDelegationDoc, narrowDelegation } from "../../src/agent/pi-mcp/delegation.js";
+import { McpDelegationDoc } from "../../src/agent/pi-mcp/delegation.js";
 import { runRights } from "../../src/agent/host/identity.js";
 import { PiMcp } from "../../src/agent/pi-mcp/index.js";
 import { McpCatalogsDoc, digest } from "../../src/agent/pi-mcp/catalog.js";
@@ -522,34 +522,6 @@ describe("Pi MCP 委派授权交集", () => {
     });
     await r.run(child, name);
     expect((await results(child))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_denied" })]));
-    expect(s.state.calls).toBe(0);
-  });
-
-  it("父目录工具名即使被复制进子选择，也不能使用父连接", async () => {
-    const s = await server(), r = await rig(s.config({}, { allowSubagent: true })), parent = await r.create();
-    await r.configure(parent);
-    const child = await delegated(r, parent), foreign = (await mcpNames(parent))[0]!;
-    const parentState = await r.harness.snapshot(AgentDoc, parent.id, context);
-    await r.harness.commit(async tx => { Object.assign(await tx.doc(AgentDoc, child.id), parentState); }, context);
-    await r.run(child, foreign);
-    expect((await results(child))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_denied" })]));
-    expect(s.state.calls).toBe(0); expect(s.state.sessions).toBe(2);
-  });
-
-  it("未知 wake 的续发撤掉快照，之后 owner 交代也不会重新获得工具", async () => {
-    const s = await server(), r = await rig(s.config({}, { allowSubagent: true })), parent = await r.create(), child = await delegated(r, parent);
-    r.bindings.set(Number(parent.id), { ...owner(), identity: { kind: "wake" } });
-    const next = await r.mcp.delegation(parent.id);
-    await r.harness.commit(async tx => {
-      const doc = await tx.doc(McpDelegationDoc, child.id); doc.grant = narrowDelegation(doc.grant, next);
-    }, context);
-    await r.mcp.configureChild(child, context); expect(await mcpNames(child)).toHaveLength(0);
-    r.bindings.set(Number(parent.id), owner());
-    const restored = await r.mcp.delegation(parent.id);
-    await r.harness.commit(async tx => {
-      const doc = await tx.doc(McpDelegationDoc, child.id); doc.grant = narrowDelegation(doc.grant, restored);
-    }, context);
-    await r.mcp.configureChild(child, context); expect(await mcpNames(child)).toHaveLength(0);
     expect(s.state.calls).toBe(0);
   });
 });

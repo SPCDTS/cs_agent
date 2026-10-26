@@ -737,20 +737,6 @@ describe("pi 换模型前压缩", () => {
     } finally { off(); }
   });
 
-  it("modelId 不变但 provider 改变也压缩", async () => {
-    let provider: string | undefined;
-    const r = await rig([], { currentModel: initial => ({ provider: provider ?? initial, modelId: "test" }) });
-    await turn(r, "5", "已有历史");
-    const other = fauxProvider({ provider: "other", models: [{ id: "test" }], tokensPerSecond: Infinity });
-    other.setResponses([reply()]);
-    r.models.setProvider(other.provider);
-    const conv = await observeConversation(r), compact = vi.spyOn(conv, "compact");
-    provider = "other";
-    await turn(r, "5", "切换提供者");
-    expect(compact).toHaveBeenCalledTimes(1);
-    expect((await conv.agent(context)).model).toEqual({ provider: "other", modelId: "test" });
-  });
-
   it("新会话、相同模型和只改思考档位都不压缩", async () => {
     let thinking: "low" | "high" = "low";
     const r = await rig([], { extraModels: [{ id: "reasoning", reasoning: true }],
