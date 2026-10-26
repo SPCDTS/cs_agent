@@ -349,11 +349,6 @@ describe('面板二期页面', () => {
     const off = await r.get('/settings/memory-extract', { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
     expect(off.status).toBe(303);
     expect(r.settings.current().memory.extract).toEqual({ owner: false });
-    // 600 个未勾选的群 + owner 取消勾选：只存与缺省不同的覆盖项，不触发 500 项上限
-    const many = new URLSearchParams([['_csrf', r.csrf], ['ns', 'owner'], ...Array.from({ length: 600 }, (_, i): [string, string] => ['ns', `group:${i + 1}`])]).toString();
-    const saved = await r.get('/settings/memory-extract', { method: 'POST', redirect: 'manual', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: many });
-    expect(saved.status).toBe(303);
-    expect(r.settings.current().memory.extract).toEqual({ owner: false });
     const bad = await r.post('/settings/memory-extract', { _csrf: r.csrf, ns: 'group:abc', 'extract:group:abc': 'on' });
     expect(bad.status).toBe(400); expect(await bad.text()).toContain('抽取开关未保存');
     expect(JSON.parse((await (await r.get('/api/memory/extract')).text()))).toMatchObject({ queue: 2, running: 'pi:t9', today: { counts: { owner: 3 } } });

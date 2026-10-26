@@ -190,16 +190,6 @@ describe("ProfileStore：画像读写", () => {
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error; /* Windows 无权限建文件链接时跳过 */ }
   });
 
-  it("运维手改出超过 4 KiB 的画像：读取标 oversize 并给出 revision，可凭它重写", async () => {
-    const dir = tmp("cs-memory-profile-"), profiles = new ProfileStore(dir);
-    await fs.mkdir(path.join(dir, "memory", "owner"), { recursive: true });
-    await fs.writeFile(profiles.file("owner"), "长".repeat(2000), "utf8");
-    const read = await profiles.read("owner");
-    expect(read).toMatchObject({ oversize: true, revision: expect.stringMatching(/^[0-9a-f]{24}$/) });
-    await profiles.write("owner", "精简后的画像", read.revision);
-    expect((await profiles.read("owner")).oversize).toBeUndefined();
-  });
-
   it("超过 4 KiB、含凭据样式内容、非法命名空间一律拒绝", async () => {
     const profiles = new ProfileStore(tmp("cs-memory-profile-"));
     await expect(profiles.write("owner", "字".repeat(1400), PROFILE_NONE)).rejects.toThrow(/4 KiB/);

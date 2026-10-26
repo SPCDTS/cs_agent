@@ -121,17 +121,13 @@ describe("工具语义", () => {
     expect(r.store.versions(4).at(-1)?.by).toBe("dashboard");
   });
 
-  it("参数校验、秘密检测与每轮写入上限", async () => {
+  it("参数校验与秘密检测", async () => {
     const r = rig();
     await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "wish" })).rejects.toThrow(/参数无效：kind/);
     await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "fact", extra: 1 })).rejects.toThrow(/参数无效/);
     await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "fact", since: "2026-02-30" })).rejects.toThrow(/日期/);
     await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "服务器密码 password=hunter2abc", kind: "fact" })).rejects.toThrow(/凭据/);
     await expect(r.service.tool(ownerTurn(), "mem_nope", {})).rejects.toThrow(/未知的记忆工具/);
-    const turn = ownerTurn({ turnId: "pi:busy" });
-    for (let i = 0; i < 20; i++) await r.service.tool(turn, "mem_remember", { text: `第 ${i} 条`, kind: "fact" });
-    await expect(r.service.tool(turn, "mem_remember", { text: "超限", kind: "fact" })).rejects.toThrow(/上限（20 次）/);
-    expect(await r.service.tool(ownerTurn({ turnId: "pi:next" }), "mem_remember", { text: "下一轮", kind: "fact" })).toContain("已记住");
   });
 
   it("输出总量受字数上限约束并说明未显示的条数；检索记召回统计并写 memory_recall / memory_write 事件（不记正文）", async () => {
@@ -166,10 +162,11 @@ describe("工具语义", () => {
   });
 
   it("revision 冲突时返回的当前画像按字数上限截断并注明；超限画像不进提示，mem_profile 提示重写", async () => {
-    const r = rig(300);
-    const { revision } = await r.profiles.write("owner", "画".repeat(1300), PROFILE_NONE);
+    const r = rig();
+    // 缺省上限 2500 字：接近 4 KiB 的英文画像（单字节字符）就会超出
+    const { revision } = await r.profiles.write("owner", "Prefers short plain-text replies.\n".repeat(120), PROFILE_NONE);
     const error = await r.service.tool(ownerTurn(), "mem_profile", { text: "新", revision: "stale" }).catch((e: Error) => e.message);
-    expect(error.length).toBeLessThanOrEqual(300);
+    expect(error.length).toBeLessThanOrEqual(2500);
     expect(error).toMatch(/当前 revision=[0-9a-f]{24}[\s\S]*…（已截断）$/);
     // 运维手改到 4 KiB 以上：渲染为空，mem_profile 报超限并给 revision，凭它重写成功
     await fs.writeFile(r.profiles.file("owner"), "超".repeat(2000), "utf8");
@@ -181,12 +178,13 @@ describe("工具语义", () => {
     expect(await r.service.render("owner")).toContain("精简");
   });
 
-  it("画像写入与条目写入共用每轮 20 次额度；遗忘原因也过秘密检测", async () => {
+  it("画像写入与条目写入共用每轮 20 次额度，下一轮重新计数；遗忘原因也过秘密检测", async () => {
     const r = rig();
     const turn = ownerTurn({ turnId: "pi:mixed" });
     for (let i = 0; i < 19; i++) await r.service.tool(turn, "mem_remember", { text: `第 ${i} 条`, kind: "fact" });
     await r.service.tool(turn, "mem_profile", { text: "称呼：老王", revision: PROFILE_NONE });
     await expect(r.service.tool(turn, "mem_profile", { text: "称呼：小王", revision: (await r.profiles.read("owner")).revision })).rejects.toThrow(/上限（20 次）/);
+    expect(await r.service.tool(ownerTurn({ turnId: "pi:next" }), "mem_remember", { text: "下一轮", kind: "fact" })).toContain("已记住");
     await expect(r.service.tool(ownerTurn(), "mem_forget", { id: 1, reason: "密码是 password=hunter2abc" })).rejects.toThrow(/凭据/);
     expect(r.store.get(1)?.status).toBe("active");
     expect(r.store.versions(1)).toHaveLength(1);

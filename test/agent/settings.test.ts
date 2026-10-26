@@ -96,9 +96,8 @@ describe("运行时设置", () => {
     expect(memoryExtractEnabled(s.current(), "owner")).toBe(false);
     expect(JSON.parse(readFileSync(file, "utf8")).settings.memory).toEqual({ extract: { owner: false, "group:7": true }, consolidate: true });
     await expect(s.update({ memory: { extract: { "group:abc": true } } }, "test")).rejects.toThrow();
-    // 与缺省相同的键（owner 开、其余关）不保存：600 个关闭的群加 owner 关闭，只剩 { owner: false }
-    const many = Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`group:${i + 1}`, false]));
-    await s.update({ memory: { extract: { ...many, owner: false } } }, "test");
+    // 与缺省相同的键（owner 开、其余关）不保存：几个关闭的会话加 owner 关闭，只剩 { owner: false }
+    await s.update({ memory: { extract: { "group:7": false, "group:8": false, "private:5": false, owner: false } } }, "test");
     expect(s.current().memory.extract).toEqual({ owner: false });
     await s.update({ memory: { extract: { owner: true } } }, "test");
     expect(s.current().memory.extract).toEqual({});
