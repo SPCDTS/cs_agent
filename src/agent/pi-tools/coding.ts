@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord/context";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { err, ok, ExecutionError, FileError, type DirReader, type Result, type ShellExecOptions, type ShellExecResult } from "@earendil-works/pi-durable/env";
-import { createCodingTools, DEFAULT_IMAGE_LIMITS } from "@earendil-works/pi-durable/tools";
+import { createBashTool, createCodingTools, DEFAULT_IMAGE_LIMITS } from "@earendil-works/pi-durable/tools";
 import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
 import { BWRAP, bwrapArgs, PiPathPolicy, requireBwrap, type PiSandboxOptions } from "./sandbox.js";
 
@@ -113,7 +113,12 @@ export async function codingEnvironment(options: PiSandboxOptions): Promise<PiEx
 
 export async function codingTools() {
   const images = await createNodePhotonImages();
-  return createCodingTools({ images: {
+  const coding = createCodingTools({ images: {
     prepare: (bytes, mimeType) => images.prepare(bytes, mimeType, DEFAULT_IMAGE_LIMITS),
   } });
+  const bash = createBashTool();
+  bash.description += " 单条命令最长 60 秒，未指定 timeout 时也为 60 秒。";
+  const timeout = { ...bash.parameters.properties.timeout, description: "超时秒数（可选，默认 60 秒，最长 60 秒）。" };
+  bash.parameters = { ...bash.parameters, properties: { ...bash.parameters.properties, timeout } };
+  return { ...coding, tools: coding.tools?.map(tool => tool.name === "bash" ? bash : tool) };
 }

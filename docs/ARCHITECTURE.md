@@ -162,7 +162,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 - **回合**：开轮 `conv.submit({ type: "input", requestId: 入站键, whenBusy: "followUp" })`，同一发送者插话 `whenBusy: "steer"`；回合结束由会话 idle 事件驱动宿主。
 - **工具**：`read` / `write` / `edit` / `bash`（`PiPathPolicy` + bwrap 沙箱，§5.5）、`web_search` / `fetch_page`（DeepSeek Search/Fetch API 直连，需 `DEEPSEEK_API_KEY`）、`qq_recent` / `qq_search` / `qq_message` / `qq_image` / `qq_chats`、`send_message`、按本轮权限出现的 `auth_*` / `schedule_*`、`subagent`。工具调用不按回合计次。每轮开始（含唤醒与重启恢复）时按本轮的人重新选择 IM 与定时工具集；调用时服务端逐次复核。
 - **提示词**：pi-durable 把各 section 合成为最前面的一条 system 消息，内容不变不重发（保住提示缓存）：
-  1. `cs-pi`：`DATA_DIR/prompts/agent.md`（缺失时播种默认模板，已有不覆盖，按 mtime/size 热加载）+ 受管规则（`SEND_RULE`、工作区、子 agent 用法）。
+  1. `cs-pi`：受管规则（发送、链接、安全、工作区、子 agent 用法）+ `DATA_DIR/prompts/agent.md`（仅人设、语气与输出格式；缺失时播种，已有不覆盖，按 mtime/size 热加载）。工具使用指引放在各工具描述中。
   2. `project-context`：运维层 `WORKSPACE_DIR/AGENTS.md` 与会话层 `DATA_DIR/pi-work/<key>/AGENTS.md`，各按 `AGENTS.override.md → AGENTS.md → AGENTS.MD → CLAUDE.md → CLAUDE.MD` 取第一个普通文件（≤128 KiB、严格 UTF-8、去 BOM、拒绝链接），渲染为 `<project_instructions path="…">`。主进程直接读取，不向上遍历，不读 `/data/AGENTS.md`；cwd 不是 `pi-work` 的直接子目录时只用运维层并告警一次。语义参照 pi-coding-agent 的 `loadProjectContextFiles`，未引入该包（[THIRD-PARTY.md](THIRD-PARTY.md)）。
   3. `skills`：可用技能列表（§7）。
 - **压缩**：harness 级自动压缩开启，`PI_COMPACTION_RESERVE_TOKENS`（16384）/ `PI_COMPACTION_BACKGROUND_TOKENS`（32768）/ keepRecentTokens 20000；不轮换，压缩不删除数据库原文。
@@ -262,7 +262,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 - **消息库** `/data/qq-messages.sqlite`（WAL）：允许范围内的全部消息、机器人发出的每条消息、日/周摘要；trigram FTS5（2 字中文词回退 `LIKE`）。所有读取带访问范围过滤（`context/access.ts`）。撤回删除原始行。
 - **衰老**（`context/aging.ts`）：每天 `HISTORY_SUMMARY_HOUR` 点（容器 `TZ`，默认 Asia/Shanghai）：≥5 条消息的会话日生成 ≤400 字日摘要，已结束的自然周合并为周摘要；原始消息超过 `HISTORY_RAW_DAYS`（30）且已被摘要覆盖才删除，未覆盖的最多保留 `HISTORY_RAW_HARD_MAX_DAYS`（90）天；摘要保留 `HISTORY_SUMMARY_DAYS`（180）天。上次运行早于 24 小时则启动补跑。
 - **检索工具**：`qq_recent` / `qq_search` / `qq_message`（总量 ≤`QQ_CONTEXT_MAX_CHARS`，2500 字）、`qq_chats`。**按需检索，不自动注入**：只有消息指代此前内容或用户要求回顾时由模型自己调用；唯一自动带入的历史是 `[引用]` 行。
-- **图片按需召回**：消息默认只存 `[image]`，不存 URL、不下载。`qq_image(message_id)` 下载到媒体库并只返回路径文本，正文改为 `[image:<路径>]`；看图用各自的文件工具（pi `read`，codex `qq_view_image`）。每回合召回 ≤`MEDIA_RECALL_MAX_PER_TURN`（5；旧名 `MEDIA_RECALL_MAX_PER_TICKET` 仍可用）。媒体随原始消息保留，每日 GC 回收无引用文件。
+- **图片按需召回**：消息默认只存 `[image]`，不存 URL、不下载。`qq_image(message_id)` 下载到媒体库并只返回路径文本，正文改为 `[image:<路径>]`；看图用各自的文件工具（pi `read`，codex `qq_view_image`）。codex 每回合召回 ≤`MEDIA_RECALL_MAX_PER_TURN`（默认 5；旧名 `MEDIA_RECALL_MAX_PER_TICKET` 仍可用）；pi 不按回合计次。媒体随原始消息保留，每日 GC 回收无引用文件。
 - **codex 接入**：`qq_context` MCP（只读库连接）经主进程 loopback 服务（`MEDIA_RECALL_PORT`，仅 127.0.0.1）完成召回与 `qq_chats`；主进程凭线程令牌与 `_meta.callId` 确认调用属于会话当前回合，再按本轮权限求出范围。pi 直接调用同一服务。
 
 ## 10. 存储
