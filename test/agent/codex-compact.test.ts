@@ -1,8 +1,9 @@
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContextUsageStore } from "../../src/agent/context-usage.js";
 import { log } from "../../src/shared/log.js";
+import { trace, type LiveEvent } from "../../src/shared/trace.js";
 import { CodexBackend } from "../../src/agent/backends/codex.js";
 import type { InputRef } from "../../src/agent/host/types.js";
 import { CodexScript, codexRunnerRig } from "./codex-fixture.js";
@@ -24,17 +25,20 @@ const tokenCount = { type: "event_msg", payload: { type: "token_count", info: {
  * 面板压缩经常驻 app-server：thread/compact/start 后，服务端以一个压缩回合（或只发 contextCompaction 条目）完成；
  * rows：压缩时追加到线程 rollout 的记录（缺省时间戳为当前）。
  */
-async function rig(opts: { rows?: unknown[]; fail?: boolean; usage?: boolean } = {}) {
+async function rig(opts: { rows?: unknown[]; fail?: boolean; usage?: boolean; compactTimeoutMs?: number; hold?: Promise<void> } = {}) {
   const dir = tmp("cs-compact-");
   const store = opts.usage ? new ContextUsageStore(dir) : undefined;
   if (store) stores.push(store);
   const script = new CodexScript();
   const base = script.handlers;
+  let compactSeq = 0;
   script.handlers = () => ({ ...base(),
     "thread/compact/start": (m, child) => {
       if (opts.fail) return { error: { code: -32603, message: "fake failure" } };
       const threadId = String(m.params!.threadId);
-      setImmediate(() => {
+      const turnId = "compact-" + ++compactSeq;
+      setImmediate(async () => {
+        await opts.hold;
         if (opts.rows) {
           const sessions = path.join(dir, "codex", "sessions");
           mkdirSync(sessions, { recursive: true });
@@ -42,9 +46,9 @@ async function rig(opts: { rows?: unknown[]; fail?: boolean; usage?: boolean } =
           appendFileSync(path.join(sessions, `rollout-${threadId}.jsonl`), rows.map(row => JSON.stringify(row)).join("\n") + "\n", "utf8");
         }
         // 压缩以服务端回合进行：压缩锁持有到该回合结束
-        child.notify("turn/started", { threadId, turn: { id: "compact-turn", status: "inProgress" } });
-        child.notify("item/completed", { threadId, turnId: "compact-turn", item: { id: "compact-item", type: "contextCompaction" } });
-        child.notify("turn/completed", { threadId, turn: { id: "compact-turn", status: "completed" } });
+        child.notify("turn/started", { threadId, turn: { id: turnId, status: "inProgress" } });
+        child.notify("item/completed", { threadId, turnId, item: { id: "compact-item", type: "contextCompaction" } });
+        child.notify("turn/completed", { threadId, turn: { id: turnId, status: "completed" } });
       });
       return { result: {} };
     },
@@ -58,7 +62,7 @@ async function rig(opts: { rows?: unknown[]; fail?: boolean; usage?: boolean } =
     render: async () => ({ text: "问题", images: [], source: { type: "private" as const, user_id: "9", group_id: null, nickname: "测试" } }),
   };
   const tokens = { issue: vi.fn(() => "a".repeat(64)), revoke: vi.fn() };
-  const backend = new CodexBackend({ runner: r.runner, tokens, imagesDir: path.join(dir, "images"), turns, compactTimeoutMs: 2_000 });
+  const backend = new CodexBackend({ runner: r.runner, tokens, imagesDir: path.join(dir, "images"), turns, compactTimeoutMs: opts.compactTimeoutMs ?? 2_000 });
   backend.attach({ onTurnStarted: (_k, turnId) => host.started.push(turnId), onActivity: () => undefined,
     onTurnCompleted: (_k, turnId) => host.completed.push(turnId) });
   return { ...r, script, backend, host, store, tokens };
@@ -141,5 +145,94 @@ describe("CodexBackend.compactThread", () => {
     expect(await failing.runner.readThreadIds()).toEqual({ owner: "existing" });
     expect(await failing.backend.resetThread("owner")).toBe("existing");
     expect(await failing.backend.compactThread("owner")).toBe("unchanged");
+  });
+});
+
+describe("CodexBackend 换模型前压缩", () => {
+  const settings = (model: string) => ({ backend: "codex" as const, codexModel: model, codexReasoningEffort: "high" as const });
+  async function turn(r: Awaited<ReturnType<typeof rig>>, model: string, key: "owner" | "group:7" = "owner") {
+    const count = r.host.completed.length;
+    await r.backend.startTurn(key, [input], { kind: "user", sender: "9" }, settings(model));
+    await vi.waitFor(() => expect(r.host.completed.length).toBeGreaterThan(count));
+    await r.backend.idle();
+  }
+
+  it("开轮原子记录模型；每次变化都先压缩再 turn/start，相同模型不压缩", async () => {
+    const r = await rig();
+    await turn(r, "old");
+    expect(JSON.parse(readFileSync(r.runner.opts.threadsFile, "utf8"))).toMatchObject({ owner: { thread_id: "thr-1", model: "old" } });
+    expect(await r.runner.lastModel("owner")).toBe("old");
+    await turn(r, "old");
+    expect(r.requests("thread/compact/start")).toEqual([]);
+    const compact = r.runner.client.compactThread.bind(r.runner.client), order: string[] = [];
+    vi.spyOn(r.runner.client, "compactThread").mockImplementation(async (...args) => {
+      order.push("compact:" + await r.runner.lastModel("owner"));
+      return compact(...args);
+    });
+    r.script.onTurn = t => { order.push("turn:" + t.model); };
+    const events: LiveEvent[] = [];
+    const off = trace.tap(e => { if (e.stage === "model_switch_compaction") events.push(e); });
+    try {
+      await turn(r, "new");
+      await turn(r, "old");
+      expect(order).toEqual(["compact:old", "turn:new", "compact:new", "turn:old"]);
+      expect(events.map(e => e.detail)).toEqual([
+        { thread: "owner", from: "old", to: "new", outcome: "compacted", duration_ms: expect.any(Number) },
+        { thread: "owner", from: "new", to: "old", outcome: "compacted", duration_ms: expect.any(Number) },
+      ]);
+      expect(r.host.started).toEqual(["codex:turn-1", "codex:turn-2", "codex:turn-3", "codex:turn-4"]);
+    } finally { off(); }
+  });
+
+  it.each([undefined, "old"])("加载旧映射：已知模型先以旧模型 resume 再压缩；未知模型跳过（%s）", async model => {
+    const r = await rig();
+    writeFileSync(r.runner.opts.threadsFile, JSON.stringify({ owner: { thread_id: "existing", ...(model ? { model } : {}) } }), "utf8");
+    await turn(r, "new");
+    expect(r.loads()[0]).toMatchObject({ threadId: "existing", model: model ?? "new" });
+    const requests = r.fake.children.flatMap(c => c.received).map(m => m.method).filter(m => m === "thread/resume" || m === "thread/compact/start" || m === "turn/start");
+    expect(requests).toEqual(model ? ["thread/resume", "thread/compact/start", "turn/start"] : ["thread/resume", "turn/start"]);
+    expect(await r.runner.lastModel("owner")).toBe("new");
+  });
+
+  it("轮换到新线程不压缩，记录新模型", async () => {
+    const r = await rig();
+    writeFileSync(r.runner.opts.threadsFile, JSON.stringify({ owner: { thread_id: "expired", model: "old", created_at: "2000-01-01T00:00:00Z" } }), "utf8");
+    await turn(r, "new");
+    expect(await r.runner.threadId("owner")).toBe("thr-1");
+    expect(await r.runner.lastModel("owner")).toBe("new");
+    expect(r.requests("thread/compact/start")).toEqual([]);
+  });
+
+  it.each([false, true])("压缩失败或超时仍切换并记录 warn 和 trace（超时=%s）", async timeout => {
+    const r = await rig({ fail: !timeout, compactTimeoutMs: 30 });
+    await turn(r, "old");
+    if (timeout) vi.spyOn(r.runner.client, "compactThread").mockImplementation(() => new Promise(() => {}));
+    const warn = vi.spyOn(log, "warn"), events: LiveEvent[] = [];
+    const off = trace.tap(e => { if (e.stage === "model_switch_compaction") events.push(e); });
+    try {
+      await turn(r, "new");
+      expect(r.script.turns.at(-1)?.model).toBe("new");
+      expect(await r.runner.lastModel("owner")).toBe("new");
+      expect(events.map(e => e.detail.outcome)).toEqual(["failed"]);
+      expect(warn).toHaveBeenCalledWith("codex model switch compaction failed; switching anyway", expect.objectContaining({ thread: "owner", from: "old", to: "new" }));
+    } finally { off(); }
+  });
+
+  it("等待压缩结束才开新轮；其他线程仍能开轮并保存模型", async () => {
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const r = await rig({ hold });
+    await turn(r, "old");
+    const switching = r.backend.startTurn("owner", [input], { kind: "user", sender: "9" }, settings("new"));
+    try {
+      await vi.waitFor(() => expect(r.requests("thread/compact/start")).toHaveLength(1));
+      await turn(r, "other", "group:7");
+      expect(r.script.turns.map(t => t.model)).toEqual(["old", "other"]);
+      expect(await r.runner.lastModel("owner")).toBe("old");
+      expect(await r.runner.lastModel("group:7")).toBe("other");
+      release();
+      await switching;
+      expect(r.script.turns.map(t => t.model)).toEqual(["old", "other", "new"]);
+    } finally { release(); await switching; }
   });
 });

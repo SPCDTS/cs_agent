@@ -77,6 +77,7 @@ export interface ResidentOptions {
   contextUsage?: boolean;
   reserveTokens?: number;
   backgroundTokens?: number;
+  compactTimeoutMs?: number;
   /** 开轮时的设置快照覆盖（模型、档位） */
   settings?: (scope: string) => Partial<SettingsSnapshot>;
   /** 预先放进数据目录的文件（PiBackend 打开前） */
@@ -151,7 +152,8 @@ export async function residentRig(options: ResidentOptions = {}) {
       ...(options.currentModel ? { currentModel: () => options.currentModel!(model.provider) } : {}),
       ...(contextUsage ? { contextUsage } : {}),
       ...(options.reserveTokens !== undefined ? { reserveTokens: options.reserveTokens } : {}),
-      ...(options.backgroundTokens !== undefined ? { backgroundTokens: options.backgroundTokens } : {}) });
+      ...(options.backgroundTokens !== undefined ? { backgroundTokens: options.backgroundTokens } : {}),
+      ...(options.compactTimeoutMs !== undefined ? { compactTimeoutMs: options.compactTimeoutMs } : {}) });
     codexRunner = new CodexRunner({ command: [process.execPath, path.join(FIXTURES, "fake-codex.mjs")],
       codexHome: path.join(dir, "codex"), workspaceDir: path.join(dir, "codex-ws"), threadsFile: path.join(dir, "codex-threads.json"),
       sandbox: "workspace-write", mediaRecallPort: recallServer.port, spawn: codexSpawn.spawn,
@@ -179,7 +181,7 @@ export async function residentRig(options: ResidentOptions = {}) {
   });
 
   const r = {
-    dir, bridge, history, grants, sendService, inbox, script, codexSpawn, tokens, sent, faux, brain, owners, model, call,
+    dir, bridge, history, grants, sendService, inbox, script, codexSpawn, tokens, sent, faux, brain, owners, model, models, call,
     get codexRunner() { return codexRunner; },
     get contextUsage() { return contextUsage; },
     get harness() { return harness; }, get host() { return host; }, get pi() { return pi; }, get codex() { return codex; }, get monitor() { return monitor; },

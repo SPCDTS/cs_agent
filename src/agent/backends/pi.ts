@@ -6,7 +6,7 @@ import type { PiConversation, PiEntryPage, PiSessionSource } from "./pi-session-
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
 import { clampThinkingLevel, type Models, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc, Harness, LiveDoc, ROOT_CONVERSATION_ID, watchEvents, type AgentEvent, type AgentEventStream, type Conversation, type ConversationId, type Cursor, type EntryId, type ModelRef, type Storage, type SubmissionId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -86,6 +86,8 @@ export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "w
   thinkingLevel: ModelThinkingLevel;
   reserveTokens?: number;
   backgroundTokens?: number;
+  /** 换模型前压缩的等待上限，默认 5 分钟。 */
+  compactTimeoutMs?: number;
   /** 测试用内存或自定义持久化存储；生产使用 DATA_DIR/pi.sqlite。 */
   storage?: Storage;
   turns: PiTurns;
@@ -474,37 +476,50 @@ export class PiBackend implements ThreadAdapter {
 
   /** 会话键 → 常驻会话（首次使用时创建）；每轮按设置快照配置模型与思考档位。 */
   private async conversation(key: string, settings?: SettingsSnapshot): Promise<Conversation> {
-    // 仅创建和 JSON 写回用短全局锁。
-    return this.serial("mapping", async () => {
+    // 没有快照（唤醒回合等）时读取当前模型。
+    let ref = this.opts.currentModel?.() ?? this.opts.model;
+    if (settings?.piModel !== undefined) ref = { ...ref, modelId: settings.piModel };
+    let model = this.opts.models.getModel(ref.provider, ref.modelId);
+    if (!model) {
+      log.warn("pi runtime model unavailable; using startup model", { provider: ref.provider, model: ref.modelId });
+      ref = this.opts.model;
+      model = this.opts.models.getModel(ref.provider, ref.modelId);
+    }
+    if (!model) throw new Error("pi 启动模型不可用");
+    const agent = { model: ref, thinkingLevel: clampThinkingLevel(model, settings?.piThinkingLevel ?? this.opts.thinkingLevel) };
+    // 仅映射查询、创建和 JSON 写回用全局锁，压缩不能阻塞其他会话。
+    const { conv, created } = await this.serial("mapping", async () => {
       const id = (await this.readThreadIds())[key];
-      // 没有快照（唤醒回合等）时读取当前模型。
-      let ref = settings?.piModel !== undefined ? this.opts.currentModel?.() ?? { ...this.opts.model, modelId: settings.piModel } : this.opts.currentModel?.() ?? this.opts.model;
-      let model = this.opts.models.getModel(ref.provider, ref.modelId);
-      if (!model) {
-        log.warn("pi runtime model unavailable; using startup model", { provider: ref.provider, model: ref.modelId });
-        ref = this.opts.model;
-        model = this.opts.models.getModel(ref.provider, ref.modelId);
-      }
-      if (!model) throw new Error("pi 启动模型不可用");
-      const agent = { model: ref, thinkingLevel: clampThinkingLevel(model, settings?.piThinkingLevel ?? this.opts.thinkingLevel) };
       if (id !== undefined) {
         const conv = await this.harness.conversation(id as ConversationId, context);
         if (!conv) throw new Error("pi 会话不存在");
-        await conv.configure(agent, context);
-        await this.observeContext(key, conv, ref);
-        await this.persistMirrors();
-        return conv;
+        return { conv, created: false };
       }
       const conv = await this.harness.createConversation({ ownership: { kind: "ownerless" }, agent,
         init: async (tx, conversationId) => { (await tx.doc(PiThreadsDoc))[key] = conversationId; },
       }, context);
       this.keys.set(Number(conv.id), key);
       this.opts.contextUsage?.reset("pi", key);
-      await this.observeContext(key, conv, ref);
       await this.persistMirrors();
-      if (this.attached) await this.watchThread(key, conv.id);
-      return conv;
+      return { conv, created: true };
     });
+    if (!created) {
+      const from = (await conv.agent(context)).model;
+      if (from && (from.provider !== ref.provider || from.modelId !== ref.modelId)) {
+        const startedAt = Date.now();
+        let outcome: "compacted" | "unchanged" | "failed";
+        try { outcome = await this.compactConversation(key, conv, this.opts.compactTimeoutMs ?? 300_000); }
+        catch (error) {
+          outcome = "failed";
+          log.warn("pi model switch compaction failed; switching anyway", { thread: key, from, to: ref, error });
+        }
+        trace.event("@context", "model_switch_compaction", { detail: { thread: key, from, to: ref, outcome, duration_ms: Date.now() - startedAt } });
+      }
+      await conv.configure(agent, context);
+    }
+    await this.observeContext(key, conv, ref);
+    if (created && this.attached) await this.watchThread(key, conv.id);
+    return conv;
   }
 
   /**
@@ -819,11 +834,26 @@ export class PiBackend implements ThreadAdapter {
     if (id === undefined) return "unchanged";
     const conv = await this.harness.conversation(id as ConversationId, context);
     if (!conv) throw new Error("pi 会话不存在");
+    return this.compactConversation(key, conv);
+  }
+
+  private async compactConversation(key: string, conv: Conversation, timeoutMs?: number): Promise<"compacted" | "unchanged"> {
     const task = await conv.compact(undefined, context);
-    const { state: { outcome } } = await this.harness.waitForTask(task, context);
-    if (outcome.status !== "completed") throw new Error(`pi 会话压缩失败（${outcome.status}）`);
-    if (this.opts.contextUsage) await refreshPiCompactionUsage(conv, key, this.opts.contextUsage);
-    return "compacted";
+    const waiting = withCancel(context);
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => waiting.cancel(new Error("pi 压缩超时")), timeoutMs);
+    try {
+      const { state: { outcome } } = await this.harness.waitForTask(task, waiting.context);
+      if (outcome.status !== "completed") throw new Error(`pi 会话压缩失败（${outcome.status}）`);
+      if (outcome.result.entryId === undefined && outcome.result.submissionId === undefined) return "unchanged";
+      if (this.opts.contextUsage) await refreshPiCompactionUsage(conv, key, this.opts.contextUsage);
+      return "compacted";
+    } catch (error) {
+      if (waiting.context.abortSignal?.aborted) {
+        // 超时取消摘要任务；清理不应延长换模型的等待。
+        void this.harness.abortTask(task, context).catch(error => log.warn("pi compaction abort failed", { thread: key, error }));
+      }
+      throw error;
+    } finally { clearTimeout(timer); waiting.cancel(); }
   }
 
   /** 关闭前调用：之后的回合结束不再回报（重启后由宿主恢复），pi 回合与子 agent 保留检查点。 */

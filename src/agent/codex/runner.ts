@@ -287,6 +287,7 @@ export async function writeManagedFile(file: string, content: string): Promise<"
 
 interface ThreadRecord {
   thread_id: string;
+  model?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -300,6 +301,7 @@ function parseThread(j: unknown): ThreadRecord | undefined {
   const created = typeof r.created_at === "string" ? r.created_at : typeof r.updated_at === "string" ? r.updated_at : undefined;
   return {
     thread_id: r.thread_id,
+    ...(typeof r.model === "string" && r.model ? { model: r.model } : {}),
     ...(created ? { created_at: created } : {}),
     ...(typeof r.updated_at === "string" ? { updated_at: r.updated_at } : {}),
   };
@@ -541,6 +543,24 @@ export class CodexRunner {
   async threadId(key: ThreadKey): Promise<string | undefined> {
     if (!isThreadKey(key)) throw new Error("非法的 codex 线程键");
     return (await this.readThread(key))?.thread_id;
+  }
+
+  /** 旧映射没有模型时不猜测，首次开轮后再记录。 */
+  async lastModel(key: ThreadKey): Promise<string | undefined> {
+    return (await this.readThread(key))?.model;
+  }
+
+  async recordTurnModel(key: ThreadKey, threadId: string, model?: string): Promise<void> {
+    await this.migrate();
+    await this.serialized(async () => {
+      const doc = await this.readThreadsRaw();
+      const row = parseThread(doc[key]);
+      if (!row || row.thread_id !== threadId) return;
+      const used = model ?? row.model ?? this.opts.model;
+      if (used === undefined || used === row.model) return;
+      doc[key] = { ...row, model: used, updated_at: new Date().toISOString() };
+      await this.writeThreadsFile(doc);
+    });
   }
 
   /**

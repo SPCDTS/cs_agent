@@ -46,7 +46,7 @@ import type { HostCallbacks, InputRef, StartTurnResult, SubagentView, ThreadAdap
 import type { PiTurns } from "./pi.js";
 
 export interface CodexBackendOptions {
-  runner: Pick<CodexRunner, "client" | "supervisor" | "openThread" | "rotationDue" | "threadId" | "resetThread" | "recordTurnUsage" | "recordCompaction" | "workspaceOf">;
+  runner: Pick<CodexRunner, "client" | "supervisor" | "openThread" | "rotationDue" | "threadId" | "lastModel" | "recordTurnModel" | "resetThread" | "recordTurnUsage" | "recordCompaction" | "workspaceOf">;
   tokens: Pick<ThreadTokens, "issue" | "revoke">;
   /** ${DATA_DIR}/images：会话图片目录的根（send_message 可发送其中的 Outbox 副本） */
   imagesDir: string;
@@ -240,9 +240,23 @@ export class CodexBackend implements ThreadAdapter {
     return this.serial(threadKey, async () => {
       // 用户（或定时）开了新一轮：停止后的唤醒抑制到此为止
       this.stopped.delete(threadKey);
-      let threadId = await this.ensureThread(threadKey, model);
+      // 重启后先以旧模型加载历史，压缩完成后才在 turn/start 切换。
+      const previousModel = await this.opts.runner.lastModel(threadKey);
+      let threadId = await this.ensureThread(threadKey, previousModel ?? model);
       const blocking = this.blocking(threadKey, threadId);
       if (blocking) return blocking;
+      // 加载时可能轮换或重建线程，新线程没有上次模型。
+      const from = await this.opts.runner.lastModel(threadKey);
+      if (model && from && from !== model) {
+        const startedAt = Date.now();
+        let outcome: "compacted" | "unchanged" | "failed";
+        try { outcome = await this.compact(threadKey, from); }
+        catch (error) {
+          outcome = "failed";
+          log.warn("codex model switch compaction failed; switching anyway", { thread: threadKey, from, to: model, error });
+        }
+        trace.event("@context", "model_switch_compaction", { detail: { thread: threadKey, from, to: model, outcome, duration_ms: Date.now() - startedAt } });
+      }
       const startedAt = Date.now();
       let started = await this.submit(threadId, clientId, input, options);
       if (started.error instanceof ThreadNotLoadedError) {
@@ -293,6 +307,9 @@ export class CodexBackend implements ThreadAdapter {
         return { absorbedInto: turnId, ...(rec.kind === "wake" && rec.inherited ? { identity: rec.inherited } : {}) };
       }
       this.classify(rec, "user");
+      // 不等落盘：回合要先判定为 user，app-server 推来的条目才归到本轮。
+      void this.opts.runner.recordTurnModel(threadKey, threadId, model)
+        .catch(error => log.warn("codex turn model record failed", { thread: threadKey, error }));
       // 本轮已开出：在途期间服务端另开的回合判为 wake，但不交给宿主（否则宿主会以唤醒取代本轮）
       this.releaseObserved(others, false);
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "codex", thread_key: threadKey, thread_id: threadId, kind: turn.kind,
@@ -506,33 +523,34 @@ export class CodexBackend implements ThreadAdapter {
 
   /** 面板"压缩"：会话空闲时经常驻 app-server 压缩线程上下文（压缩回合不交给宿主），完成后刷新用量。 */
   compactThread(threadKey: ThreadKey, model?: string): Promise<"compacted" | "unchanged"> {
-    return this.serial(threadKey, async () => {
-      if (!await this.opts.runner.threadId(threadKey)) return "unchanged";
-      if (await this.busy(threadKey)) throw new Error("会话正在处理中，稍后再压缩");
-      const threadId = await this.ensureThread(threadKey, model);
-      const startedAt = Date.now();
-      const detail = { thread_key: threadKey, thread_id: threadId };
-      log.info("codex thread compaction started", detail);
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const done = new Promise<void>((resolve, reject) => {
-        this.compactions.set(threadId, { done: error => { this.compactions.delete(threadId); error ? reject(error) : resolve(); } });
-        timer = setTimeout(() => this.compactions.get(threadId)?.done(new Error("codex 压缩超时")), this.opts.compactTimeoutMs ?? 300_000);
-      });
-      try {
-        await this.opts.runner.client.compactThread(threadId);
-        await done;
-      } catch (error) {
-        this.compactions.get(threadId)?.done(error as Error);
-        await done.catch(() => undefined);
-        log.info("codex thread compaction ended", { ...detail, compacted: false, duration_ms: Date.now() - startedAt });
-        throw error;
-      } finally {
-        clearTimeout(timer);
-      }
-      log.info("codex thread compaction ended", { ...detail, compacted: true, duration_ms: Date.now() - startedAt });
-      await this.opts.runner.recordCompaction(threadKey, threadId, startedAt);
-      return "compacted";
+    return this.serial(threadKey, () => this.compact(threadKey, model));
+  }
+
+  private async compact(threadKey: ThreadKey, model?: string): Promise<"compacted" | "unchanged"> {
+    if (!await this.opts.runner.threadId(threadKey)) return "unchanged";
+    if (await this.busy(threadKey)) throw new Error("会话正在处理中，稍后再压缩");
+    const threadId = await this.ensureThread(threadKey, model);
+    const startedAt = Date.now();
+    const detail = { thread_key: threadKey, thread_id: threadId };
+    log.info("codex thread compaction started", detail);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const done = new Promise<void>((resolve, reject) => {
+      this.compactions.set(threadId, { done: error => { this.compactions.delete(threadId); error ? reject(error) : resolve(); } });
+      timer = setTimeout(() => this.compactions.get(threadId)?.done(new Error("codex 压缩超时")), this.opts.compactTimeoutMs ?? 300_000);
     });
+    try {
+      await Promise.all([this.opts.runner.client.compactThread(threadId), done]);
+    } catch (error) {
+      this.compactions.get(threadId)?.done(error as Error);
+      await done.catch(() => undefined);
+      log.info("codex thread compaction ended", { ...detail, compacted: false, duration_ms: Date.now() - startedAt });
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    log.info("codex thread compaction ended", { ...detail, compacted: true, duration_ms: Date.now() - startedAt });
+    await this.opts.runner.recordCompaction(threadKey, threadId, startedAt);
+    return "compacted";
   }
 
   // ───────────── app-server 事件 ─────────────

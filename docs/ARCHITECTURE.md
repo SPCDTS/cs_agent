@@ -73,6 +73,7 @@ QQ ─NapCat(OneBot v11)─▶ QQBridge ──@消息──▶ Inbox ──▶ T
 - 快路径：去掉头部后 ≤12 字、无问号/代码符号/任务词 → `low`；含"仔细想/深入分析/认真思考/think hard" → `xhigh`。
 - 否则用 `AUTO_EFFORT_MODEL`（magpie 下的模型，默认 `deepseek/deepseek-flash`）分类为 low / medium / high / xhigh，超时 `AUTO_EFFORT_TIMEOUT_MS`；失败回退到 `.env` 缺省档位（`effortSource: auto-fallback`），记 `effort_route` 事件。
 - codex 经 `turn/start` 的 `model` / `effort` 生效；pi 按快照选模型与思考档位，模型不支持的档位就近收敛。codex 模型名必须是 magpie 目录中的完整 slug（如 `codex/gpt-6.1-sol`），不在目录中的值告警并回退。
+- 换模型前先用原模型压缩一次（失败照常切换）。
 
 ### 2.6 输入的呈现
 
@@ -145,6 +146,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 
 - **进程**：cs-agent 启动并监管**一个**常驻 `codex app-server`（`app-server/supervisor.ts`），承载所有会话线程。进程退出、管道错误或握手失败即视为掉线：按 1 s→60 s 退避重启（稳定运行后归零），并清理进程树。环境变量走白名单（PATH/HOME/LANG/TERM/TZ/代理、`CODEX_HOME`），magpie 模式只额外注入 `CODEX_MAGPIE_KEY`。
 - **线程**：每个会话键一条线程，映射在 `/data/codex-threads.json`；首次 `thread/start` 后立即原子落盘，之后 `thread/resume`，只有确认线程不存在（`no rollout found`）才归档旧映射并新建。线程空闲、开新一轮前检查安全阀：rollout 超过 `CODEX_ROLLOUT_MAX_MB`（50）或线程超过 `CODEX_THREAD_MAX_DAYS`（90）天则轮换，历史靠 `qq_context` 找回。面板可重置或压缩（`thread/compact/start`）线程。
+- **压缩**：换模型前先用原模型压缩一次（失败照常切换）。
 - **线程级配置**：`thread/start` / `thread/resume` 的 `config` 用点号键注入：命名权限 `cs_agent_scope`（`codex/workspace.ts`，与 `sandbox_mode` 互斥）、`model_instructions_file`、`project_doc_max_bytes`、`im` / `qq_context` 两个 MCP 的线程令牌（`mcp_servers.<名>.env.IM_TOKEN` / `QQ_RECALL_TOKEN`）。app-server 为每个线程单独起 MCP 进程（同一线程跨回合复用）；令牌只证明"来自哪个线程"，线程重新加载或 app-server 重启时作废重发。工作目录 `/workspace/<会话键>`（冒号换下划线）；approval policy `never`。
 - **回合**：开轮 `turn/start`（`effort`、`model` 为本轮快照，`clientUserMessageId` = 入站键）；插话 `turn/steer`；停止 `turn/interrupt`；结束 `turn/completed`。适配层把每个服务端回合分类一次（user / wake / compaction / suppressed）；MCP 调用按 `_meta.callId` 登记到所属回合，子 agent 线程与过期回合的调用一律拒绝。
 - **受管 `config.toml`**：入口脚本每次启动按环境变量重写（provider、模型缺省值、web_search、`[features]` 的 `apps = false`、`multi_agent = true`、`wake_on_agent_messages = true`、可选 `plugins = false`、MCP 段等，见 [DEPLOY.md](DEPLOY.md)「codex 配置」）。
@@ -166,7 +168,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
   2. `project-context`：运维层 `WORKSPACE_DIR/AGENTS.md` 与会话层 `DATA_DIR/pi-work/<key>/AGENTS.md`，各按 `AGENTS.override.md → AGENTS.md → AGENTS.MD → CLAUDE.md → CLAUDE.MD` 取第一个普通文件（≤128 KiB、严格 UTF-8、去 BOM、拒绝链接），渲染为 `<project_instructions path="…">`。主进程直接读取，不向上遍历，不读 `/data/AGENTS.md`；cwd 不是 `pi-work` 的直接子目录时只用运维层并告警一次。语义参照 pi-coding-agent 的 `loadProjectContextFiles`，未引入该包（[THIRD-PARTY.md](THIRD-PARTY.md)）。
   3. `memory`：本会话的画像与未完成承诺（§9.1），空则不渲染。
   4. `skills`：可用技能列表（§7）。
-- **压缩**：harness 级自动压缩开启，`PI_COMPACTION_RESERVE_TOKENS`（16384）/ `PI_COMPACTION_BACKGROUND_TOKENS`（32768）/ keepRecentTokens 20000；不轮换，压缩不删除数据库原文。
+- **压缩**：harness 级自动压缩开启，`PI_COMPACTION_RESERVE_TOKENS`（16384）/ `PI_COMPACTION_BACKGROUND_TOKENS`（32768）/ keepRecentTokens 20000；不轮换，压缩不删除数据库原文。换模型前先用原模型压缩一次（失败照常切换）。
 - **模型**：`AGENT_MODEL_PROVIDER` / `AGENT_MODEL_ID`；为 `magpie` 时启动拉一次 magpie 目录注册为 pi-ai provider（`src/agent/magpie-models.ts`）：codex 模型走 `openai-responses`，其余走 `openai-completions`；pi-ai 有内置定义的模型（如 deepseek-flash）继承其 `thinkingLevelMap`、`compat`、价格，窗口以 magpie 为准。日/周摘要用同一模型。
 - **恢复**：pi-durable 持久化，进程重启后进行中的回合与子 agent 自动续跑，`delivered` 输入无需处理。
 

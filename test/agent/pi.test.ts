@@ -4,7 +4,7 @@ import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { createModels, fauxProvider, getSystemMessageText, Type, type Message, type TranscriptContext } from "@earendil-works/pi-ai";
 import { CompactionEntry, createRegistry, defineDoc, defineExtension, defineTool, Harness, type ConversationId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiThreadsArchiveDoc } from "../../src/agent/backends/pi.js";
 import { DeepSeekWeb, publicPageUrl } from "../../src/agent/pi-tools/web.js";
 import { DEFAULT_PI_PROMPT, PiPromptLoader } from "../../src/agent/pi-tools/prompt.js";
@@ -26,7 +26,7 @@ import { mediaFixture } from "../context/media-fixture.js";
 import { TRANSPARENT_PNG, tmp } from "./helpers.js";
 import { put } from "./pi-sandbox-fixture.js";
 import { scheduleToolsFixture } from "./schedule-tools-fixture.js";
-import { call, context, reply, residentRig, type Brain, type ResidentOptions, type ResidentRig } from "./resident-fixture.js";
+import { call, context, gate, reply, residentRig, type Brain, type ResidentOptions, type ResidentRig } from "./resident-fixture.js";
 
 type Step = Message | ((ctx: TranscriptContext, extra?: { model: string; reasoning: unknown }) => Message | Promise<Message>);
 
@@ -690,6 +690,148 @@ it("pi 历史工具记录回合与会话归属并发出轻量 trace", async () =
       expect(events).toContain("memory_recall");
     } finally { off(); }
   } finally { obs.close(); }
+});
+
+describe("pi 换模型前压缩", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function observeConversation(r: ResidentRig) {
+    const conv = await convOf(r, "group:7");
+    const lookup = r.pi.harness.conversation.bind(r.pi.harness);
+    vi.spyOn(r.pi.harness, "conversation").mockImplementation((id, ctx) => id === conv.id ? Promise.resolve(conv) : lookup(id, ctx));
+    return conv;
+  }
+
+  it("窗口变大也先用旧模型生成摘要，再 configure 新模型并刷新占用", async () => {
+    let modelId = "test";
+    const r = await rig([], { extraModels: [{ id: "larger", contextWindow: 400000 }], contextUsage: true,
+      currentModel: provider => ({ provider, modelId }) });
+    await turn(r, "5", "历史事实。".repeat(30000));
+    await turn(r, "5", "recent material. ".repeat(6000));
+    const conv = await observeConversation(r), order: string[] = [], events: LiveEvent[] = [];
+    const compact = conv.compact.bind(conv), configure = conv.configure.bind(conv);
+    vi.spyOn(conv, "compact").mockImplementation(async (...args) => {
+      order.push("compact:" + (await conv.agent(context)).model?.modelId);
+      return compact(...args);
+    });
+    vi.spyOn(conv, "configure").mockImplementation(async (...args) => {
+      if (args[0].model) order.push("configure:" + args[0].model.modelId);
+      return configure(...args);
+    });
+    r.brain.current = async (ctx, _signal, extra) => {
+      const summary = systemOf(ctx).includes("context summarization assistant");
+      order.push((summary ? "summary:" : "turn:") + extra?.model);
+      expect((await conv.agent(context)).model?.modelId).toBe(summary ? "test" : "larger");
+      return reply(summary ? "摘要：保留历史事实" : "新模型回答");
+    };
+    const off = trace.tap(e => { if (e.stage === "model_switch_compaction") events.push(e); });
+    try {
+      modelId = "larger";
+      await turn(r, "5", "继续");
+      expect(order).toEqual(["compact:test", "summary:test", "configure:larger", "turn:larger"]);
+      expect(events).toHaveLength(1);
+      expect(events[0]!.detail).toEqual({ thread: "group:7", from: { provider: r.model.provider, modelId: "test" },
+        to: { provider: r.model.provider, modelId: "larger" }, outcome: "compacted", duration_ms: expect.any(Number) });
+      expect((await conv.context(context)).entries.some(CompactionEntry.is)).toBe(true);
+      expect(r.contextUsage!.get("pi", "group:7")).toMatchObject({ windowTokens: 400000, turns: 3, lastCompactionAt: expect.any(Number) });
+    } finally { off(); }
+  });
+
+  it("modelId 不变但 provider 改变也压缩", async () => {
+    let provider: string | undefined;
+    const r = await rig([], { currentModel: initial => ({ provider: provider ?? initial, modelId: "test" }) });
+    await turn(r, "5", "已有历史");
+    const other = fauxProvider({ provider: "other", models: [{ id: "test" }], tokensPerSecond: Infinity });
+    other.setResponses([reply()]);
+    r.models.setProvider(other.provider);
+    const conv = await observeConversation(r), compact = vi.spyOn(conv, "compact");
+    provider = "other";
+    await turn(r, "5", "切换提供者");
+    expect(compact).toHaveBeenCalledTimes(1);
+    expect((await conv.agent(context)).model).toEqual({ provider: "other", modelId: "test" });
+  });
+
+  it("新会话、相同模型和只改思考档位都不压缩", async () => {
+    let thinking: "low" | "high" = "low";
+    const r = await rig([], { extraModels: [{ id: "reasoning", reasoning: true }],
+      settings: () => ({ piModel: "reasoning", piThinkingLevel: thinking }) });
+    const wait = vi.spyOn(r.pi.harness, "waitForTask");
+    await turn(r, "5", "首次");
+    await turn(r, "5", "相同");
+    thinking = "high";
+    await turn(r, "5", "只改档位");
+    expect(wait).not.toHaveBeenCalled();
+    expect(await (await convOf(r, "group:7")).agent(context)).toMatchObject({ model: { modelId: "reasoning" }, thinkingLevel: "high" });
+  });
+
+  it.each([false, true])("短历史返回 unchanged；按快照或无快照的当前模型切换（无快照=%s）", async noSnapshot => {
+    let current = "test", snapshot = "test";
+    const r = await rig([], { extraModels: [{ id: "next" }],
+      currentModel: provider => ({ provider, modelId: current }), settings: () => ({ piModel: snapshot }) });
+    await turn(r, "5", "短历史");
+    if (noSnapshot) {
+      const start = r.pi.startTurn.bind(r.pi);
+      vi.spyOn(r.pi, "startTurn").mockImplementation((key, inputs, turn) => start(key, inputs, turn));
+      current = "next";
+    } else snapshot = "next";
+    const events: LiveEvent[] = [];
+    const off = trace.tap(e => { if (e.stage === "model_switch_compaction") events.push(e); });
+    try {
+      await turn(r, "5", "切换");
+      expect((await (await convOf(r, "group:7")).agent(context)).model?.modelId).toBe("next");
+      expect(events.map(e => e.detail.outcome)).toEqual(["unchanged"]);
+    } finally { off(); }
+  });
+
+  it.each(["admission", "task"])("压缩失败仍切换并记录 warn 和 failed trace（%s）", async failure => {
+    let modelId = "test";
+    const r = await rig([], { extraModels: [{ id: "next" }], settings: () => ({ piModel: modelId }) });
+    await turn(r, "5", "历史事实。".repeat(30000));
+    await turn(r, "5", "recent material. ".repeat(6000));
+    const conv = await observeConversation(r);
+    if (failure === "admission") vi.spyOn(conv, "compact").mockRejectedValueOnce(new Error("compaction failed"));
+    else r.brain.current = ctx => systemOf(ctx).includes("context summarization assistant")
+      ? { ...reply(), stopReason: "error", errorMessage: "400 invalid request" } : reply();
+    const warn = vi.spyOn(log, "warn"), events: LiveEvent[] = [];
+    const off = trace.tap(e => { if (e.stage === "model_switch_compaction") events.push(e); });
+    try {
+      modelId = "next";
+      await turn(r, "5", "继续");
+      expect((await conv.agent(context)).model?.modelId).toBe("next");
+      expect(warn).toHaveBeenCalledWith("pi model switch compaction failed; switching anyway", expect.objectContaining({ thread: "group:7" }));
+      expect(events.map(e => e.detail.outcome)).toEqual(["failed"]);
+    } finally { off(); }
+  });
+
+  it.each([false, true])("慢压缩不持有 mapping 锁；完成或超时后仍切换（超时=%s）", async timeout => {
+    let modelId = "test";
+    const r = await rig([], { extraModels: [{ id: "next" }], settings: scope => ({ piModel: scope === "group:7" ? modelId : "test" }),
+      ...(timeout ? { compactTimeoutMs: 500 } : {}) });
+    await turn(r, "5", "历史事实。".repeat(30000));
+    await turn(r, "5", "recent material. ".repeat(6000));
+    const conv = await convOf(r, "group:7"), held = gate(), events: LiveEvent[] = [];
+    let otherAnswered = false;
+    r.brain.current = async (ctx, signal, extra) => {
+      if (systemOf(ctx).includes("context summarization assistant")) await held.wait(signal);
+      else if (extra?.model === "test") otherAnswered = true;
+      return reply();
+    };
+    const off = trace.tap(e => { if (e.stage === "model_switch_compaction") events.push(e); });
+    try {
+      modelId = "next";
+      await r.say("5", "切换");
+      await vi.waitFor(() => expect(held.entered).toBe(1));
+      expect((await conv.agent(context)).model?.modelId).toBe("test");
+      await r.say("6", "另一会话", "8");
+      await vi.waitFor(() => expect(otherAnswered).toBe(true), { timeout: 400, interval: 10 });
+      expect(events).toHaveLength(0);
+      if (!timeout) held.open();
+      await r.idle();
+      expect((await conv.agent(context)).model?.modelId).toBe("next");
+      expect(events.map(e => e.detail.outcome)).toEqual([timeout ? "failed" : "compacted"]);
+      await conv.waitForIdle(context);
+    } finally { held.open(); off(); }
+  });
 });
 
 describe("pi 运行时模型设置", () => {

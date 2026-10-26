@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSyn
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CodexRunner,
   buildCodexEnv,
   buildCodexPrompt,
   isMissingSessionError,
@@ -162,6 +163,28 @@ describe("CodexRunner 线程加载（常驻 app-server）", () => {
     expect(start).not.toHaveProperty("sandbox");
     expect(start).not.toHaveProperty("developerInstructions");
     expect(resume).toMatchObject({ threadId: "thr-1", cwd: workspaceDir });
+  });
+
+  it("并发记录各线程的模型并持久保存；旧映射、重置和过期线程 id 不沿用模型", async () => {
+    const { dir, runner } = await setup();
+    const created = "2026-10-01T00:00:00Z";
+    writeFileSync(runner.opts.threadsFile, JSON.stringify({
+      "group:1": { thread_id: "group-thread", updated_at: created }, owner: { thread_id: "owner-thread" },
+    }), "utf8");
+    expect(await runner.lastModel("group:1")).toBeUndefined();
+    await Promise.all([runner.recordTurnModel("group:1", "group-thread", "model-a"), runner.recordTurnModel("owner", "owner-thread", "model-b")]);
+    expect(JSON.parse(readFileSync(runner.opts.threadsFile, "utf8"))).toMatchObject({
+      "group:1": { thread_id: "group-thread", model: "model-a", created_at: created }, owner: { thread_id: "owner-thread", model: "model-b" },
+    });
+    const reopened = new CodexRunner(runner.opts);
+    expect(await reopened.lastModel("group:1")).toBe("model-a");
+    expect(await reopened.lastModel("owner")).toBe("model-b");
+    await runner.recordTurnModel("group:1", "stale-thread", "wrong-model");
+    expect(await runner.lastModel("group:1")).toBe("model-a");
+    await runner.resetThread("group:1");
+    await runner.recordTurnModel("group:1", "group-thread", "wrong-model");
+    expect(await runner.lastModel("group:1")).toBeUndefined();
+    expect(threadOf(dir)).toBeUndefined();
   });
 
   it("再次加载覆盖模型对受管文件的修改", async () => {
