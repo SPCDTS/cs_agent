@@ -124,10 +124,10 @@ async function rig(config: McpConfigState, db = path.join(tmp("cs-pi-mcp-"), "pi
     bindings.set(Number(conv.id), binding); return conv;
   };
   const configure = (conversation: Conversation, ctx = context) => mcp.configure({ conversation, turn: bindings.get(Number(conversation.id))! }, ctx);
-  // 业务工具只给脚本调用，经 nested 嵌套调用。
+  // MCP 工具只给脚本调用，经 nested 嵌套调用。
   const run = async (conv: Conversation, name: string, args: JsonObject = { value: 1 }, direct = false) => {
-    const business = !direct && name.startsWith("mcp_") && !isMcpControlTool(name);
-    selected = business ? "nested" : name; argumentsValue = business ? { name, args } : args;
+    const nested = !direct && name.startsWith("mcp_");
+    selected = nested ? "nested" : name; argumentsValue = nested ? { name, args } : args;
     return (await conv.submit({ type: "input", content: "执行一次" }, context)).wait(context);
   };
   return { mcp, harness, registry, db, bindings, create, configure, run, close, requests, revoke: () => { owners = []; } };
@@ -141,7 +141,7 @@ describe("Pi MCP 原生工具与持久目录", () => {
     const s = await server(), r = await rig(s.config()), c = await r.create();
     await r.configure(c);
     expect(await names(c)).toEqual(["local", "codemode", "mcp_refresh_tools", expect.stringMatching(/^mcp_fixture_lookup_\w+$/)]);
-    expect((await c.agent(context)).tools.map(t => t.name)).toEqual(["local", "nested", "codemode", "mcp_refresh_tools"]);
+    expect((await c.agent(context)).tools.map(t => t.name)).toEqual(["local", "nested", "codemode"]);
     const [name] = await mcpNames(c);
     expect(r.registry.snapshot().tools().find(t => t.tool.name === name)!.tool.replay).toBe("unsafe");
     expect(await r.run(c, name!)).toMatchObject({ status: "done" });
@@ -514,6 +514,9 @@ describe("Pi MCP 只读资源", () => {
     const on = await rig(s.config({}, {}, [], ["notion://docs/"])), b = await on.create();
     await on.configure(b);
     expect(await names(b)).toEqual(["local", "codemode", "mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]);
+    const agent = await b.agent(context);
+    expect(agent.tools.map(tool => tool.name)).toEqual(["local", "nested", "codemode"]);
+    expect(agent.callable.map(tool => tool.name)).toEqual(["mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]);
     for (const name of ["mcp_list_resources", "mcp_read_resource"]) {
       expect(on.registry.snapshot().tools().find(item => item.tool.name === name)?.tool)
         .toMatchObject({ replay: "safe", executionMode: "sequential", outputLimits: { maxBytes: 32_768 } });
@@ -632,7 +635,8 @@ describe("Pi MCP 只读资源", () => {
         expect(Buffer.byteLength(message.content[0].text)).toBeLessThanOrEqual(256);
       }
       if (suffix === "large") { expect(text).toContain("MCP 文本已截断；原始"); expect(text).not.toContain("�"); }
-      if (suffix === "png") expect((await results(c)).at(-1)?.model?.[0]).toMatchObject({ content: [expect.objectContaining({ type: "image", mimeType: "image/png" })] });
+      // nested 将无输出 schema 的图片结果序列化为文本，仍检查资源转换后的图片类型。
+      if (suffix === "png") expect(JSON.parse(text)).toMatchObject({ type: "image", mimeType: "image/png" });
       if (suffix === "binary") { expect(text).toContain("二进制资源 application/octet-stream，base64 4 字节，未解码"); await resourceDiagnostic(c, "content_omitted"); }
       if (suffix === "empty") expect(text).toBe("[MCP 资源为空]");
     }
@@ -658,9 +662,10 @@ describe("Pi MCP 只读资源", () => {
     }
     await r.run(parent, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
     const child = await delegated(r, parent);
-    await r.harness.commit(async tx => { const doc = await tx.doc(AgentDoc, child.id); doc.tools = ["local"]; doc.modelTools = ["local"]; }, context);
+    await r.harness.commit(async tx => { const doc = await tx.doc(AgentDoc, child.id); doc.tools = ["local", "nested"]; doc.modelTools = ["local", "nested"]; }, context);
     await r.configure(child);
     expect(await names(child)).toEqual(["local", "codemode", "mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]);
+    expect((await r.harness.snapshot(AgentDoc, child.id, context))?.modelTools).toEqual(["local", "nested", "codemode"]);
     await r.run(child, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
     expect((await results(child)).at(-1)?.model?.[0]).toMatchObject({ isError: false });
     expect(s.state.resourceReads).toBe(2); expect(s.state.sessions).toBe(2);

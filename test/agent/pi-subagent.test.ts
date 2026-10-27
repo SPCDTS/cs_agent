@@ -6,6 +6,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSubagentExtension, isSubagentExcludedTool, isSubagentReportRequest, SUBAGENT_REPORT_KIND,
   SUBAGENT_REPORT_REQUEST_PREFIX, SubagentDoc, type SubagentOptions } from "../../src/agent/pi-tools/subagent.js";
+import { MCP_CONTROL_TOOLS } from "../../src/agent/pi-mcp/names.js";
 import { tmp } from "./helpers.js";
 import { call, gate, isChild, lastUser, text, toolResults } from "./faux-helpers.js";
 
@@ -63,10 +64,10 @@ function parentBrain(commands: Record<string, [string, JsonObject][]>, seen: str
 
 describe("pi 子 agent 扩展", () => {
   it("排除名单：subagent、send_message、auth、schedule、schedule_control 不给子会话", () => {
-    for (const name of ["subagent", "send_message", "auth", "schedule", "schedule_control", "mcp_unknown_history", MCP_CALLABLE])
+    for (const name of ["subagent", "send_message", "auth", "schedule", "schedule_control", "mcp_unknown_history", MCP_CALLABLE, ...MCP_CONTROL_TOOLS])
       expect(isSubagentExcludedTool(name), name).toBe(true);
     for (const name of ["echo", "web_search", "qq_recent", "generate_image", "bash", "read", "auth_status", "schedule_whatever"]) expect(isSubagentExcludedTool(name), name).toBe(false);
-    const allowed = new Set([PARENT_TOOLS.at(-1)!, MCP_CALLABLE, "mcp_refresh_tools"]);
+    const allowed = new Set([PARENT_TOOLS.at(-1)!, MCP_CALLABLE, ...MCP_CONTROL_TOOLS]);
     for (const name of allowed) expect(isSubagentExcludedTool(name, name => allowed.has(name))).toBe(false);
     expect(isSubagentExcludedTool("mcp_other_secret", name => allowed.has(name))).toBe(true);
     expect(isSubagentExcludedTool("send_message", () => true)).toBe(true);

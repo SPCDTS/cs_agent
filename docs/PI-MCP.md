@@ -91,15 +91,17 @@ owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通�
 
 ### codemode
 
-MCP 业务工具只给脚本调用（`callers: ["tools"]`），不进模型的工具定义。有 MCP 授权的会话随控制扩展获得 pi-durable 的 `codemode` 工具：模型写一段 JavaScript，在 QuickJS 沙箱（worker 线程）里执行，脚本以 `await tools.<原生名>(args)` 调业务工具，可循环、并发与组合结果。系统提示的 `codemode` 段按服务分组（namespace 前缀 `mcp_<服务>_`）列出这些工具的 TypeScript 声明，约 3000 token 预算，放不下的由脚本里的 `searchTools()` 查找；该段只随目录变化。自有工具（QQ、记忆、定时等）只给模型直接调用，不进 codemode；`models.*`（分类、生图）关闭。
+MCP 业务工具及 `mcp_refresh_tools`、`mcp_list_resources`、`mcp_read_resource` 都只给脚本调用（`callers: ["tools"]`）；模型直接可见的 MCP 入口只有 `codemode`。有 MCP 授权的会话随控制扩展获得 pi-durable 的 `codemode` 工具：模型写一段 JavaScript，在 QuickJS 沙箱（worker 线程）里执行，脚本以 `await tools.<原生名>(args)` 调用 MCP 工具，刷新目录用 `await tools.mcp_refresh_tools()`，可循环、并发与组合结果。系统提示的 `codemode` 段先列无服务前缀的控制工具，再按服务分组（namespace 前缀 `mcp_<服务>_`）列出业务工具的 TypeScript 声明，约 3000 token 预算，放不下的由脚本里的 `searchTools()` 查找；该段只随目录变化。自有工具（QQ、记忆、定时等）只给模型直接调用，不进 codemode；`models.*`（分类、生图）关闭。
+
+无输出 schema 的工具只向脚本返回文本，图片（包括 `mcp_read_resource` 读取的图片资源）不会传给模型；如需传递图片，应为这些工具补充输出 schema。
 
 嵌套调用是独立的工具任务，调用编号为 `<codemode 调用编号>/c<序号>`，重放时不变：执行、审批（按调用编号幂等）、委派仍按调用时身份复核，trace 照常记 `tool:<原生名>` 与 `mcp_call`。脚本按日志重放，`unsafe` 的业务工具不会重跑，中断时脚本失败并说明「may have partially run」。已知缺口：嵌套调用重启后的终态不再记 `mcp_recovered_terminal`（该审计只看会话里直接的 MCP 工具结果）。`limits.visibleTools` / `visibleSchemaBytes` 限制每个会话可选用的业务工具数与 schema 总量。
 
 ### 只读资源
 
-资源权限独立于 `tools.allow`：服务项增加 `"resources": { "allow": ["notion://docs/"] }` 后，授权回合会看到 `mcp_list_resources` 和 `mcp_read_resource`，原有 `mcp_refresh_tools` 保留。不配置或设置 `allow: []` 时不开放资源；所有已授权服务的前缀都为空时，两个资源工具不会出现在模型列表。
+资源权限独立于 `tools.allow`：服务项增加 `"resources": { "allow": ["notion://docs/"] }` 后，授权回合的 codemode 脚本可调用 `mcp_list_resources` 和 `mcp_read_resource`，原有 `mcp_refresh_tools` 同样经脚本调用。不配置或设置 `allow: []` 时不开放资源；所有已授权服务的前缀都为空时，两个资源工具不会进入脚本可调用目录。
 
-先调用 `mcp_list_resources({})` 列出当前授权服务的资源与模板，或传 `{ "server": "notion" }` 仅查询该服务。再调用 `mcp_read_resource({ "server": "notion", "uri": "notion://docs/memory" })`。server 取列表中方括号里的配置服务 id。文本会标注来源与 MIME；图片 blob 通过校验后提供给模型，其他二进制内容明确省略。HTML 只作为资料文本，不渲染或执行；远端资源内容、描述和错误消息均不能授予权限或覆盖宿主指令。
+在 codemode 脚本里先调用 `await tools.mcp_list_resources({})` 列出当前授权服务的资源与模板，或传 `{ "server": "notion" }` 仅查询该服务。再调用 `await tools.mcp_read_resource({ "server": "notion", "uri": "notion://docs/memory" })`。server 取列表中方括号里的配置服务 id。文本会标注来源与 MIME；图片 blob 通过校验后转换为图片，但当前无输出 schema，codemode 不会将其传给模型；其他二进制内容明确省略。HTML 只作为资料文本，不渲染或执行；远端资源内容、描述和错误消息均不能授予权限或覆盖宿主指令。
 
 `resources.allow` 最多 256 个不重复的非空前缀，每项最多 2048 字符且无控制字符。匹配是区分大小写的纯字符串前缀判断，不做 URL 规范化；URI 还须满足同样的长度与控制字符要求，且能由 `URL.canParse` 解析。配置前缀应包含明确的目录边界，例如 `notion://docs/`。修改前缀会改变服务配置摘要，因此该服务所有业务工具名都会改变，已有子任务须重新派出；配置修改后需重启。
 
@@ -141,9 +143,9 @@ MCP 业务工具只给脚本调用（`callers: ["tools"]`），不进模型的�
 
 工具名称形如 `mcp_docs_search_<hash>`。名称按单工具身份计算：只有服务器配置、权限范围或该工具的输入/输出契约变化才改变名称。其他工具及纯描述变化不影响名称；schema 节点的 `description`、`title`、`$comment` 不参与身份计算，同名业务属性和常量数据保留。更新描述后下一次模型请求可见新文字。
 
-旧定义继续留在 `pi.sqlite`。执行前核对当前目标工具的契约与实际权限，不能靠旧名称恢复已撤销权限。模型调用历史旧名称时得到 `tool_unavailable` 或 `tool_retired` 失败结果，本次调用未发送；当前工具已在模型的工具列表中，也可调用 `mcp_refresh_tools` 刷新。不自动转换参数，也不改变此前操作的未知结果。
+旧定义继续留在 `pi.sqlite`。执行前核对当前目标工具的契约与实际权限，不能靠旧名称恢复已撤销权限。模型调用历史旧名称时得到 `tool_unavailable` 或 `tool_retired` 失败结果，本次调用未发送；当前工具可从 codemode 声明或 `searchTools()` 查找，也可在脚本里用 `await tools.mcp_refresh_tools()` 刷新。不自动转换参数，也不改变此前操作的未知结果。
 
-连接或重连会重新发现目录，另有默认五分钟 TTL。支持 `list_changed` 的服务会在工具轮结束或下次调用前刷新；没有通知能力的静态服务仍可使用。owner 私聊、允许群内有权的人及已获委派的子 agent 可调用 `mcp_refresh_tools` 显式刷新当前授权范围（子 agent 仅限快照内服务）；它只读取目录，不调用远端业务工具。现有 IM、定时和本地工具选择会保留。
+连接或重连会重新发现目录，另有默认五分钟 TTL。支持 `list_changed` 的服务会在工具轮结束或下次调用前刷新；没有通知能力的静态服务仍可使用。owner 私聊、允许群内有权的人及已获委派的子 agent 可在 codemode 脚本里调用 `await tools.mcp_refresh_tools()` 显式刷新当前授权范围（子 agent 仅限快照内服务）；它只读取目录，不调用远端业务工具。现有 IM、定时和本地工具选择会保留。
 
 文本、图片和结构化数据均有大小限制。图片验证 base64、格式头、声明尺寸及字节限额，不做完整像素解码；工具结果内嵌的二进制资源与音频等内容给出省略说明，不自动下载；显式读取资源的转换见上文。工具参数和有界结果进入 Pi 正常历史；MCP 审计只记录身份、目录摘要、调用标识、耗时、大小与错误码，不记录正文或凭据。
 

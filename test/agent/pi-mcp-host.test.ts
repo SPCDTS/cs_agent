@@ -11,11 +11,12 @@ import type { ThreadKey } from "../../src/agent/host/types.js";
 import type { PiCallBinding } from "../../src/agent/pi-tools/request.js";
 import { httpFixture } from "./fixtures/pi-mcp-http.js";
 import { call, context, gate, isChild, lastUser, reply, residentRig, type ResidentRig } from "./resident-fixture.js";
+import { text } from "./faux-helpers.js";
 
 const servers: Awaited<ReturnType<typeof httpFixture>>[] = [];
 afterEach(async () => { for (const server of servers.splice(0)) await server.close(); });
 
-/** 从真实发给模型的 system 条目重建本次可用工具，覆盖扩展选择接线。 */
+/** faux 上下文还包含 withCodemode 从脚本声明补入的工具；真实模型列表由 conversation.agent().tools 检查。 */
 function offeredTools(transcript: TranscriptContext): string[] {
   const names = new Set<string>();
   for (const message of transcript.messages) {
@@ -54,7 +55,7 @@ describe("Pi MCP 真实宿主接线", () => {
       expect(calls).toHaveLength(3);
       expect(calls[0]).toMatchObject({ status: "ok", duration_ms: expect.any(Number), detail: {
         serverId: "fixture", op: "read", scheme: "notion", uriBytes: Buffer.byteLength(uri),
-        uriDigest: createHash("sha256").update(uri).digest("hex").slice(0, 12), outputBytes: expect.any(Number), callId: expect.any(String) } });
+        uriDigest: createHash("sha256").update(uri).digest("hex").slice(0, 12), outputBytes: expect.any(Number), callId: expect.stringMatching(/\/c\d+$/) } });
       expect(calls[1]).toMatchObject({ status: "failed", detail: { code: "remote_error" } });
       expect(calls[2]).toMatchObject({ status: "ok", detail: { op: "list", count: 3, uriBytes: 0 } });
       expect(calls[2].detail).not.toHaveProperty("uriDigest");
@@ -143,7 +144,7 @@ describe("Pi MCP 子 agent 委派", () => {
       if (!isChild(transcript)) return delegate(transcript);
       const tools = offeredTools(transcript); childTools.push(tools);
       const last = transcript.messages.findLast(message => message.role !== "system");
-      if (last?.role === "toolResult" && last.toolName !== "mcp_refresh_tools") return reply("完成");
+      if (last?.role === "toolResult" && !text(last).includes("本次仅刷新目录")) return reply("完成");
       if (last?.role !== "toolResult") return call(["mcp_refresh_tools", {}]);
       return call([tools.find(name => name.startsWith("mcp_fixture_first_"))!, {}]);
     } });

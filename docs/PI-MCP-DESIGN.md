@@ -172,7 +172,7 @@ schema 进入模块时是 `unknown`。支持经过契约测试的严格 draft-07
 
 旧契约不会被新契约同名覆盖。旧调用尚未发送时，包装器检查 dirty 状态与目标工具当前契约：工具已删除、契约已变、服务配置目标已变时返回 `tool_retired`；无关工具与纯描述变化允许继续调用。刷新失败时保留旧目录用于历史解释；dirty 或过期目录不再发出新调用，返回有界的失败码（如 `protocol_error`、`catalog_limit`、`reconnect_backoff`）。调用审计记录实际检查的目录摘要。
 
-owner 私聊中的 `mcp_refresh_tools` 提供显式刷新，只有已授权服务才参与。调用历史旧名称时，Pi 在工具任务创建前返回 `tool_unavailable`，包装器核对失败时返回 `tool_retired`；两者都表示本次未发送，模型从当前工具列表中选新工具，不额外改写模型输入，也不转发旧写调用。
+在 codemode 脚本里调用 `await tools.mcp_refresh_tools()` 提供显式刷新，只有已授权服务才参与。调用历史旧名称时，Pi 在工具任务创建前返回 `tool_unavailable`，包装器核对失败时返回 `tool_retired`；两者都表示本次未发送，模型从 codemode 声明或 `searchTools()` 中选新工具，不额外改写模型输入，也不转发旧写调用。
 
 目录更新由 PiMcp 串行发布，会话配置沿用 PiBackend 按 threadKey 的串行边界。避免异步刷新直接写全局“当前会话”或重置非 MCP 工具。身份切换不能被“整轮固定目录”阻止，撤权优先于可见目录的稳定。
 
@@ -324,7 +324,7 @@ unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterToo
 
 1. **目录与隔离边界。** 配置、身份判定、命名/schema、模块接口；用 fixture 和真实 Registry 验证旧/新目录、子工具复制过滤与日志边界。不开启生产服务。
 2. **首版能力交付。** Streamable HTTP、原生工具注册、结果转换、会话连接、限额、关闭、全 unsafe 恢复；完成上述故障矩阵后，开放指定 owner 私聊白名单。
-3. **运维与规模验证。** 状态展示、目录保留容量、长时间连接回收、真实但无副作用的服务 smoke；通过后扩大服务白名单。业务工具已改为只经 codemode 脚本调用（见 PI-MCP.md「codemode」）。
+3. **运维与规模验证。** 状态展示、目录保留容量、长时间连接回收、真实但无副作用的服务 smoke；通过后扩大服务白名单。业务工具与刷新、资源控制工具均只经 codemode 脚本调用，模型直接可见的 MCP 入口只有 `codemode`（见 PI-MCP.md「codemode」）。
 
 发布门槛：非授权场景零外部请求；unsafe 崩溃窗口无自动重复；历史调用能进入终态；日志无秘密；目录和连接资源有界。
 
@@ -398,10 +398,10 @@ Inbox 在 ThreadHost 投递前截获已验证 owner 的引用/编号命令，恢
 
 服务可独立配置 `resources: { "allow": ["notion://docs/"] }`。默认 `allow: []`，没有隐式放行；最多 256 个不重复的非空前缀，每项不超过 2048 字符且不含控制字符。匹配严格使用区分大小写的 `uri.startsWith(prefix)`，不做 URL 规范化；读取 URI 还必须不超过 2048 字符、无控制字符且通过 `URL.canParse`。前缀属于服务器配置摘要，修改它会改变该服务所有业务工具名，并使旧委派快照失效；重启后生效。升级到此版本时，即使未配置资源，补齐的默认 resources 字段也会改变旧配置摘要；已有工具需重新选择，子任务需重新派出。
 
-当本回合至少一个已授权服务开放了资源前缀，选择 `cs.mcp.resources`，紧跟 `cs.mcp.control`，同时加入子会话的显式工具白名单。两个入口均为 `replay: "safe"`、串行执行：
+当本回合至少一个已授权服务开放了资源前缀，选择 `cs.mcp.resources`，紧跟 `cs.mcp.control`，同时加入子会话的显式工具白名单。两个入口与 `mcp_refresh_tools` 均为 `callers: ["tools"]`，保留在会话 `tools`，不加入模型 `modelTools`；模型经 `codemode` 嵌套调用，仍经过 `ToolTask` 的 `beforeTool`。资源入口均为 `replay: "safe"`、串行执行：
 
-- `mcp_list_resources({ server? })`：不传 server 时遍历有权且开放资源的服务；传入时仅查询该服务。完整分页读取资源与模板，按前缀过滤，提供服务 id、URI、名称与 MIME；描述清洗控制字符并限制为 300 字符。单服务失败不影响其他服务，全部失败才返回错误。不缓存资源目录，不订阅资源；SDK 忽略没有 handler 的 `resources/list_changed`。
-- `mcp_read_resource({ server, uri })`：server 使用列表输出中的配置服务 id；不匹配前缀时在联网前返回 `resource_not_allowed`。只发送固定的 `resources/read` 方法，不下载 URI 指向的网页或本地文件，不增加任意方法转发入口。服务仍必须有 tools capability；未声明 resources capability 返回 `resources_unsupported`。
+- `await tools.mcp_list_resources({ server? })`：不传 server 时遍历有权且开放资源的服务；传入时仅查询该服务。完整分页读取资源与模板，按前缀过滤，提供服务 id、URI、名称与 MIME；描述清洗控制字符并限制为 300 字符。单服务失败不影响其他服务，全部失败才返回错误。不缓存资源目录，不订阅资源；SDK 忽略没有 handler 的 `resources/list_changed`。
+- `await tools.mcp_read_resource({ server, uri })`：server 使用列表输出中的配置服务 id；不匹配前缀时在联网前返回 `resource_not_allowed`。只发送固定的 `resources/read` 方法，不下载 URI 指向的网页或本地文件，不增加任意方法转发入口。服务仍必须有 tools capability；未声明 resources capability 返回 `resources_unsupported`。
 
 授权完全复用 `authorize`，以当前 conversationId、principal、配置摘要隔离连接，使用相同连接池和队列；排队后、取得连接后复核真实绑定、principal 与 person 摘要。群成员直接读取获准前缀，不走主人审批；要限制群成员，应只开放文档类前缀。子 agent 必须同时满足派出快照包含该服务、配置摘要相符、当前身份有效与 `allowSubagent` 开启。资料中的文本、描述、HTML 和错误消息都不是指令。
 

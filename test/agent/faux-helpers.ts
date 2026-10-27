@@ -13,11 +13,11 @@ export const reply = (body = "好的") => fauxAssistantMessage(body);
 export const toolResults = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => text(m));
 
 /**
- * 像真模型一样经 codemode 调 MCP 业务工具：脚本可调的工具（codemode 段列出的）补进交给脚本的上下文，
- * 脚本直接调用业务工具时改写成同 id 的 codemode 调用 `return await tools.<名称>(参数)`。
+ * 像真模型一样经 codemode 调 MCP 工具：脚本可调的工具（codemode 段列出的）补进交给脚本的上下文，
+ * 脚本直接调用 MCP 工具时改写成同 id 的 codemode 调用 `return await tools.<名称>(参数)`。
  */
 export function withCodemode<A extends unknown[]>(brain: (ctx: TranscriptContext, ...rest: A) => Message | Promise<Message>) {
-  const business = (name: string) => /^mcp_/.test(name) && !/^mcp_(refresh_tools|list_resources|read_resource)$/.test(name);
+  const scriptedTool = (name: string) => name.startsWith("mcp_");
   return async (ctx: TranscriptContext, ...rest: A): Promise<Message> => {
     const section = ctx.messages.map(m => (m as { sections?: Record<string, string> }).sections?.codemode).findLast(Boolean) ?? "";
     const scripted = [...section.matchAll(/### `(mcp_[^`]+)`\n([^\n]*)/g)].map(([, name, description]) =>
@@ -26,7 +26,7 @@ export function withCodemode<A extends unknown[]>(brain: (ctx: TranscriptContext
       ? [...ctx.messages, { role: "system", content: "", toolsAdded: scripted, timestamp: 0 } as unknown as Message] : ctx.messages;
     const out = await brain({ ...ctx, messages: offered }, ...rest);
     if (out.role !== "assistant") return out;
-    return { ...out, content: out.content.map(c => c.type === "toolCall" && business(c.name)
+    return { ...out, content: out.content.map(c => c.type === "toolCall" && scriptedTool(c.name)
       ? { ...c, name: "codemode", arguments: { code: `return await tools.${c.name}(${JSON.stringify(c.arguments)});` } } : c) };
   };
 }
