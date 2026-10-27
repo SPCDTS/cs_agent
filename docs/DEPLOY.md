@@ -134,6 +134,8 @@ docker compose ps                 # HEALTH 列
 docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').then(r=>r.text()).then(console.log)"
 ```
 
+**更新部署**用 `scripts/deploy.ps1 -By <谁>`（默认 main 最新提交，`-Commit` 指定，`-Wait <分钟>` 等 agent 空闲，`-DryRun` 只检查）。脚本持 `.git/deploy.lock`（进程退出即释放），在部署 worktree `<仓库>-deploy` 检出目标提交并构建 `cs-agent:dev`（首行 syntax 指令拉不到时去掉重试），列出线上提交到目标之间的全部提交，确认面板拓扑里没有忙碌线程或运行中的子 agent 后 `docker compose up -d --no-build` 重建 cs-agent（启用 gmail profile 时连同 sidecar），等健康并核对容器内 `/app/source/COMMIT`，结果追加到 `.git/deploy.log`。
+
 `/healthz`（无需口令）返回：`ws_connected`（离线时 HTTP 503，容器 unhealthy）；`codex`（magpie 模式检查 key 已配置，直连检查 `auth.json`；列出各会话线程 id）；`pi.threads`（数量与键）；`context_usage`；`degraded`（观测降级）。不返回服务地址、错误原文或凭据。
 
 **卷权限**：容器以 `node`（uid 1000）运行，`./data`、`./workspace` 须可写；入口脚本与 agent 启动时写删探针文件，不可写则以退出码 1 退出。Linux 宿主机可 `sudo chown -R 1000:1000 data workspace`。
