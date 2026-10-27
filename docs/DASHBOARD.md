@@ -264,9 +264,11 @@ Pi MCP OAuth 的 JSON 与浏览器授权端点由 `src/obs/mcp/http.ts` 实现�
 | 方法与路径 | 行为 |
 | --- | --- |
 | GET /api/mcp/accounts | 返回 `{ accounts, redirectUrl }`；每项仅含 serverId、accountId、revision、issuer、loggedIn、expiresAt、scope、hasRefresh、lastError、lastErrorAt（无值字段省略）。未启用时 503 `{ error: "未启用外部账号" }` |
-| POST /mcp/oauth/start/<serverId> | 同源表单与 `_csrf` 校验，设置 OAuth cookie，303 到授权页；已有有效授权则回账号页 |
+| POST /mcp/oauth/start/<serverId> | 同源表单与 `_csrf` 校验，设置 OAuth cookie，返回 200 同站 HTML 跳转页，通过 meta refresh 自动前往授权页并提供可见备用链接；已有有效授权或失败仍 303 回账号页 |
 | GET /mcp/oauth/callback?code&state[&error] | 校验 state、过期与 cookie 后换码；直接返回 200 同站 HTML：成功显示「外部账号已登录」与服务 id，失败显示「登录未完成」与固定错误码；两者均提供 `/mcp/accounts` 链接，总是清 OAuth cookie |
 | POST /mcp/oauth/logout/<serverId> | 同源表单与 `_csrf` 校验，尽力撤销并删除本地 token；303 到 `/mcp/accounts?ok=logout` |
+
+面板 CSP 保持 `form-action 'self'`：浏览器也会检查表单提交后的重定向，因此 start 不直接 303 到外站授权页，而先返回「正在跳转到授权页」的同站页面，再由 meta refresh 导航。若未自动跳转，可点击页面上的授权链接。页面复用 page() 与面板 CSP nonce，响应保持 no-store/no-referrer，授权 URL 只用于页面的 meta refresh 和链接，不写日志。
 
 JSON、start、logout 继续要求 obs_token 面板会话；POST 使用 application/x-www-form-urlencoded，隐藏字段 `_csrf` 是现有 `csrfToken(OBS_TOKEN)`。表单/CSRF 校验失败返回 403。授权服务失败只回固定 `auth_required/server_unavailable/invalid_state`，不回显第三方 error_description。
 

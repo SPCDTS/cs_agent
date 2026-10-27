@@ -38,8 +38,22 @@ async function rig(enabled = true) {
     headers: { "content-type": "application/x-www-form-urlencoded", origin } });
   const start = async () => {
     const response = await post("/mcp/oauth/start/notion");
-    expect(response.status).toBe(303);
-    const url = response.headers.get("location")!;
+    expect(response.status).toBe(200);
+    expect(response.headers.get("location")).toBeNull();
+    expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    const html = await response.text();
+    expect(html).toContain("正在跳转到授权页");
+    expect(html).toContain("如果没有自动跳转，请点击链接");
+    const escapedUrl = /<meta http-equiv="refresh" content="0;url=([^"]+)">/u.exec(html)?.[1];
+    if (!escapedUrl) throw new Error("fixture_missing_authorization_url");
+    expect(html).toContain(`<a href="${escapedUrl}">前往授权页</a>`);
+    const nonce = /<style nonce="([^"]+)">/u.exec(html)?.[1];
+    expect(nonce).toBeTruthy();
+    expect(response.headers.get("content-security-policy")).toContain(`style-src 'self' 'nonce-${nonce}'`);
+    expect(response.headers.get("content-security-policy")).toContain("form-action 'self'");
+    const url = escapedUrl.replaceAll("&amp;", "&");
     const cookie = response.headers.get("set-cookie")!;
     expect(cookie).toMatch(/mcp_oauth=[A-Za-z0-9_-]+; Path=\/mcp\/oauth; HttpOnly; SameSite=Lax; Max-Age=600/u);
     return { state: new URL(url).searchParams.get("state")!, code: await fixture.authorize(url), cookie: cookie.split(";")[0] };

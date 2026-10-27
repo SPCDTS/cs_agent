@@ -47,10 +47,18 @@ export function createMcpRoutes(oauth: McpOAuth | undefined, validatePost: (req:
     try {
       if (!oauth) throw new McpOAuthError("server_unavailable");
       if (action[1] === "logout") { await oauth.logout(action[2]); redirect(res, "/mcp/accounts?ok=logout"); return; }
-      const nonce = randomBytes(32).toString("base64url");
-      res.setHeader("Set-Cookie", cookie(nonce, 600));
-      const result = await oauth.start(action[2], nonce);
-      if ("authorizationUrl" in result) redirect(res, result.authorizationUrl);
+      const cookieNonce = randomBytes(32).toString("base64url");
+      res.setHeader("Set-Cookie", cookie(cookieNonce, 600));
+      const result = await oauth.start(action[2], cookieNonce);
+      if ("authorizationUrl" in result) {
+        // 先结束同站表单请求，再由页面导航，避免 form-action 'self' 拦截外站 303。
+        const authorizationUrl = esc(result.authorizationUrl);
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(page({
+          title: "正在跳转到授权页", path: url.pathname, nonce,
+          head: `<meta http-equiv="refresh" content="0;url=${authorizationUrl}">`,
+          body: `<p>如果没有自动跳转，请点击链接</p><p><a href="${authorizationUrl}">前往授权页</a></p>`,
+        }));
+      }
       else { res.setHeader("Set-Cookie", cookie("", 0)); redirect(res, `/mcp/accounts?ok=login&server=${encodeURIComponent(action[2])}`); }
     } catch (error) {
       res.setHeader("Set-Cookie", cookie("", 0));
