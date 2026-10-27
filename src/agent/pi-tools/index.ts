@@ -25,7 +25,7 @@ import { PiPromptLoader } from "./prompt.js";
 import { ProjectContextLoader } from "./project-context.js";
 import { SkillsLoader } from "./skills.js";
 import { DeepSeekWeb } from "./web.js";
-import { isMcpToolName, type McpToolIdentity } from "../pi-mcp/names.js";
+import { isMcpControlTool, isMcpToolName, type McpToolIdentity } from "../pi-mcp/names.js";
 import type { MemoryService } from "../memory/service.js";
 import { MEMORY_RULE } from "../memory/tools.js";
 
@@ -155,11 +155,11 @@ export function createPiExtension(opts: PiToolsOptions) {
           if (["write", "edit", "bash", "subagent", "skill_publish"].includes(call.name) || call.name === "auth" || isScheduleTool(call.name)) return { block: "事件回合只读，不能使用此工具" };
         }
         start(api.taskId);
-        trace.event(traceKey(bound), "tool:" + call.name, { status: "started", detail: isMcpToolName(call.name) ? mcpSummary(call, api)
+        trace.event(traceKey(bound), "tool:" + call.name, { status: "started", detail: (isMcpToolName(call.name) || isMcpControlTool(call.name)) ? mcpSummary(call, api)
           : BUILTIN_TOOLS.has(call.name) ? builtinSummary(call) : { backend: "pi", input: call.arguments } });
         const block = (reason: string) => {
           trace.event(traceKey(bound), "tool:" + call.name, { status: "failed", durationMs: Date.now() - started.get(api.taskId)!,
-            detail: isMcpToolName(call.name) ? { ...mcpSummary(call, api), error_code: "tool_blocked" } : { backend: "pi", error: reason } });
+            detail: (isMcpToolName(call.name) || isMcpControlTool(call.name)) ? { ...mcpSummary(call, api), error_code: "tool_blocked" } : { backend: "pi", error: reason } });
           started.delete(api.taskId);
           return { block: reason };
         };
@@ -168,7 +168,7 @@ export function createPiExtension(opts: PiToolsOptions) {
         return undefined;
       }, afterTool: async (call, result, api) => {
         const bound = await opts.binding(Number(api.conversationId));
-        if (isMcpToolName(call.name)) {
+        if (isMcpToolName(call.name) || isMcpControlTool(call.name)) {
           if (bound) trace.event(traceKey(bound), "tool:" + call.name, { status: result.isError ? "failed" : "ok",
             durationMs: started.has(api.taskId) ? Date.now() - started.get(api.taskId)! : undefined,
             detail: { ...mcpSummary(call, api), failure: result.isError ? diagnosticFailure(result, "mcp") : undefined } });
