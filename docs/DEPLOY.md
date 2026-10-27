@@ -50,6 +50,7 @@ Copy-Item .env.example .env
 | `COMPOSE_PROFILES` | 空 | 填 `gmail` 启用 Gmail sidecar，之后普通 `docker compose up -d` 即包含它；也可用 `--profile gmail` |
 | `GMAIL_SIDECAR_TOKEN` | 空 | 启动 sidecar 时必填：至少 32 字符的无空白 ASCII 随机串，sidecar 静态 Bearer |
 | `GMAIL_SIDECAR_AUTH_HEADER` | 空 | `Bearer <同一个串>`，Pi MCP `secretHeaders` 引用，注入 cs-agent |
+| `EVENTS_GMAIL_URL` | 空 | Gmail 事件来源 origin，例如 `http://172.28.0.10:3731`；配置 owner 与 `GMAIL_SIDECAR_AUTH_HEADER` 后启用。事件仅在 owner 会话后端为 Pi 时投递，面板见 `/events` |
 | `PI_MCP_CONFIG` | 空 | Pi 外部 MCP 管理员 JSON 配置绝对路径；留空禁用。Streamable HTTP、静态凭据、owner 私聊，见 [PI-MCP.md](PI-MCP.md) |
 | `ATTACH_FILE_MAX_MB` / `ATTACH_FILES_MAX` / `ATTACH_FILE_DENY_EXT` | 20 / 3 / `.exe,.bat,…,.lnk` | 发送文件的单个上限、每条数量与扩展名黑名单 |
 | `CODEX_SANDBOX` | `workspace-write` | `workspace-write` 或 `read-only`；`danger-full-access` 无法做会话隔离，codex 回合会被拒绝执行 |

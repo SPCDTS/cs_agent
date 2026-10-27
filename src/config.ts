@@ -85,6 +85,11 @@ const EnvSchema = z.object({
   PI_SKILLS_DIR: z.string().default(""),
   /** 管理员维护的 MCP JSON 配置路径；空值禁用新调用。 */
   PI_MCP_CONFIG: z.string().default(""),
+  /** 空值禁用 Gmail 事件来源。 */
+  EVENTS_GMAIL_URL: z.union([z.literal(""), serviceUrl.refine(value => {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && url.pathname === "/" && !url.search && !url.hash;
+  }, "事件来源须为 HTTP(S) origin")]).default(""),
   PI_MCP_OAUTH_REDIRECT_URL: serviceUrl.refine(value => {
     const url = new URL(value);
     return ["http:", "https:"].includes(url.protocol) && !value.includes("?") && !value.includes("#");

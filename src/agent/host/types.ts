@@ -8,7 +8,7 @@ export type { ThreadKey };
  */
 
 /** user：QQ 消息；scheduled：定时任务到点的输入（§6） */
-export type InputKind = "user" | "scheduled";
+export type InputKind = "user" | "scheduled" | "event";
 /** wake：后端自己开的回合（子 agent 完成唤醒），没有新输入 */
 export type TurnKind = InputKind | "wake";
 
@@ -17,6 +17,7 @@ export type HostInput = {
   /** 入站消息的确定性键（定时为触发键）；同一键重复投递是空操作 */
   inboundKey: string;
   kind: InputKind;
+  source?: string;
   /** user：发送者 QQ 号；scheduled：创建者 */
   sender: string;
 };
@@ -34,6 +35,9 @@ export type TurnContext = { kind: InputKind; sender: string; admit?: () => Promi
 
 export type TurnStatus = "completed" | "failed" | "lost";
 
+/** Pi 持久化提交的事件身份；无法确证时 creator 为空，仅保留限制、不提升权限。 */
+export type RecoveredEvent = { identity: Extract<TurnIdentity, { kind: "event" }>; inboundKey?: string };
+
 /**
  * 开轮结果：
  * - turnId：新回合（输入已送入）。
@@ -43,7 +47,7 @@ export type TurnStatus = "completed" | "failed" | "lost";
  *   输入已交付、不再重排；宿主按唤醒回合跟踪该回合（identity 同上），输入随该回合结束，结果即该回合的结果。
  * - denied：重试前准入复核被拒（见 TurnContext.admit），没有开轮。
  */
-export type StartTurnResult = { turnId: string } | { backendTurnId: string; identity?: RunPerson } | { absorbedInto: string; identity?: RunPerson } | { denied: true };
+export type StartTurnResult = { turnId: string } | { backendTurnId: string; identity?: RunPerson; event?: RecoveredEvent } | { absorbedInto: string; identity?: RunPerson } | { denied: true };
 
 /** 回合结果（与 onTurnCompleted 回报的一致）。 */
 export type TurnOutcome = { status: TurnStatus; error?: string };
@@ -93,9 +97,10 @@ export interface SubagentView {
 export interface HostCallbacks {
   /**
    * initiatedBy=backend 表示后端自己开的唤醒回合；host 表示 startTurn 开的回合（仅刷新活动时间）。
-   * identity：唤醒回合确证继承的人（由带回的汇报求出，§5.1）；缺省为会话基础权限。只在宿主新接管该回合时采用。
+   * identity：唤醒回合确证继承的人（由带回的汇报求出，§5.1）；缺省为会话基础权限。
+   * event：Pi 从持久化提交恢复的事件；接回对应入站并保留 event 身份，已知同一 turnId 也需修复。
    */
-  onTurnStarted(threadKey: ThreadKey, turnId: string, initiatedBy: "host" | "backend", identity?: RunPerson): void;
+  onTurnStarted(threadKey: ThreadKey, turnId: string, initiatedBy: "host" | "backend", identity?: RunPerson, event?: RecoveredEvent): void;
   onTurnCompleted(threadKey: ThreadKey, turnId: string, result: { status: TurnStatus; error?: string }): void;
   /** 模型输出、工具调用、子 agent 活动；只刷新看门狗时间。 */
   onActivity(threadKey: ThreadKey): void;

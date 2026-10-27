@@ -43,7 +43,7 @@ export interface InboundMessage {
 export type SendStatus = "pending" | "sending" | "sent" | "uncertain";
 
 /** 输入种类：QQ 消息或定时任务到点（§2.2、§6）。 */
-export type InboundKind = "user" | "scheduled";
+export type InboundKind = "user" | "scheduled" | "event";
 /** queued 未送达后端 → delivered 后端已收下 → done 所在回合结束（§2.2）。 */
 export type InboundState = "queued" | "delivered" | "done";
 
@@ -51,6 +51,10 @@ export type InboundState = "queued" | "delivered" | "done";
 export interface InboundRecord {
   key: string;
   kind: InboundKind;
+  event_source?: string;
+  event_count?: number;
+  /** 合并事件的去重键，与入站行同事务持久化。 */
+  event_keys?: string[];
   /** 到达顺序号（表 rowid） */
   seq: number;
   /** 本会话的投递地址：group:<id> / private:<qq> */
@@ -91,6 +95,16 @@ export interface ScheduledInput {
   time: number;
 }
 
+export interface EventInput {
+  key: string;
+  owner: string;
+  source: string;
+  count: number;
+  eventKeys: string[];
+  text: string;
+  time: number;
+}
+
 /** Inbox 的持久化契约；agent 不依赖 QQ 的 SQLite 实现。 */
 export interface InboxStore {
   getInbound(key: string): InboundRecord | null;
@@ -104,6 +118,7 @@ export interface InboxStore {
   listInboundByTurn(turnId: string): InboundRecord[];
   markInbound(keys: readonly string[], state: InboundState, turnId?: string): void;
   openScheduledInput(input: ScheduledInput): InboundRecord;
+  openEventInput(input: EventInput): InboundRecord;
 }
 
 export interface ReplyResult {
@@ -191,7 +206,7 @@ export interface RemoteMessage {
  * 回合绑定的人（§5.1）：kind 为此人以什么身份驱动回合（user 发送者 / scheduled 定时创建者），
  * owner 为快照时此人是否 owner（继承时只降不升：当前配置也须仍是 owner）。
  */
-export type RunPerson = { kind: "user" | "scheduled"; person: string; owner: boolean };
+export type RunPerson = { kind: "user" | "scheduled" | "event"; person: string; owner: boolean };
 
 /**
  * 本轮身份（§5.1）：user 为发送者，scheduled 为创建者，wake 为没有新输入的唤醒回合。
@@ -201,6 +216,7 @@ export type RunPerson = { kind: "user" | "scheduled"; person: string; owner: boo
 export type TurnIdentity =
   | { kind: "user"; sender: string }
   | { kind: "scheduled"; creator: string }
+  | { kind: "event"; source: string; creator: string }
   | { kind: "wake"; inherited?: RunPerson };
 
 /**

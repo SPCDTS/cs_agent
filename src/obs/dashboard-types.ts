@@ -1,3 +1,4 @@
+import type { EventManagement } from "./events.js";
 import type { McpOAuth } from "../agent/pi-mcp/oauth.js";
 /** 面板组合接口；页面仅接收 dashboard-pages 定义的只读数据视图。 */
 import type { GrantsService } from '../agent/grants.js';
@@ -22,6 +23,7 @@ export interface DashboardOptions {
   mcpOAuth?: McpOAuth;
   grants?: Pick<GrantsService, 'list' | 'panel'>;
   schedules?: ScheduleManagement;
+  events?: EventManagement;
   /** 共享技能管理；off 时不注入。页面使用 list/readSkillMd/files。 */
   skills?: SkillsStore;
   config: Config; store: ObsStore; context: ContextStore;

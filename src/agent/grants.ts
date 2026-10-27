@@ -6,7 +6,7 @@ import type { TurnBinding } from "../channel/types.js";
 import { isScope } from "../context/access.js";
 import { trace, type Trace } from "../shared/trace.js";
 import { GrantsDoc, type Grant } from "./docs.js";
-import { runRights, type RunRights } from "./host/identity.js";
+import { isEventTurn, runRights, type RunRights } from "./host/identity.js";
 
 export const TARGET_PATTERN = "^qq:(group|private):[1-9][0-9]{0,19}$";
 const userSchema = z.string().regex(/^qq:[1-9][0-9]{0,19}$/, "user 必须是 qq:<QQ号>").refine(v => v === v.trim(), "user 不允许空白");
@@ -53,7 +53,7 @@ export class GrantsService {
    */
   identity(binding: GrantBinding): { actor: string; actorIsOwner: boolean; scope: string; origin: "message" | "scheduled" } | undefined {
     const rights = this.rights(binding);
-    if (!rights.person || !rights.actor) return undefined;
+    if (!rights.person || !rights.actor || isEventTurn(rights)) return undefined;
     return { actor: rights.actor, actorIsOwner: rights.owner, origin: rights.person.kind === "scheduled" ? "scheduled" : "message", scope: rights.scope };
   }
 

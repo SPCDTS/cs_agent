@@ -167,7 +167,7 @@ export interface PiSandboxOptions {
   workspaceDir?: string;
   key: string;
   /** 本轮绑定：读取范围与本轮输入键（只读其 incoming 目录） */
-  request: { access: string; senderIsOwner?: boolean; inputs: readonly string[] };
+  request: { readOnly?: boolean; access: string; senderIsOwner?: boolean; inputs: readonly string[] };
   store: Pick<ContextStore, "mediaPathAllowed">;
   requirementsFile?: string;
 }
@@ -218,6 +218,7 @@ export class PiPathPolicy {
   }
 
   async check(file: string, mode: "read" | "write", deny?: PiDenyRead): Promise<string> {
+    if (mode === "write" && this.options.request.readOnly) throw new Error("事件回合只读");
     deny ??= await this.deny();
     const absolute = path.resolve(this.workspace, file);
     const canonical = await policyRealpath(absolute);

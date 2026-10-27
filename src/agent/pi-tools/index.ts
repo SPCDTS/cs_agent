@@ -1,3 +1,4 @@
+import { isEventTurn, runRights } from "../host/identity.js";
 import type { ScheduleTools } from "../schedule/tools.js";
 import type { GrantsService } from "../grants.js";
 import type { Channel } from "../../channel/types.js";
@@ -131,6 +132,7 @@ export function createPiExtension(opts: PiToolsOptions) {
       hook(GenerationTask, {
         beforeRequest: async (_request, api) => {
           const bound = await opts.binding(Number(api.conversationId));
+          if (bound?.identity.kind === "event") trace.metadataOnly(traceKey(bound));
           start(api.taskId);
           if (bound) trace.event(traceKey(bound), "model_turn", { status: "started", detail: { backend: "pi", conversation: api.conversationId, thread_key: bound.threadKey } });
         },
@@ -146,6 +148,11 @@ export function createPiExtension(opts: PiToolsOptions) {
       hook(ToolTask, { beforeTool: async (call, api) => {
         const bound = await opts.binding(Number(api.conversationId));
         if (!bound || !parseAccess(bound.access)) return { block: "工具请求未绑定有效访问范围" };
+        const event = bound.identity.kind === "event" || isEventTurn(runRights(bound, opts.grants?.owners));
+        if (event) {
+          trace.metadataOnly(traceKey(bound));
+          if (["write", "edit", "bash", "subagent", "skill_publish"].includes(call.name) || /^(auth_|schedule_)/.test(call.name)) return { block: "事件回合只读，不能使用此工具" };
+        }
         start(api.taskId);
         trace.event(traceKey(bound), "tool:" + call.name, { status: "started", detail: isMcpToolName(call.name) ? mcpSummary(call, api)
           : BUILTIN_TOOLS.has(call.name) ? builtinSummary(call) : { backend: "pi", input: call.arguments } });

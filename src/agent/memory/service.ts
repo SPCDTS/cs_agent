@@ -12,7 +12,7 @@ import { log } from "../../shared/log.js";
 import type { OwnerIds } from "../../shared/owners.js";
 import { trace as defaultTrace, type Trace } from "../../shared/trace.js";
 import { containsSecret } from "../../shared/redact.js";
-import { runRights, type RunRights } from "../host/identity.js";
+import { isEventTurn, runRights, type RunRights } from "../host/identity.js";
 import { formatMemoryLine, renderMemorySection } from "./render.js";
 import { MEMORY_READ_TOOLS, MEMORY_WRITE_TOOLS, isMemoryTool, memoryInputs, parseClearableTime, parseMemoryTime, type MemoryTool } from "./tools.js";
 
@@ -36,6 +36,7 @@ export function memoryAccess(rights: RunRights, child = false): MemoryAccess {
   if (!isMemoryNs(ns)) return { read: [], write: [], routeSubjects: false };
   const read: MemoryScope = rights.access === "all" ? "all" : [ns];
   if (child || !rights.person) return { read, write: [], routeSubjects: false };
+  if (isEventTurn(rights)) return { read, write: ns === "owner" && rights.owner ? ["owner"] : [], routeSubjects: false };
   if (ns === "owner") return rights.owner && rights.access === "all" ? { read, write: ["owner"], routeSubjects: true, profile: "owner" }
     : { read, write: [], routeSubjects: false };
   return { read, write: [ns], routeSubjects: false, ...(rights.owner ? { profile: ns } : {}) };
@@ -187,7 +188,8 @@ export class MemoryService {
     if (binding.child) throw new MemoryError(MEMORY_CHILD_READONLY);
     if (!rights.person || !access.write.length) throw new MemoryError(MEMORY_UNVERIFIED);
     const key = traceKeyOf(binding), used = this.writes.get(key) ?? 0;
-    if (used >= MEMORY_WRITES_PER_TURN) throw new MemoryError(`本轮写入记忆已达上限（${MEMORY_WRITES_PER_TURN} 次）`);
+    const limit = isEventTurn(rights) ? 5 : MEMORY_WRITES_PER_TURN;
+    if (used >= limit) throw new MemoryError(`本轮写入记忆已达上限（${limit} 次）`);
     this.writes.delete(key); this.writes.set(key, used + 1);
     if (this.writes.size > 1000) this.writes.delete(this.writes.keys().next().value!);
   }

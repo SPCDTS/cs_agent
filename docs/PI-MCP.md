@@ -81,6 +81,10 @@ OAuth 发现、换码、注册、刷新与撤销请求仅允许资源 origin 和
 
 退出登录会尽力撤销 refresh token，再删除本地 token 与状态；CIMD 客户端身份可以保留。库及 WAL 属于私密凭据，不加入 datasette；已有沙箱 `*.sqlite*` 禁读规则覆盖它。
 
+## 事件回合的读工具
+
+`tools.eventAllow` 默认 `[]`，必须是 `tools.allow` 的子集。事件回合不看 allowScheduled / allowWake：空列表的服务不选择、不连接；非空只加载该列表中的工具，目录与用户回合隔离，执行前再次复核。仅填写确定只读的工具，例如 Gmail 的 `gmail_search`、`gmail_read`，Notion 的 `notion-search`、`notion-fetch`，不得加入发送或编辑工具。资源工具仍按 `resources.allow` 只读开放；事件禁止子 agent 委派。
+
 ## 权限与结果
 
 owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通私聊与未配置的群拒绝。执行前及排队后按 `runRights` 复核真实身份。定时和唤醒默认关闭；可分别设置 `access.allowScheduled`、`access.allowWake`，继承定时身份的唤醒需要两个选项都开启。群内也按回合代表的人授权：owner 直接执行，成员适用审批；只有基础权限、无法确证人的回合拒绝。

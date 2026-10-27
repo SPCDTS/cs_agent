@@ -1,3 +1,4 @@
+import { trace } from "../../shared/trace.js";
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { TurnBinding } from "../../channel/types.js";
 
@@ -24,7 +25,10 @@ export interface PiCallBinding extends TurnBinding {
 }
 
 /** 回合级观测键：回合内为 turn:<id>，没有回合（子 agent 在父回合结束后仍在工作）为 thr:<会话键>。 */
-export function traceKey(binding: Pick<TurnBinding, "turnId" | "threadKey"> | undefined): string {
+export function traceKey(binding: (Pick<TurnBinding, "turnId" | "threadKey"> & Partial<Pick<TurnBinding, "identity">>) | undefined): string {
   if (!binding) return "@pi";
-  return binding.turnId ? "turn:" + binding.turnId : "thr:" + binding.threadKey;
+  const key = binding.turnId ? "turn:" + binding.turnId : "thr:" + binding.threadKey;
+  // 每个输出钩子独立重建标记：safe 工具重放会跳过 beforeTool。
+  if (binding.identity?.kind === "event" || (binding.identity?.kind === "wake" && binding.identity.inherited?.kind === "event")) trace.metadataOnly(key);
+  return key;
 }

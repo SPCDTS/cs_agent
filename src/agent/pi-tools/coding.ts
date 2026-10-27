@@ -122,3 +122,9 @@ export async function codingTools() {
   bash.parameters = { ...bash.parameters, properties: { ...bash.parameters.properties, timeout } };
   return { ...coding, tools: coding.tools?.map(tool => tool.name === "bash" ? bash : tool) };
 }
+
+/** 事件回合只选择 read；执行时仍由路径策略阻止写入。 */
+export async function eventCodingTools() {
+  const coding = await codingTools();
+  return { ...coding, name: "cs-pi-event-read", tools: coding.tools?.filter(tool => tool.name === "read") };
+}

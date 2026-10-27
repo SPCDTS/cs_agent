@@ -39,7 +39,7 @@
         "secretHeaders": { "Authorization": "GMAIL_SIDECAR_AUTH_HEADER" }
       },
       "credential": { "kind": "external-account", "accountId": "owner-gmail", "revision": "1" },
-      "tools": { "allow": ["gmail_search", "gmail_read", "gmail_send"] },
+      "tools": { "allow": ["gmail_search", "gmail_read", "gmail_send"], "eventAllow": ["gmail_search", "gmail_read"] },
       "access": { "kind": "owner-private" },
       "replay": "unsafe"
     },
@@ -76,8 +76,10 @@
       },
       "tools": {
         "allow": [
-          "notion-search"
-        ]
+          "notion-search",
+          "notion-fetch"
+        ],
+        "eventAllow": ["notion-search", "notion-fetch"]
       },
       "resources": { "allow": ["notion://docs/"] },
       "access": {

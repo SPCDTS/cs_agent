@@ -257,7 +257,7 @@ describe("Pi MCP 子 agent 委派", () => {
     expect(server.calls).toBe(revoke ? 0 : 2);
   });
 
-  it("未知唤醒续发会收紧已有快照，后续 owner message 不重新提权", async () => {
+  it("未知 owner 运行按事件限制拒绝续发，既有子 agent 快照不被改写", async () => {
     const { server, mcp } = await mcpFixture({ allowSubagent: true });
     const seen: string[][] = [];
     const r = await residentRig({ mcp, brain: transcript => {
@@ -267,13 +267,19 @@ describe("Pi MCP 子 agent 委派", () => {
     await r.say("1", "开始", null); await childIdle(r);
     expect(seen[0]?.some(name => name.startsWith("mcp_fixture_"))).toBe(true);
     const child = await childConversation(r);
+    const grant = (await r.pi.harness.snapshot(McpDelegationDoc, child.id, context))!.grant;
     const parent = await r.pi.harness.conversation((await r.pi.readThreadIds()).owner as ConversationId, context);
     await (await parent!.submit({ type: "input", content: "续发", whenBusy: "followUp" }, context)).wait(context);
     await childIdle(r);
-    expect((await r.pi.harness.snapshot(McpDelegationDoc, child.id, context))!.grant).toBeNull();
+    expect(seen).toHaveLength(1);
+    expect((await r.pi.harness.snapshot(McpDelegationDoc, child.id, context))!.grant).toEqual(grant);
+    const rejected = (await parent!.entries({}, 100, undefined, context)).items.filter(ToolResultEntry.is)
+      .find(entry => entry.model?.some(message => message.role === "toolResult" && message.toolName === "subagent" && message.isError));
+    expect(rejected).toBeDefined();
     await r.say("1", "续发", null); await childIdle(r);
-    expect(seen).toHaveLength(3);
-    expect(seen.slice(1).every(tools => !tools.some(name => name.startsWith("mcp_")))).toBe(true);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.some(name => name.startsWith("mcp_fixture_"))).toBe(true);
+    expect((await r.pi.harness.snapshot(McpDelegationDoc, child.id, context))!.grant).toEqual(grant);
     expect(server.calls).toBe(0);
   });
 

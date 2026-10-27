@@ -32,12 +32,11 @@ import { createDashboardPages } from './ui/dashboard-pages.js';
 import { asContextUsageEvent } from './context-turns.js';
 import { turnContextTurns } from './turn-context.js';
 import { createScheduleRoutes } from './schedules.js';
+import { createEventRoutes, isEventsPath } from './events.js';
 import { createSchedulePanel, isSchedulePath } from './schedule-panel.js';
-
 // 与顶栏的蓝色方框及两条横线保持一致；静态图形不含运行数据。
 const FAVICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="7" y="4" width="18" height="24" rx="2" fill="none" stroke="#2b47b5" stroke-width="3"/><path d="M11 13h10M11 19h10" stroke="#2b47b5" stroke-width="3"/></svg>';
 const MAX_SSE = 20;
-
 const FLASH: Record<string, string> = {
   skillsUploaded: '技能上传已处理，下一条消息生效。', skillsDeleted: '技能已删除，下一条消息生效。',
   saved: '设置已保存，之后收到的消息按新设置处理。', breakerReset: '熔断已解除，该范围从此刻重新计数。', prompt: 'agent.md 已保存，pi 下一轮对话即读取新内容。',
@@ -49,7 +48,6 @@ const FLASH: Record<string, string> = {
   profileSaved: '画像已保存，下一轮起进入提示。', proposalAccepted: '已采纳画像提议并写入画像，下一轮起进入提示。', proposalRejected: '已拒绝画像提议。',
   consolidateStarted: '记忆整理已开始，完成后刷新查看报告。', consolidateRunning: '记忆整理已在运行，完成后刷新查看报告。', batchRolledBack: '该整理批次已回退。', stopped: '已请求停止：当前回合与子 agent 会中止，排队的消息随后照常处理。',
 };
-
 const asObj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
 export function createDashboard(opts: DashboardOptions) {
   const config = resolveAgentConfig(opts.config);
@@ -88,11 +86,9 @@ export function createDashboard(opts: DashboardOptions) {
       return after;
     })().catch(() => null);
   });
-
   const offCodexBasePrompt = opts.codexBasePrompt?.subscribe(change => {
     tracer.event(SETTINGS_KEY, 'prompt_changed', { detail: { ...change, target: 'codex-base', source: 'dashboard' } });
   });
-
   const { render, usageList } = createDashboardPages({
     opts: { ...opts, store: {
       get degraded() { return opts.store.degraded; },
@@ -117,10 +113,10 @@ export function createDashboard(opts: DashboardOptions) {
   });
   const schedulePanel = createSchedulePanel({ service: opts.schedules, owner: config.owner, csrf, scopeNames: () => opts.context.scopeNames() });
   const handlePost = createDashboardPost(opts, csrf, agentMd, tracer, render, schedulePanel.post);
+  const handleEvents = createEventRoutes(opts.events, csrf);
   const handleSchedules = createScheduleRoutes(opts.schedules, config.owner, csrf), memoryEntryActions = createMemoryEntryActions(opts.memoryEntries, csrf);
   const memoryJobActions = createMemoryJobActions(opts.memoryJobs, csrf);
   const mcpRoutes = createMcpRoutes(opts.mcpOAuth, (req, host) => validateDashboardPost(req, host, csrf));
-
   /** 在服务端内部调用会话 JSON 路由：与浏览器拿到的是同一份已脱敏 JSON、同样的校验与错误码。 */
   async function api(pathQuery: string): Promise<{ status: number; body: unknown }> {
     return readDashboardJson(pathQuery, (url, res) => url.pathname === '/api/mcp/accounts'
@@ -128,7 +124,6 @@ export function createDashboard(opts: DashboardOptions) {
       ? mcpRoutes({ method: 'GET' } as IncomingMessage, res, url, '', '')
       : (url.pathname === '/api/memory' || url.pathname.startsWith('/api/memory/') ? memoryRoute : sessionRoute)(url, res));
   }
-
   function sse(res: ServerResponse): SseWriter | null {
     if (closed || res.destroyed || res.writableEnded) return null;
     if (clients.size >= MAX_SSE) { res.writeHead(503).end(); return null; }
@@ -139,7 +134,6 @@ export function createDashboard(opts: DashboardOptions) {
     res.on('close',()=>{ clearInterval(heartbeat); clients.delete(res); });
     return out;
   }
-
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (closed) { res.writeHead(503).end(); return; }
     const nonce = randomBytes(18).toString('base64');
@@ -174,6 +168,7 @@ export function createDashboard(opts: DashboardOptions) {
         res.writeHead(303, { Location: url.pathname + url.search }).end(); return;
       }
     }
+    if (isEventsPath(url.pathname)) { await handleEvents(req, res, url, host, nonce); return; }
     if (url.pathname === '/api/mcp/accounts' || url.pathname.startsWith('/mcp/oauth/')) { await mcpRoutes(req, res, url, host, nonce); return; }
     if (url.pathname === '/api/schedules' || url.pathname.startsWith('/api/schedules/')) {
       await handleSchedules(req, res, url, host); return;
@@ -291,7 +286,6 @@ export function createDashboard(opts: DashboardOptions) {
     }
     res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'}).end(html);
   }
-
   return { handle: (req: IncomingMessage,res: ServerResponse) => handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(500);res.end('观测页面暂不可用');}),
     close: async () => {closed=true;for(const res of clients)res.end();clients.clear();if(typeof offCodexPrompt==='function')offCodexPrompt();offCodexBasePrompt?.();
       await Promise.all(Object.values(adapters).map(adapter => adapter.close?.()));} };

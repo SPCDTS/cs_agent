@@ -1,3 +1,4 @@
+import { PiInputDoc, piInputSchema, submitPiInput, type PiInput } from "./pi-input.js";
 import type { McpOAuth } from "../pi-mcp/oauth.js";
 import type { ContextUsageStore } from "../context-usage.js";
 import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../pi-context-usage.js";
@@ -9,9 +10,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT, withCancel } from "@earendil-works/chord/context";
 import { clampThinkingLevel, type Models, type ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, Harness, LiveDoc, ROOT_CONVERSATION_ID, watchEvents, type AgentEvent, type AgentEventStream, type Conversation, type ConversationId, type Cursor, type EntryId, type ModelRef, type Storage, type SubmissionId } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, Harness, LiveDoc, ROOT_CONVERSATION_ID, watchEvents, type Extension, type AgentEvent, type AgentEventStream, type Conversation, type ConversationId, type Cursor, type EntryId, type ModelRef, type Storage, type SubmissionId } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { codingEnvironment, codingTools } from "../pi-tools/coding.js";
+import { codingEnvironment, codingTools, eventCodingTools } from "../pi-tools/coding.js";
 import { PiMcp } from "../pi-mcp/index.js";
 import type { McpApproval, McpApprovals } from "../pi-mcp/approval.js";
 import type { EnvironmentSecrets, McpConfigState } from "../pi-mcp/config.js";
@@ -23,13 +24,13 @@ import { memoryAccess } from "../memory/service.js";
 import type { SkillsStore } from "../skills-store.js";
 import { PiChildDoc, traceKey, type PiCallBinding } from "../pi-tools/request.js";
 import { createSubagentExtension, isSubagentReportRequest, reportPerson, SUBAGENT_REPORT_KIND, SubagentDoc, type SubagentOptions, type SubagentSpawner } from "../pi-tools/subagent.js";
-import { mergePersons, runRights, validPerson, type RunPerson } from "../host/identity.js";
+import { isEventTurn, mergePersons, runRights, validPerson, type RunPerson } from "../host/identity.js";
 import { PiPromptLoader } from "../pi-tools/prompt.js";
 import { isScope } from "../../context/access.js";
 import { log } from "../../shared/log.js";
 import type { OwnerIds } from "../../shared/owners.js";
 import type { InboundRecord, TurnBinding } from "../../channel/types.js";
-import type { HostCallbacks, InputRef, StartTurnResult, SubagentView, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome, TurnStatus } from "../host/types.js";
+import type { HostCallbacks, RecoveredEvent, InputRef, StartTurnResult, SubagentView, ThreadAdapter, ThreadKey, TurnContext, TurnOutcome, TurnStatus } from "../host/types.js";
 import type { RenderedInputs } from "../inbox.js";
 import type { BackendName, SettingsSnapshot } from "./types.js";
 
@@ -49,7 +50,7 @@ import type { BackendName, SettingsSnapshot } from "./types.js";
  *    宿主开的那次 run（当前 run 的首条提交 = 宿主当前回合）取宿主的本轮身份；宿主接管的唤醒 run 取宿主记下的继承身份，
  *    且须与按 run 当前输入重新求出的身份一致；其余 run（宿主放弃的回合、事件尚未送达的 run、对不上的）只有会话基础权限。
  *    子会话由 initChild 写入父会话键，只有基础权限；派出时由 spawner 快照父会话这一轮的身份，随汇报带回。
- * 6. 恢复：pi-durable 持久化 run 与子 agent，重启后回合续跑；bind 宿主 → 宿主恢复（recoverTurn）→ attach 事件流并恢复调度。
+ * 6. 恢复：提交与 cs.pi.input 同事务持久化；事件或无法辨认的 owner run 先恢复只读配置与宿主事件身份，再由 attach 统一恢复调度。
  */
 
 const context = BACKGROUND_CONTEXT;
@@ -101,8 +102,9 @@ export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "w
 }
 
 /** identity：唤醒 run 开始时由其输入求出的继承身份（宿主开的 run 不用它）。 */
-type ActiveTurn = { turnId: string; first: SubmissionId; owner: "host" | "backend"; identity?: RunPerson };
+type ActiveTurn = { turnId: string; first: SubmissionId; owner: "host" | "backend"; identity?: RunPerson; event?: RecoveredEvent };
 type ThreadState = { conv: ConversationId; active?: ActiveTurn; stream?: AgentEventStream };
+type SubagentReportIdentity = { person: RunPerson | undefined };
 
 export const piTurnId = (conv: ConversationId | number, first: SubmissionId | number) => `pi:${Number(conv)}:${Number(first)}`;
 function parseTurnId(turnId: string): { conv: ConversationId; first: SubmissionId } | undefined {
@@ -124,10 +126,10 @@ export class PiBackend implements ThreadAdapter {
   private readonly contextObservers = new Map<string, PiContextObserver>();
   /** 最近结束的回合结果（宿主放弃回合时结束事件可能还排在宿主队列里） */
   private readonly ended = new Map<string, TurnOutcome>();
-  /** 提交 id → 汇报带回的派出者（null = 不是汇报或没有确证的派出者）；已放置的提交不再变化，可缓存 */
-  private readonly reporters = new Map<number, RunPerson | null>();
+  /** 提交 id → 已确证的汇报及其可选派出者（null = 不是汇报）；已放置的提交不再变化，可缓存 */
+  private readonly reports = new Map<number, SubagentReportIdentity | null>();
   readonly sessionSource: PiSessionSource;
-  private constructor(readonly harness: Harness, private readonly opts: PiBackendOptions) {
+  private constructor(readonly harness: Harness, private readonly opts: PiBackendOptions, private readonly toolModes: { coding: Extension; eventCoding: Extension; subagent?: Extension }) {
     this.sessionSource = {
       listConversations: () => this.listObservedConversations(),
       entries: async (id, cursor, limit = 256): Promise<PiEntryPage> => {
@@ -202,6 +204,7 @@ export class PiBackend implements ThreadAdapter {
     const binding = (id: number) => backend.binding(id);
     const coding = await codingTools(), extension = createPiExtension({ ...opts, workspaceDir, getHarness: () => harness, binding,
       mcpToolIdentity: name => backend.mcp?.toolIdentity(name) });
+    const eventCoding = await eventCodingTools();
     const im = createPiImExtensions({ ...opts, binding });
     const schedule = createPiScheduleExtensions(binding, opts.scheduleTools);
     const subagent = opts.subagent === false ? undefined : createSubagentExtension({ ...opts.subagent, getHarness: () => harness,
@@ -217,17 +220,17 @@ export class PiBackend implements ThreadAdapter {
       spawner: parent => backend.spawner(Number(parent)) });
     const skill = createPiSkillExtension({ ...opts, binding });
     const memory = createPiMemoryExtensions(binding, opts.memory);
-    for (const item of [coding, extension, ...Object.values(im), ...Object.values(schedule), skill, ...Object.values(memory),
+    for (const item of [coding, eventCoding, extension, ...Object.values(im), ...Object.values(schedule), skill, ...Object.values(memory),
       ...(subagent ? [subagent] : [])]) registry.install(item);
     const storage = opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite"));
     harness = await Harness.open(storage, {
       models: opts.models, registry,
       env: async target => {
-        // 每次工具调用/恢复均从宿主当前回合重建身份；不从闭包或全局变量取当前回合。
+        // 每次调用/恢复先核对 Pi 提交身份；事件限制不依赖宿主是否已保存 turnId。
         const bound = await backend.binding(Number(target.conversationId));
         if (!bound) return undefined;
         return codingEnvironment({ dataDir: opts.dataDir, workspaceDir, key: bound.threadKey,
-          request: { access: bound.access, senderIsOwner: bound.senderIsOwner, inputs: bound.inputs }, store: opts.store });
+          request: { readOnly: bound.identity.kind === "event" || isEventTurn(runRights(bound, backend.owners())), access: bound.access, senderIsOwner: bound.senderIsOwner, inputs: bound.inputs }, store: opts.store });
       },
       settings: { extensions: [coding, extension, im.basic, ...(opts.memory ? [memory.read] : []), ...(subagent ? [subagent] : [])], toolExecution: "sequential", retry: { maxRetries: 2 }, compaction: {
         enabled: true,
@@ -236,7 +239,7 @@ export class PiBackend implements ThreadAdapter {
       } },
       onReport: err => log.warn("pi harness report", { error: err instanceof Error ? err.message : String(err) }),
     }, context);
-    backend = new PiBackend(harness, { ...opts, storage });
+    backend = new PiBackend(harness, { ...opts, storage }, { coding, eventCoding, subagent });
     try {
       backend.mcp = await PiMcp.attach({
         registry, harness, storage,
@@ -279,7 +282,7 @@ export class PiBackend implements ThreadAdapter {
    * 宿主恢复之后调用一次：接上每个会话的事件流（宿主不知道的 run 按唤醒回合回报），再恢复 pi 调度。
    */
   async attach(): Promise<void> {
-    this.attached = true;
+    if (this.attached) return;
     for (const [key, id] of Object.entries(await this.readThreadIds())) {
       await this.serial(key, async () => { await this.watchThread(key, id as ConversationId); });
       // 已提交的子 run 可能先于 Reporter 恢复，恢复调度前先清理或重建其 MCP 选择。
@@ -290,6 +293,8 @@ export class PiBackend implements ThreadAdapter {
         if (conversation) await this.mcp?.configureChild(conversation, context);
       }
     }
+    this.attached = true;
+    for (const [key, state] of this.threads) if (state.active) this.waitTurn(key, state.active);
     this.harness.resume();
   }
 
@@ -329,9 +334,16 @@ export class PiBackend implements ThreadAdapter {
     // 宿主的本轮身份只给宿主开的那次 run：会话当前的 run 须是本适配器为宿主开的回合，且与宿主的当前回合一致
     // （开轮请求未确认时宿主还没有 turnId）。宿主接管的唤醒 run 取经核对的继承身份；其余一律只有会话基础权限。
     const active = this.threads.get(threadKey)?.active;
+    const event = child ? undefined : await this.eventRun(threadKey, conversationId as ConversationId);
     if (child) {
       const inherited = await this.childIdentity(conversationId);
       turn = { ...turn, identity: { kind: "wake", ...(inherited ? { inherited } : {}) }, inputs: [] };
+    }
+    else if (event) {
+      turn = { ...turn, identity: event.identity, inputs: event.inboundKey ? [event.inboundKey] : [],
+        ...(event.inboundKey ? { inputKey: event.inboundKey } : { inputKey: undefined }),
+        turnId: event.turnId };
+      trace.metadataOnly(traceKey(turn));
     }
     else if (await this.hostOwnsRun(threadKey, conversationId, turn.turnId)) {
       if (active && !turn.turnId) turn = { ...turn, turnId: active.turnId }; // 开轮请求未确认：回合 id 以本适配器为准
@@ -343,6 +355,47 @@ export class PiBackend implements ThreadAdapter {
     const rights = runRights(turn, this.owners());
     return { ...turn, child, ...(child ? { turnId: undefined } : {}),
       access: rights.access, senderIsOwner: rights.owner && !child, auth: rights.auth && !child };
+  }
+
+  /** 缺失、错配或旧版 owner 输入只收紧为事件；确证的普通输入/子 agent 汇报才可恢复原权限。 */
+  private async eventRun(threadKey: string, conv: ConversationId, first?: SubmissionId): Promise<(RecoveredEvent & { turnId: string }) | undefined> {
+    const live = await this.harness.snapshot(LiveDoc, conv, context);
+    const inputs = [...(first !== undefined && live?.run?.inputs[0] !== first ? [first] : live?.run?.inputs ?? [])];
+    if (!inputs.length) {
+      const active = this.threads.get(threadKey)?.active;
+      if (!active) return undefined;
+      inputs.push(active.first);
+    }
+    const doc = await this.harness.snapshot(PiInputDoc, conv, context);
+    let unknown = false, inboundKey: string | undefined;
+    const turnId = piTurnId(conv, inputs[0]!);
+    for (const id of inputs) {
+      const record = await (await this.harness.submission(id, context))?.status(context);
+      inboundKey ??= record?.requestId;
+      const parsed = piInputSchema.safeParse(doc?.submissions?.[String(id)]);
+      if (parsed.success && record?.type === "input" && record.conversationId === conv && parsed.data.inboundKey === record.requestId) {
+        const identity = parsed.data.identity;
+        let inbound: InboundRecord | undefined;
+        try { [inbound] = this.opts.turns.records([{ inboundKey: parsed.data.inboundKey }]); } catch { /* 缺失入站不能用来提权。 */ }
+        const person = identity.kind === "user" ? identity.sender : identity.creator;
+        if (!inbound || inbound.thread_key !== threadKey || inbound.kind !== identity.kind || inbound.user_id !== person ||
+          (identity.kind === "event" && inbound.event_source !== identity.source)) { unknown = true; continue; }
+        if (parsed.data.identity.kind === "event") return { identity: parsed.data.identity, inboundKey: parsed.data.inboundKey, turnId };
+      } else if (!await this.subagentReport(conv, id)) {
+        // 未写过身份文档的旧输入不能按当前宿主身份提权。
+        unknown = true;
+      }
+    }
+    return threadKey === "owner" && unknown ? { identity: { kind: "event", source: "unidentified", creator: "" }, inboundKey, turnId } : undefined;
+  }
+
+  /** 恢复配置失败必须阻止调度，不能用之前的完整工具继续运行。 */
+  private async configureEvent(threadKey: string, conv: ConversationId, event: RecoveredEvent, turnId: string): Promise<void> {
+    trace.metadataOnly("turn:" + turnId);
+    const conversation = await this.harness.conversation(conv, context);
+    if (!conversation) throw new Error("Pi 恢复会话不存在");
+    await this.configureTools(conversation, threadKey, { ...this.opts.turns.binding(threadKey), turnId,
+      identity: event.identity, inputs: event.inboundKey ? [event.inboundKey] : [], inputKey: event.inboundKey });
   }
 
   /**
@@ -363,30 +416,30 @@ export class PiBackend implements ThreadAdapter {
     if (!inputs.length) return undefined;
     const persons: (RunPerson | undefined)[] = [];
     for (const input of inputs) {
-      const person = await this.reporter(conv, input);
+      const person = (await this.subagentReport(conv, input))?.person;
       if (!person) return undefined;
       persons.push(person);
     }
     return mergePersons(persons);
   }
 
-  /** 一条输入提交：子 agent 汇报（requestId 前缀 + 汇报条目）带回的派出者；其余或读不到返回 undefined。 */
-  private async reporter(conv: ConversationId, id: SubmissionId): Promise<RunPerson | undefined> {
-    const cached = this.reporters.get(Number(id));
+  /** 持久化条目确证汇报类型；没有可继承的人仍是汇报，不能降成无法识别的事件输入。 */
+  private async subagentReport(conv: ConversationId, id: SubmissionId): Promise<SubagentReportIdentity | undefined> {
+    const cached = this.reports.get(Number(id));
     if (cached !== undefined) return cached ?? undefined;
     const record = await (await this.harness.submission(id, context))?.status(context);
     // 尚未放置（没有条目）的不缓存
     if (!record || record.type !== "input" || record.entry === undefined || record.conversationId !== conv) return undefined;
-    let person: RunPerson | undefined;
+    let report: SubagentReportIdentity | undefined;
     if (isSubagentReportRequest(record.requestId)) {
       const conversation = await this.harness.conversation(conv, context);
       const page = await conversation?.entries({ order: "ascending", minEntryId: record.entry }, 1, undefined, context);
       const entry = page?.items[0];
-      if (entry?.id === record.entry && entry.kind === SUBAGENT_REPORT_KIND) person = reportPerson(entry.data);
+      if (entry?.id === record.entry && entry.kind === SUBAGENT_REPORT_KIND) report = { person: reportPerson(entry.data) };
     }
-    if (this.reporters.size >= 1000) this.reporters.delete(this.reporters.keys().next().value!);
-    this.reporters.set(Number(id), person ?? null);
-    return person;
+    if (this.reports.size >= 1000) this.reports.delete(this.reports.keys().next().value!);
+    this.reports.set(Number(id), report ?? null);
+    return report;
   }
 
   /**
@@ -406,6 +459,7 @@ export class PiBackend implements ThreadAdapter {
   async spawner(conversationId: number): Promise<SubagentSpawner | undefined> {
     const bound = await this.binding(conversationId);
     if (!bound || bound.child) return undefined;
+    if (bound.identity.kind === "event" || isEventTurn(runRights(bound, this.owners()))) throw new Error("事件回合不能派子 agent");
     const person = runRights(bound, this.owners()).person;
     return { turn: bound.identity.kind, ...(person ? { as: person } : {}) };
   }
@@ -518,6 +572,8 @@ export class PiBackend implements ThreadAdapter {
       await this.persistMirrors();
       return { conv, created: true };
     });
+    // 恢复中的 run 使用已提交配置；compact 也会启动调度，必须等 attach 完成身份配置。
+    if (!created && !this.attached && (await this.harness.snapshot(LiveDoc, conv.id, context))?.run) return conv;
     if (!created) {
       const from = (await conv.agent(context)).model;
       if (from && (from.provider !== ref.provider || from.modelId !== ref.modelId)) {
@@ -542,20 +598,21 @@ export class PiBackend implements ThreadAdapter {
    * 配置从下一次模型请求起生效（唤醒 run 已准备好的首个请求仍用旧工具，调用照常按唤醒身份复核）。
    */
   private async configureTools(conv: Conversation, threadKey: string, binding: TurnBinding = this.opts.turns.binding(threadKey)): Promise<void> {
+    const event = binding.identity.kind === "event" || isEventTurn(runRights(binding, this.owners()));
     const permissions = await this.opts.grants?.permissions(binding) ?? { actorIsOwner: false, target: false, auth: false };
-    const im = createPiImExtensions({ ...this.opts, binding: id => this.binding(id) }), selected = permissions.auth ? im.owner : permissions.target ? im.targeted : im.basic;
+    const im = createPiImExtensions({ ...this.opts, binding: id => this.binding(id) }), selected = event ? im.basic : permissions.auth ? im.owner : permissions.target ? im.targeted : im.basic;
     const schedule = createPiScheduleExtensions(id => this.binding(id), this.opts.scheduleTools);
     const available = await this.opts.scheduleTools?.permissions(binding);
-    const scheduleExtension = available?.scheduleControl ? schedule.control : available?.schedule ? schedule.management : undefined;
+    const scheduleExtension = event ? undefined : available?.scheduleControl ? schedule.control : available?.schedule ? schedule.management : undefined;
     const skill = createPiSkillExtension({ ...this.opts, binding: id => this.binding(id) });
     // 记忆：读工具恒有，写工具按本轮权限（host/identity.ts 的 runRights）选档，没有确证的人就没有写工具。
     const memory = createPiMemoryExtensions(id => this.binding(id), this.opts.memory);
     const memoryWrite = this.opts.memory ? selectMemoryWriteExtension(memory, memoryAccess(runRights(binding, this.owners()))) : undefined;
     await conv.configure({ extensions: {
-      add: [selected, ...(scheduleExtension ? [scheduleExtension] : []), ...(permissions.actorIsOwner ? [skill] : []),
+      add: [event ? this.toolModes.eventCoding : this.toolModes.coding, ...(!event && this.toolModes.subagent ? [this.toolModes.subagent] : []), selected, ...(scheduleExtension ? [scheduleExtension] : []), ...(!event && permissions.actorIsOwner ? [skill] : []),
         ...(this.opts.memory ? [memory.read] : []), ...(memoryWrite ? [memoryWrite] : [])],
-      remove: [...Object.values(im).filter(e => e.name !== selected.name),
-        ...Object.values(schedule).filter(e => e.name !== scheduleExtension?.name), ...(permissions.actorIsOwner ? [] : [skill]),
+      remove: [event ? this.toolModes.coding : this.toolModes.eventCoding, ...(event && this.toolModes.subagent ? [this.toolModes.subagent] : []), ...Object.values(im).filter(e => e.name !== selected.name),
+        ...Object.values(schedule).filter(e => e.name !== scheduleExtension?.name), ...(!event && permissions.actorIsOwner ? [] : [skill]),
         ...[memory.write, memory.owner].filter(e => e.name !== memoryWrite?.name), ...(this.opts.memory ? [] : [memory.read])],
     } }, context);
     await this.mcp?.configure({ conversation: conv, turn: binding }, context);
@@ -602,23 +659,37 @@ export class PiBackend implements ThreadAdapter {
           if (!state.active) await this.startWake(threadKey, state, running);
           const wake = state.active!;
           wake.owner = "backend";
-          return { backendTurnId: wake.turnId, ...(wake.identity ? { identity: wake.identity } : {}) };
+          return { backendTurnId: wake.turnId, ...(wake.identity ? { identity: wake.identity } : {}), ...(wake.event ? { event: wake.event } : {}) };
         }
         first = running;
-        await this.configureTools(conv, threadKey);
+        const event = await this.eventRun(threadKey, conv.id, first);
+        if (event) {
+          await this.configureEvent(threadKey, conv.id, event, piTurnId(conv.id, first));
+          this.host?.onTurnStarted(threadKey, piTurnId(conv.id, first), "backend", undefined, event);
+        } else await this.configureTools(conv, threadKey);
       } else {
         await this.configureTools(conv, threadKey);
-        // followUp 开新 run；requestId = 入站键，重放取回同一提交（已结束的提交其结果即本轮结果）
-        first = (await conv.submit({ type: "input", requestId: record!.key, content: await this.content(record!),
-          whenBusy: "followUp" }, context)).id;
+        const ref = inputs[0]!;
+        const identity: PiInput["identity"] = ref.kind === "user" ? { kind: "user", sender: ref.sender }
+          : ref.kind === "scheduled" ? { kind: "scheduled", creator: ref.sender }
+          : { kind: "event", source: ref.source ?? "", creator: ref.sender };
+        const submitted = await submitPiInput(this.harness, conv.id,
+          piInputSchema.parse({ inboundKey: record!.key, identity }), await this.content(record!));
+        first = submitted.first;
+        if (!submitted.submitted) {
+          await this.startWake(threadKey, state, first);
+          const wake = state.active!;
+          return { backendTurnId: wake.turnId, ...(wake.identity ? { identity: wake.identity } : {}), ...(wake.event ? { event: wake.event } : {}) };
+        }
       }
       const turnId = piTurnId(conv.id, first);
       if (state.active?.turnId === turnId) state.active.owner = "host";
       else {
         const active: ActiveTurn = { turnId, first, owner: "host" };
         state.active = active;
-        this.waitTurn(threadKey, active);
+        if (this.attached) this.waitTurn(threadKey, active);
       }
+      if (turn.kind === "event") trace.metadataOnly("turn:" + turnId);
       trace.event("turn:" + turnId, "dispatched", { detail: { backend: "pi", conversation_key: threadKey, conversation: conv.id,
         kind: turn.kind, inputs: [record!.key], ...(settings ? { settings } : {}) } });
       return { turnId };
@@ -635,7 +706,8 @@ export class PiBackend implements ThreadAdapter {
       const conv = await this.harness.conversation(this.threads.get(threadKey)!.conv, context);
       if (!conv) return "no_active_turn" as const;
       const [rec] = this.opts.turns.records([input]);
-      await conv.submit({ type: "input", requestId: rec!.key, content: await this.content(rec!), whenBusy: "steer" }, context);
+      await submitPiInput(this.harness, conv.id, piInputSchema.parse({ inboundKey: rec!.key,
+        identity: { kind: "user", sender: input.sender } }), await this.content(rec!), "steer");
       trace.event("turn:" + turnId, "steered", { detail: { backend: "pi", input: input.inboundKey } });
       return "ok" as const;
     });
@@ -706,14 +778,19 @@ export class PiBackend implements ThreadAdapter {
     if (!submission) return "lost";
     const wake = isSubagentReportRequest((await submission.status(context)).requestId);
     const active: ActiveTurn = { turnId, first: parsed.first, owner: wake ? "backend" : "host" };
-    if (wake) {
+    const event = await this.eventRun(threadKey, parsed.conv, parsed.first);
+    if (event) {
+      active.event = event;
+      await this.configureEvent(threadKey, parsed.conv, event, turnId);
+      this.host?.onTurnStarted(threadKey, turnId, "backend", undefined, event);
+    } else if (wake) {
       const live = await this.harness.snapshot(LiveDoc, parsed.conv, context);
       const identity = await this.runIdentity(parsed.conv, live?.run?.inputs[0] === parsed.first ? live.run.inputs : [parsed.first]);
       if (identity) active.identity = identity;
       await this.configureWakeTools(threadKey, parsed.conv, identity);
     }
     this.state(threadKey, parsed.conv).active = active;
-    this.waitTurn(threadKey, active);
+    if (this.attached) this.waitTurn(threadKey, active);
     return "alive";
   }
 
@@ -772,6 +849,14 @@ export class PiBackend implements ThreadAdapter {
     const active: ActiveTurn = { turnId: piTurnId(state.conv, first), first, owner: "backend" };
     state.active = active;
     const live = await this.harness.snapshot(LiveDoc, state.conv, context);
+    const event = await this.eventRun(threadKey, state.conv, first);
+    if (event) {
+      active.event = event;
+      await this.configureEvent(threadKey, state.conv, event, active.turnId);
+      this.host?.onTurnStarted(threadKey as ThreadKey, active.turnId, "backend", undefined, event);
+      if (this.attached) this.waitTurn(threadKey, active);
+      return;
+    }
     const identity = await this.runIdentity(state.conv, live?.run?.inputs[0] === first ? live.run.inputs : [first])
       .catch(error => { log.warn("pi wake identity unavailable; base rights", { thread: threadKey, error }); return undefined; });
     if (identity) active.identity = identity;
@@ -782,7 +867,7 @@ export class PiBackend implements ThreadAdapter {
       thread_key: threadKey, kind: "wake", inherited: identity ?? null } });
     trace.event("turn:" + active.turnId, "dispatched", { detail: { backend: "pi", conversation_key: threadKey, conversation: state.conv, kind: "wake" } });
     this.host?.onTurnStarted(threadKey as ThreadKey, active.turnId, "backend", identity);
-    this.waitTurn(threadKey, active);
+    if (this.attached) this.waitTurn(threadKey, active);
   }
 
   /** 接上会话事件流：run 开始时识别唤醒回合，模型与工具活动刷新看门狗。须在会话键串行内调用。 */
@@ -802,7 +887,15 @@ export class PiBackend implements ThreadAdapter {
           const live = await this.harness.snapshot(LiveDoc, conv, context);
           if (live?.run?.inputs[0] !== run[0]) continue;
           // 宿主有回合进行中时出现的 run 并入该回合（同一会话一次只有一个回合）。
-          if (current.active) this.host?.onActivity(threadKey as ThreadKey);
+          if (current.active) {
+            const event = await this.eventRun(threadKey, conv, run[0]!);
+            if (event) {
+              current.active.event = event;
+              await this.configureEvent(threadKey, conv, event, current.active.turnId);
+              this.host?.onTurnStarted(threadKey as ThreadKey, current.active.turnId, "backend", undefined, event);
+            }
+            this.host?.onActivity(threadKey as ThreadKey);
+          }
           else await this.startWake(threadKey, current, run[0]!);
         } else if (["message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "turn_start"].includes(event.type)) {
           this.host?.onActivity(threadKey as ThreadKey);

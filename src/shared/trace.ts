@@ -20,6 +20,12 @@ function errorCategory(error: unknown): string {
 export class Trace {
   private listeners = new Set<Listener>();
   private taps = new Set<(e: LiveEvent) => void>();
+  private readonly privateKeys = new Set<string>();
+  /** 事件回合只保留固定观测字段，模型与工具正文仍留在正常会话历史。 */
+  metadataOnly(key: string): void {
+    this.privateKeys.add(key);
+    if (this.privateKeys.size > 10000) this.privateKeys.delete(this.privateKeys.values().next().value!);
+  }
   dropped = 0;
   constructor(private store?: TraceStore) {}
   attach(store?: TraceStore): void { this.store = store; }
@@ -29,6 +35,13 @@ export class Trace {
   event(key: string, stage: string, opts: EventOptions = {}): void {
     if (!this.store && !this.taps.size) return;
     try {
+      if (key.startsWith('in:evt_') || this.privateKeys.has(key)) {
+        const allowed = new Set(['backend', 'thread_key', 'conversation', 'kind', 'inputs', 'terminal', 'status', 'tool',
+          'provider', 'model', 'call_id', 'taskId', 'callId', 'serverId', 'remoteName', 'code', 'error_code',
+          'source', 'count', 'result', 'events', 'durationMs', 'already_sent', 'system']);
+        const raw = opts.detail && typeof opts.detail === 'object' ? opts.detail : {};
+        opts = { ...opts, detail: Object.fromEntries(Object.entries(raw).filter(([name]) => allowed.has(name))) };
+      }
       const detail = opts.status === 'failed' && opts.detail && typeof opts.detail === 'object'
         ? { ...opts.detail, error_category: errorCategory((opts.detail as Record<string, unknown>).error) } : opts.detail;
       const ts = opts.ts !== undefined && Number.isFinite(opts.ts) ? Math.max(0,opts.ts) : Date.now(), status = opts.status ?? 'ok';

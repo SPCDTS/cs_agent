@@ -1,3 +1,4 @@
+import { turnResult } from "../turn-result.js";
 import { isOwnerActor } from "../../shared/owners.js";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { createHash } from "node:crypto";
@@ -147,10 +148,7 @@ export function createScheduledRuntime(opts: ScheduledRuntimeOptions) {
     if (!run.result) {
       const turnId = outcome?.turnId ?? run.turn_id;
       const rows = turnId ? opts.getChannel().outbox.listOutboxByTurn(turnId).filter(row => !row.system) : [];
-      const sent = rows.filter(row => row.status === "sent").length;
-      // 不确定的投递不能算静默或成功；保留 Outbox 状态且永不重发。
-      const deliveryFailed = rows.some(row => row.status !== "sent" || row.files.some(file => file.status !== "sent"));
-      const turnFailed = !run.denied && (outcome?.status ?? "completed") !== "completed";
+      const { sent, deliveryFailed, turnFailed } = turnResult(outcome?.status ?? "completed", rows);
       const failed = run.denied || turnFailed || deliveryFailed;
       const record: ScheduleRun = {
         fire_key: run.fire_key, fire_at: run.fire_at, input_key: key, status: failed ? "failed" : sent ? "sent" : "silent",

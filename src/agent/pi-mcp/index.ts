@@ -11,11 +11,11 @@ import { z } from "zod";
 import type { TurnBinding } from "../../channel/types.js";
 import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import { trace } from "../../shared/trace.js";
-import { runRights } from "../host/identity.js";
+import { isEventTurn, runRights } from "../host/identity.js";
 import { traceKey, type PiCallBinding } from "../pi-tools/request.js";
 import { DEFAULT_MCP_LIMITS, resourceUriSchema, type EnvironmentSecrets, type McpConfigState, type McpServerConfig } from "./config.js";
 import { McpConnection, McpConnectionError, McpRemoteError } from "./connection.js";
-import { McpCatalogsDoc, approvalCatalog, compileStoredTool, digest, jsonBytes, makeCatalog, restoreCatalog, serverDigest, toolContract, toolNames,
+import { McpCatalogsDoc, approvalCatalog, eventCatalog, compileStoredTool, digest, jsonBytes, makeCatalog, restoreCatalog, serverDigest, toolContract, toolNames,
   type CatalogRevision } from "./catalog.js";
 import { MCP_CONTROL_EXTENSION, MCP_RESOURCE_EXTENSION, isMcpControlTool, isMcpExtensionName, isMcpToolName, type McpToolIdentity } from "./names.js";
 import { McpDelegationDoc, readDelegation, type McpDelegation } from "./delegation.js";
@@ -149,7 +149,7 @@ export class PiMcp {
     const binding = await this.opts.binding(Number(parent));
     if (!binding || binding.child || this.opts.config.kind !== "enabled") return null;
     const rights = runRights(binding, this.opts.owners());
-    if (!rights.person) return null;
+    if (!rights.person || isEventTurn(rights)) return null;
     const servers: Record<string, string> = {};
     for (const server of this.opts.config.value.servers) {
       if (!this.authorizeParent(server, binding) || !server.access.allowSubagent) continue;
@@ -288,6 +288,7 @@ export class PiMcp {
       !this.allowedScope(server, binding) || ("child" in binding && binding.child)) return;
     const rights = runRights(binding, this.opts.owners());
     if (!rights.person || (!binding.scope.startsWith("group:") && !rights.owner)) return;
+    if (binding.identity.kind === "event" || isEventTurn(rights)) return server.tools.eventAllow.length ? this.principal(binding, rights.person.person) : undefined;
     if (binding.identity.kind === "wake" && !server.access.allowWake) return;
     if (rights.person.kind === "scheduled" && !server.access.allowScheduled) return;
     return this.principal(binding, rights.person.person);
@@ -376,8 +377,9 @@ export class PiMcp {
 
   private async selection(revision: CatalogRevision, server: McpServerConfig, turn: TurnBinding, signal: AbortSignal): Promise<CatalogRevision> {
     // 群里 owner 与成员共用一份目录：工具名不随回合身份变化，是否审批只在执行时按身份决定。
-    if (!turn.scope.startsWith("group:")) return revision;
-    const selected = approvalCatalog(revision, server.tools.approval);
+    const event = turn.identity.kind === "event" || isEventTurn(runRights(turn, this.opts.owners()));
+    if (!event && !turn.scope.startsWith("group:")) return revision;
+    const selected = event ? eventCatalog(revision, server.tools.eventAllow) : approvalCatalog(revision, server.tools.approval);
     if (jsonBytes(selected) > this.limits.catalogBytes) throw new McpFailure("catalog_too_large");
     await this.publish(selected, signal);
     return selected;
@@ -531,6 +533,7 @@ export class PiMcp {
       bound = await call.resolve();
       const principal = server && await this.authorize(server, bound, call.conversationId);
       if (!server || !bound || !principal || !server.tools.allow.includes(call.toolName)) throw new McpFailure("denied");
+      if (isEventTurn(runRights(bound, this.opts.owners())) && !server.tools.eventAllow.includes(call.toolName)) throw new McpFailure("denied");
       const validApproval = () => !approved || (isOwner(this.opts.owners(), approved.decided_by) &&
         serverDigest(server) === approved.server_digest && server.tools.approval.includes(call.toolName) &&
         server.access.groups.includes(approved.scope.slice(6)) && digest(call.args) === approved.args_digest);
@@ -546,6 +549,7 @@ export class PiMcp {
         const live = await call.resolve();
         if (await this.authorize(server, live, call.conversationId) !== principal || !live || !validApproval() ||
           digest(runRights(live, this.opts.owners()).person ?? null) !== digest(person ?? null)) throw new McpFailure("denied");
+        if (isEventTurn(runRights(live, this.opts.owners())) && !server.tools.eventAllow.includes(call.toolName)) throw new McpFailure("denied");
         return live;
       };
       const output = await this.withEntry(server, Number(call.conversationId), bound, principal, budget.signal, async entry => {

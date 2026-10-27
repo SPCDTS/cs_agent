@@ -1,6 +1,6 @@
 # 外部事件设计
 
-状态：设计稿，未实现。日期：2026-10-27。设计基线：cs-agent `8eac41a`。依赖：Gmail sidecar（[GMAIL-SIDECAR.md](GMAIL-SIDECAR.md)）、Pi 外部 MCP（[PI-MCP.md](PI-MCP.md)）、定时任务（[ARCHITECTURE.md](ARCHITECTURE.md) §6）。
+状态：P1 已实现（Gmail 来源、内核、面板最小页）；webhook、安静时段 UI、日历未做。日期：2026-10-27。设计基线：cs-agent `8eac41a`。依赖：Gmail sidecar（[GMAIL-SIDECAR.md](GMAIL-SIDECAR.md)）、Pi 外部 MCP（[PI-MCP.md](PI-MCP.md)）、定时任务（[ARCHITECTURE.md](ARCHITECTURE.md) §6）。
 
 ## 1. 设计结论
 
@@ -140,14 +140,20 @@ sidecar 增加非 MCP 端点 `GET /events?cursor=<historyId>&limit=<n>`，鉴权
 
 Notion 同理只开 `notion-search`、`notion-fetch`。cs2-workshop 不开。
 
-事件回合在 codex 后端没有 MCP（现状），只能凭外壳里的元数据分诊；要让它读全文，owner 线程须在 Pi 后端（现状已是）。
+事件回合仅支持 owner 会话后端为 Pi。Codex 的沙箱按线程固定，不能在同一线程的事件回合临时收紧 bash 与文件写权限，因此不允许 Codex 承载事件回合。事件服务在插入 inbound 前读取 ThreadHost 的会话后端；不是 Pi 时保留 held（最多 200 件，溢出丢弃最旧并告警），记 backend_unsupported，并在 stats.blockedReason 显示“owner 线程后端为 codex，事件需要 Pi 后端”，同时标记 degraded，不等同于暂停。每次轮询及合并检查重验，切回 Pi 后清除阻塞并按原合并、预算规则投递；尚未建立会话后端时同样等待 owner 用户回合初始化。修改后端设置后，需由下一次 owner 用户回合完成会话后端切换。ThreadHost 开轮前再次检查，切换竞态下将事件输入标为 done / failed，reason=backend_unsupported，不进入 Codex；主进程 im 权限复核仍保留。
 
 ## 9. 持久化与恢复
+
+Pi 在 conversation 文档 `cs.pi.input` 中按 submission id 保存入站键与身份（事件为 `{ kind: "event", source, creator }`），和输入提交、run 创建在同一 harness 事务写入。普通用户、定时输入及用户插话也记录身份，以区分合法普通运行和未知运行。即使进程在 Pi 提交后、ThreadHost 保存 turnId 前退出，恢复的 snapshot 和 recoverTurn 都先校验此记录与 submission / inbound，再配置 eventCoding、basic IM、事件 MCP 目录并移除 subagent、定时和写工具；宿主接回原输入，持久化 turnKind / turnSource / turnSender，不能按普通 wake 接管。所有恢复会话完成配置后才注册 submission 等待并恢复调度（wait 本身会启动调度）。owner 运行记录缺失或不一致时按事件限制处理，creator 为空、不提升读取或 MCP 权限；spawner 与 codingEnvironment 同样每次从持久化身份重建限制。
+
+事件 trace 的正文过滤在每个输出点由绑定身份重新设置，包括 afterTool、model_turn 结束和发送；不依赖 beforeTool 是否执行或内存标记是否仍在。safe 工具从 execute 检查点重放时跳过 beforeTool，也只能记录元数据。恢复时另行重建回合标记，邮件正文仍只进入正常会话历史。
 
 - `cs.events`（宿主 harness session 文档）：每个来源的 `enabled`、`cursor`、`settings`（过滤、合并窗口、预算）、`held`（安静时段积压）、`stats`（最近轮询时间与结果、连续失败数、最近 24 小时投递/静默/发送计数）、`paused_reason`。
 - `cs.events.run`（文档族）：每条事件输入的运行记录，成员键为入站键，保留最近 200 条，旧的裁剪。
 - 事件输入与定时输入同在 `qq-bridge.sqlite` 的 `inbound`，重启后由 Inbox 按既有规则重新投递 `queued` 的；游标在 `cs.events`，重启从游标继续。两者没有事务，顺序保证（先 inbound 后游标）使崩溃只产生重复而不丢失。
 - 安静时段积压随文档持久，重启不丢。
+
+P1 持久化补充：合并期间用 pendingCursor 随 held 保存已拉取位置；cursor 只在入站成功后确认。inbound_event_keys 与合并入站行同事务保存各事件去重键，run 裁剪不影响去重。预算溢出的键与 extraCount（≤999）持久保存，在下一条输入中确认。quietHours 配在 cs.events.sources.<id>.settings 中，使用北京时间；面板暂不提供设置表单。
 
 ## 10. 轮询与容量
 

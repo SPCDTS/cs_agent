@@ -59,7 +59,7 @@ export function createPiSkillExtension(opts: Pick<PiToolsOptions, "binding"> & {
       async execute(args, api) {
         try {
           const bound = await opts.binding(Number(api.conversationId)), env = api.env;
-          if (!bound || bound.child || !bound.senderIsOwner || !(env instanceof PiExecutionEnv)) throw new Error(SKILL_OWNER_ONLY);
+          if (!bound || bound.child || !bound.senderIsOwner || bound.identity.kind === "event" || !(env instanceof PiExecutionEnv)) throw new Error(SKILL_OWNER_ONLY);
           return output(JSON.stringify(await publishSkill(opts.skills, env.policy.workspace, args)));
         } catch (error) { return { ...output((error as Error).message), isError: true }; }
       },

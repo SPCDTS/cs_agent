@@ -594,6 +594,7 @@ export class CodexBackend implements ThreadAdapter {
     if (rec.kind !== undefined) return;
     rec.kind = kind;
     const turnId = hostTurnId(rec.codexTurnId);
+    if (this.opts.turns.binding(rec.key).identity.kind === "event") trace.metadataOnly("turn:" + turnId);
     const buffered = rec.buffered.splice(0);
     if (kind === "user") {
       rec.hostVisible = true;

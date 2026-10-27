@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ChatType, InboundMessage, InboundRecord, InboundState, ScheduledInput } from "../channel/types.js";
+import type { ChatType, InboundMessage, InboundRecord, InboundState, ScheduledInput, EventInput } from "../channel/types.js";
 
 import type { OutboxInput, OutboxRow } from "../channel/outbox.js";
 import { isSendRuleError, type SendBreaker, type SendRuleLimits } from "../channel/send-rules.js";
@@ -30,6 +30,7 @@ export function dedupeKey(m: Pick<InboundMessage, "self_id" | "message_type" | "
 }
 
 interface InboundRow {
+  event_source: string | null; event_count: number | null; event_keys: string | null;
   seq: number; key: string; kind: string; scope: string; thread_key: string; self_id: string; user_id: string;
   group_id: string | null; group_name: string | null; message_type: string; message_id: string; nickname: string;
   text: string; route_text: string; reply_to: string | null; time: number; images: string; attachments: string;
@@ -38,7 +39,8 @@ interface InboundRow {
 
 function toInbound(row: InboundRow): InboundRecord {
   return {
-    key: row.key, kind: row.kind === "scheduled" ? "scheduled" : "user", seq: Number(row.seq), scope: row.scope,
+    key: row.key, kind: row.kind === "event" ? "event" : row.kind === "scheduled" ? "scheduled" : "user", seq: Number(row.seq), scope: row.scope,
+    ...(row.event_source ? { event_source: row.event_source, event_count: row.event_count ?? 0, event_keys: JSON.parse(row.event_keys ?? "[]") } : {}),
     thread_key: row.thread_key, self_id: row.self_id, user_id: row.user_id, group_id: row.group_id,
     ...(row.group_name ? { group_name: row.group_name } : {}),
     message_type: row.message_type === "group" ? "group" : "private", message_id: row.message_id, nickname: row.nickname,
@@ -62,7 +64,8 @@ CREATE TABLE IF NOT EXISTS outbox (
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS inbound (
-  key TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('user','scheduled')),
+  key TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('user','scheduled','event')),
+  event_source TEXT, event_count INTEGER, event_keys TEXT,
   scope TEXT NOT NULL, thread_key TEXT NOT NULL, self_id TEXT NOT NULL DEFAULT '', user_id TEXT NOT NULL,
   group_id TEXT, group_name TEXT, message_type TEXT NOT NULL CHECK (message_type IN ('private','group')),
   message_id TEXT NOT NULL DEFAULT '', nickname TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '',
@@ -103,6 +106,20 @@ export class ReplyStore {
    *   thread_key 保留原入站键、#late/#fallback 行标为系统消息，主动额度所需的 proactive/created_at 原样保留。
    */
   private migrate(): void {
+    const inbound = this.columns("inbound");
+    const schema = String(this.db.prepare("SELECT sql FROM sqlite_schema WHERE name='inbound'").get()?.sql ?? "");
+    if (!schema.includes("'event'") || !inbound.includes("event_keys")) {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.db.exec("DROP INDEX IF EXISTS inbound_state; DROP INDEX IF EXISTS inbound_thread; DROP INDEX IF EXISTS inbound_turn; ALTER TABLE inbound RENAME TO inbound_previous;");
+        this.db.exec(SCHEMA);
+        // rowid 是恢复顺序号，迁移必须原样保留。
+        const columns = inbound.map(name => '"' + name + '"').join(',');
+        this.db.exec('INSERT INTO inbound(rowid,' + columns + ') SELECT rowid,' + columns + ' FROM inbound_previous; DROP TABLE inbound_previous;');
+        this.db.exec("COMMIT");
+      } catch (error) { if (this.db.isTransaction) this.db.exec("ROLLBACK"); throw error; }
+    }
+    this.db.exec("CREATE TABLE IF NOT EXISTS inbound_event_keys (key TEXT PRIMARY KEY, input_key TEXT NOT NULL)");
     const outbox = this.columns("outbox");
     if (outbox.includes("ticket")) {
       if (!outbox.includes("proactive")) this.db.exec("ALTER TABLE outbox ADD COLUMN proactive INTEGER NOT NULL DEFAULT 0");
@@ -281,8 +298,33 @@ export class ReplyStore {
     return rec;
   }
 
+  /** 事件输入与全部合并键同事务写入；run 裁剪后仍能去重。 */
+  openEventInput(input: EventInput): InboundRecord {
+    const pattern = /^evt_[A-Za-z][A-Za-z0-9_:-]{0,63}_[a-f0-9]{40}$/;
+    if (!/^[1-9][0-9]{0,19}$/.test(input.owner) || !pattern.test(input.key) ||
+        !input.eventKeys.includes(input.key) || !input.eventKeys.every(key => pattern.test(key)) ||
+        !Number.isSafeInteger(input.count) || input.count < 1) throw new Error("事件输入无效");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.getInbound(input.key);
+      if (existing) {
+        if (existing.kind !== "event" || existing.event_source !== input.source || existing.user_id !== input.owner) throw new Error("事件输入绑定不一致");
+        this.db.exec("COMMIT"); return existing;
+      }
+      if (input.eventKeys.some(key => this.getInbound(key))) throw new Error("事件合并键已投递");
+      this.db.prepare("INSERT INTO inbound " +
+        "(key,kind,event_source,event_count,event_keys,scope,thread_key,user_id,message_type,text,route_text,time,created_at,state) " +
+        "VALUES (?,'event',?,?,?,?,'owner',?,'private',?,?,?,?,'queued')")
+        .run(input.key, input.source, input.count, JSON.stringify(input.eventKeys), 'private:' + input.owner, input.owner,
+          input.text, input.text, input.time, new Date().toISOString());
+      const alias = this.db.prepare("INSERT INTO inbound_event_keys(key,input_key) VALUES (?,?)");
+      for (const key of new Set(input.eventKeys)) alias.run(key, input.key);
+      this.db.exec("COMMIT"); return this.getInbound(input.key)!;
+    } catch (error) { if (this.db.isTransaction) this.db.exec("ROLLBACK"); throw error; }
+  }
+
   getInbound(key: string): InboundRecord | null {
-    const row = this.db.prepare("SELECT rowid AS seq, * FROM inbound WHERE key = ?").get(key) as InboundRow | undefined;
+    const row = this.db.prepare("SELECT rowid AS seq, * FROM inbound WHERE key = ?1 OR key = (SELECT input_key FROM inbound_event_keys WHERE key = ?1)").get(key) as InboundRow | undefined;
     return row ? toInbound(row) : null;
   }
 

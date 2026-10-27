@@ -71,6 +71,13 @@ export function approvalCatalog(revision: CatalogRevision, approval: readonly st
   return { ...payload, digest: digest(payload) };
 }
 
+/** 事件目录与交互目录使用不同名称，历史中的写工具不能混入。 */
+export function eventCatalog(revision: CatalogRevision, allow: readonly string[]): CatalogRevision {
+  const { digest: _digest, ...original } = revision;
+  const payload = { ...original, scopeDigest: digest([revision.scopeDigest, "event"]), tools: revision.tools.filter(tool => allow.includes(tool.name)) };
+  return { ...payload, digest: digest(payload) };
+}
+
 export function restoreCatalog(input: unknown, limits: McpLimits): CatalogRevision {
   if (jsonBytes(input) > limits.catalogBytes) throw new Error("catalog_too_large");
   const revision = revisionSchema.parse(input);

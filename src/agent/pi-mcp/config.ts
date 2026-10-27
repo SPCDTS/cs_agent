@@ -67,8 +67,10 @@ const serverSchema = z.strictObject({
     z.strictObject({ kind: z.literal("external-account"), accountId: cleanText.min(1).max(128), revision: cleanText.min(1).max(128) }),
   ]),
   tools: z.strictObject({ allow: z.array(cleanText.min(1).max(256)).max(1_000).refine(value => new Set(value).size === value.length),
+    eventAllow: z.array(cleanText.min(1).max(256)).max(1_000).default([]),
     approval: z.array(cleanText.min(1).max(256)).max(1_000).default([]) }).refine(value => value.approval.every(name => value.allow.includes(name)),
-      { message: "approval 必须是 allow 的子集" }),
+      { message: "approval 必须是 allow 的子集" }).refine(value => value.eventAllow.every(name => value.allow.includes(name)),
+      { message: "eventAllow 必须是 allow 的子集" }),
   resources: z.strictObject({ allow: z.array(cleanText.min(1).max(2_048)).max(256)
     .refine(value => new Set(value).size === value.length).default([]) }).default(() => ({ allow: [] })),
   access: z.strictObject({ kind: z.literal("owner-private"), allowScheduled: z.boolean().default(false), allowWake: z.boolean().default(false),
@@ -103,7 +105,7 @@ export function parseMcpConfig(input: unknown): McpConfigState {
       kind: "invalid",
       issues: parsed.error.issues.slice(0, 32).map(issue => ({
         path: issue.path.map(part => typeof part === "number" ? String(part) : String(part).replace(/[^A-Za-z0-9_-]/gu, "*").slice(0, 64)).join("."),
-        code: issue.code, message: "MCP 配置不符合契约",
+        code: issue.code, message: issue.message === "eventAllow 必须是 allow 的子集" ? issue.message : "MCP 配置不符合契约",
       })),
     };
     return parsed.data.enabled ? { kind: "enabled", value: parsed.data } : { kind: "disabled", reason: "MCP 配置已禁用" };

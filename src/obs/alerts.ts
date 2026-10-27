@@ -27,6 +27,9 @@ export function startAlerts(opts: { enabled: boolean | (() => boolean); owner?: 
       void opts.bridge.sendOps('private', opts.owner!, `cs-agent 告警：${who}发送熔断（${d.reason}），暂停 ${minutes} 分钟；可在面板设置页解除。`)
         .catch(() => log.warn('owner breaker alert delivery failed'));
     }
+    if (e.stage === 'event_source_state' && d.state === 'paused' && d.reason === '连续 3 次失败') send('事件来源连续三次回合失败，已自动暂停，请打开事件面板排查。');
+    if (e.stage === 'event_source_state' && d.state === 'degraded') send('事件来源连续三次轮询失败，正在退避重试，请打开事件面板排查。');
+    if (e.stage === 'event_source_state' && d.state === 'overflow') send('事件积压超过 200 件，已丢弃最旧事件，请打开事件面板排查。');
     if (e.stage === 'schedule_paused') send('定时任务连续三次失败，已自动暂停，请打开观测面板排查。');
     if (e.status === 'failed' && /codex|pi|model_turn|model_error|tool:/.test(e.stage) && d.failure?.kind === 'auth')
       send('模型鉴权失败，请检查凭据。');

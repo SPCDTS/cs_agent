@@ -64,7 +64,7 @@ export class Inbox {
     if (rec.state === "done") return;
     if (await this.opts.intercept?.(rec, () => this.channel.inbox.markInbound([rec.key], "done"))) return;
     const result = await this.opts.getHost().deliver(rec.thread_key as ThreadKey, {
-      inboundKey: rec.key, kind: rec.kind, sender: rec.user_id,
+      inboundKey: rec.key, kind: rec.kind, sender: rec.user_id, ...(rec.event_source ? { source: rec.event_source } : {}),
     });
     trace.event("in:" + rec.key, "queued", { scope: rec.scope, detail: { thread_key: rec.thread_key, kind: rec.kind, result } });
   }
@@ -73,6 +73,13 @@ export class Inbox {
   async deliverScheduled(key: string): Promise<void> {
     const rec = this.channel.inbox.getInbound(key);
     if (!rec || rec.kind !== "scheduled") throw new Error("定时输入不存在");
+    await this.deliver(rec);
+  }
+
+  /** 事件输入复用定时输入的投递路径，按入站键幂等排队。 */
+  async deliverEvent(key: string): Promise<void> {
+    const rec = this.get(key);
+    if (!rec || rec.kind !== "event") throw new Error("事件输入不存在");
     await this.deliver(rec);
   }
 
@@ -99,7 +106,7 @@ export class Inbox {
         }
         const ready = rec.kind === "user" && rec.attachments.some(a => a.status === "pending")
           ? await this.channel.prepareIncoming?.(rec.key) ?? rec : rec;
-        trace.event("in:" + rec.key, "recovered", { scope: rec.scope, detail: { text: rec.text, sender: rec.nickname } });
+        trace.event("in:" + rec.key, "recovered", { scope: rec.scope, detail: rec.kind === "event" ? { kind: "event" } : { text: rec.text, sender: rec.nickname } });
         await this.deliver(ready);
       } catch (error) {
         log.warn("inbound recovery failed", { key: rec.key.slice(0, 12), error });
@@ -165,7 +172,7 @@ export class Inbox {
     const gap = first ? this.gap(first, backend) : "";
     if (gap) parts.push(gap);
     for (const rec of records) {
-      if (rec.kind === "scheduled") { parts.push(rec.text); continue; }
+      if (rec.kind === "scheduled" || rec.kind === "event") { parts.push(rec.text); continue; }
       const source = sourceOf(rec);
       let quote: { message_id: string; nickname: string; text: string } | undefined;
       if (rec.reply_to && this.opts.store) {

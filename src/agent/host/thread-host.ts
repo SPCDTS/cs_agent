@@ -25,7 +25,7 @@ import { isOwner, type OwnerIds } from "../../shared/owners.js";
 import { mergePersons } from "./identity.js";
 import { HostInputDoc, ThreadHostDoc, ThreadHostIndexDoc, type ThreadHostState } from "./docs.js";
 import type {
-  DeliverResult, HostCallbacks, HostInput, InputRef, RunPerson, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey,
+  DeliverResult, HostCallbacks, HostInput, RecoveredEvent, InputRef, RunPerson, StartTurnResult, ThreadAdapter, ThreadHostEvents, ThreadKey,
   TurnEnded, TurnIdentity, TurnOutcome, TurnStatus,
 } from "./types.js";
 
@@ -52,7 +52,7 @@ export interface ThreadHostOptions {
 }
 
 /** 文档里可缺省的字段：写回时不在新状态里的要删除，不能残留上一轮的值。 */
-const OPTIONAL = ["turnId", "turnKind", "turnSender", "turnInherited", "lastActivityAt", "backend"] as const;
+const OPTIONAL = ["turnId", "turnKind", "turnSender", "turnSource", "turnInherited", "lastActivityAt", "backend"] as const;
 
 /** 空闲状态：会话后端保留。 */
 function idleState(s: ThreadHostState, pending = s.pending): ThreadHostState {
@@ -66,8 +66,18 @@ function wakeState(s: ThreadHostState, turnId: string, identity: RunPerson | und
   const wake: ThreadHostState = { ...s, busy: true, turnId, turnKind: "wake", turnInputs: [], mentioned: false, lastActivityAt: now,
     ...(inherited ? { turnInherited: inherited } : {}) };
   delete wake.turnSender;
+  delete wake.turnSource;
   if (!inherited) delete wake.turnInherited;
   return wake;
+}
+
+/** Pi 提交先于宿主确认落盘时，接回原事件输入；不得退化为可写的 wake。 */
+function eventState(s: ThreadHostState, turnId: string, event: RecoveredEvent, now: number): ThreadHostState {
+  const inputs = [...s.turnInputs, ...s.pending].filter(input => input.inboundKey === event.inboundKey);
+  const next = { ...wakeState(s, turnId, undefined, now), turnKind: "event" as const,
+    turnSource: event.identity.source, turnSender: event.identity.creator, turnInputs: inputs,
+    pending: s.pending.filter(input => input.inboundKey !== event.inboundKey) };
+  return next;
 }
 
 function bySeq(refs: readonly InputRef[]): InputRef[] {
@@ -140,7 +150,7 @@ export class ThreadHost implements HostCallbacks {
         const doc = await tx.doc(HostInputDoc, input.inboundKey, threadKey);
         if (doc.state !== "new") return;
         const index = await tx.doc(ThreadHostIndexDoc);
-        ref = { inboundKey: input.inboundKey, kind: input.kind, sender: input.sender, seq: index.nextSeq++, at: this.now() };
+        ref = { ...input, seq: index.nextSeq++, at: this.now() };
         Object.assign(doc, { threadKey, seq: ref.seq, state: "queued" });
         next = { ...s, pending: bySeq([...s.pending, ref]) };
         await this.write(tx, next);
@@ -259,6 +269,7 @@ export class ThreadHost implements HostCallbacks {
         }
         const begun: ThreadHostState = {
           ...s, busy: true, turnKind: head.kind, turnSender: head.sender, turnInputs: inputs,
+          turnSource: head.source,
           pending: s.pending.slice(1), mentioned: false, lastActivityAt: this.now(),
           ...(backend !== undefined ? { backend } : {}),
         };
@@ -268,10 +279,15 @@ export class ThreadHost implements HostCallbacks {
         await this.save(threadKey, begun, tx => this.markInputs(tx, threadKey, inputs, "starting"));
         used = true;
         this.holding.add(threadKey);
+        if (head.kind === "event" && backend !== "pi") {
+          log.warn("thread host event backend unsupported", { thread: threadKey, input: head.inboundKey, backend });
+          await this.finish(threadKey, begun, "failed", "backend_unsupported");
+          return;
+        }
         let started: StartTurnResult;
         try {
           // 定时输入开轮前按创建者当前授权复核（排队期间可能已撤销或过期）；适配器内部重试前再经 ctx.admit 复核
-          const admit = head.kind === "scheduled" && this.opts.admit ? () => this.opts.admit!(threadKey, head) : undefined;
+          const admit = head.kind !== "user" && this.opts.admit ? () => this.opts.admit!(threadKey, head) : undefined;
           started = admit && !await admit() ? { denied: true }
             : await this.opts.adapter.startTurn(threadKey, inputs, { kind: head.kind, sender: head.sender,
               ...(admit ? { admit } : {}), ...(backend !== undefined ? { backend } : {}) });
@@ -281,8 +297,8 @@ export class ThreadHost implements HostCallbacks {
           return;
         }
         if ("denied" in started) {
-          log.warn("thread host scheduled input denied at turn start", { thread: threadKey, input: head.inboundKey });
-          await this.finish(threadKey, begun, "failed", "定时任务创建者已无权限");
+          log.warn("thread host input denied at turn start", { thread: threadKey, input: head.inboundKey });
+          await this.finish(threadKey, begun, "failed", head.kind === "event" ? "事件来源创建者已无权限" : "定时任务创建者已无权限");
           return;
         }
         const cur = this.threads.get(threadKey)!;
@@ -291,7 +307,11 @@ export class ThreadHost implements HostCallbacks {
           log.warn("thread host start yielded to backend turn", { thread: threadKey, turn: started.backendTurnId, inputs: keys });
           const wake = wakeState(cur, started.backendTurnId, started.identity, this.now());
           wake.pending = bySeq([...inputs, ...cur.pending]);
-          await this.save(threadKey, wake);
+          if (started.event) {
+            const adopted = eventState(wake, started.backendTurnId, started.event, this.now());
+            await this.save(threadKey, adopted, tx => this.markInputs(tx, threadKey, adopted.turnInputs, "delivered"));
+            this.emit("inputsDelivered", threadKey, started.backendTurnId, adopted.turnInputs);
+          } else await this.save(threadKey, wake);
           return;
         }
         if ("absorbedInto" in started) {
@@ -325,7 +345,7 @@ export class ThreadHost implements HostCallbacks {
   private async finish(threadKey: ThreadKey, s: ThreadHostState, status: TurnStatus, error?: string): Promise<void> {
     const cur = this.threads.get(threadKey) ?? s;
     await this.save(threadKey, idleState(cur), tx => this.markInputs(tx, threadKey, s.turnInputs, "done",
-      { status, ...(s.turnId ? { turnId: s.turnId } : {}) }));
+      { status, ...(s.turnId ? { turnId: s.turnId } : {}), ...(error === "backend_unsupported" ? { reason: "backend_unsupported" as const } : {}) }));
     if (this.holding.delete(threadKey)) this.slots.release();
     const event: TurnEnded = {
       threadKey, kind: s.turnKind ?? "wake", inputs: s.turnInputs, status,
@@ -336,9 +356,18 @@ export class ThreadHost implements HostCallbacks {
 
   // ───────────── 适配器回调 ─────────────
 
-  onTurnStarted(threadKey: ThreadKey, turnId: string, initiatedBy: "host" | "backend", identity?: RunPerson): void {
+  onTurnStarted(threadKey: ThreadKey, turnId: string, initiatedBy: "host" | "backend", identity?: RunPerson, event?: RecoveredEvent): void {
     this.track(this.serial(threadKey, async () => {
       const s = await this.load(threadKey);
+      if (event && initiatedBy === "backend") {
+        const adopted = eventState(s, turnId, event, this.now());
+        if (s.busy && s.turnId !== turnId) adopted.pending = bySeq([...adopted.pending,
+          ...s.turnInputs.filter(input => input.inboundKey !== event.inboundKey)]);
+        await this.save(threadKey, adopted, tx => this.markInputs(tx, threadKey, adopted.turnInputs, "delivered"));
+        this.emit("inputsDelivered", threadKey, turnId, adopted.turnInputs);
+        if (!this.holding.has(threadKey)) { this.holding.add(threadKey); this.slots.force(); }
+        return;
+      }
       if (s.busy && s.turnId === turnId) { this.touch(s); return; }
       if (initiatedBy === "host") return; // 不是本宿主当前的回合：过期事件
       if (s.busy) {
@@ -392,6 +421,7 @@ export class ThreadHost implements HostCallbacks {
     const s = this.threads.get(threadKey);
     if (!s?.busy) return undefined;
     if (s.turnKind === "user" && s.turnSender) return { kind: "user", sender: s.turnSender };
+    if (s.turnKind === "event") return { kind: "event", source: s.turnSource ?? "unidentified", creator: s.turnSender ?? "" };
     if (s.turnKind === "scheduled" && s.turnSender) return { kind: "scheduled", creator: s.turnSender };
     return { kind: "wake", ...(s.turnKind === "wake" && s.turnInherited ? { inherited: structuredClone(s.turnInherited) } : {}) };
   }
@@ -431,10 +461,10 @@ export class ThreadHost implements HostCallbacks {
   }
 
   /** 已结束输入所在回合的结果（与 done 同一提交写入）；未结束或没有记录返回 undefined。 */
-  async inputOutcome(inboundKey: string): Promise<{ status: TurnStatus; turnId?: string } | undefined> {
+  async inputOutcome(inboundKey: string): Promise<{ status: TurnStatus; turnId?: string; reason?: "backend_unsupported" } | undefined> {
     const doc = await this.opts.store.snapshot(HostInputDoc, inboundKey, this.ctx);
     if (doc?.state !== "done" || !doc.status) return undefined;
-    return { status: doc.status, ...(doc.turnId ? { turnId: doc.turnId } : {}) };
+    return { status: doc.status, ...(doc.turnId ? { turnId: doc.turnId } : {}), ...(doc.reason ? { reason: doc.reason } : {}) };
   }
 
   /** 观测用：本进程已知的全部会话键（启动后接触过的与恢复集合） */
@@ -539,7 +569,7 @@ export class ThreadHost implements HostCallbacks {
   }
 
   private async markInputs(tx: Tx, threadKey: string, refs: readonly InputRef[], state: "queued" | "starting" | "delivered" | "done",
-    outcome?: { status: TurnStatus; turnId?: string }): Promise<void> {
+    outcome?: { status: TurnStatus; turnId?: string; reason?: "backend_unsupported" }): Promise<void> {
     for (const ref of refs) Object.assign(await tx.doc(HostInputDoc, ref.inboundKey, threadKey), { state, ...outcome });
   }
 

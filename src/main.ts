@@ -1,3 +1,6 @@
+import { EventService } from "./agent/events/service.js";
+import { GmailEventSource } from "./agent/events/sources/gmail.js";
+import { runRights, isEventTurn } from "./agent/host/identity.js";
 import { McpOAuth } from "./agent/pi-mcp/oauth.js";
 import { loadCodexModelCatalog, loadCodexModelValidator } from "./agent/codex/model-catalog.js";
 import { backendNameFor } from "./agent/backends/select.js";
@@ -79,7 +82,7 @@ async function main(): Promise<void> {
   closeLogs = () => { unsubscribeLog(); return fileLog.close(); };
   try { cfg.OBS_TOKEN = await loadObsToken(cfg.DATA_DIR, cfg.OBS_TOKEN, message => log.info(message)); }
   catch { log.warn("observability token unavailable; dashboard access disabled"); }
-  registerSecrets([cfg.OBS_TOKEN, cfg.NAPCAT_TOKEN, cfg.CODEX_MAGPIE_KEY]);
+  registerSecrets([cfg.OBS_TOKEN, cfg.NAPCAT_TOKEN, cfg.CODEX_MAGPIE_KEY, process.env.GMAIL_SIDECAR_AUTH_HEADER]);
   const ctx = BACKGROUND_CONTEXT;
   log.info("starting cs-agent", {
     commit: process.env.CS_AGENT_COMMIT || "unknown",
@@ -179,7 +182,10 @@ async function main(): Promise<void> {
     permissions: async binding => ({ ...await grants.permissions(binding), ...await scheduleTools.permissions(binding) }),
     schedule: (binding, name, args) => scheduleTools.tool(binding, name, args),
     auth: (binding, name, args) => grants.tool(binding, name, args),
-    skillPublish: (binding, args) => publishSkill(skills, binding.workdir, args),
+    skillPublish: (binding, args) => {
+      if (isEventTurn(runRights(binding, cfg.owners))) throw new Error("事件回合不能发布技能");
+      return publishSkill(skills, binding.workdir, args);
+    },
     memory: (binding, name, args) => memory.tool({ ...binding, backend: "codex" }, name, args),
     send: (binding, callKey, args, signal) => sendService.send({ ...binding,
       extraRoots: [binding.imageDir,
@@ -359,10 +365,15 @@ async function main(): Promise<void> {
     enabled: () => memoryConsolidateEnabled(settings.current()),
     ...(extractModel ? { complete: memoryComplete(6000) } : {}),
   });
-  const monitor = new TurnMonitor({ inbox, sendService, scheduled, getHost: () => host, observers: [event => extractor.observe(event)] });
+  const events = cfg.EVENTS_GMAIL_URL && cfg.owner ? new EventService({ harness, owner: cfg.owner, ownerBackend: () => host.recordedBackend("owner"),
+    sources: [new GmailEventSource({ baseUrl: cfg.EVENTS_GMAIL_URL, authHeader: process.env.GMAIL_SIDECAR_AUTH_HEADER ?? "" })],
+    inbox: { get: key => inbox.get(key), insert: input => getBridge().inbox.openEventInput(input), deliver: key => inbox.deliverEvent(key) },
+    outbox: turnId => getBridge().outbox.listOutboxByTurn(turnId), inputOutcome: key => host.inputOutcome(key),
+  }) : undefined;
+  const monitor = new TurnMonitor({ inbox, sendService, scheduled, eventRuns: events, getHost: () => host, observers: [event => extractor.observe(event)] });
   // 会话宿主（§2.3）：状态存于派发 harness 的 cs.thread-host 文档；并发上限只限进行中的回合数。
   host = new ThreadHost({ store: harness, adapter: router, concurrency: cfg.AGENT_CONCURRENCY, owners: cfg.owners, events: monitor.events,
-    admit: (_threadKey, input) => scheduled.admit(input.inboundKey) });
+    admit: async (_threadKey, input) => input.kind === "event" ? isOwner(cfg.owners, input.sender) && !!input.source : scheduled.admit(input.inboundKey) });
   pi.bind(host);
   codexBackend.attach(host);
 
@@ -393,6 +404,7 @@ async function main(): Promise<void> {
   await mcpApprovals.recover();
   await inbox.recover();
   await scheduled.recover();
+  await events?.start();
   monitor.start();
 
   // raw 先于 message 发出：入站消息先入库，再投递给会话宿主
@@ -475,7 +487,7 @@ async function main(): Promise<void> {
       scopeLabel: (scope: string) => memory.label(scope) } };
   const dashboard = createDashboard({
     mcpOAuth,
-    grants, schedules, ...dashboardData, config: cfg, store: obs, context: store, queue: () => queueStatus(),
+    grants, schedules, events, ...dashboardData, config: cfg, store: obs, context: store, queue: () => queueStatus(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
     codex: codexStatus, pi: piStatus, piSessions: pi.sessionSource, settings, live,
@@ -546,6 +558,7 @@ async function main(): Promise<void> {
     alerts.stop();
     aging.stop();
     schedules.stop();
+    await events?.stop();
     monitor.stopWatchdog();
     // 记忆抽取：不再收新回合，正在跑的那一条在关闭记忆库前最多再等 8 秒；整理同样有界等待，超时中止模型请求、结果不落库
     const extractDrained = extractor.close(8000);

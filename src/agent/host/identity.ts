@@ -48,8 +48,10 @@ export function base(threadKey: string, scope: string): RunRights {
 export function elevation(identity: TurnIdentity, owners: OwnerIds): RunPerson | undefined {
   const claimed: RunPerson | undefined = identity.kind === "user" ? { kind: "user", person: identity.sender, owner: true }
     : identity.kind === "scheduled" ? { kind: "scheduled", person: identity.creator, owner: true }
+    : identity.kind === "event" ? { kind: "event", person: identity.creator, owner: true }
     : identity.inherited;
   if (!validPerson(claimed)) return undefined;
+  if (claimed.kind === "event" && !isOwner(owners, claimed.person)) return undefined;
   // 继承来的快照与当前 owner 配置不一致（之后被加入或移出 owner）：下游按 actor 重新判断 owner 的地方会与快照冲突，回落基础权限。
   if (identity.kind === "wake" && claimed.owner !== isOwner(owners, claimed.person)) return undefined;
   return { kind: claimed.kind, person: claimed.person, owner: claimed.owner === true && isOwner(owners, claimed.person) };
@@ -69,7 +71,7 @@ export function runRights(binding: { threadKey: string; scope: string; identity:
 export function validPerson(value: unknown): value is RunPerson {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const p = value as Record<string, unknown>;
-  return (p.kind === "user" || p.kind === "scheduled") && typeof p.person === "string" && QQ.test(p.person) && typeof p.owner === "boolean";
+  return (p.kind === "user" || p.kind === "scheduled" || p.kind === "event") && typeof p.person === "string" && QQ.test(p.person) && typeof p.owner === "boolean";
 }
 
 /**
@@ -84,3 +86,6 @@ export function mergePersons(persons: readonly (RunPerson | undefined)[]): RunPe
   }
   return { kind: first.kind, person: first.person, owner: first.owner };
 }
+
+/** 事件读取身份不能用于写操作或委派。 */
+export const isEventTurn = (rights: RunRights): boolean => rights.person?.kind === "event";

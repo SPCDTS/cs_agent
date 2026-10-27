@@ -716,3 +716,21 @@ describe("Pi MCP 委派授权交集", () => {
     expect(s.state.calls).toBe(0);
   });
 });
+
+it("事件切换后旧目录写工具被执行复核拒绝，事件目录与用户目录隔离", async () => {
+  const s = await server(), config = s.config({}, {}, ["lookup", "other"]);
+  if (config.kind !== "enabled") throw new Error("config");
+  config.value.servers[0].tools.eventAllow = ["lookup"];
+  const r = await rig(config), c = await r.create();
+  await r.configure(c);
+  const oldNames = await mcpNames(c), write = oldNames.find(name => name.includes("_other_"))!;
+  r.bindings.set(Number(c.id), { ...owner(), auth: false, identity: { kind: "event", source: "gmail", creator: "123" } });
+  await r.run(c, write);
+  expect(s.state.calls).toBe(0);
+  expect((await results(c))[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_denied" })]));
+  await r.configure(c);
+  const eventNames = await mcpNames(c);
+  expect(eventNames).toEqual([expect.stringMatching(/^mcp_fixture_lookup_/)]);
+  expect(eventNames[0]).not.toBe(oldNames.find(name => name.includes("_lookup_")));
+  await r.run(c, eventNames[0]); expect(s.state.calls).toBe(1);
+});

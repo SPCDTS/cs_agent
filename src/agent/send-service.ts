@@ -1,5 +1,5 @@
-import { parseTarget, type GrantsService } from "./grants.js";
-import { runRights } from "./host/identity.js";
+import { BASE_ONLY_SEND, parseTarget, type GrantsService } from "./grants.js";
+import { isEventTurn, runRights } from "./host/identity.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -91,7 +91,10 @@ export class SendService {
       const targetRef = args.target ?? sourceRef, target = parseTarget(targetRef), targeted = targetRef !== sourceRef;
       // 权限一律按 runRights（§5.1）：只有会话基础权限的回合发往别处由 authorizeSend 拒绝；定时身份的发送计主动额度。
       const rights = this.opts.grants?.rights(binding) ?? runRights(binding, undefined);
-      const proactive = targeted || rights.person?.kind === "scheduled";
+      const event = binding.identity.kind === "event" || isEventTurn(rights);
+      if (event) trace.metadataOnly(binding.turnId ? "turn:" + binding.turnId : "thr:" + binding.threadKey);
+      if (event && args.target !== undefined) throw new Error(BASE_ONLY_SEND);
+      const proactive = targeted || rights.person?.kind === "scheduled" || event;
       const existing = channel.outbox.getOutbox(key);
       // 已绑定的调用键原样重放；仍待发送的行使用原目标，不能通过更换参数绕过授权。
       if (existing && (existing.message_type !== target.message_type || existing.target_id !== target.target_id)) {
@@ -104,7 +107,7 @@ export class SendService {
           if (!this.opts.grants) throw new Error("主动发送授权未启用");
           await this.opts.grants.authorizeSend(binding, existingRef);
         }
-        return this.deliver(existing, signal);
+        return this.deliver(existing, signal, event);
       }
       // 同一回合里内容（正文 + 图片与文件内容）与目标相同、已发出或结果不确定的消息不能通过新的调用键重发。
       const hash = createHash("sha256").update(args.text).digest("hex");
@@ -114,7 +117,7 @@ export class SendService {
       if (candidates.length) {
         prepared = await this.prepare(binding, args);
         for (const row of candidates) {
-          if (await sameAttachments(row, prepared)) return this.deliver(row, signal);
+          if (await sameAttachments(row, prepared)) return this.deliver(row, signal, event);
         }
       }
       if (targeted) {
@@ -139,7 +142,7 @@ export class SendService {
         ...(proactive ? { dailyLimit: { ...this.day(), limit: 100 } } : {}),
         proactive, text: args.text, images, files,
       });
-      return this.deliver(row, signal);
+      return this.deliver(row, signal, event);
     });
   }
 
@@ -217,7 +220,7 @@ export class SendService {
   async reconcile(signal?: AbortSignal): Promise<void> {
     for (const row of this.opts.getChannel().outbox.listUnfinishedOutbox()) {
       await this.serial(row.thread_key, () => this.deliver(row, signal)).catch(error =>
-        log.warn("outbox reconciliation failed", { key: row.key, error }));
+        log.warn("outbox reconciliation failed", { key: row.key, error: row.input_key && this.opts.getChannel().inbox.getInbound(row.input_key)?.kind === "event" ? "事件补发失败" : error }));
     }
   }
 
@@ -265,8 +268,10 @@ export class SendService {
     });
   }
 
-  private async deliver(row: OutboxRow, signal?: AbortSignal): Promise<SendResult> {
+  private async deliver(row: OutboxRow, signal?: AbortSignal, eventIdentity = false): Promise<SendResult> {
     const channel = this.opts.getChannel();
+    const event = eventIdentity || !!row.input_key && channel.inbox.getInbound(row.input_key)?.kind === "event";
+    if (event) trace.metadataOnly(row.turn_id ? "turn:" + row.turn_id : "thr:" + row.thread_key);
     const before = row.status;
     let alreadySent: boolean;
     try {
@@ -293,14 +298,15 @@ export class SendService {
           const data = await readAttachmentData(path.dirname(file.filename), { ...file, filename: path.basename(file.filename), originalPath: "", source: "workspace" });
           fileId = (await channel.uploadFile(row.message_type, row.target_id, data, file.name)).file_id;
           if (!fileId) throw new Error("文件上传缺少 file_id");
-        } catch (error) { log.warn("outbox file uncertain; will not retry", { key: row.key, name: file.name, error }); }
+        } catch (error) { log.warn("outbox file uncertain; will not retry", { key: row.key, ...(event ? { error: "事件附件发送失败" } : { name: file.name, error }) }); }
         channel.outbox.updateOutboxFile(row.key, index, fileId ? "sent" : "uncertain", fileId);
       }
       return result;
     } finally {
+      if (event) trace.metadataOnly(row.turn_id ? "turn:" + row.turn_id : "thr:" + row.thread_key);
       if (!result.already_sent) trace.event(row.turn_id ? "turn:" + row.turn_id : "thr:" + row.thread_key, "send_message", { detail: {
         target: `qq:${row.message_type}:${row.target_id}`, key: row.key, system: row.system, message_id: result.message_id,
-        ...(!row.key.startsWith(`${row.thread_key}:sys:mcp:`) ? { text: row.text.slice(0, 500) } : {}),
+        ...(!row.key.startsWith(`${row.thread_key}:sys:mcp:`) && !event ? { text: row.text.slice(0, 500) } : {}),
         status: result.status, images: row.images.length, files: channel.outbox.getOutbox(row.key)!.files.map(({ name, bytes, status }) => ({ name, bytes, status })),
         already_sent: false } });
     }

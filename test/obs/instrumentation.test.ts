@@ -39,6 +39,7 @@ async function piTurn(pi:PiBackend,stub:ReturnType<typeof hostStub>,key:string,t
     message_id:key,nickname:'测试',text,route_text:text,time:1,images:[],attachments:[],created_at:new Date().toISOString(),state:'queued'});
   let done!:(status:string)=>void;const ended=new Promise<string>(r=>{done=r;});
   pi.bind({onTurnStarted:()=>{},onActivity:()=>{},onTurnCompleted:(_k,_t,result)=>done(result.status)});
+  await pi.attach();
   stub.state.turnId=undefined;
   const started=await pi.startTurn('private:1',[{inboundKey:key,kind:'user',sender:'1',seq:1,at:1}],{kind:'user',sender:'1'});
   if('turnId' in started)stub.state.turnId=started.turnId;

@@ -220,3 +220,12 @@ describe("提示段渲染（§7）", () => {
     expect(await r.service.render("group:7")).toBeUndefined();
   });
 });
+
+it("事件回合只写 owner，最多五次，不开放画像，移除 owner 后拒绝", async () => {
+  const r = rig(), binding = bind("owner", { kind: "event", source: "gmail", creator: "1" });
+  expect(memoryAccess(runRights(binding, OWNERS))).toEqual({ read: "all", write: ["owner"], routeSubjects: false });
+  for (let i = 0; i < 5; i++) await r.service.tool(binding, "mem_remember", { text: "已提醒事件 " + i, kind: "episode" });
+  await expect(r.service.tool(binding, "mem_remember", { text: "超额事件", kind: "episode" })).rejects.toThrow("5 次");
+  await expect(r.service.tool({ ...binding, turnId: "pi:next" }, "mem_profile", { text: "不允许画像" })).rejects.toThrow();
+  expect(runRights({ ...binding, identity: { kind: "event", source: "gmail", creator: "2" } }, OWNERS).person).toBeUndefined();
+});

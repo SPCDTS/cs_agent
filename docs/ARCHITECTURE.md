@@ -42,6 +42,7 @@ QQ ─NapCat(OneBot v11)─▶ QQBridge ──@消息──▶ Inbox ──▶ T
 - 入站键由消息确定性生成；`qq-bridge.sqlite` 表 `inbound` 记录每条输入：`queued`（未交给后端）→ `delivered`（后端已确认收下）→ `done`（所在回合结束）。
 - 配置群的 MCP 审批命令在投递 ThreadHost 前由 `pi-mcp/approval.ts` 确定性处理：只认已验证 owner 的引用/编号决定，入站直接标 done；其余消息照常投递。恢复 queued 输入也走此入口。
 - 定时任务到点同样作为一条输入投递（入站键以 `run_` 开头，发送者为创建者，§6）。
+- 外部事件以 `evt_` 键进入同一 Inbox，持久化来源、件数与合并去重键；外壳直接投递到 owner 线程，忙时排队，用户与事件不相互插话（§6.1）。
 - 重启后宿主先恢复回合（§4.4），Inbox 再按 `seq` 重新投递 `queued` 输入；输入以入站键幂等。
 
 ### 2.3 ThreadHost（`src/agent/host/`）
@@ -162,7 +163,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 ### 4.2 pi：进程内 harness（`src/agent/backends/pi.ts`、`src/agent/pi-tools/`）
 
 - **会话**：独立 `Harness.open`（`DATA_DIR/pi.sqlite`），每个会话键一条 ownerless 长期会话；映射写在 session 文档 `cs.pi.threads`，`pi-threads.json` 是其原子镜像，启动从 SQLite 重建。工作区 `DATA_DIR/pi-work/<key>`。
-- **回合**：开轮 `conv.submit({ type: "input", requestId: 入站键, whenBusy: "followUp" })`，同一发送者插话 `whenBusy: "steer"`；回合结束由会话 idle 事件驱动宿主。
+- **回合**：`backends/pi-input.ts` 用公开 Tx API 将入站键、按 submission id 索引的 `cs.pi.input` 身份及输入/run 原子提交；空闲时新建 GenerationTask，已有 run 时只允许用户插话进入 InboxDoc，其他输入留给宿主排队。同一 requestId 重放取原提交，首条 submission 结束驱动宿主完成回合。
 - **工具**：`read` / `write` / `edit` / `bash`（`PiPathPolicy` + bwrap 沙箱，§5.5）、`web_search` / `fetch_page`（DeepSeek Search/Fetch API 直连，需 `DEEPSEEK_API_KEY`）、`qq_recent` / `qq_search` / `qq_message` / `qq_image` / `qq_chats`、`send_message`、按本轮权限出现的 `auth_*` / `schedule_*`、`mem_*`（§9.1）、`subagent`。工具调用不按回合计次。每轮开始（含唤醒与重启恢复）时按本轮的人重新选择 IM、定时与记忆工具集；调用时服务端逐次复核。
 - **提示词**：pi-durable 把各 section 合成为最前面的一条 system 消息，内容不变不重发（保住提示缓存）：
   1. `cs-pi`：受管规则（发送、链接、安全、工作区、子 agent 用法、记忆工具的使用规则）+ `DATA_DIR/prompts/agent.md`（仅人设、语气与输出格式；缺失时播种，已有不覆盖，按 mtime/size 热加载）。工具使用指引放在各工具描述中。
@@ -185,7 +186,7 @@ Pi 外部 MCP（`agent/pi-mcp/`）默认限 owner 私聊；服务 `access.groups
 
 ### 4.4 重启顺序
 
-宿主先恢复回合（pi 续跑；codex 丢失的回合发"处理中断了"），Inbox 再按到达顺序重新投递 `queued` 输入；Outbox 中 sending / uncertain 的消息不重发；定时排程任务按检查点继续（§6）。
+宿主先恢复回合（pi 续跑；codex 丢失的回合发"处理中断了"），Inbox 再按到达顺序重新投递 `queued` 输入；Outbox 中 sending / uncertain 的消息不重发；定时排程任务按检查点继续（§6）。Pi 的 recoverTurn 与 snapshot 接管先读取持久化提交身份，事件配置完成前不恢复调度；submission.wait 也延后至全部会话配置完成。事件接回原入站并保留 event 身份。各日志输出点按绑定身份重建 metadataOnly，不依赖 beforeTool，以覆盖 safe 工具 execute 重放。
 
 ## 5. 身份与权限
 
@@ -197,9 +198,10 @@ Pi 外部 MCP（`agent/pi-mcp/`）默认限 owner 私聊；服务 `access.groups
 |---|---|
 | 用户输入 | 发送者（一轮只有一个发送者；owner 多账号算同一人） |
 | 定时输入 | 创建者；没有 `auth_*`，授权按当前授权表复核 |
+| 事件回合 | 来源创建者（owner），只读；仅 Pi 会话可运行。Codex 沙箱按线程固定，事件先积压并显示 blockedReason；开轮竞态由 ThreadHost 按 backend_unsupported 拒绝。Pi 提交身份与输入同事务持久化，恢复继续绑定 event，不能变成普通 wake |
 | 唤醒回合 | 派出该子 agent 的那一轮的人（派出时快照）；唤醒回合派出的再唤醒时沿链继承。同一唤醒回合带回多个汇报而派出者不是同一人或类型不同 → 基础权限 |
 
-**无法确证就只有会话基础权限（fail closed）**：没有派出记录、不是汇报的 run、宿主尚未确认或已放弃的回合、数据缺失或不一致，一律回落基础权限，绝不向上回落。owner 标记只降不升：快照时与当前配置都必须是 owner。
+**无法确证就收紧权限（fail closed）**：Pi owner 线程上无法辨认的运行（提交身份缺失或不一致）使用事件工具限制及空 creator，不能恢复 write/edit/bash/subagent，也不提升读取、MCP 或记忆写权限。其他情况下没有派出记录、不是汇报的 run、宿主尚未确认或已放弃的回合、数据缺失或不一致，一律回落基础权限，绝不向上回落。owner 标记只降不升：快照时与当前配置都必须是 owner。
 
 ### 5.2 两层权限
 
@@ -243,6 +245,12 @@ MCP 群审批独立于 send/schedule grants：审批单存宿主 `cs.mcp.approva
   `send_message` 不带 target 时发回该会话，不 @。权限按创建者求出，无 `auth_*`；创建者已失去权限则本次记 failed 并暂停。
 - **结果**（`run.ts`）：统计该输入所在回合发出的消息：有发送 → `sent`，无 → `silent`（静默，不兜底），回合失败/丢失/投递不确定 → `failed`。sent / silent 清零失败计数；连续 3 次 failed 自动暂停（`pause_reason = 连续 3 次失败`）并告警。
 - **管理**：面板"定时任务"页与 JSON 接口 `/api/schedules` 只支持查看、暂停、恢复、立即运行和删除；创建与修改任务通过聊天工具完成。聊天里 `schedule_create / list / update / pause / resume / delete / run_now`（仅当前的人通过 `canSchedule` 的交互回合可见；owner 管理全部，他人只管自己的）。来源与 `created_by` 取本轮会话与确证的人，模型不能指定。规则使用北京时间 `YYYY-MM-DD HH:mm`；工具说明要求把"家庭群"等目的地先用 `qq_chats` 解析为具体 ref 写进提示词，按需静默的监控注明"无新内容则静默"。定时回合内只开放 `schedule_control({ action: pause | complete, reason })`，目标按本轮定时输入键从运行文档读取，不打断当前回合。
+
+### 6.1 外部事件（`src/agent/events/`）
+
+设置 `EVENTS_GMAIL_URL` 后，宿主经 sidecar `/events` 拉取 Gmail 元数据，按事件键去重、标签与发件人过滤、合并窗口、北京时间安静时段及每小时预算投递。先写 inbound，再确认游标和运行文档；恢复时重用原入站外壳。`cs.events` 保存来源设置、积压与统计，`cs.events.run` 保留最近 200 条，回合结果与定时任务共用 `turnResult`；连续三次回合失败暂停，轮询失败降级退避。
+
+事件只在 owner 的 Pi 会话运行，不开放 bash、文件写入、授权、定时、子 agent 或技能发布；发送仅限本会话并计主动额度。MCP 只选择并执行 `tools.eventAllow`，记忆写入限 owner 命名空间每轮 5 次，不做回合后抽取。邮件资料不写 trace、日志或告警；`/events` 管理状态和最近记录。完整设计见 [EVENTS-DESIGN.md](EVENTS-DESIGN.md)。
 
 ## 7. 技能（skills）
 
@@ -294,7 +302,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 | 位置 | 内容 |
 |---|---|
 | `data/agent.sqlite` | 宿主 harness：`cs.thread-host*`（会话宿主与输入）、`cs.grants`、`cs.schedules` / `cs.schedule` / `cs.schedule.run`、`cs.mcp.approval`（按 code 的审批文档族）及 `.index`（调用去重与引用查找） |
-| `data/pi.sqlite`、`pi-threads.json` | pi 长期会话与子 agent 会话、`cs.pi.threads(.archive)`；JSON 是映射镜像 |
+| `data/pi.sqlite`、`pi-threads.json` | pi 长期会话与子 agent 会话、`cs.pi.threads(.archive)`、conversation 级 `cs.pi.input` 提交身份；JSON 是映射镜像 |
 | `data/qq-bridge.sqlite` | `inbound`、`outbox`、`seen_messages`、`send_log` / `send_breakers`；旧版遗留的 `tickets` 表原样留在磁盘上，不再读写 |
 | `data/qq-messages.sqlite` | 消息库（机器人消息带 Outbox 行键 `messages.outbox_key`）、摘要、`scope_names`、媒体引用 |
 | `data/memory.sqlite` | 记忆条目 `memories`、版本 `memory_versions`、取代链 `memory_links`、`memories_fts`（§9.1） |
@@ -324,7 +332,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 | 3 | `channel/` | 通道公共契约：入站记录、Outbox、发送规则、回合身份类型（不依赖 qq / context / agent） |
 | 4 | `qq/` | OneBot 传输（`bridge.ts`）、授权与触发（`policy.ts`）、`inbound` / `outbox` 持久化（`reply-store.ts`）、入站附件（`incoming.ts`）、发送规则执行（`send-rules.ts`）；`qq/types.ts` 是契约 |
 | 5 | `context/` | 消息库、衰老、访问范围、格式化、媒体库与召回服务、`qq_context` 工具门面、观察者接口；`memory/`：记忆库与画像文件（只依赖 shared，与消息库互不 import） |
-| 6 | `agent/` | `inbox.ts`、`host/`（ThreadHost、`identity.ts`）、`turns.ts`（BackendRouter / TurnMonitor）、`backends/`（codex / pi 适配）、`codex/`（app-server 客户端与监管、runner、提示词、工作区权限、模型目录）、`pi-tools/`（pi 扩展、沙箱、子 agent、技能、项目指引、记忆工具）、`memory/`（记忆服务：权限、工具语义、提示段渲染，不依赖后端实现）、`schedule/`、`send-service.ts`、`grants.ts`、`settings.ts`、`turn-settings.ts`、`effort-router.ts`、`skills-store.ts`、`magpie-models.ts` |
+| 6 | `agent/` | `inbox.ts`、`host/`（ThreadHost、`identity.ts`）、`turns.ts`（BackendRouter / TurnMonitor）、`backends/`（codex / pi 适配）、`codex/`（app-server 客户端与监管、runner、提示词、工作区权限、模型目录）、`pi-tools/`（pi 扩展、沙箱、子 agent、技能、项目指引、记忆工具）、`memory/`（记忆服务：权限、工具语义、提示段渲染，不依赖后端实现）、`schedule/`、`events/`（外部事件过滤、合并、轮询、运行记账）、`send-service.ts`、`grants.ts`、`settings.ts`、`turn-settings.ts`、`effort-router.ts`、`skills-store.ts`、`magpie-models.ts` |
 | 7 | `obs/` | 观测存储与指标、面板路由与页面（`ui/`）、会话 / 上下文 / 记忆视图、告警 |
 | 8 | `mcp/` | codex 的 stdio MCP 入口：`qq-context.ts`（检索、召回、`qq_chats`）、`im.ts`（发送、授权、定时、技能发布、记忆） |
 | 9 | `main.ts` | 组合根：加载配置 → 打开 harness → 恢复 → 启动 bridge、宿主、排程、面板 |

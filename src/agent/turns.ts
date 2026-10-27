@@ -140,6 +140,7 @@ export interface TurnMonitorOptions {
     delivered(key: string, turnId: string): Promise<void>;
     finish(key: string, outcome: { status: TurnEnded["status"]; turnId?: string }): Promise<void>;
   };
+  eventRuns?: TurnMonitorOptions["scheduled"];
   getHost(): Pick<ThreadHost, "stalled" | "interrupt">;
   /** 回合结束观察者（回合后记忆抽取，docs/MEMORY-DESIGN.md §8.1）：与定时运行统计同一条通知；须立即返回，自行异步处理 */
   observers?: readonly ((event: TurnEnded) => void)[];
@@ -175,6 +176,7 @@ export class TurnMonitor {
     inputsDelivered: (threadKey, turnId, inputs) => {
       this.opts.inbox.onDelivered(turnId, inputs);
       const records = this.opts.inbox.records(inputs);
+      if (records.some(rec => rec.kind === "event")) trace.metadataOnly("turn:" + turnId);
       const first = !this.started.has(turnId);
       if (first) {
         this.started.add(turnId);
@@ -184,6 +186,7 @@ export class TurnMonitor {
           inputs: inputs.map(i => i.inboundKey) } });
       } else trace.event("turn:" + turnId, "steered", { detail: { inputs: inputs.map(i => i.inboundKey), text: records.map(r => r.text).join("\n") } });
       for (const rec of records) {
+        if (rec.kind === "event" && this.opts.eventRuns) this.track(this.opts.eventRuns.delivered(rec.key, turnId), "event run delivery record failed");
         if (rec.kind === "scheduled" && this.opts.scheduled) this.track(this.opts.scheduled.delivered(rec.key, turnId), "scheduled run delivery record failed");
       }
     },
@@ -192,12 +195,14 @@ export class TurnMonitor {
       if (event.turnId) this.started.delete(event.turnId);
       const ok = event.status === "completed";
       const key = event.turnId ? "turn:" + event.turnId : "in:" + (event.inputs[0]?.inboundKey ?? "");
+      if (event.kind === "event") trace.metadataOnly(key);
       trace.event(key, ok ? "reply_sent" : "failed", { status: ok ? "ok" : "failed", detail: {
         terminal: true, status: event.status, kind: event.kind, thread_key: event.threadKey, ...(event.error ? { reason: event.error } : {}),
         inputs: event.inputs.map(i => i.inboundKey) } });
       const stopped = this.stopping.delete(event.threadKey);
-      if (!ok && !stopped && event.kind !== "scheduled") this.track(this.notice(event), "error notice failed");
+      if (!ok && !stopped && event.kind !== "scheduled" && event.kind !== "event") this.track(this.notice(event), "error notice failed");
       for (const input of event.inputs) {
+        if (input.kind === "event" && this.opts.eventRuns) this.track(this.opts.eventRuns.finish(input.inboundKey, { status: event.status, turnId: event.turnId }), "event run finish failed");
         if (input.kind === "scheduled" && this.opts.scheduled) {
           this.track(this.opts.scheduled.finish(input.inboundKey, { status: event.status, ...(event.turnId ? { turnId: event.turnId } : {}) }), "scheduled run finish failed");
         }

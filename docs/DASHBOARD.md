@@ -275,3 +275,9 @@ JSON、start、logout 继续要求 obs_token 面板会话；POST 使用 applicat
 专用 cookie 为 `mcp_oauth=<随机32字节base64url>; Path=/mcp/oauth; HttpOnly; SameSite=Lax; Max-Age=600`。数据库仅存 cookie nonce 的 SHA-256。state 同样随机 32 字节，十分钟过期，回调换码前原子消费；cookie 缺失或不匹配也删除该 pending。回调不要求跨站时不会携带的 Strict obs_token，而以 state/cookie 绑定本次已通过 CSRF 的启动请求。回调不再 303 跳转，因为跨站重定向链不会携带 SameSite=Strict 的面板 cookie；直接显示结果页，用户点击返回链接时属于同站导航，可以携带 obs_token。结果页复用 page() 与面板 CSP nonce；响应设置 no-store 与 no-referrer，不记录或回显 code/state。
 
 token、client_secret、PKCE verifier 不出现在 JSON 或审计。需要登录及确定的 OAuth 刷新错误分别以 auth_required、refresh_failed 显示；网络错误、超时或 5xx 不写 refresh_failed，后续请求可继续刷新；账号 revision 变更后需重新登录。完整配置见 [Pi MCP 使用说明](PI-MCP.md#oauth-登录cimd)。
+
+## 12. 外部事件（`/events`）
+
+来源卡显示启用、暂停、轮询降级或后端阻塞状态，以及游标、上次轮询、连续失败、本小时预算、积压和原因。owner 会话为 Codex 时保留事件积压，显示 blockedReason；切为 Pi 后下次轮询或合并检查继续处理。暂停、恢复、立即轮询表单使用同源与 CSRF 校验；此页不提供安静时段与过滤设置。最近表最多显示 50 条运行的时间、来源、件数、结果与入站键。
+
+`GET /api/events` 返回 sources、runs 与 csrf；`POST /api/events/<source>/(pause|resume|poll)` 接受空 JSON 或仅 `_csrf`，须有面板 cookie、同源与有效 CSRF。来源连续三次回合失败自动暂停；连续三次轮询失败降级但继续退避重试。
