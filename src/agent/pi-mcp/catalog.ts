@@ -94,8 +94,9 @@ export function compileStoredTool(tool: StoredTool, limits: McpLimits) {
     output: tool.outputSchema ? compileMcpSchema(tool.outputSchema, limits) : undefined };
 }
 
+export const slug = (value: string, length: number) => value.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, length) || "tool";
+
 export function toolNames(revision: CatalogRevision, tool: StoredTool): McpToolIdentity & { extensionName: string; fullDigest: string } {
-  const slug = (value: string, length: number) => value.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, length) || "tool";
   const fullDigest = toolContract(revision, tool);
   return { serverId: revision.serverId, remoteName: tool.name, catalogDigest: revision.digest, fullDigest,
     nativeName: `mcp_${slug(revision.serverId, 16)}_${slug(tool.name, 24)}_${fullDigest.slice(0, 12)}`,

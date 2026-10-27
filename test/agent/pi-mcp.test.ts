@@ -98,8 +98,16 @@ async function rig(config: McpConfigState, db = path.join(tmp("cs-pi-mcp-"), "pi
   faux.setResponses(Array.from({ length: 100 }, () => step));
   const models = createModels(); models.setProvider(faux.provider);
   const registry = createRegistry();
-  const base = defineExtension({ name: "base", tools: [defineTool({ name: "local", description: "本地工具", parameters: Type.Object({}),
-    execute: async () => ({ output: [{ type: "text", text: "本地" }] }) })] });
+  // nested 走 codemode 同一条嵌套调用路径（executeTool），把嵌套结果原样交回，便于直接断言诊断码。
+  const base = defineExtension({ name: "base", tools: [defineTool({ name: "local", description: "本地工具", parameters: Type.Object({}), callers: ["model"],
+    execute: async () => ({ output: [{ type: "text", text: "本地" }] }) }),
+  defineTool({ name: "nested", description: "嵌套调用", parameters: Type.Object({ name: Type.String(), args: Type.Record(Type.String(), Type.Unknown()) }), callers: ["model"],
+    execute: async ({ name, args }, api, ctx) => {
+      const result = await api.executeTool(name, args as JsonObject, ctx);
+      const value = result.structuredOutput;
+      return { isError: result.isError, diagnostics: [...result.diagnostics],
+        output: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value ?? "") }] };
+    } })] });
   registry.install(base);
   const storage = await openNodeSqliteStorage(db);
   const harness = await Harness.open(storage, { models, registry,
@@ -116,19 +124,15 @@ async function rig(config: McpConfigState, db = path.join(tmp("cs-pi-mcp-"), "pi
     bindings.set(Number(conv.id), binding); return conv;
   };
   const configure = (conversation: Conversation, ctx = context) => mcp.configure({ conversation, turn: bindings.get(Number(conversation.id))! }, ctx);
-  // 视同模型已用 tool_search 加载：业务工具是延迟工具，未加载时不在请求里。
-  const load = (conv: Conversation, name: string) => harness.commit(async tx => {
-    const state = await tx.doc(AgentDoc, conv.id);
-    if (!Array.isArray(state.modelTools)) state.modelTools = { ...state.modelTools, add: [...state.modelTools?.add ?? [], name] };
-  }, context);
-  const run = async (conv: Conversation, name: string, args: JsonObject = { value: 1 }) => {
-    selected = name; argumentsValue = args;
-    if (name.startsWith("mcp_") && !isMcpControlTool(name)) await load(conv, name);
+  // 业务工具只给脚本调用，经 nested 嵌套调用。
+  const run = async (conv: Conversation, name: string, args: JsonObject = { value: 1 }, direct = false) => {
+    const business = !direct && name.startsWith("mcp_") && !isMcpControlTool(name);
+    selected = business ? "nested" : name; argumentsValue = business ? { name, args } : args;
     return (await conv.submit({ type: "input", content: "执行一次" }, context)).wait(context);
   };
   return { mcp, harness, registry, db, bindings, create, configure, run, close, requests, revoke: () => { owners = []; } };
 }
-const names = async (conv: Conversation) => { const agent = await conv.agent(context); return [...agent.tools, ...agent.deferred].map(t => t.name); };
+const names = async (conv: Conversation) => { const agent = await conv.agent(context); return [...new Set([...agent.tools, ...agent.callable].map(t => t.name))].filter(n => n !== "nested"); };
 const mcpNames = async (conv: Conversation) => (await names(conv)).filter(n => n.startsWith("mcp_") && !isMcpControlTool(n));
 const results = async (conv: Conversation) => (await conv.entries({ order: "ascending" }, 1000, undefined, context)).items.filter(ToolResultEntry.is);
 
@@ -136,12 +140,13 @@ describe("Pi MCP 原生工具与持久目录", () => {
   it("保留原扩展、精确 allowlist、unsafe 原生调用与结构化结果", async () => {
     const s = await server(), r = await rig(s.config()), c = await r.create();
     await r.configure(c);
-    expect(await names(c)).toEqual(["local", "tool_search", "mcp_refresh_tools", expect.stringMatching(/^mcp_fixture_lookup_\w+$/)]);
-    expect((await c.agent(context)).tools.map(t => t.name)).toEqual(["local", "tool_search", "mcp_refresh_tools"]);
+    expect(await names(c)).toEqual(["local", "codemode", "mcp_refresh_tools", expect.stringMatching(/^mcp_fixture_lookup_\w+$/)]);
+    expect((await c.agent(context)).tools.map(t => t.name)).toEqual(["local", "nested", "codemode", "mcp_refresh_tools"]);
     const [name] = await mcpNames(c);
     expect(r.registry.snapshot().tools().find(t => t.tool.name === name)!.tool.replay).toBe("unsafe");
     expect(await r.run(c, name!)).toMatchObject({ status: "done" });
-    expect(r.requests.at(-1)).toContain("可通过 tool_search 加载的 MCP 工具：\\n- fixture: lookup");
+    const codemode = JSON.parse(r.requests.at(-1)!).find((m: { sections?: Record<string, string> }) => m.sections?.codemode)?.sections?.codemode;
+    expect(codemode).toContain(`## fixture\n\n### \`${name}\``);
     expect(s.state.calls).toBe(1);
     expect((await results(c))[0]?.model?.[0]).toMatchObject({ role: "toolResult", isError: false });
     expect(JSON.stringify((await results(c))[0]?.model)).toContain('\\"value\\":1');
@@ -235,7 +240,7 @@ describe("Pi MCP 原生工具与持久目录", () => {
     expect(s.state.calls).toBe(1);
     expect(await mcpNames(c)).toContain(lookup);
     expect(await mcpNames(c)).not.toEqual(before);
-    expect((await c.agent(context)).tools.find(tool => tool.name === lookup)?.description).toContain("更新后的描述");
+    expect((await c.agent(context)).callable.find(tool => tool.name === lookup)?.description).toContain("更新后的描述");
     expect(r.registry.snapshot().tools().filter(item => item.tool.name === lookup)).toHaveLength(1);
     expect(r.requests.some(request => request.includes("更新后的描述"))).toBe(true);
     const revisions = Object.values((await r.harness.snapshot(McpCatalogsDoc, context))!.revisions);
@@ -340,7 +345,7 @@ describe("Pi MCP 原生工具与持久目录", () => {
     await first.configure(c); const [old] = await mcpNames(c), id = c.id;
     s.state.version++;
     await first.mcp.configure({ conversation: c, turn: owner(), refresh: true }, context);
-    await first.run(c, old!);
+    await first.run(c, old!, undefined, true);
     await first.close();
     const terminals: Record<string, unknown>[] = [];
     const untap = trace.tap(event => { if (event.stage === "mcp_recovered_terminal") terminals.push(event.detail); });
@@ -352,7 +357,7 @@ describe("Pi MCP 原生工具与持久目录", () => {
     expect(stream.snapshot.entries.filter(ToolResultEntry.is)).toHaveLength(1);
     second.mcp.observeEvent(Number(id), stream.snapshot);
     stream.start(async events => { for (const event of events) second.mcp.observeEvent(Number(id), event); });
-    await second.run(restored, old!);
+    await second.run(restored, old!, undefined, true);
     const [historical, fresh] = await results(restored);
     for (const entry of [historical, fresh]) {
       expect(entry?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "tool_unavailable" })]));
@@ -508,7 +513,7 @@ describe("Pi MCP 只读资源", () => {
     expect(await names(a)).not.toContain("mcp_read_resource");
     const on = await rig(s.config({}, {}, [], ["notion://docs/"])), b = await on.create();
     await on.configure(b);
-    expect(await names(b)).toEqual(["local", "tool_search", "mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]);
+    expect(await names(b)).toEqual(["local", "codemode", "mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]);
     for (const name of ["mcp_list_resources", "mcp_read_resource"]) {
       expect(on.registry.snapshot().tools().find(item => item.tool.name === name)?.tool)
         .toMatchObject({ replay: "safe", executionMode: "sequential", outputLimits: { maxBytes: 32_768 } });
@@ -655,7 +660,7 @@ describe("Pi MCP 只读资源", () => {
     const child = await delegated(r, parent);
     await r.harness.commit(async tx => { const doc = await tx.doc(AgentDoc, child.id); doc.tools = ["local"]; doc.modelTools = ["local"]; }, context);
     await r.configure(child);
-    expect(await names(child)).toEqual(["local", "tool_search", "mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]);
+    expect(await names(child)).toEqual(["local", "codemode", "mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]);
     await r.run(child, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
     expect((await results(child)).at(-1)?.model?.[0]).toMatchObject({ isError: false });
     expect(s.state.resourceReads).toBe(2); expect(s.state.sessions).toBe(2);

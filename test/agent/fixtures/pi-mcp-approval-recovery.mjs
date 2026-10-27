@@ -1,7 +1,7 @@
 import path from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import { AgentDoc, createRegistry, Harness } from "@earendil-works/pi-durable";
+import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { PiMcp } from "../../../dist/agent/pi-mcp/index.js";
 import { McpApprovals } from "../../../dist/agent/pi-mcp/approval.js";
@@ -34,11 +34,9 @@ async function main() {
       const model = faux.getModel();
       const conversation = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: model.provider, modelId: model.id } } }, context);
       await mcp.configure({ conversation, turn: binding }, context);
-      const tool = (await conversation.agent(context)).deferred.find(t => t.name.startsWith("mcp_fixture_first_"));
+      const tool = (await conversation.agent(context)).callable.find(t => t.name.startsWith("mcp_fixture_first_"));
       if (!tool) throw new Error("missing_tool");
-      // 视同模型已用 tool_search 加载这个延迟工具。
-      await harness.commit(async tx => { (await tx.doc(AgentDoc, conversation.id)).modelTools = { add: [tool.name] }; }, context);
-      faux.setResponses([fauxAssistantMessage(fauxToolCall(tool.name, { project: "stored-approval" }), { stopReason: "toolUse" }), fauxAssistantMessage("等待审批")]);
+      faux.setResponses([fauxAssistantMessage(fauxToolCall("codemode", { code: `return await tools.${tool.name}({"project":"stored-approval"});` }), { stopReason: "toolUse" }), fauxAssistantMessage("等待审批")]);
       harness.resume();
       await (await conversation.submit({ type: "input", content: "申请编辑" }, context)).wait(context);
       const record = (await approvals.records())[0];

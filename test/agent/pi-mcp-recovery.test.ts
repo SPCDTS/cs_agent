@@ -73,11 +73,13 @@ describe("Pi MCP 真进程强杀恢复", () => {
     expect(result.pending).toBe(0);
     expect(result.results).toHaveLength(1);
     if (hang) {
-      expect(result.results[0]).toMatchObject({ isError: true, codes: ["interrupted"] });
-      expect(result.terminals).toEqual(["interrupted"]);
+      // codemode 脚本里的嵌套调用：中断如实交回模型，不重跑。
+      expect(result.results[0]).toMatchObject({ isError: true });
+      expect(result.results[0].text).toContain("was interrupted and may have partially run");
     } else {
       // 桩故意返回不符输出 schema 的结构化结果；恢复复用这条已提交的拒绝结果。
-      expect(result.results[0]).toMatchObject({ isError: true, codes: ["result_rejected"] });
+      expect(result.results[0]).toMatchObject({ isError: true });
+      expect(result.results[0].text).toContain("MCP 结果已拒绝；远端操作可能已完成");
       expect(result.terminals).toEqual([]);
     }
     expect(server.calls).toBe(1);

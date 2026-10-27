@@ -217,8 +217,9 @@ describe("Pi MCP 子 agent 委派", () => {
     expect(server.calls).toBe(0);
     const child = await childConversation(r);
     const results = (await child.entries({}, 100, undefined, context)).items.filter(ToolResultEntry.is);
-    expect(results[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "mcp_denied" })]));
-    expect((await child.agent(context)).tools.some(tool => tool.name.startsWith("mcp_"))).toBe(false);
+    // 脚本里的嵌套调用被拒，拒绝原因随 codemode 结果交回模型。
+    expect(JSON.stringify(results[0]?.model)).toContain("MCP 操作未发送（denied）");
+    expect((await child.agent(context)).tools.some(tool => tool.name.startsWith("mcp_") || tool.name === "codemode")).toBe(false);
   });
 
   it.each([false, true])("子 run 重启前撤权=%s：恢复先重配工具，续发不扩大快照", async revoke => {

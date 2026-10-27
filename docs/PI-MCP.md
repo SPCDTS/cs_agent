@@ -89,9 +89,11 @@ OAuth 发现、换码、注册、刷新与撤销请求仅允许资源 origin 和
 
 owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通私聊与未配置的群拒绝。执行前及排队后按 `runRights` 复核真实身份。定时和唤醒默认关闭；可分别设置 `access.allowScheduled`、`access.allowWake`，继承定时身份的唤醒需要两个选项都开启。群内也按回合代表的人授权：owner 直接执行，成员适用审批；只有基础权限、无法确证人的回合拒绝。
 
-### 延迟加载与 tool_search
+### codemode
 
-MCP 业务工具全部注册为 Pi 延迟工具（`deferred`），默认不进模型请求。有 MCP 授权的会话同时获得 pi-durable 自带的 `tool_search`（BM25，只索引英文与数字，工具描述应写英文）与控制工具；模型搜到的工具写入会话 `modelTools.add`，下一次调用起提供，压缩后仍保留。系统提示的 `mcp-tools` 段按会话当前可调用的 MCP 工具自动列出「服务: 工具名」，只随目录变化，加载工具不改变它，接新服务无需改提示词。工具因配置或目录变化改名后，旧名称不可用，模型按提示重新搜索。搜索不放宽权限：执行、审批与委派仍按调用时身份复核。`limits.visibleTools` / `visibleSchemaBytes` 限制每个会话可选用（含未加载）的业务工具数与 schema 总量。`tool_search` 的搜索词与加载结果见 trace 的 `tool:tool_search`。
+MCP 业务工具只给脚本调用（`callers: ["tools"]`），不进模型的工具定义。有 MCP 授权的会话随控制扩展获得 pi-durable 的 `codemode` 工具：模型写一段 JavaScript，在 QuickJS 沙箱（worker 线程）里执行，脚本以 `await tools.<原生名>(args)` 调业务工具，可循环、并发与组合结果。系统提示的 `codemode` 段按服务分组（namespace 前缀 `mcp_<服务>_`）列出这些工具的 TypeScript 声明，约 3000 token 预算，放不下的由脚本里的 `searchTools()` 查找；该段只随目录变化。自有工具（QQ、记忆、定时等）只给模型直接调用，不进 codemode；`models.*`（分类、生图）关闭。
+
+嵌套调用是独立的工具任务，调用编号为 `<codemode 调用编号>/c<序号>`，重放时不变：执行、审批（按调用编号幂等）、委派仍按调用时身份复核，trace 照常记 `tool:<原生名>` 与 `mcp_call`。脚本按日志重放，`unsafe` 的业务工具不会重跑，中断时脚本失败并说明「may have partially run」。已知缺口：嵌套调用重启后的终态不再记 `mcp_recovered_terminal`（该审计只看会话里直接的 MCP 工具结果）。`limits.visibleTools` / `visibleSchemaBytes` 限制每个会话可选用的业务工具数与 schema 总量。
 
 ### 只读资源
 

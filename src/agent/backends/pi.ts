@@ -220,8 +220,9 @@ export class PiBackend implements ThreadAdapter {
       spawner: parent => backend.spawner(Number(parent)) });
     const skill = createPiSkillExtension({ ...opts, binding });
     const memory = createPiMemoryExtensions(binding, opts.memory);
+    // 自有工具只给模型直接调用：codemode 脚本只调 MCP 业务工具，自有工具不重复占用 codemode 段的声明预算。
     for (const item of [coding, eventCoding, extension, ...Object.values(im), ...Object.values(schedule), skill, ...Object.values(memory),
-      ...(subagent ? [subagent] : [])]) registry.install(item);
+      ...(subagent ? [subagent] : [])]) registry.install({ ...item, tools: item.tools?.map(tool => ({ ...tool, callers: ["model"] as const })) });
     const storage = opts.storage ?? await openNodeSqliteStorage(path.join(opts.dataDir, "pi.sqlite"));
     harness = await Harness.open(storage, {
       models: opts.models, registry,

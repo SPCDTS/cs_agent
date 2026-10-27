@@ -13,19 +13,21 @@ export const reply = (body = "好的") => fauxAssistantMessage(body);
 export const toolResults = (ctx: TranscriptContext) => ctx.messages.filter(m => m.role === "toolResult").map(m => text(m));
 
 /**
- * 像真模型一样先用 tool_search 加载延迟的 MCP 业务工具：提供了 tool_search 而业务工具都未加载时先搜一次；
- * 交给脚本的上下文去掉搜索往返，脚本照旧从本轮提供的工具里取名字。
+ * 像真模型一样经 codemode 调 MCP 业务工具：脚本可调的工具（codemode 段列出的）补进交给脚本的上下文，
+ * 脚本直接调用业务工具时改写成同 id 的 codemode 调用 `return await tools.<名称>(参数)`。
  */
-export function withToolSearch<A extends unknown[], R>(brain: (ctx: TranscriptContext, ...rest: A) => R) {
-  const isSearch = (m: Message) => m.role === "toolResult" ? m.toolName === "tool_search"
-    : m.role === "assistant" && m.content.some(c => c.type === "toolCall" && c.name === "tool_search");
-  return (ctx: TranscriptContext, ...rest: A): R | ReturnType<typeof call> => {
-    const offered = getCurrentTools(ctx.messages).map(t => t.name);
-    const last = ctx.messages.findLast(m => m.role !== "system");
-    if (last?.role === "user" && offered.includes("tool_search") && !offered.some(n => /^mcp_/.test(n) && !/^mcp_(refresh_tools|list_resources|read_resource)$/.test(n))) {
-      return call(["tool_search", { query: "mcp", limit: 50 }]);
-    }
-    return brain({ ...ctx, messages: ctx.messages.filter(m => !isSearch(m)) }, ...rest);
+export function withCodemode<A extends unknown[]>(brain: (ctx: TranscriptContext, ...rest: A) => Message | Promise<Message>) {
+  const business = (name: string) => /^mcp_/.test(name) && !/^mcp_(refresh_tools|list_resources|read_resource)$/.test(name);
+  return async (ctx: TranscriptContext, ...rest: A): Promise<Message> => {
+    const section = ctx.messages.map(m => (m as { sections?: Record<string, string> }).sections?.codemode).findLast(Boolean) ?? "";
+    const scripted = [...section.matchAll(/### `(mcp_[^`]+)`\n([^\n]*)/g)].map(([, name, description]) =>
+      ({ name: name!, description: description!, parameters: { type: "object", properties: {} } }));
+    const offered = getCurrentTools(ctx.messages).some(t => t.name === "codemode") && scripted.length
+      ? [...ctx.messages, { role: "system", content: "", toolsAdded: scripted, timestamp: 0 } as unknown as Message] : ctx.messages;
+    const out = await brain({ ...ctx, messages: offered }, ...rest);
+    if (out.role !== "assistant") return out;
+    return { ...out, content: out.content.map(c => c.type === "toolCall" && business(c.name)
+      ? { ...c, name: "codemode", arguments: { code: `return await tools.${c.name}(${JSON.stringify(c.arguments)});` } } : c) };
   };
 }
 

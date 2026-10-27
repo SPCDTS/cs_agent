@@ -96,14 +96,14 @@ describe("群内 MCP 宿主审批", () => {
     const first = await request(r);
     await request(r);
     expect(await records(r)).toHaveLength(1); expect(s.calls).toHaveLength(0);
-    expect(first).toMatchObject({ state: "pending", requester: "5", requester_name: "用户5", scope: "group:7", args: { project: "demo-A" }, call_id: "stable-call" });
+    expect(first).toMatchObject({ state: "pending", requester: "5", requester_name: "用户5", scope: "group:7", args: { project: "demo-A" }, call_id: "stable-call/c1" });
     expect(first.code).toMatch(/^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{4}$/);
     expect(first.expires_at - first.requested_at).toBe(30 * 60_000);
     expect(first.request_message_id).toBeTruthy(); expect(r.mentions()).toEqual(["1"]);
     expect(r.texts()[0]).toContain(`待审批 #${first.code}`);
     expect(JSON.stringify(await results(r))).toContain(`已提交主人审批（#${first.code}）`);
     expect((await results(r)).every(e => e.model?.some(m => m.role === "toolResult" && !m.isError))).toBe(true);
-    expect(offered(seen[0]!).find(t => t.name.includes("workshop_edit"))?.description).toContain("Requires owner approval");
+    expect(JSON.stringify(seen[0]!.messages)).toContain("Requires owner approval when triggered by a non-owner in a group");
     expect(offered(seen[0]!).some(t => t.name === "mcp_refresh_tools")).toBe(true);
     expect((await r.harness.snapshot(McpApprovalDoc, first.code, context))?.record?.code).toBe(first.code);
     expect(await r.pi.harness.snapshot(McpApprovalDoc, first.code, context)).toBeUndefined();
@@ -192,9 +192,9 @@ describe("群内 MCP 宿主审批", () => {
     const r = await residentRig({ mcp: s.mcp, brain: ctx => {
       if (isChild(ctx)) {
         seen.push(offered(ctx).map(t => t.name));
-        const last = ctx.messages.findLast(m => m.role !== "system");
-        if (last?.role === "toolResult" && !last.toolName.startsWith("mcp_workshop_workshop_status_")) return reply();
-        const remote = last?.role === "toolResult" ? "workshop_edit" : "workshop_status";
+        const done = ctx.messages.filter(m => m.role === "toolResult").length;
+        if (done >= 2) return reply();
+        const remote = done ? "workshop_edit" : "workshop_status";
         const name = nameOf(ctx, remote);
         return name ? fauxAssistantMessage([{ type: "toolCall", id: `child-${remote}`, name, arguments: { project: "demo-A" } }], { stopReason: "toolUse" })
           : reply("没有工具");
@@ -218,7 +218,7 @@ describe("群内 MCP 宿主审批", () => {
       expect(await records(r)).toHaveLength(1);
       const record = (await records(r))[0]!;
       expect(record).toMatchObject({ state: "pending", requester: user, scope: "group:7", thread_key: "group:7",
-        conversation_id: Number(childId), call_id: "child-workshop_edit", tool: "workshop_edit", args: writeCall.arguments });
+        conversation_id: Number(childId), call_id: "child-workshop_edit/c1", tool: "workshop_edit", args: writeCall.arguments });
       const child = await r.pi.harness.conversation(childId, context);
       expect(JSON.stringify((await child!.entries({}, 100, undefined, context)).items.filter(ToolResultEntry.is))).toContain(`已提交主人审批（#${record.code}）`);
       await r.say("9", `批准 #${record.code}`);

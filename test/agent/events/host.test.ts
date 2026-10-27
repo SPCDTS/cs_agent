@@ -89,11 +89,11 @@ it("事件 MCP 目录仅选 eventAllow；空列表服务不连接，用户回合
   const r = await residentRig({ mcp: { config, secrets: { readReferencedVariable: () => "host-fixture-secret" } },
     brain: transcript => { seen.push(offeredTools(transcript)); return reply(); } });
   await event(r, "mcp"); await r.idle();
-  // 延迟工具通过当前 conversation 的目录检查，不能只看模型首次请求。
+  // 业务工具只给 codemode 脚本调用，按当前 conversation 的可调用目录检查，不能只看模型首次请求。
   const id = (await r.pi.readThreadIds()).owner;
   const conv = await r.pi.harness.conversation(id! as ConversationId, context);
   const agent = await conv!.agent(context);
-  expect([...agent.tools, ...agent.deferred].filter(t => t.name.startsWith("mcp_fixture_")).map(t => t.name)).toEqual([expect.stringMatching(/^mcp_fixture_first_/)]);
+  expect(agent.callable.filter(t => t.name.startsWith("mcp_fixture_")).map(t => t.name)).toEqual([expect.stringMatching(/^mcp_fixture_first_/)]);
   expect(seen[0]).toContain("mcp_read_resource");
   expect(excluded.messages).toEqual([]);
   await r.say("1", "现在由主人处理", null); await r.idle();
