@@ -109,7 +109,7 @@ describe("群内 MCP 宿主审批", () => {
     cleanup.push(trace.tap(e => events.push(e)));
     const r = await residentRig({ mcp: s.mcp, brain: brain() }), record = await request(r);
     const model = vi.fn(() => reply()); r.brain.current = model;
-    const key = await r.say("9", "[reply][at] 批准", "7", { segments: [{ type: "reply", data: { id: record.request_message_id! } }] });
+    const key = await r.say("9", "[reply][at] 允许", "7", { segments: [{ type: "reply", data: { id: record.request_message_id! } }] });
     expect(r.bridge.inbox.getInbound(key)?.state).toBe("done"); expect(model).not.toHaveBeenCalled();
     expect(s.calls).toEqual([{ name: "workshop_edit", arguments: record.args }]);
     expect(s.sessions).toHaveLength(1); expect((await records(r))[0]).toMatchObject({ state: "done", result_summary: expect.stringContaining("完成 token=[已隐藏]") });
@@ -130,7 +130,7 @@ describe("群内 MCP 宿主审批", () => {
     const model = vi.fn(() => reply()); r.brain.current = model;
     await r.say("6", `批准 #${record.code}`); await r.idle();
     expect(model).toHaveBeenCalledTimes(1); expect((await records(r))[0]?.state).toBe("pending");
-    await r.say("1", `拒绝 #${record.code}`);
+    await r.say("1", `不允许 #${record.code}`);
     expect(model).toHaveBeenCalledTimes(1); expect((await records(r))[0]?.state).toBe("rejected");
     expect(r.texts().at(-1)).toContain(`#${record.code} 已拒绝`); expect(r.mentions().at(-1)).toBe("5"); expect(s.calls).toHaveLength(0);
   });

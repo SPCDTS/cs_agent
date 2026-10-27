@@ -41,6 +41,9 @@ type Options = {
   now?: () => number;
 };
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+const APPROVE = ["批准", "同意", "通过", "允许", "可以"], REJECT = ["拒绝", "驳回", "不行", "不允许"];
+const DECISION = [...REJECT, ...APPROVE].join("|");
+const CODED = new RegExp(`^(${DECISION})\\s*#?([A-Z0-9]{4})$`, "u"), BARE = new RegExp(`^(${DECISION})$`, "u");
 const text = (value: string, isError = false): ToolExecutionResult => ({ output: [{ type: "text", text: value }], ...(isError ? { isError } : {}) });
 const singleLine = (value: string, max: number) => value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, max);
 
@@ -113,8 +116,8 @@ export class McpApprovals {
     if (rec.kind !== "user" || rec.message_type !== "group" || !isOwner(this.opts.owners(), rec.user_id) ||
       this.opts.config.kind !== "enabled" || !this.opts.config.value.servers.some(s => s.access.groups.includes(rec.scope.slice(6)))) return false;
     const value = rec.text.replace(/\[(?:reply|at)\]/gu, "").trim();
-    const match = /^(批准|同意|通过|拒绝|驳回)\s*#?([A-Z0-9]{4})$/u.exec(value);
-    const bare = /^(批准|同意|通过|拒绝|驳回)$/u.exec(value.replace(/\s/gu, ""));
+    const match = CODED.exec(value);
+    const bare = BARE.exec(value.replace(/\s/gu, ""));
     if (!match && !bare) return false;
     const records = (await this.records()).filter(r => r.scope === rec.scope);
     const record = match ? records.find(r => r.code === match[2])
@@ -128,7 +131,7 @@ export class McpApprovals {
       await this.send(pending[0]!, "请引用待审批消息，或回复「批准 #编号」/「拒绝 #编号」。", `ambiguous:${rec.key}`, undefined, rec.key);
       return true;
     }
-    const approve = !["拒绝", "驳回"].includes((match ?? bare)![1]!);
+    const approve = APPROVE.includes((match ?? bare)![1]!);
     const decision = await this.opts.getHarness().commit(async tx => {
       const doc = await tx.doc(McpApprovalDoc, record.code, record.code), current = doc.record;
       if (!current || current.state !== "pending") return { record: current ? approvalSchema.parse(current) : null, changed: false };
