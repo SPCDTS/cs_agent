@@ -317,12 +317,12 @@ export class PiMcp {
       try {
         const tools = await entry.connection.listTools(signal);
         if (version !== entry.changed) throw new McpFailure("catalog_changed_during_list");
-        const { revision, rejected } = makeCatalog(entry.server, entry.scope, tools, this.limits);
+        const { revision, rejected, rejectedTools } = makeCatalog(entry.server, entry.scope, tools, this.limits);
         await this.publish(revision, signal);
         if (version !== entry.changed) throw new McpFailure("catalog_changed_during_publish");
         entry.catalog = revision; entry.discovered = version; entry.listedAt = Date.now();
         this.event("catalog", rejected ? "degraded" : "ready", { server: entry.server.id, catalog: revision.digest,
-          tools: revision.tools.length, rejected });
+          tools: revision.tools.length, rejected, rejectedTools });
       } catch (error) { entry.discovered = -1; this.dispose(entry); throw error; }
     }
     return entry.catalog;

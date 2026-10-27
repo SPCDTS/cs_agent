@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_MCP_LIMITS, loadMcpConfig, parseMcpConfig } from "../../src/agent/pi-mcp/config.js";
+import { digest, makeCatalog } from "../../src/agent/pi-mcp/catalog.js";
 import { compileMcpSchema } from "../../src/agent/pi-mcp/schema.js";
 import { convertMcpResult } from "../../src/agent/pi-mcp/result.js";
 
@@ -142,6 +143,26 @@ describe("Pi MCP schema 边界", () => {
     expect(compiled.check({ count: 2, extra: 1 })).toBe(false);
   });
 
+  it("支持 Notion 的 2020-12 声明与 $defs 本地引用，暴露和摘要剥离声明", () => {
+    const inputSchema = { type: "object" as const, $schema: "https://json-schema.org/draft/2020-12/schema",
+      $defs: { x: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "string", description: "Instructions version" } },
+      properties: { instructions_version: { $ref: "#/$defs/x" } }, additionalProperties: false };
+    const compiled = compileMcpSchema(inputSchema, limits);
+    expect(compiled.check({ instructions_version: "2026-10-27" })).toBe(true);
+    expect(compiled.check({ instructions_version: 1 })).toBe(false);
+    expect(JSON.stringify(compiled.schema)).not.toContain('"$schema"');
+    const parsed = parseMcpConfig(config());
+    if (parsed.kind !== "enabled") throw new Error("fixture config");
+    const server = parsed.value.servers[0];
+    const result = makeCatalog(server, digest("owner"), [{ name: "read", inputSchema }], limits);
+    expect(result.revision.tools[0].inputSchema).toEqual(compiled.schema);
+    expect(makeCatalog(server, digest("owner"), [{ name: "read", inputSchema: { ...inputSchema, unevaluatedProperties: false } }], limits))
+      .toMatchObject({ rejected: 1, rejectedTools: [{ name: "read", reason: "unknown_keyword" }] });
+    const { $schema: _root, ...withoutRoot } = inputSchema;
+    const { $schema: _nested, ...x } = inputSchema.$defs.x;
+    expect(makeCatalog(server, digest("owner"), [{ name: "read", inputSchema: { ...withoutRoot, $defs: { x } } }], limits).revision.digest).toBe(result.revision.digest);
+  });
+
   it("支持局部引用、JSON Pointer 转义与并列复用", () => {
     const compiled = compileMcpSchema({ type: "object", definitions: { "a/b~c": { type: "string", pattern: "^ok$" } }, properties: { a: { $ref: "#/definitions/a~1b~0c" }, b: { $ref: "#/definitions/a~1b~0c" } }, required: ["a", "b"] }, limits);
     expect(compiled.check({ a: "ok", b: "ok" })).toBe(true);
@@ -169,7 +190,6 @@ describe("Pi MCP schema 边界", () => {
     { type: "object", properties: { x: { $ref: "#/missing" } } },
     { type: "object", properties: { x: { $ref: "#" } } },
     { type: "object", definitions: { A: { $ref: "#/definitions/B" }, B: { $ref: "#/definitions/A" } } },
-    { type: "object", $schema: "https://json-schema.org/draft/2020-12/schema" },
     { type: "object", unevaluatedProperties: false },
     { type: "object", properties: { x: { type: "string", format: "SECRET_SENTINEL" } } },
     { type: "object", properties: { x: { type: "string", pattern: "[" } } },

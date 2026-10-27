@@ -10,14 +10,14 @@ const listOfSchemas = z.array(z.unknown()).min(1);
 const mapOfSchemas = z.record(z.string(), z.unknown());
 const formats = z.enum(["date-time", "date", "time", "email", "hostname", "ipv4", "ipv6", "uri", "uri-reference", "uri-template", "json-pointer", "relative-json-pointer", "regex"]);
 const nodeSchema = z.strictObject({
-  $schema: z.literal("http://json-schema.org/draft-07/schema#").optional(),
+  $schema: z.string().max(256).optional(),
   $ref: z.string().optional(), $comment: z.string().optional(),
   title: z.string().optional(), description: z.string().optional(),
   default: z.unknown().optional(), examples: z.array(z.unknown()).optional(),
   readOnly: z.boolean().optional(), writeOnly: z.boolean().optional(),
   type: z.union([jsonType, z.array(jsonType).min(1).refine(value => new Set(value).size === value.length)]).optional(),
   enum: z.array(z.unknown()).min(1).optional(), const: z.unknown().optional(),
-  definitions: mapOfSchemas.optional(),
+  definitions: mapOfSchemas.optional(), $defs: mapOfSchemas.optional(),
   properties: mapOfSchemas.optional(), patternProperties: mapOfSchemas.optional(),
   required: z.array(z.string()).refine(value => new Set(value).size === value.length).optional(),
   additionalProperties: z.unknown().optional(), propertyNames: z.unknown().optional(),
@@ -32,38 +32,45 @@ const nodeSchema = z.strictObject({
   not: z.unknown().optional(), if: z.unknown().optional(), then: z.unknown().optional(), else: z.unknown().optional(),
 });
 
-function reject(): never { throw new Error("MCP schema 不受支持、无效或超过限额"); }
+type SchemaRejectionReason = "unknown_keyword" | "ref_external" | "ref_unresolved" | "cycle" | "schema_limit" | "schema_invalid";
+export class McpSchemaError extends Error {
+  constructor(readonly reason: SchemaRejectionReason) { super("MCP schema 不受支持、无效或超过限额"); }
+}
+function reject(reason: SchemaRejectionReason = "schema_invalid"): never { throw new McpSchemaError(reason); }
 
-function fail(): never { throw new Error("MCP JSON 无效或超过限额"); }
+class JsonBoundaryError extends Error {
+  constructor(readonly reason: "schema_invalid" | "schema_limit" | "cycle") { super("MCP JSON 无效或超过限额"); }
+}
+function fail(reason: JsonBoundaryError["reason"] = "schema_invalid"): never { throw new JsonBoundaryError(reason); }
 
 /** 先限制深度和占用，再复制严格 JSON；不执行 toJSON 或访问器。超限或非 JSON 时抛错。 */
 export function boundedJson(input: unknown, maxBytes: number, maxDepth: number): JsonValue {
   let bytes = 0;
   const active = new Set<object>();
   function visit(value: unknown, depth: number): void {
-    if (depth > maxDepth) fail();
+    if (depth > maxDepth) fail("schema_limit");
     if (typeof value === "string") bytes += Buffer.byteLength(value, "utf8") + 2;
     else if (value === null || typeof value === "boolean" || typeof value === "number") bytes += 8;
     else if (typeof value === "object") {
-      if (active.has(value)) fail();
+      if (active.has(value)) fail("cycle");
       active.add(value);
       bytes += 2;
       for (const key of Reflect.ownKeys(value)) {
         if (Array.isArray(value) && key === "length") continue;
         if (typeof key !== "string") fail();
         bytes += Buffer.byteLength(key, "utf8") + 4;
-        if (bytes > maxBytes * 2) fail();
+        if (bytes > maxBytes * 2) fail("schema_limit");
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (!descriptor || !("value" in descriptor)) fail();
         visit(descriptor.value, depth + 1);
       }
       active.delete(value);
     } else fail();
-    if (bytes > maxBytes * 2) fail();
+    if (bytes > maxBytes * 2) fail("schema_limit");
   }
   visit(input, 0);
   const result = copyJson(input);
-  if (Buffer.byteLength(JSON.stringify(result), "utf8") > maxBytes) fail();
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > maxBytes) fail("schema_limit");
   return result;
 }
 
@@ -80,40 +87,44 @@ export function compileMcpSchema(input: unknown, limits: McpLimits): { schema: T
     const active = new Set<object>();
     let visits = 0;
     function resolve(ref: string): JsonValue {
-      if (!ref.startsWith("#")) reject();
-      const pointer = decodeURIComponent(ref.slice(1));
-      if (pointer !== "" && !pointer.startsWith("/")) reject();
+      if (!ref.startsWith("#")) reject("ref_external");
+      let pointer: string;
+      try { pointer = decodeURIComponent(ref.slice(1)); } catch { return reject("ref_unresolved"); }
+      if (pointer !== "" && !pointer.startsWith("/")) reject("ref_unresolved");
       let target: JsonValue = schema;
       if (pointer === "") return target;
       for (const token of pointer.slice(1).split("/")) {
-        if (/~(?:[^01]|$)/u.test(token)) reject();
+        if (/~(?:[^01]|$)/u.test(token)) reject("ref_unresolved");
         const key = token.replace(/~1/gu, "/").replace(/~0/gu, "~");
         if (Array.isArray(target)) {
-          if (!/^(?:0|[1-9][0-9]*)$/u.test(key) || !Object.hasOwn(target, key)) reject();
+          if (!/^(?:0|[1-9][0-9]*)$/u.test(key) || !Object.hasOwn(target, key)) reject("ref_unresolved");
           target = target[Number(key)];
         } else {
-          if (!isObject(target) || !Object.hasOwn(target, key)) reject();
+          if (!isObject(target) || !Object.hasOwn(target, key)) reject("ref_unresolved");
           target = target[key];
         }
       }
       return target;
     }
     function visit(value: unknown, depth: number): void {
-      if (depth > limits.schemaDepth || ++visits > limits.schemaBytes) reject();
+      if (depth > limits.schemaDepth || ++visits > limits.schemaBytes) reject("schema_limit");
       if (typeof value === "boolean") return;
-      if (value === null || typeof value !== "object" || Array.isArray(value) || active.has(value)) reject();
+      if (value === null || typeof value !== "object" || Array.isArray(value)) reject();
+      if (active.has(value)) reject("cycle");
       const parsed = nodeSchema.safeParse(value);
-      if (!parsed.success) reject();
+      if (!parsed.success) reject(parsed.error.issues.some(issue => issue.code === "unrecognized_keys") ? "unknown_keyword" : "schema_invalid");
       const node = parsed.data;
+      // 方言声明只作有界注解；仅删除 schema 节点上的键，保留业务数据中的同名字段。
+      Reflect.deleteProperty(value, "$schema");
       active.add(value);
       if (node.$ref !== undefined) {
-        if (Object.keys(node).some(key => !["$ref", "$comment", "title", "description"].includes(key))) reject();
+        if (Object.keys(node).some(key => !["$ref", "$schema", "$comment", "title", "description"].includes(key))) reject();
         visit(resolve(node.$ref), depth + 1);
       }
       if (node.pattern !== undefined) new RegExp(node.pattern, "u");
       if (node.patternProperties) for (const pattern of Object.keys(node.patternProperties)) new RegExp(pattern, "u");
       if (node.enum && new Set(node.enum.map(item => JSON.stringify(item))).size !== node.enum.length) reject();
-      for (const map of [node.definitions, node.properties, node.patternProperties]) {
+      for (const map of [node.definitions, node.$defs, node.properties, node.patternProperties]) {
         if (map) for (const child of Object.values(map)) visit(child, depth + 1);
       }
       for (const children of [node.allOf, node.anyOf, node.oneOf]) {
@@ -144,5 +155,8 @@ export function compileMcpSchema(input: unknown, limits: McpLimits): { schema: T
         } catch { return false; }
       },
     };
-  } catch { return reject(); }
+  } catch (error) {
+    if (error instanceof McpSchemaError) throw error;
+    return reject(error instanceof JsonBoundaryError ? error.reason : "schema_invalid");
+  }
 }

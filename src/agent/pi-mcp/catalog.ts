@@ -3,7 +3,7 @@ import { defineDoc } from "@earendil-works/pi-durable";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { McpLimits, McpServerConfig } from "./config.js";
-import { compileMcpSchema } from "./schema.js";
+import { compileMcpSchema, McpSchemaError } from "./schema.js";
 import type { McpToolIdentity } from "./names.js";
 
 const schemaJson = z.record(z.string(), z.json());
@@ -36,24 +36,30 @@ export const digest = (value: unknown): string => createHash("sha256").update(ca
 export const serverDigest = (server: McpServerConfig): string => digest(server);
 
 export function makeCatalog(server: McpServerConfig, scopeDigest: string, tools: readonly Tool[], limits: McpLimits): {
-  revision: CatalogRevision; rejected: number;
+  revision: CatalogRevision; rejected: number; rejectedTools: { name: string; reason: McpSchemaError["reason"] }[];
 } {
   const accepted: StoredTool[] = [];
   let rejected = 0;
+  const rejectedTools: { name: string; reason: McpSchemaError["reason"] }[] = [];
   for (const tool of tools) {
     if (!server.tools.allow.includes(tool.name)) continue;
     try {
       const candidate = storedTool.parse({ name: tool.name, description: tool.description ?? tool.name,
         inputSchema: tool.inputSchema, ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}) });
-      compileStoredTool(candidate, limits);
-      accepted.push(candidate);
-    } catch { rejected++; }
+      const compiled = compileStoredTool(candidate, limits);
+      accepted.push({ ...candidate, inputSchema: schemaJson.parse(compiled.input.schema),
+        ...(compiled.output ? { outputSchema: schemaJson.parse(compiled.output.schema) } : {}) });
+    } catch (error) {
+      rejected++;
+      if (rejectedTools.length < 20) rejectedTools.push({ name: tool.name.slice(0, 128),
+        reason: error instanceof McpSchemaError ? error.reason : "schema_invalid" });
+    }
   }
   accepted.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   const payload = { adapterVersion: 2 as const, serverId: server.id, configDigest: serverDigest(server), scopeDigest, tools: accepted };
   const revision = { ...payload, digest: digest(payload) };
   if (jsonBytes(revision) > limits.catalogBytes) throw new Error("catalog_too_large");
-  return { revision, rejected };
+  return { revision, rejected, rejectedTools };
 }
 
 /** 群目录（owner 与成员共用）使用独立权限范围；审批工具可能只返回回执，不能套用远端输出 schema。 */
@@ -76,7 +82,7 @@ export function restoreCatalog(input: unknown, limits: McpLimits): CatalogRevisi
 }
 
 export function compileStoredTool(tool: StoredTool, limits: McpLimits) {
-  if (jsonBytes([tool.inputSchema, tool.outputSchema ?? null]) > limits.schemaBytes) throw new Error("schema_too_large");
+  if (jsonBytes([tool.inputSchema, tool.outputSchema ?? null]) > limits.schemaBytes) throw new McpSchemaError("schema_limit");
   return { input: compileMcpSchema(tool.inputSchema, limits),
     output: tool.outputSchema ? compileMcpSchema(tool.outputSchema, limits) : undefined };
 }
@@ -92,9 +98,9 @@ export function toolNames(revision: CatalogRevision, tool: StoredTool): McpToolI
 /** 只遍历 schema 节点；同名业务字段及 const/default/enum 内的数据必须保留。 */
 function contractSchema(value: z.infer<ReturnType<typeof z.json>>): z.infer<ReturnType<typeof z.json>> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
-  const maps = new Set(["properties", "patternProperties", "definitions", "dependencies"]);
+  const maps = new Set(["properties", "patternProperties", "definitions", "$defs", "dependencies"]);
   const nodes = new Set(["additionalProperties", "propertyNames", "additionalItems", "contains", "not", "if", "then", "else"]);
-  return Object.fromEntries(Object.entries(value).filter(([key]) => !["description", "title", "$comment"].includes(key)).map(([key, child]) => {
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !["description", "title", "$comment", "$schema"].includes(key)).map(([key, child]) => {
     if (maps.has(key) && child !== null && typeof child === "object" && !Array.isArray(child)) {
       return [key, Object.fromEntries(Object.entries(child).map(([name, schema]) => [name, contractSchema(schema)]))];
     }

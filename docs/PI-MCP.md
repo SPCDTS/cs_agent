@@ -114,7 +114,7 @@ owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通�
 
 每次 spawn/message 投递前及重启恢复调度前，用子会话自己的 ID 重配 MCP 工具与连接；请求前 hook 从已经持久化的模型请求中移除失效工具，新名称在下一次准备模型请求时提供。message 只收紧快照，不增加服务或重新授权；不同人续发会撤掉 MCP，之后 owner 续发也不会恢复。父回合有 MCP 而 spawn 未获委派，或 message 刚撤掉已有委派时，工具结果会提示主 agent 自行调用 MCP。执行时取“派出快照 ∩ 当前有效授权 ∩ 子任务范围”：派出者身份失效、服务在当前配置中禁用或 `allowSubagent` 关闭，后续调用立即拒绝。配置文件仍在启动时读取，修改磁盘文件须重启后生效。
 
-目录完整分页读取，再按白名单选择工具。不支持的 schema 隔离到单个工具，不放宽条件。当前支持严格 draft-07 子集、根 object 和非循环本地 `$ref`；不支持 `$defs`、`$id`、外部引用或未知 format/关键字。详细支持范围见 [schema.ts](../src/agent/pi-mcp/schema.ts) 和边界测试。
+目录完整分页读取，再按白名单选择工具。不支持的 schema 隔离到单个工具，不放宽条件。当前支持严格 draft-07 子集、根 object 和非循环本地 `$ref`；兼容 `$defs`（与 `definitions` 同样遍历，支持 `#/$defs/...` 引用）及数值形式的 `exclusiveMinimum` / `exclusiveMaximum`。根及嵌套 schema 节点的 `$schema` 仅接受长度不超过 256 字符的字符串，不校验 URI，并在编译、暴露和目录摘要计算前剥离；这不代表支持完整 2020-12 方言。仍拒绝 `$id`、外部或循环引用及未知 format/关键字。目录 trace 保留拒绝总数及最多 20 条工具名（最多 128 字符）和固定分类原因，不记录原始校验错误或 schema 内容。详细支持范围见 [schema.ts](../src/agent/pi-mcp/schema.ts) 和边界测试。
 
 工具名称形如 `mcp_docs_search_<hash>`。名称按单工具身份计算：只有服务器配置、权限范围或该工具的输入/输出契约变化才改变名称。其他工具及纯描述变化不影响名称；schema 节点的 `description`、`title`、`$comment` 不参与身份计算，同名业务属性和常量数据保留。更新描述后下一次模型请求可见新文字。
 

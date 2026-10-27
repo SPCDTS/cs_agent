@@ -162,7 +162,7 @@ await mcp.close();
 3. 先白名单过滤，再验证要暴露的 schema。单个 schema 无法支持则隔离该工具、记录原因；不能把 schema 静默降为任意对象。
 4. 持久提交完整目录版本，再安装 Registry 定义，最后更新会话选择。后两步可重复；崩溃后根据已提交目录重新安装，不要求 Registry 与数据库形成事务。
 
-schema 进入模块时是 `unknown`。首版支持经过契约测试的 draft-07 兼容子集、根 object 和文档内 `$ref`；明确拒绝外部引用、循环引用及不支持的方言/关键字。不删校验条件来“修复”schema，不手工重写成 TypeBox，不用强制类型断言冒充已经验证。Pi 当前可以处理普通 JSON Schema，但实际支持范围由编译和样例验证确定。
+schema 进入模块时是 `unknown`。支持经过契约测试的严格 draft-07 兼容子集、根 object 和文档内 `$ref`；`$defs` 与 `definitions` 同样遍历，支持 `#/$defs/...` 引用，数值形式的 `exclusiveMinimum` / `exclusiveMaximum` 保持支持。根及嵌套 schema 节点允许不超过 256 字符的字符串 `$schema`，不进一步校验 URI；编译、暴露及目录摘要计算前剥离该声明，不影响同名业务属性或常量数据，也不意味着支持完整 2020-12 方言。仍拒绝 `$id`、外部引用、循环引用和未知 format/关键字。`mcp_catalog` trace detail 保留 `rejected` 总数及 `rejectedTools` 列表：最多 20 条 `{name, reason}`，名称最多 128 字符，原因仅使用 `unknown_keyword`、`ref_external`、`ref_unresolved`、`cycle`、`schema_limit`、`schema_invalid` 固定分类码，不带原始 Zod 消息或 schema 内容；拒绝列表不写入持久目录，存储格式不变。不删校验条件来“修复”schema，不手工重写成 TypeBox，不用强制类型断言冒充已经验证。Pi 当前可以处理普通 JSON Schema，但实际支持范围由编译和样例验证确定。
 
 适配器在发出请求前再次验证 Pi 最终传入的参数。Pi 自身可能执行参数修复/类型转换，因此本设计不承诺输入逐字节原样转发；不会额外填充默认值、替换调用目标或注入未定义业务字段。
 
