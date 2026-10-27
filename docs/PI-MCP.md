@@ -72,7 +72,7 @@ Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器�
 
 `PI_MCP_OAUTH_REDIRECT_URL` 默认 `http://127.0.0.1:8787/mcp/oauth/callback`；只接受不含 query/hash 的 HTTP(S) 绝对 URL，且必须与公开 CIMD 文档的 `redirect_uris` 逐字一致。更换回调地址需同步更新公开元数据。
 
-页面接入后的操作路径是：先进入面板，再打开 `/mcp/accounts` → 点击服务的「登录」→ 在外部服务的浏览器授权页确认 → 回调显示「外部账号已登录」的同站 HTML，点击「返回外部账号」链接进入账号页。目前交付包含 JSON API、授权端点与回调结果页，`/mcp/accounts` 暂为 404，HTML 页面由后续改动接入。接口与表单约定见 [面板文档](DASHBOARD.md#11-外部账号接口)。登录入口只在面板，不在聊天或模型工具中提供。
+操作路径是：先进入面板，再打开 `/mcp/accounts` → 点击服务的「登录」→ 在外部服务的浏览器授权页确认 → 回调显示「外部账号已登录」的同站 HTML，点击「返回外部账号」链接进入账号页。账号页（面板顶栏「外部账号」）列出各服务的登录状态、到期时间与最近错误，并提供登录、重新登录与退出。接口与表单约定见 [面板文档](DASHBOARD.md#11-外部账号接口)。登录入口只在面板，不在聊天或模型工具中提供。
 
 凭据保存到 `DATA_DIR/mcp-oauth.sqlite`，与账号的 `serverId + accountId + revision` 绑定。修改 `revision` 等于换账号版本，重启后需要重新登录，不使用旧版本 token。运行回合没有 token 时在联网前返回 `auth_required`；运行时不安装 SDK authProvider，传输层在每次请求前注入 Bearer。临近过期（60 秒）时在账号锁内刷新；资源 401 同样在锁内复核 token 版本，其他连接已刷新则复用新 token，否则刷新，并对同一请求只重试一次（含 POST、SSE GET 与 DELETE）。重试仍为 401 时返回 auth_required，SDK 不会收到 401；403 仍拒绝。只有授权服务器返回确定的 OAuth 错误（如 invalid_grant、invalid_client、unauthorized_client）才删除 token 并保留 refresh_failed，需 owner 重新登录；网络错误、超时、5xx 与暂态服务错误只使本次请求以 transport_error 失败，不改 token 或状态，下次请求仍可刷新。
 

@@ -123,8 +123,10 @@ export function createDashboard(opts: DashboardOptions) {
 
   /** 在服务端内部调用会话 JSON 路由：与浏览器拿到的是同一份已脱敏 JSON、同样的校验与错误码。 */
   async function api(pathQuery: string): Promise<{ status: number; body: unknown }> {
-    return readDashboardJson(pathQuery, (url, res) =>
-      (url.pathname === '/api/memory' || url.pathname.startsWith('/api/memory/') ? memoryRoute : sessionRoute)(url, res));
+    return readDashboardJson(pathQuery, (url, res) => url.pathname === '/api/mcp/accounts'
+      // 外部账号 JSON 只读 method；内部调用不经过网络请求，补一个 GET 即可。
+      ? mcpRoutes({ method: 'GET' } as IncomingMessage, res, url, '', '')
+      : (url.pathname === '/api/memory' || url.pathname.startsWith('/api/memory/') ? memoryRoute : sessionRoute)(url, res));
   }
 
   function sse(res: ServerResponse): SseWriter | null {

@@ -3,6 +3,7 @@ import { imagesPageBody, imageDetailBody, IMAGES_NOTE } from './images-pages.js'
 import { entriesPageBody, entryFilters, entryPageBody, entryQuery } from './memory-entries-pages.js';
 import type { MemoryEntryDetail, MemoryEntryPage, MemoryExtractStatus, MemoryJobsStatus, MemoryProfileView } from '../memory/types.js';
 import { jobsPageBody, profilePageBody } from './memory-jobs-pages.js';
+import { mcpAccountsBody, mcpAccountsLead, type McpAccountsView } from './mcp-pages.js';
 import type { ImagePage, ImageDetail } from '../memory/types.js';
 import { redact, redactText } from '../../shared/redact.js';
 import { recallDetailBody, recallFilters, recallQuery, recallsPageBody, turnRecallSection, type RecallDetail, type RecallList } from './recall-pages.js';
@@ -257,6 +258,10 @@ export function createDashboardPages(deps: DashboardPageDeps) {
     if (p.startsWith('/agents/')) return agentsRoute(p, q, nonce, shell);
     if (p === '/memory' || p.startsWith('/memory/')) return memoryPage(p, q, nonce, shell);
     if (p === '/settings') return shell('设置', await settingsBody(), { lead: '修改立即对之后收到的消息生效，无需重启；.env 中的值只是初始默认。', scripts: ['/assets/forms.js'] });
+    if (p === '/mcp/accounts') {
+      const r = await api('/api/mcp/accounts');
+      return shell('外部账号', mcpAccountsBody({ ...r, error: apiError(r) }, q, csrf), { lead: mcpAccountsLead(r.status === 200 ? (r.body as McpAccountsView).redirectUrl : undefined), scripts: ['/assets/forms.js'] });
+    }
     if (p === '/skills') return shell('技能', await skillsBody(), { lead: 'pi 与 codex 共用的技能目录；上传、删除后下一条消息即生效。' });
     if (p.startsWith('/skills/')) {
       let name: string; try { name = decodeURIComponent(p.slice(8)); } catch { return null; }

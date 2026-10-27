@@ -131,7 +131,7 @@ describe('面板二期页面', () => {
       for (const m of html.matchAll(/<script[^>]*>/g)) expect(m[0]).toContain(`nonce="${nonce}"`);
       const navOf: Record<string, string> = { '/logs': '/settings', '/config': '/settings', '/context': '/memory', '/turns/pi%3A7%3A1': '/turns', '/conversations/group%3A7': '/live' };
       if (url !== '/') expect(html).toContain(`href="${navOf[url] ?? url}" aria-current="page"`);
-      expect(html).toMatch(/<nav class="tabs"[^>]*><a href="\/"[^>]*>总览<\/a><a href="\/agents"[^>]*>Agent<\/a><a href="\/memory"[^>]*>记忆<\/a><a href="\/context-usage"[^>]*>上下文监控<\/a><a href="\/turns"[^>]*>回合<\/a><a href="\/live"[^>]*>(<i[^>]*><\/i>)?实时<\/a><a href="\/schedules"[^>]*>定时任务<\/a><a href="\/skills"[^>]*>技能<\/a><a href="\/settings"[^>]*>设置<\/a><\/nav>/);
+      expect(html).toMatch(/<nav class="tabs"[^>]*><a href="\/"[^>]*>总览<\/a><a href="\/agents"[^>]*>Agent<\/a><a href="\/memory"[^>]*>记忆<\/a><a href="\/context-usage"[^>]*>上下文监控<\/a><a href="\/turns"[^>]*>回合<\/a><a href="\/live"[^>]*>(<i[^>]*><\/i>)?实时<\/a><a href="\/schedules"[^>]*>定时任务<\/a><a href="\/skills"[^>]*>技能<\/a><a href="\/mcp\/accounts"[^>]*>外部账号<\/a><a href="\/settings"[^>]*>设置<\/a><\/nav>/);
     }
     // 去重：总览不再列在途卡片（只给计数，详情在实时页）；设置页不再有"线程"区块（重置/压缩在 Agent 页）。
     const home = await (await r.get('/')).text();

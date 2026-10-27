@@ -14,7 +14,7 @@
 
 ## 2. 页面
 
-顶栏：总览 · Agent · 记忆 · 上下文监控 · 回合 · 实时 · 定时任务 · 技能 · 设置（日志、配置从设置页进入；`/context` 归入记忆）。手机宽度（≤720px）导航改为横向滚动的第二行，表格隐藏次要列，375px 下无横向滚动。
+顶栏：总览 · Agent · 记忆 · 上下文监控 · 回合 · 实时 · 定时任务 · 技能 · 外部账号 · 设置（日志、配置从设置页进入；`/context` 归入记忆）。手机宽度（≤720px）导航改为横向滚动的第二行，表格隐藏次要列，375px 下无横向滚动。
 
 | 路径 | 内容 | 写操作 |
 |---|---|---|
@@ -257,7 +257,9 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 
 ## 11. 外部账号接口
 
-Pi MCP OAuth 的 JSON 与浏览器授权端点由 `src/obs/mcp/http.ts` 实现。`/mcp/accounts` 的 HTML 页面由后续改动实现，本次暂为 404。
+Pi MCP OAuth 的 JSON 与浏览器授权端点由 `src/obs/mcp/http.ts` 实现。
+
+页面 `/mcp/accounts`（`src/obs/ui/mcp-pages.ts`，顶栏「外部账号」，位于技能与设置之间）：每个账号一张卡，状态印章（已登录 / 需要登录 / 刷新失败 / 已过期）、账号与 revision、issuer 主机名、access token 到期时间、scope、有无 refresh token、最近错误（中文 + 错误码）；「登录 / 重新登录」与「退出」（需确认）都是带 `_csrf` 的表单 POST。`?ok=login&server=`、`?ok=logout`、`?error=<码>` 显示一条提示；未启用时（JSON 503）仍可访问，只显示说明。数据经页面内部调用 `/api/mcp/accounts`，不含 token。
 
 | 方法与路径 | 行为 |
 | --- | --- |

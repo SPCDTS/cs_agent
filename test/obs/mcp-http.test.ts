@@ -92,6 +92,18 @@ describe("面板 MCP 外部账号", () => {
     expect(r.fixture.grants).toEqual([]);
   });
 
+  it("账号页展示登录状态与两个 CSRF 表单，不含 token，错误码显示中文", async () => {
+    const r = await rig(), flow = await r.start();
+    await r.request(`/mcp/oauth/callback?${new URLSearchParams({ state: flow.state, code: flow.code })}`, {}, flow.cookie);
+    const response = await r.request("/mcp/accounts"), html = await response.text();
+    expect(response.status).toBe(200);
+    expect(html).toContain("notion"); expect(html).toContain("已登录");
+    const csrf = `name="_csrf" value="${csrfToken(OBS_TOKEN)}"`;
+    expect(html).toMatch(new RegExp(`action="/mcp/oauth/start/notion">[^]*?${csrf}[^]*?action="/mcp/oauth/logout/notion"[^>]*>[^]*?${csrf}`, "u"));
+    for (const secret of [r.fixture.token.access_token, r.fixture.token.refresh_token]) expect(html).not.toContain(secret);
+    expect(await (await r.request("/mcp/accounts?error=invalid_state")).text()).toContain("登录链接已失效");
+  });
+
   it("未配置 OAuth 的 JSON 接口返回 503", async () => {
     const r = await rig(false), response = await r.request("/api/mcp/accounts");
     expect(response.status).toBe(503);
