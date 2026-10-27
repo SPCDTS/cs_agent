@@ -67,6 +67,6 @@ describe("pi：mem_* 工具按本轮权限注册，memory 段进入系统提示"
     // 唤醒回合没有继承的人：可见集只剩读工具，服务端同样拒绝写
     const wake = { threadKey: "group:7", scope: "group:7", identity: { kind: "wake" as const }, inputs: [] };
     expect(memory.toolNames(wake)).toEqual(["mem_search"]);
-    await expect(memory.tool(wake, "mem_remember", { text: "x", kind: "fact" })).rejects.toThrow("本轮身份未确证");
+    await expect(memory.tool(wake, "mem_remember", { text: "x", kind: "fact" })).rejects.toThrow(/本轮身份未确证.*本轮请勿重试/);
   });
 });

@@ -92,9 +92,9 @@ describe("MemoryStore：去重、取代与版本", () => {
     expect(r.store.links(old.id)).toEqual([{ from_id: next.row.id, to_id: old.id, rel: "supersedes", created_at: 1_790_000_010 }]);
     expect(r.store.versions(old.id).map(v => v.reason)).toEqual(["remember", "superseded"]);
     const before = r.store.browse({ limit: 50 }).total;
-    expect(() => r.store.remember({ ns: "owner", kind: "fact", text: "又搬家", author: "qq:1" }, { supersedes: old.id })).toThrow(/不是 active/);
+    expect(() => r.store.remember({ ns: "owner", kind: "fact", text: "又搬家", author: "qq:1" }, { supersedes: old.id })).toThrow(/superseded.*无需再取代.*删除 supersedes/);
     const g = r.add("群公告", { ns: "group:7" }).row;
-    expect(() => r.store.remember({ ns: "owner", kind: "fact", text: "跨域取代", author: "qq:1" }, { supersedes: g.id })).toThrow(/同一命名空间/);
+    expect(() => r.store.remember({ ns: "owner", kind: "fact", text: "跨域取代", author: "qq:1" }, { supersedes: g.id })).toThrow(/同一会话.*mem_search/);
     expect(r.store.browse({ limit: 50 }).total).toBe(before + 1);
   });
 
@@ -139,7 +139,7 @@ describe("MemoryStore：去重、取代与版本", () => {
     expect(JSON.parse(versions[1]!.after_json).text).toBe("周报每周四发");
     expect(r.store.statusBeforeForget(row.id)).toBe("superseded");
     expect(r.store.update(row.id, { subject: "周报" }, "qq:1").hash).toBe(memoryHash("owner", "fact", "周报每周四发"));
-    expect(() => r.store.update(row.id, {}, "qq:1")).toThrow(/没有要修改/);
+    expect(() => r.store.update(row.id, {}, "qq:1")).toThrow(/没有要修改.*text、subject、until、due_at 或 done_at/);
   });
 
   it("面板浏览：全部状态、按命名空间与关键词筛选并给出总数", () => {

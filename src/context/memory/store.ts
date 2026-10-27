@@ -223,8 +223,8 @@ export class MemoryStore {
       // 取代与去重互不影响：新正文已有相同条目时，仍在同一事务里让它取代旧条目。
       if (opts.supersedes !== undefined && opts.supersedes !== duplicate?.id) {
         const old = this.get(opts.supersedes);
-        if (!old || old.ns !== input.ns) throw new MemoryStoreError(`被取代的条目 #${opts.supersedes} 不存在或不在同一命名空间`);
-        if (old.status !== "active") throw new MemoryStoreError(`条目 #${old.id} 已不是 active，不能再被取代`);
+        if (!old || old.ns !== input.ns) throw new MemoryStoreError(`无法取代条目 #${opts.supersedes}，只能取代同一会话的条目。请删除 supersedes 后重试，或先用 mem_search 查找要替换的条目 id。`);
+        if (old.status !== "active") throw new MemoryStoreError(`条目 #${old.id} 已是 ${old.status}，无需再取代；请删除 supersedes 后重试。`);
         // until 一律记为取代时间（§4.3），原先填的未来失效时间被覆盖
         this.db.prepare("UPDATE memories SET status = 'superseded', until = ?, updated_at = ? WHERE id = ?").run(now, now, old.id);
         superseded = this.get(old.id)!;
@@ -264,7 +264,7 @@ export class MemoryStore {
         set("subject", subject);
       }
       for (const key of ["since", "until", "due_at", "done_at"] as const) if (patch[key] !== undefined) set(key, patch[key]);
-      if (!sets.length) throw new MemoryStoreError("没有要修改的字段");
+      if (!sets.length) throw new MemoryStoreError("没有要修改的字段；mem_update 请至少提供 text、subject、until、due_at 或 done_at。");
       set("updated_at", this.now());
       this.db.prepare(`UPDATE memories SET ${sets.join(", ")} WHERE id = ?`).run(...args, id);
       const after = this.get(id)!;

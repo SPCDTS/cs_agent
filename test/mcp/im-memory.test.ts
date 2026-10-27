@@ -54,14 +54,14 @@ describe("codex im MCP：mem_* 工具经 loopback 回主进程", () => {
     expect(f.text(await f.tool("mem_search", { query: "简短" }))).toBe("没有找到匹配的记忆。");
     const profile = await f.tool("mem_profile", { text: "群简介", revision: "none" });
     expect(profile.isError).toBe(true);
-    expect(f.text(profile)).toContain("画像只能在 owner 本人的回合修改");
+    expect(f.text(profile)).toMatch(/画像只能在 owner 本人的回合修改.*本轮请勿重试/);
     expect((await f.post("mem_profile", { text: "群简介", revision: "none" })).status).toBe(400);
     expect((await f.tool("mem_forget", { id: 1, reason: "x" })).isError).toBe(true);
 
     f.current.binding = f.binding("group:7", { kind: "wake" });
     const denied = await f.tool("mem_remember", { text: "x", kind: "fact" });
     expect(denied.isError).toBe(true);
-    expect(f.text(denied)).toContain("本轮身份未确证");
+    expect(f.text(denied)).toMatch(/本轮身份未确证.*本轮请勿重试/);
     expect(f.store.browse({ limit: 10 }).total).toBe(1);
   });
 

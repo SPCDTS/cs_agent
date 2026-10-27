@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import { MemoryStore } from "../../src/context/memory/store.js";
 import { PROFILE_NONE, ProfileStore } from "../../src/context/memory/profile.js";
 import { runRights } from "../../src/agent/host/identity.js";
-import { MEMORY_CHILD_READONLY, MEMORY_PROFILE_OWNER_ONLY, MEMORY_UNVERIFIED, MemoryService, memoryAccess, memoryToolNames, type MemoryBinding } from "../../src/agent/memory/service.js";
+import { MemoryService, memoryAccess, memoryToolNames, type MemoryBinding } from "../../src/agent/memory/service.js";
 import { renderMemorySection } from "../../src/agent/memory/render.js";
 import { isSubagentExcludedTool } from "../../src/agent/pi-tools/subagent.js";
 import { MEMORY_TOOLS } from "../../src/agent/memory/tools.js";
@@ -81,16 +81,16 @@ describe("工具语义", () => {
     const all = await r.service.tool(ownerTurn(), "mem_list", {});
     expect(all.split("\n")).toHaveLength(2);
     // 群里的人不能改、不能遗忘 owner 的条目；提示与不存在相同
-    await expect(r.service.tool(groupTurn("5"), "mem_forget", { id: 1, reason: "试试" })).rejects.toThrow("没有可修改的记忆 #1");
-    await expect(r.service.tool(groupTurn("5"), "mem_update", { id: 999, text: "x" })).rejects.toThrow("没有可修改的记忆 #999");
+    await expect(r.service.tool(groupTurn("5"), "mem_forget", { id: 1, reason: "试试" })).rejects.toThrow(/没有可修改的记忆 #1.*mem_search/);
+    await expect(r.service.tool(groupTurn("5"), "mem_update", { id: 999, text: "x" })).rejects.toThrow(/没有可修改的记忆 #999.*mem_search/);
   });
 
   it("person 为空的回合与子 agent 不可写；未确证的群回合仍可读本群", async () => {
     const r = rig();
     await r.service.tool(groupTurn("5"), "mem_remember", { text: "群规：周末不发工作消息", kind: "rule" });
-    await expect(r.service.tool(bind("group:7", { kind: "wake" }), "mem_remember", { text: "x", kind: "fact" })).rejects.toThrow(MEMORY_UNVERIFIED);
-    await expect(r.service.tool(bind("owner", { kind: "wake" }), "mem_forget", { id: 1, reason: "x" })).rejects.toThrow(MEMORY_UNVERIFIED);
-    await expect(r.service.tool(ownerTurn({ child: true }), "mem_remember", { text: "x", kind: "fact" })).rejects.toThrow(MEMORY_CHILD_READONLY);
+    await expect(r.service.tool(bind("group:7", { kind: "wake" }), "mem_remember", { text: "x", kind: "fact" })).rejects.toThrow(/本轮身份未确证.*本轮请勿重试/);
+    await expect(r.service.tool(bind("owner", { kind: "wake" }), "mem_forget", { id: 1, reason: "x" })).rejects.toThrow(/本轮身份未确证.*本轮请勿重试/);
+    await expect(r.service.tool(ownerTurn({ child: true }), "mem_remember", { text: "x", kind: "fact" })).rejects.toThrow(/子 agent.*本轮请勿重试/);
     expect(await r.service.tool(bind("group:7", { kind: "wake" }), "mem_search", { query: "周末" })).toContain("#1 [rule]");
     expect(await r.service.tool(ownerTurn({ child: true }), "mem_search", { query: "周末" })).toContain("#1 [rule]");
   });
@@ -109,8 +109,11 @@ describe("工具语义", () => {
     expect(await r.service.tool(groupTurn("5"), "mem_remember", { text: "聚会改到下周日。", kind: "fact" })).toContain("已有相同的记忆，未重复记录");
     await r.service.tool(groupTurn("5"), "mem_remember", { text: "周四前把周报模板发给群主", kind: "commitment", due_at: "2026-10-30" });
     expect(await r.service.tool(groupTurn("5"), "mem_update", { id: 5, done_at: "2026-10-29 18:30" })).toContain("(已完成 2026-10-29 18:30)");
-    await expect(r.service.tool(groupTurn("5"), "mem_update", { id: 4, due_at: "2026-11-01" })).rejects.toThrow(/只用于 commitment/);
-    await expect(r.service.tool(groupTurn("5"), "mem_update", { id: 3, text: "改旧的" })).rejects.toThrow(/只能修改 active/);
+    await expect(r.service.tool(groupTurn("5"), "mem_update", { id: 4, due_at: "2026-11-01" })).rejects.toThrow(/kind=fact.*commitment.*until/);
+    await expect(r.service.tool(groupTurn("5"), "mem_update", { id: 4, done_at: "2026-11-01" })).rejects.toThrow(/kind=fact.*commitment.*until/);
+    await expect(r.service.tool(groupTurn("5"), "mem_update", { id: 4 })).rejects.toThrow(/text、subject、until、due_at 或 done_at/);
+    await expect(r.service.tool(groupTurn("5"), "mem_remember", { text: "聚会又改期", kind: "episode", supersedes: 3 })).rejects.toThrow(/superseded.*无需再取代.*删除 supersedes/);
+    await expect(r.service.tool(groupTurn("5"), "mem_update", { id: 3, text: "改旧的" })).rejects.toThrow(/superseded.*只能修改 active.*mem_remember/);
     expect(await r.service.tool(groupTurn("5"), "mem_forget", { id: 4, reason: "说错了" })).toContain("已遗忘 #4");
     expect(r.store.versions(4).map(v => [v.by, v.reason])).toEqual([["qq:5", "remember"], ["qq:5", "说错了"]]);
     // owner 私聊可以管理别的命名空间的条目
@@ -121,13 +124,35 @@ describe("工具语义", () => {
     expect(r.store.versions(4).at(-1)?.by).toBe("dashboard");
   });
 
+  it("事故回归：episode 日期改用 since，跨会话 supersedes 提示先检索且不泄露条目存在性", async () => {
+    const r = rig();
+    await r.service.tool(ownerTurn(), "mem_remember", { text: "owner 的旧记忆", kind: "fact" });
+    const args = { kind: "episode", due_at: "2026-10-27", since: "2026-10-27", supersedes: 1, subject: "qq:10000001", text: "今天参加了聚会" };
+    await expect(r.service.tool(groupTurn("5"), "mem_remember", args)).rejects.toThrow(/due_at.*commitment.*episode.*since.*删除 due_at/);
+    const { due_at: _due, ...withoutDue } = args;
+    const cross = await r.service.tool(groupTurn("5"), "mem_remember", withoutDue).catch((e: Error) => e.message);
+    const missing = await r.service.tool(groupTurn("5"), "mem_remember", { ...withoutDue, supersedes: 999 }).catch((e: Error) => e.message);
+    expect(cross).toMatch(/同一会话.*删除 supersedes.*mem_search/);
+    expect(cross.replace("#1", "#999")).toBe(missing);
+    expect(r.store.browse({ limit: 10 }).total).toBe(1);
+    const { supersedes: _old, ...corrected } = withoutDue;
+    expect(await r.service.tool(groupTurn("5"), "mem_remember", corrected)).toContain("[episode] (2026-10-27)");
+    expect(r.store.get(1)?.status).toBe("active");
+    expect(r.store.get(2)).toMatchObject({ ns: "group:7", due_at: null });
+  });
+
   it("参数校验与秘密检测", async () => {
     const r = rig();
-    await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "wish" })).rejects.toThrow(/参数无效：kind/);
-    await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "fact", extra: 1 })).rejects.toThrow(/参数无效/);
-    await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "fact", since: "2026-02-30" })).rejects.toThrow(/日期/);
-    await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "服务器密码 password=hunter2abc", kind: "fact" })).rejects.toThrow(/凭据/);
-    await expect(r.service.tool(ownerTurn(), "mem_nope", {})).rejects.toThrow(/未知的记忆工具/);
+    await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "wish" })).rejects.toThrow(/参数无效：kind.*fact、preference、rule、commitment、episode/);
+    await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "fact", extra: 1 })).rejects.toThrow(/extra.*删除/);
+    await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "fact", since: "2026-02-30" })).rejects.toThrow(/since.*日期.*有效的 YYYY-MM-DD/);
+    await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "x", kind: "episode", since: "2026/10/27" })).rejects.toThrow(/since.*北京时间 YYYY-MM-DD/);
+    await expect(r.service.tool(ownerTurn(), "mem_update", { id: "1", text: "x" })).rejects.toThrow(/id.*数字/);
+    await expect(r.service.tool(ownerTurn(), "mem_update", { id: 1, until: 123 })).rejects.toThrow(/until.*字符串 YYYY-MM-DD.*空字符串/);
+    await expect(r.service.tool(ownerTurn(), "mem_search", { status: "done" })).rejects.toThrow(/status.*active、superseded、retired、orphaned、forgotten/);
+    await expect(r.service.tool(ownerTurn(), "mem_search", { limit: 21 })).rejects.toThrow(/limit.*不大于 20/);
+    await expect(r.service.tool(ownerTurn(), "mem_remember", { text: "服务器密码 password=hunter2abc", kind: "fact" })).rejects.toThrow(/凭据.*删除凭据/);
+    await expect(r.service.tool(ownerTurn(), "mem_nope", {})).rejects.toThrow(/未知的记忆工具.*本轮提供的/);
   });
 
   it("输出总量受字数上限约束并说明未显示的条数；检索记召回统计并写 memory_recall / memory_write 事件（不记正文）", async () => {
@@ -150,8 +175,8 @@ describe("工具语义", () => {
 
   it("画像只在 owner 本人的回合、只写本线程命名空间；revision 不符返回当前内容", async () => {
     const r = rig();
-    await expect(r.service.tool(groupTurn("5"), "mem_profile", { text: "群简介", revision: PROFILE_NONE })).rejects.toThrow(MEMORY_PROFILE_OWNER_ONLY);
-    await expect(r.service.tool(ownerTurn({ child: true }), "mem_profile", { text: "x", revision: PROFILE_NONE })).rejects.toThrow(MEMORY_PROFILE_OWNER_ONLY);
+    await expect(r.service.tool(groupTurn("5"), "mem_profile", { text: "群简介", revision: PROFILE_NONE })).rejects.toThrow(/owner 本人的回合.*本轮请勿重试/);
+    await expect(r.service.tool(ownerTurn({ child: true }), "mem_profile", { text: "x", revision: PROFILE_NONE })).rejects.toThrow(/owner 本人的回合.*本轮请勿重试/);
     expect(await r.service.tool(groupTurn("1"), "mem_profile", { text: "家庭群：爸妈和兄弟姐妹", revision: PROFILE_NONE })).toContain("画像已保存");
     expect((await r.profiles.read("group:7")).text).toBe("家庭群：爸妈和兄弟姐妹");
     expect((await r.profiles.read("owner")).text).toBe("");
@@ -183,7 +208,7 @@ describe("工具语义", () => {
     const turn = ownerTurn({ turnId: "pi:mixed" });
     for (let i = 0; i < 19; i++) await r.service.tool(turn, "mem_remember", { text: `第 ${i} 条`, kind: "fact" });
     await r.service.tool(turn, "mem_profile", { text: "称呼：老王", revision: PROFILE_NONE });
-    await expect(r.service.tool(turn, "mem_profile", { text: "称呼：小王", revision: (await r.profiles.read("owner")).revision })).rejects.toThrow(/上限（20 次）/);
+    await expect(r.service.tool(turn, "mem_profile", { text: "称呼：小王", revision: (await r.profiles.read("owner")).revision })).rejects.toThrow(/上限（20 次）.*本轮请勿重试.*下一轮/);
     expect(await r.service.tool(ownerTurn({ turnId: "pi:next" }), "mem_remember", { text: "下一轮", kind: "fact" })).toContain("已记住");
     await expect(r.service.tool(ownerTurn(), "mem_forget", { id: 1, reason: "密码是 password=hunter2abc" })).rejects.toThrow(/凭据/);
     expect(r.store.get(1)?.status).toBe("active");
@@ -225,7 +250,7 @@ it("事件回合只写 owner，最多五次，不开放画像，移除 owner 后
   const r = rig(), binding = bind("owner", { kind: "event", source: "gmail", creator: "1" });
   expect(memoryAccess(runRights(binding, OWNERS))).toEqual({ read: "all", write: ["owner"], routeSubjects: false });
   for (let i = 0; i < 5; i++) await r.service.tool(binding, "mem_remember", { text: "已提醒事件 " + i, kind: "episode" });
-  await expect(r.service.tool(binding, "mem_remember", { text: "超额事件", kind: "episode" })).rejects.toThrow("5 次");
+  await expect(r.service.tool(binding, "mem_remember", { text: "超额事件", kind: "episode" })).rejects.toThrow(/5 次.*本轮请勿重试/);
   await expect(r.service.tool({ ...binding, turnId: "pi:next" }, "mem_profile", { text: "不允许画像" })).rejects.toThrow();
   expect(runRights({ ...binding, identity: { kind: "event", source: "gmail", creator: "2" } }, OWNERS).person).toBeUndefined();
 });

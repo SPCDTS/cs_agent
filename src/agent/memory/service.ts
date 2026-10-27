@@ -15,7 +15,7 @@ import { trace as defaultTrace, type Trace } from "../../shared/trace.js";
 import { containsSecret } from "../../shared/redact.js";
 import { isEventTurn, runRights, type RunRights } from "../host/identity.js";
 import { formatMemoryLine, renderMemorySection } from "./render.js";
-import { MEMORY_READ_TOOLS, MEMORY_WRITE_TOOLS, memoryInputs, parseClearableTime, parseMemoryTime, type MemoryTool } from "./tools.js";
+import { MEMORY_READ_TOOLS, MEMORY_WRITE_TOOLS, memoryInputError, memoryInputs, parseClearableTime, parseMemoryTime, type MemoryTool } from "./tools.js";
 
 /** 本轮的记忆范围：read 为可读命名空间（all = 全部），write 为可写命名空间，profile 为可改画像的命名空间。 */
 export interface MemoryAccess {
@@ -48,9 +48,9 @@ export function memoryToolNames(access: MemoryAccess): MemoryTool[] {
   return [...MEMORY_READ_TOOLS, ...(access.write.length ? MEMORY_WRITE_TOOLS : []), ...(access.profile ? ["mem_profile" as const] : [])];
 }
 
-export const MEMORY_UNVERIFIED = "本轮身份未确证，不能写入记忆";
-export const MEMORY_CHILD_READONLY = "子 agent 只能检索记忆，不能写入";
-export const MEMORY_PROFILE_OWNER_ONLY = "画像只能在 owner 本人的回合修改";
+export const MEMORY_UNVERIFIED = "本轮身份未确证，不能写入记忆；本轮请勿重试。";
+export const MEMORY_CHILD_READONLY = "子 agent 只能检索记忆，不能写入；本轮请勿重试。";
+export const MEMORY_PROFILE_OWNER_ONLY = "画像只能在 owner 本人的回合修改；本轮请勿重试。";
 /** 每轮工具写入上限（§11） */
 export const MEMORY_WRITES_PER_TURN = 20;
 
@@ -120,18 +120,18 @@ export class MemoryService {
 
   /** 执行一个 mem_* 工具，返回文本；参数或权限不符抛 MemoryError（调用方作为工具错误返回）。 */
   async tool(binding: MemoryBinding, name: string, args: unknown): Promise<string> {
-    if (!isMemoryOperation(name)) throw new MemoryError("未知的记忆工具：" + name);
+    if (!isMemoryOperation(name)) throw new MemoryError(`未知的记忆工具：${name}。请使用本轮提供的 mem_* 工具。`);
     const rights = runRights(binding, this.owners()), access = memoryAccess(rights, binding.child === true);
     try {
       switch (name) {
-        case "mem_search": return this.search(binding, access, memoryInputs.mem_search.parse(args ?? {}));
-        case "mem_list": return this.list(binding, access, memoryInputs.mem_list.parse(args ?? {}));
-        case "mem_profile": return await this.profile(binding, rights, access, memoryInputs.mem_profile.parse(args ?? {}));
+        case "mem_search": return this.search(binding, access, memoryInputs.mem_search.parse(args ?? {}, { error: memoryInputError }));
+        case "mem_list": return this.list(binding, access, memoryInputs.mem_list.parse(args ?? {}, { error: memoryInputError }));
+        case "mem_profile": return await this.profile(binding, rights, access, memoryInputs.mem_profile.parse(args ?? {}, { error: memoryInputError }));
         default: {
           this.ensureWritable(binding, rights, access);
-          const text = name === "mem_remember" ? this.remember(binding, rights, access, memoryInputs.mem_remember.parse(args ?? {}))
-            : name === "mem_update" ? this.update(binding, rights, access, memoryInputs.mem_update.parse(args ?? {}))
-            : this.forget(binding, rights, access, memoryInputs.mem_forget.parse(args ?? {}));
+          const text = name === "mem_remember" ? this.remember(binding, rights, access, memoryInputs.mem_remember.parse(args ?? {}, { error: memoryInputError }))
+            : name === "mem_update" ? this.update(binding, rights, access, memoryInputs.mem_update.parse(args ?? {}, { error: memoryInputError }))
+            : this.forget(binding, rights, access, memoryInputs.mem_forget.parse(args ?? {}, { error: memoryInputError }));
           return text;
         }
       }
@@ -190,7 +190,7 @@ export class MemoryService {
     if (!rights.person || !access.write.length) throw new MemoryError(MEMORY_UNVERIFIED);
     const key = traceKeyOf(binding), used = this.writes.get(key) ?? 0;
     const limit = isEventTurn(rights) ? 5 : MEMORY_WRITES_PER_TURN;
-    if (used >= limit) throw new MemoryError(`本轮写入记忆已达上限（${limit} 次）`);
+    if (used >= limit) throw new MemoryError(`本轮写入记忆已达上限（${limit} 次）；本轮请勿重试，下一轮再写入。`);
     this.writes.delete(key); this.writes.set(key, used + 1);
     if (this.writes.size > 1000) this.writes.delete(this.writes.keys().next().value!);
   }
@@ -202,12 +202,12 @@ export class MemoryService {
   private writable(access: MemoryAccess, id: number): MemoryRow {
     const row = this.opts.store.get(id);
     // 读不到与无权写同一提示，不暴露别的命名空间里是否有这个 id。
-    if (!row || !this.canWrite(access, row.ns)) throw new MemoryError(`没有可修改的记忆 #${id}`);
+    if (!row || !this.canWrite(access, row.ns)) throw new MemoryError(`没有可修改的记忆 #${id}；请先用 mem_search 查找本会话可写的条目 id。`);
     return row;
   }
 
   private checkSecret(...texts: (string | undefined)[]): void {
-    if (texts.some(t => t !== undefined && containsSecret(t))) throw new MemoryError("内容包含凭据样式的信息，拒绝写入记忆");
+    if (texts.some(t => t !== undefined && containsSecret(t))) throw new MemoryError("内容包含凭据样式的信息，拒绝写入记忆。请删除凭据后再调用。");
   }
 
   private written(binding: MemoryBinding, tool: MemoryOperation, rights: RunRights, row: MemoryRow, extra: Record<string, unknown> = {}): void {
@@ -219,11 +219,11 @@ export class MemoryService {
     args: { text: string; kind: MemoryKind; subject?: string; since?: string; due_at?: string; supersedes?: number }): string {
     this.checkSecret(args.text, args.subject);
     const ns = access.routeSubjects && args.subject && NS_SUBJECT.test(args.subject) ? args.subject : access.write[0]!;
-    if (args.due_at !== undefined && args.kind !== "commitment") throw new MemoryError("due_at 只用于 commitment");
+    if (args.due_at !== undefined && args.kind !== "commitment") throw new MemoryError("due_at 只用于 kind=commitment；episode 的事件日期请填 since。请删除 due_at 后重新调用。");
     const source = binding.inputKey ? this.opts.inbound?.(binding.inputKey) ?? null : null;
     const result = this.opts.store.remember({
       ns, kind: args.kind, text: args.text, subject: args.subject ?? null,
-      since: args.since !== undefined ? parseMemoryTime(args.since) : null, due_at: args.due_at !== undefined ? parseMemoryTime(args.due_at) : null,
+      since: args.since !== undefined ? parseMemoryTime(args.since, "since") : null, due_at: args.due_at !== undefined ? parseMemoryTime(args.due_at, "due_at") : null,
       author: rights.actor!, source_scope: source?.scope ?? binding.scope, source_message_id: source?.message_id || null,
       source_turn_id: binding.turnId ?? null, confidence: 1,
     }, args.supersedes !== undefined ? { supersedes: args.supersedes } : {});
@@ -237,12 +237,12 @@ export class MemoryService {
   private update(binding: MemoryBinding, rights: RunRights, access: MemoryAccess,
     args: { id: number; text?: string; subject?: string; until?: string; due_at?: string; done_at?: string }): string {
     const row = this.writable(access, args.id);
-    if (row.status !== "active") throw new MemoryError(`记忆 #${row.id} 已是 ${row.status}，只能修改 active 条目`);
-    if ((args.due_at || args.done_at) && row.kind !== "commitment") throw new MemoryError("due_at / done_at 只用于 commitment");
+    if (row.status !== "active") throw new MemoryError(`记忆 #${row.id} 已是 ${row.status}，只能修改 active 条目；有新信息请用 mem_remember 记录。`);
+    if ((args.due_at || args.done_at) && row.kind !== "commitment") throw new MemoryError(`记忆 #${row.id} 的 kind=${row.kind}，due_at / done_at 只适用于 commitment 条目。请删除这些字段；要设置失效时间请用 until。`);
     this.checkSecret(args.text, args.subject);
     const after = this.opts.store.update(row.id, {
       ...(args.text !== undefined ? { text: args.text } : {}), ...(args.subject !== undefined ? { subject: args.subject || null } : {}),
-      until: parseClearableTime(args.until), due_at: parseClearableTime(args.due_at), done_at: parseClearableTime(args.done_at),
+      until: parseClearableTime(args.until, "until"), due_at: parseClearableTime(args.due_at, "due_at"), done_at: parseClearableTime(args.done_at, "done_at"),
     }, rights.actor!, "mem_update");
     this.written(binding, "mem_update", rights, after);
     return "已更新：" + formatMemoryLine(after, scope => this.label(scope));
