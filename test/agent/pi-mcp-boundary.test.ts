@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_MCP_LIMITS, loadMcpConfig, parseMcpConfig } from "../../src/agent/pi-mcp/config.js";
-import { digest, makeCatalog } from "../../src/agent/pi-mcp/catalog.js";
+import { digest, makeCatalog, serverDigest } from "../../src/agent/pi-mcp/catalog.js";
 import { compileMcpSchema } from "../../src/agent/pi-mcp/schema.js";
-import { convertMcpResult } from "../../src/agent/pi-mcp/result.js";
+import { convertMcpResourceResult, convertMcpResult } from "../../src/agent/pi-mcp/result.js";
 
 const limits = { ...DEFAULT_MCP_LIMITS };
 function http() {
@@ -21,6 +21,18 @@ const directories: string[] = [];
 afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
 describe("Pi MCP 配置边界", () => {
+  it("资源前缀默认拒绝，重复与空项无效，权限变化改变服务器摘要", () => {
+    const base = parseMcpConfig(config()), allowed = parseMcpConfig(config({ ...http(), resources: { allow: ["notion://docs/"] } }));
+    if (base.kind !== "enabled" || allowed.kind !== "enabled") throw new Error("fixture");
+    expect(base.value.servers[0].resources.allow).toEqual([]);
+    expect(base.value.limits.maxResources).toBe(200);
+    expect(serverDigest(base.value.servers[0])).not.toBe(serverDigest(allowed.value.servers[0]));
+    for (const allow of [[""], ["notion://docs/", "notion://docs/"], ["notion://docs/\n"]]) {
+      expect(parseMcpConfig(config({ ...http(), resources: { allow } })).kind).toBe("invalid");
+    }
+    expect(parseMcpConfig({ ...config(), limits: { maxResources: 2_001 } }).kind).toBe("invalid");
+  });
+
   it("OAuth 回调配置保留原文，只接受无 query/hash 的 HTTP(S) 绝对 URL", () => {
     expect(loadConfig({}).PI_MCP_OAUTH_REDIRECT_URL).toBe("http://127.0.0.1:8787/mcp/oauth/callback");
     const value = "https://agent.example/oauth/callback";
@@ -306,5 +318,28 @@ describe("Pi MCP 结果边界", () => {
     }
     expect(reads).toBe(0);
     expect(Buffer.byteLength(textOf(convertMcpResult({ bad: true }, undefined, { ...limits, textBytes: 7 })), "utf8")).toBeLessThanOrEqual(7);
+  });
+});
+
+describe("Pi MCP 资源结果契约", () => {
+  it("无效和超限资源响应返回资源专用错误，不声称操作可能已完成", () => {
+    for (const raw of [{ content: [] }, { contents: [{ uri: "notion://docs/large", text: "文".repeat(100) }] }]) {
+      const result = convertMcpResourceResult(raw, { ...limits, messageBytes: 100 });
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toBe("result_rejected：远端资源响应格式或大小不符合契约");
+      expect(result.structuredOutput).toBeUndefined();
+    }
+  });
+
+  it("资源 blob 复用图片校验与总预算，不把无效图片作为 image 交给 Pi", () => {
+    const contents = [{ uri: "notion://docs/png", mimeType: "image/png", blob: png },
+      { uri: "notion://docs/bad", mimeType: "image/png", blob: "AAAA" }];
+    for (const options of [{ ...limits, images: 0 }, { ...limits, imageBytes: 1 }, { ...limits, contentBytes: 1 }]) {
+      expect(convertMcpResourceResult({ contents }, options).output?.some(item => item.type === "image")).toBe(false);
+    }
+    const result = convertMcpResourceResult({ contents }, limits);
+    expect(result.output?.filter(item => item.type === "image")).toHaveLength(1);
+    expect(result.diagnostics).toEqual([expect.objectContaining({ code: "content_omitted" })]);
+    expect(result.isError).toBeUndefined(); expect(result.structuredOutput).toBeUndefined();
   });
 });

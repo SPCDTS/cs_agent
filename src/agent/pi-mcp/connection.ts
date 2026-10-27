@@ -1,12 +1,20 @@
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { CallToolResultSchema, ErrorCode, ListToolsResultSchema, McpError, ToolListChangedNotificationSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema, ErrorCode, ListToolsResultSchema, ListResourcesResultSchema, ListResourceTemplatesResultSchema,
+  ReadResourceResultSchema, McpError, ToolListChangedNotificationSchema, type CallToolResult, type Tool, type Resource, type ResourceTemplate,
+  type ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 import type { EnvironmentSecrets, McpLimits, McpServerConfig } from "./config.js";
 import { boundedFetch, McpConnectionError } from "./transport-http.js";
 import type { McpOAuth } from "./oauth.js";
 
 export { McpConnectionError } from "./transport-http.js";
+
+/** 远端错误只交给资源结果展示；异常自身不包含远端消息或 data。 */
+export class McpRemoteError extends Error {
+  readonly code = "remote_error";
+  constructor(readonly remote: { code: number; message: string }) { super("MCP 远端资源请求失败"); }
+}
 
 type OpenOptions = {
   server: McpServerConfig;
@@ -121,6 +129,63 @@ export class McpConnection {
     }
   }
 
+  supportsResources(): boolean { return !!this.client.getServerCapabilities()?.resources; }
+
+  listResources(signal: AbortSignal): Promise<readonly Resource[]> {
+    return this.resourcePages(async cursor => {
+      const result = await this.client.request({ method: "resources/list", params: cursor === undefined ? {} : { cursor } }, ListResourcesResultSchema,
+        { signal, timeout: this.limits.connectMs, maxTotalTimeout: this.limits.connectMs, resetTimeoutOnProgress: false });
+      return { items: result.resources, nextCursor: result.nextCursor, bytes: Buffer.byteLength(JSON.stringify(result)) };
+    }, resource => resource.uri, signal, 0);
+  }
+
+  listResourceTemplates(signal: AbortSignal, used = 0): Promise<readonly ResourceTemplate[]> {
+    return this.resourcePages(async cursor => {
+      const result = await this.client.request({ method: "resources/templates/list", params: cursor === undefined ? {} : { cursor } }, ListResourceTemplatesResultSchema,
+        { signal, timeout: this.limits.connectMs, maxTotalTimeout: this.limits.connectMs, resetTimeoutOnProgress: false });
+      return { items: result.resourceTemplates, nextCursor: result.nextCursor, bytes: Buffer.byteLength(JSON.stringify(result)) };
+    }, template => template.uriTemplate, signal, used);
+  }
+
+  private async resourcePages<T>(fetchPage: (cursor?: string) => Promise<{ items: T[]; nextCursor?: string; bytes: number }>,
+    key: (item: T) => string, signal: AbortSignal, used: number): Promise<readonly T[]> {
+    const items: T[] = [], keys = new Set<string>(), cursors = new Set<string>();
+    let cursor: string | undefined, bytes = 0;
+    try {
+      for (let page = 0; page < this.limits.maxPages; page++) {
+        this.assertOpen(signal);
+        const result = await fetchPage(cursor);
+        bytes += result.bytes;
+        if (bytes > this.limits.catalogBytes || used + items.length + result.items.length > this.limits.maxResources) {
+          throw new McpConnectionError("catalog_limit", "MCP 资源目录超出限额");
+        }
+        for (const item of result.items) {
+          const name = key(item);
+          if (keys.has(name)) throw new McpConnectionError("protocol_error", "MCP 资源目录包含重复 URI 或模板");
+          keys.add(name); items.push(item);
+        }
+        if (result.nextCursor === undefined) return items;
+        if (cursors.has(result.nextCursor)) throw new McpConnectionError("protocol_error", "MCP 资源分页游标重复");
+        cursors.add(result.nextCursor); cursor = result.nextCursor;
+      }
+      throw new McpConnectionError("catalog_limit", "MCP 资源目录页数超出限额");
+    } catch (error) {
+      signal.throwIfAborted();
+      throw this.failure ?? resourceError(error);
+    }
+  }
+
+  async readResource(uri: string, signal: AbortSignal): Promise<ReadResourceResult> {
+    this.assertOpen(signal);
+    try {
+      return await this.client.request({ method: "resources/read", params: { uri } }, ReadResourceResultSchema,
+        { signal, timeout: this.limits.callMs, maxTotalTimeout: this.limits.callMs, resetTimeoutOnProgress: false });
+    } catch (error) {
+      signal.throwIfAborted();
+      throw this.failure ?? resourceError(error);
+    }
+  }
+
   async callTool(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<CallToolResult> {
     this.assertOpen(signal);
     try {
@@ -161,6 +226,14 @@ function safeError(error: unknown): McpConnectionError {
   if (error instanceof UnauthorizedError || (error instanceof StreamableHTTPError && error.code === 401)) return new McpConnectionError("auth_required", "MCP 服务需要在面板登录外部账号");
   if (error instanceof McpError && error.code === ErrorCode.RequestTimeout) return new McpConnectionError("timeout", "MCP 协议请求超时");
   return error instanceof McpConnectionError ? error : new McpConnectionError("protocol_error", "MCP 协议请求失败");
+}
+
+function resourceError(error: unknown): McpConnectionError | McpRemoteError {
+  // SDK 的本地超时、断线与响应校验失败不属于远端业务拒绝。
+  if (error instanceof McpError && ![ErrorCode.RequestTimeout, ErrorCode.ConnectionClosed].includes(error.code)) {
+    return new McpRemoteError({ code: error.code, message: error.message.replace(`MCP error ${error.code}: `, "") });
+  }
+  return safeError(error);
 }
 
 async function boundedWait(promise: Promise<void>, ms: number): Promise<void> {

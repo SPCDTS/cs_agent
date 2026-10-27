@@ -17,6 +17,32 @@ async function open(mode: HttpMode = "json", limits: Partial<McpLimits> = {}, on
 }
 
 describe("Pi MCP Streamable HTTP 单连接", () => {
+  it.each(["json", "sse"] satisfies HttpMode[])("%s 资源完整分页、读响应与 list_changed 通知兼容", async mode => {
+    const { connection } = await open(mode);
+    expect(connection.supportsResources()).toBe(true);
+    const resources = await connection.listResources(live());
+    expect(resources).toHaveLength(3);
+    expect(await connection.listResourceTemplates(live(), resources.length)).toHaveLength(2);
+    expect(await connection.readResource("notion://docs/memory", live())).toMatchObject({ contents: [{ text: "RESOURCE_BODY_SENTINEL：记忆资料" }] });
+    await expect(connection.readResource("notion://docs/missing", live())).rejects.toMatchObject({ code: "remote_error", remote: { code: -32002 } });
+  });
+
+  it.each(["duplicate-name", "duplicate-cursor"] satisfies HttpMode[])("资源目录拒绝 %s", async mode => {
+    const { connection } = await open(mode);
+    await expect(connection.listResources(live())).rejects.toMatchObject({ code: "protocol_error" });
+  });
+
+  it.each([{ maxPages: 1 }, { maxResources: 2 }, { catalogBytes: 1 }])("资源分页限额 %j 在过滤前生效", async limits => {
+    const { connection } = await open("json", limits);
+    await expect(connection.listResources(live())).rejects.toMatchObject({ code: "catalog_limit" });
+  });
+
+  it("资源和模板合计使用 maxResources", async () => {
+    const { connection } = await open("json", { maxResources: 4 });
+    const resources = await connection.listResources(live());
+    await expect(connection.listResourceTemplates(live(), resources.length)).rejects.toMatchObject({ code: "catalog_limit" });
+  });
+
   it.each(["json", "sse"] satisfies HttpMode[])("%s 完整分页、独立输出契约、凭据与通知", async mode => {
     let changed = 0;
     const { fixture, connection } = await open(mode, {}, () => changed++);

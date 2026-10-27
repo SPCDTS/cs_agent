@@ -1,19 +1,44 @@
 import { copyJson, type JsonValue } from "@earendil-works/chord";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { ToolDiagnostic, ToolExecutionResult } from "@earendil-works/pi-durable";
-import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema, ReadResourceResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { McpLimits } from "./config.js";
 import { boundedJson, type compileMcpSchema } from "./schema.js";
 
-function rejected(limits: McpLimits): ToolExecutionResult {
+function rejected(limits: McpLimits, resource = false): ToolExecutionResult {
   return {
     isError: true,
-    output: [{ type: "text", text: utf8Prefix("result_rejected：远端响应格式、schema 或大小不符合契约。操作可能已完成，请先查询实际状态，不要自动重复。", limits.textBytes) }],
-    diagnostics: [{ severity: "error", code: "result_rejected", message: "MCP 结果已拒绝；远端操作可能已完成" }],
+    output: [{ type: "text", text: utf8Prefix(resource ? "result_rejected：远端资源响应格式或大小不符合契约"
+      : "result_rejected：远端响应格式、schema 或大小不符合契约。操作可能已完成，请先查询实际状态，不要自动重复。", limits.textBytes) }],
+    diagnostics: [{ severity: "error", code: "result_rejected", message: resource ? "MCP 资源结果已拒绝" : "MCP 结果已拒绝；远端操作可能已完成" }],
   };
 }
 
-function utf8Prefix(value: string, maxBytes: number): string {
+export function boundedMcpText(text: string, limits: McpLimits, diagnostics: ToolDiagnostic[] = [], textBytes = Buffer.byteLength(text, "utf8")): string {
+  if (textBytes <= limits.textBytes) return text;
+  const marker = `\n[MCP 文本已截断；原始 ${textBytes} 字节]`;
+  diagnostics.push({ severity: "warn", code: "text_truncated", message: `MCP 文本已截断；原始 ${textBytes} 字节` });
+  return utf8Prefix(text, Math.max(0, limits.textBytes - Buffer.byteLength(marker, "utf8"))) + utf8Prefix(marker, limits.textBytes);
+}
+
+/** 同一响应的图片共用张数与解码预算，工具结果和资源响应使用相同校验。 */
+function imageCollector(limits: McpLimits) {
+  const images: ImageContent[] = [];
+  let imageBytes = 0;
+  return { images, add(data: string, mimeType: string): string | undefined {
+    if (images.length >= limits.images) return "图片张数超过限额";
+    if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(mimeType)) return "图片格式不支持";
+    if (data.length > Math.ceil(limits.imageBytes / 3) * 4 || data.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(data)) return "图片编码无效或超过单张限额";
+    const bytes = Buffer.from(data, "base64");
+    if (bytes.toString("base64") !== data || bytes.length > limits.imageBytes || imageBytes + bytes.length > limits.contentBytes) return "图片编码或解码总量超过限额";
+    const size = imageSize(bytes, mimeType);
+    if (!size || size.width < 1 || size.height < 1 || size.width > 16_384 || size.height > 16_384 || size.width * size.height > 40_000_000) return "图片内容、MIME 或尺寸无效";
+    imageBytes += bytes.length;
+    images.push({ type: "image", data, mimeType });
+  } };
+}
+
+export function utf8Prefix(value: string, maxBytes: number): string {
   if (maxBytes <= 0) return "";
   const bytes = Buffer.from(value, "utf8");
   if (bytes.length <= maxBytes) return value;
@@ -67,9 +92,8 @@ export function convertMcpResult(input: unknown, outputSchema: ReturnType<typeof
     if (!parsed.success) return rejected(limits);
     const result = parsed.data;
     const texts: string[] = [];
-    const images: ImageContent[] = [];
+    const collector = imageCollector(limits), { images } = collector;
     const diagnostics: ToolDiagnostic[] = [];
-    let imageBytes = 0;
     function omitted(message: string): void {
       texts.push(`[MCP 内容省略：${message}]`);
       if (diagnostics.length < 16) diagnostics.push({ severity: "warn", code: "content_omitted", message });
@@ -86,15 +110,8 @@ export function convertMcpResult(input: unknown, outputSchema: ReturnType<typeof
           break;
         case "audio": omitted("音频，未转写"); break;
         case "image": {
-          if (images.length >= limits.images) { omitted("图片张数超过限额"); break; }
-          if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(content.mimeType)) { omitted("图片格式不支持"); break; }
-          if (content.data.length > Math.ceil(limits.imageBytes / 3) * 4 || content.data.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(content.data)) { omitted("图片编码无效或超过单张限额"); break; }
-          const bytes = Buffer.from(content.data, "base64");
-          if (bytes.toString("base64") !== content.data || bytes.length > limits.imageBytes || imageBytes + bytes.length > limits.contentBytes) { omitted("图片编码或解码总量超过限额"); break; }
-          const size = imageSize(bytes, content.mimeType);
-          if (!size || size.width < 1 || size.height < 1 || size.width > 16_384 || size.height > 16_384 || size.width * size.height > 40_000_000) { omitted("图片内容、MIME 或尺寸无效"); break; }
-          imageBytes += bytes.length;
-          images.push({ type: "image", data: content.data, mimeType: content.mimeType });
+          const reason = collector.add(content.data, content.mimeType);
+          if (reason) omitted(reason);
           break;
         }
         default: { const exhaustive: never = content; return exhaustive; }
@@ -109,15 +126,32 @@ export function convertMcpResult(input: unknown, outputSchema: ReturnType<typeof
       texts.push("[MCP 结构化结果]\n" + json);
     } else if (outputSchema && !result.isError) return rejected(limits);
     if (result.isError) diagnostics.push({ severity: "warn", code: "remote_error", message: "远端返回错误；错误不保证操作没有副作用" });
-    const text = texts.join("\n");
-    const textBytes = Buffer.byteLength(text, "utf8");
-    let boundedText = text;
-    if (textBytes > limits.textBytes) {
-      const marker = `\n[MCP 文本已截断；原始 ${textBytes} 字节]`;
-      boundedText = utf8Prefix(text, Math.max(0, limits.textBytes - Buffer.byteLength(marker, "utf8"))) + utf8Prefix(marker, limits.textBytes);
-      diagnostics.push({ severity: "warn", code: "text_truncated", message: `MCP 文本已截断；原始 ${textBytes} 字节` });
-    }
+    const boundedText = boundedMcpText(texts.join("\n"), limits, diagnostics);
     const output: (TextContent | ImageContent)[] = boundedText ? [{ type: "text", text: boundedText }, ...images] : [...images];
     return { output, ...(structuredOutput !== undefined ? { structuredOutput } : {}), ...(result.isError ? { isError: true } : {}), ...(diagnostics.length ? { diagnostics } : {}) };
   } catch { return rejected(limits); }
+}
+
+/** 资源只作为有来源的资料；不执行 HTML，也不跟随其中的 URI。 */
+export function convertMcpResourceResult(input: unknown, limits: McpLimits): ToolExecutionResult {
+  try {
+    const parsed = ReadResourceResultSchema.safeParse(boundedJson(input, limits.messageBytes, limits.schemaDepth * 3 + 3));
+    if (!parsed.success) return rejected(limits, true);
+    const texts: string[] = [], diagnostics: ToolDiagnostic[] = [];
+    const collector = imageCollector(limits);
+    for (const content of parsed.data.contents) {
+      if ("text" in content) texts.push(`[MCP 资料来源：${content.uri}；${content.mimeType ?? "未声明"}]\n${content.text}`);
+      else {
+        const reason = collector.add(content.blob, content.mimeType ?? "");
+        if (reason) {
+          texts.push(`[MCP 内容省略：二进制资源 ${content.mimeType ?? "未声明"}，base64 ${Buffer.byteLength(content.blob)} 字节，未解码]`);
+          if (diagnostics.length < 16) diagnostics.push({ severity: "warn", code: "content_omitted", message: reason });
+        }
+      }
+    }
+    if (!parsed.data.contents.length) texts.push("[MCP 资源为空]");
+    const text = boundedMcpText(texts.join("\n"), limits, diagnostics);
+    const output: (TextContent | ImageContent)[] = [...text ? [{ type: "text" as const, text }] : [], ...collector.images];
+    return { output, ...(diagnostics.length ? { diagnostics } : {}) };
+  } catch { return rejected(limits, true); }
 }

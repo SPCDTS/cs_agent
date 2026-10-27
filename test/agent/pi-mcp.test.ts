@@ -7,6 +7,8 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { McpDelegationDoc } from "../../src/agent/pi-mcp/delegation.js";
+import { resourceResponse } from "./fixtures/pi-mcp-http.js";
+import { isMcpControlTool } from "../../src/agent/pi-mcp/names.js";
 import { runRights } from "../../src/agent/host/identity.js";
 import { PiMcp } from "../../src/agent/pi-mcp/index.js";
 import { McpCatalogsDoc, digest } from "../../src/agent/pi-mcp/catalog.js";
@@ -24,7 +26,8 @@ const owner = (): PiCallBinding => ({ threadKey: "owner", scope: "private:123", 
 
 /** 可改变目录且可挂起业务请求的真实 HTTP 服务，计数器只在服务收到请求时增加。 */
 async function server() {
-  const state = { calls: 0, lists: 0, sessions: 0, active: 0, peak: 0, deletes: 0, deleteDelay: 0, version: 1, otherVersion: 1, description: "", hang: false, notify: false };
+  const state = { calls: 0, lists: 0, sessions: 0, active: 0, peak: 0, deletes: 0, deleteDelay: 0, version: 1, otherVersion: 1, description: "", hang: false, notify: false, resources: true, resourceReads: 0, resourceLists: 0, templateLists: 0, resourceHang: false };
+  const holds = new Map<string, Promise<void>>();
   const http = createServer(async (req, res) => {
     req.on("error", () => {}); res.on("error", () => {});
     if (req.method === "GET") { res.writeHead(405).end(); return; }
@@ -40,13 +43,22 @@ async function server() {
     if (message.method === "initialize") {
       res.setHeader("mcp-session-id", `session-${++state.sessions}`);
       state.active++; state.peak = Math.max(state.peak, state.active);
-      result = { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "fixture", version: "1" } };
+      await holds.get(message.method);
+      result = { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: true }, ...state.resources ? { resources: {} } : {} }, serverInfo: { name: "fixture", version: "1" } };
     } else if (message.method === "tools/list") {
       state.lists++;
+      await holds.get(message.method);
       result = { tools: ["lookup", "hidden", "other"].map(name => ({ name, description: state.description || `版本 ${state.version}`,
         inputSchema: { type: "object", properties: { value: { type: "integer", minimum: name === "other" ? state.otherVersion : state.version,
           description: state.description } }, required: ["value"], additionalProperties: false },
         outputSchema: { type: "object", properties: { value: { type: "integer" } }, required: ["value"] } })) };
+    } else if (message.method.startsWith("resources/")) {
+      if (message.method === "resources/read") state.resourceReads++;
+      else if (message.method === "resources/list") state.resourceLists++;
+      else state.templateLists++;
+      if (state.resourceHang) return;
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: message.id,
+        ...resourceResponse(message.method, message.params) })); return;
     } else if (message.method === "tools/call") {
       state.calls++;
       if (state.hang) return;
@@ -64,10 +76,14 @@ async function server() {
   const address = http.address();
   if (!address || typeof address === "string") throw new Error("address");
   cleanup.push(async () => { http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve())); });
-  const config = (limits: object = {}, access: object = {}, allow = ["lookup"]): McpConfigState => parseMcpConfig({ version: 1, enabled: true, limits,
+  const config = (limits: object = {}, access: object = {}, allow = ["lookup"], resources: string[] = []): McpConfigState => parseMcpConfig({ version: 1, enabled: true, limits,
     servers: [{ id: "fixture", transport: { kind: "streamable-http", url: `http://127.0.0.1:${address.port}/mcp`, allowLoopbackHttp: true },
-      credential: { kind: "none" }, tools: { allow }, access: { kind: "owner-private", ...access }, replay: "unsafe" }] });
-  return { state, config };
+      credential: { kind: "none" }, tools: { allow }, resources: { allow: resources }, access: { kind: "owner-private", ...access }, replay: "unsafe" }] });
+  return { state, config, hold(method: "initialize" | "tools/list") {
+    let release = () => {};
+    holds.set(method, new Promise<void>(resolve => { release = resolve; }));
+    return () => { holds.delete(method); release(); };
+  } };
 }
 
 async function rig(config: McpConfigState, db = path.join(tmp("cs-pi-mcp-"), "pi.sqlite")) {
@@ -107,7 +123,7 @@ async function rig(config: McpConfigState, db = path.join(tmp("cs-pi-mcp-"), "pi
   return { mcp, harness, registry, db, bindings, create, configure, run, close, requests, revoke: () => { owners = []; } };
 }
 const names = async (conv: Conversation) => (await conv.agent(context)).tools.map(t => t.name);
-const mcpNames = async (conv: Conversation) => (await names(conv)).filter(n => n.startsWith("mcp_") && n !== "mcp_refresh_tools");
+const mcpNames = async (conv: Conversation) => (await names(conv)).filter(n => n.startsWith("mcp_") && !isMcpControlTool(n));
 const results = async (conv: Conversation) => (await conv.entries({ order: "ascending" }, 1000, undefined, context)).items.filter(ToolResultEntry.is);
 
 describe("Pi MCP 原生工具与持久目录", () => {
@@ -470,6 +486,173 @@ async function delegated(r: Awaited<ReturnType<typeof rig>>, parent: Conversatio
   await r.configure(child);
   return child;
 }
+
+const resourceText = async (conv: Conversation) => (await results(conv)).at(-1)?.model?.flatMap(message => message.role === "toolResult"
+  ? message.content.flatMap(item => item.type === "text" ? [item.text] : []) : []).join("\n") ?? "";
+const resourceDiagnostic = async (conv: Conversation, code: string) => expect((await results(conv)).at(-1)?.data?.diagnostics)
+  .toEqual(expect.arrayContaining([expect.objectContaining({ code })]));
+
+describe("Pi MCP 只读资源", () => {
+  it("前缀为空不选择资源工具；开放后紧跟刷新工具，采用 safe 串行执行", async () => {
+    const s = await server(), off = await rig(s.config()), a = await off.create();
+    await off.configure(a);
+    expect(await names(a)).not.toContain("mcp_list_resources");
+    expect(await names(a)).not.toContain("mcp_read_resource");
+    const on = await rig(s.config({}, {}, [], ["notion://docs/"])), b = await on.create();
+    await on.configure(b);
+    expect(await names(b)).toEqual(["local", "mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]);
+    for (const name of ["mcp_list_resources", "mcp_read_resource"]) {
+      expect(on.registry.snapshot().tools().find(item => item.tool.name === name)?.tool)
+        .toMatchObject({ replay: "safe", executionMode: "sequential", outputLimits: { maxBytes: 32_768 } });
+    }
+  });
+
+  it("资源和模板完整分页再过滤，清洗远端描述并输出服务 id", async () => {
+    const s = await server(), r = await rig(s.config({}, {}, [], ["notion://docs/"])), c = await r.create();
+    await r.configure(c); await r.run(c, "mcp_list_resources", {});
+    const text = await resourceText(c);
+    expect(text).toContain("[服务 fixture] 资源 2 项，模板 1 项");
+    expect(text).toContain("notion://docs/memory | Memory Title");
+    expect(text).toContain("notion://docs/skills"); expect(text).toContain("notion://docs/{id}");
+    expect(text).not.toContain("ui://"); expect(text).not.toContain("\u0000"); expect(text).not.toContain("长".repeat(300));
+    expect(s.state.resourceLists).toBe(2); expect(s.state.templateLists).toBe(2);
+  });
+
+  it("text 带来源头，远端 JSON-RPC 错误保留清洗后的短消息", async () => {
+    const s = await server(), r = await rig(s.config({}, {}, ["lookup"], ["notion://docs/"])), c = await r.create();
+    await r.configure(c); await r.run(c, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
+    expect(await resourceText(c)).toContain("[MCP 资料来源：notion://docs/memory；text/markdown]\nRESOURCE_BODY_SENTINEL");
+    const sessions = s.state.sessions;
+    await r.run(c, "mcp_read_resource", { server: "fixture", uri: "notion://docs/missing" });
+    await resourceDiagnostic(c, "mcp_remote_error");
+    expect(await resourceText(c)).toContain("远端拒绝或找不到资源（code -32002）：RESOURCE_ERROR_SENTINEL 找不到资源");
+    await r.run(c, (await mcpNames(c))[0]!);
+    expect(s.state.calls).toBe(1);
+    expect(s.state.sessions).toBe(sessions); expect(s.state.deletes).toBe(0);
+  });
+
+  it("不匹配前缀、大小写不同和非法 URI 均在联网前拒绝", async () => {
+    const s = await server(), r = await rig(s.config({}, {}, [], ["notion://docs/"])), c = await r.create();
+    await r.configure(c); const sessions = s.state.sessions;
+    for (const uri of ["notion://private/memory", "Notion://docs/memory"]) {
+      await r.run(c, "mcp_read_resource", { server: "fixture", uri });
+      await resourceDiagnostic(c, "mcp_resource_not_allowed");
+    }
+    for (const uri of ["relative/path", "notion://docs/\nsecret"]) {
+      await r.run(c, "mcp_read_resource", { server: "fixture", uri });
+      await resourceDiagnostic(c, "mcp_invalid_arguments");
+    }
+    expect(s.state.resourceReads).toBe(0); expect(s.state.sessions).toBe(sessions);
+    await r.run(c, "mcp_list_resources", { server: "unknown" }); await resourceDiagnostic(c, "mcp_denied");
+  });
+
+  it("缺少 resources capability 不发送任何资源请求", async () => {
+    const s = await server(); s.state.resources = false;
+    const r = await rig(s.config({}, {}, [], ["notion://docs/"])), c = await r.create();
+    await r.configure(c); await r.run(c, "mcp_list_resources", { server: "fixture" });
+    await resourceDiagnostic(c, "mcp_resources_unsupported");
+    await r.run(c, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
+    await resourceDiagnostic(c, "mcp_resources_unsupported");
+    expect(s.state.resourceReads + s.state.resourceLists + s.state.templateLists).toBe(0);
+  });
+
+  it("单服务失败保留其他服务结果；全部失败才标为错误", async () => {
+    const a = await server(), b = await server(); b.state.resources = false;
+    const config = a.config({}, {}, [], ["notion://docs/"]), other = b.config({}, {}, [], ["notion://docs/"]);
+    if (config.kind !== "enabled" || other.kind !== "enabled") throw new Error("fixture_config");
+    config.value.servers.push({ ...other.value.servers[0], id: "unsupported" });
+    const r = await rig(config), c = await r.create();
+    await r.configure(c); await r.run(c, "mcp_list_resources", {});
+    expect((await results(c)).at(-1)?.model?.[0]).toMatchObject({ isError: false });
+    expect(await resourceText(c)).toContain("[服务 fixture] 资源 2 项");
+    expect(await resourceText(c)).toContain("[服务 unsupported] resources_unsupported");
+    await r.run(c, "mcp_list_resources", { server: "unsupported" });
+    expect((await results(c)).at(-1)?.model?.[0]).toMatchObject({ isError: true });
+  });
+
+  it("撤销 owner 后拒绝已选中的资源工具，远端零请求", async () => {
+    const s = await server(), r = await rig(s.config({}, {}, [], ["notion://docs/"])), c = await r.create();
+    await r.configure(c); r.revoke();
+    await r.run(c, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
+    await resourceDiagnostic(c, "mcp_denied"); expect(s.state.resourceReads).toBe(0);
+  });
+
+  it.each(["queue", "connect"] as const)("资源调用在 %s 等待期间撤权，恢复后仍拒绝", async phase => {
+    const s = await server(), r = await rig(s.config({ idleMs: phase === "connect" ? 5 : 300_000 }, {}, [], ["notion://docs/"])), c = await r.create();
+    await r.configure(c);
+    if (phase === "connect") await vi.waitFor(() => expect(s.state.deletes).toBe(1));
+    const release = s.hold(phase === "queue" ? "tools/list" : "initialize");
+    const refresh = phase === "queue" ? r.mcp.configure({ conversation: c, turn: owner(), refresh: true }, context) : Promise.resolve();
+    if (phase === "queue") await vi.waitFor(() => expect(s.state.lists).toBe(2));
+    const bound = vi.spyOn(r.bindings, "get");
+    const running = r.run(c, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
+    try {
+      await vi.waitFor(() => phase === "connect" ? expect(s.state.sessions).toBe(2) : expect(bound).toHaveBeenCalled());
+      expect(s.state.resourceReads).toBe(0);
+      r.revoke();
+    } finally { release(); }
+    await Promise.all([refresh, running]);
+    await resourceDiagnostic(c, "mcp_denied"); expect(s.state.resourceReads).toBe(0);
+  });
+
+  it("超大文本与列表受总文本预算约束；PNG 转成图片，其他 blob 明确省略", async () => {
+    const s = await server(), config = s.config({ textBytes: 256 }, {}, [], ["notion://docs/"]);
+    if (config.kind !== "enabled") throw new Error("fixture_config");
+    config.value.servers.push(...["second", "third"].map(id => ({ ...config.value.servers[0], id })));
+    const complete = await rig({ ...config, value: { ...config.value, limits: { ...config.value.limits, textBytes: 32_768 } } });
+    const full = await complete.create();
+    await complete.configure(full); await complete.run(full, "mcp_list_resources", {});
+    const original = await resourceText(full);
+    expect(original).not.toContain("MCP 文本已截断");
+    const r = await rig(config), c = await r.create();
+    await r.configure(c);
+    await r.run(c, "mcp_list_resources", {});
+    expect((await resourceText(c)).match(/\[MCP 文本已截断；原始 \d+ 字节\]/gu))
+      .toEqual([`[MCP 文本已截断；原始 ${Buffer.byteLength(original, "utf8")} 字节]`]);
+    expect((await results(c)).at(-1)?.data?.diagnostics.filter(item => item.code === "text_truncated")).toHaveLength(1);
+    for (const suffix of ["large", "png", "binary", "empty"]) {
+      await r.run(c, "mcp_read_resource", { server: "fixture", uri: `notion://docs/${suffix}` });
+      const text = await resourceText(c);
+      // Pi 会另加 <harness> 诊断文本；预算限制的是转换函数交付的正文块。
+      const message = (await results(c)).at(-1)?.model?.[0];
+      if (message?.role === "toolResult" && message.content[0]?.type === "text") {
+        expect(Buffer.byteLength(message.content[0].text)).toBeLessThanOrEqual(256);
+      }
+      if (suffix === "large") { expect(text).toContain("MCP 文本已截断；原始"); expect(text).not.toContain("�"); }
+      if (suffix === "png") expect((await results(c)).at(-1)?.model?.[0]).toMatchObject({ content: [expect.objectContaining({ type: "image", mimeType: "image/png" })] });
+      if (suffix === "binary") { expect(text).toContain("二进制资源 application/octet-stream，base64 4 字节，未解码"); await resourceDiagnostic(c, "content_omitted"); }
+      if (suffix === "empty") expect(text).toBe("[MCP 资源为空]");
+    }
+  });
+
+  it("资源超时为 timeout，关闭连接且不使用 outcome_unknown", async () => {
+    const s = await server(), r = await rig(s.config({ callMs: 300 }, {}, [], ["notion://docs/"])), c = await r.create();
+    await r.configure(c); s.state.resourceHang = true;
+    await r.run(c, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
+    await resourceDiagnostic(c, "mcp_timeout"); expect(await resourceText(c)).not.toContain("outcome_unknown");
+    expect(s.state.resourceReads).toBe(1); expect(s.state.deletes).toBeGreaterThan(0);
+  });
+
+  it("群成员及获委派的子 agent 可只读访问，子白名单包含两个入口", async () => {
+    const s = await server(), r = await rig(s.config({}, { groups: ["7"], allowSubagent: true }, [], ["notion://docs/"]));
+    const parent = await r.create({ ...owner(), threadKey: "group:7", scope: "group:7", identity: { kind: "user", sender: "456" } });
+    await r.configure(parent);
+    const grant = await r.mcp.delegation(parent.id);
+    for (const name of ["mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]) {
+      expect(r.mcp.allowsDelegationTool(grant, name)).toBe(true);
+      expect(r.mcp.allowsDelegationTool(null, name)).toBe(false);
+      expect(r.mcp.allowsDelegationTool({ principal: "456", servers: {}, wake: false, scheduled: false }, name)).toBe(false);
+    }
+    await r.run(parent, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
+    const child = await delegated(r, parent);
+    await r.harness.commit(async tx => { const doc = await tx.doc(AgentDoc, child.id); doc.tools = ["local"]; doc.modelTools = ["local"]; }, context);
+    await r.configure(child);
+    expect(await names(child)).toEqual(["local", "mcp_refresh_tools", "mcp_list_resources", "mcp_read_resource"]);
+    await r.run(child, "mcp_read_resource", { server: "fixture", uri: "notion://docs/memory" });
+    expect((await results(child)).at(-1)?.model?.[0]).toMatchObject({ isError: false });
+    expect(s.state.resourceReads).toBe(2); expect(s.state.sessions).toBe(2);
+  });
+});
 
 describe("Pi MCP 委派授权交集", () => {
   it.each([

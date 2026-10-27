@@ -4,7 +4,7 @@ Pi 后端可以把外部 MCP 的每个工具注册为 Pi 原生工具，保留�
 
 ## 启用
 
-1. 从 [配置示例](design/pi-mcp/config.example.json) 复制管理员配置，只保留需要的服务，替换 HTTP 地址，并填写远端工具原名的 `tools.allow`。
+1. 从 [配置示例](design/pi-mcp/config.example.json) 复制管理员配置，只保留需要的服务，替换 HTTP 地址，并填写远端工具原名的 `tools.allow`。需要读取资源时，另外配置 `resources.allow` URI 前缀白名单，默认不开启资源。
 2. 将配置放到管理员维护的位置，设置 `PI_MCP_CONFIG` 为该 JSON 文件的绝对路径。文件必须是 UTF-8，支持 BOM。不要把密钥写入配置。
 3. 确认目标会话使用 Pi 后端：设置 `AGENT_BACKEND=pi`，或在后端覆盖设置中将 owner 私聊 / 指定群分配给 Pi。
 4. 将配置引用的秘密环境变量注入 cs-agent 进程，重启服务。修改 MCP 配置、账号或凭据后需要重启；更换账号、token 或权限时同时递增 `credential.revision`。
@@ -61,6 +61,7 @@ Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器�
       "notion-search"
     ]
   },
+  "resources": { "allow": ["notion://docs/"] },
   "access": {
     "kind": "owner-private"
   },
@@ -83,6 +84,18 @@ OAuth 发现、换码、注册、刷新与撤销请求仅允许资源 origin 和
 ## 权限与结果
 
 owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通私聊与未配置的群拒绝。执行前及排队后按 `runRights` 复核真实身份。定时和唤醒默认关闭；可分别设置 `access.allowScheduled`、`access.allowWake`，继承定时身份的唤醒需要两个选项都开启。群内也按回合代表的人授权：owner 直接执行，成员适用审批；只有基础权限、无法确证人的回合拒绝。
+
+### 只读资源
+
+资源权限独立于 `tools.allow`：服务项增加 `"resources": { "allow": ["notion://docs/"] }` 后，授权回合会看到 `mcp_list_resources` 和 `mcp_read_resource`，原有 `mcp_refresh_tools` 保留。不配置或设置 `allow: []` 时不开放资源；所有已授权服务的前缀都为空时，两个资源工具不会出现在模型列表。
+
+先调用 `mcp_list_resources({})` 列出当前授权服务的资源与模板，或传 `{ "server": "notion" }` 仅查询该服务。再调用 `mcp_read_resource({ "server": "notion", "uri": "notion://docs/memory" })`。server 取列表中方括号里的配置服务 id。文本会标注来源与 MIME；图片 blob 通过校验后提供给模型，其他二进制内容明确省略。HTML 只作为资料文本，不渲染或执行；远端资源内容、描述和错误消息均不能授予权限或覆盖宿主指令。
+
+`resources.allow` 最多 256 个不重复的非空前缀，每项最多 2048 字符且无控制字符。匹配是区分大小写的纯字符串前缀判断，不做 URL 规范化；URI 还须满足同样的长度与控制字符要求，且能由 `URL.canParse` 解析。配置前缀应包含明确的目录边界，例如 `notion://docs/`。修改前缀会改变服务配置摘要，因此该服务所有业务工具名都会改变，已有子任务须重新派出；配置修改后需重启。
+
+资源读操作不走主人审批：允许群中的成员可以直接读取白名单内资源，需要限制时只放行文档类前缀。子 agent 沿用现有授权快照，服务必须在快照内且当前授权有效；仍需开启 `access.allowSubagent`。每次操作在排队后和取得连接后重新复核身份。
+
+`limits.maxResources` 默认 200，最多 2000，限制过滤前资源与模板的合计条数；每类目录复用 `maxPages`、`catalogBytes`。列表及读取共享总调用预算 `callMs`，分页请求受 `connectMs` 约束，输出受 `textBytes` 和现有图片限额约束。两入口为只读 `replay: "safe"`，超时或断线返回对应错误，不使用业务工具的 `outcome_unknown`。审计只含 URI scheme、字节数、摘要与调用元数据；完整 URI 和正文保留在正常 Pi 工具历史中，不写 trace。
 
 ### 群内使用与审批
 
@@ -122,11 +135,11 @@ owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通�
 
 连接或重连会重新发现目录，另有默认五分钟 TTL。支持 `list_changed` 的服务会在工具轮结束或下次调用前刷新；没有通知能力的静态服务仍可使用。owner 私聊、允许群内有权的人及已获委派的子 agent 可调用 `mcp_refresh_tools` 显式刷新当前授权范围（子 agent 仅限快照内服务）；它只读取目录，不调用远端业务工具。现有 IM、定时和本地工具选择会保留。
 
-文本、图片和结构化数据均有大小限制。图片验证 base64、格式头、声明尺寸及字节限额，不做完整像素解码；资源与音频等内容给出省略说明，不自动下载。工具参数和有界结果进入 Pi 正常历史；MCP 审计只记录身份、目录摘要、调用标识、耗时、大小与错误码，不记录正文或凭据。
+文本、图片和结构化数据均有大小限制。图片验证 base64、格式头、声明尺寸及字节限额，不做完整像素解码；工具结果内嵌的二进制资源与音频等内容给出省略说明，不自动下载；显式读取资源的转换见上文。工具参数和有界结果进入 Pi 正常历史；MCP 审计只记录身份、目录摘要、调用标识、耗时、大小与错误码，不记录正文或凭据。
 
 ## 中断、关闭与容量
 
-所有外部工具固定 `replay: "unsafe"`。网络超时或断线发生在发送后时，返回 `outcome_unknown`；进程崩溃时，已有 execute 检查点按 Pi 的 `interrupted` 结算。已提交结果恢复后直接复用。任何这些情况都不会自动重发原工具调用，但也不能据此断定远端未执行，后续操作应先核对外部状态。
+外部业务工具固定 `replay: "unsafe"`。网络超时或断线发生在发送后时，返回 `outcome_unknown`；进程崩溃时，已有 execute 检查点按 Pi 的 `interrupted` 结算。已提交结果恢复后直接复用。任何这些情况都不会自动重发原工具调用，但也不能据此断定远端未执行，后续操作应先核对外部状态。
 
 连接按会话、真实账号身份和服务配置隔离；每条连接串行，等待队列、活跃连接及关闭连接受限。默认总调用预算 60 秒、初始化 10 秒、最多 16 条连接、每条连接最多 16 个等待项，闲置五分钟回收。配置缺失、无效或服务离线不会阻塞整个 Pi 启动。
 
@@ -140,6 +153,9 @@ owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通�
 | `auth_required` | 在面板登录外部账号；核对 accountId/revision、回调地址与 CIMD 文档一致性 |
 | `refresh_failed` | 授权服务器返回确定的 OAuth 错误，token 已删除；在面板重新登录。网络错误、超时与 5xx 不会产生此状态 |
 | `missing_secret` / `auth_failed` | 引用变量是否注入、请求头完整值、外部账号权限 |
+| `resources_unsupported` | 服务没有声明 resources capability；客户端不发送 resources 请求 |
+| `resource_not_allowed` | URI 不匹配 resources.allow 的大小写敏感前缀，在联网前已拒绝 |
+| `remote_error` | 远端拒绝资源请求或资源不存在；核对服务 id 与 URI，模型结果中有远端错误码和有界消息 |
 | `tool_unavailable` / `tool_retired` | 历史名称、目标工具契约或账号配置已变，改用工具列表中的当前工具；必要时调用 `mcp_refresh_tools` |
 | `catalog_storage_limit` | 回收后仍超出目录容量：仍被引用的版本过多。核对限额与频繁变化的远端 schema；trace 中 `mcp_catalog` 的 `pruned` 记录回收数量，`prune_*` 降级码表示本轮未回收 |
 | `connections_busy` / `queue_busy` | 并发量或长时间调用占满额度 |
@@ -150,6 +166,7 @@ owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通�
 
 ```text
 npm run typecheck
+npm test -- test/agent/pi-mcp
 npm test
 npm run test:integration -- test/agent/pi-mcp-recovery.test.ts
 ```

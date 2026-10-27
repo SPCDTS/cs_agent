@@ -10,6 +10,7 @@
     "catalogTtlMs": 300000,
     "maxPages": 20,
     "maxTools": 200,
+    "maxResources": 200,
     "catalogBytes": 2097152,
     "schemaBytes": 65536,
     "schemaDepth": 64,
@@ -40,6 +41,7 @@
       },
       "credential": { "kind": "external-account", "accountId": "owner-docs", "revision": "1" },
       "tools": { "allow": ["search", "fetch_document"] },
+      "resources": { "allow": [] },
       "access": { "kind": "owner-private", "allowScheduled": false, "allowWake": false },
       "replay": "unsafe"
     },
@@ -63,6 +65,7 @@
           "notion-search"
         ]
       },
+      "resources": { "allow": ["notion://docs/"] },
       "access": {
         "kind": "owner-private"
       },

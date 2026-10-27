@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { trace, type LiveEvent } from "../../src/shared/trace.js";
 import { AgentDoc, ToolResultEntry, type ConversationId } from "@earendil-works/pi-durable";
 import { McpDelegationDoc } from "../../src/agent/pi-mcp/delegation.js";
 import { McpCatalogsDoc } from "../../src/agent/pi-mcp/catalog.js";
@@ -32,6 +34,40 @@ async function mcpFixture(access: object = {}): Promise<{ server: Awaited<Return
 }
 
 describe("Pi MCP 真实宿主接线", () => {
+  it("资源经过真实 Pi hooks，trace 仅含 URI 摘要及调用元数据", async () => {
+    const { server, mcp } = await mcpFixture();
+    if (mcp.config.kind !== "enabled") throw new Error("config");
+    mcp.config.value.servers[0].resources.allow = ["notion://docs/"];
+    const uri = "notion://docs/PRIVATE_URI_SENTINEL", events: LiveEvent[] = [];
+    const stop = trace.tap(event => events.push(event));
+    try {
+      const r = await residentRig({ mcp, brain: transcript => {
+        if (endRole(transcript) === "toolResult") return reply();
+        const tools = offeredTools(transcript);
+        expect(tools).toContain("mcp_read_resource"); expect(tools).toContain("mcp_refresh_tools");
+        return lastUser(transcript).includes("错误") ? call(["mcp_read_resource", { server: "fixture", uri: "notion://docs/missing" }])
+          : lastUser(transcript).includes("列出") ? call(["mcp_list_resources", {}])
+            : call(["mcp_read_resource", { server: "fixture", uri }]);
+      } });
+      for (const message of ["读取资料", "读取错误", "列出资料"]) { await r.say("1", message, null); await r.idle(); }
+      const calls = events.filter(event => event.stage === "mcp_resource");
+      expect(calls).toHaveLength(3);
+      expect(calls[0]).toMatchObject({ status: "ok", duration_ms: expect.any(Number), detail: {
+        serverId: "fixture", op: "read", scheme: "notion", uriBytes: Buffer.byteLength(uri),
+        uriDigest: createHash("sha256").update(uri).digest("hex").slice(0, 12), outputBytes: expect.any(Number), callId: expect.any(String) } });
+      expect(calls[1]).toMatchObject({ status: "failed", detail: { code: "remote_error" } });
+      expect(calls[2]).toMatchObject({ status: "ok", detail: { op: "list", count: 3, uriBytes: 0 } });
+      expect(calls[2].detail).not.toHaveProperty("uriDigest");
+      expect(events.filter(event => event.stage === "tool:mcp_read_resource").map(event => event.status))
+        .toEqual(["started", "ok", "started", "failed"]);
+      const logged = JSON.stringify(events);
+      for (const sentinel of [uri, "notion://docs/missing", "RESOURCE_BODY_SENTINEL", "RESOURCE_ERROR_SENTINEL", "host-fixture-secret", "Memory Title"]) {
+        expect(logged).not.toContain(sentinel);
+      }
+      expect(server.messages.filter(message => "method" in message && message.method === "resources/read")).toHaveLength(2);
+    } finally { stop(); }
+  });
+
   it("owner 私聊首轮直接选出 MCP 原生工具并通过真实回合绑定调用一次", async () => {
     const { server, mcp } = await mcpFixture();
     const seen: string[][] = [], bindings: PiCallBinding[] = [];

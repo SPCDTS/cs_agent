@@ -7,7 +7,7 @@ const limitsSchema = z.strictObject({
   connectMs: limit(10_000, 60_000), callMs: limit(60_000, 300_000),
   connections: limit(16, 64), queuedPerConnection: limit(16, 64),
   idleMs: limit(300_000, 3_600_000), catalogTtlMs: limit(300_000, 3_600_000),
-  maxPages: limit(20, 100), maxTools: limit(200, 1_000), catalogBytes: limit(2_097_152, 8_388_608),
+  maxPages: limit(20, 100), maxTools: limit(200, 1_000), maxResources: limit(200, 2_000), catalogBytes: limit(2_097_152, 8_388_608),
   schemaBytes: limit(65_536, 262_144), schemaDepth: limit(64, 64),
   visibleTools: limit(64, 128), visibleSchemaBytes: limit(524_288, 2_097_152),
   argumentBytes: limit(262_144, 1_048_576), messageBytes: limit(12_582_912, 25_165_824),
@@ -21,6 +21,7 @@ export type McpLimits = z.infer<typeof limitsSchema>;
 export const DEFAULT_MCP_LIMITS: McpLimits = Object.freeze(limitsSchema.parse({}));
 
 const cleanText = z.string().max(8_192).refine(value => !/[\u0000-\u001f\u007f]/u.test(value));
+export const resourceUriSchema = cleanText.min(1).max(2_048).refine(value => URL.canParse(value));
 const variable = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u);
 const headerName = z.string().max(128).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u);
 const sensitiveHeader = /(?:^|[-_])(?:auth|authorization|cookie|token|key|secret)(?:$|[-_])/iu;
@@ -68,6 +69,8 @@ const serverSchema = z.strictObject({
   tools: z.strictObject({ allow: z.array(cleanText.min(1).max(256)).max(1_000).refine(value => new Set(value).size === value.length),
     approval: z.array(cleanText.min(1).max(256)).max(1_000).default([]) }).refine(value => value.approval.every(name => value.allow.includes(name)),
       { message: "approval 必须是 allow 的子集" }),
+  resources: z.strictObject({ allow: z.array(cleanText.min(1).max(2_048)).max(256)
+    .refine(value => new Set(value).size === value.length).default([]) }).default(() => ({ allow: [] })),
   access: z.strictObject({ kind: z.literal("owner-private"), allowScheduled: z.boolean().default(false), allowWake: z.boolean().default(false),
     allowSubagent: z.boolean().default(false), groups: z.array(z.string().regex(/^[1-9][0-9]{0,19}$/)).max(200).default([]) }),
   replay: z.literal("unsafe"),

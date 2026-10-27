@@ -6,7 +6,7 @@
 
 在 Pi 后端内部增加 `PiMcp` 模块，把 MCP Server 提供的每个工具包装成一个带原始参数 schema 的 Pi 原生工具。连接、目录、凭据、权限与结果转换由这个模块管理；调用执行、检查点和恢复终态继续交给 Pi ToolTask。
 
-首版支持 **Streamable HTTP、静态凭据、tools 发现与调用、目录刷新、会话隔离、取消、故障恢复和可观测性**。不实现 stdio；OAuth 已按第 17 节实现。所有 MCP 工具固定为 `replay: "unsafe"`，直接调用不新增调用账本；群成员的待审批调用另存宿主审批文档（第 16 节）。
+首版支持 **Streamable HTTP、静态凭据、tools 发现与调用、目录刷新、会话隔离、取消、故障恢复和可观测性**。不实现 stdio；OAuth 已按第 17 节实现。所有 MCP 业务工具固定为 `replay: "unsafe"`，直接调用不新增调用账本；群成员的待审批调用另存宿主审批文档（第 16 节）。
 
 权限覆盖 **owner 私聊、显式配置的群及获准委派的子 agent**；群成员的指定工具须主人审批。子 agent 默认关闭，按服务设置 `access.allowSubagent`；允许群内的成员可委派，子 agent 保留成员身份与审批限制。普通私聊与未配置群拒绝。已实现的委派边界及后续授权约束见第 13 节。
 
@@ -42,7 +42,7 @@ flowchart TB
 | 取消与进度 | 传播取消信号；进度有界接收，不能作为成功依据 |
 | OAuth | 已实现：授权码 + PKCE，CIMD 客户端身份，DCR 回退 |
 | 旧 HTTP+SSE transport | 不支持，不自动降级；与上面的 HTTP SSE 响应区分 |
-| resources / prompts | 不实现 list/read/get/subscribe，结果内嵌资源按第 10 节处理 |
+| resources / prompts | 已实现 list/templates/read，前缀白名单；不实现 subscribe/prompts，见第 18 节 |
 | sampling / elicitation / roots / MCP tasks | 不声明这些客户端能力；收到相关请求明确返回不支持 |
 | 热重载管理员配置 | 首版修改配置后重启；协议目录可在线刷新 |
 | 自动重放、跨进程调度 | 不支持；单进程独占现有 Pi 存储 |
@@ -135,7 +135,7 @@ await mcp.close();
 
 ## 5. 身份与会话隔离
 
-模型参数只包含远端业务参数。`serverId`、凭据、threadKey、actor、conversationId 和授权来源均来自宿主与已安装工具定义，模型不能覆盖。
+业务工具参数只包含远端业务参数，其 `serverId`、凭据、threadKey、actor、conversationId 和授权来源均来自宿主与已安装工具定义，模型不能覆盖。资源入口额外接收配置服务 id 与 URI，由宿主从已验证配置选择服务并逐服务复核权限（第 18 节）。
 
 目录发现前先授权；配置选择使用既有 `runRights(turn, currentOwners())`，执行时重新调用 `PiBackend.binding(conversationId)`。owners 读取函数由宿主注入，不在 MCP 模块复制身份推导。这能覆盖 owner 配置变化、回合切换、未知 wake 和子会话。schema 隐藏只是减少误用，真正边界是发请求前的复核；排队后、拿到连接后再检查一次取消状态与身份。
 
@@ -258,6 +258,8 @@ AbortSignal 传播到 SDK，并尽力发 MCP cancellation；本地等待有截�
 | structuredContent 无 outputSchema | 仅提供有界 JSON 文本，不伪造 Pi 结构化契约 |
 | embedded text resource | 带 URI 来源的资料文本，计入同一文本预算 |
 | resource_link | 展示 URI、名称、MIME 等元信息，不自动访问 |
+| resources/read text | 带 URI 与 MIME 来源头的资料文本，按 textBytes 截断；空 contents 明确提示为空 |
+| resources/read blob | PNG/JPEG/WebP/GIF 复用图片校验与预算；其他二进制省略并给出 content_omitted 诊断 |
 | audio / binary resource | 给出类型与省略说明，不灌入 base64、不假装已转写 |
 
 Pi 模型主要读取 `output`，不能只保存 structuredContent。结构化数据不通过截断 JSON 来“满足”大小限制；超限时返回 result_rejected，不填写与 schema 不符的 structuredOutput。MCP `isError` 保留，不能把错误对象 stringify 后当成功结果。
@@ -272,6 +274,7 @@ Pi 模型主要读取 `output`，不能只保存 structuredContent。结构化�
 | 单调用总预算 | 60 秒，含排队/连接，管理员最多配置 300 秒 | 按是否 dispatch 分类 |
 | 连接数 / 单连接排队数 | 16 / 16 | 回收空闲连接或明确 busy，不逐出活跃调用 |
 | 空闲连接 TTL / 目录 TTL | 各 5 分钟 | 空闲释放 / 下次使用先刷新 |
+| 每服务资源与模板 | 合计 200 项，硬上限 2000；每类 20 页、2 MiB | 过滤前计数，超限拒绝本服务资源目录 |
 | 每服务目录 | 20 页、200 工具、2 MiB | 拒绝该候选快照 |
 | 单工具 schema / 嵌套深度 | 输入输出合计 64 KiB / 64 层 | 隔离该工具 |
 | 每会话暴露工具 | 64 个 MCP 工具；模型工具定义（名称、描述、输入 schema）总计 512 KiB | 明确配置过大，要求缩小白名单，不默默截断 |
@@ -339,7 +342,7 @@ unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterToo
 
 **未知结果阻断。** 如要硬性阻止模型在超时后用新 callId 发起相同操作，增加持久 unknown 记录、明确的操作匹配规则和管理员核对解除入口；承认改参数的语义重复仍需业务理解。这是独立需求，不能悄悄藏在重试中。
 
-**resources/prompts 与大目录。** 需要时增加独立授权及明确工具入口；resources/read 不能绕过 URL/文件权限。大量工具优先复用 Pi deferred/tool_search，并保证搜到的工具仍受同一执行边界约束，不同时维护第二条任意 MCP dispatcher 调用路径。
+**prompts 与大目录。** prompts 仍未实现，未来需要独立授权及明确工具入口；resources 已按第 18 节实现。大量工具优先复用 Pi deferred/tool_search，并保证搜到的工具仍受同一执行边界约束，不同时维护第二条任意 MCP dispatcher 调用路径。
 
 ## 14. 为什么选择这套形状
 
@@ -390,3 +393,20 @@ Inbox 在 ThreadHost 投递前截获已验证 owner 的引用/编号命令，恢
 `oauth-fetch.ts` 为发现、注册、换码、刷新与撤销提供 HTTPS、无 cookie、不跟随重定向、256 KiB 响应上限与 5 秒总超时；来源限定为资源 origin 与 issuer origin。登录先只允许资源 origin 获取 PRM，再加入 authorization_servers 中选定 issuer 的 origin；AS 元数据及 token/registration/revocation 端点不得越界，授权页 URL 还必须属于 issuer origin。主动刷新与撤销只使用资源 origin 和 token 行中已保存的 issuer origin。PRM 返回 404 时保留回退到资源 origin 的兼容行为；登录与刷新发现中的网络错误、超时或 5xx 不当作“不支持 PRM”，避免错误更换 issuer 或账号状态。DNS 全部地址检查后将完整固定列表绑定 socket lookup（all:true 返回数组），保留 Node autoSelectFamily 回落，不重新解析，拒绝 loopback/私网。测试显式打开回环 HTTP，生产 main 不设置该选项。撤销流程另受 3 秒预算约束，失败不阻碍本地退出。事件沿用 `@pi-mcp` trace 通道，只含 serverId/accountId/revision/错误码。
 
 账号 JSON 与 start/callback/logout 位于 `src/obs/mcp/http.ts`，由 obs 依赖 agent 层，agent 实现不反向导入 obs。HTML 账号页 `/mcp/accounts` 在 `src/obs/ui/mcp-pages.ts`，经页面内部调用同一 JSON 渲染，回调结果页同样复用 page()。真实本机 HTTP 桩覆盖 CIMD/PKCE、cookie/state、持久化、主动刷新、401 单次重试、invalid_grant、revision 隔离、DCR/退出与面板脱敏边界；另覆盖双连接同时 401 只刷新一次、SSE GET 持续 401 的单次上限、第三方端点零请求、IPv6 不可达回落 IPv4、刷新 503 后无需登录即可恢复。
+
+## 18. 资源读取（已实现）
+
+服务可独立配置 `resources: { "allow": ["notion://docs/"] }`。默认 `allow: []`，没有隐式放行；最多 256 个不重复的非空前缀，每项不超过 2048 字符且不含控制字符。匹配严格使用区分大小写的 `uri.startsWith(prefix)`，不做 URL 规范化；读取 URI 还必须不超过 2048 字符、无控制字符且通过 `URL.canParse`。前缀属于服务器配置摘要，修改它会改变该服务所有业务工具名，并使旧委派快照失效；重启后生效。升级到此版本时，即使未配置资源，补齐的默认 resources 字段也会改变旧配置摘要；已有工具需重新选择，子任务需重新派出。
+
+当本回合至少一个已授权服务开放了资源前缀，选择 `cs.mcp.resources`，紧跟 `cs.mcp.control`，同时加入子会话的显式工具白名单。两个入口均为 `replay: "safe"`、串行执行：
+
+- `mcp_list_resources({ server? })`：不传 server 时遍历有权且开放资源的服务；传入时仅查询该服务。完整分页读取资源与模板，按前缀过滤，提供服务 id、URI、名称与 MIME；描述清洗控制字符并限制为 300 字符。单服务失败不影响其他服务，全部失败才返回错误。不缓存资源目录，不订阅资源；SDK 忽略没有 handler 的 `resources/list_changed`。
+- `mcp_read_resource({ server, uri })`：server 使用列表输出中的配置服务 id；不匹配前缀时在联网前返回 `resource_not_allowed`。只发送固定的 `resources/read` 方法，不下载 URI 指向的网页或本地文件，不增加任意方法转发入口。服务仍必须有 tools capability；未声明 resources capability 返回 `resources_unsupported`。
+
+授权完全复用 `authorize`，以当前 conversationId、principal、配置摘要隔离连接，使用相同连接池和队列；排队后、取得连接后复核真实绑定、principal 与 person 摘要。群成员直接读取获准前缀，不走主人审批；要限制群成员，应只开放文档类前缀。子 agent 必须同时满足派出快照包含该服务、配置摘要相符、当前身份有效与 `allowSubagent` 开启。资料中的文本、描述、HTML 和错误消息都不是指令。
+
+整个工具调用（含跨服务遍历、排队和连接）使用 `callMs` 总预算，每页使用 `connectMs`。每类目录复用 `maxPages` 和 `catalogBytes`，资源与模板总条数共享新增 `maxResources`（默认 200，硬上限 2000），过滤前计数。重复 URI、模板或 cursor 为 `protocol_error`，超限为 `catalog_limit`。读取复用原始消息、文本、图片及内容限额；text 带 URI/MIME 来源头，PNG/JPEG/WebP/GIF blob 通过现有图片校验后交给 Pi，其他 blob 明确省略，空 contents 明确显示为空。文本和列表按 UTF-8 总预算截断并标注原始字节数。Pi 随后另附有界的诊断文本，诊断不计入适配器的正文预算。
+
+资源是只读操作：超时、断线按 `timeout` 或对应故障码返回并关闭故障连接，不使用 `outcome_unknown`。JSON-RPC 远端拒绝为 `remote_error`，仅向模型显示远端 code 及清洗后最多 200 字符的 message；错误 data、堆栈不展示。资源格式或大小校验失败为 `result_rejected`，不提示操作可能已完成。
+
+每个目标服务在当前回合 trace 记录 `mcp_resource`：状态、耗时、serverId、op、taskId、callId、输出字节数及失败码；read 只记录 URI 的 scheme、UTF-8 字节数和 SHA-256 前 12 位，list 记录过滤后的资源与模板合计数。完整 URI、资源正文、名称、描述及远端错误消息不进入审计。Pi 通用 hooks 按整个 `mcp_` 命名空间只记元数据；URI 参数和有界正文仍按正常工具历史保存在 Pi 中。
