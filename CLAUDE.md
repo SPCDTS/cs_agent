@@ -6,7 +6,7 @@
 
 - 每个任务在自己的 worktree 里做：`scripts/wt.ps1 new <名称>`，建出 `<主工作区>-wt-<名称>` 与同名分支。Codex 和其他子 agent 也在这个 worktree 里写，不进主工作区。
 - 主工作区 `D:\project\cs_agent` 只做集成。`scripts/hooks/pre-commit` 拒绝在主工作区提交（`wt.ps1` 会设置 `core.hooksPath`），确有必要时设 `CS_ALLOW_MAIN_COMMIT=1`。
-- 合并用 `scripts/wt.ps1 land <名称>`：rebase 到 main，跑 typecheck 与单测，再在主工作区 `merge --ff-only`。冲突在自己的 worktree 里解决；测试期间 main 前进了就重跑。不需要事先通知别的会话。
+- 合并用 `scripts/wt.ps1 land <名称>`：rebase 到 main，跑 typecheck、单测与集成测试，再在主工作区 `merge --ff-only`。冲突在自己的 worktree 里解决；测试期间 main 前进了就重跑。不需要事先通知别的会话。
 - 清理用 `scripts/wt.ps1 rm <名称>`，不要直接 `git worktree remove`：worktree 的 `node_modules` 是指向主工作区的链接，直接删会把主工作区的依赖一起删掉。
 - 不要在 worktree 里 `npm install`，它会改到主工作区的依赖。改依赖时先删掉该 worktree 的 `node_modules` 链接再 `npm ci`，land 之后在主工作区 `npm ci`。
 

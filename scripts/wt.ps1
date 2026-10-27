@@ -1,6 +1,6 @@
 # 多 agent 开发的 worktree 管理：每个任务一个 worktree，主工作区只做快进合并（约定见 CLAUDE.md）。
 #   scripts/wt.ps1 new <名称>    从 main 建 <主工作区>-wt-<名称>，分支 <名称>，node_modules 链接到主工作区
-#   scripts/wt.ps1 land <名称>   rebase 到 main、typecheck + 单测，再在主工作区 merge --ff-only
+#   scripts/wt.ps1 land <名称>   rebase 到 main、typecheck + 单测 + 集成测试，再在主工作区 merge --ff-only
 #   scripts/wt.ps1 rm <名称>     先断开 node_modules 链接再删 worktree；分支已合并则一并删除
 #   scripts/wt.ps1 list
 param(
@@ -42,6 +42,8 @@ switch ($Action) {
       try {
         npm run -s typecheck; if ($LASTEXITCODE) { throw "typecheck 失败" }
         npm test --silent; if ($LASTEXITCODE) { throw "单测失败" }
+        # 集成测试的 fixture 依赖构建后的 dist，跟着生产代码过时只有这里能发现；全量约 15–25 s。
+        npm run -s test:integration; if ($LASTEXITCODE) { throw "集成测试失败" }
       } finally { Pop-Location }
     }
     if ((Invoke-Git -C $main symbolic-ref --short HEAD) -ne "main") { throw "主工作区不在 main 分支" }
