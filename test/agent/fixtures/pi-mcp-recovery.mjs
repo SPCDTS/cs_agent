@@ -51,7 +51,7 @@ async function main() {
       conversation = await harness.createConversation({ ownership: { kind: "ownerless" },
         agent: { model: { provider: model.provider, modelId: model.id } } }, context);
       await mcp.configure({ conversation, turn: binding }, context);
-      const tool = (await conversation.agent(context)).callable.find(item => item.name.startsWith("mcp_"));
+      const tool = (await conversation.agent(context)).callable.find(item => item.name.startsWith("mcp_fixture_first_"));
       if (!tool) throw new Error("fixture_mcp_tool_missing");
       await writeFile(metadataFile, JSON.stringify({ conversation: Number(conversation.id) }), "utf8");
       faux.setResponses([
