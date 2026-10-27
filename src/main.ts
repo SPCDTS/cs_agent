@@ -1,3 +1,4 @@
+import { McpOAuth } from "./agent/pi-mcp/oauth.js";
 import { loadCodexModelCatalog, loadCodexModelValidator } from "./agent/codex/model-catalog.js";
 import { backendNameFor } from "./agent/backends/select.js";
 import { MediaRecall } from "./context/media.js";
@@ -296,6 +297,11 @@ async function main(): Promise<void> {
     kind: "invalid" as const, issues: [{ path: "", code: "config_load_failed", message: "MCP 配置读取失败" }],
   }));
   if (mcpConfig.kind === "invalid") log.warn("pi MCP disabled: invalid configuration", { issues: mcpConfig.issues });
+  const oauthServers = mcpConfig.kind === "enabled" ? mcpConfig.value.servers.filter(server => server.credential.kind === "oauth") : [];
+  const mcpOAuth = oauthServers.length ? new McpOAuth({ dataDir: cfg.DATA_DIR, redirectUrl: cfg.PI_MCP_OAUTH_REDIRECT_URL,
+    servers: oauthServers, onEvent: (kind, detail) => trace.event("@pi-mcp", `mcp_${kind}`, {
+      status: kind === "oauth_required" || kind === "oauth_refresh_failed" ? "degraded" : "ok", detail,
+    }) }) : undefined;
   const mcpEnvironment = new Map<string, string | undefined>();
   if (mcpConfig.kind === "enabled") {
     for (const { transport } of mcpConfig.value.servers) {
@@ -316,7 +322,7 @@ async function main(): Promise<void> {
     thinkingLevel, store, instrumentation, contextUsage,
     reserveTokens: cfg.PI_COMPACTION_RESERVE_TOKENS, backgroundTokens: cfg.PI_COMPACTION_BACKGROUND_TOKENS,
     maxContextChars: cfg.QQ_CONTEXT_MAX_CHARS,
-    mcp: { config: mcpConfig, secrets: mcpSecrets, approvals: mcpApprovals },
+    mcp: { config: mcpConfig, secrets: mcpSecrets, approvals: mcpApprovals, oauth: mcpOAuth },
     attachmentLimits: { maxBytes: cfg.ATTACH_FILE_MAX_MB * 1024 * 1024, maxFiles: cfg.ATTACH_FILES_MAX, denyExtensions: cfg.ATTACH_FILE_DENY_EXT },
   });
   codexBackend = new CodexBackend({ runner: codex, tokens: threadTokens, imagesDir: cfg.imagesDir, reasoningEffort: cfg.CODEX_REASONING_EFFORT,
@@ -468,6 +474,7 @@ async function main(): Promise<void> {
       nextRun: () => { const now = Date.now(); return now + msUntilNextRun(cfg.HISTORY_SUMMARY_HOUR, now); },
       scopeLabel: (scope: string) => memory.label(scope) } };
   const dashboard = createDashboard({
+    mcpOAuth,
     grants, schedules, ...dashboardData, config: cfg, store: obs, context: store, queue: () => queueStatus(),
     health: () => ({ degraded: obs.degraded || !cfg.OBS_TOKEN, bridge: bridge!.status(), ...checks, deepseek_key_present: !!(process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_APIKEY),
       aging: obs.latest("aging") ?? { last_run: store.getMeta("aging_last_run") ?? null }, dropped_events: trace.dropped }),
@@ -546,6 +553,7 @@ async function main(): Promise<void> {
     await recallServer.close();
     await bridge!.stop().catch(() => undefined);
     await closeAgentHarnesses(harness, pi);
+    await mcpOAuth?.close();
     await codex.stop().catch(() => undefined);
     await contextUsage.close().catch(() => log.warn("context usage shutdown flush failed"));
     await extractDrained.catch(() => undefined);

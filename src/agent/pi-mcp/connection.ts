@@ -1,13 +1,16 @@
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolResultSchema, ErrorCode, ListToolsResultSchema, McpError, ToolListChangedNotificationSchema, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { EnvironmentSecrets, McpLimits, McpServerConfig } from "./config.js";
 import { boundedFetch, McpConnectionError } from "./transport-http.js";
+import type { McpOAuth } from "./oauth.js";
 
 export { McpConnectionError } from "./transport-http.js";
 
 type OpenOptions = {
   server: McpServerConfig;
+  oauth?: McpOAuth;
   limits: McpLimits;
   secrets: EnvironmentSecrets;
   signal: AbortSignal;
@@ -28,7 +31,12 @@ export class McpConnection {
 
   static async open(options: OpenOptions): Promise<McpConnection> {
     options.signal.throwIfAborted();
-    const { server, limits, secrets } = options;
+    const { server, limits, secrets, oauth } = options;
+    if (server.credential.kind === "oauth") {
+      if (!oauth) throw new McpConnectionError("auth_required", "MCP 服务需要在面板登录外部账号");
+      await oauth.accessToken(server);
+    }
+    options.signal.throwIfAborted();
     const client = new Client({ name: "cs-agent-pi-mcp", version: "1.0.0" }, { capabilities: {} });
     let connection: McpConnection | undefined;
     const fail = (error: McpConnectionError) => {
@@ -47,14 +55,17 @@ export class McpConnection {
     }
     const transport = new StreamableHTTPClientTransport(new URL(settings.url), {
       requestInit: { headers, redirect: "manual", credentials: "omit" },
-      fetch: boundedFetch(new URL(settings.url), limits.messageBytes, fail),
+      fetch: boundedFetch(new URL(settings.url), limits.messageBytes, fail, oauth && server.credential.kind === "oauth" ? {
+        accessToken: () => oauth.accessToken(server), rejected: used => oauth.rejected(server, used),
+        authRequired: used => oauth.authRequired(server, used),
+      } : undefined),
       // 不安排 SDK 后台重连；断流按本次调用预算结算，避免关闭后残留恢复计时器。
       reconnectionOptions: { initialReconnectionDelay: 250, maxReconnectionDelay: 1000, reconnectionDelayGrowFactor: 2, maxRetries: 0 },
     });
     connection = new McpConnection(client, transport, limits);
     client.onerror = error => {
       // 只保留本模块产生的有界错误，不保存第三方消息或堆栈。
-      if (error instanceof McpConnectionError) connection.failure ??= error;
+      if (error instanceof McpConnectionError || error instanceof UnauthorizedError) fail(safeError(error));
     };
     client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
       if (!connection.closed) options.onToolsChanged();
@@ -147,6 +158,7 @@ function secret(secrets: EnvironmentSecrets, name: string): string {
 }
 
 function safeError(error: unknown): McpConnectionError {
+  if (error instanceof UnauthorizedError || (error instanceof StreamableHTTPError && error.code === 401)) return new McpConnectionError("auth_required", "MCP 服务需要在面板登录外部账号");
   if (error instanceof McpError && error.code === ErrorCode.RequestTimeout) return new McpConnectionError("timeout", "MCP 协议请求超时");
   return error instanceof McpConnectionError ? error : new McpConnectionError("protocol_error", "MCP 协议请求失败");
 }

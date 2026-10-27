@@ -1,6 +1,7 @@
+import type { McpAccessToken } from "./oauth.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 
-type FailureCode = "missing_secret" | "auth_failed" | "remote_state_lost" | "transport_error" | "protocol_error" | "catalog_limit" | "message_limit" | "timeout" | "closed";
+type FailureCode = "missing_secret" | "auth_required" | "auth_failed" | "remote_state_lost" | "transport_error" | "protocol_error" | "catalog_limit" | "message_limit" | "timeout" | "closed";
 
 export class McpConnectionError extends Error {
   constructor(readonly code: FailureCode, message: string) {
@@ -10,12 +11,27 @@ export class McpConnectionError extends Error {
 }
 
 /** 在 SDK 的 JSON/SSE 解析器读取前限制实际流字节；拒绝同源重定向。 */
-export function boundedFetch(endpoint: URL, messageBytes: number, fail: (error: McpConnectionError) => void): FetchLike {
+export function boundedFetch(endpoint: URL, messageBytes: number, fail: (error: McpConnectionError) => void, bearer?: {
+  accessToken(): Promise<McpAccessToken>; rejected(used: McpAccessToken): Promise<McpAccessToken>; authRequired(used: McpAccessToken): Promise<never>;
+}): FetchLike {
   return async (url, init) => {
-    if (new URL(url).origin !== endpoint.origin) throw new McpConnectionError("transport_error", "MCP HTTP 来源变化被拒绝");
-    let response: Response;
-    try { response = await fetch(url, { ...init, redirect: "manual", credentials: "omit" }); }
-    catch { throw new McpConnectionError("transport_error", "MCP HTTP 连接失败"); }
+    const target = new URL(url);
+    if (target.origin !== endpoint.origin) throw new McpConnectionError("transport_error", "MCP HTTP 来源变化被拒绝");
+    const send = async (token?: McpAccessToken) => {
+      const headers = new Headers(init?.headers);
+      if (token) headers.set("authorization", `Bearer ${token.access_token}`);
+      try { return await fetch(url, { ...init, headers, redirect: "manual", credentials: "omit" }); }
+      catch { throw new McpConnectionError("transport_error", "MCP HTTP 连接失败"); }
+    };
+    const used = await bearer?.accessToken();
+    let response = await send(used);
+    if (bearer && used && response.status === 401) {
+      await response.body?.cancel();
+      // SDK 的 body 是字符串；原请求（包括 GET/DELETE）最多复用一次，401 绝不交给 SDK。
+      const retryToken = await bearer.rejected(used);
+      response = await send(retryToken);
+      if (response.status === 401) { await response.body?.cancel(); await bearer.authRequired(retryToken); }
+    }
     if (response.status >= 300 && response.status < 400) {
       await response.body?.cancel();
       throw new McpConnectionError("transport_error", "MCP HTTP 重定向被拒绝");

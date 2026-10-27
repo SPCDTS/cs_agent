@@ -1,5 +1,5 @@
 /** 面板文件与表单边界；路径、大小、版本和秘密检查保持集中。 */
-import type { IncomingMessage } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual, createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -136,4 +136,25 @@ export async function writeAgentMd(file: string, content: string): Promise<{ bef
   try { await fs.writeFile(tmp, text, { encoding: 'utf8', flag: 'wx' }); await fs.rename(tmp, file); }
   finally { await fs.rm(tmp, { force: true }).catch(() => undefined); }
   return { before, after: bytes };
+}
+
+/** 子路由注入同源和表单校验，避免子目录反向依赖 HTTP 组合层。 */
+export async function validateDashboardPost(req: IncomingMessage, host: string, csrf: string): Promise<void> {
+  guardDashboardOrigin(req, host);
+  const form = await readBody(req);
+  if (!csrf || form.getAll('_csrf').length !== 1 || !equal(form.get('_csrf') ?? '', csrf)) throw new HttpError(403, 'CSRF 令牌无效');
+}
+
+/** 页面内部读取与浏览器相同的 JSON 路由；不启动 HTTP 请求。 */
+export async function readDashboardJson(pathQuery: string, route: (url: URL, res: ServerResponse) => Promise<void>): Promise<{ status: number; body: unknown }> {
+  let text = '';
+  const res = { statusCode: 200, headersSent: false, destroyed: false, writableEnded: false,
+    setHeader() { return res; }, getHeader() { return undefined; }, on() { return res; }, once() { return res; }, off() { return res; },
+    writeHead(status: number) { res.statusCode = status; res.headersSent = true; return res; },
+    write(chunk: unknown) { text += String(chunk); return true; },
+    end(chunk?: unknown) { if (typeof chunk === 'string' || Buffer.isBuffer(chunk)) text += String(chunk); res.headersSent = true; res.writableEnded = true; return res; } };
+  await route(new URL(pathQuery, 'http://localhost'), res as unknown as ServerResponse);
+  let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { /* 非 JSON 响应 */ }
+  return { status: res.statusCode, body };
 }

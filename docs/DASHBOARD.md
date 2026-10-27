@@ -254,3 +254,20 @@ Trace ──tap──▶ LiveBus（内存：每会话一行，当前回合的阶
 - 字体：`"PingFang SC","Hiragino Sans GB","Microsoft YaHei UI","Microsoft YaHei","Noto Sans CJK SC",…,system-ui`；等宽只用于 ID、代码与日志；数字启用 `tnum`。
 - 字号 12.5 / 13.5 / 15（正文，行高 1.65）/ 18 / 23 / 30；间距 4 / 8 / 12 / 16 / 24 / 32 / 48；圆角 3（印章）/ 6（控件、单据）/ 10（面板）。
 - `prefers-color-scheme: dark` 自动切换；动效只有处理中的脉冲点与新单据的一次高亮，`prefers-reduced-motion` 下关闭。
+
+## 11. 外部账号接口
+
+Pi MCP OAuth 的 JSON 与浏览器授权端点由 `src/obs/mcp/http.ts` 实现。`/mcp/accounts` 的 HTML 页面由后续改动实现，本次暂为 404。
+
+| 方法与路径 | 行为 |
+| --- | --- |
+| GET /api/mcp/accounts | 返回 `{ accounts, redirectUrl }`；每项仅含 serverId、accountId、revision、issuer、loggedIn、expiresAt、scope、hasRefresh、lastError、lastErrorAt（无值字段省略）。未启用时 503 `{ error: "未启用外部账号" }` |
+| POST /mcp/oauth/start/<serverId> | 同源表单与 `_csrf` 校验，设置 OAuth cookie，303 到授权页；已有有效授权则回账号页 |
+| GET /mcp/oauth/callback?code&state[&error] | 校验 state、过期与 cookie 后换码；直接返回 200 同站 HTML：成功显示「外部账号已登录」与服务 id，失败显示「登录未完成」与固定错误码；两者均提供 `/mcp/accounts` 链接，总是清 OAuth cookie |
+| POST /mcp/oauth/logout/<serverId> | 同源表单与 `_csrf` 校验，尽力撤销并删除本地 token；303 到 `/mcp/accounts?ok=logout` |
+
+JSON、start、logout 继续要求 obs_token 面板会话；POST 使用 application/x-www-form-urlencoded，隐藏字段 `_csrf` 是现有 `csrfToken(OBS_TOKEN)`。表单/CSRF 校验失败返回 403。授权服务失败只回固定 `auth_required/server_unavailable/invalid_state`，不回显第三方 error_description。
+
+专用 cookie 为 `mcp_oauth=<随机32字节base64url>; Path=/mcp/oauth; HttpOnly; SameSite=Lax; Max-Age=600`。数据库仅存 cookie nonce 的 SHA-256。state 同样随机 32 字节，十分钟过期，回调换码前原子消费；cookie 缺失或不匹配也删除该 pending。回调不要求跨站时不会携带的 Strict obs_token，而以 state/cookie 绑定本次已通过 CSRF 的启动请求。回调不再 303 跳转，因为跨站重定向链不会携带 SameSite=Strict 的面板 cookie；直接显示结果页，用户点击返回链接时属于同站导航，可以携带 obs_token。结果页复用 page() 与面板 CSP nonce；响应设置 no-store 与 no-referrer，不记录或回显 code/state。
+
+token、client_secret、PKCE verifier 不出现在 JSON 或审计。需要登录及确定的 OAuth 刷新错误分别以 auth_required、refresh_failed 显示；网络错误、超时或 5xx 不写 refresh_failed，后续请求可继续刷新；账号 revision 变更后需重新登录。完整配置见 [Pi MCP 使用说明](PI-MCP.md#oauth-登录cimd)。

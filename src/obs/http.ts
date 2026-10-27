@@ -1,3 +1,4 @@
+import { createMcpRoutes, MCP_OAUTH_CALLBACK } from "./mcp/http.js";
 import { resolveAgentConfig } from '../agent/config.js';
 import { SkillsStoreError } from '../agent/skills-store.js';
 import { csrfToken, sseWriter, type SseWriter } from './http-util.js';
@@ -25,7 +26,7 @@ import { VENDOR_CACHE, vendorAsset } from './ui/vendor.js';
 import type { ContextUsage } from '../shared/format.js';
 import { empty, page, traceHref } from './ui/html.js';
 import type { DashboardOptions } from './dashboard-types.js';
-import { equal, readText, agentMdRevision, AGENT_MD_MAX_BYTES } from './dashboard-io.js';
+import { equal, readText, agentMdRevision, AGENT_MD_MAX_BYTES, readDashboardJson, validateDashboardPost } from './dashboard-io.js';
 import { createDashboardPost } from './dashboard-post.js';
 import { createDashboardPages } from './ui/dashboard-pages.js';
 import { asContextUsageEvent } from './context-turns.js';
@@ -118,22 +119,14 @@ export function createDashboard(opts: DashboardOptions) {
   const handlePost = createDashboardPost(opts, csrf, agentMd, tracer, render, schedulePanel.post);
   const handleSchedules = createScheduleRoutes(opts.schedules, config.owner, csrf), memoryEntryActions = createMemoryEntryActions(opts.memoryEntries, csrf);
   const memoryJobActions = createMemoryJobActions(opts.memoryJobs, csrf);
+  const mcpRoutes = createMcpRoutes(opts.mcpOAuth, (req, host) => validateDashboardPost(req, host, csrf));
 
   /** 在服务端内部调用会话 JSON 路由：与浏览器拿到的是同一份已脱敏 JSON、同样的校验与错误码。 */
   async function api(pathQuery: string): Promise<{ status: number; body: unknown }> {
-    let text = '';
-    const res = { statusCode: 200, headersSent: false, destroyed: false, writableEnded: false,
-      setHeader() { return res; }, getHeader() { return undefined; }, on() { return res; }, once() { return res; }, off() { return res; },
-      writeHead(status: number) { res.statusCode = status; res.headersSent = true; return res; },
-      write(chunk: unknown) { text += String(chunk); return true; },
-      end(chunk?: unknown) { if (typeof chunk === 'string' || Buffer.isBuffer(chunk)) text += String(chunk); res.headersSent = true; res.writableEnded = true; return res; } };
-    const target = new URL(pathQuery, 'http://localhost');
-    const route = target.pathname === '/api/memory' || target.pathname.startsWith('/api/memory/') ? memoryRoute : sessionRoute;
-    await route(target, res as unknown as ServerResponse);
-    let body: unknown = null;
-    try { body = text ? JSON.parse(text) : null; } catch { /* 非 JSON 响应 */ }
-    return { status: res.statusCode, body };
+    return readDashboardJson(pathQuery, (url, res) =>
+      (url.pathname === '/api/memory' || url.pathname.startsWith('/api/memory/') ? memoryRoute : sessionRoute)(url, res));
   }
+
   function sse(res: ServerResponse): SseWriter | null {
     if (closed || res.destroyed || res.writableEnded) return null;
     if (clients.size >= MAX_SSE) { res.writeHead(503).end(); return null; }
@@ -160,6 +153,8 @@ export function createDashboard(opts: DashboardOptions) {
       res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' }).end(FAVICON); return;
     }
     const post = req.method === 'POST';
+    // 外部站点回调不携带 Strict 面板 cookie；由一次性 state 和 Lax cookie 独立验证。
+    if (url.pathname === MCP_OAUTH_CALLBACK) { await mcpRoutes(req, res, url, host, nonce); return; }
     {
       const cookie = /(?:^|;\s*)obs_token=([^;]*)/.exec(req.headers.cookie ?? '')?.[1] ?? '';
       let saved = ''; try { saved = decodeURIComponent(cookie); } catch { /* 无效 cookie */ }
@@ -177,6 +172,7 @@ export function createDashboard(opts: DashboardOptions) {
         res.writeHead(303, { Location: url.pathname + url.search }).end(); return;
       }
     }
+    if (url.pathname === '/api/mcp/accounts' || url.pathname.startsWith('/mcp/oauth/')) { await mcpRoutes(req, res, url, host, nonce); return; }
     if (url.pathname === '/api/schedules' || url.pathname.startsWith('/api/schedules/')) {
       await handleSchedules(req, res, url, host); return;
     }

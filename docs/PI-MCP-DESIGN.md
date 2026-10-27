@@ -6,7 +6,7 @@
 
 在 Pi 后端内部增加 `PiMcp` 模块，把 MCP Server 提供的每个工具包装成一个带原始参数 schema 的 Pi 原生工具。连接、目录、凭据、权限与结果转换由这个模块管理；调用执行、检查点和恢复终态继续交给 Pi ToolTask。
 
-首版支持 **Streamable HTTP、静态凭据、tools 发现与调用、目录刷新、会话隔离、取消、故障恢复和可观测性**。不实现 stdio 与 OAuth。所有 MCP 工具固定为 `replay: "unsafe"`，直接调用不新增调用账本；群成员的待审批调用另存宿主审批文档（第 16 节）。
+首版支持 **Streamable HTTP、静态凭据、tools 发现与调用、目录刷新、会话隔离、取消、故障恢复和可观测性**。不实现 stdio；OAuth 已按第 17 节实现。所有 MCP 工具固定为 `replay: "unsafe"`，直接调用不新增调用账本；群成员的待审批调用另存宿主审批文档（第 16 节）。
 
 权限覆盖 **owner 私聊、显式配置的群及 owner 显式委派的子 agent**；群成员的指定工具须主人审批。子 agent 默认关闭，按服务设置 `access.allowSubagent`；成员派出的子 agent 没有 MCP 工具。普通私聊与未配置群拒绝。已实现的委派边界及后续授权约束见第 13 节。
 
@@ -36,11 +36,11 @@ flowchart TB
 | 初始化与版本协商 | 使用已锁定版本的 SDK；协商不兼容时停止该连接 |
 | stdio | 不支持；配置中 `kind: "stdio"` 按无效配置拒绝 |
 | Streamable HTTP | 支持 JSON 和 SSE 响应；SSE 是此传输的一部分 |
-| 认证 | 无认证、固定 Bearer/API key/请求头 |
+| 认证 | 无认证、固定 Bearer/API key/请求头、OAuth |
 | tools | 完整分页发现、白名单筛选、调用、目录变更通知 |
 | 结果 | text、image、structuredContent；其他内容明确降级 |
 | 取消与进度 | 传播取消信号；进度有界接收，不能作为成功依据 |
-| OAuth | 不实现授权跳转、动态注册、回调、刷新 token，也不安装 SDK authProvider |
+| OAuth | 已实现：授权码 + PKCE，CIMD 客户端身份，DCR 回退 |
 | 旧 HTTP+SSE transport | 不支持，不自动降级；与上面的 HTTP SSE 响应区分 |
 | resources / prompts | 不实现 list/read/get/subscribe，结果内嵌资源按第 10 节处理 |
 | sampling / elicitation / roots / MCP tasks | 不声明这些客户端能力；收到相关请求明确返回不支持 |
@@ -62,7 +62,7 @@ flowchart TB
 | `src/agent/pi-mcp/transport-http.ts` | HTTP JSON/SSE 原始消息限额、拒绝重定向与跨源 |
 | `src/agent/pi-mcp/schema.ts` | 严格 draft-07 子集验证与编译 |
 | `src/agent/pi-mcp/result.ts` | MCP 结果验证、Pi 输出转换、内容预算与错误分类；纯边界函数 |
-| `src/config.ts` | 只增加 `PI_MCP_CONFIG` 路径，不导入 agent 实现 |
+| `src/config.ts` | `PI_MCP_CONFIG` 路径与 `PI_MCP_OAUTH_REDIRECT_URL`，不导入 agent 实现 |
 | `src/main.ts` | 读取配置与环境秘密，向 PiBackend 注入经过验证的配置和秘密解析函数 |
 | `src/agent/backends/pi.ts` | 在暂停调度时 attach；每轮 configure；先关闭 Pi Harness 再关闭 MCP |
 | `src/agent/pi-tools/index.ts` | 为 MCP 工具增加独立审计分支，避免现有通用 hook 记录完整输入和输出 |
@@ -90,7 +90,7 @@ await mcp.close();
 
 这是调用形状。`backend.binding` 必须在第一次使用前完成实例绑定，不能在构造期间触发尚未赋值的 backend。
 
-## 4. 配置契约：不依赖 OAuth 或新密钥平台
+## 4. 配置契约：静态凭据与 OAuth
 
 `PI_MCP_CONFIG` 未设置时不开启新 MCP 调用。设置后读取管理员维护的 UTF-8 JSON 文件；不从聊天消息、模型参数或工作区生成物加载服务配置。
 
@@ -129,7 +129,7 @@ await mcp.close();
 5. 定时和唤醒默认拒绝。启用对应选项后仍按宿主确证的人和会话范围授权；群成员继承身份仍须审批，owner 继承身份直接执行。继承定时身份的 wake 必须同时满足两个开关。不能仅按线程名信任唤醒。
 6. 子 agent 默认拒绝；服务设置 `allowSubagent: true` 后，仅限父回合本身获准的服务与身份，按第 13 节保存快照、配置子工具并逐次复核。
 7. HTTP 默认 HTTPS；loopback 需显式设置 `allowLoopbackHttp`，局域网 RFC1918 IPv4 字面地址需显式设置 `allowPrivateNetworkHttp`。私网开关不允许公网、链路本地地址或域名。禁止 URL 内嵌密码；固定 origin，不跟随重定向，不能把认证头发送到其他来源。禁止覆盖 SDK 管理的协议、session、Host、Content-Length 等 header。敏感 header 只能用秘密引用。
-8. Zod 严格拒绝未知字段、重复 id、非法限额、stdio 传输、`replay: safe` 和 OAuth 配置。全局结构错误时整个 MCP 禁用并明确告警；单服务缺秘密/连不上只降级该服务。本地 Pi 工具继续工作，不静默改用别的账号。文件未设置、禁用或损坏时仍恢复已有目录以结算旧任务，但不给新回合选择工具。
+8. Zod 严格拒绝未知字段、重复 id、非法限额、stdio 传输、`replay: safe` 和不符合第 17 节的 OAuth 配置。全局结构错误时整个 MCP 禁用并明确告警；单服务缺秘密/连不上只降级该服务。本地 Pi 工具继续工作，不静默改用别的账号。文件未设置、禁用或损坏时仍恢复已有目录以结算旧任务，但不给新回合选择工具。
 
 配置文件、秘密注入和服务发布由运维管理；首版不增加聊天内的“安装 MCP”或“修改命令”入口。
 
@@ -235,7 +235,7 @@ ToolTask 检查点与结果继续由 Pi 保存。正常工具参数/有界结果
 
 普通错误转换成有错误码的 Pi `isError`，避免进入外层通用 retry 路径。**Harness 关闭/任务中断的信号要继续向上抛出**，保留 Pi 检查点语义，不能转换为普通完成结果。
 
-初始化失败后使用带抖动的重连退避，后续发现或调用可再次尝试连接；首版不在同一次调用里循环重试。tools/call 不因为重连、401、429、5xx、session 404 或 schema 错误而重发。401/403 不启动 OAuth，也不尝试另一账号。SDK 的自动 SSE 断点恢复已关闭，断流按当前调用预算结算；发送后的异常统一为 `outcome_unknown`，具体原因仅保留为有界审计码。
+初始化失败后使用带抖动的重连退避，后续发现或调用可再次尝试连接；首版不在同一次调用里循环重试。tools/call 不因为重连、429、5xx、session 404 或 schema 错误而重发。静态凭据的 401/403 直接拒绝；OAuth 运行时不安装 SDK authProvider，由传输层注入 Bearer；401 在账号锁内复核版本并刷新（或复用其他连接刷新的 token），同一请求只重试一次，覆盖 POST、SSE GET、DELETE，401 不返回 SDK。403 仍直接拒绝。OAuth 请求来源限定为资源 origin 与 issuer origin。暂态刷新失败仅以 transport_error 结束本次请求，不写 refresh_failed、不删除 token，下次请求仍可刷新。运行时不启动浏览器授权，不尝试另一账号。SDK 的自动 SSE 断点恢复已关闭，断流按当前调用预算结算；发送后的异常统一为 `outcome_unknown`，具体原因仅保留为有界审计码。
 
 AbortSignal 传播到 SDK，并尽力发 MCP cancellation；本地等待有截止时间。取消不证明远端停止。迟到响应不得归到下一次调用，已经结算的调用不能被迟到消息重复提交。
 
@@ -304,7 +304,7 @@ unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterToo
 
 | 测试组 | 必须证明的行为 |
 | --- | --- |
-| 配置与认证 | Streamable HTTP，拒绝 stdio；无 OAuth provider；秘密缺失、非法 header/URL；401/403 不开启认证流程或换账号 |
+| 配置与认证 | Streamable HTTP，拒绝 stdio；OAuth provider 与 CIMD/PKCE；秘密缺失、非法 header/URL；无 token 零请求，401 刷新一次，403 拒绝且不换账号 |
 | 发现与命名 | 全分页、重复 cursor/名称、半目录失败、短 hash 碰撞、同名跨服务；新工具不会突破白名单 |
 | schema | 普通 JSON Schema、局部引用、拒绝外部/循环引用、Pi 参数修复后再校验；无静默放宽 |
 | 权限 | owner 私聊允许；未配置群、普通私聊、未获委派的子 agent、未知 wake 均零外部请求；允许群覆盖 owner 直调与成员审批；子委派、续发、撤权及重启复测；队列等待后撤权仍拒绝 |
@@ -374,3 +374,19 @@ SDK API 以本地锁定安装版本和 [TypeScript SDK v1 官方源码](https://
 Inbox 在 ThreadHost 投递前截获已验证 owner 的引用/编号命令，恢复 queued 输入时经过同一入口。pending → executing 先提交事务，再消费入站、调用 PiBackend → PiMcp.invoke；不运行模型，不在事务内访问网络。每次执行复核配置摘要、群与工具名单、owner 身份及参数摘要；复用原连接池、队列、预算、schema 与 convertMcpResult。重启将 executing 结算为 unknown，不重放。
 
 成员工具目录使用独立权限摘要，审批工具只返回回执；owner 与成员实际连接都使用 owner principal，按 conversation 隔离。申请通知、拒绝及结果走 SendService.system / Outbox，显式 @owner 或申请人，决定答复引用 owner 消息；普通消息库与期间消息承接后续上下文。审计为 mcp_approval_requested / decided / executed，仅记录编号、工具、群、申请人、参数摘要与大小，发送审计也不采审批正文。
+
+## 17. OAuth 凭据（已实现）
+
+`oauth.ts` 的 `McpOAuth` 由 main 构造一次，同时注入 PiBackend/PiMcp 与 dashboard；PiMcp 关闭后再等授权任务结束并关库。SDK 固定为 1.32.1，使用公开的 `OAuthClientProvider`、`auth()`、`refreshAuthorization()`、`OAuthError` 和 `UnauthorizedError`。CIMD 将 HTTPS 元数据 URL 作为 client_id；仅配置 `registration: "dynamic"` 时走 DCR。
+
+`oauth-store.ts` 使用 node:sqlite DatabaseSync + WAL，在 IMMEDIATE 事务内幂等建表。token 主键是 `server_id/account_id/revision`，保存原始 issuer、access/refresh token、scope、过期毫秒；client 按 server/issuer 保存完整注册信息；pending 保存 state、PKCE verifier、cookie SHA-256、创建与十分钟过期时间；独立 oauth_status 表保存最近 `auth_required/refresh_failed` 与时间。插入 pending 时清理过期行。秘密在保存和读出时登记 `registerSecrets`，不进入配置摘要、目录、工具结果、日志、trace 或账号 JSON。
+
+运行时不安装 SDK authProvider，也不使用 Proxy；connection.ts 将 McpOAuth 接到 transport-http.ts 的 Bearer 钩子。每个请求先调用 accessToken()，在账号锁内重读 token；无 token 在联网前拒绝，退出登录后的已有连接也不发送匿名请求。临近过期（60 秒）且有 refresh token 时调用 SDK refreshAuthorization() 并保存。返回 access_token 与整数 version；version 在 token 行每次保存时由 SQLite upsert 自增，旧库在建表事务内补列（初值 0），updated_at 仍保存更新时间，不再用作版本；401 时 rejected() 在同一账号锁内重新读库，若版本已更新则复用，否则刷新。传输层覆盖 Authorization 并重放同一个请求一次，POST、SSE GET 和 DELETE 共用此上限；再次 401 将重试实际使用的 token/version 交给 authRequired()，在账号锁内仅当库中仍匹配时记 auth_required；版本已变化或行已删除则仅使本次请求失败，不改账号状态、不发送第三次请求。SDK 从不收到 401。403 直接 auth_failed，运行时绝不跳浏览器。连接键继续通过配置摘要固定 accountId/revision，auth_required 沿用连接初始化失败的退避。
+
+刷新继续使用 SDK 导出的 refreshAuthorization 与 OAuthError。确定的 OAuth 错误（如 invalid_grant、invalid_client、unauthorized_client）才删除 token 并保留 refresh_failed；SDK 对无效错误正文生成的 server_error，以及 temporarily_unavailable、网络错误、超时、5xx 均以 transport_error 结束本次请求，不改 token 或状态，下次请求可再刷新。5xx 在 SDK 解析前按暂态错误处理。成功保存后仍发 oauth_refreshed。
+
+登录 provider 用 state 与 pending verifier 完成授权码 + S256 PKCE；start/logout 沿用面板会话、同源与 `_csrf` 表单校验。start 设置 `mcp_oauth` HttpOnly / SameSite=Lax / Path=/mcp/oauth / Max-Age=600 cookie，库中只保存 nonce 的 SHA-256。callback 在换码前原子消费 pending，并核对过期、cookie、账号与 revision；错误或成功都不能重放。现有面板 obs_token 是 SameSite=Strict，因此回调单独在会话检查前挂载，只依赖 state/cookie 校验，且总是清 cookie。回调直接返回 200 同站 HTML：成功标题「外部账号已登录」并显示服务 id，失败标题「登录未完成」并仅显示固定错误码（invalid_state/auth_required/server_unavailable）；两者都有 /mcp/accounts 链接。用户点击链接后是同站导航，会带 Strict cookie；不再用 303 延续跨站重定向链。响应保持 no-store/no-referrer，不含授权 code/state 或原始 AS 错误。
+
+`oauth-fetch.ts` 为发现、注册、换码、刷新与撤销提供 HTTPS、无 cookie、不跟随重定向、256 KiB 响应上限与 5 秒总超时；来源限定为资源 origin 与 issuer origin。登录先只允许资源 origin 获取 PRM，再加入 authorization_servers 中选定 issuer 的 origin；AS 元数据及 token/registration/revocation 端点不得越界，授权页 URL 还必须属于 issuer origin。主动刷新与撤销只使用资源 origin 和 token 行中已保存的 issuer origin。PRM 返回 404 时保留回退到资源 origin 的兼容行为；登录与刷新发现中的网络错误、超时或 5xx 不当作“不支持 PRM”，避免错误更换 issuer 或账号状态。DNS 全部地址检查后将完整固定列表绑定 socket lookup（all:true 返回数组），保留 Node autoSelectFamily 回落，不重新解析，拒绝 loopback/私网。测试显式打开回环 HTTP，生产 main 不设置该选项。撤销流程另受 3 秒预算约束，失败不阻碍本地退出。事件沿用 `@pi-mcp` trace 通道，只含 serverId/accountId/revision/错误码。
+
+账号 JSON 与 start/callback/logout 位于 `src/obs/mcp/http.ts`，由 obs 依赖 agent 层，agent 实现不反向导入 obs。HTML 账号页仍暂为 404，回调结果页已复用 page() 实现。真实本机 HTTP 桩覆盖 CIMD/PKCE、cookie/state、持久化、主动刷新、401 单次重试、invalid_grant、revision 隔离、DCR/退出与面板脱敏边界；另覆盖双连接同时 401 只刷新一次、SSE GET 持续 401 的单次上限、第三方端点零请求、IPv6 不可达回落 IPv4、刷新 503 后无需登录即可恢复。

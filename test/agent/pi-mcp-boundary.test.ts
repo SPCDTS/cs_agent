@@ -1,3 +1,4 @@
+import { loadConfig } from "../../src/config.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,28 @@ const directories: string[] = [];
 afterEach(async () => { for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 
 describe("Pi MCP 配置边界", () => {
+  it("OAuth 回调配置保留原文，只接受无 query/hash 的 HTTP(S) 绝对 URL", () => {
+    expect(loadConfig({}).PI_MCP_OAUTH_REDIRECT_URL).toBe("http://127.0.0.1:8787/mcp/oauth/callback");
+    const value = "https://agent.example/oauth/callback";
+    expect(loadConfig({ PI_MCP_OAUTH_REDIRECT_URL: value }).PI_MCP_OAUTH_REDIRECT_URL).toBe(value);
+    for (const url of ["/mcp/oauth/callback", "ftp://agent.example/callback", value + "?code=1", value + "#fragment"]) {
+      expect(() => loadConfig({ PI_MCP_OAUTH_REDIRECT_URL: url })).toThrow();
+    }
+  });
+  it("OAuth 接受 CIMD 示例，拒绝缺少 URL 和固定 Authorization", () => {
+    const server = { ...http(), transport: { kind: "streamable-http", url: "https://mcp.notion.com/mcp" },
+      credential: { kind: "oauth", accountId: "owner-notion", revision: "1",
+        clientMetadataUrl: "https://jule-agent.vercel.app/oauth/client-metadata.json", scope: "default" } };
+    const parsed = parseMcpConfig(config(server));
+    expect(parsed.kind).toBe("enabled");
+    if (parsed.kind === "enabled") expect(parsed.value.servers[0].credential).toMatchObject({ registration: "cimd" });
+    expect(parseMcpConfig(config({ ...server, credential: { ...server.credential, clientMetadataUrl: undefined } })).kind).toBe("invalid");
+    for (const name of ["Authorization", "authorization", "AUTHORIZATION"]) {
+      expect(parseMcpConfig(config({ ...server, transport: { ...server.transport, secretHeaders: { [name]: "MCP_TOKEN" } } })).kind).toBe("invalid");
+    }
+    expect(parseMcpConfig(config({ ...server, credential: { ...server.credential, registration: "dynamic", clientMetadataUrl: undefined } })).kind).toBe("enabled");
+  });
+
   it("严格解析 HTTP 传输并补齐默认值，不读取环境秘密", async () => {
     const example = JSON.parse(await readFile("docs/design/pi-mcp/config.example.json", "utf8"));
     expect(parseMcpConfig(example).kind).toBe("enabled");

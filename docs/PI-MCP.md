@@ -1,6 +1,6 @@
 # Pi 外部 MCP 使用说明
 
-Pi 后端可以把外部 MCP 的每个工具注册为 Pi 原生工具，保留参数 schema，并通过现有 ToolTask 保存调用检查点和结果。只支持 Streamable HTTP 与静态凭据，不支持 stdio 和 OAuth。
+Pi 后端可以把外部 MCP 的每个工具注册为 Pi 原生工具，保留参数 schema，并通过现有 ToolTask 保存调用检查点和结果。支持 Streamable HTTP、静态凭据与 OAuth 授权码 + PKCE；不支持 stdio。
 
 ## 启用
 
@@ -32,9 +32,53 @@ Compose 部署时，配置文件必须通过只读挂载进入 cs-agent 容器�
 }
 ```
 
-`DOCS_AUTH_HEADER` 的值是完整请求头，例如 `Bearer <token>`。无认证服务使用 `credential: { "kind": "none" }`，去掉 `secretHeaders`。HTTP 默认要求 HTTPS；本地开发服务需显式设置 `allowLoopbackHttp: true` 才接受回环 HTTP。所有重定向都拒绝，不启动 OAuth，不回退到旧 SSE transport，也不自动恢复 SSE 断点。
+`DOCS_AUTH_HEADER` 的值是完整请求头，例如 `Bearer <token>`。无认证服务使用 `credential: { "kind": "none" }`，去掉 `secretHeaders`。HTTP 默认要求 HTTPS；本地开发服务需显式设置 `allowLoopbackHttp: true` 才接受回环 HTTP。传输请求不跟随重定向；OAuth 的浏览器跳转仅由面板登录发起。不回退到旧 SSE transport，也不自动恢复 SSE 断点。
 
 局域网服务使用 HTTP 时，管理员可为该服务设置 `transport.allowPrivateNetworkHttp: true`，仅放行 RFC1918 私网 IPv4 字面地址（`10/8`、`172.16/12`、`192.168/16`）。该开关不放开公网、链路本地地址或域名；请求仍只发往配置的固定来源，不跟随重定向。
+
+## OAuth 登录（CIMD）
+
+在 `servers` 中加入以下服务；`tools.allow` 是示例名，请按远端实际工具精确填写：
+
+```json
+{
+  "id": "notion",
+  "enabled": true,
+  "transport": {
+    "kind": "streamable-http",
+    "url": "https://mcp.notion.com/mcp"
+  },
+  "credential": {
+    "kind": "oauth",
+    "accountId": "owner-notion",
+    "revision": "1",
+    "clientMetadataUrl": "https://jule-agent.vercel.app/oauth/client-metadata.json",
+    "registration": "cimd",
+    "scope": "default"
+  },
+  "tools": {
+    "allow": [
+      "notion-search"
+    ]
+  },
+  "access": {
+    "kind": "owner-private"
+  },
+  "replay": "unsafe"
+}
+```
+
+`registration` 默认 `cimd`，此时 `clientMetadataUrl` 必须是非根路径的 HTTPS URL。服务不支持 CIMD 时不会自动动态注册；显式改为 `registration: "dynamic"` 才启用 DCR，且不向 SDK 传递 `clientMetadataUrl`。OAuth 服务不能在 `headers` 或 `secretHeaders` 中设置任何大小写的 `Authorization`。
+
+`PI_MCP_OAUTH_REDIRECT_URL` 默认 `http://127.0.0.1:8787/mcp/oauth/callback`；只接受不含 query/hash 的 HTTP(S) 绝对 URL，且必须与公开 CIMD 文档的 `redirect_uris` 逐字一致。更换回调地址需同步更新公开元数据。
+
+页面接入后的操作路径是：先进入面板，再打开 `/mcp/accounts` → 点击服务的「登录」→ 在外部服务的浏览器授权页确认 → 回调显示「外部账号已登录」的同站 HTML，点击「返回外部账号」链接进入账号页。目前交付包含 JSON API、授权端点与回调结果页，`/mcp/accounts` 暂为 404，HTML 页面由后续改动接入。接口与表单约定见 [面板文档](DASHBOARD.md#11-外部账号接口)。登录入口只在面板，不在聊天或模型工具中提供。
+
+凭据保存到 `DATA_DIR/mcp-oauth.sqlite`，与账号的 `serverId + accountId + revision` 绑定。修改 `revision` 等于换账号版本，重启后需要重新登录，不使用旧版本 token。运行回合没有 token 时在联网前返回 `auth_required`；运行时不安装 SDK authProvider，传输层在每次请求前注入 Bearer。临近过期（60 秒）时在账号锁内刷新；资源 401 同样在锁内复核 token 版本，其他连接已刷新则复用新 token，否则刷新，并对同一请求只重试一次（含 POST、SSE GET 与 DELETE）。重试仍为 401 时返回 auth_required，SDK 不会收到 401；403 仍拒绝。只有授权服务器返回确定的 OAuth 错误（如 invalid_grant、invalid_client、unauthorized_client）才删除 token 并保留 refresh_failed，需 owner 重新登录；网络错误、超时、5xx 与暂态服务错误只使本次请求以 transport_error 失败，不改 token 或状态，下次请求仍可刷新。
+
+OAuth 发现、换码、注册、刷新与撤销请求仅允许资源 origin 和 issuer origin：登录先仅从资源 origin 获取 PRM，再加入其中所选 issuer 的 origin；刷新与撤销使用已保存 token 的 issuer。授权页 URL 必须属于 issuer origin。请求不跟随重定向，DNS 全部地址校验后固定交给 socket，让 Node 在地址族间回落，不再次解析。
+
+退出登录会尽力撤销 refresh token，再删除本地 token 与状态；CIMD 客户端身份可以保留。库及 WAL 属于私密凭据，不加入 datasette；已有沙箱 `*.sqlite*` 禁读规则覆盖它。
 
 ## 权限与结果
 
@@ -93,6 +137,8 @@ owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通�
 | 现象或审计码 | 检查方向 |
 | --- | --- |
 | 配置 invalid / 工具未出现 | JSON 字段、实际后端、owner 私聊身份、精确白名单 |
+| `auth_required` | 在面板登录外部账号；核对 accountId/revision、回调地址与 CIMD 文档一致性 |
+| `refresh_failed` | 授权服务器返回确定的 OAuth 错误，token 已删除；在面板重新登录。网络错误、超时与 5xx 不会产生此状态 |
 | `missing_secret` / `auth_failed` | 引用变量是否注入、请求头完整值、外部账号权限 |
 | `tool_unavailable` / `tool_retired` | 历史名称、目标工具契约或账号配置已变，改用工具列表中的当前工具；必要时调用 `mcp_refresh_tools` |
 | `catalog_storage_limit` | 回收后仍超出目录容量：仍被引用的版本过多。核对限额与频繁变化的远端 schema；trace 中 `mcp_catalog` 的 `pruned` 记录回收数量，`prune_*` 降级码表示本轮未回收 |

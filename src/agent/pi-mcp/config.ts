@@ -49,10 +49,19 @@ const httpSchema = z.strictObject({
     ctx.addIssue({ code: "custom", path: ["headers"], message: "请求头不允许或重复" });
   }
 });
+const oauthCredential = z.strictObject({
+  kind: z.literal("oauth"), accountId: cleanText.min(1).max(128), revision: cleanText.min(1).max(128),
+  clientMetadataUrl: cleanText.max(4_096).refine(value => {
+    const url = URL.parse(value);
+    return !!url && url.protocol === "https:" && url.pathname !== "/" && !url.username && !url.password && !url.hash;
+  }, "CIMD 地址必须是非根路径 HTTPS URL").optional(),
+  registration: z.enum(["cimd", "dynamic"]).default("cimd"), scope: cleanText.max(256).optional(),
+}).refine(value => value.registration !== "cimd" || !!value.clientMetadataUrl, { message: "CIMD 缺少元数据地址" });
 const serverSchema = z.strictObject({
   id: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u), enabled: z.boolean().default(true),
   transport: httpSchema,
   credential: z.discriminatedUnion("kind", [
+    oauthCredential,
     z.strictObject({ kind: z.literal("none") }),
     z.strictObject({ kind: z.literal("external-account"), accountId: cleanText.min(1).max(128), revision: cleanText.min(1).max(128) }),
   ]),
@@ -62,7 +71,9 @@ const serverSchema = z.strictObject({
   access: z.strictObject({ kind: z.literal("owner-private"), allowScheduled: z.boolean().default(false), allowWake: z.boolean().default(false),
     allowSubagent: z.boolean().default(false), groups: z.array(z.string().regex(/^[1-9][0-9]{0,19}$/)).max(200).default([]) }),
   replay: z.literal("unsafe"),
-});
+}).refine(value => value.credential.kind !== "oauth" ||
+  ![...Object.keys(value.transport.headers), ...Object.keys(value.transport.secretHeaders)].some(name => name.toLowerCase() === "authorization"),
+  { message: "OAuth 不允许固定 Authorization 请求头" });
 const configSchema = z.strictObject({
   version: z.literal(1), enabled: z.boolean(), servers: z.array(serverSchema).max(64),
   limits: limitsSchema.default(() => ({ ...DEFAULT_MCP_LIMITS })),

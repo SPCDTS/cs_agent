@@ -42,6 +42,31 @@
       "tools": { "allow": ["search", "fetch_document"] },
       "access": { "kind": "owner-private", "allowScheduled": false, "allowWake": false },
       "replay": "unsafe"
+    },
+    {
+      "id": "notion",
+      "enabled": true,
+      "transport": {
+        "kind": "streamable-http",
+        "url": "https://mcp.notion.com/mcp"
+      },
+      "credential": {
+        "kind": "oauth",
+        "accountId": "owner-notion",
+        "revision": "1",
+        "clientMetadataUrl": "https://jule-agent.vercel.app/oauth/client-metadata.json",
+        "registration": "cimd",
+        "scope": "default"
+      },
+      "tools": {
+        "allow": [
+          "notion-search"
+        ]
+      },
+      "access": {
+        "kind": "owner-private"
+      },
+      "replay": "unsafe"
     }
   ]
 }

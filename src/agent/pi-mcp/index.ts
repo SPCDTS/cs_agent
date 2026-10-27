@@ -1,3 +1,4 @@
+import type { McpOAuth } from "./oauth.js";
 import { BACKGROUND_CONTEXT, awaitWithContext, withAbortSignal, type Context } from "@earendil-works/chord/context";
 import { getCurrentTools, getToolStateChanges } from "@earendil-works/pi-ai/utils/transcript";
 import { Type, type Message } from "@earendil-works/pi-ai";
@@ -24,6 +25,7 @@ export { isMcpToolName } from "./names.js";
 type Options = {
   registry: Registry; harness: Harness; storage: Pick<Storage, "mintId">; config: McpConfigState; secrets: EnvironmentSecrets;
   approvals?: Pick<McpApprovals, "request">;
+  oauth?: McpOAuth;
   owners: () => OwnerIds; binding: (id: number) => Promise<PiCallBinding | undefined>;
 };
 type PoolEntry = {
@@ -298,6 +300,7 @@ export class PiMcp {
       this.event("connection", "connecting", { server: entry.server.id, scope: entry.scope });
       try {
         entry.connection = await McpConnection.open({ server: entry.server, limits: this.limits, secrets: this.opts.secrets,
+          oauth: entry.server.credential.kind === "oauth" ? this.opts.oauth : undefined,
           signal, onToolsChanged: () => { entry.changed++; } });
         entry.discovered = -1; entry.failures = 0;
         this.event("connection", "ready", { server: entry.server.id, scope: entry.scope });

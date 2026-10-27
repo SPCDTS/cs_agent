@@ -1,3 +1,4 @@
+import type { McpOAuth } from "../pi-mcp/oauth.js";
 import type { ContextUsageStore } from "../context-usage.js";
 import { PiContextObserver, piContextCapacity, refreshPiCompactionUsage } from "../pi-context-usage.js";
 import { readThreadArchive, writeThreadArchive, THREAD_ARCHIVE_LIMIT } from "../thread-archive.js";
@@ -94,7 +95,7 @@ export interface PiBackendOptions extends Omit<PiToolsOptions, "getHarness" | "w
   turns: PiTurns;
   owners?: OwnerIds | (() => OwnerIds);
   /** 已验证的管理员配置与秘密解析边界；缺省仍恢复历史目录。 */
-  mcp?: { config: McpConfigState; secrets: EnvironmentSecrets; approvals?: McpApprovals };
+  mcp?: { config: McpConfigState; secrets: EnvironmentSecrets; approvals?: McpApprovals; oauth?: McpOAuth };
   /** 子 agent 扩展的选项；false 不安装 */
   subagent?: Partial<Omit<SubagentOptions, "getHarness" | "initChild" | "spawner" | "mcp">> | false;
 }
@@ -241,7 +242,7 @@ export class PiBackend implements ThreadAdapter {
         registry, harness, storage,
         config: opts.mcp?.config ?? { kind: "disabled", reason: "PI_MCP_CONFIG 未设置" },
         secrets: opts.mcp?.secrets ?? { readReferencedVariable: () => undefined },
-        owners: () => backend.owners(), binding, approvals: opts.mcp?.approvals,
+        owners: () => backend.owners(), binding, approvals: opts.mcp?.approvals, oauth: opts.mcp?.oauth,
       });
       const retired = await harness.commit(async tx => {
         const threads = await tx.doc(PiThreadsDoc);
