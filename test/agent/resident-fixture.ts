@@ -39,7 +39,7 @@ export const context = BACKGROUND_CONTEXT;
 const rigs: { close(): Promise<void> }[] = [];
 afterEach(async () => { for (const r of rigs.splice(0).reverse()) await r.close(); vi.unstubAllEnvs(); });
 
-import { reply } from "./faux-helpers.js";
+import { reply, withToolSearch } from "./faux-helpers.js";
 export { call, gate, isChild, lastUser, reply, text, toolResults, waitUntil } from "./faux-helpers.js";
 
 /** extra：本次请求的模型与选项（运行时模型设置测试用）。 */
@@ -94,8 +94,9 @@ export async function residentRig(options: ResidentOptions = {}) {
   const brain = { current: options.brain ?? (() => reply()) };
   const faux = fauxProvider({ models: [{ id: "test", contextWindow: 200_000, input: options.vision ? ["text", "image"] : ["text"] },
     ...(options.extraModels ?? [])], tokensPerSecond: Infinity });
+  const think = withToolSearch((ctx: TranscriptContext, signal: AbortSignal | undefined, info: Parameters<Brain>[2]) => brain.current(ctx, signal, info));
   const step: FauxResponseFactory = async (ctx, opts, _state, m) =>
-    await brain.current(ctx, opts?.signal, { model: m.id, reasoning: opts?.reasoning }) as ReturnType<typeof fauxAssistantMessage>;
+    await think(ctx, opts?.signal, { model: m.id, reasoning: opts?.reasoning }) as ReturnType<typeof fauxAssistantMessage>;
   faux.setResponses(Array.from({ length: 500 }, () => step));
   const models = createModels(); models.setProvider(faux.provider);
   const model = faux.getModel();

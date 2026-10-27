@@ -3,7 +3,7 @@ import { GenerationTask, hook, configure, defineDoc, defineExtension, defineTask
 import { isScheduleTool } from "../../shared/schedule-tools.js";
 import type { PiMcp } from "../pi-mcp/index.js";
 import { McpDelegationDoc, narrowDelegation } from "../pi-mcp/delegation.js";
-import { isMcpToolName } from "../pi-mcp/names.js";
+import { isMcpControlTool, isMcpToolName } from "../pi-mcp/names.js";
 import { mergePersons, validPerson, type RunPerson } from "../host/identity.js";
 
 /**
@@ -49,7 +49,7 @@ export const SUBAGENT_EXCLUDED_TOOLS = { exact: ["subagent", "send_message", "sk
 export function isSubagentExcludedTool(name: string, allowMcp?: (name: string) => boolean): boolean {
   return (SUBAGENT_EXCLUDED_TOOLS.exact as readonly string[]).includes(name) ||
     SUBAGENT_EXCLUDED_TOOLS.prefixes.some(prefix => name.startsWith(prefix)) || isScheduleTool(name) ||
-    (isMcpToolName(name) && !allowMcp?.(name));
+    ((isMcpToolName(name) || isMcpControlTool(name)) && !allowMcp?.(name));
 }
 
 export const DEFAULT_SUBAGENT_INSTRUCTIONS = "你是主 agent 派出的子 agent，只负责完成交给你的任务。你不能直接联系用户；把最终结果写在回答里，它会原样交回主 agent。";

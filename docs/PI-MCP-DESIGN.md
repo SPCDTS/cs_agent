@@ -324,7 +324,7 @@ unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterToo
 
 1. **目录与隔离边界。** 配置、身份判定、命名/schema、模块接口；用 fixture 和真实 Registry 验证旧/新目录、子工具复制过滤与日志边界。不开启生产服务。
 2. **首版能力交付。** Streamable HTTP、原生工具注册、结果转换、会话连接、限额、关闭、全 unsafe 恢复；完成上述故障矩阵后，开放指定 owner 私聊白名单。
-3. **运维与规模验证。** 状态展示、目录保留容量、长时间连接回收、真实但无副作用的服务 smoke；通过后扩大服务白名单。大量工具确有需求时再接 Pi `deferred` 与 tool_search。
+3. **运维与规模验证。** 状态展示、目录保留容量、长时间连接回收、真实但无副作用的服务 smoke；通过后扩大服务白名单。已接 Pi `deferred` 与 tool_search（见 PI-MCP.md「延迟加载与 tool_search」）。
 
 发布门槛：非授权场景零外部请求；unsafe 崩溃窗口无自动重复；历史调用能进入终态；日志无秘密；目录和连接资源有界。
 
@@ -342,7 +342,7 @@ unsafe 恢复直接进入 Pi 的 interrupted 终态，不经过 execute/afterToo
 
 **未知结果阻断。** 如要硬性阻止模型在超时后用新 callId 发起相同操作，增加持久 unknown 记录、明确的操作匹配规则和管理员核对解除入口；承认改参数的语义重复仍需业务理解。这是独立需求，不能悄悄藏在重试中。
 
-**prompts 与大目录。** prompts 仍未实现，未来需要独立授权及明确工具入口；resources 已按第 18 节实现。大量工具优先复用 Pi deferred/tool_search，并保证搜到的工具仍受同一执行边界约束，不同时维护第二条任意 MCP dispatcher 调用路径。
+**prompts 与大目录。** prompts 仍未实现，未来需要独立授权及明确工具入口；resources 已按第 18 节实现。业务工具已全部走 Pi deferred/tool_search，搜到的工具仍受同一执行边界约束，不维护第二条任意 MCP dispatcher 调用路径。
 
 ## 14. 为什么选择这套形状
 

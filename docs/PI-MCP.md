@@ -85,6 +85,10 @@ OAuth 发现、换码、注册、刷新与撤销请求仅允许资源 origin 和
 
 owner 私聊主会话及 `access.groups` 指定的群可以使用 MCP，普通私聊与未配置的群拒绝。执行前及排队后按 `runRights` 复核真实身份。定时和唤醒默认关闭；可分别设置 `access.allowScheduled`、`access.allowWake`，继承定时身份的唤醒需要两个选项都开启。群内也按回合代表的人授权：owner 直接执行，成员适用审批；只有基础权限、无法确证人的回合拒绝。
 
+### 延迟加载与 tool_search
+
+MCP 业务工具全部注册为 Pi 延迟工具（`deferred`），默认不进模型请求。有 MCP 授权的会话同时获得 pi-durable 自带的 `tool_search`（BM25，只索引英文与数字，工具描述应写英文）与控制工具；模型搜到的工具写入会话 `modelTools.add`，下一次调用起提供，压缩后仍保留。系统提示的 `mcp-tools` 段按会话当前可调用的 MCP 工具自动列出「服务: 工具名」，只随目录变化，加载工具不改变它，接新服务无需改提示词。工具因配置或目录变化改名后，旧名称不可用，模型按提示重新搜索。搜索不放宽权限：执行、审批与委派仍按调用时身份复核。`limits.visibleTools` / `visibleSchemaBytes` 限制每个会话可选用（含未加载）的业务工具数与 schema 总量。`tool_search` 的搜索词与加载结果见 trace 的 `tool:tool_search`。
+
 ### 只读资源
 
 资源权限独立于 `tools.allow`：服务项增加 `"resources": { "allow": ["notion://docs/"] }` 后，授权回合会看到 `mcp_list_resources` 和 `mcp_read_resource`，原有 `mcp_refresh_tools` 保留。不配置或设置 `allow: []` 时不开放资源；所有已授权服务的前缀都为空时，两个资源工具不会出现在模型列表。

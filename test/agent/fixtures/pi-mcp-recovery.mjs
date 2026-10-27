@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import { createRegistry, Harness, watchEvents } from "@earendil-works/pi-durable";
+import { AgentDoc, createRegistry, Harness, watchEvents } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { PiMcp } from "../../../dist/agent/pi-mcp/index.js";
 import { parseMcpConfig } from "../../../dist/agent/pi-mcp/config.js";
@@ -51,8 +51,10 @@ async function main() {
       conversation = await harness.createConversation({ ownership: { kind: "ownerless" },
         agent: { model: { provider: model.provider, modelId: model.id } } }, context);
       await mcp.configure({ conversation, turn: binding }, context);
-      const tool = (await conversation.agent(context)).tools.find(item => item.name.startsWith("mcp_") && item.name !== "mcp_refresh_tools");
+      const tool = (await conversation.agent(context)).deferred.find(item => item.name.startsWith("mcp_"));
       if (!tool) throw new Error("fixture_mcp_tool_missing");
+      // 视同模型已用 tool_search 加载这个延迟工具。
+      await harness.commit(async tx => { (await tx.doc(AgentDoc, conversation.id)).modelTools = { add: [tool.name] }; }, context);
       await writeFile(metadataFile, JSON.stringify({ conversation: Number(conversation.id) }), "utf8");
       faux.setResponses([
         fauxAssistantMessage(fauxToolCall(tool.name, {}), { stopReason: "toolUse" }),
