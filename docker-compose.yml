@@ -17,6 +17,7 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       DATA_DIR: /data
       WORKSPACE_DIR: /workspace
+    networks: [default, internal]
     ports: ["127.0.0.1:8787:8787"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -33,6 +34,35 @@ services:
       - seccomp=./docker/seccomp-codex.json
     restart: unless-stopped
     init: false   # 镜像内已用 tini
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gmail-sidecar:
+    profiles: ["gmail"]
+    # 与 cs-agent 共用镜像；先 docker compose build cs-agent，避免重复构建。
+    image: cs-agent:dev
+    entrypoint: ["tini", "--", "node", "dist/sidecar/gmail/main.js"]
+    user: node
+    environment:
+      GMAIL_SIDECAR_TOKEN: ${GMAIL_SIDECAR_TOKEN:-}
+    volumes:
+      - ./secrets/gmail:/secrets/gmail
+      # token 刷新需写目录，桌面客户端身份单独覆盖为只读。
+      - ./secrets/gmail/client.json:/secrets/gmail/client.json:ro
+      - ./data/gmail-sidecar:/state
+    networks:
+      internal:
+        ipv4_address: 172.28.0.10
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3731/healthz').then(async r=>process.exit(r.ok&&(await r.json()).ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     logging:
       driver: json-file
       options:
@@ -76,3 +106,9 @@ services:
       /data/observability.sqlite /data/qq-messages.sqlite /data/qq-bridge.sqlite
       /data/memory.sqlite /data/agent.sqlite /data/pi.sqlite
       --setting sql_time_limit_ms 5000 --setting max_returned_rows 1000
+
+networks:
+  internal:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

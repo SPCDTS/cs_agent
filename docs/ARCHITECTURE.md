@@ -319,6 +319,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 |---|---|---|
 | 0 | `shared/` | 日志、脱敏、trace 事件总线、usage/错误归一化、格式化、来源头字段清洗、owner 判定、定时与记忆工具名契约 |
 | 1 | `config.ts` | 环境变量 → 原始配置（zod），不 import 业务模块 |
+| 1 | `sidecar/` | 独立服务进程；`gmail/` 持有 Google OAuth 凭据并暴露三个 MCP 工具，只依赖 shared 与本目录，其他包不得 import；Pi 通过 HTTP 接入（[部署说明](GMAIL-SIDECAR.md)） |
 | 2 | `media/` | 下载与 SSRF 防护、图片头与限额、附件来源校验、参考图校验 |
 | 3 | `channel/` | 通道公共契约：入站记录、Outbox、发送规则、回合身份类型（不依赖 qq / context / agent） |
 | 4 | `qq/` | OneBot 传输（`bridge.ts`）、授权与触发（`policy.ts`）、`inbound` / `outbox` 持久化（`reply-store.ts`）、入站附件（`incoming.ts`）、发送规则执行（`send-rules.ts`）；`qq/types.ts` 是契约 |

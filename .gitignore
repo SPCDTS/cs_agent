@@ -8,3 +8,4 @@ napcat/
 .vscode/
 .env.bak*
 .external_doc
+secrets/

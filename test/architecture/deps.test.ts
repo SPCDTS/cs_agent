@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
-const LAYERS = { shared: 0, config: 1, media: 2, channel: 3, qq: 4, context: 5, agent: 6, obs: 7, mcp: 8, main: 9 } as const;
+const LAYERS = { shared: 0, config: 1, sidecar: 1, media: 2, channel: 3, qq: 4, context: 5, agent: 6, obs: 7, mcp: 8, main: 9 } as const;
 type Package = keyof typeof LAYERS;
 type Edge = [from: string, to: string];
 
@@ -50,6 +50,8 @@ function violations([from, to]: Edge): string[] {
   if (a !== b && LAYERS[b] > LAYERS[a]) reasons.push('跨包向上依赖');
   if (['agent', 'context', 'obs', 'mcp'].includes(a) && b === 'qq') reasons.push('上层不可依赖 qq 实现');
   if (a === 'channel' && ['qq', 'context', 'agent'].includes(b)) reasons.push('channel 不可依赖通道实现或上层');
+  if (a === 'sidecar' && b !== 'shared' && !to.startsWith(path.posix.dirname(from) + '/')) reasons.push('sidecar 只依赖 shared 与本目录');
+  if (b === 'sidecar' && a !== 'sidecar') reasons.push('其他包不可依赖 sidecar');
   if (a === 'media' && ['channel', 'qq'].includes(b)) reasons.push('media 不可依赖 channel 或 qq');
   if (from.startsWith('src/obs/ui/') && !to.startsWith('src/obs/ui/') && b !== 'shared' &&
       !['src/obs/sessions/types.ts', 'src/obs/memory/types.ts', 'src/obs/context/types.ts',
@@ -107,6 +109,11 @@ describe('包结构与分层', () => {
 
   it.each<Edge>([
     ['src/shared/new.ts', 'src/config.ts'],
+    ['src/sidecar/gmail/new.ts', 'src/config.ts'],
+    ['src/sidecar/gmail/new.ts', 'src/agent/pi-mcp/schema.ts'],
+    ['src/sidecar/gmail/new.ts', 'src/sidecar/other/new.ts'],
+    ['src/main.ts', 'src/sidecar/gmail/main.ts'],
+    ['src/agent/new.ts', 'src/sidecar/gmail/server.ts'],
     ['src/media/new.ts', 'src/qq/image.ts'],
     ['src/media/new.ts', 'src/qq/types.ts'],
     ['src/media/new.ts', 'src/channel/types.ts'],

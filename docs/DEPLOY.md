@@ -1,6 +1,8 @@
 # cs_agent 部署手册
 
-Compose 双服务：`napcat`（QQ，OneBot v11）与 `cs-agent`（Inbox / ThreadHost → 执行 agent → `send_message` 回到 QQ）。系统如何工作见 [ARCHITECTURE.md](ARCHITECTURE.md)，面板见 [DASHBOARD.md](DASHBOARD.md)。
+Compose 核心服务：`napcat`（QQ，OneBot v11）与 `cs-agent`（Inbox / ThreadHost → 执行 agent → `send_message` 回到 QQ）。系统如何工作见 [ARCHITECTURE.md](ARCHITECTURE.md)，面板见 [DASHBOARD.md](DASHBOARD.md)。
+
+另有 `datasette` 只读浏览器和可选的 `gmail-sidecar` 邮件 MCP 服务；Gmail 与 cs-agent 共用镜像、独立持有凭据，不发布宿主机端口，首次授权与启动顺序见 [GMAIL-SIDECAR.md](GMAIL-SIDECAR.md)。Gmail 默认不启动；在 `.env` 设置 `COMPOSE_PROFILES=gmail` 后，普通 `docker compose up -d` 会包含它，也可通过 `docker compose --profile gmail up -d` 启用。只有启动 sidecar 才要求有效的 `GMAIL_SIDECAR_TOKEN`，未配置 Gmail 不影响其他服务的 Compose 解析、构建与启动。
 
 ## 0. 使用方式
 
@@ -45,6 +47,9 @@ Copy-Item .env.example .env
 | `MEMORY_EXTRACT_TIMEOUT_MS` | 20000 | 单次抽取的模型超时；超时放弃本轮，不重试 |
 | `DEEPSEEK_API_KEY` | 空 | 也可写作 `DEEPSEEK_APIKEY`。provider 为 `deepseek` 时缺失即启动失败；pi 的联网检索始终需要它 |
 | `SKILLS_DIR` / `PI_SKILLS_DIR` | `./data/skills` / 空 | 共享技能目录（宿主机路径，可指向 magpie Library 的 skills 目录，Windows 写 `C:/…`）；`PI_SKILLS_DIR=off` 关闭 pi 的技能段 |
+| `COMPOSE_PROFILES` | 空 | 填 `gmail` 启用 Gmail sidecar，之后普通 `docker compose up -d` 即包含它；也可用 `--profile gmail` |
+| `GMAIL_SIDECAR_TOKEN` | 空 | 启动 sidecar 时必填：至少 32 字符的无空白 ASCII 随机串，sidecar 静态 Bearer |
+| `GMAIL_SIDECAR_AUTH_HEADER` | 空 | `Bearer <同一个串>`，Pi MCP `secretHeaders` 引用，注入 cs-agent |
 | `PI_MCP_CONFIG` | 空 | Pi 外部 MCP 管理员 JSON 配置绝对路径；留空禁用。Streamable HTTP、静态凭据、owner 私聊，见 [PI-MCP.md](PI-MCP.md) |
 | `ATTACH_FILE_MAX_MB` / `ATTACH_FILES_MAX` / `ATTACH_FILE_DENY_EXT` | 20 / 3 / `.exe,.bat,…,.lnk` | 发送文件的单个上限、每条数量与扩展名黑名单 |
 | `CODEX_SANDBOX` | `workspace-write` | `workspace-write` 或 `read-only`；`danger-full-access` 无法做会话隔离，codex 回合会被拒绝执行 |
@@ -155,6 +160,8 @@ docker compose exec cs-agent node -e "fetch('http://127.0.0.1:8787/healthz').the
 | `./data/pi-work/<键>/` | pi 会话工作区；可放会话层 `AGENTS.md` |
 | `./workspace/` | codex 会话工作区父目录；运维可维护 `AGENTS.override.md` / `AGENTS.md`，拼入每个会话的受管文件 |
 | `./workspace/<键>/AGENTS.md` | **受管规则文件**（首行 `<!-- cs-agent-managed-workspace-agents v1 -->`），加载线程时生成，改动会被覆盖 |
+| `./secrets/gmail/` | Google 桌面客户端 `client.json` 与授权 `token.json`；只挂入 Gmail sidecar，客户端文件只读，token 原子写入、0600；不可移入 `data/` |
+| `./data/gmail-sidecar/` | Gmail `sent.json` 幂等回执（保留 7 天），不含 OAuth 凭据；随备份保留，勿在运行时删除 |
 | `./napcat/` | NapCat 配置与登录态（§4.2） |
 
 旧 `.env` 中残留的 `COMFY_*`、`IMAGE_PREFIXES`、`CODEX_IMAGE_GEN`、`IMAGE_COLLECT_EXTENSIONS`、`IMAGE_GEN_MCP_WAIT_SEC`、`CODEX_REPLY_MODE` 已不再读取，可删除。

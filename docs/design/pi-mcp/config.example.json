@@ -30,6 +30,20 @@
   },
   "servers": [
     {
+      "id": "gmail",
+      "enabled": true,
+      "transport": {
+        "kind": "streamable-http",
+        "url": "http://172.28.0.10:3731/mcp",
+        "allowPrivateNetworkHttp": true,
+        "secretHeaders": { "Authorization": "GMAIL_SIDECAR_AUTH_HEADER" }
+      },
+      "credential": { "kind": "external-account", "accountId": "owner-gmail", "revision": "1" },
+      "tools": { "allow": ["gmail_search", "gmail_read", "gmail_send"] },
+      "access": { "kind": "owner-private" },
+      "replay": "unsafe"
+    },
+    {
       "id": "docs",
       "enabled": true,
       "transport": {
