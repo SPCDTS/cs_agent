@@ -155,7 +155,7 @@ describe("Gmail MCP HTTP", () => {
     expect(result).toMatchObject({ isError: true });
     expect(textOf(result)).toContain(String(expected));
     expect(textOf(result)).not.toContain("private upstream");
-    expect(f.events[0].google_status).toBe(Number(status));
+    expect(f.events[0]).toMatchObject({ google_status: Number(status) });
   });
 
   it("无结果明确说明", async () => {

@@ -10,7 +10,9 @@ import { sendSchema } from "./mime.js";
 import type { GmailOAuth } from "./oauth.js";
 
 type ToolName = "gmail_search" | "gmail_read" | "gmail_send";
-export type AuditEvent = { tool?: ToolName; duration_ms?: number; status: "ok" | "error"; error?: string; google_status?: number };
+export type AuditEvent =
+  | { tool?: ToolName; duration_ms?: number; status: "ok" | "error"; error?: string; google_status?: number }
+  | { endpoint: "events"; duration_ms: number; status: "ok" | "error"; fetched: number; error?: string };
 export type Audit = (event: AuditEvent) => void;
 export const auditJson: Audit = event => { process.stdout.write(JSON.stringify(event) + "\n"); };
 
@@ -85,13 +87,51 @@ export function createGmailHttp(options: { token: string; oauth: GmailOAuth; gma
     throw new GmailError("config", "GMAIL_SIDECAR_TOKEN 必须为至少 32 字符的无空白 ASCII 随机串");
   }
   const expected = `Bearer ${options.token}`;
+  async function events(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const started = performance.now();
+    let fetched = 0, error: string | undefined;
+    let status: "ok" | "error" = "error";
+    res.setHeader("Cache-Control", "no-store");
+    try {
+      if (!constantTimeEqual(req.headers.authorization ?? "", expected)) {
+        error = "unauthorized";
+        rejectBody(req, res, 401);
+        return;
+      }
+      if (req.method !== "GET") {
+        error = "method";
+        res.writeHead(405, { Allow: "GET" }).end();
+        return;
+      }
+      const cursor = url.searchParams.get("cursor"), rawLimit = url.searchParams.get("limit");
+      const limit = rawLimit === null ? 20 : Number(rawLimit);
+      if ((cursor !== null && !/^[0-9]{1,20}$/u.test(cursor)) ||
+          (rawLimit !== null && !/^[0-9]+$/u.test(rawLimit)) || !Number.isInteger(limit) || limit < 1 || limit > 50) {
+        error = "input";
+        res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error }));
+        return;
+      }
+      const result = await options.gmail.events(cursor, limit);
+      fetched = result.events.length;
+      status = "ok";
+      if (result.reset && cursor !== null) error = "history_reset";
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(result));
+    } catch (cause) {
+      error = safeError(cause).kind;
+      res.writeHead(error === "auth_missing" || error === "auth_invalid" ? 503 : 502, { "Content-Type": "application/json" }).end(JSON.stringify({ error }));
+    } finally {
+      (options.audit ?? auditJson)({ endpoint: "events", duration_ms: Math.round(performance.now() - started), status, fetched, ...(error ? { error } : {}) });
+    }
+  }
   const http = createServer({ requestTimeout: 30_000, headersTimeout: 10_000 }, (req, res) => {
     void (async () => {
-      const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+      const url = new URL(req.url ?? "/", "http://localhost");
+      const pathname = url.pathname;
       if (pathname === "/healthz" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: options.oauth.auth === "ready", auth: options.oauth.auth, tools: 3 }));
         return;
       }
+      if (pathname === "/events") { await events(req, res, url); return; }
       if (pathname !== "/mcp") { res.writeHead(404).end(); return; }
       if (req.method === "GET") { res.writeHead(405, { Allow: "POST, DELETE" }).end(); return; }
       if (req.method === "DELETE") { res.writeHead(204).end(); return; }

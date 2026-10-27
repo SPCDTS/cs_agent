@@ -34,7 +34,23 @@ export async function body(req: IncomingMessage): Promise<string> {
 }
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void> | void;
-export async function fixture(options: { expiresInMs?: number; token?: Handler; gmail?: Handler; missing?: boolean } = {}) {
+export function mail(id = "mail-1") {
+  return {
+    id, threadId: "thread-1", snippet: "摘要\u0000\n" + "字".repeat(220), internalDate: "1793066400000", labelIds: ["INBOX", "UNREAD"],
+    payload: {
+      mimeType: "text/plain", headers: [
+        { name: "From", value: "sender@example.com" }, { name: "Subject", value: "原主题" },
+        { name: "Date", value: "Tue, 27 Oct 2026 10:00:00 +0800" },
+        { name: "Message-ID", value: "<original@example.com>" }, { name: "References", value: "<root@example.com>" },
+      ], body: { data: Buffer.from("正文").toString("base64url"), size: 6 },
+    },
+  };
+}
+
+export async function fixture(options: {
+  expiresInMs?: number; token?: Handler; gmail?: Handler; missing?: boolean;
+  profile?: Handler; history?: Handler; message?: Handler;
+} = {}) {
   const directory = await mkdtemp(join(tmpdir(), "gmail-sidecar-"));
   const tokenFile = join(directory, "token.json");
   const stateDir = join(directory, "state");
@@ -59,16 +75,18 @@ export async function fixture(options: { expiresInMs?: number; token?: Handler; 
       if (options.gmail) { await options.gmail(req, res); return; }
       if (url.pathname.endsWith("/send")) { json(res, { id: `sent-${sendCalls}`, threadId: "thread-1" }); return; }
       if (url.pathname === "/gmail/v1/users/me/messages") { json(res, { messages: [{ id: "mail-1" }] }); return; }
-      json(res, {
-        id: "mail-1", threadId: "thread-1", snippet: "摘要\u0000\n" + "字".repeat(220),
-        payload: {
-          mimeType: "text/plain", headers: [
-            { name: "From", value: "sender@example.com" }, { name: "Subject", value: "原主题" },
-            { name: "Date", value: "Tue, 27 Oct 2026 10:00:00 +0800" },
-            { name: "Message-ID", value: "<original@example.com>" }, { name: "References", value: "<root@example.com>" },
-          ], body: { data: Buffer.from("正文").toString("base64url"), size: 6 },
-        },
-      });
+      if (url.pathname === "/gmail/v1/users/me/profile") {
+        if (options.profile) await options.profile(req, res);
+        else json(res, { historyId: "100" });
+        return;
+      }
+      if (url.pathname === "/gmail/v1/users/me/history") {
+        if (options.history) await options.history(req, res);
+        else json(res, { historyId: "101" });
+        return;
+      }
+      if (options.message) await options.message(req, res);
+      else json(res, mail(decodeURIComponent(url.pathname.slice(url.pathname.lastIndexOf("/") + 1))));
     })().catch(() => { if (!res.headersSent) json(res, { error: "fixture_failure" }, 500); else res.end(); });
   });
   const baseUrl = await listen(upstream);

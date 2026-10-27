@@ -87,6 +87,48 @@ CLI 默认使用相对路径 `secrets/gmail/client.json` 和 `secrets/gmail/toke
 
 幂等记录与 Gmail 发送不能跨系统原子提交：Google 已接收但响应丢失、进程在落盘前崩溃，或写盘失败后尚未补存就重启时，仍可能重复发送。遇到不确定结果，先搜索「已发送」核对，不能靠换 key 重试。`replay: unsafe` 保留客户端对不确定结果的处理，不承诺 exactly-once。
 
+## 事件端点
+
+`GET /events?cursor=<historyId>&limit=<n>` 是非 MCP 的邮件事件端点，使用与 `/mcp` 相同的 `Authorization: Bearer <GMAIL_SIDECAR_TOKEN>`，并以常量时间比较鉴权。无凭据或凭据错误返回 401；已鉴权的其他 HTTP 方法返回 405（`Allow: GET`）。请求示例：
+
+```http
+GET /events?cursor=123456&limit=20 HTTP/1.1
+Authorization: Bearer <GMAIL_SIDECAR_TOKEN>
+```
+
+`cursor` 可省略；提供时必须为 1–20 位数字字符串，不允许空串。`limit` 默认 20，只接受 1–50 的十进制整数。不合法的参数返回 400 `{ "error": "input" }`。响应使用 JSON，并设置 `Cache-Control: no-store`：
+
+```json
+{
+  "cursor": "123500",
+  "events": [{
+    "source": "gmail", "externalId": "mail-id", "occurredAt": 1793066400000,
+    "kind": "mail.received", "title": "邮件主题", "summary": "邮件摘要",
+    "actor": "sender@example.com", "ref": "mail-id", "labels": ["INBOX", "UNREAD"]
+  }],
+  "reset": false,
+  "more": false
+}
+```
+
+首次调用省略 `cursor` 时，只读取 profile 的当前 `historyId`，返回空事件和 `reset: true`、`more: false`，从现在开始，不回溯历史。已有游标时，读取 INBOX 的 `messageAdded` 历史，每页 `maxResults=100`，最多 10 页；按 history 记录顺序整条消费，每条记录都有自己的 `id`（historyId），可能包含多条新增邮件。邮件 id 按首次出现顺序去重。
+
+`limit` 是以完整记录为边界的目标数量：去重数量小于 `limit` 时继续取记录；若下一条会使数量超过 `limit`，则在该条之前停止，不拆分记录。例外是本次第一条记录单独就超限时，仍完整消费，保证游标能够推进，因此返回事件数可能超过 `limit`，甚至超过 50。达到 `limit` 后不再消费后续记录。只为已消费记录中的邮件取元数据，并发最多 5 个请求；邮件已删除（元数据 404）时跳过，不补取后续记录来填满数量。
+
+| 字段 | 含义 |
+| --- | --- |
+| `cursor` | 提前停止或第 10 页后仍有后页时，返回最后一条已消费记录的 `id`。全部记录和分页均读完时，返回最后一页响应的 `historyId`，即使没有新事件或首条记录超限也如此。只有未消费任何记录且仍有后页时，才保留传入游标 |
+| `reset` | 首次调用或 history 返回 404（游标过旧）时为 true；此时重新取得当前游标，事件为空，期间遗漏的邮件不补回 |
+| `more` | 因数量限制留下未消费记录，或仍有未读取的后页时为 true；所有记录和分页均已读完、或重置时为 false |
+
+收到 `more: true` 后，调用方保存返回的游标，并从该游标继续轮询下一条记录；只要消费过记录，就按该记录的 `id` 推进，不会退回传入游标。例如三条记录的 id 为 `101`、`102`、`103`，每条一封邮件，最终响应的 `historyId` 为 `200`：使用 `limit=1` 连续轮询，会依次返回游标 `101`、`102`、`200`，`more` 依次为 true、true、false。不同记录仍可能引用同一邮件，调用方应按 `externalId` 去重。省略游标可显式重新从现在开始，但会放弃未返回的历史。
+
+事件的 `occurredAt` 优先使用 `internalDate` 毫秒值，缺失或无效时依次退回 Date 头与当前时间。主题、摘要、发件人经过单行化，分别最多 200、500、120 个 Unicode 码点；标签最多 16 项，每项最多 64 个码点。事件只包含元数据，不读取正文或附件。
+
+Google 错误返回 502 `{ "error": "<分类>" }`（如 `permission`、`quota`、`upstream`、`network`、`response`）；本地授权缺失或失效分别返回 503 `auth_missing` / `auth_invalid`。不返回 Google 原始错误。沿用每次 Google 请求 30 秒超时、8 MiB 响应上限与来源限制；多页和多批元数据的总耗时可能超过 30 秒。
+
+每次端点调用产生一行审计，仅包含 `endpoint: "events"`、`duration_ms`、`status`、`fetched` 和可选错误分类。history 404 重置记 `status: "ok"`、`error: "history_reset"`；不记录标题、发件人、摘要或邮件 id。
+
 ## 重新授权与排查
 
 `GET /healthz` 无需 Bearer，仅返回 `{ "ok": true, "auth": "ready", "tools": 3 }` 等状态；不执行 Google 请求。ready 代表本地凭据可用，只有真正刷新后才会识别已撤销授权。
