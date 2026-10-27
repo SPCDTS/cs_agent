@@ -44,11 +44,10 @@ function narrowSpawner(current: SubagentSpawner | undefined, requester: Subagent
 }
 
 /** 子会话不可用的工具：不能再派子 agent、不能授权或定时，也不能对外发消息（只有主 agent 对用户说话），记忆只读。 */
-export const SUBAGENT_EXCLUDED_TOOLS = { exact: ["subagent", "send_message", "skill_publish", "mem_remember", "mem_update", "mem_forget", "mem_profile"],
-  prefixes: ["auth_", "schedule_"] } as const;
+export const SUBAGENT_EXCLUDED_TOOLS = { exact: ["subagent", "send_message", "auth", "skill_publish", "mem_remember", "mem_update", "mem_forget", "mem_profile"] } as const;
 export function isSubagentExcludedTool(name: string, allowMcp?: (name: string) => boolean): boolean {
   return (SUBAGENT_EXCLUDED_TOOLS.exact as readonly string[]).includes(name) ||
-    SUBAGENT_EXCLUDED_TOOLS.prefixes.some(prefix => name.startsWith(prefix)) || isScheduleTool(name) ||
+    isScheduleTool(name) ||
     ((isMcpToolName(name) || isMcpControlTool(name)) && !allowMcp?.(name));
 }
 

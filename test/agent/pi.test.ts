@@ -907,10 +907,10 @@ describe("pi 身份随发言人切换（§7.3）", () => {
     const inspect = (ctx: TranscriptContext) => { observed.push(ctx); return reply(); };
     const r = await rig([
       call(["qq_recent", {}]),
-      call(["auth_grant", { user: "qq:6", caps: ["send"], targets: ["qq:group:8"], scopes: ["group:7"] }]),
+      call(["auth", { action: "grant", user: "qq:6", caps: ["send"], targets: ["qq:group:8"], scopes: ["group:7"] }]),
       call(["send_message", { target: "qq:group:8", text: "跨会话消息" }]),
       call(["send_message", { text: "来源群回复" }]), inspect,
-      call(["auth_list", {}]), inspect,
+      call(["auth", { action: "list" }]), inspect,
       call(["send_message", { target: "qq:group:8", text: "撤销后不能发" }]), inspect,
     ]);
     r.history.ingest(r.message("6", "owner 可读取的私聊内容", null, { message_id: "private-owner" }));
@@ -923,9 +923,9 @@ describe("pi 身份随发言人切换（§7.3）", () => {
     expect(r.texts("7")).toEqual(["来源群回复"]);
     const conv = await convOf(r, "group:7");
     const tools = () => conv.agent(context).then(a => a.tools);
-    expect((await tools()).map(t => t.name)).toContain("auth_grant");
+    expect((await tools()).map(t => t.name)).toContain("auth");
     await turn(r, "6", "成员");
-    expect((await tools()).some(t => t.name.startsWith("auth_"))).toBe(false);
+    expect((await tools()).some(t => t.name === "auth")).toBe(false);
     expect((await tools()).find(t => t.name === "send_message")!.parameters).toHaveProperty("properties.target");
     expect(toolResults(observed[1]!).at(-1)).toMatchObject({ isError: true });
     await r.grants.panel("auth_revoke", { user: "qq:6" });
@@ -938,12 +938,12 @@ describe("pi 身份随发言人切换（§7.3）", () => {
 
   it("两个 owner 账号共用 owner 会话与历史，第二账号保留授权工具", async () => {
     let seen!: TranscriptContext;
-    const r = await rig([reply("主账号的历史答复"), call(["auth_list", {}]), transcript => { seen = transcript; return reply("继续对话"); }],
+    const r = await rig([reply("主账号的历史答复"), call(["auth", { action: "list" }]), transcript => { seen = transcript; return reply("继续对话"); }],
       { owners: ["9", "1"] });
     await turn(r, "9", "第一个号", null);
     await turn(r, "1", "第二个号", null);
     expect(JSON.stringify(seen.messages)).toContain("主账号的历史答复");
-    const result = toolResults(seen).find(m => m.toolName === "auth_list");
+    const result = toolResults(seen).find(m => m.toolName === "auth");
     expect(result?.isError).not.toBe(true);
     expect(Object.keys(await r.pi.readThreadIds())).toEqual(["owner"]);
   });
@@ -952,13 +952,13 @@ describe("pi 身份随发言人切换（§7.3）", () => {
     const f = await scheduleToolsFixture(), seen: TranscriptContext[] = [];
     const inspect = (ctx: TranscriptContext) => { seen.push(ctx); return reply(); };
     const r = await rig([
-      call(["schedule_create", f.args]), inspect,
-      call(["schedule_create", f.args]), inspect,
-      call(["schedule_list", {}]), inspect,
+      call(["schedule", { action: "create", ...f.args }]), inspect,
+      call(["schedule", { action: "create", ...f.args }]), inspect,
+      call(["schedule", { action: "list" }]), inspect,
       call(["schedule_control", { action: "pause", reason: "等待更新" }]), inspect,
     ], { scheduleTools: f.tools, owners: ["1"] });
     // 定时工具的授权表在装置自己的 harness 上
-    const visible = async () => (await (await convOf(r, "group:7")).agent(context)).tools.map(t => t.name).filter(n => n.startsWith("schedule_"));
+    const visible = async () => (await (await convOf(r, "group:7")).agent(context)).tools.map(t => t.name).filter(n => n === "schedule" || n === "schedule_control");
     await turn(r, "1", "建一个");
     expect(await visible()).toEqual([...SCHEDULE_MANAGEMENT_TOOLS]);
     expect(toolResults(seen[0]!).at(-1)?.isError).not.toBe(true);
@@ -1033,3 +1033,32 @@ describe("DeepSeek tools", () => {
   });
 });
 
+
+it("事件回合的 beforeTool 拦截 auth、schedule 和 schedule_control", async () => {
+  const dir = tmp("pi-event-tools-"), store = new ContextStore(dir), executed: string[] = [];
+  const names = ["auth", "schedule", "schedule_control"];
+  const bound: PiCallBinding = { threadKey: "owner", turnId: "pi:event-tools", identity: { kind: "event", source: "gmail", creator: "1" },
+    scope: "private:1", inputs: [], access: "all", senderIsOwner: true, auth: true, child: false };
+  const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
+  let seen!: TranscriptContext;
+  faux.setResponses([call(...names.map(name => [name, {}] as [string, {}])), ctx => { seen = ctx; return reply(); }]);
+  const models = createModels(); models.setProvider(faux.provider);
+  const registry = createRegistry();
+  let harness!: Harness;
+  registry.install(createPiExtension({ dataDir: dir, workspaceDir: path.join(dir, "workspace"), skillsDir: "off", store,
+    getHarness: () => harness, binding: async () => bound }));
+  registry.install(defineExtension({ name: "event-tool-probe", tools: names.map(name => defineTool({
+    name, description: "Check event tool restrictions", parameters: Type.Object({}), replay: "unsafe",
+    execute: async () => { executed.push(name); return { output: [{ type: "text", text: "ok" }] }; },
+  })) }));
+  try {
+    harness = await Harness.open(await openNodeSqliteStorage(path.join(dir, "pi.sqlite")), { models, registry }, context);
+    const model = faux.getModel();
+    const conv = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: { provider: model.provider, modelId: model.id } } }, context);
+    expect((await (await conv.submit({ type: "input", content: "检查" }, context)).wait(context)).status).toBe("done");
+    expect(executed).toEqual([]);
+    const blocked = toolResults(seen).filter(result => result.isError);
+    expect(blocked.map(result => result.toolName)).toEqual(["auth", "schedule", "schedule_control"]);
+    for (const result of blocked) expect(JSON.stringify(result.content)).toContain("事件回合只读，不能使用此工具");
+  } finally { await harness?.close(context); store.close(); }
+});

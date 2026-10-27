@@ -107,8 +107,8 @@ it.each(["valid", "missing", "mismatched", "wrong-kind"] as const)("Pi 已提交
   const agent = await (await r.pi.harness.conversation(id, context))!.agent(context);
   const tools = [...agent.tools, ...agent.deferred, ...agent.callable].map(tool => tool.name);
   expect(tools).toContain("read"); expect(tools).toContain("send_message");
-  expect(tools.filter(name => /^(auth_|schedule_)/.test(name) || ["write", "edit", "bash", "subagent", "skill_publish"].includes(name))).toEqual([]);
-  expect(offered[0].filter(name => /^(auth_|schedule_)/.test(name) || ["write", "edit", "bash", "subagent", "skill_publish"].includes(name))).toEqual([]);
+  expect(tools.filter(name => ["auth", "schedule", "schedule_control"].includes(name) || ["write", "edit", "bash", "subagent", "skill_publish"].includes(name))).toEqual([]);
+  expect(offered[0].filter(name => ["auth", "schedule", "schedule_control"].includes(name) || ["write", "edit", "bash", "subagent", "skill_publish"].includes(name))).toEqual([]);
   const mcp = [...new Set(tools.filter(name => name.startsWith("mcp_fixture_")))];
   expect(mcp).toEqual(persisted === "valid" ? [expect.stringMatching(/^mcp_fixture_first_/)] : []);
   resumed.open(); await r.idle();

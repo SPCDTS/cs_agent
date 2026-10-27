@@ -1,3 +1,4 @@
+import { isScheduleTool } from "../../shared/schedule-tools.js";
 import { isEventTurn, runRights } from "../host/identity.js";
 import type { ScheduleTools } from "../schedule/tools.js";
 import type { GrantsService } from "../grants.js";
@@ -151,7 +152,7 @@ export function createPiExtension(opts: PiToolsOptions) {
         const event = bound.identity.kind === "event" || isEventTurn(runRights(bound, opts.grants?.owners));
         if (event) {
           trace.metadataOnly(traceKey(bound));
-          if (["write", "edit", "bash", "subagent", "skill_publish"].includes(call.name) || /^(auth_|schedule_)/.test(call.name)) return { block: "事件回合只读，不能使用此工具" };
+          if (["write", "edit", "bash", "subagent", "skill_publish"].includes(call.name) || call.name === "auth" || isScheduleTool(call.name)) return { block: "事件回合只读，不能使用此工具" };
         }
         start(api.taskId);
         trace.event(traceKey(bound), "tool:" + call.name, { status: "started", detail: isMcpToolName(call.name) ? mcpSummary(call, api)
@@ -163,7 +164,7 @@ export function createPiExtension(opts: PiToolsOptions) {
           return { block: reason };
         };
         // 不按回合计调用次数（失控防护交给 bridge 发送规则，docs/ARCHITECTURE.md §3.3）；身份相关的限制在各工具执行时复核。
-        if (call.name.startsWith("auth_")) return bound.auth ? undefined : block("授权工具仅限 owner 回合");
+        if (call.name === "auth") return bound.auth ? undefined : block("授权工具仅限 owner 回合");
         return undefined;
       }, afterTool: async (call, result, api) => {
         const bound = await opts.binding(Number(api.conversationId));

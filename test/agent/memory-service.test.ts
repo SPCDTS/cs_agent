@@ -60,11 +60,11 @@ describe("§5 权限表：按 runRights 求可读 / 可写命名空间", () => {
 
   it("工具可见性：读工具恒有；写工具要有可写命名空间；mem_profile 只在 owner 本人的回合；子 agent 只有读工具", () => {
     expect(memoryToolNames(access(ownerTurn()))).toEqual([...MEMORY_TOOLS]);
-    expect(memoryToolNames(access(groupTurn("5")))).toEqual(["mem_search", "mem_list", "mem_remember", "mem_update", "mem_forget"]);
-    expect(memoryToolNames(access(bind("group:7", { kind: "wake" })))).toEqual(["mem_search", "mem_list"]);
-    expect(memoryToolNames(access(ownerTurn(), true))).toEqual(["mem_search", "mem_list"]);
-    // pi 子会话的工具集排除写工具（与 send_message、auth_* 同一份排除名单）
-    for (const name of MEMORY_TOOLS) expect(isSubagentExcludedTool(name)).toBe(name !== "mem_search" && name !== "mem_list");
+    expect(memoryToolNames(access(groupTurn("5")))).toEqual(["mem_search", "mem_remember", "mem_update", "mem_forget"]);
+    expect(memoryToolNames(access(bind("group:7", { kind: "wake" })))).toEqual(["mem_search"]);
+    expect(memoryToolNames(access(ownerTurn(), true))).toEqual(["mem_search"]);
+    // pi 子会话的工具集排除写工具（与 send_message、auth 同一份排除名单）
+    for (const name of MEMORY_TOOLS) expect(isSubagentExcludedTool(name)).toBe(name !== "mem_search");
   });
 });
 

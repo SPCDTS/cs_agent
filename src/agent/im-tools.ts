@@ -1,23 +1,28 @@
 import { Type } from "@earendil-works/pi-ai";
-import { TARGET_PATTERN } from "./grants.js";
+import { z } from "zod";
+import { AUTH_ACTIONS } from "../shared/auth-tools.js";
+import { authInputs, TARGET_PATTERN } from "./grants.js";
 
 const user = Type.String({ pattern: "^qq:[1-9][0-9]{0,19}$", description: "Real QQ identity, e.g. qq:10001" });
 const caps = Type.Array(Type.Union([Type.Literal("send"), Type.Literal("schedule")]), { minItems: 1, maxItems: 2 });
 export const authParameters = {
-  auth_grant: Type.Object({
-    user, caps,
+  auth: Type.Object({
+    action: Type.String({ enum: [...AUTH_ACTIONS] }),
+    user: Type.Optional(user), caps: Type.Optional(caps),
     targets: Type.Optional(Type.Array(Type.String({ pattern: TARGET_PATTERN }), { maxItems: 200 })),
     scopes: Type.Optional(Type.Array(Type.String({ pattern: "^(group|private):[1-9][0-9]{0,19}$" }), { maxItems: 200 })),
     expires_in_hours: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 24 * 365 * 100 })),
   }, { additionalProperties: false }),
-  auth_revoke: Type.Object({ user, caps: Type.Optional(caps) }, { additionalProperties: false }),
-  auth_list: Type.Object({}, { additionalProperties: false }),
 };
 export const authDescriptions = {
-  auth_grant: "Grant or replace permissions for one person. Empty targets prevent proactive sends to other chats; omitting scopes allows any source. schedule permits managing their own scheduled tasks in authorized source chats.",
-  auth_revoke: "Revoke specified capabilities for one person; omit caps to revoke all permissions.",
-  auth_list: "List grants and their expiration status; owner turns only.",
+  auth: "Owner only. grant requires user and caps; optional targets, scopes, expires_in_hours. Empty targets prevent sends to other chats; omitted scopes allow any source. schedule permits managing own tasks. revoke requires user; optional caps (omit for all). list takes no other fields.",
 };
+const authAction = z.object({ action: z.enum(AUTH_ACTIONS, { error: "auth action is required and must be one of: grant, revoke, list" }) }).loose();
+export function parseAuthCall(input: unknown) {
+  const { action, ...args } = authAction.parse(input);
+  const name = `auth_${action}` as const;
+  return { name, args: authInputs[name].parse(args) };
+}
 export function sendParameters(target: boolean) {
   return Type.Object({
     text: Type.String({ minLength: 1, maxLength: 4000 }),

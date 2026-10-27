@@ -1,3 +1,4 @@
+import { parseMemoryCall } from "../../src/agent/memory/tools.js";
 /**
  * 常驻 agent 的集成测试装置（设计 §4、§6、§7、§8）：真实 ReplyStore / bridge（假 OneBot 客户端）、
  * ThreadHost（派发 harness）、Inbox、pi 后端（faux 模型）与 codex 适配层（假 runner），可模拟重启。
@@ -215,8 +216,9 @@ export async function residentRig(options: ResidentOptions = {}) {
       return sendViaLoopback(args, meta, token ?? r.codexToken(threadKey), recallServer.port);
     },
     /** 模拟 im MCP 的 mem_* 调用（经线程令牌 loopback） */
-    codexMemory(threadKey: string, name: "mem_search" | "mem_list", args: unknown, meta: CallMeta, token?: string) {
-      return imViaLoopback(name, args, meta, token ?? r.codexToken(threadKey), recallServer.port);
+    codexMemory(threadKey: string, name: "mem_search", args: unknown, meta: CallMeta, token?: string) {
+      const call = parseMemoryCall(name, args);
+      return imViaLoopback(call.name, call.args, meta, token ?? r.codexToken(threadKey), recallServer.port);
     },
     /** 模拟 qq_context / image_gen 取调用上下文 */
     codexContext(threadKey: string, meta: CallMeta, token?: string) {

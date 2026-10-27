@@ -1,5 +1,5 @@
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { MEMORY_READ_TOOLS, MEMORY_WRITE_TOOLS, memoryDescriptions, memoryParameters, type MemoryTool } from "../memory/tools.js";
+import { MEMORY_READ_TOOLS, MEMORY_WRITE_TOOLS, memoryDescriptions, memoryParameters, parseMemoryCall, type MemoryTool } from "../memory/tools.js";
 import type { MemoryAccess, MemoryService } from "../memory/service.js";
 import type { PiCallBinding } from "./request.js";
 
@@ -20,7 +20,8 @@ export function createPiMemoryExtensions(binding: (conversationId: number) => Pr
           const bound = await binding(Number(api.conversationId));
           if (!bound || !service) throw new Error("记忆工具缺少本轮绑定");
           context.abortSignal?.throwIfAborted();
-          return output(await service.tool({ ...bound, backend: "pi", session: String(api.conversationId) }, tool, args));
+          const call = parseMemoryCall(tool, args);
+          return output(await service.tool({ ...bound, backend: "pi", session: String(api.conversationId) }, call.name, call.args));
         } catch (error) { return { ...output((error as Error).message), isError: true }; }
       },
     })),

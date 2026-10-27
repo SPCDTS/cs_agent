@@ -9,7 +9,7 @@ import { createScheduledRuntime } from "../../src/agent/schedule/run.js";
 import { ScheduleService } from "../../src/agent/schedule/service.js";
 import { createScheduleTask } from "../../src/agent/schedule/task.js";
 import { ScheduleTools } from "../../src/agent/schedule/tools.js";
-import { formatBeijingTime } from "../../src/agent/schedule/tool-schema.js";
+import { formatBeijingTime, parseScheduleCall } from "../../src/agent/schedule/tool-schema.js";
 import { bridgeFixture } from "./grants-fixture.js";
 
 type Bound = GrantBinding & { actor: string; inputKey?: string };
@@ -42,8 +42,12 @@ export async function scheduleToolsFixture() {
   });
   const args = { name: "监控日报", prompt: "检查新消息，无新内容则静默；有更新发到 qq:group:7（家庭群）",
     rule: { rrule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=30", start: formatBeijingTime(Date.now() + 86_400_000) } };
+  const call = async (bound: GrantBinding, input: unknown) => {
+    const operation = parseScheduleCall("schedule", input);
+    return tools.tool(bound, operation.name, operation.args);
+  };
   const create = async (bound = binding()) => {
-    await tools.tool(bound, "schedule_create", args);
+    await call(bound, { action: "create", ...args });
     return (await service.list(bound.actor)).at(-1)!;
   };
   /** 立即运行后的定时回合绑定：身份为创建者，本轮输入为该次运行的定时输入。 */
@@ -53,5 +57,5 @@ export async function scheduleToolsFixture() {
     return { threadKey: input.thread_key, identity: { kind: "scheduled", creator: actor.slice(3) }, scope: input.scope,
       inputs: [input.key], inputKey: input.key, actor };
   };
-  return { ...f, grants, tools, service, harness, event, binding, args, create, scheduled, launcher, deliver, runtime };
+  return { ...f, grants, tools, service, harness, event, binding, args, call, create, scheduled, launcher, deliver, runtime };
 }

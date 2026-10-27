@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
+import { SCHEDULE_ACTIONS, SCHEDULE_MANAGEMENT_TOOLS } from "../../src/shared/schedule-tools.js";
 import type { GrantBinding } from "../../src/agent/grants.js";
 import type { CallBinding } from "../../src/context/media-recall-server.js";
 import { scheduleToolsFixture } from "../agent/schedule-tools-fixture.js";
@@ -28,11 +28,14 @@ it.each([
   ["1", false, false], ["9", true, false], ["9", false, false], ["1", false, true], ["9", true, true],
 ] as const)("真实 im 子进程：定时工具全部列出，按本次调用的身份在主进程校验 actor=%s grant=%s scheduled=%s", async (user, grant, scheduled) => {
   const f = await setup(user, grant, scheduled);
-  const visible = (await f.client.listTools()).tools.filter(t => t.name.startsWith("schedule_"));
+  const visible = (await f.client.listTools()).tools.filter(t => t.name === "schedule" || t.name === "schedule_control");
   expect(visible.map(t => t.name)).toEqual([...SCHEDULE_MANAGEMENT_TOOLS, "schedule_control"]);
-  if (scheduled || user === "9" && !grant) for (const name of SCHEDULE_MANAGEMENT_TOOLS) {
-    expect((await f.tool(name, {})).isError).toBe(true);
-    expect((await f.post(name, {})).status).toBe(400);
+  if (scheduled || user === "9" && !grant) for (const action of SCHEDULE_ACTIONS) {
+    const args = action === "create" ? f.args : action === "list" ? {} : { id: "missing" };
+    const denied = await f.tool("schedule", { action, ...args });
+    expect(denied.isError).toBe(true);
+    expect(JSON.stringify(denied.content)).toContain("无权");
+    expect((await f.post(`schedule_${action}`, args)).status).toBe(400);
   }
   if (!scheduled) {
     const args = { action: "complete", reason: "伪造定时回合" };
@@ -49,15 +52,15 @@ it.each([
 
 it("codex 创建、列出、更新、暂停、恢复、立即运行和删除；大于 2 KiB 的中文 prompt 完整保存", async () => {
   const f = await setup(), args = { ...f.args, prompt: "检查资讯，更新时发到 qq:group:7；".repeat(150) };
-  const created = await f.tool("schedule_create", args);
+  const created = await f.tool("schedule", { action: "create", ...args });
   expect(created.isError).not.toBe(true);
   const schedule = (await f.service.list())[0]!;
   expect(schedule).toMatchObject({ prompt: args.prompt, created_by: "qq:1", conversation: "group:7" });
   expect(JSON.stringify(created.content)).toContain("北京时间");
   expect(JSON.stringify(created.content)).toContain(schedule.id);
-  expect(JSON.stringify((await f.tool("schedule_list")).content)).toContain(schedule.id);
-  for (const name of ["schedule_update", "schedule_pause", "schedule_resume", "schedule_run_now", "schedule_delete"] as const) {
-    const result = await f.tool(name, { id: schedule.id, ...(name === "schedule_update" ? { name: "更名", prompt: args.prompt } : {}) });
+  expect(JSON.stringify((await f.tool("schedule", { action: "list" })).content)).toContain(schedule.id);
+  for (const action of ["update", "pause", "resume", "run_now", "delete"] as const) {
+    const result = await f.tool("schedule", { action, id: schedule.id, ...(action === "update" ? { name: "更名", prompt: args.prompt } : {}) });
     expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
     expect(JSON.stringify(result.content)).toContain(schedule.id);
   }
@@ -89,12 +92,33 @@ it("HTTP 控制只取本次调用所属的定时运行绑定；跨任务 id 不�
 
 it("授权撤销后端点复核拒绝；不属于当前回合的调用与作废令牌均无副作用", async () => {
   const f = await setup("9", true);
-  expect((await f.tool("schedule_list")).isError).not.toBe(true);
+  expect((await f.tool("schedule", { action: "list" })).isError).not.toBe(true);
   await f.grants.panel("auth_revoke", { user: "qq:9" });
-  expect((await f.tool("schedule_create", f.args)).isError).toBe(true);
+  expect((await f.tool("schedule", { action: "create", ...f.args })).isError).toBe(true);
   expect((await f.post("schedule_create", f.args)).status).toBe(400);
   expect((await f.post("schedule_list", {}, { turnId: "ended" })).status).toBe(400);
   f.tokens.revoke(f.binding.threadKey);
   expect((await f.post("schedule_list", {})).status).toBe(401);
   expect(await f.service.list()).toEqual([]);
+});
+
+it("schedule 使用扁平 schema，按动作保留必填和严格字段校验，不保留旧工具别名", async () => {
+  const f = await setup();
+  const schema = (await f.client.listTools()).tools.find(t => t.name === "schedule")!.inputSchema;
+  expect(schema.required).toEqual(["action"]);
+  expect(schema.properties!.action).toMatchObject({ enum: ["create", "list", "update", "pause", "resume", "delete", "run_now"] });
+  expect(schema).not.toHaveProperty("anyOf"); expect(schema).not.toHaveProperty("oneOf");
+  for (const args of [{}, { action: "unknown" }]) {
+    const result = await f.tool("schedule", args);
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("schedule action is required and must be one of");
+  }
+  for (const action of ["create", "update", "pause", "resume", "delete", "run_now"]) expect((await f.tool("schedule", { action })).isError).toBe(true);
+  for (const args of [{ action: "list", id: "missing" }, { action: "pause", id: "missing", name: "ignored" },
+    { action: "create", ...f.args, actor: "qq:9" }, { action: "update", id: "missing", conversation: "owner" }]) {
+    expect((await f.tool("schedule", args)).isError).toBe(true);
+  }
+  expect((await f.tool("schedule_list")).isError).toBe(true);
+  expect(await f.service.list()).toEqual([]);
+  expect(f.event).not.toHaveBeenCalled();
 });

@@ -32,7 +32,7 @@ async function setup() {
 }
 
 describe("codex im MCP：mem_* 工具经 loopback 回主进程", () => {
-  it("列出六个记忆工具，使用规则挂在 mem_remember 的说明里", async () => {
+  it("列出五个记忆工具，使用规则挂在 mem_remember 的说明里", async () => {
     const f = await setup();
     const tools = (await f.client.listTools()).tools;
     expect(tools.filter(t => t.name.startsWith("mem_")).map(t => t.name)).toEqual([...MEMORY_TOOLS]);
@@ -72,4 +72,21 @@ describe("codex im MCP：mem_* 工具经 loopback 回主进程", () => {
     expect(bad.isError).toBe(true);
     expect(f.text(bad)).toContain("参数无效");
   });
+});
+
+it("无 query 的 mem_search 与原列表操作一致", async () => {
+  const f = await setup();
+  expect(f.text(await f.tool("mem_search"))).toBe("没有记忆条目。");
+  for (const [text, due_at] of [["较晚", "2030-12-20"], ["较早", "2030-12-10"], ["无截止", undefined]]) {
+    expect((await f.tool("mem_remember", { text, kind: "commitment", subject: "self", due_at })).isError).not.toBe(true);
+  }
+  const before = [1, 2, 3].map(id => f.store.get(id));
+  for (const args of [{}, { kind: "commitment" }, { kind: "commitment", subject: "self", status: "active", limit: 1 }]) {
+    const legacy = await (await f.post("mem_list", args)).json();
+    expect(f.text(await f.tool("mem_search", args))).toBe(legacy);
+  }
+  expect([1, 2, 3].map(id => f.store.get(id))).toEqual(before);
+  expect((await f.tool("mem_list")).isError).toBe(true);
+  f.current.binding = f.binding("group:7", { kind: "user", sender: "5" });
+  expect(f.text(await f.tool("mem_search"))).toBe("没有记忆条目。");
 });

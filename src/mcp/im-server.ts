@@ -1,12 +1,13 @@
-import { isScheduleTool, SCHEDULE_TOOLS, type ScheduleTool } from "../shared/schedule-tools.js";
-import { scheduleDescriptions, scheduleParameters } from "../agent/schedule/tool-schema.js";
+import type { MemoryOperation } from "../shared/memory-tools.js";
+import { isScheduleTool, SCHEDULE_TOOLS, type ScheduleOperation } from "../shared/schedule-tools.js";
+import { parseScheduleCall, scheduleDescriptions, scheduleParameters } from "../agent/schedule/tool-schema.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { validateSendArguments } from "../agent/send-service.js";
-import { AUTH_TOOLS, type AuthTool } from "../agent/grants.js";
-import { authDescriptions, authParameters, sendParameters, SKILL_PUBLISH_DESCRIPTION, skillPublishParameters } from "../agent/im-tools.js";
+import { AUTH_TOOLS, type AuthOperation } from "../shared/auth-tools.js";
+import { authDescriptions, authParameters, parseAuthCall, sendParameters, SKILL_PUBLISH_DESCRIPTION, skillPublishParameters } from "../agent/im-tools.js";
 import { qqContextText } from "../context/qq-context-tool.js";
-import { MEMORY_RULE, MEMORY_TOOLS, isMemoryTool, memoryDescriptions, memoryParameters, type MemoryTool } from "../agent/memory/tools.js";
+import { MEMORY_RULE, MEMORY_TOOLS, isMemoryTool, memoryDescriptions, memoryParameters, parseMemoryCall } from "../agent/memory/tools.js";
 import type { CallMeta } from "../context/media-recall-server.js";
 import { callMetaOf, loopbackJson, loopbackPost } from "./media-recall-client.js";
 
@@ -16,10 +17,10 @@ import { callMetaOf, loopbackJson, loopbackPost } from "./media-recall-client.js
  */
 export interface ImHandlers {
   send(args: unknown, meta: CallMeta): Promise<unknown>;
-  auth(name: AuthTool, args: unknown, meta: CallMeta): Promise<unknown>;
-  schedule(name: ScheduleTool, args: unknown, meta: CallMeta): Promise<string>;
+  auth(name: AuthOperation, args: unknown, meta: CallMeta): Promise<unknown>;
+  schedule(name: ScheduleOperation, args: unknown, meta: CallMeta): Promise<string>;
   skillPublish(args: unknown, meta: CallMeta): Promise<unknown>;
-  memory(name: MemoryTool, args: unknown, meta: CallMeta): Promise<string>;
+  memory(name: MemoryOperation, args: unknown, meta: CallMeta): Promise<string>;
 }
 
 export function createImServer(handlers: ImHandlers): Server {
@@ -30,17 +31,17 @@ export function createImServer(handlers: ImHandlers): Server {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, ...AUTH_TOOLS.map(name => ({
     name, description: authDescriptions[name] + " (owner turns only)", inputSchema: authParameters[name],
-    annotations: { readOnlyHint: name === "auth_list", destructiveHint: name === "auth_revoke", openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   })), {
     name: "skill_publish", description: SKILL_PUBLISH_DESCRIPTION, inputSchema: skillPublishParameters,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, ...MEMORY_TOOLS.map(name => ({
     // 使用规则只在 MEMORY_RULE 定义一次，挂在 mem_remember 的说明里；可见性固定为全集，主进程每次调用按本轮权限复核。
     name, description: memoryDescriptions[name] + (name === "mem_remember" ? " " + MEMORY_RULE : ""), inputSchema: memoryParameters[name],
-    annotations: { readOnlyHint: name === "mem_search" || name === "mem_list", destructiveHint: false, idempotentHint: name !== "mem_update", openWorldHint: false },
+    annotations: { readOnlyHint: name === "mem_search", destructiveHint: false, idempotentHint: name !== "mem_update", openWorldHint: false },
   })), ...SCHEDULE_TOOLS.map(name => ({
     name, description: scheduleDescriptions[name], inputSchema: scheduleParameters[name],
-    annotations: { readOnlyHint: name === "schedule_list", destructiveHint: name === "schedule_delete", openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: name === "schedule", openWorldHint: false },
   }))] }));
   server.setRequestHandler(CallToolRequestSchema, async req => {
     const meta = callMetaOf(req.params._meta);
@@ -48,17 +49,20 @@ export function createImServer(handlers: ImHandlers): Server {
       if (req.params.name === "send_message") {
         return qqContextText(JSON.stringify(await handlers.send(validateSendArguments(req.params.arguments), meta)));
       }
-      if (AUTH_TOOLS.includes(req.params.name as AuthTool)) {
-        return qqContextText(JSON.stringify(await handlers.auth(req.params.name as AuthTool, req.params.arguments ?? {}, meta)));
+      if (req.params.name === "auth") {
+        const call = parseAuthCall(req.params.arguments ?? {});
+        return qqContextText(JSON.stringify(await handlers.auth(call.name, call.args, meta)));
       }
       if (req.params.name === "skill_publish") {
         return qqContextText(JSON.stringify(await handlers.skillPublish(req.params.arguments ?? {}, meta)));
       }
       if (isMemoryTool(req.params.name)) {
-        return qqContextText(await handlers.memory(req.params.name, req.params.arguments ?? {}, meta));
+        const call = parseMemoryCall(req.params.name, req.params.arguments ?? {});
+        return qqContextText(await handlers.memory(call.name, call.args, meta));
       }
       if (isScheduleTool(req.params.name)) {
-        return qqContextText(await handlers.schedule(req.params.name, req.params.arguments ?? {}, meta));
+        const call = parseScheduleCall(req.params.name, req.params.arguments ?? {});
+        return qqContextText(await handlers.schedule(call.name, call.args, meta));
       }
       return qqContextText("未知工具：" + req.params.name, true);
     } catch (error) { return qqContextText((error as Error).message, true); }
@@ -67,7 +71,7 @@ export function createImServer(handlers: ImHandlers): Server {
 }
 
 /** 经线程令牌向主进程提交 im 工具调用。 */
-export async function imViaLoopback(endpoint: AuthTool | ScheduleTool | MemoryTool | "send" | "skill_publish", args: unknown, meta: CallMeta, token: string | undefined, port = 8790): Promise<unknown> {
+export async function imViaLoopback(endpoint: AuthOperation | ScheduleOperation | MemoryOperation | "send" | "skill_publish", args: unknown, meta: CallMeta, token: string | undefined, port = 8790): Promise<unknown> {
   return loopbackJson(await loopbackPost(endpoint, args, token, port, meta, endpoint === "send" ? 600_000 : 30_000), "IM 请求失败");
 }
 

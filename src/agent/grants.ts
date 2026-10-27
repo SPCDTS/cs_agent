@@ -1,3 +1,4 @@
+import type { AuthOperation } from "../shared/auth-tools.js";
 import { isOwnerActor, type OwnerIds } from "../shared/owners.js";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Harness } from "@earendil-works/pi-durable";
@@ -18,8 +19,7 @@ const grantSchema = z.object({
   expires_in_hours: z.number().positive().max(24 * 365 * 100).optional(),
 }).strict();
 const revokeSchema = z.object({ user: userSchema, caps: capsSchema.optional() }).strict();
-export type AuthTool = "auth_grant" | "auth_revoke" | "auth_list";
-export const AUTH_TOOLS: AuthTool[] = ["auth_grant", "auth_revoke", "auth_list"];
+export const authInputs = { auth_grant: grantSchema, auth_revoke: revokeSchema, auth_list: z.object({}).strict() };
 /** 工具调用时由主进程求出的会话绑定（docs/ARCHITECTURE.md §5.1）；身份与范围不来自模型参数。 */
 export type GrantBinding = Pick<TurnBinding, "threadKey" | "identity" | "scope" | "turnId" | "inputs">;
 export interface ImPermissions { actorIsOwner: boolean; target: boolean; auth: boolean }
@@ -94,11 +94,11 @@ export class GrantsService {
     if (!grant?.caps.includes("send") || !grant.targets.includes(target)) throw new Error("没有发往该 target 的有效 send 授权");
   }
 
-  async tool(binding: GrantBinding, name: AuthTool, args: unknown): Promise<unknown> {
+  async tool(binding: GrantBinding, name: AuthOperation, args: unknown): Promise<unknown> {
     const identity = this.identity(binding);
     if (!identity || !this.rights(binding).auth) throw new Error("授权工具仅限 owner 交互回合");
     if (name === "auth_list") {
-      z.object({}).strict().parse(args);
+      authInputs.auth_list.parse(args);
       return this.list();
     }
     return this.mutate(name, args, identity.actor, "tool", binding.turnId ? "turn:" + binding.turnId : "thr:" + binding.threadKey);

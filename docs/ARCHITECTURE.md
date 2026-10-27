@@ -164,7 +164,7 @@ send_message({ text, images?: string[], files?: { path, name? }[], target? }) �
 
 - **会话**：独立 `Harness.open`（`DATA_DIR/pi.sqlite`），每个会话键一条 ownerless 长期会话；映射写在 session 文档 `cs.pi.threads`，`pi-threads.json` 是其原子镜像，启动从 SQLite 重建。工作区 `DATA_DIR/pi-work/<key>`。
 - **回合**：`backends/pi-input.ts` 用公开 Tx API 将入站键、按 submission id 索引的 `cs.pi.input` 身份及输入/run 原子提交；空闲时新建 GenerationTask，已有 run 时只允许用户插话进入 InboxDoc，其他输入留给宿主排队。同一 requestId 重放取原提交，首条 submission 结束驱动宿主完成回合。
-- **工具**：`read` / `write` / `edit` / `bash`（`PiPathPolicy` + bwrap 沙箱，§5.5）、`web_search` / `fetch_page`（DeepSeek Search/Fetch API 直连，需 `DEEPSEEK_API_KEY`）、`qq_recent` / `qq_search` / `qq_message` / `qq_image` / `qq_chats`、`send_message`、按本轮权限出现的 `auth_*` / `schedule_*`、`mem_*`（§9.1）、`subagent`。工具调用不按回合计次。每轮开始（含唤醒与重启恢复）时按本轮的人重新选择 IM、定时与记忆工具集；调用时服务端逐次复核。
+- **工具**：`read` / `write` / `edit` / `bash`（`PiPathPolicy` + bwrap 沙箱，§5.5）、`web_search` / `fetch_page`（DeepSeek Search/Fetch API 直连，需 `DEEPSEEK_API_KEY`）、`qq_recent` / `qq_search` / `qq_message` / `qq_image` / `qq_chats`、`send_message`、按本轮权限出现的 `auth`、`schedule`、`schedule_control`、`mem_*`（§9.1）、`subagent`。工具调用不按回合计次。每轮开始（含唤醒与重启恢复）时按本轮的人重新选择 IM、定时与记忆工具集；调用时服务端逐次复核。
 - **提示词**：pi-durable 把各 section 合成为最前面的一条 system 消息，内容不变不重发（保住提示缓存）：
   1. `cs-pi`：受管规则（发送、链接、安全、工作区、子 agent 用法、记忆工具的使用规则）+ `DATA_DIR/prompts/agent.md`（仅人设、语气与输出格式；缺失时播种，已有不覆盖，按 mtime/size 热加载）。工具使用指引放在各工具描述中。
   2. `project-context`：运维层 `WORKSPACE_DIR/AGENTS.md` 与会话层 `DATA_DIR/pi-work/<key>/AGENTS.md`，各按 `AGENTS.override.md → AGENTS.md → AGENTS.MD → CLAUDE.md → CLAUDE.MD` 取第一个普通文件（≤128 KiB、严格 UTF-8、去 BOM、拒绝链接），渲染为 `<project_instructions path="…">`。主进程直接读取，不向上遍历，不读 `/data/AGENTS.md`；cwd 不是 `pi-work` 的直接子目录时只用运维层并告警一次。语义参照 pi-coding-agent 的 `loadProjectContextFiles`，未引入该包（[THIRD-PARTY.md](THIRD-PARTY.md)）。
@@ -181,7 +181,7 @@ Pi 外部 MCP（`agent/pi-mcp/`）默认限 owner 私聊；服务 `access.groups
 长任务派子 agent，主 agent 结束本轮；子 agent 完成时唤醒主 agent，由它汇报。两个后端的受管提示都写明"长任务先告知用户、派子 agent 后结束本轮，收到结果再汇报"。模型漏发结论时系统不自动补一步。
 
 - **codex**：受管配置开启 `features.multi_agent` 与 `features.wake_on_agent_messages`；子 agent 完成后 app-server 自己开一轮（`turn/started`），宿主据此识别"没有新输入的唤醒回合"。适配器求出派出者并随 `onTurnStarted` 交给宿主；求不出就只有会话基础权限。后台终端命令跑完**不会**唤醒。codex 子 agent 线程调用 cs-agent 的 MCP 工具（`qq_context` 召回、`im` 的发送与记忆工具）一律在主进程求绑定时被拒绝（"子 agent 不能使用此工具"），所以 codex 子 agent 没有记忆工具。升级 codex 前须复测：父线程收到 `subAgentActivity kind=completed` 后应很快出现 `turn/started`。
-- **pi**：`subagent` 扩展（`pi-tools/subagent.ts`，仿 pi-durable 示例 `23-subagent-background`），动作 `spawn / message / status / list / stop`，每会话同时存活 ≤3 个、每天派出 ≤20 个。后台锚定任务持有子会话，完成后汇报任务把结果作为 follow-up 输入（`[子 agent 完成]`）投回父会话。子会话工具集与父相同但不含 `subagent`、`send_message`、`auth_*`、`schedule_*` 与记忆写工具（只留 `mem_search` / `mem_list`）；读取权限继承派出者在本会话的权限。
+- **pi**：`subagent` 扩展（`pi-tools/subagent.ts`，仿 pi-durable 示例 `23-subagent-background`），动作 `spawn / message / status / list / stop`，每会话同时存活 ≤3 个、每天派出 ≤20 个。后台锚定任务持有子会话，完成后汇报任务把结果作为 follow-up 输入（`[子 agent 完成]`）投回父会话。子会话工具集与父相同但不含 `subagent`、`send_message`、`auth`、`schedule`、`schedule_control` 与记忆写工具（只留 `mem_search`）；读取权限继承派出者在本会话的权限。
 - **身份随汇报带回**：spawn 时快照这一轮的人，登记在 `cs.subagent.children` 并写入汇报输入；唤醒回合继承它（§5.1）。`message` 给已有子 agent 时与这一轮的人合并，不是同一人就降为基础权限，之后的汇报都带合并后的身份。
 
 ### 4.4 重启顺序
@@ -197,7 +197,7 @@ Pi 外部 MCP（`agent/pi-mcp/`）默认限 owner 私聊；服务 `access.groups
 | 回合 | 绑定的人 |
 |---|---|
 | 用户输入 | 发送者（一轮只有一个发送者；owner 多账号算同一人） |
-| 定时输入 | 创建者；没有 `auth_*`，授权按当前授权表复核 |
+| 定时输入 | 创建者；没有 `auth`，授权按当前授权表复核 |
 | 事件回合 | 来源创建者（owner），只读；仅 Pi 会话可运行。Codex 沙箱按线程固定，事件先积压并显示 blockedReason；开轮竞态由 ThreadHost 按 backend_unsupported 拒绝。Pi 提交身份与输入同事务持久化，恢复继续绑定 event，不能变成普通 wake |
 | 唤醒回合 | 派出该子 agent 的那一轮的人（派出时快照）；唤醒回合派出的再唤醒时沿链继承。同一唤醒回合带回多个汇报而派出者不是同一人或类型不同 → 基础权限 |
 
@@ -205,8 +205,8 @@ Pi 外部 MCP（`agent/pi-mcp/`）默认限 owner 私聊；服务 `access.groups
 
 ### 5.2 两层权限
 
-- **会话基础权限**（任何回合都有）：读本会话范围、只发往本会话；没有 target、没有 `schedule_*`、没有 `auth_*`。
-- **人的权限**（只在确证时叠加）：owner 全权（target 不查授权表、`skill_publish`、交互回合有 `auth_*`）；他人按授权表（`send` 开放 target，`schedule` 开放定时管理）。群里每个人的权限仍按人区分。
+- **会话基础权限**（任何回合都有）：读本会话范围、只发往本会话；没有 target、没有 `schedule`、`schedule_control`、没有 `auth`。
+- **人的权限**（只在确证时叠加）：owner 全权（target 不查授权表、`skill_publish`、交互回合有 `auth`）；他人按授权表（`send` 开放 target，`schedule` 开放定时管理）。群里每个人的权限仍按人区分。
 
 ### 5.3 读取范围按线程，不按人
 
@@ -215,8 +215,8 @@ Pi 外部 MCP（`agent/pi-mcp/`）默认限 owner 私聊；服务 `access.groups
 ### 5.4 授权表与授权工具
 
 - `GrantsDoc`（`cs.grants`，宿主 harness 的 session 文档，`src/agent/grants.ts`）以 `qq:<号>` 为键：`caps`（`send` / `schedule`）、`targets`（可主动发往的 ref）、可选 `scopes`（在哪些来源会话生效）、`expires_at`。过期授权只读展示、不生效。
-- 只能由 owner 修改：面板设置页"授权"（owner 运维口令 + 同源/CSRF），或 owner 交互回合里的 `auth_grant` / `auth_revoke` / `auth_list`。变更记 `auth_changed`（来源、操作者、前后差异）。
-- 工具可见性：pi 按回合配置工具；codex 的 `im` 子进程启动时查询 `/im-info`，仅有权回合列出 `target`，仅 owner 交互回合列出 `auth_*`；服务端每次调用都复核。
+- 只能由 owner 修改：面板设置页"授权"（owner 运维口令 + 同源/CSRF），或 owner 交互回合里的 `auth({ action: grant | revoke | list, ... })`。变更记 `auth_changed`（来源、操作者、前后差异）。
+- 工具可见性：pi 按回合配置工具；codex 的 `im` 工具清单固定为全集，`target` 和 `auth` 由主进程按本次调用身份授权；服务端每次调用都复核。
 
 MCP 群审批独立于 send/schedule grants：审批单存宿主 `cs.mcp.approval`，只授权保存的那一次调用；执行前提交 executing，重启结算 unknown，不自动重试。
 
@@ -242,9 +242,9 @@ MCP 群审批独立于 send/schedule grants：审批单存宿主 `cs.mcp.approva
   [说明] 这是定时任务，不是用户消息。需要通知就调用 send_message（可带 target），不需要就直接结束。需要停止后续触发时调用 schedule_control……
   ```
 
-  `send_message` 不带 target 时发回该会话，不 @。权限按创建者求出，无 `auth_*`；创建者已失去权限则本次记 failed 并暂停。
+  `send_message` 不带 target 时发回该会话，不 @。权限按创建者求出，无 `auth`；创建者已失去权限则本次记 failed 并暂停。
 - **结果**（`run.ts`）：统计该输入所在回合发出的消息：有发送 → `sent`，无 → `silent`（静默，不兜底），回合失败/丢失/投递不确定 → `failed`。sent / silent 清零失败计数；连续 3 次 failed 自动暂停（`pause_reason = 连续 3 次失败`）并告警。
-- **管理**：面板"定时任务"页与 JSON 接口 `/api/schedules` 只支持查看、暂停、恢复、立即运行和删除；创建与修改任务通过聊天工具完成。聊天里 `schedule_create / list / update / pause / resume / delete / run_now`（仅当前的人通过 `canSchedule` 的交互回合可见；owner 管理全部，他人只管自己的）。来源与 `created_by` 取本轮会话与确证的人，模型不能指定。规则使用北京时间 `YYYY-MM-DD HH:mm`；工具说明要求把"家庭群"等目的地先用 `qq_chats` 解析为具体 ref 写进提示词，按需静默的监控注明"无新内容则静默"。定时回合内只开放 `schedule_control({ action: pause | complete, reason })`，目标按本轮定时输入键从运行文档读取，不打断当前回合。
+- **管理**：面板"定时任务"页与 JSON 接口 `/api/schedules` 只支持查看、暂停、恢复、立即运行和删除；创建与修改任务通过聊天工具完成。聊天里 `schedule({ action: create | list | update | pause | resume | delete | run_now, ... })`（仅当前的人通过 `canSchedule` 的交互回合可见；owner 管理全部，他人只管自己的）。来源与 `created_by` 取本轮会话与确证的人，模型不能指定。规则使用北京时间 `YYYY-MM-DD HH:mm`；工具说明要求把"家庭群"等目的地先用 `qq_chats` 解析为具体 ref 写进提示词，按需静默的监控注明"无新内容则静默"。定时回合内只开放 `schedule_control({ action: pause | complete, reason })`，目标按本轮定时输入键从运行文档读取，不打断当前回合。
 
 ### 6.1 外部事件（`src/agent/events/`）
 
@@ -288,7 +288,7 @@ cs-agent 不提供生图工具。codex 自带的内置生图（`.system` 技能 
 - **存储**：`/data/memory.sqlite`（WAL，`context/memory/store.ts`；与 `/data/memory/` 一样在 codex 与 pi 的禁读名单里，只能经记忆工具与面板读写）：`memories`（命名空间、种类 fact / preference / rule / commitment / episode、subject、一句话正文 ≤500 字、生效与失效时间、承诺的截止与完成时间、状态 active / superseded / retired / orphaned / forgotten、作者、来源会话与消息 id、回合 id、召回统计、去重哈希）、`memory_versions`（每次正文或状态变化一行，前后快照与原因）、`memory_links`（`supersedes` 取代链）；`memories_fts` 为 trigram FTS5，content 表触发器同步。命名空间与会话键一致（`owner`、`group:<id>`、`private:<qq>`）。哈希为 `ns + kind + 规整后正文` 的 SHA-256，同命名空间的 active 条目重复写入时返回已有条目。存储不认识权限，与消息库互不 import。
 - **画像**：每个命名空间一份 `/data/memory/<ns>/profile.md`（冒号换下划线），纯文本 ≤4 KiB（超限的不进入提示，`mem_profile` 提示重写）；画像目录与文件不可为链接、真实路径须在画像根目录内；revision = mtime + size + 内容哈希，写入必须带读到的 revision（CAS），含凭据样式内容拒绝（与提示词编辑器同一条规则，`shared/redact.ts` 的 `containsSecret`）。
 - **权限**（`agent/memory/service.ts`，每次调用按 `runRights` 重新求出）：owner 私聊且读全部的回合读全部命名空间、写 `owner`，`subject` 写成 `group:<id>` / `private:<qq>` 时记入那个会话，并可管理任意命名空间的条目；群线程（含 owner 在群里）只读写本群；其他私聊只读写本人；本轮没有确证的人时只读不写；pi 子 agent 只读；codex 子 agent 没有记忆工具（与 `qq_context` 相同，子线程的 MCP 调用一律拒绝，§4.3）。画像只在 owner 本人的回合、只写本线程命名空间。
-- **工具**：`mem_search`（关键词子串匹配，最近召回优先、其次最新；命中记召回统计）、`mem_list`（承诺按截止排序）、`mem_remember`（可带 `supersedes`，同事务取代旧条目）、`mem_update`、`mem_forget`（只标记）、`mem_profile`。输出每条一行 `#id [kind] (时效) 正文 ← 来源 会话 #消息`，总量 ≤`QQ_CONTEXT_MAX_CHARS`；写入前过秘密检测；每轮写入 ≤20 次。使用规则只定义在 `agent/memory/tools.ts` 的 `MEMORY_RULE`，pi 放在 `cs-pi` 受管段，codex 放在 `mem_remember` 的说明里。trace 事件 `memory_recall`（工具名与命中 id，不记正文）、`memory_write`（作者、命名空间、种类、是否取代）。
+- **工具**：`mem_search`（带 query 时按关键词子串匹配，最近召回优先、其次最新；命中记召回统计；省略 query 时列出最近更新，承诺按截止排序）、`mem_remember`（可带 `supersedes`，同事务取代旧条目）、`mem_update`、`mem_forget`（只标记）、`mem_profile`。输出每条一行 `#id [kind] (时效) 正文 ← 来源 会话 #消息`，总量 ≤`QQ_CONTEXT_MAX_CHARS`；写入前过秘密检测；每轮写入 ≤20 次。使用规则只定义在 `agent/memory/tools.ts` 的 `MEMORY_RULE`，pi 放在 `cs-pi` 受管段，codex 放在 `mem_remember` 的说明里。trace 事件 `memory_recall`（工具名与命中 id，不记正文）、`memory_write`（作者、命名空间、种类、是否取代）。
 - **两个后端**：pi 由 `pi-tools/memory.ts` 注册（读工具一个扩展，写工具按本轮权限分两档，`mem_profile` 只在 owner 档）。codex 的 `im` MCP 固定列出六个 `mem_*`，经线程令牌 loopback（`/mem_*` 端点）回主进程，`ThreadTokens` 求出本次调用的绑定后交给同一个服务复核。
 - **提示注入**：只注入画像全文与未完成承诺的前 10 条（按截止升序，无截止的在后），渲染为 `<memory ns="…" profile_revision="…">` 段（`agent/memory/render.ts`），两者都空时不渲染。pi 为 `memory` section；codex 写进会话域受管 `AGENTS.md` 的"记忆"一节，随加载线程生成，已加载的线程何时重读取决于 codex（§4.1）。其余条目不自动注入，由模型按需 `mem_search`。
 - **回合后抽取**（`agent/memory/extractor.ts`）：TurnMonitor 的回合结束通知（与定时运行统计同一条）交给抽取器的观察者。只收 `completed` 的用户回合，且本轮确证的人按上面的权限表能写该命名空间、该命名空间的开关打开（面板设置页 `memory.extract`，缺省只有 `owner`）；定时、唤醒、失败的回合不抽取。满足即入独立队列立即返回（下一轮事件循环才读材料），不阻塞宿主；一次只跑一条，积压超过 50 条丢最旧的并告警，每命名空间每天（北京时间）最多 200 次模型调用。材料只取 `qq-bridge.sqlite`：`inbound` 按 `turn_id`（有索引）取本轮全部输入（含插话）、Outbox 按回合取发出的行（去掉系统消息，只留 `sent` / `uncertain`，主动发送标注目标，图片与文件只留标记），两列按时间各自保序交错成一段对话，"[我]"为助手；引用行原文按消息 id 从消息库取（与输入呈现同一查找）。不用 `final_answer`、不读后端会话与观测库、不读工具输出。单条正文先截到 2,000 字，归并累计超过 12,000 字即停（关键词只扫进入材料的正文）；正文合计不足 80 字跳过。说话人标签只由抽取器生成：正文行首（含前导空白）的 `[` 换成 `(`，昵称去掉方括号、尖括号与控制字符。模型为 `MEMORY_EXTRACT_MODEL`（缺省同 `AUTO_EFFORT_MODEL`，经 magpie 直调，与选档同一方式），超时 `MEMORY_EXTRACT_TIMEOUT_MS`（20 s）即放弃、不重试；提示词 `MEMORY_EXTRACT_PROMPT` 只在 `extractor.ts` 定义，对话是待分析数据，并附上该命名空间里与材料关键词（英文词与汉字二字片段，去虚词，按频次取 8 个，逐个 FTS 检索）相关的 active 条目 ≤20 条作"已知信息"。输出须为严格 JSON 数组，形状不对整批丢弃；`confidence < 0.6`、含凭据样式、时间无效的项丢弃；与 active 条目同正文的不写只记召回、不占写入额度，但带 `supersedes` 时仍同事务取代；`supersedes` 指向同命名空间的 active 条目时取代；每轮最多写 5 条，`author = extractor`，来源为本轮最后一条输入，`confidence` 存模型给的值。永远不改画像、不发消息。每轮记 `memory_extract`（`turn:<id>`：候选、写入、取代、丢弃原因计数、用量、耗时或跳过原因），写入的条目另记 `memory_write`，超过 active 软上限与显式工具同一处告警。关闭时不再收新回合、丢弃排队的，正在跑的一条在关闭记忆库前最多等 8 秒；超时则中止并标记取消，模型之后才返回也不落库（`closed`）。状态见面板 `/memory` 与 `/api/memory/extract`（[DASHBOARD.md](DASHBOARD.md) §8.5）。

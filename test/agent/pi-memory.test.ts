@@ -41,7 +41,7 @@ describe("pi：mem_* 工具按本轮权限注册，memory 段进入系统提示"
     await turn(r, "1", "记一下：周四前把周报模板发他", null);
     expect(results(seen[0]!)).toEqual([expect.objectContaining({ name: "mem_remember", error: false, text: expect.stringContaining("已记住：#1 [commitment] (截止 2026-10-30)") })]);
     expect(store.get(1)).toMatchObject({ ns: "owner", author: "qq:1", source_scope: "private:1" });
-    expect(await visible(r, "owner")).toEqual(["mem_search", "mem_list", "mem_remember", "mem_update", "mem_forget", "mem_profile"]);
+    expect(await visible(r, "owner")).toEqual(["mem_search", "mem_remember", "mem_update", "mem_forget", "mem_profile"]);
     // 规则在每条系统消息的受管段里只出现一次；下一轮 memory 段带上未完成的承诺
     for (const m of seen[0]!.messages.filter(m => m.role === "system"))
       expect(getSystemMessageText(m as Parameters<typeof getSystemMessageText>[0]).split(MEMORY_RULE).length).toBeLessThanOrEqual(2);
@@ -56,17 +56,17 @@ describe("pi：mem_* 工具按本轮权限注册，memory 段进入系统提示"
     ]);
     expect(store.get(2)).toMatchObject({ ns: "group:7", author: "qq:5" });
     expect(systemText(seen[2]!)).not.toContain("<memory");
-    expect(await visible(r, "group:7")).toEqual(["mem_search", "mem_list", "mem_remember", "mem_update", "mem_forget"]);
+    expect(await visible(r, "group:7")).toEqual(["mem_search", "mem_remember", "mem_update", "mem_forget"]);
   });
 
   it("没有确证身份的回合只注册读工具；直接调用写工具在服务端拒绝", async () => {
     const seen: TranscriptContext[] = [];
-    const { r, memory } = await rig([() => call(["mem_list", {}]), ctx => { seen.push(ctx); return reply(); }]);
+    const { r, memory } = await rig([() => call(["mem_search", {}]), ctx => { seen.push(ctx); return reply(); }]);
     await turn(r, "5", "看看记忆", "7");
-    expect(results(seen[0]!)[0]).toMatchObject({ name: "mem_list", error: false });
+    expect(results(seen[0]!)[0]).toMatchObject({ name: "mem_search", error: false });
     // 唤醒回合没有继承的人：可见集只剩读工具，服务端同样拒绝写
     const wake = { threadKey: "group:7", scope: "group:7", identity: { kind: "wake" as const }, inputs: [] };
-    expect(memory.toolNames(wake)).toEqual(["mem_search", "mem_list"]);
+    expect(memory.toolNames(wake)).toEqual(["mem_search"]);
     await expect(memory.tool(wake, "mem_remember", { text: "x", kind: "fact" })).rejects.toThrow("本轮身份未确证");
   });
 });

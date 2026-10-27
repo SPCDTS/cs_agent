@@ -106,9 +106,9 @@ flowchart LR
 | 任何 `person` 为空的回合 | 同上读 | 不可写（工具返回"本轮身份未确证"） |
 
 - `profile.md` 的写入只允许 `owner: true` 的回合，且只能写本线程命名空间的画像；面板编辑需 owner 运维口令。
-- 子 agent：只有 `mem_search` 与 `mem_list`，继承派出者在本会话的读范围；没有写工具。与 `send_message`、`auth_*` 的处理一致。（P1 注：此条只对 pi 成立；codex 子 agent 线程的 MCP 调用在主进程求绑定时一律拒绝，与 `qq_context` 相同，所以 codex 子 agent 没有记忆工具。）
+- 子 agent：只有 `mem_search`，继承派出者在本会话的读范围；没有写工具。与 `send_message`、`auth` 的处理一致。（P1 注：此条只对 pi 成立；codex 子 agent 线程的 MCP 调用在主进程求绑定时一律拒绝，与 `qq_context` 相同，所以 codex 子 agent 没有记忆工具。）
 - 定时回合：读写按创建者求出，和用户回合一样。唤醒回合按继承的人。
-- 工具可见性与现有做法一致：pi 每轮按 `runRights` 决定注册哪些 `mem_*`；codex 的 `im` 子进程启动时查 `/im-info`，服务端每次调用复核。
+- 工具可见性与现有做法一致：pi 每轮按 `runRights` 决定注册哪些 `mem_*`；codex 的 `im` 工具清单固定为全集，服务端每次调用复核。
 
 ## 6. 工具
 
@@ -121,8 +121,7 @@ flowchart LR
 
 | 工具 | 参数 | 行为 |
 | --- | --- | --- |
-| `mem_search` | `query`（≤100 字）、`kind?`、`subject?`、`status?`（默认 active）、`limit?`（≤20） | 可读命名空间内检索；命中条目更新 `last_recalled_at`、`recall_count`；写 `memory_recall` 事件 |
-| `mem_list` | `kind?`、`subject?`、`status?`、`limit?` | 不带检索词的列表，默认最近更新在前；`kind=commitment` 时按 `due_at` 排 |
+| `mem_search` | `query?`（≤100 字）、`kind?`、`subject?`、`status?`（默认 active）、`limit?`（≤20） | 带 query 时检索并更新召回计数（默认 10 条）；省略时列出最近更新且不增加召回计数（默认 20 条），`kind=commitment` 时按 `due_at` 排；两种方式均写 `memory_recall` |
 | `mem_remember` | `text`、`kind`、`subject?`、`since?`、`due_at?`、`supersedes?`（条目 id） | 写入可写命名空间。`hash` 已存在则返回已有条目不重复写；带 `supersedes` 时在同一事务里把旧条目标 `superseded` 并建链 |
 | `mem_update` | `id`、`text?`、`subject?`、`until?`、`due_at?`、`done_at?` | 改正文或时效；写版本 |
 | `mem_forget` | `id`、`reason` | 标 `forgotten`，不删行；版本保留，面板可恢复 |
@@ -146,7 +145,7 @@ flowchart LR
 ```
 
 - **pi**：新增 `memory` section，位置在 `project-context` 之后、`skills` 之前。内容不变不重发，与现有 section 一致，提示缓存只在画像或承诺变化时失效。
-- **codex**：渲染进会话域受管 `AGENTS.md`（`/workspace/<key>/AGENTS.md`），在"加载线程前生成，内容不变不重写"的现有流程里一起生成。已加载线程何时重读取决于 codex（[ARCHITECTURE.md](ARCHITECTURE.md) §4.1 已有同样的限制）；画像改动不频繁，可接受；需要立即生效时模型可以 `mem_search` 或 `mem_list`。
+- **codex**：渲染进会话域受管 `AGENTS.md`（`/workspace/<key>/AGENTS.md`），在"加载线程前生成，内容不变不重写"的现有流程里一起生成。已加载线程何时重读取决于 codex（[ARCHITECTURE.md](ARCHITECTURE.md) §4.1 已有同样的限制）；画像改动不频繁，可接受；需要立即生效时模型可以 `mem_search`。
 - 群与其他私聊的命名空间也有画像文件，但默认为空，不渲染空段。
 
 不做的事：不在每条输入前附加记忆，不在回合开始自动检索。
@@ -251,7 +250,7 @@ flowchart LR
 
 | 期 | 内容 | 验收 |
 | --- | --- | --- |
-| P1 | store、service、六个工具、pi section、codex AGENTS.md 注入、面板列表与遗忘 | owner 私聊说"记住…"，切换后端后 `mem_search` 能查到；群里查不到 owner 条目；子 agent 没有写工具 |
+| P1 | store、service、五个工具、pi section、codex AGENTS.md 注入、面板列表与遗忘 | owner 私聊说"记住…"，切换后端后 `mem_search` 能查到；群里查不到 owner 条目；子 agent 没有写工具 |
 | P2 | 抽取器 | 一段含偏好的对话结束后 30 s 内出现 `author=extractor` 条目；重复对话不产生重复条目 |
 | P3 | 整理、孤立、降级、画像提议、整批回退 | 撤回来源后次日条目标 `orphaned`；回退后状态恢复 |
 | P4 | 按召回记录评估命中率，决定是否加向量 | 有数据再定 |
@@ -259,7 +258,7 @@ flowchart LR
 ## 14. 未决问题
 
 1. 群命名空间的抽取默认关闭。要不要对 `QQ_ALLOW_GROUPS` 里的"家庭群"这类群默认打开，由 owner 在设置页决定。
-2. `commitment` 只是带截止时间的记忆条目，没有触发能力。"到期提醒"要靠定时任务读 `mem_list`，或者后续做事件源时再接。
+2. `commitment` 只是带截止时间的记忆条目，没有触发能力。"到期提醒"要靠定时任务调用不带 query 的 `mem_search`，或者后续做事件源时再接。
 3. owner 在群里说"记住我喜欢 X"：按 §5 写入群命名空间，owner 私聊看得到（读全部），但不会进 owner 画像。是否要提供"提升到 owner 命名空间"的工具参数，待用起来再定。
 4. （P3 已定）整理与显式写入：§8.0 说显式写入"整理时不动"，P3 据此实现为近似冲突里显式条目不会被取代（模型判它过时也只记 keep）、孤立检查只看抽取条目；精确去重与 episode 降级对所有作者生效（去重留最早一条，正文相同不丢信息）。
 5. （P3 已定）孤立与保留期：撤回与 `HISTORY_RAW_DAYS` 清理都删消息库原行，无法区分。孤立检查按来源会话的原文保留天数只看创建不早于"保留天数 − 7"天的抽取条目（7 天为抽取延迟的保守余量）；§12 的保留期改动落地后，保留天数为 0（永不清理，默认）的会话不受此限。

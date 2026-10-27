@@ -45,7 +45,7 @@ it("事件在 owner 线程开轮，只见只读工具，发送目标和授权由
     expect(runRights(binding, r.owners)).toMatchObject({ access: "all", auth: false, person: { kind: "event", owner: true } });
     expect(inputs[0]).toContain("[外部事件]");
     expect(seen[0]).toContain("read"); expect(seen[0]).toContain("send_message");
-    expect(seen[0].filter(name => /^(auth_|schedule_)/.test(name) || ["write", "edit", "bash", "subagent", "skill_publish"].includes(name))).toEqual([]);
+    expect(seen[0].filter(name => ["auth", "schedule", "schedule_control"].includes(name) || ["write", "edit", "bash", "subagent", "skill_publish"].includes(name))).toEqual([]);
     const sendBinding = { ...binding, access: { kind: "all" as const }, workdir: r.dir };
     await expect(r.sendService.send(sendBinding, { text: "拒绝", target: "qq:private:1" }, "explicit-target")).rejects.toThrow(BASE_ONLY_SEND);
     expect(await r.grants.permissions(binding)).toMatchObject({ auth: false, target: false });

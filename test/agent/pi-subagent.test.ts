@@ -14,7 +14,7 @@ const cleanup: (() => Promise<unknown> | void)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 
 /** 父会话可见的全部工具；子会话应只剩 echo 与 web_search。 */
-const PARENT_TOOLS = ["echo", "web_search", "send_message", "auth_grant", "auth_list", "schedule_create", "schedule_control", "mcp_docs_lookup_123456789abc"];
+const PARENT_TOOLS = ["echo", "web_search", "send_message", "auth", "schedule", "schedule_control", "mcp_docs_lookup_123456789abc"];
 const MCP_CALLABLE = "mcp_docs_internal_123456789abc";
 const last = (ctx: TranscriptContext) => ctx.messages.at(-1)!;
 
@@ -62,10 +62,10 @@ function parentBrain(commands: Record<string, [string, JsonObject][]>, seen: str
 }
 
 describe("pi 子 agent 扩展", () => {
-  it("排除名单：subagent、send_message、auth_*、schedule_* 不给子会话", () => {
-    for (const name of ["subagent", "send_message", "auth_grant", "auth_revoke", "auth_list", "schedule_create", "schedule_control", "schedule_whatever", "mcp_unknown_history", MCP_CALLABLE])
+  it("排除名单：subagent、send_message、auth、schedule、schedule_control 不给子会话", () => {
+    for (const name of ["subagent", "send_message", "auth", "schedule", "schedule_control", "mcp_unknown_history", MCP_CALLABLE])
       expect(isSubagentExcludedTool(name), name).toBe(true);
-    for (const name of ["echo", "web_search", "qq_recent", "generate_image", "bash", "read"]) expect(isSubagentExcludedTool(name), name).toBe(false);
+    for (const name of ["echo", "web_search", "qq_recent", "generate_image", "bash", "read", "auth_status", "schedule_whatever"]) expect(isSubagentExcludedTool(name), name).toBe(false);
     const allowed = new Set([PARENT_TOOLS.at(-1)!, MCP_CALLABLE, "mcp_refresh_tools"]);
     for (const name of allowed) expect(isSubagentExcludedTool(name, name => allowed.has(name))).toBe(false);
     expect(isSubagentExcludedTool("mcp_other_secret", name => allowed.has(name))).toBe(true);

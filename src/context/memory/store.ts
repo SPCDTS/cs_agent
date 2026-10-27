@@ -325,7 +325,7 @@ export class MemoryStore {
       .all(...match.args, ...filter.args, Math.max(0, Math.floor(q.limit)), Math.max(0, q.offset ?? 0)) as unknown as MemoryRow[];
   }
 
-  /** 列表（§6 mem_list）：缺省最近更新在前；kind=commitment 时按 due_at 升序、无截止的在后。缺省只列 active。 */
+  /** 列表（§6 mem_search 不带 query）：缺省最近更新在前；kind=commitment 时按 due_at 升序、无截止的在后。缺省只列 active。 */
   list(q: MemoryQuery): MemoryRow[] {
     const filter = this.where({ ...q, status: q.status ?? "active" });
     if (!filter) return [];

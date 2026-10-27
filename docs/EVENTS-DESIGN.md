@@ -9,7 +9,7 @@
 三条原则：
 
 1. **事件是输入，不是新的执行通道。** 复用 Inbox、ThreadHost、回合绑定、定时任务的运行记账与面板形态，只新增 `InboundKind = "event"` 和一个事件服务。不另起会话、不另起进程。
-2. **事件回合只读。** 事件内容是外部不可信资料（邮件正文天然是提示注入的载体）。事件回合没有 `auth_*`、`schedule_*`、子 agent、`send_message` 的 target；MCP 只开放服务配置里 `tools.eventAllow` 列出的读工具。写操作必须经过主人的一句话。
+2. **事件回合只读。** 事件内容是外部不可信资料（邮件正文天然是提示注入的载体）。事件回合没有 `auth`、`schedule`、`schedule_control`、子 agent、`send_message` 的 target；MCP 只开放服务配置里 `tools.eventAllow` 列出的读工具。写操作必须经过主人的一句话。
 3. **降噪在模型之前。** 过滤、合并、安静时段、预算都是确定性规则，在投递前完成；模型只负责"这件事重不重要"的判断，并可依据记忆里的偏好（"newsletter 不用提醒"）。
 
 ## 2. 能力范围
@@ -39,7 +39,7 @@
 | `src/agent/host/identity.ts` | `RunPerson.kind` 增加 `event`；绑定身份 `{ kind: "event", source, creator }`；权限见第 8 节 |
 | `src/agent/inbox.ts` | 事件输入与定时输入同样按入站键幂等投递；回合结束通知交给事件服务记账 |
 | `src/agent/pi-mcp/config.ts`、`index.ts` | 服务配置增加 `tools.eventAllow`；事件回合只选择、只执行该列表内的工具 |
-| `src/agent/pi-tools/*`、`src/mcp/im-server.ts`、`src/agent/codex/*` | 事件回合的工具可见性与复核：无 `auth_*`、`schedule_*`、`subagent`、target |
+| `src/agent/pi-tools/*`、`src/mcp/im-server.ts`、`src/agent/codex/*` | 事件回合的工具可见性与复核：无 `auth`、`schedule`、`schedule_control`、`subagent`、target |
 | `src/sidecar/gmail/{server,gmail}.ts` | 新增 `GET /events?cursor=<historyId>&limit=<n>`，同一 Bearer |
 | `src/obs/events/*`、`src/obs/ui/events-pages.ts` | 面板页与 `/api/events`、`/events/<source>` webhook 入口 |
 
@@ -125,7 +125,7 @@ sidecar 增加非 MCP 端点 `GET /events?cursor=<historyId>&limit=<n>`，鉴权
 | --- | --- |
 | 绑定的人 | 来源的创建者，首版固定为 owner（`RunPerson.kind = "event"`） |
 | `send_message` | 只能发回本会话（owner 私聊），无 target，不 @ |
-| `auth_*`、`schedule_*`、`skill_publish`、`subagent` | 无；pi 不注册，codex 的 im 复核时拒绝 |
+| `auth`、`schedule`、`schedule_control`、`skill_publish`、`subagent` | 无；pi 不注册，codex 的 im 复核时拒绝 |
 | 记忆 | 读全部命名空间（owner 线程规则）；可写 `owner`（主人说过"这类邮件不用提醒"时模型会在用户回合写，事件回合写入用于记录"已提醒"类 episode；每轮 ≤5 次） |
 | 聊天记录检索 | 与 owner 线程相同 |
 | MCP | 只有服务配置 `tools.eventAllow`（`allow` 的子集，默认 `[]`）中的工具；列表为空的服务在事件回合不选择、不连接。委派不可用（无子 agent） |
@@ -177,7 +177,7 @@ trace 事件（`@events` 键，详情不含标题、摘要、发件人）：
 
 ## 12. 验证与落地顺序
 
-1. **P1 内核**：`InboundKind.event`、身份与权限、输入外壳、`cs.events` 文档、事件服务（去重/过滤/合并/预算/记账）、面板最小页（来源状态与最近事件）。测试：事件输入在线程忙时排队不插话；重放同键不重复投递；事件回合无 `auth_*`/`schedule_*`/target；事件回合 MCP 只见 `eventAllow`；预算超额并入下一条；重启后 `queued` 事件输入重投一次。
+1. **P1 内核**：`InboundKind.event`、身份与权限、输入外壳、`cs.events` 文档、事件服务（去重/过滤/合并/预算/记账）、面板最小页（来源状态与最近事件）。测试：事件输入在线程忙时排队不插话；重放同键不重复投递；事件回合无 `auth`/`schedule`、`schedule_control`/target；事件回合 MCP 只见 `eventAllow`；预算超额并入下一条；重启后 `queued` 事件输入重投一次。
 2. **P1 Gmail**：sidecar `/events` 端点（HTTP 桩测试：空游标重置、history 分页、404 重置）；宿主 Gmail 来源与默认过滤；端到端：桩 sidecar → 投递 → Pi faux 模型调用 `gmail_read`（eventAllow）→ `send_message` → 记 sent。
 3. **P2**：webhook 入口与密钥；安静时段与积压；面板设置表单。
 4. **P3**：Outlook 日历来源（Graph 日历 sidecar）、Notion 变更来源。

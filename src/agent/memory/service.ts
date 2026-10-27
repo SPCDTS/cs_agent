@@ -1,6 +1,7 @@
+import { isMemoryOperation, type MemoryOperation } from "../../shared/memory-tools.js";
 /**
  * 记忆服务（docs/MEMORY-DESIGN.md §5、§6）：按本轮权限（host/identity.ts 的 runRights）求出命名空间的可读集与可写集，
- * 执行六个 mem_* 工具的语义，写 trace 事件 memory_recall / memory_write。pi 工具与 codex 的 im MCP（经 loopback）都调这里，
+ * 执行 mem_* 内部操作的语义，写 trace 事件 memory_recall / memory_write。pi 工具与 codex 的 im MCP（经 loopback）都调这里，
  * 每次调用都重新求权限，不信任调用方传来的范围。面板的遗忘 / 恢复也经这里，作者记为 dashboard。
  */
 import type { InboundRecord, TurnBinding } from "../../channel/types.js";
@@ -14,7 +15,7 @@ import { trace as defaultTrace, type Trace } from "../../shared/trace.js";
 import { containsSecret } from "../../shared/redact.js";
 import { isEventTurn, runRights, type RunRights } from "../host/identity.js";
 import { formatMemoryLine, renderMemorySection } from "./render.js";
-import { MEMORY_READ_TOOLS, MEMORY_WRITE_TOOLS, isMemoryTool, memoryInputs, parseClearableTime, parseMemoryTime, type MemoryTool } from "./tools.js";
+import { MEMORY_READ_TOOLS, MEMORY_WRITE_TOOLS, memoryInputs, parseClearableTime, parseMemoryTime, type MemoryTool } from "./tools.js";
 
 /** 本轮的记忆范围：read 为可读命名空间（all = 全部），write 为可写命名空间，profile 为可改画像的命名空间。 */
 export interface MemoryAccess {
@@ -119,7 +120,7 @@ export class MemoryService {
 
   /** 执行一个 mem_* 工具，返回文本；参数或权限不符抛 MemoryError（调用方作为工具错误返回）。 */
   async tool(binding: MemoryBinding, name: string, args: unknown): Promise<string> {
-    if (!isMemoryTool(name)) throw new MemoryError("未知的记忆工具：" + name);
+    if (!isMemoryOperation(name)) throw new MemoryError("未知的记忆工具：" + name);
     const rights = runRights(binding, this.owners()), access = memoryAccess(rights, binding.child === true);
     try {
       switch (name) {
@@ -161,7 +162,7 @@ export class MemoryService {
     return { text: out.join("\n"), shown };
   }
 
-  private recall(binding: MemoryBinding, tool: MemoryTool, hits: readonly MemoryRow[], shown: readonly MemoryRow[], chars: number): void {
+  private recall(binding: MemoryBinding, tool: MemoryOperation, hits: readonly MemoryRow[], shown: readonly MemoryRow[], chars: number): void {
     this.tracer.event(traceKeyOf(binding), "memory_recall", { detail: { backend: binding.backend, session: binding.session, tool,
       ids: shown.map(r => r.id), returned_count: shown.length, dropped_count: hits.length - shown.length, chars,
       max_chars: this.maxChars() } });
@@ -209,7 +210,7 @@ export class MemoryService {
     if (texts.some(t => t !== undefined && containsSecret(t))) throw new MemoryError("内容包含凭据样式的信息，拒绝写入记忆");
   }
 
-  private written(binding: MemoryBinding, tool: MemoryTool, rights: RunRights, row: MemoryRow, extra: Record<string, unknown> = {}): void {
+  private written(binding: MemoryBinding, tool: MemoryOperation, rights: RunRights, row: MemoryRow, extra: Record<string, unknown> = {}): void {
     this.tracer.event(traceKeyOf(binding), "memory_write", { detail: { backend: binding.backend, session: binding.session, tool,
       author: rights.actor, id: row.id, ns: row.ns, kind: row.kind, status: row.status, ...extra } });
   }

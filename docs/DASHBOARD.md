@@ -57,7 +57,7 @@
 
 ### 2.3 定时任务
 
-面板身份即 owner：支持查看全部任务及详情、暂停、恢复、立即运行和删除；创建与修改任务在聊天里让 agent 通过 `schedule_create`、`schedule_update` 完成。未配置 owner 或未接入 ScheduleService 时只显示未启用。表单 POST 与 JSON 接口使用同一套校验，失败时在列表或详情页显示错误提示，任务不存在时回到列表。时间均按北京时间显示，群名来自 `scope_names`。删除用页内展开的确认按钮。
+面板身份即 owner：支持查看全部任务及详情、暂停、恢复、立即运行和删除；创建与修改任务在聊天里让 agent 通过 `schedule` 的 `create`、`update` 动作完成。未配置 owner 或未接入 ScheduleService 时只显示未启用。表单 POST 与 JSON 接口使用同一套校验，失败时在列表或详情页显示错误提示，任务不存在时回到列表。时间均按北京时间显示，群名来自 `scope_names`。删除用页内展开的确认按钮。
 
 JSON 接口 `/api/schedules`：`GET` 返回 `{schedules, csrf}`；`POST /api/schedules/<id>/{pause,resume,run,delete}` 只接受 `application/json`（≤64 KiB），CSRF 令牌放 `X-CSRF-Token` 头或 `_csrf` 字段。
 

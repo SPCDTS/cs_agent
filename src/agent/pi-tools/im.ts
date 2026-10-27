@@ -1,6 +1,7 @@
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { AUTH_TOOLS, type ImPermissions } from "../grants.js";
-import { authDescriptions, authParameters, sendParameters, SKILL_PUBLISH_DESCRIPTION, skillPublishParameters } from "../im-tools.js";
+import { AUTH_TOOLS } from "../../shared/auth-tools.js";
+import type { ImPermissions } from "../grants.js";
+import { authDescriptions, authParameters, parseAuthCall, sendParameters, SKILL_PUBLISH_DESCRIPTION, skillPublishParameters } from "../im-tools.js";
 import { SKILL_OWNER_ONLY } from "../../context/media-recall-server.js";
 import { publishSkill, type SkillsStore } from "../skills-store.js";
 import { parseAccess } from "../../context/access.js";
@@ -31,13 +32,14 @@ export function createPiImExtensions(opts: Pick<PiToolsOptions, "sendService" | 
       }),
       ...(permissions.auth ? AUTH_TOOLS.map(name => defineTool({
         name, description: authDescriptions[name], parameters: authParameters[name],
-        replay: name === "auth_list" ? "safe" as const : "unsafe" as const,
+        replay: "unsafe",
         async execute(args, api, context) {
           try {
             const bound = await opts.binding(Number(api.conversationId));
             if (!bound || bound.child || !opts.grants) throw new Error("授权工具仅限 owner 回合");
             context.abortSignal?.throwIfAborted();
-            return output(JSON.stringify(await opts.grants.tool(bound, name, args)));
+            const call = parseAuthCall(args);
+            return output(JSON.stringify(await opts.grants.tool(bound, call.name, call.args)));
           } catch (error) { return { ...output((error as Error).message), isError: true }; }
         },
       })) : []),

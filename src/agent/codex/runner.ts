@@ -473,7 +473,7 @@ export class CodexRunner {
     await this.opts.preparePrompt?.();
     const managed = renderManagedAgentsMd({ dataDir, workspaceDir: policy.workspaceDir,
       codexHome: this.opts.codexHome, writableRoots: policy.writableRoots, readOnly: this.opts.sandbox === "read-only" });
-    // 记忆段读不到时不阻塞加载线程，模型仍可用 mem_search / mem_list 查。
+    // 记忆段读不到时不阻塞加载线程，模型仍可用 mem_search 查。
     const memory = await this.opts.memoryPrompt?.(key).catch((error: unknown) => { log.warn("codex memory prompt failed", { key, error }); return undefined; });
     const instructions = managed + (memory ? "\n\n## 记忆（画像与未完成的承诺）\n" + memory : "") + (guidance ? "\n\n## 运维工作区指引\n" + guidance : "");
     await writeManagedFile(path.join(policy.workspaceDir, "AGENTS.md"),

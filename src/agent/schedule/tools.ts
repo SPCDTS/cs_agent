@@ -1,6 +1,6 @@
 import type { Harness } from "@earendil-works/pi-durable";
 import { trace, type Trace } from "../../shared/trace.js";
-import type { ScheduleTool, ScheduleToolPermissions } from "../../shared/schedule-tools.js";
+import type { ScheduleOperation, ScheduleToolPermissions } from "../../shared/schedule-tools.js";
 import type { GrantBinding, GrantsService } from "../grants.js";
 import { readScheduledRun } from "./run.js";
 import type { ScheduleService } from "./service.js";
@@ -49,7 +49,7 @@ export class ScheduleTools {
     return { schedule: access.management, scheduleControl: access.scheduleId !== undefined };
   }
 
-  async tool(binding: GrantBinding, name: ScheduleTool, input: unknown): Promise<string> {
+  async tool(binding: GrantBinding, name: ScheduleOperation, input: unknown): Promise<string> {
     const access = await this.access(binding), service = this.opts.getSchedules();
     let id: string | null = null, action: string = name.slice("schedule_".length), reason: string | undefined, text: string;
     if (name === "schedule_control") {

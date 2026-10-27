@@ -42,7 +42,7 @@ it("owner 用户派出、定时回合追问后无继承身份的汇报，重启�
     await expect(r.pi.spawner(id)).resolves.toEqual({ turn: "wake" });
     const tools = offered.at(-1)!;
     expect(tools).toEqual(expect.arrayContaining(["read", "write", "edit", "bash", "subagent", "send_message"]));
-    expect(tools.filter(name => /^(auth_|schedule_)/.test(name))).toEqual([]);
+    expect(tools.filter(name => ["auth", "schedule", "schedule_control"].includes(name))).toEqual([]);
   };
   await assertBasicWake();
   const conv = (await r.pi.harness.conversation(id, context))!;

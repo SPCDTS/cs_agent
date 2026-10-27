@@ -6,7 +6,7 @@ it("独立 im stdio 工具立即发消息与附件，返回 message_id；工具�
   const f = await imSendRig({ stdio: true });
   const tools = (await f.client.listTools()).tools;
   expect(tools.map(t => t.name)).toContain("send_message");
-  expect(tools.map(t => t.name)).toEqual(expect.arrayContaining(["auth_grant", "auth_list", "schedule_create", "schedule_control"]));
+  expect(tools.map(t => t.name)).toEqual(expect.arrayContaining(["auth", "schedule", "schedule_control"]));
   expect(Object.hasOwn(tools[0]!.inputSchema.properties!, "target")).toBe(true);
   const result = await f.tool("send_message", { text: "报告", images: ["image.png"], files: [{ path: "file.txt", name: "报告.txt" }] });
   expect(result.isError).not.toBe(true);
