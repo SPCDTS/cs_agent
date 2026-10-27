@@ -192,12 +192,12 @@ const createReporter = (opts: SubagentOptions) => defineTask<ReporterInput, Repo
 
 const Parameters = Type.Object({
   action: Type.Union([Type.Literal("spawn"), Type.Literal("message"), Type.Literal("status"), Type.Literal("list"), Type.Literal("stop")], {
-    description: "spawn 派出新的子 agent；message 给已有子 agent 发消息；status/list 查看；stop 停止并释放名额",
+    description: "spawn starts a new subagent; message sends a message to an existing subagent; status/list inspects subagents; stop stops one and frees its slot",
   }),
-  name: Type.Optional(Type.String({ minLength: 1, maxLength: 32, description: "子 agent 名字；spawn 时可省略" })),
-  task: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "spawn 的任务说明，或 message 的内容" })),
+  name: Type.Optional(Type.String({ minLength: 1, maxLength: 32, description: "Subagent name; optional for spawn" })),
+  task: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "Task instructions for spawn, or message content for message" })),
   mode: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer")], {
-    description: "message 的投递方式：followUp（默认）等它当前工作结束再处理；steer 插入它正在进行的工作",
+    description: "Delivery mode for message: followUp (default) waits until its current work finishes; steer inserts the message into its ongoing work",
   })),
 }, { additionalProperties: false });
 
@@ -227,7 +227,7 @@ export function createSubagentExtension(opts: SubagentOptions) {
 
   const tool = defineTool({
     name: "subagent",
-    description: "把独立、耗时的任务交给后台子 agent。spawn 后立即返回，子 agent 完成时结果会以“[子 agent 完成]”输入自动交回给你；子 agent 不能联系用户、授权或定时。",
+    description: "Delegate independent, time-consuming tasks to a background subagent. spawn returns immediately; when the subagent finishes, its result is automatically returned to you as '[子 agent 完成]' input. Subagents cannot contact users, grant permissions, or schedule tasks.",
     parameters: Parameters,
     replay: "safe",
     async execute(args, api, context) {

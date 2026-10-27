@@ -6,7 +6,7 @@ import type { PiCallBinding } from "./request.js";
 
 export function recallTool(binding: (conversationId: number) => Promise<PiCallBinding | undefined>, media?: Pick<MediaRecall, "recall">) {
   return defineTool({
-    name: "qq_image", description: "按消息 id 召回本次授权范围的图片，只返回本地路径文本。消息中的 [image] 表示尚未召回，需要查看时调用 qq_image(message_id)，返回路径后用 read 打开；[image:<路径>] 表示已召回，可直接用 read 打开。read 读取图片会返回图片内容。",
+    name: "qq_image", description: "Recall an image by message id within the current authorization scope; return only its local path as text. In messages, '[image]' means not yet recalled: call qq_image(message_id) when you need to view it, then open the returned path with read. '[image:<path>]' means already recalled and can be opened directly with read. Reading an image with read returns its image content.",
     replay: "safe",
     parameters: Type.Object({ message_id: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
     async execute(args, api, context) {

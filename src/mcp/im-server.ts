@@ -25,18 +25,18 @@ export interface ImHandlers {
 export function createImServer(handlers: ImHandlers): Server {
   const server = new Server({ name: "im", version: "2.0.0" }, { capabilities: { tools: {} } });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{
-    name: "send_message", description: "用户能看到你内容的唯一方式：立即发送消息，默认发往本会话，返回 message_id。target 须有授权。",
+    name: "send_message", description: "The only way users can see your content: immediately send a message, to this chat by default, and return message_id. target requires authorization.",
     inputSchema: sendParameters(true),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, ...AUTH_TOOLS.map(name => ({
-    name, description: authDescriptions[name] + "（仅限 owner 回合）", inputSchema: authParameters[name],
+    name, description: authDescriptions[name] + " (owner turns only)", inputSchema: authParameters[name],
     annotations: { readOnlyHint: name === "auth_list", destructiveHint: name === "auth_revoke", openWorldHint: false },
   })), {
     name: "skill_publish", description: SKILL_PUBLISH_DESCRIPTION, inputSchema: skillPublishParameters,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, ...MEMORY_TOOLS.map(name => ({
     // 使用规则只在 MEMORY_RULE 定义一次，挂在 mem_remember 的说明里；可见性固定为全集，主进程每次调用按本轮权限复核。
-    name, description: memoryDescriptions[name] + (name === "mem_remember" ? MEMORY_RULE : ""), inputSchema: memoryParameters[name],
+    name, description: memoryDescriptions[name] + (name === "mem_remember" ? " " + MEMORY_RULE : ""), inputSchema: memoryParameters[name],
     annotations: { readOnlyHint: name === "mem_search" || name === "mem_list", destructiveHint: false, idempotentHint: name !== "mem_update", openWorldHint: false },
   })), ...SCHEDULE_TOOLS.map(name => ({
     name, description: scheduleDescriptions[name], inputSchema: scheduleParameters[name],

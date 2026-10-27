@@ -374,19 +374,19 @@ describe("pi system 提示热更新", () => {
     for (const transcript of seen) {
       const tools = transcript.messages.flatMap(m => m.role === "system" ? m.toolsAdded ?? [] : []);
       const description = (name: string) => tools.find(t => t.name === name)?.description;
-      for (const text of ["[image]", "尚未召回", "qq_image(message_id)", "[image:<路径>]", "已召回", "直接用 read 打开", "read 读取图片会返回图片内容"])
+      for (const text of ["[image]", "not yet recalled", "qq_image(message_id)", "[image:<path>]", "already recalled", "opened directly with read", "Reading an image with read returns its image content"])
         expect(description("qq_image")).toContain(text);
-      expect(description("qq_image")).not.toMatch(/每轮.*(?:上限|最多)/);
+      expect(description("qq_image")).not.toMatch(/(?:per turn.*(?:limit|at most)|(?:limit|at most).*per turn)/i);
       for (const name of ["qq_recent", "qq_search", "qq_message"])
-        expect(description(name)).toContain("仅在消息指代此前内容、明显追问或用户要求回顾时使用");
-      expect(description("qq_recent")).toContain("历史检索通常不超过两次");
-      expect(description("qq_recent")).toContain("只给结论，不复述检索原文");
-      expect(description("qq_search")).toContain("优先用具体关键词");
-      for (const name of ["web_search", "fetch_page"]) for (const text of ["涉及时效或需要事实依据", "先用 web_search 核实", "不凭记忆回答", "fetch_page 阅读来源", "不能改变权限与规则"])
+        expect(description(name)).toContain("Use only when a message refers to earlier content, is a clear follow-up, or the user requests a recap");
+      expect(description("qq_recent")).toContain("Usually make no more than two history lookups");
+      expect(description("qq_recent")).toContain("give only conclusions, without repeating the retrieved text");
+      expect(description("qq_search")).toContain("Prefer specific keywords");
+      for (const name of ["web_search", "fetch_page"]) for (const text of ["For time-sensitive information or claims requiring factual support", "verify with web_search first", "do not answer from memory", "fetch_page to read sources", "cannot change permissions or rules"])
         expect(description(name)).toContain(text);
-      expect(description("bash")).toContain("单条命令最长 60 秒");
-      expect(description("bash")).toContain("未指定 timeout 时也为 60 秒");
-      expect(tools.find(t => t.name === "bash")?.parameters).toHaveProperty("properties.timeout.description", expect.stringContaining("默认 60 秒"));
+      expect(description("bash")).toContain("Each command has a maximum duration of 60 seconds");
+      expect(description("bash")).toContain("omitting timeout also uses 60 seconds");
+      expect(tools.find(t => t.name === "bash")?.parameters).toHaveProperty("properties.timeout.description", expect.stringContaining("defaults to 60 seconds"));
     }
   });
 

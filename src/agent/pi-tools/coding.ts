@@ -117,8 +117,8 @@ export async function codingTools() {
     prepare: (bytes, mimeType) => images.prepare(bytes, mimeType, DEFAULT_IMAGE_LIMITS),
   } });
   const bash = createBashTool();
-  bash.description += " 单条命令最长 60 秒，未指定 timeout 时也为 60 秒。";
-  const timeout = { ...bash.parameters.properties.timeout, description: "超时秒数（可选，默认 60 秒，最长 60 秒）。" };
+  bash.description += " Each command has a maximum duration of 60 seconds; omitting timeout also uses 60 seconds.";
+  const timeout = { ...bash.parameters.properties.timeout, description: "Timeout in seconds (optional, defaults to 60 seconds, maximum 60 seconds)." };
   bash.parameters = { ...bash.parameters, properties: { ...bash.parameters.properties, timeout } };
   return { ...coding, tools: coding.tools?.map(tool => tool.name === "bash" ? bash : tool) };
 }

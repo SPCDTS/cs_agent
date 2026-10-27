@@ -103,7 +103,7 @@ describe("群内 MCP 宿主审批", () => {
     expect(r.texts()[0]).toContain(`待审批 #${first.code}`);
     expect(JSON.stringify(await results(r))).toContain(`已提交主人审批（#${first.code}）`);
     expect((await results(r)).every(e => e.model?.some(m => m.role === "toolResult" && !m.isError))).toBe(true);
-    expect(offered(seen[0]!).find(t => t.name.includes("workshop_edit"))?.description).toContain("需主人审批");
+    expect(offered(seen[0]!).find(t => t.name.includes("workshop_edit"))?.description).toContain("Requires owner approval");
     expect(offered(seen[0]!).some(t => t.name === "mcp_refresh_tools")).toBe(true);
     expect((await r.harness.snapshot(McpApprovalDoc, first.code, context))?.record?.code).toBe(first.code);
     expect(await r.pi.harness.snapshot(McpApprovalDoc, first.code, context)).toBeUndefined();

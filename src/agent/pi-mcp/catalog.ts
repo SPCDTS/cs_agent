@@ -67,7 +67,7 @@ export function approvalCatalog(revision: CatalogRevision, approval: readonly st
   const { digest: _digest, ...original } = revision;
   const payload = { ...original, scopeDigest: digest([revision.scopeDigest, "group"]), tools: revision.tools.map(tool =>
     approval.includes(tool.name) ? { ...tool, approval: true as const,
-      description: tool.description + "\n群里由主人以外的人触发时需主人审批：调用后只返回审批编号，不会立即执行，不要重复调用；主人触发时直接执行。" } : tool) };
+      description: tool.description + "\nRequires owner approval when triggered by a non-owner in a group: the call only returns an approval code without executing immediately; do not repeat the call. Calls triggered by the owner execute directly." } : tool) };
   return { ...payload, digest: digest(payload) };
 }
 

@@ -15,7 +15,7 @@ export function createPiImExtensions(opts: Pick<PiToolsOptions, "sendService" | 
     name,
     tools: [
       defineTool({
-        name: "send_message", description: "用户能看到你内容的唯一方式：立即发送文字及可选图片、文件，默认发往本会话，返回 message_id。回合中途、子 agent 完成后都可以发。",
+        name: "send_message", description: "The only way users can see your content: immediately send text with optional images and files, to this chat by default, and return message_id. You may send during a turn or after a subagent finishes.",
         parameters: sendParameters(permissions.target), replay: "safe",
         async execute(args, api, context) {
           try {

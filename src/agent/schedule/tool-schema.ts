@@ -4,7 +4,7 @@ import { SHANGHAI_OFFSET_MS } from "./model.js";
 import type { ScheduleRule } from "./types.js";
 
 const TIME_PATTERN = "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$";
-const time = Type.String({ pattern: TIME_PATTERN, description: "北京时间，严格使用 YYYY-MM-DD HH:mm" });
+const time = Type.String({ pattern: TIME_PATTERN, description: "Beijing time, strictly in YYYY-MM-DD HH:mm format" });
 const name = Type.String({ minLength: 1, maxLength: 64 });
 const prompt = Type.String({ minLength: 1, maxLength: 8000 });
 const id = Type.String({ minLength: 1, maxLength: 128 });
@@ -23,16 +23,16 @@ export const scheduleParameters = {
     reason: Type.String({ minLength: 1, maxLength: 500 }),
   }, { additionalProperties: false }),
 };
-const promptInstruction = "prompt 必须明确每次执行什么、通知谁以及如何通知。目的地如“家庭群”须先用 qq_chats 解析，将具体 ref 写入 prompt，例如“发到 qq:group:123（家庭群）”。监控任务若用户要求无更新不通知，写明“无新内容则静默（silent if nothing new）”。";
+const promptInstruction = "prompt must specify what to do on each run, whom to notify, and how. Resolve destinations such as '家庭群' with qq_chats first, then include the exact ref in prompt, e.g. '发到 qq:group:123（家庭群）'. For monitoring tasks where the user requests no notification without updates, explicitly write '无新内容则静默（silent if nothing new）'.";
 export const scheduleDescriptions = {
-  schedule_create: "在当前来源会话创建定时任务，创建者为本回合发言人。rule 使用北京时间；rrule 是 RRULE 正文，start 省略为现在；at 为未来的一次性时刻。" + promptInstruction,
-  schedule_list: "列出可见定时任务的 id、状态与下次北京时间；owner 看全部，其他人只看自己创建的任务。",
-  schedule_update: "按 id 修改名称、prompt 或整个 rule；来源会话与创建者不可修改。只能管理有权操作的任务。" + promptInstruction,
-  schedule_pause: "按 id 暂停定时任务，不中断正在执行的回合。",
-  schedule_resume: "按 id 恢复定时任务，从现在重新计算下次北京时间，不补跑错过的触发。",
-  schedule_delete: "按 id 删除定时任务。",
-  schedule_run_now: "按 id 立即触发一次，不改变下次计划时间；返回本次运行状态。",
-  schedule_control: "仅定时运行可用：暂停（pause）或完成（complete）本次运行所属的任务，并说明 reason。完成后停止后续触发，不中断当前回合；不能指定其他任务。",
+  schedule_create: "Create a scheduled task in the current source chat, with this turn's speaker as its creator. rule uses Beijing time; rrule is the RRULE body, start defaults to now if omitted, and at is a one-time future instant. " + promptInstruction,
+  schedule_list: "List visible scheduled tasks with id, status, and next run time in Beijing time. The owner sees all tasks; others see only tasks they created.",
+  schedule_update: "Update the name, prompt, or entire rule by id. The source chat and creator cannot be changed. Manage only tasks you are authorized to operate on. " + promptInstruction,
+  schedule_pause: "Pause a scheduled task by id without interrupting a running turn.",
+  schedule_resume: "Resume a scheduled task by id, recalculating the next run in Beijing time from now without replaying missed triggers.",
+  schedule_delete: "Delete a scheduled task by id.",
+  schedule_run_now: "Trigger one run immediately by id without changing the next scheduled time; return the status of this run.",
+  schedule_control: "Available only during scheduled runs: pause or complete the task for this run and provide a reason. Completion stops future triggers without interrupting the current turn. Other tasks cannot be targeted.",
 };
 
 const timeInput = z.string().regex(new RegExp(TIME_PATTERN));

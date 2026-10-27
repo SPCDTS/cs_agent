@@ -30,31 +30,31 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: f
 const TOOLS = [
   {
     name: "qq_chats",
-    description: "只读列出群名、群号及好友备注；仅限主人回合，用于按名称确认会话。",
+    description: "Read-only listing of group names, group IDs, and friend remark names; owner turns only, for identifying chats by name.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: READ_ONLY,
   },
   {
     name: "qq_view_image",
-    description: "查看当前访问范围内已召回的图片，一次一张，不占召回次数。",
+    description: "View already recalled images within the current access scope, one at a time, without counting toward the recall limit.",
     inputSchema: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 1024 } }, required: ["path"], additionalProperties: false },
     annotations: READ_ONLY,
   },
   {
     name: "qq_image",
-    description: "按消息 id 召回图片，只返回本地路径文本，用 qq_view_image 查看；每轮最多 5 次。",
+    description: "Recall an image by message id; return only its local path as text. Use qq_view_image to view it; at most 5 recalls per turn.",
     inputSchema: { type: "object", properties: { message_id: { type: "string", minLength: 1, maxLength: 128 } }, required: ["message_id"], additionalProperties: false },
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   },
   {
     name: "qq_recent",
     description:
-      "读取当前 QQ 会话最近的聊天记录（旧→新，每行 `#消息id 时间 昵称: 文本`，[我] 是机器人自己）。仅当消息指代此前内容时使用。",
+      "Read recent history from the current QQ chat (oldest first, each line formatted as `#message_id time nickname: text`; '[我]' is the bot itself). Use only when a message refers to earlier content.",
     inputSchema: {
       type: "object",
       properties: {
-        limit: { type: "integer", minimum: 1, maximum: RECENT_MAX, description: `条数，≤${RECENT_MAX}，默认 15` },
-        before_message_id: { type: "string", description: "只看这条消息之前的记录（向前翻页）" },
+        limit: { type: "integer", minimum: 1, maximum: RECENT_MAX, description: `Number of records, at most ${RECENT_MAX}, defaults to 15` },
+        before_message_id: { type: "string", description: "Only records before this message (page back through history)" },
       },
       additionalProperties: false,
     },
@@ -62,13 +62,13 @@ const TOOLS = [
   },
   {
     name: "qq_search",
-    description: "按关键词检索当前 QQ 会话的历史（原始消息与日/周摘要混排，新→旧）。多个关键词用空格分隔，需全部命中。",
+    description: "Search the current QQ chat history by keyword (raw messages mixed with daily/weekly summaries, newest first). Separate multiple keywords with spaces; all must match.",
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "关键词（中文可用 2 字以上子串）" },
-        days: { type: "integer", minimum: 1, maximum: SEARCH_DAYS_MAX, description: `回溯天数，≤${SEARCH_DAYS_MAX}，默认 30` },
-        limit: { type: "integer", minimum: 1, maximum: SEARCH_LIMIT_MAX, description: `条数，≤${SEARCH_LIMIT_MAX}，默认 10` },
+        query: { type: "string", description: "Keywords (Chinese substrings of at least 2 characters are supported)" },
+        days: { type: "integer", minimum: 1, maximum: SEARCH_DAYS_MAX, description: `Days to look back, at most ${SEARCH_DAYS_MAX}, defaults to 30` },
+        limit: { type: "integer", minimum: 1, maximum: SEARCH_LIMIT_MAX, description: `Number of records, at most ${SEARCH_LIMIT_MAX}, defaults to 10` },
       },
       required: ["query"],
       additionalProperties: false,
@@ -77,7 +77,7 @@ const TOOLS = [
   },
   {
     name: "qq_message",
-    description: "读取一条消息的完整正文及其引用链（≤3 层）。message_id 来自 qq_recent / qq_search 行首的 #id。",
+    description: "Read a message's full text and its quote chain (at most 3 levels). Get message_id from the #id at the start of a qq_recent / qq_search line.",
     inputSchema: {
       type: "object",
       properties: { message_id: { type: "string" } },

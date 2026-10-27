@@ -7,7 +7,7 @@ import type { PiCallBinding } from "./request.js";
 
 export function chatsTool(binding: (conversationId: number) => Promise<PiCallBinding | undefined>, channel?: Pick<Channel, "listChats">) {
   return defineTool({
-    name: "qq_chats", description: "只读列出群名、群号及好友备注；仅限主人回合，用于按名称确认会话。",
+    name: "qq_chats", description: "Read-only listing of group names, group IDs, and friend remark names; owner turns only, for identifying chats by name.",
     replay: "safe", parameters: Type.Object({}, { additionalProperties: false }),
     async execute(_args, api, context) {
       try {
