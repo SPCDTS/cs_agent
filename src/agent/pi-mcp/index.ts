@@ -327,7 +327,8 @@ export class PiMcp {
   }
 
   private async selection(revision: CatalogRevision, server: McpServerConfig, turn: TurnBinding, signal: AbortSignal): Promise<CatalogRevision> {
-    if (!turn.scope.startsWith("group:") || runRights(turn, this.opts.owners()).owner) return revision;
+    // 群里 owner 与成员共用一份目录：工具名不随回合身份变化，是否审批只在执行时按身份决定。
+    if (!turn.scope.startsWith("group:")) return revision;
     const selected = approvalCatalog(revision, server.tools.approval);
     if (jsonBytes(selected) > this.limits.catalogBytes) throw new McpFailure("catalog_too_large");
     await this.publish(selected, signal);

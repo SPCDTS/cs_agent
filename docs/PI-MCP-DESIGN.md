@@ -373,7 +373,7 @@ SDK API 以本地锁定安装版本和 [TypeScript SDK v1 官方源码](https://
 
 Inbox 在 ThreadHost 投递前截获已验证 owner 的引用/编号命令，恢复 queued 输入时经过同一入口。pending → executing 先提交事务，再消费入站、调用 PiBackend → PiMcp.invoke；不运行模型，不在事务内访问网络。每次执行复核配置摘要、群与工具名单、owner 身份及参数摘要；复用原连接池、队列、预算、schema 与 convertMcpResult。重启将 executing 结算为 unknown，不重放。
 
-成员工具目录使用独立权限摘要，审批工具只返回回执；owner 与成员实际连接都使用 owner principal，按 conversation 隔离。申请通知、拒绝及结果走 SendService.system / Outbox，显式 @owner 或申请人，决定答复引用 owner 消息；普通消息库与期间消息承接后续上下文。审计为 mcp_approval_requested / decided / executed，仅记录编号、工具、群、申请人、参数摘要与大小，发送审计也不采审批正文。
+群工具目录使用独立权限摘要且 owner 与成员共用，同一会话里工具名不随回合身份变化（否则模型沿用别的身份回合里的名字会得到 tool_unavailable）；成员调用审批工具只返回回执；owner 与成员实际连接都使用 owner principal，按 conversation 隔离。申请通知、拒绝及结果走 SendService.system / Outbox，显式 @owner 或申请人，决定答复引用 owner 消息；普通消息库与期间消息承接后续上下文。审计为 mcp_approval_requested / decided / executed，仅记录编号、工具、群、申请人、参数摘要与大小，发送审计也不采审批正文。
 
 ## 17. OAuth 凭据（已实现）
 

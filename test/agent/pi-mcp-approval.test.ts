@@ -75,13 +75,17 @@ async function results(r: ResidentRig) {
 }
 
 describe("群内 MCP 宿主审批", () => {
-  it("owner 群内写工具直接执行；成员读工具直接执行，共用本群 owner 连接", async () => {
-    const s = await fixture(), r = await residentRig({ mcp: s.mcp, brain: brain() });
+  it("owner 群内写工具直接执行；成员读工具直接执行，共用本群 owner 连接；成员沿用 owner 用过的工具名进入审批", async () => {
+    let ownerEdit: string | undefined;
+    const s = await fixture(), r = await residentRig({ mcp: s.mcp, brain: ctx => { ownerEdit ??= nameOf(ctx, "workshop_edit"); return brain()(ctx); } });
     await r.say("9", "编辑项目"); await r.idle();
     r.brain.current = brain("workshop_status");
     await r.say("5", "查看状态"); await r.idle();
     expect(s.calls).toEqual([{ name: "workshop_edit", arguments: { project: "demo-A" } }, { name: "workshop_status", arguments: { project: "demo-A" } }]);
     expect(s.sessions).toHaveLength(1); expect(await records(r)).toEqual([]);
+    r.brain.current = ctx => endRole(ctx) === "toolResult" ? reply() : call([ownerEdit!, { project: "demo-A" }]);
+    await r.say("5", "编辑项目"); await r.idle();
+    expect((await records(r)).map(x => x.state)).toEqual(["pending"]); expect(s.calls).toHaveLength(2);
     await r.say("1", "查看状态", null); await r.idle();
     expect(s.sessions).toHaveLength(2);
   });
@@ -98,7 +102,7 @@ describe("群内 MCP 宿主审批", () => {
     expect(r.texts()[0]).toContain(`待审批 #${first.code}`);
     expect(JSON.stringify(await results(r))).toContain(`已提交主人审批（#${first.code}）`);
     expect((await results(r)).every(e => e.model?.some(m => m.role === "toolResult" && !m.isError))).toBe(true);
-    expect(offered(seen[0]!).find(t => t.name.includes("workshop_edit"))?.description).toContain("群成员调用需主人审批");
+    expect(offered(seen[0]!).find(t => t.name.includes("workshop_edit"))?.description).toContain("需主人审批");
     expect(offered(seen[0]!).some(t => t.name === "mcp_refresh_tools")).toBe(true);
     expect((await r.harness.snapshot(McpApprovalDoc, first.code, context))?.record?.code).toBe(first.code);
     expect(await r.pi.harness.snapshot(McpApprovalDoc, first.code, context)).toBeUndefined();
