@@ -108,7 +108,7 @@ describe("QQ Channel 远端消息适配", () => {
     expect(remote!.segments).toEqual([
       { type: "text", rendered: "前[image]😀\n" },
       { type: "text", rendered: "" },
-      { type: "at", rendered: "[at]" },
+      { type: "at", rendered: "[@qq:20001]" },
       { type: "reply", rendered: "[reply]" },
       { type: "unknown", rendered: "[unknown]" },
       { type: "image", rendered: "[image]", image: { file: "https://cdn.test/file", url: "https://cdn.test/file" } },

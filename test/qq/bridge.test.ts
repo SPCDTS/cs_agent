@@ -158,7 +158,7 @@ describe("auth and trigger rules", () => {
       groupEvent(GROUP, STRANGER, `@bot [CQ:at,qq=${SELF_ID}] text only`, false),
       groupEvent(GROUP, STRANGER, "real mention", true),
     );
-    expect(got.map(m => m.text)).toEqual([`[at] real mention`]);
+    expect(got.map(m => m.text)).toEqual([`[@你] real mention`]);
     expect(got[0]).toMatchObject({ group_id: GROUP, mentioned_self: true, nickname: "card-" + STRANGER });
   });
 

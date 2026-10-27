@@ -43,12 +43,25 @@ function segmentText(segment: Record<string, unknown>): string {
   return typeof text === "string" ? text : "";
 }
 
-export function renderText(segments: Record<string, unknown>[]): string {
-  return segments.map(s => (segmentType(s) === "text" ? segmentText(s) : "[" + segmentType(s) + "]")).join("");
+/** @ 段写出对象：成员用 qq:<号码>（与记忆的 subject 同格式），机器人自己写成「你」。 */
+function renderAt(segment: Record<string, unknown>, selfId?: string): string {
+  const data = segmentData(segment), qq = idString(data.qq);
+  if (qq === "all") return "[@全体成员]";
+  if (!isValidId(qq)) return "[at]";
+  if (qq === selfId) return "[@你]";
+  const name = typeof data.name === "string" ? data.name.replace(/[\p{Cc}\p{Zl}\p{Zp}\[\]]/gu, " ").replace(/\s+/g, " ").trim().slice(0, MAX_NICKNAME) : "";
+  return `[@${name ? name + " " : ""}qq:${qq}]`;
+}
+
+export function renderText(segments: Record<string, unknown>[], selfId?: string): string {
+  return segments.map(s => {
+    const type = segmentType(s);
+    return type === "text" ? segmentText(s) : type === "at" ? renderAt(s, selfId) : "[" + type + "]";
+  }).join("");
 }
 
 /** 分流文本：跳过开头的 at / reply 段（以及夹在其间的纯空白 text 段），跳过图片占位，其余按 renderText 渲染。 */
-function renderRouteText(segments: Record<string, unknown>[]): string {
+function renderRouteText(segments: Record<string, unknown>[], selfId: string): string {
   segments = segments.filter(s => segmentType(s) !== "image");
   let i = 0;
   for (; i < segments.length; i++) {
@@ -58,7 +71,7 @@ function renderRouteText(segments: Record<string, unknown>[]): string {
     if (type === "text" && !segmentText(s).trim()) continue;
     break;
   }
-  return renderText(segments.slice(i));
+  return renderText(segments.slice(i), selfId);
 }
 
 function compactSegments(segments: Record<string, unknown>[]): MessageSegment[] {
@@ -103,7 +116,7 @@ export function normalizeMessage(event: unknown): InboundMessage | null {
   if (type === "group" && (!group_id || !isValidId(group_id))) return null;
 
   const segments = rawSegments(event);
-  const text = renderText(segments);
+  const text = renderText(segments, self_id);
   return {
     message_id,
     time: typeof event.time === "number" && Number.isFinite(event.time) ? event.time : 0,
@@ -114,7 +127,7 @@ export function normalizeMessage(event: unknown): InboundMessage | null {
     nickname: nickname(event),
     text: text.slice(0, MAX_TEXT),
     truncated: text.length > MAX_TEXT,
-    route_text: renderRouteText(segments).slice(0, MAX_TEXT),
+    route_text: renderRouteText(segments, self_id).slice(0, MAX_TEXT),
     mentioned_self: segments.some(s => segmentType(s) === "at" && idString(segmentData(s).qq) === self_id),
     segments: compactSegments(segments),
     images: [],

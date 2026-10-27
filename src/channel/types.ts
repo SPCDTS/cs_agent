@@ -22,7 +22,7 @@ export interface InboundMessage {
   group_name?: string;
   self_id: string;
   nickname: string;
-  /** text 段拼接，其它段以 "[type]" 占位，最长 16000 字符 */
+  /** text 段拼接；@ 段写成 [@qq:号码]（@ 机器人为 [@你]），其它段以 "[type]" 占位，最长 16000 字符 */
   text: string;
   /**
    * 规则分流用的文本：跳过开头的 at（任意目标）/ reply 段（及其间的纯空白 text 段）后，图片段跳过，其余按 text 同一规则渲染，

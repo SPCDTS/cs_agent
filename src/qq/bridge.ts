@@ -213,7 +213,7 @@ class Bridge extends EventEmitter implements Channel {
       segments: segments.map(segment => {
         const normalized: RemoteMessage["segments"][number] = {
           type: typeof segment.type === "string" ? segment.type : "unknown",
-          rendered: renderText([segment]),
+          rendered: renderText([segment], this.selfId ?? undefined),
         };
         if (segment.type === "image") {
           const data = isRecord(segment.data) ? segment.data : {};

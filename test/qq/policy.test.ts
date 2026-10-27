@@ -49,7 +49,7 @@ describe("normalizeMessage", () => {
       message: [{ type: "reply", data: { id: 5 } }, { type: "at", data: { qq: SELF_ID } }, { type: "text", data: { text: " " } },
         { type: "at", data: { qq: 999 } }, { type: "text", data: { text: " 奶龙:猫" } }],
     }));
-    expect(real.text).toBe("[reply][at] [at] 奶龙:猫");
+    expect(real.text).toBe("[reply][@你] [@qq:999] 奶龙:猫");
     expect(real.route_text).toBe(" 奶龙:猫");
     const typed = norm(groupEvent("30001", "20002", "", false, {
       message: [{ type: "at", data: { qq: SELF_ID } }, { type: "text", data: { text: " [at] 奶龙:猫" } }],
@@ -58,7 +58,14 @@ describe("normalizeMessage", () => {
     const mid = norm(privateEvent("20001", "", {
       message: [{ type: "text", data: { text: "hi " } }, { type: "at", data: { qq: 1 } }],
     }));
-    expect(mid.route_text).toBe("hi [at]");
+    expect(mid.route_text).toBe("hi [@qq:1]");
+  });
+
+  it("@ 段写出被 @ 的人：带昵称时附昵称，@全体成员单独写出", () => {
+    const m = norm(groupEvent("30001", "20002", "", false, {
+      message: [{ type: "at", data: { qq: 888, name: "好大儿" } }, { type: "text", data: { text: " 和 " } }, { type: "at", data: { qq: "all" } }],
+    }));
+    expect(m.text).toBe("[@好大儿 qq:888] 和 [@全体成员]");
   });
 
   it("strips control characters and line breaks from nicknames at ingestion", () => {
