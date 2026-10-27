@@ -276,7 +276,7 @@ describe("pi 子 agent 扩展", () => {
     let now = Date.parse("2026-10-21T10:00:00+08:00");
     const { harness, model } = await rig(brain, { subagent: { maxPerDay: 4, now: () => now } });
     const conv = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, context);
-    const spawned = (name: string) => `已派出子 agent ${name}，完成后结果会自动交回`;
+    const spawned = (name: string) => `已派出子 agent ${name}，完成后结果会自动交回\n该子 agent 没有 MCP 工具（当前未获委派），需要 MCP 的步骤请自己调用。`;
     const concurrent = "子 agent 已达同时存活上限（3 个），请先 stop 不再需要的子 agent";
     await (await conv.submit({ type: "input", content: "四个" }, context)).wait(context);
     expect(seen.at(-1)!.slice(-4)).toEqual([spawned("sub-1"), spawned("sub-2"), spawned("sub-3"), concurrent]);

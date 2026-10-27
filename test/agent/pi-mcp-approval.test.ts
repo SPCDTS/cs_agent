@@ -6,6 +6,7 @@ import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseMcpConfig } from "../../src/agent/pi-mcp/config.js";
 import { McpApprovalDoc } from "../../src/agent/pi-mcp/approval.js";
+import { McpDelegationDoc } from "../../src/agent/pi-mcp/delegation.js";
 import { trace, type LiveEvent } from "../../src/shared/trace.js";
 import { call, context, isChild, lastUser, reply, residentRig, type ResidentRig } from "./resident-fixture.js";
 
@@ -186,19 +187,72 @@ describe("群内 MCP 宿主审批", () => {
     expect((await records(r)).at(-1)?.state).toBe("failed"); expect(r.texts().at(-1)).toContain("项目不可编辑");
   });
 
-  it.each(["1", "5"])("群内 %s 派出子任务：只有 owner 能委派 MCP", async user => {
+  it.each(["1", "5"])("群内 %s 派出子任务：继承派出者身份，读直接执行、成员写需审批", async user => {
     const s = await fixture({ allowSubagent: true }), seen: string[][] = [];
     const r = await residentRig({ mcp: s.mcp, brain: ctx => {
-      if (isChild(ctx)) { seen.push(offered(ctx).map(t => t.name)); return brain()(ctx); }
+      if (isChild(ctx)) {
+        seen.push(offered(ctx).map(t => t.name));
+        const last = ctx.messages.findLast(m => m.role !== "system");
+        if (last?.role === "toolResult" && !last.toolName.startsWith("mcp_workshop_workshop_status_")) return reply();
+        const remote = last?.role === "toolResult" ? "workshop_edit" : "workshop_status";
+        const name = nameOf(ctx, remote);
+        return name ? fauxAssistantMessage([{ type: "toolCall", id: `child-${remote}`, name, arguments: { project: "demo-A" } }], { stopReason: "toolUse" })
+          : reply("没有工具");
+      }
       if (endRole(ctx) === "toolResult" || lastUser(ctx).startsWith("[子 agent ")) return reply();
-      return call(["subagent", { action: "spawn", name: "worker", task: "编辑项目" }]);
+      return call(["subagent", { action: "spawn", name: "worker", task: "查看并编辑项目" }]);
     } });
     await r.say(user, "派出子任务");
     await vi.waitFor(async () => expect((await r.pi.subagents("group:7"))[0]?.state).toBe("done"), { timeout: 10000 });
     await r.idle();
-    expect(seen[0]?.some(n => n.startsWith("mcp_"))).toBe(user === "1");
-    expect(s.calls).toHaveLength(user === "1" ? 1 : 0); expect(await records(r)).toEqual([]);
-    expect(s.sessions).toHaveLength(user === "1" ? 2 : 1);
+    const childId = Number((await r.pi.subagents("group:7"))[0]!.session) as ConversationId;
+    expect((await r.pi.harness.snapshot(McpDelegationDoc, childId, context))?.grant)
+      .toMatchObject({ principal: user, wake: false, scheduled: false });
+    expect(seen[0]).toEqual(expect.arrayContaining([expect.stringMatching(/^mcp_workshop_workshop_status_/), expect.stringMatching(/^mcp_workshop_workshop_edit_/)]));
+    const readCall = { name: "workshop_status", arguments: { project: "demo-A" } };
+    const writeCall = { name: "workshop_edit", arguments: { project: "demo-A" } };
+    expect(s.calls).toEqual(user === "1" ? [readCall, writeCall] : [readCall]);
+    expect(s.sessions).toHaveLength(2);
+    if (user === "1") expect(await records(r)).toEqual([]);
+    else {
+      expect(await records(r)).toHaveLength(1);
+      const record = (await records(r))[0]!;
+      expect(record).toMatchObject({ state: "pending", requester: user, scope: "group:7", thread_key: "group:7",
+        conversation_id: Number(childId), call_id: "child-workshop_edit", tool: "workshop_edit", args: writeCall.arguments });
+      const child = await r.pi.harness.conversation(childId, context);
+      expect(JSON.stringify((await child!.entries({}, 100, undefined, context)).items.filter(ToolResultEntry.is))).toContain(`已提交主人审批（#${record.code}）`);
+      await r.say("9", `批准 #${record.code}`);
+      expect((await records(r))[0]?.state).toBe("done");
+      await r.say("1", `批准 #${record.code}`);
+      expect(s.calls).toEqual([readCall, writeCall]);
+      expect(s.sessions).toHaveLength(2);
+    }
+  });
+
+  it("成员派出的子任务由 owner 续发后撤掉 MCP，并提示交代人与派出人不同", async () => {
+    const s = await fixture({ allowSubagent: true }), seen: string[][] = [];
+    const r = await residentRig({ mcp: s.mcp, brain: ctx => {
+      if (isChild(ctx)) {
+        if (endRole(ctx) !== "toolResult") seen.push(offered(ctx).map(t => t.name));
+        return brain("workshop_status")(ctx);
+      }
+      if (endRole(ctx) === "toolResult" || lastUser(ctx).startsWith("[子 agent ")) return reply();
+      return call(["subagent", { action: lastUser(ctx).includes("续发") ? "message" : "spawn", name: "worker", task: "查看状态" }]);
+    } });
+    await r.say("5", "派出子任务");
+    await vi.waitFor(async () => expect((await r.pi.subagents("group:7"))[0]?.state).toBe("done"), { timeout: 10000 });
+    await r.idle();
+    expect(seen[0]?.some(n => n.startsWith("mcp_"))).toBe(true);
+    await r.say("1", "续发任务");
+    await vi.waitFor(() => expect(seen).toHaveLength(2), { timeout: 10000 });
+    await vi.waitFor(async () => expect((await r.pi.subagents("group:7"))[0]?.state).toBe("done"), { timeout: 10000 });
+    await r.idle();
+    const childId = Number((await r.pi.subagents("group:7"))[0]!.session) as ConversationId;
+    expect((await r.pi.harness.snapshot(McpDelegationDoc, childId, context))?.grant).toBeNull();
+    expect(seen.slice(1).every(tools => !tools.some(n => n.startsWith("mcp_")))).toBe(true);
+    expect(JSON.stringify(await results(r))).toContain("该子 agent 没有 MCP 工具（交代人与派出人不同），需要 MCP 的步骤请自己调用。");
+    expect(s.calls).toEqual([{ name: "workshop_status", arguments: { project: "demo-A" } }]);
+    expect(await records(r)).toEqual([]);
   });
 
   it.each(["1", "5"])("子任务汇报唤醒 %s：按继承的人决定直接执行或审批", async user => {

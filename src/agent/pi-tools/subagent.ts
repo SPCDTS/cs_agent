@@ -202,6 +202,7 @@ const Parameters = Type.Object({
 }, { additionalProperties: false });
 
 const NAME = /^[\p{L}\p{N}_-]{1,32}$/u;
+const noMcpHint = (reason: string) => `\n该子 agent 没有 MCP 工具（${reason}），需要 MCP 的步骤请自己调用。`;
 
 function describe(child: ChildRecord, full = false): string {
   const state = child.stopped ? "已停止" : child.pending.length ? "工作中" : "空闲";
@@ -247,6 +248,8 @@ export function createSubagentExtension(opts: SubagentOptions) {
         // 派出那一轮的身份快照（§5.1）：汇报唤醒的回合继承它。
         const spawner = await opts.spawner?.(api.conversationId);
         const mcp = opts.mcp?.(), grant = await mcp?.delegation(api.conversationId) ?? null;
+        const hint = !grant && [...parentAgent.tools, ...parentAgent.callable].some(tool => isMcpToolName(tool.name))
+          ? noMcpHint("当前未获委派") : "";
         // 子会话的工具集：父会话启用的工具减去排除名单，显式写成数组，宿主后续换扩展也不会带回被排除的工具。
         const seen = new Set<string>(), tools: ToolRegistration[] = [];
         for (const tool of [...parentAgent.tools, ...parentAgent.callable]) {
@@ -279,7 +282,7 @@ export function createSubagentExtension(opts: SubagentOptions) {
           doc.seq++; doc.spawnedToday++;
           doc.children[name] = { name, anchor: Number(anchor), conversation: Number(created.id), task: args.task!, createdAt: now(), stopped: false, pending: [Number(reporter)],
             ...(spawner ? { spawner } : {}) };
-          return { text: remember(doc.calls, call, `已派出子 agent ${name}，完成后结果会自动交回`), error: false, child: Number(created.id) };
+          return { text: remember(doc.calls, call, `已派出子 agent ${name}，完成后结果会自动交回${hint}`), error: false, child: Number(created.id) };
         }, context);
         if ("child" in result && result.child !== undefined) await api.details({ conversationId: result.child }, context);
         return output(result.text, result.error);
@@ -290,13 +293,18 @@ export function createSubagentExtension(opts: SubagentOptions) {
         if (!args.task) return output("message 需要 task（消息内容）", true);
         const requester = await opts.spawner?.(api.conversationId);
         const grant = await opts.mcp?.()?.delegation(api.conversationId) ?? null;
+        const parentAgent = await api.agent(context);
+        const parentHasMcp = [...parentAgent.tools, ...parentAgent.callable].some(tool => isMcpToolName(tool.name));
         const result = await api.commit(async tx => {
           const doc = await tx.doc(SubagentDoc, api.conversationId);
           if (doc.calls[call]) return { text: doc.calls[call], error: false };
           const child = doc.children[name];
           if (!child || child.stopped) return { text: `没有存活的子 agent ${name}`, error: true };
           const delegation = await tx.doc(McpDelegationDoc, conversationId(child.conversation));
-          delegation.grant = narrowDelegation(delegation.grant, grant);
+          const previous = delegation.grant;
+          delegation.grant = narrowDelegation(previous, grant);
+          const hint = previous && !delegation.grant && parentHasMcp
+            ? noMcpHint(requester?.as && requester.as.person !== previous.principal ? "交代人与派出人不同" : "本次交代不满足委派条件") : "";
           const mode: ReporterInput["whenBusy"] = args.mode ?? "followUp";
           // 子 agent 的上下文里已有这一轮交代的内容：登记的身份与之合并（不同人 → 基础权限），此后的汇报都带合并后的身份。
           const spawner = narrowSpawner(child.spawner, requester);
@@ -304,7 +312,7 @@ export function createSubagentExtension(opts: SubagentOptions) {
           const reporter = await tx.createTask(Reporter, { name, anchor: child.anchor, child: child.conversation, content: args.task!, whenBusy: mode,
             ...(spawner ? { spawner } : {}) } satisfies ReporterInput, { ownership: { kind: "task", taskId: taskId(child.anchor) } });
           child.pending.push(Number(reporter));
-          return { text: remember(doc.calls, call, `已${mode === "steer" ? "转向" : "追加消息给"}子 agent ${name}，结果会自动交回`), error: false };
+          return { text: remember(doc.calls, call, `已${mode === "steer" ? "转向" : "追加消息给"}子 agent ${name}，结果会自动交回${hint}`), error: false };
         }, context);
         return output(result.text, result.error);
       }

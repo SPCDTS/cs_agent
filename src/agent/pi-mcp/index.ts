@@ -117,16 +117,16 @@ export class PiMcp {
   /** 只从父回合的真实绑定生成授权；服务摘要固定账号、白名单和委派时的配置。 */
   async delegation(parent: ConversationId): Promise<McpDelegation | null> {
     const binding = await this.opts.binding(Number(parent));
-    if (!binding || binding.child || !runRights(binding, this.opts.owners()).owner || this.opts.config.kind !== "enabled") return null;
+    if (!binding || binding.child || this.opts.config.kind !== "enabled") return null;
+    const rights = runRights(binding, this.opts.owners());
+    if (!rights.person) return null;
     const servers: Record<string, string> = {};
-    let principal: string | undefined;
     for (const server of this.opts.config.value.servers) {
-      const person = this.authorizeParent(server, binding);
-      if (!person || !server.access.allowSubagent) continue;
-      principal = runRights(binding, this.opts.owners()).person?.person; servers[server.id] = serverDigest(server);
+      if (!this.authorizeParent(server, binding) || !server.access.allowSubagent) continue;
+      servers[server.id] = serverDigest(server);
     }
-    return principal ? { principal, servers, wake: binding.identity.kind === "wake",
-      scheduled: runRights(binding, this.opts.owners()).person?.kind === "scheduled" } : null;
+    return Object.keys(servers).length ? { principal: rights.person.person, servers, wake: binding.identity.kind === "wake",
+      scheduled: rights.person.kind === "scheduled" } : null;
   }
 
   allowsDelegationTool(grant: McpDelegation | null | undefined, name: string): boolean {
@@ -226,7 +226,9 @@ export class PiMcp {
     if (!grant || grant.servers[server.id] !== serverDigest(server) ||
       (grant.wake && !server.access.allowWake) || (grant.scheduled && !server.access.allowScheduled)) return;
     const rights = runRights(binding, this.opts.owners());
-    if (rights.owner && rights.person?.person === grant.principal) return this.principal(binding, grant.principal);
+    if ((binding.scope.startsWith("group:") || rights.owner) && rights.person?.person === grant.principal) {
+      return this.principal(binding, grant.principal);
+    }
   }
 
   private allowedScope(server: McpServerConfig, binding: TurnBinding): boolean {

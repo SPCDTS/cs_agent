@@ -153,6 +153,11 @@ describe("Pi MCP 子 agent 委派", () => {
     expect(seen.every(tools => !tools.some(name => name.startsWith("mcp_")))).toBe(true);
     expect(server.calls).toBe(0);
     expect(server.messages.filter(message => "method" in message && message.method === "initialize")).toHaveLength(enabled ? 0 : 1);
+    if (!enabled) {
+      const parent = await r.pi.harness.conversation((await r.pi.readThreadIds())[key] as ConversationId, context);
+      expect(JSON.stringify((await parent!.entries({}, 100, undefined, context)).items.filter(ToolResultEntry.is)))
+        .toContain("该子 agent 没有 MCP 工具（当前未获委派），需要 MCP 的步骤请自己调用。");
+    }
     const results = (await child.entries({}, 100, undefined, context)).items.filter(ToolResultEntry.is);
     expect(results[0]?.data?.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "tool_unavailable" })]));
   });
