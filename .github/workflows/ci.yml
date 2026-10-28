@@ -46,12 +46,13 @@ jobs:
       - run: npm ci
       - run: npm run test:integration -- --reporter=dot
 
-  # Workers 部署：main 上两组测试都过且仓库里有 wrangler.jsonc 时才跑（P0 之前没有这个文件，作业直接跳过）。
+  # Workers 部署：main 上两组测试都过且仓库里有 wrangler.jsonc 时才跑（P0 之前没有这个文件，各步跳过）。
+  # hashFiles() 不能用在作业级 if 里，所以文件检查放在第一步，后续步骤按它的输出决定。
   # 密钥 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID 在仓库 Settings → Secrets；本机 Docker 部署仍走 scripts/deploy.ps1。
   deploy-workers:
     name: deploy workers
     needs: [check, integration]
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && hashFiles('wrangler.jsonc') != ''
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: workers
@@ -60,12 +61,17 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - id: cfg
+        run: echo "present=$([ -f wrangler.jsonc ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.cfg.outputs.present == 'true'
+        uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-      - run: npm ci
-      - uses: cloudflare/wrangler-action@v3
+      - if: steps.cfg.outputs.present == 'true'
+        run: npm ci
+      - if: steps.cfg.outputs.present == 'true'
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
