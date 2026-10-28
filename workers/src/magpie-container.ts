@@ -41,6 +41,15 @@ export class MagpieContainer extends DurableObject<Env> {
     }));
   }
 
+  /**
+   * 销毁容器，下一次请求用当时的 env 重新 start()。用于 secrets 变更后：容器是用启动那一刻的环境变量
+   * 起来的，R2 凭据补上后，已经在跑的空配置 magpie 不会自己重来。
+   */
+  async restart(): Promise<void> {
+    const container = this.ctx.container;
+    if (container?.running) await container.destroy("restart requested");
+  }
+
   /** 把一个 HTTP 请求转给容器的中继端口；start() 返回时进程未必就绪，连接失败按间隔重试。 */
   override async fetch(request: Request): Promise<Response> {
     this.ensureStarted();

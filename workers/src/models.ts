@@ -39,6 +39,11 @@ export async function openModels(env: Env) {
       if (!baseUrl || !key) throw new Error("magpie configuration missing");
       process.env.MAGPIE_GATEWAY_KEY = key;
       const catalog = await fetchMagpieCatalog(baseUrl, key);
+      if (catalog.length === 0 && inContainer) {
+        // 目录为空几乎只有一种情况：容器用缺 R2 凭据的环境起来了（secrets 后补）。销毁它，下次请求重新拉起
+        await env.MAGPIE.getByName("gateway").restart();
+        throw new Error("magpie catalog empty; container restarted");
+      }
       models.setProvider(createMagpieProvider({ baseUrl, models: magpieProviderModels(catalog, models) }));
       break;
     }
