@@ -204,10 +204,11 @@ export class EventService {
       if (seen.has(key) || this.opts.inbox.get(key)) { this.count(state, "deduped"); received("deduped"); continue; }
       seen.add(key);
       const filters = state.settings.filters, labels = event.labels ?? [];
-      if (filters.requireLabels.some(label => !labels.includes(label)) || filters.excludeLabels.some(label => labels.includes(label)) ||
-          filters.excludeSenders.some(sender => event.actor?.toLowerCase().includes(sender.toLowerCase()))) {
-        this.count(state, "suppressed"); received("suppressed"); continue;
-      }
+      const missing = filters.requireLabels.find(label => !labels.includes(label));
+      const excluded = filters.excludeLabels.find(label => labels.includes(label));
+      const sender = filters.excludeSenders.find(sender => event.actor?.toLowerCase().includes(sender.toLowerCase()));
+      const reason = missing !== undefined ? `缺少标签 ${missing}` : excluded !== undefined ? `排除标签 ${excluded}` : sender !== undefined ? `排除发件人规则 ${sender}` : undefined;
+      if (reason) { this.count(state, "suppressed"); this.event("event_received", { source: id, kind: event.kind, decision: "suppressed", reason, key }); continue; }
       state.held.push(event); state.mergeAt ??= this.now() + state.settings.mergeWindowS * 1000;
       if (state.held.length > 200) {
         state.held.shift(); this.event("event_source_state", { source: id, state: "overflow", reason: "held_limit" });

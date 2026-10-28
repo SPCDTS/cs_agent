@@ -90,6 +90,7 @@ export function summarize(e: Pick<LiveEvent, 'stage' | 'status' | 'detail'>): st
   else if (e.stage === 'final_answer') { add('留存：', d.text, 100); }
   else if (e.stage === 'send_message') { add('→ ', d.text, 100); add('消息 #', d.message_id, 100); add('目标 ', d.target, 100); }
   else if (TERMINAL.has(e.stage)) { add('', d.reply, 100); add('', d.reason ?? d.failure); }
+  else if (e.stage === 'event_received') { add('', d.decision); add('', d.reason); }
   else if (e.stage === 'settings_changed') add('', d.changed);
   else if (e.stage === 'context_usage' && typeof d.usedTokens === 'number' && typeof d.windowTokens === 'number')
     parts.push(`上下文 ${fmtShort(d.usedTokens)} / ${fmtShort(d.windowTokens)}（${fmtPct(ratio(d.usedTokens, d.windowTokens))}）`);

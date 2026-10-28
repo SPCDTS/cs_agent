@@ -22,7 +22,7 @@ it("过滤、合并与跨重启去重；trace 不含邮件资料", async () => {
   expect((await r.state()).stats.counts24h.deduped).toBe(2);
   expect(await r.service.recentRuns()).toHaveLength(1);
   expect(JSON.stringify(r.event.mock.calls)).not.toMatch(/私密/);
-  expect(r.event).toHaveBeenCalledWith("@events", "event_received", { detail: expect.objectContaining({ decision: "suppressed" }) });
+  expect(r.event).toHaveBeenCalledWith("@events", "event_received", { detail: expect.objectContaining({ decision: "suppressed", reason: "排除标签 CATEGORY_PROMOTIONS" }) });
 });
 
 it("每小时预算溢出留作下一条的未展开数", async () => {

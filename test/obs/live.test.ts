@@ -205,4 +205,6 @@ it('用量摘要明确标注线程累计量，并兼容旧观测字段；发送�
     .toBe('输入 1000 / 输出 50 tokens');
   expect(summarize({ stage: 'send_message', status: 'ok', detail: { text: '晴', message_id: '5', target: 'qq:group:7' } }))
     .toBe('→ 晴 · 消息 #5 · 目标 qq:group:7');
+  expect(summarize({ stage: 'event_received', status: 'ok', detail: { decision: 'suppressed', reason: '排除标签 CATEGORY_UPDATES', key: 'k' } }))
+    .toBe('suppressed · 排除标签 CATEGORY_UPDATES');
 });
