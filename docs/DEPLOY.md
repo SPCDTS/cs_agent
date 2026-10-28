@@ -290,3 +290,9 @@ docker compose config
 - **"发送过快"/熔断**：bridge 发送规则拒绝或熔断，在面板设置页查看与解除；被拒的消息不计数。
 - **改了 AGENTS.md / codex.md / 技能但 codex 没反应**：已加载线程不一定重读，在面板重置该会话线程或重启容器。
 - **NapCat 双响应**：同一账号同时连了两个 NapCat，见 §4.1。
+
+## 14. CI/CD（GitHub Actions）
+
+仓库 `SPCDTS/cs_agent`（私有）。`.github/workflows/ci.yml` 在 push 到 main、PR 与手动触发时跑两组作业：`typecheck + unit`（`npm run typecheck`、`npm test`）与 `integration`（`npm run test:integration`，运行器上装 bubblewrap 并放开非特权用户命名空间）。
+
+`deploy workers` 作业只在 main 上、两组测试通过且仓库根有 `wrangler.jsonc` 时执行（[WORKERS-DESIGN.md](WORKERS-DESIGN.md) P0 之前没有这个文件，作业跳过），用 `cloudflare/wrangler-action` 跑 `wrangler deploy`，密钥在仓库 Settings → Secrets and variables → Actions：`CLOUDFLARE_API_TOKEN`（API token，权限至少 Workers Scripts、Workers Routes、Containers 编辑与 Account Settings 读取）与 `CLOUDFLARE_ACCOUNT_ID`；作业绑定 environment `workers`，可在仓库 Settings → Environments 加审批人。本机 Docker 部署不经 CI，仍按 §5 用 `scripts/deploy.ps1`。
