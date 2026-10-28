@@ -24,6 +24,11 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # test/agent/pi.test.ts 在 linux 上按"容器里有 bwrap"断言 bash 工具可用，运行器也要装 bubblewrap
+      - run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: npm ci
       - run: npm run typecheck
       - run: npm test -- --reporter=dot
