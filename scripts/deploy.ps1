@@ -44,10 +44,16 @@ try {
   $vars = docker inspect cs-agent --format '{{range .Config.Env}}{{println .}}{{end}}' 2>$null
   $running = ($vars | Select-String '^CS_AGENT_COMMIT=([0-9a-f]+)').Matches.Groups[1].Value
   if ($running) { & git -C $main cat-file -e "$running^{commit}" 2>$null }
-  if ($running -and !$LASTEXITCODE) {
+  $known = $running -and !$LASTEXITCODE
+  if ($known) { & git -C $main merge-base --is-ancestor $running $target }
+  if ($known -and !$LASTEXITCODE) {
     $commits = Invoke-Git -C $main log --format="%h %s" "$running..$target"
     "线上 $($running.Substring(0, 7)) -> $short，本次上线 $(@($commits).Count) 个提交（确认都经用户同意）："
     $commits | ForEach-Object { "  " + ($_.Length -gt 100 ? $_.Substring(0, 100) : $_) }
+  } elseif ($known) {
+    # 历史重写后旧提交仍在本地对象库，按提交列会把整段新历史算进来，改为比内容
+    "线上 $($running.Substring(0, 7)) 不在 $short 的历史里（历史可能被重写），按内容比较（确认改动都经用户同意）："
+    Invoke-Git -C $main diff --stat $running $target | ForEach-Object { "  $_" }
   } else { "线上提交未知，目标 $short" }
 
   if (!$DryRun) {
