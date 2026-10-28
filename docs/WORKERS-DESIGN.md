@@ -1,6 +1,6 @@
 # cs-agent 迁移 Cloudflare Workers 设计
 
-状态：设计稿，未实现。日期：2026-10-28。设计基线：cs-agent `153718f`、pi-durable `1.3.0`。前提由主人定：**砍掉 codex 后端，只保留 Pi**；NapCat 留在本机；模型出站不再经宿主机 magpie。
+状态：设计稿，未实现。日期：2026-10-28。设计基线：cs-agent `153718f`、pi-durable `1.3.0`。前提由主人定：**砍掉 codex 后端，只保留 Pi**；NapCat 留在本机；模型出站仍经 magpie，但 magpie 也上云（第 3.7 节）。
 
 ## 1. 结论
 
@@ -19,7 +19,7 @@
 
 | 保留 | 改造 | 砍掉 |
 |---|---|---|
-| Pi 后端、ThreadHost 调度规则、身份与权限模型、send_message 与发送规则、Inbox 状态机、记忆系统、定时任务、外部事件、PI-MCP、技能 | 存储层（同步→异步、按 DO 拆分）、NapCat 连接方式、模型出站、媒体存储、观测与面板数据面、coding 工具（→Sandbox）、子 agent（→子 DO） | codex 后端及 `src/agent/codex/`、`src/mcp/`（codex 的 stdio MCP 入口）、magpie 依赖、Docker 部署、本地 sidecar 进程形态 |
+| Pi 后端、ThreadHost 调度规则、身份与权限模型、send_message 与发送规则、Inbox 状态机、记忆系统、定时任务、外部事件、PI-MCP、技能 | 存储层（同步→异步、按 DO 拆分）、NapCat 连接方式、模型出站、媒体存储、观测与面板数据面、coding 工具（→Sandbox）、子 agent（→子 DO） | codex 后端及 `src/agent/codex/`、`src/mcp/`（codex 的 stdio MCP 入口）、宿主机 magpie 与 `host.docker.internal`、Docker 部署、本地 sidecar 进程形态 |
 
 ## 3. 拓扑
 
@@ -32,7 +32,8 @@ QQ ─ NapCat(本机，反向 WS 客户端) ──wss──▶ Worker 入口 ─
                                               ▼                   ▼                       ▼
                                         Subagent DO           fetch 出站            Bridge DO → NapCat API
 Registry DO（授权、审批、定时任务目录、OAuth 凭据、事件游标、技能目录）
-R2（媒体、附件、技能文件）  Secrets Store（模型 key、Google refresh token、NapCat token）
+magpie 容器（Cloudflare Containers，模型网关；状态经 R2 同步）
+R2（媒体、附件、技能文件、magpie 状态）  Secrets Store（magpie gateway key、Google refresh token、NapCat token）
 Cron Trigger（日/周摘要、夜间整理、保留清理）  Sandbox（coding 工具的工作区）
 面板 Worker（Cloudflare Access 保护，读各 DO 的快照）
 ```
@@ -89,7 +90,21 @@ ComfyUI 留在本机，不接。
 
 ### 3.7 模型出站
 
-pi-ai 的 provider 用 fetch，Workers 可直接调 DeepSeek、OpenAI、Anthropic。magpie 的作用（统一网关、OAuth 中转）消失：DeepSeek 用 API key 放 Secrets Store；codex 砍掉后不再有 ChatGPT OAuth 的需求。`AUTO_EFFORT_MODEL` 的分类调用同样直连。
+模型仍经 magpie 网关：它统一各家 provider、持有订阅类的 OAuth 登录、按 gateway key 归集用量。magpie 支持服务端部署：官方镜像 `ghcr.io/yetone/magpie`，`magpie web --gateway` 无桌面运行，状态在 `/config`，`MAGPIE_WEB_KEY` 保护 Web UI，`magpie s3` 可把 providers、key、设置经 S3 兼容存储（含 R2）加密同步。
+
+**部署在 Cloudflare Containers**（建议）：
+
+- 一个 Container 绑定到 Registry DO（Containers 的容器由 DO 管理），镜像即官方镜像，入口 `magpie web --gateway --addr 0.0.0.0:3425 --no-open`。Worker 经 container binding 直连容器端口，不暴露公网，不需要 Access。
+- 容器磁盘是临时的。启动脚本先 `magpie s3 restore` 从 R2 取回状态（access key、secret、passphrase 来自 Secrets Store，经环境变量注入），运行中 `magpie s3 auto 3` 每 3 分钟同步回去，OAuth token 刷新因此不丢。最坏丢最近 3 分钟的刷新结果，下次调用重新刷新即可。
+- 空闲后容器休眠，首次调用冷启动几秒。Registry DO 用 alarm 每几分钟 `GET /api/hello` 保活，或接受冷启动；由主人按成本定。
+- Pi 侧不变：`createMagpieProvider` 的 `baseUrl` 指向容器，`CODEX_MAGPIE_KEY` 改名为 `MAGPIE_GATEWAY_KEY` 放 Secrets Store。模型目录在冷启动时拉一次，缓存在 Registry DO，magpie 暂不可达时用缓存启动，不再像现在那样启动失败。
+- 订阅类 provider 的 OAuth 登录经 Worker 反代的 magpie Web UI 做一次（`MAGPIE_WEB_URL` 指向反代地址，路由加 Access），登录结果随 s3 同步落 R2。
+
+**备选：小 VPS** 跑同一镜像，`/config` 挂卷，经 Cloudflare Tunnel 发布并套 Access 服务令牌，Worker 对该主机名的 fetch 注入 `CF-Access-Client-Id/Secret`。常开、无冷启动，多一台机器要管。magpie 把回环来源视为可信，隧道后面的 magpie 对任何能到主机名的人都是敞开的，所以 Access 不是可选项。
+
+本机那份 magpie 继续给本机的 codex / claude 用，和云端那份经同一个 R2 bucket 同步配置（`keys=yes`），两边 provider 与 key 一致。
+
+`AUTO_EFFORT_MODEL` 的分类调用同样经 magpie。
 
 ## 4. 消息流
 
@@ -184,14 +199,16 @@ alarm 每个 DO 一个，需要多个到期时间的地方（Registry DO 的定�
 | Hibernation 被阻塞 | Bridge DO 里不能有 `setTimeout` 或挂起的 fetch；API 调用的等待用存储加唤醒实现 |
 | NapCat 在中国大陆连 Cloudflare 边缘 | 反向 WS 走 443，一般可达；不稳则在 Tunnel 之外加一条备用域名。此风险要先实测 |
 | 延迟 | DO 位置在首次访问的区域附近固定；模型出站到海外 provider 本来就是跨境，总延迟不比现在差 |
-| 成本 | Workers Paid 5 美元/月起，DO 请求与存储按量；个人规模估计每月个位数美元；Sandbox 另计 |
+| 成本 | Workers Paid 5 美元/月起，DO 请求与存储按量；个人规模估计每月个位数美元；Sandbox 与 magpie 容器按活跃 CPU 另计，保活会把容器成本变成常量 |
+| magpie 容器冷启动与状态 | 临时磁盘靠 R2 同步恢复；镜像须为 linux/amd64；容器内 magpie 对非回环来源仍校验 gateway key，但只有 Worker 能到达它 |
+| 订阅类 OAuth 从云端 IP 使用 | 各 provider 条款不同，由主人确认；不行则该 provider 留在本机 magpie，云端只放 API key 类 provider |
 | Pub/Sub push 要公网校验 | 用 Pub/Sub 的 OIDC token 校验，Worker 验签 |
 | CIMD redirect 变更 | Notion 需重新登录一次 |
 | 图片处理内存 | `/images/cloudflare` 在调用线程解码，大图占内存不释放；只对缩略图启用，大图走 R2 原样传给模型 |
 
 ## 13. 分期
 
-1. **P0 可行性**：一个 Worker、Bridge DO、`owner` Thread DO；NapCat 反向 WS 直连；Harness 在 DO 里跑一个只有 `send_message` 的回合；DeepSeek 直连。验证 CPU 限额、休眠唤醒、NapCat 连通、FTS5 建表。两三天。
+1. **P0 可行性**：一个 Worker、Bridge DO、`owner` Thread DO；NapCat 反向 WS 直连；Harness 在 DO 里跑一个只有 `send_message` 的回合，先 DeepSeek 直连，再把 magpie 容器起在 Containers 上并从 Worker 调通 `/v1/models` 与一次补全。验证 CPU 限额、休眠唤醒、NapCat 连通、FTS5 建表、容器冷启动与 R2 同步恢复。三四天。
 2. **P1 可用**：Inbox 状态机、消息库与 FTS、身份与权限、发送规则、记忆（读写与画像）、PI-MCP 与 codemode、群会话、面板最小页、数据迁移脚本。没有 coding 工具与子 agent。
 3. **P2 完整**：定时任务、日/周摘要、夜间整理、外部事件（Pub/Sub push、webhook）、Gmail 内置、子 agent DO、告警。
 4. **P3**：Sandbox coding 工具、技能发布、面板实时视图、历史数据全部导入。
@@ -209,4 +226,5 @@ P0 过不了就停，不动现有部署。
 
 - pi-durable README「Storage」：`openDurableObjectSqliteStorage`、宿主表共享队列、便携 SQLite 核心不依赖 Node；「codemode」：`RemoteCodemodeSandbox`；「images」：`/images/cloudflare` 的内存提醒。
 - Cloudflare 文档：[DO 限制](https://developers.cloudflare.com/durable-objects/platform/limits)（CPU 30 s 默认、`limits.cpu_ms` 至 5 分钟、SQLite 10 GB、单值 128 KiB、100 列）、[SQLite 存储 API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)（FTS5 支持）、[Containers 与 Sandbox GA](https://developers.cloudflare.com/changelog/2026-04-13-containers-sandbox-ga)、[Sandbox 平台](https://developers.cloudflare.com/sandbox/platform)。
+- magpie 0.1.1549 的 `magpie --help`、`magpie web --help`、`magpie s3 help`；官方镜像 `ghcr.io/yetone/magpie`（[Railway 模板](https://railway.com/deploy/magpie-ai-gateway)：`/config` 卷与 `MAGPIE_WEB_KEY`）；[DEPLOY.md](DEPLOY.md) §3 的回环可信说明。
 - 现有架构：[ARCHITECTURE.md](ARCHITECTURE.md) §2–§6、§11；[EVENTS-DESIGN.md](EVENTS-DESIGN.md)；[PI-MCP-DESIGN.md](PI-MCP-DESIGN.md)；[MEMORY-DESIGN.md](MEMORY-DESIGN.md)。
