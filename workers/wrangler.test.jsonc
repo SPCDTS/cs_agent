@@ -1,0 +1,31 @@
+// 测试专用配置：与 wrangler.jsonc 相同，去掉 containers（vitest-pool-workers 自带的 wrangler 不认 durable_object
+// 调度策略）、routes 与 dev；MAGPIE 绑定保留，faux 模式不会碰容器。改 wrangler.jsonc 时同步改这里。
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cs-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // CPU 限额只计活跃计算；回合里的 JSON 处理偶有峰值，放到上限 5 分钟
+  "limits": { "cpu_ms": 300000 },
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [
+      { "name": "THREAD", "class_name": "ThreadDO" },
+      { "name": "BRIDGE", "class_name": "BridgeDO" },
+      { "name": "MAGPIE", "class_name": "MagpieContainer" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ThreadDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["BridgeDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] }
+  ],
+  // QQ_OWNER、NAPCAT_TOKEN、R2_*、MAGPIE_SYNC_PASSPHRASE 都是 secrets（wrangler secret put），不写在这里
+  "vars": {
+    "CS_AGENT_COMMIT": "dev",
+    "MODEL_PROVIDER": "faux",
+    "MODEL_ID": "test",
+    "MAGPIE_URL": ""
+  }
+}

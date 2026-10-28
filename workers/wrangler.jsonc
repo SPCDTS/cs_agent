@@ -22,9 +22,10 @@
     { "tag": "v2", "new_sqlite_classes": ["BridgeDO"] },
     { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] }
   ],
-  // magpie 模型网关跑在 Containers 上（magpie/Dockerfile）；本地 dev 与测试不起容器，faux 模式不碰它
+  // magpie 模型网关跑在 Containers 上（magpie/Dockerfile）。本账户只允许 durable_object 调度策略：
+  // 镜像以命名方式交给 DO（ctx.container.images.magpie），实例规格在 start() 里给；本地 dev 与测试不起容器
   "containers": [
-    { "class_name": "MagpieContainer", "image": "./magpie/Dockerfile", "max_instances": 1, "instance_type": "lite" }
+    { "class_name": "MagpieContainer", "scheduling_policy": "durable_object", "images": { "magpie": { "dockerfile": "./magpie/Dockerfile" } } }
   ],
   "dev": { "enable_containers": false },
   // QQ_OWNER、NAPCAT_TOKEN、R2_*、MAGPIE_SYNC_PASSPHRASE 都是 secrets（wrangler secret put），不写在这里

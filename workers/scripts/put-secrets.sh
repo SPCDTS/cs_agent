@@ -3,7 +3,9 @@
 # 读取：仓库根 .env 的 NAPCAT_TOKEN、QQ_OWNER；secrets/r2-magpie.env 的 R2_*、MAGPIE_SYNC_PASSPHRASE。
 # 用法：在仓库根执行  bash workers/scripts/put-secrets.sh
 set -euo pipefail
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+# 在 worktree 里跑时 .env 与 secrets/ 只在主工作区，用 CS_AGENT_ROOT 指过去
+workers_dir="$(cd "$(dirname "$0")/.." && pwd)"
+root="${CS_AGENT_ROOT:-$(cd "$workers_dir/.." && pwd)}"
 env_file="$root/.env"; r2_file="$root/secrets/r2-magpie.env"
 [ -f "$env_file" ] || { echo "缺少 $env_file" >&2; exit 1; }
 [ -f "$r2_file" ] || { echo "缺少 $r2_file" >&2; exit 1; }
@@ -27,7 +29,7 @@ for name in NAPCAT_TOKEN QQ_OWNER R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECR
   [ -n "${!name}" ] || { echo "$name 为空" >&2; exit 1; }
 done
 
-cd "$root/workers"
+cd "$workers_dir"
 {
   printf '{'
   first=1

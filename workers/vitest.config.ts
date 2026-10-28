@@ -11,7 +11,7 @@ if (workerd && typeof workerd === "object" && "default" in workerd && typeof wor
 // 0.23 / Vitest 4 已移除 defineWorkersConfig，改由插件配置同一套 Workers pool。
 export default defineConfig({
   plugins: [cloudflareTest({
-    wrangler: { configPath: "./wrangler.jsonc" },
+    wrangler: { configPath: "./wrangler.test.jsonc" },
     miniflare: {
       bindings: { NAPCAT_TOKEN: "t", QQ_OWNER: "10000001", MODEL_PROVIDER: "faux" },
     },
