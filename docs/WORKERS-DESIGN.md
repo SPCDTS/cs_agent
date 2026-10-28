@@ -92,13 +92,14 @@ ComfyUI 留在本机，不接。
 
 模型仍经 magpie 网关：它统一各家 provider、持有订阅类的 OAuth 登录、按 gateway key 归集用量。magpie 支持服务端部署：官方镜像 `ghcr.io/yetone/magpie`，`magpie web --gateway` 无桌面运行，状态在 `/config`，`MAGPIE_WEB_KEY` 保护 Web UI，`magpie s3` 可把 providers、key、设置经 S3 兼容存储（含 R2）加密同步。
 
-**部署在 Cloudflare Containers**（建议）：
+**部署在 Cloudflare Containers**（P0 已实现，`workers/magpie/` 与 `workers/src/magpie-container.ts`）：
 
-- 一个 Container 绑定到 Registry DO（Containers 的容器由 DO 管理），镜像即官方镜像，入口 `magpie web --gateway --addr 0.0.0.0:3425 --no-open`。Worker 经 container binding 直连容器端口，不暴露公网，不需要 Access。
-- 容器磁盘是临时的。启动脚本先 `magpie s3 restore` 从 R2 取回状态（access key、secret、passphrase 来自 Secrets Store，经环境变量注入），运行中 `magpie s3 auto 3` 每 3 分钟同步回去，OAuth token 刷新因此不丢。最坏丢最近 3 分钟的刷新结果，下次调用重新刷新即可。
-- 空闲后容器休眠，首次调用冷启动几秒。Registry DO 用 alarm 每几分钟 `GET /api/hello` 保活，或接受冷启动；由主人按成本定。
-- Pi 侧不变：`createMagpieProvider` 的 `baseUrl` 指向容器，`CODEX_MAGPIE_KEY` 改名为 `MAGPIE_GATEWAY_KEY` 放 Secrets Store。模型目录在冷启动时拉一次，缓存在 Registry DO，magpie 暂不可达时用缓存启动，不再像现在那样启动失败。
-- 订阅类 provider 的 OAuth 登录经 Worker 反代的 magpie Web UI 做一次（`MAGPIE_WEB_URL` 指向反代地址，路由加 Access），登录结果随 s3 同步落 R2。
+- 本账户只允许 `durable_object` 调度策略：容器由 `MagpieContainer` 这个普通 DO 用 `ctx.container.start()` 按需拉起，镜像在 `wrangler.jsonc` 的 `images.magpie` 里命名，实例规格与环境变量在 `start()` 里给，空闲 30 分钟后退出。`@cloudflare/containers` 的 `Container` 类不支持这种策略，没有用。
+- 镜像 = 官方镜像 `ghcr.io/yetone/magpie`（Debian 底、静态链接的 `/magpie`、自带 dash/curl/perl）加一个入口脚本：先起 `magpie serve`，再起 perl 回环中继 `0.0.0.0:3426 → 127.0.0.1:3425`，最后在后台 `magpie s3 on ...`（secret 与 passphrase 走 stdin）并 `s3 auto 3`。顺序不能反：同步由网关进程执行，没有网关时 `s3 on` 一直等；`s3 restore` 要交互确认、`s3 now` 会等锁，都不能放在入口脚本里。
+- **网关 key 不随 R2 同步**（同步的是 providers、provider key、设置、profiles、library），容器每次启动都是一份没有网关 key 的 magpie。Worker 进来的源地址是 10.0.0.1 不是回环，magpie 会拒绝。所以 Worker 只连中继端口 3426：中继把连接转到回环，magpie 按回环处理，任意 Bearer 都接受。容器端口只有绑定它的 DO 能到达，中继不再加鉴权。`MAGPIE_ALLOW_IPS`、`MAGPIE_GATEWAY_KEY` 两个环境变量都不能替代这一步（前者只是网络白名单，后者不是服务端设置）。
+- 容器磁盘是临时的，`s3 on` 自己就同步一次并取回状态（本机验证：容器起来 15 秒内 providers 已恢复）。主人电脑上的 magpie 也开着同一个 bucket 的同步，但要 `magpie s3 auto off`：它的定时同步会和容器抢锁，容器那边一直"another magpie is syncing"。电脑改了 provider 或 key 后手动 `magpie s3 now`。
+- Pi 侧：`MAGPIE_URL=container` 时 `baseUrl` 用哨兵主机名 `http://magpie.container/v1`，`installMagpieRoute` 把全局 fetch 里这个主机名的请求改道到 `MAGPIE` DO 的 `fetch`（pi-durable 的生成任务不暴露按请求注入 fetch 的入口）；DO 把请求转给容器的 3426 端口，冷启动期间按 500 ms 重试最多一分钟。目录每次 DO 冷启动拉一次，P0 没有缓存。
+- 订阅类 provider 的 OAuth 登录（magpie 的 accounts）不在同步范围内，云端只有 API key 类 provider；目前只有 DeepSeek，Pi 用它够了。
 
 **备选：小 VPS** 跑同一镜像，`/config` 挂卷，经 Cloudflare Tunnel 发布并套 Access 服务令牌，Worker 对该主机名的 fetch 注入 `CF-Access-Client-Id/Secret`。常开、无冷启动，多一台机器要管。magpie 把回环来源视为可信，隧道后面的 magpie 对任何能到主机名的人都是敞开的，所以 Access 不是可选项。
 
