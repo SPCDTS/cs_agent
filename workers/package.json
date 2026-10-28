@@ -1,0 +1,30 @@
+{
+  "name": "cs-agent-workers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "cs-agent on Cloudflare Workers: one Durable Object per conversation (docs/WORKERS-DESIGN.md)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7",
+    "@earendil-works/chord": "^1.3.0",
+    "@earendil-works/pi-ai": "^1.3.0",
+    "@earendil-works/pi-durable": "^1.3.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
+    "@cloudflare/workers-types": "^5.20261028.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.154.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

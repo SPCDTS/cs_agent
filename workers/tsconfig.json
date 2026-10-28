@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "es2024",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2024"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "types": ["@cloudflare/vitest-pool-workers/types"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "worker-configuration.d.ts"]
+}

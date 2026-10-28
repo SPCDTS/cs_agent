@@ -1,0 +1,37 @@
+// P0 将 NapCat 连接与会话分开，空闲连接可独立休眠。
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cs-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // CPU 限额只计活跃计算；回合里的 JSON 处理偶有峰值，放到上限 5 分钟
+  "limits": { "cpu_ms": 300000 },
+  "observability": { "enabled": true },
+  // 自定义域名在 Cloudflare 托管的 zone 下；*.workers.dev 在国内不稳定，NapCat 反向 WS 只连这个
+  "routes": [{ "pattern": "agent.spcdts.dev", "custom_domain": true }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "THREAD", "class_name": "ThreadDO" },
+      { "name": "BRIDGE", "class_name": "BridgeDO" },
+      { "name": "MAGPIE", "class_name": "MagpieContainer" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ThreadDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["BridgeDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] }
+  ],
+  // magpie 模型网关跑在 Containers 上（magpie/Dockerfile）；本地 dev 与测试不起容器，faux 模式不碰它
+  "containers": [
+    { "class_name": "MagpieContainer", "image": "./magpie/Dockerfile", "max_instances": 1, "instance_type": "lite" }
+  ],
+  "dev": { "enable_containers": false },
+  // QQ_OWNER、NAPCAT_TOKEN、R2_*、MAGPIE_SYNC_PASSPHRASE 都是 secrets（wrangler secret put），不写在这里
+  "vars": {
+    "CS_AGENT_COMMIT": "dev",
+    "MODEL_PROVIDER": "faux",
+    "MODEL_ID": "test",
+    "MAGPIE_URL": ""
+  }
+}
