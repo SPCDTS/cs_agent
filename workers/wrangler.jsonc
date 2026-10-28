@@ -29,10 +29,11 @@
   ],
   "dev": { "enable_containers": false },
   // QQ_OWNER、NAPCAT_TOKEN、R2_*、MAGPIE_SYNC_PASSPHRASE 都是 secrets（wrangler secret put），不写在这里
+  // 生产：模型经 magpie 容器（MAGPIE_URL=container）。测试用 wrangler.test.jsonc 覆盖为 faux
   "vars": {
     "CS_AGENT_COMMIT": "dev",
-    "MODEL_PROVIDER": "faux",
-    "MODEL_ID": "test",
-    "MAGPIE_URL": ""
+    "MODEL_PROVIDER": "magpie",
+    "MODEL_ID": "deepseek/deepseek-flash",
+    "MAGPIE_URL": "container"
   }
 }
