@@ -29,6 +29,13 @@ for name in NAPCAT_TOKEN QQ_OWNER R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECR
   [ -n "${!name}" ] || { echo "$name 为空" >&2; exit 1; }
 done
 
+# wrangler 的 OAuth 刷新要连 dash.cloudflare.com，网络不通时用 API token 直连 api.cloudflare.com：
+# 把 token 放在 secrets/cloudflare-api-token.env（一行 CLOUDFLARE_API_TOKEN=...），存在就用它
+token_file="$root/secrets/cloudflare-api-token.env"
+if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -f "$token_file" ]; then
+  CLOUDFLARE_API_TOKEN=$(read_var "$token_file" CLOUDFLARE_API_TOKEN); export CLOUDFLARE_API_TOKEN
+fi
+
 cd "$workers_dir"
 {
   printf '{'
