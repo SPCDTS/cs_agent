@@ -25,6 +25,8 @@
   "vars": {
     "CS_AGENT_COMMIT": "dev",
     "QQ_GROUP_MENTIONS": true,
+    "MEMORY_EXTRACT_MODEL": "",
+    "MEMORY_EXTRACT_NAMESPACES": "owner",
     "MODEL_PROVIDER": "faux",
     "MODEL_ID": "test",
     "MAGPIE_URL": ""

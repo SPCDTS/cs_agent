@@ -28,7 +28,15 @@ R2_ENDPOINT=$(read_var "$r2_file" R2_ENDPOINT)
 R2_ACCESS_KEY_ID=$(read_var "$r2_file" R2_ACCESS_KEY_ID)
 R2_SECRET_ACCESS_KEY=$(read_var "$r2_file" R2_SECRET_ACCESS_KEY)
 MAGPIE_SYNC_PASSPHRASE=$(read_var "$r2_file" MAGPIE_SYNC_PASSPHRASE)
-for name in NAPCAT_TOKEN QQ_OWNER R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE; do
+# 管理端点（/admin/memory/import）的口令：没有就生成一次并存到 secrets/admin-token.env，之后沿用
+admin_file="$root/secrets/admin-token.env"
+if [ ! -f "$admin_file" ]; then
+  printf 'ADMIN_TOKEN=%s
+' "$(python -c 'import secrets; print(secrets.token_hex(24))')" > "$admin_file"
+fi
+ADMIN_TOKEN=$(read_var "$admin_file" ADMIN_TOKEN)
+
+for name in NAPCAT_TOKEN QQ_OWNER R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE ADMIN_TOKEN; do
   [ -n "${!name}" ] || { echo "$name 为空" >&2; exit 1; }
 done
 
@@ -43,7 +51,7 @@ cd "$workers_dir"
 {
   printf '{'
   first=1
-  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE; do
+  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE ADMIN_TOKEN; do
     [ -n "${!name}" ] || continue
     [ $first -eq 1 ] || printf ','
     first=0

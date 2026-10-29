@@ -1,6 +1,117 @@
-# Workers P1a
+# Workers P1b
 
 NapCat 的 OneBot v11 Universal 反向 WebSocket 连接 `/onebot`。Bridge DO 单例 `napcat` 负责授权、去重、群名与发送规则；群消息进入 `group:<群号>` 的 Thread DO，owner 私聊仍共用 `owner`，其他允许用户进入 `private:<QQ号>`。Thread 中运行 pi-durable，保存消息与回合，工具调用经同一条反向 WS 回复 QQ。
+
+## P1b 记忆系统
+
+每个 Thread DO 保存自己的记忆命名空间。新增表为 memories、memory_versions、memory_links、memories_fts（FTS5 trigram）和 profile；不创建 proposals、pair_checks 或夜间整理表。记忆正文修改、状态修改与 supersedes 关系使用同一个 SQLite 事务，旧条目的 until 设为取代时间。所有宿主 SQL 都走与 Pi 共享的 DurableObjectSqliteDatabase 队列。
+
+本期按 P1B brief 收紧权限：owner 私聊提供五个 mem_* 工具，只读写 owner；群（包括 owner 在群内的回合）与其他私聊仅提供 mem_search，只查本 DO。工具执行时再次核对当前入站身份，不接受模型传入命名空间，也不通过 subject 路由到其他 DO。工具参数和说明文字复制自 Docker；其中跨会话写入、面板恢复等旧能力描述以本段限制为准，调用不支持的跨会话写入会明确返回错误。
+
+- mem_search：最多 20 条；带 query 时按空白分词且全部命中，更新展示条目的召回统计；不带 query 列出最近更新，commitment 按截止日期排序。输出沿用 #id [kind] (时效) 正文 ← 来源，总量最多 2500 字符。
+- mem_remember：规整后的 SHA-256 精确去重；即使新正文重复，合法 supersedes 仍同事务取代旧条目并建链。
+- mem_update / mem_forget：只修改本命名空间；更新只允许 active，遗忘只标 forgotten，版本保留。时间参数使用北京时间，空字符串可清空。
+- mem_profile：画像最多 4096 UTF-8 字节；未创建时 revision 为 none，保存后为正文 SHA-256 前 16 位。CAS 冲突返回当前 revision 与内容，错误输出也受 2500 字符限制。相同内容的 revision 不变。
+- 每轮最多 20 次工具写入尝试，计数持久化；凭据形态的正文、subject、遗忘原因及画像拒绝保存。memory_write / memory_recall 事件只含操作名和计数，不含正文。
+- memory section 保留画像全文及未完成承诺前 10 条，按 due_at 升序、无截止的最后。按 brief，画像为空时整个 section 不渲染；承诺仍可检索。文本仅由画像和承诺决定，召回计数或当前时间变化不会触发 Pi 重发。
+
+### 回合后抽取
+
+inbound 和 outbox 新增 turn_id 与索引。Pi 的 run.taskId 在工具续轮会变化，因此使用本轮首条 submission 的 ID 生成稳定业务回合键；同人插话共享该键。send_message 在收到成功回执后，和自发消息历史一起记录 outbox 的 turn_id。全部入站完成结算后，settle 在同一事务中入队并设置 alarm；失败回合不入队。
+
+| 配置 | 行为 |
+| --- | --- |
+| MEMORY_EXTRACT_MODEL | var，默认空，使用主模型 ID；provider 仍为 MODEL_PROVIDER |
+| MEMORY_EXTRACT_NAMESPACES | var，默认 owner；逗号分隔完整命名空间，空字符串关闭全部抽取；可显式开启群或其他私聊的后台抽取 |
+| ADMIN_TOKEN | 独立 secret，只保护导入端点；不是 NAPCAT_TOKEN，不能用 query token |
+
+alarm 间隔 5 秒，每次最多处理 3 个回合；队列最多 50 条，超限丢最旧的并记计数事件。extract_receipts 防止重复 settle 或 alarm 重试再次抽取同一回合；extract_daily 按北京时间日期持久计数，每命名空间每天最多 200 次模型调用。只用本回合 inbound 正文和成功 outbox，交错排序；不读 final answer、工具结果或其他回合。正文不足 80 字跳过，单条最多 2000 字，整份材料最多 12000 字；材料关键词召回最多 20 条已有记忆供模型判断冲突。
+
+抽取提示词复制自 Docker。直接调用 pi-ai Models.complete，不创建第二个 Harness，不提供工具；20 秒超时，AbortSignal 与 Promise.race 同时生效。JSON 形状错误整批丢弃；confidence < 0.6、凭据形态及非法日期丢弃；重复只更新召回，合法 supersedes 同事务取代，每轮最多新写 5 条，author=extractor。抽取不会修改画像或发送 QQ。events(at, kind, detail) 的 memory_extract 只保存计数、用量、耗时和固定原因，不保存材料、模型响应或错误正文。
+
+GET /healthz 的 owner thread 增加 memory: { active, profileBytes, extractQueue }；profileBytes 是 UTF-8 字节数，active 是 active 状态条目数。
+
+### 导出与导入
+
+Node >=24，脚本在仓库根目录运行，只读 data/memory.sqlite 和 data/memory/<ns>/profile.md。Docker 实际目录名把冒号换成下划线，例如 group_<群号>；脚本沿用这一约定。输出是单个命名空间的 JSON，不上传。下面是 **Bash** 示例，Node stdout 与重定向文件均为 UTF-8 无 BOM；不要直接套用 Windows PowerShell 5.1 的默认重定向编码。
+
+~~~bash
+node workers/scripts/export-memory.mjs owner > memory-owner.json
+curl --fail-with-body -X POST "$WORKER_URL/admin/memory/import" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data-binary @memory-owner.json
+~~~
+
+ADMIN_TOKEN 应通过 Wrangler secret 注入，上例只引用环境变量，没有内置 token。此任务未执行真实导出、上传或 secret 配置。
+
+POST /admin/memory/import 接收 { ns, profile?: { text }, memories: [...] }，成功返回 { inserted, skipped }；401 表示 Bearer 鉴权失败，400 表示格式、命名空间、画像大小或凭据检查不通过。验证整批后路由对应 DO，DO 再复核 ns 与 idFromName 一致。memories 保留 id、状态、时间、召回统计和来源；重算 hash，id 冲突跳过计数。省略的可选列使用表的默认语义。导入事务为新增条目写 import 版本；FTS 由触发器同步。profile 如提供则作为管理员覆盖，revision 按导入内容重算。
+
+### P1b 文件与测试
+
+| 文件 | 职责 |
+| --- | --- |
+| src/memory/types.ts、schema.ts、store.ts | 条目契约、SQLite schema、索引、版本、关系、CAS 与写入额度 |
+| src/memory/contracts.ts、tools.ts、render.ts、time.ts、secrets.ts | 原工具契约、权限复核、文本与 section、北京时间、凭据形态检测 |
+| src/memory/extractor.ts、import.ts | 持久队列、直接模型调用、落库过滤与导入校验 |
+| src/thread.ts、index.ts、env.ts | DO 装配、回合关联、alarm、管理端点与健康计数 |
+| wrangler.jsonc、wrangler.test.jsonc、worker-configuration.d.ts | 同步 vars 与重新生成的类型 |
+| scripts/export-memory.mjs | 只读 Node 导出 CLI |
+| test/memory*.test.ts、test/export-memory.node.mjs | workerd 集成测试与真实 Node 导出验证 |
+| README.md | 配置、迁移用法、测试与限制 |
+
+| 功能 | 对应测试（test/ 下） |
+| --- | --- |
+| hash 去重、版本、重复赢家 supersedes、事务回滚 | memory.test.ts：deduplicates normalized hashes and atomically versions supersedes including duplicate winners |
+| trigram、短词、字面通配符、范围隔离、来源格式 | memory.test.ts：searches trigram, short terms and literal wildcards with namespace isolation and source rendering |
+| 更新/删除 FTS、遗忘版本、2500 字符 | memory.test.ts：updates FTS triggers, marks forgotten with versions and bounds output to 2500 characters |
+| 画像 CAS 并发冲突、内容 revision、UTF-8 限额与凭据拒绝 | memory.test.ts：uses content revisions and CAS, enforcing UTF-8 byte limits and secret rejection |
+| 稳定 section、空画像、未完成承诺排序与前 10 条 | memory.test.ts：keeps memory sections stable and renders only ten unfinished commitments in deadline order |
+| 日期与 commitment 参数限制 | memory.test.ts：rejects invalid Beijing dates and non-commitment timing |
+| 五工具真实执行、当前回合来源、CAS 返回、section 实际注入且不重复发送、事件不含正文 | memory-tools.test.ts：executes all five tools with source attribution, deduplication, CAS feedback and next-request memory sections |
+| 群成员、群内 owner、其他私聊无写工具，读不到 owner 数据 | memory-tools.test.ts：offers only mem_search in $ns and cannot read owner memories（三组参数） |
+| 拒绝跨 DO subject 与每轮 20 次写入 | memory-tools.test.ts：rejects cross-DO subject routing and caps tool writes at twenty per turn |
+| faux 单次 completion、confidence、去重召回、supersedes、每轮 5 条、来源与只记统计 | memory-extractor.test.ts：calls pi-ai once with faux JSON and applies confidence, duplicate recall, supersedes, five-write cap and sources |
+| 每批 3 轮、幂等收据、日额 200、北京时间跨日、积压 50 | memory-extractor.test.ts：processes at most three jobs…；persists the Beijing daily quota… |
+| 过短、关闭、非法 JSON、超时晚到、失败不重试、材料预算与注入中和 | memory-extractor.test.ts：skips short or disabled turns…；times out and ignores late model output…；bounds material… |
+| 插话与成功发送共享 turn_id、默认 owner 开启、指定抽取模型、排除 final answer | memory-extractor.test.ts：binds steered inputs and acknowledged output to one turn and uses the configured extraction model in alarm |
+| DO 驱逐后队列恢复、真实 alarm 每批 3 轮及续约/清理 | memory-extractor.test.ts：keeps queued work across DO eviction and rearms alarms after batches of three |
+| 失败回合不入队、默认群关闭与命名空间 var 开启 | memory-extractor.test.ts：does not queue failed turns and only enables other namespaces through the explicit var |
+| Bearer 鉴权、缺 secret、拒绝 NapCat/query token、id 去重、健康字节数、跨 DO 隔离、整批校验 | memory-import.test.ts 的 3 项测试 |
+| 真实 Node CLI、中文 stdout JSON、画像目录、id/来源、只读原库 | export-memory.node.mjs（node --test 单独运行；workerd 不支持 node:sqlite） |
+
+本期验证在 workers/ 中执行：
+
+~~~text
+npx.cmd wrangler types
+Types written to worker-configuration.d.ts
+
+npx.cmd tsc -p tsconfig.json --noEmit
+退出码 0，无类型错误
+
+npx.cmd vitest run
+Test Files  10 passed (10)
+Tests       58 passed (58)
+
+node --test test/export-memory.node.mjs
+tests 1 / pass 1 / fail 0
+~~~
+
+测试只使用合成 QQ ID、测试 token 与 faux 模型，未安装依赖、未联网取包、未提交 Git。原 35 项 P0/P1a 测试全部保留。Wrangler 首次尝试写用户配置目录日志被沙箱拒绝，但类型生成成功；后续设置 WRANGLER_LOG_PATH 到任务临时目录并关闭 metrics。生成文件恢复原 CRLF，其余既有文件保留 UTF-8 无 BOM 与 CRLF；新增文件为 UTF-8 无 BOM、LF。
+
+### P1b 简化与容易踩的坑
+
+- brief 与 Docker 文档的权限表不同，本期采用上述 owner 私聊写、其他会话只读的保守边界；不实现 owner 跨 DO 召回/写入。群或其他私聊的抽取只由管理配置显式开启，不能通过用户工具改变开关。
+- 不含夜间整理、画像提议、面板、自动提醒、向量检索或历史清理。保留的版本与链接可供后续功能使用，当前没有恢复工具。队列收据、日计数、工具写次数与事件尚无清理策略。
+- 按 brief，空画像时承诺也不进入 section。工具说明保留 Docker 原文中的“下一轮”，pi-durable 实际会在下一次模型请求重新计算 section；同轮工具后续请求也可能看到画像变更。
+- P1a 的 outbox 只保存成功回执，所以抽取没有 Docker 的 uncertain、附件与主动目标材料；引用仅保留入站正文中的标记，不额外回查引用原文。
+- 抽取先领取回合并保存收据，再调用模型。模型失败不重试；进程在领取后、落库前中断会放弃这一轮，未领取队列仍由预设 alarm 唤醒。这一取舍避免平台重试导致重复模型调用与重复费用。
+- Pi 的工具续轮会换 run.taskId；稳定 turn_id 必须用首个输入，而不是最新输入或当前 generation task。FTS trigram 的短词不能直接 MATCH；这里沿用 Docker 的 FTS LIKE 路径，并对 %、_、反斜杠做字面转义。
+- 管理员导入会覆盖所提供的画像，不走用户 CAS；相同 id 不覆盖已有记忆。接口只导入当前条目与画像，原 Docker 的版本历史和 links 不在 body 契约内。保留 id 仅保证来源引用不重新编号，不能恢复未导入的关系历史。
+- Node 导出跨 SQLite 与画像文件没有联合快照，迁移时应停掉源端写入后导出。导出器只输出文件，不会自行上传。
+- workerd 限制跨 DO 使用 WebSocket 等 I/O 对象；测试回执必须在创建 socket 的上下文发出。负向发送 RPC 测试仍有预期 exception 输出，Vitest 没有未处理错误。测试包的改名提示不影响本期已安装版本。
+
+以下保留 P0/P1a 基础配置、行为及历史验证记录。
 
 ## 配置与行为
 

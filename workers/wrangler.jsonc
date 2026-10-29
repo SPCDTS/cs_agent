@@ -33,6 +33,8 @@
   "vars": {
     "CS_AGENT_COMMIT": "dev",
     "QQ_GROUP_MENTIONS": true,
+    "MEMORY_EXTRACT_MODEL": "",
+    "MEMORY_EXTRACT_NAMESPACES": "owner",
     "MODEL_PROVIDER": "magpie",
     "MODEL_ID": "deepseek/deepseek-flash",
     "MAGPIE_URL": "container"
