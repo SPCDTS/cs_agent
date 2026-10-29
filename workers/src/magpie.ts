@@ -46,7 +46,8 @@ export function magpieProviderModels(entries: MagpieCatalogEntry[], builtin: Mod
 
 export async function fetchMagpieCatalog(baseUrl: string, apiKey: string, fetchImpl: typeof fetch = fetch): Promise<MagpieCatalogEntry[]> {
   const response = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/models`, {
-    headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(30_000), redirect: "error",
+    // Workers 的 fetch 不接受 redirect: "error"，用 manual 拿到 3xx 后按失败处理，同样不跟随到别的来源
+    headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(30_000), redirect: "manual",
   });
   if (!response.ok) throw new Error(`magpie 模型目录请求失败: HTTP ${response.status}`);
   // 原始 JSON 解析错误可能带响应片段，不能把网关正文传到日志或健康检查。
