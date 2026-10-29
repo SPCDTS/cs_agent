@@ -299,9 +299,11 @@ docker compose config
 
 Workers 侧的部署事实（设计见 [WORKERS-DESIGN.md](WORKERS-DESIGN.md)）：
 
-- 线上地址 `https://agent.spcdts.dev`，`/healthz` 返回提交号、NapCat 连接状态、模型选择与 owner 线程的入站/出站计数。
-- Worker 的 secrets（`NAPCAT_TOKEN`、`QQ_OWNER`、`R2_*`、`MAGPIE_SYNC_PASSPHRASE`）用 `bash workers/scripts/put-secrets.sh` 从本地 `.env` 与 `secrets/r2-magpie.env` 上传，值不进命令行与仓库；wrangler 的 OAuth 刷新连不上 dash.cloudflare.com 时，脚本与手动 `wrangler deploy` 用 `secrets/cloudflare-api-token.env` 里的 API token 直连 API。
+- 线上地址 `https://agent.spcdts.dev`，`/healthz` 返回提交号、NapCat 连接状态、模型选择、owner 线程的入站/出站与记忆计数，以及 `mcp`（每个服务的登录状态 `ok|needed|error|unconfigured` 与目录工具数）。
+- Worker 的 secrets（`NAPCAT_TOKEN`、`QQ_OWNER`、`QQ_ALLOW_*`、`R2_*`、`MAGPIE_SYNC_PASSPHRASE`、`ADMIN_TOKEN`、`OAUTH_STORE_KEY`）用 `bash workers/scripts/put-secrets.sh` 从本地 `.env` 与 `secrets/r2-magpie.env` 上传，值不进命令行与仓库；wrangler 的 OAuth 刷新连不上 dash.cloudflare.com 时，脚本与手动 `wrangler deploy` 用 `secrets/cloudflare-api-token.env` 里的 API token 直连 API。
 - 本机手动 `wrangler deploy` 与 CI 的自动部署会互相覆盖：CI 作业可能排队很久后才执行，把更早的提交部署上去盖掉手动部署的新版本。手动部署后要确认 CI 上没有更旧提交的运行还在排队，或等 CI 跑完同一提交。
-- NapCat 以反向 WebSocket 连 Worker（`napcat/config/onebot11*.json` 的 `websocketClients` 条目 `workers`），本机 Docker 的旧 cs-agent 仍经正向连接收同一批消息，两边都会回复，直到决定停掉其中一边。
+- `ADMIN_TOKEN` 与 `OAUTH_STORE_KEY` 由脚本首次生成并存在 `secrets/admin-token.env`、`secrets/oauth-store-key.env`，之后沿用；`OAUTH_STORE_KEY` 丢了就解不开已存的 OAuth token，只能重新登录。代理到 api.cloudflare.com 偶发 `fetch failed`，重跑即可。
+- MCP 服务登录（以 Notion 为例）：`curl -X POST https://agent.spcdts.dev/admin/mcp/oauth/login-link -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' -d '{"server":"notion"}'` 返回一次性链接（10 分钟、单次），在浏览器打开并授权，回调页显示「已登录 notion」；之后 `/healthz` 的 `mcp` 里该服务 `login: ok`，owner 线程下次打开时拉取工具目录。
+- NapCat 以反向 WebSocket 连 Worker（`napcat/config/onebot11*.json` 的 `websocketClients` 条目 `workers`）。本机 Docker 的 cs-agent 与 gmail-sidecar 已于 2026-10-29 停掉（`docker compose stop cs-agent gmail-sidecar`），Worker 是唯一回复方；`napcat` 容器暂留，计划迁回宿主机直接运行。
 
-本机 Docker 部署不经 CI，仍按 §5 用 `scripts/deploy.ps1`。
+本机 Docker 部署已停用；如需临时重启旧版，仍按 §5 用 `scripts/deploy.ps1`，但要先在 NapCat 里停掉 `workers` 反向连接，否则两边都会回复。
