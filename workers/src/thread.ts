@@ -3,13 +3,16 @@ import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context"
 import { Type } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type Submission } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
+import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
-import { inboundKey, policyFromEnv, scopeOf, type InboundInput, type Target } from "./policy";
+import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target } from "./policy";
+import { effectiveSettings, type SettingsSnapshot } from "./settings";
 import { MESSAGE_SCHEMA, recordMessage, recall } from "./context";
 import { PI_SAFETY_RULE, SEND_RULE, turnIdentity } from "./prompt";
 import { openModels } from "./models";
 import { MEMORY_SCHEMA } from "./memory/schema";
-import { MemoryStore } from "./memory/store";
+import { MemoryStore, MemoryStoreError, type Profile } from "./memory/store";
+import type { MemoryRow } from "./memory/types";
 import { parseImport } from "./memory/import";
 import { createMemoryTools, type MemoryBinding } from "./memory/tools";
 import { MEMORY_RULE } from "./memory/contracts";
@@ -26,8 +29,13 @@ type InboundRow = {
   status: "queued" | "done" | "failed"; chat_kind: "private" | "group"; chat_id: string; nickname: string;
   scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null;
 };
-type Runtime = { harness: Harness; root: Conversation; selection: { provider: string; id: string } };
+type Runtime = { harness: Harness; root: Conversation; selection: { provider: string; id: string }; mcp?: ThreadMcp };
 const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind: "group", groupId: row.chat_id } : { kind: "private", userId: row.chat_id };
+export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
+export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
+// 结果过滤按事件类型取各自的 JSON 字段；表外的类型不参与结果过滤。
+const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_catalog: "$.status" };
+const SETTINGS_TTL_MS = 60_000;
 
 export class ThreadDO extends DurableObject<Env> {
   private readonly database = new DurableObjectSqliteDatabase(this.ctx.storage);
@@ -35,6 +43,7 @@ export class ThreadDO extends DurableObject<Env> {
   private extractionModels?: ReturnType<typeof openModels>;
   private runtime?: Promise<Runtime>;
   private admissions: Promise<void> = Promise.resolve();
+  private settingsCache?: { at: number; load: Promise<SettingsSnapshot> };
 
   private initialize(): Promise<void> {
     return this.initialized ??= this.database.transaction(async tx => {
@@ -63,11 +72,14 @@ export class ThreadDO extends DurableObject<Env> {
     });
   }
 
-  async ingest(input: InboundInput): Promise<void> {
+  async ingest(input: InboundInput): Promise<{ repliedToSelf: boolean }> {
     await this.initialize();
-    const ns = input.target.kind === "private" && policyFromEnv(this.env).owners.includes(input.userId) ? "owner" : scopeOf(input.target);
+    const ns = input.target.kind === "private" && ownerIds(this.env).includes(input.userId) ? "owner" : scopeOf(input.target);
     await this.bindNamespace(ns);
     await this.database.transaction(tx => recordMessage(tx, input));
+    const replied = input.replyToId === null ? undefined
+      : await this.database.get("SELECT 1 FROM messages WHERE scope = ? AND message_id = ? AND is_self = 1", scopeOf(input.target), input.replyToId);
+    return { repliedToSelf: replied !== undefined };
   }
 
   private open(): Promise<Runtime> {
@@ -111,7 +123,7 @@ export class ThreadDO extends DurableObject<Env> {
         section("memory", () => renderMemorySection(memory), { tag: false }),
         section("turn-identity", async (api, callContext) => {
           const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
-          return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, policyFromEnv(this.env).owners.includes(input.user_id)) : undefined;
+          return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, ownerIds(this.env).includes(input.user_id)) : undefined;
         }, { tag: false }),
       ],
       tools: [...createMemoryTools(memory, async (api, callContext) => {
@@ -166,7 +178,7 @@ export class ThreadDO extends DurableObject<Env> {
     const harness = await Harness.open(storage, { models, registry }, context);
     const root = await harness.root(context, { agent: { model: { provider: selection.provider, modelId: selection.id } } });
     await root.configure({ model: { provider: selection.provider, modelId: selection.id } }, context);
-    const runtime = { harness, root, selection };
+    const runtime = { harness, root, selection, mcp };
     // requestId 幂等地补齐入库后、Pi 接收前中断的窗口，按原到达顺序恢复。
     for (const row of await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' ORDER BY rowid")) {
       const submission = await this.admit(runtime, row);
@@ -199,13 +211,13 @@ export class ThreadDO extends DurableObject<Env> {
       status = result.status === "done" ? "done" : "failed";
       fallbackTurn = result.answer === undefined ? undefined : `answer:${result.answer}`;
     } finally {
-      const store = new MemoryStore(this.database, await this.namespace());
+      const extractor = await this.extractor(new MemoryStore(this.database, await this.namespace()));
       await this.database.transaction(async tx => {
         const row = await tx.get<InboundRow>("UPDATE inbound SET status = ?, turn_id = COALESCE(turn_id, ?) WHERE message_id = ? RETURNING *", status, fallbackTurn ?? null, messageId);
         if (status !== "done" || !row?.turn_id) return;
         const unfinished = await tx.get("SELECT 1 FROM inbound WHERE turn_id = ? AND status != 'done' LIMIT 1", row.turn_id);
         if (unfinished) return;
-        await this.extractor(store).enqueue(row.turn_id, tx);
+        await extractor.enqueue(row.turn_id, tx);
         if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1") && await this.ctx.storage.getAlarm() === null) {
           await this.ctx.storage.setAlarm(Date.now() + EXTRACT_ALARM_DELAY_MS);
         }
@@ -276,7 +288,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   private memoryBinding(input: InboundRow, ns: string): MemoryBinding | undefined {
     if (!input.turn_id) return;
-    const owner = policyFromEnv(this.env).owners.includes(input.user_id);
+    const owner = ownerIds(this.env).includes(input.user_id);
     const expected = owner && input.chat_kind === "private" ? "owner" : scopeOf(targetOf(input));
     if (expected !== ns || input.user_id === input.self_id) return;
     return { ns, owner, userId: input.user_id, turnId: input.turn_id, scope: scopeOf(targetOf(input)), messageId: input.platform_message_id };
@@ -289,8 +301,22 @@ export class ThreadDO extends DurableObject<Env> {
     return directComplete(models, selection.provider, this.env.MEMORY_EXTRACT_MODEL?.trim() || selection.id)(prompt, signal);
   };
 
-  private extractor(store: MemoryStore): MemoryExtractor {
-    return new MemoryExtractor(store, this.complete, () => !!store.ns && (this.env.MEMORY_EXTRACT_NAMESPACES ?? "owner").split(",").map(ns => ns.trim()).includes(store.ns));
+  private async extractEnabled(ns: string): Promise<boolean> {
+    if (!ns) return false;
+    let cache = this.settingsCache;
+    if (!cache || Date.now() - cache.at >= SETTINGS_TTL_MS) {
+      const load = this.env.REGISTRY.getByName("main").settings();
+      cache = this.settingsCache = { at: Date.now(), load };
+      load.catch(() => { if (this.settingsCache?.load === load) this.settingsCache = undefined; });
+    }
+    // 取不到设置时不抽取：面板可能刚关掉这个命名空间，宁可漏一轮也不按过期配置调用模型。
+    try { return effectiveSettings(this.env, (await cache.load).overrides).extractNamespaces.includes(ns); }
+    catch { return false; }
+  }
+
+  private async extractor(store: MemoryStore): Promise<MemoryExtractor> {
+    const enabled = await this.extractEnabled(store.ns);
+    return new MemoryExtractor(store, this.complete, () => enabled);
   }
 
   override async alarm(): Promise<void> {
@@ -298,7 +324,7 @@ export class ThreadDO extends DurableObject<Env> {
     const store = new MemoryStore(this.database, await this.namespace());
     // 先续约闹钟：处理中若进程中断，未领取的回合仍会被唤醒。
     await this.database.transaction(async () => { await this.ctx.storage.setAlarm(Date.now() + 65_000); });
-    try { await this.extractor(store).drain(); }
+    try { await (await this.extractor(store)).drain(); }
     finally {
       await this.database.transaction(async tx => {
         if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1")) await this.ctx.storage.setAlarm(Date.now() + EXTRACT_ALARM_DELAY_MS);
@@ -318,6 +344,69 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     await this.bindNamespace(data.ns);
     return new MemoryStore(this.database, data.ns).import(data);
+  }
+
+  async events(q: EventQuery): Promise<{ events: AuditEvent[]; next?: number }> {
+    await this.initialize();
+    const where: string[] = [], args: SqliteValue[] = [];
+    if (q.kind) { where.push("kind = ?"); args.push(q.kind); }
+    if (q.result) {
+      where.push(`CASE kind ${Object.keys(EVENT_RESULT_PATH).map(() => "WHEN ? THEN json_extract(detail, ?) = ?").join(" ")} ELSE 1 END`);
+      for (const [kind, path] of Object.entries(EVENT_RESULT_PATH)) args.push(kind, path, q.result);
+    }
+    if (q.before !== undefined) { where.push("rowid < ?"); args.push(q.before); }
+    const limit = Math.min(200, Math.max(1, Math.trunc(q.limit)));
+    const rows = await this.database.all<{ id: number; at: number; kind: string; detail: string }>(
+      `SELECT rowid AS id, at, kind, detail FROM events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid DESC LIMIT ?`, ...args, limit + 1);
+    const events = rows.slice(0, limit).map((row): AuditEvent => ({ id: row.id, at: row.at, kind: row.kind, detail: JSON.parse(row.detail) }));
+    return rows.length > limit ? { events, next: events[events.length - 1].id } : { events };
+  }
+
+  async stop(): Promise<{ stopped: boolean }> {
+    await this.initialize();
+    if (!await this.database.get("SELECT 1 FROM inbound WHERE status = 'queued' LIMIT 1")) return { stopped: false };
+    const idle = (await this.open()).root.abort(context);
+    this.ctx.waitUntil(idle);
+    // 中止在第一次提交时就已生效；等待 QQ 回执的发送工具要到自身超时才结束，不让管理请求一直挂着。
+    await Promise.race([idle, scheduler.wait(2000)]);
+    return { stopped: true };
+  }
+
+  async refreshMcp(): Promise<{ server: string; status: string; tools: number }[]> {
+    const { mcp } = await this.open();
+    if (!mcp) throw new Error("mcp_unavailable");
+    return mcp.refreshAll();
+  }
+
+  private async adminStore(ns: string): Promise<MemoryStore> {
+    await this.initialize();
+    await this.bindNamespace(ns);
+    return new MemoryStore(this.database, ns);
+  }
+
+  async memoryView(ns: string, query: string): Promise<{ profile: Profile; memories: MemoryRow[] }> {
+    const store = await this.adminStore(ns), q = query.trim(), id = /^#(\d{1,15})$/.exec(q);
+    const memories = id ? [await store.get(Number(id[1]))].filter(row => row !== undefined)
+      : q ? await store.search({ query: q, limit: 20 }) : await store.recent(50);
+    return { profile: await store.profile(), memories };
+  }
+
+  async forgetMemory(ns: string, id: number): Promise<{ status: "forgotten" | "not_found" }> {
+    const store = await this.adminStore(ns);
+    if (!await store.get(id)) return { status: "not_found" };
+    await store.forget(id, "admin", "面板删除");
+    return { status: "forgotten" };
+  }
+
+  async writeProfile(ns: string, text: string, expected: string): Promise<{ status: "ok" | "conflict"; current: Profile } | { status: "invalid"; reason: string }> {
+    const store = await this.adminStore(ns);
+    try {
+      const result = await store.writeProfile(text, expected);
+      return { status: result.ok ? "ok" : "conflict", current: result.current };
+    } catch (error) {
+      if (error instanceof MemoryStoreError) return { status: "invalid", reason: error.message };
+      throw error;
+    }
   }
 
   async mcpToolCounts(): Promise<Record<string, number>> {

@@ -1,3 +1,21 @@
+# Workers 管理面板
+
+浏览器打开 `/admin/`，输入 `ADMIN_TOKEN` 后可以看总览、会话、审计事件、MCP、设置与记忆。口令只存在本标签页的 sessionStorage，每个请求以 `Authorization: Bearer` 发送；任一接口返回 401 时页面清掉口令并回到登录框。页面与 `/admin/app.js` 不需要口令，也不含数据；`/admin/` 下其余路由都在 `src/admin/routes.ts` 的路由表里，先匹配路由再鉴权，未知路径返回 404。页面响应带 CSP（`script-src 'self'`、`frame-ancestors 'none'`）、`no-store`、`no-referrer` 与 `nosniff`，接口文本一律用 `textContent` 写入。
+
+| 接口 | 作用 |
+| --- | --- |
+| GET /admin/overview | Bridge 连接、模型、熔断、MCP 状态、各线程 stats（单个 Thread 失败显示 unavailable）、secrets 是否已配置 |
+| GET / PUT /admin/settings | 运行时设置；PUT 带 `expectedRevision`，不一致返回 409 与当前值，成功后推送给 Bridge |
+| GET /admin/events?thread=&kind=&result=&before=&limit= | 单个线程的审计事件，按 rowid 倒序翻页，limit ≤ 200 |
+| POST /admin/threads/:key/stop | 中止该线程当前回合并撤回排队输入（pi-durable `root.abort`） |
+| GET /admin/memory?ns=&q=、DELETE /admin/memory/:id?ns=、PUT /admin/memory/profile | 记忆列表与搜索（`#id` 按编号）、遗忘、画像 CAS；ns 只能是 owner 或 group:群号 |
+| POST /admin/mcp/:server/login-link、logout、refresh | 一次性登录链接、本地登出、刷新 owner 线程的 MCP 目录 |
+| POST /admin/send-rules/release | 解除某个 scope 的熔断 |
+
+设置保存在 Registry 的 `settings` 表（一行整份覆盖值）：`groupTrigger`（`mention_or_reply` / `mention_only` / `off`）、`allowGroups`、`allowUsers`、`extractNamespaces`。没有保存过时沿用 `QQ_ALLOW_GROUPS`、`QQ_ALLOW_USERS`、`QQ_GROUP_MENTIONS`（false 对应 off，其余对应 mention_only）与 `MEMORY_EXTRACT_NAMESPACES`；保存后这四个 secrets/vars 只作默认值显示。revision 是有效内容 SHA-256 的前 16 位。`mention_or_reply` 新增“回复机器人发出的消息”也能触发，判定查本群消息库里 `is_self=1` 的消息。Bridge 在内存缓存设置，面板保存后立即重载；Thread 判定抽取命名空间时缓存 60 秒，取不到设置时本轮不抽取。owner 只来自 `QQ_OWNER`，面板不能修改。
+
+解除熔断把该行的 `until` 改成当前时间而不删除，它仍是计数窗口的起点，否则熔断前的 60 条会让下一条立刻再次熔断。
+
 # Workers P1c
 
 P1c 在 owner 私聊增加外部 MCP 与 codemode，初始服务为 Notion 托管 MCP。配置在 [mcp.json](mcp.json) 中随构建打包，只有非秘密的服务地址、账号引用版本、CIMD URL 和精确工具白名单。仅修改配置文件不会热更新，需重新构建部署。现有 QQ、记忆与模型路径继续保留。

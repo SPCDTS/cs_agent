@@ -1,3 +1,5 @@
+import type { GroupTrigger, Settings } from "./settings";
+
 export type Target = { kind: "private"; userId: string } | { kind: "group"; groupId: string };
 export type InboundInput = {
   messageId: string; selfId: string; userId: string; nickname: string;
@@ -5,7 +7,7 @@ export type InboundInput = {
   mentionedSelf: boolean; replyToId: string | null; imageCount: number;
   scopeName?: string;
 };
-export type PolicyConfig = { owners: string[]; allowUsers: string[]; allowGroups: string[]; groupMentions: boolean };
+export type PolicyConfig = { owners: string[]; allowUsers: string[]; allowGroups: string[]; groupTrigger: GroupTrigger };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -62,15 +64,20 @@ export function isAllowed(policy: PolicyConfig, message: InboundInput): boolean 
   if (policy.owners.includes(message.userId) || policy.allowUsers.includes(message.userId)) return true;
   return message.target.kind === "group" && policy.allowGroups.includes(message.target.groupId);
 }
-export function isTriggered(policy: PolicyConfig, message: InboundInput): boolean {
+const GROUP_TRIGGER: Record<GroupTrigger, (message: InboundInput, repliedToSelf: boolean) => boolean> = {
+  mention_or_reply: (message, repliedToSelf) => message.mentionedSelf || repliedToSelf,
+  mention_only: message => message.mentionedSelf,
+  off: () => false,
+};
+export function isTriggered(policy: PolicyConfig, message: InboundInput, repliedToSelf = false): boolean {
   if (message.userId === message.selfId || !isAllowed(policy, message)) return false;
-  return message.target.kind === "private" || (policy.groupMentions && message.mentionedSelf);
+  return message.target.kind === "private" || GROUP_TRIGGER[policy.groupTrigger](message, repliedToSelf);
 }
-export function policyFromEnv(env: { QQ_OWNER?: string; QQ_ALLOW_USERS?: string; QQ_ALLOW_GROUPS?: string; QQ_GROUP_MENTIONS?: string | boolean }): PolicyConfig {
-  const list = (value = "") => value.split(",").map(value => value.trim()).filter(validId);
-  return { owners: list(env.QQ_OWNER), allowUsers: list(env.QQ_ALLOW_USERS), allowGroups: list(env.QQ_ALLOW_GROUPS),
-    groupMentions: env.QQ_GROUP_MENTIONS !== false && env.QQ_GROUP_MENTIONS !== "false" };
-}
+export const idList = (value = "") => value.split(",").map(value => value.trim()).filter(validId);
+// owner 只来自 secret，面板设置不能把任何人升为 owner。
+export const ownerIds = (env: { QQ_OWNER?: string }) => idList(env.QQ_OWNER);
+export const policyFrom = (env: { QQ_OWNER?: string }, settings: Settings): PolicyConfig =>
+  ({ owners: ownerIds(env), allowUsers: settings.allowUsers, allowGroups: settings.allowGroups, groupTrigger: settings.groupTrigger });
 export const scopeOf = (target: Target) => target.kind === "group" ? `group:${target.groupId}` : `private:${target.userId}`;
 export const threadKey = (policy: PolicyConfig, message: InboundInput) => message.target.kind === "private" && policy.owners.includes(message.userId) ? "owner" : scopeOf(message.target);
 export const inboundKey = (message: InboundInput) => `${message.selfId}:${message.target.kind}:${message.target.kind === "group" ? message.target.groupId : ""}:${message.userId}:${message.messageId}`;

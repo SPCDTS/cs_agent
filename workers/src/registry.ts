@@ -6,6 +6,7 @@ import { MCP_CONFIG, isOAuthServer, publicOrigin, referencedSecret, type OAuthSe
 import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { DiscoverySchema, discover, exchange, TokenRejected, type OAuthTokens } from "./mcp/oauth";
 import { OAuthFailure } from "./mcp/oauth-fetch";
+import { defaultSettings, effectiveSettings, settingsRevision, type Settings, type SettingsSnapshot } from "./settings";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
 type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash: string; created_at: number; expires_at: number };
@@ -30,7 +31,24 @@ export class RegistryDO extends DurableObject<Env> {
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS mcp_oauth_nonce ON mcp_oauth_logins(nonce_hash);
       CREATE TABLE IF NOT EXISTS mcp_oauth_client (server_id TEXT PRIMARY KEY, registration_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, revision TEXT NOT NULL, updated_at INTEGER NOT NULL);
     `);
+  }
+
+  // 一行保存整份覆盖值；revision 按有效内容计算，未覆盖时也能对默认值做 CAS。
+  settings(): SettingsSnapshot {
+    const row = this.ctx.storage.sql.exec<{ value: string; updated_at: number }>("SELECT value, updated_at FROM settings WHERE key = 'runtime'").toArray()[0];
+    const overrides: Settings | null = row ? JSON.parse(row.value) : null, value = effectiveSettings(this.env, overrides);
+    return { value, revision: settingsRevision(value), defaults: defaultSettings(this.env), overrides, updatedAt: row?.updated_at ?? null };
+  }
+
+  putSettings(value: Settings, expectedRevision: string): { ok: boolean; current: SettingsSnapshot } {
+    const current = this.settings();
+    if (current.revision !== expectedRevision) return { ok: false, current };
+    this.ctx.storage.sql.exec(`INSERT INTO settings (key, value, revision, updated_at) VALUES ('runtime', ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, revision=excluded.revision, updated_at=excluded.updated_at`,
+    JSON.stringify(value), settingsRevision(value), Date.now());
+    return { ok: true, current: this.settings() };
   }
 
   private server(id: string): OAuthServer {

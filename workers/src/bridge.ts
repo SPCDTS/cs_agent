@@ -1,8 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./env";
 import { channelDown, parseFrame, type SendReceipt } from "./onebot";
-import { cleanName, id, inboundKey, isAllowed, isRecord, isTriggered, policyFromEnv, scopeOf, threadKey, type InboundInput, type Target } from "./policy";
+import { cleanName, id, inboundKey, isAllowed, isRecord, isTriggered, policyFrom, scopeOf, threadKey, type InboundInput, type Target } from "./policy";
 import { SendRules } from "./send-rules";
+import { effectiveSettings, type SettingsSnapshot } from "./settings";
 
 type Attachment = { id: string; active: boolean };
 type Pending = { socket: WebSocket; resolve: (data: unknown) => void; reject: (error: Error) => void };
@@ -14,6 +15,8 @@ export class BridgeDO extends DurableObject<Env> {
   private readonly deliveries = new Map<string, Promise<void>>();
   private readonly groupQueries = new Map<string, Promise<string | undefined>>();
   private readonly rules = new SendRules(this.ctx.storage);
+  // 设置只在内存缓存；面板保存后经 reloadSettings 推送，DO 重建时重新拉取。
+  private settingsLoad?: Promise<SettingsSnapshot>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -59,7 +62,7 @@ export class BridgeDO extends DurableObject<Env> {
         return;
       }
       case "message": {
-        const input = frame.input, policy = policyFromEnv(this.env);
+        const input = frame.input, policy = policyFrom(this.env, effectiveSettings(this.env, (await this.loadSettings()).overrides));
         if (!isAllowed(policy, input)) {
           await this.ctx.storage.transaction(async tx => {
             await tx.put("ignored", (await tx.get<number>("ignored") ?? 0) + 1);
@@ -78,8 +81,8 @@ export class BridgeDO extends DurableObject<Env> {
         const delivery = (this.deliveries.get(thread) ?? Promise.resolve()).then(async () => {
           if (input.target.kind === "group") input.scopeName = await this.groupName(input.target.groupId);
           const target = this.env.THREAD.getByName(thread);
-          await target.ingest(input);
-          if (input.text.trim() && isTriggered(policy, input)) {
+          const { repliedToSelf } = await target.ingest(input);
+          if (input.text.trim() && isTriggered(policy, input, repliedToSelf)) {
             this.ctx.waitUntil(target.submit(input).catch(() => {
               console.error({ event: "submit_failed", messageId: input.messageId, length: input.text.length });
             }));
@@ -92,6 +95,31 @@ export class BridgeDO extends DurableObject<Env> {
         this.ctx.waitUntil(delivery.finally(() => { if (this.deliveries.get(thread) === delivery) this.deliveries.delete(thread); }));
       }
     }
+  }
+
+  private loadSettings(): Promise<SettingsSnapshot> {
+    return this.settingsLoad ??= this.env.REGISTRY.getByName("main").settings().catch(error => {
+      this.settingsLoad = undefined;
+      throw error;
+    });
+  }
+
+  async reloadSettings(): Promise<string> {
+    this.settingsLoad = undefined;
+    return (await this.loadSettings()).revision;
+  }
+
+  async threadList(): Promise<{ key: string; seenAt: number; name?: string }[]> {
+    const rows = this.ctx.storage.sql.exec<{ key: string; seen_at: number }>("SELECT key, seen_at FROM threads ORDER BY seen_at DESC, key LIMIT 50").toArray();
+    const names = await this.ctx.storage.get<GroupName>(rows.filter(row => row.key.startsWith("group:")).map(row => row.key));
+    return rows.map(row => {
+      const name = names.get(row.key)?.name;
+      return { key: row.key, seenAt: row.seen_at, ...(name ? { name } : {}) };
+    });
+  }
+
+  releaseSendRule(scope: string): { released: boolean } {
+    return { released: this.rules.release(scope) };
   }
 
   private groupName(groupId: string): Promise<string | undefined> {

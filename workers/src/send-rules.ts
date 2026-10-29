@@ -34,6 +34,10 @@ export class SendRules {
   breakers(now = Date.now()): SendBreaker[] {
     return this.storage.sql.exec<SendBreaker>("SELECT scope, until, tripped_at, reason FROM send_breakers WHERE until > ? ORDER BY scope = 'global' DESC, until", now).toArray();
   }
+  // 熔断行保留并把 until 提前到现在：它仍是窗口起点，解除后旧计数不会立刻再次触发。
+  release(scope: string, now = Date.now()): boolean {
+    return this.storage.sql.exec("UPDATE send_breakers SET until = ? WHERE scope = ? AND until > ? RETURNING scope", now, scope, now).toArray().length > 0;
+  }
   private count(scope: string | null, from: number): number {
     // until 保留为窗口起点；熔断到期后旧记录不能立即再次触发同一个熔断。
     const reset = this.storage.sql.exec<{ until: number }>("SELECT until FROM send_breakers WHERE scope = ?", scope ?? "global").toArray()[0]?.until ?? 0;

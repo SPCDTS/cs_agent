@@ -131,6 +131,9 @@ export class MemoryStore {
     return this.db.all<MemoryRow>(`SELECT m.* FROM ${from} WHERE ${parts.join(" AND ")} ORDER BY ${order} LIMIT ?`,
       ...args, Math.min(20, Math.max(1, q.limit ?? (terms.length ? 10 : 20))));
   }
+  recent(limit: number) {
+    return this.db.all<MemoryRow>("SELECT * FROM memories WHERE ns = ? AND status = 'active' ORDER BY updated_at DESC, id DESC LIMIT ?", this.ns, limit);
+  }
   openCommitments() {
     return this.db.all<MemoryRow>(`SELECT * FROM memories WHERE ns = ? AND kind = 'commitment' AND status = 'active' AND done_at IS NULL
       ORDER BY due_at IS NULL, due_at, id LIMIT 10`, this.ns);

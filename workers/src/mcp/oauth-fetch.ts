@@ -1,9 +1,14 @@
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { httpsUrl } from "./config";
 
+const OAUTH_CODES = ["invalid_state", "unconfigured", "auth_required", "oauth_metadata", "oauth_network", "oauth_token", "server_unavailable"] as const;
+type OAuthCode = typeof OAUTH_CODES[number];
 export class OAuthFailure extends Error {
-  constructor(readonly code: "invalid_state" | "unconfigured" | "auth_required" | "oauth_metadata" | "oauth_network" | "oauth_token" | "server_unavailable") { super(code); }
+  constructor(readonly code: OAuthCode) { super(code); }
 }
+const isOAuthCode = (value: string): value is OAuthCode => (OAUTH_CODES as readonly string[]).includes(value);
+// RPC/SDK 原始错误可能含远端正文；HTTP 响应只按消息白名单输出分类。
+export const oauthErrorCode = (error: unknown): OAuthCode | "invalid_request" => error instanceof Error && isOAuthCode(error.message) ? error.message : "invalid_request";
 
 export function createOAuthFetch(allowedOrigins: () => readonly string[]): FetchLike {
   return async (input, init = {}) => {
