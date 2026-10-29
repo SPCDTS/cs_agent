@@ -14,7 +14,8 @@ import { parseImport } from "./memory/import";
 import { createMemoryTools, type MemoryBinding } from "./memory/tools";
 import { MEMORY_RULE } from "./memory/contracts";
 import { renderMemorySection } from "./memory/render";
-import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS } from "./memory/extractor";
+import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS, type ExtractComplete } from "./memory/extractor";
+import { maintenanceConfig, maintenanceStatus, runMaintenanceJob, type MaintenanceJob, type MaintenanceReport } from "./maintenance";
 
 import { MCP_CATALOG_SCHEMA } from "./mcp/catalog";
 import { ThreadMcp } from "./mcp";
@@ -251,7 +252,8 @@ export class ThreadDO extends DurableObject<Env> {
     const profile = await this.database.get<{ n: number }>("SELECT COALESCE(SUM(length(CAST(text AS BLOB))), 0) AS n FROM profile");
     const queue = await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM extract_queue");
     return { inbound, outbox: out?.n ?? 0, ...(out?.last ? { lastSentAt: out.last } : {}),
-      memory: { active: active?.n ?? 0, profileBytes: profile?.n ?? 0, extractQueue: queue?.n ?? 0 } };
+      memory: { active: active?.n ?? 0, profileBytes: profile?.n ?? 0, extractQueue: queue?.n ?? 0 },
+      maintenance: await maintenanceStatus(this.database, this.ctx.storage) };
   }
 
   private async bindNamespace(ns: string): Promise<void> {
@@ -280,12 +282,15 @@ export class ThreadDO extends DurableObject<Env> {
     return { ns, owner, userId: input.user_id, turnId: input.turn_id, scope: scopeOf(targetOf(input)), messageId: input.platform_message_id };
   }
 
+  // 抽取、摘要与整理都是无工具的单次补全，共用抽取模型配置。
+  private readonly complete: ExtractComplete = async (prompt, signal) => {
+    const { models, selection } = await (this.extractionModels ??= openModels(this.env).catch(error => { this.extractionModels = undefined; throw error; }));
+    signal.throwIfAborted();
+    return directComplete(models, selection.provider, this.env.MEMORY_EXTRACT_MODEL?.trim() || selection.id)(prompt, signal);
+  };
+
   private extractor(store: MemoryStore): MemoryExtractor {
-    return new MemoryExtractor(store, async (prompt, signal) => {
-      const { models, selection } = await (this.extractionModels ??= openModels(this.env).catch(error => { this.extractionModels = undefined; throw error; }));
-      signal.throwIfAborted();
-      return directComplete(models, selection.provider, this.env.MEMORY_EXTRACT_MODEL?.trim() || selection.id)(prompt, signal);
-    }, () => !!store.ns && (this.env.MEMORY_EXTRACT_NAMESPACES ?? "owner").split(",").map(ns => ns.trim()).includes(store.ns));
+    return new MemoryExtractor(store, this.complete, () => !!store.ns && (this.env.MEMORY_EXTRACT_NAMESPACES ?? "owner").split(",").map(ns => ns.trim()).includes(store.ns));
   }
 
   override async alarm(): Promise<void> {
@@ -300,6 +305,12 @@ export class ThreadDO extends DurableObject<Env> {
         else await this.ctx.storage.deleteAlarm();
       });
     }
+  }
+
+  async maintain(job: MaintenanceJob): Promise<MaintenanceReport> {
+    await this.initialize();
+    return runMaintenanceJob(job.kind, { db: this.database, kv: this.ctx.storage, store: new MemoryStore(this.database, await this.namespace()),
+      complete: this.complete, config: maintenanceConfig(this.env), now: job.now });
   }
 
   async importMemory(value: unknown): Promise<{ inserted: number; skipped: number }> {

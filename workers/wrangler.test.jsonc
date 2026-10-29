@@ -9,6 +9,8 @@
   // CPU 限额只计活跃计算；回合里的 JSON 处理偶有峰值，放到上限 5 分钟
   "limits": { "cpu_ms": 300000 },
   "observability": { "enabled": true },
+  // UTC 19:30 = 北京 03:30：聊天摘要与清理、记忆整理、审计保留（src/maintenance）
+  "triggers": { "crons": ["30 19 * * *"] },
   "durable_objects": {
     "bindings": [
       { "name": "THREAD", "class_name": "ThreadDO" },

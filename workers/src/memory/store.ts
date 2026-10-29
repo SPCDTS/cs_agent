@@ -88,6 +88,32 @@ export class MemoryStore {
       await this.version(tx, before, after, by, reason);
     });
   }
+  async supersede(winnerId: number, loserId: number, by: string, reason: string): Promise<MemoryRow> {
+    return this.db.transaction(async tx => {
+      const winner = await this.get(winnerId, tx), loser = await this.get(loserId, tx);
+      if (!winner || !loser || winnerId === loserId) throw new MemoryStoreError("条目不存在");
+      if (winner.status !== "active" || loser.status !== "active") throw new MemoryStoreError("只能取代 active 条目");
+      const now = this.now(), after: MemoryRow = { ...loser, status: "superseded", until: now, updated_at: now };
+      await tx.run("UPDATE memories SET status = 'superseded', until = ?, updated_at = ? WHERE id = ?", now, now, loser.id);
+      await tx.run("INSERT OR IGNORE INTO memory_links (from_id, to_id, rel, created_at) VALUES (?, ?, 'supersedes', ?)", winner.id, loser.id, now);
+      await this.version(tx, loser, after, by, reason);
+      return after;
+    });
+  }
+  async setStatus(id: number, status: MemoryStatus, by: string, reason: string): Promise<MemoryRow> {
+    return this.db.transaction(async tx => {
+      const before = await this.get(id, tx);
+      if (!before) throw new MemoryStoreError("条目不存在");
+      if (before.status === status) return before;
+      const after: MemoryRow = { ...before, status, updated_at: this.now() };
+      await tx.run("UPDATE memories SET status = ?, updated_at = ? WHERE id = ?", status, after.updated_at, id);
+      await this.version(tx, before, after, by, reason);
+      return after;
+    });
+  }
+  async relate(fromId: number, toId: number): Promise<void> {
+    await this.db.run("INSERT OR IGNORE INTO memory_links (from_id, to_id, rel, created_at) VALUES (?, ?, 'related', ?)", fromId, toId, this.now());
+  }
   search(q: MemoryQuery): Promise<MemoryRow[]> {
     const args: SqliteValue[] = [this.ns, q.status ?? "active"], parts = ["m.ns = ?", "m.status = ?"];
     if (q.kind) { parts.push("m.kind = ?"); args.push(q.kind); }

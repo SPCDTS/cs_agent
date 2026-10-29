@@ -22,4 +22,9 @@ export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" 
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   MAGPIE_SYNC_PASSPHRASE?: string;
+  // 维护任务的保留天数（0 = 不清理）；缺省见 maintenance/index.ts
+  HISTORY_RAW_DAYS?: string;
+  HISTORY_RAW_HARD_MAX_DAYS?: string;
+  HISTORY_SUMMARY_DAYS?: string;
+  EVENTS_RETENTION_DAYS?: string;
 }

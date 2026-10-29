@@ -160,6 +160,10 @@ export class BridgeDO extends DurableObject<Env> {
       sendRules: this.rules.breakers() };
   }
 
+  threadKeys(): string[] {
+    return this.ctx.storage.sql.exec<{ key: string }>("SELECT key FROM threads ORDER BY key").toArray().map(row => row.key);
+  }
+
   private disconnect(socket: WebSocket): void {
     const attachment: Attachment | null = socket.deserializeAttachment();
     if (attachment) socket.serializeAttachment({ ...attachment, active: false });

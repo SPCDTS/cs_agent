@@ -4,6 +4,7 @@ import { Check } from "typebox/value";
 import { publicOrigin } from "./mcp/config";
 import type { Env } from "./env";
 import { parseImport } from "./memory/import";
+import { MAINTENANCE_CRON, runMaintenance } from "./maintenance";
 
 export { RegistryDO } from "./registry";
 export { BridgeDO } from "./bridge";
@@ -74,5 +75,10 @@ export default {
       return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules, mcp: accounts.map(account => ({ ...account, tools: counts[account.server] ?? 0 })) }, { status: ok ? 200 : 503 });
     }
     return new Response("not found", { status: 404 });
+  },
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    switch (controller.cron) {
+      case MAINTENANCE_CRON: ctx.waitUntil(runMaintenance(env, controller.scheduledTime)); break;
+    }
   },
 } satisfies ExportedHandler<Env>;
