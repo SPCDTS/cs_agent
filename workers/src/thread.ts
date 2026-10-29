@@ -8,7 +8,7 @@ import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
 import { effectiveSettings, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
 import { MESSAGE_SCHEMA, recordMessage, recall } from "./context";
-import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, turnIdentity } from "./prompt";
+import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, turnIdentity } from "./prompt";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { modelChange, openModels, sameSelection } from "./models";
 import { remoteCredentials } from "./model-credentials";
@@ -31,6 +31,11 @@ import { parseScheduleInputKey } from "./schedule/run";
 import type { ScheduleConversation } from "./schedule/types";
 import { createGmailTools } from "./gmail/tools";
 import type { EventRunStatus } from "./events/model";
+import { codexSearch } from "./search";
+import { cleanOutgoing } from "./send-clean";
+import { createWebSearchTool } from "./tools/web-search";
+import { createWebPageTool } from "./tools/web-page";
+import { availabilityOf, codexImage, createGenerateImageTool } from "./tools/generate-image";
 
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -41,7 +46,7 @@ type InboundRow = {
 };
 // 模型可见工具按会话配置生效，只能在会话空闲时切换；两种档位的输入永远不会进入同一个 run。定时输入归 chat 档。
 type ToolProfile = "chat" | "event";
-const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read",
+const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page",
   ...(MCP_CONFIG.enabled && MCP_CONFIG.servers.some(server => server.enabled && server.tools.eventAllow.length) ? ["codemode"] : [])]);
 const profileOf = (row: InboundRow): ToolProfile => row.kind === "event" ? "event" : "chat";
 type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp };
@@ -49,7 +54,7 @@ const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind
 export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
 export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
 // 结果过滤按事件类型取各自的 JSON 字段；表外的类型不参与结果过滤。
-const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_catalog: "$.status" };
+const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_catalog: "$.status", web_search: "$.result", generate_image: "$.result" };
 const SETTINGS_TTL_MS = 60_000;
 
 export class ThreadDO extends DurableObject<Env> {
@@ -146,7 +151,7 @@ export class ThreadDO extends DurableObject<Env> {
     registry.install(defineExtension({
       name: "cs-workers",
       sections: [
-        section("qq", () => SEND_RULE + "\n" + PI_SAFETY_RULE + "\n" + MEMORY_RULE, { tag: false }),
+        section("qq", () => SEND_RULE + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE + "\n" + MEMORY_RULE, { tag: false }),
         section("memory", () => renderMemorySection(memory), { tag: false }),
         section("turn-identity", async (api, callContext) => {
           const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
@@ -167,7 +172,27 @@ export class ThreadDO extends DurableObject<Env> {
       }), ...(memory.ns === "owner" ? createGmailTools(async (api, callContext) => {
         const input = await this.currentInput(harness, api, api.conversationId, callContext);
         return input ? this.ownerTurnKind(input) : undefined;
-      }, () => this.env.EVENTS.getByName("main")) : []), defineTool({
+      }, () => this.env.EVENTS.getByName("main")) : []),
+      createWebSearchTool((query, maxResults, signal) => codexSearch(models, query, { signal, maxResults, modelId: this.env.CODEX_SEARCH_MODEL }),
+        detail => this.audit("web_search", detail)),
+      createWebPageTool(),
+      ...(memory.ns === "owner" ? [createGenerateImageTool({
+        allowed: async (api, callContext) => {
+          const input = await this.currentInput(harness, api, api.conversationId, callContext);
+          return !!input && this.ownerTurnKind(input) === "message" && input.user_id !== input.self_id;
+        },
+        generate: (prompt, size, signal) => codexImage(models, prompt, size, { signal, modelId: this.env.CODEX_SEARCH_MODEL }),
+        deliver: async (api, callContext, base64) => {
+          const input = await this.currentInput(harness, api, api.conversationId, callContext);
+          if (!input) throw new Error("current input missing");
+          return this.deliver(input, "[图片]", base64);
+        },
+        record: async (outcome, ms) => {
+          await this.audit("generate_image", { result: outcome, ms });
+          const state = availabilityOf(outcome);
+          if (state) await this.env.REGISTRY.getByName("main").recordImageGeneration(state);
+        },
+      })] : []), defineTool({
         name: "send_message", description: "向本回合所在 QQ 会话发送纯文本；群回复自动 @ 本轮发送者。",
         parameters: Type.Object({ text: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
         // 发 QQ 是外部副作用，中断后禁止自动重放，避免重复发送。
@@ -175,25 +200,7 @@ export class ThreadDO extends DurableObject<Env> {
         execute: async ({ text }, api, toolContext) => {
           const input = await this.currentInput(harness, api, api.conversationId, toolContext);
           if (!input) throw new Error("current input missing");
-          const target = targetOf(input);
-          let result;
-          try {
-            const receipt = await this.env.BRIDGE.getByName("napcat").send(target, text, target.kind === "group" && input.kind === "message" ? input.user_id : undefined);
-            await this.database.transaction(async tx => {
-              await tx.run("INSERT INTO outbox (message_id, text, sent_at, turn_id, input_id) VALUES (?, ?, ?, ?, ?)", receipt.message_id, text, Date.now(), input.turn_id, input.message_id);
-              await recordMessage(tx, { messageId: receipt.message_id, selfId: input.self_id, userId: input.self_id,
-                nickname: "机器人", target, text, routeText: text, time: Math.floor(Date.now() / 1000),
-                mentionedSelf: false, replyToId: input.platform_message_id, imageCount: 0, scopeName: input.scope_name }, true);
-            });
-            result = { status: "sent", message_id: receipt.message_id };
-          } catch (error) {
-            // RPC 可能归一化 Error.name，因此用固定前缀识别可向模型说明的拒绝。
-            if (!(error instanceof Error)) throw error;
-            if (error.message === "channel_down") result = { status: "failed", reason: "channel_down" };
-            else if (error.message.startsWith("send_rule: ")) result = { status: "rejected", reason: error.message.slice(11) };
-            else throw error;
-          }
-          return { output: [{ type: "text", text: JSON.stringify(result) }] };
+          return { output: [{ type: "text", text: JSON.stringify(await this.deliver(input, cleanOutgoing(text))) }] };
         },
       }), defineTool({
         name: "qq_context", description: "只读检索本回合所在会话的聊天记录；无 query 取最近消息，before 为 Unix 秒。",
@@ -233,6 +240,32 @@ export class ThreadDO extends DurableObject<Env> {
     harness.resume();
     void harness.closed.then(async () => { this.runtime = undefined; await mcp?.close(); });
     return runtime;
+  }
+
+  /** 发到本回合所在会话并记进 outbox 与消息库；带 image 时发图片，text 只是消息库里的占位。 */
+  private async deliver(input: InboundRow, text: string, image?: string): Promise<{ status: string; message_id?: string; reason?: string }> {
+    const target = targetOf(input), at = target.kind === "group" && input.kind === "message" ? input.user_id : undefined;
+    const bridge = this.env.BRIDGE.getByName("napcat");
+    try {
+      const receipt = image === undefined ? await bridge.send(target, text, at) : await bridge.sendImage(target, image, at);
+      await this.database.transaction(async tx => {
+        await tx.run("INSERT INTO outbox (message_id, text, sent_at, turn_id, input_id) VALUES (?, ?, ?, ?, ?)", receipt.message_id, text, Date.now(), input.turn_id, input.message_id);
+        await recordMessage(tx, { messageId: receipt.message_id, selfId: input.self_id, userId: input.self_id,
+          nickname: "机器人", target, text, routeText: text, time: Math.floor(Date.now() / 1000),
+          mentionedSelf: false, replyToId: input.platform_message_id, imageCount: image === undefined ? 0 : 1, scopeName: input.scope_name }, true);
+      });
+      return { status: "sent", message_id: receipt.message_id };
+    } catch (error) {
+      // RPC 可能归一化 Error.name，因此用固定前缀识别可向模型说明的拒绝。
+      if (!(error instanceof Error)) throw error;
+      if (error.message === "channel_down") return { status: "failed", reason: "channel_down" };
+      if (error.message.startsWith("send_rule: ")) return { status: "rejected", reason: error.message.slice(11) };
+      throw error;
+    }
+  }
+
+  private audit(kind: string, detail: object): Promise<unknown> {
+    return this.database.run("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", Date.now(), kind, JSON.stringify(detail));
   }
 
   private async admit({ harness, root }: Runtime, row: InboundRow): Promise<Submission> {

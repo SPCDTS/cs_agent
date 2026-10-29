@@ -11,7 +11,7 @@
 | GET /admin/memory?ns=&q=、DELETE /admin/memory/:id?ns=、PUT /admin/memory/profile | 记忆列表与搜索（`#id` 按编号）、遗忘、画像 CAS；ns 只能是 owner 或 group:群号 |
 | POST /admin/mcp/:server/login-link、logout、refresh | 一次性登录链接、本地登出、刷新 owner 线程的 MCP 目录 |
 | POST /admin/send-rules/release | 解除某个 scope 的熔断 |
-| GET / PUT /admin/model | 当前模型、可选模型与 ChatGPT 登录状态；PUT 带 `expectedRevision`（与设置共用），切到不可用的模型返回 400 `invalid_model` |
+| GET / PUT /admin/model | 当前模型、可选模型、ChatGPT 登录状态与 `imageGeneration`（`unknown` / `available` / `unavailable`）；PUT 带 `expectedRevision`（与设置共用），切到不可用的模型返回 400 `invalid_model` |
 | POST /admin/model/oauth/codex/start、complete、logout | ChatGPT 订阅登录：生成授权链接、提交粘贴回来的回调地址、登出 |
 
 设置保存在 Registry 的 `settings` 表（一行整份覆盖值）：`groupTrigger`（`mention_or_reply` / `mention_only` / `off`）、`allowGroups`、`allowUsers`、`extractNamespaces`。没有保存过时沿用 `QQ_ALLOW_GROUPS`、`QQ_ALLOW_USERS`、`QQ_GROUP_MENTIONS`（false 对应 off，其余对应 mention_only）与 `MEMORY_EXTRACT_NAMESPACES`；保存后这四个 secrets/vars 只作默认值显示。revision 是有效内容 SHA-256 的前 16 位。`mention_or_reply` 新增“回复机器人发出的消息”也能触发，判定查本群消息库里 `is_self=1` 的消息。Bridge 在内存缓存设置，面板保存后立即重载；Thread 判定抽取命名空间时缓存 60 秒，取不到设置时本轮不抽取。owner 只来自 `QQ_OWNER`，面板不能修改。
@@ -30,6 +30,15 @@
 - pi-ai 在 access token 剩 5 分钟内时于 `CredentialStore.modify` 里刷新。Thread 一侧的 store（`src/model-credentials.ts` 的 `remoteCredentials`）经 Registry 租锁：`credentialAcquire` 拿锁与当前凭据，回调在 Thread 里跑，`credentialSettle` 按版本 CAS 写回并放锁；租约 30 秒到期自动放锁。所以多个会话同时请求时只刷新一次，轮换后的 refresh token 不会被另一份旧 token 的刷新冲掉。
 - Codex 固定走 SSE：Harness 的 stream 设置与 `directComplete` 都传 `transport: "sse"`。pi-ai 默认先试 WebSocket 并按会话缓存连接，DO 里的连接跨不了请求。
 - secrets：`DEEPSEEK_API_KEY` 由 `scripts/put-secrets.sh` 从仓库根 `.env` 的 `DEEPSEEK_APIKEY` 读取，为空就跳过并提示；ChatGPT 登录不经 secrets，只依赖已有的 `OAUTH_STORE_KEY`，换这个密钥会使已存的 ChatGPT 凭据解不开，要重新登录。
+
+## 联网搜索、网页与图片生成
+
+ChatGPT 订阅自带的托管工具做成 Worker 工具，当前模型是 DeepSeek 时也能用。代答走一次独立的 Codex 补全（`src/codex-hosted.ts`），不经 Harness、不进会话历史；请求体在 pi-ai 的 `onPayload` 里追加托管工具，托管工具的输出项从 `onProviderStreamEvent` 的原始事件里取，因为 pi-ai 把 `web_search_call`、`image_generation_call` 静默丢掉（不报错，也不进结果）。代答模型由 var `CODEX_SEARCH_MODEL` 指定，留空时按 `models.ts` 的 `searchModel` 挑：先找 id 含 mini / nano 的，没有就取目录标价最低的（现为 `gpt-6-luna`）。推理强度固定 low。
+
+- `web_search`（`src/search.ts`、`src/tools/web-search.ts`）：所有会话、所有回合都有，事件回合也有。响应里没有 `web_search_call` 输出项就当作没搜、凭记忆作答，整份结果丢弃并回 `not_searched`。结果规整为 `{ title, url, snippet }`，URL 去掉 `utm_*`。超时 60 秒。审计 `events.kind = web_search` 只记分类、耗时与结果数，不记查询。
+- `web_page`（`src/tools/web-page.ts`）：Worker 自己 fetch。只按主机名字面判断（拿不到 DNS 结果）：IP 字面量、单标签名、localhost 与 `.local` / `.internal` / `.container` 一律拒绝，每跳重定向重新校验，最多 3 跳；20 秒、4 MiB，只收 HTML、纯文本与 JSON；HTML 去掉脚本、样式、导航、页脚与 noscript 后抽正文，默认截到 8000 字。所有回合可用。
+- `generate_image`（`src/tools/generate-image.ts`）：只注册在 owner 线程，执行时再核对本回合是 owner 亲自发来的消息，定时回合拒绝，事件回合的工具档里没有它。图片取自 `image_generation_call.result`（base64 PNG），经 Bridge 的 `sendImage` 以 OneBot `base64://` 图片段发到当前会话，按一条消息计入发送规则。成功或被后端 4xx 拒绝时把结果写进 Registry，面板“模型”卡片显示“图片生成：未知 / 可用 / 不可用”。ChatGPT 订阅是否允许这个托管工具要看真实调用，探针见 `test/codex-image.probe.test.ts`（`CODEX_PROBE=1` 时从本机 Codex CLI 的 `~/.codex/auth.json` 读凭据，默认跳过）。
+- `send_message` 发出前经 `src/send-clean.ts`：Markdown 链接 `[文字](url)` 改成 `文字（url）`，所有 URL 去掉 `utm_*` 参数，其余文字不动。
 
 # Workers P2：定时任务、外部事件与维护
 
@@ -274,6 +283,7 @@ tests 1 / pass 1 / fail 0
 | `QQ_GROUP_MENTIONS` | var，默认 `true`；设为 `false` 时群消息仍入库，但不启动回合，包括 owner |
 | `MODEL_PROVIDER` / `MODEL_ID` | 默认模型（`deepseek` / `openai-codex` 及对应 id，测试为 faux）；运行时以面板保存的设置为准，见“模型与 ChatGPT 登录” |
 | `DEEPSEEK_API_KEY` | secret，DeepSeek 直连；ChatGPT 订阅在面板登录，不用 secret |
+| `CODEX_SEARCH_MODEL` | var，默认空；代其他模型联网搜索与生成图片的 Codex 模型 id，空则按目录挑最便宜的 |
 | `CS_AGENT_COMMIT` | 健康检查中的构建标识 |
 
 QQ 列表默认空；非法 ID 被忽略，不支持通配符。文件上传等 notice / 系统事件不作为聊天输入；字符串形式的 CQ 码不解析，文本 `@昵称`、引用和 `@全体成员` 均不能冒充真实 `at` 机器人。正文保留 `[@你]`、`[reply]`、`[image]` 等标记，引用 ID 单独落库，昵称和群名折成单行。

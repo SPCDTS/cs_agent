@@ -82,8 +82,10 @@ export function scriptedModel(steps: { name: string; args: JsonObject }[]) {
     return fauxAssistantMessage("done");
   };
   faux.setResponses([respond]);
-  vi.spyOn(models, "openModels").mockImplementation(() => {
-    const registry = createModels(); registry.setProvider(faux.provider);
+  // Codex 照常注册：主模型是 faux 时，web_search 与 generate_image 仍经它代答。
+  vi.spyOn(models, "openModels").mockImplementation((_env, credentials) => {
+    const registry = createModels({ credentials }); registry.setProvider(faux.provider);
+    registry.setProvider(models.MODEL_PROVIDERS["openai-codex"]!.create());
     return registry;
   });
   return { requests, outputs, steps };

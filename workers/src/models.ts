@@ -1,5 +1,5 @@
 import { createModels, createProvider, type Models, type MutableModels, type Provider } from "@earendil-works/pi-ai/models";
-import type { CredentialStore } from "@earendil-works/pi-ai";
+import type { Api, CredentialStore, Model } from "@earendil-works/pi-ai";
 import { fauxProvider, fauxToolCall, fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
@@ -16,6 +16,8 @@ type ProviderSpec = {
   create(): Provider;
   /** checkAuth 不通过时给面板与健康检查的原因 */
   unavailable: string;
+  /** 能代其他模型联网搜索、生成图片的 provider 才有：从目录里挑代答用的模型。 */
+  searchModel?(catalog: readonly Model<Api>[]): string | undefined;
 };
 
 // pi-ai 自带的 openaiCodexProvider 的 OAuth 经 lazyOAuth 用变量路径加载，Worker 里加载不到；目录与 API 照用，auth 换成 codexOAuth。
@@ -41,7 +43,10 @@ function echoProvider(): Provider {
 
 export const MODEL_PROVIDERS: Record<string, ProviderSpec> = {
   deepseek: { name: "DeepSeek", listed: () => true, create: deepseekProvider, unavailable: "missing_key" },
-  [CODEX_PROVIDER]: { name: "ChatGPT 订阅（Codex）", listed: () => true, create: codexProvider, unavailable: "login_required" },
+  [CODEX_PROVIDER]: { name: "ChatGPT 订阅（Codex）", listed: () => true, create: codexProvider, unavailable: "login_required",
+    // 代答只要能调托管工具，挑最便宜的：先找 mini / nano，目录里没有就按标价取最低。
+    searchModel: catalog => (catalog.find(model => /mini|nano/i.test(model.id))
+      ?? catalog.toSorted((a, b) => a.cost.input + a.cost.output - b.cost.input - b.cost.output)[0])?.id },
   faux: { name: "faux（测试）", listed: env => env.MODEL_PROVIDER === "faux", create: echoProvider, unavailable: "unavailable" },
 };
 
