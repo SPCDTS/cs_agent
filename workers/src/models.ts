@@ -38,11 +38,18 @@ export async function openModels(env: Env) {
       const key = env.MAGPIE_GATEWAY_KEY || (inContainer ? "magpie-loopback" : "");
       if (!baseUrl || !key) throw new Error("magpie configuration missing");
       process.env.MAGPIE_GATEWAY_KEY = key;
-      const catalog = await fetchMagpieCatalog(baseUrl, key);
-      if (catalog.length === 0 && inContainer) {
-        // 目录为空几乎只有一种情况：容器用缺 R2 凭据的环境起来了（secrets 后补）。销毁它，下次请求重新拉起
-        await env.MAGPIE.getByName("gateway").restart();
-        throw new Error("magpie catalog empty; container restarted");
+      let catalog = await fetchMagpieCatalog(baseUrl, key);
+      if (inContainer) {
+        // 容器刚起来时网关先应答、R2 同步随后才把 providers 取回来，目录会空一阵；等它，不要立刻判死
+        for (let attempt = 0; catalog.length === 0 && attempt < 25; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          catalog = await fetchMagpieCatalog(baseUrl, key);
+        }
+        if (catalog.length === 0) {
+          // 等够了还是空：多半是容器用缺 R2 凭据的环境起来的（secrets 后补）。销毁它，下次请求重新拉起
+          await env.MAGPIE.getByName("gateway").restart();
+          throw new Error("magpie catalog empty after waiting; container restarted");
+        }
       }
       models.setProvider(createMagpieProvider({ baseUrl, models: magpieProviderModels(catalog, models) }));
       break;
