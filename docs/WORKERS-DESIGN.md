@@ -1,6 +1,6 @@
 # cs-agent 迁移 Cloudflare Workers 设计
 
-状态：P0、P1（含面板最小页 `/admin/`）与 P2（定时任务、外部事件与 Gmail、Cron 维护）已上线（agent.spcdts.dev，2026-10-29），本机 Docker 版 cs-agent 与 NapCat 容器已停；P3（子 agent 子 DO、Sandbox coding 工具、技能、历史导入）未做。首稿日期：2026-10-28。设计基线：cs-agent `153718f`、pi-durable `1.3.0`。前提由主人定：**砍掉 codex 后端，只保留 Pi**；NapCat 留在本机；模型出站仍经 magpie，但 magpie 也上云（第 3.7 节）。
+状态：P0–P3 全部上线（agent.spcdts.dev，2026-10-30）：面板 `/admin/`、定时任务、外部事件与 Gmail、Cron 维护、子 agent 子 DO、沙箱 coding 工具、技能目录、历史记录导入；模型直连 DeepSeek 与 OpenAI Codex 订阅（magpie 已移除），`web_search` / `generate_image` 经 Codex 订阅代办供任何模型使用。本机 Docker 版 cs-agent 与 NapCat 容器已停。首稿日期：2026-10-28。设计基线：cs-agent `153718f`、pi-durable `1.3.0`。前提由主人定：**砍掉 codex 后端，只保留 Pi**；NapCat 留在本机；模型出站仍经 magpie，但 magpie 也上云（第 3.7 节）。
 
 ## 1. 结论
 
@@ -85,6 +85,8 @@ Cloudflare Tunnel 在这个方案里只用于一件事：主人从外面访问 N
 - **B. 砍掉 coding 工具**：只保留 codemode（`RemoteCodemodeSandbox`）、MCP、web、im、memory、schedule。事件回合本来就是这一套。
 
 建议 P1 走 B，P3 再接 A。主人在 QQ 里让 agent 写文件、跑脚本的场景有，但不是主路径；codemode 已经覆盖"多步调用工具"的需求。
+
+**P3 实现事实（2026-10-30）**：子 agent 是独立的 `SubagentDO`（绑定 `SUBAGENT`，迁移 v8，名字 `sub:<父线程键>:<id>`），父线程用 `subagent` 工具派出/追加/取消，子 DO 回答落库后经 `THREAD.subagentReport` 投回 `kind = "subagent"` 的输入唤醒主 agent，心跳 alarm 补送，父 alarm 兜底超时，结束 14 天删除；子会话只有 `web_search`、`web_page`、`qq_context`、`mem_search`。coding 工具走 A 路线但不用 Sandbox SDK（1.x 的文件操作依赖 SDK 私有帧协议，且本账户只允许 `durable_object` 调度）：`SandboxDO`（绑定 `SANDBOX`，迁移 v9）按需启动自建镜像 `workers/sandbox/`（debian-slim + node/python/git，`server.mjs` 控制服务，命令降权到 uid 1000，realpath 校验），`read / write / edit / bash` 只在 owner 私聊的 message 回合注册，空闲 10 分钟退出、工作区不保证保留。技能存在 Registry `skills` 表，提示里只列目录，`read_skill` 读正文，写入只经面板；历史聊天与摘要经 `POST /admin/messages/import` 导入各线程。模型侧：`web_search` 与 `generate_image` 都是对 Codex 发一次独立补全并追加托管工具（magpie 的"任何模型都能联网搜索"做法），`send_message` 发出前清理 Markdown 链接与 `utm_*`。
 
 ### 3.6 Gmail 与其他侧车
 
