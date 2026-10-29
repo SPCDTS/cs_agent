@@ -50,6 +50,16 @@ describe("admin routes", () => {
     for (const sink of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "localStorage", "document.cookie"]) expect(script).not.toContain(sink);
   });
 
+  it("serves a script that parses and only looks up element ids the page defines", async () => {
+    const html = await (await admin("GET", "/admin/", undefined, null)).text();
+    const script = await (await admin("GET", "/admin/app.js", undefined, null)).text();
+    expect(() => new Function(script)).not.toThrow();
+    const defined = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]));
+    const used = [...script.matchAll(/\$\("([^"]+)"\)/g)].map(match => match[1]!);
+    expect(used).toEqual(expect.arrayContaining(["schedules", "sources", "card-threads-extra", "event-kinds"]));
+    expect(used.filter(id => !defined.has(id))).toEqual([]);
+  });
+
   it("starts from env defaults, saves with CAS revisions and rejects malformed IDs", async () => {
     const initial = await adminJson<SettingsSnapshot>("GET", "/admin/settings");
     expect(initial).toMatchObject({ value: { groupTrigger: "mention_only", allowGroups: ["200000001"], allowUsers: ["10000003"], extractNamespaces: ["owner"],
@@ -137,6 +147,23 @@ describe("admin data views", () => {
     for (const query of ["thread=owner&limit=201", "thread=../owner", "thread=owner&kind=x'y"]) expect((await admin("GET", `/admin/events?${query}`)).status).toBe(400);
   });
 
+  it("filters web_search and coding audit events by their result field", async () => {
+    const owner = env.THREAD.getByName("owner");
+    await owner.stats();
+    const rows: [string, object][] = [
+      ["web_search", { result: "ok", ms: 900, results: 5 }], ["coding_exec", { result: "ok", commandLength: 12, code: 0, ms: 40 }],
+      ["web_search", { result: "not_searched", ms: 700, results: 0 }], ["coding_exec", { result: "timeout", commandLength: 30, code: null, ms: 60_000 }],
+    ];
+    await runInDurableObject(owner, (_instance, state) => {
+      rows.forEach(([kind, detail], i) => state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", 1_700_000_000_000 + i, kind, JSON.stringify(detail)));
+    });
+    const page = (query: string) => adminJson<EventPage>("GET", `/admin/events?thread=owner&${query}`);
+    expect((await page("result=ok")).events.map(e => [e.kind, e.detail.result])).toEqual([["coding_exec", "ok"], ["web_search", "ok"]]);
+    expect((await page("kind=web_search&result=not_searched")).events.map(e => e.detail.results)).toEqual([0]);
+    expect((await page("kind=coding_exec&result=timeout")).events.map(e => e.detail.commandLength)).toEqual([30]);
+    expect((await page("kind=coding_exec&result=not_searched")).events).toEqual([]);
+  });
+
   it("lists, forgets and CAS-edits memory of one namespace", async () => {
     const memories = [
       { id: 11, ns: "owner", kind: "fact", text: "喜欢烟雾弹", author: "dashboard", updated_at: 1_700_000_100 },
@@ -212,6 +239,26 @@ describe("admin data views", () => {
         { key: "group:200000002", kind: "group", stats: { error: "unavailable" } },
       ] });
     for (const secret of [TOKEN, "01".repeat(32), "10000001,10000002"]) expect(raw).not.toContain(secret);
+  });
+
+  it("adds schedule and event backlog to the overview and still answers when either DO fails", async () => {
+    type Overview = { schedule: { active?: number; paused?: number; error?: string }; events: { held?: number; error?: string } };
+    await env.SCHEDULE.getByName("main").create({ name: "早报", prompt: "整理早报", conversation: "owner",
+      rule: { kind: "rrule", rrule: "FREQ=DAILY;BYHOUR=8;BYMINUTE=0;BYSECOND=0", dtstart: Date.now() } }, "qq:10000001");
+    expect(await adminJson<Overview>("GET", "/admin/overview")).toMatchObject({ schedule: { active: 1, paused: 0 }, events: { held: 0 } });
+
+    const breakTable = (stub: DurableObjectStub, table: string) => runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec(`DROP TABLE ${table}; CREATE TABLE ${table} (broken TEXT)`);
+    });
+    await breakTable(env.SCHEDULE.getByName("main"), "schedules");
+    const scheduleDown = await admin("GET", "/admin/overview");
+    expect(scheduleDown.status).toBe(200);
+    expect(await scheduleDown.json()).toMatchObject({ schedule: { error: "unavailable" }, events: { held: 0 }, threads: [{ key: "owner" }] });
+
+    await breakTable(env.EVENTS.getByName("main"), "event_source");
+    const bothDown = await admin("GET", "/admin/overview");
+    expect(bothDown.status).toBe(200);
+    expect(await bothDown.json()).toMatchObject({ schedule: { error: "unavailable" }, events: { error: "unavailable" }, threads: [{ key: "owner" }] });
   });
 
   it("stops the in-flight turn of a thread", async () => {

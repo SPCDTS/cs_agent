@@ -59,7 +59,8 @@ const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind
 export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
 export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
 // 结果过滤按事件类型取各自的 JSON 字段；表外的类型不参与结果过滤。
-const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_catalog: "$.status", web_search: "$.result", generate_image: "$.result" };
+const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_catalog: "$.status", web_search: "$.result", generate_image: "$.result",
+  coding_exec: "$.result", coding_read: "$.result", coding_write: "$.result", coding_edit: "$.result" };
 const SETTINGS_TTL_MS = 60_000;
 
 export class ThreadDO extends DurableObject<Env> {

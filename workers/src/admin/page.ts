@@ -34,7 +34,7 @@ tr:last-child td{border-bottom:0}
 .btn:disabled{opacity:.5;cursor:default}
 .chip{appearance:none;border:1px solid #CBD1DA;background:#FFFFFF;border-radius:999px;padding:6px 12px;font-size:13px;min-height:36px;cursor:pointer}
 .chip.on{background:#16181D;color:#FFFFFF;border-color:#16181D}
-input[type=text],input[type=search],input[type=password],select,textarea{border:1px solid #CBD1DA;border-radius:8px;padding:8px 10px;font-size:13px;min-height:36px;background:#FFFFFF;color:#16181D;font-family:inherit;max-width:100%}
+input[type=text],input[type=search],input[type=password],input[type=number],input[type=time],select,textarea{border:1px solid #CBD1DA;border-radius:8px;padding:8px 10px;font-size:13px;min-height:36px;background:#FFFFFF;color:#16181D;font-family:inherit;max-width:100%}
 textarea{width:100%;min-height:160px;resize:vertical;line-height:1.5}
 label{font-size:12px;color:#5B6472}
 .topbar{background:#FFFFFF;border-bottom:1px solid #E3E6EB}
@@ -63,6 +63,10 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
 .memory-entries{flex:3 1 380px;min-width:0;overflow-x:auto}
 .profile-text{font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
 .cell-text{overflow-wrap:anywhere;min-width:220px}
+.cell-rule{overflow-wrap:anywhere;min-width:160px;max-width:280px}
+.source{border:1px solid #E3E6EB;border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px}
+.source summary{cursor:pointer;font-size:13px;color:#2457D6}
+.source .field{flex:1 1 150px;min-width:0}
 .login{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}
 .login-card{width:100%;max-width:360px;padding:24px;display:flex;flex-direction:column;gap:12px}
 .login-card h1{margin:0 0 4px;font-size:18px}
@@ -103,7 +107,7 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
   <section class="cards">
     <div class="card"><div class="muted small">NapCat</div><div id="card-napcat" class="big">-</div><div id="card-napcat-sub" class="muted small"></div></div>
     <div class="card"><div class="muted small">模型</div><div id="card-model" class="big">-</div><div id="card-model-sub" class="muted small"></div></div>
-    <div class="card"><div class="muted small">会话</div><div id="card-threads" class="big">-</div><div id="card-threads-sub" class="muted small"></div></div>
+    <div class="card"><div class="muted small">会话</div><div id="card-threads" class="big">-</div><div id="card-threads-sub" class="muted small"></div><div id="card-threads-extra" class="muted small"></div></div>
     <div class="card"><div class="muted small">发送规则</div><div id="card-rules" class="big">-</div><div id="card-rules-list" class="small"></div></div>
   </section>
 
@@ -221,6 +225,21 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
   </section>
 
   <section class="card">
+    <div class="section-head"><h2 class="h2">定时任务</h2><span class="muted">存在 ScheduleDO，时间均为北京时间；连续失败 3 次自动暂停</span></div>
+    <div class="scroll">
+      <table class="wide">
+        <thead><tr><th>名称</th><th>会话</th><th>规则</th><th>状态</th><th>下次触发</th><th>连续失败</th><th>最近运行</th><th></th></tr></thead>
+        <tbody id="schedules"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="section-head"><h2 class="h2">事件来源</h2><span class="muted">新事件经过滤、合并窗口、安静时段与每小时预算后投给 owner 线程；时间均为北京时间</span></div>
+    <div id="sources" class="stack"></div>
+  </section>
+
+  <section class="card">
     <div class="section-head">
       <h2 id="mem-title" class="h2">记忆</h2>
       <span id="mem-meta" class="muted"></span>
@@ -281,6 +300,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
 (() => {
   const TOKEN_KEY = "cs-agent-admin-token";
   const EVENT_KINDS = ["", "mcp_call", "mcp_catalog", "memory_extract", "memory_write"];
+  const MORE_KINDS = ["web_search", "generate_image", "coding_exec", "coding_read", "coding_write", "coding_edit"];
   const LOGIN = { ok: ["已登录", "ok"], needed: ["需要登录", "warn"], error: ["凭据错误", "bad"], unconfigured: ["未配置", "neutral"] };
   const CREDENTIAL = { oauth: "OAuth（CIMD）", static: "静态凭据", none: "无凭据" };
   const ERRORS = {
@@ -310,12 +330,13 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     invalid_file: "附件只能是文本",
     file_too_large: "单个附件超过 64 KiB",
     files_too_large: "附件合计超过 512 KiB",
+    invalid_settings: "设置不合法：轮询间隔 30～3600 秒、合并窗口 0～600 秒、预算每小时 1～100 次，均为整数；标签不能重复；安静时段写 HH:MM，起止都填或都留空",
   };
   const MODEL_REASONS = { missing_key: "缺 DEEPSEEK_API_KEY", login_required: "未登录 ChatGPT", unconfigured: "未配置 OAUTH_STORE_KEY",
     unknown_provider: "provider 未注册", unknown_model: "目录里没有这个模型", unavailable: "不可用" };
   const state = { overview: null, settings: null, model: null, eventKind: "", eventThread: "owner", before: undefined, history: [], next: undefined,
     memoryNs: "owner", memoryQuery: "", memoryView: null, profile: null, armedDelete: null, skills: [], armedSkill: null, timer: null, noticeTimer: null,
-    subagents: {} };
+    subagents: {}, schedules: [], armedSchedule: null, sources: null, editingSource: null, sourceForms: {} };
 
   const $ = id => document.getElementById(id);
   const readToken = () => { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } };
@@ -343,6 +364,14 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     return d.toDateString() === now.toDateString() ? clock : pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + clock.slice(0, 5);
   }
   const bytes = n => typeof n !== "number" ? "-" : n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " KB";
+  // 定时与事件都按北京时间计算，这里不跟浏览器时区走。
+  const BEIJING = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  function bjTime(ms) {
+    if (!ms) return "-";
+    const p = {};
+    for (const part of BEIJING.formatToParts(ms)) p[part.type] = part.value;
+    return p.month + "-" + p.day + " " + p.hour + ":" + p.minute;
+  }
   const duration = ms => typeof ms !== "number" ? "-" : ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(1) + " s";
 
   class ApiError extends Error {
@@ -403,7 +432,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     state.timer = setInterval(refresh, 30000);
   }
   function refresh() {
-    return Promise.all([loadOverview(), loadEvents()]).then(() => {
+    return Promise.all([loadOverview(), loadEvents(), loadSchedules(), loadSources()]).then(() => {
       $("refreshed").textContent = "刷新于 " + time(Date.now());
     }).catch(fail);
   }
@@ -429,6 +458,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     for (const thread of o.threads) if (thread.stats.inbound) for (const key of Object.keys(totals)) totals[key] += thread.stats.inbound[key];
     $("card-threads").textContent = o.threads.length + " 个线程";
     $("card-threads-sub").textContent = "处理中 " + totals.queued + " · 完成 " + totals.done + " · 失败 " + totals.failed;
+    const schedule = "error" in o.schedule ? "定时 不可用" : "定时 " + o.schedule.active + " 个" + (o.schedule.paused ? "（暂停 " + o.schedule.paused + "）" : "");
+    $("card-threads-extra").textContent = schedule + " · 事件积压 " + ("error" in o.events ? "不可用" : o.events.held);
     renderRules(o.sendRules);
     renderThreads(o.threads);
     renderMcp(o.mcp);
@@ -529,6 +560,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     mcp_call: d => ({ parts: [d.server, d.tool, duration(d.ms), "入 " + bytes(d.inputBytes) + " / 出 " + bytes(d.outputBytes)], result: d.result }),
     mcp_catalog: d => ({ parts: [d.server, typeof d.tools === "number" ? d.tools + " 个工具" : null, typeof d.rejected === "number" ? "拒绝 " + d.rejected : null,
       typeof d.digest === "string" ? "摘要 " + d.digest.slice(0, 8) : null, d.code], result: d.status }),
+    web_search: d => ({ parts: [typeof d.results === "number" ? d.results + " 条结果" : null, duration(d.ms)], result: d.result }),
+    generate_image: d => ({ parts: [duration(d.ms)], result: d.result }),
     coding_exec: d => ({ parts: ["命令 " + d.commandLength + " 字", d.code === undefined || d.code === null ? null : "退出码 " + d.code, duration(d.ms)], result: d.result }),
     coding_read: d => ({ parts: [duration(d.ms)], result: d.result }),
     coding_write: d => ({ parts: [duration(d.ms)], result: d.result }),
@@ -575,6 +608,147 @@ export const ADMIN_APP_JS = String.raw`"use strict";
       box.append(el("button", { className: "chip" + (kind === state.eventKind ? " on" : ""), type: "button", text: kind || "全部",
         onclick: () => { state.eventKind = kind; renderKinds(); resetEvents(); } }));
     }
+    const more = el("select", { "aria-label": "更多类型", onchange: event => { state.eventKind = event.target.value; renderKinds(); resetEvents(); } },
+      [el("option", { value: "", text: "更多…" })].concat(MORE_KINDS.map(kind => el("option", { value: kind, text: kind }))));
+    more.value = MORE_KINDS.includes(state.eventKind) ? state.eventKind : "";
+    box.append(more);
+  }
+
+  const SCHEDULE_STATUS = { active: ["启用", "ok"], paused: ["已暂停", "warn"], completed: ["已结束", "neutral"] };
+  const PAUSE_REASON = { manual: "手动暂停", failures: "连续失败自动暂停", error: "规则出错" };
+  const RUN_STATUS = { queued: ["排队", "warn"], running: ["执行中", "warn"], sent: ["已发送", "ok"], silent: ["没发消息", "neutral"], failed: ["失败", "bad"], skipped: ["跳过", "neutral"] };
+  const RUN_REASON = { stale: "错过触发", overlap: "上一轮未完", interrupted: "输入丢失", backend_failed: "投递失败", timeout: "超时" };
+  async function loadSchedules() {
+    renderSchedules(await api("GET", "/admin/schedules"));
+  }
+  function renderSchedules(list) {
+    state.schedules = list;
+    const body = $("schedules");
+    clear(body);
+    if (!list.length) { body.append(el("tr", {}, [el("td", { colspan: 8, className: "muted", text: "还没有定时任务，在 QQ 里让它“每天 8 点提醒我…”即可创建" })])); return; }
+    for (const s of list) {
+      const status = SCHEDULE_STATUS[s.status] || [s.status, "neutral"];
+      const last = s.runs[s.runs.length - 1], run = last && (RUN_STATUS[last.status] || [last.status, "neutral"]);
+      const armed = state.armedSchedule === s.id;
+      const act = (action, text) => el("button", { className: "btn compact", type: "button", text,
+        onclick: event => { event.target.disabled = true; scheduleAction(s.id, action); } });
+      body.append(el("tr", {}, [
+        el("td", { className: "cell-text", text: s.name }),
+        el("td", { className: "mono", text: s.conversation }),
+        el("td", { className: "mono cell-rule", text: s.rule.kind === "rrule" ? s.rule.rrule : "一次性" }),
+        el("td", {}, [pill(status[0], status[1]), s.pause_reason ? el("div", { className: "muted small", text: PAUSE_REASON[s.pause_reason] || s.pause_reason }) : null]),
+        el("td", { className: "mono", text: bjTime(s.next_fire_at) }),
+        el("td", { className: "mono", text: s.failures }),
+        el("td", {}, last ? [pill(run[0], run[1]), el("div", { className: "muted small mono",
+          text: bjTime(last.ended_at || last.started_at || last.fire_at) + (last.reason ? " · " + (RUN_REASON[last.reason] || last.reason) : "") })] : ["-"]),
+        el("td", {}, [
+          s.status === "active" ? act("pause", "暂停") : s.status === "paused" ? act("resume", "恢复") : null,
+          act("run-now", "立即运行"),
+          el("button", { className: "btn compact danger", type: "button", text: armed ? "确认删除" : "删除", onclick: () => armed ? scheduleAction(s.id, "delete") : armSchedule(s.id) }),
+        ]),
+      ]));
+    }
+  }
+  function armSchedule(id) {
+    state.armedSchedule = id;
+    renderSchedules(state.schedules);
+    setTimeout(() => { if (state.armedSchedule === id) { state.armedSchedule = null; renderSchedules(state.schedules); } }, 5000);
+  }
+  async function scheduleAction(id, action) {
+    state.armedSchedule = null;
+    try {
+      const result = await api("POST", "/admin/schedules/" + encodeURIComponent(id) + "/" + action);
+      notice(action === "delete" ? "已删除定时任务" : action === "run-now" ? "已触发一次：" + (RUN_STATUS[result.status] || [result.status])[0]
+        : action === "pause" ? "已暂停「" + result.name + "」" : "已恢复「" + result.name + "」，下次 " + bjTime(result.next_fire_at));
+    } catch (error) { fail(error); }
+    refresh();
+  }
+
+  const SOURCE_PAUSE = { manual: "手动暂停", turn_failures: "连续 3 次事件回合失败" };
+  const SOURCE_RUN = { queued: ["处理中", "warn"], sent: ["已发送", "ok"], silent: ["未打扰", "neutral"], failed: ["失败", "bad"] };
+  async function loadSources() {
+    renderSources(await api("GET", "/admin/event-sources"));
+  }
+  function renderSources(view) {
+    state.sources = view;
+    const box = $("sources");
+    clear(box);
+    if (!view.sources.length) { box.append(el("div", { className: "muted", text: "没有事件来源" })); return; }
+    for (const source of view.sources) box.append(renderSource(source, view));
+  }
+  function renderSource(source, view) {
+    const status = source.paused ? ["已暂停", "warn"] : source.degraded ? ["降级", "bad"] : ["正常", "ok"];
+    const facts = ["游标 " + (source.cursor ? "已建立" : "无"), "上次轮询 " + bjTime(source.lastPollAt), "积压 " + source.held,
+      "本小时预算 " + source.budget.used + " / " + source.budget.perHour];
+    if (source.id === "gmail") facts.push("watch " + (!view.watch.topic ? "未配置推送" : view.watch.expiration ? "到期 " + bjTime(view.watch.expiration) : "未建立"));
+    const problems = [source.paused ? SOURCE_PAUSE[source.pauseReason] || source.pauseReason : null, source.failures ? "连续拉取失败 " + source.failures + " 次" : null,
+      source.lastErrorCode ? "最近错误 " + source.lastErrorCode : null].filter(Boolean);
+    // 刷新只重画状态；正在编辑的设置表单原样搬回，不覆盖没保存的输入。
+    const editing = state.editingSource === source.id && state.sourceForms[source.id];
+    const form = editing || (state.sourceForms[source.id] = sourceForm(source));
+    const runs = view.runs.filter(run => run.source === source.id).slice(0, 10);
+    return el("div", { className: "source" }, [
+      el("div", { className: "row" }, [
+        el("strong", { className: "mono", text: source.id }), pill(status[0], status[1]), source.configured ? null : pill("未配置凭据", "neutral"),
+        el("div", { className: "grow" }),
+        el("button", { className: "btn compact", type: "button", text: source.paused ? "恢复" : "暂停", onclick: () => setSourcePaused(source.id, !source.paused) }),
+      ]),
+      el("div", { className: "muted small", text: facts.join(" · ") }),
+      problems.length ? el("div", { className: "small", text: problems.join(" · ") }) : null,
+      form,
+      runs.length ? el("div", { className: "scroll" }, [el("table", {}, [
+        el("thead", {}, [el("tr", {}, ["投递时间", "事件数", "状态", "结束"].map(text => el("th", { text })))]),
+        el("tbody", {}, runs.map(run => {
+          const tone = SOURCE_RUN[run.status] || [run.status, "neutral"];
+          return el("tr", {}, [el("td", { className: "mono", text: bjTime(run.deliveredAt) }), el("td", { className: "mono", text: run.events }),
+            el("td", {}, [pill(tone[0], tone[1])]), el("td", { className: "mono", text: bjTime(run.endedAt) })]);
+        })),
+      ])]) : el("div", { className: "muted small", text: "还没有投递记录" }),
+    ]);
+  }
+  function sourceForm(source) {
+    const s = source.settings, quiet = s.quietHours || { start: "", end: "" };
+    const input = (type, value) => el("input", { type, value, inputmode: type === "number" ? "numeric" : undefined });
+    const fields = {
+      intervalS: input("number", s.intervalS), mergeWindowS: input("number", s.mergeWindowS), budgetPerHour: input("number", s.budgetPerHour),
+      requireLabels: input("text", s.filters.requireLabels.join(", ")), excludeLabels: input("text", s.filters.excludeLabels.join(", ")),
+      excludeSenders: input("text", s.filters.excludeSenders.join(", ")), quietStart: input("time", quiet.start), quietEnd: input("time", quiet.end),
+    };
+    const field = (text, node) => el("label", { className: "field" }, [el("span", { text }), node]);
+    const details = el("details", { ontoggle: () => {
+      if (details.open) state.editingSource = source.id;
+      else if (state.editingSource === source.id) state.editingSource = null;
+    } }, [
+      el("summary", { text: "设置" }),
+      el("div", { className: "stack", style: "padding:10px 0 0" }, [
+        el("div", { className: "row" }, [field("轮询间隔（秒）", fields.intervalS), field("合并窗口（秒）", fields.mergeWindowS), field("每小时预算（次）", fields.budgetPerHour)]),
+        el("div", { className: "row" }, [field("必须带的标签（逗号分隔）", fields.requireLabels), field("排除的标签（逗号分隔）", fields.excludeLabels)]),
+        el("div", { className: "row" }, [field("排除的发件人（逗号分隔，包含即排除）", fields.excludeSenders)]),
+        el("div", { className: "row" }, [field("安静时段开始", fields.quietStart), field("安静时段结束（两项都空 = 关闭）", fields.quietEnd)]),
+        el("div", { className: "row" }, [el("button", { className: "btn primary", type: "button", text: "保存设置", onclick: () => saveSource(source.id, fields) })]),
+      ]),
+    ]);
+    return details;
+  }
+  const commaList = value => Array.from(new Set(value.split(/[,，]/).map(item => item.trim()).filter(Boolean)));
+  async function saveSource(id, fields) {
+    const settings = { intervalS: Number(fields.intervalS.value), mergeWindowS: Number(fields.mergeWindowS.value), budgetPerHour: Number(fields.budgetPerHour.value),
+      filters: { requireLabels: commaList(fields.requireLabels.value), excludeLabels: commaList(fields.excludeLabels.value), excludeSenders: commaList(fields.excludeSenders.value) } };
+    const start = fields.quietStart.value.trim(), end = fields.quietEnd.value.trim();
+    if (start || end) settings.quietHours = { start, end };
+    try {
+      await api("PUT", "/admin/event-sources/" + encodeURIComponent(id) + "/settings", settings);
+      state.editingSource = null;
+      notice("已保存 " + id + " 的设置");
+    } catch (error) { fail(error); return; }
+    loadSources().catch(fail);
+  }
+  async function setSourcePaused(id, paused) {
+    try {
+      await api("POST", "/admin/event-sources/" + encodeURIComponent(id) + "/" + (paused ? "pause" : "resume"));
+      notice(id + (paused ? " 已暂停" : " 已恢复"));
+    } catch (error) { fail(error); }
+    refresh();
   }
 
   function renderMcp(servers) {

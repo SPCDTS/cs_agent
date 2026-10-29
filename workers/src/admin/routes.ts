@@ -88,8 +88,11 @@ export const ADMIN_ROUTES: AdminRoute[] = [
 
   { method: "GET", path: "/admin/overview", handle: async ({ env }) => {
     const bridge = env.BRIDGE.getByName("napcat"), owner = env.THREAD.getByName("owner"), registry = env.REGISTRY.getByName("main");
-    const [status, list, model, accounts, counts] = await Promise.all([
+    const unavailable = () => ({ error: "unavailable" as const });
+    // 定时与事件只给总览卡片一行小字，任一个 DO 出错都不能拖垮整页。
+    const [status, list, model, accounts, counts, schedule, events] = await Promise.all([
       bridge.status(), bridge.threadList(), registry.modelStatus(), registry.status(), owner.mcpToolCounts(),
+      env.SCHEDULE.getByName("main").status().catch(unavailable), env.EVENTS.getByName("main").health().catch(unavailable),
     ]);
     const { threads: _keys, sendRules, ...connection } = status;
     // owner 线程总是列出，Bridge 还没见过 owner 私聊时也能从面板查看它的事件与记忆。
@@ -102,7 +105,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       const sandbox = key === "owner" ? await env.SANDBOX.getByName(key).status().catch(() => "unavailable" as const) : undefined;
       return { key, ...(name ? { name } : {}), kind: threadKind(key), seenAt, stats, ...(sandbox ? { sandbox } : {}) };
     }));
-    return json({ commit: env.CS_AGENT_COMMIT, bridge: connection, model, sendRules, threads,
+    return json({ commit: env.CS_AGENT_COMMIT, bridge: connection, model, sendRules, threads, schedule, events,
       mcp: accounts.map(account => ({ ...account, tools: counts[account.server] ?? 0 })),
       configured: Object.fromEntries(SECRET_NAMES.map(name => [name, !!env[name]])) });
   } },

@@ -1,12 +1,12 @@
 # Workers 管理面板
 
-浏览器打开 `/admin/`，输入 `ADMIN_TOKEN` 后可以看总览、会话、审计事件、MCP、设置与记忆。口令只存在本标签页的 sessionStorage，每个请求以 `Authorization: Bearer` 发送；任一接口返回 401 时页面清掉口令并回到登录框。页面与 `/admin/app.js` 不需要口令，也不含数据；`/admin/` 下其余路由都在 `src/admin/routes.ts` 的路由表里，先匹配路由再鉴权，未知路径返回 404。页面响应带 CSP（`script-src 'self'`、`frame-ancestors 'none'`）、`no-store`、`no-referrer` 与 `nosniff`，接口文本一律用 `textContent` 写入。
+浏览器打开 `/admin/`，输入 `ADMIN_TOKEN` 后可以看总览、会话、审计事件、MCP、设置、定时任务、事件来源与记忆。口令只存在本标签页的 sessionStorage，每个请求以 `Authorization: Bearer` 发送；任一接口返回 401 时页面清掉口令并回到登录框。页面与 `/admin/app.js` 不需要口令，也不含数据；`/admin/` 下其余路由都在 `src/admin/routes.ts` 的路由表里，先匹配路由再鉴权，未知路径返回 404。页面响应带 CSP（`script-src 'self'`、`frame-ancestors 'none'`）、`no-store`、`no-referrer` 与 `nosniff`，接口文本一律用 `textContent` 写入。
 
 | 接口 | 作用 |
 | --- | --- |
-| GET /admin/overview | Bridge 连接、模型、熔断、MCP 状态、各线程 stats（单个 Thread 失败显示 unavailable）、secrets 是否已配置 |
+| GET /admin/overview | Bridge 连接、模型、熔断、MCP 状态、各线程 stats（单个 Thread 失败显示 unavailable）、secrets 是否已配置；`schedule`（`ScheduleDO.status()`）与 `events`（`EventsDO.health()`），任一个 DO 出错时该字段为 `{ error: "unavailable" }`，整页仍 200 |
 | GET / PUT /admin/settings | 运行时设置；PUT 带 `expectedRevision`，不一致返回 409 与当前值，成功后推送给 Bridge |
-| GET /admin/events?thread=&kind=&result=&before=&limit= | 单个线程的审计事件，按 rowid 倒序翻页，limit ≤ 200 |
+| GET /admin/events?thread=&kind=&result=&before=&limit= | 单个线程的审计事件，按 rowid 倒序翻页，limit ≤ 200。`result` 按 `thread.ts` 的 `EVENT_RESULT_PATH` 取各类型的结果字段（mcp_call、web_search、generate_image、coding_* 为 `result`，mcp_catalog 为 `status`），表里没有的类型不按结果过滤 |
 | POST /admin/threads/:key/stop | 中止该线程当前回合并撤回排队输入（pi-durable `root.abort`） |
 | GET /admin/threads/:key/subagents | 该线程最近 50 个子 agent：任务前 200 字、状态、派出与结束时间、最近汇报、派出者 |
 | POST /admin/subagents/:id/cancel?thread=、GET /admin/subagents/:id/transcript?thread=&limit= | 取消运行中的子 agent；查看子会话最近 limit（≤ 50）条条目的类型与文本前 200 字。子 DO 名字含父线程键，所以要带 thread |
@@ -21,6 +21,8 @@
 | POST /admin/messages/import | 历史聊天记录导入，见“历史记录导入” |
 
 设置保存在 Registry 的 `settings` 表（一行整份覆盖值）：`groupTrigger`（`mention_or_reply` / `mention_only` / `off`）、`allowGroups`、`allowUsers`、`extractNamespaces`。没有保存过时沿用 `QQ_ALLOW_GROUPS`、`QQ_ALLOW_USERS`、`QQ_GROUP_MENTIONS`（false 对应 off，其余对应 mention_only）与 `MEMORY_EXTRACT_NAMESPACES`；保存后这四个 secrets/vars 只作默认值显示。revision 是有效内容 SHA-256 的前 16 位。`mention_or_reply` 新增“回复机器人发出的消息”也能触发，判定查本群消息库里 `is_self=1` 的消息。Bridge 在内存缓存设置，面板保存后立即重载；Thread 判定抽取命名空间时缓存 60 秒，取不到设置时本轮不抽取。owner 只来自 `QQ_OWNER`，面板不能修改。
+
+“定时任务”卡片列出 `GET /admin/schedules` 的全部任务（规则原文或一次性、北京时间的下次触发、连续失败数、最近一次运行），可暂停 / 恢复、立即运行与删除（点两次确认）。“事件来源”卡片按来源显示状态（已暂停 / 降级 / 正常）、游标、上次轮询、积压、本小时预算与 Gmail watch 到期，可暂停 / 恢复；“设置”展开后整份提交 `PUT /admin/event-sources/:source/settings`，展开期间 30 秒刷新不覆盖未保存的输入；下方列该来源最近 10 次投递。审计事件的类型 chips 之外另有“更多”下拉，含 web_search、generate_image 与 coding_*。
 
 解除熔断把该行的 `until` 改成当前时间而不删除，它仍是计数窗口的起点，否则熔断前的 60 条会让下一条立刻再次熔断。
 
