@@ -48,7 +48,7 @@
     "MODEL_PROVIDER": "magpie",
     "MODEL_ID": "deepseek/deepseek-flash",
     "MAGPIE_URL": "container",
-    "GMAIL_PUBSUB_SERVICE_ACCOUNT": "",
-    "GMAIL_PUBSUB_TOPIC": ""
+    "GMAIL_PUBSUB_SERVICE_ACCOUNT": "gmail-push@jule-agent.iam.gserviceaccount.com",
+    "GMAIL_PUBSUB_TOPIC": "projects/jule-agent/topics/gmail-push"
   }
 }
