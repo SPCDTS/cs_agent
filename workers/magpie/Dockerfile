@@ -3,5 +3,5 @@
 FROM ghcr.io/yetone/magpie:latest
 COPY --chmod=0755 entrypoint.sh /entrypoint.sh
 COPY --chmod=0644 relay.pl /relay.pl
-EXPOSE 3426
+EXPOSE 3426 3430
 ENTRYPOINT ["/entrypoint.sh"]

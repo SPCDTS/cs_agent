@@ -16,6 +16,16 @@
 
 解除熔断把该行的 `until` 改成当前时间而不删除，它仍是计数窗口的起点，否则熔断前的 60 条会让下一条立刻再次熔断。
 
+# magpie 网关与 Web UI
+
+云端 magpie 跑在 `MagpieContainer`（`magpie/`、`src/magpie-container.ts`）：容器里 3426 是给 Pi 用的回环中继，3430 是 magpie 自带的 Web UI（`magpie serve --web=0.0.0.0:3430`）。Worker 把主机名等于 `MAGPIE_WEB_HOST`（`magpie.spcdts.dev`）的所有请求经 DO 的 `fetch` 转到 3430，响应加 `X-Robots-Tag: noindex` 与 `Referrer-Policy: no-referrer`；容器起不来时只回 503 `magpie unavailable`。`MAGPIE_WEB_HOST` 为空串时不拦截任何主机。WebSocket 与流式响应原样透传，所以走 DO 的 `fetch` 而不是 RPC 方法（RPC 不能序列化带 WebSocket 的 Response）。
+
+- 地址：https://magpie.spcdts.dev 。登录口令是 secret `MAGPIE_WEB_KEY`，`scripts/put-secrets.sh` 第一次运行时生成并存到主工作区的 `secrets/magpie-web-key.env`，之后沿用。magpie 对非回环来源要求这个口令，签入保持 400 天。
+- 云端容器是 providers、key 与设置的唯一来源：在 Web UI 里改。R2 只用来给容器自己持久化（容器磁盘是临时的，重启时 `s3 on` 从 R2 取回）。主人电脑上的 magpie 要 `magpie s3 off`，不再和这个 bucket 同步，否则两边会抢锁、互相覆盖。
+- OAuth 登录的账号（订阅类 provider）不随 R2 同步，容器一重启就没了；云端只有 API key 型 provider 可靠。
+- 容器空闲 30 分钟退出，第一次打开页面要等冷启动（网关起来加 R2 首次同步，几秒到几十秒）；DO 在一分钟内按 500 ms 重试连接。
+- `MAGPIE_WEB_KEY` 与 `MAGPIE_WEB_URL`（`https://` + `MAGPIE_WEB_HOST`）在容器启动时作为环境变量传入。改了口令要等容器下次启动才生效。
+
 # Workers P2：定时任务、外部事件与维护
 
 ## 定时任务（P2a）

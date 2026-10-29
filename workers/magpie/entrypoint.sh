@@ -5,7 +5,8 @@
 # 另一份 magpie（主人的电脑）正在同步时它也会等锁，所以同步放后台，不挡服务。
 set -u
 
-/magpie serve &
+# --web 让同一进程在 3430 提供 Web UI，Worker 经 MAGPIE_WEB_HOST 转来，登录口令是 MAGPIE_WEB_KEY
+/magpie serve --web=0.0.0.0:3430 &
 gateway=$!
 # Worker 经 3426 进来，中继转到回环的 3425：magpie 对回环来源不要求网关 key（见 relay.pl）
 perl /relay.pl 0.0.0.0:3426 127.0.0.1:3425 &

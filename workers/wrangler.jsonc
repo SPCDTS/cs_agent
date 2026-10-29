@@ -12,7 +12,8 @@
   // index.ts 的 scheduled 按 cron 字符串分派
   "triggers": { "crons": ["*/5 * * * *", "30 19 * * *"] },
   // 自定义域名在 Cloudflare 托管的 zone 下；*.workers.dev 在国内不稳定，NapCat 反向 WS 只连这个
-  "routes": [{ "pattern": "agent.spcdts.dev", "custom_domain": true }],
+  // magpie.spcdts.dev 整台主机转给 magpie 容器的 Web UI（index.ts 按 MAGPIE_WEB_HOST 分流）
+  "routes": [{ "pattern": "agent.spcdts.dev", "custom_domain": true }, { "pattern": "magpie.spcdts.dev", "custom_domain": true }],
   "durable_objects": {
     "bindings": [
       { "name": "THREAD", "class_name": "ThreadDO" },
@@ -37,7 +38,7 @@
     { "class_name": "MagpieContainer", "scheduling_policy": "durable_object", "images": { "magpie": { "dockerfile": "./magpie/Dockerfile" } } }
   ],
   "dev": { "enable_containers": false },
-  // QQ_OWNER、NAPCAT_TOKEN、R2_*、MAGPIE_SYNC_PASSPHRASE 都是 secrets（wrangler secret put），不写在这里
+  // QQ_OWNER、NAPCAT_TOKEN、R2_*、MAGPIE_SYNC_PASSPHRASE、MAGPIE_WEB_KEY 都是 secrets（wrangler secret put），不写在这里
   // 生产：模型经 magpie 容器（MAGPIE_URL=container）。测试用 wrangler.test.jsonc 覆盖为 faux
   "vars": {
     "CS_AGENT_COMMIT": "dev",
@@ -49,6 +50,7 @@
     "MODEL_ID": "deepseek/deepseek-flash",
     "MAGPIE_URL": "container",
     "GMAIL_PUBSUB_SERVICE_ACCOUNT": "gmail-push@jule-agent.iam.gserviceaccount.com",
-    "GMAIL_PUBSUB_TOPIC": "projects/jule-agent/topics/gmail-push"
+    "GMAIL_PUBSUB_TOPIC": "projects/jule-agent/topics/gmail-push",
+    "MAGPIE_WEB_HOST": "magpie.spcdts.dev"
   }
 }

@@ -157,6 +157,9 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   } },
 
   // 旧路径保留纯文本错误分类，已有脚本与文档按它解析。
+  // 容器用启动那一刻的 secrets 起来；改了 MAGPIE_WEB_KEY 或 R2 凭据后要主动重启，不等它空闲退出。
+  { method: "POST", path: "/admin/magpie/restart", handle: async ({ env }) => { await env.MAGPIE.getByName("gateway").restart(); return json({ restarted: true }); } },
+
   { method: "POST", path: "/admin/mcp/oauth/login-link", handle: async ({ env, request }) => {
     try {
       const value: unknown = await request.json();

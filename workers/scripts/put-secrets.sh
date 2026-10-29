@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 把 Worker 需要的 secrets 从本地私有文件上传到 Cloudflare（wrangler secret bulk，值走 stdin，不进命令行与仓库）。
 # 读取：仓库根 .env 的 NAPCAT_TOKEN、QQ_OWNER、QQ_ALLOW_USERS、QQ_ALLOW_GROUPS；secrets/r2-magpie.env 的 R2_*、MAGPIE_SYNC_PASSPHRASE；
-# secrets/gmail/client.json 与 token.json（可选）的 GMAIL_CLIENT_ID、GMAIL_CLIENT_SECRET、GMAIL_REFRESH_TOKEN。
+# secrets/gmail/client.json 与 token.json（可选）的 GMAIL_CLIENT_ID、GMAIL_CLIENT_SECRET、GMAIL_REFRESH_TOKEN；
+# secrets/admin-token.env、oauth-store-key.env、magpie-web-key.env 不存在时就地生成。
 # 用法：在仓库根执行  bash workers/scripts/put-secrets.sh
 set -euo pipefail
 # 在 worktree 里跑时 .env 与 secrets/ 只在主工作区，用 CS_AGENT_ROOT 指过去
@@ -45,6 +46,15 @@ fi
 OAUTH_STORE_KEY=$(read_var "$oauth_file" OAUTH_STORE_KEY)
 [[ "$OAUTH_STORE_KEY" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "OAUTH_STORE_KEY 必须为 32 字节 hex" >&2; exit 1; }
 
+# magpie Web UI（magpie.spcdts.dev）的固定登录口令，同样只生成一次；magpie 要求 16 位以上的字母、数字或 - . _ ~
+web_key_file="$root/secrets/magpie-web-key.env"
+if [ ! -f "$web_key_file" ]; then
+  (umask 077; python -c 'import secrets,string,sys; from pathlib import Path; alphabet = string.ascii_letters + string.digits + "._~-"; Path(sys.argv[1]).write_text("MAGPIE_WEB_KEY=" + "".join(secrets.choice(alphabet) for _ in range(32)) + "\n", encoding="utf-8")' "$web_key_file")
+fi
+MAGPIE_WEB_KEY=$(read_var "$web_key_file" MAGPIE_WEB_KEY)
+web_key_pattern='^[A-Za-z0-9._~-]{16,}$'
+[[ "$MAGPIE_WEB_KEY" =~ $web_key_pattern ]] || { echo "MAGPIE_WEB_KEY 必须是 16 位以上的字母、数字或 - . _ ~" >&2; exit 1; }
+
 # Gmail：桌面客户端 JSON 与 owner 授权后的 token.json（字段名见 src/sidecar/gmail/oauth.ts）。可选，任一缺失就跳过三项
 json_field() { python -c 'import json,sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -59,7 +69,7 @@ if [ -z "$GMAIL_CLIENT_ID" ] || [ -z "$GMAIL_CLIENT_SECRET" ] || [ -z "$GMAIL_RE
   GMAIL_CLIENT_ID=""; GMAIL_CLIENT_SECRET=""; GMAIL_REFRESH_TOKEN=""
 fi
 
-for name in NAPCAT_TOKEN QQ_OWNER R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE ADMIN_TOKEN OAUTH_STORE_KEY; do
+for name in NAPCAT_TOKEN QQ_OWNER R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE ADMIN_TOKEN OAUTH_STORE_KEY MAGPIE_WEB_KEY; do
   [ -n "${!name}" ] || { echo "$name 为空" >&2; exit 1; }
 done
 
@@ -74,7 +84,7 @@ cd "$workers_dir"
 {
   printf '{'
   first=1
-  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE ADMIN_TOKEN OAUTH_STORE_KEY GMAIL_CLIENT_ID GMAIL_CLIENT_SECRET GMAIL_REFRESH_TOKEN; do
+  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE ADMIN_TOKEN OAUTH_STORE_KEY MAGPIE_WEB_KEY GMAIL_CLIENT_ID GMAIL_CLIENT_SECRET GMAIL_REFRESH_TOKEN; do
     [ -n "${!name}" ] || continue
     [ $first -eq 1 ] || printf ','
     first=0

@@ -19,9 +19,26 @@ const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> 
   [MAINTENANCE_CRON]: runMaintenance,
 };
 
+// magpie Web UI 整台主机交给容器；容器起不来时不回显错误，那可能带内部细节。
+async function magpieWeb(request: Request, env: Env): Promise<Response> {
+  let response: Response;
+  try {
+    response = await env.MAGPIE.getByName("gateway").fetch(request);
+  } catch (error) {
+    console.error({ event: "magpie_web_unavailable", message: error instanceof Error ? error.message : String(error) });
+    response = new Response("magpie unavailable", { status: 503, headers: { "Content-Type": "text/plain; charset=utf-8" } });
+  }
+  // 以原响应为 init 复制 status 与 webSocket，101 升级也能加头
+  response = new Response(response.body, response);
+  response.headers.set("X-Robots-Tag", "noindex");
+  response.headers.set("Referrer-Policy", "no-referrer");
+  return response;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url), path = url.pathname;
+    if (env.MAGPIE_WEB_HOST && url.hostname === env.MAGPIE_WEB_HOST) return magpieWeb(request, env);
     if (request.method === "POST" && path === "/gmail/pubsub") {
       // 未配置服务账号即视为推送未启用；Pub/Sub 要求快速确认，真正的拉取放到 waitUntil。
       const account = env.GMAIL_PUBSUB_SERVICE_ACCOUNT?.trim();

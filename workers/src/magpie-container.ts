@@ -6,7 +6,8 @@ import type { Env } from "./env";
  * ctx.container.start() 按需拉起，镜像来自 wrangler.jsonc 的 images.magpie（magpie/Dockerfile）。
  * 容器里 3425 是 magpie 本身，3426 是回环中继：Worker 进来的源地址不是回环，magpie 会要求已启用的
  * 网关 key，而网关 key 不随 R2 同步、容器每次启动都是新的；中继把连接转到 127.0.0.1:3425，
- * magpie 便按回环处理，任意 Bearer 都接受。容器端口只有本 DO 能到达。
+ * magpie 便按回环处理，任意 Bearer 都接受。3430 是 Web UI，Worker 把 MAGPIE_WEB_HOST 上的请求转来；
+ * 它来自非回环地址，magpie 要求 MAGPIE_WEB_KEY 登录。容器端口只有本 DO 能到达。
  */
 export class MagpieContainer extends DurableObject<Env> {
   /** 空闲多久后让容器退出；下一次模型调用冷启动几秒并从 R2 取回状态 */
@@ -33,6 +34,9 @@ export class MagpieContainer extends DurableObject<Env> {
         R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY ?? "",
         MAGPIE_SYNC_PASSPHRASE: env.MAGPIE_SYNC_PASSPHRASE ?? "",
         MAGPIE_SYNC_MINUTES: "3",
+        // magpie 自己读这两个变量，空值可能被当成非法配置，所以没配就不传
+        ...(env.MAGPIE_WEB_KEY ? { MAGPIE_WEB_KEY: env.MAGPIE_WEB_KEY } : {}),
+        ...(env.MAGPIE_WEB_HOST ? { MAGPIE_WEB_URL: `https://${env.MAGPIE_WEB_HOST}` } : {}),
       },
     });
     // 只记录退出，不阻塞请求；容器退出后下一次请求重新 start
@@ -50,11 +54,17 @@ export class MagpieContainer extends DurableObject<Env> {
     if (container?.running) await container.destroy("restart requested");
   }
 
-  /** 把一个 HTTP 请求转给容器的中继端口；start() 返回时进程未必就绪，连接失败按间隔重试。 */
+  /**
+   * 把一个 HTTP 请求转给容器：主机名是 MAGPIE_WEB_HOST 的去 Web UI，其余去模型中继；start() 返回时进程
+   * 未必就绪，连接失败按间隔重试。Web UI 的 WebSocket 也走这里而不是 RPC 方法：RPC 不能序列化
+   * 带 WebSocket 的 Response。升级请求是没有 body 的 GET，带着 Upgrade 头转出去，端口返回的 101
+   * 连同 webSocket 原样交回；响应体不缓冲，流式输出直接透传。
+   */
   override async fetch(request: Request): Promise<Response> {
     this.ensureStarted();
-    const port = this.ctx.container!.getTcpPort(3426);
     const incoming = new URL(request.url);
+    const web = !!this.env.MAGPIE_WEB_HOST && incoming.hostname === this.env.MAGPIE_WEB_HOST;
+    const port = this.ctx.container!.getTcpPort(web ? 3430 : 3426);
     const target = `http://container${incoming.pathname}${incoming.search}`;
     const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer();
     let lastError: unknown;

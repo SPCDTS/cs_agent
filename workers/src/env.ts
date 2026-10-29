@@ -1,5 +1,5 @@
 // 配置可被部署覆盖，不能沿用生成文件中的字面量类型；绑定仍由 Wrangler 生成。
-export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" | "MAGPIE_URL" | "QQ_GROUP_MENTIONS" | "MEMORY_EXTRACT_MODEL" | "MEMORY_EXTRACT_NAMESPACES" | "PUBLIC_ORIGIN" | "GMAIL_PUBSUB_SERVICE_ACCOUNT" | "GMAIL_PUBSUB_TOPIC"> {
+export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" | "MAGPIE_URL" | "QQ_GROUP_MENTIONS" | "MEMORY_EXTRACT_MODEL" | "MEMORY_EXTRACT_NAMESPACES" | "PUBLIC_ORIGIN" | "GMAIL_PUBSUB_SERVICE_ACCOUNT" | "GMAIL_PUBSUB_TOPIC" | "MAGPIE_WEB_HOST"> {
   PUBLIC_ORIGIN: string;
   // Pub/Sub 推送的服务账号邮箱与 Gmail watch 的 topic；为空时只靠 Cron 轮询
   GMAIL_PUBSUB_SERVICE_ACCOUNT?: string;
@@ -25,6 +25,9 @@ export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" 
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   MAGPIE_SYNC_PASSPHRASE?: string;
+  // magpie Web UI 的主机名（var，空串即不暴露）与固定登录口令（secret）
+  MAGPIE_WEB_HOST: string;
+  MAGPIE_WEB_KEY?: string;
   // 维护任务的保留天数（0 = 不清理）；缺省见 maintenance/index.ts
   HISTORY_RAW_DAYS?: string;
   HISTORY_RAW_HARD_MAX_DAYS?: string;
