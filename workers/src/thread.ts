@@ -40,6 +40,7 @@ import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentView } from "./subagent/parent";
 import { subagentName, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
+import { createCodingExtension } from "./tools/coding";
 
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -227,6 +228,15 @@ export class ThreadDO extends DurableObject<Env> {
         },
       }), this.subagents.tool(async (api, callContext) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext)),
         async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
+    }));
+    // 沙箱 coding 工具与 generate_image 同一道门：owner 线程注册，只有 owner 亲自发消息的回合能调用。
+    if (memory.ns === "owner") registry.install(createCodingExtension({
+      allowed: async (api, callContext) => {
+        const input = await this.currentInput(harness, api, api.conversationId, callContext);
+        return !!input && this.ownerTurnKind(input) === "message" && input.user_id !== input.self_id;
+      },
+      sandbox: () => this.env.SANDBOX.getByName(memory.ns),
+      record: (kind, detail) => this.audit(kind, detail),
     }));
     if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
       registry.install(createScheduleExtension(this.env, memory.ns as ScheduleConversation, async (api, callContext) =>

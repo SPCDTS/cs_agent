@@ -10,6 +10,8 @@
 | POST /admin/threads/:key/stop | 中止该线程当前回合并撤回排队输入（pi-durable `root.abort`） |
 | GET /admin/threads/:key/subagents | 该线程最近 50 个子 agent：任务前 200 字、状态、派出与结束时间、最近汇报、派出者 |
 | POST /admin/subagents/:id/cancel?thread=、GET /admin/subagents/:id/transcript?thread=&limit= | 取消运行中的子 agent；查看子会话最近 limit（≤ 50）条条目的类型与文本前 200 字。子 DO 名字含父线程键，所以要带 thread |
+
+| POST /admin/threads/:key/sandbox/reset | 销毁该线程的沙箱容器（`/work` 随之清空）；没有容器绑定时 503 `sandbox_unavailable`。总览里 owner 行带 `sandbox`：`running` / `stopped` / `unavailable` |
 | GET /admin/memory?ns=&q=、DELETE /admin/memory/:id?ns=、PUT /admin/memory/profile | 记忆列表与搜索（`#id` 按编号）、遗忘、画像 CAS；ns 只能是 owner 或 group:群号 |
 | POST /admin/mcp/:server/login-link、logout、refresh | 一次性登录链接、本地登出、刷新 owner 线程的 MCP 目录 |
 | POST /admin/send-rules/release | 解除某个 scope 的熔断 |
@@ -101,6 +103,19 @@ curl --fail-with-body -X POST "$WORKER_URL/admin/messages/import" \
 | 面板端点鉴权、列表、记录、取消 | lists, inspects and cancels subagents through the authenticated admin API |
 
 与 Docker 版（`src/agent/pi-tools/subagent.ts`）的差异：子 agent 在自己的 DO 里而不是同一 Harness 的子会话；输入一律 followUp，没有 steer；没有每天 20 个的上限，改为限时；按 id 而不是名字寻址，没有 status 动作（list 即可）；工具集是固定的只读白名单，不再从父会话复制后减去排除名单；汇报回合不能再派子 agent，Docker 版允许沿链继承。
+
+## 沙箱 coding 工具（P3c）
+
+owner 私聊里的 `read` / `write` / `edit` / `bash` 跑在 Cloudflare Containers 的沙箱容器里，每个会话一个，工作区 `/work`。
+
+- 容器：`SandboxDO`（`src/sandbox/do.ts`，绑定 `SANDBOX`，迁移 `v9`，名字是线程键）。本账户只允许 `durable_object` 调度策略，所以和当年的 magpie 一样由普通 DO 用 `ctx.container.start({ image: images.sandbox, enableInternet: true, instance: "lite" })` 按需拉起，`setInactivityTimeout` 10 分钟。冷启动时轮询 `/health`（500 ms，最多 30 秒）；就绪后每个请求只发一次，连接失败回 `sandbox_unavailable` 并在下次重新确认就绪，exec 不会被重放。
+- 镜像：`sandbox/Dockerfile`，`debian:bookworm-slim` 加 python3、nodejs、git、curl，由 `wrangler deploy` 构建推送（需要 Docker，本机 `--dry-run` 也要 Docker，没有时加 `--containers-rollout=none`）。没用官方 `cloudflare/sandbox` 镜像：`@cloudflare/sandbox` 1.x 只带 `sandbox-shim`，文件操作要经 SDK 的帧协议，Worker 侧就得引入这个依赖。
+- 控制服务：`sandbox/server.mjs`，监听 3000，只有 DO 能到达。`POST /exec {cmd, cwd, timeoutMs ≤ 120 s}` → `{stdout, stderr, code, timedOut, truncated}`，两路输出各留末尾 64 KiB 并在开头标出省略字节数；超时杀整个进程组；shell 退出后最多再等 1 秒，后台进程不拖住请求。`GET/PUT /file`、`POST /edit {path, edits}`（每处 oldText 必须唯一、互不重叠，与 Docker 版 edit 一致）、`GET /ls`。服务以 root 运行，命令降到 uid 1000 的 `sandbox` 用户执行，服务写出的新文件与目录交给该用户。
+- 路径：Worker 侧 `workPath`（`src/sandbox/client.ts`）先按 `/work` 词法规范化，出界就不发给容器；控制服务再按 realpath 校验，符号链接指到 `/work` 外一律 `path_denied`。
+- 工具（`src/tools/coding.ts`，扩展 `cs.coding`）：参数与说明移植 Docker 版（`edit` 同样修正模型把 edits 写成 JSON 字符串或单个对象的情况），`bash` 默认 60 秒、最长 120 秒。只注册在 owner 线程，执行时核对本回合是 owner 亲自发来的消息（与 `generate_image` 同一道门），定时回合拒绝，事件回合的工具档里没有它们。`bash` 的 `replay` 为 `unsafe`，其余 `safe`。系统提示段 `sandbox` 只在本次请求提供了 `bash` 时出现。失败按分类码回给模型（`sandbox_unavailable`、`path_denied`、`edit_not_found` 等）。
+- 审计：`coding_exec` 记 `{result, commandLength, code, ms}`，`coding_read` / `coding_write` / `coding_edit` 记 `{result, ms}`；不记命令、路径、文件内容与输出。
+- 工作区不保证跨容器重建保留。产物写到 `/work/out/`；发文件给主人（`send_file`）尚未实现。
+- 测试：`test/coding-tools.test.ts`（路径与协议、用假容器测 DO 的启动与不重放、工具注册与分类、面板）；控制服务用真实 Node 测：`node --test test/sandbox-server.node.mjs`（Windows 上用 Git 的 bash）。
 
 # Workers P2：定时任务、外部事件与维护
 

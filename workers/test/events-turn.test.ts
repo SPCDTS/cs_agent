@@ -22,7 +22,7 @@ async function deliverMail(google: ReturnType<typeof fakeGoogle>, id: string) {
   await events().notify("gmail");
 }
 const EVENT_TOOLS = ["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill"];
-const WRITE_TOOLS = ["mem_remember", "mem_update", "mem_forget", "mem_profile", "gmail_send", "generate_image"];
+const WRITE_TOOLS = ["mem_remember", "mem_update", "mem_forget", "mem_profile", "gmail_send", "generate_image", "read", "write", "edit", "bash"];
 
 describe("event turns in the owner thread", () => {
   it("runs a read-only triage turn, records sent, and restores the full tool set for the next owner message", async () => {

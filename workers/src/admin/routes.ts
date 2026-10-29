@@ -98,7 +98,9 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     const threads = await Promise.all(keys.map(async ({ key, name, seenAt }) => {
       let stats;
       try { stats = await env.THREAD.getByName(key).stats(); } catch { stats = { error: "unavailable" as const }; }
-      return { key, ...(name ? { name } : {}), kind: threadKind(key), seenAt, stats };
+      // 只有 owner 线程有 coding 工具，也只有它会拉起沙箱容器。
+      const sandbox = key === "owner" ? await env.SANDBOX.getByName(key).status().catch(() => "unavailable" as const) : undefined;
+      return { key, ...(name ? { name } : {}), kind: threadKind(key), seenAt, stats, ...(sandbox ? { sandbox } : {}) };
     }));
     return json({ commit: env.CS_AGENT_COMMIT, bridge: connection, model, sendRules, threads,
       mcp: accounts.map(account => ({ ...account, tools: counts[account.server] ?? 0 })),
@@ -180,6 +182,10 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     const result = await env.THREAD.getByName(threadParam(url)).subagentTranscript(params.id, Number(limit));
     if (!result) throw new HttpError(404, "not_found");
     return json(result);
+  } },
+  { method: "POST", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/sandbox/reset$`), handle: async ({ env, params }) => {
+    try { return json(await env.SANDBOX.getByName(params.key!).reset()); }
+    catch { throw new HttpError(503, "sandbox_unavailable"); }
   } },
 
   { method: "GET", path: "/admin/memory", handle: async ({ env, url }) => {

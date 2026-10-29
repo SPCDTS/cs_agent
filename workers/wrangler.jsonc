@@ -21,7 +21,8 @@
       { "name": "SCHEDULE", "class_name": "ScheduleDO" },
       { "name": "EVENTS", "class_name": "EventsDO" },
       // 子 agent：每个一个对象，名字 sub:<父线程键>:<id>，结束 14 天后自删
-      { "name": "SUBAGENT", "class_name": "SubagentDO" }
+      { "name": "SUBAGENT", "class_name": "SubagentDO" },
+      { "name": "SANDBOX", "class_name": "SandboxDO" }
     ]
   },
   "migrations": [
@@ -33,8 +34,15 @@
     { "tag": "v6", "new_sqlite_classes": ["EventsDO"] },
     // 2026-10-30 起 magpie 容器整体移除，Worker 直连 DeepSeek 与 OpenAI Codex
     { "tag": "v7", "deleted_classes": ["MagpieContainer"] },
-    { "tag": "v8", "new_sqlite_classes": ["SubagentDO"] }
+    { "tag": "v8", "new_sqlite_classes": ["SubagentDO"] },
+    { "tag": "v9", "new_sqlite_classes": ["SandboxDO"] }
   ],
+  // coding 工具的沙箱（sandbox/Dockerfile）。本账户只允许 durable_object 调度策略：SandboxDO 用 ctx.container.start()
+  // 按需拉起镜像 images.sandbox，规格在 start() 里给；本地 dev 与测试不起容器（wrangler.test.jsonc 不带这一段）
+  "containers": [
+    { "class_name": "SandboxDO", "scheduling_policy": "durable_object", "images": { "sandbox": { "dockerfile": "./sandbox/Dockerfile" } } }
+  ],
+  "dev": { "enable_containers": false },
   // QQ_OWNER、NAPCAT_TOKEN、DEEPSEEK_API_KEY、OAUTH_STORE_KEY 等都是 secrets（wrangler secret put），不写在这里
   // MODEL_PROVIDER / MODEL_ID 只是默认模型，运行时在管理面板切换（Registry 设置）。测试用 wrangler.test.jsonc 覆盖为 faux
   "vars": {

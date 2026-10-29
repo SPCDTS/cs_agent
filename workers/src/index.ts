@@ -12,6 +12,7 @@ export { ThreadDO } from "./thread";
 export { ScheduleDO } from "./schedule/do";
 export { EventsDO } from "./events/do";
 export { SubagentDO } from "./subagent/do";
+export { SandboxDO } from "./sandbox/do";
 
 // 按 wrangler.jsonc 的 crons 字符串分派，各后台任务各占一行。
 const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> = {

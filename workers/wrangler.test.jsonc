@@ -1,4 +1,4 @@
-// 测试专用配置：与 wrangler.jsonc 相同，去掉 routes，模型默认用 faux。改 wrangler.jsonc 时同步改这里。
+// 测试专用配置：与 wrangler.jsonc 相同，去掉 routes 与 containers（测试池不支持容器），模型默认用 faux。改 wrangler.jsonc 时同步改这里。
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "cs-agent",
@@ -19,7 +19,8 @@
       { "name": "SCHEDULE", "class_name": "ScheduleDO" },
       { "name": "EVENTS", "class_name": "EventsDO" },
       // 子 agent：每个一个对象，名字 sub:<父线程键>:<id>，结束 14 天后自删
-      { "name": "SUBAGENT", "class_name": "SubagentDO" }
+      { "name": "SUBAGENT", "class_name": "SubagentDO" },
+      { "name": "SANDBOX", "class_name": "SandboxDO" }
     ]
   },
   "migrations": [
@@ -30,7 +31,8 @@
     { "tag": "v5", "new_sqlite_classes": ["ScheduleDO"] },
     { "tag": "v6", "new_sqlite_classes": ["EventsDO"] },
     { "tag": "v7", "deleted_classes": ["MagpieContainer"] },
-    { "tag": "v8", "new_sqlite_classes": ["SubagentDO"] }
+    { "tag": "v8", "new_sqlite_classes": ["SubagentDO"] },
+    { "tag": "v9", "new_sqlite_classes": ["SandboxDO"] }
   ],
   // QQ_OWNER、NAPCAT_TOKEN、DEEPSEEK_API_KEY、OAUTH_STORE_KEY 等都是 secrets（wrangler secret put），不写在这里
   "vars": {

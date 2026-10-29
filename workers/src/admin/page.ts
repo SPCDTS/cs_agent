@@ -454,6 +454,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
       ]));
     }
   }
+  const SANDBOX_TEXT = { running: "运行中", stopped: "已停", unavailable: "不可用" };
   function renderThreads(threads) {
     const body = $("threads");
     clear(body);
@@ -463,7 +464,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
       const busy = !broken && s.inbound.queued > 0;
       body.append(el("tr", {}, [
         el("td", {}, [el("span", { className: "mono", text: thread.key }), thread.name ? el("div", { className: "muted small", text: thread.name }) : null]),
-        el("td", {}, [broken ? pill("不可用", "bad") : busy ? pill("处理中", "warn") : pill("空闲", "ok")]),
+        el("td", {}, [broken ? pill("不可用", "bad") : busy ? pill("处理中", "warn") : pill("空闲", "ok"),
+          thread.sandbox ? el("div", { className: "muted small", text: "沙箱：" + SANDBOX_TEXT[thread.sandbox] }) : null]),
         el("td", { className: "mono", text: broken ? "-" : s.inbound.queued + " / " + s.inbound.done + " / " + s.inbound.failed }),
         el("td", { className: "mono", text: broken ? "-" : s.outbox }),
         el("td", { className: "mono", text: broken ? "-" : s.memory.active + " 条 · 画像 " + bytes(s.memory.profileBytes) }),
@@ -475,6 +477,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         el("td", {}, [
           el("button", { className: "btn compact", type: "button", text: "事件", onclick: () => { selectThread(thread.key); $("events-section").scrollIntoView(); } }),
           busy ? el("button", { className: "btn compact danger", type: "button", text: "停止", onclick: () => stop(thread.key) }) : null,
+          thread.sandbox === "running" ? el("button", { className: "btn compact danger", type: "button", text: "重置沙箱", onclick: () => resetSandbox(thread.key) }) : null,
         ]),
       ]));
       const open = state.subagents[thread.key];
@@ -526,6 +529,10 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     mcp_call: d => ({ parts: [d.server, d.tool, duration(d.ms), "入 " + bytes(d.inputBytes) + " / 出 " + bytes(d.outputBytes)], result: d.result }),
     mcp_catalog: d => ({ parts: [d.server, typeof d.tools === "number" ? d.tools + " 个工具" : null, typeof d.rejected === "number" ? "拒绝 " + d.rejected : null,
       typeof d.digest === "string" ? "摘要 " + d.digest.slice(0, 8) : null, d.code], result: d.status }),
+    coding_exec: d => ({ parts: ["命令 " + d.commandLength + " 字", d.code === undefined || d.code === null ? null : "退出码 " + d.code, duration(d.ms)], result: d.result }),
+    coding_read: d => ({ parts: [duration(d.ms)], result: d.result }),
+    coding_write: d => ({ parts: [duration(d.ms)], result: d.result }),
+    coding_edit: d => ({ parts: [duration(d.ms)], result: d.result }),
     memory_extract: d => ({ parts: ["候选 " + d.candidates, "写入 " + d.written, d.reason, d.usage && d.usage.totalTokens ? "用量 " + d.usage.totalTokens + " tok" : null, duration(d.ms)], result: d.status }),
   };
   const RESULT_TONE = { ok: "ok", skipped: "neutral" };
@@ -853,6 +860,14 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     try {
       const result = await api("POST", "/admin/threads/" + encodeURIComponent(key) + "/stop");
       notice(result.stopped ? "已停止 " + key + " 的当前回合" : key + " 没有进行中的回合");
+    } catch (error) { fail(error); }
+    refresh();
+  }
+  async function resetSandbox(key) {
+    if (!confirm("重置会销毁 " + key + " 的沙箱容器，/work 里的文件都会丢失。继续？")) return;
+    try {
+      const result = await api("POST", "/admin/threads/" + encodeURIComponent(key) + "/sandbox/reset");
+      notice(result.reset ? "已重置 " + key + " 的沙箱" : key + " 的沙箱没有在运行");
     } catch (error) { fail(error); }
     refresh();
   }
