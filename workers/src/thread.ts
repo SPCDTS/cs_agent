@@ -17,6 +17,7 @@ import { parseImport } from "./memory/import";
 import { createMemoryTools, type MemoryBinding } from "./memory/tools";
 import { MEMORY_RULE } from "./memory/contracts";
 import { renderMemorySection } from "./memory/render";
+import { formatBeijingTime } from "./memory/time";
 import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS, type ExtractComplete } from "./memory/extractor";
 import { maintenanceConfig, maintenanceStatus, runMaintenanceJob, type MaintenanceJob, type MaintenanceReport } from "./maintenance";
 
@@ -30,6 +31,7 @@ import { createGmailTools } from "./gmail/tools";
 import type { EventRunStatus } from "./events/model";
 
 const context = BACKGROUND_CONTEXT;
+const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 type InboundRow = {
   message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number;
   status: "queued" | "done" | "failed"; chat_kind: "private" | "group"; chat_id: string; nickname: string;
@@ -143,6 +145,13 @@ export class ThreadDO extends DurableObject<Env> {
           const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
           if (input?.kind === "event") return EVENT_TURN_IDENTITY;
           return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, ownerIds(this.env).includes(input.user_id)) : undefined;
+        }, { tag: false }),
+        // 模型没有时钟；按本轮输入的到达时刻给时间，同一回合内文本不变，不打散提示缓存。
+        section("time", async (api, callContext) => {
+          const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
+          if (!input) return undefined;
+          const ms = input.received_at < 1e12 ? input.received_at * 1000 : input.received_at;
+          return `现在是北京时间 ${formatBeijingTime(ms)}（${WEEKDAYS[new Date(ms + 8 * 3600_000).getUTCDay()]}）；今天、明天、下周这类相对时间都按北京时间理解。`;
         }, { tag: false }),
       ],
       tools: [...createMemoryTools(memory, async (api, callContext) => {
