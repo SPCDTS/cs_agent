@@ -103,9 +103,11 @@ describe("ScheduleDO alarm", () => {
     const rows = await runInDurableObject(env.THREAD.getByName("owner"), (_instance, state) => ({
       inbound: state.storage.sql.exec("SELECT kind, status, when_busy, user_id FROM inbound").toArray(),
       inputs: state.storage.sql.exec("SELECT text FROM messages WHERE is_self = 0").toArray(),
+      extractQueue: state.storage.sql.exec("SELECT turn_id FROM extract_queue").toArray(),
     }));
     expect(rows.inbound).toEqual([{ kind: "schedule", status: "done", when_busy: "followUp", user_id: "10000001" }]);
     expect(rows.inputs).toEqual([]);
+    expect(rows.extractQueue).toEqual([]);
     expect(await runDurableObjectAlarm(directory())).toBe(false);
   });
 

@@ -118,7 +118,7 @@ describe("MCP transport, snapshots and connection lifetime", () => {
       await db.exec(MCP_CATALOG_SCHEMA + "CREATE TABLE IF NOT EXISTS events(at INTEGER,kind TEXT,detail TEXT)");
       const revision = makeCatalog(MCP_CONFIG.servers[0], sampleTools, MCP_CONFIG.limits).revision;
       await saveCatalog(db, revision);
-      const registry = createRegistry(), mcp = new ThreadMcp(db, env, registry, async () => true, { ...MCP_CONFIG, limits: { ...MCP_CONFIG.limits, idleMs: 1 } });
+      const registry = createRegistry(), mcp = new ThreadMcp(db, env, registry, async () => "message" as const, { ...MCP_CONFIG, limits: { ...MCP_CONFIG.limits, idleMs: 1 } });
       await mcp.restore();
       expect(registry.snapshot().tools().filter(t => t.tool.name.startsWith("mcp_notion_"))).toHaveLength(2);
       expect(remote.state.initializations).toBe(0);

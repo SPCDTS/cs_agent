@@ -16,6 +16,32 @@
 
 解除熔断把该行的 `until` 改成当前时间而不删除，它仍是计数窗口的起点，否则熔断前的 60 条会让下一条立刻再次熔断。
 
+# Workers P2：定时任务、外部事件与维护
+
+## 定时任务（P2a）
+
+- owner 在私聊或群里让机器人用 `schedule` 工具建任务，时间按北京时间解析（一次性 `at` 或 RRULE）。`ScheduleDO` 用单一 alarm 触发，把一条 `kind=schedule` 输入投给对应会话的 ThreadDO。
+- 定时回合归 chat 工具档：排在当前回合之后（不插话）、不进消息库、不做记忆抽取；回合内只能用 `schedule_control` 控制自己这条任务，不能再建任务。回合结束按 `outbox.input_id` 统计发送条数，回写 sent / silent / failed。
+- 连续 3 次失败自动暂停并私聊告警；上一次还在执行时本次记为 overlap 跳过。
+- 管理端点：`GET /admin/schedules`、`POST /admin/schedules/:id/pause|resume|delete|run-now`。`/healthz` 的 `schedule` 给出活动数、暂停数与下一次触发时间。
+- 不需要额外的 var 或 secret，owner 仍只来自 `QQ_OWNER`。
+
+## 外部事件与 Gmail（P2b）
+
+- `EventsDO`（绑定 `EVENTS`）拉取外部来源，目前只有 Gmail。触发有两路：Pub/Sub 推送到 `POST /gmail/pubsub`（校验 OIDC 令牌的服务账号与 audience，不用 `ADMIN_TOKEN`），以及 Cron `*/5 * * * *` 轮询兜底（来源默认间隔 120 秒）。
+- 新邮件先按标签与发件人过滤，再按合并窗口、每小时预算（默认 10）和安静时段节流，最后以 `kind=event` 输入投给 owner 线程。事件回合用 event 工具档，只读：`send_message` 只发给 owner，另有 `qq_context`、`mem_search`、`gmail_search`、`gmail_read` 与 `mcp.json` 里 `eventAllow` 列出的 MCP 工具；不写记忆、不进消息库、不做抽取。回合结束回报 `finishRun`。
+- 主人私聊回合可以用 `gmail_search`、`gmail_read`、`gmail_send`。发信只允许主人亲自发消息的回合，定时与事件回合都不行。
+- vars：`GMAIL_PUBSUB_SERVICE_ACCOUNT`（推送订阅用的服务账号邮箱）、`GMAIL_PUBSUB_TOPIC`（`projects/<项目>/topics/<名称>`）。两项都为空时只靠轮询。secrets：`GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET`、`GMAIL_REFRESH_TOKEN`，由 `scripts/put-secrets.sh` 从 `secrets/gmail/client.json` 与 `token.json` 读取，缺任一项时跳过这三项。
+- 管理端点：`GET /admin/event-sources`、`POST /admin/event-sources/:source/pause|resume`、`PUT /admin/event-sources/:source/settings`（整份来源设置，严格校验）。`/admin/events` 仍是线程审计事件。`/healthz` 的 `events` 给出各来源状态与积压数。
+- 用户侧要做的事：在 Google Cloud 建 Pub/Sub topic，给 `gmail-api-push@system.gserviceaccount.com` 授予该 topic 的 Publisher 角色；建推送订阅，端点为 `https://agent.spcdts.dev/gmail/pubsub`，开启身份验证并指定一个服务账号，audience 留空（默认即端点 URL，Worker 按它校验）；把 topic 与服务账号邮箱填进 `wrangler.jsonc` 的两个 var；然后重跑 `bash workers/scripts/put-secrets.sh` 上传 Gmail secrets，再部署。
+
+## 维护任务（P2c）
+
+- Cron `30 19 * * *`（UTC，即北京时间 03:30）对 Bridge 见过的每个线程依次调用 `ThreadDO.maintain`，跑三项：aging（生成日、周聊天摘要并清理过期原文）、consolidate（记忆夜间整理）、retention（审计事件、入站与发件记录、抽取队列的保留期清理）。单项失败只记日志，不影响其他线程。
+- `index.ts` 的 `scheduled()` 用 `CRONS` 表按 cron 字符串分派，事件轮询与维护各占一项；`wrangler*.jsonc` 的 `triggers.crons` 两项都要有。
+- vars（可选，单位为天，0 表示不清理）：`HISTORY_RAW_DAYS`（默认 30）、`HISTORY_RAW_HARD_MAX_DAYS`（90）、`HISTORY_SUMMARY_DAYS`（365）、`EVENTS_RETENTION_DAYS`（30）。
+- 没有单独的管理端点。`/healthz` 与 `/admin/overview` 中线程 stats 的 `maintenance` 字段给出上次 aging、consolidate 的时间和摘要条数。
+
 # Workers P1c
 
 P1c 在 owner 私聊增加外部 MCP 与 codemode，初始服务为 Notion 托管 MCP。配置在 [mcp.json](mcp.json) 中随构建打包，只有非秘密的服务地址、账号引用版本、CIMD URL 和精确工具白名单。仅修改配置文件不会热更新，需重新构建部署。现有 QQ、记忆与模型路径继续保留。

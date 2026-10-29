@@ -1,14 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
-import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type Registry, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
-import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target } from "./policy";
+import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
 import { effectiveSettings, type SettingsSnapshot } from "./settings";
 import { MESSAGE_SCHEMA, recordMessage, recall } from "./context";
-import { PI_SAFETY_RULE, SEND_RULE, turnIdentity } from "./prompt";
+import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, turnIdentity } from "./prompt";
 import { openModels } from "./models";
 import { MEMORY_SCHEMA } from "./memory/schema";
 import { MemoryStore, MemoryStoreError, type Profile } from "./memory/store";
@@ -21,19 +21,26 @@ import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS, type ExtractCo
 import { maintenanceConfig, maintenanceStatus, runMaintenanceJob, type MaintenanceJob, type MaintenanceReport } from "./maintenance";
 
 import { MCP_CATALOG_SCHEMA } from "./mcp/catalog";
+import { MCP_CONFIG } from "./mcp/config";
 import { ThreadMcp } from "./mcp";
 import { createScheduleExtension, type ScheduleAccess } from "./schedule/tools";
 import { parseScheduleInputKey } from "./schedule/run";
 import type { ScheduleConversation } from "./schedule/types";
+import { createGmailTools } from "./gmail/tools";
+import type { EventRunStatus } from "./events/model";
 
 const context = BACKGROUND_CONTEXT;
 type InboundRow = {
   message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number;
   status: "queued" | "done" | "failed"; chat_kind: "private" | "group"; chat_id: string; nickname: string;
-  scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null;
-  kind: NonNullable<InboundInput["kind"]>;
+  scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null; kind: TurnKind;
 };
-type Runtime = { harness: Harness; root: Conversation; selection: { provider: string; id: string }; mcp?: ThreadMcp };
+// 模型可见工具按会话配置生效，只能在会话空闲时切换；两种档位的输入永远不会进入同一个 run。定时输入归 chat 档。
+type ToolProfile = "chat" | "event";
+const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read",
+  ...(MCP_CONFIG.enabled && MCP_CONFIG.servers.some(server => server.enabled && server.tools.eventAllow.length) ? ["codemode"] : [])]);
+const profileOf = (row: InboundRow): ToolProfile => row.kind === "event" ? "event" : "chat";
+type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: { provider: string; id: string }; profile: ToolProfile; mcp?: ThreadMcp };
 const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind: "group", groupId: row.chat_id } : { kind: "private", userId: row.chat_id };
 export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
 export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
@@ -48,6 +55,8 @@ export class ThreadDO extends DurableObject<Env> {
   private runtime?: Promise<Runtime>;
   private admissions: Promise<void> = Promise.resolve();
   private settingsCache?: { at: number; load: Promise<SettingsSnapshot> };
+  private readonly waiters = new Map<string, (submission: Submission | undefined) => void>();
+  private idleWait?: Promise<void>;
 
   private initialize(): Promise<void> {
     return this.initialized ??= this.database.transaction(async tx => {
@@ -82,8 +91,9 @@ export class ThreadDO extends DurableObject<Env> {
   async ingest(input: InboundInput): Promise<{ repliedToSelf: boolean }> {
     await this.initialize();
     const ns = input.target.kind === "private" && ownerIds(this.env).includes(input.userId) ? "owner" : scopeOf(input.target);
+    if (input.kind === "event" && ns !== "owner") throw new Error("event input must bind the owner thread");
     await this.bindNamespace(ns);
-    // 定时等非聊天输入不进消息库，qq_context 与记忆抽取只看到真实聊天。
+    // 定时与事件等非聊天输入不进消息库，qq_context 与记忆抽取只看到真实聊天。
     if ((input.kind ?? "message") === "message") await this.database.transaction(tx => recordMessage(tx, input));
     const replied = input.replyToId === null ? undefined
       : await this.database.get("SELECT 1 FROM messages WHERE scope = ? AND message_id = ? AND is_self = 1", scopeOf(input.target), input.replyToId);
@@ -131,13 +141,17 @@ export class ThreadDO extends DurableObject<Env> {
         section("memory", () => renderMemorySection(memory), { tag: false }),
         section("turn-identity", async (api, callContext) => {
           const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
+          if (input?.kind === "event") return EVENT_TURN_IDENTITY;
           return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, ownerIds(this.env).includes(input.user_id)) : undefined;
         }, { tag: false }),
       ],
       tools: [...createMemoryTools(memory, async (api, callContext) => {
         const input = await this.currentInput(harness, api, api.conversationId, callContext);
         return input ? this.memoryBinding(input, memory.ns) : undefined;
-      }), defineTool({
+      }), ...(memory.ns === "owner" ? createGmailTools(async (api, callContext) => {
+        const input = await this.currentInput(harness, api, api.conversationId, callContext);
+        return input ? this.ownerTurnKind(input) : undefined;
+      }, () => this.env.EVENTS.getByName("main")) : []), defineTool({
         name: "send_message", description: "向本回合所在 QQ 会话发送纯文本；群回复自动 @ 本轮发送者。",
         parameters: Type.Object({ text: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
         // 发 QQ 是外部副作用，中断后禁止自动重放，避免重复发送。
@@ -184,18 +198,19 @@ export class ThreadDO extends DurableObject<Env> {
     }
     const mcp = memory.ns === "owner" ? new ThreadMcp(this.database, this.env, registry, async (api, callContext) => {
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
-      return !!input && this.memoryBinding(input, memory.ns)?.owner === true && input.chat_kind === "private";
+      return input ? this.ownerTurnKind(input) : undefined;
     }) : undefined;
     await mcp?.restore();
     const harness = await Harness.open(storage, { models, registry }, context);
     const root = await harness.root(context, { agent: { model: { provider: selection.provider, modelId: selection.id } } });
     await root.configure({ model: { provider: selection.provider, modelId: selection.id } }, context);
-    const runtime = { harness, root, selection, mcp };
-    // requestId 幂等地补齐入库后、Pi 接收前中断的窗口，按原到达顺序恢复。
-    for (const row of await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' ORDER BY rowid")) {
-      const submission = await this.admit(runtime, row);
-      this.ctx.waitUntil(this.settle(row.message_id, submission));
+    const runtime: Runtime = { harness, root, registry, selection, profile: "chat", mcp };
+    await this.applyProfile(runtime, await this.ctx.storage.get<ToolProfile>("tool_profile") ?? "chat");
+    // 已被 Pi 接收过的输入按 requestId 幂等重交；尚未接收的由 pump 按工具档位继续接纳。
+    for (const row of await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' AND when_busy IS NOT NULL ORDER BY rowid")) {
+      this.track(row.message_id, await this.admit(runtime, row));
     }
+    this.ctx.waitUntil(this.pump());
     // 快照先装配，远端离线不阻塞 Harness 恢复；首次执行仍强制核对完整目录。
     if (mcp) this.ctx.waitUntil(mcp.refreshAll().then(() => {}));
     harness.resume();
@@ -207,13 +222,78 @@ export class ThreadDO extends DurableObject<Env> {
     let whenBusy = row.when_busy;
     if (!whenBusy) {
       // 先查排队，再读当前回合；已有他人排队时，后来的同人消息也不能越过队首。
+      // 定时与事件输入不插话；它们的回合里来的消息也排到其后，不能并入这些运行。
       const inbox = await harness.snapshot(InboxDoc, root.id, context);
       const active = await this.currentInput(harness, harness, root.id, context);
-      // 定时输入不插话；它的回合里来的消息也排到其后，不能并入定时运行。
       whenBusy = row.kind === "message" && active?.kind === "message" && active.user_id === row.user_id && !inbox?.items.some(item => item.mode === "followUp") ? "steer" : "followUp";
       await this.database.run("UPDATE inbound SET when_busy = ? WHERE message_id = ?", whenBusy, row.message_id);
     }
     return root.submit({ type: "input", content: row.text, requestId: row.message_id, whenBusy }, context);
+  }
+
+  private async applyProfile(runtime: Runtime, profile: ToolProfile): Promise<void> {
+    const tools = new Map(runtime.registry.snapshot().tools().map(({ tool }) => [tool.name, tool]));
+    await runtime.root.configure({ modelTools: profile === "event" ? [...tools.values()].filter(tool => EVENT_MODEL_TOOLS.has(tool.name)) : null }, context);
+    await this.ctx.storage.put("tool_profile", profile);
+    runtime.profile = profile;
+  }
+
+  private async idle({ harness, root }: Runtime): Promise<boolean> {
+    const [live, inbox] = await Promise.all([harness.snapshot(LiveDoc, root.id, context), harness.snapshot(InboxDoc, root.id, context)]);
+    return !live?.run && !inbox?.items.length;
+  }
+
+  private track(key: string, submission: Submission | undefined): void {
+    const waiter = this.waiters.get(key);
+    this.waiters.delete(key);
+    if (waiter) waiter(submission);
+    else if (submission) this.ctx.waitUntil(this.settle(key, submission).then(() => {}, () => {}));
+  }
+
+  private serial<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.admissions.then(work);
+    this.admissions = run.then(() => {}, () => {});
+    return run;
+  }
+
+  // 同档位的输入立即接纳（含插话）；换档的输入等会话空闲后再切换工具配置，因此先到的另一档输入可能晚于后到的同档输入。
+  private pump(afterIdle = false): Promise<void> {
+    return this.serial(async () => {
+      let runtime: Runtime;
+      try { runtime = await this.open(); }
+      catch {
+        for (const key of [...this.waiters.keys()]) {
+          await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ? AND status = 'queued'", key);
+          this.track(key, undefined);
+        }
+        return;
+      }
+      for (;;) {
+        const rows = await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' AND when_busy IS NULL ORDER BY rowid");
+        for (const row of rows.filter(row => profileOf(row) === runtime.profile)) {
+          let submission: Submission | undefined;
+          try { submission = await this.admit(runtime, row); }
+          catch { await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ?", row.message_id); }
+          this.track(row.message_id, submission);
+        }
+        const next = rows.find(row => profileOf(row) !== runtime.profile);
+        if (!next) return;
+        if (!await this.idle(runtime)) {
+          // 失败 run 保留的排队项要等下一条输入才放行；空闲等待只重试一次，避免空转。
+          if (!afterIdle && !this.idleWait) {
+            this.idleWait = runtime.harness.waitForIdle(context).then(() => { this.idleWait = undefined; return this.pump(true); });
+            this.ctx.waitUntil(this.idleWait);
+          }
+          return;
+        }
+        await this.applyProfile(runtime, profileOf(next));
+      }
+    }).catch(() => {});
+  }
+
+  private async eventStatus(row: InboundRow): Promise<EventRunStatus> {
+    if (row.status !== "done") return row.status === "failed" ? "failed" : "queued";
+    return await this.database.get("SELECT 1 FROM outbox WHERE input_id = ? LIMIT 1", row.message_id) ? "sent" : "silent";
   }
 
   private async settle(messageId: string, submission: Submission): Promise<{ status: "done" | "failed" }> {
@@ -232,6 +312,8 @@ export class ThreadDO extends DurableObject<Env> {
         if (status !== "done" || !row?.turn_id) return row;
         const unfinished = await tx.get("SELECT 1 FROM inbound WHERE turn_id = ? AND status != 'done' LIMIT 1", row.turn_id);
         if (unfinished) return row;
+        // 定时与事件回合的输出可能转述外部资料，没有聊天输入的回合不抽取，避免这些资料经抽取变成记忆。
+        if (!await tx.get("SELECT 1 FROM inbound WHERE turn_id = ? AND kind = 'message' LIMIT 1", row.turn_id)) return row;
         await extractor.enqueue(row.turn_id, tx);
         if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1") && await this.ctx.storage.getAlarm() === null) {
           await this.ctx.storage.setAlarm(Date.now() + EXTRACT_ALARM_DELAY_MS);
@@ -239,41 +321,70 @@ export class ThreadDO extends DurableObject<Env> {
         return row;
       });
       if (row?.kind === "schedule") await this.reportScheduleRun(row, status, answer);
+      if (row?.kind === "event") {
+        const outcome = await this.eventStatus(row);
+        this.ctx.waitUntil(this.env.EVENTS.getByName("main").finishRun(messageId, outcome).catch(() => {
+          console.error({ event: "event_finish_report_failed", status: outcome });
+        }));
+      }
+      this.ctx.waitUntil(this.pump());
     }
     return { status };
   }
 
-  async submit(input: InboundInput): Promise<{ deduped: true } | { status: "done" | "failed" | "queued" }> {
-    // 只串行接纳，不串行等待回合，否则同一发送者的插话也会被堵到回合结束。
-    const admission = this.admissions.then(async () => {
+  private enqueue(input: InboundInput, wait: boolean): Promise<{ key: string; admitted?: Promise<Submission | undefined> } | undefined> {
+    return this.serial(async () => {
       await this.ingest(input);
-      const key = inboundKey(input);
-      const legacy = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND self_id = '' AND user_id = ?", input.messageId, input.userId);
-      if (legacy) return;
+      const kind: TurnKind = input.kind ?? "message";
+      // 事件的入站键由事件服务按来源与外部 id 生成，旧版无 self_id 的兼容判断不适用。
+      const key = kind === "event" ? input.messageId : inboundKey(input);
+      if (kind !== "event" && await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND self_id = '' AND user_id = ?", input.messageId, input.userId)) return;
       const inserted = await this.database.get<InboundRow>(`INSERT OR IGNORE INTO inbound
         (message_id, platform_message_id, user_id, self_id, text, received_at, status, chat_kind, chat_id, nickname, scope_name, kind)
         VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?) RETURNING *`, key, input.messageId, input.userId, input.selfId, input.text, input.time,
-        input.target.kind, input.target.kind === "group" ? input.target.groupId : input.target.userId, input.nickname, input.scopeName ?? "", input.kind ?? "message");
+        input.target.kind, input.target.kind === "group" ? input.target.groupId : input.target.userId, input.nickname, input.scopeName ?? "", kind);
       if (!inserted) return;
-      try {
-        const runtime = await this.open();
-        const row = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ?", key);
-        return { key, submission: await this.admit(runtime, row ?? inserted) };
-      } catch {
-        await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ?", key);
-        return { failed: true };
-      }
+      // 等待者必须在本串行段内登记，之后的 pump 才能把接纳结果交回调用方。
+      return { key, ...(wait ? { admitted: new Promise<Submission | undefined>(resolve => this.waiters.set(key, resolve)) } : {}) };
     });
-    this.admissions = admission.then(() => {}, () => {});
-    const admitted = await admission;
-    if (!admitted) return { deduped: true };
-    if ("failed" in admitted) return { status: "failed" };
+  }
+
+  async submit(input: InboundInput): Promise<{ deduped: true } | { status: "done" | "failed" | "queued" }> {
+    // 只串行接纳，不串行等待回合，否则同一发送者的插话也会被堵到回合结束。
+    const queued = await this.enqueue(input, true);
+    if (!queued?.admitted) return { deduped: true };
+    void this.pump();
+    const submission = await queued.admitted;
+    if (!submission) return { status: "failed" };
     // ScheduleDO 只等接纳不等回合：结果由 settle 回写，alarm 不被长回合占住。
     if (input.kind === "schedule") {
-      this.ctx.waitUntil(this.settle(admitted.key, admitted.submission));
+      this.ctx.waitUntil(this.settle(queued.key, submission));
       return { status: "queued" };
     }
-    return this.settle(admitted.key, admitted.submission);
+    return this.settle(queued.key, submission);
+  }
+
+  /** 事件服务的投递入口：入站行落库即返回，回合结果由 settle 回报事件服务。 */
+  async deliverEvent(input: InboundInput): Promise<"accepted" | "duplicate"> {
+    if (input.kind !== "event") throw new Error("deliverEvent requires an event input");
+    const queued = await this.enqueue(input, false);
+    if (!queued) return "duplicate";
+    this.ctx.waitUntil(this.pump());
+    return "accepted";
+  }
+
+  /** 事件服务对账：未知返回 undefined；仍在排队时顺带唤醒接纳，覆盖冷启动后无人触发的情况。 */
+  async eventOutcome(key: string): Promise<EventRunStatus | undefined> {
+    await this.initialize();
+    const row = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND kind = 'event'", key);
+    if (!row) return;
+    if (row.status === "queued") this.ctx.waitUntil(this.pump());
+    return this.eventStatus(row);
+  }
+
+  private ownerTurnKind(input: InboundRow): TurnKind | undefined {
+    if (!input.turn_id || input.chat_kind !== "private" || !ownerIds(this.env).includes(input.user_id)) return;
+    return input.kind;
   }
 
   private scheduleAccess(input: InboundRow | undefined): ScheduleAccess {
@@ -307,11 +418,11 @@ export class ThreadDO extends DurableObject<Env> {
     }
   }
 
-  /** ScheduleDO 补查定时输入的结果；仍在排队时顺带唤醒运行时，让驱逐前的输入恢复执行。 */
+  /** ScheduleDO 补查定时输入的结果；仍在排队时顺带唤醒接纳，让驱逐前的输入恢复执行。 */
   async scheduleRunOutcome(key: string): Promise<{ status: "queued" | "done" | "failed" | "missing"; sent: number }> {
     await this.initialize();
     const row = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND kind = 'schedule'", key);
-    if (row?.status === "queued") this.ctx.waitUntil(this.open().then(() => {}, () => {}));
+    if (row?.status === "queued") this.ctx.waitUntil(this.pump());
     const sent = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE input_id = ?", key))?.n ?? 0;
     return { status: row?.status ?? "missing", sent };
   }
@@ -353,7 +464,8 @@ export class ThreadDO extends DurableObject<Env> {
     const owner = ownerIds(this.env).includes(input.user_id);
     const expected = owner && input.chat_kind === "private" ? "owner" : scopeOf(targetOf(input));
     if (expected !== ns || input.user_id === input.self_id) return;
-    return { ns, owner, userId: input.user_id, turnId: input.turn_id, scope: scopeOf(targetOf(input)), messageId: input.platform_message_id };
+    // 事件回合绑定 owner 只为读取范围；写记忆须经主人的一句话，因此不给写权限。
+    return { ns, owner: owner && input.kind !== "event", userId: input.user_id, turnId: input.turn_id, scope: scopeOf(targetOf(input)), messageId: input.platform_message_id };
   }
 
   // 抽取、摘要与整理都是无工具的单次补全，共用抽取模型配置。

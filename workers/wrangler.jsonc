@@ -8,8 +8,9 @@
   // CPU 限额只计活跃计算；回合里的 JSON 处理偶有峰值，放到上限 5 分钟
   "limits": { "cpu_ms": 300000 },
   "observability": { "enabled": true },
-  // UTC 19:30 = 北京 03:30：聊天摘要与清理、记忆整理、审计保留（src/maintenance）
-  "triggers": { "crons": ["30 19 * * *"] },
+  // */5：外部事件轮询兜底（Gmail 推送优先）；UTC 19:30 = 北京 03:30：聊天摘要与清理、记忆整理、审计保留（src/maintenance）。
+  // index.ts 的 scheduled 按 cron 字符串分派
+  "triggers": { "crons": ["*/5 * * * *", "30 19 * * *"] },
   // 自定义域名在 Cloudflare 托管的 zone 下；*.workers.dev 在国内不稳定，NapCat 反向 WS 只连这个
   "routes": [{ "pattern": "agent.spcdts.dev", "custom_domain": true }],
   "durable_objects": {
@@ -18,7 +19,8 @@
       { "name": "REGISTRY", "class_name": "RegistryDO" },
       { "name": "BRIDGE", "class_name": "BridgeDO" },
       { "name": "MAGPIE", "class_name": "MagpieContainer" },
-      { "name": "SCHEDULE", "class_name": "ScheduleDO" }
+      { "name": "SCHEDULE", "class_name": "ScheduleDO" },
+      { "name": "EVENTS", "class_name": "EventsDO" }
     ]
   },
   "migrations": [
@@ -26,7 +28,8 @@
     { "tag": "v2", "new_sqlite_classes": ["BridgeDO"] },
     { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] },
     { "tag": "v4", "new_sqlite_classes": ["RegistryDO"] },
-    { "tag": "v5", "new_sqlite_classes": ["ScheduleDO"] }
+    { "tag": "v5", "new_sqlite_classes": ["ScheduleDO"] },
+    { "tag": "v6", "new_sqlite_classes": ["EventsDO"] }
   ],
   // magpie 模型网关跑在 Containers 上（magpie/Dockerfile）。本账户只允许 durable_object 调度策略：
   // 镜像以命名方式交给 DO（ctx.container.images.magpie），实例规格在 start() 里给；本地 dev 与测试不起容器
@@ -44,6 +47,8 @@
     "MEMORY_EXTRACT_NAMESPACES": "owner",
     "MODEL_PROVIDER": "magpie",
     "MODEL_ID": "deepseek/deepseek-flash",
-    "MAGPIE_URL": "container"
+    "MAGPIE_URL": "container",
+    "GMAIL_PUBSUB_SERVICE_ACCOUNT": "",
+    "GMAIL_PUBSUB_TOPIC": ""
   }
 }

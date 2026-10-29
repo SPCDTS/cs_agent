@@ -10,6 +10,7 @@ export type InboundInput = {
   kind?: "message" | "schedule" | "event";
   meta?: { fireKey: string };
 };
+export type TurnKind = NonNullable<InboundInput["kind"]>;
 export type PolicyConfig = { owners: string[]; allowUsers: string[]; allowGroups: string[]; groupTrigger: GroupTrigger };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

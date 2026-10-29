@@ -14,7 +14,8 @@
       "scope": "default"
     },
     "access": { "kind": "owner-private" },
-    "tools": { "allow": ["notion-search", "notion-fetch", "notion-get-self", "notion-get-users", "notion-get-comments", "notion-query-data-sources", "notion-list-recent-pages", "notion-create-pages", "notion-update-page", "notion-create-comment"] },
+    "tools": { "allow": ["notion-search", "notion-fetch", "notion-get-self", "notion-get-users", "notion-get-comments", "notion-query-data-sources", "notion-list-recent-pages", "notion-create-pages", "notion-update-page", "notion-create-comment"],
+      "eventAllow": ["notion-search", "notion-fetch"] },
     "replay": "unsafe"
   }]
 }

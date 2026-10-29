@@ -22,6 +22,7 @@ const CSP = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; c
 const THREAD_KEY = `owner|group:${QQ_ID}|private:${QQ_ID}`;
 const MEMORY_NS = new RegExp(`^(owner|group:${QQ_ID})$`);
 const SERVER = "[A-Za-z][A-Za-z0-9_-]{0,63}";
+const SOURCE = "[A-Za-z][A-Za-z0-9_:-]{0,63}";
 const strict = { additionalProperties: false } as const;
 
 class HttpError extends Error {
@@ -95,6 +96,21 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       // ScheduleDO 的错误是自己的固定分类文本（如 overlap、paused），不含用户正文。
       throw new HttpError(400, error instanceof Error ? error.message.slice(0, 200) : "failed");
     }
+  } },
+
+  // 外部事件来源；/admin/events 已是线程审计事件，这里另起前缀。
+  { method: "GET", path: "/admin/event-sources", handle: async ({ env }) => json(await env.EVENTS.getByName("main").adminStatus()) },
+  { method: "POST", path: new RegExp(`^/admin/event-sources/(?<source>${SOURCE})/(?<action>pause|resume)$`), handle: async ({ env, params }) => {
+    if (!await env.EVENTS.getByName("main").setPaused(params.source!, params.action === "pause")) throw new HttpError(404, "not_found");
+    return json({ ok: true });
+  } },
+  { method: "PUT", path: new RegExp(`^/admin/event-sources/(?<source>${SOURCE})/settings$`), handle: async ({ env, request, params }) => {
+    let value: unknown;
+    try { value = await request.json(); } catch { throw new HttpError(400, "invalid_json"); }
+    const result = await env.EVENTS.getByName("main").putSettings(params.source!, value);
+    if (result === "unknown_source") throw new HttpError(404, "not_found");
+    if (result === "invalid") throw new HttpError(400, "invalid_settings");
+    return json({ ok: true });
   } },
 
   { method: "GET", path: "/admin/settings", handle: async ({ env }) => json(await env.REGISTRY.getByName("main").settings()) },

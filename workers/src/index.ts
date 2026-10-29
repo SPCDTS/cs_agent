@@ -4,16 +4,34 @@ import { publicOrigin } from "./mcp/config";
 import { oauthErrorCode } from "./mcp/oauth-fetch";
 import type { Env } from "./env";
 import { MAINTENANCE_CRON, runMaintenance } from "./maintenance";
+import { readPush, verifyPushToken } from "./gmail/pubsub";
 
 export { RegistryDO } from "./registry";
 export { BridgeDO } from "./bridge";
 export { ThreadDO } from "./thread";
 export { MagpieContainer } from "./magpie-container";
 export { ScheduleDO } from "./schedule/do";
+export { EventsDO } from "./events/do";
+
+// 按 wrangler.jsonc 的 crons 字符串分派，各后台任务各占一行。
+const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> = {
+  "*/5 * * * *": env => env.EVENTS.getByName("main").tick(),
+  [MAINTENANCE_CRON]: runMaintenance,
+};
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url), path = url.pathname;
+    if (request.method === "POST" && path === "/gmail/pubsub") {
+      // 未配置服务账号即视为推送未启用；Pub/Sub 要求快速确认，真正的拉取放到 waitUntil。
+      const account = env.GMAIL_PUBSUB_SERVICE_ACCOUNT?.trim();
+      if (!account || !await verifyPushToken(request.headers.get("Authorization"), publicOrigin(env.PUBLIC_ORIGIN) + "/gmail/pubsub", account)) {
+        return new Response("forbidden", { status: 403 });
+      }
+      if (!await readPush(request)) return new Response("invalid push", { status: 400 });
+      ctx?.waitUntil(env.EVENTS.getByName("main").notify("gmail"));
+      return new Response(null, { status: 204 });
+    }
     if (request.method === "GET" && path === "/oauth/client-metadata.json") {
       const origin = publicOrigin(env.PUBLIC_ORIGIN);
       return Response.json({ client_id: origin + "/oauth/client-metadata.json", client_name: "cs-agent", client_uri: origin,
@@ -38,19 +56,18 @@ export default {
     if (path === "/admin" || path.startsWith("/admin/")) return handleAdmin(request, env);
     if (request.method === "GET" && path === "/healthz") {
       const owner = env.THREAD.getByName("owner");
-      const [bridge, model, thread, accounts, counts, schedule] = await Promise.all([
+      const [bridge, model, thread, accounts, counts, schedule, events] = await Promise.all([
         env.BRIDGE.getByName("napcat").status(), owner.modelStatus(), owner.stats(), env.REGISTRY.getByName("main").status(), owner.mcpToolCounts(),
-        env.SCHEDULE.getByName("main").status(),
+        env.SCHEDULE.getByName("main").status(), env.EVENTS.getByName("main").health(),
       ]);
       const ok = !("unavailable" in model);
       const { threads, sendRules, ...connection } = bridge;
-      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules, mcp: accounts.map(account => ({ ...account, tools: counts[account.server] ?? 0 })), schedule }, { status: ok ? 200 : 503 });
+      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules, mcp: accounts.map(account => ({ ...account, tools: counts[account.server] ?? 0 })), schedule, events }, { status: ok ? 200 : 503 });
     }
     return new Response("not found", { status: 404 });
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    switch (controller.cron) {
-      case MAINTENANCE_CRON: ctx.waitUntil(runMaintenance(env, controller.scheduledTime)); break;
-    }
+    const job = CRONS[controller.cron];
+    if (job) ctx.waitUntil(job(env, controller.scheduledTime));
   },
 } satisfies ExportedHandler<Env>;
