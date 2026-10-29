@@ -12,6 +12,7 @@
   "durable_objects": {
     "bindings": [
       { "name": "THREAD", "class_name": "ThreadDO" },
+      { "name": "REGISTRY", "class_name": "RegistryDO" },
       { "name": "BRIDGE", "class_name": "BridgeDO" },
       { "name": "MAGPIE", "class_name": "MagpieContainer" }
     ]
@@ -19,11 +20,13 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ThreadDO"] },
     { "tag": "v2", "new_sqlite_classes": ["BridgeDO"] },
-    { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] }
+    { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] },
+    { "tag": "v4", "new_sqlite_classes": ["RegistryDO"] }
   ],
   // QQ_OWNER、NAPCAT_TOKEN、R2_*、MAGPIE_SYNC_PASSPHRASE 都是 secrets（wrangler secret put），不写在这里
   "vars": {
     "CS_AGENT_COMMIT": "dev",
+    "PUBLIC_ORIGIN": "https://agent.spcdts.dev",
     "QQ_GROUP_MENTIONS": true,
     "MEMORY_EXTRACT_MODEL": "",
     "MEMORY_EXTRACT_NAMESPACES": "owner",

@@ -1,5 +1,7 @@
 // 配置可被部署覆盖，不能沿用生成文件中的字面量类型；绑定仍由 Wrangler 生成。
-export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" | "MAGPIE_URL" | "QQ_GROUP_MENTIONS" | "MEMORY_EXTRACT_MODEL" | "MEMORY_EXTRACT_NAMESPACES"> {
+export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" | "MAGPIE_URL" | "QQ_GROUP_MENTIONS" | "MEMORY_EXTRACT_MODEL" | "MEMORY_EXTRACT_NAMESPACES" | "PUBLIC_ORIGIN"> {
+  PUBLIC_ORIGIN: string;
+  OAUTH_STORE_KEY?: string;
   MODEL_PROVIDER: string;
   MODEL_ID: string;
   MAGPIE_URL: string;

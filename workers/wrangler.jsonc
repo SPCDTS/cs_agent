@@ -13,6 +13,7 @@
   "durable_objects": {
     "bindings": [
       { "name": "THREAD", "class_name": "ThreadDO" },
+      { "name": "REGISTRY", "class_name": "RegistryDO" },
       { "name": "BRIDGE", "class_name": "BridgeDO" },
       { "name": "MAGPIE", "class_name": "MagpieContainer" }
     ]
@@ -20,7 +21,8 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ThreadDO"] },
     { "tag": "v2", "new_sqlite_classes": ["BridgeDO"] },
-    { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] }
+    { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] },
+    { "tag": "v4", "new_sqlite_classes": ["RegistryDO"] }
   ],
   // magpie 模型网关跑在 Containers 上（magpie/Dockerfile）。本账户只允许 durable_object 调度策略：
   // 镜像以命名方式交给 DO（ctx.container.images.magpie），实例规格在 start() 里给；本地 dev 与测试不起容器
@@ -32,6 +34,7 @@
   // 生产：模型经 magpie 容器（MAGPIE_URL=container）。测试用 wrangler.test.jsonc 覆盖为 faux
   "vars": {
     "CS_AGENT_COMMIT": "dev",
+    "PUBLIC_ORIGIN": "https://agent.spcdts.dev",
     "QQ_GROUP_MENTIONS": true,
     "MEMORY_EXTRACT_MODEL": "",
     "MEMORY_EXTRACT_NAMESPACES": "owner",

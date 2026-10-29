@@ -1,3 +1,94 @@
+# Workers P1c
+
+P1c 在 owner 私聊增加外部 MCP 与 codemode，初始服务为 Notion 托管 MCP。配置在 [mcp.json](mcp.json) 中随构建打包，只有非秘密的服务地址、账号引用版本、CIMD URL 和精确工具白名单。仅修改配置文件不会热更新，需重新构建部署。现有 QQ、记忆与模型路径继续保留。
+
+## 配置与登录
+
+| 项目 | 行为 |
+| --- | --- |
+| PUBLIC_ORIGIN | var，生产为 https://agent.spcdts.dev；须为无路径、query、hash 的 HTTPS origin |
+| ADMIN_TOKEN | secret，保护记忆导入及 POST /admin/mcp/oauth/login-link，只接受 Bearer |
+| OAUTH_STORE_KEY | secret，32 字节 hex；缺失或格式错误时 OAuth 状态为 unconfigured，不阻塞普通回合 |
+| credential.kind | none、external-account、oauth；external-account 的 transport.secretHeaders 只引用 Worker secret 名 |
+| oauth.registration | 仅 cimd，省略时也按 CIMD 执行；不回退 DCR |
+| access.kind | 仅 owner-private；不接受群、定时、唤醒或子 agent 权限开关 |
+| replay | MCP 业务与 mcp_refresh_tools 均为 unsafe；codemode 的脚本日志恢复由 pi-durable 管理 |
+
+GET /oauth/client-metadata.json 返回本 Worker 的客户端元数据，Content-Type 为 application/json，Cache-Control 为 public, max-age=300。client_id 是 PUBLIC_ORIGIN + /oauth/client-metadata.json，redirect_uris 唯一项是 PUBLIC_ORIGIN + /mcp/oauth/callback。Notion 配置中的 clientMetadataUrl 已使用生产 Worker 域名，不依赖 Vercel。更换域名时同时修改 PUBLIC_ORIGIN 与 mcp.json 中的 URL。
+
+管理员以 Bearer 调用 POST /admin/mcp/oauth/login-link，JSON body 为 {"server":"notion"}，得到 {"url":"…"}。打开该一次性链接后，GET /mcp/oauth/start?nonce=… 返回 302 到授权服务器。授权成功回调 GET /mcp/oauth/callback?code=…&state=…，换码后返回纯文本“已登录 notion”。错误仅返回固定分类；登录相关响应均 no-store、no-referrer。链接是登录能力本身，应由管理员私下交给 owner；聊天工具不生成链接。
+
+每个服务只保留一条待登录记录；重新发链接会使旧链接失效。nonce 在 start 联网前消费，state 在换码前消费，成功或失败均不能重放。十分钟有效期从签发链接起计算。PKCE 使用随机 32 字节 verifier 与 S256 challenge。发现必须宣告 CIMD 和 S256，client_id 直接使用配置中的元数据 URL。
+
+RegistryDO 绑定 REGISTRY，以 main 为单例名，v4 迁移新建 SQLite DO。三张表为 mcp_oauth_tokens、mcp_oauth_logins、mcp_oauth_client；失败分类另保存在该 DO 的 KV。access/refresh token 以独立随机 IV 的 AES-GCM 密文保存，AAD 绑定 server/account/revision/字段；登录 verifier 连同本次发现结果与配置快照也加密。client 表只保存公开 CIMD 身份，不保存 client_secret。更换 revision 后不读取旧版本 token。
+
+accessToken 在到期前 60 秒按需刷新；并发刷新共享结果。刷新响应未给新 refresh token 时保留旧值。invalid_grant、invalid_client、unauthorized_client 删除当前版本 token 并标 error；网络失败、超时、5xx 保留 token。401 在账号锁内复核已用 token，同一 HTTP 请求最多换 token 重试一次，403 不重试。logout RPC 删除本地 token 与待登录状态，P1c 没有公开 logout 路由。
+
+scripts/put-secrets.sh 增加读取 secrets/oauth-store-key.env；缺文件时以 UTF-8 生成随机密钥并保存，然后随既有 secrets 经 stdin 上传。脚本只在显式运维执行时生成或上传，本次开发未执行。请保留原密钥，改值会使现有密文无法解密。
+
+## 工具、快照与审计
+
+每个 owner Thread DO 有独立 SDK Client 连接池，按服务串行调用；连接默认空闲十分钟后在下一次 MCP 请求时关闭，不占用记忆抽取的 alarm。初始化 10 秒，调用总预算 60 秒，默认每服务队列上限 16。目录完整分页后按 allow 精确过滤；重复名称/游标、分页或字节超限拒绝整个候选目录，schema 不支持只隔离单个工具。
+
+schema 移植严格 draft-07 子集：根 object、本地无环引用、definitions/$defs、数值 exclusiveMinimum/exclusiveMaximum；拒绝未知关键字、未知 format、外部/循环引用。只剥离 schema 节点的有界 $schema 注解。工具名称使用原 mcp-tool-v2 契约摘要与 SHA-256 前 12 位；描述变化及无关工具变化不会改名，业务属性和 const/default 数据仍参与身份。
+
+Thread 表 mcp_catalog 保存当前完整目录。启动先验证并注册快照，再通过 waitUntil 后台刷新；首次调用、重连、目录通知和五分钟 TTL 到期时重新发现并核对契约。刷新失败保留快照，但不发送依赖失效目录的新调用。每服务替换当前 extension，旧名称不可用于新的调用；变更后的工具在下一段 codemode 脚本中可见。
+
+MCP 业务工具和 mcp_refresh_tools 使用 callers: ["tools"]，不出现在模型工具定义中；只有 codemode 作为脚本入口。QQ 与记忆工具使用 callers: ["model"]。codemode 使用 createInlineCodemodeSandbox()，models: false，声明按服务前缀分组。每次脚本入口、控制调用及嵌套业务调用均按本回合入站身份复核 owner；排队和连接等待后再次检查。群内 owner、群成员与其他私聊根本不安装 MCP/codemode。
+
+文本结果拼接后限制在 8000 字符内并标出截断；图片、音频、二进制资源给出省略提示，不下载链接。声明 outputSchema 的 structuredContent 先校验再交给脚本，否则只传有界文本。业务请求发送后失败返回 outcome_unknown，不自动重发；远端可能已产生副作用，需先查询实际状态。
+
+events 表的 mcp_call 仅保存服务、工具名、耗时、结果分类、输入输出字节数；mcp_catalog 保存刷新结果、目录摘要、工具数和有界 schema 拒绝原因。不保存正文、凭据、code 或 verifier。正常 Pi 工具历史仍包含业务参数和有界结果。GET /healthz 增加 mcp 数组，含 server、enabled、credential、login 和 tools；tools 为最后持久目录的数量，OAuth 状态不会改变原有模型健康码。
+
+## P1c 文件与验证
+
+| 文件 | 职责 |
+| --- | --- |
+| mcp.json、src/mcp/config.ts | 静态 Notion 配置、TypeBox + Check 严格边界 |
+| src/registry.ts、src/mcp/crypto.ts、oauth.ts、oauth-fetch.ts | Registry OAuth 状态、AES-GCM、CIMD、PKCE、受限发现/换码/刷新 |
+| src/mcp/connection.ts、transport-http.ts | SDK Streamable HTTP、Bearer、分页、流限额、关闭 |
+| src/mcp/catalog.ts、schema.ts、names.ts、result.ts | SQLite 快照、严格 schema、稳定名称、结果转换 |
+| src/mcp/index.ts、src/thread.ts | 连接池、codemode、权限复核、工具装配与审计 |
+| src/index.ts、env.ts | 登录/元数据路由、健康字段与绑定类型 |
+| wrangler.jsonc、wrangler.test.jsonc、worker-configuration.d.ts、tsconfig.json | REGISTRY、v4、PUBLIC_ORIGIN、生成类型、JSON import |
+| scripts/put-secrets.sh、vitest.config.ts | 运维密钥脚本与仅用于测试的合成密钥绑定 |
+| test/mcp-*.test.ts、test/mcp-helpers.ts | workerd 集成、协议桩与边界测试 |
+
+| 功能 | 对应测试（test/ 下） |
+| --- | --- |
+| Notion 配置、未知字段、重复 id、owner-private、unsafe、stdio/HTTP/危险头拒绝 | mcp-config-schema.test.ts：bundles…、rejects unsupported or unsafe config、accepts static secret references… |
+| 严格 schema、本地引用、$defs、边界、注解、允许列表、单工具拒绝、名称稳定 | mcp-config-schema.test.ts：checks local refs…、rejects unsupported schema、filters allow lists… |
+| 文本拼接、8000 字、图片占位、远端错误、结构化输出校验 | mcp-config-schema.test.ts：joins text… |
+| 自托管 CIMD 文档、PUBLIC_ORIGIN 回调、缓存头 | mcp-oauth.test.ts：serves its own client metadata… |
+| 管理鉴权、缺密钥降级 | mcp-oauth.test.ts：requires an admin Bearer… |
+| 完整链接→start→callback→token、S256、单次消费、十分钟过期、密文与健康状态 | mcp-oauth.test.ts：runs login-link…、expires links and states… |
+| 刷新单飞、保留 refresh token、invalid_grant、暂态错误、DO 重建、logout | mcp-oauth.test.ts：single-flights refresh…、keeps tokens on temporary refresh failures… |
+| CIMD 必需、第三方端点零请求、AES-GCM 随机 IV/AAD/防篡改 | mcp-oauth.test.ts：refuses absent CIMD support…、uses randomized AES-GCM… |
+| OAuth HTTPS/来源/cookie/重定向/256 KiB/5 秒超时 | mcp-oauth.test.ts：bounded OAuth fetch 两项 |
+| 真实 Thread + faux 模型 + QuickJS + SDK、模型不可直调 MCP、快照及脱敏审计 | mcp-tools.test.ts：runs codemode through the real Thread… |
+| 本轮发送者变更复核、群内 owner/成员/其他私聊隔离、unsafe 不重发 | mcp-tools.test.ts：rechecks the current sender…、installs no MCP…、does not resend… |
+| Streamable HTTP 初始化、分页、静态 secrets、GET 405、DELETE、快照冷恢复、半截目录、空闲关闭 | mcp-tools.test.ts：uses SDK Streamable HTTP…、restores snapshots before network refresh… |
+| POST/GET/DELETE 的 401 单次上限、来源与重定向、JSON/SSE 原始流限额 | mcp-transport.test.ts 全部测试 |
+
+在 workers/ 执行：npx.cmd wrangler types、npx.cmd tsc -p tsconfig.json --noEmit、npx.cmd vitest run。类型生成成功，tsc 无错；全量 14 个测试文件、107 项测试通过（含原 58 项）。测试不需要真实外部服务或账号。额外使用 wrangler.test.jsonc 做 deploy --dry-run，QuickJS WASM 和 Worker 成功打包；未部署。
+
+## P1c 简化与 SDK/workerd 差异
+
+- P1c 仅支持 HTTPS、owner 私聊、CIMD；不移植 DCR、群审批、子 agent、定时/唤醒、资源工具或 Docker 的图片解码。配置拒绝这些未实现字段与对应 limits；只保留本期实际使用的限额。文本上限固定 8000 字符。
+- 目录只保留每服务当前快照，不实现 Docker 的多版本目录回收账本。所有页成功才原子替换，Pi 自身负责既有调用检查点；没有增加跨业务幂等或 exactly-once 保证。重连没有后台退避计时器，仅下次调用重试连接准备。
+- 登录入口采用管理员签发的一次性能力链接，不使用面板会话或 cookie。logout 只做本地退出，不调用远端 revocation endpoint。不存在真实 Notion 登录或远端写入的验证。
+- OAuth 网络保留来源限制和响应/时间边界；Workers fetch 不提供 Node 的 DNS/socket lookup 固定能力，因此没有移植 Docker 的 DNS 解析结果绑定。只允许管理员配置的资源 HTTPS 来源与该资源声明的 issuer 来源。
+- Streamable HTTP 用 SDK 的 fetch + eventsource-parser，不依赖浏览器 EventSource，也不回退旧 SSE transport。GET 405 是可选流不支持，不能当作初始化失败；关闭时 DELETE 是尽力清理。禁用 SSE 自动恢复。
+- Workers 不接受 redirect: "error"，须 manual 并拒绝 3xx；RequestInit 没有 credentials，平台没有 cookie jar，代码显式删 Cookie。用 new Headers 统一 SDK 的 header 输入，Bearer 每次请求从 Registry 取，401 不交给 SDK 自动授权。
+- Check 采用解释式校验，避免 Compile/new Function 在部署运行时被禁止。SDK 用 client.request 配合 ListToolsResultSchema/CallToolResultSchema，避免 callTool 的逐页 outputSchema 缓存及默认 Ajv 编译；完整输入输出校验由本模块负责。
+- AbortSignal 向 SDK 传播，并设置不随 progress 重置的总超时；OAuth 同时使用 signal 和 Promise.race，防止实现忽略 signal 时永不结算。测试的 DO RPC thenable 在 Vitest rejects 断言前包装为普通 async Promise，避免产生误报的未处理 rejection。
+- QuickJS /cloudflare 入口由 Wrangler 默认 CompiledWasm 规则打包，不需要额外 rules；不能在 Worker 内从字节编译 WASM。inline VM 会占用本 DO 线程，计算循环只能由 interruptBudget 限制，Date.now() 在纯计算期间不推进；分离 Worker 的远程沙箱留待后续。
+- 生产配置 dry-run 会先构建既有 Magpie 容器，本机无法启动 Docker CLI；本次采用无容器的测试配置验证同一 Worker 入口打包。Vitest 有已安装包改名/缺 sourcemap 提示，以及负向 RPC 测试的固定分类异常输出；最终没有未处理错误。
+
+原 package.json 和 package-lock.json 的依赖增量为任务开始时已有内容，本次保留；未运行 npm install 或 git commit。既有文件保持 UTF-8 无 BOM 与原换行；新增文本为 UTF-8 无 BOM、LF。
+
+以下保留 P0～P1b 文档与历史验证记录。
+
 # Workers P1b
 
 NapCat 的 OneBot v11 Universal 反向 WebSocket 连接 `/onebot`。Bridge DO 单例 `napcat` 负责授权、去重、群名与发送规则；群消息进入 `group:<群号>` 的 Thread DO，owner 私聊仍共用 `owner`，其他允许用户进入 `private:<QQ号>`。Thread 中运行 pi-durable，保存消息与回合，工具调用经同一条反向 WS 回复 QQ。

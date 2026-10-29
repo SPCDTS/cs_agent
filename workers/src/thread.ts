@@ -16,6 +16,9 @@ import { MEMORY_RULE } from "./memory/contracts";
 import { renderMemorySection } from "./memory/render";
 import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS } from "./memory/extractor";
 
+import { MCP_CATALOG_SCHEMA } from "./mcp/catalog";
+import { ThreadMcp } from "./mcp";
+
 const context = BACKGROUND_CONTEXT;
 type InboundRow = {
   message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number;
@@ -42,6 +45,7 @@ export class ThreadDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY, message_id TEXT NOT NULL, text TEXT NOT NULL, sent_at INTEGER NOT NULL);
         ${MESSAGE_SCHEMA}
         ${MEMORY_SCHEMA}
+        ${MCP_CATALOG_SCHEMA}
       `);
       // 已部署的 P0 表与 submission.requestId 必须保留，新增列用默认值兼容旧回合恢复。
       const columns = await tx.all<{ name: string }>("PRAGMA table_info(inbound)");
@@ -151,8 +155,13 @@ export class ThreadDO extends DurableObject<Env> {
           // scope 只来自当前输入，模型没有选择其他会话的参数，owner 也不能跨账号召回。
           return { output: [{ type: "text", text: await recall(this.database, scopeOf(targetOf(input)), options) }] };
         },
-      })],
+      })].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
+    const mcp = memory.ns === "owner" ? new ThreadMcp(this.database, this.env, registry, async (api, callContext) => {
+      const input = await this.currentInput(harness, api, api.conversationId, callContext);
+      return !!input && this.memoryBinding(input, memory.ns)?.owner === true && input.chat_kind === "private";
+    }) : undefined;
+    await mcp?.restore();
     const harness = await Harness.open(storage, { models, registry }, context);
     const root = await harness.root(context, { agent: { model: { provider: selection.provider, modelId: selection.id } } });
     await root.configure({ model: { provider: selection.provider, modelId: selection.id } }, context);
@@ -162,8 +171,10 @@ export class ThreadDO extends DurableObject<Env> {
       const submission = await this.admit(runtime, row);
       this.ctx.waitUntil(this.settle(row.message_id, submission));
     }
+    // 快照先装配，远端离线不阻塞 Harness 恢复；首次执行仍强制核对完整目录。
+    if (mcp) this.ctx.waitUntil(mcp.refreshAll().then(() => {}));
     harness.resume();
-    void harness.closed.then(() => { this.runtime = undefined; });
+    void harness.closed.then(async () => { this.runtime = undefined; await mcp?.close(); });
     return runtime;
   }
 
@@ -296,6 +307,12 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     await this.bindNamespace(data.ns);
     return new MemoryStore(this.database, data.ns).import(data);
+  }
+
+  async mcpToolCounts(): Promise<Record<string, number>> {
+    await this.initialize();
+    const rows = await this.database.all<{ server_id: string; n: number }>("SELECT server_id, COUNT(*) AS n FROM mcp_catalog GROUP BY server_id");
+    return Object.fromEntries(rows.map(row => [row.server_id, row.n]));
   }
 
   async modelStatus(): Promise<{ provider: string; id: string } | { unavailable: string }> {
