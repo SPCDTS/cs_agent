@@ -32,7 +32,8 @@ export default {
         env.BRIDGE.getByName("napcat").status(), owner.modelStatus(), owner.stats(),
       ]);
       const ok = !("unavailable" in model);
-      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge, model, thread }, { status: ok ? 200 : 503 });
+      const { threads, sendRules, ...connection } = bridge;
+      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules }, { status: ok ? 200 : 503 });
     }
     return new Response("not found", { status: 404 });
   },

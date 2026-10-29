@@ -32,6 +32,7 @@
   // 生产：模型经 magpie 容器（MAGPIE_URL=container）。测试用 wrangler.test.jsonc 覆盖为 faux
   "vars": {
     "CS_AGENT_COMMIT": "dev",
+    "QQ_GROUP_MENTIONS": true,
     "MODEL_PROVIDER": "magpie",
     "MODEL_ID": "deepseek/deepseek-flash",
     "MAGPIE_URL": "container"

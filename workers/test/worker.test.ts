@@ -2,6 +2,7 @@ import { env, SELF, runInDurableObject, evictDurableObject, reset } from "cloudf
 import { afterEach, describe, expect, it } from "vitest";
 import { Type } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
+import { normalizeMessage } from "../src/policy";
 
 const sockets: WebSocket[] = [];
 const Action = Type.Object({
@@ -32,7 +33,13 @@ async function connect(query = false) {
 function message(messageId: number, text = "你好", userId = 10000001) {
   return { post_type: "message", message_type: "private", self_id: 42, user_id: userId,
     message_id: messageId, time: 1700000000,
-    message: [{ type: "text", data: { text } }, { type: "image", data: { file: "ignored" } }] };
+    message: [{ type: "text", data: { text } }] };
+}
+
+function input(messageId: string, text: string, userId = "10000001") {
+  const value = normalizeMessage(message(Number(messageId), text, Number(userId)));
+  if (!value) throw new Error("invalid fixture");
+  return value;
 }
 
 async function action(frames: unknown[], index = 0) {
@@ -48,7 +55,7 @@ function reply(socket: WebSocket, echo: string, messageId = 99) {
 
 async function inboundStatus(id: string) {
   return runInDurableObject(env.THREAD.getByName("owner"), (_instance, state) =>
-    state.storage.sql.exec<{ status: string }>("SELECT status FROM inbound WHERE message_id = ?", id).toArray()[0]?.status,
+    state.storage.sql.exec<{ status: string }>("SELECT status FROM inbound WHERE platform_message_id = ?", id).toArray()[0]?.status,
   );
 }
 
@@ -72,9 +79,9 @@ describe("OneBot reverse WebSocket", () => {
   it("runs Pi, sends text segments, persists the receipt, and deduplicates redelivery", async () => {
     const { socket, frames } = await connect();
     socket.send(JSON.stringify({ post_type: "meta_event", meta_event_type: "lifecycle", self_id: 42 }));
-    const input = message(1);
-    input.message.push({ type: "text", data: { text: "，主人" } });
-    socket.send(JSON.stringify(input));
+    const event = message(1);
+    event.message.push({ type: "text", data: { text: "，主人" } });
+    socket.send(JSON.stringify(event));
     const frame = await action(frames);
     expect(frame.params).toEqual({ user_id: "10000001", message: [{ type: "text", data: { text: "echo: 你好，主人" } }] });
     reply(socket, frame.echo);
@@ -85,17 +92,17 @@ describe("OneBot reverse WebSocket", () => {
     expect(await (await SELF.fetch("https://test/healthz")).json()).toMatchObject({
       ok: true, bridge: { connected: true, selfId: "42", ignored: 0 }, model: { provider: "faux", id: "test" },
     });
-    socket.send(JSON.stringify(input));
-    expect(await env.THREAD.getByName("owner").submit({ messageId: "1", userId: "10000001", text: "重复", time: 0 })).toEqual({ deduped: true });
+    socket.send(JSON.stringify(event));
+    expect(await env.THREAD.getByName("owner").submit(input("1", "重复", "10000001"))).toEqual({ deduped: true });
     await pause(1000);
     expect(frames).toHaveLength(1);
   });
 
-  it("ignores non-owner and group messages, and survives malformed frames", async () => {
+  it("ignores unauthorized private and group messages, and survives malformed frames", async () => {
     const { socket, frames } = await connect();
     socket.send("{broken");
     socket.send(JSON.stringify(message(2, "stranger", 20000002)));
-    socket.send(JSON.stringify({ ...message(3), message_type: "group" }));
+    socket.send(JSON.stringify({ ...message(3, "stranger", 20000002), message_type: "group", group_id: 200000002 }));
     socket.send(JSON.stringify({ post_type: "meta_event", meta_event_type: "heartbeat", self_id: 43 }));
     await expect.poll(() => env.BRIDGE.getByName("napcat").status()).toMatchObject({ connected: true, selfId: "43", ignored: 2 });
     expect(frames).toEqual([]);
@@ -112,7 +119,7 @@ describe("OneBot reverse WebSocket", () => {
     reply(socket, frame.echo);
     await expect.poll(() => inboundStatus("4")).toBe("done");
     await evictDurableObject(env.THREAD.getByName("owner"));
-    expect(await env.THREAD.getByName("owner").submit({ messageId: "4", userId: "10000001", text: "重复", time: 0 })).toEqual({ deduped: true });
+    expect(await env.THREAD.getByName("owner").submit(input("4", "重复", "10000001"))).toEqual({ deduped: true });
     socket.send(JSON.stringify(message(5, "第二轮")));
     const second = await action(frames, 1);
     expect(second.params.message[0]?.data.text).toBe("echo: 第二轮");
@@ -123,9 +130,9 @@ describe("OneBot reverse WebSocket", () => {
   it("keeps each queued input bound to its own recipient", async () => {
     const { socket, frames } = await connect();
     const thread = env.THREAD.getByName("owner");
-    const first = thread.submit({ messageId: "6", userId: "10000001", text: "first", time: 0 });
+    const first = thread.submit(input("6", "first", "10000001"));
     const frame = await action(frames);
-    const second = thread.submit({ messageId: "7", userId: "10000002", text: "second", time: 0 });
+    const second = thread.submit(input("7", "second", "10000002"));
     expect(frame.params.user_id).toBe("10000001");
     reply(socket, frame.echo);
     const next = await action(frames, 1);
@@ -136,7 +143,7 @@ describe("OneBot reverse WebSocket", () => {
 
   it("returns channel_down to the tool when disconnected without writing an outbox receipt", async () => {
     await expect(sendPrivate("offline")).rejects.toThrow("channel_down");
-    expect(await env.THREAD.getByName("owner").submit({ messageId: "8", userId: "10000001", text: "offline", time: 0 })).toEqual({ status: "done" });
+    expect(await env.THREAD.getByName("owner").submit(input("8", "offline", "10000001"))).toEqual({ status: "done" });
     const rows = await runInDurableObject(env.THREAD.getByName("owner"), (_instance, state) => ({
       sent: state.storage.sql.exec("SELECT * FROM outbox").toArray(),
       entries: state.storage.sql.exec("SELECT * FROM pi_entries").toArray(),

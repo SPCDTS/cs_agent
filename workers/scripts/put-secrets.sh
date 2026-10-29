@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 把 Worker 需要的 secrets 从本地私有文件上传到 Cloudflare（wrangler secret bulk，值走 stdin，不进命令行与仓库）。
-# 读取：仓库根 .env 的 NAPCAT_TOKEN、QQ_OWNER；secrets/r2-magpie.env 的 R2_*、MAGPIE_SYNC_PASSPHRASE。
+# 读取：仓库根 .env 的 NAPCAT_TOKEN、QQ_OWNER、QQ_ALLOW_USERS、QQ_ALLOW_GROUPS；secrets/r2-magpie.env 的 R2_*、MAGPIE_SYNC_PASSPHRASE。
 # 用法：在仓库根执行  bash workers/scripts/put-secrets.sh
 set -euo pipefail
 # 在 worktree 里跑时 .env 与 secrets/ 只在主工作区，用 CS_AGENT_ROOT 指过去
@@ -20,6 +20,9 @@ json_escape() { python -c 'import json,sys; print(json.dumps(sys.stdin.read()))'
 
 NAPCAT_TOKEN=$(read_var "$env_file" NAPCAT_TOKEN)
 QQ_OWNER=$(read_var "$env_file" QQ_OWNER)
+# 白名单是可选配置；缺项或空值都不影响必需 secrets 的上传。
+QQ_ALLOW_USERS=$(read_var "$env_file" QQ_ALLOW_USERS || true)
+QQ_ALLOW_GROUPS=$(read_var "$env_file" QQ_ALLOW_GROUPS || true)
 R2_BUCKET=$(read_var "$r2_file" R2_BUCKET)
 R2_ENDPOINT=$(read_var "$r2_file" R2_ENDPOINT)
 R2_ACCESS_KEY_ID=$(read_var "$r2_file" R2_ACCESS_KEY_ID)
@@ -40,11 +43,12 @@ cd "$workers_dir"
 {
   printf '{'
   first=1
-  for name in NAPCAT_TOKEN QQ_OWNER R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE; do
+  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE; do
+    [ -n "${!name}" ] || continue
     [ $first -eq 1 ] || printf ','
     first=0
     printf '"%s":%s' "$name" "$(printf '%s' "${!name}" | json_escape)"
   done
   printf '}\n'
 } | npx wrangler secret bulk
-echo "已上传 7 个 secrets 到 Worker cs-agent"
+echo "已上传必需 secrets 与非空 QQ 白名单到 Worker cs-agent"

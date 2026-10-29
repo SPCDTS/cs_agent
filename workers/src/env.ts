@@ -1,10 +1,13 @@
 // 配置可被部署覆盖，不能沿用生成文件中的字面量类型；绑定仍由 Wrangler 生成。
-export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" | "MAGPIE_URL"> {
+export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" | "MAGPIE_URL" | "QQ_GROUP_MENTIONS"> {
   MODEL_PROVIDER: string;
   MODEL_ID: string;
   MAGPIE_URL: string;
+  QQ_GROUP_MENTIONS?: string | boolean;
   // 以下都是 secrets：QQ 号不进仓库与配置文件
   QQ_OWNER?: string;
+  QQ_ALLOW_USERS?: string;
+  QQ_ALLOW_GROUPS?: string;
   NAPCAT_TOKEN?: string;
   DEEPSEEK_API_KEY?: string;
   MAGPIE_GATEWAY_KEY?: string;
