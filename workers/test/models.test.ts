@@ -68,6 +68,6 @@ describe("model providers", () => {
         MAGPIE_URL: "https://magpie.test/v1", MAGPIE_GATEWAY_KEY: "test-only" });
       return thread.modelStatus();
     });
-    expect(status).toBe("unavailable");
+    expect(status).toEqual({ unavailable: "magpie 模型目录请求失败: HTTP 503" });
   });
 });

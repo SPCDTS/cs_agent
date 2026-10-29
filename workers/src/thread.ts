@@ -107,8 +107,11 @@ export class ThreadDO extends DurableObject<Env> {
     }
   }
 
-  async modelStatus(): Promise<{ provider: string; id: string } | "unavailable"> {
+  async modelStatus(): Promise<{ provider: string; id: string } | { unavailable: string }> {
     try { return (await this.open()).selection; }
-    catch { return "unavailable"; }
+    catch (error) {
+      // 只给出错误的分类文本（本包抛出的固定消息或 fetch 失败），不含网关正文或凭据
+      return { unavailable: error instanceof Error ? error.message.slice(0, 160) : "unknown" };
+    }
   }
 }

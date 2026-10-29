@@ -30,7 +30,7 @@ export default {
       const [bridge, model] = await Promise.all([
         env.BRIDGE.getByName("napcat").status(), env.THREAD.getByName("owner").modelStatus(),
       ]);
-      const ok = model !== "unavailable";
+      const ok = !("unavailable" in model);
       return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge, model }, { status: ok ? 200 : 503 });
     }
     return new Response("not found", { status: 404 });
