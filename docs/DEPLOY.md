@@ -291,8 +291,17 @@ docker compose config
 - **改了 AGENTS.md / codex.md / 技能但 codex 没反应**：已加载线程不一定重读，在面板重置该会话线程或重启容器。
 - **NapCat 双响应**：同一账号同时连了两个 NapCat，见 §4.1。
 
-## 14. CI/CD（GitHub Actions）
+## 14. CI/CD（GitHub Actions）与 Cloudflare Workers
 
-仓库 `SPCDTS/cs_agent`（私有）。`.github/workflows/ci.yml` 在 push 到 main、PR 与手动触发时跑两组作业：`typecheck + unit`（`npm run typecheck`、`npm test`）与 `integration`（`npm run test:integration`，运行器上装 bubblewrap 并放开非特权用户命名空间）。
+仓库 `SPCDTS/cs_agent`（私有）。`.github/workflows/ci.yml` 在 push 到 main、PR 与手动触发时跑两组作业：`typecheck + unit`（根包与 `workers/` 包的 typecheck 与单测；根包的 `test/agent/pi.test.ts` 在 linux 上按容器环境断言 bash 可用，运行器要装 bubblewrap）与 `integration`（`npm run test:integration`）。
 
-`deploy workers` 作业只在 main 上、两组测试通过且仓库根有 `wrangler.jsonc` 时执行（[WORKERS-DESIGN.md](WORKERS-DESIGN.md) P0 之前没有这个文件，作业跳过），用 `cloudflare/wrangler-action` 跑 `wrangler deploy`，密钥在仓库 Settings → Secrets and variables → Actions：`CLOUDFLARE_API_TOKEN`（API token，权限至少 Workers Scripts、Workers Routes、Containers 编辑与 Account Settings 读取）与 `CLOUDFLARE_ACCOUNT_ID`；作业绑定 environment `workers`，可在仓库 Settings → Environments 加审批人。本机 Docker 部署不经 CI，仍按 §5 用 `scripts/deploy.ps1`。
+`deploy workers` 作业只在 main 上、两组测试通过且有 `workers/wrangler.jsonc` 时执行，在 `workers/` 下用 `cloudflare/wrangler-action` 跑 `wrangler deploy --var CS_AGENT_COMMIT:<sha>`，连带用 Docker 构建 magpie 容器镜像并推到 Cloudflare 镜像仓库。密钥在仓库 Settings → Secrets and variables → Actions：`CLOUDFLARE_API_TOKEN`（"Edit Cloudflare Workers" 模板加 Containers 编辑）与 `CLOUDFLARE_ACCOUNT_ID`；作业绑定 environment `workers`。
+
+Workers 侧的部署事实（设计见 [WORKERS-DESIGN.md](WORKERS-DESIGN.md)）：
+
+- 线上地址 `https://agent.spcdts.dev`，`/healthz` 返回提交号、NapCat 连接状态、模型选择与 owner 线程的入站/出站计数。
+- Worker 的 secrets（`NAPCAT_TOKEN`、`QQ_OWNER`、`R2_*`、`MAGPIE_SYNC_PASSPHRASE`）用 `bash workers/scripts/put-secrets.sh` 从本地 `.env` 与 `secrets/r2-magpie.env` 上传，值不进命令行与仓库；wrangler 的 OAuth 刷新连不上 dash.cloudflare.com 时，脚本与手动 `wrangler deploy` 用 `secrets/cloudflare-api-token.env` 里的 API token 直连 API。
+- 本机手动 `wrangler deploy` 与 CI 的自动部署会互相覆盖：CI 作业可能排队很久后才执行，把更早的提交部署上去盖掉手动部署的新版本。手动部署后要确认 CI 上没有更旧提交的运行还在排队，或等 CI 跑完同一提交。
+- NapCat 以反向 WebSocket 连 Worker（`napcat/config/onebot11*.json` 的 `websocketClients` 条目 `workers`），本机 Docker 的旧 cs-agent 仍经正向连接收同一批消息，两边都会回复，直到决定停掉其中一边。
+
+本机 Docker 部署不经 CI，仍按 §5 用 `scripts/deploy.ps1`。
