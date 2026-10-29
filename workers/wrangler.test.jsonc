@@ -16,14 +16,16 @@
       { "name": "THREAD", "class_name": "ThreadDO" },
       { "name": "REGISTRY", "class_name": "RegistryDO" },
       { "name": "BRIDGE", "class_name": "BridgeDO" },
-      { "name": "MAGPIE", "class_name": "MagpieContainer" }
+      { "name": "MAGPIE", "class_name": "MagpieContainer" },
+      { "name": "SCHEDULE", "class_name": "ScheduleDO" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ThreadDO"] },
     { "tag": "v2", "new_sqlite_classes": ["BridgeDO"] },
     { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] },
-    { "tag": "v4", "new_sqlite_classes": ["RegistryDO"] }
+    { "tag": "v4", "new_sqlite_classes": ["RegistryDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["ScheduleDO"] }
   ],
   // QQ_OWNER、NAPCAT_TOKEN、R2_*、MAGPIE_SYNC_PASSPHRASE 都是 secrets（wrangler secret put），不写在这里
   "vars": {

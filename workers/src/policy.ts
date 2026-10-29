@@ -6,6 +6,9 @@ export type InboundInput = {
   target: Target; text: string; routeText: string; time: number;
   mentionedSelf: boolean; replyToId: string | null; imageCount: number;
   scopeName?: string;
+  /** 缺省为 message；schedule 由 ScheduleDO 投递，入站键就是 messageId（run_<fire_key>）。 */
+  kind?: "message" | "schedule" | "event";
+  meta?: { fireKey: string };
 };
 export type PolicyConfig = { owners: string[]; allowUsers: string[]; allowGroups: string[]; groupTrigger: GroupTrigger };
 
@@ -80,4 +83,4 @@ export const policyFrom = (env: { QQ_OWNER?: string }, settings: Settings): Poli
   ({ owners: ownerIds(env), allowUsers: settings.allowUsers, allowGroups: settings.allowGroups, groupTrigger: settings.groupTrigger });
 export const scopeOf = (target: Target) => target.kind === "group" ? `group:${target.groupId}` : `private:${target.userId}`;
 export const threadKey = (policy: PolicyConfig, message: InboundInput) => message.target.kind === "private" && policy.owners.includes(message.userId) ? "owner" : scopeOf(message.target);
-export const inboundKey = (message: InboundInput) => `${message.selfId}:${message.target.kind}:${message.target.kind === "group" ? message.target.groupId : ""}:${message.userId}:${message.messageId}`;
+export const inboundKey = (message: InboundInput) => message.kind === "schedule" ? message.messageId : `${message.selfId}:${message.target.kind}:${message.target.kind === "group" ? message.target.groupId : ""}:${message.userId}:${message.messageId}`;

@@ -83,6 +83,20 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       configured: Object.fromEntries(SECRET_NAMES.map(name => [name, !!env[name]])) });
   } },
 
+  { method: "GET", path: "/admin/schedules", handle: async ({ env }) => json(await env.SCHEDULE.getByName("main").list()) },
+  { method: "POST", path: /^\/admin\/schedules\/(?<id>[0-9a-f-]{36})\/(?<action>pause|resume|delete|run-now)$/, handle: async ({ env, params }) => {
+    const schedules = env.SCHEDULE.getByName("main"), id = params.id!, action = params.action!;
+    if (!(await schedules.list()).some(schedule => schedule.id === id)) throw new HttpError(404, "not_found");
+    try {
+      if (action === "delete") { await schedules.remove(id, "admin"); return json({ deleted: id }); }
+      if (action === "run-now") return json(await schedules.runNow(id, "admin"));
+      return json(await schedules.setStatus(id, action === "pause" ? "paused" : "active", undefined, "admin"));
+    } catch (error) {
+      // ScheduleDO 的错误是自己的固定分类文本（如 overlap、paused），不含用户正文。
+      throw new HttpError(400, error instanceof Error ? error.message.slice(0, 200) : "failed");
+    }
+  } },
+
   { method: "GET", path: "/admin/settings", handle: async ({ env }) => json(await env.REGISTRY.getByName("main").settings()) },
   { method: "PUT", path: "/admin/settings", handle: async ({ env, request }) => {
     const { value, expectedRevision } = await body(request, Type.Object({ value: SettingsSchema, expectedRevision: Type.String({ pattern: "^[0-9a-f]{16}$" }) }, strict));
@@ -167,7 +181,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     catch (error) {
       if (error instanceof HttpError) return json({ error: error.code, ...error.extra }, error.status);
       // 原始异常可能带存储或远端内容，只记录路由。
-      console.error({ event: "admin_failed", method: route.method, path: String(route.path) });
+      console.error({ event: "admin_failed", method: route.method, path: String(route.path), error: error instanceof Error ? `${error.name}: ${error.message.slice(0, 200)}` : typeof error });
       return json({ error: "internal" }, 500);
     }
   }

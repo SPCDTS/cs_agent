@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
-import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type Submission } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
@@ -22,12 +22,16 @@ import { maintenanceConfig, maintenanceStatus, runMaintenanceJob, type Maintenan
 
 import { MCP_CATALOG_SCHEMA } from "./mcp/catalog";
 import { ThreadMcp } from "./mcp";
+import { createScheduleExtension, type ScheduleAccess } from "./schedule/tools";
+import { parseScheduleInputKey } from "./schedule/run";
+import type { ScheduleConversation } from "./schedule/types";
 
 const context = BACKGROUND_CONTEXT;
 type InboundRow = {
   message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number;
   status: "queued" | "done" | "failed"; chat_kind: "private" | "group"; chat_id: string; nickname: string;
   scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null;
+  kind: NonNullable<InboundInput["kind"]>;
 };
 type Runtime = { harness: Harness; root: Conversation; selection: { provider: string; id: string }; mcp?: ThreadMcp };
 const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind: "group", groupId: row.chat_id } : { kind: "private", userId: row.chat_id };
@@ -63,9 +67,12 @@ export class ThreadDO extends DurableObject<Env> {
         chat_kind: "TEXT NOT NULL DEFAULT 'private'", chat_id: "TEXT NOT NULL DEFAULT ''",
         nickname: "TEXT NOT NULL DEFAULT ''", self_id: "TEXT NOT NULL DEFAULT ''",
         scope_name: "TEXT NOT NULL DEFAULT ''", platform_message_id: "TEXT NOT NULL DEFAULT ''", when_busy: "TEXT", turn_id: "TEXT",
+        kind: "TEXT NOT NULL DEFAULT 'message'",
       })) if (!columns.some(column => column.name === name)) await tx.exec(`ALTER TABLE inbound ADD COLUMN ${name} ${definition}`);
       const outboxColumns = await tx.all<{ name: string }>("PRAGMA table_info(outbox)");
       if (!outboxColumns.some(column => column.name === "turn_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN turn_id TEXT");
+      // 跟进输入会并入同一 Pi run、共用 turn_id；定时运行的发送条数只能按输入计。
+      if (!outboxColumns.some(column => column.name === "input_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN input_id TEXT");
       await tx.exec("CREATE INDEX IF NOT EXISTS inbound_turn ON inbound(turn_id); CREATE INDEX IF NOT EXISTS outbox_turn ON outbox(turn_id)");
       await tx.run("UPDATE inbound SET chat_id = user_id WHERE chat_id = ''");
       await tx.run("UPDATE inbound SET platform_message_id = message_id WHERE platform_message_id = ''");
@@ -76,7 +83,8 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     const ns = input.target.kind === "private" && ownerIds(this.env).includes(input.userId) ? "owner" : scopeOf(input.target);
     await this.bindNamespace(ns);
-    await this.database.transaction(tx => recordMessage(tx, input));
+    // 定时等非聊天输入不进消息库，qq_context 与记忆抽取只看到真实聊天。
+    if ((input.kind ?? "message") === "message") await this.database.transaction(tx => recordMessage(tx, input));
     const replied = input.replyToId === null ? undefined
       : await this.database.get("SELECT 1 FROM messages WHERE scope = ? AND message_id = ? AND is_self = 1", scopeOf(input.target), input.replyToId);
     return { repliedToSelf: replied !== undefined };
@@ -140,9 +148,9 @@ export class ThreadDO extends DurableObject<Env> {
           const target = targetOf(input);
           let result;
           try {
-            const receipt = await this.env.BRIDGE.getByName("napcat").send(target, text, target.kind === "group" ? input.user_id : undefined);
+            const receipt = await this.env.BRIDGE.getByName("napcat").send(target, text, target.kind === "group" && input.kind === "message" ? input.user_id : undefined);
             await this.database.transaction(async tx => {
-              await tx.run("INSERT INTO outbox (message_id, text, sent_at, turn_id) VALUES (?, ?, ?, ?)", receipt.message_id, text, Date.now(), input.turn_id);
+              await tx.run("INSERT INTO outbox (message_id, text, sent_at, turn_id, input_id) VALUES (?, ?, ?, ?, ?)", receipt.message_id, text, Date.now(), input.turn_id, input.message_id);
               await recordMessage(tx, { messageId: receipt.message_id, selfId: input.self_id, userId: input.self_id,
                 nickname: "机器人", target, text, routeText: text, time: Math.floor(Date.now() / 1000),
                 mentionedSelf: false, replyToId: input.platform_message_id, imageCount: 0, scopeName: input.scope_name }, true);
@@ -170,6 +178,10 @@ export class ThreadDO extends DurableObject<Env> {
         },
       })].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
+    if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
+      registry.install(createScheduleExtension(this.env, memory.ns as ScheduleConversation, async (api, callContext) =>
+        this.scheduleAccess(await this.currentInput(harness, api, api.conversationId, callContext))));
+    }
     const mcp = memory.ns === "owner" ? new ThreadMcp(this.database, this.env, registry, async (api, callContext) => {
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
       return !!input && this.memoryBinding(input, memory.ns)?.owner === true && input.chat_kind === "private";
@@ -197,7 +209,8 @@ export class ThreadDO extends DurableObject<Env> {
       // 先查排队，再读当前回合；已有他人排队时，后来的同人消息也不能越过队首。
       const inbox = await harness.snapshot(InboxDoc, root.id, context);
       const active = await this.currentInput(harness, harness, root.id, context);
-      whenBusy = active?.user_id === row.user_id && !inbox?.items.some(item => item.mode === "followUp") ? "steer" : "followUp";
+      // 定时输入不插话；它的回合里来的消息也排到其后，不能并入定时运行。
+      whenBusy = row.kind === "message" && active?.kind === "message" && active.user_id === row.user_id && !inbox?.items.some(item => item.mode === "followUp") ? "steer" : "followUp";
       await this.database.run("UPDATE inbound SET when_busy = ? WHERE message_id = ?", whenBusy, row.message_id);
     }
     return root.submit({ type: "input", content: row.text, requestId: row.message_id, whenBusy }, context);
@@ -206,27 +219,31 @@ export class ThreadDO extends DurableObject<Env> {
   private async settle(messageId: string, submission: Submission): Promise<{ status: "done" | "failed" }> {
     let status: "done" | "failed" = "failed";
     let fallbackTurn: string | undefined;
+    let answer: SettledSubmissionRecord["answer"];
     try {
       const result = await submission.wait(context);
       status = result.status === "done" ? "done" : "failed";
+      answer = result.answer;
       fallbackTurn = result.answer === undefined ? undefined : `answer:${result.answer}`;
     } finally {
       const extractor = await this.extractor(new MemoryStore(this.database, await this.namespace()));
-      await this.database.transaction(async tx => {
+      const row = await this.database.transaction(async tx => {
         const row = await tx.get<InboundRow>("UPDATE inbound SET status = ?, turn_id = COALESCE(turn_id, ?) WHERE message_id = ? RETURNING *", status, fallbackTurn ?? null, messageId);
-        if (status !== "done" || !row?.turn_id) return;
+        if (status !== "done" || !row?.turn_id) return row;
         const unfinished = await tx.get("SELECT 1 FROM inbound WHERE turn_id = ? AND status != 'done' LIMIT 1", row.turn_id);
-        if (unfinished) return;
+        if (unfinished) return row;
         await extractor.enqueue(row.turn_id, tx);
         if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1") && await this.ctx.storage.getAlarm() === null) {
           await this.ctx.storage.setAlarm(Date.now() + EXTRACT_ALARM_DELAY_MS);
         }
+        return row;
       });
+      if (row?.kind === "schedule") await this.reportScheduleRun(row, status, answer);
     }
     return { status };
   }
 
-  async submit(input: InboundInput): Promise<{ deduped: true } | { status: "done" | "failed" }> {
+  async submit(input: InboundInput): Promise<{ deduped: true } | { status: "done" | "failed" | "queued" }> {
     // 只串行接纳，不串行等待回合，否则同一发送者的插话也会被堵到回合结束。
     const admission = this.admissions.then(async () => {
       await this.ingest(input);
@@ -234,9 +251,9 @@ export class ThreadDO extends DurableObject<Env> {
       const legacy = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND self_id = '' AND user_id = ?", input.messageId, input.userId);
       if (legacy) return;
       const inserted = await this.database.get<InboundRow>(`INSERT OR IGNORE INTO inbound
-        (message_id, platform_message_id, user_id, self_id, text, received_at, status, chat_kind, chat_id, nickname, scope_name)
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) RETURNING *`, key, input.messageId, input.userId, input.selfId, input.text, input.time,
-        input.target.kind, input.target.kind === "group" ? input.target.groupId : input.target.userId, input.nickname, input.scopeName ?? "");
+        (message_id, platform_message_id, user_id, self_id, text, received_at, status, chat_kind, chat_id, nickname, scope_name, kind)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?) RETURNING *`, key, input.messageId, input.userId, input.selfId, input.text, input.time,
+        input.target.kind, input.target.kind === "group" ? input.target.groupId : input.target.userId, input.nickname, input.scopeName ?? "", input.kind ?? "message");
       if (!inserted) return;
       try {
         const runtime = await this.open();
@@ -251,7 +268,52 @@ export class ThreadDO extends DurableObject<Env> {
     const admitted = await admission;
     if (!admitted) return { deduped: true };
     if ("failed" in admitted) return { status: "failed" };
+    // ScheduleDO 只等接纳不等回合：结果由 settle 回写，alarm 不被长回合占住。
+    if (input.kind === "schedule") {
+      this.ctx.waitUntil(this.settle(admitted.key, admitted.submission));
+      return { status: "queued" };
+    }
     return this.settle(admitted.key, admitted.submission);
+  }
+
+  private scheduleAccess(input: InboundRow | undefined): ScheduleAccess {
+    if (input?.kind === "schedule") {
+      const key = parseScheduleInputKey(input.message_id);
+      return key ? { kind: "control", scheduleId: key.scheduleId, fireKey: key.fireKey } : { kind: "none" };
+    }
+    return input?.kind === "message" && input.user_id !== input.self_id && ownerIds(this.env).includes(input.user_id)
+      ? { kind: "manage", actor: `qq:${input.user_id}` } : { kind: "none" };
+  }
+
+  private async reportScheduleRun(row: InboundRow, status: "done" | "failed", answer: SettledSubmissionRecord["answer"]): Promise<void> {
+    const key = parseScheduleInputKey(row.message_id);
+    if (!key) return;
+    const sent = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE input_id = ?", row.message_id))?.n ?? 0;
+    let note = "";
+    if (answer !== undefined) {
+      try {
+        const { harness } = await this.open();
+        const message = (await harness.commit(tx => tx.entry(answer), context))?.model?.find(item => item.role === "assistant");
+        if (message?.role === "assistant") note = message.content.flatMap(block => block.type === "text" ? [block.text] : []).join("").slice(0, 200);
+      } catch { /* 摘要只是记录，读不到不影响结果 */ }
+    }
+    try {
+      await this.env.SCHEDULE.getByName("main").recordRun(key.scheduleId, { fire_key: key.fireKey, fire_at: key.fireAt, input_key: row.message_id,
+        status: status === "failed" ? "failed" : sent ? "sent" : "silent", ...(status === "failed" ? { reason: "backend_failed" as const } : {}),
+        sent, note, ended_at: Date.now() });
+    } catch {
+      // ScheduleDO 下次触发前会经 scheduleRunOutcome 补查，这里只记日志。
+      console.error({ event: "schedule_record_failed", key: row.message_id });
+    }
+  }
+
+  /** ScheduleDO 补查定时输入的结果；仍在排队时顺带唤醒运行时，让驱逐前的输入恢复执行。 */
+  async scheduleRunOutcome(key: string): Promise<{ status: "queued" | "done" | "failed" | "missing"; sent: number }> {
+    await this.initialize();
+    const row = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND kind = 'schedule'", key);
+    if (row?.status === "queued") this.ctx.waitUntil(this.open().then(() => {}, () => {}));
+    const sent = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE input_id = ?", key))?.n ?? 0;
+    return { status: row?.status ?? "missing", sent };
   }
 
   async stats() {

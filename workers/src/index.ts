@@ -9,6 +9,7 @@ export { RegistryDO } from "./registry";
 export { BridgeDO } from "./bridge";
 export { ThreadDO } from "./thread";
 export { MagpieContainer } from "./magpie-container";
+export { ScheduleDO } from "./schedule/do";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -37,12 +38,13 @@ export default {
     if (path === "/admin" || path.startsWith("/admin/")) return handleAdmin(request, env);
     if (request.method === "GET" && path === "/healthz") {
       const owner = env.THREAD.getByName("owner");
-      const [bridge, model, thread, accounts, counts] = await Promise.all([
+      const [bridge, model, thread, accounts, counts, schedule] = await Promise.all([
         env.BRIDGE.getByName("napcat").status(), owner.modelStatus(), owner.stats(), env.REGISTRY.getByName("main").status(), owner.mcpToolCounts(),
+        env.SCHEDULE.getByName("main").status(),
       ]);
       const ok = !("unavailable" in model);
       const { threads, sendRules, ...connection } = bridge;
-      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules, mcp: accounts.map(account => ({ ...account, tools: counts[account.server] ?? 0 })) }, { status: ok ? 200 : 503 });
+      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules, mcp: accounts.map(account => ({ ...account, tools: counts[account.server] ?? 0 })), schedule }, { status: ok ? 200 : 503 });
     }
     return new Response("not found", { status: 404 });
   },

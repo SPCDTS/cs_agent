@@ -211,7 +211,7 @@ export class MemoryExtractor {
       this.now(), JSON.stringify({ candidates: 0, written: 0, superseded: 0, ms: this.now() - start, ...detail }));
     if (!this.enabled()) { await finish({ status: "skipped", reason: "disabled" }); return; }
     try {
-      const inputs = await this.store.db.all<ExtractInput>("SELECT * FROM inbound WHERE turn_id = ? AND status = 'done' ORDER BY rowid", turnId);
+      const inputs = await this.store.db.all<ExtractInput>("SELECT * FROM inbound WHERE turn_id = ? AND status = 'done' AND kind = 'message' ORDER BY rowid", turnId);
       const outputs = await this.store.db.all<ExtractOutput>("SELECT text, sent_at FROM outbox WHERE turn_id = ? ORDER BY id", turnId);
       const material = buildMaterial(inputs, outputs);
       if (material.chars < 80) { await finish({ status: "skipped", reason: "too_short" }); return; }
