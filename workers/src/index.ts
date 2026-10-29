@@ -27,11 +27,12 @@ export default {
       return env.BRIDGE.getByName("napcat").fetch(request);
     }
     if (request.method === "GET" && path === "/healthz") {
-      const [bridge, model] = await Promise.all([
-        env.BRIDGE.getByName("napcat").status(), env.THREAD.getByName("owner").modelStatus(),
+      const owner = env.THREAD.getByName("owner");
+      const [bridge, model, thread] = await Promise.all([
+        env.BRIDGE.getByName("napcat").status(), owner.modelStatus(), owner.stats(),
       ]);
       const ok = !("unavailable" in model);
-      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge, model }, { status: ok ? 200 : 503 });
+      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge, model, thread }, { status: ok ? 200 : 503 });
     }
     return new Response("not found", { status: 404 });
   },

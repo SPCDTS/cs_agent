@@ -107,6 +107,16 @@ export class ThreadDO extends DurableObject<Env> {
     }
   }
 
+  /** 入站与出站计数，给 /healthz 核对一条真实消息是否经本 DO 处理；不含正文。 */
+  async stats(): Promise<{ inbound: { queued: number; done: number; failed: number }; outbox: number; lastSentAt?: number }> {
+    await this.initialize();
+    const rows = await this.database.all<{ status: "queued" | "done" | "failed"; n: number }>("SELECT status, COUNT(*) AS n FROM inbound GROUP BY status");
+    const inbound = { queued: 0, done: 0, failed: 0 };
+    for (const row of rows) inbound[row.status] = row.n;
+    const out = await this.database.get<{ n: number; last: number | null }>("SELECT COUNT(*) AS n, MAX(sent_at) AS last FROM outbox");
+    return { inbound, outbox: out?.n ?? 0, ...(out?.last ? { lastSentAt: out.last } : {}) };
+  }
+
   async modelStatus(): Promise<{ provider: string; id: string } | { unavailable: string }> {
     try { return (await this.open()).selection; }
     catch (error) {
