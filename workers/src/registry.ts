@@ -12,6 +12,7 @@ import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, type CredentialLease } fr
 import { openModels, providerStatuses, selectionProblem, type ProviderStatus } from "./models";
 import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, exchangeCode, parseCallback, startCodexLogin } from "./codex-login";
 import type { ImageAvailability } from "./tools/generate-image";
+import { SKILLS_SCHEMA, type Skill, type SkillInput, type SkillSummary } from "./skills";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
 type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash: string; created_at: number; expires_at: number };
@@ -47,7 +48,44 @@ export class RegistryDO extends DurableObject<Env> {
       ${MODEL_CREDENTIALS_SCHEMA};
       CREATE TABLE IF NOT EXISTS model_logins (state TEXT PRIMARY KEY, provider_id TEXT NOT NULL, verifier_enc TEXT NOT NULL,
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+      ${SKILLS_SCHEMA};
     `);
+  }
+
+  // 技能目录只经面板写入；Thread 读目录与正文。
+  skillsList(): SkillSummary[] {
+    return this.ctx.storage.sql.exec<{ name: string; description: string; files_json: string; enabled: number; updated_at: number }>(
+      "SELECT name, description, files_json, enabled, updated_at FROM skills ORDER BY name").toArray()
+      .map(row => ({ name: row.name, description: row.description, enabled: row.enabled === 1, updatedAt: row.updated_at, files: Object.keys(JSON.parse(row.files_json)) }));
+  }
+
+  skillGet(name: string): Skill | undefined {
+    const row = this.ctx.storage.sql.exec<{ name: string; description: string; body: string; files_json: string; enabled: number; updated_at: number }>(
+      "SELECT * FROM skills WHERE name = ?", name).toArray()[0];
+    return row && { name: row.name, description: row.description, body: row.body, files: JSON.parse(row.files_json), enabled: row.enabled === 1, updatedAt: row.updated_at };
+  }
+
+  /** 覆盖写入保留启用状态；files 省略时保留已有附件。 */
+  skillPut(skill: SkillInput): SkillSummary {
+    const files = skill.files === undefined ? null : JSON.stringify(skill.files), now = Date.now();
+    this.ctx.storage.sql.exec(`INSERT INTO skills (name, description, body, files_json, updated_at) VALUES (?, ?, ?, COALESCE(?, '{}'), ?)
+      ON CONFLICT(name) DO UPDATE SET description = excluded.description, body = excluded.body, files_json = COALESCE(?, files_json), updated_at = excluded.updated_at`,
+    skill.name, skill.description, skill.body, files, now, files);
+    return this.skillsList().find(summary => summary.name === skill.name)!;
+  }
+
+  skillDelete(name: string): boolean {
+    return this.ctx.storage.sql.exec("DELETE FROM skills WHERE name = ? RETURNING name", name).toArray().length > 0;
+  }
+
+  skillSetEnabled(name: string, enabled: boolean): boolean {
+    return this.ctx.storage.sql.exec("UPDATE skills SET enabled = ?, updated_at = ? WHERE name = ? RETURNING name", enabled ? 1 : 0, Date.now(), name).toArray().length > 0;
+  }
+
+  /** 只由启用技能的名称与描述决定，Thread 据此判断目录是否需要重新渲染。 */
+  async skillsDigest(): Promise<string> {
+    const rows = this.ctx.storage.sql.exec<{ name: string; description: string }>("SELECT name, description FROM skills WHERE enabled = 1 ORDER BY name").toArray();
+    return (await sha256(JSON.stringify(rows.map(row => [row.name, row.description])))).toString("hex").slice(0, 16);
   }
 
   // 一行保存整份覆盖值；revision 按有效内容计算，未覆盖时也能对默认值做 CAS。

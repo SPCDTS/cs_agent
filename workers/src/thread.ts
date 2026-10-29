@@ -36,6 +36,8 @@ import { cleanOutgoing } from "./send-clean";
 import { createWebSearchTool } from "./tools/web-search";
 import { createWebPageTool } from "./tools/web-page";
 import { availabilityOf, codexImage, createGenerateImageTool } from "./tools/generate-image";
+import { SkillCatalog } from "./skills";
+import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
 
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -46,7 +48,7 @@ type InboundRow = {
 };
 // 模型可见工具按会话配置生效，只能在会话空闲时切换；两种档位的输入永远不会进入同一个 run。定时输入归 chat 档。
 type ToolProfile = "chat" | "event";
-const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page",
+const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill",
   ...(MCP_CONFIG.enabled && MCP_CONFIG.servers.some(server => server.enabled && server.tools.eventAllow.length) ? ["codemode"] : [])]);
 const profileOf = (row: InboundRow): ToolProfile => row.kind === "event" ? "event" : "chat";
 type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp };
@@ -66,6 +68,7 @@ export class ThreadDO extends DurableObject<Env> {
   private settingsCache?: { at: number; load: Promise<SettingsSnapshot> };
   private readonly waiters = new Map<string, (submission: Submission | undefined) => void>();
   private idleWait?: Promise<void>;
+  private readonly skills = new SkillCatalog(() => this.env.REGISTRY.getByName("main"));
 
   private initialize(): Promise<void> {
     return this.initialized ??= this.database.transaction(async tx => {
@@ -165,6 +168,7 @@ export class ThreadDO extends DurableObject<Env> {
           const ms = input.received_at < 1e12 ? input.received_at * 1000 : input.received_at;
           return `现在是北京时间 ${formatBeijingTime(ms)}（${WEEKDAYS[new Date(ms + 8 * 3600_000).getUTCDay()]}）；今天、明天、下周这类相对时间都按北京时间理解。`;
         }, { tag: false }),
+        section("skills", () => this.skills.section(), { tag: false }),
       ],
       tools: [...createMemoryTools(memory, async (api, callContext) => {
         const input = await this.currentInput(harness, api, api.conversationId, callContext);
@@ -176,6 +180,7 @@ export class ThreadDO extends DurableObject<Env> {
       createWebSearchTool((query, maxResults, signal) => codexSearch(models, query, { signal, maxResults, modelId: this.env.CODEX_SEARCH_MODEL }),
         detail => this.audit("web_search", detail)),
       createWebPageTool(),
+      this.skills.tool(),
       ...(memory.ns === "owner" ? [createGenerateImageTool({
         allowed: async (api, callContext) => {
           const input = await this.currentInput(harness, api, api.conversationId, callContext);
@@ -583,6 +588,16 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     await this.bindNamespace(data.ns);
     return new MemoryStore(this.database, data.ns).import(data);
+  }
+
+  /** 历史聊天记录导入：路由按 importThreadKey 选线程，这里再经 idFromName 复核，不能把别的会话塞进本 DO。 */
+  async importMessages(value: unknown): Promise<MessageImportResult> {
+    const data = parseMessageImport(value);
+    await this.initialize();
+    await this.bindNamespace(importThreadKey(data.scope, ownerIds(this.env)));
+    const result = await this.database.transaction(tx => importHistory(tx, data));
+    await this.audit("history_import", result);
+    return result;
   }
 
   async events(q: EventQuery): Promise<{ events: AuditEvent[]; next?: number }> {

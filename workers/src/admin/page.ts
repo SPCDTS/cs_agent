@@ -248,6 +248,28 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
       </div>
     </div>
   </section>
+
+  <section class="card" id="skills-section">
+    <div class="section-head"><h2 class="h2">技能</h2><span class="muted">存在 Registry；启用的技能只以名称与描述进入各会话提示，模型用 read_skill 读正文，改动最迟 60 秒后生效</span></div>
+    <div class="scroll">
+      <table class="wide">
+        <thead><tr><th>名称</th><th>描述</th><th>附件</th><th>状态</th><th></th></tr></thead>
+        <tbody id="skills"></tbody>
+      </table>
+    </div>
+    <div class="stack">
+      <div class="field">
+        <label for="skill-md">SKILL.md（开头的 frontmatter 需要 name 与 description）</label>
+        <textarea id="skill-md" class="mono" spellcheck="false"></textarea>
+      </div>
+      <div class="row">
+        <button id="skill-save" class="btn primary" type="button">保存技能</button>
+        <button id="skill-new" class="btn" type="button">清空</button>
+        <span id="skill-meta" class="muted small"></span>
+      </div>
+      <div class="note">保存按 frontmatter 的 name 新建或覆盖；覆盖时保留启用状态与已有附件。附件暂无页面入口，经 PUT /admin/skills/:name 的 files 上传。</div>
+    </div>
+  </section>
 </main>
 </div>
 <script src="/admin/app.js" defer></script>
@@ -278,11 +300,21 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     authorization_denied: "ChatGPT 授权被拒绝",
     invalid_callback: "回调地址格式不正确",
     token_exchange: "换取 token 失败，请重新开始登录",
+    invalid_name: "技能名只能用小写字母、数字和连字符，以字母或数字开头，最长 64 位",
+    missing_frontmatter: "SKILL.md 开头缺少以 --- 包围的 frontmatter",
+    name_mismatch: "frontmatter 的 name 与技能名不一致",
+    missing_description: "frontmatter 缺少 description",
+    description_too_long: "description 超过 500 字",
+    skill_too_large: "SKILL.md 超过 256 KiB",
+    invalid_path: "附件路径不合法",
+    invalid_file: "附件只能是文本",
+    file_too_large: "单个附件超过 64 KiB",
+    files_too_large: "附件合计超过 512 KiB",
   };
   const MODEL_REASONS = { missing_key: "缺 DEEPSEEK_API_KEY", login_required: "未登录 ChatGPT", unconfigured: "未配置 OAUTH_STORE_KEY",
     unknown_provider: "provider 未注册", unknown_model: "目录里没有这个模型", unavailable: "不可用" };
   const state = { overview: null, settings: null, model: null, eventKind: "", eventThread: "owner", before: undefined, history: [], next: undefined,
-    memoryNs: "owner", memoryQuery: "", memoryView: null, profile: null, armedDelete: null, timer: null, noticeTimer: null };
+    memoryNs: "owner", memoryQuery: "", memoryView: null, profile: null, armedDelete: null, skills: [], armedSkill: null, timer: null, noticeTimer: null };
 
   const $ = id => document.getElementById(id);
   const readToken = () => { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } };
@@ -365,6 +397,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     loadSettings().catch(fail);
     loadModel().catch(fail);
     loadMemory().catch(fail);
+    loadSkills().catch(fail);
     clearInterval(state.timer);
     state.timer = setInterval(refresh, 30000);
   }
@@ -696,6 +729,74 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     refresh();
   }
 
+  async function loadSkills() {
+    renderSkills((await api("GET", "/admin/skills")).skills);
+  }
+  function renderSkills(skills) {
+    state.skills = skills;
+    const body = $("skills");
+    clear(body);
+    if (!skills.length) { body.append(el("tr", {}, [el("td", { colspan: 5, className: "muted", text: "还没有技能" })])); return; }
+    for (const skill of skills) {
+      const armed = state.armedSkill === skill.name;
+      body.append(el("tr", {}, [
+        el("td", { className: "mono", text: skill.name }),
+        el("td", { className: "cell-text", text: skill.description }),
+        el("td", { className: "mono", text: skill.files.length ? skill.files.length + " 个" : "-" }),
+        el("td", {}, [skill.enabled ? pill("启用", "ok") : pill("停用", "neutral")]),
+        el("td", {}, [
+          el("button", { className: "btn compact", type: "button", text: skill.enabled ? "停用" : "启用", onclick: () => toggleSkill(skill.name, !skill.enabled) }),
+          el("button", { className: "btn compact", type: "button", text: "编辑", onclick: () => editSkill(skill.name) }),
+          el("button", { className: "btn compact danger", type: "button", text: armed ? "确认删除" : "删除", onclick: () => armed ? deleteSkill(skill.name) : armSkill(skill.name) }),
+        ]),
+      ]));
+    }
+  }
+  // 名字只用来拼 URL；格式与一致性由服务端校验。
+  function skillName(markdown) {
+    const front = /^---\r?\n([\s\S]*?)^---/m.exec(markdown);
+    const name = front && front.index === 0 ? /^name:\s*["']?([^"'\r\n]*?)["']?\s*$/m.exec(front[1]) : null;
+    return name ? name[1] : "";
+  }
+  async function saveSkill() {
+    const markdown = $("skill-md").value, name = skillName(markdown);
+    if (!name) { show("SKILL.md 开头的 frontmatter 里需要 name", "error"); return; }
+    try {
+      await api("PUT", "/admin/skills/" + encodeURIComponent(name), { markdown });
+      $("skill-meta").textContent = "正在编辑 " + name;
+      notice("技能 " + name + " 已保存，各会话最迟 60 秒后看到");
+    } catch (error) { fail(error); }
+    loadSkills().catch(fail);
+  }
+  async function editSkill(name) {
+    try {
+      const skill = await api("GET", "/admin/skills/" + encodeURIComponent(name));
+      $("skill-md").value = skill.body;
+      $("skill-meta").textContent = "正在编辑 " + name + (Object.keys(skill.files).length ? " · 附件保留不变" : "");
+      $("skill-md").focus();
+    } catch (error) { fail(error); }
+  }
+  async function toggleSkill(name, enabled) {
+    try {
+      await api("POST", "/admin/skills/" + encodeURIComponent(name) + "/" + (enabled ? "enable" : "disable"));
+      notice("技能 " + name + (enabled ? " 已启用" : " 已停用"));
+    } catch (error) { fail(error); }
+    loadSkills().catch(fail);
+  }
+  function armSkill(name) {
+    state.armedSkill = name;
+    renderSkills(state.skills);
+    setTimeout(() => { if (state.armedSkill === name) { state.armedSkill = null; renderSkills(state.skills); } }, 5000);
+  }
+  async function deleteSkill(name) {
+    state.armedSkill = null;
+    try {
+      await api("DELETE", "/admin/skills/" + encodeURIComponent(name));
+      notice("已删除技能 " + name);
+    } catch (error) { fail(error); }
+    loadSkills().catch(fail);
+  }
+
   async function release(scope) {
     try { await api("POST", "/admin/send-rules/release", { scope }); notice("已解除 " + scope + " 的熔断"); } catch (error) { fail(error); }
     refresh();
@@ -755,6 +856,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   $("mem-q").addEventListener("search", event => { state.memoryQuery = event.target.value.trim(); loadMemory().catch(fail); });
   $("profile-toggle").addEventListener("click", () => toggleProfile($("profile-edit").hidden));
   $("profile-save").addEventListener("click", saveProfile);
+  $("skill-save").addEventListener("click", saveSkill);
+  $("skill-new").addEventListener("click", () => { $("skill-md").value = ""; $("skill-meta").textContent = ""; });
   $("mcp-link-copy").addEventListener("click", () => { navigator.clipboard.writeText($("mcp-link-url").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
 
   renderKinds();

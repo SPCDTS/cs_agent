@@ -21,7 +21,7 @@ async function deliverMail(google: ReturnType<typeof fakeGoogle>, id: string) {
   google.addMail(id, { subject: "Q4 预算确认", body: "请在周五前确认预算。" });
   await events().notify("gmail");
 }
-const EVENT_TOOLS = ["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page"];
+const EVENT_TOOLS = ["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill"];
 const WRITE_TOOLS = ["mem_remember", "mem_update", "mem_forget", "mem_profile", "gmail_send", "generate_image"];
 
 describe("event turns in the owner thread", () => {

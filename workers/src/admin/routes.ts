@@ -7,6 +7,9 @@ import { oauthErrorCode } from "../mcp/oauth-fetch";
 import { ModelSelectionSchema, QQ_ID, SettingsSchema, type Settings } from "../settings";
 import { modelLoginErrorCode } from "../codex-login";
 import type { EventQuery } from "../thread";
+import { SkillError, parseSkill } from "../skills";
+import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from "../message-import";
+import { ownerIds } from "../policy";
 import { ADMIN_APP_JS, ADMIN_PAGE_HTML } from "./page";
 
 export type AdminContext = { env: Env; request: Request; url: URL; params: Record<string, string> };
@@ -24,6 +27,7 @@ const THREAD_KEY = `owner|group:${QQ_ID}|private:${QQ_ID}`;
 const MEMORY_NS = new RegExp(`^(owner|group:${QQ_ID})$`);
 const SERVER = "[A-Za-z][A-Za-z0-9_-]{0,63}";
 const SOURCE = "[A-Za-z][A-Za-z0-9_:-]{0,63}";
+const SKILL = "[^/]{1,128}";
 const strict = { additionalProperties: false } as const;
 
 class HttpError extends Error {
@@ -180,6 +184,38 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     try { data = parseImport(await request.json()); }
     catch { return json({ error: "invalid memory import" }, 400); }
     return json(await env.THREAD.getByName(data.ns).importMemory(data));
+  } },
+  { method: "POST", path: "/admin/messages/import", handle: async ({ env, request }) => {
+    if (Number(request.headers.get("Content-Length") ?? 0) > MESSAGE_IMPORT_MAX_BYTES) throw new HttpError(413, "too_large");
+    const raw = await request.arrayBuffer();
+    if (raw.byteLength > MESSAGE_IMPORT_MAX_BYTES) throw new HttpError(413, "too_large");
+    let data;
+    try { data = parseMessageImport(JSON.parse(new TextDecoder().decode(raw))); }
+    catch { throw new HttpError(400, "invalid_import"); }
+    return json(await env.THREAD.getByName(importThreadKey(data.scope, ownerIds(env))).importMessages(data));
+  } },
+
+  // 技能目录：Registry 是唯一来源，Thread 按 digest 缓存目录；名字不合法也要匹配到路由，才能回 400 而不是 404。
+  { method: "GET", path: "/admin/skills", handle: async ({ env }) => json({ skills: await env.REGISTRY.getByName("main").skillsList() }) },
+  { method: "GET", path: new RegExp(`^/admin/skills/(?<name>${SKILL})$`), handle: async ({ env, params }) => {
+    const skill = await env.REGISTRY.getByName("main").skillGet(params.name!);
+    if (!skill) throw new HttpError(404, "not_found");
+    return json(skill);
+  } },
+  { method: "PUT", path: new RegExp(`^/admin/skills/(?<name>${SKILL})$`), handle: async ({ env, request, params }) => {
+    const { markdown, files } = await body(request, Type.Object({ markdown: Type.String(), files: Type.Optional(Type.Record(Type.String(), Type.String())) }, strict));
+    let skill;
+    try { skill = parseSkill(params.name!, markdown, files); }
+    catch (error) { throw error instanceof SkillError ? new HttpError(400, error.code) : error; }
+    return json(await env.REGISTRY.getByName("main").skillPut(skill));
+  } },
+  { method: "DELETE", path: new RegExp(`^/admin/skills/(?<name>${SKILL})$`), handle: async ({ env, params }) => {
+    if (!await env.REGISTRY.getByName("main").skillDelete(params.name!)) throw new HttpError(404, "not_found");
+    return json({ deleted: params.name });
+  } },
+  { method: "POST", path: new RegExp(`^/admin/skills/(?<name>${SKILL})/(?<action>enable|disable)$`), handle: async ({ env, params }) => {
+    if (!await env.REGISTRY.getByName("main").skillSetEnabled(params.name!, params.action === "enable")) throw new HttpError(404, "not_found");
+    return json({ name: params.name, enabled: params.action === "enable" });
   } },
 
   // 旧路径保留纯文本错误分类，已有脚本与文档按它解析。

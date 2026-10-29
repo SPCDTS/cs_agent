@@ -13,6 +13,8 @@
 | POST /admin/send-rules/release | 解除某个 scope 的熔断 |
 | GET / PUT /admin/model | 当前模型、可选模型、ChatGPT 登录状态与 `imageGeneration`（`unknown` / `available` / `unavailable`）；PUT 带 `expectedRevision`（与设置共用），切到不可用的模型返回 400 `invalid_model` |
 | POST /admin/model/oauth/codex/start、complete、logout | ChatGPT 订阅登录：生成授权链接、提交粘贴回来的回调地址、登出 |
+| GET /admin/skills、GET / PUT / DELETE /admin/skills/:name、POST /admin/skills/:name/enable、disable | 技能目录：列表（不含正文）、读单个技能、写入（body `{ markdown, files? }`）、删除、启停 |
+| POST /admin/messages/import | 历史聊天记录导入，见“历史记录导入” |
 
 设置保存在 Registry 的 `settings` 表（一行整份覆盖值）：`groupTrigger`（`mention_or_reply` / `mention_only` / `off`）、`allowGroups`、`allowUsers`、`extractNamespaces`。没有保存过时沿用 `QQ_ALLOW_GROUPS`、`QQ_ALLOW_USERS`、`QQ_GROUP_MENTIONS`（false 对应 off，其余对应 mention_only）与 `MEMORY_EXTRACT_NAMESPACES`；保存后这四个 secrets/vars 只作默认值显示。revision 是有效内容 SHA-256 的前 16 位。`mention_or_reply` 新增“回复机器人发出的消息”也能触发，判定查本群消息库里 `is_self=1` 的消息。Bridge 在内存缓存设置，面板保存后立即重载；Thread 判定抽取命名空间时缓存 60 秒，取不到设置时本轮不抽取。owner 只来自 `QQ_OWNER`，面板不能修改。
 
@@ -39,6 +41,41 @@ ChatGPT 订阅自带的托管工具做成 Worker 工具，当前模型是 DeepSe
 - `web_page`（`src/tools/web-page.ts`）：Worker 自己 fetch。只按主机名字面判断（拿不到 DNS 结果）：IP 字面量、单标签名、localhost 与 `.local` / `.internal` / `.container` 一律拒绝，每跳重定向重新校验，最多 3 跳；20 秒、4 MiB，只收 HTML、纯文本与 JSON；HTML 去掉脚本、样式、导航、页脚与 noscript 后抽正文，默认截到 8000 字。所有回合可用。
 - `generate_image`（`src/tools/generate-image.ts`）：只注册在 owner 线程，执行时再核对本回合是 owner 亲自发来的消息，定时回合拒绝，事件回合的工具档里没有它。图片取自 `image_generation_call.result`（base64 PNG），经 Bridge 的 `sendImage` 以 OneBot `base64://` 图片段发到当前会话，按一条消息计入发送规则。成功或被后端 4xx 拒绝时把结果写进 Registry，面板“模型”卡片显示“图片生成：未知 / 可用 / 不可用”。ChatGPT 订阅是否允许这个托管工具要看真实调用，探针见 `test/codex-image.probe.test.ts`（`CODEX_PROBE=1` 时从本机 Codex CLI 的 `~/.codex/auth.json` 读凭据，默认跳过）。
 - `send_message` 发出前经 `src/send-clean.ts`：Markdown 链接 `[文字](url)` 改成 `文字（url）`，所有 URL 去掉 `utm_*` 参数，其余文字不动。
+
+# Workers P3b：技能目录与历史记录导入
+
+## 技能目录
+
+- 存在 Registry 的 `skills` 表：`name` 主键、`description`、`body`（整份 SKILL.md，含 frontmatter）、`files_json`（`{ "<相对路径>": "<文本>" }`）、`updated_at`、`enabled`。代码在 `src/skills.ts`，Registry RPC 为 `skillsList()`（不含正文）、`skillGet`、`skillPut`、`skillDelete`、`skillSetEnabled`、`skillsDigest()`（启用技能的 name+description 的 SHA-256 前 16 位）。
+- 写入只经面板：`PUT /admin/skills/:name`，body `{ markdown, files? }`。校验照 Docker 的 `skills-store.ts`：name 须匹配 `^[a-z0-9][a-z0-9-]{0,63}$`，frontmatter 的 name 与 URL 一致（没写 name 时以 URL 为准），description 必填且不超过 500 字，SKILL.md 不超过 256 KiB；附件只收文本，单个 ≤ 64 KiB、合计 ≤ 512 KiB，路径不能含 `..`、反斜杠或控制字符，不能以 `/` 开头。错误返回 400 与分类（`invalid_name`、`name_mismatch`、`missing_frontmatter`、`missing_description`、`description_too_long`、`skill_too_large`、`invalid_path`、`invalid_file`、`file_too_large`、`files_too_large`）。覆盖写入保留启用状态；省略 `files` 时保留已有附件，传 `{}` 才清空。
+- 提示注入：每个 Thread 有 `skills` section，按 Docker 的 `<available_skills>` 格式只列启用技能的名称与描述，没有启用技能时不渲染。Thread 缓存目录 60 秒，到期先取 digest，变了才重新取列表渲染；文本不变时 pi-durable 不重发。Registry 暂时取不到时沿用上一份目录。
+- 工具 `read_skill { name, path? }`：不传 path 返回 SKILL.md，传 path 返回附件，超过 20000 字截断；技能不存在或已停用时返回说明文字。所有线程都有，事件回合的只读工具档也有。没有写技能的工具。
+- 面板“技能”卡片：列表、启停、编辑、删除（点两次确认）；新增或编辑都是把 SKILL.md 粘进文本域保存，名字取自 frontmatter。附件暂无页面入口，只能经接口上传。
+- 从 Docker 迁移（Bash，仓库根目录）：`scripts/import-skills.mjs` 读 `data/skills/<name>/SKILL.md` 与该目录下的文本文件（含子目录），输出 PUT 请求体；二进制、`__pycache__`、点开头的文件与超过 64 KiB 的文件跳过，并在 stderr 列出路径。
+
+~~~bash
+for dir in data/skills/*/; do
+  name=$(basename "$dir")
+  node workers/scripts/import-skills.mjs "$name" | curl --fail-with-body -X PUT "$WORKER_URL/admin/skills/$name" \
+    -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' --data-binary @-
+done
+~~~
+
+## 历史记录导入
+
+- 导出（仓库根目录，Node ≥ 24）：`node workers/scripts/export-messages.mjs <scope>`，scope 为 `group:<群号>` 或 `private:<QQ号>`。只读打开 `data/qq-messages.sqlite`，输出 `{ scope, name?, messages, summaries }`；Docker 的 `summaries.level` 改名 `kind`，`outbox_key`、`status` 丢弃，`detail` 含 `data:` URI 或 256 字符以上的 base64 串时置空。
+- 导入：`POST /admin/messages/import`（ADMIN_TOKEN），body 即导出结果，≤ 8 MiB（超过 413，格式不对 400 `invalid_import`）。`group:<群号>` 进同名线程；`private:<owner 号>` 进 `owner` 线程，消息仍按 `private:<owner 号>` 作用域保存，`qq_context` 才能按当前会话召回；其他私聊进 `private:<号>`。owner 号取自 `QQ_OWNER`。Thread 再经 `idFromName` 复核。
+- 消息按 `(scope, message_id)`、摘要按 `(scope, kind, period_start)` 去重（`INSERT OR IGNORE`），线上已有的同号消息不被覆盖；`scope_names` 用导入的 name 更新。FTS（trigram）由触发器同步。返回 `{ messages: { inserted, skipped }, summaries: { inserted, skipped } }`，同样的计数写进审计事件 `history_import`，不含正文。
+
+~~~bash
+node workers/scripts/export-messages.mjs group:123456789 > history-group.json
+curl --fail-with-body -X POST "$WORKER_URL/admin/messages/import" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  --data-binary @history-group.json
+~~~
+
+- 导入后由维护任务接管：早于 `HISTORY_RAW_DAYS` 的原文，已被摘要覆盖的在下一次 aging 时删除；没被覆盖且一天 ≥ 5 条的，aging 会逐日调用模型补日摘要。早于 `HISTORY_SUMMARY_DAYS` 的摘要会被清理。
+- 测试：`test/skills.test.ts`、`test/message-import.test.ts`（vitest），`test/export-messages.node.mjs`、`test/import-skills.node.mjs`（`node --test` 单独运行）。
 
 # Workers P2：定时任务、外部事件与维护
 
