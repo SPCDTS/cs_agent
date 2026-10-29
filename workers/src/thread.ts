@@ -6,10 +6,12 @@ import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@ea
 import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
-import { effectiveSettings, type SettingsSnapshot } from "./settings";
+import { effectiveSettings, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
 import { MESSAGE_SCHEMA, recordMessage, recall } from "./context";
 import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, turnIdentity } from "./prompt";
-import { openModels } from "./models";
+import type { MutableModels } from "@earendil-works/pi-ai/models";
+import { modelChange, openModels, sameSelection } from "./models";
+import { remoteCredentials } from "./model-credentials";
 import { MEMORY_SCHEMA } from "./memory/schema";
 import { MemoryStore, MemoryStoreError, type Profile } from "./memory/store";
 import type { MemoryRow } from "./memory/types";
@@ -42,7 +44,7 @@ type ToolProfile = "chat" | "event";
 const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read",
   ...(MCP_CONFIG.enabled && MCP_CONFIG.servers.some(server => server.enabled && server.tools.eventAllow.length) ? ["codemode"] : [])]);
 const profileOf = (row: InboundRow): ToolProfile => row.kind === "event" ? "event" : "chat";
-type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: { provider: string; id: string }; profile: ToolProfile; mcp?: ThreadMcp };
+type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp };
 const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind: "group", groupId: row.chat_id } : { kind: "private", userId: row.chat_id };
 export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
 export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
@@ -53,7 +55,7 @@ const SETTINGS_TTL_MS = 60_000;
 export class ThreadDO extends DurableObject<Env> {
   private readonly database = new DurableObjectSqliteDatabase(this.ctx.storage);
   private initialized?: Promise<void>;
-  private extractionModels?: ReturnType<typeof openModels>;
+  private modelsCache?: MutableModels;
   private runtime?: Promise<Runtime>;
   private admissions: Promise<void> = Promise.resolve();
   private settingsCache?: { at: number; load: Promise<SettingsSnapshot> };
@@ -129,9 +131,14 @@ export class ThreadDO extends DurableObject<Env> {
     return submission?.requestId ? this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ?", submission.requestId) : undefined;
   }
 
+  // 回合与记忆抽取共用一个 Models；OAuth 凭据经 Registry 读写，刷新也在 Registry 的锁里串行。
+  private models(): MutableModels {
+    return this.modelsCache ??= openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")));
+  }
+
   private async openRuntime(): Promise<Runtime> {
     await this.initialize();
-    const { models, selection } = await (this.extractionModels ??= openModels(this.env).catch(error => { this.extractionModels = undefined; throw error; }));
+    const models = this.models(), selection = (await this.loadSettings(true)).model;
     const memory = new MemoryStore(this.database, await this.namespace());
     // 相同 storage 对象共享事务队列，避免宿主写入被 Pi 的事务一起回滚。
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
@@ -210,9 +217,10 @@ export class ThreadDO extends DurableObject<Env> {
       return input ? this.ownerTurnKind(input) : undefined;
     }) : undefined;
     await mcp?.restore();
-    const harness = await Harness.open(storage, { models, registry }, context);
-    const root = await harness.root(context, { agent: { model: { provider: selection.provider, modelId: selection.id } } });
-    await root.configure({ model: { provider: selection.provider, modelId: selection.id } }, context);
+    // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
+    const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
+    const root = await harness.root(context, { agent: modelChange(selection) });
+    await root.configure(modelChange(selection), context);
     const runtime: Runtime = { harness, root, registry, selection, profile: "chat", mcp };
     await this.applyProfile(runtime, await this.ctx.storage.get<ToolProfile>("tool_profile") ?? "chat");
     // 已被 Pi 接收过的输入按 requestId 幂等重交；尚未接收的由 pump 按工具档位继续接纳。
@@ -247,6 +255,14 @@ export class ThreadDO extends DurableObject<Env> {
     runtime.profile = profile;
   }
 
+  // 面板改了模型后，从下一批接纳的输入起生效；取不到设置时沿用当前模型。
+  private async syncModel(runtime: Runtime): Promise<void> {
+    const selection = await this.loadSettings(true).then(settings => settings.model, () => runtime.selection);
+    if (sameSelection(selection, runtime.selection)) return;
+    await runtime.root.configure(modelChange(selection), context);
+    runtime.selection = selection;
+  }
+
   private async idle({ harness, root }: Runtime): Promise<boolean> {
     const [live, inbox] = await Promise.all([harness.snapshot(LiveDoc, root.id, context), harness.snapshot(InboxDoc, root.id, context)]);
     return !live?.run && !inbox?.items.length;
@@ -279,7 +295,9 @@ export class ThreadDO extends DurableObject<Env> {
       }
       for (;;) {
         const rows = await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' AND when_busy IS NULL ORDER BY rowid");
-        for (const row of rows.filter(row => profileOf(row) === runtime.profile)) {
+        const admissible = rows.filter(row => profileOf(row) === runtime.profile);
+        if (admissible.length) await this.syncModel(runtime);
+        for (const row of admissible) {
           let submission: Submission | undefined;
           try { submission = await this.admit(runtime, row); }
           catch { await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ?", row.message_id); }
@@ -477,23 +495,28 @@ export class ThreadDO extends DurableObject<Env> {
     return { ns, owner: owner && input.kind !== "event", userId: input.user_id, turnId: input.turn_id, scope: scopeOf(targetOf(input)), messageId: input.platform_message_id };
   }
 
-  // 抽取、摘要与整理都是无工具的单次补全，共用抽取模型配置。
+  // 抽取、摘要与整理都是无工具的单次补全，用当前选择的 provider；MEMORY_EXTRACT_MODEL 只换模型 id。
   private readonly complete: ExtractComplete = async (prompt, signal) => {
-    const { models, selection } = await (this.extractionModels ??= openModels(this.env).catch(error => { this.extractionModels = undefined; throw error; }));
+    const selection = (await this.loadSettings()).model;
     signal.throwIfAborted();
-    return directComplete(models, selection.provider, this.env.MEMORY_EXTRACT_MODEL?.trim() || selection.id)(prompt, signal);
+    return directComplete(this.models(), selection.provider, this.env.MEMORY_EXTRACT_MODEL?.trim() || selection.id)(prompt, signal);
   };
 
-  private async extractEnabled(ns: string): Promise<boolean> {
-    if (!ns) return false;
+  /** 抽取判定读 60 秒缓存；接纳输入时传 fresh，面板改的模型下一回合就生效。 */
+  private async loadSettings(fresh = false): Promise<Settings> {
     let cache = this.settingsCache;
-    if (!cache || Date.now() - cache.at >= SETTINGS_TTL_MS) {
+    if (fresh || !cache || Date.now() - cache.at >= SETTINGS_TTL_MS) {
       const load = this.env.REGISTRY.getByName("main").settings();
       cache = this.settingsCache = { at: Date.now(), load };
       load.catch(() => { if (this.settingsCache?.load === load) this.settingsCache = undefined; });
     }
+    return effectiveSettings(this.env, (await cache.load).overrides);
+  }
+
+  private async extractEnabled(ns: string): Promise<boolean> {
+    if (!ns) return false;
     // 取不到设置时不抽取：面板可能刚关掉这个命名空间，宁可漏一轮也不按过期配置调用模型。
-    try { return effectiveSettings(this.env, (await cache.load).overrides).extractNamespaces.includes(ns); }
+    try { return (await this.loadSettings()).extractNamespaces.includes(ns); }
     catch { return false; }
   }
 
@@ -596,12 +619,5 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     const rows = await this.database.all<{ server_id: string; n: number }>("SELECT server_id, COUNT(*) AS n FROM mcp_catalog GROUP BY server_id");
     return Object.fromEntries(rows.map(row => [row.server_id, row.n]));
-  }
-
-  async modelStatus(): Promise<{ provider: string; id: string } | { unavailable: string }> {
-    try { return (await this.open()).selection; }
-    catch (error) {
-      return { unavailable: error instanceof Error ? error.message.slice(0, 160) : "unknown" };
-    }
   }
 }

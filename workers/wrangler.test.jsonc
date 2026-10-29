@@ -1,5 +1,4 @@
-// 测试专用配置：与 wrangler.jsonc 相同，去掉 containers（vitest-pool-workers 自带的 wrangler 不认 durable_object
-// 调度策略）、routes 与 dev；MAGPIE 绑定保留，faux 模式不会碰容器。改 wrangler.jsonc 时同步改这里。
+// 测试专用配置：与 wrangler.jsonc 相同，去掉 routes，模型默认用 faux。改 wrangler.jsonc 时同步改这里。
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "cs-agent",
@@ -17,7 +16,6 @@
       { "name": "THREAD", "class_name": "ThreadDO" },
       { "name": "REGISTRY", "class_name": "RegistryDO" },
       { "name": "BRIDGE", "class_name": "BridgeDO" },
-      { "name": "MAGPIE", "class_name": "MagpieContainer" },
       { "name": "SCHEDULE", "class_name": "ScheduleDO" },
       { "name": "EVENTS", "class_name": "EventsDO" }
     ]
@@ -28,9 +26,10 @@
     { "tag": "v3", "new_sqlite_classes": ["MagpieContainer"] },
     { "tag": "v4", "new_sqlite_classes": ["RegistryDO"] },
     { "tag": "v5", "new_sqlite_classes": ["ScheduleDO"] },
-    { "tag": "v6", "new_sqlite_classes": ["EventsDO"] }
+    { "tag": "v6", "new_sqlite_classes": ["EventsDO"] },
+    { "tag": "v7", "deleted_classes": ["MagpieContainer"] }
   ],
-  // QQ_OWNER、NAPCAT_TOKEN、R2_*、MAGPIE_SYNC_PASSPHRASE、MAGPIE_WEB_KEY 都是 secrets（wrangler secret put），不写在这里
+  // QQ_OWNER、NAPCAT_TOKEN、DEEPSEEK_API_KEY、OAUTH_STORE_KEY 等都是 secrets（wrangler secret put），不写在这里
   "vars": {
     "CS_AGENT_COMMIT": "dev",
     "PUBLIC_ORIGIN": "https://agent.spcdts.dev",
@@ -39,9 +38,7 @@
     "MEMORY_EXTRACT_NAMESPACES": "owner",
     "MODEL_PROVIDER": "faux",
     "MODEL_ID": "test",
-    "MAGPIE_URL": "",
     "GMAIL_PUBSUB_SERVICE_ACCOUNT": "",
-    "GMAIL_PUBSUB_TOPIC": "",
-    "MAGPIE_WEB_HOST": "magpie.spcdts.dev"
+    "GMAIL_PUBSUB_TOPIC": ""
   }
 }

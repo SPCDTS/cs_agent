@@ -162,9 +162,9 @@ describe("memory extraction", () => {
       return fauxAssistantMessage(fauxToolCall("send_message", { text: "本回合已发送的练习约定。" }), { stopReason: "toolUse" });
     };
     faux.setResponses([respond]);
-    vi.spyOn(models, "openModels").mockImplementation(async () => {
+    vi.spyOn(models, "openModels").mockImplementation(() => {
       const registry = createModels(); registry.setProvider(faux.provider);
-      return { models: registry, selection: { provider: "faux", id: "test" } };
+      return registry;
     });
     const thread = env.THREAD.getByName("owner");
     const running = runInDurableObject(thread, async (_instance, state) => {
@@ -225,11 +225,11 @@ describe("memory extraction", () => {
     expect(failed.result).toEqual({ status: "failed" });
     expect(failed.stats.memory.extractQueue).toBe(0);
     expect(failed.alarm).toBeNull();
-    vi.spyOn(models, "openModels").mockImplementation(async () => {
+    vi.spyOn(models, "openModels").mockImplementation(() => {
       const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
       faux.setResponses([fauxAssistantMessage("done")]);
       const registry = createModels(); registry.setProvider(faux.provider);
-      return { models: registry, selection: { provider: "faux", id: "test" } };
+      return registry;
     });
     for (const [id, setting, expected] of [[200000001, "owner", 0], [200000002, "owner, group:200000002", 1]] as const) {
       const stats = await runInDurableObject(env.THREAD.getByName(`group:${id}`), async (_instance, state) => {

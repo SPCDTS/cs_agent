@@ -32,9 +32,9 @@ function fauxModel() {
     return fauxAssistantMessage(prompt.includes("一周内每天的摘要") ? "本周围绕烟雾弹训练做了安排。" : "成员讨论了烟雾弹训练。");
   };
   faux.setResponses([respond]);
-  vi.spyOn(models, "openModels").mockImplementation(async () => {
+  vi.spyOn(models, "openModels").mockImplementation(() => {
     const registry = createModels(); registry.setProvider(faux.provider);
-    return { models: registry, selection: { provider: "faux", id: "test" } };
+    return registry;
   });
   return prompts;
 }

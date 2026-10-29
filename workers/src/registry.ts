@@ -1,23 +1,33 @@
 import { DurableObject } from "cloudflare:workers";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
+import type { Credential } from "@earendil-works/pi-ai";
 import type { Env } from "./env";
 import { MCP_CONFIG, isOAuthServer, publicOrigin, referencedSecret, type OAuthServer } from "./mcp/config";
 import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { DiscoverySchema, discover, exchange, TokenRejected, type OAuthTokens } from "./mcp/oauth";
 import { OAuthFailure } from "./mcp/oauth-fetch";
-import { defaultSettings, effectiveSettings, settingsRevision, type Settings, type SettingsSnapshot } from "./settings";
+import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
+import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, type CredentialLease } from "./model-credentials";
+import { openModels, providerStatuses, selectionProblem, type ProviderStatus } from "./models";
+import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, exchangeCode, parseCallback, startCodexLogin } from "./codex-login";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
 type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash: string; created_at: number; expires_at: number };
 export type McpStatus = { server: string; enabled: boolean; credential: "none" | "static" | "oauth"; login: "ok" | "needed" | "error" | "unconfigured" };
 const Pending = Type.Object({ verifier: Type.String(), config: Type.String(), discovery: DiscoverySchema }, { additionalProperties: false });
 const identity = (server: OAuthServer, field: string) => JSON.stringify([server.id, server.credential.accountId, server.credential.revision, field]);
+type ModelLoginRow = { state: string; provider_id: string; verifier_enc: string; created_at: number; expires_at: number };
+export type ModelView = { current: ModelSelection; revision: string; providers: ProviderStatus[]; codex: { loggedIn: boolean; email?: string; expiresAt?: number } };
+export type ModelStatus = (ModelSelection & { codexLoggedIn: boolean }) | { unavailable: string };
+export type PutSettingsResult = { ok: true; current: SettingsSnapshot } | { ok: false; error: "conflict"; current: SettingsSnapshot } | { ok: false; error: "invalid_model"; reason: string };
 
 export class RegistryDO extends DurableObject<Env> {
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly access = new Map<string, Promise<string | undefined>>();
+  private readonly credentials = new SqlCredentialStore(this.ctx.storage.sql, this.vault);
+  private readonly models = openModels(this.env, this.credentials);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -32,23 +42,89 @@ export class RegistryDO extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS mcp_oauth_nonce ON mcp_oauth_logins(nonce_hash);
       CREATE TABLE IF NOT EXISTS mcp_oauth_client (server_id TEXT PRIMARY KEY, registration_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, revision TEXT NOT NULL, updated_at INTEGER NOT NULL);
+      ${MODEL_CREDENTIALS_SCHEMA};
+      CREATE TABLE IF NOT EXISTS model_logins (state TEXT PRIMARY KEY, provider_id TEXT NOT NULL, verifier_enc TEXT NOT NULL,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
     `);
   }
 
   // 一行保存整份覆盖值；revision 按有效内容计算，未覆盖时也能对默认值做 CAS。
   settings(): SettingsSnapshot {
     const row = this.ctx.storage.sql.exec<{ value: string; updated_at: number }>("SELECT value, updated_at FROM settings WHERE key = 'runtime'").toArray()[0];
-    const overrides: Settings | null = row ? JSON.parse(row.value) : null, value = effectiveSettings(this.env, overrides);
-    return { value, revision: settingsRevision(value), defaults: defaultSettings(this.env), overrides, updatedAt: row?.updated_at ?? null };
+    const defaults = defaultSettings(this.env);
+    // 加入 model 之前保存的行没有这一项，沿用 vars 的默认模型。
+    const overrides: Settings | null = row ? { model: defaults.model, ...JSON.parse(row.value) } : null, value = effectiveSettings(this.env, overrides);
+    return { value, revision: settingsRevision(value), defaults, overrides, updatedAt: row?.updated_at ?? null };
   }
 
-  putSettings(value: Settings, expectedRevision: string): { ok: boolean; current: SettingsSnapshot } {
+  /** 模型变了才校验可用性：已选的模型登出后，仍要能保存群与白名单等其他设置。 */
+  async putSettings(value: Settings, expectedRevision: string): Promise<PutSettingsResult> {
+    const before = this.settings().value.model;
+    if (value.model.provider !== before.provider || value.model.id !== before.id) {
+      const reason = selectionProblem(await this.providers(), value.model);
+      if (reason) return { ok: false, error: "invalid_model", reason };
+    }
+    // 校验期间可能有别的保存插进来，CAS 放在 await 之后同步完成。
     const current = this.settings();
-    if (current.revision !== expectedRevision) return { ok: false, current };
+    if (current.revision !== expectedRevision) return { ok: false, error: "conflict", current };
     this.ctx.storage.sql.exec(`INSERT INTO settings (key, value, revision, updated_at) VALUES ('runtime', ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, revision=excluded.revision, updated_at=excluded.updated_at`,
     JSON.stringify(value), settingsRevision(value), Date.now());
     return { ok: true, current: this.settings() };
+  }
+
+  private async providers(): Promise<ProviderStatus[]> {
+    const statuses = await providerStatuses(this.models);
+    return statuses.map(status => status.id === CODEX_PROVIDER && !this.vault.configured ? { ...status, reason: "unconfigured" } : status);
+  }
+
+  async modelView(): Promise<ModelView> {
+    const settings = this.settings(), meta = this.credentials.meta(CODEX_PROVIDER);
+    return { current: settings.value.model, revision: settings.revision, providers: await this.providers(),
+      codex: { loggedIn: meta !== undefined, ...(meta?.email ? { email: meta.email } : {}), ...(meta?.expiresAt ? { expiresAt: meta.expiresAt } : {}) } };
+  }
+
+  async modelStatus(): Promise<ModelStatus> {
+    const view = await this.modelView(), problem = selectionProblem(view.providers, view.current);
+    return problem ? { unavailable: `${view.current.provider}/${view.current.id}: ${problem}` } : { ...view.current, codexLoggedIn: view.codex.loggedIn };
+  }
+
+  // Thread 侧 CredentialStore 的 RPC；凭据只在 Worker 内部的 DO 之间传递，不经任何 HTTP 响应。
+  credentialRead(providerId: string) { return this.credentials.read(providerId); }
+  credentialList() { return this.credentials.list(); }
+  credentialDelete(providerId: string) { return this.credentials.delete(providerId); }
+  credentialAcquire(providerId: string): Promise<CredentialLease> { return this.credentials.acquire(providerId); }
+  credentialSettle(providerId: string, lease: string, expectedUpdatedAt: number | null, next?: Credential) {
+    return this.credentials.settle(providerId, lease, expectedUpdatedAt, next);
+  }
+
+  /** 每个 provider 只留一条待完成登录；verifier 加密保存，AAD 绑定 state。 */
+  async codexLoginStart(): Promise<{ url: string }> {
+    if (!this.vault.configured) throw new ModelLoginError("unconfigured");
+    const pending = await startCodexLogin(), now = Date.now();
+    const verifier = await this.vault.encrypt(pending.verifier, `model-login:${pending.state}`);
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM model_logins WHERE expires_at <= ? OR provider_id = ?", now, CODEX_PROVIDER);
+      this.ctx.storage.sql.exec("INSERT INTO model_logins VALUES (?, ?, ?, ?, ?)", pending.state, CODEX_PROVIDER, verifier, now, now + LOGIN_TTL_MS);
+    });
+    return { url: pending.url };
+  }
+
+  /** state 在换 token 之前就消费掉，失败也不能用同一个回调地址重试。 */
+  async codexLoginComplete(callbackUrl: string): Promise<{ email?: string }> {
+    const { code, state } = parseCallback(callbackUrl);
+    const row = this.ctx.storage.sql.exec<ModelLoginRow>("DELETE FROM model_logins WHERE state = ? RETURNING *", state).toArray()[0];
+    if (!row || row.expires_at <= Date.now()) throw new ModelLoginError("invalid_state");
+    let verifier: string;
+    try { verifier = await this.vault.decrypt(row.verifier_enc, `model-login:${state}`); } catch { throw new ModelLoginError("invalid_state"); }
+    const credential = await exchangeCode(code, verifier);
+    await this.credentials.modify(row.provider_id, async () => credential);
+    return credential.email ? { email: credential.email } : {};
+  }
+
+  async codexLogout(): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM model_logins WHERE provider_id = ?", CODEX_PROVIDER);
+    await this.credentials.delete(CODEX_PROVIDER);
   }
 
   private server(id: string): OAuthServer {

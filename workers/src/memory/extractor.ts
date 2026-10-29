@@ -134,8 +134,8 @@ export function directComplete(models: Models, provider: string, id: string): Ex
   return async (prompt, signal) => {
     const model = models.getModel(provider, id);
     if (!model) throw new Error("memory_model_unavailable");
-    // 直接调用 pi-ai，不创建 Harness、不提供工具、不进入主会话历史。
-    const result = await models.complete(model, { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { signal, maxTokens: 2000 });
+    // 直接调用 pi-ai，不创建 Harness、不提供工具、不进入主会话历史。Codex 在 Worker 里只能走 SSE，同回合的设置一致。
+    const result = await models.complete(model, { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] }, { signal, maxTokens: 2000, transport: "sse" });
     if (result.stopReason === "error" || result.stopReason === "aborted" || result.stopReason === "toolUse" || result.stopReason === "length") throw new Error("memory_model_failed");
     return { text: result.content.filter(block => block.type === "text").map(block => block.text).join(""), usage: result.usage };
   };

@@ -138,6 +138,52 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
     </div>
   </section>
 
+  <section class="card" id="model-section">
+    <div class="section-head"><h2 class="h2">模型</h2><span class="muted">存在 Registry 设置里，切换后各会话下一回合生效，不用重新部署</span></div>
+    <div class="pair" style="gap:0">
+      <div class="stack" style="flex:1 1 420px;min-width:0">
+        <div class="row"><span class="muted small">当前</span><span id="m-current" class="mono">-</span></div>
+        <div class="field">
+          <label for="m-model">模型</label>
+          <select id="m-model"></select>
+        </div>
+        <div class="field">
+          <label for="m-effort">推理强度</label>
+          <select id="m-effort">
+            <option value="">模型默认</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+          </select>
+        </div>
+        <div class="row"><button id="m-save" class="btn primary" type="button">切换</button><span id="m-meta" class="muted small"></span></div>
+      </div>
+      <div class="stack" style="flex:1 1 420px;min-width:0">
+        <div class="row"><strong>ChatGPT 订阅登录</strong><span id="codex-status" class="pill neutral">-</span></div>
+        <div id="codex-account" class="muted small"></div>
+        <div class="row">
+          <button id="codex-start" class="btn primary" type="button">开始登录</button>
+          <button id="codex-logout" class="btn danger" type="button" hidden>登出</button>
+        </div>
+        <div id="codex-pending" class="stack" style="padding:0" hidden>
+          <div class="muted small">1. 打开授权链接并登录 ChatGPT；授权后浏览器会跳到一个打不开的 localhost:1455 地址，这是正常的。</div>
+          <div class="link-box">
+            <input id="codex-url" type="text" readonly aria-label="ChatGPT 授权链接">
+            <a id="codex-open" class="btn" target="_blank" rel="noopener noreferrer">打开</a>
+            <button id="codex-copy" class="btn" type="button">复制</button>
+          </div>
+          <div class="muted small">2. 把地址栏里的整串回调地址粘贴到这里，再点完成登录（10 分钟内有效，只能用一次）。</div>
+          <div class="link-box">
+            <input id="codex-callback" type="text" autocomplete="off" placeholder="http://localhost:1455/auth/callback?code=…&amp;state=…" aria-label="回调地址">
+            <button id="codex-complete" class="btn primary" type="button">完成登录</button>
+          </div>
+        </div>
+        <div class="note">token 加密存在 Registry，到期前自动续期；页面只显示结果分类，不回显 code 或 token。</div>
+      </div>
+    </div>
+  </section>
+
   <section class="pair">
     <div class="card">
       <div class="section-head"><h2 class="h2">MCP 服务</h2><span class="muted">来自 mcp.json，改服务要重新部署</span></div>
@@ -224,8 +270,16 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     unconfigured: "未配置 OAUTH_STORE_KEY，不能登录",
     server_unavailable: "该服务未启用或不支持此操作",
     internal: "服务内部错误",
+    invalid_model: "该模型当前不可用",
+    invalid_state: "登录已过期或与本次授权不匹配，请重新开始登录",
+    missing_code: "回调地址里没有 code，请粘贴浏览器地址栏里的完整地址",
+    authorization_denied: "ChatGPT 授权被拒绝",
+    invalid_callback: "回调地址格式不正确",
+    token_exchange: "换取 token 失败，请重新开始登录",
   };
-  const state = { overview: null, settings: null, eventKind: "", eventThread: "owner", before: undefined, history: [], next: undefined,
+  const MODEL_REASONS = { missing_key: "缺 DEEPSEEK_API_KEY", login_required: "未登录 ChatGPT", unconfigured: "未配置 OAUTH_STORE_KEY",
+    unknown_provider: "provider 未注册", unknown_model: "目录里没有这个模型", unavailable: "不可用" };
+  const state = { overview: null, settings: null, model: null, eventKind: "", eventThread: "owner", before: undefined, history: [], next: undefined,
     memoryNs: "owner", memoryQuery: "", memoryView: null, profile: null, armedDelete: null, timer: null, noticeTimer: null };
 
   const $ = id => document.getElementById(id);
@@ -277,7 +331,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     if (error instanceof ApiError) {
       const code = error.body && error.body.error;
       const reason = error.body && error.body.reason;
-      return (ERRORS[code] || ("请求失败（" + error.status + (code ? " " + code : "") + "）")) + (reason ? "：" + reason : "");
+      return (ERRORS[code] || ("请求失败（" + error.status + (code ? " " + code : "") + "）")) + (reason ? "：" + (MODEL_REASONS[reason] || reason) : "");
     }
     return "网络错误，请稍后再试";
   }
@@ -307,6 +361,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     $("status").hidden = true;
     refresh();
     loadSettings().catch(fail);
+    loadModel().catch(fail);
     loadMemory().catch(fail);
     clearInterval(state.timer);
     state.timer = setInterval(refresh, 30000);
@@ -332,7 +387,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     $("card-napcat").textContent = o.bridge.connected ? "已连接" : "未连接";
     $("card-napcat-sub").textContent = "反向 WebSocket" + (o.bridge.selfId ? " · 机器人 " + o.bridge.selfId : "") + " · 忽略 " + o.bridge.ignored;
     $("card-model").textContent = healthy ? o.model.id : "不可用";
-    $("card-model-sub").textContent = healthy ? "provider " + o.model.provider : o.model.unavailable;
+    $("card-model-sub").textContent = healthy ? "provider " + o.model.provider + (o.model.reasoningEffort ? " · 推理 " + o.model.reasoningEffort : "") : o.model.unavailable;
     const totals = { queued: 0, done: 0, failed: 0 };
     for (const thread of o.threads) if (thread.stats.inbound) for (const key of Object.keys(totals)) totals[key] += thread.stats.inbound[key];
     $("card-threads").textContent = o.threads.length + " 个线程";
@@ -476,21 +531,99 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     $("s-extract").value = listText(value.extractNamespaces);
     $("s-meta").textContent = snapshot.overrides ? "上次保存 " + time(snapshot.updatedAt) : "当前沿用 secrets/vars 默认值";
     const d = snapshot.defaults;
-    $("s-defaults").textContent = "默认值：群 " + (listText(d.allowGroups) || "无") + "；私聊 " + (listText(d.allowUsers) || "无") + "；抽取 " + (listText(d.extractNamespaces) || "关闭");
+    $("s-defaults").textContent = "默认值：群 " + (listText(d.allowGroups) || "无") + "；私聊 " + (listText(d.allowUsers) || "无") + "；抽取 " + (listText(d.extractNamespaces) || "关闭")
+      + "；模型 " + d.model.provider + "/" + d.model.id;
   }
   async function saveSettings() {
+    // 模型由模型卡片切换，这里原样带回当前值；两张卡片共用一个 revision。
     const value = { groupTrigger: $("s-trigger").value, allowGroups: parseList($("s-groups").value),
-      allowUsers: parseList($("s-users").value), extractNamespaces: parseList($("s-extract").value) };
+      allowUsers: parseList($("s-users").value), extractNamespaces: parseList($("s-extract").value), model: state.settings.value.model };
     try {
       const saved = await api("PUT", "/admin/settings", { value, expectedRevision: state.settings.revision });
       renderSettings(saved);
       notice(saved.applied ? "设置已保存并推送到 Bridge" : "设置已保存，Bridge 暂未确认，最迟在它重启后生效");
+      loadModel().catch(fail);
       refresh();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && error.body.current) renderSettings(error.body.current);
       if (error instanceof ApiError && error.status === 400) { show("设置格式不正确：群号与 QQ 号须为 5～16 位数字，命名空间只能是 owner、group:群号 或 private:QQ号", "error"); return; }
       fail(error);
     }
+  }
+
+  async function loadModel() {
+    renderModel(await api("GET", "/admin/model"));
+  }
+  function renderModel(view) {
+    state.model = view;
+    const current = view.current, key = current.provider + "/" + current.id;
+    $("m-current").textContent = key + (current.reasoningEffort ? " · 推理 " + current.reasoningEffort : "");
+    const select = $("m-model");
+    clear(select);
+    for (const provider of view.providers) {
+      const group = el("optgroup", { label: provider.name + (provider.available ? "" : "（" + (MODEL_REASONS[provider.reason] || provider.reason) + "）") });
+      for (const model of provider.models) {
+        const value = provider.id + "/" + model.id;
+        group.append(el("option", { value, text: model.name + " · " + model.id, disabled: !provider.available && value !== key }));
+      }
+      select.append(group);
+    }
+    select.value = key;
+    $("m-effort").value = current.reasoningEffort || "";
+    const codex = view.codex;
+    const status = $("codex-status");
+    status.textContent = codex.loggedIn ? "已登录" : "未登录";
+    status.className = "pill " + (codex.loggedIn ? "ok" : "neutral");
+    $("codex-account").textContent = codex.loggedIn ? (codex.email || "账号邮箱未知") + (codex.expiresAt ? " · access token 到期 " + time(codex.expiresAt) + "（会自动续期）" : "") : "";
+    $("codex-start").textContent = codex.loggedIn ? "重新登录" : "开始登录";
+    $("codex-logout").hidden = !codex.loggedIn;
+    if (codex.loggedIn) $("codex-pending").hidden = true;
+  }
+  async function saveModel() {
+    const value = $("m-model").value, slash = value.indexOf("/"), effort = $("m-effort").value;
+    const model = { provider: value.slice(0, slash), id: value.slice(slash + 1) };
+    if (effort) model.reasoningEffort = effort;
+    try {
+      renderModel(await api("PUT", "/admin/model", { model, expectedRevision: state.model.revision }));
+      notice("模型已切换，各会话下一回合生效");
+      loadSettings().catch(fail);
+      refresh();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) loadModel().catch(fail);
+      fail(error);
+    }
+  }
+  async function codexStart() {
+    try {
+      const result = await api("POST", "/admin/model/oauth/codex/start");
+      $("codex-url").value = result.url;
+      $("codex-open").setAttribute("href", result.url);
+      $("codex-callback").value = "";
+      $("codex-pending").hidden = false;
+      notice("已生成 ChatGPT 授权链接，旧链接已失效");
+    } catch (error) { fail(error); }
+  }
+  async function codexComplete() {
+    const callbackUrl = $("codex-callback").value.trim();
+    if (!callbackUrl) return;
+    try {
+      const result = await api("POST", "/admin/model/oauth/codex/complete", { callbackUrl });
+      $("codex-callback").value = "";
+      $("codex-url").value = "";
+      $("codex-pending").hidden = true;
+      notice("ChatGPT 已登录" + (result.email ? "：" + result.email : ""));
+    } catch (error) {
+      // state 已消费，同一个回调地址不能再用，清掉免得重复提交。
+      $("codex-callback").value = "";
+      fail(error);
+    }
+    loadModel().catch(fail);
+    refresh();
+  }
+  async function codexLogout() {
+    try { await api("POST", "/admin/model/oauth/codex/logout"); notice("ChatGPT 已登出"); } catch (error) { fail(error); }
+    loadModel().catch(fail);
+    refresh();
   }
 
   async function loadMemory() {
@@ -604,6 +737,11 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     loadEvents().catch(fail);
   });
   $("s-save").addEventListener("click", saveSettings);
+  $("m-save").addEventListener("click", saveModel);
+  $("codex-start").addEventListener("click", codexStart);
+  $("codex-complete").addEventListener("click", codexComplete);
+  $("codex-logout").addEventListener("click", codexLogout);
+  $("codex-copy").addEventListener("click", () => { navigator.clipboard.writeText($("codex-url").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
   $("mem-ns").addEventListener("change", event => { state.memoryNs = event.target.value; toggleProfile(false); loadMemory().catch(fail); });
   $("mem-q").addEventListener("keydown", event => { if (event.key === "Enter") { state.memoryQuery = event.target.value.trim(); loadMemory().catch(fail); } });
   $("mem-q").addEventListener("search", event => { state.memoryQuery = event.target.value.trim(); loadMemory().catch(fail); });

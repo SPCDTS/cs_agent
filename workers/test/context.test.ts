@@ -68,10 +68,10 @@ describe("per-thread message context", () => {
       return fauxAssistantMessage(fauxToolCall("qq_context", { query: "烟雾弹", limit: 50 }), { stopReason: "toolUse" });
     };
     faux.setResponses([respond]);
-    vi.spyOn(models, "openModels").mockImplementation(async () => {
+    vi.spyOn(models, "openModels").mockImplementation(() => {
       const registry = createModels();
       registry.setProvider(faux.provider);
-      return { models: registry, selection: { provider: "faux", id: "test" } };
+      return registry;
     });
     const thread = env.THREAD.getByName("owner");
     const running = runInDurableObject(thread, async (_instance, state) => {

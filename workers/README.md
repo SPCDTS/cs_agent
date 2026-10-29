@@ -11,20 +11,25 @@
 | GET /admin/memory?ns=&q=、DELETE /admin/memory/:id?ns=、PUT /admin/memory/profile | 记忆列表与搜索（`#id` 按编号）、遗忘、画像 CAS；ns 只能是 owner 或 group:群号 |
 | POST /admin/mcp/:server/login-link、logout、refresh | 一次性登录链接、本地登出、刷新 owner 线程的 MCP 目录 |
 | POST /admin/send-rules/release | 解除某个 scope 的熔断 |
+| GET / PUT /admin/model | 当前模型、可选模型与 ChatGPT 登录状态；PUT 带 `expectedRevision`（与设置共用），切到不可用的模型返回 400 `invalid_model` |
+| POST /admin/model/oauth/codex/start、complete、logout | ChatGPT 订阅登录：生成授权链接、提交粘贴回来的回调地址、登出 |
 
 设置保存在 Registry 的 `settings` 表（一行整份覆盖值）：`groupTrigger`（`mention_or_reply` / `mention_only` / `off`）、`allowGroups`、`allowUsers`、`extractNamespaces`。没有保存过时沿用 `QQ_ALLOW_GROUPS`、`QQ_ALLOW_USERS`、`QQ_GROUP_MENTIONS`（false 对应 off，其余对应 mention_only）与 `MEMORY_EXTRACT_NAMESPACES`；保存后这四个 secrets/vars 只作默认值显示。revision 是有效内容 SHA-256 的前 16 位。`mention_or_reply` 新增“回复机器人发出的消息”也能触发，判定查本群消息库里 `is_self=1` 的消息。Bridge 在内存缓存设置，面板保存后立即重载；Thread 判定抽取命名空间时缓存 60 秒，取不到设置时本轮不抽取。owner 只来自 `QQ_OWNER`，面板不能修改。
 
 解除熔断把该行的 `until` 改成当前时间而不删除，它仍是计数窗口的起点，否则熔断前的 60 条会让下一条立刻再次熔断。
 
-# magpie 网关与 Web UI
+# 模型与 ChatGPT 登录
 
-云端 magpie 跑在 `MagpieContainer`（`magpie/`、`src/magpie-container.ts`）：容器里 3426 是给 Pi 用的回环中继，3430 是 magpie 自带的 Web UI（`magpie serve --web=0.0.0.0:3430`）。Worker 把主机名等于 `MAGPIE_WEB_HOST`（`magpie.spcdts.dev`）的所有请求经 DO 的 `fetch` 转到 3430，响应加 `X-Robots-Tag: noindex` 与 `Referrer-Policy: no-referrer`；容器起不来时只回 503 `magpie unavailable`。`MAGPIE_WEB_HOST` 为空串时不拦截任何主机。WebSocket 与流式响应原样透传，所以走 DO 的 `fetch` 而不是 RPC 方法（RPC 不能序列化带 WebSocket 的 Response）。
+2026-10-30 起不再经 magpie 容器。Worker 用 pi-ai 直连两个 provider：`deepseek`（API key，secret `DEEPSEEK_API_KEY`）与 `openai-codex`（ChatGPT Plus/Pro 订阅的 OAuth，请求 `https://chatgpt.com/backend-api/codex/responses`）。provider 注册表在 `src/models.ts`，测试配置另有 `faux`。
 
-- 地址：https://magpie.spcdts.dev 。登录口令是 secret `MAGPIE_WEB_KEY`，`scripts/put-secrets.sh` 第一次运行时生成并存到主工作区的 `secrets/magpie-web-key.env`，之后沿用。magpie 对非回环来源要求这个口令，签入保持 400 天。
-- 云端容器是 providers、key 与设置的唯一来源：在 Web UI 里改。R2 只用来给容器自己持久化（容器磁盘是临时的，重启时 `s3 on` 从 R2 取回）。主人电脑上的 magpie 要 `magpie s3 off`，不再和这个 bucket 同步，否则两边会抢锁、互相覆盖。
-- OAuth 登录的账号（订阅类 provider）不随 R2 同步，容器一重启就没了；云端只有 API key 型 provider 可靠。
-- 容器空闲 30 分钟退出，第一次打开页面要等冷启动（网关起来加 R2 首次同步，几秒到几十秒）；DO 在一分钟内按 500 ms 重试连接。
-- `MAGPIE_WEB_KEY` 与 `MAGPIE_WEB_URL`（`https://` + `MAGPIE_WEB_HOST`）在容器启动时作为环境变量传入。改了口令要等容器下次启动才生效。
+- 当前模型是 Registry 设置里的 `model`：`{ provider, id, reasoningEffort? }`，推理强度可选 low / medium / high / xhigh，不选即模型默认。没保存过时用 vars `MODEL_PROVIDER` / `MODEL_ID`（生产为 `deepseek` / `deepseek-flash`）。在面板“模型”卡片里切换，保存走设置的 CAS；Thread 在接纳下一批输入前重新读设置，变了就 `configure` 切到新模型，不用重新部署。记忆抽取、摘要与整理用同一个 provider，`MEMORY_EXTRACT_MODEL` 只换模型 id。
+- 只能选已注册、目录里有、且可用的模型：DeepSeek 缺 key 时原因为 `missing_key`；Codex 没登录为 `login_required`，没有 `OAUTH_STORE_KEY` 为 `unconfigured`。只有模型变化时才校验，已选的 Codex 登出后，群与白名单等其他设置仍能保存，`/healthz` 的 `model` 变为 `{ unavailable }`，回合失败，直到重新登录或切走。
+- 登录步骤：面板“模型”卡片点“开始登录”，打开授权链接登录 ChatGPT；授权后浏览器跳到打不开的 `http://localhost:1455/auth/callback?code=…&state=…`，把地址栏里的整串地址粘贴回面板，点“完成登录”。授权链接 10 分钟有效，每次开始都会作废上一条；state 在换 token 前就消费，失败后要重新开始。错误只回分类（`invalid_state`、`missing_code`、`authorization_denied`、`invalid_callback`、`token_exchange`、`unconfigured`），不回显 code 或 token。
+- 授权端点、token 端点、client id、scope 与 PKCE S256 都与 pi-ai 自带的 openai-codex 登录相同（`src/codex-login.ts`）。没有调 pi-ai 的 `login()`，它要在本机起 1455 端口的回调服务器；也没有用 pi-ai 的 `openaiCodexProvider()`，它的 OAuth 实现经变量路径动态 import，打包进 Worker 后加载不到，所以按同一端点自己写 refresh，目录与 Codex Responses API 照用 pi-ai 的。
+- 凭据存在 Registry 的 `model_credentials`：整份 pi-ai `Credential`（`{ type: "oauth", access, refresh, expires, accountId, email? }`）经 AES-GCM 加密，AAD 为 provider id；`meta_json` 只有类型、邮箱、account id 与过期时间，面板和健康检查只读这一列。account id 取自 access token 的 `chatgpt_account_id`，pi-ai 用它填 `chatgpt-account-id` 请求头。
+- pi-ai 在 access token 剩 5 分钟内时于 `CredentialStore.modify` 里刷新。Thread 一侧的 store（`src/model-credentials.ts` 的 `remoteCredentials`）经 Registry 租锁：`credentialAcquire` 拿锁与当前凭据，回调在 Thread 里跑，`credentialSettle` 按版本 CAS 写回并放锁；租约 30 秒到期自动放锁。所以多个会话同时请求时只刷新一次，轮换后的 refresh token 不会被另一份旧 token 的刷新冲掉。
+- Codex 固定走 SSE：Harness 的 stream 设置与 `directComplete` 都传 `transport: "sse"`。pi-ai 默认先试 WebSocket 并按会话缓存连接，DO 里的连接跨不了请求。
+- secrets：`DEEPSEEK_API_KEY` 由 `scripts/put-secrets.sh` 从仓库根 `.env` 的 `DEEPSEEK_APIKEY` 读取，为空就跳过并提示；ChatGPT 登录不经 secrets，只依赖已有的 `OAUTH_STORE_KEY`，换这个密钥会使已存的 ChatGPT 凭据解不开，要重新登录。
 
 # Workers P2：定时任务、外部事件与维护
 
@@ -267,10 +272,8 @@ tests 1 / pass 1 / fail 0
 | `QQ_ALLOW_USERS` | 可选 secret，逗号分隔；允许私聊，沿用原策略也允许这些用户在其他群真实 @ 后触发 |
 | `QQ_ALLOW_GROUPS` | 可选 secret，逗号分隔；允许群内所有成员的消息入库，真实 @ 机器人时才触发 |
 | `QQ_GROUP_MENTIONS` | var，默认 `true`；设为 `false` 时群消息仍入库，但不启动回合，包括 owner |
-| `MODEL_PROVIDER` / `MODEL_ID` | `faux` / `deepseek` / `magpie` 及对应模型；测试始终用 faux |
-| `MAGPIE_URL` | `container` 使用现有 MagpieContainer；外部网关使用 OpenAI 兼容根地址 |
-| `DEEPSEEK_API_KEY` / `MAGPIE_GATEWAY_KEY` | 既有模型 secrets |
-| `R2_*` / `MAGPIE_SYNC_PASSPHRASE` | 既有容器状态同步 secrets |
+| `MODEL_PROVIDER` / `MODEL_ID` | 默认模型（`deepseek` / `openai-codex` 及对应 id，测试为 faux）；运行时以面板保存的设置为准，见“模型与 ChatGPT 登录” |
+| `DEEPSEEK_API_KEY` | secret，DeepSeek 直连；ChatGPT 订阅在面板登录，不用 secret |
 | `CS_AGENT_COMMIT` | 健康检查中的构建标识 |
 
 QQ 列表默认空；非法 ID 被忽略，不支持通配符。文件上传等 notice / 系统事件不作为聊天输入；字符串形式的 CQ 码不解析，文本 `@昵称`、引用和 `@全体成员` 均不能冒充真实 `at` 机器人。正文保留 `[@你]`、`[reply]`、`[image]` 等标记，引用 ID 单独落库，昵称和群名折成单行。

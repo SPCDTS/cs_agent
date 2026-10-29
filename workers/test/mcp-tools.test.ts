@@ -33,9 +33,9 @@ function scriptedModel(steps: { name: string; args: JsonObject }[]) {
     return next ? fauxAssistantMessage(fauxToolCall(next.name, next.args), { stopReason: "toolUse" }) : fauxAssistantMessage("done");
   };
   faux.setResponses([respond]);
-  vi.spyOn(models, "openModels").mockImplementation(async () => {
+  vi.spyOn(models, "openModels").mockImplementation(() => {
     const models = createModels(); models.setProvider(faux.provider);
-    return { models, selection: { provider: "faux", id: "test" } };
+    return models;
   });
   return { offers, sections, outputs };
 }

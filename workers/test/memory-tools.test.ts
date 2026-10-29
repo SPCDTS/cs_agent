@@ -31,9 +31,9 @@ function script(steps: { name: string; args: JsonObject }[]) {
     return next ? fauxAssistantMessage(fauxToolCall(next.name, next.args), { stopReason: "toolUse" }) : fauxAssistantMessage("done");
   };
   faux.setResponses([respond]);
-  vi.spyOn(models, "openModels").mockImplementation(async () => {
+  vi.spyOn(models, "openModels").mockImplementation(() => {
     const registry = createModels(); registry.setProvider(faux.provider);
-    return { models: registry, selection: { provider: "faux", id: "test" } };
+    return registry;
   });
   return { outputs, offers, sections, memorySections };
 }

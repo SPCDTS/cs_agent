@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # 把 Worker 需要的 secrets 从本地私有文件上传到 Cloudflare（wrangler secret bulk，值走 stdin，不进命令行与仓库）。
-# 读取：仓库根 .env 的 NAPCAT_TOKEN、QQ_OWNER、QQ_ALLOW_USERS、QQ_ALLOW_GROUPS；secrets/r2-magpie.env 的 R2_*、MAGPIE_SYNC_PASSPHRASE；
+# 读取：仓库根 .env 的 NAPCAT_TOKEN、QQ_OWNER、QQ_ALLOW_USERS、QQ_ALLOW_GROUPS、DEEPSEEK_APIKEY（上传为 DEEPSEEK_API_KEY，可选）；
 # secrets/gmail/client.json 与 token.json（可选）的 GMAIL_CLIENT_ID、GMAIL_CLIENT_SECRET、GMAIL_REFRESH_TOKEN；
-# secrets/admin-token.env、oauth-store-key.env、magpie-web-key.env 不存在时就地生成。
+# secrets/admin-token.env、oauth-store-key.env 不存在时就地生成。ChatGPT 订阅不走 secrets，在管理面板登录。
 # 用法：在仓库根执行  bash workers/scripts/put-secrets.sh
 set -euo pipefail
 # 在 worktree 里跑时 .env 与 secrets/ 只在主工作区，用 CS_AGENT_ROOT 指过去
 workers_dir="$(cd "$(dirname "$0")/.." && pwd)"
 root="${CS_AGENT_ROOT:-$(cd "$workers_dir/.." && pwd)}"
-env_file="$root/.env"; r2_file="$root/secrets/r2-magpie.env"
+env_file="$root/.env"
 [ -f "$env_file" ] || { echo "缺少 $env_file" >&2; exit 1; }
-[ -f "$r2_file" ] || { echo "缺少 $r2_file" >&2; exit 1; }
 
 read_var() { # read_var <file> <NAME>：取第一处赋值，去掉引号与行尾注释
   local line; line=$(grep -E "^${2}=" "$1" | head -1 | cut -d= -f2-)
@@ -25,11 +24,9 @@ QQ_OWNER=$(read_var "$env_file" QQ_OWNER)
 # 白名单是可选配置；缺项或空值都不影响必需 secrets 的上传。
 QQ_ALLOW_USERS=$(read_var "$env_file" QQ_ALLOW_USERS || true)
 QQ_ALLOW_GROUPS=$(read_var "$env_file" QQ_ALLOW_GROUPS || true)
-R2_BUCKET=$(read_var "$r2_file" R2_BUCKET)
-R2_ENDPOINT=$(read_var "$r2_file" R2_ENDPOINT)
-R2_ACCESS_KEY_ID=$(read_var "$r2_file" R2_ACCESS_KEY_ID)
-R2_SECRET_ACCESS_KEY=$(read_var "$r2_file" R2_SECRET_ACCESS_KEY)
-MAGPIE_SYNC_PASSPHRASE=$(read_var "$r2_file" MAGPIE_SYNC_PASSPHRASE)
+# DeepSeek 直连的 key；为空时不上传，面板里 DeepSeek 显示缺 key，仍可选 ChatGPT 订阅
+DEEPSEEK_API_KEY=$(read_var "$env_file" DEEPSEEK_APIKEY || true)
+[ -n "$DEEPSEEK_API_KEY" ] || echo ".env 里没有 DEEPSEEK_APIKEY，跳过 DEEPSEEK_API_KEY" >&2
 # 管理端点（记忆导入与 MCP 登录链接）的口令：没有就生成一次并存到 secrets/admin-token.env，之后沿用
 admin_file="$root/secrets/admin-token.env"
 if [ ! -f "$admin_file" ]; then
@@ -46,14 +43,6 @@ fi
 OAUTH_STORE_KEY=$(read_var "$oauth_file" OAUTH_STORE_KEY)
 [[ "$OAUTH_STORE_KEY" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "OAUTH_STORE_KEY 必须为 32 字节 hex" >&2; exit 1; }
 
-# magpie Web UI（magpie.spcdts.dev）的固定登录口令，同样只生成一次；magpie 要求 16 位以上的字母、数字或 - . _ ~
-web_key_file="$root/secrets/magpie-web-key.env"
-if [ ! -f "$web_key_file" ]; then
-  (umask 077; python -c 'import secrets,string,sys; from pathlib import Path; alphabet = string.ascii_letters + string.digits + "._~-"; Path(sys.argv[1]).write_text("MAGPIE_WEB_KEY=" + "".join(secrets.choice(alphabet) for _ in range(32)) + "\n", encoding="utf-8")' "$web_key_file")
-fi
-MAGPIE_WEB_KEY=$(read_var "$web_key_file" MAGPIE_WEB_KEY)
-web_key_pattern='^[A-Za-z0-9._~-]{16,}$'
-[[ "$MAGPIE_WEB_KEY" =~ $web_key_pattern ]] || { echo "MAGPIE_WEB_KEY 必须是 16 位以上的字母、数字或 - . _ ~" >&2; exit 1; }
 
 # Gmail：桌面客户端 JSON 与 owner 授权后的 token.json（字段名见 src/sidecar/gmail/oauth.ts）。可选，任一缺失就跳过三项
 json_field() { python -c 'import json,sys
@@ -69,7 +58,7 @@ if [ -z "$GMAIL_CLIENT_ID" ] || [ -z "$GMAIL_CLIENT_SECRET" ] || [ -z "$GMAIL_RE
   GMAIL_CLIENT_ID=""; GMAIL_CLIENT_SECRET=""; GMAIL_REFRESH_TOKEN=""
 fi
 
-for name in NAPCAT_TOKEN QQ_OWNER R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE ADMIN_TOKEN OAUTH_STORE_KEY MAGPIE_WEB_KEY; do
+for name in NAPCAT_TOKEN QQ_OWNER ADMIN_TOKEN OAUTH_STORE_KEY; do
   [ -n "${!name}" ] || { echo "$name 为空" >&2; exit 1; }
 done
 
@@ -84,7 +73,7 @@ cd "$workers_dir"
 {
   printf '{'
   first=1
-  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS R2_BUCKET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY MAGPIE_SYNC_PASSPHRASE ADMIN_TOKEN OAUTH_STORE_KEY MAGPIE_WEB_KEY GMAIL_CLIENT_ID GMAIL_CLIENT_SECRET GMAIL_REFRESH_TOKEN; do
+  for name in NAPCAT_TOKEN QQ_OWNER QQ_ALLOW_USERS QQ_ALLOW_GROUPS DEEPSEEK_API_KEY ADMIN_TOKEN OAUTH_STORE_KEY GMAIL_CLIENT_ID GMAIL_CLIENT_SECRET GMAIL_REFRESH_TOKEN; do
     [ -n "${!name}" ] || continue
     [ $first -eq 1 ] || printf ','
     first=0
@@ -92,4 +81,4 @@ cd "$workers_dir"
   done
   printf '}\n'
 } | npx wrangler secret bulk
-echo "已上传必需 secrets、非空 QQ 白名单与可用的 Gmail 凭据到 Worker cs-agent"
+echo "已上传必需 secrets、非空 QQ 白名单、DeepSeek key（如有）与可用的 Gmail 凭据到 Worker cs-agent"

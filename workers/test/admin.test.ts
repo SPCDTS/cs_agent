@@ -52,9 +52,10 @@ describe("admin routes", () => {
 
   it("starts from env defaults, saves with CAS revisions and rejects malformed IDs", async () => {
     const initial = await adminJson<SettingsSnapshot>("GET", "/admin/settings");
-    expect(initial).toMatchObject({ value: { groupTrigger: "mention_only", allowGroups: ["200000001"], allowUsers: ["10000003"], extractNamespaces: ["owner"] }, overrides: null });
+    expect(initial).toMatchObject({ value: { groupTrigger: "mention_only", allowGroups: ["200000001"], allowUsers: ["10000003"], extractNamespaces: ["owner"],
+      model: { provider: "faux", id: "test" } }, overrides: null });
     expect(initial.defaults).toEqual(initial.value);
-    const value: Settings = { groupTrigger: "mention_or_reply", allowGroups: ["200000001", "200000002"], allowUsers: [], extractNamespaces: ["owner", "group:200000001"] };
+    const value: Settings = { groupTrigger: "mention_or_reply", allowGroups: ["200000001", "200000002"], allowUsers: [], extractNamespaces: ["owner", "group:200000001"], model: initial.value.model };
     const saved = await adminJson<SettingsSnapshot & { applied: boolean }>("PUT", "/admin/settings", { value, expectedRevision: initial.revision });
     expect(saved).toMatchObject({ value, overrides: value, defaults: initial.defaults, applied: true });
     expect(saved.revision).not.toBe(initial.revision);

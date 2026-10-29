@@ -82,9 +82,9 @@ export function scriptedModel(steps: { name: string; args: JsonObject }[]) {
     return fauxAssistantMessage("done");
   };
   faux.setResponses([respond]);
-  vi.spyOn(models, "openModels").mockImplementation(async () => {
+  vi.spyOn(models, "openModels").mockImplementation(() => {
     const registry = createModels(); registry.setProvider(faux.provider);
-    return { models: registry, selection: { provider: "faux", id: "test" } };
+    return registry;
   });
   return { requests, outputs, steps };
 }

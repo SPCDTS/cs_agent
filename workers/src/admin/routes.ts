@@ -4,7 +4,8 @@ import { authenticated } from "../auth";
 import type { Env } from "../env";
 import { parseImport } from "../memory/import";
 import { oauthErrorCode } from "../mcp/oauth-fetch";
-import { QQ_ID, SettingsSchema } from "../settings";
+import { ModelSelectionSchema, QQ_ID, SettingsSchema, type Settings } from "../settings";
+import { modelLoginErrorCode } from "../codex-login";
 import type { EventQuery } from "../thread";
 import { ADMIN_APP_JS, ADMIN_PAGE_HTML } from "./page";
 
@@ -55,8 +56,17 @@ function eventQuery(url: URL): { thread: string; query: EventQuery } {
   return { thread, query: { kind, result, before: before === undefined ? undefined : Number(before), limit: Number(limit) } };
 }
 const threadKind = (key: string) => key === "owner" ? "owner" : key.startsWith("group:") ? "group" : "private";
+async function putSettings(env: Env, value: Settings, expectedRevision: string) {
+  const result = await env.REGISTRY.getByName("main").putSettings(value, expectedRevision);
+  if (!result.ok && result.error === "conflict") throw new HttpError(409, "conflict", { current: result.current });
+  if (!result.ok) throw new HttpError(400, "invalid_model", { reason: result.reason });
+  return result.current;
+}
+async function modelLogin<T>(work: () => Promise<T>): Promise<Response> {
+  try { return json(await work()); } catch (error) { throw new HttpError(400, modelLoginErrorCode(error)); }
+}
 
-const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY", "MAGPIE_GATEWAY_KEY"] as const;
+const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY"] as const;
 
 export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin", public: true, handle: async () => new Response(null, { status: 308, headers: { ...API_HEADERS, Location: "/admin/" } }) },
@@ -66,9 +76,9 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     handle: async () => new Response(ADMIN_APP_JS, { headers: { ...API_HEADERS, "Content-Security-Policy": CSP, "Content-Type": "text/javascript; charset=utf-8" } }) },
 
   { method: "GET", path: "/admin/overview", handle: async ({ env }) => {
-    const bridge = env.BRIDGE.getByName("napcat"), owner = env.THREAD.getByName("owner");
+    const bridge = env.BRIDGE.getByName("napcat"), owner = env.THREAD.getByName("owner"), registry = env.REGISTRY.getByName("main");
     const [status, list, model, accounts, counts] = await Promise.all([
-      bridge.status(), bridge.threadList(), owner.modelStatus(), env.REGISTRY.getByName("main").status(), owner.mcpToolCounts(),
+      bridge.status(), bridge.threadList(), registry.modelStatus(), registry.status(), owner.mcpToolCounts(),
     ]);
     const { threads: _keys, sendRules, ...connection } = status;
     // owner 线程总是列出，Bridge 还没见过 owner 私聊时也能从面板查看它的事件与记忆。
@@ -116,13 +126,29 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin/settings", handle: async ({ env }) => json(await env.REGISTRY.getByName("main").settings()) },
   { method: "PUT", path: "/admin/settings", handle: async ({ env, request }) => {
     const { value, expectedRevision } = await body(request, Type.Object({ value: SettingsSchema, expectedRevision: Type.String({ pattern: "^[0-9a-f]{16}$" }) }, strict));
-    const result = await env.REGISTRY.getByName("main").putSettings(value, expectedRevision);
-    if (!result.ok) throw new HttpError(409, "conflict", { current: result.current });
+    const current = await putSettings(env, value, expectedRevision);
     let applied = false;
-    try { applied = await env.BRIDGE.getByName("napcat").reloadSettings() === result.current.revision; }
+    try { applied = await env.BRIDGE.getByName("napcat").reloadSettings() === current.revision; }
     catch { console.error({ event: "settings_reload_failed" }); }
-    return json({ ...result.current, applied });
+    return json({ ...current, applied });
   } },
+
+  // 模型选择是设置的一项，共用 revision 做 CAS；Thread 在下一批接纳输入时读新值，Bridge 不用它。
+  { method: "GET", path: "/admin/model", handle: async ({ env }) => json(await env.REGISTRY.getByName("main").modelView()) },
+  { method: "PUT", path: "/admin/model", handle: async ({ env, request }) => {
+    const { model, expectedRevision } = await body(request, Type.Object({ model: ModelSelectionSchema, expectedRevision: Type.String({ pattern: "^[0-9a-f]{16}$" }) }, strict));
+    const registry = env.REGISTRY.getByName("main");
+    await putSettings(env, { ...(await registry.settings()).value, model }, expectedRevision);
+    return json(await registry.modelView());
+  } },
+  // ChatGPT 订阅登录：回调地址是 localhost:1455，浏览器打不开，用户把整串地址贴回来。错误只回分类。
+  { method: "POST", path: "/admin/model/oauth/codex/start", handle: ({ env }) => modelLogin(() => env.REGISTRY.getByName("main").codexLoginStart()) },
+  { method: "POST", path: "/admin/model/oauth/codex/complete", handle: async ({ env, request }) => {
+    const { callbackUrl } = await body(request, Type.Object({ callbackUrl: Type.String({ minLength: 1, maxLength: 16384 }) }, strict));
+    return modelLogin(async () => ({ loggedIn: true, ...await env.REGISTRY.getByName("main").codexLoginComplete(callbackUrl) }));
+  } },
+  { method: "POST", path: "/admin/model/oauth/codex/logout",
+    handle: ({ env }) => modelLogin(async () => { await env.REGISTRY.getByName("main").codexLogout(); return { ok: true }; }) },
 
   { method: "GET", path: "/admin/events", handle: async ({ env, url }) => {
     const { thread, query } = eventQuery(url);
@@ -157,9 +183,6 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   } },
 
   // 旧路径保留纯文本错误分类，已有脚本与文档按它解析。
-  // 容器用启动那一刻的 secrets 起来；改了 MAGPIE_WEB_KEY 或 R2 凭据后要主动重启，不等它空闲退出。
-  { method: "POST", path: "/admin/magpie/restart", handle: async ({ env }) => { await env.MAGPIE.getByName("gateway").restart(); return json({ restarted: true }); } },
-
   { method: "POST", path: "/admin/mcp/oauth/login-link", handle: async ({ env, request }) => {
     try {
       const value: unknown = await request.json();
