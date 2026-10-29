@@ -6,8 +6,8 @@ export type InboundInput = {
   target: Target; text: string; routeText: string; time: number;
   mentionedSelf: boolean; replyToId: string | null; imageCount: number;
   scopeName?: string;
-  /** 缺省为 message；schedule 由 ScheduleDO 投递，入站键就是 messageId（run_<fire_key>）。 */
-  kind?: "message" | "schedule" | "event";
+  /** 缺省为 message；schedule 由 ScheduleDO 投递，入站键就是 messageId（run_<fire_key>）；subagent 是子 agent 的汇报，入站键同样是 messageId。 */
+  kind?: "message" | "schedule" | "event" | "subagent";
   meta?: { fireKey: string };
 };
 export type TurnKind = NonNullable<InboundInput["kind"]>;

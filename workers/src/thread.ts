@@ -1,14 +1,14 @@
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
-import { Type } from "@earendil-works/pi-ai";
+import { Type, type Static } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type Registry, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
 import { effectiveSettings, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
-import { MESSAGE_SCHEMA, recordMessage, recall } from "./context";
-import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, turnIdentity } from "./prompt";
+import { MESSAGE_SCHEMA, QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, recordMessage, recall, type RecallOptions } from "./context";
+import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from "./prompt";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { modelChange, openModels, sameSelection } from "./models";
 import { remoteCredentials } from "./model-credentials";
@@ -16,8 +16,8 @@ import { MEMORY_SCHEMA } from "./memory/schema";
 import { MemoryStore, MemoryStoreError, type Profile } from "./memory/store";
 import type { MemoryRow } from "./memory/types";
 import { parseImport } from "./memory/import";
-import { createMemoryTools, type MemoryBinding } from "./memory/tools";
-import { MEMORY_RULE } from "./memory/contracts";
+import { createMemoryTools, searchMemory, type MemoryBinding } from "./memory/tools";
+import { MEMORY_RULE, type memoryParameters } from "./memory/contracts";
 import { renderMemorySection } from "./memory/render";
 import { formatBeijingTime } from "./memory/time";
 import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS, type ExtractComplete } from "./memory/extractor";
@@ -38,6 +38,8 @@ import { createWebPageTool } from "./tools/web-page";
 import { availabilityOf, codexImage, createGenerateImageTool } from "./tools/generate-image";
 import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
+import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentView } from "./subagent/parent";
+import { subagentName, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
 
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -69,6 +71,8 @@ export class ThreadDO extends DurableObject<Env> {
   private readonly waiters = new Map<string, (submission: Submission | undefined) => void>();
   private idleWait?: Promise<void>;
   private readonly skills = new SkillCatalog(() => this.env.REGISTRY.getByName("main"));
+  private readonly subagents = new ParentSubagents({ db: this.database, env: this.env, thread: () => this.namespace(),
+    wake: input => this.queueInput(input), wakeBy: at => this.wakeBy(at), audit: (kind, detail) => this.audit(kind, detail) });
 
   private initialize(): Promise<void> {
     return this.initialized ??= this.database.transaction(async tx => {
@@ -81,6 +85,7 @@ export class ThreadDO extends DurableObject<Env> {
         ${MESSAGE_SCHEMA}
         ${MEMORY_SCHEMA}
         ${MCP_CATALOG_SCHEMA}
+        ${SUBAGENT_SCHEMA}
       `);
       // 已部署的 P0 表与 submission.requestId 必须保留，新增列用默认值兼容旧回合恢复。
       const columns = await tx.all<{ name: string }>("PRAGMA table_info(inbound)");
@@ -102,6 +107,8 @@ export class ThreadDO extends DurableObject<Env> {
 
   async ingest(input: InboundInput): Promise<{ repliedToSelf: boolean }> {
     await this.initialize();
+    // 汇报来自本线程自己派出的子 agent，命名空间在派出时已绑定；userId 可能为空（基础权限），不能按它重算命名空间。
+    if (input.kind === "subagent") return { repliedToSelf: false };
     const ns = input.target.kind === "private" && ownerIds(this.env).includes(input.userId) ? "owner" : scopeOf(input.target);
     if (input.kind === "event" && ns !== "owner") throw new Error("event input must bind the owner thread");
     await this.bindNamespace(ns);
@@ -159,6 +166,8 @@ export class ThreadDO extends DurableObject<Env> {
         section("turn-identity", async (api, callContext) => {
           const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
           if (input?.kind === "event") return EVENT_TURN_IDENTITY;
+          if (input?.kind === "subagent") return subagentTurnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name },
+            ownerIds(this.env).includes(input.user_id));
           return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, ownerIds(this.env).includes(input.user_id)) : undefined;
         }, { tag: false }),
         // 模型没有时钟；按本轮输入的到达时刻给时间，同一回合内文本不变，不打散提示缓存。
@@ -208,9 +217,7 @@ export class ThreadDO extends DurableObject<Env> {
           return { output: [{ type: "text", text: JSON.stringify(await this.deliver(input, cleanOutgoing(text))) }] };
         },
       }), defineTool({
-        name: "qq_context", description: "只读检索本回合所在会话的聊天记录；无 query 取最近消息，before 为 Unix 秒。",
-        parameters: Type.Object({ query: Type.Optional(Type.String({ maxLength: 1000 })),
-          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })), before: Type.Optional(Type.Number()) }, { additionalProperties: false }),
+        name: "qq_context", description: QQ_CONTEXT_DESCRIPTION, parameters: QQ_CONTEXT_PARAMETERS,
         replay: "safe",
         execute: async (options, api, toolContext) => {
           const input = await this.currentInput(harness, api, api.conversationId, toolContext);
@@ -218,7 +225,8 @@ export class ThreadDO extends DurableObject<Env> {
           // scope 只来自当前输入，模型没有选择其他会话的参数，owner 也不能跨账号召回。
           return { output: [{ type: "text", text: await recall(this.database, scopeOf(targetOf(input)), options) }] };
         },
-      })].map(tool => ({ ...tool, callers: ["model"] as const })),
+      }), this.subagents.tool(async (api, callContext) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext)),
+        async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
     if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
       registry.install(createScheduleExtension(this.env, memory.ns as ScheduleConversation, async (api, callContext) =>
@@ -380,9 +388,7 @@ export class ThreadDO extends DurableObject<Env> {
         // 定时与事件回合的输出可能转述外部资料，没有聊天输入的回合不抽取，避免这些资料经抽取变成记忆。
         if (!await tx.get("SELECT 1 FROM inbound WHERE turn_id = ? AND kind = 'message' LIMIT 1", row.turn_id)) return row;
         await extractor.enqueue(row.turn_id, tx);
-        if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1") && await this.ctx.storage.getAlarm() === null) {
-          await this.ctx.storage.setAlarm(Date.now() + EXTRACT_ALARM_DELAY_MS);
-        }
+        if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1")) await this.wakeBy(Date.now() + EXTRACT_ALARM_DELAY_MS);
         return row;
       });
       if (row?.kind === "schedule") await this.reportScheduleRun(row, status, answer);
@@ -401,9 +407,9 @@ export class ThreadDO extends DurableObject<Env> {
     return this.serial(async () => {
       await this.ingest(input);
       const kind: TurnKind = input.kind ?? "message";
-      // 事件的入站键由事件服务按来源与外部 id 生成，旧版无 self_id 的兼容判断不适用。
-      const key = kind === "event" ? input.messageId : inboundKey(input);
-      if (kind !== "event" && await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND self_id = '' AND user_id = ?", input.messageId, input.userId)) return;
+      // 事件与子 agent 汇报的入站键由投递方生成（来源与外部 id、子 agent 与请求），旧版无 self_id 的兼容判断不适用。
+      const key = kind === "event" || kind === "subagent" ? input.messageId : inboundKey(input);
+      if (kind !== "event" && kind !== "subagent" && await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND self_id = '' AND user_id = ?", input.messageId, input.userId)) return;
       const inserted = await this.database.get<InboundRow>(`INSERT OR IGNORE INTO inbound
         (message_id, platform_message_id, user_id, self_id, text, received_at, status, chat_kind, chat_id, nickname, scope_name, kind)
         VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?) RETURNING *`, key, input.messageId, input.userId, input.selfId, input.text, input.time,
@@ -432,10 +438,66 @@ export class ThreadDO extends DurableObject<Env> {
   /** 事件服务的投递入口：入站行落库即返回，回合结果由 settle 回报事件服务。 */
   async deliverEvent(input: InboundInput): Promise<"accepted" | "duplicate"> {
     if (input.kind !== "event") throw new Error("deliverEvent requires an event input");
+    return this.queueInput(input);
+  }
+
+  /** 入站行落库即返回，回合由 pump 接纳；同一入站键只入队一次。 */
+  private async queueInput(input: InboundInput): Promise<"accepted" | "duplicate"> {
     const queued = await this.enqueue(input, false);
     if (!queued) return "duplicate";
     this.ctx.waitUntil(this.pump());
     return "accepted";
+  }
+
+  /** 子 agent 的汇报：作为 kind=subagent 的输入入队，归 chat 档、排在当前回合之后、不进消息库、不参与记忆抽取。 */
+  async subagentReport(report: SubagentReport): Promise<"accepted" | "duplicate" | "ignored"> {
+    await this.initialize();
+    return this.subagents.report(report);
+  }
+
+  /** 子 agent 的 qq_context：只读派出它的会话。 */
+  async subagentContext(id: string, options: RecallOptions): Promise<string> {
+    await this.initialize();
+    const access = await this.subagents.access(id);
+    if (!access) throw new Error("subagent_unknown");
+    return recall(this.database, access.scope, options);
+  }
+
+  /** 子 agent 的 mem_search：与 memoryBinding 同一条线，owner 命名空间只对确证的 owner 派出者开放，其他会话读本会话。 */
+  async subagentMemory(id: string, args: Static<typeof memoryParameters.mem_search>): Promise<{ text: string; error?: true }> {
+    await this.initialize();
+    const access = await this.subagents.access(id), ns = await this.namespace();
+    if (!access || !ns || ns === "owner" && !access.identity.as?.owner) return { text: "本轮身份未确证，不能访问记忆；本轮请勿重试。", error: true };
+    try { return { text: await searchMemory(new MemoryStore(this.database, ns), args) }; }
+    catch (error) { return { text: error instanceof Error ? error.message : "记忆操作失败", error: true }; }
+  }
+
+  async subagentList(): Promise<SubagentView[]> {
+    await this.initialize();
+    return this.subagents.list();
+  }
+
+  async cancelSubagent(id: string): Promise<ParentSubagentStatus | undefined> {
+    await this.initialize();
+    return this.subagents.cancel(id);
+  }
+
+  async subagentTranscript(id: string, limit: number): Promise<{ meta: SubagentMeta; entries: SubagentEntry[] } | undefined> {
+    await this.initialize();
+    if (!await this.subagents.exists(id)) return;
+    return this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).transcriptSummary(limit);
+  }
+
+  private subagentCaller(input: InboundRow | undefined): SubagentCaller | undefined {
+    if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;
+    return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner: ownerIds(this.env).includes(input.user_id) } },
+      origin: { target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name } };
+  }
+
+  /** 让 alarm 不晚于 at：记忆抽取与子 agent 限时共用这一个 alarm。 */
+  private async wakeBy(at: number): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > at) await this.ctx.storage.setAlarm(at);
   }
 
   /** 事件服务对账：未知返回 undefined；仍在排队时顺带唤醒接纳，覆盖冷启动后无人触发的情况。 */
@@ -457,7 +519,8 @@ export class ThreadDO extends DurableObject<Env> {
       const key = parseScheduleInputKey(input.message_id);
       return key ? { kind: "control", scheduleId: key.scheduleId, fireKey: key.fireKey } : { kind: "none" };
     }
-    return input?.kind === "message" && input.user_id !== input.self_id && ownerIds(this.env).includes(input.user_id)
+    // 子 agent 汇报回合继承派出者：派出者是确证的 owner 时与其消息回合同权。
+    return (input?.kind === "message" || input?.kind === "subagent") && input.user_id !== input.self_id && ownerIds(this.env).includes(input.user_id)
       ? { kind: "manage", actor: `qq:${input.user_id}` } : { kind: "none" };
   }
 
@@ -501,7 +564,7 @@ export class ThreadDO extends DurableObject<Env> {
     const active = await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM memories WHERE status = 'active'");
     const profile = await this.database.get<{ n: number }>("SELECT COALESCE(SUM(length(CAST(text AS BLOB))), 0) AS n FROM profile");
     const queue = await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM extract_queue");
-    return { inbound, outbox: out?.n ?? 0, ...(out?.last ? { lastSentAt: out.last } : {}),
+    return { inbound, outbox: out?.n ?? 0, ...(out?.last ? { lastSentAt: out.last } : {}), subagents: { running: await this.subagents.running() },
       memory: { active: active?.n ?? 0, profileBytes: profile?.n ?? 0, extractQueue: queue?.n ?? 0 },
       maintenance: await maintenanceStatus(this.database, this.ctx.storage) };
   }
@@ -568,10 +631,18 @@ export class ThreadDO extends DurableObject<Env> {
     const store = new MemoryStore(this.database, await this.namespace());
     // 先续约闹钟：处理中若进程中断，未领取的回合仍会被唤醒。
     await this.database.transaction(async () => { await this.ctx.storage.setAlarm(Date.now() + 65_000); });
-    try { await (await this.extractor(store)).drain(); }
-    finally {
+    try {
+      await this.subagents.expire(Date.now()).catch(error => {
+        console.error({ event: "subagent_expire_failed", error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
+      });
+      await (await this.extractor(store)).drain();
+    } finally {
       await this.database.transaction(async tx => {
-        if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1")) await this.ctx.storage.setAlarm(Date.now() + EXTRACT_ALARM_DELAY_MS);
+        const deadline = await this.subagents.nextDeadline(tx), now = Date.now();
+        // 已过期仍未处理完的限时（取消或入队失败）隔 30 秒重试，避免 alarm 立刻重入空转。
+        const due = [await tx.get("SELECT 1 FROM extract_queue LIMIT 1") ? now + EXTRACT_ALARM_DELAY_MS : undefined,
+          deadline === undefined ? undefined : deadline <= now ? now + 30_000 : deadline].filter(at => at !== undefined);
+        if (due.length) await this.ctx.storage.setAlarm(Math.min(...due));
         else await this.ctx.storage.deleteAlarm();
       });
     }

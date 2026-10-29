@@ -19,7 +19,9 @@
       { "name": "REGISTRY", "class_name": "RegistryDO" },
       { "name": "BRIDGE", "class_name": "BridgeDO" },
       { "name": "SCHEDULE", "class_name": "ScheduleDO" },
-      { "name": "EVENTS", "class_name": "EventsDO" }
+      { "name": "EVENTS", "class_name": "EventsDO" },
+      // 子 agent：每个一个对象，名字 sub:<父线程键>:<id>，结束 14 天后自删
+      { "name": "SUBAGENT", "class_name": "SubagentDO" }
     ]
   },
   "migrations": [
@@ -30,7 +32,8 @@
     { "tag": "v5", "new_sqlite_classes": ["ScheduleDO"] },
     { "tag": "v6", "new_sqlite_classes": ["EventsDO"] },
     // 2026-10-30 起 magpie 容器整体移除，Worker 直连 DeepSeek 与 OpenAI Codex
-    { "tag": "v7", "deleted_classes": ["MagpieContainer"] }
+    { "tag": "v7", "deleted_classes": ["MagpieContainer"] },
+    { "tag": "v8", "new_sqlite_classes": ["SubagentDO"] }
   ],
   // QQ_OWNER、NAPCAT_TOKEN、DEEPSEEK_API_KEY、OAUTH_STORE_KEY 等都是 secrets（wrangler secret put），不写在这里
   // MODEL_PROVIDER / MODEL_ID 只是默认模型，运行时在管理面板切换（Registry 设置）。测试用 wrangler.test.jsonc 覆盖为 faux

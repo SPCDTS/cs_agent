@@ -10,6 +10,7 @@ import type { EventQuery } from "../thread";
 import { SkillError, parseSkill } from "../skills";
 import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from "../message-import";
 import { ownerIds } from "../policy";
+import { SUBAGENT_ID } from "../subagent/model";
 import { ADMIN_APP_JS, ADMIN_PAGE_HTML } from "./page";
 
 export type AdminContext = { env: Env; request: Request; url: URL; params: Record<string, string> };
@@ -58,6 +59,12 @@ function eventQuery(url: URL): { thread: string; query: EventQuery } {
     throw new HttpError(400, "invalid_query");
   }
   return { thread, query: { kind, result, before: before === undefined ? undefined : Number(before), limit: Number(limit) } };
+}
+// 子 agent 的 DO 名字含父线程键，按 id 定位要带上它。
+function threadParam(url: URL): string {
+  const thread = url.searchParams.get("thread") ?? "";
+  if (!new RegExp(`^(${THREAD_KEY})$`).test(thread)) throw new HttpError(400, "invalid_thread");
+  return thread;
 }
 const threadKind = (key: string) => key === "owner" ? "owner" : key.startsWith("group:") ? "group" : "private";
 async function putSettings(env: Env, value: Settings, expectedRevision: string) {
@@ -160,6 +167,20 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   } },
   { method: "POST", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/stop$`),
     handle: async ({ env, params }) => json(await env.THREAD.getByName(params.key).stop()) },
+  { method: "GET", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/subagents$`),
+    handle: async ({ env, params }) => json(await env.THREAD.getByName(params.key).subagentList()) },
+  { method: "POST", path: new RegExp(`^/admin/subagents/(?<id>${SUBAGENT_ID})/cancel$`), handle: async ({ env, url, params }) => {
+    const status = await env.THREAD.getByName(threadParam(url)).cancelSubagent(params.id);
+    if (!status) throw new HttpError(404, "not_found");
+    return json({ id: params.id, status });
+  } },
+  { method: "GET", path: new RegExp(`^/admin/subagents/(?<id>${SUBAGENT_ID})/transcript$`), handle: async ({ env, url, params }) => {
+    const limit = url.searchParams.get("limit") ?? "20";
+    if (!/^\d{1,2}$/.test(limit) || Number(limit) < 1 || Number(limit) > 50) throw new HttpError(400, "invalid_query");
+    const result = await env.THREAD.getByName(threadParam(url)).subagentTranscript(params.id, Number(limit));
+    if (!result) throw new HttpError(404, "not_found");
+    return json(result);
+  } },
 
   { method: "GET", path: "/admin/memory", handle: async ({ env, url }) => {
     const ns = memoryNs(url), q = url.searchParams.get("q") ?? "";

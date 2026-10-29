@@ -8,6 +8,8 @@
 | GET / PUT /admin/settings | 运行时设置；PUT 带 `expectedRevision`，不一致返回 409 与当前值，成功后推送给 Bridge |
 | GET /admin/events?thread=&kind=&result=&before=&limit= | 单个线程的审计事件，按 rowid 倒序翻页，limit ≤ 200 |
 | POST /admin/threads/:key/stop | 中止该线程当前回合并撤回排队输入（pi-durable `root.abort`） |
+| GET /admin/threads/:key/subagents | 该线程最近 50 个子 agent：任务前 200 字、状态、派出与结束时间、最近汇报、派出者 |
+| POST /admin/subagents/:id/cancel?thread=、GET /admin/subagents/:id/transcript?thread=&limit= | 取消运行中的子 agent；查看子会话最近 limit（≤ 50）条条目的类型与文本前 200 字。子 DO 名字含父线程键，所以要带 thread |
 | GET /admin/memory?ns=&q=、DELETE /admin/memory/:id?ns=、PUT /admin/memory/profile | 记忆列表与搜索（`#id` 按编号）、遗忘、画像 CAS；ns 只能是 owner 或 group:群号 |
 | POST /admin/mcp/:server/login-link、logout、refresh | 一次性登录链接、本地登出、刷新 owner 线程的 MCP 目录 |
 | POST /admin/send-rules/release | 解除某个 scope 的熔断 |
@@ -76,6 +78,29 @@ curl --fail-with-body -X POST "$WORKER_URL/admin/messages/import" \
 
 - 导入后由维护任务接管：早于 `HISTORY_RAW_DAYS` 的原文，已被摘要覆盖的在下一次 aging 时删除；没被覆盖且一天 ≥ 5 条的，aging 会逐日调用模型补日摘要。早于 `HISTORY_SUMMARY_DAYS` 的摘要会被清理。
 - 测试：`test/skills.test.ts`、`test/message-import.test.ts`（vitest），`test/export-messages.node.mjs`、`test/import-skills.node.mjs`（`node --test` 单独运行）。
+# 子 agent（P3a）
+
+主 agent 用 `subagent` 工具把耗时或可并行的事交给子 agent。每个子 agent 是一个独立的 `SubagentDO`（绑定 `SUBAGENT`，迁移 `v8`，名字 `sub:<父线程键>:<id>`），里面跑自己的 pi-durable Harness；完成后结果作为后续输入投回父线程，唤醒主 agent 再由它对用户说。代码在 `src/subagent/`：`model.ts` 是两边共用的类型与身份合并，`do.ts` 是子 DO，`parent.ts` 是父线程的登记表与工具。
+
+- 工具：`spawn { task, timeoutMs? }` 立即返回 id；`message { id, text }` 追加消息；`list`；`cancel { id }`。只有用户亲自发消息的回合能用（owner 私聊与群都可以），定时、事件与汇报回合调用会被拒绝；事件工具档里没有它。每个父线程同时最多 3 个运行中的子 agent，第 4 个 spawn 返回拒绝文本。spawn 的 id 与 message 的请求 id 由工具调用的任务 id 哈希得出，工具重放不会重复派出或重复交代。
+- 子会话的工具只有 `web_search`、`web_page`、`qq_context`、`mem_search`。后两个经 RPC 回父线程执行：`qq_context` 只读派出时的会话，`mem_search` 读父命名空间，owner 命名空间只对确证的 owner 派出者开放。没有 `send_message`、`generate_image`、gmail、schedule、`subagent`、记忆写工具与 MCP。模型与推理强度在 spawn 时取 Registry 设置的当前值。
+- 子 DO 的表：`meta`（一行 JSON：parent、id、task、createdAt、identity、model、status、endedAt、reportCount、version）与 `inbox`（request_id、text、received_at、status、answer、outcome）。输入一次只跑一条，每条各得一个回答、各汇报一次：queued → running → answered（回答落库）→ reported（父线程收下）。汇报经 `THREAD.subagentReport` 投回；送不到时停在 answered，由子 DO 每 60 秒的心跳 alarm 补送，驱逐后也由心跳重开 Harness 续跑。结束（done / failed / cancelled）满 14 天后 alarm 删除整个对象。
+- 父线程表 `subagents`：id、task、状态（running / done / failed / cancelled / timeout）、身份快照、派出会话、限时与 deadline、子 DO 版本。子 DO 每次状态变化推进 `version`，父线程只采纳更新的版本，所以 message 的返回与汇报无论谁先到都收敛。cancelled 与 timeout 是父线程的终态，之后迟到的汇报丢弃。结束 14 天后由夜间 retention 删除登记。
+- 汇报输入：`kind = "subagent"`，入站键 `subagent-report:<id>:<requestId>`（超时为 `timeout@<deadline>`），文本以 `[子 agent 完成]`、`[子 agent 失败]` 或 `[子 agent 超时]` 开头。归 chat 档、followUp 排在当前回合之后、不进消息库、不参与记忆抽取，回合的 `turn-identity` 段说明这是子 agent 的汇报与派出者。
+- 身份（ARCHITECTURE §5.1）：spawn 时快照本回合发送者；汇报回合以快照里的人为本回合的人，owner 派出的汇报回合有 owner 的记忆写、schedule 与 MCP 权限（发邮件、生图仍只限主人亲自发消息的回合）。别的回合 message 它时与快照合并，不是同一人（owner 多账号算同一人）就降为基础权限，之后的汇报 userId 为空。快照时与当前配置的 owner 身份不一致也降为基础权限。
+- 超时：spawn 的 `timeoutMs` 默认 30 分钟，范围 1 秒到 6 小时；每次 message 从当时起重新计时。父 DO 的 alarm 同时服务记忆抽取与最早的 deadline；到期时先取消子 DO（它若刚好答完就按完成处理），再以 `[子 agent 超时]` 汇报唤醒父线程，最后记为 timeout。
+- 审计：父线程 events 记 `subagent_spawn`（id、限时、任务字数）与 `subagent_report`（id、结果、自派出起的耗时、汇报字数），不记正文。面板会话表每行显示运行中的子 agent 数，点开列出任务摘要、状态与时间，运行中的可取消。
+
+| 功能 | 对应测试（test/subagent.test.ts） |
+| --- | --- |
+| 子 DO 启动、汇报唤醒主模型并 send_message、汇报不进消息库不抽取、子会话工具集、审计只含元数据 | runs the task in its own DO with read-only tools… |
+| message 追加、子 DO inbox 按 requestId 幂等 | delivers follow-up messages and processes each child request id once |
+| 群成员派出的汇报回合没有 owner 工具，owner 派出的有（群里 schedule、私聊 mem_remember） | wakes with the spawner's rights… |
+| 父 alarm 到期取消子 DO 并以超时汇报唤醒 | cancels the child at the deadline… |
+| 第 4 个 spawn 被拒 | rejects a fourth concurrent spawn |
+| 面板端点鉴权、列表、记录、取消 | lists, inspects and cancels subagents through the authenticated admin API |
+
+与 Docker 版（`src/agent/pi-tools/subagent.ts`）的差异：子 agent 在自己的 DO 里而不是同一 Harness 的子会话；输入一律 followUp，没有 steer；没有每天 20 个的上限，改为限时；按 id 而不是名字寻址，没有 status 动作（list 即可）；工具集是固定的只读白名单，不再从父会话复制后减去排除名单；汇报回合不能再派子 agent，Docker 版允许沿链继承。
 
 # Workers P2：定时任务、外部事件与维护
 

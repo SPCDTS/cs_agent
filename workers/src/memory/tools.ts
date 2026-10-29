@@ -1,4 +1,5 @@
 import type { Context } from "@earendil-works/chord/context";
+import type { Static } from "@earendil-works/pi-ai";
 import { defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { memoryParameters, memoryDescriptions, type MemoryTool } from "./contracts";
 import { MemoryStore } from "./store";
@@ -11,8 +12,20 @@ export function memoryToolNames(ns: string): MemoryTool[] {
   // P1b 的权限比 Docker 更窄：只有 owner 私聊提供写工具，其他 DO 仅召回本会话。
   return ns === "owner" ? ["mem_search", "mem_remember", "mem_update", "mem_forget", "mem_profile"] : ["mem_search"];
 }
+const memoryEvent = (store: MemoryStore, kind: "memory_recall" | "memory_write", detail: object) =>
+  store.db.run("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", Date.now(), kind, JSON.stringify(detail));
+
+/** mem_search 的检索与审计；子 agent 经父线程 RPC 只读检索时走同一段。 */
+export async function searchMemory(store: MemoryStore, args: Static<typeof memoryParameters.mem_search>): Promise<string> {
+  if (args.query !== undefined && !args.query.trim()) throw new Error("query 不能为空");
+  const rows = await store.search(args), { text, shown } = renderLines(rows);
+  if (args.query) await store.touchRecall(shown.map(row => row.id));
+  await memoryEvent(store, "memory_recall", { tool: "mem_search", returned_count: shown.length, dropped_count: rows.length - shown.length, chars: text.length });
+  return bounded(text);
+}
+
 export function createMemoryTools(store: MemoryStore, binding: (api: ToolExecutionApi, context: Context) => Promise<MemoryBinding | undefined>) {
-  const event = (kind: "memory_recall" | "memory_write", detail: object) => store.db.run("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", Date.now(), kind, JSON.stringify(detail));
+  const event = (kind: "memory_recall" | "memory_write", detail: object) => memoryEvent(store, kind, detail);
   async function run(api: ToolExecutionApi, context: Context, write: boolean, action: (b: MemoryBinding) => Promise<string>) {
     try {
       const b = await binding(api, context);
@@ -32,13 +45,7 @@ export function createMemoryTools(store: MemoryStore, binding: (api: ToolExecuti
   }
   const tools = [
     defineTool({ name: "mem_search", description: memoryDescriptions.mem_search, parameters: memoryParameters.mem_search, replay: "safe",
-      execute: (args, api, context) => run(api, context, false, async () => {
-        if (args.query !== undefined && !args.query.trim()) throw new Error("query 不能为空");
-        const rows = await store.search(args), { text, shown } = renderLines(rows);
-        if (args.query) await store.touchRecall(shown.map(row => row.id));
-        await event("memory_recall", { tool: "mem_search", returned_count: shown.length, dropped_count: rows.length - shown.length, chars: text.length });
-        return text;
-      }) }),
+      execute: (args, api, context) => run(api, context, false, () => searchMemory(store, args)) }),
     defineTool({ name: "mem_remember", description: memoryDescriptions.mem_remember, parameters: memoryParameters.mem_remember, replay: "unsafe",
       execute: (args, api, context) => run(api, context, true, async b => {
         check(args.text, args.subject);

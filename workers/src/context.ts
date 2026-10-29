@@ -1,3 +1,4 @@
+import { Type } from "@earendil-works/pi-ai";
 import type { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { cleanName, scopeOf, type InboundInput } from "./policy";
 
@@ -54,6 +55,9 @@ export async function recordMessage(database: Pick<DurableObjectSqliteDatabase, 
 }
 
 export type RecallOptions = { query?: string; limit?: number; before?: number };
+export const QQ_CONTEXT_DESCRIPTION = "只读检索本回合所在会话的聊天记录；无 query 取最近消息，before 为 Unix 秒。";
+export const QQ_CONTEXT_PARAMETERS = Type.Object({ query: Type.Optional(Type.String({ maxLength: 1000 })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })), before: Type.Optional(Type.Number()) }, { additionalProperties: false });
 type MessageRow = { time: number; user_id: string; nickname: string; is_self: number; text: string };
 export type SummaryRow = { id: number; scope: string; kind: "day" | "week"; period_start: number; period_end: number; text: string; msg_count: number };
 const beijingDate = (sec: number) => new Date((sec + 8 * 3600) * 1000).toISOString().slice(5, 10);

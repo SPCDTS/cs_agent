@@ -167,7 +167,7 @@ describe("audit retention", () => {
       }
       for (const at of [old, recent]) await db.run("INSERT INTO outbox (message_id, text, sent_at) VALUES ('m', '', ?)", at);
       for (const [turn, at] of [["stale", now - 8 * DAY * 1000], ["fresh", recent]] as const) await db.run("INSERT INTO extract_queue VALUES (?, ?)", turn, at);
-      expect(await run(thread, "retention", now)).toEqual({ kind: "retention", events: 1, inbound: 2, outbox: 1, extractQueue: 1 });
+      expect(await run(thread, "retention", now)).toEqual({ kind: "retention", events: 1, inbound: 2, outbox: 1, extractQueue: 1, subagents: 0 });
       expect(await db.all("SELECT at FROM events")).toEqual([{ at: recent }]);
       expect(await db.all("SELECT message_id FROM inbound ORDER BY message_id")).toEqual([{ message_id: "c" }, { message_id: "d" }]);
       expect(await db.all("SELECT turn_id FROM extract_queue")).toEqual([{ turn_id: "fresh" }]);

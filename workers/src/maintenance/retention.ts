@@ -1,4 +1,5 @@
 import type { MaintenanceContext } from "./index";
+import { RETENTION_MS } from "../subagent/model";
 
 const DAY_MS = 86400_000;
 const INBOUND_DAYS = 30;
@@ -16,6 +17,8 @@ export async function runRetention({ db, config, now }: MaintenanceContext) {
       inbound: await count("DELETE FROM inbound WHERE status IN ('done', 'failed') AND received_at < ?", Math.floor((now - INBOUND_DAYS * DAY_MS) / 1000)),
       outbox: await count("DELETE FROM outbox WHERE sent_at < ?", now - OUTBOX_DAYS * DAY_MS),
       extractQueue: await count("DELETE FROM extract_queue WHERE enqueued_at < ?", now - EXTRACT_QUEUE_DAYS * DAY_MS),
+      // 与子 DO 自删同一期限：结束 14 天后登记一并删除。
+      subagents: await count("DELETE FROM subagents WHERE status != 'running' AND ended_at < ?", now - RETENTION_MS),
     };
   });
 }

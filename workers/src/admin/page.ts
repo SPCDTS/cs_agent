@@ -111,7 +111,7 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
     <div class="section-head"><h2 class="h2">会话</h2><span class="muted">每个会话键一个 Thread DO</span></div>
     <div class="scroll">
       <table class="wide">
-        <thead><tr><th>线程</th><th>状态</th><th>入站 排队 / 完成 / 失败</th><th>出站</th><th>记忆</th><th>最近发送</th><th></th></tr></thead>
+        <thead><tr><th>线程</th><th>状态</th><th>入站 排队 / 完成 / 失败</th><th>出站</th><th>记忆</th><th>子 agent</th><th>最近发送</th><th></th></tr></thead>
         <tbody id="threads"></tbody>
       </table>
     </div>
@@ -314,7 +314,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   const MODEL_REASONS = { missing_key: "缺 DEEPSEEK_API_KEY", login_required: "未登录 ChatGPT", unconfigured: "未配置 OAUTH_STORE_KEY",
     unknown_provider: "provider 未注册", unknown_model: "目录里没有这个模型", unavailable: "不可用" };
   const state = { overview: null, settings: null, model: null, eventKind: "", eventThread: "owner", before: undefined, history: [], next: undefined,
-    memoryNs: "owner", memoryQuery: "", memoryView: null, profile: null, armedDelete: null, skills: [], armedSkill: null, timer: null, noticeTimer: null };
+    memoryNs: "owner", memoryQuery: "", memoryView: null, profile: null, armedDelete: null, skills: [], armedSkill: null, timer: null, noticeTimer: null,
+    subagents: {} };
 
   const $ = id => document.getElementById(id);
   const readToken = () => { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } };
@@ -411,6 +412,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     const overview = await api("GET", "/admin/overview");
     state.overview = overview;
     renderOverview(overview);
+    await Promise.all(Object.keys(state.subagents).map(loadSubagents));
   }
   function renderOverview(o) {
     $("commit").textContent = location.host + " · " + o.commit;
@@ -455,7 +457,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   function renderThreads(threads) {
     const body = $("threads");
     clear(body);
-    if (!threads.length) { body.append(el("tr", {}, [el("td", { colspan: 7, className: "muted", text: "还没有会话" })])); return; }
+    if (!threads.length) { body.append(el("tr", {}, [el("td", { colspan: 8, className: "muted", text: "还没有会话" })])); return; }
     for (const thread of threads) {
       const s = thread.stats, broken = "error" in s;
       const busy = !broken && s.inbound.queued > 0;
@@ -465,13 +467,59 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         el("td", { className: "mono", text: broken ? "-" : s.inbound.queued + " / " + s.inbound.done + " / " + s.inbound.failed }),
         el("td", { className: "mono", text: broken ? "-" : s.outbox }),
         el("td", { className: "mono", text: broken ? "-" : s.memory.active + " 条 · 画像 " + bytes(s.memory.profileBytes) }),
+        el("td", {}, broken || !s.subagents ? ["-"] : [
+          el("button", { className: "btn compact", type: "button", text: s.subagents.running + " 个运行中" + (state.subagents[thread.key] ? " ▲" : " ▼"),
+            onclick: () => toggleSubagents(thread.key) }),
+        ]),
         el("td", { className: "mono", text: broken ? "-" : time(s.lastSentAt) }),
         el("td", {}, [
           el("button", { className: "btn compact", type: "button", text: "事件", onclick: () => { selectThread(thread.key); $("events-section").scrollIntoView(); } }),
           busy ? el("button", { className: "btn compact danger", type: "button", text: "停止", onclick: () => stop(thread.key) }) : null,
         ]),
       ]));
+      const open = state.subagents[thread.key];
+      if (open) body.append(el("tr", {}, [el("td", { colspan: 8 }, [renderSubagents(thread.key, open.list)])]));
     }
+  }
+
+  const SUBAGENT_STATUS = { running: ["运行中", "warn"], done: ["已完成", "ok"], failed: ["失败", "bad"], cancelled: ["已取消", "neutral"], timeout: ["已超时", "bad"] };
+  function renderSubagents(key, list) {
+    if (!list) return el("span", { className: "muted", text: "加载中…" });
+    if (!list.length) return el("span", { className: "muted", text: "这个会话没有派出过子 agent" });
+    const rows = list.map(sub => {
+      const status = SUBAGENT_STATUS[sub.status] || [sub.status, "neutral"];
+      return el("tr", {}, [
+        el("td", { className: "mono", text: sub.id.slice(0, 8) }),
+        el("td", { text: sub.task }),
+        el("td", {}, [pill(status[0], status[1])]),
+        el("td", { className: "mono", text: time(sub.createdAt) }),
+        el("td", { className: "mono", text: sub.status === "running" ? "限时至 " + time(sub.deadline) : time(sub.endedAt) }),
+        el("td", { className: "mono", text: time(sub.lastReportAt) }),
+        el("td", { className: "muted small", text: sub.spawner || "无法确证" }),
+        el("td", {}, [sub.status === "running" ? el("button", { className: "btn compact danger", type: "button", text: "取消", onclick: () => cancelSubagent(key, sub.id) }) : null]),
+      ]);
+    });
+    return el("table", { className: "wide" }, [
+      el("thead", {}, [el("tr", {}, ["id", "任务", "状态", "派出", "结束", "最近汇报", "派出者", ""].map(text => el("th", { text })))]),
+      el("tbody", {}, rows),
+    ]);
+  }
+  async function loadSubagents(key) {
+    const list = await api("GET", "/admin/threads/" + encodeURIComponent(key) + "/subagents");
+    if (state.subagents[key]) state.subagents[key].list = list;
+    if (state.overview) renderThreads(state.overview.threads);
+  }
+  function toggleSubagents(key) {
+    if (state.subagents[key]) delete state.subagents[key];
+    else { state.subagents[key] = { list: null }; loadSubagents(key).catch(fail); }
+    if (state.overview) renderThreads(state.overview.threads);
+  }
+  async function cancelSubagent(key, id) {
+    try {
+      const result = await api("POST", "/admin/subagents/" + encodeURIComponent(id) + "/cancel?thread=" + encodeURIComponent(key));
+      notice("子 agent " + id.slice(0, 8) + "：" + (SUBAGENT_STATUS[result.status] || [result.status])[0]);
+    } catch (error) { fail(error); }
+    refresh();
   }
 
   const EVENT_FORMAT = {

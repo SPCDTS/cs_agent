@@ -17,7 +17,9 @@
       { "name": "REGISTRY", "class_name": "RegistryDO" },
       { "name": "BRIDGE", "class_name": "BridgeDO" },
       { "name": "SCHEDULE", "class_name": "ScheduleDO" },
-      { "name": "EVENTS", "class_name": "EventsDO" }
+      { "name": "EVENTS", "class_name": "EventsDO" },
+      // 子 agent：每个一个对象，名字 sub:<父线程键>:<id>，结束 14 天后自删
+      { "name": "SUBAGENT", "class_name": "SubagentDO" }
     ]
   },
   "migrations": [
@@ -27,7 +29,8 @@
     { "tag": "v4", "new_sqlite_classes": ["RegistryDO"] },
     { "tag": "v5", "new_sqlite_classes": ["ScheduleDO"] },
     { "tag": "v6", "new_sqlite_classes": ["EventsDO"] },
-    { "tag": "v7", "deleted_classes": ["MagpieContainer"] }
+    { "tag": "v7", "deleted_classes": ["MagpieContainer"] },
+    { "tag": "v8", "new_sqlite_classes": ["SubagentDO"] }
   ],
   // QQ_OWNER、NAPCAT_TOKEN、DEEPSEEK_API_KEY、OAUTH_STORE_KEY 等都是 secrets（wrangler secret put），不写在这里
   "vars": {
