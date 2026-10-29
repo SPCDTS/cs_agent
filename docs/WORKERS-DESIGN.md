@@ -1,6 +1,6 @@
 # cs-agent 迁移 Cloudflare Workers 设计
 
-状态：P0 与 P1a–P1c 已上线（agent.spcdts.dev，2026-10-29），本机 Docker 版 cs-agent 已停；面板最小页与 P2/P3 未做。首稿日期：2026-10-28。设计基线：cs-agent `153718f`、pi-durable `1.3.0`。前提由主人定：**砍掉 codex 后端，只保留 Pi**；NapCat 留在本机；模型出站仍经 magpie，但 magpie 也上云（第 3.7 节）。
+状态：P0、P1（含面板最小页 `/admin/`）与 P2（定时任务、外部事件与 Gmail、Cron 维护）已上线（agent.spcdts.dev，2026-10-29），本机 Docker 版 cs-agent 与 NapCat 容器已停；P3（子 agent 子 DO、Sandbox coding 工具、技能、历史导入）未做。首稿日期：2026-10-28。设计基线：cs-agent `153718f`、pi-durable `1.3.0`。前提由主人定：**砍掉 codex 后端，只保留 Pi**；NapCat 留在本机；模型出站仍经 magpie，但 magpie 也上云（第 3.7 节）。
 
 ## 1. 结论
 
@@ -74,6 +74,8 @@ Cloudflare Tunnel 在这个方案里只用于一件事：主人从外面访问 N
 跨会话的状态：授权（`auth`）、群内 MCP 审批（`cs.mcp.approval`）、定时任务目录、PI-MCP 的服务配置摘要与 OAuth 凭据（现在的 `mcp-oauth.sqlite`）、事件服务（去重键、游标、预算、held 列表）、技能目录、面板口令。单点但轻：每次写都是小事务，读由各 Thread DO 以 RPC 发起并在本地缓存一个配置摘要，摘要不变不回源，和现在委派快照的做法一样。
 
 **P1c 实现事实（2026-10-29）**：`RegistryDO`（绑定 `REGISTRY`，名字 `main`，迁移 v4）目前只放 PI-MCP 的 OAuth 状态：`mcp_oauth_tokens`（access/refresh token 用 AES-GCM 加密，密钥为 secret `OAUTH_STORE_KEY`，AAD 绑定服务、账号、版本与字段）、`mcp_oauth_logins`（一次性 nonce 的哈希、state、加密的 verifier）、`mcp_oauth_client`。服务配置不在 DO 里：`workers/mcp.json` 构建期打包、typebox 严格校验（只允许 `streamable-http`、`owner-private`、`replay: "unsafe"`）。CIMD 文档由 Worker 自己在 `/oauth/client-metadata.json` 提供，client_id 就是这个 URL，不做 DCR。登录没有面板：`POST /admin/mcp/oauth/login-link`（Bearer `ADMIN_TOKEN`）签发 10 分钟一次性链接 → `/mcp/oauth/start` 302 到授权页 → `/mcp/oauth/callback` 换 token，页面只回「已登录 <server>」或错误分类，不回显 code/token。MCP 工具只在 owner 命名空间的 Thread DO 装配、`callers: ["tools"]` 只给 codemode 脚本调用（inline QuickJS 沙箱，占本 DO 线程），每次调用再复核本回合发送者是 owner 私聊；目录快照存 Thread DO 的 `mcp_catalog`，审计写 `events`（`mcp_call`、`mcp_catalog`，只记元数据）。Notion 托管 MCP 已验证端到端。
+
+**P2 实现事实（2026-10-29）**：定时与事件没有放进 Registry DO，而是各自一个 DO，免得共用一个 alarm：`ScheduleDO`（绑定 `SCHEDULE`，迁移 v5；`schedules` / `schedule_runs`，单一 alarm 取最小 `next_fire_at`，RRULE 用 `rrule` 2.8.1、时区 Asia/Shanghai）和 `EventsDO`（绑定 `EVENTS`，迁移 v6；去重、60 s 合并、安静时段、每小时预算、来源状态、Gmail 的 access token 缓存与 watch 状态、`gmail_send` 幂等回执）。`InboundInput.kind` 为 `message | schedule | event`；Thread DO 的接纳是 `enqueue + pump`，按回合档位（chat / event）在会话空闲时切换工具集，定时与事件输入都不插话、不进消息库、不参与记忆抽取。Gmail 推送走 `POST /gmail/pubsub`（Pub/Sub push，OIDC token 校验：iss、aud = `PUBLIC_ORIGIN/gmail/pubsub`、email = var `GMAIL_PUBSUB_SERVICE_ACCOUNT`），Cron `*/5 * * * *` 轮询兜底；Gmail API 在 Worker 内直接调用（secrets `GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN`），不再有 sidecar。维护走 Cron `30 19 * * *`（北京 03:30），逐线程 RPC `maintain`。运行时设置（群触发、允许群/用户、抽取命名空间）在 Registry DO 的 `settings` 表，面板保存后推送 Bridge 重载。
 
 ### 3.5 Sandbox（coding 工具）
 
