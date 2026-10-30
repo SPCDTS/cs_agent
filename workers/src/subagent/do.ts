@@ -9,6 +9,7 @@ import { modelChange, openModels } from "../models";
 import { captureModels } from "../requests/capture";
 import { remoteCredentials } from "../model-credentials";
 import { createWebPageTool } from "../tools/web-page";
+import { createWebSearchTool } from "../tools/web-search";
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
 import { memoryDescriptions, memoryParameters } from "../memory/contracts";
 import { formatBeijingTime } from "../memory/time";
@@ -267,6 +268,7 @@ export class SubagentDO extends DurableObject<Env> {
         }, { tag: false }),
       ],
       tools: [
+        createWebSearchTool(this.env.DEEPSEEK_API_KEY),
         createWebPageTool(),
         defineTool({ name: "qq_context", description: QQ_CONTEXT_DESCRIPTION, parameters: QQ_CONTEXT_PARAMETERS, replay: "safe",
           execute: async options => ({ output: [{ type: "text", text: await parent().subagentContext(meta.id, options) }] }) }),

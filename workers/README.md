@@ -22,7 +22,7 @@
 
 设置保存在 Registry 的 `settings` 表（一行整份覆盖值）：`groupTrigger`（`mention_or_reply` / `mention_only` / `off`）、`allowGroups`、`allowUsers`、`extractNamespaces`。没有保存过时沿用 `QQ_ALLOW_GROUPS`、`QQ_ALLOW_USERS`、`QQ_GROUP_MENTIONS`（false 对应 off，其余对应 mention_only）与 `MEMORY_EXTRACT_NAMESPACES`；保存后这四个 secrets/vars 只作默认值显示。revision 是有效内容 SHA-256 的前 16 位。`mention_or_reply` 新增“回复机器人发出的消息”也能触发，判定查本群消息库里 `is_self=1` 的消息。Bridge 在内存缓存设置，面板保存后立即重载；Thread 判定抽取命名空间时缓存 60 秒，取不到设置时本轮不抽取。owner 只来自 `QQ_OWNER`，面板不能修改。
 
-“定时任务”卡片列出 `GET /admin/schedules` 的全部任务（规则原文或一次性、北京时间的下次触发、连续失败数、最近一次运行），可暂停 / 恢复、立即运行与删除（点两次确认）。“事件来源”卡片按来源显示状态（已暂停 / 降级 / 正常）、游标、上次轮询、积压、本小时预算与 Gmail watch 到期，可暂停 / 恢复；“设置”展开后整份提交 `PUT /admin/event-sources/:source/settings`，展开期间 30 秒刷新不覆盖未保存的输入；下方列该来源最近 10 次投递。审计事件的类型 chips 之外另有“更多”下拉，含 coding_*，也保留已移除的 web_search、generate_image 历史事件筛选。
+“定时任务”卡片列出 `GET /admin/schedules` 的全部任务（规则原文或一次性、北京时间的下次触发、连续失败数、最近一次运行），可暂停 / 恢复、立即运行与删除（点两次确认）。“事件来源”卡片按来源显示状态（已暂停 / 降级 / 正常）、游标、上次轮询、积压、本小时预算与 Gmail watch 到期，可暂停 / 恢复；“设置”展开后整份提交 `PUT /admin/event-sources/:source/settings`，展开期间 30 秒刷新不覆盖未保存的输入；下方列该来源最近 10 次投递。审计事件的类型 chips 之外另有“更多”下拉，含 coding_*，支持 web_search 搜索事件，也保留已移除的 generate_image 历史事件筛选。
 
 解除熔断把该行的 `until` 改成当前时间而不删除，它仍是计数窗口的起点，否则熔断前的 60 条会让下一条立刻再次熔断。
 
@@ -39,11 +39,13 @@
 - Codex 固定走 SSE：Harness 的 stream 设置与 `directComplete` 都传 `transport: "sse"`。pi-ai 默认先试 WebSocket 并按会话缓存连接，DO 里的连接跨不了请求。
 - secrets：`DEEPSEEK_API_KEY` 由 `scripts/put-secrets.sh` 从仓库根 `.env` 的 `DEEPSEEK_APIKEY` 读取，为空就跳过并提示；ChatGPT 登录不经 secrets，只依赖已有的 `OAUTH_STORE_KEY`，换这个密钥会使已存的 ChatGPT 凭据解不开，要重新登录。
 
-## 网页读取
+## 联网搜索与网页读取
+
+`web_search`（`src/tools/web-search.ts`）直接调用 [DeepSeek Search API](https://api-docs.deepseek.com/api/search/)，复用 `DEEPSEEK_API_KEY`，默认返回 8 条标题、日期、摘要和来源 URL，不请求全文。主会话、网页会话、定时与事件回合、子 agent 均可使用，与当前选择的对话模型无关；搜索按调用产生 DeepSeek API 费用，不依赖容器或新增后台轮询。主线程审计记录结果、耗时与条数，不记录查询词或凭据。
 
 `web_page`（`src/tools/web-page.ts`）读取指定 URL 的页面内容，供主会话、事件回合与子 agent 使用。它直接请求网页，不调用 Codex 订阅。回答中的链接使用纯文本 URL，发送前仍会清理 Markdown 链接与 `utm_*`。
 
-2026-10-30 移除借用 Codex 订阅的 `web_search` 与 `generate_image` 工具，以及代答模型配置和图片生成状态；ChatGPT 登录仍用于选择 Codex 作为会话模型。历史工具审计保留，可在面板继续查看。
+2026-10-30 移除借用 Codex 订阅的搜索与生图实现，以及代答模型配置和图片生成状态；`web_search` 改为独立的 DeepSeek 原生搜索，`generate_image` 不恢复；ChatGPT 登录仍用于选择 Codex 作为会话模型。历史工具审计保留，可在面板继续查看。
 
 # Workers P3b：技能目录与历史记录导入
 
@@ -84,7 +86,7 @@ curl --fail-with-body -X POST "$WORKER_URL/admin/messages/import" \
 主 agent 用 `subagent` 工具把耗时或可并行的事交给子 agent。每个子 agent 是一个独立的 `SubagentDO`（绑定 `SUBAGENT`，迁移 `v8`，名字 `sub:<父线程键>:<id>`），里面跑自己的 pi-durable Harness；完成后结果作为后续输入投回父线程，唤醒主 agent 再由它对用户说。代码在 `src/subagent/`：`model.ts` 是两边共用的类型与身份合并，`do.ts` 是子 DO，`parent.ts` 是父线程的登记表与工具。
 
 - 工具：`spawn { task, timeoutMs? }` 立即返回 id；`message { id, text }` 追加消息；`list`；`cancel { id }`。只有用户亲自发消息的回合能用（owner 私聊与群都可以），定时、事件与汇报回合调用会被拒绝；事件工具档里没有它。每个父线程同时最多 3 个运行中的子 agent，第 4 个 spawn 返回拒绝文本。spawn 的 id 与 message 的请求 id 由工具调用的任务 id 哈希得出，工具重放不会重复派出或重复交代。
-- 子会话的工具只有 `web_page`、`qq_context`、`mem_search`。后两个经 RPC 回父线程执行：`qq_context` 只读派出时的会话，`mem_search` 读父命名空间，owner 命名空间只对确证的 owner 派出者开放。没有 `send_message`、gmail、schedule、`subagent`、记忆写工具与 MCP。模型与推理强度在 spawn 时取 Registry 设置的当前值。
+- 子会话的基础检索工具为 `web_search`、`web_page`、`qq_context`、`mem_search`。后两个经 RPC 回父线程执行：`qq_context` 只读派出时的会话，`mem_search` 读父命名空间，owner 命名空间只对确证的 owner 派出者开放。没有 `send_message`、gmail、schedule、`subagent`、记忆写工具与 MCP。模型与推理强度在 spawn 时取 Registry 设置的当前值。
 - 子 DO 的表：`meta`（一行 JSON：parent、id、task、createdAt、identity、model、status、endedAt、reportCount、version）与 `inbox`（request_id、text、received_at、status、answer、outcome）。输入一次只跑一条，每条各得一个回答、各汇报一次：queued → running → answered（回答落库）→ reported（父线程收下）。汇报经 `THREAD.subagentReport` 投回；送不到时停在 answered，由子 DO 每 60 秒的心跳 alarm 补送，驱逐后也由心跳重开 Harness 续跑。结束（done / failed / cancelled）满 14 天后 alarm 删除整个对象。
 - 父线程表 `subagents`：id、task、状态（running / done / failed / cancelled / timeout）、身份快照、派出会话、限时与 deadline、子 DO 版本。子 DO 每次状态变化推进 `version`，父线程只采纳更新的版本，所以 message 的返回与汇报无论谁先到都收敛。cancelled 与 timeout 是父线程的终态，之后迟到的汇报丢弃。结束 14 天后由夜间 retention 删除登记。
 - 汇报输入：`kind = "subagent"`，入站键 `subagent-report:<id>:<requestId>`（超时为 `timeout@<deadline>`），文本以 `[子 agent 完成]`、`[子 agent 失败]` 或 `[子 agent 超时]` 开头。归 chat 档、followUp 排在当前回合之后、不进消息库、不参与记忆抽取，回合的 `turn-identity` 段说明这是子 agent 的汇报与派出者。
@@ -358,7 +360,7 @@ tests 1 / pass 1 / fail 0
 | `QQ_ALLOW_GROUPS` | 可选 secret，逗号分隔；允许群内所有成员的消息入库，真实 @ 机器人时才触发 |
 | `QQ_GROUP_MENTIONS` | var，默认 `true`；设为 `false` 时群消息仍入库，但不启动回合，包括 owner |
 | `MODEL_PROVIDER` / `MODEL_ID` | 默认模型（`deepseek` / `openai-codex` 及对应 id，测试为 faux）；运行时以面板保存的设置为准，见“模型与 ChatGPT 登录” |
-| `DEEPSEEK_API_KEY` | secret，DeepSeek 直连；ChatGPT 订阅在面板登录，不用 secret |
+| `DEEPSEEK_API_KEY` | secret，DeepSeek 对话模型与原生搜索；ChatGPT 订阅在面板登录，不用 secret |
 | `CS_AGENT_COMMIT` | 健康检查中的构建标识 |
 
 QQ 列表默认空；非法 ID 被忽略，不支持通配符。文件上传等 notice / 系统事件不作为聊天输入；字符串形式的 CQ 码不解析，文本 `@昵称`、引用和 `@全体成员` 均不能冒充真实 `at` 机器人。正文保留 `[@你]`、`[reply]`、`[image]` 等标记，引用 ID 单独落库，昵称和群名折成单行。

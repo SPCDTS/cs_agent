@@ -50,6 +50,7 @@ import { createGmailTools } from "./gmail/tools";
 import type { EventRunStatus } from "./events/model";
 import { cleanOutgoing } from "./send-clean";
 import { createWebPageTool } from "./tools/web-page";
+import { createWebSearchTool } from "./tools/web-search";
 import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin, type SubagentView } from "./subagent/parent";
@@ -68,7 +69,7 @@ type ToolProfile = "chat" | "event" | "web";
 const isWeb = (row: InboundRow) => row.reply_channel === "web";
 const isWebAdmin = (row: InboundRow) => isWeb(row) && row.user_id === "admin:web";
 const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只能展示网页。需要回复时调用 send_message，它只把文字写入网页，不向 QQ 发送。不得使用其他工具绕过此回复入口限制。";
-const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_page", "read_skill",
+const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill",
   ...(MCP_CONFIG.enabled && MCP_CONFIG.servers.some(server => server.enabled && server.tools.eventAllow.length) ? ["codemode"] : [])]);
 const profileOf = (row: InboundRow): ToolProfile => isWeb(row) ? "web" : row.kind === "event" ? "event" : "chat";
 type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp };
@@ -225,6 +226,7 @@ export class ThreadDO extends DurableObject<Env> {
         const input = await this.currentInput(harness, api, api.conversationId, callContext);
         return input ? this.ownerTurnKind(input) : undefined;
       }, () => this.env.EVENTS.getByName("main")) : []),
+      createWebSearchTool(this.env.DEEPSEEK_API_KEY, detail => this.audit("web_search", detail)),
       createWebPageTool(),
       this.skills.tool(),
       defineTool({

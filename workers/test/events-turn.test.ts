@@ -21,7 +21,7 @@ async function deliverMail(google: ReturnType<typeof fakeGoogle>, id: string) {
   google.addMail(id, { subject: "Q4 预算确认", body: "请在周五前确认预算。" });
   await events().notify("gmail");
 }
-const EVENT_TOOLS = ["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_page", "read_skill"];
+const EVENT_TOOLS = ["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill"];
 const WRITE_TOOLS = ["mem_remember", "mem_update", "mem_forget", "mem_profile", "gmail_send", "read", "write", "edit", "bash"];
 
 describe("event turns in the owner thread", () => {
@@ -42,7 +42,7 @@ describe("event turns in the owner thread", () => {
     const first = seen.requests[0]!;
     expect(first.user).toContain("[外部事件] gmail · 新邮件 1 件");
     expect(first.tools).toEqual(expect.arrayContaining(EVENT_TOOLS));
-    for (const name of [...WRITE_TOOLS, "web_search", "generate_image"]) expect(first.tools).not.toContain(name);
+    for (const name of [...WRITE_TOOLS, "generate_image"]) expect(first.tools).not.toContain(name);
     expect(seen.outputs[0]).toContain("请在周五前确认预算。");
     expect(seen.outputs[0]).toContain("report.pdf | 2048 bytes");
     expect(google.state.sends).toBe(0);
@@ -51,7 +51,7 @@ describe("event turns in the owner thread", () => {
     expect(await env.THREAD.getByName("owner").submit(input(2, "好的，记一下", 10000001))).toEqual({ status: "done" });
     const chat = seen.requests.find(request => request.user.includes("好的，记一下"));
     expect(chat?.tools).toEqual(expect.arrayContaining([...EVENT_TOOLS, ...WRITE_TOOLS]));
-    for (const name of ["web_search", "generate_image"]) expect(chat?.tools).not.toContain(name);
+    expect(chat?.tools).not.toContain("generate_image");
     const messages = await runInDurableObject(env.THREAD.getByName("owner"), (_instance, state) =>
       state.storage.sql.exec<{ text: string }>("SELECT text FROM messages").toArray().map(row => row.text).join("\n"));
     expect(messages).not.toContain("Q4 预算确认");
