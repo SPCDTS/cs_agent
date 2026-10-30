@@ -24,3 +24,16 @@ McpAuthority 必须由宿主构造，包含 kind、scope、actor、owner、gener
 Notion 资源仅允许 notion://docs/ 前缀，并且 URI 必须在远端资源目录或模板内。resources/list、resources/templates/list、resources/read 使用同一授权和连接队列；资源 URI 不是任意网络抓取入口。
 
 MCP 图片作为原生 image content 返回，允许 PNG/JPEG/WebP/GIF，单张最多 4 MiB、最多 4 张，总响应仍受 messageBytes 限制。图片只作为已有 MCP 结果，不提供生图工具。文本输出最多 8000 字；凭据继续仅由 Registry 获取，不传给模型或子 agent。
+
+
+## 群授权与逐次审批
+
+ThreadMcp 构造第六参传 {scope: threadNs}。群默认没有任何 Notion 工具；宿主通过 setAccess(scope, server, input, expectedRevision, reviewerAuthority) 保存明确的工具、资源前缀、成员与到期时间。工具只能来自静态 allow，资源前缀只能缩小静态 resourceAllow。只授予授权表中的工具可见性，调用前再次检查当前授权。
+
+MCP 配置的 tools.readOnly 是宿主维护的只读清单，不相信远端自行声明。群成员使用 owner 账号执行清单外工具时，每次产生独立审批；owner 本人也必须具有群工具 grant，但不需要审批自己的账号写入。事件回合不会借群授权调用 MCP。
+
+审批绑定 actor、scope、generation、replyChannel、server/tool contract、参数摘要、operationId 和 10 分钟有效期。批准只执行已保存的确切参数；HTTP 批准接口不接收新参数。重复同一操作返回回执；已执行但结果不明的请求只返回 outcome_unknown，不重新调用远端。拒绝、过期及授权变更使请求失效。原生图片保留在原调用结果中，SQLite 回执只保存文本摘要，避免重复存放图片造成套餐写入膨胀。
+
+主 runtime restore 时执行一次 recoverInterrupted，将 executing 账本标记 unknown；普通管理查询或 grant 读取不会执行恢复。reviewApproval(scope,id,decision,reviewer,current) 中的 current 回调由父宿主重新核验原 actor 和当前 generation，子 agent 还须核验登记与取消状态。回复入口必须与审批保存的入口一致。审批结果默认仅在网页面板与原工具回执可见，不主动向 QQ 发通知。
+
+管理 HTTP 工厂为 createMcpAdminRoutes(resolve)，对应接口定义在 workers/src/admin/mcp-routes.ts 的 McpAdminRpc。它应安装到现有 Bearer 鉴权路由内；Thread RPC 还须核验自己实际绑定的 scope。管理审批仅提供 approve/reject，不允许改写工具或参数。

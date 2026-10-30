@@ -9,7 +9,7 @@ export type McpAuthority = {
   subagentId?: string;
 };
 export type McpCapabilitySnapshot = {
-  scope: string; actor: string; generation: number; replyChannel: "web" | "qq"; catalogJson: string;
+  scope: string; actor: string; generation: number; replyChannel: "web" | "qq"; catalogJson: string; tools: string[]; resourceAllow?: { server: string; prefixes: string[] }[];
 };
 export type McpAuthorization = TurnKind | McpAuthority | undefined;
 /** 旧 owner-private 回调继续有效；群授权与审批必须由宿主传完整身份。 */
