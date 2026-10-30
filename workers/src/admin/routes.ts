@@ -1,3 +1,6 @@
+import { workspaceRoutes } from "./workspace-routes";
+import { createMcpAdminRoutes } from "./mcp-routes";
+import { accessRoutes } from "./access-routes";
 import { createMemoryAdminRoutes } from "./memory-routes";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
@@ -102,6 +105,13 @@ async function knownThread(env: Env, key: string) {
 const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY"] as const;
 
 export const ADMIN_ROUTES: AdminRoute[] = [
+  ...accessRoutes(),
+  ...workspaceRoutes({forThread:async(thread,ctx)=>{
+    const stub=ctx.env.THREAD.getByName(thread);
+    return {list:()=>stub.workspaceFiles(thread),download:input=>stub.workspaceReadBlob(thread,input),
+      resetRuntime:()=>stub.workspaceResetRuntime(thread),inspectChild:input=>stub.workspaceInspectChild(thread,input),mergeChild:input=>stub.workspaceMergeChild(thread,input)};
+  }}),
+  ...createMcpAdminRoutes((ctx, scope) => ctx.env.THREAD.getByName(scope)),
   ...createMemoryAdminRoutes((ctx, ns) => ctx.env.THREAD.getByName(ns)),
 
   { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/history$"), handle: async ({ env, params, url }) => {

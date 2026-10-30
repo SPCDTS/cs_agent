@@ -157,7 +157,7 @@ describe("subagents as child Durable Objects", () => {
     const group = "group:200000001";
     expect(await thread(group).submit(input(1, "派个子 agent", 10000003, 200000001, true))).toEqual({ status: "done" });
     await reports(group, 1);
-    expect(outputs.parent[1]).toContain("仅限 owner");
+    expect(outputs.parent[1]).toContain("定时管理授权");
     expect(seen.parent.find(request => request.user.includes("成员任务的结果"))?.identity).toContain("派出者是 群成员");
 
     expect(await thread(group).submit(input(2, "我也派一个", 10000001, 200000001, true))).toEqual({ status: "done" });
@@ -166,7 +166,7 @@ describe("subagents as child Durable Objects", () => {
 
     expect(await thread("owner").submit(input(3, "私聊派一个", 10000001))).toEqual({ status: "done" });
     await reports("owner", 1);
-    expect(outputs.parent[5]).toContain("已记住");
+    expect(outputs.parent[5]).toContain("只读权限");
   });
 
   it("cancels the child at the deadline from the parent alarm and wakes the parent with a timeout report", async () => {
@@ -184,13 +184,13 @@ describe("subagents as child Durable Objects", () => {
     expect(report!.user_id).toBe("10000003");
   });
 
-  it("rejects a fourth concurrent spawn", async () => {
-    const { outputs } = twoModels([spawn("任务 1"), spawn("任务 2"), spawn("任务 3"), spawn("任务 4")], ["hang", "hang", "hang"]);
-    expect(await thread("owner").submit(input(1, "派四个", 10000001))).toEqual({ status: "done" });
-    expect(outputs.parent.slice(0, 3).every(output => output.startsWith("已派出子 agent"))).toBe(true);
-    expect(outputs.parent[3]).toContain("达到上限");
-    expect((await thread("owner").subagentList()).map(sub => sub.status)).toEqual(["running", "running", "running"]);
-    expect((await thread("owner").stats()).subagents).toEqual({ running: 3 });
+  it("rejects a second concurrent spawn within the cloud budget", async () => {
+    const { outputs } = twoModels([spawn("任务 1"), spawn("任务 2")], ["hang"]);
+    expect(await thread("owner").submit(input(1, "派两个", 10000001))).toEqual({ status: "done" });
+    expect(outputs.parent.slice(0, 1).every(output => output.startsWith("已派出子 agent"))).toBe(true);
+    expect(outputs.parent[1]).toContain("达到上限");
+    expect((await thread("owner").subagentList()).map(sub => sub.status)).toEqual(["running"]);
+    expect((await thread("owner").stats()).subagents).toEqual({ running: 1 });
   });
 
   it("lists, inspects and cancels subagents through the authenticated admin API", async () => {

@@ -9,7 +9,7 @@ import type { ModelSelection } from "../settings";
 import { formatBeijingTime } from "../memory/time";
 import {
   DEFAULT_TIMEOUT_MS, MAX_RUNNING, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS, SUBAGENT_ID, clip, confirmedIdentity, narrowIdentity, reportKey, reportText, stableId, subagentName,
-  type ParentSubagentStatus, type SubagentIdentity, type SubagentReport, type SubagentState,
+  type ParentSubagentStatus, type SubagentCapabilities, type SubagentIdentity, type SubagentReport, type SubagentState,
 } from "./model";
 
 export const SUBAGENT_SCHEMA = `
@@ -23,7 +23,7 @@ CREATE INDEX IF NOT EXISTS subagents_deadline ON subagents(status, deadline);
 `;
 
 /** 汇报回合回到派出时的会话：目标、机器人号与群名。 */
-export type SubagentOrigin = { generation?: number; target: Target; selfId: string; scopeName: string; replyChannel?: "web" };
+export type SubagentOrigin = { capabilities?: SubagentCapabilities; workspaceRevision?: string; generation?: number; target: Target; selfId: string; scopeName: string; replyChannel?: "web" };
 export type SubagentCaller = { identity: SubagentIdentity; origin: SubagentOrigin };
 export type SubagentView = {
   id: string; task: string; status: ParentSubagentStatus; createdAt: number; deadline: number;
@@ -55,9 +55,9 @@ const PARAMETERS = Type.Object({
   task: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "spawn: a self-contained task description" })),
   id: Type.Optional(Type.String({ pattern: `^${SUBAGENT_ID}$`, description: "message / cancel: the subagent id returned by spawn or list" })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "message: a follow-up message for that subagent" })),
-  timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, maximum: MAX_TIMEOUT_MS, description: "spawn: time limit in ms, default 30 minutes" })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, maximum: MAX_TIMEOUT_MS, description: "spawn: time limit in ms, default 10 minutes" })),
 }, { additionalProperties: false });
-const DESCRIPTION = `Delegate a self-contained, time-consuming task to a background subagent with its own context. spawn returns at once; tell the user you started it and end the turn. When the subagent answers, its result comes back to you as a '[子 agent 完成]' input; then report to the user with send_message. message sends a follow-up to a subagent, list shows this chat's subagents, cancel stops one. At most ${MAX_RUNNING} run at a time. Subagents can only search the web, read pages, and read this chat's history and memory; they cannot message users.`;
+const DESCRIPTION = `Delegate a self-contained, time-consuming task to a background subagent with its own context. spawn returns at once; tell the user you started it and end the turn. When the subagent answers, its result comes back to you as a '[子 agent 完成]' input; then report to the user with send_message. message sends a follow-up to a subagent, list shows this chat's subagents, cancel stops one. At most ${MAX_RUNNING} run at a time. Subagents inherit approved MCP, skills and optional isolated coding capabilities. They cannot send messages, grant permissions or publish skills.`;
 
 /** 父线程的子 agent 登记：派出、交代、取消、汇报入队与超时，都经这张表。 */
 export class ParentSubagents {
@@ -100,7 +100,7 @@ export class ParentSubagents {
     if (!admitted) return { text: `本会话已有 ${MAX_RUNNING} 个子 agent 在运行，达到上限；等它们完成，或先 cancel 不再需要的。`, error: true };
     const row = (await this.row(id))!;
     try {
-      await this.apply(id, await this.child(thread, id).start({ parent: thread, id, task: row.task, identity: JSON.parse(row.identity_json) as SubagentIdentity, model }));
+      await this.apply(id, await this.child(thread, id).start({ parent: thread, id, task: row.task, identity: JSON.parse(row.identity_json) as SubagentIdentity, model, capabilities: (JSON.parse(row.origin_json) as SubagentOrigin).capabilities }));
     } catch (error) {
       console.error({ event: "subagent_start_failed", id, error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
       await this.host.db.run("UPDATE subagents SET status = 'failed', ended_at = ? WHERE id = ? AND status = 'running'", Date.now(), id);
@@ -115,6 +115,7 @@ export class ParentSubagents {
     const row = await this.row(id);
     if (!row) return { text: `本会话没有子 agent ${id}`, error: true };
     if (row.status === "cancelled" || row.status === "timeout") return { text: `子 agent ${id} ${STATUS_TEXT[row.status]}，不能再发消息；需要的话重新 spawn。`, error: true };
+    if ((JSON.parse(row.origin_json) as SubagentOrigin).generation !== caller.origin.generation) return {text:"该子任务属于已归档会话，请重新 spawn。",error:true};
     if ((JSON.parse(row.origin_json) as SubagentOrigin).replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，请在当前入口新建子任务。", error: true };
     // 这一轮交代的内容会进入子 agent 的上下文：登记的身份与本轮合并，不是同一人就降为基础权限，之后的汇报都按合并后的身份。
     const identity = narrowIdentity(JSON.parse(row.identity_json) as SubagentIdentity, caller.identity);
@@ -184,10 +185,11 @@ export class ParentSubagents {
   }
 
   /** 子 DO 只读 RPC 的取数范围：派出时的会话与当前确证的身份；不在本线程登记的子 agent 一律没有。 */
-  async access(id: string): Promise<{ scope: string; identity: SubagentIdentity } | undefined> {
+  async access(id: string, completed = false): Promise<{ scope: string; identity: SubagentIdentity; origin: SubagentOrigin } | undefined> {
     const row = await this.row(id);
-    if (!row || row.status !== "running") return;
-    return { scope: scopeOf((JSON.parse(row.origin_json) as SubagentOrigin).target),
+    if (!row || row.status !== "running" && !(completed && (row.status === "done" || row.status === "failed"))) return;
+    const origin = JSON.parse(row.origin_json) as SubagentOrigin;
+    return { scope: scopeOf(origin.target), origin,
       identity: confirmedIdentity(JSON.parse(row.identity_json) as SubagentIdentity, ownerIds(this.host.env)) };
   }
 

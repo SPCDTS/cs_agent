@@ -141,15 +141,15 @@ describe("OneBot reverse WebSocket", () => {
     expect(await Promise.all([first, second])).toEqual([{ status: "done" }, { status: "done" }]);
   });
 
-  it("returns channel_down to the tool when disconnected without writing an outbox receipt", async () => {
+  it("queues delivery while disconnected without writing a successful outbox receipt", async () => {
     await expect(sendPrivate("offline")).rejects.toThrow("channel_down");
     expect(await env.THREAD.getByName("owner").submit(input("8", "offline", "10000001"))).toEqual({ status: "done" });
     const rows = await runInDurableObject(env.THREAD.getByName("owner"), (_instance, state) => ({
       sent: state.storage.sql.exec("SELECT * FROM outbox").toArray(),
-      entries: state.storage.sql.exec("SELECT * FROM pi_entries").toArray(),
+      intents: state.storage.sql.exec("SELECT state FROM outgoing_intents").toArray(),
     }));
     expect(rows.sent).toEqual([]);
-    expect(JSON.stringify(rows.entries)).toContain("channel_down");
+    expect(rows.intents).toEqual([{ state: "queued" }]);
   });
 
   it("replaces the old connection and rejects its pending API call", async () => {

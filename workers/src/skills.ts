@@ -63,7 +63,7 @@ export function parseSkill(name: string, markdown: string, files?: Record<string
 const escape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 export function renderAvailableSkills(skills: readonly Pick<SkillSummary, "name" | "description">[]): string | undefined {
   if (!skills.length) return undefined;
-  return "可用技能（skills）。当任务与某个技能的描述匹配时，先用 read_skill 读取它的 SKILL.md，再按其中的指引执行；技能里提到的附件用 read_skill 的 path 参数按相对路径读取。技能只能在管理面板新建或修改。\n"
+  return "可用技能（skills）。当任务与某个技能的描述匹配时，先用 read_skill 读取它的 SKILL.md，再按其中的指引执行；技能里提到的附件用 read_skill 的 path 参数按相对路径读取。主人可以在管理面板修改技能，也可以在工作区编写后用 skill_inspect 检查、skill_publish 发布。\n"
     + "<available_skills>\n" + skills.map(skill => `<skill>\n<name>${escape(skill.name)}</name>\n<description>${escape(skill.description)}</description>\n</skill>`).join("\n")
     + "\n</available_skills>";
 }
@@ -101,6 +101,10 @@ export class SkillCatalog {
     }
   }
 
+  async read(name: string, path?: string): Promise<string> {
+    return readSkill(await this.registry().skillGet(name), name, path);
+  }
+
   tool() {
     return defineTool({
       name: "read_skill",
@@ -108,7 +112,7 @@ export class SkillCatalog {
       parameters: Type.Object({ name: Type.String({ minLength: 1, maxLength: 64 }), path: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })) },
         { additionalProperties: false }),
       replay: "safe",
-      execute: async ({ name, path }) => ({ output: [{ type: "text", text: readSkill(await this.registry().skillGet(name), name, path) }] }),
+      execute: async ({ name, path }) => ({ output: [{ type: "text", text: await this.read(name, path) }] }),
     });
   }
 }

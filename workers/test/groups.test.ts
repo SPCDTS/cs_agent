@@ -93,7 +93,8 @@ describe("group conversations", () => {
       .toEqual([{ when_busy: "steer" }]);
     reply(socket, one.echo, 90000020);
     const two = await action(frames, 1);
-    expect(two.params.message?.[0]?.data.qq).toBe("10000004");
+    expect(one.params.message?.[0]?.data.qq).toBe("10000004");
+    expect(two.params.message?.some(segment => segment.type === "at")).toBe(false);
     reply(socket, two.echo, 90000021);
     expect(await Promise.all([first, second])).toEqual([{ status: "done" }, { status: "done" }]);
     const submissions = await runInDurableObject(thread, (_instance, state) => state.storage.sql.exec<{ answer: number }>("SELECT json_extract(record, '$.answer') AS answer FROM pi_submissions ORDER BY id").toArray());

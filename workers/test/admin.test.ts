@@ -182,7 +182,7 @@ describe("admin data views", () => {
     expect((await adminJson<View>("GET", "/admin/memory?ns=owner")).memories.map(row => row.id)).toEqual([13, 11]);
     expect((await env.THREAD.getByName("owner").stats()).memory.active).toBe(2);
     expect((await admin("DELETE", "/admin/memory/999?ns=owner")).status).toBe(404);
-    expect((await admin("GET", "/admin/memory?ns=private:10000003")).status).toBe(400);
+    expect((await adminJson<View>("GET", "/admin/memory?ns=private:10000003")).memories).toEqual([]);
 
     const saved = await adminJson<{ profile: { text: string; revision: string } }>("PUT", "/admin/memory/profile", { ns: "owner", text: "新画像", expected: view.profile.revision });
     expect(saved.profile.text).toBe("新画像");

@@ -1,3 +1,14 @@
+import { createAccessExtension } from "./tools/access";
+import { createWorkspaceAdminApi, type WorkspaceAdminApi, type WorkspaceMergeInput } from "./sandbox/admin";
+import { createWorkspaceAdminExtension } from "./tools/workspace-admin";
+import type { McpAdminRpc } from "./admin/mcp-routes";
+import type { McpGrantInput } from "./mcp/policy";
+import type { Delivery, DeliverySource } from "./delivery";
+import { gcMediaTickets, MediaRepository, type AssetRef } from "./media/repository";
+import { createMediaExtension } from "./tools/media";
+import { lookupHostMedia } from "./tools/media-host";
+import type { McpAuthority } from "./mcp/access";
+import type { SubagentCodingOperation, SubagentCapabilityHost } from "./mcp/delegated";
 import { DurableObject } from "cloudflare:workers";
 import { historyCursor, historyEntry, readHistoryCursor } from "./sessions";
 import { MemoryManager, type MemoryListQuery, type ProfileProposal } from "./memory/management";
@@ -11,8 +22,8 @@ import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@ea
 import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
-import { effectiveSettings, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
-import { MESSAGE_SCHEMA, QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, recordMessage, recall, type RecallOptions } from "./context";
+import { threadOpsSettings, effectiveSettings, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
+import { MESSAGE_SCHEMA, QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, markMessageRecalled, recordMessage, recall, type RecallOptions } from "./context";
 import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from "./prompt";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { modelChange, openModels, sameSelection } from "./models";
@@ -20,14 +31,14 @@ import { captureModels } from "./requests/capture";
 import { remoteCredentials } from "./model-credentials";
 import { MEMORY_SCHEMA } from "./memory/schema";
 import { MemoryStore, MemoryStoreError, type Profile } from "./memory/store";
-import type { MemoryRow } from "./memory/types";
+import type { MemoryRow, MemoryInput } from "./memory/types";
 import { parseImport } from "./memory/import";
 import { createMemoryTools, searchMemory, type MemoryBinding } from "./memory/tools";
 import { MEMORY_RULE, type memoryParameters } from "./memory/contracts";
 import { renderMemorySection } from "./memory/render";
 import { formatBeijingTime } from "./memory/time";
 import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS, type ExtractComplete } from "./memory/extractor";
-import { maintenanceConfig, maintenanceStatus, runMaintenanceJob, type MaintenanceJob, type MaintenanceReport } from "./maintenance";
+import { maintenanceStatus, runMaintenanceJob, type MaintenanceJob, type MaintenanceReport } from "./maintenance";
 
 import { MCP_CATALOG_SCHEMA } from "./mcp/catalog";
 import { MCP_CONFIG } from "./mcp/config";
@@ -41,8 +52,8 @@ import { cleanOutgoing } from "./send-clean";
 import { createWebPageTool } from "./tools/web-page";
 import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
-import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentView } from "./subagent/parent";
-import { subagentName, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
+import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin, type SubagentView } from "./subagent/parent";
+import { subagentName, type SubagentIdentity, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
 import { createCodingExtension } from "./tools/coding";
 
 const context = BACKGROUND_CONTEXT;
@@ -50,7 +61,7 @@ const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "�
 type InboundRow = {
   message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number;
   status: "queued" | "done" | "failed"; chat_kind: "private" | "group"; chat_id: string; nickname: string;
-  session_generation: number; reply_channel: "qq" | "web"; scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null; kind: TurnKind;
+  persona_text: string | null; session_generation: number; reply_channel: "qq" | "web"; scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null; kind: TurnKind;
 };
 // 模型可见工具按会话配置生效，只能在会话空闲时切换；不同档位的输入永远不会进入同一个 run。定时输入归 chat 档。
 type ToolProfile = "chat" | "event" | "web";
@@ -97,6 +108,7 @@ export class ThreadDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS session_state (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL);
         INSERT OR IGNORE INTO session_state VALUES (1,0);
         CREATE TABLE IF NOT EXISTS session_resets (request_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, label TEXT NOT NULL, at INTEGER NOT NULL, status TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS outgoing_intents(id TEXT PRIMARY KEY,input_id TEXT NOT NULL,target_json TEXT NOT NULL,text TEXT NOT NULL,assets_json TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS web_outputs (id TEXT PRIMARY KEY, input_id TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
       `);
       // 已部署的 P0 表与 submission.requestId 必须保留，新增列用默认值兼容旧回合恢复。
@@ -105,10 +117,13 @@ export class ThreadDO extends DurableObject<Env> {
         chat_kind: "TEXT NOT NULL DEFAULT 'private'", chat_id: "TEXT NOT NULL DEFAULT ''",
         nickname: "TEXT NOT NULL DEFAULT ''", self_id: "TEXT NOT NULL DEFAULT ''",
         scope_name: "TEXT NOT NULL DEFAULT ''", platform_message_id: "TEXT NOT NULL DEFAULT ''", when_busy: "TEXT", turn_id: "TEXT",
-        session_generation: "INTEGER NOT NULL DEFAULT 0", kind: "TEXT NOT NULL DEFAULT 'message'", reply_channel: "TEXT NOT NULL DEFAULT 'qq'",
+        persona_text: "TEXT", session_generation: "INTEGER NOT NULL DEFAULT 0", kind: "TEXT NOT NULL DEFAULT 'message'", reply_channel: "TEXT NOT NULL DEFAULT 'qq'",
       })) if (!columns.some(column => column.name === name)) await tx.exec(`ALTER TABLE inbound ADD COLUMN ${name} ${definition}`);
       const outboxColumns = await tx.all<{ name: string }>("PRAGMA table_info(outbox)");
       if (!outboxColumns.some(column => column.name === "turn_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN turn_id TEXT");
+      if (!outboxColumns.some(column => column.name === "delivery_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN delivery_id TEXT");
+      await tx.exec("CREATE UNIQUE INDEX IF NOT EXISTS outbox_delivery ON outbox(delivery_id)");
+      if (!(await tx.all<{name:string}>("PRAGMA table_info(web_outputs)")).some(c=>c.name==="assets_json")) await tx.exec("ALTER TABLE web_outputs ADD COLUMN assets_json TEXT NOT NULL DEFAULT '[]'");
       // 跟进输入会并入同一 Pi run、共用 turn_id；定时运行的发送条数只能按输入计。
       if (!outboxColumns.some(column => column.name === "input_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN input_id TEXT");
       await tx.exec("CREATE INDEX IF NOT EXISTS inbound_turn ON inbound(turn_id); CREATE INDEX IF NOT EXISTS outbox_turn ON outbox(turn_id)");
@@ -197,34 +212,48 @@ export class ThreadDO extends DurableObject<Env> {
           return `现在是北京时间 ${formatBeijingTime(ms)}（${WEEKDAYS[new Date(ms + 8 * 3600_000).getUTCDay()]}）；今天、明天、下周这类相对时间都按北京时间理解。`;
         }, { tag: false }),
         section("skills", () => this.skills.section(), { tag: false }),
+        section("persona", async (api,c) => (await this.currentInput(harness,api.read,api.conversationId,c))?.persona_text || undefined, { tag: false }),
       ],
       tools: [...createMemoryTools(memory, async (api, callContext) => {
         const input = await this.currentInput(harness, api, api.conversationId, callContext);
         return input ? this.memoryBinding(input, memory.ns) : undefined;
-      }), ...(memory.ns === "owner" ? createGmailTools(async (api, callContext) => {
+      }, { rememberInNamespace: async (ns, input, options, binding) => {
+        const source = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE turn_id=? AND platform_message_id=? AND user_id=? ORDER BY rowid DESC LIMIT 1", binding.turnId, binding.messageId, binding.userId);
+        if (!source) throw new Error("memory_source_denied");
+        return this.env.THREAD.getByName(ns).rememberFromOwner(ns, input, options, { inputId: source.message_id, generation: source.session_generation });
+      } }), ...(memory.ns === "owner" ? createGmailTools(async (api, callContext) => {
         const input = await this.currentInput(harness, api, api.conversationId, callContext);
         return input ? this.ownerTurnKind(input) : undefined;
       }, () => this.env.EVENTS.getByName("main")) : []),
       createWebPageTool(),
       this.skills.tool(),
       defineTool({
-        name: "send_message", description: "向本回合的回复入口发送纯文本；QQ 群回复自动 @ 本轮发送者，网页回合只显示在网页。",
-        parameters: Type.Object({ text: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+        name: "send_message", description: "向本轮回复入口发送文字或私有图片资产。target可填qq:group:ID或qq:private:ID，跨会话须授权；网页回合只显示网页。",
+        parameters: Type.Object({ text: Type.String({ maxLength: 4000 }), images: Type.Optional(Type.Array(Type.String({ pattern: "^[a-f0-9]{64}$" }), { maxItems: 5 })), target: Type.Optional(Type.String({ pattern: "^qq:(group|private):[1-9][0-9]{0,19}$" })) }, { additionalProperties: false }),
         // 发 QQ 是外部副作用，中断后禁止自动重放，避免重复发送。
         replay: "unsafe",
-        execute: async ({ text }, api, toolContext) => {
+        execute: async ({ text, images, target }, api, toolContext) => {
           const input = await this.currentInput(harness, api, api.conversationId, toolContext);
           if (!input) throw new Error("current input missing");
-          return { output: [{ type: "text", text: JSON.stringify(await this.deliver(input, cleanOutgoing(text), String(api.taskId))) }] };
+          const repository = new MediaRepository({ bucket: this.env.ASSETS, scope: memory.ns });
+          const attachments = await Promise.all((images ?? []).map(async id => { const { ref } = await repository.get(id); if(ref.kind!=="image")throw new Error("unsupported_image"); return ref; }));
+          const to: Target | undefined = target ? target.startsWith("qq:group:") ? { kind: "group", groupId: target.slice(9) } : { kind: "private", userId: target.slice(11) } : undefined;
+          return { output: [{ type: "text", text: JSON.stringify(await this.deliver(input, cleanOutgoing(text), String(api.taskId), { target: to, attachments })) }] };
         },
       }), defineTool({
-        name: "qq_context", description: QQ_CONTEXT_DESCRIPTION, parameters: QQ_CONTEXT_PARAMETERS,
+        name: "qq_context", description: QQ_CONTEXT_DESCRIPTION + " 主人私聊可显式指定 target 读取其他会话已保存历史；发送授权不授予历史读取权。", parameters: Type.Object({ ...QQ_CONTEXT_PARAMETERS.properties, target: Type.Optional(Type.String({pattern:"^(group|private):[1-9][0-9]{0,19}$"})) }, {additionalProperties:false}),
         replay: "safe",
         execute: async (options, api, toolContext) => {
           const input = await this.currentInput(harness, api, api.conversationId, toolContext);
           if (!input) throw new Error("current input missing");
-          // scope 只来自当前输入，模型没有选择其他会话的参数，owner 也不能跨账号召回。
-          return { output: [{ type: "text", text: await recall(this.database, scopeOf(targetOf(input)), options) }] };
+          const {target,...query}=options;
+          let text: string;
+          if (target && target !== scopeOf(targetOf(input))) {
+            if(isWeb(input)||this.ownerTurnKind(input)!=="message")throw new Error("context_denied");
+            const ns=target.startsWith("private:")&&ownerIds(this.env).includes(target.slice(8))?"owner":target;
+            text=await this.env.THREAD.getByName(ns).recallForOwner(ns,target,query,{inputId:input.message_id,generation:input.session_generation});
+          } else text=await recall(this.database, scopeOf(targetOf(input)), query);
+          return { output: [{ type: "text", text }] };
         },
       }), this.subagents.tool(async (api, callContext) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext)),
         async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
@@ -238,14 +267,38 @@ export class ThreadDO extends DurableObject<Env> {
       sandbox: () => this.env.SANDBOX.getByName(memory.ns),
       record: (kind, detail) => this.audit(kind, detail),
     }));
+    registry.install(createAccessExtension({
+      allowManage:async(api,c)=>{
+        const input=await this.currentInput(harness,api,api.conversationId,c);
+        if(!input||this.ownerTurnKind(input)!=="message"||input.session_generation!==await this.sessionGeneration())return;
+        const id=isWebAdmin(input)?ownerIds(this.env)[0]:input.user_id;
+        return id?"qq:"+id:undefined;
+      },
+      registry:()=>this.env.REGISTRY.getByName("main"),bridge:()=>this.env.BRIDGE.getByName("napcat"),
+    }));
+    registry.install(createWorkspaceAdminExtension({
+      allowed:async(api,c)=>{const input=await this.currentInput(harness,api,api.conversationId,c);return !!input&&this.ownerTurnKind(input)==="message"&&input.session_generation===await this.sessionGeneration();},
+      sandbox:()=>this.env.SANDBOX.getByName(memory.ns),registry:()=>this.env.REGISTRY.getByName("main"),
+    }));
+    registry.install(createMediaExtension({
+      allowed: async (api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c); return !!input && input.session_generation === await this.sessionGeneration() && input.kind === "message"; },
+      repository: async () => new MediaRepository({ bucket: this.env.ASSETS, scope: memory.ns }),
+      lookup: async (messageId, api, c, selection) => {
+        const input = await this.currentInput(harness, api, api.conversationId, c); if (!input) throw new Error("media_scope_denied");
+        return lookupHostMedia({ database: this.database, bridge: this.env.BRIDGE.getByName("napcat"), source: { namespace: memory.ns, scope: scopeOf(targetOf(input)), target: targetOf(input) }, messageId, selection });
+      },
+      sandbox: async () => this.env.SANDBOX.getByName(memory.ns),
+      deliver: async (ref, api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c); if(!input)throw new Error("media_scope_denied"); return this.deliver(input,"",String(api.taskId),{attachments:[ref]}); },
+      record: (kind, detail) => this.audit(kind, detail),
+    }));
     if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
       registry.install(createScheduleExtension(this.env, memory.ns as ScheduleConversation, async (api, callContext) =>
         this.scheduleAccess(await this.currentInput(harness, api, api.conversationId, callContext))));
     }
-    const mcp = memory.ns === "owner" ? new ThreadMcp(this.database, this.env, registry, async (api, callContext) => {
+    const mcp = new ThreadMcp(this.database, this.env, registry, async (api, callContext) => {
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
-      return input ? this.ownerTurnKind(input) : undefined;
-    }) : undefined;
+      return this.mcpAuthority(input);
+    }, MCP_CONFIG, {scope:memory.ns});
     await mcp?.restore();
     // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
@@ -266,30 +319,74 @@ export class ThreadDO extends DurableObject<Env> {
     return runtime;
   }
 
-  /** 按本轮来源投递：网页写本地输出，QQ 发送成功才记 outbox 与消息库。 */
-  private async deliver(input: InboundRow, text: string, outputId: string): Promise<{ status: string; message_id?: string; reason?: string }> {
+
+  /** 网页输出只入本线程；QQ 副作用由 Bridge 的稳定意图负责恢复与防重。 */
+  private async deliver(input: InboundRow, text: string, outputId: string, options: { target?: Target; attachments?: AssetRef[] } = {}): Promise<{ status: string; message_id?: string; reason?: string }> {
+    if (input.session_generation !== await this.sessionGeneration()) return { status: "rejected", reason: "session_generation_revoked" };
     if (isWeb(input)) {
-      await this.database.run("INSERT OR IGNORE INTO web_outputs(id,input_id,text,at) VALUES(?,?,?,?)", outputId, input.message_id, text, Date.now());
+      if (options.target) return { status: "rejected", reason: "web_reply_only" };
+      await this.database.run("INSERT OR IGNORE INTO web_outputs(id,input_id,text,at,assets_json) VALUES(?,?,?,?,?)", outputId, input.message_id, text, Date.now(), JSON.stringify(options.attachments ?? []));
       return { status: "sent", message_id: outputId };
     }
-    const target = targetOf(input), at = target.kind === "group" && input.kind === "message" ? input.user_id : undefined;
+    const thread = await this.namespace(), target = options.target ?? targetOf(input), id = thread + ":" + input.session_generation + ":" + outputId;
+    const source = { thread, inputId: input.message_id, generation: input.session_generation, scope: scopeOf(targetOf(input)) };
+    if (!await this.validateDeliverySource(source, target)) return { status: "rejected", reason: "send_denied" };
+    await this.database.run("INSERT OR IGNORE INTO outgoing_intents(id,input_id,target_json,text,assets_json,state,created_at) VALUES(?,?,?,?,?,'queued',?)",
+      id, input.message_id, JSON.stringify(target), text, JSON.stringify(options.attachments ?? []), Date.now());
+    const operation = await this.database.get<{created_at:number}>("SELECT created_at FROM outgoing_intents WHERE id=?",id);
+    if(!operation)throw new Error("delivery_missing");
     const bridge = this.env.BRIDGE.getByName("napcat");
+    let receipt: Delivery | undefined;
     try {
-      const receipt = await bridge.send(target, text, at);
-      await this.database.transaction(async tx => {
-        await tx.run("INSERT INTO outbox (message_id, text, sent_at, turn_id, input_id) VALUES (?, ?, ?, ?, ?)", receipt.message_id, text, Date.now(), input.turn_id, input.message_id);
-        await recordMessage(tx, { messageId: receipt.message_id, selfId: input.self_id, userId: input.self_id,
-          nickname: "机器人", target, text, routeText: text, time: Math.floor(Date.now() / 1000),
-          mentionedSelf: false, replyToId: input.platform_message_id, imageCount: 0, scopeName: input.scope_name }, true);
-      });
-      return { status: "sent", message_id: receipt.message_id };
+      receipt = await bridge.deliver({ id, operationAt: operation.created_at,
+        runId: thread + ":" + (input.turn_id ?? input.message_id), target, text, source, attachments: options.attachments,
+        ...(target.kind === "group" && input.kind === "message" && scopeOf(target) === source.scope ? { atUserId: input.user_id } : {}) });
     } catch (error) {
-      // RPC 可能归一化 Error.name，因此用固定前缀识别可向模型说明的拒绝。
-      if (!(error instanceof Error)) throw error;
-      if (error.message === "channel_down") return { status: "failed", reason: "channel_down" };
-      if (error.message.startsWith("send_rule: ")) return { status: "rejected", reason: error.message.slice(11) };
-      throw error;
+      receipt = await bridge.delivery(id).catch(() => undefined);
+      if (!receipt) throw error;
     }
+    await this.projectDelivery(receipt);
+    return { status: receipt.state, ...(receipt.messageId ? { message_id: receipt.messageId } : {}), ...(receipt.error ? { reason: receipt.error } : {}) };
+  }
+
+  async validateDeliverySource(source: DeliverySource, target: Target): Promise<boolean> {
+    await this.initialize();
+    if (source.thread !== await this.namespace() || source.generation !== await this.sessionGeneration()) return false;
+    const input = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", source.inputId);
+    if (!input || isWeb(input) || input.session_generation !== source.generation || source.scope !== scopeOf(targetOf(input)) || input.user_id === input.self_id) return false;
+    if (scopeOf(target) === source.scope) return true;
+    return input.kind === "message" && this.env.REGISTRY.getByName("main").canAccess({ user: "qq:" + input.user_id, cap: "send", scope: source.scope, target: "qq:" + scopeOf(target) });
+  }
+
+  private async projectDelivery(receipt: Delivery): Promise<void> {
+    await this.database.transaction(async tx => {
+      const pending = await tx.get<{ input_id: string; target_json: string; text: string; assets_json: string }>("SELECT * FROM outgoing_intents WHERE id=?", receipt.id);
+      if (!pending) return;
+      await tx.run("UPDATE outgoing_intents SET state=? WHERE id=?", receipt.state, receipt.id);
+      if (receipt.state !== "sent") return;
+      const input = await tx.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", pending.input_id);
+      if (!input || await tx.get("SELECT 1 FROM outbox WHERE delivery_id=?", receipt.id)) return;
+      await tx.run("INSERT INTO outbox(message_id,text,sent_at,turn_id,input_id,delivery_id) VALUES(?,?,?,?,?,?)", receipt.messageId ?? "", pending.text, receipt.updatedAt, input.turn_id, input.message_id, receipt.id);
+      const target: Target = JSON.parse(pending.target_json);
+      if (receipt.messageId) await recordMessage(tx, { messageId: receipt.messageId, selfId: input.self_id, userId: input.self_id,
+        nickname: "机器人", target, text: pending.text || "[附件]", routeText: pending.text, time: Math.floor(receipt.updatedAt / 1000),
+        mentionedSelf: false, replyToId: scopeOf(target) === scopeOf(targetOf(input)) ? input.platform_message_id : null, imageCount: 0, scopeName: input.scope_name }, true);
+    });
+  }
+
+  async syncDeliveries(): Promise<void> {
+    await this.initialize();
+    for (const row of await this.database.all<{ id: string }>("SELECT id FROM outgoing_intents WHERE state IN ('queued','sending','unknown') ORDER BY rowid LIMIT 10")) {
+      const receipt = await this.env.BRIDGE.getByName("napcat").delivery(row.id);
+      if (receipt) await this.projectDelivery(receipt);
+    }
+  }
+
+  async markRecalled(scope: string, messageId: string): Promise<void> {
+    await this.initialize();
+    const ns = await this.namespace();
+    if (scope !== ns && !(ns === "owner" && scope.startsWith("private:") && ownerIds(this.env).includes(scope.slice(8)))) return;
+    await markMessageRecalled(this.database, scope, messageId);
   }
 
   private audit(kind: string, detail: object): Promise<unknown> {
@@ -297,6 +394,7 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async admit({ harness, root }: Runtime, row: InboundRow): Promise<Submission> {
+    if (row.persona_text === null) await this.database.run("UPDATE inbound SET persona_text=? WHERE message_id=? AND persona_text IS NULL", (await this.env.REGISTRY.getByName("main").persona()).text, row.message_id);
     let whenBusy = row.when_busy;
     if (!whenBusy) {
       // 先查排队，再读当前回合；已有他人排队时，后来的同人消息也不能越过队首。
@@ -347,10 +445,13 @@ export class ThreadDO extends DurableObject<Env> {
     return this.serial(async () => {
       let runtime: Runtime;
       try { runtime = await this.open(); }
-      catch {
-        for (const key of [...this.waiters.keys()]) {
-          await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ? AND status = 'queued'", key);
-          this.track(key, undefined);
+      catch(error) {
+        const rows=await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status='queued' ORDER BY rowid LIMIT 20");
+        for (const row of rows) {
+          await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ? AND status = 'queued'", row.message_id);
+          this.track(row.message_id, undefined);
+          await this.env.REGISTRY.getByName("main").recordTurn({scope:await this.namespace(),origin:isWeb(row)?"web":"qq",
+            outcome:error instanceof Error&&/auth|unauthorized|credential/i.test(error.message)?"auth_failed":"failed"}).catch(() => { console.error({ event: "turn_outcome_report_failed" }); });
         }
         return;
       }
@@ -407,6 +508,7 @@ export class ThreadDO extends DurableObject<Env> {
         if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1")) await this.wakeBy(Date.now() + EXTRACT_ALARM_DELAY_MS);
         return row;
       });
+      if (row) await this.env.REGISTRY.getByName("main").recordTurn({scope:await this.namespace(),origin:isWeb(row)?"web":"qq",outcome:status==="done"?"ok":"failed"}).catch(() => { console.error({ event: "turn_outcome_report_failed" }); });
       if (row?.kind === "schedule") await this.reportScheduleRun(row, status, answer);
       if (row?.kind === "event") {
         const outcome = await this.eventStatus(row);
@@ -511,10 +613,57 @@ export class ThreadDO extends DurableObject<Env> {
     return this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).transcriptSummary(limit);
   }
 
-  private subagentCaller(input: InboundRow | undefined): SubagentCaller | undefined {
+  private async mcpAuthority(input: InboundRow | undefined): Promise<McpAuthority | undefined> {
+    if (!input?.turn_id || input.session_generation !== await this.sessionGeneration()) return;
+    return { kind: input.kind, scope: await this.namespace(), actor: input.user_id, owner: isWebAdmin(input) || ownerIds(this.env).includes(input.user_id),
+      generation: input.session_generation, replyChannel: input.reply_channel };
+  }
+
+  async validateSubagentAccess(id: string): ReturnType<SubagentCapabilityHost["validateSubagentAccess"]> {
+    return this.subagentAccess(id);
+  }
+  private async subagentAccess(id: string, completed=false): ReturnType<SubagentCapabilityHost["validateSubagentAccess"]> {
+    await this.initialize();
+    const access = await this.subagents.access(id,completed), as = access?.identity.as;
+    if (!access || !as || access.origin.generation === undefined || access.origin.generation !== await this.sessionGeneration()) return;
+    return { authority: { kind: "subagent", scope: await this.namespace(), actor: as.userId, owner: as.owner,
+      generation: access.origin.generation, replyChannel: access.origin.replyChannel ?? "qq", subagentId: id }, capabilities: access.origin.capabilities ?? {} };
+  }
+  async subagentMcp(id: string, call: { name: string; args: unknown; operationId: string }): ReturnType<SubagentCapabilityHost["subagentMcp"]> {
+    const access = await this.validateSubagentAccess(id), { mcp } = await this.open();
+    if (!access?.capabilities.mcp || !mcp) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
+    return mcp.invoke({ ...call, operationId: "sub:" + id + ":" + call.operationId, snapshot: access.capabilities.mcp },
+      async () => (await this.validateSubagentAccess(id))?.authority);
+  }
+  async subagentSkill(id: string, input: { name: string; path?: string }): ReturnType<SubagentCapabilityHost["subagentSkill"]> {
+    if (!await this.validateSubagentAccess(id)) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
+    return { output: [{ type: "text", text: await this.skills.read(input.name, input.path) }] };
+  }
+  async subagentCoding(id: string, operation: SubagentCodingOperation): ReturnType<SubagentCapabilityHost["subagentCoding"]> {
+    const access = await this.validateSubagentAccess(id);
+    if (!access?.capabilities.coding || !access.authority.owner) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
+    const name = subagentName(await this.namespace(), id), sandbox = this.env.SANDBOX.getByName(name);
+    if (!await this.ctx.storage.get("child-workspace:" + id)) {
+      const origin = (await this.subagents.access(id))?.origin, current = await sandbox.snapshot();
+      if (!origin) throw new Error("delegation_denied");
+      const cloned = await sandbox.cloneFrom({ sourceName: await this.namespace(), expectedRevision: current.revision, sourceRevision: origin.workspaceRevision });
+      if (!cloned.ok) throw new Error("workspace_conflict");
+      await this.ctx.storage.put("child-workspace:" + id, true);
+    }
+    const op = operation.kind === "write" ? { kind: "write" as const, path: operation.path, text: operation.content } : operation;
+    const result = await sandbox.run({ operationId: "sub:" + id + ":" + operation.operationId, operation: op });
+    if (result.status === "committed" && "kind" in result.result && result.result.kind === "image")
+      return { output: [{ type: "image", data: result.result.data, mimeType: result.result.mimeType }] };
+    return { ...(result.status === "committed" ? {} : { isError: true }), output: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  private async subagentCaller(input: InboundRow | undefined): Promise<SubagentCaller | undefined> {
     if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;
+    const authority = await this.mcpAuthority(input), { mcp } = await this.open();
+    const coding = this.ownerTurnKind(input) === "message", snapshot = coding ? await this.env.SANDBOX.getByName(await this.namespace()).snapshot() : undefined;
+    const capabilities = { coding, ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority) } : {}) };
     return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner: isWebAdmin(input) ? this.ctx.id.equals(this.env.THREAD.idFromName("owner")) : ownerIds(this.env).includes(input.user_id), ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
-      origin: { generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
+      origin: { capabilities, workspaceRevision: snapshot?.revision, generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
   }
 
   /** 让 alarm 不晚于 at：记忆抽取与子 agent 限时共用这一个 alarm。 */
@@ -538,14 +687,14 @@ export class ThreadDO extends DurableObject<Env> {
     return input.kind;
   }
 
-  private scheduleAccess(input: InboundRow | undefined): ScheduleAccess {
+  private async scheduleAccess(input: InboundRow | undefined): Promise<ScheduleAccess> {
     if (input && isWebAdmin(input)) return { kind: "manage", actor: "admin:web" };
     if (input?.kind === "schedule") {
       const key = parseScheduleInputKey(input.message_id);
       return key ? { kind: "control", scheduleId: key.scheduleId, fireKey: key.fireKey } : { kind: "none" };
     }
     // 子 agent 汇报回合继承派出者：派出者是确证的 owner 时与其消息回合同权。
-    return (input?.kind === "message" || input?.kind === "subagent") && input.user_id !== input.self_id && ownerIds(this.env).includes(input.user_id)
+    return (input?.kind === "message" || input?.kind === "subagent") && input.user_id !== input.self_id && await this.env.REGISTRY.getByName("main").canAccess({ user: "qq:" + input.user_id, cap: "schedule", scope: scopeOf(targetOf(input)) })
       ? { kind: "manage", actor: `qq:${input.user_id}` } : { kind: "none" };
   }
 
@@ -603,21 +752,21 @@ export class ThreadDO extends DurableObject<Env> {
   async chatView(thread: string) {
     await this.initialize();
     await this.bindNamespace(thread);
-    type ChatRow = { id: string; role: "user" | "assistant"; source: "qq" | "web"; name: string; text: string; at: number; status: string | null };
+    type ChatRow = { id: string; role: "user" | "assistant"; source: "qq" | "web"; name: string; text: string; at: number; status: string | null; assets_json: string };
     const rows = await this.database.all<ChatRow>(`
       SELECT * FROM (
         SELECT 'qq:' || id AS id, CASE WHEN is_self=1 THEN 'assistant' ELSE 'user' END AS role,
-          'qq' AS source,nickname AS name,text,time * 1000 AS at,NULL AS status FROM messages
+          'qq' AS source,nickname AS name,text,time * 1000 AS at,NULL AS status,'[]' AS assets_json FROM messages
         UNION ALL
-        SELECT message_id AS id,'user' AS role,'web' AS source,nickname AS name,text,received_at * 1000 AS at,status
+        SELECT message_id AS id,'user' AS role,'web' AS source,nickname AS name,text,received_at * 1000 AS at,status,'[]' AS assets_json
           FROM inbound WHERE reply_channel='web' AND kind='message'
         UNION ALL
-        SELECT 'web-out:' || id AS id,'assistant' AS role,'web' AS source,'助手' AS name,text,at,NULL AS status FROM web_outputs
+        SELECT 'web-out:' || id AS id,'assistant' AS role,'web' AS source,'助手' AS name,text,at,NULL AS status,assets_json FROM web_outputs
       ) ORDER BY at DESC,id DESC LIMIT 100
     `);
     const queued = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued' AND reply_channel='web'"))?.n ?? 0;
     if (queued) this.ctx.waitUntil(this.pump());
-    return { messages: rows.reverse(), queued, limit: 100 };
+    return { messages: rows.reverse().map(({assets_json,...row})=>({...row,assets:JSON.parse(assets_json) as AssetRef[]})), queued, limit: 100 };
   }
 
   async stats() {
@@ -650,6 +799,27 @@ export class ThreadDO extends DurableObject<Env> {
     const ns = scopeOf(targetOf(input));
     await this.bindNamespace(ns);
     return ns;
+  }
+
+  async recallForOwner(ns: string, scope: string, options: RecallOptions, source: {inputId:string;generation:number}):Promise<string> {
+    if(!await this.env.THREAD.getByName("owner").validateMemorySource(source))throw new Error("context_denied");
+    await this.initialize();await this.bindNamespace(ns);
+    if(scope!==ns&&!(ns==="owner"&&scope.startsWith("private:")&&ownerIds(this.env).includes(scope.slice(8))))throw new Error("context_denied");
+    return recall(this.database,scope,options);
+  }
+
+  async validateMemorySource(source: { inputId: string; generation: number }) {
+    await this.initialize();
+    if (await this.namespace() !== "owner" || source.generation !== await this.sessionGeneration()) return;
+    const input = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", source.inputId);
+    if (!input || input.session_generation !== source.generation || isWeb(input) || this.ownerTurnKind(input) !== "message" || input.user_id === input.self_id) return;
+    return { author: "qq:" + input.user_id, source_scope: scopeOf(targetOf(input)), source_message_id: input.platform_message_id, source_turn_id: input.turn_id };
+  }
+
+  async rememberFromOwner(ns: string, input: Omit<MemoryInput, "ns">, options: { supersedes?: number }, source: { inputId: string; generation: number }): ReturnType<MemoryStore["remember"]> {
+    const origin = await this.env.THREAD.getByName("owner").validateMemorySource(source);
+    if (!origin) throw new Error("memory_source_denied");
+    return (await this.adminStore(ns)).remember({ ...input, ...origin }, options);
   }
 
   private memoryBinding(input: InboundRow, ns: string): MemoryBinding | undefined {
@@ -715,8 +885,12 @@ export class ThreadDO extends DurableObject<Env> {
 
   async maintain(job: MaintenanceJob): Promise<MaintenanceReport> {
     await this.initialize();
+    await this.syncDeliveries();
+    if(job.kind==="retention")await this.collectAssets();
+    const config = threadOpsSettings((await this.env.REGISTRY.getByName("main").opsSettings()).value, await this.namespace());
+    if (job.kind === "consolidate" && !config.consolidate) return { kind: "consolidate", status: "skipped" };
     return runMaintenanceJob(job.kind, { db: this.database, kv: this.ctx.storage, store: new MemoryStore(this.database, await this.namespace()),
-      complete: this.complete, config: maintenanceConfig(this.env), now: job.now });
+      complete: this.complete, config, now: job.now });
   }
 
   async importMemory(value: unknown): Promise<{ inserted: number; skipped: number }> {
@@ -791,6 +965,7 @@ export class ThreadDO extends DurableObject<Env> {
       const live = await runtime.harness.snapshot(LiveDoc, runtime.root.id, context);
       if (live?.compactions?.length) return { error: "busy" };
       const generation = await this.sessionGeneration();
+      await this.env.BRIDGE.getByName("napcat").cancelQueued({thread,generation});
       // 先取消子任务；并发的迟到汇报会由 generation 检查拒绝。
       await Promise.all((await this.subagents.list()).filter(item => item.status === "running").map(item => this.subagents.cancel(item.id)));
       await this.database.transaction(async tx => {
@@ -830,6 +1005,75 @@ export class ThreadDO extends DurableObject<Env> {
     return { stopped: true };
   }
 
+
+
+  private async workspaceAdmin(thread:string):Promise<WorkspaceAdminApi>{
+    await this.initialize();await this.bindNamespace(thread);
+    return createWorkspaceAdminApi({
+      authorize:async()=>{},
+      current:()=>this.env.SANDBOX.getByName(thread),
+      child:async id=>{
+        const row=await this.database.get<{origin_json:string;identity_json:string}>("SELECT origin_json,identity_json FROM subagents WHERE id=?",id);
+        if(!row||thread!=="owner")throw new Error("workspace_denied");
+        const origin=JSON.parse(row.origin_json) as SubagentOrigin,identity=JSON.parse(row.identity_json) as SubagentIdentity;
+        if(origin.generation!==await this.sessionGeneration()||!origin.capabilities?.coding||!identity.as?.owner)throw new Error("workspace_denied");
+        const sourceName=subagentName(thread,id);
+        return {sourceName,sandbox:this.env.SANDBOX.getByName(sourceName)};
+      },
+    });
+  }
+  async workspaceFiles(thread:string){return (await this.workspaceAdmin(thread)).list();}
+  async workspaceReadBlob(thread:string,input:{path:string;revision:string}){return (await this.workspaceAdmin(thread)).download(input);}
+  async workspaceResetRuntime(thread:string){return (await this.workspaceAdmin(thread)).resetRuntime();}
+  async workspaceInspectChild(thread:string,input:{childId:string}){return (await this.workspaceAdmin(thread)).inspectChild(input);}
+  async workspaceMergeChild(thread:string,input:WorkspaceMergeInput){return (await this.workspaceAdmin(thread)).mergeChild(input);}
+
+  private async collectAssets():Promise<void>{
+    const ns=await this.namespace();
+    await this.env.SANDBOX.getByName(ns).gc({dryRun:false,batchSize:100});
+    const after=await this.ctx.storage.get<number>("asset-gc-child")??0;
+    const children=await this.database.all<{rowid:number;id:string}>("SELECT rowid,id FROM subagents WHERE rowid>? ORDER BY rowid LIMIT 5",after);
+    for(const child of children)await this.env.SANDBOX.getByName(subagentName(ns,child.id)).gc({dryRun:false,batchSize:100});
+    await this.ctx.storage.put("asset-gc-child",children.length===5?children[children.length-1]!.rowid:0);
+    if(ns==="owner"){
+      const result=await gcMediaTickets(this.env.ASSETS,{limit:1000,cursor:await this.ctx.storage.get<string>("asset-gc-tickets")});
+      if(result.cursor)await this.ctx.storage.put("asset-gc-tickets",result.cursor);else await this.ctx.storage.delete("asset-gc-tickets");
+    }
+  }
+
+  private async adminMcp(scope: string) {
+    await this.initialize(); await this.bindNamespace(scope);
+    const {mcp}=await this.open(); if(!mcp)throw new Error("mcp_unavailable"); return mcp;
+  }
+  private async mcpReviewer(scope:string):Promise<McpAuthority>{
+    return {scope,actor:"admin:web",owner:true,kind:"message",generation:await this.sessionGeneration(),replyChannel:"web"};
+  }
+  async mcpAccess(scope:string,server:string):ReturnType<McpAdminRpc["mcpAccess"]>{
+    return (await (await this.adminMcp(scope)).policy.grant(scope,server))??null;
+  }
+  async mcpSetAccess(scope:string,server:string,input:McpGrantInput,expected:string):ReturnType<McpAdminRpc["mcpSetAccess"]>{
+    const mcp=await this.adminMcp(scope),grant=await mcp.setAccess(scope,server,input,expected,await this.mcpReviewer(scope));
+    await mcp.refreshAll(); return grant;
+  }
+  async mcpApprovals(scope:string):ReturnType<McpAdminRpc["mcpApprovals"]>{
+    return (await this.adminMcp(scope)).policy.list(scope);
+  }
+  async mcpReviewApproval(scope:string,id:string,decision:"approve"|"reject"):ReturnType<McpAdminRpc["mcpReviewApproval"]>{
+    const mcp=await this.adminMcp(scope);
+    const reviewed = await mcp.reviewApproval(scope,id,decision,await this.mcpReviewer(scope),async original=>{
+      if(original.scope!==scope||original.generation!==await this.sessionGeneration())return;
+      if(original.subagentId){
+        const access=await this.subagentAccess(original.subagentId,true),snapshot=access?.capabilities.mcp;
+        return access&&snapshot&&snapshot.scope===original.scope&&snapshot.actor===original.actor&&snapshot.generation===original.generation&&snapshot.replyChannel===original.replyChannel?access.authority:undefined;
+      }
+      const input=await this.database.get<InboundRow>("SELECT * FROM inbound WHERE user_id=? AND reply_channel=? AND session_generation=? AND kind=? ORDER BY rowid DESC LIMIT 1",original.actor,original.replyChannel,original.generation,original.kind);
+      return this.mcpAuthority(input);
+    });
+    if(!reviewed.result)return {status:reviewed.status};
+    return {status:reviewed.status,result:{isError:reviewed.result.isError,output:(reviewed.result.output??[]).map(content=>
+      content.type==="text"?{type:"text" as const,text:content.text}:{type:"image" as const,data:content.data,mimeType:content.mimeType})}};
+  }
+
   async refreshMcp(): Promise<{ server: string; status: string; tools: number }[]> {
     const { mcp } = await this.open();
     if (!mcp) throw new Error("mcp_unavailable");
@@ -857,8 +1101,9 @@ export class ThreadDO extends DurableObject<Env> {
   }
   async consolidateMemory(ns: string): ReturnType<typeof runConsolidate> {
     const store = await this.adminStore(ns);
+    const config = threadOpsSettings((await this.env.REGISTRY.getByName("main").opsSettings()).value, ns);
     return runConsolidate({ db: this.database, kv: this.ctx.storage, store,
-      complete: this.complete, config: maintenanceConfig(this.env), now: Date.now() });
+      complete: this.complete, config, now: Date.now() });
   }
   async rollbackMemory(ns: string, batchId: string): ReturnType<MemoryManager["rollback"]> {
     return new MemoryManager(await this.adminStore(ns)).rollback(batchId);

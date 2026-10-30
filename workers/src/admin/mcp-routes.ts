@@ -2,12 +2,12 @@ import { Type } from "typebox";
 import { Check } from "typebox/value";
 import type { AdminContext, AdminRoute } from "./routes";
 import type { McpGrant, McpGrantInput, McpApproval } from "../mcp/policy";
-import type { ThreadMcp } from "../mcp";
+export type McpReviewResult = {status:string;result?:{isError?:boolean;output:({type:"text";text:string}|{type:"image";data:string;mimeType:string})[]}};
 export interface McpAdminRpc {
  mcpAccess(scope: string, server: string): Promise<McpGrant | null>;
  mcpSetAccess(scope: string, server: string, input: McpGrantInput, expected: string): Promise<McpGrant>;
  mcpApprovals(scope: string): Promise<McpApproval[]>;
- mcpReviewApproval(scope: string, id: string, decision: "approve" | "reject"): ReturnType<ThreadMcp["reviewApproval"]>;
+ mcpReviewApproval(scope: string, id: string, decision: "approve" | "reject"): Promise<McpReviewResult>;
 }
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
 function scope(ctx: AdminContext) {
