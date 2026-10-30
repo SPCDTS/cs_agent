@@ -54,7 +54,13 @@ describe("sandboxClient", () => {
 /** 测试池不起容器；把 ctx.container 换成假的，控制端口的 fetch 由测试决定。 */
 function fakeContainer(port: (url: string, init?: RequestInit) => Promise<Response>) {
   const state = { running: false, starts: [] as unknown[], idle: [] as unknown[], destroyed: 0 };
-  const fetch = vi.fn(port);
+  const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    const pathname = new URL(url).pathname;
+    if (pathname === "/restore/start") return Response.json({ id: "restore" });
+    if (pathname === "/restore/commit") return Response.json({ restored: true });
+    if (pathname === "/snapshot") return Response.json({ files: [], directories: [], totalBytes: 0 });
+    return port(url, init);
+  });
   const container = {
     get running() { return state.running; },
     images: { sandbox: "registry.test/sandbox:1" },
@@ -98,8 +104,8 @@ describe("SandboxDO", () => {
       expect(await sandbox.status()).toBe("running");
     });
     expect(state.starts).toEqual([{ image: "registry.test/sandbox:1", enableInternet: true, instance: "lite" }]);
-    expect(state.idle).toEqual([600_000, 600_000]);
-    expect(fetch.mock.calls.map(([url]) => url)).toEqual(["http://sandbox/health", "http://sandbox/health", "http://sandbox/health", "http://sandbox/exec", "http://sandbox/exec"]);
+    expect(state.idle.every(value => value === 180_000)).toBe(true);
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(["http://sandbox/health", "http://sandbox/health", "http://sandbox/health", "http://sandbox/restore/start", "http://sandbox/restore/commit", "http://sandbox/exec", "http://sandbox/snapshot", "http://sandbox/exec", "http://sandbox/snapshot"]);
   });
 
   it("does not replay a call that failed after the port was ready, and re-checks readiness next time", async () => {
@@ -109,10 +115,11 @@ describe("SandboxDO", () => {
       return Response.json(url.endsWith("/health") ? { ok: true } : { stdout: "", stderr: "", code: 0, timedOut: false, truncated: false });
     });
     await withContainer(container, async sandbox => {
-      await expect(sandbox.exec("make", { timeoutMs: 5000 })).rejects.toThrow("sandbox_unavailable");
+      await expect(sandbox.exec("make", { timeoutMs: 5000 })).rejects.toThrow("operation_unknown");
       await sandbox.exec("make", { timeoutMs: 5000 });
     });
-    expect(fetch.mock.calls.map(([url]) => url)).toEqual(["http://sandbox/health", "http://sandbox/exec", "http://sandbox/health", "http://sandbox/exec"]);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/exec"))).toHaveLength(2);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/health"))).toHaveLength(2);
   });
 
   it("gives up with sandbox_unavailable when the control port never comes up", async () => {
@@ -166,7 +173,7 @@ describe("coding tools", () => {
     const exec = vi.spyOn(SandboxDO.prototype, "exec").mockResolvedValue({ stdout: "built\n", stderr: "warning: x\n", code: 2, timedOut: false, truncated: false });
     const seen = scriptedModel([{ name: "bash", args: { command: "make", timeout: 90 } }, { name: "", args: {} }]);
     expect(await env.THREAD.getByName("owner").submit(input(1, "编译", 10000001))).toEqual({ status: "done" });
-    expect(exec).toHaveBeenCalledWith("make", { cwd: "/work", timeoutMs: 90_000 });
+    expect(exec).toHaveBeenCalledWith("make", { cwd: "/work", timeoutMs: 90_000, operationId: expect.stringMatching(/^task:/) });
     expect(seen.outputs[0]).toBe("built\n\n[stderr]\nwarning: x\n\nCommand exited with code 2");
     expect(await auditRows("coding_exec")).toEqual([{ result: "ok", commandLength: 4, code: 2, ms: expect.any(Number) }]);
   });
@@ -181,7 +188,7 @@ describe("coding tools", () => {
     ]);
     expect(await env.THREAD.getByName("owner").submit(input(1, "改一下", 10000001))).toEqual({ status: "done" });
     expect(seen.outputs[0]).toBe("a\nb\n\n[Showing lines 1-2 of 5. Use offset=3 to continue.]");
-    expect(edit).toHaveBeenCalledWith("main.py", [{ oldText: "a", newText: "A" }]);
+    expect(edit).toHaveBeenCalledWith("main.py", [{ oldText: "a", newText: "A" }], expect.stringMatching(/^task:/));
     expect(seen.outputs[1]).toBe("Successfully replaced 1 block(s) in main.py.");
   });
 });

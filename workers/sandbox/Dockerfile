@@ -7,7 +7,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --uid 1000 --shell /bin/bash sandbox \
  && mkdir -p /work/out && chown -R sandbox:sandbox /work
-COPY --chmod=0644 server.mjs /opt/sandbox/server.mjs
+COPY --chmod=0644 server.mjs workspace.mjs /opt/sandbox/
 WORKDIR /work
 EXPOSE 3000
 CMD ["node", "/opt/sandbox/server.mjs"]

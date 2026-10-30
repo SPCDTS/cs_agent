@@ -17,7 +17,7 @@ before(async () => {
   writeFileSync(path.join(outside, "secret.txt"), "outside");
   // 目录链接在 Windows 上用 junction，不需要管理员权限。
   symlinkSync(outside, path.join(root, "escape"), "junction");
-  server = createSandboxServer({ root, shell });
+  server = createSandboxServer({ root, shell, env: process.platform === "win32" ? { PATH: "/usr/bin:/bin" } : {} });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   origin = `http://127.0.0.1:${server.address().port}`;
 });

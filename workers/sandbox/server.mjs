@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { workspaceControl, detectImage } from "./workspace.mjs";
 
 export const OUTPUT_CAP = 64 * 1024;
 export const MAX_TIMEOUT_MS = 120_000;
@@ -118,6 +119,8 @@ export function createSandboxServer({ root, shell = "/bin/bash", user, env = {} 
     if (stat.isDirectory()) throw new Failure("is_directory");
     if (stat.size > FILE_MAX_BYTES) throw new Failure("too_large");
     const bytes = await fs.readFile(file);
+    const mimeType = detectImage(bytes);
+    if (mimeType) return { kind: "image", data: bytes.toString("base64"), mimeType };
     if (bytes.includes(0)) throw new Failure("binary_file");
     const lines = bytes.toString("utf8").split("\n");
     if (start >= lines.length) throw new Failure("offset_out_of_range");
@@ -193,7 +196,13 @@ export function createSandboxServer({ root, shell = "/bin/bash", user, env = {} 
   }
   const optionalInt = value => value === null ? undefined : Number(value);
 
+  const workspace = workspaceControl({ root, own });
   const routes = {
+    "GET /snapshot": () => workspace.scan(),
+    "GET /blob": async (_request, url) => { const file = await resolveInside(root, url.searchParams.get("path")); const stat = await readStat(file); if (!stat.isFile()) throw new Failure("is_directory"); if (stat.size > FILE_MAX_BYTES) throw new Failure("too_large"); return fs.readFile(file); },
+    "POST /restore/start": async request => workspace.start(await json(request)),
+    "PUT /restore/blob": async (request, url) => workspace.put(url.searchParams.get("id"), url.searchParams.get("path"), await body(request)),
+    "POST /restore/commit": async request => workspace.commit((await json(request)).id),
     "GET /health": async () => ({ ok: true }),
     "POST /exec": async request => exec(await json(request)),
     "GET /file": async (_request, url) => read({ path: url.searchParams.get("path"), offset: optionalInt(url.searchParams.get("offset")), limit: optionalInt(url.searchParams.get("limit")) }),
@@ -210,10 +219,11 @@ export function createSandboxServer({ root, shell = "/bin/bash", user, env = {} 
       if (!route) throw new Failure("not_found", 404);
       payload = await route(request, url);
     } catch (error) {
-      if (error instanceof Failure) { status = error.status; payload = { error: error.message }; }
+      if (error instanceof Failure || error?.workspaceFailure) { status = error.status; payload = { error: error.message, ...(error.issues ? { issues: error.issues } : {}) }; }
       else if (error?.code === "EACCES" || error?.code === "EPERM") { status = 403; payload = { error: "permission_denied" }; }
       else { status = 500; payload = { error: "internal" }; console.error(error); }
     }
+    if (payload instanceof Uint8Array) { response.writeHead(status, { "Content-Type": "application/octet-stream" }); response.end(payload); return; }
     response.writeHead(status, { "Content-Type": "application/json" });
     response.end(JSON.stringify(payload));
   });

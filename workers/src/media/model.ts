@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 
 export const FILE_MAX_BYTES = 10 * 1024 * 1024;
-export const WORKSPACE_MAX_BYTES = 200 * 1024 * 1024;
+export const WORKSPACE_MAX_BYTES = 50 * 1024 * 1024;
 export const ASSET_PREFIX = "cs-agent/v1";
 export const AssetKindSchema = Type.Union([Type.Literal("image"), Type.Literal("file"), Type.Literal("audio"), Type.Literal("video")]);
 export const AssetRefSchema = Type.Object({

@@ -60,3 +60,11 @@ export async function readMediaToken(bucket: R2Bucket, token: string): Promise<{
   const ref = parseAssetRef(value.ref);
   return new MediaRepository({ bucket, scope: ref.scope }).get(ref.id);
 }
+
+/** 独立于模型回合的维护入口；游标推进防止大量未过期票据阻塞后续对象。 */
+export async function gcMediaTickets(bucket: R2Bucket, options: { limit?: number; cursor?: string; dryRun?: boolean } = {}): Promise<{ scanned: number; deleted: number; cursor?: string }> {
+  const listing = await bucket.list({ prefix: `${ASSET_PREFIX}/tickets/`, limit: Math.max(1, Math.min(1000, options.limit ?? 100)), cursor: options.cursor, include: ["customMetadata"] });
+  const expired = listing.objects.filter(object => Number(object.customMetadata?.expires) <= Date.now()).map(object => object.key);
+  if (!options.dryRun && expired.length) await bucket.delete(expired);
+  return { scanned: listing.objects.length, deleted: options.dryRun ? 0 : expired.length, ...(listing.truncated ? { cursor: listing.cursor } : {}) };
+}
