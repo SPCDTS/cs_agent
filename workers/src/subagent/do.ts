@@ -6,6 +6,7 @@ import { createRegistry, defineExtension, defineTool, Harness, section, type Con
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "../env";
 import { modelChange, openModels } from "../models";
+import { captureModels } from "../requests/capture";
 import { remoteCredentials } from "../model-credentials";
 import { createWebPageTool } from "../tools/web-page";
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
@@ -240,7 +241,7 @@ export class SubagentDO extends DurableObject<Env> {
   private async openRuntime(): Promise<Runtime> {
     const meta = await this.meta();
     if (!meta) throw new Error("subagent_missing");
-    const models = openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")));
+    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main"))), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" });
     const parent = () => this.env.THREAD.getByName(meta.parent);
     const registry = createRegistry();
     // 子会话只有网页读取与上下文检索工具，不能发消息、写记忆或调用 MCP。

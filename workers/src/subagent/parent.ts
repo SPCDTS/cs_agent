@@ -23,7 +23,7 @@ CREATE INDEX IF NOT EXISTS subagents_deadline ON subagents(status, deadline);
 `;
 
 /** 汇报回合回到派出时的会话：目标、机器人号与群名。 */
-export type SubagentOrigin = { target: Target; selfId: string; scopeName: string };
+export type SubagentOrigin = { target: Target; selfId: string; scopeName: string; replyChannel?: "web" };
 export type SubagentCaller = { identity: SubagentIdentity; origin: SubagentOrigin };
 export type SubagentView = {
   id: string; task: string; status: ParentSubagentStatus; createdAt: number; deadline: number;
@@ -83,7 +83,7 @@ export class ParentSubagents {
     // 没有确证的派出者时 userId 留空：所有按人求权限的地方都只剩会话基础权限。
     return { messageId: key, selfId: origin.selfId, userId: as?.userId ?? "", nickname: as?.nickname ?? "", target: origin.target,
       text, routeText: text, time: Math.floor(Date.now() / 1000), mentionedSelf: false, replyToId: null, imageCount: 0,
-      scopeName: origin.scopeName, kind: "subagent" };
+      scopeName: origin.scopeName, replyChannel: origin.replyChannel, kind: "subagent" };
   }
 
   async spawn(caller: SubagentCaller, task: string, timeoutMs: number | undefined, model: ModelSelection, seed: string): Promise<Reply> {
@@ -115,6 +115,7 @@ export class ParentSubagents {
     const row = await this.row(id);
     if (!row) return { text: `本会话没有子 agent ${id}`, error: true };
     if (row.status === "cancelled" || row.status === "timeout") return { text: `子 agent ${id} ${STATUS_TEXT[row.status]}，不能再发消息；需要的话重新 spawn。`, error: true };
+    if ((JSON.parse(row.origin_json) as SubagentOrigin).replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，请在当前入口新建子任务。", error: true };
     // 这一轮交代的内容会进入子 agent 的上下文：登记的身份与本轮合并，不是同一人就降为基础权限，之后的汇报都按合并后的身份。
     const identity = narrowIdentity(JSON.parse(row.identity_json) as SubagentIdentity, caller.identity);
     await this.host.db.run("UPDATE subagents SET identity_json = ? WHERE id = ?", JSON.stringify(identity), id);

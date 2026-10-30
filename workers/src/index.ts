@@ -6,6 +6,7 @@ import type { Env } from "./env";
 import { MAINTENANCE_CRON, runMaintenance } from "./maintenance";
 import { readPush, verifyPushToken } from "./gmail/pubsub";
 
+export { RequestsDO } from "./requests/do";
 export { RegistryDO } from "./registry";
 export { BridgeDO } from "./bridge";
 export { ThreadDO } from "./thread";

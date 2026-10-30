@@ -11,6 +11,7 @@ import { MESSAGE_SCHEMA, QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, recordMe
 import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from "./prompt";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { modelChange, openModels, sameSelection } from "./models";
+import { captureModels } from "./requests/capture";
 import { remoteCredentials } from "./model-credentials";
 import { MEMORY_SCHEMA } from "./memory/schema";
 import { MemoryStore, MemoryStoreError, type Profile } from "./memory/store";
@@ -44,13 +45,16 @@ const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "�
 type InboundRow = {
   message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number;
   status: "queued" | "done" | "failed"; chat_kind: "private" | "group"; chat_id: string; nickname: string;
-  scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null; kind: TurnKind;
+  reply_channel: "qq" | "web"; scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null; kind: TurnKind;
 };
-// 模型可见工具按会话配置生效，只能在会话空闲时切换；两种档位的输入永远不会进入同一个 run。定时输入归 chat 档。
-type ToolProfile = "chat" | "event";
+// 模型可见工具按会话配置生效，只能在会话空闲时切换；不同档位的输入永远不会进入同一个 run。定时输入归 chat 档。
+type ToolProfile = "chat" | "event" | "web";
+const isWeb = (row: InboundRow) => row.reply_channel === "web";
+const isWebAdmin = (row: InboundRow) => isWeb(row) && row.user_id === "admin:web";
+const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只能展示网页。需要回复时调用 send_message，它只把文字写入网页，不向 QQ 发送。不得使用其他工具绕过此回复入口限制。";
 const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_page", "read_skill",
   ...(MCP_CONFIG.enabled && MCP_CONFIG.servers.some(server => server.enabled && server.tools.eventAllow.length) ? ["codemode"] : [])]);
-const profileOf = (row: InboundRow): ToolProfile => row.kind === "event" ? "event" : "chat";
+const profileOf = (row: InboundRow): ToolProfile => isWeb(row) ? "web" : row.kind === "event" ? "event" : "chat";
 type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp };
 const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind: "group", groupId: row.chat_id } : { kind: "private", userId: row.chat_id };
 export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
@@ -85,6 +89,7 @@ export class ThreadDO extends DurableObject<Env> {
         ${MEMORY_SCHEMA}
         ${MCP_CATALOG_SCHEMA}
         ${SUBAGENT_SCHEMA}
+        CREATE TABLE IF NOT EXISTS web_outputs (id TEXT PRIMARY KEY, input_id TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
       `);
       // 已部署的 P0 表与 submission.requestId 必须保留，新增列用默认值兼容旧回合恢复。
       const columns = await tx.all<{ name: string }>("PRAGMA table_info(inbound)");
@@ -92,7 +97,7 @@ export class ThreadDO extends DurableObject<Env> {
         chat_kind: "TEXT NOT NULL DEFAULT 'private'", chat_id: "TEXT NOT NULL DEFAULT ''",
         nickname: "TEXT NOT NULL DEFAULT ''", self_id: "TEXT NOT NULL DEFAULT ''",
         scope_name: "TEXT NOT NULL DEFAULT ''", platform_message_id: "TEXT NOT NULL DEFAULT ''", when_busy: "TEXT", turn_id: "TEXT",
-        kind: "TEXT NOT NULL DEFAULT 'message'",
+        kind: "TEXT NOT NULL DEFAULT 'message'", reply_channel: "TEXT NOT NULL DEFAULT 'qq'",
       })) if (!columns.some(column => column.name === name)) await tx.exec(`ALTER TABLE inbound ADD COLUMN ${name} ${definition}`);
       const outboxColumns = await tx.all<{ name: string }>("PRAGMA table_info(outbox)");
       if (!outboxColumns.some(column => column.name === "turn_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN turn_id TEXT");
@@ -152,7 +157,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   private async openRuntime(): Promise<Runtime> {
     await this.initialize();
-    const models = this.models(), selection = (await this.loadSettings(true)).model;
+    const models = captureModels(this.models(), this.env, this.ctx, { thread: await this.namespace(), actor: "thread", purpose: "conversation" }), selection = (await this.loadSettings(true)).model;
     const memory = new MemoryStore(this.database, await this.namespace());
     // 相同 storage 对象共享事务队列，避免宿主写入被 Pi 的事务一起回滚。
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
@@ -160,10 +165,14 @@ export class ThreadDO extends DurableObject<Env> {
     registry.install(defineExtension({
       name: "cs-workers",
       sections: [
-        section("qq", () => SEND_RULE + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE + "\n" + MEMORY_RULE, { tag: false }),
+        section("qq", async (api, callContext) => {
+          const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
+          return (input && isWeb(input) ? WEB_SEND_RULE : SEND_RULE) + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE + "\n" + MEMORY_RULE;
+        }, { tag: false }),
         section("memory", () => renderMemorySection(memory), { tag: false }),
         section("turn-identity", async (api, callContext) => {
           const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
+          if (input && isWeb(input)) return WEB_SEND_RULE + "\n当前会话：" + memory.ns + "；管理员权限只作用于本会话范围。";
           if (input?.kind === "event") return EVENT_TURN_IDENTITY;
           if (input?.kind === "subagent") return subagentTurnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name },
             ownerIds(this.env).includes(input.user_id));
@@ -188,14 +197,14 @@ export class ThreadDO extends DurableObject<Env> {
       createWebPageTool(),
       this.skills.tool(),
       defineTool({
-        name: "send_message", description: "向本回合所在 QQ 会话发送纯文本；群回复自动 @ 本轮发送者。",
+        name: "send_message", description: "向本回合的回复入口发送纯文本；QQ 群回复自动 @ 本轮发送者，网页回合只显示在网页。",
         parameters: Type.Object({ text: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
         // 发 QQ 是外部副作用，中断后禁止自动重放，避免重复发送。
         replay: "unsafe",
         execute: async ({ text }, api, toolContext) => {
           const input = await this.currentInput(harness, api, api.conversationId, toolContext);
           if (!input) throw new Error("current input missing");
-          return { output: [{ type: "text", text: JSON.stringify(await this.deliver(input, cleanOutgoing(text))) }] };
+          return { output: [{ type: "text", text: JSON.stringify(await this.deliver(input, cleanOutgoing(text), String(api.taskId))) }] };
         },
       }), defineTool({
         name: "qq_context", description: QQ_CONTEXT_DESCRIPTION, parameters: QQ_CONTEXT_PARAMETERS,
@@ -245,8 +254,12 @@ export class ThreadDO extends DurableObject<Env> {
     return runtime;
   }
 
-  /** 发到本回合所在会话并记进 outbox 与消息库。 */
-  private async deliver(input: InboundRow, text: string): Promise<{ status: string; message_id?: string; reason?: string }> {
+  /** 按本轮来源投递：网页写本地输出，QQ 发送成功才记 outbox 与消息库。 */
+  private async deliver(input: InboundRow, text: string, outputId: string): Promise<{ status: string; message_id?: string; reason?: string }> {
+    if (isWeb(input)) {
+      await this.database.run("INSERT OR IGNORE INTO web_outputs(id,input_id,text,at) VALUES(?,?,?,?)", outputId, input.message_id, text, Date.now());
+      return { status: "sent", message_id: outputId };
+    }
     const target = targetOf(input), at = target.kind === "group" && input.kind === "message" ? input.user_id : undefined;
     const bridge = this.env.BRIDGE.getByName("napcat");
     try {
@@ -278,7 +291,7 @@ export class ThreadDO extends DurableObject<Env> {
       // 定时与事件输入不插话；它们的回合里来的消息也排到其后，不能并入这些运行。
       const inbox = await harness.snapshot(InboxDoc, root.id, context);
       const active = await this.currentInput(harness, harness, root.id, context);
-      whenBusy = row.kind === "message" && active?.kind === "message" && active.user_id === row.user_id && !inbox?.items.some(item => item.mode === "followUp") ? "steer" : "followUp";
+      whenBusy = !isWeb(row) && row.kind === "message" && active?.kind === "message" && !isWeb(active) && active.user_id === row.user_id && !inbox?.items.some(item => item.mode === "followUp") ? "steer" : "followUp";
       await this.database.run("UPDATE inbound SET when_busy = ? WHERE message_id = ?", whenBusy, row.message_id);
     }
     return root.submit({ type: "input", content: row.text, requestId: row.message_id, whenBusy }, context);
@@ -317,7 +330,7 @@ export class ThreadDO extends DurableObject<Env> {
     return run;
   }
 
-  // 同档位的输入立即接纳（含插话）；换档的输入等会话空闲后再切换工具配置，因此先到的另一档输入可能晚于后到的同档输入。
+  // 只接纳队首连续的同档输入；跨来源等待空闲再切换，防止 QQ 与网页混入同一 run。
   private pump(afterIdle = false): Promise<void> {
     return this.serial(async () => {
       let runtime: Runtime;
@@ -331,7 +344,8 @@ export class ThreadDO extends DurableObject<Env> {
       }
       for (;;) {
         const rows = await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' AND when_busy IS NULL ORDER BY rowid");
-        const admissible = rows.filter(row => profileOf(row) === runtime.profile);
+        const barrier = rows.findIndex(row => profileOf(row) !== runtime.profile);
+        const admissible = rows.slice(0, barrier < 0 ? rows.length : barrier);
         if (admissible.length) await this.syncModel(runtime);
         for (const row of admissible) {
           let submission: Submission | undefined;
@@ -376,7 +390,7 @@ export class ThreadDO extends DurableObject<Env> {
         const unfinished = await tx.get("SELECT 1 FROM inbound WHERE turn_id = ? AND status != 'done' LIMIT 1", row.turn_id);
         if (unfinished) return row;
         // 定时与事件回合的输出可能转述外部资料，没有聊天输入的回合不抽取，避免这些资料经抽取变成记忆。
-        if (!await tx.get("SELECT 1 FROM inbound WHERE turn_id = ? AND kind = 'message' LIMIT 1", row.turn_id)) return row;
+        if (!await tx.get("SELECT 1 FROM inbound WHERE turn_id = ? AND kind = 'message' AND reply_channel = 'qq' LIMIT 1", row.turn_id)) return row;
         await extractor.enqueue(row.turn_id, tx);
         if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1")) await this.wakeBy(Date.now() + EXTRACT_ALARM_DELAY_MS);
         return row;
@@ -401,9 +415,9 @@ export class ThreadDO extends DurableObject<Env> {
       const key = kind === "event" || kind === "subagent" ? input.messageId : inboundKey(input);
       if (kind !== "event" && kind !== "subagent" && await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND self_id = '' AND user_id = ?", input.messageId, input.userId)) return;
       const inserted = await this.database.get<InboundRow>(`INSERT OR IGNORE INTO inbound
-        (message_id, platform_message_id, user_id, self_id, text, received_at, status, chat_kind, chat_id, nickname, scope_name, kind)
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?) RETURNING *`, key, input.messageId, input.userId, input.selfId, input.text, input.time,
-        input.target.kind, input.target.kind === "group" ? input.target.groupId : input.target.userId, input.nickname, input.scopeName ?? "", kind);
+        (message_id, platform_message_id, user_id, self_id, text, received_at, status, chat_kind, chat_id, nickname, scope_name, kind, reply_channel)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?) RETURNING *`, key, input.messageId, input.userId, input.selfId, input.text, input.time,
+        input.target.kind, input.target.kind === "group" ? input.target.groupId : input.target.userId, input.nickname, input.scopeName ?? "", kind, input.replyChannel ?? "qq");
       if (!inserted) return;
       // 等待者必须在本串行段内登记，之后的 pump 才能把接纳结果交回调用方。
       return { key, ...(wait ? { admitted: new Promise<Submission | undefined>(resolve => this.waiters.set(key, resolve)) } : {}) };
@@ -480,8 +494,8 @@ export class ThreadDO extends DurableObject<Env> {
 
   private subagentCaller(input: InboundRow | undefined): SubagentCaller | undefined {
     if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;
-    return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner: ownerIds(this.env).includes(input.user_id) } },
-      origin: { target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name } };
+    return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner: isWebAdmin(input) ? this.ctx.id.equals(this.env.THREAD.idFromName("owner")) : ownerIds(this.env).includes(input.user_id), ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
+      origin: { target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
   }
 
   /** 让 alarm 不晚于 at：记忆抽取与子 agent 限时共用这一个 alarm。 */
@@ -500,11 +514,13 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private ownerTurnKind(input: InboundRow): TurnKind | undefined {
+    if (isWebAdmin(input) && this.ctx.id.equals(this.env.THREAD.idFromName("owner"))) return input.kind;
     if (!input.turn_id || input.chat_kind !== "private" || !ownerIds(this.env).includes(input.user_id)) return;
     return input.kind;
   }
 
   private scheduleAccess(input: InboundRow | undefined): ScheduleAccess {
+    if (input && isWebAdmin(input)) return { kind: "manage", actor: "admin:web" };
     if (input?.kind === "schedule") {
       const key = parseScheduleInputKey(input.message_id);
       return key ? { kind: "control", scheduleId: key.scheduleId, fireKey: key.fireKey } : { kind: "none" };
@@ -545,6 +561,46 @@ export class ThreadDO extends DurableObject<Env> {
     return { status: row?.status ?? "missing", sent };
   }
 
+  /** 管理员网页输入复用当前 Harness root，但不伪造 QQ 入站或写进 QQ 消息库。 */
+  async submitWeb(thread: string, requestId: string, text: string) {
+    const key = "web:" + requestId;
+    const result = await this.serial(async () => {
+      await this.initialize();
+      await this.bindNamespace(thread);
+      const previous = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", key);
+      if (previous) return previous.text === text ? { id: key, status: previous.status, duplicate: true } : { error: "request_conflict" as const };
+      const last = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE reply_channel='qq' AND kind='message' ORDER BY rowid DESC LIMIT 1");
+      const kind = thread.startsWith("group:") ? "group" : "private";
+      const chatId = thread === "owner" ? last?.chat_id ?? ownerIds(this.env)[0] ?? "web" : thread.slice(thread.indexOf(":") + 1);
+      await this.database.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel) VALUES(?,?,?,?,?,?,'queued',?,?,?,?,'message','web')",
+        key, requestId, "admin:web", last?.self_id ?? "", text, Date.now() / 1000, kind, chatId, "网页管理员", last?.scope_name ?? "");
+      return { id: key, status: "queued" as const, duplicate: false };
+    });
+    if (!("error" in result)) this.ctx.waitUntil(this.pump());
+    return result;
+  }
+
+  /** 只读已提交消息；轮询还会恢复已落库但尚未接纳的网页输入。 */
+  async chatView(thread: string) {
+    await this.initialize();
+    await this.bindNamespace(thread);
+    type ChatRow = { id: string; role: "user" | "assistant"; source: "qq" | "web"; name: string; text: string; at: number; status: string | null };
+    const rows = await this.database.all<ChatRow>(`
+      SELECT * FROM (
+        SELECT 'qq:' || id AS id, CASE WHEN is_self=1 THEN 'assistant' ELSE 'user' END AS role,
+          'qq' AS source,nickname AS name,text,time * 1000 AS at,NULL AS status FROM messages
+        UNION ALL
+        SELECT message_id AS id,'user' AS role,'web' AS source,nickname AS name,text,received_at * 1000 AS at,status
+          FROM inbound WHERE reply_channel='web' AND kind='message'
+        UNION ALL
+        SELECT 'web-out:' || id AS id,'assistant' AS role,'web' AS source,'助手' AS name,text,at,NULL AS status FROM web_outputs
+      ) ORDER BY at DESC,id DESC LIMIT 100
+    `);
+    const queued = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued' AND reply_channel='web'"))?.n ?? 0;
+    if (queued) this.ctx.waitUntil(this.pump());
+    return { messages: rows.reverse(), queued, limit: 100 };
+  }
+
   async stats() {
     await this.initialize();
     const rows = await this.database.all<{ status: "queued" | "done" | "failed"; n: number }>("SELECT status, COUNT(*) AS n FROM inbound GROUP BY status");
@@ -579,8 +635,8 @@ export class ThreadDO extends DurableObject<Env> {
 
   private memoryBinding(input: InboundRow, ns: string): MemoryBinding | undefined {
     if (!input.turn_id) return;
-    const owner = ownerIds(this.env).includes(input.user_id);
-    const expected = owner && input.chat_kind === "private" ? "owner" : scopeOf(targetOf(input));
+    const owner = isWebAdmin(input) ? ns === "owner" : ownerIds(this.env).includes(input.user_id);
+    const expected = isWebAdmin(input) ? ns : owner && input.chat_kind === "private" ? "owner" : scopeOf(targetOf(input));
     if (expected !== ns || input.user_id === input.self_id) return;
     // 事件回合绑定 owner 只为读取范围；写记忆须经主人的一句话，因此不给写权限。
     return { ns, owner: owner && input.kind !== "event", userId: input.user_id, turnId: input.turn_id, scope: scopeOf(targetOf(input)), messageId: input.platform_message_id };
@@ -590,7 +646,7 @@ export class ThreadDO extends DurableObject<Env> {
   private readonly complete: ExtractComplete = async (prompt, signal) => {
     const selection = (await this.loadSettings()).model;
     signal.throwIfAborted();
-    return directComplete(this.models(), selection.provider, this.env.MEMORY_EXTRACT_MODEL?.trim() || selection.id)(prompt, signal);
+    return directComplete(captureModels(this.models(), this.env, this.ctx, { thread: await this.namespace(), actor: "thread", purpose: "background" }), selection.provider, this.env.MEMORY_EXTRACT_MODEL?.trim() || selection.id)(prompt, signal);
   };
 
   /** 抽取判定读 60 秒缓存；接纳输入时传 fresh，面板改的模型下一回合就生效。 */

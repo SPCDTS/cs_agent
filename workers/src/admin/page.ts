@@ -1,3 +1,4 @@
+import { CONSOLE_CSS, CONSOLE_NAV, CONSOLE_HTML, CONSOLE_APP_JS } from "./console";
 // 页面与脚本分开发送：脚本走 script-src 'self'，CSP 不必放开内联脚本。两者都不含数据，数据只经带 Bearer 的接口取得。
 export const ADMIN_PAGE_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -5,7 +6,7 @@ export const ADMIN_PAGE_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>cs-agent 面板</title>
+<title>cs-agent 管理台</title>
 <style>
 *{box-sizing:border-box}
 [hidden]{display:none !important}
@@ -77,12 +78,13 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
   .memory-profile{border-right:0;border-bottom:1px solid #E3E6EB}
   .section-head{padding:14px 16px}
 }
+${CONSOLE_CSS}
 </style>
 </head>
 <body>
 <div id="login" class="login" hidden>
   <form id="login-form" class="card login-card" autocomplete="off">
-    <h1>cs-agent 面板</h1>
+    <h1>cs-agent 管理台</h1>
     <label for="login-token">管理口令（ADMIN_TOKEN）</label>
     <input id="login-token" type="password" autocomplete="current-password" required>
     <button class="btn primary" type="submit">进入</button>
@@ -91,9 +93,10 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
 </div>
 
 <div id="app" hidden>
+${CONSOLE_NAV}
 <header class="topbar">
   <div class="topbar-inner">
-    <div class="brand">cs-agent 面板</div>
+    <div class="brand">cs-agent 管理台</div>
     <div id="commit" class="mono muted"></div>
     <span id="health" class="pill neutral">加载中</span>
     <div class="grow"></div>
@@ -104,6 +107,9 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
 <div id="status" class="status-line" role="status" hidden></div>
 
 <main>
+${CONSOLE_HTML}
+<div id="view-manage" hidden>
+<div class="console-head"><div><h1>配置与管理</h1><p>管理模型、连接、记忆与自动任务。</p></div></div>
   <section class="cards">
     <div class="card"><div class="muted small">NapCat</div><div id="card-napcat" class="big">-</div><div id="card-napcat-sub" class="muted small"></div></div>
     <div class="card"><div class="muted small">模型</div><div id="card-model" class="big">-</div><div id="card-model-sub" class="muted small"></div></div>
@@ -287,6 +293,7 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
       <div class="note">保存按 frontmatter 的 name 新建或覆盖；覆盖时保留启用状态与已有附件。附件暂无页面入口，经 PUT /admin/skills/:name 的 files 上传。</div>
     </div>
   </section>
+</div>
 </main>
 </div>
 <script src="/admin/app.js" defer></script>
@@ -409,6 +416,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   const notice = message => show(message, "info");
 
   function showLogin(message) {
+    resetConsole();
     clearInterval(state.timer);
     state.timer = null;
     $("app").hidden = true;
@@ -421,13 +429,14 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     $("login").hidden = true;
     $("app").hidden = false;
     $("status").hidden = true;
+    startConsole();
     refresh();
     loadSettings().catch(fail);
     loadModel().catch(fail);
     loadMemory().catch(fail);
     loadSkills().catch(fail);
     clearInterval(state.timer);
-    state.timer = setInterval(refresh, 30000);
+    state.timer = setInterval(() => { refresh(); refreshConsole(); }, 30000);
   }
   function refresh() {
     return Promise.all([loadOverview(), loadEvents(), loadSchedules(), loadSources()]).then(() => {
@@ -439,6 +448,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     const overview = await api("GET", "/admin/overview");
     state.overview = overview;
     renderOverview(overview);
+    renderConsoleThreads();
     await Promise.all(Object.keys(state.subagents).map(loadSubagents));
   }
   function renderOverview(o) {
@@ -1088,6 +1098,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   $("skill-save").addEventListener("click", saveSkill);
   $("skill-new").addEventListener("click", () => { $("skill-md").value = ""; $("skill-meta").textContent = ""; });
   $("mcp-link-copy").addEventListener("click", () => { navigator.clipboard.writeText($("mcp-link-url").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
+
+  ${CONSOLE_APP_JS}
 
   renderKinds();
   if (readToken()) start(); else showLogin("");

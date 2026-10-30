@@ -1,8 +1,8 @@
 import type { ModelSelection } from "../settings";
 import type { TurnKind } from "../policy";
 
-/** 派出者：QQ 号、显示用昵称、快照时是否 owner。 */
-export type SubagentPerson = { userId: string; nickname: string; owner: boolean };
+/** 派出者：QQ 身份或可信网页管理员、显示昵称与会话权限快照。 */
+export type SubagentPerson = { userId: string; nickname: string; owner: boolean; admin?: true };
 /** 派出或交代任务那一轮的身份快照（ARCHITECTURE §5.1）；没有 as 表示只剩会话基础权限。 */
 export type SubagentIdentity = { turn: TurnKind; as?: SubagentPerson };
 export type SubagentStatus = "running" | "done" | "failed" | "cancelled";
@@ -38,10 +38,10 @@ export function narrowIdentity(current: SubagentIdentity, next: SubagentIdentity
   return { turn: next.turn, ...(as ? { as } : {}) };
 }
 
-/** 快照时与当前配置都须一致：之后被移出（或加入）owner 的人，汇报回合只剩基础权限。 */
+/** QQ 身份须与当前配置一致；网页管理员身份只由鉴权后的宿主构造，不从模型参数读取。 */
 export function confirmedIdentity(identity: SubagentIdentity, owners: readonly string[]): SubagentIdentity {
   const as = identity.as;
-  return as && as.owner === owners.includes(as.userId) ? identity : { turn: identity.turn };
+  return as && (as.admin === true && as.userId === "admin:web" || as.owner === owners.includes(as.userId)) ? identity : { turn: identity.turn };
 }
 
 const LABEL = { done: "[子 agent 完成]", failed: "[子 agent 失败]", timeout: "[子 agent 超时]" } as const;

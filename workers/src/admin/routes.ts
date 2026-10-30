@@ -12,6 +12,7 @@ import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from ".
 import { ownerIds } from "../policy";
 import { SUBAGENT_ID } from "../subagent/model";
 import { ADMIN_APP_JS, ADMIN_PAGE_HTML } from "./page";
+import type { RequestQuery } from "../requests/types";
 
 export type AdminContext = { env: Env; request: Request; url: URL; params: Record<string, string> };
 export type AdminRoute = {
@@ -77,6 +78,25 @@ async function modelLogin<T>(work: () => Promise<T>): Promise<Response> {
   try { return json(await work()); } catch (error) { throw new HttpError(400, modelLoginErrorCode(error)); }
 }
 
+function requestQuery(url: URL): RequestQuery {
+  const p = url.searchParams, now = Date.now();
+  const num = (key: string, fallback: number) => {
+    const raw = p.get(key); if (raw !== null && !/^\d{1,16}$/.test(raw)) throw new HttpError(400, "invalid_query");
+    const n = raw === null ? fallback : Number(raw); if (!Number.isSafeInteger(n)) throw new HttpError(400, "invalid_query"); return n;
+  };
+  const since = num("since", now - 86400_000), until = num("until", now), limit = num("limit", 40), before = num("before", 0);
+  const thread = p.get("thread") || undefined, model = p.get("model") || undefined, status = p.get("status") || undefined, purpose = p.get("purpose") || undefined;
+  if (until < since || until - since > 31 * 86400_000 || limit < 1 || limit > 100 ||
+    thread && !new RegExp("^(" + THREAD_KEY + ")$").test(thread) || model && model.length > 200 ||
+    status && !["running", "done", "error", "aborted", "interrupted"].includes(status) ||
+    purpose && !["conversation", "background", "subagent", "compaction"].includes(purpose)) throw new HttpError(400, "invalid_query");
+  return { since, until, limit, ...(before ? { before } : {}), thread, model, status: status as RequestQuery["status"], purpose };
+}
+async function knownThread(env: Env, key: string) {
+  if (key !== "owner" && !(await env.BRIDGE.getByName("napcat").threadList()).some(t => t.key === key)) throw new HttpError(404, "not_found");
+  return env.THREAD.getByName(key);
+}
+
 const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY"] as const;
 
 export const ADMIN_ROUTES: AdminRoute[] = [
@@ -85,6 +105,27 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     handle: async () => new Response(ADMIN_PAGE_HTML, { headers: { ...API_HEADERS, "Content-Security-Policy": CSP, "Content-Type": "text/html; charset=utf-8" } }) },
   { method: "GET", path: "/admin/app.js", public: true,
     handle: async () => new Response(ADMIN_APP_JS, { headers: { ...API_HEADERS, "Content-Security-Policy": CSP, "Content-Type": "text/javascript; charset=utf-8" } }) },
+
+  { method: "GET", path: "/admin/requests", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").list(requestQuery(url))) },
+  { method: "GET", path: "/admin/usage", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").usage(requestQuery(url))) },
+  { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})$/, handle: async ({ env, params }) => {
+    const detail = await env.REQUESTS.getByName("main").detail(params.id!);
+    if (!detail) throw new HttpError(404, "not_found");
+    return json(detail);
+  } },
+  { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/chat$"), handle: async ({ env, params }) =>
+    json(await (await knownThread(env, params.key!)).chatView(params.key!)) },
+  { method: "POST", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/chat$"), handle: async ({ env, request, params }) => {
+    const raw = await request.arrayBuffer();
+    if (raw.byteLength > 68000) throw new HttpError(413, "too_large");
+    let value: unknown;
+    try { value = JSON.parse(new TextDecoder().decode(raw)); } catch { throw new HttpError(400, "invalid_json"); }
+    const schema = Type.Object({ requestId: Type.String({ pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }), text: Type.String({ minLength: 1, maxLength: 16000 }) }, strict);
+    if (!Check(schema, value) || !value.text.trim()) throw new HttpError(400, "invalid_request");
+    const result = await (await knownThread(env, params.key!)).submitWeb(params.key!, value.requestId, value.text.trim());
+    if ("error" in result) throw new HttpError(409, result.error!);
+    return json(result, 202);
+  } },
 
   { method: "GET", path: "/admin/overview", handle: async ({ env }) => {
     const bridge = env.BRIDGE.getByName("napcat"), owner = env.THREAD.getByName("owner"), registry = env.REGISTRY.getByName("main");

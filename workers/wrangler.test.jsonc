@@ -15,6 +15,7 @@
     "bindings": [
       { "name": "THREAD", "class_name": "ThreadDO" },
       { "name": "REGISTRY", "class_name": "RegistryDO" },
+      { "name": "REQUESTS", "class_name": "RequestsDO" },
       { "name": "BRIDGE", "class_name": "BridgeDO" },
       { "name": "SCHEDULE", "class_name": "ScheduleDO" },
       { "name": "EVENTS", "class_name": "EventsDO" },
@@ -32,7 +33,8 @@
     { "tag": "v6", "new_sqlite_classes": ["EventsDO"] },
     { "tag": "v7", "deleted_classes": ["MagpieContainer"] },
     { "tag": "v8", "new_sqlite_classes": ["SubagentDO"] },
-    { "tag": "v9", "new_sqlite_classes": ["SandboxDO"] }
+    { "tag": "v9", "new_sqlite_classes": ["SandboxDO"] },
+    { "tag": "v10", "new_sqlite_classes": ["RequestsDO"] }
   ],
   // QQ_OWNER、NAPCAT_TOKEN、DEEPSEEK_API_KEY、OAUTH_STORE_KEY 等都是 secrets（wrangler secret put），不写在这里
   "vars": {
