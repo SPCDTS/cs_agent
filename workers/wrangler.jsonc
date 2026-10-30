@@ -13,6 +13,7 @@
   "triggers": { "crons": ["*/5 * * * *", "30 19 * * *"] },
   // 自定义域名在 Cloudflare 托管的 zone 下；*.workers.dev 在国内不稳定，NapCat 反向 WS 只连这个
   "routes": [{ "pattern": "agent.spcdts.dev", "custom_domain": true }],
+  "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "joule-bucket" }],
   "durable_objects": {
     "bindings": [
       { "name": "THREAD", "class_name": "ThreadDO" },

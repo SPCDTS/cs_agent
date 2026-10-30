@@ -11,6 +11,7 @@
   // */5：外部事件轮询兜底（Gmail 推送优先）；UTC 19:30 = 北京 03:30：聊天摘要与清理、记忆整理、审计保留（src/maintenance）。
   // index.ts 的 scheduled 按 cron 字符串分派
   "triggers": { "crons": ["*/5 * * * *", "30 19 * * *"] },
+  "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "joule-bucket" }],
   "durable_objects": {
     "bindings": [
       { "name": "THREAD", "class_name": "ThreadDO" },
