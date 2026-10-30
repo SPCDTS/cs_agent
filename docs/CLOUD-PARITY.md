@@ -25,8 +25,7 @@ QQ 的实际发送统一经过 Bridge。离线发送先排队，结果不确定�
 
 | 项目 | 默认限制 |
 | --- | --- |
-| 容器 | lite；单次硬截止 5 分钟，空闲最多 3 分钟 |
-| 容器总预算 | 按 UTC 日预留最多 120 分钟，每次预留 5 分钟，不返还未用时间；最多 2 份有效租约 |
+| 容器 | lite；按需启动，空闲 3 分钟后停止，不设置每日时长、单次寿命或全项目并发配额 |
 | 持久工作区 | 每个 50 MiB，单文件 10 MiB；保留当前及最近 2 个版本，分批清理 |
 | 子任务 | 每会话同时 1 个，默认 10 分钟，最多 24 次模型调用 |
 | Worker CPU | 每次调用 30 秒活跃 CPU；网络等待不计入 |
@@ -36,9 +35,7 @@ QQ 的实际发送统一经过 Bridge。离线发送先排队，结果不确定�
 
 工作区只读操作和内容不变的命令不重复写入 R2。账本、告警、工作区垃圾回收均按限额分批执行，不扫描整个存储桶。
 
-按每天完整使用 120 分钟、每月 31 天估算，本项目容器最多预留 15.5 GiB·h 内存、124 GB·h 磁盘，以及按 lite CPU 上限折算的 232.5 vCPU 分钟。对应官方 Workers Paid 容器月度包含量为 25 GiB·h、200 GB·h、375 vCPU 分钟。计算使用当前 [容器规格](https://developers.cloudflare.com/containers/platform/limits/) 与 [容器价格](https://developers.cloudflare.com/containers/platform/pricing/)。
-
-这些限制约束本项目，不能替代整个账户的账单上限。账户其他 Worker、R2 对象和请求仍共用额度；当前 API 权限不能查询完整账单或剩余额度。R2 与 Worker 计费分别见 [R2 价格](https://developers.cloudflare.com/r2/pricing/) 和 [Workers 价格](https://developers.cloudflare.com/workers/platform/pricing/)。
+容器按实际运行计费，通过按需启动和空闲停止减少闲置消耗。当前规格与价格见 [容器规格](https://developers.cloudflare.com/containers/platform/limits/) 和 [容器价格](https://developers.cloudflare.com/containers/platform/pricing/)；取消运行硬配额后，不再使用固定每日运行时长推算月度用量上限。R2 与 Worker 计费分别见 [R2 价格](https://developers.cloudflare.com/r2/pricing/) 和 [Workers 价格](https://developers.cloudflare.com/workers/platform/pricing/)。
 
 ## 数据迁移与检查
 

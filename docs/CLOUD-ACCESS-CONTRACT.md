@@ -78,9 +78,9 @@ type OpsSettings = {
 
 容量回收会使较旧的新操作被拒绝，即便它从未成功发送；这是达到硬上限后的安全退路。不能把重试的 operationAt 改成当前时间来绕过拒绝水位。超出正文保留期的 unknown 保留状态并注明 evidence_expired，不再尝试内容查证。
 
-## 容器预算硬限
+## 容器生命周期
 
-`Registry.reserveContainerBudget(workspace)` 仅由 Sandbox 在冷启动前调用，返回 `{ expiresAt }`。每次固定预留 5 分钟，全项目按 UTC 日最多 120 分钟，同时最多 2 份有效预留；同 workspace 在有效期内幂等返回原到期时间。配额不返还，超额抛 `container_budget_exceeded`，并发上限抛 `container_budget_busy`。一次 KV 事务只读取/写入一个小 JSON，最多两条有效预留。容器宿主必须在 expiresAt 前关闭容器；有效预留不授权无限延长热容器运行。
+Sandbox 按需直接启动 lite 容器，不再向 Registry 预留每日运行预算或并发租约。空闲 3 分钟后停止；工作区已提交文件继续保留在 R2。
 
 ## 管理面板片段
 

@@ -14,7 +14,7 @@ const numbers = (prefix:string,fields:{name:string;label:string;max?:number}[],o
 export const ACCESS_HTML = `
 <section id="access-panel" class="card">
   <div class="section-head"><h2 class="h2">人格、授权与运维</h2><span id="access-loaded" class="muted small">按需加载，不自动刷新</span><div class="grow"></div><button id="access-refresh" class="btn" type="button">加载 / 刷新</button></div>
-  <div class="stack"><p class="muted small" style="margin:0">容器预算：按 UTC 日合计最多 2 小时，单次 5 分钟，最多两个同时运行。发送账本最多 5000 条，正文保留 30 天。</p></div>
+  <div class="stack"><p class="muted small" style="margin:0">沙箱按需启动，空闲 3 分钟自动停止。发送账本最多 5000 条，正文保留 30 天。</p></div>
 </section>
 <section class="card">
   <div class="section-head"><h2 class="h2">人格设定</h2><span class="muted small">下一回合生效</span><div class="grow"></div><span id="access-persona-revision" class="muted small"></span></div>

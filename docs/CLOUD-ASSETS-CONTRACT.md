@@ -53,9 +53,9 @@ SandboxDO 的容器只是 `/work` 的临时物化视图。R2 保存不可变 man
 
 `MediaDeps.lookup`第四个可选参数是 `MediaSelection`（kind/ordinal）；root可原样传给helper，使筛选在NapCat RPC之前发生，单次最多解析5个附件。source.namespace由宿主绑定repository，不能由模型提供。
 
-## 容器成本硬限
+## 容器按需运行
 
-每次冷启动前向Registry.reserveContainerBudget(workspace)固定预留5分钟；同workspace的有效预留幂等复用，UTC日全项目合计最多120分钟，同时最多2个预留，不退款。预算服务不可用、耗尽或并发满时拒绝启动。容器按lite规格启动，3分钟idle；5分钟硬deadline只在启动时绑定，后续工具调用不延长。Node主进程接收SANDBOX_DEADLINE_MS并到期退出，SandboxDO alarm再负责兜底destroy；平台inactivity也不超过硬deadline剩余时间。文件事实源留在R2，硬停止不删除已提交工作区。
+沙箱按 lite 规格按需启动，不设置每日累计时长、单次容器寿命或全项目容器并发配额。保留 3 分钟空闲自动停止；连续使用时不会因运行满 5 分钟被终止。文件事实源留在 R2，空闲停止或手动停止不删除已提交工作区。
 
 ## 工作区技能发布与管理接线
 

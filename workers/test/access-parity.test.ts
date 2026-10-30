@@ -111,12 +111,6 @@ describe("durable delivery parity",()=>{
 });
 
 describe("registry access and configuration",()=>{
-  it("reserves a cold-start lease once and enforces two concurrent containers",async()=>{
-    const r=registry(),first=await r.reserveContainerBudget("owner");
-    expect(await r.reserveContainerBudget("owner")).toEqual(first);
-    await r.reserveContainerBudget("child");
-    await expect(async()=>await r.reserveContainerBudget("third")).rejects.toThrow("container_budget_busy");
-  });
   it("enforces caps/scope/targets/expiry immediately after revoke",async()=>{
     const r=registry(),user="qq:10000003";
     await r.grantPut({user,caps:["send","schedule"],targets:["qq:private:10000004"],scopes:["group:200000001"],expires_in_hours:1},"qq:10000001");

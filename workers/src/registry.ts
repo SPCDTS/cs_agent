@@ -97,23 +97,6 @@ export class RegistryDO extends DurableObject<Env> {
     return (await sha256(JSON.stringify(rows.map(row => [row.name, row.description])))).toString("hex").slice(0, 16);
   }
 
-  /** 只在容器冷启动前预留；同 workspace 活跃租约幂等，UTC 日预算不返还。 */
-  async reserveContainerBudget(workspace:string):Promise<{expiresAt:number}>{
-    if(typeof workspace!=="string"||!workspace||workspace.length>200||/[\x00-\x1f\x7f]/.test(workspace))throw new Error("invalid_workspace");
-    return this.ctx.storage.transaction(async tx=>{
-      const now=Date.now(),day=new Date(now).toISOString().slice(0,10);
-      const previous=await tx.get<{day:string;usedMinutes:number;reservations:Record<string,number>}>("containerBudget");
-      const reservations=Object.fromEntries(Object.entries(previous?.reservations??{}).filter(([,expires])=>expires>now));
-      const existing=reservations[workspace];if(existing!==undefined)return {expiresAt:existing};
-      const usedMinutes=previous?.day===day?previous.usedMinutes:0;
-      if(Object.keys(reservations).length>=2)throw new Error("container_budget_busy");
-      if(usedMinutes+5>120)throw new Error("container_budget_exceeded");
-      const expiresAt=now+300000;reservations[workspace]=expiresAt;
-      await tx.put("containerBudget",{day,usedMinutes:usedMinutes+5,reservations});
-      return {expiresAt};
-    });
-  }
-
   persona(): { text: string; revision: string } {
     const row = this.ctx.storage.sql.exec<{ value: string; revision: string }>("SELECT value,revision FROM settings WHERE key='persona'").toArray()[0];
     return row ? { text: row.value, revision: row.revision } : { text: "", revision: "0" };
