@@ -40,3 +40,31 @@ export function settingsRevision(value: Settings): string {
   return createHash("sha256").update(JSON.stringify({ groupTrigger, allowGroups, allowUsers, extractNamespaces,
     model: { provider: model.provider, id: model.id, reasoningEffort: model.reasoningEffort ?? null } })).digest("hex").slice(0, 16);
 }
+
+// 运维参数单独做 CAS，旧设置面板保存 runtime 行不会覆盖新字段。
+export const SendLimitsSchema = Type.Object({
+  perChatMinute: Type.Integer({ minimum: 1, maximum: 600 }), perChatHour: Type.Integer({ minimum: 1, maximum: 36000 }),
+  chatBreakerMinutes: Type.Integer({ minimum: 1, maximum: 1440 }), globalMinute: Type.Integer({ minimum: 1, maximum: 6000 }),
+  globalBreakerMinutes: Type.Integer({ minimum: 1, maximum: 1440 }),
+}, { additionalProperties: false });
+export type SendLimits = Static<typeof SendLimitsSchema>;
+export const DEFAULT_SEND_LIMITS: SendLimits = { perChatMinute: 6, perChatHour: 60, chatBreakerMinutes: 60, globalMinute: 30, globalBreakerMinutes: 10 };
+const MaintenanceSettingsSchema = Type.Object({ rawDays: Type.Integer({ minimum: 0, maximum: 3650 }), rawHardMaxDays: Type.Integer({ minimum: 0, maximum: 3650 }),
+  summaryDays: Type.Integer({ minimum: 0, maximum: 3650 }), eventsDays: Type.Integer({ minimum: 0, maximum: 3650 }), consolidate: Type.Boolean() }, { additionalProperties: false });
+const MaintenanceOverrideSchema = Type.Partial(MaintenanceSettingsSchema);
+export const OpsSettingsSchema = Type.Object({ sendLimits: SendLimitsSchema, alertOwner: Type.Boolean(),
+  alertThrottleMinutes: Type.Integer({ minimum: 10, maximum: 1440 }), ownerAlertThrottleMinutes: Type.Integer({ minimum: 30, maximum: 1440 }),
+  defaults: MaintenanceSettingsSchema,
+  threads: Type.Record(Type.String({ pattern: `^(owner|group:${QQ_ID}|private:${QQ_ID})$` }), MaintenanceOverrideSchema, { maxProperties: 500 }),
+}, { additionalProperties: false });
+export type OpsSettings = Static<typeof OpsSettingsSchema>;
+export type OpsSettingsSnapshot = { value: OpsSettings; revision: string; updatedAt: number | null };
+export function defaultOpsSettings(env: { HISTORY_RAW_DAYS?: string; HISTORY_RAW_HARD_MAX_DAYS?: string; HISTORY_SUMMARY_DAYS?: string; EVENTS_RETENTION_DAYS?: string }): OpsSettings {
+  const days = (value: string | undefined, fallback: number) => value !== undefined && /^\d+$/.test(value) && Number(value) <= 3650 ? Number(value) : fallback;
+  return { sendLimits: { ...DEFAULT_SEND_LIMITS }, alertOwner: true, alertThrottleMinutes: 10, ownerAlertThrottleMinutes: 30,
+    defaults: { rawDays: days(env.HISTORY_RAW_DAYS,30), rawHardMaxDays: days(env.HISTORY_RAW_HARD_MAX_DAYS,90), summaryDays: days(env.HISTORY_SUMMARY_DAYS,365), eventsDays: days(env.EVENTS_RETENTION_DAYS,30), consolidate: true }, threads: {} };
+}
+export function threadOpsSettings(value: OpsSettings, thread: string): OpsSettings["defaults"] { return { ...value.defaults, ...value.threads[thread] }; }
+export function opsSettingsRevision(value: OpsSettings): string {
+  return createHash("sha256").update(JSON.stringify({ ...value, threads: Object.fromEntries(Object.entries(value.threads).sort(([a],[b])=>a.localeCompare(b))) })).digest("hex").slice(0,16);
+}

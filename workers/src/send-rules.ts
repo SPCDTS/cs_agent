@@ -1,3 +1,4 @@
+import { DEFAULT_SEND_LIMITS, type SendLimits } from "./settings";
 export type SendBreaker = { scope: string; until: number; tripped_at: number; reason: string };
 const MINUTE = 60_000, HOUR = 60 * MINUTE;
 
@@ -12,20 +13,20 @@ export class SendRules {
   }
 
   // 同步事务内检查并占用额度，避免多个 RPC 在等待回执时同时穿过上限。
-  accept(scope: string, text: string, now = Date.now()): string | undefined {
+  accept(scope: string, text: string, now = Date.now(), limits: SendLimits = DEFAULT_SEND_LIMITS): string | undefined {
     if (text.length < 1 || text.length > 4000) return "单条文字必须为 1～4000 字符";
     return this.storage.transactionSync(() => {
       const blocked = this.breakers(now).find(item => item.scope === "global" || item.scope === scope);
       if (blocked) return `${blocked.scope === "global" ? "全部会话" : "本会话"}发送已熔断（${blocked.reason}），约 ${Math.max(1, Math.ceil((blocked.until - now) / MINUTE))} 分钟后恢复，请不要再发`;
-      if (this.count(null, now - MINUTE) >= 30) {
-        this.trip("global", "全局每分钟超过 30 条", now + 10 * MINUTE, now);
-        return "全局发送过多：每分钟最多 30 条，已暂停全部发送 10 分钟";
+      if (this.count(null, now - MINUTE) >= limits.globalMinute) {
+        this.trip("global", `全局每分钟超过 ${limits.globalMinute} 条`, now + limits.globalBreakerMinutes * MINUTE, now);
+        return `全局发送过多：每分钟最多 ${limits.globalMinute} 条，已暂停全部发送 ${limits.globalBreakerMinutes} 分钟`;
       }
-      if (this.count(scope, now - HOUR) >= 60) {
-        this.trip(scope, "每小时超过 60 条", now + HOUR, now);
-        return "发送过多：本会话每小时最多 60 条，已暂停本会话发送 60 分钟";
+      if (this.count(scope, now - HOUR) >= limits.perChatHour) {
+        this.trip(scope, `每小时超过 ${limits.perChatHour} 条`, now + limits.chatBreakerMinutes * MINUTE, now);
+        return `发送过多：本会话每小时最多 ${limits.perChatHour} 条，已暂停本会话发送 ${limits.chatBreakerMinutes} 分钟`;
       }
-      if (this.count(scope, now - MINUTE) >= 6) return "发送过快：本会话每分钟最多 6 条，请稍后再发";
+      if (this.count(scope, now - MINUTE) >= limits.perChatMinute) return `发送过快：本会话每分钟最多 ${limits.perChatMinute} 条，请稍后再发`;
       this.storage.sql.exec("INSERT INTO send_log (scope, at) VALUES (?, ?)", scope, now);
       this.storage.sql.exec("DELETE FROM send_log WHERE at < ?", now - HOUR);
     });

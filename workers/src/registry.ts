@@ -7,11 +7,14 @@ import { MCP_CONFIG, isOAuthServer, publicOrigin, referencedSecret, type OAuthSe
 import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { DiscoverySchema, discover, exchange, TokenRejected, type OAuthTokens } from "./mcp/oauth";
 import { OAuthFailure } from "./mcp/oauth-fetch";
-import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
+import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelection, type Settings, type SettingsSnapshot, defaultOpsSettings, opsSettingsRevision, OpsSettingsSchema, type OpsSettings, type OpsSettingsSnapshot } from "./settings";
 import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, type CredentialLease } from "./model-credentials";
 import { openModels, providerStatuses, selectionProblem, type ProviderStatus } from "./models";
 import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, exchangeCode, parseCallback, startCodexLogin } from "./codex-login";
-import { SKILLS_SCHEMA, type Skill, type SkillInput, type SkillSummary } from "./skills";
+import { GrantStore, digest, type GrantAccess } from "./grants";
+import { AlertStore, type AlertInput, type TurnReport } from "./alerts";
+import { ownerIds } from "./policy";
+import { SKILLS_SCHEMA, parseSkill, type Skill, type SkillInput, type SkillSummary } from "./skills";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
 type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash: string; created_at: number; expires_at: number };
@@ -24,6 +27,9 @@ export type ModelStatus = (ModelSelection & { codexLoggedIn: boolean }) | { unav
 export type PutSettingsResult = { ok: true; current: SettingsSnapshot } | { ok: false; error: "conflict"; current: SettingsSnapshot } | { ok: false; error: "invalid_model"; reason: string };
 
 export class RegistryDO extends DurableObject<Env> {
+  private readonly grantStore = new GrantStore(this.ctx.storage, this.env);
+  private readonly alertStore = new AlertStore(this.ctx.storage);
+  private alertDrain?: Promise<void>;
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly access = new Map<string, Promise<string | undefined>>();
@@ -69,21 +75,111 @@ export class RegistryDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec(`INSERT INTO skills (name, description, body, files_json, updated_at) VALUES (?, ?, ?, COALESCE(?, '{}'), ?)
       ON CONFLICT(name) DO UPDATE SET description = excluded.description, body = excluded.body, files_json = COALESCE(?, files_json), updated_at = excluded.updated_at`,
     skill.name, skill.description, skill.body, files, now, files);
+    this.bumpSkillRevision(skill.name);
     return this.skillsList().find(summary => summary.name === skill.name)!;
   }
 
   skillDelete(name: string): boolean {
-    return this.ctx.storage.sql.exec("DELETE FROM skills WHERE name = ? RETURNING name", name).toArray().length > 0;
+    const removed = this.ctx.storage.sql.exec("DELETE FROM skills WHERE name = ? RETURNING name", name).toArray().length > 0;
+    if (removed) this.bumpSkillRevision(name);
+    return removed;
   }
 
   skillSetEnabled(name: string, enabled: boolean): boolean {
-    return this.ctx.storage.sql.exec("UPDATE skills SET enabled = ?, updated_at = ? WHERE name = ? RETURNING name", enabled ? 1 : 0, Date.now(), name).toArray().length > 0;
+    const changed = this.ctx.storage.sql.exec("UPDATE skills SET enabled = ?, updated_at = ? WHERE name = ? RETURNING name", enabled ? 1 : 0, Date.now(), name).toArray().length > 0;
+    if (changed) this.bumpSkillRevision(name);
+    return changed;
   }
 
   /** 只由启用技能的名称与描述决定，Thread 据此判断目录是否需要重新渲染。 */
   async skillsDigest(): Promise<string> {
     const rows = this.ctx.storage.sql.exec<{ name: string; description: string }>("SELECT name, description FROM skills WHERE enabled = 1 ORDER BY name").toArray();
     return (await sha256(JSON.stringify(rows.map(row => [row.name, row.description])))).toString("hex").slice(0, 16);
+  }
+
+  /** 只在容器冷启动前预留；同 workspace 活跃租约幂等，UTC 日预算不返还。 */
+  async reserveContainerBudget(workspace:string):Promise<{expiresAt:number}>{
+    if(typeof workspace!=="string"||!workspace||workspace.length>200||/[\x00-\x1f\x7f]/.test(workspace))throw new Error("invalid_workspace");
+    return this.ctx.storage.transaction(async tx=>{
+      const now=Date.now(),day=new Date(now).toISOString().slice(0,10);
+      const previous=await tx.get<{day:string;usedMinutes:number;reservations:Record<string,number>}>("containerBudget");
+      const reservations=Object.fromEntries(Object.entries(previous?.reservations??{}).filter(([,expires])=>expires>now));
+      const existing=reservations[workspace];if(existing!==undefined)return {expiresAt:existing};
+      const usedMinutes=previous?.day===day?previous.usedMinutes:0;
+      if(Object.keys(reservations).length>=2)throw new Error("container_budget_busy");
+      if(usedMinutes+5>120)throw new Error("container_budget_exceeded");
+      const expiresAt=now+300000;reservations[workspace]=expiresAt;
+      await tx.put("containerBudget",{day,usedMinutes:usedMinutes+5,reservations});
+      return {expiresAt};
+    });
+  }
+
+  persona(): { text: string; revision: string } {
+    const row = this.ctx.storage.sql.exec<{ value: string; revision: string }>("SELECT value,revision FROM settings WHERE key='persona'").toArray()[0];
+    return row ? { text: row.value, revision: row.revision } : { text: "", revision: "0" };
+  }
+  setPersona(text: string, expected: string) {
+    if (typeof text !== "string" || new TextEncoder().encode(text).byteLength > 65536 || typeof expected !== "string") throw new Error("invalid_persona");
+    const current = this.persona();
+    if (current.revision !== expected) return { ok: false, conflict: current };
+    const value = { text, revision: crypto.randomUUID() };
+    this.ctx.storage.sql.exec("INSERT INTO settings(key,value,revision,updated_at) VALUES ('persona',?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,revision=excluded.revision,updated_at=excluded.updated_at",text,value.revision,Date.now());
+    return { ok: true, value };
+  }
+  skillRevision(name: string): string | undefined {
+    const skill=this.skillGet(name); if(!skill)return;
+    return this.ctx.storage.sql.exec<{revision:string}>("SELECT revision FROM settings WHERE key=?",`skill:${name}`).toArray()[0]?.revision ?? digest(skill);
+  }
+  skillPublish(input: SkillInput, expected: string) {
+    const checked=parseSkill(input.name,input.body,input.files), current=this.skillGet(input.name), revision=this.skillRevision(input.name);
+    if (expected === "absent" ? current !== undefined : revision !== expected) return { ok:false, conflict: current ? { skill:current, revision } : null };
+    const summary=this.skillPut(checked);
+    return { ok:true, value:{ ...summary, revision:this.skillRevision(input.name) } };
+  }
+  private bumpSkillRevision(name: string): void {
+    this.ctx.storage.sql.exec("INSERT INTO settings(key,value,revision,updated_at) VALUES (?,'',?,?) ON CONFLICT(key) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at",`skill:${name}`,crypto.randomUUID(),Date.now());
+  }
+  grantsList() { return this.grantStore.list(); }
+  grantPut(input: unknown, actor: string) { this.requireGrantOwner(actor); return this.grantStore.put(input,actor); }
+  grantRevoke(input: unknown, actor: string) { this.requireGrantOwner(actor); return this.grantStore.revoke(input); }
+  canAccess(input: GrantAccess): boolean { return this.grantStore.canAccess(input); }
+  importGrants(input: unknown) { return this.grantStore.import(input); }
+  private requireGrantOwner(actor: string): void { if (!actor.startsWith("qq:") || !ownerIds(this.env).includes(actor.slice(3))) throw new Error("owner_required"); }
+
+  opsSettings(): OpsSettingsSnapshot {
+    const row=this.ctx.storage.sql.exec<{value:string;updated_at:number}>("SELECT value,updated_at FROM settings WHERE key='ops'").toArray()[0];
+    const value:unknown=row?JSON.parse(row.value):defaultOpsSettings(this.env);
+    if(!Check(OpsSettingsSchema,value))throw new Error("invalid_stored_ops_settings");
+    return {value,revision:opsSettingsRevision(value),updatedAt:row?.updated_at??null};
+  }
+  putOpsSettings(value: OpsSettings, expected: string) {
+    if(!Check(OpsSettingsSchema,value))throw new Error("invalid_ops_settings");
+    const current=this.opsSettings();if(current.revision!==expected)return {ok:false,current};
+    this.ctx.storage.sql.exec("INSERT INTO settings(key,value,revision,updated_at) VALUES ('ops',?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,revision=excluded.revision,updated_at=excluded.updated_at",JSON.stringify(value),opsSettingsRevision(value),Date.now());
+    return {ok:true,current:this.opsSettings()};
+  }
+  alerts(limit=100) { return this.alertStore.list(limit); }
+  recordAlert(input: AlertInput) { return this.alertStore.record(input); }
+  resolveAlert(kind: AlertInput["kind"], scope: string, origin: AlertInput["origin"]) { this.alertStore.close(kind,scope,origin); }
+  recordTurn(input: TurnReport): void { this.alertStore.recordTurn(input); }
+  opsTick(): Promise<void> {
+    if(this.alertDrain)return this.alertDrain;
+    const drain=this.drainAlerts();this.alertDrain=drain;
+    return drain.finally(()=>{if(this.alertDrain===drain)this.alertDrain=undefined;});
+  }
+  private async drainAlerts(): Promise<void> {
+    const owner=ownerIds(this.env)[0];if(!owner)return;
+    const settings=this.opsSettings().value,bridge=this.env.BRIDGE.getByName("napcat");
+    const pending=this.alertStore.pending(settings);
+    if(!settings.alertOwner||!pending.length||!(await bridge.status()).connected)return;
+    for(const row of pending) {
+      if(!this.alertStore.pending(this.opsSettings().value).some(current=>current.id===row.id))continue;
+      const id=this.alertStore.claim(row.id);
+      try {
+        const result=await bridge.systemDeliver({id,operationAt:row.createdAt,runId:id,target:{kind:"private",userId:owner},purpose:"owner_alert",text:`[运行告警] ${row.message}`});
+        this.alertStore.settle(row.id,result.state);
+      } catch { this.alertStore.settle(row.id,"queued"); }
+    }
   }
 
   // 一行保存整份覆盖值；revision 按有效内容计算，未覆盖时也能对默认值做 CAS。
