@@ -41,7 +41,7 @@ const controlParameters = Type.Object({
 }, { additionalProperties: false });
 
 const DESCRIPTIONS = {
-  schedule: "Manage scheduled tasks of the current chat; only the owner's own messages may use it. create requires name, prompt, rule; list takes no other fields; update requires id plus optional name, prompt, rule; pause/resume/delete/run_now require id. rule: Beijing time YYYY-MM-DD HH:mm; rrule (RRULE body without DTSTART) with optional start (default now), or a future at. At each trigger the prompt runs as a turn in this chat and send_message there replies to this chat, so write in the prompt what to do and what to send; specify 'silent if nothing new' when requested. resume skips missed triggers; run_now preserves the next trigger; pause leaves running turns intact.",
+  schedule: "Manage scheduled tasks of the current chat; the owner or a user with an active schedule grant may use it. Granted users can manage only tasks they created in this chat. create requires name, prompt, rule; list takes no other fields; update requires id plus optional name, prompt, rule; pause/resume/delete/run_now require id. rule: Beijing time YYYY-MM-DD HH:mm; rrule (RRULE body without DTSTART) with optional start (default now), or a future at. At each trigger the prompt runs as a turn in this chat and send_message there replies to this chat, so write in the prompt what to do and what to send; specify 'silent if nothing new' when requested. resume skips missed triggers; run_now preserves the next trigger; pause leaves running turns intact.",
   schedule_control: "Available only during scheduled runs: pause or complete the task for this run and provide a reason. Completion stops future triggers without interrupting the current turn. Other tasks cannot be targeted.",
 };
 const STATUS_TEXT = { active: "启用", paused: "暂停", completed: "已完成" } as const;
@@ -66,8 +66,8 @@ const text = (value: string, isError = false) => ({ ...(isError ? { isError } : 
 export function createScheduleExtension(env: Env, conversation: ScheduleConversation, access: (api: ToolExecutionApi, context: Context) => Promise<ScheduleAccess>) {
   const directory = () => env.SCHEDULE.getByName("main");
   /** 只能操作本线程的任务；conversation 创建后不可改，所以先查后改没有竞态。 */
-  async function owned(id: string): Promise<Schedule> {
-    const found = (await directory().list(conversation)).find(schedule => schedule.id === id);
+  async function owned(id: string,actor:string): Promise<Schedule> {
+    const found = (await directory().listFor(conversation,actor)).find(schedule => schedule.id === id);
     if (!found) throw new Error("本会话没有这个定时任务");
     return found;
   }
@@ -78,38 +78,38 @@ export function createScheduleExtension(env: Env, conversation: ScheduleConversa
       case "create":
         return summary(await schedules.create({ name: args.name, prompt: args.prompt, rule: toolRule(args.rule!, Date.now()), conversation }, actor));
       case "list":
-        return (await schedules.list(conversation)).map(summary).join("\n") || "没有可见的定时任务。";
+        return (await schedules.listFor(conversation,actor)).map(summary).join("\n") || "没有可见的定时任务。";
       case "update": {
-        const id = (await owned(args.id!)).id;
+        const id = (await owned(args.id!,actor)).id;
         return summary(await schedules.update(id, { name: args.name, prompt: args.prompt, ...(args.rule ? { rule: toolRule(args.rule, Date.now()) } : {}) }, actor));
       }
       case "pause": case "resume":
-        return summary(await schedules.setStatus((await owned(args.id!)).id, args.action === "pause" ? "paused" : "active", undefined, actor));
+        return summary(await schedules.setStatus((await owned(args.id!,actor)).id, args.action === "pause" ? "paused" : "active", undefined, actor));
       case "delete": {
-        const id = (await owned(args.id!)).id;
+        const id = (await owned(args.id!,actor)).id;
         await schedules.remove(id, actor);
         return `${id} · 状态：已删除 · 下次：无`;
       }
       case "run_now": {
-        const id = (await owned(args.id!)).id, run = await schedules.runNow(id, actor);
-        const after = (await schedules.list(conversation)).find(schedule => schedule.id === id);
+        const id = (await owned(args.id!,actor)).id, run = await schedules.runNow(id, actor);
+        const after = (await schedules.listFor(conversation,actor)).find(schedule => schedule.id === id);
         return `${after ? summary(after) : `${id} · 状态：已删除 · 下次：无`}；本次运行：${run.status}`;
       }
     }
   }
   return defineExtension({
     name: "cs.schedule",
-    sections: [section("schedule", async () => {
+    sections: conversation==="owner"?[section("schedule", async () => {
       const active = (await directory().list(conversation)).filter(schedule => schedule.status === "active" && schedule.next_fire_at !== null);
       if (!active.length) return undefined;
       return "本会话的定时任务（用 schedule 工具管理）：\n" + active.map(schedule => `- ${schedule.name}：下次 ${formatBeijingTime(schedule.next_fire_at!)}（北京时间）`).join("\n");
-    })],
+    })]:[],
     tools: [defineTool({
       name: "schedule", description: DESCRIPTIONS.schedule, parameters: scheduleParameters, replay: "unsafe",
       execute: async (args, api, context) => {
         try {
           const turn = await access(api, context);
-          if (turn.kind !== "manage") throw new Error("定时管理工具仅限 owner 本人发来的消息回合；本轮请勿重试。");
+          if (turn.kind !== "manage") throw new Error("本轮没有有效的定时管理授权；本轮请勿重试。");
           return text(await manage(args, turn.actor));
         } catch (error) { return text(error instanceof Error ? error.message : "定时任务操作失败", true); }
       },

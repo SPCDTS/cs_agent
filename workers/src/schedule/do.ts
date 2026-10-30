@@ -57,6 +57,20 @@ export class ScheduleDO extends DurableObject<Env> {
     return rows.map(row => this.toSchedule(row));
   }
 
+  async listFor(conversation:ScheduleConversation,actor:string):Promise<Schedule[]>{
+    await this.requireManagement(conversation,actor);
+    return (await this.list(conversation)).filter(schedule=>this.isManager(actor)||schedule.created_by===actor);
+  }
+  private isManager(actor:string):boolean{return actor==="admin"||actor==="admin:web"||actor.startsWith("qq:")&&ownerIds(this.env).includes(actor.slice(3));}
+  private async requireManagement(conversation:ScheduleConversation,actor:string,createdBy?:string):Promise<void>{
+    if(this.isManager(actor))return;
+    if(conversation==="owner"||createdBy!==undefined&&createdBy!==actor||!await this.env.REGISTRY.getByName("main").canAccess({user:actor,cap:"schedule",scope:conversation}))throw new Error("只能管理有有效授权、由自己创建的本会话定时任务");
+  }
+  private async creatorAllowed(row:ScheduleRow):Promise<boolean>{
+    if(this.isManager(row.created_by))return true;
+    return row.conversation!=="owner"&&await this.env.REGISTRY.getByName("main").canAccess({user:row.created_by,cap:"schedule",scope:row.conversation});
+  }
+
   /** 整批原子导入；凭源快照摘要识别重试，不覆盖云端后续修改。 */
   async importSchedules(input: unknown) {
     let parsed;
@@ -98,16 +112,20 @@ export class ScheduleDO extends DurableObject<Env> {
 
   async create(input: unknown, by: string): Promise<Schedule> {
     const fields = parseCreate(input), now = Date.now();
-    if (!/^qq:[1-9]\d{0,15}$/.test(by)) throw new Error("创建者无效");
+    const creator=by==="admin"||by==="admin:web"?`qq:${ownerIds(this.env)[0]??""}`:by;
+    if (!/^qq:[1-9]\d{0,15}$/.test(creator)) throw new Error("创建者无效");
+    await this.requireManagement(fields.conversation,creator);
     const next = validateRule(fields.rule, now), id = crypto.randomUUID();
     this.sql.exec(`INSERT INTO schedules (id, revision, name, prompt, conversation, rule_json, status, created_by, created_at, updated_at, next_fire_at)
-      VALUES (?, 1, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`, id, fields.name, fields.prompt, fields.conversation, JSON.stringify(fields.rule), by, now, now, next);
+      VALUES (?, 1, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`, id, fields.name, fields.prompt, fields.conversation, JSON.stringify(fields.rule), creator, now, now, next);
     await this.changed("create", id, by);
     return this.toSchedule(this.row(id));
   }
 
   async update(id: string, patch: unknown, by: string): Promise<Schedule> {
-    const fields = parseUpdate(patch), row = this.row(id), rule = fields.rule ?? this.rule(row);
+    const fields = parseUpdate(patch), before=this.row(id);
+    await this.requireManagement(before.conversation,by,before.created_by);
+    const row=this.row(id),rule = fields.rule ?? this.rule(row);
     const next = fields.rule || row.status === "active" ? validateRule(rule, Date.now()) : null;
     this.sql.exec(`UPDATE schedules SET name = ?, prompt = ?, rule_json = ?, next_fire_at = CASE WHEN status = 'active' THEN ? ELSE next_fire_at END,
       revision = revision + 1, updated_at = ? WHERE id = ?`, fields.name ?? row.name, fields.prompt ?? row.prompt, JSON.stringify(rule), next, Date.now(), id);
@@ -116,6 +134,11 @@ export class ScheduleDO extends DurableObject<Env> {
   }
 
   async setStatus(id: string, status: ScheduleStatus, reason: string | undefined, by: string): Promise<Schedule> {
+    const before=this.row(id);
+    const control=by.startsWith("run:")&&by.slice(4).startsWith(`${id}@`)&&this.runRow(by.slice(4));
+    if(control&&status!=="active"){
+      if(settled(control.status))throw new Error("定时运行已经结束");
+    }else await this.requireManagement(before.conversation,by,before.created_by);
     const row = this.row(id), now = Date.now();
     if (status === "active") {
       // 恢复从现在往后算，停机或暂停期间错过的不补跑。
@@ -130,7 +153,7 @@ export class ScheduleDO extends DurableObject<Env> {
   }
 
   async remove(id: string, by: string): Promise<void> {
-    this.row(id);
+    const before=this.row(id);await this.requireManagement(before.conversation,by,before.created_by);
     this.ctx.storage.transactionSync(() => {
       this.sql.exec("DELETE FROM schedule_runs WHERE schedule_id = ?", id);
       this.sql.exec("DELETE FROM schedules WHERE id = ?", id);
@@ -139,6 +162,7 @@ export class ScheduleDO extends DurableObject<Env> {
   }
 
   async runNow(id: string, by: string): Promise<ScheduleRun> {
+    const before=this.row(id);await this.requireManagement(before.conversation,by,before.created_by);
     const row = this.row(id), now = Date.now();
     console.log({ event: "schedule_change", action: "run_now", id, by });
     return this.fire(row, now);
@@ -204,6 +228,11 @@ export class ScheduleDO extends DurableObject<Env> {
     const fireKey = `${row.id}@${fireAt}`, inputKey = scheduleInputKey(fireKey);
     const existing = this.runRow(fireKey);
     if (existing && existing.status !== "queued") return this.toRun(existing);
+    if(!await this.creatorAllowed(row)){
+      this.sql.exec("UPDATE schedules SET status='paused',pause_reason='authorization_revoked',next_fire_at=NULL,revision=revision+1,updated_at=? WHERE id=?",Date.now(),row.id);
+      this.apply(row.id,{fire_key:fireKey,fire_at:fireAt,status:"skipped",reason:"paused",ended_at:Date.now(),note:"创建者的定时授权已失效，任务已暂停"});
+      return this.toRun(this.runRow(fireKey)!);
+    }
     if (!existing) {
       for (const previous of this.inFlight(row.id)) await this.reconcile(row, previous);
       if (this.inFlight(row.id).length) {
@@ -293,7 +322,8 @@ export class ScheduleDO extends DurableObject<Env> {
     console.error({ event: "schedule_paused", id: schedule.id, reason: "failures", failures: schedule.failures });
     if (!owner) return;
     try {
-      await this.env.BRIDGE.getByName("napcat").sendPrivate(owner, `定时任务「${cleanName(schedule.name)}」连续 ${FAILURE_LIMIT} 次运行失败，已自动暂停。确认问题后可在聊天或管理端点恢复。`);
+      const id=`schedule-alert:${schedule.id}:${schedule.revision}`;
+      await this.env.BRIDGE.getByName("napcat").systemDeliver({id,operationAt:schedule.updated_at,runId:id,target:{kind:"private",userId:owner},purpose:"owner_alert",text: `定时任务「${cleanName(schedule.name)}」连续 ${FAILURE_LIMIT} 次运行失败，已自动暂停。确认问题后可在聊天或管理端点恢复。`});
     } catch (error) {
       console.error({ event: "schedule_alert_failed", id: schedule.id, error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
     }

@@ -83,6 +83,18 @@ describe("RRULE in Beijing time", () => {
 });
 
 describe("ScheduleDO alarm", () => {
+  it("runs an authorized creator once and pauses future triggers after revocation",async()=>{
+    const registry=env.REGISTRY.getByName("main"),actor="qq:10000003";
+    await registry.grantPut({user:actor,caps:["schedule"],scopes:["private:10000003"]},"qq:10000001");
+    const {socket,frames}=await connect(sockets);
+    const created=await directory().create({name:"授权提醒",prompt:"提醒一次",conversation:"private:10000003",rule:daily},actor);
+    const firing=directory().runNow(created.id,actor),frame=await action(frames,0,"send_private_msg");reply(socket,frame.echo);await firing;
+    await expect.poll(()=>runStatus(created.id),{timeout:10000}).toBe("sent");
+    await registry.grantRevoke({user:actor},"qq:10000001");
+    await makeDue(created.id,Date.now()-1000);await runDurableObjectAlarm(directory());
+    expect(await find(created.id)).toMatchObject({status:"paused",pause_reason:"authorization_revoked",next_fire_at:null});
+    expect(frames.filter(frame=>JSON.stringify(frame).includes("send_private_msg"))).toHaveLength(1);
+  });
   it("delivers a schedule input to the owner thread, records sent with the answer note, and completes one-shot tasks", async () => {
     const { socket, frames } = await connect(sockets);
     const at = Date.now() + 3600_000;
@@ -215,7 +227,7 @@ describe("schedule chat tools", () => {
     });
     expect(await directory().list("group:200000001")).toMatchObject([{ name: "群提醒", conversation: "group:200000001", created_by: "qq:10000001" }]);
     expect(await directory().list("owner")).toEqual([]);
-    expect(seen.outputs[1]).toContain("仅限 owner");
+    expect(seen.outputs[1]).toContain("没有有效的定时管理授权");
   });
 });
 

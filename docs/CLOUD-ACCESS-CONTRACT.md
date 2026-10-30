@@ -85,3 +85,9 @@ type OpsSettings = {
 ## 管理面板片段
 
 `admin/access-ui.ts` 导出 `ACCESS_HTML` 和 `ACCESS_APP_JS`：HTML 放在管理视图内，脚本放在现有 ADMIN_APP_JS 的 IIFE 末尾，复用 `$ / api / el / show / fail / time / ApiError`。片段首次插入不会请求数据，点击“加载 / 刷新”后读取五组数据；各列表也可单独刷新。人格和运维保存带当前 revision，409 时保留编辑内容并提示手动刷新。没有定时刷新或轮询。轻量 DOM 主流程已核对加载、人格 CAS、运维 CAS、授权与含斜线 operation ID 的查证路径；浏览器整体布局由集成后统一确认。
+
+## 宿主工具与定时撤权
+
+`createAccessExtension({ allowManage, registry, bridge })` 安装 qq_chats、auth_list、auth_grant、auth_revoke。allowManage 每次执行必须重新查当前持久输入，仅允许 owner 私聊交互消息或鉴权 owner 网页，并返回真实 `qq:<owner>` actor；群消息和子 agent 不能借用此入口。聊天目录默认最多 50 项（可限 100、按 query 过滤），授权列表最多 100 项，完整目录在面板查看。
+
+ScheduleDO.listFor(conversation,actor) 和全部管理写入再次核验有效 schedule grant；普通授权用户只能管理由自己创建的同会话任务，owner/admin 可管理当前会话全部任务。后台触发前重新核验 created_by，失效即暂停、标注 authorization_revoked 并跳过投递。owner/admin 仍按 secret 身份正常运行；admin 网页创建任务时保存对应 QQ owner 为 created_by。非 owner namespace 不自动注入其他创建者的任务摘要，模型可通过自己有权调用的 list 查询。
