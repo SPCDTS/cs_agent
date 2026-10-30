@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import { cleanName, ownerIds, type InboundInput, type Target } from "../policy";
 import { DEFAULT_SCHEDULE_OPTIONS, missedFires, nextFireAt, parseCreate, parseUpdate, validateRule } from "./model";
+import { parseScheduleImport } from "./import";
 import { scheduleInputKey, scheduledInput } from "./run";
 import type { Schedule, ScheduleConversation, ScheduleRule, ScheduleRun, ScheduleRunStatus, ScheduleStatus } from "./types";
 
@@ -39,6 +40,7 @@ export class ScheduleDO extends DurableObject<Env> {
         created_by TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, next_fire_at INTEGER,
         failures INTEGER NOT NULL DEFAULT 0, fire_count INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS schedule_imports (id TEXT PRIMARY KEY, hash TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS schedules_due ON schedules(status, next_fire_at);
       CREATE TABLE IF NOT EXISTS schedule_runs (
         fire_key TEXT PRIMARY KEY, schedule_id TEXT NOT NULL, fire_at INTEGER NOT NULL, status TEXT NOT NULL, reason TEXT,
@@ -53,6 +55,45 @@ export class ScheduleDO extends DurableObject<Env> {
       ? this.sql.exec<ScheduleRow>("SELECT * FROM schedules ORDER BY created_at, id").toArray()
       : this.sql.exec<ScheduleRow>("SELECT * FROM schedules WHERE conversation = ? ORDER BY created_at, id", conversation).toArray();
     return rows.map(row => this.toSchedule(row));
+  }
+
+  /** 整批原子导入；凭源快照摘要识别重试，不覆盖云端后续修改。 */
+  async importSchedules(input: unknown) {
+    let parsed;
+    try { parsed = parseScheduleImport(input, Date.now()); }
+    catch { return { error: "invalid_import" as const }; }
+    const plans = await Promise.all(parsed.schedules.map(async item => ({ ...item,
+      hash: Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(item.source))),
+        byte => byte.toString(16).padStart(2, "0")).join(""),
+    })));
+    const result = this.ctx.storage.transactionSync(() => {
+      const items = [];
+      for (const { schedule, hash } of plans) {
+        const receipt = this.sql.exec<{ hash: string }>("SELECT hash FROM schedule_imports WHERE id = ?", schedule.id).toArray()[0];
+        const exists = this.sql.exec("SELECT id FROM schedules WHERE id = ?", schedule.id).toArray().length > 0;
+        if (receipt ? receipt.hash !== hash || !exists : exists) return { error: "schedule_conflict" as const };
+        const current = exists ? this.toSchedule(this.row(schedule.id)) : schedule;
+        items.push({ id: schedule.id, name: current.name, status: current.status, next_fire_at: current.next_fire_at,
+          action: receipt ? "skip" as const : "import" as const });
+      }
+      if (!parsed.dryRun) for (const { schedule: s, hash, fireCount } of plans) {
+        if (items.find(item => item.id === s.id)?.action === "skip") continue;
+        this.sql.exec("INSERT INTO schedules (id, revision, name, prompt, conversation, rule_json, status, pause_reason, created_by, created_at, updated_at, next_fire_at, failures, fire_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          s.id, s.revision, s.name, s.prompt, s.conversation, JSON.stringify(s.rule), s.status, s.pause_reason ?? null,
+          s.created_by, s.created_at, s.updated_at, s.next_fire_at, s.failures, fireCount);
+        for (const run of s.runs) this.sql.exec(
+          "INSERT INTO schedule_runs (fire_key, schedule_id, fire_at, status, " + RUN_FIELDS.join(", ") + ") VALUES (?, ?, ?, ?, " + RUN_FIELDS.map(() => "?").join(", ") + ")",
+          run.fire_key, s.id, run.fire_at, run.status, ...RUN_FIELDS.map(field => run[field] ?? null));
+        this.sql.exec("INSERT INTO schedule_imports (id, hash) VALUES (?, ?)", s.id, hash);
+      }
+      return { dryRun: parsed.dryRun, imported: parsed.dryRun ? 0 : items.filter(item => item.action === "import").length,
+        skipped: items.filter(item => item.action === "skip").length, items };
+    });
+    if (!("error" in result) && !parsed.dryRun) {
+      await this.arm();
+      console.log({ event: "schedule_import", imported: result.imported, skipped: result.skipped });
+    }
+    return result;
   }
 
   async create(input: unknown, by: string): Promise<Schedule> {

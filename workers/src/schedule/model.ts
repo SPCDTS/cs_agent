@@ -18,7 +18,7 @@ const fields = {
   prompt: Type.String({ minLength: 1, maxLength: 8000 }),
   rule: RuleSchema,
 };
-const CreateSchema = Type.Object({ ...fields, conversation: Type.String({ pattern: "^(owner|(group|private):[1-9][0-9]{0,15})$" }) }, { additionalProperties: false });
+export const CreateSchema = Type.Object({ ...fields, conversation: Type.String({ pattern: "^(owner|(group|private):[1-9][0-9]{0,15})$" }) }, { additionalProperties: false });
 const UpdateSchema = Type.Object({ name: Type.Optional(fields.name), prompt: Type.Optional(fields.prompt), rule: Type.Optional(fields.rule) }, { additionalProperties: false });
 
 function trimmed<T extends { name?: string; prompt?: string }>(value: T): T {

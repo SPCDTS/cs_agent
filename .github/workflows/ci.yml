@@ -39,6 +39,8 @@ jobs:
         working-directory: workers
       - run: npm test
         working-directory: workers
+      - run: node --test test/export-schedules.node.mjs
+        working-directory: workers
 
   integration:
     name: integration

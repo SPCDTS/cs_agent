@@ -12,6 +12,7 @@ import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from ".
 import { ownerIds } from "../policy";
 import { SUBAGENT_ID } from "../subagent/model";
 import { ADMIN_APP_JS, ADMIN_PAGE_HTML } from "./page";
+import { SCHEDULE_IMPORT_MAX_BYTES } from "../schedule/import";
 import type { RequestQuery } from "../requests/types";
 
 export type AdminContext = { env: Env; request: Request; url: URL; params: Record<string, string> };
@@ -151,6 +152,16 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       configured: Object.fromEntries(SECRET_NAMES.map(name => [name, !!env[name]])) });
   } },
 
+  { method: "POST", path: "/admin/schedules/import", handle: async ({ env, request }) => {
+    if (Number(request.headers.get("Content-Length") ?? 0) > SCHEDULE_IMPORT_MAX_BYTES) throw new HttpError(413, "too_large");
+    const raw = await request.arrayBuffer();
+    if (raw.byteLength > SCHEDULE_IMPORT_MAX_BYTES) throw new HttpError(413, "too_large");
+    let input: unknown;
+    try { input = JSON.parse(new TextDecoder().decode(raw)); } catch { throw new HttpError(400, "invalid_json"); }
+    const result = await env.SCHEDULE.getByName("main").importSchedules(input);
+    if (result.error) throw new HttpError(result.error === "schedule_conflict" ? 409 : 400, result.error);
+    return json(result);
+  } },
   { method: "GET", path: "/admin/schedules", handle: async ({ env }) => json(await env.SCHEDULE.getByName("main").list()) },
   { method: "POST", path: /^\/admin\/schedules\/(?<id>[0-9a-f-]{36})\/(?<action>pause|resume|delete|run-now)$/, handle: async ({ env, params }) => {
     const schedules = env.SCHEDULE.getByName("main"), id = params.id!, action = params.action!;

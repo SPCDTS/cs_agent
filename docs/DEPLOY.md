@@ -315,3 +315,21 @@ Workers 侧的部署事实（设计见 [WORKERS-DESIGN.md](WORKERS-DESIGN.md)）
 - 宿主机 NapCat 没有自带开机自启；可用计划任务在登录后拉起：`schtasks /Create /TN "NapCat autostart" /SC ONLOGON /DELAY 0000:30 /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File D:\Tools\NapCat\start.ps1" /F`。
 
 本机 Docker 部署已停用；如需临时重启旧版，仍按 §5 用 `scripts/deploy.ps1`，并把 `.env` 的 `NAPCAT_*_URL` 改回 `host.docker.internal:3000/3001`（NapCat 已不在 compose 里运行），且先在 NapCat 里停掉 `workers` 反向连接，否则两边都会回复。
+
+## 定时任务从 Docker 迁到 Workers
+
+先停旧调度器，再只读导出 `data/agent.sqlite` 的 `cs.schedules` 和 `cs.schedule.runtime`。导出器还原基础版本及增量，保留任务 ID、规则、状态、创建者、最近执行记录和累计触发次数：
+
+`node workers/scripts/export-schedules.mjs [数据目录] [提示词覆盖.json]`
+
+可选的 UTF-8 覆盖文件为任务 ID 到新提示词的映射；仅用于明确适配旧路径或工具，不改写源库。云端使用 `read_skill` 读取技能，群定时任务可用 `web_page` 读取已知来源，不依赖 Docker 文件路径或已删除的搜索工具。
+
+将输出作为 JSON 请求体，带 Bearer ADMIN_TOKEN 调用 `POST /admin/schedules/import`：
+
+- 默认 `dryRun: true` 只返回逐项预览，不写任务、历史或 alarm；核对后用同一负载改为 `false` 正式导入。
+- 活动任务重新计算严格晚于导入时刻的下一次触发，不补跑停机期间错过的回合；已完成、暂停任务保持状态且不设触发。
+- 单批最多 100 个任务、1 MiB；每项最多 20 条已结算记录。拒绝在途任务、自定义超时选项、重复 ID、非法规则及不匹配的运行键；应先在旧端核实，不能丢弃在途状态后直接重发。
+- 整批写入 SQLite 事务，源快照摘要作为导入收据。完全相同的重试跳过已导入项，云端后续编辑不会被覆盖；同 ID 不同快照、已删除任务或非迁入任务冲突返回 409，整批不写。
+- 导入接口只负责恢复定义和历史，不主动试跑，不发 QQ 消息。正式导入后查询列表，核对数量、状态、下一次北京时间和执行记录。
+
+验证：Workers 的 schedule-import、schedule、admin 测试覆盖导入与原有调度；导出器用真实 SQLite 执行 node --test workers/test/export-schedules.node.mjs，CI 同步运行。
