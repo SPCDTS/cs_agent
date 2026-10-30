@@ -21,6 +21,7 @@ export function fakeRemote() {
   const requests: { url: string; method: string; body: string; headers: Headers; redirect: string }[] = [];
   const state = {
     resources: [{ uri: "notion://docs/start", name: "起步资料" }, { uri: "notion://private/hidden", name: "未授权" }],
+    resourceBlob: undefined as { blob: string; mimeType: string } | undefined,
     templates: [{ uriTemplate: "notion://docs/{page}", name: "文档" }], resourceReads: 0,
     tools: structuredClone(sampleTools), refreshes: 0, calls: 0, initializations: 0, pages: 0,
     tokenStatus: 200, tokenError: "invalid_grant", expires: 3600, cimd: true,
@@ -57,7 +58,7 @@ export function fakeRemote() {
         result = rpc.params?.cursor ? { tools: state.tools.slice(2) } : { tools: state.tools.slice(0, 2), nextCursor: "page2" };
       } else if (rpc.method === "resources/list") result = { resources: state.resources };
       else if (rpc.method === "resources/templates/list") result = { resourceTemplates: state.templates };
-      else if (rpc.method === "resources/read") { state.resourceReads++; result = { contents: [{ uri: rpc.params?.uri, mimeType: "text/plain", text: "合成文档正文" }] }; }
+      else if (rpc.method === "resources/read") { state.resourceReads++; result = { contents: [{ uri: rpc.params?.uri, ...(state.resourceBlob ?? { mimeType: "text/plain", text: "合成文档正文" }) }] }; }
       else if (rpc.method === "tools/call") {
         state.calls++;
         await state.beforeCall?.();

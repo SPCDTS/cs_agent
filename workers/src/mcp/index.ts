@@ -6,6 +6,7 @@ import { defineExtension, defineTool, section, type Registry, type ToolExecution
 import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { createInlineCodemodeSandbox } from "@earendil-works/pi-codemode/cloudflare";
 import type { Env } from "../env";
+import { MediaRepository } from "../media/repository";
 import type { Resource, ResourceTemplate } from "@modelcontextprotocol/sdk/types.js";
 import { mcpAuthority, sameMcpOrigin, type McpAuthority, type McpAuthorization, type McpCapabilitySnapshot } from "./access";
 import { allowedResource, resourceInCatalog } from "./resources";
@@ -314,7 +315,20 @@ export class ThreadMcp {
         if (!uri || !allowedResource(uri, prefixes) || !resourceInCatalog(uri, entry.resources.rows, entry.resources.templates) || !await allowed()) return mcpFailure("denied");
         const result = await connection.readResource(uri, signal);
         if (result.contents.some(content => !allowedResource(content.uri, prefixes))) return mcpFailure("result_rejected");
-        return convertMcpResult({ content: result.contents.map(resource => ({ type: "resource", resource })) }, undefined, this.config.limits);
+        const content = [];
+        for (const resource of result.contents) {
+          if ("text" in resource) content.push({ type: "resource", resource });
+          else if (/^image\/(png|jpeg|webp|gif)$/.test(resource.mimeType ?? "") && Buffer.byteLength(resource.blob, "base64") <= 4 * 1024 * 1024) {
+            content.push({ type: "image", data: resource.blob, mimeType: resource.mimeType });
+          } else {
+            const asset = await new MediaRepository({ bucket: this.env.ASSETS, scope: authority.scope }).put({
+              bytes: new Uint8Array(Buffer.from(resource.blob, "base64")), mime: resource.mimeType, kind: "file",
+              name: new URL(resource.uri).pathname.split("/").at(-1) || "mcp-resource",
+            });
+            content.push({ type: "text", text: "[MCP 私有附件] " + JSON.stringify(asset) });
+          }
+        }
+        return convertMcpResult({ content }, undefined, this.config.limits);
       });
     } catch { return mcpFailure("resource_unavailable"); }
   }

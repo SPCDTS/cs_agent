@@ -26,6 +26,8 @@ describe("MCP resources and delegated capabilities", () => {
       expect((await invoke("mcp_resources_read", { server: "notion", uri: "notion://private/hidden" })).isError).toBe(true);
       expect(remote.state.resourceReads).toBe(1);
       expect(remote.requests.filter(r => r.body.includes('"method":"resources/list"'))).toHaveLength(1);
+      remote.state.resourceBlob = { blob: Buffer.from("synthetic pdf bytes").toString("base64"), mimeType: "application/pdf" };
+      expect(JSON.stringify((await invoke("mcp_resources_read", { server: "notion", uri: "notion://docs/file.pdf" })).output)).toContain("MCP 私有附件");
       await mcp.close();
     });
   });

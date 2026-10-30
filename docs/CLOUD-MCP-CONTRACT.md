@@ -23,6 +23,8 @@ McpAuthority 必须由宿主构造，包含 kind、scope、actor、owner、gener
 
 Notion 资源仅允许 notion://docs/ 前缀，并且 URI 必须在远端资源目录或模板内。resources/list、resources/templates/list、resources/read 使用同一授权和连接队列；资源 URI 不是任意网络抓取入口。
 
+resources/read 的图片 blob 同样转原生图片；其他二进制资源写入当前 scope 的私有 R2 资产，返回 AssetRef 元数据，下载复用既有鉴权媒体入口。只有显式读取二进制时才发生这次 R2 写入。
+
 MCP 图片作为原生 image content 返回，允许 PNG/JPEG/WebP/GIF，单张最多 4 MiB、最多 4 张，总响应仍受 messageBytes 限制。图片只作为已有 MCP 结果，不提供生图工具。文本输出最多 8000 字；凭据继续仅由 Registry 获取，不传给模型或子 agent。
 
 
