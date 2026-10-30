@@ -46,3 +46,9 @@ SandboxDO 的容器只是 `/work` 的临时物化视图。R2 保存不可变 man
 ## 默认资源开销
 
 工作区默认上限50MiB、单文件10MiB、容器空闲3分钟停止。普通write/edit只对内容变化的文件各写一个R2 blob，再写一份manifest；小于32KiB的操作结果直接存DO。bash未改变文件时不创建新manifest或blob。read不产生R2写入，也不建立持久操作账本。冷恢复需要读取一份manifest及其文件blob；热工作区只读DO head与manifest。历史维护默认保留head加最近2份历史，短期传输租约仍受保护。详细操作结果最多保留最近32条，更旧结果压缩为不会重放的tombstone；每个tombstone仍占少量DO存储，因此长期超高频使用应按会话分代保留幂等边界。
+
+## Thread接线辅助
+
+`lookupHostMedia({database,bridge,source:{scope,namespace,target},messageId,selection?})` 位于 `tools/media-host.ts`。source由宿主从已验证回合构造；scope是物理QQ会话（例如private:QQ），namespace是Thread与资产范围（owner私聊可为owner）。它只查询本scope的media；旧消息缺引用时，必须先在本scope找到原消息，才调用Bridge.getMessage，并核验返回的群或私聊目标。文件ID按该source.target调用getFileUrl，图片/语音/视频分别调用getImage/getRecord/getFile。函数不下载文件，返回URL仍经MediaRepository的受限下载。
+
+`MediaDeps.lookup`第四个可选参数是 `MediaSelection`（kind/ordinal）；root可原样传给helper，使筛选在NapCat RPC之前发生，单次最多解析5个附件。source.namespace由宿主绑定repository，不能由模型提供。

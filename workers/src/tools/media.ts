@@ -4,10 +4,11 @@ import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionR
 import type { InboundMedia } from "../policy";
 import { MediaRepository, type AssetRef } from "../media/repository";
 
+export type MediaSelection = { ordinal?: number; kind?: InboundMedia["kind"] };
 export type MediaDeps = {
   allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
   repository(api: ToolExecutionApi, context: Context): Promise<MediaRepository>;
-  lookup(messageId: string, api: ToolExecutionApi, context: Context): Promise<InboundMedia[]>;
+  lookup(messageId: string, api: ToolExecutionApi, context: Context, selection?: MediaSelection): Promise<InboundMedia[]>;
   sandbox(api: ToolExecutionApi, context: Context): Promise<{ exportAsset(path: string, scope: string, name?: string): Promise<AssetRef> }>;
   deliver(ref: AssetRef, api: ToolExecutionApi, context: Context): Promise<unknown>;
   record?(kind: "media_recall" | "media_send", detail: object): Promise<unknown>;
@@ -34,7 +35,7 @@ export function createMediaExtension(deps: MediaDeps) {
     description: imageOnly ? "Recall images by message_id in the current authorized chat. Returns image content directly; ordinal selects one attachment." : "Recall an attachment by message_id in the current authorized chat; returns its private asset reference and metadata, without claiming its contents were parsed.",
     parameters: RecallParams,
     execute: (args, api, context) => boundary("media_recall", api, context, async () => {
-      const repository = await deps.repository(api, context), media = await deps.lookup(args.message_id, api, context);
+      const repository = await deps.repository(api, context), media = await deps.lookup(args.message_id, api, context, { ordinal: args.ordinal, ...(imageOnly ? { kind: "image" } : {}) });
       const selected = media.filter(item => (!imageOnly || item.kind === "image") && (args.ordinal === undefined || item.ordinal === args.ordinal)).slice(0,5);
       if (!selected.length) return text("本会话这条消息没有可访问的附件。", true);
       const output: ToolExecutionResult["output"] = [];
