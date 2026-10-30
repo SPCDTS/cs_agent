@@ -95,15 +95,16 @@ describe("memory tools in the real Harness", () => {
     expect(result.memory.active).toBe(1);
   });
 
-  it("rejects cross-DO subject routing and caps tool writes at twenty per turn", async () => {
-    const seen = script([{ name: "mem_remember", args: { text: "禁止跨会话写", kind: "fact", subject: "group:200000001" } },
+  it("routes owner subject writes to the target and caps total writes at twenty per turn", async () => {
+    const seen = script([{ name: "mem_remember", args: { text: "共享训练安排", kind: "fact", subject: "group:200000001" } },
       ...Array.from({ length: 21 }, (_, i) => ({ name: "mem_remember", args: { text: `条目${i}`, kind: "fact" } }))]);
     const stats = await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       const instance = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       await instance.submit(input(1, "多次写入", 10000001));
       return instance.stats();
     });
-    expect(seen.outputs[0]).toContain("不支持通过 subject 跨会话写入");
+    expect(seen.outputs[0]).toContain("已记住");
+    expect((await env.THREAD.getByName("group:200000001").memoryView("group:200000001", "")).memories.map(row => row.text)).toEqual(["共享训练安排"]);
     expect(seen.outputs.at(-1)).toContain("20 次");
     expect(stats.memory.active).toBe(19);
   });

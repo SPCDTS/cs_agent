@@ -42,7 +42,7 @@ function fauxModel() {
 async function withThread<T>(name: string, vars: Record<string, string>, fn: (thread: ThreadDO, db: DurableObjectSqliteDatabase) => Promise<T>) {
   return runInDurableObject(env.THREAD.getByName(name), async (_instance, state) => {
     const thread = new ThreadDO(state, { ...env, ...vars });
-    await thread.stats();
+    await thread.memoryView(name, "");
     return fn(thread, new DurableObjectSqliteDatabase(state.storage));
   });
 }
@@ -103,7 +103,9 @@ describe("chat history aging", () => {
       expect(await remaining(db)).toEqual([{ day: "2026-10-28" }]);
       expect(await db.all("SELECT text FROM summaries")).toEqual([{ text: "本周围绕烟雾弹训练做了安排。" }]);
     });
-    await withThread("group:200000002", { HISTORY_RAW_DAYS: "0" }, async (thread, db) => {
+    const registry = env.REGISTRY.getByName("main"), settings = await registry.opsSettings();
+    await registry.putOpsSettings({ ...settings.value, threads: { "group:200000002": { rawDays: 0 } } }, settings.revision);
+    await withThread("group:200000002", {}, async (thread, db) => {
       await seed(db);
       expect(await run(thread, "aging", bj("2026-12-01", "03:30"))).toMatchObject({ day: 2, purgedMessages: 0 });
       expect(await count(db, "SELECT COUNT(*) AS n FROM messages")).toBe(17);
