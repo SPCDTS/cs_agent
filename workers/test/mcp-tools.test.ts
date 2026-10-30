@@ -77,13 +77,14 @@ describe("MCP in pi-durable and inline QuickJS", () => {
     expect(remote.state.calls).toBe(1); expect(seen.outputs.join("\n")).toContain("denied");
   });
   it.each([{ ns: "group:200000001", user: 10000001, group: 200000001 }, { ns: "group:200000001", user: 10000004, group: 200000001 },
-    { ns: "private:10000003", user: 10000003, group: undefined }])("installs no MCP or codemode for $ns sender $user", async ({ ns, user, group }) => {
+    { ns: "private:10000003", user: 10000003, group: undefined }])("denies codemode without a grant for $ns sender $user", async ({ ns, user, group }) => {
     const remote = fakeRemote(), seen = scriptedModel([{ name: "codemode", args: { code: "text(ALL_TOOLS)" } }]);
     await runInDurableObject(env.THREAD.getByName(ns), async (_instance, state) => {
       const thread = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       expect(await thread.submit(input(1, "test", user, group, true))).toEqual({ status: "done" });
     });
-    expect(seen.offers).not.toContain("codemode"); expect(seen.sections).toHaveLength(0); expect(remote.requests).toHaveLength(0);
+    expect(seen.outputs.join("\n")).toContain("denied");
+    expect(remote.requests).toHaveLength(0);
   });
   it("does not resend an unsafe call after a transport failure", async () => {
     const remote = fakeRemote(); await login(); remote.state.failCalls = true;

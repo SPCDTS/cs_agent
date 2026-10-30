@@ -39,8 +39,10 @@ export class ThreadMcp {
     registry.install(defineExtension({ ...codemode, name: "cs.mcp.control",
       sections: [section("mcp-policy", () => MCP_RULE), ...codemode.sections ?? []],
       tools: [...(codemode.tools ?? []).map(tool => ({ ...tool, execute: async (args: unknown, api: ToolExecutionApi, context: Context) => {
-        const kind = mcpAuthority(await this.authorize(api, context))?.kind;
-        return kind && (kind !== "event" || [...this.entries.values()].some(e => e.server.tools.eventAllow.length))
+        const authority = mcpAuthority(await this.authorize(api, context));
+        return authority && (authority.kind === "event"
+          ? [...this.entries.values()].some(e => e.server.tools.eventAllow.length)
+          : await this.hasAccess(authority))
           ? tool.execute(args, api, context) : mcpFailure("denied");
       } })),
       defineTool({ name: "mcp_refresh_tools", description: "在 codemode 中刷新 MCP 目录，不执行远端业务操作。",
