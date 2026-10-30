@@ -42,6 +42,16 @@ describe("DO memory storage", () => {
     });
   });
 
+  it("searches long Chinese substrings in workerd without exceeding FTS complexity limits", async () => {
+    await useStore(async store => {
+      const text = "这是用于测试长中文关键词查询的合成记忆内容而非任何真实资料";
+      const hit = await store.remember({ kind: "fact", text, author: "dashboard" });
+      for (const length of [12, 18, 30]) {
+        expect((await store.search({ query: text.slice(0, length) })).map(row => row.id)).toEqual([hit.row.id]);
+      }
+    });
+  });
+
   it("updates FTS triggers, marks forgotten with versions and bounds output to 2500 characters", async () => {
     await useStore(async store => {
       const initial = await store.remember({ kind: "fact", text: "烟雾弹练习", author: "dashboard" });

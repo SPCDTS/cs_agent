@@ -119,13 +119,19 @@ export class MemoryStore {
     if (q.kind) { parts.push("m.kind = ?"); args.push(q.kind); }
     if (q.subject) { parts.push("m.subject = ?"); args.push(q.subject.trim()); }
     const terms = q.query?.trim().split(/\s+/).filter(Boolean).slice(0, 5) ?? [];
-    // 与 Docker 相同：FTS trigram 的 LIKE 可索引长词；短词与特殊字符按字面回退扫描。
+    // workerd 的 LIKE 模式字节上限较低：只用短前缀缩小候选，再按完整字面子串过滤。
+    // 完整匹配不用 LIKE，因此长中文、通配符与反斜线都不会触发平台限制。
+    let indexed = false;
     for (const term of terms) {
-      const special = /[%_\\]/.test(term), like = special ? "LIKE ? ESCAPE '\\'" : "LIKE ?";
-      const pattern = `%${special ? term.replace(/[%_\\]/g, "\\$&") : term}%`;
-      parts.push(`(f.text ${like} OR f.subject ${like})`); args.push(pattern, pattern);
+      const prefix = [...term].slice(0, 3).join("");
+      if ([...prefix].length === 3 && !/[%_\\]/.test(prefix)) {
+        indexed = true;
+        parts.push("(f.text LIKE ? OR f.subject LIKE ?)"); args.push(`%${prefix}%`, `%${prefix}%`);
+      }
+      parts.push("(instr(lower(m.text), lower(?)) > 0 OR instr(lower(COALESCE(m.subject, '')), lower(?)) > 0)");
+      args.push(term, term);
     }
-    const from = terms.length ? "memories_fts f JOIN memories m ON m.id = f.rowid" : "memories m";
+    const from = indexed ? "memories_fts f JOIN memories m ON m.id = f.rowid" : "memories m";
     const order = terms.length ? "COALESCE(m.last_recalled_at, 0) DESC, m.updated_at DESC, m.id DESC"
       : q.kind === "commitment" ? "m.due_at IS NULL, m.due_at, m.id" : "m.updated_at DESC, m.id DESC";
     return this.db.all<MemoryRow>(`SELECT m.* FROM ${from} WHERE ${parts.join(" AND ")} ORDER BY ${order} LIMIT ?`,
