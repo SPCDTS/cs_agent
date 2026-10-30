@@ -52,3 +52,7 @@ SandboxDO 的容器只是 `/work` 的临时物化视图。R2 保存不可变 man
 `lookupHostMedia({database,bridge,source:{scope,namespace,target},messageId,selection?})` 位于 `tools/media-host.ts`。source由宿主从已验证回合构造；scope是物理QQ会话（例如private:QQ），namespace是Thread与资产范围（owner私聊可为owner）。它只查询本scope的media；旧消息缺引用时，必须先在本scope找到原消息，才调用Bridge.getMessage，并核验返回的群或私聊目标。文件ID按该source.target调用getFileUrl，图片/语音/视频分别调用getImage/getRecord/getFile。函数不下载文件，返回URL仍经MediaRepository的受限下载。
 
 `MediaDeps.lookup`第四个可选参数是 `MediaSelection`（kind/ordinal）；root可原样传给helper，使筛选在NapCat RPC之前发生，单次最多解析5个附件。source.namespace由宿主绑定repository，不能由模型提供。
+
+## 容器成本硬限
+
+每次冷启动前向Registry.reserveContainerBudget(workspace)固定预留5分钟；同workspace的有效预留幂等复用，UTC日全项目合计最多120分钟，同时最多2个预留，不退款。预算服务不可用、耗尽或并发满时拒绝启动。容器按lite规格启动，3分钟idle；5分钟硬deadline只在启动时绑定，后续工具调用不延长。Node主进程接收SANDBOX_DEADLINE_MS并到期退出，SandboxDO alarm再负责兜底destroy；平台inactivity也不超过硬deadline剩余时间。文件事实源留在R2，硬停止不删除已提交工作区。

@@ -72,7 +72,7 @@ function fakeContainer(port: (url: string, init?: RequestInit) => Promise<Respon
   };
   return { state, fetch, container };
 }
-function withContainer<T>(container: object, work: (sandbox: SandboxDO) => Promise<T>): Promise<T> {
+function withContainer<T>(container: object, work: (sandbox: SandboxDO) => Promise<T>, reserveBudget: () => Promise<number> = async () => Date.now() + SandboxDO.MAX_LIFETIME_MS): Promise<T> {
   return runInDurableObject(env.SANDBOX.getByName("owner"), async (instance, ctx) => {
     if (!(instance instanceof SandboxDO)) throw new Error("expected SandboxDO");
     const proxied = new Proxy(ctx, { get: (target, key) => {
@@ -81,11 +81,17 @@ function withContainer<T>(container: object, work: (sandbox: SandboxDO) => Promi
       return typeof value === "function" ? value.bind(target) : value;
     } });
     Object.defineProperty(instance, "ctx", { value: proxied });
+    Object.defineProperty(instance, "reserveBudget", { value: reserveBudget, configurable: true });
     return work(instance);
   });
 }
 
 describe("SandboxDO", () => {
+  it("预算拒绝时不会启动容器", async () => {
+    const { state, container } = fakeContainer(async () => Response.json({ ok: true }));
+    await withContainer(container, sandbox => expect(sandbox.writeFile("a.txt", "x")).rejects.toThrow("container_budget_busy"), async () => { throw new Error("container_budget_busy"); });
+    expect(state.starts).toEqual([]);
+  });
   it("starts the container on demand, waits for the control port, then sends each call once", async () => {
     vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
     let healthChecks = 0;
@@ -103,8 +109,8 @@ describe("SandboxDO", () => {
       expect(await sandbox.exec("echo ok", { timeoutMs: 5000 })).toEqual(result);
       expect(await sandbox.status()).toBe("running");
     });
-    expect(state.starts).toEqual([{ image: "registry.test/sandbox:1", enableInternet: true, instance: "lite" }]);
-    expect(state.idle.every(value => value === 180_000)).toBe(true);
+    expect(state.starts).toEqual([{ image: "registry.test/sandbox:1", enableInternet: true, instance: "lite", env: { SANDBOX_DEADLINE_MS: expect.stringMatching(/^\d+$/) } }]);
+    expect(state.idle.every(value => typeof value === "number" && value > 0 && value <= 180_000)).toBe(true);
     expect(fetch.mock.calls.map(([url]) => url)).toEqual(["http://sandbox/health", "http://sandbox/health", "http://sandbox/health", "http://sandbox/restore/start", "http://sandbox/restore/commit", "http://sandbox/exec", "http://sandbox/snapshot", "http://sandbox/exec", "http://sandbox/snapshot"]);
   });
 

@@ -4,7 +4,7 @@ export const EXEC_MAX_TIMEOUT_MS = 120_000;
 
 // 失败一律以这些分类码作为 Error.message 抛出；RPC 会保留 message，工具按它给模型说明。
 export const SANDBOX_FAILURES = ["sandbox_unavailable", "path_denied", "not_found", "is_directory", "not_a_directory", "binary_file", "too_large",
-  "workspace_storage_unavailable", "workspace_quota", "persistence_failed", "operation_unknown", "operation_expired", "operation_conflict", "workspace_conflict", "blob_corrupt", "restore_incomplete", "offset_out_of_range", "edit_not_found", "edit_ambiguous", "edit_overlap", "permission_denied", "invalid_request", "sandbox_error"] as const;
+  "container_budget_unavailable", "container_budget_exceeded", "container_budget_busy", "container_budget_expired", "workspace_storage_unavailable", "workspace_quota", "persistence_failed", "operation_unknown", "operation_expired", "operation_conflict", "workspace_conflict", "blob_corrupt", "restore_incomplete", "offset_out_of_range", "edit_not_found", "edit_ambiguous", "edit_overlap", "permission_denied", "invalid_request", "sandbox_error"] as const;
 export type SandboxFailure = typeof SANDBOX_FAILURES[number];
 const known = (code: unknown): SandboxFailure => (SANDBOX_FAILURES as readonly unknown[]).includes(code) ? code as SandboxFailure : "sandbox_error";
 export const sandboxFailure = (error: unknown): SandboxFailure => known(error instanceof Error ? error.message.split(":")[0] : undefined);

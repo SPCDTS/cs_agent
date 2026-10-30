@@ -17,6 +17,10 @@ export type CodingDeps = {
 
 const DEFAULT_TIMEOUT_S = 60;
 const FAILURES: Record<SandboxFailure, string> = {
+  container_budget_unavailable: "容器预算服务暂时不可用，本次没有启动新容器。",
+  container_budget_exceeded: "今日全项目容器预算已用完；请稍后再运行，已提交文件仍保留。",
+  container_budget_busy: "全项目已有两个容器占用预算，请稍后再运行。",
+  container_budget_expired: "本次容器的5分钟硬期限已到；不会自动重跑命令，已提交文件仍保留。",
   workspace_storage_unavailable: "持久资产存储未配置；不能继续写入。",
   workspace_quota: "工作区快照被拒绝：单文件最多10MiB，总量最多50MiB，不能包含符号链接；本次文件变更没有提交，请缩小工作集。",
   persistence_failed: "命令已执行，但持久化失败；文件变更未确认，不能当作成功，也不要盲目重跑有副作用的命令。",

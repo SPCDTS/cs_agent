@@ -230,6 +230,14 @@ export function createSandboxServer({ root, shell = "/bin/bash", user, env = {} 
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const reservedDeadline = Number(process.env.SANDBOX_DEADLINE_MS);
+  if (!Number.isFinite(reservedDeadline) || reservedDeadline <= Date.now()) {
+    console.error({ event: "sandbox_budget_deadline_missing" });
+    process.exit(1);
+  }
+  // PID 1 到期退出使整个容器停止；不受持续工具调用、网络活动或后台进程影响。
+  const deadline = Math.min(reservedDeadline, Date.now() + 5 * 60 * 1000);
+  setTimeout(() => process.exit(0), Math.max(1, deadline - Date.now())).unref();
   const user = process.getuid?.() === 0 ? { uid: Number(process.env.SANDBOX_UID ?? 1000), gid: Number(process.env.SANDBOX_GID ?? 1000) } : undefined;
   createSandboxServer({ root: process.env.SANDBOX_ROOT ?? "/work", user, env: user ? { HOME: "/home/sandbox", USER: "sandbox" } : {} })
     .listen(Number(process.env.PORT ?? 3000), "0.0.0.0");
