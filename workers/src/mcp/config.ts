@@ -31,14 +31,15 @@ const Server = Type.Object({
   id: Type.String({ pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}$" }), enabled: Type.Optional(Type.Boolean()),
   transport: Type.Object({ kind: Type.Literal("streamable-http"), url: clean(4096, 1),
     headers: Type.Optional(Type.Record(Header, clean(8192), strict)), secretHeaders: Type.Optional(Type.Record(Header, Variable, strict)) }, strict),
+  resourceAllow: Type.Optional(Type.Array(clean(2048, 1), { maxItems: 100, uniqueItems: true })),
   credential: Credential, access: Type.Object({ kind: Type.Literal("owner-private") }, strict),
-  tools: Type.Object({ allow: Type.Array(clean(256, 1), { maxItems: 1000, uniqueItems: true }),
+  tools: Type.Object({ readOnly: Type.Optional(Type.Array(clean(256, 1), { maxItems: 1000, uniqueItems: true })), allow: Type.Array(clean(256, 1), { maxItems: 1000, uniqueItems: true }),
     eventAllow: Type.Optional(Type.Array(clean(256, 1), { maxItems: 1000, uniqueItems: true })) }, strict), replay: Type.Literal("unsafe"),
 }, strict);
 const Config = Type.Object({ version: Type.Literal(1), enabled: Type.Boolean(), servers: Type.Array(Server, { maxItems: 64 }), limits: Type.Optional(Limits) }, strict);
 type ServerInput = Static<typeof Server>;
 export type McpServerConfig = ServerInput & { enabled: boolean; transport: ServerInput["transport"] & { headers: Record<string, string>; secretHeaders: Record<string, string> };
-  tools: { allow: string[]; eventAllow: string[] } };
+  resourceAllow: string[]; tools: { allow: string[]; eventAllow: string[]; readOnly?: string[] } };
 export type OAuthServer = McpServerConfig & { credential: Extract<ServerInput["credential"], { kind: "oauth" }> };
 export type McpConfig = { version: 1; enabled: boolean; servers: McpServerConfig[]; limits: McpLimits };
 
@@ -64,11 +65,11 @@ export function parseMcpConfig(value: unknown): McpConfig {
         || Object.keys(headers).some(n => /(?:^|[-_])(?:auth|authorization|cookie|token|key|secret)(?:$|[-_])/i.test(n))) throw new Error();
       if (server.credential.kind === "none" && Object.keys(secretHeaders).length) throw new Error();
       const eventAllow = server.tools.eventAllow ?? [];
-      if (eventAllow.some(name => !server.tools.allow.includes(name))) throw new Error();
+      if ([...eventAllow, ...server.tools.readOnly ?? []].some(name => !server.tools.allow.includes(name))) throw new Error();
       if (server.credential.kind === "oauth") {
         if (httpsUrl(server.credential.clientMetadataUrl).pathname === "/" || names.includes("authorization")) throw new Error();
       }
-      return { ...server, enabled: server.enabled ?? true, transport: { ...server.transport, headers, secretHeaders }, tools: { allow: server.tools.allow, eventAllow } };
+      return { ...server, enabled: server.enabled ?? true, transport: { ...server.transport, headers, secretHeaders }, resourceAllow: server.resourceAllow ?? [], tools: { allow: server.tools.allow, eventAllow, readOnly: server.tools.readOnly ?? eventAllow } };
     });
     return { ...value, servers, limits: { ...DEFAULT_MCP_LIMITS, ...value.limits } };
   } catch { throw new Error("mcp_config_invalid"); }

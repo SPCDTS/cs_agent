@@ -13,7 +13,8 @@ import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
 import { memoryDescriptions, memoryParameters } from "../memory/contracts";
 import { formatBeijingTime } from "../memory/time";
 import { PI_SAFETY_RULE, WEB_RULE } from "../prompt";
-import { RETENTION_MS, subagentName, type SubagentEntry, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
+import { createSubagentCapabilityHost, installDelegatedCapabilities } from "../mcp/delegated";
+import { DEFAULT_TIMEOUT_MS, MAX_MODEL_CALLS, RETENTION_MS, subagentName, type SubagentEntry, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
 
 const context = BACKGROUND_CONTEXT;
 // 有未完成的工作时定期自唤醒：驱逐后由 alarm 重新打开 Harness 续跑，并补送没送到父线程的汇报。
@@ -241,10 +242,21 @@ export class SubagentDO extends DurableObject<Env> {
   private async openRuntime(): Promise<Runtime> {
     const meta = await this.meta();
     if (!meta) throw new Error("subagent_missing");
-    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main"))), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" });
+    const baseModels = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main"))), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" });
+    let modelCalls = Number((await this.database.get<{ value: string }>("SELECT value FROM meta WHERE key = 'model_calls'"))?.value ?? 0);
+    const models = new Proxy(baseModels, { get: (target, key) => {
+      const value: unknown = Reflect.get(target, key, target);
+      if (["stream", "streamSimple", "complete", "completeSimple"].includes(String(key)) && typeof value === "function") return (...args: unknown[]) => {
+        if (modelCalls >= MAX_MODEL_CALLS || Date.now() - meta.createdAt > DEFAULT_TIMEOUT_MS) throw new Error("subagent_budget_exhausted");
+        modelCalls++;
+        this.ctx.waitUntil(this.database.run("INSERT INTO meta(key,value) VALUES ('model_calls',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", String(modelCalls)));
+        return Reflect.apply(value, target, args);
+      };
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
     const parent = () => this.env.THREAD.getByName(meta.parent);
     const registry = createRegistry();
-    // 子会话只有网页读取与上下文检索工具，不能发消息、写记忆或调用 MCP。
+    // 子会话保留只读检索；下面按派出快照安装技能、独立coding与MCP代理，仍无发送或管理工具。
     registry.install(defineExtension({
       name: "cs-subagent",
       sections: [
@@ -265,12 +277,13 @@ export class SubagentDO extends DurableObject<Env> {
           } }),
       ].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
+    const delegated = installDelegatedCapabilities(registry, createSubagentCapabilityHost(parent()), meta.id, meta.capabilities ?? {});
     // 与 ThreadDO 相同：DO 里的连接跨不了请求，Codex 固定走 SSE。
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
     const root = await harness.root(context, { agent: modelChange(meta.model) });
     harness.resume();
-    void harness.closed.then(() => { this.runtime = undefined; });
+    void harness.closed.then(() => { this.runtime = undefined; void delegated.close(); });
     return { harness, root };
   }
 }

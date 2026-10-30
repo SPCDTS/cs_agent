@@ -54,9 +54,9 @@ describe("MCP static config and strict schema", () => {
     const changed = makeCatalog(server, [{ ...sampleTools[0], inputSchema: { type: "object", properties: { query: { type: "number" } } } }], DEFAULT_MCP_LIMITS);
     expect(toolNames(changed.revision, changed.revision.tools[0]).nativeName).not.toBe(name);
   });
-  it("joins text, omits images, bounds 8000 characters and preserves result errors and output validation", () => {
+  it("joins text, preserves bounded images, bounds 8000 characters and preserves result errors and output validation", () => {
     const result = convertMcpResult({ content: [{ type: "text", text: "one" }, { type: "text", text: "two" }, { type: "image", mimeType: "image/png", data: "aW1hZ2U=" }] }, undefined, DEFAULT_MCP_LIMITS);
-    expect(result.output).toEqual([{ type: "text", text: "one\ntwo\n[MCP 图片已省略：P1c 只传递文本]" }]);
+    expect(result.output).toEqual([{ type: "text", text: "one\ntwo" }, { type: "image", data: "aW1hZ2U=", mimeType: "image/png" }]);
     const large = convertMcpResult({ content: [{ type: "text", text: "中".repeat(9000) }], isError: true }, undefined, DEFAULT_MCP_LIMITS);
     expect(large.isError).toBe(true);
     expect(large.output?.[0]).toMatchObject({ type: "text", text: expect.stringContaining("截断") });

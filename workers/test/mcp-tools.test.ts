@@ -57,7 +57,7 @@ describe("MCP in pi-durable and inline QuickJS", () => {
     expect(seen.offers).toContain("codemode"); expect(seen.offers.some(n => n.startsWith("mcp_"))).toBe(false);
     expect(seen.sections.join("\n")).toContain("notion"); expect(seen.sections.join("\n")).toContain(name);
     expect(seen.sections.join("\n")).not.toContain("mem_remember");
-    expect(seen.outputs[1]).toContain("service-result:"); expect(seen.outputs[1]).toContain("图片已省略");
+    expect(seen.outputs[1]).toContain("service-result:"); expect(seen.outputs[1]).not.toContain("图片已省略");
     expect(result.catalog).toHaveLength(2);
     const calls = result.events.filter(e => e.kind === "mcp_call"); expect(calls).toHaveLength(1);
     expect(JSON.parse(String(calls[0].detail))).toMatchObject({ server: "notion", tool: name, result: "ok", ms: expect.any(Number), inputBytes: expect.any(Number), outputBytes: expect.any(Number) });

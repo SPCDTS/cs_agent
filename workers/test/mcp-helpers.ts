@@ -20,6 +20,8 @@ const Rpc = Type.Object({ id: Type.Optional(Type.Union([Type.Number(), Type.Stri
 export function fakeRemote() {
   const requests: { url: string; method: string; body: string; headers: Headers; redirect: string }[] = [];
   const state = {
+    resources: [{ uri: "notion://docs/start", name: "起步资料" }, { uri: "notion://private/hidden", name: "未授权" }],
+    templates: [{ uriTemplate: "notion://docs/{page}", name: "文档" }], resourceReads: 0,
     tools: structuredClone(sampleTools), refreshes: 0, calls: 0, initializations: 0, pages: 0,
     tokenStatus: 200, tokenError: "invalid_grant", expires: 3600, cimd: true,
     tokenEndpoint: `${issuer}/token`, resourceIssuer: issuer, failCalls: false, failPage: false,
@@ -48,12 +50,15 @@ export function fakeRemote() {
       if (!Check(Rpc, rpc)) throw new Error("bad_test_rpc");
       if (rpc.id === undefined) return new Response(null, { status: 202 });
       let result: unknown;
-      if (rpc.method === "initialize") { state.initializations++; result = { protocolVersion: rpc.params?.protocolVersion, capabilities: { tools: { listChanged: true } }, serverInfo: { name: "fixture", version: "1" } }; }
+      if (rpc.method === "initialize") { state.initializations++; result = { protocolVersion: rpc.params?.protocolVersion, capabilities: { tools: { listChanged: true }, resources: {} }, serverInfo: { name: "fixture", version: "1" } }; }
       else if (rpc.method === "tools/list") {
         state.pages++;
         if (state.failPage && rpc.params?.cursor) return new Response("synthetic-private-body", { status: 500 });
         result = rpc.params?.cursor ? { tools: state.tools.slice(2) } : { tools: state.tools.slice(0, 2), nextCursor: "page2" };
-      } else if (rpc.method === "tools/call") {
+      } else if (rpc.method === "resources/list") result = { resources: state.resources };
+      else if (rpc.method === "resources/templates/list") result = { resourceTemplates: state.templates };
+      else if (rpc.method === "resources/read") { state.resourceReads++; result = { contents: [{ uri: rpc.params?.uri, mimeType: "text/plain", text: "合成文档正文" }] }; }
+      else if (rpc.method === "tools/call") {
         state.calls++;
         await state.beforeCall?.();
         if (state.failCalls) throw new Error("synthetic-network-detail");

@@ -1,3 +1,4 @@
+import type { McpCapabilitySnapshot } from "../mcp/access";
 import type { ModelSelection } from "../settings";
 import type { TurnKind } from "../policy";
 
@@ -10,18 +11,20 @@ export type SubagentStatus = "running" | "done" | "failed" | "cancelled";
 export type ParentSubagentStatus = SubagentStatus | "timeout";
 /** 子 DO 的状态与单调版本；父线程只采纳更新的版本，所以消息、汇报与取消的 RPC 无论先后到达都收敛到同一状态。 */
 export type SubagentState = { status: SubagentStatus; version: number };
+export type SubagentCapabilities = { mcp?: McpCapabilitySnapshot; coding?: boolean };
 export type SubagentMeta = {
   parent: string; id: string; task: string; createdAt: number; identity: SubagentIdentity; model: ModelSelection;
-  status: SubagentStatus; endedAt?: number; reportCount: number; version: number;
+  capabilities?: SubagentCapabilities; status: SubagentStatus; endedAt?: number; reportCount: number; version: number;
 };
-export type SubagentStart = Pick<SubagentMeta, "parent" | "id" | "task" | "identity" | "model">;
+export type SubagentStart = Pick<SubagentMeta, "parent" | "id" | "task" | "identity" | "model" | "capabilities">;
 export type SubagentReport = {
   subagentId: string; requestId: string; text: string; identity: SubagentIdentity; outcome: "done" | "failed"; state: SubagentState;
 };
 export type SubagentEntry = { id: number; kind: string; role?: string; text: string };
 
-export const MAX_RUNNING = 3;
-export const DEFAULT_TIMEOUT_MS = 30 * 60_000;
+export const MAX_RUNNING = 1;
+export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+export const MAX_MODEL_CALLS = 24;
 export const MIN_TIMEOUT_MS = 1000;
 export const MAX_TIMEOUT_MS = 6 * 3600_000;
 export const RETENTION_MS = 14 * 86400_000;

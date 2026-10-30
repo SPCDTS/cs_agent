@@ -1,21 +1,56 @@
 {
   "version": 1,
   "enabled": true,
-  "servers": [{
-    "id": "notion",
-    "enabled": true,
-    "transport": { "kind": "streamable-http", "url": "https://mcp.notion.com/mcp" },
-    "credential": {
-      "kind": "oauth",
-      "accountId": "owner-notion",
-      "revision": "1",
-      "registration": "cimd",
-      "clientMetadataUrl": "https://agent.spcdts.dev/oauth/client-metadata.json",
-      "scope": "default"
-    },
-    "access": { "kind": "owner-private" },
-    "tools": { "allow": ["notion-search", "notion-fetch", "notion-get-self", "notion-get-users", "notion-get-comments", "notion-query-data-sources", "notion-list-recent-pages", "notion-create-pages", "notion-update-page", "notion-create-comment"],
-      "eventAllow": ["notion-search", "notion-fetch"] },
-    "replay": "unsafe"
-  }]
+  "servers": [
+    {
+      "id": "notion",
+      "enabled": true,
+      "transport": {
+        "kind": "streamable-http",
+        "url": "https://mcp.notion.com/mcp"
+      },
+      "credential": {
+        "kind": "oauth",
+        "accountId": "owner-notion",
+        "revision": "1",
+        "registration": "cimd",
+        "clientMetadataUrl": "https://agent.spcdts.dev/oauth/client-metadata.json",
+        "scope": "default"
+      },
+      "access": {
+        "kind": "owner-private"
+      },
+      "tools": {
+        "allow": [
+          "notion-search",
+          "notion-fetch",
+          "notion-get-self",
+          "notion-get-users",
+          "notion-get-comments",
+          "notion-query-data-sources",
+          "notion-list-recent-pages",
+          "notion-create-pages",
+          "notion-update-page",
+          "notion-create-comment"
+        ],
+        "eventAllow": [
+          "notion-search",
+          "notion-fetch"
+        ],
+        "readOnly": [
+          "notion-search",
+          "notion-fetch",
+          "notion-get-self",
+          "notion-get-users",
+          "notion-get-comments",
+          "notion-query-data-sources",
+          "notion-list-recent-pages"
+        ]
+      },
+      "replay": "unsafe",
+      "resourceAllow": [
+        "notion://docs/"
+      ]
+    }
+  ]
 }

@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { CallToolResultSchema, ListToolsResultSchema, ToolListChangedNotificationSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema, ListToolsResultSchema, ListResourcesResultSchema, ListResourceTemplatesResultSchema, ReadResourceResultSchema, type Resource, type ResourceTemplate, ToolListChangedNotificationSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Env } from "../env";
 import { referencedSecret, type McpLimits, type McpServerConfig } from "./config";
 import { boundedFetch, McpConnectionError } from "./transport-http";
@@ -40,7 +40,7 @@ export class McpConnection {
     try {
       await connection.client.connect(connection.transport, { signal, timeout: limits.connectMs, maxTotalTimeout: limits.connectMs });
       signal.throwIfAborted();
-      if (!connection.client.getServerCapabilities()?.tools) throw new McpConnectionError("protocol_error", "protocol_error");
+      if (!connection.client.getServerCapabilities()?.tools && !connection.client.getServerCapabilities()?.resources) throw new McpConnectionError("protocol_error", "protocol_error");
       return connection;
     } catch (error) { await connection.close(); throw connection.failure ?? safeError(error); }
   }
@@ -61,6 +61,40 @@ export class McpConnection {
       cursors.add(result.nextCursor); cursor = result.nextCursor;
     }
     throw new McpConnectionError("catalog_limit", "catalog_limit");
+  }
+  async listResources(signal: AbortSignal): Promise<Resource[]> {
+    if (!this.client.getServerCapabilities()?.resources) return [];
+    const rows: Resource[] = [], cursors = new Set<string>();
+    let cursor: string | undefined, bytes = 0;
+    for (let page = 0; page < this.limits.maxPages; page++) {
+      const result = await this.client.request({ method: "resources/list", params: cursor === undefined ? {} : { cursor } }, ListResourcesResultSchema,
+        { signal, timeout: this.limits.connectMs, maxTotalTimeout: this.limits.connectMs });
+      bytes += Buffer.byteLength(JSON.stringify(result)); rows.push(...result.resources);
+      if (bytes > this.limits.catalogBytes || rows.length > this.limits.maxTools) throw new McpConnectionError("catalog_limit", "catalog_limit");
+      if (!result.nextCursor) return rows;
+      if (cursors.has(result.nextCursor)) throw new McpConnectionError("protocol_error", "protocol_error");
+      cursors.add(result.nextCursor); cursor = result.nextCursor;
+    }
+    throw new McpConnectionError("catalog_limit", "catalog_limit");
+  }
+  async listResourceTemplates(signal: AbortSignal): Promise<ResourceTemplate[]> {
+    if (!this.client.getServerCapabilities()?.resources) return [];
+    const rows: ResourceTemplate[] = [], cursors = new Set<string>();
+    let cursor: string | undefined, bytes = 0;
+    for (let page = 0; page < this.limits.maxPages; page++) {
+      const result = await this.client.request({ method: "resources/templates/list", params: cursor === undefined ? {} : { cursor } }, ListResourceTemplatesResultSchema,
+        { signal, timeout: this.limits.connectMs, maxTotalTimeout: this.limits.connectMs });
+      bytes += Buffer.byteLength(JSON.stringify(result)); rows.push(...result.resourceTemplates);
+      if (bytes > this.limits.catalogBytes || rows.length > this.limits.maxTools) throw new McpConnectionError("catalog_limit", "catalog_limit");
+      if (!result.nextCursor) return rows;
+      if (cursors.has(result.nextCursor)) throw new McpConnectionError("protocol_error", "protocol_error");
+      cursors.add(result.nextCursor); cursor = result.nextCursor;
+    }
+    throw new McpConnectionError("catalog_limit", "catalog_limit");
+  }
+  async readResource(uri: string, signal: AbortSignal) {
+    return this.client.request({ method: "resources/read", params: { uri } }, ReadResourceResultSchema,
+      { signal, timeout: this.limits.callMs, maxTotalTimeout: this.limits.callMs, resetTimeoutOnProgress: false });
   }
   async callTool(name: string, args: Record<string, unknown>, signal: AbortSignal) {
     if (this.closing || this.failure) throw this.failure ?? new McpConnectionError("closed", "closed");
