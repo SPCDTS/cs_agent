@@ -1,3 +1,4 @@
+import { SESSION_HTML, SESSION_APP_JS } from "./sessions";
 import { CONSOLE_CSS, CONSOLE_NAV, CONSOLE_HTML, CONSOLE_APP_JS } from "./console";
 // 页面与脚本分开发送：脚本走 script-src 'self'，CSP 不必放开内联脚本。两者都不含数据，数据只经带 Bearer 的接口取得。
 export const ADMIN_PAGE_HTML = `<!doctype html>
@@ -294,6 +295,7 @@ ${CONSOLE_HTML}
     </div>
   </section>
 </div>
+${SESSION_HTML}
 </main>
 </div>
 <script src="/admin/app.js" defer></script>
@@ -309,6 +311,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   const LOGIN = { ok: ["已登录", "ok"], needed: ["需要登录", "warn"], error: ["凭据错误", "bad"], unconfigured: ["未配置", "neutral"] };
   const CREDENTIAL = { oauth: "OAuth（CIMD）", static: "静态凭据", none: "无凭据" };
   const ERRORS = {
+    busy: "会话正在运行或压缩，请先停止或等待完成后重试",
+    invalid_cursor: "历史分页标记已失效，请重新打开历史",
     conflict: "数据已被别处修改，已载入最新值，请确认后再保存",
     invalid_request: "请求格式不正确",
     invalid_json: "请求格式不正确",
@@ -1100,6 +1104,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   $("mcp-link-copy").addEventListener("click", () => { navigator.clipboard.writeText($("mcp-link-url").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
 
   ${CONSOLE_APP_JS}
+  ${SESSION_APP_JS}
 
   renderKinds();
   if (readToken()) start(); else showLogin("");

@@ -1,3 +1,4 @@
+import { createMemoryAdminRoutes } from "./memory-routes";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { authenticated } from "../auth";
@@ -27,7 +28,7 @@ export type AdminRoute = {
 const API_HEADERS = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" };
 const CSP = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const THREAD_KEY = `owner|group:${QQ_ID}|private:${QQ_ID}`;
-const MEMORY_NS = new RegExp(`^(owner|group:${QQ_ID})$`);
+const MEMORY_NS = new RegExp(`^(owner|(?:group|private):${QQ_ID})$`);
 const SERVER = "[A-Za-z][A-Za-z0-9_-]{0,63}";
 const SOURCE = "[A-Za-z][A-Za-z0-9_:-]{0,63}";
 const SKILL = "[^/]{1,128}";
@@ -101,6 +102,23 @@ async function knownThread(env: Env, key: string) {
 const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY"] as const;
 
 export const ADMIN_ROUTES: AdminRoute[] = [
+  ...createMemoryAdminRoutes((ctx, ns) => ctx.env.THREAD.getByName(ns)),
+
+  { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/history$"), handle: async ({ env, params, url }) => {
+    try { return json(await (await knownThread(env, params.key!)).sessionHistory(params.key!, url.searchParams.get("cursor") ?? undefined)); }
+    catch (error) { if (error instanceof Error && error.message.includes("invalid_cursor")) throw new HttpError(400, "invalid_cursor"); throw error; }
+  } },
+  { method: "POST", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/reset$"), handle: async ({ env, params, request }) => {
+    const value = await body(request, Type.Object({ requestId: Type.String({ format: "uuid" }), label: Type.String({ maxLength: 200 }) }, strict));
+    const result = await (await knownThread(env, params.key!)).resetSession(params.key!, value.requestId, value.label);
+    return json(result, "error" in result ? 409 : 200);
+  } },
+  { method: "POST", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/compact$"), handle: async ({ env, params, request }) => {
+    const value = await body(request, Type.Object({ instructions: Type.Optional(Type.String({ maxLength: 2000 })) }, strict));
+    const result = await (await knownThread(env, params.key!)).compactSession(params.key!, value.instructions);
+    return json(result, "error" in result ? 409 : 202);
+  } },
+
   { method: "GET", path: "/admin", public: true, handle: async () => new Response(null, { status: 308, headers: { ...API_HEADERS, Location: "/admin/" } }) },
   { method: "GET", path: "/admin/", public: true,
     handle: async () => new Response(ADMIN_PAGE_HTML, { headers: { ...API_HEADERS, "Content-Security-Policy": CSP, "Content-Type": "text/html; charset=utf-8" } }) },

@@ -1,4 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
+import { historyCursor, historyEntry, readHistoryCursor } from "./sessions";
+import { MemoryManager, type MemoryListQuery, type ProfileProposal } from "./memory/management";
+import { importMemoryHistory } from "./memory/history-import";
+import { runConsolidate } from "./maintenance/consolidate";
+import { generateProfileProposal } from "./maintenance/profile-proposal";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { Type, type Static } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type Registry, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
@@ -45,7 +50,7 @@ const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "�
 type InboundRow = {
   message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number;
   status: "queued" | "done" | "failed"; chat_kind: "private" | "group"; chat_id: string; nickname: string;
-  reply_channel: "qq" | "web"; scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null; kind: TurnKind;
+  session_generation: number; reply_channel: "qq" | "web"; scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null; kind: TurnKind;
 };
 // 模型可见工具按会话配置生效，只能在会话空闲时切换；不同档位的输入永远不会进入同一个 run。定时输入归 chat 档。
 type ToolProfile = "chat" | "event" | "web";
@@ -89,6 +94,9 @@ export class ThreadDO extends DurableObject<Env> {
         ${MEMORY_SCHEMA}
         ${MCP_CATALOG_SCHEMA}
         ${SUBAGENT_SCHEMA}
+        CREATE TABLE IF NOT EXISTS session_state (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL);
+        INSERT OR IGNORE INTO session_state VALUES (1,0);
+        CREATE TABLE IF NOT EXISTS session_resets (request_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, label TEXT NOT NULL, at INTEGER NOT NULL, status TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS web_outputs (id TEXT PRIMARY KEY, input_id TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL);
       `);
       // 已部署的 P0 表与 submission.requestId 必须保留，新增列用默认值兼容旧回合恢复。
@@ -97,7 +105,7 @@ export class ThreadDO extends DurableObject<Env> {
         chat_kind: "TEXT NOT NULL DEFAULT 'private'", chat_id: "TEXT NOT NULL DEFAULT ''",
         nickname: "TEXT NOT NULL DEFAULT ''", self_id: "TEXT NOT NULL DEFAULT ''",
         scope_name: "TEXT NOT NULL DEFAULT ''", platform_message_id: "TEXT NOT NULL DEFAULT ''", when_busy: "TEXT", turn_id: "TEXT",
-        kind: "TEXT NOT NULL DEFAULT 'message'", reply_channel: "TEXT NOT NULL DEFAULT 'qq'",
+        session_generation: "INTEGER NOT NULL DEFAULT 0", kind: "TEXT NOT NULL DEFAULT 'message'", reply_channel: "TEXT NOT NULL DEFAULT 'qq'",
       })) if (!columns.some(column => column.name === name)) await tx.exec(`ALTER TABLE inbound ADD COLUMN ${name} ${definition}`);
       const outboxColumns = await tx.all<{ name: string }>("PRAGMA table_info(outbox)");
       if (!outboxColumns.some(column => column.name === "turn_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN turn_id TEXT");
@@ -106,6 +114,9 @@ export class ThreadDO extends DurableObject<Env> {
       await tx.exec("CREATE INDEX IF NOT EXISTS inbound_turn ON inbound(turn_id); CREATE INDEX IF NOT EXISTS outbox_turn ON outbox(turn_id)");
       await tx.run("UPDATE inbound SET chat_id = user_id WHERE chat_id = ''");
       await tx.run("UPDATE inbound SET platform_message_id = message_id WHERE platform_message_id = ''");
+    }).then(async () => {
+      const ns = await this.namespace();
+      if (ns) await new MemoryManager(new MemoryStore(this.database, ns)).recoverInterruptedJobs();
     });
   }
 
@@ -240,6 +251,7 @@ export class ThreadDO extends DurableObject<Env> {
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
     const root = await harness.root(context, { agent: modelChange(selection) });
     await root.configure(modelChange(selection), context);
+    await this.recoverSessionReset(root);
     const runtime: Runtime = { harness, root, registry, selection, profile: "chat", mcp };
     await this.applyProfile(runtime, await this.ctx.storage.get<ToolProfile>("tool_profile") ?? "chat");
     // 已被 Pi 接收过的输入按 requestId 幂等重交；尚未接收的由 pump 按工具档位继续接纳。
@@ -411,12 +423,17 @@ export class ThreadDO extends DurableObject<Env> {
     return this.serial(async () => {
       await this.ingest(input);
       const kind: TurnKind = input.kind ?? "message";
+      if (kind === "subagent") {
+        const id = /^subagent-report:([0-9a-f-]{36}):/.exec(input.messageId)?.[1];
+        const source = id && await this.database.get<{ generation: number | null; status: string }>("SELECT json_extract(origin_json, '$.generation') AS generation,status FROM subagents WHERE id=?", id);
+        if (!source || source.status === "cancelled" || source.status === "timeout" || (source.generation ?? 0) !== await this.sessionGeneration()) return;
+      }
       // 事件与子 agent 汇报的入站键由投递方生成（来源与外部 id、子 agent 与请求），旧版无 self_id 的兼容判断不适用。
       const key = kind === "event" || kind === "subagent" ? input.messageId : inboundKey(input);
       if (kind !== "event" && kind !== "subagent" && await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND self_id = '' AND user_id = ?", input.messageId, input.userId)) return;
       const inserted = await this.database.get<InboundRow>(`INSERT OR IGNORE INTO inbound
-        (message_id, platform_message_id, user_id, self_id, text, received_at, status, chat_kind, chat_id, nickname, scope_name, kind, reply_channel)
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?) RETURNING *`, key, input.messageId, input.userId, input.selfId, input.text, input.time,
+        (message_id, platform_message_id, user_id, self_id, text, received_at, status, chat_kind, chat_id, nickname, scope_name, kind, reply_channel, session_generation)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, (SELECT generation FROM session_state WHERE id=1)) RETURNING *`, key, input.messageId, input.userId, input.selfId, input.text, input.time,
         input.target.kind, input.target.kind === "group" ? input.target.groupId : input.target.userId, input.nickname, input.scopeName ?? "", kind, input.replyChannel ?? "qq");
       if (!inserted) return;
       // 等待者必须在本串行段内登记，之后的 pump 才能把接纳结果交回调用方。
@@ -456,6 +473,8 @@ export class ThreadDO extends DurableObject<Env> {
   /** 子 agent 的汇报：作为 kind=subagent 的输入入队，归 chat 档、排在当前回合之后、不进消息库、不参与记忆抽取。 */
   async subagentReport(report: SubagentReport): Promise<"accepted" | "duplicate" | "ignored"> {
     await this.initialize();
+    const source = await this.database.get<{ generation: number | null }>("SELECT json_extract(origin_json, '$.generation') AS generation FROM subagents WHERE id=?", report.subagentId);
+    if (!source || (source.generation ?? 0) !== await this.sessionGeneration()) return "ignored";
     return this.subagents.report(report);
   }
 
@@ -495,7 +514,7 @@ export class ThreadDO extends DurableObject<Env> {
   private subagentCaller(input: InboundRow | undefined): SubagentCaller | undefined {
     if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;
     return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner: isWebAdmin(input) ? this.ctx.id.equals(this.env.THREAD.idFromName("owner")) : ownerIds(this.env).includes(input.user_id), ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
-      origin: { target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
+      origin: { generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
   }
 
   /** 让 alarm 不晚于 at：记忆抽取与子 agent 限时共用这一个 alarm。 */
@@ -572,7 +591,7 @@ export class ThreadDO extends DurableObject<Env> {
       const last = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE reply_channel='qq' AND kind='message' ORDER BY rowid DESC LIMIT 1");
       const kind = thread.startsWith("group:") ? "group" : "private";
       const chatId = thread === "owner" ? last?.chat_id ?? ownerIds(this.env)[0] ?? "web" : thread.slice(thread.indexOf(":") + 1);
-      await this.database.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel) VALUES(?,?,?,?,?,?,'queued',?,?,?,?,'message','web')",
+      await this.database.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation) VALUES(?,?,?,?,?,?,'queued',?,?,?,?,'message','web',(SELECT generation FROM session_state WHERE id=1))",
         key, requestId, "admin:web", last?.self_id ?? "", text, Date.now() / 1000, kind, chatId, "网页管理员", last?.scope_name ?? "");
       return { id: key, status: "queued" as const, duplicate: false };
     });
@@ -639,7 +658,7 @@ export class ThreadDO extends DurableObject<Env> {
     const expected = isWebAdmin(input) ? ns : owner && input.chat_kind === "private" ? "owner" : scopeOf(targetOf(input));
     if (expected !== ns || input.user_id === input.self_id) return;
     // 事件回合绑定 owner 只为读取范围；写记忆须经主人的一句话，因此不给写权限。
-    return { ns, owner: owner && input.kind !== "event", userId: input.user_id, turnId: input.turn_id, scope: scopeOf(targetOf(input)), messageId: input.platform_message_id };
+    return { ns, origin: isWeb(input) ? "web" : input.kind, owner: owner && input.kind !== "event", userId: input.user_id, turnId: input.turn_id, scope: scopeOf(targetOf(input)), messageId: input.platform_message_id };
   }
 
   // 抽取、摘要与整理都是无工具的单次补全，用当前选择的 provider；MEMORY_EXTRACT_MODEL 只换模型 id。
@@ -733,9 +752,77 @@ export class ThreadDO extends DurableObject<Env> {
     return rows.length > limit ? { events, next: events[events.length - 1].id } : { events };
   }
 
+  /** 原始不可变记录仍在 Harness 中；pi.reset 只是新的上下文起点，旧会话可分页浏览。 */
+  async sessionHistory(thread: string, cursor?: string): Promise<{ entries: ReturnType<typeof historyEntry>[]; next?: string; busy: boolean; compacting: boolean }> {
+    await this.initialize();
+    await this.bindNamespace(thread);
+    const { root, harness } = await this.open();
+    const page = await root.entries({}, 30, readHistoryCursor(cursor), context);
+    const live = await harness.snapshot(LiveDoc, root.id, context);
+    return { entries: page.items.map(historyEntry), next: historyCursor(page.next),
+      busy: !!live?.run, compacting: (live?.compactions?.length ?? 0) > 0 };
+  }
+
+  private async sessionGeneration(): Promise<number> {
+    return (await this.database.get<{ generation: number }>("SELECT generation FROM session_state WHERE id=1"))?.generation ?? 0;
+  }
+
+  /** 原生 write 的 requestId 是唯一恢复凭据；SQLite 元数据先占新代，恢复时只补同一 reset。 */
+  private async recoverSessionReset(root: Conversation): Promise<void> {
+    const pending = await this.database.all<{ request_id: string; generation: number; label: string; at: number }>(
+      "SELECT * FROM session_resets WHERE status='pending' ORDER BY generation");
+    for (const command of pending) {
+      await root.submit({ type: "write", requestId: "admin-reset:" + command.request_id,
+        entry: { kind: "pi.reset", head: "self", data: { label: command.label, at: command.at, generation: command.generation } } }, context);
+      await this.database.run("UPDATE session_resets SET status='done' WHERE request_id=?", command.request_id);
+    }
+  }
+
+  async resetSession(thread: string, requestId: string, label: string): Promise<{ status: "reset"; generation: number } | { error: "busy" | "request_conflict" }> {
+    return this.serial(async () => {
+      await this.initialize();
+      await this.bindNamespace(thread);
+      const normalized = label.trim() || "已归档会话";
+      const previous = await this.database.get<{ generation: number; label: string }>("SELECT * FROM session_resets WHERE request_id=?", requestId);
+      if (previous && previous.label !== normalized) return { error: "request_conflict" };
+      const runtime = await this.open();
+      if (previous) { await this.recoverSessionReset(runtime.root); return { status: "reset", generation: previous.generation }; }
+      if (!await this.idle(runtime) || await this.database.get("SELECT 1 FROM inbound WHERE status='queued' LIMIT 1")) return { error: "busy" };
+      const live = await runtime.harness.snapshot(LiveDoc, runtime.root.id, context);
+      if (live?.compactions?.length) return { error: "busy" };
+      const generation = await this.sessionGeneration();
+      // 先取消子任务；并发的迟到汇报会由 generation 检查拒绝。
+      await Promise.all((await this.subagents.list()).filter(item => item.status === "running").map(item => this.subagents.cancel(item.id)));
+      await this.database.transaction(async tx => {
+        await tx.run("INSERT INTO session_resets VALUES (?,?,?,?,'pending')", requestId, generation + 1, normalized, Date.now());
+        await tx.run("UPDATE session_state SET generation=? WHERE id=1", generation + 1);
+      });
+      await this.recoverSessionReset(runtime.root);
+      await this.audit("session_reset", { requestId, generation: generation + 1 });
+      return { status: "reset", generation: generation + 1 };
+    });
+  }
+
+  async compactSession(thread: string, instructions?: string): Promise<{ status: "started"; taskId: number } | { error: "busy" }> {
+    return this.serial(async () => {
+      await this.initialize();
+      await this.bindNamespace(thread);
+      const { root, harness } = await this.open();
+      const live = await harness.snapshot(LiveDoc, root.id, context);
+      if (live?.compactions?.length) return { error: "busy" as const };
+      const task = await root.compact(instructions, context);
+      this.ctx.waitUntil(harness.waitForTask(task, context).then(async result => {
+        await this.audit("session_compact", { taskId: Number(task), status: result.state.status });
+      }));
+      return { status: "started" as const, taskId: Number(task) };
+    });
+  }
+
   async stop(): Promise<{ stopped: boolean }> {
     await this.initialize();
-    if (!await this.database.get("SELECT 1 FROM inbound WHERE status = 'queued' LIMIT 1")) return { stopped: false };
+    const children = (await this.subagents.list()).filter(child => child.status === "running");
+    await Promise.all(children.map(child => this.subagents.cancel(child.id)));
+    if (!await this.database.get("SELECT 1 FROM inbound WHERE status = 'queued' LIMIT 1")) return { stopped: children.length > 0 };
     const idle = (await this.open()).root.abort(context);
     this.ctx.waitUntil(idle);
     // 中止在第一次提交时就已生效；等待 QQ 回执的发送工具要到自身超时才结束，不让管理请求一直挂着。
@@ -753,6 +840,40 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     await this.bindNamespace(ns);
     return new MemoryStore(this.database, ns);
+  }
+
+
+  async memoryList(ns: string, query: MemoryListQuery): ReturnType<MemoryManager["list"]> {
+    return new MemoryManager(await this.adminStore(ns)).list(query);
+  }
+  async memoryDetail(ns: string, id: number): ReturnType<MemoryManager["detail"]> {
+    return new MemoryManager(await this.adminStore(ns)).detail(id);
+  }
+  async restoreMemory(ns: string, id: number, options: { expectedVersion: number; versionId?: number }): ReturnType<MemoryManager["restore"]> {
+    return new MemoryManager(await this.adminStore(ns)).restore(id, options);
+  }
+  async memoryJobs(ns: string): ReturnType<MemoryManager["jobs"]> {
+    return new MemoryManager(await this.adminStore(ns)).jobs();
+  }
+  async consolidateMemory(ns: string): ReturnType<typeof runConsolidate> {
+    const store = await this.adminStore(ns);
+    return runConsolidate({ db: this.database, kv: this.ctx.storage, store,
+      complete: this.complete, config: maintenanceConfig(this.env), now: Date.now() });
+  }
+  async rollbackMemory(ns: string, batchId: string): ReturnType<MemoryManager["rollback"]> {
+    return new MemoryManager(await this.adminStore(ns)).rollback(batchId);
+  }
+  async memoryProposals(ns: string, status: ProfileProposal["status"] | "all"): ReturnType<MemoryManager["proposals"]> {
+    return new MemoryManager(await this.adminStore(ns)).proposals(status);
+  }
+  async generateMemoryProposal(ns: string): ReturnType<typeof generateProfileProposal> {
+    return generateProfileProposal(await this.adminStore(ns), this.complete);
+  }
+  async decideMemoryProposal(ns: string, id: number, decision: "accepted" | "rejected", expectedRevision: string): ReturnType<MemoryManager["decideProposal"]> {
+    return new MemoryManager(await this.adminStore(ns)).decideProposal(id, decision, expectedRevision);
+  }
+  async importMemoryHistory(ns: string, data: unknown, options: { dryRun?: boolean }): ReturnType<typeof importMemoryHistory> {
+    return importMemoryHistory(await this.adminStore(ns), data, options);
   }
 
   async memoryView(ns: string, query: string): Promise<{ profile: Profile; memories: MemoryRow[] }> {

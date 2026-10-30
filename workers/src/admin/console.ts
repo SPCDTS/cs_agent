@@ -83,7 +83,7 @@ export const CONSOLE_HTML = String.raw`
   <div class="console-head"><div><h1>会话对话</h1><p>继续 QQ 会话的上下文，在网页里接着聊。</p></div></div>
   <div class="chat-layout"><aside class="chat-threads"><h2>已有会话</h2><div id="chat-thread-list"></div></aside>
     <section class="chat-main" aria-label="对话">
-      <header class="chat-top"><div><strong id="chat-title">选择会话</strong><small>共享上下文 · 网页发言只回复网页</small></div><button id="chat-reload" class="btn compact" type="button">刷新</button></header>
+      <header class="chat-top"><div><strong id="chat-title">选择会话</strong><small>共享上下文 · 网页发言只回复网页</small></div><div class="row"><button id="chat-history" class="btn compact" type="button">历史</button><button id="chat-compact" class="btn compact" type="button">压缩</button><button id="chat-reset" class="btn compact" type="button">归档重置</button><button id="chat-reload" class="btn compact" type="button">刷新</button></div></header>
       <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-relevant="additions"></div>
       <form id="chat-form" class="chat-composer"><div id="chat-state" role="status"></div><label for="chat-input" class="small">发给当前会话</label><textarea id="chat-input" maxlength="16000" placeholder="输入消息，继续这段对话…" required></textarea>
         <div class="composer-footer"><small>Ctrl / ⌘ + Enter 发送 · 最近 100 条消息</small><button id="chat-send" class="btn primary" type="submit">发送消息</button></div>
@@ -134,6 +134,7 @@ export const CONSOLE_APP_JS = String.raw`
   }
   function resetConsole(){
     clearInterval(cs.timer);cs.timer=null;cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
+    $("session-history").close();sh.version++;
     $("request-detail").close();$("detail-body").replaceChildren();$("chat-messages").replaceChildren();
   }
   function startConsole(){

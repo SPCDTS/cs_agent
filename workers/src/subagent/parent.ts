@@ -23,7 +23,7 @@ CREATE INDEX IF NOT EXISTS subagents_deadline ON subagents(status, deadline);
 `;
 
 /** 汇报回合回到派出时的会话：目标、机器人号与群名。 */
-export type SubagentOrigin = { target: Target; selfId: string; scopeName: string; replyChannel?: "web" };
+export type SubagentOrigin = { generation?: number; target: Target; selfId: string; scopeName: string; replyChannel?: "web" };
 export type SubagentCaller = { identity: SubagentIdentity; origin: SubagentOrigin };
 export type SubagentView = {
   id: string; task: string; status: ParentSubagentStatus; createdAt: number; deadline: number;
@@ -186,7 +186,7 @@ export class ParentSubagents {
   /** 子 DO 只读 RPC 的取数范围：派出时的会话与当前确证的身份；不在本线程登记的子 agent 一律没有。 */
   async access(id: string): Promise<{ scope: string; identity: SubagentIdentity } | undefined> {
     const row = await this.row(id);
-    if (!row) return;
+    if (!row || row.status !== "running") return;
     return { scope: scopeOf((JSON.parse(row.origin_json) as SubagentOrigin).target),
       identity: confirmedIdentity(JSON.parse(row.identity_json) as SubagentIdentity, ownerIds(this.host.env)) };
   }

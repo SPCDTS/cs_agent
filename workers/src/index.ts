@@ -1,3 +1,4 @@
+import { handleMediaRequest } from "./media/routes";
 import { authenticated } from "./auth";
 import { handleAdmin } from "./admin/routes";
 import { publicOrigin } from "./mcp/config";
@@ -24,6 +25,8 @@ const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> 
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url), path = url.pathname;
+    const media = await handleMediaRequest(request, { bucket: env.ASSETS, authenticateAdmin: req => authenticated(req, env.ADMIN_TOKEN) });
+    if (media) return media;
     if (request.method === "POST" && path === "/gmail/pubsub") {
       // 未配置服务账号即视为推送未启用；Pub/Sub 要求快速确认，真正的拉取放到 waitUntil。
       const account = env.GMAIL_PUBSUB_SERVICE_ACCOUNT?.trim();

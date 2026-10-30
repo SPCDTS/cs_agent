@@ -109,7 +109,7 @@ export class MemoryManager {
     });
   }
   async recoverInterruptedJobs() {
-    await this.db.run("UPDATE memory_jobs SET status = 'interrupted', finished_at = ? WHERE ns = ? AND status = 'running'", this.now(), this.store.ns);
+    await this.db.run("UPDATE memory_jobs SET status = 'interrupted', finished_at = ? WHERE ns = ? AND status = 'running'", Date.now(), this.store.ns);
   }
   jobs(limit = 40) { return this.db.all<MemoryJob>("SELECT * FROM memory_jobs WHERE ns = ? ORDER BY started_at DESC, id DESC LIMIT ?", this.store.ns, Math.min(100, Math.max(1, limit))); }
   async proposals(status: ProfileProposal["status"] | "all" = "pending") {
