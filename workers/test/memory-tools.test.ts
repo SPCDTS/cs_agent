@@ -78,7 +78,7 @@ describe("memory tools in the real Harness", () => {
     { ns: "group:200000001", user: 10000004, group: 200000001 },
     { ns: "group:200000001", user: 10000001, group: 200000001 },
     { ns: "private:10000003", user: 10000003, group: undefined },
-  ])("offers only mem_search in $ns and cannot read owner memories", async ({ ns, user, group }) => {
+  ])("offers local memory writes in $ns and cannot read owner memories", async ({ ns, user, group }) => {
     const seen = script([{ name: "mem_search", args: { query: "专属" } }, { name: "mem_remember", args: { text: "越权写入", kind: "fact" } }]);
     await env.THREAD.getByName("owner").importMemory({ ns: "owner", memories: [{ id: 1, kind: "fact", text: "owner专属信息", author: "dashboard" }] });
     const result = await runInDurableObject(env.THREAD.getByName(ns), async (_instance, state) => {
@@ -87,11 +87,12 @@ describe("memory tools in the real Harness", () => {
       return instance.stats();
     });
     expect(seen.offers.flat().filter(name => name.startsWith("mem_"))).toEqual(expect.arrayContaining(["mem_search"]));
-    expect(seen.offers.flat()).not.toContain("mem_profile");
-    expect(seen.offers.flat()).not.toContain("mem_remember");
+    expect(seen.offers.flat()).toContain("mem_profile");
+    expect(seen.offers.flat()).toContain("mem_remember");
     expect(seen.outputs[0]).toContain("没有找到");
     expect(seen.outputs.join("\n")).not.toContain("owner专属信息");
-    expect(result.memory.active).toBe(0);
+    expect(seen.outputs[1]).toContain("已记住");
+    expect(result.memory.active).toBe(1);
   });
 
   it("rejects cross-DO subject routing and caps tool writes at twenty per turn", async () => {
