@@ -234,6 +234,13 @@ export const CONSOLE_APP_JS = String.raw`
     if(cs.pending&&typeof cs.pending.text==="string")$("chat-input").value=cs.pending.text;else cs.pending=null;
     $("chat-input").readOnly=!!cs.pending;$("chat-send").textContent=cs.pending?"重试发送":"发送消息";
   }
+  async function downloadAsset(ref){
+    try{
+      const response=await fetch("/media/assets/"+encodeURIComponent(ref.scope)+"/"+encodeURIComponent(ref.id),{headers:{Authorization:"Bearer "+readToken()},cache:"no-store",credentials:"omit",referrerPolicy:"no-referrer"});
+      if(!response.ok)throw new ApiError(response.status,{});const url=URL.createObjectURL(await response.blob()),a=document.createElement("a");
+      a.href=url;a.download=ref.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    }catch(error){fail(error);}
+  }
   async function loadChat(){
     const thread=cs.chat,version=++cs.chatVersion,epoch=cs.epoch,d=await api("GET","/admin/threads/"+encodeURIComponent(thread)+"/chat");
     if(thread!==cs.chat||version!==cs.chatVersion||epoch!==cs.epoch)return;
@@ -242,7 +249,7 @@ export const CONSOLE_APP_JS = String.raw`
     const fingerprint=JSON.stringify(d.messages);if(fingerprint===cs.fingerprint)return;cs.fingerprint=fingerprint;
     const list=$("chat-messages"),nearBottom=list.scrollHeight-list.scrollTop-list.clientHeight<100,first=!list.querySelector(".chat-message");
     list.replaceChildren(...d.messages.map(m=>el("article",{className:"chat-message "+m.role},[
-      el("div",{className:"message-meta",text:(m.role==="assistant"?"助手":m.name||"用户")+" · "+(m.source==="web"?"网页":"QQ")+" · "+bjTime(m.at)+(m.status?" · "+(statuses[m.status]||m.status):"")}),el("div",{className:"message-text",text:m.text})])));
+      el("div",{className:"message-meta",text:(m.role==="assistant"?"助手":m.name||"用户")+" · "+(m.source==="web"?"网页":"QQ")+" · "+bjTime(m.at)+(m.status?" · "+(statuses[m.status]||m.status):"")}),el("div",{className:"message-text",text:m.text}),...(m.assets||[]).map(ref=>el("button",{className:"btn",text:ref.name+" · "+bytes(ref.bytes),onclick:()=>downloadAsset(ref)}))])));
     if(!d.messages.length)list.append(el("div",{className:"empty-state"},[el("strong",{text:"从这里继续对话"}),"网页发言会进入当前会话，QQ 里的上下文仍然保留。"]));
     if(nearBottom||first)list.scrollTop=list.scrollHeight;
   }

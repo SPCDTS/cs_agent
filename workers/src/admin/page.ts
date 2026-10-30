@@ -1,3 +1,7 @@
+import { MCP_ADMIN_HTML, MCP_ADMIN_APP_JS } from "./mcp-ui";
+import { WORKSPACE_CSS, WORKSPACE_HTML, WORKSPACE_APP_JS } from "./workspace-ui";
+import { ACCESS_HTML, ACCESS_APP_JS } from "./access-ui";
+import { MEMORY_MANAGER_HTML, MEMORY_MANAGER_JS } from "./memory-ui";
 import { SESSION_HTML, SESSION_APP_JS } from "./sessions";
 import { CONSOLE_CSS, CONSOLE_NAV, CONSOLE_HTML, CONSOLE_APP_JS } from "./console";
 // 页面与脚本分开发送：脚本走 script-src 'self'，CSP 不必放开内联脚本。两者都不含数据，数据只经带 Bearer 的接口取得。
@@ -80,6 +84,7 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
   .section-head{padding:14px 16px}
 }
 ${CONSOLE_CSS}
+${WORKSPACE_CSS}
 </style>
 </head>
 <body>
@@ -273,6 +278,7 @@ ${CONSOLE_HTML}
     </div>
   </section>
 
+  ${MEMORY_MANAGER_HTML}
   <section class="card" id="skills-section">
     <div class="section-head"><h2 class="h2">技能</h2><span class="muted">存在 Registry；启用的技能只以名称与描述进入各会话提示，模型用 read_skill 读正文，改动最迟 60 秒后生效</span></div>
     <div class="scroll">
@@ -294,6 +300,9 @@ ${CONSOLE_HTML}
       <div class="note">保存按 frontmatter 的 name 新建或覆盖；覆盖时保留启用状态与已有附件。附件暂无页面入口，经 PUT /admin/skills/:name 的 files 上传。</div>
     </div>
   </section>
+${ACCESS_HTML}
+${WORKSPACE_HTML}
+${MCP_ADMIN_HTML}
 </div>
 ${SESSION_HTML}
 </main>
@@ -903,8 +912,12 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   }
 
   async function loadMemory() {
-    const view = await api("GET", "/admin/memory?ns=" + encodeURIComponent(state.memoryNs) + "&q=" + encodeURIComponent(state.memoryQuery));
-    renderMemory(view);
+    if(mm.ns!==state.memoryNs||mm.query!==state.memoryQuery){mm.page=1;mm.ns=state.memoryNs;mm.query=state.memoryQuery;}
+    const query="?ns="+encodeURIComponent(state.memoryNs), page=mm.page;
+    const [base,list]=await Promise.all([api("GET","/admin/memory"+query),api("GET","/admin/memory/list"+query+"&q="+encodeURIComponent(state.memoryQuery)+"&status="+$("mem-status").value+"&page="+page+"&limit=30")]);
+    renderMemory({...base,memories:list.items});
+    mm.total=list.total;$("mem-page").textContent="第 "+page+" 页 · 共 "+list.total+" 条";
+    $("mem-prev").disabled=page<=1;$("mem-next").disabled=page*30>=list.total;
   }
   function renderMemory(view) {
     state.memoryView = view;
@@ -925,7 +938,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         el("td", {}, [pill(row.kind, "neutral")]),
         el("td", { className: "cell-text" }, [el("div", { text: row.text }), extra.length ? el("div", { className: "muted small", text: extra.join(" · ") }) : null]),
         el("td", { className: "mono muted", text: row.author + " · " + time(row.updated_at * 1000) }),
-        el("td", {}, [row.status === "active" ? el("button", { className: "btn compact danger", type: "button", text: armed ? "确认删除" : "删除",
+        el("td", {}, [el("button",{className:"btn compact",type:"button",text:"详情",onclick:()=>memoryDetail(row.id)}), row.status === "active" ? el("button", { className: "btn compact danger", type: "button", text: armed ? "确认删除" : "删除",
           onclick: () => armed ? forget(row.id) : arm(row.id) }) : null]),
       ]));
     }
@@ -1105,6 +1118,10 @@ export const ADMIN_APP_JS = String.raw`"use strict";
 
   ${CONSOLE_APP_JS}
   ${SESSION_APP_JS}
+  ${MEMORY_MANAGER_JS}
+  ${ACCESS_APP_JS}
+  ${WORKSPACE_APP_JS}
+  ${MCP_ADMIN_APP_JS}
 
   renderKinds();
   if (readToken()) start(); else showLogin("");
