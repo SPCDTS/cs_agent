@@ -37,3 +37,10 @@ MCP 配置的 tools.readOnly 是宿主维护的只读清单，不相信远端自
 主 runtime restore 时执行一次 recoverInterrupted，将 executing 账本标记 unknown；普通管理查询或 grant 读取不会执行恢复。reviewApproval(scope,id,decision,reviewer,current) 中的 current 回调由父宿主重新核验原 actor 和当前 generation，子 agent 还须核验登记与取消状态。回复入口必须与审批保存的入口一致。审批结果默认仅在网页面板与原工具回执可见，不主动向 QQ 发通知。
 
 管理 HTTP 工厂为 createMcpAdminRoutes(resolve)，对应接口定义在 workers/src/admin/mcp-routes.ts 的 McpAdminRpc。它应安装到现有 Bearer 鉴权路由内；Thread RPC 还须核验自己实际绑定的 scope。管理审批仅提供 approve/reject，不允许改写工具或参数。
+
+
+## 管理页装配
+
+从 workers/src/admin/mcp-ui.ts 导入 MCP_ADMIN_HTML 与 MCP_ADMIN_APP_JS。把 HTML 放入管理视图，把 APP_JS 放到现有管理脚本 IIFE 的公共 helper 定义之后；它复用 api、el、readToken、show、fail、time，不新增定时器或轮询。线程列表通过“加载线程”读取 overview，授权和审批通过按钮或选择线程手动刷新。固定参数用只读文本显示，批准接口只接请求 ID 和动作。
+
+Thread 需要实现 McpAdminRpc 的 mcpAccess、mcpSetAccess、mcpApprovals、mcpReviewApproval；签名以 workers/src/admin/mcp-routes.ts 为准。创建 ThreadMcp 时必须把 namespace 放入第六参 {scope: ns}，否则无法按本线程 grant 限制可见目录。非 owner 线程没有有效工具或资源 grant 时，refreshAll 直接返回 denied，不创建远端连接；保存非空 grant 后，宿主按需 refreshAll 一次即可恢复目录。

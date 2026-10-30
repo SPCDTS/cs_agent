@@ -68,6 +68,12 @@ export class ThreadMcp {
     const results: { server: string; status: string; tools: number }[] = [];
     for (const entry of this.entries.values()) {
       try {
+        if (this.options.scope && this.options.scope !== "owner") {
+          const grant = await this.policy.grant(this.options.scope, entry.server.id);
+          if (!grant || grant.expiresAt !== null && grant.expiresAt <= Date.now() || !grant.tools.length && !grant.resourceAllow.length) {
+            results.push({ server: entry.server.id, status: "denied", tools: 0 }); continue;
+          }
+        }
         await this.queued(entry, signal, async budget => {
           if (!await allowed()) throw new Error("denied");
           await this.refresh(entry, budget);

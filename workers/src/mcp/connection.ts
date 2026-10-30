@@ -45,6 +45,7 @@ export class McpConnection {
     } catch (error) { await connection.close(); throw connection.failure ?? safeError(error); }
   }
   async listTools(signal: AbortSignal): Promise<Tool[]> {
+    if (!this.client.getServerCapabilities()?.tools) return [];
     const tools: Tool[] = [], names = new Set<string>(), cursors = new Set<string>();
     let cursor: string | undefined, bytes = 0;
     for (let page = 0; page < this.limits.maxPages; page++) {

@@ -30,6 +30,7 @@ describe("scoped MCP exact-call approval", () => {
       expect(registry.snapshot().tools().some(t => t.tool.name === name)).toBe(false);
       const grant = await mcp.setAccess(group, "notion", { tools: ["notion-create-pages"], resourceAllow: [], actors: [actor.actor], expiresAt: null }, "none", reviewer);
       expect(grant.tools).toEqual(["notion-create-pages"]);
+      await mcp.refreshAll();
       expect(registry.snapshot().tools().some(t => t.tool.name === name)).toBe(true);
       expect(JSON.stringify((await mcp.invoke(call, async () => actor)).output)).toContain("pending");
       expect(remote.state.calls).toBe(0);
