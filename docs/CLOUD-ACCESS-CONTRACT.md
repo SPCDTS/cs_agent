@@ -81,3 +81,7 @@ type OpsSettings = {
 ## 容器预算硬限
 
 `Registry.reserveContainerBudget(workspace)` 仅由 Sandbox 在冷启动前调用，返回 `{ expiresAt }`。每次固定预留 5 分钟，全项目按 UTC 日最多 120 分钟，同时最多 2 份有效预留；同 workspace 在有效期内幂等返回原到期时间。配额不返还，超额抛 `container_budget_exceeded`，并发上限抛 `container_budget_busy`。一次 KV 事务只读取/写入一个小 JSON，最多两条有效预留。容器宿主必须在 expiresAt 前关闭容器；有效预留不授权无限延长热容器运行。
+
+## 管理面板片段
+
+`admin/access-ui.ts` 导出 `ACCESS_HTML` 和 `ACCESS_APP_JS`：HTML 放在管理视图内，脚本放在现有 ADMIN_APP_JS 的 IIFE 末尾，复用 `$ / api / el / show / fail / time / ApiError`。片段首次插入不会请求数据，点击“加载 / 刷新”后读取五组数据；各列表也可单独刷新。人格和运维保存带当前 revision，409 时保留编辑内容并提示手动刷新。没有定时刷新或轮询。轻量 DOM 主流程已核对加载、人格 CAS、运维 CAS、授权与含斜线 operation ID 的查证路径；浏览器整体布局由集成后统一确认。
