@@ -71,4 +71,25 @@ CREATE TABLE IF NOT EXISTS memory_pair_checks (
   a_id INTEGER NOT NULL, b_id INTEGER NOT NULL, verdict TEXT NOT NULL, batch_id TEXT NOT NULL, at INTEGER NOT NULL,
   a_updated INTEGER NOT NULL, b_updated INTEGER NOT NULL, PRIMARY KEY (a_id, b_id)
 );
+CREATE TABLE IF NOT EXISTS memory_proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ns TEXT NOT NULL, text TEXT NOT NULL, based_on_revision TEXT NOT NULL,
+  batch_id TEXT NOT NULL, created_at INTEGER NOT NULL, entries_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','rejected')),
+  decided_at INTEGER, applied_revision TEXT
+);
+CREATE INDEX IF NOT EXISTS memory_proposals_ns ON memory_proposals(ns, status, id);
+CREATE TABLE IF NOT EXISTS memory_jobs (
+  id TEXT PRIMARY KEY, ns TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','ok','failed','interrupted')),
+  started_at INTEGER NOT NULL, finished_at INTEGER, report_json TEXT
+);
+CREATE INDEX IF NOT EXISTS memory_jobs_ns ON memory_jobs(ns, started_at);
+CREATE TABLE IF NOT EXISTS memory_imported_versions (version_id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS memory_history_map (
+  source TEXT NOT NULL, ns TEXT NOT NULL, legacy_id INTEGER NOT NULL, memory_id INTEGER NOT NULL,
+  PRIMARY KEY(source, ns, legacy_id)
+);
+CREATE TABLE IF NOT EXISTS memory_history_receipts (
+  source TEXT NOT NULL, ns TEXT NOT NULL, kind TEXT NOT NULL, legacy_id TEXT NOT NULL, digest TEXT NOT NULL,
+  imported_at INTEGER NOT NULL, PRIMARY KEY(source, ns, kind, legacy_id)
+);
 `;

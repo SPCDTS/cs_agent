@@ -5,6 +5,8 @@ import { MemoryStoreError, normalizeMemoryText, type MemoryStore } from "../memo
 import { formatBeijingTime } from "../memory/time";
 import type { MemoryRow } from "../memory/types";
 import type { MaintenanceContext } from "./index";
+import { MemoryAdminError } from "../memory/management";
+import { generateProfileProposal } from "./profile-proposal";
 
 export const CONSOLIDATE_LAST_RUN_KEY = "maint:consolidate_last_run";
 const DAY = 86400;
@@ -132,12 +134,12 @@ async function conflicts(store: MemoryStore, complete: ExtractComplete, batchId:
 }
 
 /** 去重、近似冲突、孤立、降级；每步失败只记步骤名，后续步骤照跑。 */
-export async function runConsolidate({ store, kv, complete, config, now }: MaintenanceContext) {
+async function consolidate({ store, kv, complete, config, now }: MaintenanceContext, batchId: string) {
   if (!store.ns || !await store.db.get("SELECT 1 FROM memories WHERE ns = ? LIMIT 1", store.ns)) return { kind: "consolidate" as const, status: "skipped" as const };
-  const started = Date.now(), batchId = crypto.randomUUID(), by = `consolidate:${batchId}`, nowSec = Math.floor(now / 1000);
+  const started = Date.now(), by = `consolidate:${batchId}`, nowSec = Math.floor(now / 1000);
   const report = { kind: "consolidate" as const, status: "ok" as "ok" | "failed", batchId, dedup: 0,
     conflicts: { pairs: 0, superseded: 0, coexist: 0, keep: 0, protected: 0 } as ConflictCounts, orphaned: 0, retired: 0,
-    tokens: { input: 0, output: 0 }, failed: [] as string[], ms: 0 };
+    proposal: null as string | null, tokens: { input: 0, output: 0 }, failed: [] as string[], ms: 0 };
   const step = async (name: string, run: () => Promise<void>) => {
     try { await run(); } catch { report.status = "failed"; report.failed.push(name); }
   };
@@ -175,9 +177,35 @@ export async function runConsolidate({ store, kv, complete, config, now }: Maint
     for (const row of rows) { await store.setStatus(row.id, "retired", by, "consolidate_retire"); report.retired++; }
   });
 
+  if (store.ns === "owner") await step("proposal", async () => {
+    const out = await generateProfileProposal(store, complete, batchId);
+    report.proposal = out.result;
+    report.tokens.input += out.usage?.input ?? 0;
+    report.tokens.output += out.usage?.output ?? 0;
+  });
+
   report.ms = Date.now() - started;
   const { kind: _kind, ...detail } = report;
   await store.db.run("INSERT INTO events(at, kind, detail) VALUES (?, 'memory_consolidate', ?)", Date.now(), JSON.stringify(detail));
   await kv.put(CONSOLIDATE_LAST_RUN_KEY, now);
   return report;
+}
+
+/** 手动与夜间整理共享持久作业记录；等待模型时重复请求会得到 conflict。 */
+export async function runConsolidate(context: MaintenanceContext) {
+  const { store } = context, batchId = crypto.randomUUID();
+  await store.db.transaction(async tx => {
+    if (await tx.get("SELECT 1 FROM memory_jobs WHERE ns = ? AND status = 'running' LIMIT 1", store.ns)) throw new MemoryAdminError("conflict");
+    await tx.run("INSERT INTO memory_jobs(id,ns,status,started_at) VALUES (?,?,'running',?)", batchId, store.ns, Date.now());
+  });
+  try {
+    const report = await consolidate(context, batchId);
+    await store.db.run("UPDATE memory_jobs SET status = ?, finished_at = ?, report_json = ? WHERE id = ? AND ns = ?",
+      report.status === "failed" ? "failed" : "ok", Date.now(), JSON.stringify(report), batchId, store.ns);
+    return report;
+  } catch (error) {
+    await store.db.run("UPDATE memory_jobs SET status = 'failed', finished_at = ?, report_json = ? WHERE id = ? AND ns = ?",
+      Date.now(), JSON.stringify({ error: "consolidation_failed" }), batchId, store.ns);
+    throw error;
+  }
 }

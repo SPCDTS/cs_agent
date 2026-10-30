@@ -112,7 +112,10 @@ export class MemoryStore {
     });
   }
   async relate(fromId: number, toId: number): Promise<void> {
-    await this.db.run("INSERT OR IGNORE INTO memory_links (from_id, to_id, rel, created_at) VALUES (?, ?, 'related', ?)", fromId, toId, this.now());
+    await this.db.transaction(async tx => {
+      if (!await this.get(fromId, tx) || !await this.get(toId, tx)) throw new MemoryStoreError("条目不存在");
+      await tx.run("INSERT OR IGNORE INTO memory_links (from_id, to_id, rel, created_at) VALUES (?, ?, 'related', ?)", fromId, toId, this.now());
+    });
   }
   search(q: MemoryQuery): Promise<MemoryRow[]> {
     const args: SqliteValue[] = [this.ns, q.status ?? "active"], parts = ["m.ns = ?", "m.status = ?"];
