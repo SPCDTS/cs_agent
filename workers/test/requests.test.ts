@@ -4,7 +4,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { createAssistantMessageEventStream, type AssistantMessage, type StreamOptions } from "@earendil-works/pi-ai";
 import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { captureModels } from "../src/requests/capture";
-import { snapshot } from "../src/requests/snapshot";
+import { snapshot, errorSummary } from "../src/requests/snapshot";
 import type { RequestDetail, RequestQuery } from "../src/requests/types";
 import worker from "../src/index";
 afterEach(() => reset());
@@ -45,8 +45,10 @@ describe("request observability", () => {
     let reported = false;
     const make = (_m: unknown, _c: unknown, options?: StreamOptions) => {
       const stream = createAssistantMessageEventStream();
-      const message: AssistantMessage = fauxAssistantMessage("", { stopReason: "error", errorMessage: "upstream unavailable" });
+      const message: AssistantMessage = fauxAssistantMessage("", { stopReason: "error",
+        errorMessage: "<html><head><style>" + ".hidden{display:none}".repeat(100) + "</style></head><body><h1>Request blocked</h1><p>Contact support.</p></body></html>" });
       void (async () => {
+        await options?.onResponse?.({ status: 403, headers: { "content-type": "text/html", "set-cookie": "never-store-cookie" } }, faux.models[0]);
         if (reported) await options?.onProviderStreamEvent?.({ usage: { prompt_tokens: 0, completion_tokens: 0 } }, faux.models[0]);
         stream.push({ type: "error", reason: "error", error: message });
       })();
@@ -55,11 +57,19 @@ describe("request observability", () => {
     base.setProvider({ ...faux.provider, stream: make, streamSimple: make });
     const pending: Promise<unknown>[] = [];
     const models = captureModels(base, env, { waitUntil: p => { pending.push(p); } }, { thread: "owner", actor: "thread", purpose: "background" });
-    await models.complete(faux.models[0], { messages: [] }); await Promise.all(pending);
+    const statuses: number[] = [];
+    await models.complete(faux.models[0], { messages: [] }, { onResponse: value => { statuses.push(value.status); } }); await Promise.all(pending);
     reported = true; await models.completeSimple(faux.models[0], { messages: [] }); await Promise.all(pending);
     const rows = (await env.REQUESTS.getByName("main").list(query())).requests;
     expect(rows.map(r => r.inputTokens)).toEqual([0, null]);
     expect(rows.every(r => r.status === "error")).toBe(true);
+    expect(rows.map(r => r.error)).toEqual(["HTTP 403 · Request blocked\nContact support.", "HTTP 403 · Request blocked\nContact support."]);
+    expect(statuses).toEqual([403]);
+    expect(JSON.stringify(rows)).not.toContain("never-store-cookie");
+  });
+  it("keeps ordinary errors readable and redacts credentials before formatting", () => {
+    expect(errorSummary("invalid model", 400)).toBe("HTTP 400 · invalid model");
+    expect(errorSummary("Authorization: Bearer never-store-this", 401)).toBe("HTTP 401 · [含凭据的内容已隐藏]");
   });
   it("deduplicates terminal writes, pages without overlap, filters and ages details independently", async () => {
     const store = env.REQUESTS.getByName("main"), a = detail(crypto.randomUUID()), b = detail(crypto.randomUUID());

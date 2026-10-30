@@ -1,6 +1,7 @@
 import type { Context, Message, AssistantMessage } from "@earendil-works/pi-ai";
 import { normalizeContext, getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { containsSecret } from "../memory/secrets";
+import { htmlToText } from "../tools/web-page";
 
 export type TextPart = { text: string; chars: number; truncated: boolean };
 export type ContextSnapshot = {
@@ -10,6 +11,11 @@ export type ContextSnapshot = {
 };
 // 不保存认证选项或二进制；含凭据的文本整块隐藏，正文总量另有上限。
 export function safeText(text: string): string { return containsSecret(text) ? "[含凭据的内容已隐藏]" : text; }
+export function errorSummary(message: string, status?: number): string {
+  const clean = safeText(message);
+  const text = /<(?:!doctype\s+html|html)\b/i.test(clean) ? htmlToText(clean).text : clean;
+  return [status === undefined ? "" : `HTTP ${status}`, text || "上游返回空错误"].filter(Boolean).join(" · ").slice(0, 1000);
+}
 function textOf(message: Message): string {
   if (typeof message.content === "string") return message.content;
   return message.content.map(block => {

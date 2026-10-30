@@ -39,6 +39,8 @@
 - Codex 固定走 SSE：Harness 的 stream 设置与 `directComplete` 都传 `transport: "sse"`。pi-ai 默认先试 WebSocket 并按会话缓存连接，DO 里的连接跨不了请求。
 - secrets：`DEEPSEEK_API_KEY` 由 `scripts/put-secrets.sh` 从仓库根 `.env` 的 `DEEPSEEK_APIKEY` 读取，为空就跳过并提示；ChatGPT 登录不经 secrets，只依赖已有的 `OAUTH_STORE_KEY`，换这个密钥会使已存的 ChatGPT 凭据解不开，要重新登录。
 
+模型请求失败时，请求统计保留上游 HTTP 状态；HTML 拒绝页先提取正文再记录，避免样式代码挤掉实际原因。已登录仅表示存在凭据，不代表推理请求一定能通过上游访问检查。
+
 ## 联网搜索与网页读取
 
 `web_search`（`src/tools/web-search.ts`）直接调用 [DeepSeek Search API](https://api-docs.deepseek.com/api/search/)，复用 `DEEPSEEK_API_KEY`，默认返回 8 条标题、日期、摘要和来源 URL，不请求全文。主会话、网页会话、定时与事件回合、子 agent 均可使用，与当前选择的对话模型无关；搜索按调用产生 DeepSeek API 费用，不依赖容器或新增后台轮询。主线程审计记录结果、耗时与条数，不记录查询词或凭据。
