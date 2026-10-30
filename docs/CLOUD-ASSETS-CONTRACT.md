@@ -56,3 +56,13 @@ SandboxDO 的容器只是 `/work` 的临时物化视图。R2 保存不可变 man
 ## 容器成本硬限
 
 每次冷启动前向Registry.reserveContainerBudget(workspace)固定预留5分钟；同workspace的有效预留幂等复用，UTC日全项目合计最多120分钟，同时最多2个预留，不退款。预算服务不可用、耗尽或并发满时拒绝启动。容器按lite规格启动，3分钟idle；5分钟硬deadline只在启动时绑定，后续工具调用不延长。Node主进程接收SANDBOX_DEADLINE_MS并到期退出，SandboxDO alarm再负责兜底destroy；平台inactivity也不超过硬deadline剩余时间。文件事实源留在R2，硬停止不删除已提交工作区。
+
+## 工作区技能发布与管理接线
+
+`createWorkspaceAdminExtension({allowed,sandbox,registry})` 注册 `skill_inspect(path,name?)` 与 `skill_publish(path,name?,workspaceRevision,expectedRevision)`。allowed只能由宿主核验owner本人私聊或owner网页入口后返回true，子agent不继承。sandbox绑定当前已授权工作区；registry只暴露skillRevision与skillPublish。inspect返回固定workspaceRevision和当前技能expectedRevision（不存在为absent），publish参数二者都必填。每次读取只取一份manifest，再按同一revision读取目录；UTF-8、路径、SKILL.md和附件大小先校验，再调用parseSkill与Registry CAS。不能把ADMIN_TOKEN放进模型参数或提示。
+
+`createWorkspaceAdminApi({authorize,current,child})` 提供list、download({path,revision})、resetRuntime、inspectChild({childId})与mergeChild({childId,expectedRevision,sourceRevision,paths})。child是受信宿主回调：先验证当前访问者是owner，再确认子任务parentThread、origin与generation属于当前会话，才返回内部sourceName和其sandbox。子工作区检查一次返回{childId,parent,source}；合并固定父expectedRevision与子sourceRevision，路径必须明确选择，未出现在子快照中的已选父文件代表删除。resetRuntime只停止容器，保留manifest和文件。
+
+Thread建议提供workspaceFiles、workspaceReadBlob({path,revision})、workspaceResetRuntime、workspaceInspectChild({childId})、workspaceMergeChild({childId,expectedRevision,sourceRevision,paths})五个已验证宿主RPC，映射到上述API。HTTP侧使用workspaceRoutes({forThread})，挂在统一handleAdmin鉴权之后；forThread把已认证owner网页身份传给Thread，不能仅依据URL里的thread参数授予跨会话权限。
+
+管理页面拼入WORKSPACE_CSS、WORKSPACE_HTML和WORKSPACE_APP_JS；APP_JS放在已有api/readToken/describe闭包里。路径为GET /admin/threads/:thread/workspace、GET .../workspace/file?path=&revision=、POST .../workspace/reset-runtime、GET .../workspace/children/:childId、POST .../workspace/merge。所有按钮都手动触发，没有轮询；下载通过Authorization请求获取blob，不把口令放URL。发布技能的inspect/publish工具使用独立宿主权限，不借用管理面板口令。
