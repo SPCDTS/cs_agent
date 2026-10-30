@@ -145,18 +145,10 @@ export class BridgeDO extends DurableObject<Env> {
   }
 
   async send(target: Target, text: string, atUserId?: string): Promise<SendReceipt> {
-    return this.deliver(target, text, { type: "text", data: { text } }, atUserId);
-  }
-
-  /** 图片按一条消息计入发送规则；base64:// 图片段由 NapCat 解码后上传。 */
-  async sendImage(target: Target, base64: string, atUserId?: string): Promise<SendReceipt> {
-    return this.deliver(target, "[图片]", { type: "image", data: { file: `base64://${base64}` } }, atUserId);
-  }
-
-  private async deliver(target: Target, ruleText: string, segment: object, atUserId?: string): Promise<SendReceipt> {
     if (!this.activeSocket()) throw channelDown();
-    const rejected = this.rules.accept(scopeOf(target), ruleText);
+    const rejected = this.rules.accept(scopeOf(target), text);
     if (rejected) throw new Error(`send_rule: ${rejected}`);
+    const segment = { type: "text", data: { text } };
     const message = target.kind === "group" && atUserId ? [{ type: "at", data: { qq: atUserId } }, segment] : [segment];
     const result = await this.call(target.kind === "private" ? "send_private_msg" : "send_group_msg",
       target.kind === "private" ? { user_id: target.userId, message } : { group_id: target.groupId, message });

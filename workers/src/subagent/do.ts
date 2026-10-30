@@ -7,8 +7,6 @@ import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@ea
 import type { Env } from "../env";
 import { modelChange, openModels } from "../models";
 import { remoteCredentials } from "../model-credentials";
-import { codexSearch } from "../search";
-import { createWebSearchTool } from "../tools/web-search";
 import { createWebPageTool } from "../tools/web-page";
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
 import { memoryDescriptions, memoryParameters } from "../memory/contracts";
@@ -245,7 +243,7 @@ export class SubagentDO extends DurableObject<Env> {
     const models = openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")));
     const parent = () => this.env.THREAD.getByName(meta.parent);
     const registry = createRegistry();
-    // 子会话只有只读与联网工具：没有 send_message、generate_image、gmail、schedule、subagent、记忆写工具与 MCP。
+    // 子会话只有网页读取与上下文检索工具，不能发消息、写记忆或调用 MCP。
     registry.install(defineExtension({
       name: "cs-subagent",
       sections: [
@@ -256,8 +254,6 @@ export class SubagentDO extends DurableObject<Env> {
         }, { tag: false }),
       ],
       tools: [
-        createWebSearchTool((query, maxResults, signal) => codexSearch(models, query, { signal, maxResults, modelId: this.env.CODEX_SEARCH_MODEL }),
-          async detail => { console.log({ event: "subagent_web_search", ...detail }); }),
         createWebPageTool(),
         defineTool({ name: "qq_context", description: QQ_CONTEXT_DESCRIPTION, parameters: QQ_CONTEXT_PARAMETERS, replay: "safe",
           execute: async options => ({ output: [{ type: "text", text: await parent().subagentContext(meta.id, options) }] }) }),

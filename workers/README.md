@@ -15,14 +15,14 @@
 | GET /admin/memory?ns=&q=、DELETE /admin/memory/:id?ns=、PUT /admin/memory/profile | 记忆列表与搜索（`#id` 按编号）、遗忘、画像 CAS；ns 只能是 owner 或 group:群号 |
 | POST /admin/mcp/:server/login-link、logout、refresh | 一次性登录链接、本地登出、刷新 owner 线程的 MCP 目录 |
 | POST /admin/send-rules/release | 解除某个 scope 的熔断 |
-| GET / PUT /admin/model | 当前模型、可选模型、ChatGPT 登录状态与 `imageGeneration`（`unknown` / `available` / `unavailable`）；PUT 带 `expectedRevision`（与设置共用），切到不可用的模型返回 400 `invalid_model` |
+| GET / PUT /admin/model | 当前模型、可选模型、ChatGPT 登录状态；PUT 带 `expectedRevision`（与设置共用），切到不可用的模型返回 400 `invalid_model` |
 | POST /admin/model/oauth/codex/start、complete、logout | ChatGPT 订阅登录：生成授权链接、提交粘贴回来的回调地址、登出 |
 | GET /admin/skills、GET / PUT / DELETE /admin/skills/:name、POST /admin/skills/:name/enable、disable | 技能目录：列表（不含正文）、读单个技能、写入（body `{ markdown, files? }`）、删除、启停 |
 | POST /admin/messages/import | 历史聊天记录导入，见“历史记录导入” |
 
 设置保存在 Registry 的 `settings` 表（一行整份覆盖值）：`groupTrigger`（`mention_or_reply` / `mention_only` / `off`）、`allowGroups`、`allowUsers`、`extractNamespaces`。没有保存过时沿用 `QQ_ALLOW_GROUPS`、`QQ_ALLOW_USERS`、`QQ_GROUP_MENTIONS`（false 对应 off，其余对应 mention_only）与 `MEMORY_EXTRACT_NAMESPACES`；保存后这四个 secrets/vars 只作默认值显示。revision 是有效内容 SHA-256 的前 16 位。`mention_or_reply` 新增“回复机器人发出的消息”也能触发，判定查本群消息库里 `is_self=1` 的消息。Bridge 在内存缓存设置，面板保存后立即重载；Thread 判定抽取命名空间时缓存 60 秒，取不到设置时本轮不抽取。owner 只来自 `QQ_OWNER`，面板不能修改。
 
-“定时任务”卡片列出 `GET /admin/schedules` 的全部任务（规则原文或一次性、北京时间的下次触发、连续失败数、最近一次运行），可暂停 / 恢复、立即运行与删除（点两次确认）。“事件来源”卡片按来源显示状态（已暂停 / 降级 / 正常）、游标、上次轮询、积压、本小时预算与 Gmail watch 到期，可暂停 / 恢复；“设置”展开后整份提交 `PUT /admin/event-sources/:source/settings`，展开期间 30 秒刷新不覆盖未保存的输入；下方列该来源最近 10 次投递。审计事件的类型 chips 之外另有“更多”下拉，含 web_search、generate_image 与 coding_*。
+“定时任务”卡片列出 `GET /admin/schedules` 的全部任务（规则原文或一次性、北京时间的下次触发、连续失败数、最近一次运行），可暂停 / 恢复、立即运行与删除（点两次确认）。“事件来源”卡片按来源显示状态（已暂停 / 降级 / 正常）、游标、上次轮询、积压、本小时预算与 Gmail watch 到期，可暂停 / 恢复；“设置”展开后整份提交 `PUT /admin/event-sources/:source/settings`，展开期间 30 秒刷新不覆盖未保存的输入；下方列该来源最近 10 次投递。审计事件的类型 chips 之外另有“更多”下拉，含 coding_*，也保留已移除的 web_search、generate_image 历史事件筛选。
 
 解除熔断把该行的 `until` 改成当前时间而不删除，它仍是计数窗口的起点，否则熔断前的 60 条会让下一条立刻再次熔断。
 
@@ -39,14 +39,11 @@
 - Codex 固定走 SSE：Harness 的 stream 设置与 `directComplete` 都传 `transport: "sse"`。pi-ai 默认先试 WebSocket 并按会话缓存连接，DO 里的连接跨不了请求。
 - secrets：`DEEPSEEK_API_KEY` 由 `scripts/put-secrets.sh` 从仓库根 `.env` 的 `DEEPSEEK_APIKEY` 读取，为空就跳过并提示；ChatGPT 登录不经 secrets，只依赖已有的 `OAUTH_STORE_KEY`，换这个密钥会使已存的 ChatGPT 凭据解不开，要重新登录。
 
-## 联网搜索、网页与图片生成
+## 网页读取
 
-ChatGPT 订阅自带的托管工具做成 Worker 工具，当前模型是 DeepSeek 时也能用。代答走一次独立的 Codex 补全（`src/codex-hosted.ts`），不经 Harness、不进会话历史；请求体在 pi-ai 的 `onPayload` 里追加托管工具，托管工具的输出项从 `onProviderStreamEvent` 的原始事件里取，因为 pi-ai 把 `web_search_call`、`image_generation_call` 静默丢掉（不报错，也不进结果）。代答模型由 var `CODEX_SEARCH_MODEL` 指定，留空时按 `models.ts` 的 `searchModel` 挑：先找 id 含 mini / nano 的，没有就取目录标价最低的（现为 `gpt-6-luna`）。推理强度固定 low。
+`web_page`（`src/tools/web-page.ts`）读取指定 URL 的页面内容，供主会话、事件回合与子 agent 使用。它直接请求网页，不调用 Codex 订阅。回答中的链接使用纯文本 URL，发送前仍会清理 Markdown 链接与 `utm_*`。
 
-- `web_search`（`src/search.ts`、`src/tools/web-search.ts`）：所有会话、所有回合都有，事件回合也有。响应里没有 `web_search_call` 输出项就当作没搜、凭记忆作答，整份结果丢弃并回 `not_searched`。结果规整为 `{ title, url, snippet }`，URL 去掉 `utm_*`。超时 60 秒。审计 `events.kind = web_search` 只记分类、耗时与结果数，不记查询。
-- `web_page`（`src/tools/web-page.ts`）：Worker 自己 fetch。只按主机名字面判断（拿不到 DNS 结果）：IP 字面量、单标签名、localhost 与 `.local` / `.internal` / `.container` 一律拒绝，每跳重定向重新校验，最多 3 跳；20 秒、4 MiB，只收 HTML、纯文本与 JSON；HTML 去掉脚本、样式、导航、页脚与 noscript 后抽正文，默认截到 8000 字。所有回合可用。
-- `generate_image`（`src/tools/generate-image.ts`）：只注册在 owner 线程，执行时再核对本回合是 owner 亲自发来的消息，定时回合拒绝，事件回合的工具档里没有它。图片取自 `image_generation_call.result`（base64 PNG），经 Bridge 的 `sendImage` 以 OneBot `base64://` 图片段发到当前会话，按一条消息计入发送规则。成功或被后端 4xx 拒绝时把结果写进 Registry，面板“模型”卡片显示“图片生成：未知 / 可用 / 不可用”。ChatGPT 订阅是否允许这个托管工具要看真实调用，探针见 `test/codex-image.probe.test.ts`（`CODEX_PROBE=1` 时从本机 Codex CLI 的 `~/.codex/auth.json` 读凭据，默认跳过）。
-- `send_message` 发出前经 `src/send-clean.ts`：Markdown 链接 `[文字](url)` 改成 `文字（url）`，所有 URL 去掉 `utm_*` 参数，其余文字不动。
+2026-10-30 移除借用 Codex 订阅的 `web_search` 与 `generate_image` 工具，以及代答模型配置和图片生成状态；ChatGPT 登录仍用于选择 Codex 作为会话模型。历史工具审计保留，可在面板继续查看。
 
 # Workers P3b：技能目录与历史记录导入
 
@@ -87,7 +84,7 @@ curl --fail-with-body -X POST "$WORKER_URL/admin/messages/import" \
 主 agent 用 `subagent` 工具把耗时或可并行的事交给子 agent。每个子 agent 是一个独立的 `SubagentDO`（绑定 `SUBAGENT`，迁移 `v8`，名字 `sub:<父线程键>:<id>`），里面跑自己的 pi-durable Harness；完成后结果作为后续输入投回父线程，唤醒主 agent 再由它对用户说。代码在 `src/subagent/`：`model.ts` 是两边共用的类型与身份合并，`do.ts` 是子 DO，`parent.ts` 是父线程的登记表与工具。
 
 - 工具：`spawn { task, timeoutMs? }` 立即返回 id；`message { id, text }` 追加消息；`list`；`cancel { id }`。只有用户亲自发消息的回合能用（owner 私聊与群都可以），定时、事件与汇报回合调用会被拒绝；事件工具档里没有它。每个父线程同时最多 3 个运行中的子 agent，第 4 个 spawn 返回拒绝文本。spawn 的 id 与 message 的请求 id 由工具调用的任务 id 哈希得出，工具重放不会重复派出或重复交代。
-- 子会话的工具只有 `web_search`、`web_page`、`qq_context`、`mem_search`。后两个经 RPC 回父线程执行：`qq_context` 只读派出时的会话，`mem_search` 读父命名空间，owner 命名空间只对确证的 owner 派出者开放。没有 `send_message`、`generate_image`、gmail、schedule、`subagent`、记忆写工具与 MCP。模型与推理强度在 spawn 时取 Registry 设置的当前值。
+- 子会话的工具只有 `web_page`、`qq_context`、`mem_search`。后两个经 RPC 回父线程执行：`qq_context` 只读派出时的会话，`mem_search` 读父命名空间，owner 命名空间只对确证的 owner 派出者开放。没有 `send_message`、gmail、schedule、`subagent`、记忆写工具与 MCP。模型与推理强度在 spawn 时取 Registry 设置的当前值。
 - 子 DO 的表：`meta`（一行 JSON：parent、id、task、createdAt、identity、model、status、endedAt、reportCount、version）与 `inbox`（request_id、text、received_at、status、answer、outcome）。输入一次只跑一条，每条各得一个回答、各汇报一次：queued → running → answered（回答落库）→ reported（父线程收下）。汇报经 `THREAD.subagentReport` 投回；送不到时停在 answered，由子 DO 每 60 秒的心跳 alarm 补送，驱逐后也由心跳重开 Harness 续跑。结束（done / failed / cancelled）满 14 天后 alarm 删除整个对象。
 - 父线程表 `subagents`：id、task、状态（running / done / failed / cancelled / timeout）、身份快照、派出会话、限时与 deadline、子 DO 版本。子 DO 每次状态变化推进 `version`，父线程只采纳更新的版本，所以 message 的返回与汇报无论谁先到都收敛。cancelled 与 timeout 是父线程的终态，之后迟到的汇报丢弃。结束 14 天后由夜间 retention 删除登记。
 - 汇报输入：`kind = "subagent"`，入站键 `subagent-report:<id>:<requestId>`（超时为 `timeout@<deadline>`），文本以 `[子 agent 完成]`、`[子 agent 失败]` 或 `[子 agent 超时]` 开头。归 chat 档、followUp 排在当前回合之后、不进消息库、不参与记忆抽取，回合的 `turn-identity` 段说明这是子 agent 的汇报与派出者。
@@ -114,7 +111,7 @@ owner 私聊里的 `read` / `write` / `edit` / `bash` 跑在 Cloudflare Containe
 - 镜像：`sandbox/Dockerfile`，`debian:bookworm-slim` 加 python3、nodejs、git、curl，由 `wrangler deploy` 构建推送（需要 Docker，本机 `--dry-run` 也要 Docker，没有时加 `--containers-rollout=none`）。没用官方 `cloudflare/sandbox` 镜像：`@cloudflare/sandbox` 1.x 只带 `sandbox-shim`，文件操作要经 SDK 的帧协议，Worker 侧就得引入这个依赖。
 - 控制服务：`sandbox/server.mjs`，监听 3000，只有 DO 能到达。`POST /exec {cmd, cwd, timeoutMs ≤ 120 s}` → `{stdout, stderr, code, timedOut, truncated}`，两路输出各留末尾 64 KiB 并在开头标出省略字节数；超时杀整个进程组；shell 退出后最多再等 1 秒，后台进程不拖住请求。`GET/PUT /file`、`POST /edit {path, edits}`（每处 oldText 必须唯一、互不重叠，与 Docker 版 edit 一致）、`GET /ls`。服务以 root 运行，命令降到 uid 1000 的 `sandbox` 用户执行，服务写出的新文件与目录交给该用户。
 - 路径：Worker 侧 `workPath`（`src/sandbox/client.ts`）先按 `/work` 词法规范化，出界就不发给容器；控制服务再按 realpath 校验，符号链接指到 `/work` 外一律 `path_denied`。
-- 工具（`src/tools/coding.ts`，扩展 `cs.coding`）：参数与说明移植 Docker 版（`edit` 同样修正模型把 edits 写成 JSON 字符串或单个对象的情况），`bash` 默认 60 秒、最长 120 秒。只注册在 owner 线程，执行时核对本回合是 owner 亲自发来的消息（与 `generate_image` 同一道门），定时回合拒绝，事件回合的工具档里没有它们。`bash` 的 `replay` 为 `unsafe`，其余 `safe`。系统提示段 `sandbox` 只在本次请求提供了 `bash` 时出现。失败按分类码回给模型（`sandbox_unavailable`、`path_denied`、`edit_not_found` 等）。
+- 工具（`src/tools/coding.ts`，扩展 `cs.coding`）：参数与说明移植 Docker 版（`edit` 同样修正模型把 edits 写成 JSON 字符串或单个对象的情况），`bash` 默认 60 秒、最长 120 秒。只注册在 owner 线程，执行时核对本回合是 owner 亲自发来的消息，定时回合拒绝，事件回合的工具档里没有它们。`bash` 的 `replay` 为 `unsafe`，其余 `safe`。系统提示段 `sandbox` 只在本次请求提供了 `bash` 时出现。失败按分类码回给模型（`sandbox_unavailable`、`path_denied`、`edit_not_found` 等）。
 - 审计：`coding_exec` 记 `{result, commandLength, code, ms}`，`coding_read` / `coding_write` / `coding_edit` 记 `{result, ms}`；不记命令、路径、文件内容与输出。
 - 工作区不保证跨容器重建保留。产物写到 `/work/out/`；发文件给主人（`send_file`）尚未实现。
 - 测试：`test/coding-tools.test.ts`（路径与协议、用假容器测 DO 的启动与不重放、工具注册与分类、面板）；控制服务用真实 Node 测：`node --test test/sandbox-server.node.mjs`（Windows 上用 Git 的 bash）。
@@ -362,7 +359,6 @@ tests 1 / pass 1 / fail 0
 | `QQ_GROUP_MENTIONS` | var，默认 `true`；设为 `false` 时群消息仍入库，但不启动回合，包括 owner |
 | `MODEL_PROVIDER` / `MODEL_ID` | 默认模型（`deepseek` / `openai-codex` 及对应 id，测试为 faux）；运行时以面板保存的设置为准，见“模型与 ChatGPT 登录” |
 | `DEEPSEEK_API_KEY` | secret，DeepSeek 直连；ChatGPT 订阅在面板登录，不用 secret |
-| `CODEX_SEARCH_MODEL` | var，默认空；代其他模型联网搜索与生成图片的 Codex 模型 id，空则按目录挑最便宜的 |
 | `CS_AGENT_COMMIT` | 健康检查中的构建标识 |
 
 QQ 列表默认空；非法 ID 被忽略，不支持通配符。文件上传等 notice / 系统事件不作为聊天输入；字符串形式的 CQ 码不解析，文本 `@昵称`、引用和 `@全体成员` 均不能冒充真实 `at` 机器人。正文保留 `[@你]`、`[reply]`、`[image]` 等标记，引用 ID 单独落库，昵称和群名折成单行。

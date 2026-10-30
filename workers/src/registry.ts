@@ -11,7 +11,6 @@ import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelecti
 import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, type CredentialLease } from "./model-credentials";
 import { openModels, providerStatuses, selectionProblem, type ProviderStatus } from "./models";
 import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, exchangeCode, parseCallback, startCodexLogin } from "./codex-login";
-import type { ImageAvailability } from "./tools/generate-image";
 import { SKILLS_SCHEMA, type Skill, type SkillInput, type SkillSummary } from "./skills";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
@@ -20,8 +19,7 @@ export type McpStatus = { server: string; enabled: boolean; credential: "none" |
 const Pending = Type.Object({ verifier: Type.String(), config: Type.String(), discovery: DiscoverySchema }, { additionalProperties: false });
 const identity = (server: OAuthServer, field: string) => JSON.stringify([server.id, server.credential.accountId, server.credential.revision, field]);
 type ModelLoginRow = { state: string; provider_id: string; verifier_enc: string; created_at: number; expires_at: number };
-export type ModelView = { current: ModelSelection; revision: string; providers: ProviderStatus[]; codex: { loggedIn: boolean; email?: string; expiresAt?: number };
-  imageGeneration: ImageAvailability };
+export type ModelView = { current: ModelSelection; revision: string; providers: ProviderStatus[]; codex: { loggedIn: boolean; email?: string; expiresAt?: number } };
 export type ModelStatus = (ModelSelection & { codexLoggedIn: boolean }) | { unavailable: string };
 export type PutSettingsResult = { ok: true; current: SettingsSnapshot } | { ok: false; error: "conflict"; current: SettingsSnapshot } | { ok: false; error: "invalid_model"; reason: string };
 
@@ -121,13 +119,7 @@ export class RegistryDO extends DurableObject<Env> {
   async modelView(): Promise<ModelView> {
     const settings = this.settings(), meta = this.credentials.meta(CODEX_PROVIDER);
     return { current: settings.value.model, revision: settings.revision, providers: await this.providers(),
-      codex: { loggedIn: meta !== undefined, ...(meta?.email ? { email: meta.email } : {}), ...(meta?.expiresAt ? { expiresAt: meta.expiresAt } : {}) },
-      imageGeneration: await this.ctx.storage.get<ImageAvailability>("image_generation") ?? "unknown" };
-  }
-
-  /** 订阅能不能生成图片只有真实调用才知道；Thread 每次成功或被后端拒绝后回写。 */
-  async recordImageGeneration(state: Exclude<ImageAvailability, "unknown">): Promise<void> {
-    await this.ctx.storage.put("image_generation", state);
+      codex: { loggedIn: meta !== undefined, ...(meta?.email ? { email: meta.email } : {}), ...(meta?.expiresAt ? { expiresAt: meta.expiresAt } : {}) } };
   }
 
   async modelStatus(): Promise<ModelStatus> {

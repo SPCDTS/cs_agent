@@ -186,8 +186,6 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
         <div class="note">token 加密存在 Registry，到期前自动续期；页面只显示结果分类，不回显 code 或 token。</div>
       </div>
     </div>
-    <div class="row"><span class="muted small">联网搜索</span><span id="m-search" class="pill neutral">-</span>
-      <span class="muted small">图片生成</span><span id="m-image" class="pill neutral">-</span></div>
   </section>
 
   <section class="pair">
@@ -841,12 +839,6 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     $("codex-account").textContent = codex.loggedIn ? (codex.email || "账号邮箱未知") + (codex.expiresAt ? " · access token 到期 " + time(codex.expiresAt) + "（会自动续期）" : "") : "";
     $("codex-start").textContent = codex.loggedIn ? "重新登录" : "开始登录";
     $("codex-logout").hidden = !codex.loggedIn;
-    // 任何模型的 web_search 都经 ChatGPT 订阅代搜；图片生成能否用只有真实调用后才知道。
-    $("m-search").textContent = codex.loggedIn ? "可用（经 ChatGPT 订阅）" : "需登录";
-    $("m-search").className = "pill " + (codex.loggedIn ? "ok" : "neutral");
-    const image = { unknown: ["未知", "neutral"], available: ["可用", "ok"], unavailable: ["不可用", "bad"] }[view.imageGeneration] || ["未知", "neutral"];
-    $("m-image").textContent = image[0];
-    $("m-image").className = "pill " + image[1];
     if (codex.loggedIn) $("codex-pending").hidden = true;
   }
   async function saveModel() {
