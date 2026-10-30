@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import type { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
-import { cleanName, scopeOf, type InboundInput } from "./policy";
+import { cleanName, scopeOf, parseInboundMedia, type InboundInput, type InboundMedia } from "./policy";
 
 export const MESSAGE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -8,6 +8,10 @@ CREATE TABLE IF NOT EXISTS messages (
   time INTEGER NOT NULL, user_id TEXT NOT NULL, nickname TEXT NOT NULL DEFAULT '',
   is_self INTEGER NOT NULL DEFAULT 0, text TEXT NOT NULL DEFAULT '', reply_to_id TEXT,
   action TEXT, detail TEXT, image_count INTEGER, UNIQUE (scope, message_id)
+);
+CREATE TABLE IF NOT EXISTS message_media (
+  scope TEXT NOT NULL, message_id TEXT NOT NULL, media_json TEXT NOT NULL DEFAULT '[]', recalled INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (scope, message_id)
 );
 CREATE INDEX IF NOT EXISTS messages_scope_time ON messages(scope, time);
 CREATE INDEX IF NOT EXISTS messages_time ON messages(time);
@@ -50,15 +54,27 @@ export async function recordMessage(database: Pick<DurableObjectSqliteDatabase, 
     (scope, message_id, time, user_id, nickname, is_self, text, reply_to_id, action, image_count)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, scope, input.messageId, input.time, input.userId, input.nickname,
     isSelf || input.userId === input.selfId ? 1 : 0, input.text, input.replyToId, isSelf ? "send_message" : null, input.imageCount);
+  if (input.media?.length) await database.run(`INSERT INTO message_media (scope, message_id, media_json) VALUES (?, ?, ?)
+    ON CONFLICT(scope, message_id) DO UPDATE SET media_json=excluded.media_json`, scope, input.messageId, JSON.stringify(parseInboundMedia(input.media)));
   if (input.scopeName) await database.run(`INSERT INTO scope_names (scope, name, updated_at) VALUES (?, ?, ?)
     ON CONFLICT(scope) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at`, scope, cleanName(input.scopeName), Math.floor(Date.now() / 1000));
+}
+
+export async function recallMedia(database: Pick<DurableObjectSqliteDatabase, "get">, scope: string, messageId: string): Promise<InboundMedia[]> {
+  const row = await database.get<{ media_json: string; recalled: number }>("SELECT media_json, recalled FROM message_media WHERE scope=? AND message_id=?", scope, messageId);
+  if (row?.recalled) throw new Error("message_recalled");
+  return row ? parseInboundMedia(JSON.parse(row.media_json)) : [];
+}
+export async function markMessageRecalled(database: Pick<DurableObjectSqliteDatabase, "run">, scope: string, messageId: string): Promise<void> {
+  await database.run(`INSERT INTO message_media (scope,message_id,recalled) VALUES (?,?,1)
+    ON CONFLICT(scope,message_id) DO UPDATE SET recalled=1`, scope, messageId);
 }
 
 export type RecallOptions = { query?: string; limit?: number; before?: number };
 export const QQ_CONTEXT_DESCRIPTION = "只读检索本回合所在会话的聊天记录；无 query 取最近消息，before 为 Unix 秒。";
 export const QQ_CONTEXT_PARAMETERS = Type.Object({ query: Type.Optional(Type.String({ maxLength: 1000 })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })), before: Type.Optional(Type.Number()) }, { additionalProperties: false });
-type MessageRow = { time: number; user_id: string; nickname: string; is_self: number; text: string };
+type MessageRow = { message_id: string; image_count: number | null; time: number; user_id: string; nickname: string; is_self: number; text: string };
 export type SummaryRow = { id: number; scope: string; kind: "day" | "week"; period_start: number; period_end: number; text: string; msg_count: number };
 const beijingDate = (sec: number) => new Date((sec + 8 * 3600) * 1000).toISOString().slice(5, 10);
 export const summaryLabel = (row: Pick<SummaryRow, "kind" | "period_start" | "period_end">) =>
@@ -88,13 +104,18 @@ export async function recall(database: DurableObjectSqliteDatabase, scope: strin
       WHERE summaries_fts MATCH ? AND s.scope = ? AND s.period_start < ? ORDER BY s.period_end DESC LIMIT ?`, phrase, scope, before, limit);
   }
   if (!rows.length && !summaries.length) return "未找到本会话的聊天记录。";
+  const mediaRows = rows.length ? await database.all<{ message_id: string; media_json: string; recalled: number }>(
+    `SELECT message_id,media_json,recalled FROM message_media WHERE scope=? AND message_id IN (${rows.map(() => "?").join(",")})`, scope, ...rows.map(row => row.message_id)) : [];
+  const attachments = new Map(mediaRows.map(row => [row.message_id, row]));
   const now = new Date(Date.now() + 8 * 3600_000).toISOString();
   const entries = rows.map(row => {
     // Workers 的默认时区是 UTC，显式使用北京时间保持 QQ 历史的阅读习惯。
     const time = new Date(row.time * 1000 + 8 * 3600_000).toISOString();
     const stamp = (time.slice(0, 10) === now.slice(0, 10) ? "" : time.slice(5, 10) + " ") + time.slice(11, 16);
+    const attachment = attachments.get(row.message_id);
+    const label = attachment || row.image_count ? ` [message_id:${row.message_id}${attachment?.recalled ? " 已撤回" : ""}]` : "";
     const body = `${row.is_self ? "[我]" : cleanName(row.nickname).slice(0, 40) || row.user_id}(${row.user_id}): ${row.text.replace(/\s+/g, " ").trim()}`;
-    return { at: row.time, line: `${stamp} ${body.length <= 120 ? body : body.slice(0, 119) + "…"}` };
+    return { at: row.time, line: `${stamp} ${body.length <= 120 ? body : body.slice(0, 119) + "…"}${label}` };
   });
   // 原文过了保留期后摘要是唯一线索，与命中的消息按时间混排后再截到同一条数上限。
   for (const row of summaries) entries.push({ at: row.period_end, line: `${summaryLabel(row)} ${row.text.replace(/\s+/g, " ").trim()}` });

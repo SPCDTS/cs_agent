@@ -1,11 +1,28 @@
+import { Type, type Static } from "typebox";
+import { Check } from "typebox/value";
 import type { GroupTrigger, Settings } from "./settings";
 
 export type Target = { kind: "private"; userId: string } | { kind: "group"; groupId: string };
+export const InboundMediaSchema = Type.Object({
+  kind: Type.Union([Type.Literal("image"), Type.Literal("file"), Type.Literal("audio"), Type.Literal("video")]),
+  ordinal: Type.Integer({ minimum: 1, maximum: 100 }),
+  url: Type.Optional(Type.String({ maxLength: 8192 })), file: Type.Optional(Type.String({ maxLength: 8192 })),
+  fileId: Type.Optional(Type.String({ maxLength: 512 })), name: Type.Optional(Type.String({ maxLength: 255 })),
+  size: Type.Optional(Type.Number({ minimum: 0 })), assetId: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+}, { additionalProperties: false });
+export type InboundMedia = Static<typeof InboundMediaSchema>;
+export function parseInboundMedia(value: unknown): InboundMedia[] {
+  if (!Check(Type.Array(InboundMediaSchema, { maxItems: 100 }), value)) throw new Error("invalid_media");
+  return value;
+}
+export type InboundNotice = { kind: "upload"; input: InboundInput }
+  | { kind: "recall"; target: Target; messageId: string; userId: string; selfId: string; time: number };
 export type InboundInput = {
   messageId: string; selfId: string; userId: string; nickname: string;
   target: Target; text: string; routeText: string; time: number;
   mentionedSelf: boolean; replyToId: string | null; imageCount: number;
   scopeName?: string;
+  media?: InboundMedia[];
   /** 仅可信宿主投递可指定；QQ 归一化不会从外部消息读取此字段。 */
   replyChannel?: "web";
   /** 缺省为 message；schedule 由 ScheduleDO 投递，入站键就是 messageId（run_<fire_key>）；subagent 是子 agent 的汇报，入站键同样是 messageId。 */
@@ -39,6 +56,39 @@ export function renderText(segments: Record<string, unknown>[], selfId?: string)
   }).join("");
 }
 
+/** 保留平台媒体引用，不把 file 字段当可读本地路径，也不在归一化阶段访问 URL。 */
+export function normalizeMedia(segments: Record<string, unknown>[]): InboundMedia[] {
+  return segments.flatMap<InboundMedia>(segment => {
+    const kind = segment.type === "record" ? "audio" : segment.type;
+    if (kind !== "image" && kind !== "file" && kind !== "audio" && kind !== "video") return [];
+    const value = data(segment);
+    const string = (field: string, max: number) => typeof value[field] === "string" ? value[field].slice(0, max) : undefined;
+    const fileId = id(value.file_id ?? value.id).slice(0, 512), size = Number(value.file_size ?? value.size);
+    return [{ kind, ordinal: 1, ...(string("url", 8192) ? { url: string("url", 8192) } : {}),
+      ...(string("file", 8192) ? { file: string("file", 8192) } : {}), ...(fileId ? { fileId } : {}),
+      ...(string("name", 255) ? { name: string("name", 255) } : {}), ...(Number.isFinite(size) && size >= 0 ? { size } : {}) }];
+  }).slice(0,100).map((media, index) => ({ ...media, ordinal: index + 1 }));
+}
+
+export function normalizeNotice(event: unknown): InboundNotice | undefined {
+  if (!isRecord(event) || event.post_type !== "notice") return;
+  const selfId = id(event.self_id), userId = id(event.user_id), groupId = id(event.group_id);
+  if (!validId(selfId) || !validId(userId) || groupId && !validId(groupId)) return;
+  const target: Target = groupId ? { kind: "group", groupId } : { kind: "private", userId };
+  const time = typeof event.time === "number" && Number.isFinite(event.time) ? event.time : 0;
+  if (event.notice_type === "group_recall" || event.notice_type === "friend_recall") {
+    const messageId = id(event.message_id);
+    return messageId ? { kind: "recall", target, messageId, selfId, userId, time } : undefined;
+  }
+  if (event.notice_type !== "group_upload" && event.notice_type !== "offline_file") return;
+  if (!isRecord(event.file)) return;
+  const media = normalizeMedia([{ type: "file", data: event.file }]);
+  const item = media[0];
+  if (!item || !item.fileId && !item.url) return;
+  return { kind: "upload", input: { messageId: id(event.message_id) || `upload:${item.fileId || item.url}:${time}`, selfId, userId, nickname: "",
+    target, text: `[file] ${item.name ?? "附件"}`, routeText: "", time, mentionedSelf: false, replyToId: null, imageCount: 0, media } };
+}
+
 export function normalizeMessage(event: unknown): InboundInput | undefined {
   if (!isRecord(event) || event.post_type !== "message") return;
   if (event.message_type !== "private" && event.message_type !== "group") return;
@@ -49,6 +99,7 @@ export function normalizeMessage(event: unknown): InboundInput | undefined {
   if (event.message_type === "group" && !validId(groupId)) return;
   // 只信任结构化消息段，文本里的 CQ 码和 @昵称不能取得触发权限。
   const segments = Array.isArray(event.message) ? event.message.filter(isRecord) : [];
+  const media = normalizeMedia(segments);
   const route = segments.filter(segment => segment.type !== "image");
   const start = route.findIndex(segment => segment.type !== "at" && segment.type !== "reply" && (segment.type !== "text" || !!segmentText(segment).trim()));
   const reply = segments.find(segment => segment.type === "reply");
@@ -63,6 +114,7 @@ export function normalizeMessage(event: unknown): InboundInput | undefined {
     mentionedSelf: segments.some(segment => segment.type === "at" && id(data(segment).qq) === selfId),
     replyToId: reply ? id(data(reply).id) || null : null,
     imageCount: segments.filter(segment => segment.type === "image").length,
+    ...(media.length ? { media } : {}),
   };
 }
 
