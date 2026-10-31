@@ -1,6 +1,6 @@
 # 云端功能与资源预算
 
-本次补齐既有 Node / Pi 能力到 Workers；CS2 Workshop 暂不接入。此前删除的 Codex 后端及借用订阅的联网、生图工具保持删除，现有 Codex 模型提供方保留。`web_search` 已补齐为直接调用 DeepSeek Search API，复用现有 API key，不依赖 Codex 订阅或容器。
+本次补齐既有 Node / Pi 能力到 Workers；CS2 Workshop 通过鉴权 Tunnel 接入本机，详见 [本机接入说明](WORKSHOP-LOCAL.md)。此前删除的 Codex 后端及借用订阅的联网、生图工具保持删除，现有 Codex 模型提供方保留。`web_search` 已补齐为直接调用 DeepSeek Search API，复用现有 API key，不依赖 Codex 订阅或容器。
 
 ## 管理入口
 

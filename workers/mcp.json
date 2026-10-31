@@ -51,6 +51,50 @@
       "resourceAllow": [
         "notion://docs/"
       ]
+    },
+    {
+      "id": "cs2-workshop",
+      "enabled": true,
+      "transport": {
+        "kind": "streamable-http",
+        "url": "https://workshop.spcdts.dev/mcp",
+        "secretHeaders": {
+          "Authorization": "CS2_WORKSHOP_AUTHORIZATION"
+        }
+      },
+      "credential": {
+        "kind": "external-account",
+        "accountId": "owner-workshop",
+        "revision": "1"
+      },
+      "access": {
+        "kind": "owner-private"
+      },
+      "tools": {
+        "allow": [
+          "workshop_browse",
+          "workshop_context",
+          "workshop_prepare",
+          "workshop_edit",
+          "workshop_mode",
+          "workshop_trial",
+          "workshop_produce",
+          "workshop_status",
+          "workshop_results"
+        ],
+        "readOnly": [
+          "workshop_browse",
+          "workshop_context",
+          "workshop_status"
+        ],
+        "eventAllow": []
+      },
+      "replay": "unsafe",
+      "resourceAllow": [
+        "workshop://guide",
+        "workshop://edit-director",
+        "workshop://editing-schema"
+      ]
     }
   ]
 }

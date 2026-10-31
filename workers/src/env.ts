@@ -18,6 +18,7 @@ export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" 
   MEMORY_EXTRACT_MODEL?: string;
   MEMORY_EXTRACT_NAMESPACES?: string;
   DEEPSEEK_API_KEY?: string;
+  CS2_WORKSHOP_AUTHORIZATION?: string;
   // 维护任务的保留天数（0 = 不清理）；缺省见 maintenance/index.ts
   HISTORY_RAW_DAYS?: string;
   HISTORY_RAW_HARD_MAX_DAYS?: string;
