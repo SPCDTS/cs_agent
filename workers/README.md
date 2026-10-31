@@ -16,7 +16,8 @@
 | POST /admin/mcp/:server/login-link、logout、refresh | 一次性登录链接、本地登出、刷新 owner 线程的 MCP 目录 |
 | POST /admin/send-rules/release | 解除某个 scope 的熔断 |
 | GET / PUT /admin/model | 当前模型、可选模型、ChatGPT 登录状态；PUT 带 `expectedRevision`（与设置共用），切到不可用的模型返回 400 `invalid_model` |
-| POST /admin/model/oauth/codex/start、complete、logout | ChatGPT 订阅登录：生成授权链接、提交粘贴回来的回调地址、登出 |
+| POST /admin/model/oauth/codex/start、select、catalog、logout | ChatGPT 订阅授权：生成一次性配对码、切换账号、刷新模型目录、登出 |
+| GET /admin/model/oauth/codex/helper.mjs；POST /admin/model/oauth/codex/bridge/begin、complete | 下载本机助手；助手用短期配对码发起授权、提交凭据（不使用管理员口令） |
 | GET /admin/skills、GET / PUT / DELETE /admin/skills/:name、POST /admin/skills/:name/enable、disable | 技能目录：列表（不含正文）、读单个技能、写入（body `{ markdown, files? }`）、删除、启停 |
 | POST /admin/messages/import | 历史聊天记录导入，见“历史记录导入” |
 
@@ -28,18 +29,25 @@
 
 # 模型与 ChatGPT 登录
 
-2026-10-30 起不再经 magpie 容器。Worker 用 pi-ai 直连两个 provider：`deepseek`（API key，secret `DEEPSEEK_API_KEY`）与 `openai-codex`（ChatGPT Plus/Pro 订阅的 OAuth，请求 `https://chatgpt.com/backend-api/codex/responses`）。provider 注册表在 `src/models.ts`，测试配置另有 `faux`。
+2026-10-31 起 ChatGPT 订阅使用官方 Sign in with ChatGPT 开源/自托管流程，推理走 `https://api.openai.com/v1/responses`。历史 provider id `openai-codex` 保留，模型选择和会话历史不变。DeepSeek 仍使用 `DEEPSEEK_API_KEY`。不需要常驻授权助手、代理或新容器。
 
-- 当前模型是 Registry 设置里的 `model`：`{ provider, id, reasoningEffort? }`，推理强度可选 low / medium / high / xhigh，不选即模型默认。没保存过时用 vars `MODEL_PROVIDER` / `MODEL_ID`（生产为 `deepseek` / `deepseek-flash`）。在面板“模型”卡片里切换，保存走设置的 CAS；Thread 在接纳下一批输入前重新读设置，变了就 `configure` 切到新模型，不用重新部署。记忆抽取、摘要与整理用同一个 provider，`MEMORY_EXTRACT_MODEL` 只换模型 id。
-- 只能选已注册、目录里有、且可用的模型：DeepSeek 缺 key 时原因为 `missing_key`；Codex 没登录为 `login_required`，没有 `OAUTH_STORE_KEY` 为 `unconfigured`。只有模型变化时才校验，已选的 Codex 登出后，群与白名单等其他设置仍能保存，`/healthz` 的 `model` 变为 `{ unavailable }`，回合失败，直到重新登录或切走。
-- 登录步骤：面板“模型”卡片点“开始登录”，打开授权链接登录 ChatGPT；授权后浏览器跳到打不开的 `http://localhost:1455/auth/callback?code=…&state=…`，把地址栏里的整串地址粘贴回面板，点“完成登录”。授权链接 10 分钟有效，每次开始都会作废上一条；state 在换 token 前就消费，失败后要重新开始。错误只回分类（`invalid_state`、`missing_code`、`authorization_denied`、`invalid_callback`、`token_exchange`、`unconfigured`），不回显 code 或 token。
-- 授权端点、token 端点、client id、scope 与 PKCE S256 都与 pi-ai 自带的 openai-codex 登录相同（`src/codex-login.ts`）。没有调 pi-ai 的 `login()`，它要在本机起 1455 端口的回调服务器；也没有用 pi-ai 的 `openaiCodexProvider()`，它的 OAuth 实现经变量路径动态 import，打包进 Worker 后加载不到，所以按同一端点自己写 refresh，目录与 Codex Responses API 照用 pi-ai 的。
-- 凭据存在 Registry 的 `model_credentials`：整份 pi-ai `Credential`（`{ type: "oauth", access, refresh, expires, accountId, email? }`）经 AES-GCM 加密，AAD 为 provider id；`meta_json` 只有类型、邮箱、account id 与过期时间，面板和健康检查只读这一列。account id 取自 access token 的 `chatgpt_account_id`，pi-ai 用它填 `chatgpt-account-id` 请求头。
-- pi-ai 在 access token 剩 5 分钟内时于 `CredentialStore.modify` 里刷新。Thread 一侧的 store（`src/model-credentials.ts` 的 `remoteCredentials`）经 Registry 租锁：`credentialAcquire` 拿锁与当前凭据，回调在 Thread 里跑，`credentialSettle` 按版本 CAS 写回并放锁；租约 30 秒到期自动放锁。所以多个会话同时请求时只刷新一次，轮换后的 refresh token 不会被另一份旧 token 的刷新冲掉。
-- Codex 固定走 SSE：Harness 的 stream 设置与 `directComplete` 都传 `transport: "sse"`。pi-ai 默认先试 WebSocket 并按会话缓存连接，DO 里的连接跨不了请求。
-- secrets：`DEEPSEEK_API_KEY` 由 `scripts/put-secrets.sh` 从仓库根 `.env` 的 `DEEPSEEK_APIKEY` 读取，为空就跳过并提示；ChatGPT 登录不经 secrets，只依赖已有的 `OAUTH_STORE_KEY`，换这个密钥会使已存的 ChatGPT 凭据解不开，要重新登录。
+1. 管理页“模型”中选“添加 ChatGPT 账号”或已有账号，点“授权所选账号”。
+2. 下载本机助手，在下载目录运行面板提供的命令（Node.js 24+），按提示粘贴一次性配对码。
+3. 助手先监听 `127.0.0.1` 的空闲端口，再打开官方授权页面；完成登录并允许使用 ChatGPT 订阅额度。助手在本机交换令牌，通过 HTTPS 提交给云端，然后退出。回到管理页点“刷新状态”。
+4. 账号模型目录来自 `GET https://api.openai.com/v1/models`，保留服务端排序与显示名称，只显示 `visibility=list` 且当前 pi-ai 已支持的 Responses 模型。授权、切换账号或手动刷新时读取一次，不在健康检查或页面定时刷新时请求上游。
 
-模型请求失败时，请求统计保留上游 HTTP 状态；HTML 拒绝页先提取正文再记录，避免样式代码挤掉实际原因。已登录仅表示存在凭据，不代表推理请求一定能通过上游访问检查。
+旧 Codex 登录的 scope 和 client id 不能沿用，升级后面板显示“需要重新授权”。当前模型仍保留，授权完成前 GPT 请求不可用；可以手动切到已配置的 DeepSeek。首次实际推理成功前，不能仅凭“已登录”断言模型已恢复。
+
+- 授权使用 PKCE S256、state、nonce 和稳定的云端 host id（`urn:uuid:...`）。新账号使用 `dynamic_agent_client` 注册；后续登录复用签发的 client id。同邮箱的不同注册单独保存，账号标签含稳定短 ID。
+- 配对码 10 分钟有效，只授权一次凭据导入，不授予管理权限；数据库只保存它的摘要。待授权数据和令牌均经 `OAUTH_STORE_KEY` AES-GCM 加密；本机助手不保存令牌文件，管理页不会收到访问令牌、刷新令牌或 ID token。
+- 云端用官方 JWKS 验证 ID token 的签名、issuer、audience、有效期、nonce 和返回账号身份，并检查 `resource.invoke` 与 `chatgpt.tokens.use.direct`。校验和目录读取完成后才切换当前账号。
+- 注册信息在 `chatgpt_accounts`，host 与当前账号在 `chatgpt_state`，凭据按账号分别存入 `model_credentials`。Thread 经 Registry 租锁串行续期；租约绑定开始时的账号，切换后旧请求的续期结果仍写回原账号。刷新使用该注册的 client id、最新 refresh token 与 resource，不重新指定 scope。
+- 登出会撤销当前刷新会话并清除本地令牌，保留注册和 host id；如果远端撤销未确认，面板提示前往 ChatGPT 设置断开授权。订阅用量与额度在 [ChatGPT 用量设置](https://chatgpt.com/settings/usage) 查看。
+- 模型请求使用 SSE，`store=false`、`stream=true`；继续记录输入/输出 token、工具和 HTTP 错误，HTML 拒绝页仅提取正文。DeepSeek 搜索不受本次迁移影响。
+
+当前模型仍由 Registry 设置 `{ provider, id, reasoningEffort? }` 决定，管理页保存采用 revision CAS，各会话下一回合生效；未授权、无凭据或目录没有当前模型时，`/healthz` 会明确报告不可用，不自动换模型。改变 `OAUTH_STORE_KEY` 会使已存凭据无法解密，需要重新授权。
+
+实现见 `src/{codex-login,chatgpt-accounts,model-credentials,models}.ts` 与 `src/admin/chatgpt-helper.ts`。协议依据：[官方授权](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)、[账号与续期](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions)、[模型与推理](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)、[自托管迁移](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms)。
 
 ## 联网搜索与网页读取
 

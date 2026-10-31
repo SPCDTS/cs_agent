@@ -39,7 +39,7 @@ jobs:
         working-directory: workers
       - run: npm test
         working-directory: workers
-      - run: node --test test/export-schedules.node.mjs
+      - run: node --test test/export-schedules.node.mjs test/chatgpt-login.node.mjs
         working-directory: workers
 
   integration:

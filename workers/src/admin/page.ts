@@ -178,24 +178,26 @@ ${CONSOLE_HTML}
       <div class="stack" style="flex:1 1 420px;min-width:0">
         <div class="row"><strong>ChatGPT 订阅登录</strong><span id="codex-status" class="pill neutral">-</span></div>
         <div id="codex-account" class="muted small"></div>
+        <select id="codex-accounts" aria-label="ChatGPT 账号"></select>
         <div class="row">
-          <button id="codex-start" class="btn primary" type="button">开始登录</button>
-          <button id="codex-logout" class="btn danger" type="button" hidden>登出</button>
+          <button id="codex-select" class="btn" type="button">使用所选账号</button>
+          <button id="codex-start" class="btn primary" type="button">授权所选账号</button>
+          <button id="codex-logout" class="btn danger" type="button" hidden>登出当前账号</button>
+          <button id="codex-refresh" class="btn" type="button">刷新状态</button>
+          <button id="codex-catalog" class="btn" type="button">刷新模型列表</button>
         </div>
         <div id="codex-pending" class="stack" style="padding:0" hidden>
-          <div class="muted small">1. 打开授权链接并登录 ChatGPT；授权后浏览器会跳到一个打不开的 localhost:1455 地址，这是正常的。</div>
+          <div class="muted small">1. 下载授权助手，在下载目录打开终端并运行下方命令（需要 Node.js 24 或更新版本）。</div>
+          <a class="btn" href="/admin/model/oauth/codex/helper.mjs" download="chatgpt-login.mjs">下载授权助手</a>
+          <input id="codex-command" type="text" readonly aria-label="运行命令">
+          <div class="muted small">2. 向助手粘贴配对码，在自动打开的 ChatGPT 页面授权。配对码 10 分钟内有效，仅用于这一次授权。</div>
           <div class="link-box">
-            <input id="codex-url" type="text" readonly aria-label="ChatGPT 授权链接">
-            <a id="codex-open" class="btn" target="_blank" rel="noopener noreferrer">打开</a>
-            <button id="codex-copy" class="btn" type="button">复制</button>
+            <input id="codex-ticket" type="text" readonly aria-label="配对码">
+            <button id="codex-copy" class="btn" type="button">复制配对码</button>
           </div>
-          <div class="muted small">2. 把地址栏里的整串回调地址粘贴到这里，再点完成登录（10 分钟内有效，只能用一次）。</div>
-          <div class="link-box">
-            <input id="codex-callback" type="text" autocomplete="off" placeholder="http://localhost:1455/auth/callback?code=…&amp;state=…" aria-label="回调地址">
-            <button id="codex-complete" class="btn primary" type="button">完成登录</button>
-          </div>
+          <div class="muted small">3. 助手完成后自动退出，点击“刷新状态”。</div>
         </div>
-        <div class="note">token 加密存在 Registry，到期前自动续期；页面只显示结果分类，不回显 code 或 token。</div>
+        <div class="note">凭据加密保存在云端，到期自动续期。本机助手只在授权时运行。<a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">查看 ChatGPT 用量与授权额度</a></div>
       </div>
     </div>
   </section>
@@ -337,7 +339,10 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     missing_code: "回调地址里没有 code，请粘贴浏览器地址栏里的完整地址",
     authorization_denied: "ChatGPT 授权被拒绝",
     invalid_callback: "回调地址格式不正确",
-    token_exchange: "换取 token 失败，请重新开始登录",
+    token_exchange: "换取凭据失败，请重新开始授权",
+    invalid_identity: "账号身份校验失败，请重新授权所选账号",
+    plan_permission_required: "尚未允许使用 ChatGPT 订阅额度，请重新授权并开启该权限",
+    catalog_failed: "读取账号模型列表失败，请稍后重试",
     invalid_name: "技能名只能用小写字母、数字和连字符，以字母或数字开头，最长 64 位",
     missing_frontmatter: "SKILL.md 开头缺少以 --- 包围的 frontmatter",
     name_mismatch: "frontmatter 的 name 与技能名不一致",
@@ -855,14 +860,18 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     }
     select.value = key;
     $("m-effort").value = current.reasoningEffort || "";
-    const codex = view.codex;
-    const status = $("codex-status");
-    status.textContent = codex.loggedIn ? "已登录" : "未登录";
+    if (!Array.from(select.options).some(option => option.value === key)) select.append(el("option", { value: key, text: key + "（当前不可用）" }));
+    select.value = key;
+    const codex = view.codex, status = $("codex-status");
+    status.textContent = codex.loggedIn ? "已登录" : codex.needsReauth ? "需要重新授权" : "未登录";
     status.className = "pill " + (codex.loggedIn ? "ok" : "neutral");
-    $("codex-account").textContent = codex.loggedIn ? (codex.email || "账号邮箱未知") + (codex.expiresAt ? " · access token 到期 " + time(codex.expiresAt) + "（会自动续期）" : "") : "";
-    $("codex-start").textContent = codex.loggedIn ? "重新登录" : "开始登录";
+    $("codex-account").textContent = codex.loggedIn ? (codex.email || "ChatGPT 账号") + " · 凭据会自动续期" : "请选择账号授权后使用 GPT";
+    const accounts = $("codex-accounts"); clear(accounts);
+    accounts.append(el("option", { value: "", text: "添加 ChatGPT 账号" }));
+    for (const account of codex.accounts) accounts.append(el("option", { value: account.id,
+      text: account.label + (account.id === codex.activeId ? "（当前）" : "") + (account.loggedIn ? "" : " · 需授权") }));
+    accounts.value = codex.activeId || "";
     $("codex-logout").hidden = !codex.loggedIn;
-    if (codex.loggedIn) $("codex-pending").hidden = true;
   }
   async function saveModel() {
     const value = $("m-model").value, slash = value.indexOf("/"), effort = $("m-effort").value;
@@ -880,33 +889,34 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   }
   async function codexStart() {
     try {
-      const result = await api("POST", "/admin/model/oauth/codex/start");
-      $("codex-url").value = result.url;
-      $("codex-open").setAttribute("href", result.url);
-      $("codex-callback").value = "";
+      const accountId = $("codex-accounts").value;
+      const result = await api("POST", "/admin/model/oauth/codex/start", accountId ? { accountId } : {});
+      $("codex-ticket").value = result.ticket;
+      $("codex-command").value = "node ./chatgpt-login.mjs " + location.origin;
       $("codex-pending").hidden = false;
-      notice("已生成 ChatGPT 授权链接，旧链接已失效");
+      notice("配对码已生成，请运行本机授权助手");
     } catch (error) { fail(error); }
   }
-  async function codexComplete() {
-    const callbackUrl = $("codex-callback").value.trim();
-    if (!callbackUrl) return;
+  async function codexRefresh() {
     try {
-      const result = await api("POST", "/admin/model/oauth/codex/complete", { callbackUrl });
-      $("codex-callback").value = "";
-      $("codex-url").value = "";
-      $("codex-pending").hidden = true;
-      notice("ChatGPT 已登录" + (result.email ? "：" + result.email : ""));
-    } catch (error) {
-      // state 已消费，同一个回调地址不能再用，清掉免得重复提交。
-      $("codex-callback").value = "";
-      fail(error);
-    }
-    loadModel().catch(fail);
-    refresh();
+      await loadModel();
+      if (state.model.codex.loggedIn) { $("codex-pending").hidden = true; $("codex-ticket").value = ""; }
+      notice(state.model.codex.loggedIn ? "ChatGPT 已登录" : "尚未完成授权");
+    } catch (error) { fail(error); }
+  }
+  async function codexSelect() {
+    const accountId = $("codex-accounts").value;
+    if (!accountId) return notice("请先为新账号完成授权");
+    try { renderModel(await api("POST", "/admin/model/oauth/codex/select", { accountId })); notice("账号已切换，下一回合生效"); } catch (error) { fail(error); }
+  }
+  async function codexCatalog() {
+    try { renderModel(await api("POST", "/admin/model/oauth/codex/catalog")); notice("模型列表已刷新"); } catch (error) { fail(error); }
   }
   async function codexLogout() {
-    try { await api("POST", "/admin/model/oauth/codex/logout"); notice("ChatGPT 已登出"); } catch (error) { fail(error); }
+    try {
+      const result = await api("POST", "/admin/model/oauth/codex/logout");
+      notice(result.revoked ? "ChatGPT 已登出" : "已在本应用登出，但未确认远端撤销，请到 ChatGPT 设置中断开授权");
+    } catch (error) { fail(error); }
     loadModel().catch(fail);
     refresh();
   }
@@ -1104,9 +1114,11 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   $("s-save").addEventListener("click", saveSettings);
   $("m-save").addEventListener("click", saveModel);
   $("codex-start").addEventListener("click", codexStart);
-  $("codex-complete").addEventListener("click", codexComplete);
+  $("codex-refresh").addEventListener("click", codexRefresh);
+  $("codex-select").addEventListener("click", codexSelect);
+  $("codex-catalog").addEventListener("click", codexCatalog);
   $("codex-logout").addEventListener("click", codexLogout);
-  $("codex-copy").addEventListener("click", () => { navigator.clipboard.writeText($("codex-url").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
+  $("codex-copy").addEventListener("click", () => { navigator.clipboard.writeText($("codex-ticket").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
   $("mem-ns").addEventListener("change", event => { state.memoryNs = event.target.value; toggleProfile(false); loadMemory().catch(fail); });
   $("mem-q").addEventListener("keydown", event => { if (event.key === "Enter") { state.memoryQuery = event.target.value.trim(); loadMemory().catch(fail); } });
   $("mem-q").addEventListener("search", event => { state.memoryQuery = event.target.value.trim(); loadMemory().catch(fail); });

@@ -1,101 +1,147 @@
-import type { OAuthAuth, OAuthCredential } from "@earendil-works/pi-ai";
+import type { OAuthAuth } from "@earendil-works/pi-ai";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+import { Type, type Static } from "typebox";
+import { Check } from "typebox/value";
 import { randomSecret, sha256 } from "./mcp/crypto";
 
-// 与 pi-ai 的 openai-codex OAuth 流程同一组常量（node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-codex.js）。
-// pi-ai 的 login() 要在本机起 1455 端口的回调服务器，Worker 做不到，所以授权由面板发起，用户把浏览器跳到的回调地址贴回来。
 export const CODEX_PROVIDER = "openai-codex";
-const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
-const TOKEN_URL = "https://auth.openai.com/oauth/token";
-const REDIRECT_URI = "http://localhost:1455/auth/callback";
-const SCOPE = "openid profile email offline_access";
-const JWT_AUTH_CLAIM = "https://api.openai.com/auth";
-const JWT_PROFILE_CLAIM = "https://api.openai.com/profile";
+export const TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token";
+export const RESOURCE = "https://api.openai.com/v1";
 export const LOGIN_TTL_MS = 10 * 60_000;
-
-const LOGIN_CODES = ["invalid_callback", "missing_code", "authorization_denied", "invalid_state", "token_exchange", "unconfigured"] as const;
+const ISSUER = "https://auth.openai.com";
+const SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+const JWKS = createRemoteJWKSet(new URL(ISSUER + "/.well-known/jwks.json"));
+const LOGIN_CODES = ["invalid_callback", "authorization_denied", "invalid_state", "token_exchange", "invalid_identity",
+  "plan_permission_required", "login_required", "catalog_failed", "unconfigured"] as const;
 export type ModelLoginCode = typeof LOGIN_CODES[number];
 export class ModelLoginError extends Error {
   constructor(readonly code: ModelLoginCode) { super(code); }
 }
-// RPC 只保留消息文本；按白名单取分类，远端正文、code 与 token 永远不会出现在响应里。
 export const modelLoginErrorCode = (error: unknown): ModelLoginCode | "invalid_request" =>
   error instanceof Error && (LOGIN_CODES as readonly string[]).includes(error.message) ? error.message as ModelLoginCode : "invalid_request";
 
-export type CodexCredential = OAuthCredential & { accountId: string; email?: string };
-export type PendingLogin = { state: string; verifier: string; url: string };
+const Text = Type.String({ minLength: 1 });
+export const TokenResponseSchema = Type.Object({
+  access_token: Text, refresh_token: Text, id_token: Type.Optional(Text), token_type: Type.Literal("Bearer"),
+  expires_in: Type.Number({ exclusiveMinimum: 0 }), scope: Type.Optional(Text),
+});
+export type TokenResponse = Static<typeof TokenResponseSchema>;
+export const CatalogSchema = Type.Array(Type.Object({ slug: Text, display_name: Text, visibility: Text }));
+export type ChatGPTModel = Static<typeof CatalogSchema>[number];
+const CredentialSchema = Type.Object({
+  type: Type.Literal("oauth"), flow: Type.Literal("chatgpt-plan"), access: Text, refresh: Text, expires: Type.Number(),
+  clientId: Text, subject: Text, idToken: Text, scope: Text, email: Type.Optional(Text), hostId: Text, catalog: CatalogSchema,
+});
+export type ChatGPTCredential = Static<typeof CredentialSchema>;
+export const isChatGPTCredential = (value: unknown): value is ChatGPTCredential => Check(CredentialSchema, value);
+export const PendingSchema = Type.Object({
+  state: Text, nonce: Text, verifier: Text, redirectUri: Text, hostId: Text,
+  accountId: Type.Optional(Text), clientId: Type.Optional(Text), subject: Type.Optional(Text),
+});
+export type PendingLogin = Static<typeof PendingSchema>;
 
-export async function startCodexLogin(): Promise<PendingLogin> {
-  const state = randomSecret(), verifier = randomSecret();
-  const url = new URL(AUTHORIZE_URL);
-  for (const [key, value] of Object.entries({ response_type: "code", client_id: CLIENT_ID, redirect_uri: REDIRECT_URI, scope: SCOPE,
-    code_challenge: (await sha256(verifier)).toString("base64url"), code_challenge_method: "S256", state,
-    id_token_add_organizations: "true", codex_cli_simplified_flow: "true", originator: "pi" })) url.searchParams.set(key, value);
-  return { state, verifier, url: url.href };
+export async function startChatGPTLogin(hostId: string, port: number, account?: {
+  id: string; clientId: string; subject: string; email?: string; idToken?: string;
+}): Promise<{ pending: PendingLogin; url: string }> {
+  const pending: PendingLogin = { hostId, state: randomSecret(), nonce: randomSecret(), verifier: randomSecret(),
+    redirectUri: "http://127.0.0.1:" + port + "/auth/callback",
+    ...(account ? { accountId: account.id, clientId: account.clientId, subject: account.subject } : {}) };
+  const url = new URL(ISSUER + "/api/accounts/authorize");
+  const params = { response_type: "code", client_id: account?.clientId ?? "dynamic_agent_client",
+    ext_agent_host_id: hostId, redirect_uri: pending.redirectUri, scope: SCOPE, resource: RESOURCE,
+    state: pending.state, nonce: pending.nonce, code_challenge_method: "S256",
+    code_challenge: (await sha256(pending.verifier)).toString("base64url"),
+    ...(!account ? { agent_name_hint: "cs-agent" } : {}),
+    ...(account?.idToken ? { id_token_hint: account.idToken } : {}), ...(account?.email ? { login_hint: account.email } : {}) };
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  return { pending, url: url.href };
 }
 
-/** 解析用户贴回的回调地址；浏览器地址栏复制时可能没有协议头。 */
-export function parseCallback(input: string): { code: string; state: string } {
-  const text = input.trim();
+export function callbackClient(input: string, pending: PendingLogin): string {
   let url: URL;
-  try { url = new URL(/^https?:\/\//i.test(text) ? text : `http://${text}`); } catch { throw new ModelLoginError("invalid_callback"); }
+  try { url = new URL(input); } catch { throw new ModelLoginError("invalid_callback"); }
+  if (url.origin + url.pathname !== pending.redirectUri || url.searchParams.get("state") !== pending.state)
+    throw new ModelLoginError("invalid_state");
   if (url.searchParams.has("error")) throw new ModelLoginError("authorization_denied");
-  const code = url.searchParams.get("code"), state = url.searchParams.get("state");
-  if (!code || code.length > 8192) throw new ModelLoginError("missing_code");
-  if (!state) throw new ModelLoginError("invalid_state");
-  return { code, state };
+  const clientId = url.searchParams.get("client_id") ?? pending.clientId;
+  if (!url.searchParams.get("code") || !clientId || clientId === "dynamic_agent_client" ||
+    (pending.clientId && clientId !== pending.clientId)) throw new ModelLoginError("invalid_callback");
+  return clientId;
 }
 
-function jwtPayload(token: string | undefined): Record<string, unknown> | undefined {
-  const part = token?.split(".")[1];
-  if (!part) return;
+async function verifyIdentity(idToken: string, clientId: string, expected: { nonce?: string; subject?: string }) {
   try {
-    const value: unknown = JSON.parse(new TextDecoder().decode(Buffer.from(part, "base64url")));
-    return value && typeof value === "object" ? value as Record<string, unknown> : undefined;
-  } catch { return; }
+    const { payload } = await jwtVerify(idToken, JWKS, { issuer: ISSUER, audience: clientId, algorithms: ["RS256"],
+      requiredClaims: ["exp", "sub"] });
+    if (!payload.sub || (expected.nonce && payload.nonce !== expected.nonce) ||
+      (expected.subject && payload.sub !== expected.subject)) throw new Error();
+    return { subject: payload.sub, ...(typeof payload.email === "string" ? { email: payload.email } : {}) };
+  } catch { throw new ModelLoginError("invalid_identity"); }
 }
-const claim = (payload: Record<string, unknown> | undefined, path: string, field: string): string | undefined => {
-  const value = (payload?.[path] as Record<string, unknown> | undefined)?.[field];
-  return typeof value === "string" && value ? value : undefined;
-};
-
-type TokenResponse = { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown; id_token?: unknown };
-async function tokenRequest(params: Record<string, string>, signal: AbortSignal): Promise<TokenResponse> {
-  let response: Response;
+function checkScope(scope: string | undefined): string {
+  if (!scope?.split(" ").includes("chatgpt.tokens.use.direct") || !scope.split(" ").includes("resource.invoke"))
+    throw new ModelLoginError("plan_permission_required");
+  return scope;
+}
+export async function acceptTokens(raw: unknown, clientId: string, pending: PendingLogin): Promise<ChatGPTCredential> {
+  if (!Check(TokenResponseSchema, raw) || !raw.id_token) throw new ModelLoginError("token_exchange");
+  const scope = checkScope(raw.scope), identity = await verifyIdentity(raw.id_token, clientId, pending);
+  return { type: "oauth", flow: "chatgpt-plan", access: raw.access_token, refresh: raw.refresh_token,
+    expires: Date.now() + raw.expires_in * 1000, idToken: raw.id_token, scope, clientId,
+    hostId: pending.hostId, ...identity, catalog: [] };
+}
+export async function fetchCatalog(access: string): Promise<ChatGPTModel[]> {
   try {
-    response = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-      body: new URLSearchParams({ ...params, client_id: CLIENT_ID }), redirect: "manual", signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
-  } catch { throw new ModelLoginError("token_exchange"); }
-  if (!response.ok) { await response.body?.cancel(); throw new ModelLoginError("token_exchange"); }
-  const value: unknown = await response.json().catch(() => undefined);
-  if (!value || typeof value !== "object") throw new ModelLoginError("token_exchange");
-  return value;
+    const response = await fetch(RESOURCE + "/models", { headers: { Authorization: "Bearer " + access },
+      redirect: "manual", signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) { await response.body?.cancel(); throw new Error(); }
+    const value: unknown = await response.json();
+    if (!Check(Type.Object({ models: CatalogSchema }), value)) throw new Error();
+    return value.models.filter(model => model.visibility === "list");
+  } catch { throw new ModelLoginError("catalog_failed"); }
 }
-
-/** 按 pi-ai 的形状组装凭据：account id 来自 access token 的 chatgpt_account_id，Codex 请求头要用它。 */
-function credentialFrom(tokens: TokenResponse, previous?: CodexCredential): CodexCredential {
-  if (typeof tokens.access_token !== "string" || typeof tokens.expires_in !== "number") throw new ModelLoginError("token_exchange");
-  const refresh = typeof tokens.refresh_token === "string" ? tokens.refresh_token : previous?.refresh;
-  const access = jwtPayload(tokens.access_token), id = jwtPayload(typeof tokens.id_token === "string" ? tokens.id_token : undefined);
-  const accountId = claim(access, JWT_AUTH_CLAIM, "chatgpt_account_id");
-  if (!refresh || !accountId) throw new ModelLoginError("token_exchange");
-  const email = (typeof id?.email === "string" ? id.email : undefined) ?? claim(access, JWT_PROFILE_CLAIM, "email") ?? previous?.email;
-  return { type: "oauth", access: tokens.access_token, refresh, expires: Date.now() + tokens.expires_in * 1000, accountId, ...(email ? { email } : {}) };
-}
-
-export async function exchangeCode(code: string, verifier: string): Promise<CodexCredential> {
-  return credentialFrom(await tokenRequest({ grant_type: "authorization_code", code, code_verifier: verifier, redirect_uri: REDIRECT_URI }, AbortSignal.timeout(15_000)));
-}
-
-/**
- * 交给 pi-ai 的 OAuthAuth。pi-ai 自带的那份经 lazyOAuth 用变量路径动态 import，打包进 Worker 后加载不到，
- * 所以按同一端点自己写 refresh；Models.getAuth 在 CredentialStore.modify 里调用它，换下来的 refresh token 随之存回。
- */
 export const codexOAuth: OAuthAuth = {
-  name: "OpenAI (ChatGPT Plus/Pro)",
-  isSubscription: true,
-  login: async () => { throw new Error("ChatGPT 登录只能从管理面板发起"); },
-  refresh: async (credential, signal) => credentialFrom(await tokenRequest({ grant_type: "refresh_token", refresh_token: credential.refresh }, signal),
-    credential as CodexCredential),
-  toAuth: async credential => ({ apiKey: credential.access }),
+  name: "ChatGPT 订阅", isSubscription: true,
+  login: async () => { throw new ModelLoginError("login_required"); },
+  refresh: async (credential, signal) => {
+    if (!isChatGPTCredential(credential)) throw new ModelLoginError("login_required");
+    let response: Response;
+    try {
+      response = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "refresh_token", client_id: credential.clientId, refresh_token: credential.refresh, resource: RESOURCE }),
+        redirect: "manual", signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
+    } catch { throw new ModelLoginError("token_exchange"); }
+    if (!response.ok) { await response.body?.cancel(); throw new ModelLoginError("token_exchange"); }
+    const tokens: unknown = await response.json();
+    if (!Check(TokenResponseSchema, tokens)) throw new ModelLoginError("token_exchange");
+    const scope = checkScope(tokens.scope ?? credential.scope);
+    const identity = tokens.id_token ? await verifyIdentity(tokens.id_token, credential.clientId, { subject: credential.subject }) : {};
+    return { ...credential, ...identity, access: tokens.access_token, refresh: tokens.refresh_token,
+      expires: Date.now() + tokens.expires_in * 1000, idToken: tokens.id_token ?? credential.idToken, scope };
+  },
+  toAuth: async credential => {
+    if (!isChatGPTCredential(credential)) throw new ModelLoginError("login_required");
+    checkScope(credential.scope);
+    return { apiKey: credential.access };
+  },
 };
+export async function revokeSession(credential: ChatGPTCredential): Promise<boolean> {
+  try {
+    const discovery = await fetch(ISSUER + "/.well-known/openid-configuration", { redirect: "manual", signal: AbortSignal.timeout(10_000) });
+    if (!discovery.ok) { await discovery.body?.cancel(); return false; }
+    const value: unknown = await discovery.json();
+    if (!Check(Type.Object({ revocation_endpoint: Text }), value)) return false;
+    const endpoint = new URL(value.revocation_endpoint);
+    if (endpoint.origin !== ISSUER) return false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: credential.refresh, token_type_hint: "refresh_token", client_id: credential.clientId }),
+        redirect: "manual", signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
+      await response?.body?.cancel();
+      if (response?.status === 200) return true;
+      if (response && response.status < 500) return false;
+      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    return false;
+  } catch { return false; }
+}

@@ -2,10 +2,10 @@ import { createModels, createProvider, type Models, type MutableModels, type Pro
 import type { CredentialStore } from "@earendil-works/pi-ai";
 import { fauxProvider, fauxToolCall, fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
-import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
-import { openAICodexResponsesApi } from "@earendil-works/pi-ai/api/openai-codex-responses.lazy";
+import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type { Env } from "./env";
-import { CODEX_PROVIDER, codexOAuth } from "./codex-login";
+import { CODEX_PROVIDER, codexOAuth, isChatGPTCredential } from "./codex-login";
 import type { ModelSelection } from "./settings";
 
 type ProviderSpec = {
@@ -18,10 +18,22 @@ type ProviderSpec = {
   unavailable: string;
 };
 
-// pi-ai 自带的 openaiCodexProvider 的 OAuth 经 lazyOAuth 用变量路径加载，Worker 里加载不到；目录与 API 照用，auth 换成 codexOAuth。
+// 保留历史 provider id；新授权只使用公开 Responses API。
 function codexProvider(): Provider {
-  return createProvider({ id: CODEX_PROVIDER, name: "OpenAI Codex", baseUrl: "https://chatgpt.com/backend-api",
-    auth: { oauth: codexOAuth }, models: Object.values(OPENAI_CODEX_MODELS), api: openAICodexResponsesApi() });
+  const provider = createProvider({ id: CODEX_PROVIDER, name: "ChatGPT 订阅", baseUrl: "https://api.openai.com/v1",
+    auth: { oauth: codexOAuth }, models: Object.values(OPENAI_MODELS).filter(model => model.api === "openai-responses")
+      .map(model => ({ ...model, provider: CODEX_PROVIDER, compat: { ...model.compat,
+        // pi-ai 只在 provider=openai 时自动套用 SIWC 参数限制；历史别名需明确关闭这些 API key 专用能力。
+        supportsMidConvoEffort: false, supportsLongCacheRetention: false,
+        supportsExplicitPromptCacheMode: false, supportsMaxOutputTokens: false,
+      } })), api: openAIResponsesApi() });
+  return { ...provider, filterModels: (models, credential) => {
+    if (!isChatGPTCredential(credential)) return [];
+    return credential.catalog.flatMap(entry => {
+      const model = models.find(model => model.id === entry.slug);
+      return model ? [{ ...model, name: entry.display_name }] : [];
+    });
+  } };
 }
 
 function echoProvider(): Provider {
@@ -41,7 +53,7 @@ function echoProvider(): Provider {
 
 export const MODEL_PROVIDERS: Record<string, ProviderSpec> = {
   deepseek: { name: "DeepSeek", listed: () => true, create: deepseekProvider, unavailable: "missing_key" },
-  [CODEX_PROVIDER]: { name: "ChatGPT 订阅（Codex）", listed: () => true, create: codexProvider, unavailable: "login_required" },
+  [CODEX_PROVIDER]: { name: "ChatGPT 订阅", listed: () => true, create: codexProvider, unavailable: "login_required" },
   faux: { name: "faux（测试）", listed: env => env.MODEL_PROVIDER === "faux", create: echoProvider, unavailable: "unavailable" },
 };
 
@@ -65,14 +77,14 @@ export async function providerStatuses(models: Models): Promise<ProviderStatus[]
     // 凭据解不开（例如换了 OAUTH_STORE_KEY）也按不可用处理，不让面板与健康检查整体失败。
     const available = !!await models.checkAuth(provider.id).catch(() => undefined);
     return { id: provider.id, name: spec?.name ?? provider.name, available, ...(available ? {} : { reason: spec?.unavailable ?? "unavailable" }),
-      models: models.getModels(provider.id).map(model => ({ id: model.id, name: model.name })) };
+      models: (provider.id === CODEX_PROVIDER ? (available ? await models.getAvailable(provider.id) : []) : models.getModels(provider.id)).map(model => ({ id: model.id, name: model.name })) };
   }));
 }
 export function selectionProblem(providers: readonly ProviderStatus[], selection: ModelSelection): string | undefined {
   const provider = providers.find(provider => provider.id === selection.provider);
   if (!provider) return "unknown_provider";
-  if (!provider.models.some(model => model.id === selection.id)) return "unknown_model";
-  return provider.available ? undefined : provider.reason;
+  if (!provider.available) return provider.reason;
+  return provider.models.some(model => model.id === selection.id) ? undefined : "unknown_model";
 }
 export const sameSelection = (a: ModelSelection, b: ModelSelection) => a.provider === b.provider && a.id === b.id && a.reasoningEffort === b.reasoningEffort;
 /** pi-durable 的会话配置：推理强度对应 thinkingLevel，没设时清掉，回到模型默认。 */

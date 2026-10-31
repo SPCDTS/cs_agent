@@ -96,7 +96,7 @@ ComfyUI 留在本机，不接。
 
 ### 3.7 模型出站
 
-**2026-10-30 起 magpie 整体移除，Worker 直连 DeepSeek 与 OpenAI Codex（订阅 OAuth）。** 不再有 `MagpieContainer`（`v7` 迁移 `deleted_classes`）、`magpie.spcdts.dev` 与 R2 同步。Worker 用 pi-ai 自带的 `deepseek` provider（secret `DEEPSEEK_API_KEY`）和按 pi-ai `openai-codex` 目录与 Responses API 装配的 provider（ChatGPT 订阅，请求 `chatgpt.com/backend-api/codex/responses`，固定 SSE）。订阅登录由管理面板发起：Worker 生成 PKCE 授权链接，用户把浏览器跳到的 `localhost:1455` 回调地址贴回面板，Registry 换 token 后把整份 pi-ai `Credential` 用 `OAUTH_STORE_KEY` 加密存进 `model_credentials`；各 Thread 经 Registry 租锁实现 pi-ai 的 `CredentialStore`，并发请求只刷新一次。当前模型（provider、id、推理强度）是 Registry 运行时设置的一项，面板切换，Thread 下一回合 `configure` 切过去，vars `MODEL_PROVIDER` / `MODEL_ID` 只是默认值。实现见 `workers/src/{models,model-credentials,codex-login}.ts` 与 `workers/README.md`“模型与 ChatGPT 登录”。以下为移除前的设计，保留作历史。
+**当前实现（2026-10-31）**：magpie 已移除。DeepSeek 使用 API key；ChatGPT 订阅迁到官方 Sign in with ChatGPT 自托管流程，管理页生成短期配对码，本机助手完成 loopback 授权并通过 HTTPS 导入云端，推理直连 `api.openai.com/v1/responses`（SSE、`store=false`）。按账号保存独立注册、加密凭据与模型目录，Registry 租锁续期；保留 `openai-codex` 历史 provider id，各会话下一回合采用面板设置。旧凭据需要重新授权，详见 [Workers 操作说明](../workers/README.md#模型与-chatgpt-登录)。以下为移除前的设计，保留作历史。
 
 模型仍经 magpie 网关：它统一各家 provider、持有订阅类的 OAuth 登录、按 gateway key 归集用量。magpie 支持服务端部署：官方镜像 `ghcr.io/yetone/magpie`，`magpie web --gateway` 无桌面运行，状态在 `/config`，`MAGPIE_WEB_KEY` 保护 Web UI，`magpie s3` 可把 providers、key、设置经 S3 兼容存储（含 R2）加密同步。
 

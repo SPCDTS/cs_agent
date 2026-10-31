@@ -1,168 +1,176 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { createModels } from "@earendil-works/pi-ai/models";
-import type { Credential } from "@earendil-works/pi-ai";
 import { fauxProvider, fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import worker from "../src/index";
 import * as models from "../src/models";
 import { remoteCredentials } from "../src/model-credentials";
 import { RegistryDO, type ModelView } from "../src/registry";
+import { isChatGPTCredential, RESOURCE, TOKEN_URL } from "../src/codex-login";
 import { sha256 } from "../src/mcp/crypto";
 import { input } from "./helpers";
 
 const TOKEN = "test-admin-only";
-const TOKEN_URL = "https://auth.openai.com/oauth/token";
-const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
-const ACCOUNT = "synthetic-account";
 const registry = () => env.REGISTRY.getByName("main");
-// 不签名的合成 JWT：pi-ai 只解码 payload 取 chatgpt_account_id。
-const jwt = (payload: object) => ["e30", Buffer.from(JSON.stringify(payload)).toString("base64url"), "synthetic"].join(".");
-const access = (tag: string) => jwt({ tag, "https://api.openai.com/auth": { chatgpt_account_id: ACCOUNT }, "https://api.openai.com/profile": { email: "owner@example.test" } });
-const credential = (tag: string, expires: number): Credential => ({ type: "oauth", access: access(tag), refresh: `refresh-${tag}`, expires, accountId: ACCOUNT });
 const store = () => remoteCredentials(registry);
-
-function admin(method: string, path: string, body?: unknown) {
-  return worker.fetch(new Request(`https://test${path}`, { method, headers: { Authorization: `Bearer ${TOKEN}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+const keys = await generateKeyPair("RS256", { extractable: true });
+const jwk = { ...await exportJWK(keys.publicKey), kid: "test-key", alg: "RS256", use: "sig" };
+const scopes = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+const catalog = [
+  { slug: "gpt-6-astra", display_name: "GPT Astra", visibility: "list" },
+  { slug: "gpt-6-sol", display_name: "GPT Sol", visibility: "hidden" },
+];
+function admin(method: string, path: string, body?: unknown, token = TOKEN) {
+  return worker.fetch(new Request("https://test" + path, { method, headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body) }), { ...env, ADMIN_TOKEN: TOKEN });
 }
-async function adminJson<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const response = await admin(method, path, body);
-  if (!response.ok) throw new Error(`admin ${method} ${path} -> ${response.status}: ${await response.text()}`);
+async function adminJson<T>(method: string, path: string, body?: unknown, token = TOKEN): Promise<T> {
+  const response = await admin(method, path, body, token);
+  if (!response.ok) throw new Error("admin " + path + " -> " + response.status + ": " + await response.text());
   return response.json<T>();
 }
-async function selectModel(model: ModelView["current"]): Promise<Response> {
+async function selectModel(model: ModelView["current"]) {
   const { revision } = await adminJson<ModelView>("GET", "/admin/model");
   return admin("PUT", "/admin/model", { model, expectedRevision: revision });
 }
 type Sent = { url: string; headers: Headers; body: string };
-function tokenEndpoint(sent: Sent[], tag: string, delay = 0) {
-  return async (request: Request): Promise<Response> => {
-    sent.push({ url: request.url, headers: request.headers, body: new TextDecoder().decode(await request.arrayBuffer()) });
-    await new Promise(resolve => setTimeout(resolve, delay));
-    return Response.json({ access_token: access(tag), refresh_token: `refresh-${tag}`, expires_in: 864000, id_token: jwt({ email: "owner@example.test" }) });
-  };
-}
-function routeFetch(routes: Record<string, (request: Request) => Promise<Response>>) {
+let sent: Sent[];
+function network(overrides: Record<string, (request: Request) => Promise<Response>> = {}) {
+  sent = [];
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
     const request = new Request(url, init);
-    const route = routes[request.url];
-    if (!route) throw new Error(`network disabled in tests: ${request.url}`);
-    return route(request);
+    sent.push({ url: request.url, headers: request.headers, body: await request.clone().text() });
+    if (overrides[request.url]) return overrides[request.url]!(request);
+    if (request.url.endsWith("/.well-known/jwks.json")) return Response.json({ keys: [jwk] });
+    if (request.url === RESOURCE + "/models") return Response.json({ models: catalog });
+    if (request.url.endsWith("/.well-known/openid-configuration")) return Response.json({ revocation_endpoint: "https://auth.openai.com/api/accounts/oauth/revoke" });
+    if (request.url.endsWith("/api/accounts/oauth/revoke")) return new Response(null, { status: 200 });
+    throw new Error("unexpected network endpoint");
   });
 }
-async function login(): Promise<{ sent: Sent[]; state: string; challenge: string }> {
-  const sent: Sent[] = [];
-  routeFetch({ [TOKEN_URL]: tokenEndpoint(sent, "login") });
-  const { url } = await adminJson<{ url: string }>("POST", "/admin/model/oauth/codex/start");
-  const authorize = new URL(url), state = authorize.searchParams.get("state") ?? "";
-  expect(await adminJson("POST", "/admin/model/oauth/codex/complete", { callbackUrl: `http://localhost:1455/auth/callback?code=synthetic-code&state=${state}` }))
-    .toEqual({ loggedIn: true, email: "owner@example.test" });
-  return { sent, state, challenge: authorize.searchParams.get("code_challenge") ?? "" };
+type Begin = { url: string; verifier: string; redirectUri: string; state: string; clientId?: string };
+async function begin(accountId?: string) {
+  const { ticket } = await adminJson<{ ticket: string }>("POST", "/admin/model/oauth/codex/start", accountId ? { accountId } : {});
+  const pending = await adminJson<Begin>("POST", "/admin/model/oauth/codex/bridge/begin", { port: 54321 }, ticket);
+  return { ticket, pending };
 }
+async function tokens(pending: Begin, clientId = "oaiapp_test", subject = "subject-a", scope = scopes, nonce?: string) {
+  const id = await new SignJWT({ email: "owner@example.test", nonce: nonce ?? new URL(pending.url).searchParams.get("nonce") })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" }).setIssuer("https://auth.openai.com")
+    .setAudience(clientId).setSubject(subject).setExpirationTime("1h").sign(keys.privateKey);
+  return { access_token: "access-" + clientId, refresh_token: "refresh-" + clientId, token_type: "Bearer", expires_in: 3600, scope, id_token: id };
+}
+async function complete(attempt: Awaited<ReturnType<typeof begin>>, clientId = "oaiapp_test", subject = "subject-a", scope = scopes, nonce?: string) {
+  const callbackUrl = attempt.pending.redirectUri + "?code=secret-code&state=" + attempt.pending.state + "&client_id=" + clientId;
+  return admin("POST", "/admin/model/oauth/codex/bridge/complete", { callbackUrl, tokens: await tokens(attempt.pending, clientId, subject, scope, nonce) }, attempt.ticket);
+}
+async function login(clientId = "oaiapp_test", subject = "subject-a") {
+  const attempt = await begin();
+  expect((await complete(attempt, clientId, subject)).status).toBe(200);
+  return attempt;
+}
+afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 
-beforeEach(() => { vi.stubGlobal("WebSocket", vi.fn()); });
-afterEach(async () => { vi.restoreAllMocks(); vi.unstubAllGlobals(); await reset(); });
-
-describe("model credentials", () => {
-  it("refreshes once for concurrent requests from separate stores and keeps the rotated refresh token", async () => {
-    await store().modify("openai-codex", async () => credential("old", Date.now() - 1000));
-    const sent: Sent[] = [];
-    routeFetch({ [TOKEN_URL]: tokenEndpoint(sent, "new", 50) });
-    // 两份 Models 相当于两个 Thread DO，各自经 Registry 租锁。
-    const [a, b] = await Promise.all([models.openModels(env, store()), models.openModels(env, store())].map(m => m.getAuth("openai-codex")));
-    expect(sent).toHaveLength(1);
-    expect(new URLSearchParams(sent[0]!.body).get("refresh_token")).toBe("refresh-old");
-    expect(a?.auth.apiKey).toBe(access("new"));
-    expect(b?.auth.apiKey).toBe(access("new"));
-    expect(await store().read("openai-codex")).toMatchObject({ refresh: "refresh-new", accountId: ACCOUNT });
-  });
-
-  it("stores only ciphertext and non-secret metadata", async () => {
-    await store().modify("openai-codex", async () => credential("stored", Date.now() + 3600_000));
+describe("ChatGPT plan authorization", () => {
+  it("uses PKCE, a stable host and one-use pairing, verifies identity, encrypts tokens and lists the account catalog", async () => {
+    network();
+    const attempt = await login();
+    const url = new URL(attempt.pending.url);
+    expect(url.origin + url.pathname).toBe("https://auth.openai.com/api/accounts/authorize");
+    expect(Object.fromEntries(url.searchParams)).toMatchObject({ client_id: "dynamic_agent_client", resource: RESOURCE,
+      redirect_uri: "http://127.0.0.1:54321/auth/callback", scope: scopes, agent_name_hint: "cs-agent" });
+    expect(url.searchParams.get("ext_agent_host_id")).toMatch(/^urn:uuid:/);
+    expect((await sha256(attempt.pending.verifier)).toString("base64url")).toBe(url.searchParams.get("code_challenge"));
+    const view = await adminJson<ModelView>("GET", "/admin/model");
+    expect(view.codex).toMatchObject({ loggedIn: true, email: "owner@example.test", accounts: [expect.objectContaining({ loggedIn: true })] });
+    expect(view.providers.find(p => p.id === "openai-codex")?.models).toEqual([{ id: "gpt-6-astra", name: "GPT Astra" }]);
     const rows = await runInDurableObject(registry(), (_instance, state) => state.storage.sql.exec("SELECT * FROM model_credentials").toArray());
-    expect(rows).toEqual([expect.objectContaining({ provider_id: "openai-codex", credential_enc: expect.stringMatching(/^v1\./) })]);
-    const text = JSON.stringify(rows);
-    for (const secret of [access("stored"), "refresh-stored"]) expect(text).not.toContain(secret);
-    expect(JSON.parse(String(rows[0]!.meta_json))).toEqual({ type: "oauth", accountId: ACCOUNT, expiresAt: expect.any(Number) });
+    expect(rows[0]).toMatchObject({ credential_enc: expect.stringMatching(/^v1\./) });
+    expect(JSON.stringify(rows)).not.toContain("refresh-oaiapp_test");
+    expect((await complete(attempt)).status).toBe(400);
+    const reauth = await begin(view.codex.activeId);
+    const next = new URL(reauth.pending.url);
+    expect(next.searchParams.get("client_id")).toBe("oaiapp_test");
+    expect(next.searchParams.get("ext_agent_host_id")).toBe(url.searchParams.get("ext_agent_host_id"));
+    expect(next.searchParams.has("agent_name_hint")).toBe(false);
+    expect(next.searchParams.has("id_token_hint")).toBe(true);
   });
 
-  it("reports Codex as unconfigured without OAUTH_STORE_KEY instead of failing", async () => {
-    const view = await runInDurableObject(registry(), async (_instance, state) => {
+  it("rejects a wrong nonce, missing plan scope and a returning account identity change without replacing the active account", async () => {
+    network(); await login();
+    const first = (await adminJson<ModelView>("GET", "/admin/model")).codex.activeId;
+    for (const [scope, nonce, subject, expected] of [
+      [scopes, "wrong-nonce", "subject-a", "invalid_identity"],
+      ["openid profile email", undefined, "subject-a", "plan_permission_required"],
+      [scopes, undefined, "other-subject", "invalid_identity"],
+    ] as const) {
+      const attempt = await begin(first);
+      const response = await complete(attempt, "oaiapp_test", subject, scope, nonce);
+      expect([response.status, await response.json()]).toEqual([400, { error: expected }]);
+      expect((await adminJson<ModelView>("GET", "/admin/model")).codex.activeId).toBe(first);
+    }
+    const expired = await begin();
+    await runInDurableObject(registry(), (_instance, state) => { state.storage.sql.exec("UPDATE chatgpt_logins SET expires_at = 0"); });
+    expect((await complete(expired)).status).toBe(400);
+  });
+
+  it("keeps same-email registrations separate and finishes an in-flight refresh against its original account", async () => {
+    network(); await login();
+    const first = (await adminJson<ModelView>("GET", "/admin/model")).codex.activeId!;
+    const lease = await registry().credentialAcquire("openai-codex");
+    await login("oaiapp_second", "subject-b");
+    const current = await store().read("openai-codex");
+    expect(current).toMatchObject({ clientId: "oaiapp_second" });
+    if (!isChatGPTCredential(lease.credential)) throw new Error("expected plan credential");
+    await registry().credentialSettle("openai-codex", lease.lease, lease.updatedAt,
+      { ...lease.credential, access: "refreshed-first" });
+    expect(await store().read("openai-codex")).toMatchObject({ clientId: "oaiapp_second" });
+    const view = await adminJson<ModelView>("POST", "/admin/model/oauth/codex/select", { accountId: first });
+    expect(view.codex.accounts).toHaveLength(2);
+    expect(await store().read("openai-codex")).toMatchObject({ clientId: "oaiapp_test", access: "refreshed-first" });
+    expect(sent.at(-1)?.headers.get("authorization")).toBe("Bearer refreshed-first");
+    expect(await adminJson("POST", "/admin/model/oauth/codex/logout")).toEqual({ revoked: true });
+    const loggedOut = await adminJson<ModelView>("GET", "/admin/model");
+    expect(loggedOut.codex.loggedIn).toBe(false);
+    expect(loggedOut.codex.accounts).toHaveLength(2);
+    const revoke = sent.find(call => call.url.endsWith("/oauth/revoke"))!;
+    expect(Object.fromEntries(new URLSearchParams(revoke.body))).toMatchObject({ client_id: "oaiapp_test", token_type_hint: "refresh_token" });
+    expect((await begin(first)).pending.clientId).toBe("oaiapp_test");
+  });
+
+  it("refreshes once across concurrent requests, using the issued client and rotating refresh token", async () => {
+    network(); await login();
+    await store().modify("openai-codex", async current => ({ ...current!, expires: Date.now() - 1 }));
+    network({ [TOKEN_URL]: async () => {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return Response.json({ access_token: "fresh", refresh_token: "rotated", expires_in: 3600, token_type: "Bearer" });
+    } });
+    const [a, b] = await Promise.all([models.openModels(env, store()), models.openModels(env, store())].map(m => m.getAuth("openai-codex")));
+    expect(sent.filter(call => call.url === TOKEN_URL)).toHaveLength(1);
+    expect(Object.fromEntries(new URLSearchParams(sent[0]!.body))).toEqual({
+      grant_type: "refresh_token", client_id: "oaiapp_test", refresh_token: "refresh-oaiapp_test", resource: RESOURCE,
+    });
+    expect(a?.auth.apiKey).toBe("fresh"); expect(b?.auth.apiKey).toBe("fresh");
+    expect(await store().read("openai-codex")).toMatchObject({ refresh: "rotated" });
+  });
+
+  it("requires fresh authorization for legacy credentials and reports a missing vault cleanly", async () => {
+    await runInDurableObject(registry(), async (_instance, state) => {
+      state.storage.sql.exec("INSERT INTO model_credentials VALUES (?, ?, ?, ?)", "openai-codex", "old-encrypted", 1, '{"type":"oauth"}');
+    });
+    const view = await adminJson<ModelView>("GET", "/admin/model");
+    expect(view.codex).toMatchObject({ loggedIn: false, needsReauth: true });
+    expect((await selectModel({ provider: "openai-codex", id: "gpt-6-astra" })).status).toBe(400);
+    await runInDurableObject(registry(), async (_instance, state) => {
       const instance = new RegistryDO(state, { ...env, OAUTH_STORE_KEY: undefined });
       await expect(instance.codexLoginStart()).rejects.toThrow("unconfigured");
-      return instance.modelView();
+      expect((await instance.modelView()).providers.find(p => p.id === "openai-codex")?.reason).toBe("unconfigured");
     });
-    expect(view.providers.find(provider => provider.id === "openai-codex")).toMatchObject({ available: false, reason: "unconfigured" });
-    expect(view.codex.loggedIn).toBe(false);
   });
 });
 
-describe("ChatGPT login", () => {
-  it("runs start → pasted callback → PKCE token exchange → logout", async () => {
-    const { sent, challenge } = await login();
-    const body = new URLSearchParams(sent[0]!.body);
-    expect(Object.fromEntries(body)).toMatchObject({ grant_type: "authorization_code", code: "synthetic-code", redirect_uri: "http://localhost:1455/auth/callback" });
-    expect((await sha256(body.get("code_verifier") ?? "")).toString("base64url")).toBe(challenge);
-    const view = await adminJson<ModelView>("GET", "/admin/model");
-    expect(view.codex).toEqual({ loggedIn: true, email: "owner@example.test", expiresAt: expect.any(Number) });
-    expect(view.providers.find(provider => provider.id === "openai-codex")).toMatchObject({ available: true, models: expect.arrayContaining([expect.objectContaining({ id: "gpt-6-sol" })]) });
-    expect(await runInDurableObject(registry(), (_instance, state) => state.storage.sql.exec("SELECT COUNT(*) AS n FROM model_logins").one().n)).toBe(0);
-
-    expect(await adminJson("POST", "/admin/model/oauth/codex/logout")).toEqual({ ok: true });
-    expect((await adminJson<ModelView>("GET", "/admin/model")).codex).toEqual({ loggedIn: false });
-  });
-
-  it("rejects a foreign or expired state, a missing code and a replayed callback without echoing them", async () => {
-    const sent: Sent[] = [];
-    routeFetch({ [TOKEN_URL]: tokenEndpoint(sent, "login") });
-    const complete = (callbackUrl: string) => admin("POST", "/admin/model/oauth/codex/complete", { callbackUrl });
-    const state = new URL((await adminJson<{ url: string }>("POST", "/admin/model/oauth/codex/start")).url).searchParams.get("state");
-    for (const [callbackUrl, error] of [
-      ["http://localhost:1455/auth/callback?code=secret-code&state=foreign-state", "invalid_state"],
-      [`http://localhost:1455/auth/callback?state=${state}`, "missing_code"],
-      [`localhost:1455/auth/callback?error=access_denied&state=${state}`, "authorization_denied"],
-    ] as const) {
-      const response = await complete(callbackUrl);
-      const text = await response.text();
-      expect([response.status, JSON.parse(text)]).toEqual([400, { error }]);
-      expect(text).not.toContain("secret-code");
-    }
-    await runInDurableObject(registry(), (_instance, db) => { db.storage.sql.exec("UPDATE model_logins SET expires_at = ?", Date.now() - 1); });
-    expect((await (await complete(`http://localhost:1455/auth/callback?code=c&state=${state}`)).json())).toEqual({ error: "invalid_state" });
-    expect(sent).toHaveLength(0);
-
-    const fresh = new URL((await adminJson<{ url: string }>("POST", "/admin/model/oauth/codex/start")).url).searchParams.get("state");
-    expect((await complete(`http://localhost:1455/auth/callback?code=c&state=${fresh}`)).status).toBe(200);
-    expect((await complete(`http://localhost:1455/auth/callback?code=c&state=${fresh}`)).status).toBe(400);
-    expect(sent).toHaveLength(1);
-  });
-});
-
-describe("model selection", () => {
-  it("defaults to vars and only allows Codex after login", async () => {
-    const view = await adminJson<ModelView>("GET", "/admin/model");
-    expect(view.current).toEqual({ provider: "faux", id: "test" });
-    expect(view.providers.map(provider => [provider.id, provider.available, provider.reason])).toEqual([
-      ["deepseek", false, "missing_key"], ["openai-codex", false, "login_required"], ["faux", true, undefined]]);
-    const rejected = await selectModel({ provider: "openai-codex", id: "gpt-6-sol" });
-    expect([rejected.status, await rejected.json()]).toEqual([400, { error: "invalid_model", reason: "login_required" }]);
-    expect((await selectModel({ provider: "faux", id: "missing" })).status).toBe(400);
-
-    await login();
-    const saved = await selectModel({ provider: "openai-codex", id: "gpt-6-sol", reasoningEffort: "high" });
-    expect(saved.status).toBe(200);
-    expect((await saved.json<ModelView>()).current).toEqual({ provider: "openai-codex", id: "gpt-6-sol", reasoningEffort: "high" });
-    const health = await (await worker.fetch(new Request("https://test/healthz"), env)).json<{ model: unknown }>();
-    expect(health.model).toEqual({ provider: "openai-codex", id: "gpt-6-sol", reasoningEffort: "high", codexLoggedIn: true });
-
-    // 已选的模型登出后不可用，但其他设置仍能保存
-    await adminJson("POST", "/admin/model/oauth/codex/logout");
-    expect((await (await worker.fetch(new Request("https://test/healthz"), env)).json<{ model: unknown }>()).model)
-      .toEqual({ unavailable: "openai-codex/gpt-6-sol: login_required" });
-    const settings = await adminJson<{ value: object; revision: string }>("GET", "/admin/settings");
-    expect((await admin("PUT", "/admin/settings", { value: { ...settings.value, allowUsers: [] }, expectedRevision: settings.revision })).status).toBe(200);
-  });
-
+describe("model selection and public Responses", () => {
   it("switches the Thread to the newly selected model on its next turn", async () => {
     const used: string[] = [];
     const faux = fauxProvider({ models: [{ id: "test" }, { id: "test-alt" }], tokensPerSecond: Infinity });
@@ -182,43 +190,29 @@ describe("model selection", () => {
     expect(await owner.submit(input(2, "第二句", 10000001))).toEqual({ status: "done" });
     expect(used).toEqual(["test", "test-alt"]);
   });
-});
 
-describe("Codex requests", () => {
-  const sse = (text: string) => new Response([
-    { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_1", role: "assistant", content: [] } },
-    { type: "response.output_text.delta", output_index: 0, delta: text },
-    { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text }] } },
-    { type: "response.completed", response: { status: "completed", usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 } } },
-  ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream" } });
-  async function requestBody(sent: Sent): Promise<{ model: string; reasoning?: { effort?: string } }> {
-    if (sent.headers.get("content-encoding") !== "zstd") return JSON.parse(sent.body);
-    const zlib = await import("node:zlib") as unknown as { zstdDecompressSync(data: Uint8Array): Uint8Array };
-    return JSON.parse(new TextDecoder().decode(zlib.zstdDecompressSync(new Uint8Array(Buffer.from(sent.body, "latin1")))));
-  }
-
-  it("refreshes an expired token, then calls the Codex responses endpoint over SSE with the selected effort", async () => {
-    await login();
-    expect((await selectModel({ provider: "openai-codex", id: "gpt-6-sol", reasoningEffort: "high" })).status).toBe(200);
-    await store().modify("openai-codex", async () => credential("expired", Date.now() - 1000));
-    const order: string[] = [], tokens: Sent[] = [], calls: Sent[] = [];
-    routeFetch({
-      [TOKEN_URL]: async request => { order.push("token"); return tokenEndpoint(tokens, "fresh")(request); },
-      [CODEX_URL]: async request => {
-        order.push("codex");
-        calls.push({ url: request.url, headers: request.headers, body: Buffer.from(await request.arrayBuffer()).toString("latin1") });
-        return sse("好的");
-      },
-    });
-    expect(await env.THREAD.getByName("owner").submit(input(1, "你好", 10000001))).toEqual({ status: "done" });
-    expect(order).toEqual(["token", "codex"]);
-    expect(new URLSearchParams(tokens[0]!.body).get("refresh_token")).toBe("refresh-expired");
-    const headers = calls[0]!.headers;
-    expect(headers.get("authorization")).toBe(`Bearer ${access("fresh")}`);
-    expect(headers.get("chatgpt-account-id")).toBe(ACCOUNT);
-    expect(headers.get("accept")).toBe("text/event-stream");
-    expect(await requestBody(calls[0]!)).toMatchObject({ model: "gpt-6-sol", reasoning: { effort: "high" } });
-    expect(WebSocket).not.toHaveBeenCalled();
-    expect(await store().read("openai-codex")).toMatchObject({ access: access("fresh"), refresh: "refresh-fresh" });
+  it("uses the public endpoint over SSE with store false and the selected effort", async () => {
+    network(); await login();
+    expect((await selectModel({ provider: "openai-codex", id: "gpt-6-astra", reasoningEffort: "high" })).status).toBe(200);
+    const requests: Sent[] = [];
+    network({ [RESOURCE + "/responses"]: async request => {
+      requests.push({ url: request.url, headers: request.headers, body: await request.text() });
+      return new Response([
+        { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_1", role: "assistant", content: [] } },
+        { type: "response.output_text.delta", output_index: 0, delta: "好的" },
+        { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "好的" }] } },
+        { type: "response.completed", response: { status: "completed", usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 } } },
+      ].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""), { headers: { "Content-Type": "text/event-stream" } });
+    } });
+    const result = await env.THREAD.getByName("owner").submit(input(1, "你好", 10000001));
+    expect(result).toEqual({ status: "done" });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.headers.get("authorization")).toBe("Bearer access-oaiapp_test");
+    expect(requests[0]!.headers.has("chatgpt-account-id")).toBe(false);
+    expect(JSON.parse(requests[0]!.body)).toMatchObject({ model: "gpt-6-astra", store: false, stream: true, reasoning: { effort: "high" } });
+    const payload = JSON.parse(requests[0]!.body);
+    for (const key of ["max_output_tokens", "temperature", "prompt_cache_options", "prompt_cache_retention"]) expect(payload).not.toHaveProperty(key);
+    expect(payload.input.some((item: { type?: string }) => item.type === "configuration_update")).toBe(false);
+    expect(isChatGPTCredential(await store().read("openai-codex"))).toBe(true);
   });
 });

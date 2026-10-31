@@ -9,13 +9,14 @@ import type { Env } from "../env";
 import { parseImport } from "../memory/import";
 import { oauthErrorCode } from "../mcp/oauth-fetch";
 import { ModelSelectionSchema, QQ_ID, SettingsSchema, type Settings } from "../settings";
-import { modelLoginErrorCode } from "../codex-login";
+import { modelLoginErrorCode, TokenResponseSchema } from "../codex-login";
 import type { EventQuery } from "../thread";
 import { SkillError, parseSkill } from "../skills";
 import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from "../message-import";
 import { ownerIds } from "../policy";
 import { SUBAGENT_ID } from "../subagent/model";
 import { ADMIN_APP_JS, ADMIN_PAGE_HTML } from "./page";
+import { CHATGPT_HELPER } from "./chatgpt-helper";
 import { SCHEDULE_IMPORT_MAX_BYTES } from "../schedule/import";
 import type { RequestQuery } from "../requests/types";
 
@@ -23,7 +24,7 @@ export type AdminContext = { env: Env; request: Request; url: URL; params: Recor
 export type AdminRoute = {
   method: "GET" | "POST" | "PUT" | "DELETE";
   path: string | RegExp;
-  // 只有静态页面与脚本不需要口令；它们不含任何数据，数据都经带 Bearer 的接口取得。
+  // 静态资源无需口令；bridge 路由在处理函数中校验短期配对票据。
   public?: true;
   handle(ctx: AdminContext): Promise<Response>;
 };
@@ -78,6 +79,11 @@ async function putSettings(env: Env, value: Settings, expectedRevision: string) 
   if (!result.ok && result.error === "conflict") throw new HttpError(409, "conflict", { current: result.current });
   if (!result.ok) throw new HttpError(400, "invalid_model", { reason: result.reason });
   return result.current;
+}
+function pairingTicket(request: Request): string {
+  const match = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.get("Authorization") ?? "");
+  if (!match) throw new HttpError(401, "invalid_state");
+  return match[1]!;
 }
 async function modelLogin<T>(work: () => Promise<T>): Promise<Response> {
   try { return json(await work()); } catch (error) { throw new HttpError(400, modelLoginErrorCode(error)); }
@@ -237,14 +243,30 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     await putSettings(env, { ...(await registry.settings()).value, model }, expectedRevision);
     return json(await registry.modelView());
   } },
-  // ChatGPT 订阅登录：回调地址是 localhost:1455，浏览器打不开，用户把整串地址贴回来。错误只回分类。
-  { method: "POST", path: "/admin/model/oauth/codex/start", handle: ({ env }) => modelLogin(() => env.REGISTRY.getByName("main").codexLoginStart()) },
-  { method: "POST", path: "/admin/model/oauth/codex/complete", handle: async ({ env, request }) => {
-    const { callbackUrl } = await body(request, Type.Object({ callbackUrl: Type.String({ minLength: 1, maxLength: 16384 }) }, strict));
-    return modelLogin(async () => ({ loggedIn: true, ...await env.REGISTRY.getByName("main").codexLoginComplete(callbackUrl) }));
+  { method: "GET", path: "/admin/model/oauth/codex/helper.mjs", public: true,
+    handle: async () => new Response(CHATGPT_HELPER, { headers: { ...API_HEADERS, "Content-Type": "text/javascript; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="chatgpt-login.mjs"' } }) },
+  { method: "POST", path: "/admin/model/oauth/codex/start", handle: async ({ env, request }) => {
+    const { accountId } = await body(request, Type.Object({ accountId: Type.Optional(Type.String({ format: "uuid" })) }, strict));
+    return modelLogin(() => env.REGISTRY.getByName("main").codexLoginStart(accountId));
   } },
+  { method: "POST", path: "/admin/model/oauth/codex/bridge/begin", public: true, handle: async ({ env, request }) => {
+    const { port } = await body(request, Type.Object({ port: Type.Integer({ minimum: 1, maximum: 65535 }) }, strict));
+    return modelLogin(() => env.REGISTRY.getByName("main").codexLoginBegin(pairingTicket(request), port));
+  } },
+  { method: "POST", path: "/admin/model/oauth/codex/bridge/complete", public: true, handle: async ({ env, request }) => {
+    const { callbackUrl, tokens } = await body(request, Type.Object({ callbackUrl: Type.String({ minLength: 1, maxLength: 16384 }), tokens: TokenResponseSchema }, strict));
+    return modelLogin(() => env.REGISTRY.getByName("main").codexLoginComplete(pairingTicket(request), callbackUrl, tokens));
+  } },
+  { method: "POST", path: "/admin/model/oauth/codex/select", handle: async ({ env, request }) => {
+    const { accountId } = await body(request, Type.Object({ accountId: Type.String({ format: "uuid" }) }, strict));
+    return modelLogin(async () => { const registry = env.REGISTRY.getByName("main"); await registry.codexSelect(accountId); return registry.modelView(); });
+  } },
+  { method: "POST", path: "/admin/model/oauth/codex/catalog", handle: ({ env }) => modelLogin(async () => {
+    const registry = env.REGISTRY.getByName("main"); await registry.codexRefreshCatalog(); return registry.modelView();
+  }) },
   { method: "POST", path: "/admin/model/oauth/codex/logout",
-    handle: ({ env }) => modelLogin(async () => { await env.REGISTRY.getByName("main").codexLogout(); return { ok: true }; }) },
+    handle: ({ env }) => modelLogin(() => env.REGISTRY.getByName("main").codexLogout()) },
 
   { method: "GET", path: "/admin/events", handle: async ({ env, url }) => {
     const { thread, query } = eventQuery(url);

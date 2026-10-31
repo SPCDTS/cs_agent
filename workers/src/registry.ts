@@ -10,7 +10,8 @@ import { OAuthFailure } from "./mcp/oauth-fetch";
 import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelection, type Settings, type SettingsSnapshot, defaultOpsSettings, opsSettingsRevision, OpsSettingsSchema, type OpsSettings, type OpsSettingsSnapshot } from "./settings";
 import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, type CredentialLease } from "./model-credentials";
 import { openModels, providerStatuses, selectionProblem, type ProviderStatus } from "./models";
-import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, exchangeCode, parseCallback, startCodexLogin } from "./codex-login";
+import { CODEX_PROVIDER } from "./codex-login";
+import { CHATGPT_SCHEMA, ChatGPTAccounts, type ChatGPTView } from "./chatgpt-accounts";
 import { GrantStore, digest, type GrantAccess } from "./grants";
 import { AlertStore, type AlertInput, type TurnReport } from "./alerts";
 import { ownerIds } from "./policy";
@@ -21,8 +22,7 @@ type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash
 export type McpStatus = { server: string; enabled: boolean; credential: "none" | "static" | "oauth"; login: "ok" | "needed" | "error" | "unconfigured" };
 const Pending = Type.Object({ verifier: Type.String(), config: Type.String(), discovery: DiscoverySchema }, { additionalProperties: false });
 const identity = (server: OAuthServer, field: string) => JSON.stringify([server.id, server.credential.accountId, server.credential.revision, field]);
-type ModelLoginRow = { state: string; provider_id: string; verifier_enc: string; created_at: number; expires_at: number };
-export type ModelView = { current: ModelSelection; revision: string; providers: ProviderStatus[]; codex: { loggedIn: boolean; email?: string; expiresAt?: number } };
+export type ModelView = { current: ModelSelection; revision: string; providers: ProviderStatus[]; codex: ChatGPTView };
 export type ModelStatus = (ModelSelection & { codexLoggedIn: boolean }) | { unavailable: string };
 export type PutSettingsResult = { ok: true; current: SettingsSnapshot } | { ok: false; error: "conflict"; current: SettingsSnapshot } | { ok: false; error: "invalid_model"; reason: string };
 
@@ -34,7 +34,8 @@ export class RegistryDO extends DurableObject<Env> {
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly access = new Map<string, Promise<string | undefined>>();
   private readonly credentials = new SqlCredentialStore(this.ctx.storage.sql, this.vault);
-  private readonly models = openModels(this.env, this.credentials);
+  private readonly chatgpt = new ChatGPTAccounts(this.ctx.storage.sql, this.vault, this.credentials);
+  private readonly models = openModels(this.env, this.chatgpt.store);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -50,8 +51,7 @@ export class RegistryDO extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS mcp_oauth_client (server_id TEXT PRIMARY KEY, registration_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, revision TEXT NOT NULL, updated_at INTEGER NOT NULL);
       ${MODEL_CREDENTIALS_SCHEMA};
-      CREATE TABLE IF NOT EXISTS model_logins (state TEXT PRIMARY KEY, provider_id TEXT NOT NULL, verifier_enc TEXT NOT NULL,
-        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
+      ${CHATGPT_SCHEMA}
       ${SKILLS_SCHEMA};
     `);
   }
@@ -196,9 +196,9 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   async modelView(): Promise<ModelView> {
-    const settings = this.settings(), meta = this.credentials.meta(CODEX_PROVIDER);
+    const settings = this.settings();
     return { current: settings.value.model, revision: settings.revision, providers: await this.providers(),
-      codex: { loggedIn: meta !== undefined, ...(meta?.email ? { email: meta.email } : {}), ...(meta?.expiresAt ? { expiresAt: meta.expiresAt } : {}) } };
+      codex: this.chatgpt.view() };
   }
 
   async modelStatus(): Promise<ModelStatus> {
@@ -207,42 +207,19 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   // Thread 侧 CredentialStore 的 RPC；凭据只在 Worker 内部的 DO 之间传递，不经任何 HTTP 响应。
-  credentialRead(providerId: string) { return this.credentials.read(providerId); }
-  credentialList() { return this.credentials.list(); }
-  credentialDelete(providerId: string) { return this.credentials.delete(providerId); }
-  credentialAcquire(providerId: string): Promise<CredentialLease> { return this.credentials.acquire(providerId); }
+  credentialRead(providerId: string) { return this.chatgpt.store.read(providerId); }
+  credentialList() { return this.chatgpt.store.list(); }
+  credentialDelete(providerId: string) { return this.chatgpt.store.delete(providerId); }
+  credentialAcquire(providerId: string): Promise<CredentialLease> { return this.chatgpt.acquire(providerId); }
   credentialSettle(providerId: string, lease: string, expectedUpdatedAt: number | null, next?: Credential) {
-    return this.credentials.settle(providerId, lease, expectedUpdatedAt, next);
+    return this.chatgpt.settle(providerId, lease, expectedUpdatedAt, next);
   }
-
-  /** 每个 provider 只留一条待完成登录；verifier 加密保存，AAD 绑定 state。 */
-  async codexLoginStart(): Promise<{ url: string }> {
-    if (!this.vault.configured) throw new ModelLoginError("unconfigured");
-    const pending = await startCodexLogin(), now = Date.now();
-    const verifier = await this.vault.encrypt(pending.verifier, `model-login:${pending.state}`);
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec("DELETE FROM model_logins WHERE expires_at <= ? OR provider_id = ?", now, CODEX_PROVIDER);
-      this.ctx.storage.sql.exec("INSERT INTO model_logins VALUES (?, ?, ?, ?, ?)", pending.state, CODEX_PROVIDER, verifier, now, now + LOGIN_TTL_MS);
-    });
-    return { url: pending.url };
-  }
-
-  /** state 在换 token 之前就消费掉，失败也不能用同一个回调地址重试。 */
-  async codexLoginComplete(callbackUrl: string): Promise<{ email?: string }> {
-    const { code, state } = parseCallback(callbackUrl);
-    const row = this.ctx.storage.sql.exec<ModelLoginRow>("DELETE FROM model_logins WHERE state = ? RETURNING *", state).toArray()[0];
-    if (!row || row.expires_at <= Date.now()) throw new ModelLoginError("invalid_state");
-    let verifier: string;
-    try { verifier = await this.vault.decrypt(row.verifier_enc, `model-login:${state}`); } catch { throw new ModelLoginError("invalid_state"); }
-    const credential = await exchangeCode(code, verifier);
-    await this.credentials.modify(row.provider_id, async () => credential);
-    return credential.email ? { email: credential.email } : {};
-  }
-
-  async codexLogout(): Promise<void> {
-    this.ctx.storage.sql.exec("DELETE FROM model_logins WHERE provider_id = ?", CODEX_PROVIDER);
-    await this.credentials.delete(CODEX_PROVIDER);
-  }
+  codexLoginStart(accountId?: string) { return this.chatgpt.start(accountId); }
+  codexLoginBegin(ticket: string, port: number) { return this.chatgpt.begin(ticket, port); }
+  codexLoginComplete(ticket: string, callbackUrl: string, tokens: unknown) { return this.chatgpt.complete(ticket, callbackUrl, tokens); }
+  codexLogout() { return this.chatgpt.logout(); }
+  codexSelect(accountId: string) { return this.chatgpt.select(accountId); }
+  codexRefreshCatalog() { return this.chatgpt.refreshCatalog(); }
 
   private server(id: string): OAuthServer {
     const server = MCP_CONFIG.servers.find(server => server.id === id);
