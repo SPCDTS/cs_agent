@@ -448,16 +448,12 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     $("app").hidden = false;
     $("status").hidden = true;
     startConsole();
-    refresh();
-    loadSettings().catch(fail);
-    loadModel().catch(fail);
-    loadMemory().catch(fail);
-    loadSkills().catch(fail);
+    loadOverview().catch(fail);
     clearInterval(state.timer);
-    state.timer = setInterval(() => { refresh(); refreshConsole(); }, 30000);
+    state.timer = null;
   }
   function refresh() {
-    return Promise.all([loadOverview(), loadEvents(), loadSchedules(), loadSources()]).then(() => {
+    return Promise.all([loadOverview(), loadManagement(cs.view)]).then(() => {
       $("refreshed").textContent = "刷新于 " + time(Date.now());
     }).catch(fail);
   }
@@ -467,7 +463,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     state.overview = overview;
     renderOverview(overview);
     renderConsoleThreads();
-    await Promise.all(Object.keys(state.subagents).map(loadSubagents));
+    if(cs.view==="memory")await Promise.all(Object.keys(state.subagents).map(loadSubagents));
   }
   function renderOverview(o) {
     $("commit").textContent = location.host + " · " + o.commit;
@@ -532,7 +528,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         ]),
         el("td", { className: "mono", text: broken ? "-" : time(s.lastSentAt) }),
         el("td", {}, [
-          el("button", { className: "btn compact", type: "button", text: "事件", onclick: () => { selectThread(thread.key); $("events-section").scrollIntoView(); } }),
+          el("button", { className: "btn compact", type: "button", text: "事件", onclick: () => { state.eventThread=thread.key;$("ev-thread").value=thread.key;state.before=undefined;state.history=[];consoleView("operations");$("events-section").scrollIntoView(); } }),
           busy ? el("button", { className: "btn compact danger", type: "button", text: "停止", onclick: () => stop(thread.key) }) : null,
           thread.sandbox === "running" ? el("button", { className: "btn compact danger", type: "button", text: "重置沙箱", onclick: () => resetSandbox(thread.key) }) : null,
         ]),
@@ -615,7 +611,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     }
   }
   async function loadEvents() {
-    let path = "/admin/events?limit=50&thread=" + encodeURIComponent(state.eventThread);
+    let path = "/admin/events?limit=10&thread=" + encodeURIComponent(state.eventThread);
     if (state.eventKind) path += "&kind=" + encodeURIComponent(state.eventKind);
     if (state.before !== undefined) path += "&before=" + state.before;
     const page = await api("GET", path);
@@ -623,7 +619,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     renderEvents(page.events);
     $("ev-prev").disabled = state.history.length === 0;
     $("ev-next").disabled = page.next === undefined;
-    $("events-meta").textContent = "第 " + (state.history.length + 1) + " 页 · 每页 50 条";
+    $("events-meta").textContent = "第 " + (state.history.length + 1) + " 页 · 每页 10 条";
   }
   function resetEvents() { state.before = undefined; state.history = []; return loadEvents().catch(fail); }
   function selectThread(key) { state.eventThread = key; $("ev-thread").value = key; resetEvents(); }

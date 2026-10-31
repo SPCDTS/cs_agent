@@ -96,12 +96,12 @@ function requestQuery(url: URL): RequestQuery {
     const n = raw === null ? fallback : Number(raw); if (!Number.isSafeInteger(n)) throw new HttpError(400, "invalid_query"); return n;
   };
   const since = num("since", now - 86400_000), until = num("until", now), limit = num("limit", 40), before = num("before", 0);
-  const thread = p.get("thread") || undefined, model = p.get("model") || undefined, status = p.get("status") || undefined, purpose = p.get("purpose") || undefined;
+  const thread = p.get("thread") || undefined, model = p.get("model") || undefined, status = p.get("status") || undefined, purpose = p.get("purpose") || undefined, turnId = p.get("turn") || undefined;
   if (until < since || until - since > 31 * 86400_000 || limit < 1 || limit > 100 ||
     thread && !new RegExp("^(" + THREAD_KEY + ")$").test(thread) || model && model.length > 200 ||
     status && !["running", "done", "error", "aborted", "interrupted"].includes(status) ||
-    purpose && !["conversation", "background", "subagent", "compaction"].includes(purpose)) throw new HttpError(400, "invalid_query");
-  return { since, until, limit, ...(before ? { before } : {}), thread, model, status: status as RequestQuery["status"], purpose };
+    purpose && !["conversation", "background", "subagent", "compaction"].includes(purpose) || turnId && (!thread || !/^turn:[A-Za-z0-9:_-]{1,180}$/.test(turnId))) throw new HttpError(400, "invalid_query");
+  return { since, until, limit, ...(before ? { before } : {}), thread, model, status: status as RequestQuery["status"], purpose, turnId };
 }
 async function knownThread(env: Env, key: string) {
   if (key !== "owner" && !(await env.BRIDGE.getByName("napcat").threadList()).some(t => t.key === key)) throw new HttpError(404, "not_found");
@@ -148,8 +148,21 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     if (!detail) throw new HttpError(404, "not_found");
     return json(detail);
   } },
-  { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/chat$"), handle: async ({ env, params }) =>
-    json(await (await knownThread(env, params.key!)).chatView(params.key!)) },
+  { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/chat$"), handle: async ({ env, params, url }) => {
+    const after = url.searchParams.get("after"), pending = url.searchParams.getAll("pending");
+    if (after !== null && (!/^\d{1,16}(?:\.\d+)?$/.test(after) || !Number.isFinite(Number(after))) || pending.length > 100 || pending.some(id => !/^(?:qq:\d+|web:[A-Za-z0-9-]+)$/.test(id))) throw new HttpError(400, "invalid_query");
+    return json(await (await knownThread(env, params.key!)).chatView(params.key!, after === null ? undefined : { after: Number(after), pending }));
+  } },
+  { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/trace$"), handle: async ({ env, params, url }) => {
+    const turns = url.searchParams.getAll("turn"), after = url.searchParams.get("after") ?? "0";
+    if (turns.length > 100 || turns.some(turn => !/^turn:[A-Za-z0-9:_-]{1,180}$/.test(turn)) || !/^\d{1,15}$/.test(after)) throw new HttpError(400, "invalid_query");
+    return json(await env.REQUESTS.getByName("main").turnTrace(params.key!, [...new Set(turns)], Number(after)));
+  } },
+  { method: "GET", path: /^\/admin\/tools\/(?<id>[0-9a-f-]{36})$/, handle: async ({ env, params }) => {
+    const detail = await env.REQUESTS.getByName("main").toolDetail(params.id!);
+    if (!detail) throw new HttpError(404, "not_found");
+    return json(detail);
+  } },
   { method: "POST", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/chat$"), handle: async ({ env, request, params }) => {
     const raw = await request.arrayBuffer();
     if (raw.byteLength > 68000) throw new HttpError(413, "too_large");

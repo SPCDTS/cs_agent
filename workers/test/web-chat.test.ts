@@ -37,6 +37,25 @@ describe("web chat continues QQ",()=>{
     await expect.poll(async()=> (await owner().chatView("owner")).messages.filter(m=>m.role==="assistant"&&m.source==="web").length).toBe(1);
     const page=await owner().chatView("owner");
     expect(page.messages.filter(m=>m.source==="web"&&m.role==="user")).toHaveLength(1);
+    const web = page.messages.find(m=>m.id==="web:"+command.requestId)!;
+    expect(web.turnId).toMatch(/^turn:/);
+    const store=env.REQUESTS.getByName("main");
+    await expect.poll(async()=> (await store.turnTrace("owner",[web.turnId!],0)).requests.filter(r=>r.status==="done").length).toBe(2);
+    const trace=await store.turnTrace("owner",[web.turnId!],0);
+    const traceResponse=await worker.fetch(new Request("https://test/admin/threads/owner/trace?turn="+encodeURIComponent(web.turnId!),{headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
+    expect(traceResponse.status).toBe(200);
+    expect(trace.tools).toHaveLength(1);
+    expect(trace.tools[0]).toMatchObject({name:"send_message",status:"done",binding:{inputId:web.id,turnId:web.turnId}});
+    expect(JSON.stringify(trace)).not.toContain("记得你在 QQ 里说过海风");
+    const request=trace.requests.find(r=>r.toolCalls?.some(t=>t.name==="send_message"))!;
+    const detail=await store.detail(request.id);
+    expect(detail?.tools[0]).not.toHaveProperty("result");
+    expect((await store.toolDetail(trace.tools[0].id))?.result?.text).toContain('"status":"sent"');
+    expect(detail?.related).toHaveLength(2);
+    expect((await store.turnTrace("owner",[web.turnId!],trace.cursor)).requests).toEqual([]);
+    const delta=await owner().chatView("owner",{after:Date.now()+1,pending:[web.id]});
+    expect(delta.messages.map(m=>m.id)).toEqual([web.id]);
+    expect(delta.messages[0].status).toBe("done");
     expect(contexts.some(t=>t.includes("海风")&&t.includes("网页里继续"))).toBe(true);
     await runInDurableObject(owner(),(_instance,state)=>{
       expect(state.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM outbox").one().n).toBe(0);

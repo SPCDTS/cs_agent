@@ -1,4 +1,4 @@
-// 复用管理台的 card/stack/field/table 样式与 api/el/show/fail/time 辅助函数；所有加载均由按钮触发。
+// 复用管理台的 card/stack/field/table 样式与 api/el/show/fail/time 辅助函数；进入对应页面或点击刷新时加载。
 const limitFields = [
   {name:"perChatMinute",label:"每会话每分钟",max:600}, {name:"perChatHour",label:"每会话每小时",max:36000},
   {name:"chatBreakerMinutes",label:"会话熔断（分钟）",max:1440}, {name:"globalMinute",label:"全局每分钟",max:6000},
@@ -13,13 +13,13 @@ const numbers = (prefix:string,fields:{name:string;label:string;max?:number}[],o
 
 export const ACCESS_HTML = `
 <section id="access-panel" class="card">
-  <div class="section-head"><h2 class="h2">人格、授权与运维</h2><span id="access-loaded" class="muted small">按需加载，不自动刷新</span><div class="grow"></div><button id="access-refresh" class="btn" type="button">加载 / 刷新</button></div>
+  <div class="section-head"><h2 class="h2">权限与运维</h2><span id="access-loaded" class="muted small">按需加载，不自动刷新</span><div class="grow"></div><button id="access-refresh" class="btn" type="button">加载 / 刷新</button></div>
   <div class="stack"><p class="muted small" style="margin:0">沙箱按需启动，空闲 3 分钟自动停止。发送账本最多 5000 条，正文保留 30 天。</p></div>
 </section>
 <section class="card">
   <div class="section-head"><h2 class="h2">人格设定</h2><span class="muted small">下一回合生效</span><div class="grow"></div><span id="access-persona-revision" class="muted small"></span></div>
   <form id="access-persona-form" class="stack">
-    <label for="access-persona">全局人格与工作方式</label><textarea id="access-persona" maxlength="65536" placeholder="点击上方加载后编辑"></textarea>
+    <label for="access-persona">全局人格与工作方式</label><textarea id="access-persona" maxlength="65536" placeholder="填写机器人的人格与工作方式"></textarea>
     <div class="row"><button id="access-persona-save" class="btn primary" type="submit" disabled>保存人格</button><span class="muted small">独立于长期记忆画像；保存会检查是否已有其他修改。</span></div>
   </form>
 </section>
@@ -121,7 +121,7 @@ export const ACCESS_APP_JS = String.raw`
     if(!data.deliveries.length)accessEmpty("access-deliveries",4);
   }
   async function loadAccess(){
-    await Promise.all([loadAccessPersona(),loadAccessGrants(),loadAccessOps(),loadAccessAlerts(),loadAccessDeliveries()]);
+    await Promise.all([loadAccessGrants(),loadAccessOps(),loadAccessAlerts(),loadAccessDeliveries()]);
     $("access-loaded").textContent="已刷新 "+time(Date.now());
   }
   if($("access-panel")){

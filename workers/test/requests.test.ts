@@ -5,7 +5,7 @@ import { createAssistantMessageEventStream, type AssistantMessage, type StreamOp
 import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { captureModels } from "../src/requests/capture";
 import { snapshot, errorSummary } from "../src/requests/snapshot";
-import type { RequestDetail, RequestQuery } from "../src/requests/types";
+import type { RequestDetail, RequestQuery, ToolTrace } from "../src/requests/types";
 import worker from "../src/index";
 afterEach(() => reset());
 const query = (): RequestQuery => ({ since: Date.now() - 86400_000, until: Date.now() + 1000, limit: 40 });
@@ -49,7 +49,7 @@ describe("request observability", () => {
         errorMessage: "<html><head><style>" + ".hidden{display:none}".repeat(100) + "</style></head><body><h1>Request blocked</h1><p>Contact support.</p></body></html>" });
       void (async () => {
         await options?.onResponse?.({ status: 403, headers: { "content-type": "text/html", "set-cookie": "never-store-cookie" } }, faux.models[0]);
-        if (reported) await options?.onProviderStreamEvent?.({ usage: { prompt_tokens: 0, completion_tokens: 0 } }, faux.models[0]);
+        if (reported) await options?.onProviderStreamEvent?.({ usage: { prompt_tokens: 0, completion_tokens: 0, prompt_tokens_details: { cached_tokens: 0 } } }, faux.models[0]);
         stream.push({ type: "error", reason: "error", error: message });
       })();
       return stream;
@@ -62,6 +62,7 @@ describe("request observability", () => {
     reported = true; await models.completeSimple(faux.models[0], { messages: [] }); await Promise.all(pending);
     const rows = (await env.REQUESTS.getByName("main").list(query())).requests;
     expect(rows.map(r => r.inputTokens)).toEqual([0, null]);
+    expect(rows.map(r => r.cacheRead)).toEqual([0, null]);
     expect(rows.every(r => r.status === "error")).toBe(true);
     expect(rows.map(r => r.error)).toEqual(["HTTP 403 · Request blocked\nContact support.", "HTTP 403 · Request blocked\nContact support."]);
     expect(statuses).toEqual([403]);
@@ -86,11 +87,32 @@ describe("request observability", () => {
     await runInDurableObject(store, (_instance, state) => { expect(state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM request_details").one().n).toBe(2); });
   });
   it("guards every new route and validates queries", async () => {
-    for (const path of ["/admin/requests", "/admin/usage", "/admin/requests/"+crypto.randomUUID(), "/admin/threads/owner/chat"]) {
+    for (const path of ["/admin/requests", "/admin/usage", "/admin/requests/"+crypto.randomUUID(), "/admin/threads/owner/chat", "/admin/threads/owner/trace", "/admin/tools/"+crypto.randomUUID()]) {
       expect((await worker.fetch(new Request("https://test"+path), { ...env, ADMIN_TOKEN:"test" })).status).toBe(401);
     }
     const call = (path: string) => worker.fetch(new Request("https://test"+path, { headers:{Authorization:"Bearer test"} }), { ...env, ADMIN_TOKEN:"test" });
     for (const q of ["status=unexpected", "since=NaN", "limit=101", "thread=other", "since=0&until=9999999999999"]) expect((await call("/admin/requests?"+q)).status).toBe(400);
     expect((await call("/admin/usage")).status).toBe(200);
+    expect((await call("/admin/threads/owner/trace?turn=wrong")).status).toBe(400);
+  });
+  it("keeps tool failures separate from model status and reads bodies only in detail", async () => {
+    const store=env.REQUESTS.getByName("main"), request=detail(crypto.randomUUID());
+    request.request.binding={turnId:"turn:test",inputId:"web:test",generation:0};
+    request.request.toolCalls=[{id:"call1",name:"qq_image"}];
+    await store.record(request);
+    const first=await store.turnTrace("owner",["turn:test"],0);
+    const tool:ToolTrace={id:crypto.randomUUID(),thread:"owner",binding:request.request.binding,callId:"call1",name:"qq_image",startedAt:Date.now(),endedAt:null,status:"running",arguments:{text:'{"message_id":"123"}',chars:20,truncated:false}};
+    await store.recordTool(tool);
+    const running=await store.turnTrace("owner",["turn:test"],first.cursor);
+    expect(running.requests).toEqual([]);expect(running.tools[0].status).toBe("running");
+    expect(JSON.stringify(running)).not.toContain("message_id");
+    await store.recordTool({...tool,status:"error",endedAt:Date.now(),result:{text:"image unavailable",chars:17,truncated:false}});
+    const ended=await store.turnTrace("owner",["turn:test"],running.cursor);
+    expect(ended.tools[0].status).toBe("error");
+    const captured=await store.detail(request.request.id);
+    expect(captured?.request.status).toBe("done");expect(captured?.tools[0].status).toBe("error");
+    expect(captured?.tools[0]).not.toHaveProperty("result");
+    expect((await store.turnTrace("group:123",["turn:test"],0)).tools).toEqual([]);
+    expect((await store.toolDetail(tool.id))?.arguments?.text).toContain("message_id");
   });
 });

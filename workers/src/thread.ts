@@ -28,6 +28,7 @@ import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnI
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { modelChange, openModels, sameSelection } from "./models";
 import { captureModels } from "./requests/capture";
+import { requestTrace } from "./requests/trace";
 import { remoteCredentials } from "./model-credentials";
 import { MEMORY_SCHEMA } from "./memory/schema";
 import { MemoryStore, MemoryStoreError, type Profile } from "./memory/store";
@@ -128,6 +129,7 @@ export class ThreadDO extends DurableObject<Env> {
       // 跟进输入会并入同一 Pi run、共用 turn_id；定时运行的发送条数只能按输入计。
       if (!outboxColumns.some(column => column.name === "input_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN input_id TEXT");
       await tx.exec("CREATE INDEX IF NOT EXISTS inbound_turn ON inbound(turn_id); CREATE INDEX IF NOT EXISTS outbox_turn ON outbox(turn_id)");
+      await tx.exec("CREATE INDEX IF NOT EXISTS inbound_platform ON inbound(platform_message_id,user_id,chat_kind,chat_id); CREATE INDEX IF NOT EXISTS outbox_message ON outbox(message_id)");
       await tx.run("UPDATE inbound SET chat_id = user_id WHERE chat_id = ''");
       await tx.run("UPDATE inbound SET platform_message_id = message_id WHERE platform_message_id = ''");
     }).then(async () => {
@@ -184,11 +186,16 @@ export class ThreadDO extends DurableObject<Env> {
 
   private async openRuntime(): Promise<Runtime> {
     await this.initialize();
-    const models = captureModels(this.models(), this.env, this.ctx, { thread: await this.namespace(), actor: "thread", purpose: "conversation" }), selection = (await this.loadSettings(true)).model;
+    const trace = requestTrace(this.env, await this.namespace(), async (api, c) => {
+      const input = await this.currentInput(harness, api, api.conversationId, c);
+      return input?.turn_id ? { turnId: input.turn_id, inputId: input.message_id, generation: input.session_generation } : undefined;
+    });
+    const models = captureModels(this.models(), this.env, this.ctx, { thread: await this.namespace(), actor: "thread", purpose: "conversation" }, trace.binding), selection = (await this.loadSettings(true)).model;
     const memory = new MemoryStore(this.database, await this.namespace());
     // 相同 storage 对象共享事务队列，避免宿主写入被 Pi 的事务一起回滚。
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
     const registry = createRegistry();
+    registry.install(trace.extension);
     registry.install(defineExtension({
       name: "cs-workers",
       sections: [
@@ -753,24 +760,27 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   /** 只读已提交消息；轮询还会恢复已落库但尚未接纳的网页输入。 */
-  async chatView(thread: string) {
+  async chatView(thread: string, delta?: { after: number; pending: string[] }) {
     await this.initialize();
     await this.bindNamespace(thread);
-    type ChatRow = { id: string; role: "user" | "assistant"; source: "qq" | "web"; name: string; text: string; at: number; status: string | null; assets_json: string };
+    type ChatRow = { id: string; role: "user" | "assistant"; source: "qq" | "web"; name: string; text: string; at: number; status: string | null; turnId: string | null; assets_json: string };
     const rows = await this.database.all<ChatRow>(`
       SELECT * FROM (
-        SELECT 'qq:' || id AS id, CASE WHEN is_self=1 THEN 'assistant' ELSE 'user' END AS role,
-          'qq' AS source,nickname AS name,text,time * 1000 AS at,NULL AS status,'[]' AS assets_json FROM messages
+        SELECT 'qq:' || m.id AS id, CASE WHEN m.is_self=1 THEN 'assistant' ELSE 'user' END AS role,
+          'qq' AS source,m.nickname AS name,m.text,m.time * 1000 AS at,i.status,'[]' AS assets_json,
+          COALESCE(i.turn_id,(SELECT turn_id FROM outbox WHERE message_id=m.message_id ORDER BY id DESC LIMIT 1)) AS turnId
+          FROM messages m LEFT JOIN inbound i ON i.message_id=(SELECT message_id FROM inbound WHERE platform_message_id=m.message_id AND user_id=m.user_id AND chat_kind || ':' || chat_id=m.scope ORDER BY rowid DESC LIMIT 1)
         UNION ALL
-        SELECT message_id AS id,'user' AS role,'web' AS source,nickname AS name,text,received_at * 1000 AS at,status,'[]' AS assets_json
+        SELECT message_id AS id,'user' AS role,'web' AS source,nickname AS name,text,received_at * 1000 AS at,status,'[]' AS assets_json,turn_id AS turnId
           FROM inbound WHERE reply_channel='web' AND kind='message'
         UNION ALL
-        SELECT 'web-out:' || id AS id,'assistant' AS role,'web' AS source,'助手' AS name,text,at,NULL AS status,assets_json FROM web_outputs
-      ) ORDER BY at DESC,id DESC LIMIT 100
-    `);
+        SELECT 'web-out:' || w.id AS id,'assistant' AS role,'web' AS source,'助手' AS name,w.text,w.at,NULL AS status,w.assets_json,i.turn_id AS turnId FROM web_outputs w LEFT JOIN inbound i ON i.message_id=w.input_id
+      ) ${delta ? `WHERE at>=?${delta.pending.length ? ` OR id IN (${delta.pending.map(() => "?").join(",")})` : ""}` : ""} ORDER BY at DESC,id DESC LIMIT 100
+    `, ...(delta ? [delta.after, ...delta.pending] : []));
     const queued = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued' AND reply_channel='web'"))?.n ?? 0;
     if (queued) this.ctx.waitUntil(this.pump());
-    return { messages: rows.reverse().map(({assets_json,...row})=>({...row,assets:JSON.parse(assets_json) as AssetRef[]})), queued, limit: 100 };
+    const active = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued'"))?.n ?? 0;
+    return { messages: rows.reverse().map(({assets_json,...row})=>({...row,assets:JSON.parse(assets_json) as AssetRef[]})), queued, active, limit: 100, delta: !!delta };
   }
 
   async stats() {

@@ -1,3 +1,7 @@
+import { REQUEST_DETAIL_CSS, REQUEST_DETAIL_JS } from "./request-detail";
+import { TRACE_JS } from "./trace-ui";
+import { MANAGEMENT_JS } from "./management";
+
 export const CONSOLE_CSS = String.raw`
 :root{--bg:#F6F7F9;--surface:#fff;--ink:#13272B;--muted:#64767B;--accent:#087F73;--line:#E7EDF0}
 body{background:var(--bg);color:var(--ink);font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
@@ -35,15 +39,20 @@ main{max-width:1600px;margin-left:204px;padding:30px 34px;width:calc(100% - 204p
 @media(max-width:1100px){.analytics{grid-template-columns:1fr}.model-panel{display:none}.metrics{gap:12px}.metric-value{font-size:24px}.chat-layout{grid-template-columns:185px minmax(0,1fr)}}
 @media(max-width:760px){.sidebar{position:static;width:auto;padding:15px;gap:14px;border-right:0}.sidebar .wordmark{font-size:20px;padding:0}.sidebar nav{flex-direction:row;gap:4px;overflow:auto}.nav-btn{white-space:nowrap;font-size:13px;padding:9px 11px}.sidebar-foot{display:none}.topbar{margin-left:0}.topbar-inner{padding:12px 18px}.topbar .brand{display:none}main{margin:0;padding:22px 16px;width:100%}.status-line{margin:10px 16px}.console-head h1{font-size:24px}.metrics{grid-template-columns:repeat(2,1fr);gap:18px}.metrics>div:last-child{grid-column:span 2}.filters{gap:8px}.filters label{flex:1;min-width:120px}.chat-layout{height:calc(100dvh - 300px);min-height:530px;grid-template-columns:1fr}.chat-threads{max-height:110px;border-right:0;border-bottom:1px solid var(--line);padding:10px;display:flex;gap:6px}.chat-threads h2{display:none}#chat-thread-list{display:flex;gap:6px}.chat-thread{min-width:140px;width:auto;margin:0}.chat-top,.chat-composer{padding:12px 15px}.chat-messages{padding:18px 15px}.chat-message{max-width:95%}.detail-stats{grid-template-columns:repeat(2,1fr)}.detail-body{padding:16px}.detail-head{padding:16px}.console-head .row{width:100%}.chart-panel{padding:15px}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+${REQUEST_DETAIL_CSS}
 `;
 
 export const CONSOLE_NAV = String.raw`<aside class="sidebar">
   <div class="wordmark">cs<span> / </span>agent</div>
   <nav aria-label="管理台导航">
     <button type="button" class="nav-btn" data-view="usage" aria-current="page">用量总览</button>
-    <button type="button" class="nav-btn" data-view="requests">请求记录</button>
     <button type="button" class="nav-btn" data-view="chat">会话对话</button>
-    <button type="button" class="nav-btn" data-view="manage">配置与管理</button>
+    <div class="manage-nav-label">管理</div>
+    <button type="button" class="nav-btn" data-view="models">模型与接入</button>
+    <button type="button" class="nav-btn" data-view="memory">会话与记忆</button>
+    <button type="button" class="nav-btn" data-view="operations">任务与事件</button>
+    <button type="button" class="nav-btn" data-view="access">权限与运维</button>
+    <button type="button" class="nav-btn" data-view="workspace">工作区</button>
   </nav>
   <div class="sidebar-foot">会话、请求与上下文<br>在一个地方查看</div>
 </aside>`;
@@ -59,12 +68,13 @@ export const CONSOLE_HTML = String.raw`
     <label>用途<select id="req-purpose"><option value="">全部用途</option><option value="conversation">主会话</option><option value="subagent">子任务</option><option value="background">记忆与维护</option><option value="compaction">上下文压缩</option></select></label>
     <label>状态<select id="req-status"><option value="">全部状态</option><option value="done">完成</option><option value="running">进行中</option><option value="error">错误</option><option value="aborted">已取消</option><option value="interrupted">采集未完成</option></select></label>
   </div>
+  <div id="request-turn-filter" class="request-turn-filter" hidden><span>只看从对话选中的这一轮请求</span><button id="request-turn-clear" class="btn compact" type="button">查看全部</button></div>
   <div id="usage-summary">
     <div class="metrics">
       <div><div class="metric-label">模型请求</div><div id="metric-requests" class="metric-value">—</div><div id="metric-failures" class="metric-note">等待数据</div></div>
       <div><div class="metric-label">输入 token</div><div id="metric-input" class="metric-value">—</div><div class="metric-note">包含缓存读取与写入</div></div>
       <div><div class="metric-label">输出 token</div><div id="metric-output" class="metric-value">—</div><div class="metric-note">包含模型推理用量</div></div>
-      <div><div class="metric-label">缓存命中率</div><div id="metric-cache" class="metric-value">—</div><div class="metric-note">缓存读取 / 总输入</div></div>
+      <div><div class="metric-label">缓存命中率</div><div id="metric-cache" class="metric-value">—</div><div id="metric-cache-note" class="metric-note">缓存读取 / 总输入</div></div>
       <div><div class="metric-label">平均请求耗时</div><div id="metric-duration" class="metric-value">—</div><div id="metric-measured" class="metric-note">仅统计已完成采集</div></div>
     </div>
     <div class="analytics">
@@ -73,7 +83,7 @@ export const CONSOLE_HTML = String.raw`
     </div>
   </div>
   <section class="card"><div class="section-head"><h2 class="h2">请求记录</h2><span class="small muted">一次模型调用一条记录，工具续轮分别统计</span><span class="grow"></span><span id="req-count" class="small muted"></span></div>
-    <div class="scroll"><table class="wide console-table"><thead><tr><th>时间 / 请求</th><th>模型 / 用途</th><th>会话</th><th>状态</th><th class="num">输入</th><th class="num">输出</th><th class="num">耗时</th></tr></thead><tbody id="request-rows"></tbody></table></div>
+    <div class="scroll"><table class="wide console-table"><thead><tr><th>时间 / 请求</th><th>模型 / 用途</th><th>会话</th><th>状态</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存命中率</th><th class="num">耗时</th></tr></thead><tbody id="request-rows"></tbody></table></div>
     <div id="request-empty" class="empty-state" hidden><strong>所选范围内还没有请求</strong>新版本会从上线后开始记录。可以切换范围，或在会话里发一条消息。</div>
     <div class="pager"><span id="request-state" class="small muted" role="status"></span><div class="row"><button id="req-prev" class="btn" type="button" disabled>上一页</button><button id="req-next" class="btn" type="button" disabled>下一页</button></div></div>
   </section>
@@ -98,7 +108,8 @@ export const CONSOLE_HTML = String.raw`
 
 export const CONSOLE_APP_JS = String.raw`
   const cs = { view:"usage", until:Date.now(), before:undefined, next:undefined, pages:[], requestVersion:0, detailVersion:0,
-    chat:"owner", chatVersion:0, fingerprint:"", timer:null, sending:false, epoch:0, pending:null };
+    chat:"owner", chatVersion:0, fingerprint:"", timer:null, sending:false, epoch:0, pending:null,
+    chatActive:false,requestActive:false,chatLoading:false,messages:new Map(),requests:new Map(),tools:new Map(),traceTurns:"",traceCursor:0,chatAfter:null,turn:null,detailId:null };
   const nf = n => typeof n === "number" ? n.toLocaleString("zh-CN") : "—";
   const compact = n => n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(1)+"k":nf(n);
   const statuses={running:"进行中",done:"完成",error:"错误",aborted:"已取消",interrupted:"采集未完成",queued:"排队 / 执行中",failed:"失败"};
@@ -116,34 +127,32 @@ export const CONSOLE_APP_JS = String.raw`
       onclick:()=>chooseChat(t.key)},[el("span",{text:t.name||(t.key==="owner"?"主人会话":t.key)}),el("small",{text:t.key})])));
   }
   function chooseChat(key){
-    cs.chat=key;cs.chatVersion++;cs.fingerprint="";
+    cs.chat=key;cs.chatVersion++;cs.fingerprint="";resetChatTrace();
     $("chat-messages").replaceChildren(el("div",{className:"empty-state",text:"正在载入对话…"}));
-    $("chat-input").value="";restorePending();renderConsoleThreads();loadChat().catch(fail);
+    $("chat-input").value="";restorePending();renderConsoleThreads();if(cs.view==="chat")loadChat().catch(fail);
   }
   function consoleView(view){
-    if ((cs.view==="chat"||cs.view==="manage")&&(view==="requests"||view==="usage")) { cs.until=Date.now();cs.before=undefined;cs.pages=[]; }
+    if(cs.view!==view){clearTimeout(cs.timer);detailCache.clear();toolCache.clear();cs.requestVersion++;if(cs.view==="chat"){cs.chatVersion++;cs.chatLoading=false;}}
+    if(cs.view!=="usage"&&view==="usage"){cs.until=Date.now();cs.before=undefined;cs.pages=[];}
     cs.view=view;
-    window.addEventListener("resize",()=>{clearTimeout(cs.resizeTimer);cs.resizeTimer=setTimeout(()=>{if(cs.chart&&cs.view==="usage")drawTokens(cs.chart.u,cs.chart.since,cs.chart.until);},100);});
-  document.querySelectorAll("[data-view]").forEach(b=>{if(b.dataset.view===view)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current");});
-    $("view-requests").hidden=view!=="usage"&&view!=="requests";$("usage-summary").hidden=view!=="usage";
-    $("view-chat").hidden=view!=="chat";$("view-manage").hidden=view!=="manage";
-    $("requests-heading").textContent=view==="requests"?"请求记录":"请求与用量";
-    $("requests-subtitle").textContent=view==="requests"?"查看每一次调用，展开当时的消息、工具与上下文。":"从整体趋势，追踪到每一次模型调用。";
+    document.querySelectorAll("[data-view]").forEach(b=>{if(b.dataset.view===view)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current");});
+    $("view-requests").hidden=view!=="usage";$("usage-summary").hidden=view!=="usage";$("view-chat").hidden=view!=="chat";
+    showManagement(view);$("requests-heading").textContent="用量总览";
     if(view==="chat")loadChat().catch(fail);
-    if(view==="usage"||view==="requests")loadRequests().catch(fail);
+    if(view==="usage")loadRequests().catch(fail);
+    if(managementPages[view])loadManagement(view).catch(fail);
   }
+  window.addEventListener("resize",()=>{clearTimeout(cs.resizeTimer);cs.resizeTimer=setTimeout(()=>{if(cs.chart&&cs.view==="usage")drawTokens(cs.chart.u,cs.chart.since,cs.chart.until);},100);});
   function resetConsole(){
-    clearInterval(cs.timer);cs.timer=null;cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
+    clearTimeout(cs.timer);cs.timer=null;detailCache.clear();toolCache.clear();resetChatTrace();cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
     $("session-history").close();sh.version++;
     $("request-detail").close();$("detail-body").replaceChildren();$("chat-messages").replaceChildren();
   }
-  function startConsole(){
-    restorePending();renderConsoleThreads();consoleView(cs.view);clearInterval(cs.timer);
-    cs.timer=setInterval(()=>{if(cs.view==="chat"&&!document.hidden&&readToken())loadChat().catch(fail);},2500);
-  }
+  function startConsole(){restorePending();renderConsoleThreads();consoleView(cs.view);}
   function requestParams(){
     const p=new URLSearchParams({since:String(cs.until-Number($("req-range").value)*3600000),until:String(cs.until),limit:"40"});
     for(const [key,id] of [["thread","req-thread"],["model","req-model"],["status","req-status"],["purpose","req-purpose"]])if($(id).value)p.set(key,$(id).value);
+    if(cs.turn)p.set("turn",cs.turn);
     return p;
   }
   async function loadRequests(){
@@ -158,12 +167,13 @@ export const CONSOLE_APP_JS = String.raw`
         el("td",{},[el("button",{className:"request-link",type:"button",text:bjTime(r.startedAt),onclick:()=>openRequest(r.id)}),el("div",{className:"table-sub mono",text:r.id.slice(0,8)})]),
         el("td",{},[el("span",{text:r.model}),el("div",{className:"table-sub",text:r.provider+" / "+(purposes[r.purpose]||r.purpose)})]),
         el("td",{},[el("button",{className:"request-link",type:"button",text:r.thread,onclick:()=>{chooseChat(r.thread);consoleView("chat");}})]),
-        el("td",{},[requestPill(r.status)]),el("td",{className:"num",text:nf(r.inputTokens)}),el("td",{className:"num",text:nf(r.outputTokens)}),el("td",{className:"num",text:duration(r.durationMs)})
+        el("td",{},[requestPill(r.status)]),el("td",{className:"num",text:nf(r.inputTokens)}),el("td",{className:"num",text:nf(r.outputTokens)}),el("td",{className:"num"},[cacheCell(r)]),el("td",{className:"num",text:duration(r.durationMs)})
       ])));
-      const s=u.summary;
+      const s=u.summary;cs.requestActive=s.running>0;$("request-turn-filter").hidden=!cs.turn;
       $("metric-requests").textContent=nf(s.requests);$("metric-failures").textContent=s.failed+" 条异常 · "+s.running+" 条进行中";
-      $("metric-input").textContent=nf(s.inputTokens);$("metric-output").textContent=nf(s.outputTokens);
-      $("metric-cache").textContent=s.inputTokens?(s.cacheRead/s.inputTokens*100).toFixed(1)+"%":"—";
+      $("metric-input").textContent=s.measured?nf(s.inputTokens):"—";$("metric-output").textContent=s.measured?nf(s.outputTokens):"—";
+      $("metric-cache").textContent=s.cacheInputTokens?percent(s.cacheRead/s.cacheInputTokens):"—";
+      $("metric-cache-note").textContent=s.cacheMeasured+" / "+s.requests+" 条已上报缓存 · 按输入量加权";
       $("metric-duration").textContent=duration(s.avgDuration==null?null:Math.round(s.avgDuration));
       $("metric-measured").textContent=s.measured+" / "+s.requests+" 条已返回用量";
       $("req-count").textContent="共 "+nf(s.requests)+" 次调用";$("request-state").textContent="第 "+(cs.pages.length+1)+" 页 · 更新于 "+time(Date.now());
@@ -176,9 +186,9 @@ export const CONSOLE_APP_JS = String.raw`
       if(!u.models.length)$("model-breakdown").append(el("p",{className:"muted small",text:"有请求后，这里会显示各模型的用量占比。"}));
       $("request-retention").textContent="元数据最多 30 天 / 20,000 条，上下文详情最多 7 天 / 总计 32 MiB。达到上限会提前清理。"+
         (u.retainedSince?"当前最早记录："+bjTime(u.retainedSince)+"。":"从新版本上线后开始采集。")+"未返回的用量不计入 token 合计。";
-    }catch(error){if(version===cs.requestVersion)$("request-state").textContent="数据载入失败，请刷新重试";throw error;}
+    }catch(error){if(version===cs.requestVersion){cs.requestActive=false;$("request-state").textContent="数据载入失败，请刷新重试";}throw error;}finally{if(version===cs.requestVersion)scheduleConsolePoll();}
   }
-  function refreshConsole(){if((cs.view==="usage"||cs.view==="requests")&&!cs.before&&!document.hidden){cs.until=Date.now();loadRequests().catch(fail);}}
+  function refreshConsole(){if(cs.view==="usage"&&cs.requestActive&&!cs.before&&!document.hidden){cs.until=Date.now();loadRequests().catch(fail);}}
   function refreshRequests(){cs.until=Date.now();cs.before=undefined;cs.pages=[];loadRequests().catch(fail);}
   function sv(name,attrs,text){
     const node=document.createElementNS("http://www.w3.org/2000/svg",name);
@@ -200,34 +210,7 @@ export const CONSOLE_APP_JS = String.raw`
     if(!u.summary.measured)svg.append(sv("text",{x:left+width/2,y:85,"text-anchor":"middle"},"暂无已返回的 token 用量"));
     $("chart-note").textContent="北京时间 · "+(step===3600000?"每小时":"每天")+"汇总 · "+(u.summary.requests-u.summary.measured)+" 条请求未返回用量";
   }
-  function detailPart(title,part,open){
-    const p=part||{text:"未保留",chars:0};
-    return el("details",{className:"context-part",open:!!open},[el("summary",{text:title+" · "+nf(p.chars)+" 字符"+(p.truncated?" · 已截断":"")}),el("pre",{text:p.text||"（空）"})]);
-  }
-  async function openRequest(id){
-    const version=++cs.detailVersion,epoch=cs.epoch;
-    $("detail-id").textContent=id;$("detail-body").replaceChildren(el("p",{className:"muted",text:"正在读取请求详情…"}));
-    if(!$("request-detail").open)$("request-detail").showModal();
-    try{
-      const d=await api("GET","/admin/requests/"+encodeURIComponent(id));if(version!==cs.detailVersion||epoch!==cs.epoch)return;
-      const r=d.request,body=$("detail-body");body.replaceChildren(
-        el("div",{className:"row"},[el("strong",{text:r.model}),requestPill(r.status),el("span",{className:"muted",text:r.thread+" / "+(purposes[r.purpose]||r.purpose)})]),
-        el("div",{className:"detail-stats"},[["输入 token",nf(r.inputTokens)],["输出 token",nf(r.outputTokens)],["缓存读取",nf(r.cacheRead)],["耗时",duration(r.durationMs)]].map(([name,value])=>el("div",{className:"metric-label"},[name,el("strong",{text:value})]))),
-        el("p",{className:"muted small",text:"开始："+bjTime(r.startedAt)+"；上下文窗口："+nf(r.contextWindow)+" token"+(r.inputTokens!=null&&r.contextWindow?"，本次输入约占 "+(r.inputTokens/r.contextWindow*100).toFixed(1)+"%":"")+"；缓存写入："+nf(r.cacheWrite)+"；推理："+nf(r.reasoningTokens)+"（已包含在输出）。"})
-      );
-      if(r.error)body.append(el("pre",{className:"context-note",text:r.error}));
-      if(!d.detailAvailable){body.append(el("div",{className:"empty-state",text:"上下文详情已过保留期或达到容量上限；请求用量仍可查看。"}));return;}
-      const c=d.context,total=c.chars.system+c.chars.messages+c.chars.tools;
-      body.append(el("div",{className:"context-note",text:"以下是本次 pi-ai 请求的归一化上下文。各部分按字符计量，不是精确 token；已隐藏凭据与图片数据。"+(c.truncated?"内容超过保留上限，部分已截断。":"")}),
-        el("div",{className:"composition"},Object.values(c.chars).map(x=>el("span",{style:"width:"+(total?x/total*100:0)+"%"}))),
-        el("div",{className:"legend",text:"系统 "+nf(c.chars.system)+" 字符 / 消息 "+nf(c.chars.messages)+" 字符 / 工具定义 "+nf(c.chars.tools)+" 字符"}),
-        detailPart("系统提示",c.system,false),el("h3",{className:"detail-section-title",text:"请求消息 · "+c.messageCount+" 条"+(c.omittedMessages?"（省略最早 "+c.omittedMessages+" 条）":"")}));
-      c.messages.forEach((m,i)=>body.append(detailPart((i+1+c.omittedMessages)+". "+m.role+(m.toolName?" / "+m.toolName:""),m,i===c.messages.length-1)));
-      body.append(el("h3",{className:"detail-section-title",text:"可用工具 · "+c.toolCount+" 个"}));c.tools.forEach(t=>body.append(detailPart(t.name,t,false)));
-      if(d.response)body.append(el("h3",{className:"detail-section-title",text:"本次模型输出"}),detailPart("响应内容",d.response,true));
-      body.append(el("p",{className:"muted small",text:"工具调用参数保留在 assistant 消息与本次输出中；工具执行结果出现在下一次请求的 toolResult 消息里。"}));
-    }catch(error){if(version===cs.detailVersion)$("detail-body").replaceChildren(el("p",{text:"详情读取失败，请关闭后重试。"}));fail(error);}
-  }
+  ${REQUEST_DETAIL_JS}
   const pendingKey=()=>"cs-agent:web-pending:"+cs.chat;
   function restorePending(){
     try{cs.pending=JSON.parse(sessionStorage.getItem(pendingKey())||"null");}catch{cs.pending=null;}
@@ -241,18 +224,8 @@ export const CONSOLE_APP_JS = String.raw`
       a.href=url;a.download=ref.name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
     }catch(error){fail(error);}
   }
-  async function loadChat(){
-    const thread=cs.chat,version=++cs.chatVersion,epoch=cs.epoch,d=await api("GET","/admin/threads/"+encodeURIComponent(thread)+"/chat");
-    if(thread!==cs.chat||version!==cs.chatVersion||epoch!==cs.epoch)return;
-    $("chat-title").textContent=(state.overview&&state.overview.threads.find(t=>t.key===thread)?.name)||thread;
-    $("chat-state").textContent=cs.pending?"上次发送结果未确认，点击重试会沿用原编号。":d.queued?"有 "+d.queued+" 条网页输入正在排队或执行…":"回复只展示在此网页，不发送到 QQ。";
-    const fingerprint=JSON.stringify(d.messages);if(fingerprint===cs.fingerprint)return;cs.fingerprint=fingerprint;
-    const list=$("chat-messages"),nearBottom=list.scrollHeight-list.scrollTop-list.clientHeight<100,first=!list.querySelector(".chat-message");
-    list.replaceChildren(...d.messages.map(m=>el("article",{className:"chat-message "+m.role},[
-      el("div",{className:"message-meta",text:(m.role==="assistant"?"助手":m.name||"用户")+" · "+(m.source==="web"?"网页":"QQ")+" · "+bjTime(m.at)+(m.status?" · "+(statuses[m.status]||m.status):"")}),el("div",{className:"message-text",text:m.text}),...(m.assets||[]).map(ref=>el("button",{className:"btn",text:ref.name+" · "+bytes(ref.bytes),onclick:()=>downloadAsset(ref)}))])));
-    if(!d.messages.length)list.append(el("div",{className:"empty-state"},[el("strong",{text:"从这里继续对话"}),"网页发言会进入当前会话，QQ 里的上下文仍然保留。"]));
-    if(nearBottom||first)list.scrollTop=list.scrollHeight;
-  }
+  ${TRACE_JS}
+  ${MANAGEMENT_JS}
   async function sendChat(event){
     event.preventDefault();if(cs.sending)return;
     const thread=cs.chat,text=$("chat-input").value.trim();if(!text)return;
@@ -261,6 +234,7 @@ export const CONSOLE_APP_JS = String.raw`
     cs.sending=true;$("chat-send").disabled=true;$("chat-input").readOnly=true;$("chat-state").textContent="正在提交…";
     try{
       await api("POST","/admin/threads/"+encodeURIComponent(thread)+"/chat",pending);
+      if(cs.chat===thread){cs.awaitingInput="web:"+pending.requestId;cs.chatActive=true;}
       try{sessionStorage.removeItem("cs-agent:web-pending:"+thread);}catch{}
       if(cs.chat===thread){cs.pending=null;$("chat-input").value="";$("chat-input").readOnly=false;$("chat-send").textContent="发送消息";await loadChat();$("chat-input").focus();}
     }catch(error){
@@ -270,15 +244,16 @@ export const CONSOLE_APP_JS = String.raw`
         $("chat-state").textContent=rejected?"消息未提交，请检查后重试。":"发送结果未确认。重试会使用相同编号，避免重复提交。";$("chat-send").textContent=rejected?"发送消息":"重试发送";
       }
       fail(error);
-    }finally{cs.sending=false;$("chat-send").disabled=false;}
+    }finally{cs.sending=false;$("chat-send").disabled=false;scheduleConsolePoll();}
   }
   document.querySelectorAll("[data-view]").forEach(b=>b.addEventListener("click",()=>consoleView(b.dataset.view)));
-  ["req-range","req-thread","req-model","req-purpose","req-status"].forEach(id=>$(id).addEventListener("change",refreshRequests));
+  ["req-range","req-thread","req-model","req-purpose","req-status"].forEach(id=>$(id).addEventListener("change",()=>{cs.turn=null;refreshRequests();}));
+  $("request-turn-clear").addEventListener("click",()=>{cs.turn=null;refreshRequests();});
   $("req-refresh").addEventListener("click",refreshRequests);
   $("req-prev").addEventListener("click",()=>{cs.before=cs.pages.pop();loadRequests().catch(fail);});
   $("req-next").addEventListener("click",()=>{if(!cs.next)return;cs.pages.push(cs.before);cs.before=cs.next;loadRequests().catch(fail);});
   $("detail-close").addEventListener("click",()=>{$("request-detail").close();cs.detailVersion++;});
   $("chat-form").addEventListener("submit",sendChat);
   $("chat-input").addEventListener("keydown",e=>{if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){e.preventDefault();$("chat-form").requestSubmit();}});
-  $("chat-reload").addEventListener("click",()=>loadChat().catch(fail));
+  $("chat-reload").addEventListener("click",()=>{cs.chatAfter=null;loadChat().catch(fail);});
 `;
