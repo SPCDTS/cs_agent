@@ -24,6 +24,11 @@ fs.writeFileSync(lock, String(process.pid), { flag: "wx", encoding: "utf8" });
 let stopping = false;
 const children = new Set();
 const timers = new Set();
+const stopFile = path.join(privateDir, "stop.request");
+const stopWatcher = fs.watch(privateDir, (_event, filename) => {
+  if (filename !== "stop.request") return;
+  try { if (fs.readFileSync(stopFile, "utf8").trim() === String(process.pid)) stop(); } catch {}
+});
 
 function start(name, executable, args, env) {
   if (stopping) return;
@@ -48,6 +53,7 @@ function start(name, executable, args, env) {
 function stop() {
   if (stopping) return;
   stopping = true;
+  stopWatcher.close();
   for (const timer of timers) clearTimeout(timer);
   for (const child of children) child.kill();
 }
