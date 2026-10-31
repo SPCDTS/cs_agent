@@ -17,3 +17,22 @@ it("按已核验来源解析fileId与图片引用，选择后才发RPC",async()=
     await expect(lookupHostMedia({database,bridge:rpc,source:{...source,scope:"private:10000002"},messageId:"1"})).rejects.toThrow("media_scope_denied");
   });
 });
+
+it("已存QQ图片URL仍通过file引用刷新，私有资产不重复访问QQ", async () => {
+  const input = normalizeMessage({ ...event(2), message: [{ type: "image", data: { file: "photo.png", url: "https://multimedia.nt.qq.com.cn/download?rkey=expired" } }] });
+  if (!input) throw new Error("fixture");
+  const thread = env.THREAD.getByName("private:10000003");
+  await thread.ingest(input);
+  await runInDurableObject(thread, async (_instance, state) => {
+    const database = new DurableObjectSqliteDatabase(state.storage), rpc = bridge();
+    rpc.getImage.mockResolvedValue("https://multimedia.nt.qq.com.cn/download?rkey=current");
+    const source = { scope: "private:10000003", namespace: "private:10000003", target: { kind: "private" as const, userId: "10000003" } };
+    const args = { database, bridge: rpc, source, messageId: "2", selection: { kind: "image" as const } };
+    expect(await lookupHostMedia(args)).toEqual([{ ...input.media?.[0], url: "https://multimedia.nt.qq.com.cn/download?rkey=current" }]);
+    expect(rpc.getImage).toHaveBeenCalledWith("photo.png");
+    expect(rpc.getMessage).not.toHaveBeenCalled();
+    await database.run("UPDATE message_media SET media_json=? WHERE scope=? AND message_id=?", JSON.stringify([{ kind: "image", ordinal: 1, assetId: "a".repeat(64) }]), source.scope, "2");
+    expect((await lookupHostMedia(args))[0]?.assetId).toBe("a".repeat(64));
+    expect(rpc.getImage).toHaveBeenCalledTimes(1);
+  });
+});

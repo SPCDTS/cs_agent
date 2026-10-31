@@ -49,7 +49,12 @@ export async function lookupHostMedia(input: {
   const selected = media.filter(item => (input.selection?.kind === undefined || item.kind === input.selection.kind) &&
     (input.selection?.ordinal === undefined || item.ordinal === input.selection.ordinal)).slice(0,5);
   return Promise.all(selected.map(async item => {
-    if (item.assetId || item.url) return item;
+    if (item.assetId) return item;
+    // QQ 图片 URL 的 rkey 会失效；保留的 file 引用用于取得当前可用地址。
+    if (item.kind === "image" && item.file && !/^https?:\/\//i.test(item.file)) {
+      return { ...item, url: await input.bridge.getImage(item.file) };
+    }
+    if (item.url) return item;
     if (item.file && /^https?:\/\//i.test(item.file)) return { ...item, url: item.file };
     const file = item.file ?? item.fileId;
     if (!file) throw new Error("media_reference_missing");

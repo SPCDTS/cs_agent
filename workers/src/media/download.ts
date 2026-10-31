@@ -1,5 +1,12 @@
 import { FILE_MAX_BYTES, safeMime } from "./model";
 
+export class MediaDownloadError extends Error {
+  constructor(readonly status: number, readonly hostname: string) {
+    super("media_download_failed");
+    this.name = "MediaDownloadError";
+  }
+}
+
 export type DownloadDeps = {
   fetch?: typeof fetch;
   resolve?: (hostname: string) => Promise<string[]>;
@@ -57,7 +64,10 @@ export async function downloadMedia(raw: string, deps: DownloadDeps = {}): Promi
       next = new URL(location, url).href;
       continue;
     }
-    if (!response.ok || !response.body) throw new Error("media_download_failed");
+    if (!response.ok || !response.body) {
+      await response.body?.cancel();
+      throw new MediaDownloadError(response.status, url.hostname);
+    }
     const length = Number(response.headers.get("Content-Length"));
     if (Number.isFinite(length) && length > FILE_MAX_BYTES) { await response.body.cancel(); throw new Error("too_large"); }
     const reader = response.body.getReader(), chunks: Uint8Array[] = [];

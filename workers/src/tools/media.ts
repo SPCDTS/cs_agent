@@ -2,6 +2,7 @@ import type { Context } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { InboundMedia } from "../policy";
+import { MediaDownloadError } from "../media/download";
 import { MediaRepository, type AssetRef } from "../media/repository";
 
 export type MediaSelection = { ordinal?: number; kind?: InboundMedia["kind"] };
@@ -26,7 +27,7 @@ export function createMediaExtension(deps: MediaDeps) {
     try { const result = await work(); await deps.record?.(kind, { result: "ok" }); return result; }
     catch (error) {
       const code = error instanceof Error && /^[a-z_]{1,80}$/.test(error.message) ? error.message : "media_error";
-      await deps.record?.(kind, { result: code });
+      await deps.record?.(kind, { result: code, ...(error instanceof MediaDownloadError ? { status: error.status, hostname: error.hostname } : {}) });
       return text(`${code}：附件访问失败；请确认消息仍可用、来源范围正确且文件不超过10MiB。`, true);
     }
   }
