@@ -20,8 +20,9 @@ export function publicAddress(raw: string): boolean {
 }
 async function dns(hostname: string): Promise<string[]> {
   const responses = await Promise.all(["A", "AAAA"].map(async type => {
+    // Workers 不支持 error 重定向模式；manual 的 3xx 由下方 ok 检查拒绝。
     const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`, {
-      headers: { Accept: "application/dns-json" }, signal: AbortSignal.timeout(10_000), redirect: "error",
+      headers: { Accept: "application/dns-json" }, signal: AbortSignal.timeout(10_000), redirect: "manual",
     });
     if (!response.ok) throw new Error("media_dns_failed");
     const body: unknown = await response.json();

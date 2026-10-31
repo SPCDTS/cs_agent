@@ -46,6 +46,33 @@ describe("私有媒体资产", () => {
   });
 });
 describe("有界公网下载", () => {
+  it.each([200, 302])("默认DNS下载路径在Workers中支持图片入库，并拒绝DNS重定向（%s）", async status => {
+    const image = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/mQAAAAASUVORK5CYII="), char => char.charCodeAt(0));
+    const requests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      // 保留 Workers 原生 Request 校验，只替换外网响应，避免注入 resolve 绕过 DNS 路径。
+      const request = new Request(input, init), url = new URL(request.url);
+      requests.push(url.hostname);
+      if (url.hostname === "cloudflare-dns.com") {
+        if (status === 302) return new Response(null, { status, headers: { Location: "https://other.example.com/dns-query" } });
+        return Response.json({ Answer: url.searchParams.get("type") === "A" ? [{ type: 1, data: "1.1.1.1" }] : [] });
+      }
+      if (url.href === "https://multimedia.nt.qq.com.cn/image.png") return new Response(image, { headers: { "Content-Type": "image/png" } });
+      throw new Error("unexpected_media_request");
+    });
+    const repo = new MediaRepository({ bucket: env.ASSETS, scope: "owner" });
+    const imported = repo.importRemote({ url: "https://multimedia.nt.qq.com.cn/image.png", kind: "image" });
+    if (status === 302) {
+      await expect(imported).rejects.toThrow("media_dns_failed");
+      expect(requests).toEqual(["cloudflare-dns.com", "cloudflare-dns.com"]);
+    } else {
+      const asset = await imported;
+      expect(asset).toMatchObject({ kind: "image", mime: "image/png", bytes: image.length });
+      expect((await repo.get(asset.id)).bytes).toEqual(image);
+      expect(requests).toEqual(["cloudflare-dns.com", "cloudflare-dns.com", "multimedia.nt.qq.com.cn"]);
+    }
+  });
+
   it("拒绝内网、混合DNS、保留地址和重定向到内网", async () => {
     for (const address of ["127.0.0.1", "10.0.0.1", "192.168.0.2", "169.254.169.254", "100.64.0.1", "::1", "::ffff:127.0.0.1", "fd00::1", "2001:db8::1"]) expect(publicAddress(address), address).toBe(false);
     expect(publicAddress("1.1.1.1")).toBe(true);
