@@ -70,6 +70,7 @@ export const TRACE_JS = String.raw`
   }
   async function loadChat(){
     if(cs.chatLoading)return;cs.chatLoading=true;
+    loadTopology();
     const thread=cs.chat,version=++cs.chatVersion,epoch=cs.epoch,p=new URLSearchParams();
     if(cs.chatAfter!==null){p.set("after",String(cs.chatAfter));for(const m of cs.messages.values())if(m.status==="queued")p.append("pending",m.id);}
     try{
@@ -85,7 +86,7 @@ export const TRACE_JS = String.raw`
       $("chat-title").textContent=(state.overview&&state.overview.threads.find(t=>t.key===thread)?.name)||thread;
       $("chat-state").textContent=cs.pending?"上次发送结果未确认，重试沿用原编号。":cs.chatActive?"本轮执行中，正在增量更新…":"回复仅显示网页。空闲时停止自动刷新，点击刷新查看 QQ 新消息。";
       const fingerprint=JSON.stringify([messages,[...cs.requests.values()],[...cs.tools.values()]]);
-      if(fingerprint!==cs.fingerprint){cs.fingerprint=fingerprint;renderChatMessages(messages);if($("request-detail").open&&cs.detailId&&!detailCache.has(cs.detailId))openRequest(cs.detailId);}
+      if(fingerprint!==cs.fingerprint){if(cs.fingerprint)refreshTopologyAfterTurn();cs.fingerprint=fingerprint;renderChatMessages(messages);if($("request-detail").open&&cs.detailId&&!detailCache.has(cs.detailId))openRequest(cs.detailId);}
     }finally{if(version===cs.chatVersion){cs.chatLoading=false;scheduleConsolePoll();}}
   }
   document.addEventListener("visibilitychange",()=>{clearTimeout(cs.timer);if(!document.hidden){if(cs.view==="chat"&&cs.chatActive)loadChat().catch(fail);else scheduleConsolePoll();}});

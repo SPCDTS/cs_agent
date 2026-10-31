@@ -6,6 +6,7 @@ import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai/provid
 import { captureModels } from "../src/requests/capture";
 import { snapshot, errorSummary } from "../src/requests/snapshot";
 import type { RequestDetail, RequestQuery, ToolTrace } from "../src/requests/types";
+import type { AgentTopology } from "../src/requests/topology";
 import worker from "../src/index";
 afterEach(() => reset());
 const query = (): RequestQuery => ({ since: Date.now() - 86400_000, until: Date.now() + 1000, limit: 40 });
@@ -87,7 +88,7 @@ describe("request observability", () => {
     await runInDurableObject(store, (_instance, state) => { expect(state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM request_details").one().n).toBe(2); });
   });
   it("guards every new route and validates queries", async () => {
-    for (const path of ["/admin/requests", "/admin/usage", "/admin/requests/"+crypto.randomUUID(), "/admin/threads/owner/chat", "/admin/threads/owner/trace", "/admin/tools/"+crypto.randomUUID()]) {
+    for (const path of ["/admin/agent-topology", "/admin/requests", "/admin/usage", "/admin/requests/"+crypto.randomUUID(), "/admin/threads/owner/chat", "/admin/threads/owner/trace", "/admin/tools/"+crypto.randomUUID()]) {
       expect((await worker.fetch(new Request("https://test"+path), { ...env, ADMIN_TOKEN:"test" })).status).toBe(401);
     }
     const call = (path: string) => worker.fetch(new Request("https://test"+path, { headers:{Authorization:"Bearer test"} }), { ...env, ADMIN_TOKEN:"test" });
@@ -114,5 +115,32 @@ describe("request observability", () => {
     expect(captured?.tools[0]).not.toHaveProperty("result");
     expect((await store.turnTrace("group:123",["turn:test"],0)).tools).toEqual([]);
     expect((await store.toolDetail(tool.id))?.arguments?.text).toContain("message_id");
+  });
+  it("summarizes recent agents and their parents without loading request or tool bodies", async () => {
+    const store=env.REQUESTS.getByName("main"),now=Date.now(),child=crypto.randomUUID(),otherChild=crypto.randomUUID();
+    for(const [thread,actor,purpose,at,status] of [
+      ["owner","thread","conversation",now-20000,"done"],
+      ["owner","thread","background",now-10000,"error"],
+      ["owner",child,"subagent",now-15000,"done"],
+      ["owner",child,"compaction",now-5000,"running"],
+      ["group:456",otherChild,"subagent",now-1000,"done"],
+      ["private:123","thread","conversation",now-2000,"error"],
+      ["private:999","thread","conversation",now-30*3600000,"done"],
+    ] as const){
+      const d=detail(crypto.randomUUID(),at);
+      Object.assign(d.request,{thread,actor,purpose,status,endedAt:status==="running"?null:at+10});
+      await store.record(d);
+    }
+    await store.recordTool({id:crypto.randomUUID(),thread:"owner",binding:{turnId:"turn:topology",inputId:"web:topology",generation:0},callId:"tool",name:"qq_image",startedAt:now,endedAt:null,status:"running",arguments:{text:"private arguments",chars:17,truncated:false}});
+    const response=await worker.fetch(new Request("https://test/admin/agent-topology",{headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
+    expect(response.status).toBe(200);
+    const data=await response.json<AgentTopology>();
+    expect(data.nodes).toHaveLength(5);
+    expect(data.nodes.find(n=>n.id==="thread:owner")).toMatchObject({parentId:null,activity:"active"});
+    expect(data.nodes.find(n=>n.id===`sub:owner:${child}`)).toMatchObject({kind:"subagent",parentId:"thread:owner",activity:"active"});
+    expect(data.nodes.find(n=>n.id==="thread:group:456")).toMatchObject({activity:"context",lastActiveAt:null});
+    expect(data.nodes.find(n=>n.id==="thread:private:123")).toMatchObject({activity:"error"});
+    expect(JSON.stringify(data)).not.toMatch(/private arguments|你好|contextWindow|inputTokens|toolCallId/);
+    expect((await store.agentTopology()).sampledAt).toBe(data.sampledAt);
   });
 });
