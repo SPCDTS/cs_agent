@@ -250,9 +250,16 @@ export class WorkspaceManager {
         ...(results.truncated ? { deferred: "result_scan_limit" } : {}) };
     });
   }
-  importSnapshot(input: { manifest: WorkspaceManifest; expectedRevision: string; paths?: string[] }): Promise<WorkspaceCompareResult> {
+  importSnapshot(input: { manifest: WorkspaceManifest; expectedRevision: string; paths?: string[]; operationId?: string }): Promise<WorkspaceCompareResult> {
     return this.serial(async () => {
       const source = parseManifest(input.manifest), current = await this.manifest();
+      const receiptKey = input.operationId ? "workspace:import:" + await sha256(new TextEncoder().encode(input.operationId)) : undefined;
+      const fingerprint = await sha256(new TextEncoder().encode(JSON.stringify(input)));
+      const receipt = receiptKey ? await this.deps.storage.get<{ fingerprint: string; revision: string }>(receiptKey) : undefined;
+      if (receipt) {
+        if (receipt.fingerprint !== fingerprint) throw new Error("operation_conflict");
+        return { ok: true, manifest: await this.manifest(receipt.revision) };
+      }
       if (current.revision !== input.expectedRevision) return { ok: false, conflict: current };
       const selected = input.paths ? new Set(input.paths.map(relativeWorkPath)) : undefined;
       const changed = source.files.filter(file => !selected || selected.has(file.path));
@@ -265,7 +272,8 @@ export class WorkspaceManager {
       await this.deps.bucket.put(`${await this.prefix()}/manifests/${manifest.revision}`, JSON.stringify(manifest));
       await this.deps.storage.transaction(async tx => {
         if ((await tx.get<string>(HEAD) ?? "0") !== current.revision) throw new Error("workspace_conflict");
-        await tx.put({ [HEAD]: manifest.revision, [EPOCH]: (await tx.get<number>(EPOCH) ?? 0) + 1 });
+        await tx.put({ [HEAD]: manifest.revision, [EPOCH]: (await tx.get<number>(EPOCH) ?? 0) + 1,
+          ...(receiptKey ? { [receiptKey]: { fingerprint, revision: manifest.revision } } : {}) });
       });
       this.hydrated = false;
       if (this.deps.runtimeReady()) await this.deps.resetRuntime();

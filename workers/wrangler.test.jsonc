@@ -22,7 +22,8 @@
       { "name": "EVENTS", "class_name": "EventsDO" },
       // 子 agent：每个一个对象，名字 sub:<父线程键>:<id>，结束 14 天后自删
       { "name": "SUBAGENT", "class_name": "SubagentDO" },
-      { "name": "SANDBOX", "class_name": "SandboxDO" }
+      { "name": "SANDBOX", "class_name": "SandboxDO" },
+      { "name": "SANDBOX_FLEET", "class_name": "SandboxFleetDO" }
     ]
   },
   "migrations": [
@@ -35,11 +36,13 @@
     { "tag": "v7", "deleted_classes": ["MagpieContainer"] },
     { "tag": "v8", "new_sqlite_classes": ["SubagentDO"] },
     { "tag": "v9", "new_sqlite_classes": ["SandboxDO"] },
-    { "tag": "v10", "new_sqlite_classes": ["RequestsDO"] }
+    { "tag": "v10", "new_sqlite_classes": ["RequestsDO"] },
+    { "tag": "v11", "new_sqlite_classes": ["SandboxFleetDO"] }
   ],
   // QQ_OWNER、NAPCAT_TOKEN、DEEPSEEK_API_KEY、OAUTH_STORE_KEY 等都是 secrets（wrangler secret put），不写在这里
   "vars": {
     "CS_AGENT_COMMIT": "dev",
+    "REMOTE_SANDBOX_ENABLED": "false",
     "PUBLIC_ORIGIN": "https://agent.spcdts.dev",
     "QQ_GROUP_MENTIONS": true,
     "MEMORY_EXTRACT_MODEL": "",

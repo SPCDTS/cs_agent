@@ -24,7 +24,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: workers/package-lock.json
+          cache-dependency-path: |
+            workers/package-lock.json
+            runner/package-lock.json
       - run: npm run install:workers
       # 包含类型检查、workerd 测试、所有独立 Node 测试及不发布的打包检查。
       - run: npm run check
@@ -45,7 +47,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: workers/package-lock.json
+          cache-dependency-path: |
+            workers/package-lock.json
+            runner/package-lock.json
       - run: npm run install:workers
       # coding 沙箱仍由 Wrangler 构建并推送到 Cloudflare；不再部署旧的常驻 Node 容器。
       - uses: cloudflare/wrangler-action@v3

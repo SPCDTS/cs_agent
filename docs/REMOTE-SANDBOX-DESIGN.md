@@ -1,262 +1,206 @@
 # 远程沙箱设计：Cloudflare 调度本机 WSB
 
-状态：设计稿，尚未实现。日期：2026-11-01。
+状态：第一版闭环已实现并完成本地验证；实验功能，默认关闭。更新日期：2026-11-01。接入步骤见 [远程沙箱运行说明](REMOTE-SANDBOX-RUNBOOK.md)。
 
-## 1. 目标与结论
+## 1. 已确定的边界
 
-让部署在 Cloudflare 的 agent 使用这台 Windows 设备上的 Windows Sandbox（WSB），完成拉取指定仓库、修改代码、安装依赖、运行测试，再把结果交回云端。会话、权限、记忆和调度继续在 Cloudflare；本机只增加一个轻量连接器和一个沙箱内执行器。
+Cloudflare 保留 agent、会话、权限、调度和 R2 源码；Windows 连接器主动建立 WSS，通过 WSB 执行命令。本机不需要公网端口或 Tunnel，也不重新部署旧 Node 主服务。
 
-采用“本机主动建立 WSS 连接”的方案，无需给本机开放公网端口，也无需额外的 Cloudflare Tunnel。这是应用自己的远程执行设备注册机制，WSB 不会变成 Cloudflare 原生 Containers 的实例。现有 Cloudflare coding 沙箱保留，与远程沙箱一起进入统一目录。
+设备注册时声明配置与任务类别。cs.sandbox extension 向 owner agent 提供资源摘要和查询工具；agent 按需选择 sandboxId，Worker 重新验证能力、版本和槽位后分配租约。管理员批准设备，不为每次任务预先绑定唯一机器。
 
-沙箱向 Worker 注册时声明配置和可执行的任务类别，运行中更新可用状态。extension 向 agent 暴露其授权范围内的沙箱整体情况；agent 根据当前任务主动选择 sandboxId，再由 Worker 校验能力与容量并分配执行租约。管理员配置可用范围和限额，不需要为每个任务提前指定唯一设备。
+当前实现限于 owner 本人的消息回合；事件回合、其他用户和子 agent 不继承远程设备权限。每设备一个目标、一个执行槽，最多 32 个设备；保留原 Cloudflare Linux coding 沙箱。权限范围扩展、多配置共享资源和通用桌面控制不属于首版。
 
-首期接入一台远程设备、一个 WSB 执行槽，并保留 Cloudflare 目标；目录和工具协议从第一版就支持多个 sandbox。首期不做自动负载均衡、任意宿主命令、迁移运行中任务或通用桌面控制。agent 可在尚未派发的任务上重新选择满足要求的沙箱；已经接纳或结果未知的任务先核对，不能换设备重跑。
+## 2. 实现组件与设计收敛
 
-## 2. 当前代码与本机依据
-
-| 已核对的事实 | 对设计的影响 |
+| 组件 | 当前职责 |
 | --- | --- |
-| [SandboxDO](../workers/src/sandbox/do.ts) 直接使用 `ctx.container`，通过端口 3000 调用执行器 | 需要把运行环境生命周期和请求传输抽出适配层 |
-| [sandbox client](../workers/src/sandbox/client.ts) 支持注入 `ControlFetch` | 现有文件操作协议可复用，远程鉴权和 Windows 路径要补充 |
-| [WorkspaceManager](../workers/src/sandbox/workspace.ts) 用 R2 保存 manifest/blob，用 DO storage 保存 HEAD、epoch 和操作结果 | 继续作为工作区权威状态，不另建一套文件同步数据库 |
-| 工作区管理器重新初始化时会重置 runtime；操作主要由内存 Promise 队列串行 | 远程任务可能仍在执行，必须改成持久任务锁与恢复核对 |
-| [coding tools](../workers/src/tools/coding.ts) 假定 Debian、`bash`、`/work`，执行上限 120 秒 | Windows 目标需要不同能力描述，长任务需要异步接口 |
-| [现有执行服务](../workers/sandbox/server.mjs) 依赖容器内网络，无公网鉴权 | 不能直接把它通过 Tunnel 暴露到公网 |
-| 本机 WindowsSandbox 应用版本 0.8.107.0，系统版本 10.0.26200；`wsb` 的 start/list/exec/share/stop 帮助可用 | 具备做可行性探针的条件，但本次没有启动 WSB |
-| 查询时 `wsb list --raw` 返回空列表 | 只是当时没有运行实例，不能据此假定以后永远空闲 |
-| 清理提交在 Linux Node 24 下的 263 项 Workers 测试、14 项 Node 测试及打包检查通过 | 作为回归基线；不代表 Windows WSB 已通过同样检查 |
+| ThreadDO / cs.sandbox | 资源摘要、发现、选择、任务工具；使用真实输入来源验证 owner 权限 |
+| SandboxDO / RemoteWorkspace | 保存选中租约、派发意图、activeJob、提交结果；串行化同工作区写入 |
+| SandboxFleetDO | 设备注册、批准/撤销、能力目录、WSS、原子槽位分配、任务状态与提交重试 |
+| WorkspaceManager / SourceFiles | R2 源码、文件读取与编辑、版本 CAS、幂等导入；普通文件操作不启动 WSB 或另一容器 |
+| runner 连接器 | DPAPI 凭据、固定 WSB 生命周期操作、本地 journal、HTTP/WSS 重连、npm 缓存管理 |
+| guest 执行器 | 在 WSB 内恢复源码、运行 PowerShell 或 npm 测试、捕获输出、生成快照 |
+| 私有 R2 | 已提交源码、任务输入/结果清单、内容寻址文件；不保存 node_modules 或 Git 元数据 |
 
-Microsoft 文档明确说明 `wsb exec` 暂不回传进程输入输出。因此它只用于启动沙箱内执行器；命令 stdout/stderr 由执行器捕获，另行传回连接器。[Windows Sandbox CLI](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-cli)
+前稿的“目录索引 + 每设备 DeviceDO”在首版合并为一个 owner 范围的 SandboxFleetDO。这样目录版本和槽位分配在同一持久事务内完成，不引入额外的跨 DO 预留协议。SandboxDO 仍独立负责工作区提交，FleetDO 不能自行改写 HEAD。规模扩大后可按 owner 分片，再评估每设备对象。
 
-## 3. 组件与数据归属
+大清单和 stdout/stderr 结果保存在 R2，DO 单值只保存小型状态、结果摘要和上传计数；上传对象的校验记录拆成独立键。能力目录和任务日志均有大小上限。
 
-| 组件 | 职责 | 不持有的权限 |
+下图保留接纳、执行、提交的逻辑角色划分；图中的 DeviceDO 网关角色在首版由 SandboxFleetDO 实现，完成通知部分属于后续阶段。
+
+[![远程任务逻辑时序](diagrams/remote-sandbox.svg)](diagrams/remote-sandbox.svg)
+
+[可编辑图源](diagrams/remote-sandbox.sequence.json)。实际首版流程以下文为准。
+
+## 3. 注册、能力和权限
+
+1. 管理 API 创建 256 位一次性配对码，10 分钟过期；云端仅保存摘要。
+2. 本机生成独立设备 Token，先以 Windows DPAPI 加密写入专用目录，再提交 Token 摘要与设备声明。重复兑换仅允许同一摘要和声明，避免响应丢失后重复注册。
+3. 注册后设备为 pending；管理员检查设备配置并批准。待批准设备不能连接 WSS、获取任务或访问文件。
+4. 连接器用 Authorization 请求头建立 WSS，发送协议版本和完整 descriptor；Worker 返回 capabilityRevision。新连接替换旧连接，旧 socket 的消息被拒绝。
+5. 调用者权限由宿主验证，不由设备名称、taskType 或模型参数决定。模型不能调用批准、撤销或管理员封存接口。
+6. 撤销立即拒绝后续设备请求并关闭 WSS。连接器断线后请求停止自有实例；云端在没有停止证据时仍保留 unknown 和工作区写锁。
+
+设备凭据不进入 guest、URL、命令行参数或模型上下文。专用目录使用当前用户/SYSTEM ACL；即使是本机 owner，也不要把真实用户目录、项目 checkout 或 SSH/GitHub 凭据映射给 WSB。
+
+| 声明字段 | 首版实现 |
+| --- | --- |
+| provider / OS / arch | windows-wsb / windows / x64 或 arm64 |
+| shells | 当前执行器只声明 powershell；不把 Windows shell 当作 bash |
+| tools | 从指定只读工具目录探测 Node、npm；可选 Git |
+| memoryMiB | WSB 配置内存，默认 6144 MiB，可配置；不是宿主剩余内存 |
+| maxConcurrent / maxTimeoutMs | 1 个槽；执行时限最多 20 分钟 |
+| taskTypes | shell.exec；node.test（在 cwd 中执行 npm ci，再 npm run 指定脚本） |
+| workspaceProtocol | r2-source-v1 |
+| cache | npm=true，git=false；表示缓存功能可用，不保证某个仓库命中 |
+| 动态状态 | Worker 根据已完成握手的连接、60 秒心跳时效及租约推导 ready / busy / offline / draining |
+
+硬需求包含 OS、shell、最小内存和工具版本；首版版本匹配为精确字符串，未实现 semver 范围。内存、CPU、GPU 的动态余量不冒充已测能力。未知任务类别会被 schema 拒绝。
+
+允许 shell.exec 就意味着可以在 WSB 权限范围内运行任意代码；node.test 也会执行仓库 npm 脚本。任务类别用于匹配，不构成额外安全隔离。
+
+## 4. Agent 如何选择和使用
+
+| 工具 | 当前行为 |
+| --- | --- |
+| sandbox_list | 查询完整目录，可附 taskType / requirements，返回不匹配原因 |
+| sandbox_inspect | 查看当前工作区选中的租约和 activeJob |
+| sandbox_acquire | 提交 sandboxId、capabilityRevision、任务类别和需求；operationId 由宿主生成 |
+| sandbox_release | 释放远程租约并回到默认 Cloudflare；运行中或 unknown 时拒绝 |
+| exec_start | 异步执行，立即返回 jobId；传输错误时返回 dispatch_pending，保留原 jobId |
+| exec_status | 查询阶段、结果、日志尾部与提交状态，并可推进提交 |
+| exec_cancel | 请求停止；不能把“请求已发出”当作“已停止” |
+
+每轮仅附最多 8 个目标的简要摘要和当前选择，详细能力按需查询。目录中设备名称作为不可信数据展示。
+
+未选择远程目标时，原 read/write/edit/bash 保持 Cloudflare 行为。选择 WSB 后，read/write/edit/list 直接使用已提交 R2 文件；bash 返回 remote_async_required，指引使用 exec_start。命令执行期间允许读取已提交文件，拒绝修改、切换和释放。
+
+/work 是统一逻辑路径，Windows guest 的真实目录为 C:\AgentWork。operation.cwd 可以使用 /work 或其子目录；PowerShell 命令中的文件路径使用相对于 cwd 的路径，不假定 Windows 存在 Unix /work 目录。
+
+首版没有自动唤醒 agent 的完成事件。FleetDO 会重试将结果提交到 SandboxDO，agent 通过 exec_status 观察结果；长任务启动后应向用户说明 jobId 和当前阶段，不能宣称测试已通过。自动完成通知需使用受限的持久事件，不伪装成 owner 的新消息。
+
+## 5. WSB 执行与本机隔离
+
+采用已经在本机验证的专用 spool 交接，不开 guest HTTP 服务：
+
+- 只读映射 Node 安装目录、可选 Git 工具目录、打包后的 guest 执行器和本任务输入。
+- 可写映射仅有本任务输出目录及本任务 npm 缓存副本。
+- 关闭剪贴板、打印机、摄像头和麦克风重定向；开启 guest 网络以允许安装依赖。
+- 宿主执行的命令固定为 WSB CLI、工具版本探测、DPAPI 和 npm cache verify；模型命令只进入 guest 的 PowerShell。
+- 创建前生成并持久登记 WSB ID，使用 wsb start --id 启动。停止时只操作登记的 ID，不结束用户的其他 WSB 或宿主 Node 进程。
+
+Microsoft 的 wsb exec 不提供进程 I/O，因此 guest 捕获输出并写入专用结果目录；连接器负责回传。[Windows Sandbox CLI](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-cli)
+
+**首版每个任务使用独立 WSB，任务结束后先停止实例，再读取、校验 guest 输出和回收缓存。** 这使后台子进程随实例一起终止，也避免读取不可信目录时 guest 仍在改动文件。取消、断线和超时同样停止整个实例；停止结果不确定时不上报已取消。
+
+后续保留 WSB 的热复用必须先完成 guest 进程树管理、文件句柄校验和稳定快照协议，不能仅延长空闲时间就宣称隔离不变。WSB 的网络访问目前不限制目标域名；不向 guest 注入 GitHub 写凭据。
+
+## 6. 任务、恢复和提交
+
+任务输入固定包含 jobId、lease、operation、baseRevision、source manifest、createdAt 和 deadline。源码清单最多 6 MiB JSON，控制帧最多 128 KiB；文件走认证 HTTPS，不塞进 WSS。
+
+1. SandboxDO 持久记录派发意图和 activeJob，再向 FleetDO 提交。相同 operationId 复用同一输入、jobId 和截止时间；参数不同则拒绝。
+2. FleetDO 原子检查设备批准、能力版本、任务类别和独占槽位，持久记录后派发。重连只重复投递同一个 jobId。
+3. 连接器先写本地 started journal，再启动 WSB。重复消息读取 journal；已执行任务绝不通过新进程重跑。
+4. guest 恢复输入、执行、生成受限输出。连接器确认 WSB 已停止后验证路径、普通文件、大小和 SHA-256，再上传。
+5. FleetDO 持久接收结果后确认回执，并通过闹钟重试 SandboxDO 的提交。回执说明云端已保存结果，不等于工作区已提交。
+6. SandboxDO 用 baseRevision 做 CAS；HEAD 和导入 operationId 的回执在同一事务写入。提交后响应丢失也不会重复导入。
+7. 成功、取消或失败处理完成后释放任务写锁；冲突保留任务结果但不覆盖 HEAD。unknown 保留写锁和设备槽位。
+
+执行状态与提交状态分别表达。phase=completed 可以包含非零退出码；persistence.state=committed 才表示源码修改已生效。测试失败仍可提交有效源码，并明确报告失败。
+
+| 异常 | 首版行为 |
+| --- | --- |
+| 派发前不可用 | 返回 dispatch_pending 和原 jobId；可按原 ID 重试或取消尚未登记的派发 |
+| WSS 断线 | 本机请求停止当前 WSB；重连回传 journal，不重跑任务 |
+| 连接器崩溃 | 恢复时停止登记实例；有完整结果则回传，只有 started 记录则 unknown |
+| 源码版本已变化 | 返回 conflict，保留云端任务快照，不覆盖新文件 |
+| R2 或 HTTP 回传失败 | 保留本机 journal 和已经导出的输出，下次连接重传 |
+| guest 未留下有效快照、超限或 hash 不符 | unknown；不提交。原 guest 已停止，不能保证取回所有未导出的修改 |
+| 取消未得到停止确认 | 维持 cancel_requested，超过截止宽限后 unknown |
+| 设备永久丢失或撤销 | 管理员核对外部副作用后可显式 abandon；标记“执行未知”，封存任务并拒绝晚到结果 |
+
+不承诺跨 OS 进程启动和持久记账的 exactly-once。保证的是识别重复消息、未知时不自动重跑，以及晚到结果不能覆盖已封存任务或新工作区修订。
+
+当前任务结果及云端日志保留约 7 天，unknown 不自动清除。已确认接收的本机任务清理输入、输出和 npm 副本，保留小型去重 journal；未确认结果必须保留。文件编辑意图和去重回执的长期压缩属于后续维护工作。
+
+## 7. node_modules、npm 与 Git 缓存
+
+R2 仅保存源码事实，不保存执行环境。固定排除任意层级的 .git、node_modules、.wrangler；不允许模型任意新增忽略规则，也不因名字是 dist 就忽略可能被跟踪的源码。
+
+| 数据 | 放在哪里 | 首版复用与失效规则 |
 | --- | --- | --- |
-| ThreadDO / agent | 查看目录、按任务选择沙箱、发起任务、解释结果 | 不接触设备密钥、宿主路径和任意设备管理 API |
-| sandbox extension，新增 | 目录摘要、发现/选择工具、异步任务编排；与 coding extension 共用工作区服务 | 不因沙箱自报描述而扩大调用者权限 |
-| SandboxDO，每工作区一个 | 当前租约、任务账本、执行锁、版本校验、R2 提交 | 不执行本机命令 |
-| 沙箱目录，云端索引 | 汇总已注册配置、任务类别、动态状态，按调用者权限过滤 | 目录快照不保证设备此刻仍空闲 |
-| DeviceDO，每设备一个，新增 | 认证 WSS、沙箱能力版本、连接代次、容量分配、任务消息路由 | 不代替 SandboxDO 判定文件提交成功 |
-| 本机连接器，新增 | 保存设备凭据、启动自己拥有的 WSB、任务日志、断线重连 | 不把模型提供的命令放到宿主 PowerShell 执行 |
-| WSB 内执行器，新增 | 文件读写、命令进程树、日志、快照差异 | 不持有设备长期凭据和 GitHub 写凭据 |
-| 私有 R2，复用 | 已提交源码、受限日志及显式导出的产物 | 不保存整份 node_modules、宿主目录或隐式缓存 |
+| 源码、package.json、lockfile | R2 与任务只读输入 | 按提交修订恢复；删除也属于源码结果 |
+| node_modules | WSB 内部磁盘 | 仅单个任务内复用；任务结束销毁，下次 npm ci 重建 |
+| npm 下载缓存 | 连接器专用 cache/npm | 按工作区、Windows/架构、Node 版本隔离；每次只给 guest 独立副本 |
+| .git 与 checkout 元数据 | WSB 内 | 不进入 R2，当前不跨任务保存 |
+| Git 对象缓存 | 后续连接器专用 cache/git | 尚未实现，所以 descriptor 明确报告 git=false |
 
-设备注册信息及其沙箱声明持久化在 DeviceDO；云端目录维护可检索索引，列表展示可最终一致。认证、吊销、当前能力版本和容量分配以对应设备的执行服务为准，Cloudflare 目标由云端 provider 提供同样的目录条目。
+npm 缓存处理：复制同 scope 的 _cacache 到任务私有目录 → guest 安装依赖 → 停止 WSB → 拒绝 junction/符号链接和超额条目 → 固定的宿主 npm cache verify 校验 → 发布为下次只读种子。缓存里不带宿主 .npmrc、Token、SSH 配置或其他工作区文件。
 
-区分三个标识：`deviceId` 是连接器设备身份，`sandboxId` 是 agent 可选择的稳定执行目标，`runtimeSessionId` 是一次具体运行环境实例。一个设备未来可以声明多个沙箱配置，但这些配置共享的 CPU、内存和执行槽不能重复计算。首期一台设备只声明一个 WSB 目标，WSB 可以按需启动；目录在线不等于 guest 已经启动。
+默认单个 scope 缓存上限 512 MiB，总缓存 2 GiB，按最近使用时间淘汰。验证或配额失败只放弃缓存，不改写源码结果。运行中的可写映射目录不具备 NTFS 硬配额；正式长期使用前应把 state 放在有空间预算的专用磁盘，并补充独立磁盘配额/监控。
 
-agent 提交 sandboxId，服务端解析成 `{ kind: "cloudflare", sandboxId }` 或 `{ kind: "remote", sandboxId, deviceId, profile }` 并保存到租约。内部连接地址、设备凭据和宿主目录不进入模型参数。
+npm 下载缓存不是安装结果，不能使 npm ci 跳过 node_modules 重建。npm ci 要求 lockfile 与 package.json 一致，也会移除现有 node_modules。[npm ci](https://docs.npmjs.com/cli/v11/commands/npm-ci/)
 
-下面的时序图展示 agent 已选定沙箱后的接纳、执行和提交三个阶段；注册、目录展示与选型见第 4.1、4.2 节。为保持可读性，图中省略短确认回复；“经网关回传”表示连接器通过 DeviceDO 转交 SandboxDO，没有绕过认证通道。
+后续热复用的依赖标识至少包含：scope、OS、架构、Node ABI/版本、包管理器版本、lockfile 摘要、安装选项、workspaces/file: 依赖、安装脚本相关输入。只用 lockfile hash 不足以证明可复用；不确定时重新安装。Node/npm 升级不影响 Git 对象缓存的身份。
 
-[![远程沙箱任务执行与提交时序](diagrams/remote-sandbox.svg)](diagrams/remote-sandbox.svg)
+Git 缓存下一阶段按批准的 repository identity + 信任范围组织裸对象库：
 
-[可编辑图源](diagrams/remote-sandbox.sequence.json)。详细状态与失败处理见后文。
+1. 由连接器受控的 fetch 更新，使用明确 ref/base SHA；仓库 URL 不成为任意宿主命令。
+2. guest 得到只读对象种子，在自己的 WSB 建立独立 checkout。禁止共享 writable working tree、hooks、Git config 和凭据。
+3. guest 新对象只能作为隔离候选导入，校验仓库范围和对象完整性后再发布；不能直接改写全局缓存。
+4. 若使用 alternates/reference，需要保证被引用对象寿命，或使用独立复制/--dissociate 避免缓存 GC 破坏 checkout。[git clone](https://git-scm.com/docs/git-clone)
+5. 宿主缓存按容量和 LRU 清理，R2 源码与已固定的 base SHA 仍是恢复依据。
 
-## 4. 配对、连接与权限
+缓存命中只作为选型偏好，不能改变权限、任务类别或基线版本。首版仅暴露缓存功能布尔值，仓库级命中率、体积和冷热预估尚未上报。
 
-1. owner 在管理页创建一次性配对码，建议有效期 10 分钟。配对码使用高熵随机值，只保存摘要，成功兑换后失效。
-2. 本机连接器代表其管理的 sandbox 提交配对码、设备名、配置和任务类别声明。管理页确认设备接入后，签发仅属于此设备的随机凭据；不复用应用的管理员 Token。以后在已授权范围内使用和选型不再逐任务要求管理员确认。
-3. 云端保存凭据摘要；本机以 DPAPI 加密并限制文件 ACL。凭据不写入仓库、URL、命令行参数、沙箱映射目录或普通日志。
-4. 连接器用认证请求头主动建立 WSS，并上报完整能力声明。Worker 核对设备状态、协议版本、声明格式与凭据，确认 capabilityRevision 后更新目录；新连接替换旧连接时分配新的连接代次。
-5. 管理员设置调用者/工作区可使用的 sandbox 范围、任务类别和资源上限。extension 提供经过过滤的目录，agent 按需选择；模型不能自行批准设备、扩大目录可见范围或提高权限。
-6. 吊销后关闭云端连接并禁止新任务。离线设备无法立即收到取消，已有任务由本地截止时间和取消机制约束，界面不能提前宣称它已停止。
+## 8. GitHub 与 PR
 
-DeviceDO 使用 WebSocket Hibernation API；空闲心跳采用自动响应，任务状态变化才唤醒 DO。连接器指数退避重连，并携带最后确认的消息序号。DO 内存可能被回收，连接附件、设备注册和任务槽状态必须可恢复。[Cloudflare WebSocket 最佳实践](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
+远程沙箱负责改代码、安装依赖和测试；GitHub MCP/API/gh 负责仓库与 PR 操作。当前实现没有新增 GitHub 凭据或自动创建 PR 流程。
 
-控制帧包含 `protocolVersion`、`deviceId`、`connectionGeneration`、`messageId`；任务帧另带 `jobId`、`leaseId`、`runtimeSessionId`。连接代次只用于拒绝旧连接消息，不能在正常重连时自动作废仍在执行的任务租约。平台发布和网络变化都可能中断 WebSocket，重连是正常路径。[Cloudflare WebSockets](https://developers.cloudflare.com/network/websockets/)
+后续优先由云端使用 GitHub App 或已配置的 GitHub MCP 发布：固定 repo/base SHA → 导入源码 → 远程修改和测试 → 校验 R2 修订与差异 → 创建分支、提交和 PR。GitHub 写凭据不进入可执行仓库脚本的 WSB。
 
-### 4.1 注册声明与动态状态
+公开仓库可以在单次任务中 clone；私有仓库优先由云端提供固定版本源码。Windows 验证与 Linux CI 各自报告，WSB 测试不替代 GitHub Actions 的发布门禁。
 
-设备初次连接和重连时发送完整声明，运行时通过 `capabilities_changed` 更新配置，通过 `status_changed` 更新健康与占用；Worker 返回接收确认及当前版本。下面是拟议字段，不代表本机已经验证这些能力：
+## 9. 当前 API 与代码落点
 
-| 字段组 | 内容 | 使用方式 |
-| --- | --- | --- |
-| 身份与版本 | sandboxId、deviceId、displayName、provider、protocolVersion、capabilityRevision | sandboxId 由云端分配并绑定设备；设备只能更新自己拥有的条目 |
-| 系统与软件 | OS、架构、shell、工具及版本，如 PowerShell、Node、Git | 匹配命令和依赖；区分声明、探测结果及探测时间，不能把自报内容视为兼容性认证 |
-| 可分配资源 | guest 内存、CPU 配置、GPU 能力、并发槽、时限和磁盘限制 | 区分硬限制、软阈值和未知值；不能把宿主总内存当作沙箱可用内存 |
-| 可执行任务类别 | taskType、contractVersion、输入/输出契约、依赖能力 | 例如 `shell.exec@1`、`test.node@1`；明确由哪个已部署 handler 承接 |
-| 文件与网络能力 | 工作区协议、快照/产物能力、允许的网络范围 | 代码任务要求支持项目的 R2 源码契约；其他类别声明自己的产物契约 |
-| 动态可用性 | ready / busy / offline / draining / unhealthy、可用槽、已分配任务数、冷/热状态 | ready 可表示可按需启动；Worker 结合连接状态和上报时效判断，不能只信自报 ready |
-| 资源观测与时效 | availableMemory、diskFree、observedAt、lastSeenAt、statusRevision | 用于选型提示，分配时再次检查；未上报的值为 unknown |
-
-有效能力是“设备声明 ∩ Worker 支持的契约 ∩ 调用者授权范围”。Worker 校验 schema、版本、条目数量和字段大小；未知类别可标为 unsupported，但不能让 agent 对未知协议直接执行。新任务类别通过受版本管理的契约和执行 handler 接入，不从设备描述下载并执行 extension 代码。
-
-任务类别主要用于能力匹配。允许通用 shell 本身就允许其权限范围内的任意命令，不能靠把任务标为 `test.node` 就声称限制了其他行为；实际隔离、网络和凭据权限仍由执行环境落实。描述文字作为数据展示，不作为系统提示或权限依据。
-
-能力版本变化后，新申请按新版本匹配；已有租约固定其接纳时的配置和契约。设备无法继续满足已有租约时先进入 draining 或报告故障，按取消/未知状态协议处理，不静默替换运行环境。连接断开和状态过期会更新目录的可用性；它们不证明旧任务已停止。
-
-### 4.2 extension 暴露目录，agent 按需选择
-
-新增 `cs.sandbox` extension，注册目录/租约工具、环境摘要和持久任务；现有 `cs.coding` 继续提供代码读写与执行工具，两者注入同一工作区服务。复用框架的 `tools / sections / tasks`，不修改 pi-durable 核心，也不另造通用任务调度器。设备租约和源码提交仍分别由 DeviceDO、SandboxDO 负责。
-
-每轮提示只提供紧凑摘要，例如可见沙箱数、在线/忙碌/离线数量、主要任务类别和当前租约，并标明观测时刻；详细配置通过工具按需查询，避免每轮塞入全部机器信息。摘要和工具结果均按当前调用者过滤，不泄漏其他用户的设备或任务内容。
-
-| 工具 | agent 获得或表达的信息 |
+| 入口 | 权限和行为 |
 | --- | --- |
-| `sandbox_list(taskType?, requirements?, cursor?)` | 分页列出可见目标、配置摘要、任务类别、可用状态及不匹配原因；带目录版本和观测时刻 |
-| `sandbox_inspect(sandboxId)` | 获取完整配置、能力契约、当前状态和限制；只显示该调用者有权查看的任务详情 |
-| `sandbox_acquire(sandboxId, workspaceId, taskType, requirements, capabilityRevision, expectedRevision)` | agent 明确选择目标；Worker 复核授权、工作区版本、能力和容量，原子预留槽位并返回 leaseId |
-| `sandbox_release(leaseId)` | 释放执行会话；运行中或修改未保存时拒绝直接释放，先完成或取消并核对结果 |
+| POST /admin/sandbox-devices/pairings | ADMIN_TOKEN；创建一次性配对码 |
+| POST /sandbox-devices/claim | 配对码；登记待批准设备 |
+| GET /admin/sandbox-devices | ADMIN_TOKEN；查看声明、批准与连接状态 |
+| POST /admin/sandbox-devices/:id/approve | ADMIN_TOKEN；批准设备 |
+| DELETE /admin/sandbox-devices/:id | ADMIN_TOKEN；撤销设备 |
+| GET /sandbox-devices/:id/connect | 设备 Token；WSS |
+| GET /sandbox-devices/:id/jobs/:job/input | 设备 Token；只可读取分配给自己的输入 |
+| GET/PUT /sandbox-devices/:id/jobs/:job/objects/:sha | 设备 Token；限定任务对象与内容 hash |
+| POST /sandbox-devices/:id/jobs/:job/result | 设备 Token；提交受限结果 |
+| POST /admin/sandbox-devices/jobs/:job/abandon | ADMIN_TOKEN + 显式承认执行未知；封存任务 |
 
-`requirements` 表达任务硬需求，例如 OS、工具版本、最小内存和工作区协议；偏好单独表达，不把“优先使用已有依赖缓存”误当硬约束。agent 在满足硬需求的候选中综合环境、可用性、冷启动和数据准备成本自行决定。初版不引入无法解释的固定评分器，也不要求用户逐次选机器。
+首版为 API/CLI 接入，没有新的管理页。所有入口由 REMOTE_SANDBOX_ENABLED 控制；Wrangler 新增 SandboxFleetDO binding 和 v11 migration，生产默认 false。
 
-列表查询不会占用设备，`sandbox_acquire` 才竞争真实槽位，所有申请使用稳定 operationId 去重。目录过期、能力版本改变或设备忙时返回 `capability_changed / busy / unavailable` 及新状态；agent 可刷新后选其他满足原需求的目标。若 dispatch 已发生，则先查原 lease/job，不能因为换了目标就绕过去重。
+共享 schema 位于 runner/src/protocol.ts；云端代码在 workers/src/remote-sandbox/，extension 在 workers/src/tools/remote-sandbox.ts。runner 是独立小包，不恢复已删除的旧 Node 服务。根目录 install/check 与 CI 已加入 runner 依赖、类型检查、Node 测试和 guest 构建。
 
-取得租约后，`exec_start` 和文件操作引用同一 leaseId；兼容旧工具时，宿主在一次调用开始时冻结并注入租约，不能在调用中途读取一个已经换过的全局目标。租约校验同时绑定调用者、工作区和任务类别，知道 leaseId 本身不授予权限。
+## 10. 限额、成本与后续验收
 
-工作区可以在任务之间更换沙箱：先结束原任务并提交源码、释放旧租约，再为新目标分配租约，从 R2 恢复指定修订。更换实际运行环境增加 workspaceEpoch，旧实例结果不得提交；普通 WSS 重连不增加 epoch。`send_file`、技能发布和子 agent 仍引用同一个工作区服务，避免文件视图分裂。并行执行需要独立工作区/分支，再显式合并；同一工作区不同时允许两个写入目标。
-
-一次典型使用过程是：沙箱注册声明 → extension 展示目录摘要 → agent 查询候选并选中 sandboxId → Worker 分配租约 → 执行任务并回传结果 → 保存产物/源码并释放租约。首期即使只有一个远程 WSB，也完整保留发现与选择过程。
-
-## 5. 本机 WSB 如何执行
-
-连接器以普通用户运行，使用固定、经校验的参数调用 `wsb`。首期按单实例容量设计，只管理自己创建并登记的 sandbox ID；如果用户自己的 WSB 占用资源，就报告 busy，不接管或停止它。
-
-启动时生成专用配置：设置内存、网络和固定启动命令；关闭不必要的剪贴板、打印机、摄像头、麦克风等重定向。只读映射预装工具包，包括固定版本 Node 24、Portable Git 和执行器。不要映射真实项目目录、用户主目录、SSH 密钥或浏览器资料。WSB 关闭后内部文件会丢失，必须先完成源码提交。[WSB 配置文档](https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-configure-using-wsb-file)
-
-宿主到 guest 的传输优先采用专用、带会话 nonce 的 guest HTTP 服务。P0 验证 `wsb ip`、防火墙与可达性；若不成立，再验证仅供本任务使用的 spool 目录方案。spool 属于不可信输入，解析时拒绝路径跳转、重解析点和超额内容，禁止从中加载或执行宿主脚本。不能通过扩大宿主共享目录来绕过连通性问题。
-
-实际命令始终在 WSB 内运行。默认 shell 明确标为 PowerShell；需要 Bash 时由能力协商决定是否可用。Windows 的命令取消使用 Job Object 管理整个进程树，失控时停止该连接器拥有的 WSB。Job Object 用于资源和进程管理，隔离边界仍是 WSB。[Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
-
-同一工作区可短期复用同一个 WSB；切换工作区时销毁重建，避免缓存和后台进程串入另一个任务。初始化脚本、下载工具和更新包必须有版本与摘要，任务内容不能替换连接器或启动包。
-
-## 6. 长任务与提交协议
-
-增加中性的 `exec_start`、`exec_status`、`exec_logs`、`exec_cancel`，文件工具继续采用统一接口；执行和文件操作使用第 4.2 节取得的 leaseId，任务还携带 taskType 与 contractVersion。`exec_start` 立即返回 `jobId`，可短等几秒收取快速结果，但不让 HTTP 请求挂着等 20 分钟。现有 Cloudflare `bash` 兼容保留，远程能力在工具提示中明确说明系统、shell、工作目录和时限。
-
-任务至少保存以下信息：
-
-| 信息 | 用途 |
+| 项目 | 当前默认/限制 |
 | --- | --- |
-| jobId、operationId、fingerprint | 请求去重，重复提交查询原任务；不同参数复用同一 ID 时拒绝 |
-| workspaceId、baseRevision、workspaceEpoch | 防止旧快照覆盖新文件 |
-| sandboxId、deviceId、runtimeSessionId、leaseId | 锁定 agent 选择的目标、执行设备、具体实例和租约 |
-| taskType、contractVersion、capabilityRevision、requirements | 保存任务契约、接纳时能力版本和硬需求，恢复时不重新猜测目标 |
-| deadline、executionState、persistenceState | 区分执行超时、进程结果与文件保存状态 |
-| logCursor、exitCode、snapshotManifest | 断线补日志和提交验证 |
-| originatingTask、threadId、replyChannel | 将完成事件送回原会话，不扩大调用者权限 |
+| 源码 | 单文件 10 MiB，总量 50 MiB，最多 20,000 个文件/目录；清单 JSON 6 MiB |
+| 输出 | stdout/stderr 各保留末尾 64 KiB；云端阶段日志保留末尾 32 KiB |
+| 执行 | 最多 20 分钟；另留最多 6 分钟启动/准备预算及 1 分钟停止确认宽限 |
+| WSB 内存 | 默认 6 GiB，可配置；本机 smoke 使用 4 GiB |
+| 空闲租约 | 无活动任务 10 分钟后释放；WSB 不跨任务保留 |
+| npm 缓存 | 单 scope 512 MiB，总量 2 GiB；普通 npm 缓存，不是 node_modules |
+| 本地结果 | 云端确认前保留；确认后删除大文件，只保留去重记录 |
 
-状态采用可判别联合类型，避免大量可选字段形成非法组合。设备连接状态、进程状态、文件提交状态分别记录：例如设备 disconnected 时，进程仍可能 running；进程 exited 时，文件仍可能 pending。
+本机成本主要是每任务启动 WSB、npm ci、测试及磁盘缓存；云端新增少量设备/任务状态和按文件上传下载的 R2 请求。大依赖不传回 Cloudflare；缓存命中节省下载，仍有安装/解压成本。DO 心跳使用自动响应，闹钟按截止时间、重试和过期时间安排，避免空闲任务每几秒长期唤醒。
 
-正常流程：
+验证分层：
 
-1. agent 通过目录选择 sandboxId；`sandbox_acquire` 在 SandboxDO 持久登记选择意图、基线版本和 operationId，再向对应 DeviceDO 幂等预留槽位。拿到 reservation 后保存 leaseId，确认租约并返回；确认失败或结果不明时查询原申请，不盲目释放再申请。两个 DO 不依赖跨对象事务。
-2. agent 使用 leaseId 提交任务。SandboxDO 重新核验租约、授权和所选任务契约，持久登记 activeJob，锁住工作区写入及其他执行，再确认 dispatch。未启动任务的空闲租约可超时回收；一旦派发就走第 7 节的对账规则。读取默认返回已提交版本，并标明有任务运行中。
-3. 连接器先持久记录 accepted，再请求 guest 启动。下发和确认丢失时沿用原 jobId 查询，禁止创建第二次执行。
-4. guest 捕获 stdout/stderr、序号和退出码。日志分块、合并发送，云端按游标确认；不逐字唤醒 DO。
-5. 进程树结束后，guest 计算源码快照差异。连接器先保存结果元数据，再传回退出证据、文件摘要与对象内容。
-6. 云端核对设备、任务租约、runtimeSessionId、epoch 和 baseRevision，验证文件路径、大小及 hash，再写 R2 blob/manifest。
-7. 在 SandboxDO 的持久事务中 CAS 更新 HEAD、记录操作结果、解除 activeJob；CAS 失败时保留冲突证据，不覆盖新修订。
-8. 通过持久 outbox 唤醒原 ThreadDO；使用稳定事件 ID 去重。完成事件沿用原回复通道与授权范围，不伪装成 owner 亲自发出的新命令。
+- 自动检查：协议/Windows 路径、缓存隔离与淘汰、HTTP/WSS 重连去重、设备授权与槽位、文件 CAS、未知状态、管理员封存、原功能回归。
+- 本机 WSB smoke：DPAPI、独立启动/销毁、npm ci + Node 测试、中文与二进制、跨实例 npm 缓存、取消后确认停止。
+- 本地完整链路：真实 Wrangler Worker/DO/R2、认证 WSS、连接器及 WSB，验证注册、选择、恢复、执行、上传、CAS 和释放。
+- 尚需部署前验证：实际公网 Worker 到本机的持续连接、真实目标仓库和 Windows 特有工具链、长时间断网/宿主重启、磁盘硬配额及告警。
+- 后续阶段：自动完成通知、管理 UI、WSB 热复用、Git 缓存、仓库基线与 PR 发布、授权范围扩展。
 
-exitCode 非零也可以提交有效源码，然后明确报告测试失败。只有源码提交成功，才可把结果标为完整完成；保存失败必须报告“执行已结束，但修改未保存”。
-
-## 7. 断线、取消与未知状态
-
-| 情况 | 必须采取的行为 |
-| --- | --- |
-| 设备在 dispatch 前离线 | 未确认的 reservation 可过期释放；任务返回 unavailable 或等待，不执行宿主兜底 |
-| dispatch 发出后确认丢失 | 视为可能已经执行，按 jobId 对账，不能自动重派 |
-| WSS 断线、DO 休眠后唤醒 | 恢复持久 activeJob，查询原 runtimeSessionId，不直接销毁 WSB |
-| 连接器崩溃发生在记账和启动之间 | 查询 guest journal / 进程状态；无法判定时标 unknown，保持工作区写锁 |
-| 同一任务重复到达 | 参数相同返回原任务状态；参数不同拒绝；不能把消息重试当命令重试 |
-| 发起取消 | 先记录 cancel_requested；确认整个进程树停止后才标 cancelled |
-| 超时且控制失灵 | 由本机 watchdog 停止自有 WSB；未获停止证据前仍是 unknown |
-| 正常更换执行目标 | agent 在任务结束、修改提交及旧租约释放后重新选择；新环境增加 workspaceEpoch，拒绝旧结果提交 |
-| 原任务未知时强制恢复 | 显式管理操作增加 workspaceEpoch 并保留 unknown 记录；不能撤销已经发生的外部副作用 |
-| R2 不可用、快照超限、hash 错误 | 保留隔离的本机待取回结果，报告 persistence_failed，不谎报完成或立即销毁唯一修改副本 |
-| 任务执行完但通知丢失 | 持久 outbox 重试同一完成事件，不重跑任务 |
-
-连接器写 journal 与 OS 启动进程无法组成原子事务，因此不承诺任意故障下的 exactly-once。目标是重复投递可识别、结果可核对、未知时停止自动推进。工作区 epoch 能阻止晚到的文件覆盖，不能撤销 GitHub 提交或其他联网副作用。
-
-首次实现必须修改现有 `ensureRuntime` 和 unknown-operation 的恢复策略：Cloudflare provider 可保留原有重建行为，remote provider 在启动恢复时先 inspect/reconcile。持久 activeJob 取代单靠内存 Promise 队列维持长任务锁。
-
-## 8. 文件、依赖与 Git 仓库
-
-R2 是已提交源码的权威副本，WSB 是执行视图。本地缓存不能反过来覆盖云端 HEAD。首期保留现有单文件 10 MiB、工作区源码总量 50 MiB 等限制，超限必须有明确错误和取回路径。
-
-`node_modules`、`.git`、npm 缓存、`.wrangler` 及声明的构建产物属于临时数据，不进入源码快照。这需要给现有 snapshot/restore 增加受控的临时目录规则；不能让模型随意添加忽略路径并隐藏源码改动。只将确定为生成目录的路径列入规则，不能仅因目录名叫 `dist` 就忽略仓库真实跟踪的文件。
-
-源码协议统一使用工作区相对路径及 `/`；Windows runner 将其映射到固定工作区目录。拒绝盘符、UNC、ADS、保留设备名、大小写碰撞、路径越界以及 symlink/junction/reparse point 绕过。所有文件 API 和快照必须应用同一套校验，不能只检查传入字符串。
-
-仓库来源 URL 和 base commit SHA 由云端批准的元数据确定。初始化从固定 commit 建立 checkout，再恢复当前工作区源码修订，包括已记录的删除；Git 元数据不作为 R2 文件同步。缓存按 OS、CPU 架构、Node 版本和 lockfile hash 区分，只在同一信任范围内复用，不复用其他工作区的 dirty checkout。
-
-大文件通过短时、限定 job/object/hash/size 的上传下载凭证传输，避免全部塞入 WSS。凭证只能读写该任务对象；上传后仍由云端验证摘要和 manifest。日志与任务产物同样限定工作区权限。
-
-## 9. GitHub MCP、gh 与 PR
-
-远程沙箱与 GitHub 接入解决不同问题：沙箱提供完整文件系统和命令执行，GitHub MCP / API / gh 提供仓库与 PR 操作。即使接通 GitHub MCP，安装依赖和运行测试仍需要执行环境。
-
-推荐把发布留在云端：WSB 产出经过校验的文件差异及测试结果；云端发布组件使用 GitHub App 或已有 GitHub MCP，创建分支、提交和 PR。发布前重新核对仓库、base SHA、允许的路径和工作区修订。GitHub 写凭据不进入可运行任意仓库脚本的 WSB。
-
-公开仓库可以直接 clone。私有仓库优先由云端生成固定版本源码包；确需 guest clone 时使用仅限指定仓库读取的短期凭据，并承认仓库脚本可能读取该凭据，不能将其权限扩大到组织或写入操作。
-
-`gh` 可以安装在具备相应授权的执行环境中，但不是此次设备注册的前提。最终 PR 继续由 GitHub Actions 运行 Linux 检查；本机 WSB 测试提供快速反馈和 Windows 验证，不替代尚未验证兼容性的 Linux 发布门禁。
-
-## 10. 建议接口与代码落点
-
-以下是拟议接口，不是当前可调用的 API：
-
-| 入口 | 调用者 | 行为 |
-| --- | --- | --- |
-| `POST /admin/devices/pairings` | 管理端 | 创建配对码 |
-| `POST /devices/pairings/exchange` | 本机连接器 | 兑换配对并建立待确认设备 |
-| `POST /admin/devices/:id/approve` | 管理端 | 确认设备并允许完成凭据签发 |
-| `GET /admin/devices` | 管理端 | 查看设备及其 sandbox 声明、连接状态、任务与错误 |
-| `GET /sandboxes`、`GET /sandboxes/:id` | extension 的宿主服务 | 根据真实调用者权限读取目录与详情 |
-| `DELETE /admin/devices/:id` | 管理端 | 吊销设备，禁止新任务 |
-| `PUT /admin/workspaces/:id/sandbox-policy` | 管理端 | 配置允许的目标、任务类别与限额；agent 在此范围内自行选择 |
-| `GET /devices/:id/connect` | 本机连接器 | 认证后升级 WSS；接收能力声明、版本更新和动态状态 |
-| acquire / release / submit / inspect / logs / cancel RPC | extension 宿主、SandboxDO 与 DeviceDO | 按 sandboxId 选择并校验租约；不暴露管理员能力给模型 |
-
-配对兑换先签发短期 pairing-session，仅允许该设备等待管理员确认并取回自己的设备凭据；它不能执行任务或查询其他设备。批准、领取和失效状态均持久化，避免批准后网络中断导致凭据泄漏或重复签发。
-
-拟增加 `RuntimeAdapter`，提供 `describe / prepare / submit / inspect / cancel / read / write / edit / snapshot / release`；describe 归一化配置与任务能力，目录采用同一契约。Cloudflare adapter 先包装现有逻辑；remote adapter 通过 DeviceDO 执行。传输重试只作用于有 ID 的协议消息，不隐式重跑 shell 命令。
-
-| 路径 | 变更范围 |
-| --- | --- |
-| `workers/src/sandbox/runtime.ts`、`remote.ts` | 新增运行时契约及远程实现 |
-| `workers/src/sandbox/do.ts`、`workspace.ts` | agent 所选目标的租约、持久任务锁、恢复核对与提交 |
-| `workers/src/remote-sandbox/` | 新增 DeviceDO、能力声明、目录索引、设备认证和租约状态 |
-| `workers/src/admin/` | 增加设备管理及工作区沙箱授权范围入口 |
-| `workers/src/tools/sandbox.ts`，新增 | cs.sandbox extension：摘要、发现、选型、租约工具与持久任务 |
-| `workers/src/tools/coding.ts` | 与 sandbox extension 共用工作区服务，按租约提供执行和文件工具 |
-| `runner/`，新增独立小包 | 本机连接器、WSB bootstrap、guest runner；不恢复旧 Node 主服务 |
-
-协议只维护一份带版本的 schema，云端和连接器共用校验规则。新增 DeviceDO 需要 Wrangler binding / migration，宿主安装 cs.sandbox extension 并注入目录和工作区服务；新功能默认关闭，先接一台测试设备。agent 显式选择目录中的远程目标后走新路径，Cloudflare 目标继续保留。
-
-## 11. 初始限额与成本
-
-下列数值是建议默认值，尚未通过 WSB 实测调优：
-
-| 项目 | 首期建议 |
-| --- | --- |
-| 并发 | 每设备 1 个任务；每工作区 1 个写入/执行任务 |
-| 远程任务时长 | 默认 20 分钟硬截止；现有 Cloudflare 120 秒上限先保持不变 |
-| WSB 内存 | 先用 6 GiB 配置做探针，启动前检查宿主余量；不把 Linux 测试进程峰值当作整台 Windows guest 的需求 |
-| 空闲回收 | 同一工作区空闲 10 分钟后关闭 WSB；有未保存结果时单独处理 |
-| 日志 | 单次工具展示最多 64 KiB，持久保存每任务最多 1 MiB，建议保留 7 天；截断要显式标记 |
-| 源码 | 继续单文件 10 MiB、总量 50 MiB；依赖和产物不计入源码快照 |
-| 临时磁盘 | 先以 2 GiB 工作目录告警阈值观测，根据实际依赖调优；不是 WSB 原生硬配额 |
-
-CPU、内存和依赖磁盘消耗转移到本机；云端增加设备连接、任务元数据、R2 文件及日志请求，模型调用费用基本不因执行地点改变。Hibernation 可减少空闲 DO 活跃时间，但频繁日志和应用层心跳仍有请求及运行成本。
-
-云端增量可按“任务元数据读写 + 日志批次数 + 变更文件传输/存储”估算；本机增量按“WSB 启动时间 + 测试运行时间 + 待机复用时间”测量。依赖缓存命中时无需重复下载整个 node_modules，也无需每次上传它。没有本机实测和任务频率前，不给出伪精确的月费数字。
-
-主要代价是电脑必须在线、Windows 与 Linux 行为差异、连接器维护及故障恢复复杂度。相比纯 GitHub Actions，远程沙箱适合交互式反复修改和快速重跑；GitHub Actions 继续提供独立、可复现的发布验证。
-
-## 12. 实施顺序与验收
-
-| 阶段 | 交付物 | 通过条件 |
-| --- | --- | --- |
-| P0：本机可行性 | 独立 WSB 探针和测量记录 | 成功启动自有实例；Node 24 / Git 可用；中文 stdout/stderr 无损；host↔guest 可通信；可终止进程树；记录启动、内存和磁盘；验证本项目 Windows 测试兼容性 |
-| P1：最小闭环 | 设备配对、声明与更新、extension 目录、agent 选型、单任务执行 | agent 能区分 WSB 与 Cloudflare 的配置/任务类别并申请匹配目标；WSB 完成无副作用探针任务，断线后可查询原任务；不能执行宿主命令 |
-| P2：工作区可靠性 | 源码恢复与提交、异步完成通知、取消与对账 | 安装依赖、修改和测试后只提交源码；故障场景不重复执行、不覆盖新版本、不误报已保存 |
-| P3：代码协作 | 固定版本 checkout → 修改测试 → 云端提交 PR | PR 差异和工作区修订一致；GitHub Actions 检查通过；发布凭据未进入 guest |
-
-P0 若证实 Windows 的 workerd/测试池不兼容，就把该目标能力标为 Windows 通用执行，Linux 检查继续走现有 Cloudflare / GitHub Actions。后续可增加本机 WSL2 内的隔离容器或独立 Linux VM adapter；裸 WSL 发行版通常能访问宿主盘，不能直接当作不可信代码沙箱，也不要求在 WSB 内嵌套 WSL。
-
-P2 至少覆盖：接纳前后断网、执行后提交前断网、连接器重启、DO 回收、重复消息、过期 epoch、取消后残留子进程、R2 失败、超额文件、hash 错误、Windows 大小写冲突和 junction 越界、设备离线时吊销。目录与选型另需覆盖：配置更新、未知任务契约、未授权目标不可见、陈旧目录、并发抢槽、同设备多配置共享容量、lease 跨工作区误用、未派发可重选与已派发禁止自动换机。已有 Cloudflare provider 行为和测试保持通过。
-
-本设计的下一步是 P0 探针。本文及图源不启用设备、不开放端口、不启动 WSB，也不改变线上执行路径。
+功能保持默认关闭。本次实现和本地验证不会注册生产设备，也不会自动部署或推送 main。

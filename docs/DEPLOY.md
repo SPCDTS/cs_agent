@@ -11,7 +11,7 @@ npm run install:workers
 npm run check
 ```
 
-根目录没有运行依赖；不需要安装根目录旧 lockfile 中的包。`npm run build` 执行 Wrangler dry-run，并设置 `--containers-rollout=none`，只验证 Worker 打包，不发布也不构建镜像。
+根目录没有运行依赖；不需要安装根目录旧 lockfile 中的包。`npm run install:workers` 会分别安装 Workers 与 runner 的固定依赖。`npm run build` 先构建 guest 执行器，再执行 Wrangler dry-run，并设置 `--containers-rollout=none`，只验证 Worker 打包，不发布也不构建镜像。
 
 配置位于 `workers/wrangler.jsonc`：Worker 名称、自定义域名、Durable Object 绑定与迁移、R2 绑定、定时触发和编码沙箱镜像。`workers/wrangler.test.jsonc` 用于隔离测试。不要删除已上线的 DO migration 历史，包括已经删除的类。
 
@@ -44,4 +44,6 @@ NapCat 独立运行，在其反向 WebSocket 客户端中配置 `wss://<Worker �
 
 ## 本地旧文件
 
-代码清理不删除既有 `data/`、`workspace/`、`napcat/`、`secrets/` 或其他 worktree。老 worktree 可能通过目录链接共享根 node_modules，不能直接递归删除这份共享缓存。新 checkout 只需 Workers 一套依赖。
+代码清理不删除既有 `data/`、`workspace/`、`napcat/`、`secrets/` 或其他 worktree。老 worktree 可能通过目录链接共享根 node_modules，不能直接递归删除这份共享缓存。新 checkout 安装 `workers/` 和 `runner/` 各自的依赖；不能共享其他 worktree 的 node_modules。
+
+远程沙箱的生产开关 `REMOTE_SANDBOX_ENABLED` 默认是 `"false"`。启用前按 [运行说明](REMOTE-SANDBOX-RUNBOOK.md) 核对设备权限、WSB 与磁盘配置；本机连接器另行运行。`workers/wrangler.smoke.jsonc` 仅用于本地链路验证，不是部署配置。

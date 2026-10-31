@@ -7,12 +7,12 @@
     "node": ">=24"
   },
   "scripts": {
-    "install:workers": "npm --prefix workers ci",
+    "install:workers": "npm --prefix workers ci && npm --prefix runner ci",
     "dev": "npm --prefix workers run dev",
-    "build": "npm --prefix workers run build",
-    "typecheck": "npm --prefix workers run typecheck",
+    "build": "npm --prefix runner run build && npm --prefix workers run build",
+    "typecheck": "npm --prefix workers run typecheck && npm --prefix runner run typecheck",
     "test": "npm --prefix workers test --",
-    "test:node": "npm --prefix workers run test:node",
+    "test:node": "npm --prefix workers run test:node && npm --prefix runner test",
     "test:all": "npm run test && npm run test:node",
     "check": "npm run typecheck && npm test -- --maxWorkers=1 && npm run test:node && npm run build",
     "deploy": "npm --prefix workers run deploy"

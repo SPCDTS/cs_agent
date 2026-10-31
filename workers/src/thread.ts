@@ -57,6 +57,7 @@ import { importHistory, importThreadKey, parseMessageImport, type MessageImportR
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin, type SubagentView } from "./subagent/parent";
 import { subagentName, type SubagentIdentity, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
 import { createCodingExtension } from "./tools/coding";
+import { createRemoteSandboxExtension } from "./tools/remote-sandbox";
 
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -268,7 +269,13 @@ export class ThreadDO extends DurableObject<Env> {
         async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
     // 沙箱 coding 工具只在 owner 线程注册，只有 owner 亲自发消息的回合能调用。
+    if (memory.ns === "owner" && this.env.REMOTE_SANDBOX_ENABLED === "true") registry.install(createRemoteSandboxExtension({
+      allowed: async (api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c); return !!input && this.ownerTurnKind(input) === "message" && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration(); },
+      fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), sandbox: () => this.env.SANDBOX.getByName(memory.ns),
+      record: detail => this.audit("remote_sandbox", detail),
+    }));
     if (memory.ns === "owner") registry.install(createCodingExtension({
+      remoteEnabled: this.env.REMOTE_SANDBOX_ENABLED === "true",
       allowed: async (api, callContext) => {
         const input = await this.currentInput(harness, api, api.conversationId, callContext);
         return !!input && this.ownerTurnKind(input) === "message" && input.user_id !== input.self_id;

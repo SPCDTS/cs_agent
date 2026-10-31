@@ -1,5 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
+import { RemoteWorkspace } from "../remote-sandbox/workspace";
+import type { AcquireInput } from "../remote-sandbox/fleet";
+import type { Operation } from "../../../runner/src/protocol";
 import { MediaRepository, type AssetRef } from "../media/repository";
 import { imageMime } from "../media/model";
 import { sandboxClient, type DirEntry, type ExecResult, type FileEdit, type ReadResult } from "./client";
@@ -18,6 +21,14 @@ export class SandboxDO extends DurableObject<Env> {
   private readonly client = sandboxClient((path, init) => this.send(path, init));
   private readonly workspace = new WorkspaceManager({ workspace: `workspace:${this.ctx.id.toString()}`, bucket: this.env.ASSETS, storage: this.ctx.storage,
     runtime: this.client, runtimeReady: () => this.ready && Boolean(this.ctx.container?.running), resetRuntime: () => this.destroyRuntime() });
+  private readonly remote = new RemoteWorkspace({ name: this.ctx.id.toString(), env: this.env, storage: this.ctx.storage, workspace: this.workspace });
+  private remoteEnabled() { if (this.env.REMOTE_SANDBOX_ENABLED !== "true") throw new Error("remote_sandbox_disabled"); }
+  async sandboxSelection() { return this.remote.selection(); }
+  acquireSandbox(input: Omit<AcquireInput, "workspace">) { this.remoteEnabled(); return this.remote.acquire(input); }
+  releaseSandbox() { this.remoteEnabled(); return this.remote.release(); }
+  startRemoteJob(operationId: string, operation: Operation) { this.remoteEnabled(); return this.remote.start(operationId, operation); }
+  finishRemoteJob(id: string) { return this.remote.finish(id); }
+  cancelRemoteJob(id: string) { this.remoteEnabled(); return this.remote.cancel(id); }
   private container(): Container {
     const container = this.ctx.container;
     if (!container) throw new Error("sandbox_unavailable");
@@ -47,7 +58,7 @@ export class SandboxDO extends DurableObject<Env> {
     try { return await port.fetch(`http://sandbox${path}`, init); }
     catch { this.ready = false; throw new Error("sandbox_unavailable"); }
   }
-  run(input: { operationId: string; operation: WorkspaceOperation }): Promise<WorkspaceRunResult> { return this.workspace.run(input); }
+  run(input: { operationId: string; operation: WorkspaceOperation }): Promise<WorkspaceRunResult> { return this.remote.run(input); }
   private async result(operation: WorkspaceOperation, operationId?: string) {
     const run = await this.run({ operationId: operationId ?? crypto.randomUUID(), operation });
     if (run.status !== "committed") throw new Error(run.status === "unknown" ? "operation_unknown" : run.error + (run.issues ? `:${JSON.stringify(run.issues)}` : ""));
@@ -73,7 +84,7 @@ export class SandboxDO extends DurableObject<Env> {
     if (!("replaced" in result)) throw new Error("sandbox_error");
     return result;
   }
-  list(path: string): Promise<DirEntry[]> { return this.workspace.list(path); }
+  list(path: string): Promise<DirEntry[]> { return this.remote.list(path); }
   files(revision?: string): Promise<WorkspaceManifest> { return this.workspace.files(revision); }
   snapshot(): Promise<WorkspaceManifest> { return this.files(); }
   listAssets(revision?: string): Promise<WorkspaceManifest> { return this.files(revision); }
@@ -82,7 +93,7 @@ export class SandboxDO extends DurableObject<Env> {
     const file = await this.readBlob(path);
     return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({ ...file, name: name ?? file.name, kind: imageMime(file.bytes) ? "image" : "file" });
   }
-  importSnapshot(input: { manifest: WorkspaceManifest; expectedRevision: string; paths?: string[] }): Promise<WorkspaceCompareResult> { return this.workspace.importSnapshot(input); }
+  importSnapshot(input: { manifest: WorkspaceManifest; expectedRevision: string; paths?: string[] }): Promise<WorkspaceCompareResult> { return this.remote.mutate(() => this.workspace.importSnapshot(input)); }
   async cloneFrom(input: { sourceName: string; expectedRevision: string; sourceRevision?: string }): Promise<WorkspaceCompareResult> {
     const manifest = await this.env.SANDBOX.getByName(input.sourceName).files(input.sourceRevision);
     return this.importSnapshot({ manifest, expectedRevision: input.expectedRevision });
@@ -101,6 +112,6 @@ export class SandboxDO extends DurableObject<Env> {
     return true;
   }
   gc(options?: Parameters<WorkspaceManager["gc"]>[0]): ReturnType<WorkspaceManager["gc"]> { return this.workspace.gc(options); }
-  resetRuntime(): Promise<{ reset: boolean }> { return this.workspace.resetRuntime(); }
+  resetRuntime(): Promise<{ reset: boolean }> { return this.remote.mutate(() => this.workspace.resetRuntime()); }
   reset(): Promise<{ reset: boolean }> { return this.resetRuntime(); }
 }

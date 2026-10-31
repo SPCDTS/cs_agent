@@ -1,6 +1,7 @@
 // 配置可被部署覆盖，不能沿用生成文件中的字面量类型；绑定仍由 Wrangler 生成。
-export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" | "QQ_GROUP_MENTIONS" | "MEMORY_EXTRACT_MODEL" | "MEMORY_EXTRACT_NAMESPACES" | "PUBLIC_ORIGIN" | "GMAIL_PUBSUB_SERVICE_ACCOUNT" | "GMAIL_PUBSUB_TOPIC"> {
+export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" | "QQ_GROUP_MENTIONS" | "MEMORY_EXTRACT_MODEL" | "MEMORY_EXTRACT_NAMESPACES" | "PUBLIC_ORIGIN" | "GMAIL_PUBSUB_SERVICE_ACCOUNT" | "GMAIL_PUBSUB_TOPIC" | "REMOTE_SANDBOX_ENABLED"> {
   PUBLIC_ORIGIN: string;
+  REMOTE_SANDBOX_ENABLED?: string;
   // Pub/Sub 推送的服务账号邮箱与 Gmail watch 的 topic；为空时只靠 Cron 轮询
   GMAIL_PUBSUB_SERVICE_ACCOUNT?: string;
   GMAIL_PUBSUB_TOPIC?: string;
