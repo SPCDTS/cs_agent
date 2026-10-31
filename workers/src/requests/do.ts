@@ -1,9 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import type { RequestDetail, RequestQuery, RequestRecord, ToolTrace, ToolSummary } from "./types";
+import { readAgentTopology, type AgentTopology } from "./topology";
 const DAY = 86_400_000;
 type Row = { seq: number; record: string; available: number };
 export class RequestsDO extends DurableObject<Env> {
+  private topologyCache?: AgentTopology;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`
@@ -89,6 +91,11 @@ export class RequestsDO extends DurableObject<Env> {
       if (value) { where.push(column + " = ?"); args.push(value); }
     }
     return { where: where.join(" AND "), args };
+  }
+  agentTopology(): AgentTopology {
+    const now = Date.now();
+    if (!this.topologyCache || now - this.topologyCache.sampledAt >= 10_000) this.topologyCache = readAgentTopology(this.ctx.storage.sql, now);
+    return this.topologyCache;
   }
   list(q: RequestQuery) {
     const { where, args } = this.filter(q);
