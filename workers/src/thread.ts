@@ -23,7 +23,7 @@ import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
 import { threadOpsSettings, effectiveSettings, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
-import { MESSAGE_SCHEMA, QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, markMessageRecalled, recordMessage, recall, type RecallOptions } from "./context";
+import { MESSAGE_SCHEMA, QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, markMessageRecalled, recordMessage, recall, withReplyContext, type RecallOptions } from "./context";
 import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from "./prompt";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { modelChange, openModels, sameSelection } from "./models";
@@ -406,7 +406,9 @@ export class ThreadDO extends DurableObject<Env> {
       whenBusy = !isWeb(row) && row.kind === "message" && active?.kind === "message" && !isWeb(active) && active.user_id === row.user_id && !inbox?.items.some(item => item.mode === "followUp") ? "steer" : "followUp";
       await this.database.run("UPDATE inbound SET when_busy = ? WHERE message_id = ?", whenBusy, row.message_id);
     }
-    return root.submit({ type: "input", content: row.text, requestId: row.message_id, whenBusy }, context);
+    const content = row.kind === "message" && !isWeb(row)
+      ? await withReplyContext(this.database, scopeOf(targetOf(row)), row.platform_message_id, row.text) : row.text;
+    return root.submit({ type: "input", content, requestId: row.message_id, whenBusy }, context);
   }
 
   private async applyProfile(runtime: Runtime, profile: ToolProfile): Promise<void> {

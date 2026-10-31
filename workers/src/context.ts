@@ -70,17 +70,44 @@ export async function markMessageRecalled(database: Pick<DurableObjectSqliteData
     ON CONFLICT(scope,message_id) DO UPDATE SET recalled=1`, scope, messageId);
 }
 
-export type RecallOptions = { query?: string; limit?: number; before?: number };
-export const QQ_CONTEXT_DESCRIPTION = "只读检索本回合所在会话的聊天记录；无 query 取最近消息，before 为 Unix 秒。";
-export const QQ_CONTEXT_PARAMETERS = Type.Object({ query: Type.Optional(Type.String({ maxLength: 1000 })),
+export type RecallOptions = { message_id?: string; query?: string; limit?: number; before?: number };
+export const QQ_CONTEXT_DESCRIPTION = "只读检索本回合所在会话的聊天记录；message_id 读取单条全文及其引用原文，无 query 取最近消息，before 为 Unix 秒。";
+export const QQ_CONTEXT_PARAMETERS = Type.Object({ message_id: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })), query: Type.Optional(Type.String({ maxLength: 1000 })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })), before: Type.Optional(Type.Number()) }, { additionalProperties: false });
-type MessageRow = { message_id: string; image_count: number | null; time: number; user_id: string; nickname: string; is_self: number; text: string };
+type MessageRow = { message_id: string; image_count: number | null; time: number; user_id: string; nickname: string; is_self: number; text: string; reply_to_id: string | null };
 export type SummaryRow = { id: number; scope: string; kind: "day" | "week"; period_start: number; period_end: number; text: string; msg_count: number };
 const beijingDate = (sec: number) => new Date((sec + 8 * 3600) * 1000).toISOString().slice(5, 10);
 export const summaryLabel = (row: Pick<SummaryRow, "kind" | "period_start" | "period_end">) =>
   row.kind === "day" ? `[日摘要 ${beijingDate(row.period_start)}]` : `[周摘要 ${beijingDate(row.period_start)}~${beijingDate(row.period_end - 86400)}]`;
 
+type MessageDatabase = Pick<DurableObjectSqliteDatabase, "get">;
+function storedMessage(database: MessageDatabase, scope: string, messageId: string) {
+  return database.get<MessageRow & { recalled: number | null }>(
+    `SELECT m.*, mm.recalled FROM messages m LEFT JOIN message_media mm
+      ON mm.scope=m.scope AND mm.message_id=m.message_id WHERE m.scope=? AND m.message_id=?`, scope, messageId);
+}
+async function attachReply(database: MessageDatabase, scope: string, replyToId: string | null | undefined, text: string): Promise<string> {
+  if (!replyToId) return text;
+  const quoted = await storedMessage(database, scope, replyToId);
+  const reference = !quoted ? { message_id: replyToId, status: "原消息未保存在当前会话中" }
+    : quoted.recalled ? { message_id: replyToId, status: "原消息已撤回" }
+    : { message_id: quoted.message_id, user_id: quoted.user_id, nickname: cleanName(quoted.nickname), text: quoted.text };
+  // 原文作为 JSON 资料传入，不改变当前回合身份，也不递归展开引用链。
+  return `[引用消息（同一QQ会话）]\n${JSON.stringify(reference)}\n[当前消息]\n${text}`;
+}
+export async function withReplyContext(database: MessageDatabase, scope: string, messageId: string, text: string): Promise<string> {
+  const row = await database.get<{ reply_to_id: string | null }>("SELECT reply_to_id FROM messages WHERE scope=? AND message_id=?", scope, messageId);
+  return attachReply(database, scope, row?.reply_to_id, text);
+}
+
 export async function recall(database: DurableObjectSqliteDatabase, scope: string, options: RecallOptions): Promise<string> {
+  if (options.message_id) {
+    const row = await storedMessage(database, scope, options.message_id);
+    if (!row) return "未找到本会话的聊天记录。";
+    if (row.recalled) return `[message_id:${row.message_id} 已撤回]`;
+    const text = `[message_id:${row.message_id}] ${row.is_self ? "[我]" : cleanName(row.nickname) || row.user_id}(${row.user_id}): ${row.text}`;
+    return attachReply(database, scope, row.reply_to_id, text);
+  }
   const limit = typeof options.limit === "number" && Number.isFinite(options.limit) ? Math.min(50, Math.max(1, Math.floor(options.limit))) : 20;
   const before = typeof options.before === "number" && Number.isFinite(options.before) ? options.before : Number.MAX_SAFE_INTEGER;
   const query = options.query?.trim().slice(0, 1000) ?? "";
@@ -113,9 +140,10 @@ export async function recall(database: DurableObjectSqliteDatabase, scope: strin
     const time = new Date(row.time * 1000 + 8 * 3600_000).toISOString();
     const stamp = (time.slice(0, 10) === now.slice(0, 10) ? "" : time.slice(5, 10) + " ") + time.slice(11, 16);
     const attachment = attachments.get(row.message_id);
-    const label = attachment || row.image_count ? ` [message_id:${row.message_id}${attachment?.recalled ? " 已撤回" : ""}]` : "";
+    const label = attachment || row.image_count || row.reply_to_id ? ` [message_id:${row.message_id}${attachment?.recalled ? " 已撤回" : ""}]` : "";
+    const reply = row.reply_to_id ? ` [reply_to_id:${row.reply_to_id}]` : "";
     const body = `${row.is_self ? "[我]" : cleanName(row.nickname).slice(0, 40) || row.user_id}(${row.user_id}): ${row.text.replace(/\s+/g, " ").trim()}`;
-    return { at: row.time, line: `${stamp} ${body.length <= 120 ? body : body.slice(0, 119) + "…"}${label}` };
+    return { at: row.time, line: `${stamp} ${body.length <= 120 ? body : body.slice(0, 119) + "…"}${label}${reply}` };
   });
   // 原文过了保留期后摘要是唯一线索，与命中的消息按时间混排后再截到同一条数上限。
   for (const row of summaries) entries.push({ at: row.period_end, line: `${summaryLabel(row)} ${row.text.replace(/\s+/g, " ").trim()}` });
