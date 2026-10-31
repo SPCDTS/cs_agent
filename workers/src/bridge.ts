@@ -5,7 +5,8 @@ import { cleanName, id, inboundKey, isAllowed, isRecord, isTriggered, policyFrom
 import { SendRules } from "./send-rules";
 import { effectiveSettings, type SettingsSnapshot } from "./settings";
 import { DeliveryStore, type AuthorizedQqIntent, type SystemQqIntent, type DeliveryState, type Delivery, type DeliverySource } from "./delivery";
-import { MediaRepository } from "./media/repository";
+import { MediaRepository, type AssetRef } from "./media/repository";
+import { FILE_MAX_BYTES, validScope } from "./media/model";
 
 type Attachment = { id: string; active: boolean };
 type Pending = { socket: WebSocket; resolve: (data: unknown) => void; reject: (error: Error) => void };
@@ -302,7 +303,20 @@ export class BridgeDO extends DurableObject<Env> {
     const result=await this.call(target.kind==="group"?"get_group_file_url":"get_private_file_url",target.kind==="group"?{group_id:target.groupId,file_id:fileId,busid}:{user_id:target.userId,file_id:fileId});
     return this.mediaUrl(result);
   }
-  async getImage(file:string):Promise<string>{this.validMediaFile(file);return this.mediaUrl(await this.call("get_image",{file}));}
+  /** QQ 图片由本机下载，经 OneBot 回传内容；不使用返回的 QQ URL。 */
+  async getImage(file: string, scope: string): Promise<AssetRef> {
+    this.validMediaFile(file);
+    validScope(scope);
+    const result = await this.call("get_image", { file });
+    if (!isRecord(result) || typeof result.base64 !== "string" || !result.base64) throw new Error("napcat_image_content_missing");
+    if (result.base64.length > Math.ceil(FILE_MAX_BYTES / 3) * 4) throw new Error("too_large");
+    let binary: string;
+    try { binary = atob(result.base64); } catch { throw new Error("invalid_image_content"); }
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({
+      bytes, kind: "image", name: typeof result.file_name === "string" ? result.file_name : "image",
+    });
+  }
   async getRecord(file:string):Promise<string>{this.validMediaFile(file);return this.mediaUrl(await this.call("get_record",{file,out_format:"mp3"}));}
   async getFile(file:string):Promise<string>{this.validMediaFile(file);return this.mediaUrl(await this.call("get_file",{file}));}
   private validMediaFile(file:string):void{if(!file||file.length>8192||/[\x00-\x1f\x7f]/.test(file))throw new Error("invalid_media_reference");}

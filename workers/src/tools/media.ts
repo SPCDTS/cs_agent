@@ -28,7 +28,9 @@ export function createMediaExtension(deps: MediaDeps) {
     catch (error) {
       const code = error instanceof Error && /^[a-z_]{1,80}$/.test(error.message) ? error.message : "media_error";
       await deps.record?.(kind, { result: code, ...(error instanceof MediaDownloadError ? { status: error.status, hostname: error.hostname } : {}) });
-      return text(`${code}：附件访问失败；请确认消息仍可用、来源范围正确且文件不超过10MiB。`, true);
+      return text(code === "napcat_image_content_missing"
+        ? "napcat_image_content_missing：NapCat 未返回图片内容，请检查本机媒体回传设置。"
+        : `${code}：附件访问失败；请确认消息仍可用、来源范围正确且文件不超过10MiB。`, true);
     }
   }
   const recall = (imageOnly: boolean) => defineTool({

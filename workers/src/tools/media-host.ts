@@ -1,7 +1,7 @@
 import type { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { recallMedia } from "../context";
 import { id, isRecord, normalizeMedia, scopeOf, type InboundMedia, type Target } from "../policy";
-import { validScope } from "../media/model";
+import { validScope, type AssetRef } from "../media/model";
 import type { MediaSelection } from "./media";
 
 /** 只由宿主从已经核验的回合身份构造；scope是物理QQ会话，namespace是Thread/资产命名空间。 */
@@ -9,7 +9,7 @@ export type VerifiedMediaSource = { scope: string; namespace: string; target: Ta
 export type MediaLookupBridge = {
   getMessage(messageId: string): Promise<unknown>;
   getFileUrl(target: Target, fileId: string, busid?: number): Promise<string>;
-  getImage(file: string): Promise<string>;
+  getImage(file: string, scope: string): Promise<AssetRef>;
   getRecord(file: string): Promise<string>;
   getFile(file: string): Promise<string>;
 };
@@ -50,9 +50,11 @@ export async function lookupHostMedia(input: {
     (input.selection?.ordinal === undefined || item.ordinal === input.selection.ordinal)).slice(0,5);
   return Promise.all(selected.map(async item => {
     if (item.assetId) return item;
-    // QQ 图片 URL 的 rkey 会失效；保留的 file 引用用于取得当前可用地址。
-    if (item.kind === "image" && item.file && !/^https?:\/\//i.test(item.file)) {
-      return { ...item, url: await input.bridge.getImage(item.file) };
+    if (item.kind === "image") {
+      const file = item.file ?? item.fileId;
+      if (!file || /^https?:\/\//i.test(file)) throw new Error("media_reference_missing");
+      const asset = await input.bridge.getImage(file, input.source.namespace);
+      return { ...item, assetId: asset.id };
     }
     if (item.url) return item;
     if (item.file && /^https?:\/\//i.test(item.file)) return { ...item, url: item.file };
@@ -60,13 +62,12 @@ export async function lookupHostMedia(input: {
     if (!file) throw new Error("media_reference_missing");
     let url: string;
     switch(item.kind) {
-      case "image": url = await input.bridge.getImage(file); break;
       case "audio": url = await input.bridge.getRecord(file); break;
       case "video": url = await input.bridge.getFile(file); break;
       case "file": url = item.fileId ? await input.bridge.getFileUrl(target, item.fileId) : await input.bridge.getFile(file); break;
       default: { const exhaustive: never = item.kind; throw new Error(`invalid_media_kind:${exhaustive}`); }
     }
-    // 此处不下载；MediaRepository.importRemote仍会检查公网DNS、每跳重定向与流式大小。
+    // 其他附件仍由 MediaRepository.importRemote 检查公网地址、重定向与大小。
     return { ...item, url };
   }));
 }

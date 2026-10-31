@@ -49,9 +49,15 @@ SandboxDO 的容器只是 `/work` 的临时物化视图。R2 保存不可变 man
 
 ## Thread接线辅助
 
-`lookupHostMedia({database,bridge,source:{scope,namespace,target},messageId,selection?})` 位于 `tools/media-host.ts`。source由宿主从已验证回合构造；scope是物理QQ会话（例如private:QQ），namespace是Thread与资产范围（owner私聊可为owner）。它只查询本scope的media；旧消息缺引用时，必须先在本scope找到原消息，才调用Bridge.getMessage，并核验返回的群或私聊目标。文件ID按该source.target调用getFileUrl，图片/语音/视频分别调用getImage/getRecord/getFile。函数不下载文件，返回URL仍经MediaRepository的受限下载。
+`lookupHostMedia({database,bridge,source:{scope,namespace,target},messageId,selection?})` 位于 `tools/media-host.ts`。source由宿主从已验证回合构造；scope是物理QQ会话（例如private:QQ），namespace是Thread与资产范围（owner私聊可为owner）。它只查询本scope的media；旧消息缺引用时，必须先在本scope找到原消息，才调用Bridge.getMessage，并核验返回的群或私聊目标。文件ID按该source.target调用getFileUrl，语音/视频分别调用getRecord/getFile，返回URL仍经MediaRepository的受限下载。QQ图片调用getImage(file, source.namespace)，由NapCat在本机下载，通过既有OneBot反向WebSocket返回base64；Bridge解码、检查大小与图片格式后写入私有R2，helper返回assetId，Worker不再访问QQ图片URL。
 
 `MediaDeps.lookup`第四个可选参数是 `MediaSelection`（kind/ordinal）；root可原样传给helper，使筛选在NapCat RPC之前发生，单次最多解析5个附件。source.namespace由宿主绑定repository，不能由模型提供。
+
+## NapCat 图片回传设置
+
+本机 OneBot 配置需启用 `enableLocalFile2Url: true`，使 `get_image` 返回已下载文件的 `base64`。可通过 NapCat WebUI 配置 API 热更新，无需新增端口、进程或容器；已有反向 WebSocket 继续传输。该设置也会让支持它的其他文件 API 附带内容，本次云端只消费图片内容。
+
+图片仍按需读取，沿用单资产 10MiB 上限；base64 最大约 13.34MiB，低于 Durable Objects 接收 WebSocket 消息的 32MiB 平台限制。Bridge 不把回传的 base64 写入 DO SQL 或请求审计，而是在校验后写入私有 R2、返回 AssetRef。缺少 base64 时返回 `napcat_image_content_missing`，不退回云端下载 QQ 链接；`qq_image` 和 `qq_attachment` 的图片均使用这一路径。
 
 ## 容器按需运行
 

@@ -31,13 +31,13 @@ describe("durable delivery parity",()=>{
     expect(frames).toHaveLength(0);
     expect(await runInDurableObject(env.THREAD.getByName("owner"),(_instance,state)=>state.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM inbound").one().n)).toBe(0);
   });
-  it("resolves file IDs through read-only NapCat APIs and rejects local-only image paths",async()=>{
+  it("resolves file IDs through read-only NapCat APIs and requires image content even when a URL exists",async()=>{
     const {socket,frames}=await connect(sockets),bridge=env.BRIDGE.getByName("napcat");
     const file=bridge.getFileUrl(target,"file-id");const frame=await action(frames,0,"get_private_file_url");
     socket.send(JSON.stringify({status:"ok",retcode:0,echo:frame.echo,data:{url:"https://files.example.test/a"}}));
     expect(await file).toBe("https://files.example.test/a");
-    const image=bridge.getImage("image-id"),rejected=expect(async()=>await image).rejects.toThrow("media_url_unavailable");const imageFrame=await action(frames,0,"get_image");
-    socket.send(JSON.stringify({status:"ok",retcode:0,echo:imageFrame.echo,data:{file:"C:/NapCat/cache.jpg"}}));await rejected;
+    const image=bridge.getImage("image-id","owner"),rejected=expect(async()=>await image).rejects.toThrow("napcat_image_content_missing");const imageFrame=await action(frames,0,"get_image");
+    socket.send(JSON.stringify({status:"ok",retcode:0,echo:imageFrame.echo,data:{file:"C:/NapCat/cache.jpg",url:"https://multimedia.nt.qq.com.cn/image.jpg"}}));await rejected;
   });
   it("replays an acknowledged intent, rejects payload conflicts and keeps one frame",async()=>{
     const {socket,frames}=await connect(sockets),bridge=env.BRIDGE.getByName("napcat");
