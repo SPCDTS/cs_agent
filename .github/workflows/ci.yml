@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   check:
-    name: typecheck + unit
+    name: workers check
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -24,48 +24,14 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      # test/agent/pi.test.ts 在 linux 上按"容器里有 bwrap"断言 bash 工具可用，运行器也要装 bubblewrap
-      - run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test -- --reporter=dot
-      # Workers 包（workers/）有自己的依赖与测试（vitest-pool-workers 在 workerd 里跑）
-      - run: npm ci
-        working-directory: workers
-      - run: npm run typecheck
-        working-directory: workers
-      - run: npm test
-        working-directory: workers
-      - run: node --test test/export-schedules.node.mjs test/chatgpt-login.node.mjs
-        working-directory: workers
+          cache-dependency-path: workers/package-lock.json
+      - run: npm run install:workers
+      # 包含类型检查、workerd 测试、所有独立 Node 测试及不发布的打包检查。
+      - run: npm run check
 
-  integration:
-    name: integration
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      # pi-sandbox-linux 用 bubblewrap；Ubuntu 24.04 默认禁止非特权用户命名空间，放开后 bwrap 才能起
-      - run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: npm ci
-      - run: npm run test:integration -- --reporter=dot
-
-  # Workers 部署：main 上两组测试都过且仓库里有 workers/wrangler.jsonc 时才跑。
-  # hashFiles() 不能用在作业级 if 里，所以文件检查放在第一步，后续步骤按它的输出决定。
-  # 密钥 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID 在仓库 Settings → Secrets；本机 Docker 部署仍走 scripts/deploy.ps1。
   deploy-workers:
     name: deploy workers
-    needs: [check, integration]
+    needs: check
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -75,19 +41,14 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
-      - id: cfg
-        run: echo "present=$([ -f workers/wrangler.jsonc ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - if: steps.cfg.outputs.present == 'true'
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
-      - if: steps.cfg.outputs.present == 'true'
-        run: npm ci
-        working-directory: workers
-      # 容器镜像由 wrangler 在部署时用 Docker 构建并推到 Cloudflare 镜像仓库；CS_AGENT_COMMIT 写入提交号
-      - if: steps.cfg.outputs.present == 'true'
-        uses: cloudflare/wrangler-action@v3
+          cache-dependency-path: workers/package-lock.json
+      - run: npm run install:workers
+      # coding 沙箱仍由 Wrangler 构建并推送到 Cloudflare；不再部署旧的常驻 Node 容器。
+      - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

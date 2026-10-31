@@ -4,7 +4,7 @@ import type { TurnKind } from "../policy";
 
 /** 派出者：QQ 身份或可信网页管理员、显示昵称与会话权限快照。 */
 export type SubagentPerson = { userId: string; nickname: string; owner: boolean; admin?: true };
-/** 派出或交代任务那一轮的身份快照（ARCHITECTURE §5.1）；没有 as 表示只剩会话基础权限。 */
+/** 派出或交代任务那一轮的身份快照（docs/ARCHITECTURE.md 的身份与权限）；没有 as 表示只剩会话基础权限。 */
 export type SubagentIdentity = { turn: TurnKind; as?: SubagentPerson };
 export type SubagentStatus = "running" | "done" | "failed" | "cancelled";
 /** timeout 只在父线程：由父 DO 的 alarm 判定，子 DO 只知道自己被取消。 */

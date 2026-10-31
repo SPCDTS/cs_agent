@@ -1,5 +1,5 @@
 /**
- * 定时任务共用契约，照抄 Docker 版 src/agent/schedule/types.ts（docs/ARCHITECTURE.md §6）。
+ * 云端定时任务契约，供 ScheduleDO、工具与管理接口共用。
  * ScheduleDO 的表、聊天工具与 ThreadDO 的回写都以本文件为准，改动须各处同步。
  */
 

@@ -1,8 +1,0 @@
-node_modules
-dist
-data
-workspace
-.git
-.env
-*.log
-secrets

@@ -1,6 +1,6 @@
 # 云端功能与资源预算
 
-本次补齐既有 Node / Pi 能力到 Workers；CS2 Workshop 通过鉴权 Tunnel 接入本机，详见 [本机接入说明](WORKSHOP-LOCAL.md)。此前删除的 Codex 后端及借用订阅的联网、生图工具保持删除，现有 Codex 模型提供方保留。`web_search` 已补齐为直接调用 DeepSeek Search API，复用现有 API key，不依赖 Codex 订阅或容器。
+项目已统一运行在 Cloudflare Workers；CS2 Workshop 通过鉴权 Tunnel 接入本机，详见 [本机接入说明](WORKSHOP-LOCAL.md)。此前删除的 Codex 后端及借用订阅的联网、生图工具保持删除，现有 Codex 模型提供方保留。`web_search` 已补齐为直接调用 DeepSeek Search API，复用现有 API key，不依赖 Codex 订阅或容器。
 
 ## 管理入口
 
@@ -37,10 +37,6 @@ QQ 的实际发送统一经过 Bridge。离线发送先排队，结果不确定�
 
 容器按实际运行计费，通过按需启动和空闲停止减少闲置消耗。当前规格与价格见 [容器规格](https://developers.cloudflare.com/containers/platform/limits/) 和 [容器价格](https://developers.cloudflare.com/containers/platform/pricing/)；取消运行硬配额后，不再使用固定每日运行时长推算月度用量上限。R2 与 Worker 计费分别见 [R2 价格](https://developers.cloudflare.com/r2/pricing/) 和 [Workers 价格](https://developers.cloudflare.com/workers/platform/pricing/)。
 
-## 数据迁移与检查
+## 验证
 
-操作步骤见 [私有迁移说明](CLOUD-PARITY-MIGRATION.md)。迁移先保存私有备份并 dry-run，保留云端后续修改，授权保留原到期时间，历史导入使用稳定 ID 和幂等回执。
-
-旧工作目录的 7194 个文件共 762676176 字节仅做分类清单，不上传素材、缓存或整个旧工作目录。人设、技能、授权、记忆历史按各自接口迁移。私有正文、凭据、数据库和备份不进入 Git。
-
-验证只覆盖主要功能流程、权限隔离和发送去重，不扩展极端兼容条件。本地管理面板已经浏览器检查；发送测试使用模拟 NapCat。发布仍执行仓库规定的类型检查、单元与集成检查，并以 CI 和上线后的只读核对为准。
+在仓库根运行 `npm run install:workers` 和 `npm run check`。检查覆盖 Workers 类型、workerd 中的业务测试、独立 Node 工具测试与不发布的 Worker 打包。Cloudflare coding 沙箱仍按需构建部署；旧 Node 主服务、旧观测面板及其 Docker Compose 部署已移除。

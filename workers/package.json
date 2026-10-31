@@ -9,7 +9,9 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "types": "wrangler types"
+    "types": "wrangler types",
+    "build": "wrangler deploy --dry-run --containers-rollout=none",
+    "test:node": "node --test test/*.node.mjs"
   },
   "dependencies": {
     "@earendil-works/chord": "^1.3.0",

@@ -44,7 +44,7 @@ OAUTH_STORE_KEY=$(read_var "$oauth_file" OAUTH_STORE_KEY)
 [[ "$OAUTH_STORE_KEY" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "OAUTH_STORE_KEY 必须为 32 字节 hex" >&2; exit 1; }
 
 
-# Gmail：桌面客户端 JSON 与 owner 授权后的 token.json（字段名见 src/sidecar/gmail/oauth.ts）。可选，任一缺失就跳过三项
+# Gmail：桌面客户端 JSON 与 owner 授权后的 token.json（client.json 使用 installed/client_id/client_secret，token.json 使用 refresh_token）。可选，任一缺失就跳过三项
 json_field() { python -c 'import json,sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 for key in sys.argv[2:]: value = value[key]
