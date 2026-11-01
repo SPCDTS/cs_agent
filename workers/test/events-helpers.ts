@@ -76,7 +76,8 @@ export function scriptedModel(steps: { name: string; args: JsonObject }[]) {
       captured.add(last.toolCallId);
       outputs.push(last.content.filter(block => block.type === "text").map(block => block.text).join(""));
     }
-    if (transcript.messages.at(-1)?.role === "user" || transcript.messages.at(-1)?.role === "toolResult") {
+    const latest = transcript.messages.findLast(message => message.role !== "system");
+    if (latest?.role === "user" || latest?.role === "toolResult") {
       const next = steps.shift();
       // 空名字表示本回合到此结束，后续步骤留给下一回合。
       if (next?.name) return fauxAssistantMessage(fauxToolCall(next.name, next.args), { stopReason: "toolUse" });

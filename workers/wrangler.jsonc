@@ -52,6 +52,7 @@
   // MODEL_PROVIDER / MODEL_ID 只是默认模型，运行时在管理面板切换（Registry 设置）。测试用 wrangler.test.jsonc 覆盖为 faux
   "vars": {
     "CS_AGENT_COMMIT": "dev",
+    // 首次默认值；管理台 Sandbox 保存的运行时开关优先，无需部署即可修改。
     "REMOTE_SANDBOX_ENABLED": "false",
     "PUBLIC_ORIGIN": "https://agent.spcdts.dev",
     "QQ_GROUP_MENTIONS": true,

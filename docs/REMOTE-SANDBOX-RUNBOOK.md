@@ -1,6 +1,6 @@
 # 远程 WSB 沙箱运行说明
 
-协议 v2：设备注册工具，WSB 首期只提供 `powershell`。文件和缓存保留在同一租约的 guest 内，不再与 R2 同步。功能默认关闭，架构见[设计文档](REMOTE-SANDBOX-DESIGN.md)。
+协议 v2：设备注册工具，WSB 首期只提供 `powershell`。文件和缓存保留在同一租约的 guest 内，不再与 R2 同步。首次默认关闭，在管理台 **Sandbox** 标签页启用；架构见[设计文档](REMOTE-SANDBOX-DESIGN.md)。
 
 ## 准备与验证
 
@@ -32,9 +32,9 @@ npx wrangler dev --config wrangler.smoke.jsonc --local --persist-to .wrangler/re
 
 ## 启用与配对
 
-在获准部署中将 `REMOTE_SANDBOX_ENABLED` 设置为 `"true"`，保留 `SANDBOX_FLEET` binding 和 v11 migration。管理 API 使用现有 `ADMIN_TOKEN`，不将管理员 Token 交给连接器。
+登录管理台，进入独立的 **Sandbox** 标签页，点击“启用远程任务”。开关持久保存在 Fleet 中，现有会话下一次工具调用即读取新值，无需重新部署。`REMOTE_SANDBOX_ENABLED` 仅作为尚未保存设置时的默认值，保留 `SANDBOX_FLEET` binding 和 v11 migration。管理 API 使用现有 `ADMIN_TOKEN`，不将管理员 Token 交给连接器。
 
-1. `POST /admin/sandbox-devices/pairings` 获取 pairingId 和一次性 code。
+1. 点击“生成配对码”，复制配对 ID 和一次性配对码；有效期 10 分钟，仅在生成时返回。离开标签页、登出或到期会清除页面显示，不写入浏览器持久存储。
 2. 执行以下命令，在提示中输入配对信息：
 
 ```powershell
@@ -43,8 +43,8 @@ npm --prefix runner start -- pair --origin https://你的Worker域名 --state D:
 
 Git 可追加 `--git-dir "C:\Program Files\Git"`；工具目录只读映射，不要填写项目源码或用户目录。Node 默认取连接器自身的安装目录，可用 `--node-dir` 指定；内存默认 6144 MiB，可用 `--memory` 调整。
 
-3. `GET /admin/sandbox-devices` 核对设备配置、`tools` 声明、`instructions` 和 `persistence`。这些说明由 runner 提供，Worker 不按 provider 推断。
-4. `POST /admin/sandbox-devices/{deviceId}/approve` 批准设备。
+3. 返回 Sandbox 标签页，刷新设备列表，展开“配置、工具与使用说明”核对设备配置、`tools`、`instructions` 和 `persistence`。这些说明由 runner 提供，Worker 不按 provider 推断。
+4. 点击“批准设备”。未批准设备不能连接或执行任务。
 5. 检查并运行：
 
 ```powershell
@@ -53,6 +53,12 @@ npm --prefix runner start -- run --state D:\sandbox-runner-state
 ```
 
 `inspect` 不输出 Token。`run` 为前台进程，Ctrl+C 停止自身实例；未自动安装系统服务。配对响应丢失可使用同一 pairingId/code 和 state 重试；不要把配对码或设备 Token 放进聊天、日志或命令行参数。
+
+Sandbox 页每 10 秒刷新在线状态，列出当前任务和租约，可取消任务、释放租约和撤销设备。取消和释放只表示已发请求，等待连接器确认；撤销会断开连接并使设备凭据失效。内置 Cloudflare 沙箱单独显示，不受远程任务开关影响。
+
+停用开关只阻止新配对、新租约和新任务，不中断已有任务，也不关闭结果回传、取消和释放通道；仍需按需处理任务并释放租约。设置保存采用版本检查，多页面同时修改时会提示刷新。
+
+脚本集成仍可使用管理 API：`GET /admin/sandbox-devices/overview` 查看配置与设备，`PUT /admin/sandbox-devices/settings` 提交 `{enabled, expectedRevision}`；配对、批准和撤销分别使用 `POST /admin/sandbox-devices/pairings`、`POST /admin/sandbox-devices/{deviceId}/approve` 和 `DELETE /admin/sandbox-devices/{deviceId}`。
 
 ## Agent 使用
 
@@ -107,4 +113,4 @@ Content-Type: application/json
 
 封存只表示接受未知结果，不证明远端停止，也不能撤销 GitHub 等副作用。租约失效，设备仍需停止握手后才能复用。该操作不向 agent 暴露。
 
-撤销设备使用 `DELETE /admin/sandbox-devices/{deviceId}`。关闭开关前处理活动任务并释放租约。远程文件导出、跨租约缓存、自动完成通知和自动 PR 发布不属于当前实现。
+撤销设备可在 Sandbox 页操作，或使用 `DELETE /admin/sandbox-devices/{deviceId}`。远程文件导出、跨租约缓存、自动完成通知和自动 PR 发布不属于当前实现。

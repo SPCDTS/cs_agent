@@ -277,8 +277,8 @@ export class ThreadDO extends DurableObject<Env> {
         && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration();
     };
     // 沙箱工具只在 owner 线程注册，权限在每次 nested 调用时复核。
-    if (memory.ns === "owner" && this.env.REMOTE_SANDBOX_ENABLED === "true") registry.install(createRemoteSandboxExtension({
-      allowed: sandboxAllowed,
+    if (memory.ns === "owner") registry.install(createRemoteSandboxExtension({
+      allowed: async (api, callContext) => await sandboxAllowed(api, callContext) && await this.env.SANDBOX_FLEET.getByName("owner").enabled(),
       fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.env.SANDBOX.idFromName(memory.ns).toString(),
       record: detail => this.audit("remote_sandbox", detail),
     }));

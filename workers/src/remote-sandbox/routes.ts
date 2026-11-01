@@ -1,5 +1,7 @@
 import type { Env } from "../env";
 import { authenticated } from "../auth";
+import { Type } from "typebox";
+import { IdSchema, parse } from "../../../runner/src/protocol";
 const headers = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" };
 const jsonWire = (value: string) => new Response(value, { headers: { ...headers, "Content-Type": "application/json" } });
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers });
@@ -14,13 +16,26 @@ async function body(request: Request, limit = 128 * 1024): Promise<unknown> { re
 export async function remoteSandboxRoutes(request: Request, env: Env): Promise<Response | undefined> {
   const url = new URL(request.url), path = url.pathname;
   if (!path.startsWith("/sandbox-devices/") && !path.startsWith("/admin/sandbox-devices")) return;
-  if (env.REMOTE_SANDBOX_ENABLED !== "true") return json({ error: "disabled" }, 404);
   const fleet = env.SANDBOX_FLEET.getByName("owner");
   try {
     if (path.startsWith("/admin/")) {
       if (!await authenticated(request, env.ADMIN_TOKEN)) return json({ error: "unauthorized" }, 401);
+      if (path === "/admin/sandbox-devices/overview" && request.method === "GET") return jsonWire(await fleet.overviewJson());
+      if (path === "/admin/sandbox-devices/settings" && request.method === "GET") return json(await fleet.settings());
+      if (path === "/admin/sandbox-devices/settings" && request.method === "PUT") return json(await fleet.putSettings(await body(request)));
       if (path === "/admin/sandbox-devices" && request.method === "GET") return jsonWire(await fleet.devicesJson());
       if (path === "/admin/sandbox-devices/pairings" && request.method === "POST") return json(await fleet.createPairing(), 201);
+      const operation = /^\/admin\/sandbox-devices\/([a-f0-9-]{36})\/(cancel|release)$/.exec(path);
+      if (operation && request.method === "POST") {
+        if (operation[2] === "cancel") {
+          const input = parse(Type.Object({ jobId: IdSchema }, { additionalProperties: false }), await body(request));
+          await fleet.cancelDeviceJob(operation[1]!, input.jobId);
+        } else {
+          const input = parse(Type.Object({ leaseId: IdSchema }, { additionalProperties: false }), await body(request));
+          await fleet.releaseDevice(operation[1]!, input.leaseId);
+        }
+        return json({ ok: true });
+      }
       const abandon = /^\/admin\/sandbox-devices\/jobs\/([a-f0-9-]{36})\/abandon$/.exec(path);
       if (abandon && request.method === "POST") {
         const input = await body(request);
@@ -47,6 +62,6 @@ export async function remoteSandboxRoutes(request: Request, env: Env): Promise<R
   } catch (error) {
     const code = error instanceof Error ? error.message : "invalid_request";
     console.error({ event: "remote_sandbox_request_failed", code: code.slice(0, 180) });
-    return json({ error: code.slice(0, 180) }, code.includes("denied") ? 403 : code === "too_large" ? 413 : 400);
+    return json({ error: code.slice(0, 180) }, code === "conflict" || code === "job_running" ? 409 : code === "disabled" ? 403 : code.includes("denied") ? 403 : code === "too_large" ? 413 : 400);
   }
 }

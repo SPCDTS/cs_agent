@@ -61,6 +61,7 @@ describe("coding tools", () => {
     { provider: "windows-wsb", os: "windows", tool: "powershell", script: "Write-Output hello", root: "C:\\AgentWork", instructions: "使用 PowerShell；文件保留到释放。" },
     { provider: "custom-notebook", os: "linux", tool: "python_cell", script: "print('hello')", root: "/notebooks", instructions: "使用 python_cell；变量保留到 kernel 重启，输出为 cell 结果。" },
   ])("renders $provider registration instructions and calls its tool in one Code Mode script", async target => {
+    await env.SANDBOX_FLEET.getByName("owner").putSettings({ enabled: true, expectedRevision: 0 });
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
     const deviceId = "11111111-1111-1111-1111-111111111111", sandboxId = "remote:" + deviceId, revision = "a".repeat(64);
     const resource: CatalogEntry = { id: sandboxId, name: "测试沙箱", provider: target.provider, os: target.os, arch: "x64", instructions: target.instructions,
@@ -83,6 +84,20 @@ describe("coding tools", () => {
     expect(seen.outputs.join("\n")).toContain(target.instructions);
     expect(seen.outputs.join("\n")).toContain("job-one");
     for (const name of ["sandbox_list", "sandbox_acquire", "sandbox_call", "sandbox_job", "sandbox_release"]) expect(seen.requests[0]!.tools).not.toContain(name);
+  });
+
+  it("enables and disables remote calls in the same live harness without redeploying", async () => {
+    const call = { name: "codemode", args: { code: "text(await tools.sandbox_list({}));" } }, stop = { name: "", args: {} };
+    const seen = scriptedModel([call, stop, call, stop, call, stop]);
+    const thread = env.THREAD.getByName("owner"), fleet = env.SANDBOX_FLEET.getByName("owner");
+    await thread.submit(input(1, "查看沙箱", 10000001));
+    expect(seen.outputs[0]).toContain("permission_denied");
+    await fleet.putSettings({ enabled: true, expectedRevision: 0 });
+    await thread.submit(input(2, "再查看沙箱", 10000001));
+    expect(seen.outputs[1]).toContain("cloudflare");
+    await fleet.putSettings({ enabled: false, expectedRevision: 1 });
+    await thread.submit(input(3, "停用后查看", 10000001));
+    expect(seen.outputs[2]).toContain("permission_denied");
   });
 
   it("passes sandbox images through structured read and image() into the model transcript", async () => {

@@ -12,8 +12,10 @@ const descriptor: Descriptor = { name: "测试 WSB", provider: "windows-wsb", os
   tools: [{ name: "powershell", description: "在 guest 中运行命令", inputSchema: parse(JsonObjectSchema, JSON.parse(JSON.stringify(PowerShellInputSchema))) }],
   environment: [{ name: "node", version: "v24" }], memoryMiB: 4096, maxConcurrent: 1, maxTimeoutMs: 1200000, workspaceProtocol: "registered-tools-v2" };
 const fleet = () => env.SANDBOX_FLEET.getByName("owner");
+const enable = async () => fleet().putSettings({ enabled: true, expectedRevision: (await fleet().settings()).revision });
 const nextFrame = (socket: WebSocket) => new Promise<MessageEvent>(resolve => socket.addEventListener("message", resolve, { once: true }));
 async function register(registration: Descriptor = descriptor) {
+  await enable();
   const pairing = await fleet().createPairing(), token = "a".repeat(64);
   const claim = { pairingId: pairing.pairingId, code: pairing.code, tokenHash: await hash(token), descriptor: registration };
   const device = await fleet().claim(claim);
@@ -125,9 +127,9 @@ it("unknown 保留槽位，确认停止后失效租约；管理员封存不声�
   await fleet().release("owner", lease.id);
   await expect((async () => await fleet().complete(device.deviceId, call.jobId, completed))()).rejects.toThrow("operation_conflict");
 });
-it("管理 API 默认关闭且需要认证；旧源码上传端点不存在", async () => {
+it("停用时管理 API 仍需认证且可访问；旧源码上传端点不存在", async () => {
   const req = new Request("https://test/admin/sandbox-devices");
-  expect((await remoteSandboxRoutes(req, env))?.status).toBe(404);
+  expect((await remoteSandboxRoutes(req, env))?.status).toBe(401);
   expect((await remoteSandboxRoutes(req, { ...env, REMOTE_SANDBOX_ENABLED: "true", ADMIN_TOKEN: "admin" }))?.status).toBe(401);
   expect((await remoteSandboxRoutes(new Request(req, { headers: { Authorization: "Bearer admin" } }), { ...env, REMOTE_SANDBOX_ENABLED: "true", ADMIN_TOKEN: "admin" }))?.status).toBe(200);
   const device = await register();
@@ -135,8 +137,51 @@ it("管理 API 默认关闭且需要认证；旧源码上传端点不存在", as
   expect((await remoteSandboxRoutes(upload, { ...env, REMOTE_SANDBOX_ENABLED: "true" }))?.status).toBe(404);
 });
 it("旧协议拒绝注册；不安全工具 schema 在配对边界被拒绝", async () => {
+  await enable();
   const pairing = await fleet().createPairing();
   const claim = { pairingId: pairing.pairingId, code: pairing.code, tokenHash: "a".repeat(64), descriptor };
   await expect((async () => await fleet().claim({ ...claim, descriptor: { ...descriptor, workspaceProtocol: "r2-source-v1" } }))()).rejects.toThrow("invalid_request");
   await expect((async () => await fleet().claim({ ...claim, descriptor: { ...descriptor, tools: [{ name: "powershell", description: "bad", inputSchema: { type: "object", additionalProperties: false, $ref: "https://example.com" } }] } }))()).rejects.toThrow("unsupported_tool_schema");
+});
+
+const adminRequest = (method: string, suffix: string, value?: unknown, token = "admin") => remoteSandboxRoutes(new Request("https://test/admin/sandbox-devices" + suffix, {
+  method, headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: value === undefined ? undefined : JSON.stringify(value),
+}), { ...env, ADMIN_TOKEN: "admin" });
+it("管理页开关无需部署，配置持久化并防止旧页面覆盖；配对码不进入设备列表", async () => {
+  expect((await adminRequest("GET", "/overview", undefined, "wrong"))?.status).toBe(401);
+  expect(await (await adminRequest("GET", "/settings"))!.json()).toMatchObject({ enabled: false, revision: 0 });
+  expect((await adminRequest("POST", "/pairings"))?.status).toBe(403);
+  expect((await adminRequest("PUT", "/settings", { enabled: "true", expectedRevision: 0 }))?.status).toBe(400);
+  expect(await (await adminRequest("PUT", "/settings", { enabled: true, expectedRevision: 0 }))!.json()).toMatchObject({ enabled: true, revision: 1 });
+  expect((await adminRequest("PUT", "/settings", { enabled: false, expectedRevision: 0 }))?.status).toBe(409);
+  const pairing = await (await adminRequest("POST", "/pairings"))!.json<{ pairingId: string; code: string }>();
+  const token = "d".repeat(64), device = await fleet().claim({ pairingId: pairing.pairingId, code: pairing.code, tokenHash: await hash(token), descriptor });
+  const response = (await adminRequest("GET", "/overview"))!;
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  const text = await response.text();
+  expect(text).toContain("pending");expect(text).toContain(descriptor.instructions);
+  expect(text).not.toContain(pairing.code);expect(text).not.toContain(await hash(token));expect(text).not.toContain("tokenHash");
+  expect((await adminRequest("POST", "/" + device.deviceId + "/approve"))?.status).toBe(200);
+  expect((await adminRequest("DELETE", "/" + device.deviceId))?.status).toBe(200);
+  await runInDurableObject(fleet(), async (_instance, state) => {
+    const { SandboxFleetDO } = await import("../src/remote-sandbox/fleet");
+    expect(await new SandboxFleetDO(state, { ...env, REMOTE_SANDBOX_ENABLED: "false" }).enabled()).toBe(true);
+  });
+});
+it("停用拒绝新租约与任务，但保留回传、取消和释放；过期操作不能作用到新租约", async () => {
+  const device = await register(), lease = await acquire(device), call = await fleet().invoke("owner", "running", request(lease.id));
+  const settings = await fleet().settings();
+  expect((await adminRequest("PUT", "/settings", { enabled: false, expectedRevision: settings.revision }))?.status).toBe(200);
+  await expect((async () => await fleet().invoke("owner", "new-call", request(lease.id)))()).rejects.toThrow("disabled");
+  await expect((async () => await acquire(device, "other"))()).rejects.toThrow("disabled");
+  expect((await adminRequest("POST", "/" + device.deviceId + "/release", { leaseId: "stale" }))?.status).toBe(400);
+  expect((await adminRequest("POST", "/" + device.deviceId + "/release", { leaseId: lease.id }))?.status).toBe(409);
+  expect((await adminRequest("POST", "/" + device.deviceId + "/cancel", { jobId: call.jobId }))?.status).toBe(200);
+  const result = await remoteSandboxRoutes(new Request(`https://test/sandbox-devices/${device.deviceId}/jobs/${call.jobId}/result`, {
+    method: "POST", headers: { Authorization: "Bearer " + device.token }, body: JSON.stringify({ kind: "cancelled", reason: "stopped", sessionLost: true }),
+  }), env);
+  expect(result?.status).toBe(200);
+  expect((await adminRequest("POST", "/" + device.deviceId + "/release", { leaseId: lease.id }))?.status).toBe(200);
+  await runInDurableObject(fleet(), async (instance, state) => { await instance.webSocketMessage(state.getWebSockets(device.deviceId)[0]!, JSON.stringify({ kind: "released", leaseId: lease.id })); });
+  expect(await fleet().sessions("owner")).toEqual([]);
 });

@@ -18,7 +18,9 @@ type Job = { id: string; workspace: string; deviceId: string; leaseId: string; f
   createdAt: number; deadline: number; outcomeHash: string | null };
 type Log = { sequence: number; text: string };
 type Connection = { deviceId: string; ready: boolean; helloAt: number };
+type Settings = { enabled: boolean; revision: number; updatedAt: number | null };
 const strict = { additionalProperties: false };
+const SettingsChangeSchema = Type.Object({ enabled: Type.Boolean(), expectedRevision: Type.Integer({ minimum: 0 }) }, strict);
 const ClaimSchema = Type.Object({ pairingId: Type.String({ pattern: "^[a-f0-9-]{36}$" }), code: Type.String({ pattern: "^[a-f0-9]{64}$" }),
   tokenHash: Type.String({ pattern: "^[a-f0-9]{64}$" }), descriptor: DescriptorSchema }, strict);
 const AcquireSchema = Type.Object({ sandboxId: Type.String({ pattern: "^remote:[a-f0-9-]{36}$" }), workspace: Type.String({ pattern: "^[a-zA-Z0-9:_-]{1,160}$" }),
@@ -43,6 +45,18 @@ export class SandboxFleetDO extends DurableObject<Env> {
     super(ctx, env);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
+  private defaultSettings(): Settings { return { enabled: this.env.REMOTE_SANDBOX_ENABLED === "true", revision: 0, updatedAt: null }; }
+  async settings(): Promise<Settings> { return await this.ctx.storage.get<Settings>("settings") ?? this.defaultSettings(); }
+  async enabled(): Promise<boolean> { return (await this.settings()).enabled; }
+  async putSettings(value: unknown): Promise<Settings> {
+    const input = parse(SettingsChangeSchema, value);
+    return this.ctx.storage.transaction(async tx => {
+      const current = await tx.get<Settings>("settings") ?? this.defaultSettings();
+      if (current.revision !== input.expectedRevision) throw new Error("conflict");
+      const next = { enabled: input.enabled, revision: current.revision + 1, updatedAt: Date.now() };
+      await tx.put("settings", next); return next;
+    });
+  }
   private socket(deviceId: string): WebSocket | undefined { return this.ctx.getWebSockets(deviceId).find(ws => ws.readyState === WebSocket.OPEN); }
   private available(id: string) {
     const ws = this.socket(id); if (!ws) return false;
@@ -59,6 +73,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
     try { ws.send(JSON.stringify(frame)); return true; } catch { return false; }
   }
   async createPairing() {
+    if (!await this.enabled()) throw new Error("disabled");
     if ((await this.ctx.storage.list<Device>({ prefix: "device:" })).size >= 32) throw new Error("device_limit");
     const id = crypto.randomUUID(), code = secret(), expiresAt = Date.now() + 600000;
     await this.ctx.storage.put("pair:" + id, { id, codeHash: await hash(code), deviceId: crypto.randomUUID(), expiresAt, claimed: false } satisfies Pairing);
@@ -69,6 +84,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
     const input = parse(ClaimSchema, value); validateDescriptor(input.descriptor);
     const codeHash = await hash(input.code), revision = await hash(JSON.stringify(input.descriptor));
     return this.ctx.storage.transaction(async tx => {
+      if (!(await tx.get<Settings>("settings") ?? this.defaultSettings()).enabled) throw new Error("disabled");
       const pair = await tx.get<Pairing>("pair:" + input.pairingId);
       if (!pair || pair.expiresAt < Date.now() || pair.codeHash !== codeHash) throw new Error("pairing_denied");
       const existing = await tx.get<Device>("device:" + pair.deviceId);
@@ -96,10 +112,26 @@ export class SandboxFleetDO extends DurableObject<Env> {
     if ((allocation?.kind === "active" || allocation?.kind === "lost") && allocation.jobId) await this.cancel(allocation.lease.workspace, allocation.jobId);
     for (const ws of this.ctx.getWebSockets(id)) ws.close(1008, "revoked");
   }
-  async devicesJson(): Promise<string> { return JSON.stringify([...(await this.ctx.storage.list<Device>({ prefix: "device:" })).values()].map(({ tokenHash: _, ...device }) => {
+  async devicesJson(): Promise<string> { return JSON.stringify(await Promise.all([...(await this.ctx.storage.list<Device>({ prefix: "device:" })).values()].map(async ({ tokenHash: _, ...device }) => {
     let compatible = true; try { validateDescriptor(device.descriptor); } catch { compatible = false; }
-    return { ...device, protocolCompatible: compatible, connected: this.available(device.id) };
-  })); }
+    const allocation = await this.ctx.storage.get<Allocation>("allocation:" + device.id);
+    const jobId = allocation && "jobId" in allocation ? allocation.jobId : null;
+    const job = jobId ? await this.ctx.storage.get<Job>("job:" + jobId) : undefined;
+    return { ...device, protocolCompatible: compatible, connected: this.available(device.id),
+      lease: allocation && allocation.kind !== "released" ? { id: allocation.lease.id, state: allocation.kind, jobId, jobPhase: job?.phase ?? null } : null };
+  }))); }
+  async overviewJson(): Promise<string> {
+    return JSON.stringify({ settings: await this.settings(), builtin: CLOUDFLARE_SANDBOX, devices: JSON.parse(await this.devicesJson()) });
+  }
+  async releaseDevice(deviceId: string, leaseId: string) {
+    const allocation = await this.ctx.storage.get<Allocation>("allocation:" + deviceId);
+    if (!allocation || allocation.lease.id !== leaseId) throw new Error("lease_expired");
+    await this.release(allocation.lease.workspace, leaseId);
+  }
+  async cancelDeviceJob(deviceId: string, jobId: string) {
+    const job = await this.ownedJob(deviceId, jobId);
+    await this.cancel(job.workspace, jobId);
+  }
   private async device(id: string): Promise<Device> {
     const found = await this.ctx.storage.get<Device>("device:" + id); if (!found) throw new Error("device_not_found"); return found;
   }
@@ -189,6 +221,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
     const input = parse(AcquireSchema, value), deviceId = input.sandboxId.slice(7);
     const requestKey = "acquire:" + await hash(input.workspace + ":" + input.operationId), fingerprint = await hash(JSON.stringify(input));
     const lease = await this.ctx.storage.transaction(async tx => {
+      if (!(await tx.get<Settings>("settings") ?? this.defaultSettings()).enabled) throw new Error("disabled");
       const prior = await tx.get<{ fingerprint: string; lease: Lease }>(requestKey);
       if (prior) {
         if (prior.fingerprint !== fingerprint) throw new Error("operation_conflict");
@@ -269,6 +302,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
         if (!existing) throw new Error("job_expired");
         return existing;
       }
+      if (!(await tx.get<Settings>("settings") ?? this.defaultSettings()).enabled) throw new Error("disabled");
       const currentDevice = await tx.get<Device>("device:" + device.id), current = await tx.get<Allocation>("allocation:" + device.id);
       if (!currentDevice || currentDevice.approval !== "approved" || current?.kind !== "active" || current.lease.id !== input.lease.id || current.lease.workspace !== workspace) throw new Error("lease_expired");
       if (currentDevice.revision !== input.lease.capabilityRevision) throw new Error("capability_changed");

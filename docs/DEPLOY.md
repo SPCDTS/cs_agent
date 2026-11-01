@@ -61,4 +61,4 @@ HTTP 403 的 HTML 响应和 Cloudflare challenge 属于接入失败证据，不�
 
 代码清理不删除既有 `data/`、`workspace/`、`napcat/`、`secrets/` 或其他 worktree。老 worktree 可能通过目录链接共享根 node_modules，不能直接递归删除这份共享缓存。新 checkout 安装 `workers/` 和 `runner/` 各自的依赖；不能共享其他 worktree 的 node_modules。
 
-远程沙箱的生产开关 `REMOTE_SANDBOX_ENABLED` 默认是 `"false"`。启用前按 [运行说明](REMOTE-SANDBOX-RUNBOOK.md) 核对设备权限、WSB 与磁盘配置；本机连接器另行运行。`workers/wrangler.smoke.jsonc` 仅用于本地链路验证，不是部署配置。
+管理台的 **Sandbox** 标签页可启停远程任务、生成配对码、审批设备、取消任务和释放租约。开关在 Fleet 中持久保存，无需再次部署；`REMOTE_SANDBOX_ENABLED` 默认 `"false"`，仅在未保存运行时设置时生效。停用阻止新任务，已有任务的回传与清理通道保留。启用前按 [运行说明](REMOTE-SANDBOX-RUNBOOK.md) 核对设备配置；本机连接器另行运行。`workers/wrangler.smoke.jsonc` 仅用于本地链路验证，不是部署配置。
