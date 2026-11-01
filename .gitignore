@@ -9,3 +9,4 @@ napcat/
 .env.bak*
 .external_doc
 secrets/
+/.scratch/
