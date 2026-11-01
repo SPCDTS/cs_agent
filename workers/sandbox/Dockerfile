@@ -1,13 +1,12 @@
-# coding 工具的沙箱容器，由 SandboxDO 经 ctx.container.start() 按需拉起（docs/WORKERS-DESIGN.md §3.5）。
-# 不用官方 cloudflare/sandbox 镜像：1.x 起它只带 sandbox-shim，文件操作要经 @cloudflare/sandbox 的帧协议，
-# 这里换成一个小的 HTTP 控制服务（server.mjs），Worker 侧不需要额外依赖。
-FROM debian:bookworm-slim
+# 原生 Container 执行命令，官方 Files 通过同版本 sandbox-shim 操作文件。
+FROM node:24-trixie-slim
+COPY --from=docker.io/cloudflare/sandbox:1.0.3 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl git nodejs python3 \
+ && apt-get install -y --no-install-recommends ca-certificates curl git python3 \
  && rm -rf /var/lib/apt/lists/* \
- && useradd --create-home --uid 1000 --shell /bin/bash sandbox \
+ && usermod --login sandbox --home /home/sandbox --move-home --shell /bin/bash node \
+ && groupmod --new-name sandbox node \
  && mkdir -p /work/out && chown -R sandbox:sandbox /work
-COPY --chmod=0644 server.mjs workspace.mjs /opt/sandbox/
+COPY --chmod=0644 runtime.mjs workspace.mjs /opt/sandbox/
 WORKDIR /work
-EXPOSE 3000
-CMD ["node", "/opt/sandbox/server.mjs"]
+CMD ["sleep", "infinity"]

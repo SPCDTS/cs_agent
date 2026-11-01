@@ -2,32 +2,31 @@ import { DurableObject } from "cloudflare:workers";
 import { Type, type Static } from "typebox";
 import { authenticated } from "../auth";
 import type { Env } from "../env";
-import { scopePrefix } from "../media/repository";
-import { DescriptorSchema, RequirementsSchema, JobInputSchema, OutcomeSchema, DeviceFrameSchema, parse, parseFrame, validateSnapshot, mismatch, FILE_MAX_BYTES, SOURCE_MAX_BYTES,
+import type { CatalogEntry } from "./wire";
+export type { CatalogEntry } from "./wire";
+import { DescriptorSchema, RequirementsSchema, JobInputSchema, DeviceFrameSchema, IdSchema, ToolNameSchema, parse, parseFrame,
+  validateDescriptor, validateToolArguments, validateOutcome, mismatch,
   type Descriptor, type Outcome, type Lease, type JobInput, type ServerFrame } from "../../../runner/src/protocol";
 
 type Device = { id: string; approval: "pending" | "approved" | "revoked"; tokenHash: string; descriptor: Descriptor; revision: string; createdAt: number };
 type Pairing = { id: string; codeHash: string; deviceId: string; expiresAt: number; claimed: boolean };
-type Allocation = { kind: "active"; lease: Lease; jobId: string | null; touchedAt: number }
+type Allocation = { kind: "active" | "lost"; lease: Lease; jobId: string | null; touchedAt: number }
   | { kind: "releasing" | "released"; lease: Lease };
 type Phase = "dispatched" | "accepted" | "cancel_requested" | Outcome["kind"];
 type Job = { id: string; workspace: string; deviceId: string; leaseId: string; fingerprint: string; phase: Phase;
-  createdAt: number; deadline: number; outcomeHash: string | null; uploadBytes: number; uploadCount: number; notify: boolean };
+  createdAt: number; deadline: number; outcomeHash: string | null };
 type Log = { sequence: number; text: string };
 type Connection = { deviceId: string; ready: boolean; helloAt: number };
-export type CatalogEntry = {
-  id: string; name: string; provider: "cloudflare" | "windows-wsb"; os: "linux" | "windows"; arch: string;
-  shells: string[]; tools: { name: string; version: string }[]; taskTypes: string[]; memoryMiB: number | null;
-  maxTimeoutMs: number; capabilityRevision: string; availability: "ready" | "busy" | "offline" | "draining";
-  activeJobs: number; cache: { npm: boolean; git: boolean }; mismatch: string[];
-};
 const strict = { additionalProperties: false };
 const ClaimSchema = Type.Object({ pairingId: Type.String({ pattern: "^[a-f0-9-]{36}$" }), code: Type.String({ pattern: "^[a-f0-9]{64}$" }),
   tokenHash: Type.String({ pattern: "^[a-f0-9]{64}$" }), descriptor: DescriptorSchema }, strict);
 const AcquireSchema = Type.Object({ sandboxId: Type.String({ pattern: "^remote:[a-f0-9-]{36}$" }), workspace: Type.String({ pattern: "^[a-zA-Z0-9:_-]{1,160}$" }),
   operationId: Type.String({ pattern: "^[a-zA-Z0-9:_-]{1,160}$" }), capabilityRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-  taskType: Type.Union([Type.Literal("shell.exec"), Type.Literal("node.test")]), requirements: RequirementsSchema }, strict);
+  requirements: RequirementsSchema }, strict);
 export type AcquireInput = Static<typeof AcquireSchema>;
+const InvokeSchema = Type.Object({ leaseId: IdSchema, tool: ToolNameSchema, arguments: Type.Record(Type.String(), Type.Unknown()),
+  timeoutMs: Type.Integer({ minimum: 1000, maximum: 1200000 }) }, strict);
+export type InvokeInput = Static<typeof InvokeSchema>;
 export async function hash(value: string | Uint8Array): Promise<string> {
   const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value;
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(n => n.toString(16).padStart(2, "0")).join("");
@@ -36,15 +35,13 @@ function secret(): string { return [...crypto.getRandomValues(new Uint8Array(32)
 const resolved = (phase: Phase) => phase === "completed" || phase === "cancelled" || phase === "failed";
 const terminal = (phase: Phase) => resolved(phase) || phase === "unknown";
 const dataKey = (id: string, name: string) => "remote-jobs/" + id + "/" + name;
-async function blobPrefix(id: string): Promise<string> { return await scopePrefix("remote:" + id) + "/workspace/blobs/"; }
 
-/** 一个 owner 的设备、槽位与任务账本在同一对象中原子更新；大清单与结果放在 R2。 */
+/** 设备、租约、参数和任务收据原子保存；较大的工具结果放 R2，不同步远端文件。 */
 export class SandboxFleetDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
-  private readonly inputs = new Map<string, JobInput>();
   private socket(deviceId: string): WebSocket | undefined { return this.ctx.getWebSockets(deviceId).find(ws => ws.readyState === WebSocket.OPEN); }
   private available(id: string) {
     const ws = this.socket(id); if (!ws) return false;
@@ -68,7 +65,8 @@ export class SandboxFleetDO extends DurableObject<Env> {
     return { pairingId: id, code, expiresAt };
   }
   async claim(value: unknown) {
-    const input = parse(ClaimSchema, value), codeHash = await hash(input.code), revision = await hash(JSON.stringify(input.descriptor));
+    const input = parse(ClaimSchema, value); validateDescriptor(input.descriptor);
+    const codeHash = await hash(input.code), revision = await hash(JSON.stringify(input.descriptor));
     return this.ctx.storage.transaction(async tx => {
       const pair = await tx.get<Pairing>("pair:" + input.pairingId);
       if (!pair || pair.expiresAt < Date.now() || pair.codeHash !== codeHash) throw new Error("pairing_denied");
@@ -94,10 +92,13 @@ export class SandboxFleetDO extends DurableObject<Env> {
     const device = await this.device(id);
     await this.ctx.storage.put("device:" + id, { ...device, approval: "revoked" } satisfies Device);
     const allocation = await this.ctx.storage.get<Allocation>("allocation:" + id);
-    if (allocation?.kind === "active" && allocation.jobId) await this.cancel(allocation.lease.workspace, allocation.jobId);
+    if ((allocation?.kind === "active" || allocation?.kind === "lost") && allocation.jobId) await this.cancel(allocation.lease.workspace, allocation.jobId);
     for (const ws of this.ctx.getWebSockets(id)) ws.close(1008, "revoked");
   }
-  async devices() { return [...(await this.ctx.storage.list<Device>({ prefix: "device:" })).values()].map(({ tokenHash: _, ...device }) => ({ ...device, connected: this.available(device.id) })); }
+  async devicesJson(): Promise<string> { return JSON.stringify([...(await this.ctx.storage.list<Device>({ prefix: "device:" })).values()].map(({ tokenHash: _, ...device }) => {
+    let compatible = true; try { validateDescriptor(device.descriptor); } catch { compatible = false; }
+    return { ...device, protocolCompatible: compatible, connected: this.available(device.id) };
+  })); }
   private async device(id: string): Promise<Device> {
     const found = await this.ctx.storage.get<Device>("device:" + id); if (!found) throw new Error("device_not_found"); return found;
   }
@@ -124,12 +125,13 @@ export class SandboxFleetDO extends DurableObject<Env> {
       if (frame.kind !== "hello" && !attachment.ready) throw new Error("hello_required");
       switch (frame.kind) {
         case "hello": {
+          validateDescriptor(frame.descriptor);
           const revision = await hash(JSON.stringify(frame.descriptor)), allocation = await this.ctx.storage.get<Allocation>("allocation:" + device.id);
           if (allocation && allocation.kind !== "released" && device.revision !== revision) throw new Error("capability_changed_while_leased");
           await this.ctx.storage.put("device:" + device.id, { ...device, descriptor: frame.descriptor, revision });
           ws.serializeAttachment({ deviceId: device.id, ready: true, helloAt: Date.now() } satisfies Connection);
           this.send(device.id, { kind: "welcome", deviceId: device.id, capabilityRevision: revision });
-          if (allocation?.kind === "active" && allocation.jobId) {
+          if ((allocation?.kind === "active" || allocation?.kind === "lost") && allocation.jobId) {
             const job = await this.job(allocation.jobId);
             if (job.phase === "cancel_requested" || job.phase === "unknown") this.send(device.id, { kind: "cancel", jobId: job.id });
             else if (!terminal(job.phase)) this.send(device.id, { kind: "execute", jobId: job.id });
@@ -161,24 +163,28 @@ export class SandboxFleetDO extends DurableObject<Env> {
   }
   override webSocketClose(ws: WebSocket) { try { ws.close(); } catch { /* 已关闭。 */ } }
   override webSocketError(ws: WebSocket) { try { ws.close(1011, "connection_error"); } catch { /* 已关闭。 */ } }
-  async catalog(taskType = "shell.exec", value: unknown = {}): Promise<CatalogEntry[]> {
+  async catalogJson(value: unknown = {}): Promise<string> {
     const requirements = parse(RequirementsSchema, value), rows: CatalogEntry[] = [{
       id: "cloudflare", name: "Cloudflare coding", provider: "cloudflare", os: "linux", arch: "managed",
-      shells: ["bash"], tools: [], taskTypes: ["shell.exec"], memoryMiB: null, maxTimeoutMs: 120000,
-      capabilityRevision: "builtin-v1", availability: "ready", activeJobs: 0, cache: { npm: false, git: false },
-      mismatch: [...(taskType !== "shell.exec" ? ["task_type"] : []), ...(requirements.os === "windows" ? ["os"] : []),
-        ...(requirements.shell === "powershell" ? ["shell"] : []), ...(requirements.memoryMiB || requirements.tools?.length ? ["unverified_requirements"] : [])],
+      tools: [], codeModeTools: ["bash", "read", "write", "edit"], memoryMiB: null, maxTimeoutMs: 120000,
+      capabilityRevision: "builtin-v2", availability: "ready", activeJobs: 0, workspaceRoot: "/work", persistence: "R2 source; container-local caches",
+      mismatch: [...(requirements.os && requirements.os !== "linux" ? ["os"] : []),
+        ...(requirements.memoryMiB ? ["unverified_memory"] : []), ...(requirements.tools ?? []).filter(name => !["bash", "read", "write", "edit"].includes(name)).map(name => "tool:" + name)],
     }];
     for (const device of (await this.ctx.storage.list<Device>({ prefix: "device:" })).values()) {
       if (device.approval !== "approved") continue;
+      // 旧 runner 必须升级声明；保留管理员可见记录，不把旧任务误当成可调用工具。
+      try { validateDescriptor(device.descriptor); } catch { continue; }
       const allocation = await this.ctx.storage.get<Allocation>("allocation:" + device.id);
       rows.push({ id: "remote:" + device.id, name: device.descriptor.name, provider: device.descriptor.provider,
-        os: device.descriptor.os, arch: device.descriptor.arch, shells: device.descriptor.shells, tools: device.descriptor.tools,
-        taskTypes: device.descriptor.taskTypes, memoryMiB: device.descriptor.memoryMiB, maxTimeoutMs: device.descriptor.maxTimeoutMs,
-        capabilityRevision: device.revision, availability: !this.available(device.id) ? "offline" : allocation?.kind === "releasing" ? "draining" : allocation?.kind === "active" ? "busy" : "ready",
-        activeJobs: allocation?.kind === "active" && allocation.jobId ? 1 : 0, cache: device.descriptor.cache, mismatch: mismatch(device.descriptor, taskType, requirements) });
+        os: device.descriptor.os, arch: device.descriptor.arch, tools: device.descriptor.tools, ...(device.descriptor.environment ? { environment: device.descriptor.environment } : {}),
+        memoryMiB: device.descriptor.memoryMiB, maxTimeoutMs: device.descriptor.maxTimeoutMs,
+        capabilityRevision: device.revision, availability: !this.available(device.id) ? "offline" : allocation?.kind === "releasing" || allocation?.kind === "lost" ? "draining" : allocation?.kind === "active" ? "busy" : "ready",
+        activeJobs: (allocation?.kind === "active" || allocation?.kind === "lost") && allocation.jobId ? 1 : 0,
+        workspaceRoot: device.descriptor.workspaceRoot ?? "tool-specific", persistence: device.descriptor.provider === "windows-wsb" ? "lease-local; discarded on release or session loss" : "consult registered tools; no R2 source synchronization",
+        mismatch: mismatch(device.descriptor, requirements) });
     }
-    return rows;
+    return JSON.stringify(rows);
   }
   async acquire(value: unknown): Promise<Lease> {
     const input = parse(AcquireSchema, value), deviceId = input.sandboxId.slice(7);
@@ -195,21 +201,35 @@ export class SandboxFleetDO extends DurableObject<Env> {
       if (!device || device.approval !== "approved") throw new Error("permission_denied");
       if (!this.available(deviceId)) throw new Error("unavailable");
       if (device.revision !== input.capabilityRevision) throw new Error("capability_changed");
-      if (mismatch(device.descriptor, input.taskType, input.requirements).length) throw new Error("capability_mismatch");
+      validateDescriptor(device.descriptor);
+      if (mismatch(device.descriptor, input.requirements).length) throw new Error("capability_mismatch");
       const current = await tx.get<Allocation>("allocation:" + deviceId);
       if (current && current.kind !== "released") throw new Error("busy");
       const lease: Lease = { ...input, id: crypto.randomUUID(), deviceId, createdAt: Date.now() };
-      await tx.put({ ["allocation:" + deviceId]: { kind: "active", lease, jobId: null, touchedAt: Date.now() } satisfies Allocation, [requestKey]: { fingerprint, lease } });
+      await tx.put({ ["allocation:" + deviceId]: { kind: "active", lease, jobId: null, touchedAt: Date.now() } satisfies Allocation,
+        ["lease:" + lease.id]: deviceId, [requestKey]: { fingerprint, lease } });
       return lease;
     });
     await this.arm(Date.now() + 15000); return lease;
   }
-  async release(lease: Lease): Promise<void> {
+  async sessions(workspace: string) {
+    return [...(await this.ctx.storage.list<Allocation>({ prefix: "allocation:" })).values()]
+      .filter(item => item.lease.workspace === workspace && item.kind !== "released")
+      .map(item => ({ lease: item.lease, state: item.kind, jobId: "jobId" in item ? item.jobId : null }));
+  }
+  private async allocation(workspace: string, leaseId: string): Promise<Allocation> {
+    const deviceId = await this.ctx.storage.get<string>("lease:" + leaseId);
+    const allocation = deviceId ? await this.ctx.storage.get<Allocation>("allocation:" + deviceId) : undefined;
+    if (!allocation || allocation.lease.id !== leaseId || allocation.lease.workspace !== workspace) throw new Error("lease_expired");
+    return allocation;
+  }
+  async release(workspace: string, leaseId: string): Promise<void> {
+    const { lease } = await this.allocation(workspace, leaseId);
     await this.ctx.storage.transaction(async tx => {
       const current = await tx.get<Allocation>("allocation:" + lease.deviceId);
       if (!current || current.lease.id !== lease.id || current.lease.workspace !== lease.workspace) throw new Error("lease_expired");
       if (current.kind === "released") return;
-      if (current.kind === "active" && current.jobId) throw new Error("job_running");
+      if ((current.kind === "active" || current.kind === "lost") && current.jobId) throw new Error("job_running");
       await tx.put("allocation:" + lease.deviceId, { kind: "releasing", lease } satisfies Allocation);
     });
     this.send(lease.deviceId, { kind: "release", leaseId: lease.id });
@@ -220,93 +240,85 @@ export class SandboxFleetDO extends DurableObject<Env> {
       if (allocation?.kind === "releasing" && allocation.lease.id === leaseId) await tx.put("allocation:" + deviceId, { ...allocation, kind: "released" } satisfies Allocation);
     });
   }
-  async start(value: JobInput): Promise<string> {
-    const input = parse(JobInputSchema, value); validateSnapshot(input.source);
-    const fingerprint = await hash(JSON.stringify(input)), inputKey = dataKey(input.id, "input-" + fingerprint);
-    await this.env.ASSETS.put(inputKey, JSON.stringify(input));
-    await this.ctx.storage.transaction(async tx => {
-      const existing = await tx.get<Job>("job:" + input.id);
-      if (existing) { if (existing.fingerprint !== fingerprint) throw new Error("operation_conflict"); return; }
-      const device = await tx.get<Device>("device:" + input.lease.deviceId), allocation = await tx.get<Allocation>("allocation:" + input.lease.deviceId);
-      if (!device || device.approval !== "approved" || allocation?.kind !== "active" || allocation.lease.id !== input.lease.id || allocation.lease.workspace !== input.lease.workspace) throw new Error("lease_expired");
-      if (allocation.jobId) throw new Error("job_running");
+  async invoke(workspace: string, operationId: string, value: unknown) {
+    parse(IdSchema, workspace); parse(IdSchema, operationId);
+    const request = parse(InvokeSchema, value), fingerprint = await hash(JSON.stringify({ workspace, ...request }));
+    const key = "call:" + await hash(workspace + ":" + operationId);
+    const prior = await this.ctx.storage.get<{ fingerprint: string; jobId: string }>(key);
+    if (prior) {
+      if (prior.fingerprint !== fingerprint) throw new Error("operation_conflict");
+      const job = await this.job(prior.jobId);
+      // 事务提交后可能在发送前中断；runner journal 使重复通知不会重复执行。
+      if (job.phase === "dispatched") this.send(job.deviceId, { kind: "execute", jobId: job.id });
+      await this.arm(Date.now() + 15000);
+      return { jobId: job.id, phase: job.phase };
+    }
+    const allocation = await this.allocation(workspace, request.leaseId);
+    if (allocation.kind !== "active") throw new Error(allocation.kind === "lost" ? "session_lost" : "lease_expired");
+    const device = await this.device(allocation.lease.deviceId);
+    const args = validateToolArguments(validateDescriptor(device.descriptor), request.tool, request.arguments);
+    if (request.timeoutMs > device.descriptor.maxTimeoutMs) throw new Error("capability_mismatch");
+    const now = Date.now(), id = crypto.randomUUID();
+    const input: JobInput = { id, lease: allocation.lease, tool: request.tool, arguments: args,
+      timeoutMs: request.timeoutMs, createdAt: now, deadline: now + request.timeoutMs + 180000 };
+    // 参数上限 64 KiB，连同租约小于 DO 单值上限，与收据一起提交，不生成 R2 暂存孤儿。
+    const job = await this.ctx.storage.transaction(async tx => {
+      const prior = await tx.get<{ fingerprint: string; jobId: string }>(key);
+      if (prior) {
+        if (prior.fingerprint !== fingerprint) throw new Error("operation_conflict");
+        const existing = await tx.get<Job>("job:" + prior.jobId);
+        if (!existing) throw new Error("job_expired");
+        return existing;
+      }
+      const currentDevice = await tx.get<Device>("device:" + device.id), current = await tx.get<Allocation>("allocation:" + device.id);
+      if (!currentDevice || currentDevice.approval !== "approved" || current?.kind !== "active" || current.lease.id !== input.lease.id || current.lease.workspace !== workspace) throw new Error("lease_expired");
+      if (currentDevice.revision !== input.lease.capabilityRevision) throw new Error("capability_changed");
+      if (current.jobId) throw new Error("job_running");
       if (!this.available(device.id)) throw new Error("unavailable");
-      const op = input.operation;
-      if (op.kind !== allocation.lease.taskType || op.timeoutMs > device.descriptor.maxTimeoutMs ||
-        op.kind === "shell.exec" && !device.descriptor.shells.includes(op.shell)) throw new Error("capability_mismatch");
-      const job: Job = { id: input.id, workspace: input.lease.workspace, deviceId: device.id, leaseId: input.lease.id, fingerprint,
-        createdAt: input.createdAt, deadline: input.deadline, phase: "dispatched", outcomeHash: null, uploadBytes: 0, uploadCount: 0, notify: false };
-      await tx.put({ ["job:" + input.id]: job, ["allocation:" + device.id]: { ...allocation, jobId: input.id } satisfies Allocation });
+      const job: Job = { id, workspace, deviceId: device.id, leaseId: input.lease.id, fingerprint,
+        createdAt: now, deadline: input.deadline, phase: "dispatched", outcomeHash: null };
+      await tx.put({ ["job:" + id]: job, ["allocation:" + device.id]: { ...current, jobId: id, touchedAt: now } satisfies Allocation,
+        ["input:" + id]: JSON.stringify(input), [key]: { fingerprint, jobId: id } });
+      return job;
     });
-    this.send(input.lease.deviceId, { kind: "execute", jobId: input.id });
-    await this.arm(Date.now() + 15000); return input.id;
+    if (!terminal(job.phase)) this.send(device.id, { kind: "execute", jobId: job.id });
+    await this.arm(Date.now() + 15000); return { jobId: job.id, phase: job.phase };
   }
   private async job(id: string): Promise<Job> { const job = await this.ctx.storage.get<Job>("job:" + id); if (!job) throw new Error("job_not_found"); return job; }
   private async ownedJob(deviceId: string, id: string): Promise<Job> { const job = await this.job(id); if (job.deviceId !== deviceId) throw new Error("permission_denied"); return job; }
-  async input(deviceId: string, id: string): Promise<JobInput> {
-    const job = await this.ownedJob(deviceId, id), cached = this.inputs.get(id);
-    if (cached) return cached;
-    const object = await this.env.ASSETS.get(dataKey(id, "input-" + job.fingerprint));
-    if (!object) throw new Error("input_missing");
-    const input = parse(JobInputSchema, await object.json());
-    if (this.inputs.size >= 2) this.inputs.delete(this.inputs.keys().next().value!);
-    this.inputs.set(id, input); return input;
-  }
-  async inputBlob(deviceId: string, id: string, sha: string): Promise<Uint8Array> {
-    const input = await this.input(deviceId, id), file = input.source.files.find(file => file.sha256 === sha);
-    if (!file) throw new Error("not_found");
-    const object = await this.env.ASSETS.get(await scopePrefix("workspace:" + input.lease.workspace) + "/workspace/blobs/" + sha);
-    if (!object || object.size !== file.bytes) throw new Error("blob_corrupt");
-    const bytes = new Uint8Array(await object.arrayBuffer());
-    if (await hash(bytes) !== sha) throw new Error("blob_corrupt"); return bytes;
-  }
-  async upload(deviceId: string, id: string, sha: string, bytes: Uint8Array): Promise<void> {
-    if (bytes.length > FILE_MAX_BYTES || await hash(bytes) !== sha) throw new Error("blob_corrupt");
-    await this.ctx.storage.transaction(async tx => {
-      const job = await tx.get<Job>("job:" + id), key = "upload:" + id + ":" + sha;
-      if (!job || job.deviceId !== deviceId || resolved(job.phase)) throw new Error("permission_denied");
-      const prior = await tx.get<number>(key);
-      if (prior !== undefined) { if (prior !== bytes.length) throw new Error("blob_corrupt"); return; }
-      if (job.uploadCount >= 20000 || job.uploadBytes + bytes.length > SOURCE_MAX_BYTES) throw new Error("workspace_quota");
-      await tx.put({ [key]: bytes.length, ["job:" + id]: { ...job, uploadCount: job.uploadCount + 1, uploadBytes: job.uploadBytes + bytes.length } satisfies Job });
-    });
-    await this.env.ASSETS.put(await blobPrefix(id) + sha, bytes);
+  async inputJson(deviceId: string, id: string): Promise<string> {
+    await this.ownedJob(deviceId, id);
+    const json = await this.ctx.storage.get<string>("input:" + id);
+    if (!json) throw new Error("input_missing");
+    return JSON.stringify(parse(JobInputSchema, JSON.parse(json)));
   }
   async complete(deviceId: string, id: string, value: unknown): Promise<void> {
-    const outcome = parse(OutcomeSchema, value), outcomeHash = await hash(JSON.stringify(outcome)), job = await this.ownedJob(deviceId, id);
+    const outcome = validateOutcome(value), outcomeHash = await hash(JSON.stringify(outcome)), job = await this.ownedJob(deviceId, id);
     if (resolved(job.phase)) {
       if (job.outcomeHash !== outcomeHash) throw new Error("operation_conflict");
       this.send(deviceId, { kind: "outcome_ack", jobId: id }); return;
-    }
-    if (outcome.kind === "completed") {
-      validateSnapshot(outcome.snapshot);
-      const input = await this.input(deviceId, id), original = new Map(input.source.files.map(file => [file.sha256, file]));
-      for (const file of outcome.snapshot.files) {
-        const uploaded = await this.ctx.storage.get<number>("upload:" + id + ":" + file.sha256);
-        if (uploaded === file.bytes) {
-          const object = await this.env.ASSETS.head(await blobPrefix(id) + file.sha256);
-          if (!object || object.size !== file.bytes) throw new Error("blob_corrupt");
-        } else {
-          if (original.get(file.sha256)?.bytes !== file.bytes) throw new Error("blob_corrupt");
-          await this.env.ASSETS.put(await blobPrefix(id) + file.sha256, await this.inputBlob(deviceId, id, file.sha256));
-        }
-      }
     }
     await this.env.ASSETS.put(dataKey(id, "outcome-" + outcomeHash), JSON.stringify(outcome));
     await this.ctx.storage.transaction(async tx => {
       const latest = await tx.get<Job>("job:" + id);
       if (!latest) throw new Error("job_not_found");
       if (resolved(latest.phase) && latest.outcomeHash !== outcomeHash) throw new Error("operation_conflict");
-      await tx.put("job:" + id, { ...latest, phase: outcome.kind, outcomeHash, notify: true } satisfies Job);
+      await tx.put("job:" + id, { ...latest, phase: outcome.kind, outcomeHash } satisfies Job);
+      const allocation = await tx.get<Allocation>("allocation:" + deviceId);
+      if ((allocation?.kind === "active" || allocation?.kind === "lost") && allocation.jobId === id) {
+        await tx.put("allocation:" + deviceId, { ...allocation,
+          kind: allocation.kind === "lost" || outcome.sessionLost ? "lost" : "active",
+          jobId: resolved(outcome.kind) ? null : id, touchedAt: Date.now() } satisfies Allocation);
+      }
     });
     await this.arm(Date.now() + 1000);
     this.send(deviceId, { kind: "outcome_ack", jobId: id });
   }
-  async inspect(workspace: string, id: string) {
+  async inspectJson(workspace: string, id: string): Promise<string> {
     const job = await this.job(id); if (job.workspace !== workspace) throw new Error("permission_denied");
     const object = job.outcomeHash ? await this.env.ASSETS.get(dataKey(id, "outcome-" + job.outcomeHash)) : null;
-    return { input: await this.input(job.deviceId, id), phase: job.phase, outcome: object ? parse(OutcomeSchema, await object.json()) : null,
-      log: (await this.ctx.storage.get<Log>("log:" + id)) ?? { sequence: -1, text: "" } };
+    return JSON.stringify({ jobId: id, leaseId: job.leaseId, phase: job.phase, outcome: object ? validateOutcome(await object.json()) : null,
+      log: (await this.ctx.storage.get<Log>("log:" + id)) ?? { sequence: -1, text: "" } });
   }
   async cancel(workspace: string, id: string) {
     const job = await this.ctx.storage.transaction(async tx => {
@@ -319,23 +331,12 @@ export class SandboxFleetDO extends DurableObject<Env> {
     if (!resolved(job.phase)) this.send(job.deviceId, { kind: "cancel", jobId: id });
     await this.arm(Date.now() + 15000);
   }
-  async acknowledgeCommit(workspace: string, id: string) {
-    await this.ctx.storage.transaction(async tx => {
-      const job = await tx.get<Job>("job:" + id);
-      if (!job || job.workspace !== workspace || !terminal(job.phase)) throw new Error("invalid_job_state");
-      const allocation = await tx.get<Allocation>("allocation:" + job.deviceId);
-      if (resolved(job.phase) && allocation?.kind === "active" && allocation.jobId === id)
-        await tx.put("allocation:" + job.deviceId, { ...allocation, jobId: null, touchedAt: Date.now() } satisfies Allocation);
-      await tx.put("job:" + id, { ...job, notify: false } satisfies Job);
-    });
-    await this.arm(Date.now() + 600000);
-  }
   /** 仅管理员路由可调用；承认结果未知并封存任务，绝不宣称远端已停止。 */
   async abandon(id: string) {
     const job = await this.job(id);
     if (resolved(job.phase)) throw new Error("already_resolved");
     this.send(job.deviceId, { kind: "cancel", jobId: id });
-    await this.complete(job.deviceId, id, { kind: "failed", error: "admin_abandoned_execution_unknown" });
+    await this.complete(job.deviceId, id, { kind: "failed", error: "admin_abandoned_execution_unknown", sessionLost: true });
     return { jobId: id, execution: "unknown", fenced: true };
   }
   private async deletePrefix(prefix: string) {
@@ -349,8 +350,8 @@ export class SandboxFleetDO extends DurableObject<Env> {
       if (pair.expiresAt < now) await this.ctx.storage.delete(key); else schedule(pair.expiresAt);
     }
     for (const allocation of (await this.ctx.storage.list<Allocation>({ prefix: "allocation:" })).values()) {
-      if (allocation.kind === "active" && !allocation.jobId) {
-        if (now - allocation.touchedAt >= 600000) await this.release(allocation.lease);
+      if ((allocation.kind === "active" || allocation.kind === "lost") && !allocation.jobId) {
+        if (now - allocation.touchedAt >= 600000) await this.release(allocation.lease.workspace, allocation.lease.id);
         else schedule(allocation.touchedAt + 600000);
       }
     }
@@ -360,15 +361,9 @@ export class SandboxFleetDO extends DurableObject<Env> {
         if (now > job.deadline + 60000) await this.complete(job.deviceId, job.id, { kind: "unknown", reason: "deadline_without_confirmation" });
         else if (now > job.deadline) await this.cancel(job.workspace, job.id);
       }
-      if (job.notify) {
-        try { await this.env.SANDBOX.get(this.env.SANDBOX.idFromString(job.workspace)).finishRemoteJob(job.id); }
-        catch { schedule(now + 15000); }
-      }
-      if (!job.notify && resolved(job.phase) && now - job.createdAt > 7 * 86400000) {
-        await this.deletePrefix(dataKey(job.id, "")); await this.deletePrefix(await blobPrefix(job.id));
-        const uploads = [...(await this.ctx.storage.list({ prefix: "upload:" + job.id + ":" })).keys()];
-        for (let at = 0; at < uploads.length; at += 128) await this.ctx.storage.delete(uploads.slice(at, at + 128));
-        await this.ctx.storage.delete([key, "log:" + job.id]);
+      if (resolved(job.phase) && now - job.createdAt > 7 * 86400000) {
+        await this.deletePrefix(dataKey(job.id, ""));
+        await this.ctx.storage.delete([key, "log:" + job.id, "input:" + job.id]);
       } else if (resolved(job.phase)) schedule(job.createdAt + 7 * 86400000);
     }
     const already = await this.ctx.storage.getAlarm();

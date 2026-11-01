@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { authenticated } from "../auth";
-import { FILE_MAX_BYTES } from "../../../runner/src/protocol";
 const headers = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" };
+const jsonWire = (value: string) => new Response(value, { headers: { ...headers, "Content-Type": "application/json" } });
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers });
 async function bytes(request: Request, limit: number): Promise<Uint8Array> {
   if (Number(request.headers.get("content-length") ?? 0) > limit) throw new Error("too_large");
@@ -19,7 +19,7 @@ export async function remoteSandboxRoutes(request: Request, env: Env): Promise<R
   try {
     if (path.startsWith("/admin/")) {
       if (!await authenticated(request, env.ADMIN_TOKEN)) return json({ error: "unauthorized" }, 401);
-      if (path === "/admin/sandbox-devices" && request.method === "GET") return json(await fleet.devices());
+      if (path === "/admin/sandbox-devices" && request.method === "GET") return jsonWire(await fleet.devicesJson());
       if (path === "/admin/sandbox-devices/pairings" && request.method === "POST") return json(await fleet.createPairing(), 201);
       const abandon = /^\/admin\/sandbox-devices\/jobs\/([a-f0-9-]{36})\/abandon$/.exec(path);
       if (abandon && request.method === "POST") {
@@ -32,7 +32,7 @@ export async function remoteSandboxRoutes(request: Request, env: Env): Promise<R
       if (match && !match[2] && request.method === "DELETE") { await fleet.revoke(match[1]!); return json({ ok: true }); }
     }
     if (path === "/sandbox-devices/claim" && request.method === "POST") return json(await fleet.claim(await body(request)));
-    const match = /^\/sandbox-devices\/([a-f0-9-]{36})\/(connect|jobs\/([a-zA-Z0-9:_-]{1,160})(?:\/(input|result|objects\/([a-f0-9]{64})))?)$/.exec(path);
+    const match = /^\/sandbox-devices\/([a-f0-9-]{36})\/(connect|jobs\/([a-zA-Z0-9:_-]{1,160})\/(input|result))$/.exec(path);
     if (!match) return json({ error: "not_found" }, 404);
     const deviceId = match[1]!;
     if (match[2] === "connect" && request.method === "GET") {
@@ -41,10 +41,8 @@ export async function remoteSandboxRoutes(request: Request, env: Env): Promise<R
     }
     if (!await fleet.authorize(deviceId, request.headers.get("Authorization"))) return json({ error: "unauthorized" }, 401);
     const jobId = match[3]!, action = match[4];
-    if (action === "input" && request.method === "GET") return json(await fleet.input(deviceId, jobId));
-    if (action?.startsWith("objects/") && request.method === "GET") return new Response(await fleet.inputBlob(deviceId, jobId, match[5]!), { headers });
-    if (action?.startsWith("objects/") && request.method === "PUT") { await fleet.upload(deviceId, jobId, match[5]!, await bytes(request, FILE_MAX_BYTES)); return json({ ok: true }); }
-    if (action === "result" && request.method === "POST") { await fleet.complete(deviceId, jobId, await body(request, 8 * 1024 * 1024)); return json({ ok: true }); }
+    if (action === "input" && request.method === "GET") return jsonWire(await fleet.inputJson(deviceId, jobId));
+    if (action === "result" && request.method === "POST") { await fleet.complete(deviceId, jobId, await body(request, 256 * 1024)); return json({ ok: true }); }
     return json({ error: "not_found" }, 404);
   } catch (error) {
     const code = error instanceof Error ? error.message : "invalid_request";

@@ -5,20 +5,15 @@ import { once } from "node:events";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import { Connector } from "../src/connector.ts";
-import { sha256, readJson } from "../src/files.ts";
-import type { Config } from "../src/wsb.ts";
-import type { JobInput, Descriptor } from "../src/protocol.ts";
-test("真实 HTTP/WSS 重连只回传 journal，不再次执行；凭据不进入任务文件", { timeout: 20000 }, async t => {
+import { atomicJson, readJson } from "../src/files.ts";
+import { capabilities, config as makeConfig, job as makeJob, lease } from "./fixtures.ts";
+for (const previouslyStarted of [false, true]) test("真实 HTTP/WS 重连不重跑，释放等待实际后端；已开始收据=" + previouslyStarted, { timeout: 20000 }, async t => {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), "cs-agent-connector-")); t.after(() => fs.rm(state, { recursive: true, force: true }));
-  const deviceId = randomUUID(), jobId = randomUUID(), token = "a".repeat(64);
-  const capabilities: Descriptor = { name: "测试", provider: "windows-wsb", os: "windows", arch: "x64", shells: ["powershell"], tools: [], taskTypes: ["shell.exec"],
-    memoryMiB: 4096, maxConcurrent: 1, maxTimeoutMs: 1200000, workspaceProtocol: "r2-source-v1", cache: { npm: true, git: false } };
-  const job: JobInput = { id: jobId, lease: { id: randomUUID(), deviceId, sandboxId: "remote:" + deviceId, workspace: "owner", operationId: "test", taskType: "shell.exec", requirements: {}, capabilityRevision: sha256(JSON.stringify(capabilities)), createdAt: Date.now() },
-    operation: { kind: "shell.exec", command: "probe", shell: "powershell", cwd: "/work", timeoutMs: 1000 }, source: { files: [], directories: [], totalBytes: 0 }, baseRevision: "0", createdAt: Date.now(), deadline: Date.now() + 20000 };
-  let runs = 0, posts = 0, latest: WebSocket | undefined, resolveDone: () => void = () => undefined;
+  const binding = lease(), job = makeJob(binding), deviceId = binding.deviceId, jobId = job.id, token = "a".repeat(64);
+  if (previouslyStarted) await atomicJson(path.join(state, "jobs", jobId, "journal.json"), { state: "started" });
+  let runs = 0, posts = 0, releases = 0, stops = 0, latest: WebSocket | undefined, resolveDone: () => void = () => undefined;
   const done = new Promise<void>(resolve => { resolveDone = resolve; });
   const server = createServer((req, res) => {
     assert.equal(req.headers.authorization, "Bearer " + token);
@@ -29,7 +24,7 @@ test("真实 HTTP/WSS 重连只回传 journal，不再次执行；凭据不进�
         const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8")); assert.ok(body);
         posts++;
         if (posts === 1) { res.writeHead(503).end(); latest?.terminate(); }
-        else { res.end("{}"); resolveDone(); }
+        else { res.end("{}"); latest?.send(JSON.stringify({ kind: "release", leaseId: binding.id })); }
       });
       return;
     }
@@ -41,27 +36,48 @@ test("真实 HTTP/WSS 重连只回传 journal，不再次执行；凭据不进�
     socket.on("message", raw => {
       const frame = JSON.parse(raw.toString());
       if (frame.kind === "hello") {
+        assert.equal(frame.protocolVersion, 2);
         socket.send(JSON.stringify({ kind: "welcome", deviceId, capabilityRevision: job.lease.capabilityRevision }));
         socket.send(JSON.stringify({ kind: "execute", jobId }));
         socket.send(JSON.stringify({ kind: "execute", jobId }));
       }
+      if (frame.kind === "released") { assert.equal(frame.leaseId, binding.id); assert.equal(releases, 1); resolveDone(); }
     });
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); assert.ok(address && typeof address === "object");
-  const config: Config = { origin: "http://127.0.0.1:" + address.port, deviceId, tokenProtected: "test-only", name: "test", nodeDir: "/unused", memoryMiB: 4096, maxTimeoutMs: 1200000 };
+  const config = makeConfig(deviceId, "http://127.0.0.1:" + address.port);
   const connector = new Connector(state, config, "/unused", { credentials: async () => token, capabilities: async () => capabilities,
-    backend: { stopOwned: async () => undefined, run: async input => {
+    backend: { stopOwned: async () => { stops++; }, release: async id => { assert.equal(id, binding.id); releases++; }, run: async input => {
       runs++; assert.equal(JSON.stringify(input).includes(token), false);
-      return { kind: "completed", result: { stdout: "中文", stderr: "", code: 0, timedOut: false, truncated: false }, snapshot: { files: [], directories: [], totalBytes: 0 } };
+      return { kind: "completed", result: { stdout: "中文", stderr: "", code: 0, timedOut: false, truncated: false } };
     } } });
   const running = connector.run();
   try {
-    await done; assert.equal(posts, 2); assert.equal(runs, 1);
-    assert.equal(JSON.stringify(await readJson(path.join(state, "jobs", jobId, "input/input.json"))).includes(token), false);
+    await done; assert.equal(posts, 2); assert.equal(runs, previouslyStarted ? 0 : 1);
+    assert.ok(stops >= 1, "空闲结果回传失败后的断线也必须终止会话");
+    if (!previouslyStarted) assert.equal(JSON.stringify(await readJson(path.join(state, "jobs", jobId, "input.json"))).includes(token), false);
   } finally {
     await connector.stop(); await running;
     for (const client of ws.clients) client.terminate();
     await new Promise<void>(resolve => ws.close(() => resolve())); await new Promise<void>(resolve => server.close(() => resolve()));
   }
+});
+test("401 握手失败仍销毁本机闲置会话", { timeout: 10000 }, async t => {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "cs-agent-revoked-"));
+  t.after(() => fs.rm(state, { recursive: true, force: true }));
+  const server = createServer((_req, res) => res.writeHead(401).end());
+  server.on("upgrade", (_req, socket) => socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"));
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  const address = server.address(); assert.ok(address && typeof address === "object");
+  let acknowledgeStop: () => void = () => undefined, stops = 0;
+  const stopped = new Promise<void>(resolve => { acknowledgeStop = resolve; });
+  const connector = new Connector(state, makeConfig(lease().deviceId, "http://127.0.0.1:" + address.port), "/unused", {
+    credentials: async () => "revoked-token", capabilities: async () => capabilities,
+    backend: { stopOwned: async () => { stops++; acknowledgeStop(); }, release: async () => undefined,
+      run: async () => { throw new Error("unauthorized_runner_must_not_execute"); } },
+  });
+  const running = connector.run();
+  try { await stopped; assert.ok(stops >= 1); }
+  finally { await connector.stop(); await running; await new Promise<void>(resolve => server.close(() => resolve())); }
 });

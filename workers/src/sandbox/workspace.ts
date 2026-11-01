@@ -174,7 +174,8 @@ export class WorkspaceManager {
       try {
         const result = await this.execute(input.operation);
         executed = true;
-        const committed = await this.commit(await this.deps.runtime.snapshot(), manifest, epoch);
+        const retainedPaths = [...manifest.files.map(file => file.path), ...manifest.directories];
+        const committed = await this.commit(await this.deps.runtime.snapshot(retainedPaths), manifest, epoch);
         const resultKey = `${await this.prefix()}/results/${await sha256(input.operationId)}`;
         const encodedResult = JSON.stringify(result);
         const storedResult: Extract<OperationRecord, { state: "committed" }>["result"] = new TextEncoder().encode(encodedResult).length <= 32768 ? { kind: "inline", value: result } : { kind: "r2", key: resultKey };
@@ -201,6 +202,8 @@ export class WorkspaceManager {
         const code = error instanceof Error ? error.message : "sandbox_error";
         if (!executed && code === "sandbox_unavailable" && input.operation.kind === "exec") {
           await this.deps.storage.put(key, { fingerprint, state: "unknown", revision: manifest.revision } satisfies OperationRecord);
+          // 原生执行中断时助手可能还未收尾；先销毁容器，不能让后台写入进入后续快照。
+          await this.deps.resetRuntime();
           return { status: "unknown", persistence: "unknown", revision: manifest.revision, operationId: input.operationId };
         }
         const failure = { fingerprint, state: "failed", revision: manifest.revision, error: executed && !["workspace_quota", "blob_corrupt", "workspace_conflict"].includes(code) ? "persistence_failed" : code,

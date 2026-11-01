@@ -1,25 +1,22 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkspaceManager } from "../src/sandbox/workspace";
-import { sandboxClient } from "../src/sandbox/client";
+import { type SandboxClient } from "../src/sandbox/client";
 import { sha256 } from "../src/media/model";
 afterEach(async () => { await reset(); });
 function runtime() {
-  let files = new Map<string,Uint8Array>(), stage = new Map<string,Uint8Array>(), ready = false, executions = 0, failExec = false;
-  const client = sandboxClient(async (route, init) => {
-    ready = true;
-    const url = new URL(route,"http://sandbox"), path = (url.searchParams.get("path") ?? "").replace(/^\/work\//,"");
-    switch(url.pathname) {
-      case "/restore/start": stage = new Map(); return Response.json({id:"r"});
-      case "/restore/blob": if (!(init?.body instanceof Uint8Array)) throw new Error("body"); stage.set(path,new Uint8Array(init.body)); return Response.json({bytes:init.body.length});
-      case "/restore/commit": files = stage; return Response.json({restored:true});
-      case "/file": if(init?.method === "PUT") { const value = new TextEncoder().encode(String(init.body)); files.set(path,value); return Response.json({bytes:value.length}); } return Response.json({text:new TextDecoder().decode(files.get(path)),startLine:1,endLine:1,totalLines:1});
-      case "/exec": executions++; if(failExec) { failExec=false; throw new Error("sandbox_unavailable"); } files.set("binary.bin",new Uint8Array([0,255,1])); return Response.json({stdout:"ok",stderr:"",code:0,timedOut:false,truncated:false});
-      case "/blob": return new Response(files.get(path));
-      case "/snapshot": { const entries = await Promise.all([...files].map(async ([path,bytes])=>({path,bytes:bytes.length,sha256:await sha256(bytes),mime:"application/octet-stream",mode:420}))); return Response.json({files:entries,directories:[],totalBytes:entries.reduce((sum,file)=>sum+file.bytes,0)}); }
-      default: return Response.json([]);
-    }
-  });
+  let files = new Map<string,Uint8Array>(), ready = false, executions = 0, failExec = false;
+  const relative = (path: string) => path.replace(/^\/work\//, "");
+  const client: SandboxClient = {
+    async restore(snapshot, readBlob) { ready = true; files = new Map(await Promise.all(snapshot.files.map(async (file): Promise<[string, Uint8Array]> => [file.path, await readBlob(file)]))); },
+    async writeFile(path, text) { const value = new TextEncoder().encode(text); files.set(relative(path), value); return { bytes: value.length }; },
+    async readFile(path) { return { text: new TextDecoder().decode(files.get(relative(path))), startLine: 1, endLine: 1, totalLines: 1 }; },
+    async exec() { executions++; if (failExec) { failExec = false; throw new Error("sandbox_unavailable"); } files.set("binary.bin", new Uint8Array([0,255,1])); return { stdout: "ok", stderr: "", code: 0, timedOut: false, truncated: false }; },
+    async readBlob(path) { const value = files.get(relative(path)); if (!value) throw new Error("not_found"); return value; },
+    async snapshot() { const entries = await Promise.all([...files].map(async ([path, bytes]) => ({ path, bytes: bytes.length, sha256: await sha256(bytes), mime: "application/octet-stream", mode: 420 }))); return { files: entries, directories: [], totalBytes: entries.reduce((sum, file) => sum + file.bytes, 0) }; },
+    async list() { return []; },
+    async editFile() { throw new Error("unused"); },
+  };
   return { client, ready:()=>ready, reset:async()=>{ready=false;files=new Map();return true;}, executions:()=>executions, fail:()=>{failExec=true;} };
 }
 describe("持久工作区", () => {

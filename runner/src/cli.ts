@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { Type } from "typebox";
-import { parse, DescriptorSchema } from "./protocol.ts";
+import { parse, validateDescriptor } from "./protocol.ts";
 import { atomicJson, exists, readJson, sha256 } from "./files.ts";
 import { ConfigSchema, command, descriptor, protectToken } from "./wsb.ts";
 import { Connector, origin, request } from "./connector.ts";
@@ -24,7 +24,7 @@ if (action === "pair") {
   const config = { name: option("name", os.hostname())!, nodeDir: path.resolve(option("node-dir", path.dirname(process.execPath))!),
     gitDir: option("git-dir"), memoryMiB: Number(option("memory", "6144")), maxTimeoutMs: Number(option("timeout-ms", "1200000")) };
   if (args.length) throw new Error("unknown_arguments");
-  const capabilities = parse(DescriptorSchema, await descriptor(config));
+  const capabilities = validateDescriptor(await descriptor(config));
   if (await exists(configFile)) throw new Error("该目录已经配对；请使用独立的新 state 目录配对另一设备。");
   if (state === path.parse(state).root) throw new Error("dedicated_state_directory_required");
   await fs.mkdir(state, { recursive: true });

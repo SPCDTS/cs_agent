@@ -3,8 +3,8 @@ import { Check } from "typebox/value";
 import { boundedJson } from "./schema";
 import { mcpFailure } from "./result";
 import { defineExtension, defineTool, section, type Registry, type ToolExecutionResult } from "@earendil-works/pi-durable";
-import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
-import { createInlineCodemodeSandbox } from "@earendil-works/pi-codemode/cloudflare";
+import { installCodemode } from "../codemode";
+import { SandboxReadOutput } from "../tools/coding";
 import { compileMcpSchema } from "./schema";
 import { MCP_CONFIG } from "./config";
 import { slug, toolNames } from "./names";
@@ -27,34 +27,37 @@ export interface SubagentCapabilityHost {
 
 /** 主子 agent 共用 MCP 目录 schema、名字和父端运行时；子 DO 不持凭据或另建远端连接。 */
 export function installDelegatedCapabilities(registry: Registry, host: SubagentCapabilityHost, id: string, capabilities: SubagentCapabilities) {
-  const snapshot = capabilities.mcp, catalogs = snapshot ? snapshotCatalogs(snapshot) : [], sandbox = createInlineCodemodeSandbox();
+  const snapshot = capabilities.mcp, catalogs = snapshot ? snapshotCatalogs(snapshot) : [];
   registry.install(defineExtension({ name: "cs.subagent.skills", tools: [
     defineTool({ name: "read_skill", description: "读取父线程当前已启用技能或附件；不授予发布技能权限。",
       parameters: Type.Object({ name: Type.String({ minLength: 1, maxLength: 64 }), path: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })) }, { additionalProperties: false }),
       replay: "safe", execute: args => host.subagentSkill(id, args) }),
   ] }));
   if (capabilities.coding) registry.install(defineExtension({ name: "cs.subagent.coding",
-    sections: [section("sandbox", () => `你的 Linux 沙箱使用独立工作区 ${WORK_ROOT}，派出时从父工作区克隆；后续修改不会自动同步回父工作区。相对路径从 ${WORK_ROOT} 解析。` +
+    sections: [section("sandbox", async ({ agent }) => {
+      const access = await host.validateSubagentAccess(id);
+      if (!agent.callable.some(tool => tool.name === "bash") || !access?.capabilities.coding || !access.authority.owner) return;
+      return `所有沙箱工具只通过 Code Mode 调用。read 返回 {kind:"text",text} 或 {kind:"image",image}；分别用 text(result.text) / image(result.image) 输出。你的 Cloudflare Linux 沙箱使用独立工作区 ${WORK_ROOT}，派出时从父工作区克隆；后续修改不会自动同步回父工作区。相对路径从 ${WORK_ROOT} 解析。` +
       `${WORK_ROOT} 内文件由宿主在 write / edit / bash 操作完成后自动快照提交到持久存储，只有提交成功才会在沙箱重建后恢复；持久化失败或结果不确定时不能宣称已保存，也不要盲目重跑。` +
-      `${WORK_ROOT} 外的文件、运行中的进程和系统环境修改不在持久化范围内。产物放在 ${WORK_ROOT}/out/，在最终回答中说明路径，交由父 agent 处理。`, { tag: false })],
+      `新产生的 .git、node_modules、.wrangler 只留在当前容器，不进入源码快照；${WORK_ROOT} 外的文件、运行中的进程和系统环境修改也不在持久化范围内。产物放在 ${WORK_ROOT}/out/，在最终回答中说明路径，交由父 agent 处理。`;
+    }, { tag: false })],
     tools: [
-    defineTool({ name: "bash", description: "在派出时克隆的独立工作区执行命令，最长60秒；不能修改父工作区。",
+    defineTool({ name: "bash", callers: ["tools"], description: "在派出时克隆的独立工作区执行命令，最长60秒；不能修改父工作区。",
       parameters: Type.Object({ command: Type.String({ minLength: 1 }), timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 60 })) }, { additionalProperties: false }),
       replay: "unsafe", execute: (args, api) => host.subagentCoding(id, { kind: "exec", operationId: String(api.taskId), command: args.command, timeoutMs: (args.timeout ?? 60) * 1000 }) }),
-    defineTool({ name: "read", description: "读取子 agent 独立工作区文本。",
+    defineTool({ name: "read", callers: ["tools"], structuredOutputSchema: SandboxReadOutput, description: "读取子 agent 独立工作区文本。",
       parameters: Type.Object({ path: Type.String({ minLength: 1 }), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1 })) }, { additionalProperties: false }),
       replay: "safe", execute: (args, api) => host.subagentCoding(id, { kind: "read", operationId: String(api.taskId), ...args }) }),
-    defineTool({ name: "write", description: "写入子 agent 独立工作区文本。",
+    defineTool({ name: "write", callers: ["tools"], description: "写入子 agent 独立工作区文本。",
       parameters: Type.Object({ path: Type.String({ minLength: 1 }), content: Type.String() }, { additionalProperties: false }),
       replay: "unsafe", execute: (args, api) => host.subagentCoding(id, { kind: "write", operationId: String(api.taskId), ...args }) }),
-    defineTool({ name: "edit", description: "在子 agent 独立工作区执行精确文本替换。",
+    defineTool({ name: "edit", callers: ["tools"], description: "在子 agent 独立工作区执行精确文本替换。",
       parameters: Type.Object({ path: Type.String({ minLength: 1 }), edits: Type.Array(Type.Object({ oldText: Type.String({ minLength: 1 }), newText: Type.String() }, { additionalProperties: false }), { minItems: 1 }) }, { additionalProperties: false }),
       replay: "unsafe", execute: (args, api) => host.subagentCoding(id, { kind: "edit", operationId: String(api.taskId), ...args }) }),
   ] }));
   if (catalogs.length) {
-    const codemode = createCodemodeExtension({ sandbox, models: false, namespaces: catalogs.map(c => ({ name: c.serverId, prefix: `mcp_${slug(c.serverId, 16)}_` })) });
-    registry.install(defineExtension({ ...codemode, name: "cs.subagent.mcp",
-      sections: [...codemode.sections ?? [], section("mcp-delegation", () => "MCP 只能使用派出目录与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。")] }));
+    registry.install(defineExtension({ name: "cs.subagent.mcp",
+      sections: [section("mcp-delegation", () => "MCP 只能使用派出目录与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。")] }));
     for (const catalog of catalogs) registry.install(defineExtension({ name: `cs.subagent.mcp.${catalog.serverId}`, tools: catalog.tools.map(tool => {
       const name = toolNames(catalog, tool).nativeName, input = compileMcpSchema(tool.inputSchema, MCP_CONFIG.limits);
       return defineTool({ name, description: tool.description, parameters: input.schema, replay: "unsafe", callers: ["tools"],
@@ -66,7 +69,13 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
       replay: "safe", callers: ["tools"], execute: (args, api) => host.subagentMcp(id, { name: `mcp_resources_${action}`, args, operationId: String(api.taskId) }),
     })) }));
   }
-  return { close: () => sandbox.close() };
+  return installCodemode(registry, {
+    allowed: async () => {
+      const access = await host.validateSubagentAccess(id);
+      return !!access && (!!access.capabilities.coding && access.authority.owner || !!access.capabilities.mcp);
+    },
+    namespaces: () => catalogs.map(c => ({ name: c.serverId, prefix: `mcp_${slug(c.serverId, 16)}_` })),
+  });
 }
 
 /** 固定方法名的 RPC 适配器；返回值在边界解析，不把原始 RPC stub 或凭据交给模型。 */
@@ -75,16 +84,18 @@ export function createSubagentCapabilityHost(stub: object): SubagentCapabilityHo
     const method: unknown = Reflect.get(stub, name);
     if (typeof method !== "function") throw new Error("delegation_unavailable");
     const value: unknown = await Reflect.apply(method, stub, args);
-    return boundedJson(value, MCP_CONFIG.limits.messageBytes, 32);
+    // DO RPC 返回值携带生命周期 symbol；只把其 JSON 数据交给严格边界检查。
+    return value === undefined ? undefined : boundedJson(JSON.parse(JSON.stringify(value)), MCP_CONFIG.limits.messageBytes, 32);
   };
-  const output = Type.Object({ isError: Type.Optional(Type.Boolean()), output: Type.Optional(Type.Array(Type.Union([
+  const output = Type.Object({ isError: Type.Optional(Type.Boolean()), structuredOutput: Type.Optional(Type.Unknown()), output: Type.Optional(Type.Array(Type.Union([
     Type.Object({ type: Type.Literal("text"), text: Type.String() }),
     Type.Object({ type: Type.Literal("image"), data: Type.String(), mimeType: Type.String() }),
   ]))) });
   const result = async (method: string, args: unknown[]): Promise<ToolExecutionResult> => {
     try {
       const value = await invoke(method, args);
-      return Check(output, value) ? { ...(value.isError ? { isError: true } : {}), output: value.output } : mcpFailure("result_rejected");
+      return Check(output, value) ? { ...(value.isError ? { isError: true } : {}), output: value.output,
+        ...(value.structuredOutput === undefined ? {} : { structuredOutput: boundedJson(value.structuredOutput, MCP_CONFIG.limits.messageBytes, 32) }) } : mcpFailure("result_rejected");
     } catch { return mcpFailure("denied"); }
   };
   return {

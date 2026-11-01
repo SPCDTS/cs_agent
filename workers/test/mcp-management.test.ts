@@ -111,7 +111,7 @@ describe("runtime MCP onboarding", () => {
   it("adds, probes, activates, calls and disables a service in one real owner conversation", async () => {
     const remote = remoteFixture();
     for (const record of await registry().mcpServersList()) await registry().mcpServerDisable(record.server.id, record.revision);
-    const call = { name: "codemode", args: { code: "const tool=ALL_TOOLS.find(t=>t.name.startsWith('mcp_fixture_project_lookup_'));text(await tools[tool.name]({query:'合成查询'}));" } };
+    const call = { name: "codemode", args: { code: "const tool=ALL_TOOLS.find(t=>t.name.startsWith('mcp_fixture_project_lookup_'));if(tool) text(await tools[tool.name]({query:'合成查询'})); else text('tool_retired');" } };
     const seen = scriptedModel([
       () => ({ name: "mcp_manage", args: { action: "put", expectedRevision: "absent", server: { id, url: endpoint, auth: "none" } } }),
       revision => ({ name: "mcp_manage", args: { action: "probe", id, expectedRevision: revision } }),
@@ -127,7 +127,7 @@ describe("runtime MCP onboarding", () => {
     });
     expect(seen.offers).toContain("mcp_manage");
     expect(seen.outputs[3]).toContain("service-result:");
-    expect(seen.outputs[5]).toContain("denied");
+    expect(seen.outputs[5]).toContain("tool_retired");
     expect(remote.state.calls).toBe(1);
     expect((await registry().mcpServerGet(id)).server.enabled).toBe(false);
   });

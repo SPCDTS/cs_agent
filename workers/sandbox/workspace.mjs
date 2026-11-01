@@ -18,13 +18,21 @@ export function detectImage(bytes) {
 }
 export function workspaceControl({ root, own }) {
   let restore;
-  async function scan() {
+  async function scan(retainedPaths = []) {
     const files = [], directories = [], issues = [];
+    const retained = new Set(retainedPaths), traversed = new Set();
+    for (const retainedPath of retainedPaths) {
+      const parts = retainedPath.split("/");
+      for (let end = 1; end < parts.length; end++) traversed.add(parts.slice(0, end).join("/"));
+    }
+    const cache = relative => relative.split("/").some(part => [".git", "node_modules", ".wrangler"].includes(part));
     let totalBytes = 0;
     async function walk(dir, prefix = "") {
       const entries = await fs.readdir(dir, { withFileTypes: true });
       for (const entry of entries.sort((a,b) => a.name.localeCompare(b.name))) {
         const relative = prefix + entry.name, absolute = path.join(dir, entry.name);
+        // 新缓存不进 R2；旧 manifest 已追踪的条目继续保存，避免升级后静默丢失。
+        if (cache(relative) && !retained.has(relative) && !traversed.has(relative)) continue;
         const stat = await fs.lstat(absolute);
         if (stat.isSymbolicLink() || !stat.isDirectory() && !stat.isFile()) { issues.push({ path: relative, code: "unsupported_link_or_special" }); continue; }
         try { relativePath(relative); } catch { issues.push({ path: relative, code: "path_denied" }); continue; }

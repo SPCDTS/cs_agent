@@ -17,7 +17,7 @@ import { runConsolidate } from "./maintenance/consolidate";
 import { generateProfileProposal } from "./maintenance/profile-proposal";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import { Type, type Static } from "@earendil-works/pi-ai";
-import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type Registry, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type Registry, type ToolExecutionApi, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
@@ -42,7 +42,7 @@ import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS, type ExtractCo
 import { maintenanceStatus, runMaintenanceJob, type MaintenanceJob, type MaintenanceReport } from "./maintenance";
 
 import { MCP_CATALOG_SCHEMA } from "./mcp/catalog";
-import { MCP_CONFIG } from "./mcp/config";
+import { installCodemode } from "./codemode";
 import { createMcpManagementExtension, type McpChange } from "./mcp/manage";
 import { ThreadMcp } from "./mcp";
 import { createScheduleExtension, type ScheduleAccess } from "./schedule/tools";
@@ -73,7 +73,7 @@ const isWeb = (row: InboundRow) => row.reply_channel === "web";
 const isWebAdmin = (row: InboundRow) => isWeb(row) && row.user_id === "admin:web";
 const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只能展示网页。需要回复时调用 send_message，它只把文字写入网页，不向 QQ 发送。不得使用其他工具绕过此回复入口限制。";
 const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill",
-  ...(MCP_CONFIG.enabled && MCP_CONFIG.servers.some(server => server.enabled && server.tools.eventAllow.length) ? ["codemode"] : [])]);
+  "codemode"]);
 const profileOf = (row: InboundRow): ToolProfile => isWeb(row) ? "web" : row.kind === "event" ? "event" : "chat";
 type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp };
 const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind: "group", groupId: row.chat_id } : { kind: "private", userId: row.chat_id };
@@ -270,18 +270,19 @@ export class ThreadDO extends DurableObject<Env> {
       }), this.subagents.tool(async (api, callContext) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext)),
         async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
-    // 沙箱 coding 工具只在 owner 线程注册，只有 owner 亲自发消息的回合能调用。
+    const sandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
+      const input = await this.currentInput(harness, api, api.conversationId, callContext);
+      return memory.ns === "owner" && !!input && this.ownerTurnKind(input) === "message"
+        && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration();
+    };
+    // 沙箱工具只在 owner 线程注册，权限在每次 nested 调用时复核。
     if (memory.ns === "owner" && this.env.REMOTE_SANDBOX_ENABLED === "true") registry.install(createRemoteSandboxExtension({
-      allowed: async (api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c); return !!input && this.ownerTurnKind(input) === "message" && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration(); },
-      fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), sandbox: () => this.env.SANDBOX.getByName(memory.ns),
+      allowed: sandboxAllowed,
+      fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.env.SANDBOX.idFromName(memory.ns).toString(),
       record: detail => this.audit("remote_sandbox", detail),
     }));
     if (memory.ns === "owner") registry.install(createCodingExtension({
-      remoteEnabled: this.env.REMOTE_SANDBOX_ENABLED === "true",
-      allowed: async (api, callContext) => {
-        const input = await this.currentInput(harness, api, api.conversationId, callContext);
-        return !!input && this.ownerTurnKind(input) === "message" && input.user_id !== input.self_id;
-      },
+      allowed: sandboxAllowed,
       sandbox: () => this.env.SANDBOX.getByName(memory.ns),
       record: (kind, detail) => this.audit(kind, detail),
     }));
@@ -295,7 +296,7 @@ export class ThreadDO extends DurableObject<Env> {
       registry:()=>this.env.REGISTRY.getByName("main"),bridge:()=>this.env.BRIDGE.getByName("napcat"),
     }));
     registry.install(createWorkspaceAdminExtension({
-      allowed:async(api,c)=>{const input=await this.currentInput(harness,api,api.conversationId,c);return !!input&&this.ownerTurnKind(input)==="message"&&input.session_generation===await this.sessionGeneration();},
+      allowed: sandboxAllowed,
       sandbox:()=>this.env.SANDBOX.getByName(memory.ns),registry:()=>this.env.REGISTRY.getByName("main"),
     }));
     registry.install(createMediaExtension({
@@ -324,6 +325,10 @@ export class ThreadDO extends DurableObject<Env> {
         return !!input && this.ownerTurnKind(input) === "message" && input.session_generation === await this.sessionGeneration(); },
       async refresh => { await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
       change => this.audit("mcp_management", { ...change, source: "agent" })));
+    const codemode = installCodemode(registry, {
+      allowed: async (api, callContext) => await sandboxAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
+      namespaces: () => mcp.namespaces(),
+    });
     // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
     const root = await harness.root(context, { agent: modelChange(selection) });
@@ -339,7 +344,7 @@ export class ThreadDO extends DurableObject<Env> {
     // 快照先装配，远端离线不阻塞 Harness 恢复；首次执行仍强制核对完整目录。
     if (mcp) this.ctx.waitUntil(mcp.refreshAll().then(() => {}));
     harness.resume();
-    void harness.closed.then(async () => { this.runtime = undefined; await mcp?.close(); });
+    void harness.closed.then(async () => { this.runtime = undefined; await codemode.close(); await mcp?.close(); });
     return runtime;
   }
 
@@ -680,8 +685,11 @@ export class ThreadDO extends DurableObject<Env> {
     const op = operation.kind === "write" ? { kind: "write" as const, path: operation.path, text: operation.content } : operation;
     const result = await sandbox.run({ operationId: "sub:" + id + ":" + operation.operationId, operation: op });
     if (result.status === "committed" && "kind" in result.result && result.result.kind === "image")
-      return { output: [{ type: "image", data: result.result.data, mimeType: result.result.mimeType }] };
-    return { ...(result.status === "committed" ? {} : { isError: true }), output: [{ type: "text", text: JSON.stringify(result) }] };
+      return { output: [{ type: "image", data: result.result.data, mimeType: result.result.mimeType }],
+        structuredOutput: { kind: "image", image: { type: "image", data: result.result.data, mimeType: result.result.mimeType } } };
+    const value = JSON.stringify(result);
+    return { ...(result.status === "committed" ? {} : { isError: true }), output: [{ type: "text", text: value }],
+      ...(operation.kind === "read" && result.status === "committed" ? { structuredOutput: { kind: "text", text: value } } : {}) };
   }
 
   private async subagentCaller(input: InboundRow | undefined): Promise<SubagentCaller | undefined> {

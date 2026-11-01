@@ -9,17 +9,14 @@ export type SandboxApi = Pick<SandboxDO, "exec" | "readFile" | "writeFile" | "ed
 export type CodingAuditKind = "coding_exec" | "coding_read" | "coding_write" | "coding_edit";
 export type CodingDeps = {
   /** 只有 owner 亲自发来的消息回合可以用；定时回合虽然看得到工具，调用时也拒绝。 */
-  allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
+  allowed(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context): Promise<boolean>;
   sandbox(): SandboxApi;
-  remoteEnabled?: boolean;
   /** 审计只记分类、耗时、命令长度与退出码，不记命令、路径、文件内容与输出。 */
   record(kind: CodingAuditKind, detail: object): Promise<unknown>;
 };
 
 const DEFAULT_TIMEOUT_S = 60;
 const FAILURES: Record<SandboxFailure, string> = {
-  remote_async_required: "当前已选择远程沙箱；请使用 exec_start 执行命令，再用 exec_status 查看结果。",
-  remote_job_running: "远程任务仍在执行或结果不确定；先用 exec_status / exec_cancel 检查，不能并发修改工作区。",
   workspace_storage_unavailable: "持久资产存储未配置；不能继续写入。",
   workspace_quota: "工作区快照被拒绝：单文件最多10MiB，总量最多50MiB，不能包含符号链接；本次文件变更没有提交，请缩小工作集。",
   persistence_failed: "命令已执行，但持久化失败；文件变更未确认，不能当作成功，也不要盲目重跑有副作用的命令。",
@@ -45,9 +42,14 @@ const FAILURES: Record<SandboxFailure, string> = {
   sandbox_error: "沙箱返回了意外错误。",
 };
 const NOT_ALLOWED = "只有主人亲自发消息的回合可以使用沙箱工具；本回合请先告诉主人。";
-export const SANDBOX_RULE = `沙箱：read / write / edit / bash 作用在本会话的 Linux 沙箱（Debian，带 python3、node、git、curl），工作目录 ${WORK_ROOT}，路径只能在 ${WORK_ROOT} 下。` +
-  `沙箱空闲 3 分钟后停止，已成功提交的 ${WORK_ROOT} 文件会从私有存储恢复；单文件最多10MiB，工作区总量最多50MiB，不支持符号链接。产物写到 ${WORK_ROOT}/out/，可用 send_file 发送。` +
-  `网络可用，但不要下载大文件或安装大型依赖；单条命令最长 ${EXEC_MAX_TIMEOUT_MS / 1000} 秒，不要起常驻服务。只有主人亲自发消息的回合可用。`;
+export const SANDBOX_RULE = `沙箱工具 read / write / edit / bash 只通过 Code Mode 的 await tools.<名称>(参数) 调用，作用在本会话的 Cloudflare Linux 沙箱（Debian，带 python3、node、git、curl），工作目录 ${WORK_ROOT}，路径只能在 ${WORK_ROOT} 下。` +
+  `沙箱空闲 3 分钟后停止，已成功提交的 ${WORK_ROOT} 源码会从私有存储恢复；新产生的 .git、node_modules、.wrangler 只留在当前容器，停止或重建后可能丢失。源码快照单文件最多10MiB、总量最多50MiB，不支持符号链接。产物写到 ${WORK_ROOT}/out/，可用 send_file 发送。` +
+  `网络可用，但不要下载大文件或安装大型依赖；单条命令最长 ${EXEC_MAX_TIMEOUT_MS / 1000} 秒，不要起常驻服务。只有主人亲自发消息的回合可用。read 返回 {kind:"text",text} 或 {kind:"image",image}；文本用 text(result.text)，图片必须 image(result.image) 输出。`;
+
+export const SandboxReadOutput = Type.Union([
+  Type.Object({ kind: Type.Literal("text"), text: Type.String() }, { additionalProperties: false }),
+  Type.Object({ kind: Type.Literal("image"), image: Type.Object({ type: Type.Literal("image"), data: Type.String(), mimeType: Type.String() }, { additionalProperties: false }) }, { additionalProperties: false }),
+]);
 
 const text = (value: string, isError = false): ToolExecutionResult => ({ ...(isError ? { isError } : {}), output: [{ type: "text", text: value }] });
 
@@ -103,18 +105,22 @@ function prepareEditArguments(input: unknown): Static<typeof EditParams> {
 export function createCodingExtension(deps: CodingDeps) {
   const tools = [
     codingTool(deps, {
-      name: "read", kind: "coding_read", replay: "safe",
+      name: "read", kind: "coding_read", replay: "safe", structuredOutputSchema: SandboxReadOutput,
       description: `Read the contents of a text file in the sandbox. Output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Relative paths resolve against ${WORK_ROOT}.`,
       parameters: Type.Object({
         path: Type.String({ minLength: 1, description: `Path to the file to read (relative to ${WORK_ROOT} or absolute)` }),
         offset: Type.Optional(Type.Integer({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
         limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
       }, { additionalProperties: false }),
-      run: async ({ path, offset, limit }, sandbox) => {
+      run: async ({ path, offset, limit }, sandbox): Promise<{ result: ToolExecutionResult }> => {
         const file = await sandbox.readFile(path, { offset, limit });
-        if ("kind" in file) return { result: { output: [{ type: "image", data: file.data, mimeType: file.mimeType }] } };
+        if ("kind" in file) {
+          const image = { type: "image" as const, data: file.data, mimeType: file.mimeType };
+          return { result: { output: [image], structuredOutput: { kind: "image", image } } };
+        }
         const more = file.endLine < file.totalLines ? `\n\n[Showing lines ${file.startLine}-${file.endLine} of ${file.totalLines}. Use offset=${file.endLine + 1} to continue.]` : "";
-        return { result: text((file.text || "(empty)") + more) };
+        const value = (file.text || "(empty)") + more;
+        return { result: { ...text(value), structuredOutput: { kind: "text", text: value } } };
       },
     }),
     codingTool(deps, {
@@ -162,8 +168,7 @@ export function createCodingExtension(deps: CodingDeps) {
   ];
   return defineExtension({
     name: "cs.coding",
-    // 只在本次请求真的提供了 bash 时说明沙箱；事件回合按档位过滤掉了这些工具。
-    sections: [section("sandbox", ({ agent }) => agent.tools.some(tool => tool.name === "bash") ? (deps.remoteEnabled ? "read / write / edit 操作本会话持久工作区 /work。先用 sandbox_list 查看资源，通过 sandbox_acquire 选择远程沙箱，使用 exec_start 执行、exec_status 查询；未选择远程时 bash 使用默认 Cloudflare Linux 沙箱。远程命令使用目录内的相对路径；/work 是逻辑路径，Windows 实际目录由 runner 映射。任务完成且 persistence=committed 后文件才生效。只有主人消息回合可用。" : SANDBOX_RULE) : undefined, { tag: false })],
-    tools: tools.map(tool => ({ ...tool, callers: ["model"] as const })),
+    sections: [section("sandbox", async (api, context) => api.agent.callable.some(tool => tool.name === "bash") && await deps.allowed({ ...api.read, conversationId: api.conversationId }, context) ? SANDBOX_RULE : undefined, { tag: false })],
+    tools: tools.map(tool => ({ ...tool, callers: ["tools"] as const })),
   });
 }

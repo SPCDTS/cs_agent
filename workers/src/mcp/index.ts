@@ -3,8 +3,6 @@ import type { SqliteDatabase } from "@earendil-works/chord/sqlite";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { defineExtension, defineTool, section, type Registry, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
-import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
-import { createInlineCodemodeSandbox } from "@earendil-works/pi-codemode/cloudflare";
 import type { Env } from "../env";
 import { MediaRepository } from "../media/repository";
 import type { Resource, ResourceTemplate } from "@modelcontextprotocol/sdk/types.js";
@@ -26,7 +24,6 @@ const MCP_RULE = "MCP 默认只在 owner 私聊可用；群只可使用宿主明
 
 export class ThreadMcp {
   private readonly entries = new Map<string, Entry>();
-  private readonly sandbox = createInlineCodemodeSandbox();
   private stopped = false;
   readonly policy: McpPolicyStore;
   constructor(private readonly db: SqliteDatabase, private readonly env: Env, private readonly registry: Registry,
@@ -37,17 +34,9 @@ export class ThreadMcp {
     this.installControl();
   }
   private installControl() {
-    const codemode = createCodemodeExtension({ sandbox: this.sandbox, models: false,
-      namespaces: [...this.entries.values()].map(({ server }) => ({ name: server.id, prefix: `mcp_${slug(server.id, 16)}_` })) });
-    this.registry.install(defineExtension({ ...codemode, name: "cs.mcp.control",
-      sections: [section("mcp-policy", () => MCP_RULE), ...codemode.sections ?? []],
-      tools: [...(codemode.tools ?? []).map(tool => ({ ...tool, execute: async (args: unknown, api: ToolExecutionApi, context: Context) => {
-        const authority = mcpAuthority(await this.authorize(api, context));
-        return authority && (authority.kind === "event"
-          ? [...this.entries.values()].some(e => e.server.tools.eventAllow.length)
-          : await this.hasAccess(authority))
-          ? tool.execute(args, api, context) : mcpFailure("denied");
-      } })),
+    this.registry.install(defineExtension({ name: "cs.mcp.control",
+      sections: [section("mcp-policy", () => MCP_RULE)],
+      tools: [
       defineTool({ name: "mcp_refresh_tools", description: "在 codemode 中刷新 MCP 目录，不执行远端业务操作。",
         parameters: Type.Object({}, { additionalProperties: false }), replay: "unsafe", callers: ["tools"],
         execute: async (_args, api, context) => {
@@ -56,6 +45,15 @@ export class ThreadMcp {
           const results = await this.refreshAll(owner, context.abortSignal);
           return { output: [{ type: "text", text: JSON.stringify(results) }] };
         } }), ...this.resourceTools()] }));
+  }
+  namespaces() {
+    return [...this.entries.values()].map(({ server }) => ({ name: server.id, prefix: `mcp_${slug(server.id, 16)}_` }));
+  }
+  async canUseCodemode(api: ToolExecutionApi, context: Context): Promise<boolean> {
+    const authority = mcpAuthority(await this.authorize(api, context));
+    return !!authority && (authority.kind === "event"
+      ? [...this.entries.values()].some(entry => entry.server.tools.eventAllow.length > 0)
+      : await this.hasAccess(authority));
   }
   async syncConfig(config: McpConfig): Promise<void> {
     // DO RPC 在返回对象上附带生命周期符号，只比较配置本身的 JSON 字段。
@@ -365,7 +363,6 @@ export class ThreadMcp {
   }
   async close(): Promise<void> {
     this.stopped = true;
-    await this.sandbox.close();
     await Promise.allSettled([...this.entries.values()].map(async entry => { await entry.tail; await entry.connection?.close(); }));
   }
 }

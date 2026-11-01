@@ -26,7 +26,9 @@ Bridge 出站只接受可信宿主解析后的 `AssetRef[]`。图片使用 `{typ
 
 ## 持久工作区
 
-SandboxDO 的容器只是 `/work` 的临时物化视图。R2 保存不可变 manifest 和按 SHA-256 去重的二进制 blob，DO storage 只保存当前 head、epoch 和操作账本。
+SandboxDO 的 Cloudflare 容器使用官方 `Files` 与原生 `Container.exec` 操作真实 `/work`，R2 保存源码的不可变 manifest 和按 SHA-256 去重的二进制 blob，DO storage 保存当前 head、epoch 和操作账本。模型通过 Code Mode 调用文件和执行工具；远程 WSB 有独立工作区，不复用这里的文件路由。
+
+新产生的 `.git`、`node_modules`、`.wrangler` 留在当前容器，不进入源码快照或其配额，容器停止或重建后可能丢失。旧 manifest 已追踪的缓存条目仍按原契约保存；`snapshot(retainedPaths)` 只为这些既有路径保留兼容。资产导出及子工作区 clone/merge 仅包含 manifest 中的文件。
 
 - `run({operationId,operation})` 串行执行，操作为 `exec/read/write/edit`。返回 `status:'committed'|'failed'|'unknown'` 与 `persistence` 和 `revision`。同一 id 不同参数拒绝，已执行中断的 bash 返回 unknown，绝不重跑。
 - `exec/readFile/writeFile/editFile/list` 保持旧接口；exec options 和 write/edit 可选传入 operationId。工具宿主应使用稳定 taskId。成功的 write/edit/exec 必须完成 checkpoint；持久化失败明确报错并丢弃未提交的容器视图。
@@ -64,6 +66,8 @@ SandboxDO 的容器只是 `/work` 的临时物化视图。R2 保存不可变 man
 沙箱按 lite 规格按需启动，不设置每日累计时长、单次容器寿命或全项目容器并发配额。保留 3 分钟空闲自动停止；连续使用时不会因运行满 5 分钟被终止。文件事实源留在 R2，空闲停止或手动停止不删除已提交工作区。
 
 ## 工作区技能发布与管理接线
+
+`skill_inspect` 与 `skill_publish` 仅作为 Code Mode 嵌套工具提供，各自仍执行宿主权限检查。
 
 `createWorkspaceAdminExtension({allowed,sandbox,registry})` 注册 `skill_inspect(path,name?)` 与 `skill_publish(path,name?,workspaceRevision,expectedRevision)`。allowed只能由宿主核验owner本人私聊或owner网页入口后返回true，子agent不继承。sandbox绑定当前已授权工作区；registry只暴露skillRevision与skillPublish。inspect返回固定workspaceRevision和当前技能expectedRevision（不存在为absent），publish参数二者都必填。每次读取只取一份manifest，再按同一revision读取目录；UTF-8、路径、SKILL.md和附件大小先校验，再调用parseSkill与Registry CAS。不能把ADMIN_TOKEN放进模型参数或提示。
 

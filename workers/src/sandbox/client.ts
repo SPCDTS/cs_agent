@@ -1,12 +1,12 @@
-/** 沙箱控制服务（sandbox/server.mjs）的 HTTP 协议：SandboxDO 把它接到容器端口，测试接到伪造的 fetch。 */
+/** CF 运行时契约；实现使用官方 Files 与原生 Container.exec，不对外开放控制端口。 */
 export const WORK_ROOT = "/work";
 export const EXEC_MAX_TIMEOUT_MS = 120_000;
 
 // 失败一律以这些分类码作为 Error.message 抛出；RPC 会保留 message，工具按它给模型说明。
-export const SANDBOX_FAILURES = ["remote_async_required", "remote_job_running", "sandbox_unavailable", "path_denied", "not_found", "is_directory", "not_a_directory", "binary_file", "too_large",
+export const SANDBOX_FAILURES = ["sandbox_unavailable", "path_denied", "not_found", "is_directory", "not_a_directory", "binary_file", "too_large",
   "workspace_storage_unavailable", "workspace_quota", "persistence_failed", "operation_unknown", "operation_expired", "operation_conflict", "workspace_conflict", "blob_corrupt", "restore_incomplete", "offset_out_of_range", "edit_not_found", "edit_ambiguous", "edit_overlap", "permission_denied", "invalid_request", "sandbox_error"] as const;
 export type SandboxFailure = typeof SANDBOX_FAILURES[number];
-const known = (code: unknown): SandboxFailure => (SANDBOX_FAILURES as readonly unknown[]).includes(code) ? code as SandboxFailure : "sandbox_error";
+const known = (code: unknown): SandboxFailure => SANDBOX_FAILURES.find(item => item === code) ?? "sandbox_error";
 export const sandboxFailure = (error: unknown): SandboxFailure => known(error instanceof Error ? error.message.split(":")[0] : undefined);
 
 export type ExecResult = { stdout: string; stderr: string; code: number | null; timedOut: boolean; truncated: boolean };
@@ -19,7 +19,7 @@ export class SandboxError extends Error { constructor(code: string, readonly iss
 export type FileEdit = { oldText: string; newText: string };
 export type DirEntry = { name: string; type: "file" | "dir" | "link" | "other"; size: number };
 
-/** 模型给的路径按 /work 解析成规范绝对路径；词法上出了 /work 就不发给容器。符号链接由控制服务按 realpath 再查。 */
+/** 模型路径按 /work 解析；词法上出了 /work 就不发给容器，固定本地助手再核验 realpath。 */
 export function workPath(raw: string): string {
   if (raw.includes("\0")) throw new Error("invalid_request");
   const parts: string[] = [];
@@ -33,47 +33,14 @@ export function workPath(raw: string): string {
   return path;
 }
 
-export type ControlFetch = (path: string, init?: RequestInit) => Promise<Response>;
-
-export function sandboxClient(send: ControlFetch) {
-  async function call<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await send(path, init);
-    const body = await response.json<T & { error?: string }>().catch(() => undefined);
-    if (!response.ok || body === undefined) throw new SandboxError(known(body?.error), body && "issues" in body ? body.issues : undefined);
-    return body;
-  }
-  const post = (body: object): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const query = (params: Record<string, string | number | undefined>) =>
-    new URLSearchParams(Object.entries(params).flatMap(([key, value]) => value === undefined ? [] : [[key, String(value)]])).toString();
-  return {
-    async snapshot(): Promise<RuntimeSnapshot> { return call("/snapshot"); },
-    async readBlob(path: string): Promise<Uint8Array> {
-      const response = await send(`/blob?${query({ path: workPath(path) })}`);
-      if (!response.ok) throw new Error(known((await response.json<{ error?: string }>()).error));
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > 10 * 1024 * 1024) throw new Error("too_large");
-      return bytes;
-    },
-    async restore(snapshot: RuntimeSnapshot, readBlob: (file: RuntimeFile) => Promise<Uint8Array>): Promise<void> {
-      const { id } = await call<{ id: string }>("/restore/start", post(snapshot));
-      for (const file of snapshot.files) await call(`/restore/blob?${query({ id, path: file.path })}`, { method: "PUT", body: await readBlob(file) });
-      await call("/restore/commit", post({ id }));
-    },
-    async exec(cmd: string, options: { cwd?: string; timeoutMs: number }): Promise<ExecResult> {
-      return call("/exec", post({ cmd, cwd: workPath(options.cwd ?? WORK_ROOT), timeoutMs: Math.min(EXEC_MAX_TIMEOUT_MS, Math.max(1, Math.trunc(options.timeoutMs))) }));
-    },
-    async readFile(path: string, options: { offset?: number; limit?: number } = {}): Promise<ReadResult> {
-      return call(`/file?${query({ path: workPath(path), offset: options.offset, limit: options.limit })}`);
-    },
-    async writeFile(path: string, text: string): Promise<{ bytes: number }> {
-      return call(`/file?${query({ path: workPath(path) })}`, { method: "PUT", body: text });
-    },
-    async editFile(path: string, edits: FileEdit[]): Promise<{ replaced: number }> {
-      return call("/edit", post({ path: workPath(path), edits }));
-    },
-    async list(path: string): Promise<DirEntry[]> {
-      return call(`/ls?${query({ path: workPath(path) })}`);
-    },
-  };
+/** 新建 .git、node_modules、.wrangler 只留在当前容器；旧清单已追踪的缓存继续保存。 */
+export interface SandboxClient {
+  snapshot(retainedPaths?: readonly string[]): Promise<RuntimeSnapshot>;
+  readBlob(path: string): Promise<Uint8Array>;
+  restore(snapshot: RuntimeSnapshot, readBlob: (file: RuntimeFile) => Promise<Uint8Array>): Promise<void>;
+  exec(cmd: string, options: { cwd?: string; timeoutMs: number }): Promise<ExecResult>;
+  readFile(path: string, options?: { offset?: number; limit?: number }): Promise<ReadResult>;
+  writeFile(path: string, text: string): Promise<{ bytes: number }>;
+  editFile(path: string, edits: FileEdit[]): Promise<{ replaced: number }>;
+  list(path: string): Promise<DirEntry[]>;
 }
-export type SandboxClient = ReturnType<typeof sandboxClient>;

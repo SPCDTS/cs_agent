@@ -5,7 +5,7 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Type } from "typebox";
-import { parse } from "../src/protocol.ts";
+import { parse, OutcomeSchema, ExecResultSchema } from "../src/protocol.ts";
 import { Connector, request } from "../src/connector.ts";
 import { descriptor, protectToken, type Config } from "../src/wsb.ts";
 import { sha256 } from "../src/files.ts";
@@ -23,26 +23,32 @@ const config: Config = { ...seed, origin: base, deviceId: device.deviceId, token
 const connector = new Connector(state, config, fileURLToPath(new URL("../dist/", import.meta.url)));
 const running = connector.run();
 const delay = () => new Promise(resolve => setTimeout(resolve, 1000));
-let id: string | undefined;
-try {
-  for (let attempt = 0; attempt < 30 && !id; attempt++) {
-    const response = parse(Type.Object({ jobId: Type.Optional(Type.String()) }), JSON.parse((await request(base, admin, "/smoke/start?run=" + run, { method: "POST" })).toString("utf8")));
-    id = response.jobId; if (!id) await delay();
-  }
-  assert.ok(id);
-  let committed = false;
-  for (let attempt = 0; attempt < 120 && !committed; attempt++) {
-    const response = parse(Type.Object({ status: Type.Object({ phase: Type.String(), persistence: Type.Union([Type.String(), Type.Object({ state: Type.String() })]) }) }),
+const StartedSchema = Type.Object({ jobId: Type.Optional(Type.String()), leaseId: Type.Optional(Type.String()) });
+async function completed(id: string) {
+  for (let attempt = 0; attempt < 180; attempt++) {
+    const response = parse(Type.Object({ phase: Type.String(), outcome: Type.Union([OutcomeSchema, Type.Null()]) }),
       JSON.parse((await request(base, admin, "/smoke/status?run=" + run + "&id=" + id)).toString("utf8")));
-    const persistence = response.status.persistence;
-    committed = typeof persistence !== "string" && persistence.state === "committed";
-    if (response.status.phase === "unknown" || response.status.phase === "cancelled" || response.status.phase === "failed") throw new Error(JSON.stringify(response));
-    if (!committed) await delay();
+    if (response.phase === "completed" && response.outcome?.kind === "completed") return parse(ExecResultSchema, response.outcome.result);
+    if (["unknown", "cancelled", "failed"].includes(response.phase)) throw new Error(JSON.stringify(response));
+    await delay();
   }
-  assert.ok(committed);
-  assert.equal((await request(base, admin, "/smoke/result?run=" + run)).toString("utf8"), "Worker 到 WSB 再回 R2");
-  await request(base, admin, "/smoke/release?run=" + run, { method: "POST" });
-  console.log(JSON.stringify({ passed: true, deviceId: device.deviceId, jobId: id, state }));
+  throw new Error("smoke_timeout");
+}
+let leaseId: string | undefined;
+try {
+  let firstId: string | undefined;
+  for (let attempt = 0; attempt < 30 && !firstId; attempt++) {
+    const response = parse(StartedSchema, JSON.parse((await request(base, admin, "/smoke/start?run=" + run, { method: "POST" })).toString("utf8")));
+    firstId = response.jobId; leaseId = response.leaseId; if (!firstId) await delay();
+  }
+  assert.ok(firstId); assert.ok(leaseId);
+  const first = await completed(firstId); assert.equal(first.code, 0);
+  const next = parse(StartedSchema, JSON.parse((await request(base, admin, "/smoke/next?run=" + run + "&lease=" + leaseId, { method: "POST" })).toString("utf8")));
+  assert.ok(next.jobId);
+  const second = await completed(next.jobId); assert.equal(second.code, 0);
+  assert.match(second.stdout, /guest persistence verified/);
+  await request(base, admin, "/smoke/release?run=" + run + "&lease=" + leaseId, { method: "POST" });
+  console.log(JSON.stringify({ passed: true, deviceId: device.deviceId, jobs: [firstId, next.jobId], leaseId, state, result: second.stdout }));
 } finally {
   await connector.stop(); await running;
   await request(base, admin, "/admin/sandbox-devices/" + device.deviceId, { method: "DELETE" });
