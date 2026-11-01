@@ -130,7 +130,7 @@ text(job);
 - `completed`：检查 `outcome.result`；PowerShell 的 code=0 表示进程成功退出，还需核对实际测试结果。
 - `cancel_requested`：等待停止确认，不立即复用槽位。
 - `unknown`：不盲目重跑；恢复连接器或请求取消并确认实例停止。
-- `sessionLost` 或租约 `lost`：释放旧租约后重新获取；新租约是空工作区。
+- `sessionLost` 或租约 `lost`：释放旧租约后重新获取；新 VM 重新挂载该工作区的持久目录，未启用持久目录时才是空工作区。
 - `releasing`：等待停止握手；租约从 `sandbox_list.sessions` 消失才完成释放。
 - 回传失败：保留 `state/jobs`，connector 从 journal 回传已有结果，不重新执行。
 
