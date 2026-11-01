@@ -10,6 +10,7 @@ import { MCP_CONFIG } from "./config";
 import { slug, toolNames } from "./names";
 import { snapshotCatalogs, type McpAuthority } from "./access";
 import type { SubagentCapabilities } from "../subagent/model";
+import { WORK_ROOT } from "../sandbox/client";
 
 export type SubagentCodingOperation =
   | { kind: "exec"; operationId: string; command: string; timeoutMs: number }
@@ -32,7 +33,11 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
       parameters: Type.Object({ name: Type.String({ minLength: 1, maxLength: 64 }), path: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })) }, { additionalProperties: false }),
       replay: "safe", execute: args => host.subagentSkill(id, args) }),
   ] }));
-  if (capabilities.coding) registry.install(defineExtension({ name: "cs.subagent.coding", tools: [
+  if (capabilities.coding) registry.install(defineExtension({ name: "cs.subagent.coding",
+    sections: [section("sandbox", () => `你的 Linux 沙箱使用独立工作区 ${WORK_ROOT}，派出时从父工作区克隆；后续修改不会自动同步回父工作区。相对路径从 ${WORK_ROOT} 解析。` +
+      `${WORK_ROOT} 内文件由宿主在 write / edit / bash 操作完成后自动快照提交到持久存储，只有提交成功才会在沙箱重建后恢复；持久化失败或结果不确定时不能宣称已保存，也不要盲目重跑。` +
+      `${WORK_ROOT} 外的文件、运行中的进程和系统环境修改不在持久化范围内。产物放在 ${WORK_ROOT}/out/，在最终回答中说明路径，交由父 agent 处理。`, { tag: false })],
+    tools: [
     defineTool({ name: "bash", description: "在派出时克隆的独立工作区执行命令，最长60秒；不能修改父工作区。",
       parameters: Type.Object({ command: Type.String({ minLength: 1 }), timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 60 })) }, { additionalProperties: false }),
       replay: "unsafe", execute: (args, api) => host.subagentCoding(id, { kind: "exec", operationId: String(api.taskId), command: args.command, timeoutMs: (args.timeout ?? 60) * 1000 }) }),
