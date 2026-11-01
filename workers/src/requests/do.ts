@@ -146,12 +146,13 @@ export class RequestsDO extends DurableObject<Env> {
   }
   turnTrace(thread: string, turns: string[], after: number) {
     if (!turns.length) return { requests: [], tools: [], cursor: after, more: false };
-    const marks = turns.map(() => "?").join(","), sql = this.ctx.storage.sql;
-    const filter = `thread=? AND turn_id IN (${marks}) AND revision>?`;
+    const turnIds = JSON.stringify(turns), sql = this.ctx.storage.sql;
+    // 整个回合列表只占一个绑定参数，避免两段 UNION 在 49 个回合时超过 Cloudflare SQLite 的 100 参数上限。
+    const filter = "thread=? AND turn_id IN (SELECT value FROM json_each(?)) AND revision>?";
     const changed = sql.exec<{ kind: string; record: string; revision: number }>(
       `SELECT 'request' AS kind,record,revision FROM requests WHERE ${filter} UNION ALL
        SELECT 'tool' AS kind,record,revision FROM tool_traces WHERE ${filter} ORDER BY revision LIMIT 201`,
-      thread, ...turns, after, thread, ...turns, after).toArray();
+      thread, turnIds, after, thread, turnIds, after).toArray();
     const page = changed.slice(0, 200);
     return { requests: page.filter(r => r.kind === "request").map(r => JSON.parse(r.record) as RequestRecord),
       tools: page.filter(r => r.kind === "tool").map(r => JSON.parse(r.record) as ToolSummary),

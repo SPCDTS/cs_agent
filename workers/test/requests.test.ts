@@ -136,6 +136,33 @@ describe("request observability", () => {
     expect((await store.turnTrace("group:123",["turn:test"],0)).tools).toEqual([]);
     expect((await store.toolDetail(tool.id))?.arguments?.text).toContain("message_id");
   });
+  it("loads traces for the full visible turn list without truncating or leaking another thread", async () => {
+    const store = env.REQUESTS.getByName("main"), turns = Array.from({ length: 100 }, (_, i) => "turn:visible:" + i);
+    const requests: string[] = [], tools: string[] = [];
+    for (const turnId of turns.filter((_, index) => [0, 48, 99].includes(index))) {
+      const request = detail(crypto.randomUUID());
+      request.request.binding = { turnId, inputId: "web:" + turnId, generation: 0 };
+      await store.record(request); requests.push(request.request.id);
+      const tool: ToolTrace = { id: crypto.randomUUID(), thread: "owner", binding: request.request.binding, callId: "call:" + turnId,
+        name: "qq_image", startedAt: Date.now(), endedAt: Date.now(), status: "done", arguments: { text: "{}", chars: 2, truncated: false } };
+      await store.recordTool(tool); tools.push(tool.id);
+      await store.record({ ...request, request: { ...request.request, id: crypto.randomUUID(), thread: "group:12345" } });
+      await store.recordTool({ ...tool, id: crypto.randomUUID(), thread: "group:12345" });
+    }
+    const unselected = detail(crypto.randomUUID());
+    unselected.request.binding = { turnId: "turn:outside", inputId: "web:outside", generation: 0 };
+    await store.record(unselected);
+    const params = new URLSearchParams(); turns.forEach(turn => params.append("turn", turn));
+    const response = await worker.fetch(new Request("https://test/admin/threads/owner/trace?" + params,
+      { headers: { Authorization: "Bearer test" } }), { ...env, ADMIN_TOKEN: "test" });
+    expect(response.status).toBe(200);
+    const trace = await response.json<Awaited<ReturnType<typeof store.turnTrace>>>();
+    expect(trace.requests.map(request => request.id)).toEqual(requests);
+    expect(trace.tools.map(tool => tool.id)).toEqual(tools);
+    expect(trace.more).toBe(false);
+    const delta = await store.turnTrace("owner", turns, trace.cursor);
+    expect(delta.requests).toEqual([]); expect(delta.tools).toEqual([]);
+  });
   it("summarizes recent agents and their parents without loading request or tool bodies", async () => {
     const store=env.REQUESTS.getByName("main"),now=Date.now(),child=crypto.randomUUID(),otherChild=crypto.randomUUID();
     for(const [thread,actor,purpose,at,status] of [
