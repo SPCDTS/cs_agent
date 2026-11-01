@@ -38,6 +38,18 @@ describe("MCP static config and strict schema", () => {
     expect(result.check({ count: 2, title: { $schema: "business-data" } })).toBe(true);
     for (const value of [{ count: 1 }, { count: 4 }, { count: "2" }, { count: 2, extra: true }]) expect(result.check(value)).toBe(false);
   });
+  it("accepts GitHub parameter header annotations without weakening argument validation", () => {
+    const source = { type: "object", properties: {
+      owner: { type: "string", minLength: 1, "x-mcp-header": "owner" },
+      repo: { type: "string", "x-mcp-header": "repo" },
+      metadata: { const: { "x-mcp-header": "business-data" } },
+    }, required: ["owner", "repo"], additionalProperties: false };
+    const compiled = compileMcpSchema(source, DEFAULT_MCP_LIMITS);
+    expect(compiled.schema).not.toHaveProperty("properties.owner.x-mcp-header");
+    expect(source.properties.owner["x-mcp-header"]).toBe("owner");
+    expect(compiled.check({ owner: "github", repo: "github-mcp-server", metadata: { "x-mcp-header": "business-data" } })).toBe(true);
+    for (const args of [{ owner: "github" }, { owner: 1, repo: "test" }, { owner: "", repo: "test" }, { owner: "github", repo: "test", extra: true }]) expect(compiled.check(args)).toBe(false);
+  });
   it.each([
     { $id: "id" }, { properties: { x: { format: "unknown-format" } } }, { properties: { x: { $ref: "https://outside.test/schema" } } },
     { properties: { x: { $ref: "#" } } }, { properties: { x: { $ref: "#/$defs/missing" } } }, { properties: { x: { typo: true } } },

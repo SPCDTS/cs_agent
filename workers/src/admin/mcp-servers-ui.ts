@@ -64,7 +64,14 @@ export const MCP_SERVERS_JS = String.raw`
       else if(action==="probe")$("mcp-server-state").textContent="连接正常，请选择要开放的工具；只读分类需要自行核实。";
       else if(action==="activate")$("mcp-server-state").textContent="已启用，可继续在 owner 会话使用。";
       await loadOverview();
-    }catch(error){fail(error);$("mcp-server-state").textContent="操作失败，请刷新后重试。";}
+    }catch(error){
+      if(error instanceof ApiError&&error.body?.error==="tools_rejected"){
+        const reasons={unknown_keyword:"包含不支持的 schema 字段",ref_external:"引用了外部 schema",ref_unresolved:"schema 引用不存在",cycle:"schema 存在循环引用",schema_limit:"工具定义超过大小或深度限制",schema_invalid:"工具定义无效"};
+        const details=error.body.rejectedTools.map(tool=>tool.name+"："+(reasons[tool.reason]||tool.reason)).join("；");
+        const message="启用失败，原配置已保留。请调整工具选择后重试。"+details;
+        show(message,"error");$("mcp-server-state").textContent=message;
+      }else{fail(error);$("mcp-server-state").textContent="操作失败，请刷新后重试。";}
+    }
   }
   $("mcp-secret-save").addEventListener("click",async event=>{
     const id=mcpServers.selected,key=$("mcp-secret-header").value.trim(),value=$("mcp-secret-value").value.trim();if(!id||!key||!value)return;

@@ -90,7 +90,8 @@ export class McpServerStore {
     const next = parseMcpConfig({ version: 1, enabled: true, servers: [{ ...server, enabled: true,
       tools: { allow: input.allow, readOnly: input.readOnly ?? [], eventAllow: [] }, resourceAllow: input.resourceAllow ?? [] }] }).servers[0]!;
     const accepted = makeCatalog(next, tools, MCP_CONFIG.limits);
-    if (accepted.rejected) throw new McpSetupError("invalid");
+    if (accepted.rejected) return { error: "tools_rejected" as const, rejected: accepted.rejected, rejectedTools: accepted.rejectedTools,
+      message: "部分所选工具的定义不受支持，未修改服务状态或工具选择。请根据 rejectedTools 调整选择后重试，无需重新填写凭据。" };
     this.sql.exec("UPDATE mcp_servers SET config=?,revision=? WHERE id=?", JSON.stringify(next), crypto.randomUUID(), id);
     return this.get(id);
   }

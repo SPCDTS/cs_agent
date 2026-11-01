@@ -25,19 +25,21 @@ const endpoint = "https://mcp.integration.test/mcp", id = "fixture-project";
 const registry = () => env.REGISTRY.getByName("main");
 function remoteFixture() {
   const remote = fakeRemote(endpoint);
-  remote.state.tools = [{ name: "lookup", description: "查询合成项目", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }];
+  remote.state.tools = [{ name: "lookup", description: "查询合成项目", inputSchema: { type: "object", properties: { query: { type: "string", "x-mcp-header": "query" } }, required: ["query"] } }];
   return remote;
 }
 async function probeActivate() {
   let record = await registry().mcpServerGet(id);
   expect(await manageMcp(env, { action: "probe", id, expectedRevision: record.revision })).toMatchObject({ status: "ready" });
   record = await registry().mcpServerGet(id);
-  return registry().mcpServerActivate(id, record.revision, { allow: ["lookup"], readOnly: ["lookup"] });
+  const result = await registry().mcpServerActivate(id, record.revision, { allow: ["lookup"], readOnly: ["lookup"] });
+  if ("error" in result) throw new Error(JSON.stringify(result));
+  return result;
 }
 type Step = (revision: string) => { name: string; args: JsonObject };
 function scriptedModel(steps: Step[]) {
   const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
-  const offers: string[] = [], outputs: string[] = [], captured = new Set<string>();
+  const offers: string[] = [], outputs: string[] = [], errors: boolean[] = [], captured = new Set<string>();
   let revision = "absent";
   const respond: FauxResponseFactory = transcript => {
     faux.setResponses([respond]);
@@ -46,7 +48,7 @@ function scriptedModel(steps: Step[]) {
       if (message.role === "toolResult" && !captured.has(message.toolCallId)) {
         captured.add(message.toolCallId);
         const text = message.content.filter(part => part.type === "text").map(part => part.text).join("\n");
-        outputs.push(text);
+        outputs.push(text); errors.push(message.isError);
         try { const value: unknown = JSON.parse(text); if (Check(Type.Object({ revision: Type.String() }), value)) revision = value.revision; } catch {}
       }
     }
@@ -55,7 +57,7 @@ function scriptedModel(steps: Step[]) {
   };
   faux.setResponses([respond]);
   vi.spyOn(models, "openModels").mockImplementation(() => { const result = createModels(); result.setProvider(faux.provider); return result; });
-  return { offers, outputs };
+  return { offers, outputs, errors };
 }
 
 describe("runtime MCP onboarding", () => {
@@ -108,13 +110,15 @@ describe("runtime MCP onboarding", () => {
     });
   });
 
-  it("adds, probes, activates, calls and disables a service in one real owner conversation", async () => {
+  it("lets the owner agent adjust rejected tools, activate, call and disable in one conversation", async () => {
     const remote = remoteFixture();
+    remote.state.tools.push({ name: "unsupported", inputSchema: { type: "object", properties: { value: { type: "string", unknownKeyword: true } } } });
     for (const record of await registry().mcpServersList()) await registry().mcpServerDisable(record.server.id, record.revision);
     const call = { name: "codemode", args: { code: "const tool=ALL_TOOLS.find(t=>t.name.startsWith('mcp_fixture_project_lookup_'));if(tool) text(await tools[tool.name]({query:'合成查询'})); else text('tool_retired');" } };
     const seen = scriptedModel([
       () => ({ name: "mcp_manage", args: { action: "put", expectedRevision: "absent", server: { id, url: endpoint, auth: "none" } } }),
       revision => ({ name: "mcp_manage", args: { action: "probe", id, expectedRevision: revision } }),
+      revision => ({ name: "mcp_manage", args: { action: "activate", id, expectedRevision: revision, selection: { allow: ["lookup", "unsupported"] } } }),
       revision => ({ name: "mcp_manage", args: { action: "activate", id, expectedRevision: revision, selection: { allow: ["lookup"], readOnly: ["lookup"] } } }),
       () => call,
       revision => ({ name: "mcp_manage", args: { action: "disable", id, expectedRevision: revision } }),
@@ -126,10 +130,26 @@ describe("runtime MCP onboarding", () => {
       expect(result, JSON.stringify(state.storage.sql.exec("SELECT * FROM events").toArray())).toEqual({ status: "done" });
     });
     expect(seen.offers).toContain("mcp_manage");
-    expect(seen.outputs[3]).toContain("service-result:");
-    expect(seen.outputs[5]).toContain("tool_retired");
+    expect(seen.errors[2]).toBe(true);
+    expect(JSON.parse(seen.outputs[2]!)).toMatchObject({ error: "tools_rejected", rejected: 1, rejectedTools: [{ name: "unsupported", reason: "unknown_keyword" }] });
+    expect(seen.outputs[4]).toContain("service-result:");
+    expect(seen.outputs[6]).toContain("tool_retired");
     expect(remote.state.calls).toBe(1);
     expect((await registry().mcpServerGet(id)).server.enabled).toBe(false);
+  });
+
+  it("returns tool rejection details through the admin API and preserves the active selection", async () => {
+    const remote = remoteFixture();
+    remote.state.tools.push({ name: "unsupported", inputSchema: { type: "object", properties: { value: { type: "string", unknownKeyword: true } } } });
+    await registry().mcpServerPut({ id, url: endpoint, auth: "none" }, "absent");
+    const before = await probeActivate();
+    const response = await worker.fetch(new Request("https://test/admin/mcp/manage", { method: "POST",
+      headers: { Authorization: "Bearer synthetic-admin", "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "activate", id, expectedRevision: before.revision, selection: { allow: ["lookup", "unsupported"] } }) }), adminEnv());
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "tools_rejected", rejected: 1, rejectedTools: [{ name: "unsupported", reason: "unknown_keyword" }] });
+    expect(await registry().mcpServerGet(id)).toEqual(before);
+    expect(await env.THREAD.getByName("owner").events({ kind: "mcp_management", limit: 10 })).toEqual({ events: [] });
   });
 
   it("uses the existing OAuth login and refresh flow for a newly registered service", async () => {

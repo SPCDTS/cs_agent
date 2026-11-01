@@ -12,6 +12,7 @@ const nodeSchema = Type.Object({
   $schema: optional(Type.String({ maxLength: 256 })), $ref: optional(Type.String()), $comment: optional(Type.String()),
   title: optional(Type.String()), description: optional(Type.String()), default: optional(Type.Unknown()), examples: optional(Type.Array(Type.Unknown())),
   readOnly: optional(Type.Boolean()), writeOnly: optional(Type.Boolean()),
+  "x-mcp-header": optional(Type.String({ minLength: 1, maxLength: 256 })),
   type: optional(Type.Union([jsonType, Type.Array(jsonType, { minItems: 1, uniqueItems: true })])),
   enum: optional(Type.Array(Type.Unknown(), { minItems: 1 })), const: optional(Type.Unknown()),
   definitions: optional(mapOfSchemas), $defs: optional(mapOfSchemas), properties: optional(mapOfSchemas), patternProperties: optional(mapOfSchemas),
@@ -108,8 +109,9 @@ export function compileMcpSchema(input: unknown, limits: McpLimits): { schema: T
       if (active.has(value)) reject("cycle");
       if (!Check(nodeSchema, value)) reject(Object.keys(value).some(key => !Object.hasOwn(nodeSchema.properties, key)) ? "unknown_keyword" : "schema_invalid");
       const node = value;
-      // 方言声明只作有界注解；仅删除 schema 节点上的键，保留业务数据中的同名字段。
+      // 当前 SDK 协议不使用参数头注解；仅从模型 schema 删除元数据，保留业务数据中的同名字段。
       Reflect.deleteProperty(value, "$schema");
+      Reflect.deleteProperty(value, "x-mcp-header");
       active.add(value);
       if (node.$ref !== undefined) {
         if (Object.keys(node).some(key => !["$ref", "$schema", "$comment", "title", "description"].includes(key))) reject();

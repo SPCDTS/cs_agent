@@ -11,6 +11,7 @@ export const MCP_SERVER_ROUTES: AdminRoute[] = [
       const input: unknown = await request.json();
       if (!Check(McpManageInput, input)) return json({ error: "invalid" }, 400);
       const result = await manageMcp(env, input);
+      if ("error" in result) return json(result, 400);
       const change = mcpChange(input);
       if (change) await env.THREAD.getByName("owner").recordMcpChange(change);
       if (input.action === "activate") await env.THREAD.getByName("owner").refreshMcp();
