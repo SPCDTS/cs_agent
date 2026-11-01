@@ -11,6 +11,7 @@ import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelecti
 import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, type CredentialLease } from "./model-credentials";
 import { openModels, providerStatuses, selectionProblem, type ProviderStatus } from "./models";
 import { CODEX_PROVIDER } from "./codex-login";
+import type { RefreshFailure } from "./codex-refresh-error";
 import { CHATGPT_SCHEMA, ChatGPTAccounts, type ChatGPTView } from "./chatgpt-accounts";
 import { GrantStore, digest, type GrantAccess } from "./grants";
 import { AlertStore, type AlertInput, type TurnReport } from "./alerts";
@@ -202,7 +203,8 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   async modelStatus(): Promise<ModelStatus> {
-    const view = await this.modelView(), problem = selectionProblem(view.providers, view.current);
+    const view = await this.modelView(), problem = selectionProblem(view.providers, view.current)
+      ?? (view.current.provider === CODEX_PROVIDER && view.codex.status !== "ready" ? view.codex.status : undefined);
     return problem ? { unavailable: `${view.current.provider}/${view.current.id}: ${problem}` } : { ...view.current, codexLoggedIn: view.codex.loggedIn };
   }
 
@@ -211,8 +213,8 @@ export class RegistryDO extends DurableObject<Env> {
   credentialList() { return this.chatgpt.store.list(); }
   credentialDelete(providerId: string) { return this.chatgpt.store.delete(providerId); }
   credentialAcquire(providerId: string): Promise<CredentialLease> { return this.chatgpt.acquire(providerId); }
-  credentialSettle(providerId: string, lease: string, expectedUpdatedAt: number | null, next?: Credential) {
-    return this.chatgpt.settle(providerId, lease, expectedUpdatedAt, next);
+  credentialSettle(providerId: string, lease: string, expectedUpdatedAt: number | null, next?: Credential, failure?: RefreshFailure) {
+    return this.chatgpt.settle(providerId, lease, expectedUpdatedAt, next, failure);
   }
   codexLoginStart(accountId?: string) { return this.chatgpt.start(accountId); }
   codexLoginBegin(ticket: string, port: number) { return this.chatgpt.begin(ticket, port); }

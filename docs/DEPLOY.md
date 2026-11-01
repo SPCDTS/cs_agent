@@ -42,6 +42,21 @@ NapCat 独立运行，在其反向 WebSocket 客户端中配置 `wss://<Worker �
 
 读取 `/healthz`，核对提交号和 Bridge / 模型状态；登录 `/admin/` 检查请求统计、会话、MCP 与工作区。部署成功不能代替模型实际可用性验证。真实 QQ 发送、邮件发送与 Workshop 制作动作需要相应授权；常规自动测试使用模拟服务。
 
+## ChatGPT 刷新故障排查
+
+管理页的登录状态来自账号凭据元数据，不会为了读取状态发起 OAuth 请求：
+
+- “凭据有效”：access token 距到期超过 5 分钟，且没有未恢复的刷新故障。
+- “到期待刷新”：已进入 pi-ai 的 5 分钟刷新窗口，下次模型请求会尝试刷新；这不等同于授权失效。
+- “刷新失败”：最近一次刷新失败，但尚无需要重新授权的明确证据。
+- “需要重新授权”：上游返回 invalid_grant、refresh_token_expired 等明确拒绝凭据的错误，或缺少订阅权限。
+
+点击“刷新模型列表”可以验证现有凭据及刷新路径，不会发起模型生成或 QQ 发送。失败后页面更新账号状态，并显示 HTTP 状态、已知 OAuth 错误码、响应类型、请求 ID 和 Cloudflare Ray；凭据保留，以便临时故障后重试。重新授权或刷新成功会清除旧故障。只读取“刷新状态”不会尝试续期。
+
+模型请求列表保留相同的脱敏诊断；Workers 日志事件名是 model_oauth_refresh_failed。账号状态保存在 Registry 的凭据元数据中，DO 重启后仍可读取；跨会话失败按当时的账号和凭据版本写回，不影响后来切换或更新的账号。错误正文、错误描述、认证头和令牌均不写日志；未知错误码显示为 unrecognized。
+
+HTTP 403 的 HTML 响应和 Cloudflare challenge 属于接入失败证据，不能据此断言 refresh token 已失效；429、5xx、网络错误和超时同样不应直接要求重新授权。模型健康检查会暴露待刷新或失败状态，但不会阻止下一次正常请求尝试恢复。读取模型目录失败时，已经刷新并轮换的令牌仍会保存。
+
 ## 本地旧文件
 
 代码清理不删除既有 `data/`、`workspace/`、`napcat/`、`secrets/` 或其他 worktree。老 worktree 可能通过目录链接共享根 node_modules，不能直接递归删除这份共享缓存。新 checkout 安装 `workers/` 和 `runner/` 各自的依赖；不能共享其他 worktree 的 node_modules。

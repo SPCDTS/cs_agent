@@ -1,11 +1,12 @@
 import type { Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 import { randomSecret, type TokenVault } from "./mcp/crypto";
 import type { RegistryDO } from "./registry";
+import { refreshFailure, type RefreshFailure } from "./codex-refresh-error";
 
 export const MODEL_CREDENTIALS_SCHEMA = `CREATE TABLE IF NOT EXISTS model_credentials (
   provider_id TEXT PRIMARY KEY, credential_enc TEXT NOT NULL, updated_at INTEGER NOT NULL, meta_json TEXT NOT NULL)`;
 /** 非密信息，面板与健康检查只读这一列，不解密凭据。 */
-export type CredentialMeta = { type: Credential["type"]; email?: string; accountId?: string; expiresAt?: number };
+export type CredentialMeta = { type: Credential["type"]; email?: string; accountId?: string; expiresAt?: number; refreshFailure?: RefreshFailure };
 export type CredentialLease = { lease: string; updatedAt: number | null; credential?: Credential };
 type Row = { provider_id: string; credential_enc: string; updated_at: number; meta_json: string };
 // pi-ai 的刷新有 15 秒超时；持锁的 Thread 中途被驱逐时，Registry 最迟在这之后放开锁。
@@ -63,7 +64,10 @@ export class SqlCredentialStore implements CredentialStore {
   async modify(providerId: string, fn: (current: Credential | undefined) => Promise<Credential | undefined>): Promise<Credential | undefined> {
     const release = await this.lock(providerId);
     try {
-      const row = this.row(providerId), current = await this.decode(row), next = await fn(current);
+      const row = this.row(providerId), current = await this.decode(row);
+      let next: Credential | undefined;
+      try { next = await fn(current); }
+      catch (error) { this.recordFailure(providerId, row?.updated_at ?? null, refreshFailure(error)); throw error; }
       if (next !== undefined) await this.write(providerId, next, row);
       return next ?? current;
     } finally { release(); }
@@ -84,12 +88,22 @@ export class SqlCredentialStore implements CredentialStore {
     } catch (error) { this.end(lease); throw error; }
   }
   /** 后半段：版本未变才写入，租约到期后迟到的结果不会盖掉别人刚存的凭据。 */
-  async settle(providerId: string, lease: string, expectedUpdatedAt: number | null, next?: Credential): Promise<Credential | undefined> {
+  async settle(providerId: string, lease: string, expectedUpdatedAt: number | null, next?: Credential, failure?: RefreshFailure): Promise<Credential | undefined> {
     try {
       const row = this.row(providerId);
+      if (next === undefined && this.leases.has(lease)) this.recordFailure(providerId, expectedUpdatedAt, failure);
       if (next !== undefined && (row?.updated_at ?? null) === expectedUpdatedAt) { await this.write(providerId, next, row); return next; }
       return await this.decode(row);
     } finally { this.end(lease); }
+  }
+  private recordFailure(providerId: string, expectedUpdatedAt: number | null, failure?: RefreshFailure): void {
+    if (!failure || failure.kind === "aborted") return;
+    const row = this.row(providerId);
+    if (!row || row.updated_at !== expectedUpdatedAt) return;
+    const meta: CredentialMeta = JSON.parse(row.meta_json);
+    this.sql.exec("UPDATE model_credentials SET meta_json = ? WHERE provider_id = ? AND updated_at = ?",
+      JSON.stringify({ ...meta, refreshFailure: failure }), providerId, expectedUpdatedAt);
+    console.error({ event: "model_oauth_refresh_failed", provider: providerId.startsWith("chatgpt:") ? "openai-codex" : providerId, ...failure });
   }
   private end(lease: string): void {
     const release = this.leases.get(lease);
@@ -109,7 +123,7 @@ export function remoteCredentials(registry: () => DurableObjectStub<RegistryDO>)
       let next: Credential | undefined;
       try { next = await fn(credential); }
       catch (error) {
-        await registry().credentialSettle(providerId, lease, updatedAt).catch(() => {});
+        await registry().credentialSettle(providerId, lease, updatedAt, undefined, refreshFailure(error)).catch(() => {});
         throw error;
       }
       return await registry().credentialSettle(providerId, lease, updatedAt, next) as Credential | undefined;

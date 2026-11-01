@@ -3,6 +3,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { randomSecret, sha256 } from "./mcp/crypto";
+import { OAuthRefreshError, refreshFailure, responseDiagnostic, responseOAuthCode } from "./codex-refresh-error";
 
 export const CODEX_PROVIDER = "openai-codex";
 export const TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token";
@@ -18,7 +19,7 @@ export class ModelLoginError extends Error {
   constructor(readonly code: ModelLoginCode) { super(code); }
 }
 export const modelLoginErrorCode = (error: unknown): ModelLoginCode | "invalid_request" =>
-  error instanceof Error && (LOGIN_CODES as readonly string[]).includes(error.message) ? error.message as ModelLoginCode : "invalid_request";
+  refreshFailure(error) ? "token_exchange" : error instanceof Error && (LOGIN_CODES as readonly string[]).includes(error.message) ? error.message as ModelLoginCode : "invalid_request";
 
 const Text = Type.String({ minLength: 1 });
 export const TokenResponseSchema = Type.Object({
@@ -110,12 +111,23 @@ export const codexOAuth: OAuthAuth = {
       response = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ grant_type: "refresh_token", client_id: credential.clientId, refresh_token: credential.refresh, resource: RESOURCE }),
         redirect: "manual", signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
-    } catch { throw new ModelLoginError("token_exchange"); }
-    if (!response.ok) { await response.body?.cancel(); throw new ModelLoginError("token_exchange"); }
-    const tokens: unknown = await response.json();
-    if (!Check(TokenResponseSchema, tokens)) throw new ModelLoginError("token_exchange");
-    const scope = checkScope(tokens.scope ?? credential.scope);
-    const identity = tokens.id_token ? await verifyIdentity(tokens.id_token, credential.clientId, { subject: credential.subject }) : {};
+    } catch (error) {
+      throw new OAuthRefreshError({ at: Date.now(), kind: error instanceof Error && error.name === "TimeoutError" ? "timeout"
+        : error instanceof Error && error.name === "AbortError" ? "aborted" : "network" });
+    }
+    const diagnostic = responseDiagnostic(response);
+    if (!response.ok) throw new OAuthRefreshError({ at: Date.now(), kind: "http", ...diagnostic, oauthCode: await responseOAuthCode(response) });
+    let tokens: unknown;
+    try { tokens = await response.json(); } catch { throw new OAuthRefreshError({ at: Date.now(), kind: "invalid_json", ...diagnostic }); }
+    if (!Check(TokenResponseSchema, tokens)) throw new OAuthRefreshError({ at: Date.now(), kind: "invalid_token_response", ...diagnostic });
+    let scope: string, identity: Awaited<ReturnType<typeof verifyIdentity>> | {};
+    try {
+      scope = checkScope(tokens.scope ?? credential.scope);
+      identity = tokens.id_token ? await verifyIdentity(tokens.id_token, credential.clientId, { subject: credential.subject }) : {};
+    } catch (error) {
+      throw new OAuthRefreshError({ at: Date.now(), kind: error instanceof ModelLoginError && error.code === "plan_permission_required"
+        ? "plan_permission_required" : "invalid_identity", ...diagnostic });
+    }
     return { ...credential, ...identity, access: tokens.access_token, refresh: tokens.refresh_token,
       expires: Date.now() + tokens.expires_in * 1000, idToken: tokens.id_token ?? credential.idToken, scope };
   },

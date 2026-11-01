@@ -2,7 +2,8 @@ import type { Credential, CredentialStore } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
-import { SqlCredentialStore, type CredentialLease } from "./model-credentials";
+import { refreshNeedsReauth, type RefreshFailure } from "./codex-refresh-error";
+import { SqlCredentialStore, type CredentialMeta, type CredentialLease } from "./model-credentials";
 import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, PendingSchema, acceptTokens, callbackClient,
   codexOAuth, fetchCatalog, isChatGPTCredential, revokeSession, startChatGPTLogin } from "./codex-login";
 
@@ -14,10 +15,17 @@ export const CHATGPT_SCHEMA = `
 `;
 type Account = { id: string; client_id: string; subject: string; email: string | null; created_at: number };
 const DraftSchema = Type.Object({ accountId: Type.Optional(Type.String()) });
+type LoginStatus = "logged_out" | "ready" | "refresh_due" | "refresh_failed" | "reauth_required";
 export type ChatGPTView = {
-  loggedIn: boolean; needsReauth: boolean; activeId?: string; email?: string; expiresAt?: number;
-  accounts: { id: string; label: string; loggedIn: boolean }[];
+  status: LoginStatus; loggedIn: boolean; hasCredential: boolean; needsReauth: boolean;
+  activeId?: string; email?: string; expiresAt?: number; refreshFailure?: RefreshFailure;
+  accounts: { id: string; label: string; loggedIn: boolean; status: LoginStatus }[];
 };
+function loginStatus(meta?: CredentialMeta): LoginStatus {
+  if (!meta) return "logged_out";
+  if (meta.refreshFailure) return refreshNeedsReauth(meta.refreshFailure) ? "reauth_required" : "refresh_failed";
+  return (meta.expiresAt ?? 0) <= Date.now() + 300_000 ? "refresh_due" : "ready";
+}
 const accountKey = (id: string) => "chatgpt:" + id;
 
 export class ChatGPTAccounts {
@@ -49,22 +57,24 @@ export class ChatGPTAccounts {
   }
   view(): ChatGPTView {
     const activeId = this.activeId(), meta = activeId ? this.credentials.meta(accountKey(activeId)) : undefined;
-    return { loggedIn: !!meta, needsReauth: !meta && !!this.credentials.meta(CODEX_PROVIDER), activeId, email: meta?.email, expiresAt: meta?.expiresAt,
+    const status = !meta && this.credentials.meta(CODEX_PROVIDER) ? "reauth_required" : loginStatus(meta);
+    return { status, loggedIn: status === "ready", hasCredential: !!meta, needsReauth: status === "reauth_required",
+      activeId, email: meta?.email, expiresAt: meta?.expiresAt, refreshFailure: meta?.refreshFailure,
       accounts: this.sql.exec<Account>("SELECT * FROM chatgpt_accounts ORDER BY created_at, id").toArray().map(account => ({
         id: account.id, label: (account.email ?? "ChatGPT 账号") + " · " + account.id.slice(0, 8),
-        loggedIn: !!this.credentials.meta(accountKey(account.id)),
+        loggedIn: loginStatus(this.credentials.meta(accountKey(account.id))) === "ready", status: loginStatus(this.credentials.meta(accountKey(account.id))),
       })) };
   }
   async acquire(provider: string): Promise<CredentialLease> {
     const key = this.key(provider), result = await this.credentials.acquire(key);
     return { ...result, lease: key + "|" + result.lease };
   }
-  settle(provider: string, lease: string, updatedAt: number | null, next?: Credential) {
+  settle(provider: string, lease: string, updatedAt: number | null, next?: Credential, failure?: RefreshFailure) {
     const separator = lease.indexOf("|"), key = lease.slice(0, separator);
     if (separator < 0 || (provider === CODEX_PROVIDER ? !key.startsWith("chatgpt:") : key !== provider))
       throw new ModelLoginError("invalid_state");
     // 租约携带当时选中的存储键，切换账号后的刷新仍写回原账号。
-    return this.credentials.settle(key, lease.slice(separator + 1), updatedAt, next);
+    return this.credentials.settle(key, lease.slice(separator + 1), updatedAt, next, failure);
   }
   async start(accountId?: string) {
     if (!this.vault.configured) throw new ModelLoginError("unconfigured");
@@ -122,9 +132,12 @@ export class ChatGPTAccounts {
     if (!id) throw new ModelLoginError("login_required");
     await this.credentials.modify(accountKey(id), async current => {
       if (!isChatGPTCredential(current)) throw new ModelLoginError("login_required");
-      const credential = current.expires <= Date.now() + 60_000 ? await codexOAuth.refresh(current, AbortSignal.timeout(15_000)) : current;
-      if (!isChatGPTCredential(credential)) throw new ModelLoginError("login_required");
-      return { ...credential, catalog: await fetchCatalog(credential.access) };
+      return current.expires <= Date.now() + 300_000 ? await codexOAuth.refresh(current, AbortSignal.timeout(15_000)) : undefined;
+    });
+    // 先保存轮换后的 refresh token，再读取目录；目录故障不能丢掉唯一有效的新令牌。
+    await this.credentials.modify(accountKey(id), async current => {
+      if (!isChatGPTCredential(current)) throw new ModelLoginError("login_required");
+      return { ...current, catalog: await fetchCatalog(current.access) };
     });
   }
   async logout() {

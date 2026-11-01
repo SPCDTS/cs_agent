@@ -339,7 +339,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     missing_code: "回调地址里没有 code，请粘贴浏览器地址栏里的完整地址",
     authorization_denied: "ChatGPT 授权被拒绝",
     invalid_callback: "回调地址格式不正确",
-    token_exchange: "换取凭据失败，请重新开始授权",
+    token_exchange: "刷新或换取凭据失败，请查看诊断信息",
     invalid_identity: "账号身份校验失败，请重新授权所选账号",
     plan_permission_required: "尚未允许使用 ChatGPT 订阅额度，请重新授权并开启该权限",
     catalog_failed: "读取账号模型列表失败，请稍后重试",
@@ -355,6 +355,13 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     files_too_large: "附件合计超过 512 KiB",
     invalid_settings: "设置不合法：轮询间隔 30～3600 秒、合并窗口 0～600 秒、预算每小时 1～100 次，均为整数；标签不能重复；安静时段写 HH:MM，起止都填或都留空",
   };
+  const CODEX_STATUS = { logged_out: "未登录", ready: "凭据有效", refresh_due: "到期待刷新", refresh_failed: "刷新失败", reauth_required: "需要重新授权" };
+  function refreshDiagnostic(failure) {
+    if (!failure) return "";
+    return [failure.kind, failure.status ? "HTTP " + failure.status : "", failure.oauthCode,
+      failure.challenge ? "Cloudflare challenge" : "", failure.format, failure.requestId ? "request " + failure.requestId : "",
+      failure.cfRay ? "ray " + failure.cfRay : ""].filter(Boolean).join(" · ");
+  }
   const MODEL_REASONS = { missing_key: "缺 DEEPSEEK_API_KEY", login_required: "未登录 ChatGPT", unconfigured: "未配置 OAUTH_STORE_KEY",
     unknown_provider: "provider 未注册", unknown_model: "目录里没有这个模型", unavailable: "不可用" };
   const state = { overview: null, settings: null, model: null, eventKind: "", eventThread: "owner", before: undefined, history: [], next: undefined,
@@ -418,7 +425,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     if (error instanceof ApiError) {
       const code = error.body && error.body.error;
       const reason = error.body && error.body.reason;
-      return (ERRORS[code] || ("请求失败（" + error.status + (code ? " " + code : "") + "）")) + (reason ? "：" + (MODEL_REASONS[reason] || reason) : "");
+      const diagnostic = refreshDiagnostic(error.body && error.body.diagnostic);
+      return (ERRORS[code] || ("请求失败（" + error.status + (code ? " " + code : "") + "）")) + (reason ? "：" + (MODEL_REASONS[reason] || reason) : "") + (diagnostic ? "：" + diagnostic : "");
     }
     return "网络错误，请稍后再试";
   }
@@ -859,15 +867,18 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     if (!Array.from(select.options).some(option => option.value === key)) select.append(el("option", { value: key, text: key + "（当前不可用）" }));
     select.value = key;
     const codex = view.codex, status = $("codex-status");
-    status.textContent = codex.loggedIn ? "已登录" : codex.needsReauth ? "需要重新授权" : "未登录";
-    status.className = "pill " + (codex.loggedIn ? "ok" : "neutral");
-    $("codex-account").textContent = codex.loggedIn ? (codex.email || "ChatGPT 账号") + " · 凭据会自动续期" : "请选择账号授权后使用 GPT";
+    status.textContent = CODEX_STATUS[codex.status] || "状态未知";
+    status.className = "pill " + (codex.loggedIn ? "ok" : codex.status === "refresh_failed" || codex.needsReauth ? "bad" : "neutral");
+    $("codex-account").textContent = [codex.email, codex.expiresAt ? "凭据到期 " + time(codex.expiresAt) : "",
+      codex.status === "refresh_due" ? "下次请求将尝试刷新；也可点击刷新模型列表验证" : "",
+      codex.refreshFailure ? time(codex.refreshFailure.at) + " · " + refreshDiagnostic(codex.refreshFailure) : "",
+      !codex.hasCredential ? "请选择账号授权后使用 GPT" : ""].filter(Boolean).join(" · ");
     const accounts = $("codex-accounts"); clear(accounts);
     accounts.append(el("option", { value: "", text: "添加 ChatGPT 账号" }));
     for (const account of codex.accounts) accounts.append(el("option", { value: account.id,
-      text: account.label + (account.id === codex.activeId ? "（当前）" : "") + (account.loggedIn ? "" : " · 需授权") }));
+      text: account.label + (account.id === codex.activeId ? "（当前）" : "") + " · " + (CODEX_STATUS[account.status] || "状态未知") }));
     accounts.value = codex.activeId || "";
-    $("codex-logout").hidden = !codex.loggedIn;
+    $("codex-logout").hidden = !codex.hasCredential;
   }
   async function saveModel() {
     const value = $("m-model").value, slash = value.indexOf("/"), effort = $("m-effort").value;
@@ -897,7 +908,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     try {
       await loadModel();
       if (state.model.codex.loggedIn) { $("codex-pending").hidden = true; $("codex-ticket").value = ""; }
-      notice(state.model.codex.loggedIn ? "ChatGPT 已登录" : "尚未完成授权");
+      notice(CODEX_STATUS[state.model.codex.status] || "状态未知");
     } catch (error) { fail(error); }
   }
   async function codexSelect() {
@@ -906,7 +917,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     try { renderModel(await api("POST", "/admin/model/oauth/codex/select", { accountId })); notice("账号已切换，下一回合生效"); } catch (error) { fail(error); }
   }
   async function codexCatalog() {
-    try { renderModel(await api("POST", "/admin/model/oauth/codex/catalog")); notice("模型列表已刷新"); } catch (error) { fail(error); }
+    try { renderModel(await api("POST", "/admin/model/oauth/codex/catalog")); notice("模型列表已刷新"); } catch (error) { fail(error); } finally { await loadModel().catch(fail); }
   }
   async function codexLogout() {
     try {
