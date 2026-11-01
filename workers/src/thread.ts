@@ -276,13 +276,25 @@ export class ThreadDO extends DurableObject<Env> {
       }), this.subagents.tool(async (api, callContext) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext)),
         async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
-    const ownerSandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
+    const ownerMessageAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
       return memory.ns === "owner" && !!input && this.ownerTurnKind(input) === "message"
         && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration();
     };
+    const ownerSandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context, capability: "coding" | "remoteSandbox") => {
+      const input = await this.currentInput(harness, api, api.conversationId, callContext);
+      if (memory.ns !== "owner" || !input || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return false;
+      if (this.ownerTurnKind(input) === "message") return true;
+      if (this.ownerTurnKind(input) !== "subagent") return false;
+      const id = /^subagent-report:([0-9a-f-]{36}):/.exec(input.message_id)?.[1];
+      const access = id ? await this.subagentAccess(id, true) : undefined;
+      return !!access?.capabilities[capability] && access.authority.owner && access.authority.scope === "owner"
+        && access.authority.actor === input.user_id && access.authority.replyChannel === input.reply_channel;
+    };
+    const remoteSandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
+      await ownerSandboxAllowed(api, callContext, "remoteSandbox") && await this.env.SANDBOX_FLEET.getByName("owner").enabled();
     const codingAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
-      if (memory.ns === "owner") return ownerSandboxAllowed(api, callContext);
+      if (memory.ns === "owner") return ownerSandboxAllowed(api, callContext, "coding");
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
       return memory.ns.startsWith("group:") && !!input && input.kind === "message"
         && input.chat_kind === "group" && scopeOf(targetOf(input)) === memory.ns
@@ -290,7 +302,7 @@ export class ThreadDO extends DurableObject<Env> {
     };
     // 远程设备与技能发布保留 owner 权限；Linux 工作区按会话隔离，每次嵌套调用复核。
     if (memory.ns === "owner") registry.install(createRemoteSandboxExtension({
-      allowed: async (api, callContext) => await ownerSandboxAllowed(api, callContext) && await this.env.SANDBOX_FLEET.getByName("owner").enabled(),
+      allowed: remoteSandboxAllowed,
       fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.env.SANDBOX.idFromName(memory.ns).toString(),
       record: detail => this.audit("remote_sandbox", detail),
     }));
@@ -309,7 +321,7 @@ export class ThreadDO extends DurableObject<Env> {
       registry:()=>this.env.REGISTRY.getByName("main"),bridge:()=>this.env.BRIDGE.getByName("napcat"),
     }));
     registry.install(createWorkspaceAdminExtension({
-      allowed: ownerSandboxAllowed,
+      allowed: ownerMessageAllowed,
       sandbox:()=>this.env.SANDBOX.getByName(memory.ns),registry:()=>this.env.REGISTRY.getByName("main"),
     }));
     registry.install(createMediaExtension({
@@ -339,7 +351,7 @@ export class ThreadDO extends DurableObject<Env> {
       async refresh => { await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
       change => this.audit("mcp_management", { ...change, source: "agent" })));
     const codemode = installCodemode(registry, {
-      allowed: async (api, callContext) => await codingAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
+      allowed: async (api, callContext) => await codingAllowed(api, callContext) || await remoteSandboxAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
       namespaces: () => mcp.namespaces(),
     });
     // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
