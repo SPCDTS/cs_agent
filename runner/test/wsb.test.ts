@@ -33,7 +33,7 @@ async function fixture(t: TestContext, persistent = false) {
     return "{}";
   };
   const dataDir = state + "-data";
-  const backend = new WsbBackend(state, { ...config(binding.deviceId), ...(persistent ? { dataDir } : {}) }, path.join(state, "checkout/runner/dist"), { command: host, capabilities: async () => capabilities });
+  const backend = new WsbBackend(state, { ...config(binding.deviceId), ...(persistent ? { dataDir, gitDir: path.join(state, "tools/git") } : {}) }, path.join(state, "checkout/runner/dist"), { command: host, capabilities: async () => capabilities });
   t.after(async () => { await backend.stopOwned(); await fs.rm(state, { recursive: true, force: true }); await fs.rm(dataDir, { recursive: true, force: true }); });
   return { backend, binding, calls, live, state, dataDir, setMode(value: typeof mode) { mode = value; }, run(command = "probe") { return backend.run(job(binding, command), new AbortController().signal, () => undefined); } };
 }
@@ -100,4 +100,18 @@ test("结果文件被替换时持有句柄不会改读新路径；故障令会�
   assert.deepEqual(await f.run(), { kind: "unknown", reason: "sandbox_execution_unconfirmed", sessionLost: true });
   assert.deepEqual([...f.live], ["unowned-instance"]);
   assert.deepEqual(await f.run(), { kind: "failed", error: "session_lost", sessionLost: true });
+});
+
+test("子工作区仅只读挂载来源，独立可写目录复用来源的 npm 缓存", async t => {
+  const f = await fixture(t, true);
+  f.binding.workspace = "child"; f.binding.workspaceSource = { workspace: "parent" };
+  assert.equal((await f.run()).kind, "completed");
+  const start = f.calls.find(call => call.args[0] === "start"); assert.ok(start);
+  const xml = start.args[start.args.indexOf("--config") + 1];
+  const source = path.join(f.dataDir, "projects", sha256("parent"));
+  const work = path.join(f.dataDir, "projects", sha256("child"));
+  const cache = path.join(f.dataDir, "cache", sha256("parent"), "npm");
+  assert.ok(xml.includes("<HostFolder>" + source + "</HostFolder><SandboxFolder>C:\\AgentSeed</SandboxFolder><ReadOnly>true</ReadOnly>"));
+  assert.ok(xml.includes("<HostFolder>" + work + "</HostFolder><SandboxFolder>C:\\AgentWork</SandboxFolder><ReadOnly>false</ReadOnly>"));
+  assert.ok(xml.includes("<HostFolder>" + cache + "</HostFolder><SandboxFolder>C:\\AgentCache\\npm</SandboxFolder><ReadOnly>false</ReadOnly>"));
 });

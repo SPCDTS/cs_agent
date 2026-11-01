@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { parse, JobInputSchema, PowerShellInputSchema, MAX_CONTROL_BYTES, type ExecResult } from "./protocol.ts";
 import { readJson } from "./files.ts";
+import { seedWorkspace } from "./workspace-seed.ts";
 
 const inputFile = process.argv[2];
 if (!inputFile) throw new Error("input_required");
@@ -10,29 +11,39 @@ const job = parse(JobInputSchema, await readJson(inputFile));
 if (job.tool !== "powershell") throw new Error("tool_not_registered");
 const input = parse(PowerShellInputSchema, job.arguments);
 const work = "C:\\AgentWork";
-await fs.mkdir(work, { recursive: true });
-const cwd = path.resolve(work, input.cwd ?? ".");
-if (!(await fs.stat(cwd)).isDirectory()) throw new Error("not_a_directory");
-const script = "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; $ErrorActionPreference='Stop'; $global:LASTEXITCODE=0; " + input.command + "\nexit $LASTEXITCODE";
-const result: ExecResult = await new Promise((resolve, reject) => {
-  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
-    cwd, windowsHide: true, env: { ...process.env, PATH: "C:\\AgentTools\\node;C:\\AgentTools\\git\\cmd;" + process.env.PATH,
-      GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "C:/AgentWork",
-      GIT_CONFIG_KEY_1: "safe.directory", GIT_CONFIG_VALUE_1: "C:/AgentWork/*",
-      npm_config_cache: "C:\\AgentCache\\npm", npm_config_update_notifier: "false", CI: "true" }, stdio: ["ignore", "pipe", "pipe"],
+const gitConfig = "C:\\Windows\\Temp\\cs-agent-gitconfig";
+const guestEnv = { ...process.env, PATH: "C:\\AgentTools\\node;C:\\AgentTools\\git\\cmd;" + process.env.PATH,
+  GIT_CONFIG_SYSTEM: gitConfig,
+  npm_config_cache: "C:\\AgentCache\\npm", npm_config_update_notifier: "false", CI: "true" };
+async function execute(): Promise<ExecResult> {
+  await fs.mkdir(work, { recursive: true });
+  // 本地 clone 的 upload-pack 会清除命令级配置；使用仅 guest 内的配置文件供子进程继承。
+  await fs.writeFile(gitConfig, "[safe]\n" + ["C:/AgentWork", "C:/AgentWork/*", "C:/AgentSeed", "C:/AgentSeed/*"].map(directory => "\tdirectory = " + directory + "\n").join(""), "utf8");
+  const prepared = job.lease.workspaceSource ? await seedWorkspace({ source: "C:\\AgentSeed", work, sourceId: job.lease.workspaceSource.workspace,
+    workspace: job.lease.workspace, git: "C:\\AgentTools\\git\\cmd\\git.exe", env: guestEnv }) : "";
+  const cwd = path.resolve(work, input.cwd ?? ".");
+  if (!(await fs.stat(cwd)).isDirectory()) throw new Error("not_a_directory");
+  const script = "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; $ErrorActionPreference='Stop'; $global:LASTEXITCODE=0; " + input.command + "\nexit $LASTEXITCODE";
+  const result: ExecResult = await new Promise((resolve, reject) => {
+    const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
+      cwd, windowsHide: true, env: guestEnv, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), truncated = false;
+    const capture = (target: "stdout" | "stderr", chunk: Buffer) => {
+      const prior = target === "stdout" ? stdout : stderr, combined = Buffer.concat([prior, chunk]);
+      truncated ||= combined.length > 65536;
+      if (target === "stdout") stdout = combined.subarray(-65536); else stderr = combined.subarray(-65536);
+    };
+    child.stdout.on("data", (chunk: Buffer) => capture("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => capture("stderr", chunk));
+    child.once("error", reject);
+    // 超时、取消或连接丢失由宿主销毁整个 VM；普通完成保留此租约的工作目录。
+    child.once("close", code => resolve({ stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), code, timedOut: false, truncated }));
   });
-  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), truncated = false;
-  const capture = (target: "stdout" | "stderr", chunk: Buffer) => {
-    const prior = target === "stdout" ? stdout : stderr, combined = Buffer.concat([prior, chunk]);
-    truncated ||= combined.length > 65536;
-    if (target === "stdout") stdout = combined.subarray(-65536); else stderr = combined.subarray(-65536);
-  };
-  child.stdout.on("data", (chunk: Buffer) => capture("stdout", chunk));
-  child.stderr.on("data", (chunk: Buffer) => capture("stderr", chunk));
-  child.once("error", reject);
-  // 超时、取消或连接丢失由宿主销毁整个 VM；普通完成保留此租约的工作目录。
-  child.once("close", code => resolve({ stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), code, timedOut: false, truncated }));
-});
+  result.stdout = (prepared + result.stdout).slice(-65536);
+  return result;
+}
+const result = await execute().catch((error: unknown): ExecResult => ({ stdout: "", stderr: error instanceof Error ? error.message.slice(-65536) : "guest_execution_failed", code: 1, timedOut: false, truncated: false }));
 let encoded = JSON.stringify({ kind: "completed", result });
 while (Buffer.byteLength(encoded) > MAX_CONTROL_BYTES - 1024) {
   result.stdout = result.stdout.slice(Math.ceil(result.stdout.length / 2));

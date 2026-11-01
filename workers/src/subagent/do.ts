@@ -323,11 +323,12 @@ export class SubagentDO extends DurableObject<Env> {
     }));
     const host = createSubagentCapabilityHost(parent());
     if (meta.capabilities?.remoteSandbox) registry.install(createRemoteSandboxExtension({
-      allowed: async () => {
+      allowed: async (_api, _context, action) => {
         const access = await host.validateSubagentAccess(meta.id);
         return !!access?.capabilities.remoteSandbox && access.authority.owner && access.authority.scope === "owner"
-          && (await this.meta())?.status === "running" && await this.env.SANDBOX_FLEET.getByName("owner").enabled();
+          && (await this.meta())?.status === "running" && !!access.sandboxTask?.permissions.remote[action];
       },
+      sourceWorkspace: async () => (await host.validateSubagentAccess(meta.id))?.sandboxTask?.workspace,
       fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.ctx.id.toString(),
       record: async detail => { console.log({ event: "subagent_remote_sandbox", id: meta.id, ...detail }); },
     }));

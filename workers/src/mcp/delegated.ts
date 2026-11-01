@@ -9,6 +9,7 @@ import { compileMcpSchema } from "./schema";
 import { MCP_CONFIG } from "./config";
 import { slug, toolNames } from "./names";
 import { snapshotCatalogs, type McpAuthority } from "./access";
+import type { SandboxTask } from "../sandbox/task-access";
 import type { SubagentCapabilities } from "../subagent/model";
 import { CLOUDFLARE_DELEGATED_INSTRUCTIONS } from "../sandbox/registration";
 
@@ -19,7 +20,7 @@ export type SubagentCodingOperation =
   | { kind: "edit"; operationId: string; path: string; edits: { oldText: string; newText: string }[] };
 export interface SubagentCapabilityHost {
   /** 每个实际操作的父端入口必须重核 scope/generation/当前授权；下面的检查供状态与读网页使用。 */
-  validateSubagentAccess(id: string): Promise<{ authority: McpAuthority; capabilities: SubagentCapabilities } | undefined>;
+  validateSubagentAccess(id: string): Promise<{ authority: McpAuthority; capabilities: SubagentCapabilities; sandboxTask?: SandboxTask } | undefined>;
   subagentMcp(id: string, call: { name: string; args: unknown; operationId: string }): Promise<ToolExecutionResult>;
   subagentSkill(id: string, input: { name: string; path?: string }): Promise<ToolExecutionResult>;
   subagentCoding(id: string, operation: SubagentCodingOperation): Promise<ToolExecutionResult>;

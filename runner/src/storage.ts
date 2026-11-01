@@ -31,11 +31,14 @@ export async function prepareStorage(input: Storage): Promise<string> {
   }
   return root;
 }
-export async function workspaceStorage(input: Storage & { workspace: string }): Promise<{ work: string; cache: string }> {
+export async function workspaceStorage(input: Storage & { workspace: string; sourceWorkspace?: string }): Promise<{ work: string; cache: string; source?: string }> {
   const root = await prepareStorage(input), scope = sha256(input.workspace);
-  const work = path.join(root, "projects", scope), cache = path.join(root, "cache", scope, "npm");
-  for (const directory of [work, cache]) {
+  if (input.sourceWorkspace === input.workspace) throw new Error("workspace_source_must_differ");
+  const sourceScope = input.sourceWorkspace ? sha256(input.sourceWorkspace) : undefined;
+  const source = sourceScope ? path.join(root, "projects", sourceScope) : undefined;
+  const work = path.join(root, "projects", scope), cache = path.join(root, "cache", sourceScope ?? scope, "npm");
+  for (const directory of [work, cache, ...(source ? [source] : [])]) {
     await noLinks(directory); await fs.mkdir(directory, { recursive: true }); await noLinks(directory);
   }
-  return { work, cache };
+  return { work, cache, ...(source ? { source } : {}) };
 }

@@ -5,6 +5,7 @@ const strict = { additionalProperties: false };
 export const CatalogEntrySchema = Type.Object({
   id: Type.String(), name: Type.String(), provider: Type.String(), os: Type.String(), arch: Type.String(),
   tools: Type.Array(ToolDeclarationSchema), codeModeTools: Type.Optional(Type.Array(Type.String())),
+  workspacePreparation: Type.Optional(Type.Literal("git-clone-v1")),
   environment: Type.Optional(Type.Array(Type.Object({ name: Type.String(), version: Type.String() }, strict))),
   memoryMiB: Type.Union([Type.Integer(), Type.Null()]), maxTimeoutMs: Type.Integer(), capabilityRevision: Type.String(),
   availability: Type.Union([Type.Literal("ready"), Type.Literal("busy"), Type.Literal("offline"), Type.Literal("draining")]),

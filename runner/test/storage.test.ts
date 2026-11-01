@@ -13,7 +13,12 @@ test("专用持久目录按工作区复用，凭据、checkout 与其他设备�
   await fs.writeFile(path.join(first.work, "keep.txt"), "持久文件", "utf8");
   const next = await workspaceStorage({ ...input, workspace: "owner" });
   assert.equal(await fs.readFile(path.join(next.work, "keep.txt"), "utf8"), "持久文件");
-  assert.notEqual((await workspaceStorage({ ...input, workspace: "other" })).work, first.work);
+  const independent = await workspaceStorage({ ...input, workspace: "other" });
+  assert.notEqual(independent.work, first.work); assert.notEqual(independent.cache, first.cache);
+  const child = await workspaceStorage({ ...input, workspace: "child", sourceWorkspace: "owner" });
+  assert.notEqual(child.work, first.work); assert.equal(child.source, first.work); assert.equal(child.cache, first.cache);
+  assert.deepEqual(await fs.readdir(child.work), []);
+  await assert.rejects(workspaceStorage({ ...input, workspace: "owner", sourceWorkspace: "owner" }), /source_must_differ/);
   await assert.rejects(prepareStorage({ ...input, dataDir: input.state }), /overlaps/);
   await assert.rejects(prepareStorage({ ...input, dataDir: path.join(root, "checkout", "subdir") }), /overlaps/);
   await assert.rejects(prepareStorage({ ...input, dataDir: root }), /overlaps/);

@@ -64,14 +64,14 @@ npm --prefix runner run build
 npm --prefix runner start -- run --state D:\sandbox-runner-state
 ```
 
-连接器重连会更新注册的 `instructions` 和 `persistence`，无需部署 Worker。未配置 `dataDir` 的旧设备仍使用临时工作区，不会自动移动原有 guest 文件。
+连接器重连会更新注册的 `instructions` 和 `persistence`。本次新增可选的 `workspacePreparation: "git-clone-v1"` 声明：升级前排空并释放租约，先部署支持此字段的 Worker，再更新 runner、构建 guest 并重连。旧 runner 可继续连接新 Worker，但不具备自动准备子仓库的能力；新 runner 不应连接尚未支持该字段的旧 Worker。未配置 `dataDir` 的旧设备仍使用临时工作区，不会自动移动原有 guest 文件。
 
 | 本机目录 | guest 路径 | 保留范围 |
 | --- | --- | --- |
 | `dataDir/projects/<工作区哈希>` | `C:\AgentWork` | 从 GitHub 克隆的新仓库、`.git`、`node_modules`、构建产物 |
 | `dataDir/cache/<工作区哈希>/npm` | `C:\AgentCache\npm` | npm 下载缓存 |
 
-工作区标识沿用 Fleet 租约；不同工作区不会挂载彼此的数据。同一工作区的新租约、连接器重启和 VM 重建都会挂载原目录。数据仅在本机，state 中的设备凭据不映射进 guest，Node/Git/runner 工具仍只读映射。释放、取消和超时会销毁 VM，但不回滚持久目录的写入，也不自动清理磁盘文件。Windows 注册表、服务和其余 guest 路径仍是临时状态。
+工作区标识沿用 Fleet 租约；不同工作区的可写项目目录隔离。子任务获得宿主签发的来源工作区时，另将来源目录只读映射到 `C:\AgentSeed`，npm 缓存改用来源工作区的缓存路径；没有来源的普通工作区维持上表映射。同一工作区的新租约、连接器重启和 VM 重建都会挂载原目录。数据仅在本机，state 中的设备凭据不映射进 guest，Node/Git/runner 工具仍只读映射。释放、取消和超时会销毁 VM，但不回滚持久目录的写入，也不自动清理磁盘文件。Windows 注册表、服务和其余 guest 路径仍是临时状态。
 
 真实 WSB 验证发现，共享目录中创建符号链接会返回 `EPERM`。普通 npm 包可以持久安装；本地目录依赖可先 `npm pack` 再安装 `.tgz`。必须依赖符号链接的 workspace、pnpm 或构建流程应在 guest 临时目录运行，并显式保存产物；目录映射不提供原生 NTFS 的全部语义。
 
@@ -95,15 +95,19 @@ Sandbox 页每 10 秒刷新在线状态，列出当前任务和租约，可取�
 
 ## Agent 使用
 
-从 owner 本人的消息或已认证网页回合提出任务。子 agent 汇报触发的主会话续轮会核验派出时的沙箱能力、当前派出者身份、回复入口和会话代次；仅仍有效的授权可以继续使用沙箱，取消、归档或身份降权后不能恢复权限，远程任务总开关仍实时生效。此继承不开放技能发布或权限管理。
+从 owner 本人的消息或已认证网页回合提出任务。宿主把沙箱权限保存为任务授权，用户输入和子 agent 回报绑定同一授权；工具逐次检查授权是否撤销、当前身份、回复入口、会话代次与子任务状态。停止会话会撤销已有授权，并阻止排队输入稍后重新签发；归档、身份降权或取消子任务也不能借回报恢复权限。新用户消息可以创建新授权。技能发布和权限管理仍只允许用户直接消息。
 
-主会话继续使用自己的工作区；子 agent 使用独立工作区，不自动继承主会话的 WSB 仓库或缓存。主会话看到 `C:\AgentWork\cs_agent` 不代表子 agent 也能看到该目录，应在子任务中明确仓库来源并准备独立克隆。以下工具全部在 Code Mode 内通过 `tools.*` 调用：
+授权把远程操作分成查看、执行、管理三类。`sandbox_list` 和查询结果使用查看权；新租约及新命令使用执行权；取消和释放使用管理权。管理台的远程任务开关只额外限制执行，不撤销查看和管理权；`sandbox_list.enabled` 明确返回开关状态。此拆分不向非 owner 开放设备目录。任务授权支持宿主绑定后续输入，但当前只自动接续子 agent 回报；定时任务或普通外部事件不会仅凭文本取得授权。
+
+主会话和子 agent 各有独立工作区，子 agent 不继承主会话的租约。对于同时配置 Git 和持久目录的新版 WSB，设备声明支持 `git-clone-v1`；宿主在子租约中填入 `workspaceSource`，模型不能指定其他来源。首次命令执行前，guest 从只读来源目录的一级 Git 仓库子目录读取当时的 HEAD，完整克隆到自己的 `C:\AgentWork`，建立 `agent/<子工作区哈希>` 分支。`.git` 对象独立，不使用硬链接或 alternates；已有子工作区不覆盖，未提交修改和 `node_modules` 不复制。主工作区根目录本身就是 Git 仓库时，不在自动发现范围，应把仓库放在 `C:\AgentWork\repo` 这样的子目录。
+
+子任务复用主工作区的 npm 下载缓存，但首次仍需在自己的项目中运行 `npm-ensure.mjs --prefer-offline` 安装依赖；后续可复用自己的 `node_modules`。首次准备固定提交并记录进度，重试继续未完成的克隆；完成后不会随主分支前进而重置子工作区。来源没有仓库，或设备没有声明自动准备能力时，按设备说明自行克隆。GitHub 登录状态和宿主凭据不会自动转交，推送仍需明确配置。以下工具全部在 Code Mode 内通过 `tools.*` 调用：
 
 Agent 会收到沙箱注册的使用说明，并可通过 `sandbox_list` 查看完整配置、说明和 schema。通用扩展不设 Cloudflare/WSB 优先级；平台的路径、缓存、命令及结果用法由各自注册信息决定。若更新说明，先释放活动租约，再让连接器重新注册。
 
 | 工具 | 用途 |
 | --- | --- |
-| `sandbox_list` | 查看沙箱、注册工具 schema、需求不匹配原因和本会话租约 |
+| `sandbox_list` | 查看 enabled、沙箱、注册工具 schema、需求不匹配原因和本会话租约 |
 | `sandbox_acquire` | 按 sandboxId/capabilityRevision 获取租约，返回 id |
 | `sandbox_call` | 以 leaseId、tool、arguments、timeoutMs 提交任务 |
 | `sandbox_job` | 按 jobId 查询；`action: "cancel"` 请求取消 |

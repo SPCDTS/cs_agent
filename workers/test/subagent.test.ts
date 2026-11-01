@@ -104,7 +104,7 @@ async function remoteDevice() {
   await fleet.putSettings({ enabled: true, expectedRevision: 0 });
   const descriptor: Descriptor = { name: "测试 WSB", provider: "windows-wsb", os: "windows", arch: "x64",
     instructions: "通过 powershell 执行命令。", persistence: "释放后丢弃文件。", memoryMiB: 4096, maxConcurrent: 1, maxTimeoutMs: 120000,
-    workspaceProtocol: "registered-tools-v2", tools: [{ name: "powershell", description: "运行 PowerShell",
+    workspaceProtocol: "registered-tools-v2", workspacePreparation: "git-clone-v1", tools: [{ name: "powershell", description: "运行 PowerShell",
       inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"], additionalProperties: false } }] };
   const pairing = await fleet.createPairing();
   const { deviceId } = await fleet.claim({ pairingId: pairing.pairingId, code: pairing.code, tokenHash: await hash(token), descriptor });
@@ -287,6 +287,7 @@ describe("subagents as child Durable Objects", () => {
     await vi.waitFor(() => expect(outputs.child[0]).toContain("jobId"));
     expect(seen.child[0].tools).toContain("codemode");
     const session = (await fleet.sessions(workspace))[0]!;
+    expect(session.lease.workspaceSource?.workspace).toBe(env.SANDBOX.idFromName("owner").toString());
     expect(session.jobId).toBeTruthy();
     expect(await fleet.sessions(env.SANDBOX.idFromName("owner").toString())).toEqual([]);
     await expect((async () => await fleet.invoke("another-child", "call", { leaseId: session.lease.id, tool: "powershell", arguments: { command: "wrong" }, timeoutMs: 1000 }))()).rejects.toThrow("lease_expired");
@@ -299,7 +300,7 @@ describe("subagents as child Durable Objects", () => {
       await fleet.putSettings({ enabled: false, expectedRevision: 1 });
       disabled.open();
       await reports("owner", 1);
-      expect(outputs.child[2]).toContain("permission_denied");
+      expect(outputs.child[2]).toContain('"enabled":false');
     } else {
       await thread("owner").cancelSubagent(sub.id);
       await vi.waitFor(async () => expect(readJob(await fleet.inspectJson(workspace, session.jobId!)).phase).toBe("cancel_requested"));
@@ -341,7 +342,7 @@ describe("subagents as child Durable Objects", () => {
     await vi.waitFor(async () => expect(await fleet.sessions(workspace)).toEqual([]));
   });
 
-  it.each(["capability", "identity", "generation", "cancelled", "channel", "disabled"] as const)("rechecks %s before a parent report turn uses the sandbox", async change => {
+  it.each(["capability", "identity", "generation", "cancelled", "channel", "disabled", "task"] as const)("rechecks %s before a parent report turn uses the sandbox", async change => {
     const { fleet } = await remoteDevice(), childReady = gate(), resume = gate();
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
     const { outputs, seen } = twoModels([spawn("检查工作区"), { text: "已派出" },
@@ -357,12 +358,42 @@ describe("subagents as child Durable Objects", () => {
       case "generation": await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.generation', 1) WHERE id=?", sub.id); break;
       case "cancelled": await rows("owner", "UPDATE subagents SET status='cancelled' WHERE id=?", sub.id); break;
       case "channel": await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.replyChannel', 'web') WHERE id=?", sub.id); break;
+      case "task": await rows("owner", "UPDATE sandbox_tasks SET revoked_at=1"); break;
       case "disabled": await fleet.putSettings({ enabled: false, expectedRevision: 1 }); break;
     }
     resume.open();
     await reports("owner", 1);
-    expect(outputs.parent[1]).toContain("denied");
+    expect(outputs.parent[1]).toContain(change === "disabled" ? '"enabled":false' : "denied");
     expect(await fleet.sessions(env.SANDBOX.idFromName("owner").toString())).toEqual([]);
+  });
+
+  it("关闭新任务后仍允许查看、取消和释放，禁止新租约及已有租约上的新命令", async () => {
+    const { fleet, deviceId, socket } = await remoteDevice(), disabled = gate(), finished = gate();
+    vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
+    const jobId = (outputs: string[]) => /"jobId"\s*:\s*"([^"\n]+)"/.exec(outputs[0])?.[1];
+    const leaseId = (outputs: string[]) => /"leaseId"\s*:\s*"([^"\n]+)"/.exec(outputs[0])?.[1];
+    const { outputs } = twoModels([
+      { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.provider==="windows-wsb"); const lease=await tools.sandbox_acquire({sandboxId:target.id,capabilityRevision:target.capabilityRevision}); text({leaseId:lease.id,...await tools.sandbox_call({leaseId:lease.id,tool:"powershell",arguments:{command:"probe"}})});' } },
+      { tool: "codemode", after: disabled.promise, args: { code: 'text(await tools.sandbox_list({}));' } },
+      values => ({ tool: "codemode", args: { code: 'text(await tools.sandbox_job({jobId:'+JSON.stringify(jobId(values))+',action:"cancel"}));' } }),
+      values => ({ tool: "codemode", args: { code: 'text(await tools.sandbox_call({leaseId:'+JSON.stringify(leaseId(values))+',tool:"powershell",arguments:{command:"new"}}));' } }),
+      values => ({ tool: "codemode", after: finished.promise, args: { code: 'text(await tools.sandbox_release({leaseId:'+JSON.stringify(leaseId(values))+'}));' } }),
+      { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.provider==="windows-wsb"); text(await tools.sandbox_acquire({sandboxId:target.id,capabilityRevision:target.capabilityRevision}));' } },
+      { text: "已收尾" },
+    ], []);
+    const pending = thread("owner").submit(input(1, "运行", 10000001)), workspace = env.SANDBOX.idFromName("owner").toString();
+    await vi.waitFor(() => expect(outputs.parent[0]).toContain("jobId"));
+    const session = (await fleet.sessions(workspace))[0]!;
+    await fleet.putSettings({ enabled: false, expectedRevision: 1 }); disabled.open();
+    await vi.waitFor(() => expect(outputs.parent[3]).toContain("disabled"));
+    expect(outputs.parent[1]).toContain('"enabled":false');
+    expect(outputs.parent[2]).toContain("cancel_requested");
+    await fleet.complete(deviceId, session.jobId!, { kind: "cancelled", reason: "stopped" }); finished.open();
+    expect(await pending).toEqual({ status: "done" });
+    expect(outputs.parent[4]).toContain("requested");
+    expect(outputs.parent[5]).toContain("disabled");
+    socket.send(JSON.stringify({ kind: "released", leaseId: session.lease.id }));
+    await vi.waitFor(async () => expect(await fleet.sessions(workspace)).toEqual([]));
   });
 
   it("lists, inspects and cancels subagents through the authenticated admin API", async () => {

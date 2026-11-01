@@ -19,6 +19,7 @@ export const SandboxPersistenceSchema = Type.String({ minLength: 1, maxLength: 1
 export const DescriptorSchema = Type.Object({
   name: Type.String({ minLength: 1, maxLength: 80 }), provider: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }),
   os: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), arch: Type.String({ pattern: "^[a-z0-9_-]{1,40}$" }),
+  workspacePreparation: Type.Optional(Type.Literal("git-clone-v1")),
   workspaceRoot: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })),
   instructions: SandboxInstructionsSchema, persistence: SandboxPersistenceSchema,
   tools: Type.Array(ToolDeclarationSchema, { minItems: 1, maxItems: 16 }),
@@ -46,9 +47,11 @@ export const OutcomeSchema = Type.Union([
   Type.Object({ kind: Type.Literal("unknown"), reason: Type.String({ minLength: 1, maxLength: 200 }), sessionLost }, strict),
 ]);
 export type Outcome = Static<typeof OutcomeSchema>;
+export const WorkspaceSourceSchema = Type.Object({ workspace: IdSchema }, strict);
 export const LeaseSchema = Type.Object({
   id: IdSchema, deviceId: IdSchema, sandboxId: IdSchema, workspace: IdSchema, operationId: IdSchema,
   capabilityRevision: HashSchema, requirements: RequirementsSchema, createdAt: Type.Number(),
+  workspaceSource: Type.Optional(WorkspaceSourceSchema),
 }, strict);
 export type Lease = Static<typeof LeaseSchema>;
 export const JobInputSchema = Type.Object({

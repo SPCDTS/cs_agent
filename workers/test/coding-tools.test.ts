@@ -93,13 +93,13 @@ describe("coding tools", () => {
     const seen = scriptedModel([call, stop, call, stop, call, stop]);
     const thread = env.THREAD.getByName("owner"), fleet = env.SANDBOX_FLEET.getByName("owner");
     await thread.submit(input(1, "查看沙箱", 10000001));
-    expect(seen.outputs[0]).toContain("permission_denied");
+    expect(seen.outputs[0]).toContain('"enabled":false');
     await fleet.putSettings({ enabled: true, expectedRevision: 0 });
     await thread.submit(input(2, "再查看沙箱", 10000001));
     expect(seen.outputs[1]).toContain("cloudflare");
     await fleet.putSettings({ enabled: false, expectedRevision: 1 });
     await thread.submit(input(3, "停用后查看", 10000001));
-    expect(seen.outputs[2]).toContain("permission_denied");
+    expect(seen.outputs[2]).toContain('"enabled":false');
   });
 
   it("passes sandbox images through structured read and image() into the model transcript", async () => {

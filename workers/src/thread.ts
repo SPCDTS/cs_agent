@@ -58,6 +58,7 @@ import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin, type SubagentView } from "./subagent/parent";
 import { subagentName, type SubagentIdentity, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
+import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject, type RemoteAction } from "./sandbox/task-access";
 import { createCodingExtension } from "./tools/coding";
 import { createRemoteSandboxExtension } from "./tools/remote-sandbox";
 
@@ -88,6 +89,7 @@ const SETTINGS_TTL_MS = 60_000;
 
 export class ThreadDO extends DurableObject<Env> {
   private readonly database = new DurableObjectSqliteDatabase(this.ctx.storage);
+  private readonly sandboxTasks = new SandboxTasks(this.database);
   private initialized?: Promise<void>;
   private modelsCache?: MutableModels;
   private runtime?: Promise<Runtime>;
@@ -111,6 +113,7 @@ export class ThreadDO extends DurableObject<Env> {
         ${MEMORY_SCHEMA}
         ${MCP_CATALOG_SCHEMA}
         ${SUBAGENT_SCHEMA}
+        ${SANDBOX_TASK_SCHEMA}
         CREATE TABLE IF NOT EXISTS session_state (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL);
         INSERT OR IGNORE INTO session_state VALUES (1,0);
         CREATE TABLE IF NOT EXISTS session_resets (request_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, label TEXT NOT NULL, at INTEGER NOT NULL, status TEXT NOT NULL);
@@ -281,25 +284,12 @@ export class ThreadDO extends DurableObject<Env> {
       return memory.ns === "owner" && !!input && this.ownerTurnKind(input) === "message"
         && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration();
     };
-    const ownerSandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context, capability: "coding" | "remoteSandbox") => {
-      const input = await this.currentInput(harness, api, api.conversationId, callContext);
-      if (memory.ns !== "owner" || !input || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return false;
-      if (this.ownerTurnKind(input) === "message") return true;
-      if (this.ownerTurnKind(input) !== "subagent") return false;
-      const id = /^subagent-report:([0-9a-f-]{36}):/.exec(input.message_id)?.[1];
-      const access = id ? await this.subagentAccess(id, true) : undefined;
-      return !!access?.capabilities[capability] && access.authority.owner && access.authority.scope === "owner"
-        && access.authority.actor === input.user_id && access.authority.replyChannel === input.reply_channel;
-    };
-    const remoteSandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
-      await ownerSandboxAllowed(api, callContext, "remoteSandbox") && await this.env.SANDBOX_FLEET.getByName("owner").enabled();
-    const codingAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
-      if (memory.ns === "owner") return ownerSandboxAllowed(api, callContext, "coding");
-      const input = await this.currentInput(harness, api, api.conversationId, callContext);
-      return memory.ns.startsWith("group:") && !!input && input.kind === "message"
-        && input.chat_kind === "group" && scopeOf(targetOf(input)) === memory.ns
-        && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration();
-    };
+    const taskAccess = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
+      this.sandboxTaskForInput(await this.currentInput(harness, api, api.conversationId, callContext));
+    const remoteSandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context, action: RemoteAction) =>
+      !!(await taskAccess(api, callContext))?.permissions.remote[action];
+    const codingAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
+      !!(await taskAccess(api, callContext))?.permissions.coding;
     // 远程设备与技能发布保留 owner 权限；Linux 工作区按会话隔离，每次嵌套调用复核。
     if (memory.ns === "owner") registry.install(createRemoteSandboxExtension({
       allowed: remoteSandboxAllowed,
@@ -351,7 +341,7 @@ export class ThreadDO extends DurableObject<Env> {
       async refresh => { await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
       change => this.audit("mcp_management", { ...change, source: "agent" })));
     const codemode = installCodemode(registry, {
-      allowed: async (api, callContext) => await codingAllowed(api, callContext) || await remoteSandboxAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
+      allowed: async (api, callContext) => await codingAllowed(api, callContext) || await remoteSandboxAllowed(api, callContext, "view") || await mcp.canUseCodemode(api, callContext),
       namespaces: () => mcp.namespaces(),
     });
     // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
@@ -670,6 +660,33 @@ export class ThreadDO extends DurableObject<Env> {
     return this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).transcriptSummary(limit);
   }
 
+  private async sandboxTaskForInput(input: InboundRow | undefined): Promise<SandboxTask | undefined> {
+    if (!input || !input.turn_id || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return;
+    const scope = await this.namespace(), subject = { scope, actor: input.user_id, generation: input.session_generation,
+      replyChannel: input.reply_channel, owner: isWebAdmin(input) ? scope === "owner" : ownerIds(this.env).includes(input.user_id) };
+    if (input.kind === "subagent") {
+      const id = /^subagent-report:([0-9a-f-]{36}):/.exec(input.message_id)?.[1], access = id ? await this.subagentAccess(id, true) : undefined;
+      if (!access?.sandboxTask) return;
+      const task = await this.sandboxTasks.resolve(access.sandboxTask.id, subject);
+      if (!task) return;
+      await this.sandboxTasks.bind(input.message_id, task.id);
+      return { ...task, permissions: { coding: task.permissions.coding && !!access.capabilities.coding,
+        remote: { view: task.permissions.remote.view && !!access.capabilities.remoteSandbox,
+          execute: task.permissions.remote.execute && !!access.capabilities.remoteSandbox, control: task.permissions.remote.control && !!access.capabilities.remoteSandbox } } };
+    }
+    let id = await this.sandboxTasks.inputTask(input.message_id);
+    // 只在可信用户输入上签发；后台输入必须由宿主绑定已有任务，文本不能携带授权。
+    if (id === undefined && input.kind === "message") {
+      const owner = scope === "owner" && this.ownerTurnKind(input) === "message";
+      const coding = owner || scope.startsWith("group:") && input.chat_kind === "group" && scopeOf(targetOf(input)) === scope;
+      if (!coding) return;
+      const task = await this.sandboxTasks.issue({ sourceInputId: input.message_id, subject, workspace: this.env.SANDBOX.idFromName(scope).toString(),
+        permissions: { coding, remote: { view: owner, execute: owner, control: owner } } });
+      id = task.id;
+    }
+    return id ? this.sandboxTasks.resolve(id, subject) : undefined;
+  }
+
   private async mcpAuthority(input: InboundRow | undefined): Promise<McpAuthority | undefined> {
     if (!input?.turn_id || input.session_generation !== await this.sessionGeneration()) return;
     return { kind: input.kind, scope: await this.namespace(), actor: input.user_id, owner: isWebAdmin(input) || ownerIds(this.env).includes(input.user_id),
@@ -683,8 +700,20 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     const access = await this.subagents.access(id,completed), as = access?.identity.as;
     if (!access || !as || access.origin.generation === undefined || access.origin.generation !== await this.sessionGeneration()) return;
-    return { authority: { kind: "subagent", scope: await this.namespace(), actor: as.userId, owner: as.owner,
-      generation: access.origin.generation, replyChannel: access.origin.replyChannel ?? "qq", subagentId: id }, capabilities: access.origin.capabilities ?? {} };
+    const scope = await this.namespace(), capabilities = { ...access.origin.capabilities };
+    const subject = { scope, actor: as.userId, owner: as.owner, generation: access.origin.generation, replyChannel: access.origin.replyChannel ?? "qq" } satisfies SandboxSubject;
+    // 兼容旧子任务：只从宿主保存且当前仍有效的身份和能力迁移一次授权。
+    if (!capabilities.sandboxTask && (capabilities.coding || capabilities.remoteSandbox)) {
+      const task = await this.sandboxTasks.issue({ sourceInputId: "legacy-child:" + id, subject, workspace: this.env.SANDBOX.idFromName(scope).toString(),
+        permissions: { coding: !!capabilities.coding, remote: { view: !!capabilities.remoteSandbox, execute: !!capabilities.remoteSandbox, control: !!capabilities.remoteSandbox } } });
+      capabilities.sandboxTask = task.id;
+      await this.database.run("UPDATE subagents SET origin_json=json_set(origin_json,'$.capabilities.sandboxTask',?) WHERE id=?", task.id, id);
+    }
+    const task = capabilities.sandboxTask ? await this.sandboxTasks.resolve(capabilities.sandboxTask, subject) : undefined;
+    capabilities.coding = !!task?.permissions.coding && !!capabilities.coding;
+    capabilities.remoteSandbox = !!task?.permissions.remote.view && !!capabilities.remoteSandbox;
+    return { ...(task ? { sandboxTask: task } : {}), authority: { kind: "subagent", scope, actor: as.userId, owner: as.owner,
+      generation: access.origin.generation, replyChannel: access.origin.replyChannel ?? "qq", subagentId: id }, capabilities };
   }
   async subagentMcp(id: string, call: { name: string; args: unknown; operationId: string }): ReturnType<SubagentCapabilityHost["subagentMcp"]> {
     const access = await this.validateSubagentAccess(id), { mcp } = await this.open();
@@ -720,9 +749,10 @@ export class ThreadDO extends DurableObject<Env> {
   private async subagentCaller(input: InboundRow | undefined): Promise<SubagentCaller | undefined> {
     if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;
     const authority = await this.mcpAuthority(input), { mcp } = await this.open();
-    const coding = this.ownerTurnKind(input) === "message", snapshot = coding ? await this.env.SANDBOX.getByName(await this.namespace()).snapshot() : undefined;
-    const remoteSandbox = coding && authority?.scope === "owner" && await this.env.SANDBOX_FLEET.getByName("owner").enabled();
-    const capabilities = { coding, remoteSandbox, ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority) } : {}) };
+    const task = await this.sandboxTaskForInput(input), coding = !!task?.permissions.coding && authority?.scope === "owner";
+    const snapshot = coding ? await this.env.SANDBOX.getByName(await this.namespace()).snapshot() : undefined;
+    const remoteSandbox = !!task?.permissions.remote.view && authority?.scope === "owner";
+    const capabilities = { coding, remoteSandbox, ...(task ? { sandboxTask: task.id } : {}), ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority) } : {}) };
     return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner: isWebAdmin(input) ? this.ctx.id.equals(this.env.THREAD.idFromName("owner")) : ownerIds(this.env).includes(input.user_id), ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
       origin: { capabilities, workspaceRevision: snapshot?.revision, generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
   }
@@ -1059,6 +1089,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   async stop(): Promise<{ stopped: boolean }> {
     await this.initialize();
+    await this.sandboxTasks.revokeAll((await this.database.all<{ message_id: string }>("SELECT message_id FROM inbound WHERE status='queued'")).map(row => row.message_id));
     const children = (await this.subagents.list()).filter(child => child.status === "running");
     await Promise.all(children.map(child => this.subagents.cancel(child.id)));
     if (!await this.database.get("SELECT 1 FROM inbound WHERE status = 'queued' LIMIT 1")) return { stopped: children.length > 0 };
