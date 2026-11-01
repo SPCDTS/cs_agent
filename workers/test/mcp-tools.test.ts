@@ -77,8 +77,8 @@ describe("MCP in pi-durable and inline QuickJS", () => {
     expect(remote.state.calls).toBe(1); expect(seen.outputs.join("\n")).toContain("denied");
   });
   it.each([{ ns: "group:200000001", user: 10000001, group: 200000001 }, { ns: "group:200000001", user: 10000004, group: 200000001 },
-    { ns: "private:10000003", user: 10000003, group: undefined }])("denies codemode without a grant for $ns sender $user", async ({ ns, user, group }) => {
-    const remote = fakeRemote(), seen = scriptedModel([{ name: "codemode", args: { code: "text(ALL_TOOLS)" } }]);
+    { ns: "private:10000003", user: 10000003, group: undefined }])("allows public scripts but denies MCP without a grant for $ns sender $user", async ({ ns, user, group }) => {
+    const remote = fakeRemote(), seen = scriptedModel([{ name: "codemode", args: { code: "text(ALL_TOOLS); text(await tools.mcp_refresh_tools({}));" } }]);
     await runInDurableObject(env.THREAD.getByName(ns), async (_instance, state) => {
       const thread = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       expect(await thread.submit(input(1, "test", user, group, true))).toEqual({ status: "done" });

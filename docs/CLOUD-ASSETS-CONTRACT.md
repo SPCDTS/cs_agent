@@ -24,6 +24,17 @@ Bridge 出站只接受可信宿主解析后的 `AssetRef[]`。图片使用 `{typ
 
 `createMediaExtension(deps)` 注册 `qq_image(message_id,ordinal?)`、`qq_attachment(message_id,ordinal?)` 和 `send_file(path,name?)`。依赖包括 `allowed(api,context)`、`repository(api,context)`、`lookup(messageId,api,context)`、`sandbox(api,context)`、`deliver(ref,api,context)` 以及可选 `record(kind,detail)`。lookup 必须验证当前访问范围，再读历史或让 Bridge 取原消息。repository 已锁定 scope。deliver 保留原始 web/QQ 回复入口。图片直接返回模型 image content；非图附件返回私有引用和元数据，不能伪装成已解析正文。
 
+## 群聊脚本取图
+
+普通消息回合（群聊、私聊与管理台网页续聊）可以使用 Code Mode 的公网取图能力，不需要 MCP 授权或编码容器。宿主逐次校验当前回合与会话代次；事件、定时和子任务回合不因此获得新权限。MCP、技能发布和沙箱工具继续各自复核权限。
+
+- tools.web_fetch({url}) 仅做公网 GET，返回最终 url、contentType 与完整 body，接受 HTML、XHTML、纯文本或 JSON，最多 1MiB，超限报错而不截断。脚本可自行解析图片标签、元数据或页面 JSON；它不执行页面脚本。
+- tools.web_import_image({url,baseUrl?,name?}) 支持相对图片地址，下载真实图片后按当前会话范围存入私有 R2，返回 {url,asset,image}。使用 text(result.asset) 输出引用，image(result.image) 查看图片，再用 send_message({text,images:[asset.id]}) 发送。导入本身不发 QQ 消息，网页回合仍只输出到网页。
+- 两个工具只供 Code Mode 嵌套调用。读取和下载复用公网地址、DNS、逐跳重定向检查，不接受自定义请求头或宿主凭据；单次下载总时限20秒，支持回合取消，图片上限10MiB并校验文件签名。读取完成后再次核验回合，失效回合不能写入图片资产。
+- 审计事件为 web_fetch、web_import_image，记录分类和耗时；HTTP失败额外保留状态码和主机名，不记录完整网址、网页正文或图片二进制。
+
+这条路径补齐“搜索网页 → 脚本提取图片地址 → 导入当前会话资产 → 核验并发送”，不把搜索摘要当成已取得图片；网页内容始终按不可信资料处理。
+
 ## 持久工作区
 
 SandboxDO 的 Cloudflare 容器使用官方 `Files` 与原生 `Container.exec` 操作真实 `/work`，R2 保存源码的不可变 manifest 和按 SHA-256 去重的二进制 blob，DO storage 保存当前 head、epoch 和操作账本。模型通过 Code Mode 调用文件和执行工具；远程 WSB 有独立工作区，不复用这里的文件路由。

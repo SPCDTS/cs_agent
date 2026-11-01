@@ -9,6 +9,9 @@ export class MediaDownloadError extends Error {
 
 export type DownloadDeps = {
   fetch?: typeof fetch;
+  signal?: AbortSignal;
+  maxBytes?: number;
+  contentTypes?: ReadonlySet<string>;
   resolve?: (hostname: string) => Promise<string[]>;
 };
 /** 只接受公网单播地址；IPv4 映射、回环、保留网段与 IPv6 局域地址均拒绝。 */
@@ -25,11 +28,11 @@ export function publicAddress(raw: string): boolean {
     (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 168 || b === 0 || (b === 0 && c === 2))) ||
     (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) || (a === 203 && b === 0 && c === 113));
 }
-async function dns(hostname: string): Promise<string[]> {
+async function dns(hostname: string, signal: AbortSignal): Promise<string[]> {
   const responses = await Promise.all(["A", "AAAA"].map(async type => {
     // Workers 不支持 error 重定向模式；manual 的 3xx 由下方 ok 检查拒绝。
     const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`, {
-      headers: { Accept: "application/dns-json" }, signal: AbortSignal.timeout(10_000), redirect: "manual",
+      headers: { Accept: "application/dns-json" }, signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]), redirect: "manual",
     });
     if (!response.ok) throw new Error("media_dns_failed");
     const body: unknown = await response.json();
@@ -51,12 +54,17 @@ async function checkedUrl(raw: string, resolve: NonNullable<DownloadDeps["resolv
   return url;
 }
 /** 每一跳重做地址检查，流式计量，不信任 Content-Length，不携带宿主或管理员凭据。 */
-export async function downloadMedia(raw: string, deps: DownloadDeps = {}): Promise<{ bytes: Uint8Array; mime: string; url: string }> {
-  const request = deps.fetch ?? fetch, resolve = deps.resolve ?? dns;
+export async function downloadMedia(raw: string, deps: DownloadDeps = {}): Promise<{ bytes: Uint8Array; mime: string; url: string; contentType: string }> {
+  const deadline = AbortSignal.timeout(20_000);
+  const signal = deps.signal ? AbortSignal.any([deps.signal, deadline]) : deadline;
+  const request = deps.fetch ?? fetch, resolve = deps.resolve ?? ((host: string) => dns(host, signal));
+  const maxBytes = Math.min(FILE_MAX_BYTES, deps.maxBytes ?? FILE_MAX_BYTES);
   let next = raw;
   for (let redirects = 0; redirects <= 3; redirects++) {
+    signal.throwIfAborted();
     const url = await checkedUrl(next, resolve);
-    const response = await request(url, { redirect: "manual", signal: AbortSignal.timeout(20_000), headers: { Accept: "*/*" } });
+    signal.throwIfAborted();
+    const response = await request(url, { redirect: "manual", signal, headers: { Accept: "*/*" } });
     if ([301,302,303,307,308].includes(response.status)) {
       await response.body?.cancel();
       const location = response.headers.get("Location");
@@ -68,21 +76,23 @@ export async function downloadMedia(raw: string, deps: DownloadDeps = {}): Promi
       await response.body?.cancel();
       throw new MediaDownloadError(response.status, url.hostname);
     }
+    const contentType = response.headers.get("Content-Type") ?? "", mime = safeMime(contentType);
+    if (deps.contentTypes && !deps.contentTypes.has(mime)) { await response.body.cancel(); throw new Error("unsupported_type"); }
     const length = Number(response.headers.get("Content-Length"));
-    if (Number.isFinite(length) && length > FILE_MAX_BYTES) { await response.body.cancel(); throw new Error("too_large"); }
+    if (Number.isFinite(length) && length > maxBytes) { await response.body.cancel(); throw new Error("too_large"); }
     const reader = response.body.getReader(), chunks: Uint8Array[] = [];
     let size = 0;
     for (;;) {
       const chunk = await reader.read();
       if (chunk.done) break;
       size += chunk.value.byteLength;
-      if (size > FILE_MAX_BYTES) { await reader.cancel(); throw new Error("too_large"); }
+      if (size > maxBytes) { await reader.cancel(); throw new Error("too_large"); }
       chunks.push(chunk.value);
     }
     const bytes = new Uint8Array(size);
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-    return { bytes, mime: safeMime(response.headers.get("Content-Type") ?? undefined), url: url.href };
+    return { bytes, mime, contentType, url: url.href };
   }
   throw new Error("media_redirect_denied");
 }

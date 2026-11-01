@@ -10,6 +10,7 @@ export function installCodemode(registry: Registry, options: {
 }) {
   const sandbox = createInlineCodemodeSandbox();
   const extension = () => createCodemodeExtension({ sandbox, models: false, namespaces: [
+    { name: "web-media", prefix: "web_", description: "公开网页原文读取、脚本解析与图片资产导入" },
     { name: "remote-sandbox", prefix: "sandbox_", description: "远程沙箱资源、租约与工具调用" },
     { name: "workspace-skills", prefix: "skill_", description: "Cloudflare 工作区技能检查与发布" },
     ...options.namespaces?.() ?? [],
