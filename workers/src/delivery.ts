@@ -1,3 +1,4 @@
+import type { AdminCursor } from "./admin/pagination";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { digest } from "./grants";
@@ -66,11 +67,14 @@ export class DeliveryStore {
       ...(row.message_id?{messageId:row.message_id}:{}),...(row.error?{error:row.error}:{})},intent:value,echo:row.echo,connectionId:row.connection_id,mention:row.mention===1,attemptedAt:row.started_at,senderId:row.sender_id};
   }
   required(id:string):StoredDelivery {const value=this.get(id);if(!value)throw new Error("delivery_not_found");return value;}
-  list(input:{state?:DeliveryState;limit?:number}={}):Delivery[] {
-    const limit=Math.min(200,Math.max(1,input.limit??50));
-    const rows=input.state?this.storage.sql.exec<{id:string}>("SELECT id FROM delivery_intents WHERE state=? ORDER BY created_at DESC,id LIMIT ?",input.state,limit)
-      :this.storage.sql.exec<{id:string}>("SELECT id FROM delivery_intents ORDER BY created_at DESC,id LIMIT ?",limit);
-    return rows.toArray().map(row=>this.required(row.id).receipt);
+  list(input:{state?:DeliveryState;limit?:number;before?:AdminCursor}={}):Delivery[] {
+    const limit=Math.min(200,Math.max(1,input.limit??50)),where:string[]=[],args:(string|number)[]=[];
+    if(input.state){where.push("state=?");args.push(input.state);}
+    if(input.before){where.push("(created_at<? OR (created_at=? AND id>?))");args.push(input.before.at,input.before.at,input.before.id);}
+    const rows=this.storage.sql.exec<Pick<Row,"id"|"state"|"payload_hash"|"created_at"|"updated_at"|"message_id"|"error">>(
+      "SELECT id,state,payload_hash,created_at,updated_at,message_id,error FROM delivery_intents"+(where.length?" WHERE "+where.join(" AND "):"")+" ORDER BY created_at DESC,id LIMIT ?",...args,limit);
+    return rows.toArray().map(row=>({id:row.id,state:row.state,payloadHash:row.payload_hash,createdAt:row.created_at,updatedAt:row.updated_at,
+      ...(row.message_id?{messageId:row.message_id}:{}),...(row.error?{error:row.error}:{})}));
   }
   begin(id:string,echo:string,connectionId:string,target:Target,senderId?:string):StoredDelivery {
     return this.storage.transactionSync(()=>{

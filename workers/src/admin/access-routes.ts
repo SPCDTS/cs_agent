@@ -1,3 +1,4 @@
+import { ADMIN_PAGE_SIZE, readAdminCursor, nextAdminCursor } from "./pagination";
 import { Type, type TSchema, type Static } from "typebox";
 import { Check } from "typebox/value";
 import type { AdminRoute } from "./routes";
@@ -39,8 +40,14 @@ export function accessRoutes():AdminRoute[]{const routes:AdminRoute[]=[
     const input=await read(request,Type.Object({value:OpsSettingsSchema,expected:Type.String({minLength:1,maxLength:100})},strict));
     const result=await env.REGISTRY.getByName("main").putOpsSettings(input.value,input.expected);return json(result,result.ok?200:409);
   }},
-  {method:"GET",path:"/admin/alerts",handle:async({env})=>json({alerts:await env.REGISTRY.getByName("main").alerts()})},
-  {method:"GET",path:"/admin/deliveries",handle:async({env})=>json({deliveries:await env.BRIDGE.getByName("napcat").deliveryList()})},
+  {method:"GET",path:"/admin/alerts",handle:async({env,url})=>{
+    const rows=await env.REGISTRY.getByName("main").alerts(ADMIN_PAGE_SIZE+1,readAdminCursor(url));
+    return json({alerts:rows.slice(0,ADMIN_PAGE_SIZE),next:nextAdminCursor(rows,row=>({at:row.updatedAt,id:row.id}))});
+  }},
+  {method:"GET",path:"/admin/deliveries",handle:async({env,url})=>{
+    const rows=await env.BRIDGE.getByName("napcat").deliveryList({limit:ADMIN_PAGE_SIZE+1,before:readAdminCursor(url)});
+    return json({deliveries:rows.slice(0,ADMIN_PAGE_SIZE),next:nextAdminCursor(rows,row=>({at:row.createdAt,id:row.id}))});
+  }},
   {method:"GET",path:/^\/admin\/deliveries\/(?<id>.+)$/,handle:async({env,params})=>{
     const delivery=await env.BRIDGE.getByName("napcat").delivery(params.id!);return delivery?json(delivery):json({error:"not_found"},404);
   }},

@@ -130,6 +130,7 @@ export const CONSOLE_APP_JS = String.raw`
     $("chat-thread-list").replaceChildren(...threads.map(t=>el("button",{className:"chat-thread",type:"button","aria-current":String(t.key===cs.chat),
       onclick:()=>chooseChat(t.key)},[el("span",{text:t.name||(t.key==="owner"?"主人会话":t.key)}),el("small",{text:t.key})])));
     renderTopology();
+    paginateChildren($("chat-thread-list"));
   }
   function chooseChat(key){
     cs.chat=key;cs.chatVersion++;cs.fingerprint="";resetChatTrace();
@@ -151,7 +152,7 @@ export const CONSOLE_APP_JS = String.raw`
   window.addEventListener("resize",()=>{clearTimeout(cs.resizeTimer);cs.resizeTimer=setTimeout(()=>{if(cs.chart&&cs.view==="usage")drawTokens(cs.chart.u,cs.chart.since,cs.chart.until);},100);});
   function resetConsole(){
     resetSandboxAdmin();
-    resetTopology();
+    listPages.clear();resetTopology();
     clearTimeout(cs.timer);cs.timer=null;detailCache.clear();toolCache.clear();resetChatTrace();cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
     $("session-history").close();sh.version++;
     $("request-detail").close();$("detail-body").replaceChildren();$("chat-messages").replaceChildren();

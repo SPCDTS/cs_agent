@@ -53,6 +53,7 @@ export const MCP_ADMIN_APP_JS = String.raw`
       list.append(el("label", { className: "row", style: "gap:5px" }, [checkbox, el("span", { className: "mono", text: name }),
         el("span", { className: "small muted", text: server.readOnly.includes(name) ? "只读" : "成员逐次审批" })]));
     }
+    paginateChildren(list,{key:"mcp-access-tools:"+selection.scope+":"+selection.server});
   }
   function mcpUiGrant(grant) {
     mcpUi.revision = grant ? grant.revision : "none";
@@ -86,6 +87,7 @@ export const MCP_ADMIN_APP_JS = String.raw`
       ]));
     }
     if (!rows.length) list.append(el("div", { className: "muted", text: mcpUiNode("mcp-approvals-pending").checked ? "当前没有待审批调用。" : "当前没有调用审批记录。" }));
+    paginateChildren(list,{key:"mcp-approvals:"+mcpUiNode("mcp-approvals-pending").checked});
   }
   async function mcpUiLoad() {
     if (!readToken()) return;
@@ -123,7 +125,7 @@ export const MCP_ADMIN_APP_JS = String.raw`
     const rawExpiry = mcpUiNode("mcp-access-expires").value;
     const expiresAt = rawExpiry ? new Date(rawExpiry).getTime() : null;
     if (!revoke && expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) { show("请选择未来的授权到期时间。", "error"); return; }
-    const input = { tools: revoke ? [] : [...mcpUiNode("mcp-access-tools").querySelectorAll("input:checked")].map(node => node.value),
+    const input = { tools: revoke ? [] : listInputs(mcpUiNode("mcp-access-tools"),"input:checked").map(node => node.value),
       resourceAllow: revoke ? [] : mcpUiLines(mcpUiNode("mcp-access-resources").value), actors: actors.length ? actors : ["*"], expiresAt: revoke ? null : expiresAt };
     button.disabled = true;
     try {

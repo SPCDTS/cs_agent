@@ -20,7 +20,7 @@ export const MEMORY_MANAGER_JS = String.raw`
       };
       $("memory-detail-body").replaceChildren(el("p",{text:value.row.text}),el("p",{className:"muted small",text:"状态："+value.row.status+" · 类型："+value.row.kind}),
         el("button",{className:"btn",text:"恢复已遗忘内容",disabled:value.row.status!=="forgotten",onclick:()=>restore()}),
-        el("h3",{text:"版本"}),...value.versions.map(v=>el("details",{className:"context-part"},[el("summary",{text:"#"+v.id+" · "+time(v.at*1000)+" · "+v.reason}),el("pre",{text:v.after_json}),el("button",{className:"btn",text:"恢复此版本",onclick:()=>restore(v.id)})])),
+        el("h3",{text:"版本"}),paginatedBlock("memory-versions:"+ns+":"+id,value.versions.map(v=>el("details",{className:"context-part"},[el("summary",{text:"#"+v.id+" · "+time(v.at*1000)+" · "+v.reason}),el("pre",{text:v.after_json}),el("button",{className:"btn",text:"恢复此版本",onclick:()=>restore(v.id)})]))),
         el("h3",{text:"关联"}),el("pre",{className:"context-text",text:JSON.stringify(value.links,null,2)}));
       if(!$("memory-detail").open)$("memory-detail").showModal();
     }catch(error){fail(error);}
@@ -35,12 +35,12 @@ export const MEMORY_MANAGER_JS = String.raw`
       $("memory-detail-body").replaceChildren(
         el("div",{className:"row"},[el("button",{className:"btn",text:"整理记忆",onclick:()=>action("/admin/memory/consolidate")}),el("button",{className:"btn",text:"生成画像建议",onclick:()=>action("/admin/memory/proposals")})]),
         el("p",{className:"muted small",text:"这两项操作会调用模型；画像建议需确认后才写入。"}),el("h3",{text:"待审画像建议"}),
-        ...proposals.proposals.map(p=>{
+        paginatedBlock("memory-proposals:"+ns,proposals.proposals.map(p=>{
           const buttons=["accept","reject"].map(decision=>el("button",{className:"btn",text:decision==="accept"?"采纳":"拒绝",
             onclick:()=>action("/admin/memory/proposals/"+p.id+"/"+decision,{expectedRevision:p.based_on_revision})}));
           return el("section",{className:"context-part"},[el("pre",{text:p.text}),el("div",{className:"row"},buttons)]);
-        }),
-        el("h3",{text:"整理记录"}),...jobs.jobs.map(j=>el("section",{className:"context-part"},[el("p",{text:time(j.started_at)+" · "+j.status}),el("pre",{text:j.report_json||"暂无报告"}),j.status==="ok"?el("button",{className:"btn",text:"回滚此批次",onclick:()=>{if(confirm("回滚该批次的整理结果？"))action("/admin/memory/jobs/"+j.id+"/rollback");}}):null])));
+        })),
+        el("h3",{text:"整理记录"}),paginatedBlock("memory-jobs:"+ns,jobs.jobs.map(j=>el("section",{className:"context-part"},[el("p",{text:time(j.started_at)+" · "+j.status}),el("pre",{text:j.report_json||"暂无报告"}),j.status==="ok"?el("button",{className:"btn",text:"回滚此批次",onclick:()=>{if(confirm("回滚该批次的整理结果？"))action("/admin/memory/jobs/"+j.id+"/rollback");}}):null]))));
       if(!$("memory-detail").open)$("memory-detail").showModal();
     }catch(error){fail(error);}
   }

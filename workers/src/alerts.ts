@@ -1,3 +1,4 @@
+import type { AdminCursor } from "./admin/pagination";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import type { OpsSettings } from "./settings";
@@ -24,7 +25,10 @@ export class AlertStore {
   }
   private view(row:AlertRow):AlertView{return {id:row.id,kind:row.kind,scope:row.scope,episode:row.episode,origin:row.origin,message:row.message,createdAt:row.created_at,updatedAt:row.updated_at,closedAt:row.closed_at,notifiedAt:row.notified_at,deliveryId:row.delivery_id,status:row.status};}
   private get(id:string):AlertView|undefined{const row=this.storage.sql.exec<AlertRow>("SELECT * FROM ops_alerts WHERE id=?",id).toArray()[0];return row?this.view(row):undefined;}
-  list(limit=100):AlertView[]{return this.storage.sql.exec<AlertRow>("SELECT * FROM ops_alerts ORDER BY updated_at DESC,id LIMIT ?",Math.min(200,Math.max(1,limit))).toArray().map(row=>this.view(row));}
+  list(limit=100,before?:AdminCursor):AlertView[]{
+    const args=before?[before.at,before.at,before.id]:[];
+    return this.storage.sql.exec<AlertRow>("SELECT * FROM ops_alerts"+(before?" WHERE updated_at<? OR (updated_at=? AND id>?)":"")+" ORDER BY updated_at DESC,id LIMIT ?",...args,Math.min(200,Math.max(1,limit))).toArray().map(row=>this.view(row));
+  }
   record(input:AlertInput,now=Date.now()):AlertView{
     if(!Check(AlertInputSchema,input))throw new Error("invalid_alert");
     const id=JSON.stringify([input.kind,input.scope,input.origin,input.episode]);

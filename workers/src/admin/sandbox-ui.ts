@@ -30,7 +30,7 @@ export const SANDBOX_APP_JS = String.raw`
     if(descriptor.environment?.length)details.append(el("p",{className:"muted small",text:descriptor.environment.map(item=>item.name+" "+item.version).join(" · ")}));
     details.append(el("strong",{text:"使用说明"}),el("div",{className:"profile-text",text:descriptor.instructions||"此设备尚未提供使用说明，请更新连接器。"}),el("strong",{text:"文件与缓存"}),el("div",{className:"profile-text",text:descriptor.persistence||"尚未提供持久化说明"}));
     if(descriptor.codeModeTools?.length)details.append(el("p",{className:"mono",text:"Code Mode 工具："+descriptor.codeModeTools.join("、")}));
-    for(const tool of descriptor.tools||[])details.append(el("details",{className:"source","data-sandbox-detail":key+":"+tool.name},[el("summary",{text:tool.name}),el("p",{className:"profile-text",text:tool.description}),el("pre",{className:"profile-text mono",text:JSON.stringify(tool.inputSchema,null,2)})]));
+    details.append(paginatedBlock("sandbox-tools:"+key,(descriptor.tools||[]).map(tool=>el("details",{className:"source","data-sandbox-detail":key+":"+tool.name},[el("summary",{text:tool.name}),el("p",{className:"profile-text",text:tool.description}),el("pre",{className:"profile-text mono",text:JSON.stringify(tool.inputSchema,null,2)})]))));
     return details;
   }
   function sandboxButton(text,action,disabled=false,danger=false){return el("button",{type:"button",className:"btn compact"+(danger?" danger":""),text,disabled:disabled||sandboxAdmin.busy,onclick:action});}
@@ -64,6 +64,7 @@ export const SANDBOX_APP_JS = String.raw`
     }
     $("sandbox-builtin").replaceChildren(el("div",{className:"row"},[el("strong",{text:data.builtin.name}),pill("按需启动","neutral")]),sandboxDescription(data.builtin,data.builtin.id));
     for(const node of document.querySelectorAll("[data-sandbox-detail]"))if(opened.has(node.dataset.sandboxDetail))node.open=true;
+    paginateChildren(list);
   }
   async function loadSandboxAdmin(){
     if(!readToken())return;const version=++sandboxAdmin.loading,epoch=cs.epoch;

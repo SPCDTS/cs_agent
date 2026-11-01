@@ -201,7 +201,7 @@ export class BridgeDO extends DurableObject<Env> {
     });
   }
   delivery(id: string): Delivery | undefined { return this.ledger.get(id)?.receipt; }
-  deliveryList(input:{state?:DeliveryState;limit?:number}={}): Delivery[] { return this.ledger.list(input); }
+  deliveryList(input:Parameters<DeliveryStore["list"]>[0]={}): Delivery[] { return this.ledger.list(input); }
   cancelQueued(input:{thread:string;generation:number}): { cancelled:number } { return {cancelled:this.ledger.cancelQueued(input)}; }
 
   private async sourceValid(source:DeliverySource,target:Target):Promise<boolean>{

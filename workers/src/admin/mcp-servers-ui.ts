@@ -39,6 +39,7 @@ export const MCP_SERVERS_JS = String.raw`
       list.append(el("div",{className:"source"},[el("div",{className:"row"},[el("label",{className:"row"},[enabled,el("strong",{text:tool.name})]),el("label",{className:"row"},[readonly,el("span",{text:"确认为只读"})])]),
         el("div",{className:"muted small",text:tool.description})]));
     }
+    paginateChildren($("mcp-server-tools"),{key:"mcp-server-tools:"+id});
   }
   async function loadMcpServers(selected=mcpServers.selected){
     if(!readToken())return;const version=++mcpServers.loading,epoch=cs.epoch;
@@ -52,8 +53,8 @@ export const MCP_SERVERS_JS = String.raw`
     if(action==="put")input={action,expectedRevision,server:{id,url:$("mcp-server-url").value.trim(),auth:$("mcp-server-auth").value,headers:mcpServers.rows.find(row=>row.server.id===id)?.server.transport.headers||{},...($("mcp-server-scope").value.trim()?{scope:$("mcp-server-scope").value.trim()}:{})}};
     if(action==="login")input={action,id};
     if(action==="activate"){
-      const allow=[...$("mcp-server-tools").querySelectorAll("input[data-tool]:checked")].map(node=>node.dataset.tool);
-      input.selection={allow,readOnly:[...$("mcp-server-tools").querySelectorAll("input[data-readonly]:checked")].map(node=>node.dataset.readonly).filter(name=>allow.includes(name)),resourceAllow:mcpUiLines($("mcp-server-resources").value)};
+      const allow=listInputs($("mcp-server-tools"),"input[data-tool]:checked").map(node=>node.dataset.tool);
+      input.selection={allow,readOnly:listInputs($("mcp-server-tools"),"input[data-readonly]:checked").map(node=>node.dataset.readonly).filter(name=>allow.includes(name)),resourceAllow:mcpUiLines($("mcp-server-resources").value)};
     }
     $("mcp-server-state").textContent="处理中…";
     try{

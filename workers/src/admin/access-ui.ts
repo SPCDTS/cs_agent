@@ -53,7 +53,7 @@ export const ACCESS_HTML = `
 </section>`;
 
 export const ACCESS_APP_JS = String.raw`
-  const accessState={persona:null,ops:null,overrides:{}};
+  const accessState={persona:null,ops:null,overrides:{},alerts:{cursor:undefined,history:[],version:0},deliveries:{cursor:undefined,history:[],version:0}};
   const accessLimitNames=["perChatMinute","perChatHour","chatBreakerMinutes","globalMinute","globalBreakerMinutes"];
   const accessRetentionNames=["rawDays","rawHardMaxDays","summaryDays","eventsDays"];
   const accessRetentionLabels={rawDays:"原文",rawHardMaxDays:"原文上限",summaryDays:"摘要",eventsDays:"事件"};
@@ -81,6 +81,7 @@ export const ACCESS_APP_JS = String.raw`
       body.append(el("tr",{},[accessCell(grant.user),accessCell(grant.caps.map(cap=>cap==="send"?"主动发送":"定时").join("、")),accessCell(targets+" / "+scopes),accessCell((grant.expired?"已过期 · ":"")+(grant.expires_at?time(grant.expires_at):"长期")),el("td",{},[revoke])]));
     }
     if(!data.grants.length)accessEmpty("access-grants",5);
+    paginateChildren($("access-grants"));
   }
   function renderAccessOverrides(){
     const body=$("access-overrides");body.replaceChildren();
@@ -91,6 +92,7 @@ export const ACCESS_APP_JS = String.raw`
       body.append(el("tr",{},[accessCell(thread),accessCell(parts.join("，")||"沿用全局"),el("td",{},[remove])]));
     }
     if(!Object.keys(accessState.overrides).length)accessEmpty("access-overrides",3,"全部会话沿用全局默认");
+    paginateChildren($("access-overrides"));
   }
   async function loadAccessOps(){
     const snapshot=await api("GET","/admin/ops-settings"),value=snapshot.value;accessState.ops=snapshot;accessState.overrides=structuredClone(value.threads);
@@ -100,13 +102,27 @@ export const ACCESS_APP_JS = String.raw`
     $("access-alert-throttle").value=value.alertThrottleMinutes;$("access-owner-throttle").value=value.ownerAlertThrottleMinutes;
     $("access-ops-revision").textContent="修订 "+snapshot.revision.slice(0,8);$("access-ops-save").disabled=false;renderAccessOverrides();
   }
-  async function loadAccessAlerts(){
-    const data=await api("GET","/admin/alerts"),body=$("access-alerts");body.replaceChildren();
+  async function accessPage(kind,render,reset=false){
+    const state=accessState[kind],version=++state.version,epoch=cs.epoch;
+    for(const button of listPager($("access-"+kind)).querySelectorAll("button"))button.disabled=true;
+    if(reset){state.cursor=undefined;state.history=[];}
+    const data=await api("GET","/admin/"+kind+(state.cursor?"?cursor="+encodeURIComponent(state.cursor):""));
+    if(version!==state.version||epoch!==cs.epoch)return;
+    render(data);
+    renderListPager($("access-"+kind),state.history.length+1,!!data.next,
+      ()=>{state.cursor=state.history.pop();accessPage(kind,render).catch(fail);},
+      ()=>{state.history.push(state.cursor);state.cursor=data.next;accessPage(kind,render).catch(fail);});
+  }
+  async function loadAccessAlerts(reset=false){
+    return accessPage("alerts",data=>{
+    const body=$("access-alerts");body.replaceChildren();
     for(const alert of data.alerts)body.append(el("tr",{},[accessCell(time(alert.updatedAt)+" / "+alert.scope),accessCell(alert.origin==="web"?"网页（仅面板）":"QQ"),accessCell(alert.message),accessCell((accessStates[alert.status]||alert.status)+(alert.closedAt?" · 已恢复":""))]));
     if(!data.alerts.length)accessEmpty("access-alerts",4);
+    },reset);
   }
-  async function loadAccessDeliveries(){
-    const data=await api("GET","/admin/deliveries"),body=$("access-deliveries");body.replaceChildren();
+  async function loadAccessDeliveries(reset=false){
+    return accessPage("deliveries",data=>{
+    const body=$("access-deliveries");body.replaceChildren();
     for(const delivery of data.deliveries){
       const actions=el("td");
       if(delivery.state==="unknown"&&delivery.error!=="delivery_evidence_expired"){
@@ -119,15 +135,16 @@ export const ACCESS_APP_JS = String.raw`
       body.append(el("tr",{},[accessCell(time(delivery.createdAt)+" / "+delivery.id),accessCell(accessStates[delivery.state]||delivery.state),accessCell(delivery.messageId||(accessErrors[delivery.error]||delivery.error)||"-"),actions]));
     }
     if(!data.deliveries.length)accessEmpty("access-deliveries",4);
+    },reset);
   }
   async function loadAccess(){
-    await Promise.all([loadAccessGrants(),loadAccessOps(),loadAccessAlerts(),loadAccessDeliveries()]);
+    await Promise.all([loadAccessGrants(),loadAccessOps(),loadAccessAlerts(true),loadAccessDeliveries(true)]);
     $("access-loaded").textContent="已刷新 "+time(Date.now());
   }
   if($("access-panel")){
     $("access-refresh").addEventListener("click",()=>accessRun($("access-refresh"),loadAccess));
-    $("access-alerts-refresh").addEventListener("click",()=>accessRun($("access-alerts-refresh"),loadAccessAlerts));
-    $("access-deliveries-refresh").addEventListener("click",()=>accessRun($("access-deliveries-refresh"),loadAccessDeliveries));
+    $("access-alerts-refresh").addEventListener("click",()=>accessRun($("access-alerts-refresh"),()=>loadAccessAlerts(true)));
+    $("access-deliveries-refresh").addEventListener("click",()=>accessRun($("access-deliveries-refresh"),()=>loadAccessDeliveries(true)));
     $("access-persona-form").addEventListener("submit",event=>{event.preventDefault();if(!accessState.persona)return;accessRun($("access-persona-save"),async()=>{
       const result=await api("PUT","/admin/persona",{text:$("access-persona").value,expected:accessState.persona.revision});
       accessState.persona=result.value;$("access-persona-revision").textContent="修订 "+result.value.revision.slice(0,8);show("人格已保存，下一回合生效","info");

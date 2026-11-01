@@ -164,7 +164,7 @@ export class RegistryDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec("INSERT INTO settings(key,value,revision,updated_at) VALUES ('ops',?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,revision=excluded.revision,updated_at=excluded.updated_at",JSON.stringify(value),opsSettingsRevision(value),Date.now());
     return {ok:true,current:this.opsSettings()};
   }
-  alerts(limit=100) { return this.alertStore.list(limit); }
+  alerts(limit=100,before?:Parameters<AlertStore["list"]>[1]) { return this.alertStore.list(limit,before); }
   recordAlert(input: AlertInput) { return this.alertStore.record(input); }
   resolveAlert(kind: AlertInput["kind"], scope: string, origin: AlertInput["origin"]) { this.alertStore.close(kind,scope,origin); }
   recordTurn(input: TurnReport): void { this.alertStore.recordTurn(input); }

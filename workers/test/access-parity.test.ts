@@ -4,6 +4,7 @@ import { DeliveryStore } from "../src/delivery";
 import { AlertStore } from "../src/alerts";
 import { defaultOpsSettings, threadOpsSettings } from "../src/settings";
 import { accessRoutes } from "../src/admin/access-routes";
+import worker from "../src/index";
 import { action,connect,reply } from "./helpers";
 
 const sockets:WebSocket[]=[];
@@ -168,6 +169,29 @@ describe("registry access and configuration",()=>{
     const tick=r.opsTick(),frame=await action(frames,0,"send_private_msg");reply(socket,frame.echo);await tick;
     expect(await r.alerts()).toEqual(expect.arrayContaining([expect.objectContaining({origin:"web",status:"panel"}),expect.objectContaining({origin:"qq",status:"sent"})]));
     await r.opsTick();expect(frames).toHaveLength(1);
+  });
+  it("pages admin deliveries and alerts in tens without losing records at the same timestamp",async()=>{
+    const at=Date.now();
+    await runInDurableObject(env.BRIDGE.getByName("napcat"),(_instance,state)=>{
+      const store=new DeliveryStore(state.storage);
+      for(let i=0;i<21;i++)store.create(intent("page-"+String(i).padStart(2,"0")),at);
+    });
+    await runInDurableObject(registry(),(_instance,state)=>{
+      const store=new AlertStore(state.storage);
+      for(let i=0;i<21;i++)store.record({kind:"model_auth",scope:"owner",origin:"web",episode:"page-"+String(i).padStart(2,"0"),message:"分页告警"},at);
+    });
+    for(const kind of ["deliveries","alerts"] as const){
+      type Page={deliveries?:{id:string}[];alerts?:{id:string}[];next?:string};
+      const ids:string[]=[],sizes:number[]=[];let cursor:string|undefined;
+      do{
+        const response=await worker.fetch(new Request("https://test/admin/"+kind+(cursor?"?cursor="+encodeURIComponent(cursor):""),{headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
+        expect(response.status).toBe(200);
+        const page=await response.json<Page>(),rows=page[kind]??[];
+        sizes.push(rows.length);ids.push(...rows.map(row=>row.id));cursor=page.next;
+        expect(sizes.length).toBeLessThanOrEqual(3);
+      }while(cursor);
+      expect(sizes).toEqual([10,10,1]);expect(new Set(ids).size).toBe(21);
+    }
   });
   it("exposes only authenticated admin route definitions and rejects invalid input",async()=>{
     const routes=accessRoutes();expect(routes.every(route=>!route.public)).toBe(true);

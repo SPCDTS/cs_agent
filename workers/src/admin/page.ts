@@ -1,4 +1,5 @@
 import { ADMIN_PAGE_SIZE } from "./pagination";
+import { PAGINATION_APP_JS } from "./pagination-ui";
 import { MCP_ADMIN_HTML, MCP_ADMIN_APP_JS } from "./mcp-ui";
 import { MCP_SERVERS_HTML, MCP_SERVERS_JS } from "./mcp-servers-ui";
 import { WORKSPACE_CSS, WORKSPACE_HTML, WORKSPACE_APP_JS } from "./workspace-ui";
@@ -322,6 +323,7 @@ ${SESSION_HTML}
 export const ADMIN_APP_JS = String.raw`"use strict";
 (() => {
   const ADMIN_PAGE_SIZE = ${ADMIN_PAGE_SIZE};
+  ${PAGINATION_APP_JS}
   const TOKEN_KEY = "cs-agent-admin-token";
   const EVENT_KINDS = ["", "mcp_call", "mcp_catalog", "mcp_management", "memory_extract", "memory_write"];
   const MORE_KINDS = ["web_search", "generate_image", "coding_exec", "coding_read", "coding_write", "coding_edit"];
@@ -513,19 +515,20 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     $("card-rules").textContent = rules.length ? rules.length + " 个熔断" : "无熔断";
     const list = $("card-rules-list");
     clear(list);
-    if (!rules.length) { list.append(el("span", { className: "muted", text: "每会话 6 条/分 · 60 条/时，全局 30 条/分" })); return; }
+    if (!rules.length) { list.append(el("span", { className: "muted", text: "每会话 6 条/分 · 60 条/时，全局 30 条/分" })); paginateChildren(list); return; }
     for (const rule of rules) {
       list.append(el("div", { className: "row" }, [
         el("span", { className: "mono", text: (rule.scope === "global" ? "全部会话" : rule.scope) + " · 至 " + time(rule.until) }),
         el("button", { className: "btn compact", type: "button", text: "解除", onclick: () => release(rule.scope) }),
       ]));
     }
+    paginateChildren(list);
   }
   const SANDBOX_TEXT = { running: "运行中", stopped: "已停", unavailable: "不可用" };
   function renderThreads(threads) {
     const body = $("threads");
     clear(body);
-    if (!threads.length) { body.append(el("tr", {}, [el("td", { colspan: 8, className: "muted", text: "还没有会话" })])); return; }
+    if (!threads.length) { body.append(el("tr", {}, [el("td", { colspan: 8, className: "muted", text: "还没有会话" })])); paginateChildren(body,{attachedRows:true}); return; }
     for (const thread of threads) {
       const s = thread.stats, broken = "error" in s;
       const busy = !broken && s.inbound.queued > 0;
@@ -550,6 +553,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
       const open = state.subagents[thread.key];
       if (open) body.append(el("tr", {}, [el("td", { colspan: 8 }, [renderSubagents(thread.key, open.list)])]));
     }
+    paginateChildren(body,{attachedRows:true});
   }
 
   const SUBAGENT_STATUS = { running: ["运行中", "warn"], done: ["已完成", "ok"], failed: ["失败", "bad"], cancelled: ["已取消", "neutral"], timeout: ["已超时", "bad"] };
@@ -569,10 +573,11 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         el("td", {}, [sub.status === "running" ? el("button", { className: "btn compact danger", type: "button", text: "取消", onclick: () => cancelSubagent(key, sub.id) }) : null]),
       ]);
     });
-    return el("table", { className: "wide" }, [
+    const table=el("table", { className: "wide" }, [
       el("thead", {}, [el("tr", {}, ["id", "任务", "状态", "派出", "结束", "最近汇报", "派出者", ""].map(text => el("th", { text })))]),
       el("tbody", {}, rows),
     ]);
+    const box=el("div",{},[table]);paginateChildren(table.querySelector("tbody"),{key:"subagents:"+key});return box;
   }
   async function loadSubagents(key) {
     const list = await api("GET", "/admin/threads/" + encodeURIComponent(key) + "/subagents");
@@ -662,7 +667,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     state.schedules = list;
     const body = $("schedules");
     clear(body);
-    if (!list.length) { body.append(el("tr", {}, [el("td", { colspan: 8, className: "muted", text: "还没有定时任务，在 QQ 里让它“每天 8 点提醒我…”即可创建" })])); return; }
+    if (!list.length) { body.append(el("tr", {}, [el("td", { colspan: 8, className: "muted", text: "还没有定时任务，在 QQ 里让它“每天 8 点提醒我…”即可创建" })])); paginateChildren(body); return; }
     for (const s of list) {
       const status = SCHEDULE_STATUS[s.status] || [s.status, "neutral"];
       const last = s.runs[s.runs.length - 1], run = last && (RUN_STATUS[last.status] || [last.status, "neutral"]);
@@ -685,6 +690,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         ]),
       ]));
     }
+    paginateChildren(body);
   }
   function armSchedule(id) {
     state.armedSchedule = id;
@@ -710,8 +716,9 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     state.sources = view;
     const box = $("sources");
     clear(box);
-    if (!view.sources.length) { box.append(el("div", { className: "muted", text: "没有事件来源" })); return; }
+    if (!view.sources.length) { box.append(el("div", { className: "muted", text: "没有事件来源" })); paginateChildren(box); return; }
     for (const source of view.sources) box.append(renderSource(source, view));
+    paginateChildren(box);
   }
   function renderSource(source, view) {
     const status = source.paused ? ["已暂停", "warn"] : source.degraded ? ["降级", "bad"] : ["正常", "ok"];
@@ -723,8 +730,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     // 刷新只重画状态；正在编辑的设置表单原样搬回，不覆盖没保存的输入。
     const editing = state.editingSource === source.id && state.sourceForms[source.id];
     const form = editing || (state.sourceForms[source.id] = sourceForm(source));
-    const runs = view.runs.filter(run => run.source === source.id).slice(0, 10);
-    return el("div", { className: "source" }, [
+    const runs = view.runs.filter(run => run.source === source.id);
+    const card=el("div", { className: "source" }, [
       el("div", { className: "row" }, [
         el("strong", { className: "mono", text: source.id }), pill(status[0], status[1]), source.configured ? null : pill("未配置凭据", "neutral"),
         el("div", { className: "grow" }),
@@ -742,6 +749,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         })),
       ])]) : el("div", { className: "muted small", text: "还没有投递记录" }),
     ]);
+    const body=card.querySelector("tbody");if(body)paginateChildren(body,{key:"source-runs:"+source.id});return card;
   }
   function sourceForm(source) {
     const s = source.settings, quiet = s.quietHours || { start: "", end: "" };
@@ -807,6 +815,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
       ]));
     }
     if (!servers.length) list.append(el("div", { className: "muted", text: "尚未接入 MCP 服务" }));
+    paginateChildren(list);
   }
   function renderSecrets(configured) {
     const box = $("s-secrets");
@@ -1008,7 +1017,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     state.skills = skills;
     const body = $("skills");
     clear(body);
-    if (!skills.length) { body.append(el("tr", {}, [el("td", { colspan: 5, className: "muted", text: "还没有技能" })])); return; }
+    if (!skills.length) { body.append(el("tr", {}, [el("td", { colspan: 5, className: "muted", text: "还没有技能" })])); paginateChildren(body); return; }
     for (const skill of skills) {
       const armed = state.armedSkill === skill.name;
       body.append(el("tr", {}, [
@@ -1023,6 +1032,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         ]),
       ]));
     }
+    paginateChildren(body);
   }
   // 名字只用来拼 URL；格式与一致性由服务端校验。
   function skillName(markdown) {
