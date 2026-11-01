@@ -3,6 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { Static, TSchema } from "typebox";
 import type { SandboxDO } from "../sandbox/do";
+import { CLOUDFLARE_SANDBOX } from "../sandbox/registration";
 import { EXEC_MAX_TIMEOUT_MS, sandboxFailure, WORK_ROOT, type SandboxFailure } from "../sandbox/client";
 
 export type SandboxApi = Pick<SandboxDO, "exec" | "readFile" | "writeFile" | "editFile">;
@@ -42,9 +43,6 @@ const FAILURES: Record<SandboxFailure, string> = {
   sandbox_error: "沙箱返回了意外错误。",
 };
 const NOT_ALLOWED = "只有主人亲自发消息的回合可以使用沙箱工具；本回合请先告诉主人。";
-export const SANDBOX_RULE = `沙箱工具 read / write / edit / bash 只通过 Code Mode 的 await tools.<名称>(参数) 调用，作用在本会话的 Cloudflare Linux 沙箱（Debian，带 python3、node、git、curl），工作目录 ${WORK_ROOT}，路径只能在 ${WORK_ROOT} 下。` +
-  `沙箱空闲 3 分钟后停止，已成功提交的 ${WORK_ROOT} 源码会从私有存储恢复；新产生的 .git、node_modules、.wrangler 只留在当前容器，停止或重建后可能丢失。源码快照单文件最多10MiB、总量最多50MiB，不支持符号链接。产物写到 ${WORK_ROOT}/out/，可用 send_file 发送。` +
-  `网络可用，但不要下载大文件或安装大型依赖；单条命令最长 ${EXEC_MAX_TIMEOUT_MS / 1000} 秒，不要起常驻服务。只有主人亲自发消息的回合可用。read 返回 {kind:"text",text} 或 {kind:"image",image}；文本用 text(result.text)，图片必须 image(result.image) 输出。`;
 
 export const SandboxReadOutput = Type.Union([
   Type.Object({ kind: Type.Literal("text"), text: Type.String() }, { additionalProperties: false }),
@@ -168,7 +166,7 @@ export function createCodingExtension(deps: CodingDeps) {
   ];
   return defineExtension({
     name: "cs.coding",
-    sections: [section("sandbox", async (api, context) => api.agent.callable.some(tool => tool.name === "bash") && await deps.allowed({ ...api.read, conversationId: api.conversationId }, context) ? SANDBOX_RULE : undefined, { tag: false })],
+    sections: [section("sandbox", async (api, context) => api.agent.callable.some(tool => tool.name === "bash") && await deps.allowed({ ...api.read, conversationId: api.conversationId }, context) ? CLOUDFLARE_SANDBOX.instructions : undefined, { tag: false })],
     tools: tools.map(tool => ({ ...tool, callers: ["tools"] as const })),
   });
 }

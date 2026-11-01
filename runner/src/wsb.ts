@@ -44,6 +44,11 @@ export async function descriptor(config: Pick<Config, "name" | "nodeDir" | "gitD
   const environment = [{ name: "node", version: node }, { name: "npm", version: npm }];
   if (config.gitDir) environment.push({ name: "git", version: (await command(path.join(config.gitDir, "cmd/git.exe"), ["--version"])).trim() });
   return validateDescriptor({ name: config.name, provider: "windows-wsb", os: "windows", arch: process.arch, workspaceRoot: "C:\\AgentWork",
+    instructions: "此沙箱提供 powershell 工具，在 Windows Sandbox 内执行命令，默认目录 C:\\AgentWork，cwd 必须是 guest 内的 Windows 路径。" +
+      "每次调用启动独立 PowerShell 进程，变量、环境修改和当前目录不跨调用保留；同一租约复用 VM，文件、.git、node_modules 与 npm 缓存保留在 guest。" +
+      "源码可用 git clone 或文件命令准备，不与其他沙箱或 R2 自动同步。运行 npm 请用 npm.cmd；外部程序失败后应检查 $LASTEXITCODE 并显式退出。" +
+      "完成后检查结果 code、stdout、stderr、timedOut；code=0 才表示进程成功。释放、取消、超时、连接器退出或实例丢失会销毁 guest，请提前保存需要保留的修改。",
+    persistence: "同一租约内保留文件和缓存；释放或实例丢失后丢弃，不做 R2 源码同步。",
     tools: [{ name: "powershell", description: "在当前租约的 Windows Sandbox 工作区 C:\\AgentWork 执行 PowerShell；正常完成保留文件、.git 与 node_modules。cwd 为 guest 路径，默认 C:\\AgentWork。", inputSchema: PowerShellInputSchema }],
     environment, memoryMiB: config.memoryMiB, maxConcurrent: 1, maxTimeoutMs: config.maxTimeoutMs, workspaceProtocol: "registered-tools-v2" });
 }

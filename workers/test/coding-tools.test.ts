@@ -2,6 +2,7 @@ import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { SandboxDO } from "../src/sandbox/do";
+import { CLOUDFLARE_SANDBOX } from "../src/sandbox/registration";
 import { workPath } from "../src/sandbox/client";
 import { RegistryDO } from "../src/registry";
 import { ThreadDO } from "../src/thread";
@@ -40,6 +41,7 @@ describe("coding tools", () => {
     const seen = scriptedModel([{ name: "", args: {} }, { name: "", args: {} }]);
     expect(await env.THREAD.getByName("owner").submit(input(1, "写个脚本", 10000001))).toEqual({ status: "done" });
     expect(seen.requests[0]!.tools).toContain("codemode");
+    expect(Object.values(seen.requests[0]!.sections)).toContain(CLOUDFLARE_SANDBOX.instructions);
     for (const name of [...CODING_TOOLS, "skill_inspect", "skill_publish"]) expect(seen.requests[0]!.tools).not.toContain(name);
     expect(await env.THREAD.getByName("group:200000001").submit(input(2, "跑个脚本", 10000003, 200000001, true))).toEqual({ status: "done" });
     for (const name of CODING_TOOLS) expect(seen.requests[1]!.tools).not.toContain(name);
@@ -55,24 +57,30 @@ describe("coding tools", () => {
     expect(seen.outputs.join("\n")).toContain("ok");
   });
 
-  it("lists, acquires and calls a registered WSB tool in one Code Mode script", async () => {
+  it.each([
+    { provider: "windows-wsb", os: "windows", tool: "powershell", script: "Write-Output hello", root: "C:\\AgentWork", instructions: "使用 PowerShell；文件保留到释放。" },
+    { provider: "custom-notebook", os: "linux", tool: "python_cell", script: "print('hello')", root: "/notebooks", instructions: "使用 python_cell；变量保留到 kernel 重启，输出为 cell 结果。" },
+  ])("renders $provider registration instructions and calls its tool in one Code Mode script", async target => {
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
     const deviceId = "11111111-1111-1111-1111-111111111111", sandboxId = "remote:" + deviceId, revision = "a".repeat(64);
-    const resource: CatalogEntry = { id: sandboxId, name: "WSB", provider: "windows-sandbox", os: "windows", arch: "x64",
-      tools: [{ name: "powershell", description: "执行 PowerShell", inputSchema: { type: "object", properties: { script: { type: "string" } }, required: ["script"] } }],
+    const resource: CatalogEntry = { id: sandboxId, name: "测试沙箱", provider: target.provider, os: target.os, arch: "x64", instructions: target.instructions,
+      tools: [{ name: target.tool, description: "执行代码", inputSchema: { type: "object", properties: { script: { type: "string" } }, required: ["script"] } }],
       memoryMiB: 4096, maxTimeoutMs: 120000, capabilityRevision: revision, availability: "ready", activeJobs: 0,
-      workspaceRoot: "C:\\AgentWork", persistence: "lease", mismatch: [] };
+      workspaceRoot: target.root, persistence: "由测试提供方管理持久卷。", mismatch: [] };
     vi.spyOn(SandboxFleetDO.prototype, "catalogJson").mockResolvedValue(JSON.stringify([resource]));
     vi.spyOn(SandboxFleetDO.prototype, "sessions").mockResolvedValue([]);
     const workspace = env.SANDBOX.idFromName("owner").toString();
     vi.spyOn(SandboxFleetDO.prototype, "acquire").mockResolvedValue({ id: "lease-one", deviceId, sandboxId, workspace,
       operationId: "fixture", capabilityRevision: revision, requirements: {}, createdAt: 1 });
     const invoke = vi.spyOn(SandboxFleetDO.prototype, "invoke").mockResolvedValue({ jobId: "job-one", phase: "dispatched" });
-    const seen = scriptedModel([{ name: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes[0]; const lease=await tools.sandbox_acquire({sandboxId:target.id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:target.tools[0].name,arguments:{script:"Write-Output hello"}}));' } }]);
+    const seen = scriptedModel([{ name: "codemode", args: { code: `const list=await tools.sandbox_list({}); const target=list.sandboxes[0]; text(target.instructions); const lease=await tools.sandbox_acquire({sandboxId:target.id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:target.tools[0].name,arguments:{script:${JSON.stringify(target.script)}}}));` } }]);
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       await new ThreadDO(state, { ...env, REMOTE_SANDBOX_ENABLED: "true", MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(1, "远程运行", 10000001));
     });
-    expect(invoke, seen.outputs.join("\n")).toHaveBeenCalledWith(workspace, expect.stringMatching(/^task:/), { leaseId: "lease-one", tool: "powershell", arguments: { script: "Write-Output hello" }, timeoutMs: 120000 });
+    expect(invoke, seen.outputs.join("\n")).toHaveBeenCalledWith(workspace, expect.stringMatching(/^task:/), { leaseId: "lease-one", tool: target.tool, arguments: { script: target.script }, timeoutMs: 120000 });
+    expect(Object.values(seen.requests[0]!.sections).join("\n")).toContain(target.instructions);
+    expect(Object.values(seen.requests[0]!.sections).join("\n")).toContain(resource.persistence);
+    expect(seen.outputs.join("\n")).toContain(target.instructions);
     expect(seen.outputs.join("\n")).toContain("job-one");
     for (const name of ["sandbox_list", "sandbox_acquire", "sandbox_call", "sandbox_job", "sandbox_release"]) expect(seen.requests[0]!.tools).not.toContain(name);
   });

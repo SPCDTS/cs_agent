@@ -14,10 +14,13 @@ export const JsonValueSchema = Type.Unsafe<JsonValue>(Type.Cyclic({ Json: Type.U
 export const JsonObjectSchema = Type.Record(Type.String(), JsonValueSchema);
 export const ToolDeclarationSchema = Type.Object({ name: ToolNameSchema, description: Type.String({ minLength: 1, maxLength: 2000 }), inputSchema: JsonObjectSchema }, strict);
 export type ToolDeclaration = Static<typeof ToolDeclarationSchema>;
+export const SandboxInstructionsSchema = Type.String({ minLength: 1, maxLength: 4000 });
+export const SandboxPersistenceSchema = Type.String({ minLength: 1, maxLength: 1000 });
 export const DescriptorSchema = Type.Object({
   name: Type.String({ minLength: 1, maxLength: 80 }), provider: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }),
   os: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), arch: Type.String({ pattern: "^[a-z0-9_-]{1,40}$" }),
   workspaceRoot: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })),
+  instructions: SandboxInstructionsSchema, persistence: SandboxPersistenceSchema,
   tools: Type.Array(ToolDeclarationSchema, { minItems: 1, maxItems: 16 }),
   environment: Type.Optional(Type.Array(Type.Object({ name: Type.String({ minLength: 1, maxLength: 80 }), version: Type.String({ minLength: 1, maxLength: 120 }) }, strict), { maxItems: 64 })),
   memoryMiB: Type.Integer({ minimum: 1, maximum: 1048576 }), maxConcurrent: Type.Literal(1),

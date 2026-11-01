@@ -2,18 +2,20 @@ import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, expect, it } from "vitest";
 import { readCatalog, readJob, readJobInput } from "../src/remote-sandbox/wire";
 import { hash } from "../src/remote-sandbox/fleet";
+import { CLOUDFLARE_SANDBOX } from "../src/sandbox/registration";
 import { remoteSandboxRoutes } from "../src/remote-sandbox/routes";
 import { PowerShellInputSchema, PROTOCOL_VERSION, parse, JsonObjectSchema, type Descriptor } from "../../runner/src/protocol";
 const sockets: WebSocket[] = [];
 afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); await reset(); });
 const descriptor: Descriptor = { name: "测试 WSB", provider: "windows-wsb", os: "windows", arch: "x64",
+  instructions: "使用 powershell，工作区在 guest 内。", persistence: "同租约保留，释放后丢弃。",
   tools: [{ name: "powershell", description: "在 guest 中运行命令", inputSchema: parse(JsonObjectSchema, JSON.parse(JSON.stringify(PowerShellInputSchema))) }],
   environment: [{ name: "node", version: "v24" }], memoryMiB: 4096, maxConcurrent: 1, maxTimeoutMs: 1200000, workspaceProtocol: "registered-tools-v2" };
 const fleet = () => env.SANDBOX_FLEET.getByName("owner");
 const nextFrame = (socket: WebSocket) => new Promise<MessageEvent>(resolve => socket.addEventListener("message", resolve, { once: true }));
-async function register() {
+async function register(registration: Descriptor = descriptor) {
   const pairing = await fleet().createPairing(), token = "a".repeat(64);
-  const claim = { pairingId: pairing.pairingId, code: pairing.code, tokenHash: await hash(token), descriptor };
+  const claim = { pairingId: pairing.pairingId, code: pairing.code, tokenHash: await hash(token), descriptor: registration };
   const device = await fleet().claim(claim);
   expect(await fleet().claim(claim)).toEqual(device);
   expect(readCatalog(await fleet().catalogJson())).toHaveLength(1);
@@ -22,18 +24,40 @@ async function register() {
   const response = await fleet().fetch(new Request("https://test/connect?device=" + device.deviceId, { headers: { Upgrade: "websocket", Authorization: "Bearer " + token } }));
   const socket = response.webSocket!; socket.accept(); sockets.push(socket);
   const welcome = nextFrame(socket);
-  socket.send(JSON.stringify({ kind: "hello", protocolVersion: PROTOCOL_VERSION, descriptor }));
+  socket.send(JSON.stringify({ kind: "hello", protocolVersion: PROTOCOL_VERSION, descriptor: registration }));
   expect(JSON.parse((await welcome).data).kind).toBe("welcome");
-  return { deviceId: device.deviceId, token, socket, revision: await hash(JSON.stringify(descriptor)) };
+  return { deviceId: device.deviceId, token, socket, revision: await hash(JSON.stringify(registration)) };
 }
 const request = (leaseId: string, command = "Write-Output '中文'") => ({ leaseId, tool: "powershell", arguments: { command }, timeoutMs: 1000 });
 const completed = { kind: "completed", result: { stdout: "测试通过", stderr: "", code: 0, timedOut: false, truncated: false } };
+it("自定义沙箱的使用说明随注册更新，目录保留提供方语义并使旧能力版本失效", async () => {
+  const registration: Descriptor = { ...descriptor, name: "研究环境", provider: "custom-notebook", os: "linux", workspaceRoot: "/notebooks",
+    instructions: "使用 python_cell；变量保留到 kernel 重启。", persistence: "外部卷跨租约保留。",
+    tools: [{ name: "python_cell", description: "运行 Python 单元并返回 value", inputSchema: { type: "object", properties: { code: { type: "string" } }, required: ["code"], additionalProperties: false } }] };
+  const device = await register(registration);
+  const catalog = readCatalog(await fleet().catalogJson({ tools: ["python_cell"] }));
+  expect(catalog.find(row => row.id === "cloudflare")).toMatchObject({ instructions: CLOUDFLARE_SANDBOX.instructions, codeModeTools: CLOUDFLARE_SANDBOX.codeModeTools });
+  expect(catalog.find(row => row.id.startsWith("remote:"))).toMatchObject({ instructions: registration.instructions, persistence: registration.persistence, mismatch: [] });
+  const updated = { ...registration, instructions: "使用 python_cell；返回 value，无进程退出码。" };
+  const welcome = nextFrame(device.socket);
+  device.socket.send(JSON.stringify({ kind: "hello", protocolVersion: PROTOCOL_VERSION, descriptor: updated }));
+  expect(JSON.parse((await welcome).data).kind).toBe("welcome");
+  const current = readCatalog(await fleet().catalogJson()).find(row => row.id.startsWith("remote:"))!;
+  expect(current.instructions).toBe(updated.instructions);
+  expect(current.capabilityRevision).not.toBe(device.revision);
+  const args = { sandboxId: current.id, workspace: "owner", operationId: "notebook-lease", requirements: {} };
+  await expect((async () => await fleet().acquire({ ...args, capabilityRevision: device.revision }))()).rejects.toThrow("capability_changed");
+  const lease = await fleet().acquire({ ...args, capabilityRevision: current.capabilityRevision });
+  const call = await fleet().invoke("owner", "notebook-call", { leaseId: lease.id, tool: "python_cell", arguments: { code: "6 * 7" }, timeoutMs: 1000 });
+  await fleet().complete(device.deviceId, call.jobId, { kind: "completed", result: { value: 42 } });
+  expect(readJob(await fleet().inspectJson("owner", call.jobId)).outcome).toEqual({ kind: "completed", result: { value: 42 } });
+});
 async function acquire(device: Awaited<ReturnType<typeof register>>, workspace = "owner") {
   return fleet().acquire({ sandboxId: "remote:" + device.deviceId, workspace, operationId: "acquire-1", capabilityRevision: device.revision, requirements: { tools: ["powershell"] } });
 }
 it("配对批准后才公布工具声明；租约冻结能力版本、需求和单槽位", async () => {
   const device = await register();
-  expect((readCatalog(await fleet().catalogJson({ tools: ["powershell"] }))).find(row => row.id.startsWith("remote:"))).toMatchObject({ tools: descriptor.tools, mismatch: [] });
+  expect((readCatalog(await fleet().catalogJson({ tools: ["powershell"] }))).find(row => row.id.startsWith("remote:"))).toMatchObject({ tools: descriptor.tools, instructions: descriptor.instructions, persistence: descriptor.persistence, mismatch: [] });
   const args = { sandboxId: "remote:" + device.deviceId, workspace: "owner", operationId: "acquire-1", capabilityRevision: device.revision, requirements: {} };
   await expect((async () => await fleet().acquire({ ...args, capabilityRevision: "0".repeat(64) }))()).rejects.toThrow("capability_changed");
   await expect((async () => await fleet().acquire({ ...args, requirements: { os: "linux" } }))()).rejects.toThrow("capability_mismatch");
@@ -41,7 +65,7 @@ it("配对批准后才公布工具声明；租约冻结能力版本、需求和�
   const lease = await fleet().acquire(args); expect(await fleet().acquire(args)).toEqual(lease);
   await expect((async () => await fleet().acquire({ ...args, operationId: "acquire-2" }))()).rejects.toThrow("busy");
   const changed = nextFrame(device.socket);
-  device.socket.send(JSON.stringify({ kind: "hello", protocolVersion: PROTOCOL_VERSION, descriptor: { ...descriptor, name: "改变配置" } }));
+  device.socket.send(JSON.stringify({ kind: "hello", protocolVersion: PROTOCOL_VERSION, descriptor: { ...descriptor, instructions: "改变使用方式" } }));
   expect(JSON.parse((await changed).data)).toMatchObject({ kind: "error", error: "capability_changed_while_leased" });
   expect(await fleet().authorize(device.deviceId, "Bearer " + "b".repeat(64))).toBe(false);
   await fleet().revoke(device.deviceId);

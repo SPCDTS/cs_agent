@@ -21,6 +21,14 @@ test("注册 schema 拒绝外部引用、正则、深层结构与重复工具", 
   assert.throws(() => validateDescriptor(schema({ type: "object", additionalProperties: false, properties: { nested } })), /too_deep/);
   assert.throws(() => validateDescriptor(schema({ type: "object", additionalProperties: true })), /invalid_tool_schema/);
 });
+test("注册必须提供有界的使用和持久化说明，不按 provider 推断", () => {
+  const registration = { ...capabilities, provider: "custom-notebook", os: "linux", instructions: "用 python_cell；变量保留到 kernel 重启。", persistence: "外部卷跨租约保留。" };
+  assert.deepEqual(validateDescriptor(registration), registration);
+  for (const instructions of [undefined, "", 42, "中".repeat(4001)]) {
+    assert.throws(() => validateDescriptor({ ...registration, instructions }), /invalid_request/);
+  }
+  assert.throws(() => validateDescriptor({ ...registration, persistence: "x".repeat(1001) }), /invalid_request/);
+});
 test("v1 被明确拒绝；控制消息与 JSON 结果有界", () => {
   assert.throws(() => parseFrame(DeviceFrameSchema, JSON.stringify({ kind: "hello", protocolVersion: 1, descriptor: capabilities })), /invalid_request/);
   assert.throws(() => validateDescriptor({ ...capabilities, workspaceProtocol: "r2-source-v1" }), /invalid_request/);

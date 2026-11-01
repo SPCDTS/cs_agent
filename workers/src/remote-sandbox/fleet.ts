@@ -3,6 +3,7 @@ import { Type, type Static } from "typebox";
 import { authenticated } from "../auth";
 import type { Env } from "../env";
 import type { CatalogEntry } from "./wire";
+import { CLOUDFLARE_SANDBOX } from "../sandbox/registration";
 export type { CatalogEntry } from "./wire";
 import { DescriptorSchema, RequirementsSchema, JobInputSchema, DeviceFrameSchema, IdSchema, ToolNameSchema, parse, parseFrame,
   validateDescriptor, validateToolArguments, validateOutcome, mismatch,
@@ -165,11 +166,9 @@ export class SandboxFleetDO extends DurableObject<Env> {
   override webSocketError(ws: WebSocket) { try { ws.close(1011, "connection_error"); } catch { /* 已关闭。 */ } }
   async catalogJson(value: unknown = {}): Promise<string> {
     const requirements = parse(RequirementsSchema, value), rows: CatalogEntry[] = [{
-      id: "cloudflare", name: "Cloudflare coding", provider: "cloudflare", os: "linux", arch: "managed",
-      tools: [], codeModeTools: ["bash", "read", "write", "edit"], memoryMiB: null, maxTimeoutMs: 120000,
-      capabilityRevision: "builtin-v2", availability: "ready", activeJobs: 0, workspaceRoot: "/work", persistence: "R2 source; container-local caches",
-      mismatch: [...(requirements.os && requirements.os !== "linux" ? ["os"] : []),
-        ...(requirements.memoryMiB ? ["unverified_memory"] : []), ...(requirements.tools ?? []).filter(name => !["bash", "read", "write", "edit"].includes(name)).map(name => "tool:" + name)],
+      ...CLOUDFLARE_SANDBOX,
+      mismatch: [...(requirements.os && requirements.os !== CLOUDFLARE_SANDBOX.os ? ["os"] : []),
+        ...(requirements.memoryMiB ? ["unverified_memory"] : []), ...(requirements.tools ?? []).filter(name => !CLOUDFLARE_SANDBOX.codeModeTools.includes(name)).map(name => "tool:" + name)],
     }];
     for (const device of (await this.ctx.storage.list<Device>({ prefix: "device:" })).values()) {
       if (device.approval !== "approved") continue;
@@ -181,7 +180,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
         memoryMiB: device.descriptor.memoryMiB, maxTimeoutMs: device.descriptor.maxTimeoutMs,
         capabilityRevision: device.revision, availability: !this.available(device.id) ? "offline" : allocation?.kind === "releasing" || allocation?.kind === "lost" ? "draining" : allocation?.kind === "active" ? "busy" : "ready",
         activeJobs: (allocation?.kind === "active" || allocation?.kind === "lost") && allocation.jobId ? 1 : 0,
-        workspaceRoot: device.descriptor.workspaceRoot ?? "tool-specific", persistence: device.descriptor.provider === "windows-wsb" ? "lease-local; discarded on release or session loss" : "consult registered tools; no R2 source synchronization",
+        workspaceRoot: device.descriptor.workspaceRoot ?? "tool-specific", instructions: device.descriptor.instructions, persistence: device.descriptor.persistence,
         mismatch: mismatch(device.descriptor, requirements) });
     }
     return JSON.stringify(rows);

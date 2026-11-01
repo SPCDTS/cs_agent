@@ -61,7 +61,13 @@ type ToolCall = {
 };
 ```
 
-设备同时声明 provider、OS、架构、配置内存、时限、并发数及可选的软件版本清单。`tools` 是实际可调用工具，Node/npm/Git 版本属于 `environment`。设备说明是数据，不会授予权限。声明只接受有界的基础 JSON Schema，禁止外部引用和正则，并限制目录、深度和输入/输出大小。Fleet 按注册 schema 校验，runner 按自身工具表再验。新设备可注册自己的工具，不需要增加宿主任务类型。
+设备同时声明 provider、OS、架构、配置内存、时限、并发数及可选的软件版本清单。`tools` 是实际可调用工具，Node/npm/Git 版本属于 `environment`。声明只接受有界的基础 JSON Schema，禁止外部引用和正则，并限制目录、深度和输入/输出大小。Fleet 按注册 schema 校验，runner 按自身工具表再验。新设备可注册自己的工具，不需要增加宿主任务类型。
+
+沙箱提供方必须在注册时提交 `instructions`（1～4000 字符）和 `persistence`（1～1000 字符）。前者说明适用任务、命令或工具用法、路径、会话状态和结果解读，后者说明文件与缓存的保留范围。单个工具的参数仍由 `description` 和 `inputSchema` 描述。使用说明只适用于对应沙箱，不能改变宿主权限或获取其他工具授权。
+
+通用扩展只负责目录、选择、租约、调用和查询，不写死厂商、操作系统、Shell 或退出码格式。它把注册说明加入动态摘要，完整 `sandbox_list` 也返回这些字段；Agent 按需求与说明选择。`codeModeTools` 表示可直接调用的内置工具，远程 `tools` 则经租约分派，获取租约不会改变其他工具的执行目标。
+
+Cloudflare 的注册信息与提示由 `workers/src/sandbox/registration.ts` 提供，主 agent、子 agent 和目录都使用该提供方模块；WSB 的说明由 runner 的 `descriptor()` 注册。其他沙箱可声明完全不同的工作目录、状态保留和结果格式，无需修改通用扩展。使用说明参与完整声明的 `capabilityRevision`：空闲时重新注册会更新摘要，活动租约期间禁止改变。
 
 包含递归 JSON 的目录、输入和结果通过 DO 的 `*Json` RPC 传输，在消费边界解析验证，避免 Cloudflare RPC 类型对递归 schema 的无限展开。该传输细节不暴露给模型。
 

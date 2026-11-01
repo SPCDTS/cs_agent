@@ -27,7 +27,7 @@ npx wrangler dev --config wrangler.smoke.jsonc --local --persist-to .wrangler/re
 1. 使用旧版本完成或取消活动任务，确认实例停止，再释放所有旧租约。
 2. 保留回执；`unknown` 必须先核对实例和可能的外部副作用，重启不等于回滚。
 3. 部署获准的 Worker 版本，再更新 runner 并重新构建 guest。
-4. 原配对凭据可保留，新连接发送 v2 工具声明；管理员列表 `protocolCompatible=false` 表示声明仍需升级。
+4. 原配对凭据可保留，新连接发送 v2 工具声明，必须包含 `instructions` 使用说明和 `persistence` 持久化说明；缺少字段的旧 runner 也需更新。管理员列表 `protocolCompatible=false` 表示声明仍需升级。
 5. v1 hello 和 `r2-source-v1` 会被拒绝。活动旧租约阻止能力版本改变，不能在未排空时切换。
 
 ## 启用与配对
@@ -43,7 +43,7 @@ npm --prefix runner start -- pair --origin https://你的Worker域名 --state D:
 
 Git 可追加 `--git-dir "C:\Program Files\Git"`；工具目录只读映射，不要填写项目源码或用户目录。Node 默认取连接器自身的安装目录，可用 `--node-dir` 指定；内存默认 6144 MiB，可用 `--memory` 调整。
 
-3. `GET /admin/sandbox-devices` 核对设备配置及 `tools` 声明。
+3. `GET /admin/sandbox-devices` 核对设备配置、`tools` 声明、`instructions` 和 `persistence`。这些说明由 runner 提供，Worker 不按 provider 推断。
 4. `POST /admin/sandbox-devices/{deviceId}/approve` 批准设备。
 5. 检查并运行：
 
@@ -57,6 +57,8 @@ npm --prefix runner start -- run --state D:\sandbox-runner-state
 ## Agent 使用
 
 从 owner 本人的消息或已认证网页回合提出任务。以下工具全部在 Code Mode 内通过 `tools.*` 调用：
+
+Agent 会收到沙箱注册的使用说明，并可通过 `sandbox_list` 查看完整配置、说明和 schema。通用扩展不设 Cloudflare/WSB 优先级；平台的路径、缓存、命令及结果用法由各自注册信息决定。若更新说明，先释放活动租约，再让连接器重新注册。
 
 | 工具 | 用途 |
 | --- | --- |

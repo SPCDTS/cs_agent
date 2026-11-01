@@ -4,6 +4,7 @@ import { sha256 } from "../src/files.ts";
 import type { Config } from "../src/wsb.ts";
 
 export const capabilities = validateDescriptor({ name: "测试设备", provider: "windows-wsb", os: "windows", arch: "x64",
+  instructions: "使用 powershell 在 guest 内运行命令。", persistence: "文件保留到租约释放。",
   tools: [{ name: "powershell", description: "执行 PowerShell", inputSchema: PowerShellInputSchema }],
   environment: [{ name: "node", version: "v24" }], memoryMiB: 4096, maxConcurrent: 1, maxTimeoutMs: 1200000, workspaceProtocol: "registered-tools-v2" });
 export function lease(): Lease { const deviceId = randomUUID(); return { id: randomUUID(), deviceId, sandboxId: "remote:" + deviceId, workspace: "owner", operationId: randomUUID(), capabilityRevision: sha256(JSON.stringify(capabilities)), requirements: {}, createdAt: Date.now() }; }

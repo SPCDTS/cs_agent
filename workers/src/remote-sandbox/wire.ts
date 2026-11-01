@@ -1,5 +1,5 @@
 import { Type, type Static } from "typebox";
-import { IdSchema, ToolDeclarationSchema, OutcomeSchema, JobInputSchema, parse } from "../../../runner/src/protocol";
+import { IdSchema, ToolDeclarationSchema, SandboxInstructionsSchema, SandboxPersistenceSchema, OutcomeSchema, JobInputSchema, parse } from "../../../runner/src/protocol";
 
 const strict = { additionalProperties: false };
 export const CatalogEntrySchema = Type.Object({
@@ -8,7 +8,7 @@ export const CatalogEntrySchema = Type.Object({
   environment: Type.Optional(Type.Array(Type.Object({ name: Type.String(), version: Type.String() }, strict))),
   memoryMiB: Type.Union([Type.Integer(), Type.Null()]), maxTimeoutMs: Type.Integer(), capabilityRevision: Type.String(),
   availability: Type.Union([Type.Literal("ready"), Type.Literal("busy"), Type.Literal("offline"), Type.Literal("draining")]),
-  activeJobs: Type.Integer(), workspaceRoot: Type.String(), persistence: Type.String(), mismatch: Type.Array(Type.String()),
+  activeJobs: Type.Integer(), workspaceRoot: Type.String(), instructions: SandboxInstructionsSchema, persistence: SandboxPersistenceSchema, mismatch: Type.Array(Type.String()),
 }, strict);
 export type CatalogEntry = Static<typeof CatalogEntrySchema>;
 export const JobViewSchema = Type.Object({

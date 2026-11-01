@@ -59,16 +59,18 @@ export function sql<T>(query: string, ...args: unknown[]): Promise<T[]> {
 /** 模型脚本：每次请求先记录当前可用工具（重放 toolsAdded/toolsRemoved）和最后一条用户输入，再按步骤调用工具。 */
 export function scriptedModel(steps: { name: string; args: JsonObject }[]) {
   const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
-  const requests: { tools: string[]; user: string }[] = [], outputs: string[] = [], captured = new Set<string>();
+  const requests: { tools: string[]; user: string; sections: Record<string, string | null> }[] = [], outputs: string[] = [], captured = new Set<string>();
   const respond: FauxResponseFactory = transcript => {
     faux.setResponses([respond]);
     const tools = new Set<string>();
+    const sections: Record<string, string | null> = {};
     for (const message of transcript.messages) if (message.role === "system") {
+      Object.assign(sections, message.sections);
       for (const tool of message.toolsRemoved ?? []) tools.delete(tool.name);
       for (const tool of message.toolsAdded ?? []) tools.add(tool.name);
     }
     const user = transcript.messages.findLast(message => message.role === "user");
-    requests.push({ tools: [...tools], user: typeof user?.content === "string" ? user.content : user?.content.map(block => block.type === "text" ? block.text : "").join("") ?? "" });
+    requests.push({ tools: [...tools], sections, user: typeof user?.content === "string" ? user.content : user?.content.map(block => block.type === "text" ? block.text : "").join("") ?? "" });
     const last = transcript.messages.findLast(message => message.role === "toolResult");
     if (last?.role === "toolResult" && !captured.has(last.toolCallId)) {
       captured.add(last.toolCallId);
