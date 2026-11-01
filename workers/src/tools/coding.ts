@@ -9,7 +9,7 @@ import { EXEC_MAX_TIMEOUT_MS, sandboxFailure, WORK_ROOT, type SandboxFailure } f
 export type SandboxApi = Pick<SandboxDO, "exec" | "readFile" | "writeFile" | "editFile">;
 export type CodingAuditKind = "coding_exec" | "coding_read" | "coding_write" | "coding_edit";
 export type CodingDeps = {
-  /** 只有 owner 亲自发来的消息回合可以用；定时回合虽然看得到工具，调用时也拒绝。 */
+  /** 由宿主验证本回合与工作区范围；每次嵌套调用都重新检查。 */
   allowed(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context): Promise<boolean>;
   sandbox(): SandboxApi;
   /** 审计只记分类、耗时、命令长度与退出码，不记命令、路径、文件内容与输出。 */
@@ -42,7 +42,7 @@ const FAILURES: Record<SandboxFailure, string> = {
   invalid_request: "参数无效。",
   sandbox_error: "沙箱返回了意外错误。",
 };
-const NOT_ALLOWED = "只有主人亲自发消息的回合可以使用沙箱工具；本回合请先告诉主人。";
+const NOT_ALLOWED = "本回合无权使用沙箱工具；仅当前有效的主人私聊或群消息回合可用。";
 
 export const SandboxReadOutput = Type.Union([
   Type.Object({ kind: Type.Literal("text"), text: Type.String() }, { additionalProperties: false }),
@@ -104,7 +104,7 @@ export function createCodingExtension(deps: CodingDeps) {
   const tools = [
     codingTool(deps, {
       name: "read", kind: "coding_read", replay: "safe", structuredOutputSchema: SandboxReadOutput,
-      description: `Read the contents of a text file in the sandbox. Output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Relative paths resolve against ${WORK_ROOT}.`,
+      description: `Read a text file or image in the sandbox. Images return structured image content for image(result.image). Text output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Relative paths resolve against ${WORK_ROOT}.`,
       parameters: Type.Object({
         path: Type.String({ minLength: 1, description: `Path to the file to read (relative to ${WORK_ROOT} or absolute)` }),
         offset: Type.Optional(Type.Integer({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),

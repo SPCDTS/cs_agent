@@ -10,8 +10,6 @@ export class MediaDownloadError extends Error {
 export type DownloadDeps = {
   fetch?: typeof fetch;
   signal?: AbortSignal;
-  maxBytes?: number;
-  contentTypes?: ReadonlySet<string>;
   resolve?: (hostname: string) => Promise<string[]>;
 };
 /** 只接受公网单播地址；IPv4 映射、回环、保留网段与 IPv6 局域地址均拒绝。 */
@@ -54,11 +52,10 @@ async function checkedUrl(raw: string, resolve: NonNullable<DownloadDeps["resolv
   return url;
 }
 /** 每一跳重做地址检查，流式计量，不信任 Content-Length，不携带宿主或管理员凭据。 */
-export async function downloadMedia(raw: string, deps: DownloadDeps = {}): Promise<{ bytes: Uint8Array; mime: string; url: string; contentType: string }> {
+export async function downloadMedia(raw: string, deps: DownloadDeps = {}): Promise<{ bytes: Uint8Array; mime: string; url: string }> {
   const deadline = AbortSignal.timeout(20_000);
   const signal = deps.signal ? AbortSignal.any([deps.signal, deadline]) : deadline;
   const request = deps.fetch ?? fetch, resolve = deps.resolve ?? ((host: string) => dns(host, signal));
-  const maxBytes = Math.min(FILE_MAX_BYTES, deps.maxBytes ?? FILE_MAX_BYTES);
   let next = raw;
   for (let redirects = 0; redirects <= 3; redirects++) {
     signal.throwIfAborted();
@@ -76,23 +73,22 @@ export async function downloadMedia(raw: string, deps: DownloadDeps = {}): Promi
       await response.body?.cancel();
       throw new MediaDownloadError(response.status, url.hostname);
     }
-    const contentType = response.headers.get("Content-Type") ?? "", mime = safeMime(contentType);
-    if (deps.contentTypes && !deps.contentTypes.has(mime)) { await response.body.cancel(); throw new Error("unsupported_type"); }
+    const mime = safeMime(response.headers.get("Content-Type") ?? undefined);
     const length = Number(response.headers.get("Content-Length"));
-    if (Number.isFinite(length) && length > maxBytes) { await response.body.cancel(); throw new Error("too_large"); }
+    if (Number.isFinite(length) && length > FILE_MAX_BYTES) { await response.body.cancel(); throw new Error("too_large"); }
     const reader = response.body.getReader(), chunks: Uint8Array[] = [];
     let size = 0;
     for (;;) {
       const chunk = await reader.read();
       if (chunk.done) break;
       size += chunk.value.byteLength;
-      if (size > maxBytes) { await reader.cancel(); throw new Error("too_large"); }
+      if (size > FILE_MAX_BYTES) { await reader.cancel(); throw new Error("too_large"); }
       chunks.push(chunk.value);
     }
     const bytes = new Uint8Array(size);
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-    return { bytes, mime, contentType, url: url.href };
+    return { bytes, mime, url: url.href };
   }
   throw new Error("media_redirect_denied");
 }

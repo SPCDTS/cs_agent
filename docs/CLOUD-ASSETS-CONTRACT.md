@@ -24,16 +24,17 @@ Bridge 出站只接受可信宿主解析后的 `AssetRef[]`。图片使用 `{typ
 
 `createMediaExtension(deps)` 注册 `qq_image(message_id,ordinal?)`、`qq_attachment(message_id,ordinal?)` 和 `send_file(path,name?)`。依赖包括 `allowed(api,context)`、`repository(api,context)`、`lookup(messageId,api,context)`、`sandbox(api,context)`、`deliver(ref,api,context)` 以及可选 `record(kind,detail)`。lookup 必须验证当前访问范围，再读历史或让 Bridge 取原消息。repository 已锁定 scope。deliver 保留原始 web/QQ 回复入口。图片直接返回模型 image content；非图附件返回私有引用和元数据，不能伪装成已解析正文。
 
-## 群聊脚本取图
+## 群聊脚本执行与产物发送
 
-普通消息回合（群聊、私聊与管理台网页续聊）可以使用 Code Mode 的公网取图能力，不需要 MCP 授权或编码容器。宿主逐次校验当前回合与会话代次；事件、定时和子任务回合不因此获得新权限。MCP、技能发布和沙箱工具继续各自复核权限。
+主人私聊与群聊的普通消息回合（含所属会话的管理台网页续聊）可以通过 Code Mode 调用现有的 Cloudflare Linux 沙箱，不需要 MCP 授权。Code Mode 的 QuickJS 只负责工具编排，自身不提供 fetch、Node 或文件系统；实际网络和文件操作在 Linux 容器中的 Node、Python、curl 等程序里执行。
 
-- tools.web_fetch({url}) 仅做公网 GET，返回最终 url、contentType 与完整 body，接受 HTML、XHTML、纯文本或 JSON，最多 1MiB，超限报错而不截断。脚本可自行解析图片标签、元数据或页面 JSON；它不执行页面脚本。
-- tools.web_import_image({url,baseUrl?,name?}) 支持相对图片地址，下载真实图片后按当前会话范围存入私有 R2，返回 {url,asset,image}。使用 text(result.asset) 输出引用，image(result.image) 查看图片，再用 send_message({text,images:[asset.id]}) 发送。导入本身不发 QQ 消息，网页回合仍只输出到网页。
-- 两个工具只供 Code Mode 嵌套调用。读取和下载复用公网地址、DNS、逐跳重定向检查，不接受自定义请求头或宿主凭据；单次下载总时限20秒，支持回合取消，图片上限10MiB并校验文件签名。读取完成后再次核验回合，失效回合不能写入图片资产。
-- 审计事件为 web_fetch、web_import_image，记录分类和耗时；HTTP失败额外保留状态码和主机名，不记录完整网址、网页正文或图片二进制。
+- 模型自行编写脚本，通过 tools.write 保存、tools.bash 执行，完成网页请求、解析、下载和文件处理。无需注册图片专用导入工具，也不限制为固定 GET 接口。
+- 工作区按当前会话 namespace 绑定 SandboxDO。群间、群与主人之间容器和持久文件隔离，模型不能指定其他会话的工作区；容器不注入 Worker 的管理员口令或服务凭据。
+- 产物保存到 /work/out/，执行成功并完成工作区快照后，用 tools.read 读取；图片通过 image(result.image) 交给模型查看，再直接调用模型工具 send_file({path})。send_file 导出已提交文件到当前会话资产范围，图片按图片段发送，网页回合只产生网页输出。
+- 每次嵌套调用重新校验回合种类、自身消息和会话代次；主人私聊另核验当前主人身份。事件、定时、其他私聊与子任务不因此获得沙箱权限。远程设备、技能发布、MCP 和跨会话发送仍执行各自授权。
+- 复用现有单命令最长 120 秒、单文件 10MiB、工作区 50MiB 和空闲 3 分钟停止约束。审计沿用 coding_exec/read/write/edit 与 media_send，不记录脚本、文件正文或下载内容。
 
-这条路径补齐“搜索网页 → 脚本提取图片地址 → 导入当前会话资产 → 核验并发送”，不把搜索摘要当成已取得图片；网页内容始终按不可信资料处理。
+这条路径为“搜索网页 → 模型写脚本获取文件 → 查看产物 → 按原回复入口发送”。网页内容按不可信资料处理；下载失败、未提交产物或发送结果为 queued 时，不能宣称已发出。
 
 ## 持久工作区
 

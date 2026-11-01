@@ -1,11 +1,12 @@
 import { test, before, after } from "node:test";
+import { createServer } from "node:http";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, realpathSync, existsSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { createSandboxRuntime, resolveInside, tailCollector, OUTPUT_CAP } from "../sandbox/runtime.mjs";
 
-// 固定 CLI 助手在真实 Node 中执行；不创建 HTTP 服务。
+// 固定 CLI 助手在真实 Node 中执行；下载测试只启动本地 HTTP fixture。
 const base = realpathSync(mkdtempSync(path.join(tmpdir(), "sandbox-native-")));
 const root = path.join(base, "work"), outside = path.join(base, "outside");
 const shell = process.platform === "win32" ? path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "usr", "bin", "bash.exe") : "/bin/bash";
@@ -61,4 +62,38 @@ test("realpath 拒绝工作区外路径、链接逃逸和经悬空链接写入",
     await assert.rejects(resolveInside(root, input), /path_denied/);
   await assert.rejects(runtime.exec({ command: "pwd", cwd: "escape" }), /path_denied/);
   assert.equal(readFileSync(path.join(outside, "secret.txt"), "utf8"), "outside");
+});
+
+test("模型脚本经 native CLI 请求网页、解析相对图片地址并保存真实二进制产物", async () => {
+  const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=", "base64");
+  const requests = [];
+  const server = createServer((request, response) => {
+    requests.push(request.url);
+    if (request.url === "/page") { response.setHeader("Content-Type", "text/html"); response.end('<img src="/jersey.png">'); }
+    else if (request.url === "/jersey.png") { response.setHeader("Content-Type", "image/png"); response.end(bytes); }
+    else { response.statusCode = 404; response.end(); }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert.equal(typeof address, "object");
+    const source = `import { mkdir, writeFile } from "node:fs/promises";
+const page = await fetch("http://127.0.0.1:${address.port}/page");
+if (!page.ok) throw Error(String(page.status));
+const relative = /<img src="([^"]+)"/.exec(await page.text())[1];
+const image = await fetch(new URL(relative, page.url));
+if (!image.ok) throw Error(String(image.status));
+await mkdir("out", {recursive:true});
+await writeFile("out/jersey.png", new Uint8Array(await image.arrayBuffer()));`;
+    writeFileSync(path.join(root, "download.mjs"), source, "utf8");
+    const quote = text => "'" + text.replaceAll("'", "'\\''") + "'";
+    const result = await runtime.exec({ command: `${quote(process.execPath.replaceAll("\\", "/"))} download.mjs`, timeoutMs: 10000 });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.timedOut, false);
+    assert.deepEqual(requests, ["/page", "/jersey.png"]);
+    assert.deepEqual(readFileSync(path.join(root, "out", "jersey.png")), bytes);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 });

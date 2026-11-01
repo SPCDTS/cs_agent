@@ -6,7 +6,6 @@ import type { McpGrantInput } from "./mcp/policy";
 import type { Delivery, DeliverySource } from "./delivery";
 import { gcMediaTickets, MediaRepository, type AssetRef } from "./media/repository";
 import { createMediaExtension } from "./tools/media";
-import { createWebMediaExtension } from "./tools/web-media";
 import { lookupHostMedia } from "./tools/media-host";
 import type { McpAuthority } from "./mcp/access";
 import type { SubagentCodingOperation, SubagentCapabilityHost } from "./mcp/delegated";
@@ -73,7 +72,7 @@ type InboundRow = {
 type ToolProfile = "chat" | "event" | "web";
 const isWeb = (row: InboundRow) => row.reply_channel === "web";
 const isWebAdmin = (row: InboundRow) => isWeb(row) && row.user_id === "admin:web";
-const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只能展示网页。需要回复时调用 send_message，它只把文字和图片资产写入网页，不向 QQ 发送。不得使用其他工具绕过此回复入口限制。";
+const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只能展示网页。需要回复时调用 send_message，它只把文字和图片资产写入网页，不向 QQ 发送；工作区文件可用 send_file，附件也只展示在网页。不得使用其他工具绕过此回复入口限制。";
 const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill",
   "codemode"]);
 const profileOf = (row: InboundRow): ToolProfile => isWeb(row) ? "web" : row.kind === "event" ? "event" : "chat";
@@ -273,19 +272,26 @@ export class ThreadDO extends DurableObject<Env> {
       }), this.subagents.tool(async (api, callContext) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext)),
         async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
-    const sandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
+    const ownerSandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
       return memory.ns === "owner" && !!input && this.ownerTurnKind(input) === "message"
         && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration();
     };
-    // 沙箱工具只在 owner 线程注册，权限在每次 nested 调用时复核。
+    const codingAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
+      if (memory.ns === "owner") return ownerSandboxAllowed(api, callContext);
+      const input = await this.currentInput(harness, api, api.conversationId, callContext);
+      return memory.ns.startsWith("group:") && !!input && input.kind === "message"
+        && input.chat_kind === "group" && scopeOf(targetOf(input)) === memory.ns
+        && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration();
+    };
+    // 远程设备与技能发布保留 owner 权限；Linux 工作区按会话隔离，每次嵌套调用复核。
     if (memory.ns === "owner") registry.install(createRemoteSandboxExtension({
-      allowed: async (api, callContext) => await sandboxAllowed(api, callContext) && await this.env.SANDBOX_FLEET.getByName("owner").enabled(),
+      allowed: async (api, callContext) => await ownerSandboxAllowed(api, callContext) && await this.env.SANDBOX_FLEET.getByName("owner").enabled(),
       fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.env.SANDBOX.idFromName(memory.ns).toString(),
       record: detail => this.audit("remote_sandbox", detail),
     }));
-    if (memory.ns === "owner") registry.install(createCodingExtension({
-      allowed: sandboxAllowed,
+    if (memory.ns === "owner" || memory.ns.startsWith("group:")) registry.install(createCodingExtension({
+      allowed: codingAllowed,
       sandbox: () => this.env.SANDBOX.getByName(memory.ns),
       record: (kind, detail) => this.audit(kind, detail),
     }));
@@ -299,18 +305,8 @@ export class ThreadDO extends DurableObject<Env> {
       registry:()=>this.env.REGISTRY.getByName("main"),bridge:()=>this.env.BRIDGE.getByName("napcat"),
     }));
     registry.install(createWorkspaceAdminExtension({
-      allowed: sandboxAllowed,
+      allowed: ownerSandboxAllowed,
       sandbox:()=>this.env.SANDBOX.getByName(memory.ns),registry:()=>this.env.REGISTRY.getByName("main"),
-    }));
-    const webMediaAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context) => {
-      const input = await this.currentInput(harness, api, api.conversationId, context);
-      return !!input && input.kind === "message" && input.user_id !== input.self_id
-        && input.session_generation === await this.sessionGeneration();
-    };
-    registry.install(createWebMediaExtension({
-      allowed: webMediaAllowed,
-      repository: async () => new MediaRepository({ bucket: this.env.ASSETS, scope: memory.ns }),
-      record: (kind, detail) => this.audit(kind, detail),
     }));
     registry.install(createMediaExtension({
       allowed: async (api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c); return !!input && input.session_generation === await this.sessionGeneration() && input.kind === "message"; },
@@ -339,7 +335,7 @@ export class ThreadDO extends DurableObject<Env> {
       async refresh => { await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
       change => this.audit("mcp_management", { ...change, source: "agent" })));
     const codemode = installCodemode(registry, {
-      allowed: async (api, callContext) => await webMediaAllowed(api, callContext) || await sandboxAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
+      allowed: async (api, callContext) => await codingAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
       namespaces: () => mcp.namespaces(),
     });
     // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。

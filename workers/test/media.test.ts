@@ -83,6 +83,11 @@ describe("有界公网下载", () => {
     await expect(downloadMedia("https://cdn.example.com/a", { fetch: request, resolve: async () => ["1.1.1.1", "10.0.0.1"] })).rejects.toThrow("media_url_denied");
     expect(request).toHaveBeenCalledTimes(1);
   });
+  it("取消的下载不发请求", async () => {
+    const request = vi.fn<typeof fetch>();
+    await expect(downloadMedia("https://cdn.example.com/a", { fetch: request, signal: AbortSignal.abort() })).rejects.toThrow();
+    expect(request).not.toHaveBeenCalled();
+  });
   it("流式拒绝没有Content-Length的超限响应", async () => {
     const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(new Uint8Array(FILE_MAX_BYTES + 1)));
     await expect(downloadMedia("https://cdn.example.com/a", { fetch: request, resolve: async () => ["1.1.1.1"] })).rejects.toThrow("too_large");

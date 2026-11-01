@@ -5,6 +5,7 @@ import { SandboxDO } from "../src/sandbox/do";
 import { CLOUDFLARE_SANDBOX } from "../src/sandbox/registration";
 import { workPath } from "../src/sandbox/client";
 import { RegistryDO } from "../src/registry";
+import { BridgeDO } from "../src/bridge";
 import { ThreadDO } from "../src/thread";
 import { SandboxFleetDO, type CatalogEntry } from "../src/remote-sandbox/fleet";
 import { MCP_CONFIG } from "../src/mcp/config";
@@ -37,13 +38,14 @@ describe("workPath", () => {
 });
 
 describe("coding tools", () => {
-  it("offers only Code Mode for sandbox tools in owner turns", async () => {
+  it("offers sandbox instructions and only Code Mode in owner and group turns", async () => {
     const seen = scriptedModel([{ name: "", args: {} }, { name: "", args: {} }]);
     expect(await env.THREAD.getByName("owner").submit(input(1, "写个脚本", 10000001))).toEqual({ status: "done" });
     expect(seen.requests[0]!.tools).toContain("codemode");
     expect(Object.values(seen.requests[0]!.sections)).toContain(CLOUDFLARE_SANDBOX.instructions);
     for (const name of [...CODING_TOOLS, "skill_inspect", "skill_publish"]) expect(seen.requests[0]!.tools).not.toContain(name);
     expect(await env.THREAD.getByName("group:200000001").submit(input(2, "跑个脚本", 10000003, 200000001, true))).toEqual({ status: "done" });
+    expect(Object.values(seen.requests[1]!.sections)).toContain(CLOUDFLARE_SANDBOX.instructions);
     for (const name of CODING_TOOLS) expect(seen.requests[1]!.tools).not.toContain(name);
   });
 
@@ -140,7 +142,7 @@ describe("coding tools", () => {
       await new ThreadDO(state, currentEnv).submit(input(1, "运行", 10000001));
       expect(exec).toHaveBeenCalledTimes(1);
     });
-    expect(seen.outputs.join("\n")).toContain("只有主人");
+    expect(seen.outputs.join("\n")).toContain("本回合无权使用沙箱工具");
   });
 
   it("refuses sandbox calls in event turns even when Code Mode is available", async () => {
@@ -148,7 +150,7 @@ describe("coding tools", () => {
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text(await tools.bash({command:"forbidden"}));' } }]);
     await env.THREAD.getByName("owner").submit({ ...input(1, "事件", 10000001), kind: "event" });
     expect(exec).not.toHaveBeenCalled();
-    expect(seen.outputs.join("\n")).toContain("只有主人");
+    expect(seen.outputs.join("\n")).toContain("本回合无权使用沙箱工具");
   });
 
   it("tells the model the sandbox is unavailable and audits only the classification", async () => {
@@ -187,9 +189,12 @@ describe("coding tools", () => {
 });
 
 describe("admin sandbox", () => {
-  it("shows the owner sandbox state and maps a reset without containers to 503", async () => {
+  it("shows owner and group sandbox states and maps a reset without containers to 503", async () => {
+    vi.spyOn(BridgeDO.prototype, "threadList").mockResolvedValue([{ key: "group:200000001", seenAt: 1 }, { key: "private:10000003", seenAt: 1 }]);
     const overview = await (await admin("GET", "/admin/overview")).json<{ threads: { key: string; sandbox?: string }[] }>();
     expect(overview.threads.find(thread => thread.key === "owner")?.sandbox).toBe("unavailable");
+    expect(overview.threads.find(thread => thread.key === "group:200000001")?.sandbox).toBe("unavailable");
+    expect(overview.threads.find(thread => thread.key === "private:10000003")?.sandbox).toBeUndefined();
     const response = await admin("POST", "/admin/threads/owner/sandbox/reset");
     expect([response.status, await response.json()]).toEqual([503, { error: "sandbox_unavailable" }]);
     expect((await admin("POST", "/admin/threads/nobody/sandbox/reset")).status).toBe(404);

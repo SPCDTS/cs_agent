@@ -195,8 +195,8 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     const threads = await Promise.all(keys.map(async ({ key, name, seenAt }) => {
       let stats;
       try { stats = await env.THREAD.getByName(key).stats(); } catch { stats = { error: "unavailable" as const }; }
-      // 只有 owner 线程有 coding 工具，也只有它会拉起沙箱容器。
-      const sandbox = key === "owner" ? await env.SANDBOX.getByName(key).status().catch(() => "unavailable" as const) : undefined;
+      // 主人与群会话各有独立 Linux 沙箱；读取状态不会启动容器。
+      const sandbox = key === "owner" || key.startsWith("group:") ? await env.SANDBOX.getByName(key).status().catch(() => "unavailable" as const) : undefined;
       return { key, ...(name ? { name } : {}), kind: threadKind(key), seenAt, stats, ...(sandbox ? { sandbox } : {}) };
     }));
     return json({ commit: env.CS_AGENT_COMMIT, bridge: connection, model, sendRules, threads, schedule, events,
