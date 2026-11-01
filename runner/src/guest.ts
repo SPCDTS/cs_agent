@@ -17,6 +17,8 @@ const script = "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncodin
 const result: ExecResult = await new Promise((resolve, reject) => {
   const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], {
     cwd, windowsHide: true, env: { ...process.env, PATH: "C:\\AgentTools\\node;C:\\AgentTools\\git\\cmd;" + process.env.PATH,
+      GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "safe.directory", GIT_CONFIG_VALUE_0: "C:/AgentWork",
+      GIT_CONFIG_KEY_1: "safe.directory", GIT_CONFIG_VALUE_1: "C:/AgentWork/*",
       npm_config_cache: "C:\\AgentCache\\npm", npm_config_update_notifier: "false", CI: "true" }, stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), truncated = false;

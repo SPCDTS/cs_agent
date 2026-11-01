@@ -1,6 +1,6 @@
 # 远程 WSB 沙箱运行说明
 
-协议 v2：设备注册工具，WSB 首期只提供 `powershell`。文件和缓存保留在同一租约的 guest 内，不再与 R2 同步。首次默认关闭，在管理台 **Sandbox** 标签页启用；架构见[设计文档](REMOTE-SANDBOX-DESIGN.md)。
+协议 v2：设备注册工具，WSB 只提供 `powershell`。可将项目和 npm 缓存保留到本机专用目录，跨租约复用，不与 R2 同步。首次默认关闭，在管理台 **Sandbox** 标签页启用；架构见[设计文档](REMOTE-SANDBOX-DESIGN.md)。
 
 ## 准备与验证
 
@@ -38,7 +38,7 @@ npx wrangler dev --config wrangler.smoke.jsonc --local --persist-to .wrangler/re
 2. 执行以下命令，在提示中输入配对信息：
 
 ```powershell
-npm --prefix runner start -- pair --origin https://你的Worker域名 --state D:\sandbox-runner-state --name 我的Windows设备
+npm --prefix runner start -- pair --origin https://你的Worker域名 --state D:\sandbox-runner-state --data-dir D:\sandbox-data --name 我的Windows设备
 ```
 
 Git 可追加 `--git-dir "C:\Program Files\Git"`；工具目录只读映射，不要填写项目源码或用户目录。Node 默认取连接器自身的安装目录，可用 `--node-dir` 指定；内存默认 6144 MiB，可用 `--memory` 调整。
@@ -53,6 +53,39 @@ npm --prefix runner start -- run --state D:\sandbox-runner-state
 ```
 
 `inspect` 不输出 Token。`run` 为前台进程，Ctrl+C 停止自身实例；未自动安装系统服务。配对响应丢失可使用同一 pairingId/code 和 state 重试；不要把配对码或设备 Token 放进聊天、日志或命令行参数。
+
+## 本机持久文件与依赖
+
+`--data-dir` 必须是独立的新目录，不得使用现有项目 checkout、连接器 state、Node/Git 工具目录或它们的父子目录。首次配置要求目录为空；初始化后记录所属设备，拒绝其他设备共用。已配对设备先处理并释放活动租约、停止连接器，再配置：
+
+```powershell
+npm --prefix runner start -- storage --state D:\sandbox-runner-state --data-dir D:\sandbox-data
+npm --prefix runner run build
+npm --prefix runner start -- run --state D:\sandbox-runner-state
+```
+
+连接器重连会更新注册的 `instructions` 和 `persistence`，无需部署 Worker。未配置 `dataDir` 的旧设备仍使用临时工作区，不会自动移动原有 guest 文件。
+
+| 本机目录 | guest 路径 | 保留范围 |
+| --- | --- | --- |
+| `dataDir/projects/<工作区哈希>` | `C:\AgentWork` | 从 GitHub 克隆的新仓库、`.git`、`node_modules`、构建产物 |
+| `dataDir/cache/<工作区哈希>/npm` | `C:\AgentCache\npm` | npm 下载缓存 |
+
+工作区标识沿用 Fleet 租约；不同工作区不会挂载彼此的数据。同一工作区的新租约、连接器重启和 VM 重建都会挂载原目录。数据仅在本机，state 中的设备凭据不映射进 guest，Node/Git/runner 工具仍只读映射。释放、取消和超时会销毁 VM，但不回滚持久目录的写入，也不自动清理磁盘文件。Windows 注册表、服务和其余 guest 路径仍是临时状态。
+
+真实 WSB 验证发现，共享目录中创建符号链接会返回 `EPERM`。普通 npm 包可以持久安装；本地目录依赖可先 `npm pack` 再安装 `.tgz`。必须依赖符号链接的 workspace、pnpm 或构建流程应在 guest 临时目录运行，并显式保存产物；目录映射不提供原生 NTFS 的全部语义。
+
+在沙箱内克隆仓库，再进入有 `package-lock.json` 或 `npm-shrinkwrap.json` 的项目目录：
+
+```powershell
+git.exe clone https://github.com/组织/仓库.git C:\AgentWork\repo
+Set-Location C:\AgentWork\repo
+node.exe C:\AgentTools\runner\npm-ensure.mjs
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+npm.cmd test
+```
+
+`npm-ensure.mjs` 比较 manifest、lockfile、Node/ABI、平台架构、npm 版本、有效 npm 配置和支持的安装参数，并用 `npm ls` 检查依赖结构。匹配成功标记时复用 `node_modules`，否则执行 `npm ci`；标记在安装前移除、成功后写入，安装失败或中断不会被当作成功缓存。`--fresh` 强制重装；支持 `--ignore-scripts`、`--install-links`、`--legacy-peer-deps`、`--strict-peer-deps`、`--prefer-offline`、`--offline`、`--foreground-scripts`、`--no-bin-links`、`--omit=dev|optional|peer|prod`、`--include=dev|optional|peer|prod`、`--install-strategy=hoisted|nested|shallow|linked`。修改本地 `file:` 依赖的内容或怀疑包文件损坏时用 `--fresh`，结构检查不代表逐文件内容校验。直接运行 `npm ci` 仍会重新安装；持久 npm 缓存只减少下载。
 
 Sandbox 页每 10 秒刷新在线状态，列出当前任务和租约，可取消任务、释放租约和撤销设备。取消和释放只表示已发请求，等待连接器确认；撤销会断开连接并使设备凭据失效。内置 Cloudflare 沙箱单独显示，不受远程任务开关影响。
 
@@ -80,16 +113,16 @@ const job = await tools.sandbox_call({
   tool: "powershell",
   arguments: {
     cwd: "C:\\AgentWork\\repo",
-    command: "npm.cmd ci --no-audit --no-fund; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npm.cmd test"
+    command: "node.exe C:\\AgentTools\\runner\\npm-ensure.mjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npm.cmd test"
   },
   timeoutMs: 1200000
 });
 text(job);
 ```
 
-默认 cwd 为 `C:\AgentWork`；用 PowerShell 中的 git clone 或文件命令准备源码。后续命令复用 `.git`、`node_modules` 和文件，不继承变量或当前目录。文件不进入 Cloudflare `/work`，也不由 R2 自动恢复。
+默认 cwd 为 `C:\AgentWork`；用 PowerShell 中的 git clone 或文件命令准备独立源码，不映射日常开发 checkout。后续命令复用 `.git`、`node_modules` 和文件，不继承变量或当前目录。跨租约保留范围以注册的 `persistence` 为准。文件不进入 Cloudflare `/work`，也不由 R2 自动恢复。
 
-租约空闲约 10 分钟后请求释放。及时查询并保存需要保留的修改；释放、取消、连接器退出或实例故障都可能丢失 guest 文件。未推送的提交不能当作永久备份。
+租约空闲约 10 分钟后请求释放。持久目录外的 guest 文件在释放、取消、连接器退出或实例故障后丢失。持久目录保留在本机磁盘，仍需按需要推送提交或备份。
 
 ## 状态与恢复
 
@@ -113,4 +146,4 @@ Content-Type: application/json
 
 封存只表示接受未知结果，不证明远端停止，也不能撤销 GitHub 等副作用。租约失效，设备仍需停止握手后才能复用。该操作不向 agent 暴露。
 
-撤销设备可在 Sandbox 页操作，或使用 `DELETE /admin/sandbox-devices/{deviceId}`。远程文件导出、跨租约缓存、自动完成通知和自动 PR 发布不属于当前实现。
+撤销设备可在 Sandbox 页操作，或使用 `DELETE /admin/sandbox-devices/{deviceId}`。远程文件导出、自动完成通知和自动 PR 发布不属于当前实现。

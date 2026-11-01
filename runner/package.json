@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "esbuild src/guest.ts --bundle --platform=node --format=esm --outfile=dist/guest.mjs",
+    "build": "esbuild src/guest.ts src/npm-ensure.ts --bundle --platform=node --format=esm --outdir=dist --out-extension:.js=.mjs",
     "start": "node src/cli.ts",
     "test": "node --test test/*.test.ts",
     "test:wsb": "npm run build && node scripts/smoke-wsb.ts",

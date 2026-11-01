@@ -8,7 +8,7 @@ import { parse, JobInputSchema, ExecResultSchema } from "../src/protocol.ts";
 import { readJson, sha256 } from "../src/files.ts";
 import { capabilities, config, job, lease } from "./fixtures.ts";
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, persistent = false) {
   const state = await fs.mkdtemp(path.join(os.tmpdir(), "cs-agent-wsb-unit-")), binding = lease();
   const calls: { file: string; args: string[] }[] = [], live = new Set<string>(["unowned-instance"]);
   let mode: "complete" | "hang" | "invalid" | "replace" = "complete", executions = 0, stopped: (() => void) | undefined;
@@ -32,9 +32,10 @@ async function fixture(t: TestContext) {
     await fs.writeFile(output, JSON.stringify({ kind: "completed", result: { stdout: "中文 " + executions, stderr: "", code: 0, timedOut: false, truncated: false } }), "utf8");
     return "{}";
   };
-  const backend = new WsbBackend(state, config(binding.deviceId), "C:\\Runner", { command: host, capabilities: async () => capabilities });
-  t.after(async () => { await backend.stopOwned(); await fs.rm(state, { recursive: true, force: true }); });
-  return { backend, binding, calls, live, state, setMode(value: typeof mode) { mode = value; }, run(command = "probe") { return backend.run(job(binding, command), new AbortController().signal, () => undefined); } };
+  const dataDir = state + "-data";
+  const backend = new WsbBackend(state, { ...config(binding.deviceId), ...(persistent ? { dataDir } : {}) }, path.join(state, "checkout/runner/dist"), { command: host, capabilities: async () => capabilities });
+  t.after(async () => { await backend.stopOwned(); await fs.rm(state, { recursive: true, force: true }); await fs.rm(dataDir, { recursive: true, force: true }); });
+  return { backend, binding, calls, live, state, dataDir, setMode(value: typeof mode) { mode = value; }, run(command = "probe") { return backend.run(job(binding, command), new AbortController().signal, () => undefined); } };
 }
 test("同租约连续命令复用 VM；模型命令只进入 guest 输入文件", async t => {
   const f = await fixture(t), first = await f.run("New-Item .git,node_modules -ItemType Directory"), second = await f.run("Get-ChildItem");
@@ -54,6 +55,20 @@ test("同租约连续命令复用 VM；模型命令只进入 guest 输入文件"
   await f.backend.release(f.binding.id); await f.backend.release(f.binding.id);
   assert.deepEqual([...f.live], ["unowned-instance"]);
   assert.deepEqual(await f.run(), { kind: "failed", error: "session_lost", sessionLost: true });
+});
+test("新租约重新映射同一工作区的数据，释放不删除持久文件", async t => {
+  const f = await fixture(t, true); await f.run();
+  const work = path.join(f.dataDir, "projects", sha256(f.binding.workspace));
+  await fs.writeFile(path.join(work, "kept.txt"), "源码与依赖", "utf8");
+  await f.backend.release(f.binding.id);
+  const next = { ...lease(), deviceId: f.binding.deviceId };
+  assert.equal((await f.backend.run(job(next), new AbortController().signal, () => undefined)).kind, "completed");
+  assert.equal(await fs.readFile(path.join(work, "kept.txt"), "utf8"), "源码与依赖");
+  for (const start of f.calls.filter(call => call.args[0] === "start")) {
+    const xml = start.args[start.args.indexOf("--config") + 1];
+    assert.ok(xml.includes("C:\\AgentWork")); assert.ok(xml.includes("C:\\AgentCache\\npm"));
+    assert.ok(xml.includes(work)); assert.equal(xml.includes("<HostFolder>" + f.state + "</HostFolder>"), false);
+  }
 });
 test("取消销毁已记录 VM；失效租约不能重建，新的租约可以执行", async t => {
   const f = await fixture(t); await f.run(); f.setMode("hang");

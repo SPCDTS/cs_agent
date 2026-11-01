@@ -84,13 +84,17 @@ Cloudflare 的注册信息与提示由 `workers/src/sandbox/registration.ts` 提
 
 有界调用参数与任务回执在 DO 中原子保存，较大的工具结果放在 R2；两者都不包含远程源码、`.git` 或 `node_modules`。详细结果保留约 7 天；过期回执不能变成重新执行许可。
 
-## WSB 的首期行为
+## WSB 的目录与生命周期
 
-工作区位于 guest 的 `C:\AgentWork`；同一租约的命令复用 VM，`.git`、依赖和 npm 下载缓存自然保留，无需复制或在宿主校验。每次调用启动独立 PowerShell 进程，变量、`$env` 修改和 `Set-Location` 不跨调用保留；需要目录时显式传 cwd。
+工作区位于 guest 的 `C:\AgentWork`；同一租约的命令复用 VM。设置 `dataDir` 后，项目和 npm 缓存通过 WSB 官方目录映射保留在本机专用目录，按租约工作区标识的 SHA-256 分隔；跨租约和 VM 重建继续使用同一目录。首次配置拒绝非空目录、其他设备占用、路径链接以及与 state、checkout 或工具目录重叠的路径。每次调用启动独立 PowerShell 进程，变量、`$env` 修改和 `Set-Location` 不跨调用保留；需要目录时显式传 cwd。
 
-源码不映射到宿主项目目录。Node/Git 工具目录只读映射，控制输入和有界结果使用专用通道，宿主不执行模型生成的 PowerShell。设备 Token 不进入 guest、命令行或模型上下文。
+持久项目目录从 GitHub 拉取独立源码，不使用宿主日常开发 checkout。Node/Git/runner 工具目录只读映射，控制输入和有界结果使用专用通道，宿主不执行模型生成的 PowerShell。设备 Token 不进入 guest、命令行或模型上下文。
 
-释放、连接器停止、取消或实例故障会销毁 VM。释放之前把需要保留的代码保存到远程仓库等外部系统；没有跨租约缓存、持久源码或自动 PR 发布承诺。GitHub 凭据须另行显式授权，不能映射宿主用户或凭据目录。
+映射目录保留宿主所有者，guest launcher 仅为 `C:/AgentWork` 及其子目录设置进程级 Git `safe.directory`，不修改宿主配置。WSB 共享目录不支持创建符号链接，需要链接的项目应使用 guest 临时目录；此限制随注册说明暴露给 agent。
+
+释放、连接器停止、取消或实例故障会销毁 VM，但不会删除或回滚已映射的项目和缓存。未配置 `dataDir` 的设备沿用临时目录语义；Windows 系统状态及其他 guest 文件仍随 VM 丢弃。持久模式、路径和限制由 runner 的 `instructions` / `persistence` 声明，Worker 无须增加存储协议。GitHub 凭据须另行显式授权，不能映射宿主用户或凭据目录。
+
+guest 中的 `npm-ensure.mjs` 负责可选的依赖复用：用 manifest/lockfile、Node ABI、系统架构、npm 版本、有效配置及支持的参数形成指纹，再检查 npm 依赖结构。仅成功安装后写入收据；安装前撤销旧收据，失败和中断后重新安装。手动内容修改及本地文件依赖用 `--fresh` 重装，不把结构检查当成完整内容校验。该助手由现有 `powershell` 调用，不新增模型工具，不在宿主执行项目脚本。
 
 WSB 与 Cloudflare `/work` 独立。Cloudflare `send_file`、资产导出和子工作区合并不会自动读取 WSB 文件；将来导出应注册明确的文件传输工具。
 

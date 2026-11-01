@@ -6,11 +6,13 @@ import path from "node:path";
 import { Type, type Static } from "typebox";
 import { parse, IdSchema, PowerShellInputSchema, ExecResultSchema, validateDescriptor, validateToolArguments, validateOutcome, MAX_CONTROL_BYTES, mismatch, type Descriptor, type JobInput, type Outcome } from "./protocol.ts";
 import { atomicJson, exists, readJson, sha256 } from "./files.ts";
+import { workspaceStorage } from "./storage.ts";
 
 export const ConfigSchema = Type.Object({
   origin: Type.String({ minLength: 1 }), deviceId: Type.String({ pattern: "^[a-f0-9-]{36}$" }), tokenProtected: Type.String({ minLength: 1 }),
   name: Type.String({ minLength: 1, maxLength: 80 }), nodeDir: Type.String({ minLength: 1 }), gitDir: Type.Optional(Type.String({ minLength: 1 })),
   memoryMiB: Type.Integer({ minimum: 2048, maximum: 65536 }), maxTimeoutMs: Type.Integer({ minimum: 1000, maximum: 1200000 }),
+  dataDir: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
 }, { additionalProperties: false });
 export type Config = Static<typeof ConfigSchema>;
 const InstanceSchema = Type.Object({ id: Type.String({ pattern: "^[a-f0-9-]{36}$" }), leaseId: Type.Optional(IdSchema) });
@@ -38,18 +40,20 @@ export async function protectToken(value: string, decrypt = false) {
     { input: decrypt ? value : Buffer.from(value, "utf8").toString("base64") });
   return decrypt ? Buffer.from(result.trim(), "base64").toString("utf8") : result.trim();
 }
-export async function descriptor(config: Pick<Config, "name" | "nodeDir" | "gitDir" | "memoryMiB" | "maxTimeoutMs">): Promise<Descriptor> {
+export async function descriptor(config: Pick<Config, "name" | "nodeDir" | "gitDir" | "memoryMiB" | "maxTimeoutMs" | "dataDir">): Promise<Descriptor> {
   const node = (await command(path.join(config.nodeDir, "node.exe"), ["--version"])).trim();
   const npm = (await command(path.join(config.nodeDir, "node.exe"), [path.join(config.nodeDir, "node_modules/npm/bin/npm-cli.js"), "--version"])).trim();
   const environment = [{ name: "node", version: node }, { name: "npm", version: npm }];
   if (config.gitDir) environment.push({ name: "git", version: (await command(path.join(config.gitDir, "cmd/git.exe"), ["--version"])).trim() });
   return validateDescriptor({ name: config.name, provider: "windows-wsb", os: "windows", arch: process.arch, workspaceRoot: "C:\\AgentWork",
     instructions: "此沙箱提供 powershell 工具，在 Windows Sandbox 内执行命令，默认目录 C:\\AgentWork，cwd 必须是 guest 内的 Windows 路径。" +
-      "每次调用启动独立 PowerShell 进程，变量、环境修改和当前目录不跨调用保留；同一租约复用 VM，文件、.git、node_modules 与 npm 缓存保留在 guest。" +
+      "每次调用启动独立 PowerShell 进程，变量、环境修改和当前目录不跨调用保留；同一租约复用 VM。" +
+      (config.dataDir ? "C:\\AgentWork 中的项目、.git、node_modules 和 C:\\AgentCache\\npm 下载缓存按工作区跨租约保留；其他 guest 文件仍是临时的。共享目录不支持创建符号链接；本地目录依赖可先 npm pack 再安装 tgz，必须使用链接的项目应在 guest 临时目录运行。" : "文件、.git、node_modules 与 npm 缓存仅保留在当前 guest。") +
       "源码可用 git clone 或文件命令准备，不与其他沙箱或 R2 自动同步。运行 npm 请用 npm.cmd；外部程序失败后应检查 $LASTEXITCODE 并显式退出。" +
-      "完成后检查结果 code、stdout、stderr、timedOut；code=0 才表示进程成功。释放、取消、超时、连接器退出或实例丢失会销毁 guest，请提前保存需要保留的修改。",
-    persistence: "同一租约内保留文件和缓存；释放或实例丢失后丢弃，不做 R2 源码同步。",
-    tools: [{ name: "powershell", description: "在当前租约的 Windows Sandbox 工作区 C:\\AgentWork 执行 PowerShell；正常完成保留文件、.git 与 node_modules。cwd 为 guest 路径，默认 C:\\AgentWork。", inputSchema: PowerShellInputSchema }],
+      "在包含 lockfile 的项目目录执行 node.exe C:\\AgentTools\\runner\\npm-ensure.mjs，可检查安装条件及依赖结构并复用 node_modules；不匹配则 npm ci，--fresh 强制重装，失败或中断不会留下成功标记。直接运行 npm ci 会清除旧依赖。" +
+      "完成后检查结果 code、stdout、stderr、timedOut；code=0 才表示进程成功。释放、取消、超时、连接器退出或实例丢失会销毁 guest；持久目录里的写入不会回滚。",
+    persistence: config.dataDir ? "C:\\AgentWork 与 C:\\AgentCache\\npm 映射到本机专用目录 " + path.resolve(config.dataDir) + "，按工作区隔离并跨租约、VM 和连接器重启保留；取消不回滚文件。其余 guest 文件与系统安装状态随实例销毁；不上传 R2。" : "同一租约内保留文件和缓存；释放或实例丢失后丢弃，不做 R2 源码同步。",
+    tools: [{ name: "powershell", description: "在当前租约的 Windows Sandbox 工作区 C:\\AgentWork 执行 PowerShell；文件保留范围见 persistence。cwd 为 guest 路径，默认 C:\\AgentWork。", inputSchema: PowerShellInputSchema }],
     environment, memoryMiB: config.memoryMiB, maxConcurrent: 1, maxTimeoutMs: config.maxTimeoutMs, workspaceProtocol: "registered-tools-v2" });
 }
 const xml = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
@@ -110,6 +114,8 @@ export class WsbBackend {
       return this.session;
     }
     if (record) { await this.lost(job.lease.id); throw new Error("session_lost"); }
+    const storage = this.config.dataDir ? await workspaceStorage({ dataDir: this.config.dataDir, state: this.state, deviceId: this.config.deviceId,
+      protectedPaths: [path.resolve(this.bundleDir, "../.."), this.config.nodeDir, ...(this.config.gitDir ? [this.config.gitDir] : [])], workspace: job.lease.workspace }) : undefined;
     const root = path.join(this.state, "sessions", sha256(job.lease.id)), input = path.join(root, "input"), output = path.join(root, "output");
     await fs.mkdir(input, { recursive: true }); await fs.mkdir(output, { recursive: true });
     await atomicJson(path.join(input, "input.json"), job);
@@ -122,7 +128,9 @@ export class WsbBackend {
     const configuration = "<Configuration><MemoryInMB>" + this.config.memoryMiB + "</MemoryInMB><Networking>Enable</Networking>" +
       "<ClipboardRedirection>Disable</ClipboardRedirection><AudioInput>Disable</AudioInput><VideoInput>Disable</VideoInput><PrinterRedirection>Disable</PrinterRedirection><MappedFolders>" +
       map(this.config.nodeDir, "C:\\AgentTools\\node", true) + map(this.bundleDir, "C:\\AgentTools\\runner", true) +
-      (this.config.gitDir ? map(this.config.gitDir, "C:\\AgentTools\\git", true) : "") + map(input, "C:\\AgentInput", true) + map(output, "C:\\AgentOutput", false) + "</MappedFolders></Configuration>";
+      (this.config.gitDir ? map(this.config.gitDir, "C:\\AgentTools\\git", true) : "") +
+      (storage ? map(storage.work, "C:\\AgentWork", false) + map(storage.cache, "C:\\AgentCache\\npm", false) : "") +
+      map(input, "C:\\AgentInput", true) + map(output, "C:\\AgentOutput", false) + "</MappedFolders></Configuration>";
     progress("正在启动当前租约的 Windows Sandbox。\n");
     const started = parse(StartSchema, JSON.parse(await this.host("wsb.exe", ["start", "--id", id, "--config", configuration, "--raw"], { timeoutMs: 300000 })));
     if (started.Id !== id) throw new Error("sandbox_identity_mismatch");
