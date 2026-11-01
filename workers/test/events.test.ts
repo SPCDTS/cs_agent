@@ -132,6 +132,8 @@ describe("EventsDO delivery pipeline", () => {
     await runDurableObjectAlarm(events());
     expect(await sql("SELECT key FROM event_held")).toEqual([]);
     expect((await inbound())[0]?.text).toContain("主题：主题 night");
+    // 投递返回时 Thread 仍在后台结算，等它完成后才能重置存储，避免串入下一用例。
+    await vi.waitFor(async () => expect(await sql("SELECT 1 FROM event_run WHERE status = 'queued'")).toEqual([]), { timeout: 10_000 });
   });
 
   it("folds events over the hourly budget into the next input as an unexpanded count", async () => {
@@ -156,6 +158,8 @@ describe("EventsDO delivery pipeline", () => {
     expect(rows[1]?.text).toContain("[另有 2 件未展开]");
     const runs = await sql<Run>("SELECT keys_json FROM event_run ORDER BY rowid");
     expect(JSON.parse(runs[1]!.keys_json)).toHaveLength(3);
+    // 投递返回时 Thread 仍在后台结算，等它完成后才能重置存储，避免串入下一用例。
+    await vi.waitFor(async () => expect(await sql("SELECT 1 FROM event_run WHERE status = 'queued'")).toEqual([]), { timeout: 10_000 });
   });
 
   it("pauses the source after three failed event turns and alerts once", async () => {
