@@ -155,7 +155,7 @@ export const CONSOLE_APP_JS = String.raw`
   }
   function startConsole(){restorePending();renderConsoleThreads();consoleView(cs.view);}
   function requestParams(){
-    const p=new URLSearchParams({since:String(cs.until-Number($("req-range").value)*3600000),until:String(cs.until),limit:"40"});
+    const p=new URLSearchParams({since:String(cs.until-Number($("req-range").value)*3600000),until:String(cs.until),limit:String(ADMIN_PAGE_SIZE)});
     for(const [key,id] of [["thread","req-thread"],["model","req-model"],["status","req-status"],["purpose","req-purpose"]])if($(id).value)p.set(key,$(id).value);
     if(cs.turn)p.set("turn",cs.turn);
     return p;
@@ -181,7 +181,7 @@ export const CONSOLE_APP_JS = String.raw`
       $("metric-cache-note").textContent=s.cacheMeasured+" / "+s.requests+" 条已上报缓存 · 按输入量加权";
       $("metric-duration").textContent=duration(s.avgDuration==null?null:Math.round(s.avgDuration));
       $("metric-measured").textContent=s.measured+" / "+s.requests+" 条已返回用量";
-      $("req-count").textContent="共 "+nf(s.requests)+" 次调用";$("request-state").textContent="第 "+(cs.pages.length+1)+" 页 · 更新于 "+time(Date.now());
+      $("req-count").textContent="共 "+nf(s.requests)+" 次调用";$("request-state").textContent="第 "+(cs.pages.length+1)+" 页 · 每页 "+ADMIN_PAGE_SIZE+" 条 · 更新于 "+time(Date.now());
       choices("req-model",u.choices,"全部模型");drawTokens(u,Number(p.get("since")),Number(p.get("until")));
       const total=s.inputTokens+s.outputTokens;
       $("model-breakdown").replaceChildren(...u.models.slice(0,5).map(m=>el("div",{className:"model-item"},[

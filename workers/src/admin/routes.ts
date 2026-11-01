@@ -1,3 +1,4 @@
+import { ADMIN_PAGE_SIZE } from "./pagination";
 import { workspaceRoutes } from "./workspace-routes";
 import { createMcpAdminRoutes } from "./mcp-routes";
 import { MCP_SERVER_ROUTES } from "./mcp-servers-routes";
@@ -62,7 +63,7 @@ async function oauth<T>(work: () => Promise<T>): Promise<Response> {
 }
 function eventQuery(url: URL): { thread: string; query: EventQuery } {
   const get = (name: string) => url.searchParams.get(name) ?? undefined;
-  const thread = get("thread") ?? "owner", kind = get("kind"), result = get("result"), before = get("before"), limit = get("limit") ?? "50";
+  const thread = get("thread") ?? "owner", kind = get("kind"), result = get("result"), before = get("before"), limit = get("limit") ?? String(ADMIN_PAGE_SIZE);
   if (!new RegExp(`^(${THREAD_KEY})$`).test(thread) || [kind, result].some(value => value !== undefined && !/^[a-z_]{1,32}$/.test(value))
     || (before !== undefined && !/^\d{1,15}$/.test(before)) || !/^\d{1,3}$/.test(limit) || Number(limit) < 1 || Number(limit) > 200) {
     throw new HttpError(400, "invalid_query");
@@ -97,7 +98,7 @@ function requestQuery(url: URL): RequestQuery {
     const raw = p.get(key); if (raw !== null && !/^\d{1,16}$/.test(raw)) throw new HttpError(400, "invalid_query");
     const n = raw === null ? fallback : Number(raw); if (!Number.isSafeInteger(n)) throw new HttpError(400, "invalid_query"); return n;
   };
-  const since = num("since", now - 86400_000), until = num("until", now), limit = num("limit", 40), before = num("before", 0);
+  const since = num("since", now - 86400_000), until = num("until", now), limit = num("limit", ADMIN_PAGE_SIZE), before = num("before", 0);
   const thread = p.get("thread") || undefined, model = p.get("model") || undefined, status = p.get("status") || undefined, purpose = p.get("purpose") || undefined, turnId = p.get("turn") || undefined;
   if (until < since || until - since > 31 * 86400_000 || limit < 1 || limit > 100 ||
     thread && !new RegExp("^(" + THREAD_KEY + ")$").test(thread) || model && model.length > 200 ||

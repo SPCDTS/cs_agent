@@ -1,6 +1,7 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { snapshot } from "../src/requests/snapshot";
 import type { Settings, SettingsSnapshot } from "../src/settings";
 import { action, connect, event, input, reply, sendPrivate } from "./helpers";
 import { fakeRemote, login } from "./mcp-helpers";
@@ -117,6 +118,41 @@ describe("admin routes", () => {
 
 describe("admin data views", () => {
   type EventPage = { events: { id: number; at: number; kind: string; detail: Record<string, unknown> }[]; next?: number };
+
+  it("defaults admin data pages to ten and returns the remaining row on the next page", async () => {
+    const owner = env.THREAD.getByName("owner"), store = env.REQUESTS.getByName("main"), at = Date.now() - 1000;
+    await owner.stats();
+    await runInDurableObject(owner, (_instance, state) => {
+      for (let i = 0; i < 11; i++) state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", at + i, "mcp_call", JSON.stringify({ tool: "tool" + i }));
+    });
+    const eventPage = await adminJson<EventPage>("GET", "/admin/events?thread=owner&kind=mcp_call");
+    expect(eventPage.events).toHaveLength(10);
+    expect(eventPage.next).toBeDefined();
+    const eventTail = await adminJson<EventPage>("GET", "/admin/events?thread=owner&kind=mcp_call&before=" + eventPage.next);
+    expect(eventTail.events.map(e => e.detail.tool)).toEqual(["tool0"]);
+    expect(eventTail.next).toBeUndefined();
+
+    const memories = Array.from({ length: 11 }, (_, i) => ({ id: i + 1, ns: "owner", kind: "fact", text: "分页记录" + i, author: "dashboard", updated_at: 1_700_000_000 + i }));
+    await adminJson("POST", "/admin/memory/import", { ns: "owner", memories });
+    type MemoryPage = { items: { id: number }[]; page: number; limit: number; total: number };
+    const memoryPage = await adminJson<MemoryPage>("GET", "/admin/memory/list?ns=owner");
+    expect(memoryPage).toMatchObject({ page: 1, limit: 10, total: 11 });
+    expect(memoryPage.items.map(m => m.id)).toEqual([11, 10, 9, 8, 7, 6, 5, 4, 3, 2]);
+    expect((await adminJson<MemoryPage>("GET", "/admin/memory/list?ns=owner&page=2")).items.map(m => m.id)).toEqual([1]);
+
+    const ids = Array.from({ length: 11 }, () => crypto.randomUUID());
+    for (const id of ids) await store.record({ request: {
+      id, startedAt: at, endedAt: at + 10, thread: "owner", actor: "thread", purpose: "conversation", provider: "faux", model: "test",
+      status: "done", inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, reasoningTokens: 0, durationMs: 10, contextWindow: 1000,
+    }, context: snapshot({ messages: [] }) });
+    type RequestPage = Awaited<ReturnType<typeof store.list>>;
+    const requestPage = await adminJson<RequestPage>("GET", "/admin/requests");
+    expect(requestPage.requests.map(r => r.id)).toEqual(ids.slice(1).reverse());
+    expect(requestPage.next).toBeDefined();
+    const requestTail = await adminJson<RequestPage>("GET", "/admin/requests?before=" + requestPage.next);
+    expect(requestTail.requests.map(r => r.id)).toEqual([ids[0]]);
+    expect(requestTail.next).toBeUndefined();
+  });
 
   it("pages audit events by rowid and filters by kind and result", async () => {
     const owner = env.THREAD.getByName("owner");

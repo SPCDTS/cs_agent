@@ -11,6 +11,7 @@ import type { McpAuthority } from "./mcp/access";
 import type { SubagentCodingOperation, SubagentCapabilityHost } from "./mcp/delegated";
 import { DurableObject } from "cloudflare:workers";
 import { historyCursor, historyEntry, readHistoryCursor } from "./sessions";
+import { ADMIN_PAGE_SIZE } from "./admin/pagination";
 import { MemoryManager, type MemoryListQuery, type ProfileProposal } from "./memory/management";
 import { importMemoryHistory } from "./memory/history-import";
 import { runConsolidate } from "./maintenance/consolidate";
@@ -969,7 +970,7 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     await this.bindNamespace(thread);
     const { root, harness } = await this.open();
-    const page = await root.entries({}, 30, readHistoryCursor(cursor), context);
+    const page = await root.entries({}, ADMIN_PAGE_SIZE, readHistoryCursor(cursor), context);
     const live = await harness.snapshot(LiveDoc, root.id, context);
     return { entries: page.items.map(historyEntry), next: historyCursor(page.next),
       busy: !!live?.run, compacting: (live?.compactions?.length ?? 0) > 0 };

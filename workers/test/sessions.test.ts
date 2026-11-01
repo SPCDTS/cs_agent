@@ -51,9 +51,10 @@ describe("session lifecycle", () => {
     release(); await pending;
     for (let i = 4; i < 24; i++) await owner().submit(input(i, "历史" + i, 10000001));
     const page = await owner().sessionHistory("owner");
+    expect(page.entries).toHaveLength(10);
     expect(page.next).toBeTruthy();
     const older = await owner().sessionHistory("owner", page.next);
-    expect(older.entries.length).toBeGreaterThan(0);
+    expect(older.entries).toHaveLength(10);
     expect(older.entries.some(e => page.entries.some(p => p.id === e.id))).toBe(false);
     expect((await request("history?cursor=!!!")).status).toBe(400);
   });

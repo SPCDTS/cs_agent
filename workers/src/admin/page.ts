@@ -1,3 +1,4 @@
+import { ADMIN_PAGE_SIZE } from "./pagination";
 import { MCP_ADMIN_HTML, MCP_ADMIN_APP_JS } from "./mcp-ui";
 import { MCP_SERVERS_HTML, MCP_SERVERS_JS } from "./mcp-servers-ui";
 import { WORKSPACE_CSS, WORKSPACE_HTML, WORKSPACE_APP_JS } from "./workspace-ui";
@@ -318,6 +319,7 @@ ${SESSION_HTML}
 
 export const ADMIN_APP_JS = String.raw`"use strict";
 (() => {
+  const ADMIN_PAGE_SIZE = ${ADMIN_PAGE_SIZE};
   const TOKEN_KEY = "cs-agent-admin-token";
   const EVENT_KINDS = ["", "mcp_call", "mcp_catalog", "mcp_management", "memory_extract", "memory_write"];
   const MORE_KINDS = ["web_search", "generate_image", "coding_exec", "coding_read", "coding_write", "coding_edit"];
@@ -622,7 +624,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     }
   }
   async function loadEvents() {
-    let path = "/admin/events?limit=10&thread=" + encodeURIComponent(state.eventThread);
+    let path = "/admin/events?limit=" + ADMIN_PAGE_SIZE + "&thread=" + encodeURIComponent(state.eventThread);
     if (state.eventKind) path += "&kind=" + encodeURIComponent(state.eventKind);
     if (state.before !== undefined) path += "&before=" + state.before;
     const page = await api("GET", path);
@@ -630,7 +632,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     renderEvents(page.events);
     $("ev-prev").disabled = state.history.length === 0;
     $("ev-next").disabled = page.next === undefined;
-    $("events-meta").textContent = "第 " + (state.history.length + 1) + " 页 · 每页 10 条";
+    $("events-meta").textContent = "第 " + (state.history.length + 1) + " 页 · 每页 " + ADMIN_PAGE_SIZE + " 条";
   }
   function resetEvents() { state.before = undefined; state.history = []; return loadEvents().catch(fail); }
   function selectThread(key) { state.eventThread = key; $("ev-thread").value = key; resetEvents(); }
@@ -934,10 +936,10 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   async function loadMemory() {
     if(mm.ns!==state.memoryNs||mm.query!==state.memoryQuery){mm.page=1;mm.ns=state.memoryNs;mm.query=state.memoryQuery;}
     const query="?ns="+encodeURIComponent(state.memoryNs), page=mm.page;
-    const [base,list]=await Promise.all([api("GET","/admin/memory"+query),api("GET","/admin/memory/list"+query+"&q="+encodeURIComponent(state.memoryQuery)+"&status="+$("mem-status").value+"&page="+page+"&limit=30")]);
+    const [base,list]=await Promise.all([api("GET","/admin/memory"+query),api("GET","/admin/memory/list"+query+"&q="+encodeURIComponent(state.memoryQuery)+"&status="+$("mem-status").value+"&page="+page+"&limit="+ADMIN_PAGE_SIZE)]);
     renderMemory({...base,memories:list.items});
-    mm.total=list.total;$("mem-page").textContent="第 "+page+" 页 · 共 "+list.total+" 条";
-    $("mem-prev").disabled=page<=1;$("mem-next").disabled=page*30>=list.total;
+    mm.total=list.total;$("mem-page").textContent="第 "+page+" 页 · 每页 "+ADMIN_PAGE_SIZE+" 条 · 共 "+list.total+" 条";
+    $("mem-prev").disabled=page<=1;$("mem-next").disabled=page*ADMIN_PAGE_SIZE>=list.total;
   }
   function renderMemory(view) {
     state.memoryView = view;

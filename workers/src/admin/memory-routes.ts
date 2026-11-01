@@ -1,3 +1,4 @@
+import { ADMIN_PAGE_SIZE } from "./pagination";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import type { AdminContext, AdminRoute } from "./routes";
@@ -47,7 +48,7 @@ function query(url: URL): MemoryListQuery {
     return n;
   };
   const parsed: unknown = { query: value("q"), status: value("status"), kind: value("kind"),
-    cursor: readInt("cursor", 1, Number.MAX_SAFE_INTEGER), page: readInt("page", 1, 1000000), limit: readInt("limit", 1, 100) };
+    cursor: readInt("cursor", 1, Number.MAX_SAFE_INTEGER), page: readInt("page", 1, 1000000), limit: readInt("limit", 1, 100) ?? ADMIN_PAGE_SIZE };
   const schema = Type.Object({
     query: Type.Optional(Type.String({ maxLength: 200 })), status: Type.Optional(Type.Union([...MEMORY_STATUSES.map(v => Type.Literal(v)), Type.Literal("all")])),
     kind: Type.Optional(Type.Union(MEMORY_KINDS.map(v => Type.Literal(v)))), cursor: Type.Optional(ID), page: Type.Optional(ID), limit: Type.Optional(ID),
