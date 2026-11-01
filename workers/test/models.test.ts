@@ -8,6 +8,7 @@ import * as models from "../src/models";
 import { remoteCredentials } from "../src/model-credentials";
 import { RegistryDO, type ModelView } from "../src/registry";
 import { isChatGPTCredential, RESOURCE, TOKEN_URL } from "../src/codex-login";
+import { OAuthRefreshError } from "../src/codex-refresh-error";
 import { sha256 } from "../src/mcp/crypto";
 import { input } from "./helpers";
 
@@ -153,6 +154,94 @@ describe("ChatGPT plan authorization", () => {
     });
     expect(a?.auth.apiKey).toBe("fresh"); expect(b?.auth.apiKey).toBe("fresh");
     expect(await store().read("openai-codex")).toMatchObject({ refresh: "rotated" });
+  });
+
+
+  it("reports expiring credentials without refreshing during status reads, then records the failed request and account state", async () => {
+    network(); await login();
+    expect((await selectModel({ provider: "openai-codex", id: "gpt-6-astra" })).status).toBe(200);
+    await store().modify("openai-codex", async current => ({ ...current!, expires: Date.now() - 1 }));
+    network({ [TOKEN_URL]: async () => Response.json({ error: "invalid_grant", error_description: "secret-refresh-token", access_token: "never-expose" },
+      { status: 400, headers: { "x-request-id": "req-refresh-test", "set-cookie": "never-expose-cookie" } }) });
+    const expired = await adminJson<ModelView>("GET", "/admin/model");
+    expect(expired.codex).toMatchObject({ status: "refresh_due", loggedIn: false, hasCredential: true, needsReauth: false });
+    expect(await registry().modelStatus()).toEqual({ unavailable: "openai-codex/gpt-6-astra: refresh_due" });
+    expect(sent).toHaveLength(0);
+    await env.THREAD.getByName("owner").submit(input(1, "检查模型认证", 10000001));
+    const failed = await adminJson<ModelView>("GET", "/admin/model");
+    expect(failed.codex).toMatchObject({ status: "reauth_required", loggedIn: false, needsReauth: true,
+      refreshFailure: { kind: "http", status: 400, oauthCode: "invalid_grant", requestId: "req-refresh-test", format: "json" } });
+    const page = await env.REQUESTS.getByName("main").list({ since: 0, until: Date.now() + 1000, limit: 10 });
+    expect(page.requests).toHaveLength(1);
+    expect(page.requests[0]).toMatchObject({ status: "error", toolCalls: [] });
+    expect(page.requests[0]?.error).toContain('"status":400');
+    expect(page.requests[0]?.error).toContain("invalid_grant");
+    expect(sent.filter(call => call.url === TOKEN_URL)).toHaveLength(1);
+    expect(JSON.stringify([failed, page])).not.toMatch(/secret-refresh-token|never-expose/);
+    expect(await store().read("openai-codex")).toMatchObject({ refresh: "refresh-oaiapp_test" });
+    await runInDurableObject(registry(), async (_instance, state) => {
+      expect((await new RegistryDO(state, env).modelView()).codex.status).toBe("reauth_required");
+    });
+  });
+
+  it.each([
+    { label: "network", respond: async () => { throw new Error("Bearer never-expose-network"); }, expected: { kind: "network" } },
+    { label: "timeout", respond: async () => { throw new DOMException("never-expose-timeout", "TimeoutError"); }, expected: { kind: "timeout" } },
+    { label: "HTML challenge", respond: async () => new Response("<html>never-expose-html</html>", { status: 403,
+      headers: { "content-type": "text/html", "cf-mitigated": "challenge", "cf-ray": "abc123-SJC" } }), expected: { kind: "http", status: 403, format: "html", challenge: true, cfRay: "abc123-SJC" } },
+    { label: "rate limit", respond: async () => Response.json({ error: { code: "rate_limit_exceeded", message: "never-expose-message" } }, { status: 429 }),
+      expected: { kind: "http", status: 429, oauthCode: "rate_limit_exceeded" } },
+    { label: "invalid JSON", respond: async () => new Response("never-expose-json", { headers: { "content-type": "application/json" } }), expected: { kind: "invalid_json", status: 200 } },
+    { label: "invalid fields", respond: async () => Response.json({ access_token: "never-expose-access" }), expected: { kind: "invalid_token_response", status: 200 } },
+    { label: "unknown code", respond: async () => Response.json({ error: "never_expose_unknown_code", error_description: "never-expose" }, { status: 400 }),
+      expected: { kind: "http", status: 400, oauthCode: "unrecognized" } },
+  ])("classifies $label without claiming reauthorization or leaking upstream contents, and clears failure after recovery", async ({ respond, expected }) => {
+    network(); await login();
+    await store().modify("openai-codex", async current => ({ ...current!, expires: Date.now() - 1 }));
+    const logs = vi.spyOn(console, "error").mockImplementation(() => {});
+    network({ [TOKEN_URL]: respond });
+    const result = await admin("POST", "/admin/model/oauth/codex/catalog");
+    expect(result.status).toBe(400);
+    const body = await result.json();
+    expect(body).toMatchObject({ error: "token_exchange", diagnostic: expected });
+    const failed = await adminJson<ModelView>("GET", "/admin/model");
+    expect(failed.codex).toMatchObject({ status: "refresh_failed", loggedIn: false, needsReauth: false, refreshFailure: expected });
+    expect(JSON.stringify([body, failed, logs.mock.calls])).not.toContain("never-expose");
+    expect(JSON.stringify([body, failed, logs.mock.calls])).not.toContain("never_expose");
+    expect(logs).toHaveBeenCalledWith(expect.objectContaining({ event: "model_oauth_refresh_failed", ...expected }));
+    network({ [TOKEN_URL]: async () => Response.json({ access_token: "fresh", refresh_token: "rotated", expires_in: 3600, token_type: "Bearer" }) });
+    await models.openModels(env, store()).getAuth("openai-codex");
+    expect((await adminJson<ModelView>("GET", "/admin/model")).codex).toMatchObject({ status: "ready", loggedIn: true, needsReauth: false });
+    expect((await adminJson<ModelView>("GET", "/admin/model")).codex.refreshFailure).toBeUndefined();
+  });
+
+  it("keeps the rotated refresh token when the subsequent model catalog request fails", async () => {
+    network(); await login();
+    await store().modify("openai-codex", async current => ({ ...current!, expires: Date.now() - 1 }));
+    network({ [TOKEN_URL]: async () => Response.json({ access_token: "fresh", refresh_token: "rotated", expires_in: 3600, token_type: "Bearer" }),
+      [RESOURCE + "/models"]: async () => new Response(null, { status: 503 }) });
+    expect(await (await admin("POST", "/admin/model/oauth/codex/catalog")).json()).toEqual({ error: "catalog_failed" });
+    expect(await store().read("openai-codex")).toMatchObject({ access: "fresh", refresh: "rotated" });
+    expect((await adminJson<ModelView>("GET", "/admin/model")).codex.status).toBe("ready");
+    await models.openModels(env, store()).getAuth("openai-codex");
+    expect(sent.filter(call => call.url === TOKEN_URL)).toHaveLength(1);
+  });
+
+  it("does not let a delayed failure overwrite renewed credentials or mark a different account as failed", async () => {
+    network(); await login();
+    const first = (await adminJson<ModelView>("GET", "/admin/model")).codex.activeId;
+    const lease = await registry().credentialAcquire("openai-codex");
+    const failure = { at: Date.now(), kind: "network" } as const;
+    await login("oaiapp_second", "subject-b");
+    await registry().credentialSettle("openai-codex", lease.lease, lease.updatedAt, undefined, failure);
+    expect((await adminJson<ModelView>("GET", "/admin/model")).codex).toMatchObject({ status: "ready" });
+    expect((await adminJson<ModelView>("GET", "/admin/model")).codex.accounts.find(a => a.id === first)?.status).toBe("refresh_failed");
+    const current = await registry().credentialAcquire("openai-codex");
+    await registry().credentialSettle("openai-codex", current.lease, current.updatedAt, current.credential);
+    await registry().credentialSettle("openai-codex", current.lease, current.updatedAt, undefined, failure);
+    expect((await adminJson<ModelView>("GET", "/admin/model")).codex.status).toBe("ready");
+    await expect(store().modify("openai-codex", async () => { throw new OAuthRefreshError({ at: Date.now(), kind: "aborted" }); })).rejects.toThrow("token_exchange");
+    expect((await adminJson<ModelView>("GET", "/admin/model")).codex.status).toBe("ready");
   });
 
   it("requires fresh authorization for legacy credentials and reports a missing vault cleanly", async () => {

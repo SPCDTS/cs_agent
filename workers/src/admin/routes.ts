@@ -10,6 +10,7 @@ import { parseImport } from "../memory/import";
 import { oauthErrorCode } from "../mcp/oauth-fetch";
 import { ModelSelectionSchema, QQ_ID, SettingsSchema, type Settings } from "../settings";
 import { modelLoginErrorCode, TokenResponseSchema } from "../codex-login";
+import { refreshFailure } from "../codex-refresh-error";
 import type { EventQuery } from "../thread";
 import { SkillError, parseSkill } from "../skills";
 import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from "../message-import";
@@ -86,7 +87,7 @@ function pairingTicket(request: Request): string {
   return match[1]!;
 }
 async function modelLogin<T>(work: () => Promise<T>): Promise<Response> {
-  try { return json(await work()); } catch (error) { throw new HttpError(400, modelLoginErrorCode(error)); }
+  try { return json(await work()); } catch (error) { throw new HttpError(400, modelLoginErrorCode(error), { diagnostic: refreshFailure(error) }); }
 }
 
 function requestQuery(url: URL): RequestQuery {
