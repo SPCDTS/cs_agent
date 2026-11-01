@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import type { Message } from "@earendil-works/pi-ai";
-import { createRegistry, defineExtension, defineTool, Harness, section, type Conversation, type EntryId } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, section, type Conversation, type EntryId } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "../env";
 import { modelChange, openModels } from "../models";
@@ -16,6 +16,7 @@ import { formatBeijingTime } from "../memory/time";
 import { PI_SAFETY_RULE, WEB_RULE } from "../prompt";
 import { createSubagentCapabilityHost, installDelegatedCapabilities } from "../mcp/delegated";
 import { DEFAULT_TIMEOUT_MS, MAX_MODEL_CALLS, RETENTION_MS, subagentName, type SubagentEntry, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
+import { responseDescription, shortSummary, subagentActivity, SUBAGENT_PROGRESS_RULE } from "./activity";
 
 const context = BACKGROUND_CONTEXT;
 // 有未完成的工作时定期自唤醒：驱逐后由 alarm 重新打开 Harness 续跑，并补送没送到父线程的汇报。
@@ -65,14 +66,27 @@ export class SubagentDO extends DurableObject<Env> {
       const row = await tx.get<{ value: string }>("SELECT value FROM meta WHERE key = 'subagent'");
       if (!row) throw new Error("subagent_missing");
       const meta = JSON.parse(row.value) as SubagentMeta;
+      const before = JSON.stringify([meta.status, meta.progress]);
+      let activityChanged = false;
       if (await change(meta, tx)) {
         meta.version++;
+        activityChanged = before !== JSON.stringify([meta.status, meta.progress]);
+        if (activityChanged) meta.activityAt = Date.now();
         await tx.run("UPDATE meta SET value = ? WHERE key = 'subagent'", JSON.stringify(meta));
       }
       const pending = meta.status === "running" || meta.status !== "cancelled" && !!await tx.get("SELECT 1 FROM inbox WHERE status = 'answered' LIMIT 1");
       await this.ctx.storage.setAlarm(pending ? Date.now() + HEARTBEAT_MS : (meta.endedAt ?? meta.createdAt) + RETENTION_MS);
+      return { meta, activityChanged };
+    }).then(({ meta, activityChanged }) => {
+      if (activityChanged) this.publishActivity(meta);
       return meta;
     });
+  }
+
+  private publishActivity(meta: SubagentMeta): void {
+    this.ctx.waitUntil(this.env.REQUESTS.getByName("main").recordAgent(subagentActivity(meta)).catch(() => {
+      console.error({ event: "subagent_activity_failed", id: meta.id });
+    }));
   }
 
   /** 幂等：已存在时只返回当前状态。 */
@@ -84,12 +98,13 @@ export class SubagentDO extends DurableObject<Env> {
       const existing = await tx.get<{ value: string }>("SELECT value FROM meta WHERE key = 'subagent'");
       if (existing) return JSON.parse(existing.value) as SubagentMeta;
       const now = Date.now();
-      const created: SubagentMeta = { ...init, createdAt: now, status: "running", reportCount: 0, version: 1 };
+      const created: SubagentMeta = { ...init, summary: shortSummary(init.summary || init.task), createdAt: now, activityAt: now, status: "running", reportCount: 0, version: 1 };
       await tx.run("INSERT INTO meta (key, value) VALUES ('subagent', ?)", JSON.stringify(created));
       await tx.run("INSERT INTO inbox (request_id, text, received_at, status) VALUES ('task', ?, ?, 'queued')", init.task, now);
       await this.ctx.storage.setAlarm(now + HEARTBEAT_MS);
       return created;
     });
+    this.publishActivity(meta);
     this.kick();
     return state(meta);
   }
@@ -104,6 +119,7 @@ export class SubagentDO extends DurableObject<Env> {
       await tx.run("INSERT INTO inbox (request_id, text, received_at, status) VALUES (?, ?, ?, 'queued')", requestId, text, Date.now());
       result = "accepted";
       meta.status = "running";
+      delete meta.progress;
       delete meta.endedAt;
       return true;
     });
@@ -119,6 +135,7 @@ export class SubagentDO extends DurableObject<Env> {
       if (meta.status !== "running") return false;
       await tx.run("UPDATE inbox SET status = 'cancelled' WHERE status IN ('queued', 'running')");
       meta.status = "cancelled";
+      delete meta.progress;
       meta.endedAt = Date.now();
       return changed = true;
     });
@@ -199,6 +216,11 @@ export class SubagentDO extends DurableObject<Env> {
   }
 
   private async answer(row: InboxRow): Promise<void> {
+    if (row.status === "queued") await this.update(async meta => {
+      if (!meta.progress) return false;
+      delete meta.progress;
+      return true;
+    });
     await this.database.run("UPDATE inbox SET status = 'running' WHERE request_id = ? AND status = 'queued'", row.request_id);
     const { harness, root } = await this.open();
     // requestId 让驱逐后的重交找回同一提交，不会把同一条输入跑两遍。
@@ -212,6 +234,7 @@ export class SubagentDO extends DurableObject<Env> {
       await tx.run("UPDATE inbox SET status = 'answered', answer = ?, outcome = ? WHERE request_id = ? AND status = 'running'", text, outcome, row.request_id);
       if (await tx.get("SELECT 1 FROM inbox WHERE status IN ('queued', 'running') LIMIT 1")) return false;
       meta.status = outcome;
+      if (outcome === "failed" || meta.progress?.kind !== "result") delete meta.progress;
       meta.endedAt = Date.now();
       return true;
     });
@@ -220,7 +243,7 @@ export class SubagentDO extends DurableObject<Env> {
   private async answerText(harness: Harness, answer: EntryId): Promise<string> {
     const entry = await harness.commit(tx => tx.entry(answer), context);
     return (entry?.model ?? []).flatMap(message => message.role === "assistant"
-      ? message.content.flatMap(block => block.type === "text" ? [block.text] : []) : []).join("").trim();
+      ? message.content.flatMap(block => block.type === "text" ? [block.text] : []) : []).join("").trim().replace(/^【结果】\s*/u, "");
   }
 
   private async report(meta: SubagentMeta, row: InboxRow): Promise<void> {
@@ -261,12 +284,23 @@ export class SubagentDO extends DurableObject<Env> {
     registry.install(defineExtension({
       name: "cs-subagent",
       sections: [
-        section("subagent", () => SUBAGENT_RULE + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE, { tag: false }),
+        section("subagent", () => SUBAGENT_RULE + "\n" + SUBAGENT_PROGRESS_RULE + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE, { tag: false }),
         section("time", async () => {
           const row = await this.database.get<{ received_at: number }>("SELECT received_at FROM inbox WHERE status = 'running' ORDER BY received_at DESC LIMIT 1");
           return row ? `现在是北京时间 ${formatBeijingTime(row.received_at)}。` : undefined;
         }, { tag: false }),
       ],
+      hooks: [hook(GenerationTask, { afterResponse: async message => {
+        const progress = responseDescription(message, Date.now());
+        if (!progress) return;
+        try {
+          await this.update(async current => {
+            if (current.status !== "running" || current.progress?.kind === progress.kind && current.progress.text === progress.text) return false;
+            current.progress = progress;
+            return true;
+          });
+        } catch { console.error({ event: "subagent_progress_failed", id: meta.id }); }
+      } })],
       tools: [
         createWebSearchTool(this.env.DEEPSEEK_API_KEY),
         createWebPageTool(),

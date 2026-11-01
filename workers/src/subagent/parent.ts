@@ -7,6 +7,7 @@ import type { Env } from "../env";
 import { ownerIds, scopeOf, type InboundInput, type Target } from "../policy";
 import type { ModelSelection } from "../settings";
 import { formatBeijingTime } from "../memory/time";
+import { shortSummary } from "./activity";
 import {
   DEFAULT_TIMEOUT_MS, MAX_RUNNING, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS, SUBAGENT_ID, clip, confirmedIdentity, narrowIdentity, reportKey, reportText, stableId, subagentName,
   type ParentSubagentStatus, type SubagentCapabilities, type SubagentIdentity, type SubagentReport, type SubagentState,
@@ -14,7 +15,7 @@ import {
 
 export const SUBAGENT_SCHEMA = `
 CREATE TABLE IF NOT EXISTS subagents (
-  id TEXT PRIMARY KEY, task TEXT NOT NULL, created_at INTEGER NOT NULL,
+  id TEXT PRIMARY KEY, task TEXT NOT NULL, summary TEXT, created_at INTEGER NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('running', 'done', 'failed', 'cancelled', 'timeout')),
   ended_at INTEGER, identity_json TEXT NOT NULL, last_report_at INTEGER,
   origin_json TEXT NOT NULL, timeout_ms INTEGER NOT NULL, deadline INTEGER NOT NULL, child_version INTEGER NOT NULL DEFAULT 0
@@ -26,11 +27,11 @@ CREATE INDEX IF NOT EXISTS subagents_deadline ON subagents(status, deadline);
 export type SubagentOrigin = { capabilities?: SubagentCapabilities; workspaceRevision?: string; generation?: number; target: Target; selfId: string; scopeName: string; replyChannel?: "web" };
 export type SubagentCaller = { identity: SubagentIdentity; origin: SubagentOrigin };
 export type SubagentView = {
-  id: string; task: string; status: ParentSubagentStatus; createdAt: number; deadline: number;
+  id: string; task: string; summary: string; status: ParentSubagentStatus; createdAt: number; deadline: number;
   endedAt?: number; lastReportAt?: number; spawner?: string;
 };
 type Row = {
-  id: string; task: string; created_at: number; status: ParentSubagentStatus; ended_at: number | null; identity_json: string;
+  id: string; task: string; summary: string | null; created_at: number; status: ParentSubagentStatus; ended_at: number | null; identity_json: string;
   last_report_at: number | null; origin_json: string; timeout_ms: number; deadline: number; child_version: number;
 };
 type Reply = { text: string; error?: true };
@@ -53,11 +54,12 @@ const reply = (text: string, error = false) => ({ ...(error ? { isError: true } 
 const PARAMETERS = Type.Object({
   action: Type.Union([Type.Literal("spawn"), Type.Literal("message"), Type.Literal("list"), Type.Literal("cancel")]),
   task: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "spawn: a self-contained task description" })),
+  summary: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "spawn: provide a 15–30 character Chinese task summary for the admin topology, describing the work without credentials or raw arguments" })),
   id: Type.Optional(Type.String({ pattern: `^${SUBAGENT_ID}$`, description: "message / cancel: the subagent id returned by spawn or list" })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "message: a follow-up message for that subagent" })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, maximum: MAX_TIMEOUT_MS, description: "spawn: time limit in ms, default 10 minutes" })),
 }, { additionalProperties: false });
-const DESCRIPTION = `Delegate a self-contained, time-consuming task to a background subagent with its own context. spawn returns at once; tell the user you started it and end the turn. When the subagent answers, its result comes back to you as a '[子 agent 完成]' input; then report to the user with send_message. message sends a follow-up to a subagent, list shows this chat's subagents, cancel stops one. At most ${MAX_RUNNING} run at a time. Subagents inherit approved MCP, skills and optional isolated coding capabilities. They cannot send messages, grant permissions or publish skills.`;
+const DESCRIPTION = `Delegate a self-contained, time-consuming task to a background subagent with its own context. For spawn, provide the full task and a short Chinese summary of the work for the admin overview. spawn returns at once; tell the user you started it and end the turn. When the subagent answers, its result comes back to you as a '[子 agent 完成]' input; then report to the user with send_message. message sends a follow-up to a subagent, list shows this chat's subagents, cancel stops one. At most ${MAX_RUNNING} run at a time. Subagents inherit approved MCP, skills and optional isolated coding capabilities. They cannot send messages, grant permissions or publish skills.`;
 
 /** 父线程的子 agent 登记：派出、交代、取消、汇报入队与超时，都经这张表。 */
 export class ParentSubagents {
@@ -86,21 +88,21 @@ export class ParentSubagents {
       scopeName: origin.scopeName, replyChannel: origin.replyChannel, kind: "subagent" };
   }
 
-  async spawn(caller: SubagentCaller, task: string, timeoutMs: number | undefined, model: ModelSelection, seed: string): Promise<Reply> {
+  async spawn(caller: SubagentCaller, task: string, timeoutMs: number | undefined, model: ModelSelection, seed: string, summary?: string): Promise<Reply> {
     const thread = await this.host.thread(), id = await stableId(`${thread}:${seed}`), now = Date.now();
     const timeout = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.trunc(timeoutMs ?? DEFAULT_TIMEOUT_MS)));
     const admitted = await this.host.db.transaction(async tx => {
       if (await tx.get("SELECT 1 FROM subagents WHERE id = ?", id)) return true;
       const running = await tx.get<{ n: number }>("SELECT COUNT(*) AS n FROM subagents WHERE status = 'running'");
       if ((running?.n ?? 0) >= MAX_RUNNING) return false;
-      await tx.run(`INSERT INTO subagents (id, task, created_at, status, identity_json, origin_json, timeout_ms, deadline)
-        VALUES (?, ?, ?, 'running', ?, ?, ?, ?)`, id, task, now, JSON.stringify(caller.identity), JSON.stringify(caller.origin), timeout, now + timeout);
+      await tx.run(`INSERT INTO subagents (id, task, summary, created_at, status, identity_json, origin_json, timeout_ms, deadline)
+        VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`, id, task, shortSummary(summary || task), now, JSON.stringify(caller.identity), JSON.stringify(caller.origin), timeout, now + timeout);
       return true;
     });
     if (!admitted) return { text: `本会话已有 ${MAX_RUNNING} 个子 agent 在运行，达到上限；等它们完成，或先 cancel 不再需要的。`, error: true };
     const row = (await this.row(id))!;
     try {
-      await this.apply(id, await this.child(thread, id).start({ parent: thread, id, task: row.task, identity: JSON.parse(row.identity_json) as SubagentIdentity, model, capabilities: (JSON.parse(row.origin_json) as SubagentOrigin).capabilities }));
+      await this.apply(id, await this.child(thread, id).start({ parent: thread, id, task: row.task, summary: row.summary ?? shortSummary(row.task), identity: JSON.parse(row.identity_json) as SubagentIdentity, model, capabilities: (JSON.parse(row.origin_json) as SubagentOrigin).capabilities }));
     } catch (error) {
       console.error({ event: "subagent_start_failed", id, error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
       await this.host.db.run("UPDATE subagents SET status = 'failed', ended_at = ? WHERE id = ? AND status = 'running'", Date.now(), id);
@@ -178,7 +180,7 @@ export class ParentSubagents {
     const rows = await this.host.db.all<Row>("SELECT * FROM subagents ORDER BY created_at DESC LIMIT 50");
     return rows.map(row => {
       const as = (JSON.parse(row.identity_json) as SubagentIdentity).as;
-      return { id: row.id, task: clip(row.task, 200), status: row.status, createdAt: row.created_at, deadline: row.deadline,
+      return { id: row.id, task: clip(row.task, 200), summary: row.summary ?? shortSummary(row.task), status: row.status, createdAt: row.created_at, deadline: row.deadline,
         ...(row.ended_at === null ? {} : { endedAt: row.ended_at }), ...(row.last_report_at === null ? {} : { lastReportAt: row.last_report_at }),
         ...(as ? { spawner: `${as.owner ? "owner" : "成员"} ${as.userId}` } : {}) };
     });
@@ -208,8 +210,8 @@ export class ParentSubagents {
         if (!who) return reply("子 agent 只能在用户亲自发消息的回合使用；本轮请勿重试。", true);
         const seed = `${api.conversationId}:${api.taskId}`;
         if (args.action === "spawn") {
-          if (!args.task || args.id || args.text) return reply("spawn 只需要 task（可选 timeoutMs）", true);
-          const result = await this.spawn(who, args.task, args.timeoutMs, await model(), seed);
+          if (!args.task || args.id || args.text) return reply("spawn 需要 task 与任务短简介 summary（可选 timeoutMs）", true);
+          const result = await this.spawn(who, args.task, args.timeoutMs, await model(), seed, args.summary);
           return reply(result.text, result.error);
         }
         if (args.action === "message") {

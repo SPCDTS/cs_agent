@@ -1,9 +1,12 @@
+import type { AgentDescription, SubagentActivity } from "../subagent/activity";
+import type { SubagentStatus } from "../subagent/model";
+
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
 type Activity = "active" | "recent" | "error" | "context";
 export type AgentNode = { id: string; thread: string; activity: Activity; lastActiveAt: number | null } & (
   | { kind: "thread"; parentId: null }
-  | { kind: "subagent"; parentId: string; actor: string }
+  | { kind: "subagent"; parentId: string; actor: string; status: SubagentStatus | null; summary: string | null; description: AgentDescription | null }
 );
 export type AgentTopology = { nodes: AgentNode[]; since: number; sampledAt: number };
 
@@ -35,8 +38,16 @@ export function readAgentTopology(sql: SqlStorage, now: number): AgentTopology {
     } else {
       if (!nodes.has(parentId)) nodes.set(parentId, { id: parentId, thread: row.thread, kind: "thread", parentId: null, activity: "context", lastActiveAt: null });
       const id = `sub:${row.thread}:${row.actor}`;
-      nodes.set(id, { id, thread: row.thread, kind: "subagent", parentId, actor: row.actor, activity, lastActiveAt: row.at });
+      nodes.set(id, { id, thread: row.thread, kind: "subagent", parentId, actor: row.actor, activity, lastActiveAt: row.at, status: null, summary: null, description: null });
     }
+  }
+  // 子任务的状态跨模型请求与工具执行；显式生命周期覆盖请求片段的推测状态。
+  for (const row of sql.exec<{ record: string }>("SELECT record FROM agent_activity WHERE updated>=? ORDER BY thread,actor", since)) {
+    const record: SubagentActivity = JSON.parse(row.record), parentId = "thread:" + record.thread, id = `sub:${record.thread}:${record.actor}`;
+    if (!nodes.has(parentId)) nodes.set(parentId, { id: parentId, thread: record.thread, kind: "thread", parentId: null, activity: "context", lastActiveAt: null });
+    nodes.set(id, { id, thread: record.thread, kind: "subagent", parentId, actor: record.actor,
+      activity: record.status === "running" ? "active" : record.status === "failed" ? "error" : "recent",
+      lastActiveAt: record.updatedAt, status: record.status, summary: record.summary, description: record.description });
   }
   return { nodes: [...nodes.values()], since, sampledAt: now };
 }

@@ -1,6 +1,7 @@
 import type { McpCapabilitySnapshot } from "../mcp/access";
 import type { ModelSelection } from "../settings";
 import type { TurnKind } from "../policy";
+import type { AgentDescription } from "./activity";
 
 /** 派出者：QQ 身份或可信网页管理员、显示昵称与会话权限快照。 */
 export type SubagentPerson = { userId: string; nickname: string; owner: boolean; admin?: true };
@@ -14,9 +15,10 @@ export type SubagentState = { status: SubagentStatus; version: number };
 export type SubagentCapabilities = { mcp?: McpCapabilitySnapshot; coding?: boolean };
 export type SubagentMeta = {
   parent: string; id: string; task: string; createdAt: number; identity: SubagentIdentity; model: ModelSelection;
+  summary?: string; progress?: AgentDescription; activityAt?: number;
   capabilities?: SubagentCapabilities; status: SubagentStatus; endedAt?: number; reportCount: number; version: number;
 };
-export type SubagentStart = Pick<SubagentMeta, "parent" | "id" | "task" | "identity" | "model" | "capabilities">;
+export type SubagentStart = Pick<SubagentMeta, "parent" | "id" | "task" | "summary" | "identity" | "model" | "capabilities">;
 export type SubagentReport = {
   subagentId: string; requestId: string; text: string; identity: SubagentIdentity; outcome: "done" | "failed"; state: SubagentState;
 };
