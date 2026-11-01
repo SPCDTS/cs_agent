@@ -1,4 +1,5 @@
 import { MCP_ADMIN_HTML, MCP_ADMIN_APP_JS } from "./mcp-ui";
+import { MCP_SERVERS_HTML, MCP_SERVERS_JS } from "./mcp-servers-ui";
 import { WORKSPACE_CSS, WORKSPACE_HTML, WORKSPACE_APP_JS } from "./workspace-ui";
 import { ACCESS_HTML, ACCESS_APP_JS } from "./access-ui";
 import { MEMORY_MANAGER_HTML, MEMORY_MANAGER_JS } from "./memory-ui";
@@ -40,7 +41,7 @@ tr:last-child td{border-bottom:0}
 .btn:disabled{opacity:.5;cursor:default}
 .chip{appearance:none;border:1px solid #CBD1DA;background:#FFFFFF;border-radius:999px;padding:6px 12px;font-size:13px;min-height:36px;cursor:pointer}
 .chip.on{background:#16181D;color:#FFFFFF;border-color:#16181D}
-input[type=text],input[type=search],input[type=password],input[type=number],input[type=time],select,textarea{border:1px solid #CBD1DA;border-radius:8px;padding:8px 10px;font-size:13px;min-height:36px;background:#FFFFFF;color:#16181D;font-family:inherit;max-width:100%}
+input[type=text],input[type=url],input[type=search],input[type=password],input[type=number],input[type=time],select,textarea{border:1px solid #CBD1DA;border-radius:8px;padding:8px 10px;font-size:13px;min-height:36px;background:#FFFFFF;color:#16181D;font-family:inherit;max-width:100%}
 textarea{width:100%;min-height:160px;resize:vertical;line-height:1.5}
 label{font-size:12px;color:#5B6472}
 .topbar{background:#FFFFFF;border-bottom:1px solid #E3E6EB}
@@ -204,9 +205,10 @@ ${CONSOLE_HTML}
 
   <section class="pair">
     <div class="card">
-      <div class="section-head"><h2 class="h2">MCP 服务</h2><span class="muted">来自 mcp.json，改服务要重新部署</span></div>
+      <div class="section-head"><h2 class="h2">MCP 服务</h2><span class="muted">运行时接入，无需重新部署</span></div>
       <div class="stack">
         <div id="mcp-list" class="stack" style="padding:0"></div>
+        ${MCP_SERVERS_HTML}
         <div id="mcp-link" class="link-box" hidden>
           <input id="mcp-link-url" type="text" readonly aria-label="一次性登录链接">
           <button id="mcp-link-copy" class="btn" type="button">复制</button>
@@ -317,7 +319,7 @@ ${SESSION_HTML}
 export const ADMIN_APP_JS = String.raw`"use strict";
 (() => {
   const TOKEN_KEY = "cs-agent-admin-token";
-  const EVENT_KINDS = ["", "mcp_call", "mcp_catalog", "memory_extract", "memory_write"];
+  const EVENT_KINDS = ["", "mcp_call", "mcp_catalog", "mcp_management", "memory_extract", "memory_write"];
   const MORE_KINDS = ["web_search", "generate_image", "coding_exec", "coding_read", "coding_write", "coding_edit"];
   const LOGIN = { ok: ["已登录", "ok"], needed: ["需要登录", "warn"], error: ["凭据错误", "bad"], unconfigured: ["未配置", "neutral"] };
   const CREDENTIAL = { oauth: "OAuth（CIMD）", static: "静态凭据", none: "无凭据" };
@@ -587,6 +589,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   }
 
   const EVENT_FORMAT = {
+    mcp_management: d => ({ parts: [d.server, d.action, d.source], result: "ok" }),
     mcp_call: d => ({ parts: [d.server, d.tool, duration(d.ms), "入 " + bytes(d.inputBytes) + " / 出 " + bytes(d.outputBytes)], result: d.result }),
     mcp_catalog: d => ({ parts: [d.server, typeof d.tools === "number" ? d.tools + " 个工具" : null, typeof d.rejected === "number" ? "拒绝 " + d.rejected : null,
       typeof d.digest === "string" ? "摘要 " + d.digest.slice(0, 8) : null, d.code], result: d.status }),
@@ -799,7 +802,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         server.enabled && oauth && (server.login === "ok" || server.login === "error") ? el("button", { className: "btn danger", type: "button", text: "登出", onclick: () => mcpLogout(server.server) }) : null,
       ]));
     }
-    if (!servers.length) list.append(el("div", { className: "muted", text: "mcp.json 中没有服务" }));
+    if (!servers.length) list.append(el("div", { className: "muted", text: "尚未接入 MCP 服务" }));
   }
   function renderSecrets(configured) {
     const box = $("s-secrets");
@@ -1141,6 +1144,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   ${ACCESS_APP_JS}
   ${WORKSPACE_APP_JS}
   ${MCP_ADMIN_APP_JS}
+  ${MCP_SERVERS_JS}
 
   renderKinds();
   if (readToken()) start(); else showLogin("");

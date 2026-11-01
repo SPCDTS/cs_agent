@@ -4,14 +4,15 @@ import { CallToolResultSchema, ListToolsResultSchema, ListResourcesResultSchema,
 import type { Env } from "../env";
 import { referencedSecret, type McpLimits, type McpServerConfig } from "./config";
 import { boundedFetch, McpConnectionError } from "./transport-http";
+import { connectionDigest } from "./names";
 
 export class McpConnection {
   private readonly client = new Client({ name: "cs-agent-workers", version: "1.0.0" }, { capabilities: {} });
   private readonly transport: StreamableHTTPClientTransport;
   private failure?: McpConnectionError;
   private closing?: Promise<void>;
-  private constructor(server: McpServerConfig, env: Env, private readonly limits: McpLimits, onChanged: () => void) {
-    const headers = new Headers(server.transport.headers);
+  private constructor(server: McpServerConfig, env: Env, private readonly limits: McpLimits, onChanged: () => void, managedHeaders: Record<string, string>) {
+    const headers = new Headers({ ...server.transport.headers, ...managedHeaders });
     for (const [name, ref] of Object.entries(server.transport.secretHeaders)) {
       const value = referencedSecret(env, ref);
       if (!value) throw new McpConnectionError("missing_secret", "missing_secret");
@@ -19,7 +20,7 @@ export class McpConnection {
     }
     const token = async (rejected?: string) => {
       try {
-        const value = await env.REGISTRY.getByName("main").accessToken(server.id, rejected);
+        const value = await env.REGISTRY.getByName("main").accessToken(server.id, rejected, connectionDigest(server));
         if (!value) throw new Error();
         return value;
       } catch { throw new McpConnectionError("auth_required", "auth_required"); }
@@ -36,7 +37,8 @@ export class McpConnection {
     this.client.setNotificationHandler(ToolListChangedNotificationSchema, () => { if (!this.closing) onChanged(); });
   }
   static async open(server: McpServerConfig, env: Env, limits: McpLimits, signal: AbortSignal, onChanged: () => void): Promise<McpConnection> {
-    const connection = new McpConnection(server, env, limits, onChanged);
+    const managed = server.credential.kind === "managed" ? await env.REGISTRY.getByName("main").mcpCredentialHeaders(server.id, connectionDigest(server)) : {};
+    const connection = new McpConnection(server, env, limits, onChanged, managed);
     try {
       await connection.client.connect(connection.transport, { signal, timeout: limits.connectMs, maxTotalTimeout: limits.connectMs });
       signal.throwIfAborted();

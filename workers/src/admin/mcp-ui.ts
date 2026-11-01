@@ -1,9 +1,3 @@
-import { MCP_CONFIG } from "../mcp/config";
-
-const servers = MCP_CONFIG.servers.filter(server => server.enabled).map(server => ({
-  id: server.id, tools: server.tools.allow, readOnly: server.tools.readOnly ?? server.tools.eventAllow, resourceAllow: server.resourceAllow,
-}));
-
 /** 插入管理视图；不含授权数据，读取与提交均走现有 Bearer API。 */
 export const MCP_ADMIN_HTML = `
 <section class="card" id="mcp-access-section">
@@ -39,7 +33,7 @@ export const MCP_ADMIN_HTML = `
 
 /** 插入现有 ADMIN_APP_JS 的 IIFE，复用 api/el/readToken/show/fail/time，不新增轮询。 */
 export const MCP_ADMIN_APP_JS = String.raw`
-  const mcpUiServers = ${JSON.stringify(servers)};
+  let mcpUiServers = [];
   const mcpUi = { revision: "none", approvals: [], version: 0, loaded: false };
   const mcpUiNode = id => document.getElementById(id);
   const mcpUiLines = value => [...new Set(value.split(/\r?\n/).map(line => line.trim()).filter(Boolean))];
@@ -95,11 +89,20 @@ export const MCP_ADMIN_APP_JS = String.raw`
   }
   async function mcpUiLoad() {
     if (!readToken()) return;
-    const selection = mcpUiSelection(), version = ++mcpUi.version; mcpUi.loaded = false;
+    const version = ++mcpUi.version; mcpUi.loaded = false;
     try {
+      const data = await api("GET", "/admin/mcp/servers");
+      if (version !== mcpUi.version) return;
+      const select = mcpUiNode("mcp-access-server"), selected = select.value;
+      mcpUiServers = data.servers.filter(row => row.server.enabled).map(({server}) => ({id:server.id, tools:server.tools.allow, readOnly:server.tools.readOnly, resourceAllow:server.resourceAllow, revision:server.access.revision}));
+      select.replaceChildren(...mcpUiServers.map(server => el("option", {value:server.id,text:server.id})));
+      if(mcpUiServers.some(server=>server.id===selected))select.value=selected;
+      const selection = mcpUiSelection();
+      if(!selection.server){mcpUiGrant(null);mcpUiNode("mcp-access-note").textContent="请先在模型与连接页启用 MCP 服务。";return;}
       const result = await Promise.all([api("GET", "/admin/mcp/access" + mcpUiQuery(selection)), api("GET", "/admin/mcp/approvals?scope=" + encodeURIComponent(selection.scope))]);
       if (version !== mcpUi.version) return;
       mcpUiGrant(result[0].grant); mcpUi.loaded = true; mcpUi.approvals = result[1].approvals || []; mcpUiApprovals();
+      if(result[0].grant && result[0].grant.serverRevision!==mcpUiServers.find(server=>server.id===selection.server)?.revision)mcpUiNode("mcp-access-note").textContent="连接或凭据已更换，旧群授权已失效；请核实并重新保存授权。";
     } catch (error) { fail(error); }
   }
   async function mcpUiThreads() {
@@ -140,7 +143,6 @@ export const MCP_ADMIN_APP_JS = String.raw`
       await mcpUiLoad();
     } catch (error) { fail(error); } finally { button.disabled = false; }
   }
-  for (const server of mcpUiServers) mcpUiNode("mcp-access-server").append(el("option", { value: server.id, text: server.id }));
   mcpUiNode("mcp-access-threads").addEventListener("click", mcpUiThreads);
   mcpUiNode("mcp-access-refresh").addEventListener("click", mcpUiLoad);
   mcpUiNode("mcp-access-thread").addEventListener("change", mcpUiLoad);

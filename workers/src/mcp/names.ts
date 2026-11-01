@@ -15,6 +15,7 @@ function canonical(value: JsonValue): string {
 export const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 export const digest = (value: unknown): string => createHash("sha256").update(canonical(copyJson(value))).digest("hex");
 export const serverDigest = (server: McpServerConfig): string => digest(server);
+export const connectionDigest = (server: McpServerConfig): string => digest([server.id, server.transport, server.credential]);
 
 export const slug = (value: string, length: number) => value.replace(/[^a-zA-Z0-9_]/g, "_").slice(0, length) || "tool";
 

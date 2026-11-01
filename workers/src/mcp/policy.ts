@@ -17,8 +17,8 @@ CREATE TABLE IF NOT EXISTS mcp_approvals(
 CREATE INDEX IF NOT EXISTS mcp_approvals_scope ON mcp_approvals(scope,created_at);
 CREATE TABLE IF NOT EXISTS mcp_invocations(id TEXT PRIMARY KEY,payload_digest TEXT NOT NULL,status TEXT NOT NULL,result_json TEXT,approval_id TEXT);
 `;
-export type McpGrant = { scope: string; server: string; tools: string[]; resourceAllow: string[]; actors: string[]; expiresAt: number | null; revision: string };
-export type McpGrantInput = Omit<McpGrant, "scope" | "server" | "revision">;
+export type McpGrant = { scope: string; server: string; tools: string[]; resourceAllow: string[]; actors: string[]; expiresAt: number | null; revision: string; serverRevision?: string };
+export type McpGrantInput = Omit<McpGrant, "scope" | "server" | "revision" | "serverRevision">;
 export type McpApproval = {
  id: string; scope: string; actor: string; generation: number; reply_channel: "web" | "qq"; server_id: string;
  tool_name: string; contract: string; args_json: string; authority_json: string; operation_id: string; payload_digest: string;
@@ -46,7 +46,9 @@ const receipt = (result: ToolExecutionResult) => JSON.stringify({ ...(result.isE
 /** 三张本线程表：不增加 DO，目录缓存与 OAuth 仍沿用现有所有者。 */
 export class McpPolicyStore {
  private ready?: Promise<void>;
- constructor(readonly db: SqliteDatabase, private readonly config: McpConfig = MCP_CONFIG, private readonly now = Date.now) {}
+ constructor(readonly db: SqliteDatabase, private config: McpConfig = MCP_CONFIG, private readonly now = Date.now) {}
+ setConfig(config: McpConfig) { this.config = config; }
+ matches(server: McpServerConfig, grant: McpGrant) { return server.access.revision === grant.serverRevision; }
  initialize() {
   return this.ready ??= (async () => {
    await this.db.exec(MCP_POLICY_SCHEMA);
@@ -62,7 +64,7 @@ export class McpPolicyStore {
   const row = await this.db.get<{ value_json: string }>("SELECT value_json FROM mcp_access WHERE scope=? AND server_id=?", scope, server);
   if (!row) return;
   const value: unknown = JSON.parse(row.value_json);
-  const schema = Type.Object({ ...GrantInput.properties, scope: Type.Literal(scope), server: Type.Literal(server), revision: Type.String() });
+  const schema = Type.Object({ ...GrantInput.properties, scope: Type.Literal(scope), server: Type.Literal(server), revision: Type.String(), serverRevision: Type.Optional(Type.String()) });
   if (!Check(schema, value)) throw new McpPolicyError("invalid");
   return value;
  }
@@ -75,7 +77,8 @@ export class McpPolicyStore {
   return this.db.transaction(async tx => {
    const previous = await tx.get<{ revision: string }>("SELECT revision FROM mcp_access WHERE scope=? AND server_id=?", scope, serverId);
    if ((previous?.revision ?? "none") !== expected) throw new McpPolicyError("conflict");
-   const payload = { scope, server: serverId, tools: [...input.tools].sort(), resourceAllow: [...input.resourceAllow].sort(), actors: [...input.actors].sort(), expiresAt: input.expiresAt };
+   const payload = { scope, server: serverId, tools: [...input.tools].sort(), resourceAllow: [...input.resourceAllow].sort(), actors: [...input.actors].sort(), expiresAt: input.expiresAt,
+    ...(server.access.revision ? { serverRevision: server.access.revision } : {}) };
    const grant = { ...payload, revision: digest(payload).slice(0, 16) };
    await tx.run("UPDATE mcp_approvals SET status='rejected',decided_by='grant_changed',decided_at=? WHERE scope=? AND server_id=? AND status IN ('pending','approved')", this.now(), scope, serverId);
    await tx.run("INSERT INTO mcp_access(scope,server_id,value_json,revision) VALUES (?,?,?,?) ON CONFLICT(scope,server_id) DO UPDATE SET value_json=excluded.value_json,revision=excluded.revision",
@@ -87,14 +90,14 @@ export class McpPolicyStore {
   if (authority.scope === "owner") return authority.owner && (authority.kind !== "event" || tool !== undefined && server.tools.eventAllow.includes(tool));
   if (authority.kind === "event" || !authority.scope.startsWith("group:")) return false;
   const grant = await this.grant(authority.scope, server.id);
-  return !!grant && (grant.expiresAt === null || grant.expiresAt > this.now()) && (grant.actors.includes("*") || grant.actors.includes(authority.actor))
+  return !!grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && (grant.actors.includes("*") || grant.actors.includes(authority.actor))
    && (tool !== undefined ? grant.tools.includes(tool) : uri !== undefined ? grant.resourceAllow.some(prefix => uri.startsWith(prefix)) : grant.resourceAllow.length > 0);
  }
  async resourcePrefixes(authority: McpAuthority, server: McpServerConfig): Promise<string[]> {
   if (authority.scope === "owner") return authority.owner && authority.kind !== "event" ? server.resourceAllow : [];
   if (authority.kind === "event" || !authority.scope.startsWith("group:")) return [];
   const grant = await this.grant(authority.scope, server.id);
-  return grant && (grant.expiresAt === null || grant.expiresAt > this.now()) && (grant.actors.includes("*") || grant.actors.includes(authority.actor))
+  return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && (grant.actors.includes("*") || grant.actors.includes(authority.actor))
     ? grant.resourceAllow.filter(prefix => server.resourceAllow.some(global => prefix.startsWith(global))) : [];
  }
  async list(scope: string) {

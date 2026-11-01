@@ -54,7 +54,7 @@ describe("MCP in pi-durable and inline QuickJS", () => {
       return { catalog: state.storage.sql.exec("SELECT * FROM mcp_catalog").toArray(), events: state.storage.sql.exec("SELECT * FROM events WHERE kind LIKE 'mcp_%'").toArray() };
     });
     expect(remote.state.calls).toBe(1); expect(remote.state.pages).toBeGreaterThanOrEqual(2);
-    expect(seen.offers).toContain("codemode"); expect(seen.offers.some(n => n.startsWith("mcp_"))).toBe(false);
+    expect(seen.offers).toContain("codemode"); expect(seen.offers.filter(n => n.startsWith("mcp_")).every(n => n === "mcp_manage")).toBe(true);
     expect(seen.sections.join("\n")).toContain("notion"); expect(seen.sections.join("\n")).toContain(name);
     expect(seen.sections.join("\n")).not.toContain("mem_remember");
     expect(seen.outputs[1]).toContain("service-result:"); expect(seen.outputs[1]).not.toContain("图片已省略");

@@ -43,6 +43,7 @@ import { maintenanceStatus, runMaintenanceJob, type MaintenanceJob, type Mainten
 
 import { MCP_CATALOG_SCHEMA } from "./mcp/catalog";
 import { MCP_CONFIG } from "./mcp/config";
+import { createMcpManagementExtension, type McpChange } from "./mcp/manage";
 import { ThreadMcp } from "./mcp";
 import { createScheduleExtension, type ScheduleAccess } from "./schedule/tools";
 import { parseScheduleInputKey } from "./schedule/run";
@@ -315,8 +316,14 @@ export class ThreadDO extends DurableObject<Env> {
     const mcp = new ThreadMcp(this.database, this.env, registry, async (api, callContext) => {
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
       return this.mcpAuthority(input);
-    }, MCP_CONFIG, {scope:memory.ns});
+    }, await this.env.REGISTRY.getByName("main").mcpConfig(), { scope: memory.ns,
+      current: (id, digest) => this.env.REGISTRY.getByName("main").mcpServerCurrent(id, digest) });
     await mcp?.restore();
+    if (memory.ns === "owner") registry.install(createMcpManagementExtension(this.env,
+      async (api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c);
+        return !!input && this.ownerTurnKind(input) === "message" && input.session_generation === await this.sessionGeneration(); },
+      async refresh => { await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
+      change => this.audit("mcp_management", { ...change, source: "agent" })));
     // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
     const root = await harness.root(context, { agent: modelChange(selection) });
@@ -410,7 +417,8 @@ export class ThreadDO extends DurableObject<Env> {
     return this.database.run("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", Date.now(), kind, JSON.stringify(detail));
   }
 
-  private async admit({ harness, root }: Runtime, row: InboundRow): Promise<Submission> {
+  private async admit({ harness, root, mcp }: Runtime, row: InboundRow): Promise<Submission> {
+    if (mcp) await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig());
     if (row.persona_text === null) await this.database.run("UPDATE inbound SET persona_text=? WHERE message_id=? AND persona_text IS NULL", (await this.env.REGISTRY.getByName("main").persona()).text, row.message_id);
     let whenBusy = row.when_busy;
     if (!whenBusy) {
@@ -1065,7 +1073,8 @@ export class ThreadDO extends DurableObject<Env> {
 
   private async adminMcp(scope: string) {
     await this.initialize(); await this.bindNamespace(scope);
-    const {mcp}=await this.open(); if(!mcp)throw new Error("mcp_unavailable"); return mcp;
+    const {mcp}=await this.open(); if(!mcp)throw new Error("mcp_unavailable");
+    await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig()); return mcp;
   }
   private async mcpReviewer(scope:string):Promise<McpAuthority>{
     return {scope,actor:"admin:web",owner:true,kind:"message",generation:await this.sessionGeneration(),replyChannel:"web"};
@@ -1099,7 +1108,13 @@ export class ThreadDO extends DurableObject<Env> {
   async refreshMcp(): Promise<{ server: string; status: string; tools: number }[]> {
     const { mcp } = await this.open();
     if (!mcp) throw new Error("mcp_unavailable");
+    await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig());
     return mcp.refreshAll();
+  }
+
+  async recordMcpChange(change: McpChange): Promise<void> {
+    await this.initialize();
+    await this.audit("mcp_management", { action: change.action, server: change.server, source: "admin" });
   }
 
   private async adminStore(ns: string): Promise<MemoryStore> {

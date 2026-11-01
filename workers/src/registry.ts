@@ -17,6 +17,8 @@ import { GrantStore, digest, type GrantAccess } from "./grants";
 import { AlertStore, type AlertInput, type TurnReport } from "./alerts";
 import { ownerIds } from "./policy";
 import { SKILLS_SCHEMA, parseSkill, type Skill, type SkillInput, type SkillSummary } from "./skills";
+import { McpServerStore, type ServerSetupInput, type ServerSelectionInput } from "./mcp/servers";
+import { connectionDigest } from "./mcp/names";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
 type LoginRow = { state: string; server_id: string; verifier: string; nonce_hash: string; created_at: number; expires_at: number };
@@ -32,6 +34,7 @@ export class RegistryDO extends DurableObject<Env> {
   private readonly alertStore = new AlertStore(this.ctx.storage);
   private alertDrain?: Promise<void>;
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
+  private readonly mcpServers = new McpServerStore(this.ctx.storage.sql, this.vault, this.env.PUBLIC_ORIGIN);
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly access = new Map<string, Promise<string | undefined>>();
   private readonly credentials = new SqlCredentialStore(this.ctx.storage.sql, this.vault);
@@ -55,7 +58,26 @@ export class RegistryDO extends DurableObject<Env> {
       ${CHATGPT_SCHEMA}
       ${SKILLS_SCHEMA};
     `);
+    ctx.storage.transactionSync(() => this.mcpServers.initialize());
   }
+
+  mcpConfig() { return this.mcpServers.config(); }
+  mcpServersList() { return this.mcpServers.list(); }
+  mcpServerGet(id: string) { return this.mcpServers.get(id); }
+  mcpServerCurrent(id: string, digest: string) { return this.mcpServers.current(id, digest); }
+  mcpServerPut(input: ServerSetupInput, expected: string) { return this.mcpServers.put(input, expected); }
+  mcpServerProbe(id: string, expected: string, tools: unknown) { return this.mcpServers.recordProbe(id, expected, tools); }
+  mcpServerActivate(id: string, expected: string, input: ServerSelectionInput) { return this.mcpServers.activate(id, expected, input); }
+  mcpServerDisable(id: string, expected: string) { return this.mcpServers.disable(id, expected); }
+  mcpServerRemove(id: string, expected: string) {
+    const result = this.mcpServers.remove(id, expected);
+    this.ctx.storage.sql.exec("DELETE FROM mcp_oauth_tokens WHERE server_id=?", id);
+    this.ctx.storage.sql.exec("DELETE FROM mcp_oauth_logins WHERE server_id=?", id);
+    this.ctx.storage.sql.exec("DELETE FROM mcp_oauth_client WHERE server_id=?", id);
+    return result;
+  }
+  mcpCredentialPut(id: string, expected: string, headers: unknown) { return this.mcpServers.credentialPut(id, expected, headers); }
+  mcpCredentialHeaders(id: string, digest: string) { return this.mcpServers.credentialHeaders(id, digest); }
 
   // 技能目录只经面板写入；Thread 读目录与正文。
   skillsList(): SkillSummary[] {
@@ -224,8 +246,8 @@ export class RegistryDO extends DurableObject<Env> {
   codexRefreshCatalog() { return this.chatgpt.refreshCatalog(); }
 
   private server(id: string): OAuthServer {
-    const server = MCP_CONFIG.servers.find(server => server.id === id);
-    if (!MCP_CONFIG.enabled || !server?.enabled || !isOAuthServer(server)) throw new OAuthFailure("server_unavailable");
+    const server = this.mcpServers.config().servers.find(server => server.id === id);
+    if (!MCP_CONFIG.enabled || !server || !isOAuthServer(server)) throw new OAuthFailure("server_unavailable");
     return server;
   }
   private lock<T>(id: string, work: () => Promise<T>): Promise<T> {
@@ -253,11 +275,12 @@ export class RegistryDO extends DurableObject<Env> {
     return tokens.access_token;
   }
 
-  async accessToken(serverId: string, rejectedToken?: string): Promise<string | undefined> {
+  async accessToken(serverId: string, rejectedToken?: string, expectedDigest?: string): Promise<string | undefined> {
     const server = this.server(serverId);
+    if (expectedDigest && connectionDigest(server) !== expectedDigest) throw new OAuthFailure("server_unavailable");
     if (!this.vault.configured) return undefined;
     // RPC 可在网络等待时交错；同一凭据的并发刷新共享结果，包括失败，避免耗尽旋转式 refresh token。
-    const key = JSON.stringify([serverId, rejectedToken ?? null]);
+    const key = JSON.stringify([serverId, server.credential.revision, rejectedToken ?? null]);
     const existing = this.access.get(key);
     if (existing) return existing;
     const run = this.lock(serverId, async () => {
@@ -358,7 +381,7 @@ export class RegistryDO extends DurableObject<Env> {
   }
 
   async status(): Promise<McpStatus[]> {
-    return Promise.all(MCP_CONFIG.servers.map(async server => {
+    return Promise.all(this.mcpServers.config().servers.map(async server => {
       let login: McpStatus["login"] = "ok";
       if (isOAuthServer(server)) {
         if (!this.vault.configured) login = "unconfigured";
@@ -367,9 +390,10 @@ export class RegistryDO extends DurableObject<Env> {
           login = await this.ctx.storage.get(`oauth_error:${server.id}`) ? "error" : !row || (row.expires_at !== null && row.expires_at <= Date.now() && !row.refresh_token) ? "needed" : "ok";
           if (row) try { await this.vault.decrypt(row.access_token, identity(server, "access")); } catch { login = "error"; }
         }
-      } else if (server.credential.kind === "external-account" && Object.values(server.transport.secretHeaders).some(ref => !referencedSecret(this.env, ref))) login = "unconfigured";
+      } else if (server.credential.kind === "managed") login = this.mcpServers.get(server.id).credentialSet ? "ok" : "needed";
+      else if (server.credential.kind === "external-account" && Object.values(server.transport.secretHeaders).some(ref => !referencedSecret(this.env, ref))) login = "unconfigured";
       return { server: server.id, enabled: MCP_CONFIG.enabled && server.enabled,
-        credential: server.credential.kind === "external-account" ? "static" : server.credential.kind, login };
+        credential: server.credential.kind === "external-account" || server.credential.kind === "managed" ? "static" : server.credential.kind, login };
     }));
   }
 }

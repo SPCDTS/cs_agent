@@ -1,6 +1,6 @@
 import type { TurnKind } from "../policy";
 import type { Catalog } from "./catalog";
-import { makeCatalog } from "./catalog";
+import { validateTool } from "./catalog";
 import { MCP_CONFIG } from "./config";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
@@ -30,10 +30,8 @@ export function snapshotCatalogs(snapshot: McpCapabilitySnapshot): Catalog[] {
   const schema = Type.Array(Type.Object({ serverId: Type.String(), configDigest: Type.String(), scopeDigest: Type.String(), digest: Type.String(), tools: Type.Array(tool) }));
   if (!Check(schema, value)) throw new Error("catalog_invalid");
   return value.map(catalog => {
-    const server = MCP_CONFIG.servers.find(s => s.id === catalog.serverId);
-    if (!server) throw new Error("catalog_invalid");
-    const validated = makeCatalog(server, catalog.tools.map(t => ({ name: t.name, description: t.description,
-      inputSchema: { ...t.inputSchema, type: "object" }, ...(t.outputSchema ? { outputSchema: { ...t.outputSchema, type: "object" } } : {}) })), MCP_CONFIG.limits).revision;
-    return { ...catalog, tools: validated.tools };
+    if (catalog.tools.length > MCP_CONFIG.limits.visibleTools) throw new Error("catalog_limit");
+    // 父端提供的目录快照负责展示；实际权限仍由父端逐次校验，子端不再依赖构建时的服务清单。
+    return { ...catalog, tools: catalog.tools.map(tool => validateTool(tool, MCP_CONFIG.limits)) };
   });
 }

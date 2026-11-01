@@ -1,5 +1,6 @@
 import { workspaceRoutes } from "./workspace-routes";
 import { createMcpAdminRoutes } from "./mcp-routes";
+import { MCP_SERVER_ROUTES } from "./mcp-servers-routes";
 import { accessRoutes } from "./access-routes";
 import { createMemoryAdminRoutes } from "./memory-routes";
 import { Type, type Static, type TSchema } from "typebox";
@@ -112,6 +113,7 @@ async function knownThread(env: Env, key: string) {
 const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY"] as const;
 
 export const ADMIN_ROUTES: AdminRoute[] = [
+  ...MCP_SERVER_ROUTES,
   ...accessRoutes(),
   ...workspaceRoutes({forThread:async(thread,ctx)=>{
     const stub=ctx.env.THREAD.getByName(thread);

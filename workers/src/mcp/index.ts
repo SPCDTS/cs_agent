@@ -16,7 +16,7 @@ import { makeCatalog, restoreCatalog, saveCatalog, type Catalog, type CatalogToo
 import { McpConnection, safeError } from "./connection";
 import { compileMcpSchema, boundedJson } from "./schema";
 import { McpPolicyError, McpPolicyStore, type McpGrantInput } from "./policy";
-import { digest, jsonBytes, slug, toolNames } from "./names";
+import { digest, jsonBytes, slug, toolNames, serverDigest } from "./names";
 import { convertMcpResult, mcpFailure } from "./result";
 
 // 返回本回合的输入种类；undefined 表示不是 owner 私聊回合。事件回合只放行各服务 eventAllow 中的工具。
@@ -30,13 +30,16 @@ export class ThreadMcp {
   private stopped = false;
   readonly policy: McpPolicyStore;
   constructor(private readonly db: SqliteDatabase, private readonly env: Env, private readonly registry: Registry,
-    private readonly authorize: AuthorizeMcp, private readonly config: McpConfig = MCP_CONFIG, private readonly options: { scope?: string } = {}) {
+    private readonly authorize: AuthorizeMcp, private config: McpConfig = MCP_CONFIG, private readonly options: { scope?: string; current?(id: string, digest: string): Promise<boolean> } = {}) {
     this.policy = new McpPolicyStore(db, config);
     if (config.enabled) for (const server of config.servers.filter(server => server.enabled)) this.entries.set(server.id,
       { server, listedAt: 0, lastUsed: 0, changed: 1, discovered: 0, tail: Promise.resolve(), pending: 0, ...(options.scope && options.scope !== "owner" ? { visible: new Set<string>() } : {}) });
+    this.installControl();
+  }
+  private installControl() {
     const codemode = createCodemodeExtension({ sandbox: this.sandbox, models: false,
       namespaces: [...this.entries.values()].map(({ server }) => ({ name: server.id, prefix: `mcp_${slug(server.id, 16)}_` })) });
-    registry.install(defineExtension({ ...codemode, name: "cs.mcp.control",
+    this.registry.install(defineExtension({ ...codemode, name: "cs.mcp.control",
       sections: [section("mcp-policy", () => MCP_RULE), ...codemode.sections ?? []],
       tools: [...(codemode.tools ?? []).map(tool => ({ ...tool, execute: async (args: unknown, api: ToolExecutionApi, context: Context) => {
         const authority = mcpAuthority(await this.authorize(api, context));
@@ -54,6 +57,31 @@ export class ThreadMcp {
           return { output: [{ type: "text", text: JSON.stringify(results) }] };
         } }), ...this.resourceTools()] }));
   }
+  async syncConfig(config: McpConfig): Promise<void> {
+    // DO RPC 在返回对象上附带生命周期符号，只比较配置本身的 JSON 字段。
+    if (digest([config.enabled, config.servers, config.limits]) === digest([this.config.enabled, this.config.servers, this.config.limits])) return;
+    const active = new Map(config.servers.filter(server => config.enabled && server.enabled).map(server => [server.id, server]));
+    for (const [id, entry] of this.entries) {
+      const next = active.get(id);
+      if (next && serverDigest(next) === serverDigest(entry.server)) continue;
+      this.entries.delete(id);
+      this.registry.install(defineExtension({ name: `cs.mcp.server.${id}`, tools: [] }));
+      void entry.tail.then(() => entry.connection?.close()).catch(() => {});
+    }
+    this.config = config; this.policy.setConfig(config);
+    for (const [id, server] of active) if (!this.entries.has(id)) {
+      const entry: Entry = { server, listedAt: 0, lastUsed: 0, changed: 1, discovered: 0, tail: Promise.resolve(), pending: 0,
+        ...(this.options.scope && this.options.scope !== "owner" ? { visible: new Set<string>() } : {}) };
+      this.entries.set(id, entry);
+      try {
+        const saved = await restoreCatalog(this.db, server, config.limits);
+        if (saved) { entry.catalog = saved; this.install(entry, saved); }
+      } catch { await this.event("mcp_catalog", { server: id, status: "restore_rejected" }); }
+    }
+    this.installControl();
+    await this.refreshVisibility();
+  }
+  private current(entry: Entry) { return this.options.current ? this.options.current(entry.server.id, serverDigest(entry.server)) : Promise.resolve(true); }
   private event(kind: "mcp_catalog" | "mcp_call", detail: object) {
     return this.db.run("INSERT INTO events(at,kind,detail) VALUES (?,?,?)", Date.now(), kind, JSON.stringify(detail));
   }
@@ -73,12 +101,12 @@ export class ThreadMcp {
       try {
         if (this.options.scope && this.options.scope !== "owner") {
           const grant = await this.policy.grant(this.options.scope, entry.server.id);
-          if (!grant || grant.expiresAt !== null && grant.expiresAt <= Date.now() || !grant.tools.length && !grant.resourceAllow.length) {
+          if (!grant || !this.policy.matches(entry.server, grant) || grant.expiresAt !== null && grant.expiresAt <= Date.now() || !grant.tools.length && !grant.resourceAllow.length) {
             results.push({ server: entry.server.id, status: "denied", tools: 0 }); continue;
           }
         }
         await this.queued(entry, signal, async budget => {
-          if (!await allowed()) throw new Error("denied");
+          if (!await allowed() || !await this.current(entry)) throw new Error("denied");
           await this.refresh(entry, budget);
         });
         results.push({ server: entry.server.id, status: "ok", tools: entry.catalog?.tools.length ?? 0 });
@@ -125,6 +153,7 @@ export class ThreadMcp {
       const connection = await this.connect(entry, signal), generation = entry.changed;
       const result = makeCatalog(entry.server, await connection.listTools(signal), this.config.limits);
       signal.throwIfAborted();
+      if (this.entries.get(entry.server.id) !== entry) throw new Error("tool_retired");
       await saveCatalog(this.db, result.revision);
       entry.catalog = result.revision; entry.discovered = generation; entry.listedAt = Date.now();
       await this.refreshVisibility();
@@ -163,7 +192,7 @@ export class ThreadMcp {
       if (!Check(Type.Record(Type.String(), Type.Unknown()), owned) || !input.check(owned)) return mcpFailure("invalid_arguments");
       inputBytes = jsonBytes(owned);
       return await this.queued(entry, context.abortSignal, async signal => {
-        if (!await allowed()) { classification = "denied"; return mcpFailure(classification); }
+        if (!await allowed() || !await this.current(entry)) { classification = "denied"; return mcpFailure(classification); }
         const connection = await this.connect(entry, signal);
         if (entry.changed !== entry.discovered || Date.now() - entry.listedAt >= this.config.limits.catalogTtlMs) await this.refresh(entry, signal);
         if (entry.changed !== entry.discovered) throw new Error("catalog_changed_during_refresh");
@@ -171,7 +200,7 @@ export class ThreadMcp {
         if (!entry.catalog || !current || toolNames(entry.catalog, current).nativeName !== name || !entry.server.tools.allow.includes(tool.name)) {
           classification = "tool_retired"; return mcpFailure(classification);
         }
-        if (!await allowed()) { classification = "denied"; return mcpFailure(classification); }
+        if (!await allowed() || !await this.current(entry)) { classification = "denied"; return mcpFailure(classification); }
         const authority = mcpAuthority(await authorize());
         if (!authority) return mcpFailure("denied");
         const mutation = !(entry.server.tools.readOnly ?? entry.server.tools.eventAllow).includes(tool.name);
@@ -221,7 +250,7 @@ export class ThreadMcp {
     if (!this.options.scope || this.options.scope === "owner") return;
     for (const entry of this.entries.values()) {
       const grant = await this.policy.grant(this.options.scope, entry.server.id);
-      entry.visible = new Set(grant && (grant.expiresAt === null || grant.expiresAt > Date.now()) ? grant.tools : []);
+      entry.visible = new Set(grant && this.policy.matches(entry.server, grant) && (grant.expiresAt === null || grant.expiresAt > Date.now()) ? grant.tools : []);
       if (entry.catalog) this.install(entry, entry.catalog);
     }
   }
@@ -298,7 +327,7 @@ export class ThreadMcp {
     if (!await allowed()) return mcpFailure("denied");
     try {
       return await this.queued(entry, context.abortSignal, async signal => {
-        if (!await allowed()) return mcpFailure("denied");
+        if (!await allowed() || !await this.current(entry)) return mcpFailure("denied");
         const authority = mcpAuthority(await authorize());
         if (!authority) return mcpFailure("denied");
         const currentPrefixes = await this.policy.resourcePrefixes(authority, entry.server);
@@ -314,7 +343,7 @@ export class ThreadMcp {
             : entry.resources.templates.filter(r => allowedResource(r.uriTemplate.replace(/\{[^}]+\}/g, "item"), prefixes));
           return convertMcpResult({ content: [{ type: "text", text: JSON.stringify(data) }] }, undefined, this.config.limits);
         }
-        if (!uri || !allowedResource(uri, prefixes) || !resourceInCatalog(uri, entry.resources.rows, entry.resources.templates) || !await allowed()) return mcpFailure("denied");
+        if (!uri || !allowedResource(uri, prefixes) || !resourceInCatalog(uri, entry.resources.rows, entry.resources.templates) || !await allowed() || !await this.current(entry)) return mcpFailure("denied");
         const result = await connection.readResource(uri, signal);
         if (result.contents.some(content => !allowedResource(content.uri, prefixes))) return mcpFailure("result_rejected");
         const content = [];

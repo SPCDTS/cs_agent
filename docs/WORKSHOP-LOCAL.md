@@ -65,7 +65,7 @@ Cloudflare 使用官方命令行；`cloudflared tunnel login` 需要一次浏览
 & .\data\workshop-bridge\cloudflared.exe tunnel route dns cs-workshop-local workshop.spcdts.dev
 ```
 
-云端 `workers/mcp.json` 仅保存 `CS2_WORKSHOP_AUTHORIZATION` 的引用。`workers/scripts/put-secrets.sh` 会在本机令牌存在时上传该 secret，值走 stdin。随后按仓库 CI 部署云端配置，并在管理页刷新 `cs2-workshop` 的工具目录。
+已有接入沿用 `workers/mcp.json` 首次导入的 `CS2_WORKSHOP_AUTHORIZATION` 引用；`workers/scripts/put-secrets.sh` 可上传该 secret，值走 stdin。动态 MCP 功能上线后，新接入或更换连接通过管理页配置，不再修改 `mcp.json`：认证选择 Token，在认证头 `Authorization` 填写本机令牌，再检测和启用工具。详见 [动态 MCP 接入](MCP-SETUP.md)。此过程不修改 Workshop 本体。
 
 准备好上述本机文件后，在主工作区执行：
 

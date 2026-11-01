@@ -17,7 +17,7 @@ export const MANAGEMENT_JS = String.raw`
     if(current){$("view-manage").querySelector(".console-head h1").textContent=current[0];$("view-manage").querySelector(".console-head p").textContent=current[1];}
   }
   function loadManagement(view){
-    if(view==="models")return Promise.all([loadSettings(),loadModel()]);
+    if(view==="models")return Promise.all([loadSettings(),loadModel(),loadMcpServers()]);
     if(view==="memory")return Promise.all([loadMemory(),loadSkills(),loadAccessPersona()]);
     if(view==="operations")return Promise.all([loadEvents(),loadSchedules(),loadSources()]);
     if(view==="access")return loadAccess();

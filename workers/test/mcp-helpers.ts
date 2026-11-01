@@ -17,7 +17,7 @@ export const sampleTools: Tool[] = [
   { name: "not-allowed", inputSchema: { type: "object" } },
 ];
 const Rpc = Type.Object({ id: Type.Optional(Type.Union([Type.Number(), Type.String()])), method: Type.String(), params: Type.Optional(Type.Record(Type.String(), Type.Unknown())) });
-export function fakeRemote() {
+export function fakeRemote(endpoint = "https://mcp.notion.com/mcp") {
   const requests: { url: string; method: string; body: string; headers: Headers; redirect: string }[] = [];
   const state = {
     resources: [{ uri: "notion://docs/start", name: "起步资料" }, { uri: "notion://private/hidden", name: "未授权" }],
@@ -31,7 +31,7 @@ export function fakeRemote() {
   const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input, init), url = new URL(request.url), body = new TextDecoder().decode(await request.arrayBuffer());
     requests.push({ url: request.url, method: request.method, body, headers: request.headers, redirect: request.redirect });
-    if (url.pathname.startsWith("/.well-known/oauth-protected-resource")) return Response.json({ resource: "https://mcp.notion.com/mcp", authorization_servers: [state.resourceIssuer] });
+    if (url.pathname.startsWith("/.well-known/oauth-protected-resource")) return Response.json({ resource: endpoint, authorization_servers: [state.resourceIssuer] });
     if (url.pathname.startsWith("/.well-known/oauth-authorization-server")) return Response.json({ issuer: state.resourceIssuer,
       authorization_endpoint: `${state.resourceIssuer}/authorize`, token_endpoint: state.tokenEndpoint,
       response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
@@ -44,7 +44,7 @@ export function fakeRemote() {
       return Response.json({ token_type: "Bearer", access_token: refreshing ? `${ACCESS}-refreshed` : ACCESS,
         ...(refreshing ? {} : { refresh_token: REFRESH }), scope: "default", expires_in: state.expires });
     }
-    if (url.href === "https://mcp.notion.com/mcp") {
+    if (url.href === endpoint) {
       if (request.method === "GET") return new Response(null, { status: 405 });
       if (request.method === "DELETE") return new Response(null, { status: 202 });
       const rpc: unknown = JSON.parse(body);

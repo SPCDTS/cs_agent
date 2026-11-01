@@ -22,7 +22,7 @@ function ownedSchema(value: unknown, limits: McpLimits): JsonObject {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) throw new McpSchemaError("schema_invalid");
   return schema;
 }
-function validateTool(value: unknown, limits: McpLimits): CatalogTool {
+export function validateTool(value: unknown, limits: McpLimits): CatalogTool {
   if (!Check(Stored, value)) throw new McpSchemaError("schema_invalid");
   if (jsonBytes([value.inputSchema, value.outputSchema ?? null]) > limits.schemaBytes) throw new McpSchemaError("schema_limit");
   return { name: value.name, description: value.description, inputSchema: ownedSchema(value.inputSchema, limits),

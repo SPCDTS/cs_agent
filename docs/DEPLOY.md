@@ -24,7 +24,7 @@ npm run check
 - 必需：`NAPCAT_TOKEN`、`QQ_OWNER`、`ADMIN_TOKEN`、`OAUTH_STORE_KEY`。
 - 模型：DeepSeek 使用 `DEEPSEEK_API_KEY`；ChatGPT 订阅在管理页用一次性本机助手授权。
 - Gmail：按需提供 `GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET`、`GMAIL_REFRESH_TOKEN`，推送来源配置在 Wrangler vars。
-- MCP：只上传 `workers/mcp.json` 中引用的 secret；Workshop 接入见 [本机说明](WORKSHOP-LOCAL.md)。
+- MCP：已有 `workers/mcp.json` 中引用的 secret 继续有效；新增远程服务通过 agent 或管理页接入，Token 加密保存在 Registry，无需逐个上传 Cloudflare Secret。见 [动态 MCP 接入](MCP-SETUP.md)；Workshop 本机连接见 [本机说明](WORKSHOP-LOCAL.md)。
 
 在具备 Bash、Python 和 Wrangler 登录的环境中，可从仓库根运行 `bash workers/scripts/put-secrets.sh`。先准备私有 `secrets/` 目录；脚本读取 `.env`，仅在缺失时生成管理员口令和 OAuth 加密密钥，并通过 stdin 上传。不要覆盖既有 `OAUTH_STORE_KEY`，否则已有凭据无法解密。也可逐项使用 `npx wrangler secret put`。
 

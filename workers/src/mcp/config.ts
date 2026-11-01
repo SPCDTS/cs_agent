@@ -24,6 +24,7 @@ const Variable = Type.String({ pattern: "^[A-Za-z_][A-Za-z0-9_]{0,127}$" });
 const Credential = Type.Union([
   Type.Object({ kind: Type.Literal("none") }, strict),
   Type.Object({ kind: Type.Literal("external-account"), accountId: clean(128, 1), revision: clean(128, 1) }, strict),
+  Type.Object({ kind: Type.Literal("managed"), accountId: clean(128, 1), revision: clean(128, 1) }, strict),
   Type.Object({ kind: Type.Literal("oauth"), accountId: clean(128, 1), revision: clean(128, 1),
     registration: Type.Optional(Type.Literal("cimd")), clientMetadataUrl: clean(4096, 1), scope: Type.Optional(clean(256)) }, strict),
 ]);
@@ -32,7 +33,7 @@ const Server = Type.Object({
   transport: Type.Object({ kind: Type.Literal("streamable-http"), url: clean(4096, 1),
     headers: Type.Optional(Type.Record(Header, clean(8192), strict)), secretHeaders: Type.Optional(Type.Record(Header, Variable, strict)) }, strict),
   resourceAllow: Type.Optional(Type.Array(clean(2048, 1), { maxItems: 100, uniqueItems: true })),
-  credential: Credential, access: Type.Object({ kind: Type.Literal("owner-private") }, strict),
+  credential: Credential, access: Type.Object({ kind: Type.Literal("owner-private"), revision: Type.Optional(clean(128, 1)) }, strict),
   tools: Type.Object({ readOnly: Type.Optional(Type.Array(clean(256, 1), { maxItems: 1000, uniqueItems: true })), allow: Type.Array(clean(256, 1), { maxItems: 1000, uniqueItems: true }),
     eventAllow: Type.Optional(Type.Array(clean(256, 1), { maxItems: 1000, uniqueItems: true })) }, strict), replay: Type.Literal("unsafe"),
 }, strict);
@@ -74,7 +75,7 @@ export function parseMcpConfig(value: unknown): McpConfig {
     return { ...value, servers, limits: { ...DEFAULT_MCP_LIMITS, ...value.limits } };
   } catch { throw new Error("mcp_config_invalid"); }
 }
-// 构建时打包；聊天、模型参数和工作目录均不能改变服务或凭据引用。
+// 首次初始化 Registry 时导入；后续服务变更通过受控管理接口持久化。
 export const MCP_CONFIG = parseMcpConfig(config);
 export const isOAuthServer = (server: McpServerConfig): server is OAuthServer => server.credential.kind === "oauth";
 export function referencedSecret(env: object, name: string): string | undefined {
