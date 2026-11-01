@@ -4,9 +4,11 @@
 
 主线程复用现有 ThreadMcp 连接、目录缓存和队列；子 agent 只保存派出目录快照，通过父线程执行 MCP，不建立额外远端连接。资源目录沿用 catalogTtlMs 缓存；资源读取沿用 callMs、queuedPerConnection、messageBytes 和 catalogBytes 限额。
 
-子 agent 默认并发 1、运行 10 分钟、最多 24 次模型请求。coding 只在派出能力包含 coding 时安装，通过父线程定位独立克隆工作区；容器按需启动，宿主应设空闲 3 分钟停止。子 agent 没有发送、鉴权、技能发布、记忆写入或继续派出子 agent 的工具。
+主 agent 对可独立推进的调研、实现、检查与耗时任务主动委派，派出后继续自身工作，只剩等待时让出回合，由结果自动唤醒；简单问答和单步操作直接完成。子 agent 不设固定并发数、默认运行期限或模型请求次数上限；仅在派出时显式填写 timeoutMs 才按截止时间取消，支持超过 6 小时的期限。父表 timeout_ms/deadline 为 0 表示不设自动超时，管理接口 deadline 返回 null；已有任务保存的截止时间继续有效。coding 只在派出能力包含 coding 时安装，通过父线程定位独立克隆工作区；容器按需启动，宿主应设空闲 3 分钟停止。子 agent 没有发送、鉴权、技能发布、记忆写入或继续派出子 agent 的工具。
 
 启用 coding 时，子 agent 的系统提示明确说明 `/work` 是独立持久工作区，相对路径从这里解析，产物放在 `/work/out/`。宿主在写入、编辑和命令执行后自动提交快照，只有成功提交的文件能在沙箱重建后恢复；提交失败或结果不确定不能当作已保存。`/work` 之外的文件、运行进程与系统环境修改不持久化，子工作区的后续修改不会自动同步到父工作区，产物路径通过最终回答交回父 agent。
+
+WSB 与其他远程沙箱复用主 agent 的 sandbox_list/acquire/call/job/release 工具和 Fleet 服务。只有主人会话在远程沙箱启用时派出的任务才获得 remoteSandbox 能力；每次调用复核父线程当前身份、会话代次和取消状态，以及远程沙箱开关。每个子 DO 使用自身 ID 作为租约工作区，与父会话及其他子 agent 隔离；设备实际槽位仍由提供方决定，忙碌时不能抢用别人的租约。结果通过子任务回答交回；结束前须取回需要保留的内容，不能把 WSB 临时路径当作父工作区文件。完成、失败或取消后宿主清理自身租约；运行中或结果未知的远程任务先请求取消，待确认结束再释放，心跳负责补做。
 
 ## 父线程必须实现的接口
 
@@ -17,7 +19,7 @@
 - subagentSkill(id, input)：核验后读取当前已启用技能，不允许发布。
 - subagentCoding(id, operation)：核验后调用该子 agent 独立工作区，不可路由父工作区；operationId 是持久操作标识。
 
-派出时调用 captureCapabilities(authority)，把结果放入 SubagentStart.capabilities.mcp；coding 能力只能由宿主设置。snapshot 的 catalogJson 是有界目录 JSON，避免递归 JSON 类型扩大 DO RPC 类型和序列化成本。每次业务调用核验当前身份和授权，目录快照只缩小权限，不能扩大权限。
+派出时调用 captureCapabilities(authority)，把结果放入 SubagentStart.capabilities.mcp；coding 与 remoteSandbox 能力只能由宿主设置。snapshot 的 catalogJson 是有界目录 JSON，避免递归 JSON 类型扩大 DO RPC 类型和序列化成本。每次业务调用核验当前身份和授权，目录快照只缩小权限，不能扩大权限。
 
 McpAuthority 必须由宿主构造，包含 kind、scope、actor、owner、generation 和 replyChannel。旧 owner-private 回调返回 TurnKind 仍可使用；群、网页与子 agent 应使用完整对象。网页来源的 replyChannel 必须保持 web，不能由审批、子任务或模型改成 QQ。
 

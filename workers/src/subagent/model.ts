@@ -12,7 +12,7 @@ export type SubagentStatus = "running" | "done" | "failed" | "cancelled";
 export type ParentSubagentStatus = SubagentStatus | "timeout";
 /** 子 DO 的状态与单调版本；父线程只采纳更新的版本，所以消息、汇报与取消的 RPC 无论先后到达都收敛到同一状态。 */
 export type SubagentState = { status: SubagentStatus; version: number };
-export type SubagentCapabilities = { mcp?: McpCapabilitySnapshot; coding?: boolean };
+export type SubagentCapabilities = { mcp?: McpCapabilitySnapshot; coding?: boolean; remoteSandbox?: boolean };
 export type SubagentMeta = {
   parent: string; id: string; task: string; createdAt: number; identity: SubagentIdentity; model: ModelSelection;
   summary?: string; progress?: AgentDescription; activityAt?: number;
@@ -24,11 +24,7 @@ export type SubagentReport = {
 };
 export type SubagentEntry = { id: number; kind: string; role?: string; text: string };
 
-export const MAX_RUNNING = 1;
-export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
-export const MAX_MODEL_CALLS = 24;
 export const MIN_TIMEOUT_MS = 1000;
-export const MAX_TIMEOUT_MS = 6 * 3600_000;
 export const RETENTION_MS = 14 * 86400_000;
 export const SUBAGENT_ID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 

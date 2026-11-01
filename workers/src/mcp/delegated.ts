@@ -70,7 +70,7 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
   return installCodemode(registry, {
     allowed: async () => {
       const access = await host.validateSubagentAccess(id);
-      return !!access && (!!access.capabilities.coding && access.authority.owner || !!access.capabilities.mcp);
+      return !!access && ((!!access.capabilities.coding || !!access.capabilities.remoteSandbox) && access.authority.owner || !!access.capabilities.mcp);
     },
     namespaces: () => catalogs.map(c => ({ name: c.serverId, prefix: `mcp_${slug(c.serverId, 16)}_` })),
   });
@@ -107,7 +107,7 @@ export function createSubagentCapabilityHost(stub: object): SubagentCapabilityHo
         authority: Type.Object({ kind: Type.Union(["message", "schedule", "event", "subagent"].map(v => Type.Literal(v))),
           scope: Type.String(), actor: Type.String(), owner: Type.Boolean(), generation: Type.Integer({ minimum: 0 }),
           replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), subagentId: Type.Optional(Type.String()) }),
-        capabilities: Type.Object({ coding: Type.Optional(Type.Boolean()), mcp: Type.Optional(snapshot) }),
+        capabilities: Type.Object({ coding: Type.Optional(Type.Boolean()), remoteSandbox: Type.Optional(Type.Boolean()), mcp: Type.Optional(snapshot) }),
       });
       if (!Check(schema, value)) throw new Error("delegation_denied");
       return value;

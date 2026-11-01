@@ -567,7 +567,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
         el("td", { text: sub.task }),
         el("td", {}, [pill(status[0], status[1])]),
         el("td", { className: "mono", text: time(sub.createdAt) }),
-        el("td", { className: "mono", text: sub.status === "running" ? "限时至 " + time(sub.deadline) : time(sub.endedAt) }),
+        el("td", { className: "mono", text: sub.status === "running" ? (sub.deadline ? "限时至 " + time(sub.deadline) : "不设自动超时") : time(sub.endedAt) }),
         el("td", { className: "mono", text: time(sub.lastReportAt) }),
         el("td", { className: "muted small", text: sub.spawner || "无法确证" }),
         el("td", {}, [sub.status === "running" ? el("button", { className: "btn compact danger", type: "button", text: "取消", onclick: () => cancelSubagent(key, sub.id) }) : null]),

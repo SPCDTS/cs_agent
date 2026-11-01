@@ -8,6 +8,9 @@ import * as models from "../src/models";
 import type { SubagentView } from "../src/subagent/parent";
 import { responseDescription, shortSummary } from "../src/subagent/activity";
 import { action, connect, input, reply } from "./helpers";
+import { hash } from "../src/remote-sandbox/fleet";
+import { readJob } from "../src/remote-sandbox/wire";
+import { PROTOCOL_VERSION, type Descriptor } from "../../runner/src/protocol";
 
 const TOKEN = "test-admin-only";
 const sockets: WebSocket[] = [];
@@ -18,7 +21,7 @@ afterEach(async () => {
 });
 
 /** 一步：调工具、给最终文字（可等闸门打开再答）、或一直挂起到被中止；函数步按已有的工具输出求出下一步。 */
-type Step = { tool: string; args: JsonObject; progress?: string } | { text: string; after?: Promise<void> } | "hang" | ((outputs: string[]) => Step);
+type Step = { tool: string; args: JsonObject; progress?: string; after?: Promise<void> } | { text: string; after?: Promise<void> } | "hang" | ((outputs: string[]) => Step);
 type Seen = { tools: string[]; user: string; identity: string };
 
 /** 父线程与子 agent 共用一个 faux provider；按系统段里有没有 subagent 段分流到各自的脚本。 */
@@ -55,8 +58,9 @@ function twoModels(parentSteps: Step[], childSteps: Step[]) {
         signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
       });
     }
+    if (step) await step.after;
     if (step && "tool" in step) return fauxAssistantMessage([...(step.progress ? [fauxText(step.progress)] : []), fauxToolCall(step.tool, step.args)], { stopReason: "toolUse" });
-    if (step) { await step.after; return fauxAssistantMessage(step.text); }
+    if (step) return fauxAssistantMessage(step.text);
     return fauxAssistantMessage("done");
   };
   faux.setResponses([respond]);
@@ -90,6 +94,24 @@ function gate() {
 }
 function admin(method: string, path: string, token: string | null = TOKEN) {
   return worker.fetch(new Request(`https://test${path}`, { method, headers: token === null ? {} : { Authorization: `Bearer ${token}` } }), { ...env, ADMIN_TOKEN: TOKEN });
+}
+
+async function remoteDevice() {
+  const fleet = env.SANDBOX_FLEET.getByName("owner"), token = "a".repeat(64);
+  await fleet.putSettings({ enabled: true, expectedRevision: 0 });
+  const descriptor: Descriptor = { name: "测试 WSB", provider: "windows-wsb", os: "windows", arch: "x64",
+    instructions: "通过 powershell 执行命令。", persistence: "释放后丢弃文件。", memoryMiB: 4096, maxConcurrent: 1, maxTimeoutMs: 120000,
+    workspaceProtocol: "registered-tools-v2", tools: [{ name: "powershell", description: "运行 PowerShell",
+      inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"], additionalProperties: false } }] };
+  const pairing = await fleet.createPairing();
+  const { deviceId } = await fleet.claim({ pairingId: pairing.pairingId, code: pairing.code, tokenHash: await hash(token), descriptor });
+  await fleet.approve(deviceId);
+  const response = await fleet.fetch(new Request("https://test/connect?device=" + deviceId, { headers: { Upgrade: "websocket", Authorization: "Bearer " + token } }));
+  const socket = response.webSocket!; socket.accept(); sockets.push(socket);
+  const welcome = new Promise<void>(resolve => socket.addEventListener("message", () => resolve(), { once: true }));
+  socket.send(JSON.stringify({ kind: "hello", protocolVersion: PROTOCOL_VERSION, descriptor }));
+  await welcome;
+  return { fleet, deviceId, socket };
 }
 
 describe("subagents as child Durable Objects", () => {
@@ -173,6 +195,7 @@ describe("subagents as child Durable Objects", () => {
     expect(second[1]!.text).toContain("第二轮：C 最慢");
 
     const sub = await onlySubagent("owner"), stub = child("owner", sub.id);
+    expect(sub.deadline).toBeNull();
     expect((await stub.message("dup-1", "直接追加")).result).toBe("accepted");
     expect((await stub.message("dup-1", "直接追加")).result).toBe("duplicate");
     const third = await reports("owner", 3);
@@ -190,6 +213,8 @@ describe("subagents as child Durable Objects", () => {
     expect(await thread(group).submit(input(1, "派个子 agent", 10000003, 200000001, true))).toEqual({ status: "done" });
     await reports(group, 1);
     expect(outputs.parent[1]).toContain("定时管理授权");
+    const groupSub = await onlySubagent(group);
+    expect((await child(group, groupSub.id).status())?.meta.capabilities?.remoteSandbox).toBe(false);
     expect(seen.parent.find(request => request.user.includes("成员任务的结果"))?.identity).toContain("派出者是 群成员");
 
     expect(await thread(group).submit(input(2, "我也派一个", 10000001, 200000001, true))).toEqual({ status: "done" });
@@ -216,13 +241,71 @@ describe("subagents as child Durable Objects", () => {
     expect(report!.user_id).toBe("10000003");
   });
 
-  it("rejects a second concurrent spawn within the cloud budget", async () => {
-    const { outputs } = twoModels([spawn("任务 1"), spawn("任务 2")], ["hang"]);
-    expect(await thread("owner").submit(input(1, "派两个", 10000001))).toEqual({ status: "done" });
-    expect(outputs.parent.slice(0, 1).every(output => output.startsWith("已派出子 agent"))).toBe(true);
-    expect(outputs.parent[1]).toContain("达到上限");
-    expect((await thread("owner").subagentList()).map(sub => sub.status)).toEqual(["running"]);
-    expect((await thread("owner").stats()).subagents).toEqual({ running: 1 });
+  it("allows concurrent tasks without default deadlines and preserves explicit long deadlines", async () => {
+    const { outputs } = twoModels([spawn("任务 1"), spawn("任务 2"), spawn("任务 3"), spawn("长任务", { timeoutMs: 7 * 3600_000 })], ["hang", "hang", "hang", "hang"]);
+    expect(await thread("owner").submit(input(1, "派四个", 10000001))).toEqual({ status: "done" });
+    expect(outputs.parent).toHaveLength(4);
+    expect(outputs.parent.every(output => output.startsWith("已派出子 agent"))).toBe(true);
+    const list = await thread("owner").subagentList();
+    expect(list.filter(sub => sub.deadline === null)).toHaveLength(3);
+    const limited = list.find(sub => sub.task === "长任务")!;
+    expect(limited.deadline! - limited.createdAt).toBe(7 * 3600_000);
+    await runDurableObjectAlarm(thread("owner"));
+    expect((await thread("owner").stats()).subagents).toEqual({ running: 4 });
+    for (const sub of list) await thread("owner").cancelSubagent(sub.id);
+  });
+
+  it("continues beyond 24 model calls and ten minutes of task age", async () => {
+    const ready = gate();
+    const { seen } = twoModels([spawn("持续整理上下文"), { text: "已派出" }], [
+      ...Array.from({ length: 25 }, (_, i): Step => ({ tool: "qq_context", args: {}, ...(i === 0 ? { after: ready.promise } : {}) })),
+      { text: "整理完成" },
+    ]);
+    await thread("owner").submit(input(1, "持续整理", 10000001));
+    const sub = await onlySubagent("owner");
+    const now = Date.now.bind(Date);
+    vi.spyOn(Date, "now").mockImplementation(() => now() + 20 * 60_000);
+    ready.open();
+    expect((await reports("owner", 1))[0].text).toContain("整理完成");
+    expect(seen.child).toHaveLength(26);
+    expect((await onlySubagent("owner")).deadline).toBeNull();
+  });
+
+  it.each(["done", "cancelled"] as const)("runs child WSB tools with an isolated lease and cleans it after %s", async ending => {
+    const { fleet, deviceId, socket } = await remoteDevice(), ready = gate(), disabled = gate();
+    const { outputs, seen } = twoModels([spawn("在 WSB 执行命令并交回输出"), { text: "已派出" }], [
+      { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.provider==="windows-wsb"); const lease=await tools.sandbox_acquire({sandboxId:target.id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:"powershell",arguments:{command:"Write-Output 42"}}));' } },
+      ending === "done" ? outputs => ({ tool: "codemode", after: ready.promise, args: { code: `text(await tools.sandbox_job({jobId:${JSON.stringify(/"jobId"\s*:\s*"([^"\n]+)"/.exec(outputs[0])?.[1])}}));` } }) : "hang",
+      { tool: "codemode", after: disabled.promise, args: { code: "text(await tools.sandbox_list({}));" } },
+      { text: "WSB 输出 42" },
+    ]);
+    await thread("owner").submit(input(1, "委派 WSB 任务", 10000001));
+    const sub = await onlySubagent("owner"), workspace = child("owner", sub.id).id.toString();
+    await vi.waitFor(() => expect(outputs.child[0]).toContain("jobId"));
+    expect(seen.child[0].tools).toContain("codemode");
+    const session = (await fleet.sessions(workspace))[0]!;
+    expect(session.jobId).toBeTruthy();
+    expect(await fleet.sessions(env.SANDBOX.idFromName("owner").toString())).toEqual([]);
+    await expect((async () => await fleet.invoke("another-child", "call", { leaseId: session.lease.id, tool: "powershell", arguments: { command: "wrong" }, timeoutMs: 1000 }))()).rejects.toThrow("lease_expired");
+    if (ending === "done") {
+      const stepsResult = { kind: "completed", result: { stdout: "42", stderr: "", code: 0 } };
+      await fleet.complete(deviceId, session.jobId!, stepsResult);
+      ready.open();
+      await vi.waitFor(() => expect(outputs.child[1]).toContain("completed"));
+      expect(outputs.child[1]).toContain("42");
+      await fleet.putSettings({ enabled: false, expectedRevision: 1 });
+      disabled.open();
+      await reports("owner", 1);
+      expect(outputs.child[2]).toContain("permission_denied");
+    } else {
+      await thread("owner").cancelSubagent(sub.id);
+      await vi.waitFor(async () => expect(readJob(await fleet.inspectJson(workspace, session.jobId!)).phase).toBe("cancel_requested"));
+      await fleet.complete(deviceId, session.jobId!, { kind: "cancelled", reason: "stopped" });
+      await runDurableObjectAlarm(child("owner", sub.id));
+    }
+    await vi.waitFor(async () => expect((await fleet.sessions(workspace))[0]?.state).toBe("releasing"));
+    socket.send(JSON.stringify({ kind: "released", leaseId: session.lease.id }));
+    await vi.waitFor(async () => expect(await fleet.sessions(workspace)).toEqual([]));
   });
 
   it("lists, inspects and cancels subagents through the authenticated admin API", async () => {

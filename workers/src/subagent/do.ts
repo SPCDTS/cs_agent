@@ -8,6 +8,7 @@ import type { Env } from "../env";
 import { modelChange, openModels } from "../models";
 import { captureModels } from "../requests/capture";
 import { remoteCredentials } from "../model-credentials";
+import { createRemoteSandboxExtension } from "../tools/remote-sandbox";
 import { createWebPageTool } from "../tools/web-page";
 import { createWebSearchTool } from "../tools/web-search";
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
@@ -15,13 +16,13 @@ import { memoryDescriptions, memoryParameters } from "../memory/contracts";
 import { formatBeijingTime } from "../memory/time";
 import { PI_SAFETY_RULE, WEB_RULE } from "../prompt";
 import { createSubagentCapabilityHost, installDelegatedCapabilities } from "../mcp/delegated";
-import { DEFAULT_TIMEOUT_MS, MAX_MODEL_CALLS, RETENTION_MS, subagentName, type SubagentEntry, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
+import { RETENTION_MS, subagentName, type SubagentEntry, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
 import { responseDescription, shortSummary, subagentActivity, SUBAGENT_PROGRESS_RULE } from "./activity";
 
 const context = BACKGROUND_CONTEXT;
 // 有未完成的工作时定期自唤醒：驱逐后由 alarm 重新打开 Harness 续跑，并补送没送到父线程的汇报。
 const HEARTBEAT_MS = 60_000;
-const SUBAGENT_RULE = "你是主 agent 派出的子 agent，只负责完成交给你的任务。你不能联系用户、发消息、写记忆或安排定时；把最终结果完整写在回答里，它会原样交回主 agent。qq_context 与 mem_search 只读派出你的会话。";
+const SUBAGENT_RULE = "你是主 agent 派出的子 agent，只负责完成交给你的任务。你不能联系用户、发消息、写记忆或安排定时；把最终结果完整写在回答里，它会原样交回主 agent。qq_context 与 mem_search 只读派出你的会话。获授权时可以通过 Code Mode 使用远程沙箱（包括 WSB），按 sandbox_list 的注册说明申请自己的租约；不能复用主 agent 或其他子 agent 的租约。结束前取回需要保留的产物或内容，交回父 agent；远程临时路径不等于父工作区路径。任务结束或取消后宿主会清理你的租约。";
 
 /** queued → running → answered（回答已落库）→ reported（父线程已收下）；cancelled 是取消时还没回答的项。 */
 type InboxStatus = "queued" | "running" | "answered" | "reported" | "cancelled";
@@ -141,11 +142,28 @@ export class SubagentDO extends DurableObject<Env> {
     });
     if (changed) {
       // 冷启动后也要打开 Harness 中止，否则之后任何一次打开都会续跑被取消的运行。
-      const aborted = this.open().then(({ root }) => root.abort(context));
+      const aborted = this.open().then(({ root }) => root.abort(context)).finally(() => this.cleanupRemoteSandbox(meta));
       this.ctx.waitUntil(aborted.catch(() => {}));
       await Promise.race([aborted.catch(() => {}), scheduler.wait(2000)]);
     }
     return state(meta);
+  }
+
+  /** 只处理本子任务的租约；取消确认前保持占用，心跳补做释放。 */
+  private async cleanupRemoteSandbox(meta: SubagentMeta): Promise<void> {
+    if (!meta.capabilities?.remoteSandbox) return;
+    try {
+      const fleet = this.env.SANDBOX_FLEET.getByName("owner"), workspace = this.ctx.id.toString();
+      for (const session of await fleet.sessions(workspace)) {
+        if (session.jobId) {
+          await fleet.cancel(workspace, session.jobId);
+          await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
+        } else if (session.state !== "releasing") await fleet.release(workspace, session.lease.id);
+      }
+    } catch {
+      console.error({ event: "subagent_sandbox_cleanup_failed", id: meta.id });
+      await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
+    }
   }
 
   async status(): Promise<{ meta: SubagentMeta; inbox: Partial<Record<InboxStatus, number>> } | undefined> {
@@ -201,13 +219,14 @@ export class SubagentDO extends DurableObject<Env> {
   /** 一次只跑一项输入，每项各得一个回答、各汇报一次；没有可做的返回 false。 */
   private async step(): Promise<boolean> {
     const meta = await this.meta();
-    if (!meta || meta.status === "cancelled") return false;
+    if (!meta) return false;
+    if (meta.status === "cancelled") { await this.cleanupRemoteSandbox(meta); return false; }
     const answered = await this.database.get<InboxRow>("SELECT * FROM inbox WHERE status = 'answered' ORDER BY received_at, rowid LIMIT 1");
     if (answered) {
       await this.report(meta, answered);
       return true;
     }
-    if (meta.status !== "running") return false;
+    if (meta.status !== "running") { await this.cleanupRemoteSandbox(meta); return false; }
     const next = await this.database.get<InboxRow>(`SELECT * FROM inbox WHERE status IN ('running', 'queued')
       ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, received_at, rowid LIMIT 1`);
     if (!next) return false;
@@ -266,18 +285,7 @@ export class SubagentDO extends DurableObject<Env> {
   private async openRuntime(): Promise<Runtime> {
     const meta = await this.meta();
     if (!meta) throw new Error("subagent_missing");
-    const baseModels = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main"))), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" });
-    let modelCalls = Number((await this.database.get<{ value: string }>("SELECT value FROM meta WHERE key = 'model_calls'"))?.value ?? 0);
-    const models = new Proxy(baseModels, { get: (target, key) => {
-      const value: unknown = Reflect.get(target, key, target);
-      if (["stream", "streamSimple", "complete", "completeSimple"].includes(String(key)) && typeof value === "function") return (...args: unknown[]) => {
-        if (modelCalls >= MAX_MODEL_CALLS || Date.now() - meta.createdAt > DEFAULT_TIMEOUT_MS) throw new Error("subagent_budget_exhausted");
-        modelCalls++;
-        this.ctx.waitUntil(this.database.run("INSERT INTO meta(key,value) VALUES ('model_calls',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", String(modelCalls)));
-        return Reflect.apply(value, target, args);
-      };
-      return typeof value === "function" ? value.bind(target) : value;
-    } });
+    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main"))), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" });
     const parent = () => this.env.THREAD.getByName(meta.parent);
     const registry = createRegistry();
     // 子会话保留只读检索；下面按派出快照安装技能、独立coding与MCP代理，仍无发送或管理工具。
@@ -313,7 +321,17 @@ export class SubagentDO extends DurableObject<Env> {
           } }),
       ].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
-    const delegated = installDelegatedCapabilities(registry, createSubagentCapabilityHost(parent()), meta.id, meta.capabilities ?? {});
+    const host = createSubagentCapabilityHost(parent());
+    if (meta.capabilities?.remoteSandbox) registry.install(createRemoteSandboxExtension({
+      allowed: async () => {
+        const access = await host.validateSubagentAccess(meta.id);
+        return !!access?.capabilities.remoteSandbox && access.authority.owner && access.authority.scope === "owner"
+          && (await this.meta())?.status === "running" && await this.env.SANDBOX_FLEET.getByName("owner").enabled();
+      },
+      fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.ctx.id.toString(),
+      record: async detail => { console.log({ event: "subagent_remote_sandbox", id: meta.id, ...detail }); },
+    }));
+    const delegated = installDelegatedCapabilities(registry, host, meta.id, meta.capabilities ?? {});
     // 与 ThreadDO 相同：DO 里的连接跨不了请求，Codex 固定走 SSE。
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);

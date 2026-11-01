@@ -9,7 +9,7 @@ import type { ModelSelection } from "../settings";
 import { formatBeijingTime } from "../memory/time";
 import { shortSummary } from "./activity";
 import {
-  DEFAULT_TIMEOUT_MS, MAX_RUNNING, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS, SUBAGENT_ID, clip, confirmedIdentity, narrowIdentity, reportKey, reportText, stableId, subagentName,
+  MIN_TIMEOUT_MS, SUBAGENT_ID, clip, confirmedIdentity, narrowIdentity, reportKey, reportText, stableId, subagentName,
   type ParentSubagentStatus, type SubagentCapabilities, type SubagentIdentity, type SubagentReport, type SubagentState,
 } from "./model";
 
@@ -27,7 +27,7 @@ CREATE INDEX IF NOT EXISTS subagents_deadline ON subagents(status, deadline);
 export type SubagentOrigin = { capabilities?: SubagentCapabilities; workspaceRevision?: string; generation?: number; target: Target; selfId: string; scopeName: string; replyChannel?: "web" };
 export type SubagentCaller = { identity: SubagentIdentity; origin: SubagentOrigin };
 export type SubagentView = {
-  id: string; task: string; summary: string; status: ParentSubagentStatus; createdAt: number; deadline: number;
+  id: string; task: string; summary: string; status: ParentSubagentStatus; createdAt: number; deadline: number | null;
   endedAt?: number; lastReportAt?: number; spawner?: string;
 };
 type Row = {
@@ -57,9 +57,9 @@ const PARAMETERS = Type.Object({
   summary: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "spawn: provide a 15–30 character Chinese task summary for the admin topology, describing the work without credentials or raw arguments" })),
   id: Type.Optional(Type.String({ pattern: `^${SUBAGENT_ID}$`, description: "message / cancel: the subagent id returned by spawn or list" })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "message: a follow-up message for that subagent" })),
-  timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, maximum: MAX_TIMEOUT_MS, description: "spawn: time limit in ms, default 10 minutes" })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, description: "spawn: optional task deadline in ms; omit for no automatic timeout" })),
 }, { additionalProperties: false });
-const DESCRIPTION = `Delegate a self-contained, time-consuming task to a background subagent with its own context. For spawn, provide the full task and a short Chinese summary of the work for the admin overview. spawn returns at once; tell the user you started it and end the turn. When the subagent answers, its result comes back to you as a '[子 agent 完成]' input; then report to the user with send_message. message sends a follow-up to a subagent, list shows this chat's subagents, cancel stops one. At most ${MAX_RUNNING} run at a time. Subagents inherit approved MCP, skills and optional isolated coding capabilities. They cannot send messages, grant permissions or publish skills.`;
+const DESCRIPTION = `Proactively delegate independent research, implementation, review or long-running work to background subagents with their own context. For spawn, provide a self-contained task, acceptance criteria and a short Chinese summary. spawn returns immediately: continue independent work, then yield when waiting for results; do not poll or repeat the delegated task. Results arrive automatically as a '[子 agent 完成]' input; integrate and verify them before reporting through the current reply channel. message continues an existing subagent, list shows this chat's subagents, cancel stops unnecessary work. There is no fixed concurrency, task lifetime or model-call budget; timeoutMs is optional. Subagents inherit approved MCP, skills, isolated coding and authorized remote sandbox tools (including WSB). Remote devices still require their own available lease. Subagents cannot send messages, grant permissions or publish skills.`;
 
 /** 父线程的子 agent 登记：派出、交代、取消、汇报入队与超时，都经这张表。 */
 export class ParentSubagents {
@@ -90,16 +90,12 @@ export class ParentSubagents {
 
   async spawn(caller: SubagentCaller, task: string, timeoutMs: number | undefined, model: ModelSelection, seed: string, summary?: string): Promise<Reply> {
     const thread = await this.host.thread(), id = await stableId(`${thread}:${seed}`), now = Date.now();
-    const timeout = Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.trunc(timeoutMs ?? DEFAULT_TIMEOUT_MS)));
-    const admitted = await this.host.db.transaction(async tx => {
-      if (await tx.get("SELECT 1 FROM subagents WHERE id = ?", id)) return true;
-      const running = await tx.get<{ n: number }>("SELECT COUNT(*) AS n FROM subagents WHERE status = 'running'");
-      if ((running?.n ?? 0) >= MAX_RUNNING) return false;
-      await tx.run(`INSERT INTO subagents (id, task, summary, created_at, status, identity_json, origin_json, timeout_ms, deadline)
-        VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`, id, task, shortSummary(summary || task), now, JSON.stringify(caller.identity), JSON.stringify(caller.origin), timeout, now + timeout);
-      return true;
-    });
-    if (!admitted) return { text: `本会话已有 ${MAX_RUNNING} 个子 agent 在运行，达到上限；等它们完成，或先 cancel 不再需要的。`, error: true };
+    if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < MIN_TIMEOUT_MS || !Number.isSafeInteger(now + timeoutMs)))
+      return { text: "timeoutMs 必须为至少 1000 的安全整数，且截止时间不能溢出。", error: true };
+    // 0 表示不设截止时间，兼容已保存的 NOT NULL 列；显式 timeoutMs 才安排父 alarm。
+    const timeout = timeoutMs ?? 0;
+    await this.host.db.run(`INSERT OR IGNORE INTO subagents (id, task, summary, created_at, status, identity_json, origin_json, timeout_ms, deadline)
+      VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`, id, task, shortSummary(summary || task), now, JSON.stringify(caller.identity), JSON.stringify(caller.origin), timeout, timeout ? now + timeout : 0);
     const row = (await this.row(id))!;
     try {
       await this.apply(id, await this.child(thread, id).start({ parent: thread, id, task: row.task, summary: row.summary ?? shortSummary(row.task), identity: JSON.parse(row.identity_json) as SubagentIdentity, model, capabilities: (JSON.parse(row.origin_json) as SubagentOrigin).capabilities }));
@@ -108,9 +104,9 @@ export class ParentSubagents {
       await this.host.db.run("UPDATE subagents SET status = 'failed', ended_at = ? WHERE id = ? AND status = 'running'", Date.now(), id);
       return { text: "子 agent 启动失败，请稍后再试。", error: true };
     }
-    await this.host.wakeBy(row.deadline);
+    if (row.deadline) await this.host.wakeBy(row.deadline);
     await this.host.audit("subagent_spawn", { id, timeoutMs: row.timeout_ms, chars: row.task.length });
-    return { text: `已派出子 agent ${id}（限时 ${span(row.timeout_ms)}），完成后结果会作为「[子 agent 完成]」输入交回给你。` };
+    return { text: `已派出子 agent ${id}（${row.timeout_ms ? "限时 " + span(row.timeout_ms) : "不设自动超时"}），完成后结果会作为「[子 agent 完成]」输入交回给你。` };
   }
 
   async message(caller: SubagentCaller, id: string, text: string, seed: string): Promise<Reply> {
@@ -125,9 +121,9 @@ export class ParentSubagents {
     const { result, state } = await this.child(await this.host.thread(), id).message(`m-${(await stableId(seed)).slice(0, 23)}`, text);
     await this.apply(id, state);
     if (result === "ended") return { text: `子 agent ${id} 已取消，不能再发消息。`, error: true };
-    const deadline = Date.now() + row.timeout_ms;
+    const deadline = row.timeout_ms ? Date.now() + row.timeout_ms : 0;
     await this.host.db.run("UPDATE subagents SET deadline = ? WHERE id = ? AND status = 'running'", deadline, id);
-    await this.host.wakeBy(deadline);
+    if (deadline) await this.host.wakeBy(deadline);
     return { text: `已把消息交给子 agent ${id}，回答会作为「[子 agent 完成]」输入交回给你。` };
   }
 
@@ -155,7 +151,7 @@ export class ParentSubagents {
   /** 父 DO alarm 调用：到期的先取消子 DO、再唤醒、最后落状态，中途中断时下次 alarm 重做，每一步都幂等。 */
   async expire(now: number): Promise<void> {
     const thread = await this.host.thread();
-    for (const row of await this.host.db.all<Row>("SELECT * FROM subagents WHERE status = 'running' AND deadline <= ?", now)) {
+    for (const row of await this.host.db.all<Row>("SELECT * FROM subagents WHERE status = 'running' AND deadline > 0 AND deadline <= ?", now)) {
       try {
         const state = await this.child(thread, row.id).cancel();
         // 到期前刚好答完：按完成处理，汇报照常送达。
@@ -169,7 +165,7 @@ export class ParentSubagents {
   }
 
   async nextDeadline(db: SqliteExecutor = this.host.db): Promise<number | undefined> {
-    return (await db.get<{ at: number | null }>("SELECT MIN(deadline) AS at FROM subagents WHERE status = 'running'"))?.at ?? undefined;
+    return (await db.get<{ at: number | null }>("SELECT MIN(deadline) AS at FROM subagents WHERE status = 'running' AND deadline > 0"))?.at ?? undefined;
   }
 
   async running(): Promise<number> {
@@ -180,7 +176,7 @@ export class ParentSubagents {
     const rows = await this.host.db.all<Row>("SELECT * FROM subagents ORDER BY created_at DESC LIMIT 50");
     return rows.map(row => {
       const as = (JSON.parse(row.identity_json) as SubagentIdentity).as;
-      return { id: row.id, task: clip(row.task, 200), summary: row.summary ?? shortSummary(row.task), status: row.status, createdAt: row.created_at, deadline: row.deadline,
+      return { id: row.id, task: clip(row.task, 200), summary: row.summary ?? shortSummary(row.task), status: row.status, createdAt: row.created_at, deadline: row.deadline || null,
         ...(row.ended_at === null ? {} : { endedAt: row.ended_at }), ...(row.last_report_at === null ? {} : { lastReportAt: row.last_report_at }),
         ...(as ? { spawner: `${as.owner ? "owner" : "成员"} ${as.userId}` } : {}) };
     });

@@ -25,7 +25,7 @@ import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
 import { threadOpsSettings, effectiveSettings, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
 import { MESSAGE_SCHEMA, QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, markMessageRecalled, recordMessage, recall, withReplyContext, type RecallOptions } from "./context";
-import { EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from "./prompt";
+import { DELEGATION_RULE, EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from "./prompt";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { modelChange, openModels, sameSelection } from "./models";
 import { captureModels } from "./requests/capture";
@@ -207,6 +207,10 @@ export class ThreadDO extends DurableObject<Env> {
         section("qq", async (api, callContext) => {
           const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
           return (input && isWeb(input) ? WEB_SEND_RULE : SEND_RULE) + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE + "\n" + MEMORY_RULE;
+        }, { tag: false }),
+        section("delegation", async (api, callContext) => {
+          const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
+          return input?.kind === "message" ? DELEGATION_RULE : undefined;
         }, { tag: false }),
         section("memory", () => renderMemorySection(memory), { tag: false }),
         section("turn-identity", async (api, callContext) => {
@@ -705,7 +709,8 @@ export class ThreadDO extends DurableObject<Env> {
     if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;
     const authority = await this.mcpAuthority(input), { mcp } = await this.open();
     const coding = this.ownerTurnKind(input) === "message", snapshot = coding ? await this.env.SANDBOX.getByName(await this.namespace()).snapshot() : undefined;
-    const capabilities = { coding, ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority) } : {}) };
+    const remoteSandbox = coding && authority?.scope === "owner" && await this.env.SANDBOX_FLEET.getByName("owner").enabled();
+    const capabilities = { coding, remoteSandbox, ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority) } : {}) };
     return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner: isWebAdmin(input) ? this.ctx.id.equals(this.env.THREAD.idFromName("owner")) : ownerIds(this.env).includes(input.user_id), ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
       origin: { capabilities, workspaceRevision: snapshot?.revision, generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
   }
