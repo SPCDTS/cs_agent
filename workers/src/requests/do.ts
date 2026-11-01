@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import type { RequestDetail, RequestQuery, RequestRecord, ToolTrace, ToolSummary } from "./types";
 import { readAgentTopology, type AgentTopology } from "./topology";
+import type { SubagentActivity } from "../subagent/activity";
 const DAY = 86_400_000;
 type Row = { seq: number; record: string; available: number };
 export class RequestsDO extends DurableObject<Env> {
@@ -23,6 +24,9 @@ export class RequestsDO extends DurableObject<Env> {
         started INTEGER NOT NULL, revision INTEGER NOT NULL, record TEXT NOT NULL, payload TEXT, bytes INTEGER NOT NULL,
         UNIQUE(thread,turn_id,call_id));
       CREATE INDEX IF NOT EXISTS tool_traces_turn ON tool_traces(thread,turn_id,revision);
+      CREATE TABLE IF NOT EXISTS agent_activity (thread TEXT NOT NULL, actor TEXT NOT NULL, updated INTEGER NOT NULL,
+        version INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY(thread,actor));
+      CREATE INDEX IF NOT EXISTS agent_activity_updated ON agent_activity(updated);
     `);
     const columns = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(requests)").toArray();
     if (!columns.some(c => c.name === "turn_id")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN turn_id TEXT");
@@ -30,6 +34,12 @@ export class RequestsDO extends DurableObject<Env> {
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_turn ON requests(thread,turn_id,revision)");
   }
   private revision() { return this.ctx.storage.sql.exec<{ revision: number }>("UPDATE request_revision SET revision=revision+1 WHERE id=1 RETURNING revision").one().revision; }
+  async recordAgent(activity: SubagentActivity): Promise<void> {
+    this.ctx.storage.sql.exec(`INSERT INTO agent_activity(thread,actor,updated,version,record) VALUES(?,?,?,?,?)
+      ON CONFLICT(thread,actor) DO UPDATE SET updated=excluded.updated,version=excluded.version,record=excluded.record
+      WHERE excluded.version>agent_activity.version`, activity.thread, activity.actor, activity.updatedAt, activity.version, JSON.stringify(activity));
+    if (await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 3600_000);
+  }
   async record(detail: RequestDetail): Promise<void> {
     const r = detail.request, sql = this.ctx.storage.sql;
     // 重投与乱序开始事件不会覆盖终态。
@@ -59,6 +69,7 @@ export class RequestsDO extends DurableObject<Env> {
   }
   private prune() {
     const sql = this.ctx.storage.sql, now = Date.now();
+    sql.exec("DELETE FROM agent_activity WHERE updated < ?", now - 30 * DAY);
     sql.exec("DELETE FROM requests WHERE started < ? OR seq IN (SELECT seq FROM requests ORDER BY seq DESC LIMIT -1 OFFSET 20000)", now - 30 * DAY);
     sql.exec("DELETE FROM request_details WHERE started < ? OR id NOT IN (SELECT id FROM requests)", now - 7 * DAY);
     sql.exec("DELETE FROM tool_traces WHERE started < ? OR (started < ? AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.thread=tool_traces.thread AND r.turn_id=tool_traces.turn_id))", now - 30 * DAY, now - 3600_000);
@@ -83,7 +94,7 @@ export class RequestsDO extends DurableObject<Env> {
   }
   override async alarm() {
     this.prune();
-    if (this.ctx.storage.sql.exec("SELECT 1 FROM requests UNION ALL SELECT 1 FROM tool_traces LIMIT 1").toArray().length) await this.ctx.storage.setAlarm(Date.now() + 3600_000);
+    if (this.ctx.storage.sql.exec("SELECT 1 FROM requests UNION ALL SELECT 1 FROM tool_traces UNION ALL SELECT 1 FROM agent_activity LIMIT 1").toArray().length) await this.ctx.storage.setAlarm(Date.now() + 3600_000);
   }
   private filter(q: RequestQuery) {
     const where = ["started >= ?", "started <= ?"], args: (string | number)[] = [q.since, q.until];

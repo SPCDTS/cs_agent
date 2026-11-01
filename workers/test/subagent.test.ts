@@ -1,11 +1,12 @@
 import { env, reset, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
+import { fauxProvider, fauxAssistantMessage, fauxToolCall, fauxText, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import worker from "../src/index";
 import * as models from "../src/models";
 import type { SubagentView } from "../src/subagent/parent";
+import { responseDescription, shortSummary } from "../src/subagent/activity";
 import { action, connect, input, reply } from "./helpers";
 
 const TOKEN = "test-admin-only";
@@ -17,7 +18,7 @@ afterEach(async () => {
 });
 
 /** 一步：调工具、给最终文字（可等闸门打开再答）、或一直挂起到被中止；函数步按已有的工具输出求出下一步。 */
-type Step = { tool: string; args: JsonObject } | { text: string; after?: Promise<void> } | "hang" | ((outputs: string[]) => Step);
+type Step = { tool: string; args: JsonObject; progress?: string } | { text: string; after?: Promise<void> } | "hang" | ((outputs: string[]) => Step);
 type Seen = { tools: string[]; user: string; identity: string };
 
 /** 父线程与子 agent 共用一个 faux provider；按系统段里有没有 subagent 段分流到各自的脚本。 */
@@ -54,7 +55,7 @@ function twoModels(parentSteps: Step[], childSteps: Step[]) {
         signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
       });
     }
-    if (step && "tool" in step) return fauxAssistantMessage(fauxToolCall(step.tool, step.args), { stopReason: "toolUse" });
+    if (step && "tool" in step) return fauxAssistantMessage([...(step.progress ? [fauxText(step.progress)] : []), fauxToolCall(step.tool, step.args)], { stopReason: "toolUse" });
     if (step) { await step.after; return fauxAssistantMessage(step.text); }
     return fauxAssistantMessage("done");
   };
@@ -92,6 +93,37 @@ function admin(method: string, path: string, token: string | null = TOKEN) {
 }
 
 describe("subagents as child Durable Objects", () => {
+  it("publishes task, progress and result summaries from the existing model turns", async () => {
+    const answered = gate(), summary = "排查引用图片的读取链路";
+    const { seen } = twoModels([spawn("读取最近消息，检查引用的图片能否读取。完整任务不进入拓扑。", { summary }), { text: "已派出" }, { text: "收到" }],
+      [{ tool: "qq_context", args: {}, progress: "【进度】正在核对引用消息中的图片\n这里是详细说明，不进入概览。" },
+        { text: "【结果】已确认引用消息可正常读取\n完整检查结果。", after: answered.promise }]);
+    await thread("owner").submit(input(1, "检查图片", 10000001));
+    const sub = await onlySubagent("owner"), store = env.REQUESTS.getByName("main");
+    expect(sub.summary).toBe(summary);
+    await vi.waitFor(async () => expect((await child("owner", sub.id).status())?.meta.progress?.text).toBe("正在核对引用消息中的图片"));
+    const activity = async () => runInDurableObject(store, (_instance, state) => {
+      const row = state.storage.sql.exec<{ record: string }>("SELECT record FROM agent_activity WHERE actor=?", sub.id).one();
+      return JSON.parse(row.record);
+    });
+    await vi.waitFor(async () => expect(await activity()).toMatchObject({ summary, status: "running", description: { kind: "progress", text: "正在核对引用消息中的图片" } }));
+    expect(JSON.stringify(await activity())).not.toMatch(/完整任务|详细说明/);
+    answered.open();
+    const [report] = await reports("owner", 1);
+    expect(report.text).toContain("已确认引用消息可正常读取\n完整检查结果。");
+    expect(report.text).not.toContain("【结果】");
+    await vi.waitFor(async () => expect(await activity()).toMatchObject({ status: "done", description: { kind: "result", text: "已确认引用消息可正常读取" } }));
+    expect(seen.child).toHaveLength(2);
+    expect(seen.child[0].tools).not.toContain("update_progress");
+  });
+
+  it("falls back to task text without inventing progress or exposing credentials", () => {
+    expect(shortSummary("检查图片。完整操作说明")).toBe("检查图片");
+    expect(shortSummary("Authorization: Bearer secret-value")).not.toContain("secret-value");
+    expect(responseDescription(fauxAssistantMessage("普通完整回答"), 1)).toBeUndefined();
+    expect(responseDescription(fauxAssistantMessage("【进度】调用工具", { stopReason: "stop" }), 1)).toBeUndefined();
+  });
+
   it("runs the task in its own DO with read-only tools and wakes the owner thread with the report", async () => {
     const { socket, frames } = await connect(sockets);
     const answered = gate();

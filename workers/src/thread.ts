@@ -122,6 +122,7 @@ export class ThreadDO extends DurableObject<Env> {
         persona_text: "TEXT", session_generation: "INTEGER NOT NULL DEFAULT 0", kind: "TEXT NOT NULL DEFAULT 'message'", reply_channel: "TEXT NOT NULL DEFAULT 'qq'",
       })) if (!columns.some(column => column.name === name)) await tx.exec(`ALTER TABLE inbound ADD COLUMN ${name} ${definition}`);
       const outboxColumns = await tx.all<{ name: string }>("PRAGMA table_info(outbox)");
+      if (!(await tx.all<{ name: string }>("PRAGMA table_info(subagents)")).some(c => c.name === "summary")) await tx.exec("ALTER TABLE subagents ADD COLUMN summary TEXT");
       if (!outboxColumns.some(column => column.name === "turn_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN turn_id TEXT");
       if (!outboxColumns.some(column => column.name === "delivery_id")) await tx.exec("ALTER TABLE outbox ADD COLUMN delivery_id TEXT");
       await tx.exec("CREATE UNIQUE INDEX IF NOT EXISTS outbox_delivery ON outbox(delivery_id)");

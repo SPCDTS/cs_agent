@@ -6,7 +6,8 @@ import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai/provid
 import { captureModels } from "../src/requests/capture";
 import { snapshot, errorSummary } from "../src/requests/snapshot";
 import type { RequestDetail, RequestQuery, ToolTrace } from "../src/requests/types";
-import type { AgentTopology } from "../src/requests/topology";
+import { readAgentTopology, type AgentTopology } from "../src/requests/topology";
+import type { SubagentActivity } from "../src/subagent/activity";
 import worker from "../src/index";
 afterEach(() => reset());
 const query = (): RequestQuery => ({ since: Date.now() - 86400_000, until: Date.now() + 1000, limit: 40 });
@@ -16,6 +17,25 @@ function detail(id: string, at = Date.now()): RequestDetail {
     context: snapshot({ messages: [{ role: "user", content: "你好", timestamp: at }] }) };
 }
 describe("request observability", () => {
+  it("uses child lifecycle metadata across tool waits and ignores late progress after completion", async () => {
+    const store = env.REQUESTS.getByName("main"), now = Date.now(), actor = crypto.randomUUID();
+    const activity: SubagentActivity = { thread: "owner", actor, summary: "检查图片读取", description: { kind: "task", text: "检查图片读取", updatedAt: now }, status: "running", version: 1, updatedAt: now };
+    await store.recordAgent(activity);
+    expect((await store.agentTopology()).nodes.find(n => n.kind === "subagent")).toMatchObject({ activity: "active", status: "running", summary: "检查图片读取", description: { kind: "task" } });
+    const done: SubagentActivity = { ...activity, version: 3, status: "done", description: { kind: "result", text: "已确认图片读取正常", updatedAt: now + 2 }, updatedAt: now + 2 };
+    await store.recordAgent(done);
+    await store.recordAgent({ ...activity, version: 2, description: { kind: "progress", text: "正在检查", updatedAt: now + 1 } });
+    await runInDurableObject(store, (_instance, state) => {
+      const row = state.storage.sql.exec<{ record: string }>("SELECT record FROM agent_activity WHERE actor=?", actor).one();
+      expect(JSON.parse(row.record)).toEqual(done);
+    });
+    // 清掉详情仍能在下次采样读取简介，不把已完成子任务标为执行中。
+    await runInDurableObject(store, (_instance, state) => {
+      state.storage.sql.exec("DELETE FROM request_details");
+      expect(readAgentTopology(state.storage.sql, now + 10_001).nodes.find(n => n.kind === "subagent")).toMatchObject({ activity: "recent", status: "done", description: { kind: "result", text: "已确认图片读取正常" } });
+    });
+  });
+
   it("counts every stream/complete once, keeps stream events and usage semantics, and redacts secrets", async () => {
     const faux = fauxProvider({ models: [{ id: "test" }] }), base = createModels();
     const message = { ...fauxAssistantMessage("ok"), usage: { input: 7, output: 3, cacheRead: 5, cacheWrite: 2, reasoning: 2, totalTokens: 17,
