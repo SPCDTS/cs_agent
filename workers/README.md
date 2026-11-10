@@ -23,6 +23,8 @@
 
 管理页可切换账号、刷新目录和登出。旧 Codex 登录的 scope / client id 不沿用；需要时重新授权。登录、刷新或目录失败会报告不可用，不自动切换模型。实现位于 `src/{codex-login,chatgpt-accounts,model-credentials,models}.ts` 与 `src/admin/chatgpt-helper.ts`。
 
+排查模型地区拒绝时，可用管理员鉴权调用 `GET /admin/diagnostics/model-egress`。探针从实际 owner DO 发出，仅手动请求四个固定公开地址，不读取或发送模型凭据；每次请求超时 8 秒、正文上限 8 KiB。结果分别保留 OpenAI API、认证域名、Cloudflare 与 ipify 观察到的 IP/地区，不把机房代码或共享 Worker 地址当作确定的物理出口，也不能用公开探针结果证明带认证的模型请求一定成功。
+
 ## 联网与外部工具
 
 `web_search` 调用 DeepSeek Search API，复用现有 API key；`web_page` 直接请求指定网页。远程 MCP 配置在 `mcp.json`，凭据通过 secret 名引用。OAuth 登录、目录刷新、资源读取、群授权和逐次审批见 [MCP 契约](../docs/CLOUD-MCP-CONTRACT.md)。

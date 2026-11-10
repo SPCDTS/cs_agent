@@ -1,3 +1,4 @@
+import { modelEgressDiagnostics } from "./model-egress";
 import { createAccessExtension } from "./tools/access";
 import { createWorkspaceAdminApi, type WorkspaceAdminApi, type WorkspaceMergeInput } from "./sandbox/admin";
 import { createWorkspaceAdminExtension } from "./tools/workspace-admin";
@@ -891,6 +892,8 @@ export class ThreadDO extends DurableObject<Env> {
     const active = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued'"))?.n ?? 0;
     return { messages: rows.reverse().map(({assets_json,...row})=>({...row,assets:JSON.parse(assets_json) as AssetRef[]})), queued, active, limit: 100, delta: !!delta };
   }
+
+  modelEgressDiagnostics() { return modelEgressDiagnostics(); }
 
   async stats() {
     await this.initialize();
