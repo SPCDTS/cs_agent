@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchPage } from "../src/tools/web-page";
+import { fetchPage, HttpPageError } from "../src/tools/web-page";
 
 afterEach(() => { vi.restoreAllMocks(); });
 /** 按地址返回固定响应；记录请求过的地址，用来断言被拒的地址根本没有发出。 */
@@ -66,4 +66,24 @@ describe("web_page fetch", () => {
     await expect(fetchPage("https://a.example/big", 8000)).rejects.toMatchObject({ code: "too_large" });
     expect(await fetchPage("https://a.example/data.json", 8000)).toEqual({ title: "", text: "{\"ok\":true}", truncated: false });
   });
+});
+
+it("保留 HTTP 状态和冷却时间，错误不触发立即重试",async()=>{
+  const requested=fakeWeb({
+    "https://a.example/limited":()=>new Response("limited",{status:429,headers:{"Retry-After":"120"}}),
+    "https://a.example/missing":()=>new Response("missing",{status:404}),
+  });
+  await expect(fetchPage("https://a.example/limited",8000)).rejects.toMatchObject({code:"http_error",status:429,retryAfterSeconds:120});
+  await expect(fetchPage("https://a.example/missing",8000)).rejects.toMatchObject({status:404,retryAfterSeconds:undefined});
+  expect(requested).toHaveLength(2);
+  expect(new HttpPageError(503,new Date(Date.now()+60000).toUTCString()).retryAfterSeconds).toBeGreaterThanOrEqual(59);
+});
+
+it("RSS 和 Atom 保留 XML 时间与链接，明确报告截断",async()=>{
+  const rss='<rss><channel><item><title>公告</title><link>https://a.example/news</link></item></channel></rss>';
+  const atom='<feed xmlns="http://www.w3.org/2005/Atom"><entry><published>2026-11-10T00:00:00Z</published></entry></feed>';
+  fakeWeb({"https://a.example/rss":()=>new Response(rss,{headers:{"Content-Type":"application/rss+xml"}}),
+    "https://a.example/atom":()=>new Response(atom,{headers:{"Content-Type":"application/atom+xml; charset=utf-8"}})});
+  expect(await fetchPage("https://a.example/rss",8000)).toEqual({title:"",text:rss,truncated:false});
+  expect(await fetchPage("https://a.example/atom",20)).toEqual({title:"",text:atom.slice(0,20),truncated:true});
 });

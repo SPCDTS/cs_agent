@@ -27,6 +27,9 @@ jobs:
           cache-dependency-path: |
             workers/package-lock.json
             runner/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - run: npm run install:workers
       # 包含类型检查、workerd 测试、所有独立 Node 测试及不发布的打包检查。
       - run: npm run check
