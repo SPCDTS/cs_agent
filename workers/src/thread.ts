@@ -279,10 +279,16 @@ export class ThreadDO extends DurableObject<Env> {
       }), this.subagents.tool(async (api, callContext) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext)),
         async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
-    const ownerMessageAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
+    const workspaceSkillAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
-      return memory.ns === "owner" && !!input && this.ownerTurnKind(input) === "message"
-        && input.user_id !== input.self_id && input.session_generation === await this.sessionGeneration();
+      if(memory.ns!=="owner"||!input||(input.kind!=="message"&&input.kind!=="subagent"))return false;
+      const task=await this.sandboxTaskForInput(input);
+      if(!task?.subject.owner||!task.permissions.coding)return false;
+      // 续轮必须追溯真实主人输入；复用任务撤销、身份、回复入口和会话代次检查。
+      const source=await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?",task.sourceInputId);
+      return !!source&&this.ownerTurnKind(source)==="message"&&source.user_id!==source.self_id
+        &&source.user_id===task.subject.actor&&source.reply_channel===task.subject.replyChannel
+        &&source.session_generation===task.subject.generation;
     };
     const taskAccess = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
       this.sandboxTaskForInput(await this.currentInput(harness, api, api.conversationId, callContext));
@@ -311,7 +317,7 @@ export class ThreadDO extends DurableObject<Env> {
       registry:()=>this.env.REGISTRY.getByName("main"),bridge:()=>this.env.BRIDGE.getByName("napcat"),
     }));
     registry.install(createWorkspaceAdminExtension({
-      allowed: ownerMessageAllowed,
+      allowed: workspaceSkillAllowed,
       sandbox:()=>this.env.SANDBOX.getByName(memory.ns),registry:()=>this.env.REGISTRY.getByName("main"),
     }));
     registry.install(createMediaExtension({

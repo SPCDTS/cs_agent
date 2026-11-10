@@ -1,7 +1,8 @@
-import {expect,it} from "vitest";
-import {inspectWorkspaceSkill,publishWorkspaceSkill,type WorkspaceReadApi,type SkillPublishRegistry} from "../src/tools/workspace-admin";
+import {env,reset} from "cloudflare:test";
+import {afterEach,expect,it} from "vitest";
+afterEach(async()=>{await reset();});
+import {inspectWorkspaceSkill,publishWorkspaceSkill,type WorkspaceReadApi} from "../src/tools/workspace-admin";
 import {sha256} from "../src/media/model";
-import type {SkillInput} from "../src/skills";
 import type {WorkspaceManifest} from "../src/sandbox/workspace";
 it("检查固定工作区版本后发布技能，旧Registry版本不能覆盖新发布",async()=>{
   const texts=new Map([["skills/demo/SKILL.md","---\nname: demo\ndescription: 中文示例技能\n---\n先读取 references/guide.md，再执行。"],["skills/demo/references/guide.md","这是配套说明。"]]);
@@ -9,13 +10,12 @@ it("检查固定工作区版本后发布技能，旧Registry版本不能覆盖�
   const manifest:WorkspaceManifest={schemaVersion:1,workspace:"workspace:test",revision:"abcdef01",parentRevision:"0",files,directories:["skills","skills/demo","skills/demo/references"],totalBytes:files.reduce((sum,file)=>sum+file.bytes,0)};
   const readRevisions:string[]=[];
   const sandbox:WorkspaceReadApi={files:async revision=>{if(revision&&revision!==manifest.revision)throw new Error("wrong_revision");return manifest;},readBlob:async(path,revision)=>{readRevisions.push(revision??"");const text=texts.get(path);if(text===undefined)throw new Error("not_found");return{bytes:new TextEncoder().encode(text),mime:"text/plain",name:path.split("/").at(-1)??"file"};}};
-  let revision:string|undefined,published:SkillInput|undefined;
-  const registry:SkillPublishRegistry={skillRevision:async()=>revision,skillPublish:async(input,expected)=>{if(expected!==(revision??"absent"))return{ok:false,conflict:{revision}};published=input;revision="registry-v1";return{ok:true,value:{name:input.name,revision}};}};
+  const registry=env.REGISTRY.getByName("main");
   const inspection=await inspectWorkspaceSkill(sandbox,registry,{path:"/work/skills/demo"});
   expect(inspection).toMatchObject({name:"demo",description:"中文示例技能",workspaceRevision:manifest.revision,expectedRevision:"absent"});
   const request={path:"skills/demo",workspaceRevision:inspection.workspaceRevision,expectedRevision:inspection.expectedRevision};
-  expect(await publishWorkspaceSkill(sandbox,registry,request)).toMatchObject({ok:true,value:{revision:"registry-v1"}});
-  expect(published?.files).toEqual({"references/guide.md":"这是配套说明。"});
-  expect(await publishWorkspaceSkill(sandbox,registry,request)).toMatchObject({ok:false,conflict:{revision:"registry-v1"}});
+  expect(await publishWorkspaceSkill(sandbox,registry,request)).toMatchObject({ok:true,value:{name:"demo",revision:expect.any(String)}});
+  expect((await registry.skillGet("demo"))?.files).toEqual({"references/guide.md":"这是配套说明。"});
+  expect(await publishWorkspaceSkill(sandbox,registry,request)).toMatchObject({ok:false,conflict:{revision:await registry.skillRevision("demo")}});
   expect(readRevisions.every(value=>value===manifest.revision)).toBe(true);
 });

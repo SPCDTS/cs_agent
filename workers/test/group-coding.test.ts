@@ -133,7 +133,7 @@ describe("群聊通用脚本与产物发送", () => {
     const publish = vi.spyOn(RegistryDO.prototype, "skillPublish");
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text(ALL_TOOLS.map(tool => tool.name)); try { text(await tools.skill_inspect({path:"out/skill"})); } catch(error) { text(String(error)); } try { text(await tools.skill_publish({path:"out/skill",workspaceRevision:"0",expectedRevision:"absent"})); } catch(error) { text(String(error)); }' } }]);
     await env.THREAD.getByName(group).submit(input(1, "检查工具", 10000004, 200000001, true));
-    expect(seen.outputs.join("\n")).toContain("只有主人本人私聊");
+    expect(seen.outputs.join("\n")).toContain("skill_publish_denied");
     expect(seen.outputs.join("\n")).not.toMatch(/sandbox_acquire|web_import_image|web_fetch/);
     expect(acquire).not.toHaveBeenCalled();
     expect(publish).not.toHaveBeenCalled();

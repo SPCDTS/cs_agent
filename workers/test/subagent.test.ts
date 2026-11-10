@@ -7,6 +7,8 @@ import worker from "../src/index";
 import * as models from "../src/models";
 import { RegistryDO } from "../src/registry";
 import { SandboxDO } from "../src/sandbox/do";
+import { scopePrefix } from "../src/media/repository";
+import { sha256 } from "../src/media/model";
 import { MCP_CONFIG } from "../src/mcp/config";
 import type { SubagentView } from "../src/subagent/parent";
 import { responseDescription, shortSummary } from "../src/subagent/activity";
@@ -99,6 +101,19 @@ function admin(method: string, path: string, token: string | null = TOKEN) {
   return worker.fetch(new Request(`https://test${path}`, { method, headers: token === null ? {} : { Authorization: `Bearer ${token}` } }), { ...env, ADMIN_TOKEN: TOKEN });
 }
 
+async function seedPublishSkill() {
+  const sandbox=env.SANDBOX.getByName("owner"),current=await sandbox.files();
+  const texts={"skills/example/SKILL.md":"---\nname: example\ndescription: 测试技能发布\n---\n读取 sources.md。","skills/example/sources.md":"中文来源说明"};
+  const files=await Promise.all(Object.entries(texts).map(async([path,text])=>{
+    const bytes=new TextEncoder().encode(text),digest=await sha256(bytes);
+    await env.ASSETS.put((await scopePrefix(current.workspace))+"/workspace/blobs/"+digest,bytes);
+    return {path,sha256:digest,bytes:bytes.length,mime:"text/plain",mode:420};
+  }));
+  const result=await sandbox.importSnapshot({expectedRevision:current.revision,manifest:{...current,files,
+    directories:["skills","skills/example"],totalBytes:files.reduce((sum,file)=>sum+file.bytes,0)}});
+  expect(result.ok).toBe(true);
+}
+
 async function remoteDevice() {
   const fleet = env.SANDBOX_FLEET.getByName("owner"), token = "a".repeat(64);
   await fleet.putSettings({ enabled: true, expectedRevision: 0 });
@@ -176,7 +191,7 @@ describe("subagents as child Durable Objects", () => {
 
     const tools = seen.child[0]!.tools;
     expect(tools).toEqual(expect.arrayContaining(["web_search", "web_page", "qq_context", "mem_search"]));
-    for (const name of ["send_message", "subagent", "generate_image", "mem_remember", "schedule", "gmail_send"]) expect(tools).not.toContain(name);
+    for (const name of ["send_message", "subagent", "generate_image", "mem_remember", "schedule", "gmail_send", "skill_inspect", "skill_publish"]) expect(tools).not.toContain(name);
     expect(seen.parent[0]!.tools).toContain("subagent");
 
     await vi.waitFor(async () => expect((await child("owner", sub.id).status())?.meta).toMatchObject({ status: "done", reportCount: 1 }));
@@ -314,12 +329,13 @@ describe("subagents as child Durable Objects", () => {
 
   it.each(["qq", "web"] as const)("continues the parent's sandbox task after a %s child report with MCP disabled", async channel => {
     const { fleet, deviceId, socket } = await remoteDevice(), ready = gate();
+    await seedPublishSkill();
     const exec = vi.spyOn(SandboxDO.prototype, "exec").mockResolvedValue({ stdout: "主会话命令成功", stderr: "", code: 0, timedOut: false, truncated: false });
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
     const { outputs } = twoModels([spawn("检查独立工作区"), { text: "已派出" },
       { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.provider==="windows-wsb"); const lease=await tools.sandbox_acquire({sandboxId:target.id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:"powershell",arguments:{command:"Get-ChildItem C:/AgentWork"}}));' } },
       { tool: "codemode", args: { code: 'text(await tools.bash({command:"pwd"}));' } },
-      { tool: "codemode", args: { code: 'text(await tools.skill_publish({path:"skills/example",workspaceRevision:"x",expectedRevision:"absent"}));' } },
+      { tool: "codemode", args: { code: 'const check=await tools.skill_inspect({path:"skills/example"});text(await tools.skill_publish({path:"skills/example",workspaceRevision:check.workspaceRevision,expectedRevision:check.expectedRevision}));' } },
       { text: "已核实主工作区" },
     ], [{ text: "子工作区为空，请主会话核实", after: ready.promise }]);
     if (channel === "web") {
@@ -332,7 +348,8 @@ describe("subagents as child Durable Objects", () => {
     expect(outputs.parent[1]).toContain("jobId");
     expect(outputs.parent[2]).toContain("主会话命令成功");
     expect(exec).toHaveBeenCalledTimes(1);
-    expect(outputs.parent[3]).toContain("只有主人本人私聊或经过验证的网页回合可以发布技能");
+    expect(outputs.parent[3]).toContain('"ok":true');
+    expect((await env.REGISTRY.getByName("main").skillGet("example"))?.files).toEqual({"sources.md":"中文来源说明"});
     const workspace = env.SANDBOX.idFromName("owner").toString(), session = (await fleet.sessions(workspace))[0]!;
     expect(session.lease.workspace).toBe(workspace);
     expect(await fleet.sessions(child("owner", sub.id).id.toString())).toEqual([]);
@@ -340,6 +357,23 @@ describe("subagents as child Durable Objects", () => {
     await fleet.release(workspace, session.lease.id);
     socket.send(JSON.stringify({ kind: "released", leaseId: session.lease.id }));
     await vi.waitFor(async () => expect(await fleet.sessions(workspace)).toEqual([]));
+  });
+
+  it("撤销原任务后父会话续轮不能发布技能",async()=>{
+    await seedPublishSkill();
+    const ready=gate(),resume=gate();
+    vi.spyOn(RegistryDO.prototype,"mcpConfig").mockReturnValue({...MCP_CONFIG,enabled:false,servers:[]});
+    const {outputs,seen}=twoModels([spawn("检查技能"),{text:"已派出"},
+      {tool:"codemode",after:resume.promise,args:{code:'text(await tools.skill_publish({path:"skills/example",workspaceRevision:"x",expectedRevision:"absent"}));'}},
+      {text:"授权已撤销"}], [{text:"请主会话发布",after:ready.promise}]);
+    await thread("owner").submit(input(1,"检查并发布技能",10000001));
+    ready.open();
+    await vi.waitFor(()=>expect(seen.parent.some(r=>r.user.startsWith("[子 agent 完成]"))).toBe(true));
+    await rows("owner","UPDATE sandbox_tasks SET revoked_at=1");
+    resume.open();
+    await reports("owner",1);
+    expect(outputs.parent[1]).toContain("denied");
+    expect(await env.REGISTRY.getByName("main").skillGet("example")).toBeUndefined();
   });
 
   it.each(["capability", "identity", "generation", "cancelled", "channel", "disabled", "task"] as const)("rechecks %s before a parent report turn uses the sandbox", async change => {
