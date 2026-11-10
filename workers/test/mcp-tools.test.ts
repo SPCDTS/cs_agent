@@ -4,7 +4,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, type JsonObject } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
-import { ThreadDO } from "../src/thread";
+import { threadWithBindings } from "./thread-fixture";
 import { ThreadMcp } from "../src/mcp";
 import { MCP_CATALOG_SCHEMA, makeCatalog, restoreCatalog, saveCatalog } from "../src/mcp/catalog";
 import { MCP_CONFIG } from "../src/mcp/config";
@@ -49,7 +49,7 @@ describe("MCP in pi-durable and inline QuickJS", () => {
     const name = toolNames(candidate.revision, candidate.revision.tools[1]).nativeName;
     const seen = scriptedModel([refreshStep, { name: "codemode", args: { code: searchScript } }, { name, args: { query: "must-not-send" } }]);
     const result = await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
-      const thread = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const thread = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       expect(await thread.submit(input(1, "查询 MCP", 10000001))).toEqual({ status: "done" });
       return { catalog: state.storage.sql.exec("SELECT * FROM mcp_catalog").toArray(), events: state.storage.sql.exec("SELECT * FROM events WHERE kind LIKE 'mcp_%'").toArray() };
     });
@@ -70,7 +70,7 @@ describe("MCP in pi-durable and inline QuickJS", () => {
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       const currentEnv = { ...env, QQ_OWNER: "10000001", MEMORY_EXTRACT_NAMESPACES: "" };
       remote.state.beforeCall = async () => { currentEnv.QQ_OWNER = "10000002"; };
-      const thread = new ThreadDO(state, currentEnv);
+      const thread = threadWithBindings(_instance, state, currentEnv);
       expect(await thread.submit(input(1, "调用两次", 10000001))).toEqual({ status: "done" });
       expect(state.storage.sql.exec<{ detail: string }>("SELECT detail FROM events WHERE kind='mcp_call'").toArray().some(e => JSON.parse(e.detail).result === "denied")).toBe(true);
     });
@@ -80,7 +80,7 @@ describe("MCP in pi-durable and inline QuickJS", () => {
     { ns: "private:10000003", user: 10000003, group: undefined }])("allows public scripts but denies MCP without a grant for $ns sender $user", async ({ ns, user, group }) => {
     const remote = fakeRemote(), seen = scriptedModel([{ name: "codemode", args: { code: "text(ALL_TOOLS); text(await tools.mcp_refresh_tools({}));" } }]);
     await runInDurableObject(env.THREAD.getByName(ns), async (_instance, state) => {
-      const thread = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const thread = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       expect(await thread.submit(input(1, "test", user, group, true))).toEqual({ status: "done" });
     });
     expect(seen.outputs.join("\n")).toContain("denied");
@@ -90,7 +90,7 @@ describe("MCP in pi-durable and inline QuickJS", () => {
     const remote = fakeRemote(); await login(); remote.state.failCalls = true;
     const seen = scriptedModel([refreshStep, { name: "codemode", args: { code: searchScript } }]);
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
-      expect(await new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(1, "test", 10000001))).toEqual({ status: "done" });
+      expect(await threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(1, "test", 10000001))).toEqual({ status: "done" });
     });
     expect(remote.state.calls).toBe(1); expect(seen.outputs.join("\n")).toContain("outcome_unknown");
     expect(seen.outputs.join("\n")).not.toContain("synthetic-network-detail");

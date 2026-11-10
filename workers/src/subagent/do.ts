@@ -77,7 +77,8 @@ export class SubagentDO extends DurableObject<Env> {
         await tx.run("UPDATE meta SET value = ? WHERE key = 'subagent'", JSON.stringify(meta));
       }
       const pending = meta.status === "running" || meta.status !== "cancelled" && !!await tx.get("SELECT 1 FROM inbox WHERE status = 'answered' LIMIT 1");
-      await this.ctx.storage.setAlarm(pending ? Date.now() + HEARTBEAT_MS : (meta.endedAt ?? meta.createdAt) + RETENTION_MS);
+      if (pending) await this.wakeBy(Date.now() + HEARTBEAT_MS);
+      else await this.ctx.storage.setAlarm((meta.endedAt ?? meta.createdAt) + RETENTION_MS);
       return { meta, activityChanged };
     }).then(({ meta, activityChanged }) => {
       if (activityChanged) this.publishActivity(meta);
@@ -103,11 +104,10 @@ export class SubagentDO extends DurableObject<Env> {
       const created: SubagentMeta = { ...init, summary: shortSummary(init.summary || init.task), createdAt: now, activityAt: now, status: "running", reportCount: 0, version: 1 };
       await tx.run("INSERT INTO meta (key, value) VALUES ('subagent', ?)", JSON.stringify(created));
       await tx.run("INSERT INTO inbox (request_id, text, received_at, status) VALUES ('task', ?, ?, 'queued')", init.task, now);
-      await this.ctx.storage.setAlarm(now + HEARTBEAT_MS);
+      await this.wakeBy(now);
       return created;
     });
     this.publishActivity(meta);
-    this.kick();
     return state(meta);
   }
 
@@ -123,9 +123,9 @@ export class SubagentDO extends DurableObject<Env> {
       meta.status = "running";
       delete meta.progress;
       delete meta.endedAt;
+      await this.wakeBy(Date.now());
       return true;
     });
-    if (result === "accepted") this.kick();
     return { result, state: state(meta) };
   }
 
@@ -142,10 +142,8 @@ export class SubagentDO extends DurableObject<Env> {
       return changed = true;
     });
     if (changed) {
-      // 冷启动后也要打开 Harness 中止，否则之后任何一次打开都会续跑被取消的运行。
-      const aborted = this.open().then(({ root }) => root.abort(context)).finally(() => this.cleanupRemoteSandbox(meta));
-      this.ctx.waitUntil(aborted.catch(() => {}));
-      await Promise.race([aborted.catch(() => {}), scheduler.wait(2000)]);
+      // 中止 API 也会隐式恢复 Harness；由 alarm 处理，避免取消请求成为模型执行入口。
+      await this.database.transaction(() => this.wakeBy(Date.now()));
     }
     return state(meta);
   }
@@ -188,6 +186,11 @@ export class SubagentDO extends DurableObject<Env> {
     const meta = await this.meta();
     if (meta && Date.now() < (meta.endedAt ?? Infinity) + RETENTION_MS) {
       await this.update(async () => false);
+      if (meta.status === "cancelled") {
+        await (await this.open()).root.abort(context);
+        await this.cleanupRemoteSandbox(meta);
+        return;
+      }
       this.kick();
       return;
     }
@@ -197,6 +200,11 @@ export class SubagentDO extends DurableObject<Env> {
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     this.initialized = this.runtime = undefined;
+  }
+
+  private async wakeBy(at: number): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || current > at) await this.ctx.storage.setAlarm(at);
   }
 
   private kick(): void {
@@ -343,7 +351,7 @@ export class SubagentDO extends DurableObject<Env> {
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
     const root = await harness.root(context, { agent: modelChange(meta.model) });
-    harness.resume();
+    // 读取子会话只打开存储；执行由 alarm → drain → answer 的 submit 启动。
     void harness.closed.then(() => { this.runtime = undefined; void delegated.close(); });
     return { harness, root };
   }

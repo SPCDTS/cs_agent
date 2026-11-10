@@ -81,7 +81,12 @@ const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员
 const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill",
   "codemode"]);
 const profileOf = (row: InboundRow): ToolProfile => isWeb(row) ? "web" : row.kind === "event" ? "event" : "chat";
-type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp };
+type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp; recovered: boolean };
+type TurnResult = { status: "done" | "failed" };
+type Admission = { completion: Promise<TurnResult> };
+const AGENT_WAKE = "agent_wake";
+const RUNTIME_WAKE = "runtime_wake";
+const RECOVERY_MS = 65_000;
 const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind: "group", groupId: row.chat_id } : { kind: "private", userId: row.chat_id };
 export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
 export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
@@ -99,7 +104,11 @@ export class ThreadDO extends DurableObject<Env> {
   private runtime?: Promise<Runtime>;
   private admissions: Promise<void> = Promise.resolve();
   private settingsCache?: { at: number; load: Promise<SettingsSnapshot> };
-  private readonly waiters = new Map<string, (submission: Submission | undefined) => void>();
+  private readonly waiters = new Map<string, (admission: Admission | undefined) => void>();
+  private readonly settling = new Map<string, Admission>();
+  private readonly alarmCommands: (() => Promise<void>)[] = [];
+  private runtimeStarted = false;
+  private extracting?: Promise<void>;
   private idleWait?: Promise<void>;
   private readonly skills = new SkillCatalog(() => this.env.REGISTRY.getByName("main"));
   private readonly subagents = new ParentSubagents({ db: this.database, env: this.env, thread: () => this.namespace(),
@@ -372,21 +381,17 @@ export class ThreadDO extends DurableObject<Env> {
       namespaces: () => mcp.namespaces(),
     });
     // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
-    const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
+    const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } },
+      onWake: wake => this.ctx.waitUntil(this.runtimeWake(wake)),
+    }, context);
     const root = await harness.root(context, { agent: modelChange(selection) });
     await root.configure(modelChange(selection), context);
-    await this.recoverSessionReset(root);
-    const runtime: Runtime = { harness, root, registry, selection, profile: "chat", mcp };
+    const runtime: Runtime = { harness, root, registry, selection, profile: "chat", mcp, recovered: false };
     await this.applyProfile(runtime, await this.ctx.storage.get<ToolProfile>("tool_profile") ?? "chat");
-    // 已被 Pi 接收过的输入按 requestId 幂等重交；尚未接收的由 pump 按工具档位继续接纳。
-    for (const row of await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' AND when_busy IS NOT NULL ORDER BY rowid")) {
-      this.track(row.message_id, await this.admit(runtime, row));
-    }
-    this.ctx.waitUntil(this.pump());
     // 快照先装配，远端离线不阻塞 Harness 恢复；首次执行仍强制核对完整目录。
     if (mcp) this.ctx.waitUntil(mcp.refreshAll().then(() => {}));
-    harness.resume();
-    void harness.closed.then(async () => { this.runtime = undefined; await codemode.close(); await mcp?.close(); });
+    // 只读打开保持暂停；提交、等待与恢复都由 alarm 进入，不能在查看历史时启动模型。
+    void harness.closed.then(async () => { this.runtime = undefined; this.runtimeStarted = false; await codemode.close(); await mcp?.close(); });
     return runtime;
   }
 
@@ -504,8 +509,13 @@ export class ThreadDO extends DurableObject<Env> {
   private track(key: string, submission: Submission | undefined): void {
     const waiter = this.waiters.get(key);
     this.waiters.delete(key);
-    if (waiter) waiter(submission);
-    else if (submission) this.ctx.waitUntil(this.settle(key, submission).then(() => {}, () => {}));
+    let admission = this.settling.get(key);
+    if (!admission && submission) {
+      admission = { completion: this.settle(key, submission).finally(() => { this.settling.delete(key); }) };
+      this.settling.set(key, admission);
+      this.ctx.waitUntil(admission.completion.then(() => {}, () => {}));
+    }
+    waiter?.(admission);
   }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
@@ -529,6 +539,16 @@ export class ThreadDO extends DurableObject<Env> {
         }
         return;
       }
+      this.runtimeStarted = true;
+      if (!runtime.recovered) {
+        await this.recoverSessionReset(runtime.root);
+        // 驱逐后的重交复用 requestId；只在 alarm 内恢复，读取页面不接纳输入。
+        for (const row of await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' AND when_busy IS NOT NULL ORDER BY rowid")) {
+          this.track(row.message_id, await this.admit(runtime, row));
+        }
+        runtime.recovered = true;
+      }
+      runtime.harness.resume();
       for (;;) {
         const rows = await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' AND when_busy IS NULL ORDER BY rowid");
         const barrier = rows.findIndex(row => profileOf(row) !== runtime.profile);
@@ -545,14 +565,17 @@ export class ThreadDO extends DurableObject<Env> {
         if (!await this.idle(runtime)) {
           // 失败 run 保留的排队项要等下一条输入才放行；空闲等待只重试一次，避免空转。
           if (!afterIdle && !this.idleWait) {
-            this.idleWait = runtime.harness.waitForIdle(context).then(() => { this.idleWait = undefined; return this.pump(true); });
+            this.idleWait = runtime.harness.waitForIdle(context).then(() => { this.idleWait = undefined; return this.requestPump(true); });
             this.ctx.waitUntil(this.idleWait);
           }
           return;
         }
         await this.applyProfile(runtime, profileOf(next));
       }
-    }).catch(() => {});
+    }).catch(error => {
+      console.error({ event: "thread_pump_failed" });
+      throw error;
+    });
   }
 
   private async eventStatus(row: InboundRow): Promise<EventRunStatus> {
@@ -590,12 +613,12 @@ export class ThreadDO extends DurableObject<Env> {
           console.error({ event: "event_finish_report_failed", status: outcome });
         }));
       }
-      this.ctx.waitUntil(this.pump());
+      if (await this.database.get("SELECT 1 FROM inbound WHERE status='queued' AND when_busy IS NULL LIMIT 1")) await this.requestPump();
     }
     return { status };
   }
 
-  private enqueue(input: InboundInput, wait: boolean): Promise<{ key: string; admitted?: Promise<Submission | undefined> } | undefined> {
+  private enqueue(input: InboundInput, wait: boolean): Promise<{ key: string; admitted?: Promise<Admission | undefined> } | undefined> {
     return this.serial(async () => {
       await this.ingest(input);
       const kind: TurnKind = input.kind ?? "message";
@@ -607,13 +630,17 @@ export class ThreadDO extends DurableObject<Env> {
       // 事件与子 agent 汇报的入站键由投递方生成（来源与外部 id、子 agent 与请求），旧版无 self_id 的兼容判断不适用。
       const key = kind === "event" || kind === "subagent" ? input.messageId : inboundKey(input);
       if (kind !== "event" && kind !== "subagent" && await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND self_id = '' AND user_id = ?", input.messageId, input.userId)) return;
-      const inserted = await this.database.get<InboundRow>(`INSERT OR IGNORE INTO inbound
+      const inserted = await this.database.transaction(async tx => {
+        const row = await tx.get<InboundRow>(`INSERT OR IGNORE INTO inbound
         (message_id, platform_message_id, user_id, self_id, text, received_at, status, chat_kind, chat_id, nickname, scope_name, kind, reply_channel, session_generation)
         VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, (SELECT generation FROM session_state WHERE id=1)) RETURNING *`, key, input.messageId, input.userId, input.selfId, input.text, input.time,
         input.target.kind, input.target.kind === "group" ? input.target.groupId : input.target.userId, input.nickname, input.scopeName ?? "", kind, input.replyChannel ?? "qq");
+        if (row) await this.armPump();
+        return row;
+      });
       if (!inserted) return;
       // 等待者必须在本串行段内登记，之后的 pump 才能把接纳结果交回调用方。
-      return { key, ...(wait ? { admitted: new Promise<Submission | undefined>(resolve => this.waiters.set(key, resolve)) } : {}) };
+      return { key, ...(wait ? { admitted: new Promise<Admission | undefined>(resolve => this.waiters.set(key, resolve)) } : {}) };
     });
   }
 
@@ -621,15 +648,13 @@ export class ThreadDO extends DurableObject<Env> {
     // 只串行接纳，不串行等待回合，否则同一发送者的插话也会被堵到回合结束。
     const queued = await this.enqueue(input, true);
     if (!queued?.admitted) return { deduped: true };
-    void this.pump();
-    const submission = await queued.admitted;
-    if (!submission) return { status: "failed" };
+    const admission = await queued.admitted;
+    if (!admission) return { status: "failed" };
     // ScheduleDO 只等接纳不等回合：结果由 settle 回写，alarm 不被长回合占住。
     if (input.kind === "schedule") {
-      this.ctx.waitUntil(this.settle(queued.key, submission));
       return { status: "queued" };
     }
-    return this.settle(queued.key, submission);
+    return admission.completion;
   }
 
   /** 事件服务的投递入口：入站行落库即返回，回合结果由 settle 回报事件服务。 */
@@ -642,7 +667,6 @@ export class ThreadDO extends DurableObject<Env> {
   private async queueInput(input: InboundInput): Promise<"accepted" | "duplicate"> {
     const queued = await this.enqueue(input, false);
     if (!queued) return "duplicate";
-    this.ctx.waitUntil(this.pump());
     return "accepted";
   }
 
@@ -787,10 +811,49 @@ export class ThreadDO extends DurableObject<Env> {
       origin: { capabilities, generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
   }
 
-  /** 让 alarm 不晚于 at：记忆抽取与子 agent 限时共用这一个 alarm。 */
+  /** 调用方在数据库事务内合并时间，避免入站、模型恢复和维护任务覆盖彼此。 */
   private async wakeBy(at: number): Promise<void> {
     const current = await this.ctx.storage.getAlarm();
     if (current === null || current > at) await this.ctx.storage.setAlarm(at);
+  }
+
+  private async armPump(afterIdle = false): Promise<void> {
+    const previous = await this.ctx.storage.get<boolean>(AGENT_WAKE);
+    await this.ctx.storage.put(AGENT_WAKE, previous === false ? false : afterIdle);
+    await this.wakeBy(Date.now());
+  }
+
+  private requestPump(afterIdle = false): Promise<void> {
+    return this.database.transaction(() => this.armPump(afterIdle));
+  }
+
+  private async runtimeWake(wake: ReturnType<Harness["wake"]>): Promise<void> {
+    await this.database.transaction(async () => {
+      const at = wake.active ? Date.now() + (this.runtimeStarted ? RECOVERY_MS : 0) : wake.at;
+      if (at === undefined) await this.ctx.storage.delete(RUNTIME_WAKE);
+      else { await this.ctx.storage.put(RUNTIME_WAKE, at); await this.wakeBy(at); }
+    });
+    if (!wake.active && wake.at === undefined) await this.rearmAlarm();
+  }
+
+  private rearmAlarm(): Promise<void> {
+    return this.database.transaction(async tx => {
+      const deadline = await this.subagents.nextDeadline(tx), now = Date.now();
+      const due = [await this.ctx.storage.get(AGENT_WAKE) !== undefined ? now : undefined,
+        await this.ctx.storage.get<number>(RUNTIME_WAKE),
+        await tx.get("SELECT 1 FROM extract_queue LIMIT 1") ? now + (this.extracting ? RECOVERY_MS : EXTRACT_ALARM_DELAY_MS) : undefined,
+        deadline === undefined ? undefined : deadline <= now ? now + 30_000 : deadline].filter(at => at !== undefined);
+      if (due.length) await this.ctx.storage.setAlarm(Math.min(...due));
+      else await this.ctx.storage.deleteAlarm();
+    });
+  }
+
+  /** 管理命令等到 alarm 接管才调用会隐式 resume 的 Pi API；RPC 返回前保持等待。 */
+  private async onAlarm<T>(operation: () => Promise<T>): Promise<T> {
+    const result = Promise.withResolvers<T>();
+    this.alarmCommands.push(async () => { try { result.resolve(await operation()); } catch (error) { result.reject(error); } });
+    await this.requestPump();
+    return result.promise;
   }
 
   /** 事件服务对账：未知返回 undefined；仍在排队时顺带唤醒接纳，覆盖冷启动后无人触发的情况。 */
@@ -798,7 +861,7 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     const row = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND kind = 'event'", key);
     if (!row) return;
-    if (row.status === "queued") this.ctx.waitUntil(this.pump());
+    if (row.status === "queued" && !this.settling.has(row.message_id)) await this.requestPump();
     return this.eventStatus(row);
   }
 
@@ -845,7 +908,7 @@ export class ThreadDO extends DurableObject<Env> {
   async scheduleRunOutcome(key: string): Promise<{ status: "queued" | "done" | "failed" | "missing"; sent: number }> {
     await this.initialize();
     const row = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id = ? AND kind = 'schedule'", key);
-    if (row?.status === "queued") this.ctx.waitUntil(this.pump());
+    if (row?.status === "queued" && !this.settling.has(row.message_id)) await this.requestPump();
     const sent = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM outbox WHERE input_id = ?", key))?.n ?? 0;
     return { status: row?.status ?? "missing", sent };
   }
@@ -861,11 +924,13 @@ export class ThreadDO extends DurableObject<Env> {
       const last = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE reply_channel='qq' AND kind='message' ORDER BY rowid DESC LIMIT 1");
       const kind = thread.startsWith("group:") ? "group" : "private";
       const chatId = thread === "owner" ? last?.chat_id ?? ownerIds(this.env)[0] ?? "web" : thread.slice(thread.indexOf(":") + 1);
-      await this.database.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation) VALUES(?,?,?,?,?,?,'queued',?,?,?,?,'message','web',(SELECT generation FROM session_state WHERE id=1))",
+      await this.database.transaction(async tx => {
+        await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation) VALUES(?,?,?,?,?,?,'queued',?,?,?,?,'message','web',(SELECT generation FROM session_state WHERE id=1))",
         key, requestId, "admin:web", last?.self_id ?? "", text, Date.now() / 1000, kind, chatId, "网页管理员", last?.scope_name ?? "");
+        await this.armPump();
+      });
       return { id: key, status: "queued" as const, duplicate: false };
     });
-    if (!("error" in result)) this.ctx.waitUntil(this.pump());
     return result;
   }
 
@@ -888,7 +953,7 @@ export class ThreadDO extends DurableObject<Env> {
       ) ${delta ? `WHERE at>=?${delta.pending.length ? ` OR id IN (${delta.pending.map(() => "?").join(",")})` : ""}` : ""} ORDER BY at DESC,id DESC LIMIT 100
     `, ...(delta ? [delta.after, ...delta.pending] : []));
     const queued = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued' AND reply_channel='web'"))?.n ?? 0;
-    if (queued) this.ctx.waitUntil(this.pump());
+    if (queued && !this.runtimeStarted) await this.requestPump();
     const active = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued'"))?.n ?? 0;
     return { messages: rows.reverse().map(({assets_json,...row})=>({...row,assets:JSON.parse(assets_json) as AssetRef[]})), queued, active, limit: 100, delta: !!delta };
   }
@@ -990,22 +1055,32 @@ export class ThreadDO extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     await this.initialize();
     const store = new MemoryStore(this.database, await this.namespace());
-    // 先续约闹钟：处理中若进程中断，未领取的回合仍会被唤醒。
-    await this.database.transaction(async () => { await this.ctx.storage.setAlarm(Date.now() + 65_000); });
+    // 先续约再领取；同时到达的新输入会重新设置 AGENT_WAKE，finally 不会丢掉它。
+    const requested = await this.database.transaction(async () => {
+      const requested = await this.ctx.storage.get<boolean>(AGENT_WAKE);
+      await this.ctx.storage.delete(AGENT_WAKE);
+      await this.ctx.storage.setAlarm(Date.now() + RECOVERY_MS);
+      return requested;
+    });
     try {
+      for (const command of this.alarmCommands.splice(0)) await command();
       await this.subagents.expire(Date.now()).catch(error => {
         console.error({ event: "subagent_expire_failed", error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
       });
-      await (await this.extractor(store)).drain();
-    } finally {
-      await this.database.transaction(async tx => {
-        const deadline = await this.subagents.nextDeadline(tx), now = Date.now();
-        // 已过期仍未处理完的限时（取消或入队失败）隔 30 秒重试，避免 alarm 立刻重入空转。
-        const due = [await tx.get("SELECT 1 FROM extract_queue LIMIT 1") ? now + EXTRACT_ALARM_DELAY_MS : undefined,
-          deadline === undefined ? undefined : deadline <= now ? now + 30_000 : deadline].filter(at => at !== undefined);
-        if (due.length) await this.ctx.storage.setAlarm(Math.min(...due));
-        else await this.ctx.storage.deleteAlarm();
+      if (requested !== undefined || await this.ctx.storage.get(RUNTIME_WAKE) !== undefined ||
+          await this.database.get("SELECT 1 FROM inbound WHERE status='queued' LIMIT 1")) {
+        await this.pump(requested ?? false);
+      }
+      const runtime = await this.runtime;
+      if (runtime) await this.runtimeWake(runtime.harness.wake());
+      // 抽取可能等待模型；后台继续，避免占住唯一的 alarm、阻塞新消息和插话。
+      this.extracting ??= this.extractor(store).then(extractor => extractor.drain()).finally(async () => {
+        this.extracting = undefined;
+        await this.rearmAlarm();
       });
+      this.ctx.waitUntil(this.extracting);
+    } finally {
+      await this.rearmAlarm();
     }
   }
 
@@ -1079,7 +1154,7 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   async resetSession(thread: string, requestId: string, label: string): Promise<{ status: "reset"; generation: number } | { error: "busy" | "request_conflict" }> {
-    return this.serial(async () => {
+    return this.onAlarm(() => this.serial(async () => {
       await this.initialize();
       await this.bindNamespace(thread);
       const normalized = label.trim() || "已归档会话";
@@ -1101,11 +1176,11 @@ export class ThreadDO extends DurableObject<Env> {
       await this.recoverSessionReset(runtime.root);
       await this.audit("session_reset", { requestId, generation: generation + 1 });
       return { status: "reset", generation: generation + 1 };
-    });
+    }));
   }
 
   async compactSession(thread: string, instructions?: string): Promise<{ status: "started"; taskId: number } | { error: "busy" }> {
-    return this.serial(async () => {
+    return this.onAlarm(() => this.serial(async () => {
       await this.initialize();
       await this.bindNamespace(thread);
       const { root, harness } = await this.open();
@@ -1116,7 +1191,7 @@ export class ThreadDO extends DurableObject<Env> {
         await this.audit("session_compact", { taskId: Number(task), status: result.state.status });
       }));
       return { status: "started" as const, taskId: Number(task) };
-    });
+    }));
   }
 
   async stop(): Promise<{ stopped: boolean }> {
@@ -1125,10 +1200,14 @@ export class ThreadDO extends DurableObject<Env> {
     const children = (await this.subagents.list()).filter(child => child.status === "running");
     await Promise.all(children.map(child => this.subagents.cancel(child.id)));
     if (!await this.database.get("SELECT 1 FROM inbound WHERE status = 'queued' LIMIT 1")) return { stopped: children.length > 0 };
-    const idle = (await this.open()).root.abort(context);
-    this.ctx.waitUntil(idle);
+    const idle = await this.onAlarm(() => this.serial(async () => {
+      const waiting = await this.database.all<{ message_id: string }>("UPDATE inbound SET status='failed' WHERE status='queued' AND when_busy IS NULL RETURNING message_id");
+      for (const row of waiting) this.track(row.message_id, undefined);
+      return { completion: (await this.open()).root.abort(context) };
+    }));
+    this.ctx.waitUntil(idle.completion);
     // 中止在第一次提交时就已生效；等待 QQ 回执的发送工具要到自身超时才结束，不让管理请求一直挂着。
-    await Promise.race([idle, scheduler.wait(2000)]);
+    await Promise.race([idle.completion, scheduler.wait(2000)]);
     return { stopped: true };
   }
 

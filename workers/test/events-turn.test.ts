@@ -1,6 +1,6 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ThreadDO } from "../src/thread";
+import { threadWithBindings } from "./thread-fixture";
 import { DEFAULT_SETTINGS } from "../src/events/model";
 import { fakeGoogle, scriptedModel, sql } from "./events-helpers";
 import { action, connect, input, reply } from "./helpers";
@@ -99,7 +99,7 @@ describe("Gmail tools", () => {
     fakeGoogle();
     const seen = scriptedModel([]);
     await runInDurableObject(env.THREAD.getByName(ns), async (_instance, state) => {
-      expect(await new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" }).submit(value)).toEqual({ status: "done" });
+      expect(await threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" }).submit(value)).toEqual({ status: "done" });
     });
     expect(seen.requests[0]?.tools.some(name => name.startsWith("gmail_"))).toBe(false);
   });

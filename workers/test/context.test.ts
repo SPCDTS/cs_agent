@@ -5,7 +5,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { recall } from "../src/context";
 import * as models from "../src/models";
-import { ThreadDO } from "../src/thread";
+import { threadWithBindings } from "./thread-fixture";
 import { action, connect, input, reply } from "./helpers";
 
 const sockets: WebSocket[] = [];
@@ -76,7 +76,7 @@ describe("per-thread message context", () => {
     const thread = env.THREAD.getByName("owner");
     const running = runInDurableObject(thread, async (_instance, state) => {
       // 替换模型边界，Thread、工具执行和 SQLite 均使用真实实现。
-      const instance = new ThreadDO(state, env);
+      const instance = threadWithBindings(_instance, state, env);
       await instance.ingest(input(1, "本会话烟雾弹", 10000001));
       await instance.ingest(input(2, "另一会话烟雾弹", 10000002));
       return instance.submit(input(3, "请回忆烟雾弹", 10000001));

@@ -4,7 +4,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
-import { ThreadDO } from "../src/thread";
+import { threadWithBindings } from "./thread-fixture";
 import { MemoryStore } from "../src/memory/store";
 import * as models from "../src/models";
 import { input } from "./helpers";
@@ -51,7 +51,7 @@ describe("memory tools in the real Harness", () => {
       { name: "mem_forget", args: { id: 1, reason: "测试删除" } },
     ]);
     const result = await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
-      const instance = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const instance = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       expect(await instance.submit(input(1, "记住我的偏好", 10000001))).toEqual({ status: "done" });
       const store = new MemoryStore(new DurableObjectSqliteDatabase(state.storage), "owner");
       return { row: await store.get(1), versions: await store.db.all("SELECT * FROM memory_versions"), profile: await store.profile(),
@@ -82,7 +82,7 @@ describe("memory tools in the real Harness", () => {
     const seen = script([{ name: "mem_search", args: { query: "专属" } }, { name: "mem_remember", args: { text: "越权写入", kind: "fact" } }]);
     await env.THREAD.getByName("owner").importMemory({ ns: "owner", memories: [{ id: 1, kind: "fact", text: "owner专属信息", author: "dashboard" }] });
     const result = await runInDurableObject(env.THREAD.getByName(ns), async (_instance, state) => {
-      const instance = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const instance = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       await instance.submit(input(1, "查询专属", user, group, true));
       return instance.stats();
     });
@@ -99,7 +99,7 @@ describe("memory tools in the real Harness", () => {
     const seen = script([{ name: "mem_remember", args: { text: "共享训练安排", kind: "fact", subject: "group:200000001" } },
       ...Array.from({ length: 21 }, (_, i) => ({ name: "mem_remember", args: { text: `条目${i}`, kind: "fact" } }))]);
     const stats = await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
-      const instance = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const instance = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       await instance.submit(input(1, "多次写入", 10000001));
       return instance.stats();
     });

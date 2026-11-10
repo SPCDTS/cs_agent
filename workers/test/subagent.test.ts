@@ -282,9 +282,13 @@ describe("subagents as child Durable Objects", () => {
     ]);
     await thread("owner").submit(input(1, "持续整理", 10000001));
     const sub = await onlySubagent("owner");
+    await expect.poll(() => seen.child.length).toBe(1);
     const now = Date.now.bind(Date);
     vi.spyOn(Date, "now").mockImplementation(() => now() + 20 * 60_000);
     ready.open();
+    await expect.poll(async () => (await rows("owner", "SELECT 1 FROM inbound WHERE kind='subagent'")).length, { timeout: 10_000 }).toBe(1);
+    // 本测试只改了 Date.now，workerd 的真实闹钟时钟没有前进；显式交付已排定的回报唤醒。
+    await runDurableObjectAlarm(thread("owner"));
     expect((await reports("owner", 1))[0].text).toContain("整理完成");
     expect(seen.child).toHaveLength(26);
     expect((await onlySubagent("owner")).deadline).toBeNull();

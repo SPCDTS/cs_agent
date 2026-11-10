@@ -8,7 +8,7 @@ import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/
 import { createRegistry, type JsonObject } from "@earendil-works/pi-durable";
 import worker from "../src/index";
 import { RegistryDO } from "../src/registry";
-import { ThreadDO } from "../src/thread";
+import { threadWithBindings } from "./thread-fixture";
 import { MCP_CONFIG } from "../src/mcp/config";
 import { McpPolicyStore } from "../src/mcp/policy";
 import { ThreadMcp } from "../src/mcp";
@@ -125,7 +125,7 @@ describe("runtime MCP onboarding", () => {
       () => call,
     ]);
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
-      const thread = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const thread = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       const result = await thread.submit(input(1, "接入并验证合成 MCP 服务", 10000001));
       expect(result, JSON.stringify(state.storage.sql.exec("SELECT * FROM events").toArray())).toEqual({ status: "done" });
     });
@@ -170,7 +170,7 @@ describe("runtime MCP onboarding", () => {
   it.each([{ scope: "group:200000001", user: 10000001, group: 200000001 }, { scope: "private:10000003", user: 10000003, group: undefined }])("does not expose onboarding to $scope", async ({ scope, user, group }) => {
     const seen = scriptedModel([() => ({ name: "mcp_manage", args: { action: "put", expectedRevision: "absent", server: { id, url: endpoint, auth: "none" } } })]);
     await runInDurableObject(env.THREAD.getByName(scope), async (_instance, state) => {
-      const thread = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const thread = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       expect(await thread.submit(input(1, "接入服务", user, group, true))).toEqual({ status: "done" });
     });
     expect(seen.offers).not.toContain("mcp_manage");

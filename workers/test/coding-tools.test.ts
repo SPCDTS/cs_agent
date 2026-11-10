@@ -6,7 +6,7 @@ import { CLOUDFLARE_SANDBOX } from "../src/sandbox/registration";
 import { workPath } from "../src/sandbox/client";
 import { RegistryDO } from "../src/registry";
 import { BridgeDO } from "../src/bridge";
-import { ThreadDO } from "../src/thread";
+import { threadWithBindings } from "./thread-fixture";
 import { SandboxFleetDO, type CatalogEntry } from "../src/remote-sandbox/fleet";
 import { MCP_CONFIG } from "../src/mcp/config";
 import { scriptedModel } from "./events-helpers";
@@ -78,7 +78,7 @@ describe("coding tools", () => {
     const invoke = vi.spyOn(SandboxFleetDO.prototype, "invoke").mockResolvedValue({ jobId: "job-one", phase: "dispatched" });
     const seen = scriptedModel([{ name: "codemode", args: { code: `const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.id.startsWith("remote:")); text(target.instructions); const lease=await tools.sandbox_acquire({sandboxId:list.resources.find(r=>r.providerId===target.id).id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:target.tools[0].name,arguments:{script:${JSON.stringify(target.script)}}}));` } }]);
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
-      await new ThreadDO(state, { ...env, REMOTE_SANDBOX_ENABLED: "true", MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(1, "远程运行", 10000001));
+      await threadWithBindings(_instance, state, { ...env, REMOTE_SANDBOX_ENABLED: "true", MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(1, "远程运行", 10000001));
     });
     expect(invoke, seen.outputs.join("\n")).toHaveBeenCalledWith(workspace, expect.stringMatching(/^task:/), { leaseId: "lease-one", tool: target.tool, arguments: { script: target.script }, timeoutMs: 120000 });
     expect(Object.values(seen.requests[0]!.sections).join("\n")).toContain(target.instructions);
@@ -139,7 +139,7 @@ describe("coding tools", () => {
         else await runInDurableObject(env.THREAD.getByName("owner"), (_current, currentState) => { currentState.storage.sql.exec("UPDATE session_state SET generation = generation + 1 WHERE id=1"); });
         return { stdout: "first", stderr: "", code: 0, timedOut: false, truncated: false };
       });
-      await new ThreadDO(state, currentEnv).submit(input(1, "运行", 10000001));
+      await threadWithBindings(_instance, state, currentEnv).submit(input(1, "运行", 10000001));
       expect(exec).toHaveBeenCalledTimes(1);
     });
     expect(seen.outputs.join("\n")).toContain("本回合无权使用沙箱工具");

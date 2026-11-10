@@ -4,7 +4,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import worker from "../src/index";
-import { ThreadDO } from "../src/thread";
+import { threadWithBindings } from "./thread-fixture";
 import * as models from "../src/models";
 import type { SkillSummary } from "../src/skills";
 import { input } from "./helpers";
@@ -54,7 +54,7 @@ function script(steps: { name: string; args: JsonObject }[]) {
 }
 // 每回合新建 ThreadDO 实例：实例里的目录缓存是 60 秒，新实例代表缓存过期后的下一次请求。
 const turn = (key: string, messageId: number, userId: number, groupId?: number) => runInDurableObject(env.THREAD.getByName(key),
-  (_instance, state) => new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(messageId, "按技能练枪", userId, groupId)));
+  (_instance, state) => threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(messageId, "按技能练枪", userId, groupId)));
 
 describe("skills catalog", () => {
   it("validates PUT, keeps attachments and enablement on overwrite, and changes the digest only with the enabled catalog", async () => {

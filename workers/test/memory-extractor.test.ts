@@ -5,7 +5,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { MemoryStore } from "../src/memory/store";
 import { MemoryExtractor, directComplete, buildMaterial, parseExtraction, type ExtractComplete } from "../src/memory/extractor";
-import { ThreadDO } from "../src/thread";
+import { threadWithBindings } from "./thread-fixture";
 import * as models from "../src/models";
 import { action, connect, input, reply } from "./helpers";
 
@@ -168,7 +168,7 @@ describe("memory extraction", () => {
     });
     const thread = env.THREAD.getByName("owner");
     const running = runInDurableObject(thread, async (_instance, state) => {
-      const instance = new ThreadDO(state, { ...env, MEMORY_EXTRACT_MODEL: "extract" });
+      const instance = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_MODEL: "extract" });
       const first = instance.submit(input(1, "第一条输入，长期关注烟雾弹训练。".repeat(6), 10000001));
       await action(frames, 0, "send_private_msg");
       const second = instance.submit(input(2, "同人插话：也关注咖啡。", 10000001));
@@ -180,6 +180,7 @@ describe("memory extraction", () => {
       const sent = await db.all<{ turn_id: string }>("SELECT turn_id FROM outbox");
       const alarm = await state.storage.getAlarm();
       await instance.alarm();
+      await expect.poll(async () => (await events(new MemoryStore(db, "owner"))).length).toBe(1);
       return { queued, rows, sent, alarm, stats: await instance.stats(), events: await events(new MemoryStore(db, "owner")) };
     });
     const frame = await action(frames, 0, "send_private_msg");
@@ -210,16 +211,18 @@ describe("memory extraction", () => {
     });
     await evictDurableObject(thread);
     expect(await runDurableObjectAlarm(thread)).toBe(true);
-    expect((await thread.stats()).memory.extractQueue).toBe(2);
+    await expect.poll(async () => (await thread.stats()).memory.extractQueue).toBe(2);
     expect(await runDurableObjectAlarm(thread)).toBe(true);
-    expect((await thread.stats()).memory.extractQueue).toBe(0);
+    await expect.poll(async () => (await thread.stats()).memory.extractQueue).toBe(0);
+    await expect.poll(() => runInDurableObject(thread, (_instance, state) => state.storage.getAlarm())).toBeNull();
     expect(await runDurableObjectAlarm(thread)).toBe(false);
   });
 
   it("does not queue failed turns and only enables other namespaces through the explicit var", async () => {
     const failed = await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
-      const instance = new ThreadDO(state, { ...env, MODEL_PROVIDER: "unsupported" });
+      const instance = threadWithBindings(_instance, state, { ...env, MODEL_PROVIDER: "unsupported" });
       const result = await instance.submit(input(1, "失败回合".repeat(30), 10000001));
+      await expect.poll(() => state.storage.getAlarm()).toBeNull();
       return { result, stats: await instance.stats(), alarm: await state.storage.getAlarm() };
     });
     expect(failed.result).toEqual({ status: "failed" });
@@ -233,7 +236,7 @@ describe("memory extraction", () => {
     });
     for (const [id, setting, expected] of [[200000001, "owner", 0], [200000002, "owner, group:200000002", 1]] as const) {
       const stats = await runInDurableObject(env.THREAD.getByName(`group:${id}`), async (_instance, state) => {
-        const instance = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: setting });
+        const instance = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: setting });
         await instance.submit(input(1, "本群偏好".repeat(30), 10000004, id, true));
         return instance.stats();
       });

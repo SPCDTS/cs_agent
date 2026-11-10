@@ -4,7 +4,7 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import worker from "../src/index";
-import { ThreadDO } from "../src/thread";
+import { threadWithBindings } from "./thread-fixture";
 import { formatBeijingTime } from "../src/memory/time";
 import { nextFireAt, parseBeijingTime as bj, validateRule } from "../src/schedule/model";
 import type { ScheduleRule } from "../src/schedule/types";
@@ -191,7 +191,7 @@ describe("schedule chat tools", () => {
       outputs => ({ name: "schedule", args: { action: "pause", id: idOf(outputs[0]) } }),
     ]);
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
-      const thread = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const thread = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       expect(await thread.submit(input(1, "每天八点给我晨报", 10000001))).toEqual({ status: "done" });
     });
     const [schedule] = await directory().list("owner");
@@ -207,7 +207,7 @@ describe("schedule chat tools", () => {
   it("offers no schedule tools in a non-owner private thread", async () => {
     const seen = script([]);
     await runInDurableObject(env.THREAD.getByName("private:10000003"), async (_instance, state) => {
-      const thread = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const thread = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       await thread.submit(input(1, "帮我定个闹钟", 10000003));
     });
     expect(seen.offers.flat()).not.toContain("schedule");
@@ -221,7 +221,7 @@ describe("schedule chat tools", () => {
       { name: "schedule", args: { action: "list" } },
     ]);
     await runInDurableObject(env.THREAD.getByName("group:200000001"), async (_instance, state) => {
-      const thread = new ThreadDO(state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
+      const thread = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       await thread.submit(input(1, "明天提醒大家开会", 10000001, 200000001, true));
       await thread.submit(input(2, "列出定时任务", 10000004, 200000001, true));
     });
