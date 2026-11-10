@@ -75,9 +75,9 @@ export class SandboxDO extends DurableObject<Env> {
     return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({ ...file, name: name ?? file.name, kind: imageMime(file.bytes) ? "image" : "file" });
   }
   importSnapshot(input: { manifest: WorkspaceManifest; expectedRevision: string; paths?: string[] }): Promise<WorkspaceCompareResult> { return this.workspace.importSnapshot(input); }
-  async cloneFrom(input: { sourceName: string; expectedRevision: string; sourceRevision?: string }): Promise<WorkspaceCompareResult> {
+  async cloneFrom(input: { sourceName: string; expectedRevision: string; sourceRevision?: string; operationId?: string }): Promise<WorkspaceCompareResult> {
     const manifest = await this.env.SANDBOX.getByName(input.sourceName).files(input.sourceRevision);
-    return this.importSnapshot({ manifest, expectedRevision: input.expectedRevision });
+    return this.workspace.importSnapshot({ manifest, expectedRevision: input.expectedRevision, ...(input.operationId ? { operationId: input.operationId } : {}) });
   }
   async mergeFrom(input: { sourceName: string; expectedRevision: string; paths: string[]; sourceRevision?: string }): Promise<WorkspaceCompareResult> {
     const manifest = await this.env.SANDBOX.getByName(input.sourceName).files(input.sourceRevision);

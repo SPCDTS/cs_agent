@@ -70,13 +70,13 @@ describe("coding tools", () => {
       tools: [{ name: target.tool, description: "执行代码", inputSchema: { type: "object", properties: { script: { type: "string" } }, required: ["script"] } }],
       memoryMiB: 4096, maxTimeoutMs: 120000, capabilityRevision: revision, availability: "ready", activeJobs: 0,
       workspaceRoot: target.root, persistence: "由测试提供方管理持久卷。", mismatch: [] };
-    vi.spyOn(SandboxFleetDO.prototype, "catalogJson").mockResolvedValue(JSON.stringify([resource]));
+    vi.spyOn(SandboxFleetDO.prototype, "catalogJson").mockResolvedValue(JSON.stringify([{ ...CLOUDFLARE_SANDBOX, mismatch: [] }, resource]));
     vi.spyOn(SandboxFleetDO.prototype, "sessions").mockResolvedValue([]);
     const workspace = env.SANDBOX.idFromName("owner").toString();
     vi.spyOn(SandboxFleetDO.prototype, "acquire").mockResolvedValue({ id: "lease-one", deviceId, sandboxId, workspace,
       operationId: "fixture", capabilityRevision: revision, requirements: {}, createdAt: 1 });
     const invoke = vi.spyOn(SandboxFleetDO.prototype, "invoke").mockResolvedValue({ jobId: "job-one", phase: "dispatched" });
-    const seen = scriptedModel([{ name: "codemode", args: { code: `const list=await tools.sandbox_list({}); const target=list.sandboxes[0]; text(target.instructions); const lease=await tools.sandbox_acquire({sandboxId:target.id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:target.tools[0].name,arguments:{script:${JSON.stringify(target.script)}}}));` } }]);
+    const seen = scriptedModel([{ name: "codemode", args: { code: `const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.id.startsWith("remote:")); text(target.instructions); const lease=await tools.sandbox_acquire({sandboxId:list.resources.find(r=>r.providerId===target.id).id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:target.tools[0].name,arguments:{script:${JSON.stringify(target.script)}}}));` } }]);
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       await new ThreadDO(state, { ...env, REMOTE_SANDBOX_ENABLED: "true", MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(1, "远程运行", 10000001));
     });
@@ -199,4 +199,18 @@ describe("admin sandbox", () => {
     expect([response.status, await response.json()]).toEqual([503, { error: "sandbox_unavailable" }]);
     expect((await admin("POST", "/admin/threads/nobody/sandbox/reset")).status).toBe(404);
   });
+});
+
+it("Code Mode 创建资源并把显式 sandboxId 路由至该 Cloudflare DO", async () => {
+  const targets: string[] = [];
+  vi.spyOn(SandboxDO.prototype, "exec").mockImplementation(async function(this: SandboxDO) {
+    targets.push((await this.files()).workspace);
+    return { stdout: "ok", stderr: "", code: 0, timedOut: false, truncated: false };
+  });
+  const seen = scriptedModel([{ name: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const created=await tools.sandbox_create({providerId:"cloudflare",sourceId:list.assignedSandboxId}); text(created); text(await tools.bash({sandboxId:created.id,command:"pwd"})); text(await tools.bash({command:"pwd"}));' } }]);
+  await env.THREAD.getByName("owner").submit(input(1, "创建独立沙箱", 10000001));
+  expect(seen.outputs.join("\n")).toContain('"kind":"cloudflare"');
+  expect(targets).toHaveLength(2);
+  expect(targets[0]).not.toBe(targets[1]);
+  expect(targets[1]).toBe("workspace:" + env.SANDBOX.idFromName("owner"));
 });

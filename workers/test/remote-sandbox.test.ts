@@ -1,5 +1,6 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, expect, it } from "vitest";
+import { readResources, readResource } from "../src/sandbox/resources";
 import { readCatalog, readJob, readJobInput } from "../src/remote-sandbox/wire";
 import { hash } from "../src/remote-sandbox/fleet";
 import { CLOUDFLARE_SANDBOX } from "../src/sandbox/registration";
@@ -183,5 +184,53 @@ it("停用拒绝新租约与任务，但保留回传、取消和释放；过期�
   expect(result?.status).toBe(200);
   expect((await adminRequest("POST", "/" + device.deviceId + "/release", { leaseId: lease.id }))?.status).toBe(200);
   await runInDurableObject(fleet(), async (instance, state) => { await instance.webSocketMessage(state.getWebSockets(device.deviceId)[0]!, JSON.stringify({ kind: "released", leaseId: lease.id })); });
+  expect(await fleet().sessions("owner")).toEqual([]);
+});
+
+it("共享资源复用租约但保留任务归属；退出一方不停止另一方，重建仍绑定原持久目录", async () => {
+  const device = await register({ ...descriptor, workspacePreparation: "git-clone-v1" });
+  const resources = readResources(await fleet().resourcesJson("owner")), remote = resources.find(row => row.kind === "remote")!;
+  const args = { sandboxId: remote.id, capabilityRevision: device.revision, requirements: {} };
+  const parent = await fleet().acquireResource("owner", "parent", "parent-acquire", args);
+  const child = await fleet().acquireResource("owner", "child", "child-acquire", args);
+  expect(child.id).toBe(parent.id);
+  expect(child.workspace).toBe(env.SANDBOX.idFromName("owner").toString());
+  const running = await fleet().invoke("parent", "p", request(parent.id));
+  expect((await fleet().sessions("child"))[0]?.jobId).toBeNull();
+  await expect((async () => await fleet().cancel("child", running.jobId))()).rejects.toThrow("permission_denied");
+  await expect((async () => await fleet().invoke("child", "c", request(child.id)))()).rejects.toThrow("job_running");
+  await fleet().release("child", child.id);
+  await fleet().release("child", child.id);
+  expect(await fleet().sessions("child")).toEqual([]);
+  expect((await fleet().sessions("parent"))[0]).toMatchObject({ state: "active", jobId: running.jobId });
+  await expect((async () => await fleet().invoke("child", "late", request(child.id)))()).rejects.toThrow("lease_expired");
+  const rejoined = await fleet().acquireResource("owner", "child", "child-rejoin", args);
+  expect(rejoined.id).toBe(parent.id);
+  await fleet().release("child", rejoined.id);
+  expect(await fleet().sessions("child")).toEqual([]);
+  await fleet().complete(device.deviceId, running.jobId, completed);
+  const independent = readResource(await fleet().createResourceJson("owner", "new-resource", { providerId: remote.providerId, sourceId: remote.id }));
+  await expect((async () => await fleet().acquireResource("owner", "child", "different", { ...args, sandboxId: independent.id }))()).rejects.toThrow("busy");
+  await fleet().release("parent", parent.id);
+  await runInDurableObject(fleet(), async (instance, state) => { await instance.webSocketMessage(state.getWebSockets(device.deviceId)[0]!, JSON.stringify({ kind: "released", leaseId: parent.id })); });
+  const recreated = await fleet().acquireResource("owner", "parent", "new-lease", args);
+  expect(recreated.id).not.toBe(parent.id); expect(recreated.workspace).toBe(parent.workspace);
+  await fleet().release("parent", recreated.id);
+  await runInDurableObject(fleet(), async (instance, state) => { await instance.webSocketMessage(state.getWebSockets(device.deviceId)[0]!, JSON.stringify({ kind: "released", leaseId: recreated.id })); });
+  const cloned = await fleet().acquireResource("owner", "child", "clone-lease", { ...args, sandboxId: independent.id });
+  expect(cloned.workspace).toBe(independent.id);
+  expect(cloned.workspaceSource?.workspace).toBe(parent.workspace);
+});
+
+it("资源创建幂等、跨会话不可见、显式克隆检验提供方能力", async () => {
+  const device = await register(), providerId = "remote:" + device.deviceId;
+  const defaults = readResources(await fleet().resourcesJson("owner")), remote = defaults.find(row => row.kind === "remote")!;
+  const empty = readResource(await fleet().createResourceJson("owner", "new", { providerId }));
+  expect(readResource(await fleet().createResourceJson("owner", "new", { providerId }))).toEqual(empty);
+  await expect((async () => await fleet().createResourceJson("owner", "new", { providerId: "cloudflare" }))()).rejects.toThrow("operation_conflict");
+  await expect((async () => await fleet().resourceJson("group:123", empty.id))()).rejects.toThrow("sandbox_not_found");
+  await expect((async () => await fleet().acquireResource("group:123", "attacker", "op", { sandboxId: empty.id, capabilityRevision: device.revision, requirements: {} }))()).rejects.toThrow("sandbox_not_found");
+  await expect((async () => await fleet().createResourceJson("owner", "clone", { providerId, sourceId: remote.id }))()).rejects.toThrow("clone_not_supported");
+  await expect((async () => await fleet().createResourceJson("owner", "cross-provider", { providerId: "cloudflare", sourceId: remote.id }))()).rejects.toThrow("clone_provider_mismatch");
   expect(await fleet().sessions("owner")).toEqual([]);
 });

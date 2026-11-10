@@ -4,6 +4,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "../env";
+import { ResourceIdSchema } from "../sandbox/resources";
 import { ownerIds, scopeOf, type InboundInput, type Target } from "../policy";
 import type { ModelSelection } from "../settings";
 import { formatBeijingTime } from "../memory/time";
@@ -28,7 +29,7 @@ export type SubagentOrigin = { capabilities?: SubagentCapabilities; workspaceRev
 export type SubagentCaller = { identity: SubagentIdentity; origin: SubagentOrigin };
 export type SubagentView = {
   id: string; task: string; summary: string; status: ParentSubagentStatus; createdAt: number; deadline: number | null;
-  endedAt?: number; lastReportAt?: number; spawner?: string;
+  endedAt?: number; lastReportAt?: number; spawner?: string; sandboxId?: string;
 };
 type Row = {
   id: string; task: string; summary: string | null; created_at: number; status: ParentSubagentStatus; ended_at: number | null; identity_json: string;
@@ -53,13 +54,14 @@ const reply = (text: string, error = false) => ({ ...(error ? { isError: true } 
 
 const PARAMETERS = Type.Object({
   action: Type.Union([Type.Literal("spawn"), Type.Literal("message"), Type.Literal("list"), Type.Literal("cancel")]),
+  sandboxId: Type.Optional(ResourceIdSchema),
   task: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "spawn: a self-contained task description" })),
   summary: Type.Optional(Type.String({ minLength: 1, maxLength: 80, description: "spawn: provide a 15–30 character Chinese task summary for the admin topology, describing the work without credentials or raw arguments" })),
   id: Type.Optional(Type.String({ pattern: `^${SUBAGENT_ID}$`, description: "message / cancel: the subagent id returned by spawn or list" })),
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "message: a follow-up message for that subagent" })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, description: "spawn: optional task deadline in ms; omit for no automatic timeout" })),
 }, { additionalProperties: false });
-const DESCRIPTION = `Proactively delegate independent research, implementation, review or long-running work to background subagents with their own context. For spawn, provide a self-contained task, acceptance criteria and a short Chinese summary. spawn returns immediately: continue independent work, then yield when waiting for results; do not poll or repeat the delegated task. Results arrive automatically as a '[子 agent 完成]' input; integrate and verify them before reporting through the current reply channel. message continues an existing subagent, list shows this chat's subagents, cancel stops unnecessary work. There is no fixed concurrency, task lifetime or model-call budget; timeoutMs is optional. Subagents inherit approved MCP, skills, isolated coding and authorized remote sandbox tools (including WSB). Remote devices still require their own available lease. Subagents cannot send messages, grant permissions or publish skills.`;
+const DESCRIPTION = `Proactively delegate independent research, implementation, review or long-running work to background subagents with their own context. For spawn, provide a self-contained task, acceptance criteria and a short Chinese summary. spawn returns immediately: continue independent work, then yield when waiting for results; do not poll or repeat the delegated task. Results arrive automatically as a '[子 agent 完成]' input; integrate and verify them before reporting through the current reply channel. message continues an existing subagent, list shows this chat's subagents, cancel stops unnecessary work. There is no fixed concurrency, task lifetime or model-call budget; timeoutMs is optional. Subagents inherit approved MCP and skills. sandboxId on spawn assigns a concrete resource from sandbox_list.resources. The same resource ID shares files and runtime; to work independently, call sandbox_create first and assign its returned ID. Multiple children may use that same new ID. Omit sandboxId to inherit the parent default resource; spawn never creates or clones a workspace. Each child may use only its assigned sandbox. Remote devices still enforce their declared capacity. Subagents cannot send messages, grant permissions or publish skills.`;
 
 /** 父线程的子 agent 登记：派出、交代、取消、汇报入队与超时，都经这张表。 */
 export class ParentSubagents {
@@ -176,7 +178,8 @@ export class ParentSubagents {
     const rows = await this.host.db.all<Row>("SELECT * FROM subagents ORDER BY created_at DESC LIMIT 50");
     return rows.map(row => {
       const as = (JSON.parse(row.identity_json) as SubagentIdentity).as;
-      return { id: row.id, task: clip(row.task, 200), summary: row.summary ?? shortSummary(row.task), status: row.status, createdAt: row.created_at, deadline: row.deadline || null,
+      const sandboxId = (JSON.parse(row.origin_json) as SubagentOrigin).capabilities?.sandboxId;
+      return { ...(sandboxId ? { sandboxId } : {}), id: row.id, task: clip(row.task, 200), summary: row.summary ?? shortSummary(row.task), status: row.status, createdAt: row.created_at, deadline: row.deadline || null,
         ...(row.ended_at === null ? {} : { endedAt: row.ended_at }), ...(row.last_report_at === null ? {} : { lastReportAt: row.last_report_at }),
         ...(as ? { spawner: `${as.owner ? "owner" : "成员"} ${as.userId}` } : {}) };
     });
@@ -196,13 +199,14 @@ export class ParentSubagents {
   }
 
   /** 只在用户亲自发消息的回合可用；caller 由 ThreadDO 按当前输入求出，每次执行都重新求。 */
-  tool(caller: (api: ToolExecutionApi, context: Context) => Promise<SubagentCaller | undefined>, model: () => Promise<ModelSelection>) {
+  tool(caller: (api: ToolExecutionApi, context: Context, sandboxId?: string) => Promise<SubagentCaller | undefined>, model: () => Promise<ModelSelection>) {
     return defineTool({
       name: "subagent", description: DESCRIPTION, parameters: PARAMETERS,
       // spawn 的 id 与 message 的 requestId 都由本次工具调用的任务 id 求出，中断后重放找回同一个子 agent 与同一条消息。
       replay: "safe",
       execute: async (args, api, context) => {
-        const who = await caller(api, context);
+        if (args.sandboxId && args.action !== "spawn") return reply("sandboxId 只用于 spawn；已有子任务不能改绑。", true);
+        const who = await caller(api, context, args.action === "spawn" ? args.sandboxId : undefined);
         if (!who) return reply("子 agent 只能在用户亲自发消息的回合使用；本轮请勿重试。", true);
         const seed = `${api.conversationId}:${api.taskId}`;
         if (args.action === "spawn") {
@@ -221,7 +225,7 @@ export class ParentSubagents {
           return status ? reply(`子 agent ${args.id}：${STATUS_TEXT[status]}`) : reply(`本会话没有子 agent ${args.id}`, true);
         }
         const views = await this.list();
-        return reply(views.map(view => `${view.id} · ${STATUS_TEXT[view.status]} · 派出 ${formatBeijingTime(view.createdAt)}（北京时间） · 任务：${clip(view.task.replace(/\s+/g, " "), 80)}`)
+        return reply(views.map(view => `${view.id} · ${STATUS_TEXT[view.status]}${view.sandboxId ? " · 沙箱 " + view.sandboxId : ""} · 派出 ${formatBeijingTime(view.createdAt)}（北京时间） · 任务：${clip(view.task.replace(/\s+/g, " "), 80)}`)
           .join("\n") || "本会话没有子 agent。");
       },
     });

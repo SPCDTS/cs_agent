@@ -9,6 +9,7 @@ import { compileMcpSchema } from "./schema";
 import { MCP_CONFIG } from "./config";
 import { slug, toolNames } from "./names";
 import { snapshotCatalogs, type McpAuthority } from "./access";
+import { SandboxResourceSchema, type SandboxResource } from "../sandbox/resources";
 import type { SandboxTask } from "../sandbox/task-access";
 import type { SubagentCapabilities } from "../subagent/model";
 import { CLOUDFLARE_DELEGATED_INSTRUCTIONS } from "../sandbox/registration";
@@ -20,7 +21,7 @@ export type SubagentCodingOperation =
   | { kind: "edit"; operationId: string; path: string; edits: { oldText: string; newText: string }[] };
 export interface SubagentCapabilityHost {
   /** 每个实际操作的父端入口必须重核 scope/generation/当前授权；下面的检查供状态与读网页使用。 */
-  validateSubagentAccess(id: string): Promise<{ authority: McpAuthority; capabilities: SubagentCapabilities; sandboxTask?: SandboxTask } | undefined>;
+  validateSubagentAccess(id: string): Promise<{ authority: McpAuthority; capabilities: SubagentCapabilities; sandboxTask?: SandboxTask; sandbox?: SandboxResource } | undefined>;
   subagentMcp(id: string, call: { name: string; args: unknown; operationId: string }): Promise<ToolExecutionResult>;
   subagentSkill(id: string, input: { name: string; path?: string }): Promise<ToolExecutionResult>;
   subagentCoding(id: string, operation: SubagentCodingOperation): Promise<ToolExecutionResult>;
@@ -38,19 +39,19 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
     sections: [section("sandbox", async ({ agent }) => {
       const access = await host.validateSubagentAccess(id);
       if (!agent.callable.some(tool => tool.name === "bash") || !access?.capabilities.coding || !access.authority.owner) return;
-      return CLOUDFLARE_DELEGATED_INSTRUCTIONS;
+      return CLOUDFLARE_DELEGATED_INSTRUCTIONS + (access.sandbox ? "分配给你的资源 ID：" + access.sandbox.id + "。同 ID 的 agent 共享文件；只有父 agent 分配的新资源才独立。" : "这是升级前已派出的独立工作区。");
     }, { tag: false })],
     tools: [
-    defineTool({ name: "bash", callers: ["tools"], description: "在派出时克隆的独立工作区执行命令，最长60秒；不能修改父工作区。",
+    defineTool({ name: "bash", callers: ["tools"], description: "在分配的 Cloudflare 资源执行命令，最长60秒；同 ID 的 agent 共享此工作区。",
       parameters: Type.Object({ command: Type.String({ minLength: 1 }), timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 60 })) }, { additionalProperties: false }),
       replay: "unsafe", execute: (args, api) => host.subagentCoding(id, { kind: "exec", operationId: String(api.taskId), command: args.command, timeoutMs: (args.timeout ?? 60) * 1000 }) }),
-    defineTool({ name: "read", callers: ["tools"], structuredOutputSchema: SandboxReadOutput, description: "读取子 agent 独立工作区文本。",
+    defineTool({ name: "read", callers: ["tools"], structuredOutputSchema: SandboxReadOutput, description: "读取分配的沙箱工作区文本。",
       parameters: Type.Object({ path: Type.String({ minLength: 1 }), offset: Type.Optional(Type.Integer({ minimum: 1 })), limit: Type.Optional(Type.Integer({ minimum: 1 })) }, { additionalProperties: false }),
       replay: "safe", execute: (args, api) => host.subagentCoding(id, { kind: "read", operationId: String(api.taskId), ...args }) }),
-    defineTool({ name: "write", callers: ["tools"], description: "写入子 agent 独立工作区文本。",
+    defineTool({ name: "write", callers: ["tools"], description: "写入分配的沙箱工作区文本。",
       parameters: Type.Object({ path: Type.String({ minLength: 1 }), content: Type.String() }, { additionalProperties: false }),
       replay: "unsafe", execute: (args, api) => host.subagentCoding(id, { kind: "write", operationId: String(api.taskId), ...args }) }),
-    defineTool({ name: "edit", callers: ["tools"], description: "在子 agent 独立工作区执行精确文本替换。",
+    defineTool({ name: "edit", callers: ["tools"], description: "在分配的沙箱工作区执行精确文本替换。",
       parameters: Type.Object({ path: Type.String({ minLength: 1 }), edits: Type.Array(Type.Object({ oldText: Type.String({ minLength: 1 }), newText: Type.String() }, { additionalProperties: false }), { minItems: 1 }) }, { additionalProperties: false }),
       replay: "unsafe", execute: (args, api) => host.subagentCoding(id, { kind: "edit", operationId: String(api.taskId), ...args }) }),
   ] }));
@@ -108,7 +109,8 @@ export function createSubagentCapabilityHost(stub: object): SubagentCapabilityHo
         authority: Type.Object({ kind: Type.Union(["message", "schedule", "event", "subagent"].map(v => Type.Literal(v))),
           scope: Type.String(), actor: Type.String(), owner: Type.Boolean(), generation: Type.Integer({ minimum: 0 }),
           replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), subagentId: Type.Optional(Type.String()) }),
-        capabilities: Type.Object({ coding: Type.Optional(Type.Boolean()), remoteSandbox: Type.Optional(Type.Boolean()), mcp: Type.Optional(snapshot) }),
+        sandbox: Type.Optional(SandboxResourceSchema),
+        capabilities: Type.Object({ sandboxId: Type.Optional(Type.String()), coding: Type.Optional(Type.Boolean()), remoteSandbox: Type.Optional(Type.Boolean()), mcp: Type.Optional(snapshot) }),
       });
       if (!Check(schema, value)) throw new Error("delegation_denied");
       return value;

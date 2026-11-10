@@ -8,6 +8,7 @@ import type { Env } from "../env";
 import { modelChange, openModels } from "../models";
 import { captureModels } from "../requests/capture";
 import { remoteCredentials } from "../model-credentials";
+import { readResource } from "../sandbox/resources";
 import { createRemoteSandboxExtension } from "../tools/remote-sandbox";
 import { createWebPageTool } from "../tools/web-page";
 import { createWebSearchTool } from "../tools/web-search";
@@ -288,7 +289,7 @@ export class SubagentDO extends DurableObject<Env> {
     const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main"))), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" });
     const parent = () => this.env.THREAD.getByName(meta.parent);
     const registry = createRegistry();
-    // 子会话保留只读检索；下面按派出快照安装技能、独立coding与MCP代理，仍无发送或管理工具。
+    // 子会话保留只读检索；下面按派出快照安装技能、所分配资源的 coding 与 MCP 代理，仍无发送或管理工具。
     registry.install(defineExtension({
       name: "cs-subagent",
       sections: [
@@ -325,14 +326,20 @@ export class SubagentDO extends DurableObject<Env> {
     if (meta.capabilities?.remoteSandbox) registry.install(createRemoteSandboxExtension({
       allowed: async (_api, _context, action) => {
         const access = await host.validateSubagentAccess(meta.id);
-        return !!access?.capabilities.remoteSandbox && access.authority.owner && access.authority.scope === "owner"
+        return !!access?.capabilities.remoteSandbox && (action === "view" || !access.sandbox || access.sandbox.kind === "remote") && access.authority.owner && access.authority.scope === "owner"
           && (await this.meta())?.status === "running" && !!access.sandboxTask?.permissions.remote[action];
       },
+      ...(meta.capabilities.sandboxId ? { resources: async () => {
+        const access = await host.validateSubagentAccess(meta.id);
+        if (!access?.sandbox) throw new Error("sandbox_not_assigned");
+        return { owner: meta.parent, assignedSandboxId: access.sandbox.id, resources: [access.sandbox] };
+      } } : {}),
       sourceWorkspace: async () => (await host.validateSubagentAccess(meta.id))?.sandboxTask?.workspace,
       fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.ctx.id.toString(),
       record: async detail => { console.log({ event: "subagent_remote_sandbox", id: meta.id, ...detail }); },
     }));
-    const delegated = installDelegatedCapabilities(registry, host, meta.id, meta.capabilities ?? {});
+    const assigned = meta.capabilities?.sandboxId ? readResource(await this.env.SANDBOX_FLEET.getByName("owner").resourceJson(meta.parent, meta.capabilities.sandboxId)) : undefined;
+    const delegated = installDelegatedCapabilities(registry, host, meta.id, { ...meta.capabilities, coding: !!meta.capabilities?.coding && (!assigned || assigned.kind === "cloudflare") });
     // 与 ThreadDO 相同：DO 里的连接跨不了请求，Codex 固定走 SSE。
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);

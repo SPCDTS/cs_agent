@@ -49,8 +49,8 @@ export async function descriptor(config: Pick<Config, "name" | "nodeDir" | "gitD
     ...(config.dataDir && config.gitDir ? { workspacePreparation: "git-clone-v1" } : {}),
     instructions: "此沙箱提供 powershell 工具，在 Windows Sandbox 内执行命令，默认目录 C:\\AgentWork，cwd 必须是 guest 内的 Windows 路径。" +
       "每次调用启动独立 PowerShell 进程，变量、环境修改和当前目录不跨调用保留；同一租约复用 VM。" +
-      (config.dataDir ? "C:\\AgentWork 中的项目、.git、node_modules 和 C:\\AgentCache\\npm 下载缓存按工作区跨租约保留；其他 guest 文件仍是临时的。共享目录不支持创建符号链接；本地目录依赖可先 npm pack 再安装 tgz，必须使用链接的项目应在 guest 临时目录运行。" : "文件、.git、node_modules 与 npm 缓存仅保留在当前 guest。") +
-      (config.dataDir && config.gitDir ? "子任务租约返回 workspaceSource 时，首次命令会从只读 C:\\AgentSeed 的一级 Git 仓库目录克隆各自 HEAD，建立独立 agent 分支；不含主工作区未提交文件，不共享可写源码、.git 或 node_modules，npm 下载缓存可复用。已有子工作区不自动覆盖。" : "") +
+      (config.dataDir ? "C:\\AgentWork 中的项目、.git、node_modules 和 C:\\AgentCache\\npm 下载缓存按资源工作区跨租约保留；其他 guest 文件仍是临时的。共享目录不支持创建符号链接；本地目录依赖可先 npm pack 再安装 tgz，必须使用链接的项目应在 guest 临时目录运行。" : "文件、.git、node_modules 与 npm 缓存仅保留在当前 guest。") +
+      (config.dataDir && config.gitDir ? "显式克隆资源的租约返回 workspaceSource 时，首次命令会从只读 C:\\AgentSeed 的一级 Git 仓库目录克隆各自 HEAD，建立独立 agent 分支；不含主工作区未提交文件，不共享可写源码、.git 或 node_modules，npm 下载缓存可复用。已有资源工作区不自动覆盖；多个 agent 选同一资源 ID 时直接共享该工作区。" : "") +
       "源码可用 git clone 或文件命令准备，不与其他沙箱或 R2 自动同步。运行 npm 请用 npm.cmd；外部程序失败后应检查 $LASTEXITCODE 并显式退出。" +
       "在包含 lockfile 的项目目录执行 node.exe C:\\AgentTools\\runner\\npm-ensure.mjs，可检查安装条件及依赖结构并复用 node_modules；不匹配则 npm ci，--fresh 强制重装，失败或中断不会留下成功标记。直接运行 npm ci 会清除旧依赖。" +
       "完成后检查结果 code、stdout、stderr、timedOut；code=0 才表示进程成功。释放、取消、超时、连接器退出或实例丢失会销毁 guest；持久目录里的写入不会回滚。",

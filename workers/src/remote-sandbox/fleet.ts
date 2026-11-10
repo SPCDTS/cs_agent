@@ -3,6 +3,8 @@ import { Type, type Static } from "typebox";
 import { authenticated } from "../auth";
 import type { Env } from "../env";
 import type { CatalogEntry } from "./wire";
+import { SandboxResources } from "../sandbox/resources";
+import { readCatalog } from "./wire";
 import { CLOUDFLARE_SANDBOX } from "../sandbox/registration";
 export type { CatalogEntry } from "./wire";
 import { DescriptorSchema, RequirementsSchema, JobInputSchema, WorkspaceSourceSchema, DeviceFrameSchema, IdSchema, ToolNameSchema, parse, parseFrame,
@@ -11,8 +13,11 @@ import { DescriptorSchema, RequirementsSchema, JobInputSchema, WorkspaceSourceSc
 
 type Device = { id: string; approval: "pending" | "approved" | "revoked"; tokenHash: string; descriptor: Descriptor; revision: string; createdAt: number };
 type Pairing = { id: string; codeHash: string; deviceId: string; expiresAt: number; claimed: boolean };
-type Allocation = { kind: "active" | "lost"; lease: Lease; jobId: string | null; touchedAt: number }
-  | { kind: "releasing" | "released"; lease: Lease };
+type Membership = { owner: string; resourceId: string; actors: string[] };
+type Allocation = ({ kind: "active" | "lost"; lease: Lease; jobId: string | null; touchedAt: number }
+  | { kind: "releasing" | "released"; lease: Lease }) & { membership?: Membership };
+const detachedKey = (leaseId: string, actor: string) => "detached:" + leaseId + ":" + actor;
+const owns = (allocation: Allocation, actor: string) => allocation.membership ? allocation.membership.actors.includes(actor) : allocation.lease.workspace === actor;
 type Phase = "dispatched" | "accepted" | "cancel_requested" | Outcome["kind"];
 type Job = { id: string; workspace: string; deviceId: string; leaseId: string; fingerprint: string; phase: Phase;
   createdAt: number; deadline: number; outcomeHash: string | null };
@@ -109,7 +114,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
     const device = await this.device(id);
     await this.ctx.storage.put("device:" + id, { ...device, approval: "revoked" } satisfies Device);
     const allocation = await this.ctx.storage.get<Allocation>("allocation:" + id);
-    if ((allocation?.kind === "active" || allocation?.kind === "lost") && allocation.jobId) await this.cancel(allocation.lease.workspace, allocation.jobId);
+    if ((allocation?.kind === "active" || allocation?.kind === "lost") && allocation.jobId) await this.cancel((await this.job(allocation.jobId)).workspace, allocation.jobId);
     for (const ws of this.ctx.getWebSockets(id)) ws.close(1008, "revoked");
   }
   async devicesJson(): Promise<string> { return JSON.stringify(await Promise.all([...(await this.ctx.storage.list<Device>({ prefix: "device:" })).values()].map(async ({ tokenHash: _, ...device }) => {
@@ -126,7 +131,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
   async releaseDevice(deviceId: string, leaseId: string) {
     const allocation = await this.ctx.storage.get<Allocation>("allocation:" + deviceId);
     if (!allocation || allocation.lease.id !== leaseId) throw new Error("lease_expired");
-    await this.release(allocation.lease.workspace, leaseId);
+    await this.releaseAllocation(allocation.lease);
   }
   async cancelDeviceJob(deviceId: string, jobId: string) {
     const job = await this.ownedJob(deviceId, jobId);
@@ -218,16 +223,30 @@ export class SandboxFleetDO extends DurableObject<Env> {
     }
     return JSON.stringify(rows);
   }
-  async acquire(value: unknown): Promise<Lease> {
+  private resources() { return new SandboxResources(this.ctx.storage, this.env); }
+  async resourcesJson(owner: string): Promise<string> { return JSON.stringify(await this.resources().list(owner, readCatalog(await this.catalogJson()))); }
+  async resourceJson(owner: string, id: string): Promise<string> { return JSON.stringify(await this.resources().get(owner, id)); }
+  async createResourceJson(owner: string, operationId: string, value: unknown): Promise<string> {
+    return JSON.stringify(await this.resources().create(owner, operationId, value, readCatalog(await this.catalogJson())));
+  }
+  async acquireResource(owner: string, actor: string, operationId: string, value: unknown): Promise<Lease> {
+    parse(IdSchema, actor);
+    const input = parse(Type.Object({ sandboxId: IdSchema, capabilityRevision: Type.String(), requirements: RequirementsSchema }, strict), value);
+    const resource = await this.resources().get(owner, input.sandboxId);
+    if (resource.kind !== "remote") throw new Error("remote_sandbox_required");
+    return this.acquire({ sandboxId: resource.providerId, workspace: resource.workspace, operationId, capabilityRevision: input.capabilityRevision, requirements: input.requirements,
+      ...(resource.sourceWorkspace ? { workspaceSource: { workspace: resource.sourceWorkspace } } : {}) }, { owner, resourceId: resource.id, actors: [actor] });
+  }
+  async acquire(value: unknown, membership?: Membership): Promise<Lease> {
     const input = parse(AcquireSchema, value), deviceId = input.sandboxId.slice(7);
-    const requestKey = "acquire:" + await hash(input.workspace + ":" + input.operationId), fingerprint = await hash(JSON.stringify(input));
+    const requestKey = "acquire:" + await hash((membership?.actors[0] ?? input.workspace) + ":" + input.operationId), fingerprint = await hash(JSON.stringify(membership ? { input, membership } : input));
     const lease = await this.ctx.storage.transaction(async tx => {
       if (!(await tx.get<Settings>("settings") ?? this.defaultSettings()).enabled) throw new Error("disabled");
       const prior = await tx.get<{ fingerprint: string; lease: Lease }>(requestKey);
       if (prior) {
         if (prior.fingerprint !== fingerprint) throw new Error("operation_conflict");
         const allocation = await tx.get<Allocation>("allocation:" + deviceId);
-        if (allocation?.kind !== "active" || allocation.lease.id !== prior.lease.id) throw new Error("lease_expired");
+        if (allocation?.kind !== "active" || allocation.lease.id !== prior.lease.id || !owns(allocation, membership?.actors[0] ?? input.workspace)) throw new Error("lease_expired");
         return prior.lease;
       }
       const device = await tx.get<Device>("device:" + deviceId);
@@ -237,38 +256,67 @@ export class SandboxFleetDO extends DurableObject<Env> {
       validateDescriptor(device.descriptor);
       if (mismatch(device.descriptor, input.requirements).length) throw new Error("capability_mismatch");
       const current = await tx.get<Allocation>("allocation:" + deviceId);
-      if (current && current.kind !== "released") throw new Error("busy");
+      if (current && current.kind !== "released") {
+        if (!membership || current.lease.workspace !== input.workspace || current.membership && (current.membership.owner !== membership.owner || current.membership.resourceId !== membership.resourceId)) throw new Error("busy");
+        if (current.kind !== "active") throw new Error(current.kind === "lost" ? "session_lost" : "busy");
+        if (current.lease.capabilityRevision !== input.capabilityRevision) throw new Error("capability_changed");
+        const actors = [...new Set([...(current.membership?.actors ?? [current.lease.workspace]), ...membership.actors])];
+        await tx.put({ ["allocation:" + deviceId]: { ...current, membership: { ...membership, actors }, touchedAt: Date.now() } satisfies Allocation,
+          [requestKey]: { fingerprint, lease: current.lease } });
+        for (const actor of membership.actors) await tx.delete(detachedKey(current.lease.id, actor));
+        return current.lease;
+      }
       const { workspaceSource, ...base } = input;
+      if (membership && workspaceSource && device.descriptor.workspacePreparation !== "git-clone-v1") throw new Error("clone_not_supported");
       if (workspaceSource?.workspace === input.workspace) throw new Error("workspace_source_must_differ");
       const lease: Lease = { ...base, id: crypto.randomUUID(), deviceId, createdAt: Date.now(),
         ...(workspaceSource && device.descriptor.workspacePreparation === "git-clone-v1" ? { workspaceSource } : {}) };
-      await tx.put({ ["allocation:" + deviceId]: { kind: "active", lease, jobId: null, touchedAt: Date.now() } satisfies Allocation,
+      await tx.put({ ["allocation:" + deviceId]: { kind: "active", lease, jobId: null, touchedAt: Date.now(), ...(membership ? { membership } : {}) } satisfies Allocation,
         ["lease:" + lease.id]: deviceId, [requestKey]: { fingerprint, lease } });
       return lease;
     });
     await this.arm(Date.now() + 15000); return lease;
   }
   async sessions(workspace: string) {
-    return [...(await this.ctx.storage.list<Allocation>({ prefix: "allocation:" })).values()]
-      .filter(item => item.lease.workspace === workspace && item.kind !== "released")
-      .map(item => ({ lease: item.lease, state: item.kind, jobId: "jobId" in item ? item.jobId : null }));
+    const allocations = [...(await this.ctx.storage.list<Allocation>({ prefix: "allocation:" })).values()]
+      .filter(item => owns(item, workspace) && item.kind !== "released");
+    return Promise.all(allocations.map(async item => {
+      const job = "jobId" in item && item.jobId ? await this.job(item.jobId) : undefined;
+      return { lease: item.lease, state: item.kind, jobId: job?.workspace === workspace ? job.id : null,
+        ...(item.membership ? { resourceId: item.membership.resourceId } : {}) };
+    }));
   }
   private async allocation(workspace: string, leaseId: string): Promise<Allocation> {
     const deviceId = await this.ctx.storage.get<string>("lease:" + leaseId);
     const allocation = deviceId ? await this.ctx.storage.get<Allocation>("allocation:" + deviceId) : undefined;
-    if (!allocation || allocation.lease.id !== leaseId || allocation.lease.workspace !== workspace) throw new Error("lease_expired");
+    if (!allocation || allocation.lease.id !== leaseId || !owns(allocation, workspace)) throw new Error("lease_expired");
     return allocation;
   }
   async release(workspace: string, leaseId: string): Promise<void> {
+    if (await this.ctx.storage.get(detachedKey(leaseId, workspace))) return;
     const { lease } = await this.allocation(workspace, leaseId);
-    await this.ctx.storage.transaction(async tx => {
+    await this.releaseAllocation(lease, workspace);
+  }
+  private async releaseAllocation(lease: Lease, actor?: string): Promise<void> {
+    const stop = await this.ctx.storage.transaction(async tx => {
       const current = await tx.get<Allocation>("allocation:" + lease.deviceId);
-      if (!current || current.lease.id !== lease.id || current.lease.workspace !== lease.workspace) throw new Error("lease_expired");
-      if (current.kind === "released") return;
-      if ((current.kind === "active" || current.kind === "lost") && current.jobId) throw new Error("job_running");
-      await tx.put("allocation:" + lease.deviceId, { kind: "releasing", lease } satisfies Allocation);
+      if (actor && await tx.get(detachedKey(lease.id, actor))) return false;
+      if (!current || current.lease.id !== lease.id || actor && !owns(current, actor)) throw new Error("lease_expired");
+      if (current.kind === "released") return false;
+      const job = "jobId" in current && current.jobId ? await tx.get<Job>("job:" + current.jobId) : undefined;
+      if (current.membership && actor) {
+        if (job?.workspace === actor) throw new Error("job_running");
+        const actors = current.membership.actors.filter(value => value !== actor);
+        if (actors.length) {
+          await tx.put(detachedKey(lease.id, actor), true);
+          await tx.put("allocation:" + lease.deviceId, { ...current, membership: { ...current.membership, actors } } satisfies Allocation); return false;
+        }
+      }
+      if (job) throw new Error("job_running");
+      await tx.put("allocation:" + lease.deviceId, { ...current, kind: "releasing", lease } satisfies Allocation);
+      return true;
     });
-    this.send(lease.deviceId, { kind: "release", leaseId: lease.id });
+    if (stop) this.send(lease.deviceId, { kind: "release", leaseId: lease.id });
   }
   private async confirmRelease(deviceId: string, leaseId: string) {
     await this.ctx.storage.transaction(async tx => {
@@ -308,7 +356,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
       }
       if (!(await tx.get<Settings>("settings") ?? this.defaultSettings()).enabled) throw new Error("disabled");
       const currentDevice = await tx.get<Device>("device:" + device.id), current = await tx.get<Allocation>("allocation:" + device.id);
-      if (!currentDevice || currentDevice.approval !== "approved" || current?.kind !== "active" || current.lease.id !== input.lease.id || current.lease.workspace !== workspace) throw new Error("lease_expired");
+      if (!currentDevice || currentDevice.approval !== "approved" || current?.kind !== "active" || current.lease.id !== input.lease.id || !owns(current, workspace)) throw new Error("lease_expired");
       if (currentDevice.revision !== input.lease.capabilityRevision) throw new Error("capability_changed");
       if (current.jobId) throw new Error("job_running");
       if (!this.available(device.id)) throw new Error("unavailable");
@@ -388,7 +436,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
     }
     for (const allocation of (await this.ctx.storage.list<Allocation>({ prefix: "allocation:" })).values()) {
       if ((allocation.kind === "active" || allocation.kind === "lost") && !allocation.jobId) {
-        if (now - allocation.touchedAt >= 600000) await this.release(allocation.lease.workspace, allocation.lease.id);
+        if (now - allocation.touchedAt >= 600000) await this.releaseAllocation(allocation.lease);
         else schedule(allocation.touchedAt + 600000);
       }
     }

@@ -3,6 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { Static, TSchema } from "typebox";
 import type { SandboxDO } from "../sandbox/do";
+import { ResourceIdSchema } from "../sandbox/resources";
 import { CLOUDFLARE_SANDBOX } from "../sandbox/registration";
 import { EXEC_MAX_TIMEOUT_MS, sandboxFailure, WORK_ROOT, type SandboxFailure, type ReadResult } from "../sandbox/client";
 
@@ -12,7 +13,7 @@ export type CodingAuditKind = "coding_exec" | "coding_read" | "coding_write" | "
 export type CodingDeps = {
   /** 由宿主验证本回合与工作区范围；每次嵌套调用都重新检查。 */
   allowed(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context): Promise<boolean>;
-  sandbox(): SandboxApi;
+  sandbox(id?: string): SandboxApi | Promise<SandboxApi>;
   /** 可选的跨群只读入口；宿主仍逐次核对 owner 任务授权。 */
   readWorkspace?(input: WorkspaceReadInput, api: ToolExecutionApi, context: Context): Promise<ReadResult>;
   /** 审计只记分类、耗时、命令长度与退出码，不记命令、路径、文件内容与输出。 */
@@ -68,7 +69,7 @@ function codingTool<P extends TSchema>(deps: CodingDeps, { kind, audit, run, ...
       if (!await deps.allowed(api, context)) return text(NOT_ALLOWED, true);
       const started = Date.now(), before = audit?.(args) ?? {};
       try {
-        const { result, outcome, audit: after } = await run(args, deps.sandbox(), api, context);
+        const { result, outcome, audit: after } = await run(args, await deps.sandbox("sandboxId" in args && typeof args.sandboxId === "string" ? args.sandboxId : undefined), api, context);
         await deps.record(kind, { result: outcome ?? "ok", ...before, ...after, ms: Date.now() - started });
         return result;
       } catch (error) {
@@ -81,7 +82,9 @@ function codingTool<P extends TSchema>(deps: CodingDeps, { kind, audit, run, ...
   });
 }
 
+const sandboxTarget = { sandboxId: Type.Optional(ResourceIdSchema) };
 const EditParams = Type.Object({
+  ...sandboxTarget,
   path: Type.String({ minLength: 1, description: "Path to the file to edit (relative to /work or absolute)" }),
   edits: Type.Array(Type.Object({
     oldText: Type.String({ minLength: 1, description: "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call." }),
@@ -109,12 +112,14 @@ export function createCodingExtension(deps: CodingDeps) {
       name: "read", kind: "coding_read", replay: "safe", structuredOutputSchema: SandboxReadOutput,
       description: `Read a text file or image in the sandbox. Images return structured image content for image(result.image). Text output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Relative paths resolve against ${WORK_ROOT}. Owner conversations may set workspace to group:<id> to read that group's committed files without starting its container; omit it to read the current workspace.`,
       parameters: Type.Object({
+        ...sandboxTarget,
         path: Type.String({ minLength: 1, description: `Path to the file to read (relative to ${WORK_ROOT} or absolute)` }),
         workspace: Type.Optional(Type.String({ pattern: "^group:[1-9][0-9]{0,19}$", description: "Owner-only target group workspace; omitted means the current workspace" })),
         offset: Type.Optional(Type.Integer({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
         limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
       }, { additionalProperties: false }),
-      run: async ({ path, workspace, offset, limit }, sandbox, api, context): Promise<{ result: ToolExecutionResult }> => {
+      run: async ({ path, workspace, sandboxId, offset, limit }, sandbox, api, context): Promise<{ result: ToolExecutionResult }> => {
+        if (workspace !== undefined && sandboxId !== undefined) throw new Error("invalid_request");
         if (workspace !== undefined && !deps.readWorkspace) throw new Error("permission_denied");
         const file = workspace !== undefined && deps.readWorkspace
           ? await deps.readWorkspace({ workspace, path, offset, limit }, api, context)
@@ -132,6 +137,7 @@ export function createCodingExtension(deps: CodingDeps) {
       name: "write", kind: "coding_write", replay: "safe",
       description: "Write content to a file in the sandbox. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
       parameters: Type.Object({
+        ...sandboxTarget,
         path: Type.String({ minLength: 1, description: `Path to the file to write (relative to ${WORK_ROOT} or absolute)` }),
         content: Type.String({ description: "Content to write to the file" }),
       }, { additionalProperties: false }),
@@ -156,6 +162,7 @@ export function createCodingExtension(deps: CodingDeps) {
       replay: "unsafe",
       description: `Execute a bash command in the sandbox, in ${WORK_ROOT}. Returns stdout, stderr and the exit code; each stream keeps only its last 64KB. Each command has a maximum duration of ${EXEC_MAX_TIMEOUT_MS / 1000} seconds; omitting timeout uses ${DEFAULT_TIMEOUT_S} seconds.`,
       parameters: Type.Object({
+        ...sandboxTarget,
         command: Type.String({ minLength: 1, description: "Bash command to execute" }),
         timeout: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: EXEC_MAX_TIMEOUT_MS / 1000,
           description: `Timeout in seconds (optional, defaults to ${DEFAULT_TIMEOUT_S} seconds, maximum ${EXEC_MAX_TIMEOUT_MS / 1000} seconds).` })),

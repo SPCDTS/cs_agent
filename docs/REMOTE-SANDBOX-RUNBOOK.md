@@ -99,19 +99,20 @@ Sandbox 页每 10 秒刷新在线状态，列出当前任务和租约，可取�
 
 授权把远程操作分成查看、执行、管理三类。`sandbox_list` 和查询结果使用查看权；新租约及新命令使用执行权；取消和释放使用管理权。管理台的远程任务开关只额外限制执行，不撤销查看和管理权；`sandbox_list.enabled` 明确返回开关状态。此拆分不向非 owner 开放设备目录。任务授权支持宿主绑定后续输入，但当前只自动接续子 agent 回报；定时任务或普通外部事件不会仅凭文本取得授权。
 
-主会话和子 agent 各有独立工作区，子 agent 不继承主会话的租约。对于同时配置 Git 和持久目录的新版 WSB，设备声明支持 `git-clone-v1`；宿主在子租约中填入 `workspaceSource`，模型不能指定其他来源。首次命令执行前，guest 从只读来源目录的一级 Git 仓库子目录读取当时的 HEAD，完整克隆到自己的 `C:\AgentWork`，建立 `agent/<子工作区哈希>` 分支。`.git` 对象独立，不使用硬链接或 alternates；已有子工作区不覆盖，未提交修改和 `node_modules` 不复制。主工作区根目录本身就是 Git 仓库时，不在自动发现范围，应把仓库放在 `C:\AgentWork\repo` 这样的子目录。
+主 agent 从 `sandbox_list.resources` 选择具体资源 ID，通过 `subagent` 的 `sandboxId` 分配：同 ID 共享工作区和运行租约，新 ID 独立；省略时继承父会话默认 Cloudflare 资源。需要新工作区时，先在 Code Mode 调用 `sandbox_create({providerId})` 创建空资源，或传 `sourceId` 显式克隆同提供方已有资源，再派出一个或多个子 agent。不要把设备 ID 或 leaseId 当作资源 ID。新任务不再自动创建子工作区，旧任务保持原工作区。对于同时配置 Git 和持久目录的新版 WSB，设备声明支持 `git-clone-v1`；只有显式克隆才填入 `workspaceSource`。首次命令执行前，guest 从只读来源目录的一级 Git 仓库子目录读取当时的 HEAD，完整克隆到自己的 `C:\AgentWork`，建立 `agent/<子工作区哈希>` 分支。`.git` 对象独立，不使用硬链接或 alternates；已有子工作区不覆盖，未提交修改和 `node_modules` 不复制。主工作区根目录本身就是 Git 仓库时，不在自动发现范围，应把仓库放在 `C:\AgentWork\repo` 这样的子目录。
 
-子任务复用主工作区的 npm 下载缓存，但首次仍需在自己的项目中运行 `npm-ensure.mjs --prefer-offline` 安装依赖；后续可复用自己的 `node_modules`。首次准备固定提交并记录进度，重试继续未完成的克隆；完成后不会随主分支前进而重置子工作区。来源没有仓库，或设备没有声明自动准备能力时，按设备说明自行克隆。GitHub 登录状态和宿主凭据不会自动转交，推送仍需明确配置。以下工具全部在 Code Mode 内通过 `tools.*` 调用：
+显式克隆出的资源复用来源的 npm 下载缓存，但首次仍需在自己的项目中运行 `npm-ensure.mjs --prefer-offline` 安装依赖；后续可复用自己的 `node_modules`。首次准备固定提交并记录进度，重试继续未完成的克隆；完成后不会随主分支前进而重置子工作区。来源没有仓库时按设备说明自行克隆；设备没有声明自动准备能力时，创建时传 sourceId 会报 clone_not_supported，应创建空资源后自行准备。GitHub 登录状态和宿主凭据不会自动转交，推送仍需明确配置。以下工具全部在 Code Mode 内通过 `tools.*` 调用：
 
 Agent 会收到沙箱注册的使用说明，并可通过 `sandbox_list` 查看完整配置、说明和 schema。通用扩展不设 Cloudflare/WSB 优先级；平台的路径、缓存、命令及结果用法由各自注册信息决定。若更新说明，先释放活动租约，再让连接器重新注册。
 
 | 工具 | 用途 |
 | --- | --- |
-| `sandbox_list` | 查看 enabled、沙箱、注册工具 schema、需求不匹配原因和本会话租约 |
-| `sandbox_acquire` | 按 sandboxId/capabilityRevision 获取租约，返回 id |
+| `sandbox_list` | 查看 enabled、提供方 sandboxes、资源 resources、默认 assignedSandboxId、工具 schema 和自己的租约引用 |
+| `sandbox_create` | 用 providerId 创建资源；可用 sourceId 显式克隆，返回资源 id |
+| `sandbox_acquire` | 按资源 sandboxId 和提供方 capabilityRevision 加入运行租约，返回租约 id |
 | `sandbox_call` | 以 leaseId、tool、arguments、timeoutMs 提交任务 |
 | `sandbox_job` | 按 jobId 查询；`action: "cancel"` 请求取消 |
-| `sandbox_release` | 按 leaseId 请求停止 guest 并释放租约 |
+| `sandbox_release` | 按 leaseId 退出自己的引用，最后一位退出才请求停止 guest |
 
 ```ts
 const job = await tools.sandbox_call({
@@ -127,6 +128,8 @@ text(job);
 ```
 
 默认 cwd 为 `C:\AgentWork`；用 PowerShell 中的 git clone 或文件命令准备独立源码，不映射日常开发 checkout。后续命令复用 `.git`、`node_modules` 和文件，不继承变量或当前目录。跨租约保留范围以注册的 `persistence` 为准。文件不进入 Cloudflare `/work`，也不由 R2 自动恢复。
+
+相同资源上的命令串行执行，并发时返回 job_running；同设备其他资源占用时返回 busy。子 agent 完成或取消只清理自己的任务和租约引用，不会取消父 agent 的命令。若取消该子 agent 自己正在执行的 PowerShell，WSB 的整机停止机制仍会使共享租约失效；确认停止后用同一资源 ID 重新获取租约。
 
 租约空闲约 10 分钟后请求释放。持久目录外的 guest 文件在释放、取消、连接器退出或实例故障后丢失。持久目录保留在本机磁盘，仍需按需要推送提交或备份。
 
