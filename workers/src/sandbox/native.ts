@@ -1,9 +1,9 @@
-import { Buffer } from "node:buffer";
 import { Files, SandboxFileError, SandboxProtocolError } from "@cloudflare/sandbox";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
-import { FILE_MAX_BYTES, imageMime } from "../media/model";
-import { EXEC_MAX_TIMEOUT_MS, WORK_ROOT, SandboxError, sandboxFailure, workPath, type ReadResult, type SandboxClient } from "./client";
+import { FILE_MAX_BYTES } from "../media/model";
+import { decodeFileRead } from "./read";
+import { EXEC_MAX_TIMEOUT_MS, WORK_ROOT, SandboxError, sandboxFailure, workPath, type SandboxClient } from "./client";
 
 export type NativeContainer = Pick<Container, "exec">;
 export type NativeFiles = Pick<Files, "readFile" | "writeFile" | "stat" | "readDirectory" | "mkdir" | "remove">;
@@ -91,23 +91,7 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
       const timeoutMs = Math.min(EXEC_MAX_TIMEOUT_MS, Math.max(1, Math.trunc(options.timeoutMs)));
       return helper("exec", { command, cwd: workPath(options.cwd ?? WORK_ROOT), timeoutMs }, Exec, timeoutMs);
     },
-    readFile: (path, options = {}) => boundary(async (): Promise<ReadResult> => {
-      const start = (options.offset ?? 1) - 1;
-      if (!Number.isInteger(start) || start < 0 || options.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 1)) throw new SandboxError("invalid_request");
-      const content = await bytes(path), mimeType = imageMime(content);
-      if (mimeType) return { kind: "image", data: Buffer.from(content).toString("base64"), mimeType };
-      if (content.includes(0)) throw new SandboxError("binary_file");
-      const lines = decoder.decode(content).split("\n");
-      if (start >= lines.length) throw new SandboxError("offset_out_of_range");
-      const end = Math.min(lines.length, start + (options.limit ?? lines.length)), taken: string[] = [];
-      let size = 0;
-      for (let at = start; at < end && taken.length < 2000; at++) {
-        const line = lines[at], length = encoder.encode(line).byteLength + 1;
-        if (size + length > 50 * 1024) { if (!taken.length) taken.push(decoder.decode(encoder.encode(line).subarray(0, 50 * 1024))); break; }
-        taken.push(line); size += length;
-      }
-      return { text: taken.join("\n"), startLine: start + 1, endLine: start + taken.length, totalLines: lines.length };
-    }),
+    readFile: (path, options = {}) => boundary(async () => decodeFileRead(await bytes(path), options)),
     writeFile: (path, text) => boundary(() => write(path, text)),
     editFile: (path, edits) => boundary(async () => {
       if (!edits.length || edits.some(edit => !edit.oldText)) throw new SandboxError("invalid_request");

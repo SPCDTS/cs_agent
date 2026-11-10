@@ -53,6 +53,19 @@ SandboxDO 的 Cloudflare 容器使用官方 `Files` 与原生 `Container.exec` �
 
 单文件 10MiB、工作区 50MiB、文件和目录各最多 20000；拒绝符号链接、设备、越界路径、冲突路径。quota 响应包含逐项 issues，绝不截断后冒充成功。manifest 中删除的文件在下一次恢复消失。`gc(options)` 默认 dry-run，保留当前 head、1小时传输租约、当前版及最近2份历史（并保护1小时内的新版本）；仅清理宽限期之后的孤立blob，单批最多500对象。扫描超过1000份manifest或1000个blob时返回deferred且不删除，供管理员单独维护。read不写持久结果；最近32个变更操作保留详细结果，小结果直接存DO，大于32KiB的结果才写R2。更旧操作压缩成稳定tombstone，不重放。`gcMediaTickets(bucket,{limit,cursor,dryRun})` 支持过期短票据分页清理。
 
+## owner 跨群读取
+
+现有 Code Mode 工具 `read` 支持可选的 `workspace: "group:群号"`。省略时保持当前会话读取行为；指定时由宿主逐次核验 owner 原始任务授权，再通过目标 SandboxDO 的 `readBlob` 读取已提交文件。群号直接路由，不依赖最近 50 条会话列表，长期不活跃的群工作区也可读取。
+
+```javascript
+const result = await tools.read({ workspace: "group:123456", path: "/work/out/report.md", offset: 1, limit: 100 });
+text(result.text);
+```
+
+owner 私聊、owner 管理网页及子任务汇报后的父会话续轮复用同一任务授权；授权撤销、会话重置后失效。其他私聊与群会话不获得跨群读取权。目标只能是群工作区，路径仍受 `/work` 校验；写入、修改与 bash 执行继续绑定当前会话。
+
+跨群读取不启动容器、不复制工作区、不产生文件快照写入；只读取当前已提交的 manifest 和目标 blob，进行原有大小与哈希校验。运行中尚未提交的文件、容器缓存和远程 WSB 文件不在这个持久快照中。文本分段和图片返回格式与原有 read 共用实现，不新增模型工具。
+
 ## 离线迁移
 
 `scripts/workspace-export.mjs` 只读扫描本地目录，默认 dry-run 输出 JSON manifest 与分类报告，超限和生成 frames 单独列出，不从 7194 个文件或 763MB 中静默截取工作集。显式指定 `--select` 相对路径列表后才计算选定用户文件的hash；frames、node_modules等生成缓存始终排除。`scripts/workspace-import.mjs` 仅在显式传入目标 workspace 与expected revision后生成R2上传key和CAS导入计划，不发送网络请求、不修改生产。执行迁移需由独立宿主流程审核计划，再上传选定blob并调用importSnapshot。

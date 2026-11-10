@@ -4,14 +4,17 @@ import { defineExtension, defineTool, section, type ToolExecutionApi, type ToolE
 import type { Static, TSchema } from "typebox";
 import type { SandboxDO } from "../sandbox/do";
 import { CLOUDFLARE_SANDBOX } from "../sandbox/registration";
-import { EXEC_MAX_TIMEOUT_MS, sandboxFailure, WORK_ROOT, type SandboxFailure } from "../sandbox/client";
+import { EXEC_MAX_TIMEOUT_MS, sandboxFailure, WORK_ROOT, type SandboxFailure, type ReadResult } from "../sandbox/client";
 
 export type SandboxApi = Pick<SandboxDO, "exec" | "readFile" | "writeFile" | "editFile">;
+type WorkspaceReadInput = NonNullable<Parameters<SandboxApi["readFile"]>[1]> & { workspace: string; path: string };
 export type CodingAuditKind = "coding_exec" | "coding_read" | "coding_write" | "coding_edit";
 export type CodingDeps = {
   /** 由宿主验证本回合与工作区范围；每次嵌套调用都重新检查。 */
   allowed(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context): Promise<boolean>;
   sandbox(): SandboxApi;
+  /** 可选的跨群只读入口；宿主仍逐次核对 owner 任务授权。 */
+  readWorkspace?(input: WorkspaceReadInput, api: ToolExecutionApi, context: Context): Promise<ReadResult>;
   /** 审计只记分类、耗时、命令长度与退出码，不记命令、路径、文件内容与输出。 */
   record(kind: CodingAuditKind, detail: object): Promise<unknown>;
 };
@@ -55,7 +58,7 @@ type CodingTool<P extends TSchema> = Omit<ToolRegistration<P>, "execute"> & {
   kind: CodingAuditKind;
   /** 调用前就能确定的审计字段（如命令长度），失败时也要记。 */
   audit?(args: Static<P>): object;
-  run(args: Static<P>, sandbox: SandboxApi, api: ToolExecutionApi): Promise<{ result: ToolExecutionResult; outcome?: string; audit?: object }>;
+  run(args: Static<P>, sandbox: SandboxApi, api: ToolExecutionApi, context: Context): Promise<{ result: ToolExecutionResult; outcome?: string; audit?: object }>;
 };
 
 function codingTool<P extends TSchema>(deps: CodingDeps, { kind, audit, run, ...tool }: CodingTool<P>) {
@@ -65,7 +68,7 @@ function codingTool<P extends TSchema>(deps: CodingDeps, { kind, audit, run, ...
       if (!await deps.allowed(api, context)) return text(NOT_ALLOWED, true);
       const started = Date.now(), before = audit?.(args) ?? {};
       try {
-        const { result, outcome, audit: after } = await run(args, deps.sandbox(), api);
+        const { result, outcome, audit: after } = await run(args, deps.sandbox(), api, context);
         await deps.record(kind, { result: outcome ?? "ok", ...before, ...after, ms: Date.now() - started });
         return result;
       } catch (error) {
@@ -104,14 +107,18 @@ export function createCodingExtension(deps: CodingDeps) {
   const tools = [
     codingTool(deps, {
       name: "read", kind: "coding_read", replay: "safe", structuredOutputSchema: SandboxReadOutput,
-      description: `Read a text file or image in the sandbox. Images return structured image content for image(result.image). Text output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Relative paths resolve against ${WORK_ROOT}.`,
+      description: `Read a text file or image in the sandbox. Images return structured image content for image(result.image). Text output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Relative paths resolve against ${WORK_ROOT}. Owner conversations may set workspace to group:<id> to read that group's committed files without starting its container; omit it to read the current workspace.`,
       parameters: Type.Object({
         path: Type.String({ minLength: 1, description: `Path to the file to read (relative to ${WORK_ROOT} or absolute)` }),
+        workspace: Type.Optional(Type.String({ pattern: "^group:[1-9][0-9]{0,19}$", description: "Owner-only target group workspace; omitted means the current workspace" })),
         offset: Type.Optional(Type.Integer({ minimum: 1, description: "Line number to start reading from (1-indexed)" })),
         limit: Type.Optional(Type.Integer({ minimum: 1, description: "Maximum number of lines to read" })),
       }, { additionalProperties: false }),
-      run: async ({ path, offset, limit }, sandbox): Promise<{ result: ToolExecutionResult }> => {
-        const file = await sandbox.readFile(path, { offset, limit });
+      run: async ({ path, workspace, offset, limit }, sandbox, api, context): Promise<{ result: ToolExecutionResult }> => {
+        if (workspace !== undefined && !deps.readWorkspace) throw new Error("permission_denied");
+        const file = workspace !== undefined && deps.readWorkspace
+          ? await deps.readWorkspace({ workspace, path, offset, limit }, api, context)
+          : await sandbox.readFile(path, { offset, limit });
         if ("kind" in file) {
           const image = { type: "image" as const, data: file.data, mimeType: file.mimeType };
           return { result: { output: [image], structuredOutput: { kind: "image", image } } };

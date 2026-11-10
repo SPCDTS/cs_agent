@@ -101,8 +101,8 @@ function admin(method: string, path: string, token: string | null = TOKEN) {
   return worker.fetch(new Request(`https://test${path}`, { method, headers: token === null ? {} : { Authorization: `Bearer ${token}` } }), { ...env, ADMIN_TOKEN: TOKEN });
 }
 
-async function seedPublishSkill() {
-  const sandbox=env.SANDBOX.getByName("owner"),current=await sandbox.files();
+async function seedPublishSkill(workspace = "owner") {
+  const sandbox=env.SANDBOX.getByName(workspace),current=await sandbox.files();
   const texts={"skills/example/SKILL.md":"---\nname: example\ndescription: 测试技能发布\n---\n读取 sources.md。","skills/example/sources.md":"中文来源说明"};
   const files=await Promise.all(Object.entries(texts).map(async([path,text])=>{
     const bytes=new TextEncoder().encode(text),digest=await sha256(bytes);
@@ -330,12 +330,13 @@ describe("subagents as child Durable Objects", () => {
   it.each(["qq", "web"] as const)("continues the parent's sandbox task after a %s child report with MCP disabled", async channel => {
     const { fleet, deviceId, socket } = await remoteDevice(), ready = gate();
     await seedPublishSkill();
+    await seedPublishSkill("group:200000001");
     const exec = vi.spyOn(SandboxDO.prototype, "exec").mockResolvedValue({ stdout: "主会话命令成功", stderr: "", code: 0, timedOut: false, truncated: false });
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
     const { outputs } = twoModels([spawn("检查独立工作区"), { text: "已派出" },
       { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.provider==="windows-wsb"); const lease=await tools.sandbox_acquire({sandboxId:target.id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:"powershell",arguments:{command:"Get-ChildItem C:/AgentWork"}}));' } },
       { tool: "codemode", args: { code: 'text(await tools.bash({command:"pwd"}));' } },
-      { tool: "codemode", args: { code: 'const check=await tools.skill_inspect({path:"skills/example"});text(await tools.skill_publish({path:"skills/example",workspaceRevision:check.workspaceRevision,expectedRevision:check.expectedRevision}));' } },
+      { tool: "codemode", args: { code: 'const check=await tools.skill_inspect({path:"skills/example"});text(await tools.skill_publish({path:"skills/example",workspaceRevision:check.workspaceRevision,expectedRevision:check.expectedRevision}));text((await tools.read({workspace:"group:200000001",path:"skills/example/sources.md"})).text);' } },
       { text: "已核实主工作区" },
     ], [{ text: "子工作区为空，请主会话核实", after: ready.promise }]);
     if (channel === "web") {
@@ -349,6 +350,7 @@ describe("subagents as child Durable Objects", () => {
     expect(outputs.parent[2]).toContain("主会话命令成功");
     expect(exec).toHaveBeenCalledTimes(1);
     expect(outputs.parent[3]).toContain('"ok":true');
+    expect(outputs.parent[3]).toContain("中文来源说明");
     expect((await env.REGISTRY.getByName("main").skillGet("example"))?.files).toEqual({"sources.md":"中文来源说明"});
     const workspace = env.SANDBOX.idFromName("owner").toString(), session = (await fleet.sessions(workspace))[0]!;
     expect(session.lease.workspace).toBe(workspace);

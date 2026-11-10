@@ -60,6 +60,8 @@ import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOri
 import { subagentName, type SubagentIdentity, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
 import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject, type RemoteAction } from "./sandbox/task-access";
 import { createCodingExtension } from "./tools/coding";
+import { decodeFileRead } from "./sandbox/read";
+import { workPath } from "./sandbox/client";
 import { createRemoteSandboxExtension } from "./tools/remote-sandbox";
 
 const context = BACKGROUND_CONTEXT;
@@ -279,7 +281,7 @@ export class ThreadDO extends DurableObject<Env> {
       }), this.subagents.tool(async (api, callContext) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext)),
         async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
-    const workspaceSkillAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
+    const ownerTaskAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
       if(memory.ns!=="owner"||!input||(input.kind!=="message"&&input.kind!=="subagent"))return false;
       const task=await this.sandboxTaskForInput(input);
@@ -305,6 +307,11 @@ export class ThreadDO extends DurableObject<Env> {
     if (memory.ns === "owner" || memory.ns.startsWith("group:")) registry.install(createCodingExtension({
       allowed: codingAllowed,
       sandbox: () => this.env.SANDBOX.getByName(memory.ns),
+      readWorkspace: async ({ workspace, path, ...options }, api, context) => {
+        if (!await ownerTaskAllowed(api, context)) throw new Error("permission_denied");
+        const file = await this.env.SANDBOX.getByName(workspace).readBlob(workPath(path));
+        return decodeFileRead(file.bytes, options);
+      },
       record: (kind, detail) => this.audit(kind, detail),
     }));
     registry.install(createAccessExtension({
@@ -317,7 +324,7 @@ export class ThreadDO extends DurableObject<Env> {
       registry:()=>this.env.REGISTRY.getByName("main"),bridge:()=>this.env.BRIDGE.getByName("napcat"),
     }));
     registry.install(createWorkspaceAdminExtension({
-      allowed: workspaceSkillAllowed,
+      allowed: ownerTaskAllowed,
       sandbox:()=>this.env.SANDBOX.getByName(memory.ns),registry:()=>this.env.REGISTRY.getByName("main"),
     }));
     registry.install(createMediaExtension({
