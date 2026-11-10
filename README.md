@@ -11,9 +11,9 @@ npm run install:workers
 npm run check
 ```
 
-`check` 顺序执行类型检查、单 worker 的 Workers 测试、独立 Node 测试和 Worker 打包检查，不发布服务。测试使用模拟模型、NapCat 和外部接口。依赖分别由 `workers/package-lock.json` 与远程沙箱连接器的 `runner/package-lock.json` 固定；根目录 package.json 只提供命令入口。`check` 也检查 runner 并构建 guest 执行器。
+`check` 顺序执行类型检查、单 worker 的 Workers 测试、独立 Node 测试和 Worker 打包检查，不发布服务。测试使用模拟模型、NapCat 和外部接口。依赖分别由 `workers/package-lock.json` 与Windows MCP 服务的 `runner/package-lock.json` 固定；根目录 package.json 只提供命令入口。`check` 也检查 runner 并构建 guest 执行器。
 
-远程 WSB 沙箱默认关闭，设备注册可执行工具，agent 通过 Code Mode 按需获取租约并调用；WSB 首期仅提供 PowerShell，源码和缓存保留在租约内的 guest，不与 R2 同步。Cloudflare 沙箱使用官方 SDK，保留独立工作区与源码持久化。设计与接入步骤见 [远程沙箱设计](docs/REMOTE-SANDBOX-DESIGN.md) 和 [运行说明](docs/REMOTE-SANDBOX-RUNBOOK.md)。
+Cloudflare Container 保留原生 coding 工具与源码持久化，其他远程环境通过通用 MCP 接入，并继续由 Code Mode 调用。`runner/` 提供 Windows MCP 服务：Hyper-V VM 是持久工作区，WSB 是没有宿主项目映射的临时隔离沙箱。见 [设计](docs/REMOTE-SANDBOX-DESIGN.md) 和 [Windows MCP 接入](docs/WINDOWS-MCP.md)。
 
 | 命令 | 用途 |
 | --- | --- |
@@ -30,6 +30,7 @@ npm run check
 | --- | --- |
 | `workers/src/` | Worker、Durable Objects、管理台与工具 |
 | `workers/sandbox/` | Cloudflare 按需启动的编码沙箱及 Dockerfile |
+| `runner/` | Windows MCP 服务、Hyper-V 来宾助手与 WSB 临时执行器 |
 | `workers/test/` | Workers 与独立 Node 测试 |
 | `workers/scripts/` | secret 配置、技能导入和模拟 NapCat 工具 |
 | `scripts/` | worktree 管理、工作区导入导出及本机 Workshop 连接 |

@@ -8,8 +8,6 @@ import type { Env } from "../env";
 import { modelChange, openModels } from "../models";
 import { captureModels } from "../requests/capture";
 import { remoteCredentials } from "../model-credentials";
-import { readResource } from "../sandbox/resources";
-import { createRemoteSandboxExtension } from "../tools/remote-sandbox";
 import { createWebPageTool } from "../tools/web-page";
 import { createWebSearchTool } from "../tools/web-search";
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
@@ -23,7 +21,7 @@ import { responseDescription, shortSummary, subagentActivity, SUBAGENT_PROGRESS_
 const context = BACKGROUND_CONTEXT;
 // 有未完成的工作时定期自唤醒：驱逐后由 alarm 重新打开 Harness 续跑，并补送没送到父线程的汇报。
 const HEARTBEAT_MS = 60_000;
-const SUBAGENT_RULE = "你是主 agent 派出的子 agent，只负责完成交给你的任务。你不能联系用户、发消息、写记忆或安排定时；把最终结果完整写在回答里，它会原样交回主 agent。qq_context 与 mem_search 只读派出你的会话。获授权时可以通过 Code Mode 使用远程沙箱（包括 WSB），按 sandbox_list 的注册说明申请自己的租约；不能复用主 agent 或其他子 agent 的租约。结束前取回需要保留的产物或内容，交回父 agent；远程临时路径不等于父工作区路径。任务结束或取消后宿主会清理你的租约。";
+const SUBAGENT_RULE = "你是主 agent 派出的子 agent，只负责完成交给你的任务。你不能联系用户、发消息、写记忆或安排定时；把最终结果完整写在回答里，它会原样交回主 agent。qq_context 与 mem_search 只读派出你的会话。获授权时可通过 Code Mode 使用分配的 Cloudflare 工作区和 MCP 工具。结束前整理需要保留的产物和内容。";
 
 /** queued → running → answered（回答已落库）→ reported（父线程已收下）；cancelled 是取消时还没回答的项。 */
 type InboxStatus = "queued" | "running" | "answered" | "reported" | "cancelled";
@@ -148,23 +146,6 @@ export class SubagentDO extends DurableObject<Env> {
     return state(meta);
   }
 
-  /** 只处理本子任务的租约；取消确认前保持占用，心跳补做释放。 */
-  private async cleanupRemoteSandbox(meta: SubagentMeta): Promise<void> {
-    if (!meta.capabilities?.remoteSandbox) return;
-    try {
-      const fleet = this.env.SANDBOX_FLEET.getByName("owner"), workspace = this.ctx.id.toString();
-      for (const session of await fleet.sessions(workspace)) {
-        if (session.jobId) {
-          await fleet.cancel(workspace, session.jobId);
-          await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
-        } else if (session.state !== "releasing") await fleet.release(workspace, session.lease.id);
-      }
-    } catch {
-      console.error({ event: "subagent_sandbox_cleanup_failed", id: meta.id });
-      await this.ctx.storage.setAlarm(Date.now() + HEARTBEAT_MS);
-    }
-  }
-
   async status(): Promise<{ meta: SubagentMeta; inbox: Partial<Record<InboxStatus, number>> } | undefined> {
     const meta = await this.meta();
     if (!meta) return;
@@ -188,7 +169,6 @@ export class SubagentDO extends DurableObject<Env> {
       await this.update(async () => false);
       if (meta.status === "cancelled") {
         await (await this.open()).root.abort(context);
-        await this.cleanupRemoteSandbox(meta);
         return;
       }
       this.kick();
@@ -229,13 +209,13 @@ export class SubagentDO extends DurableObject<Env> {
   private async step(): Promise<boolean> {
     const meta = await this.meta();
     if (!meta) return false;
-    if (meta.status === "cancelled") { await this.cleanupRemoteSandbox(meta); return false; }
+    if (meta.status === "cancelled") return false;
     const answered = await this.database.get<InboxRow>("SELECT * FROM inbox WHERE status = 'answered' ORDER BY received_at, rowid LIMIT 1");
     if (answered) {
       await this.report(meta, answered);
       return true;
     }
-    if (meta.status !== "running") { await this.cleanupRemoteSandbox(meta); return false; }
+    if (meta.status !== "running") return false;
     const next = await this.database.get<InboxRow>(`SELECT * FROM inbox WHERE status IN ('running', 'queued')
       ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, received_at, rowid LIMIT 1`);
     if (!next) return false;
@@ -331,22 +311,8 @@ export class SubagentDO extends DurableObject<Env> {
       ].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
     const host = createSubagentCapabilityHost(parent());
-    if (meta.capabilities?.remoteSandbox) registry.install(createRemoteSandboxExtension({
-      allowed: async (_api, _context, action) => {
-        const access = await host.validateSubagentAccess(meta.id);
-        return !!access?.capabilities.remoteSandbox && (action === "view" || !access.sandbox || access.sandbox.kind === "remote") && access.authority.owner && access.authority.scope === "owner"
-          && (await this.meta())?.status === "running" && !!access.sandboxTask?.permissions.remote[action];
-      },
-      ...(meta.capabilities.sandboxId ? { resources: async () => {
-        const access = await host.validateSubagentAccess(meta.id);
-        if (!access?.sandbox) throw new Error("sandbox_not_assigned");
-        return { owner: meta.parent, assignedSandboxId: access.sandbox.id, resources: [access.sandbox] };
-      } } : {}),
-      fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.ctx.id.toString(),
-      record: async detail => { console.log({ event: "subagent_remote_sandbox", id: meta.id, ...detail }); },
-    }));
-    const assigned = meta.capabilities?.sandboxId ? readResource(await this.env.SANDBOX_FLEET.getByName("owner").resourceJson(meta.parent, meta.capabilities.sandboxId)) : undefined;
-    const delegated = installDelegatedCapabilities(registry, host, meta.id, { ...meta.capabilities, coding: !!meta.capabilities?.coding && (!assigned || assigned.kind === "cloudflare") });
+    // 运行时也可能为已完成任务的历史查看而打开。实际权限由父线程逐次复核。
+    const delegated = installDelegatedCapabilities(registry, host, meta.id, meta.capabilities ?? {});
     // 与 ThreadDO 相同：DO 里的连接跨不了请求，Codex 固定走 SSE。
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);

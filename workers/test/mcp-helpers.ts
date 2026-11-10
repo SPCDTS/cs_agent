@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { vi } from "vitest";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import worker from "../src/index";
 
 // 全部为合成测试值，不读取开发机或线上凭据。
@@ -26,6 +26,7 @@ export function fakeRemote(endpoint = "https://mcp.notion.com/mcp") {
     tools: structuredClone(sampleTools), refreshes: 0, calls: 0, initializations: 0, pages: 0,
     tokenStatus: 200, tokenError: "invalid_grant", expires: 3600, cimd: true,
     tokenEndpoint: `${issuer}/token`, resourceIssuer: issuer, failCalls: false, failPage: false,
+    toolResult: undefined as CallToolResult | undefined,
     beforeCall: undefined as (() => Promise<void>) | undefined,
   };
   const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -63,7 +64,7 @@ export function fakeRemote(endpoint = "https://mcp.notion.com/mcp") {
         state.calls++;
         await state.beforeCall?.();
         if (state.failCalls) throw new Error("synthetic-network-detail");
-        result = { content: [{ type: "text", text: "service-result:" + JSON.stringify(rpc.params?.arguments) }, { type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] };
+        result = state.toolResult ?? { content: [{ type: "text", text: "service-result:" + JSON.stringify(rpc.params?.arguments) }, { type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] };
       } else throw new Error("unexpected_test_method");
       return Response.json({ jsonrpc: "2.0", id: rpc.id, result }, { headers: { "Mcp-Session-Id": "fixture-session" } });
     }

@@ -6,7 +6,6 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import * as models from "../src/models";
 import { SandboxDO } from "../src/sandbox/do";
-import { SandboxFleetDO } from "../src/remote-sandbox/fleet";
 import { RegistryDO } from "../src/registry";
 import { MCP_CONFIG } from "../src/mcp/config";
 import { MediaRepository, readMediaToken } from "../src/media/repository";
@@ -128,14 +127,12 @@ describe("群聊通用脚本与产物发送", () => {
     expect(await env.BRIDGE.getByName("napcat").deliveryList()).toHaveLength(0);
   });
 
-  it("开放群工作区不会授予远程设备或技能发布权限，也不保留图片专用工具", async () => {
-    const acquire = vi.spyOn(SandboxFleetDO.prototype, "acquire");
+  it("开放群工作区仍限制 Cloudflare 资源管理与技能发布", async () => {
     const publish = vi.spyOn(RegistryDO.prototype, "skillPublish");
     const seen = scriptedModel([{ name: "codemode", args: { code: 'text(ALL_TOOLS.map(tool => tool.name)); try { text(await tools.skill_inspect({path:"out/skill"})); } catch(error) { text(String(error)); } try { text(await tools.skill_publish({path:"out/skill",workspaceRevision:"0",expectedRevision:"absent"})); } catch(error) { text(String(error)); }' } }]);
     await env.THREAD.getByName(group).submit(input(1, "检查工具", 10000004, 200000001, true));
     expect(seen.outputs.join("\n")).toContain("skill_publish_denied");
-    expect(seen.outputs.join("\n")).not.toMatch(/sandbox_acquire|web_import_image|web_fetch/);
-    expect(acquire).not.toHaveBeenCalled();
+    expect(seen.outputs.join("\n")).not.toMatch(/sandbox_list|sandbox_create|web_import_image|web_fetch/);
     expect(publish).not.toHaveBeenCalled();
   });
 

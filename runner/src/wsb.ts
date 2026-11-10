@@ -1,221 +1,124 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { Type, type Static } from "typebox";
-import { parse, IdSchema, PowerShellInputSchema, ExecResultSchema, validateDescriptor, validateToolArguments, validateOutcome, MAX_CONTROL_BYTES, mismatch, type Descriptor, type JobInput, type Outcome } from "./protocol.ts";
-import { atomicJson, exists, readJson, sha256 } from "./files.ts";
-import { workspaceStorage } from "./storage.ts";
+import { fileURLToPath } from "node:url";
+import type { Backend, Execution, ExecutionStatus } from "./domain.ts";
+import { closeNativeSession, retireWsbScratch } from "./wsb-execution.ts";
+import {
+  evidence, executionFiles, Heartbeat, JobReceipt, JobRequest, Marker, record, SessionIntent, sessionFiles, wsbSessionDir,
+} from "./wsb-evidence.ts";
+import { nativeWsb, type NativeWsb } from "./wsb-native.ts";
 
-export const ConfigSchema = Type.Object({
-  origin: Type.String({ minLength: 1 }), deviceId: Type.String({ pattern: "^[a-f0-9-]{36}$" }), tokenProtected: Type.String({ minLength: 1 }),
-  name: Type.String({ minLength: 1, maxLength: 80 }), nodeDir: Type.String({ minLength: 1 }), gitDir: Type.Optional(Type.String({ minLength: 1 })),
-  memoryMiB: Type.Integer({ minimum: 2048, maximum: 65536 }), maxTimeoutMs: Type.Integer({ minimum: 1000, maximum: 1200000 }),
-  dataDir: Type.Optional(Type.String({ minLength: 1, maxLength: 512 })),
-}, { additionalProperties: false });
-export type Config = Static<typeof ConfigSchema>;
-const InstanceSchema = Type.Object({ id: Type.String({ pattern: "^[a-f0-9-]{36}$" }), leaseId: Type.Optional(IdSchema) });
-const SessionRecordSchema = Type.Object({ leaseId: IdSchema, workspace: IdSchema, revision: Type.String(), state: Type.Union([Type.Literal("live"), Type.Literal("lost"), Type.Literal("released")]) }, { additionalProperties: false });
-type SessionRecord = Static<typeof SessionRecordSchema>;
-const StartSchema = Type.Object({ Id: Type.String({ pattern: "^[a-f0-9-]{36}$" }) });
-const ListSchema = Type.Object({ WindowsSandboxEnvironments: Type.Array(Type.Object({ Id: Type.String() })) });
-export function command(file: string, args: string[], options: { input?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv; cwd?: string } = {}): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { windowsHide: true, cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "", stderr = "", settled = false;
-    const finish = (error?: Error) => { if (settled) return; settled = true; clearTimeout(timer); if (error) reject(error); else resolve(stdout); };
-    const timer = setTimeout(() => { child.kill(); finish(new Error("host_command_timeout")); }, options.timeoutMs ?? 30000);
-    child.stdout.setEncoding("utf8").on("data", (data: string) => { stdout = (stdout + data).slice(-65536); });
-    child.stderr.setEncoding("utf8").on("data", (data: string) => { stderr = (stderr + data).slice(-4096); });
-    child.once("error", error => finish(error));
-    child.once("close", code => finish(code === 0 ? undefined : new Error("host_command_failed:" + path.basename(file) + ":" + code + ":" + stderr.slice(0, 400) + (path.basename(file).toLowerCase() === "wsb.exe" ? ":" + stdout.slice(-1200) : ""))));
-    child.stdin.on("error", () => undefined); child.stdin.end(options.input);
+type Helper = { role: "guard"; dir: string } | { role: "execute"; dir: string; id: string };
+interface WsbAdapters {
+  native?: NativeWsb;
+  launch?: (request: Helper) => Promise<void>;
+  stage?: (runtime: string) => Promise<void>;
+}
+const bundle = fileURLToPath(new URL("../dist/", import.meta.url));
+
+async function launchHelper(request: Helper): Promise<void> {
+  const helper = path.join(bundle, "wsb-start-helper.mjs");
+  await fs.access(helper);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, [helper, request.role, request.dir, ...(request.role === "execute" ? [request.id] : [])],
+      { detached: true, windowsHide: true, stdio: "ignore" });
+    child.once("error", reject);
+    child.once("spawn", () => { child.unref(); resolve(); });
   });
 }
-export async function protectToken(value: string, decrypt = false) {
-  const script = "Add-Type -AssemblyName System.Security; $b=[Convert]::FromBase64String([Console]::In.ReadToEnd()); $r=[Security.Cryptography.ProtectedData]::" +
-    (decrypt ? "Unprotect" : "Protect") + "($b,$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Out.Write([Convert]::ToBase64String($r))";
-  const result = await command("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-    { input: decrypt ? value : Buffer.from(value, "utf8").toString("base64") });
-  return decrypt ? Buffer.from(result.trim(), "base64").toString("utf8") : result.trim();
-}
-export async function descriptor(config: Pick<Config, "name" | "nodeDir" | "gitDir" | "memoryMiB" | "maxTimeoutMs" | "dataDir">): Promise<Descriptor> {
-  const node = (await command(path.join(config.nodeDir, "node.exe"), ["--version"])).trim();
-  const npm = (await command(path.join(config.nodeDir, "node.exe"), [path.join(config.nodeDir, "node_modules/npm/bin/npm-cli.js"), "--version"])).trim();
-  const environment = [{ name: "node", version: node }, { name: "npm", version: npm }];
-  if (config.gitDir) environment.push({ name: "git", version: (await command(path.join(config.gitDir, "cmd/git.exe"), ["--version"])).trim() });
-  return validateDescriptor({ name: config.name, provider: "windows-wsb", os: "windows", arch: process.arch, workspaceRoot: "C:\\AgentWork",
-    resourceLifecycle: {
-      create: "创建空工作区；首次工具调用时由 WSB 提供方准备，已有资源不会重新初始化。" + (config.dataDir ? "工作区跨租约持久保留。" : "仅当前 VM 内保留。"),
-      ...(config.dataDir ? { clone: "首次工具调用前，按文件复制来源的整个 C:\\AgentWork，包含未提交与未跟踪文件、.git、node_modules；不选择提交或新建分支。来源只读，目标文件独立；拒绝符号链接。来源须已初始化并释放租约；复制期间不支持宿主外部改写来源。完成后重试不再复制；中断后重试重新读取来源。npm 下载缓存独立，操作系统、进程和其他目录不复制。" } : {}),
-    },
-    instructions: "此沙箱提供 powershell 工具，在 Windows Sandbox 内执行命令，默认目录 C:\\AgentWork，cwd 必须是 guest 内的 Windows 路径。" +
-      "每次调用启动独立 PowerShell 进程，变量、环境修改和当前目录不跨调用保留；同一租约复用 VM。" +
-      (config.dataDir ? "C:\\AgentWork 中的项目、.git、node_modules 和 C:\\AgentCache\\npm 下载缓存按资源工作区跨租约保留；其他 guest 文件仍是临时的。共享目录不支持创建符号链接；本地目录依赖可先 npm pack 再安装 tgz，必须使用链接的项目应在 guest 临时目录运行。" : "文件、.git、node_modules 与 npm 缓存仅保留在当前 guest。") +
-      "源码可用 git clone 或文件命令准备，不与其他沙箱或 R2 自动同步。运行 npm 请用 npm.cmd；外部程序失败后应检查 $LASTEXITCODE 并显式退出。" +
-      "在包含 lockfile 的项目目录执行 node.exe C:\\AgentTools\\runner\\npm-ensure.mjs，可检查安装条件及依赖结构并复用 node_modules；不匹配则 npm ci，--fresh 强制重装，失败或中断不会留下成功标记。直接运行 npm ci 会清除旧依赖。" +
-      "完成后检查结果 code、stdout、stderr、timedOut；code=0 才表示进程成功。释放、取消、超时、连接器退出或实例丢失会销毁 guest；持久目录里的写入不会回滚。",
-    persistence: config.dataDir ? "C:\\AgentWork 与 C:\\AgentCache\\npm 映射到本机专用目录 " + path.resolve(config.dataDir) + "，按工作区隔离并跨租约、VM 和连接器重启保留；取消不回滚文件。其余 guest 文件与系统安装状态随实例销毁；不上传 R2。" : "同一租约内保留文件和缓存；释放或实例丢失后丢弃，不做 R2 源码同步。",
-    tools: [{ name: "powershell", description: "在当前租约的 Windows Sandbox 工作区 C:\\AgentWork 执行 PowerShell；文件保留范围见 persistence。cwd 为 guest 路径，默认 C:\\AgentWork。", inputSchema: PowerShellInputSchema }],
-    environment, memoryMiB: config.memoryMiB, maxConcurrent: 1, maxTimeoutMs: config.maxTimeoutMs, workspaceProtocol: "registered-tools-v2" });
-}
-const xml = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-const map = (host: string, guest: string, readonly: boolean) => "<MappedFolder><HostFolder>" + xml(host) + "</HostFolder><SandboxFolder>" + guest + "</SandboxFolder><ReadOnly>" + readonly + "</ReadOnly></MappedFolder>";
-const PreparationReceiptSchema = Type.Object({ fingerprint: Type.String(), ready: Type.Boolean() }, { additionalProperties: false });
-type Session = { id: string; record: SessionRecord; input: string; result: FileHandle; preparation?: { fingerprint: string; receipt?: string; ready: boolean } };
 
-export class WsbBackend {
-  readonly state: string;
-  readonly config: Config;
-  readonly bundleDir: string;
-  private readonly host: typeof command;
-  private readonly capabilities: () => Promise<Descriptor>;
-  private session?: Session;
-  private stopping?: Promise<void>;
-  private recovered?: Promise<void>;
-  private busy = false;
-  constructor(state: string, config: Config, bundleDir: string, adapters?: { command?: typeof command; capabilities?: () => Promise<Descriptor> }) {
-    this.state = path.resolve(state); this.config = config; this.bundleDir = path.resolve(bundleDir);
-    this.host = adapters?.command ?? command; this.capabilities = adapters?.capabilities ?? (() => descriptor(config));
+async function stageRuntime(runtime: string): Promise<void> {
+  await fs.mkdir(runtime);
+  await fs.copyFile(process.execPath, path.join(runtime, "node.exe"));
+  await fs.copyFile(path.join(bundle, "guest.mjs"), path.join(runtime, "guest.mjs"));
+}
+
+export class WsbBackend implements Backend {
+  readonly #state: string;
+  readonly #native: NativeWsb;
+  readonly #launch: NonNullable<WsbAdapters["launch"]>;
+  readonly #stage: NonNullable<WsbAdapters["stage"]>;
+  readonly #stops = new Map<string, Promise<boolean>>();
+
+  constructor(stateDir: string, adapters: WsbAdapters = {}) {
+    this.#state = path.resolve(stateDir);
+    this.#native = adapters.native ?? nativeWsb;
+    this.#launch = adapters.launch ?? launchHelper;
+    this.#stage = adapters.stage ?? stageRuntime;
   }
-  private instanceFile() { return path.join(this.state, "instance.json"); }
-  private leaseFile(id: string) { return path.join(this.state, "leases", sha256(id) + ".json"); }
-  private async record(id: string): Promise<SessionRecord | undefined> { return await exists(this.leaseFile(id)) ? parse(SessionRecordSchema, await readJson(this.leaseFile(id))) : undefined; }
-  private async lost(id: string) { const record = await this.record(id); if (record && record.state !== "released") await atomicJson(this.leaseFile(id), { ...record, state: "lost" }); }
-  stopOwned(): Promise<void> {
-    if (!this.stopping) this.stopping = this.stopInstance().finally(() => { this.stopping = undefined; });
-    return this.stopping;
-  }
-  private async stopInstance(): Promise<void> {
-    if (!await exists(this.instanceFile())) { await this.session?.result.close(); this.session = undefined; return; }
-    const instance = parse(InstanceSchema, await readJson(this.instanceFile()));
-    if (instance.leaseId) await this.lost(instance.leaseId);
-    const listed = parse(ListSchema, JSON.parse(await this.host("wsb.exe", ["list", "--raw"])));
-    if (listed.WindowsSandboxEnvironments.some(row => row.Id === instance.id)) await this.host("wsb.exe", ["stop", "--id", instance.id, "--raw"], { timeoutMs: 60000 });
-    const after = parse(ListSchema, JSON.parse(await this.host("wsb.exe", ["list", "--raw"])));
-    if (after.WindowsSandboxEnvironments.some(row => row.Id === instance.id)) throw new Error("sandbox_stop_unconfirmed");
-    await this.session?.result.close(); this.session = undefined;
-    await fs.unlink(this.instanceFile());
-  }
-  async release(leaseId: string): Promise<void> {
-    parse(IdSchema, leaseId);
-    if (this.busy) throw new Error("local_slot_busy");
-    if (await exists(this.instanceFile())) {
-      const instance = parse(InstanceSchema, await readJson(this.instanceFile()));
-      if (instance.leaseId !== leaseId) throw new Error("lease_mismatch");
-      await this.stopOwned();
-    }
-    const record = await this.record(leaseId);
-    if (record) await atomicJson(this.leaseFile(leaseId), { ...record, state: "released" });
-  }
-  private async acquire(job: JobInput, progress: (text: string) => void): Promise<Session> {
-    const record = await this.record(job.lease.id);
-    if (record && (record.state !== "live" || record.workspace !== job.lease.workspace || record.revision !== job.lease.capabilityRevision)) throw new Error("session_lost");
-    if (this.session) {
-      if (this.session.record.leaseId !== job.lease.id) throw new Error("lease_mismatch");
-      const listed = parse(ListSchema, JSON.parse(await this.host("wsb.exe", ["list", "--raw"])));
-      if (!listed.WindowsSandboxEnvironments.some(row => row.Id === this.session?.id)) { await this.stopOwned(); throw new Error("session_lost"); }
-      return this.session;
-    }
-    if (record) { await this.lost(job.lease.id); throw new Error("session_lost"); }
-    const directive = job.lease.resourcePreparation;
-    const fingerprint = directive ? sha256(JSON.stringify(directive)) : undefined;
-    const receipt = directive && this.config.dataDir ? path.join(this.state, "resources", sha256(job.lease.workspace) + ".json") : undefined;
-    const prior = receipt && await exists(receipt) ? parse(PreparationReceiptSchema, await readJson(receipt)) : undefined;
-    if (prior && prior.fingerprint !== fingerprint) throw new Error("operation_conflict");
-    const sourceWorkspace = directive?.kind === "clone" && !prior?.ready ? directive.sourceWorkspace : undefined;
-    const storage = this.config.dataDir ? await workspaceStorage({ dataDir: this.config.dataDir, state: this.state, deviceId: this.config.deviceId,
-      protectedPaths: [path.resolve(this.bundleDir, "../.."), this.config.nodeDir, ...(this.config.gitDir ? [this.config.gitDir] : [])], workspace: job.lease.workspace, sourceWorkspace }) : undefined;
-    if (sourceWorkspace && !storage?.source) throw new Error("clone_not_supported");
-    if (receipt && !prior) {
-      if (!storage || (await fs.readdir(storage.work)).length) throw new Error("resource_not_empty");
-      await atomicJson(receipt, { fingerprint, ready: false });
-    }
-    const root = path.join(this.state, "sessions", sha256(job.lease.id)), input = path.join(root, "input"), output = path.join(root, "output");
-    await fs.mkdir(input, { recursive: true }); await fs.mkdir(output, { recursive: true });
-    await atomicJson(path.join(input, "input.json"), job);
-    // 先打开结果句柄再映射目录；VM 运行时绝不重新解析 guest 可写路径。
-    const result = await fs.open(path.join(output, "outcome.json"), "wx+", 0o600), id = randomUUID();
-    const live: SessionRecord = { leaseId: job.lease.id, workspace: job.lease.workspace, revision: job.lease.capabilityRevision, state: "live" };
-    this.session = { id, record: live, input, result, ...(fingerprint ? { preparation: { fingerprint, receipt, ready: prior?.ready ?? false } } : {}) };
-    await atomicJson(this.leaseFile(job.lease.id), live);
-    await atomicJson(this.instanceFile(), { id, leaseId: job.lease.id });
-    const configuration = "<Configuration><MemoryInMB>" + this.config.memoryMiB + "</MemoryInMB><Networking>Enable</Networking>" +
-      "<ClipboardRedirection>Disable</ClipboardRedirection><AudioInput>Disable</AudioInput><VideoInput>Disable</VideoInput><PrinterRedirection>Disable</PrinterRedirection><MappedFolders>" +
-      map(this.config.nodeDir, "C:\\AgentTools\\node", true) + map(this.bundleDir, "C:\\AgentTools\\runner", true) +
-      (this.config.gitDir ? map(this.config.gitDir, "C:\\AgentTools\\git", true) : "") +
-      (storage ? map(storage.work, "C:\\AgentWork", false) + map(storage.cache, "C:\\AgentCache\\npm", false) : "") +
-      (storage?.source ? map(storage.source, "C:\\AgentSource", true) : "") +
-      map(input, "C:\\AgentInput", true) + map(output, "C:\\AgentOutput", false) + "</MappedFolders></Configuration>";
-    progress("正在启动当前租约的 Windows Sandbox。\n");
-    const started = parse(StartSchema, JSON.parse(await this.host("wsb.exe", ["start", "--id", id, "--config", configuration, "--raw"], { timeoutMs: 300000 })));
-    if (started.Id !== id) throw new Error("sandbox_identity_mismatch");
-    return this.session;
-  }
-  private async executeGuest(session: Session, timeoutMs: number, prepare = false): Promise<void> {
-    const launcher = '"C:\\AgentTools\\node\\node.exe" "C:\\AgentTools\\runner\\guest.mjs" "C:\\AgentInput\\input.json"' + (prepare ? " prepare" : "");
-    await this.host("wsb.exe", ["exec", "--id", session.id, "--run-as", "System", "--command", launcher, "--raw"], { timeoutMs: timeoutMs + 65000 });
-  }
-  private async result(session: Session) {
-    const stat = await session.result.stat();
-    if (stat.size < 1 || stat.size > MAX_CONTROL_BYTES) throw new Error("invalid_result");
-    const bytes = Buffer.alloc(stat.size), read = await session.result.read(bytes, 0, bytes.length, 0);
-    if (read.bytesRead !== bytes.length) throw new Error("invalid_result");
-    const outcome = validateOutcome(JSON.parse(bytes.toString("utf8")));
-    if (outcome.kind !== "completed") throw new Error("execution_ended_without_result");
-    return parse(ExecResultSchema, outcome.result);
-  }
-  async run(job: JobInput, signal: AbortSignal, progress: (text: string) => void): Promise<Outcome> {
-    if (this.busy) return { kind: "failed", error: "local_slot_busy" };
-    this.busy = true;
-    let timer: NodeJS.Timeout | undefined, abort: (() => void) | undefined, stop: Promise<void> | undefined, timedOut = false, commandStarted = false;
+
+  async dispatch(execution: Execution): Promise<void> {
+    const { command, target, id, sessionId, deadline } = execution;
+    if (!sessionId || command.kind !== "powershell" || target.kind !== "wsb") throw new Error("invalid_wsb_execution");
+    const dir = wsbSessionDir(this.#state, sessionId), session = sessionFiles(dir), job = executionFiles(dir, id);
+    await fs.mkdir(job.root, { recursive: true });
+    if (!await record(job.request, { deadline, preparedAt: Date.now() })) return;
     try {
-      this.recovered ??= this.stopOwned(); await this.recovered;
-      const capabilities = validateDescriptor(await this.capabilities());
-      if (sha256(JSON.stringify(capabilities)) !== job.lease.capabilityRevision || mismatch(capabilities, job.lease.requirements).length || job.timeoutMs > capabilities.maxTimeoutMs) return { kind: "failed", error: "capability_mismatch" };
-      if (job.lease.workspaceSource) return { kind: "failed", error: "legacy_preparation_requires_release", sessionLost: true };
-      const preparation = job.lease.resourcePreparation;
-      if (preparation && !capabilities.resourceLifecycle?.[preparation.kind]) return { kind: "failed", error: preparation.kind + "_not_supported" };
-      validateToolArguments(capabilities, job.tool, job.arguments);
-      if (job.tool !== "powershell") return { kind: "failed", error: "tool_not_registered" };
-      if (signal.aborted || Date.now() >= job.deadline) {
-        await this.stopOwned(); await atomicJson(this.leaseFile(job.lease.id), { leaseId: job.lease.id, workspace: job.lease.workspace, revision: job.lease.capabilityRevision, state: "lost" });
-        return { kind: "cancelled", reason: "cancelled_before_execution", sessionLost: true };
+      if (await evidence(session.closing, Marker) || Date.now() >= deadline) {
+        await this.stop(execution);
+        return;
       }
-      const session = await this.acquire(job, progress);
-      await session.result.truncate(0);
-      // WSB 的只读映射会锁住 rename；输入仅由宿主串行写，写完才启动固定 launcher。
-      await fs.writeFile(path.join(session.input, "input.json"), JSON.stringify(job), "utf8");
-      abort = () => { stop ??= this.stopOwned(); void stop.catch(() => undefined); };
-      signal.addEventListener("abort", abort, { once: true });
-      if (signal.aborted || Date.now() >= job.deadline) { abort(); await stop; return { kind: "cancelled", reason: "cancelled_during_start", sessionLost: true }; }
-      timer = setTimeout(() => { timedOut = true; abort?.(); }, Math.max(1, Math.min(job.timeoutMs, job.deadline - Date.now())));
-      if (session.preparation && !session.preparation.ready) {
-        progress("正在由 WSB 提供方准备资源工作区。\n");
-        await this.executeGuest(session, job.timeoutMs, true);
-        const prepared = await this.result(session);
-        if (prepared.code !== 0) throw new Error("resource_preparation_failed:" + prepared.stderr);
-        if (stop) { await stop; return { kind: "cancelled", reason: timedOut ? "timeout_instance_stopped" : "cancelled_instance_stopped", sessionLost: true }; }
-        if (session.preparation.receipt) await atomicJson(session.preparation.receipt, { fingerprint: session.preparation.fingerprint, ready: true });
-        session.preparation.ready = true;
-        await session.result.truncate(0);
+      if (!await evidence(session.intent, SessionIntent)) {
+        await this.#stage(session.runtime);
+        const created = await record(session.intent, { nativeId: randomUUID(), deadline: Date.now() + target.maxLifetimeMs, memoryMb: target.memoryMb });
+        if (created) await this.#launch({ role: "guard", dir });
       }
-      if (signal.aborted || timedOut) throw new Error("cancelled_before_command");
-      progress("沙箱会话就绪，正在执行 PowerShell。\n");
-      commandStarted = true;
-      await this.executeGuest(session, job.timeoutMs);
-      if (timer) clearTimeout(timer); signal.removeEventListener("abort", abort);
-      if (stop) { await stop; return { kind: "cancelled", reason: timedOut ? "timeout_instance_stopped" : "cancelled_instance_stopped", sessionLost: true }; }
-      return { kind: "completed", result: await this.result(session) };
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : "sandbox_execution_unconfirmed";
-      if (reason === "session_lost" || reason === "lease_mismatch") return { kind: "failed", error: reason, sessionLost: true };
-      if (!signal.aborted && !timedOut) console.error("WSB 执行失败：", reason);
-      await (stop ?? this.stopOwned());
-      if (signal.aborted || timedOut) return { kind: "cancelled", reason: timedOut ? "timeout_instance_stopped" : "cancelled_instance_stopped", sessionLost: true };
-      if (!commandStarted) return { kind: "failed", error: reason.slice(0, 512), sessionLost: true };
-      return { kind: "unknown", reason: "sandbox_execution_unconfirmed", sessionLost: true };
-    } finally { if (timer) clearTimeout(timer); if (abort) signal.removeEventListener("abort", abort); this.busy = false; }
+      await fs.mkdir(job.inputDir);
+      await record(job.input, { id, script: command.script, cwd: command.cwd, deadline });
+      if (!await evidence(session.closing, Marker)) await this.#launch({ role: "execute", dir, id });
+      else await this.stop(execution);
+    } catch {
+      await record(job.receipt, { state: "failed", error: "wsb_helper_not_dispatched" });
+      await this.closeSession(sessionId);
+    }
   }
+
+  async inspect(execution: Execution): Promise<ExecutionStatus> {
+    if (!execution.sessionId) throw new Error("invalid_wsb_execution");
+    const dir = wsbSessionDir(this.#state, execution.sessionId), job = executionFiles(dir, execution.id);
+    const receipt = await evidence(job.receipt, JobReceipt);
+    if (receipt) return receipt;
+    if (await evidence(job.issue, Marker)) return { state: "unknown", error: "wsb_execution_unconfirmed" };
+    if (await evidence(sessionFiles(dir).closed, Marker)) return this.#confirmStopped(job);
+    const request = await evidence(job.request, JobRequest);
+    if (!request) return { state: "unknown", error: "wsb_dispatch_unconfirmed" };
+    const heartbeat = await evidence(job.heartbeat, Heartbeat);
+    if (Date.now() - (heartbeat ?? request.preparedAt) < 5000) return { state: "running" };
+    return { state: "unknown", error: "wsb_helper_unreachable" };
+  }
+
+  async stop(execution: Execution): Promise<ExecutionStatus> {
+    if (!execution.sessionId) throw new Error("invalid_wsb_execution");
+    const job = executionFiles(wsbSessionDir(this.#state, execution.sessionId), execution.id);
+    const receipt = await evidence(job.receipt, JobReceipt);
+    if (receipt) return receipt;
+    if (!await this.closeSession(execution.sessionId)) return { state: "unknown", error: "wsb_stop_unconfirmed" };
+    return this.#confirmStopped(job);
+  }
+
+  closeSession(sessionId: string): Promise<boolean> {
+    const current = this.#stops.get(sessionId);
+    if (current) return current;
+    const dir = wsbSessionDir(this.#state, sessionId);
+    const result = closeNativeSession(dir, this.#native).then(async stopped => {
+      if (stopped) await retireWsbScratch(dir).catch(() => undefined);
+      return stopped;
+    }).catch(() => false).finally(() => this.#stops.delete(sessionId));
+    this.#stops.set(sessionId, result);
+    return result;
+  }
+
+  async #confirmStopped(job: ReturnType<typeof executionFiles>): Promise<JobReceipt> {
+    await fs.mkdir(job.root, { recursive: true });
+    await record(job.receipt, { state: "cancelled" });
+    const receipt = await evidence(job.receipt, JobReceipt);
+    if (!receipt) throw new Error("wsb_terminal_evidence_missing");
+    return receipt;
+  }
+}
+
+export function createWsbBackend(stateDir: string): WsbBackend {
+  return new WsbBackend(stateDir);
 }

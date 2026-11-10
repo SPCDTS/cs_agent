@@ -99,10 +99,10 @@ export class McpConnection {
     return this.client.request({ method: "resources/read", params: { uri } }, ReadResourceResultSchema,
       { signal, timeout: this.limits.callMs, maxTotalTimeout: this.limits.callMs, resetTimeoutOnProgress: false });
   }
-  async callTool(name: string, args: Record<string, unknown>, signal: AbortSignal) {
+  async callTool(name: string, args: Record<string, unknown>, caller: { scope: string }, signal: AbortSignal) {
     if (this.closing || this.failure) throw this.failure ?? new McpConnectionError("closed", "closed");
     // 直接 request 避免 SDK 的逐页 outputSchema 缓存影响早期页面的工具；校验由完整目录负责。
-    try { return await this.client.request({ method: "tools/call", params: { name, arguments: args } }, CallToolResultSchema,
+    try { return await this.client.request({ method: "tools/call", params: { name, arguments: args, _meta: { "cs-agent/caller": caller } } }, CallToolResultSchema,
       { signal, timeout: this.limits.callMs, maxTotalTimeout: this.limits.callMs, resetTimeoutOnProgress: false }); }
     catch (error) { throw this.failure ?? safeError(error); }
   }

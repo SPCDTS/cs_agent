@@ -1,71 +1,98 @@
 import assert from "node:assert/strict";
-import { promises as fs } from "node:fs";
-import path from "node:path";
-import os from "node:os";
-import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { WsbBackend, command, descriptor, protectToken, type Config } from "../src/wsb.ts";
-import { readJson, sha256 } from "../src/files.ts";
-import { parse, ExecResultSchema, type JobInput, type Lease } from "../src/protocol.ts";
-if (process.platform !== "win32") throw new Error("Windows only");
-const state = await fs.mkdtemp(path.join(os.tmpdir(), "cs-agent-wsb-smoke-"));
-const gitExecutable = (await command("where.exe", ["git.exe"])).trim().split(/\r?\n/)[0];
-if (!gitExecutable) throw new Error("git_required");
-const config: Config = { origin: "http://localhost:8787", deviceId: randomUUID(), tokenProtected: "unused", name: "wsb-smoke",
-  nodeDir: path.dirname(process.execPath), gitDir: process.env.CS_AGENT_GIT_DIR ?? path.dirname(path.dirname(gitExecutable)), memoryMiB: 4096, maxTimeoutMs: 1200000, dataDir: state + "-data" };
-const backend = new WsbBackend(state, config, fileURLToPath(new URL("../dist/", import.meta.url)));
-const capabilities = await descriptor(config);
-assert.equal(await protectToken(await protectToken("test-token"), true), "test-token");
-let binding: Lease = { id: randomUUID(), deviceId: config.deviceId, sandboxId: "remote:" + config.deviceId, workspace: "smoke", operationId: randomUUID(),
-  capabilityRevision: sha256(JSON.stringify(capabilities)), requirements: { tools: ["powershell"] }, createdAt: Date.now() };
-function prepare(command: string): JobInput { return { id: randomUUID(), lease: binding, tool: "powershell", arguments: { command },
-  timeoutMs: 120000, createdAt: Date.now(), deadline: Date.now() + 420000 }; }
-const js = (source: string) => '& node.exe -e "eval(Buffer.from(\'' + Buffer.from(source).toString("base64") + "','base64').toString())\"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; ";
-const setup = "New-Item repo -ItemType Directory | Out-Null; Set-Location repo; " + js("const fs=require('node:fs'); fs.mkdirSync('fixture',{recursive:true}); fs.writeFileSync('fixture/package.json',JSON.stringify({name:'sandbox-smoke-dep',version:'1.0.0',main:'index.cjs'})); fs.writeFileSync('fixture/index.cjs',\"module.exports='依赖已安装'\"); fs.writeFileSync('package.json',JSON.stringify({name:'wsb-smoke',version:'1.0.0',scripts:{test:'node --test sample.test.cjs'},dependencies:{'sandbox-smoke-dep':'file:./sandbox-smoke-dep-1.0.0.tgz'}})); fs.writeFileSync('sample.test.cjs',\"const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'); test('沙箱测试',()=>{assert.equal(require('sandbox-smoke-dep'),'依赖已安装');fs.writeFileSync('中文.txt','你好，远程沙箱');fs.writeFileSync('binary.bin',Buffer.from([0,255,1]));console.log('中文 stdout');console.error('中文 stderr');});\");") +
-  "& git.exe init; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & npm.cmd pack ./fixture --offline --ignore-scripts; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & npm.cmd install --package-lock-only --ignore-scripts --no-audit --no-fund; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & node.exe C:\\AgentTools\\runner\\npm-ensure.mjs --offline; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & npm.cmd test; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; " +
-  js("const fs=require('node:fs');fs.writeFileSync('.gitignore','node_modules/\\n');fs.writeFileSync('seed.txt','committed');") +
-  "& git.exe add .; & git.exe -c user.name=Smoke -c user.email=smoke@example.invalid commit -m fixture; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; " +
-  js("const fs=require('node:fs');fs.writeFileSync('seed.txt','parent-dirty');fs.writeFileSync('C:/AgentCache/npm/shared-probe.txt','shared');");
-const verify = "Set-Location C:\\AgentWork\\repo; " + js("const fs=require('node:fs'),assert=require('node:assert/strict');assert.ok(fs.existsSync('.git'));assert.ok(fs.existsSync('node_modules/sandbox-smoke-dep'));assert.equal(require('sandbox-smoke-dep'),'依赖已安装');assert.equal(fs.readFileSync('中文.txt','utf8'),'你好，远程沙箱');assert.deepEqual(fs.readFileSync('binary.bin'),Buffer.from([0,255,1]));console.log('会话文件、git 与 node_modules 均保留');") + "& git.exe status --short";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import type { Execution, ExecutionStatus, WsbTarget } from "../src/domain.ts";
+import { evidence, executionFiles, Marker, SessionIntent, sessionFiles, wsbSessionDir } from "../src/wsb-evidence.ts";
+import { nativeWsb } from "../src/wsb-native.ts";
+import { createWsbBackend } from "../src/wsb.ts";
+
+if (process.platform !== "win32") throw new Error("Windows required");
+const before = await nativeWsb.list();
+const state = await fs.mkdtemp(path.join(os.tmpdir(), "cs-agent-wsb-mcp-smoke-"));
+const sessions = [randomUUID(), randomUUID(), randomUUID()];
+const target: WsbTarget = { kind: "wsb", id: "wsb", memoryMb: 4096, idleTimeoutMs: 60000, maxLifetimeMs: 480000 };
+let backend = createWsbBackend(state);
 console.log(JSON.stringify({ state }));
+
+function job(sessionId: string, script: string): Execution {
+  return {
+    id: randomUUID(), requestId: randomUUID(), subject: { principal: "smoke", scope: "smoke" }, target, sessionId,
+    command: { kind: "powershell", script, timeoutMs: 90000 }, deadline: Date.now() + 90000,
+  };
+}
+async function wait<T>(probe: () => Promise<T | undefined>, timeoutMs = 90000): Promise<T> {
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    const value = await probe();
+    if (value !== undefined) return value;
+    await delay(250);
+  }
+  throw new Error("wsb_smoke_deadline");
+}
+async function succeeded(execution: Execution, exitCode = 0) {
+  await backend.dispatch(execution);
+  const result = await wait<ExecutionStatus>(async () => {
+    const status = await backend.inspect(execution);
+    return status.state === "running" ? undefined : status;
+  });
+  assert.equal(result.state, "succeeded", JSON.stringify(result));
+  assert.equal(result.result.exitCode, exitCode, JSON.stringify(result));
+  return result.result;
+}
+async function close(session: string) {
+  await wait(async () => await backend.closeSession(session) ? true : undefined, 350000);
+}
+const nativeId = async (sessionId: string) =>
+  (await evidence(sessionFiles(wsbSessionDir(state, sessionId)).intent, SessionIntent))?.nativeId;
+
 try {
-  const first = await backend.run(prepare(setup), new AbortController().signal, message => process.stdout.write(message));
-  if (first.kind !== "completed") throw new Error(JSON.stringify(first));
-  const firstResult = parse(ExecResultSchema, first.result);
-  assert.equal(firstResult.code, 0, firstResult.stdout + firstResult.stderr); assert.match(firstResult.stdout, /中文 stdout/); assert.match(firstResult.stdout + firstResult.stderr, /中文 stderr/);
-  const instance = await readJson(path.join(state, "instance.json"));
-  const second = await backend.run(prepare(verify), new AbortController().signal, message => process.stdout.write(message));
-  if (second.kind !== "completed") throw new Error(JSON.stringify(second));
-  const secondResult = parse(ExecResultSchema, second.result);
-  assert.equal(secondResult.code, 0, secondResult.stdout + secondResult.stderr); assert.match(secondResult.stdout, /均保留/);
-  assert.deepEqual(await readJson(path.join(state, "instance.json")), instance);
-  await backend.release(binding.id);
-  binding = { ...binding, id: randomUUID(), operationId: randomUUID(), createdAt: Date.now() };
-  const resumed = await backend.run(prepare(verify + "; & node.exe C:\\AgentTools\\runner\\npm-ensure.mjs --offline"), new AbortController().signal, message => process.stdout.write(message));
-  if (resumed.kind !== "completed") throw new Error(JSON.stringify(resumed));
-  const resumedResult = parse(ExecResultSchema, resumed.result);
-  assert.equal(resumedResult.code, 0, resumedResult.stdout + resumedResult.stderr); assert.match(resumedResult.stdout, /复用 node_modules/);
-  assert.notDeepEqual(await readJson(path.join(state, "instance.json")), instance);
-  await backend.release(binding.id);
-  binding = { ...binding, id: randomUUID(), operationId: randomUUID(), workspace: "smoke-child", resourcePreparation: { kind: "clone", operationId: "smoke-clone", sourceWorkspace: "smoke" }, createdAt: Date.now() };
-  const childCommand = js("const fs=require('node:fs'),assert=require('node:assert/strict');assert.equal(fs.existsSync('repo/node_modules'),true);assert.equal(fs.readFileSync('repo/seed.txt','utf8'),'parent-dirty');assert.equal(fs.existsSync('C:/AgentCache/npm/shared-probe.txt'),false);assert.equal(fs.existsSync('repo/.git/objects/info/alternates'),false);let denied=false;try{fs.writeFileSync('C:/AgentSource/repo/seed.txt','forbidden');}catch{denied=true;}assert.ok(denied);console.log('文件复制与来源只读验证通过');") +
-    "Set-Location repo; & node.exe C:\\AgentTools\\runner\\npm-ensure.mjs --offline; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & npm.cmd test; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; " +
-    js("const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');assert.equal(cp.execFileSync('git.exe',['branch','--show-current'],{encoding:'utf8'}),cp.execFileSync('git.exe',['-C','C:/AgentSource/repo','branch','--show-current'],{encoding:'utf8'}));fs.writeFileSync('.git/child-only','independent');fs.writeFileSync('seed.txt','child-dirty');") + verify;
-  const child = await backend.run(prepare(childCommand), new AbortController().signal, message => process.stdout.write(message));
-  if (child.kind !== "completed") throw new Error(JSON.stringify(child));
-  const childResult = parse(ExecResultSchema, child.result);
-  assert.equal(childResult.code, 0, childResult.stdout + childResult.stderr); assert.match(childResult.stdout, /复用 node_modules/); assert.match(childResult.stdout, /文件复制与来源只读验证通过/);
-  await backend.release(binding.id);
-  binding = { ...binding, id: randomUUID(), operationId: randomUUID(), workspace: "smoke", createdAt: Date.now() }; delete binding.resourcePreparation;
-  const parent = await backend.run(prepare(verify + "; " + js("const fs=require('node:fs'),assert=require('node:assert/strict');assert.equal(fs.readFileSync('seed.txt','utf8'),'parent-dirty');assert.equal(fs.existsSync('.git/child-only'),false);")), new AbortController().signal, message => process.stdout.write(message));
-  if (parent.kind !== "completed") throw new Error(JSON.stringify(parent));
-  const parentResult = parse(ExecResultSchema, parent.result);
-  assert.equal(parentResult.code, 0, parentResult.stdout + parentResult.stderr);
-  const abort = new AbortController();
-  const cancelled = await backend.run(prepare("Start-Sleep -Seconds 120"), abort.signal, message => { process.stdout.write(message); if (message.includes("正在执行")) setTimeout(() => abort.abort(), 1500); });
-  assert.equal(cancelled.kind, "cancelled"); assert.equal(cancelled.sessionLost, true);
-  assert.deepEqual(await backend.run(prepare("Get-Location"), new AbortController().signal, () => undefined), { kind: "failed", error: "session_lost", sessionLost: true });
-  await backend.release(binding.id);
-  assert.equal(await fs.readFile(path.join(config.dataDir!, "projects", sha256(binding.workspace), "repo", "中文.txt"), "utf8"), "你好，远程沙箱");
-  console.log("WSB 内 npm 安装与依赖复用、同实例命令、新租约与新 VM 恢复中文/二进制/git/node_modules、取消后持久文件保留，以及文件级克隆保留未提交修改与依赖、Git 文件独立、只读来源和独立 npm 缓存均通过。");
-} finally { await backend.stopOwned(); }
+  const first = await succeeded(job(sessions[0],
+    "[IO.File]::WriteAllText('C:\\AgentWork\\中文.txt','你好'); New-Item node_modules,.git -ItemType Directory | Out-Null; Write-Output '中文 stdout'; [Console]::Error.WriteLine('中文 stderr')"));
+  assert.match(first.stdout, /中文 stdout/);
+  assert.match(first.stderr, /中文 stderr/);
+  const original = await nativeId(sessions[0]);
+  assert.ok(original && (await nativeWsb.list()).includes(original));
+
+  // A new service object can inspect durable receipts and use the same guest.
+  backend = createWsbBackend(state);
+  const next = await succeeded(job(sessions[0],
+    "[IO.File]::ReadAllText('C:\\AgentWork\\中文.txt'); Test-Path node_modules; Test-Path .git; exit 7"), 7);
+  assert.match(next.stdout, /你好\r?\nTrue\r?\nTrue/);
+  assert.equal(await nativeId(sessions[0]), original);
+  await close(sessions[0]);
+  assert.ok(!(await nativeWsb.list()).includes(original));
+
+  const fresh = await succeeded(job(sessions[1], "Test-Path '中文.txt'; Test-Path node_modules; Test-Path .git"));
+  assert.match(fresh.stdout, /False\r?\nFalse\r?\nFalse/);
+  const replacement = await nativeId(sessions[1]);
+  assert.ok(replacement && replacement !== original);
+
+  const sleeping = job(sessions[1], "Start-Sleep -Seconds 90");
+  await backend.dispatch(sleeping);
+  const sleepEvidence = executionFiles(wsbSessionDir(state, sessions[1]), sleeping.id);
+  await wait(() => evidence(sleepEvidence.execIntent, Marker));
+  await delay(1000);
+  assert.equal(await backend.inspect(sleeping).then(status => status.state), "running");
+  await wait(async () => (await backend.stop(sleeping)).state === "cancelled" ? true : undefined, 60000);
+  assert.ok(!(await nativeWsb.list()).includes(replacement));
+  const expiring = { ...job(sessions[2], "Write-Output deadline"), target: { ...target, maxLifetimeMs: 12000 } };
+  await succeeded(expiring);
+  const expiringFiles = sessionFiles(wsbSessionDir(state, sessions[2]));
+  const expiringId = await nativeId(sessions[2]);
+  assert.ok(expiringId && (await nativeWsb.list()).includes(expiringId));
+  await wait(() => evidence(expiringFiles.closed, Marker), 20000);
+  assert.ok(!(await nativeWsb.list()).includes(expiringId));
+  console.log("WSB smoke passed: same guest across commands and backend recreation; fresh guest filesystem; confirmed stop; independent hard deadline.");
+} finally {
+  for (const session of sessions) {
+    await close(session);
+    const id = await nativeId(session);
+    if (id) {
+      assert.ok(!before.includes(id));
+      assert.ok(!(await nativeWsb.list()).includes(id));
+    }
+  }
+}

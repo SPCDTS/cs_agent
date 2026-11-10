@@ -1,4 +1,3 @@
-import { remoteSandboxRoutes } from "./remote-sandbox/routes";
 import { handleMediaRequest } from "./media/routes";
 import { authenticated } from "./auth";
 import { handleAdmin } from "./admin/routes";
@@ -16,7 +15,7 @@ export { ScheduleDO } from "./schedule/do";
 export { EventsDO } from "./events/do";
 export { SubagentDO } from "./subagent/do";
 export { SandboxDO } from "./sandbox/do";
-export { SandboxFleetDO } from "./remote-sandbox/fleet";
+export { CloudflareWorkspaceResourcesDO } from "./sandbox/resources";
 
 // 按 wrangler.jsonc 的 crons 字符串分派，各后台任务各占一行。
 const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> = {
@@ -27,8 +26,6 @@ const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> 
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url), path = url.pathname;
-    const remote = await remoteSandboxRoutes(request, env);
-    if (remote) return remote;
     const media = await handleMediaRequest(request, { bucket: env.ASSETS, authenticateAdmin: req => authenticated(req, env.ADMIN_TOKEN) });
     if (media) return media;
     if (request.method === "POST" && path === "/gmail/pubsub") {

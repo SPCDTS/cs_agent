@@ -46,9 +46,9 @@ describe("admin routes", () => {
       expect(response.headers.get("x-content-type-options")).toBe("nosniff");
     }
     const html = await (await admin("GET", "/admin/", undefined, null)).text();
-    expect(html).toContain('data-view="sandbox"');
-    expect(html).toContain('id="sandbox-toggle"');
-    expect(html).toContain('id="sandbox-pair-create"');
+    expect(html).toContain('data-view="workspace"');
+    expect(html).toContain('id="workspace-panel"');
+    expect(html).not.toContain('data-view="sandbox"');
     expect(html.match(/<script[^>]*>/g)).toEqual(['<script src="/admin/app.js" defer>']);
     const script = await (await admin("GET", "/admin/app.js", undefined, null)).text();
     for (const sink of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "localStorage", "document.cookie"]) expect(script).not.toContain(sink);

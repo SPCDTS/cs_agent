@@ -1,10 +1,12 @@
+import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { Static, TSchema } from "typebox";
+import { Check } from "typebox/value";
 import type { SandboxDO } from "../sandbox/do";
-import { ResourceIdSchema } from "../sandbox/resources";
-import { CLOUDFLARE_SANDBOX } from "../sandbox/registration";
+import { CreateResourceSchema, ResourceIdSchema, ResourceListSchema, SandboxResourceSchema } from "../sandbox/resources";
+import { CLOUDFLARE_INSTRUCTIONS, CLOUDFLARE_RESOURCE_INSTRUCTIONS } from "../sandbox/registration";
 import { EXEC_MAX_TIMEOUT_MS, sandboxFailure, WORK_ROOT, type SandboxFailure, type ReadResult } from "../sandbox/client";
 
 export type SandboxApi = Pick<SandboxDO, "exec" | "readFile" | "writeFile" | "editFile">;
@@ -14,6 +16,11 @@ export type CodingDeps = {
   /** 由宿主验证本回合与工作区范围；每次嵌套调用都重新检查。 */
   allowed(api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, context: Context): Promise<boolean>;
   sandbox(id?: string): SandboxApi | Promise<SandboxApi>;
+  resources?: {
+    list(): Promise<Static<typeof ResourceListSchema>>;
+    create(operationId: string, input: Static<typeof CreateResourceSchema>): Promise<Static<typeof SandboxResourceSchema>>;
+    allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
+  };
   /** 可选的跨群只读入口；宿主仍逐次核对 owner 任务授权。 */
   readWorkspace?(input: WorkspaceReadInput, api: ToolExecutionApi, context: Context): Promise<ReadResult>;
   /** 审计只记分类、耗时、命令长度与退出码，不记命令、路径、文件内容与输出。 */
@@ -178,9 +185,39 @@ export function createCodingExtension(deps: CodingDeps) {
       },
     }),
   ];
+  // DO RPC 对象带有生命周期 symbol。Code Mode 只接收经过验证的 JSON 数据。
+  function resourceResult<S extends TSchema>(schema: S, result: Static<S>): ToolExecutionResult {
+    const raw = JSON.stringify(result);
+    const value: unknown = JSON.parse(raw);
+    if (!Check(schema, value)) return text("invalid_resource：Cloudflare 工作区记录无效。", true);
+    return { ...text(raw), structuredOutput: value };
+  }
+  const resources = deps.resources;
+  const resourceTools = resources ? [
+    defineTool({ name: "sandbox_list", replay: "safe", callers: ["tools"],
+      description: "列出当前会话的 Cloudflare 工作区 resources 与默认 ID assignedSandboxId。",
+      parameters: Type.Object({}, { additionalProperties: false }), structuredOutputSchema: ResourceListSchema,
+      execute: async (_args, api, context) => {
+        if (!await resources.allowed(api, context)) return text(NOT_ALLOWED, true);
+        return resourceResult(ResourceListSchema, await resources.list());
+      } }),
+    defineTool({ name: "sandbox_create", replay: "safe", callers: ["tools"],
+      description: "创建独立的 Cloudflare 工作区。传 sourceId 复制来源已保存的源码；省略时创建空工作区。把返回的 id 传给 subagent.spawn.sandboxId 可分配给子任务。",
+      parameters: CreateResourceSchema, structuredOutputSchema: SandboxResourceSchema,
+      execute: async (args, api, context) => {
+        if (!await resources.allowed(api, context)) return text(NOT_ALLOWED, true);
+        try {
+          const operationId = "task:" + createHash("sha256").update(String(api.taskId)).digest("hex");
+          return resourceResult(SandboxResourceSchema, await resources.create(operationId, args));
+        } catch (error) {
+          const code = error instanceof Error && /^[a-z_]{1,100}$/.test(error.message) ? error.message : "sandbox_error";
+          return text(code + "：无法创建 Cloudflare 工作区。", true);
+        }
+      } }),
+  ] : [];
   return defineExtension({
     name: "cs.coding",
-    sections: [section("sandbox", async (api, context) => api.agent.callable.some(tool => tool.name === "bash") && await deps.allowed({ ...api.read, conversationId: api.conversationId }, context) ? CLOUDFLARE_SANDBOX.instructions : undefined, { tag: false })],
-    tools: tools.map(tool => ({ ...tool, callers: ["tools"] as const })),
+    sections: [section("sandbox", async (api, context) => api.agent.callable.some(tool => tool.name === "bash") && await deps.allowed({ ...api.read, conversationId: api.conversationId }, context) ? CLOUDFLARE_INSTRUCTIONS + (resources ? CLOUDFLARE_RESOURCE_INSTRUCTIONS : "") : undefined, { tag: false })],
+    tools: [...tools.map(tool => ({ ...tool, callers: ["tools"] as const })), ...resourceTools],
   });
 }

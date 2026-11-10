@@ -94,4 +94,54 @@ describe("MCP resources and delegated capabilities", () => {
       await delegated.close(); await mcp.close();
     });
   });
+
+  it("narrows delegated tool contracts and sends trusted caller scope separately from arguments", async () => {
+    const remote = fakeRemote(); await login(); await env.THREAD.getByName("owner").stats();
+    remote.state.tools = [
+      ...remote.state.tools.slice(0, 2),
+      { name: "notion-create-pages", inputSchema: { type: "object" },
+        outputSchema: { type: "object", properties: { requestId: { type: "string" } }, required: ["requestId"], additionalProperties: false } },
+    ];
+    const payload = { requestId: "synthetic-request" }, image = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
+    remote.state.toolResult = { structuredContent: payload, content: [image] };
+    await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
+      const db = new DurableObjectSqliteDatabase(state.storage); await db.exec(MCP_CATALOG_SCHEMA);
+      const mcp = new ThreadMcp(db, env, createRegistry(), async () => authority);
+      await mcp.refreshAll();
+      const complete = await mcp.captureCapabilities(authority);
+      const snapshot = await mcp.captureCapabilities(authority, [{ server: "notion", tools: ["notion-create-pages", "not-found"] }]);
+      const child = { ...authority, kind: "subagent" as const, subagentId: "child-one" };
+      expect(complete.tools).toHaveLength(3);
+      expect(snapshot.tools).toHaveLength(1);
+      expect(snapshot.resourceAllow).toEqual([]);
+      expect((await mcp.captureCapabilities(authority, [])).tools).toEqual([]);
+      const tool = snapshot.tools[0]!;
+      const unselected = complete.tools.find(name => name !== tool)!;
+      expect((await mcp.invoke({ name: unselected, args: {}, operationId: "outside", snapshot }, async () => child)).isError).toBe(true);
+      expect((await mcp.invoke({ name: "mcp_resources_list", args: { server: "notion" }, operationId: "outside", snapshot }, async () => child)).isError).toBe(true);
+      expect((await mcp.captureCapabilities({ ...authority, kind: "event" }, [{ server: "notion", tools: ["notion-create-pages"] }])).tools).toEqual([]);
+
+      const args = { _meta: { "cs-agent/caller": { scope: "model-supplied" } } };
+      const call = { name: tool, args, operationId: "submit" };
+      const direct = await mcp.invoke(call, async () => authority);
+      expect(direct).toMatchObject({ structuredOutput: payload, output: expect.arrayContaining([image]) });
+      const replay = await mcp.invoke(call, async () => authority);
+      expect(replay.structuredOutput).toEqual(payload);
+      expect(replay.output?.map(part => part.type)).toEqual(["text", "text"]);
+      await mcp.invoke({ ...call, operationId: "next-turn" }, async () => authority);
+      expect(await mcp.invoke({ ...call, snapshot }, async () => child)).toMatchObject({ structuredOutput: payload });
+      for (const who of [{ ...authority, generation: 2 }, { ...authority, replyChannel: "qq" as const }, { ...authority, actor: "another-owner" }]) {
+        await mcp.invoke(call, async () => who);
+      }
+      const calls = remote.requests.flatMap(request => request.body.includes('"method":"tools/call"') ? [JSON.parse(request.body).params] : []);
+      expect(calls).toHaveLength(6);
+      for (const params of calls) {
+        expect(params).toMatchObject({ arguments: args, _meta: { "cs-agent/caller": { scope: expect.stringMatching(/^[a-f0-9]{64}$/) } } });
+      }
+      const scopes = calls.map(params => params._meta["cs-agent/caller"].scope);
+      expect(scopes[0]).toBe(scopes[1]);
+      expect(new Set(scopes)).toHaveLength(5);
+      await mcp.close();
+    });
+  });
 });

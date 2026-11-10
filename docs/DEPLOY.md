@@ -61,4 +61,4 @@ HTTP 403 的 HTML 响应和 Cloudflare challenge 属于接入失败证据，不�
 
 代码清理不删除既有 `data/`、`workspace/`、`napcat/`、`secrets/` 或其他 worktree。老 worktree 可能通过目录链接共享根 node_modules，不能直接递归删除这份共享缓存。新 checkout 安装 `workers/` 和 `runner/` 各自的依赖；不能共享其他 worktree 的 node_modules。
 
-管理台的 **Sandbox** 标签页可启停远程任务、生成配对码、审批设备、取消任务和释放租约。开关在 Fleet 中持久保存，无需再次部署；`REMOTE_SANDBOX_ENABLED` 默认 `"false"`，仅在未保存运行时设置时生效。停用阻止新任务，已有任务的回传与清理通道保留。启用前按 [运行说明](REMOTE-SANDBOX-RUNBOOK.md) 核对设备配置；本机连接器另行运行。`workers/wrangler.smoke.jsonc` 仅用于本地链路验证，不是部署配置。
+远程 Windows 环境通过管理台的 MCP 服务接入，配置见 [Windows MCP](WINDOWS-MCP.md)。旧 Sandbox 标签、远程开关和配对协议已移除。上线前先用旧版本完成或取消远程任务并停止旧连接器；新服务使用独立状态目录，不复用或删除旧持久数据。Cloudflare 资源由 v12 DO class rename 保留，部署时必须连同迁移发布。

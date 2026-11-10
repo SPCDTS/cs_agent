@@ -1,185 +1,276 @@
-import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WsbBackend, type command } from "../src/wsb.ts";
-import { parse, JobInputSchema, ExecResultSchema } from "../src/protocol.ts";
-import { readJson, sha256 } from "../src/files.ts";
-import { prepareResourceFiles } from "../src/resource-files.ts";
-import { workspaceStorage } from "../src/storage.ts";
-import { capabilities, config, job, lease } from "./fixtures.ts";
+import { test, type TestContext } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import type { Execution, ExecutionStatus, WsbTarget } from "../src/domain.ts";
+import { atomicJson, readJson } from "../src/files.ts";
+import {
+  evidence, executionFiles, GuestInput, Marker, parse, SessionIntent, sessionFiles, wsbSessionDir,
+} from "../src/wsb-evidence.ts";
+import { runWsbExecution, runWsbGuardian } from "../src/wsb-execution.ts";
+import type { NativeWsb } from "../src/wsb-native.ts";
+import { WsbBackend } from "../src/wsb.ts";
 
-async function fixture(t: TestContext, persistent = false) {
-  const state = await fs.mkdtemp(path.join(os.tmpdir(), "cs-agent-wsb-unit-")), binding = lease();
-  const calls: { file: string; args: string[] }[] = [], live = new Set<string>(["unowned-instance"]);
-  let mode: "complete" | "hang" | "invalid" | "replace" = "complete", executions = 0, stopped: (() => void) | undefined;
-  const host: typeof command = async (file, args) => {
-    calls.push({ file, args }); assert.equal(file, "wsb.exe");
-    const action = args[0], id = args[args.indexOf("--id") + 1];
-    if (action === "list") return JSON.stringify({ WindowsSandboxEnvironments: [...live].map(Id => ({ Id })) });
-    if (action === "start") { live.add(id); return JSON.stringify({ Id: id }); }
-    if (action === "stop") { live.delete(id); stopped?.(); return "{}"; }
-    assert.equal(action, "exec");
-    const launcher = args[args.indexOf("--command") + 1];
-    const preparing = launcher.endsWith(" prepare");
-    assert.equal(launcher.replace(/ prepare$/, ""), '"C:\\AgentTools\\node\\node.exe" "C:\\AgentTools\\runner\\guest.mjs" "C:\\AgentInput\\input.json"');
-    if (!preparing) executions++;
-    const record = await readJson(path.join(state, "instance.json"));
-    assert.ok(record && typeof record === "object" && "leaseId" in record && typeof record.leaseId === "string");
-    const root = path.join(state, "sessions", sha256(record.leaseId)), output = path.join(root, "output/outcome.json");
-    const input = parse(JobInputSchema, await readJson(path.join(root, "input/input.json")));
-    assert.equal(input.tool, "powershell");
-    if (mode === "hang") { await new Promise<void>(resolve => { stopped = resolve; }); throw new Error("guest_stopped"); }
-    if (mode === "invalid") { await fs.writeFile(output, "invalid", "utf8"); return "{}"; }
-    if (preparing) {
-      const directive = input.lease.resourcePreparation; assert.ok(directive);
-      const work = path.join(dataDir, "projects", sha256(input.lease.workspace));
-      await prepareResourceFiles(work, directive.kind === "clone" ? path.join(dataDir, "projects", sha256(directive.sourceWorkspace)) : undefined);
-    }
-    if (mode === "replace") await fs.rename(output, path.join(root, "output/original.json"));
-    await fs.writeFile(output, JSON.stringify({ kind: "completed", result: { stdout: "中文 " + executions, stderr: "", code: 0, timedOut: false, truncated: false } }), "utf8");
-    return "{}";
-  };
-  const dataDir = state + "-data";
-  const backend = new WsbBackend(state, { ...config(binding.deviceId), ...(persistent ? { dataDir, gitDir: path.join(state, "tools/git") } : {}) }, path.join(state, "checkout/runner/dist"), { command: host, capabilities: async () => capabilities });
-  t.after(async () => { await backend.stopOwned(); await fs.rm(state, { recursive: true, force: true }); await fs.rm(dataDir, { recursive: true, force: true }); });
-  return { backend, binding, calls, live, state, dataDir, host, setMode(value: typeof mode) { mode = value; }, run(command = "probe") { return backend.run(job(binding, command), new AbortController().signal, () => undefined); } };
-}
-test("同租约连续命令复用 VM；模型命令只进入 guest 输入文件", async t => {
-  const f = await fixture(t), first = await f.run("New-Item .git,node_modules -ItemType Directory"), second = await f.run("Get-ChildItem");
-  assert.equal(first.kind, "completed"); assert.equal(second.kind, "completed");
-  if (second.kind === "completed") assert.equal(parse(ExecResultSchema, second.result).stdout, "中文 2");
-  assert.equal(f.calls.filter(x => x.args[0] === "start").length, 1);
-  assert.equal(f.calls.filter(x => x.args[0] === "stop").length, 0);
-  const ids = f.calls.filter(x => x.args[0] === "exec").map(x => x.args[x.args.indexOf("--id") + 1]);
-  assert.equal(ids[0], ids[1]);
-  assert.equal(JSON.stringify(f.calls).includes("New-Item"), false);
-  const start = f.calls.find(x => x.args[0] === "start"); assert.ok(start);
-  const xml = start.args[start.args.indexOf("--config") + 1];
-  assert.equal(xml.includes("C:\\AgentWork"), false);
-  assert.equal(xml.includes("AgentNpm"), false);
-  await assert.rejects(f.backend.release("another-lease"), /lease_mismatch/);
-  assert.equal(f.live.size, 2);
-  await f.backend.release(f.binding.id); await f.backend.release(f.binding.id);
-  assert.deepEqual([...f.live], ["unowned-instance"]);
-  assert.deepEqual(await f.run(), { kind: "failed", error: "session_lost", sessionLost: true });
+const unowned = randomUUID();
+const target: WsbTarget = { kind: "wsb", id: "wsb", memoryMb: 4096, idleTimeoutMs: 60000, maxLifetimeMs: 60000 };
+const task = (sessionId: string, script = "Get-Location", timeoutMs = 20000): Execution => ({
+  id: randomUUID(), requestId: randomUUID(), subject: { principal: "owner", scope: "test" }, target, sessionId,
+  command: { kind: "powershell", script, timeoutMs }, deadline: Date.now() + timeoutMs,
 });
-test("新租约重新映射同一工作区的数据，释放不删除持久文件", async t => {
-  const f = await fixture(t, true); await f.run();
-  const work = path.join(f.dataDir, "projects", sha256(f.binding.workspace));
-  await fs.writeFile(path.join(work, "kept.txt"), "源码与依赖", "utf8");
-  await f.backend.release(f.binding.id);
-  const next = { ...lease(), deviceId: f.binding.deviceId };
-  assert.equal((await f.backend.run(job(next), new AbortController().signal, () => undefined)).kind, "completed");
-  assert.equal(await fs.readFile(path.join(work, "kept.txt"), "utf8"), "源码与依赖");
-  for (const start of f.calls.filter(call => call.args[0] === "start")) {
-    const xml = start.args[start.args.indexOf("--config") + 1];
-    assert.ok(xml.includes("C:\\AgentWork")); assert.ok(xml.includes("C:\\AgentCache\\npm"));
-    assert.ok(xml.includes(work)); assert.equal(xml.includes("<HostFolder>" + f.state + "</HostFolder>"), false);
+const defer = () => Promise.withResolvers<void>();
+
+class Sandbox implements NativeWsb {
+  readonly running = new Set<string>([unowned]);
+  readonly starts: Array<{ id: string; xml: string }> = [];
+  readonly stops: string[] = [];
+  readonly shares = new Map<string, { id: string; host: string; writable: boolean }>();
+  readonly executions: string[] = [];
+  startGate?: Promise<void>;
+  runGate?: Promise<void>;
+  failList = false;
+  failStop = false;
+  mode: "normal" | "replace" | "oversize" | "wrong-id" = "normal";
+
+  async start(id: string, xml: string) {
+    this.starts.push({ id, xml });
+    await this.startGate;
+    this.running.add(id);
+  }
+  async list() {
+    if (this.failList) throw new Error("list unavailable");
+    return [...this.running];
+  }
+  async stop(id: string) {
+    this.stops.push(id);
+    if (this.failStop) throw new Error("stop unavailable");
+    this.running.delete(id);
+  }
+  async share(id: string, host: string, guest: string, writable: boolean) {
+    assert.ok(this.running.has(id));
+    this.shares.set(guest, { id, host, writable });
+  }
+  async exec(id: string, input: string, output: string) {
+    assert.ok(this.running.has(id));
+    this.executions.push(id);
+    await this.runGate;
+    if (!this.running.has(id)) throw new Error("sandbox was stopped");
+    const mapped = (file: string, writable: boolean) => {
+      const folder = this.shares.get(path.win32.dirname(file));
+      assert.ok(folder?.id === id && folder.writable === writable);
+      return path.join(folder.host, path.win32.basename(file));
+    };
+    const job = parse(GuestInput, await readJson(mapped(input, false)));
+    const result = mapped(output, true);
+    if (this.mode === "replace") await fs.rename(result, result + ".preopened");
+    if (this.mode === "oversize") {
+      await fs.writeFile(result, "X".repeat(200000));
+      return;
+    }
+    await fs.writeFile(result, JSON.stringify({
+      id: this.mode === "wrong-id" ? randomUUID() : job.id,
+      result: { exitCode: 7, stdout: job.script, stderr: "", truncated: false },
+    }), "utf8");
+  }
+}
+
+async function until<T>(probe: () => T | undefined | Promise<T | undefined>): Promise<T> {
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const value = await probe();
+    if (value !== undefined) return value;
+    await delay(20);
+  }
+  throw new Error("wsb test observation deadline");
+}
+
+async function fixture(t: TestContext, { beforeExecute, dropExecution = false }: {
+  beforeExecute?: Promise<void>; dropExecution?: boolean;
+} = {}) {
+  const state = await fs.mkdtemp(path.join(os.tmpdir(), "wsb-mcp-test-"));
+  const native = new Sandbox();
+  const sessions = new Set<string>();
+  const helpers: Promise<void>[] = [];
+  const adapters: NonNullable<ConstructorParameters<typeof WsbBackend>[1]> = {
+    native,
+    stage: async runtime => { await fs.mkdir(runtime); },
+    launch: async request => {
+      if (request.role === "execute" && dropExecution) return;
+      helpers.push((async () => {
+        if (request.role === "guard") await runWsbGuardian(request.dir, native);
+        else {
+          await beforeExecute;
+          await runWsbExecution(request.dir, request.id, native);
+        }
+      })());
+    },
+  };
+  const create = () => new WsbBackend(state, adapters);
+  const backend = create();
+  const session = () => {
+    const id = randomUUID();
+    sessions.add(id);
+    return id;
+  };
+  const dir = (id: string) => wsbSessionDir(state, id);
+  t.after(async () => {
+    for (const id of sessions) assert.equal(await backend.closeSession(id), true);
+    await Promise.all(helpers);
+    assert.deepEqual([...native.running], [unowned]);
+    const absolute = await fs.realpath(state);
+    assert.equal(absolute, path.join(await fs.realpath(os.tmpdir()), path.basename(state)));
+    await fs.rm(absolute, { recursive: true, force: true });
+  });
+  return { backend, create, dir, native, session };
+}
+
+const succeeded = async (backend: WsbBackend, execution: Execution): Promise<ExecutionStatus> => {
+  await backend.dispatch(execution);
+  return until(async () => {
+    const result = await backend.inspect(execution);
+    return result.state === "running" ? undefined : result;
+  });
+};
+
+test("同一会话复用原生 UUID，重建后读取收据，重复派发只执行一次", async t => {
+  const f = await fixture(t);
+  const session = f.session();
+  const first = task(session, "中文 $env:HOST_SECRET");
+  assert.deepEqual(await succeeded(f.backend, first), {
+    state: "succeeded", result: { exitCode: 7, stdout: "中文 $env:HOST_SECRET", stderr: "", truncated: false },
+  });
+  const restarted = f.create();
+  await restarted.dispatch(first);
+  assert.equal((await restarted.inspect(first)).state, "succeeded");
+  assert.equal((await succeeded(restarted, task(session))).state, "succeeded");
+  assert.equal(f.native.starts.length, 1);
+  assert.deepEqual(f.native.executions, [f.native.starts[0].id, f.native.starts[0].id]);
+  assert.match(f.native.starts[0].xml, /<SandboxFolder>C:\\AgentRuntime<\/SandboxFolder><ReadOnly>true/);
+  assert.match(f.native.starts[0].xml, /<ClipboardRedirection>Disable/);
+  assert.doesNotMatch(f.native.starts[0].xml, /AgentWork|AgentCache|sandbox-data|HOST_SECRET/);
+  assert.deepEqual([...f.native.shares.values()].map(row => row.writable), [false, true, false, true]);
+
+  assert.equal(await restarted.closeSession(session), true);
+  assert.equal(await restarted.closeSession(session), true);
+  assert.equal((await succeeded(restarted, task(f.session()))).state, "succeeded");
+  assert.notEqual(f.native.starts[1].id, f.native.starts[0].id);
+  assert.ok(!f.native.stops.includes(unowned));
+});
+
+test("启动尚未返回时空 list 不确认取消，迟到实例仍会按原生 UUID 回收", async t => {
+  const f = await fixture(t);
+  const gate = defer();
+  f.native.startGate = gate.promise;
+  const execution = task(f.session());
+  await f.backend.dispatch(execution);
+  try {
+    await until(() => f.native.starts[0]);
+    const recovered = f.create();
+    assert.deepEqual(await recovered.stop(execution), { state: "unknown", error: "wsb_stop_unconfirmed" });
+    assert.deepEqual(f.native.stops, []);
+  } finally {
+    gate.resolve();
+  }
+  assert.deepEqual(await until(async () => {
+    const status = await f.create().stop(execution);
+    return status.state === "unknown" ? undefined : status;
+  }), { state: "cancelled" });
+  assert.deepEqual(f.native.executions, []);
+  assert.deepEqual([...f.native.running], [unowned]);
+});
+
+test("启动助手拿到原生启动权前取消，迟到助手无法启动实例", async t => {
+  const gate = defer();
+  const f = await fixture(t, { beforeExecute: gate.promise });
+  const execution = task(f.session());
+  await f.backend.dispatch(execution);
+  try {
+    assert.deepEqual(await f.backend.stop(execution), { state: "cancelled" });
+  } finally {
+    gate.resolve();
+  }
+  await delay(50);
+  assert.deepEqual(f.native.starts, []);
+});
+
+test("list 和 stop 出错时保留清理状态，确认实例停止后才能取消", async t => {
+  const f = await fixture(t);
+  const gate = defer();
+  f.native.runGate = gate.promise;
+  const execution = task(f.session());
+  await f.backend.dispatch(execution);
+  try {
+    const owned = await until(() => f.native.executions[0]);
+    f.native.failList = true;
+    assert.equal((await f.backend.stop(execution)).state, "unknown");
+    assert.ok(f.native.running.has(owned));
+    f.native.failList = false;
+    f.native.failStop = true;
+    assert.equal((await f.backend.stop(execution)).state, "unknown");
+    assert.ok(f.native.running.has(owned));
+    f.native.failStop = false;
+    assert.deepEqual(await f.backend.stop(execution), { state: "cancelled" });
+    assert.ok(!f.native.running.has(owned));
+  } finally {
+    f.native.failList = f.native.failStop = false;
+    gate.resolve();
   }
 });
-test("取消销毁已记录 VM；失效租约不能重建，新的租约可以执行", async t => {
-  const f = await fixture(t); await f.run(); f.setMode("hang");
-  const abort = new AbortController();
-  const running = f.backend.run(job(f.binding), abort.signal, text => { if (text.includes("正在执行")) setTimeout(() => abort.abort(), 10); });
-  const outcome = await running;
-  assert.deepEqual(outcome, { kind: "cancelled", reason: "cancelled_instance_stopped", sessionLost: true });
-  assert.deepEqual([...f.live], ["unowned-instance"]);
-  assert.deepEqual(await f.run(), { kind: "failed", error: "session_lost", sessionLost: true });
-  f.setMode("complete");
-  const next = { ...lease(), deviceId: f.binding.deviceId };
-  assert.equal((await f.backend.run(job(next), new AbortController().signal, () => undefined)).kind, "completed");
-  const stops = f.calls.filter(x => x.args[0] === "stop");
-  assert.equal(stops.some(x => x.args.includes("unowned-instance")), false);
-});
-test("超时销毁 VM 并使租约失效", async t => {
-  const f = await fixture(t); f.setMode("hang");
-  assert.deepEqual(await f.run(), { kind: "cancelled", reason: "timeout_instance_stopped", sessionLost: true });
-  assert.deepEqual(await f.run(), { kind: "failed", error: "session_lost", sessionLost: true });
-});
-test("外部停止 VM 后返回 session_lost，不静默重建", async t => {
-  const f = await fixture(t); await f.run();
-  for (const id of f.live) if (id !== "unowned-instance") f.live.delete(id);
-  assert.deepEqual(await f.run(), { kind: "failed", error: "session_lost", sessionLost: true });
-  assert.equal(f.calls.filter(x => x.args[0] === "start").length, 1);
-});
-test("结果文件被替换时持有句柄不会改读新路径；故障令会话失效", async t => {
-  const f = await fixture(t); f.setMode("replace");
-  assert.deepEqual(await f.run(), { kind: "unknown", reason: "sandbox_execution_unconfirmed", sessionLost: true });
-  assert.deepEqual([...f.live], ["unowned-instance"]);
-  assert.deepEqual(await f.run(), { kind: "failed", error: "session_lost", sessionLost: true });
+
+test("缺少独立助手心跳时恢复报告未知，重复派发不会重放", async t => {
+  const f = await fixture(t, { dropExecution: true });
+  const session = f.session();
+  const execution = task(session);
+  await f.backend.dispatch(execution);
+  await atomicJson(executionFiles(f.dir(session), execution.id).request,
+    { deadline: execution.deadline, preparedAt: Date.now() - 6000 });
+  const recovered = f.create();
+  assert.deepEqual(await recovered.inspect(execution), { state: "unknown", error: "wsb_helper_unreachable" });
+  await recovered.dispatch(execution);
+  assert.deepEqual(f.native.starts, []);
+  assert.deepEqual(await recovered.stop(execution), { state: "cancelled" });
 });
 
-test("提供方复制文件并只读挂载来源；工作区与 npm 下载缓存独立", async t => {
-  const f = await fixture(t, true);
-  const parent = await workspaceStorage({ dataDir: f.dataDir, state: f.state, deviceId: f.binding.deviceId, protectedPaths: [], workspace: "parent" });
-  await fs.writeFile(path.join(parent.work, "dirty.txt"), "未提交内容", "utf8");
-  f.binding.workspace = "child"; f.binding.resourcePreparation = { kind: "clone", operationId: "clone-child", sourceWorkspace: "parent" };
-  assert.equal((await f.run()).kind, "completed");
-  const start = f.calls.find(call => call.args[0] === "start"); assert.ok(start);
-  const xml = start.args[start.args.indexOf("--config") + 1];
-  const source = path.join(f.dataDir, "projects", sha256("parent"));
-  const work = path.join(f.dataDir, "projects", sha256("child"));
-  const cache = path.join(f.dataDir, "cache", sha256("child"), "npm");
-  assert.ok(xml.includes("<HostFolder>" + source + "</HostFolder><SandboxFolder>C:\\AgentSource</SandboxFolder><ReadOnly>true</ReadOnly>"));
-  assert.ok(xml.includes("<HostFolder>" + work + "</HostFolder><SandboxFolder>C:\\AgentWork</SandboxFolder><ReadOnly>false</ReadOnly>"));
-  assert.ok(xml.includes("<HostFolder>" + cache + "</HostFolder><SandboxFolder>C:\\AgentCache\\npm</SandboxFolder><ReadOnly>false</ReadOnly>"));
-  assert.equal(await fs.readFile(path.join(work, "dirty.txt"), "utf8"), "未提交内容");
-  await fs.writeFile(path.join(work, "dirty.txt"), "子任务修改", "utf8");
-  await f.run();
-  await f.backend.release(f.binding.id);
-  // 新连接器、新租约继续使用宿主记录，不依赖 guest 文件里的完成标记。
-  const resumed = new WsbBackend(f.state, { ...config(f.binding.deviceId), dataDir: f.dataDir }, path.join(f.state, "checkout/runner/dist"), { command: f.host, capabilities: async () => capabilities });
-  t.after(() => resumed.stopOwned());
-  await fs.rm(source, { recursive: true });
-  const next = { ...f.binding, id: lease().id };
-  assert.equal((await resumed.run(job(next), new AbortController().signal, () => undefined)).kind, "completed");
-  assert.equal(await fs.readFile(path.join(work, "dirty.txt"), "utf8"), "子任务修改");
-  assert.equal(f.calls.filter(call => call.args.some(arg => arg.endsWith(" prepare"))).length, 1);
+test("拒绝结果替换、超限和不匹配的执行 ID", async t => {
+  const f = await fixture(t);
+  for (const mode of ["replace", "oversize", "wrong-id"] satisfies Sandbox["mode"][]) {
+    const session = f.session();
+    f.native.mode = mode;
+    const execution = task(session);
+    assert.deepEqual(await succeeded(f.backend, execution), { state: "unknown", error: "wsb_execution_unconfirmed" });
+    assert.equal(await f.backend.closeSession(session), true);
+  }
 });
 
-test("首次准备拒绝非空目标，已有资源和旧租约不会触发新的初始化", async t => {
-  const f = await fixture(t, true); await f.run(); await f.backend.release(f.binding.id);
-  const work = path.join(f.dataDir, "projects", sha256(f.binding.workspace));
-  await fs.writeFile(path.join(work, "keep.txt"), "保留", "utf8");
-  f.binding.id = lease().id;
-  f.binding.resourcePreparation = { kind: "create", operationId: "create-existing" };
-  assert.equal((await f.run()).kind, "failed");
-  assert.equal(await fs.readFile(path.join(work, "keep.txt"), "utf8"), "保留");
-  assert.equal(f.calls.filter(call => call.args.some(arg => arg.endsWith(" prepare"))).length, 0);
-  delete f.binding.resourcePreparation;
-  f.binding.workspaceSource = { workspace: "legacy-parent" };
-  assert.deepEqual(await f.run(), { kind: "failed", error: "legacy_preparation_requires_release", sessionLost: true });
+test("会话硬期限由独立 guardian 执行，已完成结果仍可恢复", async t => {
+  const f = await fixture(t);
+  const session = f.session();
+  const execution = { ...task(session), target: { ...target, maxLifetimeMs: 600 } };
+  assert.equal((await succeeded(f.backend, execution)).state, "succeeded");
+  const files = sessionFiles(f.dir(session));
+  const intent = await evidence(files.intent, SessionIntent);
+  assert.ok(intent);
+  assert.ok(f.native.running.has(intent.nativeId));
+  await until(() => evidence(files.closed, Marker));
+  assert.ok(!f.native.running.has(intent.nativeId));
+  assert.equal((await f.create().inspect(execution)).state, "succeeded");
 });
 
-test("准备失败不执行用户命令；pending 重试清理部分文件，完成记录不能换来源", async t => {
-  const f = await fixture(t, true);
-  const parent = await workspaceStorage({ dataDir: f.dataDir, state: f.state, deviceId: f.binding.deviceId, protectedPaths: [], workspace: "parent" });
-  await fs.writeFile(path.join(parent.work, "source.txt"), "来源", "utf8");
-  f.binding.resourcePreparation = { kind: "clone", operationId: "clone-once", sourceWorkspace: "parent" };
-  f.setMode("invalid");
-  assert.equal((await f.run()).kind, "failed");
-  assert.equal(f.calls.filter(call => call.args[0] === "exec").length, 1);
-  const work = path.join(f.dataDir, "projects", sha256(f.binding.workspace));
-  await fs.writeFile(path.join(work, "partial.txt"), "未完成", "utf8");
-  f.binding.id = lease().id; f.setMode("complete");
-  assert.equal((await f.run()).kind, "completed");
-  assert.deepEqual(await fs.readdir(work), ["source.txt"]);
-  await f.backend.release(f.binding.id);
-  f.binding.id = lease().id; f.binding.resourcePreparation.sourceWorkspace = "other";
-  assert.equal((await f.run()).kind, "failed");
-  assert.equal(await fs.readFile(path.join(work, "source.txt"), "utf8"), "来源");
-});
-
-test("创建空持久资源只准备一次，后续命令不清空新文件", async t => {
-  const f = await fixture(t, true);
-  f.binding.resourcePreparation = { kind: "create", operationId: "empty-resource" };
-  assert.equal((await f.run()).kind, "completed");
-  const work = path.join(f.dataDir, "projects", sha256(f.binding.workspace));
-  assert.deepEqual(await fs.readdir(work), []);
-  await fs.writeFile(path.join(work, "created.txt"), "用户文件", "utf8");
-  assert.equal((await f.run()).kind, "completed");
-  assert.equal(await fs.readFile(path.join(work, "created.txt"), "utf8"), "用户文件");
-  assert.equal(f.calls.filter(call => call.args.some(arg => arg.endsWith(" prepare"))).length, 1);
+test("执行助手在服务未参与时也会按任务截止时间销毁 guest", async t => {
+  const f = await fixture(t);
+  const gate = defer();
+  f.native.runGate = gate.promise;
+  const session = f.session();
+  const execution = task(session, "Start-Sleep 90", 500);
+  await f.backend.dispatch(execution);
+  try {
+    const id = await until(() => f.native.executions[0]);
+    await until(() => evidence(sessionFiles(f.dir(session)).closed, Marker));
+    assert.ok(!f.native.running.has(id));
+    assert.deepEqual(await f.create().inspect(execution), { state: "cancelled" });
+  } finally {
+    gate.resolve();
+  }
 });

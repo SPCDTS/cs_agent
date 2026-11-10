@@ -2,7 +2,8 @@ import type { TurnKind } from "../policy";
 import type { Catalog } from "./catalog";
 import { validateTool } from "./catalog";
 import { MCP_CONFIG } from "./config";
-import { Type } from "typebox";
+import { digest } from "./names";
+import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 export type McpAuthority = {
   kind: TurnKind; scope: string; actor: string; owner: boolean; generation: number; replyChannel: "web" | "qq";
@@ -11,6 +12,16 @@ export type McpAuthority = {
 export type McpCapabilitySnapshot = {
   scope: string; actor: string; generation: number; replyChannel: "web" | "qq"; catalogJson: string; tools: string[]; resourceAllow?: { server: string; prefixes: string[] }[];
 };
+export const McpToolSelectionSchema = Type.Array(Type.Object({
+  server: Type.String({ minLength: 1, maxLength: 64 }),
+  tools: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { minItems: 1, maxItems: 200, uniqueItems: true }),
+}, { additionalProperties: false }), { maxItems: 100 });
+export type McpToolSelection = Static<typeof McpToolSelectionSchema>;
+
+export function mcpCallerScope(authority: McpAuthority, thread: string): string {
+  return digest(["cs-agent/caller:v1", thread, authority.scope, authority.actor, authority.generation, authority.replyChannel, authority.subagentId ?? null]);
+}
+
 export type McpAuthorization = TurnKind | McpAuthority | undefined;
 /** 旧 owner-private 回调继续有效；群授权与审批必须由宿主传完整身份。 */
 export function mcpAuthority(value: McpAuthorization): McpAuthority | undefined {

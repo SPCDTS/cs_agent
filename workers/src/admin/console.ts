@@ -55,7 +55,6 @@ export const CONSOLE_NAV = String.raw`<aside class="sidebar">
     <button type="button" class="nav-btn" data-view="operations">任务与事件</button>
     <button type="button" class="nav-btn" data-view="access">权限与运维</button>
     <button type="button" class="nav-btn" data-view="workspace">工作区</button>
-    <button type="button" class="nav-btn" data-view="sandbox">Sandbox</button>
   </nav>
   <div class="sidebar-foot">会话、请求与上下文<br>在一个地方查看</div>
 </aside>`;
@@ -138,7 +137,6 @@ export const CONSOLE_APP_JS = String.raw`
     $("chat-input").value="";restorePending();renderConsoleThreads();if(cs.view==="chat")loadChat().catch(fail);
   }
   function consoleView(view){
-    if(cs.view==="sandbox"&&view!=="sandbox")sandboxClearPair();
     if(cs.view!==view){clearTimeout(cs.timer);stopTopology();detailCache.clear();toolCache.clear();cs.requestVersion++;if(cs.view==="chat"){cs.chatVersion++;cs.chatLoading=false;}}
     if(cs.view!=="usage"&&view==="usage"){cs.until=Date.now();cs.before=undefined;cs.pages=[];}
     cs.view=view;
@@ -151,7 +149,6 @@ export const CONSOLE_APP_JS = String.raw`
   }
   window.addEventListener("resize",()=>{clearTimeout(cs.resizeTimer);cs.resizeTimer=setTimeout(()=>{if(cs.chart&&cs.view==="usage")drawTokens(cs.chart.u,cs.chart.since,cs.chart.until);},100);});
   function resetConsole(){
-    resetSandboxAdmin();
     listPages.clear();resetTopology();
     clearTimeout(cs.timer);cs.timer=null;detailCache.clear();toolCache.clear();resetChatTrace();cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
     $("session-history").close();sh.version++;

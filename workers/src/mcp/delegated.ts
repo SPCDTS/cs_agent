@@ -1,11 +1,10 @@
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { boundedJson } from "./schema";
 import { mcpFailure } from "./result";
 import { defineExtension, defineTool, section, type Registry, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { installCodemode } from "../codemode";
 import { SandboxReadOutput } from "../tools/coding";
-import { compileMcpSchema } from "./schema";
+import { boundedJson, compileMcpSchema } from "./schema";
 import { MCP_CONFIG } from "./config";
 import { slug, toolNames } from "./names";
 import { snapshotCatalogs, type McpAuthority } from "./access";
@@ -60,10 +59,12 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
       sections: [section("mcp-delegation", () => "MCP 只能使用派出目录与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。")] }));
     for (const catalog of catalogs) registry.install(defineExtension({ name: `cs.subagent.mcp.${catalog.serverId}`, tools: catalog.tools.map(tool => {
       const name = toolNames(catalog, tool).nativeName, input = compileMcpSchema(tool.inputSchema, MCP_CONFIG.limits);
-      return defineTool({ name, description: tool.description, parameters: input.schema, replay: "unsafe", callers: ["tools"],
+      const output = tool.outputSchema ? compileMcpSchema(tool.outputSchema, MCP_CONFIG.limits) : undefined;
+      return defineTool({ name, description: tool.description, parameters: input.schema,
+        ...(output ? { structuredOutputSchema: output.schema } : {}), replay: "unsafe", callers: ["tools"],
         execute: (args, api) => host.subagentMcp(id, { name, args, operationId: String(api.taskId) }) });
     }) }));
-    registry.install(defineExtension({ name: "cs.subagent.mcp.resources", tools: (["list", "templates", "read"] as const).map(action => defineTool({
+    if (snapshot?.resourceAllow?.some(row => row.prefixes.length)) registry.install(defineExtension({ name: "cs.subagent.mcp.resources", tools: (["list", "templates", "read"] as const).map(action => defineTool({
       name: `mcp_resources_${action}`, description: "读取已授权 MCP 服务的资源或目录。",
       parameters: Type.Object({ server: Type.String({ minLength: 1, maxLength: 64 }), uri: Type.Optional(Type.String({ maxLength: 4096 })) }, { additionalProperties: false }),
       replay: "safe", callers: ["tools"], execute: (args, api) => host.subagentMcp(id, { name: `mcp_resources_${action}`, args, operationId: String(api.taskId) }),
@@ -72,7 +73,7 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
   return installCodemode(registry, {
     allowed: async () => {
       const access = await host.validateSubagentAccess(id);
-      return !!access && ((!!access.capabilities.coding || !!access.capabilities.remoteSandbox) && access.authority.owner || !!access.capabilities.mcp);
+      return !!access && (!!access.capabilities.coding && access.authority.owner || catalogs.length > 0 && !!access.capabilities.mcp);
     },
     namespaces: () => catalogs.map(c => ({ name: c.serverId, prefix: `mcp_${slug(c.serverId, 16)}_` })),
   });
@@ -110,7 +111,7 @@ export function createSubagentCapabilityHost(stub: object): SubagentCapabilityHo
           scope: Type.String(), actor: Type.String(), owner: Type.Boolean(), generation: Type.Integer({ minimum: 0 }),
           replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), subagentId: Type.Optional(Type.String()) }),
         sandbox: Type.Optional(SandboxResourceSchema),
-        capabilities: Type.Object({ sandboxId: Type.Optional(Type.String()), coding: Type.Optional(Type.Boolean()), remoteSandbox: Type.Optional(Type.Boolean()), mcp: Type.Optional(snapshot) }),
+        capabilities: Type.Object({ sandboxId: Type.Optional(Type.String()), coding: Type.Optional(Type.Boolean()), mcp: Type.Optional(snapshot) }),
       });
       if (!Check(schema, value)) throw new Error("delegation_denied");
       return value;

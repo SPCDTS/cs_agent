@@ -6,7 +6,7 @@ import { defineExtension, defineTool, section, type Registry, type ToolExecution
 import type { Env } from "../env";
 import { MediaRepository } from "../media/repository";
 import type { Resource, ResourceTemplate } from "@modelcontextprotocol/sdk/types.js";
-import { mcpAuthority, sameMcpOrigin, type McpAuthority, type McpAuthorization, type McpCapabilitySnapshot } from "./access";
+import { mcpAuthority, mcpCallerScope, sameMcpOrigin, type McpAuthority, type McpAuthorization, type McpCapabilitySnapshot, type McpToolSelection } from "./access";
 import { allowedResource, resourceInCatalog } from "./resources";
 export type { McpAuthority, McpAuthorization, McpCapabilitySnapshot } from "./access";
 import { MCP_CONFIG, type McpConfig, type McpServerConfig } from "./config";
@@ -27,7 +27,7 @@ export class ThreadMcp {
   private stopped = false;
   readonly policy: McpPolicyStore;
   constructor(private readonly db: SqliteDatabase, private readonly env: Env, private readonly registry: Registry,
-    private readonly authorize: AuthorizeMcp, private config: McpConfig = MCP_CONFIG, private readonly options: { scope?: string; current?(id: string, digest: string): Promise<boolean> } = {}) {
+    private readonly authorize: AuthorizeMcp, private config: McpConfig = MCP_CONFIG, private readonly options: { scope?: string; callerNamespace?: string; current?(id: string, digest: string): Promise<boolean> } = {}) {
     this.policy = new McpPolicyStore(db, config);
     if (config.enabled) for (const server of config.servers.filter(server => server.enabled)) this.entries.set(server.id,
       { server, listedAt: 0, lastUsed: 0, changed: 1, discovered: 0, tail: Promise.resolve(), pending: 0, ...(options.scope && options.scope !== "owner" ? { visible: new Set<string>() } : {}) });
@@ -180,17 +180,18 @@ export class ThreadMcp {
   private async call(entry: Entry, tool: CatalogTool, name: string, args: unknown, input: ReturnType<typeof compileMcpSchema>,
     output: ReturnType<typeof compileMcpSchema> | undefined, authorize: () => Promise<McpAuthorization>, operationId: string, context: Context): Promise<ToolExecutionResult> {
     const started = Date.now(); let dispatched = false, claimId: string | undefined, classification = "not_started", inputBytes = 0, outputBytes = 0;
-    const allowed = async () => {
+    const authorized = async () => {
       const authority = mcpAuthority(await authorize());
-      return !!authority && await this.allowed(entry, authority, tool.name);
+      return authority && await this.allowed(entry, authority, tool.name) ? authority : undefined;
     };
+    const callerScope = (authority: McpAuthority) => mcpCallerScope(authority, this.options.callerNamespace ?? authority.scope);
     try {
-      if (!await allowed()) { classification = "denied"; return mcpFailure(classification); }
+      if (!await authorized()) { classification = "denied"; return mcpFailure(classification); }
       const owned = boundedJson(args, this.config.limits.argumentBytes, this.config.limits.schemaDepth * 3 + 3);
       if (!Check(Type.Record(Type.String(), Type.Unknown()), owned) || !input.check(owned)) return mcpFailure("invalid_arguments");
       inputBytes = jsonBytes(owned);
       return await this.queued(entry, context.abortSignal, async signal => {
-        if (!await allowed() || !await this.current(entry)) { classification = "denied"; return mcpFailure(classification); }
+        if (!await authorized() || !await this.current(entry)) { classification = "denied"; return mcpFailure(classification); }
         const connection = await this.connect(entry, signal);
         if (entry.changed !== entry.discovered || Date.now() - entry.listedAt >= this.config.limits.catalogTtlMs) await this.refresh(entry, signal);
         if (entry.changed !== entry.discovered) throw new Error("catalog_changed_during_refresh");
@@ -198,9 +199,9 @@ export class ThreadMcp {
         if (!entry.catalog || !current || toolNames(entry.catalog, current).nativeName !== name || !entry.server.tools.allow.includes(tool.name)) {
           classification = "tool_retired"; return mcpFailure(classification);
         }
-        if (!await allowed() || !await this.current(entry)) { classification = "denied"; return mcpFailure(classification); }
-        const authority = mcpAuthority(await authorize());
-        if (!authority) return mcpFailure("denied");
+        const authority = await authorized();
+        if (!authority || !await this.current(entry)) { classification = "denied"; return mcpFailure(classification); }
+        const scope = callerScope(authority);
         const mutation = !(entry.server.tools.readOnly ?? entry.server.tools.eventAllow).includes(tool.name);
         if (mutation) {
           const claim = await this.policy.claim({ authority, server: entry.server.id, name, contract: toolNames(entry.catalog, current).fullDigest,
@@ -214,8 +215,15 @@ export class ThreadMcp {
           }
           claimId = claim.id;
         }
+        const currentAuthority = await authorized();
+        if (!currentAuthority || callerScope(currentAuthority) !== scope || !await this.current(entry)) {
+          classification = "denied";
+          const result = mcpFailure(classification);
+          if (claimId) await this.policy.finish(claimId, result);
+          return result;
+        }
         signal.throwIfAborted(); dispatched = true;
-        const remote = await connection.callTool(tool.name, owned, signal);
+        const remote = await connection.callTool(tool.name, owned, { scope }, signal);
         outputBytes = jsonBytes(remote);
         const result = convertMcpResult(remote, output, this.config.limits);
         classification = remote.isError ? "remote_error" : result.isError ? "result_rejected" : "ok";
@@ -277,12 +285,17 @@ export class ThreadMcp {
     return { status: "reviewed" as const, result };
   }
   /** 派出时复用本地目录快照；不会为每个子 agent 再拉取一次远端目录。 */
-  async captureCapabilities(authority: McpAuthority): Promise<McpCapabilitySnapshot> {
+  async captureCapabilities(authority: McpAuthority, selection?: McpToolSelection): Promise<McpCapabilitySnapshot> {
     const catalogs: Catalog[] = [], resourceAllow: { server: string; prefixes: string[] }[] = [];
     for (const entry of this.entries.values()) if (entry.catalog) {
+      const selected = selection?.filter(row => row.server === entry.server.id).flatMap(row => row.tools);
+      if (selected?.length === 0) continue;
       const tools: CatalogTool[] = [];
-      for (const tool of entry.catalog.tools) if (await this.allowed(entry, authority, tool.name)) tools.push(tool);
-      const prefixes = await this.policy.resourcePrefixes(authority, entry.server);
+      for (const tool of entry.catalog.tools) {
+        if ((!selected || selected.includes(tool.name)) && entry.server.tools.allow.includes(tool.name)
+          && await this.allowed(entry, authority, tool.name)) tools.push(tool);
+      }
+      const prefixes = selection === undefined ? await this.policy.resourcePrefixes(authority, entry.server) : [];
       if (prefixes.length) resourceAllow.push({ server: entry.server.id, prefixes });
       if (tools.length || prefixes.length) catalogs.push({ ...entry.catalog, tools });
     }

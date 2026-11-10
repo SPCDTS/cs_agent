@@ -2,10 +2,11 @@ import type { SqliteDatabase } from "@earendil-works/chord/sqlite";
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import { MCP_CONFIG, type McpConfig, type McpServerConfig } from "./config";
+import { MCP_CONFIG, type McpConfig, type McpLimits, type McpServerConfig } from "./config";
 import type { McpAuthority } from "./access";
 import { digest } from "./names";
 import { mcpFailure } from "./result";
+import { boundedJson } from "./schema";
 
 export const MCP_POLICY_SCHEMA = `
 CREATE TABLE IF NOT EXISTS mcp_access(scope TEXT NOT NULL,server_id TEXT NOT NULL,value_json TEXT NOT NULL,revision TEXT NOT NULL,PRIMARY KEY(scope,server_id));
@@ -34,14 +35,27 @@ const GrantInput = Type.Object({ tools: Type.Array(Type.String({ minLength: 1, m
  resourceAllow: Type.Array(Type.String({ minLength: 1, maxLength: 2048 }), { maxItems: 100, uniqueItems: true }),
  actors: Type.Array(Type.String({ pattern: "^(?:[1-9][0-9]{0,19}|admin:web|\\*)$" }), { minItems: 1, maxItems: 100, uniqueItems: true }),
  expiresAt: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]) }, { additionalProperties: false });
-const Result = Type.Object({ isError: Type.Optional(Type.Boolean()), output: Type.Optional(Type.Array(Type.Object({ type: Type.Literal("text"), text: Type.String() }))) });
-function parseResult(raw: string): ToolExecutionResult {
+const Result = Type.Object({ isError: Type.Optional(Type.Boolean()), structuredOutput: Type.Optional(Type.Unknown()),
+ output: Type.Optional(Type.Array(Type.Object({ type: Type.Literal("text"), text: Type.String() }))) }, { additionalProperties: false });
+
+function receiptOutput(value: unknown, limits: McpLimits) {
+ if (value === undefined) return {};
+ try { return { structuredOutput: boundedJson(value, limits.structuredBytes, limits.schemaDepth * 3 + 3) }; }
+ catch { return {}; }
+}
+
+function parseResult(raw: string, limits: McpLimits): ToolExecutionResult {
  const value: unknown = JSON.parse(raw);
  if (!Check(Result, value)) throw new McpPolicyError("invalid");
- return value;
+ const { structuredOutput, ...result } = value;
+ return { ...result, ...receiptOutput(structuredOutput, limits) };
 }
-const receipt = (result: ToolExecutionResult) => JSON.stringify({ ...(result.isError ? { isError: true } : {}), output: (result.output ?? []).map(content =>
- content.type === "text" ? content : { type: "text", text: "[原调用的图片保留在原结果中；回执不重复保存图片数据]" }) });
+
+const receipt = (result: ToolExecutionResult, limits: McpLimits) => JSON.stringify({
+ ...(result.isError ? { isError: true } : {}), ...receiptOutput(result.structuredOutput, limits),
+ output: (result.output ?? []).map(content => content.type === "text" ? content
+  : { type: "text", text: "[原调用的图片保留在原结果中；回执不重复保存图片数据]" }),
+});
 
 /** 三张本线程表：不增加 DO，目录缓存与 OAuth 仍沿用现有所有者。 */
 export class McpPolicyStore {
@@ -124,7 +138,7 @@ export class McpPolicyStore {
    const invocation = await tx.get<{ payload_digest: string; status: string; result_json: string | null }>("SELECT * FROM mcp_invocations WHERE id=?", id);
    if (invocation) {
     if (invocation.payload_digest !== payload) throw new McpPolicyError("conflict");
-    return { kind: "result", result: invocation.status === "succeeded" && invocation.result_json ? parseResult(invocation.result_json) : mcpFailure("outcome_unknown") };
+    return { kind: "result", result: invocation.status === "succeeded" && invocation.result_json ? parseResult(invocation.result_json, this.config.limits) : mcpFailure("outcome_unknown") };
    }
    let approval = await tx.get<McpApproval>("SELECT * FROM mcp_approvals WHERE id=?", id);
    if (approval && approval.payload_digest !== payload) throw new McpPolicyError("conflict");
@@ -148,7 +162,7 @@ export class McpPolicyStore {
  }
  async finish(id: string, result: ToolExecutionResult, unknown = false) {
   await this.initialize();
-  const state = unknown ? "unknown" : "succeeded", json = unknown ? null : receipt(result);
+  const state = unknown ? "unknown" : "succeeded", json = unknown ? null : receipt(result, this.config.limits);
   await this.db.transaction(async tx => {
    await tx.run("UPDATE mcp_invocations SET status=?,result_json=? WHERE id=?", state, json, id);
    await tx.run("UPDATE mcp_approvals SET status=?,result_json=? WHERE id=?", state, json, id);

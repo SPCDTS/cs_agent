@@ -45,3 +45,7 @@ Token 不通过聊天或模型工具参数接收，不回显。凭据使用现�
 接纳新输入时同步配置；agent 启用服务后立即刷新目录。调用前核对当前配置，停用、删除或更换服务后，旧会话及已派发子任务不能继续使用旧连接执行新的调用。已经发出的远端操作无法通过停用撤回。无需新增 DO 类型、容器、Cloudflare API 权限或定时任务。
 
 本地 stdio 服务仍需本机程序与 HTTPS 桥接。此接入机制不会自动安装本机软件，也不会修改 CS2 Workshop 项目。
+
+## Windows 远程环境
+
+Hyper-V 持久工作区和临时 WSB 使用同一个标准 MCP 服务接入，安装、Tunnel、Token 与工具选择见 [Windows MCP](WINDOWS-MCP.md)。Cloudflare Container 保留原生 coding，不迁移为 MCP。

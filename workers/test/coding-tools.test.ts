@@ -2,12 +2,11 @@ import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { SandboxDO } from "../src/sandbox/do";
-import { CLOUDFLARE_SANDBOX } from "../src/sandbox/registration";
+import { CLOUDFLARE_INSTRUCTIONS, CLOUDFLARE_RESOURCE_INSTRUCTIONS } from "../src/sandbox/registration";
 import { workPath } from "../src/sandbox/client";
 import { RegistryDO } from "../src/registry";
 import { BridgeDO } from "../src/bridge";
 import { threadWithBindings } from "./thread-fixture";
-import { SandboxFleetDO, type CatalogEntry } from "../src/remote-sandbox/fleet";
 import { MCP_CONFIG } from "../src/mcp/config";
 import { scriptedModel } from "./events-helpers";
 import { input } from "./helpers";
@@ -42,10 +41,10 @@ describe("coding tools", () => {
     const seen = scriptedModel([{ name: "", args: {} }, { name: "", args: {} }]);
     expect(await env.THREAD.getByName("owner").submit(input(1, "写个脚本", 10000001))).toEqual({ status: "done" });
     expect(seen.requests[0]!.tools).toContain("codemode");
-    expect(Object.values(seen.requests[0]!.sections)).toContain(CLOUDFLARE_SANDBOX.instructions);
+    expect(Object.values(seen.requests[0]!.sections)).toContain(CLOUDFLARE_INSTRUCTIONS + CLOUDFLARE_RESOURCE_INSTRUCTIONS);
     for (const name of [...CODING_TOOLS, "skill_inspect", "skill_publish"]) expect(seen.requests[0]!.tools).not.toContain(name);
     expect(await env.THREAD.getByName("group:200000001").submit(input(2, "跑个脚本", 10000003, 200000001, true))).toEqual({ status: "done" });
-    expect(Object.values(seen.requests[1]!.sections)).toContain(CLOUDFLARE_SANDBOX.instructions);
+    expect(Object.values(seen.requests[1]!.sections)).toContain(CLOUDFLARE_INSTRUCTIONS);
     for (const name of CODING_TOOLS) expect(seen.requests[1]!.tools).not.toContain(name);
   });
 
@@ -59,47 +58,9 @@ describe("coding tools", () => {
     expect(seen.outputs.join("\n")).toContain("ok");
   });
 
-  it.each([
-    { provider: "windows-wsb", os: "windows", tool: "powershell", script: "Write-Output hello", root: "C:\\AgentWork", instructions: "使用 PowerShell；文件保留到释放。" },
-    { provider: "custom-notebook", os: "linux", tool: "python_cell", script: "print('hello')", root: "/notebooks", instructions: "使用 python_cell；变量保留到 kernel 重启，输出为 cell 结果。" },
-  ])("renders $provider registration instructions and calls its tool in one Code Mode script", async target => {
-    await env.SANDBOX_FLEET.getByName("owner").putSettings({ enabled: true, expectedRevision: 0 });
-    vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
-    const deviceId = "11111111-1111-1111-1111-111111111111", sandboxId = "remote:" + deviceId, revision = "a".repeat(64);
-    const resource: CatalogEntry = { id: sandboxId, name: "测试沙箱", provider: target.provider, os: target.os, arch: "x64", instructions: target.instructions,
-      tools: [{ name: target.tool, description: "执行代码", inputSchema: { type: "object", properties: { script: { type: "string" } }, required: ["script"] } }],
-      memoryMiB: 4096, maxTimeoutMs: 120000, capabilityRevision: revision, availability: "ready", activeJobs: 0,
-      workspaceRoot: target.root, persistence: "由测试提供方管理持久卷。", mismatch: [] };
-    vi.spyOn(SandboxFleetDO.prototype, "catalogJson").mockResolvedValue(JSON.stringify([{ ...CLOUDFLARE_SANDBOX, mismatch: [] }, resource]));
-    vi.spyOn(SandboxFleetDO.prototype, "sessions").mockResolvedValue([]);
-    const workspace = env.SANDBOX.idFromName("owner").toString();
-    vi.spyOn(SandboxFleetDO.prototype, "acquire").mockResolvedValue({ id: "lease-one", deviceId, sandboxId, workspace,
-      operationId: "fixture", capabilityRevision: revision, requirements: {}, createdAt: 1 });
-    const invoke = vi.spyOn(SandboxFleetDO.prototype, "invoke").mockResolvedValue({ jobId: "job-one", phase: "dispatched" });
-    const seen = scriptedModel([{ name: "codemode", args: { code: `const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.id.startsWith("remote:")); text(target.instructions); const lease=await tools.sandbox_acquire({sandboxId:list.resources.find(r=>r.providerId===target.id).id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:target.tools[0].name,arguments:{script:${JSON.stringify(target.script)}}}));` } }]);
-    await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
-      await threadWithBindings(_instance, state, { ...env, REMOTE_SANDBOX_ENABLED: "true", MEMORY_EXTRACT_NAMESPACES: "" }).submit(input(1, "远程运行", 10000001));
-    });
-    expect(invoke, seen.outputs.join("\n")).toHaveBeenCalledWith(workspace, expect.stringMatching(/^task:/), { leaseId: "lease-one", tool: target.tool, arguments: { script: target.script }, timeoutMs: 120000 });
-    expect(Object.values(seen.requests[0]!.sections).join("\n")).toContain(target.instructions);
-    expect(Object.values(seen.requests[0]!.sections).join("\n")).toContain(resource.persistence);
-    expect(seen.outputs.join("\n")).toContain(target.instructions);
-    expect(seen.outputs.join("\n")).toContain("job-one");
-    for (const name of ["sandbox_list", "sandbox_acquire", "sandbox_call", "sandbox_job", "sandbox_release"]) expect(seen.requests[0]!.tools).not.toContain(name);
-  });
-
-  it("enables and disables remote calls in the same live harness without redeploying", async () => {
-    const call = { name: "codemode", args: { code: "text(await tools.sandbox_list({}));" } }, stop = { name: "", args: {} };
-    const seen = scriptedModel([call, stop, call, stop, call, stop]);
-    const thread = env.THREAD.getByName("owner"), fleet = env.SANDBOX_FLEET.getByName("owner");
-    await thread.submit(input(1, "查看沙箱", 10000001));
-    expect(seen.outputs[0]).toContain('"enabled":false');
-    await fleet.putSettings({ enabled: true, expectedRevision: 0 });
-    await thread.submit(input(2, "再查看沙箱", 10000001));
-    expect(seen.outputs[1]).toContain("cloudflare");
-    await fleet.putSettings({ enabled: false, expectedRevision: 1 });
-    await thread.submit(input(3, "停用后查看", 10000001));
-    expect(seen.outputs[2]).toContain('"enabled":false');
+  it("retired device endpoints are unavailable", async () => {
+    expect((await admin("GET", "/admin/sandbox-devices/overview")).status).toBe(404);
+    expect((await admin("POST", "/sandbox-devices/claim")).status).toBe(404);
   });
 
   it("passes sandbox images through structured read and image() into the model transcript", async () => {

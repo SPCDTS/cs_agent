@@ -29,6 +29,6 @@
 
 ## 外部服务
 
-模型和 Gmail 由 Worker 直接请求；MCP 由云端客户端连接远程 HTTPS 服务。CS2 Workshop 本体在独立项目，本仓库仅提供本机 MCP / Tunnel 接入。编码工具仍需 Cloudflare 容器，由 `workers/sandbox/Dockerfile` 构建。
+模型和 Gmail 由 Worker 直接请求；MCP 由云端客户端连接远程 HTTPS 服务。CS2 Workshop 本体在独立项目，本仓库仅提供本机 MCP / Tunnel 接入。原生 coding 工具使用 Cloudflare 容器，由 `workers/sandbox/Dockerfile` 构建；其他远程环境通过 MCP 接入。`runner/` 的 Windows MCP 服务提供 Hyper-V 持久工作区与临时 WSB，执行文件不经过 R2。
 
 具体边界见 [Workers 运行设计](WORKERS-DESIGN.md)、[权限与发送](CLOUD-ACCESS-CONTRACT.md)、[资产与工作区](CLOUD-ASSETS-CONTRACT.md)、[MCP 与子 agent](CLOUD-MCP-CONTRACT.md)。管理入口见 [管理台](ADMIN-CONSOLE.md)。

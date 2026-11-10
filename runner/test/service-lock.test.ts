@@ -1,0 +1,23 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import os from 'node:os';
+import path from 'node:path';
+import { acquireServiceLock } from '../src/service-lock.ts';
+test('服务锁阻止两个进程同时调度，进程意外退出后由 OS 释放', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'windows-mcp-lock-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const moduleUrl = new URL('../src/service-lock.ts', import.meta.url).href;
+  const script = `import { acquireServiceLock } from ${JSON.stringify(moduleUrl)}; acquireServiceLock(process.argv[1]); console.log('ready'); setInterval(() => {}, 1000);`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script, dir], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const closed = once(child, 'close');
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  const [chunk] = await once(child.stdout, 'data'); assert.match(String(chunk), /ready/);
+  assert.throws(() => acquireServiceLock(dir), /service_lock_unavailable/);
+  child.kill(); await closed;
+  const release = acquireServiceLock(dir);
+  assert.throws(() => acquireServiceLock(dir), /service_lock_unavailable/);
+  release(); release(); acquireServiceLock(dir)();
+});

@@ -8,7 +8,7 @@
 
 启用 coding 时，子 agent 的系统提示明确说明 `/work` 是所分配资源的持久工作区，相对路径从这里解析，产物放在 `/work/out/`。宿主在写入、编辑和命令执行后自动提交快照，只有成功提交的文件能在沙箱重建后恢复；提交失败或结果不确定不能当作已保存。`/work` 之外的文件、运行进程与系统环境修改不持久化，同资源的 agent 直接共享修改，独立资源之间不自动同步，产物路径通过最终回答交回父 agent。
 
-WSB 与其他远程沙箱复用主 agent 的 sandbox_list/acquire/call/job/release 工具和 Fleet 服务。只有主人会话的有效任务才能委派 remoteSandbox 能力，远程开关仅限制实际执行；每次调用复核父线程当前身份、会话代次和取消状态，以及远程沙箱开关。子 DO ID 只用于任务归属，物理工作区与运行租约由分配的资源 ID 决定；同资源共享租约但不能取消其他 agent 的任务。设备实际槽位仍由提供方决定，不同资源忙碌时不能抢占。结果通过子任务回答交回；结束前须取回需要保留的内容，不能把 WSB 临时路径当作父工作区文件。完成、失败或取消后宿主退出自己的租约引用，其他引用仍在时保留实例；运行中或结果未知的远程任务先请求取消，待确认结束再释放，心跳负责补做。
+Cloudflare 之外的环境通过标准 MCP 接入，不使用专用 sandbox extension 或远程租约。Windows MCP 的 Hyper-V VM 是持久工作区，WSB 是临时 session；由工具说明暴露环境与存储语义。子任务是否共享 VM 取决于获得哪台 VM 的工具，不自动创建或复制工作区。临时 session 与作业归属由提供方依据可信调用 scope 校验，结果通过子报告交回。停止子任务不撤回已提交的远端命令，须在任务有效期间调用取消/关闭并等待确认；远端期限负责最终收尾。
 
 ## 父线程必须实现的接口
 
@@ -19,11 +19,13 @@ WSB 与其他远程沙箱复用主 agent 的 sandbox_list/acquire/call/job/relea
 - subagentSkill(id, input)：核验后读取当前已启用技能，不允许发布。
 - subagentCoding(id, operation)：核验后调用该子 agent 分配的资源；只有分配同一资源 ID 时才共享父工作区；operationId 是持久操作标识。
 
-spawn 的 sandboxId 来自 sandbox_list.resources；省略时继承父默认资源，需要独立工作时先 sandbox_create，再分配返回的 ID。旧子任务保持原绑定，不能通过后续 message 改绑。
+Cloudflare 的 sandbox_list/create 属于 cs.coding，spawn 的 sandboxId 来自 sandbox_list.resources；省略时继承父默认资源，需要独立工作时先 sandbox_create，再分配返回的 ID。旧子任务保持原绑定，不能通过后续 message 改绑。
 
-派出时调用 captureCapabilities(authority)，把结果放入 SubagentStart.capabilities.mcp；coding 与 remoteSandbox 能力只能由宿主设置。snapshot 的 catalogJson 是有界目录 JSON，避免递归 JSON 类型扩大 DO RPC 类型和序列化成本。每次业务调用核验当前身份和授权，目录快照只缩小权限，不能扩大权限。
+派出时调用 captureCapabilities(authority)，把结果放入 SubagentStart.capabilities.mcp；coding 能力只能由宿主设置。可选 spawn.mcpTools: [{server,tools}] 收窄 MCP raw tool 名，不得扩大父线程现有权限；省略时沿用当前能力。snapshot 的 catalogJson 是有界目录 JSON，避免递归 JSON 类型扩大 DO RPC 类型和序列化成本。每次业务调用核验当前身份和授权，目录快照只缩小权限，不能扩大权限。
 
 McpAuthority 必须由宿主构造，包含 kind、scope、actor、owner、generation 和 replyChannel。旧 owner-private 回调返回 TurnKind 仍可使用；群、网页与子 agent 应使用完整对象。网页来源的 replyChannel 必须保持 web，不能由审批、子任务或模型改成 QQ。
+
+宿主在 tools/call 的 params._meta["cs-agent/caller"] 中发送稳定的不透明 scope，覆盖真实线程、actor、generation、回复入口和 child 身份。主会话续轮保持 scope；子任务独立。模型工具参数不能填写或覆盖该值，第三方 MCP 可忽略这个扩展。
 
 ## 资源与图片
 
@@ -40,7 +42,7 @@ ThreadMcp 构造第六参传 {scope: threadNs}。群默认没有任何 Notion �
 
 MCP 配置的 tools.readOnly 是宿主维护的只读清单，不相信远端自行声明。群成员使用 owner 账号执行清单外工具时，每次产生独立审批；owner 本人也必须具有群工具 grant，但不需要审批自己的账号写入。事件回合不会借群授权调用 MCP。
 
-审批绑定 actor、scope、generation、replyChannel、server/tool contract、参数摘要、operationId 和 10 分钟有效期。批准只执行已保存的确切参数；HTTP 批准接口不接收新参数。重复同一操作返回回执；已执行但结果不明的请求只返回 outcome_unknown，不重新调用远端。拒绝、过期及授权变更使请求失效。原生图片保留在原调用结果中，SQLite 回执只保存文本摘要，避免重复存放图片造成套餐写入膨胀。
+审批绑定 actor、scope、generation、replyChannel、server/tool contract、参数摘要、operationId 和 10 分钟有效期。批准只执行已保存的确切参数；HTTP 批准接口不接收新参数。重复同一操作返回回执；已执行但结果不明的请求只返回 outcome_unknown，不重新调用远端。拒绝、过期及授权变更使请求失效。原生图片保留在原调用结果中，SQLite 回执保存文本摘要及有界结构化 JSON，保留任务 ID 等字段；图片不写入重复回执。
 
 主 runtime restore 时执行一次 recoverInterrupted，将 executing 账本标记 unknown；普通管理查询或 grant 读取不会执行恢复。reviewApproval(scope,id,decision,reviewer,current) 中的 current 回调由父宿主重新核验原 actor 和当前 generation，子 agent 还须核验登记与取消状态。回复入口必须与审批保存的入口一致。审批结果默认仅在网页面板与原工具回执可见，不主动向 QQ 发通知。
 

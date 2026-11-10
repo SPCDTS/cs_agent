@@ -10,13 +10,16 @@ it("持久任务授权绑定不同输入，权限缩小、归档、撤销和绑�
     const db = new DurableObjectSqliteDatabase(state.storage), tasks = new SandboxTasks(db);
     await db.exec(SANDBOX_TASK_SCHEMA);
     const input = { sourceInputId: "message:1", subject, workspace: "owner-workspace",
-      permissions: { coding: false, remote: { view: true, execute: false, control: true } } };
+      permissions: { coding: true } };
     const task = await tasks.issue(input);
     expect(await tasks.issue(input)).toEqual(task);
+    await db.run("UPDATE sandbox_tasks SET value=? WHERE id=?", JSON.stringify({
+      ...task, permissions: { ...task.permissions, remote: { view: true, execute: false, control: true } },
+    }), task.id);
     await tasks.bind("background:result", task.id);
     const resumed = new SandboxTasks(db);
     expect(await resumed.inputTask("background:result")).toBe(task.id);
-    expect((await resumed.resolve(task.id, subject))?.permissions.remote).toEqual({ view: true, execute: false, control: true });
+    expect((await resumed.resolve(task.id, subject))?.permissions).toEqual({ coding: true });
     for (const changed of [{ actor: "other" }, { generation: 3 }, { owner: false }, { scope: "group:1" }, { replyChannel: "web" as const }]) {
       expect(await resumed.resolve(task.id, { ...subject, ...changed })).toBeUndefined();
     }

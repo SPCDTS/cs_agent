@@ -8,7 +8,7 @@ import type { Delivery, DeliverySource } from "./delivery";
 import { gcMediaTickets, MediaRepository, type AssetRef } from "./media/repository";
 import { createMediaExtension } from "./tools/media";
 import { lookupHostMedia } from "./tools/media-host";
-import type { McpAuthority } from "./mcp/access";
+import type { McpAuthority, McpToolSelection } from "./mcp/access";
 import type { SubagentCodingOperation, SubagentCapabilityHost } from "./mcp/delegated";
 import { DurableObject } from "cloudflare:workers";
 import { historyCursor, historyEntry, readHistoryCursor } from "./sessions";
@@ -59,12 +59,10 @@ import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin, type SubagentView } from "./subagent/parent";
 import { subagentName, type SubagentIdentity, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
-import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject, type RemoteAction } from "./sandbox/task-access";
+import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject } from "./sandbox/task-access";
 import { createCodingExtension } from "./tools/coding";
 import { decodeFileRead } from "./sandbox/read";
 import { workPath } from "./sandbox/client";
-import { readResource, readResources } from "./sandbox/resources";
-import { createRemoteSandboxExtension } from "./tools/remote-sandbox";
 
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -289,7 +287,7 @@ export class ThreadDO extends DurableObject<Env> {
           } else text=await recall(this.database, scopeOf(targetOf(input)), query);
           return { output: [{ type: "text", text }] };
         },
-      }), this.subagents.tool(async (api, callContext, sandboxId) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext), sandboxId),
+      }), this.subagents.tool(async (api, callContext, selection) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext), selection),
         async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
     }));
     const ownerTaskAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
@@ -305,29 +303,20 @@ export class ThreadDO extends DurableObject<Env> {
     };
     const taskAccess = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
       this.sandboxTaskForInput(await this.currentInput(harness, api, api.conversationId, callContext));
-    const remoteSandboxAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context, action: RemoteAction) =>
-      !!(await taskAccess(api, callContext))?.permissions.remote[action];
     const codingAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
       !!(await taskAccess(api, callContext))?.permissions.coding;
-    // 远程设备与技能发布保留 owner 权限；Linux 工作区按会话隔离，每次嵌套调用复核。
-    if (memory.ns === "owner") registry.install(createRemoteSandboxExtension({
-      allowed: remoteSandboxAllowed,
-      createResource: true,
-      resources: async () => {
-        const resources = readResources(await this.env.SANDBOX_FLEET.getByName("owner").resourcesJson(memory.ns));
-        const current = resources.find(resource => resource.kind === "cloudflare" && resource.name === memory.ns);
-        if (!current) throw new Error("sandbox_not_found");
-        return { owner: memory.ns, assignedSandboxId: current.id, resources };
-      },
-      fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.env.SANDBOX.idFromName(memory.ns).toString(),
-      record: detail => this.audit("remote_sandbox", detail),
-    }));
+    const resources = this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
     if (memory.ns === "owner" || memory.ns.startsWith("group:")) registry.install(createCodingExtension({
       allowed: codingAllowed,
+      ...(memory.ns === "owner" ? { resources: {
+        allowed: ownerTaskAllowed,
+        list: () => resources.list(memory.ns),
+        create: (operationId, input) => resources.create(memory.ns, operationId, input),
+      } } : {}),
       sandbox: async id => {
         if (!id) return this.env.SANDBOX.getByName(memory.ns);
-        const resource = readResource(await this.env.SANDBOX_FLEET.getByName("owner").resourceJson(memory.ns, id));
-        if (resource.kind !== "cloudflare") throw new Error("invalid_request");
+        const resource = await resources.get(memory.ns, id);
+        if (!resource) throw new Error("invalid_request");
         return this.env.SANDBOX.getByName(resource.name);
       },
       readWorkspace: async ({ workspace, path, ...options }, api, context) => {
@@ -368,7 +357,7 @@ export class ThreadDO extends DurableObject<Env> {
     const mcp = new ThreadMcp(this.database, this.env, registry, async (api, callContext) => {
       const input = await this.currentInput(harness, api, api.conversationId, callContext);
       return this.mcpAuthority(input);
-    }, await this.env.REGISTRY.getByName("main").mcpConfig(), { scope: memory.ns,
+    }, await this.env.REGISTRY.getByName("main").mcpConfig(), { scope: memory.ns, callerNamespace: this.ctx.id.toString(),
       current: (id, digest) => this.env.REGISTRY.getByName("main").mcpServerCurrent(id, digest) });
     await mcp?.restore();
     if (memory.ns === "owner") registry.install(createMcpManagementExtension(this.env,
@@ -377,7 +366,7 @@ export class ThreadDO extends DurableObject<Env> {
       async refresh => { await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
       change => this.audit("mcp_management", { ...change, source: "agent" })));
     const codemode = installCodemode(registry, {
-      allowed: async (api, callContext) => await codingAllowed(api, callContext) || await remoteSandboxAllowed(api, callContext, "view") || await mcp.canUseCodemode(api, callContext),
+      allowed: async (api, callContext) => await codingAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
       namespaces: () => mcp.namespaces(),
     });
     // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
@@ -721,9 +710,7 @@ export class ThreadDO extends DurableObject<Env> {
       const task = await this.sandboxTasks.resolve(access.sandboxTask.id, subject);
       if (!task) return;
       await this.sandboxTasks.bind(input.message_id, task.id);
-      return { ...task, permissions: { coding: task.permissions.coding && !!access.capabilities.coding,
-        remote: { view: task.permissions.remote.view && !!access.capabilities.remoteSandbox,
-          execute: task.permissions.remote.execute && !!access.capabilities.remoteSandbox, control: task.permissions.remote.control && !!access.capabilities.remoteSandbox } } };
+      return { ...task, permissions: { coding: task.permissions.coding && !!access.capabilities.coding } };
     }
     let id = await this.sandboxTasks.inputTask(input.message_id);
     // 只在可信用户输入上签发；后台输入必须由宿主绑定已有任务，文本不能携带授权。
@@ -732,7 +719,7 @@ export class ThreadDO extends DurableObject<Env> {
       const coding = owner || scope.startsWith("group:") && input.chat_kind === "group" && scopeOf(targetOf(input)) === scope;
       if (!coding) return;
       const task = await this.sandboxTasks.issue({ sourceInputId: input.message_id, subject, workspace: this.env.SANDBOX.idFromName(scope).toString(),
-        permissions: { coding, remote: { view: owner, execute: owner, control: owner } } });
+        permissions: { coding } });
       id = task.id;
     }
     return id ? this.sandboxTasks.resolve(id, subject) : undefined;
@@ -751,19 +738,21 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     const access = await this.subagents.access(id,completed), as = access?.identity.as;
     if (!access || !as || access.origin.generation === undefined || access.origin.generation !== await this.sessionGeneration()) return;
-    const scope = await this.namespace(), capabilities = { ...access.origin.capabilities };
+    const scope = await this.namespace();
+    const { sandboxId, sandboxTask, coding, mcp } = access.origin.capabilities ?? {};
+    const capabilities = { ...(sandboxId === undefined ? {} : { sandboxId }), ...(sandboxTask ? { sandboxTask } : {}), ...(mcp ? { mcp } : {}), coding: !!coding };
     const subject = { scope, actor: as.userId, owner: as.owner, generation: access.origin.generation, replyChannel: access.origin.replyChannel ?? "qq" } satisfies SandboxSubject;
     // 兼容旧子任务：只从宿主保存且当前仍有效的身份和能力迁移一次授权。
-    if (!capabilities.sandboxTask && (capabilities.coding || capabilities.remoteSandbox)) {
+    if (!capabilities.sandboxTask && capabilities.coding) {
       const task = await this.sandboxTasks.issue({ sourceInputId: "legacy-child:" + id, subject, workspace: this.env.SANDBOX.idFromName(scope).toString(),
-        permissions: { coding: !!capabilities.coding, remote: { view: !!capabilities.remoteSandbox, execute: !!capabilities.remoteSandbox, control: !!capabilities.remoteSandbox } } });
+        permissions: { coding: true } });
       capabilities.sandboxTask = task.id;
       await this.database.run("UPDATE subagents SET origin_json=json_set(origin_json,'$.capabilities.sandboxTask',?) WHERE id=?", task.id, id);
     }
     const task = capabilities.sandboxTask ? await this.sandboxTasks.resolve(capabilities.sandboxTask, subject) : undefined;
-    capabilities.coding = !!task?.permissions.coding && !!capabilities.coding;
-    capabilities.remoteSandbox = !!task?.permissions.remote.view && !!capabilities.remoteSandbox;
-    const sandbox = capabilities.sandboxId ? readResource(await this.env.SANDBOX_FLEET.getByName("owner").resourceJson(scope, capabilities.sandboxId)) : undefined;
+    const sandbox = sandboxId === undefined ? null : await this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner").get(scope, sandboxId);
+    // 显式分配的旧远程资源或缺失资源一律拒绝，只有从未绑定 ID 的旧子任务沿用原工作区。
+    capabilities.coding = !!task?.permissions.coding && !!coding && (sandboxId === undefined || !!sandbox);
     return { ...(sandbox ? { sandbox } : {}), ...(task ? { sandboxTask: task } : {}), authority: { kind: "subagent", scope, actor: as.userId, owner: as.owner,
       generation: access.origin.generation, replyChannel: access.origin.replyChannel ?? "qq", subagentId: id }, capabilities };
   }
@@ -780,7 +769,6 @@ export class ThreadDO extends DurableObject<Env> {
   async subagentCoding(id: string, operation: SubagentCodingOperation): ReturnType<SubagentCapabilityHost["subagentCoding"]> {
     const access = await this.validateSubagentAccess(id);
     if (!access?.capabilities.coding || !access.authority.owner) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
-    if (access.sandbox && access.sandbox.kind !== "cloudflare") throw new Error("delegation_denied");
     const name = access.sandbox?.name ?? subagentName(await this.namespace(), id), sandbox = this.env.SANDBOX.getByName(name);
     // 旧子任务沿用原资源目录；创建 subagent 不触发初始化或克隆。
     const op = operation.kind === "write" ? { kind: "write" as const, path: operation.path, text: operation.content } : operation;
@@ -793,20 +781,19 @@ export class ThreadDO extends DurableObject<Env> {
       ...(operation.kind === "read" && result.status === "committed" ? { structuredOutput: { kind: "text", text: value } } : {}) };
   }
 
-  private async subagentCaller(input: InboundRow | undefined, sandboxId?: string): Promise<SubagentCaller | undefined> {
+  private async subagentCaller(input: InboundRow | undefined, { sandboxId, mcpTools }: { sandboxId?: string; mcpTools?: McpToolSelection }): Promise<SubagentCaller | undefined> {
     if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;
     const authority = await this.mcpAuthority(input), { mcp } = await this.open();
     const task = await this.sandboxTaskForInput(input), coding = !!task?.permissions.coding && authority?.scope === "owner";
-    const remoteSandbox = !!task?.permissions.remote.view && authority?.scope === "owner";
-    const scope = await this.namespace();
     let resource;
-    if (coding || remoteSandbox) {
-      const fleet = this.env.SANDBOX_FLEET.getByName("owner");
-      const resources = readResources(await fleet.resourcesJson(scope));
-      resource = sandboxId ? readResource(await fleet.resourceJson(scope, sandboxId)) : resources.find(row => row.kind === "cloudflare" && row.name === scope);
-      if (!resource || resource.kind === "cloudflare" && !coding || resource.kind === "remote" && !remoteSandbox) throw new Error("sandbox_not_assigned");
+    if (coding) {
+      const resources = this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
+      const scope = await this.namespace();
+      const id = sandboxId ?? (await resources.list(scope)).assignedSandboxId;
+      resource = await resources.get(scope, id);
+      if (!resource) throw new Error("sandbox_not_assigned");
     } else if (sandboxId) throw new Error("permission_denied");
-    const capabilities = { coding, remoteSandbox, ...(resource ? { sandboxId: resource.id } : {}), ...(task ? { sandboxTask: task.id } : {}), ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority) } : {}) };
+    const capabilities = { coding, ...(resource ? { sandboxId: resource.id } : {}), ...(task ? { sandboxTask: task.id } : {}), ...(authority && mcp ? { mcp: await mcp.captureCapabilities(authority, mcpTools) } : {}) };
     return { identity: { turn: "message", as: { userId: input.user_id, nickname: input.nickname, owner: isWebAdmin(input) ? this.ctx.id.equals(this.env.THREAD.idFromName("owner")) : ownerIds(this.env).includes(input.user_id), ...(isWebAdmin(input) ? { admin: true as const } : {}) } },
       origin: { capabilities, generation: input.session_generation, target: targetOf(input), selfId: input.self_id, scopeName: input.scope_name, ...(isWeb(input) ? { replyChannel: "web" as const } : {}) } };
   }
@@ -1223,8 +1210,9 @@ export class ThreadDO extends DurableObject<Env> {
         if(!row||thread!=="owner")throw new Error("workspace_denied");
         const origin=JSON.parse(row.origin_json) as SubagentOrigin,identity=JSON.parse(row.identity_json) as SubagentIdentity;
         if(origin.generation!==await this.sessionGeneration()||!origin.capabilities?.coding||!identity.as?.owner)throw new Error("workspace_denied");
-        const resource=origin.capabilities.sandboxId ? readResource(await this.env.SANDBOX_FLEET.getByName("owner").resourceJson(thread,origin.capabilities.sandboxId)) : undefined;
-        if(resource && resource.kind!=="cloudflare")throw new Error("workspace_denied");
+        const idOfResource=origin.capabilities.sandboxId;
+        const resource=idOfResource===undefined ? null : await this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner").get(thread,idOfResource);
+        if(idOfResource!==undefined&&!resource)throw new Error("workspace_denied");
         const sourceName=resource?.name ?? subagentName(thread,id);
         return {sourceName,sandbox:this.env.SANDBOX.getByName(sourceName)};
       },

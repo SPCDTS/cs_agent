@@ -1,102 +1,68 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
-import os from "node:os";
-import { fileURLToPath } from "node:url";
-import { randomBytes } from "node:crypto";
-import { createInterface } from "node:readline/promises";
-import { Type } from "typebox";
-import { parse, validateDescriptor } from "./protocol.ts";
-import { atomicJson, exists, readJson, sha256 } from "./files.ts";
-import { ConfigSchema, command, descriptor, protectToken, type Config } from "./wsb.ts";
-import { Connector, origin, request } from "./connector.ts";
-import { prepareStorage } from "./storage.ts";
-
-if (process.platform !== "win32") throw new Error("此连接器需要 Windows 11 和 wsb CLI。");
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { loadConfig } from './config.ts';
+import { atomicJson, exists, readJson } from './files.ts';
+import { Jobs } from './jobs.ts';
+import { acquireServiceLock } from './service-lock.ts';
+import { createMcpHttpServer } from './server.ts';
+import { createHypervBackend } from './hyperv.ts';
+import { createWsbBackend } from './wsb.ts';
 const args = process.argv.slice(2), action = args.shift();
-function option(name: string, fallback?: string): string | undefined {
-  const at = args.indexOf("--" + name); if (at < 0) return fallback;
-  const value = args[at + 1]; if (!value || value.startsWith("--")) throw new Error("missing_" + name);
+function option(name: string, fallback: string) {
+  const at = args.indexOf('--' + name); if (at < 0) return fallback;
+  const value = args[at + 1]; if (!value || value.startsWith('--')) throw new Error('missing_' + name);
   args.splice(at, 2); return value;
 }
-const state = path.resolve(option("state", path.join(os.homedir(), ".cs-agent-sandbox"))!);
-const configFile = path.join(state, "config.json"), bundle = fileURLToPath(new URL("../dist/", import.meta.url));
-async function storage(config: Config) {
-  if (!config.dataDir) return;
-  await prepareStorage({ dataDir: config.dataDir, state, deviceId: config.deviceId,
-    protectedPaths: [path.resolve(bundle, "../.."), config.nodeDir, ...(config.gitDir ? [config.gitDir] : [])] });
-  const script = "$target=[Console]::In.ReadToEnd(); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; & icacls.exe $target /inheritance:r /grant:r ('*'+$sid+':(OI)(CI)F') '*S-1-5-18:(OI)(CI)F'; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}";
-  await command("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { input: config.dataDir });
+const defaultDir = path.join(os.homedir(), '.cs-agent-windows-mcp');
+async function prepareState(dir: string) {
+  const marker = path.join(dir, 'windows-mcp-state.json');
+  await fs.mkdir(dir, { recursive: true });
+  if (await exists(marker)) {
+    const value = await readJson(marker);
+    if (!value || typeof value !== 'object' || !('version' in value) || value.version !== 1) throw new Error('invalid_state_marker');
+    return;
+  }
+  if ((await fs.readdir(dir)).length) throw new Error('new_dedicated_state_directory_required');
+  if (process.platform === 'win32') {
+    const run = promisify(execFile);
+    const identity = await run('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { windowsHide: true });
+    const sid = identity.stdout.match(/S-1-5-(?:[0-9]+-)*[0-9]+/)?.[0];
+    if (!sid) throw new Error('windows_identity_unavailable');
+    await run('icacls.exe', [dir, '/inheritance:r', '/grant:r', '*' + sid + ':(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'], { windowsHide: true });
+  }
+  await atomicJson(marker, { version: 1 });
 }
-if (action === "pair") {
-  const base = origin(option("origin") ?? "");
-  const dataDir = option("data-dir");
-  const config = { name: option("name", os.hostname())!, nodeDir: path.resolve(option("node-dir", path.dirname(process.execPath))!),
-    gitDir: option("git-dir"), memoryMiB: Number(option("memory", "6144")), maxTimeoutMs: Number(option("timeout-ms", "1200000")), ...(dataDir ? { dataDir: path.resolve(dataDir) } : {}) };
-  if (args.length) throw new Error("unknown_arguments");
-  const capabilities = validateDescriptor(await descriptor(config));
-  if (await exists(configFile)) throw new Error("该目录已经配对；请使用独立的新 state 目录配对另一设备。");
-  if (state === path.parse(state).root) throw new Error("dedicated_state_directory_required");
-  await fs.mkdir(state, { recursive: true });
-  const entries = await fs.readdir(state);
-  if (entries.some(name => name !== "pending.json")) throw new Error("state_directory_not_empty");
-  {
-    const script = "$target=[Console]::In.ReadToEnd(); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; & icacls.exe $target /inheritance:r /grant:r ('*'+$sid+':(OI)(CI)F') '*S-1-5-18:(OI)(CI)F'; if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}";
-    await command("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { input: state });
-  }
-  const pendingFile = path.join(state, "pending.json");
-  const PendingSchema = Type.Object({ origin: Type.String(), tokenProtected: Type.String() });
-  let tokenProtected: string;
-  if (await exists(pendingFile)) {
-    const pending = parse(PendingSchema, await readJson(pendingFile));
-    if (pending.origin !== base) throw new Error("pending_origin_mismatch");
-    tokenProtected = pending.tokenProtected;
-  } else {
-    tokenProtected = await protectToken(randomBytes(32).toString("hex"));
-    await atomicJson(pendingFile, { origin: base, tokenProtected });
-  }
-  const prompt = createInterface({ input: process.stdin, output: process.stdout });
-  let pairingId: string, code: string;
-  try { pairingId = (await prompt.question("配对 ID：")).trim(); code = (await prompt.question("一次性配对码：")).trim(); } finally { prompt.close(); }
-  const token = await protectToken(tokenProtected, true);
-  const response = parse(Type.Object({ deviceId: Type.String({ pattern: "^[a-f0-9-]{36}$" }), approval: Type.String() }), JSON.parse((await request(base, undefined, "/sandbox-devices/claim",
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pairingId, code, tokenHash: sha256(token), descriptor: capabilities }) })).toString("utf8")));
-  const paired = parse(ConfigSchema, { ...config, origin: base, tokenProtected, deviceId: response.deviceId });
-  await atomicJson(configFile, paired);
-  await fs.unlink(pendingFile);
-  await storage(paired);
-  console.log("已提交注册，等待管理员批准。设备 ID：", response.deviceId);
-} else if (action === "storage") {
-  const dataDir = option("data-dir"); if (!dataDir || args.length) throw new Error("storage_requires_data_dir");
-  const lock = path.join(state, "runner.lock");
-  if (await exists(lock)) {
-    const old = parse(Type.Object({ pid: Type.Integer() }), await readJson(lock));
-    let alive = true; try { process.kill(old.pid, 0); } catch (error) { if (error instanceof Error && "code" in error && error.code === "ESRCH") alive = false; }
-    if (alive) throw new Error("stop_runner_before_storage_change");
-  }
-  const config = parse(ConfigSchema, { ...parse(ConfigSchema, await readJson(configFile)), dataDir: path.resolve(dataDir) });
-  if (await exists(path.join(state, "instance.json"))) throw new Error("release_sandbox_before_storage_change");
-  await storage(config); await atomicJson(configFile, config);
-  console.log("持久目录已配置：", config.dataDir, "。重新启动连接器以更新注册说明。");
-} else if (action === "run" || action === "inspect") {
-  if (args.length) throw new Error("unknown_arguments");
-  const config = parse(ConfigSchema, await readJson(configFile));
-  if (action === "inspect") console.log(JSON.stringify({ deviceId: config.deviceId, origin: config.origin, descriptor: await descriptor(config) }, null, 2));
-  else {
-    await storage(config);
-    if (!await exists(path.join(bundle, "guest.mjs")) || !await exists(path.join(bundle, "npm-ensure.mjs"))) throw new Error("先运行 npm --prefix runner run build。");
-    const lock = path.join(state, "runner.lock");
-    if (await exists(lock)) {
-      const old = parse(Type.Object({ pid: Type.Integer() }), await readJson(lock));
-      let alive = true; try { process.kill(old.pid, 0); } catch (e) { if ((e as NodeJS.ErrnoException).code === "ESRCH") alive = false; }
-      if (alive) throw new Error("runner_already_running");
-      await fs.unlink(lock);
-    }
-    const handle = await fs.open(lock, "wx", 0o600); await handle.writeFile(JSON.stringify({ pid: process.pid }), "utf8"); await handle.close();
-    const connector = new Connector(state, config, bundle);
-    const stop = () => { void connector.stop().catch(error => console.error(error instanceof Error ? error.message : "stop_failed")); };
-    process.once("SIGINT", stop); process.once("SIGTERM", stop);
-    try { await connector.run(); } finally { await connector.stop(); await fs.unlink(lock); }
-  }
-} else {
-  console.log("用法：\n  npm start -- pair --origin https://你的Worker --state 专用目录 [--git-dir Git安装目录] [--data-dir 新的持久目录]\n  npm start -- storage --state 专用目录 --data-dir 新的持久目录\n  npm start -- inspect --state 专用目录\n  npm start -- run --state 专用目录");
+async function main() {
+  if (action === 'init') {
+    const state = path.resolve(option('state', defaultDir)); if (args.length) throw new Error('unknown_arguments');
+    if (state === path.parse(state).root) throw new Error('dedicated_state_directory_required');
+    await prepareState(state);
+    const file = path.join(state, 'config.json'); if (await exists(file)) throw new Error('config_already_exists');
+    await atomicJson(file, { stateDir: state, host: '127.0.0.1', port: 7791, principals: [{ id: 'cs_agent', tokenEnv: 'WINDOWS_MCP_TOKEN' }], targets: [{ kind: 'wsb', id: 'temp', memoryMb: 6144, idleTimeoutMs: 600000, maxLifetimeMs: 3600000 }] });
+    console.log('配置已生成：' + file + '\n请按 docs/WINDOWS-MCP.md 配置 VM、凭据和 token，再运行 run。旧 WSB 目录没有迁移或挂载。');
+  } else if (action === 'run' || action === 'inspect') {
+    const file = path.resolve(option('config', path.join(defaultDir, 'config.json'))); if (args.length) throw new Error('unknown_arguments');
+    const config = await loadConfig(file);
+    if (action === 'inspect') { console.log(JSON.stringify({ endpoint: `http://${config.host}:${config.port}/mcp`, targets: config.targets.map(t => ({ id: t.id, kind: t.kind, instructions: t.instructions, ...(t.kind === 'hyperv' ? { vmId: t.vmId, guestWorkdir: t.guestWorkdir, desktopConfigured: Boolean(t.desktopUser) } : { memoryMb: t.memoryMb, idleTimeoutMs: t.idleTimeoutMs, maxLifetimeMs: t.maxLifetimeMs }) })) }, null, 2)); return; }
+    if (process.platform !== 'win32') throw new Error('windows_required');
+    await prepareState(config.stateDir);
+    const releaseLock = acquireServiceLock(config.stateDir);
+    const backends = { hyperv: createHypervBackend(config.stateDir), wsb: createWsbBackend(config.stateDir) };
+    const jobs = new Jobs(config.stateDir, backends);
+    try {
+      jobs.bindTargets(config.targets);
+      const server = createMcpHttpServer(config, jobs, backends);
+      server.requestTimeout = 30000; server.headersTimeout = 10000;
+      await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve); });
+      jobs.start(); console.log(`Windows MCP 正在监听 http://${config.host}:${config.port}/mcp`);
+      await new Promise<void>(resolve => {
+        const stop = () => { server.close(() => resolve()); server.closeIdleConnections(); };
+        process.once('SIGINT', stop); process.once('SIGTERM', stop);
+      });
+    } finally { await jobs.shutdown(); releaseLock(); }
+  } else console.log('用法：\n  npm start -- init [--state 新专用目录]\n  npm start -- inspect [--config 配置文件]\n  npm start -- run [--config 配置文件]\n详细接入与 Hyper-V 准备见 docs/WINDOWS-MCP.md。');
 }
+await main().catch(error => { console.error(error instanceof Error ? error.message : 'windows_mcp_failed'); process.exitCode = 1; });

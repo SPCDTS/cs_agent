@@ -1,6 +1,6 @@
 # Workers 开发与管理
 
-此目录是项目唯一的应用实现。开发、测试和部署入口见 [根 README](../README.md) 与 [部署说明](../docs/DEPLOY.md)。当前能力见 [云端功能与资源预算](../docs/CLOUD-PARITY.md)，管理台交互见 [管理台说明](../docs/ADMIN-CONSOLE.md)。
+此目录包含项目部署在 Cloudflare Workers 的应用。开发、测试和部署入口见 [根 README](../README.md) 与 [部署说明](../docs/DEPLOY.md)。当前能力见 [云端功能与资源预算](../docs/CLOUD-PARITY.md)，管理台交互见 [管理台说明](../docs/ADMIN-CONSOLE.md)。
 
 ## 管理面板
 
@@ -27,7 +27,7 @@
 
 ## 联网与外部工具
 
-`web_search` 调用 DeepSeek Search API，复用现有 API key；`web_page` 直接请求指定网页。远程 MCP 配置在 `mcp.json`，凭据通过 secret 名引用。OAuth 登录、目录刷新、资源读取、群授权和逐次审批见 [MCP 契约](../docs/CLOUD-MCP-CONTRACT.md)。
+`web_search` 调用 DeepSeek Search API，复用现有 API key；`web_page` 直接请求指定网页。管理员在管理台的「模型与接入」配置 MCP 服务、凭据与工具白名单。`mcp.json` 用于初始化 Registry。远程执行环境由各自的 MCP 服务提供，Windows 的 VM 和 WSB 接入见 [Windows MCP](../docs/WINDOWS-MCP.md)。OAuth 登录、目录刷新、资源读取、群授权和逐次审批见 [MCP 契约](../docs/CLOUD-MCP-CONTRACT.md)。
 
 CS2 Workshop 是外部项目。此仓库的 `scripts/workshop-local.*` 只维护连接它的本机 MCP 与 Cloudflare Tunnel；录制、合成、投稿和资源状态由 Workshop 自己管理，见 [本机接入](../docs/WORKSHOP-LOCAL.md)。
 
@@ -45,11 +45,13 @@ ScheduleDO 管理定时规则、下次触发和运行状态；EventsDO 管理外
 
 每 5 分钟的触发用于外部事件兜底；每日 UTC 19:30（北京时间 03:30）执行聊天摘要、记忆整理与保留清理。维护任务由 `src/maintenance/` 分段处理。
 
-子任务使用独立 SubagentDO，并保存派出者身份与父线程状态；MCP、技能和工作区权限在使用时重新检查。父子工作区相互隔离，文件合并由显式路径选择和版本检查完成。当前配额与身份规则以 [资源预算](../docs/CLOUD-PARITY.md) 和 [权限协议](../docs/CLOUD-ACCESS-CONTRACT.md) 为准。
+子任务使用独立 SubagentDO，并保存派出者身份与父线程状态；MCP、技能和工作区权限在使用时重新检查。Cloudflare 子任务默认继承父线程工作区。派出时传 `sandboxId` 可以分配已存在的工作区，同一 ID 共享文件。不同工作区之间按显式路径和版本检查合并文件。传 `mcpTools` 可以把子任务的 MCP 工具收窄到指定服务和原始工具名。当前配额与身份规则以 [资源预算](../docs/CLOUD-PARITY.md) 和 [权限协议](../docs/CLOUD-ACCESS-CONTRACT.md) 为准。
 
 ## 编码沙箱与持久文件
 
 `sandbox/Dockerfile` 属于当前 Cloudflare 部署。SandboxDO 按需启动容器并访问内部控制服务；执行命令的用户为 sandbox（uid 1000）。`bash` 默认 60 秒、最长 120 秒，stdout / stderr 各保留末尾 64 KiB。镜像含 Python、Node、Git 和 curl，具体版本及软件以 Dockerfile 为准。
+
+主人可以在 Code Mode 中调用 `sandbox_list({})` 查看默认工作区 ID 和已分配资源，再用 `sandbox_create({sourceId})` 复制来源已保存的源码。省略 `sourceId` 会创建空工作区。
 
 容器的 `/work` 是临时执行视图，持久状态保存在 R2。写入与命令完成后提交版本快照；停止容器保留已经提交的工作区，重启时恢复。单文件 10 MiB、每工作区 50 MiB，不支持符号链接；完整协议见 [资产与工作区](../docs/CLOUD-ASSETS-CONTRACT.md)。
 

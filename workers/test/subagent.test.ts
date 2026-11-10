@@ -7,17 +7,14 @@ import worker from "../src/index";
 import * as models from "../src/models";
 import { RegistryDO } from "../src/registry";
 import { SandboxDO } from "../src/sandbox/do";
+import { ThreadDO } from "../src/thread";
 import { scopePrefix } from "../src/media/repository";
 import { sha256 } from "../src/media/model";
 import { MCP_CONFIG } from "../src/mcp/config";
+import { fakeRemote, login } from "./mcp-helpers";
 import type { SubagentView } from "../src/subagent/parent";
 import { responseDescription, shortSummary } from "../src/subagent/activity";
 import { action, connect, input, reply } from "./helpers";
-import { hash } from "../src/remote-sandbox/fleet";
-import { readResources, readResource } from "../src/sandbox/resources";
-import { readJob } from "../src/remote-sandbox/wire";
-import { PROTOCOL_VERSION, type Descriptor } from "../../runner/src/protocol";
-
 const TOKEN = "test-admin-only";
 const sockets: WebSocket[] = [];
 afterEach(async () => {
@@ -113,24 +110,6 @@ async function seedPublishSkill(workspace = "owner") {
   const result=await sandbox.importSnapshot({expectedRevision:current.revision,manifest:{...current,files,
     directories:["skills","skills/example"],totalBytes:files.reduce((sum,file)=>sum+file.bytes,0)}});
   expect(result.ok).toBe(true);
-}
-
-async function remoteDevice() {
-  const fleet = env.SANDBOX_FLEET.getByName("owner"), token = "a".repeat(64);
-  await fleet.putSettings({ enabled: true, expectedRevision: 0 });
-  const descriptor: Descriptor = { name: "测试 WSB", provider: "windows-wsb", os: "windows", arch: "x64",
-    instructions: "通过 powershell 执行命令。", persistence: "释放后丢弃文件。", memoryMiB: 4096, maxConcurrent: 1, maxTimeoutMs: 120000,
-    workspaceProtocol: "registered-tools-v2", resourceLifecycle: { create: "创建空工作区", clone: "复制来源工作区" }, tools: [{ name: "powershell", description: "运行 PowerShell",
-      inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"], additionalProperties: false } }] };
-  const pairing = await fleet.createPairing();
-  const { deviceId } = await fleet.claim({ pairingId: pairing.pairingId, code: pairing.code, tokenHash: await hash(token), descriptor });
-  await fleet.approve(deviceId);
-  const response = await fleet.fetch(new Request("https://test/connect?device=" + deviceId, { headers: { Upgrade: "websocket", Authorization: "Bearer " + token } }));
-  const socket = response.webSocket!; socket.accept(); sockets.push(socket);
-  const welcome = new Promise<void>(resolve => socket.addEventListener("message", () => resolve(), { once: true }));
-  socket.send(JSON.stringify({ kind: "hello", protocolVersion: PROTOCOL_VERSION, descriptor }));
-  await welcome;
-  return { fleet, deviceId, socket };
 }
 
 describe("subagents as child Durable Objects", () => {
@@ -233,7 +212,6 @@ describe("subagents as child Durable Objects", () => {
     await reports(group, 1);
     expect(outputs.parent[1]).toContain("定时管理授权");
     const groupSub = await onlySubagent(group);
-    expect((await child(group, groupSub.id).status())?.meta.capabilities?.remoteSandbox).toBe(false);
     expect(seen.parent.find(request => request.user.includes("成员任务的结果"))?.identity).toContain("派出者是 群成员");
 
     expect(await thread(group).submit(input(2, "我也派一个", 10000001, 200000001, true))).toEqual({ status: "done" });
@@ -294,54 +272,14 @@ describe("subagents as child Durable Objects", () => {
     expect((await onlySubagent("owner")).deadline).toBeNull();
   });
 
-  it.each(["done", "cancelled"] as const)("runs child WSB tools on the assigned resource and detaches after %s", async ending => {
-    const { fleet, deviceId, socket } = await remoteDevice(), ready = gate(), disabled = gate();
-    const remote = readResources(await fleet.resourcesJson("owner")).find(resource => resource.kind === "remote")!;
-    const { outputs, seen } = twoModels([spawn("在 WSB 执行命令并交回输出", { sandboxId: remote.id }), { text: "已派出" }], [
-      { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.provider==="windows-wsb"); const lease=await tools.sandbox_acquire({sandboxId:list.resources.find(r=>r.providerId===target.id).id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:"powershell",arguments:{command:"Write-Output 42"}}));' } },
-      ending === "done" ? outputs => ({ tool: "codemode", after: ready.promise, args: { code: `text(await tools.sandbox_job({jobId:${JSON.stringify(/"jobId"\s*:\s*"([^"\n]+)"/.exec(outputs[0])?.[1])}}));` } }) : "hang",
-      { tool: "codemode", after: disabled.promise, args: { code: "text(await tools.sandbox_list({}));" } },
-      { text: "WSB 输出 42" },
-    ]);
-    await thread("owner").submit(input(1, "委派 WSB 任务", 10000001));
-    const sub = await onlySubagent("owner"), workspace = child("owner", sub.id).id.toString();
-    await vi.waitFor(() => expect(outputs.child[0]).toContain("jobId"));
-    expect(seen.child[0].tools).toContain("codemode");
-    const session = (await fleet.sessions(workspace))[0]!;
-    expect(session.lease.workspace).toBe(env.SANDBOX.idFromName("owner").toString());
-    expect(session.lease.workspaceSource).toBeUndefined();
-    expect(session.jobId).toBeTruthy();
-    expect(await fleet.sessions(env.SANDBOX.idFromName("owner").toString())).toEqual([]);
-    await expect((async () => await fleet.invoke("another-child", "call", { leaseId: session.lease.id, tool: "powershell", arguments: { command: "wrong" }, timeoutMs: 1000 }))()).rejects.toThrow("lease_expired");
-    if (ending === "done") {
-      const stepsResult = { kind: "completed", result: { stdout: "42", stderr: "", code: 0 } };
-      await fleet.complete(deviceId, session.jobId!, stepsResult);
-      ready.open();
-      await vi.waitFor(() => expect(outputs.child[1]).toContain("completed"));
-      expect(outputs.child[1]).toContain("42");
-      await fleet.putSettings({ enabled: false, expectedRevision: 1 });
-      disabled.open();
-      await reports("owner", 1);
-      expect(outputs.child[2]).toContain('"enabled":false');
-    } else {
-      await thread("owner").cancelSubagent(sub.id);
-      await vi.waitFor(async () => expect(readJob(await fleet.inspectJson(workspace, session.jobId!)).phase).toBe("cancel_requested"));
-      await fleet.complete(deviceId, session.jobId!, { kind: "cancelled", reason: "stopped" });
-      await runDurableObjectAlarm(child("owner", sub.id));
-    }
-    await vi.waitFor(async () => expect((await fleet.sessions(workspace))[0]?.state).toBe("releasing"));
-    socket.send(JSON.stringify({ kind: "released", leaseId: session.lease.id }));
-    await vi.waitFor(async () => expect(await fleet.sessions(workspace)).toEqual([]));
-  });
-
   it.each(["qq", "web"] as const)("continues the parent's sandbox task after a %s child report with MCP disabled", async channel => {
-    const { fleet, deviceId, socket } = await remoteDevice(), ready = gate();
+    const ready = gate();
     await seedPublishSkill();
     await seedPublishSkill("group:200000001");
     const exec = vi.spyOn(SandboxDO.prototype, "exec").mockResolvedValue({ stdout: "主会话命令成功", stderr: "", code: 0, timedOut: false, truncated: false });
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
     const { outputs } = twoModels([spawn("检查独立工作区"), { text: "已派出" },
-      { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.provider==="windows-wsb"); const lease=await tools.sandbox_acquire({sandboxId:list.resources.find(r=>r.providerId===target.id).id,capabilityRevision:target.capabilityRevision}); text(await tools.sandbox_call({leaseId:lease.id,tool:"powershell",arguments:{command:"Get-ChildItem C:/AgentWork"}}));' } },
+      { tool: "codemode", args: { code: 'text((await tools.sandbox_list({})).assignedSandboxId);' } },
       { tool: "codemode", args: { code: 'text(await tools.bash({command:"pwd"}));' } },
       { tool: "codemode", args: { code: 'const check=await tools.skill_inspect({path:"skills/example"});text(await tools.skill_publish({path:"skills/example",workspaceRevision:check.workspaceRevision,expectedRevision:check.expectedRevision}));text((await tools.read({workspace:"group:200000001",path:"skills/example/sources.md"})).text);' } },
       { text: "已核实主工作区" },
@@ -350,22 +288,16 @@ describe("subagents as child Durable Objects", () => {
       await thread("owner").submitWeb("owner", crypto.randomUUID(), "检查主工作区");
       await vi.waitFor(async () => expect(await rows("owner", "SELECT 1 FROM inbound WHERE kind='message' AND status='done'")).toHaveLength(1));
     } else await thread("owner").submit(input(1, "检查主工作区", 10000001));
-    const sub = await onlySubagent("owner");
+    await onlySubagent("owner");
     ready.open();
     await reports("owner", 1);
-    expect(outputs.parent[1]).toContain("jobId");
+    expect(outputs.parent[1]).toContain("sbx:");
     expect(outputs.parent[2]).toContain("主会话命令成功");
     expect(exec).toHaveBeenCalledTimes(1);
     expect(outputs.parent[3]).toContain('"ok":true');
     expect(outputs.parent[3]).toContain("中文来源说明");
     expect((await env.REGISTRY.getByName("main").skillGet("example"))?.files).toEqual({"sources.md":"中文来源说明"});
-    const workspace = env.SANDBOX.idFromName("owner").toString(), session = (await fleet.sessions(workspace))[0]!;
-    expect(session.lease.workspace).toBe(workspace);
-    expect(await fleet.sessions(child("owner", sub.id).id.toString())).toEqual([]);
-    await fleet.complete(deviceId, session.jobId!, { kind: "completed", result: { stdout: "cs_agent", stderr: "", code: 0 } });
-    await fleet.release(workspace, session.lease.id);
-    socket.send(JSON.stringify({ kind: "released", leaseId: session.lease.id }));
-    await vi.waitFor(async () => expect(await fleet.sessions(workspace)).toEqual([]));
+
   });
 
   it("撤销原任务后父会话续轮不能发布技能",async()=>{
@@ -385,8 +317,8 @@ describe("subagents as child Durable Objects", () => {
     expect(await env.REGISTRY.getByName("main").skillGet("example")).toBeUndefined();
   });
 
-  it.each(["capability", "identity", "generation", "cancelled", "channel", "disabled", "task"] as const)("rechecks %s before a parent report turn uses the sandbox", async change => {
-    const { fleet } = await remoteDevice(), childReady = gate(), resume = gate();
+  it.each(["capability", "identity", "generation", "cancelled", "channel", "task"] as const)("rechecks %s before a parent report turn uses the sandbox", async change => {
+    const childReady = gate(), resume = gate();
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
     const { outputs, seen } = twoModels([spawn("检查工作区"), { text: "已派出" },
       { tool: "codemode", after: resume.promise, args: { code: 'text(await tools.sandbox_list({}));' } }, { text: "权限已失效" },
@@ -396,47 +328,39 @@ describe("subagents as child Durable Objects", () => {
     childReady.open();
     await vi.waitFor(() => expect(seen.parent.some(request => request.user.startsWith("[子 agent 完成]"))).toBe(true));
     switch (change) {
-      case "capability": await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.capabilities.remoteSandbox', json('false')) WHERE id=?", sub.id); break;
+      case "capability": await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.capabilities.coding', json('false')) WHERE id=?", sub.id); break;
       case "identity": await rows("owner", "UPDATE subagents SET identity_json=json_remove(identity_json, '$.as') WHERE id=?", sub.id); break;
       case "generation": await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.generation', 1) WHERE id=?", sub.id); break;
       case "cancelled": await rows("owner", "UPDATE subagents SET status='cancelled' WHERE id=?", sub.id); break;
       case "channel": await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.replyChannel', 'web') WHERE id=?", sub.id); break;
       case "task": await rows("owner", "UPDATE sandbox_tasks SET revoked_at=1"); break;
-      case "disabled": await fleet.putSettings({ enabled: false, expectedRevision: 1 }); break;
     }
     resume.open();
     await reports("owner", 1);
-    expect(outputs.parent[1]).toContain(change === "disabled" ? '"enabled":false' : "denied");
-    expect(await fleet.sessions(env.SANDBOX.idFromName("owner").toString())).toEqual([]);
+    expect(outputs.parent[1]).toContain("denied");
   });
 
-  it("关闭新任务后仍允许查看、取消和释放，禁止新租约及已有租约上的新命令", async () => {
-    const { fleet, deviceId, socket } = await remoteDevice(), disabled = gate(), finished = gate();
-    vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
-    const jobId = (outputs: string[]) => /"jobId"\s*:\s*"([^"\n]+)"/.exec(outputs[0])?.[1];
-    const leaseId = (outputs: string[]) => /"leaseId"\s*:\s*"([^"\n]+)"/.exec(outputs[0])?.[1];
+
+  it("uses spawn.mcpTools and preserves structured results through child Code Mode", async () => {
+    const remote = fakeRemote(); await login();
+    remote.state.tools = [
+      ...remote.state.tools.slice(0, 2),
+      { name: "notion-create-pages", inputSchema: { type: "object" },
+        outputSchema: { type: "object", properties: { requestId: { type: "string" } }, required: ["requestId"], additionalProperties: false } },
+    ];
+    remote.state.toolResult = { structuredContent: { requestId: "child-job-42" }, content: [{ type: "text", text: "dispatched" }] };
     const { outputs } = twoModels([
-      { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.provider==="windows-wsb"); const lease=await tools.sandbox_acquire({sandboxId:list.resources.find(r=>r.providerId===target.id).id,capabilityRevision:target.capabilityRevision}); text({leaseId:lease.id,...await tools.sandbox_call({leaseId:lease.id,tool:"powershell",arguments:{command:"probe"}})});' } },
-      { tool: "codemode", after: disabled.promise, args: { code: 'text(await tools.sandbox_list({}));' } },
-      values => ({ tool: "codemode", args: { code: 'text(await tools.sandbox_job({jobId:'+JSON.stringify(jobId(values))+',action:"cancel"}));' } }),
-      values => ({ tool: "codemode", args: { code: 'text(await tools.sandbox_call({leaseId:'+JSON.stringify(leaseId(values))+',tool:"powershell",arguments:{command:"new"}}));' } }),
-      values => ({ tool: "codemode", after: finished.promise, args: { code: 'text(await tools.sandbox_release({leaseId:'+JSON.stringify(leaseId(values))+'}));' } }),
-      { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({}); const target=list.sandboxes.find(s=>s.provider==="windows-wsb"); text(await tools.sandbox_acquire({sandboxId:list.resources.find(r=>r.providerId===target.id).id,capabilityRevision:target.capabilityRevision}));' } },
-      { text: "已收尾" },
-    ], []);
-    const pending = thread("owner").submit(input(1, "运行", 10000001)), workspace = env.SANDBOX.idFromName("owner").toString();
-    await vi.waitFor(() => expect(outputs.parent[0]).toContain("jobId"));
-    const session = (await fleet.sessions(workspace))[0]!;
-    await fleet.putSettings({ enabled: false, expectedRevision: 1 }); disabled.open();
-    await vi.waitFor(() => expect(outputs.parent[3]).toContain("disabled"));
-    expect(outputs.parent[1]).toContain('"enabled":false');
-    expect(outputs.parent[2]).toContain("cancel_requested");
-    await fleet.complete(deviceId, session.jobId!, { kind: "cancelled", reason: "stopped" }); finished.open();
-    expect(await pending).toEqual({ status: "done" });
-    expect(outputs.parent[4]).toContain("requested");
-    expect(outputs.parent[5]).toContain("disabled");
-    socket.send(JSON.stringify({ kind: "released", leaseId: session.lease.id }));
-    await vi.waitFor(async () => expect(await fleet.sessions(workspace)).toEqual([]));
+      spawn("交给子代理发起作业", { mcpTools: [{ server: "notion", tools: ["notion-create-pages"] }] }), { text: "已派出" },
+    ], [
+      { tool: "codemode", args: { code: 'const names=ALL_TOOLS.map(tool=>tool.name); text(names); const tool=names.find(name=>name.startsWith("mcp_notion_notion_create_pages_")); const result=await tools[tool]({}); text(result.requestId);' } },
+      { text: "作业已发起" },
+    ]);
+    expect(await thread("owner").refreshMcp()).toEqual(expect.arrayContaining([expect.objectContaining({ server: "notion", status: "ok" })]));
+    await thread("owner").submit(input(1, "派发作业", 10000001));
+    await reports("owner", 1);
+    expect(outputs.child[0]).toContain("child-job-42");
+    expect(outputs.child[0]).not.toMatch(/mcp_notion_notion_(search|fetch)_|mcp_resources_/);
+    expect(remote.state.calls).toBe(1);
   });
 
   it("lists, inspects and cancels subagents through the authenticated admin API", async () => {
@@ -462,10 +386,10 @@ describe("subagents as child Durable Objects", () => {
 
 it("子 agent 按资源 ID 路由；省略时继承默认资源，多个子任务可以共用新资源", async () => {
   await seedPublishSkill();
-  const fleet = env.SANDBOX_FLEET.getByName("owner"), resources = readResources(await fleet.resourcesJson("owner"));
-  const current = resources.find(row => row.kind === "cloudflare")!;
-  const created = readResource(await fleet.createResourceJson("owner", "new-cf", { providerId: "cloudflare", sourceId: current.id }));
-  if (created.kind !== "cloudflare" || current.kind !== "cloudflare") throw new Error("wrong fixture");
+  const resources = env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
+  const { assignedSandboxId } = await resources.list("owner");
+  const current = (await resources.get("owner", assignedSandboxId))!;
+  const created = await resources.create("owner", "new-cf", { sourceId: current.id });
   const targets: string[] = [];
   vi.spyOn(SandboxDO.prototype, "run").mockImplementation(async function(this: SandboxDO) {
     const files = await this.files(); targets.push(files.workspace);
@@ -490,38 +414,33 @@ it("子 agent 按资源 ID 路由；省略时继承默认资源，多个子任�
   await expect((async () => await thread("owner").workspaceMergeChild("owner", { childId: shared.id, expectedRevision: manifest.revision, sourceRevision: manifest.revision, paths: ["skills/example/sources.md"] }))()).rejects.toThrow("workspace_shared_resource");
 });
 
-it("远程子任务不能选择未分配资源或调用隐含 Linux 工作区，取消不会停止父任务", async () => {
-  const { fleet, socket, deviceId } = await remoteDevice();
-  const resources = readResources(await fleet.resourcesJson("owner")), remote = resources.find(row => row.kind === "remote")!;
-  const other = readResource(await fleet.createResourceJson("owner", "other", { providerId: remote.providerId }));
-  const provider = JSON.parse(await fleet.catalogJson()).find((row: { id: string }) => row.id === remote.providerId);
-  const actor = env.SANDBOX.idFromName("owner").toString();
-  const lease = await fleet.acquireResource("owner", actor, "parent", { sandboxId: remote.id, capabilityRevision: provider.capabilityRevision, requirements: {} });
-  const { outputs } = twoModels([spawn("共享父资源", { sandboxId: remote.id }), { text: "已分配" }], [
-    { tool: "codemode", args: { code: 'const list=await tools.sandbox_list({});text(await tools.sandbox_acquire({sandboxId:list.assignedSandboxId,capabilityRevision:list.sandboxes[0].capabilityRevision}));' } },
-    { tool: "codemode", args: { code: 'text(await tools.sandbox_acquire({sandboxId:' + JSON.stringify(other.id) + ',capabilityRevision:' + JSON.stringify(provider.capabilityRevision) + '}));' } },
-    { tool: "codemode", args: { code: 'text(await tools.bash({command:"pwd"}));' } },
-    "hang",
-  ]);
-  await thread("owner").submit(input(1, "分配远程", 10000001));
-  const sub = await onlySubagent("owner"), childActor = child("owner", sub.id).id.toString();
-  await vi.waitFor(() => expect(outputs.child).toHaveLength(3));
-  expect(outputs.child[0]).toContain(lease.id);
-  expect(outputs.child[1]).toContain("sandbox_not_assigned");
-  expect(outputs.child[2]).toContain("tools.bash does not exist");
-  const job = await fleet.invoke(actor, "parent-job", { leaseId: lease.id, tool: "powershell", arguments: { command: "parent running" }, timeoutMs: 1000 });
+it.each(["remote", "missing"])("旧子任务绑定的 %s ID 禁止回落到 Cloudflare", async kind => {
+  const oldId = "sbx:" + "a".repeat(64);
+  if (kind === "remote") {
+    await runInDurableObject(env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner"), (_instance, state) =>
+      state.storage.put("resource:" + oldId, { kind: "ready",
+        resource: { id: oldId, owner: "owner", kind: "remote", providerId: "remote:test", workspace: "old" } }));
+  }
+  twoModels([spawn("历史任务"), { text: "已派出" }], ["hang"]);
+  await thread("owner").submit(input(1, "分配任务", 10000001));
+  const sub = await onlySubagent("owner");
+  await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.capabilities.sandboxId', ?) WHERE id=?", oldId, sub.id);
+  const run = vi.spyOn(SandboxDO.prototype, "run");
+  expect(await thread("owner").validateSubagentAccess(sub.id)).toMatchObject({ capabilities: { sandboxId: oldId, coding: false } });
+  const result = await runInDurableObject(thread("owner"), async instance => {
+    if (!(instance instanceof ThreadDO)) throw new Error("wrong fixture");
+    return (await instance.subagentCoding(sub.id, { kind: "read", operationId: "test", path: "file" })).isError;
+  });
+  expect(result).toBe(true);
+  expect(run).not.toHaveBeenCalled();
+  await expect((async () => await thread("owner").workspaceInspectChild("owner", { childId: sub.id }))()).rejects.toThrow("workspace_denied");
   await thread("owner").cancelSubagent(sub.id);
-  await vi.waitFor(async () => expect(await fleet.sessions(childActor)).toEqual([]));
-  expect(readJob(await fleet.inspectJson(actor, job.jobId)).phase).toBe("dispatched");
-  expect((await fleet.sessions(actor))[0]?.lease.id).toBe(lease.id);
-  await fleet.complete(deviceId, job.jobId, { kind: "completed", result: { stdout: "ok", code: 0 } });
-  await fleet.release(actor, lease.id);
-  socket.send(JSON.stringify({ kind: "released", leaseId: lease.id }));
 });
 
 it("Cloudflare 克隆已提交而资源登记中断时，重试使用原快照且不重复导入", async () => {
   await seedPublishSkill();
-  const fleet = env.SANDBOX_FLEET.getByName("owner"), current = readResources(await fleet.resourcesJson("owner")).find(row => row.kind === "cloudflare")!;
+  const resources = env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
+  const { assignedSandboxId } = await resources.list("owner");
   const original = SandboxDO.prototype.cloneFrom;
   let committedRevision = "";
   vi.spyOn(SandboxDO.prototype, "cloneFrom").mockImplementationOnce(async function(this: SandboxDO, input) {
@@ -529,11 +448,10 @@ it("Cloudflare 克隆已提交而资源登记中断时，重试使用原快照�
     if (result.ok) committedRevision = result.manifest.revision;
     throw new Error("interrupted_after_import");
   });
-  const args = { providerId: "cloudflare", sourceId: current.id };
-  await expect((async () => await fleet.createResourceJson("owner", "recover", args))()).rejects.toThrow("interrupted_after_import");
+  const args = { sourceId: assignedSandboxId };
+  await expect((async () => await resources.create("owner", "recover", args))()).rejects.toThrow("interrupted_after_import");
   await seedPublishSkill();
-  const recovered = readResource(await fleet.createResourceJson("owner", "recover", args));
-  if (recovered.kind !== "cloudflare") throw new Error("wrong fixture");
+  const recovered = await resources.create("owner", "recover", args);
   expect((await env.SANDBOX.getByName(recovered.name).files()).revision).toBe(committedRevision);
-  expect(readResource(await fleet.createResourceJson("owner", "recover", args))).toEqual(recovered);
+  expect(await resources.create("owner", "recover", args)).toEqual(recovered);
 });

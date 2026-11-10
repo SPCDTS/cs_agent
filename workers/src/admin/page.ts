@@ -4,7 +4,6 @@ import { MCP_ADMIN_HTML, MCP_ADMIN_APP_JS } from "./mcp-ui";
 import { MCP_SERVERS_HTML, MCP_SERVERS_JS } from "./mcp-servers-ui";
 import { WORKSPACE_CSS, WORKSPACE_HTML, WORKSPACE_APP_JS } from "./workspace-ui";
 import { ACCESS_HTML, ACCESS_APP_JS } from "./access-ui";
-import { SANDBOX_HTML, SANDBOX_APP_JS } from "./sandbox-ui";
 import { MEMORY_MANAGER_HTML, MEMORY_MANAGER_JS } from "./memory-ui";
 import { SESSION_HTML, SESSION_APP_JS } from "./sessions";
 import { CONSOLE_CSS, CONSOLE_NAV, CONSOLE_HTML, CONSOLE_APP_JS } from "./console";
@@ -309,7 +308,6 @@ ${CONSOLE_HTML}
   </section>
 ${ACCESS_HTML}
 ${WORKSPACE_HTML}
-${SANDBOX_HTML}
 ${MCP_ADMIN_HTML}
 </div>
 ${SESSION_HTML}
@@ -1157,7 +1155,6 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   ${MEMORY_MANAGER_JS}
   ${ACCESS_APP_JS}
   ${WORKSPACE_APP_JS}
-  ${SANDBOX_APP_JS}
   ${MCP_ADMIN_APP_JS}
   ${MCP_SERVERS_JS}
 
