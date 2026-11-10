@@ -120,7 +120,7 @@ async function remoteDevice() {
   await fleet.putSettings({ enabled: true, expectedRevision: 0 });
   const descriptor: Descriptor = { name: "测试 WSB", provider: "windows-wsb", os: "windows", arch: "x64",
     instructions: "通过 powershell 执行命令。", persistence: "释放后丢弃文件。", memoryMiB: 4096, maxConcurrent: 1, maxTimeoutMs: 120000,
-    workspaceProtocol: "registered-tools-v2", workspacePreparation: "git-clone-v1", tools: [{ name: "powershell", description: "运行 PowerShell",
+    workspaceProtocol: "registered-tools-v2", resourceLifecycle: { create: "创建空工作区", clone: "复制来源工作区" }, tools: [{ name: "powershell", description: "运行 PowerShell",
       inputSchema: { type: "object", properties: { command: { type: "string" } }, required: ["command"], additionalProperties: false } }] };
   const pairing = await fleet.createPairing();
   const { deviceId } = await fleet.claim({ pairingId: pairing.pairingId, code: pairing.code, tokenHash: await hash(token), descriptor });

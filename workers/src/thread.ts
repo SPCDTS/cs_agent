@@ -757,14 +757,7 @@ export class ThreadDO extends DurableObject<Env> {
     if (!access?.capabilities.coding || !access.authority.owner) return { isError: true, output: [{ type: "text", text: "delegation_denied" }] };
     if (access.sandbox && access.sandbox.kind !== "cloudflare") throw new Error("delegation_denied");
     const name = access.sandbox?.name ?? subagentName(await this.namespace(), id), sandbox = this.env.SANDBOX.getByName(name);
-    // 已派出的旧子任务保持原工作区；新任务总是保存具体资源 ID。
-    if (!access.sandbox && !await this.ctx.storage.get("child-workspace:" + id)) {
-      const origin = (await this.subagents.access(id))?.origin, current = await sandbox.snapshot();
-      if (!origin) throw new Error("delegation_denied");
-      const cloned = await sandbox.cloneFrom({ sourceName: await this.namespace(), expectedRevision: current.revision, sourceRevision: origin.workspaceRevision });
-      if (!cloned.ok) throw new Error("workspace_conflict");
-      await this.ctx.storage.put("child-workspace:" + id, true);
-    }
+    // 旧子任务沿用原资源目录；创建 subagent 不触发初始化或克隆。
     const op = operation.kind === "write" ? { kind: "write" as const, path: operation.path, text: operation.content } : operation;
     const result = await sandbox.run({ operationId: "sub:" + id + ":" + operation.operationId, operation: op });
     if (result.status === "committed" && "kind" in result.result && result.result.kind === "image")

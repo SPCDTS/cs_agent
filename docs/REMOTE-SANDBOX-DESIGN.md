@@ -39,7 +39,7 @@ else text(file.text);
 
 `sandbox_list.sandboxes` 中的 `cloudflare`、`remote:<deviceId>` 是提供方或设备 ID；`resources[].id`（`sbx:...`）才是具体沙箱资源。资源 ID、运行租约 ID 和 VM ID 分开：重建 VM 或更换租约不会改变资源 ID。默认 Cloudflare 与 WSB 资源沿用旧工作区位置，不移动已保存文件。
 
-主 agent 通过 Code Mode 调用 `sandbox_create({providerId, sourceId?})`：省略来源创建空资源，指定来源显式克隆同一提供方资源。Cloudflare 固定源快照版本并幂等导入；远程须声明自动准备能力，WSB 首次执行时固定 Git HEAD。跨提供方克隆和不支持克隆的设备明确拒绝，不静默改为空目录。
+主 agent 通过 Code Mode 调用 `sandbox_create({providerId, sourceId?})`，只决定创建资源还是从哪个资源克隆。提供方通过 `resourceLifecycle.create` / `resourceLifecycle.clone` 声明能力、复制范围、准备时点和持久化语义；管理服务验证并转发请求，不推断仓库结构、Git 提交或分支。Cloudflare 提供方在创建时固定源码快照版本并幂等导入；远程提供方接收冻结的 `resourcePreparation` 指令，在首次工具命令前完成准备。登记远程资源不占设备槽位。跨提供方克隆和未声明的能力明确拒绝。
 
 派出时用模型工具 `subagent({action:"spawn", task, sandboxId})` 分配资源。相同 ID 共享；需要独立工作时先创建新 ID，也可以把这个新 ID 分给多个子 agent。省略 ID 继承父会话默认 Cloudflare 资源。spawn 不创建或克隆目录；已派出的旧任务仍保持原有独立工作区，新任务保存明确绑定。资源只在本会话的已有授权下可用，知道 ID 不代表有权访问。
 
@@ -108,13 +108,15 @@ Cloudflare 的注册信息与提示由 `workers/src/sandbox/registration.ts` 提
 
 持久项目目录从 GitHub 拉取独立源码，不使用宿主日常开发 checkout。Node/Git/runner 工具目录只读映射，控制输入和有界结果使用专用通道，宿主不执行模型生成的 PowerShell。设备 Token 不进入 guest、命令行或模型上下文。
 
-映射目录保留宿主所有者，guest launcher 仅为 `C:/AgentWork`、只读来源 `C:/AgentSeed` 及其子目录设置 Git `safe.directory`。配置文件仅写在 guest 临时目录，使用 `GIT_CONFIG_SYSTEM` 供克隆子进程继承，不修改宿主配置。WSB 共享目录不支持创建符号链接，需要链接的项目应使用 guest 临时目录；此限制随注册说明暴露给 agent。
+映射目录保留宿主所有者，guest launcher 仅为 `C:/AgentWork`、只读来源 `C:/AgentSource` 及其子目录设置 Git `safe.directory`。配置文件仅写在 guest 临时目录，使用 `GIT_CONFIG_SYSTEM` 供工具子进程继承，不修改宿主配置。WSB 共享目录不支持创建符号链接，需要链接的项目应使用 guest 临时目录；此限制随注册说明暴露给 agent。
 
 最后一位调用者释放、空闲回收、连接器停止、取消运行中命令或实例故障会销毁 VM，但不会删除或回滚已映射的项目和缓存。未配置 `dataDir` 的设备沿用临时目录语义；Windows 系统状态及其他 guest 文件仍随 VM 丢弃。持久模式、路径和限制由 runner 的 `instructions` / `persistence` 声明，Worker 无须增加存储协议。GitHub 凭据须另行显式授权，不能映射宿主用户或凭据目录。
 
-设备可选声明 `workspacePreparation: "git-clone-v1"`。显式克隆且声明支持时，Fleet 才把所选来源的 `workspaceSource` 写入租约；未声明的提供方拒绝克隆，仍可创建空资源，扩展不按 provider 名称分支。WSB 在配置 Git 与持久目录时声明支持，将来源工作区只读映射到 `C:\AgentSeed`，子工作区独立映射到 `C:\AgentWork`，npm 下载缓存使用来源的 cache 目录。来源只读挂载也允许子任务读取其中的文件，不应把私人配置放入共享的项目工作区。
+WSB 声明创建空资源；配置持久目录后同时声明文件级克隆，不要求配置 Git。首次执行前，来源工作区只读映射到 `C:\AgentSource`，目标独立映射到 `C:\AgentWork`。复制在 guest 内执行，涵盖整个来源目录，包括根目录文件、未提交/未跟踪文件、`.git` 和 `node_modules`；不发现仓库、不选择 HEAD、不建立分支、不调用 Git，也不改写文件中的外部路径引用。npm 下载缓存按目标资源独立持久保留，不复制来源缓存。系统状态、进程及其他 guest 目录不复制，链接明确拒绝。
 
-首次命令在 guest 内克隆来源下一级仓库的已提交 HEAD：`git clone --no-local --no-checkout` 加独立 `agent/<工作区哈希>` 分支，不共享 Git 对象，不复制未提交修改或 `node_modules`。准备计划记录提交及进度，失败可继续，完成后保留子任务修改；已有非空工作区不覆盖，无仓库时允许 agent 自行准备。宿主不对 guest 可写仓库执行 Git，也不自动转交宿主登录凭据。每个独立资源仓库首次安装依赖仍需解包与运行安装脚本，共享 npm 缓存只减少下载。
+WSB 为单槽位，来源须已初始化并释放运行租约后才能执行目标资源。复制读取准备时的来源文件；宿主外部程序同时改写来源时不保证一致快照。首次准备拒绝已有非空目标。宿主私有 state 保存 pending/ready 收据，不使用 guest 可修改的文件作为成功凭据；失败不执行用户命令，中断重试仅清理尚未交给用户的目标并重新读取来源。准备完成后先保存 ready 再执行工具，后续命令、新租约和连接器重启不重复复制，也不再要求来源存在。`.git` 和依赖文件独立复制；可继续调用 `npm-ensure.mjs` 检查依赖是否可复用。
+
+升级保留原资源 ID 和已有目录；旧资源的 `sourceWorkspace` 仅作兼容读取，不触发准备。旧设备声明 `workspacePreparation` 不授予新建/克隆能力；已有资源仍可使用。已冻结旧 `workspaceSource` 初始化的租约返回 `legacy_preparation_requires_release`，须先释放。先升级 Worker，再释放活动租约并更新 runner 注册，才能使用新能力。Cloudflare 已开始的旧快照导入仍按原固定版本恢复。
 
 guest 中的 `npm-ensure.mjs` 负责可选的依赖复用：用 manifest/lockfile、Node ABI、系统架构、npm 版本、有效配置及支持的参数形成指纹，再检查 npm 依赖结构。仅成功安装后写入收据；安装前撤销旧收据，失败和中断后重新安装。手动内容修改及本地文件依赖用 `--fresh` 重装，不把结构检查当成完整内容校验。该助手由现有 `powershell` 调用，不新增模型工具，不在宿主执行项目脚本。
 
@@ -142,6 +144,6 @@ Cloudflare `read/write/edit` 在容器真实文件系统执行，成功变更再
 
 ## 验证范围与历史资料
 
-测试覆盖无 MCP 的 Code Mode、coding-only 子 agent、同段 list → acquire → call、逐调用权限、图片、schema、版本、跨工作区访问、任务去重、未知状态和停止握手。WSB smoke 验证真实连续命令保留 Git/依赖、取消停止、子工作区从已提交版本独立克隆、来源只读、npm 缓存共享和离线依赖安装。Cloudflare adapter、中文 BOM/换行、编辑歧义、缓存排除、恢复与原有资产路径保留测试。本地检查不替代生产容器验证，部署需要单独授权。
+测试覆盖无 MCP 的 Code Mode、coding-only 子 agent、同段 list → acquire → call、逐调用权限、图片、schema、版本、跨工作区访问、任务去重、未知状态和停止握手。WSB smoke 验证真实连续命令保留 Git/依赖、取消停止、文件级克隆保留未提交文件和依赖、Git 文件独立、来源只读及独立 npm 缓存。Cloudflare adapter、中文 BOM/换行、编辑歧义、缓存排除、恢复与原有资产路径保留测试。本地检查不替代生产容器验证，部署需要单独授权。
 
 旧 v1 的 R2 源码中转图仅作历史参考，不描述当前实现：[旧时序 SVG](diagrams/remote-sandbox.svg)、[可编辑图源](diagrams/remote-sandbox.sequence.json)。

@@ -3,7 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { parse, JobInputSchema, PowerShellInputSchema, MAX_CONTROL_BYTES, type ExecResult } from "./protocol.ts";
 import { readJson } from "./files.ts";
-import { seedWorkspace } from "./workspace-seed.ts";
+import { prepareResourceFiles } from "./resource-files.ts";
 
 const inputFile = process.argv[2];
 if (!inputFile) throw new Error("input_required");
@@ -17,10 +17,8 @@ const guestEnv = { ...process.env, PATH: "C:\\AgentTools\\node;C:\\AgentTools\\g
   npm_config_cache: "C:\\AgentCache\\npm", npm_config_update_notifier: "false", CI: "true" };
 async function execute(): Promise<ExecResult> {
   await fs.mkdir(work, { recursive: true });
-  // 本地 clone 的 upload-pack 会清除命令级配置；使用仅 guest 内的配置文件供子进程继承。
-  await fs.writeFile(gitConfig, "[safe]\n" + ["C:/AgentWork", "C:/AgentWork/*", "C:/AgentSeed", "C:/AgentSeed/*"].map(directory => "\tdirectory = " + directory + "\n").join(""), "utf8");
-  const prepared = job.lease.workspaceSource ? await seedWorkspace({ source: "C:\\AgentSeed", work, sourceId: job.lease.workspaceSource.workspace,
-    workspace: job.lease.workspace, git: "C:\\AgentTools\\git\\cmd\\git.exe", env: guestEnv }) : "";
+  // 映射目录保留宿主所有者；信任范围仅限 guest 的项目目录。
+  await fs.writeFile(gitConfig, "[safe]\n" + ["C:/AgentWork", "C:/AgentWork/*", "C:/AgentSource", "C:/AgentSource/*"].map(directory => "\tdirectory = " + directory + "\n").join(""), "utf8");
   const cwd = path.resolve(work, input.cwd ?? ".");
   if (!(await fs.stat(cwd)).isDirectory()) throw new Error("not_a_directory");
   const script = "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; $ErrorActionPreference='Stop'; $global:LASTEXITCODE=0; " + input.command + "\nexit $LASTEXITCODE";
@@ -40,10 +38,15 @@ async function execute(): Promise<ExecResult> {
     // 超时、取消或连接丢失由宿主销毁整个 VM；普通完成保留此租约的工作目录。
     child.once("close", code => resolve({ stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), code, timedOut: false, truncated }));
   });
-  result.stdout = (prepared + result.stdout).slice(-65536);
   return result;
 }
-const result = await execute().catch((error: unknown): ExecResult => ({ stdout: "", stderr: error instanceof Error ? error.message.slice(-65536) : "guest_execution_failed", code: 1, timedOut: false, truncated: false }));
+async function prepare(): Promise<ExecResult> {
+  const directive = job.lease.resourcePreparation;
+  if (!directive || job.lease.workspaceSource) throw new Error("resource_preparation_required");
+  await prepareResourceFiles(work, directive.kind === "clone" ? "C:\\AgentSource" : undefined);
+  return { stdout: "", stderr: "", code: 0, timedOut: false, truncated: false };
+}
+const result = await (process.argv[3] === "prepare" ? prepare() : execute()).catch((error: unknown): ExecResult => ({ stdout: "", stderr: error instanceof Error ? error.message.slice(-65536) : "guest_execution_failed", code: 1, timedOut: false, truncated: false }));
 let encoded = JSON.stringify({ kind: "completed", result });
 while (Buffer.byteLength(encoded) > MAX_CONTROL_BYTES - 1024) {
   result.stdout = result.stdout.slice(Math.ceil(result.stdout.length / 2));

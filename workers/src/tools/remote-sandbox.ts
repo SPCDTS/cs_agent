@@ -15,7 +15,6 @@ type Deps = {
   workspace(): string;
   resources?(): Promise<{ owner: string; assignedSandboxId: string; resources: SandboxResource[] }>;
   createResource?: true;
-  sourceWorkspace?(api: AuthorityApi, context: Context): Promise<string | undefined>;
   record(detail: object): Promise<unknown>;
 };
 const strict = { additionalProperties: false };
@@ -43,7 +42,7 @@ export function createRemoteSandboxExtension(deps: Deps) {
   }
   const tools = [
     ...(deps.createResource ? [defineTool({ name: "sandbox_create", replay: "safe",
-      description: "创建稳定沙箱资源 ID。providerId 来自 sandbox_list.sandboxes；省略 sourceId 创建空工作区，提供 sourceId 显式克隆同提供方资源（远程在首次执行前准备）。创建不占用设备运行槽位。把返回的 id 交给 subagent.spawn.sandboxId；多个 agent 使用同一 ID 就共享该资源和文件。",
+      description: "请求提供方创建稳定沙箱资源 ID。providerId 来自 sandbox_list.sandboxes；省略 sourceId 使用 resourceLifecycle.create，提供 sourceId 使用 resourceLifecycle.clone。只有提供方声明支持才能调用；复制范围、时点、持久化和一致性以该声明为准。远程资源在首次执行前由提供方完成准备，登记本身不占设备槽位。把返回的 id 交给 subagent.spawn.sandboxId；多个 agent 使用同一 ID 就共享该资源和文件。",
       parameters: CreateResourceSchema, structuredOutputSchema: SandboxResourceSchema,
       execute: (args, api, c) => boundary(api, c, "execute", async () => {
         const scope = await deps.resources?.(); if (!scope) throw new Error("permission_denied");
@@ -67,9 +66,8 @@ export function createRemoteSandboxExtension(deps: Deps) {
           const lease = await deps.fleet().acquireResource(scope.owner, deps.workspace(), "task:" + await hash(String(api.taskId)), { ...args, requirements: args.requirements ?? {} });
           return { ...lease, resourceId: args.sandboxId };
         }
-        const source = await deps.sourceWorkspace?.(api, c);
         return deps.fleet().acquire({ ...args, requirements: args.requirements ?? {}, workspace: deps.workspace(),
-          ...(source ? { workspaceSource: { workspace: source } } : {}), operationId: "task:" + await hash(String(api.taskId)) });
+          operationId: "task:" + await hash(String(api.taskId)) });
       }) }),
     defineTool({ name: "sandbox_call", replay: "safe", description: "在显式 leaseId 上调用设备注册的 tool，arguments 必须匹配目录的 inputSchema，并遵循该沙箱的 instructions。异步返回 jobId，用 sandbox_job 查询结果；accepted 不是执行成功。",
       parameters: Type.Object({ leaseId: IdSchema, tool: ToolNameSchema, arguments: Type.Record(Type.String(), Type.Unknown()), timeoutMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 1200000 })) }, strict),
@@ -90,8 +88,8 @@ export function createRemoteSandboxExtension(deps: Deps) {
     sections: [section("remote-sandbox", async (input, context) => {
       if (!input.agent.callable.some(tool => tool.name === "sandbox_list") || !await deps.allowed({ ...input.read, conversationId: input.conversationId }, context, "view")) return;
       const scope = await catalog(), providers = scope.sandboxes;
-      const summary = { assignedSandboxId: scope.assignedSandboxId, resourceCount: scope.resources?.length, resources: scope.resources?.slice(0, 8), enabled: await deps.fleet().enabled(), total: providers.length, targets: providers.slice(0, 8).map(({ id, name, os, tools, codeModeTools, workspaceRoot, workspacePreparation, instructions, persistence, availability }) =>
-        ({ id, name, os, tools: tools.map(tool => tool.name), codeModeTools, workspaceRoot, workspacePreparation, instructions, persistence, availability })), sessions: await deps.fleet().sessions(deps.workspace()) };
+      const summary = { assignedSandboxId: scope.assignedSandboxId, resourceCount: scope.resources?.length, resources: scope.resources?.slice(0, 8), enabled: await deps.fleet().enabled(), total: providers.length, targets: providers.slice(0, 8).map(({ id, name, os, tools, codeModeTools, workspaceRoot, resourceLifecycle, instructions, persistence, availability }) =>
+        ({ id, name, os, tools: tools.map(tool => tool.name), codeModeTools, workspaceRoot, resourceLifecycle, instructions, persistence, availability })), sessions: await deps.fleet().sessions(deps.workspace()) };
       return "沙箱目录与提供方使用说明：" + JSON.stringify(summary) +
         "。enabled=false 时仍可查看及取消、释放本工作区已有任务，只禁止新租约和新命令。所有沙箱能力只通过 Code Mode 调用。按任务需求查看 sandbox_list 中的完整配置、instructions 与工具 schema，再选择可用沙箱；远程 tools 通过 sandbox_acquire 获取显式租约后由 sandbox_call 调用，codeModeTools 可直接用 tools.<名称> 调用。" +
         (deps.createResource ? "提供方 ID 仅用于 sandbox_create；resources[].id 才是分配给 subagent 的 sandboxId，相同 ID 共享文件与实例。未指定 sandboxId 的新子 agent 默认继承父会话默认资源，需要独立工作区时先 sandbox_create，再把返回 ID 分配给一个或多个子 agent。Cloudflare 的 read/write/edit/bash 可用 sandboxId 显式选择资源。" : "你只能使用 assignedSandboxId 指定的资源，Cloudflare 文件工具固定指向该资源，不接受改绑。") +

@@ -334,7 +334,6 @@ export class SubagentDO extends DurableObject<Env> {
         if (!access?.sandbox) throw new Error("sandbox_not_assigned");
         return { owner: meta.parent, assignedSandboxId: access.sandbox.id, resources: [access.sandbox] };
       } } : {}),
-      sourceWorkspace: async () => (await host.validateSubagentAccess(meta.id))?.sandboxTask?.workspace,
       fleet: () => this.env.SANDBOX_FLEET.getByName("owner"), workspace: () => this.ctx.id.toString(),
       record: async detail => { console.log({ event: "subagent_remote_sandbox", id: meta.id, ...detail }); },
     }));

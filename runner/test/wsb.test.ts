@@ -6,6 +6,8 @@ import path from "node:path";
 import { WsbBackend, type command } from "../src/wsb.ts";
 import { parse, JobInputSchema, ExecResultSchema } from "../src/protocol.ts";
 import { readJson, sha256 } from "../src/files.ts";
+import { prepareResourceFiles } from "../src/resource-files.ts";
+import { workspaceStorage } from "../src/storage.ts";
 import { capabilities, config, job, lease } from "./fixtures.ts";
 
 async function fixture(t: TestContext, persistent = false) {
@@ -19,8 +21,10 @@ async function fixture(t: TestContext, persistent = false) {
     if (action === "start") { live.add(id); return JSON.stringify({ Id: id }); }
     if (action === "stop") { live.delete(id); stopped?.(); return "{}"; }
     assert.equal(action, "exec");
-    assert.equal(args[args.indexOf("--command") + 1], '"C:\\AgentTools\\node\\node.exe" "C:\\AgentTools\\runner\\guest.mjs" "C:\\AgentInput\\input.json"');
-    executions++;
+    const launcher = args[args.indexOf("--command") + 1];
+    const preparing = launcher.endsWith(" prepare");
+    assert.equal(launcher.replace(/ prepare$/, ""), '"C:\\AgentTools\\node\\node.exe" "C:\\AgentTools\\runner\\guest.mjs" "C:\\AgentInput\\input.json"');
+    if (!preparing) executions++;
     const record = await readJson(path.join(state, "instance.json"));
     assert.ok(record && typeof record === "object" && "leaseId" in record && typeof record.leaseId === "string");
     const root = path.join(state, "sessions", sha256(record.leaseId)), output = path.join(root, "output/outcome.json");
@@ -28,6 +32,11 @@ async function fixture(t: TestContext, persistent = false) {
     assert.equal(input.tool, "powershell");
     if (mode === "hang") { await new Promise<void>(resolve => { stopped = resolve; }); throw new Error("guest_stopped"); }
     if (mode === "invalid") { await fs.writeFile(output, "invalid", "utf8"); return "{}"; }
+    if (preparing) {
+      const directive = input.lease.resourcePreparation; assert.ok(directive);
+      const work = path.join(dataDir, "projects", sha256(input.lease.workspace));
+      await prepareResourceFiles(work, directive.kind === "clone" ? path.join(dataDir, "projects", sha256(directive.sourceWorkspace)) : undefined);
+    }
     if (mode === "replace") await fs.rename(output, path.join(root, "output/original.json"));
     await fs.writeFile(output, JSON.stringify({ kind: "completed", result: { stdout: "中文 " + executions, stderr: "", code: 0, timedOut: false, truncated: false } }), "utf8");
     return "{}";
@@ -35,7 +44,7 @@ async function fixture(t: TestContext, persistent = false) {
   const dataDir = state + "-data";
   const backend = new WsbBackend(state, { ...config(binding.deviceId), ...(persistent ? { dataDir, gitDir: path.join(state, "tools/git") } : {}) }, path.join(state, "checkout/runner/dist"), { command: host, capabilities: async () => capabilities });
   t.after(async () => { await backend.stopOwned(); await fs.rm(state, { recursive: true, force: true }); await fs.rm(dataDir, { recursive: true, force: true }); });
-  return { backend, binding, calls, live, state, dataDir, setMode(value: typeof mode) { mode = value; }, run(command = "probe") { return backend.run(job(binding, command), new AbortController().signal, () => undefined); } };
+  return { backend, binding, calls, live, state, dataDir, host, setMode(value: typeof mode) { mode = value; }, run(command = "probe") { return backend.run(job(binding, command), new AbortController().signal, () => undefined); } };
 }
 test("同租约连续命令复用 VM；模型命令只进入 guest 输入文件", async t => {
   const f = await fixture(t), first = await f.run("New-Item .git,node_modules -ItemType Directory"), second = await f.run("Get-ChildItem");
@@ -102,16 +111,75 @@ test("结果文件被替换时持有句柄不会改读新路径；故障令会�
   assert.deepEqual(await f.run(), { kind: "failed", error: "session_lost", sessionLost: true });
 });
 
-test("子工作区仅只读挂载来源，独立可写目录复用来源的 npm 缓存", async t => {
+test("提供方复制文件并只读挂载来源；工作区与 npm 下载缓存独立", async t => {
   const f = await fixture(t, true);
-  f.binding.workspace = "child"; f.binding.workspaceSource = { workspace: "parent" };
+  const parent = await workspaceStorage({ dataDir: f.dataDir, state: f.state, deviceId: f.binding.deviceId, protectedPaths: [], workspace: "parent" });
+  await fs.writeFile(path.join(parent.work, "dirty.txt"), "未提交内容", "utf8");
+  f.binding.workspace = "child"; f.binding.resourcePreparation = { kind: "clone", operationId: "clone-child", sourceWorkspace: "parent" };
   assert.equal((await f.run()).kind, "completed");
   const start = f.calls.find(call => call.args[0] === "start"); assert.ok(start);
   const xml = start.args[start.args.indexOf("--config") + 1];
   const source = path.join(f.dataDir, "projects", sha256("parent"));
   const work = path.join(f.dataDir, "projects", sha256("child"));
-  const cache = path.join(f.dataDir, "cache", sha256("parent"), "npm");
-  assert.ok(xml.includes("<HostFolder>" + source + "</HostFolder><SandboxFolder>C:\\AgentSeed</SandboxFolder><ReadOnly>true</ReadOnly>"));
+  const cache = path.join(f.dataDir, "cache", sha256("child"), "npm");
+  assert.ok(xml.includes("<HostFolder>" + source + "</HostFolder><SandboxFolder>C:\\AgentSource</SandboxFolder><ReadOnly>true</ReadOnly>"));
   assert.ok(xml.includes("<HostFolder>" + work + "</HostFolder><SandboxFolder>C:\\AgentWork</SandboxFolder><ReadOnly>false</ReadOnly>"));
   assert.ok(xml.includes("<HostFolder>" + cache + "</HostFolder><SandboxFolder>C:\\AgentCache\\npm</SandboxFolder><ReadOnly>false</ReadOnly>"));
+  assert.equal(await fs.readFile(path.join(work, "dirty.txt"), "utf8"), "未提交内容");
+  await fs.writeFile(path.join(work, "dirty.txt"), "子任务修改", "utf8");
+  await f.run();
+  await f.backend.release(f.binding.id);
+  // 新连接器、新租约继续使用宿主记录，不依赖 guest 文件里的完成标记。
+  const resumed = new WsbBackend(f.state, { ...config(f.binding.deviceId), dataDir: f.dataDir }, path.join(f.state, "checkout/runner/dist"), { command: f.host, capabilities: async () => capabilities });
+  t.after(() => resumed.stopOwned());
+  await fs.rm(source, { recursive: true });
+  const next = { ...f.binding, id: lease().id };
+  assert.equal((await resumed.run(job(next), new AbortController().signal, () => undefined)).kind, "completed");
+  assert.equal(await fs.readFile(path.join(work, "dirty.txt"), "utf8"), "子任务修改");
+  assert.equal(f.calls.filter(call => call.args.some(arg => arg.endsWith(" prepare"))).length, 1);
+});
+
+test("首次准备拒绝非空目标，已有资源和旧租约不会触发新的初始化", async t => {
+  const f = await fixture(t, true); await f.run(); await f.backend.release(f.binding.id);
+  const work = path.join(f.dataDir, "projects", sha256(f.binding.workspace));
+  await fs.writeFile(path.join(work, "keep.txt"), "保留", "utf8");
+  f.binding.id = lease().id;
+  f.binding.resourcePreparation = { kind: "create", operationId: "create-existing" };
+  assert.equal((await f.run()).kind, "failed");
+  assert.equal(await fs.readFile(path.join(work, "keep.txt"), "utf8"), "保留");
+  assert.equal(f.calls.filter(call => call.args.some(arg => arg.endsWith(" prepare"))).length, 0);
+  delete f.binding.resourcePreparation;
+  f.binding.workspaceSource = { workspace: "legacy-parent" };
+  assert.deepEqual(await f.run(), { kind: "failed", error: "legacy_preparation_requires_release", sessionLost: true });
+});
+
+test("准备失败不执行用户命令；pending 重试清理部分文件，完成记录不能换来源", async t => {
+  const f = await fixture(t, true);
+  const parent = await workspaceStorage({ dataDir: f.dataDir, state: f.state, deviceId: f.binding.deviceId, protectedPaths: [], workspace: "parent" });
+  await fs.writeFile(path.join(parent.work, "source.txt"), "来源", "utf8");
+  f.binding.resourcePreparation = { kind: "clone", operationId: "clone-once", sourceWorkspace: "parent" };
+  f.setMode("invalid");
+  assert.equal((await f.run()).kind, "failed");
+  assert.equal(f.calls.filter(call => call.args[0] === "exec").length, 1);
+  const work = path.join(f.dataDir, "projects", sha256(f.binding.workspace));
+  await fs.writeFile(path.join(work, "partial.txt"), "未完成", "utf8");
+  f.binding.id = lease().id; f.setMode("complete");
+  assert.equal((await f.run()).kind, "completed");
+  assert.deepEqual(await fs.readdir(work), ["source.txt"]);
+  await f.backend.release(f.binding.id);
+  f.binding.id = lease().id; f.binding.resourcePreparation.sourceWorkspace = "other";
+  assert.equal((await f.run()).kind, "failed");
+  assert.equal(await fs.readFile(path.join(work, "source.txt"), "utf8"), "来源");
+});
+
+test("创建空持久资源只准备一次，后续命令不清空新文件", async t => {
+  const f = await fixture(t, true);
+  f.binding.resourcePreparation = { kind: "create", operationId: "empty-resource" };
+  assert.equal((await f.run()).kind, "completed");
+  const work = path.join(f.dataDir, "projects", sha256(f.binding.workspace));
+  assert.deepEqual(await fs.readdir(work), []);
+  await fs.writeFile(path.join(work, "created.txt"), "用户文件", "utf8");
+  assert.equal((await f.run()).kind, "completed");
+  assert.equal(await fs.readFile(path.join(work, "created.txt"), "utf8"), "用户文件");
+  assert.equal(f.calls.filter(call => call.args.some(arg => arg.endsWith(" prepare"))).length, 1);
 });

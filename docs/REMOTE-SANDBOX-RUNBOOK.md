@@ -64,14 +64,14 @@ npm --prefix runner run build
 npm --prefix runner start -- run --state D:\sandbox-runner-state
 ```
 
-连接器重连会更新注册的 `instructions` 和 `persistence`。本次新增可选的 `workspacePreparation: "git-clone-v1"` 声明：升级前排空并释放租约，先部署支持此字段的 Worker，再更新 runner、构建 guest 并重连。旧 runner 可继续连接新 Worker，但不具备自动准备子仓库的能力；新 runner 不应连接尚未支持该字段的旧 Worker。未配置 `dataDir` 的旧设备仍使用临时工作区，不会自动移动原有 guest 文件。
+连接器重连会更新注册的 `instructions`、`persistence` 和可选 `resourceLifecycle` 声明。升级前排空并释放租约，先部署支持生命周期声明的 Worker，再更新 runner、构建 guest 并重连。旧 runner 可继续使用已有资源；新版创建/克隆必须有相应能力声明。未配置 `dataDir` 的设备仍使用临时工作区，不会自动移动原有 guest 文件。
 
 | 本机目录 | guest 路径 | 保留范围 |
 | --- | --- | --- |
 | `dataDir/projects/<工作区哈希>` | `C:\AgentWork` | 从 GitHub 克隆的新仓库、`.git`、`node_modules`、构建产物 |
 | `dataDir/cache/<工作区哈希>/npm` | `C:\AgentCache\npm` | npm 下载缓存 |
 
-工作区标识沿用 Fleet 租约；不同工作区的可写项目目录隔离。子任务获得宿主签发的来源工作区时，另将来源目录只读映射到 `C:\AgentSeed`，npm 缓存改用来源工作区的缓存路径；没有来源的普通工作区维持上表映射。同一工作区的新租约、连接器重启和 VM 重建都会挂载原目录。数据仅在本机，state 中的设备凭据不映射进 guest，Node/Git/runner 工具仍只读映射。释放、取消和超时会销毁 VM，但不回滚持久目录的写入，也不自动清理磁盘文件。Windows 注册表、服务和其余 guest 路径仍是临时状态。
+工作区标识沿用 Fleet 租约；不同资源的可写项目目录和 npm 下载缓存隔离。显式克隆首次准备时，提供方另外将来源目录只读映射到 `C:\AgentSource`；准备完成后的新租约不再挂载来源。同一工作区的新租约、连接器重启和 VM 重建都会挂载原目录。数据仅在本机，state 中的设备凭据和准备收据不映射进 guest，Node/Git/runner 工具仍只读映射。释放、取消和超时会销毁 VM，但不回滚持久目录的写入，也不自动清理磁盘文件。Windows 注册表、服务和其余 guest 路径仍是临时状态。
 
 真实 WSB 验证发现，共享目录中创建符号链接会返回 `EPERM`。普通 npm 包可以持久安装；本地目录依赖可先 `npm pack` 再安装 `.tgz`。必须依赖符号链接的 workspace、pnpm 或构建流程应在 guest 临时目录运行，并显式保存产物；目录映射不提供原生 NTFS 的全部语义。
 
@@ -99,9 +99,11 @@ Sandbox 页每 10 秒刷新在线状态，列出当前任务和租约，可取�
 
 授权把远程操作分成查看、执行、管理三类。`sandbox_list` 和查询结果使用查看权；新租约及新命令使用执行权；取消和释放使用管理权。管理台的远程任务开关只额外限制执行，不撤销查看和管理权；`sandbox_list.enabled` 明确返回开关状态。此拆分不向非 owner 开放设备目录。任务授权支持宿主绑定后续输入，但当前只自动接续子 agent 回报；定时任务或普通外部事件不会仅凭文本取得授权。
 
-主 agent 从 `sandbox_list.resources` 选择具体资源 ID，通过 `subagent` 的 `sandboxId` 分配：同 ID 共享工作区和运行租约，新 ID 独立；省略时继承父会话默认 Cloudflare 资源。需要新工作区时，先在 Code Mode 调用 `sandbox_create({providerId})` 创建空资源，或传 `sourceId` 显式克隆同提供方已有资源，再派出一个或多个子 agent。不要把设备 ID 或 leaseId 当作资源 ID。新任务不再自动创建子工作区，旧任务保持原工作区。对于同时配置 Git 和持久目录的新版 WSB，设备声明支持 `git-clone-v1`；只有显式克隆才填入 `workspaceSource`。首次命令执行前，guest 从只读来源目录的一级 Git 仓库子目录读取当时的 HEAD，完整克隆到自己的 `C:\AgentWork`，建立 `agent/<子工作区哈希>` 分支。`.git` 对象独立，不使用硬链接或 alternates；已有子工作区不覆盖，未提交修改和 `node_modules` 不复制。主工作区根目录本身就是 Git 仓库时，不在自动发现范围，应把仓库放在 `C:\AgentWork\repo` 这样的子目录。
+主 agent 从 `sandbox_list.resources` 选择具体资源 ID，通过 `subagent` 的 `sandboxId` 分配：同 ID 共享工作区和运行租约，新 ID 独立；省略时继承父会话默认 Cloudflare 资源。需要新资源时，先看提供方 `resourceLifecycle` 声明，再在 Code Mode 调用 `sandbox_create({providerId})` 或传 `sourceId` 请求该提供方克隆。不要把设备 ID 或 leaseId 当作资源 ID。创建 subagent 不准备源码，也不自动克隆。创建、克隆的实现和语义属于提供方；Cloudflare 使用固定源码快照，WSB 使用文件复制。
 
-显式克隆出的资源复用来源的 npm 下载缓存，但首次仍需在自己的项目中运行 `npm-ensure.mjs --prefer-offline` 安装依赖；后续可复用自己的 `node_modules`。首次准备固定提交并记录进度，重试继续未完成的克隆；完成后不会随主分支前进而重置子工作区。来源没有仓库时按设备说明自行克隆；设备没有声明自动准备能力时，创建时传 sourceId 会报 clone_not_supported，应创建空资源后自行准备。GitHub 登录状态和宿主凭据不会自动转交，推送仍需明确配置。以下工具全部在 Code Mode 内通过 `tools.*` 调用：
+WSB 配置持久目录后支持克隆，不要求配置 Git：首次工具调用前，guest 从只读 `C:\AgentSource` 复制整个工作区到 `C:\AgentWork`，包含未提交与未跟踪文件、`.git`、`node_modules`，不另建分支。目标文件和 npm 下载缓存各自独立；操作系统、进程、其他目录不复制，链接不支持，文件中的外部路径引用不自动改写。来源须已初始化并释放租约，复制期间不要在宿主改写来源。中断后重试重新读取来源；成功后跨租约和重启不会覆盖目标修改。已有非空目录拒绝首次初始化；复制失败不会执行用户命令。可用 `npm-ensure.mjs --prefer-offline` 验证并复用复制的依赖。GitHub 登录凭据不会自动转交。
+
+旧设备未声明 `resourceLifecycle` 时仍可打开已有资源，但新建返回 `create_not_supported`；没有 clone 声明时返回 `clone_not_supported`。先更新 Worker，释放活动租约，再更新并重启 runner。旧资源目录原样保留，不重新初始化；旧初始化租约收到 `legacy_preparation_requires_release` 时先释放。以下工具全部在 Code Mode 内通过 `tools.*` 调用：
 
 Agent 会收到沙箱注册的使用说明，并可通过 `sandbox_list` 查看完整配置、说明和 schema。通用扩展不设 Cloudflare/WSB 优先级；平台的路径、缓存、命令及结果用法由各自注册信息决定。若更新说明，先释放活动租约，再让连接器重新注册。
 

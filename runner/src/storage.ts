@@ -36,8 +36,9 @@ export async function workspaceStorage(input: Storage & { workspace: string; sou
   if (input.sourceWorkspace === input.workspace) throw new Error("workspace_source_must_differ");
   const sourceScope = input.sourceWorkspace ? sha256(input.sourceWorkspace) : undefined;
   const source = sourceScope ? path.join(root, "projects", sourceScope) : undefined;
-  const work = path.join(root, "projects", scope), cache = path.join(root, "cache", sourceScope ?? scope, "npm");
-  for (const directory of [work, cache, ...(source ? [source] : [])]) {
+  const work = path.join(root, "projects", scope), cache = path.join(root, "cache", scope, "npm");
+  if (source) { await noLinks(source); if (!await exists(source)) throw new Error("resource_source_missing"); }
+  for (const directory of [work, cache]) {
     await noLinks(directory); await fs.mkdir(directory, { recursive: true }); await noLinks(directory);
   }
   return { work, cache, ...(source ? { source } : {}) };

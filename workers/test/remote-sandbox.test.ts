@@ -10,6 +10,7 @@ const sockets: WebSocket[] = [];
 afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); await reset(); });
 const descriptor: Descriptor = { name: "测试 WSB", provider: "windows-wsb", os: "windows", arch: "x64",
   instructions: "使用 powershell，工作区在 guest 内。", persistence: "同租约保留，释放后丢弃。",
+  resourceLifecycle: { create: "创建空工作区" },
   tools: [{ name: "powershell", description: "在 guest 中运行命令", inputSchema: parse(JsonObjectSchema, JSON.parse(JSON.stringify(PowerShellInputSchema))) }],
   environment: [{ name: "node", version: "v24" }], memoryMiB: 4096, maxConcurrent: 1, maxTimeoutMs: 1200000, workspaceProtocol: "registered-tools-v2" };
 const fleet = () => env.SANDBOX_FLEET.getByName("owner");
@@ -188,7 +189,7 @@ it("停用拒绝新租约与任务，但保留回传、取消和释放；过期�
 });
 
 it("共享资源复用租约但保留任务归属；退出一方不停止另一方，重建仍绑定原持久目录", async () => {
-  const device = await register({ ...descriptor, workspacePreparation: "git-clone-v1" });
+  const device = await register({ ...descriptor, provider: "custom-provider", resourceLifecycle: { create: "创建空资源", clone: "由提供方复制来源文件" } });
   const resources = readResources(await fleet().resourcesJson("owner")), remote = resources.find(row => row.kind === "remote")!;
   const args = { sandboxId: remote.id, capabilityRevision: device.revision, requirements: {} };
   const parent = await fleet().acquireResource("owner", "parent", "parent-acquire", args);
@@ -219,7 +220,8 @@ it("共享资源复用租约但保留任务归属；退出一方不停止另一�
   await runInDurableObject(fleet(), async (instance, state) => { await instance.webSocketMessage(state.getWebSockets(device.deviceId)[0]!, JSON.stringify({ kind: "released", leaseId: recreated.id })); });
   const cloned = await fleet().acquireResource("owner", "child", "clone-lease", { ...args, sandboxId: independent.id });
   expect(cloned.workspace).toBe(independent.id);
-  expect(cloned.workspaceSource?.workspace).toBe(parent.workspace);
+  expect(cloned.resourcePreparation).toMatchObject({ kind: "clone", sourceWorkspace: parent.workspace });
+  expect(cloned.workspaceSource).toBeUndefined();
 });
 
 it("资源创建幂等、跨会话不可见、显式克隆检验提供方能力", async () => {
@@ -233,4 +235,27 @@ it("资源创建幂等、跨会话不可见、显式克隆检验提供方能力"
   await expect((async () => await fleet().createResourceJson("owner", "clone", { providerId, sourceId: remote.id }))()).rejects.toThrow("clone_not_supported");
   await expect((async () => await fleet().createResourceJson("owner", "cross-provider", { providerId: "cloudflare", sourceId: remote.id }))()).rejects.toThrow("clone_provider_mismatch");
   expect(await fleet().sessions("owner")).toEqual([]);
+});
+
+it("旧设备可使用已有资源但旧声明不授予创建能力；不再执行旧 Git 准备", async () => {
+  const { resourceLifecycle: _, ...legacy } = descriptor;
+  const device = await register({ ...legacy, workspacePreparation: "git-clone-v1" });
+  const providerId = "remote:" + device.deviceId;
+  const remote = readResources(await fleet().resourcesJson("owner")).find(row => row.kind === "remote")!;
+  expect(readCatalog(await fleet().catalogJson()).find(row => row.id === providerId)?.resourceLifecycle).toBeUndefined();
+  await expect((async () => await fleet().createResourceJson("owner", "new", { providerId }))()).rejects.toThrow("create_not_supported");
+  // 升级前的资源记录仍指向原目录，但不再暗中触发 Git 初始化。
+  await runInDurableObject(fleet(), async (_instance, state) => {
+    await state.storage.put("resource:" + remote.id, { kind: "ready", resource: { ...remote, sourceWorkspace: "legacy-source" } });
+  });
+  const lease = await fleet().acquireResource("owner", "actor", "existing", { sandboxId: remote.id, capabilityRevision: device.revision, requirements: {} });
+  expect(lease.workspaceSource).toBeUndefined(); expect(lease.resourcePreparation).toBeUndefined();
+  const call = await fleet().invoke("actor", "command", request(lease.id));
+  await fleet().complete(device.deviceId, call.jobId, completed);
+  // 已冻结的旧租约不能在新服务端继续派发旧初始化，仍可正常释放。
+  await runInDurableObject(fleet(), async (_instance, state) => {
+    await state.storage.put("allocation:" + device.deviceId, { kind: "active", lease: { ...lease, workspaceSource: { workspace: "legacy-source" } }, jobId: null, touchedAt: Date.now(), membership: { owner: "owner", resourceId: remote.id, actors: ["actor"] } });
+  });
+  await expect((async () => await fleet().invoke("actor", "blocked", request(lease.id)))()).rejects.toThrow("legacy_preparation_requires_release");
+  await fleet().release("actor", lease.id);
 });

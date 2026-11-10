@@ -1,11 +1,11 @@
 import { Type, type Static } from "typebox";
-import { IdSchema, ToolDeclarationSchema, SandboxInstructionsSchema, SandboxPersistenceSchema, OutcomeSchema, JobInputSchema, parse } from "../../../runner/src/protocol";
+import { IdSchema, ResourceLifecycleSchema, ToolDeclarationSchema, SandboxInstructionsSchema, SandboxPersistenceSchema, OutcomeSchema, JobInputSchema, parse } from "../../../runner/src/protocol";
 
 const strict = { additionalProperties: false };
 export const CatalogEntrySchema = Type.Object({
   id: Type.String(), name: Type.String(), provider: Type.String(), os: Type.String(), arch: Type.String(),
   tools: Type.Array(ToolDeclarationSchema), codeModeTools: Type.Optional(Type.Array(Type.String())),
-  workspacePreparation: Type.Optional(Type.Literal("git-clone-v1")),
+  resourceLifecycle: Type.Optional(ResourceLifecycleSchema),
   environment: Type.Optional(Type.Array(Type.Object({ name: Type.String(), version: Type.String() }, strict))),
   memoryMiB: Type.Union([Type.Integer(), Type.Null()]), maxTimeoutMs: Type.Integer(), capabilityRevision: Type.String(),
   availability: Type.Union([Type.Literal("ready"), Type.Literal("busy"), Type.Literal("offline"), Type.Literal("draining")]),

@@ -7,7 +7,7 @@ import { SandboxResources } from "../sandbox/resources";
 import { readCatalog } from "./wire";
 import { CLOUDFLARE_SANDBOX } from "../sandbox/registration";
 export type { CatalogEntry } from "./wire";
-import { DescriptorSchema, RequirementsSchema, JobInputSchema, WorkspaceSourceSchema, DeviceFrameSchema, IdSchema, ToolNameSchema, parse, parseFrame,
+import { DescriptorSchema, RequirementsSchema, JobInputSchema, ResourcePreparationSchema, WorkspaceSourceSchema, DeviceFrameSchema, IdSchema, ToolNameSchema, parse, parseFrame,
   validateDescriptor, validateToolArguments, validateOutcome, mismatch,
   type Descriptor, type Outcome, type Lease, type JobInput, type ServerFrame } from "../../../runner/src/protocol";
 
@@ -30,7 +30,7 @@ const ClaimSchema = Type.Object({ pairingId: Type.String({ pattern: "^[a-f0-9-]{
   tokenHash: Type.String({ pattern: "^[a-f0-9]{64}$" }), descriptor: DescriptorSchema }, strict);
 const AcquireSchema = Type.Object({ sandboxId: Type.String({ pattern: "^remote:[a-f0-9-]{36}$" }), workspace: Type.String({ pattern: "^[a-zA-Z0-9:_-]{1,160}$" }),
   operationId: Type.String({ pattern: "^[a-zA-Z0-9:_-]{1,160}$" }), capabilityRevision: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-  requirements: RequirementsSchema, workspaceSource: Type.Optional(WorkspaceSourceSchema) }, strict);
+  requirements: RequirementsSchema, resourcePreparation: Type.Optional(ResourcePreparationSchema), workspaceSource: Type.Optional(WorkspaceSourceSchema) }, strict);
 export type AcquireInput = Static<typeof AcquireSchema>;
 const InvokeSchema = Type.Object({ leaseId: IdSchema, tool: ToolNameSchema, arguments: Type.Record(Type.String(), Type.Unknown()),
   timeoutMs: Type.Integer({ minimum: 1000, maximum: 1200000 }) }, strict);
@@ -217,7 +217,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
         memoryMiB: device.descriptor.memoryMiB, maxTimeoutMs: device.descriptor.maxTimeoutMs,
         capabilityRevision: device.revision, availability: !this.available(device.id) ? "offline" : allocation?.kind === "releasing" || allocation?.kind === "lost" ? "draining" : allocation?.kind === "active" ? "busy" : "ready",
         activeJobs: (allocation?.kind === "active" || allocation?.kind === "lost") && allocation.jobId ? 1 : 0,
-        ...(device.descriptor.workspacePreparation ? { workspacePreparation: device.descriptor.workspacePreparation } : {}),
+        ...(device.descriptor.resourceLifecycle ? { resourceLifecycle: device.descriptor.resourceLifecycle } : {}),
         workspaceRoot: device.descriptor.workspaceRoot ?? "tool-specific", instructions: device.descriptor.instructions, persistence: device.descriptor.persistence,
         mismatch: mismatch(device.descriptor, requirements) });
     }
@@ -235,10 +235,11 @@ export class SandboxFleetDO extends DurableObject<Env> {
     const resource = await this.resources().get(owner, input.sandboxId);
     if (resource.kind !== "remote") throw new Error("remote_sandbox_required");
     return this.acquire({ sandboxId: resource.providerId, workspace: resource.workspace, operationId, capabilityRevision: input.capabilityRevision, requirements: input.requirements,
-      ...(resource.sourceWorkspace ? { workspaceSource: { workspace: resource.sourceWorkspace } } : {}) }, { owner, resourceId: resource.id, actors: [actor] });
+      ...(resource.preparation ? { resourcePreparation: resource.preparation } : {}) }, { owner, resourceId: resource.id, actors: [actor] });
   }
   async acquire(value: unknown, membership?: Membership): Promise<Lease> {
     const input = parse(AcquireSchema, value), deviceId = input.sandboxId.slice(7);
+    if (input.workspaceSource) throw new Error("legacy_preparation_removed");
     const requestKey = "acquire:" + await hash((membership?.actors[0] ?? input.workspace) + ":" + input.operationId), fingerprint = await hash(JSON.stringify(membership ? { input, membership } : input));
     const lease = await this.ctx.storage.transaction(async tx => {
       if (!(await tx.get<Settings>("settings") ?? this.defaultSettings()).enabled) throw new Error("disabled");
@@ -255,6 +256,9 @@ export class SandboxFleetDO extends DurableObject<Env> {
       if (device.revision !== input.capabilityRevision) throw new Error("capability_changed");
       validateDescriptor(device.descriptor);
       if (mismatch(device.descriptor, input.requirements).length) throw new Error("capability_mismatch");
+      const preparation = input.resourcePreparation;
+      if (preparation && !device.descriptor.resourceLifecycle?.[preparation.kind]) throw new Error(preparation.kind + "_not_supported");
+      if (preparation?.kind === "clone" && preparation.sourceWorkspace === input.workspace) throw new Error("workspace_source_must_differ");
       const current = await tx.get<Allocation>("allocation:" + deviceId);
       if (current && current.kind !== "released") {
         if (!membership || current.lease.workspace !== input.workspace || current.membership && (current.membership.owner !== membership.owner || current.membership.resourceId !== membership.resourceId)) throw new Error("busy");
@@ -266,11 +270,8 @@ export class SandboxFleetDO extends DurableObject<Env> {
         for (const actor of membership.actors) await tx.delete(detachedKey(current.lease.id, actor));
         return current.lease;
       }
-      const { workspaceSource, ...base } = input;
-      if (membership && workspaceSource && device.descriptor.workspacePreparation !== "git-clone-v1") throw new Error("clone_not_supported");
-      if (workspaceSource?.workspace === input.workspace) throw new Error("workspace_source_must_differ");
-      const lease: Lease = { ...base, id: crypto.randomUUID(), deviceId, createdAt: Date.now(),
-        ...(workspaceSource && device.descriptor.workspacePreparation === "git-clone-v1" ? { workspaceSource } : {}) };
+      const { workspaceSource: _, ...base } = input;
+      const lease: Lease = { ...base, id: crypto.randomUUID(), deviceId, createdAt: Date.now() };
       await tx.put({ ["allocation:" + deviceId]: { kind: "active", lease, jobId: null, touchedAt: Date.now(), ...(membership ? { membership } : {}) } satisfies Allocation,
         ["lease:" + lease.id]: deviceId, [requestKey]: { fingerprint, lease } });
       return lease;
@@ -339,6 +340,7 @@ export class SandboxFleetDO extends DurableObject<Env> {
     }
     const allocation = await this.allocation(workspace, request.leaseId);
     if (allocation.kind !== "active") throw new Error(allocation.kind === "lost" ? "session_lost" : "lease_expired");
+    if (allocation.lease.workspaceSource) throw new Error("legacy_preparation_requires_release");
     const device = await this.device(allocation.lease.deviceId);
     const args = validateToolArguments(validateDescriptor(device.descriptor), request.tool, request.arguments);
     if (request.timeoutMs > device.descriptor.maxTimeoutMs) throw new Error("capability_mismatch");

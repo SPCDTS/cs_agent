@@ -16,10 +16,19 @@ export const ToolDeclarationSchema = Type.Object({ name: ToolNameSchema, descrip
 export type ToolDeclaration = Static<typeof ToolDeclarationSchema>;
 export const SandboxInstructionsSchema = Type.String({ minLength: 1, maxLength: 4000 });
 export const SandboxPersistenceSchema = Type.String({ minLength: 1, maxLength: 1000 });
+/** 创建与克隆的语义由提供方声明；缺少声明即不支持相应操作。 */
+export const ResourceLifecycleSchema = Type.Object({ create: SandboxInstructionsSchema, clone: Type.Optional(SandboxInstructionsSchema) }, strict);
+export const ResourcePreparationSchema = Type.Union([
+  Type.Object({ kind: Type.Literal("create"), operationId: IdSchema }, strict),
+  Type.Object({ kind: Type.Literal("clone"), operationId: IdSchema, sourceWorkspace: IdSchema }, strict),
+]);
+export type ResourcePreparation = Static<typeof ResourcePreparationSchema>;
 export const DescriptorSchema = Type.Object({
   name: Type.String({ minLength: 1, maxLength: 80 }), provider: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }),
   os: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), arch: Type.String({ pattern: "^[a-z0-9_-]{1,40}$" }),
-  workspacePreparation: Type.Optional(Type.Literal("git-clone-v1")),
+  resourceLifecycle: Type.Optional(ResourceLifecycleSchema),
+  // 仅接收旧设备声明以支持滚动升级，不再把旧字段作为能力或执行指令。
+  workspacePreparation: Type.Optional(Type.String({ maxLength: 80 })),
   workspaceRoot: Type.Optional(Type.String({ minLength: 1, maxLength: 1024 })),
   instructions: SandboxInstructionsSchema, persistence: SandboxPersistenceSchema,
   tools: Type.Array(ToolDeclarationSchema, { minItems: 1, maxItems: 16 }),
@@ -51,6 +60,8 @@ export const WorkspaceSourceSchema = Type.Object({ workspace: IdSchema }, strict
 export const LeaseSchema = Type.Object({
   id: IdSchema, deviceId: IdSchema, sandboxId: IdSchema, workspace: IdSchema, operationId: IdSchema,
   capabilityRevision: HashSchema, requirements: RequirementsSchema, createdAt: Type.Number(),
+  resourcePreparation: Type.Optional(ResourcePreparationSchema),
+  // 只供旧租约查询和释放；执行端拒绝继续旧初始化。
   workspaceSource: Type.Optional(WorkspaceSourceSchema),
 }, strict);
 export type Lease = Static<typeof LeaseSchema>;

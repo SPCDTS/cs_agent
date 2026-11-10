@@ -75,6 +75,25 @@ export class SandboxDO extends DurableObject<Env> {
     return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({ ...file, name: name ?? file.name, kind: imageMime(file.bytes) ? "image" : "file" });
   }
   importSnapshot(input: { manifest: WorkspaceManifest; expectedRevision: string; paths?: string[] }): Promise<WorkspaceCompareResult> { return this.workspace.importSnapshot(input); }
+  /** Cloudflare 提供方负责选择快照和幂等初始化；管理服务只传来源与操作标识。 */
+  async prepareResource(input: { operationId: string; sourceName?: string }): Promise<void> {
+    const key = "resource-prepare:" + input.operationId;
+    type Preparation = { sourceName?: string; sourceRevision?: string };
+    let prepared = await this.ctx.storage.get<Preparation>(key);
+    if (!prepared) {
+      const candidate: Preparation = input.sourceName
+        ? { sourceName: input.sourceName, sourceRevision: (await this.env.SANDBOX.getByName(input.sourceName).snapshot()).revision } : {};
+      prepared = await this.ctx.storage.transaction(async tx => {
+        const prior = await tx.get<Preparation>(key); if (prior) return prior;
+        await tx.put(key, candidate); return candidate;
+      });
+    }
+    if (prepared.sourceName !== input.sourceName) throw new Error("operation_conflict");
+    if (prepared.sourceName) {
+      const result = await this.cloneFrom({ sourceName: prepared.sourceName, sourceRevision: prepared.sourceRevision, expectedRevision: "0", operationId: input.operationId });
+      if (!result.ok) throw new Error("workspace_conflict");
+    }
+  }
   async cloneFrom(input: { sourceName: string; expectedRevision: string; sourceRevision?: string; operationId?: string }): Promise<WorkspaceCompareResult> {
     const manifest = await this.env.SANDBOX.getByName(input.sourceName).files(input.sourceRevision);
     return this.workspace.importSnapshot({ manifest, expectedRevision: input.expectedRevision, ...(input.operationId ? { operationId: input.operationId } : {}) });

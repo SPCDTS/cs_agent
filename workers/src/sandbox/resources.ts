@@ -1,7 +1,7 @@
 import { Type, type Static } from "typebox";
 import type { Env } from "../env";
 import type { CatalogEntry } from "../remote-sandbox/wire";
-import { IdSchema, parse } from "../../../runner/src/protocol";
+import { IdSchema, ResourcePreparationSchema, parse } from "../../../runner/src/protocol";
 
 export const ResourceIdSchema = Type.String({ pattern: "^sbx:[a-f0-9-]{36,64}$" });
 export const ProviderIdSchema = Type.Union([Type.Literal("cloudflare"), Type.String({ pattern: "^remote:[a-f0-9-]{36}$" })]);
@@ -9,6 +9,8 @@ const common = { id: ResourceIdSchema, owner: IdSchema, createdAt: Type.Number()
 export const SandboxResourceSchema = Type.Union([
   Type.Object({ ...common, kind: Type.Literal("cloudflare"), providerId: Type.Literal("cloudflare"), name: IdSchema }, { additionalProperties: false }),
   Type.Object({ ...common, kind: Type.Literal("remote"), providerId: Type.String({ pattern: "^remote:[a-f0-9-]{36}$" }), workspace: IdSchema,
+    preparation: Type.Optional(ResourcePreparationSchema),
+    // 只读兼容旧资源登记；不再下发旧来源初始化指令。
     sourceWorkspace: Type.Optional(IdSchema) }, { additionalProperties: false }),
 ]);
 export type SandboxResource = Static<typeof SandboxResourceSchema>;
@@ -16,7 +18,7 @@ export const CreateResourceSchema = Type.Object({ providerId: ProviderIdSchema, 
 export const readResource = (json: string) => parse(SandboxResourceSchema, JSON.parse(json));
 export const readResources = (json: string) => parse(Type.Array(SandboxResourceSchema), JSON.parse(json));
 type Record = { kind: "ready"; resource: SandboxResource; fingerprint?: string }
-  | { kind: "preparing"; resource: Extract<SandboxResource, { kind: "cloudflare" }>; fingerprint: string; clone: { sourceName: string; sourceRevision: string; expectedRevision: string; operationId: string } };
+  | { kind: "preparing"; resource: Extract<SandboxResource, { kind: "cloudflare" }>; fingerprint: string; sourceName?: string; clone?: { sourceName: string; sourceRevision: string; expectedRevision: string; operationId: string } };
 const key = (id: string) => "resource:" + id;
 async function digest(value: string) { return [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))].map(n => n.toString(16).padStart(2, "0")).join(""); }
 
@@ -49,18 +51,17 @@ export class SandboxResources {
     if (!record) {
       const provider = catalog.find(row => row.id === input.providerId);
       if (!provider) throw new Error("provider_not_found");
+      if (!provider.resourceLifecycle) throw new Error("create_not_supported");
       const source = input.sourceId ? await this.get(owner, input.sourceId) : undefined;
       if (source && source.providerId !== provider.id) throw new Error("clone_provider_mismatch");
+      if (source && !provider.resourceLifecycle.clone) throw new Error("clone_not_supported");
       const common = { id, owner, createdAt: Date.now(), ...(source ? { sourceId: source.id } : {}) };
       if (provider.id === "cloudflare") {
         const resource = { ...common, kind: "cloudflare", providerId: "cloudflare", name: "resource:" + id.slice(4) } satisfies SandboxResource;
-        record = source?.kind === "cloudflare"
-          ? { kind: "preparing", resource, fingerprint, clone: { sourceName: source.name, sourceRevision: (await this.env.SANDBOX.getByName(source.name).snapshot()).revision, expectedRevision: "0", operationId: "create:" + id } }
-          : { kind: "ready", resource, fingerprint };
+        record = { kind: "preparing", resource, fingerprint, ...(source?.kind === "cloudflare" ? { sourceName: source.name } : {}) };
       } else {
-        if (source && provider.workspacePreparation !== "git-clone-v1") throw new Error("clone_not_supported");
         record = { kind: "ready", fingerprint, resource: { ...common, kind: "remote", providerId: provider.id, workspace: id,
-          ...(source?.kind === "remote" ? { sourceWorkspace: source.workspace } : {}) } };
+          preparation: source?.kind === "remote" ? { kind: "clone", operationId: id, sourceWorkspace: source.workspace } : { kind: "create", operationId: id } } };
       }
       const candidate = record;
       record = await this.storage.transaction(async tx => {
@@ -71,8 +72,11 @@ export class SandboxResources {
     }
     if (record.fingerprint !== fingerprint) throw new Error("operation_conflict");
     if (record.kind === "preparing") {
-      const result = await this.env.SANDBOX.getByName(record.resource.name).cloneFrom(record.clone);
-      if (!result.ok) throw new Error("workspace_conflict");
+      const provider = this.env.SANDBOX.getByName(record.resource.name);
+      if (record.clone) {
+        // 恢复升级前已经开始的 Cloudflare 快照导入，沿用已固定的版本。
+        const result = await provider.cloneFrom(record.clone); if (!result.ok) throw new Error("workspace_conflict");
+      } else await provider.prepareResource({ operationId: "create:" + id, ...(record.sourceName ? { sourceName: record.sourceName } : {}) });
       await this.storage.put(key(id), { kind: "ready", resource: record.resource, fingerprint } satisfies Record);
     }
     return record.resource;

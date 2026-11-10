@@ -47,17 +47,17 @@ try {
   assert.equal(resumedResult.code, 0, resumedResult.stdout + resumedResult.stderr); assert.match(resumedResult.stdout, /复用 node_modules/);
   assert.notDeepEqual(await readJson(path.join(state, "instance.json")), instance);
   await backend.release(binding.id);
-  binding = { ...binding, id: randomUUID(), operationId: randomUUID(), workspace: "smoke-child", workspaceSource: { workspace: "smoke" }, createdAt: Date.now() };
-  const childCommand = js("const fs=require('node:fs'),assert=require('node:assert/strict');assert.equal(fs.existsSync('repo/node_modules'),false);assert.equal(fs.readFileSync('repo/seed.txt','utf8'),'committed');assert.equal(fs.readFileSync('C:/AgentCache/npm/shared-probe.txt','utf8'),'shared');assert.equal(fs.existsSync('repo/.git/objects/info/alternates'),false);let denied=false;try{fs.writeFileSync('C:/AgentSeed/repo/seed.txt','forbidden');}catch{denied=true;}assert.ok(denied);console.log('来源只读与缓存共享验证通过');") +
+  binding = { ...binding, id: randomUUID(), operationId: randomUUID(), workspace: "smoke-child", resourcePreparation: { kind: "clone", operationId: "smoke-clone", sourceWorkspace: "smoke" }, createdAt: Date.now() };
+  const childCommand = js("const fs=require('node:fs'),assert=require('node:assert/strict');assert.equal(fs.existsSync('repo/node_modules'),true);assert.equal(fs.readFileSync('repo/seed.txt','utf8'),'parent-dirty');assert.equal(fs.existsSync('C:/AgentCache/npm/shared-probe.txt'),false);assert.equal(fs.existsSync('repo/.git/objects/info/alternates'),false);let denied=false;try{fs.writeFileSync('C:/AgentSource/repo/seed.txt','forbidden');}catch{denied=true;}assert.ok(denied);console.log('文件复制与来源只读验证通过');") +
     "Set-Location repo; & node.exe C:\\AgentTools\\runner\\npm-ensure.mjs --offline; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; & npm.cmd test; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; " +
-    js("const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');assert.match(cp.execFileSync('git.exe',['branch','--show-current'],{encoding:'utf8'}),/^agent\\//);fs.writeFileSync('seed.txt','child-dirty');") + verify;
+    js("const fs=require('node:fs'),assert=require('node:assert/strict'),cp=require('node:child_process');assert.equal(cp.execFileSync('git.exe',['branch','--show-current'],{encoding:'utf8'}),cp.execFileSync('git.exe',['-C','C:/AgentSource/repo','branch','--show-current'],{encoding:'utf8'}));fs.writeFileSync('.git/child-only','independent');fs.writeFileSync('seed.txt','child-dirty');") + verify;
   const child = await backend.run(prepare(childCommand), new AbortController().signal, message => process.stdout.write(message));
   if (child.kind !== "completed") throw new Error(JSON.stringify(child));
   const childResult = parse(ExecResultSchema, child.result);
-  assert.equal(childResult.code, 0, childResult.stdout + childResult.stderr); assert.match(childResult.stdout, /已准备独立仓库/); assert.match(childResult.stdout, /来源只读与缓存共享验证通过/);
+  assert.equal(childResult.code, 0, childResult.stdout + childResult.stderr); assert.match(childResult.stdout, /复用 node_modules/); assert.match(childResult.stdout, /文件复制与来源只读验证通过/);
   await backend.release(binding.id);
-  binding = { ...binding, id: randomUUID(), operationId: randomUUID(), workspace: "smoke", createdAt: Date.now() }; delete binding.workspaceSource;
-  const parent = await backend.run(prepare(verify + "; " + js("const fs=require('node:fs'),assert=require('node:assert/strict');assert.equal(fs.readFileSync('seed.txt','utf8'),'parent-dirty');")), new AbortController().signal, message => process.stdout.write(message));
+  binding = { ...binding, id: randomUUID(), operationId: randomUUID(), workspace: "smoke", createdAt: Date.now() }; delete binding.resourcePreparation;
+  const parent = await backend.run(prepare(verify + "; " + js("const fs=require('node:fs'),assert=require('node:assert/strict');assert.equal(fs.readFileSync('seed.txt','utf8'),'parent-dirty');assert.equal(fs.existsSync('.git/child-only'),false);")), new AbortController().signal, message => process.stdout.write(message));
   if (parent.kind !== "completed") throw new Error(JSON.stringify(parent));
   const parentResult = parse(ExecResultSchema, parent.result);
   assert.equal(parentResult.code, 0, parentResult.stdout + parentResult.stderr);
@@ -67,5 +67,5 @@ try {
   assert.deepEqual(await backend.run(prepare("Get-Location"), new AbortController().signal, () => undefined), { kind: "failed", error: "session_lost", sessionLost: true });
   await backend.release(binding.id);
   assert.equal(await fs.readFile(path.join(config.dataDir!, "projects", sha256(binding.workspace), "repo", "中文.txt"), "utf8"), "你好，远程沙箱");
-  console.log("WSB 内 npm 安装与依赖复用、同实例命令、新租约与新 VM 恢复中文/二进制/git/node_modules、取消后持久文件保留，以及子工作区独立 clone、只读来源、离线安装和 npm 缓存共享均通过。");
+  console.log("WSB 内 npm 安装与依赖复用、同实例命令、新租约与新 VM 恢复中文/二进制/git/node_modules、取消后持久文件保留，以及文件级克隆保留未提交修改与依赖、Git 文件独立、只读来源和独立 npm 缓存均通过。");
 } finally { await backend.stopOwned(); }

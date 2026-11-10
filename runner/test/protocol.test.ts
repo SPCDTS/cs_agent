@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { validateDescriptor, validateToolArguments, validateOutcome, mismatch, parseFrame, DeviceFrameSchema, ServerFrameSchema, MAX_CONTROL_BYTES } from "../src/protocol.ts";
+import { ResourcePreparationSchema, parse, validateDescriptor, validateToolArguments, validateOutcome, mismatch, parseFrame, DeviceFrameSchema, ServerFrameSchema, MAX_CONTROL_BYTES } from "../src/protocol.ts";
 import { capabilities } from "./fixtures.ts";
 
 test("设备注册的是可执行工具；环境版本不参与工具授权", () => {
@@ -38,4 +38,11 @@ test("v1 被明确拒绝；控制消息与 JSON 结果有界", () => {
   assert.throws(() => validateOutcome({ kind: "completed", result: undefined }), /invalid_json/);
   assert.throws(() => validateOutcome({ kind: "completed", result: { x: Number.NaN } }), /invalid_json/);
   assert.throws(() => validateOutcome({ kind: "completed", result: "x".repeat(MAX_CONTROL_BYTES) }), /json_too_large/);
+});
+
+test("生命周期声明有界；克隆指令需要明确来源且不能夹带初始化命令", () => {
+  assert.throws(() => validateDescriptor({ ...capabilities, resourceLifecycle: { create: "" } }), /invalid_request/);
+  assert.throws(() => validateDescriptor({ ...capabilities, resourceLifecycle: { create: "创建", clone: "中".repeat(4001) } }), /invalid_request/);
+  assert.throws(() => parse(ResourcePreparationSchema, { kind: "clone", operationId: "one" }), /invalid_request/);
+  assert.throws(() => parse(ResourcePreparationSchema, { kind: "create", operationId: "one", command: "git clone" }), /invalid_request/);
 });
