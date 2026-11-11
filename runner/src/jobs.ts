@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, statSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
+import { JobDetails, COMPLETED_DETAILS_RETENTION_MS } from './job-details.ts';
 import path from 'node:path';
 import { sha256 } from './files.ts';
 import type { Backend, Command, Execution, ExecutionStatus, Subject, Target } from './domain.ts';
@@ -10,7 +11,9 @@ interface SessionRow { id: string; principal: string; scope: string; target: str
 export interface Receipt {
   requestId: string; jobId: string; sessionId?: string; deadline: number;
   state: 'queued' | 'running' | 'cancelling' | ExecutionStatus['state'];
-  result?: { exitCode: number; stdout: string; stderr: string; truncated: boolean }; error?: string;
+  details: 'retained' | 'archived';
+  result?: { exitCode: number; stdout: string; stderr: string; truncated: boolean };
+  resultSummary?: { exitCode: number; truncated: boolean }; error?: string;
 }
 const active = (phase: Phase) => phase !== 'terminal';
 const stable = (value: unknown): string => {
@@ -21,7 +24,8 @@ const stable = (value: unknown): string => {
 /** SQLite 是主账本；原生后端只写执行证据。请求去重记录不自动删除。 */
 export class Jobs {
   private db: DatabaseSync;
-  private file: string;
+  private readonly details: JobDetails;
+  private nextArchive = 0;
   private timer?: NodeJS.Timeout;
   private pending?: Promise<void>;
   private stopped = false;
@@ -29,12 +33,13 @@ export class Jobs {
   private now: () => number;
   constructor(stateDir: string, backends: Record<Target['kind'], Backend>, now: () => number = Date.now) {
     this.backends = backends; this.now = now;
-    mkdirSync(stateDir, { recursive: true }); this.file = path.join(stateDir, 'jobs.sqlite');
-    this.db = new DatabaseSync(this.file);
+    mkdirSync(stateDir, { recursive: true });
+    this.db = new DatabaseSync(path.join(stateDir, 'jobs.sqlite'));
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS targets (id TEXT PRIMARY KEY, identity TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, principal TEXT NOT NULL, scope TEXT NOT NULL, target TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, execution TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL, created INTEGER NOT NULL, UNIQUE(principal,scope,target,request_id));
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, principal TEXT NOT NULL, scope TEXT NOT NULL, target TEXT NOT NULL, state TEXT NOT NULL, expires INTEGER NOT NULL, idle_until INTEGER NOT NULL, idle_ms INTEGER NOT NULL);`);
+    this.details = new JobDetails(this.db, this.now());
     // dispatching 表示进程可能已接到命令；恢复时只能 inspect。
     this.db.exec("UPDATE jobs SET phase='active' WHERE phase='dispatching'");
   }
@@ -63,10 +68,10 @@ export class Jobs {
     return this.db.prepare('SELECT * FROM jobs WHERE principal=? AND scope=? AND target=? AND request_id=?').get(subject.principal, subject.scope, target.id, requestId) as JobRow | undefined;
   }
   private rows(): JobRow[] { return this.db.prepare("SELECT * FROM jobs WHERE phase != 'terminal' ORDER BY created,rowid").all() as unknown as JobRow[]; }
-  private execution(row: JobRow): Execution { return JSON.parse(row.execution) as Execution; }
+  private execution(row: JobRow): Execution { return this.details.execution(row.id); }
   private receipt(row: JobRow): Receipt {
-    const execution = this.execution(row), status = JSON.parse(row.status) as ExecutionStatus;
-    return { requestId: row.request_id, jobId: row.id, ...(execution.sessionId ? { sessionId: execution.sessionId } : {}), deadline: execution.deadline,
+    const metadata = this.details.metadata(row.execution), { details, status } = this.details.read(row.id, row.status);
+    return { requestId: row.request_id, jobId: row.id, ...metadata, details,
       ...(row.phase === 'queued' ? { state: 'queued' as const } : row.phase === 'cancelling' ? { state: 'cancelling' as const } : status) };
   }
   submit(subject: Subject, target: Target, requestId: string, command: Command, sessionId?: string): Receipt {
@@ -78,8 +83,6 @@ export class Jobs {
         if (prior.fingerprint !== fingerprint) throw new Error('request_id_conflict');
         return this.receipt(prior);
       }
-      const count = this.db.prepare('SELECT COUNT(*) AS count FROM jobs').get()!;
-      if (Number(count.count) >= 4096 || statSync(this.file).size > 128 * 1024 * 1024) throw new Error('job_ledger_full');
       let deadline = this.now() + command.timeoutMs;
       if (target.kind === 'wsb') {
         if (sessionId) {
@@ -94,7 +97,9 @@ export class Jobs {
         }
       } else if (sessionId) throw new Error('session_not_supported');
       const execution: Execution = { id: randomUUID(), requestId, subject, target, command, ...(sessionId ? { sessionId } : {}), deadline };
-      this.db.prepare('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)').run(execution.id, subject.principal, subject.scope, target.id, requestId, fingerprint, JSON.stringify(execution), 'queued', JSON.stringify({ state: 'running' }), this.now());
+      const { command: _command, ...metadata } = execution;
+      this.db.prepare('INSERT INTO jobs(id,principal,scope,target,request_id,fingerprint,execution,phase,status,created) VALUES(?,?,?,?,?,?,?,?,?,?)').run(execution.id, subject.principal, subject.scope, target.id, requestId, fingerprint, JSON.stringify(metadata), 'queued', JSON.stringify({ state: 'running' }), this.now());
+      this.details.insert(execution);
       return this.receipt(this.find(subject, target, requestId)!);
     });
   }
@@ -134,7 +139,10 @@ export class Jobs {
     }
     const phase: Phase = status.state === 'running' || status.state === 'unknown' ? 'active' : 'terminal';
     // 取消期间的 inspect 不能抹掉取消意图。
-    this.db.prepare("UPDATE jobs SET phase=CASE WHEN phase='cancelling' AND ?='active' THEN 'cancelling' ELSE ? END,status=? WHERE id=?").run(phase, phase, JSON.stringify(status), row.id);
+    this.transaction(() => {
+      const summary = this.details.summarize(row.id, status);
+      this.db.prepare("UPDATE jobs SET phase=CASE WHEN phase='cancelling' AND ?='active' THEN 'cancelling' ELSE ? END,status=?,finished=CASE WHEN ?='terminal' THEN ? ELSE NULL END WHERE id=?").run(phase, phase, JSON.stringify(summary), phase, this.now(), row.id);
+    });
     const execution = this.execution(row);
     if (execution.sessionId && phase === 'terminal') this.db.prepare('UPDATE sessions SET idle_until=MIN(expires,?) WHERE id=?').run(this.now() + (execution.target.kind === 'wsb' ? execution.target.idleTimeoutMs : 0), execution.sessionId);
   }
@@ -144,7 +152,11 @@ export class Jobs {
     this.pending = this.advance().catch(() => { /* 下次轮询重查证据，绝不重新派发。 */ }).finally(() => { this.pending = undefined; });
     return this.pending;
   }
+  archiveCompleted(): number { return this.details.archive(this.now() - COMPLETED_DETAILS_RETENTION_MS); }
   private async advance() {
+    if (this.now() >= this.nextArchive) { this.archiveCompleted(); this.nextArchive = this.now() + 3600_000; }
+    // 排队期限包含等待时间；不能让同 lane 的活跃任务阻止后续项按时结算。
+    for (const row of this.rows()) if (row.phase === 'queued' && this.details.metadata(row.execution).deadline <= this.now()) this.finish(row, { state: 'cancelled' });
     const sessions = this.db.prepare("SELECT * FROM sessions WHERE state!='closed'").all() as unknown as SessionRow[];
     for (const session of sessions) {
       const hasWork = this.rows().some(row => this.execution(row).sessionId === session.id);
