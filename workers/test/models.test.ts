@@ -1,5 +1,5 @@
 import { ModelAlarm } from "../src/model-alarm";
-import { zstdDecompressSync } from "node:zlib";
+import { constants, zstdDecompressSync } from "node:zlib";
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
@@ -285,6 +285,36 @@ describe("model selection and Codex Responses", () => {
     expect((await selectModel({ provider: "faux", id: "test-alt" })).status).toBe(200);
     expect(await owner.submit(input(2, "第二句", 10000001))).toEqual({ status: "done" });
     expect(used).toEqual(["test", "test-alt"]);
+  });
+
+  it.each(["complete", "completeSimple"] as const)("%s sends large image requests with a Codex-compatible Zstd window", async method => {
+    network(); await login();
+    const image = { type: "image" as const, mimeType: "image/png", data: "a".repeat(921064) };
+    const content = [{ type: "text" as const, text: "双图传输验证" }, image, image];
+    const upstream = vi.fn<typeof fetch>(async (input, init) => {
+      const request = new Request(input, init);
+      expect(request.url).toBe(CODEX_BASE_URL + "/responses");
+      expect(request.headers.get("authorization")).toBe("Bearer " + accessToken());
+      expect(request.headers.get("content-encoding")).toBe("zstd");
+      // 库默认编码的 1.8 MiB 请求不能被此窗口上限解码；不要只验证默认解码器能读回。
+      const json = zstdDecompressSync(new Uint8Array(await request.arrayBuffer()), {
+        params: { [constants.ZSTD_d_windowLogMax]: 20 },
+      }).toString("utf8");
+      expect(Buffer.byteLength(json)).toBeGreaterThan(1_800_000);
+      expect(JSON.parse(json).input).toContainEqual({ role: "user", content: [
+        { type: "input_text", text: "双图传输验证" },
+        ...[image, image].map(part => ({ type: "input_image", detail: "auto", image_url: "data:image/png;base64," + part.data })),
+      ] });
+      return new Response('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n',
+        { headers: { "Content-Type": "text/event-stream" } });
+    });
+    const available = models.openModels(env, store(), upstream);
+    const model = available.getModels("openai-codex").find(model => model.id === "gpt-6-astra");
+    if (!model) throw new Error("test model missing");
+    const result = await available[method](model, { messages: [{ role: "user", content, timestamp: 0 }] }, { transport: "sse" });
+    expect(result.errorMessage).toBeUndefined();
+    expect(result.stopReason).toBe("stop");
+    expect(upstream).toHaveBeenCalledTimes(1);
   });
 
   it("uses the native Codex endpoint over SSE with store false and the selected effort", async () => {
