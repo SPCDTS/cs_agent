@@ -3,6 +3,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "cs-agent-dev",
   "main": "src/index.ts",
+  "build": { "command": "node scripts/build-admin.mjs", "watch_dir": ["browser", "scripts/build-admin.mjs"] },
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
   // 限制每次调用的活跃 CPU；网络等待不计入 CPU，避免异常计算消耗套餐额度
