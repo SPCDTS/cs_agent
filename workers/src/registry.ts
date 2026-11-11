@@ -10,7 +10,7 @@ import { OAuthFailure } from "./mcp/oauth-fetch";
 import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelection, type Settings, type SettingsSnapshot, defaultOpsSettings, opsSettingsRevision, OpsSettingsSchema, type OpsSettings, type OpsSettingsSnapshot } from "./settings";
 import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, type CredentialLease } from "./model-credentials";
 import { openModels, providerStatuses, selectionProblem, type ProviderStatus } from "./models";
-import { CODEX_PROVIDER } from "./codex-login";
+import { CODEX_PROVIDER, fetchCatalog } from "./codex-login";
 import type { RefreshFailure } from "./codex-refresh-error";
 import { CHATGPT_SCHEMA, ChatGPTAccounts, type ChatGPTView } from "./chatgpt-accounts";
 import { GrantStore, digest, type GrantAccess } from "./grants";
@@ -38,7 +38,8 @@ export class RegistryDO extends DurableObject<Env> {
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly access = new Map<string, Promise<string | undefined>>();
   private readonly credentials = new SqlCredentialStore(this.ctx.storage.sql, this.vault);
-  private readonly chatgpt = new ChatGPTAccounts(this.ctx.storage.sql, this.vault, this.credentials);
+  private readonly catalogCommands: (() => Promise<void>)[] = [];
+  private readonly chatgpt = new ChatGPTAccounts(this.ctx.storage.sql, this.vault, this.credentials, credential => this.catalogOnAlarm(() => fetchCatalog(credential)));
   private readonly models = openModels(this.env, this.chatgpt.store);
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -237,6 +238,17 @@ export class RegistryDO extends DurableObject<Env> {
   credentialAcquire(providerId: string): Promise<CredentialLease> { return this.chatgpt.acquire(providerId); }
   credentialSettle(providerId: string, lease: string, expectedUpdatedAt: number | null, next?: Credential, failure?: RefreshFailure) {
     return this.chatgpt.settle(providerId, lease, expectedUpdatedAt, next, failure);
+  }
+  // 目录请求与对话一样由 DO 自身的 alarm 发起，避免继承管理员入口上下文。
+  private async catalogOnAlarm<T>(operation: () => Promise<T>): Promise<T> {
+    const result = Promise.withResolvers<T>();
+    const command = async () => { try { result.resolve(await operation()); } catch (error) { result.reject(error); } };
+    this.catalogCommands.push(command);
+    await this.ctx.storage.setAlarm(Date.now());
+    return result.promise;
+  }
+  override async alarm(): Promise<void> {
+    for (const command of this.catalogCommands.splice(0)) await command();
   }
   codexLoginStart(accountId?: string) { return this.chatgpt.start(accountId); }
   codexLoginBegin(ticket: string, port: number) { return this.chatgpt.begin(ticket, port); }

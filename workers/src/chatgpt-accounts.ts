@@ -38,7 +38,7 @@ export class ChatGPTAccounts {
     modify: (provider, fn) => this.credentials.modify(this.key(provider), fn),
     delete: provider => this.credentials.delete(this.key(provider)),
   };
-  constructor(private readonly sql: SqlStorage, private readonly vault: TokenVault, private readonly credentials: SqlCredentialStore) {}
+  constructor(private readonly sql: SqlStorage, private readonly vault: TokenVault, private readonly credentials: SqlCredentialStore, private readonly loadCatalog = fetchCatalog) {}
   private state(key: string): string | undefined {
     return this.sql.exec<{ value: string }>("SELECT value FROM chatgpt_state WHERE key = ?", key).toArray()[0]?.value || undefined;
   }
@@ -155,7 +155,7 @@ export class ChatGPTAccounts {
     try {
       await this.credentials.modify(accountKey(id), async current => {
         if (!isChatGPTCredential(current)) throw new ModelLoginError("login_required");
-        return { ...current, catalog: await fetchCatalog(current) };
+        return { ...current, catalog: await this.loadCatalog(current) };
       });
       this.sql.exec("DELETE FROM chatgpt_state WHERE key = ?", "catalog:" + id);
     } catch (error) {
