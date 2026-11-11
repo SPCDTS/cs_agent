@@ -58,4 +58,8 @@ Wrangler 使用生产配置打包 Worker，实际发布时构建并推送编码�
 
 测试包与应用在同一 `workers/`，不再依赖根目录 Node 源码或另一份 node_modules。workerd 测试覆盖业务、恢复、权限和接口；独立 Node 测试覆盖无法在 workerd 中运行的沙箱控制服务和本机助手。
 
+管理台浏览器逻辑位于 `workers/browser/`，HTML/CSS 模板保留在 `workers/src/admin/`。浏览器代码通过独立的 `tsconfig.browser.json` 按严格 DOM 类型检查；共享 DOM、HTTP 接口和状态都有显式类型，读取接口先用对应 TypeBox schema 校验。各功能模块只在 `main.ts` 中注册事件并启动，详情与工具正文仍在展开时按需加载，数据列表共用每页 10 项分页。
+
+`node workers/scripts/build-admin.mjs` 使用 esbuild 生成 `workers/src/admin/app.generated.ts`，Worker 继续从 `/admin/app.js` 返回构建结果。生成文件不手工编辑、不提交；typecheck、测试及 Wrangler dev/deploy/dry-run 均先构建，开发模式监视浏览器源码。路由契约测试复用相同 schema，验证实际 Worker 返回值，不另维护一套测试类型。
+
 DO 迁移列表属于线上 schema 历史，即使旧类已经移除也必须保留相应创建与删除记录。配置、secret 和上线核对见 [部署说明](DEPLOY.md)。
