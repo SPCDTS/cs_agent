@@ -4,7 +4,7 @@
 
 ## 开发与验证
 
-需要 Node.js 24+。在仓库根目录运行：
+需要 Node.js 24+ 和 Python 3.12+。在仓库根目录运行：
 
 ```sh
 npm run install:workers
@@ -47,3 +47,7 @@ CS2 Workshop 本体属于另一个项目；本仓库只保存云端调用它所�
 - [管理台](docs/ADMIN-CONSOLE.md)、[云端功能与资源预算](docs/CLOUD-PARITY.md)
 - [权限与发送](docs/CLOUD-ACCESS-CONTRACT.md)、[资产与持久工作区](docs/CLOUD-ASSETS-CONTRACT.md)、[MCP 与子 agent](docs/CLOUD-MCP-CONTRACT.md)
 - [本机 Workshop 接入](docs/WORKSHOP-LOCAL.md)
+
+## 源码公开与贡献
+
+当前仓库仅公开源码，尚未提供开源许可证或授予额外使用许可；如需额外授权，请联系维护者。贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题见 [SECURITY.md](SECURITY.md)。功能更新通过独立分支和 PR 合并，main 禁止直推。

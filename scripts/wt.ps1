@@ -1,8 +1,7 @@
 # 每个任务一个 worktree；新任务使用 codex/ 分支和独立 Workers 依赖。
 param(
   [Parameter(Mandatory, Position = 0)][ValidateSet("new", "land", "rm", "list")][string]$Action,
-  [Parameter(Position = 1)][ValidatePattern('^[a-z0-9][a-z0-9-]*$')][string]$Name,
-  [switch]$SkipTests
+  [Parameter(Position = 1)][ValidatePattern('^[a-z0-9][a-z0-9-]*$')][string]$Name
 )
 $ErrorActionPreference = "Stop"
 function Invoke-Git {
@@ -16,11 +15,8 @@ if ($Action -eq "list") { Invoke-Git -C $main worktree list; return }
 if (!$Name) { throw "缺少名称：scripts/wt.ps1 $Action <名称>" }
 $path = [System.IO.Path]::GetFullPath("$main-wt-$Name")
 $branch = "codex/$Name"
-if ($Action -ne "new") {
+if ($Action -eq "rm") {
   $branch = Invoke-Git -C $path symbolic-ref --short HEAD
-}
-function Assert-Clean($dir, $what) {
-  if (Invoke-Git -C $dir status --porcelain --untracked-files=no) { throw "$what 有未提交改动：$dir" }
 }
 switch ($Action) {
   "new" {
@@ -29,19 +25,7 @@ switch ($Action) {
     "worktree：$path（分支 $branch）。进入后运行 npm run install:workers，依赖只安装在该 worktree。"
   }
   "land" {
-    Assert-Clean $path "worktree"
-    Invoke-Git -C $path rebase -q main | Out-Null
-    if (!$SkipTests) {
-      Push-Location $path
-      try {
-        npm run check
-        if ($LASTEXITCODE) { throw "Workers 检查失败" }
-      } finally { Pop-Location }
-    }
-    if ((Invoke-Git -C $main symbolic-ref --short HEAD) -ne "main") { throw "主工作区不在 main 分支" }
-    Assert-Clean $main "主工作区"
-    Invoke-Git -C $main merge -q --ff-only $branch
-    Invoke-Git -C $main log --oneline -1
+    throw "main 必须通过 GitHub PR 合并。请在功能分支运行 npm run check，推送分支并使用获授权的 GitHub 身份创建 PR；合并后在主工作区 git pull --ff-only。"
   }
   "rm" {
     if (!(Test-Path -LiteralPath $path)) { throw "不存在：$path" }
