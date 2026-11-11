@@ -369,8 +369,12 @@ describe("subagents as child Durable Objects", () => {
     const sub = await onlySubagent("owner");
     expect((await admin("GET", "/admin/threads/owner/subagents", null)).status).toBe(401);
     expect((await admin("POST", `/admin/subagents/${sub.id}/cancel?thread=owner`, "wrong")).status).toBe(401);
-    const list = await (await admin("GET", "/admin/threads/owner/subagents")).json<SubagentView[]>();
-    expect(list).toEqual([expect.objectContaining({ id: sub.id, task: "面板任务", status: "running" })]);
+    // 展示副本主动异步同步，任务创建成功不代表展示批次已送达。
+    await vi.waitFor(async () => {
+      const response = await admin("GET", "/admin/threads/owner/subagents");
+      expect(response.status).toBe(200);
+      expect(await response.json<SubagentView[]>()).toEqual([expect.objectContaining({ id: sub.id, task: "面板任务", status: "running" })]);
+    });
 
     await vi.waitFor(async () => {
       const transcript = await (await admin("GET", `/admin/subagents/${sub.id}/transcript?thread=owner&limit=5`)).json<{ entries: { text: string }[] }>();
