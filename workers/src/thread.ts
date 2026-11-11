@@ -54,6 +54,7 @@ import { createGmailTools } from "./gmail/tools";
 import type { EventRunStatus } from "./events/model";
 import { cleanOutgoing } from "./send-clean";
 import { createWebPageTool } from "./tools/web-page";
+import { createImageTool } from "./tools/imagegen";
 import { createWebSearchTool } from "./tools/web-search";
 import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
@@ -258,6 +259,10 @@ export class ThreadDO extends DurableObject<Env> {
       }, () => this.env.EVENTS.getByName("main")) : []),
       createWebSearchTool(this.env.DEEPSEEK_API_KEY, detail => this.audit("web_search", detail)),
       createWebPageTool(),
+      createImageTool({ models: this.models(), repository: new MediaRepository({ bucket: this.env.ASSETS, scope: memory.ns }),
+        allowed: async (api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c); return !!input && input.kind === "message" && input.session_generation === await this.sessionGeneration(); },
+        record: detail => this.audit("generate_image", detail),
+      }),
       this.skills.tool(),
       defineTool({
         name: "send_message", description: "向本轮回复入口发送文字或私有图片资产。target可填qq:group:ID或qq:private:ID，跨会话须授权；网页回合只显示网页。",

@@ -53,7 +53,7 @@ describe("event turns in the owner thread", () => {
     const chat = seen.requests.find(request => request.user.includes("好的，记一下"));
     expect(chat?.tools).toEqual(expect.arrayContaining([...EVENT_TOOLS, ...WRITE_TOOLS, "codemode"]));
     for (const name of SANDBOX_TOOLS) expect(chat?.tools).not.toContain(name);
-    expect(chat?.tools).not.toContain("generate_image");
+    expect(chat?.tools).toContain("generate_image");
     const messages = await runInDurableObject(env.THREAD.getByName("owner"), (_instance, state) =>
       state.storage.sql.exec<{ text: string }>("SELECT text FROM messages").toArray().map(row => row.text).join("\n"));
     expect(messages).not.toContain("Q4 预算确认");

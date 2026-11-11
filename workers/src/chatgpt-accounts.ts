@@ -5,7 +5,7 @@ import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { refreshNeedsReauth, type RefreshFailure } from "./codex-refresh-error";
 import { SqlCredentialStore, type CredentialMeta, type CredentialLease } from "./model-credentials";
 import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, PendingSchema, acceptTokens, callbackClient,
-  codexOAuth, fetchCatalog, isChatGPTCredential, revokeSession, startChatGPTLogin } from "./codex-login";
+  codexOAuth, fetchCatalog, isChatGPTCredential, isNativeCodexCredential, revokeSession, startChatGPTLogin } from "./codex-login";
 
 export const CHATGPT_SCHEMA = `
   CREATE TABLE IF NOT EXISTS chatgpt_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -18,7 +18,7 @@ const DraftSchema = Type.Object({ accountId: Type.Optional(Type.String()) });
 type LoginStatus = "logged_out" | "ready" | "refresh_due" | "refresh_failed" | "reauth_required";
 export type ChatGPTView = {
   status: LoginStatus; loggedIn: boolean; hasCredential: boolean; needsReauth: boolean;
-  activeId?: string; email?: string; expiresAt?: number; refreshFailure?: RefreshFailure;
+  activeId?: string; flow?: string; imageGeneration: boolean; email?: string; expiresAt?: number; refreshFailure?: RefreshFailure;
   accounts: { id: string; label: string; loggedIn: boolean; status: LoginStatus }[];
 };
 function loginStatus(meta?: CredentialMeta): LoginStatus {
@@ -59,9 +59,9 @@ export class ChatGPTAccounts {
     const activeId = this.activeId(), meta = activeId ? this.credentials.meta(accountKey(activeId)) : undefined;
     const status = !meta && this.credentials.meta(CODEX_PROVIDER) ? "reauth_required" : loginStatus(meta);
     return { status, loggedIn: status === "ready", hasCredential: !!meta, needsReauth: status === "reauth_required",
-      activeId, email: meta?.email, expiresAt: meta?.expiresAt, refreshFailure: meta?.refreshFailure,
+      activeId, flow: meta?.flow, imageGeneration: !!meta && meta.flow === "codex-native" && (!meta.refreshFailure || !refreshNeedsReauth(meta.refreshFailure)), email: meta?.email, expiresAt: meta?.expiresAt, refreshFailure: meta?.refreshFailure,
       accounts: this.sql.exec<Account>("SELECT * FROM chatgpt_accounts ORDER BY created_at, id").toArray().map(account => ({
-        id: account.id, label: (account.email ?? "ChatGPT 账号") + " · " + account.id.slice(0, 8),
+        id: account.id, label: (this.credentials.meta(accountKey(account.id))?.flow === "codex-native" ? "Codex · " : "旧授权 · ") + (account.email ?? "ChatGPT 账号") + " · " + account.id.slice(0, 8),
         loggedIn: loginStatus(this.credentials.meta(accountKey(account.id))) === "ready", status: loginStatus(this.credentials.meta(accountKey(account.id))),
       })) };
   }
@@ -102,6 +102,7 @@ export class ChatGPTAccounts {
     const { pending, url } = await startChatGPTLogin(this.hostId(), port, account ? {
       id: account.id, clientId: account.client_id, subject: account.subject, email: account.email ?? undefined,
       ...(isChatGPTCredential(credential) ? { idToken: credential.idToken } : {}),
+      ...(isNativeCodexCredential(credential) ? { workspaceId: credential.accountId } : {}),
     } : undefined);
     const encrypted = await this.vault.encrypt(JSON.stringify(pending), hash);
     this.sql.exec("INSERT INTO chatgpt_logins VALUES (?, ?, ?)", hash, encrypted, expiresAt);
@@ -113,7 +114,7 @@ export class ChatGPTAccounts {
     if (!Check(PendingSchema, value)) throw new ModelLoginError("invalid_state");
     const clientId = callbackClient(callbackUrl, value);
     const credential = await acceptTokens(tokens, clientId, value);
-    credential.catalog = await fetchCatalog(credential.access);
+    credential.catalog = await fetchCatalog(credential);
     const existing = this.sql.exec<Account>("SELECT * FROM chatgpt_accounts WHERE client_id = ? AND subject = ?", clientId, credential.subject).toArray()[0];
     const id = value.accountId ?? existing?.id ?? crypto.randomUUID();
     await this.credentials.modify(accountKey(id), async () => credential);
@@ -137,7 +138,7 @@ export class ChatGPTAccounts {
     // 先保存轮换后的 refresh token，再读取目录；目录故障不能丢掉唯一有效的新令牌。
     await this.credentials.modify(accountKey(id), async current => {
       if (!isChatGPTCredential(current)) throw new ModelLoginError("login_required");
-      return { ...current, catalog: await fetchCatalog(current.access) };
+      return { ...current, catalog: await fetchCatalog(current) };
     });
   }
   async logout() {

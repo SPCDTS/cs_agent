@@ -1,11 +1,13 @@
 import { createModels, createProvider, type Models, type MutableModels, type Provider } from "@earendil-works/pi-ai/models";
-import type { CredentialStore } from "@earendil-works/pi-ai";
+import type { CredentialStore, ProviderStreams } from "@earendil-works/pi-ai";
 import { fauxProvider, fauxToolCall, fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
+import { openAICodexResponsesApi } from "@earendil-works/pi-ai/api/openai-codex-responses.lazy";
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type { Env } from "./env";
-import { CODEX_PROVIDER, codexOAuth, isChatGPTCredential } from "./codex-login";
+import { CODEX_BASE_URL, CODEX_PROVIDER, codexOAuth, isChatGPTCredential } from "./codex-login";
 import type { ModelSelection } from "./settings";
 
 type ProviderSpec = {
@@ -18,15 +20,21 @@ type ProviderSpec = {
   unavailable: string;
 };
 
-// 保留历史 provider id；新授权只使用公开 Responses API。
+// 保留 provider id 和会话模型选择；旧 SIWC 授权仅作为迁移期间的回退。
 function codexProvider(): Provider {
-  const provider = createProvider({ id: CODEX_PROVIDER, name: "ChatGPT 订阅", baseUrl: "https://api.openai.com/v1",
-    auth: { oauth: codexOAuth }, models: Object.values(OPENAI_MODELS).filter(model => model.api === "openai-responses")
+  const native = openAICodexResponsesApi(), legacy = openAIResponsesApi();
+  const transport: ProviderStreams = {
+    stream: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.stream({ ...model, api: "openai-codex-responses" }, context, options) : legacy.stream({ ...model, api: "openai-responses" }, context, options),
+    streamSimple: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.streamSimple({ ...model, api: "openai-codex-responses" }, context, options) : legacy.streamSimple({ ...model, api: "openai-responses" }, context, options),
+  };
+  const catalog = new Map([...Object.values(OPENAI_MODELS).filter(model => model.api === "openai-responses"), ...Object.values(OPENAI_CODEX_MODELS)].map(model => [model.id, model]));
+  const provider = createProvider({ id: CODEX_PROVIDER, name: "ChatGPT 订阅", baseUrl: CODEX_BASE_URL,
+    auth: { oauth: codexOAuth }, models: [...catalog.values()]
       .map(model => ({ ...model, provider: CODEX_PROVIDER, compat: { ...model.compat,
         // pi-ai 只在 provider=openai 时自动套用 SIWC 参数限制；历史别名需明确关闭这些 API key 专用能力。
         supportsMidConvoEffort: false, supportsLongCacheRetention: false,
         supportsExplicitPromptCacheMode: false, supportsMaxOutputTokens: false,
-      } })), api: openAIResponsesApi() });
+      } })), api: transport });
   return { ...provider, filterModels: (models, credential) => {
     if (!isChatGPTCredential(credential)) return [];
     return credential.catalog.flatMap(entry => {

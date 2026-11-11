@@ -12,18 +12,28 @@
 
 ## 模型与 ChatGPT 登录
 
-模型选择保存在 Registry，后续回合读取当前配置。DeepSeek 使用 `DEEPSEEK_API_KEY`。ChatGPT 订阅使用官方 Sign in with ChatGPT 开源/自托管流程，历史 provider id `openai-codex` 保留，推理走 Responses API。
+模型选择保存在 Registry，后续回合读取当前配置。DeepSeek 使用 `DEEPSEEK_API_KEY`。ChatGPT 订阅使用 Codex 原生 OAuth，provider id `openai-codex` 和已有会话模型选择保留，推理走 `chatgpt.com/backend-api/codex/responses`，复用 pi-ai 的 Codex SSE 适配。
 
 1. 在管理页的模型设置中添加账号或选择已有账号，开始授权。
 2. 下载本机助手，用 Node.js 24+ 执行页面给出的命令并输入一次性配对码。
-3. 助手监听本机回环空闲端口，打开授权页面，完成交换后经 HTTPS 提交凭据并退出。
+3. 助手监听 `127.0.0.1:1455`，用固定回调 `http://localhost:1455/auth/callback` 打开 Codex 授权页面，完成交换后经 HTTPS 提交凭据并退出。该端口需要空闲。
 4. 回到管理页刷新状态和模型目录。首次真实推理成功前，不能仅凭“已登录”判定推理恢复。
 
 配对码有效期为 10 分钟，只授权一次凭据导入。账号注册与稳定 host id 保存在 Registry，凭据使用 `OAUTH_STORE_KEY` 加密；本机助手不保存令牌文件，页面不会收到访问令牌。Thread 经 Registry 租锁串行续期，切换账号不会把旧请求的续期结果写给新账号。
 
-管理页可切换账号、刷新目录和登出。旧 Codex 登录的 scope / client id 不沿用；需要时重新授权。登录、刷新或目录失败会报告不可用，不自动切换模型。实现位于 `src/{codex-login,chatgpt-accounts,model-credentials,models}.ts` 与 `src/admin/chatgpt-helper.ts`。
+管理页可切换账号、刷新目录和登出。新登录固定使用 Codex client id 与 `/oauth/authorize`、`/oauth/token`，不再申请 SIWC 的 `resource.invoke` / `chatgpt.tokens.use.direct`。已有 SIWC 授权按原通道继续工作；新登录通过身份和模型目录校验后才切换活动账号，旧账号保留可选。新登录失败不覆盖旧凭据；生图必须完成原生登录。请独立登录 cs-agent，不复制正在使用的 Codex CLI / 桌面端凭据，以免多端争用轮换令牌。实现位于 `src/{codex-login,chatgpt-accounts,model-credentials,models}.ts` 与 `src/admin/chatgpt-helper.ts`。
 
 排查模型地区拒绝时，可用管理员鉴权调用 `GET /admin/diagnostics/model-egress`。探针从实际 owner DO 发出，仅手动请求四个固定公开地址，不读取或发送模型凭据；每次请求超时 8 秒、正文上限 8 KiB。结果分别保留 OpenAI API、认证域名、Cloudflare 与 ipify 观察到的 IP/地区，不把机房代码或共享 Worker 地址当作确定的物理出口，也不能用公开探针结果证明带认证的模型请求一定成功。
+
+## 订阅生图
+
+DeepSeek 和 GPT 的普通聊天、网页聊天都能调用同一个 `generate_image`；工具独立解析当前 Codex 账号凭据，刷新仍经 Registry 串行租约。未完成原生登录时返回明确的登录提示，不会改用 API key 付费或自动切换对话模型。
+
+工具参照 [Magpie 图片实现](https://github.com/yetone/magpie/blob/main/internal/gateway/draw.go) 直连 Codex 的 `/images/generations`，填写本会话图片资产 ID 时使用 `/images/edits`。协议模型为 `gpt-image-2`；实际可用性和额度由订阅后端决定。支持画幅、质量、透明背景与 PNG / JPEG / WebP。生成图片大小与同次编辑参考图总大小分别沿用媒体的 10MiB 上限；不额外启动容器、轮询任务或中转代理。
+
+生成原图保存在当前会话的私有 R2 资产中；模型收到资产引用，调用 `send_message({text, images: [id]})` 展示图片。网页入口只显示网页，QQ 入口复用既有图片投递。对话不重复保存 Base64；普通请求详情记录工具参数和结果引用，事件记录结果、耗时和脱敏错误，不将生图折算成对话 token 用量。
+
+生成有额度副作用，标记为不可自动重放；连接中断、超时或保存失败时不自动重新生成。事件触发和子 agent 仍不开放该工具。真实可用性须在部署并完成新登录后验证：先执行一轮 GPT 工具调用，再分别用 DeepSeek、GPT 在网页生成图片，最后用已生成的资产测试编辑；QQ 发送另外由用户确认。
 
 ## 联网与外部工具
 

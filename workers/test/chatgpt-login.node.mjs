@@ -11,9 +11,9 @@ test("本机助手先监听回调，再用精确 redirect_uri 交换令牌并提
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
       if (url.endsWith("/bridge/begin")) {
-        redirectUri = "http://127.0.0.1:" + JSON.parse(options.body).port + "/auth/callback";
-        return Response.json({ url: "https://auth.openai.com/api/accounts/authorize?state=test-state", redirectUri,
-          state: "test-state", verifier: "test-verifier" });
+        redirectUri = "http://localhost:" + JSON.parse(options.body).port + "/auth/callback";
+        return Response.json({ url: "https://auth.openai.com/oauth/authorize?state=test-state", redirectUri,
+          state: "test-state", verifier: "test-verifier", clientId: "app_EMoamEEZ73f0CkXaXp7hrann" });
       }
       if (url.endsWith("/oauth/token")) return Response.json({ access_token: "secret-access", refresh_token: "secret-refresh" });
       if (url.endsWith("/bridge/complete")) return Response.json({ email: "owner@example.test" });
@@ -21,14 +21,16 @@ test("本机助手先监听回调，再用精确 redirect_uri 交换令牌并提
     },
     launch: async () => {
       assert.equal((await fetch(redirectUri + "?state=wrong&code=x")).status, 400);
-      callbackTask = fetch(redirectUri + "?state=test-state&code=code&client_id=oaiapp_test").then(r => r.text());
+      callbackTask = fetch(redirectUri + "?state=test-state&code=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann").then(r => r.text());
     },
   });
   assert.match(await callbackTask, /授权完成/);
   const tokenCall = calls.find(call => call.url.endsWith("/oauth/token"));
   assert.equal(tokenCall.options.body.get("redirect_uri"), redirectUri);
-  assert.equal(tokenCall.options.body.get("client_id"), "oaiapp_test");
+  assert.equal(tokenCall.options.body.get("client_id"), "app_EMoamEEZ73f0CkXaXp7hrann");
   assert.equal(tokenCall.options.body.get("code_verifier"), "test-verifier");
+  assert.equal(tokenCall.url, "https://auth.openai.com/oauth/token");
+  assert.equal(tokenCall.options.body.has("resource"), false);
   assert.equal(calls.at(-1).options.headers.Authorization, "Bearer " + ticket);
   assert.equal(JSON.parse(calls.at(-1).options.body).tokens.access_token, "secret-access");
   await assert.rejects(fetch(redirectUri));

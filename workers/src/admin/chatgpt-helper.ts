@@ -4,8 +4,8 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 
-const TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token";
-const RESOURCE = "https://api.openai.com/v1";
+const TOKEN_URL = "https://auth.openai.com/oauth/token";
+const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 function openBrowser(url) {
   const command = process.platform === "win32" ? "rundll32.exe" : process.platform === "darwin" ? "open" : "xdg-open";
   const args = process.platform === "win32" ? ["url.dll,FileProtocolHandler", url] : [url];
@@ -52,12 +52,12 @@ export async function runLogin({ origin, ticket, fetchImpl = fetch, launch = ope
       if (callback.searchParams.has("error")) throw new Error("已取消 ChatGPT 授权");
       const clientId = callback.searchParams.get("client_id") || pending.clientId;
       const code = callback.searchParams.get("code");
-      if (!code || !clientId || clientId === "dynamic_agent_client" || (pending.clientId && clientId !== pending.clientId))
+      if (!code || clientId !== CLIENT_ID || (pending.clientId && clientId !== pending.clientId))
         throw new Error("授权回调不完整，请重新开始");
       const tokenResponse = await fetchImpl(TOKEN_URL, { method: "POST", redirect: "error",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ grant_type: "authorization_code", client_id: clientId, code,
-          code_verifier: pending.verifier, redirect_uri: pending.redirectUri, resource: RESOURCE }),
+          code_verifier: pending.verifier, redirect_uri: pending.redirectUri }),
         signal: AbortSignal.timeout(15000) });
       if (!tokenResponse.ok) { await tokenResponse.body?.cancel(); throw new Error("令牌交换失败，请重新授权"); }
       const tokens = await tokenResponse.json();
@@ -73,13 +73,13 @@ export async function runLogin({ origin, ticket, fetchImpl = fetch, launch = ope
   try {
     await new Promise((resolve, reject) => {
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
+      server.listen(1455, "127.0.0.1", resolve);
     });
     timer = setTimeout(() => fail(new Error("授权已超时，请重新开始")), timeoutMs);
     pending = await post("/admin/model/oauth/codex/bridge/begin", { port: server.address().port });
     const authorize = new URL(pending.url);
-    if (authorize.origin !== "https://auth.openai.com" || authorize.pathname !== "/api/accounts/authorize" ||
-      pending.redirectUri !== "http://127.0.0.1:" + server.address().port + "/auth/callback")
+    if (authorize.origin !== "https://auth.openai.com" || authorize.pathname !== "/oauth/authorize" || pending.clientId !== CLIENT_ID ||
+      pending.redirectUri !== "http://localhost:1455/auth/callback")
       throw new Error("云端返回的授权地址无效");
     await launch(pending.url);
     await completed;
@@ -100,7 +100,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.log("授权完成。请回到管理页刷新状态。");
   } catch {
     // 错误正文可能包含上游请求信息，不打印异常对象或令牌。
-    console.error("授权未完成。请确认配对码在 10 分钟内有效，并在管理页重新开始。");
+    console.error("授权未完成。请确认配对码在 10 分钟内有效、本机端口 1455 空闲，并在管理页重新开始。");
     process.exitCode = 1;
   } finally { terminal.close(); }
 }

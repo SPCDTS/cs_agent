@@ -6,7 +6,7 @@ import { refreshFailure, type RefreshFailure } from "./codex-refresh-error";
 export const MODEL_CREDENTIALS_SCHEMA = `CREATE TABLE IF NOT EXISTS model_credentials (
   provider_id TEXT PRIMARY KEY, credential_enc TEXT NOT NULL, updated_at INTEGER NOT NULL, meta_json TEXT NOT NULL)`;
 /** 非密信息，面板与健康检查只读这一列，不解密凭据。 */
-export type CredentialMeta = { type: Credential["type"]; email?: string; accountId?: string; expiresAt?: number; refreshFailure?: RefreshFailure };
+export type CredentialMeta = { type: Credential["type"]; email?: string; accountId?: string; flow?: string; expiresAt?: number; refreshFailure?: RefreshFailure };
 export type CredentialLease = { lease: string; updatedAt: number | null; credential?: Credential };
 type Row = { provider_id: string; credential_enc: string; updated_at: number; meta_json: string };
 // pi-ai 的刷新有 15 秒超时；持锁的 Thread 中途被驱逐时，Registry 最迟在这之后放开锁。
@@ -16,7 +16,7 @@ function metaOf(credential: Credential): CredentialMeta {
   if (credential.type === "api_key") return { type: "api_key" };
   const text = (key: string) => typeof credential[key] === "string" ? credential[key] as string : undefined;
   const email = text("email"), accountId = text("accountId");
-  return { type: "oauth", ...(email ? { email } : {}), ...(accountId ? { accountId } : {}), expiresAt: credential.expires };
+  return { type: "oauth", ...(email ? { email } : {}), ...(accountId ? { accountId } : {}), ...(text("flow") ? { flow: text("flow") } : {}), expiresAt: credential.expires };
 }
 
 /**

@@ -179,7 +179,7 @@ ${CONSOLE_HTML}
         <div class="row"><button id="m-save" class="btn primary" type="button">切换</button><span id="m-meta" class="muted small"></span></div>
       </div>
       <div class="stack" style="flex:1 1 420px;min-width:0">
-        <div class="row"><strong>ChatGPT 订阅登录</strong><span id="codex-status" class="pill neutral">-</span></div>
+        <div class="row"><strong>Codex 原生登录</strong><span id="codex-status" class="pill neutral">-</span></div>
         <div id="codex-account" class="muted small"></div>
         <select id="codex-accounts" aria-label="ChatGPT 账号"></select>
         <div class="row">
@@ -200,7 +200,7 @@ ${CONSOLE_HTML}
           </div>
           <div class="muted small">3. 助手完成后自动退出，点击“刷新状态”。</div>
         </div>
-        <div class="note">凭据加密保存在云端，到期自动续期。本机助手只在授权时运行。<a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">查看 ChatGPT 用量与授权额度</a></div>
+        <div class="note">凭据加密保存在云端，到期自动续期；DeepSeek 和 GPT 共用此账号的生图能力。本机助手仅授权时运行，需要端口 1455 空闲。旧授权会保留，完成新登录后切换。<a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">查看 ChatGPT 用量与授权额度</a></div>
       </div>
     </div>
   </section>
@@ -883,7 +883,8 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     const codex = view.codex, status = $("codex-status");
     status.textContent = CODEX_STATUS[codex.status] || "状态未知";
     status.className = "pill " + (codex.loggedIn ? "ok" : codex.status === "refresh_failed" || codex.needsReauth ? "bad" : "neutral");
-    $("codex-account").textContent = [codex.email, codex.expiresAt ? "凭据到期 " + time(codex.expiresAt) : "",
+    $("codex-account").textContent = [codex.email,
+      codex.imageGeneration ? "Codex 订阅生图已接入" : codex.hasCredential && codex.flow !== "codex-native" ? "当前为旧授权，重新授权后可使用订阅生图" : "", codex.expiresAt ? "凭据到期 " + time(codex.expiresAt) : "",
       codex.status === "refresh_due" ? "下次请求将尝试刷新；也可点击刷新模型列表验证" : "",
       codex.refreshFailure ? time(codex.refreshFailure.at) + " · " + refreshDiagnostic(codex.refreshFailure) : "",
       !codex.hasCredential ? "请选择账号授权后使用 GPT" : ""].filter(Boolean).join(" · ");
