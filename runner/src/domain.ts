@@ -1,8 +1,9 @@
+import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 /** Windows MCP 服务和原生后端共享的唯一执行契约。 */
 export interface Subject { principal: string; scope: string }
 export interface HypervTarget {
   kind: 'hyperv'; id: string; vmId: string; credentialPath: string;
-  guestWorkdir: string; desktopUser?: string; instructions?: string;
+  guestWorkdir: string; desktopUser?: string; desktopMcp?: boolean; instructions?: string;
 }
 export interface WsbTarget {
   kind: 'wsb'; id: string; memoryMb: number; idleTimeoutMs: number;
@@ -39,6 +40,8 @@ export interface Backend {
   dispatch(execution: Execution): Promise<void>;
   inspect(execution: Execution): Promise<ExecutionStatus>;
   stop(execution: Execution): Promise<ExecutionStatus>;
+  desktopTools?(target: HypervTarget, subject: Subject): Promise<{ tools: Tool[]; instructions: string }>;
+  desktopCall?(target: HypervTarget, subject: Subject, name: string, args: Record<string, unknown>): Promise<CallToolResult>;
   closeSession?(sessionId: string): Promise<boolean>;
   screen?(target: HypervTarget, subject: Subject): Promise<Frame>;
 }

@@ -89,6 +89,33 @@ shell 使用现有来宾账户的 S4U 限权任务：该账户须允许批处理
 
 桌面任务使用指定用户的 InteractiveToken，只作用于 VM 中已登录且未锁定的普通桌面。未登录、锁屏或 UAC 安全桌面返回不可用；服务不会自动登录、解锁或绕过 UAC。截图返回最多 30 秒有效的 `frameId`，输入还会校验作用域、桌面会话、坐标和屏幕拓扑。宿主鼠标、键盘与显示器不参与这些操作。
 
+## 交互桌面的原生 MCP
+
+后台 PowerShell 的 S4U 任务运行在 Session 0，不能操作登录用户的 UI 树。需要使用 agent-desktop 等原生 stdio MCP 时，先完成上面的来宾准备，在 VM 内安装 Node.js 24+ 和原生程序，再运行以下命令。路径均指向 **VM 内**，安装脚本不会下载软件或修改后台任务。
+
+```powershell
+npm --prefix runner run build
+.\runner\scripts\prepare-desktop-mcp.ps1 `
+  -VmId 真实VM的GUID `
+  -CredentialPath D:\private\vm-credential.xml `
+  -GuestWorkdir C:\AgentWork `
+  -DesktopUser 'DEVVM\agent' `
+  -NodePath 'C:\Tools\node\node.exe' `
+  -Command 'C:\Tools\agent-desktop-win32-x64.exe' `
+  -McpArguments @('mcp', '--headed') `
+  -ScopeArgument '--session'
+```
+
+选择真实可执行文件，不使用 .cmd shim。启用物理键鼠的 `--headed` 会与用户共用 VM 的焦点；只需语义 UIA 操作时可传 `@('mcp')`。`ScopeArgument` 是原生程序的命名空间参数；其他 stdio MCP 无此参数时传空字符串，仅保留独立连接，不保证其磁盘引用隔离。
+
+在本机 config.json 对应 Hyper-V target 设置 `"desktopMcp": true` 后重启 Windows MCP 服务。来宾新增 `CsAgentHypervMcpV1` 登录任务，以指定用户的 InteractiveToken、非提升权限隐藏运行；退出用户会话后停止，下次登录自动启动。它通过受 Token 保护的命名管道接收 PowerShell Direct 转发，不给 VM 开 TCP 端口，不需要新 Tunnel。更新桥接前先等待桌面调用结束，再停止该任务并重跑安装。
+
+原生工具自动映射为 `vm_<id>_<原生名称>`，保留输入/输出 schema、原生错误、structuredContent 与图片块，例如 `vm_dev_desktop_snapshot`、`vm_dev_desktop_click`。通过现有 MCP 管理页重新检测并选择工具；agent-desktop 1.2.0 的 67 个工具加现有 9 个共 76 个，因此本项目将每个服务的可见工具限额配置为 128。未知第三方工具不能仅凭名称判定只读，按其实际行为配置。
+
+桌面调用直接返回原生 MCP 结果，不生成 shell Job。最多保留 8 个调用作用域的原生连接，空闲 10 分钟回收；同一 VM 的这些调用串行执行。认证 principal、调用 scope、VM ID 共同决定命名空间，登录身份或显示拓扑变化会换命名空间；并不复制桌面或应用。每次调用前检查正确用户、活动交互会话和普通桌面，锁屏、UAC 安全桌面或断开的会话拒绝执行。
+
+工具执行传输有 45 秒期限，排队也计时；目录发现使用更短期限。桌面暂时不可用时保留已发现目录，首次未发现时仍提供原有 shell/WSB 工具。执行中超时、断线或结果过大意味着结果未知，不能自动重放；重新观察桌面再决定下一步。管道响应上限 12 MiB。首次调用原生工具前读取 `desktop_skills_get` 的 `desktop`、`platform` 指南；引用失效后重新 snapshot。Code Mode 要把返回的 image 内容块交给 `image(block)` 才能让模型看到截图。
+
 ## 接入 Cloudflare
 
 配置 Cloudflare Tunnel，将一个专用 HTTPS 域名转发到 `http://127.0.0.1:7791`，并设置转发 Host 为 `localhost:7791`。例如 tunnel ingress：

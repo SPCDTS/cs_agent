@@ -41,6 +41,11 @@ internal static class Helper
 
     private static int Main(string[] args)
     {
+        if (args.Length == 2 && args[0] == "context")
+        {
+            try { Console.Out.Write(Json.Serialize(Desktop.Context(args[1]))); return 0; }
+            catch (Exception) { return 1; }
+        }
         if (args.Length != 2 || (args[0] != "shell" && args[0] != "desktop")) return 1;
         bool screen = args[0] == "desktop" && args[1].StartsWith("s-", StringComparison.Ordinal);
         string id = screen ? args[1].Substring(2) : args[1];

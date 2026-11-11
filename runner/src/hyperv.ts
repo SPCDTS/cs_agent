@@ -1,15 +1,16 @@
-
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CallToolResultSchema, ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Type } from 'typebox';
 import { Check } from 'typebox/value';
+import type { DesktopMcpOperation } from './desktop-mcp-protocol.ts';
 import type { Backend, Command, Execution, ExecutionStatus, Frame, HypervTarget, Subject } from './domain.ts';
 
 const frameTtlMs = 30_000;
-const maxReplyBytes = 10 * 1024 * 1024;
+const maxReplyBytes = 12 * 1024 * 1024;
 const unknown: ExecutionStatus = { state: 'unknown', error: 'Hyper-V 执行收据不可用' };
 const executionResult = Type.Union([
   Type.Object({ state: Type.Literal('running') }),
@@ -40,6 +41,7 @@ interface DesktopFrame extends Omit<Frame, 'data' | 'mimeType' | 'frameId'> {
 }
 
 type BridgeRequest =
+  | { action: 'mcp'; scope: string; deadline: number; operation: DesktopMcpOperation }
   | { action: 'probe' }
   | { action: 'inspect' | 'stop'; id: string }
   | { action: 'screen'; id: string; deadline: number }
@@ -58,7 +60,7 @@ const callPowerShell: HypervBridge = (target, request) => new Promise((resolve, 
   const timer = setTimeout(() => {
     child.kill();
     reject(error());
-  }, request.action === 'screen' ? 22_000 : 15_000);
+  }, request.action === 'mcp' ? (request.operation.kind === 'list' ? 8500 : 55_000) : request.action === 'screen' ? 22_000 : 15_000);
   const output: Buffer[] = [];
   let size = 0;
   child.stdout.on('data', (chunk: Buffer) => {
@@ -145,7 +147,27 @@ export function createHypervBackend(stateDir: string, bridge: HypervBridge = cal
     }
   }
 
+  async function desktop(target: HypervTarget, subject: Subject, operation: DesktopMcpOperation) {
+    if (!target.desktopMcp || !target.desktopUser) throw new Error('desktop_mcp_unavailable');
+    const scope = createHash('sha256').update(JSON.stringify([subject.principal, subject.scope, target.vmId])).digest('hex');
+    let raw: unknown;
+    try { raw = await bridge(target, { action: 'mcp', scope, deadline: Date.now() + (operation.kind === 'list' ? 7000 : 45_000), operation }); }
+    catch { throw new Error('desktop_mcp_outcome_unknown'); }
+    if (Check(Type.Object({ ok: Type.Literal(false), error: Type.String({ pattern: '^desktop_[a-z_]+$' }) }), raw)) throw new Error(raw.error);
+    if (!Check(Type.Object({ ok: Type.Literal(true), result: Type.Unknown() }), raw)) throw new Error('desktop_mcp_outcome_unknown');
+    return raw.result;
+  }
+
   return {
+    async desktopTools(target, subject) {
+      const raw = await desktop(target, subject, { kind: 'list' });
+      const { tools } = ListToolsResultSchema.parse(raw);
+      if (!Check(Type.Object({ instructions: Type.String({ maxLength: 65536 }) }), raw)) throw new Error('desktop_mcp_invalid_catalog');
+      return { tools, instructions: raw.instructions };
+    },
+    async desktopCall(target, subject, name, args) {
+      return CallToolResultSchema.parse(await desktop(target, subject, { kind: 'call', name, arguments: args }));
+    },
     async dispatch(execution) {
       const target = targetOf(execution);
       const path = receipt(execution);

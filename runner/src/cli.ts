@@ -46,7 +46,7 @@ async function main() {
   } else if (action === 'run' || action === 'inspect') {
     const file = path.resolve(option('config', path.join(defaultDir, 'config.json'))); if (args.length) throw new Error('unknown_arguments');
     const config = await loadConfig(file);
-    if (action === 'inspect') { console.log(JSON.stringify({ endpoint: `http://${config.host}:${config.port}/mcp`, targets: config.targets.map(t => ({ id: t.id, kind: t.kind, instructions: t.instructions, ...(t.kind === 'hyperv' ? { vmId: t.vmId, guestWorkdir: t.guestWorkdir, desktopConfigured: Boolean(t.desktopUser) } : { memoryMb: t.memoryMb, idleTimeoutMs: t.idleTimeoutMs, maxLifetimeMs: t.maxLifetimeMs }) })) }, null, 2)); return; }
+    if (action === 'inspect') { console.log(JSON.stringify({ endpoint: `http://${config.host}:${config.port}/mcp`, targets: config.targets.map(t => ({ id: t.id, kind: t.kind, instructions: t.instructions, ...(t.kind === 'hyperv' ? { vmId: t.vmId, guestWorkdir: t.guestWorkdir, desktopConfigured: Boolean(t.desktopUser), desktopMcp: Boolean(t.desktopMcp) } : { memoryMb: t.memoryMb, idleTimeoutMs: t.idleTimeoutMs, maxLifetimeMs: t.maxLifetimeMs }) })) }, null, 2)); return; }
     if (process.platform !== 'win32') throw new Error('windows_required');
     await prepareState(config.stateDir);
     const releaseLock = acquireServiceLock(config.stateDir);

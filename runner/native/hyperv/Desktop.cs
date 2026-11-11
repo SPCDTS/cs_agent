@@ -58,6 +58,16 @@ internal static class Desktop
         }
     }
 
+    internal static object Context(string sid)
+    {
+        try { if (!SetProcessDpiAwarenessContext(new IntPtr(-4))) SetProcessDPIAware(); }
+        catch (EntryPointNotFoundException) { SetProcessDPIAware(); }
+        Snapshot current = GetSnapshot(sid);
+        if (current == null) return null;
+        using (var process = Process.GetCurrentProcess())
+            return new { stamp = current.Stamp, sessionId = process.SessionId };
+    }
+
     private sealed class Snapshot
     {
         internal string Stamp;

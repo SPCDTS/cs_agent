@@ -10,12 +10,13 @@ try {
     if ($credential -isnot [pscredential]) { throw 'credential' }
 
     $guest = @{ workdir = $envelope.guestWorkdir; desktopUser = $envelope.desktopUser; request = $envelope.request }
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($guest | ConvertTo-Json -Depth 12 -Compress)))
-    $result = Invoke-Command -VMId $vmId -Credential $credential -ArgumentList $encoded -ScriptBlock {
-        param([string]$data)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($guest | ConvertTo-Json -Depth 80 -Compress)))
+    $result = Invoke-Command -VMId $vmId -Credential $credential -ArgumentList $encoded, ([string]$envelope.request.action) -ScriptBlock {
+        param([string]$data, [string]$action)
         $ErrorActionPreference = 'Stop'
         $root = Join-Path $env:ProgramData 'CsAgentHyperv'
-        $source = [IO.File]::ReadAllText((Join-Path $root 'bridge.ps1'), [Text.Encoding]::UTF8)
+        $file = if ($action -eq 'mcp') { 'desktop-mcp-call.ps1' } else { 'bridge.ps1' }
+        $source = [IO.File]::ReadAllText((Join-Path $root $file), [Text.Encoding]::UTF8)
         & ([ScriptBlock]::Create($source)) $data $root
     }
     if ($result -isnot [string]) { throw 'receipt' }

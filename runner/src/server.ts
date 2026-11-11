@@ -5,7 +5,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { Type, type Static, type TSchema } from 'typebox';
 import { Check } from 'typebox/value';
-import { CALLER_META_KEY, type Backend, type ServerConfig, type Subject } from './domain.ts';
+import { CALLER_META_KEY, type Backend, type HypervTarget, type ServerConfig, type Subject } from './domain.ts';
 import { Jobs } from './jobs.ts';
 const uuid = Type.String({ pattern: '^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$' });
 const timeout = Type.Optional(Type.Integer({ minimum: 1000, maximum: 1200000, description: '含排队在内的任务期限，毫秒。默认 120000。' }));
@@ -69,6 +69,37 @@ export function createMcpHttpServer(config: ServerConfig, jobs: Jobs, backends: 
   });
   if (new Set(principals.map(p => p.digest.toString('hex'))).size !== principals.length) throw new Error('duplicate_bearer_token');
   const catalog = toolCatalog(config, jobs, backends);
+  const native = new Map<string, { tools: Registered[]; at: number; pending?: Promise<Registered[]> }>();
+  async function desktopCatalog(target: HypervTarget, principal: string): Promise<Registered[]> {
+    const key = JSON.stringify([target.id, principal]);
+    let cached = native.get(key);
+    if (cached?.pending) return cached.pending;
+    if (cached && cached.at + 300_000 > Date.now()) return cached.tools;
+    if (!cached) { cached = { tools: [], at: 0 }; native.set(key, cached); }
+    const entry = cached;
+    entry.pending = (async () => {
+      try {
+        const { desktopTools, desktopCall } = backends.hyperv;
+        if (!desktopTools || !desktopCall) throw new Error('desktop_mcp_unavailable');
+        const remote = await desktopTools(target, { principal, scope: 'catalog' });
+        const seen = new Set<string>();
+        const tools = remote.tools.map(tool => {
+          const name = 'vm_' + target.id + '_' + tool.name;
+          if (!/^[A-Za-z0-9_.-]{1,128}$/.test(name) || seen.has(name) || catalog.some(row => row.tool.name === name)) throw new Error('desktop_mcp_invalid_catalog');
+          seen.add(name);
+          return { tool: { ...tool, name, description: '在 VM 的已登录交互桌面执行原生 MCP。首次使用先读取同前缀 desktop_skills_get 的 desktop 和 platform 指南；桌面引用按调用会话隔离。结果未知时禁止重放。\n' + (tool.description ?? '') + (tool.name === 'desktop_skills_get' && remote.instructions ? '\n原生 MCP 使用说明：\n' + remote.instructions : '') },
+            call: async (args: unknown, subject: Subject) => {
+              if (!Check(Type.Record(Type.String(), Type.Unknown()), args)) throw new Error('invalid_arguments');
+              return desktopCall(target, subject, tool.name, args);
+            } };
+        });
+        entry.tools = tools; entry.at = Date.now(); return tools;
+      } catch { return entry.tools; }
+    })().finally(() => { entry.pending = undefined; });
+    return entry.pending;
+  }
+  const desktopTargets = config.targets.filter((target): target is HypervTarget => target.kind === 'hyperv' && !!target.desktopMcp);
+  async function nativeTools(principal: string) { return (await Promise.all(desktopTargets.map(target => desktopCatalog(target, principal)))).flat(); }
   return createServer(async (req, res) => {
     const expected = digest(req.headers.authorization ?? '');
     const principal = principals.find(p => timingSafeEqual(p.digest, expected));
@@ -77,11 +108,11 @@ export function createMcpHttpServer(config: ServerConfig, jobs: Jobs, backends: 
     if (req.url !== '/mcp') { res.writeHead(404).end(); return; }
     if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
     if (!req.headers['content-type']?.startsWith('application/json')) { res.writeHead(415).end(); return; }
-    const server = new Server({ name: 'cs-agent-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: 'Hyper-V 提供持久工作区，WSB 提供临时隔离环境。按工具说明选择，命令均在来宾执行。长操作通过 submit / job_get / job_cancel 管理。不要把 HTTP 断线视为执行失败。' });
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: catalog.map(t => t.tool) }));
+    const server = new Server({ name: 'cs-agent-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: 'Hyper-V 提供持久工作区，WSB 提供临时隔离环境。按工具说明选择，命令均在来宾执行。长操作通过 submit / job_get / job_cancel 管理。不要把 HTTP 断线视为执行失败。desktop_* 是已登录交互桌面中的原生 MCP 工具，与 submit 的后台 Session 0 不同。首次使用读取 desktop_skills_get 的 desktop/platform 指南。调用会话独立保存桌面引用，但同一 VM 的窗口、文件与焦点共享；截图和结构化结果按原生 MCP 返回。' });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...catalog, ...await nativeTools(principal.id)].map(t => t.tool) }));
     server.setRequestHandler(CallToolRequestSchema, async request => {
       try {
-        const tool = catalog.find(t => t.tool.name === request.params.name); if (!tool) throw new Error('tool_not_found');
+        const tool = catalog.find(t => t.tool.name === request.params.name) ?? (await nativeTools(principal.id)).find(t => t.tool.name === request.params.name); if (!tool) throw new Error('tool_not_found');
         return await tool.call(request.params.arguments ?? {}, subjectFor(principal.id, request.params._meta));
       } catch (error) {
         const message = error instanceof Error && /^[a-z][a-z0-9_]{0,95}$/.test(error.message) ? error.message : 'operation_failed';
