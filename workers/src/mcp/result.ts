@@ -34,7 +34,7 @@ export function convertMcpResult(input: unknown, outputSchema: ReturnType<typeof
     if (result.structuredContent !== undefined) {
       const value = boundedJson(result.structuredContent, limits.structuredBytes, limits.schemaDepth * 3 + 3);
       if (outputSchema && !outputSchema.check(value)) return mcpFailure("result_rejected");
-      if (outputSchema) structuredOutput = copyJson(value);
+      structuredOutput = copyJson(value);
       texts.push("[MCP 结构化结果]\n" + JSON.stringify(value));
     } else if (outputSchema && !result.isError) return mcpFailure("result_rejected");
     return { output: [{ type: "text", text: boundedMcpText(texts.join("\n")) }, ...images], ...(result.isError ? { isError: true } : {}),

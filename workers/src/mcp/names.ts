@@ -41,6 +41,6 @@ function contractSchema(value: JsonValue): JsonValue {
 }
 
 export function toolContract(revision: CatalogIdentity, tool: CatalogTool): string {
-  return digest(["mcp-tool-v2", revision.serverId, revision.configDigest, revision.scopeDigest, tool.name,
+  return digest(["mcp-tool-v3", revision.serverId, revision.configDigest, revision.scopeDigest, tool.name,
     contractSchema(tool.inputSchema), tool.outputSchema ? contractSchema(tool.outputSchema) : null]);
 }

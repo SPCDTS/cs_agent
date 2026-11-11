@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { mcpFailure } from "./result";
+import { mcpCodemodeResult, mcpCodemodeSchema, MCP_RESULT_INSTRUCTIONS } from "./codemode-result";
 import { defineExtension, defineTool, section, type Registry, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import { installCodemode } from "../codemode";
 import { SandboxReadOutput } from "../tools/coding";
@@ -56,18 +57,18 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
   ] }));
   if (catalogs.length) {
     registry.install(defineExtension({ name: "cs.subagent.mcp",
-      sections: [section("mcp-delegation", () => "MCP 只能使用派出目录与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。")] }));
+      sections: [section("mcp-delegation", () => "MCP 只能使用派出目录与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。" + MCP_RESULT_INSTRUCTIONS)] }));
     for (const catalog of catalogs) registry.install(defineExtension({ name: `cs.subagent.mcp.${catalog.serverId}`, tools: catalog.tools.map(tool => {
       const name = toolNames(catalog, tool).nativeName, input = compileMcpSchema(tool.inputSchema, MCP_CONFIG.limits);
       const output = tool.outputSchema ? compileMcpSchema(tool.outputSchema, MCP_CONFIG.limits) : undefined;
       return defineTool({ name, description: tool.description, parameters: input.schema,
-        ...(output ? { structuredOutputSchema: output.schema } : {}), replay: "unsafe", callers: ["tools"],
-        execute: (args, api) => host.subagentMcp(id, { name, args, operationId: String(api.taskId) }) });
+        structuredOutputSchema: mcpCodemodeSchema(output?.schema), replay: "unsafe", callers: ["tools"],
+        execute: async (args, api) => mcpCodemodeResult(await host.subagentMcp(id, { name, args, operationId: String(api.taskId) })) });
     }) }));
     if (snapshot?.resourceAllow?.some(row => row.prefixes.length)) registry.install(defineExtension({ name: "cs.subagent.mcp.resources", tools: (["list", "templates", "read"] as const).map(action => defineTool({
       name: `mcp_resources_${action}`, description: "读取已授权 MCP 服务的资源或目录。",
       parameters: Type.Object({ server: Type.String({ minLength: 1, maxLength: 64 }), uri: Type.Optional(Type.String({ maxLength: 4096 })) }, { additionalProperties: false }),
-      replay: "safe", callers: ["tools"], execute: (args, api) => host.subagentMcp(id, { name: `mcp_resources_${action}`, args, operationId: String(api.taskId) }),
+      structuredOutputSchema: mcpCodemodeSchema(), replay: "safe", callers: ["tools"], execute: async (args, api) => mcpCodemodeResult(await host.subagentMcp(id, { name: `mcp_resources_${action}`, args, operationId: String(api.taskId) })),
     })) }));
   }
   return installCodemode(registry, {

@@ -33,7 +33,7 @@ Notion 资源仅允许 notion://docs/ 前缀，并且 URI 必须在远端资源�
 
 resources/read 的图片 blob 同样转原生图片；其他二进制资源写入当前 scope 的私有 R2 资产，返回 AssetRef 元数据，下载复用既有鉴权媒体入口。只有显式读取二进制时才发生这次 R2 写入。
 
-MCP 图片作为原生 image content 返回，允许 PNG/JPEG/WebP/GIF，单张最多 4 MiB、最多 4 张，总响应仍受 messageBytes 限制。图片只作为已有 MCP 结果，不提供生图工具。文本输出最多 8000 字；凭据继续仅由 Registry 获取，不传给模型或子 agent。
+MCP 图片作为原生 image content 返回，允许 PNG/JPEG/WebP/GIF，单张最多 4 MiB、最多 4 张，总响应仍受 messageBytes 限制。图片只作为已有 MCP 结果，不提供生图工具。Code Mode 中的远端工具和 `mcp_resources_*` 统一返回 `{ content, structuredContent?, isError? }`：原 `outputSchema` 继续校验远端结构化数据；程序从 `result.structuredContent` 读取业务字段，从 `result.content` 读取文本和图片。文本块用 `text(block.text)`，图片块用 `image(block)`，禁止把包含 Base64 的整个返回对象交给 `text()`。主线程与子 agent 使用相同返回契约；工具契约版本升级后应重新发现名称，避免旧脚本把返回对象当成业务字段本身。文本输出最多 8000 字；凭据继续仅由 Registry 获取，不传给模型或子 agent。
 
 
 ## 群授权与逐次审批

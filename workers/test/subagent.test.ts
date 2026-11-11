@@ -352,7 +352,7 @@ describe("subagents as child Durable Objects", () => {
     const { outputs } = twoModels([
       spawn("交给子代理发起作业", { mcpTools: [{ server: "notion", tools: ["notion-create-pages"] }] }), { text: "已派出" },
     ], [
-      { tool: "codemode", args: { code: 'const names=ALL_TOOLS.map(tool=>tool.name); text(names); const tool=names.find(name=>name.startsWith("mcp_notion_notion_create_pages_")); const result=await tools[tool]({}); text(result.requestId);' } },
+      { tool: "codemode", args: { code: 'const names=ALL_TOOLS.map(tool=>tool.name); text(names); const tool=names.find(name=>name.startsWith("mcp_notion_notion_create_pages_")); const result=await tools[tool]({}); text(result.structuredContent.requestId);' } },
       { text: "作业已发起" },
     ]);
     expect(await thread("owner").refreshMcp()).toEqual(expect.arrayContaining([expect.objectContaining({ server: "notion", status: "ok" })]));
