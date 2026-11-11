@@ -15,7 +15,7 @@ it("requires admin authentication and probes fixed public targets from the owner
     return new Response("ip=2a06:98c0:3600::103\nloc=GB\ncolo=LHR\nsecret=must-not-return\n", { headers: { "cf-ray": "example-LHR" } });
   });
   const call = (token: string) => worker.fetch(new Request("https://test/admin/diagnostics/model-egress", {
-    headers: { Authorization: "Bearer " + token },
+    method: "POST", headers: { Authorization: "Bearer " + token },
   }), { ...env, ADMIN_TOKEN: "synthetic-admin" });
   expect((await call("wrong")).status).toBe(401); expect(fetcher).not.toHaveBeenCalled();
   const response = await call("synthetic-admin"), result = await response.json<Awaited<ReturnType<typeof modelEgressDiagnostics>>>();

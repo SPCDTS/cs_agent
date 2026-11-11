@@ -1,3 +1,4 @@
+import { ModelAlarm } from "../src/model-alarm";
 import { zstdDecompressSync } from "node:zlib";
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -402,4 +403,45 @@ describe("原生授权迁移与共享生图", () => {
     const user = page.messages.find(message => message.role === "user")!;
     await expect.poll(async () => (await requestStore.turnTrace("owner", [user.turnId!], 0)).tools.find(tool => tool.name === "generate_image")?.status).toBe("done");
   });
+});
+
+it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，管理读取不阻塞执行", async () => {
+  network(); await login();
+  await selectModel({ provider: "openai-codex", id: "gpt-6-astra" });
+  const alarms = vi.spyOn(ModelAlarm.prototype, "dispatch");
+  let parentCalls = 0, childCalls = 0;
+  const owner = env.THREAD.getByName("owner");
+  network({ [CODEX_BASE_URL + "/responses"]: async request => {
+    const text = request.headers.get("content-encoding") === "zstd"
+      ? zstdDecompressSync(new Uint8Array(await request.arrayBuffer())).toString("utf8") : await request.text();
+    const owner = env.THREAD.getByName("owner");
+    const childRequest = text.includes("你是主 agent 派出的子 agent");
+    const step = childRequest ? childCalls++ : parentCalls++;
+    if (childRequest) {
+      const [child] = await owner.subagentList();
+      expect(child).toBeDefined();
+      expect(await owner.subagentTranscript(child!.id, 5)).toBeDefined();
+    } else expect(await owner.chatView("owner")).toBeDefined();
+    const item = step === 0
+      ? { type: "function_call", id: "fc_" + (childRequest ? "child" : "parent"), call_id: "call_" + (childRequest ? "child" : "parent"),
+          name: childRequest ? "qq_context" : "subagent", arguments: JSON.stringify(childRequest ? { limit: 1 } : { action: "spawn", task: "执行隔离验证" }) }
+      : { type: "message", id: "msg_" + (childRequest ? "child" : "parent") + step, role: "assistant", status: "completed", content: [{ type: "output_text", text: "完成" }] };
+    return new Response([
+      { type: "response.output_item.added", output_index: 0, item },
+      { type: "response.output_item.done", output_index: 0, item },
+      { type: "response.completed", response: { status: "completed", usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 } } },
+    ].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""), { headers: { "Content-Type": "text/event-stream" } });
+  } });
+  expect(await owner.submit(input(55, "派子 agent 执行隔离验证", 10000001))).toEqual({ status: "done" });
+  await vi.waitFor(async () => {
+    const [child] = await owner.subagentList();
+    expect(child?.status).toBe("done");
+  });
+  await owner.syncAdminView("owner");
+  const [child] = await owner.subagentList();
+  const display = env.REQUESTS.getByName("view:thread:owner");
+  expect((await display.subagentTranscript(child.id, 10))?.entries.some(entry => entry.text === "完成")).toBe(true);
+  expect(parentCalls).toBeGreaterThanOrEqual(2);
+  expect(childCalls).toBe(2);
+  expect(alarms.mock.calls.length).toBeGreaterThanOrEqual(parentCalls + childCalls);
 });

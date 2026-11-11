@@ -1,3 +1,5 @@
+import { ModelAlarm } from "../model-alarm";
+import { ProjectionPublisher, observeWrites } from "../requests/projection";
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
@@ -34,7 +36,10 @@ const textOf = (messages: readonly Message[] | undefined) => (messages ?? []).fl
     : message.content.flatMap(block => block.type === "text" ? [block.text] : block.type === "toolCall" ? [`[${block.name}]`] : [])).join(" ");
 
 export class SubagentDO extends DurableObject<Env> {
-  private readonly database = new DurableObjectSqliteDatabase(this.ctx.storage);
+  private readonly modelAlarm = new ModelAlarm(this.ctx);
+  private readonly projection = new ProjectionPublisher(this.ctx, this.env, async () => { const meta = await this.meta(); return meta ? subagentName(meta.parent, meta.id) : ""; }, at => this.wakeBy(at));
+  private readonly observedStorage = observeWrites(this.ctx.storage, () => this.projection.changed());
+  private readonly database = new DurableObjectSqliteDatabase(this.observedStorage);
   private initialized?: Promise<void>;
   private runtime?: Promise<Runtime>;
   private draining?: Promise<void>;
@@ -48,7 +53,7 @@ export class SubagentDO extends DurableObject<Env> {
         status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'answered', 'reported', 'cancelled')),
         answer TEXT, outcome TEXT CHECK (outcome IN ('done', 'failed'))
       );
-    `);
+    `).then(() => this.projection.install());
   }
 
   private async meta(): Promise<SubagentMeta | undefined> {
@@ -75,8 +80,10 @@ export class SubagentDO extends DurableObject<Env> {
         await tx.run("UPDATE meta SET value = ? WHERE key = 'subagent'", JSON.stringify(meta));
       }
       const pending = meta.status === "running" || meta.status !== "cancelled" && !!await tx.get("SELECT 1 FROM inbox WHERE status = 'answered' LIMIT 1");
-      if (pending) await this.wakeBy(Date.now() + HEARTBEAT_MS);
-      else await this.ctx.storage.setAlarm((meta.endedAt ?? meta.createdAt) + RETENTION_MS);
+      const next = Math.min(pending ? Date.now() + HEARTBEAT_MS : (meta.endedAt ?? meta.createdAt) + RETENTION_MS,
+        this.modelAlarm.pending ? Date.now() : Infinity, this.projection.retryAt ?? Infinity);
+      if (pending) await this.wakeBy(next);
+      else await this.ctx.storage.setAlarm(next);
       return { meta, activityChanged };
     }).then(({ meta, activityChanged }) => {
       if (activityChanged) this.publishActivity(meta);
@@ -146,6 +153,14 @@ export class SubagentDO extends DurableObject<Env> {
     return state(meta);
   }
 
+  async syncAdminView(): Promise<void> {
+    await this.initialize();
+    if (!await this.meta()) return;
+    this.projection.install();
+    await this.projection.flush();
+    if (this.projection.retryAt !== undefined) throw new Error("view_sync_failed");
+  }
+
   async status(): Promise<{ meta: SubagentMeta; inbox: Partial<Record<InboxStatus, number>> } | undefined> {
     const meta = await this.meta();
     if (!meta) return;
@@ -164,8 +179,10 @@ export class SubagentDO extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
+    this.modelAlarm.dispatch();
     const meta = await this.meta();
     if (meta && Date.now() < (meta.endedAt ?? Infinity) + RETENTION_MS) {
+      this.ctx.waitUntil(this.projection.flush());
       await this.update(async () => false);
       if (meta.status === "cancelled") {
         await (await this.open()).root.abort(context);
@@ -178,6 +195,7 @@ export class SubagentDO extends DurableObject<Env> {
     const runtime = await this.runtime?.catch(() => undefined);
     await runtime?.harness.close(context).catch(() => {});
     await this.ctx.storage.deleteAlarm();
+    this.projection.reset();
     await this.ctx.storage.deleteAll();
     this.initialized = this.runtime = undefined;
   }
@@ -274,7 +292,7 @@ export class SubagentDO extends DurableObject<Env> {
   private async openRuntime(): Promise<Runtime> {
     const meta = await this.meta();
     if (!meta) throw new Error("subagent_missing");
-    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main"))), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" });
+    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" });
     const parent = () => this.env.THREAD.getByName(meta.parent);
     const registry = createRegistry();
     // 子会话保留只读检索；下面按派出快照安装技能、所分配资源的 coding 与 MCP 代理，仍无发送或管理工具。
@@ -314,7 +332,8 @@ export class SubagentDO extends DurableObject<Env> {
     // 运行时也可能为已完成任务的历史查看而打开。实际权限由父线程逐次复核。
     const delegated = installDelegatedCapabilities(registry, host, meta.id, meta.capabilities ?? {});
     // 与 ThreadDO 相同：DO 里的连接跨不了请求，Codex 固定走 SSE。
-    const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
+    const storage = await openDurableObjectSqliteStorage(this.observedStorage, { prefix: "pi_" });
+    this.projection.install();
     const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
     const root = await harness.root(context, { agent: modelChange(meta.model) });
     // 读取子会话只打开存储；执行由 alarm → drain → answer 的 submit 启动。

@@ -1,6 +1,7 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { threadView } from "../src/admin/read-views";
 import { snapshot } from "../src/requests/snapshot";
 import type { Settings, SettingsSnapshot } from "../src/settings";
 import { action, connect, event, input, reply, sendPrivate } from "./helpers";
@@ -128,6 +129,7 @@ describe("admin data views", () => {
     await runInDurableObject(owner, (_instance, state) => {
       for (let i = 0; i < 11; i++) state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", at + i, "mcp_call", JSON.stringify({ tool: "tool" + i }));
     });
+    await owner.syncAdminView("owner");
     const eventPage = await adminJson<EventPage>("GET", "/admin/events?thread=owner&kind=mcp_call");
     expect(eventPage.events).toHaveLength(10);
     expect(eventPage.next).toBeDefined();
@@ -138,6 +140,7 @@ describe("admin data views", () => {
     const memories = Array.from({ length: 11 }, (_, i) => ({ id: i + 1, ns: "owner", kind: "fact", text: "分页记录" + i, author: "dashboard", updated_at: 1_700_000_000 + i }));
     await adminJson("POST", "/admin/memory/import", { ns: "owner", memories });
     type MemoryPage = { items: { id: number }[]; page: number; limit: number; total: number };
+    await owner.syncAdminView("owner");
     const memoryPage = await adminJson<MemoryPage>("GET", "/admin/memory/list?ns=owner");
     expect(memoryPage).toMatchObject({ page: 1, limit: 10, total: 11 });
     expect(memoryPage.items.map(m => m.id)).toEqual([11, 10, 9, 8, 7, 6, 5, 4, 3, 2]);
@@ -169,6 +172,7 @@ describe("admin data views", () => {
     await runInDurableObject(owner, (_instance, state) => {
       rows.forEach(([kind, detail], i) => state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", 1_700_000_000_000 + i, kind, JSON.stringify(detail)));
     });
+    await owner.syncAdminView("owner");
     const first = await adminJson<EventPage>("GET", "/admin/events?thread=owner&limit=3");
     expect(first.events.map(e => e.kind)).toEqual(["memory_write", "mcp_call", "mcp_catalog"]);
     expect(first.events[1].detail).toEqual({ server: "notion", tool: "c", result: "ok" });
@@ -196,6 +200,7 @@ describe("admin data views", () => {
     await runInDurableObject(owner, (_instance, state) => {
       rows.forEach(([kind, detail], i) => state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", 1_700_000_000_000 + i, kind, JSON.stringify(detail)));
     });
+    await owner.syncAdminView("owner");
     const page = (query: string) => adminJson<EventPage>("GET", `/admin/events?thread=owner&${query}`);
     expect((await page("result=ok")).events.map(e => [e.kind, e.detail.result])).toEqual([["coding_exec", "ok"], ["web_search", "ok"]]);
     expect((await page("kind=web_search&result=not_searched")).events.map(e => e.detail.results)).toEqual([0]);
@@ -211,6 +216,7 @@ describe("admin data views", () => {
     ];
     await adminJson("POST", "/admin/memory/import", { ns: "owner", profile: { text: "初始画像" }, memories });
     type View = { profile: { text: string; revision: string }; memories: { id: number; status: string }[] };
+    await env.THREAD.getByName("owner").syncAdminView("owner");
     const view = await adminJson<View>("GET", "/admin/memory?ns=owner");
     expect(view.memories.map(row => row.id)).toEqual([12, 13, 11]);
     expect(view.profile.text).toBe("初始画像");
@@ -218,9 +224,11 @@ describe("admin data views", () => {
     expect((await adminJson<View>("GET", "/admin/memory?ns=owner&q=%2313")).memories.map(row => row.id)).toEqual([13]);
 
     expect(await adminJson("DELETE", "/admin/memory/12?ns=owner")).toEqual({ status: "forgotten" });
+    await env.THREAD.getByName("owner").syncAdminView("owner");
     expect((await adminJson<View>("GET", "/admin/memory?ns=owner")).memories.map(row => row.id)).toEqual([13, 11]);
     expect((await env.THREAD.getByName("owner").stats()).memory.active).toBe(2);
     expect((await admin("DELETE", "/admin/memory/999?ns=owner")).status).toBe(404);
+    await env.THREAD.getByName("private:10000003").syncAdminView("private:10000003");
     expect((await adminJson<View>("GET", "/admin/memory?ns=private:10000003")).memories).toEqual([]);
 
     const saved = await adminJson<{ profile: { text: string; revision: string } }>("PUT", "/admin/memory/profile", { ns: "owner", text: "新画像", expected: view.profile.revision });
@@ -229,6 +237,7 @@ describe("admin data views", () => {
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({ error: "conflict", current: saved.profile });
     expect((await admin("PUT", "/admin/memory/profile", { ns: "owner", text: "token=synthetic-only", expected: saved.profile.revision })).status).toBe(400);
+    await env.THREAD.getByName("owner").syncAdminView("owner");
     expect((await adminJson<View>("GET", "/admin/memory?ns=owner")).profile).toEqual(saved.profile);
   });
 
@@ -259,13 +268,14 @@ describe("admin data views", () => {
     expect((await admin("POST", "/admin/send-rules/release", { scope: "everyone" })).status).toBe(400);
   });
 
-  it("returns stats for every thread and isolates a failing Thread DO", async () => {
+  it("returns projected stats for every thread and isolates a failing display DO", async () => {
     await runInDurableObject(env.BRIDGE.getByName("napcat"), async (_instance, state) => {
       state.storage.sql.exec("INSERT INTO threads(key, seen_at) VALUES ('group:200000001', 2), ('group:200000002', 1)");
       await state.storage.put("group:200000001", { name: "测试群", expires: Date.now() + 60_000 });
     });
     await env.THREAD.getByName("group:200000001").ingest(input(1, "普通聊天", 10000004, 200000001));
-    await runInDurableObject(env.THREAD.getByName("group:200000002"), (_instance, state) => { state.storage.sql.exec("CREATE TABLE memories (broken TEXT)"); });
+    for (const key of ["owner", "group:200000001", "group:200000002"]) await env.THREAD.getByName(key).syncAdminView(key);
+    await runInDurableObject(threadView(env,"group:200000002"), (_instance, state) => { state.storage.sql.exec("DROP TABLE memories; CREATE TABLE memories (broken TEXT)"); });
 
     const response = await admin("GET", "/admin/overview");
     expect(response.status).toBe(200);

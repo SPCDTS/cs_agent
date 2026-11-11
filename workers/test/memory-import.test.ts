@@ -38,6 +38,7 @@ describe("admin memory import", () => {
     expect(data.profiles).toEqual([{ text: "测试画像", revision: sha256("测试画像").slice(0, 16) }]);
     expect(data.versions).toHaveLength(1);
     expect(data.fts).toEqual([{ rowid: 1234 }]);
+    await env.THREAD.getByName("owner").syncAdminView("owner");
     expect(await (await SELF.fetch("https://test/healthz")).json()).toMatchObject({ thread: { memory: { active: 1, profileBytes: 12, extractQueue: 0 } } });
   });
 

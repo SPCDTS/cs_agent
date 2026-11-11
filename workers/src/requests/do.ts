@@ -1,3 +1,6 @@
+import { ProjectionStore, viewName, type ProjectionBatch } from "./projection";
+import { AgentReadView } from "./view";
+import { subagentName, RETENTION_MS, type SubagentMeta } from "../subagent/model";
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
 import type { RequestDetail, RequestQuery, RequestRecord, ToolTrace, ToolSummary } from "./types";
@@ -7,6 +10,21 @@ const DAY = 86_400_000;
 type Row = { seq: number; record: string; available: number };
 export class RequestsDO extends DurableObject<Env> {
   private topologyCache?: AgentTopology;
+  private readonly projection = new ProjectionStore(this.ctx, this.env);
+  projectionStatus() { const state = this.projection.status(); return { ready: !!state?.ready, syncedAt: state?.synced_at ?? null }; }
+  private readView() { const state = this.projection.status(); if (!state?.ready) throw new Error("view_pending"); return new AgentReadView(this.projection, state.scope); }
+  async applyProjection(batch: ProjectionBatch): Promise<void> {
+    this.projection.apply(batch);
+    if (batch.scope.startsWith("sub:")) {
+      const row = await this.projection.db.get<{value:string}>("SELECT value FROM meta WHERE key='subagent'");
+      const meta: SubagentMeta | undefined = row ? JSON.parse(row.value) : undefined;
+      if (meta?.endedAt) await this.ctx.storage.setAlarm(meta.endedAt + RETENTION_MS);
+      else await this.ctx.storage.deleteAlarm();
+    }
+  }
+  async projectionBackfillNeeded() { return await this.ctx.storage.get("admin-projection-v1") !== true; }
+  async projectionBackfillDone() { await this.ctx.storage.put("admin-projection-v1", true); }
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`
@@ -33,6 +51,28 @@ export class RequestsDO extends DurableObject<Env> {
     if (!columns.some(c => c.name === "revision")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN revision INTEGER NOT NULL DEFAULT 0");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_turn ON requests(thread,turn_id,revision)");
   }
+  sessionHistory(...args: Parameters<AgentReadView["sessionHistory"]>) { return this.readView().sessionHistory(...args); }
+  events(...args: Parameters<AgentReadView["events"]>) { return this.readView().events(...args); }
+  memoryList(...args: Parameters<AgentReadView["memoryList"]>) { return this.readView().memoryList(...args); }
+  memoryDetail(...args: Parameters<AgentReadView["memoryDetail"]>) { return this.readView().memoryDetail(...args); }
+  memoryJobs(...args: Parameters<AgentReadView["memoryJobs"]>) { return this.readView().memoryJobs(...args); }
+  memoryProposals(...args: Parameters<AgentReadView["memoryProposals"]>) { return this.readView().memoryProposals(...args); }
+  memoryView(...args: Parameters<AgentReadView["memoryView"]>) { return this.readView().memoryView(...args); }
+  mcpAccess(...args: Parameters<AgentReadView["mcpAccess"]>) { return this.readView().mcpAccess(...args); }
+  mcpApprovals(...args: Parameters<AgentReadView["mcpApprovals"]>) { return this.readView().mcpApprovals(...args); }
+  mcpToolCounts(...args: Parameters<AgentReadView["mcpToolCounts"]>) { return this.readView().mcpToolCounts(...args); }
+  subagentList(...args: Parameters<AgentReadView["subagentList"]>) { return this.readView().subagentList(...args); }
+  workspaceChild(...args: Parameters<AgentReadView["workspaceChild"]>) { return this.readView().workspaceChild(...args); }
+  transcriptSummary(...args: Parameters<AgentReadView["transcriptSummary"]>) { return this.readView().transcriptSummary(...args); }
+  async chatView(...args: Parameters<AgentReadView["chatView"]>) { return {...await this.readView().chatView(...args), syncedAt: this.projection.status()!.synced_at}; }
+  async stats() { return {...await this.readView().stats(), syncedAt: this.projection.status()!.synced_at}; }
+  async subagentTranscript(id: string, limit: number): ReturnType<AgentReadView["transcriptSummary"]> {
+    const state = this.projection.status(); if (!state?.scope.startsWith("thread:")) throw new Error("view_pending");
+    const child = await this.readView().child(id); if (!child) return;
+    if (child.ended_at !== null && Date.now() >= child.ended_at + RETENTION_MS) return;
+    return this.env.REQUESTS.getByName(viewName(subagentName(state.scope.slice(7), id))).transcriptSummary(limit);
+  }
+
   private revision() { return this.ctx.storage.sql.exec<{ revision: number }>("UPDATE request_revision SET revision=revision+1 WHERE id=1 RETURNING revision").one().revision; }
   async recordAgent(activity: SubagentActivity): Promise<void> {
     this.ctx.storage.sql.exec(`INSERT INTO agent_activity(thread,actor,updated,version,record) VALUES(?,?,?,?,?)
@@ -93,6 +133,14 @@ export class RequestsDO extends DurableObject<Env> {
     }
   }
   override async alarm() {
+    if (this.projection.status()?.scope.startsWith("sub:")) {
+      const row = await this.projection.db.get<{value:string}>("SELECT value FROM meta WHERE key='subagent'");
+      const meta: SubagentMeta | undefined = row ? JSON.parse(row.value) : undefined;
+      if (meta?.endedAt && meta.endedAt + RETENTION_MS <= Date.now()) await this.ctx.storage.deleteAll();
+      else if (meta?.endedAt) await this.ctx.storage.setAlarm(meta.endedAt + RETENTION_MS);
+      else await this.ctx.storage.deleteAlarm();
+      return;
+    }
     this.prune();
     if (this.ctx.storage.sql.exec("SELECT 1 FROM requests UNION ALL SELECT 1 FROM tool_traces UNION ALL SELECT 1 FROM agent_activity LIMIT 1").toArray().length) await this.ctx.storage.setAlarm(Date.now() + 3600_000);
   }

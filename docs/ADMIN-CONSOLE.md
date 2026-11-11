@@ -14,6 +14,8 @@
 
 请求采集从本版本上线后开始，不补造历史请求。网页对话无需 NapCat 在线，但 QQ 的实际收发仍依赖 NapCat。
 
+聊天与管理数据使用执行对象主动同步的展示副本。首次同步前返回 `503 view_pending`，页面提示“待同步”，不会通过查询唤醒执行对象补数据。升级后的旧会话由已有五分钟维护入口回填；聊天显示最近同步时间。普通增量同步合并 150 毫秒内的变化，同步失败保留本地变更并安排重试。管理写命令返回前尽力同步结果；展示服务故障不会撤销已经提交的修改。
+
 ## 调用方式与数据边界
 
 ```ts
@@ -25,7 +27,7 @@ await Harness.open(storage, { models, registry }, context);
 
 // 网页提交只接收文字与幂等编号，不接收 QQ 身份、目标或权限字段。
 await thread.submitWeb("owner", requestId, text);
-const history = await thread.chatView("owner");
+const history = await env.REQUESTS.getByName("view:thread:owner").chatView("owner");
 
 // 查询集中在 RequestsDO，读取不会唤醒每个会话。
 const page = await env.REQUESTS.getByName("main").list(query);

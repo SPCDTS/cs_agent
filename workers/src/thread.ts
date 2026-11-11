@@ -1,3 +1,6 @@
+import { ModelAlarm } from "./model-alarm";
+import { ProjectionPublisher, observeWrites } from "./requests/projection";
+import { MCP_POLICY_SCHEMA } from "./mcp/policy";
 import { modelEgressDiagnostics } from "./model-egress";
 import { createAccessExtension } from "./tools/access";
 import { createWorkspaceAdminApi, type WorkspaceAdminApi, type WorkspaceMergeInput } from "./sandbox/admin";
@@ -59,7 +62,7 @@ import { createWebSearchTool } from "./tools/web-search";
 import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin, type SubagentView } from "./subagent/parent";
-import { subagentName, type SubagentIdentity, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
+import { subagentName, RETENTION_MS, type SubagentIdentity, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
 import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject } from "./sandbox/task-access";
 import { createCodingExtension } from "./tools/coding";
 import { decodeFileRead } from "./sandbox/read";
@@ -96,7 +99,10 @@ const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_ca
 const SETTINGS_TTL_MS = 60_000;
 
 export class ThreadDO extends DurableObject<Env> {
-  private readonly database = new DurableObjectSqliteDatabase(this.ctx.storage);
+  private readonly modelAlarm = new ModelAlarm(this.ctx);
+  private readonly projection = new ProjectionPublisher(this.ctx, this.env, async () => { const ns = await this.namespace(); return ns ? "thread:" + ns : ""; }, at => this.wakeBy(at));
+  private readonly observedStorage = observeWrites(this.ctx.storage, () => this.projection.changed());
+  private readonly database = new DurableObjectSqliteDatabase(this.observedStorage);
   private readonly sandboxTasks = new SandboxTasks(this.database);
   private initialized?: Promise<void>;
   private modelsCache?: MutableModels;
@@ -124,6 +130,7 @@ export class ThreadDO extends DurableObject<Env> {
         ${MESSAGE_SCHEMA}
         ${MEMORY_SCHEMA}
         ${MCP_CATALOG_SCHEMA}
+        ${MCP_POLICY_SCHEMA}
         ${SUBAGENT_SCHEMA}
         ${SANDBOX_TASK_SCHEMA}
         CREATE TABLE IF NOT EXISTS session_state (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL);
@@ -153,9 +160,21 @@ export class ThreadDO extends DurableObject<Env> {
       await tx.run("UPDATE inbound SET chat_id = user_id WHERE chat_id = ''");
       await tx.run("UPDATE inbound SET platform_message_id = message_id WHERE platform_message_id = ''");
     }).then(async () => {
+      this.projection.install();
       const ns = await this.namespace();
       if (ns) await new MemoryManager(new MemoryStore(this.database, ns)).recoverInterruptedJobs();
     });
+  }
+
+  async syncAdminView(thread: string): Promise<void> {
+    await this.initialize();
+    await this.bindNamespace(thread);
+    this.projection.install();
+    await this.projection.flush();
+    if (this.projection.retryAt !== undefined) throw new Error("view_sync_failed");
+    for (const {id} of await this.database.all<{id:string}>("SELECT id FROM subagents WHERE ended_at IS NULL OR ended_at>?", Date.now() - RETENTION_MS)) {
+      await this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).syncAdminView();
+    }
   }
 
   async ingest(input: InboundInput): Promise<{ repliedToSelf: boolean }> {
@@ -201,7 +220,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   // 回合与记忆抽取共用一个 Models；OAuth 凭据经 Registry 读写，刷新也在 Registry 的锁里串行。
   private models(): MutableModels {
-    return this.modelsCache ??= openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")));
+    return this.modelsCache ??= openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch);
   }
 
   private async openRuntime(): Promise<Runtime> {
@@ -213,7 +232,8 @@ export class ThreadDO extends DurableObject<Env> {
     const models = captureModels(this.models(), this.env, this.ctx, { thread: await this.namespace(), actor: "thread", purpose: "conversation" }, trace.binding), selection = (await this.loadSettings(true)).model;
     const memory = new MemoryStore(this.database, await this.namespace());
     // 相同 storage 对象共享事务队列，避免宿主写入被 Pi 的事务一起回滚。
-    const storage = await openDurableObjectSqliteStorage(this.ctx.storage, { prefix: "pi_" });
+    const storage = await openDurableObjectSqliteStorage(this.observedStorage, { prefix: "pi_" });
+    this.projection.install();
     const registry = createRegistry();
     registry.install(trace.extension);
     registry.install(defineExtension({
@@ -835,6 +855,8 @@ export class ThreadDO extends DurableObject<Env> {
         await this.ctx.storage.get<number>(RUNTIME_WAKE),
         await tx.get("SELECT 1 FROM extract_queue LIMIT 1") ? now + (this.extracting ? RECOVERY_MS : EXTRACT_ALARM_DELAY_MS) : undefined,
         deadline === undefined ? undefined : deadline <= now ? now + 30_000 : deadline].filter(at => at !== undefined);
+      if (this.modelAlarm.pending) due.push(Date.now());
+      if (this.projection.retryAt !== undefined) due.push(this.projection.retryAt);
       if (due.length) await this.ctx.storage.setAlarm(Math.min(...due));
       else await this.ctx.storage.deleteAlarm();
     });
@@ -1045,7 +1067,9 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
+    this.modelAlarm.dispatch();
     await this.initialize();
+    this.ctx.waitUntil(this.projection.flush());
     const store = new MemoryStore(this.database, await this.namespace());
     // 先续约再领取；同时到达的新输入会重新设置 AGENT_WAKE，finally 不会丢掉它。
     const requested = await this.database.transaction(async () => {
@@ -1090,7 +1114,7 @@ export class ThreadDO extends DurableObject<Env> {
     const data = parseImport(value);
     await this.initialize();
     await this.bindNamespace(data.ns);
-    return new MemoryStore(this.database, data.ns).import(data);
+    return this.publishAdminResult(new MemoryStore(this.database, data.ns).import(data));
   }
 
   /** 历史聊天记录导入：路由按 importThreadKey 选线程，这里再经 idFromName 复核，不能把别的会话塞进本 DO。 */
@@ -1100,6 +1124,7 @@ export class ThreadDO extends DurableObject<Env> {
     await this.bindNamespace(importThreadKey(data.scope, ownerIds(this.env)));
     const result = await this.database.transaction(tx => importHistory(tx, data));
     await this.audit("history_import", result);
+    await this.projection.flush();
     return result;
   }
 
@@ -1255,7 +1280,7 @@ export class ThreadDO extends DurableObject<Env> {
   }
   async mcpSetAccess(scope:string,server:string,input:McpGrantInput,expected:string):ReturnType<McpAdminRpc["mcpSetAccess"]>{
     const mcp=await this.adminMcp(scope),grant=await mcp.setAccess(scope,server,input,expected,await this.mcpReviewer(scope));
-    await mcp.refreshAll(); return grant;
+    await mcp.refreshAll(); await this.projection.flush(); return grant;
   }
   async mcpApprovals(scope:string):ReturnType<McpAdminRpc["mcpApprovals"]>{
     return (await this.adminMcp(scope)).policy.list(scope);
@@ -1271,6 +1296,7 @@ export class ThreadDO extends DurableObject<Env> {
       const input=await this.database.get<InboundRow>("SELECT * FROM inbound WHERE user_id=? AND reply_channel=? AND session_generation=? AND kind=? ORDER BY rowid DESC LIMIT 1",original.actor,original.replyChannel,original.generation,original.kind);
       return this.mcpAuthority(input);
     });
+    await this.projection.flush();
     if(!reviewed.result)return {status:reviewed.status};
     return {status:reviewed.status,result:{isError:reviewed.result.isError,output:(reviewed.result.output??[]).map(content=>
       content.type==="text"?{type:"text" as const,text:content.text}:{type:"image" as const,data:content.data,mimeType:content.mimeType})}};
@@ -1280,12 +1306,19 @@ export class ThreadDO extends DurableObject<Env> {
     const { mcp } = await this.open();
     if (!mcp) throw new Error("mcp_unavailable");
     await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig());
-    return mcp.refreshAll();
+    return this.publishAdminResult(mcp.refreshAll());
   }
 
   async recordMcpChange(change: McpChange): Promise<void> {
     await this.initialize();
     await this.audit("mcp_management", { action: change.action, server: change.server, source: "admin" });
+  }
+
+  /** 管理写操作返回前尽力发布结果；展示同步失败不会撤销已经提交的业务变更。 */
+  private async publishAdminResult<T>(work: Promise<T>): Promise<T> {
+    const result = await work;
+    await this.projection.flush();
+    return result;
   }
 
   private async adminStore(ns: string): Promise<MemoryStore> {
@@ -1302,7 +1335,7 @@ export class ThreadDO extends DurableObject<Env> {
     return new MemoryManager(await this.adminStore(ns)).detail(id);
   }
   async restoreMemory(ns: string, id: number, options: { expectedVersion: number; versionId?: number }): ReturnType<MemoryManager["restore"]> {
-    return new MemoryManager(await this.adminStore(ns)).restore(id, options);
+    return this.publishAdminResult(new MemoryManager(await this.adminStore(ns)).restore(id, options));
   }
   async memoryJobs(ns: string): ReturnType<MemoryManager["jobs"]> {
     return new MemoryManager(await this.adminStore(ns)).jobs();
@@ -1310,23 +1343,23 @@ export class ThreadDO extends DurableObject<Env> {
   async consolidateMemory(ns: string): ReturnType<typeof runConsolidate> {
     const store = await this.adminStore(ns);
     const config = threadOpsSettings((await this.env.REGISTRY.getByName("main").opsSettings()).value, ns);
-    return runConsolidate({ db: this.database, kv: this.ctx.storage, store,
-      complete: this.complete, config, now: Date.now() });
+    return this.publishAdminResult(runConsolidate({ db: this.database, kv: this.ctx.storage, store,
+      complete: this.complete, config, now: Date.now() }));
   }
   async rollbackMemory(ns: string, batchId: string): ReturnType<MemoryManager["rollback"]> {
-    return new MemoryManager(await this.adminStore(ns)).rollback(batchId);
+    return this.publishAdminResult(new MemoryManager(await this.adminStore(ns)).rollback(batchId));
   }
   async memoryProposals(ns: string, status: ProfileProposal["status"] | "all"): ReturnType<MemoryManager["proposals"]> {
     return new MemoryManager(await this.adminStore(ns)).proposals(status);
   }
   async generateMemoryProposal(ns: string): ReturnType<typeof generateProfileProposal> {
-    return generateProfileProposal(await this.adminStore(ns), this.complete);
+    return this.publishAdminResult(generateProfileProposal(await this.adminStore(ns), this.complete));
   }
   async decideMemoryProposal(ns: string, id: number, decision: "accepted" | "rejected", expectedRevision: string): ReturnType<MemoryManager["decideProposal"]> {
-    return new MemoryManager(await this.adminStore(ns)).decideProposal(id, decision, expectedRevision);
+    return this.publishAdminResult(new MemoryManager(await this.adminStore(ns)).decideProposal(id, decision, expectedRevision));
   }
   async importMemoryHistory(ns: string, data: unknown, options: { dryRun?: boolean }): ReturnType<typeof importMemoryHistory> {
-    return importMemoryHistory(await this.adminStore(ns), data, options);
+    return this.publishAdminResult(importMemoryHistory(await this.adminStore(ns), data, options));
   }
 
   async memoryView(ns: string, query: string): Promise<{ profile: Profile; memories: MemoryRow[] }> {
@@ -1340,6 +1373,7 @@ export class ThreadDO extends DurableObject<Env> {
     const store = await this.adminStore(ns);
     if (!await store.get(id)) return { status: "not_found" };
     await store.forget(id, "admin", "面板删除");
+    await this.projection.flush();
     return { status: "forgotten" };
   }
 
@@ -1347,6 +1381,7 @@ export class ThreadDO extends DurableObject<Env> {
     const store = await this.adminStore(ns);
     try {
       const result = await store.writeProfile(text, expected);
+      await this.projection.flush();
       return { status: result.ok ? "ok" : "conflict", current: result.current };
     } catch (error) {
       if (error instanceof MemoryStoreError) return { status: "invalid", reason: error.message };

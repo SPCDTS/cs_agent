@@ -85,6 +85,7 @@ export const TRACE_JS = String.raw`
       cs.chatActive=!!cs.awaitingInput||!!d.active||[...cs.requests.values(),...cs.tools.values()].some(r=>r.status==="running");
       $("chat-title").textContent=(state.overview&&state.overview.threads.find(t=>t.key===thread)?.name)||thread;
       $("chat-state").textContent=cs.pending?"上次发送结果未确认，重试沿用原编号。":cs.chatActive?"本轮执行中，正在增量更新…":"回复仅显示网页。空闲时停止自动刷新，点击刷新查看 QQ 新消息。";
+      if(d.syncedAt)$("chat-state").textContent+=" · 数据同步于 "+time(d.syncedAt);
       const fingerprint=JSON.stringify([messages,[...cs.requests.values()],[...cs.tools.values()]]);
       if(fingerprint!==cs.fingerprint){if(cs.fingerprint)refreshTopologyAfterTurn();cs.fingerprint=fingerprint;renderChatMessages(messages);if($("request-detail").open&&cs.detailId&&!detailCache.has(cs.detailId))openRequest(cs.detailId);}
     }finally{if(version===cs.chatVersion){cs.chatLoading=false;scheduleConsolePoll();}}

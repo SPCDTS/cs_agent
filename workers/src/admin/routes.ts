@@ -1,3 +1,4 @@
+import { threadView, workspaceView } from "./read-views";
 import { ADMIN_PAGE_SIZE } from "./pagination";
 import { workspaceRoutes } from "./workspace-routes";
 import { createMcpAdminRoutes } from "./mcp-routes";
@@ -112,21 +113,26 @@ async function knownThread(env: Env, key: string) {
   return env.THREAD.getByName(key);
 }
 
+async function knownView(env: Env, key: string) {
+  if (key !== "owner" && !(await env.BRIDGE.getByName("napcat").threadList()).some(t => t.key === key)) throw new HttpError(404, "not_found");
+  return threadView(env, key);
+}
+
 const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY"] as const;
 
 export const ADMIN_ROUTES: AdminRoute[] = [
   ...MCP_SERVER_ROUTES,
   ...accessRoutes(),
   ...workspaceRoutes({forThread:async(thread,ctx)=>{
-    const stub=ctx.env.THREAD.getByName(thread);
-    return {list:()=>stub.workspaceFiles(thread),download:input=>stub.workspaceReadBlob(thread,input),
-      resetRuntime:()=>stub.workspaceResetRuntime(thread),inspectChild:input=>stub.workspaceInspectChild(thread,input),mergeChild:input=>stub.workspaceMergeChild(thread,input)};
+    const stub=ctx.env.THREAD.getByName(thread), view=workspaceView(ctx.env,thread);
+    return {list:()=>view.list(),download:input=>view.download(input),
+      resetRuntime:()=>stub.workspaceResetRuntime(thread),inspectChild:input=>view.inspectChild(input),mergeChild:input=>stub.workspaceMergeChild(thread,input)};
   }}),
-  ...createMcpAdminRoutes((ctx, scope) => ctx.env.THREAD.getByName(scope)),
-  ...createMemoryAdminRoutes((ctx, ns) => ctx.env.THREAD.getByName(ns)),
+  ...createMcpAdminRoutes((ctx, scope) => ctx.env.THREAD.getByName(scope), (ctx, scope) => threadView(ctx.env, scope)),
+  ...createMemoryAdminRoutes((ctx, ns) => ctx.env.THREAD.getByName(ns), (ctx, ns) => threadView(ctx.env, ns)),
 
   { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/history$"), handle: async ({ env, params, url }) => {
-    try { return json(await (await knownThread(env, params.key!)).sessionHistory(params.key!, url.searchParams.get("cursor") ?? undefined)); }
+    try { return json(await (await knownView(env, params.key!)).sessionHistory(params.key!, url.searchParams.get("cursor") ?? undefined)); }
     catch (error) { if (error instanceof Error && error.message.includes("invalid_cursor")) throw new HttpError(400, "invalid_cursor"); throw error; }
   } },
   { method: "POST", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/reset$"), handle: async ({ env, params, request }) => {
@@ -146,7 +152,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin/app.js", public: true,
     handle: async () => new Response(ADMIN_APP_JS, { headers: { ...API_HEADERS, "Content-Security-Policy": CSP, "Content-Type": "text/javascript; charset=utf-8" } }) },
 
-  { method: "GET", path: "/admin/diagnostics/model-egress", handle: async ({ env }) => json(await env.THREAD.getByName("owner").modelEgressDiagnostics()) },
+  { method: "POST", path: "/admin/diagnostics/model-egress", handle: async ({ env }) => json(await env.THREAD.getByName("owner").modelEgressDiagnostics()) },
   { method: "GET", path: "/admin/requests", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").list(requestQuery(url))) },
   { method: "GET", path: "/admin/agent-topology", handle: async ({ env }) => json(await env.REQUESTS.getByName("main").agentTopology()) },
   { method: "GET", path: "/admin/usage", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").usage(requestQuery(url))) },
@@ -158,7 +164,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/chat$"), handle: async ({ env, params, url }) => {
     const after = url.searchParams.get("after"), pending = url.searchParams.getAll("pending");
     if (after !== null && (!/^\d{1,16}(?:\.\d+)?$/.test(after) || !Number.isFinite(Number(after))) || pending.length > 100 || pending.some(id => !/^(?:qq:\d+|web:[A-Za-z0-9-]+)$/.test(id))) throw new HttpError(400, "invalid_query");
-    return json(await (await knownThread(env, params.key!)).chatView(params.key!, after === null ? undefined : { after: Number(after), pending }));
+    return json(await (await knownView(env, params.key!)).chatView(params.key!, after === null ? undefined : { after: Number(after), pending }));
   } },
   { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/trace$"), handle: async ({ env, params, url }) => {
     const turns = url.searchParams.getAll("turn"), after = url.searchParams.get("after") ?? "0";
@@ -183,11 +189,11 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   } },
 
   { method: "GET", path: "/admin/overview", handle: async ({ env }) => {
-    const bridge = env.BRIDGE.getByName("napcat"), owner = env.THREAD.getByName("owner"), registry = env.REGISTRY.getByName("main");
+    const bridge = env.BRIDGE.getByName("napcat"), owner = threadView(env, "owner"), registry = env.REGISTRY.getByName("main");
     const unavailable = () => ({ error: "unavailable" as const });
     // 定时与事件只给总览卡片一行小字，任一个 DO 出错都不能拖垮整页。
     const [status, list, model, accounts, counts, schedule, events] = await Promise.all([
-      bridge.status(), bridge.threadList(), registry.modelStatus(), registry.status(), owner.mcpToolCounts(),
+      bridge.status(), bridge.threadList(), registry.modelStatus(), registry.status(), owner.mcpToolCounts().catch(() => null),
       env.SCHEDULE.getByName("main").status().catch(unavailable), env.EVENTS.getByName("main").health().catch(unavailable),
     ]);
     const { threads: _keys, sendRules, ...connection } = status;
@@ -196,13 +202,13 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     // 单个 Thread 失败只标记该行，不能拖垮整页。
     const threads = await Promise.all(keys.map(async ({ key, name, seenAt }) => {
       let stats;
-      try { stats = await env.THREAD.getByName(key).stats(); } catch { stats = { error: "unavailable" as const }; }
+      try { stats = await threadView(env, key).stats(); } catch (error) { stats = { error: error instanceof Error && error.message.includes("view_pending") ? "view_pending" : "unavailable" }; }
       // 主人与群会话各有独立 Linux 沙箱；读取状态不会启动容器。
       const sandbox = key === "owner" || key.startsWith("group:") ? await env.SANDBOX.getByName(key).status().catch(() => "unavailable" as const) : undefined;
       return { key, ...(name ? { name } : {}), kind: threadKind(key), seenAt, stats, ...(sandbox ? { sandbox } : {}) };
     }));
     return json({ commit: env.CS_AGENT_COMMIT, bridge: connection, model, sendRules, threads, schedule, events,
-      mcp: accounts.map(account => ({ ...account, tools: counts[account.server] ?? 0 })),
+      mcp: accounts.map(account => ({ ...account, tools: counts === null ? null : counts[account.server] ?? 0 })),
       configured: Object.fromEntries(SECRET_NAMES.map(name => [name, !!env[name]])) });
   } },
 
@@ -290,12 +296,12 @@ export const ADMIN_ROUTES: AdminRoute[] = [
 
   { method: "GET", path: "/admin/events", handle: async ({ env, url }) => {
     const { thread, query } = eventQuery(url);
-    return json(await env.THREAD.getByName(thread).events(query));
+    return json(await threadView(env, thread).events(query));
   } },
   { method: "POST", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/stop$`),
     handle: async ({ env, params }) => json(await env.THREAD.getByName(params.key).stop()) },
   { method: "GET", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/subagents$`),
-    handle: async ({ env, params }) => json(await env.THREAD.getByName(params.key).subagentList()) },
+    handle: async ({ env, params }) => json(await threadView(env, params.key).subagentList()) },
   { method: "POST", path: new RegExp(`^/admin/subagents/(?<id>${SUBAGENT_ID})/cancel$`), handle: async ({ env, url, params }) => {
     const status = await env.THREAD.getByName(threadParam(url)).cancelSubagent(params.id);
     if (!status) throw new HttpError(404, "not_found");
@@ -304,7 +310,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: new RegExp(`^/admin/subagents/(?<id>${SUBAGENT_ID})/transcript$`), handle: async ({ env, url, params }) => {
     const limit = url.searchParams.get("limit") ?? "20";
     if (!/^\d{1,2}$/.test(limit) || Number(limit) < 1 || Number(limit) > 50) throw new HttpError(400, "invalid_query");
-    const result = await env.THREAD.getByName(threadParam(url)).subagentTranscript(params.id, Number(limit));
+    const result = await threadView(env, threadParam(url)).subagentTranscript(params.id, Number(limit));
     if (!result) throw new HttpError(404, "not_found");
     return json(result);
   } },
@@ -316,7 +322,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin/memory", handle: async ({ env, url }) => {
     const ns = memoryNs(url), q = url.searchParams.get("q") ?? "";
     if (q.length > 200) throw new HttpError(400, "invalid_query");
-    return json(await env.THREAD.getByName(ns).memoryView(ns, q));
+    return json(await threadView(env, ns).memoryView(ns, q));
   } },
   { method: "DELETE", path: /^\/admin\/memory\/(?<id>[1-9]\d{0,14})$/, handle: async ({ env, url, params }) => {
     const ns = memoryNs(url), result = await env.THREAD.getByName(ns).forgetMemory(ns, Number(params.id));
@@ -409,6 +415,7 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     if (!route.public && !await authenticated(request, env.ADMIN_TOKEN)) return plain("unauthorized", 401);
     try { return await route.handle({ env, request, url, params }); }
     catch (error) {
+      if (error instanceof Error && error.message.includes("view_pending")) return json({error:"view_pending"}, 503);
       if (error instanceof HttpError) return json({ error: error.code, ...error.extra }, error.status);
       // 原始异常可能带存储或远端内容，只记录路由。
       console.error({ event: "admin_failed", method: route.method, path: String(route.path), error: error instanceof Error ? `${error.name}: ${error.message.slice(0, 200)}` : typeof error });

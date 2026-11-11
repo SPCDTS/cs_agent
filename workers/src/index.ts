@@ -1,3 +1,4 @@
+import { backfillViews, threadView } from "./admin/read-views";
 import { handleMediaRequest } from "./media/routes";
 import { authenticated } from "./auth";
 import { handleAdmin } from "./admin/routes";
@@ -19,7 +20,7 @@ export { CloudflareWorkspaceResourcesDO } from "./sandbox/resources";
 
 // 按 wrangler.jsonc 的 crons 字符串分派，各后台任务各占一行。
 const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> = {
-  "*/5 * * * *": async env => { await Promise.all([env.EVENTS.getByName("main").tick(),env.BRIDGE.getByName("napcat").tick(),env.REGISTRY.getByName("main").opsTick()]); },
+  "*/5 * * * *": async env => { await Promise.all([env.EVENTS.getByName("main").tick(),env.BRIDGE.getByName("napcat").tick(),env.REGISTRY.getByName("main").opsTick(),backfillViews(env)]); },
   [MAINTENANCE_CRON]: runMaintenance,
 };
 
@@ -61,14 +62,14 @@ export default {
     }
     if (path === "/admin" || path.startsWith("/admin/")) return handleAdmin(request, env);
     if (request.method === "GET" && path === "/healthz") {
-      const owner = env.THREAD.getByName("owner"), registry = env.REGISTRY.getByName("main");
+      const owner = threadView(env, "owner"), registry = env.REGISTRY.getByName("main");
       const [bridge, model, thread, accounts, counts, schedule, events] = await Promise.all([
-        env.BRIDGE.getByName("napcat").status(), registry.modelStatus(), owner.stats(), registry.status(), owner.mcpToolCounts(),
+        env.BRIDGE.getByName("napcat").status(), registry.modelStatus(), owner.stats().catch(error => ({error:error instanceof Error && error.message.includes("view_pending") ? "view_pending" : "unavailable"})), registry.status(), owner.mcpToolCounts().catch(() => null),
         env.SCHEDULE.getByName("main").status(), env.EVENTS.getByName("main").health(),
       ]);
       const ok = !("unavailable" in model);
       const { threads, sendRules, ...connection } = bridge;
-      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules, mcp: accounts.map(account => ({ ...account, tools: counts[account.server] ?? 0 })), schedule, events }, { status: ok ? 200 : 503 });
+      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules, mcp: accounts.map(account => ({ ...account, tools: counts === null ? null : counts[account.server] ?? 0 })), schedule, events }, { status: ok ? 200 : 503 });
     }
     return new Response("not found", { status: 404 });
   },

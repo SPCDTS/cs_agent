@@ -328,6 +328,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
   const LOGIN = { ok: ["已登录", "ok"], needed: ["需要登录", "warn"], error: ["凭据错误", "bad"], unconfigured: ["未配置", "neutral"] };
   const CREDENTIAL = { oauth: "OAuth（CIMD）", static: "静态凭据", none: "无凭据" };
   const ERRORS = {
+    view_pending: "展示数据尚未同步，请稍后刷新。升级后的历史数据将在维护任务中补齐。",
     busy: "会话正在运行或压缩，请先停止或等待完成后重试",
     invalid_cursor: "历史分页标记已失效，请重新打开历史",
     conflict: "数据已被别处修改，已载入最新值，请确认后再保存",
@@ -493,7 +494,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     const totals = { queued: 0, done: 0, failed: 0 };
     for (const thread of o.threads) if (thread.stats.inbound) for (const key of Object.keys(totals)) totals[key] += thread.stats.inbound[key];
     $("card-threads").textContent = o.threads.length + " 个线程";
-    $("card-threads-sub").textContent = "处理中 " + totals.queued + " · 完成 " + totals.done + " · 失败 " + totals.failed;
+    $("card-threads-sub").textContent = (o.threads.some(t=>"error" in t.stats)?"部分会话待同步 · 已同步：":"") + "处理中 " + totals.queued + " · 完成 " + totals.done + " · 失败 " + totals.failed;
     const schedule = "error" in o.schedule ? "定时 不可用" : "定时 " + o.schedule.active + " 个" + (o.schedule.paused ? "（暂停 " + o.schedule.paused + "）" : "");
     $("card-threads-extra").textContent = schedule + " · 事件积压 " + ("error" in o.events ? "不可用" : o.events.held);
     renderRules(o.sendRules);
@@ -532,7 +533,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
       const busy = !broken && s.inbound.queued > 0;
       body.append(el("tr", {}, [
         el("td", {}, [el("span", { className: "mono", text: thread.key }), thread.name ? el("div", { className: "muted small", text: thread.name }) : null]),
-        el("td", {}, [broken ? pill("不可用", "bad") : busy ? pill("处理中", "warn") : pill("空闲", "ok"),
+        el("td", {}, [broken ? pill(s.error === "view_pending" ? "待同步" : "不可用", s.error === "view_pending" ? "warn" : "bad") : busy ? pill("处理中", "warn") : pill("空闲", "ok"),
           thread.sandbox ? el("div", { className: "muted small", text: "沙箱：" + SANDBOX_TEXT[thread.sandbox] }) : null]),
         el("td", { className: "mono", text: broken ? "-" : s.inbound.queued + " / " + s.inbound.done + " / " + s.inbound.failed }),
         el("td", { className: "mono", text: broken ? "-" : s.outbox }),
@@ -806,7 +807,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
           el("div", { className: "muted small", text: CREDENTIAL[server.credential] || server.credential }),
         ]),
         server.enabled ? pill(login[0], login[1]) : pill("已停用", "neutral"),
-        el("span", { className: "mono muted", text: server.tools + " 个工具" }),
+        el("span", { className: "mono muted", text: server.tools === null ? "工具数待同步" : server.tools + " 个工具" }),
         server.enabled ? el("button", { className: "btn", type: "button", text: "刷新目录", onclick: () => mcpRefresh(server.server) }) : null,
         server.enabled && oauth && server.login !== "ok" ? el("button", { className: "btn primary", type: "button", text: "生成登录链接", onclick: () => mcpLink(server.server) }) : null,
         server.enabled && oauth && (server.login === "ok" || server.login === "error") ? el("button", { className: "btn danger", type: "button", text: "登出", onclick: () => mcpLogout(server.server) }) : null,

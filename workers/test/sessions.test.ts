@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fauxProvider, fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { MODEL_PROVIDERS } from "../src/models";
 import worker from "../src/index";
+import { threadView } from "../src/admin/read-views";
 import { input } from "./helpers";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
@@ -50,10 +51,11 @@ describe("session lifecycle", () => {
     expect(await owner().resetSession("owner", crypto.randomUUID(), "")).toEqual({ error: "busy" });
     release(); await pending;
     for (let i = 4; i < 24; i++) await owner().submit(input(i, "历史" + i, 10000001));
-    const page = await owner().sessionHistory("owner");
+    await owner().syncAdminView("owner");
+    const page = await threadView(env,"owner").sessionHistory("owner");
     expect(page.entries).toHaveLength(10);
     expect(page.next).toBeTruthy();
-    const older = await owner().sessionHistory("owner", page.next);
+    const older = await threadView(env,"owner").sessionHistory("owner", page.next);
     expect(older.entries).toHaveLength(10);
     expect(older.entries.some(e => page.entries.some(p => p.id === e.id))).toBe(false);
     expect((await request("history?cursor=!!!")).status).toBe(400);

@@ -22,7 +22,7 @@
 | BridgeDO | NapCat 连接、聊天目录、发送与回执 |
 | RegistryDO | 设置、模型账号、技能、人设及授权 |
 | ThreadDO | 会话执行、聊天记录、记忆与工具状态 |
-| RequestsDO | 模型请求明细和统计 |
+| RequestsDO | 模型请求明细、统计与会话管理展示副本 |
 | ScheduleDO / EventsDO | 定时、外部事件和投递状态 |
 | SubagentDO | 子任务执行与汇报 |
 | SandboxDO + R2 | 按需编码容器、工作区版本与文件 |

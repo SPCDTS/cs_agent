@@ -15,17 +15,17 @@ type ProviderSpec = {
   name: string;
   /** 不列出的 provider 也不能被选中；faux 只在测试配置里出现。 */
   listed(env: Env): boolean;
-  create(): Provider;
+  create(options?: { fetch?: typeof fetch }): Provider;
   /** checkAuth 不通过时给面板与健康检查的原因 */
   unavailable: string;
 };
 
 // 保留 provider id 和会话模型选择；旧 SIWC 授权仅作为迁移期间的回退。
-function codexProvider(): Provider {
+function codexProvider({ fetch }: { fetch?: typeof globalThis.fetch } = {}): Provider {
   const native = openAICodexResponsesApi(), legacy = openAIResponsesApi();
   const transport: ProviderStreams = {
-    stream: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.stream({ ...model, api: "openai-codex-responses" }, context, options) : legacy.stream({ ...model, api: "openai-responses" }, context, options),
-    streamSimple: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.streamSimple({ ...model, api: "openai-codex-responses" }, context, options) : legacy.streamSimple({ ...model, api: "openai-responses" }, context, options),
+    stream: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.stream({ ...model, api: "openai-codex-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }) : legacy.stream({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
+    streamSimple: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.streamSimple({ ...model, api: "openai-codex-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }) : legacy.streamSimple({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
   };
   const catalog = new Map([...Object.values(OPENAI_MODELS).filter(model => model.api === "openai-responses"), ...Object.values(OPENAI_CODEX_MODELS)].map(model => [model.id, model]));
   const provider = createProvider({ id: CODEX_PROVIDER, name: "ChatGPT 订阅", baseUrl: CODEX_BASE_URL,
@@ -60,7 +60,7 @@ function echoProvider(): Provider {
 }
 
 export const MODEL_PROVIDERS: Record<string, ProviderSpec> = {
-  deepseek: { name: "DeepSeek", listed: () => true, create: deepseekProvider, unavailable: "missing_key" },
+  deepseek: { name: "DeepSeek", listed: () => true, create: () => deepseekProvider(), unavailable: "missing_key" },
   [CODEX_PROVIDER]: { name: "ChatGPT 订阅", listed: () => true, create: codexProvider, unavailable: "login_required" },
   faux: { name: "faux（测试）", listed: env => env.MODEL_PROVIDER === "faux", create: echoProvider, unavailable: "unavailable" },
 };
@@ -69,12 +69,12 @@ export const MODEL_PROVIDERS: Record<string, ProviderSpec> = {
  * 每个 DO 建一份 Models：API key 从 env 读（不写 process.env），OAuth 凭据经 credentials 读写。
  * 当前用哪个模型不在这里决定，由调用方按运行时设置传给 pi-durable 或 directComplete。
  */
-export function openModels(env: Env, credentials: CredentialStore): MutableModels {
+export function openModels(env: Env, credentials: CredentialStore, fetch?: typeof globalThis.fetch): MutableModels {
   const models = createModels({ credentials, authContext: {
     env: async name => { const value: unknown = (env as unknown as Record<string, unknown>)[name]; return typeof value === "string" && value.trim() ? value : undefined; },
     fileExists: async () => false,
   } });
-  for (const spec of Object.values(MODEL_PROVIDERS)) if (spec.listed(env)) models.setProvider(spec.create());
+  for (const spec of Object.values(MODEL_PROVIDERS)) if (spec.listed(env)) models.setProvider(spec.create({ fetch }));
   return models;
 }
 

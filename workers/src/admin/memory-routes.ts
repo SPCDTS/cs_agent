@@ -58,7 +58,7 @@ function query(url: URL): MemoryListQuery {
 }
 
 /** 放在旧 memory 路由之前；所有路由由现有 handleAdmin 统一执行 Bearer 鉴权。 */
-export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string) => MemoryAdminRpc): AdminRoute[] {
+export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string) => MemoryAdminRpc, read: (ctx: AdminContext, ns: string) => Pick<MemoryAdminRpc, "memoryList" | "memoryDetail" | "memoryJobs" | "memoryProposals"> = resolve): AdminRoute[] {
   const guarded = (handle: AdminRoute["handle"]): AdminRoute["handle"] => async ctx => {
     try { return await handle(ctx); }
     catch (error) {
@@ -76,16 +76,16 @@ export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string)
   };
   return [
     { method: "GET", path: "/admin/memory/list", handle: guarded(async ctx => {
-      const ns = nsFrom(ctx), parsed = query(ctx.url); return json(await resolve(ctx, ns).memoryList(ns, parsed));
+      const ns = nsFrom(ctx), parsed = query(ctx.url); return json(await read(ctx, ns).memoryList(ns, parsed));
     }) },
     { method: "GET", path: /^\/admin\/memory\/(?<id>[1-9]\d{0,14})$/, handle: guarded(async ctx => {
-      const ns = nsFrom(ctx); return json(await resolve(ctx, ns).memoryDetail(ns, Number(ctx.params.id)));
+      const ns = nsFrom(ctx); return json(await read(ctx, ns).memoryDetail(ns, Number(ctx.params.id)));
     }) },
     { method: "POST", path: /^\/admin\/memory\/(?<id>[1-9]\d{0,14})\/restore$/, handle: guarded(async ctx => {
       const ns = nsFrom(ctx); return json(await resolve(ctx, ns).restoreMemory(ns, Number(ctx.params.id), await body(ctx.request, RESTORE)));
     }) },
     { method: "GET", path: "/admin/memory/jobs", handle: guarded(async ctx => {
-      const ns = nsFrom(ctx); return json({ jobs: await resolve(ctx, ns).memoryJobs(ns) });
+      const ns = nsFrom(ctx); return json({ jobs: await read(ctx, ns).memoryJobs(ns) });
     }) },
     { method: "POST", path: "/admin/memory/consolidate", handle: guarded(async ctx => {
       const ns = nsFrom(ctx); return json(await resolve(ctx, ns).consolidateMemory(ns));
@@ -96,7 +96,7 @@ export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string)
     { method: "GET", path: "/admin/memory/proposals", handle: guarded(async ctx => {
       const ns = nsFrom(ctx), status = ctx.url.searchParams.get("status") ?? "pending";
       if (status !== "pending" && status !== "accepted" && status !== "rejected" && status !== "all") throw new MemoryAdminError("invalid");
-      return json({ proposals: await resolve(ctx, ns).memoryProposals(ns, status) });
+      return json({ proposals: await read(ctx, ns).memoryProposals(ns, status) });
     }) },
     { method: "POST", path: "/admin/memory/proposals", handle: guarded(async ctx => {
       const ns = nsFrom(ctx); return json(await resolve(ctx, ns).generateMemoryProposal(ns));

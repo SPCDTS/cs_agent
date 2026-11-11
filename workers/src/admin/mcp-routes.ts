@@ -15,7 +15,7 @@ function scope(ctx: AdminContext) {
  if (value !== "owner" && !/^group:[1-9][0-9]{0,19}$/.test(value ?? "")) throw new Error("mcp_policy:invalid");
  return value!;
 }
-export function createMcpAdminRoutes(resolve: (ctx: AdminContext, scope: string) => McpAdminRpc): AdminRoute[] {
+export function createMcpAdminRoutes(resolve: (ctx: AdminContext, scope: string) => McpAdminRpc, read: (ctx: AdminContext, scope: string) => Pick<McpAdminRpc, "mcpAccess" | "mcpApprovals"> = resolve): AdminRoute[] {
  const guarded = (handler: AdminRoute["handle"]): AdminRoute["handle"] => async ctx => {
   try { return await handler(ctx); }
   catch (error) {
@@ -28,7 +28,7 @@ export function createMcpAdminRoutes(resolve: (ctx: AdminContext, scope: string)
   { method: "GET", path: "/admin/mcp/access", handle: guarded(async ctx => {
    const target = scope(ctx), server = ctx.url.searchParams.get("server") ?? "";
    if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(server)) throw new Error("mcp_policy:invalid");
-   return json({ grant: await resolve(ctx, target).mcpAccess(target, server) });
+   return json({ grant: await read(ctx, target).mcpAccess(target, server) });
   }) },
   { method: "PUT", path: "/admin/mcp/access", handle: guarded(async ctx => {
    const target = scope(ctx); let value: unknown;
@@ -39,7 +39,7 @@ export function createMcpAdminRoutes(resolve: (ctx: AdminContext, scope: string)
    return json(await resolve(ctx, target).mcpSetAccess(target, value.server, value.input, value.expected));
   }) },
   { method: "GET", path: "/admin/mcp/approvals", handle: guarded(async ctx => {
-   const target = scope(ctx); return json({ approvals: await resolve(ctx, target).mcpApprovals(target) });
+   const target = scope(ctx); return json({ approvals: await read(ctx, target).mcpApprovals(target) });
   }) },
   { method: "POST", path: /^\/admin\/mcp\/approvals\/(?<id>[a-f0-9]{64})\/(?<decision>approve|reject)$/, handle: guarded(async ctx => {
    const target = scope(ctx); return json(await resolve(ctx, target).mcpReviewApproval(target, ctx.params.id!, ctx.params.decision === "approve" ? "approve" : "reject"));

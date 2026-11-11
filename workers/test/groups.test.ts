@@ -48,7 +48,7 @@ describe("group conversations", () => {
     await expect.poll(() => runInDurableObject(group(), (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM messages").one().n)).toBe(3);
     expect(frames).toHaveLength(2);
     expect(await group().submit(input(2, "帮忙", 10000004, 200000001, true))).toEqual({ deduped: true });
-    expect(await (await SELF.fetch("https://test/healthz")).json()).toMatchObject({ threads: ["group:200000001"], sendRules: [], thread: { outbox: 0 } });
+    expect(await (await SELF.fetch("https://test/healthz")).json()).toMatchObject({ threads: ["group:200000001"], sendRules: [], thread: { error: "view_pending" } });
   });
 
   it("ignores disallowed groups and admits allowUsers private messages", async () => {

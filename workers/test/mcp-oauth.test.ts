@@ -61,7 +61,7 @@ describe("Registry OAuth CIMD", () => {
     expect(stored.logins).toHaveLength(0);
     expect(remote.requests.every(r => r.redirect === "manual" && !r.headers.has("cookie"))).toBe(true);
     const healthy = await worker.fetch(new Request(`${env.PUBLIC_ORIGIN}/healthz`), env);
-    expect(await healthy.json()).toMatchObject({ mcp: expect.arrayContaining([expect.objectContaining({ server: "notion", enabled: true, credential: "oauth", login: "ok", tools: expect.any(Number) })]) });
+    expect(await healthy.json()).toMatchObject({ mcp: expect.arrayContaining([expect.objectContaining({ server: "notion", enabled: true, credential: "oauth", login: "ok", tools: null })]) });
   });
   it("expires links and states after ten minutes and consumes failed callbacks without exposing code", async () => {
     fakeRemote(); const link = await registry().loginLink("notion");
