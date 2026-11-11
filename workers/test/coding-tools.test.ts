@@ -37,6 +37,40 @@ describe("workPath", () => {
 });
 
 describe("coding tools", () => {
+  it("超长文本通过同一文件环境保存全文，输出返回可继续读取的路径", async () => {
+    vi.spyOn(SandboxDO.prototype, "createTempDir").mockResolvedValue("/work/.codemode/full-text");
+    const write = vi.spyOn(SandboxDO.prototype, "writeFile").mockResolvedValue({ bytes: 50000 });
+    const seen = scriptedModel([{ name: "codemode", args: { code: 'text("完整文本".repeat(12500));' } }]);
+    await env.THREAD.getByName("owner").submit(input(1, "生成完整输出", 10000001));
+    expect(write).toHaveBeenCalledWith("/work/.codemode/full-text/output.txt", "完整文本".repeat(12500));
+    expect(seen.outputs.join("\n")).toContain("Full output: /work/.codemode/full-text/output.txt");
+  });
+  it.each(["persistence", "owner", "generation"] as const)("自动保存遇到 %s 失败时报告原因，不宣称已保存", async failure => {
+    const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=";
+    const seen = scriptedModel([{ name: "codemode", args: { code: `image({type:"image",data:${JSON.stringify(data)},mimeType:"image/png"});` } }]);
+    const write = vi.spyOn(SandboxDO.prototype, "writeFile").mockRejectedValue(Error("persistence_failed"));
+    await runInDurableObject(env.THREAD.getByName("owner"), async (instance, state) => {
+      const currentEnv = { ...env, QQ_OWNER: "10000001", MEMORY_EXTRACT_NAMESPACES: "" };
+      vi.spyOn(SandboxDO.prototype, "createTempDir").mockImplementation(async () => {
+        if (failure === "owner") currentEnv.QQ_OWNER = "10000002";
+        if (failure === "generation") await runInDurableObject(env.THREAD.getByName("owner"), (_current, currentState) => { currentState.storage.sql.exec("UPDATE session_state SET generation=generation+1 WHERE id=1"); });
+        return "/work/.codemode/test";
+      });
+      await threadWithBindings(instance, state, currentEnv).submit(input(1, "截图", 10000001));
+    });
+    expect(write).toHaveBeenCalledTimes(failure === "persistence" ? 1 : 0);
+    expect(seen.outputs.join("\n")).toContain(failure === "persistence" ? "persistence_failed" : "permission_denied");
+    expect(seen.outputs.join("\n")).not.toContain("Image saved to");
+  });
+  it.each(["foreign", "group"] as const)("send_file 的资源 ID 不允许 %s 越权", async kind => {
+    const resource = await env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner").create(kind === "foreign" ? "other" : "owner", "send-target", {});
+    const exported = vi.spyOn(SandboxDO.prototype, "exportAsset");
+    const seen = scriptedModel([{ name: "send_file", args: { path: "/work/out/image.png", sandboxId: resource.id } }]);
+    const group = kind === "group";
+    await env.THREAD.getByName(group ? "group:200000001" : "owner").submit(input(1, "发送图片", group ? 10000004 : 10000001, group ? 200000001 : undefined, group));
+    expect(exported).not.toHaveBeenCalled();
+    expect(seen.outputs.join("\n")).toContain(group ? "permission_denied" : "invalid_request");
+  });
   it("offers sandbox instructions and only Code Mode in owner and group turns", async () => {
     const seen = scriptedModel([{ name: "", args: {} }, { name: "", args: {} }]);
     expect(await env.THREAD.getByName("owner").submit(input(1, "写个脚本", 10000001))).toEqual({ status: "done" });

@@ -27,11 +27,13 @@ const script = `text(await tools.write({path:"download.mjs",content:${JSON.strin
 // 实际脚本联网下载另由 sandbox-server.node.mjs 验证。
 async function installRuntime(scope: string) {
   await runInDurableObject(env.SANDBOX.getByName(scope), (instance, state) => {
-    let files = new Map<string, Uint8Array>(), ready = false;
+    let files = new Map<string, Uint8Array>(), directories = new Set(["out"]), ready = false;
     const relative = (path: string) => path.replace(/^\/work\//, "");
     const client: SandboxClient = {
-      async restore(snapshot, read) { files = new Map(await Promise.all(snapshot.files.map(async f => [f.path, await read(f)] as const))); ready = true; },
-      async writeFile(path, text) { const bytes = new TextEncoder().encode(text); files.set(relative(path), bytes); return { bytes: bytes.length }; },
+      async restore(snapshot, read) { files = new Map(await Promise.all(snapshot.files.map(async f => [f.path, await read(f)] as const))); directories = new Set(snapshot.directories); ready = true; },
+      async writeFile(path, text) { const bytes = typeof text === "string" ? new TextEncoder().encode(text) : text; files.set(relative(path), bytes); return { bytes: bytes.length }; },
+      async mkdir(path) { directories.add(relative(path)); },
+      async remove() { throw Error("unused"); },
       async exec(command) {
         expect(command).toBe("node download.mjs");
         expect(new TextDecoder().decode(files.get("download.mjs"))).toBe(source);
@@ -42,7 +44,7 @@ async function installRuntime(scope: string) {
       async readBlob(path) { const bytes = files.get(relative(path)); if (!bytes) throw Error("not_found"); return bytes; },
       async snapshot() {
         const entries = await Promise.all([...files].map(async ([path, bytes]) => ({ path, bytes: bytes.length, sha256: await sha256(bytes), mime: path.endsWith(".png") ? "image/png" : "text/javascript", mode: 420 })));
-        return { files: entries, directories: ["out"], totalBytes: entries.reduce((n, f) => n + f.bytes, 0) };
+        return { files: entries, directories: [...directories], totalBytes: entries.reduce((n, f) => n + f.bytes, 0) };
       },
       async list() { return []; },
       async editFile() { throw Error("unused"); },
@@ -55,18 +57,25 @@ async function installRuntime(scope: string) {
 }
 function inspectThenSend() {
   const faux = fauxProvider({ models: [{ id: "test", input: ["text", "image"] }], tokensPerSecond: Infinity });
-  const images: string[] = [];
+  const images: string[] = [], saved: string[] = [];
   let step = 0;
   const respond: FauxResponseFactory = transcript => {
     faux.setResponses([respond]);
     for (const message of transcript.messages) if (message.role === "toolResult") for (const block of message.content) if (block.type === "image") images.push(block.data);
     if (step++ === 0) return fauxAssistantMessage(fauxToolCall("codemode", { code: script }), { stopReason: "toolUse" });
-    if (step === 2) return fauxAssistantMessage(fauxToolCall("send_file", { path: "/work/out/jersey.png", name: "队服.png" }), { stopReason: "toolUse" });
+    if (step === 2) {
+      const output = transcript.messages.flatMap(message => message.role === "toolResult" ? message.content.filter(block => block.type === "text").map(block => block.text) : []).join("\n");
+      const path = /Image saved to (\/work\/\.codemode\/\S+\/image-\d+\.png)/.exec(output)?.[1];
+      expect(path, output).toBeDefined();
+      if (!path) throw Error("image_not_saved");
+      saved.push(path);
+      return fauxAssistantMessage(fauxToolCall("send_file", { path, name: "队服.png" }), { stopReason: "toolUse" });
+    }
     return fauxAssistantMessage("done");
   };
   faux.setResponses([respond]);
   vi.spyOn(models, "openModels").mockImplementation(() => { const registry = createModels(); registry.setProvider(faux.provider); return registry; });
-  return { images };
+  return { images, saved };
 }
 
 describe("群聊通用脚本与产物发送", () => {
@@ -91,6 +100,7 @@ describe("群聊通用脚本与产物发送", () => {
     expect(await run).toEqual({ status: "done" });
     expect(seen.images).toContain(data);
     expect((await env.SANDBOX.getByName(group).readBlob("out/jersey.png")).bytes).toEqual(png);
+    expect((await env.SANDBOX.getByName(group).readBlob(seen.saved[0]!)).bytes).toEqual(png);
     for (const scope of ["owner", "group:200000002"]) {
       await runInDurableObject(env.SANDBOX.getByName(scope), async instance => { if (!(instance instanceof SandboxDO)) throw Error("expected SandboxDO"); await expect(instance.readBlob("out/jersey.png")).rejects.toThrow("not_found"); });
       await expect(new MediaRepository({ bucket: env.ASSETS, scope }).get(asset.ref.id)).rejects.toThrow("asset_not_found");

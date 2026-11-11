@@ -8,7 +8,7 @@ import * as models from "../src/models";
 import { RegistryDO } from "../src/registry";
 import { SandboxDO } from "../src/sandbox/do";
 import { ThreadDO } from "../src/thread";
-import { scopePrefix } from "../src/media/repository";
+import { MediaRepository, scopePrefix } from "../src/media/repository";
 import { sha256 } from "../src/media/model";
 import { MCP_CONFIG } from "../src/mcp/config";
 import { fakeRemote, login } from "./mcp-helpers";
@@ -319,9 +319,11 @@ describe("subagents as child Durable Objects", () => {
 
   it.each(["capability", "identity", "generation", "cancelled", "channel", "task"] as const)("rechecks %s before a parent report turn uses the sandbox", async change => {
     const childReady = gate(), resume = gate();
+    const exported = vi.spyOn(SandboxDO.prototype, "exportAsset");
     vi.spyOn(RegistryDO.prototype, "mcpConfig").mockReturnValue({ ...MCP_CONFIG, enabled: false, servers: [] });
     const { outputs, seen } = twoModels([spawn("检查工作区"), { text: "已派出" },
-      { tool: "codemode", after: resume.promise, args: { code: 'text(await tools.sandbox_list({}));' } }, { text: "权限已失效" },
+      { tool: "codemode", after: resume.promise, args: { code: 'text(await tools.sandbox_list({}));' } },
+      { tool: "send_file", args: { path: "/work/.codemode/image.png" } }, { text: "权限已失效" },
     ], [{ text: "请主会话继续检查", after: childReady.promise }]);
     await thread("owner").submit(input(1, "检查工作区", 10000001));
     const sub = await onlySubagent("owner");
@@ -338,6 +340,8 @@ describe("subagents as child Durable Objects", () => {
     resume.open();
     await reports("owner", 1);
     expect(outputs.parent[1]).toContain("denied");
+    expect(outputs.parent[2]).toContain("本回合无权访问媒体或发送附件");
+    expect(exported).not.toHaveBeenCalled();
   });
 
 
@@ -386,6 +390,49 @@ describe("subagents as child Durable Objects", () => {
     expect((await child("owner", sub.id).status())?.meta.status).toBe("cancelled");
     expect(await rows("owner", "SELECT 1 FROM inbound WHERE kind = 'subagent'")).toEqual([]);
   });
+});
+
+it.each([false, true])("子 agent 自动输出沿用分配资源，父 agent 可按 ID 发送，shared=%s", async shared => {
+  const resources = env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner"), { assignedSandboxId } = await resources.list("owner");
+  const resource = shared ? await resources.get("owner", assignedSandboxId) : await resources.create("owner", "image-env", {});
+  if (!resource) throw Error("missing_resource");
+  const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aH1sAAAAASUVORK5CYII=", png = Uint8Array.from(atob(data), char => char.charCodeAt(0));
+  const targets: string[] = [], written = new Map<string, Uint8Array>();
+  vi.spyOn(SandboxDO.prototype, "createTempDir").mockImplementation(async function(this: SandboxDO) {
+    targets.push((await this.files()).workspace);
+    return "/work/.codemode/child-image";
+  });
+  vi.spyOn(SandboxDO.prototype, "writeFile").mockImplementation(async function(this: SandboxDO, path, content) {
+    targets.push((await this.files()).workspace);
+    expect(content).toBeInstanceOf(Uint8Array);
+    const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
+    written.set(path, bytes);
+    return { bytes: bytes.length };
+  });
+  vi.spyOn(SandboxDO.prototype, "exportAsset").mockImplementation(async function(this: SandboxDO, path, scope) {
+    targets.push((await this.files()).workspace);
+    const bytes = written.get(path);
+    expect(bytes).toEqual(png);
+    if (!bytes) throw Error("missing_image");
+    return new MediaRepository({ bucket: env.ASSETS, scope }).put({ bytes, name: "child.png", kind: "image" });
+  });
+  let savedPath = "";
+  const { outputs, seen } = twoModels([spawn("截图", shared ? {} : { sandboxId: resource.id }), { text: "已派出" },
+    () => ({ tool: "send_file", args: { sandboxId: resource.id, path: savedPath } })], [
+    { tool: "codemode", args: { code: `image({type:"image",data:${JSON.stringify(data)},mimeType:"image/png"});` } },
+    results => { savedPath = /Image saved to (\/work\/\.codemode\/\S+\.png)/.exec(results.join("\n"))?.[1] ?? ""; return { text: savedPath }; },
+  ]);
+  const { socket, frames } = await connect(sockets);
+  await thread("owner").submit(input(1, "截图后发给我", 10000001));
+  await vi.waitFor(() => expect(outputs.child.length).toBeGreaterThan(0));
+  expect(outputs.child.join("\n")).toContain("Image saved to");
+  reply(socket, (await action(frames, 0, "send_private_msg")).echo);
+  await reports("owner", 1);
+  expect(outputs.child.join("\n")).toContain("Image saved to");
+  expect(seen.child[0]!.tools).not.toContain("send_file");
+  expect(targets).toEqual(Array(3).fill("workspace:" + env.SANDBOX.idFromName(resource.name)));
+  const sub = await onlySubagent("owner");
+  await expect((async () => await thread("owner").subagentWriteFile(sub.id, savedPath, png))()).rejects.toThrow("delegation_denied");
 });
 
 it("子 agent 按资源 ID 路由；省略时继承默认资源，多个子任务可以共用新资源", async () => {

@@ -40,7 +40,9 @@ export interface SandboxClient {
   restore(snapshot: RuntimeSnapshot, readBlob: (file: RuntimeFile) => Promise<Uint8Array>): Promise<void>;
   exec(cmd: string, options: { cwd?: string; timeoutMs: number }): Promise<ExecResult>;
   readFile(path: string, options?: { offset?: number; limit?: number }): Promise<ReadResult>;
-  writeFile(path: string, text: string): Promise<{ bytes: number }>;
+  writeFile(path: string, content: string | Uint8Array): Promise<{ bytes: number }>;
+  mkdir(path: string): Promise<void>;
+  remove(path: string): Promise<void>;
   editFile(path: string, edits: FileEdit[]): Promise<{ replaced: number }>;
   list(path: string): Promise<DirEntry[]>;
 }
