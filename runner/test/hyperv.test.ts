@@ -79,7 +79,7 @@ test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object', {
   await copyFile(join(sources, 'bridge.ps1'), join(path, 'bridge.ps1'));
   const directBridge = [
     "$ErrorActionPreference = 'Stop'",
-    '$root = $env:CS_AGENT_TEST_HYPERV_DIR',
+    '$root = [IO.Path]::GetFullPath($env:CS_AGENT_TEST_HYPERV_DIR)',
     '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
     '$setup = @{ version = 1; bridgeSid = $sid; workdir = $root } | ConvertTo-Json -Compress',
     '[IO.File]::WriteAllText((Join-Path $root "settings.json"), $setup)',
