@@ -4,7 +4,7 @@
 
 ## 1. 请求入口
 
-`src/index.ts` 提供 `/healthz`、NapCat 反向 WebSocket、管理接口、媒体下载、MCP OAuth 与定时入口。所有路径在 Worker 内完成分派；管理数据和写操作必须鉴权。
+`src/index.ts` 提供 `/healthz`、NapCat 反向 WebSocket、管理接口、媒体下载、MCP OAuth 与定时入口。所有路径在 Worker 内完成分派；公开 `/healthz` 仅证明 Worker 存活，不访问 DO。运行详情位于鉴权的 `/admin/health`，管理数据和写操作必须鉴权。Codex 配对入口先检查票据格式，再按实际流字节读取最多 64 KiB JSON，token 字符串最多 16,384 个字符；配对票据仍由 Registry 验证和消费。
 
 ## 2. 执行与恢复
 

@@ -108,6 +108,8 @@ ${CONSOLE_NAV}
     <div class="brand">cs-agent 管理台</div>
     <div id="commit" class="mono muted"></div>
     <span id="health" class="pill neutral">加载中</span>
+    <span id="health-qq" class="pill neutral">QQ 待检测</span>
+    <span id="health-model" class="pill neutral">模型待检测</span>
     <div class="grow"></div>
     <div id="refreshed" class="muted small"></div>
     <button id="logout" class="btn" type="button">登出</button>
@@ -484,8 +486,12 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     $("commit").textContent = location.host + " · " + o.commit;
     const healthy = !("unavailable" in o.model);
     const health = $("health");
-    health.textContent = healthy ? "Worker 正常" : "Worker 异常";
-    health.className = "pill " + (healthy ? "ok" : "bad");
+    health.textContent = "Worker 在线";
+    health.className = "pill ok";
+    $("health-qq").textContent = o.bridge.connected ? "QQ 已连接" : "QQ 未连接";
+    $("health-qq").className = "pill " + (o.bridge.connected ? "ok" : "bad");
+    $("health-model").textContent = healthy ? "模型可用" : "模型不可用";
+    $("health-model").className = "pill " + (healthy ? "ok" : "bad");
 
     $("card-napcat").textContent = o.bridge.connected ? "已连接" : "未连接";
     $("card-napcat-sub").textContent = "反向 WebSocket" + (o.bridge.selfId ? " · 机器人 " + o.bridge.selfId : "") + " · 忽略 " + o.bridge.ignored;

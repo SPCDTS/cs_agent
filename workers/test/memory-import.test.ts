@@ -1,3 +1,4 @@
+import { adminHealth } from "./helpers";
 import { env, reset, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
@@ -39,7 +40,7 @@ describe("admin memory import", () => {
     expect(data.versions).toHaveLength(1);
     expect(data.fts).toEqual([{ rowid: 1234 }]);
     await env.THREAD.getByName("owner").syncAdminView("owner");
-    expect(await (await SELF.fetch("https://test/healthz")).json()).toMatchObject({ thread: { memory: { active: 1, profileBytes: 12, extractQueue: 0 } } });
+    expect(await (await adminHealth()).json()).toMatchObject({ thread: { memory: { active: 1, profileBytes: 12, extractQueue: 0 } } });
   });
 
   it("routes each namespace to its own DO and rejects malformed or cross-namespace batches atomically", async () => {

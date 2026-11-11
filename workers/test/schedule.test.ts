@@ -246,7 +246,7 @@ describe("admin schedule endpoints", () => {
     expect(await (await call(`/admin/schedules/${created.id}/resume`)).json()).toMatchObject({ status: "active", failures: 0 });
     expect(await (await call(`/admin/schedules/${created.id}/run-now`)).json()).toMatchObject({ status: "queued" });
     await expect.poll(() => runStatus(created.id), { timeout: 10_000 }).toBe("silent");
-    const health = await (await call("/healthz", "GET", "")).json();
+    const health = await (await call("/admin/health", "GET")).json();
     expect(health).toMatchObject({ schedule: { active: 1, paused: 0, nextFireAt: (await find(created.id)).next_fire_at } });
     expect((await call("/admin/schedules/00000000-0000-4000-8000-000000000000/pause")).status).toBe(404);
     expect(await (await call(`/admin/schedules/${created.id}/delete`)).json()).toEqual({ deleted: created.id });

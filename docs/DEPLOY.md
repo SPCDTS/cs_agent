@@ -42,7 +42,7 @@ NapCat 独立运行，在其反向 WebSocket 客户端中配置 `wss://<Worker �
 
 本次 DO 查询隔离沿用现有绑定和 DO 类，无需新建 Queue。首次部署后，已有五分钟维护入口回填历史展示副本；期间会话显示“待同步”。详见 [DO 隔离](DO-ISOLATION.md)。
 
-读取 `/healthz`，核对提交号和 Bridge / 模型状态；登录 `/admin/` 检查请求统计、会话、MCP 与工作区。部署成功不能代替模型实际可用性验证。真实 QQ 发送、邮件发送与 Workshop 制作动作需要相应授权；常规自动测试使用模拟服务。
+公开 `/healthz` 只返回 `{ "ok": true }`，不读取 DO，也不代表 QQ 或模型可用。携带 `Authorization: Bearer <ADMIN_TOKEN>` 读取 `/admin/health`，核对提交号、`overall` 和 `components` 中独立的 Worker / Bridge / 模型状态；详情查询成功返回 HTTP 200，依赖异常由各组件状态表达。登录 `/admin/` 检查请求统计、会话、MCP 与工作区，顶栏分别显示 Worker、QQ 和模型状态。部署成功不能代替模型实际可用性验证。真实 QQ 发送、邮件发送与 Workshop 制作动作需要相应授权；常规自动测试使用模拟服务。
 
 ## ChatGPT 刷新故障排查
 
