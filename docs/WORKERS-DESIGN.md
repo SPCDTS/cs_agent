@@ -30,6 +30,8 @@ ThreadDO 将新输入、模型出站、Pi 恢复时间、记忆抽取、同步�
 
 每个会话一份执行与上下文。owner 的私聊共享 owner 线程，群与其他私聊按各自键隔离。工具入口检查本轮发送者、触发种类、授权和目标范围。网页输入共享相应会话上下文，输出保留网页入口。
 
+`thread.ts` 负责输入准入、会话代次、执行恢复、alarm 与跨对象权限复核。`thread/runtime.ts` 通过显式宿主接口装配 Harness、工具、提示词和 MCP 目录，打开后仍保持暂停；`memory/admin.ts` 和 `mcp/admin.ts` 承担各自管理事务，Thread RPC 仅委派并提供命名空间复核与投影发布能力。MCP 管理契约位于 `mcp/contracts.ts`，执行对象不再依赖 HTTP 路由文件。模块拆分不改变 DO 绑定、存储键、管理查询投影和模型出站路径。
+
 ### 3.3 RegistryDO 与 RequestsDO
 
 Registry 保存设置、人设、技能、授权与模型账号，管理更新使用 revision CAS。Requests 保存有界的模型请求明细与统计。私有凭据不进入页面、事件正文或日志。

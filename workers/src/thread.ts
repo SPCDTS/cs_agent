@@ -1,95 +1,56 @@
+import { MemoryAdmin } from "./memory/admin";
+import { McpAdmin } from "./mcp/admin";
+import { openThreadRuntime, applyToolProfile, type Runtime } from "./thread/runtime";
+import { isWeb, isWebAdmin, profileOf, targetOf, type InboundRow, type ToolProfile } from "./thread/model";
 import { ModelAlarm } from "./model-alarm";
 import { ProjectionPublisher, observeWrites } from "./requests/projection";
 import { MCP_POLICY_SCHEMA } from "./mcp/policy";
 import { modelEgressDiagnostics } from "./model-egress";
-import { createAccessExtension } from "./tools/access";
 import { createWorkspaceAdminApi, type WorkspaceAdminApi, type WorkspaceMergeInput } from "./sandbox/admin";
-import { createWorkspaceAdminExtension } from "./tools/workspace-admin";
-import type { McpAdminRpc } from "./admin/mcp-routes";
-import type { McpGrantInput } from "./mcp/policy";
 import type { Delivery, DeliverySource } from "./delivery";
-import { gcMediaTickets, MediaRepository, type AssetRef } from "./media/repository";
-import { createMediaExtension } from "./tools/media";
-import { lookupHostMedia } from "./tools/media-host";
+import { gcMediaTickets, type AssetRef } from "./media/repository";
 import type { McpAuthority, McpToolSelection } from "./mcp/access";
 import type { SubagentCodingOperation, SubagentCapabilityHost } from "./mcp/delegated";
 import { DurableObject } from "cloudflare:workers";
 import { historyCursor, historyEntry, readHistoryCursor } from "./sessions";
 import { ADMIN_PAGE_SIZE } from "./admin/pagination";
-import { MemoryManager, type MemoryListQuery, type ProfileProposal } from "./memory/management";
-import { importMemoryHistory } from "./memory/history-import";
-import { runConsolidate } from "./maintenance/consolidate";
-import { generateProfileProposal } from "./maintenance/profile-proposal";
+import { MemoryManager } from "./memory/management";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
-import { Type, type Static } from "@earendil-works/pi-ai";
-import { createRegistry, defineExtension, defineTool, Harness, InboxDoc, LiveDoc, section, type Conversation, type Registry, type ToolExecutionApi, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
-import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
+import type { Static } from "@earendil-works/pi-ai";
+import { InboxDoc, LiveDoc, type Harness, type Conversation, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
+import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
-import { threadOpsSettings, effectiveSettings, type ModelSelection, type Settings, type SettingsSnapshot } from "./settings";
-import { MESSAGE_SCHEMA, QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, markMessageRecalled, recordMessage, recall, withReplyContext, type RecallOptions } from "./context";
-import { DELEGATION_RULE, EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from "./prompt";
+import { threadOpsSettings, effectiveSettings, type Settings, type SettingsSnapshot } from "./settings";
+import { MESSAGE_SCHEMA, markMessageRecalled, recordMessage, recall, withReplyContext, type RecallOptions } from "./context";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { modelChange, openModels, sameSelection } from "./models";
 import { captureModels } from "./requests/capture";
-import { requestTrace } from "./requests/trace";
 import { remoteCredentials } from "./model-credentials";
 import { MEMORY_SCHEMA } from "./memory/schema";
-import { MemoryStore, MemoryStoreError, type Profile } from "./memory/store";
-import type { MemoryRow, MemoryInput } from "./memory/types";
-import { parseImport } from "./memory/import";
-import { createMemoryTools, searchMemory, type MemoryBinding } from "./memory/tools";
-import { MEMORY_RULE, type memoryParameters } from "./memory/contracts";
-import { renderMemorySection } from "./memory/render";
-import { formatBeijingTime } from "./memory/time";
+import { MemoryStore } from "./memory/store";
+import type { MemoryInput } from "./memory/types";
+import { searchMemory, type MemoryBinding } from "./memory/tools";
+import type { memoryParameters } from "./memory/contracts";
 import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS, type ExtractComplete } from "./memory/extractor";
 import { maintenanceStatus, runMaintenanceJob, type MaintenanceJob, type MaintenanceReport } from "./maintenance";
-
 import { MCP_CATALOG_SCHEMA } from "./mcp/catalog";
-import { installCodemode } from "./codemode";
-import { createMcpManagementExtension, type McpChange } from "./mcp/manage";
-import { ThreadMcp } from "./mcp";
-import { createScheduleExtension, type ScheduleAccess } from "./schedule/tools";
+import type { ScheduleAccess } from "./schedule/tools";
 import { parseScheduleInputKey } from "./schedule/run";
-import type { ScheduleConversation } from "./schedule/types";
-import { createGmailTools } from "./gmail/tools";
 import type { EventRunStatus } from "./events/model";
-import { cleanOutgoing } from "./send-clean";
-import { createWebPageTool } from "./tools/web-page";
-import { createImageTool } from "./tools/imagegen";
-import { createWebSearchTool } from "./tools/web-search";
 import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin, type SubagentView } from "./subagent/parent";
 import { subagentName, RETENTION_MS, type SubagentIdentity, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
 import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject } from "./sandbox/task-access";
-import { createCodingExtension } from "./tools/coding";
-import { decodeFileRead } from "./sandbox/read";
-import { workPath } from "./sandbox/client";
 
 const context = BACKGROUND_CONTEXT;
-const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-type InboundRow = {
-  message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number;
-  status: "queued" | "done" | "failed"; chat_kind: "private" | "group"; chat_id: string; nickname: string;
-  persona_text: string | null; session_generation: number; reply_channel: "qq" | "web"; scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null; kind: TurnKind;
-};
-// 模型可见工具按会话配置生效，只能在会话空闲时切换；不同档位的输入永远不会进入同一个 run。定时输入归 chat 档。
-type ToolProfile = "chat" | "event" | "web";
-const isWeb = (row: InboundRow) => row.reply_channel === "web";
-const isWebAdmin = (row: InboundRow) => isWeb(row) && row.user_id === "admin:web";
-const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只能展示网页。需要回复时调用 send_message，它只把文字和图片资产写入网页，不向 QQ 发送；工作区文件可用 send_file，附件也只展示在网页。不得使用其他工具绕过此回复入口限制。";
-const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill",
-  "codemode"]);
-const profileOf = (row: InboundRow): ToolProfile => isWeb(row) ? "web" : row.kind === "event" ? "event" : "chat";
-type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp; recovered: boolean };
 type TurnResult = { status: "done" | "failed" };
 type Admission = { completion: Promise<TurnResult> };
 const AGENT_WAKE = "agent_wake";
 const RUNTIME_WAKE = "runtime_wake";
 const RECOVERY_MS = 65_000;
-const targetOf = (row: InboundRow): Target => row.chat_kind === "group" ? { kind: "group", groupId: row.chat_id } : { kind: "private", userId: row.chat_id };
 export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
 export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
 // 结果过滤按事件类型取各自的 JSON 字段；表外的类型不参与结果过滤。
@@ -118,6 +79,17 @@ export class ThreadDO extends DurableObject<Env> {
   private readonly skills = new SkillCatalog(() => this.env.REGISTRY.getByName("main"));
   private readonly subagents = new ParentSubagents({ db: this.database, env: this.env, thread: () => this.namespace(),
     wake: input => this.queueInput(input), wakeBy: at => this.wakeBy(at), audit: (kind, detail) => this.audit(kind, detail) });
+
+  private readonly memoryAdmin = new MemoryAdmin({
+    env: this.env, database: this.database, storage: this.ctx.storage, complete: (prompt, signal) => this.complete(prompt, signal),
+    prepare: async ns => { await this.initialize(); await this.bindNamespace(ns); }, publish: () => this.projection.flush(),
+  });
+  private readonly mcpAdmin = new McpAdmin({
+    env: this.env, database: this.database, initialize: () => this.initialize(),
+    prepare: async scope => { await this.initialize(); await this.bindNamespace(scope); }, open: async () => (await this.open()).mcp,
+    generation: () => this.sessionGeneration(), currentAuthority: original => this.currentMcpAuthority(original),
+    publish: () => this.projection.flush(), audit: (kind, detail) => this.audit(kind, detail),
+  });
 
   private initialize(): Promise<void> {
     return this.initialized ??= this.database.transaction(async tx => {
@@ -225,190 +197,18 @@ export class ThreadDO extends DurableObject<Env> {
 
   private async openRuntime(): Promise<Runtime> {
     await this.initialize();
-    const trace = requestTrace(this.env, await this.namespace(), async (api, c) => {
-      const input = await this.currentInput(harness, api, api.conversationId, c);
-      return input?.turn_id ? { turnId: input.turn_id, inputId: input.message_id, generation: input.session_generation } : undefined;
+    return openThreadRuntime({
+      env: this.env, ctx: this.ctx, observedStorage: this.observedStorage, database: this.database, skills: this.skills, subagents: this.subagents,
+      namespace: () => this.namespace(), models: () => this.models(), loadSettings: fresh => this.loadSettings(fresh),
+      installProjection: () => this.projection.install(), currentInput: (harness, read, id, context) => this.currentInput(harness, read, id, context),
+      memoryBinding: (input, ns) => this.memoryBinding(input, ns), sessionGeneration: () => this.sessionGeneration(),
+      ownerTurnKind: input => this.ownerTurnKind(input), sandboxTaskForInput: input => this.sandboxTaskForInput(input),
+      subagentCaller: (input, selection) => this.subagentCaller(input, selection), scheduleAccess: input => this.scheduleAccess(input),
+      mcpAuthority: input => this.mcpAuthority(input), deliver: (input, text, outputId, options) => this.deliver(input, text, outputId, options),
+      audit: (kind, detail) => this.audit(kind, detail), runtimeWake: wake => this.runtimeWake(wake),
+      closed: () => { this.runtime = undefined; this.runtimeStarted = false; },
     });
-    const models = captureModels(this.models(), this.env, this.ctx, { thread: await this.namespace(), actor: "thread", purpose: "conversation" }, trace.binding), selection = (await this.loadSettings(true)).model;
-    const memory = new MemoryStore(this.database, await this.namespace());
-    // 相同 storage 对象共享事务队列，避免宿主写入被 Pi 的事务一起回滚。
-    const storage = await openDurableObjectSqliteStorage(this.observedStorage, { prefix: "pi_" });
-    this.projection.install();
-    const registry = createRegistry();
-    registry.install(trace.extension);
-    registry.install(defineExtension({
-      name: "cs-workers",
-      sections: [
-        section("qq", async (api, callContext) => {
-          const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
-          return (input && isWeb(input) ? WEB_SEND_RULE : SEND_RULE) + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE + "\n" + MEMORY_RULE;
-        }, { tag: false }),
-        section("delegation", async (api, callContext) => {
-          const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
-          return input?.kind === "message" ? DELEGATION_RULE : undefined;
-        }, { tag: false }),
-        section("memory", () => renderMemorySection(memory), { tag: false }),
-        section("turn-identity", async (api, callContext) => {
-          const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
-          if (input && isWeb(input)) return WEB_SEND_RULE + "\n当前会话：" + memory.ns + "；管理员权限只作用于本会话范围。";
-          if (input?.kind === "event") return EVENT_TURN_IDENTITY;
-          if (input?.kind === "subagent") return subagentTurnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name },
-            ownerIds(this.env).includes(input.user_id));
-          return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, ownerIds(this.env).includes(input.user_id)) : undefined;
-        }, { tag: false }),
-        // 模型没有时钟；按本轮输入的到达时刻给时间，同一回合内文本不变，不打散提示缓存。
-        section("time", async (api, callContext) => {
-          const input = await this.currentInput(harness, api.read, api.conversationId, callContext);
-          if (!input) return undefined;
-          const ms = input.received_at < 1e12 ? input.received_at * 1000 : input.received_at;
-          return `现在是北京时间 ${formatBeijingTime(ms)}（${WEEKDAYS[new Date(ms + 8 * 3600_000).getUTCDay()]}）；今天、明天、下周这类相对时间都按北京时间理解。`;
-        }, { tag: false }),
-        section("skills", () => this.skills.section(), { tag: false }),
-        section("persona", async (api,c) => (await this.currentInput(harness,api.read,api.conversationId,c))?.persona_text || undefined, { tag: false }),
-      ],
-      tools: [...createMemoryTools(memory, async (api, callContext) => {
-        const input = await this.currentInput(harness, api, api.conversationId, callContext);
-        return input ? this.memoryBinding(input, memory.ns) : undefined;
-      }, { rememberInNamespace: async (ns, input, options, binding) => {
-        const source = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE turn_id=? AND platform_message_id=? AND user_id=? ORDER BY rowid DESC LIMIT 1", binding.turnId, binding.messageId, binding.userId);
-        if (!source) throw new Error("memory_source_denied");
-        return this.env.THREAD.getByName(ns).rememberFromOwner(ns, input, options, { inputId: source.message_id, generation: source.session_generation });
-      } }), ...(memory.ns === "owner" ? createGmailTools(async (api, callContext) => {
-        const input = await this.currentInput(harness, api, api.conversationId, callContext);
-        return input ? this.ownerTurnKind(input) : undefined;
-      }, () => this.env.EVENTS.getByName("main")) : []),
-      createWebSearchTool(this.env.DEEPSEEK_API_KEY, detail => this.audit("web_search", detail)),
-      createWebPageTool(),
-      createImageTool({ models: this.models(), repository: new MediaRepository({ bucket: this.env.ASSETS, scope: memory.ns }),
-        allowed: async (api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c); return !!input && input.kind === "message" && input.session_generation === await this.sessionGeneration(); },
-        record: detail => this.audit("generate_image", detail),
-      }),
-      this.skills.tool(),
-      defineTool({
-        name: "send_message", description: "向本轮回复入口发送文字或私有图片资产。target可填qq:group:ID或qq:private:ID，跨会话须授权；网页回合只显示网页。",
-        parameters: Type.Object({ text: Type.String({ maxLength: 4000 }), images: Type.Optional(Type.Array(Type.String({ pattern: "^[a-f0-9]{64}$" }), { maxItems: 5 })), target: Type.Optional(Type.String({ pattern: "^qq:(group|private):[1-9][0-9]{0,19}$" })) }, { additionalProperties: false }),
-        // 发 QQ 是外部副作用，中断后禁止自动重放，避免重复发送。
-        replay: "unsafe",
-        execute: async ({ text, images, target }, api, toolContext) => {
-          const input = await this.currentInput(harness, api, api.conversationId, toolContext);
-          if (!input) throw new Error("current input missing");
-          const repository = new MediaRepository({ bucket: this.env.ASSETS, scope: memory.ns });
-          const attachments = await Promise.all((images ?? []).map(async id => { const { ref } = await repository.get(id); if(ref.kind!=="image")throw new Error("unsupported_image"); return ref; }));
-          const to: Target | undefined = target ? target.startsWith("qq:group:") ? { kind: "group", groupId: target.slice(9) } : { kind: "private", userId: target.slice(11) } : undefined;
-          return { output: [{ type: "text", text: JSON.stringify(await this.deliver(input, cleanOutgoing(text), String(api.taskId), { target: to, attachments })) }] };
-        },
-      }), defineTool({
-        name: "qq_context", description: QQ_CONTEXT_DESCRIPTION + " 主人私聊可显式指定 target 读取其他会话已保存历史；发送授权不授予历史读取权。", parameters: Type.Object({ ...QQ_CONTEXT_PARAMETERS.properties, target: Type.Optional(Type.String({pattern:"^(group|private):[1-9][0-9]{0,19}$"})) }, {additionalProperties:false}),
-        replay: "safe",
-        execute: async (options, api, toolContext) => {
-          const input = await this.currentInput(harness, api, api.conversationId, toolContext);
-          if (!input) throw new Error("current input missing");
-          const {target,...query}=options;
-          let text: string;
-          if (target && target !== scopeOf(targetOf(input))) {
-            if(isWeb(input)||this.ownerTurnKind(input)!=="message")throw new Error("context_denied");
-            const ns=target.startsWith("private:")&&ownerIds(this.env).includes(target.slice(8))?"owner":target;
-            text=await this.env.THREAD.getByName(ns).recallForOwner(ns,target,query,{inputId:input.message_id,generation:input.session_generation});
-          } else text=await recall(this.database, scopeOf(targetOf(input)), query);
-          return { output: [{ type: "text", text }] };
-        },
-      }), this.subagents.tool(async (api, callContext, selection) => this.subagentCaller(await this.currentInput(harness, api, api.conversationId, callContext), selection),
-        async () => (await this.loadSettings(true)).model)].map(tool => ({ ...tool, callers: ["model"] as const })),
-    }));
-    const ownerTaskAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) => {
-      const input = await this.currentInput(harness, api, api.conversationId, callContext);
-      if(memory.ns!=="owner"||!input||(input.kind!=="message"&&input.kind!=="subagent"))return false;
-      const task=await this.sandboxTaskForInput(input);
-      if(!task?.subject.owner||!task.permissions.coding)return false;
-      // 续轮必须追溯真实主人输入；复用任务撤销、身份、回复入口和会话代次检查。
-      const source=await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?",task.sourceInputId);
-      return !!source&&this.ownerTurnKind(source)==="message"&&source.user_id!==source.self_id
-        &&source.user_id===task.subject.actor&&source.reply_channel===task.subject.replyChannel
-        &&source.session_generation===task.subject.generation;
-    };
-    const taskAccess = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
-      this.sandboxTaskForInput(await this.currentInput(harness, api, api.conversationId, callContext));
-    const codingAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
-      !!(await taskAccess(api, callContext))?.permissions.coding;
-    const resources = this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
-    if (memory.ns === "owner" || memory.ns.startsWith("group:")) registry.install(createCodingExtension({
-      allowed: codingAllowed,
-      ...(memory.ns === "owner" ? { resources: {
-        allowed: ownerTaskAllowed,
-        list: () => resources.list(memory.ns),
-        create: (operationId, input) => resources.create(memory.ns, operationId, input),
-      } } : {}),
-      sandbox: async id => {
-        if (!id) return this.env.SANDBOX.getByName(memory.ns);
-        const resource = await resources.get(memory.ns, id);
-        if (!resource) throw new Error("invalid_request");
-        return this.env.SANDBOX.getByName(resource.name);
-      },
-      readWorkspace: async ({ workspace, path, ...options }, api, context) => {
-        if (!await ownerTaskAllowed(api, context)) throw new Error("permission_denied");
-        const file = await this.env.SANDBOX.getByName(workspace).readBlob(workPath(path));
-        return decodeFileRead(file.bytes, options);
-      },
-      record: (kind, detail) => this.audit(kind, detail),
-    }));
-    registry.install(createAccessExtension({
-      allowManage:async(api,c)=>{
-        const input=await this.currentInput(harness,api,api.conversationId,c);
-        if(!input||this.ownerTurnKind(input)!=="message"||input.session_generation!==await this.sessionGeneration())return;
-        const id=isWebAdmin(input)?ownerIds(this.env)[0]:input.user_id;
-        return id?"qq:"+id:undefined;
-      },
-      registry:()=>this.env.REGISTRY.getByName("main"),bridge:()=>this.env.BRIDGE.getByName("napcat"),
-    }));
-    registry.install(createWorkspaceAdminExtension({
-      allowed: ownerTaskAllowed,
-      sandbox:()=>this.env.SANDBOX.getByName(memory.ns),registry:()=>this.env.REGISTRY.getByName("main"),
-    }));
-    registry.install(createMediaExtension({
-      allowed: async (api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c); return !!input && input.session_generation === await this.sessionGeneration() && input.kind === "message"; },
-      repository: async () => new MediaRepository({ bucket: this.env.ASSETS, scope: memory.ns }),
-      lookup: async (messageId, api, c, selection) => {
-        const input = await this.currentInput(harness, api, api.conversationId, c); if (!input) throw new Error("media_scope_denied");
-        return lookupHostMedia({ database: this.database, bridge: this.env.BRIDGE.getByName("napcat"), source: { namespace: memory.ns, scope: scopeOf(targetOf(input)), target: targetOf(input) }, messageId, selection });
-      },
-      sandbox: async () => this.env.SANDBOX.getByName(memory.ns),
-      deliver: async (ref, api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c); if(!input)throw new Error("media_scope_denied"); return this.deliver(input,"",String(api.taskId),{attachments:[ref]}); },
-      record: (kind, detail) => this.audit(kind, detail),
-    }));
-    if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
-      registry.install(createScheduleExtension(this.env, memory.ns as ScheduleConversation, async (api, callContext) =>
-        this.scheduleAccess(await this.currentInput(harness, api, api.conversationId, callContext))));
-    }
-    const mcp = new ThreadMcp(this.database, this.env, registry, async (api, callContext) => {
-      const input = await this.currentInput(harness, api, api.conversationId, callContext);
-      return this.mcpAuthority(input);
-    }, await this.env.REGISTRY.getByName("main").mcpConfig(), { scope: memory.ns, callerNamespace: this.ctx.id.toString(),
-      current: (id, digest) => this.env.REGISTRY.getByName("main").mcpServerCurrent(id, digest) });
-    await mcp?.restore();
-    if (memory.ns === "owner") registry.install(createMcpManagementExtension(this.env,
-      async (api, c) => { const input = await this.currentInput(harness, api, api.conversationId, c);
-        return !!input && this.ownerTurnKind(input) === "message" && input.session_generation === await this.sessionGeneration(); },
-      async refresh => { await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
-      change => this.audit("mcp_management", { ...change, source: "agent" })));
-    const codemode = installCodemode(registry, {
-      allowed: async (api, callContext) => await codingAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
-      namespaces: () => mcp.namespaces(),
-    });
-    // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
-    const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } },
-      onWake: wake => this.ctx.waitUntil(this.runtimeWake(wake)),
-    }, context);
-    const root = await harness.root(context, { agent: modelChange(selection) });
-    await root.configure(modelChange(selection), context);
-    const runtime: Runtime = { harness, root, registry, selection, profile: "chat", mcp, recovered: false };
-    await this.applyProfile(runtime, await this.ctx.storage.get<ToolProfile>("tool_profile") ?? "chat");
-    // 快照先装配，远端离线不阻塞 Harness 恢复；首次执行仍强制核对完整目录。
-    if (mcp) this.ctx.waitUntil(mcp.refreshAll().then(() => {}));
-    // 只读打开保持暂停；提交、等待与恢复都由 alarm 进入，不能在查看历史时启动模型。
-    void harness.closed.then(async () => { this.runtime = undefined; this.runtimeStarted = false; await codemode.close(); await mcp?.close(); });
-    return runtime;
   }
-
 
   /** 网页输出只入本线程；QQ 副作用由 Bridge 的稳定意图负责恢复与防重。 */
   private async deliver(input: InboundRow, text: string, outputId: string, options: { target?: Target; attachments?: AssetRef[] } = {}): Promise<{ status: string; message_id?: string; reason?: string }> {
@@ -500,11 +300,8 @@ export class ThreadDO extends DurableObject<Env> {
     return root.submit({ type: "input", content, requestId: row.message_id, whenBusy }, context);
   }
 
-  private async applyProfile(runtime: Runtime, profile: ToolProfile): Promise<void> {
-    const tools = new Map(runtime.registry.snapshot().tools().map(({ tool }) => [tool.name, tool]));
-    await runtime.root.configure({ modelTools: profile === "event" ? [...tools.values()].filter(tool => EVENT_MODEL_TOOLS.has(tool.name)) : null }, context);
-    await this.ctx.storage.put("tool_profile", profile);
-    runtime.profile = profile;
+  private applyProfile(runtime: Runtime, profile: ToolProfile): Promise<void> {
+    return applyToolProfile(runtime, profile, this.ctx.storage);
   }
 
   // 面板改了模型后，从下一批接纳的输入起生效；取不到设置时沿用当前模型。
@@ -1024,7 +821,7 @@ export class ThreadDO extends DurableObject<Env> {
   async rememberFromOwner(ns: string, input: Omit<MemoryInput, "ns">, options: { supersedes?: number }, source: { inputId: string; generation: number }): ReturnType<MemoryStore["remember"]> {
     const origin = await this.env.THREAD.getByName("owner").validateMemorySource(source);
     if (!origin) throw new Error("memory_source_denied");
-    return (await this.adminStore(ns)).remember({ ...input, ...origin }, options);
+    return (await this.memoryAdmin.store(ns)).remember({ ...input, ...origin }, options);
   }
 
   private memoryBinding(input: InboundRow, ns: string): MemoryBinding | undefined {
@@ -1110,12 +907,7 @@ export class ThreadDO extends DurableObject<Env> {
       complete: this.complete, config, now: job.now });
   }
 
-  async importMemory(value: unknown): Promise<{ inserted: number; skipped: number }> {
-    const data = parseImport(value);
-    await this.initialize();
-    await this.bindNamespace(data.ns);
-    return this.publishAdminResult(new MemoryStore(this.database, data.ns).import(data));
-  }
+  importMemory(...args: Parameters<MemoryAdmin['importMemory']>): ReturnType<MemoryAdmin['importMemory']> { return this.memoryAdmin.importMemory(...args); }
 
   /** 历史聊天记录导入：路由按 importThreadKey 选线程，这里再经 idFromName 复核，不能把别的会话塞进本 DO。 */
   async importMessages(value: unknown): Promise<MessageImportResult> {
@@ -1272,131 +1064,37 @@ export class ThreadDO extends DurableObject<Env> {
     }
   }
 
-  private async adminMcp(scope: string) {
-    await this.initialize(); await this.bindNamespace(scope);
-    const {mcp}=await this.open(); if(!mcp)throw new Error("mcp_unavailable");
-    await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig()); return mcp;
-  }
-  private async mcpReviewer(scope:string):Promise<McpAuthority>{
-    return {scope,actor:"admin:web",owner:true,kind:"message",generation:await this.sessionGeneration(),replyChannel:"web"};
-  }
-  async mcpAccess(scope:string,server:string):ReturnType<McpAdminRpc["mcpAccess"]>{
-    return (await (await this.adminMcp(scope)).policy.grant(scope,server))??null;
-  }
-  async mcpSetAccess(scope:string,server:string,input:McpGrantInput,expected:string):ReturnType<McpAdminRpc["mcpSetAccess"]>{
-    const mcp=await this.adminMcp(scope),grant=await mcp.setAccess(scope,server,input,expected,await this.mcpReviewer(scope));
-    await mcp.refreshAll(); await this.projection.flush(); return grant;
-  }
-  async mcpApprovals(scope:string):ReturnType<McpAdminRpc["mcpApprovals"]>{
-    return (await this.adminMcp(scope)).policy.list(scope);
-  }
-  async mcpReviewApproval(scope:string,id:string,decision:"approve"|"reject"):ReturnType<McpAdminRpc["mcpReviewApproval"]>{
-    const mcp=await this.adminMcp(scope);
-    const reviewed = await mcp.reviewApproval(scope,id,decision,await this.mcpReviewer(scope),async original=>{
-      if(original.scope!==scope||original.generation!==await this.sessionGeneration())return;
-      if(original.subagentId){
-        const access=await this.subagentAccess(original.subagentId,true),snapshot=access?.capabilities.mcp;
-        return access&&snapshot&&snapshot.scope===original.scope&&snapshot.actor===original.actor&&snapshot.generation===original.generation&&snapshot.replyChannel===original.replyChannel?access.authority:undefined;
-      }
-      const input=await this.database.get<InboundRow>("SELECT * FROM inbound WHERE user_id=? AND reply_channel=? AND session_generation=? AND kind=? ORDER BY rowid DESC LIMIT 1",original.actor,original.replyChannel,original.generation,original.kind);
-      return this.mcpAuthority(input);
-    });
-    await this.projection.flush();
-    if(!reviewed.result)return {status:reviewed.status};
-    return {status:reviewed.status,result:{isError:reviewed.result.isError,output:(reviewed.result.output??[]).map(content=>
-      content.type==="text"?{type:"text" as const,text:content.text}:{type:"image" as const,data:content.data,mimeType:content.mimeType})}};
-  }
-
-  async refreshMcp(): Promise<{ server: string; status: string; tools: number }[]> {
-    const { mcp } = await this.open();
-    if (!mcp) throw new Error("mcp_unavailable");
-    await mcp.syncConfig(await this.env.REGISTRY.getByName("main").mcpConfig());
-    return this.publishAdminResult(mcp.refreshAll());
-  }
-
-  async recordMcpChange(change: McpChange): Promise<void> {
-    await this.initialize();
-    await this.audit("mcp_management", { action: change.action, server: change.server, source: "admin" });
-  }
-
-  /** 管理写操作返回前尽力发布结果；展示同步失败不会撤销已经提交的业务变更。 */
-  private async publishAdminResult<T>(work: Promise<T>): Promise<T> {
-    const result = await work;
-    await this.projection.flush();
-    return result;
-  }
-
-  private async adminStore(ns: string): Promise<MemoryStore> {
-    await this.initialize();
-    await this.bindNamespace(ns);
-    return new MemoryStore(this.database, ns);
-  }
-
-
-  async memoryList(ns: string, query: MemoryListQuery): ReturnType<MemoryManager["list"]> {
-    return new MemoryManager(await this.adminStore(ns)).list(query);
-  }
-  async memoryDetail(ns: string, id: number): ReturnType<MemoryManager["detail"]> {
-    return new MemoryManager(await this.adminStore(ns)).detail(id);
-  }
-  async restoreMemory(ns: string, id: number, options: { expectedVersion: number; versionId?: number }): ReturnType<MemoryManager["restore"]> {
-    return this.publishAdminResult(new MemoryManager(await this.adminStore(ns)).restore(id, options));
-  }
-  async memoryJobs(ns: string): ReturnType<MemoryManager["jobs"]> {
-    return new MemoryManager(await this.adminStore(ns)).jobs();
-  }
-  async consolidateMemory(ns: string): ReturnType<typeof runConsolidate> {
-    const store = await this.adminStore(ns);
-    const config = threadOpsSettings((await this.env.REGISTRY.getByName("main").opsSettings()).value, ns);
-    return this.publishAdminResult(runConsolidate({ db: this.database, kv: this.ctx.storage, store,
-      complete: this.complete, config, now: Date.now() }));
-  }
-  async rollbackMemory(ns: string, batchId: string): ReturnType<MemoryManager["rollback"]> {
-    return this.publishAdminResult(new MemoryManager(await this.adminStore(ns)).rollback(batchId));
-  }
-  async memoryProposals(ns: string, status: ProfileProposal["status"] | "all"): ReturnType<MemoryManager["proposals"]> {
-    return new MemoryManager(await this.adminStore(ns)).proposals(status);
-  }
-  async generateMemoryProposal(ns: string): ReturnType<typeof generateProfileProposal> {
-    return this.publishAdminResult(generateProfileProposal(await this.adminStore(ns), this.complete));
-  }
-  async decideMemoryProposal(ns: string, id: number, decision: "accepted" | "rejected", expectedRevision: string): ReturnType<MemoryManager["decideProposal"]> {
-    return this.publishAdminResult(new MemoryManager(await this.adminStore(ns)).decideProposal(id, decision, expectedRevision));
-  }
-  async importMemoryHistory(ns: string, data: unknown, options: { dryRun?: boolean }): ReturnType<typeof importMemoryHistory> {
-    return this.publishAdminResult(importMemoryHistory(await this.adminStore(ns), data, options));
-  }
-
-  async memoryView(ns: string, query: string): Promise<{ profile: Profile; memories: MemoryRow[] }> {
-    const store = await this.adminStore(ns), q = query.trim(), id = /^#(\d{1,15})$/.exec(q);
-    const memories = id ? [await store.get(Number(id[1]))].filter(row => row !== undefined)
-      : q ? await store.search({ query: q, limit: 20 }) : await store.recent(50);
-    return { profile: await store.profile(), memories };
-  }
-
-  async forgetMemory(ns: string, id: number): Promise<{ status: "forgotten" | "not_found" }> {
-    const store = await this.adminStore(ns);
-    if (!await store.get(id)) return { status: "not_found" };
-    await store.forget(id, "admin", "面板删除");
-    await this.projection.flush();
-    return { status: "forgotten" };
-  }
-
-  async writeProfile(ns: string, text: string, expected: string): Promise<{ status: "ok" | "conflict"; current: Profile } | { status: "invalid"; reason: string }> {
-    const store = await this.adminStore(ns);
-    try {
-      const result = await store.writeProfile(text, expected);
-      await this.projection.flush();
-      return { status: result.ok ? "ok" : "conflict", current: result.current };
-    } catch (error) {
-      if (error instanceof MemoryStoreError) return { status: "invalid", reason: error.message };
-      throw error;
+  private async currentMcpAuthority(original: McpAuthority): Promise<McpAuthority | undefined> {
+    if (original.subagentId) {
+      const access = await this.subagentAccess(original.subagentId, true), snapshot = access?.capabilities.mcp;
+      return access && snapshot && snapshot.scope === original.scope && snapshot.actor === original.actor && snapshot.generation === original.generation
+        && snapshot.replyChannel === original.replyChannel ? access.authority : undefined;
     }
+    const input = await this.database.get<InboundRow>('SELECT * FROM inbound WHERE user_id=? AND reply_channel=? AND session_generation=? AND kind=? ORDER BY rowid DESC LIMIT 1',
+      original.actor, original.replyChannel, original.generation, original.kind);
+    return this.mcpAuthority(input);
   }
 
-  async mcpToolCounts(): Promise<Record<string, number>> {
-    await this.initialize();
-    const rows = await this.database.all<{ server_id: string; n: number }>("SELECT server_id, COUNT(*) AS n FROM mcp_catalog GROUP BY server_id");
-    return Object.fromEntries(rows.map(row => [row.server_id, row.n]));
-  }
+  mcpAccess(...args: Parameters<McpAdmin['mcpAccess']>): ReturnType<McpAdmin['mcpAccess']> { return this.mcpAdmin.mcpAccess(...args); }
+  mcpSetAccess(...args: Parameters<McpAdmin['mcpSetAccess']>): ReturnType<McpAdmin['mcpSetAccess']> { return this.mcpAdmin.mcpSetAccess(...args); }
+  mcpApprovals(...args: Parameters<McpAdmin['mcpApprovals']>): ReturnType<McpAdmin['mcpApprovals']> { return this.mcpAdmin.mcpApprovals(...args); }
+  mcpReviewApproval(...args: Parameters<McpAdmin['mcpReviewApproval']>): ReturnType<McpAdmin['mcpReviewApproval']> { return this.mcpAdmin.mcpReviewApproval(...args); }
+  refreshMcp(...args: Parameters<McpAdmin['refreshMcp']>): ReturnType<McpAdmin['refreshMcp']> { return this.mcpAdmin.refreshMcp(...args); }
+  recordMcpChange(...args: Parameters<McpAdmin['recordMcpChange']>): ReturnType<McpAdmin['recordMcpChange']> { return this.mcpAdmin.recordMcpChange(...args); }
+  mcpToolCounts(...args: Parameters<McpAdmin['mcpToolCounts']>): ReturnType<McpAdmin['mcpToolCounts']> { return this.mcpAdmin.mcpToolCounts(...args); }
+
+  memoryList(...args: Parameters<MemoryAdmin['memoryList']>): ReturnType<MemoryAdmin['memoryList']> { return this.memoryAdmin.memoryList(...args); }
+  memoryDetail(...args: Parameters<MemoryAdmin['memoryDetail']>): ReturnType<MemoryAdmin['memoryDetail']> { return this.memoryAdmin.memoryDetail(...args); }
+  restoreMemory(...args: Parameters<MemoryAdmin['restoreMemory']>): ReturnType<MemoryAdmin['restoreMemory']> { return this.memoryAdmin.restoreMemory(...args); }
+  memoryJobs(...args: Parameters<MemoryAdmin['memoryJobs']>): ReturnType<MemoryAdmin['memoryJobs']> { return this.memoryAdmin.memoryJobs(...args); }
+  consolidateMemory(...args: Parameters<MemoryAdmin['consolidateMemory']>): ReturnType<MemoryAdmin['consolidateMemory']> { return this.memoryAdmin.consolidateMemory(...args); }
+  rollbackMemory(...args: Parameters<MemoryAdmin['rollbackMemory']>): ReturnType<MemoryAdmin['rollbackMemory']> { return this.memoryAdmin.rollbackMemory(...args); }
+  memoryProposals(...args: Parameters<MemoryAdmin['memoryProposals']>): ReturnType<MemoryAdmin['memoryProposals']> { return this.memoryAdmin.memoryProposals(...args); }
+  generateMemoryProposal(...args: Parameters<MemoryAdmin['generateMemoryProposal']>): ReturnType<MemoryAdmin['generateMemoryProposal']> { return this.memoryAdmin.generateMemoryProposal(...args); }
+  decideMemoryProposal(...args: Parameters<MemoryAdmin['decideMemoryProposal']>): ReturnType<MemoryAdmin['decideMemoryProposal']> { return this.memoryAdmin.decideMemoryProposal(...args); }
+  importMemoryHistory(...args: Parameters<MemoryAdmin['importMemoryHistory']>): ReturnType<MemoryAdmin['importMemoryHistory']> { return this.memoryAdmin.importMemoryHistory(...args); }
+  memoryView(...args: Parameters<MemoryAdmin['memoryView']>): ReturnType<MemoryAdmin['memoryView']> { return this.memoryAdmin.memoryView(...args); }
+  forgetMemory(...args: Parameters<MemoryAdmin['forgetMemory']>): ReturnType<MemoryAdmin['forgetMemory']> { return this.memoryAdmin.forgetMemory(...args); }
+  writeProfile(...args: Parameters<MemoryAdmin['writeProfile']>): ReturnType<MemoryAdmin['writeProfile']> { return this.memoryAdmin.writeProfile(...args); }
+
 }
