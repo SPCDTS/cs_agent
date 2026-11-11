@@ -6,6 +6,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, typ
 import { Type, type Static, type TSchema } from 'typebox';
 import { Check } from 'typebox/value';
 import { CALLER_META_KEY, type ServerConfig, type Subject } from './domain.ts';
+import { EnvironmentStatusSchema } from './environment-status.ts';
 import { Jobs } from './jobs.ts';
 const uuid = Type.String({ pattern: '^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$' });
 const timeout = Type.Optional(Type.Integer({ minimum: 1000, maximum: 1200000, description: '含排队在内的任务期限，毫秒。默认 120000。' }));
@@ -35,6 +36,7 @@ export function toolCatalog(config: ServerConfig, jobs: Jobs): Registered[] {
       : '这是 Windows Sandbox 临时隔离环境；同一 sessionId 内文件可复用，关闭、取消活跃任务或到期会销毁实例及全部文件。C:\\AgentWork 和其他来宾目录都不持久保存；没有宿主项目或缓存映射。首次 submit 省略 sessionId，后续沿用返回的 ID。';
     const submitSchema = target.kind === 'wsb' ? object({ ...shell, sessionId: Type.Optional(uuid) }) : object(shell);
     add(prefix + '_submit', guidance + '\n' + (target.instructions ?? '') + '\n在来宾执行 PowerShell。先生成 requestId(UUID)，重试必须沿用它及原参数；立即返回任务收据，用 job_get 查询，unknown 禁止另起同一命令。HTTP 断线不取消任务。', submitSchema, receiptSchema, false, (args, subject) => result(jobs.submit(subject, target, args.requestId, { kind: 'powershell', script: args.script, cwd: args.cwd, timeoutMs: args.timeoutMs ?? 120000 }, 'sessionId' in args && typeof args.sessionId === 'string' ? args.sessionId : undefined)));
+    add(prefix + '_status', '独立只读环境状态，不进入执行队列、不创建或启动 VM/WSB。返回助手就绪/版本、当前作用域的任务与排队数、最早排队时间和最近错误。busy 包含其他作用域或尚未关闭的 WSB 占用，其他作用域的任务信息不返回。ready 只说明探测通过，不保证下一条命令成功。', object({}), EnvironmentStatusSchema, true, async (_args, subject) => result(await jobs.status(subject, target)));
     add(prefix + '_job_get', '查询此前 requestId 的任务状态和输出。首次 WSB submit 丢失响应时用它找回 sessionId。unknown 表示不能确定副作用；继续查询或取消，不能自动重放。details=archived 表示正文已清理，终态及退出摘要仍保留，不得重新执行旧请求。', object({ requestId: uuid }), receiptSchema, true, (args, subject) => result(jobs.get(subject, target, args.requestId)));
     add(prefix + '_job_cancel', '请求取消任务；只有确认原生进程或 WSB 实例停止后才返回 cancelled。WSB 活跃任务取消会关闭整个临时 session。请持续查询到停止确认。', object({ requestId: uuid }), receiptSchema, false, (args, subject) => result(jobs.cancel(subject, target, args.requestId)));
     if (target.kind === 'wsb') {

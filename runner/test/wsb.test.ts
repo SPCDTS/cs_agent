@@ -274,3 +274,13 @@ test("执行助手在服务未参与时也会按任务截止时间销毁 guest",
     gate.resolve();
   }
 });
+
+test("WSB 就绪查询只检查程序和 list，不创建、关闭或执行实例", async () => {
+  const native = new Sandbox(), helperVersion = "sha256:" + "b".repeat(64);
+  const backend = new WsbBackend("unused-test-state", { native, helperVersion: async () => helperVersion });
+  assert.deepEqual(await backend.probe(target), { state: "ready", protocolVersion: 1, helperVersion });
+  native.failList = true;
+  assert.deepEqual(await backend.probe(target), { state: "unavailable", error: "wsb_cli_unavailable" });
+  assert.deepEqual(await new WsbBackend("unused-test-state", { native, helperVersion: async () => { throw new Error("missing"); } }).probe(target), { state: "unavailable", error: "wsb_helper_bundle_unavailable" });
+  assert.deepEqual(native.starts, []); assert.deepEqual(native.stops, []); assert.deepEqual(native.executions, []);
+});

@@ -87,7 +87,11 @@ if ($request.action -eq 'probe') {
     $service.Connect()
     $folder = $service.GetFolder('\')
     if (-not $folder.GetTask('CsAgentHypervShellV1').Enabled) { throw 'guest_task_disabled' }
-    return Write-Receipt @{ ready = $true }
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead((Join-Path $InstallRoot 'Helper.exe'))
+    try { $helperHash = [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $stream.Dispose(); $algorithm.Dispose() }
+    return Write-Receipt @{ ready = $true; protocolVersion = 1; helperVersion = 'sha256:' + $helperHash }
 }
 
 $id = [string]$request.id

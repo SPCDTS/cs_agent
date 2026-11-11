@@ -106,13 +106,17 @@ ingress:
   - service: http_status:404
 ```
 
-在 cs-agent 管理页“模型与接入 → MCP 服务”保存 `https://windows-mcp.example.com/mcp`，认证方式选 Token，通过安全输入框填写 `WINDOWS_MCP_TOKEN` 对应值，检测后选择工具并启用。可读工具选择 `*_job_get`；submit、cancel、close 都会改变状态，不能列为只读。不再使用 Sandbox 标签、配对码、设备审批或 `REMOTE_SANDBOX_ENABLED`。
+在 cs-agent 管理页“模型与接入 → MCP 服务”保存 `https://windows-mcp.example.com/mcp`，认证方式选 Token，通过安全输入框填写 `WINDOWS_MCP_TOKEN` 对应值，检测后选择工具并启用。可读工具选择 `*_status` 和 `*_job_get`；submit、cancel、close 都会改变状态，不能列为只读。不再使用 Sandbox 标签、配对码、设备审批或 `REMOTE_SANDBOX_ENABLED`。
 
 通用 MCP 权限、群授权与逐次审批继续生效。Worker 会在调用元数据中附带可信 `cs-agent/caller.scope`，服务将任务及临时会话绑定到认证 principal 和这个 scope。它不是模型可填写的工具参数。其他标准 MCP 客户端不传此扩展时，使用该 principal 的默认 scope。
 
 ## Agent 的调用流程
 
-配置中的 `dev` 生成 `vm_dev_submit/job_get/job_cancel`；`temp` 生成 `wsb_temp_submit/job_get/job_cancel/close`。这些 raw tool 名通过已有 MCP/Code Mode 命名空间暴露，具体调用名以发现的工具目录为准。
+配置中的 `dev` 生成 `vm_dev_submit/status/job_get/job_cancel`；`temp` 生成 `wsb_temp_submit/status/job_get/job_cancel/close`。这些 raw tool 名通过已有 MCP/Code Mode 命名空间暴露，具体调用名以发现的工具目录为准。
+
+遇到排队或环境故障时先调用无参数的 `*_status`。它直接读取本机任务账本并走独立只读探测，不提交普通命令、不等待排队、不启动或关闭 VM/WSB。返回 `readiness`、助手协议/构建版本、当前作用域的当前任务、排队数、最早入队时间和最近任务错误。`queue.busy` 也涵盖其他作用域的执行或未关闭的 WSB session；其他作用域的 ID、命令和错误不返回。`lastError` 是最近失败或未知任务的历史摘要，可能在环境恢复后仍存在，须结合 `readiness` 和当前任务判断。
+
+Hyper-V 探测通过 PowerShell Direct 检查来宾配置、助手文件和计划任务是否启用，返回 `Helper.exe` 的 SHA-256 作为实际构建版本；旧助手没有版本字段时返回 `hyperv_helper_version_unavailable`，在任务结束后重新运行 `prepare-hyperv.ps1` 更新。WSB 只检查本机 helper 构建和 `wsb list`，返回 guest/启动助手构建的组合 SHA-256。`ready` 表示这些前置检查通过，不承诺下一条命令、凭据的远端权限或 GUI 交互一定成功。
 
 1. 生成一个 UUID 作为 `requestId`，提交 `script`，可带来宾 `cwd` 和 `timeoutMs`。默认期限 120 秒，最多 20 分钟，包含排队时间。
 2. 立即得到任务收据，再用同一个 `requestId` 查询。任务完成后读取 stdout、stderr、exitCode。
@@ -121,7 +125,7 @@ ingress:
 
 同一 requestId 搭配相同参数返回原收据；改变参数返回冲突。`unknown` 表示远端可能已执行，应继续查询或取消，不能换 requestId 重跑。HTTP 关闭不会取消任务。服务重启也只检查已有执行证据，不重放未确认命令。WSB 有独立硬期限 guardian，即使 MCP 服务退出仍会销毁到期实例；空闲清理由在线调度器处理。
 
-Hyper-V 的目录共享取决于选中了哪台 VM，与会话/subagent ID 无关。派出子 agent 时，可用通用 `mcpTools: [{"server":"windows","tools":["vm_dev_submit","vm_dev_job_get","vm_dev_job_cancel"]}]` 收窄工具；同一 VM 工具对应同一磁盘，不自动创建、复制或克隆仓库。子 agent 的任务收据作用域独立，结果通过子报告交回。停止子 agent 或停用 MCP 不等于撤回已发送的远端操作；必要时先在该作用域调用取消，远端期限提供最终收尾。
+Hyper-V 的目录共享取决于选中了哪台 VM，与会话/subagent ID 无关。派出子 agent 时，可用通用 `mcpTools: [{"server":"windows","tools":["vm_dev_submit","vm_dev_status","vm_dev_job_get","vm_dev_job_cancel"]}]` 收窄工具；同一 VM 工具对应同一磁盘，不自动创建、复制或克隆仓库。子 agent 的任务收据作用域独立，结果通过子报告交回。停止子 agent 或停用 MCP 不等于撤回已发送的远端操作；必要时先在该作用域调用取消，远端期限提供最终收尾。
 
 ## 运行与验证
 
@@ -129,6 +133,13 @@ Hyper-V 的目录共享取决于选中了哪台 VM，与会话/subagent ID 无�
 npm --prefix runner test
 npm --prefix runner run test:wsb
 npm run check
+```
+
+Windows CI 可额外执行以下非交互原生测试，只在临时目录编译并运行本机助手，使用模拟调度器；不会连接真实 VM、启动 WSB、安装服务或操作桌面：
+
+```powershell
+$env:CS_AGENT_TEST_HYPERV_NATIVE = '1'
+node --test --test-name-pattern="Hyper-V 来宾原生助手|独立桌面身份检查器" runner/test/hyperv.test.ts runner/test/desktop-server.test.ts
 ```
 
 普通测试包含官方 MCP SDK 的真实 HTTP 调用、任务去重/重启/权限隔离和原生后端模拟。`test:wsb` 只操作专用测试状态和自己创建的原生实例，验证多命令、重连、临时文件、取消与销毁；不使用旧持久目录。Hyper-V helper 的语法、编译和模拟测试不能代替真实 VM 验证，部署前应在准备好的 VM 验证持久文件、长命令取消；桌面验证在独立服务进行。

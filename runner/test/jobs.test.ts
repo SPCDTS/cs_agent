@@ -161,3 +161,33 @@ test('旧账本升级保留终态正文，并在保留期后继续阻止重放',
   assert.throws(() => jobs.submit(subject, vm, requestId, command), /request_id_conflict/);
   assert.equal(f.calls.length, 0);
 });
+
+test('执行桥阻塞时状态不排队，并按作用域隐藏任务与错误', { timeout: 3000 }, async t => {
+  const x = await fixture(t), gate = Promise.withResolvers<void>();
+  x.f.backend.dispatch = async e => { x.f.calls.push(e); await gate.promise; };
+  x.f.backend.probe = async () => ({ state: 'ready', protocolVersion: 1, helperVersion: 'test-build' });
+  const first = x.jobs.submit(subject, vm, randomUUID(), command);
+  const pending = x.jobs.tick();
+  const second = x.jobs.submit(subject, vm, randomUUID(), command);
+  try {
+    const status = await x.jobs.status(subject, vm);
+    assert.equal(status.readiness.state, 'ready');
+    assert.equal(status.queue.busy, true);
+    assert.equal(status.queue.current?.jobId, first.jobId);
+    assert.equal(status.queue.queued, 1);
+    assert.equal(status.queue.oldestQueuedAt, 1000);
+    assert.equal(x.f.calls.length, 1);
+    const foreign = await x.jobs.status({ ...subject, scope: 'other' }, vm);
+    assert.deepEqual(foreign.queue, { busy: true, current: null, queued: 0, oldestQueuedAt: null });
+    assert.equal(foreign.lastError, null);
+    assert.equal(JSON.stringify(foreign).includes(first.jobId), false);
+    assert.equal(x.jobs.get(subject, vm, second.requestId).state, 'queued');
+  } finally { gate.resolve(); await pending; }
+  x.f.backend.probe = async () => ({ state: 'unavailable', error: 'probe_offline' });
+  const offline = await x.jobs.status(subject, vm);
+  assert.equal(offline.readiness.state, 'unavailable');
+  assert.equal(offline.queue.current?.error, 'missing_evidence');
+  assert.equal(offline.lastError?.jobId, first.jobId);
+  assert.equal((await x.jobs.status({ principal: 'other', scope: subject.scope }, vm)).lastError, null);
+  assert.equal(x.f.calls.length, 1);
+});

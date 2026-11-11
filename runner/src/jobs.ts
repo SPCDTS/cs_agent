@@ -1,6 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
+import { Check } from 'typebox/value';
+import { LastErrorSchema, type EnvironmentStatus, type Readiness } from './environment-status.ts';
 import { JobDetails, COMPLETED_DETAILS_RETENTION_MS } from './job-details.ts';
 import path from 'node:path';
 import { sha256 } from './files.ts';
@@ -40,6 +42,7 @@ export class Jobs {
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, principal TEXT NOT NULL, scope TEXT NOT NULL, target TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, execution TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL, created INTEGER NOT NULL, UNIQUE(principal,scope,target,request_id));
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, principal TEXT NOT NULL, scope TEXT NOT NULL, target TEXT NOT NULL, state TEXT NOT NULL, expires INTEGER NOT NULL, idle_until INTEGER NOT NULL, idle_ms INTEGER NOT NULL);`);
     this.details = new JobDetails(this.db, this.now());
+    this.db.exec("CREATE INDEX IF NOT EXISTS jobs_errors_created ON jobs(principal,scope,target,created DESC) WHERE json_extract(status,'$.state') IN ('unknown','failed')");
     // dispatching 表示进程可能已接到命令；恢复时只能 inspect。
     this.db.exec("UPDATE jobs SET phase='active' WHERE phase='dispatching'");
   }
@@ -105,6 +108,29 @@ export class Jobs {
   }
   get(subject: Subject, target: Target, requestId: string): Receipt {
     const row = this.find(subject, target, requestId); if (!row) throw new Error('job_not_found'); return this.receipt(row);
+  }
+  async status(subject: Subject, target: Target): Promise<EnvironmentStatus> {
+    let readiness: Readiness;
+    try { readiness = await this.backends[target.kind].probe?.(target) ?? { state: 'unknown', error: 'probe_not_supported' }; }
+    catch { readiness = { state: 'unavailable', error: 'probe_unavailable' }; }
+    // 不等待 tick，也不 submit 探测命令；已阻塞的执行链不阻塞只读队列快照。
+    const rows = this.rows().filter(row => row.target === target.id);
+    const own = rows.filter(row => row.principal === subject.principal && row.scope === subject.scope);
+    const queued = own.filter(row => row.phase === 'queued');
+    const current = own.find(row => row.phase !== 'queued');
+    const receipt = current && this.receipt(current);
+    const lastError = this.db.prepare("SELECT id AS jobId,request_id AS requestId,json_extract(status,'$.error') AS error,created AS queuedAt FROM jobs WHERE principal=? AND scope=? AND target=? AND json_extract(status,'$.state') IN ('unknown','failed') ORDER BY created DESC,rowid DESC LIMIT 1").get(subject.principal, subject.scope, target.id);
+    return {
+      targetId: target.id, kind: target.kind, checkedAt: this.now(), readiness,
+      queue: {
+        busy: rows.some(row => row.phase !== 'queued') || (target.kind === 'wsb' && Boolean(this.db.prepare("SELECT 1 FROM sessions WHERE target=? AND state!='closed'").get(target.id))),
+        queued: queued.length, oldestQueuedAt: queued[0]?.created ?? null,
+        current: current && receipt ? { requestId: receipt.requestId, jobId: receipt.jobId, ...(receipt.sessionId ? { sessionId: receipt.sessionId } : {}),
+          deadline: receipt.deadline, queuedAt: current.created, state: receipt.state === 'cancelling' ? 'cancelling' : receipt.state === 'unknown' ? 'unknown' : 'running',
+          ...(receipt.error ? { error: receipt.error } : {}) } : null,
+      },
+      lastError: Check(LastErrorSchema, lastError) ? lastError : null,
+    };
   }
   cancel(subject: Subject, target: Target, requestId: string): Receipt {
     const row = this.find(subject, target, requestId); if (!row) throw new Error('job_not_found');
