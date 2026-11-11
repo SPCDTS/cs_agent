@@ -226,7 +226,7 @@ describe("Codex native authorization", () => {
     await store().modify("openai-codex", async current => ({ ...current!, expires: Date.now() - 1 }));
     network({ [TOKEN_URL]: async () => Response.json({ access_token: freshAccess, refresh_token: "rotated", expires_in: 3600, token_type: "Bearer" }),
       [CODEX_MODELS_URL]: async () => new Response(null, { status: 503 }) });
-    expect(await (await admin("POST", "/admin/model/oauth/codex/catalog")).json()).toEqual({ error: "catalog_failed" });
+    expect(await (await admin("POST", "/admin/model/oauth/codex/catalog")).json()).toMatchObject({ error: "catalog_failed", diagnostic: { kind: "http", status: 503 } });
     expect(await store().read("openai-codex")).toMatchObject({ access: freshAccess, refresh: "rotated" });
     expect((await adminJson<ModelView>("GET", "/admin/model")).codex.status).toBe("ready");
     await models.openModels(env, store()).getAuth("openai-codex");
@@ -314,7 +314,7 @@ describe("model selection and Codex Responses", () => {
 
 
 describe("原生授权迁移与共享生图", () => {
-  it("保留旧 SIWC 授权，新登录失败不切换，成功后可重新选择旧账号", async () => {
+  it("目录被拒绝时加密保存新授权并保留旧账号，无需重新登录即可恢复", async () => {
     network(); await login();
     const first = (await registry().modelView()).codex.activeId!;
     await runInDurableObject(registry(), (_instance, state) => {
@@ -327,16 +327,31 @@ describe("原生授权迁移与共享生图", () => {
     await expect(generateImage({ prompt: "画猫" }, { models: legacyModels,
       repository: new MediaRepository({ bucket: env.ASSETS, scope: "owner" }), operationId: "migration" })).rejects.toMatchObject({ code: "login_required" });
     const failed = await begin(first);
-    network({ [CODEX_MODELS_URL]: async () => new Response(null, { status: 503 }) });
-    expect((await complete(failed)).status).toBe(400);
+    network({ [CODEX_MODELS_URL]: async () => Response.json({ error: { code: "unsupported_country_region_territory", message: "never-expose-catalog-body" } },
+      { status: 403, headers: { "x-request-id": "req-catalog-test" } }) });
+    const saved = await complete(failed);
+    expect(saved.status).toBe(200);
+    const result = await saved.json<{ accountId: string; status: string }>();
+    expect(result).toMatchObject({ status: "catalog_pending", diagnostic: { kind: "http", status: 403, oauthCode: "unsupported_country_region_territory", requestId: "req-catalog-test" } });
+    const pending = await registry().modelView();
+    expect(pending.codex.accounts.find(account => account.id === result.accountId)).toMatchObject({ status: "catalog_pending", loggedIn: false, catalogFailure: { status: 403 } });
+    expect(JSON.stringify([result, pending])).not.toMatch(/never-expose|refresh-subject-a/);
+    await runInDurableObject(registry(), async (_instance, state) => {
+      const restored = await new RegistryDO(state, env).modelView();
+      expect(restored.codex.accounts.find(account => account.id === result.accountId)?.status).toBe("catalog_pending");
+      expect(state.storage.sql.exec("SELECT * FROM model_credentials").toArray()).toHaveLength(2);
+    });
     expect((await registry().modelView()).codex.activeId).toBe(first);
     expect((await legacyModels.getAuth("openai-codex"))?.auth.apiKey).toBe("legacy-access");
     network();
-    expect((await complete(await begin(first))).status).toBe(200);
+    await registry().codexSelect(result.accountId);
+    expect(sent.map(call => call.url)).toEqual([CODEX_MODELS_URL]);
     const view = await registry().modelView();
     expect(view.codex).toMatchObject({ flow: "codex-native", imageGeneration: true });
     expect(view.codex.accounts).toHaveLength(2);
-    expect(view.codex.activeId).not.toBe(first);
+    expect(view.codex.activeId).toBe(result.accountId);
+    expect(view.codex.catalogFailure).toBeUndefined();
+    expect(await store().read("openai-codex")).toMatchObject({ refresh: "refresh-subject-a" });
     network({ [RESOURCE + "/models"]: async () => Response.json({ models: catalog }) });
     await registry().codexSelect(first);
     expect((await models.openModels(env, store()).getAuth("openai-codex"))?.auth.apiKey).toBe("legacy-access");

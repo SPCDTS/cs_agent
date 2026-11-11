@@ -12,6 +12,7 @@ import { parseImport } from "../memory/import";
 import { oauthErrorCode } from "../mcp/oauth-fetch";
 import { ModelSelectionSchema, QQ_ID, SettingsSchema, type Settings } from "../settings";
 import { modelLoginErrorCode, TokenResponseSchema } from "../codex-login";
+import { catalogFailure } from "../codex-catalog-error";
 import { refreshFailure } from "../codex-refresh-error";
 import type { EventQuery } from "../thread";
 import { SkillError, parseSkill } from "../skills";
@@ -89,7 +90,7 @@ function pairingTicket(request: Request): string {
   return match[1]!;
 }
 async function modelLogin<T>(work: () => Promise<T>): Promise<Response> {
-  try { return json(await work()); } catch (error) { throw new HttpError(400, modelLoginErrorCode(error), { diagnostic: refreshFailure(error) }); }
+  try { return json(await work()); } catch (error) { throw new HttpError(400, modelLoginErrorCode(error), { diagnostic: catalogFailure(error) ?? refreshFailure(error) }); }
 }
 
 function requestQuery(url: URL): RequestQuery {
@@ -275,7 +276,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   } },
   { method: "POST", path: "/admin/model/oauth/codex/bridge/complete", public: true, handle: async ({ env, request }) => {
     const { callbackUrl, tokens } = await body(request, Type.Object({ callbackUrl: Type.String({ minLength: 1, maxLength: 16384 }), tokens: TokenResponseSchema }, strict));
-    return modelLogin(() => env.REGISTRY.getByName("main").codexLoginComplete(pairingTicket(request), callbackUrl, tokens));
+    return modelLogin(async () => await env.REGISTRY.getByName("main").codexLoginComplete(pairingTicket(request), callbackUrl, tokens));
   } },
   { method: "POST", path: "/admin/model/oauth/codex/select", handle: async ({ env, request }) => {
     const { accountId } = await body(request, Type.Object({ accountId: Type.String({ format: "uuid" }) }, strict));

@@ -348,7 +348,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     token_exchange: "刷新或换取凭据失败，请查看诊断信息",
     invalid_identity: "账号身份校验失败，请重新授权所选账号",
     plan_permission_required: "尚未允许使用 ChatGPT 订阅额度，请重新授权并开启该权限",
-    catalog_failed: "读取账号模型列表失败，请稍后重试",
+    catalog_failed: "读取账号模型列表失败，授权已保留，请查看诊断后重试",
     invalid_name: "技能名只能用小写字母、数字和连字符，以字母或数字开头，最长 64 位",
     missing_frontmatter: "SKILL.md 开头缺少以 --- 包围的 frontmatter",
     name_mismatch: "frontmatter 的 name 与技能名不一致",
@@ -361,7 +361,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     files_too_large: "附件合计超过 512 KiB",
     invalid_settings: "设置不合法：轮询间隔 30～3600 秒、合并窗口 0～600 秒、预算每小时 1～100 次，均为整数；标签不能重复；安静时段写 HH:MM，起止都填或都留空",
   };
-  const CODEX_STATUS = { logged_out: "未登录", ready: "凭据有效", refresh_due: "到期待刷新", refresh_failed: "刷新失败", reauth_required: "需要重新授权" };
+  const CODEX_STATUS = { catalog_pending: "已授权，目录待恢复", logged_out: "未登录", ready: "凭据有效", refresh_due: "到期待刷新", refresh_failed: "刷新失败", reauth_required: "需要重新授权" };
   function refreshDiagnostic(failure) {
     if (!failure) return "";
     return [failure.kind, failure.status ? "HTTP " + failure.status : "", failure.oauthCode,
@@ -887,7 +887,9 @@ export const ADMIN_APP_JS = String.raw`"use strict";
       codex.imageGeneration ? "Codex 订阅生图已接入" : codex.hasCredential && codex.flow !== "codex-native" ? "当前为旧授权，重新授权后可使用订阅生图" : "", codex.expiresAt ? "凭据到期 " + time(codex.expiresAt) : "",
       codex.status === "refresh_due" ? "下次请求将尝试刷新；也可点击刷新模型列表验证" : "",
       codex.refreshFailure ? time(codex.refreshFailure.at) + " · " + refreshDiagnostic(codex.refreshFailure) : "",
-      !codex.hasCredential ? "请选择账号授权后使用 GPT" : ""].filter(Boolean).join(" · ");
+      codex.catalogFailure ? "模型目录：" + refreshDiagnostic(codex.catalogFailure) : "",
+      ...codex.accounts.filter(account => account.status === "catalog_pending").map(account => account.label + "：授权已保存，选择该账号并点击「使用所选账号」重试目录（无需重新登录）。" + refreshDiagnostic(account.catalogFailure)),
+      !codex.hasCredential && !codex.accounts.some(account => account.status === "catalog_pending") ? "请选择账号授权后使用 GPT" : ""].filter(Boolean).join(" · ");
     const accounts = $("codex-accounts"); clear(accounts);
     accounts.append(el("option", { value: "", text: "添加 ChatGPT 账号" }));
     for (const account of codex.accounts) accounts.append(el("option", { value: account.id,

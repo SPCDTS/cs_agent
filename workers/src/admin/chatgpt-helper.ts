@@ -61,9 +61,11 @@ export async function runLogin({ origin, ticket, fetchImpl = fetch, launch = ope
         signal: AbortSignal.timeout(15000) });
       if (!tokenResponse.ok) { await tokenResponse.body?.cancel(); throw new Error("令牌交换失败，请重新授权"); }
       const tokens = await tokenResponse.json();
-      await post("/admin/model/oauth/codex/bridge/complete", { callbackUrl: callback.href, tokens });
-      response.end("ChatGPT 授权完成。可以关闭此页，回到管理页刷新状态。");
-      finish();
+      const result = await post("/admin/model/oauth/codex/bridge/complete", { callbackUrl: callback.href, tokens });
+      response.end(result.status === "catalog_pending"
+        ? "ChatGPT 授权已保存，但云端模型目录暂不可用。无需重新登录；回到管理页刷新状态，选择该 Codex 账号并点击「使用所选账号」重试。"
+        : "ChatGPT 授权完成。可以关闭此页，回到管理页刷新状态。");
+      finish(result);
     } catch (error) {
       response.writeHead(400).end("授权未完成，请回到管理页重新开始。");
       fail(error);
@@ -82,7 +84,7 @@ export async function runLogin({ origin, ticket, fetchImpl = fetch, launch = ope
       pending.redirectUri !== "http://localhost:1455/auth/callback")
       throw new Error("云端返回的授权地址无效");
     await launch(pending.url);
-    await completed;
+    return await completed;
   } finally {
     clearTimeout(timer);
     server.closeAllConnections();
@@ -96,8 +98,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const ticket = (await terminal.question("粘贴管理页的配对码：")).trim();
     terminal.close();
     console.log("正在打开 ChatGPT 授权页面，完成后本助手会自动退出。");
-    await runLogin({ origin: process.argv[2], ticket });
-    console.log("授权完成。请回到管理页刷新状态。");
+    const result = await runLogin({ origin: process.argv[2], ticket });
+    console.log(result.status === "catalog_pending" ? "授权已保存，模型目录暂不可用。请回管理页选择该账号重试，无需重新登录。" : "授权完成。请回到管理页刷新状态。");
   } catch {
     // 错误正文可能包含上游请求信息，不打印异常对象或令牌。
     console.error("授权未完成。请确认配对码在 10 分钟内有效、本机端口 1455 空闲，并在管理页重新开始。");

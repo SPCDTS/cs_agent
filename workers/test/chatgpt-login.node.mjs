@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { CHATGPT_HELPER } from "../src/admin/chatgpt-helper.ts";
 
 const { runLogin } = await import("data:text/javascript;base64," + Buffer.from(CHATGPT_HELPER).toString("base64"));
-test("本机助手先监听回调，再用精确 redirect_uri 交换令牌并提交云端，结束后关闭监听", async () => {
+for (const status of ["ready", "catalog_pending"]) test("本机助手收回调并保存授权，准确显示目录状态：" + status, async () => {
   const ticket = "a".repeat(43), calls = [];
   let redirectUri, callbackTask;
-  await runLogin({
+  const result = await runLogin({
     origin: "https://agent.example", ticket,
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
@@ -16,7 +16,7 @@ test("本机助手先监听回调，再用精确 redirect_uri 交换令牌并提
           state: "test-state", verifier: "test-verifier", clientId: "app_EMoamEEZ73f0CkXaXp7hrann" });
       }
       if (url.endsWith("/oauth/token")) return Response.json({ access_token: "secret-access", refresh_token: "secret-refresh" });
-      if (url.endsWith("/bridge/complete")) return Response.json({ email: "owner@example.test" });
+      if (url.endsWith("/bridge/complete")) return Response.json({ email: "owner@example.test", accountId: "account", status });
       throw new Error("unexpected endpoint");
     },
     launch: async () => {
@@ -24,7 +24,8 @@ test("本机助手先监听回调，再用精确 redirect_uri 交换令牌并提
       callbackTask = fetch(redirectUri + "?state=test-state&code=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann").then(r => r.text());
     },
   });
-  assert.match(await callbackTask, /授权完成/);
+  assert.equal(result.status, status);
+  assert.match(await callbackTask, status === "ready" ? /授权完成/ : /授权已保存.*无需重新登录/);
   const tokenCall = calls.find(call => call.url.endsWith("/oauth/token"));
   assert.equal(tokenCall.options.body.get("redirect_uri"), redirectUri);
   assert.equal(tokenCall.options.body.get("client_id"), "app_EMoamEEZ73f0CkXaXp7hrann");

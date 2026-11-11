@@ -9,7 +9,7 @@ const OAuthCode = Type.Union([
   Type.Literal("unsupported_country_region_territory"), Type.Literal("unrecognized"),
 ]);
 const identifier = Type.String({ pattern: "^[A-Za-z0-9_-]{1,100}$" });
-const responseFields = {
+export const responseFields = {
   status: Type.Integer({ minimum: 100, maximum: 599 }),
   format: Type.Union([Type.Literal("json"), Type.Literal("html"), Type.Literal("other")]),
   oauthCode: Type.Optional(OAuthCode), requestId: Type.Optional(identifier), cfRay: Type.Optional(identifier),

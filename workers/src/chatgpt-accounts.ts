@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { refreshNeedsReauth, type RefreshFailure } from "./codex-refresh-error";
+import { CatalogFailureSchema, catalogFailure, type CatalogFailure } from "./codex-catalog-error";
 import { SqlCredentialStore, type CredentialMeta, type CredentialLease } from "./model-credentials";
 import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, PendingSchema, acceptTokens, callbackClient,
   codexOAuth, fetchCatalog, isChatGPTCredential, isNativeCodexCredential, revokeSession, startChatGPTLogin } from "./codex-login";
@@ -15,11 +16,12 @@ export const CHATGPT_SCHEMA = `
 `;
 type Account = { id: string; client_id: string; subject: string; email: string | null; created_at: number };
 const DraftSchema = Type.Object({ accountId: Type.Optional(Type.String()) });
-type LoginStatus = "logged_out" | "ready" | "refresh_due" | "refresh_failed" | "reauth_required";
+type LoginStatus = "logged_out" | "ready" | "refresh_due" | "refresh_failed" | "reauth_required" | "catalog_pending";
 export type ChatGPTView = {
   status: LoginStatus; loggedIn: boolean; hasCredential: boolean; needsReauth: boolean;
   activeId?: string; flow?: string; imageGeneration: boolean; email?: string; expiresAt?: number; refreshFailure?: RefreshFailure;
-  accounts: { id: string; label: string; loggedIn: boolean; status: LoginStatus }[];
+  catalogFailure?: CatalogFailure;
+  accounts: { id: string; label: string; loggedIn: boolean; status: LoginStatus; catalogFailure?: CatalogFailure }[];
 };
 function loginStatus(meta?: CredentialMeta): LoginStatus {
   if (!meta) return "logged_out";
@@ -41,6 +43,12 @@ export class ChatGPTAccounts {
     return this.sql.exec<{ value: string }>("SELECT value FROM chatgpt_state WHERE key = ?", key).toArray()[0]?.value || undefined;
   }
   private setState(key: string, value: string) { this.sql.exec("INSERT OR REPLACE INTO chatgpt_state VALUES (?, ?)", key, value); }
+  private catalogFailure(id: string): CatalogFailure | undefined {
+    const raw = this.state("catalog:" + id);
+    if (!raw) return undefined;
+    const value: unknown = JSON.parse(raw);
+    return Check(CatalogFailureSchema, value) ? value : undefined;
+  }
   private activeId() { return this.state("active"); }
   private key(provider: string) { return provider === CODEX_PROVIDER ? accountKey(this.activeId() ?? "unselected") : provider; }
   private account(id: string): Account {
@@ -59,11 +67,13 @@ export class ChatGPTAccounts {
     const activeId = this.activeId(), meta = activeId ? this.credentials.meta(accountKey(activeId)) : undefined;
     const status = !meta && this.credentials.meta(CODEX_PROVIDER) ? "reauth_required" : loginStatus(meta);
     return { status, loggedIn: status === "ready", hasCredential: !!meta, needsReauth: status === "reauth_required",
-      activeId, flow: meta?.flow, imageGeneration: !!meta && meta.flow === "codex-native" && (!meta.refreshFailure || !refreshNeedsReauth(meta.refreshFailure)), email: meta?.email, expiresAt: meta?.expiresAt, refreshFailure: meta?.refreshFailure,
-      accounts: this.sql.exec<Account>("SELECT * FROM chatgpt_accounts ORDER BY created_at, id").toArray().map(account => ({
-        id: account.id, label: (this.credentials.meta(accountKey(account.id))?.flow === "codex-native" ? "Codex · " : "旧授权 · ") + (account.email ?? "ChatGPT 账号") + " · " + account.id.slice(0, 8),
-        loggedIn: loginStatus(this.credentials.meta(accountKey(account.id))) === "ready", status: loginStatus(this.credentials.meta(accountKey(account.id))),
-      })) };
+      activeId, catalogFailure: activeId ? this.catalogFailure(activeId) : undefined, flow: meta?.flow, imageGeneration: !!meta && meta.flow === "codex-native" && (!meta.refreshFailure || !refreshNeedsReauth(meta.refreshFailure)), email: meta?.email, expiresAt: meta?.expiresAt, refreshFailure: meta?.refreshFailure,
+      accounts: this.sql.exec<Account>("SELECT * FROM chatgpt_accounts ORDER BY created_at, id").toArray().map(account => {
+        const meta = this.credentials.meta(accountKey(account.id)), failure = this.catalogFailure(account.id);
+        const status = loginStatus(meta), displayStatus = status === "ready" && account.id !== activeId && failure ? "catalog_pending" : status;
+        return { id: account.id, label: (meta?.flow === "codex-native" ? "Codex · " : "旧授权 · ") + (account.email ?? "ChatGPT 账号") + " · " + account.id.slice(0, 8),
+          loggedIn: displayStatus === "ready", status: displayStatus, catalogFailure: failure };
+      }) };
   }
   async acquire(provider: string): Promise<CredentialLease> {
     const key = this.key(provider), result = await this.credentials.acquire(key);
@@ -114,15 +124,21 @@ export class ChatGPTAccounts {
     if (!Check(PendingSchema, value)) throw new ModelLoginError("invalid_state");
     const clientId = callbackClient(callbackUrl, value);
     const credential = await acceptTokens(tokens, clientId, value);
-    credential.catalog = await fetchCatalog(credential);
     const existing = this.sql.exec<Account>("SELECT * FROM chatgpt_accounts WHERE client_id = ? AND subject = ?", clientId, credential.subject).toArray()[0];
     const id = value.accountId ?? existing?.id ?? crypto.randomUUID();
-    await this.credentials.modify(accountKey(id), async () => credential);
+    // 身份验证通过即加密保存；目录请求失败不能丢弃一次性授权结果。
+    await this.credentials.modify(accountKey(id), async current => ({ ...credential,
+      catalog: isNativeCodexCredential(current) && isNativeCodexCredential(credential) && current.accountId === credential.accountId ? current.catalog : [] }));
     this.sql.exec("INSERT INTO chatgpt_accounts VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email = excluded.email",
       id, clientId, credential.subject, credential.email ?? null, Date.now());
+    try { await this.refreshCatalog(id); } catch (error) {
+      const diagnostic = catalogFailure(error);
+      if (!diagnostic) throw error;
+      return { accountId: id, email: credential.email, status: "catalog_pending" as const, diagnostic };
+    }
     this.setState("active", id);
     await this.credentials.delete(CODEX_PROVIDER);
-    return { email: credential.email };
+    return { accountId: id, email: credential.email, status: "ready" as const };
   }
   async select(id: string) {
     this.account(id);
@@ -136,10 +152,17 @@ export class ChatGPTAccounts {
       return current.expires <= Date.now() + 300_000 ? await codexOAuth.refresh(current, AbortSignal.timeout(15_000)) : undefined;
     });
     // 先保存轮换后的 refresh token，再读取目录；目录故障不能丢掉唯一有效的新令牌。
-    await this.credentials.modify(accountKey(id), async current => {
-      if (!isChatGPTCredential(current)) throw new ModelLoginError("login_required");
-      return { ...current, catalog: await fetchCatalog(current) };
-    });
+    try {
+      await this.credentials.modify(accountKey(id), async current => {
+        if (!isChatGPTCredential(current)) throw new ModelLoginError("login_required");
+        return { ...current, catalog: await fetchCatalog(current) };
+      });
+      this.sql.exec("DELETE FROM chatgpt_state WHERE key = ?", "catalog:" + id);
+    } catch (error) {
+      const diagnostic = catalogFailure(error);
+      if (diagnostic) this.setState("catalog:" + id, JSON.stringify(diagnostic));
+      throw error;
+    }
   }
   async logout() {
     const id = this.activeId();
@@ -152,6 +175,7 @@ export class ChatGPTAccounts {
       return undefined;
     });
     await this.credentials.delete(accountKey(id));
+    this.sql.exec("DELETE FROM chatgpt_state WHERE key = ?", "catalog:" + id);
     return { revoked };
   }
 }

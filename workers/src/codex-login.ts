@@ -5,6 +5,8 @@ import { Check } from "typebox/value";
 import { randomSecret, sha256 } from "./mcp/crypto";
 import { OAuthRefreshError, refreshFailure, responseDiagnostic, responseOAuthCode } from "./codex-refresh-error";
 
+import { CatalogError, catalogFailure } from "./codex-catalog-error";
+
 export const CODEX_PROVIDER = "openai-codex";
 export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback";
@@ -28,7 +30,7 @@ export class ModelLoginError extends Error {
   constructor(readonly code: ModelLoginCode) { super(code); }
 }
 export const modelLoginErrorCode = (error: unknown): ModelLoginCode | "invalid_request" =>
-  refreshFailure(error) ? "token_exchange" : error instanceof Error && (LOGIN_CODES as readonly string[]).includes(error.message) ? error.message as ModelLoginCode : "invalid_request";
+  catalogFailure(error) ? "catalog_failed" : refreshFailure(error) ? "token_exchange" : error instanceof Error && (LOGIN_CODES as readonly string[]).includes(error.message) ? error.message as ModelLoginCode : "invalid_request";
 
 const Text = Type.String({ minLength: 1 });
 export const TokenResponseSchema = Type.Object({
@@ -115,15 +117,23 @@ export async function acceptTokens(raw: unknown, clientId: string, pending: Pend
     hostId: pending.hostId, ...identity, catalog: [] };
 }
 export async function fetchCatalog(credential: ChatGPTCredential): Promise<ChatGPTModel[]> {
+  let response: Response;
   try {
-    const response = await fetch(credential.flow === "codex-native" ? CODEX_MODELS_URL : RESOURCE + "/models", {
+    response = await fetch(credential.flow === "codex-native" ? CODEX_MODELS_URL : RESOURCE + "/models", {
       headers: { Authorization: "Bearer " + credential.access, ...(credential.flow === "codex-native" ? { ...CODEX_HEADERS, "chatgpt-account-id": credential.accountId } : {}) },
       redirect: "manual", signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) { await response.body?.cancel(); throw new Error(); }
-    const value: unknown = await response.json();
-    if (!Check(Type.Object({ models: CatalogSchema }), value)) throw new Error();
-    return value.models.filter(model => model.visibility === "list");
-  } catch { throw new ModelLoginError("catalog_failed"); }
+  } catch (error) {
+    throw new CatalogError({ at: Date.now(), kind: error instanceof Error && error.name === "TimeoutError" ? "timeout"
+      : error instanceof Error && error.name === "AbortError" ? "aborted" : "network" });
+  }
+  const diagnostic = responseDiagnostic(response);
+  if (!response.ok) throw new CatalogError({ at: Date.now(), kind: "http", ...diagnostic, oauthCode: await responseOAuthCode(response) });
+  let value: unknown;
+  try { value = await response.json(); } catch { throw new CatalogError({ at: Date.now(), kind: "invalid_json", ...diagnostic }); }
+  if (!Check(Type.Object({ models: CatalogSchema }), value)) throw new CatalogError({ at: Date.now(), kind: "invalid_catalog", ...diagnostic });
+  const models = value.models.filter(model => model.visibility === "list");
+  if (!models.length) throw new CatalogError({ at: Date.now(), kind: "invalid_catalog", ...diagnostic });
+  return models;
 }
 export const codexOAuth: OAuthAuth = {
   name: "ChatGPT 订阅", isSubscription: true,
