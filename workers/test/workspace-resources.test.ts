@@ -10,6 +10,24 @@ const legacyResource = (seed: string, name: string) => ({
   id: resourceId(seed), owner: "owner", kind: "cloudflare", providerId: "cloudflare", name, createdAt: 42,
 });
 
+it("维护页继续扫描登记表，只返回当前owner已就绪的Cloudflare工作区", async () => {
+  const expected = Array.from({ length: 7 }, (_, index) => legacyResource("maintenance:" + index, "resource:maintenance-" + index));
+  await runInDurableObject(resources(), async (_instance, state) => {
+    for (const resource of expected) await state.storage.put("resource:" + resource.id, { kind: "ready", resource });
+    await state.storage.put("resource:foreign", { kind: "ready", resource: { ...legacyResource("foreign", "group:200000001"), owner: "group:200000001" } });
+    await state.storage.put("resource:preparing", { kind: "preparing", resource: legacyResource("preparing", "resource:preparing"), fingerprint: "" });
+    await state.storage.put("resource:remote", { kind: "ready", resource: { id: "remote", kind: "remote" } });
+  });
+  const collected: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await resources().maintenancePage("owner", cursor);
+    expect(page.resources.length).toBeLessThanOrEqual(5);
+    collected.push(...page.resources.map(resource => resource.id)); cursor = page.cursor;
+  } while (cursor);
+  expect(collected.sort()).toEqual(expected.map(resource => resource.id).sort());
+});
+
 it("保留旧 Cloudflare ID 和物理名称，旧远程记录不出现也不占创建配额", async () => {
   const existing = legacyResource("owner:create:legacy", "resource:old-physical");
   const oldRemote = Array.from({ length: 256 }, (_, index) => {

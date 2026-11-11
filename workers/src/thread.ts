@@ -1256,7 +1256,12 @@ export class ThreadDO extends DurableObject<Env> {
 
   private async collectAssets():Promise<void>{
     const ns=await this.namespace();
+    if(!ns)return;
     await this.env.SANDBOX.getByName(ns).gc({dryRun:false,batchSize:100});
+    const resources=await this.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner")
+      .maintenancePage(ns,await this.ctx.storage.get<string>("asset-gc-resource"));
+    for(const resource of resources.resources)if(resource.name!==ns)await this.env.SANDBOX.getByName(resource.name).gc({dryRun:false,batchSize:100});
+    if(resources.cursor)await this.ctx.storage.put("asset-gc-resource",resources.cursor);else await this.ctx.storage.delete("asset-gc-resource");
     const after=await this.ctx.storage.get<number>("asset-gc-child")??0;
     const children=await this.database.all<{rowid:number;id:string}>("SELECT rowid,id FROM subagents WHERE rowid>? ORDER BY rowid LIMIT 5",after);
     for(const child of children)await this.env.SANDBOX.getByName(subagentName(ns,child.id)).gc({dryRun:false,batchSize:100});

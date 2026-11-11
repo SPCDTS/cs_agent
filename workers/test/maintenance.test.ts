@@ -8,6 +8,7 @@ import { recall } from "../src/context";
 import { MAINTENANCE_CRON, type MaintenanceJob } from "../src/maintenance";
 import * as models from "../src/models";
 import { ThreadDO } from "../src/thread";
+import { SandboxDO } from "../src/sandbox/do";
 import { input } from "./helpers";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
@@ -54,6 +55,27 @@ async function chat(db: DurableObjectSqliteDatabase, date: string, count: number
 }
 const run = (thread: ThreadDO, kind: MaintenanceJob["kind"], now: number) => thread.maintain({ kind, now });
 const count = async (db: DurableObjectSqliteDatabase, sql: string, ...args: (string | number)[]) => (await db.get<{ n: number }>(sql, ...args))?.n;
+
+it("retention维护显式登记的Cloudflare工作区并保存登记分页游标", async () => {
+  const names = Array.from({ length: 6 }, (_, index) => "resource:registered-" + index);
+  await runInDurableObject(env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner"), async (_instance, state) => {
+    for (const [index, name] of names.entries()) {
+      const id = "sbx:" + String(index).padStart(64, "0");
+      await state.storage.put("resource:" + id, { kind: "ready", resource: { id, owner: GROUP, kind: "cloudflare", providerId: "cloudflare", name, createdAt: 0 } });
+    }
+  });
+  const collected: string[] = [];
+  vi.spyOn(SandboxDO.prototype, "gc").mockImplementation(async function(this: SandboxDO) {
+    collected.push((await this.files()).workspace);
+    return { scanned: 0, candidates: 0, deleted: 0, dryRun: false };
+  });
+  await withThread(GROUP, {}, async thread => {
+    await run(thread, "retention", Date.now());
+    await run(thread, "retention", Date.now() + 86400_000);
+  });
+  expect(collected).toEqual(expect.arrayContaining(names.map(name => "workspace:" + env.SANDBOX.idFromName(name).toString())));
+  expect(collected).toHaveLength(8); // 每轮默认工作区一次，登记工作区按5+1推进。
+});
 
 describe("chat history aging", () => {
   it("summarizes days with five or more messages once, then folds a finished week and recalls summaries", async () => {

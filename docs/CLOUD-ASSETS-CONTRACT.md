@@ -51,7 +51,7 @@ SandboxDO 的 Cloudflare 容器使用官方 `Files` 与原生 `Container.exec` �
 - `cloneFrom({sourceName,expectedRevision,sourceRevision?})` 克隆父版本；`mergeFrom({sourceName,expectedRevision,paths,sourceRevision?})` 选择文件合并。返回 `{ok:true,manifest}` 或 `{ok:false,conflict}`。这些是受信宿主 RPC，禁止直接向模型暴露任意 sourceName。
 - `resetRuntime()` 与兼容的 `reset()` 只销毁容器，保留 durable 工作区。新 DO 实例先销毁旧容器再恢复，epoch 在每次执行和替换时递增，拒绝旧执行提交快照。
 
-单文件 10MiB、工作区 50MiB、文件和目录各最多 20000；拒绝符号链接、设备、越界路径、冲突路径。quota 响应包含逐项 issues，绝不截断后冒充成功。manifest 中删除的文件在下一次恢复消失。`gc(options)` 默认 dry-run，保留当前 head、1小时传输租约、当前版及最近2份历史（并保护1小时内的新版本）；仅清理宽限期之后的孤立blob，单批最多500对象。扫描超过1000份manifest或1000个blob时返回deferred且不删除，供管理员单独维护。read不写持久结果；最近32个变更操作保留详细结果，小结果直接存DO，大于32KiB的结果才写R2。更旧操作压缩成稳定tombstone，不重放。`gcMediaTickets(bucket,{limit,cursor,dryRun})` 支持过期短票据分页清理。
+单文件 10MiB、工作区 50MiB、文件和目录各最多 20000；拒绝符号链接、设备、越界路径、冲突路径。quota 响应包含逐项 issues，绝不截断后冒充成功。manifest 中删除的文件在下一次恢复消失。`gc(options)` 默认 dry-run，保留当前 head、1小时传输租约、当前版及最近2份历史（并保护1小时内的新版本）；仅清理宽限期之后的孤立blob，单批最多500对象。manifest、blob 和大结果均沿 R2 cursor 扫描所有分页，先完成可达性计算再删除；扫描和删除与工作区写入、导入及新增租约共用串行队列，不会基于过期 head 删除新文件。定期维护覆盖会话默认工作区、旧子任务工作区和登记表中的显式 Cloudflare 工作区；登记表每次最多扫描5条并保存游标，未就绪资源及外部持久 env 不参与清理，资源本身与当前文件不会因闲置而删除。read不写持久结果；最近32个变更操作保留详细结果，小结果直接存DO，大于32KiB的结果才写R2。更旧操作压缩成稳定tombstone，不重放。`gcMediaTickets(bucket,{limit,cursor,dryRun})` 支持过期短票据分页清理。
 
 ## owner 跨群读取
 

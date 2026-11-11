@@ -1,9 +1,10 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceManager } from "../src/sandbox/workspace";
 import { type SandboxClient } from "../src/sandbox/client";
 import { sha256 } from "../src/media/model";
-afterEach(async () => { await reset(); });
+import { scopePrefix } from "../src/media/repository";
+afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 function runtime() {
   let files = new Map<string,Uint8Array>(), ready = false, executions = 0, failExec = false;
   const relative = (path: string) => path.replace(/^\/work\//, "");
@@ -20,6 +21,38 @@ function runtime() {
   return { client, ready:()=>ready, reset:async()=>{ready=false;files=new Map();return true;}, executions:()=>executions, fail:()=>{failExec=true;} };
 }
 describe("持久工作区", () => {
+  it("分页清理超过1000个对象，保护head、租约和排队中的新提交", async () => {
+    await runInDurableObject(env.SANDBOX.getByName("gc-pages"), async (_instance, state) => {
+      const host = runtime(), workspace = "workspace:gc-pages";
+      const manager = new WorkspaceManager({ workspace, bucket: env.ASSETS, storage: state.storage, runtime: host.client, resetRuntime: host.reset, runtimeReady: host.ready });
+      const prefix = `${await scopePrefix(workspace)}/workspace`, bytes = new TextEncoder().encode("retained"), hash = await sha256(bytes);
+      const file = { path: "keep.txt", sha256: hash, bytes: bytes.length, mime: "text/plain", mode: 420 };
+      for (let start = 0; start < 1002; start += 50) await Promise.all(Array.from({ length: Math.min(50, 1002 - start) }, async (_, offset) => {
+        const index = start + offset, revision = index.toString(16).padStart(4, "0");
+        await env.ASSETS.put(`${prefix}/manifests/${revision}`, JSON.stringify({ schemaVersion: 1, workspace, revision, parentRevision: null,
+          files: index < 2 ? [file] : [], directories: [], totalBytes: index < 2 ? bytes.length : 0 }));
+        await env.ASSETS.put(`${prefix}/blobs/${index.toString(16).padStart(64, "0")}`, "obsolete");
+        await env.ASSETS.put(`${prefix}/results/${revision}`, "obsolete");
+      }));
+      await env.ASSETS.put(`${prefix}/blobs/${hash}`, bytes);
+      const future = Date.now() + 31 * 86_400_000;
+      await state.storage.put({ "workspace:head": "0000", "workspace:pins": { "0001": future + 3600_000 } });
+      vi.spyOn(Date, "now").mockReturnValue(future);
+      expect(await manager.gc({ keepManifests: 1 })).toMatchObject({ dryRun: true, scanned: 3007, deleted: 0, candidates: 3003 });
+      // GC 和写入共享同一队列；新提交不能被此前计算出的孤立 blob 集合删除。
+      const collecting = manager.gc({ dryRun: false, keepManifests: 1, batchSize: 500 });
+      const writing = manager.run({ operationId: "after-gc", operation: { kind: "write", path: "new.txt", text: "new" } });
+      expect(await collecting).toMatchObject({ deleted: 500 });
+      expect((await writing).status).toBe("committed");
+      for (let batch = 0; batch < 7; batch++) await manager.gc({ dryRun: false, keepManifests: 1, batchSize: 500 });
+      expect(await env.ASSETS.get(`${prefix}/manifests/0001`)).not.toBeNull();
+      expect(await env.ASSETS.get(`${prefix}/blobs/${hash}`)).not.toBeNull();
+      expect(await env.ASSETS.get(`${prefix}/blobs/${(1001).toString(16).padStart(64, "0")}`)).toBeNull();
+      expect(await env.ASSETS.get(`${prefix}/results/03e9`)).toBeNull();
+      expect(new TextDecoder().decode((await manager.readBlob("new.txt")).bytes)).toBe("new");
+      expect(new TextDecoder().decode((await manager.readBlob("keep.txt", "0001")).bytes)).toBe("retained");
+    });
+  }, 60_000);
   it("write/exec差量持久化、运行时重建、稳定操作幂等且冲突参数拒绝", async () => {
     await runInDurableObject(env.SANDBOX.getByName("persistence-test"),async (_instance,state)=>{
       const first=runtime(), deps={workspace:"workspace:test",bucket:env.ASSETS,storage:state.storage,runtime:first.client,resetRuntime:first.reset,runtimeReady:first.ready};
