@@ -1,6 +1,5 @@
 #!/bin/sh
-# 主工作区只做快进合并：开发在 scripts/wt.ps1 new 建的 worktree 里提交（约定见 CLAUDE.md）。
+# 主工作区只通过 pull --ff-only 同步：开发在 scripts/wt.ps1 new 建的 worktree 里提交（约定见 CLAUDE.md）。
 [ "$(git rev-parse --absolute-git-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ] || exit 0
-[ -n "$CS_ALLOW_MAIN_COMMIT" ] && exit 0
-echo "主工作区不直接提交：用 scripts/wt.ps1 new <名称> 建 worktree 开发，再用 scripts/wt.ps1 land <名称> 合并。确需在这里提交请设 CS_ALLOW_MAIN_COMMIT=1。" >&2
+echo "主工作区不直接提交：用 scripts/wt.ps1 new <名称> 建 worktree 开发，推送功能分支并创建 PR，通过 GitHub 合并。" >&2
 exit 1

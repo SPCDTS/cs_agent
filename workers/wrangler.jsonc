@@ -1,7 +1,7 @@
 // P0 将 NapCat 连接与会话分开，空闲连接可独立休眠。
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "cs-agent",
+  "name": "cs-agent-dev",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
@@ -11,9 +11,8 @@
   // */5：外部事件轮询兜底（Gmail 推送优先）；UTC 19:30 = 北京 03:30：聊天摘要与清理、记忆整理、审计保留（src/maintenance）。
   // index.ts 的 scheduled 按 cron 字符串分派
   "triggers": { "crons": ["*/5 * * * *", "30 19 * * *"] },
-  // 自定义域名在 Cloudflare 托管的 zone 下；*.workers.dev 在国内不稳定，NapCat 反向 WS 只连这个
-  "routes": [{ "pattern": "agent.spcdts.dev", "custom_domain": true }],
-  "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "joule-bucket" }],
+  // 部署时显式选择 deployments 档案；默认只供本地开发与打包检查。
+  "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "cs-agent-assets" }],
   "durable_objects": {
     "bindings": [
       { "name": "THREAD", "class_name": "ThreadDO" },
@@ -54,13 +53,13 @@
   "vars": {
     "CS_AGENT_COMMIT": "dev",
     // 首次默认值；管理台 Sandbox 保存的运行时开关优先，无需部署即可修改。
-    "PUBLIC_ORIGIN": "https://agent.spcdts.dev",
+    "PUBLIC_ORIGIN": "https://agent.example.com",
     "QQ_GROUP_MENTIONS": true,
     "MEMORY_EXTRACT_MODEL": "",
     "MEMORY_EXTRACT_NAMESPACES": "owner",
     "MODEL_PROVIDER": "deepseek",
     "MODEL_ID": "deepseek-flash",
-    "GMAIL_PUBSUB_SERVICE_ACCOUNT": "gmail-push@jule-agent.iam.gserviceaccount.com",
-    "GMAIL_PUBSUB_TOPIC": "projects/jule-agent/topics/gmail-push"
+    "GMAIL_PUBSUB_SERVICE_ACCOUNT": "",
+    "GMAIL_PUBSUB_TOPIC": ""
   }
 }

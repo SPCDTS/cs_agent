@@ -6,7 +6,7 @@ import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/
 import { ThreadMcp } from "../src/mcp";
 import { MCP_CATALOG_SCHEMA } from "../src/mcp/catalog";
 import { MCP_CONFIG, parseMcpConfig } from "../src/mcp/config";
-import config from "../mcp.json";
+import config from "./fixtures/mcp.json";
 import { fakeRemote, login } from "./mcp-helpers";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });

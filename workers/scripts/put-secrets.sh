@@ -3,11 +3,13 @@
 # 读取：仓库根 .env 的 NAPCAT_TOKEN、QQ_OWNER、QQ_ALLOW_USERS、QQ_ALLOW_GROUPS、DEEPSEEK_APIKEY（上传为 DEEPSEEK_API_KEY，可选）；
 # secrets/gmail/client.json 与 token.json（可选）的 GMAIL_CLIENT_ID、GMAIL_CLIENT_SECRET、GMAIL_REFRESH_TOKEN；
 # secrets/admin-token.env、oauth-store-key.env 不存在时就地生成。ChatGPT 订阅不走 secrets，在管理面板登录。
-# 用法：在仓库根执行  bash workers/scripts/put-secrets.sh
+# 用法：在仓库根执行  bash workers/scripts/put-secrets.sh deployments/<档案>.json
 set -euo pipefail
 # 在 worktree 里跑时 .env 与 secrets/ 只在主工作区，用 CS_AGENT_ROOT 指过去
 workers_dir="$(cd "$(dirname "$0")/.." && pwd)"
 root="${CS_AGENT_ROOT:-$(cd "$workers_dir/.." && pwd)}"
+profile="${1:?请显式提供 deployments/<档案>.json}"
+(cd "$workers_dir" && node scripts/deploy.mjs "$profile" --prepare-only)
 env_file="$root/.env"
 [ -f "$env_file" ] || { echo "缺少 $env_file" >&2; exit 1; }
 
@@ -88,5 +90,5 @@ cd "$workers_dir"
     printf '"%s":%s' "$name" "$(printf '%s' "${!name}" | json_escape)"
   done
   printf '}\n'
-} | npx wrangler secret bulk
-echo "已上传必需 secrets、非空 QQ 白名单、DeepSeek key（如有）、可用的 Gmail 与 Workshop 凭据到 Worker cs-agent"
+} | npx wrangler secret bulk --config wrangler.deploy.json
+echo "已上传必需 secrets、非空 QQ 白名单、DeepSeek key（如有）、可用的 Gmail 与 Workshop 凭据到显式选定的 Worker"

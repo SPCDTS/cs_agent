@@ -10,3 +10,7 @@ napcat/
 .external_doc
 secrets/
 /.scratch/
+
+# 部署档案中的私有实例配置及生成文件
+workers/deployments/*.local.json
+workers/wrangler.deploy.json
