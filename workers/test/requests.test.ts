@@ -1,4 +1,4 @@
-import { env, reset, runInDurableObject } from "cloudflare:test";
+import { env, reset, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createAssistantMessageEventStream, type AssistantMessage, type StreamOptions } from "@earendil-works/pi-ai";
@@ -17,6 +17,65 @@ function detail(id: string, at = Date.now()): RequestDetail {
     context: snapshot({ messages: [{ role: "user", content: "你好", timestamp: at }] }) };
 }
 describe("request observability", () => {
+  it("普通写入不清扫历史，alarm清理过期正文及元数据且增量计数与更新一致", async () => {
+    const store = env.REQUESTS.getByName("main"), now = Date.now(), item = detail("updated");
+    await store.record({ ...item, request: { ...item.request, status: "running" } });
+    item.context.messages[0]!.text = "更新后的较长正文";
+    await store.record(item);
+    const tool: ToolTrace = { id: "tool-updated", thread: "owner", binding: { turnId: "turn:updated", inputId: "web:updated", generation: 0 },
+      callId: "call", name: "read", startedAt: now, endedAt: null, status: "running", arguments: { text: "{}", chars: 2, truncated: false } };
+    await store.recordTool(tool);
+    await store.recordTool({ ...tool, status: "done", result: { text: "完成", chars: 2, truncated: false } });
+    await store.record(detail("expired"));
+    await runInDurableObject(store, (_instance, state) => {
+      state.storage.sql.exec("UPDATE requests SET started=? WHERE id='expired'", now - 31 * 86400_000);
+      state.storage.sql.exec("UPDATE request_details SET started=? WHERE id='updated'", now - 8 * 86400_000);
+    });
+    await store.record(detail("new"));
+    expect((await store.detail("expired"))?.detailAvailable).toBe(true);
+    expect((await store.detail("updated"))?.detailAvailable).toBe(true);
+    const consistent = () => runInDurableObject(store, (_instance, state) => {
+      const expected = state.storage.sql.exec(`SELECT (SELECT COUNT(*) FROM requests) AS request_count,
+        (SELECT COALESCE(SUM(bytes),0) FROM request_details)+(SELECT COALESCE(SUM(bytes),0) FROM tool_traces) AS detail_bytes`).one();
+      expect(state.storage.sql.exec("SELECT request_count,detail_bytes FROM request_retention WHERE id=1").one()).toEqual(expected);
+    });
+    await consistent();
+    expect(await runDurableObjectAlarm(store)).toBe(true);
+    await consistent();
+    await runInDurableObject(store, async (_instance, state) => {
+      expect(await state.storage.getAlarm()).not.toBeNull();
+    });
+    expect(await store.detail("expired")).toBeUndefined();
+    expect((await store.detail("updated"))?.detailAvailable).toBe(false);
+    expect((await store.toolDetail(tool.id))?.result?.text).toBe("完成");
+  });
+
+  it("跨过20000条及32MiB时逐出最旧正文，保留最新请求与准确容量计数", async () => {
+    const store = env.REQUESTS.getByName("main"), now = Date.now(), seed = detail("seed", now - 1000);
+    await store.record(seed); // 初始化旧表的增量计数迁移。
+    seed.context.messages[0]!.text = "x".repeat(65_000);
+    const payload = JSON.stringify({ context: seed.context }), bytes = new TextEncoder().encode(payload).byteLength;
+    await runInDurableObject(store, (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec("DELETE FROM requests");
+      sql.exec(`WITH RECURSIVE n(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM n WHERE value<20000)
+        INSERT INTO requests(id,started,thread,model,purpose,status,record)
+        SELECT 'seed:'||value,?,'owner','faux/test','conversation','done',json_set(?,'$.id','seed:'||value) FROM n`, now - 1000, JSON.stringify(seed.request));
+      sql.exec(`INSERT INTO request_details(id,started,bytes,payload) SELECT id,started,?,? FROM requests ORDER BY seq LIMIT 512`, bytes, payload);
+      expect(sql.exec<{ detail_bytes: number }>("SELECT detail_bytes FROM request_retention WHERE id=1").one().detail_bytes).toBeLessThan(33_554_432);
+    });
+    const newest = detail("newest", now); newest.context.messages[0]!.text = "y".repeat(256_000);
+    await store.record(newest);
+    await runInDurableObject(store, (_instance, state) => {
+      const counters = state.storage.sql.exec<{ request_count: number; detail_bytes: number }>("SELECT request_count,detail_bytes FROM request_retention WHERE id=1").one();
+      expect(counters.request_count).toBe(20000);
+      expect(counters.detail_bytes).toBeLessThanOrEqual(33_554_432);
+      expect(counters.detail_bytes).toBe(state.storage.sql.exec<{ bytes: number }>("SELECT SUM(bytes) AS bytes FROM request_details").one().bytes);
+    });
+    expect(await store.detail("seed:1")).toBeUndefined();
+    expect((await store.detail("seed:10"))?.detailAvailable).toBe(false);
+    expect((await store.detail("newest"))?.detailAvailable).toBe(true);
+  });
   it("uses child lifecycle metadata across tool waits and ignores late progress after completion", async () => {
     const store = env.REQUESTS.getByName("main"), now = Date.now(), actor = crypto.randomUUID();
     const activity: SubagentActivity = { thread: "owner", actor, summary: "检查图片读取", description: { kind: "task", text: "检查图片读取", updatedAt: now }, status: "running", version: 1, updatedAt: now };
