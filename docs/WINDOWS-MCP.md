@@ -6,7 +6,7 @@
 
 | 环境 | 文件与系统状态 | 生命周期 | 工具 |
 | --- | --- | --- | --- |
-| Hyper-V VM | 保存在 VM 磁盘；`.git`、`node_modules`、安装的软件可长期保留 | 管理员预先创建并启动；取消任务只终止任务进程树，不关机、删除或回滚 VM | PowerShell、任务查询/取消；配置桌面用户后增加截图、键鼠输入 |
+| Hyper-V VM | 保存在 VM 磁盘；`.git`、`node_modules`、安装的软件可长期保留 | 管理员预先创建并启动；取消任务只终止任务进程树，不关机、删除或回滚 VM | PowerShell、任务查询/取消；桌面操作使用 VM 内独立 MCP |
 | WSB | 同一 session 中可复用；`C:\AgentWork` 与其他来宾目录全部易失 | 首次提交创建，显式关闭、活跃任务取消、空闲或硬期限销毁 | PowerShell、任务查询/取消、关闭 session |
 
 WSB 不映射宿主项目、源码或依赖缓存。仅映射执行所需的只读 Node/guest 程序、当前命令只读输入及窄范围结果输出。旧连接器的 `dataDir`、`D:\sandbox-data` 等已有用户目录不迁移、不读取、不删除。
@@ -42,7 +42,6 @@ npm --prefix runner start -- init --state D:\windows-mcp-state
       "vmId": "00000000-0000-0000-0000-000000000000",
       "credentialPath": "D:\\private\\vm-credential.xml",
       "guestWorkdir": "C:\\AgentWork",
-      "desktopUser": "DEVVM\\agent",
       "instructions": "用于长期开发；已有工具链和仓库位于 C:\\AgentWork。"
     },
     {
@@ -71,7 +70,7 @@ npm --prefix runner start -- run --config D:\windows-mcp-state\config.json
 
 ## 一次性准备 Hyper-V 来宾
 
-先在 VM 中创建工作目录，准备来宾管理员账户和可选的已登录桌面用户。由运行本服务的同一 Windows 身份保存凭据；`Export-Clixml` 在 Windows 使用 DPAPI，文件不能换到其他用户或设备直接使用：
+先在 VM 中创建工作目录，准备来宾管理员账户。由运行本服务的同一 Windows 身份保存凭据；`Export-Clixml` 在 Windows 使用 DPAPI，文件不能换到其他用户或设备直接使用：
 
 ```powershell
 $credential = Get-Credential
@@ -79,42 +78,20 @@ $credential | Export-Clixml -LiteralPath D:\private\vm-credential.xml -Encoding 
 .\runner\scripts\prepare-hyperv.ps1 `
   -VmId 真实VM的GUID `
   -CredentialPath D:\private\vm-credential.xml `
-  -GuestWorkdir C:\AgentWork `
-  -DesktopUser 'DEVVM\agent'
+  -GuestWorkdir C:\AgentWork
 ```
 
-准备脚本在选定来宾的 `ProgramData\CsAgentHyperv` 安装固定 helper，并注册按需启动的 shell/desktop 计划任务；不创建新账户或常驻服务。PowerShell Direct 只传递结构化数据，模型脚本由来宾解释，不进入宿主 PowerShell 求值。
+准备脚本在选定来宾的 `ProgramData\CsAgentHyperv` 安装固定 helper，并注册按需启动的 shell 计划任务；不创建新账户或常驻服务。PowerShell Direct 只传递结构化数据，模型脚本由来宾解释，不进入宿主 PowerShell 求值。
 
 shell 使用现有来宾账户的 S4U 限权任务：该账户须允许批处理登录；依赖 Windows 用户凭据的网络访问及加密文件不可用。普通 HTTPS 下载可用，Git/包管理器仍需在来宾内配置各自凭据。每条命令由 Job Object 约束，先暂停创建进程、加入任务对象再恢复，避免子进程提前逃离监督。
 
-桌面任务使用指定用户的 InteractiveToken，只作用于 VM 中已登录且未锁定的普通桌面。未登录、锁屏或 UAC 安全桌面返回不可用；服务不会自动登录、解锁或绕过 UAC。截图返回最多 30 秒有效的 `frameId`，输入还会校验作用域、桌面会话、坐标和屏幕拓扑。宿主鼠标、键盘与显示器不参与这些操作。
+## 独立桌面服务与迁移
 
-## 交互桌面的原生 MCP
+桌面操作由 VM 内的独立 HTTP MCP 提供，安装、认证、Tunnel 和会话边界见 [桌面 MCP](DESKTOP-MCP.md)。宿主服务只提供后台任务，不再发现或转发原生桌面工具，也不再提供 screen/input。
 
-后台 PowerShell 的 S4U 任务运行在 Session 0，不能操作登录用户的 UI 树。需要使用 agent-desktop 等原生 stdio MCP 时，先完成上面的来宾准备，在 VM 内安装 Node.js 24+ 和原生程序，再运行以下命令。路径均指向 **VM 内**，安装脚本不会下载软件或修改后台任务。
+从旧部署迁移时：先安装并验证独立服务，再在管理页新增桌面 MCP、选择原生工具并启用；确认旧桌面调用已结束后，停止并注销来宾的 `CsAgentHypervMcpV1` 和 `CsAgentHypervDesktopV1`，清理旧桌面进程。删除旧目录 `CsAgentHyperv` 中的 `desktop-mcp-*.ps1`、`desktop-mcp-cli.cjs`、`desktop-mcp.json`、`desktop-mcp-node.txt`、`Desktop.cs` 和 `DesktopContext.exe`，保留后台 jobs 和执行收据。
 
-```powershell
-npm --prefix runner run build
-.\runner\scripts\prepare-desktop-mcp.ps1 `
-  -VmId 真实VM的GUID `
-  -CredentialPath D:\private\vm-credential.xml `
-  -GuestWorkdir C:\AgentWork `
-  -DesktopUser 'DEVVM\agent' `
-  -NodePath 'C:\Tools\node\node.exe' `
-  -Command 'C:\Tools\agent-desktop-win32-x64.exe' `
-  -McpArguments @('mcp', '--headed') `
-  -ScopeArgument '--session'
-```
-
-选择真实可执行文件，不使用 .cmd shim。启用物理键鼠的 `--headed` 会与用户共用 VM 的焦点；只需语义 UIA 操作时可传 `@('mcp')`。`ScopeArgument` 是原生程序的命名空间参数；其他 stdio MCP 无此参数时传空字符串，仅保留独立连接，不保证其磁盘引用隔离。
-
-在本机 config.json 对应 Hyper-V target 设置 `"desktopMcp": true` 后重启 Windows MCP 服务。来宾新增 `CsAgentHypervMcpV1` 登录任务，以指定用户的 InteractiveToken、非提升权限隐藏运行；退出用户会话后停止，下次登录自动启动。它通过受 Token 保护的命名管道接收 PowerShell Direct 转发，不给 VM 开 TCP 端口，不需要新 Tunnel。更新桥接前先等待桌面调用结束，再停止该任务并重跑安装。
-
-原生工具自动映射为 `vm_<id>_<原生名称>`，保留输入/输出 schema、原生错误、structuredContent 与图片块，例如 `vm_dev_desktop_snapshot`、`vm_dev_desktop_click`。通过现有 MCP 管理页重新检测并选择工具；agent-desktop 1.2.0 的 67 个工具加现有 9 个共 76 个，因此本项目将每个服务的可见工具限额配置为 128。未知第三方工具不能仅凭名称判定只读，按其实际行为配置。
-
-桌面调用直接返回原生 MCP 结果，不生成 shell Job。最多保留 8 个调用作用域的原生连接，空闲 10 分钟回收；同一 VM 的这些调用串行执行。认证 principal、调用 scope、VM ID 共同决定命名空间，登录身份或显示拓扑变化会换命名空间；并不复制桌面或应用。每次调用前检查正确用户、活动交互会话和普通桌面，锁屏、UAC 安全桌面或断开的会话拒绝执行。
-
-工具执行传输有 45 秒期限，排队也计时；目录发现使用更短期限。桌面暂时不可用时保留已发现目录，首次未发现时仍提供原有 shell/WSB 工具。执行中超时、断线或结果过大意味着结果未知，不能自动重放；重新观察桌面再决定下一步。管道响应上限 12 MiB。首次调用原生工具前读取 `desktop_skills_get` 的 `desktop`、`platform` 指南；引用失效后重新 snapshot。Code Mode 要把返回的 image 内容块交给 `image(block)` 才能让模型看到截图。
+从宿主 config.json 的 Hyper-V target 移除 `desktopMcp`、`desktopUser`，重新运行 `prepare-hyperv.ps1` 更新后台助手，再重启宿主服务并重新检测、启用剩余后台工具。旧字段会被配置校验拒绝；不保留悄悄失效的兼容开关。新旧 MCP 的工具名与控件引用不同，迁移后重新发现工具并获取窗口快照。
 
 ## 接入 Cloudflare
 
@@ -129,13 +106,13 @@ ingress:
   - service: http_status:404
 ```
 
-在 cs-agent 管理页“模型与接入 → MCP 服务”保存 `https://windows-mcp.example.com/mcp`，认证方式选 Token，通过安全输入框填写 `WINDOWS_MCP_TOKEN` 对应值，检测后选择工具并启用。可读工具选择 `*_job_get`、`*_screen`；submit、input、cancel、close 都会改变状态，不能列为只读。不再使用 Sandbox 标签、配对码、设备审批或 `REMOTE_SANDBOX_ENABLED`。
+在 cs-agent 管理页“模型与接入 → MCP 服务”保存 `https://windows-mcp.example.com/mcp`，认证方式选 Token，通过安全输入框填写 `WINDOWS_MCP_TOKEN` 对应值，检测后选择工具并启用。可读工具选择 `*_job_get`；submit、cancel、close 都会改变状态，不能列为只读。不再使用 Sandbox 标签、配对码、设备审批或 `REMOTE_SANDBOX_ENABLED`。
 
-通用 MCP 权限、群授权与逐次审批继续生效。Worker 会在调用元数据中附带可信 `cs-agent/caller.scope`，服务将任务、临时会话及截图绑定到认证 principal 和这个 scope。它不是模型可填写的工具参数。其他标准 MCP 客户端不传此扩展时，使用该 principal 的默认 scope。
+通用 MCP 权限、群授权与逐次审批继续生效。Worker 会在调用元数据中附带可信 `cs-agent/caller.scope`，服务将任务及临时会话绑定到认证 principal 和这个 scope。它不是模型可填写的工具参数。其他标准 MCP 客户端不传此扩展时，使用该 principal 的默认 scope。
 
 ## Agent 的调用流程
 
-配置中的 `dev` 生成 `vm_dev_submit/job_get/job_cancel` 以及可选 `vm_dev_screen/input`；`temp` 生成 `wsb_temp_submit/job_get/job_cancel/close`。这些 raw tool 名通过已有 MCP/Code Mode 命名空间暴露，具体调用名以发现的工具目录为准。
+配置中的 `dev` 生成 `vm_dev_submit/job_get/job_cancel`；`temp` 生成 `wsb_temp_submit/job_get/job_cancel/close`。这些 raw tool 名通过已有 MCP/Code Mode 命名空间暴露，具体调用名以发现的工具目录为准。
 
 1. 生成一个 UUID 作为 `requestId`，提交 `script`，可带来宾 `cwd` 和 `timeoutMs`。默认期限 120 秒，最多 20 分钟，包含排队时间。
 2. 立即得到任务收据，再用同一个 `requestId` 查询。任务完成后读取 stdout、stderr、exitCode。
@@ -154,7 +131,7 @@ npm --prefix runner run test:wsb
 npm run check
 ```
 
-普通测试包含官方 MCP SDK 的真实 HTTP 调用、任务去重/重启/权限隔离和原生后端模拟。`test:wsb` 只操作专用测试状态和自己创建的原生实例，验证多命令、重连、临时文件、取消与销毁；不使用旧持久目录。Hyper-V helper 的语法、编译和模拟测试不能代替真实 VM 验证，部署前应在准备好的 VM 验证持久文件、长命令取消、截图和输入。
+普通测试包含官方 MCP SDK 的真实 HTTP 调用、任务去重/重启/权限隔离和原生后端模拟。`test:wsb` 只操作专用测试状态和自己创建的原生实例，验证多命令、重连、临时文件、取消与销毁；不使用旧持久目录。Hyper-V helper 的语法、编译和模拟测试不能代替真实 VM 验证，部署前应在准备好的 VM 验证持久文件、长命令取消；桌面验证在独立服务进行。
 
 任务主账本是本机 SQLite；来宾只提供有界执行证据。去重回执不自动清除，达到 4096 条或账本文件 128 MiB 后拒绝新提交，以免静默失去幂等语义。维护时先完成/取消全部任务并关闭 WSB，再停服务、归档整个专用状态目录；使用新目录相当于开启新执行历史，旧请求不能再作为自动重试发送。
 

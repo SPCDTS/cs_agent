@@ -12,28 +12,21 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { Jobs } from '../src/jobs.ts';
 import { createMcpHttpServer } from '../src/server.ts';
 import { parseConfig } from '../src/config.ts';
-import { CALLER_META_KEY, type Backend, type Execution, type ServerConfig, type Subject } from '../src/domain.ts';
+import { CALLER_META_KEY, type Backend, type Execution, type ServerConfig } from '../src/domain.ts';
 test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、身份隔离、参数与认证拒绝', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'windows-mcp-http-')), calls: Execution[] = [];
-  let desktopAvailable = false;
-  const nativeCalls: Array<{ subject: Subject; name: string; args: Record<string, unknown> }> = [];
-  const nativeTool = { name: 'desktop_snapshot', inputSchema: { type: 'object' as const, properties: { app: { type: 'string' } }, additionalProperties: false } };
-  const nativeResult = { content: [{ type: 'image' as const, data: 'aGVsbG8=', mimeType: 'image/png' }], structuredContent: { ok: true, snapshot: 'native' } };
   const backend: Backend = {
-    async desktopTools() { if (!desktopAvailable) throw new Error('desktop_unavailable'); return { tools: [nativeTool], instructions: '原生指南' }; },
-    async desktopCall(_target, subject, name, args) { nativeCalls.push({ subject, name, args }); return nativeResult; },
     async dispatch(e) { calls.push(e); },
     async inspect() { return { state: 'succeeded', result: { exitCode: 0, stdout: '测试通过', stderr: '', truncated: false } }; },
     async stop() { return { state: 'cancelled' }; }, async closeSession() { return true; },
-    async screen() { return { frameId: 'frame', width: 1, height: 1, mimeType: 'image/png', data: 'aGVsbG8=' }; },
   };
   const config: ServerConfig = { stateDir: dir, host: '127.0.0.1', port: 7791, principals: [{ id: 'worker', tokenEnv: 'TEST_TOKEN' }], targets: [
-    { kind: 'hyperv', id: 'dev', vmId: randomUUID(), credentialPath: 'C:\\credential.xml', guestWorkdir: 'C:\\Work', desktopUser: 'dev', desktopMcp: true },
+    { kind: 'hyperv', id: 'dev', vmId: randomUUID(), credentialPath: 'C:\\credential.xml', guestWorkdir: 'C:\\Work' },
     { kind: 'wsb', id: 'temp', memoryMb: 2048, idleTimeoutMs: 60000, maxLifetimeMs: 3600000 },
   ] };
   const backends = { hyperv: backend, wsb: backend }, jobs = new Jobs(dir, backends);
   jobs.bindTargets(config.targets);
-  const server = createMcpHttpServer(config, jobs, backends, { TEST_TOKEN: 'x'.repeat(64) });
+  const server = createMcpHttpServer(config, jobs, { TEST_TOKEN: 'x'.repeat(64) });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const url = new URL(`http://127.0.0.1:${address.port}/mcp`);
@@ -44,21 +37,13 @@ test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、�
     await client.connect(new StreamableHTTPClientTransport(url, { requestInit: { headers: { Authorization: 'Bearer ' + 'x'.repeat(64) } } })); return client;
   }
   const client = await connect();
-  const offline = await client.listTools();
-  assert.ok(offline.tools.some(tool => tool.name === 'wsb_temp_submit'));
-  assert.ok(!offline.tools.some(tool => tool.name === 'vm_dev_desktop_snapshot'));
-  desktopAvailable = true;
   const catalog = await client.listTools();
   assert.ok(catalog.tools.some(tool => tool.name === 'wsb_temp_close'));
-  assert.ok(catalog.tools.some(tool => tool.name === 'vm_dev_input' && tool.outputSchema));
+  assert.equal(catalog.tools.length, 7);
+  assert.ok(!catalog.tools.some(tool => /desktop|_screen|_input/.test(tool.name)));
+  assert.equal((await call(client, { name: 'vm_dev_screen', arguments: {} })).isError, true);
   assert.match(catalog.tools.find(tool => tool.name === 'wsb_temp_submit')!.description!, /都不持久/);
   assert.ok(!catalog.tools.some(tool => /sandbox_|acquire|register/.test(tool.name)));
-  assert.deepEqual(catalog.tools.find(tool => tool.name === 'vm_dev_desktop_snapshot')?.inputSchema, nativeTool.inputSchema);
-  const nativeMeta = { [CALLER_META_KEY]: { scope: 'c'.repeat(64) } };
-  assert.deepEqual(await call(client, { name: 'vm_dev_desktop_snapshot', arguments: { app: 'probe' }, _meta: nativeMeta }), nativeResult);
-  assert.deepEqual(nativeCalls, [{ subject: { principal: 'worker', scope: 'c'.repeat(64) }, name: 'desktop_snapshot', args: { app: 'probe' } }]);
-  assert.equal((await call(client, { name: 'vm_dev_desktop_snapshot', arguments: {}, _meta: { [CALLER_META_KEY]: { scope: '' } } })).isError, true);
-  assert.equal(nativeCalls.length, 1);
   const id = randomUUID(), meta = { [CALLER_META_KEY]: { scope: 'a'.repeat(64) } };
   const submitted = await call(client, { name: 'wsb_temp_submit', arguments: { requestId: id, script: 'Write-Output 测试' }, _meta: meta });
   assert.equal(submitted.isError, undefined); assert.equal(submitted.structuredContent?.state, 'queued');
@@ -77,8 +62,6 @@ test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、�
   assert.equal(changed.isError, true);
   const invalidMeta = await call(second, { name: 'wsb_temp_job_get', arguments: { requestId: id }, _meta: { [CALLER_META_KEY]: { scope: '' } } });
   assert.equal(invalidMeta.isError, true);
-  const shot = await call(second, { name: 'vm_dev_screen', arguments: {}, _meta: meta });
-  assert.equal(shot.structuredContent?.frameId, 'frame'); assert.equal((shot.content as Array<{type:string}>)[0]?.type, 'image');
   assert.equal((await fetch(url, { method: 'POST' })).status, 401);
   const headers = { Authorization: 'Bearer ' + 'x'.repeat(64), 'Content-Type': 'application/json' };
   assert.equal((await fetch(url, { method: 'POST', headers: { ...headers, Origin: 'https://attacker.example' }, body: '{}' })).status, 403);
@@ -95,5 +78,5 @@ test('配置只允许明确的持久 VM/临时 WSB，拒绝旧连接器配置与
   assert.throws(() => parseConfig({ ...valid, targets: [...valid.targets, ...valid.targets] }), /duplicate_id/);
   const vm = { kind: 'hyperv', id: 'dev', vmId: randomUUID(), credentialPath: path.resolve('secret.xml'), guestWorkdir: 'C:\\AgentWork' };
   assert.equal(parseConfig({ ...valid, targets: [vm] }).targets[0]?.kind, 'hyperv');
-  assert.throws(() => parseConfig({ ...valid, targets: [{ ...vm, desktopMcp: true }] }), /desktop_user_required/);
+  assert.throws(() => parseConfig({ ...valid, targets: [{ ...vm, desktopMcp: true }] }), /invalid_windows_mcp_config/);
 });
