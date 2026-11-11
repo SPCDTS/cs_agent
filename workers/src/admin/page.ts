@@ -1,3 +1,4 @@
+import { GITHUB_APP_JS } from "./github-ui";
 import { ADMIN_PAGE_SIZE } from "./pagination";
 import { PAGINATION_APP_JS } from "./pagination-ui";
 import { MCP_ADMIN_HTML, MCP_ADMIN_APP_JS } from "./mcp-ui";
@@ -331,7 +332,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     view_pending: "展示数据尚未同步，请稍后刷新。升级后的历史数据将在维护任务中补齐。",
     busy: "会话正在运行或压缩，请先停止或等待完成后重试",
     invalid_cursor: "历史分页标记已失效，请重新打开历史",
-    conflict: "数据已被别处修改，已载入最新值，请确认后再保存",
+    conflict: "数据已被别处修改，请确认最新值后再保存",
     invalid_request: "请求格式不正确",
     invalid_json: "请求格式不正确",
     invalid_namespace: "命名空间只能是 owner 或 group:群号",
@@ -706,6 +707,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     refresh();
   }
 
+  ${GITHUB_APP_JS}
   const SOURCE_PAUSE = { manual: "手动暂停", turn_failures: "连续 3 次事件回合失败" };
   const SOURCE_RUN = { queued: ["处理中", "warn"], sent: ["已发送", "ok"], silent: ["未打扰", "neutral"], failed: ["失败", "bad"] };
   async function loadSources() {
@@ -720,6 +722,7 @@ export const ADMIN_APP_JS = String.raw`"use strict";
     paginateChildren(box);
   }
   function renderSource(source, view) {
+    if (source.id === "github") return renderGitHub(source, view.github);
     const status = source.paused ? ["已暂停", "warn"] : source.degraded ? ["降级", "bad"] : ["正常", "ok"];
     const facts = ["游标 " + (source.cursor ? "已建立" : "无"), "上次轮询 " + bjTime(source.lastPollAt), "积压 " + source.held,
       "本小时预算 " + source.budget.used + " / " + source.budget.perHour];

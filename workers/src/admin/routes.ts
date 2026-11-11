@@ -1,3 +1,4 @@
+import { readBounded, WebhookError } from "../github/model";
 import { threadView, workspaceView } from "./read-views";
 import { ADMIN_PAGE_SIZE } from "./pagination";
 import { workspaceRoutes } from "./workspace-routes";
@@ -234,6 +235,22 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       // ScheduleDO 的错误是自己的固定分类文本（如 overlap、paused），不含用户正文。
       throw new HttpError(400, error instanceof Error ? error.message.slice(0, 200) : "failed");
     }
+  } },
+
+  { method: "GET", path: /^\/admin\/github\/receipts\/(?<id>[A-Za-z0-9-]{1,80})$/, handle: async ({ env, params }) => {
+    const receipt = await env.EVENTS.getByName("main").githubReceipt(params.id!);
+    if (!receipt) throw new HttpError(404, "not_found");
+    return json(receipt);
+  } },
+  { method: "PUT", path: "/admin/github/config", handle: async ({ env, request }) => {
+    let value: unknown;
+    try { value = JSON.parse(new TextDecoder().decode(await readBounded(request, 16384))); }
+    catch (error) { throw new HttpError(error instanceof WebhookError ? error.status : 400, "invalid_request"); }
+    if (!value || typeof value !== "object" || !("value" in value) || !("expectedRevision" in value)
+      || typeof value.expectedRevision !== "string" || !/^[0-9]{1,16}$/.test(value.expectedRevision)) throw new HttpError(400, "invalid_request");
+    const result = await env.EVENTS.getByName("main").putGitHubConfig(value.value, value.expectedRevision);
+    if (!result.ok) throw new HttpError(result.error === "conflict" ? 409 : 400, result.error, "current" in result ? { current: result.current } : {});
+    return json(result.current);
   } },
 
   // 外部事件来源；/admin/events 已是线程审计事件，这里另起前缀。

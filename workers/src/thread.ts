@@ -569,6 +569,23 @@ export class ThreadDO extends DurableObject<Env> {
         const admissible = rows.slice(0, barrier < 0 ? rows.length : barrier);
         if (admissible.length) await this.syncModel(runtime);
         for (const row of admissible) {
+          if (row.kind === "event" && row.message_id.startsWith("evt_github_")) {
+            // Do not put GitHub work into Harness's busy queue: authorize only at an idle admission boundary.
+            if (!await this.idle(runtime)) {
+              if (!this.idleWait) {
+                this.idleWait = runtime.harness.waitForIdle(context).then(() => { this.idleWait = undefined; return this.requestPump(true); });
+                this.ctx.waitUntil(this.idleWait);
+              }
+              return;
+            }
+            const permit = await this.env.EVENTS.getByName("main").claimGitHubRun(row.message_id);
+            if (permit === "wait") return; // Config edits wake the pump; periodic EventsDO reconciliation is the recovery backstop.
+            if (permit === "suppressed") {
+              await this.database.run("UPDATE inbound SET status='done' WHERE message_id=?", row.message_id);
+              await this.env.EVENTS.getByName("main").finishRun(row.message_id, "silent");
+              continue;
+            }
+          }
           let submission: Submission | undefined;
           try { submission = await this.admit(runtime, row); }
           catch { await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ?", row.message_id); }

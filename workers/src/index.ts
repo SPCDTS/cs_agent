@@ -6,6 +6,7 @@ import { publicOrigin } from "./mcp/config";
 import { oauthErrorCode } from "./mcp/oauth-fetch";
 import type { Env } from "./env";
 import { MAINTENANCE_CRON, runMaintenance } from "./maintenance";
+import { readWebhook, WebhookError } from "./github/model";
 import { readPush, verifyPushToken } from "./gmail/pubsub";
 
 export { RequestsDO } from "./requests/do";
@@ -29,6 +30,22 @@ export default {
     const url = new URL(request.url), path = url.pathname;
     const media = await handleMediaRequest(request, { bucket: env.ASSETS, authenticateAdmin: req => authenticated(req, env.ADMIN_TOKEN) });
     if (media) return media;
+    if (request.method === "POST" && path === "/github/webhook") {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race([
+          (async () => {
+            const delivery = await readWebhook(request, env.GITHUB_WEBHOOK_SECRET);
+            return env.EVENTS.getByName("main").receiveGitHub(delivery);
+          })(),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new WebhookError(503, "receipt_timeout")), 9000); }),
+        ]);
+        return Response.json({ status: result.code }, { status: result.status, headers: { "Cache-Control": "no-store" } });
+      } catch (error) {
+        return Response.json({ error: error instanceof WebhookError ? error.code : "receipt_unavailable" },
+          { status: error instanceof WebhookError ? error.status : 503, headers: { "Cache-Control": "no-store" } });
+      } finally { clearTimeout(timer); }
+    }
     if (request.method === "POST" && path === "/gmail/pubsub") {
       // 未配置服务账号即视为推送未启用；Pub/Sub 要求快速确认，真正的拉取放到 waitUntil。
       const account = env.GMAIL_PUBSUB_SERVICE_ACCOUNT?.trim();

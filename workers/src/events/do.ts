@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import { GitHubInbox } from "../github/inbox";
+import { DEFAULT_GITHUB, type GitHubDelivery } from "../github/model";
 import type { Env } from "../env";
 import { ownerIds, type InboundInput } from "../policy";
 import { GmailClient, type SendRequest } from "../gmail/client";
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS gmail_send_receipts (key TEXT PRIMARY KEY, message_id
  */
 export class EventsDO extends DurableObject<Env> {
   private readonly sql = this.ctx.storage.sql;
+  private readonly github: GitHubInbox;
   private readonly auth: GmailAuth;
   private readonly gmail: GmailClient;
   private readonly sources: ReadonlyMap<string, EventSource>;
@@ -55,11 +58,40 @@ export class EventsDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql.exec(SCHEMA);
+    this.github = new GitHubInbox(this.ctx.storage);
     this.auth = new GmailAuth(this.sql, env);
     this.gmail = new GmailClient(this.auth);
-    this.sources = new Map([["gmail", { id: "gmail", configured: () => this.auth.configured(), poll: (cursor, limit, signal) => this.gmail.events(cursor, limit, signal) }]]);
-    for (const id of this.sources.keys()) this.sql.exec("INSERT OR IGNORE INTO event_source (id, settings_json) VALUES (?, ?)", id, JSON.stringify(DEFAULT_SETTINGS));
+    this.sources = new Map<string, EventSource>([["gmail", { id: "gmail", configured: () => this.auth.configured(), poll: (cursor, limit, signal) => this.gmail.events(cursor, limit, signal) }], ["github", { id: "github", configured: () => !!env.GITHUB_WEBHOOK_SECRET }]]);
+    for (const id of this.sources.keys()) this.sql.exec("INSERT OR IGNORE INTO event_source (id, settings_json) VALUES (?, ?)", id, JSON.stringify(id === 'github' ? DEFAULT_GITHUB.settings : DEFAULT_SETTINGS));
   }
+
+  async receiveGitHub(delivery: GitHubDelivery) {
+    // Durable wake-up precedes the atomic receipt+held transaction; Cron is the recovery backstop.
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm > Date.now() + 1000) await this.ctx.storage.setAlarm(Date.now() + 1000);
+    const result = this.github.receive(delivery);
+    await this.ctx.storage.sync();
+    return result;
+  }
+
+  async putGitHubConfig(value: unknown, expectedRevision: string) {
+    const wasPaused = !!this.source("github")?.paused;
+    const result = this.github.put(value, expectedRevision);
+    if (result.ok && wasPaused && !result.current.value.paused) await this.ctx.storage.put("resumed:github", Date.now());
+    if (result.ok) {
+      await this.ctx.storage.setAlarm(Date.now() + 1000);
+      // An input paused after Thread enqueue has no held row. Wake its durable pump on edits/resume.
+      const keys = this.sql.exec<{ input_key: string }>("SELECT DISTINCT input_key FROM github_receipt WHERE input_key IS NOT NULL AND state IN ('enqueued','suppressed') AND EXISTS (SELECT 1 FROM event_run r WHERE r.input_key=github_receipt.input_key AND r.status='queued') LIMIT 200").toArray();
+      this.ctx.waitUntil(Promise.all(keys.map(row => this.env.THREAD.getByName("owner").eventOutcome(row.input_key))).catch(() => {
+        console.error({ event: "github_resume_wake_failed" });
+      }));
+    }
+    return result;
+  }
+
+  githubReceipt(id: string) { return this.github.receipt(id); }
+
+  claimGitHubRun(key: string) { return this.github.claim(key); }
 
   private source(id: string): SourceRow | undefined {
     return this.sql.exec<SourceRow>("SELECT * FROM event_source WHERE id = ?", id).toArray()[0];
@@ -67,7 +99,7 @@ export class EventsDO extends DurableObject<Env> {
   private settings(row: SourceRow): SourceSettings {
     let value: unknown;
     try { value = JSON.parse(row.settings_json); } catch { value = undefined; }
-    return parseSettings(value) ?? DEFAULT_SETTINGS;
+    return parseSettings(value) ?? (row.id === "github" ? DEFAULT_GITHUB.settings : DEFAULT_SETTINGS);
   }
 
   /** 定时与推送共用；同一来源单飞，推送在拉取进行中到达时再拉一轮，避免漏掉刚写入的 history。 */
@@ -94,7 +126,7 @@ export class EventsDO extends DurableObject<Env> {
 
   private async pollOnce(id: string, force: boolean): Promise<void> {
     const source = this.sources.get(id), row = this.source(id);
-    if (!source || !row || !row.enabled || row.paused) return;
+    if (!source?.poll || !row || !row.enabled || row.paused) return;
     if (!source.configured()) {
       this.sql.exec("UPDATE event_source SET last_error_code = 'unconfigured' WHERE id = ?", id);
       return;
@@ -158,6 +190,7 @@ export class EventsDO extends DurableObject<Env> {
 
   private async flushNow(): Promise<void> {
     const now = Date.now();
+    this.github.prune();
     this.sql.exec("DELETE FROM event_seen WHERE delivered_at < ?", now - SEEN_RETENTION);
     this.sql.exec("DELETE FROM event_run WHERE delivered_at < ? AND status != 'queued'", now - SEEN_RETENTION);
     this.sql.exec("DELETE FROM gmail_send_receipts WHERE sent_at < ?", now - RECEIPT_RETENTION);
@@ -167,12 +200,14 @@ export class EventsDO extends DurableObject<Env> {
   }
 
   private async flushSource(id: string, now: number): Promise<void> {
+    if (id === 'github') this.github.reauthorize();
     for (const { input_key } of this.sql.exec<{ input_key: string }>("SELECT DISTINCT input_key FROM event_held WHERE source = ? AND input_key IS NOT NULL", id).toArray()) {
       await this.deliver(id, input_key);
     }
     const row = this.source(id);
     if (!row || !row.enabled || row.paused) return;
     const settings = this.settings(row);
+    if (id === "github") this.sql.exec("UPDATE event_held SET reason='merge' WHERE source='github' AND input_key IS NULL AND reason='budget'");
     const held = this.sql.exec<HeldRow>("SELECT * FROM event_held WHERE source = ? AND input_key IS NULL ORDER BY received_at, rowid", id).toArray();
     const pending = held.filter(item => item.reason !== "budget");
     let extras = held.filter(item => item.reason === "budget");
@@ -193,6 +228,7 @@ export class EventsDO extends DurableObject<Env> {
       const batch = pending.splice(0, BATCH), inputKey = batch[0]!.key, keys = [...batch, ...extras].map(item => item.key);
       extras = [];
       this.ctx.storage.transactionSync(() => {
+        if (id === "github") this.github.enqueued(keys, inputKey);
         this.sql.exec("INSERT INTO event_run (input_key, source, keys_json, delivered_at, status) VALUES (?, ?, ?, ?, 'queued')", inputKey, id, JSON.stringify(keys), now);
         for (const key of keys) {
           this.sql.exec("INSERT OR IGNORE INTO event_seen (key, source, delivered_at) VALUES (?, ?, ?)", key, id, now);
@@ -200,6 +236,8 @@ export class EventsDO extends DurableObject<Env> {
         }
       });
       await this.deliver(id, inputKey);
+      // Re-read policy/held rows on the next alarm, not a stale batch after an RPC yield.
+      if (id === "github") return;
     }
   }
 
@@ -225,6 +263,7 @@ export class EventsDO extends DurableObject<Env> {
   /** ThreadDO 在事件回合结算后回报；sent / silent 看本回合是否发出消息。 */
   async finishRun(key: string, status: EventRunStatus): Promise<void> {
     if (status === "queued") return;
+    if (key.startsWith("evt_github_")) this.github.finish(key, status);
     const run = this.sql.exec<{ source: string }>("UPDATE event_run SET status = ?, ended_at = ? WHERE input_key = ? AND status = 'queued' RETURNING source", status, Date.now(), key).toArray()[0];
     console.log({ event: "event_turn", key, result: status });
     if (!run || status !== "failed") return;
@@ -233,6 +272,7 @@ export class EventsDO extends DurableObject<Env> {
     const recent = this.sql.exec<{ status: string }>("SELECT status FROM event_run WHERE source = ? AND status != 'queued' AND ended_at > ? ORDER BY ended_at DESC, rowid DESC LIMIT 3", run.source, since).toArray();
     if (recent.length < 3 || recent.some(item => item.status !== "failed")) return;
     if (this.sql.exec("UPDATE event_source SET paused = 1, pause_reason = 'turn_failures' WHERE id = ? AND paused = 0", run.source).rowsWritten) {
+      if (run.source === "github") { const current = this.github.snapshot(); this.github.put({ ...current.value, paused: true }, current.revision); }
       await this.alert(`paused:${run.source}`, `外部事件来源 ${run.source} 连续 3 次事件回合失败，已暂停；修复后在管理端点恢复。`);
     }
   }
@@ -256,10 +296,15 @@ export class EventsDO extends DurableObject<Env> {
       const row = this.source(id);
       if (!row || !row.enabled || row.paused) continue;
       const settings = this.settings(row);
-      const first = this.sql.exec<HeldRow>("SELECT * FROM event_held WHERE source = ? AND input_key IS NULL AND reason != 'budget' ORDER BY received_at, rowid LIMIT 1", id).toArray()[0];
+      const first = this.sql.exec<HeldRow>("SELECT * FROM event_held WHERE source = ? AND input_key IS NULL AND (reason != 'budget' OR source='github') ORDER BY received_at, rowid LIMIT 1", id).toArray()[0];
       if (first) {
         const quiet = quietRemaining(settings.quietHours, now);
-        times.push(quiet > 0 ? now + quiet : first.received_at + settings.mergeWindowS * 1000);
+        let due = quiet > 0 ? now + quiet : first.received_at + settings.mergeWindowS * 1000;
+        if (id === "github" && this.budgetUsed(id) >= settings.budgetPerHour) {
+          const oldest = this.sql.exec<{ at: number }>("SELECT MIN(delivered_at) AS at FROM event_run WHERE source='github' AND delivered_at > ?", now - HOUR).one();
+          due = Math.max(due, oldest.at + HOUR + 1);
+        }
+        times.push(due);
       }
     }
     if (this.sql.exec("SELECT 1 FROM event_held WHERE input_key IS NOT NULL LIMIT 1").toArray().length) times.push(now + MINUTE);
@@ -365,11 +410,11 @@ export class EventsDO extends DurableObject<Env> {
       key: run.input_key, source: run.source, events: (JSON.parse(run.keys_json) as unknown[]).length,
       deliveredAt: run.delivered_at, status: run.status, endedAt: run.ended_at }));
     const watch = this.sql.exec<{ expiration: number }>("SELECT expiration FROM gmail_watch WHERE id = 'owner'").toArray()[0];
-    return { sources, runs, watch: { topic: !!this.watchTopic(), expiration: watch?.expiration ?? null } };
+    return { sources, runs, github: { ...this.github.status(), configured: !!this.env.GITHUB_WEBHOOK_SECRET }, watch: { topic: !!this.watchTopic(), expiration: watch?.expiration ?? null } };
   }
 
   async setPaused(id: string, paused: boolean): Promise<boolean> {
-    if (!this.sources.has(id)) return false;
+    if (!this.sources.has(id) || id === "github") return false;
     this.sql.exec("UPDATE event_source SET paused = ?, pause_reason = ? WHERE id = ?", paused ? 1 : 0, paused ? "manual" : null, id);
     if (!paused) {
       await this.ctx.storage.put(`resumed:${id}`, Date.now());
@@ -379,7 +424,7 @@ export class EventsDO extends DurableObject<Env> {
   }
 
   async putSettings(id: string, value: unknown): Promise<"ok" | "unknown_source" | "invalid"> {
-    if (!this.sources.has(id)) return "unknown_source";
+    if (!this.sources.has(id) || id === "github") return "unknown_source";
     const settings = parseSettings(value);
     if (!settings) return "invalid";
     this.sql.exec("UPDATE event_source SET settings_json = ? WHERE id = ?", JSON.stringify(settings), id);

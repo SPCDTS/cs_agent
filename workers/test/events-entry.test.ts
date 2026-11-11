@@ -1,3 +1,4 @@
+import { DEFAULT_GITHUB } from "../src/github/model";
 import { createExecutionContext, createScheduledController, env, reset, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
@@ -48,7 +49,7 @@ describe("Pub/Sub push endpoint", () => {
     const response = await call(push(await token()));
     expect(response.status).toBe(204);
     expect(google.state.requests.some(line => line.endsWith("/gmail/v1/users/me/profile"))).toBe(true);
-    expect(await sql("SELECT cursor FROM event_source")).toEqual([{ cursor: "100" }]);
+    expect(await sql("SELECT cursor FROM event_source WHERE id='gmail'")).toEqual([{ cursor: "100" }]);
     expect((await call(push(await token(), { message: { data: "bm90IGpzb24=", messageId: "m-2" }, subscription: "s" }))).status).toBe(400);
     expect((await call(push(await token(), { padding: "x".repeat(70_000) }))).status).toBe(400);
   });
@@ -65,7 +66,7 @@ describe("cron dispatch", () => {
     await tick("0 3 * * *");
     expect(google.state.requests).toEqual([]);
     await tick("*/5 * * * *");
-    expect(await sql("SELECT cursor FROM event_source")).toEqual([{ cursor: "100" }]);
+    expect(await sql("SELECT cursor FROM event_source WHERE id='gmail'")).toEqual([{ cursor: "100" }]);
     const before = google.state.requests.length;
     await tick("*/5 * * * *");
     expect(google.state.requests).toHaveLength(before);
@@ -79,10 +80,10 @@ describe("event admin endpoints", () => {
   it("requires the admin token, pauses and resumes, and validates settings strictly", async () => {
     expect((await admin("/admin/event-sources", {}, "wrong")).status).toBe(401);
     const status = await (await admin("/admin/event-sources")).json();
-    expect(status).toMatchObject({ sources: [{ id: "gmail", configured: true, paused: false, held: 0, budget: { used: 0, perHour: 10 }, settings: DEFAULT_SETTINGS }], runs: [] });
+    expect(status).toMatchObject({ sources: [{ id: "gmail", configured: true, paused: false, held: 0, budget: { used: 0, perHour: 10 }, settings: DEFAULT_SETTINGS }, { id: "github", configured: false, paused: false, settings: DEFAULT_GITHUB.settings }], runs: [] });
 
     expect((await admin("/admin/event-sources/gmail/pause", { method: "POST" })).status).toBe(200);
-    expect(await env.EVENTS.getByName("main").health()).toMatchObject({ sources: [{ id: "gmail", paused: true }], held: 0 });
+    expect(await env.EVENTS.getByName("main").health()).toMatchObject({ sources: [{ id: "gmail", paused: true }, { id: "github", paused: false, enabled: false }], held: 0 });
     expect((await admin("/admin/event-sources/gmail/resume", { method: "POST" })).status).toBe(200);
     expect((await admin("/admin/event-sources/calendar/pause", { method: "POST" })).status).toBe(404);
 
@@ -92,9 +93,9 @@ describe("event admin endpoints", () => {
     expect((await put(DEFAULT_SETTINGS, "calendar")).status).toBe(404);
     const quiet = { ...DEFAULT_SETTINGS, quietHours: { start: "23:00", end: "08:00" } };
     expect((await put(quiet)).status).toBe(200);
-    expect(await (await admin("/admin/event-sources")).json()).toMatchObject({ sources: [{ paused: false, settings: quiet }] });
+    expect(await (await admin("/admin/event-sources")).json()).toMatchObject({ sources: [{ id: "gmail", paused: false, settings: quiet }, { id: "github", paused: false, settings: DEFAULT_GITHUB.settings }] });
 
     const health = await (await worker.fetch(new Request(`${env.PUBLIC_ORIGIN}/healthz`), env)).json();
-    expect(health).toMatchObject({ events: { sources: [{ id: "gmail", enabled: true, paused: false, degraded: false, cursor: false, lastPollAt: null }], held: 0 } });
+    expect(health).toMatchObject({ events: { sources: [{ id: "gmail", enabled: true, paused: false, degraded: false, cursor: false, lastPollAt: null }, { id: "github", enabled: false, paused: false, cursor: false }], held: 0 } });
   });
 });

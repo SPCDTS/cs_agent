@@ -1,0 +1,120 @@
+import { DEFAULT_GITHUB, parseGitHubConfig, type GitHubDelivery, type GitHubConfig } from "./model";
+import { suppressed } from "../events/model";
+
+export const PIN_LIMIT = 1000, RECEIPT_LIMIT = 5000, PENDING_LIMIT = 200, RETENTION_MS = 30 * 86400_000;
+type Receipt = {
+  delivery_id: string; body_hash: string; repository: string; repository_id: number; event: string; action: string;
+  received_at: number; updated_at: number; state: string; reason: string | null; event_key: string; input_key: string | null; outcome: string | null;
+};
+export class GitHubInbox {
+  constructor(private readonly storage: DurableObjectStorage) {
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS github_config (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL, revision INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS github_repo_pin (name TEXT PRIMARY KEY, repository_id INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS github_receipt (
+        delivery_id TEXT PRIMARY KEY, body_hash TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, repository_id INTEGER NOT NULL,
+        event TEXT NOT NULL, action TEXT NOT NULL, received_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        state TEXT NOT NULL, reason TEXT, event_key TEXT NOT NULL UNIQUE, input_key TEXT, outcome TEXT);
+      CREATE INDEX IF NOT EXISTS github_receipt_input ON github_receipt(input_key);
+    `);
+    // INSERT OR IGNORE is atomic; an explicit [] is data, never treated as missing.
+    this.sql.exec("INSERT OR IGNORE INTO github_config(id,value,revision) VALUES(1,?,1)", JSON.stringify(DEFAULT_GITHUB));
+  }
+  private get sql() { return this.storage.sql; }
+  snapshot(): { value: GitHubConfig; revision: string } {
+    const row = this.sql.exec<{ value: string; revision: number }>("SELECT value,revision FROM github_config WHERE id=1").one();
+    return { value: JSON.parse(row.value), revision: String(row.revision) };
+  }
+  put(value: unknown, expectedRevision: string) {
+    const parsed = parseGitHubConfig(value);
+    if (!parsed) return { ok: false as const, error: "invalid" as const };
+    return this.storage.transactionSync(() => {
+      const current = this.snapshot();
+      if (current.revision !== expectedRevision) return { ok: false as const, error: "conflict" as const, current };
+      this.sql.exec("UPDATE github_config SET value=?,revision=revision+1 WHERE id=1", JSON.stringify(parsed));
+      this.sql.exec("UPDATE event_source SET settings_json=?,paused=?,pause_reason=? WHERE id='github'",
+        JSON.stringify(parsed.settings), parsed.paused ? 1 : 0, parsed.paused ? "manual" : null);
+      this.reauthorize();
+      return { ok: true as const, current: this.snapshot() };
+    });
+  }
+  private reason(row: Pick<Receipt, "repository" | "repository_id" | "event" | "action">): string | null {
+    const config = this.snapshot().value, name = row.repository.toLowerCase();
+    if (!config.repositories.some(repo => repo.toLowerCase() === name)) return "repository_not_allowed";
+    const pin = this.sql.exec<{ repository_id: number }>("SELECT repository_id FROM github_repo_pin WHERE name=?", name).toArray()[0];
+    if (pin && pin.repository_id !== row.repository_id) return "repository_id_changed";
+    if (!config.selections.includes(row.event + (row.action ? "." + row.action : ""))) return "event_action_not_allowed";
+    return null;
+  }
+  private suppress(key: string, reason: string) {
+    this.sql.exec("UPDATE github_receipt SET state='suppressed',reason=?,updated_at=? WHERE event_key=? AND state IN ('held','enqueued')", reason, Date.now(), key);
+    this.sql.exec("DELETE FROM event_held WHERE key=?", key);
+  }
+  reauthorize() {
+    for (const row of this.sql.exec<Receipt>("SELECT * FROM github_receipt WHERE state IN ('held','enqueued')").toArray()) {
+      const reason = this.reason(row);
+      if (reason) this.suppress(row.event_key, reason);
+    }
+  }
+  receive(delivery: GitHubDelivery): { status: number; code: string } {
+    return this.storage.transactionSync(() => {
+      const existing = this.sql.exec<Receipt>("SELECT * FROM github_receipt WHERE delivery_id=?", delivery.deliveryId).toArray()[0];
+      if (existing) return { status: existing.body_hash === delivery.bodyHash ? 200 : 409, code: existing.body_hash === delivery.bodyHash ? "duplicate" : "delivery_conflict" };
+      // One global hash domain: neither event nor delivery headers are covered by GitHub's HMAC.
+      if (this.sql.exec("SELECT 1 FROM github_receipt WHERE body_hash=?", delivery.bodyHash).toArray().length) return { status: 200, code: "body_duplicate" };
+      this.prune();
+      if (this.count() >= RECEIPT_LIMIT) return { status: 503, code: "receipt_capacity" };
+      const row = { repository: delivery.repository, repository_id: delivery.repositoryId, event: delivery.event, action: delivery.action };
+      let reason = delivery.normalized ? this.reason(row) : "ping";
+      if (!reason && delivery.normalized && suppressed(this.snapshot().value.settings, delivery.normalized)) reason = "source_filter";
+      if (!reason && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM github_receipt WHERE state IN ('held','enqueued','started')").one().n >= PENDING_LIMIT)
+        return { status: 503, code: "pending_capacity" };
+      if (!reason && !this.sql.exec("SELECT 1 FROM github_repo_pin WHERE name=?", delivery.repository.toLowerCase()).toArray().length
+        && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM github_repo_pin").one().n >= PIN_LIMIT)
+        return { status: 503, code: "pin_capacity" };
+      const key = "evt_github_" + delivery.bodyHash;
+      if (!reason) this.sql.exec("INSERT OR IGNORE INTO github_repo_pin(name,repository_id) VALUES(?,?)", delivery.repository.toLowerCase(), delivery.repositoryId);
+      this.sql.exec(`INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,reason,event_key)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`, delivery.deliveryId, delivery.bodyHash, delivery.repository, delivery.repositoryId, delivery.event, delivery.action,
+        delivery.receivedAt, delivery.receivedAt, reason ? "suppressed" : "held", reason, key);
+      if (!reason) this.sql.exec("INSERT INTO event_held(key,source,event_json,received_at,reason) VALUES(?,'github',?,?,'merge')",
+        key, JSON.stringify(delivery.normalized), delivery.receivedAt);
+      return { status: 202, code: reason ? "suppressed" : "received" };
+    });
+  }
+  enqueued(keys: string[], inputKey: string) {
+    for (const key of keys) this.sql.exec("UPDATE github_receipt SET state='enqueued',input_key=?,updated_at=? WHERE event_key=? AND state='held'", inputKey, Date.now(), key);
+  }
+  /** Atomic execution permit. Already-issued permits may have been used: never undo or replay them. */
+  claim(inputKey: string): "start" | "wait" | "suppressed" {
+    return this.storage.transactionSync(() => {
+      const rows = this.sql.exec<Receipt>("SELECT * FROM github_receipt WHERE input_key=?", inputKey).toArray();
+      if (rows.some(row => row.state === "started" || row.state === "finished")) return "start";
+      this.reauthorize();
+      if (!rows.length || rows.some(row => row.state === "suppressed" || this.reason(row))) {
+        for (const row of rows) this.suppress(row.event_key, "batch_revoked");
+        return "suppressed";
+      }
+      const source = this.sql.exec<{ paused: number }>("SELECT paused FROM event_source WHERE id='github'").one();
+      if (source.paused) return "wait";
+      this.sql.exec("UPDATE github_receipt SET state='started',updated_at=? WHERE input_key=? AND state='enqueued'", Date.now(), inputKey);
+      return "start";
+    });
+  }
+  finish(inputKey: string, outcome: string) {
+    this.sql.exec("UPDATE github_receipt SET state='finished',outcome=?,updated_at=? WHERE input_key=? AND state IN ('enqueued','started')", outcome, Date.now(), inputKey);
+  }
+  prune() {
+    this.sql.exec("DELETE FROM github_receipt WHERE state IN ('suppressed','finished') AND updated_at < ?", Date.now() - RETENTION_MS);
+  }
+  private count(): number { return this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM github_receipt").one().n; }
+  receipt(id: string) {
+    return this.sql.exec<Receipt>("SELECT * FROM github_receipt WHERE delivery_id=?", id).toArray()[0] ?? null;
+  }
+  status() {
+    return { ...this.snapshot(), count: this.count(), capacity: RECEIPT_LIMIT, pendingCapacity: PENDING_LIMIT,
+      counts: this.sql.exec<{ state: string; count: number }>("SELECT state,COUNT(*) AS count FROM github_receipt GROUP BY state").toArray(),
+      pins: this.sql.exec<{ name: string; repository_id: number }>("SELECT * FROM github_repo_pin ORDER BY name").toArray(),
+      receipts: this.sql.exec<Receipt>("SELECT * FROM github_receipt ORDER BY received_at DESC,rowid DESC LIMIT 50").toArray() };
+  }
+}

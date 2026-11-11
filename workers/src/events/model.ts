@@ -87,9 +87,9 @@ export function renderEventInput(source: string, events: readonly ExternalEvent[
 }
 
 export type PollResult = { cursor: string; events: unknown[]; reset: boolean; more: boolean };
-/** 轮询型来源；推送只是"有新东西"的信号，仍经 poll 取数，所以不需要单独的 accept。 */
+/** Poll sources fetch on wake-up; push sources omit poll and persist receipts before ACK. */
 export interface EventSource {
   readonly id: string;
   configured(): boolean;
-  poll(cursor: string | null, limit: number, signal: AbortSignal): Promise<PollResult>;
+  poll?(cursor: string | null, limit: number, signal: AbortSignal): Promise<PollResult>;
 }
