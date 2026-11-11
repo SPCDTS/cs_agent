@@ -3,7 +3,7 @@ export const GITHUB_APP_JS = String.raw`
   function renderGitHub(source, github) {
     const editing = state.editingSource === "github" && state.sourceForms.github;
     const form = editing || (state.sourceForms.github = githubForm(github));
-    return el("div", { className: "source" }, [
+    const card = el("div", { className: "source" }, [
       el("strong", { text: "GitHub webhook" }),
       el("div", { className: "muted small", text: (github.configured ? "Secret 已配置" : "Secret 未配置：拒收") +
         " · " + (source.paused ? "已暂停" : "已启用") + " · 收件 " + github.count + "/" + github.capacity + " · 待处理上限 " + github.pendingCapacity }),
@@ -22,6 +22,8 @@ export const GITHUB_APP_JS = String.raw`
         ]))),
       ])]),
     ]);
+    paginateChildren(card.querySelector("tbody"), { key: "github-receipts" });
+    return card;
   }
   function githubForm(snapshot) {
     const value = snapshot.value, settings = value.settings;

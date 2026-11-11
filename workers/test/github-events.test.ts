@@ -1,6 +1,7 @@
 import { env, reset, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
+import { input } from "./helpers";
 import { EventsDO } from "../src/events/do";
 import { DEFAULT_GITHUB, MAX_BODY, parseGitHubConfig, readWebhook, verifySignature, type GitHubDelivery } from "../src/github/model";
 import { GitHubInbox, PENDING_LIMIT, RETENTION_MS } from "../src/github/inbox";
@@ -178,19 +179,49 @@ it("keeps a paused Thread input pending and wakes it on CAS resume without a new
   const model = scriptedModel([]);
   const d = await delivery("thread-pause"); await events().receiveGitHub(d);
   const key = "evt_github_" + d.bodyHash;
-  await configure({ paused: true });
+  // Hold admission, not enqueue: pause only after ThreadDO has stored the event.
+  let restorePump = () => {};
+  await runInDurableObject(env.THREAD.getByName("owner"), instance => {
+    const spy = vi.spyOn(instance as unknown as { pump(): Promise<void> }, "pump").mockResolvedValue(undefined);
+    restorePump = () => spy.mockRestore();
+  });
   await runInDurableObject(events(), (_instance, state) => {
     new GitHubInbox(state.storage).enqueued([key], key);
     state.storage.sql.exec("UPDATE event_held SET input_key=? WHERE key=?", key, key);
     state.storage.sql.exec("INSERT INTO event_run(input_key,source,keys_json,delivered_at,status) VALUES(?,'github',?,?,'queued')", key, JSON.stringify([key]), Date.now());
   });
   await runDurableObjectAlarm(events());
+  await runInDurableObject(env.THREAD.getByName("owner"), (_instance, state) => {
+    expect(state.storage.sql.exec("SELECT status,when_busy FROM inbound WHERE message_id=?", key).toArray())
+      .toEqual([{ status: "queued", when_busy: null }]);
+  });
+  await configure({ paused: true });
+  restorePump();
   await runDurableObjectAlarm(env.THREAD.getByName("owner"));
   expect(model.requests).toHaveLength(0);
   expect(await sql("SELECT state FROM github_receipt")).toEqual([{ state: "enqueued" }]);
-  await configure({ paused: false });
+  // The event was durably enqueued before pause; ordinary owner input must still run.
+  let ownerDone = false;
+  const ownerTurn = env.THREAD.getByName("owner").submit(input(901, "owner while paused", 10000001))
+    .then(result => { ownerDone = true; return result; });
+  try {
+    await vi.waitFor(() => expect(ownerDone).toBe(true), { timeout: 3000 });
+    expect(await ownerTurn).toEqual({ status: "done" });
+    expect(model.requests).toHaveLength(1);
+    expect(model.requests[0]?.user).toContain("owner while paused");
+    await runInDurableObject(env.THREAD.getByName("owner"), (_instance, state) => {
+      expect(state.storage.sql.exec("SELECT status,when_busy FROM inbound WHERE message_id=?", key).toArray())
+        .toEqual([{ status: "queued", when_busy: null }]);
+    });
+  } finally {
+    await configure({ paused: false });
+    await ownerTurn;
+  }
   await vi.waitFor(async () => expect(await sql("SELECT state FROM github_receipt")).toEqual([{ state: "finished" }]), { timeout: 15000 });
-  expect(model.requests).toHaveLength(1);
+  await runDurableObjectAlarm(events());
+  await runDurableObjectAlarm(env.THREAD.getByName("owner"));
+  expect(model.requests).toHaveLength(2);
+  expect(model.requests[1]?.tools).not.toContain("mem_remember");
 });
 it("suppresses a revoked Thread backlog before any model call", async () => {
   const model = scriptedModel([]);
