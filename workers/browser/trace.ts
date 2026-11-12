@@ -1,3 +1,4 @@
+import { refreshContextMonitor } from "./context-monitor";
 import { consoleView, cs, downloadAsset, loadRequests, nf, requestPill, statuses } from "./console";
 import { cacheRate, detailCache, openRequest, percent, toolCache, toolPayload } from "./request-detail";
 import { $, bjTime, bytes, duration, el, fail, readToken, state, time } from "./app";
@@ -96,6 +97,7 @@ export async function loadChat(){
     if(d.syncedAt)$("chat-state").textContent+=" · 数据同步于 "+time(d.syncedAt);
     const fingerprint=JSON.stringify([messages,[...cs.requests.values()],[...cs.tools.values()]]);
     if(fingerprint!==cs.fingerprint){if(cs.fingerprint)refreshTopologyAfterTurn();cs.fingerprint=fingerprint;renderChatMessages(messages);if($("request-detail").open&&cs.detailId&&!detailCache.has(cs.detailId))openRequest(cs.detailId);}
+    void refreshContextMonitor();
   }finally{if(version===cs.chatVersion){cs.chatLoading=false;scheduleConsolePoll();}}
 }
 

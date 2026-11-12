@@ -1,3 +1,4 @@
+import { refreshContextMonitor, resetContextMonitor } from "./context-monitor";
 import * as C from "./request-contracts";
 import { Check } from "typebox/value";
 import { readApi } from "./api";
@@ -40,7 +41,7 @@ export function renderChatHeader(){
 }
 function selectChat(target:C.ChatTarget){
   if(cs.chat.kind==="thread"&&!cs.pending)chatDrafts.set(cs.chat.thread,$("chat-input").value);
-  clearTimeout(cs.timer);cs.chat=target;cs.chatVersion++;resetChatTrace();expandChatThread(target.thread);
+  clearTimeout(cs.timer);cs.chat=target;cs.chatVersion++;resetChatTrace();resetContextMonitor();expandChatThread(target.thread);
   $("chat-messages").replaceChildren(el("div",{className:"empty-state",text:"正在载入对话…"}));$("chat-state").textContent="正在载入…";
   $("chat-input").value="";cs.pending=null;
   if(target.kind==="thread"){restorePending();if(!cs.pending)$("chat-input").value=chatDrafts.get(target.thread)||"";}
@@ -59,12 +60,12 @@ export function consoleView(view: string){
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(b=>{if(b.dataset.view===view)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current");});
   $("view-requests").hidden=view!=="usage";$("usage-summary").hidden=view!=="usage";$("view-chat").hidden=view!=="chat";
   showManagement(view);$("requests-heading").textContent="用量总览";
-  if(view==="chat"){loadChat().catch(fail);renderTopology();loadTopology(true);}
+  if(view==="chat"){void refreshContextMonitor(true);loadChat().catch(fail);renderTopology();loadTopology(true);}
   if(view==="usage")loadRequests().catch(fail);
   if(managementPages[view])loadManagement(view).catch(fail);
 }
 export function resetConsole(){
-  listPages.clear();resetTopology();resetChatNavigation();chatDrafts.clear();
+  resetContextMonitor(true);listPages.clear();resetTopology();resetChatNavigation();chatDrafts.clear();
   clearTimeout(cs.timer);cs.timer=undefined;detailCache.clear();toolCache.clear();resetChatTrace();cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
   $("session-history").close();sh.version++;
   $("request-detail").close();$("detail-body").replaceChildren();$("chat-messages").replaceChildren();
@@ -180,5 +181,5 @@ export function initConsole() {
   $("chat-older").addEventListener("click",()=>loadSubagentChat(true));
   $("chat-form").addEventListener("submit",sendChat);
   $("chat-input").addEventListener("keydown",e=>{if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){e.preventDefault();$("chat-form").requestSubmit();}});
-  $("chat-reload").addEventListener("click",()=>{cs.chatAfter=null;loadChat().catch(fail);});
+  $("chat-reload").addEventListener("click",()=>{cs.chatAfter=null;void refreshContextMonitor(true);loadChat().catch(fail);});
 }

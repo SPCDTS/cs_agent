@@ -11,7 +11,7 @@ function hasCacheMetric(value: unknown, keys: string[]): boolean {
 }
 
 /** 不消费流；终态 Promise 与 Harness 的事件迭代互不争抢。认证选项不进入采集数据。 */
-export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableObjectState, "waitUntil">, scope: RequestScope, binding?: () => RequestBinding | undefined): MutableModels {
+export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableObjectState, "waitUntil">, scope: RequestScope, binding?: () => RequestBinding | undefined, origin?: (context: Context) => import("./context-source").ContextOrigin | undefined): MutableModels {
   const observe = (model: Model<Api>, context: Context, start: (notice: (event: unknown) => void, response: (status: number) => void) => AssistantMessageEventStream, purpose = scope.purpose) => {
     const startedAt = Date.now();
     let reported = false;
@@ -29,9 +29,10 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
     const terminal = stream.result().then(result => ({ result, endedAt: Date.now() }));
     let detail: RequestDetail;
     try {
+      const captured = snapshot(context, purpose === "conversation" || purpose === "subagent" ? origin?.(context) : undefined);
       detail = { request: { ...scope, purpose, ...(requestBinding ? { binding: requestBinding } : {}), id: crypto.randomUUID(), startedAt, endedAt: null, provider: model.provider, model: model.id,
         status: "running", contextWindow: model.contextWindow, inputTokens: null, outputTokens: null, cacheRead: null, cacheWrite: null,
-        reasoningTokens: null, durationMs: null }, context: snapshot(context) };
+        reasoningTokens: null, durationMs: null, contextMetrics: captured.analysis?.metrics }, context: captured };
     } catch { console.error({ event: "request_capture_failed" }); return stream; }
     const store = env.REQUESTS.getByName("main");
     const save = (value: RequestDetail) => store.record(value).catch(() => { console.error({ event: "request_record_failed", id: value.request.id }); });

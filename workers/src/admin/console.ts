@@ -1,3 +1,4 @@
+import { CONTEXT_MONITOR_CSS, CONTEXT_MONITOR_HTML } from "./context-monitor";
 import { REQUEST_DETAIL_CSS } from "./request-detail";
 
 
@@ -42,6 +43,7 @@ main{max-width:1600px;margin-left:204px;padding:30px 34px;width:calc(100% - 204p
 @media(max-width:760px){.sidebar{position:static;width:auto;padding:15px;gap:14px;border-right:0}.sidebar .wordmark{font-size:20px;padding:0}.sidebar nav{flex-direction:row;gap:4px;overflow:auto}.nav-btn{white-space:nowrap;font-size:13px;padding:9px 11px}.sidebar-foot{display:none}.topbar{margin-left:0}.topbar-inner{padding:12px 18px}.topbar .brand{display:none}main{margin:0;padding:22px 16px;width:100%}.status-line{margin:10px 16px}.console-head h1{font-size:24px}.metrics{grid-template-columns:repeat(2,1fr);gap:18px}.metrics>div:last-child{grid-column:span 2}.filters{gap:8px}.filters label{flex:1;min-width:120px}.chat-layout{height:auto;min-height:530px;display:flex;flex-direction:column}.chat-threads{flex:none;max-height:200px;border-right:0;border-bottom:1px solid var(--line);padding:10px}.chat-threads h2{display:none}.chat-main{flex:none;height:600px;max-height:90dvh}.chat-thread{width:100%;margin:0}#chat-state{padding:10px 15px}.chat-top,.chat-composer{padding:12px 15px}.chat-messages{padding:18px 15px}.chat-message{max-width:95%}.detail-stats{grid-template-columns:repeat(2,1fr)}.detail-body{padding:16px}.detail-head{padding:16px}.console-head .row{width:100%}.chart-panel{padding:15px}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
 ${REQUEST_DETAIL_CSS}
+${CONTEXT_MONITOR_CSS}
 ${TOPOLOGY_CSS}
 `;
 
@@ -95,6 +97,7 @@ export const CONSOLE_HTML = String.raw`
 <section id="view-chat" hidden>
   <div class="console-head"><div><h1>会话对话</h1><p>继续 QQ 会话的上下文，在网页里接着聊。</p></div></div>
   ${TOPOLOGY_HTML}
+  ${CONTEXT_MONITOR_HTML}
   <div class="chat-layout"><aside class="chat-threads"><h2>已有会话</h2><div id="chat-thread-list"></div></aside>
     <section class="chat-main" aria-label="对话">
       <header class="chat-top"><div><strong id="chat-title">选择会话</strong><small id="chat-subtitle">共享上下文 · 网页发言只回复网页</small></div><div class="row"><button id="chat-history" class="btn compact" type="button">历史</button><button id="chat-compact" class="btn compact" type="button">压缩</button><button id="chat-reset" class="btn compact" type="button">归档重置</button><button id="chat-older" class="btn compact" type="button" hidden>更早记录</button><button id="chat-parent" class="btn compact" type="button" hidden>返回父会话</button><button id="chat-reload" class="btn compact" type="button">刷新</button></div></header>

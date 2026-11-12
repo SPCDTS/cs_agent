@@ -1,3 +1,4 @@
+import { ContextMetrics } from "../src/requests/context-types";
 import { Type, type Static } from "typebox";
 
 const numberOrNull = Type.Union([Type.Number(), Type.Null()]);
@@ -6,6 +7,7 @@ export const Binding = Type.Object({ turnId: Type.String(), inputId: Type.String
 export const RequestRecord = Type.Object({ id: Type.String(), thread: Type.String(), actor: Type.String(), purpose: Type.String(), startedAt: Type.Number(),
   endedAt: numberOrNull, provider: Type.String(), model: Type.String(), status: Type.String(), inputTokens: numberOrNull, outputTokens: numberOrNull,
   cacheRead: numberOrNull, cacheWrite: numberOrNull, durationMs: numberOrNull, contextWindow: Type.Number(),
+  contextMetrics: Type.Optional(ContextMetrics),
   stopReason: Type.Optional(Type.String()), error: Type.Optional(Type.String()), binding: Type.Optional(Binding),
   toolCalls: Type.Optional(Type.Array(Type.Object({ id: Type.String(), name: Type.String() }))),
 });
@@ -16,6 +18,7 @@ export const MessagePart = Type.Object({ ...TextPart.properties,
   blocks: Type.Optional(Type.Array(Type.Object({ kind: Type.String(), start: Type.Number(), end: Type.Number(), id: Type.Optional(Type.String()), name: Type.Optional(Type.String()) }))),
 });
 export type MessagePart = Static<typeof MessagePart>;
+export const ContextBody = Type.Object({ part: MessagePart, paired: Type.Array(Type.Object({ id: Type.String(), part: MessagePart })) });
 const ContextMessage = Type.Object({ ...MessagePart.properties, role: Type.String(), toolName: Type.Optional(Type.String()), toolCallId: Type.Optional(Type.String()) });
 export type ContextMessage = Static<typeof ContextMessage>;
 export const Context = Type.Object({ system: TextPart, messages: Type.Array(ContextMessage), tools: Type.Array(Type.Object({ ...TextPart.properties, name: Type.String() })),
@@ -29,7 +32,7 @@ export const ToolSummary = Type.Object({ id: Type.String(), thread: Type.String(
 export type ToolSummary = Static<typeof ToolSummary>;
 export const ToolDetail = Type.Object({ ...ToolSummary.properties, arguments: Type.Optional(TextPart), result: Type.Optional(TextPart) });
 export type ToolDetail = Static<typeof ToolDetail>;
-const DetailBase = { request: RequestRecord, tools: Type.Array(ToolSummary), related: Type.Array(RequestRecord), response: Type.Optional(MessagePart) };
+const DetailBase = { bodyDeferred: Type.Optional(Type.Boolean()), responseAvailable: Type.Optional(Type.Boolean()), request: RequestRecord, tools: Type.Array(ToolSummary), related: Type.Array(RequestRecord), response: Type.Optional(MessagePart) };
 export const RequestDetail = Type.Union([
   Type.Object({ ...DetailBase, detailAvailable: Type.Literal(true), context: Context }),
   Type.Object({ ...DetailBase, detailAvailable: Type.Literal(false) }),
