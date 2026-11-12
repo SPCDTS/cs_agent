@@ -1,3 +1,4 @@
+import { initContextMonitor } from "./context-monitor";
 import { initApp } from "./app";
 import { initConsole } from "./console";
 import { initTrace } from "./trace";
@@ -11,6 +12,7 @@ import { initMcp } from "./mcp";
 import { initMcpServers } from "./mcp-servers";
 
 initConsole();
+initContextMonitor();
 initTrace();
 initTopology();
 initManagement();

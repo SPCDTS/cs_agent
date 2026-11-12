@@ -6,6 +6,7 @@ export type RequestRecord = RequestScope & {
   id: string; startedAt: number; endedAt: number | null; provider: string; model: string; status: RequestStatus;
   inputTokens: number | null; outputTokens: number | null; cacheRead: number | null; cacheWrite: number | null; reasoningTokens: number | null;
   durationMs: number | null; contextWindow: number; stopReason?: string; error?: string;
+  contextMetrics?: import("./context-types").ContextMetrics;
   binding?: RequestBinding; toolCalls?: { id: string; name: string }[];
 };
 export type ToolTrace = {

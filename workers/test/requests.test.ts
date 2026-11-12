@@ -53,7 +53,9 @@ describe("request observability", () => {
   it("跨过20000条及32MiB时逐出最旧正文，保留最新请求与准确容量计数", async () => {
     const store = env.REQUESTS.getByName("main"), now = Date.now(), seed = detail("seed", now - 1000);
     await store.record(seed); // 初始化旧表的增量计数迁移。
-    seed.context.messages[0]!.text = "x".repeat(65_000);
+    seed.context.messages[0]!.text = "";
+    const overhead = new TextEncoder().encode(JSON.stringify({ context: seed.context })).byteLength;
+    seed.context.messages[0]!.text = "x".repeat(65_400 - overhead);
     const payload = JSON.stringify({ context: seed.context }), bytes = new TextEncoder().encode(payload).byteLength;
     await runInDurableObject(store, (_instance, state) => {
       const sql = state.storage.sql;

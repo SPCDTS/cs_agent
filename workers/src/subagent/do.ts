@@ -10,6 +10,7 @@ import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@ea
 import type { Env } from "../env";
 import { modelChange, openModels } from "../models";
 import { captureModels } from "../requests/capture";
+import { contextSource } from "../requests/context-source";
 import { remoteCredentials } from "../model-credentials";
 import { createWebPageTool } from "../tools/web-page";
 import { createWebSearchTool } from "../tools/web-search";
@@ -293,9 +294,11 @@ export class SubagentDO extends DurableObject<Env> {
   private async openRuntime(): Promise<Runtime> {
     const meta = await this.meta();
     if (!meta) throw new Error("subagent_missing");
-    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" });
+    const monitor = contextSource(this.ctx.storage, () => harness);
+    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" }, undefined, monitor.origin);
     const parent = () => this.env.THREAD.getByName(meta.parent);
     const registry = createRegistry();
+    registry.install(monitor.extension);
     // 子会话保留只读检索；下面按派出快照安装技能、所分配资源的 coding 与 MCP 代理，仍无发送或管理工具。
     registry.install(defineExtension({
       name: "cs-subagent",

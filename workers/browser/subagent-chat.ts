@@ -1,3 +1,4 @@
+import { refreshContextMonitor } from "./context-monitor";
 import { $, el, fail, bjTime, pill, time } from "./app";
 import { cs, renderChatHeader } from "./console";
 import { readApi } from "./api";
@@ -35,6 +36,7 @@ export async function loadSubagentChat(older=false){
     $("chat-older").disabled=!next;
     const fingerprint=JSON.stringify([...entries.values()].sort((a,b)=>a.id-b.id));
     if(fingerprint!==cs.fingerprint){cs.fingerprint=fingerprint;renderSubagentMessages(older);}
+    void refreshContextMonitor();
   }catch(error){
     if(!valid())return;
     cs.chatActive=false;$("chat-state").textContent="子会话读取失败，请点击刷新重试。";$("chat-older").disabled=!next;fail(error);

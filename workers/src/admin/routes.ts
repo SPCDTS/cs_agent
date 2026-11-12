@@ -1,3 +1,4 @@
+import { readAdminCursor } from "./pagination";
 import { healthReport } from "./health";
 import { threadView, workspaceView } from "./read-views";
 import { ADMIN_PAGE_SIZE } from "./pagination";
@@ -179,10 +180,26 @@ export const ADMIN_ROUTES: AdminRoute[] = [
 
   { method: "POST", path: "/admin/diagnostics/model-egress", handle: async ({ env }) => json(await env.THREAD.getByName("owner").modelEgressDiagnostics()) },
   { method: "GET", path: "/admin/requests", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").list(requestQuery(url))) },
+  { method: "GET", path: "/admin/context-timeline", handle: async ({ env, url }) => {
+    const thread = threadParam(url), actor = url.searchParams.get("actor") ?? "thread";
+    if (actor !== "thread" && !/^[0-9a-f-]{36}$/.test(actor)) throw new HttpError(400, "invalid_actor");
+    let cursor; try { cursor = readAdminCursor(url); } catch { throw new HttpError(400, "invalid_cursor"); }
+    return json(await env.REQUESTS.getByName("main").contextTimeline(thread, actor, cursor));
+  } },
+  { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})\/context$/, handle: async ({ env, params }) => {
+    const inspection = await env.REQUESTS.getByName("main").contextInspection(params.id!);
+    if (!inspection) throw new HttpError(404, "not_found");
+    return json(inspection);
+  } },
+  { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})\/context\/(?<part>system|response|message:\d+|tool:\d+)$/, handle: async ({ env, params }) => {
+    const part = await env.REQUESTS.getByName("main").contextPart(params.id!, params.part!);
+    if (!part) throw new HttpError(404, "not_found");
+    return json(part);
+  } },
   { method: "GET", path: "/admin/agent-topology", handle: async ({ env }) => json(await env.REQUESTS.getByName("main").agentTopology()) },
   { method: "GET", path: "/admin/usage", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").usage(requestQuery(url))) },
-  { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})$/, handle: async ({ env, params }) => {
-    const detail = await env.REQUESTS.getByName("main").detail(params.id!);
+  { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})$/, handle: async ({ env, params, url }) => {
+    const detail = await env.REQUESTS.getByName("main").detail(params.id!, url.searchParams.get("summary") === "1");
     if (!detail) throw new HttpError(404, "not_found");
     return json(detail);
   } },
