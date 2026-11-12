@@ -1,24 +1,25 @@
 import { expect, it } from "vitest";
-import { topologyPages } from "../browser/topology-layout";
+import { topologyFamilies } from "../browser/topology-layout";
 import type { AgentNode } from "../browser/topology-contracts";
 
-const parent=(thread:string): AgentNode=>({id:"thread:"+thread,thread,kind:"thread",parentId:null,activity:"context",lastActiveAt:null});
-const child=(thread:string,actor:string,at:number|null): AgentNode=>({id:"sub:"+thread+":"+actor,thread,kind:"subagent",parentId:"thread:"+thread,actor,activity:"recent",lastActiveAt:at,status:"done",summary:null,description:null});
+const parent=(thread:string):AgentNode=>({id:"thread:"+thread,thread,kind:"thread",parentId:null,activity:"context",lastActiveAt:null});
+const child=(thread:string,actor:string,at:number|null):AgentNode=>({id:"sub:"+thread+":"+actor,thread,kind:"subagent",parentId:"thread:"+thread,actor,activity:"recent",lastActiveAt:at,status:"done",summary:null,description:null});
 
-it("跨父会话按子任务最近活动分组排序，翻页保留顺序",()=>{
-  const nodes=[parent("a"),parent("z"),parent("m"),child("a","older",10),child("z","a",20),child("z","z",100),child("z","m",90),child("m","task",80)];
-  const pages=topologyPages(nodes,3);
-  expect(pages.flatMap(page=>page.flatMap(group=>group.children.map(node=>node.id)))).toEqual(["sub:z:z","sub:z:m","sub:z:a","sub:m:task","sub:a:older"]);
-  expect(pages[0]?.[0]?.parent.thread).toBe("z");
-  const narrow=topologyPages(nodes,1).flatMap(page=>page.flatMap(group=>group.children.map(node=>node.id)));
-  expect(narrow).toEqual(["sub:z:z","sub:z:m","sub:m:task","sub:z:a","sub:a:older"]);
+it("单页保留所有父子节点，每个父会话只出现一次，组内及组间按最近活动排序",()=>{
+  const nodes=[parent("a"),parent("z"),parent("m"),child("a","older",10),...[...Array(20).keys()].map(i=>child("z",String(i),100-i)),child("m","task",80)];
+  const families=topologyFamilies(nodes);
+  expect(families.map(group=>group.parent.thread)).toEqual(["z","m","a"]);
+  expect(families[0].children.map(node=>node.id)).toEqual([...Array(20).keys()].map(i=>"sub:z:"+i));
+  expect(families.flatMap(group=>[group.parent,...group.children])).toHaveLength(nodes.length);
+  expect(new Set(families.flatMap(group=>[group.parent,...group.children]).map(node=>node.id)).size).toBe(nodes.length);
 });
 
-it("后面的组不填回前页，旧任务更新后前移，时间相同保持稳定顺序",()=>{
-  const nodes=[parent("z"),parent("a"),parent("b"),...["1","2","3","4"].map((id,i)=>child("z",id,100-i)),child("a","task",80),child("b","task",70)];
-  expect(topologyPages(nodes,4).flatMap(page=>page.flatMap(group=>group.children.map(node=>node.id)))).toEqual(["sub:z:1","sub:z:2","sub:z:3","sub:z:4","sub:a:task","sub:b:task"]);
-  nodes.push(child("a","recent",200));
-  expect(topologyPages(nodes,4)[0]?.[0]?.children[0]?.id).toBe("sub:a:recent");
-  const tied=[parent("owner"),child("owner","z",null),child("owner","b",5),child("owner","a",5)];
-  expect(topologyPages(tied,0).flatMap(page=>page.flatMap(group=>group.children.map(node=>node.id)))).toEqual(["sub:owner:a","sub:owner:b","sub:owner:z"]);
+it("新活动使整个父子组前移，时间相同时顺序稳定，无子节点的父会话仍可见",()=>{
+  const nodes=[parent("owner"),parent("empty"),child("owner","z",null),child("owner","b",5),child("owner","a",5)];
+  expect(topologyFamilies(nodes)[0].children.map(node=>node.id)).toEqual(["sub:owner:a","sub:owner:b","sub:owner:z"]);
+  nodes[1].lastActiveAt=20;
+  expect(topologyFamilies(nodes).map(group=>group.parent.thread)).toEqual(["empty","owner"]);
+  nodes.push(child("owner","recent",30));
+  expect(topologyFamilies(nodes)[0].children[0].id).toBe("sub:owner:recent");
+  expect(topologyFamilies([])).toEqual([]);
 });
