@@ -49,10 +49,9 @@ const GitHubUser = Type.Object({id:Type.Number(),login:Type.String()});
 export const GitHubConnections = Type.Object({configured:Type.Boolean(),slug:Type.String(),identities:Type.Array(GitHubUser),
  installations:Type.Array(Type.Object({installationId:Type.Number(),user:GitHubUser,repositories:Type.Array(Type.Object({id:Type.Number(),name:Type.String()})),status:Type.Union([Type.Literal("active"),Type.Literal("revoked")]),until:Type.Number()}))});
 export const GitHubView = Type.Object({
- mode:Type.Union([Type.Literal("manual"),Type.Literal("app")]),connections:GitHubConnections,
+ connections:GitHubConnections,
  configured: Type.Boolean(), revision: Type.String(), count: Type.Number(), capacity: Type.Number(), pendingCapacity: Type.Number(),
- value: Type.Object({ repositoryIds:Type.Optional(Type.Array(Type.Object({installationId:Type.Number(),repositoryId:Type.Number()}))), repositories: Type.Array(Type.String()), selections: Type.Array(Type.String()), paused: Type.Boolean(), settings: SourceSettings }),
- pins: Type.Array(Type.Object({ name: Type.String(), repository_id: Type.Number() })),
+ value: Type.Object({ repositoryIds:Type.Array(Type.Object({installationId:Type.Number(),repositoryId:Type.Number()})), selections: Type.Array(Type.String()), paused: Type.Boolean(), settings: SourceSettings }),
  receipts: Type.Array(Type.Object({ delivery_id: Type.String(), received_at: Type.Number(), repository: Type.String(), event: Type.String(),
  action: Type.String(), state: Type.String(), reason: Type.Union([Type.String(),Type.Null()]), outcome: Type.Union([Type.String(),Type.Null()]) })),
 });

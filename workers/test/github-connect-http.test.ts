@@ -10,7 +10,7 @@ let pem:string;
 beforeAll(async()=>{pem=await exportPKCS8((await generateKeyPair("RS256",{extractable:true})).privateKey);});
 afterEach(async()=>{vi.unstubAllGlobals();vi.restoreAllMocks();await reset();});
 const browser="a".repeat(64),secret="synthetic-app-webhook",storeKey="03".repeat(32);
-const appEnv=()=>({...env,ADMIN_TOKEN:"synthetic-admin",GITHUB_MODE:"app" as const,GITHUB_APP_ID:"123",GITHUB_APP_SLUG:"test-events",GITHUB_APP_PRIVATE_KEY:pem,
+const appEnv=()=>({...env,ADMIN_TOKEN:"synthetic-admin",GITHUB_APP_ID:"123",GITHUB_APP_SLUG:"test-events",GITHUB_APP_PRIVATE_KEY:pem,
  GITHUB_APP_WEBHOOK_SECRET:secret,GITHUB_APP_CLIENT_ID:"test-client",GITHUB_APP_CLIENT_SECRET:"synthetic-client-secret",
  GITHUB_APP_CALLBACK_URL:"https://test/admin/github/oauth/callback",GITHUB_APP_STORE_KEY:storeKey});
 function mockGitHub() {
@@ -59,8 +59,8 @@ async function connect(e:Env,code="code7"){
  const complete=await admin(e,"connect/complete",{browser,state,code});expect(complete.status).toBe(200);
  return {state,complete};
 }
-async function webhook(e:Env,payload:unknown,delivery:string,event="issues"){
- const body=JSON.stringify(payload),key=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+async function webhook(e:Env,payload:unknown,delivery:string,event="issues",signingSecret=secret){
+ const body=JSON.stringify(payload),key=await crypto.subtle.importKey("raw",new TextEncoder().encode(signingSecret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
  const signature=Buffer.from(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(body))).toString("hex");
  return worker.fetch(new Request("https://test/github/webhook",{method:"POST",body,headers:{"content-type":"application/json","x-github-delivery":delivery,"x-github-event":event,"x-hub-signature-256":"sha256="+signature}}),e);
 }
@@ -281,16 +281,13 @@ it("reconnect preserves pending work still in the intersection, suppressing only
   expect(i.githubReceipt("keep-or-remove")?.state).toBe("suppressed");expect(i.githubReceipt("keep")?.state).toBe("held");
  });
 });
-it("rejects missing or invalid App mode and partial configuration without using the legacy secret or execution path",async()=>{
+it("rejects partial App configuration at ingress and execution without an alternate authorization path",async()=>{
  mockGitHub();await harness(async(e,i,ctx)=>{
   await connect(e);await enable(i);
   const current=(await i.adminStatus()).github;
-  await i.putGitHubConfig({...current.value,repositories:["owner/repo456"]},current.revision);
+  await i.putGitHubConfig({...current.value},current.revision);
   await webhook(e,payload(),"pre-mode-change");
   const variants:Env[]=[
-   {...env,GITHUB_MODE:undefined,GITHUB_WEBHOOK_SECRET:secret},
-   {...e,GITHUB_MODE:undefined,GITHUB_WEBHOOK_SECRET:secret},
-   {...e,GITHUB_MODE:"typo" as Env["GITHUB_MODE"],GITHUB_WEBHOOK_SECRET:secret},
    {...e,GITHUB_APP_CLIENT_SECRET:undefined},
    {...e,GITHUB_APP_STORE_KEY:undefined},
    {...e,GITHUB_APP_PRIVATE_KEY:undefined},
@@ -302,8 +299,51 @@ it("rejects missing or invalid App mode and partial configuration without using 
   }
   ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='mode-permit' WHERE delivery_id='pre-mode-change'");
   const recovered=new EventsDO(ctx,variants[0]!);
+  expect((await recovered.adminStatus()).github.configured).toBe(false);
+  expect(recovered.health().sources.find(s=>s.id==="github")?.enabled).toBe(false);
   expect(recovered.claimGitHubRun("mode-permit")).toBe("suppressed");
   expect((await recovered.receiveGitHub({deliveryId:"direct-invalid",bodyHash:"a".repeat(64),repository:"owner/repo456",repositoryId:457,
    installationId:456,event:"issues",action:"opened",receivedAt:Date.now(),normalized:null})).status).toBe(503);
+ });
+});
+
+it("ignores removed environment switches and rejects the old secret at the only ingress",async()=>{
+ mockGitHub();await harness(async(e,i)=>{
+  const obsolete={...e,GITHUB_MODE:"manual",GITHUB_WEBHOOK_SECRET:secret,GITHUB_APP_WEBHOOK_SECRET:undefined};
+  expect((await webhook(obsolete,payload(),"old-secret-only")).status).toBe(503);
+  expect(i.githubReceipt("old-secret-only")).toBeNull();
+  await connect(e);await enable(i);
+  const withObsoleteKeys={...e,GITHUB_MODE:"manual",GITHUB_WEBHOOK_SECRET:"obsolete-secret"};
+  expect((await webhook(withObsoleteKeys,payload(),"old-signature","issues","obsolete-secret")).status).toBe(401);
+  expect((await webhook(withObsoleteKeys,{...payload(),installation:undefined},"no-installation")).status).toBe(400);
+  expect((await webhook(withObsoleteKeys,payload(),"app-only-works")).status).toBe(202);
+  expect(i.githubReceipt("app-only-works")?.state).toBe("held");
+ });
+});
+it("migrates old config without granting IDs, keeps receipts readable and refuses legacy execution",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  await webhook(e,payload(),"legacy-pending");await webhook(e,payload(456,2),"legacy-issued");
+  const current=(await i.adminStatus()).github;
+  const old={...current.value,repositories:["owner/repo456"]};
+  ctx.storage.sql.exec("UPDATE github_config SET value=?,revision=7",JSON.stringify(old));
+  ctx.storage.sql.exec("CREATE TABLE github_repo_pin(name TEXT PRIMARY KEY,repository_id INTEGER NOT NULL)");
+  ctx.storage.sql.exec("INSERT INTO github_repo_pin VALUES('owner/repo456',457)");
+  ctx.storage.sql.exec("UPDATE github_receipt SET installation_id=0,state='enqueued',input_key='legacy-pending-run' WHERE delivery_id='legacy-pending'");
+  ctx.storage.sql.exec("UPDATE github_receipt SET installation_id=99999,state='started',input_key='legacy-issued-run' WHERE delivery_id='legacy-issued'");
+  const recovered=new EventsDO(ctx,e),view=(await recovered.adminStatus()).github;
+  expect(view.value.repositoryIds).toEqual([]);expect(view.revision).toBe("8");
+  expect(view).not.toHaveProperty("mode");expect(view).not.toHaveProperty("pins");expect(view.value).not.toHaveProperty("repositories");
+  expect(ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='github_repo_pin'").toArray()).toEqual([]);
+  expect(recovered.githubReceipt("legacy-pending")?.state).toBe("suppressed");
+  expect(recovered.githubReceipt("legacy-issued")?.state).toBe("started");
+  expect(recovered.claimGitHubRun("legacy-pending-run")).toBe("suppressed");
+  expect(recovered.claimGitHubRun("legacy-issued-run")).toBe("suppressed");
+  expect((await recovered.putGitHubConfig(view.value,"7")).error).toBe("conflict");
+  expect((await admin(e,"config",{expectedRevision:view.revision,value:old},"PUT")).status).toBe(400);
+  await enable(recovered);
+  expect(recovered.claimGitHubRun("legacy-pending-run")).toBe("suppressed");
+  expect((await webhook(e,payload(456,3),"fresh-app-event")).status).toBe(202);
+  expect(i.githubReceipt("fresh-app-event")?.state).toBe("held");
  });
 });

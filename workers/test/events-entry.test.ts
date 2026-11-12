@@ -81,10 +81,13 @@ describe("event admin endpoints", () => {
   it("requires the admin token, pauses and resumes, and validates settings strictly", async () => {
     expect((await admin("/admin/event-sources", {}, "wrong")).status).toBe(401);
     const status = await (await admin("/admin/event-sources")).json();
-    expect(status).toMatchObject({ sources: [{ id: "gmail", configured: true, paused: false, held: 0, budget: { used: 0, perHour: 10 }, settings: DEFAULT_SETTINGS }, { id: "github", configured: false, paused: false, settings: DEFAULT_GITHUB.settings }], runs: [] });
+    expect(status).toMatchObject({ sources: [{ id: "gmail", configured: true, paused: false, held: 0, budget: { used: 0, perHour: 10 }, settings: DEFAULT_SETTINGS }, { id: "github", configured: true, paused: false, settings: DEFAULT_GITHUB.settings }], runs: [] });
+
+    // The shared fixture configures the App transport, not an owner identity or repository grant.
+    expect(status).toMatchObject({github:{value:{repositoryIds:[]},connections:{identities:[],installations:[]}}});
 
     expect((await admin("/admin/event-sources/gmail/pause", { method: "POST" })).status).toBe(200);
-    expect(await env.EVENTS.getByName("main").health()).toMatchObject({ sources: [{ id: "gmail", paused: true }, { id: "github", paused: false, enabled: false }], held: 0 });
+    expect(await env.EVENTS.getByName("main").health()).toMatchObject({ sources: [{ id: "gmail", paused: true }, { id: "github", paused: false, enabled: true }], held: 0 });
     expect((await admin("/admin/event-sources/gmail/resume", { method: "POST" })).status).toBe(200);
     expect((await admin("/admin/event-sources/calendar/pause", { method: "POST" })).status).toBe(404);
 
@@ -97,6 +100,6 @@ describe("event admin endpoints", () => {
     expect(await (await admin("/admin/event-sources")).json()).toMatchObject({ sources: [{ id: "gmail", paused: false, settings: quiet }, { id: "github", paused: false, settings: DEFAULT_GITHUB.settings }] });
 
     const health = await (await adminHealth()).json();
-    expect(health).toMatchObject({ events: { sources: [{ id: "gmail", enabled: true, paused: false, degraded: false, cursor: false, lastPollAt: null }, { id: "github", enabled: false, paused: false, cursor: false }], held: 0 } });
+    expect(health).toMatchObject({ events: { sources: [{ id: "gmail", enabled: true, paused: false, degraded: false, cursor: false, lastPollAt: null }, { id: "github", enabled: true, paused: false, cursor: false }], held: 0 } });
   });
 });

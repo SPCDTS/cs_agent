@@ -7,21 +7,19 @@ import { CHOICES } from "./choices";
 export { CHOICES } from "./choices";
 const Repo = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$" });
 const ConfigSchema = Type.Object({
-  repositoryIds: Type.Optional(Type.Array(Type.Object({ installationId: Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}), repositoryId: Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}) }, {additionalProperties:false}), {maxItems:1000,uniqueItems:true})),
-  repositories: Type.Array(Repo, { maxItems: 50, uniqueItems: true }),
+  repositoryIds: Type.Array(Type.Object({ installationId: Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}), repositoryId: Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}) }, {additionalProperties:false}), {maxItems:1000,uniqueItems:true}),
   selections: Type.Array(Type.String({ enum: [...CHOICES] }), { maxItems: CHOICES.length, uniqueItems: true }),
   paused: Type.Boolean(), settings: Type.Unknown(),
 }, { additionalProperties: false });
 export type GitHubConfig = Omit<Static<typeof ConfigSchema>, "settings"> & { settings: SourceSettings };
 export const DEFAULT_GITHUB: GitHubConfig = {
-  repositories: ["SPCDTS/cs_agent"], selections: ["issues.opened", "pull_request.opened", "pull_request.ready_for_review", "release.published"],
+  repositoryIds: [], selections: ["issues.opened", "pull_request.opened", "pull_request.ready_for_review", "release.published"],
   paused: false, settings: { ...DEFAULT_SETTINGS, filters: { requireLabels: [], excludeLabels: [], excludeSenders: [] } },
 };
 export function parseGitHubConfig(value: unknown): GitHubConfig | undefined {
   if (!Check(ConfigSchema, value)) return;
   const settings = parseSettings(value.settings);
-  if (!settings || value.repositories.some(name => name.split("/")[1] === "." || name.split("/")[1] === "..")
-    || new Set(value.repositories.map(name => name.toLowerCase())).size !== value.repositories.length) return;
+  if (!settings) return;
   return { ...value, settings };
 }
 export class WebhookError extends Error {
@@ -63,7 +61,7 @@ export type GitHubDelivery = {
   receivedAt: number; normalized: ExternalEvent | null;
 };
 /** No body, secret, URLs supplied by the sender, or routing fields survive this boundary. */
-export async function readWebhook(request: Request, secret: string | undefined, app = false): Promise<GitHubDelivery> {
+export async function readWebhook(request: Request, secret: string | undefined): Promise<GitHubDelivery> {
   if (!secret) throw new WebhookError(503, "unconfigured");
   const deliveryId = request.headers.get("x-github-delivery") ?? "", event = request.headers.get("x-github-event") ?? "";
   const signature = request.headers.get("x-hub-signature-256") ?? "";
@@ -77,13 +75,13 @@ export async function readWebhook(request: Request, secret: string | undefined, 
   catch { throw new WebhookError(400, "invalid_json"); }
   const p = object(value), repo = object(p?.repository);
   const installationId = object(p?.installation)?.id;
-  if (app && event === "ping") {
+  if (event === "ping") {
     if (!positive(p?.hook_id)) throw new WebhookError(400,"invalid_ping");
     return {deliveryId,bodyHash:Buffer.from(await crypto.subtle.digest("SHA-256",bytes)).toString("hex"),
       repository:"",repositoryId:0,event,action:"",receivedAt:Date.now(),normalized:null};
   }
-  const lifecycle = app && ["installation","installation_repositories","repository","github_app_authorization"].includes(event);
-  if (app && event !== "github_app_authorization" && !positive(installationId)) throw new WebhookError(400,"invalid_installation");
+  const lifecycle = ["installation","installation_repositories","repository","github_app_authorization"].includes(event);
+  if (event !== "github_app_authorization" && !positive(installationId)) throw new WebhookError(400,"invalid_installation");
   if (lifecycle) {
     const action = str(p?.action,40), userId = object(p?.sender)?.id;
     if (!action || !/^[a-z_]+$/.test(action) || event === "github_app_authorization" && (action !== "revoked" || !positive(userId)))
@@ -113,11 +111,9 @@ export async function readWebhook(request: Request, secret: string | undefined, 
   } else if (event === "push") {
     valid = !action && typeof p.ref === "string" && p.ref.length <= 512 && /^[0-9a-f]{40}$/.test(String(p.after ?? ""));
     if (valid) { title = "Push " + p.ref; path = "/commit/" + p.after; summary = "Repository push"; }
-  } else if (event === "ping") {
-    valid = !action && positive(p.hook_id);
   }
   if (!valid) throw new WebhookError(400, "unsupported_or_invalid_event");
-  const normalized = event === "ping" ? null : normalizeEvent({ source: "github", externalId: bodyHash,
+  const normalized = normalizeEvent({ source: "github", externalId: bodyHash,
     occurredAt: receivedAt, kind: "github." + event, title: repository + ": " + title, summary,
     actor: str(object(p.sender)?.login, 120) ?? "", ref: "https://github.com/" + repository + path })!;
   return { deliveryId, bodyHash, repository, repositoryId, event, action, receivedAt, normalized, installationId: positive(installationId) ? installationId : undefined };

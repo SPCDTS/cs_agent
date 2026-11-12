@@ -20,8 +20,8 @@ const bundled=await build({entryPoints:["browser/github.ts"],absWorkingDir:proce
  export const state=globalThis.__githubState,bjTime=String,notice=()=>{},fail=e=>globalThis.__githubFail(e),loadSources=async()=>globalThis.__githubLoad(),showLogin=()=>{};`,resolveDir:process.cwd()}));}}]});
 const {renderGitHub}=await import("data:text/javascript;base64,"+Buffer.from(bundled.outputFiles[0].text).toString("base64"));
 const settings={intervalS:300,mergeWindowS:0,budgetPerHour:10,filters:{requireLabels:[],excludeLabels:[],excludeSenders:[]}};
-const view=()=>({mode:"app",configured:true,revision:"1",count:0,capacity:5000,pendingCapacity:200,pins:[],receipts:[],
- value:{repositories:[],repositoryIds:[],selections:[],paused:false,settings},
+const view=()=>({configured:true,revision:"1",count:0,capacity:5000,pendingCapacity:200,receipts:[],
+ value:{repositoryIds:[],selections:[],paused:false,settings},
  connections:{configured:true,slug:"test-app",identities:[{id:7,login:"owner"}],installations:[{installationId:456,user:{id:7,login:"owner"},status:"active",until:Date.now()+600000,
  repositories:Array.from({length:12},(_,i)=>({id:i+1,name:"owner/repo"+i}))}]}});
 const button=(root,text)=>[...root.querySelectorAll("button")].find(b=>b.textContent===text);
@@ -35,23 +35,25 @@ globalThis.fetch=async(path,init)=>{
 test("real GitHub form paginates ten, keeps detached choices and drafts, and preserves CAS conflicts and empty IDs",async()=>{
  reset();const snapshot=view(),card=renderGitHub({paused:false},snapshot);document.body.append(card);
  const form=card.querySelector("details");form.open=true;form.dispatchEvent(new window.Event("toggle"));
+ assert.equal(form.querySelector("textarea"),null);
  const label=[...form.querySelectorAll("label")].find(l=>l.textContent.includes("owner/repo0 "));
  const target=label.parentElement,pager=target.nextElementSibling;
  assert.equal(target.children.length,10);label.querySelector("input").checked=true;
  await click(button(pager,"下一页"));assert.equal(target.children.length,2);target.firstElementChild.querySelector("input").checked=true;
  assert.equal(renderGitHub({paused:false},snapshot).querySelector("details"),form);
- conflict=true;await click(button(form,"保存允许列表与设置"));
+ conflict=true;await click(button(form,"保存仓库选择与设置"));
  assert.equal(errors.length,1);assert.equal(globalThis.__githubState.editingSource,"github");
  assert.deepEqual(calls.at(-1).body.value.repositoryIds,[{installationId:456,repositoryId:1},{installationId:456,repositoryId:11}]);
  assert.equal(calls.at(-1).body.expectedRevision,"1");
+ assert.equal("repositories" in calls.at(-1).body.value,false);
  const all=[...form.querySelectorAll("label")].find(l=>l.textContent.includes("全选 / 清空可见仓库")).querySelector("input");
  all.checked=true;all.dispatchEvent(new window.Event("change"));
- await click(button(form,"保存允许列表与设置"));assert.equal(calls.at(-1).body.value.repositoryIds.length,12);
+ await click(button(form,"保存仓库选择与设置"));assert.equal(calls.at(-1).body.value.repositoryIds.length,12);
  all.checked=false;all.dispatchEvent(new window.Event("change"));
 
- conflict=false;await click(button(form,"保存允许列表与设置"));assert.equal(globalThis.__githubState.editingSource,null);
+ conflict=false;await click(button(form,"保存仓库选择与设置"));assert.equal(globalThis.__githubState.editingSource,null);
  reset();const empty=renderGitHub({paused:false},view());document.body.append(empty);
- await click(button(empty,"保存允许列表与设置"));assert.deepEqual(calls.at(-1).body.value.repositoryIds,[]);
+ await click(button(empty,"保存仓库选择与设置"));assert.deepEqual(calls.at(-1).body.value.repositoryIds,[]);
 });
 test("real connection UI uses browser-bound authenticated POST and explicit confirmation, never puts admin token in redirect",async()=>{
  reset();let card=renderGitHub({paused:false},view());document.body.append(card);

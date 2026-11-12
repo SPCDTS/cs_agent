@@ -1,139 +1,101 @@
-import { env, reset, runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Env } from "../src/env";
+import { env,reset,runInDurableObject } from "cloudflare:test";
+import { afterEach,expect,it,vi } from "vitest";
 import { GitHubAppClient } from "../src/github/app";
-import { GitHubAppConnection } from "../src/github/connection";
-afterEach(async () => { vi.restoreAllMocks(); await reset(); });
-const verifier = "a".repeat(64);
-function client() {
-  const api = new GitHubAppClient({});
-  vi.spyOn(api, "authorizationUrl").mockImplementation((state, challenge) => "https://github.com/login/oauth/authorize?state=" + state + "&code_challenge=" + challenge + "&code_challenge_method=S256");
-  vi.spyOn(api, "authorizeInstallation").mockResolvedValue({ user: { id: 7, login: "owner" }, repositories: [{ id: 42, name: "owner/repo" }], expiresAt: Date.now() + 600_000 });
-  vi.spyOn(api, "repositories").mockResolvedValue([{ id: 42, name: "owner/repo" }]); return api;
+import { GitHubConnections } from "../src/github/connections";
+afterEach(async()=>{vi.restoreAllMocks();await reset();});
+const browser="a".repeat(64),user={id:7,login:"owner"},repos=[{id:42,name:"owner/repo"}];
+function mocks(){
+ const tokens={access:"synthetic-access",refresh:"synthetic-refresh",expiresAt:Date.now()+28800_000,refreshUntil:Date.now()+15897600_000};
+ return {
+ exchange:vi.spyOn(GitHubAppClient.prototype,"exchange").mockResolvedValue(tokens),
+ discover:vi.spyOn(GitHubAppClient.prototype,"discover").mockResolvedValue({user,installations:[456]}),
+ inspect:vi.spyOn(GitHubAppClient.prototype,"inspect").mockImplementation(async()=>({user,repositories:repos,expiresAt:Date.now()+600_000})),
+ repositories:vi.spyOn(GitHubAppClient.prototype,"repositories").mockResolvedValue(repos),
+ };
 }
-describe("durable GitHub App state", () => {
-  it("keeps fresh S256 verifiers only in server state and consumes them with the state", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), connection = new GitHubAppConnection(ctx.storage, api, () => {});
-      const url = new URL(await connection.start("admin", verifier)), state = url.searchParams.get("state")!;
-      const stored = ctx.storage.sql.exec<{ code_verifier: string }>("SELECT code_verifier FROM github_app_state").one().code_verifier;
-      expect(stored).toMatch(/^[A-Za-z0-9_-]{43}$/); expect(url.href).not.toContain(stored);
-      const expected = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stored))).toString("base64url");
-      expect(url.searchParams.get("code_challenge")).toBe(expected); expect(url.searchParams.get("code_challenge_method")).toBe("S256");
-      const next = new URL(await connection.start("admin", verifier)); expect(next.searchParams.get("code_challenge")).not.toBe(expected);
-      await connection.complete(state, "code", 456, "admin", verifier);
-      expect(api.authorizeInstallation).toHaveBeenCalledWith("code", 456, stored);
-      expect(ctx.storage.sql.exec<{ code_verifier: string }>("SELECT code_verifier FROM github_app_state").toArray().some(row => row.code_verifier === stored)).toBe(false);
-      expect(JSON.stringify(connection.snapshot())).not.toContain(stored);
-    });
-  });
-  it("exposes only the repository-ID intersection and never installation-only private repositories", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), connection = new GitHubAppConnection(ctx.storage, api, () => {});
-      vi.mocked(api.repositories).mockResolvedValue([{ id: 42, name: "owner/repo" }, { id: 99, name: "org/other-private" }]);
-      vi.mocked(api.authorizeInstallation).mockResolvedValue({ user: { id: 7, login: "owner" }, repositories: [{ id: 42, name: "owner/repo" }, { id: 88, name: "owner/not-installed" }], expiresAt: Date.now() + 600_000 });
-      const state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      const result = await connection.complete(state, "code", 456, "admin", verifier);
-      expect(result.repositories).toEqual([{ id: 42, name: "owner/repo" }]); expect(result.githubUser).toEqual({ id: 7, login: "owner" });
-      expect(JSON.stringify(result)).not.toContain("other-private"); expect(connection.authorized(456, 42)).toBe(true); expect(connection.authorized(456, 99)).toBe(false); expect(connection.authorized(999, 42)).toBe(false);
-      await expect(connection.sync()).rejects.toThrow("reauthorization_required"); expect(api.repositories).toHaveBeenCalledTimes(1); expect(connection.snapshot().repositories).toEqual([]);
-    });
-  });
-  it("expires a persisted authorization lease and atomically revokes permits rather than refreshing with the App token", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), revoke = vi.fn(), connection = new GitHubAppConnection(ctx.storage, api, revoke);
-      const state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      const current = await connection.complete(state, "code", 456, "admin", verifier);
-      ctx.storage.sql.exec("UPDATE github_app_connection SET value=? WHERE id=1", JSON.stringify({ ...current, authorizedUntil: Date.now() - 1 }));
-      const recovered = new GitHubAppConnection(ctx.storage, api, revoke);
-      expect(recovered.authorized(456, 42)).toBe(false); expect(recovered.snapshot()).toMatchObject({ status: "revoked", repositories: [], userVerified: false });
-      expect(revoke).toHaveBeenCalledTimes(2); expect(api.authorizeInstallation).toHaveBeenCalledTimes(1);
-    });
-  });
-  it("revokes the matching GitHub user, invalidates pending states, and cannot recover through App-only sync", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), connection = new GitHubAppConnection(ctx.storage, api, () => {});
-      const state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      await connection.complete(state, "code", 456, "admin", verifier);
-      connection.revokeUserAuthorization(8); expect(connection.authorized(456, 42)).toBe(true);
-      const pending = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      connection.revokeUserAuthorization(7); connection.revokeUserAuthorization(7);
-      expect(connection.authorized(456, 42)).toBe(false); expect(connection.snapshot().repositories).toEqual([]);
-      await expect(connection.complete(pending, "code", 456, "admin", verifier)).rejects.toThrow("unauthorized");
-      await expect(connection.sync()).rejects.toThrow("reauthorization_required"); expect(api.repositories).toHaveBeenCalledTimes(1);
-    });
-  });
-  it("requires explicit disconnect to switch the owner's GitHub identity", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), connection = new GitHubAppConnection(ctx.storage, api, () => {});
-      let state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      await connection.complete(state, "code", 456, "admin", verifier);
-      vi.mocked(api.authorizeInstallation).mockResolvedValue({ user: { id: 8, login: "other" }, repositories: [{ id: 42, name: "owner/repo" }], expiresAt: Date.now() + 600_000 });
-      state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      await expect(connection.complete(state, "code", 456, "admin", verifier)).rejects.toThrow("identity_changed"); expect(api.repositories).toHaveBeenCalledTimes(1);
-      connection.disconnect(); state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      expect((await connection.complete(state, "code", 456, "admin", verifier)).githubUser?.id).toBe(8);
-    });
-  });
-  it("does not resurrect a first-time binding when OAuth revocation arrives while verification is pending", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), connection = new GitHubAppConnection(ctx.storage, api, () => {});
-      vi.mocked(api.authorizeInstallation).mockImplementationOnce(async () => { connection.revokeUserAuthorization(7); return { user: { id: 7, login: "owner" }, repositories: [{ id: 42, name: "owner/repo" }], expiresAt: Date.now() + 600_000 }; });
-      const state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      await expect(connection.complete(state, "code", 456, "admin", verifier)).rejects.toThrow("unauthorized"); expect(connection.authorized(456, 42)).toBe(false);
-    });
-  });
-  it("requires reconnect for a legacy App-only binding instead of silently upgrading it", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), connection = new GitHubAppConnection(ctx.storage, api, () => {});
-      ctx.storage.sql.exec("UPDATE github_app_connection SET value=? WHERE id=1", JSON.stringify({ installationId: 456, repositories: [], generation: 1, status: "active", verifiedAt: Date.now() }));
-      await expect(connection.sync()).rejects.toThrow("reauthorization_required"); expect(api.repositories).not.toHaveBeenCalled();
-    });
-  });
-  it("never binds an App-owned installation that the OAuth user cannot access", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), connection = new GitHubAppConnection(ctx.storage, api, () => {});
-      const state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      vi.mocked(api.authorizeInstallation).mockRejectedValueOnce(new Error("github_app_unauthorized"));
-      await expect(connection.complete(state, "code", 456, "admin", verifier)).rejects.toThrow("unauthorized");
-      expect(api.repositories).not.toHaveBeenCalled(); expect(connection.snapshot().status).toBe("revoked");
-      await expect(connection.complete(state, "code", 456, "admin", verifier)).rejects.toThrow("unauthorized");
-      expect(api.authorizeInstallation).toHaveBeenCalledTimes(1);
-    });
-  });
-  it("requires initiating admin and browser binding, consumes once, and survives reconstruction", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), revoke = vi.fn(); const connection = new GitHubAppConnection(ctx.storage, api, revoke);
-      const state = new URL(await connection.start("admin-a", verifier)).searchParams.get("state")!;
-      await expect(connection.complete(state + "x", "test-code", 456, "admin-a", verifier)).rejects.toThrow("unauthorized");
-      await expect(connection.complete(state, "test-code", 456, "admin-b", verifier)).rejects.toThrow("unauthorized");
-      await expect(connection.complete(state, "test-code", 456, "admin-a", "b".repeat(64))).rejects.toThrow("unauthorized");
-      expect(api.repositories).not.toHaveBeenCalled();
-      expect(await connection.complete(state, "test-code", 456, "admin-a", verifier)).toMatchObject({ installationId: 456, repositories: [{ id: 42, name: "owner/repo" }], status: "active" });
-      await expect(connection.complete(state, "test-code", 456, "admin-a", verifier)).rejects.toThrow("unauthorized");
-      expect(api.repositories).toHaveBeenCalledTimes(1); expect(revoke).toHaveBeenCalledTimes(1);
-      expect(new GitHubAppConnection(ctx.storage, api, revoke).snapshot().installationId).toBe(456);
-      const stored = ctx.storage.sql.exec<{ hash: string; binding: string }>("SELECT hash,binding FROM github_app_state").toArray(); expect(stored).toEqual([]);
-    });
-  });
-  it("rejects expired state and consumes state on upstream denial", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), connection = new GitHubAppConnection(ctx.storage, api, () => {});
-      const state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      ctx.storage.sql.exec("UPDATE github_app_state SET expires_at=0");
-      await expect(connection.complete(state, "test-code", 456, "admin", verifier)).rejects.toThrow("unauthorized"); expect(api.repositories).not.toHaveBeenCalled();
-      const next = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      vi.mocked(api.repositories).mockRejectedValueOnce(new Error("denied"));
-      await expect(connection.complete(next, "test-code", 456, "admin", verifier)).rejects.toThrow("denied");
-      await expect(connection.complete(next, "test-code", 456, "admin", verifier)).rejects.toThrow("unauthorized"); expect(connection.snapshot().status).toBe("revoked");
-    });
-  });
-  it("never lets an older in-flight API snapshot overwrite a revocation", async () => {
-    await runInDurableObject(env.EVENTS.getByName("main"), async (_instance, ctx) => {
-      const api = client(), revoke = vi.fn(), connection = new GitHubAppConnection(ctx.storage, api, revoke);
-      const state = new URL(await connection.start("admin", verifier)).searchParams.get("state")!;
-      vi.mocked(api.repositories).mockImplementationOnce(async () => { connection.invalidate(); return [{ id: 42, name: "owner/repo" }]; });
-      await expect(connection.complete(state, "test-code", 456, "admin", verifier)).rejects.toThrow("unauthorized");
-      expect(connection.snapshot()).toMatchObject({ status: "revoked", repositories: [], generation: 2 }); expect(revoke).toHaveBeenCalledTimes(2);
-    });
-  });
-});
+async function fixture(work:(c:GitHubConnections,ctx:DurableObjectState,api:ReturnType<typeof mocks>)=>Promise<void>){
+ await runInDurableObject(env.EVENTS.getByName("main"),async(_i,ctx)=>{const api=mocks();await work(new GitHubConnections(ctx.storage,env as Env,()=>{}),ctx,api);});
+}
+const start=async(c:GitHubConnections,admin="admin")=>new URL((await c.start(admin,browser)).url).searchParams.get("state")!;
+const complete=(c:GitHubConnections,state:string,admin="admin")=>c.complete(state,"code",admin,browser);
+it("keeps fresh S256 verifiers server-side and consumes state with its verifier",()=>fixture(async(c,ctx,api)=>{
+ const url=new URL((await c.start("admin",browser)).url),state=url.searchParams.get("state")!;
+ const stored=ctx.storage.sql.exec<{verifier:string}>("SELECT verifier FROM github_connect_state").one().verifier;
+ expect(stored).toMatch(/^[A-Za-z0-9_-]{43}$/);expect(url.href).not.toContain(stored);
+ const challenge=Buffer.from(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(stored))).toString("base64url");
+ expect(url.searchParams.get("code_challenge")).toBe(challenge);expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+ expect(new URL((await c.start("admin",browser)).url).searchParams.get("code_challenge")).not.toBe(challenge);
+ await complete(c,state);expect(api.exchange).toHaveBeenCalledWith("code",stored);
+ expect(ctx.storage.sql.exec<{verifier:string}>("SELECT verifier FROM github_connect_state").toArray().some(r=>r.verifier===stored)).toBe(false);
+ expect(JSON.stringify(c.snapshot())).not.toContain(stored);
+}));
+it("publishes only user/installation repository-ID intersection and revalidates both scopes",()=>fixture(async(c,_ctx,api)=>{
+ api.repositories.mockResolvedValue([...repos,{id:99,name:"org/private"}]);
+ api.inspect.mockResolvedValue({user,repositories:[...repos,{id:88,name:"owner/not-installed"}],expiresAt:Date.now()+600_000});
+ await complete(c,await start(c));expect(c.snapshot().installations[0]?.repositories).toEqual(repos);
+ expect(c.authorized(456,42)).toBe(true);expect(c.authorized(456,99)).toBe(false);expect(c.authorized(999,42)).toBe(false);
+ await c.sync();expect(api.inspect).toHaveBeenCalledTimes(2);expect(api.repositories).toHaveBeenCalledTimes(2);
+}));
+it("expired persisted permission cannot execute or recover using only an App token",()=>fixture(async(c,ctx,api)=>{
+ await complete(c,await start(c));
+ const value=JSON.parse(ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_installations").one().value);value.until=Date.now()-1;
+ ctx.storage.sql.exec("UPDATE github_installations SET value=?",JSON.stringify(value));
+ const recovered=new GitHubConnections(ctx.storage,env as Env,()=>{});expect(recovered.authorized(456,42)).toBe(false);
+ expect(recovered.snapshot().installations[0]?.repositories).toEqual([]);
+ api.inspect.mockRejectedValueOnce(new Error("denied"));await recovered.sync();expect(recovered.authorized(456,42)).toBe(false);expect(api.repositories).toHaveBeenCalledTimes(1);
+}));
+it("matching OAuth revocation clears credentials and pending states but not other identities",()=>fixture(async(c,_ctx,api)=>{
+ await complete(c,await start(c));c.disconnectUser(8);expect(c.authorized(456,42)).toBe(true);
+ const state=await start(c);c.disconnectUser(7);c.disconnectUser(7);
+ expect(c.authorized(456,42)).toBe(false);expect(c.snapshot().identities).toEqual([]);
+ await expect(complete(c,state)).rejects.toThrow("unauthorized");await c.sync();expect(api.repositories).toHaveBeenCalledTimes(1);
+}));
+it("explicit additional identities coexist and disconnect independently",()=>fixture(async(c,_ctx,api)=>{
+ await complete(c,await start(c));const other={id:8,login:"other"};
+ api.discover.mockResolvedValue({user:other,installations:[789]});api.inspect.mockResolvedValue({user:other,repositories:repos,expiresAt:Date.now()+600_000});
+ await complete(c,await start(c));expect(c.snapshot().identities).toHaveLength(2);expect(c.authorized(456,42)).toBe(true);expect(c.authorized(789,42)).toBe(true);
+ c.disconnectUser(8);expect(c.authorized(456,42)).toBe(true);expect(c.authorized(789,42)).toBe(false);
+}));
+it("first-time in-flight OAuth revocation cannot publish a new binding",()=>fixture(async(c,_ctx,api)=>{
+ api.discover.mockImplementationOnce(async()=>{c.disconnectUser(7);return {user,installations:[456]};});
+ await expect(complete(c,await start(c))).rejects.toThrow("unauthorized");expect(c.authorized(456,42)).toBe(false);
+}));
+it("legacy single-connection records and pending state confer no authority or automatic migration",()=>fixture(async(c,ctx,api)=>{
+ ctx.storage.sql.exec("CREATE TABLE github_app_connection(id INTEGER PRIMARY KEY,value TEXT)");
+ ctx.storage.sql.exec("INSERT INTO github_app_connection VALUES(1,?)",JSON.stringify({installationId:456,repositories:repos,status:"active",authorizedUntil:Date.now()+600_000,userVerified:true}));
+ ctx.storage.sql.exec("CREATE TABLE github_app_state(hash TEXT PRIMARY KEY,code_verifier TEXT)");
+ ctx.storage.sql.exec("INSERT INTO github_app_state VALUES('old-state','old-verifier')");
+ expect(c.snapshot().installations).toEqual([]);expect(c.authorized(456,42)).toBe(false);await c.sync();expect(api.repositories).not.toHaveBeenCalled();
+ await expect(complete(c,"old-state")).rejects.toThrow("unauthorized");
+}));
+it("inaccessible user installation fails before App repository lookup and consumes once",()=>fixture(async(c,_ctx,api)=>{
+ const state=await start(c);api.inspect.mockRejectedValueOnce(new Error("github_app_unauthorized"));
+ await expect(complete(c,state)).rejects.toThrow("unauthorized");expect(api.repositories).not.toHaveBeenCalled();
+ expect(c.snapshot().installations).toEqual([]);await expect(complete(c,state)).rejects.toThrow("unauthorized");expect(api.exchange).toHaveBeenCalledTimes(1);
+}));
+it("binds initiating admin/browser, consumes once and survives reconstruction",()=>fixture(async(c,ctx,api)=>{
+ const state=await start(c,"admin-a");
+ await expect(complete(c,state+"x","admin-a")).rejects.toThrow("unauthorized");
+ await expect(complete(c,state,"admin-b")).rejects.toThrow("unauthorized");
+ await expect(c.complete(state,"code","admin-a","b".repeat(64))).rejects.toThrow("unauthorized");expect(api.repositories).not.toHaveBeenCalled();
+ await complete(c,state,"admin-a");await expect(complete(c,state,"admin-a")).rejects.toThrow("unauthorized");
+ expect(new GitHubConnections(ctx.storage,env as Env,()=>{}).authorized(456,42)).toBe(true);
+ expect(ctx.storage.sql.exec("SELECT * FROM github_connect_state").toArray()).toEqual([]);
+}));
+it("rejects expired state and permanently consumes upstream-denied state",()=>fixture(async(c,ctx,api)=>{
+ const state=await start(c);ctx.storage.sql.exec("UPDATE github_connect_state SET expires=0");
+ await expect(complete(c,state)).rejects.toThrow("unauthorized");expect(api.repositories).not.toHaveBeenCalled();
+ const next=await start(c);api.repositories.mockRejectedValueOnce(new Error("denied"));
+ await expect(complete(c,next)).rejects.toThrow("denied");await expect(complete(c,next)).rejects.toThrow("unauthorized");
+ expect(c.snapshot().installations).toEqual([]);
+}));
+it("late installation snapshot cannot overwrite a lifecycle revocation",()=>fixture(async(c,_ctx,api)=>{
+ api.repositories.mockImplementationOnce(async()=>{c.invalidate(456);return repos;});
+ await expect(complete(c,await start(c))).rejects.toThrow("unauthorized");expect(c.authorized(456,42)).toBe(false);
+}));
+it("bounds active state capacity and prunes expired state without reusing verifiers",()=>fixture(async(c,ctx)=>{
+ for(let n=0;n<20;n++)await start(c);await expect(start(c)).rejects.toThrow("capacity");
+ ctx.storage.sql.exec("UPDATE github_connect_state SET expires=0");await start(c);
+ expect(ctx.storage.sql.exec("SELECT * FROM github_connect_state").toArray()).toHaveLength(1);
+}));

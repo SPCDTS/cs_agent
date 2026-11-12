@@ -41,14 +41,6 @@ export class GitHubAppClient {
     url.searchParams.set("code_challenge", challenge); url.searchParams.set("code_challenge_method", "S256");
     return url.href;
   }
-  /** The setup callback's installation_id is a hint, not identity evidence. Never return/cache this user token. */
-  async authorizeInstallation(code: string, installationId: number, verifier: string): Promise<UserAuthorization> {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(verifier)) throw new GitHubAppError("unauthorized");
-    this.authorizationUrl("configuration-check", "x".repeat(43));
-    if (!id(installationId) || !/^[A-Za-z0-9_-]{1,512}$/.test(code)) throw new GitHubAppError("unauthorized");
-    const tokens = await this.exchange(code, verifier);
-    return this.inspect(tokens, installationId);
-  }
   async exchange(code: string, verifier: string): Promise<UserTokens> {
     this.authorizationUrl("configuration-check", "x".repeat(43));
     if (!/^[A-Za-z0-9_-]{1,512}$/.test(code) || !/^[A-Za-z0-9_-]{43}$/.test(verifier)) throw new GitHubAppError("unauthorized");

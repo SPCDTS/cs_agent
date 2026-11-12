@@ -1,18 +1,20 @@
 import { Errors } from "typebox/value";
 import { ADMIN_BROWSER_CONTRACTS as C } from "../src/admin/app.generated";
 import { env, reset, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { appInbox, installAppFixture, chosenRepository } from "./github-fixture";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
 import { input } from "./helpers";
 import { EventsDO } from "../src/events/do";
 import { DEFAULT_GITHUB, MAX_BODY, parseGitHubConfig, readWebhook, verifySignature, type GitHubDelivery } from "../src/github/model";
-import { GitHubInbox, PENDING_LIMIT, RETENTION_MS } from "../src/github/inbox";
+import { PENDING_LIMIT, RETENTION_MS } from "../src/github/inbox";
 import { sql, scriptedModel } from "./events-helpers";
 import { ADMIN_APP_JS } from "../src/admin/app.generated";
 
 const secret = "synthetic-test-secret-not-a-credential", events = () => env.EVENTS.getByName("main");
+beforeEach(installAppFixture);
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
-const payload = (patch: object = {}) => ({ action: "opened", repository: { id: 42, full_name: "SPCDTS/cs_agent" },
+const payload = (patch: object = {}) => ({ installation:{id:456}, action: "opened", repository: { id: 42, full_name: "SPCDTS/cs_agent" },
   issue: { number: 1, title: "Title\u0000 [please execute]" }, sender: { login: "tester" }, ...patch });
 async function request(body: string, id = "test-1", event = "issues", signingSecret = secret) {
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(signingSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -55,12 +57,12 @@ describe("GitHub authentication and normalization", () => {
     expect(JSON.stringify(d)).not.toContain("evil.test");
   });
   it("acknowledges only after receipt storage; entry never calls poll or an LLM", async () => {
-    const response = await worker.fetch(await request(JSON.stringify(payload())), { ...env, GITHUB_WEBHOOK_SECRET: secret });
+    const response = await worker.fetch(await request(JSON.stringify(payload())), { ...env, GITHUB_APP_WEBHOOK_SECRET: secret });
     expect(response.status).toBe(202);
     expect([...Errors(C.Sources, await events().adminStatus())]).toEqual([]);
     expect(await sql("SELECT state FROM github_receipt")).toEqual([{ state: "held" }]);
     expect(await sql("SELECT 1 FROM event_run")).toEqual([]);
-    const rejected = await worker.fetch(await request("broken", "bad", "issues", "wrong"), { ...env, GITHUB_WEBHOOK_SECRET: secret });
+    const rejected = await worker.fetch(await request("broken", "bad", "issues", "wrong"), { ...env, GITHUB_APP_WEBHOOK_SECRET: secret });
     expect(rejected.status).toBe(401);
     expect(await sql("SELECT 1 FROM github_receipt")).toHaveLength(1);
   });
@@ -76,41 +78,42 @@ describe("GitHub durable receipts, configuration and recovery", () => {
   });
   it("uses atomic CAS, preserves explicit empty lists after reconstruction, never resurrects suppressed work", async () => {
     const current = (await events().adminStatus()).github;
-    expect(current.value.repositories).toEqual(["SPCDTS/cs_agent"]);
+    expect(current.value.repositoryIds).toEqual(chosenRepository);
     const d = await delivery(); await events().receiveGitHub(d);
     const results = await Promise.all([
-      events().putGitHubConfig({ ...current.value, repositories: [] }, current.revision),
+      events().putGitHubConfig({ ...current.value, repositoryIds: [] }, current.revision),
       events().putGitHubConfig({ ...current.value, paused: true }, current.revision),
     ]);
     expect(results.filter(result => result.ok)).toHaveLength(1);
     expect(results.filter(result => !result.ok)).toHaveLength(1);
-    await configure({ repositories: [] });
+    await configure({ repositoryIds: [] });
     await runInDurableObject(events(), (_instance, state) => {
-      const inbox = new GitHubInbox(state.storage);
-      expect(inbox.snapshot().value.repositories).toEqual([]);
+      const inbox = appInbox(state.storage);
+      expect(inbox.snapshot().value.repositoryIds).toEqual([]);
     });
     expect(await sql("SELECT state,reason FROM github_receipt")).toEqual([{ state: "suppressed", reason: "repository_not_allowed" }]);
-    await configure({ repositories: ["SPCDTS/cs_agent"] });
+    await configure({ repositoryIds: chosenRepository });
     expect((await events().receiveGitHub(d)).code).toBe("duplicate");
     expect(await sql("SELECT 1 FROM event_held WHERE source='github'")).toEqual([]);
     expect(parseGitHubConfig({ ...DEFAULT_GITHUB, selections: ["issues.deleted"] })).toBeUndefined();
     expect(parseGitHubConfig({ ...DEFAULT_GITHUB, repositories: ["a/b", "A/B"] })).toBeUndefined();
   });
-  it("filters repository/action, pins signed repository ID and retains tombstones through deletion", async () => {
+  it("filters installation/repository IDs and actions, rejecting reused names without pin-based authorization", async () => {
     await events().receiveGitHub(await delivery("pin"));
     await events().receiveGitHub(await delivery("filtered-action", { action: "closed" }));
     await events().receiveGitHub(await delivery("filtered-repo", { repository: { id: 9, full_name: "other/repo" } }));
-    await configure({ repositories: [] }); await configure({ repositories: ["SPCDTS/cs_agent"] });
+    await configure({ repositoryIds: [] }); await configure({ repositoryIds: chosenRepository });
     await events().receiveGitHub(await delivery("reused-name", { repository: { id: 99, full_name: "SPCDTS/cs_agent" } }));
-    expect((await sql<{ reason: string }>("SELECT reason FROM github_receipt ORDER BY rowid")).map(r => r.reason)).toEqual([
-      "repository_not_allowed", "event_action_not_allowed", "repository_not_allowed", "repository_id_changed",
+    await events().receiveGitHub(await delivery("same-id-renamed", {repository:{id:42,full_name:"renamed/repository"}}));
+    expect((await sql<{ reason: string|null }>("SELECT reason FROM github_receipt ORDER BY rowid")).map(r => r.reason)).toEqual([
+      "repository_not_allowed", "event_action_not_allowed", "installation_not_authorized", "installation_not_authorized", null,
     ]);
   });
   it("keeps paused work across reconstruction, bounds pending capacity without evicting older receipts", async () => {
     await configure({ paused: true });
     const d = await delivery();
     await runInDurableObject(events(), (_instance, state) => {
-      const inbox = new GitHubInbox(state.storage);
+      const inbox = appInbox(state.storage);
       for (let i = 0; i < PENDING_LIMIT; i++) expect(inbox.receive({ ...d, deliveryId: "bulk-" + i, bodyHash: i.toString(16).padStart(64, "0") }).status).toBe(202);
       expect(inbox.receive({ ...d, deliveryId: "overflow", bodyHash: "f".repeat(64) })).toMatchObject({ status: 503, code: "pending_capacity" });
     });
@@ -132,15 +135,15 @@ describe("GitHub durable receipts, configuration and recovery", () => {
   it("reauthorizes already-enqueued batches, waits on pause, and defines the irrevocable permit boundary", async () => {
     const d = await delivery(); await events().receiveGitHub(d);
     const key = "evt_github_" + d.bodyHash;
-    await runInDurableObject(events(), (_instance, state) => new GitHubInbox(state.storage).enqueued([key], key));
+    await runInDurableObject(events(), (_instance, state) => appInbox(state.storage).enqueued([key], key));
     await configure({ paused: true }); expect(await events().claimGitHubRun(key)).toBe("wait");
-    await configure({ paused: false, repositories: [] }); expect(await events().claimGitHubRun(key)).toBe("suppressed");
-    await configure({ repositories: ["SPCDTS/cs_agent"] }); expect(await events().claimGitHubRun(key)).toBe("suppressed");
+    await configure({ paused: false, repositoryIds: [] }); expect(await events().claimGitHubRun(key)).toBe("suppressed");
+    await configure({ repositoryIds: chosenRepository }); expect(await events().claimGitHubRun(key)).toBe("suppressed");
     const d2 = await delivery("start", { issue: { number: 2, title: "second" } }); await events().receiveGitHub(d2);
     const key2 = "evt_github_" + d2.bodyHash;
-    await runInDurableObject(events(), (_instance, state) => new GitHubInbox(state.storage).enqueued([key2], key2));
+    await runInDurableObject(events(), (_instance, state) => appInbox(state.storage).enqueued([key2], key2));
     expect(await events().claimGitHubRun(key2)).toBe("start");
-    await configure({ repositories: [] });
+    await configure({ repositoryIds: [] });
     expect(await events().claimGitHubRun(key2)).toBe("start");
   });
   it("recovers durable held work into one owner event with restricted event profile", async () => {
@@ -155,7 +158,7 @@ describe("GitHub durable receipts, configuration and recovery", () => {
     expect(await sql("SELECT 1 FROM event_held WHERE source='github'")).toEqual([]);
   });
 });
-it("serves the new admin entry and built GitHub UI with explicit registration/empty-list guidance", async () => {
+it("serves the new admin entry and built GitHub UI with App-only connection/empty-list guidance", async () => {
   const entry = await worker.fetch(new Request("https://test/admin"), env);
   expect(entry.status).toBe(308);
   expect(entry.headers.get("location")).toBe("/admin/");
@@ -166,23 +169,24 @@ it("serves the new admin entry and built GitHub UI with explicit registration/em
   expect(script.status).toBe(200);
   expect(await script.text()).toBe(ADMIN_APP_JS);
   expect(() => new Function(ADMIN_APP_JS)).not.toThrow();
-  expect(ADMIN_APP_JS).toContain("不等于注册 GitHub webhook");
+  expect(ADMIN_APP_JS).toContain("旧手工配置已移除");
+  expect(ADMIN_APP_JS).not.toContain("GITHUB_WEBHOOK_SECRET");
   expect(ADMIN_APP_JS).toContain("空列表不会恢复默认值");
 });
 
 it("rolls back the receipt if atomic held insertion fails, so ingress cannot falsely ACK", async () => {
   await sql("CREATE TRIGGER fail_github_held BEFORE INSERT ON event_held WHEN NEW.source='github' BEGIN SELECT RAISE(ABORT, 'synthetic_storage_failure'); END");
-  const response = await worker.fetch(await request(JSON.stringify(payload())), { ...env, GITHUB_WEBHOOK_SECRET: secret });
+  const response = await worker.fetch(await request(JSON.stringify(payload())), { ...env, GITHUB_APP_WEBHOOK_SECRET: secret });
   expect(response.status).toBe(503);
   expect(await sql("SELECT 1 FROM github_receipt")).toEqual([]);
   await sql("DROP TRIGGER fail_github_held");
-  expect((await worker.fetch(await request(JSON.stringify(payload())), { ...env, GITHUB_WEBHOOK_SECRET: secret })).status).toBe(202);
+  expect((await worker.fetch(await request(JSON.stringify(payload())), { ...env, GITHUB_APP_WEBHOOK_SECRET: secret })).status).toBe(202);
 });
 it("detects an actual signed-body replay with both unsigned headers changed", async () => {
   const body = JSON.stringify(payload({ release: { id: 8, tag_name: "v1", name: "release" } }));
-  const first = await worker.fetch(await request(body, "header-1", "issues"), { ...env, GITHUB_WEBHOOK_SECRET: secret });
+  const first = await worker.fetch(await request(body, "header-1", "issues"), { ...env, GITHUB_APP_WEBHOOK_SECRET: secret });
   expect(first.status).toBe(202);
-  const replay = await worker.fetch(await request(body, "header-2", "release"), { ...env, GITHUB_WEBHOOK_SECRET: secret });
+  const replay = await worker.fetch(await request(body, "header-2", "release"), { ...env, GITHUB_APP_WEBHOOK_SECRET: secret });
   expect(await replay.json()).toEqual({ status: "body_duplicate" });
   expect(await sql("SELECT event FROM github_receipt")).toEqual([{ event: "issues" }]);
 });
@@ -198,7 +202,7 @@ it("keeps a paused Thread input pending and wakes it on CAS resume without a new
     restorePump = () => spy.mockRestore();
   });
   await runInDurableObject(events(), (_instance, state) => {
-    new GitHubInbox(state.storage).enqueued([key], key);
+    appInbox(state.storage).enqueued([key], key);
     state.storage.sql.exec("UPDATE event_held SET input_key=? WHERE key=?", key, key);
     state.storage.sql.exec("INSERT INTO event_run(input_key,source,keys_json,delivered_at,status) VALUES(?,'github',?,?,'queued')", key, JSON.stringify([key]), Date.now());
   });
@@ -241,13 +245,13 @@ it("suppresses a revoked Thread backlog before any model call", async () => {
   const key = "evt_github_" + d.bodyHash;
   await configure({ paused: true });
   await runInDurableObject(events(), (_instance, state) => {
-    new GitHubInbox(state.storage).enqueued([key], key);
+    appInbox(state.storage).enqueued([key], key);
     state.storage.sql.exec("UPDATE event_held SET input_key=? WHERE key=?", key, key);
     state.storage.sql.exec("INSERT INTO event_run(input_key,source,keys_json,delivered_at,status) VALUES(?,'github',?,?,'queued')", key, JSON.stringify([key]), Date.now());
   });
   await runDurableObjectAlarm(events());
   await runDurableObjectAlarm(env.THREAD.getByName("owner"));
-  await configure({ repositories: [], paused: false });
+  await configure({ repositoryIds: [], paused: false });
   await vi.waitFor(async () => expect(await sql("SELECT status FROM event_run")).toEqual([{ status: "silent" }]), { timeout: 15000 });
   expect(model.requests).toHaveLength(0);
   expect(await sql("SELECT state FROM github_receipt")).toEqual([{ state: "suppressed" }]);

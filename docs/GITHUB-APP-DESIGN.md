@@ -4,7 +4,7 @@
 
 面向同一个个人 owner，不是多租户平台。owner 可明确连接多个 GitHub 身份及其个人/组织安装；事件只进入 owner 私聊，不增加群路由、eventAllow 或外部命令权限。独立创建事件 App，**不要复用开发 VM 的 bot App 或凭据**。
 
-生产入口是 `GitHubConnections`（`github/connections.ts`）与 EventsDO。旧 `GitHubAppConnection` 单行基础原语保留历史测试，但不用于生产接入；旧单安装记录不会静默升级成权限。
+生产入口是 `GitHubConnections`（`github/connections.ts`）与 EventsDO。旧单连接模块已删除，相关测试已迁移到生产多身份服务；旧单安装记录不会静默升级成权限。
 
 用户操作：
 1. 管理台 → 外部事件 → GitHub →「安装 / 调整 App 仓库授权」，在 GitHub 选择账号/组织与仓库。
@@ -39,7 +39,7 @@ OAuth callback /admin/github/oauth/callback 和安装 setup /admin/github/callba
 - 用户必须自身有权查看仓库；组织 SSO、管理员审批及安装仓库选择仍由 GitHub 决定。
 
 Worker 非秘密配置：
-`GITHUB_MODE=app`、`GITHUB_APP_ID`、`GITHUB_APP_SLUG`、`GITHUB_APP_CLIENT_ID`、
+`GITHUB_APP_ID`、`GITHUB_APP_SLUG`、`GITHUB_APP_CLIENT_ID`、
 `GITHUB_APP_CALLBACK_URL=https://<PUBLIC_ORIGIN>/admin/github/oauth/callback`。
 
 只通过运行环境 secrets 配置：
@@ -57,7 +57,7 @@ Worker 非秘密配置：
 
 - 一次性 state 只存 SHA-256，绑定服务端管理员凭据摘要与浏览器随机值；服务端独立生成 32 字节 PKCE verifier，使用 S256，十分钟过期，最多 20 个待消费 state。state/verifier 同一事务消费，防跨浏览器、过期、重放。全局 epoch 防止进行中的旧授权在撤销后回写。
 - 每个 GitHub 身份独立保存 AES-256-GCM 密文，里面是必要 user access/refresh token 及期限。随机 IV，AAD 绑定用途、用户 ID、代次；密钥仅来自 GITHUB_APP_STORE_KEY。前端只得用户 ID/login、安装 ID、授权仓库和状态。
-- GitHub expiring access token 通常八小时；refresh token 通常六个月。access 到期前两分钟刷新，按身份 single-flight；新令牌加密落库前再次检查 epoch，不回退旧令牌。刷新远端成功但落库前崩溃可能使旧 refresh token 失效，此时重新 OAuth，不以 App 权限替代用户授权。
+- GitHub expiring access token 通常八小时；refresh token 通常六个月。access 到期前两分钟刷新，按身份 single-flight；新令牌加密落库前再次检查身份自己的单调 generation，不回退旧令牌。刷新远端成功但落库前崩溃可能使旧 refresh token 失效，此时重新 OAuth，不以 App 权限替代用户授权。
 - 如运营历史配置仍返回不失效 access token，本地最多保留一年；新授权主动请求 offline_access。失败或 key 解密失败不会放宽权限。
 - Cron 每五分钟后台复验用户身份、用户安装列表、用户仓库与安装仓库交集；授权快照最多十分钟且不超过 token 有效期。不是十分钟人工租约。过期时收件/执行许可 fail closed，过期积压在续期前抑制。后台同步不等待 GitHub 网络后才处理 Gmail/普通 owner 工作。
 - 用户级 API/刷新失败保守撤销该身份凭据和绑定，需要重新授权；单安装核验失败只停用该安装。网络故障可能造成可用性下降，这是刻意 fail closed，不使用旧权限兜底。
@@ -66,23 +66,29 @@ Worker 非秘密配置：
 
 ## 收件、生命周期与恢复
 
-- App 模式只使用 GITHUB_APP_WEBHOOK_SECRET；原始 body 有界 HMAC 验证后，持久 receipt 与 held 在同一 SQL 事务中写入，storage.sync 后才 ACK。
+- 唯一入口只使用 GITHUB_APP_WEBHOOK_SECRET；原始 body 有界 HMAC 验证后，持久 receipt 与 held 在同一 SQL 事务中写入，storage.sync 后才 ACK。
 - installationId + repositoryId + 用户交集 + 明确 repositoryIds 选择共同决定接收和执行许可。未知安装持久记录 installation_not_authorized 抑制，不自动投递 owner。
 - 所有业务、ping、生命周期共享唯一 bodyHash 去重域；未签名 event/delivery header 不能切换去重域。同 delivery 不同 body 返回 409；容量拒绝保持 503；保留原收件恢复、CAS、空列表、执行许可和暂停语义。
 - github_app_authorization.revoked 仅按 GitHub user ID 撤销匹配身份，不误停其他身份。installation、installation_repositories、repository 生命周期保守失效其安装并原子吊销尚未获执行许可的积压。
 - 生命周期任何 action（包括 created/unsuspend/added）都**不直接恢复**；重复/乱序旧 Webhook 最多导致再次失效。管理员同步必须通过权威用户+安装 API 才恢复，已抑制积压永不复活。仓库变化暂时停用整个相关安装，其他安装不受影响。
-- 已取得执行许可的操作不能撤回；receipt finished 不等于 QQ 已送达。签名 ping 可在尚无 installation/repository 时确认配置，但不建立授权。
+- 已实际执行的操作不能撤回；每次新 claim（含恢复）仍须有效安装授权，历史 permit 不是授权兜底；receipt finished 不等于 QQ 已送达。签名 ping 可在尚无 installation/repository 时确认配置，但不建立授权。
 - DO 重建从密文与安装独立记录恢复；没有主密钥、凭据撤销、API 失败、过期快照均不能凭历史仓库名称恢复。
 - 本服务断开只删除本地接入，不替用户卸载 GitHub App 或撤销 GitHub 全局授权；需要全局撤销时到 GitHub Settings → Applications 操作。
 
-## 从旧手工模式迁移
+## 旧手工路径已移除
 
-仅显式 GITHUB_MODE=manual 时保留既有手工 Webhook；未设置、空值、拼写错误一律拒收，不自动回退旧 secret。原手工部署升级时也必须明确设置 manual。运营方设置 app 并配置独立 App secrets 后：
-- 不再接受旧 secret；手工 delivery 没有合法 installation 时拒收。
-- 旧 repositories 名称、repo_pin、单行基础连接均不赋予 App 权限。
-- 旧待执行收件 installation_id=0，在重新鉴权/claim 时抑制；先连接身份、再按 ID 明确选择仓库。
-- 不自动恢复默认仓库；清空 repositoryIds 保持空。迁移后可由用户自行关闭旧逐仓库 Webhook，避免无意义拒收请求。
-- 不把临时关闭 App 配置当成自动回退 manual；不要在故障时切模式绕过授权。
+只保留独立 App，不存在模式切换、旧 secret、按仓库名白名单或首条收件 pin 授权路径。App 配置不完整时 HTTP 与 DO 均 fail closed。
+
+- 配置仅接受 repositoryIds、selections、paused、settings；repositories 名称字段被拒绝。管理视图没有 mode、pins 或手工输入框。
+- 默认 repositoryIds 为空。旧名称/混合配置首次加载时清空 ID 选择并增加 CAS revision，不能因为代码升级而赋权；已有 App 身份密文可以保留，owner 须明确重新选择仓库。
+- 旧 pin 表被移除，旧单行连接和旧 state 不被导入生产授权表。旧 receipts/执行 ledger 保持可读。
+- 没有当前安装授权的旧待执行收件全部抑制；旧 issued/finished 记录也不能作为新的执行授权。已实际执行的操作不能倒退。
+- 合法 App receipt 的全局去重、恢复、暂停、容量、原子 ACK 保留。重新连接或重新选择不会复活旧抑制积压。
+- 无需逐仓库创建 Webhook。运营方一次配置上述独立 App，owner 只需连接身份与勾选安装/仓库 ID；可关闭旧逐仓库 Webhook 以免重复拒收。
+
+## 保留的并发安全修复
+
+刷新使用身份自身单调 generation，安装发布检查其 generation；其他身份/安装失效不再丢弃已轮换 token，同身份安装失效也不丢有效用户 token。删除重连避免 ABA。未知 GitHub 主体的待完成 OAuth 仍由全局 epoch 保守防撤销竞争，可能要求重走授权，但不会误删其他身份凭据。相同身份重连只抑制失权、过期或已撤销积压，合法交集内待执行数据保留。
 
 ## 验证边界与已知限制
 
@@ -96,29 +102,4 @@ https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-githu
 https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens
 
 
-## 本次本地最终验证（2026-11-12）
-
-- `npm run check` 最终退出 0：Workers/browser/runner 类型检查通过；66 个 Workers 测试文件、441 项通过。
-- Workers Node：19 通过、1 skip；runner：28 通过、2 skip。合计 47 通过、3 skip、0 失败。
-- runner build 与 Worker `deploy --dry-run --containers-rollout=none` 通过；没有部署。
-- GitHub 定向：6 文件、59 项通过；新增完整 HTTP/EventsDO mock 安全链路 8 项。新增真实 UI 模块 DOM 交互 2 项通过，既有管理台 loadSources/UI 测试也通过。
-- 既有 skip：JS fork 后台子进程清理、独立桌面身份检查器、Hyper-V 来宾原生助手。没有运行真实 Hyper-V/WSB smoke 或真实 GitHub App 联调。
-- 日志目录：`C:\AgentWork\github-app-connect-logs`；最终主日志 `multi-check-release.log`；定向 `multi-final-targeted.log`；类型 `multi-final-types.log`；UI `multi-browser.log`；独立 Node/build `multi-node-final.log`、`multi-build-final.log`。
-- 保留中间失败，不把重跑当成根因修复：首轮全量 435 通过/3 失败（安装 token 缓存测试仍使用旧 mock 序列、旧 UI 文案断言、既有 group-coding:114 一秒级等待超时）；前两项按新行为修正。群测试没有跳过或增加 timeout，单独 7 项通过，之后两轮完整 Workers 均 441 项通过；群偶发超时根因仍未证明。
-- 第二轮 Workers 全通过后，Node 的旧手工 UI fixture 缺少新增必填 mode/connections 导致契约拒绝；补齐 fixture，未放宽浏览器 schema，最终完整 check 全通过。
-- 旧环境更新取消的 PKCE 全量任务未盲目重放；先确认其测试进程已停止，再用新 requestId 启动验证。
-
-运营方可在 `workers/` 使用 `npx wrangler secret put <名称>` 交互输入上述四项独立 secrets；主密钥须自行安全生成 32 字节随机值。私钥通过安全管道或交互输入 PKCS#8 内容，不放入命令参数、版本库或日志。非秘密配置放入待部署环境的 vars。创建 App、真实联调、推送与部署均留待父 agent 审查及用户后续授权。
-
-
-## 固定主线合并与聚焦安全复查
-
-本轮只合并指定 main 提交 987c0d7d6e54f504959a9306fd231120c0de1019（统一环境工具并按会话授权 envId），不追后续 main，不推送或部署。
-
-发现并修正的实质问题：
-- 原 syncIdentity 用全局 epoch 判断 refresh 结果是否可写。另一个身份/安装失效会改变全局 epoch，导致已经在 GitHub 轮换成功的新 token 未落库；下次使用旧 refresh token 会误要求重连。现在 refresh 使用身份自身的单调 generation，安装快照提交使用该身份与该安装 generation，其他身份失效不再丢弃有效轮换。
-- 身份 generation 由全局单调计数分配，避免删除再连接从 1 开始产生 ABA；旧异步失败不会撤销新连接。全局 epoch 仍只负责尚未确定 GitHub 主体的 OAuth state/complete 防重放与撤销竞争。其他生命周期可能使待完成 OAuth 重新开始，但不会误删其他身份凭据；这是保守的待授权边界。
-- 同身份重新 OAuth 不再先吊销所有合法积压：新交集仍包含的、未过期未撤销安装保留 pending receipts；被移出交集、过期或已撤销的积压仍抑制且不会复活。
-- Webhook 模式必须显式 app 或 manual。模式未配置/非法返回 503；App 缺少必需配置或 callback 格式错误同样拒收，不使用 legacy secret。DO 接收及执行许可也 fail closed，防止仅 HTTP 层检查而内部退回 manual。
-
-新增回归覆盖两个身份并发刷新/撤销、同身份安装失效中的 token 轮换、删除重连 ABA、重连保留/缩小交集积压、模式缺失/错误/部分 App 配置的 HTTP 与 DO 拒收。既有手工模式测试环境显式设置 manual，不放宽生产默认值。合并后的最终统计见最新交接记录，上一节为合并前已完成的历史验证。
+运营方可在 workers/ 使用 npx wrangler secret put <名称> 交互输入上述四项独立 secrets；主密钥须安全生成 32 字节随机值。私钥通过安全管道或交互输入 PKCS#8，不放命令参数、版本库或日志。非秘密配置放入部署环境 vars。创建 App、真实联调、推送与部署留待后续授权。

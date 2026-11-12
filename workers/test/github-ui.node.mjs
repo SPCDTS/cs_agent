@@ -42,8 +42,8 @@ test("new admin loadSources reaches typed GitHub config and receipts, paginates 
   const sources=el("div",{id:"sources"});
   el("main",{},[sources]); nodes.sources=sources;
   const expect=value=>({toBe:expected=>assert.equal(value,expected)});
-    const github={mode:"manual",connections:{configured:false,slug:"",identities:[],installations:[]},configured:true,count:11,capacity:100,pendingCapacity:100,pins:[],revision:"1",
-      value:{repositories:["SPCDTS/cs_agent"],paused:false,selections:[],settings:{intervalS:60,mergeWindowS:0,budgetPerHour:10,filters:{requireLabels:[],excludeLabels:[],excludeSenders:[]}}},
+    const github={connections:{configured:true,slug:"test-app",identities:[],installations:[{installationId:456,user:{id:7,login:"owner"},repositories:[{id:42,name:"SPCDTS/cs_agent"}],status:"active",until:Date.now()+600000}]},configured:true,count:11,capacity:100,pendingCapacity:100,revision:"1",
+      value:{repositoryIds:[{installationId:456,repositoryId:42}],paused:false,selections:[],settings:{intervalS:60,mergeWindowS:0,budgetPerHour:10,filters:{requireLabels:[],excludeLabels:[],excludeSenders:[]}}},
       receipts:Array.from({length:11},(_,i)=>({delivery_id:"d"+i,received_at:i,repository:"a/b",event:"issues",action:"opened",state:"held",reason:null,outcome:null}))};
     const view={sources:[{id:"github",paused:false,degraded:false,cursor:null,lastPollAt:null,held:11,
       budget:{used:0,perHour:10},failures:0,configured:true,settings:github.value.settings}],github,watch:{topic:false,expiration:null},runs:[]};
@@ -55,7 +55,7 @@ test("new admin loadSources reaches typed GitHub config and receipts, paginates 
     await loadSources();
     const render=()=>{renderSources(view);return sources.children[0];};
     let card=sources.children[0];
-    expect(card.children[0].text).toBe("GitHub webhook");
+    expect(card.children[0].text).toBe("GitHub App");
     const body=()=>card.querySelector("tbody");
     const pager=()=>card.children.find(n=>n.dataset.listPager==="true");
     const buttons=()=>pager().children[1].children;
@@ -64,12 +64,12 @@ test("new admin loadSources reaches typed GitHub config and receipts, paginates 
     expect(body().children.length).toBe(1);
     expect(body().children[0].children[1].text).toBe("d10");
     const form=state.sourceForms.github;
-    expect(form.querySelector("textarea").value).toBe("SPCDTS/cs_agent");
-    state.editingSource="github";form.open=true;form.querySelector("textarea").value="unsaved/repo";
+    expect(form.querySelector("input").checked).toBe(true);
+    state.editingSource="github";form.open=true;form.querySelector("input").checked=false;
     card=render();
     expect(body().children.length).toBe(1);
     expect(state.sourceForms.github).toBe(form);
-    expect(form.querySelector("textarea").value).toBe("unsaved/repo");
+    expect(form.querySelector("input").checked).toBe(false);
     buttons()[0].onclick();
     expect(body().children.length).toBe(10);
     expect(body().children[0].children[1].text).toBe("d0");

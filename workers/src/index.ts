@@ -6,7 +6,7 @@ import { publicOrigin } from "./mcp/config";
 import { oauthErrorCode } from "./mcp/oauth-fetch";
 import type { Env } from "./env";
 import { MAINTENANCE_CRON, runMaintenance } from "./maintenance";
-import { githubMode, githubAppConfigured } from "./github/mode";
+import { githubAppConfigured } from "./github/configuration";
 import { readWebhook, WebhookError } from "./github/model";
 import { readPush, verifyPushToken } from "./gmail/pubsub";
 
@@ -45,9 +45,8 @@ export default {
       try {
         const result = await Promise.race([
           (async () => {
-            const mode = githubMode(env);
-            if (mode === "invalid" || mode === "app" && !githubAppConfigured(env)) throw new WebhookError(503,"unconfigured");
-            const delivery = await readWebhook(request, mode === "app" ? env.GITHUB_APP_WEBHOOK_SECRET : env.GITHUB_WEBHOOK_SECRET, mode === "app");
+            if (!githubAppConfigured(env)) throw new WebhookError(503,"unconfigured");
+            const delivery = await readWebhook(request, env.GITHUB_APP_WEBHOOK_SECRET);
             return env.EVENTS.getByName("main").receiveGitHub(delivery);
           })(),
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new WebhookError(503, "receipt_timeout")), 9000); }),

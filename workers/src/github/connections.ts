@@ -1,5 +1,5 @@
 import { GitHubAppClient, GitHubAppError, type GitHubAppSecrets, type GitHubUser, type UserTokens, type AuthorizedRepository } from "./app";
-import { githubAppConfigured } from "./mode";
+import { githubAppConfigured } from "./configuration";
 import { TokenVault, randomSecret, sha256 } from "../mcp/crypto";
 
 type Identity = { id: number; login: string; generation: number; cipher: string };
@@ -7,7 +7,7 @@ export type InstallationView = { installationId: number; user: GitHubUser; repos
 type Binding = InstallationView & { generation: number };
 const digest = async (s: string) => (await sha256(s)).toString("hex");
 const aad = (id: number, generation: number) => JSON.stringify(["github-app-owner", id, generation]);
-/** Only this service is used by production. Legacy single-connection snapshots confer no authority. */
+/** Owner identities and installations are independently authorized; old snapshots confer no authority. */
 export class GitHubConnections {
   private readonly vault: TokenVault;
   private readonly client: GitHubAppClient;
