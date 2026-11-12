@@ -12,9 +12,12 @@ const job = {
   deadline: Type.Number(), queuedAt: Type.Number(),
 };
 export const LastErrorSchema = object({ requestId: Type.String(), jobId: Type.String(), error: Type.String(), queuedAt: Type.Number() });
+export const LedgerCountsSchema = object({ jobs: Type.Integer({ minimum: 0 }), retainedPayloads: Type.Integer({ minimum: 0 }) });
+export const LedgerStorageSchema = object({ allocatedBytes: Type.Integer({ minimum: 0 }), reusableBytes: Type.Integer({ minimum: 0 }) });
 export const EnvironmentStatusSchema = object({
   targetId: Type.String(), kind: Type.Union([Type.Literal('hyperv'), Type.Literal('wsb')]), checkedAt: Type.Number(),
   readiness: ReadinessSchema,
+  ledger: object({ ...LedgerCountsSchema.properties, ...LedgerStorageSchema.properties, databaseBytes: Type.Integer({ minimum: 0 }), walBytes: Type.Integer({ minimum: 0 }) }),
   queue: object({
     busy: Type.Boolean(), queued: Type.Integer(), oldestQueuedAt: Type.Union([Type.Number(), Type.Null()]),
     current: Type.Union([Type.Null(), object({ ...job, state: Type.Union([Type.Literal('running'), Type.Literal('cancelling'), Type.Literal('unknown')]), error: Type.Optional(Type.String()) })]),

@@ -121,9 +121,15 @@ test('终态正文在线归档后保留去重和退出摘要，超过旧总量�
   const first = x.jobs.submit(subject, vm, id, command);
   await x.jobs.tick(); x.f.states.set(first.jobId, success); await x.jobs.tick();
   assert.equal(x.jobs.get(subject, vm, id).result?.stdout, 'ok');
+  const before = (await x.jobs.status(subject, vm)).ledger;
+  assert.equal(before.jobs, 1); assert.equal(before.retainedPayloads, 1);
+  assert.ok(before.databaseBytes > 0); assert.ok(before.allocatedBytes > 0);
+  assert.ok(before.reusableBytes >= 0 && before.reusableBytes <= before.allocatedBytes); assert.ok(before.walBytes >= 0);
   x.time(COMPLETED_DETAILS_RETENTION_MS + 2000); await x.jobs.tick();
   const archived = x.jobs.get(subject, vm, id);
   assert.equal(archived.details, 'archived');
+  const after = (await x.jobs.status(subject, vm)).ledger;
+  assert.equal(after.jobs, 1); assert.equal(after.retainedPayloads, 0);
   assert.equal(archived.result, undefined);
   assert.deepEqual(archived.resultSummary, { exitCode: 0, truncated: false });
   assert.equal(x.jobs.submit(subject, vm, id, command).jobId, first.jobId);
@@ -180,6 +186,9 @@ test('执行桥阻塞时状态不排队，并按作用域隐藏任务与错误',
     const foreign = await x.jobs.status({ ...subject, scope: 'other' }, vm);
     assert.deepEqual(foreign.queue, { busy: true, current: null, queued: 0, oldestQueuedAt: null });
     assert.equal(foreign.lastError, null);
+    assert.equal(status.ledger.jobs, 2); assert.equal(status.ledger.retainedPayloads, 2);
+    assert.equal(foreign.ledger.jobs, 0); assert.equal(foreign.ledger.retainedPayloads, 0);
+    assert.equal(foreign.ledger.databaseBytes, status.ledger.databaseBytes);
     assert.equal(JSON.stringify(foreign).includes(first.jobId), false);
     assert.equal(x.jobs.get(subject, vm, second.requestId).state, 'queued');
   } finally { gate.resolve(); await pending; }

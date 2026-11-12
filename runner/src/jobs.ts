@@ -1,8 +1,8 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, statSync } from 'node:fs';
 import { Check } from 'typebox/value';
-import { LastErrorSchema, type EnvironmentStatus, type Readiness } from './environment-status.ts';
+import { LastErrorSchema, LedgerCountsSchema, LedgerStorageSchema, type EnvironmentStatus, type Readiness } from './environment-status.ts';
 import { JobDetails, COMPLETED_DETAILS_RETENTION_MS } from './job-details.ts';
 import path from 'node:path';
 import { sha256 } from './files.ts';
@@ -26,6 +26,7 @@ const stable = (value: unknown): string => {
 /** SQLite 是主账本；原生后端只写执行证据。请求去重记录不自动删除。 */
 export class Jobs {
   private db: DatabaseSync;
+  private readonly databasePath: string;
   private readonly details: JobDetails;
   private nextArchive = 0;
   private timer?: NodeJS.Timeout;
@@ -36,7 +37,8 @@ export class Jobs {
   constructor(stateDir: string, backends: Record<Target['kind'], Backend>, now: () => number = Date.now) {
     this.backends = backends; this.now = now;
     mkdirSync(stateDir, { recursive: true });
-    this.db = new DatabaseSync(path.join(stateDir, 'jobs.sqlite'));
+    this.databasePath = path.join(stateDir, 'jobs.sqlite');
+    this.db = new DatabaseSync(this.databasePath);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS targets (id TEXT PRIMARY KEY, identity TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, principal TEXT NOT NULL, scope TEXT NOT NULL, target TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, execution TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL, created INTEGER NOT NULL, UNIQUE(principal,scope,target,request_id));
@@ -109,6 +111,13 @@ export class Jobs {
   get(subject: Subject, target: Target, requestId: string): Receipt {
     const row = this.find(subject, target, requestId); if (!row) throw new Error('job_not_found'); return this.receipt(row);
   }
+  private ledger(subject: Subject, target: Target): EnvironmentStatus['ledger'] {
+    const counts = this.db.prepare('SELECT COUNT(*) AS jobs,COUNT(p.id) AS retainedPayloads FROM jobs j LEFT JOIN job_payloads p ON p.id=j.id WHERE j.principal=? AND j.scope=? AND j.target=?')
+      .get(subject.principal, subject.scope, target.id);
+    const storage = this.db.prepare('SELECT page_count*page_size AS allocatedBytes,freelist_count*page_size AS reusableBytes FROM pragma_page_count(),pragma_page_size(),pragma_freelist_count()').get();
+    if (!Check(LedgerCountsSchema, counts) || !Check(LedgerStorageSchema, storage)) throw new Error('ledger_metrics_invalid');
+    return { ...counts, ...storage, databaseBytes: statSync(this.databasePath).size, walBytes: statSync(this.databasePath + '-wal', { throwIfNoEntry: false })?.size ?? 0 };
+  }
   async status(subject: Subject, target: Target): Promise<EnvironmentStatus> {
     let readiness: Readiness;
     try { readiness = await this.backends[target.kind].probe?.(target) ?? { state: 'unknown', error: 'probe_not_supported' }; }
@@ -121,7 +130,7 @@ export class Jobs {
     const receipt = current && this.receipt(current);
     const lastError = this.db.prepare("SELECT id AS jobId,request_id AS requestId,json_extract(status,'$.error') AS error,created AS queuedAt FROM jobs WHERE principal=? AND scope=? AND target=? AND json_extract(status,'$.state') IN ('unknown','failed') ORDER BY created DESC,rowid DESC LIMIT 1").get(subject.principal, subject.scope, target.id);
     return {
-      targetId: target.id, kind: target.kind, checkedAt: this.now(), readiness,
+      targetId: target.id, kind: target.kind, checkedAt: this.now(), readiness, ledger: this.ledger(subject, target),
       queue: {
         busy: rows.some(row => row.phase !== 'queued') || (target.kind === 'wsb' && Boolean(this.db.prepare("SELECT 1 FROM sessions WHERE target=? AND state!='closed'").get(target.id))),
         queued: queued.length, oldestQueuedAt: queued[0]?.created ?? null,
