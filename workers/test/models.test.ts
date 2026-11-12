@@ -1,5 +1,5 @@
 import { ModelAlarm } from "../src/model-alarm";
-import { constants, zstdDecompressSync } from "node:zlib";
+import { zstdDecompressSync } from "node:zlib";
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
@@ -287,22 +287,20 @@ describe("model selection and Codex Responses", () => {
     expect(used).toEqual(["test", "test-alt"]);
   });
 
-  it.each(["complete", "completeSimple"] as const)("%s sends large image requests with a Codex-compatible Zstd window", async method => {
+  it.each(["complete", "completeSimple"] as const)("%s sends complete long text and images as uncompressed Codex JSON", async method => {
     network(); await login();
     const image = { type: "image" as const, mimeType: "image/png", data: "a".repeat(921064) };
-    const content = [{ type: "text" as const, text: "双图传输验证" }, image, image];
+    const text = "长上下文与双图传输验证：" + "a".repeat(543874);
+    const content = [{ type: "text" as const, text }, image, image];
     const upstream = vi.fn<typeof fetch>(async (input, init) => {
       const request = new Request(input, init);
       expect(request.url).toBe(CODEX_BASE_URL + "/responses");
       expect(request.headers.get("authorization")).toBe("Bearer " + accessToken());
-      expect(request.headers.get("content-encoding")).toBe("zstd");
-      // 库默认编码的 1.8 MiB 请求不能被此窗口上限解码；不要只验证默认解码器能读回。
-      const json = zstdDecompressSync(new Uint8Array(await request.arrayBuffer()), {
-        params: { [constants.ZSTD_d_windowLogMax]: 20 },
-      }).toString("utf8");
-      expect(Buffer.byteLength(json)).toBeGreaterThan(1_800_000);
+      expect(request.headers.has("content-encoding")).toBe(false);
+      const json = await request.text();
+      expect(Buffer.byteLength(json)).toBeGreaterThan(2_300_000);
       expect(JSON.parse(json).input).toContainEqual({ role: "user", content: [
-        { type: "input_text", text: "双图传输验证" },
+        { type: "input_text", text },
         ...[image, image].map(part => ({ type: "input_image", detail: "auto", image_url: "data:image/png;base64," + part.data })),
       ] });
       return new Response('data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n',
@@ -442,6 +440,7 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
   let parentCalls = 0, childCalls = 0;
   const owner = env.THREAD.getByName("owner");
   network({ [CODEX_BASE_URL + "/responses"]: async request => {
+    expect(request.headers.has("content-encoding")).toBe(false);
     const text = request.headers.get("content-encoding") === "zstd"
       ? zstdDecompressSync(new Uint8Array(await request.arrayBuffer())).toString("utf8") : await request.text();
     const owner = env.THREAD.getByName("owner");

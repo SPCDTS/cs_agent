@@ -12,7 +12,7 @@
 
 QQ、网页、定时任务和事件输入先持久化入队，在同一事务里安排按需 alarm。只有 alarm 调用 ThreadDO 的 pump，接纳输入、恢复 Pi 任务并启动模型。SubagentDO 的首次任务和后续输入也由其 alarm 启动。
 
-首次启动 alarm 不能保证后续模型请求的上下文不受影响：执行期间进入同一 DO 的 RPC（包括 Queue 消费者转交的命令）仍可能影响下一次出站。因此主 agent 和子 agent 共用 ModelAlarm，在每次 OpenAI HTTP 请求的 SDK 准备完成后，安排原执行 DO 的新 alarm；alarm 第一行同步派发 fetch，不能先 await 存储或其他 RPC。工具续轮、压缩和记忆模型调用沿用同一模型传输层。认证、请求体字节、响应流和取消信号保持原协议，不新增模型 DO、Queue 或公网代理，也不承诺固定出口 IP／地区。
+首次启动 alarm 不能保证后续模型请求的上下文不受影响：执行期间进入同一 DO 的 RPC（包括 Queue 消费者转交的命令）仍可能影响下一次出站。因此主 agent 和子 agent 共用 ModelAlarm，在每次 OpenAI HTTP 请求的 SDK 准备完成后，安排原执行 DO 的新 alarm；alarm 第一行同步派发 fetch，不能先 await 存储或其他 RPC。工具续轮、压缩和记忆模型调用沿用同一模型传输层。Codex 的 SSE 请求在进入 ModelAlarm 前还原 pi-ai 自动生成的 Zstd 请求体，以原始 JSON 发送，并移除压缩标记与旧 Content-Length。上游实测会对部分压缩长文本返回无详情的 400，缩小窗口也不能完全消除；原始 JSON 对照成功。该适配保留完整上下文、图片、认证、响应流和取消信号，不重试模型或工具，代价是上传体积增加。主会话、子 agent、压缩和维护调用共用此适配，其他 provider 保持原路径。不新增模型 DO、Queue 或公网代理，也不承诺固定出口 IP／地区。
 
 ThreadDO 将新输入、模型出站、Pi 恢复时间、记忆抽取、同步重试和子 agent 截止时间合并到一个 alarm，选择最早到期项。运行任务保留原有恢复唤醒；无待办时删除闹钟。SubagentDO 保留心跳和结束 14 天后的清理。压缩、重置和中止等管理写命令仍由原执行对象接纳；写入使用既有 requestId 与投递账本去重。
 
