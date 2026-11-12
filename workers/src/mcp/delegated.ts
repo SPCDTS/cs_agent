@@ -1,3 +1,4 @@
+import { EnvironmentSnapshotsSchema } from "./environments";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { mcpFailure } from "./result";
@@ -57,7 +58,7 @@ export function installDelegatedCapabilities(registry: Registry, host: SubagentC
   ] }));
   if (catalogs.length) {
     registry.install(defineExtension({ name: "cs.subagent.mcp",
-      sections: [section("mcp-delegation", () => "MCP 只能使用派出目录与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。" + MCP_RESULT_INSTRUCTIONS)] }));
+      sections: [section("mcp-delegation", () => "MCP 只能使用派出目录、环境范围与父线程当前授权的交集；写调用可能等待逐次审批。网页来源保持网页，不得另行通知 QQ。" + MCP_RESULT_INSTRUCTIONS)] }));
     for (const catalog of catalogs) registry.install(defineExtension({ name: `cs.subagent.mcp.${catalog.serverId}`, tools: catalog.tools.map(tool => {
       const name = toolNames(catalog, tool).nativeName, input = compileMcpSchema(tool.inputSchema, MCP_CONFIG.limits);
       const output = tool.outputSchema ? compileMcpSchema(tool.outputSchema, MCP_CONFIG.limits) : undefined;
@@ -105,7 +106,7 @@ export function createSubagentCapabilityHost(stub: object): SubagentCapabilityHo
       const value = await invoke("validateSubagentAccess", [id]);
       if (value === null || value === undefined) return;
       const snapshot = Type.Object({ scope: Type.String(), actor: Type.String(), generation: Type.Integer({ minimum: 0 }),
-        replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), catalogJson: Type.String(), tools: Type.Array(Type.String()),
+        replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), catalogJson: Type.String(), tools: Type.Array(Type.String()), environments: Type.Optional(EnvironmentSnapshotsSchema),
         resourceAllow: Type.Optional(Type.Array(Type.Object({ server: Type.String(), prefixes: Type.Array(Type.String()) }))) });
       const schema = Type.Object({
         authority: Type.Object({ kind: Type.Union(["message", "schedule", "event", "subagent"].map(v => Type.Literal(v))),

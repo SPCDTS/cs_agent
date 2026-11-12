@@ -49,3 +49,5 @@ Token 不通过聊天或模型工具参数接收，不回显。凭据使用现�
 ## Windows 远程环境
 
 Hyper-V 持久工作区和临时 WSB 使用同一个标准 MCP 服务接入，安装、Tunnel、Token 与工具选择见 [Windows MCP](WINDOWS-MCP.md)。Cloudflare Container 保留原生 coding，不迁移为 MCP。
+
+Windows runner 的固定 env_* 工具使用环境级授权：管理页群授权中的 environments 是 envId 清单，留空即不开放；environmentApproval 默认为 required，可明确设为 none 允许授权范围内的环境操作直接执行。两字段沿用现有 PUT /admin/mcp/access 和 mcp_access JSON 存储，不新增服务。固定工具名及宿主元数据协议见 [Windows MCP](WINDOWS-MCP.md)。这些名称由平台按环境协议识别；其他普通 MCP 工具继续按原工具权限与逐次审批策略执行。

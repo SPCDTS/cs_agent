@@ -77,7 +77,7 @@ Worker 非秘密配置：
 
 ## 从旧手工模式迁移
 
-原 GITHUB_MODE 未设置或 manual 时仍为既有手工 Webhook。运营方设置 app 并配置独立 App secrets 后：
+仅显式 GITHUB_MODE=manual 时保留既有手工 Webhook；未设置、空值、拼写错误一律拒收，不自动回退旧 secret。原手工部署升级时也必须明确设置 manual。运营方设置 app 并配置独立 App secrets 后：
 - 不再接受旧 secret；手工 delivery 没有合法 installation 时拒收。
 - 旧 repositories 名称、repo_pin、单行基础连接均不赋予 App 权限。
 - 旧待执行收件 installation_id=0，在重新鉴权/claim 时抑制；先连接身份、再按 ID 明确选择仓库。
@@ -109,3 +109,16 @@ https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-githu
 - 旧环境更新取消的 PKCE 全量任务未盲目重放；先确认其测试进程已停止，再用新 requestId 启动验证。
 
 运营方可在 `workers/` 使用 `npx wrangler secret put <名称>` 交互输入上述四项独立 secrets；主密钥须自行安全生成 32 字节随机值。私钥通过安全管道或交互输入 PKCS#8 内容，不放入命令参数、版本库或日志。非秘密配置放入待部署环境的 vars。创建 App、真实联调、推送与部署均留待父 agent 审查及用户后续授权。
+
+
+## 固定主线合并与聚焦安全复查
+
+本轮只合并指定 main 提交 987c0d7d6e54f504959a9306fd231120c0de1019（统一环境工具并按会话授权 envId），不追后续 main，不推送或部署。
+
+发现并修正的实质问题：
+- 原 syncIdentity 用全局 epoch 判断 refresh 结果是否可写。另一个身份/安装失效会改变全局 epoch，导致已经在 GitHub 轮换成功的新 token 未落库；下次使用旧 refresh token 会误要求重连。现在 refresh 使用身份自身的单调 generation，安装快照提交使用该身份与该安装 generation，其他身份失效不再丢弃有效轮换。
+- 身份 generation 由全局单调计数分配，避免删除再连接从 1 开始产生 ABA；旧异步失败不会撤销新连接。全局 epoch 仍只负责尚未确定 GitHub 主体的 OAuth state/complete 防重放与撤销竞争。其他生命周期可能使待完成 OAuth 重新开始，但不会误删其他身份凭据；这是保守的待授权边界。
+- 同身份重新 OAuth 不再先吊销所有合法积压：新交集仍包含的、未过期未撤销安装保留 pending receipts；被移出交集、过期或已撤销的积压仍抑制且不会复活。
+- Webhook 模式必须显式 app 或 manual。模式未配置/非法返回 503；App 缺少必需配置或 callback 格式错误同样拒收，不使用 legacy secret。DO 接收及执行许可也 fail closed，防止仅 HTTP 层检查而内部退回 manual。
+
+新增回归覆盖两个身份并发刷新/撤销、同身份安装失效中的 token 轮换、删除重连 ABA、重连保留/缩小交集积压、模式缺失/错误/部分 App 配置的 HTTP 与 DO 拒收。既有手工模式测试环境显式设置 manual，不放宽生产默认值。合并后的最终统计见最新交接记录，上一节为合并前已完成的历史验证。

@@ -5,7 +5,8 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { Type, type Static, type TSchema } from 'typebox';
 import { Check } from 'typebox/value';
-import { CALLER_META_KEY, type ServerConfig, type Subject } from './domain.ts';
+import type { ServerConfig } from './domain.ts';
+import { EnvIdSchema, environmentCaller, allowsEnvironment, type EnvironmentCaller } from './environment-access.ts';
 import { EnvironmentStatusSchema } from './environment-status.ts';
 import { Jobs } from './jobs.ts';
 const uuid = Type.String({ pattern: '^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$' });
@@ -13,36 +14,40 @@ const timeout = Type.Optional(Type.Integer({ minimum: 1000, maximum: 1200000, de
 const shell = { requestId: uuid, script: Type.String({ minLength: 1, maxLength: 65536 }), cwd: Type.Optional(Type.String({ minLength: 1, maxLength: 2048, description: '来宾中的目录，相对路径基于该环境工作目录。' })), timeoutMs: timeout };
 const object = <T extends Record<string, TSchema>>(properties: T) => Type.Object(properties, { additionalProperties: false });
 const receiptSchema = object({ requestId: uuid, jobId: uuid, sessionId: Type.Optional(uuid), deadline: Type.Number(), state: Type.Union(['queued', 'running', 'cancelling', 'succeeded', 'failed', 'cancelled', 'unknown'].map(x => Type.Literal(x))), result: Type.Optional(object({ exitCode: Type.Integer(), stdout: Type.String(), stderr: Type.String(), truncated: Type.Boolean() })), error: Type.Optional(Type.String()), details: Type.Union([Type.Literal('retained'), Type.Literal('archived')]), resultSummary: Type.Optional(object({ exitCode: Type.Integer(), truncated: Type.Boolean() })) });
-interface Registered { tool: Tool; call(args: unknown, subject: Subject): Promise<CallToolResult> }
+interface Registered { tool: Tool; call(args: unknown, caller: EnvironmentCaller): Promise<CallToolResult> }
 const result = (value: object): CallToolResult => ({ content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: { ...value } });
-function subjectFor(principal: string, meta: unknown): Subject {
-  if (meta === undefined) return { principal, scope: 'default' };
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) throw new Error('invalid_caller_metadata');
-  const caller = Object.getOwnPropertyDescriptor(meta, CALLER_META_KEY)?.value as unknown;
-  if (caller === undefined) return { principal, scope: 'default' };
-  if (!Check(object({ scope: Type.String({ pattern: '^[a-f0-9]{64}$' }) }), caller)) throw new Error('invalid_caller_metadata');
-  return { principal, scope: caller.scope };
-}
 export function toolCatalog(config: ServerConfig, jobs: Jobs): Registered[] {
   const registered: Registered[] = [];
-  function add<T extends TSchema>(name: string, description: string, schema: T, outputSchema: TSchema, readOnly: boolean, fn: (args: Static<T>, subject: Subject) => CallToolResult | Promise<CallToolResult>) {
+  function add<T extends TSchema>(name: string, description: string, schema: T, outputSchema: TSchema, readOnly: boolean, fn: (args: Static<T>, caller: EnvironmentCaller) => CallToolResult | Promise<CallToolResult>) {
     registered.push({ tool: { name, description, inputSchema: schema as Tool['inputSchema'], outputSchema: outputSchema as Tool['outputSchema'], annotations: { readOnlyHint: readOnly, destructiveHint: !readOnly, idempotentHint: true, openWorldHint: true } },
-      async call(args, subject) { if (!Check(schema, args)) throw new Error('invalid_arguments'); return fn(args, subject); } });
+      async call(args, caller) { if (!Check(schema, args)) throw new Error('invalid_arguments'); return fn(args, caller); } });
   }
-  for (const target of config.targets) {
-    const prefix = (target.kind === 'hyperv' ? 'vm_' : 'wsb_') + target.id;
-    const guidance = target.kind === 'hyperv'
-      ? '这是预先配置的 Hyper-V Windows 持久工作区；系统、安装的软件和文件保留在 VM 磁盘中。它适合受信任的开发操作，不是隔离恶意代码的临时沙箱。取消只终止本任务，不关闭或回滚 VM。'
-      : '这是 Windows Sandbox 临时隔离环境；同一 sessionId 内文件可复用，关闭、取消活跃任务或到期会销毁实例及全部文件。C:\\AgentWork 和其他来宾目录都不持久保存；没有宿主项目或缓存映射。首次 submit 省略 sessionId，后续沿用返回的 ID。';
-    const submitSchema = target.kind === 'wsb' ? object({ ...shell, sessionId: Type.Optional(uuid) }) : object(shell);
-    add(prefix + '_submit', guidance + '\n' + (target.instructions ?? '') + '\n在来宾执行 PowerShell。先生成 requestId(UUID)，重试必须沿用它及原参数；立即返回任务收据，用 job_get 查询，unknown 禁止另起同一命令。HTTP 断线不取消任务。', submitSchema, receiptSchema, false, (args, subject) => result(jobs.submit(subject, target, args.requestId, { kind: 'powershell', script: args.script, cwd: args.cwd, timeoutMs: args.timeoutMs ?? 120000 }, 'sessionId' in args && typeof args.sessionId === 'string' ? args.sessionId : undefined)));
-    add(prefix + '_status', '独立只读环境状态，不进入执行队列、不创建或启动 VM/WSB。返回助手就绪/版本、当前作用域的任务与排队数、最早排队时间、最近错误及账本容量。ledger 的任务/正文计数限当前作用域，数据库/WAL/可复用空间是整个 runner 的匿名容量指标，不包含文件路径。busy 包含其他作用域或尚未关闭的 WSB 占用，其他作用域的任务信息不返回。ready 只说明探测通过，不保证下一条命令成功。', object({}), EnvironmentStatusSchema, true, async (_args, subject) => result(await jobs.status(subject, target)));
-    add(prefix + '_job_get', '查询此前 requestId 的任务状态和输出。首次 WSB submit 丢失响应时用它找回 sessionId。unknown 表示不能确定副作用；继续查询或取消，不能自动重放。details=archived 表示正文已清理，终态及退出摘要仍保留，不得重新执行旧请求。', object({ requestId: uuid }), receiptSchema, true, (args, subject) => result(jobs.get(subject, target, args.requestId)));
-    add(prefix + '_job_cancel', '请求取消任务；只有确认原生进程或 WSB 实例停止后才返回 cancelled。WSB 活跃任务取消会关闭整个临时 session。请持续查询到停止确认。', object({ requestId: uuid }), receiptSchema, false, (args, subject) => result(jobs.cancel(subject, target, args.requestId)));
-    if (target.kind === 'wsb') {
-      add(prefix + '_close', '销毁临时 WSB session。首次返回 closing 时请继续调用直到 closed；关闭开始后不再接收该 session 的新命令。', object({ sessionId: uuid }), object({ sessionId: uuid, state: Type.Union([Type.Literal('closing'), Type.Literal('closed')]) }), false, (args, subject) => result(jobs.close(subject, target, args.sessionId)));
-    }
+  const environment = { envId: EnvIdSchema };
+  function targetFor(caller: EnvironmentCaller, envId: string) {
+    if (!allowsEnvironment(caller.environments, envId)) throw new Error('environment_denied');
+    const target = config.targets.find(target => target.id === envId);
+    if (!target) throw new Error('environment_not_found');
+    return target;
   }
+  add('env_list', '列出当前调用身份可用的环境。不探测或启动环境；返回 envId、持久/临时类型、工作目录和用途。先选择环境，再调用其他 env 工具。', object({}), object({ environments: Type.Array(object({
+    envId: EnvIdSchema, kind: Type.Union([Type.Literal('persistent'), Type.Literal('sandbox')]), workdir: Type.String(), instructions: Type.String(),
+  })) }), true, (_args, caller) => result({ environments: config.targets.filter(target => allowsEnvironment(caller.environments, target.id)).map(target => ({
+    envId: target.id, kind: target.kind === 'hyperv' ? 'persistent' : 'sandbox', workdir: target.kind === 'hyperv' ? target.guestWorkdir : 'C:\\AgentWork', instructions: target.instructions ?? '',
+  })) }));
+  add('env_submit', '在 envId 指定的环境执行 PowerShell。持久环境保留磁盘和软件；临时 sandbox 的文件在关闭或到期后都不持久保存。先 env_list 查看用途。requestId(UUID) 和原参数在重试时必须保持一致；返回收据后用 env_job_get 查询，unknown 禁止另起同一命令。sandbox 首次省略 sessionId，后续沿用；持久环境不能传 sessionId。', object({ ...environment, ...shell, sessionId: Type.Optional(uuid) }), receiptSchema, false,
+    (args, caller) => result(jobs.submit(caller.subject, targetFor(caller, args.envId), args.requestId, { kind: 'powershell', script: args.script, cwd: args.cwd, timeoutMs: args.timeoutMs ?? 120000 }, args.sessionId)));
+  add('env_status', '独立只读环境状态，不进入执行队列、不创建或启动 VM/sandbox。返回就绪状态、助手版本、当前身份的任务队列和账本容量。数据库容量为匿名全局指标，不包含其他任务或文件路径。', object(environment), EnvironmentStatusSchema, true,
+    async (args, caller) => result(await jobs.status(caller.subject, targetFor(caller, args.envId))));
+  add('env_job_get', '查询同一 envId、调用身份下的 requestId。unknown 表示执行结果不确定，应继续查询或取消；details=archived 表示正文已归档，仍保留去重和退出摘要，不得重新执行旧请求。', object({ ...environment, requestId: uuid }), receiptSchema, true,
+    (args, caller) => result(jobs.get(caller.subject, targetFor(caller, args.envId), args.requestId)));
+  add('env_job_cancel', '取消当前身份在指定环境中的任务；持久环境只终止对应进程，临时 sandbox 的活跃任务取消会关闭整个 session。持续查询直到确认停止。', object({ ...environment, requestId: uuid }), receiptSchema, false,
+    (args, caller) => result(jobs.cancel(caller.subject, targetFor(caller, args.envId), args.requestId)));
+  add('env_close', '关闭临时 sandbox session，销毁其中的文件；返回 closing 时继续查询关闭结果。持久环境不支持关闭。', object({ ...environment, sessionId: uuid }), object({ sessionId: uuid, state: Type.Union([Type.Literal('closing'), Type.Literal('closed')]) }), false,
+    (args, caller) => {
+      const target = targetFor(caller, args.envId);
+      if (target.kind !== 'wsb') throw new Error('persistent_environment_cannot_close');
+      return result(jobs.close(caller.subject, target, args.sessionId));
+    });
   return registered;
 }
 async function body(req: IncomingMessage): Promise<unknown> {
@@ -66,12 +71,12 @@ export function createMcpHttpServer(config: ServerConfig, jobs: Jobs, env: NodeJ
     if (req.url !== '/mcp') { res.writeHead(404).end(); return; }
     if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
     if (!req.headers['content-type']?.startsWith('application/json')) { res.writeHead(415).end(); return; }
-    const server = new Server({ name: 'cs-agent-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: 'Hyper-V 提供持久工作区，WSB 提供临时隔离环境。按工具说明选择，命令均在来宾执行。长操作通过 submit / job_get / job_cancel 管理。不要把 HTTP 断线视为执行失败。桌面操作请连接 VM 内独立的桌面 MCP 服务。' });
+    const server = new Server({ name: 'cs-agent-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: 'Hyper-V 提供持久工作区，WSB 提供临时隔离环境。按工具说明选择，命令均在来宾执行。先 env_list 选择当前可用环境；长操作通过 env_submit / env_job_get / env_job_cancel 管理。不要把 HTTP 断线视为执行失败。桌面操作请连接 VM 内独立的桌面 MCP 服务。' });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: catalog.map(t => t.tool) }));
     server.setRequestHandler(CallToolRequestSchema, async request => {
       try {
         const tool = catalog.find(t => t.tool.name === request.params.name); if (!tool) throw new Error('tool_not_found');
-        return await tool.call(request.params.arguments ?? {}, subjectFor(principal.id, request.params._meta));
+        return await tool.call(request.params.arguments ?? {}, environmentCaller(principal.id, request.params._meta));
       } catch (error) {
         const message = error instanceof Error && /^[a-z][a-z0-9_]{0,95}$/.test(error.message) ? error.message : 'operation_failed';
         return { isError: true, content: [{ type: 'text', text: message }] };

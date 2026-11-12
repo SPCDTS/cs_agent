@@ -1,4 +1,5 @@
 import { GitHubAppClient, GitHubAppError, type GitHubAppSecrets, type GitHubUser, type UserTokens, type AuthorizedRepository } from "./app";
+import { githubAppConfigured } from "./mode";
 import { TokenVault, randomSecret, sha256 } from "../mcp/crypto";
 
 type Identity = { id: number; login: string; generation: number; cipher: string };
@@ -21,7 +22,7 @@ export class GitHubConnections {
       CREATE TABLE IF NOT EXISTS github_connect_epoch (id INTEGER PRIMARY KEY,epoch INTEGER NOT NULL);
       INSERT OR IGNORE INTO github_connect_epoch VALUES(1,0);`);
   }
-  configured() { return this.client.configured() && this.vault.configured && !!this.secrets.GITHUB_APP_CLIENT_ID && !!this.secrets.GITHUB_APP_CLIENT_SECRET && !!this.secrets.GITHUB_APP_CALLBACK_URL; }
+  configured() { return githubAppConfigured(this.secrets); }
   private epoch() { return this.storage.sql.exec<{epoch: number}>("SELECT epoch FROM github_connect_epoch WHERE id=1").one().epoch; }
   private identities(): Identity[] { return this.storage.sql.exec<{value:string}>("SELECT value FROM github_identities").toArray().map(r => JSON.parse(r.value) as Identity); }
   private bindings(): Binding[] { return this.storage.sql.exec<{value:string}>("SELECT value FROM github_installations").toArray().map(r => JSON.parse(r.value) as Binding); }
@@ -60,7 +61,7 @@ export class GitHubConnections {
     const tokens = await this.client.exchange(code,row.verifier);
     const discovered = await this.client.discover(tokens);
     if (this.identities().length >= 20 && !this.identities().some(u => u.id === discovered.user.id)) throw new GitHubAppError("capacity");
-    const generation = (this.identities().find(u => u.id === discovered.user.id)?.generation ?? 0) + 1;
+    const generation = this.epoch() + 1; // Monotonic across disconnect/reconnect: no identity-generation ABA.
     const cipher = await this.vault.encrypt(JSON.stringify(tokens),aad(discovered.user.id,generation));
     const prepared: Binding[] = [];
     for (const installationId of discovered.installations) {
@@ -75,9 +76,14 @@ export class GitHubConnections {
     }
     this.storage.transactionSync(() => {
       if (row.epoch !== this.epoch()) throw new GitHubAppError("unauthorized");
-      for (const b of this.bindings().filter(b => b.user.id === discovered.user.id)) this.invalidate(b.installationId);
+      for (const b of this.bindings().filter(b => b.user.id === discovered.user.id)) {
+        if (!prepared.some(next => next.installationId === b.installationId)) this.invalidate(b.installationId);
+        else if (b.status !== "active" || b.until <= Date.now()) this.revoke(b.installationId);
+      }
       this.storage.sql.exec("INSERT OR REPLACE INTO github_identities VALUES(?,?)",discovered.user.id,JSON.stringify({...discovered.user,generation,cipher}));
       for (const b of prepared) this.save(b);
+      // Reconnect retains still-authorized work, but removes receipts outside the new intersection.
+      for (const b of prepared) this.revoke(b.installationId);
       this.storage.sql.exec("UPDATE github_connect_epoch SET epoch=epoch+1 WHERE id=1");
     });
     return this.snapshot();
@@ -109,7 +115,10 @@ export class GitHubConnections {
     }
   }
   private async syncIdentity(u: Identity, restore: boolean) {
-    let epoch = this.epoch();
+    const identityCurrent = () => this.identities().some(current => current.id === u.id && current.generation === u.generation);
+    const bindingCurrent = (b: Binding) => identityCurrent() && this.bindings().some(current =>
+      current.installationId === b.installationId && current.user.id === u.id && current.generation === b.generation);
+    if (!identityCurrent()) return;
     const targets = this.bindings().filter(b => b.user.id === u.id && (restore || b.status === "active"));
     if (!targets.length) return;
     for (const b of targets) if (b.until <= Date.now()) this.revoke(b.installationId);
@@ -118,26 +127,27 @@ export class GitHubConnections {
       if (tokens.expiresAt <= Date.now()+120_000) {
         tokens = await this.client.refresh(tokens);
         const cipher = await this.vault.encrypt(JSON.stringify(tokens),aad(u.id,u.generation));
-        if (epoch !== this.epoch()) throw new GitHubAppError("unauthorized");
+        if (!identityCurrent()) return;
         this.storage.sql.exec("UPDATE github_identities SET value=? WHERE id=?",JSON.stringify({...u,cipher}),u.id);
       }
       // A user-level authorization failure must stop every binding for that identity.
       const identity = await this.client.discover(tokens);
       if (identity.user.id !== u.id) throw new GitHubAppError("unauthorized");
       for (const b of targets) {
+        if (!bindingCurrent(b)) continue;
         try {
           const auth = await this.client.inspect(tokens,b.installationId);
           if (auth.user.id !== u.id) throw new GitHubAppError("unauthorized");
           const allowed = new Set(auth.repositories.map(r => r.id));
           const repositories = (await this.client.repositories(b.installationId)).filter(r => allowed.has(r.id));
-          if (epoch !== this.epoch()) throw new GitHubAppError("unauthorized");
+          if (!bindingCurrent(b)) continue;
           this.storage.transactionSync(() => {
             // Revoke pending receipts removed from the authoritative intersection before publishing it.
             this.save({...b,repositories,status:"active",until:auth.expiresAt});
             this.revoke(b.installationId);
           });
-        } catch { if (epoch !== this.epoch()) return; this.invalidate(b.installationId); epoch = this.epoch(); }
+        } catch { if (bindingCurrent(b)) this.invalidate(b.installationId); }
       }
-    } catch { if (epoch === this.epoch()) this.disconnectUser(u.id); }
+    } catch { if (identityCurrent()) this.disconnectUser(u.id); }
   }
 }

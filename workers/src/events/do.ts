@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { githubMode } from "../github/mode";
 import { GitHubConnections } from "../github/connections";
 import { GitHubInbox } from "../github/inbox";
 import { DEFAULT_GITHUB, type GitHubDelivery } from "../github/model";
@@ -61,8 +62,8 @@ export class EventsDO extends DurableObject<Env> {
     super(ctx, env);
     this.sql.exec(SCHEMA);
     this.githubConnections = new GitHubConnections(this.ctx.storage,env, () => this.github.reauthorize());
-    this.github = new GitHubInbox(this.ctx.storage,env.GITHUB_MODE === "app" ? {
-      authorized:(installationId,repositoryId)=>this.githubConnections.authorized(installationId,repositoryId),
+    this.github = new GitHubInbox(this.ctx.storage,githubMode(env) !== "manual" ? {
+      authorized:(installationId,repositoryId)=>githubMode(env) === "app" && this.githubConnections.authorized(installationId,repositoryId),
       lifecycle:delivery=>{
         if(delivery.event==="github_app_authorization" && delivery.lifecycleUserId) this.githubConnections.disconnectUser(delivery.lifecycleUserId);
         else if(delivery.installationId) this.githubConnections.invalidate(delivery.installationId);
@@ -70,7 +71,7 @@ export class EventsDO extends DurableObject<Env> {
     }:undefined);
     this.auth = new GmailAuth(this.sql, env);
     this.gmail = new GmailClient(this.auth);
-    this.sources = new Map<string, EventSource>([["gmail", { id: "gmail", configured: () => this.auth.configured(), poll: (cursor, limit, signal) => this.gmail.events(cursor, limit, signal) }], ["github", { id: "github", configured: () => env.GITHUB_MODE === "app" ? this.githubConnections.configured() : !!env.GITHUB_WEBHOOK_SECRET }]]);
+    this.sources = new Map<string, EventSource>([["gmail", { id: "gmail", configured: () => this.auth.configured(), poll: (cursor, limit, signal) => this.gmail.events(cursor, limit, signal) }], ["github", { id: "github", configured: () => githubMode(env) === "app" ? this.githubConnections.configured() : githubMode(env) === "manual" && !!env.GITHUB_WEBHOOK_SECRET }]]);
     for (const id of this.sources.keys()) this.sql.exec("INSERT OR IGNORE INTO event_source (id, settings_json) VALUES (?, ?)", id, JSON.stringify(id === 'github' ? DEFAULT_GITHUB.settings : DEFAULT_SETTINGS));
   }
 
@@ -84,6 +85,8 @@ export class EventsDO extends DurableObject<Env> {
   }
 
   async receiveGitHub(delivery: GitHubDelivery) {
+    const mode = githubMode(this.env);
+    if (mode === "invalid" || mode === "app" && !this.githubConnections.configured()) return {status:503,code:"unconfigured"};
     // Durable wake-up precedes the atomic receipt+held transaction; Cron is the recovery backstop.
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm > Date.now() + 1000) await this.ctx.storage.setAlarm(Date.now() + 1000);
@@ -429,7 +432,7 @@ export class EventsDO extends DurableObject<Env> {
       key: run.input_key, source: run.source, events: (JSON.parse(run.keys_json) as unknown[]).length,
       deliveredAt: run.delivered_at, status: run.status, endedAt: run.ended_at }));
     const watch = this.sql.exec<{ expiration: number }>("SELECT expiration FROM gmail_watch WHERE id = 'owner'").toArray()[0];
-    return { sources, runs, github: { ...this.github.status(), mode: this.env.GITHUB_MODE === "app" ? "app" as const : "manual" as const, connections: this.githubConnections.snapshot(), configured: this.env.GITHUB_MODE === "app" ? this.githubConnections.configured() : !!this.env.GITHUB_WEBHOOK_SECRET }, watch: { topic: !!this.watchTopic(), expiration: watch?.expiration ?? null } };
+    return { sources, runs, github: { ...this.github.status(), mode: githubMode(this.env) === "manual" ? "manual" as const : "app" as const, connections: this.githubConnections.snapshot(), configured: githubMode(this.env) === "app" ? this.githubConnections.configured() : githubMode(this.env) === "manual" && !!this.env.GITHUB_WEBHOOK_SECRET }, watch: { topic: !!this.watchTopic(), expiration: watch?.expiration ?? null } };
   }
 
   async setPaused(id: string, paused: boolean): Promise<boolean> {

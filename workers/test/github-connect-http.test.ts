@@ -196,3 +196,114 @@ it("fails closed on ciphertext identity substitution and never falls back to the
   expect(i.githubConnectionsView().installations.find(b=>b.installationId===999)?.status).toBe("revoked");
  });
 });
+
+async function storedTokens(ctx:DurableObjectState,id:number) {
+ const u=JSON.parse(ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_identities WHERE id=?",id).one().value) as {id:number;generation:number;cipher:string};
+ const vault=new TokenVault(storeKey),aad=JSON.stringify(["github-app-owner",u.id,u.generation]);
+ const tokens=JSON.parse(await vault.decrypt(u.cipher,aad)) as {access:string;expiresAt:number};
+ return {u,vault,aad,tokens};
+}
+async function expireUser(ctx:DurableObjectState,id:number) {
+ const {u,vault,aad,tokens}=await storedTokens(ctx,id);tokens.expiresAt=0;
+ u.cipher=await vault.encrypt(JSON.stringify(tokens),aad);
+ ctx.storage.sql.exec("UPDATE github_identities SET value=? WHERE id=?",JSON.stringify(u),id);
+}
+it.each(["installation","identity"] as const)("keeps another identity's rotated token when concurrent sync revokes %s",async(kind)=>{
+ const gh=mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await connect(e,"code8");await expireUser(ctx,8);
+  let release!:()=>void,entered!:()=>void;
+  const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r);
+  const original=gh.fetcher.getMockImplementation()!;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   const form=new URLSearchParams(String(init?.body));
+   if(form.get("grant_type")==="refresh_token"&&form.get("refresh_token")==="refresh8") {
+    entered();await gate;
+    return Response.json({access_token:"access8-rotated",refresh_token:"refresh8-rotated",token_type:"bearer",expires_in:28800,refresh_token_expires_in:15897600});
+   }
+   return original(input,init);
+  });
+  const pending=admin(e,"connect/sync",{userId:8});await started;
+  try {
+   if(kind==="installation")gh.suspended.add(456);else gh.revoked.add(7);
+   await admin(e,"connect/sync",{userId:7});
+  } finally {release();}
+  await pending;
+  expect((await storedTokens(ctx,8)).tokens.access).toBe("access8-rotated");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===999)?.status).toBe("active");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===789)?.status).toBe(kind==="identity"?"revoked":"active");
+ });
+});
+it("retains a rotated user credential across same-identity installation invalidation without resurrecting that installation",async()=>{
+ const gh=mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await expireUser(ctx,7);
+  const original=gh.fetcher.getMockImplementation()!;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URLSearchParams(String(init?.body)).get("grant_type")==="refresh_token"){
+    await webhook(e,{action:"suspend",installation:{id:456}},"during-refresh-install","installation");
+    return Response.json({access_token:"access7-rotated",refresh_token:"refresh7-rotated",token_type:"bearer",expires_in:28800,refresh_token_expires_in:15897600});
+   }
+   return original(input,init);
+  });
+  await admin(e,"connect/sync",{userId:7});
+  expect((await storedTokens(ctx,7)).tokens.access).toBe("access7-rotated");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===789)?.status).toBe("active");
+ });
+});
+it("prevents identity generation ABA when an old sync fails after disconnect and reconnect",async()=>{
+ const gh=mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);const before=(await storedTokens(ctx,7)).u.generation;
+  let release!:()=>void,entered!:()=>void,wait=true;
+  const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r),original=gh.fetcher.getMockImplementation()!;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URL(String(input)).pathname==="/user"&&wait){wait=false;entered();await gate;return Response.json({error:"revoked"},{status:401});}
+   return original(input,init);
+  });
+  const pending=admin(e,"connect/sync",{userId:7});await started;
+  try {await admin(e,"connect/disconnect",{kind:"user",id:7});await connect(e);}
+  finally {release();}
+  await pending;
+  expect((await storedTokens(ctx,7)).u.generation).toBeGreaterThan(before);
+  expect(i.githubConnectionsView().identities.map(u=>u.id)).toEqual([7]);
+  expect(i.githubConnectionsView().installations.every(b=>b.status==="active")).toBe(true);
+ });
+});
+it("reconnect preserves pending work still in the intersection, suppressing only removed repositories",async()=>{
+ const gh=mockGitHub();await harness(async(e,i)=>{
+  await connect(e);await enable(i);await webhook(e,payload(456),"keep-or-remove");await webhook(e,payload(789),"keep");
+  await connect(e);
+  expect(i.githubReceipt("keep-or-remove")?.state).toBe("held");expect(i.githubReceipt("keep")?.state).toBe("held");
+  const original=gh.fetcher.getMockImplementation()!;
+  gh.fetcher.mockImplementation(async(input,init)=>new URL(String(input)).pathname==="/user/installations/456/repositories"
+   ? Response.json({total_count:0,repositories:[]}) : original(input,init));
+  await connect(e);
+  expect(i.githubReceipt("keep-or-remove")?.state).toBe("suppressed");expect(i.githubReceipt("keep")?.state).toBe("held");
+ });
+});
+it("rejects missing or invalid App mode and partial configuration without using the legacy secret or execution path",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  const current=(await i.adminStatus()).github;
+  await i.putGitHubConfig({...current.value,repositories:["owner/repo456"]},current.revision);
+  await webhook(e,payload(),"pre-mode-change");
+  const variants:Env[]=[
+   {...env,GITHUB_MODE:undefined,GITHUB_WEBHOOK_SECRET:secret},
+   {...e,GITHUB_MODE:undefined,GITHUB_WEBHOOK_SECRET:secret},
+   {...e,GITHUB_MODE:"typo" as Env["GITHUB_MODE"],GITHUB_WEBHOOK_SECRET:secret},
+   {...e,GITHUB_APP_CLIENT_SECRET:undefined},
+   {...e,GITHUB_APP_STORE_KEY:undefined},
+   {...e,GITHUB_APP_PRIVATE_KEY:undefined},
+   {...e,GITHUB_APP_CALLBACK_URL:"https://test/wrong"},
+  ];
+  for(const [n,bad] of variants.entries()){
+   expect((await webhook(bad,payload(456,n+2),"bad-mode-"+n)).status).toBe(503);
+   expect(i.githubReceipt("bad-mode-"+n)).toBeNull();
+  }
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='mode-permit' WHERE delivery_id='pre-mode-change'");
+  const recovered=new EventsDO(ctx,variants[0]!);
+  expect(recovered.claimGitHubRun("mode-permit")).toBe("suppressed");
+  expect((await recovered.receiveGitHub({deliveryId:"direct-invalid",bodyHash:"a".repeat(64),repository:"owner/repo456",repositoryId:457,
+   installationId:456,event:"issues",action:"opened",receivedAt:Date.now(),normalized:null})).status).toBe(503);
+ });
+});
