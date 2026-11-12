@@ -953,7 +953,7 @@ export class ThreadDO extends DurableObject<Env> {
     const { root, harness } = await this.open();
     const page = await root.entries({}, ADMIN_PAGE_SIZE, readHistoryCursor(cursor), context);
     const live = await harness.snapshot(LiveDoc, root.id, context);
-    return { entries: page.items.map(historyEntry), next: historyCursor(page.next),
+    return { entries: page.items.map(entry => historyEntry(entry)), next: historyCursor(page.next),
       busy: !!live?.run, compacting: (live?.compactions?.length ?? 0) > 0 };
   }
 

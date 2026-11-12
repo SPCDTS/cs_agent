@@ -76,8 +76,9 @@ export class RequestsDO extends DurableObject<Env> {
   async chatView(...args: Parameters<AgentReadView["chatView"]>) { return {...await this.readView().chatView(...args), syncedAt: this.projection.status()!.synced_at}; }
   async stats() { return {...await this.readView().stats(), syncedAt: this.projection.status()!.synced_at}; }
   modelHistory(...args: Parameters<AgentReadView["modelHistory"]>) { return this.readView().modelHistory(...args); }
-  async subagentHistory(id: string, cursor?: string): Promise<Awaited<ReturnType<AgentReadView["modelHistory"]>> | undefined> {
-    return (await this.childView(id))?.modelHistory(cursor);
+  subagentConversation(...args: Parameters<AgentReadView["subagentConversation"]>) { return this.readView().subagentConversation(...args); }
+  async subagentHistory(id: string, cursor?: string): Promise<Awaited<ReturnType<AgentReadView["subagentConversation"]>> | undefined> {
+    return (await this.childView(id))?.subagentConversation(cursor);
   }
   async subagentTranscript(id: string, limit: number): ReturnType<AgentReadView["transcriptSummary"]> {
     return (await this.childView(id))?.transcriptSummary(limit);
