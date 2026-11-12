@@ -46,7 +46,7 @@ async function main() {
   } else if (action === 'run' || action === 'inspect') {
     const file = path.resolve(option('config', path.join(defaultDir, 'config.json'))); if (args.length) throw new Error('unknown_arguments');
     const config = await loadConfig(file);
-    if (action === 'inspect') { console.log(JSON.stringify({ endpoint: `http://${config.host}:${config.port}/mcp`, targets: config.targets.map(t => ({ id: t.id, kind: t.kind, instructions: t.instructions, ...(t.kind === 'hyperv' ? { vmId: t.vmId, guestWorkdir: t.guestWorkdir, desktopConfigured: Boolean(t.desktopUser), desktopMcp: Boolean(t.desktopMcp) } : { memoryMb: t.memoryMb, idleTimeoutMs: t.idleTimeoutMs, maxLifetimeMs: t.maxLifetimeMs }) })) }, null, 2)); return; }
+    if (action === 'inspect') { console.log(JSON.stringify({ endpoint: `http://${config.host}:${config.port}/mcp`, targets: config.targets.map(t => ({ id: t.id, kind: t.kind, instructions: t.instructions, ...(t.kind === 'hyperv' ? { vmId: t.vmId, guestWorkdir: t.guestWorkdir } : { memoryMb: t.memoryMb, idleTimeoutMs: t.idleTimeoutMs, maxLifetimeMs: t.maxLifetimeMs }) })) }, null, 2)); return; }
     if (process.platform !== 'win32') throw new Error('windows_required');
     await prepareState(config.stateDir);
     const releaseLock = acquireServiceLock(config.stateDir);
@@ -54,7 +54,7 @@ async function main() {
     const jobs = new Jobs(config.stateDir, backends);
     try {
       jobs.bindTargets(config.targets);
-      const server = createMcpHttpServer(config, jobs, backends);
+      const server = createMcpHttpServer(config, jobs);
       server.requestTimeout = 30000; server.headersTimeout = 10000;
       await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(config.port, config.host, resolve); });
       jobs.start(); console.log(`Windows MCP 正在监听 http://${config.host}:${config.port}/mcp`);

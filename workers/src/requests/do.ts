@@ -6,10 +6,13 @@ import type { Env } from "../env";
 import type { RequestDetail, RequestQuery, RequestRecord, ToolTrace, ToolSummary } from "./types";
 import { readAgentTopology, type AgentTopology } from "./topology";
 import type { SubagentActivity } from "../subagent/activity";
+import { RequestRetention, REQUEST_RETENTION } from "./retention";
 const DAY = 86_400_000;
 type Row = { seq: number; record: string; available: number };
 export class RequestsDO extends DurableObject<Env> {
   private topologyCache?: AgentTopology;
+  private retentionStore?: RequestRetention;
+  private retention() { return this.retentionStore ??= new RequestRetention(this.ctx.storage); }
   private readonly projection = new ProjectionStore(this.ctx, this.env);
   projectionStatus() { const state = this.projection.status(); return { ready: !!state?.ready, syncedAt: state?.synced_at ?? null }; }
   private readView() { const state = this.projection.status(); if (!state?.ready) throw new Error("view_pending"); return new AgentReadView(this.projection, state.scope); }
@@ -82,6 +85,8 @@ export class RequestsDO extends DurableObject<Env> {
   }
   async record(detail: RequestDetail): Promise<void> {
     const r = detail.request, sql = this.ctx.storage.sql;
+    if (r.startedAt < Date.now() - REQUEST_RETENTION.metadataMs) return;
+    const retention = this.retention();
     // 重投与乱序开始事件不会覆盖终态。
     const previous = sql.exec<{ status: string }>("SELECT status FROM requests WHERE id = ?", r.id).toArray()[0];
     if (previous && previous.status !== "running" && (previous.status !== "interrupted" || r.status === "running")) return;
@@ -90,38 +95,35 @@ export class RequestsDO extends DurableObject<Env> {
       output_tokens=excluded.output_tokens,cache_read=excluded.cache_read,duration=excluded.duration,record=excluded.record,turn_id=excluded.turn_id,revision=excluded.revision`,
       r.id, r.startedAt, r.thread, r.provider + "/" + r.model, r.purpose, r.status, r.inputTokens, r.outputTokens, r.cacheRead, r.durationMs, JSON.stringify(r), r.binding?.turnId ?? null, this.revision());
     const payload = JSON.stringify({ context: detail.context, response: detail.response });
-    sql.exec("INSERT OR REPLACE INTO request_details(id,started,bytes,payload) VALUES(?,?,?,?)",
+    if (r.startedAt >= Date.now() - REQUEST_RETENTION.detailsMs) sql.exec(`INSERT INTO request_details(id,started,bytes,payload) VALUES(?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET started=excluded.started,bytes=excluded.bytes,payload=excluded.payload`,
       r.id, r.startedAt, new TextEncoder().encode(payload).byteLength, payload);
-    this.prune();
-    if (await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 3600_000);
+    else sql.exec("DELETE FROM request_details WHERE id=?", r.id);
+    const more = retention.trim({ kind: "request", id: r.id });
+    if (more || await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
   }
   async recordTool(trace: ToolTrace) {
     const { arguments: args, result, ...summary } = trace, sql = this.ctx.storage.sql;
+    if (trace.startedAt < Date.now() - REQUEST_RETENTION.metadataMs) return;
+    const retention = this.retention();
     const previous = sql.exec<{ record: string }>("SELECT record FROM tool_traces WHERE id=?", trace.id).toArray()[0];
     const previousStatus = previous ? (JSON.parse(previous.record) as ToolSummary).status : undefined;
     if (previousStatus && previousStatus !== "running" && (previousStatus !== "interrupted" || trace.status === "running")) return;
-    const payload = JSON.stringify({ arguments: args, result });
+    const payload = trace.startedAt >= Date.now() - REQUEST_RETENTION.detailsMs ? JSON.stringify({ arguments: args, result }) : null;
     sql.exec(`INSERT INTO tool_traces(id,thread,turn_id,call_id,started,revision,record,payload,bytes) VALUES(?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,record=excluded.record,payload=excluded.payload,bytes=excluded.bytes`,
-      trace.id, trace.thread, trace.binding.turnId, trace.callId, trace.startedAt, this.revision(), JSON.stringify(summary), payload, new TextEncoder().encode(payload).byteLength);
-    this.prune();
-    if (await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 3600_000);
+      trace.id, trace.thread, trace.binding.turnId, trace.callId, trace.startedAt, this.revision(), JSON.stringify(summary), payload, payload === null ? 0 : new TextEncoder().encode(payload).byteLength);
+    const more = retention.trim({ kind: "tool", id: trace.id });
+    if (more || await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
   }
   private prune() {
     const sql = this.ctx.storage.sql, now = Date.now();
+    const retention = this.retention();
     sql.exec("DELETE FROM agent_activity WHERE updated < ?", now - 30 * DAY);
-    sql.exec("DELETE FROM requests WHERE started < ? OR seq IN (SELECT seq FROM requests ORDER BY seq DESC LIMIT -1 OFFSET 20000)", now - 30 * DAY);
+    sql.exec("DELETE FROM requests WHERE started < ?", now - 30 * DAY);
     sql.exec("DELETE FROM request_details WHERE started < ? OR id NOT IN (SELECT id FROM requests)", now - 7 * DAY);
     sql.exec("DELETE FROM tool_traces WHERE started < ? OR (started < ? AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.thread=tool_traces.thread AND r.turn_id=tool_traces.turn_id))", now - 30 * DAY, now - 3600_000);
     sql.exec("UPDATE tool_traces SET payload=NULL,bytes=0 WHERE payload IS NOT NULL AND started < ?", now - 7 * DAY);
-    const expired = sql.exec<{ id: string; kind: string }>(`SELECT id,kind FROM (
-      SELECT id,kind,SUM(bytes) OVER (ORDER BY started DESC,id DESC) AS total FROM (
-        SELECT id,started,bytes,'request' AS kind FROM request_details UNION ALL
-        SELECT id,started,bytes,'tool' AS kind FROM tool_traces WHERE payload IS NOT NULL)) WHERE total > 33554432`).toArray();
-    for (const row of expired) {
-      if (row.kind === "request") sql.exec("DELETE FROM request_details WHERE id=?", row.id);
-      else sql.exec("UPDATE tool_traces SET payload=NULL,bytes=0 WHERE id=?", row.id);
-    }
     const stale = sql.exec<{ id: string; record: string }>("SELECT id,record FROM requests WHERE status='running' AND started < ?", now - 3600_000).toArray();
     for (const row of stale) {
       const r: RequestRecord = JSON.parse(row.record); r.status = "interrupted";
@@ -131,6 +133,7 @@ export class RequestsDO extends DurableObject<Env> {
       const trace: ToolSummary = JSON.parse(row.record); trace.status = "interrupted";
       sql.exec("UPDATE tool_traces SET record=?,revision=? WHERE id=?", JSON.stringify(trace), this.revision(), row.id);
     }
+    return retention.trim();
   }
   override async alarm() {
     if (this.projection.status()?.scope.startsWith("sub:")) {
@@ -141,8 +144,8 @@ export class RequestsDO extends DurableObject<Env> {
       else await this.ctx.storage.deleteAlarm();
       return;
     }
-    this.prune();
-    if (this.ctx.storage.sql.exec("SELECT 1 FROM requests UNION ALL SELECT 1 FROM tool_traces UNION ALL SELECT 1 FROM agent_activity LIMIT 1").toArray().length) await this.ctx.storage.setAlarm(Date.now() + 3600_000);
+    const more = this.prune();
+    if (this.ctx.storage.sql.exec("SELECT 1 FROM requests UNION ALL SELECT 1 FROM tool_traces UNION ALL SELECT 1 FROM agent_activity LIMIT 1").toArray().length) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
   }
   private filter(q: RequestQuery) {
     const where = ["started >= ?", "started <= ?"], args: (string | number)[] = [q.since, q.until];

@@ -3,8 +3,8 @@ import { Check } from "typebox/value";
 import { DEFAULT_SETTINGS, normalizeEvent, parseSettings, type ExternalEvent, type SourceSettings } from "../events/model";
 
 export const MAX_BODY = 256 * 1024;
-export const CHOICES = ["issues.opened", "issues.reopened", "issues.closed", "pull_request.opened", "pull_request.reopened",
-  "pull_request.closed", "pull_request.ready_for_review", "release.published", "workflow_run.completed", "push"] as const;
+import { CHOICES } from "./choices";
+export { CHOICES } from "./choices";
 const Repo = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$" });
 const ConfigSchema = Type.Object({
   repositories: Type.Array(Repo, { maxItems: 50, uniqueItems: true }),

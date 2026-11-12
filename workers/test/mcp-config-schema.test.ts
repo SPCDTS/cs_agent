@@ -6,8 +6,8 @@ import { toolNames } from "../src/mcp/names";
 import { convertMcpResult } from "../src/mcp/result";
 import { sampleTools } from "./mcp-helpers";
 
-describe("MCP static config and strict schema", () => {
-  it("bundles the owner-only Notion CIMD config without credentials", () => {
+describe("MCP fixture config and strict schema", () => {
+  it("validates the owner-only Notion CIMD fixture without credentials", () => {
     expect(MCP_CONFIG.servers[0].credential).toMatchObject({ kind: "oauth", registration: "cimd", clientMetadataUrl: "https://agent.spcdts.dev/oauth/client-metadata.json" });
     expect(MCP_CONFIG.servers[0].tools.allow).toHaveLength(10);
     expect(MCP_CONFIG.limits.idleMs).toBe(600_000);

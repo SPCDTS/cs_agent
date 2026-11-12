@@ -7,6 +7,7 @@ import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-code
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type { Env } from "./env";
+import { codexFetch } from "./codex-fetch";
 import { CODEX_BASE_URL, CODEX_PROVIDER, codexOAuth, isChatGPTCredential } from "./codex-login";
 import type { ModelSelection } from "./settings";
 
@@ -24,8 +25,8 @@ type ProviderSpec = {
 function codexProvider({ fetch }: { fetch?: typeof globalThis.fetch } = {}): Provider {
   const native = openAICodexResponsesApi(), legacy = openAIResponsesApi();
   const transport: ProviderStreams = {
-    stream: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.stream({ ...model, api: "openai-codex-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }) : legacy.stream({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
-    streamSimple: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.streamSimple({ ...model, api: "openai-codex-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }) : legacy.streamSimple({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
+    stream: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.stream({ ...model, api: "openai-codex-responses" }, context, { ...options, fetch: codexFetch(fetch ?? options?.fetch ?? globalThis.fetch) }) : legacy.stream({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
+    streamSimple: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.streamSimple({ ...model, api: "openai-codex-responses" }, context, { ...options, fetch: codexFetch(fetch ?? options?.fetch ?? globalThis.fetch) }) : legacy.streamSimple({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
   };
   const catalog = new Map([...Object.values(OPENAI_MODELS).filter(model => model.api === "openai-responses"), ...Object.values(OPENAI_CODEX_MODELS)].map(model => [model.id, model]));
   const provider = createProvider({ id: CODEX_PROVIDER, name: "ChatGPT 订阅", baseUrl: CODEX_BASE_URL,

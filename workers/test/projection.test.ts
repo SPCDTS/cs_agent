@@ -22,7 +22,7 @@ it("聊天与记忆增量同步，管理查询不回调执行对象",async()=>{
   const chat=vi.spyOn(ThreadDO.prototype,"chatView").mockRejectedValue(new Error("execution_read_forbidden"));
   const stats=vi.spyOn(ThreadDO.prototype,"stats").mockRejectedValue(new Error("execution_read_forbidden"));
   const events=vi.spyOn(ThreadDO.prototype,"events").mockRejectedValue(new Error("execution_read_forbidden"));
-  for(const path of ["/admin/threads/owner/chat","/admin/threads/owner/history","/admin/events?thread=owner","/admin/memory/list?ns=owner","/admin/overview"]){expect((await admin(path)).status,path).toBe(200);}
+  for(const path of ["/admin/threads/owner/chat","/admin/threads/owner/history","/admin/events?thread=owner","/admin/memory/list?ns=owner","/admin/overview","/admin/health"]){expect((await admin(path)).status,path).toBe(200);}
   expect((await view.memoryList("owner",{})).items.some(row=>row.text==="这是展示同步测试")).toBe(true);
   expect(chat).not.toHaveBeenCalled();expect(stats).not.toHaveBeenCalled();expect(events).not.toHaveBeenCalled();
 });

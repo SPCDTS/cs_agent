@@ -1,3 +1,5 @@
+import { Errors } from "typebox/value";
+import { ADMIN_BROWSER_CONTRACTS as C } from "../src/admin/app.generated";
 import { env, reset, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
@@ -6,7 +8,7 @@ import { EventsDO } from "../src/events/do";
 import { DEFAULT_GITHUB, MAX_BODY, parseGitHubConfig, readWebhook, verifySignature, type GitHubDelivery } from "../src/github/model";
 import { GitHubInbox, PENDING_LIMIT, RETENTION_MS } from "../src/github/inbox";
 import { sql, scriptedModel } from "./events-helpers";
-import { ADMIN_APP_JS } from "../src/admin/page";
+import { ADMIN_APP_JS } from "../src/admin/app.generated";
 
 const secret = "synthetic-test-secret-not-a-credential", events = () => env.EVENTS.getByName("main");
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
@@ -55,6 +57,7 @@ describe("GitHub authentication and normalization", () => {
   it("acknowledges only after receipt storage; entry never calls poll or an LLM", async () => {
     const response = await worker.fetch(await request(JSON.stringify(payload())), { ...env, GITHUB_WEBHOOK_SECRET: secret });
     expect(response.status).toBe(202);
+    expect([...Errors(C.Sources, await events().adminStatus())]).toEqual([]);
     expect(await sql("SELECT state FROM github_receipt")).toEqual([{ state: "held" }]);
     expect(await sql("SELECT 1 FROM event_run")).toEqual([]);
     const rejected = await worker.fetch(await request("broken", "bad", "issues", "wrong"), { ...env, GITHUB_WEBHOOK_SECRET: secret });

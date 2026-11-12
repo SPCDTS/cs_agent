@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
+import type { GcReport } from "./workspace-gc";
 import { MediaRepository, type AssetRef } from "../media/repository";
 import { imageMime } from "../media/model";
 import type { DirEntry, ExecResult, FileEdit, ReadResult } from "./client";
@@ -24,6 +25,12 @@ export class SandboxDO extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     // 清理旧版硬期限留下的闹钟数据，不再按累计运行时长停止容器。
     await this.ctx.storage.delete("container:deadline");
+    try { await this.collectGc(() => this.workspace.resumeGc()); }
+    catch (error) {
+      // 接住本轮失败再安排下一次，避免平台因未捕获异常立即退避重试。
+      await this.ctx.storage.setAlarm(Date.now() + 300_000);
+      console.error({ event: "workspace_gc_failed", message: error instanceof Error ? error.message : String(error) });
+    }
   }
   private async startRuntime(): Promise<Container> {
     const container = this.container();
@@ -111,7 +118,22 @@ export class SandboxDO extends DurableObject<Env> {
     await container.destroy("restore committed workspace");
     return true;
   }
-  gc(options?: Parameters<WorkspaceManager["gc"]>[0]): ReturnType<WorkspaceManager["gc"]> { return this.workspace.gc(options); }
+  async gc(options?: Parameters<WorkspaceManager["gc"]>[0]): ReturnType<WorkspaceManager["gc"]> {
+    try { return await this.collectGc(() => this.workspace.gc(options)); }
+    catch (error) {
+      if (options?.dryRun === false) await this.ctx.storage.setAlarm(Date.now() + 300_000);
+      throw error;
+    }
+  }
+  private async collectGc<T extends GcReport | undefined>(work: () => Promise<T>): Promise<T> {
+    const report = await work();
+    if (report && !report.dryRun) {
+      if (report.phase === "done") await this.ctx.storage.deleteAlarm();
+      else await this.ctx.storage.setAlarm(Date.now() + 30_000);
+      console.info({ event: "workspace_gc_progress", ...report });
+    }
+    return report;
+  }
   resetRuntime(): Promise<{ reset: boolean }> { return this.workspace.resetRuntime(); }
   reset(): Promise<{ reset: boolean }> { return this.resetRuntime(); }
 }

@@ -10,3 +10,10 @@ napcat/
 .external_doc
 secrets/
 /.scratch/
+
+# 部署档案中的私有实例配置及生成文件
+workers/deployments/*.local.json
+workers/wrangler.deploy.json
+
+# 管理台从 browser TypeScript 构建，禁止手改或提交产物
+workers/src/admin/app.generated.ts

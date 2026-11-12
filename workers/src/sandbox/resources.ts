@@ -59,6 +59,16 @@ export class CloudflareWorkspaceResourcesDO extends DurableObject<Env> {
     return record && isCloudflareRecord(record) && record.resource.owner === owner && record.kind === "ready" ? record.resource : null;
   }
 
+  /** 维护游标按登记键推进；旧远程记录和未完成的克隆不触发工作区清理。 */
+  async maintenancePage(owner: string, cursor?: string): Promise<{ resources: SandboxResource[]; cursor?: string }> {
+    if (!Check(NameSchema, owner) || (cursor !== undefined && !cursor.startsWith(prefix))) throw new Error("invalid_request");
+    const records = await this.ctx.storage.list<ResourceRecord>({ prefix, startAfter: cursor, limit: 5 });
+    const resources = [...records.values()]
+      .filter(record => isCloudflareRecord(record) && record.kind === "ready" && record.resource.owner === owner)
+      .map(record => record.resource);
+    return { resources, ...(records.size === 5 ? { cursor: [...records.keys()].at(-1)! } : {}) };
+  }
+
   async create(owner: string, operationId: string, input: unknown): Promise<SandboxResource> {
     if (!Check(NameSchema, owner) || !Check(NameSchema, operationId) || !Check(CreateResourceSchema, input)) throw new Error("invalid_request");
     const id = "sbx:" + hash(owner + ":create:" + operationId);

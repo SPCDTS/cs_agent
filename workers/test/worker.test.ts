@@ -1,3 +1,4 @@
+import { adminHealth } from "./helpers";
 import { env, SELF, runInDurableObject, evictDurableObject, reset } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { Type } from "@earendil-works/pi-ai";
@@ -89,8 +90,8 @@ describe("OneBot reverse WebSocket", () => {
     const outbox = await runInDurableObject(env.THREAD.getByName("owner"), (_instance, state) =>
       state.storage.sql.exec("SELECT message_id, text FROM outbox").toArray());
     expect(outbox).toEqual([{ message_id: "99", text: "echo: 你好，主人" }]);
-    expect(await (await SELF.fetch("https://test/healthz")).json()).toMatchObject({
-      ok: true, bridge: { connected: true, selfId: "42", ignored: 0 }, model: { provider: "faux", id: "test" },
+    expect(await (await adminHealth()).json()).toMatchObject({
+      overall: "ready", bridge: { connected: true, selfId: "42", ignored: 0 }, model: { provider: "faux", id: "test" },
     });
     socket.send(JSON.stringify(event));
     expect(await env.THREAD.getByName("owner").submit(input("1", "重复", "10000001"))).toEqual({ deduped: true });

@@ -1,4 +1,5 @@
 import { DEFAULT_GITHUB } from "../src/github/model";
+import { adminHealth } from "./helpers";
 import { createExecutionContext, createScheduledController, env, reset, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
@@ -95,7 +96,7 @@ describe("event admin endpoints", () => {
     expect((await put(quiet)).status).toBe(200);
     expect(await (await admin("/admin/event-sources")).json()).toMatchObject({ sources: [{ id: "gmail", paused: false, settings: quiet }, { id: "github", paused: false, settings: DEFAULT_GITHUB.settings }] });
 
-    const health = await (await worker.fetch(new Request(`${env.PUBLIC_ORIGIN}/healthz`), env)).json();
+    const health = await (await adminHealth()).json();
     expect(health).toMatchObject({ events: { sources: [{ id: "gmail", enabled: true, paused: false, degraded: false, cursor: false, lastPollAt: null }, { id: "github", enabled: false, paused: false, cursor: false }], held: 0 } });
   });
 });

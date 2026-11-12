@@ -100,4 +100,4 @@ const page = await env.REQUESTS.getByName("main").list(query);
 - Workers 类型检查，以及 requests、web-chat、admin 三组回归覆盖采集、真实零用量、失败未知用量、脱敏、分页和详情保留。
 - 真实 Harness 配合 faux 模型检查共享 QQ 上下文、幂等提交、QQ 插话隔离、网页子任务汇报，以及请求和工具的回合关联；测试不会向真实 QQ 发消息。
 - 本机隔离的无界面渲染检查实际生成的页面，用模拟接口核对展开前后的请求次数、详情复用、空闲和离页停止刷新、管理分组、事件每页 10 条以及 390px 手机布局；这些展示数据不是生产用量。
-- 本次复用已有 RequestsDO，在现有 SQLite 中增列和建表，无需新绑定或密钥。上线仍由获准推送 main 后的 CI 执行。
+- 本次复用已有 RequestsDO，在现有 SQLite 中增列和建表，无需新绑定或密钥。上线仍由获准通过 PR 合并到 main 后的 CI 执行。

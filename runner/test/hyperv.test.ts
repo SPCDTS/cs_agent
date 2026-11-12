@@ -14,7 +14,7 @@ import { createHypervBackend, type HypervBridge } from '../src/hyperv.ts';
 
 const vm: HypervTarget = {
   kind: 'hyperv', id: 'vm', vmId: randomUUID(), credentialPath: 'C:\\local\\credential.clixml',
-  guestWorkdir: 'C:\\workspace', desktopUser: 'guest\\dev',
+  guestWorkdir: 'C:\\workspace',
 };
 const subject = { principal: 'owner', scope: 'task' };
 const shell: Command = { kind: 'powershell', script: 'Write-Output "你好"', timeoutMs: 30_000 };
@@ -50,44 +50,20 @@ test('Hyper-V 传输丢失后只对同一个来宾 ID 查询或取消', async (t
   assert.deepEqual(calls, ['dispatch', 'inspect', 'stop'].map(action => ({ action, id: job.id })));
 });
 
-test('Hyper-V 桌面帧拒绝跨调用域、跨 VM、越界及重复输入', async (t) => {
-  const path = await directory(t);
-  const stamp = 'guest-session-token';
-  const capturedAt = Date.now();
-  const dispatched: string[] = [];
-  const bridge: HypervBridge = async (_target, request) => {
-    if (request.action === 'screen') return { width: 30, height: 20, stamp, capturedAt, data: '/9j/2Q==' };
-    if (request.action === 'dispatch') {
-      assert.deepEqual(request.frame, { stamp, capturedAt });
-      dispatched.push(request.id);
-    }
-    return { state: 'running' };
-  };
-  const backend = createHypervBackend(path, bridge);
-  assert.ok(backend.screen);
-  const frame = await backend.screen(vm, subject);
-  assert.deepEqual({ width: frame.width, height: frame.height, mimeType: frame.mimeType }, {
-    width: 30, height: 20, mimeType: 'image/jpeg',
-  });
-  const click = (x: number): Command => ({ kind: 'desktop', frameId: frame.frameId, action: { kind: 'click', x, y: 2 }, timeoutMs: 2000 });
-  const valid = execution(click(29));
-  const rejected = [
-    { ...execution(click(29)), subject: { ...subject, scope: 'other' } },
-    { ...execution(click(29)), target: { ...vm, vmId: randomUUID() } },
-    execution(click(30)),
-  ];
-  for (const job of rejected) {
-    await backend.dispatch(job);
-    assert.equal((await backend.inspect(job)).state, 'failed');
-  }
-  await backend.dispatch(valid);
-  const duplicateFrame = execution(click(29));
-  await backend.dispatch(duplicateFrame);
-  assert.equal((await backend.inspect(duplicateFrame)).state, 'failed');
-  assert.deepEqual(dispatched, [valid.id]);
+test('Hyper-V 状态只 probe，报告版本或不可用而不派发命令', async t => {
+  const path = await directory(t), actions: string[] = [];
+  const helperVersion = 'sha256:' + 'a'.repeat(64);
+  let reply: unknown = { ready: true, protocolVersion: 1, helperVersion };
+  const backend = createHypervBackend(path, async (_target, request) => { actions.push(request.action); if (reply instanceof Error) throw reply; return reply; });
+  assert.deepEqual(await backend.probe?.(vm), { state: 'ready', protocolVersion: 1, helperVersion });
+  reply = { ready: true };
+  assert.deepEqual(await backend.probe?.(vm), { state: 'unknown', error: 'hyperv_helper_version_unavailable' });
+  reply = new Error('credentials or transport failure');
+  assert.deepEqual(await backend.probe?.(vm), { state: 'unavailable', error: 'hyperv_probe_unavailable' });
+  assert.deepEqual(actions, ['probe', 'probe', 'probe']);
 });
 
-test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object 并核对桌面身份', {
+test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object', {
   skip: process.platform !== 'win32' || process.env.CS_AGENT_TEST_HYPERV_NATIVE !== '1', timeout: 30_000,
 }, async (t) => {
   const path = await directory(t);
@@ -97,13 +73,13 @@ test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object 并核对
   const helper = join(path, 'Helper.exe');
   await promisify(execFile)(compiler, [
     '/nologo', '/target:winexe', '/platform:anycpu', '/out:' + helper, '/r:System.Web.Extensions.dll',
-    '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', ...['Helper.cs', 'Job.cs', 'Desktop.cs'].map(name => join(sources, name)),
+    ...['Helper.cs', 'Job.cs'].map(name => join(sources, name)),
   ], { windowsHide: true });
   await copyFile(join(sources, 'launch.ps1'), join(path, 'launch.ps1'));
   await copyFile(join(sources, 'bridge.ps1'), join(path, 'bridge.ps1'));
   const directBridge = [
     "$ErrorActionPreference = 'Stop'",
-    '$root = $env:CS_AGENT_TEST_HYPERV_DIR',
+    '$root = [IO.Path]::GetFullPath($env:CS_AGENT_TEST_HYPERV_DIR)',
     '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
     '$setup = @{ version = 1; bridgeSid = $sid; workdir = $root } | ConvertTo-Json -Compress',
     '[IO.File]::WriteAllText((Join-Path $root "settings.json"), $setup)',
@@ -114,6 +90,12 @@ test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object 并核对
     '  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))',
     '  & ([ScriptBlock]::Create($source)) $encoded $root',
     '}',
+    'class FixtureFolder { [object] GetTask([string]$name) { return @{ Enabled = $true } } }',
+    'class FixtureScheduler { [void] Connect() {} [object] GetFolder([string]$name) { return [FixtureFolder]::new() } }',
+    'function New-Object { param([string]$ComObject) return [FixtureScheduler]::new() }',
+    '$probe = (Invoke-Fixture @{ action = "probe" }) | ConvertFrom-Json',
+    'if (-not $probe.ready -or $probe.protocolVersion -ne 1 -or $probe.helperVersion -cnotmatch "^sha256:[a-f0-9]{64}$") { throw "fixture_probe_invalid" }',
+    'Remove-Item Function:/New-Object',
     'Invoke-Fixture @{ action = "stop"; id = $id }',
     'Invoke-Fixture @{ action = "dispatch"; id = $id; deadline = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 20000; command = @{ kind = "powershell"; script = "throw 1" } }',
     'Invoke-Fixture @{ action = "inspect"; id = $id }',
@@ -141,7 +123,7 @@ test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object 并核对
     { state: 'cancelled' }, { state: 'cancelled' }, { state: 'cancelled' },
   ]);
 
-  async function run(kind: 'shell' | 'desktop', command: object, script?: string) {
+  async function run(kind: 'shell', command: object, script?: string) {
     const id = randomUUID();
     const jobPath = join(path, 'jobs', id);
     await mkdir(jobPath, { recursive: true });
@@ -190,8 +172,5 @@ test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object 并核对
   const expired = await run('shell', { kind: 'powershell', deadline: Date.now() - 1 }, 'throw "expired script executed"');
   assert.deepEqual(await expired.result(), { state: 'cancelled' });
 
-  const unavailable = await run('desktop', {
-    kind: 'desktop', desktopSid: 'S-1-5-0', action: { kind: 'text', text: 'invalid-user-input' },
-  });
-  assert.deepEqual(await unavailable.result(), { state: 'failed', error: 'desktop_unavailable' });
+
 });

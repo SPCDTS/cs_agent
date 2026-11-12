@@ -33,9 +33,10 @@ export const modelLoginErrorCode = (error: unknown): ModelLoginCode | "invalid_r
   catalogFailure(error) ? "catalog_failed" : refreshFailure(error) ? "token_exchange" : error instanceof Error && (LOGIN_CODES as readonly string[]).includes(error.message) ? error.message as ModelLoginCode : "invalid_request";
 
 const Text = Type.String({ minLength: 1 });
+const TokenText = Type.String({ minLength: 1, maxLength: 16384 });
 export const TokenResponseSchema = Type.Object({
-  access_token: Text, refresh_token: Text, id_token: Type.Optional(Text), token_type: Type.Literal("Bearer"),
-  expires_in: Type.Number({ exclusiveMinimum: 0 }), scope: Type.Optional(Text),
+  access_token: TokenText, refresh_token: TokenText, id_token: Type.Optional(TokenText), token_type: Type.Literal("Bearer"),
+  expires_in: Type.Number({ exclusiveMinimum: 0 }), scope: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
 });
 export type TokenResponse = Static<typeof TokenResponseSchema>;
 export const CatalogSchema = Type.Array(Type.Object({ slug: Text, display_name: Text, visibility: Text }));

@@ -1,3 +1,4 @@
+import { adminHealth } from "./helpers";
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
@@ -60,7 +61,7 @@ describe("Registry OAuth CIMD", () => {
     for (const secret of [ACCESS, REFRESH, "synthetic-code", verifier ?? "unreachable"]) expect(JSON.stringify(stored)).not.toContain(secret);
     expect(stored.logins).toHaveLength(0);
     expect(remote.requests.every(r => r.redirect === "manual" && !r.headers.has("cookie"))).toBe(true);
-    const healthy = await worker.fetch(new Request(`${env.PUBLIC_ORIGIN}/healthz`), env);
+    const healthy = await adminHealth();
     expect(await healthy.json()).toMatchObject({ mcp: expect.arrayContaining([expect.objectContaining({ server: "notion", enabled: true, credential: "oauth", login: "ok", tools: null })]) });
   });
   it("expires links and states after ten minutes and consumes failed callbacks without exposing code", async () => {
