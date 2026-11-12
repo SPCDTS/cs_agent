@@ -4,7 +4,11 @@ import { build } from "esbuild";
 import { runInNewContext } from "node:vm";
 import { fileURLToPath } from "node:url";
 
-test("new admin loadSources reaches typed GitHub config and receipts, paginates 10/1/back and preserves edits", async () => {
+// PR checks build the merge tree: main may import a newer console API than this branch does.
+// Exercise that interface explicitly as well, so an outdated fixture fails on the branch too.
+for (const integratedConsole of [false, true])
+test("new admin loadSources reaches typed GitHub config and receipts, paginates 10/1/back and preserves edits" +
+  (integratedConsole ? " with integrated console navigation" : ""), async () => {
   const mock = String.raw`
     class Node {
       constructor(tag, props={}, children=[]) {
@@ -25,10 +29,12 @@ test("new admin loadSources reaches typed GitHub config and receipts, paginates 
     export const el=(...args)=>new Node(...args);
     export const nodes={}, $=id=>nodes[id], input=$, clear=node=>node.replaceChildren(), pill=(text,tone)=>el("span",{text,className:tone});
     export const cs={}, consoleView=()=>{},renderConsoleThreads=()=>{},resetConsole=()=>{},startConsole=()=>{};
+    export const chooseSubagent=()=>{throw new Error("unexpected_console_navigation");};
     export const loadManagement=()=>{},memoryDetail=()=>{},mm={};
   `;
   const result = await build({
-    stdin: { contents: 'export { loadSources, renderSources, state } from "./browser/app"; export { el, nodes } from "./browser/dom";',
+    stdin: { contents: 'export { loadSources, renderSources, state } from "./browser/app"; export { el, nodes } from "./browser/dom";' +
+      (integratedConsole ? 'export { chooseSubagent } from "./browser/console";' : ""),
       resolveDir: fileURLToPath(new URL("..", import.meta.url)) },
     bundle: true, write: false, format: "cjs", platform: "browser",
     plugins: [{ name: "fake-dom", setup(build) {
