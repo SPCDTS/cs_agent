@@ -4,13 +4,14 @@ import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionR
 import type { InboundMedia } from "../policy";
 import { MediaDownloadError } from "../media/download";
 import { MediaRepository, type AssetRef } from "../media/repository";
+import { ResourceIdSchema } from "../sandbox/resources";
 
 export type MediaSelection = { ordinal?: number; kind?: InboundMedia["kind"] };
 export type MediaDeps = {
-  allowed(api: ToolExecutionApi, context: Context): Promise<boolean>;
+  allowed(api: ToolExecutionApi, context: Context, kind: "media_recall" | "media_send"): Promise<boolean>;
   repository(api: ToolExecutionApi, context: Context): Promise<MediaRepository>;
   lookup(messageId: string, api: ToolExecutionApi, context: Context, selection?: MediaSelection): Promise<InboundMedia[]>;
-  sandbox(api: ToolExecutionApi, context: Context): Promise<{ exportAsset(path: string, scope: string, name?: string): Promise<AssetRef> }>;
+  sandbox(api: ToolExecutionApi, context: Context, sandboxId?: string): Promise<{ exportAsset(path: string, scope: string, name?: string): Promise<AssetRef> }>;
   deliver(ref: AssetRef, api: ToolExecutionApi, context: Context): Promise<unknown>;
   record?(kind: "media_recall" | "media_send", detail: object): Promise<unknown>;
 };
@@ -23,7 +24,7 @@ function base64(bytes: Uint8Array): string {
 const RecallParams = Type.Object({ message_id: Type.String({ minLength: 1, maxLength: 512 }), ordinal: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false });
 export function createMediaExtension(deps: MediaDeps) {
   async function boundary(kind: "media_recall" | "media_send", api: ToolExecutionApi, context: Context, work: () => Promise<ToolExecutionResult>) {
-    if (!await deps.allowed(api, context)) return text("本回合无权访问媒体或发送附件。", true);
+    if (!await deps.allowed(api, context, kind)) return text("本回合无权访问媒体或发送附件。", true);
     try { const result = await work(); await deps.record?.(kind, { result: "ok" }); return result; }
     catch (error) {
       const code = error instanceof Error && /^[a-z_]{1,80}$/.test(error.message) ? error.message : "media_error";
@@ -53,10 +54,10 @@ export function createMediaExtension(deps: MediaDeps) {
     }),
   });
   return defineExtension({ name: "cs.media", tools: [recall(true), recall(false), defineTool({
-    name: "send_file", replay: "unsafe", description: "Send a committed file from this conversation's /work workspace through the current authorized reply route. The file must be at most 10MiB.",
-    parameters: Type.Object({ path: Type.String({ minLength: 1, maxLength: 1024 }), name: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })) }, { additionalProperties: false }),
+    name: "send_file", replay: "unsafe", description: "Send a committed file from this conversation's /work workspace through the current authorized reply route. The file must be at most 10MiB. Owner turns may specify sandboxId to send from an owned Cloudflare resource, including a subagent's assigned workspace. Omit it for the current workspace.",
+    parameters: Type.Object({ path: Type.String({ minLength: 1, maxLength: 1024 }), name: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })), sandboxId: Type.Optional(ResourceIdSchema) }, { additionalProperties: false }),
     execute: (args, api, context) => boundary("media_send", api, context, async () => {
-      const repository = await deps.repository(api, context), sandbox = await deps.sandbox(api, context);
+      const repository = await deps.repository(api, context), sandbox = await deps.sandbox(api, context, args.sandboxId);
       const ref = await sandbox.exportAsset(args.path, repository.scope, args.name);
       return text(JSON.stringify(await deps.deliver(ref, api, context)));
     }),

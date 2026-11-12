@@ -15,8 +15,10 @@ export type WorkspaceManifest = Static<typeof ManifestSchema>;
 export type WorkspaceOperation = { kind: "exec"; command: string; cwd?: string; timeoutMs?: number }
   | { kind: "read"; path: string; offset?: number; limit?: number }
   | { kind: "write"; path: string; text: string }
+  | { kind: "writeBytes"; path: string; data: Uint8Array }
+  | { kind: "mkdir" | "remove"; path: string }
   | { kind: "edit"; path: string; edits: FileEdit[] };
-export type WorkspaceOperationResult = ExecResult | ReadResult | { bytes: number } | { replaced: number };
+export type WorkspaceOperationResult = ExecResult | ReadResult | { bytes: number } | { replaced: number } | { done: true };
 export type WorkspaceRunResult = { status: "committed"; persistence: "committed"; revision: string; result: WorkspaceOperationResult }
   | { status: "unknown"; persistence: "unknown"; revision: string; operationId: string }
   | { status: "failed"; persistence: "failed"; revision: string; error: string; issues?: unknown };
@@ -135,6 +137,9 @@ export class WorkspaceManager {
       case "exec": return this.deps.runtime.exec(operation.command, { cwd: operation.cwd, timeoutMs: operation.timeoutMs ?? 60000 });
       case "read": return this.deps.runtime.readFile(operation.path, { offset: operation.offset, limit: operation.limit });
       case "write": return this.deps.runtime.writeFile(operation.path, operation.text);
+      case "writeBytes": return this.deps.runtime.writeFile(operation.path, operation.data);
+      case "mkdir": await this.deps.runtime.mkdir(operation.path); return { done: true };
+      case "remove": await this.deps.runtime.remove(operation.path); return { done: true };
       case "edit": return this.deps.runtime.editFile(operation.path, operation.edits);
       default: { const exhaustive: never = operation; throw new Error(`invalid_operation:${exhaustive}`); }
     }
@@ -147,7 +152,9 @@ export class WorkspaceManager {
         await this.ensureRuntime(manifest);
         return { status: "committed", persistence: "committed", revision: manifest.revision, result: await this.execute(input.operation) };
       }
-      const fingerprint = await sha256(JSON.stringify(input.operation)), key = `workspace:op:${await sha256(input.operationId)}`;
+      if (input.operation.kind === "writeBytes" && (!(input.operation.data instanceof Uint8Array) || input.operation.data.byteLength > FILE_MAX_BYTES)) throw new Error("too_large");
+      const fingerprint = await sha256(JSON.stringify(input.operation.kind === "writeBytes"
+        ? { ...input.operation, data: await sha256(input.operation.data) } : input.operation)), key = `workspace:op:${await sha256(input.operationId)}`;
       const previous = await this.deps.storage.get<OperationRecord>(key);
       if (previous) {
         if (previous.fingerprint !== fingerprint) throw new Error("operation_conflict");

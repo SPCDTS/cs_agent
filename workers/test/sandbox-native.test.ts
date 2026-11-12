@@ -49,6 +49,17 @@ function fixture() {
 }
 
 describe("官方 Files 与原生 Container 适配器", () => {
+  it("二进制写入保留子视图边界，目录操作仍受 /work 与 realpath 限制", async () => {
+    const f = fixture(), bytes = new Uint8Array([10, 0, 255, 128, 20]).subarray(1, 4);
+    expect(await f.client.writeFile(".codemode/out/image.png", bytes)).toEqual({ bytes: 3 });
+    expect(await f.client.readBlob(".codemode/out/image.png")).toEqual(new Uint8Array([0, 255, 128]));
+    await f.client.mkdir(".codemode/empty");
+    expect(f.nativeFiles.mkdir).toHaveBeenCalledWith("/work/.codemode/empty", { recursive: true, user: "1000:1000" });
+    await f.client.remove(".codemode/empty");
+    expect(f.nativeFiles.remove).toHaveBeenCalledWith("/work/.codemode/empty", { recursive: true, force: true, user: "1000:1000" });
+    await expect(f.client.remove("/work")).rejects.toThrow("path_denied");
+    await expect(f.client.mkdir("escape/out")).rejects.toThrow("path_denied");
+  });
   it("原生 stdin 传递参数，文件读写使用 uid/gid 1000，返回 UTF-8 字节数", async () => {
     const f = fixture();
     expect(await f.client.writeFile("out/report.md", "中文\r\n第二行")).toEqual({ bytes: 17 });

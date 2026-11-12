@@ -1,4 +1,5 @@
 import { ModelAlarm } from "../model-alarm";
+import { workspaceExecutionEnv } from "../sandbox/execution-env";
 import { ProjectionPublisher, observeWrites } from "../requests/projection";
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -334,7 +335,20 @@ export class SubagentDO extends DurableObject<Env> {
     // 与 ThreadDO 相同：DO 里的连接跨不了请求，Codex 固定走 SSE。
     const storage = await openDurableObjectSqliteStorage(this.observedStorage, { prefix: "pi_" });
     this.projection.install();
-    const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } } }, context);
+    const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } },
+      env: async target => {
+        const access = await parent().validateSubagentAccess(meta.id);
+        if (!access?.capabilities.coding || !access.authority.owner) return;
+        const name = access.sandbox?.name ?? subagentName(meta.parent, meta.id);
+        return workspaceExecutionEnv({ id: "cloudflare:" + this.env.SANDBOX.idFromName(name), cwd: target.cwd,
+          files: async () => ({
+            readBlob: path => parent().subagentReadBlob(meta.id, path),
+            writeFile: (path, content) => parent().subagentWriteFile(meta.id, path, content),
+            createTempDir: prefix => parent().subagentCreateTempDir(meta.id, prefix),
+          }),
+        });
+      },
+    }, context);
     const root = await harness.root(context, { agent: modelChange(meta.model) });
     // 读取子会话只打开存储；执行由 alarm → drain → answer 的 submit 启动。
     void harness.closed.then(() => { this.runtime = undefined; void delegated.close(); });

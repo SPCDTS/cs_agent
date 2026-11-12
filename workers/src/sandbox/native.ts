@@ -63,11 +63,13 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
     if (result.byteLength > FILE_MAX_BYTES) throw new SandboxError("too_large");
     return result;
   }
-  async function write(path: string, text: string): Promise<{ bytes: number }> {
+  async function write(path: string, content: string | Uint8Array): Promise<{ bytes: number }> {
+    const size = typeof content === "string" ? encoder.encode(content).byteLength : content.byteLength;
+    if (size > FILE_MAX_BYTES) throw new SandboxError("too_large");
     const absolute = await resolve(path), fs = await files();
     await fs.mkdir(absolute.slice(0, absolute.lastIndexOf("/")), { recursive: true, user });
-    await fs.writeFile(absolute, text, { user });
-    return { bytes: encoder.encode(text).byteLength };
+    await fs.writeFile(absolute, content, { user });
+    return { bytes: size };
   }
   return {
     snapshot: (retainedPaths = []) => helper("snapshot", { retainedPaths }, Snapshot),
@@ -93,6 +95,12 @@ export function nativeSandboxClient(deps: Dependencies): SandboxClient {
     },
     readFile: (path, options = {}) => boundary(async () => decodeFileRead(await bytes(path), options)),
     writeFile: (path, text) => boundary(() => write(path, text)),
+    mkdir: path => boundary(async () => { await (await files()).mkdir(await resolve(path), { recursive: true, user }); }),
+    remove: path => boundary(async () => {
+      const absolute = await resolve(path);
+      if (absolute === WORK_ROOT) throw new SandboxError("path_denied");
+      await (await files()).remove(absolute, { recursive: true, force: true, user });
+    }),
     editFile: (path, edits) => boundary(async () => {
       if (!edits.length || edits.some(edit => !edit.oldText)) throw new SandboxError("invalid_request");
       const original = await bytes(path);
