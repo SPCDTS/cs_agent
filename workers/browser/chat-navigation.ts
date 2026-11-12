@@ -2,10 +2,11 @@ import { $, el, state, SUBAGENT_STATUS } from "./app";
 import { cs, chooseChat, chooseSubagent } from "./console";
 import { readApi } from "./api";
 import { Subagents, type Overview } from "./app-contracts";
+import { chatChildren } from "./chat-navigation-layout";
 
 type Children = {kind:"loading"} | {kind:"ready";items:Subagents;at:number} | {kind:"error"};
-const children=new Map<string,Children>(),expanded=new Set<string>(),pending=new Set<string>();
-export function resetChatNavigation(){children.clear();expanded.clear();pending.clear();}
+const children=new Map<string,Children>(),expanded=new Set<string>(),pending=new Set<string>(),showAll=new Set<string>();
+export function resetChatNavigation(){children.clear();expanded.clear();pending.clear();showAll.clear();}
 export function expandChatThread(thread:string){expanded.add(thread);}
 export async function loadChatChildren(thread:string,force=false){
   const current=children.get(thread);
@@ -36,13 +37,18 @@ export function renderChatNavigation(threads: Pick<Overview["threads"][number],"
     const count=cached?.kind==="ready"?"（"+cached.items.length+"）":"";
     details.append(el("summary",{"data-nav":"children:"+thread.key,text:"子 agent"+count}),nested);
     if(cached?.kind==="ready"){
-      for(const child of [...cached.items].sort((a,b)=>b.lastActiveAt-a.lastActiveAt||a.id.localeCompare(b.id))){
+      const preview=chatChildren(cached.items,Date.now(),selected&&cs.chat.kind==="subagent"?cs.chat.id:undefined,showAll.has(thread.key));
+      for(const child of preview.items){
         nested.append(el("li",{},[el("button",{className:"chat-thread chat-child",type:"button","data-nav":"subagent:"+child.id,"aria-current":String(selected&&cs.chat.kind==="subagent"&&cs.chat.id===child.id),
           title:child.task,onclick:()=>chooseSubagent(thread.key,child.id,child.summary)},[
           el("span",{text:child.summary||child.task}),el("small",{text:child.id.slice(0,6)+" · "+(SUBAGENT_STATUS[child.status]?.[0]||child.status)}),
         ])]));
       }
-      if(!cached.items.length)nested.append(el("li",{className:"chat-tree-note",text:"暂无子 agent"}));
+      if(!preview.items.length)nested.append(el("li",{className:"chat-tree-note",text:cached.items.length?"暂无近期活动":"暂无子 agent"}));
+      if(preview.hidden)nested.append(el("li",{},[el("button",{className:"chat-show-more",type:"button","data-nav":"more:"+thread.key,
+        "aria-expanded":String(showAll.has(thread.key)),text:showAll.has(thread.key)?"收起":"展开显示（"+preview.hidden+"）",
+        onclick:()=>{if(showAll.has(thread.key))showAll.delete(thread.key);else showAll.add(thread.key);renderChatNavigation();}
+      })]));
     }else if(cached?.kind==="error"){
       nested.append(el("li",{},[el("button",{className:"btn compact",type:"button","data-nav":"retry:"+thread.key,text:"重新加载子 agent",onclick:()=>loadChatChildren(thread.key,true)})]));
     }else nested.append(el("li",{className:"chat-tree-note",text:"加载中…"}));
