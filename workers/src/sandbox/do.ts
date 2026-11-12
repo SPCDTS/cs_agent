@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "../env";
+import type { GcReport } from "./workspace-gc";
 import { MediaRepository, type AssetRef } from "../media/repository";
 import { imageMime } from "../media/model";
 import type { DirEntry, ExecResult, FileEdit, ReadResult } from "./client";
@@ -24,6 +25,7 @@ export class SandboxDO extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     // 清理旧版硬期限留下的闹钟数据，不再按累计运行时长停止容器。
     await this.ctx.storage.delete("container:deadline");
+    await this.collectGc(() => this.workspace.resumeGc());
   }
   private async startRuntime(): Promise<Container> {
     const container = this.container();
@@ -111,7 +113,24 @@ export class SandboxDO extends DurableObject<Env> {
     await container.destroy("restore committed workspace");
     return true;
   }
-  gc(options?: Parameters<WorkspaceManager["gc"]>[0]): ReturnType<WorkspaceManager["gc"]> { return this.workspace.gc(options); }
+  async gc(options?: Parameters<WorkspaceManager["gc"]>[0]): ReturnType<WorkspaceManager["gc"]> {
+    return this.collectGc(() => this.workspace.gc(options), options?.dryRun === false);
+  }
+  private async collectGc<T extends GcReport | undefined>(work: () => Promise<T>, retry = true): Promise<T> {
+    try {
+      const report = await work();
+      if (report && !report.dryRun) {
+        if (report.phase === "done") await this.ctx.storage.deleteAlarm();
+        else await this.ctx.storage.setAlarm(Date.now() + 30_000);
+        console.info({ event: "workspace_gc_progress", ...report });
+      }
+      return report;
+    } catch (error) {
+      // 进度仍在原 DO 中；失败延后恢复，不在一次 alarm 内密集重试。
+      if (retry) await this.ctx.storage.setAlarm(Date.now() + 300_000);
+      throw error;
+    }
+  }
   resetRuntime(): Promise<{ reset: boolean }> { return this.workspace.resetRuntime(); }
   reset(): Promise<{ reset: boolean }> { return this.resetRuntime(); }
 }

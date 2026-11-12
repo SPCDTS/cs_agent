@@ -1,5 +1,6 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { WorkspaceGc, type GcOptions } from "./workspace-gc";
 import { FILE_MAX_BYTES, WORKSPACE_MAX_BYTES, sha256 } from "../media/model";
 import { scopePrefix } from "../media/repository";
 import { SandboxError, type ExecResult, type FileEdit, type ReadResult, type RuntimeSnapshot, type SandboxClient } from "./client";
@@ -20,7 +21,7 @@ export type WorkspaceRunResult = { status: "committed"; persistence: "committed"
   | { status: "unknown"; persistence: "unknown"; revision: string; operationId: string }
   | { status: "failed"; persistence: "failed"; revision: string; error: string; issues?: unknown };
 export type WorkspaceCompareResult = { ok: true; manifest: WorkspaceManifest } | { ok: false; conflict: WorkspaceManifest };
-export type WorkspaceStorage = Pick<DurableObjectStorage, "get" | "put" | "transaction">;
+export type WorkspaceStorage = Pick<DurableObjectStorage, "get" | "put" | "delete" | "sql" | "transaction">;
 type OperationRecord = { fingerprint: string; state: "executing" | "unknown"; revision: string }
   | { fingerprint: string; state: "committed"; revision: string; result: { kind: "inline"; value: WorkspaceOperationResult } | { kind: "r2"; key: string } }
   | { fingerprint: string; state: "expired"; revision: string }
@@ -59,7 +60,10 @@ export function parseManifest(value: unknown): WorkspaceManifest {
 export class WorkspaceManager {
   private queue: Promise<unknown> = Promise.resolve();
   private hydrated = false;
-  constructor(private readonly deps: { workspace: string; bucket: R2Bucket; storage: WorkspaceStorage; runtime: SandboxClient; resetRuntime(): Promise<unknown>; runtimeReady(): boolean }) {}
+  private readonly collector: WorkspaceGc;
+  constructor(private readonly deps: { workspace: string; bucket: R2Bucket; storage: WorkspaceStorage; runtime: SandboxClient; resetRuntime(): Promise<unknown>; runtimeReady(): boolean }) {
+    this.collector = new WorkspaceGc({ ...deps, prefix: () => this.prefix(), parse: parseManifest });
+  }
   serial<T>(work: () => Promise<T>): Promise<T> {
     const pending = this.queue.then(work, work);
     this.queue = pending.catch(() => undefined);
@@ -221,45 +225,8 @@ export class WorkspaceManager {
   resetRuntime(): Promise<{ reset: boolean }> {
     return this.serial(async () => { this.hydrated = false; await this.deps.storage.put(EPOCH, (await this.deps.storage.get<number>(EPOCH) ?? 0) + 1); return { reset: Boolean(await this.deps.resetRuntime()) }; });
   }
-  private async objects(prefix: string): Promise<R2Object[]> {
-    const objects: R2Object[] = [];
-    let cursor: string | undefined;
-    do {
-      const page = await this.deps.bucket.list({ prefix, cursor, limit: 1000 });
-      objects.push(...page.objects);
-      cursor = page.truncated ? page.cursor : undefined;
-    } while (cursor);
-    return objects;
-  }
-  gc(options: { keepManifests?: number; retentionMs?: number; graceMs?: number; batchSize?: number; dryRun?: boolean } = {}): Promise<{
-    scanned: number; deleted: number; candidates: number; deferred?: string; dryRun: boolean;
-  }> {
-    return this.serial(async () => {
-      const prefix = await this.prefix(), now = Date.now(), dryRun = options.dryRun ?? true;
-      const keep = Math.max(1, Math.min(100, options.keepManifests ?? 3)), retention = Math.max(3600000, options.retentionMs ?? 3600000);
-      const grace = Math.max(3600000, options.graceMs ?? 86400000), batchSize = Math.max(1, Math.min(500, options.batchSize ?? 100));
-      // 同一 serial 队列覆盖完整扫描和删除，期间写入、导入及新租约不能改变可达性。
-      const manifests = await this.objects(`${prefix}/manifests/`);
-      const head = await this.deps.storage.get<string>(HEAD) ?? "0", pins = await this.deps.storage.get<Record<string, number>>("workspace:pins") ?? {};
-      const ordered = manifests.sort((a,b) => b.uploaded.getTime() - a.uploaded.getTime());
-      const retain = ordered.filter((object, index) => index < keep || now - object.uploaded.getTime() < retention || object.key.endsWith(`/${head}`) || (pins[object.key.split("/").at(-1) ?? ""] ?? 0) > now);
-      const retainedKeys = new Set(retain.map(object => object.key)), reachable = new Set<string>();
-      for (const object of retain) {
-        const stored = await this.deps.bucket.get(object.key);
-        if (!stored) throw new Error("workspace_manifest_missing");
-        for (const file of parseManifest(await stored.json()).files) reachable.add(file.sha256);
-      }
-      const obsolete = ordered.filter(object => !retainedKeys.has(object.key)).map(object => object.key);
-      // 只有全部manifest完成可达性计算后才能删blob；当前head和传输租约始终保留。
-      const blobs = await this.objects(`${prefix}/blobs/`);
-      const unused = blobs.filter(object => now - object.uploaded.getTime() >= grace && !reachable.has(object.key.split("/").at(-1) ?? "")).map(object => object.key);
-      const results = await this.objects(`${prefix}/results/`);
-      const expiredResults = results.filter(object => now - object.uploaded.getTime() >= Math.max(retention, 30 * 86400000)).map(object => object.key);
-      const candidates = [...obsolete, ...unused, ...expiredResults];
-      if (!dryRun && candidates.length) await this.deps.bucket.delete(candidates.slice(0, batchSize));
-      return { scanned: manifests.length + blobs.length + results.length, deleted: dryRun ? 0 : Math.min(batchSize, candidates.length), candidates: candidates.length, dryRun };
-    });
-  }
+  gc(options: GcOptions = {}) { return this.serial(() => this.collector.run(options)); }
+  resumeGc() { return this.serial(() => this.collector.resume()); }
   importSnapshot(input: { manifest: WorkspaceManifest; expectedRevision: string; paths?: string[]; operationId?: string }): Promise<WorkspaceCompareResult> {
     return this.serial(async () => {
       const source = parseManifest(input.manifest), current = await this.manifest();

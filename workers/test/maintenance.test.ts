@@ -67,7 +67,7 @@ it("retention维护显式登记的Cloudflare工作区并保存登记分页游标
   const collected: string[] = [];
   vi.spyOn(SandboxDO.prototype, "gc").mockImplementation(async function(this: SandboxDO) {
     collected.push((await this.files()).workspace);
-    return { scanned: 0, candidates: 0, deleted: 0, dryRun: false };
+    return { phase: "done", startedAt: 0, scanned: 0, stepScanned: 0, candidates: 0, deleted: 0, dryRun: false };
   });
   await withThread(GROUP, {}, async thread => {
     await run(thread, "retention", Date.now());

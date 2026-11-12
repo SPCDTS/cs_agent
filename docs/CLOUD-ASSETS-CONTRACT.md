@@ -51,7 +51,15 @@ SandboxDO 的 Cloudflare 容器使用官方 `Files` 与原生 `Container.exec` �
 - `cloneFrom({sourceName,expectedRevision,sourceRevision?})` 克隆父版本；`mergeFrom({sourceName,expectedRevision,paths,sourceRevision?})` 选择文件合并。返回 `{ok:true,manifest}` 或 `{ok:false,conflict}`。这些是受信宿主 RPC，禁止直接向模型暴露任意 sourceName。
 - `resetRuntime()` 与兼容的 `reset()` 只销毁容器，保留 durable 工作区。新 DO 实例先销毁旧容器再恢复，epoch 在每次执行和替换时递增，拒绝旧执行提交快照。
 
-单文件 10MiB、工作区 50MiB、文件和目录各最多 20000；拒绝符号链接、设备、越界路径、冲突路径。quota 响应包含逐项 issues，绝不截断后冒充成功。manifest 中删除的文件在下一次恢复消失。`gc(options)` 默认 dry-run，保留当前 head、1小时传输租约、当前版及最近2份历史（并保护1小时内的新版本）；仅清理宽限期之后的孤立blob，单批最多500对象。manifest、blob 和大结果均沿 R2 cursor 扫描所有分页，先完成可达性计算再删除；扫描和删除与工作区写入、导入及新增租约共用串行队列，不会基于过期 head 删除新文件。定期维护覆盖会话默认工作区、旧子任务工作区和登记表中的显式 Cloudflare 工作区；登记表每次最多扫描5条并保存游标，未就绪资源及外部持久 env 不参与清理，资源本身与当前文件不会因闲置而删除。read不写持久结果；最近32个变更操作保留详细结果，小结果直接存DO，大于32KiB的结果才写R2。更旧操作压缩成稳定tombstone，不重放。`gcMediaTickets(bucket,{limit,cursor,dryRun})` 支持过期短票据分页清理。
+单文件 10MiB、工作区 50MiB、文件和目录各最多 20000；拒绝符号链接、设备、越界路径、冲突路径。quota 响应包含逐项 issues，绝不截断后冒充成功。manifest 中删除的文件在下一次恢复消失。`gc(options)` 默认 dry-run，保留当前 head、1小时传输租约、当前版及最近2份历史（并保护1小时内的新版本）；仅清理宽限期之后的孤立blob，单批最多500对象。
+
+GC 每次只列举一页 R2 对象（默认100、最多500个），或读取一份保留 manifest；先分页选出保留版本并标记文件引用，再分别清理 manifest、blob 和大结果。游标、累计计数和本轮参数保存在原 DO，引用集合写入其 SQLite，临时标记完成后也分批删除，不把整个历史装入内存。
+
+同一轮沿用启动时的保留参数；dry-run 与实际清理分别保存进度，返回 phase 为 done 才表示本轮完成。每批与写入、导入及新增租约共用串行队列，批间正常接纳工作区操作；删除前重新保护当前 head 与有效租约，新增保护先完成引用标记，已保护的旧版本本轮继续保留。近期操作仍引用的大结果不按年龄误删。
+
+实际清理由原 SandboxDO 的 alarm 每30秒续跑一批，失败延后5分钟恢复，完成即停止；dry-run 由调用方继续查询，不自动安排 alarm。不新建 DO、队列或容器。workspace_gc_progress 日志及 workspace:gc:apply:last 保存阶段、起始时间、对象扫描次数、候选与删除计数；扫描次数包含 manifest 的两遍列举，不能当作唯一对象数。
+
+定期维护覆盖会话默认工作区、旧子任务工作区和登记表中的显式 Cloudflare 工作区；登记表每次最多扫描5条并保存游标，未就绪资源及外部持久 env 不参与清理，资源本身与当前文件不会因闲置而删除。read不写持久结果；最近32个变更操作保留详细结果，小结果直接存DO，大于32KiB的结果才写R2。更旧操作压缩成稳定tombstone，不重放。`gcMediaTickets(bucket,{limit,cursor,dryRun})` 支持过期短票据分页清理。
 
 ## owner 跨群读取
 
