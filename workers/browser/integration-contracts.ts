@@ -47,7 +47,7 @@ export const McpServerRecordSchema = Type.Object({
 });
 export const McpServersSchema = Type.Object({ servers: Type.Array(McpServerRecordSchema) });
 export type McpServerRecord = Static<typeof McpServerRecordSchema>;
-export const McpGrantSchema = Type.Object({ revision: Type.String(), tools: strings(), actors: strings(), resourceAllow: strings(), expiresAt: nullableNumber(), serverRevision: Type.Optional(Type.String()) });
+export const McpGrantSchema = Type.Object({ environments: Type.Optional(strings()), environmentApproval: Type.Optional(Type.Union([Type.Literal("required"), Type.Literal("none")])),  revision: Type.String(), tools: strings(), actors: strings(), resourceAllow: strings(), expiresAt: nullableNumber(), serverRevision: Type.Optional(Type.String()) });
 export type McpGrant = Static<typeof McpGrantSchema>;
 export const McpAccessSchema = Type.Object({ grant: Type.Union([McpGrantSchema, Type.Null()]) });
 const McpApprovalSchema = Type.Object({ id: Type.String(), scope: Type.String(), status: Type.String(), server_id: Type.String(), tool_name: Type.String(),

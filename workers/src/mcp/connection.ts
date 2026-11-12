@@ -1,3 +1,4 @@
+import type { EnvironmentAccess } from "./environments";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolResultSchema, ListToolsResultSchema, ListResourcesResultSchema, ListResourceTemplatesResultSchema, ReadResourceResultSchema, type Resource, type ResourceTemplate, ToolListChangedNotificationSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -99,7 +100,7 @@ export class McpConnection {
     return this.client.request({ method: "resources/read", params: { uri } }, ReadResourceResultSchema,
       { signal, timeout: this.limits.callMs, maxTotalTimeout: this.limits.callMs, resetTimeoutOnProgress: false });
   }
-  async callTool(name: string, args: Record<string, unknown>, caller: { scope: string }, signal: AbortSignal) {
+  async callTool(name: string, args: Record<string, unknown>, caller: { scope: string; environments?: EnvironmentAccess }, signal: AbortSignal) {
     if (this.closing || this.failure) throw this.failure ?? new McpConnectionError("closed", "closed");
     // 直接 request 避免 SDK 的逐页 outputSchema 缓存影响早期页面的工具；校验由完整目录负责。
     try { return await this.client.request({ method: "tools/call", params: { name, arguments: args, _meta: { "cs-agent/caller": caller } } }, CallToolResultSchema,

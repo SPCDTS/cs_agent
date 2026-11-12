@@ -1,6 +1,7 @@
+import { EnvIdsSchema, isEnvironmentTool, noEnvironments, type EnvironmentAccess } from './environments';
 import type { SqliteDatabase } from "@earendil-works/chord/sqlite";
 import type { ToolExecutionResult } from "@earendil-works/pi-durable";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { MCP_CONFIG, type McpConfig, type McpLimits, type McpServerConfig } from "./config";
 import type { McpAuthority } from "./access";
@@ -18,8 +19,8 @@ CREATE TABLE IF NOT EXISTS mcp_approvals(
 CREATE INDEX IF NOT EXISTS mcp_approvals_scope ON mcp_approvals(scope,created_at);
 CREATE TABLE IF NOT EXISTS mcp_invocations(id TEXT PRIMARY KEY,payload_digest TEXT NOT NULL,status TEXT NOT NULL,result_json TEXT,approval_id TEXT);
 `;
-export type McpGrant = { scope: string; server: string; tools: string[]; resourceAllow: string[]; actors: string[]; expiresAt: number | null; revision: string; serverRevision?: string };
-export type McpGrantInput = Omit<McpGrant, "scope" | "server" | "revision" | "serverRevision">;
+export type McpGrant = McpGrantInput & { scope: string; server: string; revision: string; serverRevision?: string };
+export type McpGrantInput = Static<typeof GrantInput>;
 export type McpApproval = {
  id: string; scope: string; actor: string; generation: number; reply_channel: "web" | "qq"; server_id: string;
  tool_name: string; contract: string; args_json: string; authority_json: string; operation_id: string; payload_digest: string;
@@ -31,7 +32,7 @@ type Claim = { kind: "execute"; id: string } | { kind: "result"; result: ToolExe
 export class McpPolicyError extends Error {
  constructor(readonly code: "invalid" | "not_found" | "conflict" | "denied") { super(`mcp_policy:${code}`); }
 }
-const GrantInput = Type.Object({ tools: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: 200, uniqueItems: true }),
+export const GrantInput = Type.Object({ environments: Type.Optional(EnvIdsSchema), environmentApproval: Type.Optional(Type.Union([Type.Literal("required"), Type.Literal("none")])), tools: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: 200, uniqueItems: true }),
  resourceAllow: Type.Array(Type.String({ minLength: 1, maxLength: 2048 }), { maxItems: 100, uniqueItems: true }),
  actors: Type.Array(Type.String({ pattern: "^(?:[1-9][0-9]{0,19}|admin:web|\\*)$" }), { minItems: 1, maxItems: 100, uniqueItems: true }),
  expiresAt: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]) }, { additionalProperties: false });
@@ -92,6 +93,7 @@ export class McpPolicyStore {
    const previous = await tx.get<{ revision: string }>("SELECT revision FROM mcp_access WHERE scope=? AND server_id=?", scope, serverId);
    if ((previous?.revision ?? "none") !== expected) throw new McpPolicyError("conflict");
    const payload = { scope, server: serverId, tools: [...input.tools].sort(), resourceAllow: [...input.resourceAllow].sort(), actors: [...input.actors].sort(), expiresAt: input.expiresAt,
+    ...(input.environments ? { environments: [...input.environments].sort() } : {}), ...(input.environmentApproval ? { environmentApproval: input.environmentApproval } : {}),
     ...(server.access.revision ? { serverRevision: server.access.revision } : {}) };
    const grant = { ...payload, revision: digest(payload).slice(0, 16) };
    await tx.run("UPDATE mcp_approvals SET status='rejected',decided_by='grant_changed',decided_at=? WHERE scope=? AND server_id=? AND status IN ('pending','approved')", this.now(), scope, serverId);
@@ -106,6 +108,18 @@ export class McpPolicyStore {
   const grant = await this.grant(authority.scope, server.id);
   return !!grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && (grant.actors.includes("*") || grant.actors.includes(authority.actor))
    && (tool !== undefined ? grant.tools.includes(tool) : uri !== undefined ? grant.resourceAllow.some(prefix => uri.startsWith(prefix)) : grant.resourceAllow.length > 0);
+ }
+ async environments(authority: McpAuthority, server: McpServerConfig): Promise<EnvironmentAccess> {
+  if (authority.scope === 'owner') return authority.owner ? { kind: 'all' } : noEnvironments();
+  const grant = await this.grant(authority.scope, server.id);
+  return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now())
+    && (grant.actors.includes('*') || grant.actors.includes(authority.actor))
+    ? { kind: 'selected', envIds: grant.environments ?? [] } : noEnvironments();
+ }
+ async requiresApproval(authority: McpAuthority, server: McpServerConfig, tool: string): Promise<boolean> {
+  if (authority.owner) return false;
+  if (!isEnvironmentTool(tool)) return true;
+  return (await this.grant(authority.scope, server.id))?.environmentApproval !== 'none';
  }
  async resourcePrefixes(authority: McpAuthority, server: McpServerConfig): Promise<string[]> {
   if (authority.scope === "owner") return authority.owner && authority.kind !== "event" ? server.resourceAllow : [];
