@@ -34,9 +34,10 @@ export class AgentReadView {
     await this.initialize();
     await this.bindNamespace(thread);
     type ChatRow = { id: string; role: "user" | "assistant"; source: "qq" | "web"; name: string; text: string; at: number; status: string | null; turnId: string | null; assets_json: string };
+    // 投影数值列没有整数类型亲和性；rowid 保留源消息主键，拼接后可原样回传增量查询。
     const rows = await this.database.all<ChatRow>(`
       SELECT * FROM (
-        SELECT 'qq:' || m.id AS id, CASE WHEN m.is_self=1 THEN 'assistant' ELSE 'user' END AS role,
+        SELECT 'qq:' || m.rowid AS id, CASE WHEN m.is_self=1 THEN 'assistant' ELSE 'user' END AS role,
           'qq' AS source,m.nickname AS name,m.text,m.time * 1000 AS at,i.status,'[]' AS assets_json,
           COALESCE(i.turn_id,(SELECT turn_id FROM outbox WHERE message_id=m.message_id ORDER BY id DESC LIMIT 1)) AS turnId
           FROM messages m LEFT JOIN inbound i ON i.message_id=(SELECT message_id FROM inbound WHERE platform_message_id=m.message_id AND user_id=m.user_id AND chat_kind || ':' || chat_id=m.scope ORDER BY rowid DESC LIMIT 1)

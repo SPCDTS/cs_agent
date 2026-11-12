@@ -4,6 +4,7 @@ import { fauxProvider, fauxToolCall, fauxAssistantMessage, type FauxResponseFact
 import { getCurrentTools, getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { MODEL_PROVIDERS } from "../src/models";
 import worker from "../src/index";
+import type { AgentReadView } from "../src/requests/view";
 import { input, connect, action, reply } from "./helpers";
 const sockets: WebSocket[] = [];
 afterEach(async () => { vi.restoreAllMocks(); sockets.splice(0).forEach(s=>s.close()); await reset(); });
@@ -100,4 +101,35 @@ describe("web chat continues QQ",()=>{
       expect(state.storage.sql.exec<{reply_channel:string}>("SELECT reply_channel FROM inbound WHERE kind='subagent'").one().reply_channel).toBe("web");
     });
   });
+});
+
+it("QQ 排队消息经展示副本读取后可原样用于增量查询，并沿用同一 ID 更新终态",async()=>{
+  const key="owner",sourceThread=env.THREAD.getByName(key);
+  let started=false,release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  fake(async()=>{started=true;await gate;return fauxAssistantMessage("核对完成");});
+  const running=sourceThread.submit(input(1,"等待核对的 QQ 消息",10000001));
+  const get=async(query="")=>worker.fetch(new Request("https://test/admin/threads/"+key+"/chat"+query,{
+    headers:{Authorization:"Bearer test"},
+  }),{...env,ADMIN_TOKEN:"test"});
+  try{
+    await expect.poll(()=>started).toBe(true);
+    await sourceThread.syncAdminView(key);
+    const response=await get();expect(response.status).toBe(200);
+    const first=await response.json<Awaited<ReturnType<AgentReadView["chatView"]>>>();
+    const queued=first.messages.filter(message=>message.status==="queued");
+    expect(queued).toHaveLength(1);
+    expect(queued[0].id).toMatch(/^qq:\d+$/);
+    const source=await sourceThread.chatView(key);
+    expect(queued[0].id).toBe(source.messages.find(message=>message.status==="queued")?.id);
+    const params=new URLSearchParams({after:String(Math.max(...first.messages.map(message=>message.at))+1)});
+    queued.forEach(message=>params.append("pending",message.id));
+    const deltaResponse=await get("?"+params);expect(deltaResponse.status).toBe(200);
+    const delta=await deltaResponse.json<Awaited<ReturnType<AgentReadView["chatView"]>>>();
+    expect(delta.delta).toBe(true);expect(delta.messages).toEqual(queued);
+    release();await running;await sourceThread.syncAdminView(key);
+    const completedResponse=await get("?"+params);expect(completedResponse.status).toBe(200);
+    const completed=await completedResponse.json<Awaited<ReturnType<AgentReadView["chatView"]>>>();
+    expect(completed.messages).toEqual([expect.objectContaining({id:queued[0].id,status:"done"})]);
+  }finally{release();await running;}
 });
