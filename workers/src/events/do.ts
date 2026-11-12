@@ -62,6 +62,7 @@ export class EventsDO extends DurableObject<Env> {
     this.sql.exec(SCHEMA);
     this.githubConnections = new GitHubConnections(this.ctx.storage,env, () => this.github.reauthorize());
     this.github = new GitHubInbox(this.ctx.storage,{
+      authorization:(installationId,repositoryId)=>this.githubConnections.authorization(installationId,repositoryId),
       authorized:(installationId,repositoryId)=>this.githubConnections.authorized(installationId,repositoryId),
       related:delivery=>this.githubConnections.related(delivery),
       lifecycle:delivery=>this.githubConnections.lifecycle(delivery),
@@ -228,7 +229,7 @@ export class EventsDO extends DurableObject<Env> {
     if (!row || !row.enabled || row.paused) return;
     const settings = this.settings(row);
     if (id === "github") this.sql.exec("UPDATE event_held SET reason='merge' WHERE source='github' AND input_key IS NULL AND reason='budget'");
-    const held = this.sql.exec<HeldRow>("SELECT * FROM event_held WHERE source = ? AND input_key IS NULL ORDER BY received_at, rowid", id).toArray();
+    const held = this.sql.exec<HeldRow>("SELECT * FROM event_held WHERE source = ? AND input_key IS NULL ORDER BY received_at, rowid", id).toArray().filter(item => id !== "github" || this.github.ready(item.key));
     const pending = held.filter(item => item.reason !== "budget");
     let extras = held.filter(item => item.reason === "budget");
     const first = pending[0];
@@ -266,11 +267,13 @@ export class EventsDO extends DurableObject<Env> {
     const run = this.sql.exec<RunRow>("SELECT * FROM event_run WHERE input_key = ?", inputKey).toArray()[0];
     const owner = ownerIds(this.env)[0];
     if (!rows.length || !run || !owner) return;
+    if (id === "github" && rows.some(item => !this.github.ready(item.key))) return;
     const events = rows.filter(item => item.reason !== "budget").map(item => JSON.parse(item.event_json) as ExternalEvent);
     const selfId = (await this.env.BRIDGE.getByName("napcat").status().catch(() => undefined))?.selfId ?? "";
     const text = renderEventInput(id, events, rows.length - events.length, run.delivered_at);
     const input: InboundInput = { kind: "event", messageId: inputKey, selfId, userId: owner, nickname: "", target: { kind: "private", userId: owner },
       text, routeText: "", time: Math.floor(run.delivered_at / 1000), mentionedSelf: false, replyToId: null, imageCount: 0 };
+    if (id === "github" && rows.some(item => !this.github.ready(item.key))) return;
     try { await this.env.THREAD.getByName("owner").deliverEvent(input); }
     catch {
       console.error({ event: "event_delivery_failed", source: id, key: inputKey });
@@ -324,6 +327,7 @@ export class EventsDO extends DurableObject<Env> {
           const oldest = this.sql.exec<{ at: number }>("SELECT MIN(delivered_at) AS at FROM event_run WHERE source='github' AND delivered_at > ?", now - HOUR).one();
           due = Math.max(due, oldest.at + HOUR + 1);
         }
+        if (id === "github" && !this.github.ready(first.key)) due = Math.max(due, now + MINUTE);
         times.push(due);
       }
     }
@@ -335,14 +339,20 @@ export class EventsDO extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
+    const sync = this.githubConnections.needsSync() ? this.githubConnections.sync() : Promise.resolve();
     await this.renewWatch();
+    await this.flush();
+    await sync;
     await this.flush();
   }
 
   /** Cron 入口：间隔未到的来源跳过拉取，但仍检查 watch 续期、合并到期与对账。 */
   async tick(): Promise<void> {
-    if (this.githubConnections.configured()) this.ctx.waitUntil(this.githubConnections.sync().catch(() => { console.error({event:"github_sync_failed"}); }));
-    for (const id of this.sources.keys()) await this.poll(id);
+    const sync = this.githubConnections.configured() ? this.githubConnections.sync() : Promise.resolve();
+    for (const id of this.sources.keys()) {
+      if (id === "github") await sync;
+      await this.poll(id);
+    }
   }
 
   private watchTopic(): string | undefined {

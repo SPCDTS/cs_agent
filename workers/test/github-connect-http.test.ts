@@ -1,3 +1,4 @@
+import { GitHubConnections } from "../src/github/connections";
 import { CONTROL_LIMIT, NOISE_LIMIT } from "../src/github/inbox";
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -653,5 +654,180 @@ it("PR1 follow-up a failed business alarm never ACKs and Cron recovers the commi
   expect(recovered.githubReceipt("failed-wake")?.state).toBe("held");
   expect(await ctx.storage.getAlarm()).not.toBeNull();
   expect(ctx.storage.sql.exec("SELECT 1 FROM github_receipt").toArray()).toHaveLength(1);
+ });
+});
+
+function expireInstallationProofs(ctx:DurableObjectState) {
+ for(const row of ctx.storage.sql.exec<{id:number;value:string}>("SELECT id,value FROM github_installations").toArray()){
+  const value=JSON.parse(row.value);value.until=Date.now()-1;
+  ctx.storage.sql.exec("UPDATE github_installations SET value=? WHERE id=?",JSON.stringify(value),row.id);
+ }
+}
+it.each(["held","enqueued"] as const)("PR1 blocking expired proof survives reconstruction without suppressing %s backlog",async state=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"proof-recovery");
+  if(state==="enqueued")ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='proof-run' WHERE delivery_id='proof-recovery'");
+  expireInstallationProofs(ctx);
+  const recovered=new EventsDO(ctx,e);
+  expect(recovered.githubReceipt("proof-recovery")?.state).toBe(state);
+  expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toHaveLength(1);
+ });
+});
+it("PR1 blocking expired proof returns wait at claim rather than permanently suppressing",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"proof-claim");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='proof-claim-run' WHERE delivery_id='proof-claim'");
+  expireInstallationProofs(ctx);
+  expect(i.claimGitHubRun("proof-claim-run")).toBe("wait");
+  expect(i.githubReceipt("proof-claim")?.state).toBe("enqueued");
+ });
+});
+it("PR1 blocking successful refresh after proof expiry retains authorized held work",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"proof-refresh");
+  expireInstallationProofs(ctx);
+  await i.syncGitHubConnect(7);
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect(i.githubReceipt("proof-refresh")?.state).toBe("held");
+ });
+});
+it("PR1 blocking reconnect after proof expiry keeps work still inside the current intersection",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"proof-complete");
+  expireInstallationProofs(ctx);
+  await connect(e);
+  expect(i.githubReceipt("proof-complete")?.state).toBe("held");
+ });
+});
+it("PR1 blocking selected known installation can retain new stale arrivals but cannot execute them",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);expireInstallationProofs(ctx);
+  expect((await webhook(e,payload(),"proof-new")).status).toBe(202);
+  expect(i.githubReceipt("proof-new")?.state).toBe("held");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='proof-new-run' WHERE delivery_id='proof-new'");
+  expect(i.claimGitHubRun("proof-new-run")).toBe("wait");
+ });
+});
+it.each(["network","timeout","user-5xx","user-installation-5xx","app-installation-5xx","refresh-5xx"])(
+ "PR1 blocking transient %s retains credentials and backlog while withholding permits",async mode=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"transient-pending");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='transient-run' WHERE delivery_id='transient-pending'");
+  if(mode==="refresh-5xx")await expireUser(ctx,7);
+  const credential=ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_identities WHERE id=7").one().value;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   const path=new URL(String(input)).pathname;
+   const target=mode==="user-installation-5xx"?"/user/installations/456/repositories":
+    mode==="app-installation-5xx"?"/app/installations/456":mode==="refresh-5xx"?"/login/oauth/access_token":"/user";
+   if(path===target){
+    if(mode==="network")throw new TypeError("synthetic_network_failure");
+    if(mode==="timeout")throw new DOMException("synthetic_timeout","AbortError");
+    return Response.json({error:"temporary"},{status:503});
+   }
+   return native(input,init);
+  });
+  await i.syncGitHubConnect(7);
+  expect(i.githubConnectionsView().identities.map(u=>u.id)).toEqual([7]);
+  expect(ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_identities WHERE id=7").one().value).toBe(credential);
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).not.toBe("revoked");
+  expect(i.githubReceipt("transient-pending")?.state).toBe("enqueued");
+  expect(i.claimGitHubRun("transient-run")).toBe("wait");
+ });
+});
+it("PR1 blocking confirmed user rejection still revokes rather than treating rejection as stale",async()=>{
+ const gh=mockGitHub();await harness(async(e,i)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"confirmed-revoked");
+  gh.revoked.add(7);await i.syncGitHubConnect(7);
+  expect(i.githubConnectionsView().identities).toEqual([]);
+  expect(i.githubReceipt("confirmed-revoked")?.state).toBe("suppressed");
+ });
+});
+it("PR1 blocking tick waits for GitHub verification before GitHub polling but not Gmail polling",async()=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i)=>{
+  await connect(e);await enable(i);
+  let release!:()=>void,enter!:()=>void,first=true,gmailPolled=false,githubPolled=false;
+  const gate=new Promise<void>(r=>release=r),entered=new Promise<void>(r=>enter=r);
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URL(String(input)).pathname==="/user"&&first){first=false;enter();await gate;}
+   return native(input,init);
+  });
+  const original=GitHubConnections.prototype.sync;let synchronized:Promise<void>|undefined;
+  vi.spyOn(GitHubConnections.prototype,"sync").mockImplementation(function(this:GitHubConnections,...args){
+   synchronized=original.apply(this,args);return synchronized;
+  });
+  vi.spyOn(i,"poll").mockImplementation(async id=>{
+   if(id==="gmail")gmailPolled=true;
+   if(id==="github")githubPolled=true;
+  });
+  const tick=i.tick();
+  try {
+   await entered;
+   expect(gmailPolled).toBe(true);
+   expect(githubPolled).toBe(false);
+  } finally {release();await tick;await synchronized;}
+  expect(githubPolled).toBe(true);
+ });
+});
+
+it("PR1 repair persists backoff across reconstruction and resumes only after revalidation",async()=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"retry-pending");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='retry-run' WHERE delivery_id='retry-pending'");
+  gh.fetcher.mockImplementation(async()=>Response.json({error:"temporary"},{status:503}));
+  await i.syncGitHubConnect(7);
+  expect(i.claimGitHubRun("retry-run")).toBe("wait");
+  const recovered=new EventsDO(ctx,e);
+  vi.spyOn(recovered,"poll").mockResolvedValue();
+  gh.fetcher.mockImplementation(native);gh.fetcher.mockClear();
+  await recovered.tick();
+  expect(gh.fetcher).not.toHaveBeenCalled();
+  expect(recovered.claimGitHubRun("retry-run")).toBe("wait");
+  for(const row of ctx.storage.sql.exec<{id:number;value:string}>("SELECT id,value FROM github_installations").toArray()){
+   const value=JSON.parse(row.value);value.retryAt=0;
+   ctx.storage.sql.exec("UPDATE github_installations SET value=? WHERE id=?",JSON.stringify(value),row.id);
+  }
+  await recovered.tick();
+  expect(gh.fetcher).toHaveBeenCalled();
+  expect(recovered.claimGitHubRun("retry-run")).toBe("start");
+ });
+});
+it("PR1 repair rate limiting pauses only the affected installation without reviving revoked work",async()=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  await webhook(e,payload(456),"limited");await webhook(e,payload(789),"healthy");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key=delivery_id");
+  gh.fetcher.mockImplementation(async(input,init)=>new URL(String(input)).pathname==="/app/installations/456"
+   ?new Response("rate limited",{status:403,headers:{"x-ratelimit-remaining":"0"}}):native(input,init));
+  await i.syncGitHubConnect(7);
+  expect(i.claimGitHubRun("limited")).toBe("wait");
+  expect(i.claimGitHubRun("healthy")).toBe("start");
+  await webhook(e,{action:"suspend",installation:{id:456}},"explicit-revoke","installation");
+  expect(i.claimGitHubRun("limited")).toBe("suppressed");
+  gh.fetcher.mockImplementation(native);await i.syncGitHubConnect(7);
+  expect(i.githubReceipt("limited")?.state).toBe("suppressed");
+ });
+});
+it("PR1 repair a stale alarm preserves held work throughout slow verification",async()=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"slow-alarm");
+  expireInstallationProofs(ctx);
+  let release!:()=>void,enter!:()=>void,first=true;
+  const gate=new Promise<void>(r=>release=r),entered=new Promise<void>(r=>enter=r);
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URL(String(input)).pathname==="/user"&&first){first=false;enter();await gate;}
+   return native(input,init);
+  });
+  const alarm=i.alarm();
+  try {
+   await entered;
+   expect(i.githubReceipt("slow-alarm")?.state).toBe("held");
+   expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toHaveLength(1);
+  } finally {release();await alarm;}
+  expect(i.githubReceipt("slow-alarm")?.state).toBe("held");
  });
 });

@@ -46,3 +46,9 @@ event/delivery header 不在 HMAC 内，不能作为可信事件身份。生命�
 未知 body 在 owner 完成授权后仍受原噪声记录查重保护；TTL 或 FIFO 淘汰后可再次处理，但必须重新通过当前授权与显式仓库选择。测试覆盖 issues/repository/ping 三类未知 body、两种淘汰边界，以及失去选择时仍被抑制。
 
 收件事务完成后，只有新写入 held 的业务事件安排 alarm；噪声、ping、控制、过滤、重复、冲突及容量拒绝不新增/提前 alarm，原有其他来源 alarm 不被删除。控制撤销仍在事务内同步完成并经 storage.sync 后 ACK，不依赖 alarm。若业务已提交而安排 alarm 失败，返回 503，重试按已存在的 body 去重；Cron 重建持久 held 的调度，覆盖提交与安排唤醒之间的故障窗口。配置变更/恢复的主动唤醒保留。
+
+### Authorization freshness and retry
+
+Installation proofs expire after at most ten minutes. Expiry means wait, not revoke: the last verified repository intersection may admit bounded held receipts, but cannot permit enqueue or execution. Unknown bindings, explicit lifecycle revocation and confirmed authorization rejection deny immediately; suppressed receipts never revive. Cron awaits verification before GitHub polling while Gmail proceeds independently. Alarms refresh only stale proofs, and claim/recovery independently enforce the same three states.
+
+Transient network, timeout, server and explicit rate-limit failures retain encrypted credentials and bindings, invalidate freshness, and persist per-installation exponential retry delays (one to fifteen minutes). Explicit owner sync bypasses the delay. Successful refresh persists rotated tokens before further discovery; existing identity-generation and binding-generation checks prevent revoked/reconnected state from being overwritten by late results.

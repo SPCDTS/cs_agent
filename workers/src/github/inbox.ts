@@ -9,7 +9,7 @@ type Receipt = {
 };
 export class GitHubInbox {
   constructor(private readonly storage: DurableObjectStorage, private readonly app: {
-    authorized: (installationId:number,repositoryId:number)=>boolean; related:(delivery:GitHubDelivery)=>boolean; lifecycle:(delivery:GitHubDelivery)=>void;
+    authorization: (installationId:number,repositoryId:number)=>"allow"|"wait"|"deny"; authorized: (installationId:number,repositoryId:number)=>boolean; related:(delivery:GitHubDelivery)=>boolean; lifecycle:(delivery:GitHubDelivery)=>void;
   }) {
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS github_config (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL, revision INTEGER NOT NULL);
@@ -68,7 +68,7 @@ export class GitHubInbox {
   }
   private reason(row: Pick<Receipt, "installation_id" | "repository_id" | "event" | "action">): string | null {
     const config = this.snapshot().value;
-    if (!this.app.authorized(row.installation_id,row.repository_id)) return "installation_not_authorized";
+    if (this.app.authorization(row.installation_id,row.repository_id) === "deny") return "installation_not_authorized";
     if (!config.repositoryIds.some(r=>r.installationId===row.installation_id && r.repositoryId===row.repository_id)) return "repository_not_allowed";
     return config.selections.includes(row.event + (row.action ? "." + row.action : "")) ? null : "event_action_not_allowed";
   }
@@ -121,6 +121,10 @@ export class GitHubInbox {
       return {status:202,code:"received"};
     });
   }
+  ready(key: string): boolean {
+    const row = this.sql.exec<Receipt>("SELECT * FROM github_receipt WHERE event_key=?",key).toArray()[0];
+    return !!row && !this.reason(row) && row.state !== "suppressed" && this.app.authorization(row.installation_id,row.repository_id) === "allow";
+  }
   enqueued(keys: string[], inputKey: string) {
     for (const key of keys) this.sql.exec("UPDATE github_receipt SET state='enqueued',input_key=?,updated_at=? WHERE event_key=? AND state='held'", inputKey, Date.now(), key);
   }
@@ -130,10 +134,15 @@ export class GitHubInbox {
       const rows = this.sql.exec<Receipt>("SELECT * FROM github_receipt WHERE input_key=?", inputKey).toArray();
       // Historical permits cannot create new execution without current installation authority.
       // An operation already running cannot be undone, but a legacy/revoked row cannot resume a new turn.
-      if (rows.some(row=>!this.app.authorized(row.installation_id,row.repository_id))) {
+      if (rows.some(row=>this.app.authorization(row.installation_id,row.repository_id) === "deny")) {
         for (const row of rows) this.suppress(row.event_key,"installation_not_authorized");
         return "suppressed";
       }
+      if (rows.some(row => row.state === "suppressed")) {
+        for (const row of rows) this.suppress(row.event_key,"batch_revoked");
+        return "suppressed";
+      }
+      if (rows.some(row => this.app.authorization(row.installation_id,row.repository_id) === "wait")) return "wait";
       if (rows.some(row => row.state === "started" || row.state === "finished")) return "start";
       this.reauthorize();
       if (!rows.length || rows.some(row => row.state === "suppressed" || this.reason(row))) {

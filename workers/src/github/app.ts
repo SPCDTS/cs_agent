@@ -51,6 +51,7 @@ export class GitHubAppClient {
     return this.tokens(token);
   }
   private tokens(token: Record<string, unknown>): UserTokens {
+    if (["server_error","temporarily_unavailable"].includes(String(token.error))) throw new GitHubAppError("unavailable");
     if (typeof token.access_token !== "string" || !token.access_token || token.access_token.length > 4096 || token.token_type !== "bearer" || token.error
       || token.expires_in !== undefined && (typeof token.expires_in !== "number" || !Number.isFinite(token.expires_in) || token.expires_in <= 60)) throw new GitHubAppError("unauthorized");
     return { access: token.access_token, refresh: typeof token.refresh_token === "string" ? token.refresh_token : "",
@@ -127,7 +128,11 @@ export class GitHubAppClient {
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10_000);
     try {
       const response = await fetch(url, { ...init, redirect: "error", signal: controller.signal });
-      if (!response.ok) { void response.body?.cancel(); throw new GitHubAppError([401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable"); }
+      if (!response.ok) {
+        void response.body?.cancel();
+        const limited = response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after"));
+        throw new GitHubAppError(!limited && [401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable");
+      }
       if (!response.body) throw new GitHubAppError();
       const reader = response.body.getReader(); let size = 0; const parts: Uint8Array[] = [];
       try { while (true) { const part = await reader.read(); if (part.done) break; size += part.value.length;
