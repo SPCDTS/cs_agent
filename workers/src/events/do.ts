@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { GitHubConnections } from "../github/connections";
 import { GitHubInbox } from "../github/inbox";
 import { DEFAULT_GITHUB, type GitHubDelivery } from "../github/model";
 import type { Env } from "../env";
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS gmail_send_receipts (key TEXT PRIMARY KEY, message_id
 export class EventsDO extends DurableObject<Env> {
   private readonly sql = this.ctx.storage.sql;
   private readonly github: GitHubInbox;
+  private readonly githubConnections: GitHubConnections;
   private readonly auth: GmailAuth;
   private readonly gmail: GmailClient;
   private readonly sources: ReadonlyMap<string, EventSource>;
@@ -58,11 +60,27 @@ export class EventsDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql.exec(SCHEMA);
-    this.github = new GitHubInbox(this.ctx.storage);
+    this.githubConnections = new GitHubConnections(this.ctx.storage,env, () => this.github.reauthorize());
+    this.github = new GitHubInbox(this.ctx.storage,env.GITHUB_MODE === "app" ? {
+      authorized:(installationId,repositoryId)=>this.githubConnections.authorized(installationId,repositoryId),
+      lifecycle:delivery=>{
+        if(delivery.event==="github_app_authorization" && delivery.lifecycleUserId) this.githubConnections.disconnectUser(delivery.lifecycleUserId);
+        else if(delivery.installationId) this.githubConnections.invalidate(delivery.installationId);
+      },
+    }:undefined);
     this.auth = new GmailAuth(this.sql, env);
     this.gmail = new GmailClient(this.auth);
-    this.sources = new Map<string, EventSource>([["gmail", { id: "gmail", configured: () => this.auth.configured(), poll: (cursor, limit, signal) => this.gmail.events(cursor, limit, signal) }], ["github", { id: "github", configured: () => !!env.GITHUB_WEBHOOK_SECRET }]]);
+    this.sources = new Map<string, EventSource>([["gmail", { id: "gmail", configured: () => this.auth.configured(), poll: (cursor, limit, signal) => this.gmail.events(cursor, limit, signal) }], ["github", { id: "github", configured: () => env.GITHUB_MODE === "app" ? this.githubConnections.configured() : !!env.GITHUB_WEBHOOK_SECRET }]]);
     for (const id of this.sources.keys()) this.sql.exec("INSERT OR IGNORE INTO event_source (id, settings_json) VALUES (?, ?)", id, JSON.stringify(id === 'github' ? DEFAULT_GITHUB.settings : DEFAULT_SETTINGS));
+  }
+
+  githubConnectionsView() { return this.githubConnections.snapshot(); }
+  startGitHubConnect(admin:string,browser:string) { return this.githubConnections.start(admin,browser); }
+  completeGitHubConnect(state:string,code:string,admin:string,browser:string) { return this.githubConnections.complete(state,code,admin,browser); }
+  async syncGitHubConnect(userId?:number) { await this.githubConnections.sync(userId,true); return this.githubConnections.snapshot(); }
+  disconnectGitHubConnect(kind:"user"|"installation",id:number) {
+    if(kind==="user") this.githubConnections.disconnectUser(id); else this.githubConnections.disconnectInstallation(id);
+    return this.githubConnections.snapshot();
   }
 
   async receiveGitHub(delivery: GitHubDelivery) {
@@ -321,6 +339,7 @@ export class EventsDO extends DurableObject<Env> {
 
   /** Cron 入口：间隔未到的来源跳过拉取，但仍检查 watch 续期、合并到期与对账。 */
   async tick(): Promise<void> {
+    if (this.env.GITHUB_MODE === "app") this.ctx.waitUntil(this.githubConnections.sync().catch(() => { console.error({event:"github_sync_failed"}); }));
     for (const id of this.sources.keys()) await this.poll(id);
   }
 
@@ -410,7 +429,7 @@ export class EventsDO extends DurableObject<Env> {
       key: run.input_key, source: run.source, events: (JSON.parse(run.keys_json) as unknown[]).length,
       deliveredAt: run.delivered_at, status: run.status, endedAt: run.ended_at }));
     const watch = this.sql.exec<{ expiration: number }>("SELECT expiration FROM gmail_watch WHERE id = 'owner'").toArray()[0];
-    return { sources, runs, github: { ...this.github.status(), configured: !!this.env.GITHUB_WEBHOOK_SECRET }, watch: { topic: !!this.watchTopic(), expiration: watch?.expiration ?? null } };
+    return { sources, runs, github: { ...this.github.status(), mode: this.env.GITHUB_MODE === "app" ? "app" as const : "manual" as const, connections: this.githubConnections.snapshot(), configured: this.env.GITHUB_MODE === "app" ? this.githubConnections.configured() : !!this.env.GITHUB_WEBHOOK_SECRET }, watch: { topic: !!this.watchTopic(), expiration: watch?.expiration ?? null } };
   }
 
   async setPaused(id: string, paused: boolean): Promise<boolean> {

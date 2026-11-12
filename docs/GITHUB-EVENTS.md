@@ -1,3 +1,5 @@
+> 统一 GitHub App、多账号/组织安装、长期授权与迁移见 docs/GITHUB-APP-DESIGN.md。本文的逐仓库 Webhook 仅适用于 legacy manual 模式。
+
 # GitHub webhook event source
 
 ## Scope and safety

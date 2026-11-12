@@ -3,11 +3,13 @@ import { suppressed } from "../events/model";
 
 export const PIN_LIMIT = 1000, RECEIPT_LIMIT = 5000, PENDING_LIMIT = 200, RETENTION_MS = 30 * 86400_000;
 type Receipt = {
-  delivery_id: string; body_hash: string; repository: string; repository_id: number; event: string; action: string;
+  installation_id: number; delivery_id: string; body_hash: string; repository: string; repository_id: number; event: string; action: string;
   received_at: number; updated_at: number; state: string; reason: string | null; event_key: string; input_key: string | null; outcome: string | null;
 };
 export class GitHubInbox {
-  constructor(private readonly storage: DurableObjectStorage) {
+  constructor(private readonly storage: DurableObjectStorage, private readonly app?: {
+    authorized: (installationId:number,repositoryId:number)=>boolean; lifecycle:(delivery:GitHubDelivery)=>void;
+  }) {
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS github_config (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL, revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS github_repo_pin (name TEXT PRIMARY KEY, repository_id INTEGER NOT NULL);
@@ -17,6 +19,8 @@ export class GitHubInbox {
         state TEXT NOT NULL, reason TEXT, event_key TEXT NOT NULL UNIQUE, input_key TEXT, outcome TEXT);
       CREATE INDEX IF NOT EXISTS github_receipt_input ON github_receipt(input_key);
     `);
+    if (!this.sql.exec<{name:string}>("PRAGMA table_info(github_receipt)").toArray().some(c=>c.name==="installation_id"))
+      this.sql.exec("ALTER TABLE github_receipt ADD COLUMN installation_id INTEGER NOT NULL DEFAULT 0");
     // INSERT OR IGNORE is atomic; an explicit [] is data, never treated as missing.
     this.sql.exec("INSERT OR IGNORE INTO github_config(id,value,revision) VALUES(1,?,1)", JSON.stringify(DEFAULT_GITHUB));
   }
@@ -27,7 +31,7 @@ export class GitHubInbox {
   }
   put(value: unknown, expectedRevision: string) {
     const parsed = parseGitHubConfig(value);
-    if (!parsed) return { ok: false as const, error: "invalid" as const };
+    if (!parsed || this.app && parsed.repositoryIds?.some(r=>!this.app!.authorized(r.installationId,r.repositoryId))) return { ok: false as const, error: "invalid" as const };
     return this.storage.transactionSync(() => {
       const current = this.snapshot();
       if (current.revision !== expectedRevision) return { ok: false as const, error: "conflict" as const, current };
@@ -38,8 +42,13 @@ export class GitHubInbox {
       return { ok: true as const, current: this.snapshot() };
     });
   }
-  private reason(row: Pick<Receipt, "repository" | "repository_id" | "event" | "action">): string | null {
+  private reason(row: Pick<Receipt, "installation_id" | "repository" | "repository_id" | "event" | "action">): string | null {
     const config = this.snapshot().value, name = row.repository.toLowerCase();
+    if (this.app) {
+      if (!this.app.authorized(row.installation_id,row.repository_id)) return "installation_not_authorized";
+      if (!config.repositoryIds?.some(r=>r.installationId===row.installation_id && r.repositoryId===row.repository_id)) return "repository_not_allowed";
+      return config.selections.includes(row.event + (row.action ? "." + row.action : "")) ? null : "event_action_not_allowed";
+    }
     if (!config.repositories.some(repo => repo.toLowerCase() === name)) return "repository_not_allowed";
     const pin = this.sql.exec<{ repository_id: number }>("SELECT repository_id FROM github_repo_pin WHERE name=?", name).toArray()[0];
     if (pin && pin.repository_id !== row.repository_id) return "repository_id_changed";
@@ -64,19 +73,20 @@ export class GitHubInbox {
       if (this.sql.exec("SELECT 1 FROM github_receipt WHERE body_hash=?", delivery.bodyHash).toArray().length) return { status: 200, code: "body_duplicate" };
       this.prune();
       if (this.count() >= RECEIPT_LIMIT) return { status: 503, code: "receipt_capacity" };
-      const row = { repository: delivery.repository, repository_id: delivery.repositoryId, event: delivery.event, action: delivery.action };
-      let reason = delivery.normalized ? this.reason(row) : "ping";
+      const row = { installation_id:delivery.installationId ?? 0, repository: delivery.repository, repository_id: delivery.repositoryId, event: delivery.event, action: delivery.action };
+      let reason = delivery.lifecycle ? "lifecycle" : delivery.normalized ? this.reason(row) : "ping";
       if (!reason && delivery.normalized && suppressed(this.snapshot().value.settings, delivery.normalized)) reason = "source_filter";
       if (!reason && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM github_receipt WHERE state IN ('held','enqueued','started')").one().n >= PENDING_LIMIT)
         return { status: 503, code: "pending_capacity" };
-      if (!reason && !this.sql.exec("SELECT 1 FROM github_repo_pin WHERE name=?", delivery.repository.toLowerCase()).toArray().length
+      if (!this.app && !reason && !this.sql.exec("SELECT 1 FROM github_repo_pin WHERE name=?", delivery.repository.toLowerCase()).toArray().length
         && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM github_repo_pin").one().n >= PIN_LIMIT)
         return { status: 503, code: "pin_capacity" };
       const key = "evt_github_" + delivery.bodyHash;
-      if (!reason) this.sql.exec("INSERT OR IGNORE INTO github_repo_pin(name,repository_id) VALUES(?,?)", delivery.repository.toLowerCase(), delivery.repositoryId);
-      this.sql.exec(`INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,reason,event_key)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)`, delivery.deliveryId, delivery.bodyHash, delivery.repository, delivery.repositoryId, delivery.event, delivery.action,
-        delivery.receivedAt, delivery.receivedAt, reason ? "suppressed" : "held", reason, key);
+      if (!this.app && !reason) this.sql.exec("INSERT OR IGNORE INTO github_repo_pin(name,repository_id) VALUES(?,?)", delivery.repository.toLowerCase(), delivery.repositoryId);
+      this.sql.exec(`INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,reason,event_key,installation_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, delivery.deliveryId, delivery.bodyHash, delivery.repository, delivery.repositoryId, delivery.event, delivery.action,
+        delivery.receivedAt, delivery.receivedAt, reason ? "suppressed" : "held", reason, key, delivery.installationId ?? 0);
+      if (delivery.lifecycle) this.app?.lifecycle(delivery);
       if (!reason) this.sql.exec("INSERT INTO event_held(key,source,event_json,received_at,reason) VALUES(?,'github',?,?,'merge')",
         key, JSON.stringify(delivery.normalized), delivery.receivedAt);
       return { status: 202, code: reason ? "suppressed" : "received" };

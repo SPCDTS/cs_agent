@@ -28,6 +28,14 @@ const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> 
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url), path = url.pathname;
+    if (request.method === "GET" && ["/admin/github/oauth/callback","/admin/github/callback"].includes(path)) {
+      const nonce=crypto.randomUUID();
+      const payload=JSON.stringify({state:url.searchParams.get("state")?.slice(0,100) ?? "",code:url.searchParams.get("error") ? "" : url.searchParams.get("code")?.slice(0,512) ?? ""}).replace(/</g,String.fromCharCode(92)+"u003c");
+      const script=path.endsWith("/oauth/callback") ? "sessionStorage.setItem('github-oauth-result',"+JSON.stringify(payload)+");" : "";
+      return new Response("<!doctype html><meta charset=utf-8><title>GitHub</title><script nonce='"+nonce+"'>history.replaceState(null,'','/admin');"+script+"location.replace('/admin');</script>",{headers:{
+        "Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store","Referrer-Policy":"no-referrer",
+        "Content-Security-Policy":"default-src 'none'; script-src 'nonce-"+nonce+"'; base-uri 'none'; frame-ancestors 'none'"}});
+    }
     if (request.method === "GET" && path === "/healthz") return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     const media = await handleMediaRequest(request, { bucket: env.ASSETS, authenticateAdmin: req => authenticated(req, env.ADMIN_TOKEN) });
     if (media) return media;
@@ -36,7 +44,7 @@ export default {
       try {
         const result = await Promise.race([
           (async () => {
-            const delivery = await readWebhook(request, env.GITHUB_WEBHOOK_SECRET);
+            const delivery = await readWebhook(request, env.GITHUB_MODE === "app" ? env.GITHUB_APP_WEBHOOK_SECRET : env.GITHUB_WEBHOOK_SECRET, env.GITHUB_MODE === "app");
             return env.EVENTS.getByName("main").receiveGitHub(delivery);
           })(),
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new WebhookError(503, "receipt_timeout")), 9000); }),

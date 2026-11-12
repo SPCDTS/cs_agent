@@ -42,7 +42,7 @@ test("new admin loadSources reaches typed GitHub config and receipts, paginates 
   const sources=el("div",{id:"sources"});
   el("main",{},[sources]); nodes.sources=sources;
   const expect=value=>({toBe:expected=>assert.equal(value,expected)});
-    const github={configured:true,count:11,capacity:100,pendingCapacity:100,pins:[],revision:"1",
+    const github={mode:"manual",connections:{configured:false,slug:"",identities:[],installations:[]},configured:true,count:11,capacity:100,pendingCapacity:100,pins:[],revision:"1",
       value:{repositories:["SPCDTS/cs_agent"],paused:false,selections:[],settings:{intervalS:60,mergeWindowS:0,budgetPerHour:10,filters:{requireLabels:[],excludeLabels:[],excludeSenders:[]}}},
       receipts:Array.from({length:11},(_,i)=>({delivery_id:"d"+i,received_at:i,repository:"a/b",event:"issues",action:"opened",state:"held",reason:null,outcome:null}))};
     const view={sources:[{id:"github",paused:false,degraded:false,cursor:null,lastPollAt:null,held:11,

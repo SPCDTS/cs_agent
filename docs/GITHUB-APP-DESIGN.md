@@ -1,71 +1,111 @@
-# 独立 GitHub App 接入：基础层与待完成集成
+# 独立 GitHub App：统一事件接入
 
-## 当前交付状态（不可作为完整功能发布）
+## 范围与入口
 
-本次只实现并测试 `github/app.ts` 与 `github/connection.ts` 基础原语；尚未接入 EventsDO、HTTP 路由、Webhook 或浏览器。
-原 PR 的 manual repo webhook 行为没有改变。不要把基础层测试通过解释为用户连接功能已完成，也不要现在创建 App 或迁移线上配置。
+面向同一个个人 owner，不是多租户平台。owner 可明确连接多个 GitHub 身份及其个人/组织安装；事件只进入 owner 私聊，不增加群路由、eventAllow 或外部命令权限。独立创建事件 App，**不要复用开发 VM 的 bot App 或凭据**。
 
-## 已实现的边界
+生产入口是 `GitHubConnections`（`github/connections.ts`）与 EventsDO。旧 `GitHubAppConnection` 单行基础原语保留历史测试，但不用于生产接入；旧单安装记录不会静默升级成权限。
 
-- 独立配置类型：非密钥 `GITHUB_APP_ID`、`GITHUB_APP_SLUG`、`GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CALLBACK_URL`；Worker secrets `GITHUB_APP_PRIVATE_KEY`、`GITHUB_APP_WEBHOOK_SECRET`、`GITHUB_APP_CLIENT_SECRET`。尚未加入 Env/管理台状态。
-- 私钥仅支持 PKCS#8 PEM（`BEGIN PRIVATE KEY`）；GitHub 下载的 PKCS#1 PEM 必须由运营方在受信环境转换成 PKCS#8。私钥不入库、不进日志/前端，也不复制开发 bot 的任何配置。
-- 服务端 RS256 JWT：iat 回退 60 秒，exp 距当前 540 秒。使用 App JWT 查询 installation，核验 id、app_id、suspended_at；再签发短期 installation token，读取实际授权仓库。
-- token 不持久化、不缓存；失败不回退到旧授权。API origin 固定，拒绝 redirect，不跟随 Link；单请求 10 秒，正文 1 MiB，最多 10 页/1000 仓库；不返回上游诊断。
-- 连接 state 使用两个随机 UUID；只存 SHA-256。绑定管理员身份上下文和浏览器 verifier，10 分钟有效，最多 20 个未过期状态。消费后才调用 GitHub，失败需重新发起；不携带线程或路由。
-- connection generation 防止旧异步 API 响应覆盖之后的吊销。同步/重连采用保守的先失效策略，调用者必须在同一 SQL 事务内吊销尚未取得执行许可的收件。
-- `GitHubAppConnection` 自身不是 HTTP 鉴权边界。调用者必须先通过 owner admin 鉴权，传入服务端确定的身份绑定，不能直接接受客户端声称的管理员身份。
+用户操作：
+1. 管理台 → 外部事件 → GitHub →「安装 / 调整 App 仓库授权」，在 GitHub 选择账号/组织与仓库。
+2. 返回管理台，点击「连接 / 添加 GitHub 身份」，完成 GitHub OAuth；回来后点击「确认连接刚授权的 GitHub 身份」。
+3. 服务端列举该身份可访问、属于本 App 且未暂停的安装，分别验证用户仓库和安装仓库，**按稳定仓库 ID 取交集**。其他 App、其他用户无权访问的私有仓库不进入视图。
+4. 在事件设置勾选安装下的仓库、既有事件动作，取消暂停并保存。仓库、安装、身份与收件列表每页 10 条。空列表表示不监听；分页及刷新保留打开中的草稿；CAS 冲突不会自动覆盖。
+5. 添加另一个身份需再次明确执行连接。不会替换已有其他身份；同一安装归属于先前明确关联的身份，换归属须先断开该安装。
+6. 独立断开安装或撤销身份。前者不影响其他安装；后者停用该身份全部安装。调整授权/暂停恢复后可点击「同步 / 恢复此身份安装」，不必每十分钟重新 OAuth。
 
-## 认证边界须明确
+管理 API（均须 owner admin Bearer；回调静态页例外）：
+- GET /admin/github/connections
+- POST /admin/github/connect/start：browser（64 位十六进制浏览器随机值）
+- POST /admin/github/connect/complete：state、code、browser
+- POST /admin/github/connect/sync：可选 userId
+- POST /admin/github/connect/disconnect：kind=user|installation、id
+- PUT /admin/github/config：expectedRevision 与 value；App 选择为 repositoryIds 数组，元素 installationId、repositoryId。
+- POST /github/webhook：唯一收件 URL，不使用 admin Bearer，以独立 App raw-body HMAC 验签。
 
-安装 setup callback 的 installation_id 及 setup_action 不能证明发起者的 GitHub 身份，**即使单 owner 也不得仅凭管理员登录和 App 归属绑定**。此前的单 owner 信任假设已删除。
+OAuth callback /admin/github/oauth/callback 和安装 setup /admin/github/callback 均已接线。公开回调页使用 nonce CSP、no-store、no-referrer，清理 URL，仅把有限长 code/state 暂存同浏览器 sessionStorage，再返回管理台。它不直接授予权限，不把管理员 token 放进 URL，不信任 setup 的 installation_id。真正消费发生在已认证 POST complete；成功/失败后前端清除暂存 code。
 
-绑定前必须完成独立事件 App 的 GitHub 用户 OAuth web flow：`start()` 返回固定 GitHub authorize URL，回调经 owner 管理员身份+浏览器 verifier+一次性 state 校验后，服务端 POST code/client ID/client secret 到固定 GitHub token endpoint。用户 token 仅存在当次调用内，用于有界分页 GET `/user/installations`，确认所选 installation ID 属于该用户、配置 App 且未暂停；随后再用 App JWT 查询安装、installation token 获取仓库。任何一步失败均不绑定。用户 token、refresh token 不入库、不返回前端；setup ID 仍只是待验证提示。
+## 一次性运营配置（本次未创建、未部署）
 
-用户授权 callback URL 固定为配置 origin 下 `/admin/github/oauth/callback`，与 setup URL `/admin/github/callback` 是两个不同入口。实际路由和浏览器接线仍待实现，不能把 URL 构造及 mocked code 交换当成已完成的浏览器流程。
-
-官方安全依据（父 agent 核验）：https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-setup-url
-
-## 后续必须完成（发布阻断）
-
-1. 管理台 POST start：已认证 owner + 浏览器 sessionStorage 随机 verifier；回调静态页只清理 URL 并回到管理台，再发起用户 OAuth，由已认证 POST complete 消费 state/code 并核验用户 installation 交集。不要通过 URL 传 admin token。
-2. Env 和安全状态视图接入；前端仅展示配置完整性、App slug、安装 ID、授权仓库，绝不展示私钥、JWT 或 installation token。
-3. GitHubInbox 改为 installation ID + repository ID 绑定；增加 repositoryIds 配置/CAS；管理台只列 API 授权仓库、每页 10 条、保留草稿、允许空列表。旧 repo name 不能自动升级成授权。
-4. Webhook raw HMAC 后在与业务事件相同的 body-hash 去重域内接收 lifecycle；不要按未签名的 event/delivery header 切换独立去重域。支持真实 installation/installation_repositories payload。
-5. lifecycle 只作失效/触发权威同步的信号，不能用旧 body 重放恢复授权；卸载/暂停/移除仓库与未执行积压吊销原子化。API 失败 fail closed；明确恢复、重复、乱序和 DO 重建策略。
-6. 执行许可前检查已验证的安装、授权仓库和失效代次。同步应优化为差异吊销，避免无变化同步也丢弃所有积压；当前基础原语刻意保守。
-7. 切入 App 模式后旧 manual webhook 必须拒收且不可静默回退。迁移需用户重连并重新选择仓库，禁止靠历史名称 pin 自动授权。
-8. 追加完整 HTTP mocked 契约、浏览器可达入口、生命周期/撤销/恢复收件、敏感信息、空列表 CAS 与旧 pump/Gmail 回归。
-
-## 目标用户流程（尚未接通）
-
-管理台「连接 GitHub」→ GitHub 安装专属 App 并选择授权仓库 → 返回管理台 → 完成 GitHub 用户授权并验证所选安装可访问 → 同步授权仓库 → 选择监听仓库/事件并保存启用。用户不逐仓库建立 webhook、不复制 secret。
-
-## 运营方将来一次设置（规划值，集成前不能使用）
-
-- 独立 App 名称、homepage、App ID、slug；只供本 owner 时限制安装范围。
+在 GitHub Settings → Developer settings → GitHub Apps 新建**独立事件 App**：
+- Homepage：管理台公开 HTTPS origin。
+- User authorization callback URL：`https://<PUBLIC_ORIGIN>/admin/github/oauth/callback`。
+- Setup URL：`https://<PUBLIC_ORIGIN>/admin/github/callback`。它不是 OAuth callback。
 - Webhook URL：`https://<PUBLIC_ORIGIN>/github/webhook`；启用 webhook，设置独立随机 secret。
-- Setup URL：计划 `https://<PUBLIC_ORIGIN>/admin/github/callback`（当前没有此路由）；不是 OAuth authorization callback。必须另外配置用户授权 Callback URL `https://<PUBLIC_ORIGIN>/admin/github/oauth/callback`，并配置独立事件 App client ID/client secret。
-- 最小仓库权限：Metadata read（隐含）；Issues read；Pull requests read；Contents read（push/releases）；Actions read（workflow_run）。不授予写权限或组织权限。
-- 订阅 issues、pull_request、release、push、workflow_run；installation 与 installation_repositories 生命周期按 GitHub App 的实际推送规则处理。后端与 UI 必须只开放已经支持的事件动作。
-- 不创建或复用开发 bot；没有真实独立 App，因此尚无真实认证或端到端成功证据。
+- 保持 user-to-server token expiration 启用。授权 URL 也请求 offline_access，以获取可轮换令牌。
+- 多账号/组织安装需允许目标账号安装（必要时选 Any account；不需要发布 Marketplace）。**允许其他人安装不等于允许进入本 owner**，未显式连接的安装默认抑制。
+- 最小 Repository permissions：Metadata read；Issues read；Pull requests read；Contents read（push/release）；Actions read（workflow_run）。不授予写权限或额外组织权限。
+- 订阅 issues、pull_request、release、push、workflow_run，以及 repository 生命周期。installation、installation_repositories、github_app_authorization 按 GitHub App 自动生命周期推送规则接收。业务动作仍以管理台既有 CHOICES 为限。
+- 用户必须自身有权查看仓库；组织 SSO、管理员审批及安装仓库选择仍由 GitHub 决定。
 
-本文件是开发交接说明，不替代现有可用功能文档。官方流程由父 agent 独立复核后再确定最终集成方案。
+Worker 非秘密配置：
+`GITHUB_MODE=app`、`GITHUB_APP_ID`、`GITHUB_APP_SLUG`、`GITHUB_APP_CLIENT_ID`、
+`GITHUB_APP_CALLBACK_URL=https://<PUBLIC_ORIGIN>/admin/github/oauth/callback`。
 
-## 本地验证记录
+只通过运行环境 secrets 配置：
+`GITHUB_APP_PRIVATE_KEY`、`GITHUB_APP_CLIENT_SECRET`、
+`GITHUB_APP_WEBHOOK_SECRET`、`GITHUB_APP_STORE_KEY`（独立随机 32 字节的 64 位十六进制主密钥）。
+不得把值放入源码、SQLite 明文、日志、截图或管理台。用部署工具的 secret 输入方式；本任务没有生成/读取真实凭据。
 
-- GitHub 定向：`npm --prefix workers test -- test/github-app.test.ts test/github-connection.test.ts test/github-events.test.ts test/github-pump.test.ts --maxWorkers=1`，4 文件/34 项通过，其中新增 14 项。
-- `npm run check`：Workers/browser/runner types 通过；Workers 全量 415 通过/1 失败。失败为未修改的 `group-coding.test.ts:114` 网页群聊回合等待 assistant 消息超时；单独重跑该文件仍为 6 通过/1 失败。没有宣称全量成功，也未证明这是基线问题。
-- 因 check 在 Workers 测试中止，另行执行 `npm run test:node`：Workers Node 17 通过/1 skip，runner 28 通过/2 skip，0 失败。skip 为 JS fork 子进程清理、独立桌面身份检查器、Hyper-V 来宾原生助手；没有运行真实 WSB/Hyper-V smoke。
-- 另行执行 `npm run build`：runner build 和 Worker deploy dry-run 成功，未部署。
-- 初次定向发现 TextDecoder 类型参数与测试 JWT 验证使用私钥的问题，已修复后重跑通过。初次日志重定向因 PowerShell 将 native stderr 当异常中断；改为 cmd 重定向后获得上述完整日志，未关闭校验或绕过 hook。
-- 真实独立 App 尚未创建，所有新认证测试为 API mocked 契约，不是端到端安装成功。
+私钥需 PKCS#8 PEM（BEGIN PRIVATE KEY）。GitHub 下载的 PKCS#1 私钥请在受信环境转换：
+`openssl pkcs8 -topk8 -nocrypt -in app.pem -out app-pkcs8.pem`。
+将转换结果作为 Worker secret，避免在终端日志打印；按运营方密钥管理流程处理临时文件。
 
-### 用户 OAuth 安全修正后的最终复验
+主密钥轮换前先暂停 GitHub 来源；轮换后立即同步使旧密文解密失败并 fail closed，重新连接身份后再恢复；本版本不提供双密钥在线迁移。备份须同时保护运行环境主密钥和 DO 持久数据，不把两者公开存放。
 
-按官方 setup URL 警告删除 App-only 绑定路径：`complete` 必须接受 code，先检查用户可访问安装再读仓库；缺少 `userVerified` 的旧基础层记录禁止直接 sync，必须重连。
-新增 code 交换、固定 OAuth URL、不返回 token、伪造/不可访问/cross-App/暂停安装、用户安装分页上限、拒绝绑定后不读仓库及旧绑定拒绝静默升级的测试。
+## 长期授权与安全边界
 
-最终 `npm run check` **退出 0**：65 个 Workers 文件/426 项全部通过；Workers/browser/runner types 全通过；Workers Node 17 通过/1 skip，runner 28 通过/2 skip；runner build 与 Worker dry-run 通过。另行 Node/build 复跑也退出 0。此前群网页超时在这次全量中通过，保留之前失败记录而不修改测试或扩大超时。
-OAuth 定向在最后一项旧绑定迁移测试加入前为 5 文件/43 项通过；该迁移测试随后包含在最终全量 426 项通过中。
-日志：`oauth-check.log`、`oauth-targeted-final.log`、`oauth-types-final.log`、`oauth-node.log`、`oauth-build.log`。
-这些结果仍只证明基础模块和回归；HTTP/浏览器完整 web flow 接线以及原任务余下的 App Webhook/UI 集成未完成，不可发布成完整功能。
+- 一次性 state 只存 SHA-256，绑定服务端管理员凭据摘要与浏览器随机值；服务端独立生成 32 字节 PKCE verifier，使用 S256，十分钟过期，最多 20 个待消费 state。state/verifier 同一事务消费，防跨浏览器、过期、重放。全局 epoch 防止进行中的旧授权在撤销后回写。
+- 每个 GitHub 身份独立保存 AES-256-GCM 密文，里面是必要 user access/refresh token 及期限。随机 IV，AAD 绑定用途、用户 ID、代次；密钥仅来自 GITHUB_APP_STORE_KEY。前端只得用户 ID/login、安装 ID、授权仓库和状态。
+- GitHub expiring access token 通常八小时；refresh token 通常六个月。access 到期前两分钟刷新，按身份 single-flight；新令牌加密落库前再次检查 epoch，不回退旧令牌。刷新远端成功但落库前崩溃可能使旧 refresh token 失效，此时重新 OAuth，不以 App 权限替代用户授权。
+- 如运营历史配置仍返回不失效 access token，本地最多保留一年；新授权主动请求 offline_access。失败或 key 解密失败不会放宽权限。
+- Cron 每五分钟后台复验用户身份、用户安装列表、用户仓库与安装仓库交集；授权快照最多十分钟且不超过 token 有效期。不是十分钟人工租约。过期时收件/执行许可 fail closed，过期积压在续期前抑制。后台同步不等待 GitHub 网络后才处理 Gmail/普通 owner 工作。
+- 用户级 API/刷新失败保守撤销该身份凭据和绑定，需要重新授权；单安装核验失败只停用该安装。网络故障可能造成可用性下降，这是刻意 fail closed，不使用旧权限兜底。
+- installation token 仅内存缓存最多四分钟，永不落库或传前端；使用前仍核验权威 installation 的 app_id/id/暂停状态。每次仓库交集重新读取 API，不能凭 App 拥有 installation 证明用户权限。
+- 固定 GitHub HTTPS origins，拒绝重定向、不跟随上游 Link；单次请求十秒、响应一 MiB，分页最多十页/1000 项。单身份最多发现 20 个本 App 安装，最多 20 个身份；超限拒绝而非截断后授权。API 错误不带远端诊断或 token。
+
+## 收件、生命周期与恢复
+
+- App 模式只使用 GITHUB_APP_WEBHOOK_SECRET；原始 body 有界 HMAC 验证后，持久 receipt 与 held 在同一 SQL 事务中写入，storage.sync 后才 ACK。
+- installationId + repositoryId + 用户交集 + 明确 repositoryIds 选择共同决定接收和执行许可。未知安装持久记录 installation_not_authorized 抑制，不自动投递 owner。
+- 所有业务、ping、生命周期共享唯一 bodyHash 去重域；未签名 event/delivery header 不能切换去重域。同 delivery 不同 body 返回 409；容量拒绝保持 503；保留原收件恢复、CAS、空列表、执行许可和暂停语义。
+- github_app_authorization.revoked 仅按 GitHub user ID 撤销匹配身份，不误停其他身份。installation、installation_repositories、repository 生命周期保守失效其安装并原子吊销尚未获执行许可的积压。
+- 生命周期任何 action（包括 created/unsuspend/added）都**不直接恢复**；重复/乱序旧 Webhook 最多导致再次失效。管理员同步必须通过权威用户+安装 API 才恢复，已抑制积压永不复活。仓库变化暂时停用整个相关安装，其他安装不受影响。
+- 已取得执行许可的操作不能撤回；receipt finished 不等于 QQ 已送达。签名 ping 可在尚无 installation/repository 时确认配置，但不建立授权。
+- DO 重建从密文与安装独立记录恢复；没有主密钥、凭据撤销、API 失败、过期快照均不能凭历史仓库名称恢复。
+- 本服务断开只删除本地接入，不替用户卸载 GitHub App 或撤销 GitHub 全局授权；需要全局撤销时到 GitHub Settings → Applications 操作。
+
+## 从旧手工模式迁移
+
+原 GITHUB_MODE 未设置或 manual 时仍为既有手工 Webhook。运营方设置 app 并配置独立 App secrets 后：
+- 不再接受旧 secret；手工 delivery 没有合法 installation 时拒收。
+- 旧 repositories 名称、repo_pin、单行基础连接均不赋予 App 权限。
+- 旧待执行收件 installation_id=0，在重新鉴权/claim 时抑制；先连接身份、再按 ID 明确选择仓库。
+- 不自动恢复默认仓库；清空 repositoryIds 保持空。迁移后可由用户自行关闭旧逐仓库 Webhook，避免无意义拒收请求。
+- 不把临时关闭 App 配置当成自动回退 manual；不要在故障时切模式绕过授权。
+
+## 验证边界与已知限制
+
+本地使用实际 Worker HTTP/admin/callback、EventsDO、持久 SQL、真实 HMAC/PKCE/AES-GCM，GitHub 上游为 mock；没有真实独立 App，尚未进行真实 OAuth、组织 SSO、安装事件和线上联调。上线前必须由运营方在独立测试安装验证上述配置。
+
+本地最终测试统计与日志见交付记录。未执行部署、创建 App、推送、PR 合并或真实 Hyper-V/WSB smoke。测试中的既有平台 skip 与真实 App 未验证必须分别记录。
+
+官方依据：
+https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-setup-url
+https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app
+https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens
+
+
+## 本次本地最终验证（2026-11-12）
+
+- `npm run check` 最终退出 0：Workers/browser/runner 类型检查通过；66 个 Workers 测试文件、441 项通过。
+- Workers Node：19 通过、1 skip；runner：28 通过、2 skip。合计 47 通过、3 skip、0 失败。
+- runner build 与 Worker `deploy --dry-run --containers-rollout=none` 通过；没有部署。
+- GitHub 定向：6 文件、59 项通过；新增完整 HTTP/EventsDO mock 安全链路 8 项。新增真实 UI 模块 DOM 交互 2 项通过，既有管理台 loadSources/UI 测试也通过。
+- 既有 skip：JS fork 后台子进程清理、独立桌面身份检查器、Hyper-V 来宾原生助手。没有运行真实 Hyper-V/WSB smoke 或真实 GitHub App 联调。
+- 日志目录：`C:\AgentWork\github-app-connect-logs`；最终主日志 `multi-check-release.log`；定向 `multi-final-targeted.log`；类型 `multi-final-types.log`；UI `multi-browser.log`；独立 Node/build `multi-node-final.log`、`multi-build-final.log`。
+- 保留中间失败，不把重跑当成根因修复：首轮全量 435 通过/3 失败（安装 token 缓存测试仍使用旧 mock 序列、旧 UI 文案断言、既有 group-coding:114 一秒级等待超时）；前两项按新行为修正。群测试没有跳过或增加 timeout，单独 7 项通过，之后两轮完整 Workers 均 441 项通过；群偶发超时根因仍未证明。
+- 第二轮 Workers 全通过后，Node 的旧手工 UI fixture 缺少新增必填 mode/connections 导致契约拒绝；补齐 fixture，未放宽浏览器 schema，最终完整 check 全通过。
+- 旧环境更新取消的 PKCE 全量任务未盲目重放；先确认其测试进程已停止，再用新 requestId 启动验证。
+
+运营方可在 `workers/` 使用 `npx wrangler secret put <名称>` 交互输入上述四项独立 secrets；主密钥须自行安全生成 32 字节随机值。私钥通过安全管道或交互输入 PKCS#8 内容，不放入命令参数、版本库或日志。非秘密配置放入待部署环境的 vars。创建 App、真实联调、推送与部署均留待父 agent 审查及用户后续授权。

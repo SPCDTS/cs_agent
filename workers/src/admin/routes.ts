@@ -262,6 +262,25 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     }
   } },
 
+  { method: "GET", path: "/admin/github/connections", handle: async ({env}) => json(await env.EVENTS.getByName("main").githubConnectionsView()) },
+  { method: "POST", path: "/admin/github/connect/start", handle: async ({env,request}) => {
+    const v=await body(request,Type.Object({browser:Type.String({pattern:"^[a-f0-9]{64}$"})},strict));
+    return json(await env.EVENTS.getByName("main").startGitHubConnect(env.ADMIN_TOKEN ?? "",v.browser));
+  }},
+  { method: "POST", path: "/admin/github/connect/complete", handle: async ({env,request}) => {
+    const v=await body(request,Type.Object({browser:Type.String({pattern:"^[a-f0-9]{64}$"}),state:Type.String({maxLength:100}),code:Type.String({maxLength:512})},strict));
+    try { return json(await env.EVENTS.getByName("main").completeGitHubConnect(v.state,v.code,env.ADMIN_TOKEN ?? "",v.browser)); }
+    catch { throw new HttpError(400,"github_authorization_failed"); }
+  }},
+  { method: "POST", path: "/admin/github/connect/sync", handle: async ({env,request}) => {
+    const v=await body(request,Type.Object({userId:Type.Optional(Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}))},strict));
+    return json(await env.EVENTS.getByName("main").syncGitHubConnect(v.userId));
+  }},
+  { method: "POST", path: "/admin/github/connect/disconnect", handle: async ({env,request}) => {
+    const v=await body(request,Type.Object({kind:Type.Union([Type.Literal("user"),Type.Literal("installation")]),id:Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER})},strict));
+    return json(await env.EVENTS.getByName("main").disconnectGitHubConnect(v.kind,v.id));
+  }},
+
   { method: "GET", path: /^\/admin\/github\/receipts\/(?<id>[A-Za-z0-9-]{1,80})$/, handle: async ({ env, params }) => {
     const receipt = await env.EVENTS.getByName("main").githubReceipt(params.id!);
     if (!receipt) throw new HttpError(404, "not_found");

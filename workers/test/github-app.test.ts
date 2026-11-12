@@ -42,13 +42,13 @@ describe("operator GitHub App API boundary", () => {
     const fetcher = vi.fn(async () => new Response("private upstream diagnostic", { status: 403 })); vi.stubGlobal("fetch", fetcher);
     const client = new GitHubAppClient(secrets); await expect(client.repositories(456)).rejects.toThrow(/^github_app_unauthorized$/); expect(fetcher).toHaveBeenCalledTimes(1);
   });
-  it("paginates only fixed API paths, rejects an inconsistent snapshot, and never caches tokens", async () => {
+  it("paginates only fixed API paths, rejects an inconsistent snapshot, and revalidates installation authority before using a short-lived cached token", async () => {
     const first = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, full_name: "owner/repo" + i }));
     const fetcher = mock([{ id: 456, app_id: 123, suspended_at: null }, token(), { total_count: 101, repositories: first }, { total_count: 101, repositories: [{ id: 101, full_name: "owner/last" }] }]);
     const api = new GitHubAppClient(secrets); expect(await api.repositories(456)).toHaveLength(101);
     const calls = fetcher.mock.calls as unknown as [string, RequestInit][]; expect(calls[3][0]).toBe("https://api.github.com/installation/repositories?per_page=100&page=2");
-    const next = mock([{ id: 456, app_id: 123, suspended_at: null }, token(), { total_count: 101, repositories: first }, { total_count: 102, repositories: [{ id: 101, full_name: "owner/last" }] }]);
-    await expect(api.repositories(456)).rejects.toThrow("github_app_unavailable"); expect(next).toHaveBeenCalledTimes(4);
+    const next = mock([{ id: 456, app_id: 123, suspended_at: null }, { total_count: 101, repositories: first }, { total_count: 102, repositories: [{ id: 101, full_name: "owner/last" }] }]);
+    await expect(api.repositories(456)).rejects.toThrow("github_app_unavailable"); expect(next).toHaveBeenCalledTimes(3);
   });
   it("bounds response bytes and does not expose response contents", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("sensitive".repeat(150_000))));
