@@ -63,10 +63,8 @@ export class EventsDO extends DurableObject<Env> {
     this.githubConnections = new GitHubConnections(this.ctx.storage,env, () => this.github.reauthorize());
     this.github = new GitHubInbox(this.ctx.storage,{
       authorized:(installationId,repositoryId)=>this.githubConnections.authorized(installationId,repositoryId),
-      lifecycle:delivery=>{
-        if(delivery.event==="github_app_authorization" && delivery.lifecycleUserId) this.githubConnections.disconnectUser(delivery.lifecycleUserId);
-        else if(delivery.installationId) this.githubConnections.invalidate(delivery.installationId);
-      },
+      related:delivery=>this.githubConnections.related(delivery),
+      lifecycle:delivery=>this.githubConnections.lifecycle(delivery),
     });
     this.auth = new GmailAuth(this.sql, env);
     this.gmail = new GmailClient(this.auth);

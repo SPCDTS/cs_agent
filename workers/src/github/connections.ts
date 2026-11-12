@@ -1,3 +1,4 @@
+import type { GitHubDelivery } from "./model";
 import { GitHubAppClient, GitHubAppError, type GitHubAppSecrets, type GitHubUser, type UserTokens, type AuthorizedRepository } from "./app";
 import { githubAppConfigured } from "./configuration";
 import { TokenVault, randomSecret, sha256 } from "../mcp/crypto";
@@ -11,6 +12,7 @@ const aad = (id: number, generation: number) => JSON.stringify(["github-app-owne
 export class GitHubConnections {
   private readonly vault: TokenVault;
   private readonly client: GitHubAppClient;
+  private readonly connecting = new Set<{userId:number;installations:number[];revoked:boolean;revokedUsers:Set<number>}>();
   private readonly syncing = new Map<number, Promise<void>>();
   constructor(private readonly storage: DurableObjectStorage, private readonly secrets: GitHubAppSecrets & { GITHUB_APP_STORE_KEY?: string },
     private readonly revoke: (installationId: number) => void) {
@@ -56,53 +58,86 @@ export class GitHubConnections {
     const row = this.storage.transactionSync(() => {
       const row = this.storage.sql.exec<{binding:string;verifier:string;expires:number;epoch:number}>("SELECT * FROM github_connect_state WHERE hash=?",hash).toArray()[0];
       if (!row || row.binding !== binding || row.expires <= Date.now() || row.epoch !== this.epoch()) throw new GitHubAppError("unauthorized");
+      if(this.connecting.size>=20) throw new GitHubAppError("capacity");
       this.storage.sql.exec("DELETE FROM github_connect_state WHERE hash=?", hash); return row;
     });
-    const tokens = await this.client.exchange(code,row.verifier);
-    const discovered = await this.client.discover(tokens);
-    if (this.identities().length >= 20 && !this.identities().some(u => u.id === discovered.user.id)) throw new GitHubAppError("capacity");
-    const generation = this.epoch() + 1; // Monotonic across disconnect/reconnect: no identity-generation ABA.
-    const cipher = await this.vault.encrypt(JSON.stringify(tokens),aad(discovered.user.id,generation));
-    const prepared: Binding[] = [];
-    for (const installationId of discovered.installations) {
-      const existing = this.bindings().find(b => b.installationId === installationId);
-      // One installation has an explicit identity owner. Another login cannot silently take it over.
-      if (existing && existing.user.id !== discovered.user.id) continue;
-      const auth = await this.client.inspect(tokens,installationId);
-      if (auth.user.id !== discovered.user.id) throw new GitHubAppError("unauthorized");
-      const allowed = new Set(auth.repositories.map(r => r.id));
-      const repositories = (await this.client.repositories(installationId)).filter(r => allowed.has(r.id));
-      prepared.push({installationId,user:auth.user,repositories,status:"active",until:auth.expiresAt,generation});
-    }
-    this.storage.transactionSync(() => {
-      if (row.epoch !== this.epoch()) throw new GitHubAppError("unauthorized");
-      for (const b of this.bindings().filter(b => b.user.id === discovered.user.id)) {
-        if (!prepared.some(next => next.installationId === b.installationId)) this.invalidate(b.installationId);
-        else if (b.status !== "active" || b.until <= Date.now()) this.revoke(b.installationId);
+    const pending={userId:0,installations:[] as number[],revoked:false,revokedUsers:new Set<number>()};
+    this.connecting.add(pending);
+    try {
+      const tokens = await this.client.exchange(code,row.verifier);
+      const discovered = await this.client.discover(tokens);
+      pending.userId=discovered.user.id;pending.installations=discovered.installations;
+      if(pending.revokedUsers.has(discovered.user.id)) pending.revoked=true;
+      pending.revokedUsers.clear();
+      if(pending.revoked) throw new GitHubAppError("unauthorized");
+      if (this.identities().length >= 20 && !this.identities().some(u => u.id === discovered.user.id)) throw new GitHubAppError("capacity");
+      const generation = this.epoch() + 1; // Monotonic across disconnect/reconnect: no identity-generation ABA.
+      const cipher = await this.vault.encrypt(JSON.stringify(tokens),aad(discovered.user.id,generation));
+      const prepared: Binding[] = [];
+      for (const installationId of discovered.installations) {
+        const existing = this.bindings().find(b => b.installationId === installationId);
+        // One installation has an explicit identity owner. Another login cannot silently take it over.
+        if (existing && existing.user.id !== discovered.user.id) continue;
+        const auth = await this.client.inspect(tokens,installationId);
+        if (auth.user.id !== discovered.user.id) throw new GitHubAppError("unauthorized");
+        const allowed = new Set(auth.repositories.map(r => r.id));
+        const repositories = (await this.client.repositories(installationId)).filter(r => allowed.has(r.id));
+        prepared.push({installationId,user:auth.user,repositories,status:"active",until:auth.expiresAt,generation});
       }
-      this.storage.sql.exec("INSERT OR REPLACE INTO github_identities VALUES(?,?)",discovered.user.id,JSON.stringify({...discovered.user,generation,cipher}));
-      for (const b of prepared) this.save(b);
-      // Reconnect retains still-authorized work, but removes receipts outside the new intersection.
-      for (const b of prepared) this.revoke(b.installationId);
-      this.storage.sql.exec("UPDATE github_connect_epoch SET epoch=epoch+1 WHERE id=1");
-    });
-    return this.snapshot();
+      this.storage.transactionSync(() => {
+        if (pending.revoked || row.epoch !== this.epoch()) throw new GitHubAppError("unauthorized");
+        for (const b of this.bindings().filter(b => b.user.id === discovered.user.id)) {
+          if (!prepared.some(next => next.installationId === b.installationId)) this.invalidate(b.installationId);
+          else if (b.status !== "active" || b.until <= Date.now()) this.revoke(b.installationId);
+        }
+        this.storage.sql.exec("INSERT OR REPLACE INTO github_identities VALUES(?,?)",discovered.user.id,JSON.stringify({...discovered.user,generation,cipher}));
+        for (const b of prepared) this.save(b);
+        // Reconnect retains still-authorized work, but removes receipts outside the new intersection.
+        for (const b of prepared) this.revoke(b.installationId);
+        this.storage.sql.exec("UPDATE github_connect_epoch SET epoch=epoch+1 WHERE id=1");
+      });
+      return this.snapshot();
+    } finally { this.connecting.delete(pending); }
   }
   invalidate(id: number) {
     this.storage.transactionSync(() => {
       const b = this.bindings().find(b => b.installationId === id);
-      if (b) { this.save({...b,status:"revoked",repositories:[],until:0,generation:b.generation+1}); this.revoke(id); }
+      for(const pending of this.connecting) if(pending.installations.includes(id)) pending.revoked=true;
+      if (!b) return; // Unknown external installations must not reset unrelated owner OAuth.
+      this.save({...b,status:"revoked",repositories:[],until:0,generation:b.generation+1}); this.revoke(id);
       this.storage.sql.exec("UPDATE github_connect_epoch SET epoch=epoch+1 WHERE id=1");
       this.storage.sql.exec("DELETE FROM github_connect_state");
     });
   }
   disconnectUser(id: number) {
     this.storage.transactionSync(() => {
+      for(const pending of this.connecting) if(pending.userId===id) pending.revoked=true;
       for (const b of this.bindings().filter(b => b.user.id === id)) this.invalidate(b.installationId);
       this.storage.sql.exec("DELETE FROM github_identities WHERE id=?",id);
       this.storage.sql.exec("UPDATE github_connect_epoch SET epoch=epoch+1 WHERE id=1");
       this.storage.sql.exec("DELETE FROM github_connect_state");
     });
+  }
+  private knownUser(id:number) { return this.identities().some(u=>u.id===id)||this.bindings().some(b=>b.user.id===id); }
+  related(d:GitHubDelivery) {
+    return !!(d.installationId && (this.bindings().some(b=>b.installationId===d.installationId)
+      ||[...this.connecting].some(p=>p.installations.includes(d.installationId!))))
+      ||!!(d.lifecycleUserId && (this.knownUser(d.lifecycleUserId)||[...this.connecting].some(p=>p.userId===d.lifecycleUserId)));
+  }
+  lifecycle(d:GitHubDelivery) {
+    if(d.event==="github_app_authorization" && d.lifecycleUserId) {
+      const id=d.lifecycleUserId;
+      if(this.knownUser(id)) this.disconnectUser(id);
+      else for(const pending of this.connecting) {
+        if(pending.userId===id) pending.revoked=true;
+        else if(pending.userId===0 && !pending.revoked) {
+          // Until /user returns, remember exact revoked users without globally invalidating other states.
+          // Bound per-flow memory; overflow rejects this unresolved flow, never grants through lost evidence.
+          if(!pending.revokedUsers.has(id) && pending.revokedUsers.size>=256) pending.revoked=true;
+          else pending.revokedUsers.add(id);
+        }
+      }
+    } else if(d.installationId) this.invalidate(d.installationId);
   }
   disconnectInstallation(id: number) {
     this.storage.transactionSync(() => { this.invalidate(id); this.storage.sql.exec("DELETE FROM github_installations WHERE id=?",id); });

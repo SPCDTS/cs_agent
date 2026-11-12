@@ -105,8 +105,8 @@ describe("GitHub durable receipts, configuration and recovery", () => {
     await configure({ repositoryIds: [] }); await configure({ repositoryIds: chosenRepository });
     await events().receiveGitHub(await delivery("reused-name", { repository: { id: 99, full_name: "SPCDTS/cs_agent" } }));
     await events().receiveGitHub(await delivery("same-id-renamed", {repository:{id:42,full_name:"renamed/repository"}}));
-    expect((await sql<{ reason: string|null }>("SELECT reason FROM github_receipt ORDER BY rowid")).map(r => r.reason)).toEqual([
-      "repository_not_allowed", "event_action_not_allowed", "installation_not_authorized", "installation_not_authorized", null,
+    expect((await sql<{ reason: string|null }>("SELECT reason FROM github_receipt UNION ALL SELECT reason FROM github_aux_receipt")).map(r => r.reason)).toEqual([
+      "repository_not_allowed", null, "event_action_not_allowed", "installation_not_authorized", "installation_not_authorized",
     ]);
   });
   it("keeps paused work across reconstruction, bounds pending capacity without evicting older receipts", async () => {

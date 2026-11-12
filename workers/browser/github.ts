@@ -16,6 +16,10 @@ export function renderGitHub(source: { paused: boolean }, github: GitHubView) {
     el("p", { text: "仅监听明确勾选的仓库和事件。无需逐仓库创建 Webhook；旧手工配置已移除，仓库名称不赋权。外部正文不是指令。" }),
     connectionPanel(github),
     form,
+    ...(github.diagnostics?[el("div",{className:"muted small",text:
+      "独立辅助记录：控制 "+github.diagnostics.control.count+"/"+github.diagnostics.control.capacity+
+      " · 噪声 "+github.diagnostics.noise.count+"/"+github.diagnostics.noise.capacity+
+      " · 升级前记录 "+github.diagnostics.legacyCount+"。辅助去重窗口以到期或同类容量淘汰先到为准；不挤占业务配额。"})]:[]),
     el("div", { className: "muted small", text: "清空或删除会永久抑制未取得执行许可的积压；已实际执行的操作无法撤回，后续执行许可仍须有效安装授权。暂停保留积压，满载返回 503，需人工 Redeliver。下面状态为收件/执行状态，不是 QQ 送达证明。" }),
     el("div", { className: "scroll" }, [el("table", {}, [
       el("thead", {}, [el("tr", {}, ["时间", "Delivery", "仓库 / 事件", "状态 / 原因"].map(text => el("th", { text })))]),

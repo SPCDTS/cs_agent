@@ -74,11 +74,12 @@ export async function readWebhook(request: Request, secret: string | undefined):
   try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes)); }
   catch { throw new WebhookError(400, "invalid_json"); }
   const p = object(value), repo = object(p?.repository);
-  const installationId = object(p?.installation)?.id;
+  const installationId = object(p?.installation)?.id, subjectUserId=object(p?.sender)?.id;
+  const subjects={installationId:positive(installationId)?installationId:undefined,lifecycleUserId:positive(subjectUserId)?subjectUserId:undefined};
   if (event === "ping") {
     if (!positive(p?.hook_id)) throw new WebhookError(400,"invalid_ping");
     return {deliveryId,bodyHash:Buffer.from(await crypto.subtle.digest("SHA-256",bytes)).toString("hex"),
-      repository:"",repositoryId:0,event,action:"",receivedAt:Date.now(),normalized:null};
+      repository:"",repositoryId:0,event,action:"",receivedAt:Date.now(),normalized:null,...subjects};
   }
   const lifecycle = ["installation","installation_repositories","repository","github_app_authorization"].includes(event);
   if (event !== "github_app_authorization" && !positive(installationId)) throw new WebhookError(400,"invalid_installation");
@@ -109,12 +110,12 @@ export async function readWebhook(request: Request, secret: string | undefined):
     valid = !!item && positive(item.id) && typeof item.name === "string" && item.name.length <= 4096 && !!action;
     if (valid) { title = String(item!.name); path = "/actions/runs/" + item!.id; summary = action + " " + (str(item!.conclusion, 64) ?? ""); }
   } else if (event === "push") {
-    valid = !action && typeof p.ref === "string" && p.ref.length <= 512 && /^[0-9a-f]{40}$/.test(String(p.after ?? ""));
+    valid = !action && typeof p.ref === "string" && p.ref.length <= 512 && typeof p.after==="string" && [40,64].includes(p.after.length) && !/[^0-9a-f]/i.test(p.after);
     if (valid) { title = "Push " + p.ref; path = "/commit/" + p.after; summary = "Repository push"; }
   }
   if (!valid) throw new WebhookError(400, "unsupported_or_invalid_event");
   const normalized = normalizeEvent({ source: "github", externalId: bodyHash,
     occurredAt: receivedAt, kind: "github." + event, title: repository + ": " + title, summary,
     actor: str(object(p.sender)?.login, 120) ?? "", ref: "https://github.com/" + repository + path })!;
-  return { deliveryId, bodyHash, repository, repositoryId, event, action, receivedAt, normalized, installationId: positive(installationId) ? installationId : undefined };
+  return { deliveryId, bodyHash, repository, repositoryId, event, action, receivedAt, normalized, ...subjects };
 }

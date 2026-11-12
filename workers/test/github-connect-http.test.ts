@@ -1,3 +1,4 @@
+import { CONTROL_LIMIT, NOISE_LIMIT } from "../src/github/inbox";
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { exportPKCS8, generateKeyPair } from "jose";
@@ -345,5 +346,219 @@ it("migrates old config without granting IDs, keeps receipts readable and refuse
   expect(recovered.claimGitHubRun("legacy-pending-run")).toBe("suppressed");
   expect((await webhook(e,payload(456,3),"fresh-app-event")).status).toBe(202);
   expect(i.githubReceipt("fresh-app-event")?.state).toBe("held");
+ });
+});
+
+describe("PR1 isolated ingress quotas and object IDs",()=>{
+ it("PR1 more than 5000 signed stranger events cannot consume owner business quota",async()=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);await enable(i);
+   const protectedPing={...payload(456,99),hook_id:99};
+   await webhook(e,protectedPing,"protected-control","ping");
+   let last=0;
+   for(let n=0;n<5001;n++)last=(await webhook(e,{...payload(987654,n+1),sender:{id:90000,login:"stranger"}},"noise-"+n)).status;
+   const owner=await webhook(e,payload(),"owner-after-noise");
+   expect({noise:last,owner:owner.status}).toEqual({noise:202,owner:202});
+   expect(i.githubReceipt("owner-after-noise")?.state).toBe("held");
+   expect(i.githubReceipt("protected-control")?.reason).toBe("ping");
+   expect(await (await webhook(e,protectedPing,"stripped-ping-header")).json()).toEqual({status:"body_duplicate"});
+   expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_aux_receipt WHERE kind='noise'").one().n).toBe(NOISE_LIMIT);
+   expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt").one().n).toBe(1);
+  });
+ },60000); // Deliberate 5001 signed HTTP requests, not a relaxed existing timing assertion.
+ it("PR1 unknown installation lifecycle cannot invalidate owner OAuth or existing grants",async()=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);
+   const start=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+   const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+   expect((await webhook(e,{installation:{id:987654},action:"deleted",sender:{id:90000}},"unknown-life","installation")).status).toBe(202);
+   expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+   expect(i.githubConnectionsView().installations.every(b=>b.status==="active")).toBe(true);
+   expect((await admin(e,"connect/complete",{browser,state:new URL(start.url).searchParams.get("state"),code:"code7"})).status).toBe(200);
+  });
+ });
+ it.each(["installation","github_app_authorization"])("PR1 %s revocation persists even with a full business ledger",async event=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);await enable(i);
+   ctx.storage.sql.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<5000)
+    INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,event_key)
+    SELECT 'full-'||i,'hash-'||i,'owner/repo',457,'issues','opened',1,?,'finished','key-'||i FROM n`,Date.now());
+   const body=event==="installation"?{installation:{id:456},action:"deleted"}:{action:"revoked",sender:{id:7}};
+   expect((await webhook(e,body,"full-revoke",event)).status).toBe(202);
+   const recovered=new EventsDO(ctx,e);
+   expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+   expect((await webhook(e,body,"full-revoke",event)).status).toBe(200);
+   expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt").one().n).toBe(5000);
+  });
+ });
+ it("PR1 body hash and delivery conflicts span business, lifecycle and ping headers",async()=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);await enable(i);
+   const business={...payload(),hook_id:1};
+   expect((await webhook(e,business,"business-first")).status).toBe(202);
+   expect(await (await webhook(e,business,"life-replay","installation")).json()).toEqual({status:"body_duplicate"});
+   expect(await (await webhook(e,business,"ping-replay","ping")).json()).toEqual({status:"body_duplicate"});
+   expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+   const control={...payload(456,2),hook_id:2};
+   expect((await webhook(e,control,"control-first","ping")).status).toBe(202);
+   expect(await (await webhook(e,control,"business-replay")).json()).toEqual({status:"body_duplicate"});
+   expect((await webhook(e,payload(456,3),"control-first")).status).toBe(409);
+   expect((await webhook(e,{hook_id:3},"business-first","ping")).status).toBe(409);
+   expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM event_held").one().n).toBe(1);
+  });
+ });
+ it.each(["a".repeat(40),"b".repeat(64),"C".repeat(64)])("PR1 accepts a valid hexadecimal push object ID %s",async after=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);await enable(i);
+   const current=(await i.adminStatus()).github;
+   await i.putGitHubConfig({...current.value,selections:["push"]},current.revision);
+   expect((await webhook(e,{...payload(),action:undefined,ref:"refs/heads/main",after},"push-valid","push")).status).toBe(202);
+   expect(ctx.storage.sql.exec<{event_json:string}>("SELECT event_json FROM event_held").one().event_json).toContain("/commit/"+after);
+  });
+ });
+ it.each(["a".repeat(39),"a".repeat(41),"a".repeat(63),"a".repeat(65),"g".repeat(40),["a".repeat(40)],null,"a".repeat(39)+"\n","a".repeat(40)+"\n","b".repeat(63)+"\r","a".repeat(39)+" "].map(after=>({after})))("PR1 rejects malformed push object ID %j",async ({after})=>{
+  await harness(async e=>{
+   expect((await webhook(e,{...payload(),action:undefined,ref:"refs/heads/main",after},"push-invalid","push")).status).toBe(400);
+  });
+ });
+});
+
+it("PR1 diagnostic insertion failure rolls back revocation and ACK, then retry commits durably",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"before-control-failure");
+  ctx.storage.sql.exec("CREATE TRIGGER fail_control BEFORE INSERT ON github_aux_receipt BEGIN SELECT RAISE(ABORT,'synthetic_control_failure'); END");
+  const body={installation:{id:456},action:"deleted"};
+  expect((await webhook(e,body,"control-atomic","installation")).status).toBe(503);
+  expect(i.githubReceipt("control-atomic")).toBeNull();
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect(i.githubReceipt("before-control-failure")?.state).toBe("held");
+  ctx.storage.sql.exec("DROP TRIGGER fail_control");
+  expect((await webhook(e,body,"control-atomic","installation")).status).toBe(202);
+  const recovered=new EventsDO(ctx,e);
+  expect(recovered.githubReceipt("control-atomic")?.reason).toBe("lifecycle");
+  expect(recovered.githubReceipt("before-control-failure")?.state).toBe("suppressed");
+  const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+  expect((await webhook(e,body,"control-atomic","installation")).status).toBe(200);
+  expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+  expect((await webhook(e,{installation:{id:456},action:"unsuspend"},"out-of-order","installation")).status).toBe(202);
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  await recovered.syncGitHubConnect(7);
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect((await webhook(e,body,"old-control-new-header","repository")).status).toBe(200);
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+ });
+});
+it.each(["installation","github_app_authorization"])("PR1 %s can cancel only a matching discovered in-flight connection",async event=>{
+ const api=mockGitHub(),original=api.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  let intercepted=false;
+  api.fetcher.mockImplementation(async(input,init)=>{
+   if(String(input).includes("/installation/repositories")&&!intercepted){
+    intercepted=true;
+    const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+    await webhook(e,{installation:{id:987654},action:"deleted",sender:{id:90000}},"unrelated-in-flight","installation");
+    expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+    const body=event==="installation"?{installation:{id:456},action:"deleted"}:{sender:{id:7},action:"revoked"};
+    expect((await webhook(e,body,"matching-in-flight",event)).status).toBe(202);
+   }
+   return original(input,init);
+  });
+  const start=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+  expect((await admin(e,"connect/complete",{browser,state:new URL(start.url).searchParams.get("state"),code:"code7"})).status).toBe(400);
+  expect(intercepted).toBe(true);expect(i.githubConnectionsView().identities).toEqual([]);
+  expect(i.githubConnectionsView().installations).toEqual([]);
+  expect(ctx.storage.sql.exec<{kind:string}>("SELECT kind FROM github_aux_receipt WHERE delivery_id='matching-in-flight'").one().kind).toBe("control");
+ });
+});
+it("PR1 control capacity and TTL define a bounded replay window without evicting business records",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  await webhook(e,payload(),"protected-business");
+  const first={...payload(456,100),hook_id:1};
+  for(let n=0;n<CONTROL_LIMIT+1;n++)expect((await webhook(e,{...payload(456,n+100),hook_id:n+1},"control-ring-"+n,"ping")).status).toBe(202);
+  expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_aux_receipt WHERE kind='control'").one().n).toBe(CONTROL_LIMIT);
+  expect(i.githubReceipt("protected-business")?.state).toBe("held");expect(i.githubReceipt("control-ring-0")).toBeNull();
+  const oldest=ctx.storage.sql.exec<{delivery_id:string}>("SELECT delivery_id FROM github_aux_receipt WHERE kind='control' ORDER BY rowid LIMIT 1").one().delivery_id;
+  ctx.storage.sql.exec("CREATE TRIGGER fail_rollover BEFORE INSERT ON github_aux_receipt BEGIN SELECT RAISE(ABORT,'synthetic_rollover_failure'); END");
+  expect((await webhook(e,{installation:{id:456},action:"deleted"},"rollover-failure","installation")).status).toBe(503);
+  expect(i.githubReceipt(oldest)).not.toBeNull();
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  ctx.storage.sql.exec("DROP TRIGGER fail_rollover");
+
+  // After FIFO eviction, the same signed body may be reprocessed, but still needs current owner scope.
+  expect((await webhook(e,first,"after-control-eviction")).status).toBe(202);
+  expect(i.githubReceipt("after-control-eviction")?.state).toBe("held");
+  const expires={...payload(456,9000),hook_id:9000};
+  await webhook(e,expires,"expiring-control","ping");
+  ctx.storage.sql.exec("UPDATE github_aux_receipt SET expires_at=0 WHERE delivery_id='expiring-control'");
+  expect((await webhook(e,expires,"after-control-expiry")).status).toBe(202);
+  expect(i.githubReceipt("after-control-expiry")?.state).toBe("held");
+  await webhook(e,{hook_id:12345,installation:{id:456}},"control-refill","ping");
+  expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_aux_receipt WHERE kind='control'").one().n).toBe(CONTROL_LIMIT);
+  // Even a full protected ring must persist and perform a new revocation.
+  expect((await webhook(e,{installation:{id:456},action:"deleted"},"ring-full-revoke","installation")).status).toBe(202);
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+ });
+});
+it("PR1 upgrade preserves the old bounded ledger and global hashes without charging new business quota",async()=>{
+ mockGitHub();await harness(async(e,_i,ctx)=>{
+  await connect(e);
+  const oldBody={...payload(456,91),hook_id:91};
+  const hash=Buffer.from(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(oldBody)))).toString("hex");
+  ctx.storage.sql.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<4999)
+    INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,event_key)
+    SELECT 'legacy-'||i,'legacy-hash-'||i,'owner/repo',457,'issues','opened',1,?,'finished','legacy-key-'||i FROM n`,Date.now());
+  ctx.storage.sql.exec(`INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,event_key)
+    VALUES('legacy-signed',?,'owner/repo',457,'issues','opened',1,?,'finished','legacy-signed-key')`,hash,Date.now());
+  ctx.storage.sql.exec("ALTER TABLE github_receipt DROP COLUMN quota");
+  const recovered=new EventsDO(ctx,e);
+  const routed={...e,EVENTS:{getByName:()=>recovered} as unknown as Env["EVENTS"]};
+  await enable(recovered);
+  expect((await recovered.adminStatus()).github.diagnostics.legacyCount).toBe(5000);
+  expect((await webhook(routed,oldBody,"old-body-new-header","ping")).status).toBe(200);
+  expect((await webhook(routed,payload(),"new-owner-room")).status).toBe(202);
+  expect(recovered.githubReceipt("legacy-signed")?.state).toBe("finished");
+  expect((await recovered.adminStatus()).github.count).toBe(1);
+  expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt").one().n).toBe(5001);
+ });
+});
+
+it("PR1 unknown users and installations do not invalidate a discovered owner's OAuth state",async()=>{
+ const api=mockGitHub(),original=api.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  let intercept=true;
+  api.fetcher.mockImplementation(async(input,init)=>{
+   if(String(input).endsWith("/user")&&intercept){
+    intercept=false;
+    const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+    await webhook(e,{action:"revoked",sender:{id:987654}},"unrelated-user-before-discovery","github_app_authorization");
+    for(let n=0;n<260;n++) await webhook(e,{action:"deleted",installation:{id:800000+n}},"opaque-unknown-"+n,"installation");
+    expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+   }
+   return original(input,init);
+  });
+  await connect(e);
+  expect(i.githubConnectionsView().identities.map(u=>u.id)).toEqual([7]);
+ });
+});
+it("PR1 opaque OAuth revocation tracking is bounded and rejects overflow without deleting other states",async()=>{
+ const api=mockGitHub(),original=api.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  let intercept=true;
+  api.fetcher.mockImplementation(async(input,init)=>{
+   if(String(input).endsWith("/user")&&intercept){
+    intercept=false;
+    const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+    for(let n=0;n<257;n++)await webhook(e,{action:"revoked",sender:{id:800000+n}},"opaque-revoke-"+n,"github_app_authorization");
+    expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+    expect(ctx.storage.sql.exec("SELECT * FROM github_connect_state").toArray()).toHaveLength(1);
+   }
+   return original(input,init);
+  });
+  const start=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+  const independent=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+  expect((await admin(e,"connect/complete",{browser,state:new URL(start.url).searchParams.get("state"),code:"code7"})).status).toBe(400);
+  expect(i.githubConnectionsView().identities).toEqual([]);
+  expect((await admin(e,"connect/complete",{browser,state:new URL(independent.url).searchParams.get("state"),code:"code7"})).status).toBe(200);
  });
 });

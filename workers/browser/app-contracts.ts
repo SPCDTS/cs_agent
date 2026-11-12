@@ -50,6 +50,10 @@ export const GitHubConnections = Type.Object({configured:Type.Boolean(),slug:Typ
  installations:Type.Array(Type.Object({installationId:Type.Number(),user:GitHubUser,repositories:Type.Array(Type.Object({id:Type.Number(),name:Type.String()})),status:Type.Union([Type.Literal("active"),Type.Literal("revoked")]),until:Type.Number()}))});
 export const GitHubView = Type.Object({
  connections:GitHubConnections,
+ diagnostics:Type.Optional(Type.Object({
+  control:Type.Object({count:Type.Number(),capacity:Type.Number(),ttlMs:Type.Number()}),
+  noise:Type.Object({count:Type.Number(),capacity:Type.Number(),ttlMs:Type.Number()}),legacyCount:Type.Number(),
+ })),
  configured: Type.Boolean(), revision: Type.String(), count: Type.Number(), capacity: Type.Number(), pendingCapacity: Type.Number(),
  value: Type.Object({ repositoryIds:Type.Array(Type.Object({installationId:Type.Number(),repositoryId:Type.Number()})), selections: Type.Array(Type.String()), paused: Type.Boolean(), settings: SourceSettings }),
  receipts: Type.Array(Type.Object({ delivery_id: Type.String(), received_at: Type.Number(), repository: Type.String(), event: Type.String(),

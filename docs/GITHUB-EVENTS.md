@@ -12,15 +12,18 @@
 
 owner 在管理台安装/调整 App 仓库权限，明确连接自己的 GitHub 身份，再勾选 installationId + repositoryId。服务端每次核验用户权限与本 App 安装权限的稳定仓库 ID 交集。仓库名仅显示和构建 GitHub 链接，不授权。多个身份与安装独立，事件只进入 owner；外部正文、路由字段都不是指令。
 
-管理台每页十项、空选择保持空，打开中的草稿与 CAS 冲突不会被后台刷新覆盖。默认不监听任何仓库。事件动作沿用受控 CHOICES，不开放任意事件或命令。
+管理台每页十项、空选择保持空，打开中的草稿与 CAS 冲突不会被后台刷新覆盖。默认不监听任何仓库。事件动作沿用受控 CHOICES，不开放任意事件或命令。push 对象 ID 只接受精确 40/64 位十六进制字符串，拒绝非法字符、空白和非字符串。
 
 ## 持久收件和执行
 
 - body 上限 256 KiB、流读取超时五秒。校验 content-type、有限 header、HMAC 后再解析。
 - 普通事件必须有合法 installation ID；签名 ping 可确认 App 配置，但不授予仓库或安装权限。
 - receipt 与 event_held 原子写入并同步后才 ACK；入口不运行模型，不轮询其他源。
-- 所有业务、ping、生命周期共享唯一 bodyHash 去重域；修改未签名 delivery/event header 不能绕过去重。重复 body 返回 200，同 delivery 不同 body 返回 409。
-- 最多 5000 receipts、200 pending；满载返回 503，不逐出未完成数据。超过三十天只清理 terminal receipts；失败需运营方在 App delivery 页面 Redeliver。
+- 所有业务、ping、生命周期在记录保留期间共享唯一 bodyHash 去重域；修改未签名 delivery/event header 不能绕过去重。重复 body 返回 200，同 delivery 不同 body 返回 409。
+- owner 业务 ledger 最多 5000 条、200 pending；只有入队业务计入该配额，满载 503，不逐出未完成数据。terminal 保留三十天。
+- 控制/ping/过滤诊断独立有界：owner 关联 control 最多 1024 条/24 小时；陌生 noise 最多 256 条/十分钟。各自 FIFO，不挤占业务或另一类配额。业务满载时合法绑定的撤销仍原子持久执行；辅助记录滚动淘汰和撤销同一事务，sync 后 ACK。
+- 去重只在记录保留时有效，辅助记录的有效窗口是 TTL 或同类容量淘汰先到者。窗口结束后旧签名 body 可被重新处理，仍要求当前 App 授权，不声称无限防重放。未知安装生命周期不清空 owner OAuth state；首次 OAuth 用户撤销竞争采用有界在途匹配，详见设计文档。
+- 升级前最多 5000 条旧记录原样保留、另计旧配额，不阻塞新业务；原鉴权、恢复、三十天 terminal 清理继续有效。存储隔离不是网络/CPU 抗无限流量保证；失败可在 App delivery 页面 Redeliver。
 - 安装/仓库生命周期保守失效，只有显式同步权威 API 才能恢复；已抑制积压不会复活。
 - 暂停保留积压；清空/失权抑制尚未获许可的数据。恢复执行时也必须有当前安装授权；已经实际运行的操作无法倒退。
 - durable receipt/held/input key 与执行 ledger 保留。owner 普通消息不因暂停的 GitHub 输入阻塞；收件或 finished 状态不保证 QQ 已送达。

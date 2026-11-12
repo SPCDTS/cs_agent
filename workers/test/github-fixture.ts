@@ -33,6 +33,7 @@ export function appInbox(storage:DurableObjectStorage) {
  let inbox:GitHubInbox;
  const connections=new GitHubConnections(storage,env as Env,()=>inbox.reauthorize());
  inbox=new GitHubInbox(storage,{authorized:(installation,repo)=>connections.authorized(installation,repo),
-  lifecycle:d=>{if(d.event==="github_app_authorization"&&d.lifecycleUserId)connections.disconnectUser(d.lifecycleUserId);else if(d.installationId)connections.invalidate(d.installationId);}});
+  related:d=>connections.related(d),lifecycle:d=>connections.lifecycle(d)});
+
  return inbox;
 }

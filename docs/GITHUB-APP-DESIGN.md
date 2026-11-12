@@ -67,8 +67,8 @@ Worker 非秘密配置：
 ## 收件、生命周期与恢复
 
 - 唯一入口只使用 GITHUB_APP_WEBHOOK_SECRET；原始 body 有界 HMAC 验证后，持久 receipt 与 held 在同一 SQL 事务中写入，storage.sync 后才 ACK。
-- installationId + repositoryId + 用户交集 + 明确 repositoryIds 选择共同决定接收和执行许可。未知安装持久记录 installation_not_authorized 抑制，不自动投递 owner。
-- 所有业务、ping、生命周期共享唯一 bodyHash 去重域；未签名 event/delivery header 不能切换去重域。同 delivery 不同 body 返回 409；容量拒绝保持 503；保留原收件恢复、CAS、空列表、执行许可和暂停语义。
+- installationId + repositoryId + 用户交集 + 明确 repositoryIds 选择共同决定接收和执行许可。未知安装在独立短期有界辅助记录中记为 installation_not_authorized，不占业务配额、不自动投递 owner。
+- 所有业务、ping、生命周期在记录保留窗口内共享唯一 bodyHash 去重域；未签名 event/delivery header 不能切换去重域。同 delivery 不同 body 返回 409；容量拒绝保持 503；保留原收件恢复、CAS、空列表、执行许可和暂停语义。
 - github_app_authorization.revoked 仅按 GitHub user ID 撤销匹配身份，不误停其他身份。installation、installation_repositories、repository 生命周期保守失效其安装并原子吊销尚未获执行许可的积压。
 - 生命周期任何 action（包括 created/unsuspend/added）都**不直接恢复**；重复/乱序旧 Webhook 最多导致再次失效。管理员同步必须通过权威用户+安装 API 才恢复，已抑制积压永不复活。仓库变化暂时停用整个相关安装，其他安装不受影响。
 - 已实际执行的操作不能撤回；每次新 claim（含恢复）仍须有效安装授权，历史 permit 不是授权兜底；receipt finished 不等于 QQ 已送达。签名 ping 可在尚无 installation/repository 时确认配置，但不建立授权。
@@ -103,3 +103,25 @@ https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-githu
 
 
 运营方可在 workers/ 使用 npx wrangler secret put <名称> 交互输入上述四项独立 secrets；主密钥须安全生成 32 字节随机值。私钥通过安全管道或交互输入 PKCS#8，不放命令参数、版本库或日志。非秘密配置放入部署环境 vars。创建 App、真实联调、推送与部署留待后续授权。
+
+## 独立配额、持久控制与有限重放窗口
+
+PR1 审查发现：陌生安装的合法签名收件及 ping/lifecycle 原先共同占用 5000 条业务 receipt，业务满载还会阻止撤销。本轮隔离如下：
+
+- 只有真正入队的 owner 业务写入业务 ledger：上限 5000、pending 上限 200。后来撤销而 suppressed 的业务记录仍留在该 ledger，不会被噪声驱逐；terminal 保留三十天，pending 不按时间删除。
+- 未入队的控制、ping、权限/过滤诊断进入独立辅助表。按已签名 body 的 installation/user ID 判定 owner 关联，**不是按未签名 event header 判定保护域**；ping 也保留这些主体字段。
+- 已绑定或已发现的在途 owner 主体：control 最多 1024 条，TTL 24 小时；陌生主体：noise 最多 256 条，TTL 十分钟。各自 FIFO 滚动，满额只淘汰同类最老记录，不触碰业务 ledger，也不跨类挤占。辅助数据不进入模型队列，管理页显示有界计数而非陌生仓库内容。
+- 所有业务、历史、control、noise 共用 bodyHash 与 delivery-ID 查询域；相同 delivery 不同 body 仍是 409，跨域改 header 仍去重。查重与记录/淘汰、撤销在一个 SQL 事务；失败完整回滚，DO storage.sync 成功后才 ACK。业务或控制配额满额都不会阻止已绑定安装的新撤销持久生效。
+- **只保证记录尚在时的去重。** 辅助窗口以 TTL 到期或同类 FIFO 淘汰较早者为准；业务 terminal 记录三十天后亦可清理。窗口结束后，同一合法签名 body 可能再次处理，但仍须当前安装/用户交集及显式 ID 选择。旧控制重放最多保守失效，绝不自动授予或恢复权限。不声称无限防重放。
+- 升级保留此前最多 5000 条旧 ledger 原文、状态、hash 和执行键，旧行一次性标记 quota=0，不消耗新业务配额；新业务始终 quota=1。旧 terminal 仍按原三十天清理，旧 pending 的鉴权/恢复不变。因此最坏升级暂存为旧 5000 + 新业务 5000 + control 1024 + noise 256 条；无新写入可扩张旧配额。
+- 此隔离解决存储配额相互挤占，不是无限流量、网络或 CPU 的抗拒绝服务保证。
+
+### 未知主体与 OAuth 竞争
+
+陌生 installation 生命周期不增加全局 epoch、不删除 owner 待授权 state、不改变其他绑定。已绑定安装照常撤销；发现身份/安装后的在途授权只取消匹配主体，防迟到 API 结果恢复失效权限。
+
+首次 OAuth 的 /user 尚未返回时，用户撤销不能直接丢弃：每个在途流程临时保留至多 256 个不同撤销用户 ID，识别身份后只检查匹配项并清空集合。溢出只拒绝该尚未识别的在途流程，不改变全局 epoch、其他待授权 state 或已绑定身份。陌生 installation 事件不进入此集合；单个陌生用户反复撤销不增加不同 ID 数量。最多 20 个在途流程，finally 清理；消费 state 已持久化，DO 重启中断的流程不能继续发布。新连接始终重新调用权威用户/安装 API，不从未知事件恢复权限。
+
+### push 对象 ID
+
+push.after 必须是字符串、精确 40 或 64 个十六进制字符（大小写均可）；拒绝数组/数字强制转换、非法字符以及尾随换行或空白。链接仍固定在 GitHub 仓库 commit 路径。
