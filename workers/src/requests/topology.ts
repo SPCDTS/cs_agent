@@ -47,7 +47,7 @@ export function readAgentTopology(sql: SqlStorage, now: number): AgentTopology {
     if (!nodes.has(parentId)) nodes.set(parentId, { id: parentId, thread: record.thread, kind: "thread", parentId: null, activity: "context", lastActiveAt: null });
     nodes.set(id, { id, thread: record.thread, kind: "subagent", parentId, actor: record.actor,
       activity: record.status === "running" ? "active" : record.status === "failed" ? "error" : "recent",
-      lastActiveAt: record.updatedAt, status: record.status, summary: record.summary, description: record.description });
+      lastActiveAt: Math.max(record.updatedAt, nodes.get(id)?.lastActiveAt ?? 0), status: record.status, summary: record.summary, description: record.description });
   }
   return { nodes: [...nodes.values()], since, sampledAt: now };
 }

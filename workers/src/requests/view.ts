@@ -125,13 +125,16 @@ export class AgentReadView {
     await this.initialize();
     return this.database.get<{id:string;task:string;summary:string|null;status:ParentSubagentStatus;created_at:number;deadline:number;ended_at:number|null;last_report_at:number|null;identity_json:string;origin_json:string}>("SELECT * FROM subagents WHERE id=?",id);
   }
-  async subagentList(): Promise<SubagentView[]> {
+  async subagentList(activity: Record<string, number>): Promise<(SubagentView & {lastActiveAt: number})[]> {
     await this.initialize();
-    const ids = await this.database.all<{id:string}>("SELECT id FROM subagents ORDER BY created_at DESC LIMIT 50");
-    const items: SubagentView[]=[];
-    for (const {id} of ids) { const row=await this.child(id); if(!row)continue;
+    const ids = await this.database.all<{id:string;last_active_at:number}>(`SELECT subagents.id,
+      MAX(created_at,COALESCE(last_report_at,0),COALESCE(ended_at,0),COALESCE(activity.value,0)) AS last_active_at
+      FROM subagents LEFT JOIN json_each(?) AS activity ON activity.key=subagents.id
+      ORDER BY last_active_at DESC,created_at DESC,subagents.id LIMIT 50`,JSON.stringify(activity));
+    const items: (SubagentView & {lastActiveAt: number})[]=[];
+    for (const {id,last_active_at} of ids) { const row=await this.child(id); if(!row)continue;
       const as=(JSON.parse(row.identity_json) as SubagentIdentity).as, sandboxId=(JSON.parse(row.origin_json) as SubagentOrigin).capabilities?.sandboxId;
-      items.push({id,task:clip(row.task,200),summary:row.summary??shortSummary(row.task),status:row.status,createdAt:row.created_at,deadline:row.deadline||null,
+      items.push({id,lastActiveAt:last_active_at,task:clip(row.task,200),summary:row.summary??shortSummary(row.task),status:row.status,createdAt:row.created_at,deadline:row.deadline||null,
         ...(sandboxId?{sandboxId}:{}),...(as?{spawner:(as.owner?"owner":"成员")+" "+as.userId}:{}),
         ...(row.ended_at===null?{}:{endedAt:row.ended_at}),...(row.last_report_at===null?{}:{lastReportAt:row.last_report_at})});
     }
@@ -139,14 +142,18 @@ export class AgentReadView {
   }
   async sessionHistory(thread: string, cursor?: string) {
     await this.initialize();await this.bindNamespace(thread);
+    return {...await this.modelHistory(cursor),
+      busy:!!await this.database.get("SELECT 1 FROM inbound WHERE status='queued' LIMIT 1"),compacting:this.info().compacting};
+  }
+  async modelHistory(cursor?: string) {
+    await this.initialize();
     const c=readHistoryCursor(cursor),after=c?.after;
     if(after!==undefined&&(typeof after!=="number"||!Number.isSafeInteger(after)))throw new Error("invalid_cursor");
     if(c&&(after===undefined||(c.order!==undefined&&c.order!=="descending")))throw new Error("invalid_cursor");
     const hasEntries=await this.database.get("SELECT 1 FROM sqlite_master WHERE name='pi_entries'");
     const rows=hasEntries?await this.database.all<{record:string}>("SELECT record FROM pi_entries WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",ROOT_CONVERSATION_ID,after??Number.MAX_SAFE_INTEGER,ADMIN_PAGE_SIZE+1):[];
     const entries=rows.slice(0,ADMIN_PAGE_SIZE).map(row=>historyEntry(JSON.parse(row.record) as EntryRecord));
-    return {entries,next:rows.length>ADMIN_PAGE_SIZE?historyCursor({after:entries.at(-1)!.id,order:"descending"}):undefined,
-      busy:!!await this.database.get("SELECT 1 FROM inbound WHERE status='queued' LIMIT 1"),compacting:this.info().compacting};
+    return {entries,next:rows.length>ADMIN_PAGE_SIZE?historyCursor({after:entries.at(-1)!.id,order:"descending"}):undefined};
   }
   async transcriptSummary(limit: number): Promise<{meta:SubagentMeta;entries:SubagentEntry[]}|undefined> {
     await this.initialize();

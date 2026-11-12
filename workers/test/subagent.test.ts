@@ -4,6 +4,10 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, fauxText, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import worker from "../src/index";
+import { Errors } from "typebox/value";
+import type { RequestsDO } from "../src/requests/do";
+import { ADMIN_BROWSER_CONTRACTS as C } from "../src/admin/app.generated";
+type HistoryPage = Awaited<ReturnType<RequestsDO["modelHistory"]>>;
 import * as models from "../src/models";
 import { RegistryDO } from "../src/registry";
 import { SandboxDO } from "../src/sandbox/do";
@@ -505,4 +509,40 @@ it("Cloudflare 克隆已提交而资源登记中断时，重试使用原快照�
   const recovered = await resources.create("owner", "recover", args);
   expect((await env.SANDBOX.getByName(recovered.name).files()).revision).toBe(committedRevision);
   expect(await resources.create("owner", "recover", args)).toEqual(recovered);
+});
+
+it("管理台可分页查看子会话正文与工具记录，且读取不唤醒执行 DO", async () => {
+  const task="需要逐项核对的任务。".repeat(35)+"任务末尾", answer="这是核对后的结果。".repeat(35)+"结果末尾";
+  twoModels([spawn(task)], [...Array.from({length:6},(): Step=>({tool:"qq_context",args:{}})),{text:answer}]);
+  await thread("owner").submit(input(1,"查看子会话",10000001));
+  await reports("owner",1);
+  const sub=await onlySubagent("owner");
+  await thread("owner").syncAdminView("owner");
+  await child("owner",sub.id).syncAdminView();
+  await thread("group:200000001").syncAdminView("group:200000001");
+  const execution=vi.spyOn(ThreadDO.prototype,"subagentTranscript").mockRejectedValue(new Error("execution_read_forbidden"));
+  const path="/admin/subagents/"+sub.id+"/history?thread=owner";
+  expect((await admin("GET",path,null)).status).toBe(401);
+  expect((await admin("GET",path+"&cursor=!!!")).status).toBe(400);
+  expect((await admin("GET","/admin/subagents/"+sub.id+"/history")).status).toBe(400);
+  expect((await admin("GET",path.replace("thread=owner","thread=group:200000001"))).status).toBe(404);
+  const entries: HistoryPage["entries"]=[];
+  let cursor: string|undefined;
+  do {
+    const response=await admin("GET",path+(cursor?"&cursor="+encodeURIComponent(cursor):""));
+    expect(response.status).toBe(200);
+    const page=await response.json<HistoryPage>();
+    expect([...Errors(C.SessionHistorySchema,page)]).toEqual([]);
+    if(!cursor){expect(page.entries).toHaveLength(10);expect(page.next).toBeTruthy();}
+    entries.push(...page.entries);cursor=page.next;
+  }while(cursor);
+  expect(new Set(entries.map(entry=>entry.id)).size).toBe(entries.length);
+  const messages=entries.flatMap(entry=>entry.messages);
+  expect(messages.some(message=>message.role==="user"&&message.text.includes(task))).toBe(true);
+  expect(messages.some(message=>message.role==="assistant"&&message.text.includes(answer))).toBe(true);
+  expect(messages.some(message=>message.toolName==="qq_context")).toBe(true);
+  expect(execution).not.toHaveBeenCalled();
+  await rows("owner","UPDATE subagents SET ended_at=? WHERE id=?",Date.now()-15*86400_000,sub.id);
+  await thread("owner").syncAdminView("owner");
+  expect((await admin("GET",path)).status).toBe(404);
 });

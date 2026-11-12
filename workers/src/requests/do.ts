@@ -64,16 +64,29 @@ export class RequestsDO extends DurableObject<Env> {
   mcpAccess(...args: Parameters<AgentReadView["mcpAccess"]>) { return this.readView().mcpAccess(...args); }
   mcpApprovals(...args: Parameters<AgentReadView["mcpApprovals"]>) { return this.readView().mcpApprovals(...args); }
   mcpToolCounts(...args: Parameters<AgentReadView["mcpToolCounts"]>) { return this.readView().mcpToolCounts(...args); }
-  subagentList(...args: Parameters<AgentReadView["subagentList"]>) { return this.readView().subagentList(...args); }
+  async subagentList() {
+    const view = this.readView(), scope = this.projection.status()!.scope;
+    if (!scope.startsWith("thread:")) throw new Error("view_scope_mismatch");
+    const topology = await this.env.REQUESTS.getByName("main").agentTopology();
+    const activity = Object.fromEntries(topology.nodes.flatMap(node => node.kind === "subagent" && node.thread === scope.slice(7) && node.lastActiveAt !== null ? [[node.actor, node.lastActiveAt]] : []));
+    return view.subagentList(activity);
+  }
   workspaceChild(...args: Parameters<AgentReadView["workspaceChild"]>) { return this.readView().workspaceChild(...args); }
   transcriptSummary(...args: Parameters<AgentReadView["transcriptSummary"]>) { return this.readView().transcriptSummary(...args); }
   async chatView(...args: Parameters<AgentReadView["chatView"]>) { return {...await this.readView().chatView(...args), syncedAt: this.projection.status()!.synced_at}; }
   async stats() { return {...await this.readView().stats(), syncedAt: this.projection.status()!.synced_at}; }
+  modelHistory(...args: Parameters<AgentReadView["modelHistory"]>) { return this.readView().modelHistory(...args); }
+  async subagentHistory(id: string, cursor?: string): Promise<Awaited<ReturnType<AgentReadView["modelHistory"]>> | undefined> {
+    return (await this.childView(id))?.modelHistory(cursor);
+  }
   async subagentTranscript(id: string, limit: number): ReturnType<AgentReadView["transcriptSummary"]> {
+    return (await this.childView(id))?.transcriptSummary(limit);
+  }
+  private async childView(id: string): Promise<DurableObjectStub<RequestsDO> | undefined> {
     const state = this.projection.status(); if (!state?.scope.startsWith("thread:")) throw new Error("view_pending");
     const child = await this.readView().child(id); if (!child) return;
     if (child.ended_at !== null && Date.now() >= child.ended_at + RETENTION_MS) return;
-    return this.env.REQUESTS.getByName(viewName(subagentName(state.scope.slice(7), id))).transcriptSummary(limit);
+    return this.env.REQUESTS.getByName(viewName(subagentName(state.scope.slice(7), id)));
   }
 
   private revision() { return this.ctx.storage.sql.exec<{ revision: number }>("UPDATE request_revision SET revision=revision+1 WHERE id=1 RETURNING revision").one().revision; }
