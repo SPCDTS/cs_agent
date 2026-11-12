@@ -1,7 +1,9 @@
 import { $, ApiError, el, fail, readToken, state } from "./app";
 import { cs, sv } from "./console";
 import { readApi } from "./api";
-import { AgentTopologySchema, type AgentNode, type AgentTopology, type AgentFamily } from "./topology-contracts";
+import { AgentTopologySchema, type AgentNode, type AgentTopology } from "./topology-contracts";
+import { topologyPages } from "./topology-layout";
+import { openHistory } from "./sessions";
 export const topology:{data:AgentTopology|null;timer:ReturnType<typeof setTimeout>|undefined;version:number;pending:boolean;page:number;capacity:number;structure:string;inViewport:boolean}={data:null,timer:undefined,version:0,pending:false,page:0,capacity:1,structure:"",inViewport:true};
 export const topologyStatus={active:"执行中",recent:"近期活动",error:"最近异常",context:"父 agent"};
 export const topologyLifecycle={running:"执行中",done:"已完成",failed:"失败",cancelled:"已取消"};
@@ -31,17 +33,10 @@ export function topologyName(node:AgentNode){
   if(node.kind==="subagent")return "子 agent "+node.actor.slice(0,6);
   return state.overview?.threads.find(t=>t.key===node.thread)?.name||(node.thread==="owner"?"主人会话":node.thread);
 }
-export function topologyFamilies(){
-  const nodes=topology.data?.nodes??[],groups:AgentFamily[]=[],size=Math.min(3,topology.capacity);
-  for(const parent of nodes.filter(n=>n.kind==="thread")){
-    const children=nodes.filter(n=>n.parentId===parent.id).sort((a,b)=>a.id.localeCompare(b.id));
-    for(let i=0;i<Math.max(1,children.length);i+=size)groups.push({parent,children:children.slice(i,i+size),part:i/size});
-  }
-  return groups.sort((a,b)=>a.parent.thread.localeCompare(b.parent.thread)||a.part-b.part);
-}
 export function topologyCard(node:AgentNode){
   const orb=el("div",{className:"topology-orb","aria-hidden":"true"},[el("div",{className:"topology-glass"}),el("div",{className:"topology-core"}),el("div",{className:"topology-rim"}),el("div",{className:"topology-orbit"},[el("i")])]);
-  return el("div",{className:"topology-node","data-agent":node.id,"data-kind":node.kind},[orb,el("div",{className:"topology-copy"},[el("div",{className:"topology-name"}),el("div",{className:"topology-description"},[el("span",{className:"visible"}),el("span",{"aria-hidden":"true"})]),el("div",{className:"topology-state"})])]);
+  return el(node.kind==="subagent"?"button":"div",{className:"topology-node","data-agent":node.id,"data-kind":node.kind,
+    ...(node.kind==="subagent"?{type:"button",title:"查看子 agent 会话",onclick:()=>openHistory({kind:"subagent",thread:node.thread,id:node.actor})}:{})},[orb,el("div",{className:"topology-copy"},[el("div",{className:"topology-name"}),el("div",{className:"topology-description"},[el("span",{className:"visible"}),el("span",{"aria-hidden":"true"})]),el("div",{className:"topology-state"})])]);
 }
 export function updateTopologyCard(card:HTMLElement,node:AgentNode){
   const name=topologyName(node),status=(node.kind==="subagent"&&node.status?topologyLifecycle[node.status]:undefined)||topologyStatus[node.activity],text=node.kind==="subagent"?(node.description?.text||node.summary||"暂无任务简介"):"";
@@ -51,7 +46,7 @@ export function updateTopologyCard(card:HTMLElement,node:AgentNode){
   const description=card.querySelector<HTMLElement>(".topology-description")!,current=description.querySelector(".visible")!,next=[...description.children].find(s=>s!==current)!;
   if(current.textContent!==text){next.textContent=text;next.classList.add("visible");next.removeAttribute("aria-hidden");current.classList.remove("visible");current.setAttribute("aria-hidden","true");}
   description.title=(node.kind==="subagent"&&node.summary&&node.summary!==text?"任务："+node.summary+"\n":"")+text;
-  card.setAttribute("aria-label",name+" · "+status+(text?" · "+text:""));
+  card.setAttribute("aria-label",name+" · "+status+(text?" · "+text:"")+(node.kind==="subagent"?" · 查看会话":""));
 }
 export function drawTopologyLinks(){
   const scene=$("topology-graph").querySelector(".topology-scene");if(!scene)return;
@@ -69,11 +64,7 @@ export function renderTopology(instant=false){
   if(!topology.data||cs.view!=="chat")return;
   const host=$("topology-graph"),capacity=Math.max(1,Math.floor(host.clientWidth/170));
   if(capacity!==topology.capacity){topology.capacity=capacity;topology.page=0;instant=true;}
-  const sheets:AgentFamily[][]=[];
-  for(const group of topologyFamilies()){
-    let sheet=sheets.find(items=>items.length<3&&items.reduce((n,g)=>n+Math.max(1,g.children.length),0)+Math.max(1,group.children.length)<=capacity&&!items.some(g=>g.parent.id===group.parent.id));
-    if(!sheet){sheet=[];sheets.push(sheet);}sheet.push(group);
-  }
+  const sheets=topologyPages(topology.data.nodes,capacity);
   const pages=Math.max(1,sheets.length);topology.page=Math.min(topology.page,pages-1);
   const visible=sheets[topology.page]||[],nodes=topology.data.nodes;
   const active=nodes.filter(n=>n.activity==="active").length,recent=nodes.filter(n=>n.activity!=="context").length;

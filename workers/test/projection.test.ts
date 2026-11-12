@@ -5,6 +5,7 @@ import { RequestsDO } from "../src/requests/do";
 import { ThreadDO } from "../src/thread";
 import { threadView } from "../src/admin/read-views";
 import { ModelAlarm } from "../src/model-alarm";
+import { snapshot } from "../src/requests/snapshot";
 afterEach(async()=>{vi.restoreAllMocks();await reset();});
 const admin=(path:string)=>worker.fetch(new Request("https://test"+path,{headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
 it("未同步的查询返回待同步，不唤醒执行 DO",async()=>{
@@ -58,4 +59,22 @@ it("同步失败保留变更，执行对象重启后补齐且更新删除不会�
   expect((await view.memoryView("owner","已经更新")).memories).toHaveLength(1);
   await runInDurableObject(owner,(_instance,state)=>state.storage.sql.exec("DELETE FROM memories WHERE id=1").toArray());
   await owner.syncAdminView("owner");expect((await view.memoryList("owner",{})).items).toEqual([]);
+});
+
+it("子任务列表先按真实活动排序再截取，较早创建的活跃任务不会被挤掉",async()=>{
+  const owner=env.THREAD.getByName("owner"),now=Date.now(),activeId="00000000-0000-0000-0000-000000000000";
+  await owner.syncAdminView("owner");
+  await runInDurableObject(owner,(_instance,state)=>{
+    for(let i=0;i<51;i++)state.storage.sql.exec(
+      "INSERT INTO subagents(id,task,created_at,status,identity_json,origin_json,timeout_ms,deadline) VALUES(?,?,?,'running','{}','{}',0,0)",
+      "00000000-0000-0000-0000-"+String(i).padStart(12,"0"),"排序测试",now-10000+i);
+  });
+  await owner.syncAdminView("owner");
+  const registry=env.REQUESTS.getByName("main");
+  await registry.recordAgent({thread:"owner",actor:activeId,summary:"旧任务的新进展",description:{kind:"progress",text:"重新核对",updatedAt:now-5000},status:"running",version:1,updatedAt:now-5000});
+  await registry.record({request:{id:crypto.randomUUID(),startedAt:now,thread:"owner",actor:activeId,purpose:"subagent",provider:"faux",model:"test",status:"running",endedAt:null,inputTokens:null,outputTokens:null,cacheRead:null,cacheWrite:null,reasoningTokens:null,durationMs:null,contextWindow:1000},context:snapshot({messages:[]})});
+  const response=await admin("/admin/threads/owner/subagents"),list=await response.json<{id:string;lastActiveAt:number}[]>();
+  expect(response.status).toBe(200);expect(list).toHaveLength(50);
+  expect(list[0]).toMatchObject({id:activeId,lastActiveAt:now});
+  expect(list.at(-1)?.id).toBe("00000000-0000-0000-0000-000000000002");
 });

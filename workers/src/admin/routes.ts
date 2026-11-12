@@ -334,6 +334,13 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     if (!status) throw new HttpError(404, "not_found");
     return json({ id: params.id, status });
   } },
+  { method: "GET", path: new RegExp(`^/admin/subagents/(?<id>${SUBAGENT_ID})/history$`), handle: async ({ env, url, params }) => {
+    try {
+      const result = await threadView(env, threadParam(url)).subagentHistory(params.id, url.searchParams.get("cursor") ?? undefined);
+      if (!result) throw new HttpError(404, "not_found");
+      return json(result);
+    } catch (error) { if (error instanceof Error && error.message.includes("invalid_cursor")) throw new HttpError(400, "invalid_cursor"); throw error; }
+  } },
   { method: "GET", path: new RegExp(`^/admin/subagents/(?<id>${SUBAGENT_ID})/transcript$`), handle: async ({ env, url, params }) => {
     const limit = url.searchParams.get("limit") ?? "20";
     if (!/^\d{1,2}$/.test(limit) || Number(limit) < 1 || Number(limit) > 50) throw new HttpError(400, "invalid_query");
