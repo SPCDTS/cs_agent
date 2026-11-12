@@ -1,4 +1,4 @@
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { MemoryRow } from "./app-contracts";
 
 export const SessionHistorySchema = Type.Object({ entries: Type.Array(Type.Object({
@@ -6,6 +6,20 @@ export const SessionHistorySchema = Type.Object({ entries: Type.Array(Type.Objec
   archive: Type.Optional(Type.Object({ label: Type.String(), at: Type.Number() })),
   messages: Type.Array(Type.Object({ role: Type.String(), text: Type.String(), toolName: Type.Optional(Type.String()) })),
 })), next: Type.Optional(Type.String()) });
+export const SubagentConversationSchema = Type.Object({
+  ...SessionHistorySchema.properties,
+  entries: Type.Array(Type.Object({
+    ...SessionHistorySchema.properties.entries.items.properties,
+    messages: Type.Array(Type.Object({
+      role: Type.String(), text: Type.String(), at: Type.Optional(Type.Number()),
+      toolName: Type.Optional(Type.String()), isError: Type.Optional(Type.Boolean()),
+      toolCalls: Type.Optional(Type.Array(Type.Object({id: Type.String(), name: Type.String(), arguments: Type.String()}))),
+    })),
+  })),
+  status: Type.Union([Type.Literal("running"),Type.Literal("done"),Type.Literal("failed"),Type.Literal("cancelled")]),
+  summary: Type.String(), syncedAt: Type.Number(),
+});
+export type SubagentConversation = Static<typeof SubagentConversationSchema>;
 export const MemoryDetailSchema = Type.Object({ row: MemoryRow, revision: Type.Number(),
   versions: Type.Array(Type.Object({ id: Type.Number(), at: Type.Number(), reason: Type.Union([Type.String(), Type.Null()]), after_json: Type.String() })),
   links: Type.Array(Type.Object({ from_id: Type.Number(), to_id: Type.Number(), rel: Type.String(), created_at: Type.Number() })),

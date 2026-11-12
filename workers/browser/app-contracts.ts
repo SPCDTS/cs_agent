@@ -23,7 +23,7 @@ export const Overview = Type.Object({
   configured: Type.Record(Type.String(), Type.Boolean()),
 });
 export type Overview = Static<typeof Overview>;
-export const Subagents = Type.Array(Type.Object({ id: Type.String(), task: Type.String(), status: Type.String(), createdAt: Type.Number(), lastActiveAt: Type.Number(),
+export const Subagents = Type.Array(Type.Object({ id: Type.String(), task: Type.String(), summary: Type.String(), status: Type.String(), createdAt: Type.Number(), lastActiveAt: Type.Number(),
   deadline: optionalNumber, endedAt: optionalNumber, lastReportAt: optionalNumber, spawner: optionalText }));
 export type Subagents = Static<typeof Subagents>;
 export const EventDetail = Type.Object({ server: Type.Optional(Type.String()), action: Type.Optional(Type.String()), source: Type.Optional(Type.String()),

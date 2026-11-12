@@ -52,9 +52,10 @@ export type ChatMessage = Static<typeof ChatMessage>;
 export const ChatView = Type.Object({ messages: Type.Array(ChatMessage), delta: Type.Boolean(), active: Type.Number(), syncedAt: Type.Optional(Type.Number()) });
 export const Trace = Type.Object({ requests: Type.Array(RequestRecord), tools: Type.Array(ToolSummary), cursor: Type.Number(), more: Type.Boolean() });
 export const PendingChat = Type.Object({ requestId: Type.String(), text: Type.String() });
+export type ChatTarget = {kind:"thread";thread:string} | {kind:"subagent";thread:string;id:string;summary:string};
 export interface ConsoleState {
   view: string; until: number; before: number | undefined; next: number | undefined; pages: (number | undefined)[]; requestVersion: number; detailVersion: number;
-  chat: string; chatVersion: number; fingerprint: string; timer: number | undefined; resizeTimer?: number; sending: boolean; epoch: number;
+  chat: ChatTarget; chatVersion: number; fingerprint: string; timer: number | undefined; resizeTimer?: number; sending: boolean; epoch: number;
   pending: Static<typeof PendingChat> | null; chatActive: boolean; requestActive: boolean; chatLoading: boolean;
   messages: Map<string, ChatMessage>; requests: Map<string, RequestRecord>; tools: Map<string, ToolSummary>;
   traceTurns: string; traceCursor: number; chatAfter: number | null; turn: string | null; detailId: string | null;

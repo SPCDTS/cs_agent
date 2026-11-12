@@ -4,14 +4,16 @@ import { readApi } from "./api";
 import { input } from "./dom";
 import { $, ApiError, api, bjTime, duration, el, fail, pill, readToken, state, time } from "./app";
 import { loadTopology, renderTopology, resetTopology, stopTopology } from "./topology";
-import { listPages, paginateChildren } from "./pagination";
+import { listPages } from "./pagination";
 import { loadChat, resetChatTrace, scheduleConsolePoll } from "./trace";
 import { cacheCell, detailCache, openRequest, percent, toolCache } from "./request-detail";
 import { loadManagement, managementPages, showManagement } from "./management";
 import { sh } from "./sessions";
+import { expandChatThread, renderChatNavigation, resetChatNavigation } from "./chat-navigation";
+import { loadSubagentChat } from "./subagent-chat";
 import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
 export const cs: C.ConsoleState = { view:"usage", until:Date.now(), before:undefined, next:undefined, pages:[], requestVersion:0, detailVersion:0,
-  chat:"owner", chatVersion:0, fingerprint:"", timer:undefined, sending:false, epoch:0, pending:null,
+  chat:{kind:"thread",thread:"owner"}, chatVersion:0, fingerprint:"", timer:undefined, sending:false, epoch:0, pending:null,
   chatActive:false,requestActive:false,chatLoading:false,messages:new Map(),requests:new Map(),tools:new Map(),traceTurns:"",traceCursor:0,chatAfter:null,turn:null,detailId:null };
 export const nf = (n: unknown) => typeof n === "number" ? n.toLocaleString("zh-CN") : "—";
 export const compact = (n: number) => n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(1)+"k":nf(n);
@@ -26,15 +28,29 @@ export function choices(id: string, values: (string | {key: string; name?: strin
 export function renderConsoleThreads(){
   const threads=state.overview&&state.overview.threads||[{key:"owner",name:"主人会话"}];
   choices("req-thread",threads.map(t=>({key:t.key,name:t.name||(t.key==="owner"?"主人会话":t.key)})),"全部会话");
-  $("chat-thread-list").replaceChildren(...threads.map(t=>el("button",{className:"chat-thread",type:"button","aria-current":String(t.key===cs.chat),
-    onclick:()=>chooseChat(t.key)},[el("span",{text:t.name||(t.key==="owner"?"主人会话":t.key)}),el("small",{text:t.key})])));
-  renderTopology();
-  paginateChildren($("chat-thread-list"));
+  renderChatNavigation(threads);renderTopology();
 }
-export function chooseChat(key: string){
-  cs.chat=key;cs.chatVersion++;cs.fingerprint="";resetChatTrace();
-  $("chat-messages").replaceChildren(el("div",{className:"empty-state",text:"正在载入对话…"}));
-  $("chat-input").value="";restorePending();renderConsoleThreads();if(cs.view==="chat")loadChat().catch(fail);
+const chatDrafts=new Map<string,string>();
+export function renderChatHeader(){
+  const target=cs.chat,child=target.kind==="subagent",name=state.overview?.threads.find(t=>t.key===target.thread)?.name||(target.thread==="owner"?"主人会话":target.thread);
+  $("chat-title").textContent=child?(target.summary||"子 agent "+target.id.slice(0,6)):name;
+  $("chat-subtitle").textContent=child?name+" / 子 agent "+target.id.slice(0,6)+" · 只读会话":"共享上下文 · 网页发言只回复网页";
+  for(const id of ["chat-history","chat-compact","chat-reset","chat-form"])$(id).hidden=child;
+  $("chat-older").hidden=!child;$("chat-parent").hidden=!child;
+}
+function selectChat(target:C.ChatTarget){
+  if(cs.chat.kind==="thread"&&!cs.pending)chatDrafts.set(cs.chat.thread,$("chat-input").value);
+  clearTimeout(cs.timer);cs.chat=target;cs.chatVersion++;resetChatTrace();expandChatThread(target.thread);
+  $("chat-messages").replaceChildren(el("div",{className:"empty-state",text:"正在载入对话…"}));$("chat-state").textContent="正在载入…";
+  $("chat-input").value="";cs.pending=null;
+  if(target.kind==="thread"){restorePending();if(!cs.pending)$("chat-input").value=chatDrafts.get(target.thread)||"";}
+  renderChatHeader();renderConsoleThreads();if(cs.view==="chat")loadChat().catch(fail);
+}
+export function chooseChat(key:string){selectChat({kind:"thread",thread:key});}
+export function chooseSubagent(thread:string,id:string,summary:string){
+  selectChat({kind:"subagent",thread,id,summary});
+  if(cs.view!=="chat")consoleView("chat");
+  $("chat-title").scrollIntoView({block:"nearest"});
 }
 export function consoleView(view: string){
   if(cs.view!==view){clearTimeout(cs.timer);stopTopology();detailCache.clear();toolCache.clear();cs.requestVersion++;if(cs.view==="chat"){cs.chatVersion++;cs.chatLoading=false;}}
@@ -48,12 +64,12 @@ export function consoleView(view: string){
   if(managementPages[view])loadManagement(view).catch(fail);
 }
 export function resetConsole(){
-  listPages.clear();resetTopology();
+  listPages.clear();resetTopology();resetChatNavigation();chatDrafts.clear();
   clearTimeout(cs.timer);cs.timer=undefined;detailCache.clear();toolCache.clear();resetChatTrace();cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
   $("session-history").close();sh.version++;
   $("request-detail").close();$("detail-body").replaceChildren();$("chat-messages").replaceChildren();
 }
-export function startConsole(){restorePending();renderConsoleThreads();consoleView(cs.view);}
+export function startConsole(){if(cs.chat.kind==="thread")restorePending();expandChatThread(cs.chat.thread);renderChatHeader();renderConsoleThreads();consoleView(cs.view);}
 export function requestParams(){
   const p=new URLSearchParams({since:String(cs.until-Number($("req-range").value)*3600000),until:String(cs.until),limit:String(ADMIN_PAGE_SIZE)});
   for(const [key,id] of [["thread","req-thread"],["model","req-model"],["status","req-status"],["purpose","req-purpose"]])if(input(id).value)p.set(key,input(id).value);
@@ -115,7 +131,7 @@ export function drawTokens(u: C.Usage, since: number, until: number){
   if(!u.summary.measured)svg.append(sv("text",{x:left+width/2,y:85,"text-anchor":"middle"},"暂无已返回的 token 用量"));
   $("chart-note").textContent="北京时间 · "+(step===3600000?"每小时":"每天")+"汇总 · "+(u.summary.requests-u.summary.measured)+" 条请求未返回用量";
 }
-export const pendingKey=()=>"cs-agent:web-pending:"+cs.chat;
+export const pendingKey=()=>"cs-agent:web-pending:"+cs.chat.thread;
 export function restorePending(){
   try{const value: unknown=JSON.parse(sessionStorage.getItem(pendingKey())||"null");cs.pending=Check(C.PendingChat,value)?value:null;}catch{cs.pending=null;}
   if(cs.pending&&typeof cs.pending.text==="string")$("chat-input").value=cs.pending.text;else cs.pending=null;
@@ -129,18 +145,20 @@ export async function downloadAsset(ref: C.Asset){
   }catch(error){fail(error);}
 }
 export async function sendChat(event: Event){
-  event.preventDefault();if(cs.sending)return;
-  const thread=cs.chat,text=$("chat-input").value.trim();if(!text)return;
+  event.preventDefault();if(cs.sending||cs.chat.kind!=="thread")return;
+  const thread=cs.chat.thread,text=$("chat-input").value.trim();if(!text)return;
+  const current=()=>cs.chat.kind==="thread"&&cs.chat.thread===thread;
   const pending=cs.pending||{requestId:crypto.randomUUID(),text};cs.pending=pending;
   try{sessionStorage.setItem(pendingKey(),JSON.stringify(pending));}catch{}
   cs.sending=true;$("chat-send").disabled=true;$("chat-input").readOnly=true;$("chat-state").textContent="正在提交…";
   try{
     await api("POST","/admin/threads/"+encodeURIComponent(thread)+"/chat",pending);
-    if(cs.chat===thread){cs.awaitingInput="web:"+pending.requestId;cs.chatActive=true;}
+    if(current()){cs.awaitingInput="web:"+pending.requestId;cs.chatActive=true;}
+    chatDrafts.delete(thread);
     try{sessionStorage.removeItem("cs-agent:web-pending:"+thread);}catch{}
-    if(cs.chat===thread){cs.pending=null;$("chat-input").value="";$("chat-input").readOnly=false;$("chat-send").textContent="发送消息";await loadChat();$("chat-input").focus();}
+    if(current()){cs.pending=null;$("chat-input").value="";$("chat-input").readOnly=false;$("chat-send").textContent="发送消息";await loadChat();if(current())$("chat-input").focus();}
   }catch(error){
-    if(cs.chat===thread){
+    if(current()){
       const rejected=error instanceof ApiError && error.status>=400 && error.status<500 && error.status!==429;
       if(rejected){cs.pending=null;try{sessionStorage.removeItem(pendingKey());}catch{}$("chat-input").readOnly=false;}
       $("chat-state").textContent=rejected?"消息未提交，请检查后重试。":"发送结果未确认。重试会使用相同编号，避免重复提交。";$("chat-send").textContent=rejected?"发送消息":"重试发送";
@@ -158,6 +176,8 @@ export function initConsole() {
   $("req-prev").addEventListener("click",()=>{cs.before=cs.pages.pop();loadRequests().catch(fail);});
   $("req-next").addEventListener("click",()=>{if(!cs.next)return;cs.pages.push(cs.before);cs.before=cs.next;loadRequests().catch(fail);});
   $("detail-close").addEventListener("click",()=>{$("request-detail").close();cs.detailVersion++;});
+  $("chat-parent").addEventListener("click",()=>chooseChat(cs.chat.thread));
+  $("chat-older").addEventListener("click",()=>loadSubagentChat(true));
   $("chat-form").addEventListener("submit",sendChat);
   $("chat-input").addEventListener("keydown",e=>{if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){e.preventDefault();$("chat-form").requestSubmit();}});
   $("chat-reload").addEventListener("click",()=>{cs.chatAfter=null;loadChat().catch(fail);});

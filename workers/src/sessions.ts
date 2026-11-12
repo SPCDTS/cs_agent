@@ -14,16 +14,18 @@ export function readHistoryCursor(value?: string): Cursor | undefined {
   return parsed;
 }
 export const historyCursor = (value: Cursor | undefined) => value && Buffer.from(JSON.stringify(value)).toString("base64url");
-export function historyEntry(entry: EntryRecord) {
+export function historyEntry(entry: EntryRecord, format: "history" | "chat" = "history") {
   return { id: Number(entry.id), kind: entry.kind, reset: entry.kind === "pi.reset",
     messages: (entry.model ?? []).map(message => ({
       role: message.role,
-      text: (typeof message.content === "string" ? message.content : message.content.map(block => {
+      ...("timestamp" in message ? { at: message.timestamp } : {}),
+      text: (typeof message.content === "string" ? message.content : message.content.flatMap(block => {
         if (block.type === "text") return block.text;
         if (block.type === "thinking") return block.thinking;
-        if (block.type === "toolCall") return block.name + " " + JSON.stringify(block.arguments);
+        if (block.type === "toolCall") return format === "chat" ? [] : [block.name + " " + JSON.stringify(block.arguments)];
         return "[图片]";
       }).join("\n")).slice(0, 16000),
+      ...(format === "chat" && typeof message.content !== "string" ? { toolCalls: message.content.flatMap(block => block.type === "toolCall" ? [{ id: block.id, name: block.name, arguments: JSON.stringify(block.arguments).slice(0, 16000) }] : []) } : {}),
       ...(message.role === "toolResult" ? { toolName: message.toolName, isError: message.isError } : {}),
     })),
     ...(entry.kind === "pi.reset" && Check(Type.Object({ label: Type.String(), at: Type.Number() }), entry.data)

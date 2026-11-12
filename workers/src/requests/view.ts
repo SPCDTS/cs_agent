@@ -146,14 +146,21 @@ export class AgentReadView {
     return {...await this.modelHistory(cursor),
       busy:!!await this.database.get("SELECT 1 FROM inbound WHERE status='queued' LIMIT 1"),compacting:this.info().compacting};
   }
-  async modelHistory(cursor?: string) {
+  async subagentConversation(cursor?: string) {
+    await this.initialize();
+    const row=await this.database.get<{value:string}>("SELECT value FROM meta WHERE key='subagent'");
+    if(!row)throw new Error("view_pending");
+    const meta=JSON.parse(row.value) as SubagentMeta;
+    return {...await this.modelHistory(cursor,"chat"),status:meta.status,summary:meta.summary??shortSummary(meta.task),syncedAt:this.store.status()!.synced_at};
+  }
+  async modelHistory(cursor?: string, format: "history" | "chat" = "history") {
     await this.initialize();
     const c=readHistoryCursor(cursor),after=c?.after;
     if(after!==undefined&&(typeof after!=="number"||!Number.isSafeInteger(after)))throw new Error("invalid_cursor");
     if(c&&(after===undefined||(c.order!==undefined&&c.order!=="descending")))throw new Error("invalid_cursor");
     const hasEntries=await this.database.get("SELECT 1 FROM sqlite_master WHERE name='pi_entries'");
     const rows=hasEntries?await this.database.all<{record:string}>("SELECT record FROM pi_entries WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",ROOT_CONVERSATION_ID,after??Number.MAX_SAFE_INTEGER,ADMIN_PAGE_SIZE+1):[];
-    const entries=rows.slice(0,ADMIN_PAGE_SIZE).map(row=>historyEntry(JSON.parse(row.record) as EntryRecord));
+    const entries=rows.slice(0,ADMIN_PAGE_SIZE).map(row=>historyEntry(JSON.parse(row.record) as EntryRecord,format));
     return {entries,next:rows.length>ADMIN_PAGE_SIZE?historyCursor({after:entries.at(-1)!.id,order:"descending"}):undefined};
   }
   async transcriptSummary(limit: number): Promise<{meta:SubagentMeta;entries:SubagentEntry[]}|undefined> {

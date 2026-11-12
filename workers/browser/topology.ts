@@ -1,9 +1,9 @@
 import { $, ApiError, el, fail, readToken, state } from "./app";
-import { cs, sv } from "./console";
+import { cs, sv, chooseChat, chooseSubagent } from "./console";
 import { readApi } from "./api";
 import { AgentTopologySchema, type AgentNode, type AgentTopology } from "./topology-contracts";
 import { topologyPages } from "./topology-layout";
-import { openHistory } from "./sessions";
+import { refreshChatChildren } from "./chat-navigation";
 export const topology:{data:AgentTopology|null;timer:ReturnType<typeof setTimeout>|undefined;version:number;pending:boolean;page:number;capacity:number;structure:string;inViewport:boolean}={data:null,timer:undefined,version:0,pending:false,page:0,capacity:1,structure:"",inViewport:true};
 export const topologyStatus={active:"执行中",recent:"近期活动",error:"最近异常",context:"父 agent"};
 export const topologyLifecycle={running:"执行中",done:"已完成",failed:"失败",cancelled:"已取消"};
@@ -25,7 +25,7 @@ export async function loadTopology(force=false,instant=false){
   try{
     const data=await readApi(AgentTopologySchema,"GET","/admin/agent-topology");
     if(version!==topology.version||epoch!==cs.epoch||cs.view!=="chat"||document.hidden)return;
-    topology.data=data;renderTopology(instant);
+    topology.data=data;renderTopology(instant);refreshChatChildren();
   }catch(error){if(version===topology.version){$("topology-count").textContent="拓扑读取失败，点击刷新重试";if(!topology.data)$("topology-graph").replaceChildren(el("p",{className:"topology-empty",text:"暂时无法读取近期活动"}));}if(error instanceof ApiError&&error.status===401)fail(error);}
   finally{if(version===topology.version){topology.pending=false;scheduleTopology();}}
 }
@@ -35,18 +35,21 @@ export function topologyName(node:AgentNode){
 }
 export function topologyCard(node:AgentNode){
   const orb=el("div",{className:"topology-orb","aria-hidden":"true"},[el("div",{className:"topology-glass"}),el("div",{className:"topology-core"}),el("div",{className:"topology-rim"}),el("div",{className:"topology-orbit"},[el("i")])]);
-  return el(node.kind==="subagent"?"button":"div",{className:"topology-node","data-agent":node.id,"data-kind":node.kind,
-    ...(node.kind==="subagent"?{type:"button",title:"查看子 agent 会话",onclick:()=>openHistory({kind:"subagent",thread:node.thread,id:node.actor})}:{})},[orb,el("div",{className:"topology-copy"},[el("div",{className:"topology-name"}),el("div",{className:"topology-description"},[el("span",{className:"visible"}),el("span",{"aria-hidden":"true"})]),el("div",{className:"topology-state"})])]);
+  return el("button",{className:"topology-node","data-agent":node.id,"data-kind":node.kind,type:"button",title:"查看对应会话",onclick:()=>{
+    if(node.kind==="subagent")chooseSubagent(node.thread,node.actor,node.summary||"");
+    else {chooseChat(node.thread);$("chat-title").scrollIntoView({block:"nearest"});}
+  }},[orb,el("div",{className:"topology-copy"},[el("div",{className:"topology-name"}),el("div",{className:"topology-description"},[el("span",{className:"visible"}),el("span",{"aria-hidden":"true"})]),el("div",{className:"topology-state"})])]);
 }
 export function updateTopologyCard(card:HTMLElement,node:AgentNode){
   const name=topologyName(node),status=(node.kind==="subagent"&&node.status?topologyLifecycle[node.status]:undefined)||topologyStatus[node.activity],text=node.kind==="subagent"?(node.description?.text||node.summary||"暂无任务简介"):"";
-  card.dataset.activity=node.activity;card.dataset.current=String(node.kind==="thread"&&node.thread===cs.chat);
+  const selected=node.thread===cs.chat.thread&&(node.kind==="thread"?cs.chat.kind==="thread":cs.chat.kind==="subagent"&&node.actor===cs.chat.id);
+  card.dataset.activity=node.activity;card.dataset.current=String(selected);
   card.querySelector<HTMLElement>(".topology-name")!.textContent=name;card.querySelector<HTMLElement>(".topology-name")!.title=name;
-  card.querySelector(".topology-state")!.textContent=(node.kind==="thread"&&node.thread===cs.chat?"当前会话 · ":"")+status;
+  card.querySelector(".topology-state")!.textContent=(selected?"当前会话 · ":"")+status;
   const description=card.querySelector<HTMLElement>(".topology-description")!,current=description.querySelector(".visible")!,next=[...description.children].find(s=>s!==current)!;
   if(current.textContent!==text){next.textContent=text;next.classList.add("visible");next.removeAttribute("aria-hidden");current.classList.remove("visible");current.setAttribute("aria-hidden","true");}
   description.title=(node.kind==="subagent"&&node.summary&&node.summary!==text?"任务："+node.summary+"\n":"")+text;
-  card.setAttribute("aria-label",name+" · "+status+(text?" · "+text:"")+(node.kind==="subagent"?" · 查看会话":""));
+  card.setAttribute("aria-label",name+" · "+status+(text?" · "+text:"")+" · 查看会话");
 }
 export function drawTopologyLinks(){
   const scene=$("topology-graph").querySelector(".topology-scene");if(!scene)return;
