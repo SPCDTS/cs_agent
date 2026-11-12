@@ -93,6 +93,12 @@ describe("持久工作区", () => {
     expect(await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm())).not.toBeNull();
     await evictDurableObject(stub);
     await runInDurableObject(stub, async (instance, state) => {
+      const failure = vi.spyOn(WorkspaceManager.prototype, "resumeGc").mockRejectedValueOnce(new Error("r2_temporarily_unavailable"));
+      const failedAt = Date.now();
+      await instance.alarm();
+      expect(await state.storage.getAlarm()).toBeGreaterThanOrEqual(failedAt + 300_000);
+      expect(await state.storage.get("workspace:gc:apply")).toBeDefined();
+      failure.mockRestore();
       for (let turn = 0; turn < 8 && await state.storage.getAlarm() !== null; turn++) await instance.alarm();
       expect(await state.storage.getAlarm()).toBeNull();
       expect(await state.storage.get("workspace:gc:apply:last")).toMatchObject({ phase: "done", deleted: 0 });
