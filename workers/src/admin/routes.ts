@@ -1,3 +1,4 @@
+import { readBounded, WebhookError } from "../github/model";
 import { readAdminCursor } from "./pagination";
 import { healthReport } from "./health";
 import { threadView, workspaceView } from "./read-views";
@@ -276,6 +277,41 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       // ScheduleDO 的错误是自己的固定分类文本（如 overlap、paused），不含用户正文。
       throw new HttpError(400, error instanceof Error ? error.message.slice(0, 200) : "failed");
     }
+  } },
+
+  { method: "GET", path: "/admin/github/connections", handle: async ({env}) => json(await env.EVENTS.getByName("main").githubConnectionsView()) },
+  { method: "POST", path: "/admin/github/connect/start", handle: async ({env,request}) => {
+    const v=await body(request,Type.Object({browser:Type.String({pattern:"^[a-f0-9]{64}$"})},strict));
+    return json(await env.EVENTS.getByName("main").startGitHubConnect(env.ADMIN_TOKEN ?? "",v.browser));
+  }},
+  { method: "POST", path: "/admin/github/connect/complete", handle: async ({env,request}) => {
+    const v=await body(request,Type.Object({browser:Type.String({pattern:"^[a-f0-9]{64}$"}),state:Type.String({maxLength:100}),code:Type.String({maxLength:512})},strict));
+    try { return json(await env.EVENTS.getByName("main").completeGitHubConnect(v.state,v.code,env.ADMIN_TOKEN ?? "",v.browser)); }
+    catch { throw new HttpError(400,"github_authorization_failed"); }
+  }},
+  { method: "POST", path: "/admin/github/connect/sync", handle: async ({env,request}) => {
+    const v=await body(request,Type.Object({userId:Type.Optional(Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}))},strict));
+    return json(await env.EVENTS.getByName("main").syncGitHubConnect(v.userId));
+  }},
+  { method: "POST", path: "/admin/github/connect/disconnect", handle: async ({env,request}) => {
+    const v=await body(request,Type.Object({kind:Type.Union([Type.Literal("user"),Type.Literal("installation")]),id:Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER})},strict));
+    return json(await env.EVENTS.getByName("main").disconnectGitHubConnect(v.kind,v.id));
+  }},
+
+  { method: "GET", path: /^\/admin\/github\/receipts\/(?<id>[A-Za-z0-9-]{1,80})$/, handle: async ({ env, params }) => {
+    const receipt = await env.EVENTS.getByName("main").githubReceipt(params.id!);
+    if (!receipt) throw new HttpError(404, "not_found");
+    return json(receipt);
+  } },
+  { method: "PUT", path: "/admin/github/config", handle: async ({ env, request }) => {
+    let value: unknown;
+    try { value = JSON.parse(new TextDecoder().decode(await readBounded(request, 16384))); }
+    catch (error) { throw new HttpError(error instanceof WebhookError ? error.status : 400, "invalid_request"); }
+    if (!value || typeof value !== "object" || !("value" in value) || !("expectedRevision" in value)
+      || typeof value.expectedRevision !== "string" || !/^[0-9]{1,16}$/.test(value.expectedRevision)) throw new HttpError(400, "invalid_request");
+    const result = await env.EVENTS.getByName("main").putGitHubConfig(value.value, value.expectedRevision);
+    if (!result.ok) throw new HttpError(result.error === "conflict" ? 409 : 400, result.error, "current" in result ? { current: result.current } : {});
+    return json(result.current);
   } },
 
   // 外部事件来源；/admin/events 已是线程审计事件，这里另起前缀。

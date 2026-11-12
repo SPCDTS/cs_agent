@@ -361,12 +361,49 @@ export class ThreadDO extends DurableObject<Env> {
         runtime.recovered = true;
       }
       runtime.harness.resume();
-      for (;;) {
-        const rows = await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' AND when_busy IS NULL ORDER BY rowid");
+      // Deferred GitHub inputs stay durable and unadmitted. Exclude them only for this
+      // pump, before computing profile barriers, so ordinary inputs keep their order.
+      const deferred = new Set<string>();
+      const github = (row: InboundRow) => row.kind === "event" && row.message_id.startsWith("evt_github_");
+      const waitForIdle = () => {
+        if (!afterIdle && !this.idleWait) {
+          this.idleWait = runtime.harness.waitForIdle(context).then(() => { this.idleWait = undefined; return this.requestPump(true); });
+          this.ctx.waitUntil(this.idleWait);
+        }
+      };
+      pumping: for (;;) {
+        // Scan the whole pending queue: a fixed leading batch of deferred events
+        // must not hide later owner input forever.
+        let rows = (await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status = 'queued' AND when_busy IS NULL ORDER BY rowid"))
+          .filter(row => !deferred.has(row.message_id));
+        if (rows.some(github) && !await this.idle(runtime)) {
+          waitForIdle();
+          for (const row of rows) if (github(row)) deferred.add(row.message_id);
+          rows = rows.filter(row => !deferred.has(row.message_id));
+        }
         const barrier = rows.findIndex(row => profileOf(row) !== runtime.profile);
         const admissible = rows.slice(0, barrier < 0 ? rows.length : barrier);
         if (admissible.length) await this.syncModel(runtime);
         for (const row of admissible) {
+          if (row.kind === "event" && row.message_id.startsWith("evt_github_")) {
+            // Do not put GitHub work into Harness's busy queue: authorize only at an idle admission boundary.
+            if (!await this.idle(runtime)) {
+              waitForIdle();
+              deferred.add(row.message_id);
+              continue pumping;
+            }
+            const permit = await this.env.EVENTS.getByName("main").claimGitHubRun(row.message_id);
+            if (permit === "wait") {
+              // Config edits/reconciliation wake a fresh pump; do not spin on this row.
+              deferred.add(row.message_id);
+              continue pumping;
+            }
+            if (permit === "suppressed") {
+              await this.database.run("UPDATE inbound SET status='done' WHERE message_id=?", row.message_id);
+              await this.env.EVENTS.getByName("main").finishRun(row.message_id, "silent");
+              continue;
+            }
+          }
           let submission: Submission | undefined;
           try { submission = await this.admit(runtime, row); }
           catch { await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ?", row.message_id); }
@@ -376,10 +413,7 @@ export class ThreadDO extends DurableObject<Env> {
         if (!next) return;
         if (!await this.idle(runtime)) {
           // 失败 run 保留的排队项要等下一条输入才放行；空闲等待只重试一次，避免空转。
-          if (!afterIdle && !this.idleWait) {
-            this.idleWait = runtime.harness.waitForIdle(context).then(() => { this.idleWait = undefined; return this.requestPump(true); });
-            this.ctx.waitUntil(this.idleWait);
-          }
+          waitForIdle();
           return;
         }
         await this.applyProfile(runtime, profileOf(next));

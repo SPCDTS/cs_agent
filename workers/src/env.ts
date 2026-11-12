@@ -25,6 +25,14 @@ export interface Env extends Omit<Cloudflare.Env, "MODEL_PROVIDER" | "MODEL_ID" 
   HISTORY_SUMMARY_DAYS?: string;
   EVENTS_RETENTION_DAYS?: string;
   // Gmail 桌面客户端与 owner 的 refresh token（secrets）；任一缺失时 Gmail 来源与工具报 auth
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_SLUG?: string;
+  GITHUB_APP_CLIENT_ID?: string;
+  GITHUB_APP_CALLBACK_URL?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
+  GITHUB_APP_CLIENT_SECRET?: string;
+  GITHUB_APP_WEBHOOK_SECRET?: string;
+  GITHUB_APP_STORE_KEY?: string;
   GMAIL_CLIENT_ID?: string;
   GMAIL_CLIENT_SECRET?: string;
   GMAIL_REFRESH_TOKEN?: string;

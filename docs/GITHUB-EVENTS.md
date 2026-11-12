@@ -1,0 +1,54 @@
+# GitHub App 事件接入
+
+只支持独立 GitHub App。旧逐仓库手工 Webhook、名称白名单与首条事件 repo pin 已移除，不提供模式切换或旧 secret 兼容路径。不要复用开发 VM bot App 或凭据。
+
+## 一次配置，后续只连接和勾选
+
+完整 App 创建、权限、secret 与回调配置见 docs/GITHUB-APP-DESIGN.md。运营方只需一次配置独立 App：
+- OAuth callback：`https://<PUBLIC_ORIGIN>/admin/github/oauth/callback`
+- Setup callback：`https://<PUBLIC_ORIGIN>/admin/github/callback`
+- 唯一事件入口：`POST https://<PUBLIC_ORIGIN>/github/webhook`
+- 入口只用 `GITHUB_APP_WEBHOOK_SECRET` 验证原始 body；必需 App 配置缺失即 503，不回退。
+
+owner 在管理台安装/调整 App 仓库权限，明确连接自己的 GitHub 身份，再勾选 installationId + repositoryId。服务端每次核验用户权限与本 App 安装权限的稳定仓库 ID 交集。仓库名仅显示和构建 GitHub 链接，不授权。多个身份与安装独立，事件只进入 owner；外部正文、路由字段都不是指令。
+
+管理台每页十项、空选择保持空，打开中的草稿与 CAS 冲突不会被后台刷新覆盖。默认不监听任何仓库。事件动作沿用受控 CHOICES，不开放任意事件或命令。push 对象 ID 只接受精确 40/64 位十六进制字符串，拒绝非法字符、空白和非字符串。
+
+## 持久收件和执行
+
+- body 上限 256 KiB、流读取超时五秒。校验 content-type、有限 header、HMAC 后再解析。
+- 普通事件必须有合法 installation ID；签名 ping 可确认 App 配置，但不授予仓库或安装权限。
+- receipt 与 event_held 原子写入并同步后才 ACK；入口不运行模型，不轮询其他源。
+- 所有业务、ping、生命周期在记录保留期间共享唯一 bodyHash 去重域；修改未签名 delivery/event header 不能绕过去重。重复 body 返回 200，同 delivery 不同 body 返回 409。
+- owner 业务 ledger 最多 5000 条、200 pending；只有入队业务计入该配额，满载 503，不逐出未完成数据。terminal 保留三十天。
+- 控制/ping/过滤诊断独立有界：owner 关联 control 最多 1024 条/24 小时；陌生 noise 最多 256 条/十分钟。各自 FIFO，不挤占业务或另一类配额。业务满载时合法绑定的撤销仍原子持久执行；辅助记录滚动淘汰和撤销同一事务，sync 后 ACK。
+- 去重只在记录保留时有效，辅助记录的有效窗口是 TTL 或同类容量淘汰先到者。窗口结束后旧签名 body 可被重新处理，仍要求当前 App 授权，不声称无限防重放。未知安装生命周期不清空 owner OAuth state；首次 OAuth 用户撤销竞争采用有界在途匹配，详见设计文档。
+- 升级前最多 5000 条旧记录原样保留、另计旧配额，不阻塞新业务；原鉴权、恢复、三十天 terminal 清理继续有效。存储隔离不是网络/CPU 抗无限流量保证；失败可在 App delivery 页面 Redeliver。
+- 安装/仓库生命周期保守失效，只有显式同步权威 API 才能恢复；已抑制积压不会复活。
+- 暂停保留积压；清空/失权抑制尚未获许可的数据。恢复执行时也必须有当前安装授权；已经实际运行的操作无法倒退。
+- durable receipt/held/input key 与执行 ledger 保留。owner 普通消息不因暂停的 GitHub 输入阻塞；收件或 finished 状态不保证 QQ 已送达。
+
+## 旧数据切换
+
+旧手工配置和旧单行连接不会升级成 App 权限。旧名称或混合配置首次加载时转换为空 ID 选择、增加 revision；已连接身份的密文可以保留，但仍须 owner 明确重新勾选。旧 pin 表被移除，旧 receipts 保持可读。没有有效安装授权的旧 pending 会被抑制，旧 issued/finished 记录也不能被当作新的执行授权。旧 config 请求含 repositories 字段会被拒绝。
+
+配置 App、连接身份、明确保存 ID 选择后，只接收新的有效 App 事件；不会恢复旧抑制积压。可关闭原逐仓库 Webhook，避免无意义拒收请求。本版本不再提供任何手工 Webhook 安装教程或运行路径。
+
+## 验证边界
+
+测试使用真实 Worker HTTP、EventsDO、SQL、HMAC、PKCE 与 AES-GCM，仅 mock GitHub HTTPS；覆盖旧 secret/config 拒收与拒执行，以及有效 App 流程、CAS、清空、全局去重、容量、崩溃恢复、暂停和 owner pump。真实独立 App/OAuth/组织 SSO/线上 Webhook 尚未联调。最新本地测试结果见交付记录。
+
+
+### 未签名 header 与唤醒边界（PR1 补充验证）
+
+event/delivery header 不在 HMAC 内，不能作为可信事件身份。生命周期解析沿用保守失效策略：例如 issues.opened 的已签名 body 首次被改头为 repository/installation，可导致相关绑定失效，不能据此授予权限；不声称查重能够阻止首到请求的改头。现有记录保留期间，控制先到再业务、业务先到再控制都按同一个 bodyHash 去重，且同 delivery 不同 body 仍冲突。回归覆盖真实 lifecycle（不仅 ping）、重建、显式 API 恢复后再重投。
+
+未知 body 在 owner 完成授权后仍受原噪声记录查重保护；TTL 或 FIFO 淘汰后可再次处理，但必须重新通过当前授权与显式仓库选择。测试覆盖 issues/repository/ping 三类未知 body、两种淘汰边界，以及失去选择时仍被抑制。
+
+收件事务完成后，只有新写入 held 的业务事件安排 alarm；噪声、ping、控制、过滤、重复、冲突及容量拒绝不新增/提前 alarm，原有其他来源 alarm 不被删除。控制撤销仍在事务内同步完成并经 storage.sync 后 ACK，不依赖 alarm。若业务已提交而安排 alarm 失败，返回 503，重试按已存在的 body 去重；Cron 重建持久 held 的调度，覆盖提交与安排唤醒之间的故障窗口。配置变更/恢复的主动唤醒保留。
+
+### 授权新鲜度与重试
+
+安装授权快照最多十分钟有效。到期表示 wait，不是撤销：最后一次核验的仓库交集只允许有配额约束的 held 收件，不能据此入队或执行。未知绑定、明确生命周期撤销及确认的权限拒绝立即 deny；已 suppressed 的事件不会复活。Cron 等待核验完成再轮询 GitHub，同时让 Gmail 独立推进。Alarm 只刷新已过期快照，claim 与重建恢复各自执行同一套三态判断。
+
+网络、超时、服务端故障及明确的限流失败保留加密凭据和绑定，使快照失效，并持久化每个安装的指数退避（从一分钟至十五分钟）。Owner 显式同步可以跳过退避。成功轮换的 token 在后续发现请求前持久化；既有身份 generation 与绑定 generation 检查继续防止迟到结果覆盖已撤销或重新连接的状态。

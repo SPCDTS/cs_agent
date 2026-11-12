@@ -1,3 +1,4 @@
+import { renderGitHub } from "./github";
 import * as C from "./app-contracts";
 import { Check } from "typebox/value";
 import type { Static } from "typebox";
@@ -20,7 +21,7 @@ export const ERRORS: Record<string, string> = {
   view_pending: "展示数据尚未同步，请稍后刷新。升级后的历史数据将在维护任务中补齐。",
   busy: "会话正在运行或压缩，请先停止或等待完成后重试",
   invalid_cursor: "历史分页标记已失效，请重新打开历史",
-  conflict: "数据已被别处修改，已载入最新值，请确认后再保存",
+  conflict: "数据已被别处修改，请确认最新值后再保存",
   invalid_request: "请求格式不正确",
   invalid_json: "请求格式不正确",
   invalid_namespace: "命名空间只能是 owner 或 group:群号",
@@ -367,7 +368,7 @@ export function renderSources(view: C.Sources) {
   const box = $("sources");
   clear(box);
   if (!view.sources.length) { box.append(el("div", { className: "muted", text: "没有事件来源" })); paginateChildren(box); return; }
-  for (const source of view.sources) box.append(renderSource(source, view));
+  for (const source of view.sources) box.append(source.id === "github" ? renderGitHub(source, view.github) : renderSource(source, view));
   paginateChildren(box);
 }
 export function renderSource(source: C.Sources["sources"][number], view: C.Sources) {

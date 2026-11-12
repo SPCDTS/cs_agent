@@ -45,9 +45,26 @@ export const SourceSettings = Type.Object({ intervalS: Type.Number(), mergeWindo
   filters: Type.Object({ requireLabels: Type.Array(Type.String()), excludeLabels: Type.Array(Type.String()), excludeSenders: Type.Array(Type.String()) }),
   quietHours: Type.Optional(Type.Object({ start: Type.String(), end: Type.String() })),
 });
+const GitHubUser = Type.Object({id:Type.Number(),login:Type.String()});
+export const GitHubConnections = Type.Object({configured:Type.Boolean(),slug:Type.String(),identities:Type.Array(GitHubUser),
+ installations:Type.Array(Type.Object({installationId:Type.Number(),user:GitHubUser,repositories:Type.Array(Type.Object({id:Type.Number(),name:Type.String()})),status:Type.Union([Type.Literal("active"),Type.Literal("revoked")]),until:Type.Number()}))});
+export const GitHubView = Type.Object({
+ connections:GitHubConnections,
+ diagnostics:Type.Optional(Type.Object({
+  control:Type.Object({count:Type.Number(),capacity:Type.Number(),ttlMs:Type.Number()}),
+  noise:Type.Object({count:Type.Number(),capacity:Type.Number(),ttlMs:Type.Number()}),legacyCount:Type.Number(),
+ })),
+ configured: Type.Boolean(), revision: Type.String(), count: Type.Number(), capacity: Type.Number(), pendingCapacity: Type.Number(),
+ value: Type.Object({ repositoryIds:Type.Array(Type.Object({installationId:Type.Number(),repositoryId:Type.Number()})), selections: Type.Array(Type.String()), paused: Type.Boolean(), settings: SourceSettings }),
+ receipts: Type.Array(Type.Object({ delivery_id: Type.String(), received_at: Type.Number(), repository: Type.String(), event: Type.String(),
+ action: Type.String(), state: Type.String(), reason: Type.Union([Type.String(),Type.Null()]), outcome: Type.Union([Type.String(),Type.Null()]) })),
+});
+export type GitHubView = Static<typeof GitHubView>;
+
 export const Sources = Type.Object({ sources: Type.Array(Type.Object({ id: Type.String(), paused: Type.Boolean(), degraded: Type.Boolean(),
   cursor: Type.Unknown(), lastPollAt: optionalNumber, held: Type.Number(), budget: Type.Object({ used: Type.Number(), perHour: Type.Number() }),
   pauseReason: optionalText, failures: Type.Number(), lastErrorCode: optionalText, configured: Type.Boolean(), settings: SourceSettings })),
+  github: GitHubView,
   watch: Type.Object({ topic: Type.Boolean(), expiration: optionalNumber }),
   runs: Type.Array(Type.Object({ source: Type.String(), status: Type.String(), deliveredAt: Type.Number(), events: Type.Number(), endedAt: optionalNumber })),
 });

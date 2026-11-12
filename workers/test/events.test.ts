@@ -27,7 +27,7 @@ describe("EventsDO Gmail polling", () => {
     await runInDurableObject(events(), async (_instance, state) => {
       await new EventsDO(state, { ...env, GMAIL_PUBSUB_TOPIC: "projects/proj-test/topics/gmail-push" }).poll("gmail");
     });
-    expect(await sql("SELECT cursor FROM event_source")).toEqual([{ cursor: "101" }]);
+    expect(await sql("SELECT cursor FROM event_source WHERE id='gmail'")).toEqual([{ cursor: "101" }]);
     expect(await sql("SELECT key FROM event_held")).toEqual([]);
     expect(google.state.requests.some(line => line.includes("/history?"))).toBe(false);
     expect(google.state.watches).toBe(1);
@@ -48,12 +48,12 @@ describe("EventsDO Gmail polling", () => {
     const starts = google.state.requests.filter(line => line.includes("/history?")).map(line => new URL(line.slice(4)).searchParams.get("startHistoryId"));
     expect(starts).toEqual(["100", String(split)]);
     expect(await sql<Held>("SELECT key FROM event_held")).toHaveLength(52);
-    expect(await sql("SELECT cursor FROM event_source")).toEqual([{ cursor: String(google.state.historyId) }]);
+    expect(await sql("SELECT cursor FROM event_source WHERE id='gmail'")).toEqual([{ cursor: String(google.state.historyId) }]);
 
     google.state.historyStatus = 404;
     google.addMail("lost");
     await events().notify("gmail");
-    expect(await sql("SELECT cursor FROM event_source")).toEqual([{ cursor: String(google.state.historyId) }]);
+    expect(await sql("SELECT cursor FROM event_source WHERE id='gmail'")).toEqual([{ cursor: String(google.state.historyId) }]);
     expect(await sql("SELECT key FROM event_held")).toHaveLength(52);
   });
 
@@ -76,7 +76,7 @@ describe("EventsDO Gmail polling", () => {
     await events().poll("gmail");
     google.state.failGmail = true;
     for (let i = 0; i < 4; i++) await events().notify("gmail");
-    expect(await sql("SELECT failures, degraded, last_error_code FROM event_source")).toEqual([{ failures: 4, degraded: 1, last_error_code: "upstream" }]);
+    expect(await sql("SELECT failures, degraded, last_error_code FROM event_source WHERE id='gmail'")).toEqual([{ failures: 4, degraded: 1, last_error_code: "upstream" }]);
     const alert = await action(frames, 0, "send_private_msg");
     expect(alert.params.user_id).toBe("10000001");
     expect(alert.params.message?.[0]?.data.text).toContain("连续 3 次拉取失败");
@@ -127,7 +127,7 @@ describe("EventsDO delivery pipeline", () => {
     expect(alarm).toBeGreaterThan(Date.now() + 58 * 60_000);
     expect(alarm).toBeLessThanOrEqual(Date.now() + 60 * 60_000);
 
-    await sql("UPDATE event_source SET settings_json = ?", JSON.stringify({ ...DEFAULT_SETTINGS, quietHours: { start: beijing(-120), end: beijing(-60) } }));
+    await sql("UPDATE event_source SET settings_json = ? WHERE id='gmail'", JSON.stringify({ ...DEFAULT_SETTINGS, quietHours: { start: beijing(-120), end: beijing(-60) } }));
     await sql("UPDATE event_held SET received_at = received_at - 61000");
     await runDurableObjectAlarm(events());
     expect(await sql("SELECT key FROM event_held")).toEqual([]);
@@ -166,14 +166,14 @@ describe("EventsDO delivery pipeline", () => {
     await sql("INSERT INTO event_run (input_key, source, keys_json, delivered_at, status) VALUES ('k1','gmail','[]',1,'queued'),('k2','gmail','[]',2,'queued'),('k3','gmail','[]',3,'queued')");
     await events().finishRun("k1", "failed");
     await events().finishRun("k2", "failed");
-    expect(await sql("SELECT paused FROM event_source")).toEqual([{ paused: 0 }]);
+    expect(await sql("SELECT paused FROM event_source WHERE id='gmail'")).toEqual([{ paused: 0 }]);
     await events().finishRun("k3", "failed");
-    expect(await sql("SELECT paused, pause_reason FROM event_source")).toEqual([{ paused: 1, pause_reason: "turn_failures" }]);
+    expect(await sql("SELECT paused, pause_reason FROM event_source WHERE id='gmail'")).toEqual([{ paused: 1, pause_reason: "turn_failures" }]);
     expect(await sql("SELECT status FROM event_run ORDER BY rowid")).toEqual([{ status: "failed" }, { status: "failed" }, { status: "failed" }]);
 
     expect(await events().setPaused("gmail", false)).toBe(true);
     await sql("INSERT INTO event_run (input_key, source, keys_json, delivered_at, status) VALUES ('k4','gmail','[]',4,'queued')");
     await events().finishRun("k4", "failed");
-    expect(await sql("SELECT paused FROM event_source")).toEqual([{ paused: 0 }]);
+    expect(await sql("SELECT paused FROM event_source WHERE id='gmail'")).toEqual([{ paused: 0 }]);
   });
 });

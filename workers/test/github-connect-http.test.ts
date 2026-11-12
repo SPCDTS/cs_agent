@@ -1,0 +1,833 @@
+import { GitHubConnections } from "../src/github/connections";
+import { CONTROL_LIMIT, NOISE_LIMIT } from "../src/github/inbox";
+import { env, reset, runInDurableObject } from "cloudflare:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { exportPKCS8, generateKeyPair } from "jose";
+import worker from "../src/index";
+import { EventsDO } from "../src/events/do";
+import type { Env } from "../src/env";
+import { TokenVault } from "../src/mcp/crypto";
+
+let pem:string;
+beforeAll(async()=>{pem=await exportPKCS8((await generateKeyPair("RS256",{extractable:true})).privateKey);});
+afterEach(async()=>{vi.unstubAllGlobals();vi.restoreAllMocks();await reset();});
+const browser="a".repeat(64),secret="synthetic-app-webhook",storeKey="03".repeat(32);
+const appEnv=()=>({...env,ADMIN_TOKEN:"synthetic-admin",GITHUB_APP_ID:"123",GITHUB_APP_SLUG:"test-events",GITHUB_APP_PRIVATE_KEY:pem,
+ GITHUB_APP_WEBHOOK_SECRET:secret,GITHUB_APP_CLIENT_ID:"test-client",GITHUB_APP_CLIENT_SECRET:"synthetic-client-secret",
+ GITHUB_APP_CALLBACK_URL:"https://test/admin/github/oauth/callback",GITHUB_APP_STORE_KEY:storeKey});
+function mockGitHub() {
+ const revoked=new Set<number>(),suspended=new Set<number>();let refreshes=0;
+ const installs=(uid:number)=>uid===7?[456,789]:[999];
+ const fetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+  const url=new URL(String(input)), token=new Headers(init?.headers).get("authorization")??"", uid=token.includes("access8")?8:7;
+  const json=(value:unknown,status=200)=>new Response(JSON.stringify(value),{status});
+  if(url.hostname==="github.com"){
+   const form=new URLSearchParams(String(init?.body)), id=(form.get("code")??form.get("refresh_token"))?.includes("8")?8:7;
+   if(form.get("grant_type")==="refresh_token")refreshes++;
+   return json({access_token:"access"+id,refresh_token:"refresh"+id,token_type:"bearer",expires_in:28800,refresh_token_expires_in:15897600});
+  }
+  if(url.pathname.startsWith("/user")&&revoked.has(uid))return json({error:"private-diagnostic"},401);
+  if(url.pathname==="/user")return json({id:uid,login:"owner"+uid});
+  const installation=(id:number)=>({id,app_id:123,suspended_at:suspended.has(id)?"2026-01-01":null});
+  if(url.pathname==="/user/installations")return json({total_count:installs(uid).length,installations:installs(uid).map(installation)});
+  const userRepo=/^\/user\/installations\/(\d+)\/repositories$/.exec(url.pathname);
+  if(userRepo){const id=Number(userRepo[1]);return json({total_count:1,repositories:[{id:id+1,full_name:"owner/repo"+id}]});}
+  const appInstallation=/^\/app\/installations\/(\d+)$/.exec(url.pathname);
+  if(appInstallation)return json(installation(Number(appInstallation[1])));
+  const issue=/^\/app\/installations\/(\d+)\/access_tokens$/.exec(url.pathname);
+  if(issue)return json({token:"install"+issue[1],expires_at:new Date(Date.now()+3600_000).toISOString()});
+  if(url.pathname==="/installation/repositories"){
+   const id=Number(token.replace("Bearer install",""));
+   return json({total_count:2,repositories:[{id:id+1,full_name:"owner/repo"+id},{id:99999,full_name:"org/not-user-visible"}]});
+  }
+  throw new Error("unexpected_mock_path");
+ });
+ vi.stubGlobal("fetch",fetcher);return {fetcher,revoked,suspended,get refreshes(){return refreshes;}};
+}
+async function harness(run:(e:Env,instance:EventsDO,ctx:DurableObjectState)=>Promise<void>) {
+ await runInDurableObject(env.EVENTS.getByName("main"),async(_old,ctx)=>{
+  const e=appEnv();const instance=new EventsDO(ctx,e);
+  const routed={...e,EVENTS:{getByName:()=>instance} as unknown as Env["EVENTS"]};
+  await run(routed,instance,ctx);
+ });
+}
+async function admin(e:Env,path:string,value?:unknown,method="POST"){
+ return worker.fetch(new Request("https://test/admin/github/"+path,{method,headers:{Authorization:"Bearer synthetic-admin","Content-Type":"application/json"},body:value===undefined?undefined:JSON.stringify(value)}),e);
+}
+async function connect(e:Env,code="code7"){
+ const r=await admin(e,"connect/start",{browser});expect(r.status).toBe(200);
+ const start=await r.json() as {url:string};const url=new URL(start.url),state=url.searchParams.get("state")!;
+ expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+ const complete=await admin(e,"connect/complete",{browser,state,code});expect(complete.status).toBe(200);
+ return {state,complete};
+}
+async function webhook(e:Env,payload:unknown,delivery:string,event="issues",signingSecret=secret){
+ const body=JSON.stringify(payload),key=await crypto.subtle.importKey("raw",new TextEncoder().encode(signingSecret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+ const signature=Buffer.from(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(body))).toString("hex");
+ return worker.fetch(new Request("https://test/github/webhook",{method:"POST",body,headers:{"content-type":"application/json","x-github-delivery":delivery,"x-github-event":event,"x-hub-signature-256":"sha256="+signature}}),e);
+}
+const payload=(id=456,n=1)=>({installation:{id},repository:{id:id+1,full_name:"owner/repo"+id},action:"opened",issue:{number:n,title:"test"},sender:{id:7,login:"owner7"}});
+async function enable(instance:EventsDO,ids=[456,789]){
+ const current=(await instance.adminStatus()).github;
+ expect((await instance.putGitHubConfig({...current.value,repositoryIds:ids.map(id=>({installationId:id,repositoryId:id+1}))},current.revision)).ok).toBe(true);
+}
+
+describe("production GitHub App HTTP and EventsDO integration",()=>{
+ it("requires admin, binds PKCE to browser, expires and consumes state, and keeps callback URL inert",async()=>{
+  mockGitHub();await harness(async(e,_i,ctx)=>{
+   expect((await worker.fetch(new Request("https://test/admin/github/connections"),e)).status).toBe(401);
+   const start=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+   const state=new URL(start.url).searchParams.get("state");
+   expect((await admin(e,"connect/complete",{browser:"b".repeat(64),state,code:"code7"})).status).toBe(400);
+   expect((await admin(e,"connect/complete",{browser,state,code:"code7"})).status).toBe(200);
+   expect((await admin(e,"connect/complete",{browser,state,code:"code7"})).status).toBe(400);
+   const expired=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+   ctx.storage.sql.exec("UPDATE github_connect_state SET expires=0");
+   expect((await admin(e,"connect/complete",{browser,state:new URL(expired.url).searchParams.get("state"),code:"code7"})).status).toBe(400);
+   const callback=await worker.fetch(new Request("https://test/admin/github/oauth/callback?state=x&code="+encodeURIComponent("</script><script>alert(1)</script>")),e);
+   const html=await callback.text();expect(html).not.toContain("</script><script>");expect(callback.headers.get("referrer-policy")).toBe("no-referrer");
+   expect(html).toContain("history.replaceState");expect(html).toContain("github-oauth-result");
+  });
+ });
+ it("connects two identities without replacing installations, intersects repository IDs and encrypts every retained token",async()=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);await connect(e,"code8");
+   const view=i.githubConnectionsView();expect(view.identities.map(u=>u.id)).toEqual([7,8]);expect(view.installations.map(b=>b.installationId)).toEqual([456,789,999]);
+   expect(view.installations.every(b=>b.repositories.length===1)).toBe(true);
+   const rows=JSON.stringify(ctx.storage.sql.exec("SELECT * FROM github_identities").toArray());
+   for(const token of ["access7","refresh7","access8","refresh8"])expect(rows+JSON.stringify(view)).not.toContain(token);
+   expect(JSON.stringify(view)).not.toContain("not-user-visible");
+   await enable(i,[456,789,999]);
+   expect((await webhook(e,payload(999),"other-owner")).status).toBe(202);
+   expect(i.githubReceipt("other-owner")?.state).toBe("held");
+   await admin(e,"connect/disconnect",{kind:"installation",id:456});
+   expect(i.githubConnectionsView().installations.map(b=>b.installationId)).toEqual([789,999]);
+  });
+ });
+ it("fails closed for unbound IDs and legacy config; shares lifecycle and business receipt dedupe and never revives backlog",async()=>{
+  mockGitHub();await harness(async(e,i)=>{
+   await connect(e);
+   await webhook(e,payload(),"legacy-list");expect(i.githubReceipt("legacy-list")?.state).toBe("suppressed");
+   await enable(i);
+   await webhook(e,payload(456,2),"accepted");expect(i.githubReceipt("accepted")?.state).toBe("held");
+   await webhook(e,payload(999),"unbound");expect(i.githubReceipt("unbound")?.reason).toBe("installation_not_authorized");
+   const lifecycle={action:"suspend",installation:{id:456},sender:{id:7}};
+   await webhook(e,lifecycle,"lifecycle","installation");
+   expect(i.githubReceipt("accepted")?.state).toBe("suppressed");
+   expect(i.githubConnectionsView().installations.find(b=>b.installationId===789)?.status).toBe("active");
+   expect(await (await webhook(e,lifecycle,"changed-header","installation_repositories")).json()).toEqual({status:"body_duplicate"});
+   await admin(e,"connect/sync",{userId:7});expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+   expect(i.githubReceipt("accepted")?.state).toBe("suppressed");
+   await webhook(e,{action:"unsuspend",installation:{id:456}},"old-unsuspend","installation");
+   expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+   expect((await webhook(e,payload(456,3),"lifecycle")).status).toBe(409);
+  });
+ });
+ it("revokes all and only the matching identity, clears pending state, and rejects user token revocation on sync",async()=>{
+  const gh=mockGitHub();await harness(async(e,i)=>{
+   await connect(e);await connect(e,"code8");await enable(i,[456,789,999]);
+   const start=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+   await webhook(e,{action:"revoked",sender:{id:7}},"revoke","github_app_authorization");
+   expect(i.githubConnectionsView().identities.map(u=>u.id)).toEqual([8]);
+   expect(i.githubConnectionsView().installations.filter(b=>b.user.id===7).every(b=>b.status==="revoked")).toBe(true);
+   expect((await admin(e,"connect/complete",{browser,code:"code7",state:new URL(start.url).searchParams.get("state")})).status).toBe(400);
+   gh.revoked.add(8);await admin(e,"connect/sync",{userId:8});
+   expect(i.githubConnectionsView().identities).toEqual([]);
+  });
+ });
+ it("single-flights rotating refresh, persists ciphertext, restores after reconstruction and preserves empty CAS config",async()=>{
+  const gh=mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);
+   const row=ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_identities WHERE id=7").one();
+   const u=JSON.parse(row.value) as {id:number;generation:number;cipher:string};
+   const vault=new TokenVault(storeKey),aad=JSON.stringify(["github-app-owner",u.id,u.generation]);
+   const token=JSON.parse(await vault.decrypt(u.cipher,aad)) as {expiresAt:number};token.expiresAt=0;
+   u.cipher=await vault.encrypt(JSON.stringify(token),aad);ctx.storage.sql.exec("UPDATE github_identities SET value=? WHERE id=7",JSON.stringify(u));
+   await Promise.all([admin(e,"connect/sync",{userId:7}),admin(e,"connect/sync",{userId:7})]);expect(gh.refreshes).toBe(1);
+   const current=(await i.adminStatus()).github;
+   const results=await Promise.all([i.putGitHubConfig({...current.value,repositoryIds:[]},current.revision),i.putGitHubConfig({...current.value,repositoryIds:[]},current.revision)]);
+   expect(results.filter(r=>r.ok)).toHaveLength(1);
+   const recovered=new EventsDO(ctx,appEnv());expect((await recovered.adminStatus()).github.value.repositoryIds).toEqual([]);
+   expect(recovered.githubConnectionsView().installations).toHaveLength(2);
+   expect(JSON.stringify(recovered.githubConnectionsView())).not.toContain("access7");
+  });
+ });
+});
+
+it("accepts the App configuration ping without granting any installation and suppresses repository lifecycle independently",async()=>{
+ mockGitHub();await harness(async(e,i)=>{
+  expect((await webhook(e,{hook_id:1,zen:"test"},"app-ping","ping")).status).toBe(202);
+  expect(i.githubConnectionsView().installations).toEqual([]);
+  await connect(e);await enable(i);await webhook(e,payload(),"before-delete");
+  await webhook(e,{action:"deleted",installation:{id:456},repository:{id:457}},"repo-delete","repository");
+  expect(i.githubReceipt("before-delete")?.state).toBe("suppressed");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===789)?.status).toBe("active");
+  const current=(await i.adminStatus()).github;
+  expect((await i.putGitHubConfig({...current.value,repositoryIds:[{installationId:789,repositoryId:99999}]},current.revision)).ok).toBe(false);
+ });
+});
+it("never lets an in-flight OAuth or refresh result resurrect a lifecycle-revoked identity",async()=>{
+ const gh=mockGitHub();await harness(async(e,i)=>{
+  const original=gh.fetcher.getMockImplementation()!;let revoke=true;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URL(String(input)).pathname==="/user"&&revoke){revoke=false;await webhook(e,{action:"revoked",sender:{id:7}},"during-oauth","github_app_authorization");}
+   return original(input,init);
+  });
+  const start=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+  expect((await admin(e,"connect/complete",{browser,code:"code7",state:new URL(start.url).searchParams.get("state")})).status).toBe(400);
+  expect(i.githubConnectionsView().identities).toEqual([]);
+  await connect(e);
+  revoke=true;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URL(String(input)).pathname==="/user"&&revoke){revoke=false;await webhook(e,{action:"revoked",sender:{id:7},nonce:1},"during-sync","github_app_authorization");}
+   return original(input,init);
+  });
+  await admin(e,"connect/sync",{userId:7});
+  expect(i.githubConnectionsView().identities).toEqual([]);
+  expect(i.githubConnectionsView().installations.every(b=>b.status==="revoked")).toBe(true);
+ });
+});
+it("fails closed on ciphertext identity substitution and never falls back to the installation scope",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await connect(e,"code8");
+  const a=JSON.parse(ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_identities WHERE id=7").one().value) as {cipher:string};
+  const b=JSON.parse(ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_identities WHERE id=8").one().value) as {cipher:string};
+  b.cipher=a.cipher;ctx.storage.sql.exec("UPDATE github_identities SET value=? WHERE id=8",JSON.stringify(b));
+  await admin(e,"connect/sync",{userId:8});
+  expect(i.githubConnectionsView().identities.map(u=>u.id)).toEqual([7]);
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===999)?.status).toBe("revoked");
+ });
+});
+
+async function storedTokens(ctx:DurableObjectState,id:number) {
+ const u=JSON.parse(ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_identities WHERE id=?",id).one().value) as {id:number;generation:number;cipher:string};
+ const vault=new TokenVault(storeKey),aad=JSON.stringify(["github-app-owner",u.id,u.generation]);
+ const tokens=JSON.parse(await vault.decrypt(u.cipher,aad)) as {access:string;expiresAt:number};
+ return {u,vault,aad,tokens};
+}
+async function expireUser(ctx:DurableObjectState,id:number) {
+ const {u,vault,aad,tokens}=await storedTokens(ctx,id);tokens.expiresAt=0;
+ u.cipher=await vault.encrypt(JSON.stringify(tokens),aad);
+ ctx.storage.sql.exec("UPDATE github_identities SET value=? WHERE id=?",JSON.stringify(u),id);
+}
+it.each(["installation","identity"] as const)("keeps another identity's rotated token when concurrent sync revokes %s",async(kind)=>{
+ const gh=mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await connect(e,"code8");await expireUser(ctx,8);
+  let release!:()=>void,entered!:()=>void;
+  const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r);
+  const original=gh.fetcher.getMockImplementation()!;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   const form=new URLSearchParams(String(init?.body));
+   if(form.get("grant_type")==="refresh_token"&&form.get("refresh_token")==="refresh8") {
+    entered();await gate;
+    return Response.json({access_token:"access8-rotated",refresh_token:"refresh8-rotated",token_type:"bearer",expires_in:28800,refresh_token_expires_in:15897600});
+   }
+   return original(input,init);
+  });
+  const pending=admin(e,"connect/sync",{userId:8});await started;
+  try {
+   if(kind==="installation")gh.suspended.add(456);else gh.revoked.add(7);
+   await admin(e,"connect/sync",{userId:7});
+  } finally {release();}
+  await pending;
+  expect((await storedTokens(ctx,8)).tokens.access).toBe("access8-rotated");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===999)?.status).toBe("active");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===789)?.status).toBe(kind==="identity"?"revoked":"active");
+ });
+});
+it("retains a rotated user credential across same-identity installation invalidation without resurrecting that installation",async()=>{
+ const gh=mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await expireUser(ctx,7);
+  const original=gh.fetcher.getMockImplementation()!;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URLSearchParams(String(init?.body)).get("grant_type")==="refresh_token"){
+    await webhook(e,{action:"suspend",installation:{id:456}},"during-refresh-install","installation");
+    return Response.json({access_token:"access7-rotated",refresh_token:"refresh7-rotated",token_type:"bearer",expires_in:28800,refresh_token_expires_in:15897600});
+   }
+   return original(input,init);
+  });
+  await admin(e,"connect/sync",{userId:7});
+  expect((await storedTokens(ctx,7)).tokens.access).toBe("access7-rotated");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===789)?.status).toBe("active");
+ });
+});
+it("prevents identity generation ABA when an old sync fails after disconnect and reconnect",async()=>{
+ const gh=mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);const before=(await storedTokens(ctx,7)).u.generation;
+  let release!:()=>void,entered!:()=>void,wait=true;
+  const gate=new Promise<void>(r=>release=r),started=new Promise<void>(r=>entered=r),original=gh.fetcher.getMockImplementation()!;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URL(String(input)).pathname==="/user"&&wait){wait=false;entered();await gate;return Response.json({error:"revoked"},{status:401});}
+   return original(input,init);
+  });
+  const pending=admin(e,"connect/sync",{userId:7});await started;
+  try {await admin(e,"connect/disconnect",{kind:"user",id:7});await connect(e);}
+  finally {release();}
+  await pending;
+  expect((await storedTokens(ctx,7)).u.generation).toBeGreaterThan(before);
+  expect(i.githubConnectionsView().identities.map(u=>u.id)).toEqual([7]);
+  expect(i.githubConnectionsView().installations.every(b=>b.status==="active")).toBe(true);
+ });
+});
+it("reconnect preserves pending work still in the intersection, suppressing only removed repositories",async()=>{
+ const gh=mockGitHub();await harness(async(e,i)=>{
+  await connect(e);await enable(i);await webhook(e,payload(456),"keep-or-remove");await webhook(e,payload(789),"keep");
+  await connect(e);
+  expect(i.githubReceipt("keep-or-remove")?.state).toBe("held");expect(i.githubReceipt("keep")?.state).toBe("held");
+  const original=gh.fetcher.getMockImplementation()!;
+  gh.fetcher.mockImplementation(async(input,init)=>new URL(String(input)).pathname==="/user/installations/456/repositories"
+   ? Response.json({total_count:0,repositories:[]}) : original(input,init));
+  await connect(e);
+  expect(i.githubReceipt("keep-or-remove")?.state).toBe("suppressed");expect(i.githubReceipt("keep")?.state).toBe("held");
+ });
+});
+it("rejects partial App configuration at ingress and execution without an alternate authorization path",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  const current=(await i.adminStatus()).github;
+  await i.putGitHubConfig({...current.value},current.revision);
+  await webhook(e,payload(),"pre-mode-change");
+  const variants:Env[]=[
+   {...e,GITHUB_APP_CLIENT_SECRET:undefined},
+   {...e,GITHUB_APP_STORE_KEY:undefined},
+   {...e,GITHUB_APP_PRIVATE_KEY:undefined},
+   {...e,GITHUB_APP_CALLBACK_URL:"https://test/wrong"},
+  ];
+  for(const [n,bad] of variants.entries()){
+   expect((await webhook(bad,payload(456,n+2),"bad-mode-"+n)).status).toBe(503);
+   expect(i.githubReceipt("bad-mode-"+n)).toBeNull();
+  }
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='mode-permit' WHERE delivery_id='pre-mode-change'");
+  const recovered=new EventsDO(ctx,variants[0]!);
+  expect((await recovered.adminStatus()).github.configured).toBe(false);
+  expect(recovered.health().sources.find(s=>s.id==="github")?.enabled).toBe(false);
+  expect(recovered.claimGitHubRun("mode-permit")).toBe("suppressed");
+  expect((await recovered.receiveGitHub({deliveryId:"direct-invalid",bodyHash:"a".repeat(64),repository:"owner/repo456",repositoryId:457,
+   installationId:456,event:"issues",action:"opened",receivedAt:Date.now(),normalized:null})).status).toBe(503);
+ });
+});
+
+it("ignores removed environment switches and rejects the old secret at the only ingress",async()=>{
+ mockGitHub();await harness(async(e,i)=>{
+  const obsolete={...e,GITHUB_MODE:"manual",GITHUB_WEBHOOK_SECRET:secret,GITHUB_APP_WEBHOOK_SECRET:undefined};
+  expect((await webhook(obsolete,payload(),"old-secret-only")).status).toBe(503);
+  expect(i.githubReceipt("old-secret-only")).toBeNull();
+  await connect(e);await enable(i);
+  const withObsoleteKeys={...e,GITHUB_MODE:"manual",GITHUB_WEBHOOK_SECRET:"obsolete-secret"};
+  expect((await webhook(withObsoleteKeys,payload(),"old-signature","issues","obsolete-secret")).status).toBe(401);
+  expect((await webhook(withObsoleteKeys,{...payload(),installation:undefined},"no-installation")).status).toBe(400);
+  expect((await webhook(withObsoleteKeys,payload(),"app-only-works")).status).toBe(202);
+  expect(i.githubReceipt("app-only-works")?.state).toBe("held");
+ });
+});
+it("migrates old config without granting IDs, keeps receipts readable and refuses legacy execution",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  await webhook(e,payload(),"legacy-pending");await webhook(e,payload(456,2),"legacy-issued");
+  const current=(await i.adminStatus()).github;
+  const old={...current.value,repositories:["owner/repo456"]};
+  ctx.storage.sql.exec("UPDATE github_config SET value=?,revision=7",JSON.stringify(old));
+  ctx.storage.sql.exec("CREATE TABLE github_repo_pin(name TEXT PRIMARY KEY,repository_id INTEGER NOT NULL)");
+  ctx.storage.sql.exec("INSERT INTO github_repo_pin VALUES('owner/repo456',457)");
+  ctx.storage.sql.exec("UPDATE github_receipt SET installation_id=0,state='enqueued',input_key='legacy-pending-run' WHERE delivery_id='legacy-pending'");
+  ctx.storage.sql.exec("UPDATE github_receipt SET installation_id=99999,state='started',input_key='legacy-issued-run' WHERE delivery_id='legacy-issued'");
+  const recovered=new EventsDO(ctx,e),view=(await recovered.adminStatus()).github;
+  expect(view.value.repositoryIds).toEqual([]);expect(view.revision).toBe("8");
+  expect(view).not.toHaveProperty("mode");expect(view).not.toHaveProperty("pins");expect(view.value).not.toHaveProperty("repositories");
+  expect(ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE name='github_repo_pin'").toArray()).toEqual([]);
+  expect(recovered.githubReceipt("legacy-pending")?.state).toBe("suppressed");
+  expect(recovered.githubReceipt("legacy-issued")?.state).toBe("started");
+  expect(recovered.claimGitHubRun("legacy-pending-run")).toBe("suppressed");
+  expect(recovered.claimGitHubRun("legacy-issued-run")).toBe("suppressed");
+  expect((await recovered.putGitHubConfig(view.value,"7")).error).toBe("conflict");
+  expect((await admin(e,"config",{expectedRevision:view.revision,value:old},"PUT")).status).toBe(400);
+  await enable(recovered);
+  expect(recovered.claimGitHubRun("legacy-pending-run")).toBe("suppressed");
+  expect((await webhook(e,payload(456,3),"fresh-app-event")).status).toBe(202);
+  expect(i.githubReceipt("fresh-app-event")?.state).toBe("held");
+ });
+});
+
+describe("PR1 isolated ingress quotas and object IDs",()=>{
+ it("PR1 more than 5000 signed stranger events cannot consume owner business quota",async()=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);await enable(i);
+   const protectedPing={...payload(456,99),hook_id:99};
+   await webhook(e,protectedPing,"protected-control","ping");
+   let last=0;
+   for(let n=0;n<5001;n++)last=(await webhook(e,{...payload(987654,n+1),sender:{id:90000,login:"stranger"}},"noise-"+n)).status;
+   const owner=await webhook(e,payload(),"owner-after-noise");
+   expect({noise:last,owner:owner.status}).toEqual({noise:202,owner:202});
+   expect(i.githubReceipt("owner-after-noise")?.state).toBe("held");
+   expect(i.githubReceipt("protected-control")?.reason).toBe("ping");
+   expect(await (await webhook(e,protectedPing,"stripped-ping-header")).json()).toEqual({status:"body_duplicate"});
+   expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_aux_receipt WHERE kind='noise'").one().n).toBe(NOISE_LIMIT);
+   expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt").one().n).toBe(1);
+  });
+ },60000); // Deliberate 5001 signed HTTP requests, not a relaxed existing timing assertion.
+ it("PR1 unknown installation lifecycle cannot invalidate owner OAuth or existing grants",async()=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);
+   const start=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+   const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+   expect((await webhook(e,{installation:{id:987654},action:"deleted",sender:{id:90000}},"unknown-life","installation")).status).toBe(202);
+   expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+   expect(i.githubConnectionsView().installations.every(b=>b.status==="active")).toBe(true);
+   expect((await admin(e,"connect/complete",{browser,state:new URL(start.url).searchParams.get("state"),code:"code7"})).status).toBe(200);
+  });
+ });
+ it.each(["installation","github_app_authorization"])("PR1 %s revocation persists even with a full business ledger",async event=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);await enable(i);
+   ctx.storage.sql.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<5000)
+    INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,event_key)
+    SELECT 'full-'||i,'hash-'||i,'owner/repo',457,'issues','opened',1,?,'finished','key-'||i FROM n`,Date.now());
+   const body=event==="installation"?{installation:{id:456},action:"deleted"}:{action:"revoked",sender:{id:7}};
+   expect((await webhook(e,body,"full-revoke",event)).status).toBe(202);
+   const recovered=new EventsDO(ctx,e);
+   expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+   expect((await webhook(e,body,"full-revoke",event)).status).toBe(200);
+   expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt").one().n).toBe(5000);
+  });
+ });
+ it("PR1 body hash and delivery conflicts span business, lifecycle and ping headers",async()=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);await enable(i);
+   const business={...payload(),hook_id:1};
+   expect((await webhook(e,business,"business-first")).status).toBe(202);
+   expect(await (await webhook(e,business,"life-replay","installation")).json()).toEqual({status:"body_duplicate"});
+   expect(await (await webhook(e,business,"ping-replay","ping")).json()).toEqual({status:"body_duplicate"});
+   expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+   const control={...payload(456,2),hook_id:2};
+   expect((await webhook(e,control,"control-first","ping")).status).toBe(202);
+   expect(await (await webhook(e,control,"business-replay")).json()).toEqual({status:"body_duplicate"});
+   expect((await webhook(e,payload(456,3),"control-first")).status).toBe(409);
+   expect((await webhook(e,{hook_id:3},"business-first","ping")).status).toBe(409);
+   expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM event_held").one().n).toBe(1);
+  });
+ });
+ it.each(["a".repeat(40),"b".repeat(64),"C".repeat(64)])("PR1 accepts a valid hexadecimal push object ID %s",async after=>{
+  mockGitHub();await harness(async(e,i,ctx)=>{
+   await connect(e);await enable(i);
+   const current=(await i.adminStatus()).github;
+   await i.putGitHubConfig({...current.value,selections:["push"]},current.revision);
+   expect((await webhook(e,{...payload(),action:undefined,ref:"refs/heads/main",after},"push-valid","push")).status).toBe(202);
+   expect(ctx.storage.sql.exec<{event_json:string}>("SELECT event_json FROM event_held").one().event_json).toContain("/commit/"+after);
+  });
+ });
+ it.each(["a".repeat(39),"a".repeat(41),"a".repeat(63),"a".repeat(65),"g".repeat(40),["a".repeat(40)],null,"a".repeat(39)+"\n","a".repeat(40)+"\n","b".repeat(63)+"\r","a".repeat(39)+" "].map(after=>({after})))("PR1 rejects malformed push object ID %j",async ({after})=>{
+  await harness(async e=>{
+   expect((await webhook(e,{...payload(),action:undefined,ref:"refs/heads/main",after},"push-invalid","push")).status).toBe(400);
+  });
+ });
+});
+
+it("PR1 diagnostic insertion failure rolls back revocation and ACK, then retry commits durably",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"before-control-failure");
+  ctx.storage.sql.exec("CREATE TRIGGER fail_control BEFORE INSERT ON github_aux_receipt BEGIN SELECT RAISE(ABORT,'synthetic_control_failure'); END");
+  const body={installation:{id:456},action:"deleted"};
+  expect((await webhook(e,body,"control-atomic","installation")).status).toBe(503);
+  expect(i.githubReceipt("control-atomic")).toBeNull();
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect(i.githubReceipt("before-control-failure")?.state).toBe("held");
+  ctx.storage.sql.exec("DROP TRIGGER fail_control");
+  expect((await webhook(e,body,"control-atomic","installation")).status).toBe(202);
+  const recovered=new EventsDO(ctx,e);
+  expect(recovered.githubReceipt("control-atomic")?.reason).toBe("lifecycle");
+  expect(recovered.githubReceipt("before-control-failure")?.state).toBe("suppressed");
+  const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+  expect((await webhook(e,body,"control-atomic","installation")).status).toBe(200);
+  expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+  expect((await webhook(e,{installation:{id:456},action:"unsuspend"},"out-of-order","installation")).status).toBe(202);
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  await recovered.syncGitHubConnect(7);
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect((await webhook(e,body,"old-control-new-header","repository")).status).toBe(200);
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+ });
+});
+it.each(["installation","github_app_authorization"])("PR1 %s can cancel only a matching discovered in-flight connection",async event=>{
+ const api=mockGitHub(),original=api.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  let intercepted=false;
+  api.fetcher.mockImplementation(async(input,init)=>{
+   if(String(input).includes("/installation/repositories")&&!intercepted){
+    intercepted=true;
+    const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+    await webhook(e,{installation:{id:987654},action:"deleted",sender:{id:90000}},"unrelated-in-flight","installation");
+    expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+    const body=event==="installation"?{installation:{id:456},action:"deleted"}:{sender:{id:7},action:"revoked"};
+    expect((await webhook(e,body,"matching-in-flight",event)).status).toBe(202);
+   }
+   return original(input,init);
+  });
+  const start=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+  expect((await admin(e,"connect/complete",{browser,state:new URL(start.url).searchParams.get("state"),code:"code7"})).status).toBe(400);
+  expect(intercepted).toBe(true);expect(i.githubConnectionsView().identities).toEqual([]);
+  expect(i.githubConnectionsView().installations).toEqual([]);
+  expect(ctx.storage.sql.exec<{kind:string}>("SELECT kind FROM github_aux_receipt WHERE delivery_id='matching-in-flight'").one().kind).toBe("control");
+ });
+});
+it("PR1 control capacity and TTL define a bounded replay window without evicting business records",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  await webhook(e,payload(),"protected-business");
+  const first={...payload(456,100),hook_id:1};
+  for(let n=0;n<CONTROL_LIMIT+1;n++)expect((await webhook(e,{...payload(456,n+100),hook_id:n+1},"control-ring-"+n,"ping")).status).toBe(202);
+  expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_aux_receipt WHERE kind='control'").one().n).toBe(CONTROL_LIMIT);
+  expect(i.githubReceipt("protected-business")?.state).toBe("held");expect(i.githubReceipt("control-ring-0")).toBeNull();
+  const oldest=ctx.storage.sql.exec<{delivery_id:string}>("SELECT delivery_id FROM github_aux_receipt WHERE kind='control' ORDER BY rowid LIMIT 1").one().delivery_id;
+  ctx.storage.sql.exec("CREATE TRIGGER fail_rollover BEFORE INSERT ON github_aux_receipt BEGIN SELECT RAISE(ABORT,'synthetic_rollover_failure'); END");
+  expect((await webhook(e,{installation:{id:456},action:"deleted"},"rollover-failure","installation")).status).toBe(503);
+  expect(i.githubReceipt(oldest)).not.toBeNull();
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  ctx.storage.sql.exec("DROP TRIGGER fail_rollover");
+
+  // After FIFO eviction, the same signed body may be reprocessed, but still needs current owner scope.
+  expect((await webhook(e,first,"after-control-eviction")).status).toBe(202);
+  expect(i.githubReceipt("after-control-eviction")?.state).toBe("held");
+  const expires={...payload(456,9000),hook_id:9000};
+  await webhook(e,expires,"expiring-control","ping");
+  ctx.storage.sql.exec("UPDATE github_aux_receipt SET expires_at=0 WHERE delivery_id='expiring-control'");
+  expect((await webhook(e,expires,"after-control-expiry")).status).toBe(202);
+  expect(i.githubReceipt("after-control-expiry")?.state).toBe("held");
+  await webhook(e,{hook_id:12345,installation:{id:456}},"control-refill","ping");
+  expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_aux_receipt WHERE kind='control'").one().n).toBe(CONTROL_LIMIT);
+  // Even a full protected ring must persist and perform a new revocation.
+  expect((await webhook(e,{installation:{id:456},action:"deleted"},"ring-full-revoke","installation")).status).toBe(202);
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+ });
+});
+it("PR1 upgrade preserves the old bounded ledger and global hashes without charging new business quota",async()=>{
+ mockGitHub();await harness(async(e,_i,ctx)=>{
+  await connect(e);
+  const oldBody={...payload(456,91),hook_id:91};
+  const hash=Buffer.from(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(oldBody)))).toString("hex");
+  ctx.storage.sql.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<4999)
+    INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,event_key)
+    SELECT 'legacy-'||i,'legacy-hash-'||i,'owner/repo',457,'issues','opened',1,?,'finished','legacy-key-'||i FROM n`,Date.now());
+  ctx.storage.sql.exec(`INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,event_key)
+    VALUES('legacy-signed',?,'owner/repo',457,'issues','opened',1,?,'finished','legacy-signed-key')`,hash,Date.now());
+  ctx.storage.sql.exec("ALTER TABLE github_receipt DROP COLUMN quota");
+  const recovered=new EventsDO(ctx,e);
+  const routed={...e,EVENTS:{getByName:()=>recovered} as unknown as Env["EVENTS"]};
+  await enable(recovered);
+  expect((await recovered.adminStatus()).github.diagnostics.legacyCount).toBe(5000);
+  expect((await webhook(routed,oldBody,"old-body-new-header","ping")).status).toBe(200);
+  expect((await webhook(routed,payload(),"new-owner-room")).status).toBe(202);
+  expect(recovered.githubReceipt("legacy-signed")?.state).toBe("finished");
+  expect((await recovered.adminStatus()).github.count).toBe(1);
+  expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt").one().n).toBe(5001);
+ });
+});
+
+it("PR1 unknown users and installations do not invalidate a discovered owner's OAuth state",async()=>{
+ const api=mockGitHub(),original=api.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  let intercept=true;
+  api.fetcher.mockImplementation(async(input,init)=>{
+   if(String(input).endsWith("/user")&&intercept){
+    intercept=false;
+    const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+    await webhook(e,{action:"revoked",sender:{id:987654}},"unrelated-user-before-discovery","github_app_authorization");
+    for(let n=0;n<260;n++) await webhook(e,{action:"deleted",installation:{id:800000+n}},"opaque-unknown-"+n,"installation");
+    expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+   }
+   return original(input,init);
+  });
+  await connect(e);
+  expect(i.githubConnectionsView().identities.map(u=>u.id)).toEqual([7]);
+ });
+});
+it("PR1 opaque OAuth revocation tracking is bounded and rejects overflow without deleting other states",async()=>{
+ const api=mockGitHub(),original=api.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  let intercept=true;
+  api.fetcher.mockImplementation(async(input,init)=>{
+   if(String(input).endsWith("/user")&&intercept){
+    intercept=false;
+    const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+    for(let n=0;n<257;n++)await webhook(e,{action:"revoked",sender:{id:800000+n}},"opaque-revoke-"+n,"github_app_authorization");
+    expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+    expect(ctx.storage.sql.exec("SELECT * FROM github_connect_state").toArray()).toHaveLength(1);
+   }
+   return original(input,init);
+  });
+  const start=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+  const independent=await (await admin(e,"connect/start",{browser})).json() as {url:string};
+  expect((await admin(e,"connect/complete",{browser,state:new URL(start.url).searchParams.get("state"),code:"code7"})).status).toBe(400);
+  expect(i.githubConnectionsView().identities).toEqual([]);
+  expect((await admin(e,"connect/complete",{browser,state:new URL(independent.url).searchParams.get("state"),code:"code7"})).status).toBe(200);
+ });
+});
+
+it.each(["installation","repository"])("PR1 follow-up real %s header lifecycle is deduplicated in both arrival orders after reconstruction",async event=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  const control=payload(456,201);
+  // Headers are unsigned: conservative parsing really treats this issues.opened body as lifecycle.
+  expect((await webhook(e,control,"first-real-control",event)).status).toBe(202);
+  expect(i.githubReceipt("first-real-control")?.reason).toBe("lifecycle");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  const recovered=new EventsDO(ctx,e),routed={...e,EVENTS:{getByName:()=>recovered} as unknown as Env["EVENTS"]};
+  await recovered.syncGitHubConnect(7);
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect(await (await webhook(routed,control,"control-then-business")).json()).toEqual({status:"body_duplicate"});
+  expect(await (await webhook(routed,control,"first-real-control")).json()).toEqual({status:"duplicate"});
+  expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toEqual([]);
+  const business=payload(456,202);
+  expect((await webhook(routed,business,"first-real-business")).status).toBe(202);
+  const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+  expect(await (await webhook(routed,business,"business-then-control",event)).json()).toEqual({status:"body_duplicate"});
+  expect(recovered.githubReceipt("first-real-business")?.state).toBe("held");
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+  expect((await webhook(routed,business,"first-real-control")).status).toBe(409);
+  expect((await webhook(routed,control,"first-real-business",event)).status).toBe(409);
+ });
+});
+it.each(["issues","repository","ping"].flatMap(event=>["ttl","fifo"].map(boundary=>({event,boundary}))))(
+ "PR1 follow-up unknown $event body remains deduplicated after authorization until $boundary ends",async({event,boundary})=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  const body={...payload(456,301),hook_id:301};
+  expect((await webhook(e,body,"before-owner",event)).status).toBe(202);
+  expect(ctx.storage.sql.exec<{kind:string}>("SELECT kind FROM github_aux_receipt WHERE delivery_id='before-owner'").one().kind).toBe("noise");
+  await connect(e);await enable(i);
+  const recovered=new EventsDO(ctx,e),routed={...e,EVENTS:{getByName:()=>recovered} as unknown as Env["EVENTS"]};
+  expect(await (await webhook(routed,body,"after-owner")).json()).toEqual({status:"body_duplicate"});
+  expect(await (await webhook(routed,body,"before-owner")).json()).toEqual({status:"duplicate"});
+  expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toEqual([]);
+  if(boundary==="ttl")ctx.storage.sql.exec("UPDATE github_aux_receipt SET expires_at=0 WHERE delivery_id='before-owner'");
+  else {
+   for(let n=0;n<NOISE_LIMIT;n++)expect((await webhook(routed,{...payload(900000+n,n+1),sender:{id:800000+n}},"evict-unknown-"+n)).status).toBe(202);
+   expect(recovered.githubReceipt("before-owner")).toBeNull();
+  }
+  // Losing a diagnostic hash is not authority: selection is still required.
+  await enable(recovered,[]);
+  expect(await (await webhook(routed,body,"expired-without-selection")).json()).toEqual({status:"suppressed"});
+  expect(recovered.githubReceipt("expired-without-selection")?.reason).toBe("repository_not_allowed");
+  expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toEqual([]);
+  ctx.storage.sql.exec("UPDATE github_aux_receipt SET expires_at=0 WHERE delivery_id='expired-without-selection'");
+  await enable(recovered);
+  expect(await (await webhook(routed,body,"expired-with-current-authority")).json()).toEqual({status:"received"});
+  expect(recovered.githubReceipt("expired-with-current-authority")?.state).toBe("held");
+  expect(await (await webhook(routed,body,"expired-body-control-replay","repository")).json()).toEqual({status:"body_duplicate"});
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+ });
+});
+it("PR1 follow-up auxiliary receipts, duplicate headers and conflicts never schedule a business alarm",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await ctx.storage.deleteAlarm();
+  const wake=vi.spyOn(ctx.storage,"setAlarm");
+  for(let n=0;n<12;n++)await webhook(e,{...payload(900000+n),sender:{id:800000+n}},"noisy-wake-"+n);
+  await webhook(e,{hook_id:1,installation:{id:456}},"ping-no-wake","ping");
+  await webhook(e,{...payload(),action:"closed"},"filtered-no-wake");
+  await webhook(e,payload(456,401),"control-no-wake","repository");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  expect(wake).not.toHaveBeenCalled();expect(await ctx.storage.getAlarm()).toBeNull();
+  await i.syncGitHubConnect(7);
+  const body=payload(456,402);
+  expect((await webhook(e,body,"business-wake")).status).toBe(202);
+  expect(wake).toHaveBeenCalledTimes(1);expect(await ctx.storage.getAlarm()).not.toBeNull();
+  await ctx.storage.deleteAlarm();wake.mockClear();
+  expect((await webhook(e,body,"business-wake")).status).toBe(200);
+  expect((await webhook(e,body,"duplicate-control-no-wake","repository")).status).toBe(200);
+  expect((await webhook(e,payload(456,403),"business-wake")).status).toBe(409);
+  expect(wake).not.toHaveBeenCalled();expect(await ctx.storage.getAlarm()).toBeNull();
+ });
+});
+it("PR1 follow-up a failed business alarm never ACKs and Cron recovers the committed held receipt",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await ctx.storage.deleteAlarm();
+  const wake=vi.spyOn(ctx.storage,"setAlarm").mockRejectedValueOnce(new Error("synthetic_alarm_failure"));
+  const body=payload(456,501);
+  expect((await webhook(e,body,"failed-wake")).status).toBe(503);
+  expect(i.githubReceipt("failed-wake")?.state).toBe("held");
+  wake.mockRestore();
+  const recovered=new EventsDO(ctx,e),routed={...e,EVENTS:{getByName:()=>recovered} as unknown as Env["EVENTS"]};
+  expect((await webhook(routed,body,"failed-wake-retry")).status).toBe(200);
+  expect(await ctx.storage.getAlarm()).toBeNull();
+  await recovered.tick();
+  expect(recovered.githubReceipt("failed-wake")?.state).toBe("held");
+  expect(await ctx.storage.getAlarm()).not.toBeNull();
+  expect(ctx.storage.sql.exec("SELECT 1 FROM github_receipt").toArray()).toHaveLength(1);
+ });
+});
+
+function expireInstallationProofs(ctx:DurableObjectState) {
+ for(const row of ctx.storage.sql.exec<{id:number;value:string}>("SELECT id,value FROM github_installations").toArray()){
+  const value=JSON.parse(row.value);value.until=Date.now()-1;
+  ctx.storage.sql.exec("UPDATE github_installations SET value=? WHERE id=?",JSON.stringify(value),row.id);
+ }
+}
+it.each(["held","enqueued"] as const)("PR1 blocking expired proof survives reconstruction without suppressing %s backlog",async state=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"proof-recovery");
+  if(state==="enqueued")ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='proof-run' WHERE delivery_id='proof-recovery'");
+  expireInstallationProofs(ctx);
+  const recovered=new EventsDO(ctx,e);
+  expect(recovered.githubReceipt("proof-recovery")?.state).toBe(state);
+  expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toHaveLength(1);
+ });
+});
+it("PR1 blocking expired proof returns wait at claim rather than permanently suppressing",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"proof-claim");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='proof-claim-run' WHERE delivery_id='proof-claim'");
+  expireInstallationProofs(ctx);
+  expect(i.claimGitHubRun("proof-claim-run")).toBe("wait");
+  expect(i.githubReceipt("proof-claim")?.state).toBe("enqueued");
+ });
+});
+it("PR1 blocking successful refresh after proof expiry retains authorized held work",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"proof-refresh");
+  expireInstallationProofs(ctx);
+  await i.syncGitHubConnect(7);
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect(i.githubReceipt("proof-refresh")?.state).toBe("held");
+ });
+});
+it("PR1 blocking reconnect after proof expiry keeps work still inside the current intersection",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"proof-complete");
+  expireInstallationProofs(ctx);
+  await connect(e);
+  expect(i.githubReceipt("proof-complete")?.state).toBe("held");
+ });
+});
+it("PR1 blocking selected known installation can retain new stale arrivals but cannot execute them",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);expireInstallationProofs(ctx);
+  expect((await webhook(e,payload(),"proof-new")).status).toBe(202);
+  expect(i.githubReceipt("proof-new")?.state).toBe("held");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='proof-new-run' WHERE delivery_id='proof-new'");
+  expect(i.claimGitHubRun("proof-new-run")).toBe("wait");
+ });
+});
+it.each(["network","timeout","user-5xx","user-installation-5xx","app-installation-5xx","refresh-5xx"])(
+ "PR1 blocking transient %s retains credentials and backlog while withholding permits",async mode=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"transient-pending");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='transient-run' WHERE delivery_id='transient-pending'");
+  if(mode==="refresh-5xx")await expireUser(ctx,7);
+  const credential=ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_identities WHERE id=7").one().value;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   const path=new URL(String(input)).pathname;
+   const target=mode==="user-installation-5xx"?"/user/installations/456/repositories":
+    mode==="app-installation-5xx"?"/app/installations/456":mode==="refresh-5xx"?"/login/oauth/access_token":"/user";
+   if(path===target){
+    if(mode==="network")throw new TypeError("synthetic_network_failure");
+    if(mode==="timeout")throw new DOMException("synthetic_timeout","AbortError");
+    return Response.json({error:"temporary"},{status:503});
+   }
+   return native(input,init);
+  });
+  await i.syncGitHubConnect(7);
+  expect(i.githubConnectionsView().identities.map(u=>u.id)).toEqual([7]);
+  expect(ctx.storage.sql.exec<{value:string}>("SELECT value FROM github_identities WHERE id=7").one().value).toBe(credential);
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).not.toBe("revoked");
+  expect(i.githubReceipt("transient-pending")?.state).toBe("enqueued");
+  expect(i.claimGitHubRun("transient-run")).toBe("wait");
+ });
+});
+it("PR1 blocking confirmed user rejection still revokes rather than treating rejection as stale",async()=>{
+ const gh=mockGitHub();await harness(async(e,i)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"confirmed-revoked");
+  gh.revoked.add(7);await i.syncGitHubConnect(7);
+  expect(i.githubConnectionsView().identities).toEqual([]);
+  expect(i.githubReceipt("confirmed-revoked")?.state).toBe("suppressed");
+ });
+});
+it("PR1 blocking tick waits for GitHub verification before GitHub polling but not Gmail polling",async()=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i)=>{
+  await connect(e);await enable(i);
+  let release!:()=>void,enter!:()=>void,first=true,gmailPolled=false,githubPolled=false;
+  const gate=new Promise<void>(r=>release=r),entered=new Promise<void>(r=>enter=r);
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URL(String(input)).pathname==="/user"&&first){first=false;enter();await gate;}
+   return native(input,init);
+  });
+  const original=GitHubConnections.prototype.sync;let synchronized:Promise<void>|undefined;
+  vi.spyOn(GitHubConnections.prototype,"sync").mockImplementation(function(this:GitHubConnections,...args){
+   synchronized=original.apply(this,args);return synchronized;
+  });
+  vi.spyOn(i,"poll").mockImplementation(async id=>{
+   if(id==="gmail")gmailPolled=true;
+   if(id==="github")githubPolled=true;
+  });
+  const tick=i.tick();
+  try {
+   await entered;
+   expect(gmailPolled).toBe(true);
+   expect(githubPolled).toBe(false);
+  } finally {release();await tick;await synchronized;}
+  expect(githubPolled).toBe(true);
+ });
+});
+
+it("PR1 repair persists backoff across reconstruction and resumes only after revalidation",async()=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"retry-pending");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key='retry-run' WHERE delivery_id='retry-pending'");
+  gh.fetcher.mockImplementation(async()=>Response.json({error:"temporary"},{status:503}));
+  await i.syncGitHubConnect(7);
+  expect(i.claimGitHubRun("retry-run")).toBe("wait");
+  const recovered=new EventsDO(ctx,e);
+  vi.spyOn(recovered,"poll").mockResolvedValue();
+  gh.fetcher.mockImplementation(native);gh.fetcher.mockClear();
+  await recovered.tick();
+  expect(gh.fetcher).not.toHaveBeenCalled();
+  expect(recovered.claimGitHubRun("retry-run")).toBe("wait");
+  for(const row of ctx.storage.sql.exec<{id:number;value:string}>("SELECT id,value FROM github_installations").toArray()){
+   const value=JSON.parse(row.value);value.retryAt=0;
+   ctx.storage.sql.exec("UPDATE github_installations SET value=? WHERE id=?",JSON.stringify(value),row.id);
+  }
+  await recovered.tick();
+  expect(gh.fetcher).toHaveBeenCalled();
+  expect(recovered.claimGitHubRun("retry-run")).toBe("start");
+ });
+});
+it("PR1 repair rate limiting pauses only the affected installation without reviving revoked work",async()=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  await webhook(e,payload(456),"limited");await webhook(e,payload(789),"healthy");
+  ctx.storage.sql.exec("UPDATE github_receipt SET state='enqueued',input_key=delivery_id");
+  gh.fetcher.mockImplementation(async(input,init)=>new URL(String(input)).pathname==="/app/installations/456"
+   ?new Response("rate limited",{status:403,headers:{"x-ratelimit-remaining":"0"}}):native(input,init));
+  await i.syncGitHubConnect(7);
+  expect(i.claimGitHubRun("limited")).toBe("wait");
+  expect(i.claimGitHubRun("healthy")).toBe("start");
+  await webhook(e,{action:"suspend",installation:{id:456}},"explicit-revoke","installation");
+  expect(i.claimGitHubRun("limited")).toBe("suppressed");
+  gh.fetcher.mockImplementation(native);await i.syncGitHubConnect(7);
+  expect(i.githubReceipt("limited")?.state).toBe("suppressed");
+ });
+});
+it("PR1 repair a stale alarm preserves held work throughout slow verification",async()=>{
+ const gh=mockGitHub(),native=gh.fetcher.getMockImplementation()!;
+ await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await webhook(e,payload(),"slow-alarm");
+  expireInstallationProofs(ctx);
+  let release!:()=>void,enter!:()=>void,first=true;
+  const gate=new Promise<void>(r=>release=r),entered=new Promise<void>(r=>enter=r);
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   if(new URL(String(input)).pathname==="/user"&&first){first=false;enter();await gate;}
+   return native(input,init);
+  });
+  const alarm=i.alarm();
+  try {
+   await entered;
+   expect(i.githubReceipt("slow-alarm")?.state).toBe("held");
+   expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toHaveLength(1);
+  } finally {release();await alarm;}
+  expect(i.githubReceipt("slow-alarm")?.state).toBe("held");
+ });
+});
