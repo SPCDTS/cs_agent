@@ -47,8 +47,8 @@ event/delivery header 不在 HMAC 内，不能作为可信事件身份。生命�
 
 收件事务完成后，只有新写入 held 的业务事件安排 alarm；噪声、ping、控制、过滤、重复、冲突及容量拒绝不新增/提前 alarm，原有其他来源 alarm 不被删除。控制撤销仍在事务内同步完成并经 storage.sync 后 ACK，不依赖 alarm。若业务已提交而安排 alarm 失败，返回 503，重试按已存在的 body 去重；Cron 重建持久 held 的调度，覆盖提交与安排唤醒之间的故障窗口。配置变更/恢复的主动唤醒保留。
 
-### Authorization freshness and retry
+### 授权新鲜度与重试
 
-Installation proofs expire after at most ten minutes. Expiry means wait, not revoke: the last verified repository intersection may admit bounded held receipts, but cannot permit enqueue or execution. Unknown bindings, explicit lifecycle revocation and confirmed authorization rejection deny immediately; suppressed receipts never revive. Cron awaits verification before GitHub polling while Gmail proceeds independently. Alarms refresh only stale proofs, and claim/recovery independently enforce the same three states.
+安装授权快照最多十分钟有效。到期表示 wait，不是撤销：最后一次核验的仓库交集只允许有配额约束的 held 收件，不能据此入队或执行。未知绑定、明确生命周期撤销及确认的权限拒绝立即 deny；已 suppressed 的事件不会复活。Cron 等待核验完成再轮询 GitHub，同时让 Gmail 独立推进。Alarm 只刷新已过期快照，claim 与重建恢复各自执行同一套三态判断。
 
-Transient network, timeout, server and explicit rate-limit failures retain encrypted credentials and bindings, invalidate freshness, and persist per-installation exponential retry delays (one to fifteen minutes). Explicit owner sync bypasses the delay. Successful refresh persists rotated tokens before further discovery; existing identity-generation and binding-generation checks prevent revoked/reconnected state from being overwritten by late results.
+网络、超时、服务端故障及明确的限流失败保留加密凭据和绑定，使快照失效，并持久化每个安装的指数退避（从一分钟至十五分钟）。Owner 显式同步可以跳过退避。成功轮换的 token 在后续发现请求前持久化；既有身份 generation 与绑定 generation 检查继续防止迟到结果覆盖已撤销或重新连接的状态。
