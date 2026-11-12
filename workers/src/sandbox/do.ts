@@ -5,6 +5,7 @@ import { MediaRepository, type AssetRef } from "../media/repository";
 import { imageMime } from "../media/model";
 import type { DirEntry, ExecResult, FileEdit, ReadResult } from "./client";
 import { nativeSandboxClient } from "./native";
+import { createOutputDirectory } from "./output-directory";
 import { WorkspaceManager, type WorkspaceManifest, type WorkspaceOperation, type WorkspaceRunResult, type WorkspaceCompareResult } from "./workspace";
 export type { WorkspaceManifest, WorkspaceOperation, WorkspaceRunResult, WorkspaceCompareResult } from "./workspace";
 export type SandboxStatus = "running" | "stopped" | "unavailable";
@@ -62,10 +63,16 @@ export class SandboxDO extends DurableObject<Env> {
     if (!("text" in result) && !("kind" in result)) throw new Error("sandbox_error");
     return result;
   }
-  async writeFile(path: string, text: string, operationId?: string): Promise<{ bytes: number }> {
-    const result = await this.result({ kind: "write", path, text }, operationId);
+  async writeFile(path: string, content: string | Uint8Array, operationId?: string): Promise<{ bytes: number }> {
+    const result = await this.result(typeof content === "string" ? { kind: "write", path, text: content } : { kind: "writeBytes", path, data: content }, operationId);
     if (!("bytes" in result)) throw new Error("sandbox_error");
     return result;
+  }
+  async createTempDir(prefix?: string): Promise<string> {
+    return createOutputDirectory({ list: path => this.list(path),
+      mkdir: async path => { await this.result({ kind: "mkdir", path }); },
+      remove: async path => { await this.result({ kind: "remove", path }); },
+    }, prefix);
   }
   async editFile(path: string, edits: FileEdit[], operationId?: string): Promise<{ replaced: number }> {
     const result = await this.result({ kind: "edit", path, edits }, operationId);

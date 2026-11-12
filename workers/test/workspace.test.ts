@@ -7,15 +7,17 @@ import { sha256 } from "../src/media/model";
 import { scopePrefix } from "../src/media/repository";
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 function runtime() {
-  let files = new Map<string,Uint8Array>(), ready = false, executions = 0, failExec = false;
+  let files = new Map<string,Uint8Array>(), directories = new Set<string>(), ready = false, executions = 0, failExec = false;
   const relative = (path: string) => path.replace(/^\/work\//, "");
   const client: SandboxClient = {
-    async restore(snapshot, readBlob) { ready = true; files = new Map(await Promise.all(snapshot.files.map(async (file): Promise<[string, Uint8Array]> => [file.path, await readBlob(file)]))); },
-    async writeFile(path, text) { const value = new TextEncoder().encode(text); files.set(relative(path), value); return { bytes: value.length }; },
+    async restore(snapshot, readBlob) { ready = true; directories = new Set(snapshot.directories); files = new Map(await Promise.all(snapshot.files.map(async (file): Promise<[string, Uint8Array]> => [file.path, await readBlob(file)]))); },
+    async writeFile(path, text) { const value = typeof text === "string" ? new TextEncoder().encode(text) : text; files.set(relative(path), value); return { bytes: value.length }; },
+    async mkdir(path) { directories.add(relative(path)); },
+    async remove(path) { const target = relative(path); for (const name of files.keys()) if (name === target || name.startsWith(target + "/")) files.delete(name); for (const name of directories) if (name === target || name.startsWith(target + "/")) directories.delete(name); },
     async readFile(path) { return { text: new TextDecoder().decode(files.get(relative(path))), startLine: 1, endLine: 1, totalLines: 1 }; },
     async exec() { executions++; if (failExec) { failExec = false; throw new Error("sandbox_unavailable"); } files.set("binary.bin", new Uint8Array([0,255,1])); return { stdout: "ok", stderr: "", code: 0, timedOut: false, truncated: false }; },
     async readBlob(path) { const value = files.get(relative(path)); if (!value) throw new Error("not_found"); return value; },
-    async snapshot() { const entries = await Promise.all([...files].map(async ([path, bytes]) => ({ path, bytes: bytes.length, sha256: await sha256(bytes), mime: "application/octet-stream", mode: 420 }))); return { files: entries, directories: [], totalBytes: entries.reduce((sum, file) => sum + file.bytes, 0) }; },
+    async snapshot() { const entries = await Promise.all([...files].map(async ([path, bytes]) => ({ path, bytes: bytes.length, sha256: await sha256(bytes), mime: "application/octet-stream", mode: 420 }))); return { files: entries, directories: [...directories], totalBytes: entries.reduce((sum, file) => sum + file.bytes, 0) }; },
     async list() { return []; },
     async editFile() { throw new Error("unused"); },
   };
@@ -102,6 +104,24 @@ describe("持久工作区", () => {
       for (let turn = 0; turn < 8 && await state.storage.getAlarm() !== null; turn++) await instance.alarm();
       expect(await state.storage.getAlarm()).toBeNull();
       expect(await state.storage.get("workspace:gc:apply:last")).toMatchObject({ phase: "done", deleted: 0 });
+    });
+  });
+  it("二进制输出按内容幂等提交，重建后字节不变，目录删除也持久化", async () => {
+    await runInDurableObject(env.SANDBOX.getByName("binary-output"), async (_instance, state) => {
+      const first = runtime(), deps = { workspace: "workspace:binary", bucket: env.ASSETS, storage: state.storage, runtime: first.client, resetRuntime: first.reset, runtimeReady: first.ready };
+      const manager = new WorkspaceManager(deps), path = "/work/.codemode/output/image.png", data = new Uint8Array([17, 0, 255, 128, 23]).subarray(1, 4);
+      expect((await manager.run({ operationId: "dir", operation: { kind: "mkdir", path: "/work/.codemode/output" } })).status).toBe("committed");
+      const write = { operationId: "image", operation: { kind: "writeBytes" as const, path, data } };
+      const result = await manager.run(write);
+      expect(result).toMatchObject({ status: "committed", result: { bytes: 3 } });
+      expect(await manager.run(write)).toEqual(result);
+      await expect(manager.run({ ...write, operation: { ...write.operation, data: new Uint8Array([0, 255, 129]) } })).rejects.toThrow("operation_conflict");
+      const second = runtime(), rebuilt = new WorkspaceManager({ ...deps, runtime: second.client, resetRuntime: second.reset, runtimeReady: second.ready });
+      expect((await rebuilt.readBlob(path)).bytes).toEqual(data);
+      expect((await rebuilt.files()).directories).toContain(".codemode/output");
+      expect((await rebuilt.run({ operationId: "remove", operation: { kind: "remove", path: "/work/.codemode/output" } })).status).toBe("committed");
+      expect((await rebuilt.files()).files).toEqual([]);
+      await expect(rebuilt.readBlob(path)).rejects.toThrow("not_found");
     });
   });
   it("write/exec差量持久化、运行时重建、稳定操作幂等且冲突参数拒绝", async () => {

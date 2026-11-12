@@ -3,6 +3,7 @@ import { McpAdmin } from "./mcp/admin";
 import { openThreadRuntime, applyToolProfile, type Runtime } from "./thread/runtime";
 import { isWeb, isWebAdmin, profileOf, targetOf, type InboundRow, type ToolProfile } from "./thread/model";
 import { ModelAlarm } from "./model-alarm";
+import { workPath } from "./sandbox/client";
 import { ProjectionPublisher, observeWrites } from "./requests/projection";
 import { MCP_POLICY_SCHEMA } from "./mcp/policy";
 import { modelEgressDiagnostics } from "./model-egress";
@@ -636,6 +637,15 @@ export class ThreadDO extends DurableObject<Env> {
     return { ...(result.status === "committed" ? {} : { isError: true }), output: [{ type: "text", text: value }],
       ...(operation.kind === "read" && result.status === "committed" ? { structuredOutput: { kind: "text", text: value } } : {}) };
   }
+
+  private async subagentWorkspaceFiles(id: string) {
+    const access = await this.validateSubagentAccess(id);
+    if (!access?.capabilities.coding || !access.authority.owner) throw new Error("delegation_denied");
+    return this.env.SANDBOX.getByName(access.sandbox?.name ?? subagentName(await this.namespace(), id));
+  }
+  async subagentReadBlob(id: string, path: string) { return (await this.subagentWorkspaceFiles(id)).readBlob(workPath(path)); }
+  async subagentWriteFile(id: string, path: string, content: string | Uint8Array) { return (await this.subagentWorkspaceFiles(id)).writeFile(workPath(path), content); }
+  async subagentCreateTempDir(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createTempDir(prefix); }
 
   private async subagentCaller(input: InboundRow | undefined, { sandboxId, mcpTools }: { sandboxId?: string; mcpTools?: McpToolSelection }): Promise<SubagentCaller | undefined> {
     if (input?.kind !== "message" || !input.turn_id || input.user_id === input.self_id) return;

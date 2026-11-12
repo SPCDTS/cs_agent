@@ -38,6 +38,7 @@ import type { SandboxTask } from '../sandbox/task-access';
 import { createCodingExtension } from '../tools/coding';
 import { decodeFileRead } from '../sandbox/read';
 import { workPath } from '../sandbox/client';
+import { workspaceExecutionEnv } from '../sandbox/execution-env';
 import { isWeb, isWebAdmin, targetOf, type InboundRow, type ToolProfile } from './model';
 
 const context = BACKGROUND_CONTEXT;
@@ -190,6 +191,12 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   const codingAllowed = async (api: Pick<ToolExecutionApi, "snapshot" | "conversationId">, callContext: Context) =>
     !!(await taskAccess(api, callContext))?.permissions.coding;
   const resources = host.env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner");
+  const workspaceFor = async (id?: string) => {
+    if (!id) return host.env.SANDBOX.getByName(memory.ns);
+    const resource = await resources.get(memory.ns, id);
+    if (!resource) throw new Error("invalid_request");
+    return host.env.SANDBOX.getByName(resource.name);
+  };
   if (memory.ns === "owner" || memory.ns.startsWith("group:")) registry.install(createCodingExtension({
     allowed: codingAllowed,
     ...(memory.ns === "owner" ? { resources: {
@@ -197,12 +204,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       list: () => resources.list(memory.ns),
       create: (operationId, input) => resources.create(memory.ns, operationId, input),
     } } : {}),
-    sandbox: async id => {
-      if (!id) return host.env.SANDBOX.getByName(memory.ns);
-      const resource = await resources.get(memory.ns, id);
-      if (!resource) throw new Error("invalid_request");
-      return host.env.SANDBOX.getByName(resource.name);
-    },
+    sandbox: workspaceFor,
     readWorkspace: async ({ workspace, path, ...options }, api, context) => {
       if (!await ownerTaskAllowed(api, context)) throw new Error("permission_denied");
       const file = await host.env.SANDBOX.getByName(workspace).readBlob(workPath(path));
@@ -224,13 +226,20 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     sandbox:()=>host.env.SANDBOX.getByName(memory.ns),registry:()=>host.env.REGISTRY.getByName("main"),
   }));
   registry.install(createMediaExtension({
-    allowed: async (api, c) => { const input = await host.currentInput(harness, api, api.conversationId, c); return !!input && input.session_generation === await host.sessionGeneration() && input.kind === "message"; },
+    allowed: async (api, c, kind) => {
+      const input = await host.currentInput(harness, api, api.conversationId, c);
+      if (!input || input.session_generation !== await host.sessionGeneration()) return false;
+      return input.kind === "message" || kind === "media_send" && input.kind === "subagent" && await ownerTaskAllowed(api, c);
+    },
     repository: async () => new MediaRepository({ bucket: host.env.ASSETS, scope: memory.ns }),
     lookup: async (messageId, api, c, selection) => {
       const input = await host.currentInput(harness, api, api.conversationId, c); if (!input) throw new Error("media_scope_denied");
       return lookupHostMedia({ database: host.database, bridge: host.env.BRIDGE.getByName("napcat"), source: { namespace: memory.ns, scope: scopeOf(targetOf(input)), target: targetOf(input) }, messageId, selection });
     },
-    sandbox: async () => host.env.SANDBOX.getByName(memory.ns),
+    sandbox: async (api, callContext, sandboxId) => {
+      if (sandboxId !== undefined && !await ownerTaskAllowed(api, callContext)) throw new Error("permission_denied");
+      return workspaceFor(sandboxId);
+    },
     deliver: async (ref, api, c) => { const input = await host.currentInput(harness, api, api.conversationId, c); if(!input)throw new Error("media_scope_denied"); return host.deliver(input,"",String(api.taskId),{attachments:[ref]}); },
     record: (kind, detail) => host.audit(kind, detail),
   }));
@@ -255,6 +264,12 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   });
   // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
   const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } },
+    env: target => workspaceExecutionEnv({ id: "cloudflare:" + host.env.SANDBOX.idFromName(memory.ns), cwd: target.cwd,
+      files: async callContext => {
+        if (!await codingAllowed({ conversationId: target.conversationId, snapshot: target.read.snapshot.bind(target.read) }, callContext)) throw new Error("permission_denied");
+        return workspaceFor();
+      },
+    }),
     onWake: wake => host.ctx.waitUntil(host.runtimeWake(wake)),
   }, context);
   const root = await harness.root(context, { agent: modelChange(selection) });
