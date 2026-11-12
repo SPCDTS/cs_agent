@@ -169,3 +169,9 @@ Sources:
 https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries
 https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries
 https://docs.github.com/en/webhooks/using-webhooks/redelivering-webhooks
+
+
+## 当前边界（本次管理台迁移不扩展）
+
+- 管理台收件分页只覆盖最新 50 条，每页 10 条，不是全部保留收件的游标分页。较旧的保留收件可按 delivery ID 使用上述认证接口查询。
+- push 的 `after` 当前仅接受 40 位小写十六进制 Git SHA-1；64 位 Git SHA-256 对象 ID 尚不支持，会返回 400。本限制不影响 webhook 使用 HMAC-SHA256 验签或收件使用 SHA-256 正文哈希。

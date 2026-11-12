@@ -155,7 +155,16 @@ describe("GitHub durable receipts, configuration and recovery", () => {
     expect(await sql("SELECT 1 FROM event_held WHERE source='github'")).toEqual([]);
   });
 });
-it("ships syntactically valid UI with explicit registration/empty-list guidance", () => {
+it("serves the new admin entry and built GitHub UI with explicit registration/empty-list guidance", async () => {
+  const entry = await worker.fetch(new Request("https://test/admin"), env);
+  expect(entry.status).toBe(308);
+  expect(entry.headers.get("location")).toBe("/admin/");
+  const page = await worker.fetch(new Request("https://test/admin/"), env);
+  expect(page.status).toBe(200);
+  expect(await page.text()).toContain('<script src="/admin/app.js" defer></script>');
+  const script = await worker.fetch(new Request("https://test/admin/app.js"), env);
+  expect(script.status).toBe(200);
+  expect(await script.text()).toBe(ADMIN_APP_JS);
   expect(() => new Function(ADMIN_APP_JS)).not.toThrow();
   expect(ADMIN_APP_JS).toContain("不等于注册 GitHub webhook");
   expect(ADMIN_APP_JS).toContain("空列表不会恢复默认值");
