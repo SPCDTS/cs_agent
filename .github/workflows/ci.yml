@@ -100,7 +100,8 @@ jobs:
   deploy-workers:
     name: deploy workers
     needs: check
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    # 原生测试允许按变更跳过；显式状态函数避免其 skipped 状态继续阻断部署。
+    if: ${{ !cancelled() && needs.check.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: workers
