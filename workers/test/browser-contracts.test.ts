@@ -37,6 +37,10 @@ it("浏览器 schema 接受真实管理路由响应，包括空列表和已保�
     "/admin/threads/owner/subagents": C.Subagents, "/admin/threads/owner/workspace": C.ManifestSchema,
     "/admin/threads/owner/trace?turn=turn:browser-check": C.Trace,
     "/admin/requests": C.RequestPage, "/admin/usage": C.Usage, "/admin/agent-topology": C.AgentTopologySchema,
+    ["/admin/requests/" + id + "?summary=1"]: C.RequestDetail,
+    ["/admin/requests/" + id + "/context"]: C.ContextInspection,
+    ["/admin/requests/" + id + "/context/message:0"]: C.ContextBody,
+    "/admin/context-timeline?thread=owner": C.ContextTimeline,
     ["/admin/requests/" + id]: C.RequestDetail, ["/admin/tools/" + toolId]: C.ToolDetail,
   };
   for (const [path, schema] of Object.entries(checks)) {

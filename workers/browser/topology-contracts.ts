@@ -16,4 +16,4 @@ const AgentNodeSchema = Type.Union([
 export const AgentTopologySchema = Type.Object({ nodes: Type.Array(AgentNodeSchema), since: Type.Number(), sampledAt: Type.Number() });
 export type AgentNode = Static<typeof AgentNodeSchema>;
 export type AgentTopology = Static<typeof AgentTopologySchema>;
-export type AgentFamily = { parent: Extract<AgentNode, { kind: "thread" }>; children: AgentNode[]; part: number };
+export type AgentFamily = { parent: Extract<AgentNode, { kind: "thread" }>; children: Extract<AgentNode, { kind: "subagent" }>[] };

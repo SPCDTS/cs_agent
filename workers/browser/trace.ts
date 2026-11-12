@@ -1,10 +1,12 @@
+import { refreshContextMonitor } from "./context-monitor";
 import { consoleView, cs, downloadAsset, loadRequests, nf, requestPill, statuses } from "./console";
 import { cacheRate, detailCache, openRequest, percent, toolCache, toolPayload } from "./request-detail";
 import { $, bjTime, bytes, duration, el, fail, readToken, state, time } from "./app";
 import * as C from "./request-contracts";
 import { readApi } from "./api";
 import { loadTopology, refreshTopologyAfterTurn } from "./topology";
-export function resetChatTrace(){cs.messages.clear();cs.requests.clear();cs.tools.clear();cs.traceCursor=0;cs.traceTurns="";cs.chatAfter=null;cs.chatActive=false;cs.chatLoading=false;cs.awaitingInput=null;toolCache.clear();}
+import { loadSubagentChat, resetSubagentChat } from "./subagent-chat";
+export function resetChatTrace(){resetSubagentChat();cs.fingerprint="";cs.messages.clear();cs.requests.clear();cs.tools.clear();cs.traceCursor=0;cs.traceTurns="";cs.chatAfter=null;cs.chatActive=false;cs.chatLoading=false;cs.awaitingInput=null;toolCache.clear();}
 export function scheduleConsolePoll(){
   clearTimeout(cs.timer);cs.timer=undefined;
   if(document.hidden||!readToken())return;
@@ -19,7 +21,7 @@ export async function fetchTrace(thread:string,messages:C.ChatMessage[],version:
   while(more){
     const p=new URLSearchParams({after:String(cs.traceCursor)});turns.forEach(t=>p.append("turn",t));
     const trace=await readApi(C.Trace,"GET","/admin/threads/"+encodeURIComponent(thread)+"/trace?"+p);
-    if(thread!==cs.chat||version!==cs.chatVersion||epoch!==cs.epoch)return;
+    if((cs.chat.kind!=="thread"||thread!==cs.chat.thread)||version!==cs.chatVersion||epoch!==cs.epoch)return;
     const changedTurns=new Set<string>();
     trace.requests.forEach(r=>{cs.requests.set(r.id,r);detailCache.delete(r.id);if(r.binding)changedTurns.add(r.binding.turnId);});
     trace.tools.forEach(t=>{cs.tools.set(t.id,t);toolCache.delete(t.id);changedTurns.add(t.binding.turnId);});
@@ -57,7 +59,7 @@ export function turnTrace(turnId:string){
 export function showTurnRequests(turnId:string){
   const requests=[...cs.requests.values()].filter(r=>r.binding?.turnId===turnId);cs.turn=turnId;cs.until=Date.now();cs.before=undefined;cs.pages=[];
   if(requests.length&&Math.min(...requests.map(r=>r.startedAt))<cs.until-86400000)$("req-range").value="720";
-  $("req-thread").value=cs.chat;$("req-model").value="";$("req-status").value="";$("req-purpose").value="";consoleView("usage");
+  $("req-thread").value=cs.chat.thread;$("req-model").value="";$("req-status").value="";$("req-purpose").value="";consoleView("usage");
 }
 export function renderChatMessages(messages:C.ChatMessage[]){
   const list=$("chat-messages"),nearBottom=list.scrollHeight-list.scrollTop-list.clientHeight<100,first=!list.querySelector(".chat-message"),expanded=new Set([...list.querySelectorAll<HTMLDetailsElement>("details[data-tool][open]")].map(n=>n.dataset.tool)),seen=new Set<string>();
@@ -75,18 +77,19 @@ export function renderChatMessages(messages:C.ChatMessage[]){
   else if(nearBottom||first)list.scrollTop=list.scrollHeight;
 }
 export async function loadChat(){
+  if(cs.chat.kind==="subagent")return loadSubagentChat();
   if(cs.chatLoading)return;cs.chatLoading=true;
   loadTopology();
-  const thread=cs.chat,version=++cs.chatVersion,epoch=cs.epoch,p=new URLSearchParams();
+  const thread=cs.chat.thread,version=++cs.chatVersion,epoch=cs.epoch,p=new URLSearchParams();
   if(cs.chatAfter!==null){p.set("after",String(cs.chatAfter));for(const m of cs.messages.values())if(m.status==="queued")p.append("pending",m.id);}
   try{
     const d=await readApi(C.ChatView,"GET","/admin/threads/"+encodeURIComponent(thread)+"/chat"+(p.size?"?"+p:""));
-    if(thread!==cs.chat||version!==cs.chatVersion||epoch!==cs.epoch)return;
+    if((cs.chat.kind!=="thread"||thread!==cs.chat.thread)||version!==cs.chatVersion||epoch!==cs.epoch)return;
     if(!d.delta)cs.messages.clear();d.messages.forEach(m=>cs.messages.set(m.id,m));
     const messages=[...cs.messages.values()].sort((a,b)=>a.at-b.at||a.id.localeCompare(b.id)).slice(-100);cs.messages=new Map(messages.map(m=>[m.id,m]));
     cs.chatAfter=messages.at(-1)?.at??null;
     await fetchTrace(thread,messages,version,epoch);
-    if(thread!==cs.chat||version!==cs.chatVersion||epoch!==cs.epoch)return;
+    if((cs.chat.kind!=="thread"||thread!==cs.chat.thread)||version!==cs.chatVersion||epoch!==cs.epoch)return;
     if(cs.awaitingInput&&cs.messages.has(cs.awaitingInput)&&cs.messages.get(cs.awaitingInput)?.status!=="queued")cs.awaitingInput=null;
     cs.chatActive=!!cs.awaitingInput||!!d.active||[...cs.requests.values(),...cs.tools.values()].some(r=>r.status==="running");
     $("chat-title").textContent=(state.overview&&state.overview.threads.find(t=>t.key===thread)?.name)||thread;
@@ -94,6 +97,7 @@ export async function loadChat(){
     if(d.syncedAt)$("chat-state").textContent+=" · 数据同步于 "+time(d.syncedAt);
     const fingerprint=JSON.stringify([messages,[...cs.requests.values()],[...cs.tools.values()]]);
     if(fingerprint!==cs.fingerprint){if(cs.fingerprint)refreshTopologyAfterTurn();cs.fingerprint=fingerprint;renderChatMessages(messages);if($("request-detail").open&&cs.detailId&&!detailCache.has(cs.detailId))openRequest(cs.detailId);}
+    void refreshContextMonitor();
   }finally{if(version===cs.chatVersion){cs.chatLoading=false;scheduleConsolePoll();}}
 }
 

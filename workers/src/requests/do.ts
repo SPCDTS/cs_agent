@@ -1,3 +1,4 @@
+import { ContextStore, contextMetadata } from "./context-store";
 import { ProjectionStore, viewName, type ProjectionBatch } from "./projection";
 import { AgentReadView } from "./view";
 import { subagentName, RETENTION_MS, type SubagentMeta } from "../subagent/model";
@@ -10,6 +11,9 @@ import { RequestRetention, REQUEST_RETENTION } from "./retention";
 const DAY = 86_400_000;
 type Row = { seq: number; record: string; available: number };
 export class RequestsDO extends DurableObject<Env> {
+  contextTimeline(...args: Parameters<ContextStore["timeline"]>) { return new ContextStore(this.ctx.storage.sql).timeline(...args); }
+  contextInspection(id: string) { return new ContextStore(this.ctx.storage.sql).inspect(id); }
+  contextPart(id: string, part: string) { return new ContextStore(this.ctx.storage.sql).part(id, part); }
   private topologyCache?: AgentTopology;
   private retentionStore?: RequestRetention;
   private retention() { return this.retentionStore ??= new RequestRetention(this.ctx.storage); }
@@ -52,6 +56,7 @@ export class RequestsDO extends DurableObject<Env> {
     const columns = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(requests)").toArray();
     if (!columns.some(c => c.name === "turn_id")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN turn_id TEXT");
     if (!columns.some(c => c.name === "revision")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN revision INTEGER NOT NULL DEFAULT 0");
+    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_actor_started ON requests(thread,json_extract(record,'$.actor'),started,id)");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_turn ON requests(thread,turn_id,revision)");
   }
   sessionHistory(...args: Parameters<AgentReadView["sessionHistory"]>) { return this.readView().sessionHistory(...args); }
@@ -64,16 +69,30 @@ export class RequestsDO extends DurableObject<Env> {
   mcpAccess(...args: Parameters<AgentReadView["mcpAccess"]>) { return this.readView().mcpAccess(...args); }
   mcpApprovals(...args: Parameters<AgentReadView["mcpApprovals"]>) { return this.readView().mcpApprovals(...args); }
   mcpToolCounts(...args: Parameters<AgentReadView["mcpToolCounts"]>) { return this.readView().mcpToolCounts(...args); }
-  subagentList(...args: Parameters<AgentReadView["subagentList"]>) { return this.readView().subagentList(...args); }
+  async subagentList() {
+    const view = this.readView(), scope = this.projection.status()!.scope;
+    if (!scope.startsWith("thread:")) throw new Error("view_scope_mismatch");
+    const topology = await this.env.REQUESTS.getByName("main").agentTopology();
+    const activity = Object.fromEntries(topology.nodes.flatMap(node => node.kind === "subagent" && node.thread === scope.slice(7) && node.lastActiveAt !== null ? [[node.actor, node.lastActiveAt]] : []));
+    return view.subagentList(activity);
+  }
   workspaceChild(...args: Parameters<AgentReadView["workspaceChild"]>) { return this.readView().workspaceChild(...args); }
   transcriptSummary(...args: Parameters<AgentReadView["transcriptSummary"]>) { return this.readView().transcriptSummary(...args); }
   async chatView(...args: Parameters<AgentReadView["chatView"]>) { return {...await this.readView().chatView(...args), syncedAt: this.projection.status()!.synced_at}; }
   async stats() { return {...await this.readView().stats(), syncedAt: this.projection.status()!.synced_at}; }
+  modelHistory(...args: Parameters<AgentReadView["modelHistory"]>) { return this.readView().modelHistory(...args); }
+  subagentConversation(...args: Parameters<AgentReadView["subagentConversation"]>) { return this.readView().subagentConversation(...args); }
+  async subagentHistory(id: string, cursor?: string): Promise<Awaited<ReturnType<AgentReadView["subagentConversation"]>> | undefined> {
+    return (await this.childView(id))?.subagentConversation(cursor);
+  }
   async subagentTranscript(id: string, limit: number): ReturnType<AgentReadView["transcriptSummary"]> {
+    return (await this.childView(id))?.transcriptSummary(limit);
+  }
+  private async childView(id: string): Promise<DurableObjectStub<RequestsDO> | undefined> {
     const state = this.projection.status(); if (!state?.scope.startsWith("thread:")) throw new Error("view_pending");
     const child = await this.readView().child(id); if (!child) return;
     if (child.ended_at !== null && Date.now() >= child.ended_at + RETENTION_MS) return;
-    return this.env.REQUESTS.getByName(viewName(subagentName(state.scope.slice(7), id))).transcriptSummary(limit);
+    return this.env.REQUESTS.getByName(viewName(subagentName(state.scope.slice(7), id)));
   }
 
   private revision() { return this.ctx.storage.sql.exec<{ revision: number }>("UPDATE request_revision SET revision=revision+1 WHERE id=1 RETURNING revision").one().revision; }
@@ -179,7 +198,7 @@ export class RequestsDO extends DurableObject<Env> {
     const choices = sql.exec<{ model: string }>("SELECT DISTINCT model FROM requests ORDER BY model").toArray().map(r => r.model);
     return { summary, series, models, choices, bucket, retainedSince: first, retention: { metadataDays: 30, detailsDays: 7, maxRequests: 20000, maxDetailBytes: 33554432 } };
   }
-  detail(id: string) {
+  detail(id: string, metadataOnly = false) {
     const r = this.ctx.storage.sql.exec<{ record: string }>("SELECT record FROM requests WHERE id=?", id).toArray()[0];
     if (!r) return;
     const d = this.ctx.storage.sql.exec<{ payload: string }>("SELECT payload FROM request_details WHERE id=?", id).toArray()[0];
@@ -189,7 +208,10 @@ export class RequestsDO extends DurableObject<Env> {
       .filter(row => { const t: ToolSummary = JSON.parse(row.record); return request.toolCalls?.some(call => call.id === t.callId || call.id === t.parentCallId); })
       .map(row => ({ ...JSON.parse(row.record) as ToolSummary, detailAvailable: !!row.available })) : [];
     const related = request.binding ? this.ctx.storage.sql.exec<{ record: string }>("SELECT record FROM requests WHERE thread=? AND turn_id=? ORDER BY started,seq", request.thread, request.binding.turnId).toArray().map(row => JSON.parse(row.record) as RequestRecord) : [];
-    return { request, ...(d ? JSON.parse(d.payload) as Pick<RequestDetail, "context" | "response"> : {}), tools, related, detailAvailable: !!d };
+    const payload: Pick<RequestDetail, "context" | "response"> | undefined = d ? JSON.parse(d.payload) : undefined;
+    return { request, context: payload ? metadataOnly ? contextMetadata(payload.context) : payload.context : undefined,
+      response: payload?.response ? metadataOnly ? { ...payload.response, text: "" } : payload.response : undefined,
+      responseAvailable: !!payload?.response, bodyDeferred: metadataOnly, tools, related, detailAvailable: !!d };
   }
   toolDetail(id: string) {
     const row = this.ctx.storage.sql.exec<{ record: string; payload: string | null }>("SELECT record,payload FROM tool_traces WHERE id=?", id).toArray()[0];

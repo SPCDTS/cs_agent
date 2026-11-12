@@ -10,6 +10,7 @@ import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS, recall } from '../contex
 import { DELEGATION_RULE, EVENT_TURN_IDENTITY, PI_SAFETY_RULE, SEND_RULE, WEB_RULE, subagentTurnIdentity, turnIdentity } from '../prompt';
 import { modelChange } from '../models';
 import { captureModels } from '../requests/capture';
+import { contextSource } from '../requests/context-source';
 import { requestTrace } from '../requests/trace';
 import { MemoryStore } from '../memory/store';
 import { createMemoryTools, type MemoryBinding } from '../memory/tools';
@@ -89,13 +90,15 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     const input = await host.currentInput(harness, api, api.conversationId, c);
     return input?.turn_id ? { turnId: input.turn_id, inputId: input.message_id, generation: input.session_generation } : undefined;
   });
-  const models = captureModels(host.models(), host.env, host.ctx, { thread: await host.namespace(), actor: "thread", purpose: "conversation" }, trace.binding), selection = (await host.loadSettings(true)).model;
+  const monitor = contextSource(host.ctx.storage, () => harness);
+  const models = captureModels(host.models(), host.env, host.ctx, { thread: await host.namespace(), actor: "thread", purpose: "conversation" }, trace.binding, monitor.origin), selection = (await host.loadSettings(true)).model;
   const memory = new MemoryStore(host.database, await host.namespace());
   // 相同 storage 对象共享事务队列，避免宿主写入被 Pi 的事务一起回滚。
   const storage = await openDurableObjectSqliteStorage(host.observedStorage, { prefix: "pi_" });
   host.installProjection();
   const registry = createRegistry();
   registry.install(trace.extension);
+  registry.install(monitor.extension);
   registry.install(defineExtension({
     name: "cs-workers",
     sections: [

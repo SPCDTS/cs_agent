@@ -2,15 +2,23 @@ import { cs } from "./console";
 import { $, api, el, fail, notice, time } from "./app";
 import { readApi } from "./api";
 import { SessionHistorySchema } from "./history-contracts";
-export const sh: {thread:string;next:string|undefined;version:number} = { thread:"", next:undefined, version:0 };
+export const sh: {thread:string;next:string|undefined;version:number} = { thread:"owner", next:undefined, version:0 };
+export function openHistory(thread:string) {
+  sh.thread=thread;sh.next=undefined;
+  $("session-history-title").textContent="会话历史与归档";
+  $("session-history-scope").textContent=thread;
+  $("session-history").showModal();
+  void sessionHistory(false);
+}
 export async function sessionHistory(older:boolean){
-  const version=++sh.version, epoch=cs.epoch;
-  if(!older){sh.thread=cs.chat;sh.next=undefined;$("session-history-body").replaceChildren();$("session-history").showModal();}
-  $("session-history-scope").textContent=sh.thread;
+  const version=++sh.version, epoch=cs.epoch, thread=sh.thread;
+  if(!older){sh.next=undefined;$("session-history-body").replaceChildren(el("div",{className:"empty-state",text:"正在载入会话…"}));}
   $("session-history-older").disabled=true;
-  const query=older&&sh.next?"?cursor="+encodeURIComponent(sh.next):"";
+  const query=new URLSearchParams();
+  if(older&&sh.next)query.set("cursor",sh.next);
+  const path="/admin/threads/"+encodeURIComponent(thread);
   try{
-    const view=await readApi(SessionHistorySchema,"GET","/admin/threads/"+encodeURIComponent(sh.thread)+"/history"+query);
+    const view=await readApi(SessionHistorySchema,"GET",path+"/history?"+query);
     if(version!==sh.version||epoch!==cs.epoch)return;
     const rows=view.entries.map(entry=>{
       if(entry.reset)return el("section",{className:"context-item"},[el("h3",{text:"已归档 · "+(entry.archive&&entry.archive.label||"上下文重置")}),el("small",{text:entry.archive?time(entry.archive.at):""})]);
@@ -18,17 +26,25 @@ export async function sessionHistory(older:boolean){
         ...entry.messages.map(m=>el("pre",{className:"context-text",text:m.text||"(无文本内容)"}))]);
     });
     if(!older&&!rows.length)rows.push(el("div",{className:"empty-state",text:"这个会话还没有模型历史"}));
+    if(!older)$("session-history-body").replaceChildren();
     $("session-history-body").append(...rows);sh.next=view.next;
     $("session-history-older").disabled=!sh.next;
-  }catch(error){if(version===sh.version)fail(error);}
+  }catch(error){
+    if(version!==sh.version||epoch!==cs.epoch)return;
+    if(!older)$("session-history-body").replaceChildren(el("div",{className:"empty-state",text:"会话载入失败，请点击刷新重试。"}));
+    $("session-history-older").disabled=!sh.next;
+    fail(error);
+  }
 }
 export async function compactChat(){
+  if(cs.chat.kind!=="thread")return;
   $("chat-compact").disabled=true;
-  try{await api("POST","/admin/threads/"+encodeURIComponent(cs.chat)+"/compact",{});notice("已开始压缩上下文，原始记录仍保留");}
+  try{await api("POST","/admin/threads/"+encodeURIComponent(cs.chat.thread)+"/compact",{});notice("已开始压缩上下文，原始记录仍保留");}
   catch(error){fail(error);}finally{$("chat-compact").disabled=false;}
 }
 export async function resetChat(){
-  const thread=cs.chat;
+  if(cs.chat.kind!=="thread")return;
+  const thread=cs.chat.thread;
   if(!confirm("归档并重置 "+thread+" 的模型上下文？聊天记录、长期记忆和工作区文件会保留，正在运行的子任务会取消。"))return;
   $("chat-reset").disabled=true;
   try{await api("POST","/admin/threads/"+encodeURIComponent(thread)+"/reset",{requestId:crypto.randomUUID(),label:"手动归档 "+new Date().toLocaleString("zh-CN")});notice("已归档，下一条消息使用新的模型上下文");}
@@ -36,9 +52,11 @@ export async function resetChat(){
 }
 
 export function initSessions() {
-  $("chat-history").addEventListener("click",()=>sessionHistory(false));
+  $("chat-history").addEventListener("click",()=>{if(cs.chat.kind==="thread")openHistory(cs.chat.thread);});
   $("chat-compact").addEventListener("click",compactChat);
   $("chat-reset").addEventListener("click",resetChat);
-  $("session-history-close").addEventListener("click",()=>{$("session-history").close();sh.version++;});
+  $("session-history-close").addEventListener("click",()=>{$("session-history").close();});
+  $("session-history").addEventListener("close",()=>{sh.version++;});
+  $("session-history-refresh").addEventListener("click",()=>sessionHistory(false));
   $("session-history-older").addEventListener("click",()=>sessionHistory(true));
 }

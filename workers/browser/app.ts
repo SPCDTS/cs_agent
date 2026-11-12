@@ -7,7 +7,7 @@ import { $, el, clear, pill } from "./dom";
 export { $, input, el, clear, pill } from "./dom";
 import { api, readApi, ApiError, readToken, writeToken } from "./api";
 export { api, ApiError, readToken, writeToken } from "./api";
-import { consoleView, cs, renderConsoleThreads, resetConsole, startConsole } from "./console";
+import { chooseSubagent, consoleView, cs, renderConsoleThreads, resetConsole, startConsole } from "./console";
 import { loadManagement } from "./management";
 import { paginateChildren } from "./pagination";
 import { memoryDetail, mm } from "./memory";
@@ -222,13 +222,13 @@ export function renderSubagents(key: string, list: C.Subagents | null) {
       el("td", {}, [pill(status[0], status[1])]),
       el("td", { className: "mono", text: time(sub.createdAt) }),
       el("td", { className: "mono", text: sub.status === "running" ? (sub.deadline ? "限时至 " + time(sub.deadline) : "不设自动超时") : time(sub.endedAt) }),
-      el("td", { className: "mono", text: time(sub.lastReportAt) }),
+      el("td", { className: "mono", text: time(sub.lastActiveAt) }),
       el("td", { className: "muted small", text: sub.spawner || "无法确证" }),
-      el("td", {}, [sub.status === "running" ? el("button", { className: "btn compact danger", type: "button", text: "取消", onclick: () => cancelSubagent(key, sub.id) }) : null]),
+      el("td", {}, [el("button", { className: "btn compact", type: "button", text: "查看会话", onclick: () => chooseSubagent(key,sub.id,sub.summary) }), sub.status === "running" ? el("button", { className: "btn compact danger", type: "button", text: "取消", onclick: () => cancelSubagent(key, sub.id) }) : null]),
     ]);
   });
   const table=el("table", { className: "wide" }, [
-    el("thead", {}, [el("tr", {}, ["id", "任务", "状态", "派出", "结束", "最近汇报", "派出者", ""].map(text => el("th", { text })))]),
+    el("thead", {}, [el("tr", {}, ["id", "任务", "状态", "派出", "结束", "最近活动", "派出者", ""].map(text => el("th", { text })))]),
     el("tbody", {}, rows),
   ]);
   const box=el("div",{},[table]);paginateChildren(table.tBodies[0],{key:"subagents:"+key});return box;
