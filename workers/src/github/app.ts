@@ -1,7 +1,7 @@
 import { importPKCS8, SignJWT } from "jose";
 
 /** Separate operator-owned App; never reuse the development bot credentials. */
-export type GitHubAppSecrets = { GITHUB_APP_ID?: string; GITHUB_APP_SLUG?: string; GITHUB_APP_PRIVATE_KEY?: string; GITHUB_APP_WEBHOOK_SECRET?: string };
+export type GitHubAppSecrets = { GITHUB_APP_ID?: string; GITHUB_APP_SLUG?: string; GITHUB_APP_PRIVATE_KEY?: string; GITHUB_APP_WEBHOOK_SECRET?: string; GITHUB_APP_CLIENT_ID?: string; GITHUB_APP_CLIENT_SECRET?: string; GITHUB_APP_CALLBACK_URL?: string };
 export type AuthorizedRepository = { id: number; name: string };
 export class GitHubAppError extends Error {
   constructor(readonly code: "unconfigured" | "unavailable" | "unauthorized" | "capacity" = "unavailable") { super("github_app_" + code); }
@@ -20,6 +20,47 @@ export class GitHubAppClient {
     const url = new URL("https://github.com/apps/" + this.secrets.GITHUB_APP_SLUG + "/installations/new");
     url.searchParams.set("state", state); return url.href;
   }
+  private callbackUrl(): string {
+    try {
+      const url = new URL(this.secrets.GITHUB_APP_CALLBACK_URL ?? "");
+      if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/admin/github/oauth/callback") throw new Error();
+      return url.href;
+    } catch { throw new GitHubAppError("unconfigured"); }
+  }
+  authorizationUrl(state: string): string {
+    if (!this.configured() || !this.secrets.GITHUB_APP_CLIENT_ID || !this.secrets.GITHUB_APP_CLIENT_SECRET) throw new GitHubAppError("unconfigured");
+    const url = new URL("https://github.com/login/oauth/authorize");
+    url.searchParams.set("client_id", this.secrets.GITHUB_APP_CLIENT_ID);
+    url.searchParams.set("redirect_uri", this.callbackUrl()); url.searchParams.set("state", state);
+    return url.href;
+  }
+  /** The setup callback's installation_id is a hint, not identity evidence. Never return/cache this user token. */
+  async authorizeInstallation(code: string, installationId: number): Promise<void> {
+    this.authorizationUrl("configuration-check");
+    if (!id(installationId) || !/^[A-Za-z0-9_-]{1,512}$/.test(code)) throw new GitHubAppError("unauthorized");
+    const token = object(await this.requestJson("https://github.com/login/oauth/access_token", { method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "cs-agent-events" },
+      body: new URLSearchParams({ client_id: this.secrets.GITHUB_APP_CLIENT_ID!, client_secret: this.secrets.GITHUB_APP_CLIENT_SECRET!, code, redirect_uri: this.callbackUrl() }),
+    }));
+    if (typeof token.access_token !== "string" || !token.access_token || token.token_type !== "bearer" || token.error
+      || token.expires_in !== undefined && (typeof token.expires_in !== "number" || !Number.isFinite(token.expires_in) || token.expires_in <= 60)) throw new GitHubAppError("unauthorized");
+    let found = false, expectedTotal: number | undefined; const seen = new Set<number>();
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const body = object(await this.request("/user/installations?per_page=100&page=" + page, token.access_token));
+      if (!Array.isArray(body.installations) || body.installations.length > 100 || !Number.isSafeInteger(body.total_count) || Number(body.total_count) < 0
+        || expectedTotal !== undefined && expectedTotal !== body.total_count) throw new GitHubAppError();
+      expectedTotal = Number(body.total_count); if (expectedTotal > MAX_PAGES * 100) throw new GitHubAppError("capacity");
+      for (const entry of body.installations) {
+        const installation = object(entry); if (!id(installation.id) || seen.has(installation.id)) throw new GitHubAppError(); seen.add(installation.id);
+        if (installation.id === installationId && String(installation.app_id) === this.secrets.GITHUB_APP_ID && installation.suspended_at === null) found = true;
+      }
+      if (body.installations.length < 100 || seen.size === expectedTotal) {
+        if (seen.size !== expectedTotal) throw new GitHubAppError();
+        if (!found) throw new GitHubAppError("unauthorized"); return;
+      }
+    }
+    throw new GitHubAppError("capacity");
+  }
   private async jwt(): Promise<string> {
     if (!this.configured()) throw new GitHubAppError("unconfigured");
     try {
@@ -29,11 +70,14 @@ export class GitHubAppClient {
     } catch { throw new GitHubAppError("unconfigured"); }
   }
   private async request(path: string, token: string, method = "GET"): Promise<unknown> {
-    // All paths are constructed here. No Link headers, response URLs or callback URLs are followed.
+    return this.requestJson("https://api.github.com" + path, { method,
+      headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "cs-agent-events" } });
+  }
+  private async requestJson(url: string, init: RequestInit): Promise<unknown> {
+    // Only fixed GitHub origins and internally constructed paths. Never follow redirects or Link.
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const response = await fetch("https://api.github.com" + path, { method, redirect: "error", signal: controller.signal,
-        headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "cs-agent-events" } });
+      const response = await fetch(url, { ...init, redirect: "error", signal: controller.signal });
       if (!response.ok) { void response.body?.cancel(); throw new GitHubAppError([401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable"); }
       if (!response.body) throw new GitHubAppError();
       const reader = response.body.getReader(); let size = 0; const parts: Uint8Array[] = [];
