@@ -5,11 +5,12 @@ import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
 import type { Message } from "@earendil-works/pi-ai";
-import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, section, type Conversation, type EntryId } from "@earendil-works/pi-durable";
+import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, section, type Conversation, type EntryId } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "../env";
 import { modelChange, openModels } from "../models";
 import { captureModels } from "../requests/capture";
+import { requestTrace } from "../requests/trace";
 import { contextSource } from "../requests/context-source";
 import { remoteCredentials } from "../model-credentials";
 import { createWebPageTool } from "../tools/web-page";
@@ -294,11 +295,18 @@ export class SubagentDO extends DurableObject<Env> {
   private async openRuntime(): Promise<Runtime> {
     const meta = await this.meta();
     if (!meta) throw new Error("subagent_missing");
+    const trace = requestTrace(this.env, meta.parent, async (api, callContext) => {
+      const live = await api.snapshot(LiveDoc, api.conversationId, callContext), first = live?.run?.inputs[0], last = live?.run?.inputs.at(-1);
+      if (!first || !last) return;
+      const submission = await (await harness.submission(last, callContext))?.status(callContext);
+      return submission?.requestId ? { turnId: "turn:sub:" + meta.id + ":" + first, inputId: submission.requestId, generation: 0 } : undefined;
+    }, meta.id);
     const monitor = contextSource(this.ctx.storage, () => harness);
-    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" }, undefined, monitor.origin);
+    const models = captureModels(openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch), this.env, this.ctx, { thread: meta.parent, actor: meta.id, purpose: "subagent" }, trace.binding, monitor.origin);
     const parent = () => this.env.THREAD.getByName(meta.parent);
     const registry = createRegistry();
     registry.install(monitor.extension);
+    registry.install(trace.extension);
     // 子会话保留只读检索；下面按派出快照安装技能、所分配资源的 coding 与 MCP 代理，仍无发送或管理工具。
     registry.install(defineExtension({
       name: "cs-subagent",

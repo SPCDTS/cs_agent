@@ -4,9 +4,8 @@ import { compact, cs, nf } from "./console";
 import { ContextInspection, totalChars, type ContextCategory, type ContextItem, type ContextTotals } from "../src/requests/context-types";
 import * as C from "./request-contracts";
 import { messageContent, openRequest, percent, structuredPart } from "./request-detail";
-import { renderToolTrace } from "./trace";
+import { executionLink, renderToolForest } from "./tool-execution";
 import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
-import { paginatedBlock } from "./pagination";
 
 const categories: { id: ContextCategory; label: string }[] = [
   { id: "result", label: "工具结果" }, { id: "assistant", label: "助手消息" }, { id: "summary", label: "历史摘要" },
@@ -16,21 +15,22 @@ const categoryLabel = (id: ContextCategory) => categories.find(category => categ
 const note = (text: string) => el("p", { className: "context-note", text });
 const button = (text: string, onclick: () => void, className = "btn compact") => el("button", { type: "button", className, text, onclick });
 
-export function deferredContextPart(requestId: string, item: Pick<ContextItem, "id" | "label" | "chars" | "truncated" | "bodyAvailable">) {
+export function deferredContextPart(requestId: string, item: Pick<ContextItem, "id" | "label" | "chars" | "truncated" | "bodyAvailable" | "execution">) {
   const content = el("div", { className: "message-block-content" });
   const box = el("details", { className: "message-block context-part", "data-context-part": item.id }, [
-    el("summary", {}, [el("span", { text: item.label }), el("small", { text: nf(item.chars) + " 字符" + (item.truncated ? " · 正文截断" : "") })]), content,
+    el("summary", {}, [el("span", { text: item.label + (item.execution?.label ? " · " + item.execution.label : "") }), el("small", { text: nf(item.chars) + " 字符" + (item.truncated ? " · 正文截断" : "") })]), content,
   ]);
   let loaded = false;
   box.addEventListener("toggle", async () => {
     if (!box.open || loaded) return;
-    if (!item.bodyAvailable) { content.replaceChildren(note("这部分正文未保留；统计包含截断前的完整字符数。")); return; }
+    if (!item.bodyAvailable) { content.replaceChildren(note("这部分正文未保留；统计包含截断前的完整字符数。")); if(item.execution)content.append(executionLink(item.execution)); return; }
     loaded = true; const epoch = cs.epoch;
     content.replaceChildren(el("p", { className: "muted small", text: "正在读取正文…" }));
     try {
       const result = await readApi(C.ContextBody, "GET", "/admin/requests/" + encodeURIComponent(requestId) + "/context/" + item.id);
       if (!box.isConnected || epoch !== cs.epoch) return;
       content.replaceChildren(messageContent(result.part, new Map(result.paired.map(pair => [pair.id, pair.part]))));
+      if (item.execution) { content.prepend(note("本次输入中的工具结果")); content.append(executionLink(item.execution)); }
       if (result.part.truncated) content.prepend(note("正文已截断；上方字符数为截断前的大小。"));
     } catch {
       loaded = false;
@@ -72,15 +72,15 @@ export function contextRects(totals: ContextTotals): Rect[] {
   return divide(values, 0, 0, 100, 100);
 }
 
-export function contextInspector(detail: C.RequestDetail) {
+export function contextInspector(detail: C.RequestDetail, focusExecution?: string) {
   const host = el("section", { className: "context-inspector" }, [note("正在读取上下文分析…")]), epoch = cs.epoch;
   void readApi(ContextInspection, "GET", "/admin/requests/" + encodeURIComponent(detail.request.id) + "/context").then(data => {
-    if (host.isConnected && epoch === cs.epoch) renderInspector(host, detail, data);
+    if (host.isConnected && epoch === cs.epoch) renderInspector(host, detail, data, focusExecution);
   }).catch(() => { if (host.isConnected && epoch === cs.epoch) host.replaceChildren(note("上下文分析读取失败，请重新打开请求。")); });
   return host;
 }
 
-function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: ContextInspection) {
+function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: ContextInspection, focusExecution?: string) {
   const r = data.current, analysis = data.analysis, previous = data.previous;
   const reset = r.metrics?.head?.kind === "reset" && r.metrics.head.id !== previous?.metrics?.head?.id;
   const comparable = !!previous && previous.model === r.model && previous.provider === r.provider && !reset;
@@ -92,7 +92,7 @@ function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: Conte
   ]);
   const tabs = el("nav", { className: "context-tabs", "aria-label": "请求分析" }), content = el("div", { className: "context-tab-body" });
   type Tab = "composition" | "diff" | "compaction" | "output" | "raw";
-  let active: Tab = "composition", category: ContextCategory | undefined;
+  let active: Tab = focusExecution ? "output" : "composition", category: ContextCategory | undefined;
   const buttons = new Map<Tab, HTMLButtonElement>();
   const show = (tab: Tab) => {
     active = tab; for (const [key, node] of buttons) node.setAttribute("aria-pressed", String(tab === key));
@@ -101,7 +101,7 @@ function renderInspector(host: HTMLElement, detail: C.RequestDetail, data: Conte
     if (tab === "output") {
       if (detail.responseAvailable || detail.response) content.append(deferredContextPart(r.id, { id: "response", label: "本次模型输出", chars: detail.response?.chars ?? 0, truncated: false, bodyAvailable: true }));
       else content.append(note(detail.request.status === "running" ? "模型仍在生成。" : "本次模型输出未保留。"));
-      if (detail.tools.length) content.append(el("h3", { text: "调用后的工具执行" }), paginatedBlock("context-tools:" + r.id, detail.tools.map(renderToolTrace)));
+      if (detail.tools.length) content.append(el("h3", { text: "调用后的工具执行" }), renderToolForest(detail.tools, "context-tools:" + r.id, focusExecution));
       else if (detail.request.toolCalls?.length) content.append(note("这次模型返回了工具调用；执行明细尚未采集，输入里的工具结果可在上下文组成中查看。"));
       return;
     }

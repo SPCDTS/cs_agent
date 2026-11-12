@@ -396,6 +396,32 @@ describe("subagents as child Durable Objects", () => {
   });
 });
 
+it("子 agent 的 CodeMode 内部调用、捕获的失败和后续输入都归入独立执行组", async () => {
+  vi.spyOn(SandboxDO.prototype, "run").mockImplementation(async function(this: SandboxDO, input) {
+    if (input.operation.kind === "exec" && input.operation.command === "fail") throw Error("fixture_execution_failed");
+    return { status: "committed", persistence: "committed", revision: (await this.files()).revision,
+      result: { stdout: "少量输出", stderr: "", code: 0, timedOut: false, truncated: false } };
+  });
+  twoModels([spawn("执行两个命令"), { text: "已派出" }, { text: "收到结果" }], [
+    { tool: "codemode", args: { code: 'try { await tools.bash({command:"fail"}); } catch {} text(await tools.bash({command:"ok"}));' } }, { text: "处理完毕" },
+  ]);
+  await thread("owner").submit(input(1, "运行检查", 10000001));
+  await reports("owner", 1);
+  const agent = await onlySubagent("owner"), store = env.REQUESTS.getByName("main");
+  const page = await store.list({ since: 0, until: Date.now() + 1000, limit: 20 });
+  const request = page.requests.find(row => row.actor === agent.id && row.toolCalls?.some(call => call.name === "codemode"));
+  expect(request?.binding?.turnId).toContain("turn:sub:" + agent.id + ":");
+  const detail = await store.detail(request!.id), root = detail!.tools.find(tool => tool.name === "codemode")!;
+  expect(root.status, JSON.stringify(await store.toolDetail(root.id))).toBe("done");
+  expect(detail!.tools.every(tool => tool.actor === agent.id)).toBe(true);
+  expect(detail!.tools.filter(tool => tool.parentCallId === root.callId).map(tool => tool.status).sort()).toEqual(["done", "error"]);
+  const followup = page.requests.find(row => row.actor === agent.id && row.purpose === "subagent" && !row.toolCalls?.length);
+  const inspection = await store.contextInspection(followup!.id), item = inspection?.analysis?.items.find(item => item.execution);
+  expect(item?.execution).toMatchObject({ calls: 2, failures: 1, label: "bash ×2" });
+  expect((await store.toolExecution(root.id))?.sourceRequestId).toBe(request!.id);
+  expect(inspection?.analysis?.metrics.chars.result).toBeLessThan(1000);
+});
+
 it.each([false, true])("子 agent 自动输出沿用分配资源，父 agent 可按 ID 发送，shared=%s", async shared => {
   const resources = env.CLOUDFLARE_WORKSPACE_RESOURCES.getByName("owner"), { assignedSandboxId } = await resources.list("owner");
   const resource = shared ? await resources.get("owner", assignedSandboxId) : await resources.create("owner", "image-env", {});

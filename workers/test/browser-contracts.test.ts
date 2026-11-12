@@ -41,6 +41,7 @@ it("浏览器 schema 接受真实管理路由响应，包括空列表和已保�
     ["/admin/requests/" + id + "/context"]: C.ContextInspection,
     ["/admin/requests/" + id + "/context/message:0"]: C.ContextBody,
     "/admin/context-timeline?thread=owner": C.ContextTimeline,
+    ["/admin/tools/" + toolId + "/execution"]: C.ToolExecution,
     ["/admin/requests/" + id]: C.RequestDetail, ["/admin/tools/" + toolId]: C.ToolDetail,
   };
   for (const [path, schema] of Object.entries(checks)) {

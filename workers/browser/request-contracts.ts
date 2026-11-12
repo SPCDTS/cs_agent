@@ -1,3 +1,5 @@
+import { ToolSummary } from "../src/requests/tool-types";
+export { ToolSummary } from "../src/requests/tool-types";
 import { ContextMetrics } from "../src/requests/context-types";
 import { Type, type Static } from "typebox";
 
@@ -26,11 +28,7 @@ export const Context = Type.Object({ system: TextPart, messages: Type.Array(Cont
   chars: Type.Object({ system: Type.Number(), messages: Type.Number(), tools: Type.Number() }),
 });
 export type Context = Static<typeof Context>;
-export const ToolSummary = Type.Object({ id: Type.String(), thread: Type.String(), binding: Binding, callId: Type.String(), parentCallId: Type.Optional(Type.String()),
-  name: Type.String(), startedAt: Type.Number(), endedAt: numberOrNull, status: Type.String(), detailAvailable: Type.Optional(Type.Boolean()),
-});
-export type ToolSummary = Static<typeof ToolSummary>;
-export const ToolDetail = Type.Object({ ...ToolSummary.properties, arguments: Type.Optional(TextPart), result: Type.Optional(TextPart) });
+export const ToolDetail = Type.Object({ ...ToolSummary.properties, arguments: Type.Optional(TextPart), result: Type.Optional(TextPart), structuredResult: Type.Optional(TextPart) });
 export type ToolDetail = Static<typeof ToolDetail>;
 const DetailBase = { bodyDeferred: Type.Optional(Type.Boolean()), responseAvailable: Type.Optional(Type.Boolean()), request: RequestRecord, tools: Type.Array(ToolSummary), related: Type.Array(RequestRecord), response: Type.Optional(MessagePart) };
 export const RequestDetail = Type.Union([

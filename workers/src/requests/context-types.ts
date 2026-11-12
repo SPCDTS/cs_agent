@@ -1,3 +1,4 @@
+import { ExecutionReference } from "./tool-types";
 import { Type, type Static } from "typebox";
 
 export const ContextTotals = Type.Object({ system: Type.Number(), tools: Type.Number(), summary: Type.Number(), user: Type.Number(), assistant: Type.Number(), result: Type.Number() });
@@ -20,6 +21,7 @@ export const ContextMetrics = Type.Object({ version: Type.Literal(1), chars: Con
 export type ContextMetrics = Static<typeof ContextMetrics>;
 export const ContextItem = Type.Object({ id: Type.String(), key: Type.String(), category: ContextCategory, chars: Type.Number(),
   label: Type.String(), images: Type.Number(), bodyAvailable: Type.Boolean(), truncated: Type.Boolean(),
+  toolCallId: Type.Optional(Type.String()), at: Type.Optional(Type.Number()), execution: Type.Optional(ExecutionReference),
   phase: Type.Optional(Type.Union([Type.Literal("retained"), Type.Literal("added")])),
 });
 export type ContextItem = Static<typeof ContextItem>;

@@ -16,7 +16,7 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
     const startedAt = Date.now();
     let reported = false;
     let cacheReported = false, cacheWriteReported = false;
-    const requestBinding = purpose === "conversation" ? binding?.() : undefined;
+    const requestBinding = purpose === "conversation" || purpose === "subagent" ? binding?.() : undefined;
     let httpStatus: number | undefined;
     const stream = start(event => {
       if (!event || typeof event !== "object") return;

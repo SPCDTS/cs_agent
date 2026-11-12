@@ -186,6 +186,11 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     let cursor; try { cursor = readAdminCursor(url); } catch { throw new HttpError(400, "invalid_cursor"); }
     return json(await env.REQUESTS.getByName("main").contextTimeline(thread, actor, cursor));
   } },
+  { method: "GET", path: /^\/admin\/tools\/(?<id>[0-9a-f-]{36})\/execution$/, handle: async ({ env, params }) => {
+    const execution = await env.REQUESTS.getByName("main").toolExecution(params.id!);
+    if (!execution) throw new HttpError(404, "not_found");
+    return json(execution);
+  } },
   { method: "GET", path: /^\/admin\/requests\/(?<id>[0-9a-f-]{36})\/context$/, handle: async ({ env, params }) => {
     const inspection = await env.REQUESTS.getByName("main").contextInspection(params.id!);
     if (!inspection) throw new HttpError(404, "not_found");

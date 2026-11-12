@@ -89,6 +89,7 @@ export function snapshot(input: Context, origin?: ContextOrigin): ContextSnapsho
     if (tag?.phase === "added") addedChars += text.length;
     items.push({ id: "message:" + index, key: category + ":" + message.timestamp + ":" + fingerprint(text), category, chars: text.length,
       label: tag?.summary ? "压缩后的历史摘要" : (index + 1) + ". " + (message.role === "toolResult" ? safeText(message.toolName).slice(0, 120) : message.role),
+      ...(message.role === "toolResult" ? { toolCallId: message.toolCallId, at: message.timestamp } : {}),
       images, bodyAvailable: !!body, truncated: !body || body.truncated, ...(tag?.phase ? { phase: tag.phase } : {}) });
   });
   const analysis: ContextAnalysis = { items, metrics: { version: 1, chars: totals, messageCount: nonSystem.length, toolCount: tools.length, imageCount,

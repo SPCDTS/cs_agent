@@ -1,3 +1,4 @@
+import { ToolStore } from "./tool-store";
 import type { ContextInspection, ContextItem, ContextRequestSummary, ContextTimeline } from "./context-types";
 import type { ContextSnapshot, MessagePart } from "./snapshot";
 import type { RequestDetail, RequestRecord } from "./types";
@@ -40,7 +41,9 @@ export class ContextStore {
       AND (started<? OR (started=? AND id<?)) ORDER BY started DESC,id DESC LIMIT 1`,
       current.thread, current.actor, current.purpose, current.startedAt, current.startedAt, current.id).toArray()[0];
     const previous: RequestRecord | undefined = prior ? JSON.parse(prior.record) : undefined;
-    const old = previous ? this.payload(previous.id)?.context.analysis : undefined, analysis = payload?.context.analysis;
+    const tools = new ToolStore(this.sql), oldContext = previous ? this.payload(previous.id)?.context : undefined;
+    const old = oldContext?.analysis && previous ? { ...oldContext.analysis, items: tools.annotate(previous, oldContext) } : undefined;
+    const analysis = payload?.context.analysis ? { ...payload.context.analysis, items: tools.annotate(current, payload.context) } : undefined;
     const head = analysis?.metrics.head, previousHead = old?.metrics.head;
     return { current: summary(current), previous: previous ? summary(previous) : null, analysis: analysis ?? null,
       comparison: analysis && old ? { ...compareContext(old.items, analysis.items),
