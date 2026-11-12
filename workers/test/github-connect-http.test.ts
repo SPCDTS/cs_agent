@@ -562,3 +562,96 @@ it("PR1 opaque OAuth revocation tracking is bounded and rejects overflow without
   expect((await admin(e,"connect/complete",{browser,state:new URL(independent.url).searchParams.get("state"),code:"code7"})).status).toBe(200);
  });
 });
+
+it.each(["installation","repository"])("PR1 follow-up real %s header lifecycle is deduplicated in both arrival orders after reconstruction",async event=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);
+  const control=payload(456,201);
+  // Headers are unsigned: conservative parsing really treats this issues.opened body as lifecycle.
+  expect((await webhook(e,control,"first-real-control",event)).status).toBe(202);
+  expect(i.githubReceipt("first-real-control")?.reason).toBe("lifecycle");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  const recovered=new EventsDO(ctx,e),routed={...e,EVENTS:{getByName:()=>recovered} as unknown as Env["EVENTS"]};
+  await recovered.syncGitHubConnect(7);
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect(await (await webhook(routed,control,"control-then-business")).json()).toEqual({status:"body_duplicate"});
+  expect(await (await webhook(routed,control,"first-real-control")).json()).toEqual({status:"duplicate"});
+  expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toEqual([]);
+  const business=payload(456,202);
+  expect((await webhook(routed,business,"first-real-business")).status).toBe(202);
+  const epoch=ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch;
+  expect(await (await webhook(routed,business,"business-then-control",event)).json()).toEqual({status:"body_duplicate"});
+  expect(recovered.githubReceipt("first-real-business")?.state).toBe("held");
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+  expect(ctx.storage.sql.exec<{epoch:number}>("SELECT epoch FROM github_connect_epoch").one().epoch).toBe(epoch);
+  expect((await webhook(routed,business,"first-real-control")).status).toBe(409);
+  expect((await webhook(routed,control,"first-real-business",event)).status).toBe(409);
+ });
+});
+it.each(["issues","repository","ping"].flatMap(event=>["ttl","fifo"].map(boundary=>({event,boundary}))))(
+ "PR1 follow-up unknown $event body remains deduplicated after authorization until $boundary ends",async({event,boundary})=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  const body={...payload(456,301),hook_id:301};
+  expect((await webhook(e,body,"before-owner",event)).status).toBe(202);
+  expect(ctx.storage.sql.exec<{kind:string}>("SELECT kind FROM github_aux_receipt WHERE delivery_id='before-owner'").one().kind).toBe("noise");
+  await connect(e);await enable(i);
+  const recovered=new EventsDO(ctx,e),routed={...e,EVENTS:{getByName:()=>recovered} as unknown as Env["EVENTS"]};
+  expect(await (await webhook(routed,body,"after-owner")).json()).toEqual({status:"body_duplicate"});
+  expect(await (await webhook(routed,body,"before-owner")).json()).toEqual({status:"duplicate"});
+  expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toEqual([]);
+  if(boundary==="ttl")ctx.storage.sql.exec("UPDATE github_aux_receipt SET expires_at=0 WHERE delivery_id='before-owner'");
+  else {
+   for(let n=0;n<NOISE_LIMIT;n++)expect((await webhook(routed,{...payload(900000+n,n+1),sender:{id:800000+n}},"evict-unknown-"+n)).status).toBe(202);
+   expect(recovered.githubReceipt("before-owner")).toBeNull();
+  }
+  // Losing a diagnostic hash is not authority: selection is still required.
+  await enable(recovered,[]);
+  expect(await (await webhook(routed,body,"expired-without-selection")).json()).toEqual({status:"suppressed"});
+  expect(recovered.githubReceipt("expired-without-selection")?.reason).toBe("repository_not_allowed");
+  expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toEqual([]);
+  ctx.storage.sql.exec("UPDATE github_aux_receipt SET expires_at=0 WHERE delivery_id='expired-without-selection'");
+  await enable(recovered);
+  expect(await (await webhook(routed,body,"expired-with-current-authority")).json()).toEqual({status:"received"});
+  expect(recovered.githubReceipt("expired-with-current-authority")?.state).toBe("held");
+  expect(await (await webhook(routed,body,"expired-body-control-replay","repository")).json()).toEqual({status:"body_duplicate"});
+  expect(recovered.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("active");
+ });
+});
+it("PR1 follow-up auxiliary receipts, duplicate headers and conflicts never schedule a business alarm",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await ctx.storage.deleteAlarm();
+  const wake=vi.spyOn(ctx.storage,"setAlarm");
+  for(let n=0;n<12;n++)await webhook(e,{...payload(900000+n),sender:{id:800000+n}},"noisy-wake-"+n);
+  await webhook(e,{hook_id:1,installation:{id:456}},"ping-no-wake","ping");
+  await webhook(e,{...payload(),action:"closed"},"filtered-no-wake");
+  await webhook(e,payload(456,401),"control-no-wake","repository");
+  expect(i.githubConnectionsView().installations.find(b=>b.installationId===456)?.status).toBe("revoked");
+  expect(wake).not.toHaveBeenCalled();expect(await ctx.storage.getAlarm()).toBeNull();
+  await i.syncGitHubConnect(7);
+  const body=payload(456,402);
+  expect((await webhook(e,body,"business-wake")).status).toBe(202);
+  expect(wake).toHaveBeenCalledTimes(1);expect(await ctx.storage.getAlarm()).not.toBeNull();
+  await ctx.storage.deleteAlarm();wake.mockClear();
+  expect((await webhook(e,body,"business-wake")).status).toBe(200);
+  expect((await webhook(e,body,"duplicate-control-no-wake","repository")).status).toBe(200);
+  expect((await webhook(e,payload(456,403),"business-wake")).status).toBe(409);
+  expect(wake).not.toHaveBeenCalled();expect(await ctx.storage.getAlarm()).toBeNull();
+ });
+});
+it("PR1 follow-up a failed business alarm never ACKs and Cron recovers the committed held receipt",async()=>{
+ mockGitHub();await harness(async(e,i,ctx)=>{
+  await connect(e);await enable(i);await ctx.storage.deleteAlarm();
+  const wake=vi.spyOn(ctx.storage,"setAlarm").mockRejectedValueOnce(new Error("synthetic_alarm_failure"));
+  const body=payload(456,501);
+  expect((await webhook(e,body,"failed-wake")).status).toBe(503);
+  expect(i.githubReceipt("failed-wake")?.state).toBe("held");
+  wake.mockRestore();
+  const recovered=new EventsDO(ctx,e),routed={...e,EVENTS:{getByName:()=>recovered} as unknown as Env["EVENTS"]};
+  expect((await webhook(routed,body,"failed-wake-retry")).status).toBe(200);
+  expect(await ctx.storage.getAlarm()).toBeNull();
+  await recovered.tick();
+  expect(recovered.githubReceipt("failed-wake")?.state).toBe("held");
+  expect(await ctx.storage.getAlarm()).not.toBeNull();
+  expect(ctx.storage.sql.exec("SELECT 1 FROM github_receipt").toArray()).toHaveLength(1);
+ });
+});

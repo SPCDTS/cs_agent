@@ -83,10 +83,13 @@ export class EventsDO extends DurableObject<Env> {
 
   async receiveGitHub(delivery: GitHubDelivery) {
     if (!this.githubConnections.configured()) return {status:503,code:"unconfigured"};
-    // Durable wake-up precedes the atomic receipt+held transaction; Cron is the recovery backstop.
-    const alarm = await this.ctx.storage.getAlarm();
-    if (alarm === null || alarm > Date.now() + 1000) await this.ctx.storage.setAlarm(Date.now() + 1000);
     const result = this.github.receive(delivery);
+    // Only newly admitted held business needs a wake; diagnostics/replays must not amplify alarms.
+    // Cron recovers committed held rows if a crash or failed alarm occurs before ACK.
+    if (result.code === "received") {
+      const alarm = await this.ctx.storage.getAlarm();
+      if (alarm === null || alarm > Date.now() + 1000) await this.ctx.storage.setAlarm(Date.now() + 1000);
+    }
     await this.ctx.storage.sync();
     return result;
   }

@@ -125,3 +125,12 @@ PR1 审查发现：陌生安装的合法签名收件及 ping/lifecycle 原先共
 ### push 对象 ID
 
 push.after 必须是字符串、精确 40 或 64 个十六进制字符（大小写均可）；拒绝数组/数字强制转换、非法字符以及尾随换行或空白。链接仍固定在 GitHub 仓库 commit 路径。
+
+
+### 未签名 header 与唤醒边界（PR1 补充验证）
+
+event/delivery header 不在 HMAC 内，不能作为可信事件身份。生命周期解析沿用保守失效策略：例如 issues.opened 的已签名 body 首次被改头为 repository/installation，可导致相关绑定失效，不能据此授予权限；不声称查重能够阻止首到请求的改头。现有记录保留期间，控制先到再业务、业务先到再控制都按同一个 bodyHash 去重，且同 delivery 不同 body 仍冲突。回归覆盖真实 lifecycle（不仅 ping）、重建、显式 API 恢复后再重投。
+
+未知 body 在 owner 完成授权后仍受原噪声记录查重保护；TTL 或 FIFO 淘汰后可再次处理，但必须重新通过当前授权与显式仓库选择。测试覆盖 issues/repository/ping 三类未知 body、两种淘汰边界，以及失去选择时仍被抑制。
+
+收件事务完成后，只有新写入 held 的业务事件安排 alarm；噪声、ping、控制、过滤、重复、冲突及容量拒绝不新增/提前 alarm，原有其他来源 alarm 不被删除。控制撤销仍在事务内同步完成并经 storage.sync 后 ACK，不依赖 alarm。若业务已提交而安排 alarm 失败，返回 503，重试按已存在的 body 去重；Cron 重建持久 held 的调度，覆盖提交与安排唤醒之间的故障窗口。配置变更/恢复的主动唤醒保留。
