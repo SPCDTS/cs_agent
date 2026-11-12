@@ -1,5 +1,5 @@
 import { GitHubConnections } from "../src/github/connections";
-import { CONTROL_LIMIT, NOISE_LIMIT } from "../src/github/inbox";
+import { CONTROL_LIMIT, NOISE_LIMIT, GitHubInbox } from "../src/github/inbox";
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { exportPKCS8, generateKeyPair } from "jose";
@@ -829,5 +829,116 @@ it("PR1 repair a stale alarm preserves held work throughout slow verification",a
    expect(ctx.storage.sql.exec("SELECT 1 FROM event_held").toArray()).toHaveLength(1);
   } finally {release();await alarm;}
   expect(i.githubReceipt("slow-alarm")?.state).toBe("held");
+ });
+});
+
+describe("safe GitHub connect diagnostics",()=>{
+ const sensitive="synthetic-secret-code-state-browser-verifier-header-query";
+ const logCapture=()=>vi.spyOn(console,"error").mockImplementation(()=>{});
+ async function begin(e:Env) {
+  const response=await admin(e,"connect/start",{browser});
+  expect(response.status).toBe(200);
+  return new URL((await response.json() as {url:string}).url).searchParams.get("state")!;
+ }
+ async function failure(response:Response,status:number,code:string,stage:string,logs:ReturnType<typeof logCapture>) {
+  expect(response.status).toBe(status);
+  const data=await response.json() as {error:string;requestId:string};
+  expect(data).toEqual({error:code,requestId:response.headers.get("X-Request-ID")});
+  expect(data.requestId).toMatch(/^[a-f0-9-]{36}$/);
+  expect(logs).toHaveBeenLastCalledWith({event:"github_connect_failed",operation:stage==="configuration"&&status===503?"start":"complete",
+   stage,code,status,requestId:data.requestId});
+  expect(JSON.stringify(logs.mock.calls)+JSON.stringify(data)).not.toContain(sensitive);
+ }
+ it("reports state missing/binding/expiry/epoch separately without consuming rejected states",async()=>{
+  const logs=logCapture(),gh=mockGitHub();
+  await harness(async(e,_i,ctx)=>{
+   await failure(await admin(e,"connect/complete",{browser,state:sensitive,code:sensitive}),400,"github_connect_state_missing","state_missing",logs);
+   const state=await begin(e);
+   await failure(await admin(e,"connect/complete",{browser:"b".repeat(64),state,code:sensitive}),400,"github_connect_state_binding","state_binding",logs);
+   expect(ctx.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_connect_state").one().n).toBe(1);
+   ctx.storage.sql.exec("UPDATE github_connect_state SET expires=0");
+   await failure(await admin(e,"connect/complete",{browser,state,code:sensitive}),400,"github_connect_state_expired","state_expired",logs);
+   const fresh=await begin(e);
+   ctx.storage.sql.exec("UPDATE github_connect_epoch SET epoch=epoch+1 WHERE id=1");
+   await failure(await admin(e,"connect/complete",{browser,state:fresh,code:sensitive}),400,"github_connect_state_epoch","state_epoch",logs);
+   expect(gh.fetcher).not.toHaveBeenCalled();
+   expect(JSON.stringify(logs.mock.calls)).not.toContain(state);
+   expect(JSON.stringify(logs.mock.calls)).not.toContain(browser);
+  });
+ });
+ it("maps missing configuration to 503 and pending capacity to 429",async()=>{
+  const logs=logCapture();mockGitHub();
+  await harness(async(e,_i,ctx)=>{
+   const bad={...e,GITHUB_APP_STORE_KEY:"not-a-key"};
+   const instance=new EventsDO(ctx,bad);
+   const routed={...bad,EVENTS:{getByName:()=>instance} as unknown as Env["EVENTS"]};
+   await failure(await admin(routed,"connect/start",{browser}),503,"github_app_unconfigured","configuration",logs);
+   for(let n=0;n<20;n++)await begin(e);
+   const response=await admin(e,"connect/start",{browser});
+   expect(response.status).toBe(429);
+   expect((await response.json() as {error:string}).error).toBe("github_app_capacity");
+   expect(logs.mock.calls.at(-1)?.[0]).toMatchObject({operation:"start",stage:"capacity",status:429});
+  });
+ });
+ it.each([
+  ["token_exchange","github.com",undefined],
+  ["user","api.github.com","/user"],
+  ["discover","api.github.com","/user/installations"],
+  ["install_repo","api.github.com","/app/installations/456"],
+ ] as const)("identifies %s failures and never logs upstream response bodies",async(stage,host,path)=>{
+  const logs=logCapture(),gh=mockGitHub(),original=gh.fetcher.getMockImplementation()!;
+  gh.fetcher.mockImplementation(async(input,init)=>{
+   const url=new URL(String(input));
+   return url.hostname===host&&(!path||url.pathname===path)
+    ? new Response(JSON.stringify({error:sensitive}),{status:401}) : original(input,init);
+  });
+  await harness(async(e)=>{
+   const state=await begin(e);
+   await failure(await admin(e,"connect/complete",{browser,state,code:sensitive}),400,"github_app_unauthorized",stage,logs);
+   const calls=gh.fetcher.mock.calls.length;
+   await failure(await admin(e,"connect/complete",{browser,state,code:sensitive}),400,"github_connect_state_missing","state_missing",logs);
+   expect(gh.fetcher).toHaveBeenCalledTimes(calls);
+  });
+ });
+ it.each([429,403])("maps upstream rate limiting (%s) to 429 without logging headers",async(status)=>{
+  const logs=logCapture(),gh=mockGitHub();
+  gh.fetcher.mockImplementation(async()=>new Response(JSON.stringify({error:sensitive}),{status,headers:{"retry-after":sensitive}}));
+  await harness(async(e)=>{
+   const state=await begin(e);
+   await failure(await admin(e,"connect/complete",{browser,state,code:sensitive}),429,"github_app_rate_limited","token_exchange",logs);
+  });
+ });
+ it("reports invalid signing key as app_jwt configuration failure, not token exchange",async()=>{
+  const logs=logCapture();mockGitHub();
+  await harness(async(e,_i,ctx)=>{
+   const bad={...e,GITHUB_APP_PRIVATE_KEY:sensitive};
+   const instance=new EventsDO(ctx,bad);
+   const routed={...bad,EVENTS:{getByName:()=>instance} as unknown as Env["EVENTS"]};
+   const state=await begin(routed);
+   const response=await admin(routed,"connect/complete",{browser,state,code:sensitive});
+   expect(response.status).toBe(503);
+   expect((await response.json() as {error:string}).error).toBe("github_app_unconfigured");
+   expect(logs.mock.calls.at(-1)?.[0]).toMatchObject({operation:"complete",stage:"app_jwt",status:503});
+   expect(JSON.stringify(logs.mock.calls)).not.toContain(sensitive);
+  });
+ });
+ it.each(["vault","persist"] as const)("keeps unknown %s errors as 500 without leaking exception properties",async(stage)=>{
+  const logs=logCapture();mockGitHub();
+  await harness(async(e)=>{
+   const state=await begin(e),err=Object.assign(new Error(sensitive),{code:sensitive,stack:sensitive});
+   if(stage==="vault")vi.spyOn(TokenVault.prototype,"encrypt").mockRejectedValueOnce(err);
+   else vi.spyOn(GitHubInbox.prototype,"reauthorize").mockImplementationOnce(()=>{throw err;});
+   await failure(await admin(e,"connect/complete",{browser,state,code:sensitive}),500,"internal",stage,logs);
+  });
+ });
+ it("uses safe rpc diagnostics when DO construction or transport fails",async()=>{
+  const logs=logCapture(),e={...appEnv(),EVENTS:{getByName:()=>{throw Object.assign(new Error(sensitive),{code:"unconfigured"});}}} as unknown as Env;
+  await failure(await admin(e,"connect/complete",{browser,state:sensitive,code:sensitive}),500,"internal","rpc",logs);
+ });
+ it("preserves typed failure envelopes across actual Durable Object RPC",async()=>{
+  const requestId=crypto.randomUUID();
+  const result=await env.EVENTS.getByName("diagnostic-rpc").completeGitHubConnect(sensitive,sensitive,"synthetic-admin",browser,requestId);
+  expect(result).toEqual({ok:false,status:400,code:"github_connect_state_missing",requestId});
+  expect(JSON.stringify(result)).not.toContain(sensitive);
  });
 });

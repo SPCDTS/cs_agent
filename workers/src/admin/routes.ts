@@ -53,6 +53,23 @@ class HttpError extends Error {
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: API_HEADERS });
 const plain = (body: string, status: number) => new Response(body, { status, headers: { ...API_HEADERS, "Content-Type": "text/plain; charset=utf-8" } });
 
+// Plain result envelopes preserve classification across DO RPC serialization.
+async function githubConnectResponse<T>(operation: "start" | "complete",
+  work: (requestId: string) => Promise<import("../github/connect-diagnostics").ConnectResult<T>>): Promise<Response> {
+  const requestId = crypto.randomUUID();
+  let response: Response;
+  try {
+    const result = await work(requestId);
+    response = result.ok ? json(result.value) : json({ error: result.code, requestId: result.requestId }, result.status);
+  } catch {
+    // Constructor/RPC failures happen before the DO boundary. Do not inspect their message.
+    console.error({ event: "github_connect_failed", requestId, operation, stage: "rpc", code: "internal", status: 500 });
+    response = json({ error: "internal", requestId }, 500);
+  }
+  response.headers.set("X-Request-ID", requestId);
+  return response;
+}
+
 const PAIRING_BODY_MAX_BYTES = 64 * 1024;
 async function limitedJson(request: Request, maxBytes: number): Promise<unknown> {
   if (Number(request.headers.get("content-length")) > maxBytes) {
@@ -282,12 +299,11 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin/github/connections", handle: async ({env}) => json(await env.EVENTS.getByName("main").githubConnectionsView()) },
   { method: "POST", path: "/admin/github/connect/start", handle: async ({env,request}) => {
     const v=await body(request,Type.Object({browser:Type.String({pattern:"^[a-f0-9]{64}$"})},strict));
-    return json(await env.EVENTS.getByName("main").startGitHubConnect(env.ADMIN_TOKEN ?? "",v.browser));
+    return githubConnectResponse("start",requestId => env.EVENTS.getByName("main").startGitHubConnect(env.ADMIN_TOKEN ?? "",v.browser,requestId));
   }},
   { method: "POST", path: "/admin/github/connect/complete", handle: async ({env,request}) => {
     const v=await body(request,Type.Object({browser:Type.String({pattern:"^[a-f0-9]{64}$"}),state:Type.String({maxLength:100}),code:Type.String({maxLength:512})},strict));
-    try { return json(await env.EVENTS.getByName("main").completeGitHubConnect(v.state,v.code,env.ADMIN_TOKEN ?? "",v.browser)); }
-    catch { throw new HttpError(400,"github_authorization_failed"); }
+    return githubConnectResponse("complete",requestId => env.EVENTS.getByName("main").completeGitHubConnect(v.state,v.code,env.ADMIN_TOKEN ?? "",v.browser,requestId));
   }},
   { method: "POST", path: "/admin/github/connect/sync", handle: async ({env,request}) => {
     const v=await body(request,Type.Object({userId:Type.Optional(Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}))},strict));
