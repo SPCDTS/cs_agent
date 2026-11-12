@@ -14,8 +14,30 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: workers check
+  native-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.paths.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: paths
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- runner/ .github/workflows/ci.yml)" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  workers-tests:
+    name: workers tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -33,6 +55,47 @@ jobs:
       - run: npm run install:workers
       # 包含类型检查、workerd 测试、所有独立 Node 测试及不发布的打包检查。
       - run: npm run check
+
+  runner-native:
+    name: windows native
+    needs: native-changes
+    if: needs.native-changes.outputs.changed == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: runner/package-lock.json
+      - run: npm --prefix runner ci
+      - run: npm --prefix runner run build
+      - run: node --test --test-name-pattern="Hyper-V 来宾原生助手|独立桌面身份检查器" test/hyperv.test.ts test/desktop-server.test.ts
+        working-directory: runner
+        env:
+          CS_AGENT_TEST_HYPERV_NATIVE: '1'
+
+  check:
+    name: workers check
+    needs: [workers-tests, native-changes, runner-native]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require relevant checks
+        env:
+          WORKERS_RESULT: ${{ needs.workers-tests.result }}
+          CHANGES_RESULT: ${{ needs.native-changes.result }}
+          NATIVE_RESULT: ${{ needs.runner-native.result }}
+          NATIVE_CHANGED: ${{ needs.native-changes.outputs.changed }}
+        run: |
+          test "$WORKERS_RESULT" = success
+          test "$CHANGES_RESULT" = success
+          if [ "$NATIVE_CHANGED" = true ]; then
+            test "$NATIVE_RESULT" = success
+          else
+            test "$NATIVE_RESULT" = skipped
+          fi
 
   deploy-workers:
     name: deploy workers
@@ -54,10 +117,12 @@ jobs:
             workers/package-lock.json
             runner/package-lock.json
       - run: npm run install:workers
+      - run: node scripts/deploy.mjs deployments/production.json --prepare-only
+        working-directory: workers
       # coding 沙箱仍由 Wrangler 构建并推送到 Cloudflare；不再部署旧的常驻 Node 容器。
       - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: workers
-          command: deploy --var CS_AGENT_COMMIT:${{ github.sha }}
+          command: deploy --config wrangler.deploy.json --var CS_AGENT_COMMIT:${{ github.sha }}

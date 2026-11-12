@@ -1,3 +1,4 @@
+import worker from "../src/index";
 import { env, SELF } from "cloudflare:test";
 import { expect } from "vitest";
 import { Type } from "@earendil-works/pi-ai";
@@ -48,4 +49,8 @@ export async function action(frames: unknown[], index = 0, name = "send_group_ms
 }
 export async function sendPrivate(text: string, userId = "10000003") {
   return await env.BRIDGE.getByName("napcat").send({ kind: "private", userId }, text);
+}
+
+export function adminHealth() {
+  return worker.fetch(new Request("https://test/admin/health", { headers: { Authorization: "Bearer test-health" } }), { ...env, ADMIN_TOKEN: "test-health" });
 }

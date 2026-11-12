@@ -1,6 +1,6 @@
 # 本机 CS2 Workshop 接入
 
-云端通过 `https://workshop.spcdts.dev/mcp` 调用本机官方 MCP。Tunnel 名为 `cs-workshop-local`，入口仅转发 `/mcp`，其余路径返回 404。本机 MCP 绑定 `127.0.0.1:3721`，使用 Bearer 令牌鉴权。
+本章记录维护者已有实例；新部署应使用自己的域名和动态 MCP 接入。云端通过 `https://workshop.spcdts.dev/mcp` 调用本机官方 MCP。Tunnel 名为 `cs-workshop-local`，入口仅转发 `/mcp`，其余路径返回 404。本机 MCP 绑定 `127.0.0.1:3721`，使用 Bearer 令牌鉴权。
 
 ## 执行与权限
 

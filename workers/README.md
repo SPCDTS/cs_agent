@@ -37,7 +37,7 @@ DeepSeek 和 GPT 的普通聊天、网页聊天都能调用同一个 `generate_i
 
 ## 联网与外部工具
 
-`web_search` 调用 DeepSeek Search API，复用现有 API key；`web_page` 直接请求指定网页。管理员在管理台的「模型与接入」配置 MCP 服务、凭据与工具白名单。`mcp.json` 用于初始化 Registry。远程执行环境由各自的 MCP 服务提供，Windows 的 VM 和 WSB 接入见 [Windows MCP](../docs/WINDOWS-MCP.md)。OAuth 登录、目录刷新、资源读取、群授权和逐次审批见 [MCP 契约](../docs/CLOUD-MCP-CONTRACT.md)。
+`web_search` 调用 DeepSeek Search API，复用现有 API key；`web_page` 直接请求指定网页。管理员在管理台的「模型与接入」配置 MCP 服务、凭据与工具白名单。`mcp.json` 只用于首次初始化 Registry，默认服务目录为空；升级不会覆盖已经保存的服务。远程执行环境由各自的 MCP 服务提供，Windows 的 VM 和 WSB 接入见 [Windows MCP](../docs/WINDOWS-MCP.md)。OAuth 登录、目录刷新、资源读取、群授权和逐次审批见 [MCP 契约](../docs/CLOUD-MCP-CONTRACT.md)。
 
 CS2 Workshop 是外部项目。此仓库的 `scripts/workshop-local.*` 只维护连接它的本机 MCP 与 Cloudflare Tunnel；录制、合成、投稿和资源状态由 Workshop 自己管理，见 [本机接入](../docs/WORKSHOP-LOCAL.md)。
 

@@ -9,6 +9,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 async function call(client: Client, request: Parameters<Client['callTool']>[0]) { return CallToolResultSchema.parse(await client.callTool(request)); }
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Check } from 'typebox/value';
+import { EnvironmentStatusSchema } from '../src/environment-status.ts';
 import { Jobs } from '../src/jobs.ts';
 import { createMcpHttpServer } from '../src/server.ts';
 import { parseConfig } from '../src/config.ts';
@@ -16,6 +18,7 @@ import { CALLER_META_KEY, type Backend, type Execution, type ServerConfig } from
 test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、身份隔离、参数与认证拒绝', async t => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'windows-mcp-http-')), calls: Execution[] = [];
   const backend: Backend = {
+    async probe() { return { state: 'ready', protocolVersion: 1, helperVersion: 'test-build' }; },
     async dispatch(e) { calls.push(e); },
     async inspect() { return { state: 'succeeded', result: { exitCode: 0, stdout: '测试通过', stderr: '', truncated: false } }; },
     async stop() { return { state: 'cancelled' }; }, async closeSession() { return true; },
@@ -39,7 +42,8 @@ test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、�
   const client = await connect();
   const catalog = await client.listTools();
   assert.ok(catalog.tools.some(tool => tool.name === 'wsb_temp_close'));
-  assert.equal(catalog.tools.length, 7);
+  assert.equal(catalog.tools.length, 9);
+  assert.equal(catalog.tools.find(tool => tool.name === 'vm_dev_status')?.annotations?.readOnlyHint, true);
   assert.ok(!catalog.tools.some(tool => /desktop|_screen|_input/.test(tool.name)));
   assert.equal((await call(client, { name: 'vm_dev_screen', arguments: {} })).isError, true);
   assert.match(catalog.tools.find(tool => tool.name === 'wsb_temp_submit')!.description!, /都不持久/);
@@ -47,6 +51,14 @@ test('真实官方 SDK HTTP：工具发现、结构化回执、断线续查、�
   const id = randomUUID(), meta = { [CALLER_META_KEY]: { scope: 'a'.repeat(64) } };
   const submitted = await call(client, { name: 'wsb_temp_submit', arguments: { requestId: id, script: 'Write-Output 测试' }, _meta: meta });
   assert.equal(submitted.isError, undefined); assert.equal(submitted.structuredContent?.state, 'queued');
+  const environment = await call(client, { name: 'wsb_temp_status', arguments: {}, _meta: meta });
+  assert.equal(environment.isError, undefined);
+  assert.deepEqual(environment.structuredContent?.readiness, { state: 'ready', protocolVersion: 1, helperVersion: 'test-build' });
+  const snapshot = environment.structuredContent;
+  assert.ok(Check(EnvironmentStatusSchema, snapshot));
+  assert.equal(snapshot.queue.busy, true); assert.equal(snapshot.queue.queued, 1);
+  assert.equal(typeof snapshot.queue.oldestQueuedAt, 'number'); assert.equal(snapshot.queue.current, null);
+  assert.equal(calls.length, 0);
   const session = submitted.structuredContent?.sessionId; assert.equal(typeof session, 'string');
   await client.close(); await jobs.tick(); assert.equal(calls.length, 1);
   const second = await connect();

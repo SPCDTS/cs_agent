@@ -1,4 +1,4 @@
-import { backfillViews, threadView } from "./admin/read-views";
+import { backfillViews } from "./admin/read-views";
 import { handleMediaRequest } from "./media/routes";
 import { authenticated } from "./auth";
 import { handleAdmin } from "./admin/routes";
@@ -27,6 +27,7 @@ const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> 
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url), path = url.pathname;
+    if (request.method === "GET" && path === "/healthz") return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
     const media = await handleMediaRequest(request, { bucket: env.ASSETS, authenticateAdmin: req => authenticated(req, env.ADMIN_TOKEN) });
     if (media) return media;
     if (request.method === "POST" && path === "/gmail/pubsub") {
@@ -61,16 +62,6 @@ export default {
       return env.BRIDGE.getByName("napcat").fetch(request);
     }
     if (path === "/admin" || path.startsWith("/admin/")) return handleAdmin(request, env);
-    if (request.method === "GET" && path === "/healthz") {
-      const owner = threadView(env, "owner"), registry = env.REGISTRY.getByName("main");
-      const [bridge, model, thread, accounts, counts, schedule, events] = await Promise.all([
-        env.BRIDGE.getByName("napcat").status(), registry.modelStatus(), owner.stats().catch(error => ({error:error instanceof Error && error.message.includes("view_pending") ? "view_pending" : "unavailable"})), registry.status(), owner.mcpToolCounts().catch(() => null),
-        env.SCHEDULE.getByName("main").status(), env.EVENTS.getByName("main").health(),
-      ]);
-      const ok = !("unavailable" in model);
-      const { threads, sendRules, ...connection } = bridge;
-      return Response.json({ ok, commit: env.CS_AGENT_COMMIT, bridge: connection, model, thread, threads, sendRules, mcp: accounts.map(account => ({ ...account, tools: counts === null ? null : counts[account.server] ?? 0 })), schedule, events }, { status: ok ? 200 : 503 });
-    }
     return new Response("not found", { status: 404 });
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {

@@ -1,7 +1,7 @@
 import { env, SELF, reset, runInDurableObject, evictDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { SendRules } from "../src/send-rules";
-import { action, connect, reply, sendPrivate } from "./helpers";
+import { action, adminHealth, connect, reply, sendPrivate } from "./helpers";
 
 const sockets: WebSocket[] = [];
 afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); await reset(); });
@@ -29,7 +29,7 @@ describe("durable send rules", () => {
     expect(await runInDurableObject(env.BRIDGE.getByName("napcat"), (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM send_log").one().n)).toBe(1);
   });
 
-  it("persists the hourly breaker, exposes it in healthz and resets the expired window", async () => {
+  it("persists the hourly breaker, exposes it in authenticated health and resets the expired window", async () => {
     await connect(sockets);
     const bridge = env.BRIDGE.getByName("napcat");
     await runInDurableObject(bridge, (_instance, state) => {
@@ -41,7 +41,7 @@ describe("durable send rules", () => {
     expect(status.sendRules).toMatchObject([{ scope: "private:10000003", reason: "每小时超过 60 条" }]);
     const breaker = status.sendRules[0];
     expect(breaker.until - breaker.tripped_at).toBe(3600_000);
-    expect(await (await SELF.fetch("https://test/healthz")).json()).toMatchObject({ sendRules: status.sendRules });
+    expect(await (await adminHealth()).json()).toMatchObject({ sendRules: status.sendRules });
     await expect(sendPrivate("再试")).rejects.toThrow("发送已熔断");
     const reset = await runInDurableObject(bridge, (_instance, state) => {
       const rules = new SendRules(state.storage);

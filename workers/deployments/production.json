@@ -1,0 +1,20 @@
+{
+  "name": "cs-agent",
+  "routes": [
+    {
+      "pattern": "agent.spcdts.dev",
+      "custom_domain": true
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ASSETS",
+      "bucket_name": "joule-bucket"
+    }
+  ],
+  "vars": {
+    "PUBLIC_ORIGIN": "https://agent.spcdts.dev",
+    "GMAIL_PUBSUB_SERVICE_ACCOUNT": "gmail-push@jule-agent.iam.gserviceaccount.com",
+    "GMAIL_PUBSUB_TOPIC": "projects/jule-agent/topics/gmail-push"
+  }
+}

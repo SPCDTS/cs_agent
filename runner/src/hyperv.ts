@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Type } from 'typebox';
 import { Check } from 'typebox/value';
+import type { Readiness } from './environment-status.ts';
 import type { Backend, Command, Execution, ExecutionStatus, HypervTarget } from './domain.ts';
 
 const maxReplyBytes = 12 * 1024 * 1024;
@@ -18,7 +19,7 @@ const executionResult = Type.Union([
     stderr: Type.String({ maxLength: 65_536 }), truncated: Type.Boolean(),
   }) }),
 ]);
-const probeResult = Type.Object({ ready: Type.Literal(true) });
+const probeResult = Type.Object({ ready: Type.Literal(true), protocolVersion: Type.Literal(1), helperVersion: Type.String({ pattern: '^sha256:[a-f0-9]{64}$' }) });
 
 type BridgeRequest =
   | { action: 'probe' }
@@ -72,10 +73,12 @@ const callPowerShell: HypervBridge = (target, request) => new Promise((resolve, 
   }), 'utf8').toString('base64'));
 });
 
-export async function probeHypervTarget(target: HypervTarget): Promise<{ ready: true }> {
-  const result = await callPowerShell(target, { action: 'probe' });
-  if (!Check(probeResult, result)) throw new Error('Hyper-V 来宾助手未安装或配置不匹配');
-  return result;
+export async function probeHypervTarget(target: HypervTarget, bridge: HypervBridge = callPowerShell): Promise<Readiness> {
+  try {
+    const result = await bridge(target, { action: 'probe' });
+    if (!Check(probeResult, result)) return { state: 'unknown', error: 'hyperv_helper_version_unavailable' };
+    return { state: 'ready', protocolVersion: result.protocolVersion, helperVersion: result.helperVersion };
+  } catch { return { state: 'unavailable', error: 'hyperv_probe_unavailable' }; }
 }
 
 export function createHypervBackend(stateDir: string, bridge: HypervBridge = callPowerShell): Backend {
@@ -100,6 +103,9 @@ export function createHypervBackend(stateDir: string, bridge: HypervBridge = cal
   }
 
   return {
+    async probe(target) {
+      return target.kind === 'hyperv' ? probeHypervTarget(target, bridge) : { state: 'unavailable', error: 'target_kind_mismatch' };
+    },
     async dispatch(execution) {
       const target = targetOf(execution);
       const path = receipt(execution);

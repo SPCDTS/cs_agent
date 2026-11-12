@@ -1,3 +1,5 @@
+import type { Readiness } from './environment-status.ts';
+
 /** Windows MCP 服务和原生后端共享的唯一执行契约。 */
 export interface Subject { principal: string; scope: string }
 export interface HypervTarget {
@@ -25,6 +27,7 @@ export type ExecutionStatus =
  * WSB stop 销毁整个临时 session；Hyper-V stop 只终止本任务进程树。
  */
 export interface Backend {
+  probe?(target: Target): Promise<Readiness>;
   dispatch(execution: Execution): Promise<void>;
   inspect(execution: Execution): Promise<ExecutionStatus>;
   stop(execution: Execution): Promise<ExecutionStatus>;

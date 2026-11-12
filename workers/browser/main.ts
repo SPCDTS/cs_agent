@@ -1,0 +1,23 @@
+import { initApp } from "./app";
+import { initConsole } from "./console";
+import { initTrace } from "./trace";
+import { initTopology } from "./topology";
+import { initManagement } from "./management";
+import { initSessions } from "./sessions";
+import { initMemory } from "./memory";
+import { initAccess } from "./access";
+import { initWorkspace } from "./workspace";
+import { initMcp } from "./mcp";
+import { initMcpServers } from "./mcp-servers";
+
+initConsole();
+initTrace();
+initTopology();
+initManagement();
+initSessions();
+initMemory();
+initAccess();
+initWorkspace();
+initMcp();
+initMcpServers();
+initApp();

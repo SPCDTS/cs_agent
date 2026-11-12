@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Backend, Execution, ExecutionStatus } from "./domain.ts";
+import type { Backend, Execution, ExecutionStatus, Target } from "./domain.ts";
+import type { Readiness } from "./environment-status.ts";
+import { sha256 } from "./files.ts";
 import { closeNativeSession, retireWsbScratch } from "./wsb-execution.ts";
 import {
   evidence, executionFiles, Heartbeat, JobReceipt, JobRequest, Marker, record, SessionIntent, sessionFiles, wsbSessionDir,
@@ -13,10 +15,16 @@ import { nativeWsb, type NativeWsb } from "./wsb-native.ts";
 type Helper = { role: "guard"; dir: string } | { role: "execute"; dir: string; id: string };
 interface WsbAdapters {
   native?: NativeWsb;
+  helperVersion?: () => Promise<string>;
   launch?: (request: Helper) => Promise<void>;
   stage?: (runtime: string) => Promise<void>;
 }
 const bundle = fileURLToPath(new URL("../dist/", import.meta.url));
+
+async function runtimeVersion(): Promise<string> {
+  const bytes = await Promise.all(["guest.mjs", "wsb-start-helper.mjs"].map(name => fs.readFile(path.join(bundle, name))));
+  return "sha256:" + sha256(Buffer.concat(bytes));
+}
 
 async function launchHelper(request: Helper): Promise<void> {
   const helper = path.join(bundle, "wsb-start-helper.mjs");
@@ -38,6 +46,7 @@ async function stageRuntime(runtime: string): Promise<void> {
 export class WsbBackend implements Backend {
   readonly #state: string;
   readonly #native: NativeWsb;
+  readonly #helperVersion: () => Promise<string>;
   readonly #launch: NonNullable<WsbAdapters["launch"]>;
   readonly #stage: NonNullable<WsbAdapters["stage"]>;
   readonly #stops = new Map<string, Promise<boolean>>();
@@ -45,8 +54,19 @@ export class WsbBackend implements Backend {
   constructor(stateDir: string, adapters: WsbAdapters = {}) {
     this.#state = path.resolve(stateDir);
     this.#native = adapters.native ?? nativeWsb;
+    this.#helperVersion = adapters.helperVersion ?? runtimeVersion;
     this.#launch = adapters.launch ?? launchHelper;
     this.#stage = adapters.stage ?? stageRuntime;
+  }
+
+  async probe(target: Target): Promise<Readiness> {
+    if (target.kind !== "wsb") return { state: "unavailable", error: "target_kind_mismatch" };
+    let helperVersion: string;
+    try { helperVersion = await this.#helperVersion(); }
+    catch { return { state: "unavailable", error: "wsb_helper_bundle_unavailable" }; }
+    try { await this.#native.list(); }
+    catch { return { state: "unavailable", error: "wsb_cli_unavailable" }; }
+    return { state: "ready", protocolVersion: 1, helperVersion };
   }
 
   async dispatch(execution: Execution): Promise<void> {

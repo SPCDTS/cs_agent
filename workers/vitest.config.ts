@@ -1,15 +1,9 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
-import { createRequire } from "node:module";
-
-// pool 自带八月的运行时，复用已安装 Wrangler 的 workerd 才能测试十月的部署兼容日期。
-const workerd: unknown = createRequire(import.meta.url)("workerd");
-if (workerd && typeof workerd === "object" && "default" in workerd && typeof workerd.default === "string") {
-  process.env.MINIFLARE_WORKERD_PATH = workerd.default;
-}
-
-// 0.23 / Vitest 4 已移除 defineWorkersConfig，改由插件配置同一套 Workers pool。
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 export default defineConfig({
+  // 测试显式使用合成服务目录，生产默认目录为空；覆盖 Notion 与 Workshop 两种接入。
+  resolve: { alias: [{ find: "../../mcp.json", replacement: fileURLToPath(new URL("./test/fixtures/mcp.json", import.meta.url).href) }] },
   plugins: [cloudflareTest({
     wrangler: { configPath: "./wrangler.test.jsonc" },
     miniflare: {

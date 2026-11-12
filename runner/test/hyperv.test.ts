@@ -50,6 +50,19 @@ test('Hyper-V 传输丢失后只对同一个来宾 ID 查询或取消', async (t
   assert.deepEqual(calls, ['dispatch', 'inspect', 'stop'].map(action => ({ action, id: job.id })));
 });
 
+test('Hyper-V 状态只 probe，报告版本或不可用而不派发命令', async t => {
+  const path = await directory(t), actions: string[] = [];
+  const helperVersion = 'sha256:' + 'a'.repeat(64);
+  let reply: unknown = { ready: true, protocolVersion: 1, helperVersion };
+  const backend = createHypervBackend(path, async (_target, request) => { actions.push(request.action); if (reply instanceof Error) throw reply; return reply; });
+  assert.deepEqual(await backend.probe?.(vm), { state: 'ready', protocolVersion: 1, helperVersion });
+  reply = { ready: true };
+  assert.deepEqual(await backend.probe?.(vm), { state: 'unknown', error: 'hyperv_helper_version_unavailable' });
+  reply = new Error('credentials or transport failure');
+  assert.deepEqual(await backend.probe?.(vm), { state: 'unavailable', error: 'hyperv_probe_unavailable' });
+  assert.deepEqual(actions, ['probe', 'probe', 'probe']);
+});
+
 test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object', {
   skip: process.platform !== 'win32' || process.env.CS_AGENT_TEST_HYPERV_NATIVE !== '1', timeout: 30_000,
 }, async (t) => {
@@ -66,7 +79,7 @@ test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object', {
   await copyFile(join(sources, 'bridge.ps1'), join(path, 'bridge.ps1'));
   const directBridge = [
     "$ErrorActionPreference = 'Stop'",
-    '$root = $env:CS_AGENT_TEST_HYPERV_DIR',
+    '$root = [IO.Path]::GetFullPath($env:CS_AGENT_TEST_HYPERV_DIR)',
     '$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
     '$setup = @{ version = 1; bridgeSid = $sid; workdir = $root } | ConvertTo-Json -Compress',
     '[IO.File]::WriteAllText((Join-Path $root "settings.json"), $setup)',
@@ -77,6 +90,12 @@ test('Hyper-V 来宾原生助手记录输出、取消整个 Job Object', {
     '  $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))',
     '  & ([ScriptBlock]::Create($source)) $encoded $root',
     '}',
+    'class FixtureFolder { [object] GetTask([string]$name) { return @{ Enabled = $true } } }',
+    'class FixtureScheduler { [void] Connect() {} [object] GetFolder([string]$name) { return [FixtureFolder]::new() } }',
+    'function New-Object { param([string]$ComObject) return [FixtureScheduler]::new() }',
+    '$probe = (Invoke-Fixture @{ action = "probe" }) | ConvertFrom-Json',
+    'if (-not $probe.ready -or $probe.protocolVersion -ne 1 -or $probe.helperVersion -cnotmatch "^sha256:[a-f0-9]{64}$") { throw "fixture_probe_invalid" }',
+    'Remove-Item Function:/New-Object',
     'Invoke-Fixture @{ action = "stop"; id = $id }',
     'Invoke-Fixture @{ action = "dispatch"; id = $id; deadline = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + 20000; command = @{ kind = "powershell"; script = "throw 1" } }',
     'Invoke-Fixture @{ action = "inspect"; id = $id }',

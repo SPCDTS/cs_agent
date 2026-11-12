@@ -40,7 +40,7 @@ Token 不通过聊天或模型工具参数接收，不回显。凭据使用现�
 | `POST /admin/mcp/manage` | 传入 `action` 和对应参数，执行与 agent 相同的管理流程 |
 | `PUT /admin/mcp/servers/:id/credentials` | 传入 `expectedRevision` 和 `headers`，加密保存认证头 |
 
-服务存储复用 RegistryDO。首次启动将 `workers/mcp.json` 原样导入，保留已有 Notion OAuth 凭据、Workshop secret 引用及工具策略。此后以 Registry 数据为准；部署、DO 重启和静态配置变更不会覆盖运行时修改，也不会重新添加已移除的服务。原文件仍提供初始数据和全局 MCP 限额。
+服务存储复用 RegistryDO。首次启动将 `workers/mcp.json` 导入；公开默认模板的服务目录为空，由管理页或 agent 完成接入。升级已有实例保留 Registry 中的 Notion OAuth 凭据、Workshop secret 引用及工具策略。此后以 Registry 数据为准；部署、DO 重启和静态配置变更不会覆盖运行时修改，也不会重新添加已移除的服务。原文件仍提供初始数据和全局 MCP 限额。
 
 接纳新输入时同步配置；agent 启用服务后立即刷新目录。调用前核对当前配置，停用、删除或更换服务后，旧会话及已派发子任务不能继续使用旧连接执行新的调用。已经发出的远端操作无法通过停用撤回。无需新增 DO 类型、容器、Cloudflare API 权限或定时任务。
 

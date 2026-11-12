@@ -1,3 +1,4 @@
+import { healthReport } from "./health";
 import { threadView, workspaceView } from "./read-views";
 import { ADMIN_PAGE_SIZE } from "./pagination";
 import { workspaceRoutes } from "./workspace-routes";
@@ -20,7 +21,8 @@ import { SkillError, parseSkill } from "../skills";
 import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from "../message-import";
 import { ownerIds } from "../policy";
 import { SUBAGENT_ID } from "../subagent/model";
-import { ADMIN_APP_JS, ADMIN_PAGE_HTML } from "./page";
+import { ADMIN_PAGE_HTML } from "./page";
+import { ADMIN_APP_JS } from "./app.generated";
 import { CHATGPT_HELPER } from "./chatgpt-helper";
 import { SCHEDULE_IMPORT_MAX_BYTES } from "../schedule/import";
 import type { RequestQuery } from "../requests/types";
@@ -49,9 +51,31 @@ class HttpError extends Error {
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: API_HEADERS });
 const plain = (body: string, status: number) => new Response(body, { status, headers: { ...API_HEADERS, "Content-Type": "text/plain; charset=utf-8" } });
 
-async function body<T extends TSchema>(request: Request, schema: T): Promise<Static<T>> {
+const PAIRING_BODY_MAX_BYTES = 64 * 1024;
+async function limitedJson(request: Request, maxBytes: number): Promise<unknown> {
+  if (Number(request.headers.get("content-length")) > maxBytes) {
+    await request.body?.cancel();
+    throw new HttpError(413, "request_too_large");
+  }
+  const reader = request.body?.getReader();
+  if (!reader) throw new HttpError(400, "invalid_json");
+  const decoder = new TextDecoder();
+  let bytes = 0, text = "";
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > maxBytes) throw new HttpError(413, "request_too_large");
+      text += decoder.decode(part.value, { stream: true });
+    }
+    return JSON.parse(text + decoder.decode());
+  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+}
+async function body<T extends TSchema>(request: Request, schema: T, maxBytes?: number): Promise<Static<T>> {
   let value: unknown;
-  try { value = await request.json(); } catch { throw new HttpError(400, "invalid_json"); }
+  try { value = await (maxBytes === undefined ? request.json() : limitedJson(request, maxBytes)); }
+  catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, "invalid_json"); }
   if (!Check(schema, value)) throw new HttpError(400, "invalid_request");
   return value;
 }
@@ -121,6 +145,7 @@ async function knownView(env: Env, key: string) {
 const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS", "QQ_ALLOW_GROUPS", "OAUTH_STORE_KEY", "DEEPSEEK_API_KEY"] as const;
 
 export const ADMIN_ROUTES: AdminRoute[] = [
+  { method: "GET", path: "/admin/health", handle: async ({ env }) => json(await healthReport(env)) },
   ...MCP_SERVER_ROUTES,
   ...accessRoutes(),
   ...workspaceRoutes({forThread:async(thread,ctx)=>{
@@ -277,12 +302,14 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     return modelLogin(() => env.REGISTRY.getByName("main").codexLoginStart(accountId));
   } },
   { method: "POST", path: "/admin/model/oauth/codex/bridge/begin", public: true, handle: async ({ env, request }) => {
-    const { port } = await body(request, Type.Object({ port: Type.Integer({ minimum: 1, maximum: 65535 }) }, strict));
-    return modelLogin(() => env.REGISTRY.getByName("main").codexLoginBegin(pairingTicket(request), port));
+    const ticket = pairingTicket(request);
+    const { port } = await body(request, Type.Object({ port: Type.Integer({ minimum: 1, maximum: 65535 }) }, strict), PAIRING_BODY_MAX_BYTES);
+    return modelLogin(() => env.REGISTRY.getByName("main").codexLoginBegin(ticket, port));
   } },
   { method: "POST", path: "/admin/model/oauth/codex/bridge/complete", public: true, handle: async ({ env, request }) => {
-    const { callbackUrl, tokens } = await body(request, Type.Object({ callbackUrl: Type.String({ minLength: 1, maxLength: 16384 }), tokens: TokenResponseSchema }, strict));
-    return modelLogin(async () => await env.REGISTRY.getByName("main").codexLoginComplete(pairingTicket(request), callbackUrl, tokens));
+    const ticket = pairingTicket(request);
+    const { callbackUrl, tokens } = await body(request, Type.Object({ callbackUrl: Type.String({ minLength: 1, maxLength: 16384 }), tokens: TokenResponseSchema }, strict), PAIRING_BODY_MAX_BYTES);
+    return modelLogin(async () => await env.REGISTRY.getByName("main").codexLoginComplete(ticket, callbackUrl, tokens));
   } },
   { method: "POST", path: "/admin/model/oauth/codex/select", handle: async ({ env, request }) => {
     const { accountId } = await body(request, Type.Object({ accountId: Type.String({ format: "uuid" }) }, strict));
