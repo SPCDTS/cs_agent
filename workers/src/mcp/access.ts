@@ -1,3 +1,4 @@
+import type { EnvironmentAccess } from "./environments";
 import type { TurnKind } from "../policy";
 import type { Catalog } from "./catalog";
 import { validateTool } from "./catalog";
@@ -10,7 +11,7 @@ export type McpAuthority = {
   subagentId?: string;
 };
 export type McpCapabilitySnapshot = {
-  scope: string; actor: string; generation: number; replyChannel: "web" | "qq"; catalogJson: string; tools: string[]; resourceAllow?: { server: string; prefixes: string[] }[];
+  scope: string; actor: string; generation: number; replyChannel: "web" | "qq"; catalogJson: string; tools: string[]; resourceAllow?: { server: string; prefixes: string[] }[]; environments?: { server: string; access: EnvironmentAccess }[];
 };
 export const McpToolSelectionSchema = Type.Array(Type.Object({
   server: Type.String({ minLength: 1, maxLength: 64 }),

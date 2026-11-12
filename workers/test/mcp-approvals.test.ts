@@ -28,7 +28,7 @@ describe("scoped MCP exact-call approval", () => {
       const call = { name, args: { title: "已审阅的合成标题" }, operationId: "write-one" };
       expect((await mcp.invoke(call, async () => actor)).isError).toBe(true);
       expect(registry.snapshot().tools().some(t => t.tool.name === name)).toBe(false);
-      const grant = await mcp.setAccess(group, "notion", { tools: ["notion-create-pages"], resourceAllow: [], actors: [actor.actor], expiresAt: null }, "none", reviewer);
+      const grant = await mcp.setAccess(group, "notion", { tools: ["notion-create-pages"], environments: ["group852"], environmentApproval: "none", resourceAllow: [], actors: [actor.actor], expiresAt: null }, "none", reviewer);
       expect(grant.tools).toEqual(["notion-create-pages"]);
       await mcp.refreshAll();
       expect(registry.snapshot().tools().some(t => t.tool.name === name)).toBe(true);

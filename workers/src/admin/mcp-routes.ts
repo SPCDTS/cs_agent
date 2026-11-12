@@ -1,3 +1,4 @@
+import { GrantInput } from "../mcp/policy";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import type { AdminContext, AdminRoute } from "./routes";
@@ -27,7 +28,7 @@ export function createMcpAdminRoutes(resolve: (ctx: AdminContext, scope: string)
    const target = scope(ctx); let value: unknown;
    try { value = await ctx.request.json(); } catch { throw new Error("mcp_policy:invalid"); }
    const schema = Type.Object({ server: Type.String({ pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}$" }), expected: Type.String({ minLength: 1, maxLength: 64 }),
-    input: Type.Object({ tools: Type.Array(Type.String()), resourceAllow: Type.Array(Type.String()), actors: Type.Array(Type.String()), expiresAt: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]) }, { additionalProperties: false }) }, { additionalProperties: false });
+    input: GrantInput }, { additionalProperties: false });
    if (!Check(schema, value)) throw new Error("mcp_policy:invalid");
    return json(await resolve(ctx, target).mcpSetAccess(target, value.server, value.input, value.expected));
   }) },

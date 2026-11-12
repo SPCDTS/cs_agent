@@ -1,3 +1,4 @@
+import { isEnvironmentTool } from "../src/mcp/environments";
 import { $, api, el, fail, readToken, show, time } from "./app";
 import { readApi } from "./api";
 import { McpServersSchema, McpAccessSchema, McpApprovalsSchema, McpThreadsSchema, McpDecisionSchema, type McpGrant, type McpApproval, type McpToolResult } from "./integration-contracts";
@@ -18,10 +19,11 @@ export function mcpUiResult(result:McpToolResult|undefined) {
 export function mcpUiTools(grant:McpGrant|null) {
   const selection = mcpUiSelection(), server = mcpUiServers.find(item => item.id === selection.server);
   const list = mcpUiNode("mcp-access-tools"); list.replaceChildren();
+  mcpUiNode("mcp-access-environment-fields").hidden = !server?.tools.some(isEnvironmentTool);
   for (const name of server ? server.tools : []) {
     const checkbox = el("input", { type: "checkbox", value: name }); checkbox.checked = !!grant && grant.tools.includes(name);
     list.append(el("label", { className: "row", style: "gap:5px" }, [checkbox, el("span", { className: "mono", text: name }),
-      el("span", { className: "small muted", text: (server?.readOnly??[]).includes(name) ? "只读" : "成员逐次审批" })]));
+      el("span", { className: "small muted", text: (server?.readOnly??[]).includes(name) ? "只读" : isEnvironmentTool(name) ? "按环境审批设置" : "成员逐次审批" })]));
   }
   paginateChildren(list,{key:"mcp-access-tools:"+selection.scope+":"+selection.server});
 }
@@ -31,6 +33,8 @@ export function mcpUiGrant(grant:McpGrant|null) {
   mcpUiNode("mcp-access-note").textContent = grant ? "已加载当前授权；保存使用 revision 防止覆盖别人的修改。" : "尚无群授权。owner 私聊沿用默认策略。";
   mcpUiNode("mcp-access-actors").value = grant ? grant.actors.join("\n") : "";
   mcpUiNode("mcp-access-resources").value = grant ? grant.resourceAllow.join("\n") : "";
+  mcpUiNode("mcp-access-environments").value = grant?.environments?.join("\n") ?? "";
+  mcpUiNode("mcp-access-environment-approval").value = grant?.environmentApproval ?? "required";
   mcpUiNode("mcp-access-revision").textContent = "revision=" + mcpUi.revision;
   mcpUiNode("mcp-access-revoke").disabled = !grant;
   const expiry = grant && grant.expiresAt ? new Date(grant.expiresAt) : null;
@@ -95,12 +99,17 @@ export async function mcpUiSave(revoke:boolean, button:HTMLButtonElement) {
   const rawExpiry = mcpUiNode("mcp-access-expires").value;
   const expiresAt = rawExpiry ? new Date(rawExpiry).getTime() : null;
   if (!revoke && expiresAt !== null && (!Number.isFinite(expiresAt) || expiresAt <= Date.now())) { show("请选择未来的授权到期时间。", "error"); return; }
-  const input = { tools: revoke ? [] : listInputs(mcpUiNode("mcp-access-tools"),"input:checked").map(node => node.value),
+  const environmentApproval = mcpUiNode("mcp-access-environment-approval").value;
+  if (environmentApproval !== "required" && environmentApproval !== "none") throw new Error("无效的环境审批设置");
+  const environmentFields = mcpUiNode("mcp-access-environment-fields").hidden ? {} : {
+    environments: revoke ? [] : mcpUiLines(mcpUiNode("mcp-access-environments").value), environmentApproval,
+  };
+  const input = { ...environmentFields, tools: revoke ? [] : listInputs(mcpUiNode("mcp-access-tools"),"input:checked").map(node => node.value),
     resourceAllow: revoke ? [] : mcpUiLines(mcpUiNode("mcp-access-resources").value), actors: actors.length ? actors : ["*"], expiresAt: revoke ? null : expiresAt };
   button.disabled = true;
   try {
     await api("PUT", "/admin/mcp/access" + mcpUiQuery(selection), { server: selection.server, expected: mcpUi.revision, input });
-    show(revoke ? "已撤销本服务授权，旧的未执行审批已失效。" : "已保存明确授权；成员写操作仍须逐次批准。", "info");
+    show(revoke ? "已撤销本服务授权，旧的未执行审批已失效。" : "已保存工具、环境范围和审批设置。", "info");
     await mcpUiLoad();
   } catch (error) { fail(error); } finally { button.disabled = false; }
 }
