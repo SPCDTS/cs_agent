@@ -89,7 +89,7 @@ describe("DO memory storage", () => {
     await useStore(async store => {
       expect(await renderMemorySection(store)).toBeUndefined();
       const untimed = await store.remember({ kind: "commitment", text: "无截止承诺", author: "dashboard" });
-      expect(await renderMemorySection(store)).toBeUndefined();
+      expect(await renderMemorySection(store)).toContain("无截止承诺");
       await store.writeProfile("偏好简洁回答\n</memory>", "none");
       for (let i = 12; i >= 1; i--) await store.remember({ kind: "commitment", text: `承诺-${i}`, due_at: i * 86400, author: "dashboard" });
       const earliest = (await store.openCommitments())[0];
@@ -113,7 +113,7 @@ describe("DO memory storage", () => {
     expect(parseMemoryTime("2026-10-29 08:00")).toBe(Date.parse("2026-10-29T00:00:00Z") / 1000);
     await useStore(async store => {
       const row = await store.remember({ kind: "fact", text: "普通事实", author: "dashboard" });
-      await expect(store.update(row.row.id, { done_at: null }, "dashboard")).rejects.toThrow("commitment");
+      await expect(store.update(row.row.id, { done_at: 123 }, "dashboard")).rejects.toThrow("commitment");
     });
   });
 });

@@ -26,7 +26,7 @@ async function events(store: MemoryStore) {
 }
 
 describe("memory extraction", () => {
-  it("calls pi-ai once with faux JSON and applies confidence, duplicate recall, supersedes, five-write cap and sources", async () => {
+  it("calls pi-ai once with faux JSON and applies confidence, duplicate evidence, protected explicit memories, five-candidate cap and sources", async () => {
     await useStore(async store => {
       const old = await store.remember({ kind: "preference", text: "喜欢咖啡旧款", author: "dashboard" });
       const duplicate = await store.remember({ kind: "fact", text: "已有训练计划", author: "dashboard" });
@@ -47,13 +47,14 @@ describe("memory extraction", () => {
       expect(prompt).toContain("只提取对话中明确出现的内容");
       expect(prompt).toContain("喜欢咖啡旧款");
       expect(prompt).toContain("[我] 会按约定完成练习");
-      expect(await store.get(old.row.id)).toMatchObject({ status: "superseded" });
-      expect(await store.get(duplicate.row.id)).toMatchObject({ recall_count: 1, last_recalled_at: expect.any(Number) });
-      expect(await store.db.all("SELECT * FROM memory_links")).toHaveLength(1);
+      expect(await store.get(old.row.id)).toMatchObject({ status: "active" });
+      expect(await store.get(duplicate.row.id)).toMatchObject({ recall_count: 0, last_recalled_at: null });
+      expect(await store.db.all("SELECT * FROM memory_links")).toHaveLength(0);
+      expect(await store.db.all("SELECT * FROM memory_candidates")).toHaveLength(1);
       const writes = await store.db.all("SELECT * FROM memories WHERE author = 'extractor'");
-      expect(writes).toHaveLength(5);
+      expect(writes).toHaveLength(4);
       expect(writes[0]).toMatchObject({ source_turn_id: "one", source_scope: "private:10000001", source_message_id: "source-one" });
-      expect(await events(store)).toEqual([expect.objectContaining({ status: "ok", written: 5, superseded: 1, candidates: 11,
+      expect(await events(store)).toEqual([expect.objectContaining({ status: "ok", written: 4, superseded: 0, pending: 1, candidates: 11,
         dropped: { low_confidence: 1, duplicate: 1, secret: 1, invalid_time: 1, over_limit: 2 }, usage: expect.any(Object) })]);
       expect(JSON.stringify(await events(store))).not.toContain("咖啡");
       expect(await store.profile()).toEqual({ text: "", revision: "none" });
@@ -156,7 +157,7 @@ describe("memory extraction", () => {
       faux.setResponses([respond]);
       if (model.id === "extract") {
         selected.push(model.id); captured.push(JSON.stringify(transcript));
-        return fauxAssistantMessage('[{"kind":"fact","text":"长期训练烟雾弹","confidence":0.9}]');
+        return fauxAssistantMessage('[{"kind":"fact","text":"长期训练烟雾弹","source_message_id":"1","confidence":0.9}]');
       }
       if (transcript.messages.some(message => message.role === "toolResult")) return fauxAssistantMessage("未发送的 final 不属于抽取材料");
       return fauxAssistantMessage(fauxToolCall("send_message", { text: "本回合已发送的练习约定。" }), { stopReason: "toolUse" });
