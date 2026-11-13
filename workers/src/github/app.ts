@@ -7,8 +7,12 @@ export type AuthorizedRepository = { id: number; name: string };
 export type GitHubUser = { id: number; login: string };
 export type UserTokens = { access: string; refresh: string; expiresAt: number; refreshUntil: number };
 export type UserAuthorization = { user: GitHubUser; repositories: AuthorizedRepository[]; expiresAt: number };
+export const UPSTREAM_REASONS = ["network", "timeout", "http_error", "empty_body", "invalid_encoding", "invalid_json",
+  "server_error", "temporarily_unavailable", "body_too_large"] as const;
+export type UpstreamReason = typeof UPSTREAM_REASONS[number];
 export class GitHubAppError extends Error {
-  constructor(readonly code: "unconfigured" | "unavailable" | "unauthorized" | "capacity" | "rate_limited" | "reauthorization_required" | "identity_changed" = "unavailable") { super("github_app_" + code); }
+  constructor(readonly code: "unconfigured" | "unavailable" | "unauthorized" | "capacity" | "rate_limited" | "reauthorization_required" | "identity_changed" = "unavailable",
+    readonly reason?: UpstreamReason, readonly upstreamStatus?: number) { super("github_app_" + code); }
 }
 const id = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) > 0;
 const object = (v: unknown): Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
@@ -128,23 +132,36 @@ export class GitHubAppClient {
   }
   private async requestJson(url: string, init: RequestInit): Promise<unknown> {
     // Only fixed GitHub origins and internally constructed paths. Never follow redirects or Link.
+    let upstreamStatus: number | undefined;
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10_000);
     try {
       const response = await fetch(url, { ...init, redirect: "error", signal: controller.signal });
+      upstreamStatus = response.status;
       if (!response.ok) {
         void response.body?.cancel();
         const limited = response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after"));
         throw new GitHubAppError(limited || response.status === 429 ? "rate_limited"
-          : [401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable");
+          : [401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable", "http_error", upstreamStatus);
       }
-      if (!response.body) throw new GitHubAppError();
+      if (!response.body) throw new GitHubAppError("unavailable", "empty_body", upstreamStatus);
       const reader = response.body.getReader(); let size = 0; const parts: Uint8Array[] = [];
       try { while (true) { const part = await reader.read(); if (part.done) break; size += part.value.length;
-        if (size > MAX_BYTES) { await reader.cancel(); throw new GitHubAppError("capacity"); } parts.push(part.value); }
+        if (size > MAX_BYTES) { await reader.cancel(); throw new GitHubAppError("capacity", "body_too_large", upstreamStatus); } parts.push(part.value); }
       } finally { reader.releaseLock(); }
       const bytes = new Uint8Array(size); let at = 0; for (const part of parts) { bytes.set(part, at); at += part.length; }
-      return JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
-    } catch (error) { if (error instanceof GitHubAppError) throw error; throw new GitHubAppError(); }
+      if (!size) throw new GitHubAppError("unavailable", "empty_body", upstreamStatus);
+      let decoded: string, parsed: unknown;
+      try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes); }
+      catch { throw new GitHubAppError("unavailable", "invalid_encoding", upstreamStatus); }
+      try { parsed = JSON.parse(decoded); }
+      catch { throw new GitHubAppError("unavailable", "invalid_json", upstreamStatus); }
+      if (url === "https://github.com/login/oauth/access_token") {
+        const reason = object(parsed).error;
+        if (reason === "server_error" || reason === "temporarily_unavailable")
+          throw new GitHubAppError("unavailable", reason, upstreamStatus);
+      }
+      return parsed;
+    } catch (error) { if (error instanceof GitHubAppError) throw error; throw new GitHubAppError("unavailable", controller.signal.aborted ? "timeout" : "network", upstreamStatus); }
     finally { clearTimeout(timer); }
   }
   /** Cache only the short-lived credential; revalidate installation authority and repository pages on every call. */
