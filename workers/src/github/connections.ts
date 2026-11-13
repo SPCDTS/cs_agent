@@ -1,4 +1,5 @@
 import type { GitHubDelivery } from "./model";
+import type { ConnectMark } from "./connect-diagnostics";
 import { GitHubAppClient, GitHubAppError, type GitHubAppSecrets, type GitHubUser, type UserTokens, type AuthorizedRepository } from "./app";
 import { githubAppConfigured } from "./configuration";
 import { TokenVault, randomSecret, sha256 } from "../mcp/crypto";
@@ -45,53 +46,73 @@ export class GitHubConnections {
     return b.until > Date.now() ? "allow" : "wait";
   }
   authorized(installationId: number, repositoryId: number) { return this.authorization(installationId,repositoryId) === "allow"; }
-  async start(admin: string, browser: string) {
+  async start(admin: string, browser: string, mark: ConnectMark = () => {}) {
+    mark("configuration");
     if (!this.configured()) throw new GitHubAppError("unconfigured");
+    mark("browser");
     if (!/^[a-f0-9]{64}$/.test(browser)) throw new GitHubAppError("unauthorized");
+    mark("state_prepare");
     const state = randomSecret(), verifier = randomSecret(), binding = await digest(admin + ":" + browser);
     const url = this.client.authorizationUrl(state, (await sha256(verifier)).toString("base64url"));
     const hash = await digest(state);
+    mark("persist");
     this.storage.transactionSync(() => {
       this.storage.sql.exec("DELETE FROM github_connect_state WHERE expires<=?", Date.now());
-      if (this.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_connect_state").one().n >= 20) throw new GitHubAppError("capacity");
+      if (this.storage.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_connect_state").one().n >= 20) { mark("capacity"); throw new GitHubAppError("capacity"); }
       this.storage.sql.exec("INSERT INTO github_connect_state VALUES(?,?,?,?,?)",hash,binding,verifier,Date.now()+600_000,this.epoch());
     });
     return { url, installationUrl: this.client.installationUrl(state) };
   }
-  async complete(state: string, code: string, admin: string, browser: string) {
+  async complete(state: string, code: string, admin: string, browser: string, mark: ConnectMark = () => {}) {
+    mark("browser");
     if (state.length > 100 || !/^[a-f0-9]{64}$/.test(browser)) throw new GitHubAppError("unauthorized");
+    mark("state_lookup");
     const hash = await digest(state), binding = await digest(admin + ":" + browser);
     const row = this.storage.transactionSync(() => {
       const row = this.storage.sql.exec<{binding:string;verifier:string;expires:number;epoch:number}>("SELECT * FROM github_connect_state WHERE hash=?",hash).toArray()[0];
-      if (!row || row.binding !== binding || row.expires <= Date.now() || row.epoch !== this.epoch()) throw new GitHubAppError("unauthorized");
-      if(this.connecting.size>=20) throw new GitHubAppError("capacity");
+      if (!row) { mark("state_missing"); throw new GitHubAppError("unauthorized"); }
+      if (row.binding !== binding) { mark("state_binding"); throw new GitHubAppError("unauthorized"); }
+      if (row.expires <= Date.now()) { mark("state_expired"); throw new GitHubAppError("unauthorized"); }
+      if (row.epoch !== this.epoch()) { mark("state_epoch"); throw new GitHubAppError("unauthorized"); }
+      if(this.connecting.size>=20) { mark("capacity"); throw new GitHubAppError("capacity"); }
       this.storage.sql.exec("DELETE FROM github_connect_state WHERE hash=?", hash); return row;
     });
     const pending={userId:0,installations:[] as number[],revoked:false,revokedUsers:new Set<number>()};
     this.connecting.add(pending);
     try {
+      mark("configuration");
+      if (!this.configured()) throw new GitHubAppError("unconfigured");
+      mark("token_exchange");
       const tokens = await this.client.exchange(code,row.verifier);
-      const discovered = await this.client.discover(tokens);
+      mark("user");
+      const discovered = await this.client.discover(tokens,mark);
       pending.userId=discovered.user.id;pending.installations=discovered.installations;
       if(pending.revokedUsers.has(discovered.user.id)) pending.revoked=true;
       pending.revokedUsers.clear();
-      if(pending.revoked) throw new GitHubAppError("unauthorized");
+      if(pending.revoked) { mark("revoked"); throw new GitHubAppError("unauthorized"); }
+      mark("capacity");
       if (this.identities().length >= 20 && !this.identities().some(u => u.id === discovered.user.id)) throw new GitHubAppError("capacity");
+      mark("state_lookup");
       const generation = this.epoch() + 1; // Monotonic across disconnect/reconnect: no identity-generation ABA.
+      mark("vault");
       const cipher = await this.vault.encrypt(JSON.stringify(tokens),aad(discovered.user.id,generation));
       const prepared: Binding[] = [];
       for (const installationId of discovered.installations) {
         const existing = this.bindings().find(b => b.installationId === installationId);
         // One installation has an explicit identity owner. Another login cannot silently take it over.
         if (existing && existing.user.id !== discovered.user.id) continue;
+        mark("inspect");
         const auth = await this.client.inspect(tokens,installationId);
         if (auth.user.id !== discovered.user.id) throw new GitHubAppError("unauthorized");
         const allowed = new Set(auth.repositories.map(r => r.id));
-        const repositories = (await this.client.repositories(installationId)).filter(r => allowed.has(r.id));
+        mark("app_jwt");
+        const repositories = (await this.client.repositories(installationId,mark)).filter(r => allowed.has(r.id));
         prepared.push({installationId,user:auth.user,repositories,status:"active",until:auth.expiresAt,generation});
       }
+      mark("persist");
       this.storage.transactionSync(() => {
-        if (pending.revoked || row.epoch !== this.epoch()) throw new GitHubAppError("unauthorized");
+        if (pending.revoked) { mark("revoked"); throw new GitHubAppError("unauthorized"); }
+        if (row.epoch !== this.epoch()) { mark("state_epoch"); throw new GitHubAppError("unauthorized"); }
         for (const b of this.bindings().filter(b => b.user.id === discovered.user.id)) {
           if (!prepared.some(next => next.installationId === b.installationId)) this.invalidate(b.installationId);
           else if (b.status !== "active") this.revoke(b.installationId);
@@ -102,6 +123,7 @@ export class GitHubConnections {
         for (const b of prepared) this.revoke(b.installationId);
         this.storage.sql.exec("UPDATE github_connect_epoch SET epoch=epoch+1 WHERE id=1");
       });
+      mark("snapshot");
       return this.snapshot();
     } finally { this.connecting.delete(pending); }
   }

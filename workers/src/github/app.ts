@@ -1,4 +1,5 @@
 import { importPKCS8, SignJWT } from "jose";
+import type { ConnectMark } from "./connect-diagnostics";
 
 /** Separate operator-owned App; never reuse the development bot credentials. */
 export type GitHubAppSecrets = { GITHUB_APP_ID?: string; GITHUB_APP_SLUG?: string; GITHUB_APP_PRIVATE_KEY?: string; GITHUB_APP_WEBHOOK_SECRET?: string; GITHUB_APP_CLIENT_ID?: string; GITHUB_APP_CLIENT_SECRET?: string; GITHUB_APP_CALLBACK_URL?: string };
@@ -7,7 +8,7 @@ export type GitHubUser = { id: number; login: string };
 export type UserTokens = { access: string; refresh: string; expiresAt: number; refreshUntil: number };
 export type UserAuthorization = { user: GitHubUser; repositories: AuthorizedRepository[]; expiresAt: number };
 export class GitHubAppError extends Error {
-  constructor(readonly code: "unconfigured" | "unavailable" | "unauthorized" | "capacity" | "reauthorization_required" | "identity_changed" = "unavailable") { super("github_app_" + code); }
+  constructor(readonly code: "unconfigured" | "unavailable" | "unauthorized" | "capacity" | "rate_limited" | "reauthorization_required" | "identity_changed" = "unavailable") { super("github_app_" + code); }
 }
 const id = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) > 0;
 const object = (v: unknown): Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
@@ -90,9 +91,11 @@ export class GitHubAppClient {
     }
     throw new GitHubAppError("capacity");
   }
-  async discover(tokens: UserTokens): Promise<{ user: GitHubUser; installations: number[] }> {
+  async discover(tokens: UserTokens, mark: ConnectMark = () => {}): Promise<{ user: GitHubUser; installations: number[] }> {
+    mark("user");
     const identity = object(await this.request("/user",tokens.access));
     if (!id(identity.id) || typeof identity.login !== "string" || !/^[A-Za-z0-9-]{1,39}$/.test(identity.login)) throw new GitHubAppError("unauthorized");
+    mark("discover");
     const installations: number[] = [], seen = new Set<number>(); let total: number | undefined;
     for (let page=1; page<=MAX_PAGES; page++) {
       const data = object(await this.request("/user/installations?per_page=100&page="+page,tokens.access));
@@ -131,7 +134,8 @@ export class GitHubAppClient {
       if (!response.ok) {
         void response.body?.cancel();
         const limited = response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after"));
-        throw new GitHubAppError(!limited && [401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable");
+        throw new GitHubAppError(limited || response.status === 429 ? "rate_limited"
+          : [401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable");
       }
       if (!response.body) throw new GitHubAppError();
       const reader = response.body.getReader(); let size = 0; const parts: Uint8Array[] = [];
@@ -144,9 +148,11 @@ export class GitHubAppClient {
     finally { clearTimeout(timer); }
   }
   /** Cache only the short-lived credential; revalidate installation authority and repository pages on every call. */
-  async repositories(installationId: number): Promise<AuthorizedRepository[]> {
+  async repositories(installationId: number, mark: ConnectMark = () => {}): Promise<AuthorizedRepository[]> {
     if (!id(installationId)) throw new GitHubAppError("unauthorized");
+    mark("app_jwt");
     const jwt = await this.jwt();
+    mark("install_repo");
     const installation = object(await this.request("/app/installations/" + installationId, jwt));
     if (installation.id !== installationId || String(installation.app_id) !== this.secrets.GITHUB_APP_ID || installation.suspended_at !== null)
       throw new GitHubAppError("unauthorized");

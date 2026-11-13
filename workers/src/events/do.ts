@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { GitHubConnections } from "../github/connections";
+import { diagnoseConnect } from "../github/connect-diagnostics";
 import { GitHubInbox } from "../github/inbox";
 import { DEFAULT_GITHUB, type GitHubDelivery } from "../github/model";
 import type { Env } from "../env";
@@ -74,8 +75,12 @@ export class EventsDO extends DurableObject<Env> {
   }
 
   githubConnectionsView() { return this.githubConnections.snapshot(); }
-  startGitHubConnect(admin:string,browser:string) { return this.githubConnections.start(admin,browser); }
-  completeGitHubConnect(state:string,code:string,admin:string,browser:string) { return this.githubConnections.complete(state,code,admin,browser); }
+  startGitHubConnect(admin:string,browser:string,requestId:string) {
+    return diagnoseConnect(requestId,"start",mark => this.githubConnections.start(admin,browser,mark));
+  }
+  completeGitHubConnect(state:string,code:string,admin:string,browser:string,requestId:string) {
+    return diagnoseConnect(requestId,"complete",mark => this.githubConnections.complete(state,code,admin,browser,mark));
+  }
   async syncGitHubConnect(userId?:number) { await this.githubConnections.sync(userId,true); return this.githubConnections.snapshot(); }
   disconnectGitHubConnect(kind:"user"|"installation",id:number) {
     if(kind==="user") this.githubConnections.disconnectUser(id); else this.githubConnections.disconnectInstallation(id);

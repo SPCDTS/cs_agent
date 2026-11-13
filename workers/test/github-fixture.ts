@@ -23,8 +23,10 @@ export async function installAppFixture() {
  });
  try {
   const events=env.EVENTS.getByName("main"),browser="a".repeat(64);
-  const start=await events.startGitHubConnect("fixture-admin",browser);
-  await events.completeGitHubConnect(new URL(start.url).searchParams.get("state")!,"fixture-code","fixture-admin",browser);
+  const start=await events.startGitHubConnect("fixture-admin",browser,crypto.randomUUID());
+  if (!start.ok) throw new Error(start.code);
+  const complete=await events.completeGitHubConnect(new URL(start.value.url).searchParams.get("state")!,"fixture-code","fixture-admin",browser,crypto.randomUUID());
+  if (!complete.ok) throw new Error(complete.code);
   const current=(await events.adminStatus()).github;
   await events.putGitHubConfig({...current.value,repositoryIds:chosenRepository},current.revision);
  } finally {spy.mockRestore();}
