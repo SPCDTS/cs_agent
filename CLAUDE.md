@@ -1,6 +1,6 @@
 # cs_agent 协作约定
 
-项目统一部署在 Cloudflare Workers，应用代码、依赖和测试位于 `workers/`。`runner/` 是可选的 Windows MCP 服务，提供 Hyper-V 持久工作区与临时 WSB。根目录 npm 命令统一检查这两个包；没有旧 Node 主服务或 Docker Compose 部署。
+项目统一部署在 Cloudflare Workers，应用代码、依赖和测试位于 `workers/`。`runner/` 提供可选的跨平台设备命令行 MCP、桌面接入，以及 Windows 专用的 Hyper-V 持久工作区与临时 WSB 管理服务。根目录 npm 命令统一检查这两个包；没有旧 Node 主服务或 Docker Compose 部署。
 
 ## 开发与合并
 

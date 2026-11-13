@@ -71,10 +71,29 @@ jobs:
         working-directory: runner
         env:
           CS_AGENT_TEST_HYPERV_NATIVE: '1'
+      - run: node --test test/device-shell.test.ts test/device-install.test.ts
+        working-directory: runner
+
+  device-macos:
+    name: macOS device
+    needs: native-changes
+    if: needs.native-changes.outputs.changed == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: runner/package-lock.json
+      - run: npm --prefix runner ci
+      - run: node --test test/device-shell.test.ts test/device-install.test.ts
+        working-directory: runner
 
   check:
     name: workers check
-    needs: [workers-tests, native-changes, runner-native]
+    needs: [workers-tests, native-changes, runner-native, device-macos]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -85,6 +104,7 @@ jobs:
           CHANGES_RESULT: ${{ needs.native-changes.result }}
           NATIVE_RESULT: ${{ needs.runner-native.result }}
           NATIVE_CHANGED: ${{ needs.native-changes.outputs.changed }}
+          DEVICE_MACOS_RESULT: ${{ needs.device-macos.result }}
         run: |
           test "$CHANGES_RESULT" = success
           if [ "$CODE_CHANGED" = true ]; then
@@ -94,8 +114,10 @@ jobs:
           fi
           if [ "$NATIVE_CHANGED" = true ]; then
             test "$NATIVE_RESULT" = success
+            test "$DEVICE_MACOS_RESULT" = success
           else
             test "$NATIVE_RESULT" = skipped
+            test "$DEVICE_MACOS_RESULT" = skipped
           fi
 
   deploy-workers:
@@ -115,8 +137,11 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: workers/package-lock.json
-      - run: npm --prefix workers ci
+          cache-dependency-path: |
+            workers/package-lock.json
+            runner/package-lock.json
+      # 设备客户端下载包与 Worker 一起构建，使用 runner 的锁定依赖。
+      - run: npm run install:workers
       - run: node scripts/deploy.mjs deployments/production.json --prepare-only
         working-directory: workers
       # coding 沙箱仍由 Wrangler 构建并推送到 Cloudflare；不再部署旧的常驻 Node 容器。
