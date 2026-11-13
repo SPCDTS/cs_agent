@@ -1,5 +1,6 @@
 import { importPKCS8, SignJWT } from "jose";
 import type { ConnectMark } from "./connect-diagnostics";
+import { capabilityData, type CapabilityData } from "./capability-model";
 
 /** Separate operator-owned App; never reuse the development bot credentials. */
 export type GitHubAppSecrets = { GITHUB_APP_ID?: string; GITHUB_APP_SLUG?: string; GITHUB_APP_PRIVATE_KEY?: string; GITHUB_APP_WEBHOOK_SECRET?: string; GITHUB_APP_CLIENT_ID?: string; GITHUB_APP_CLIENT_SECRET?: string; GITHUB_APP_CALLBACK_URL?: string };
@@ -12,7 +13,7 @@ export const UPSTREAM_REASONS = ["request_init", "network", "timeout", "http_err
 export type UpstreamReason = typeof UPSTREAM_REASONS[number];
 export class GitHubAppError extends Error {
   constructor(readonly code: "unconfigured" | "unavailable" | "unauthorized" | "capacity" | "rate_limited" | "reauthorization_required" | "identity_changed" = "unavailable",
-    readonly reason?: UpstreamReason, readonly upstreamStatus?: number) { super("github_app_" + code); }
+    readonly reason?: UpstreamReason, readonly upstreamStatus?: number, readonly retryAfterMs?: number) { super("github_app_" + code); }
 }
 const id = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) > 0;
 const object = (v: unknown): Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
@@ -118,6 +119,16 @@ export class GitHubAppClient {
     }
     throw new GitHubAppError("capacity");
   }
+  /** App JWT metadata, deliberately separate from user/repository authority verification. */
+  async capabilities(installationId?:number):Promise<CapabilityData> {
+    if(installationId!==undefined&&!id(installationId))throw new GitHubAppError("unauthorized");
+    const p=object(await this.request(installationId===undefined?"/app":"/app/installations/"+installationId,await this.jwt()));
+    if(installationId===undefined ? String(p.id)!==this.secrets.GITHUB_APP_ID : p.id!==installationId||String(p.app_id)!==this.secrets.GITHUB_APP_ID)
+      throw new GitHubAppError("unauthorized");
+    if(installationId!==undefined && (!["all","selected"].includes(String(p.repository_selection))
+      || p.suspended_at!==null && (typeof p.suspended_at!=="string" || !Number.isFinite(Date.parse(p.suspended_at))))) throw new GitHubAppError();
+    return capabilityData({events:p.events,permissions:p.permissions,...(installationId===undefined?{}:{repositorySelection:p.repository_selection,suspendedAt:p.suspended_at})});
+  }
   private async jwt(): Promise<string> {
     if (!this.configured()) throw new GitHubAppError("unconfigured");
     try {
@@ -144,7 +155,7 @@ export class GitHubAppClient {
         void response.body?.cancel();
         const limited = response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after"));
         throw new GitHubAppError(limited || response.status === 429 ? "rate_limited"
-          : [401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable", "http_error", upstreamStatus);
+          : [401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable", "http_error", upstreamStatus, /^\d{1,6}$/.test(response.headers.get("retry-after")??"") ? Math.min(86400,Number(response.headers.get("retry-after")))*1000 : undefined);
       }
       if (!response.body) throw new GitHubAppError("unavailable", "empty_body", upstreamStatus);
       const reader = response.body.getReader(); let size = 0; const parts: Uint8Array[] = [];

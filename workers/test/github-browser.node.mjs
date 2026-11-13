@@ -66,3 +66,26 @@ test("real connection UI uses browser-bound authenticated POST and explicit conf
  assert.equal(calls.at(-1).path,"/admin/github/connect/complete");assert.equal(calls.at(-1).body.code,"synthetic-code");
  assert.equal(saved.has("github-oauth-result"),false);assert.equal(saved.has("github-browser"),false);
 });
+
+test("custom rules roundtrip, discovered candidates never auto-enable, all OR rules remain visible",async()=>{
+ reset();const v=view();v.value.selections=["future_old.done"];v.value.rules=[{event:"issue_comment",actions:["created"],subject:"pull_request"},{event:"future_notice",actions:[""]}];
+ v.value.commentFilters={excludeConnectedUser:true,ignoreBots:false};
+ const read={status:"fresh",fetchedAt:123,lastAttemptAt:123,expiresAt:Date.now()+300000,retryAt:0,error:null,data:{events:["future_discovered"],permissions:{issues:"read"}}};
+ v.capabilities={app:read,installations:[{installationId:456,read}]};
+ const card=renderGitHub({paused:false},v);document.body.append(card);
+ assert.ok(card.textContent.includes("取消上方预设不会删除这里"));
+ assert.ok(card.querySelector('datalist option[value="future_discovered"]'));
+ assert.equal([...card.querySelectorAll(".github-check")].every(l=>l.children[0].tagName==="INPUT"&&l.children[1].tagName==="SPAN"),true);
+ await click(button(card,"保存仓库选择与设置"));
+ assert.deepEqual(calls.at(-1).body.value.rules,v.value.rules);
+ assert.deepEqual(calls.at(-1).body.value.selections,["future_old.done"]);
+ assert.deepEqual(calls.at(-1).body.value.commentFilters,v.value.commentFilters);
+ await click(button(card,"新增自定义规则"));
+ await click(button(card,"保存仓库选择与设置"));assert.equal(errors.length,1);
+ const rows=card.querySelectorAll(".github-rules>.row"),last=rows[rows.length-1],inputs=last.querySelectorAll("input");
+ inputs[0].value="future_discovered";inputs[1].value="created,edited";
+ await click(button(card,"保存仓库选择与设置"));
+ assert.deepEqual(calls.at(-1).body.value.rules.at(-1),{event:"future_discovered",actions:["created","edited"]});
+ await click(button(card,"删除此规则"));
+ await click(button(card,"保存仓库选择与设置"));assert.equal(calls.at(-1).body.value.rules.length,2);
+});

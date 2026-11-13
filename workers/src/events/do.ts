@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { GitHubConnections } from "../github/connections";
+import { GitHubCapabilities } from "../github/capabilities";
 import { diagnoseConnect } from "../github/connect-diagnostics";
 import { GitHubInbox } from "../github/inbox";
 import { DEFAULT_GITHUB, type GitHubDelivery } from "../github/model";
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS gmail_send_receipts (key TEXT PRIMARY KEY, message_id
 export class EventsDO extends DurableObject<Env> {
   private readonly sql = this.ctx.storage.sql;
   private readonly github: GitHubInbox;
+  private readonly githubCapabilities: GitHubCapabilities;
   private readonly githubConnections: GitHubConnections;
   private readonly auth: GmailAuth;
   private readonly gmail: GmailClient;
@@ -62,9 +64,11 @@ export class EventsDO extends DurableObject<Env> {
     super(ctx, env);
     this.sql.exec(SCHEMA);
     this.githubConnections = new GitHubConnections(this.ctx.storage,env, () => this.github.reauthorize());
+    this.githubCapabilities = new GitHubCapabilities(this.ctx.storage,env,()=>this.githubConnections.capabilityTargets());
     this.github = new GitHubInbox(this.ctx.storage,{
       authorization:(installationId,repositoryId)=>this.githubConnections.authorization(installationId,repositoryId),
       authorized:(installationId,repositoryId)=>this.githubConnections.authorized(installationId,repositoryId),
+      connectedUser:id=>this.githubConnections.connectedUser(id),
       related:delivery=>this.githubConnections.related(delivery),
       lifecycle:delivery=>this.githubConnections.lifecycle(delivery),
     });
@@ -74,6 +78,7 @@ export class EventsDO extends DurableObject<Env> {
     for (const id of this.sources.keys()) this.sql.exec("INSERT OR IGNORE INTO event_source (id, settings_json) VALUES (?, ?)", id, JSON.stringify(id === 'github' ? DEFAULT_GITHUB.settings : DEFAULT_SETTINGS));
   }
 
+  refreshGitHubCapabilities(force=false) { return this.githubCapabilities.refresh(force); }
   githubConnectionsView() { return this.githubConnections.snapshot(); }
   startGitHubConnect(admin:string,browser:string,requestId:string) {
     return diagnoseConnect(requestId,"start",mark => this.githubConnections.start(admin,browser,mark));
@@ -446,7 +451,7 @@ export class EventsDO extends DurableObject<Env> {
       key: run.input_key, source: run.source, events: (JSON.parse(run.keys_json) as unknown[]).length,
       deliveredAt: run.delivered_at, status: run.status, endedAt: run.ended_at }));
     const watch = this.sql.exec<{ expiration: number }>("SELECT expiration FROM gmail_watch WHERE id = 'owner'").toArray()[0];
-    return { sources, runs, github: { ...this.github.status(), connections: this.githubConnections.snapshot(), configured: this.githubConnections.configured() }, watch: { topic: !!this.watchTopic(), expiration: watch?.expiration ?? null } };
+    return { sources, runs, github: { ...this.github.status(), capabilities: this.githubCapabilities.snapshot(), connections: this.githubConnections.snapshot(), configured: this.githubConnections.configured() }, watch: { topic: !!this.watchTopic(), expiration: watch?.expiration ?? null } };
   }
 
   async setPaused(id: string, paused: boolean): Promise<boolean> {
