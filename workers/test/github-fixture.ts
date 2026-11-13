@@ -35,7 +35,7 @@ export function appInbox(storage:DurableObjectStorage) {
  let inbox:GitHubInbox;
  const connections=new GitHubConnections(storage,env as Env,()=>inbox.reauthorize());
  inbox=new GitHubInbox(storage,{authorization:(installation,repo)=>connections.authorization(installation,repo),authorized:(installation,repo)=>connections.authorized(installation,repo),
-  related:d=>connections.related(d),lifecycle:d=>connections.lifecycle(d)});
+  connectedUser:id=>connections.connectedUser(id),related:d=>connections.related(d),lifecycle:d=>connections.lifecycle(d)});
 
  return inbox;
 }

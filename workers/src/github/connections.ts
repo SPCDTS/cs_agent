@@ -45,6 +45,8 @@ export class GitHubConnections {
     if (!b || b.status !== "active" || !b.repositories.some(r => r.id === repositoryId)) return "deny";
     return b.until > Date.now() ? "allow" : "wait";
   }
+  connectedUser(installationId: number) { return this.bindings().find(b => b.installationId === installationId && b.status === "active")?.user.id; }
+  capabilityTargets() { return this.bindings().filter(b => b.status === "active").map(b => ({id:b.installationId, stamp:this.epoch()+":"+b.generation+":"+b.user.id})); }
   authorized(installationId: number, repositoryId: number) { return this.authorization(installationId,repositoryId) === "allow"; }
   async start(admin: string, browser: string, mark: ConnectMark = () => {}) {
     mark("configuration");

@@ -1,14 +1,17 @@
 import { DEFAULT_GITHUB, parseGitHubConfig, type GitHubDelivery, type GitHubConfig } from "./model";
 import { suppressed } from "../events/model";
+import { ruleMatches } from "./rules";
 
 export const RECEIPT_LIMIT = 5000, PENDING_LIMIT = 200, RETENTION_MS = 30 * 86400_000;
 export const CONTROL_LIMIT=1024, NOISE_LIMIT=256, CONTROL_RETENTION_MS=24*3600_000, NOISE_RETENTION_MS=600_000;
 type Receipt = {
   installation_id: number; delivery_id: string; body_hash: string; repository: string; repository_id: number; event: string; action: string;
   received_at: number; updated_at: number; state: string; reason: string | null; event_key: string; input_key: string | null; outcome: string | null;
+  comment_subject: string; author_id: number; author_type: string; generic: number;
 };
 export class GitHubInbox {
   constructor(private readonly storage: DurableObjectStorage, private readonly app: {
+    connectedUser?: (installationId:number)=>number | undefined;
     authorization: (installationId:number,repositoryId:number)=>"allow"|"wait"|"deny"; authorized: (installationId:number,repositoryId:number)=>boolean; related:(delivery:GitHubDelivery)=>boolean; lifecycle:(delivery:GitHubDelivery)=>void;
   }) {
     this.sql.exec(`
@@ -29,6 +32,11 @@ export class GitHubInbox {
     `);
     if (!this.sql.exec<{name:string}>("PRAGMA table_info(github_receipt)").toArray().some(c=>c.name==="installation_id"))
       this.sql.exec("ALTER TABLE github_receipt ADD COLUMN installation_id INTEGER NOT NULL DEFAULT 0");
+    for (const [name, definition] of [["comment_subject", "TEXT NOT NULL DEFAULT ''"], ["author_id", "INTEGER NOT NULL DEFAULT 0"],
+      ["author_type", "TEXT NOT NULL DEFAULT ''"], ["generic", "INTEGER NOT NULL DEFAULT 0"]]) {
+      if (!this.sql.exec<{name:string}>("PRAGMA table_info(github_receipt)").toArray().some(c => c.name === name))
+        this.sql.exec("ALTER TABLE github_receipt ADD COLUMN " + name + " " + definition);
+    }
     // Old receipts (at most the former 5000 cap) keep their full ledger/dedupe retention but
     // cannot hold the new owner quota hostage. New code always inserts quota=1 explicitly.
     if (!this.sql.exec<{name:string}>("PRAGMA table_info(github_receipt)").toArray().some(c=>c.name==="quota"))
@@ -39,7 +47,10 @@ export class GitHubInbox {
     this.storage.transactionSync(() => {
       const raw = this.sql.exec<{value:string}>("SELECT value FROM github_config WHERE id=1").one().value;
       let current: unknown; try { current=JSON.parse(raw); } catch { current=null; }
-      if (!parseGitHubConfig(current)) {
+      const parsed = parseGitHubConfig(current);
+      if (parsed && JSON.stringify(parsed) !== JSON.stringify(current)) {
+        this.sql.exec("UPDATE github_config SET value=?,revision=revision+1 WHERE id=1", JSON.stringify(parsed));
+      } else if (!parsed) {
         const old=current && typeof current==="object" ? current as Record<string,unknown> : {};
         const migrated=parseGitHubConfig({repositoryIds:[],selections:old.selections,paused:old.paused,settings:old.settings}) ?? DEFAULT_GITHUB;
         this.sql.exec("UPDATE github_config SET value=?,revision=revision+1 WHERE id=1",JSON.stringify(migrated));
@@ -51,14 +62,16 @@ export class GitHubInbox {
   private get sql() { return this.storage.sql; }
   snapshot(): { value: GitHubConfig; revision: string } {
     const row = this.sql.exec<{ value: string; revision: number }>("SELECT value,revision FROM github_config WHERE id=1").one();
-    return { value: JSON.parse(row.value), revision: String(row.revision) };
+    return { value: parseGitHubConfig(JSON.parse(row.value))!, revision: String(row.revision) };
   }
   put(value: unknown, expectedRevision: string) {
-    const parsed = parseGitHubConfig(value);
-    if (!parsed || parsed.repositoryIds.some(r=>!this.app.authorized(r.installationId,r.repositoryId))) return { ok: false as const, error: "invalid" as const };
     return this.storage.transactionSync(() => {
       const current = this.snapshot();
       if (current.revision !== expectedRevision) return { ok: false as const, error: "conflict" as const, current };
+      if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: false as const, error: "invalid" as const };
+      // Older clients cannot erase policy fields they do not know; explicit [] clears rules.
+      const parsed = parseGitHubConfig({ rules: current.value.rules, commentFilters: current.value.commentFilters, ...value });
+      if (!parsed || parsed.repositoryIds.some(r=>!this.app.authorized(r.installationId,r.repositoryId))) return { ok: false as const, error: "invalid" as const };
       this.sql.exec("UPDATE github_config SET value=?,revision=revision+1 WHERE id=1", JSON.stringify(parsed));
       this.sql.exec("UPDATE event_source SET settings_json=?,paused=?,pause_reason=? WHERE id='github'",
         JSON.stringify(parsed.settings), parsed.paused ? 1 : 0, parsed.paused ? "manual" : null);
@@ -66,11 +79,22 @@ export class GitHubInbox {
       return { ok: true as const, current: this.snapshot() };
     });
   }
-  private reason(row: Pick<Receipt, "installation_id" | "repository_id" | "event" | "action">): string | null {
+  private reason(row: Pick<Receipt, "installation_id" | "repository_id" | "event" | "action" | "comment_subject" | "author_id" | "author_type">): string | null {
     const config = this.snapshot().value;
     if (this.app.authorization(row.installation_id,row.repository_id) === "deny") return "installation_not_authorized";
     if (!config.repositoryIds.some(r=>r.installationId===row.installation_id && r.repositoryId===row.repository_id)) return "repository_not_allowed";
-    return config.selections.includes(row.event + (row.action ? "." + row.action : "")) ? null : "event_action_not_allowed";
+    const selected = config.selections.includes(row.event + (row.action ? "." + row.action : ""));
+    const rules = config.rules ?? [];
+    if (!selected && !rules.some(r => ruleMatches(r, row.event, row.action, row.comment_subject))) {
+      return rules.some(r => ruleMatches({...r, subject: "any"}, row.event, row.action, row.comment_subject))
+        ? "comment_subject_not_allowed" : "event_action_not_allowed";
+    }
+    if (row.comment_subject) {
+      if (config.commentFilters?.ignoreBots && row.author_type === "Bot") return "comment_bot_filtered";
+      const user = this.app.connectedUser?.(row.installation_id);
+      if (config.commentFilters?.excludeConnectedUser && user !== undefined && row.author_id === user) return "comment_connected_user_filtered";
+    }
+    return null;
   }
 
   private suppress(key: string, reason: string) {
@@ -93,7 +117,8 @@ export class GitHubInbox {
       if (this.sql.exec(`SELECT 1 FROM github_receipt WHERE body_hash=?
         UNION ALL SELECT 1 FROM github_aux_receipt WHERE body_hash=?`,delivery.bodyHash,delivery.bodyHash).toArray().length)
         return {status:200,code:"body_duplicate"};
-      const row = { installation_id:delivery.installationId ?? 0, repository_id: delivery.repositoryId, event: delivery.event, action: delivery.action };
+      const row = { installation_id:delivery.installationId ?? 0, repository_id: delivery.repositoryId, event: delivery.event, action: delivery.action,
+        comment_subject: delivery.commentSubject ?? "", author_id: delivery.authorId ?? 0, author_type: delivery.authorType ?? "" };
       let reason = delivery.lifecycle ? "lifecycle" : delivery.normalized ? this.reason(row) : "ping";
       if (!reason && delivery.normalized && suppressed(this.snapshot().value.settings, delivery.normalized)) reason = "source_filter";
       const key = "evt_github_" + delivery.bodyHash, now=Date.now();
@@ -110,12 +135,15 @@ export class GitHubInbox {
         if(delivery.lifecycle) this.app.lifecycle(delivery);
         return {status:202,code:"suppressed"};
       }
-      if (this.count() >= RECEIPT_LIMIT) return { status: 503, code: "receipt_capacity" };
+      if (delivery.generic && (this.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt WHERE generic=1").one().n >= 200
+        || this.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt WHERE generic=1 AND state IN ('held','enqueued','started')").one().n >= 20))
+        return { status: 503, code: "generic_capacity" };
+      if (!delivery.generic && this.count() >= RECEIPT_LIMIT) return { status: 503, code: "receipt_capacity" };
       if (this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM github_receipt WHERE state IN ('held','enqueued','started')").one().n >= PENDING_LIMIT)
         return { status: 503, code: "pending_capacity" };
-      this.sql.exec(`INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,reason,event_key,installation_id,quota)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)`,delivery.deliveryId,delivery.bodyHash,delivery.repository,delivery.repositoryId,delivery.event,delivery.action,
-        delivery.receivedAt,delivery.receivedAt,"held",null,key,delivery.installationId??0);
+      this.sql.exec(`INSERT INTO github_receipt(delivery_id,body_hash,repository,repository_id,event,action,received_at,updated_at,state,reason,event_key,installation_id,quota,comment_subject,author_id,author_type,generic)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,delivery.deliveryId,delivery.bodyHash,delivery.repository,delivery.repositoryId,delivery.event,delivery.action,
+        delivery.receivedAt,delivery.receivedAt,"held",null,key,delivery.installationId??0,delivery.generic?0:1,row.comment_subject,row.author_id,row.author_type,delivery.generic?1:0);
       this.sql.exec("INSERT INTO event_held(key,source,event_json,received_at,reason) VALUES(?,'github',?,?,'merge')",
         key,JSON.stringify(delivery.normalized),delivery.receivedAt);
       return {status:202,code:"received"};
@@ -169,9 +197,10 @@ export class GitHubInbox {
   }
   status() {
     return { ...this.snapshot(), diagnostics:{
+      generic:{count:this.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt WHERE generic=1").one().n,capacity:200,pendingCapacity:20},
       control:{count:this.auxCount("control"),capacity:CONTROL_LIMIT,ttlMs:CONTROL_RETENTION_MS},
       noise:{count:this.auxCount("noise"),capacity:NOISE_LIMIT,ttlMs:NOISE_RETENTION_MS},
-      legacyCount:this.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt WHERE quota=0").one().n,
+      legacyCount:this.sql.exec<{n:number}>("SELECT COUNT(*) n FROM github_receipt WHERE quota=0 AND generic=0").one().n,
     },count: this.count(), capacity: RECEIPT_LIMIT, pendingCapacity: PENDING_LIMIT,
       counts: this.sql.exec<{ state: string; count: number }>("SELECT state,COUNT(*) AS count FROM github_receipt GROUP BY state").toArray(),
       receipts: this.sql.exec<Receipt>("SELECT * FROM github_receipt ORDER BY received_at DESC,rowid DESC LIMIT 50").toArray() };

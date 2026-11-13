@@ -67,6 +67,10 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
 .note{font-size:12px;color:#5B6472;border-top:1px dashed #E3E6EB;padding-top:10px}
 .link-box{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .link-box input{flex:1 1 240px}
+.github-check{display:inline-flex!important;align-items:center;justify-content:flex-start;gap:6px;margin:4px 12px 4px 0;max-width:100%}
+.github-check input[type=checkbox]{width:auto!important;min-width:0;flex:0 0 auto;margin:0;padding:0}
+.github-check span{flex:0 1 auto;overflow-wrap:anywhere}
+.github-rules .row{align-items:end;border-bottom:1px solid var(--line);padding:8px 0}
 .memory-body{display:flex;flex-wrap:wrap}
 .memory-profile{flex:2 1 280px;min-width:0;padding:16px 20px;border-right:1px solid #E3E6EB;display:flex;flex-direction:column;gap:10px}
 .memory-entries{flex:3 1 380px;min-width:0;overflow-x:auto}

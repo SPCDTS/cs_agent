@@ -104,7 +104,7 @@ describe("GitHub durable receipts, configuration and recovery", () => {
     await configure({ repositoryIds: chosenRepository });
     expect((await events().receiveGitHub(d)).code).toBe("duplicate");
     expect(await sql("SELECT 1 FROM event_held WHERE source='github'")).toEqual([]);
-    expect(parseGitHubConfig({ ...DEFAULT_GITHUB, selections: ["issues.deleted"] })).toBeUndefined();
+    expect(parseGitHubConfig({ ...DEFAULT_GITHUB, selections: ["issues.deleted"] })?.selections).toEqual(["issues.deleted"]);
     expect(parseGitHubConfig({ ...DEFAULT_GITHUB, repositories: ["a/b", "A/B"] })).toBeUndefined();
   });
   it("filters installation/repository IDs and actions, rejecting reused names without pin-based authorization", async () => {

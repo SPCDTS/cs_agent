@@ -3,12 +3,16 @@ import { Check } from "typebox/value";
 import { DEFAULT_SETTINGS, normalizeEvent, parseSettings, type ExternalEvent, type SourceSettings } from "../events/model";
 
 export const MAX_BODY = 256 * 1024;
-import { CHOICES } from "./choices";
+// Covers the legal legacy maximum (1000 safe-integer ID pairs plus Unicode filters).
+export const MAX_CONFIG_BYTES = 256 * 1024;
+import { RuleSchema, CommentFiltersSchema, DEFAULT_COMMENT_FILTERS, reservedEvent } from "./rules";
 export { CHOICES } from "./choices";
 const Repo = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$" });
 const ConfigSchema = Type.Object({
   repositoryIds: Type.Array(Type.Object({ installationId: Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}), repositoryId: Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}) }, {additionalProperties:false}), {maxItems:1000,uniqueItems:true}),
-  selections: Type.Array(Type.String({ enum: [...CHOICES] }), { maxItems: CHOICES.length, uniqueItems: true }),
+  selections: Type.Array(Type.String({ pattern: "^[a-z_]{1,40}(?:\\.[a-z_]{1,40})?$" }), { maxItems: 100, uniqueItems: true }),
+  rules: Type.Optional(Type.Array(RuleSchema, { maxItems: 100 })),
+  commentFilters: Type.Optional(CommentFiltersSchema),
   paused: Type.Boolean(), settings: Type.Unknown(),
 }, { additionalProperties: false });
 export type GitHubConfig = Omit<Static<typeof ConfigSchema>, "settings"> & { settings: SourceSettings };
@@ -17,10 +21,11 @@ export const DEFAULT_GITHUB: GitHubConfig = {
   paused: false, settings: { ...DEFAULT_SETTINGS, filters: { requireLabels: [], excludeLabels: [], excludeSenders: [] } },
 };
 export function parseGitHubConfig(value: unknown): GitHubConfig | undefined {
-  if (!Check(ConfigSchema, value)) return;
+  if (!Check(ConfigSchema, value) || new TextEncoder().encode(JSON.stringify(value)).length > MAX_CONFIG_BYTES) return;
+  if (value.selections.some(s => reservedEvent(s.split(".")[0]!)) || value.rules?.some(r => reservedEvent(r.event) || r.event !== "issue_comment" && r.subject !== undefined)) return;
   const settings = parseSettings(value.settings);
   if (!settings) return;
-  return { ...value, settings };
+  return { ...value, settings, rules: value.rules ?? [], commentFilters: value.commentFilters ?? { ...DEFAULT_COMMENT_FILTERS } };
 }
 export class WebhookError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code); }
@@ -59,8 +64,9 @@ export type GitHubDelivery = {
   deliveryId: string; bodyHash: string; repository: string; repositoryId: number; event: string; action: string;
   installationId?: number; lifecycleUserId?: number; lifecycle?: boolean;
   receivedAt: number; normalized: ExternalEvent | null;
+  commentSubject?: string; authorId?: number; authorType?: string; generic?: boolean;
 };
-/** No body, secret, URLs supplied by the sender, or routing fields survive this boundary. */
+/** Only bounded selected metadata/comment excerpts survive; never raw bodies, supplied URLs or routing fields. */
 export async function readWebhook(request: Request, secret: string | undefined): Promise<GitHubDelivery> {
   if (!secret) throw new WebhookError(503, "unconfigured");
   const deliveryId = request.headers.get("x-github-delivery") ?? "", event = request.headers.get("x-github-event") ?? "";
@@ -95,9 +101,11 @@ export async function readWebhook(request: Request, secret: string | undefined):
   if (!p || !repository || !Check(Repo, repository) || !positive(repositoryId)
     || repository.split("/").some(part => part === "." || part === "..")) throw new WebhookError(400, "invalid_repository");
   const action = p.action === undefined ? "" : str(p.action, 40);
-  if (action === undefined || action && !/^[a-z_]+$/.test(action)) throw new WebhookError(400, "invalid_action");
+  if (action === undefined || p.action !== undefined && !/^[a-z_]+$/.test(action)) throw new WebhookError(400, "invalid_action");
   const bodyHash = Buffer.from(await crypto.subtle.digest("SHA-256", bytes)).toString("hex"), receivedAt = Date.now();
+  if (reservedEvent(event)) throw new WebhookError(400, "reserved_control_event");
   let title = "", summary = "", path = "", valid = false;
+  let commentSubject: string | undefined, authorId: number | undefined, authorType: string | undefined, generic = false;
   const item = object(p[event === "issues" ? "issue" : event === "pull_request" ? "pull_request" : event === "release" ? "release" : "workflow_run"]);
   if (event === "issues" || event === "pull_request") {
     valid = !!item && positive(item.number) && typeof item.title === "string" && item.title.length <= 4096 && !!action
@@ -112,10 +120,31 @@ export async function readWebhook(request: Request, secret: string | undefined):
   } else if (event === "push") {
     valid = !action && typeof p.ref === "string" && p.ref.length <= 512 && typeof p.after==="string" && [40,64].includes(p.after.length) && !/[^0-9a-f]/i.test(p.after);
     if (valid) { title = "Push " + p.ref; path = "/commit/" + p.after; summary = "Repository push"; }
+  } else if (["issue_comment", "pull_request_review", "pull_request_review_comment"].includes(event)) {
+    const subject = object(event === "issue_comment" ? p.issue : p.pull_request);
+    const comment = object(event === "pull_request_review" ? p.review : p.comment);
+    const author = object(comment?.user);
+    const isPR = event !== "issue_comment" || !!object(subject?.pull_request);
+    valid = !!subject && positive(subject.number) && typeof subject.title === "string" && subject.title.length <= 4096
+      && !!comment && positive(comment.id) && positive(author?.id) && ["User", "Bot", "Organization", "Mannequin"].includes(String(author?.type))
+      && (typeof comment.body === "string" || event === "pull_request_review" && comment.body === null)
+      && !!action && (event !== "issue_comment" || subject.pull_request === undefined || !!object(subject.pull_request))
+      && (event !== "pull_request_review" || typeof comment.state === "string" && /^[a-z_]{1,40}$/.test(comment.state));
+    if (valid) {
+      commentSubject = isPR ? "pull_request" : "issue"; authorId = Number(author!.id); authorType = String(author!.type);
+      title = String(subject!.title);
+      path = (isPR ? "/pull/" : "/issues/") + subject!.number
+        + (event === "pull_request_review" ? "#pullrequestreview-" : event === "pull_request_review_comment" ? "#discussion_r" : "#issuecomment-") + comment!.id;
+      summary = action + (event === "pull_request_review" ? " " + comment!.state : "") + ": " + (comment!.body ?? "");
+    }
+  } else {
+    // Unknown repository notifications get metadata only; never traverse arbitrary payload.
+    valid = true; generic = true; title = event; summary = action || "收到仓库事件（通用摘要）";
   }
   if (!valid) throw new WebhookError(400, "unsupported_or_invalid_event");
   const normalized = normalizeEvent({ source: "github", externalId: bodyHash,
     occurredAt: receivedAt, kind: "github." + event, title: repository + ": " + title, summary,
-    actor: str(object(p.sender)?.login, 120) ?? "", ref: "https://github.com/" + repository + path })!;
-  return { deliveryId, bodyHash, repository, repositoryId, event, action, receivedAt, normalized, ...subjects };
+    actor: str(object(p.sender)?.login, 120) ?? "", ref: "https://github.com/" + repository + path });
+  if (!normalized) throw new WebhookError(400, "invalid_normalized_event");
+  return { deliveryId, bodyHash, repository, repositoryId, event, action, receivedAt, normalized, commentSubject, authorId, authorType, generic, ...subjects };
 }
