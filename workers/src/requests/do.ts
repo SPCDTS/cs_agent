@@ -1,3 +1,4 @@
+import { ToolStore } from "./tool-store";
 import { ContextStore, contextMetadata } from "./context-store";
 import { ProjectionStore, viewName, type ProjectionBatch } from "./projection";
 import { AgentReadView } from "./view";
@@ -14,6 +15,7 @@ export class RequestsDO extends DurableObject<Env> {
   contextTimeline(...args: Parameters<ContextStore["timeline"]>) { return new ContextStore(this.ctx.storage.sql).timeline(...args); }
   contextInspection(id: string) { return new ContextStore(this.ctx.storage.sql).inspect(id); }
   contextPart(id: string, part: string) { return new ContextStore(this.ctx.storage.sql).part(id, part); }
+  toolExecution(id: string) { return new ToolStore(this.ctx.storage.sql).execution(id); }
   private topologyCache?: AgentTopology;
   private retentionStore?: RequestRetention;
   private retention() { return this.retentionStore ??= new RequestRetention(this.ctx.storage); }
@@ -56,6 +58,7 @@ export class RequestsDO extends DurableObject<Env> {
     const columns = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(requests)").toArray();
     if (!columns.some(c => c.name === "turn_id")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN turn_id TEXT");
     if (!columns.some(c => c.name === "revision")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN revision INTEGER NOT NULL DEFAULT 0");
+    ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS tool_traces_actor_call ON tool_traces(thread,COALESCE(json_extract(record,'$.actor'),'thread'),call_id,started)");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_actor_started ON requests(thread,json_extract(record,'$.actor'),started,id)");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS requests_turn ON requests(thread,turn_id,revision)");
   }
@@ -122,13 +125,13 @@ export class RequestsDO extends DurableObject<Env> {
     if (more || await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + (more ? 1000 : 3600_000));
   }
   async recordTool(trace: ToolTrace) {
-    const { arguments: args, result, ...summary } = trace, sql = this.ctx.storage.sql;
+    const { arguments: args, result, structuredResult, ...summary } = trace, sql = this.ctx.storage.sql;
     if (trace.startedAt < Date.now() - REQUEST_RETENTION.metadataMs) return;
     const retention = this.retention();
     const previous = sql.exec<{ record: string }>("SELECT record FROM tool_traces WHERE id=?", trace.id).toArray()[0];
     const previousStatus = previous ? (JSON.parse(previous.record) as ToolSummary).status : undefined;
     if (previousStatus && previousStatus !== "running" && (previousStatus !== "interrupted" || trace.status === "running")) return;
-    const payload = trace.startedAt >= Date.now() - REQUEST_RETENTION.detailsMs ? JSON.stringify({ arguments: args, result }) : null;
+    const payload = trace.startedAt >= Date.now() - REQUEST_RETENTION.detailsMs ? JSON.stringify({ arguments: args, result, structuredResult }) : null;
     sql.exec(`INSERT INTO tool_traces(id,thread,turn_id,call_id,started,revision,record,payload,bytes) VALUES(?,?,?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,record=excluded.record,payload=excluded.payload,bytes=excluded.bytes`,
       trace.id, trace.thread, trace.binding.turnId, trace.callId, trace.startedAt, this.revision(), JSON.stringify(summary), payload, payload === null ? 0 : new TextEncoder().encode(payload).byteLength);
@@ -203,10 +206,7 @@ export class RequestsDO extends DurableObject<Env> {
     if (!r) return;
     const d = this.ctx.storage.sql.exec<{ payload: string }>("SELECT payload FROM request_details WHERE id=?", id).toArray()[0];
     const request: RequestRecord = JSON.parse(r.record);
-    const tools = request.binding ? this.ctx.storage.sql.exec<{ record: string; available: number }>(
-      "SELECT record,payload IS NOT NULL AS available FROM tool_traces WHERE thread=? AND turn_id=? ORDER BY started,id", request.thread, request.binding.turnId).toArray()
-      .filter(row => { const t: ToolSummary = JSON.parse(row.record); return request.toolCalls?.some(call => call.id === t.callId || call.id === t.parentCallId); })
-      .map(row => ({ ...JSON.parse(row.record) as ToolSummary, detailAvailable: !!row.available })) : [];
+    const tools = new ToolStore(this.ctx.storage.sql).forRequest(request);
     const related = request.binding ? this.ctx.storage.sql.exec<{ record: string }>("SELECT record FROM requests WHERE thread=? AND turn_id=? ORDER BY started,seq", request.thread, request.binding.turnId).toArray().map(row => JSON.parse(row.record) as RequestRecord) : [];
     const payload: Pick<RequestDetail, "context" | "response"> | undefined = d ? JSON.parse(d.payload) : undefined;
     return { request, context: payload ? metadataOnly ? contextMetadata(payload.context) : payload.context : undefined,
@@ -215,7 +215,7 @@ export class RequestsDO extends DurableObject<Env> {
   }
   toolDetail(id: string) {
     const row = this.ctx.storage.sql.exec<{ record: string; payload: string | null }>("SELECT record,payload FROM tool_traces WHERE id=?", id).toArray()[0];
-    return row ? { ...JSON.parse(row.record) as ToolSummary, ...(row.payload ? JSON.parse(row.payload) as Pick<ToolTrace, "arguments" | "result"> : {}), detailAvailable: !!row.payload } : undefined;
+    return row ? { ...JSON.parse(row.record) as ToolSummary, ...(row.payload ? JSON.parse(row.payload) as Pick<ToolTrace, "arguments" | "result" | "structuredResult"> : {}), detailAvailable: !!row.payload } : undefined;
   }
   turnTrace(thread: string, turns: string[], after: number) {
     if (!turns.length) return { requests: [], tools: [], cursor: after, more: false };

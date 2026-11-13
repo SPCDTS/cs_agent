@@ -9,11 +9,9 @@ export type RequestRecord = RequestScope & {
   contextMetrics?: import("./context-types").ContextMetrics;
   binding?: RequestBinding; toolCalls?: { id: string; name: string }[];
 };
-export type ToolTrace = {
-  id: string; thread: string; binding: RequestBinding; callId: string; parentCallId?: string; name: string;
-  startedAt: number; endedAt: number | null; status: "running" | "done" | "error" | "interrupted";
-  arguments: TextPart; result?: TextPart;
+export type { ToolSummary } from "./tool-types";
+export type ToolTrace = import("./tool-types").ToolSummary & {
+  arguments: TextPart; result?: TextPart; structuredResult?: TextPart;
 };
-export type ToolSummary = Omit<ToolTrace, "arguments" | "result">;
 export type RequestDetail = { request: RequestRecord; context: ContextSnapshot; response?: MessagePart };
 export type RequestQuery = { since: number; until: number; thread?: string; model?: string; status?: RequestStatus; purpose?: string; turnId?: string; before?: number; limit: number };

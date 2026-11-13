@@ -1,3 +1,4 @@
+import { TOOL_EXECUTION_CSS } from "./tool-execution";
 import { CONTEXT_MONITOR_CSS, CONTEXT_MONITOR_HTML } from "./context-monitor";
 import { REQUEST_DETAIL_CSS } from "./request-detail";
 
@@ -44,6 +45,7 @@ main{max-width:1600px;margin-left:204px;padding:30px 34px;width:calc(100% - 204p
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
 ${REQUEST_DETAIL_CSS}
 ${CONTEXT_MONITOR_CSS}
+${TOOL_EXECUTION_CSS}
 ${TOPOLOGY_CSS}
 `;
 

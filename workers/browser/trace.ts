@@ -1,6 +1,7 @@
+import { renderToolTrace, toolRoots } from "./tool-execution";
 import { refreshContextMonitor } from "./context-monitor";
-import { consoleView, cs, downloadAsset, loadRequests, nf, requestPill, statuses } from "./console";
-import { cacheRate, detailCache, openRequest, percent, toolCache, toolPayload } from "./request-detail";
+import { consoleView, cs, downloadAsset, loadRequests, nf, statuses } from "./console";
+import { cacheRate, detailCache, openRequest, percent, toolCache } from "./request-detail";
 import { $, bjTime, bytes, duration, el, fail, readToken, state, time } from "./app";
 import * as C from "./request-contracts";
 import { readApi } from "./api";
@@ -30,25 +31,16 @@ export async function fetchTrace(thread:string,messages:C.ChatMessage[],version:
     if(document.hidden||cs.view!=="chat")break;
   }
 }
-export function renderToolTrace(tool:C.ToolSummary){
-  const content=el("div",{className:"message-block-content"}),box=el("details",{className:"message-block trace-tool","data-tool":tool.id},[el("summary",{},[el("strong",{text:tool.name}),el("small",{text:tool.endedAt?duration(tool.endedAt-tool.startedAt):tool.status==="running"?"执行中":"耗时未记录"}),requestPill(tool.status)]),content]);let loaded=false;
-  box.addEventListener("toggle",async()=>{
-    if(!box.open||loaded)return;loaded=true;content.replaceChildren(el("p",{className:"muted small",text:"正在读取工具详情…"}));
-    const epoch=cs.epoch;
-    try{const d=toolCache.get(tool.id)||await readApi(C.ToolDetail,"GET","/admin/tools/"+encodeURIComponent(tool.id));if(epoch!==cs.epoch||!box.isConnected)return;if(d.status!=="running")toolCache.set(tool.id,d);content.replaceChildren(toolPayload(d));}
-    catch(error){loaded=false;content.replaceChildren(el("p",{text:"读取失败，折叠后可重试。"}));fail(error);}
-  });return box;
-}
-export function turnTrace(turnId:string){
+export function turnTrace(turnId:string,expanded?:ReadonlySet<string|undefined>){
   const requests=[...cs.requests.values()].filter(r=>r.binding?.turnId===turnId).sort((a,b)=>a.startedAt-b.startedAt),tools=[...cs.tools.values()].filter(t=>t.binding.turnId===turnId).sort((a,b)=>a.startedAt-b.startedAt);
   if(!requests.length&&!tools.length)return el("div",{className:"trace-unknown",text:"本轮暂无执行记录；旧回合可能未采集关联。"});
   type Entry={kind:"request";at:number;value:C.RequestRecord}|{kind:"tool";at:number;value:C.ToolSummary};
-  const entries=[...requests.map<Entry>(r=>({kind:"request",at:r.startedAt,value:r})),...tools.map<Entry>(t=>({kind:"tool",at:t.startedAt,value:t}))].sort((a,b)=>a.at-b.at);
+  const entries=[...requests.map<Entry>(r=>({kind:"request",at:r.startedAt,value:r})),...toolRoots(tools).map<Entry>(t=>({kind:"tool",at:t.startedAt,value:t}))].sort((a,b)=>a.at-b.at);
   const active=entries.some(e=>e.value.status==="running");
   return el("section",{className:"trace-turn","data-turn":turnId},[
     el("div",{className:"trace-heading"},[el("span",{text:(active?"本轮执行中":"本轮执行记录")+" · "+requests.length+" 次模型请求 · "+tools.length+" 次工具调用"}),el("button",{className:"request-link",type:"button",text:"本轮请求",onclick:()=>showTurnRequests(turnId)})]),
     ...entries.map(entry=>{
-      if(entry.kind==="tool")return renderToolTrace(entry.value);
+      if(entry.kind==="tool")return renderToolTrace(entry.value,tools,{expanded:new Set([...expanded??[]].filter((id):id is string=>!!id))});
       const r=entry.value;
       return el("button",{className:"trace-request",type:"button",onclick:()=>openRequest(r.id)},[
         el("span",{},[r.model+" · "+(statuses[r.status]||r.status),el("small",{text:"输入 "+nf(r.inputTokens)+" / 输出 "+nf(r.outputTokens)})]),
@@ -66,9 +58,9 @@ export function renderChatMessages(messages:C.ChatMessage[]){
   const content: HTMLElement[]=[];
   for(const m of messages){
     const message=el("article",{className:"chat-message "+m.role},[el("div",{className:"message-meta",text:(m.role==="assistant"?"助手":m.name||"用户")+" · "+(m.source==="web"?"网页":"QQ")+" · "+bjTime(m.at)+(m.status?" · "+(statuses[m.status]||m.status):"")}),el("div",{className:"message-text",text:m.text}),...(m.assets||[]).map(ref=>el("button",{className:"btn",text:ref.name+" · "+bytes(ref.bytes),onclick:()=>downloadAsset(ref)}))]);
-    if(m.turnId&&!seen.has(m.turnId)&&m.role==="assistant"){seen.add(m.turnId);content.push(turnTrace(m.turnId));}
+    if(m.turnId&&!seen.has(m.turnId)&&m.role==="assistant"){seen.add(m.turnId);content.push(turnTrace(m.turnId,expanded));}
     content.push(message);
-    if(m.turnId&&!seen.has(m.turnId)&&m.role==="user"){seen.add(m.turnId);content.push(turnTrace(m.turnId));}
+    if(m.turnId&&!seen.has(m.turnId)&&m.role==="user"){seen.add(m.turnId);content.push(turnTrace(m.turnId,expanded));}
   }
   list.replaceChildren(...content);
   if(!messages.length)list.append(el("div",{className:"empty-state"},[el("strong",{text:"从这里继续对话"}),"网页发言会进入当前会话，QQ 里的上下文仍然保留。"]));
