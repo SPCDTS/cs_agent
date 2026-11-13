@@ -1,4 +1,4 @@
-import { GitHubAppError } from "./app";
+import { GitHubAppError, UPSTREAM_REASONS } from "./app";
 
 // Static allowlist only: never log exception messages or OAuth inputs.
 export const CONNECT_STAGES = [
@@ -44,7 +44,12 @@ export async function diagnoseConnect<T>(requestId: string, operation: ConnectOp
   catch (error) {
     const failure = { ok: false as const, ...classify(error, stage), requestId: safeId };
     console.error({ event: "github_connect_failed", requestId: safeId,
-      operation: operation === "start" ? "start" : "complete", stage, code: failure.code, status: failure.status });
+      operation: operation === "start" ? "start" : "complete", stage, code: failure.code, status: failure.status,
+      ...(error instanceof GitHubAppError && error.reason && UPSTREAM_REASONS.includes(error.reason) ? {
+        reason: error.reason,
+        ...(Number.isInteger(error.upstreamStatus) && error.upstreamStatus! >= 100 && error.upstreamStatus! <= 599
+          ? { upstreamStatus: error.upstreamStatus } : {}),
+      } : {}) });
     return failure;
   }
 }
