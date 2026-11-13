@@ -14,6 +14,10 @@
   ],
   "vars": {
     "PUBLIC_ORIGIN": "https://agent.spcdts.dev",
+    "GITHUB_APP_ID": "5729532",
+    "GITHUB_APP_SLUG": "cs-agent-event",
+    "GITHUB_APP_CLIENT_ID": "Iv23liMy3apxkf5bQBrL",
+    "GITHUB_APP_CALLBACK_URL": "https://agent.spcdts.dev/admin/github/oauth/callback",
     "GMAIL_PUBSUB_SERVICE_ACCOUNT": "gmail-push@jule-agent.iam.gserviceaccount.com",
     "GMAIL_PUBSUB_TOPIC": "projects/jule-agent/topics/gmail-push"
   }

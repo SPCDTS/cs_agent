@@ -42,6 +42,8 @@ Worker 非秘密配置：
 `GITHUB_APP_ID`、`GITHUB_APP_SLUG`、`GITHUB_APP_CLIENT_ID`、
 `GITHUB_APP_CALLBACK_URL=https://<PUBLIC_ORIGIN>/admin/github/oauth/callback`。
 
+这四项写入当前环境的 `workers/deployments/<档案>.json` 的 `vars`。本仓库生产 CI 使用 `workers/deployments/production.json`；仅在 Cloudflare 控制台修改会在后续部署时被档案覆盖，因此控制台调整后也要同步档案。`CS_AGENT_COMMIT` 由 CI 注入当前提交，不复制控制台中的固定值。
+
 只通过运行环境 secrets 配置：
 `GITHUB_APP_PRIVATE_KEY`、`GITHUB_APP_CLIENT_SECRET`、
 `GITHUB_APP_WEBHOOK_SECRET`、`GITHUB_APP_STORE_KEY`（独立随机 32 字节的 64 位十六进制主密钥）。
