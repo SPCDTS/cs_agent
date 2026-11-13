@@ -12,7 +12,7 @@ async function authorize(verifier:string) {
 const user = { id: 7, login: "owner", email: "private@example.test" };
 const userToken = { access_token: "user-test-token", token_type: "bearer", expires_in: 28800, refresh_token: "unused-test-refresh" };
 const installation = { id: 456, app_id: 123, suspended_at: null };
-function mock(values: unknown[]) { const fn = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify(values.shift()))); vi.stubGlobal("fetch", fn); return fn; }
+function mock(values: unknown[]) { const fn = vi.fn(async (_request: Request) => new Response(JSON.stringify(values.shift()))); vi.stubGlobal("fetch", fn); return fn; }
 describe("GitHub App user authorization contract", () => {
   it("constructs distinct client-ID OAuth URL with S256 PKCE and fixed query-free redirect", () => {
     const url = new URL(new GitHubAppClient(secrets).authorizationUrl("opaque-state", challenge));
@@ -28,10 +28,10 @@ describe("GitHub App user authorization contract", () => {
     const result = await authorize(verifier);
     expect(result).toMatchObject({ user: { id: 7, login: "owner" }, repositories: [{ id: 42, name: "owner/repo" }] }); expect(result.expiresAt).toBeGreaterThan(Date.now());
     for (const secret of ["user-test-token", "unused-test-refresh", "private@example.test"]) expect(JSON.stringify(result)).not.toContain(secret);
-    expect(fetcher.mock.calls.map(c => c[0])).toEqual(["https://github.com/login/oauth/access_token", "https://api.github.com/user", "https://api.github.com/user/installations?per_page=100&page=1", "https://api.github.com/user/installations/456/repositories?per_page=100&page=1"]);
-    const exchange = fetcher.mock.calls[0][1]!; expect(exchange.method).toBe("POST"); expect(exchange.redirect).toBe("error");
-    const form = exchange.body as URLSearchParams; expect(form.get("code")).toBe("test-code"); expect(form.get("code_verifier")).toBe(verifier); expect(form.get("client_secret")).toBe("test-client-secret");
-    expect((fetcher.mock.calls[3][1]!.headers as Record<string, string>).Authorization).toBe("Bearer user-test-token");
+    expect(fetcher.mock.calls.map(([request]) => request.url)).toEqual(["https://github.com/login/oauth/access_token", "https://api.github.com/user", "https://api.github.com/user/installations?per_page=100&page=1", "https://api.github.com/user/installations/456/repositories?per_page=100&page=1"]);
+    const exchange = fetcher.mock.calls[0][0]; expect(exchange.method).toBe("POST"); expect(exchange.redirect).toBe("manual");
+    const form = await exchange.formData(); expect(form.get("code")).toBe("test-code"); expect(form.get("code_verifier")).toBe(verifier); expect(form.get("client_secret")).toBe("test-client-secret");
+    expect(fetcher.mock.calls[3][0].headers.get("authorization")).toBe("Bearer user-test-token");
   });
   it.each([[], [{ ...installation, id: 999 }], [{ ...installation, app_id: 999 }], [{ ...installation, suspended_at: "2026-01-01" }]].map(installations => ({ installations })))("rejects forged/inaccessible/cross-App/suspended installation %j", async ({ installations }) => {
     const fetcher = mock([userToken, user, { total_count: installations.length, installations }]);
@@ -48,8 +48,8 @@ describe("GitHub App user authorization contract", () => {
     const fetcher = mock([userToken, user, { total_count: 101, installations: first }, { total_count: 101, installations: [installation] },
       { total_count: 101, repositories: repos }, { total_count: 101, repositories: [{ id: 101, full_name: "owner/last" }] }]);
     expect((await authorize(verifier)).repositories).toHaveLength(101);
-    expect(fetcher.mock.calls[3][0]).toBe("https://api.github.com/user/installations?per_page=100&page=2");
-    expect(fetcher.mock.calls[5][0]).toBe("https://api.github.com/user/installations/456/repositories?per_page=100&page=2");
+    expect(fetcher.mock.calls[3][0].url).toBe("https://api.github.com/user/installations?per_page=100&page=2");
+    expect(fetcher.mock.calls[5][0].url).toBe("https://api.github.com/user/installations/456/repositories?per_page=100&page=2");
     mock([userToken, user, { total_count: 1001, installations: [] }]);
     await expect(authorize(verifier)).rejects.toThrow("capacity");
     mock([userToken, user, { total_count: 1, installations: [installation] }, { total_count: 1001, repositories: [] }]);

@@ -42,7 +42,11 @@ function mockGitHub() {
   }
   throw new Error("unexpected_mock_path");
  });
- vi.stubGlobal("fetch",fetcher);return {fetcher,revoked,suspended,get refreshes(){return refreshes;}};
+ vi.stubGlobal("fetch",async(input:RequestInfo|URL,init?:RequestInit)=>{
+  const request=new Request(input,init);
+  return fetcher(request.url,{method:request.method,headers:request.headers,redirect:request.redirect,
+   signal:request.signal,body:request.body?new TextDecoder().decode(await request.arrayBuffer()):undefined});
+ });return {fetcher,revoked,suspended,get refreshes(){return refreshes;}};
 }
 async function harness(run:(e:Env,instance:EventsDO,ctx:DurableObjectState)=>Promise<void>) {
  await runInDurableObject(env.EVENTS.getByName("main"),async(_old,ctx)=>{
