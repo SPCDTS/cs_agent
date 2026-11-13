@@ -845,8 +845,8 @@ describe("safe GitHub connect diagnostics",()=>{
   const data=await response.json() as {error:string;requestId:string};
   expect(data).toEqual({error:code,requestId:response.headers.get("X-Request-ID")});
   expect(data.requestId).toMatch(/^[a-f0-9-]{36}$/);
-  expect(logs).toHaveBeenLastCalledWith({event:"github_connect_failed",operation:stage==="configuration"&&status===503?"start":"complete",
-   stage,code,status,requestId:data.requestId});
+  expect(logs).toHaveBeenLastCalledWith(expect.objectContaining({event:"github_connect_failed",operation:stage==="configuration"&&status===503?"start":"complete",
+   stage,code,status,requestId:data.requestId}));
   expect(JSON.stringify(logs.mock.calls)+JSON.stringify(data)).not.toContain(sensitive);
  }
  it("reports state missing/binding/expiry/epoch separately without consuming rejected states",async()=>{
@@ -895,6 +895,7 @@ describe("safe GitHub connect diagnostics",()=>{
   await harness(async(e)=>{
    const state=await begin(e);
    await failure(await admin(e,"connect/complete",{browser,state,code:sensitive}),400,"github_app_unauthorized",stage,logs);
+   expect(logs.mock.calls.at(-1)?.[0]).toMatchObject({reason:"http_error",upstreamStatus:401});
    const calls=gh.fetcher.mock.calls.length;
    await failure(await admin(e,"connect/complete",{browser,state,code:sensitive}),400,"github_connect_state_missing","state_missing",logs);
    expect(gh.fetcher).toHaveBeenCalledTimes(calls);
@@ -906,6 +907,7 @@ describe("safe GitHub connect diagnostics",()=>{
   await harness(async(e)=>{
    const state=await begin(e);
    await failure(await admin(e,"connect/complete",{browser,state,code:sensitive}),429,"github_app_rate_limited","token_exchange",logs);
+   expect(logs.mock.calls.at(-1)?.[0]).toMatchObject({reason:"http_error",upstreamStatus:status});
   });
  });
  it("reports invalid signing key as app_jwt configuration failure, not token exchange",async()=>{
