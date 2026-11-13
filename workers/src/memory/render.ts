@@ -31,10 +31,11 @@ export function formatMemoryLine(row: MemoryRow, label: (scope: string) => strin
 const fence = (text: string) => text.replace(/<\/memory\s*>/gi, "</memory_>");
 export async function renderMemorySection(store: MemoryStore): Promise<string | undefined> {
   const profile = await store.profile();
-  // P1b brief 要求画像为空时不渲染；未完成承诺仍可通过 mem_search 查看。
-  if (!profile.text.trim()) return undefined;
+  // 待复核画像暂停注入；未完成承诺独立于画像展示。
   const commitments = await store.openCommitments();
-  const parts = [`<memory ns="${store.ns}" profile_revision="${profile.revision}">`, fence(profile.text)];
+  const profileText = profile.review ? "" : profile.text.trim();
+  if (!profileText && !commitments.length) return undefined;
+  const parts = [`<memory ns="${store.ns}" profile_revision="${profile.revision}">`, fence(profileText)];
   if (commitments.length) parts.push("", "未完成的承诺：", ...commitments.map(row => {
     const timing = memoryTiming(row);
     return `- #${row.id}${timing ? ` (${timing})` : ""} ${fence(row.text)}`;

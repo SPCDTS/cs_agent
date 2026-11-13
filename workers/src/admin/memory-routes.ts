@@ -1,3 +1,5 @@
+import { MemoryStoreError } from "../memory/store";
+import { MemoryEditorSchema, type MemoryEditor } from "../memory/editor";
 import { ADMIN_PAGE_SIZE } from "./pagination";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
@@ -10,6 +12,10 @@ import type { runConsolidate } from "../maintenance/consolidate";
 
 /** ThreadDO 只需按下列签名转发到同一 SQLite 内的 manager / maintenance。 */
 export interface MemoryAdminRpc {
+  saveMemory(ns:string,id:number|null,input:MemoryEditor,expectedVersion?:number):ReturnType<MemoryManager["save"]>;
+  memoryCandidates(ns:string):ReturnType<MemoryManager["candidates"]>;
+  decideMemoryCandidate(ns:string,id:number,accept:boolean):ReturnType<MemoryManager["decideCandidate"]>;
+  forgetMemory(ns:string,id:number,expectedVersion?:number):Promise<{status:"forgotten"|"not_found"}>;
   memoryList(ns: string, query: MemoryListQuery): ReturnType<MemoryManager["list"]>;
   memoryDetail(ns: string, id: number): ReturnType<MemoryManager["detail"]>;
   restoreMemory(ns: string, id: number, options: { expectedVersion: number; versionId?: number }): ReturnType<MemoryManager["restore"]>;
@@ -23,7 +29,8 @@ export interface MemoryAdminRpc {
 }
 const strict = { additionalProperties: false } as const;
 const ID = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
-const RESTORE = Type.Object({ expectedVersion: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }), versionId: Type.Optional(ID) }, strict);
+const REVISION = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
+const RESTORE = Type.Object({ expectedVersion: REVISION, versionId: Type.Optional(ID) }, strict);
 const DECISION = Type.Object({ expectedRevision: Type.String({ minLength: 1, maxLength: 64 }) }, strict);
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
 function nsFrom(ctx: AdminContext) {
@@ -47,10 +54,11 @@ function query(url: URL): MemoryListQuery {
     if (!Number.isSafeInteger(n) || n < minimum || n > maximum) throw new MemoryAdminError("invalid");
     return n;
   };
-  const parsed: unknown = { query: value("q"), status: value("status"), kind: value("kind"),
+  const parsed: unknown = { query: value("q"), status: value("status"), kind: value("kind"), source: value("source"), validity: value("validity"),
     cursor: readInt("cursor", 1, Number.MAX_SAFE_INTEGER), page: readInt("page", 1, 1000000), limit: readInt("limit", 1, 100) ?? ADMIN_PAGE_SIZE };
   const schema = Type.Object({
-    query: Type.Optional(Type.String({ maxLength: 200 })), status: Type.Optional(Type.Union([...MEMORY_STATUSES.map(v => Type.Literal(v)), Type.Literal("all")])),
+    query: Type.Optional(Type.String({ maxLength: 200 })), source: Type.Optional(Type.Union([Type.Literal("explicit"),Type.Literal("extractor")])),
+    validity: Type.Optional(Type.Union(["current","expired","future","open","done"].map(v=>Type.Literal(v)))), status: Type.Optional(Type.Union([...MEMORY_STATUSES.map(v => Type.Literal(v)), Type.Literal("all")])),
     kind: Type.Optional(Type.Union(MEMORY_KINDS.map(v => Type.Literal(v)))), cursor: Type.Optional(ID), page: Type.Optional(ID), limit: Type.Optional(ID),
   }, strict);
   if (!Check(schema, parsed)) throw new MemoryAdminError("invalid");
@@ -58,11 +66,12 @@ function query(url: URL): MemoryListQuery {
 }
 
 /** 放在旧 memory 路由之前；所有路由由现有 handleAdmin 统一执行 Bearer 鉴权。 */
-export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string) => MemoryAdminRpc, read: (ctx: AdminContext, ns: string) => Pick<MemoryAdminRpc, "memoryList" | "memoryDetail" | "memoryJobs" | "memoryProposals"> = resolve): AdminRoute[] {
+export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string) => MemoryAdminRpc, read: (ctx: AdminContext, ns: string) => Pick<MemoryAdminRpc, "memoryList" | "memoryDetail" | "memoryJobs" | "memoryProposals" | "memoryCandidates"> = resolve): AdminRoute[] {
   const guarded = (handle: AdminRoute["handle"]): AdminRoute["handle"] => async ctx => {
     try { return await handle(ctx); }
     catch (error) {
       // RPC 跨 isolate 时自定义 Error 的原型可能被擦除，Thread 应保留可识别的短错误分类。
+      if (error instanceof MemoryStoreError && error.message !== "memory_admin:conflict") return json({error:"invalid"},400);
       if (error instanceof MemoryAdminError) return json({ error: error.code }, error.code === "not_found" ? 404 : error.code === "conflict" ? 409 : 400);
       if (error instanceof Error && /^memory_admin:(not_found|conflict|invalid)$/.test(error.message)) {
         const code = error.message.slice("memory_admin:".length);
@@ -75,6 +84,24 @@ export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string)
     }
   };
   return [
+    {method:"POST",path:"/admin/memory/entries",handle:guarded(async ctx=>{
+      const ns=nsFrom(ctx); return json(await resolve(ctx,ns).saveMemory(ns,null,await body(ctx.request,MemoryEditorSchema)));
+    })},
+    {method:"PUT",path:/^\/admin\/memory\/(?<id>[1-9]\d{0,14})$/,handle:guarded(async ctx=>{
+      const ns=nsFrom(ctx),input=await body(ctx.request,Type.Object({entry:MemoryEditorSchema,expectedVersion:REVISION},strict));
+      return json(await resolve(ctx,ns).saveMemory(ns,Number(ctx.params.id),input.entry,input.expectedVersion));
+    })},
+    {method:"DELETE",path:/^\/admin\/memory\/(?<id>[1-9]\d{0,14})$/,handle:guarded(async ctx=>{
+      const ns=nsFrom(ctx),input=ctx.request.body!==null?await body(ctx.request,Type.Object({expectedVersion:Type.Optional(REVISION)},strict)):{};
+      const result=await resolve(ctx,ns).forgetMemory(ns,Number(ctx.params.id),input.expectedVersion);
+      if(result.status==="not_found")throw new MemoryAdminError("not_found"); return json(result);
+    })},
+    {method:"GET",path:"/admin/memory/candidates",handle:guarded(async ctx=>{
+      const ns=nsFrom(ctx);return json({candidates:await read(ctx,ns).memoryCandidates(ns)});
+    })},
+    {method:"POST",path:/^\/admin\/memory\/candidates\/(?<id>[1-9]\d{0,14})\/(?<decision>accept|reject)$/,handle:guarded(async ctx=>{
+      const ns=nsFrom(ctx);return json(await resolve(ctx,ns).decideMemoryCandidate(ns,Number(ctx.params.id),ctx.params.decision==="accept"));
+    })},
     { method: "GET", path: "/admin/memory/list", handle: guarded(async ctx => {
       const ns = nsFrom(ctx), parsed = query(ctx.url); return json(await read(ctx, ns).memoryList(ns, parsed));
     }) },

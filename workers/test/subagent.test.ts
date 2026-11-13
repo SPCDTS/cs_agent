@@ -1,3 +1,4 @@
+import { MEMORY_EXTRACT_PROMPT } from "../src/memory/extractor";
 import { env, reset, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -38,6 +39,7 @@ function twoModels(parentSteps: Step[], childSteps: Step[]) {
   const captured = new Set<string>();
   const respond: FauxResponseFactory = async (transcript, options) => {
     faux.setResponses([respond]);
+    if (transcript.messages.some(message => message.role === "user" && typeof message.content === "string" && message.content.startsWith(MEMORY_EXTRACT_PROMPT))) return fauxAssistantMessage("[]");
     let role: "parent" | "child" = "parent", identity = "";
     const tools = new Set<string>();
     for (const message of transcript.messages) {

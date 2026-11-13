@@ -64,6 +64,7 @@ export interface MemoryInput {
   since?: number | null;
   until?: number | null;
   due_at?: number | null;
+  done_at?: number | null;
   author: string;
   source_scope?: string | null;
   source_message_id?: string | null;
@@ -73,6 +74,7 @@ export interface MemoryInput {
 
 /** 正文或时效的修改；null 表示清空。 */
 export interface MemoryPatch {
+  kind?: MemoryKind;
   text?: string;
   subject?: string | null;
   since?: number | null;

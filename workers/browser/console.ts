@@ -1,4 +1,5 @@
 import { refreshContextMonitor, resetContextMonitor } from "./context-monitor";
+import { resetMemory } from "./memory";
 import * as C from "./request-contracts";
 import { Check } from "typebox/value";
 import { readApi } from "./api";
@@ -65,6 +66,7 @@ export function consoleView(view: string){
   if(managementPages[view])loadManagement(view).catch(fail);
 }
 export function resetConsole(){
+  resetMemory();
   resetContextMonitor(true);listPages.clear();resetTopology();resetChatNavigation();chatDrafts.clear();
   clearTimeout(cs.timer);cs.timer=undefined;detailCache.clear();toolCache.clear();resetChatTrace();cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
   $("session-history").close();sh.version++;

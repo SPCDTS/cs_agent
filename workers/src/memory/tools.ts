@@ -4,6 +4,7 @@ import { defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { memoryParameters, memoryDescriptions, type MemoryTool } from "./contracts";
 import { MemoryStore } from "./store";
 import { bounded, formatMemoryLine, renderLines } from "./render";
+import { materialKeywords } from "./extractor";
 import { containsSecret } from "./secrets";
 import { parseMemoryTime, parseClearableTime } from "./time";
 import { isMemoryNs, type MemoryInput } from "./types";
@@ -30,10 +31,19 @@ const memoryEvent = (store: MemoryStore, kind: "memory_recall" | "memory_write",
 /** mem_search 的检索与审计；子 agent 经父线程 RPC 只读检索时走同一段。 */
 export async function searchMemory(store: MemoryStore, args: Static<typeof memoryParameters.mem_search>): Promise<string> {
   if (args.query !== undefined && !args.query.trim()) throw new Error("query 不能为空");
-  const rows = await store.search(args), { text, shown } = renderLines(rows);
+  let rows = await store.search(args), fallback = false;
+  if(!rows.length && args.query) {
+    const hits = new Map<number,{row:typeof rows[number];matches:number}>();
+    for(const term of materialKeywords(args.query,6))for(const row of await store.search({...args,query:term,limit:20})) {
+      const hit=hits.get(row.id);hits.set(row.id,{row,matches:(hit?.matches??0)+1});
+    }
+    rows=[...hits.values()].sort((a,b)=>b.matches-a.matches || Number(a.row.author==="extractor")-Number(b.row.author==="extractor") || b.row.updated_at-a.row.updated_at).slice(0,args.limit??10).map(h=>h.row);
+    fallback=rows.length>0;
+  }
+  const {text,shown}=renderLines(rows);
   if (args.query) await store.touchRecall(shown.map(row => row.id));
-  await memoryEvent(store, "memory_recall", { tool: "mem_search", returned_count: shown.length, dropped_count: rows.length - shown.length, chars: text.length });
-  return bounded(text);
+  await memoryEvent(store, "memory_recall", { tool: "mem_search", returned_count: shown.length, dropped_count: rows.length - shown.length, ids:shown.map(r=>r.id), fallback, chars: text.length });
+  return bounded((fallback?"未找到完整短语，以下仅为关键词相关记忆，请核对是否适用：\n":"")+text);
 }
 
 export function createMemoryTools(store: MemoryStore, binding: (api: ToolExecutionApi, context: Context) => Promise<MemoryBinding | undefined>, options: MemoryToolOptions = {}) {

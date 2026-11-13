@@ -1,13 +1,16 @@
+import { Check } from "typebox/value";
+import { CandidateInputSchema, type MemoryCandidate, type MemoryEditor } from "./editor";
 import type { SqliteExecutor, SqliteValue } from "@earendil-works/chord/sqlite";
-import { MemoryStore, memoryHash, nowSec, sha256 } from "./store";
+import { MemoryStore, MemoryStoreError, memoryHash, nowSec, sha256 } from "./store";
 import type { MemoryKind, MemoryLinkRow, MemoryRow, MemoryStatus, MemoryVersionRow } from "./types";
 import { parseSnapshot } from "./history-import";
+import { effectiveMemory } from "./lifecycle";
 import { containsSecret } from "./secrets";
 
 export class MemoryAdminError extends Error {
   constructor(readonly code: "not_found" | "conflict" | "invalid", _message: string = code) { super(`memory_admin:${code}`); }
 }
-export type MemoryListQuery = { status?: MemoryStatus | "all"; kind?: MemoryKind; query?: string; cursor?: number; page?: number; limit?: number };
+export type MemoryListQuery = { status?: MemoryStatus | "all"; kind?: MemoryKind; query?: string; source?: "explicit" | "extractor"; validity?: "current" | "expired" | "future" | "open" | "done"; cursor?: number; page?: number; limit?: number };
 export type ProfileProposal = {
   id: number; ns: string; text: string; based_on_revision: string; batch_id: string; created_at: number;
   entries_hash: string; status: "pending" | "accepted" | "rejected"; decided_at: number | null; applied_revision: string | null;
@@ -18,6 +21,31 @@ export type MemoryJob = { id: string; ns: string; status: "running" | "ok" | "fa
 export class MemoryManager {
   constructor(readonly store: MemoryStore, private readonly now = nowSec) {}
   private get db() { return this.store.db; }
+  async save(id: number | null, input: MemoryEditor, expectedVersion?: number) {
+    if (containsSecret(input.text) || input.subject && containsSecret(input.subject) || !input.text.trim()
+      || input.until != null && input.since != null && input.until <= input.since
+      || input.kind !== "commitment" && (input.due_at != null || input.done_at != null)) throw new MemoryAdminError("invalid");
+    if (id === null) return (await this.store.remember({...input,author:"dashboard"})).row;
+    try { return await this.store.update(id,input,"dashboard",expectedVersion); }
+    catch(error) { if(error instanceof MemoryStoreError)throw new MemoryAdminError(error.message==="memory_admin:conflict"?"conflict":"invalid");throw error; }
+  }
+  candidates() { return this.db.all<MemoryCandidate>("SELECT * FROM memory_candidates WHERE ns=? AND status='pending' ORDER BY id DESC LIMIT 100",this.store.ns); }
+  async decideCandidate(id: number, accept: boolean) {
+    return this.db.transaction(async tx => {
+      const candidate = await tx.get<MemoryCandidate>("SELECT * FROM memory_candidates WHERE id=? AND ns=?",id,this.store.ns);
+      if (!candidate) throw new MemoryAdminError("not_found");
+      if (candidate.status !== "pending") throw new MemoryAdminError("conflict");
+      if (accept) {
+        const input: unknown = JSON.parse(candidate.input_json);
+        if (!Check(CandidateInputSchema,input) || containsSecret(input.text) || input.subject && containsSecret(input.subject)) throw new MemoryAdminError("invalid");
+        const saved=await this.store.remember({...input,author:"dashboard"},{supersedes:candidate.target_id,expectedTargetVersion:candidate.target_version,reason:"confirmed_conflict"},tx);
+        if(input.evidence && input.source_scope && input.source_message_id && !containsSecret(input.evidence.quote))
+          await tx.run("INSERT OR IGNORE INTO memory_evidence(memory_id,scope,message_id,speaker,quote) VALUES (?,?,?,?,?)",saved.row.id,input.source_scope,input.source_message_id,input.evidence.speaker,input.evidence.quote);
+      }
+      await tx.run("UPDATE memory_candidates SET status=? WHERE id=?",accept?"accepted":"rejected",id);
+      return {status:accept?"accepted":"rejected"};
+    });
+  }
   async list(q: MemoryListQuery = {}) {
     const limit = q.limit ?? 40, page = q.page ?? 1;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100 || !Number.isSafeInteger(page) || page < 1
@@ -26,7 +54,14 @@ export class MemoryManager {
     const parts = ["ns = ?"], args: SqliteValue[] = [this.store.ns];
     if (q.status !== "all") { parts.push("status = ?"); args.push(q.status ?? "active"); }
     if (q.kind) { parts.push("kind = ?"); args.push(q.kind); }
-    for (const term of q.query?.trim().split(/\s+/).filter(Boolean).slice(0, 5) ?? []) {
+    if (q.source) { parts.push(q.source === "extractor" ? "author='extractor'" : "author<>'extractor'"); }
+    if (q.validity === "current") { parts.push(effectiveMemory()); args.push(this.now(),this.now()); }
+    if (q.validity === "expired") { parts.push("kind<>'episode' AND until IS NOT NULL AND until<=?"); args.push(this.now()); }
+    if (q.validity === "future") { parts.push("since>?"); args.push(this.now()); }
+    if (q.validity === "open" || q.validity === "done") { parts.push("kind='commitment'",q.validity === "open" ? "done_at IS NULL" : "done_at IS NOT NULL"); }
+    const id = /^#([1-9]\d{0,14})$/.exec(q.query?.trim() ?? "");
+    if (id) { parts.push("id=?"); args.push(Number(id[1])); }
+    for (const term of (id ? undefined : q.query)?.trim().split(/\s+/).filter(Boolean).slice(0, 5) ?? []) {
       parts.push("(instr(lower(text), lower(?)) > 0 OR instr(lower(COALESCE(subject, '')), lower(?)) > 0)"); args.push(term, term);
     }
     const total = (await this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM memories WHERE ${parts.join(" AND ")}`, ...args))?.n ?? 0;
@@ -37,13 +72,21 @@ export class MemoryManager {
     return { items, total, page, limit, nextCursor: rows.length > limit ? items.at(-1)?.id ?? null : null };
   }
   async detail(id: number) {
-    const row = await this.store.get(id);
+    return this.db.transaction(async tx=>{
+    const row = await this.store.get(id,tx);
     if (!row) throw new MemoryAdminError("not_found");
-    const versions = await this.db.all<MemoryVersionRow>("SELECT * FROM memory_versions WHERE memory_id = ? ORDER BY id DESC", id);
-    const links = await this.db.all<MemoryLinkRow>(`SELECT l.* FROM memory_links l
+    const versions = await tx.all<MemoryVersionRow>("SELECT * FROM memory_versions WHERE memory_id = ? ORDER BY id DESC", id);
+    const links = await tx.all<MemoryLinkRow>(`SELECT l.* FROM memory_links l
       JOIN memories a ON a.id = l.from_id JOIN memories b ON b.id = l.to_id
       WHERE a.ns = ? AND b.ns = ? AND (l.from_id = ? OR l.to_id = ?) ORDER BY l.created_at DESC, l.from_id, l.to_id`, this.store.ns, this.store.ns, id, id);
-    return { row, versions, links, revision: (await this.currentVersion(this.db, id))?.id ?? 0 };
+    const evidence = await tx.all<{scope:string;message_id:string;speaker:string;quote:string}>("SELECT scope,message_id,speaker,quote FROM memory_evidence WHERE memory_id=?",id);
+    if(!evidence.length && row.source_scope && row.source_message_id) {
+      const source=await tx.get<{user_id:string;text:string}>("SELECT user_id,text FROM messages WHERE scope=? AND message_id=?",row.source_scope,row.source_message_id);
+      if(source && !containsSecret(source.text))evidence.push({scope:row.source_scope,message_id:row.source_message_id,speaker:source.user_id,quote:source.text.slice(0,500)});
+    }
+    const profile = await this.store.profile(tx);
+    return { row, versions, links, evidence, inProfile: profile.sources?.includes(id) ?? false, revision: (await this.currentVersion(tx, id))?.id ?? 0 };
+    });
   }
   private currentVersion(tx: SqliteExecutor, id: number) {
     return tx.get<MemoryVersionRow>(`SELECT * FROM memory_versions v WHERE memory_id = ?
@@ -81,7 +124,7 @@ export class MemoryManager {
         if (!forgotten?.before_json) throw new MemoryAdminError("conflict", "没有遗忘前快照");
         snapshot = parseSnapshot(forgotten.before_json, this.store.ns, id);
       }
-      return this.replace(tx, current, snapshot, by, "restore");
+      return this.replace(tx, current, {...snapshot,author:by}, by, "restore");
     });
   }
   async rollback(batchId: string) {
@@ -138,9 +181,11 @@ export class MemoryManager {
         || decision === "accepted" && current.revision !== row.based_on_revision) throw new MemoryAdminError("conflict");
       const revision = decision === "accepted" ? sha256(row.text).slice(0, 16) : null;
       if (decision === "accepted") {
+        if (row.entries_hash !== await this.store.profileFingerprint(tx)) throw new MemoryAdminError("conflict");
         if (new TextEncoder().encode(row.text).byteLength > 4096 || containsSecret(row.text)) throw new MemoryAdminError("invalid");
         await tx.run(`INSERT INTO profile(ns,text,revision,updated_at) VALUES (?,?,?,?)
           ON CONFLICT(ns) DO UPDATE SET text=excluded.text,revision=excluded.revision,updated_at=excluded.updated_at`, this.store.ns, row.text, revision, this.now());
+        await this.store.approveProfileSources(tx);
       }
       await tx.run("UPDATE memory_proposals SET status = ?, decided_at = ?, applied_revision = ? WHERE id = ? AND ns = ?", decision, this.now(), revision, id, this.store.ns);
       return { id, status: decision, revision };

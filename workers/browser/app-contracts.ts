@@ -88,10 +88,10 @@ export const ModelView = Type.Object({ revision: Type.String(), current: ModelSe
     accounts: Type.Array(Account), activeId: optionalText }),
 });
 export type ModelView = Static<typeof ModelView>;
-export const Profile = Type.Object({ text: Type.String(), revision: Type.String() });
+export const Profile = Type.Object({ text: Type.String(), revision: Type.String(), review: Type.Optional(Type.String()), sources: Type.Optional(Type.Array(Type.Number())) });
 export type Profile = Static<typeof Profile>;
 export const MemoryRow = Type.Object({ id: Type.Number(), text: Type.String(), kind: Type.String(), status: Type.String(), subject: optionalText,
-  due_at: optionalNumber, author: Type.String(), updated_at: Type.Number() });
+  since: optionalNumber, until: optionalNumber, due_at: optionalNumber, done_at: optionalNumber, source_scope: optionalText, source_message_id: optionalText, confidence: Type.Optional(Type.Number()), recall_count: Type.Optional(Type.Number()), author: Type.String(), updated_at: Type.Number() });
 export const MemoryView = Type.Object({ profile: Profile, memories: Type.Array(MemoryRow) });
 export type MemoryView = Static<typeof MemoryView>;
 export const MemoryList = Type.Object({ items: Type.Array(MemoryRow), total: Type.Number() });

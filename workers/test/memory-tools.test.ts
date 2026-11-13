@@ -62,14 +62,15 @@ describe("memory tools in the real Harness", () => {
     expect(seen.outputs[2]).toContain("← 来源 私聊 10000001 #1");
     expect(seen.outputs[3]).toContain("已更新");
     expect(seen.outputs[4]).toContain("喜欢闪光弹");
-    expect(seen.outputs[6]).toContain(`当前 revision=${result.profile.revision}`);
+    expect(seen.outputs[6]).toMatch(/当前 revision=[a-f0-9]{16}/);
+    expect(result.profile.review).toContain("请复核");
     expect(seen.outputs[6]).toContain("偏好简洁回答");
     expect(seen.outputs[7]).toContain("已遗忘");
     expect(result.row).toMatchObject({ status: "forgotten", author: "qq:10000001", source_message_id: "1", source_scope: "private:10000001", source_turn_id: expect.stringMatching(/^turn:/), recall_count: 1 });
     expect(result.versions).toHaveLength(3);
     expect(seen.offers[0]).toEqual(expect.arrayContaining(["mem_search", "mem_remember", "mem_update", "mem_forget", "mem_profile"]));
     expect(seen.sections.some(text => text?.includes("偏好简洁回答"))).toBe(true);
-    expect(seen.memorySections.at(-1)).toBe(1);
+    expect(seen.sections.at(-1)).toBeNull();
     expect(JSON.stringify(result.events)).not.toContain("烟雾弹");
     expect(JSON.stringify(result.events)).not.toContain("偏好简洁回答");
   });
