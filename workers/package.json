@@ -10,6 +10,8 @@
     "typecheck": "npm run build:admin && tsc -p tsconfig.browser.json --noEmit && tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "pretest": "npm run build:admin",
+    "test:related": "vitest related --run",
+    "pretest:related": "npm run build:admin",
     "build:admin": "node scripts/build-admin.mjs",
     "types": "wrangler types",
     "build": "wrangler deploy --dry-run --containers-rollout=none",

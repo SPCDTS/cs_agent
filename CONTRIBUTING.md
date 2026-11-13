@@ -13,6 +13,10 @@ npm run check
 
 根目录命令检查 `workers/` 和 `runner/`，各自依赖由各自的 lockfile 固定；每个 worktree 独立安装依赖。
 
+日常单模块改动先运行 `npm run typecheck` 和相关测试，例如 `npm run test:related -- src/github/app.ts`；路径相对 `workers/`。也可直接指定测试文件：`npm test -- test/github-user-auth.test.ts`。相关测试根据静态 import 关系选择，涉及共享入口、DO 生命周期、配置或跨模块行为时运行完整 `npm run check`。纯说明文档无需运行代码测试。
+
+完整检查保留所有用例与文件隔离，本机最多并发 2 个测试文件、CI 最多 4 个；排查时可以用 `npm test -- --maxWorkers=1` 临时串行运行。CI 对代码变更执行全套检查；仅修改 `docs/` 或根目录说明文档时快速完成必需的 `workers check`，并跳过部署。合并 main 后的代码发布仍须通过该提交的完整检查。
+
 ## 提交与 PR
 
 1. 从最新 main 创建功能分支；agent 使用 `codex/` 前缀。Windows 可用 `scripts/wt.ps1 new <名称>` 创建 worktree。

@@ -12,7 +12,7 @@
 ## 验证与文件
 
 - 在各 worktree 独立安装依赖：`npm run install:workers`。不要共享或清理其他 worktree 的 node_modules。
-- 日常改动运行相关测试；提交整组改动前运行 `npm run check`。测试针对真实行为，保持精简。
+- 单模块改动提交前运行相关测试和类型检查；可用 `npm run test:related -- src/<文件>.ts`（路径相对 workers/）。共享入口、DO 生命周期、构建/测试配置或跨模块改动运行 `npm run check`。CI 对代码变更执行完整检查，不要求每次小改动在本地重复全套。测试针对真实行为，保持精简。
 - 中文说明采用中文正文；编辑已有文本前检查编码、BOM 和换行，并原样保留。
 - 不提交 `.env`、`secrets/`、`data/`、`workspace/`、`napcat/` 或真实执行环境数据。
 - 不修改已上线 DO 的迁移历史；主/子 agent 的 `alarm()` 必须先派发已经准备好的模型请求。

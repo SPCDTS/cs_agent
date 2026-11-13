@@ -16,5 +16,6 @@ export default defineConfig({
         GMAIL_CLIENT_ID: "synthetic-gmail-client", GMAIL_CLIENT_SECRET: "synthetic-gmail-secret", GMAIL_REFRESH_TOKEN: "synthetic-gmail-refresh" },
     },
   })],
-  test: { testTimeout: 20_000 },
+  // 保留每个测试文件的隔离；本机并发 2 个，CI 在同一台 runner 内并发 4 个。
+  test: { testTimeout: 20_000, isolate: true, maxWorkers: process.env.CI ? 4 : 2 },
 });
