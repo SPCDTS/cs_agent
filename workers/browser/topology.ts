@@ -67,7 +67,8 @@ export function renderTopology(instant=false){
   if(!topology.data||cs.view!=="chat")return;
   const host=$("topology-graph"),nodes=topology.data.nodes,visible=topologyFamilies(nodes);
   const active=nodes.filter(n=>n.activity==="active").length,recent=nodes.filter(n=>n.activity!=="context").length;
-  $("topology-count").textContent=recent+" 个近期活跃"+(active?" · "+active+" 个执行中":"");
+  const total=nodes.filter(n=>n.kind==="subagent").length,shown=visible.reduce((count,family)=>count+family.children.length,0);
+  $("topology-count").textContent=recent+" 个近期活跃"+(active?" · "+active+" 个执行中":"")+(shown<total?" · 子 agent 展示 "+shown+" / "+total:"");
   if(!visible.length){topology.structure="";host.replaceChildren(el("p",{className:"topology-empty",text:"最近 24 小时还没有 agent 活动"}));return;}
   const structure=JSON.stringify(visible.map(g=>[g.parent.id,g.children.map(c=>c.id)]));
   if(structure!==topology.structure){

@@ -3,7 +3,7 @@ export const TOPOLOGY_HTML = String.raw`
     <div class="topology-head"><div><h2 id="topology-title">Agent 拓扑</h2><p>最近 24 小时 · 父 agent → 子 agent</p></div>
       <div class="topology-actions"><span id="topology-count" class="small muted" role="status">进入页面后加载</span><button id="topology-refresh" type="button" class="btn compact">刷新拓扑</button></div></div>
     <div id="topology-graph" class="topology-graph"><p class="topology-empty">正在读取近期活动…</p></div>
-    <div class="topology-foot"><span class="small muted">按最近活动排序 · 点击 agent 查看对应会话</span></div>
+    <div class="topology-foot"><span class="small muted">最多显示最近活跃的 5 个子 agent · 其余可在下方会话列表查看</span></div>
   </section>
 `;
 
