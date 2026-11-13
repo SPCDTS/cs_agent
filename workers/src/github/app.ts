@@ -7,7 +7,7 @@ export type AuthorizedRepository = { id: number; name: string };
 export type GitHubUser = { id: number; login: string };
 export type UserTokens = { access: string; refresh: string; expiresAt: number; refreshUntil: number };
 export type UserAuthorization = { user: GitHubUser; repositories: AuthorizedRepository[]; expiresAt: number };
-export const UPSTREAM_REASONS = ["network", "timeout", "http_error", "empty_body", "invalid_encoding", "invalid_json",
+export const UPSTREAM_REASONS = ["request_init", "network", "timeout", "http_error", "empty_body", "invalid_encoding", "invalid_json",
   "server_error", "temporarily_unavailable", "body_too_large"] as const;
 export type UpstreamReason = typeof UPSTREAM_REASONS[number];
 export class GitHubAppError extends Error {
@@ -135,7 +135,10 @@ export class GitHubAppClient {
     let upstreamStatus: number | undefined;
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const response = await fetch(url, { ...init, redirect: "error", signal: controller.signal });
+      let request: Request;
+      try { request = new Request(url, { ...init, redirect: "manual", signal: controller.signal }); }
+      catch { throw new GitHubAppError("unavailable", "request_init"); }
+      const response = await fetch(request);
       upstreamStatus = response.status;
       if (!response.ok) {
         void response.body?.cancel();

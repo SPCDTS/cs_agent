@@ -18,4 +18,4 @@ DO 内部完成分类后返回普通结构化结果，不依赖跨 RPC 保留自
 
 不延长 TTL、不放松授权、不自动重放 code。state 仍在远端请求前一次性消费；前端仍会清理已确认尝试的 sessionStorage。排障先保存首次失败的安全 error/requestId 并关联日志，不反复点击旧确认按钮。此改动仅提供诊断，不能据此声称已修复某次线上授权失败。
 
-上游请求失败另记固定白名单 `reason`：`network`、`timeout`、`http_error`、`empty_body`、`invalid_encoding`、`invalid_json`、`server_error`、`temporarily_unavailable`、`body_too_large`。收到响应头时记录数值 `upstreamStatus`（包括 200），没有响应则省略，绝不以对外 502 代替。非成功 HTTP 优先归为 `http_error`，不读取错误体；明确 OAuth server_error/temporarily_unavailable 只从成功 HTTP 的 JSON 提取。超时以本地十秒 AbortController 为准；网络错误可能包含被拒绝的重定向，不能仅凭该标签确定网络根因。新增字段只在服务端日志出现，不改变对外响应或 state 消费。
+上游请求失败另记固定白名单 `reason`：`request_init`、`network`、`timeout`、`http_error`、`empty_body`、`invalid_encoding`、`invalid_json`、`server_error`、`temporarily_unavailable`、`body_too_large`。收到响应头时记录数值 `upstreamStatus`（包括 200），没有响应则省略，绝不以对外 502 代替。非成功 HTTP 优先归为 `http_error`，不读取错误体；明确 OAuth server_error/temporarily_unavailable 只从成功 HTTP 的 JSON 提取。请求构造失败归为 `request_init`，此时尚未调用 fetch；超时以本地十秒 AbortController 为准。请求使用 Workers 支持的 `redirect: "manual"`，3xx 返回 `http_error`，不会跟随跳转；`network` 表示请求发送或响应体读取失败，不能仅凭该标签确定网络根因。新增字段只在服务端日志出现，不改变对外响应或 state 消费。

@@ -45,12 +45,12 @@ it("separates network rejection from timeout without trusting error names or mes
 });
 it.each([false,true])("reports deadline expiry (headers received: %s)", async received => {
   vi.useFakeTimers();
-  vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init: RequestInit) => {
+  vi.stubGlobal("fetch", vi.fn(async (request: Request) => {
     if (!received) return new Promise((_resolve, reject) => {
-      init.signal!.addEventListener("abort", () => reject(new Error(sensitive)));
+      request.signal.addEventListener("abort", () => reject(new Error(sensitive)));
     });
     return new Response(new ReadableStream({
-      start(controller) { init.signal!.addEventListener("abort", () => controller.error(new Error(sensitive))); },
+      start(controller) { request.signal.addEventListener("abort", () => controller.error(new Error(sensitive))); },
     }), {status:200});
   }));
   const pending = diagnose();
@@ -67,16 +67,15 @@ it("retains response status when a body stream fails", async () => {
   expect((await diagnose()).entry).toMatchObject({reason:"network", upstreamStatus:200});
 });
 it("keeps the form exchange contract, redirect policy and UTF-8 BOM JSON support", async () => {
-  const fetcher = vi.fn(async (_url: unknown, init: RequestInit) => {
-    expect(_url).toBe("https://github.com/login/oauth/access_token");
-    expect(init.method).toBe("POST");
-    expect(init.redirect).toBe("error");
-    expect(init.signal).toBeInstanceOf(AbortSignal);
-    const headers = new Headers(init.headers);
+  const fetcher = vi.fn(async (request: Request) => {
+    expect(request.url).toBe("https://github.com/login/oauth/access_token");
+    expect(request.method).toBe("POST");
+    expect(request.redirect).toBe("manual");
+    expect(request.signal).toBeInstanceOf(AbortSignal);
+    const headers = request.headers;
     expect(headers.get("accept")).toBe("application/json");
     expect(headers.get("content-type")).toBe("application/x-www-form-urlencoded");
-    expect(init.body).toBeInstanceOf(URLSearchParams);
-    expect(Object.fromEntries(init.body as URLSearchParams)).toEqual({
+    expect(Object.fromEntries(await request.formData())).toEqual({
       client_id:sensitive, client_secret:sensitive, code:sensitive, code_verifier:"v".repeat(43),
       redirect_uri:"https://test/admin/github/oauth/callback",
     });
@@ -96,4 +95,27 @@ it("rejects unallowlisted reason and nonnumeric upstream status even on a local 
   expect(JSON.stringify(log.mock.calls)).not.toContain(sensitive);
   expect(log.mock.calls[0]?.[0]).not.toHaveProperty("reason");
   for (const [entry] of log.mock.calls) expect(entry).not.toHaveProperty("upstreamStatus");
+});
+
+it("classifies request construction failure separately without exposing exception details", async () => {
+  const fetcher = vi.fn();
+  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("Request", class { constructor() { throw new TypeError(sensitive); } });
+  const {result, entry} = await diagnose();
+  expect(result).toMatchObject({ok:false, status:502, code:"github_app_unavailable"});
+  expect(entry).toMatchObject({stage:"token_exchange", reason:"request_init"});
+  expect(entry).not.toHaveProperty("upstreamStatus");
+  expect(fetcher).not.toHaveBeenCalled();
+});
+it.each([302, 307])("rejects HTTP %s redirects without making a second request", async status => {
+  const fetcher = vi.fn(async (request: Request) => {
+    expect(request).toBeInstanceOf(Request);
+    expect(request.redirect).toBe("manual");
+    return new Response(null, {status, headers:{location:"https://example.invalid/private"}});
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const {result, entry} = await diagnose();
+  expect(result).toMatchObject({ok:false, status:502});
+  expect(entry).toMatchObject({reason:"http_error", upstreamStatus:status});
+  expect(fetcher).toHaveBeenCalledTimes(1);
 });
