@@ -5,6 +5,7 @@ import { threadView, workspaceView } from "./read-views";
 import { ADMIN_PAGE_SIZE } from "./pagination";
 import { workspaceRoutes } from "./workspace-routes";
 import { createMcpAdminRoutes } from "./mcp-routes";
+import { DEVICE_ROUTES } from './devices-routes';
 import { MCP_SERVER_ROUTES } from "./mcp-servers-routes";
 import { accessRoutes } from "./access-routes";
 import { createMemoryAdminRoutes } from "./memory-routes";
@@ -166,6 +167,7 @@ const SECRET_NAMES = ["ADMIN_TOKEN", "NAPCAT_TOKEN", "QQ_OWNER", "QQ_ALLOW_USERS
 export const ADMIN_ROUTES: AdminRoute[] = [
   { method: "GET", path: "/admin/health", handle: async ({ env }) => json(await healthReport(env)) },
   ...MCP_SERVER_ROUTES,
+  ...DEVICE_ROUTES,
   ...accessRoutes(),
   ...workspaceRoutes({forThread:async(thread,ctx)=>{
     const stub=ctx.env.THREAD.getByName(thread), view=workspaceView(ctx.env,thread);
