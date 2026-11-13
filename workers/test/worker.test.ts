@@ -1,6 +1,6 @@
 import { adminHealth } from "./helpers";
 import { env, SELF, runInDurableObject, evictDurableObject, reset } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Type } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { normalizeMessage } from "../src/policy";
@@ -61,6 +61,7 @@ async function inboundStatus(id: string) {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   for (const socket of sockets.splice(0)) socket.close();
   await reset();
 });
@@ -178,10 +179,22 @@ describe("OneBot reverse WebSocket", () => {
   });
 
   it("times out an unanswered action after 15 seconds", async () => {
-    const { frames } = await connect();
-    const call = sendPrivate("timeout");
-    const rejected = expect(call).rejects.toThrow("onebot_timeout");
+    const { frames, socket } = await connect();
+    const sent = new Promise<void>(resolve => socket.addEventListener("message", () => resolve(), { once: true }));
+    await runInDurableObject(env.BRIDGE.getByName("napcat"), async instance => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        let settled = false;
+        const call = instance.sendPrivate("10000001", "timeout").finally(() => { settled = true; });
+        const rejected = expect(call).rejects.toThrow("onebot_timeout");
+        await sent;
+        await vi.advanceTimersByTimeAsync(14_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        await rejected;
+      } finally { vi.useRealTimers(); }
+    });
     await action(frames);
-    await rejected;
+    expect(frames).toHaveLength(1);
   });
 });

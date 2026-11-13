@@ -49,6 +49,15 @@ describe("GitHub authentication and normalization", () => {
     await expect(readWebhook(await request(JSON.stringify(payload({ repository: { id: 42, full_name: "../evil" } }))), secret)).rejects.toMatchObject({ status: 400 });
     await expect(readWebhook(await request(JSON.stringify(payload({ issue: { number: "1", title: "bad" } }))), secret)).rejects.toMatchObject({ status: 400 });
   });
+  it("push object ID 接受 SHA-1/SHA-256，拒绝错误长度、字符和类型", async () => {
+    const parse = async (after: unknown) => readWebhook(await request(JSON.stringify(payload({ action: undefined, ref: "refs/heads/main", after })), "push", "push"), secret);
+    for (const after of ["a".repeat(40), "B".repeat(64)]) {
+      expect((await parse(after)).normalized?.ref).toBe("https://github.com/SPCDTS/cs_agent/commit/" + after);
+    }
+    for (const after of ["a".repeat(39), "a".repeat(65), "g".repeat(40), "a".repeat(40) + "\n", null, ["a".repeat(40)]]) {
+      await expect(parse(after)).rejects.toMatchObject({ status: 400 });
+    }
+  });
   it("constructs GitHub-only links and strips external body/routing and control characters", async () => {
     const d = await delivery("safe", { issue: { number: 3, title: "a\u0000b", html_url: "https://evil.test", body: "secret-data" }, target: "group:123" });
     expect(d.normalized?.ref).toBe("https://github.com/SPCDTS/cs_agent/issues/3");
