@@ -71,15 +71,16 @@ describe("coding tools", () => {
     expect(exported).not.toHaveBeenCalled();
     expect(seen.outputs.join("\n")).toContain(group ? "permission_denied" : "invalid_request");
   });
-  it("offers sandbox instructions and only Code Mode in owner and group turns", async () => {
+  it("owner 与群成员获得 CodeMode、搜索、网页读取和生图，沙箱工具只经 CodeMode 暴露", async () => {
     const seen = scriptedModel([{ name: "", args: {} }, { name: "", args: {} }]);
     expect(await env.THREAD.getByName("owner").submit(input(1, "写个脚本", 10000001))).toEqual({ status: "done" });
     expect(seen.requests[0]!.tools).toContain("codemode");
     expect(Object.values(seen.requests[0]!.sections)).toContain(CLOUDFLARE_INSTRUCTIONS + CLOUDFLARE_RESOURCE_INSTRUCTIONS);
     for (const name of [...CODING_TOOLS, "skill_inspect", "skill_publish"]) expect(seen.requests[0]!.tools).not.toContain(name);
-    expect(await env.THREAD.getByName("group:200000001").submit(input(2, "跑个脚本", 10000003, 200000001, true))).toEqual({ status: "done" });
+    expect(await env.THREAD.getByName("group:200000001").submit(input(2, "跑个脚本", 10000004, 200000001, true))).toEqual({ status: "done" });
     expect(Object.values(seen.requests[1]!.sections)).toContain(CLOUDFLARE_INSTRUCTIONS);
     for (const name of CODING_TOOLS) expect(seen.requests[1]!.tools).not.toContain(name);
+    for (const request of seen.requests) expect(request.tools).toEqual(expect.arrayContaining(["codemode", "web_search", "web_page", "generate_image"]));
   });
 
   it("runs nested sandbox calls with MCP disabled and gives each call its own task ID", async () => {

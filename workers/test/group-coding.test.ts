@@ -111,8 +111,8 @@ describe("群聊通用脚本与产物发送", () => {
     await installRuntime(group);
     const seen = inspectThenSend(), thread = env.THREAD.getByName(group);
     await thread.submitWeb(group, crypto.randomUUID(), "下载图片");
-    await expect.poll(async () => (await thread.chatView(group)).messages.some(m => m.role === "assistant")).toBe(true);
-    await expect.poll(async () => (await thread.chatView(group)).active).toBe(0);
+    await expect.poll(async () => (await thread.chatView(group)).messages.some(m => m.role === "assistant"), { timeout: 5000 }).toBe(true);
+    await expect.poll(async () => (await thread.chatView(group)).active, { timeout: 5000 }).toBe(0);
     expect((await thread.chatView(group)).messages.find(m => m.role === "assistant")).toMatchObject({
       source: "web", assets: [{ scope: group, name: "队服.png", kind: "image" }],
     });

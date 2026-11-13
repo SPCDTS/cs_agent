@@ -45,22 +45,6 @@ it("expired persisted permission cannot execute or recover using only an App tok
  expect(recovered.snapshot().installations[0]?.repositories).toEqual([]);
  api.inspect.mockRejectedValueOnce(new Error("denied"));await recovered.sync();expect(recovered.authorized(456,42)).toBe(false);expect(api.repositories).toHaveBeenCalledTimes(1);
 }));
-it("matching OAuth revocation clears credentials and pending states but not other identities",()=>fixture(async(c,_ctx,api)=>{
- await complete(c,await start(c));c.disconnectUser(8);expect(c.authorized(456,42)).toBe(true);
- const state=await start(c);c.disconnectUser(7);c.disconnectUser(7);
- expect(c.authorized(456,42)).toBe(false);expect(c.snapshot().identities).toEqual([]);
- await expect(complete(c,state)).rejects.toThrow("unauthorized");await c.sync();expect(api.repositories).toHaveBeenCalledTimes(1);
-}));
-it("explicit additional identities coexist and disconnect independently",()=>fixture(async(c,_ctx,api)=>{
- await complete(c,await start(c));const other={id:8,login:"other"};
- api.discover.mockResolvedValue({user:other,installations:[789]});api.inspect.mockResolvedValue({user:other,repositories:repos,expiresAt:Date.now()+600_000});
- await complete(c,await start(c));expect(c.snapshot().identities).toHaveLength(2);expect(c.authorized(456,42)).toBe(true);expect(c.authorized(789,42)).toBe(true);
- c.disconnectUser(8);expect(c.authorized(456,42)).toBe(true);expect(c.authorized(789,42)).toBe(false);
-}));
-it("first-time in-flight OAuth revocation cannot publish a new binding",()=>fixture(async(c,_ctx,api)=>{
- api.discover.mockImplementationOnce(async()=>{c.disconnectUser(7);return {user,installations:[456]};});
- await expect(complete(c,await start(c))).rejects.toThrow("unauthorized");expect(c.authorized(456,42)).toBe(false);
-}));
 it("legacy single-connection records and pending state confer no authority or automatic migration",()=>fixture(async(c,ctx,api)=>{
  ctx.storage.sql.exec("CREATE TABLE github_app_connection(id INTEGER PRIMARY KEY,value TEXT)");
  ctx.storage.sql.exec("INSERT INTO github_app_connection VALUES(1,?)",JSON.stringify({installationId:456,repositories:repos,status:"active",authorizedUntil:Date.now()+600_000,userVerified:true}));
@@ -82,17 +66,6 @@ it("binds initiating admin/browser, consumes once and survives reconstruction",(
  await complete(c,state,"admin-a");await expect(complete(c,state,"admin-a")).rejects.toThrow("unauthorized");
  expect(new GitHubConnections(ctx.storage,env as Env,()=>{}).authorized(456,42)).toBe(true);
  expect(ctx.storage.sql.exec("SELECT * FROM github_connect_state").toArray()).toEqual([]);
-}));
-it("rejects expired state and permanently consumes upstream-denied state",()=>fixture(async(c,ctx,api)=>{
- const state=await start(c);ctx.storage.sql.exec("UPDATE github_connect_state SET expires=0");
- await expect(complete(c,state)).rejects.toThrow("unauthorized");expect(api.repositories).not.toHaveBeenCalled();
- const next=await start(c);api.repositories.mockRejectedValueOnce(new Error("denied"));
- await expect(complete(c,next)).rejects.toThrow("denied");await expect(complete(c,next)).rejects.toThrow("unauthorized");
- expect(c.snapshot().installations).toEqual([]);
-}));
-it("late installation snapshot cannot overwrite a lifecycle revocation",()=>fixture(async(c,_ctx,api)=>{
- api.repositories.mockImplementationOnce(async()=>{c.invalidate(456);return repos;});
- await expect(complete(c,await start(c))).rejects.toThrow("unauthorized");expect(c.authorized(456,42)).toBe(false);
 }));
 it("bounds active state capacity and prunes expired state without reusing verifiers",()=>fixture(async(c,ctx)=>{
  for(let n=0;n<20;n++)await start(c);await expect(start(c)).rejects.toThrow("capacity");

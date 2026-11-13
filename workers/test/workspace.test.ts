@@ -33,8 +33,10 @@ describe("持久工作区", () => {
       const file = { path: "keep.txt", sha256: hash, bytes: bytes.length, mime: "text/plain", mode: 420 };
       const lateBytes = new TextEncoder().encode("late-lease"), lateHash = await sha256(lateBytes);
       const lateFile = { ...file, path: "late.txt", sha256: lateHash, bytes: lateBytes.length };
-      for (let start = 0; start < 1002; start += 50) await Promise.all(Array.from({ length: Math.min(50, 1002 - start) }, async (_, offset) => {
-        const index = start + offset, revision = index.toString(16).padStart(4, "0");
+      // 用小批次跨过真实 R2 游标边界，避免为分页行为创建数千个对象。
+      const versions = 8, batchSize = 3;
+      await Promise.all(Array.from({ length: versions }, async (_, index) => {
+        const revision = index.toString(16).padStart(4, "0");
         await env.ASSETS.put(`${prefix}/manifests/${revision}`, JSON.stringify({ schemaVersion: 1, workspace, revision, parentRevision: null,
           files: index < 2 ? [file] : index === 2 ? [lateFile] : [], directories: [], totalBytes: index < 2 ? bytes.length : index === 2 ? lateBytes.length : 0 }));
         await env.ASSETS.put(`${prefix}/blobs/${index.toString(16).padStart(64, "0")}`, "obsolete");
@@ -50,7 +52,7 @@ describe("持久工作区", () => {
         const calls = list.mock.calls.length;
         const report = await manager.gc(options);
         expect(list.mock.calls.length - calls).toBeLessThanOrEqual(1);
-        expect(report.stepScanned).toBeLessThanOrEqual(500);
+        expect(report.stepScanned).toBeLessThanOrEqual(batchSize);
         manager = new WorkspaceManager(deps);
         return report;
       };
@@ -61,10 +63,11 @@ describe("持久工作区", () => {
         }
         throw new Error("GC did not finish");
       };
-      const dry = await finish({ keepManifests: 1, batchSize: 500 });
+      const dry = await finish({ keepManifests: 1, batchSize });
       expect(dry.deleted).toBe(0);
-      expect(dry.candidates).toBeGreaterThan(3000);
-      const options = { dryRun: false, keepManifests: 1, batchSize: 500 };
+      expect(list.mock.calls.some(([options]) => options?.cursor)).toBe(true);
+      expect(dry.candidates).toBeGreaterThan(versions * 2);
+      const options = { dryRun: false, keepManifests: 1, batchSize };
       for (let turn = 0; turn < 20; turn++) {
         if ((await step(options)).phase === "manifests") break;
         if (turn === 19) throw new Error("inventory did not finish");
@@ -76,19 +79,19 @@ describe("持久工作区", () => {
       expect((await writing).status).toBe("committed");
       manager = new WorkspaceManager(deps);
       const complete = await finish(options);
-      expect(complete.deleted).toBeGreaterThan(3000);
+      expect(complete.deleted).toBeGreaterThan(versions * 2);
       expect(state.storage.sql.exec("SELECT * FROM workspace_gc_refs").toArray()).toEqual([]);
       expect(state.storage.sql.exec("SELECT * FROM workspace_gc_manifests").toArray()).toEqual([]);
       expect(await manager.resumeGc()).toBeUndefined();
       expect(new TextDecoder().decode((await manager.readBlob("late.txt", "0002")).bytes)).toBe("late-lease");
       expect(await env.ASSETS.get(`${prefix}/manifests/0001`)).not.toBeNull();
       expect(await env.ASSETS.get(`${prefix}/blobs/${hash}`)).not.toBeNull();
-      expect(await env.ASSETS.get(`${prefix}/blobs/${(1001).toString(16).padStart(64, "0")}`)).toBeNull();
-      expect(await env.ASSETS.get(`${prefix}/results/03e9`)).toBeNull();
+      expect(await env.ASSETS.get(`${prefix}/blobs/${(versions - 1).toString(16).padStart(64, "0")}`)).toBeNull();
+      expect(await env.ASSETS.get(`${prefix}/results/${(versions - 1).toString(16).padStart(4, "0")}`)).toBeNull();
       expect(new TextDecoder().decode((await manager.readBlob("new.txt")).bytes)).toBe("new");
       expect(new TextDecoder().decode((await manager.readBlob("keep.txt", "0001")).bytes)).toBe("retained");
     });
-  }, 60_000);
+  });
   it("原SandboxDO的alarm在重建后继续GC，完成后停止唤醒", async () => {
     const stub = env.SANDBOX.getByName("gc-alarm");
     expect((await stub.gc({ dryRun: false })).phase).not.toBe("done");
