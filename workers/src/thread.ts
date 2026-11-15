@@ -29,6 +29,7 @@ import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { modelChange, openModels, sameSelection } from "./models";
 import { captureModels } from "./requests/capture";
 import { remoteCredentials } from "./model-credentials";
+import { MEMORY_SUPPORT_SCHEMA, MEMORY_LIFECYCLE_TRIGGERS } from "./memory/lifecycle";
 import { MEMORY_SCHEMA } from "./memory/schema";
 import { MemoryStore } from "./memory/store";
 import type { MemoryInput } from "./memory/types";
@@ -102,6 +103,8 @@ export class ThreadDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY, message_id TEXT NOT NULL, text TEXT NOT NULL, sent_at INTEGER NOT NULL);
         ${MESSAGE_SCHEMA}
         ${MEMORY_SCHEMA}
+        ${MEMORY_SUPPORT_SCHEMA}
+        ${MEMORY_LIFECYCLE_TRIGGERS}
         ${MCP_CATALOG_SCHEMA}
         ${MCP_POLICY_SCHEMA}
         ${SUBAGENT_SCHEMA}
@@ -692,9 +695,10 @@ export class ThreadDO extends DurableObject<Env> {
   private rearmAlarm(): Promise<void> {
     return this.database.transaction(async tx => {
       const deadline = await this.subagents.nextDeadline(tx), now = Date.now();
+      const extraction = await tx.get<{at:number|null}>(`SELECT MIN(MAX(COALESCE(a.available_at,0),?)) AS at FROM extract_queue q LEFT JOIN extract_attempts a ON a.turn_id=q.turn_id`,now+EXTRACT_ALARM_DELAY_MS);
       const due = [await this.ctx.storage.get(AGENT_WAKE) !== undefined ? now : undefined,
         await this.ctx.storage.get<number>(RUNTIME_WAKE),
-        await tx.get("SELECT 1 FROM extract_queue LIMIT 1") ? now + (this.extracting ? RECOVERY_MS : EXTRACT_ALARM_DELAY_MS) : undefined,
+        extraction?.at ?? undefined,
         deadline === undefined ? undefined : deadline <= now ? now + 30_000 : deadline].filter(at => at !== undefined);
       if (this.modelAlarm.pending) due.push(Date.now());
       if (this.projection.retryAt !== undefined) due.push(this.projection.retryAt);
@@ -1127,6 +1131,9 @@ export class ThreadDO extends DurableObject<Env> {
   recordMcpChange(...args: Parameters<McpAdmin['recordMcpChange']>): ReturnType<McpAdmin['recordMcpChange']> { return this.mcpAdmin.recordMcpChange(...args); }
   mcpToolCounts(...args: Parameters<McpAdmin['mcpToolCounts']>): ReturnType<McpAdmin['mcpToolCounts']> { return this.mcpAdmin.mcpToolCounts(...args); }
 
+  saveMemory(...args: Parameters<MemoryAdmin['saveMemory']>) { return this.memoryAdmin.saveMemory(...args); }
+  memoryCandidates(...args: Parameters<MemoryAdmin['memoryCandidates']>) { return this.memoryAdmin.memoryCandidates(...args); }
+  decideMemoryCandidate(...args: Parameters<MemoryAdmin['decideMemoryCandidate']>) { return this.memoryAdmin.decideMemoryCandidate(...args); }
   memoryList(...args: Parameters<MemoryAdmin['memoryList']>): ReturnType<MemoryAdmin['memoryList']> { return this.memoryAdmin.memoryList(...args); }
   memoryDetail(...args: Parameters<MemoryAdmin['memoryDetail']>): ReturnType<MemoryAdmin['memoryDetail']> { return this.memoryAdmin.memoryDetail(...args); }
   restoreMemory(...args: Parameters<MemoryAdmin['restoreMemory']>): ReturnType<MemoryAdmin['restoreMemory']> { return this.memoryAdmin.restoreMemory(...args); }

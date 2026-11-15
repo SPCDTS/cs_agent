@@ -83,6 +83,7 @@ export class AgentReadView {
     return rows.length > limit ? { events, next: events[events.length - 1].id } : { events };
   }
 
+  async memoryCandidates(ns: string) { return new MemoryManager(await this.adminStore(ns)).candidates(); }
   async memoryList(ns: string, query: MemoryListQuery): ReturnType<MemoryManager["list"]> {
     return new MemoryManager(await this.adminStore(ns)).list(query);
   }

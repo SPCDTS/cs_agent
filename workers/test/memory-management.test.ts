@@ -85,7 +85,7 @@ describe("namespace memory administration", () => {
       await expect(manager.decideProposal(proposal.id, "accepted", "none")).rejects.toMatchObject({ code: "conflict" });
       await expect(manager.decideProposal(proposal.id, "accepted", changed.revision)).rejects.toMatchObject({ code: "conflict" });
       expect(await manager.decideProposal(proposal.id, "rejected", changed.revision)).toMatchObject({ status: "rejected" });
-      const replacement = await manager.putProposal({ text: "新画像", based_on_revision: changed.revision, batch_id: "next", entries_hash: "new" });
+      const replacement = await manager.putProposal({ text: "新画像", based_on_revision: changed.revision, batch_id: "next", entries_hash: await store.profileFingerprint() });
       expect(await manager.decideProposal(replacement.id, "accepted", changed.revision)).toMatchObject({ status: "accepted" });
       expect((await store.profile()).text).toBe("新画像");
       expect(await manager.proposals()).toEqual([]);

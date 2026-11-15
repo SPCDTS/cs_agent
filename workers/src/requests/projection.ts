@@ -1,9 +1,10 @@
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
+import { MEMORY_SUPPORT_SCHEMA } from "../memory/lifecycle";
 import type { Env } from "../env";
 
 // 只投影管理展示需要的表；不复制凭据、运行任务、工具恢复状态和完整请求快照。
 export const VIEW_TABLES = ["messages", "inbound", "outbox", "web_outputs", "session_state", "session_resets", "events", "subagents",
-  "memories", "memory_versions", "memory_links", "memory_imported_versions", "memory_jobs", "memory_proposals", "profile", "extract_queue", "summaries",
+  "memories", "memory_versions", "memory_links", "memory_imported_versions", "memory_jobs", "memory_proposals", "profile", "profile_sources", "profile_review", "memory_evidence", "memory_candidates", "extract_attempts", "extract_queue", "summaries",
   "mcp_access", "mcp_approvals", "mcp_catalog", "pi_entries", "pi_conversations", "meta"] as const;
 export type ViewTable = typeof VIEW_TABLES[number];
 export type ViewInfo = { agingLastRun: number | null; consolidateLastRun: number | null; compacting: boolean };
@@ -124,6 +125,7 @@ export class ProjectionStore {
   readonly db: DurableObjectSqliteDatabase;
   constructor(private readonly ctx: DurableObjectState, private readonly env: Env) {
     this.db = new DurableObjectSqliteDatabase(ctx.storage);
+    ctx.storage.sql.exec(MEMORY_SUPPORT_SCHEMA);
   }
   status() {
     const exists = this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE name='admin_projection_state'").toArray().length;

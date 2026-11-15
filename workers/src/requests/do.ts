@@ -64,6 +64,7 @@ export class RequestsDO extends DurableObject<Env> {
   }
   sessionHistory(...args: Parameters<AgentReadView["sessionHistory"]>) { return this.readView().sessionHistory(...args); }
   events(...args: Parameters<AgentReadView["events"]>) { return this.readView().events(...args); }
+  memoryCandidates(...args: Parameters<AgentReadView["memoryCandidates"]>) { return this.readView().memoryCandidates(...args); }
   memoryList(...args: Parameters<AgentReadView["memoryList"]>) { return this.readView().memoryList(...args); }
   memoryDetail(...args: Parameters<AgentReadView["memoryDetail"]>) { return this.readView().memoryDetail(...args); }
   memoryJobs(...args: Parameters<AgentReadView["memoryJobs"]>) { return this.readView().memoryJobs(...args); }

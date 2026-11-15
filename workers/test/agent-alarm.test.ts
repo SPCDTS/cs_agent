@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { MODEL_PROVIDERS } from "../src/models";
 import { ThreadDO } from "../src/thread";
-import { MemoryExtractor } from "../src/memory/extractor";
+import { MemoryExtractor, MEMORY_EXTRACT_PROMPT } from "../src/memory/extractor";
 import { input } from "./helpers";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
@@ -13,8 +13,9 @@ it("persists input before execution, keeps history passive, and runs tool contin
   const origin = new AsyncLocalStorage<string>();
   const starts: (string | undefined)[] = [];
   const provider = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
-  const respond: FauxResponseFactory = () => {
+  const respond: FauxResponseFactory = transcript => {
     provider.setResponses([respond]);
+    if (transcript.messages.some(message => message.role === "user" && typeof message.content === "string" && message.content.startsWith(MEMORY_EXTRACT_PROMPT))) return fauxAssistantMessage("[]");
     starts.push(origin.getStore());
     return starts.length === 1
       ? fauxAssistantMessage(fauxToolCall("qq_context", {}), { stopReason: "toolUse" })
@@ -39,7 +40,7 @@ it("persists input before execution, keeps history passive, and runs tool contin
   expect(await thread.submit(input(601, "重复投递", 10000001))).toEqual({ deduped: true });
   await runDurableObjectAlarm(thread);
   expect(starts).toHaveLength(2);
-  expect(await runInDurableObject(thread, (_instance, state) => state.storage.getAlarm())).toBeNull();
+  await expect.poll(() => runInDurableObject(thread, (_instance, state) => state.storage.getAlarm())).toBeNull();
 });
 
 it("accepts another message while background memory extraction is waiting", async () => {

@@ -4,7 +4,7 @@ import { MCP_ADMIN_HTML } from "./mcp-ui";
 import { MCP_SERVERS_HTML } from "./mcp-servers-ui";
 import { WORKSPACE_CSS, WORKSPACE_HTML } from "./workspace-ui";
 import { ACCESS_HTML } from "./access-ui";
-import { MEMORY_MANAGER_HTML } from "./memory-ui";
+import { MEMORY_MANAGER_HTML, MEMORY_FILTER_HTML } from "./memory-ui";
 import { SESSION_HTML } from "./sessions";
 import { CONSOLE_CSS, CONSOLE_NAV, CONSOLE_HTML } from "./console";
 // 页面与脚本分开发送：脚本走 script-src 'self'，CSP 不必放开内联脚本。两者都不含数据，数据只经带 Bearer 的接口取得。
@@ -74,6 +74,12 @@ main{max-width:1200px;margin:0 auto;padding:24px;display:flex;flex-direction:col
 .memory-body{display:flex;flex-wrap:wrap}
 .memory-profile{flex:2 1 280px;min-width:0;padding:16px 20px;border-right:1px solid #E3E6EB;display:flex;flex-direction:column;gap:10px}
 .memory-entries{flex:3 1 380px;min-width:0;overflow-x:auto}
+.memory-toolbar{display:flex;flex-wrap:wrap;align-items:end;gap:12px;padding:12px 20px;border-bottom:1px solid #E3E6EB}
+.memory-toolbar label{display:flex;flex-direction:column;gap:4px}.memory-pagination{display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-left:auto}
+#memory-detail{width:min(840px,100%);max-width:100%}.memory-facts{display:grid;grid-template-columns:110px 1fr;gap:8px 16px}.memory-facts dt{color:#5B6472}.memory-facts dd{margin:0;overflow-wrap:anywhere}
+.memory-diff{display:grid;grid-template-columns:1fr 1fr;gap:12px}.memory-diff pre,.memory-evidence{white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:#F4F5F7;border-radius:6px;margin:0}.memory-edit-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.memory-edit-grid .full{grid-column:1/-1}
+.memory-review{padding:10px;border-left:3px solid #B77916;background:#FFF7E8}.memory-profile .row{align-items:flex-start}
+@media(max-width:640px){.memory-diff,.memory-edit-grid{grid-template-columns:1fr}.memory-pagination{margin-left:0;width:100%}.memory-facts{grid-template-columns:85px 1fr}}
 .profile-text{font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
 .cell-text{overflow-wrap:anywhere;min-width:220px}
 .cell-rule{overflow-wrap:anywhere;min-width:160px;max-width:280px}
@@ -266,24 +272,27 @@ ${CONSOLE_HTML}
       <h2 id="mem-title" class="h2">记忆</h2>
       <span id="mem-meta" class="muted"></span>
       <div class="grow"></div>
-      <label for="mem-ns">命名空间</label>
+      <label for="mem-ns">会话范围</label>
       <select id="mem-ns"></select>
       <label for="mem-q">搜索</label>
       <input id="mem-q" type="search" placeholder="关键词或 #id" style="width:220px">
     </div>
+    ${MEMORY_FILTER_HTML}
     <div class="memory-body">
       <div class="memory-profile">
         <div class="row"><strong>画像</strong><span id="profile-meta" class="muted small"></span></div>
+        <p id="profile-review" class="memory-review" hidden></p>
         <div id="profile-text" class="profile-text muted"></div>
+        <div id="profile-sources" class="row small"></div>
         <textarea id="profile-edit" hidden aria-label="编辑画像"></textarea>
         <div class="row">
           <button id="profile-toggle" class="btn" type="button">编辑画像</button>
           <button id="profile-save" class="btn primary" type="button" hidden>保存画像</button>
         </div>
       </div>
-      <div class="memory-entries">
+      <div class="memory-entries" aria-live="polite">
         <table>
-          <thead><tr><th>#</th><th>类型</th><th>内容</th><th>来源</th><th></th></tr></thead>
+          <thead><tr><th>#</th><th>类型</th><th>内容</th><th>来源 / 状态</th><th></th></tr></thead>
           <tbody id="memories"></tbody>
         </table>
       </div>

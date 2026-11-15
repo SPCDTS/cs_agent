@@ -20,9 +20,12 @@ export const SubagentConversationSchema = Type.Object({
   summary: Type.String(), syncedAt: Type.Number(),
 });
 export type SubagentConversation = Static<typeof SubagentConversationSchema>;
-export const MemoryDetailSchema = Type.Object({ row: MemoryRow, revision: Type.Number(),
-  versions: Type.Array(Type.Object({ id: Type.Number(), at: Type.Number(), reason: Type.Union([Type.String(), Type.Null()]), after_json: Type.String() })),
+export const MemoryDetailSchema = Type.Object({ row: MemoryRow, revision: Type.Number(), inProfile:Type.Optional(Type.Boolean()),
+  evidence:Type.Optional(Type.Array(Type.Object({scope:Type.String(),message_id:Type.String(),speaker:Type.String(),quote:Type.String()}))),
+  versions: Type.Array(Type.Object({ id: Type.Number(), at: Type.Number(), reason: Type.Union([Type.String(), Type.Null()]), before_json: Type.Union([Type.String(),Type.Null()]), by: Type.String(), after_json: Type.String() })),
   links: Type.Array(Type.Object({ from_id: Type.Number(), to_id: Type.Number(), rel: Type.String(), created_at: Type.Number() })),
 });
 export const MemoryJobsSchema = Type.Object({ jobs: Type.Array(Type.Object({ id: Type.String(), status: Type.String(), started_at: Type.Number(), report_json: Type.Union([Type.String(), Type.Null()]) })) });
 export const MemoryProposalsSchema = Type.Object({ proposals: Type.Array(Type.Object({ id: Type.Number(), text: Type.String(), based_on_revision: Type.String() })) });
+
+export const MemoryCandidatesSchema=Type.Object({candidates:Type.Array(Type.Object({id:Type.Number(),input_json:Type.String(),target_id:Type.Number(),target_version:Type.Number(),created_at:Type.Number()}))});

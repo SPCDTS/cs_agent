@@ -1,3 +1,4 @@
+import { memoryIdentity } from "../memory/lifecycle";
 import { Type } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { ExtractTimeout, completeWithin, type ExtractComplete } from "../memory/extractor";
@@ -151,8 +152,8 @@ async function consolidate({ store, kv, complete, config, now }: MaintenanceCont
       GROUP BY hash HAVING COUNT(*) > 1) d ON d.hash = m.hash WHERE m.ns = ? AND m.status = 'active' ORDER BY m.hash, m.created_at, m.id`, store.ns, store.ns);
     const keep = new Map<string, MemoryRow>();
     for (const row of rows) {
-      const first = keep.get(row.hash);
-      if (!first) { keep.set(row.hash, row); continue; }
+      const first = keep.get(memoryIdentity(row));
+      if (!first) { keep.set(memoryIdentity(row), row); continue; }
       try { await store.supersede(first.id, row.id, by, "consolidate_duplicate"); report.dedup++; }
       catch (error) { if (!(error instanceof MemoryStoreError)) throw error; }
     }

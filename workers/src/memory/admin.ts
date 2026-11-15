@@ -3,6 +3,7 @@ import type { Env } from '../env';
 import { threadOpsSettings } from '../settings';
 import { MemoryManager, type MemoryListQuery, type ProfileProposal } from './management';
 import { MemoryStore, MemoryStoreError, type Profile } from './store';
+import type { MemoryEditor } from './editor';
 import type { MemoryRow } from './types';
 import type { ExtractComplete } from './extractor';
 import { parseImport } from './import';
@@ -35,6 +36,13 @@ export class MemoryAdmin {
     const data = parseImport(value);
     return this.publish((await this.store(data.ns)).import(data));
   }
+  async saveMemory(ns: string, id: number | null, input: MemoryEditor, expectedVersion?: number) {
+    return this.publish(new MemoryManager(await this.store(ns)).save(id,input,expectedVersion));
+  }
+  async memoryCandidates(ns: string) { return new MemoryManager(await this.store(ns)).candidates(); }
+  async decideMemoryCandidate(ns: string,id: number,accept: boolean) {
+    return this.publish(new MemoryManager(await this.store(ns)).decideCandidate(id,accept));
+  }
   async memoryList(ns: string, query: MemoryListQuery): ReturnType<MemoryManager["list"]> {
     return new MemoryManager(await this.store(ns)).list(query);
   }
@@ -60,7 +68,7 @@ export class MemoryAdmin {
     return new MemoryManager(await this.store(ns)).proposals(status);
   }
   async generateMemoryProposal(ns: string): ReturnType<typeof generateProfileProposal> {
-    return this.publish(generateProfileProposal(await this.store(ns), this.host.complete));
+    return this.publish(generateProfileProposal(await this.store(ns), this.host.complete, crypto.randomUUID(), true));
   }
   async decideMemoryProposal(ns: string, id: number, decision: "accepted" | "rejected", expectedRevision: string): ReturnType<MemoryManager["decideProposal"]> {
     return this.publish(new MemoryManager(await this.store(ns)).decideProposal(id, decision, expectedRevision));
@@ -76,10 +84,10 @@ export class MemoryAdmin {
     return { profile: await store.profile(), memories };
   }
 
-  async forgetMemory(ns: string, id: number): Promise<{ status: "forgotten" | "not_found" }> {
+  async forgetMemory(ns: string, id: number, expectedVersion?: number): Promise<{ status: "forgotten" | "not_found" }> {
     const store = await this.store(ns);
     if (!await store.get(id)) return { status: "not_found" };
-    await store.forget(id, "admin", "面板删除");
+    await store.forget(id, "admin", "面板遗忘", expectedVersion);
     await this.host.publish();
     return { status: "forgotten" };
   }

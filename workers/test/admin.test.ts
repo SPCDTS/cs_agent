@@ -231,7 +231,8 @@ describe("admin data views", () => {
     await env.THREAD.getByName("private:10000003").syncAdminView("private:10000003");
     expect((await adminJson<View>("GET", "/admin/memory?ns=private:10000003")).memories).toEqual([]);
 
-    const saved = await adminJson<{ profile: { text: string; revision: string } }>("PUT", "/admin/memory/profile", { ns: "owner", text: "新画像", expected: view.profile.revision });
+    const reviewed = await adminJson<View>("GET", "/admin/memory?ns=owner");
+    const saved = await adminJson<{ profile: { text: string; revision: string } }>("PUT", "/admin/memory/profile", { ns: "owner", text: "新画像", expected: reviewed.profile.revision });
     expect(saved.profile.text).toBe("新画像");
     const conflict = await admin("PUT", "/admin/memory/profile", { ns: "owner", text: "旧页面的画像", expected: view.profile.revision });
     expect(conflict.status).toBe(409);

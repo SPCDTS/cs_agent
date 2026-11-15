@@ -10,7 +10,7 @@ export { api, ApiError, readToken, writeToken } from "./api";
 import { chooseSubagent, consoleView, cs, renderConsoleThreads, resetConsole, startConsole } from "./console";
 import { loadManagement } from "./management";
 import { paginateChildren } from "./pagination";
-import { memoryDetail, mm } from "./memory";
+export { loadMemory } from "./memory";
 import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
 
 export const EVENT_KINDS = ["", "mcp_call", "mcp_catalog", "mcp_management", "memory_extract", "memory_write"];
@@ -158,7 +158,7 @@ export function renderOverview(o: C.Overview) {
   renderMcp(o.mcp);
   renderSecrets(o.configured);
   fillSelect($("ev-thread"), o.threads.map(t => t.key), state.eventThread);
-  fillSelect($("mem-ns"), o.threads.filter(t => t.kind !== "private").map(t => t.key), state.memoryNs);
+  fillSelect($("mem-ns"), o.threads.map(t => t.key), state.memoryNs);
 }
 export function fillSelect(select: HTMLSelectElement, keys: string[], current: string) {
   const options = Array.from(new Set(["owner", current].concat(keys)));
@@ -596,73 +596,6 @@ export async function codexLogout() {
   loadModel().catch(fail);
   refresh();
 }
-export async function loadMemory() {
-  if(mm.ns!==state.memoryNs||mm.query!==state.memoryQuery){mm.page=1;mm.ns=state.memoryNs;mm.query=state.memoryQuery;}
-  const query="?ns="+encodeURIComponent(state.memoryNs), page=mm.page;
-  const [base,list]=await Promise.all([readApi(C.MemoryView, "GET","/admin/memory"+query),readApi(C.MemoryList, "GET","/admin/memory/list"+query+"&q="+encodeURIComponent(state.memoryQuery)+"&status="+$("mem-status").value+"&page="+page+"&limit="+ADMIN_PAGE_SIZE)]);
-  renderMemory({...base,memories:list.items});
-  mm.total=list.total;$("mem-page").textContent="第 "+page+" 页 · 每页 "+ADMIN_PAGE_SIZE+" 条 · 共 "+list.total+" 条";
-  $("mem-prev").disabled=page<=1;$("mem-next").disabled=page*ADMIN_PAGE_SIZE>=list.total;
-}
-export function renderMemory(view: C.MemoryView | null) {
-  if (!view) return;
-  state.memoryView = view;
-  state.profile = view.profile;
-  $("mem-title").textContent = "记忆 · " + state.memoryNs;
-  $("mem-meta").textContent = (state.memoryQuery ? "匹配 " : "最近活跃 ") + view.memories.length + " 条";
-  const profileBytes = new TextEncoder().encode(view.profile.text).byteLength;
-  $("profile-meta").textContent = view.profile.revision === "none" ? "未创建" : bytes(profileBytes) + " · " + view.profile.revision;
-  $("profile-text").textContent = view.profile.text || "（空）";
-  const body = $("memories");
-  clear(body);
-  if (!view.memories.length) { body.append(el("tr", {}, [el("td", { colspan: 5, className: "muted", text: "没有记忆" })])); return; }
-  for (const row of view.memories) {
-    const armed = state.armedDelete === row.id;
-    const extra = [row.subject ? "主题 " + row.subject : null, row.due_at ? "到期 " + time(row.due_at * 1000) : null, row.status !== "active" ? "状态 " + row.status : null].filter(Boolean);
-    body.append(el("tr", {}, [
-      el("td", { className: "mono", text: row.id }),
-      el("td", {}, [pill(row.kind, "neutral")]),
-      el("td", { className: "cell-text" }, [el("div", { text: row.text }), extra.length ? el("div", { className: "muted small", text: extra.join(" · ") }) : null]),
-      el("td", { className: "mono muted", text: row.author + " · " + time(row.updated_at * 1000) }),
-      el("td", {}, [el("button",{className:"btn compact",type:"button",text:"详情",onclick:()=>memoryDetail(row.id)}), row.status === "active" ? el("button", { className: "btn compact danger", type: "button", text: armed ? "确认删除" : "删除",
-        onclick: () => armed ? forget(row.id) : arm(row.id) }) : null]),
-    ]));
-  }
-}
-export function arm(id: number) {
-  state.armedDelete = id;
-  renderMemory(state.memoryView);
-  setTimeout(() => { if (state.armedDelete === id) { state.armedDelete = null; renderMemory(state.memoryView); } }, 5000);
-}
-export async function forget(id: number) {
-  state.armedDelete = null;
-  try {
-    await api("DELETE", "/admin/memory/" + id + "?ns=" + encodeURIComponent(state.memoryNs));
-    notice("已删除记忆 #" + id);
-  } catch (error) { fail(error); }
-  loadMemory().catch(fail);
-  refresh();
-}
-export function toggleProfile(editing: boolean) {
-  $("profile-edit").hidden = !editing;
-  $("profile-text").hidden = editing;
-  $("profile-save").hidden = !editing;
-  $("profile-toggle").textContent = editing ? "取消" : "编辑画像";
-  if (editing) $("profile-edit").value = state.profile ? state.profile.text : "";
-}
-export async function saveProfile() {
-  if (!state.profile) return;
-  try {
-    await api("PUT", "/admin/memory/profile", { ns: state.memoryNs, text: $("profile-edit").value, expected: state.profile.revision });
-    toggleProfile(false);
-    notice("画像已保存");
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 409) { toggleProfile(false); show("画像已被别处修改，已载入最新内容，请重新编辑", "error"); }
-    else fail(error);
-  }
-  loadMemory().catch(fail);
-  refresh();
-}
 export async function loadSkills() {
   renderSkills((await readApi(C.Skills, "GET", "/admin/skills")).skills);
 }
@@ -795,11 +728,6 @@ export function initApp() {
   $("codex-catalog").addEventListener("click", codexCatalog);
   $("codex-logout").addEventListener("click", codexLogout);
   $("codex-copy").addEventListener("click", () => { navigator.clipboard.writeText($("codex-ticket").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
-  $("mem-ns").addEventListener("change", () => { state.memoryNs = $("mem-ns").value; toggleProfile(false); loadMemory().catch(fail); });
-  $("mem-q").addEventListener("keydown", event => { if (event.key === "Enter") { state.memoryQuery = $("mem-q").value.trim(); loadMemory().catch(fail); } });
-  $("mem-q").addEventListener("search", event => { state.memoryQuery = $("mem-q").value.trim(); loadMemory().catch(fail); });
-  $("profile-toggle").addEventListener("click", () => toggleProfile(Boolean($("profile-edit").hidden)));
-  $("profile-save").addEventListener("click", saveProfile);
   $("skill-save").addEventListener("click", saveSkill);
   $("skill-new").addEventListener("click", () => { $("skill-md").value = ""; $("skill-meta").textContent = ""; });
   $("mcp-link-copy").addEventListener("click", () => { navigator.clipboard.writeText($("mcp-link-url").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
