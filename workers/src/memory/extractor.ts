@@ -163,7 +163,7 @@ export async function applyExtraction(store: MemoryStore, turnId: string, items:
     if(item.supersedes && !snapshot) {drop("unknown_target");continue;}
     const target=snapshot?await store.get(snapshot.id):undefined;
     if(snapshot && (!target||target.status!=="active"||await store.revision(snapshot.id)!==snapshot.version)) {drop("changed_target");continue;}
-    if(target && target.author!=="extractor") {
+    if(target && (target.author!=="extractor" || await store.db.get("SELECT 1 FROM memory_rule_bindings WHERE ns=? AND memory_id=? AND state='enabled'",store.ns,target.id))) {
       const quote=item.quote??source.text.slice(0,500);
       const candidate={...input,...(!containsSecret(quote)?{evidence:{speaker:source.user_id,quote}}:{})};
       await store.db.run(`INSERT OR IGNORE INTO memory_candidates(ns,input_json,target_id,target_version,created_at) VALUES (?,?,?,?,?)`,store.ns,JSON.stringify(candidate),target.id,snapshot!.version,Math.floor(Date.now()/1000));

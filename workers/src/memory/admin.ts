@@ -4,6 +4,8 @@ import { threadOpsSettings } from '../settings';
 import { MemoryManager, type MemoryListQuery, type ProfileProposal } from './management';
 import { MemoryStore, MemoryStoreError, type Profile } from './store';
 import type { MemoryEditor } from './editor';
+import { ownerIds } from '../policy';
+import { RuleService, RuleError, type RuleProposeInput, type RuleConfirmInput, type RuleRevokeInput } from './rules';
 import type { MemoryRow } from './types';
 import type { ExtractComplete } from './extractor';
 import { parseImport } from './import';
@@ -14,7 +16,7 @@ import { generateProfileProposal } from '../maintenance/profile-proposal';
 export interface MemoryAdminHost {
   database: DurableObjectSqliteDatabase;
   storage: DurableObjectStorage;
-  env: Pick<Env, 'REGISTRY'>;
+  env: Pick<Env, 'REGISTRY' | 'QQ_OWNER'>;
   complete: ExtractComplete;
   prepare(namespace: string): Promise<void>;
   publish(): Promise<void>;
@@ -32,6 +34,15 @@ export class MemoryAdmin {
     await this.host.publish();
     return result;
   }
+  private async rules(scope: string) {
+    if(!scope.startsWith("private:") || !ownerIds(this.host.env).includes(scope.slice(8)))throw new RuleError("scope");
+    return new RuleService(await this.store("owner"),scope);
+  }
+  async rulePropose(scope:string,input:RuleProposeInput) { return (await this.rules(scope)).propose(input); }
+  async ruleConfirm(scope:string,input:RuleConfirmInput) { return this.publish((await this.rules(scope)).confirm(input)); }
+  async ruleRevoke(scope:string,input:RuleRevokeInput) { return this.publish((await this.rules(scope)).revoke(input)); }
+  async ruleList(scope:string) { return (await this.rules(scope)).list(); }
+  async ruleReceipt(scope:string,id:string) { return (await this.rules(scope)).receipt(id); }
   async importMemory(value: unknown): Promise<{ inserted: number; skipped: number }> {
     const data = parseImport(value);
     return this.publish((await this.store(data.ns)).import(data));

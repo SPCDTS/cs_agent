@@ -16,6 +16,8 @@ import { MemoryStore } from '../memory/store';
 import { createMemoryTools, type MemoryBinding } from '../memory/tools';
 import { MEMORY_RULE } from '../memory/contracts';
 import { renderMemorySection } from '../memory/render';
+import { RuleService, renderRules } from '../memory/rules';
+import { ruleScopeForInput } from '../memory/rule-context';
 import { formatBeijingTime } from '../memory/time';
 import { installCodemode } from '../codemode';
 import { createMcpManagementExtension } from '../mcp/manage';
@@ -111,6 +113,11 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
         return input?.kind === "message" ? DELEGATION_RULE : undefined;
       }, { tag: false }),
       section("memory", () => renderMemorySection(memory), { tag: false }),
+      section("memory-rules", (api, callContext) => renderRules(async () => {
+        const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
+        const scope = ruleScopeForInput(memory.ns, input, ownerIds(host.env), await host.sessionGeneration());
+        return scope ? new RuleService(memory, scope).read() : undefined;
+      }, detail => console.log({event:"memory_rules_render", ...detail})), { tag:false }),
       section("turn-identity", async (api, callContext) => {
         const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
         if (input && isWeb(input)) return WEB_SEND_RULE + "\n当前会话：" + memory.ns + "；管理员权限只作用于本会话范围。";

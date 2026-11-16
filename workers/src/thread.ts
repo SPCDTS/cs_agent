@@ -31,6 +31,7 @@ import { captureModels } from "./requests/capture";
 import { remoteCredentials } from "./model-credentials";
 import { MEMORY_SUPPORT_SCHEMA, MEMORY_LIFECYCLE_TRIGGERS } from "./memory/lifecycle";
 import { MEMORY_SCHEMA } from "./memory/schema";
+import { MEMORY_RULE_SCHEMA } from "./memory/rule-schema";
 import { MemoryStore } from "./memory/store";
 import type { MemoryInput } from "./memory/types";
 import { searchMemory, type MemoryBinding } from "./memory/tools";
@@ -105,6 +106,7 @@ export class ThreadDO extends DurableObject<Env> {
         ${MEMORY_SCHEMA}
         ${MEMORY_SUPPORT_SCHEMA}
         ${MEMORY_LIFECYCLE_TRIGGERS}
+        ${MEMORY_RULE_SCHEMA}
         ${MCP_CATALOG_SCHEMA}
         ${MCP_POLICY_SCHEMA}
         ${SUBAGENT_SCHEMA}
@@ -1131,6 +1133,11 @@ export class ThreadDO extends DurableObject<Env> {
   recordMcpChange(...args: Parameters<McpAdmin['recordMcpChange']>): ReturnType<McpAdmin['recordMcpChange']> { return this.mcpAdmin.recordMcpChange(...args); }
   mcpToolCounts(...args: Parameters<McpAdmin['mcpToolCounts']>): ReturnType<McpAdmin['mcpToolCounts']> { return this.mcpAdmin.mcpToolCounts(...args); }
 
+  rulePropose(...args: Parameters<MemoryAdmin['rulePropose']>) { return this.memoryAdmin.rulePropose(...args); }
+  ruleConfirm(...args: Parameters<MemoryAdmin['ruleConfirm']>) { return this.memoryAdmin.ruleConfirm(...args); }
+  ruleRevoke(...args: Parameters<MemoryAdmin['ruleRevoke']>) { return this.memoryAdmin.ruleRevoke(...args); }
+  ruleList(...args: Parameters<MemoryAdmin['ruleList']>) { return this.memoryAdmin.ruleList(...args); }
+  ruleReceipt(...args: Parameters<MemoryAdmin['ruleReceipt']>) { return this.memoryAdmin.ruleReceipt(...args); }
   saveMemory(...args: Parameters<MemoryAdmin['saveMemory']>) { return this.memoryAdmin.saveMemory(...args); }
   memoryCandidates(...args: Parameters<MemoryAdmin['memoryCandidates']>) { return this.memoryAdmin.memoryCandidates(...args); }
   decideMemoryCandidate(...args: Parameters<MemoryAdmin['decideMemoryCandidate']>) { return this.memoryAdmin.decideMemoryCandidate(...args); }

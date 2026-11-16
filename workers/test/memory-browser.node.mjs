@@ -74,3 +74,27 @@ test("退出登录清空画像草稿，晚到的冲突响应不能恢复旧内�
  $("profile-save").dispatchEvent(new window.Event("click"));await settle();assert.equal(typeof release,"function");ui.resetMemory();release();await settle();
  assert.equal($("profile-edit").value,"");assert.equal($("profile-edit").hidden,true);assert.equal(state.profile,null);assert.equal($("profile-text").textContent,"");
 });
+
+test("规则批准必须展示精确提案后单独确认，候选预览不会自动激活",async()=>{
+ reset();
+ handler=(url,init)=>{
+  if(url.pathname==="/admin/memory/1")return Response.json(detail({...row(),kind:"rule"}));
+  if(url.pathname==="/admin/memory/rules/scopes")return Response.json({scopes:["private:10000001"]});
+  if(url.pathname==="/admin/memory/rules")return Response.json({bindings:[]});
+  if(url.pathname==="/admin/memory/rules/proposals")return Response.json({id:"proposal-id",payload_hash:"h".repeat(64),payload_json:JSON.stringify({kind:"rule",text:"精确批准正文"}),scope_key:"private:10000001",memory_version:7,binding_revision:0});
+  if(url.pathname==="/admin/memory/rules/confirm")return Response.json({status:"committed"});
+  return defaults(url,init);
+ };
+ await ui.memoryDetail(1);
+ await click(button("规则批准 / 修改 / 撤销"));
+ await click(button("生成精确批准预览"));
+ const proposed=calls.find(c=>c.path.startsWith("/admin/memory/rules/proposals"));
+ assert.equal(proposed.body.expectedVersion,7);assert.equal(proposed.body.expectedBindingRevision,0);
+ assert.equal(calls.some(c=>c.path.startsWith("/admin/memory/rules/confirm")),false);
+ assert.match($("memory-detail-body").textContent,/精确批准正文/);
+ await click(button("我批准以上精确版本和正文"));
+ const confirmed=calls.find(c=>c.path.startsWith("/admin/memory/rules/confirm"));
+ assert.equal(confirmed.body.proposalId,"proposal-id");assert.equal(confirmed.body.payloadHash,"h".repeat(64));
+ assert.equal(confirmed.body.approved,undefined);
+ assert.match($("memory-detail-body").textContent,/下一次成功 prepare/);
+});
