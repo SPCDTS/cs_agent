@@ -70,6 +70,7 @@ export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string)
   const guarded = (handle: AdminRoute["handle"]): AdminRoute["handle"] => async ctx => {
     try { return await handle(ctx); }
     catch (error) {
+      if (error instanceof Error && error.message.includes("memory_rule:protected")) return json({error:"rule_management_required"},409);
       // RPC 跨 isolate 时自定义 Error 的原型可能被擦除，Thread 应保留可识别的短错误分类。
       if (error instanceof MemoryStoreError && error.message !== "memory_admin:conflict") return json({error:"invalid"},400);
       if (error instanceof MemoryAdminError) return json({ error: error.code }, error.code === "not_found" ? 404 : error.code === "conflict" ? 409 : 400);

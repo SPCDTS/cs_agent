@@ -9,6 +9,7 @@ import { MemoryEditorSchema, CandidateInputSchema } from "../src/memory/editor";
 import { parseMemoryTime, formatBeijingTime } from "../src/memory/time";
 import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
 import { paginatedBlock } from "./pagination";
+import { ruleEditor } from "./memory-rules";
 
 type Row = Static<typeof C.MemoryRow>;
 type Detail = Static<typeof MemoryDetailSchema>;
@@ -108,6 +109,12 @@ export async function memoryDetail(id:number,ns=state.memoryNs) {
       if(row.kind==="commitment"&&row.done_at==null)actions.append(el("button",{className:"btn",text:"标记完成",onclick:()=>mutate(ns,"PUT","/admin/memory/"+id,{expectedVersion:value.revision,entry:{text:row.text,kind:row.kind,done_at:Math.floor(Date.now()/1000)}},"承诺已完成",version)}));
     }
     if(row.status==="forgotten")actions.append(el("button",{className:"btn",text:"恢复记忆",onclick:()=>mutate(ns,"POST","/admin/memory/"+id+"/restore",{expectedVersion:value.revision},"记忆已恢复",version)}));
+    if(ns==="owner" && row.kind==="rule" && row.status==="active")actions.append(el("button",{className:"btn",text:"规则批准 / 修改 / 撤销",onclick:()=>{
+      if(version!==mm.version || ns!==state.memoryNs || !$("memory-detail").open)return;
+      const editorVersion=++mm.version,session=sessionVersion;
+      const current=()=>editorVersion===mm.version && session===sessionVersion && ns===state.memoryNs && $("memory-detail").open;
+      void ruleEditor($("memory-detail-body"),{...row,kind:"rule"},value.revision,current);
+    }}));
     const source=el("section",{},[el("h3",{text:"来源依据"})]);
     if(value.evidence?.length)for(const e of value.evidence)source.append(el("p",{className:"muted small",text:e.scope+" · 消息 #"+e.message_id+" · 发言人 "+e.speaker}),el("blockquote",{className:"memory-evidence",text:e.quote}));
     else source.append(el("p",{text:row.source_scope?row.source_scope+" · 消息 #"+(row.source_message_id||"未知")+"（未保存证据片段）":"手动录入或历史导入，未保存原始消息。"}));
@@ -214,6 +221,7 @@ export function initMemory() {
   $("mem-add").addEventListener("click",()=>memoryEditor(state.memoryNs));
   $("memory-detail-close").addEventListener("click",()=>{$("memory-detail").close();mm.version++;});
   $("memory-detail").addEventListener("cancel",()=>{mm.version++;});
+  $("memory-detail").addEventListener("close",()=>{mm.version++;});
   $("mem-ns").addEventListener("change",()=>{profileEdit(false);mm.version++;$("memory-detail").close();state.memoryNs=$("mem-ns").value;state.profile=null;$("profile-text").textContent="";$("profile-review").hidden=true;$("profile-sources").replaceChildren();void loadMemory();});
   const search=()=>{state.memoryQuery=$("mem-q").value.trim();void loadMemory();};
   $("mem-q").addEventListener("keydown",event=>{if(event.key==="Enter")search();});$("mem-q").addEventListener("search",search);

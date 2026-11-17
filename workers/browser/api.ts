@@ -25,22 +25,26 @@ export const readToken = () => { try { return sessionStorage.getItem(TOKEN_KEY);
 export const writeToken = (value: string | null) => { try { if (value) sessionStorage.setItem(TOKEN_KEY, value); else sessionStorage.removeItem(TOKEN_KEY); } catch {} };
 
 /** 返回值在调用方按所需视图 schema 校验，写操作可以直接忽略正文。 */
-export async function api(method: string, path: string, body?: unknown): Promise<unknown> {
+export async function api(method: string, path: string, body?: unknown, isCurrent: () => boolean = () => true): Promise<unknown> {
+  if (!isCurrent()) throw new Error("stale_admin_request");
   const token = readToken();
   if (!token) { showLogin(""); throw new ApiError(401, null); }
   const headers: Record<string, string> = { Authorization: "Bearer " + token };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body),
     cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" });
+  if (!isCurrent()) throw new Error("stale_admin_request");
   if (response.status === 401) { writeToken(null); showLogin("口令无效或已失效，请重新输入"); throw new ApiError(401, null); }
   const raw = await response.text();
+  if (!isCurrent()) throw new Error("stale_admin_request");
   let data: unknown;
   try { data = raw ? JSON.parse(raw) : null; } catch { data = { error: raw.slice(0, 60) }; }
   if (!response.ok) throw new ApiError(response.status, data);
   return data;
 }
-export async function readApi<T extends TSchema>(schema: T, method: string, path: string, body?: unknown): Promise<Static<T>> {
-  const value = await api(method, path, body);
+export async function readApi<T extends TSchema>(schema: T, method: string, path: string, body?: unknown, isCurrent: () => boolean = () => true): Promise<Static<T>> {
+  const value = await api(method, path, body, isCurrent);
+  if (!isCurrent()) throw new Error("stale_admin_request");
   if (!Check(schema, value)) throw new Error("invalid_admin_response: " + path.split("?")[0]);
   return value;
 }

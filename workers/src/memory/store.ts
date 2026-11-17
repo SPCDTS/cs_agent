@@ -33,7 +33,9 @@ export class MemoryStore {
   }
   async profileEntries(tx: SqliteExecutor = this.db) {
     return tx.all<MemoryRow>(`SELECT * FROM memories WHERE ns=? AND status='active' AND kind IN ('fact','preference','rule')
-      AND (? <> 'owner' OR subject IS NULL OR subject='self') AND ${effectiveMemory()} ORDER BY id`, this.ns, this.ns, this.now(), this.now());
+      AND (? <> 'owner' OR subject IS NULL OR subject='self')
+      AND NOT EXISTS(SELECT 1 FROM memory_rule_bindings b WHERE b.ns=memories.ns AND b.memory_id=memories.id)
+      AND ${effectiveMemory()} ORDER BY id`, this.ns, this.ns, this.now(), this.now());
   }
   async profileFingerprint(tx: SqliteExecutor = this.db) {
     return profileEntriesFingerprint(await this.profileEntries(tx));
@@ -87,8 +89,8 @@ export class MemoryStore {
     };
     return executor ? write(executor) : this.db.transaction(write);
   }
-  async update(id: number, patch: MemoryPatch, by: string, expectedVersion?: number): Promise<MemoryRow> {
-    return this.db.transaction(async tx => {
+  async update(id: number, patch: MemoryPatch, by: string, expectedVersion?: number, executor?: SqliteExecutor): Promise<MemoryRow> {
+    const write = async (tx: SqliteExecutor) => {
       const before = await this.get(id, tx);
       if (expectedVersion !== undefined && await this.revision(id,tx) !== expectedVersion) throw new MemoryStoreError("memory_admin:conflict");
       if (!before || before.status !== "active") throw new MemoryStoreError("只能修改本会话的 active 条目");
@@ -117,7 +119,8 @@ export class MemoryStore {
       if (!after) throw new MemoryStoreError("记忆不存在");
       await this.version(tx, before, after, by, "mem_update");
       return after;
-    });
+    };
+    return executor ? write(executor) : this.db.transaction(write);
   }
   async forget(id: number, by: string, reason: string, expectedVersion?: number): Promise<void> {
     await this.db.transaction(async tx => {
@@ -246,6 +249,11 @@ export class MemoryStore {
         await tx.run(`INSERT INTO profile(ns,text,revision,updated_at) VALUES (?,?,?,?)
           ON CONFLICT(ns) DO UPDATE SET text=excluded.text,revision=excluded.revision,updated_at=excluded.updated_at`, this.ns, text, sha256(text).slice(0, 16), this.now());
         await this.approveProfileSources(tx);
+        // 导入的画像不是对受控规则的重新批准；存在管理历史时必须重新人工复核。
+        await tx.run(`INSERT INTO profile_review(ns,reason)
+          SELECT ns,'导入画像可能包含旧规则副本，请复核后保存。' FROM profile WHERE ns=?
+          AND EXISTS(SELECT 1 FROM memory_rule_bindings WHERE ns=?) ON CONFLICT(ns) DO UPDATE SET reason=excluded.reason`,this.ns,this.ns);
+        await tx.run("UPDATE profile SET revision=lower(hex(randomblob(8))) WHERE ns=? AND EXISTS(SELECT 1 FROM profile_review WHERE ns=?)",this.ns,this.ns);
       }
       return { inserted, skipped };
     });

@@ -8,6 +8,7 @@ import { createMcpAdminRoutes } from "./mcp-routes";
 import { MCP_SERVER_ROUTES } from "./mcp-servers-routes";
 import { accessRoutes } from "./access-routes";
 import { createMemoryAdminRoutes } from "./memory-routes";
+import { createRuleAdminRoutes } from "./rule-routes";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { authenticated } from "../auth";
@@ -173,6 +174,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       resetRuntime:()=>stub.workspaceResetRuntime(thread),inspectChild:input=>view.inspectChild(input),mergeChild:input=>stub.workspaceMergeChild(thread,input)};
   }}),
   ...createMcpAdminRoutes((ctx, scope) => ctx.env.THREAD.getByName(scope), (ctx, scope) => threadView(ctx.env, scope)),
+  ...createRuleAdminRoutes(),
   ...createMemoryAdminRoutes((ctx, ns) => ctx.env.THREAD.getByName(ns), (ctx, ns) => threadView(ctx.env, ns)),
 
   { method: "GET", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/history$"), handle: async ({ env, params, url }) => {

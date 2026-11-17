@@ -92,4 +92,35 @@ CREATE TABLE IF NOT EXISTS memory_history_receipts (
   source TEXT NOT NULL, ns TEXT NOT NULL, kind TEXT NOT NULL, legacy_id TEXT NOT NULL, digest TEXT NOT NULL,
   imported_at INTEGER NOT NULL, PRIMARY KEY(source, ns, kind, legacy_id)
 );
+
+-- History-only append v2: classification precedes insertion in one SQLite statement.
+-- Existing versions cannot be relabelled, and historical versions cannot become current.
+CREATE TRIGGER IF NOT EXISTS memory_history_label_insert BEFORE INSERT ON memory_imported_versions
+WHEN new.version_id<=0 OR EXISTS(SELECT 1 FROM memory_versions WHERE id=new.version_id)
+BEGIN SELECT RAISE(ABORT,'memory_history:existing_version'); END;
+CREATE TRIGGER IF NOT EXISTS memory_history_label_update BEFORE UPDATE ON memory_imported_versions
+BEGIN SELECT RAISE(ABORT,'memory_history:immutable'); END;
+CREATE TRIGGER IF NOT EXISTS memory_history_label_delete BEFORE DELETE ON memory_imported_versions
+BEGIN SELECT RAISE(ABORT,'memory_history:immutable'); END;
+CREATE TRIGGER IF NOT EXISTS memory_history_version_insert BEFORE INSERT ON memory_versions
+WHEN EXISTS(SELECT 1 FROM memory_imported_versions WHERE version_id=new.id)
+ AND EXISTS(SELECT 1 FROM memory_versions WHERE id=new.id)
+BEGIN SELECT RAISE(ABORT,'memory_history:immutable'); END;
+CREATE TRIGGER IF NOT EXISTS memory_history_version_update BEFORE UPDATE ON memory_versions
+WHEN EXISTS(SELECT 1 FROM memory_imported_versions WHERE version_id=old.id OR version_id=new.id)
+BEGIN SELECT RAISE(ABORT,'memory_history:immutable'); END;
+CREATE TRIGGER IF NOT EXISTS memory_history_version_delete BEFORE DELETE ON memory_versions
+WHEN EXISTS(SELECT 1 FROM memory_imported_versions WHERE version_id=old.id)
+BEGIN SELECT RAISE(ABORT,'memory_history:immutable'); END;
+CREATE VIEW IF NOT EXISTS memory_history_append AS
+ SELECT memory_id,at,by,before_json,after_json,reason FROM memory_versions WHERE 0;
+CREATE TRIGGER IF NOT EXISTS memory_history_append_insert INSTEAD OF INSERT ON memory_history_append
+BEGIN
+ INSERT INTO memory_imported_versions(version_id) VALUES (
+  max(coalesce((SELECT max(id) FROM memory_versions),0),
+      coalesce((SELECT seq FROM sqlite_sequence WHERE name='memory_versions'),0),
+      coalesce((SELECT max(version_id) FROM memory_imported_versions),0))+1);
+ INSERT INTO memory_versions(id,memory_id,at,by,before_json,after_json,reason)
+ VALUES ((SELECT max(version_id) FROM memory_imported_versions),new.memory_id,new.at,new.by,new.before_json,new.after_json,new.reason);
+END;
 `;

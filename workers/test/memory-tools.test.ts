@@ -6,6 +6,7 @@ import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFact
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { threadWithBindings } from "./thread-fixture";
 import { MemoryStore } from "../src/memory/store";
+import { RuleService, compileRules } from "../src/memory/rules";
 import * as models from "../src/models";
 import { input } from "./helpers";
 
@@ -14,6 +15,7 @@ function script(steps: { name: string; args: JsonObject }[]) {
   const faux = fauxProvider({ models: [{ id: "test" }], tokensPerSecond: Infinity });
   const outputs: string[] = [], offers: string[][] = [], sections: (string | null)[] = [];
   const captured = new Set<string>();
+  const toolErrors: boolean[] = [];
   const memorySections: number[] = [];
   const respond: FauxResponseFactory = transcript => {
     faux.setResponses([respond]);
@@ -25,6 +27,7 @@ function script(steps: { name: string; args: JsonObject }[]) {
     const last = transcript.messages.findLast(message => message.role === "toolResult");
     if (last?.role === "toolResult" && !captured.has(last.toolCallId)) {
       captured.add(last.toolCallId);
+      toolErrors.push(last.isError);
       outputs.push(last.content.filter(block => block.type === "text").map(block => block.text).join(""));
     }
     const next = steps.shift();
@@ -35,7 +38,7 @@ function script(steps: { name: string; args: JsonObject }[]) {
     const registry = createModels(); registry.setProvider(faux.provider);
     return registry;
   });
-  return { outputs, offers, sections, memorySections };
+  return { outputs, offers, sections, memorySections, toolErrors };
 }
 
 describe("memory tools in the real Harness", () => {
@@ -108,5 +111,37 @@ describe("memory tools in the real Harness", () => {
     expect((await env.THREAD.getByName("group:200000001").memoryView("group:200000001", "")).memories.map(row => row.text)).toEqual(["共享训练安排"]);
     expect(seen.outputs.at(-1)).toContain("20 次");
     expect(stats.memory.active).toBe(19);
+  });
+});
+
+describe("approved rule version-producing writes",()=>{
+  it.each(["dashboard","qq:10000001"])("rejects due_at/done_at clears for %s through real tools without invalidating the scope",async author=>{
+    const seen=script([
+      {name:"mem_update",args:{id:1,due_at:""}},
+      {name:"mem_update",args:{id:1,done_at:""}},
+      {name:"mem_search",args:{query:"受保护甲"}},
+    ]);
+    await runInDurableObject(env.THREAD.getByName("owner"),async(_instance,state)=>{
+      const instance=threadWithBindings(_instance,state,{...env,MEMORY_EXTRACT_NAMESPACES:""});
+      await instance.importMemory({ns:"owner",memories:[]});
+      const store=new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner"),rules=new RuleService(store,"private:10000001");
+      for(const text of ["受保护甲","受保护乙"]){
+        const row=(await store.remember({kind:"rule",text,author})).row;
+        const p=await rules.propose({id:row.id,expectedVersion:await store.revision(row.id),expectedBindingRevision:0,requestId:crypto.randomUUID()});
+        await rules.confirm({proposalId:p.id,payloadHash:p.payload_hash,requestId:crypto.randomUUID()});
+      }
+      const before=await rules.read(),bindings=await rules.list(),versions=await store.db.all("SELECT * FROM memory_versions ORDER BY id");
+      expect(await instance.submit(input(1,"合成空值更新与召回",10000001))).toEqual({status:"done"});
+      expect(seen.toolErrors).toEqual([true,true,false]);
+      for(const output of seen.outputs.slice(0,2)){expect(output).toContain("memory_rule:protected");expect(output).not.toContain("已更新");}
+      expect(await store.db.all("SELECT * FROM memory_versions ORDER BY id")).toEqual(versions);
+      expect(await rules.list()).toEqual(bindings);
+      expect(await rules.read()).toEqual(before);
+      expect(compileRules(await rules.read())).toBe(compileRules(before));
+      expect((await store.get(1))?.recall_count).toBe(1);
+      await expect(store.db.run("INSERT INTO memory_versions(memory_id,at,by,after_json,reason) VALUES (1,0,'ordinary','{}','no-op')")).rejects.toThrow("memory_rule:protected");
+      expect(await store.db.all("SELECT * FROM memory_versions ORDER BY id")).toEqual(versions);
+      expect(await rules.read()).toEqual(before);
+    });
   });
 });
