@@ -9,6 +9,7 @@ import { initMemory } from "./memory";
 import { initAccess } from "./access";
 import { initWorkspace } from "./workspace";
 import { initMcp } from "./mcp";
+import { initDevices } from './devices';
 import { initMcpServers } from "./mcp-servers";
 
 initConsole();
@@ -22,4 +23,5 @@ initAccess();
 initWorkspace();
 initMcp();
 initMcpServers();
+initDevices();
 initApp();

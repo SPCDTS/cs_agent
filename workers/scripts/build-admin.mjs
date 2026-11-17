@@ -8,6 +8,14 @@ const result = await build({
   format: "iife", platform: "browser", target: "es2022", write: false,
   legalComments: "none", charset: "utf8", logLevel: "warning",
 });
+const device = await build({
+  absWorkingDir: fileURLToPath(new URL('../runner/', root)), entryPoints: ['src/device-cli.ts'], bundle: true,
+  format: 'cjs', platform: 'node', target: 'node24', minify: true, write: false,
+  legalComments: 'none', charset: 'utf8', logLevel: 'warning',
+});
+await mkdir(new URL('src/devices/', root), { recursive: true });
+await writeFile(new URL('src/devices/client.generated.ts', root),
+  '// 自动生成的设备客户端；修改 runner/src/device-*.ts。\nexport const DEVICE_CLIENT = ' + JSON.stringify(device.outputFiles[0].text) + ';\n', 'utf8');
 const schemas = await build({
   absWorkingDir: fileURLToPath(root), entryPoints: ["browser/contracts.ts"], bundle: true,
   format: "esm", platform: "node", target: "es2022", write: false, logLevel: "warning",

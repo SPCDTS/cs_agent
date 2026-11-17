@@ -46,6 +46,10 @@ Token 不通过聊天或模型工具参数接收，不回显。凭据使用现�
 
 本地 stdio 服务仍需本机程序与 HTTPS 桥接。此接入机制不会自动安装本机软件，也不会修改 CS2 Workshop 项目。
 
+## 设备命令行与可选桌面
+
+新设备可在“模型与接入 → 添加设备”生成短期配对链接。轻量客户端默认提供本机命令行，agent-desktop 按需安装，自动配置独立 Tunnel 和 MCP 凭据。管理员首次配置、安装和恢复步骤见 [设备 MCP](DEVICE-MCP.md)。
+
 ## Windows 远程环境
 
 Hyper-V 持久工作区和临时 WSB 使用同一个标准 MCP 服务接入，安装、Tunnel、Token 与工具选择见 [Windows MCP](WINDOWS-MCP.md)。Cloudflare Container 保留原生 coding，不迁移为 MCP。

@@ -17,3 +17,4 @@ workers/wrangler.deploy.json
 
 # 管理台从 browser TypeScript 构建，禁止手改或提交产物
 workers/src/admin/app.generated.ts
+workers/src/devices/client.generated.ts

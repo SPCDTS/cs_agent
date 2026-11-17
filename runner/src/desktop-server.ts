@@ -12,13 +12,14 @@ import type { DesktopConfig } from './desktop-config.ts';
 const resultBytes = 12 * 1024 * 1024;
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const callerSchema = Type.Object({ scope: Type.String({ pattern: '^[a-f0-9]{64}$' }) }, { additionalProperties: false });
-const guidance = '这是 VM 内已登录用户的持久桌面。首次使用读取 desktop_skills_get 的 desktop/platform 指南。窗口、文件、剪贴板和焦点与用户及其他调用者共享；控件引用按调用会话隔离。锁屏或未登录时不可用。执行结果未知时先观察状态，不要自动重放操作。';
+const defaultGuidance = '这是 VM 内已登录用户的持久桌面。首次使用读取 desktop_skills_get 的 desktop/platform 指南。窗口、文件、剪贴板和焦点与用户及其他调用者共享；控件引用按调用会话隔离。锁屏或未登录时不可用。执行结果未知时先观察状态，不要自动重放操作。';
 type Entry = { client: Client; stamp: string; lastUsed: number; busy: boolean };
 
 /** 在登录桌面内将原生 stdio MCP 暴露为独立 HTTP MCP，不经过宿主执行后端。 */
 export function createDesktopServer(config: DesktopConfig, context: () => Promise<string>, options: {
-  idleMs?: number; maxClients?: number; callTimeoutMs?: number;
+  idleMs?: number; maxClients?: number; callTimeoutMs?: number; path?: string; instructions?: string;
 } = {}) {
+  const guidance = options.instructions ?? defaultGuidance;
   const clients = new Map<string, Entry>();
   const active = new Set<AbortController>();
   const expectedToken = Buffer.from(hash('Bearer ' + config.token), 'hex');
@@ -80,7 +81,7 @@ export function createDesktopServer(config: DesktopConfig, context: () => Promis
       res.writeHead(401, { 'WWW-Authenticate': 'Bearer', 'Cache-Control': 'no-store' }).end(); return;
     }
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(req.headers.host ?? '') || req.headers.origin !== undefined) { res.writeHead(403).end(); return; }
-    if (req.url !== '/mcp') { res.writeHead(404).end(); return; }
+    if (req.url !== (options.path ?? '/mcp')) { res.writeHead(404).end(); return; }
     if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
     if (!req.headers['content-type']?.startsWith('application/json')) { res.writeHead(415).end(); return; }
     const abort = new AbortController(); active.add(abort);

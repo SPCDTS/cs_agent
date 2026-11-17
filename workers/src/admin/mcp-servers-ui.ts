@@ -1,4 +1,5 @@
-export const MCP_SERVERS_HTML = String.raw`
+import { DEVICES_HTML } from './devices-ui';
+export const MCP_SERVERS_HTML = DEVICES_HTML + String.raw`
 <details id="mcp-server-editor" class="source">
   <summary>接入或管理 MCP 服务</summary>
   <p class="muted small">保存连接 → 填写凭据或登录 → 检测工具 → 启用。修改即时保存，无需部署。</p>

@@ -18,6 +18,8 @@ import { AlertStore, type AlertInput, type TurnReport } from "./alerts";
 import { ownerIds } from "./policy";
 import { SKILLS_SCHEMA, parseSkill, type Skill, type SkillInput, type SkillSummary } from "./skills";
 import { McpServerStore, type ServerSetupInput, type ServerSelectionInput } from "./mcp/servers";
+import { DeviceStore, type DeviceCreate } from './devices/store';
+import type { Static } from 'typebox';
 import { connectionDigest } from "./mcp/names";
 
 type TokenRow = { server_id: string; account_id: string; revision: string; issuer: string; access_token: string; refresh_token: string | null; scope: string | null; expires_at: number | null; updated_at: number };
@@ -35,6 +37,7 @@ export class RegistryDO extends DurableObject<Env> {
   private alertDrain?: Promise<void>;
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
   private readonly mcpServers = new McpServerStore(this.ctx.storage.sql, this.vault, this.env.PUBLIC_ORIGIN);
+  private readonly devices = new DeviceStore(this.ctx.storage.sql, this.vault, this.mcpServers, this.env);
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly access = new Map<string, Promise<string | undefined>>();
   private readonly credentials = new SqlCredentialStore(this.ctx.storage.sql, this.vault);
@@ -59,8 +62,14 @@ export class RegistryDO extends DurableObject<Env> {
       ${CHATGPT_SCHEMA}
       ${SKILLS_SCHEMA};
     `);
-    ctx.storage.transactionSync(() => this.mcpServers.initialize());
+    ctx.storage.transactionSync(() => { this.mcpServers.initialize(); this.devices.initialize(); });
   }
+
+  devicesList() { return this.devices.list(); }
+  deviceCreate(input: Static<typeof DeviceCreate>) { return this.lock('device:' + input.id, () => this.devices.create(input)); }
+  deviceClaim(id: string, token: string, claim: string) { return this.lock('device:' + id, () => this.devices.claim(id, token, claim)); }
+  deviceReady(id: string, token: string, claim: string) { return this.lock('device:' + id, () => this.devices.ready(id, token, claim)); }
+  deviceRevoke(id: string) { return this.lock('device:' + id, () => this.devices.revoke(id)); }
 
   mcpConfig() { return this.mcpServers.config(); }
   mcpServersList() { return this.mcpServers.list(); }
