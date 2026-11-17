@@ -1,4 +1,4 @@
-/** 前向追加；不修改既有 schema / 生命周期触发器。 */
+/** 前向安装；保留旧表和生命周期触发器，规则版本保护在初始化事务内升级。 */
 export const MEMORY_RULE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_rule_bindings (
  ns TEXT NOT NULL, memory_id INTEGER NOT NULL, revision INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('enabled','disabled')),
@@ -48,4 +48,11 @@ BEGIN
  WHERE ns=new.ns AND trim(text)<>'' ON CONFLICT(ns) DO UPDATE SET reason=excluded.reason;
  UPDATE profile SET revision=lower(hex(randomblob(8))) WHERE ns=new.ns AND EXISTS(SELECT 1 FROM profile_review WHERE ns=new.ns);
 END;
+-- Forward replacement is installed inside ThreadDO.initialize's schema transaction.
+-- No author/reason string can grant an exception: only permanently historical IDs qualify.
+DROP TRIGGER IF EXISTS memory_rule_protect_version_insert;
+CREATE TRIGGER memory_rule_protect_version_insert BEFORE INSERT ON memory_versions
+WHEN EXISTS(SELECT 1 FROM memory_rule_bindings WHERE memory_id=new.memory_id AND state='enabled')
+ AND (new.id<=0 OR NOT EXISTS(SELECT 1 FROM memory_imported_versions WHERE version_id=new.id))
+BEGIN SELECT RAISE(ABORT,'memory_rule:protected'); END;
 `;

@@ -131,11 +131,11 @@ export async function importMemoryHistory(store: MemoryStore, value: unknown, op
       if (!await receipt("version", String(version.id), version)) continue;
       result.versions++;
       if (!options.dryRun) {
-        const inserted = await tx.get<{ id: number }>("INSERT INTO memory_versions(memory_id,at,by,before_json,after_json,reason) VALUES (?,?,?,?,?,?) RETURNING id",
+        // The view atomically reserves an immutable historical ID before inserting its version.
+        // It never disables approval or updates an existing current version.
+        await tx.run("INSERT INTO memory_history_append(memory_id,at,by,before_json,after_json,reason) VALUES (?,?,?,?,?,?)",
           remap(version.memory_id), version.at, version.by, version.before_json === null ? null : snapshot(version.before_json, version.memory_id),
           snapshot(version.after_json, version.memory_id), version.reason);
-        if (!inserted) throw new Error("history_version_insert_failed");
-        await tx.run("INSERT INTO memory_imported_versions(version_id) VALUES (?)", inserted.id);
       }
     }
     for (const link of data.links) {
