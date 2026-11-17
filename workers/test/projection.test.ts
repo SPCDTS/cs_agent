@@ -6,6 +6,8 @@ import { ThreadDO } from "../src/thread";
 import { threadView } from "../src/admin/read-views";
 import { ModelAlarm } from "../src/model-alarm";
 import { snapshot } from "../src/requests/snapshot";
+import { fauxProvider, fauxToolCall, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { MODEL_PROVIDERS } from "../src/models";
 afterEach(async()=>{vi.restoreAllMocks();await reset();});
 const admin=(path:string)=>worker.fetch(new Request("https://test"+path,{headers:{Authorization:"Bearer test"}}),{...env,ADMIN_TOKEN:"test"});
 it("未同步的查询返回待同步，不唤醒执行 DO",async()=>{
@@ -16,8 +18,19 @@ it("未同步的查询返回待同步，不唤醒执行 DO",async()=>{
 });
 it("聊天与记忆增量同步，管理查询不回调执行对象",async()=>{
   const owner=env.THREAD.getByName("owner"),view=threadView(env,"owner");
-  await owner.submitWeb("owner","projection-test","展示同步");
-  await expect.poll(async()=>{try{return(await view.chatView("owner")).messages.some(m=>m.role==="assistant");}catch{return false;}}).toBe(true);
+  // submitWeb acknowledges queueing, not completion. Deliberately exceed Vitest's default 1s
+  // poll budget, retaining the real alarm -> model -> send_message -> projection chain.
+  const faux=fauxProvider({models:[{id:"test"}],tokensPerSecond:Infinity});
+  faux.setResponses([async()=>{
+    await new Promise(resolve=>setTimeout(resolve,1250));
+    return fauxAssistantMessage(fauxToolCall("send_message",{text:"合成延迟同步"}),{stopReason:"toolUse"});
+  },fauxAssistantMessage("done")]);
+  vi.spyOn(MODEL_PROVIDERS.faux,"create").mockReturnValue(faux.provider);
+  expect(await owner.submitWeb("owner","projection-test","展示同步")).toMatchObject({status:"queued"});
+  await expect.poll(async()=>{
+    try{return(await view.chatView("owner")).messages.some(m=>m.role==="assistant"&&m.text==="合成延迟同步");}
+    catch(error){if(error instanceof Error&&error.message.includes("view_pending"))return false;throw error;}
+  },{timeout:10_000}).toBe(true);
   await owner.importMemory({ns:"owner",memories:[{id:1,kind:"fact",text:"这是展示同步测试",author:"test"}]});
   await owner.syncAdminView("owner");
   const chat=vi.spyOn(ThreadDO.prototype,"chatView").mockRejectedValue(new Error("execution_read_forbidden"));
