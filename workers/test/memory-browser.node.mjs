@@ -98,3 +98,97 @@ test("规则批准必须展示精确提案后单独确认，候选预览不会�
  assert.equal(confirmed.body.approved,undefined);
  assert.match($("memory-detail-body").textContent,/下一次成功 prepare/);
 });
+
+function ruleFixture(url,init){
+ if(/^\/admin\/memory\/[12]$/.test(url.pathname)){
+  const id=Number(url.pathname.split("/").at(-1)),ns=url.searchParams.get("ns");
+  return Response.json(detail({...row(ns==="owner"?(id===1?"OWNER-RULE":"OTHER-MEMORY"):"GROUP-MEMORY",id),kind:id===1&&ns==="owner"?"rule":"fact"}));
+ }
+ if(url.pathname==="/admin/memory/rules/scopes")return Response.json({scopes:["private:10000001","private:10000002"]});
+ if(url.pathname==="/admin/memory/rules")return Response.json({bindings:[{memory_id:1,revision:3,state:"enabled"}]});
+ if(url.pathname==="/admin/memory/rules/proposals")return Response.json({id:"proposal-id",payload_hash:"a".repeat(64),payload_json:'{"kind":"rule","text":"LATE-PROPOSAL"}',scope_key:"private:10000001",memory_version:7,binding_revision:3});
+ if(url.pathname==="/admin/memory/rules/confirm"||url.pathname==="/admin/memory/rules/revoke")return Response.json({status:"committed"});
+ if(url.pathname.startsWith("/admin/memory/rules/receipts/"))return Response.json(null);
+ return defaults(url,init);
+}
+async function openRule(){await ui.memoryDetail(1);await click(button("规则批准 / 修改 / 撤销"));}
+const rulePath={scopes:"/admin/memory/rules/scopes",bindings:"/admin/memory/rules",proposals:"/admin/memory/rules/proposals"};
+async function deferRule(stage){
+ let release;
+ handler=(url,init)=>url.pathname===rulePath[stage]?new Promise(resolve=>{release=value=>resolve(value??ruleFixture(url,init));}):ruleFixture(url,init);
+ await openRule();
+ if(stage==="proposals")await click(button("生成精确批准预览"));
+ assert.equal(typeof release,"function");return value=>release(value);
+}
+test("迟到 scopes、bindings、proposals 不覆盖其他 namespace、记忆或关闭后的详情",async()=>{
+ for(const stage of ["scopes","bindings","proposals"]){
+  reset();const release=await deferRule(stage);
+  if(stage==="scopes"){state.memoryNs="group:200";await ui.memoryDetail(1,"group:200");}
+  else if(stage==="bindings")await ui.memoryDetail(2);
+  else {await click($("memory-detail-close"));await ui.memoryDetail(2);}
+  const title=$("memory-detail-title").textContent,body=$("memory-detail-body").textContent;
+  release();await settle();
+  assert.equal($("memory-detail-title").textContent,title);
+  assert.equal($("memory-detail-body").textContent,body);
+  assert.equal(button("生成精确批准预览"),undefined);
+  assert.equal(button("我批准以上精确版本和正文"),undefined);
+  assert.equal(errors.length,0);
+ }
+});
+test("退出重登后的迟到读取和提案错误不能恢复旧编辑器或注销新登录",async()=>{
+ for(const [stage,status] of [["scopes",401],["bindings",500],["proposals",400]]){
+  reset();const release=await deferRule(stage);
+  ui.resetMemory();sessionStorage.setItem("cs-agent-admin-token","synthetic-new-session");
+  await ui.memoryDetail(2);
+  const body=$("memory-detail-body").textContent;
+  release(Response.json({error:"late"},{status}));await settle();
+  assert.equal($("memory-detail-body").textContent,body);
+  assert.equal(sessionStorage.getItem("cs-agent-admin-token"),"synthetic-new-session");
+  assert.equal(errors.length,0);assert.equal(notices.length,0);
+ }
+});
+test("失效编辑器的旧按钮引用不能生成提案、确认、撤销或查询回执",async()=>{
+ globalThis.window=window;window.confirm=()=>true;
+ for(const invalidate of [
+  async()=>{await click($("memory-detail-close"));await ui.memoryDetail(2);},
+  async()=>{$("memory-detail").dispatchEvent(new window.Event("cancel"));await settle();},
+  async()=>{state.memoryNs="group:200";await ui.memoryDetail(1,"group:200");},
+  async()=>{await ui.memoryDetail(2);},
+  async()=>{ui.resetMemory();await ui.memoryDetail(1);},
+ ]){
+  reset();handler=ruleFixture;await openRule();
+  const prepare=button("生成精确批准预览"),revoke=button("撤销此批准版本");
+  await invalidate();const count=calls.length;
+  await click(prepare);await click(revoke);
+  assert.equal(calls.length,count);
+ }
+ reset();handler=ruleFixture;await openRule();await click(button("生成精确批准预览"));
+ const confirm=button("我批准以上精确版本和正文");
+ await ui.memoryDetail(2);let count=calls.length;await click(confirm);assert.equal(calls.length,count);
+ reset();handler=(url,init)=>url.pathname==="/admin/memory/rules/proposals"?Response.json({error:"synthetic"},{status:500}):ruleFixture(url,init);
+ await openRule();await click(button("生成精确批准预览"));const receipt=button("查询操作回执");
+ await click($("memory-detail-close"));await ui.memoryDetail(2);count=calls.length;await click(receipt);assert.equal(calls.length,count);
+});
+test("已发送确认或撤销的迟到响应不能污染新的详情，且不会再发写请求",async()=>{
+ globalThis.window=window;window.confirm=()=>true;
+ for(const [action,status] of [["confirm",200],["revoke",500]]){
+  reset();let release;
+  handler=(url,init)=>url.pathname==="/admin/memory/rules/"+action?new Promise(resolve=>{release=()=>resolve(Response.json({status:"committed"},{status}));}):ruleFixture(url,init);
+  await openRule();
+  if(action==="confirm"){await click(button("生成精确批准预览"));await click(button("我批准以上精确版本和正文"));}
+  else await click(button("撤销此批准版本"));
+  assert.equal(typeof release,"function");await ui.memoryDetail(2);
+  const body=$("memory-detail-body").textContent,count=calls.length;release();await settle();
+  assert.equal($("memory-detail-body").textContent,body);assert.equal(calls.length,count);
+  assert.equal(errors.length,0);assert.equal(notices.length,0);
+ }
+});
+test("同编辑器切换scope后，旧bindings失败不覆盖当前作用域",async()=>{
+ reset();let release;
+ handler=(url,init)=>url.pathname==="/admin/memory/rules"&&url.searchParams.get("scope")==="private:10000001"
+  ?new Promise(resolve=>{release=()=>resolve(Response.json({error:"late"},{status:500}));}):ruleFixture(url,init);
+ await openRule();const select=$("memory-detail-body").querySelector("select");
+ select.value="private:10000002";select.dispatchEvent(new window.Event("change"));await settle();
+ assert.ok(button("生成精确批准预览"));const body=$("memory-detail-body").textContent;
+ release();await settle();assert.equal($("memory-detail-body").textContent,body);assert.equal(errors.length,0);
+});

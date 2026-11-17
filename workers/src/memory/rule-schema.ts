@@ -25,6 +25,14 @@ CREATE TRIGGER IF NOT EXISTS memory_rule_protect_update
 BEFORE UPDATE OF ns,kind,subject,text,since,until,status,author,source_scope,source_message_id,source_turn_id ON memories
 WHEN EXISTS(SELECT 1 FROM memory_rule_bindings WHERE ns=old.ns AND memory_id=old.id AND state='enabled')
 BEGIN SELECT RAISE(ABORT,'memory_rule:protected'); END;
+-- 前向增加保护：批准绑定 memory version，非正文的空值更新也不得生成新版本。
+CREATE TRIGGER IF NOT EXISTS memory_rule_protect_aux_update
+BEFORE UPDATE OF id,due_at,done_at,hash,created_at,updated_at,confidence ON memories
+WHEN EXISTS(SELECT 1 FROM memory_rule_bindings WHERE ns=old.ns AND memory_id=old.id AND state='enabled')
+BEGIN SELECT RAISE(ABORT,'memory_rule:protected'); END;
+CREATE TRIGGER IF NOT EXISTS memory_rule_protect_version_insert BEFORE INSERT ON memory_versions
+WHEN EXISTS(SELECT 1 FROM memory_rule_bindings WHERE memory_id=new.memory_id AND state='enabled')
+BEGIN SELECT RAISE(ABORT,'memory_rule:protected'); END;
 CREATE TRIGGER IF NOT EXISTS memory_rule_protect_delete BEFORE DELETE ON memories
 WHEN EXISTS(SELECT 1 FROM memory_rule_bindings WHERE ns=old.ns AND memory_id=old.id AND state='enabled')
 BEGIN SELECT RAISE(ABORT,'memory_rule:protected'); END;
