@@ -162,7 +162,7 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     }),
     host.skills.tool(),
     defineTool({
-      name: "send_message", description: "向本轮回复入口发送文字或私有图片资产。target可填qq:group:ID或qq:private:ID，跨会话须授权；网页回合只显示网页。",
+      name: "send_message", description: "向本轮回复入口发送文字或私有图片资产。text 是收件人最终看到的消息。QQ 收件人看不到你的工具调用和搜索结果，正文要让对方能独立读懂。引用外部资料时，另起一行写「来源：页面标题 完整网址」，只用本轮实际打开并读到相关原文的页面地址。打不开原文或只有内部编号时省略该来源，不拼接、猜测网址；工具和当前界面的标记留在工具记录里。target 可填 qq:group:ID 或 qq:private:ID，跨会话须授权；网页回合只显示网页。",
       parameters: Type.Object({
         text: Type.String({ maxLength: 4000, description: QQ_CITATION_RULE }),
         images: Type.Optional(Type.Array(Type.String({ pattern: "^[a-f0-9]{64}$" }), { maxItems: 5 })),
