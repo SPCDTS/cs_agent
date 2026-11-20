@@ -2,6 +2,7 @@ import type { Api, Context, Model, AssistantMessageEventStream, StreamOptions } 
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import type { Env } from "../env";
 import { agentSearchOption, hostedSearchSteps } from "../tools/web-search";
+import { argumentPreview } from "./tool-snapshot";
 import { snapshot, responseSnapshot, errorSummary, boundedText } from "./snapshot";
 import type { RequestBinding, RequestDetail, RequestScope } from "./types";
 
@@ -41,20 +42,22 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
       await save(detail);
       const { result, endedAt } = await terminal, u = result.usage;
       const measured = reported || [u.input, u.output, u.cacheRead, u.cacheWrite].some(n => Number.isFinite(n) && n > 0);
-      const searches = hostedSearchSteps(result);
+      // 上游调用 ID 只用于协议回放；管理页在一次模型请求内关联搜索。
+      const searches = hostedSearchSteps(result).map(step => ({ ...step, callId: `${detail.request.id}:${step.item.id}` }));
       if (requestBinding) {
-        for (const { item, startedAt, endedAt } of searches) {
+        for (const { item, callId, startedAt, endedAt } of searches) {
           const { sources, ...action } = item.action ?? {};
           const result = { status: item.status, sources: sources ?? item.sources ?? item.results, page: item.page, error: item.error };
           await store.recordTool({ id: crypto.randomUUID(), thread: scope.thread, actor: scope.actor, binding: requestBinding,
-            callId: item.id, name: "web_search", startedAt, endedAt, status: item.status === "completed" ? "done" : "error",
+            callId, name: "web_search", startedAt, endedAt, argumentPreview: argumentPreview(action),
+            status: item.status === "completed" ? "done" : item.status === "failed" ? "error" : "interrupted",
             arguments: boundedText(JSON.stringify(action, null, 2)), result: boundedText(JSON.stringify(result, null, 2)) })
             .catch(() => console.error({ event: "tool_trace_failed", id: detail.request.id }));
         }
       }
       await save({ ...detail, response: responseSnapshot(result), request: { ...detail.request, endedAt, durationMs: endedAt - startedAt,
         status: result.stopReason === "error" ? "error" : result.stopReason === "aborted" ? "aborted" : "done", stopReason: result.stopReason,
-        toolCalls: [...searches.map(({ item }) => ({ id: item.id, name: "web_search" })),
+        toolCalls: [...searches.map(({ callId }) => ({ id: callId, name: "web_search" })),
           ...result.content.flatMap(block => block.type === "toolCall" ? [{ id: block.id, name: block.name }] : [])],
         ...(result.errorMessage ? { error: errorSummary(result.errorMessage, httpStatus) } : {}),
         ...(measured ? { inputTokens: u.input + u.cacheRead + u.cacheWrite, outputTokens: u.output,

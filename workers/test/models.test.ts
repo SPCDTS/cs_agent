@@ -482,8 +482,9 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
     const payload = JSON.parse(text);
     expect(payload.tools.filter((tool: { type: string; name?: string }) => tool.type === "web_search" || tool.name === "web_search"))
       .toEqual([{ type: "web_search", external_web_access: true }]);
-    const search = { type: "web_search_call", id: childRequest ? "ws_child" : "ws_parent", status: "completed", action: { type: "search", query: "官方文档" } };
-    if (step > 0) expect(payload.input).toContainEqual(search);
+    const query = childRequest && step === 1 ? "后续文档" : "官方文档";
+    const search = { type: "web_search_call", id: "ws_0", status: "completed", action: { type: "search", query } };
+    if (step > 0) expect(payload.input).toContainEqual({ ...search, action: { type: "search", query: "官方文档" } });
     if (childRequest) {
       const [child] = await owner.subagentList();
       expect(child).toBeDefined();
@@ -494,7 +495,7 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
           name: childRequest ? "qq_context" : "subagent", arguments: JSON.stringify(childRequest ? { limit: 1 } : { action: "spawn", task: "执行隔离验证" }) }
       : { type: "message", id: "msg_" + (childRequest ? "child" : "parent") + step, role: "assistant", status: "completed", content: [{ type: "output_text", text: "完成" }] };
     return new Response([
-      ...(step === 0 ? [{ type: "response.output_item.done", output_index: 0, item: search }] : []),
+      ...(step === 0 || childRequest ? [{ type: "response.output_item.done", output_index: 0, item: search }] : []),
       { type: "response.output_item.added", output_index: 1, item },
       { type: "response.output_item.done", output_index: 1, item },
       { type: "response.completed", response: { status: "completed", usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 } } },
@@ -511,11 +512,21 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
   expect((await display.subagentTranscript(child.id, 10))?.entries.some(entry => entry.text === "完成")).toBe(true);
   const requests = env.REQUESTS.getByName("main");
   const page = await requests.list({ since: 0, until: Date.now() + 1000, limit: 20 });
-  for (const id of ["ws_parent", "ws_child"]) {
-    const request = page.requests.find(r => r.toolCalls?.some(call => call.id === id));
-    expect(request).toBeDefined();
-    expect((await requests.detail(request!.id))?.tools.some(tool => tool.callId === id && tool.status === "done")).toBe(true);
+  const withSearch = page.requests.filter(r => r.toolCalls?.some(call => call.name === "web_search"));
+  expect(withSearch).toHaveLength(3);
+  const childRequests = withSearch.filter(r => r.actor === child.id);
+  expect(childRequests).toHaveLength(2);
+  expect(childRequests[0]!.binding!.turnId).toBe(childRequests[1]!.binding!.turnId);
+  const previews = [];
+  for (const request of withSearch) {
+    const tools = (await requests.detail(request.id))!.tools.filter(t => t.name === "web_search");
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({ callId: request.id + ":ws_0", status: "done" });
+    if (request.actor === child.id) previews.push(tools[0]?.argumentPreview);
   }
+  expect(previews.sort()).toEqual(["query: 后续文档", "query: 官方文档"].sort());
+  expect((await display.events({ kind: "web_search", limit: 10 })).events.map(e => e.detail))
+    .toEqual([expect.objectContaining({ result: "ok", provider: "openai-codex", calls: 1 })]);
   expect(parentCalls).toBeGreaterThanOrEqual(2);
   expect(childCalls).toBe(2);
   expect(alarms.mock.calls.length).toBeGreaterThanOrEqual(parentCalls + childCalls);
