@@ -1,3 +1,5 @@
+import type { Context, Tool } from "@earendil-works/pi-ai";
+import { agentSearchOption } from "../src/tools/web-search";
 import { ModelAlarm } from "../src/model-alarm";
 import { zstdDecompressSync } from "node:zlib";
 import { env, reset, runInDurableObject } from "cloudflare:test";
@@ -313,6 +315,37 @@ describe("model selection and Codex Responses", () => {
     expect(result.errorMessage).toBeUndefined();
     expect(result.stopReason).toBe("stop");
     expect(upstream).toHaveBeenCalledTimes(1);
+  });
+
+  it("旧会话只声明原生搜索，保留历史函数调用、结果和其他工具的撤销提示", async () => {
+    network(); await login();
+    const base = models.openModels(env, store()), model = base.getModel("openai-codex", "gpt-6-astra")!;
+    const tool = (name: string): Tool => ({ name, description: name, parameters: { type: "object", properties: {} } });
+    const context: Context = { messages: [
+      { role: "system", content: "开始", timestamp: 0, toolsAdded: ["web_search", "old_tool", "send_message"].map(tool) },
+      { role: "user", content: "查文档", timestamp: 1 },
+      { ...fauxAssistantMessage(fauxToolCall("web_search", { query: "文档" }, { id: "call_old|fc_old" }), { stopReason: "toolUse" }),
+        provider: model.provider, api: "openai-codex-responses", model: model.id },
+      { role: "toolResult", toolCallId: "call_old|fc_old", toolName: "web_search", content: [{ type: "text", text: "旧搜索结果" }], isError: false, timestamp: 2 },
+      { role: "system", content: "", timestamp: 3, toolsRemoved: [{ name: "web_search" }, { name: "old_tool" }] },
+      { role: "user", content: "继续", timestamp: 4 },
+    ] };
+    let payload: { tools: { type: string }[]; input: { type?: string; name?: string; content?: unknown; output?: unknown; tools?: { name?: string }[] }[] } | undefined;
+    network({ [CODEX_BASE_URL + "/responses"]: async request => {
+      payload = await request.json();
+      return new Response('data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n', { headers: { "Content-Type": "text/event-stream" } });
+    } });
+    const original = structuredClone(context);
+    expect((await base.streamSimple(model, context, { ...agentSearchOption, transport: "sse" }).result()).stopReason).toBe("stop");
+    expect(context).toEqual(original);
+    expect(payload!.tools).toEqual([{ type: "web_search", external_web_access: true }]);
+    expect(payload!.input.filter(i => i.type === "additional_tools").flatMap(i => i.tools?.map(t => t.name) ?? [])).toEqual(["old_tool", "send_message"]);
+    const instructions = payload!.input.flatMap(i => typeof i.content === "string" ? [i.content] : []).join("\n");
+    expect(instructions).toContain("- old_tool");
+    expect(instructions).not.toContain("web_search");
+    const call = payload!.input.findIndex(i => i.type === "function_call" && i.name === "web_search");
+    expect(call).toBeGreaterThanOrEqual(0);
+    expect(payload!.input[call + 1]).toMatchObject({ type: "function_call_output", output: "旧搜索结果" });
   });
 
   it("uses the native Codex endpoint over SSE with store false and the selected effort", async () => {

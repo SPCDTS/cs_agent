@@ -1,4 +1,4 @@
-import type { Api, AssistantMessage, Model, ProviderStreams, SimpleStreamOptions, TranscriptContext } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model, ProviderStreams, SimpleStreamOptions, SystemMessage, TranscriptContext } from "@earendil-works/pi-ai";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 
@@ -12,8 +12,17 @@ export const hostedSearchSteps = (message: AssistantMessage) => (message as Sear
 export const agentSearchOption = { agentWebSearch: true } as const;
 type SearchOptions = SimpleStreamOptions & { agentWebSearch?: boolean };
 
+// 当所有可恢复的会话都不再含旧版 web_search 函数声明时，可删除这层兼容。
+function withoutLegacySearch(message: SystemMessage): SystemMessage {
+  return { ...message,
+    ...(message.toolsAdded && { toolsAdded: message.toolsAdded.filter(tool => tool.name !== "web_search") }),
+    ...(message.toolsRemoved && { toolsRemoved: message.toolsRemoved.filter(tool => tool.name !== "web_search") }),
+  };
+}
+
 function replaySearch(context: TranscriptContext, model: Model<Api>): TranscriptContext {
   return normalizeContext({ messages: context.messages.map(message => {
+    if (message.role === "system") return withoutLegacySearch(message);
     if (message.role !== "assistant" || message.provider !== model.provider || message.api !== model.api || message.model !== model.id) return message;
     const steps = hostedSearchSteps(message);
     if (!steps.length) return message;
@@ -54,8 +63,7 @@ export function withHostedSearch(regular: ProviderStreams, responses = regular):
         const payload = await options?.onPayload?.(original, m) ?? original;
         if (!object(payload)) return payload;
         const tools = Array.isArray(payload.tools) ? payload.tools : [];
-        // 旧会话的初始工具声明可能还包含已退役的同名函数。
-        const current = tools.filter(t => !(t.type === "function" && t.name === "web_search") && t.type !== type);
+        const current = tools.filter(t => t.type !== type);
         const reasoning = object(payload.reasoning) ? payload.reasoning : {};
         return { ...payload, tools: [...current, { type, ...(deepseek ? {} : { external_web_access: true }) }],
           ...(flash && (!reasoning.effort || reasoning.effort === "none") ? { reasoning: { ...reasoning, effort: "low" } } : {}) };
