@@ -106,7 +106,7 @@ describe("per-thread message context", () => {
     expect(JSON.stringify(result.entries)).toContain("text: must not have more than 4000 characters");
     expect(JSON.stringify(result.entries)).toContain("发送过快");
     expect(result.sent).toBe(0);
-    expect(await thread.stats()).toMatchObject({ outbox: 0 });
+    expect(await runInDurableObject(thread, (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM outbox").one().n)).toBe(0);
   });
 
   it("migrates the P0 inbound table without losing request IDs or replaying completed inputs", async () => {

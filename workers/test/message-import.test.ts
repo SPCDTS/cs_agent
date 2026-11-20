@@ -16,9 +16,9 @@ const message = (id: string, text: string, time: number, userId = "10000004") =>
 // 北京时间 2023-11-14 零点。
 const DAY_START = 1699891200;
 const summary = { kind: "day", period_start: DAY_START, period_end: DAY_START + 86400, text: "群里约了周末打训练赛", msg_count: 12, created_at: DAY_START + 90000 };
-// stats() 先建表，没被导入碰过的线程也能查。
+// syncAdminView() 先建表，没被导入碰过的线程也能查。
 const rows = async (key: string, sql: string) => {
-  await env.THREAD.getByName(key).stats();
+  await env.THREAD.getByName(key).syncAdminView(key);
   return runInDurableObject(env.THREAD.getByName(key), (_instance, state) => state.storage.sql.exec(sql).toArray());
 };
 const recallIn = (key: string, scope: string, query: string) => runInDurableObject(env.THREAD.getByName(key),

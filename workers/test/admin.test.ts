@@ -90,7 +90,7 @@ describe("admin routes", () => {
     const { socket, frames } = await connect(sockets);
     socket.send(JSON.stringify(event(1, "帮忙", 10000004, 200000001, true)));
     reply(socket, (await action(frames)).echo, 90000001);
-    await expect.poll(() => env.THREAD.getByName("group:200000001").stats()).toMatchObject({ inbound: { done: 1 } });
+    await expect.poll(async () => { await env.THREAD.getByName("group:200000001").syncAdminView("group:200000001"); return threadView(env, "group:200000001").stats(); }).toMatchObject({ inbound: { done: 1 } });
 
     socket.send(JSON.stringify(replyToBot(2, "90000001")));
     await expect.poll(() => groupMessages()).toBe(3);
@@ -101,7 +101,7 @@ describe("admin routes", () => {
     const second = await action(frames, 1);
     expect(second.params.message?.[0]?.data.qq).toBe("10000004");
     reply(socket, second.echo, 90000002);
-    await expect.poll(() => env.THREAD.getByName("group:200000001").stats()).toMatchObject({ inbound: { done: 2 } });
+    await expect.poll(async () => { await env.THREAD.getByName("group:200000001").syncAdminView("group:200000001"); return threadView(env, "group:200000001").stats(); }).toMatchObject({ inbound: { done: 2 } });
 
     await saveSettings({ allowGroups: [] });
     socket.send(JSON.stringify(event(4, "还在吗", 10000004, 200000001, true)));
@@ -113,10 +113,12 @@ describe("admin routes", () => {
     await saveSettings({ extractNamespaces: ["group:200000001"] });
     const group = env.THREAD.getByName("group:200000001");
     expect(await group.submit(input(1, "本群偏好".repeat(30), 10000004, 200000001, true))).toEqual({ status: "done" });
-    expect((await group.stats()).memory.extractQueue).toBe(1);
+    await group.syncAdminView("group:200000001");
+    expect((await threadView(env, "group:200000001").stats()).memory.extractQueue).toBe(1);
     const owner = env.THREAD.getByName("owner");
     expect(await owner.submit(input(2, "主人偏好".repeat(30), 10000001))).toEqual({ status: "done" });
-    expect((await owner.stats()).memory.extractQueue).toBe(0);
+    await owner.syncAdminView("owner");
+    expect((await threadView(env, "owner").stats()).memory.extractQueue).toBe(0);
   });
 });
 
@@ -125,7 +127,7 @@ describe("admin data views", () => {
 
   it("defaults admin data pages to ten and returns the remaining row on the next page", async () => {
     const owner = env.THREAD.getByName("owner"), store = env.REQUESTS.getByName("main"), at = Date.now() - 1000;
-    await owner.stats();
+    await owner.syncAdminView("owner");
     await runInDurableObject(owner, (_instance, state) => {
       for (let i = 0; i < 11; i++) state.storage.sql.exec("INSERT INTO events(at, kind, detail) VALUES (?, ?, ?)", at + i, "mcp_call", JSON.stringify({ tool: "tool" + i }));
     });
@@ -162,7 +164,7 @@ describe("admin data views", () => {
 
   it("pages audit events by rowid and filters by kind and result", async () => {
     const owner = env.THREAD.getByName("owner");
-    await owner.stats();
+    await owner.syncAdminView("owner");
     const rows: [string, object][] = [
       ["mcp_call", { server: "notion", tool: "a", result: "ok" }], ["mcp_catalog", { server: "notion", status: "error", code: "auth_required" }],
       ["memory_extract", { status: "skipped", reason: "too_short" }], ["mcp_call", { server: "notion", tool: "b", result: "outcome_unknown" }],
@@ -192,7 +194,7 @@ describe("admin data views", () => {
 
   it("filters web_search and coding audit events by their result field", async () => {
     const owner = env.THREAD.getByName("owner");
-    await owner.stats();
+    await owner.syncAdminView("owner");
     const rows: [string, object][] = [
       ["web_search", { result: "ok", ms: 900, results: 5 }], ["coding_exec", { result: "ok", commandLength: 12, code: 0, ms: 40 }],
       ["web_search", { result: "not_searched", ms: 700, results: 0 }], ["coding_exec", { result: "timeout", commandLength: 30, code: null, ms: 60_000 }],
@@ -226,7 +228,7 @@ describe("admin data views", () => {
     expect(await adminJson("DELETE", "/admin/memory/12?ns=owner")).toEqual({ status: "forgotten" });
     await env.THREAD.getByName("owner").syncAdminView("owner");
     expect((await adminJson<View>("GET", "/admin/memory?ns=owner")).memories.map(row => row.id)).toEqual([13, 11]);
-    expect((await env.THREAD.getByName("owner").stats()).memory.active).toBe(2);
+    expect((await threadView(env, "owner").stats()).memory.active).toBe(2);
     expect((await admin("DELETE", "/admin/memory/999?ns=owner")).status).toBe(404);
     await env.THREAD.getByName("private:10000003").syncAdminView("private:10000003");
     expect((await adminJson<View>("GET", "/admin/memory?ns=private:10000003")).memories).toEqual([]);
@@ -319,12 +321,14 @@ describe("admin data views", () => {
     const thread = env.THREAD.getByName("group:200000001");
     const turn = (async () => thread.submit(input(1, "一", 10000004, 200000001, true)))();
     const pending = await action(frames);
-    expect((await thread.stats()).inbound.queued).toBe(1);
+    await thread.syncAdminView("group:200000001");
+    expect((await threadView(env, "group:200000001").stats()).inbound.queued).toBe(1);
     expect(pending.action).toBe("send_group_msg");
     expect(await adminJson("POST", "/admin/threads/group%3A200000001/stop")).toEqual({ stopped: true });
     reply(socket, pending.echo);
     expect(await turn).toEqual({ status: "failed" });
-    expect((await thread.stats()).inbound).toEqual({ queued: 0, done: 0, failed: 1 });
+    await thread.syncAdminView("group:200000001");
+    expect((await threadView(env, "group:200000001").stats()).inbound).toEqual({ queued: 0, done: 0, failed: 1 });
     expect(await adminJson("POST", "/admin/threads/group:200000001/stop")).toEqual({ stopped: false });
   });
 });

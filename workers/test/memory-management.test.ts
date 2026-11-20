@@ -10,7 +10,7 @@ import type { MemoryRow } from "../src/memory/types";
 
 afterEach(async () => { await reset(); });
 async function use<T>(fn: (store: MemoryStore, manager: MemoryManager, state: DurableObjectState) => Promise<T>) {
-  const stub = env.THREAD.getByName("owner"); await stub.stats();
+  const stub = env.THREAD.getByName("owner"); await stub.syncAdminView("owner");
   return runInDurableObject(stub, (_instance, state) => {
     const store = new MemoryStore(new DurableObjectSqliteDatabase(state.storage), "owner", () => 100);
     return fn(store, new MemoryManager(store, () => 100), state);

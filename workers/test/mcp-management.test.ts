@@ -149,7 +149,8 @@ describe("runtime MCP onboarding", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "tools_rejected", rejected: 1, rejectedTools: [{ name: "unsupported", reason: "unknown_keyword" }] });
     expect(await registry().mcpServerGet(id)).toEqual(before);
-    expect(await env.THREAD.getByName("owner").events({ kind: "mcp_management", limit: 10 })).toEqual({ events: [] });
+    await env.THREAD.getByName("owner").syncAdminView("owner");
+    expect(await env.REQUESTS.getByName("view:thread:owner").events({ kind: "mcp_management", limit: 10 })).toEqual({ events: [] });
   });
 
   it("uses the existing OAuth login and refresh flow for a newly registered service", async () => {

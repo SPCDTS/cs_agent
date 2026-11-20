@@ -4,7 +4,7 @@ import { SandboxDO } from "../src/sandbox/do";
 import { sha256 } from "../src/media/model";
 import { scopePrefix } from "../src/media/repository";
 import { scriptedModel } from "./events-helpers";
-import { input } from "./helpers";
+import { input, syncedView } from "./helpers";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 const groupA = "group:200000001", groupB = "group:200000002";
@@ -35,7 +35,7 @@ it.each(["qq", "web"] as const)("owner %s 使用原 read 读取多个群的持�
   const thread = env.THREAD.getByName("owner");
   if (channel === "web") {
     await thread.submitWeb("owner", crypto.randomUUID(), "查看群产物");
-    await expect.poll(async () => (await thread.chatView("owner")).active, { timeout: 5000 }).toBe(0);
+    await expect.poll(async () => (await (await syncedView("owner")).chatView("owner")).active, { timeout: 5000 }).toBe(0);
   } else await thread.submit(input(1, "查看群产物", 10000001));
   const output = seen.outputs.join("\n");
   expect(output).toContain("甲群内容\n\n[Showing lines 2-2 of 3. Use offset=3 to continue.]");

@@ -4,7 +4,6 @@ import { ProjectionPublisher, observeWrites } from "../requests/projection";
 import { DurableObject } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { SqliteExecutor } from "@earendil-works/chord/sqlite";
-import type { Message } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, section, type Conversation, type EntryId } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase, openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "../env";
@@ -19,7 +18,7 @@ import { memoryDescriptions, memoryParameters } from "../memory/contracts";
 import { formatBeijingTime } from "../memory/time";
 import { PI_SAFETY_RULE, WEB_RULE } from "../prompt";
 import { createSubagentCapabilityHost, installDelegatedCapabilities } from "../mcp/delegated";
-import { RETENTION_MS, subagentName, type SubagentEntry, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
+import { RETENTION_MS, subagentName, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
 import { responseDescription, shortSummary, subagentActivity, SUBAGENT_PROGRESS_RULE } from "./activity";
 
 const context = BACKGROUND_CONTEXT;
@@ -33,9 +32,6 @@ type InboxRow = { request_id: string; text: string; received_at: number; status:
 type Runtime = { harness: Harness; root: Conversation };
 
 const state = (meta: SubagentMeta): SubagentState => ({ status: meta.status, version: meta.version });
-const textOf = (messages: readonly Message[] | undefined) => (messages ?? []).flatMap(message =>
-  typeof message.content === "string" ? [message.content]
-    : message.content.flatMap(block => block.type === "text" ? [block.text] : block.type === "toolCall" ? [`[${block.name}]`] : [])).join(" ");
 
 export class SubagentDO extends DurableObject<Env> {
   private readonly modelAlarm = new ModelAlarm(this.ctx);
@@ -168,16 +164,6 @@ export class SubagentDO extends DurableObject<Env> {
     if (!meta) return;
     const rows = await this.database.all<{ status: InboxStatus; n: number }>("SELECT status, COUNT(*) AS n FROM inbox GROUP BY status");
     return { meta, inbox: Object.fromEntries(rows.map(row => [row.status, row.n])) };
-  }
-
-  /** 面板查看：最近 limit 条会话条目的元数据与文本前 200 字，新的在前。 */
-  async transcriptSummary(limit: number): Promise<{ meta: SubagentMeta; entries: SubagentEntry[] } | undefined> {
-    const meta = await this.meta();
-    if (!meta) return;
-    const { harness, root } = await this.open();
-    const page = await harness.commit(tx => tx.scanEntries({ conversationId: root.id }, Math.min(50, Math.max(1, Math.trunc(limit)))), context);
-    return { meta, entries: page.items.map(entry => ({ id: Number(entry.id), kind: entry.kind,
-      ...(entry.model?.[0] ? { role: entry.model[0].role } : {}), text: textOf(entry.model).slice(0, 200) })) };
   }
 
   override async alarm(): Promise<void> {

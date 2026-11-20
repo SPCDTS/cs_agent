@@ -88,7 +88,7 @@ describe("memory tools in the real Harness", () => {
     const result = await runInDurableObject(env.THREAD.getByName(ns), async (_instance, state) => {
       const instance = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       await instance.submit(input(1, "查询专属", user, group, true));
-      return instance.stats();
+      return { memory: { active: state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM memories WHERE status='active'").one().n } };
     });
     expect(seen.offers.flat().filter(name => name.startsWith("mem_"))).toEqual(expect.arrayContaining(["mem_search"]));
     expect(seen.offers.flat()).toContain("mem_profile");
@@ -105,10 +105,11 @@ describe("memory tools in the real Harness", () => {
     const stats = await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       const instance = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       await instance.submit(input(1, "多次写入", 10000001));
-      return instance.stats();
+      return { memory: { active: state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM memories WHERE status='active'").one().n } };
     });
     expect(seen.outputs[0]).toContain("已记住");
-    expect((await env.THREAD.getByName("group:200000001").memoryView("group:200000001", "")).memories.map(row => row.text)).toEqual(["共享训练安排"]);
+    await env.THREAD.getByName("group:200000001").syncAdminView("group:200000001");
+    expect((await env.REQUESTS.getByName("view:thread:group:200000001").memoryView("group:200000001", "")).memories.map(row => row.text)).toEqual(["共享训练安排"]);
     expect(seen.outputs.at(-1)).toContain("20 次");
     expect(stats.memory.active).toBe(19);
   });

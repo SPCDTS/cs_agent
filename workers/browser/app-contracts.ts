@@ -95,7 +95,7 @@ export const MemoryRow = Type.Object({ id: Type.Number(), text: Type.String(), k
   since: optionalNumber, until: optionalNumber, due_at: optionalNumber, done_at: optionalNumber, source_scope: optionalText, source_message_id: optionalText, confidence: Type.Optional(Type.Number()), recall_count: Type.Optional(Type.Number()), author: Type.String(), updated_at: Type.Number() });
 export const MemoryView = Type.Object({ profile: Profile, memories: Type.Array(MemoryRow) });
 export type MemoryView = Static<typeof MemoryView>;
-export const MemoryList = Type.Object({ items: Type.Array(MemoryRow), total: Type.Number() });
+export const MemoryList = Type.Object({ items: Type.Array(MemoryRow), total: Type.Number(), profile: Profile });
 export const Skills = Type.Object({ skills: Type.Array(Type.Object({ name: Type.String(), description: Type.String(), files: Type.Array(Type.Unknown()), enabled: Type.Boolean() })) });
 export type Skills = Static<typeof Skills>["skills"];
 export const Skill = Type.Object({ name: Type.String(), body: Type.String(), files: Type.Record(Type.String(), Type.String()) });

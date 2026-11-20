@@ -10,22 +10,25 @@ import { MEMORY_HISTORY_MAX_BYTES, parseMemoryHistory, type importMemoryHistory 
 import type { generateProfileProposal } from "../maintenance/profile-proposal";
 import type { runConsolidate } from "../maintenance/consolidate";
 
-/** ThreadDO 只需按下列签名转发到同一 SQLite 内的 manager / maintenance。 */
+/** ThreadDO 只需按下列签名转发写操作到同一 SQLite 内的 manager / maintenance。 */
 export interface MemoryAdminRpc {
   saveMemory(ns:string,id:number|null,input:MemoryEditor,expectedVersion?:number):ReturnType<MemoryManager["save"]>;
-  memoryCandidates(ns:string):ReturnType<MemoryManager["candidates"]>;
   decideMemoryCandidate(ns:string,id:number,accept:boolean):ReturnType<MemoryManager["decideCandidate"]>;
   forgetMemory(ns:string,id:number,expectedVersion?:number):Promise<{status:"forgotten"|"not_found"}>;
-  memoryList(ns: string, query: MemoryListQuery): ReturnType<MemoryManager["list"]>;
-  memoryDetail(ns: string, id: number): ReturnType<MemoryManager["detail"]>;
   restoreMemory(ns: string, id: number, options: { expectedVersion: number; versionId?: number }): ReturnType<MemoryManager["restore"]>;
-  memoryJobs(ns: string): ReturnType<MemoryManager["jobs"]>;
   consolidateMemory(ns: string): ReturnType<typeof runConsolidate>;
   rollbackMemory(ns: string, batchId: string): ReturnType<MemoryManager["rollback"]>;
-  memoryProposals(ns: string, status: ProfileProposal["status"] | "all"): ReturnType<MemoryManager["proposals"]>;
   generateMemoryProposal(ns: string): ReturnType<typeof generateProfileProposal>;
   decideMemoryProposal(ns: string, id: number, decision: "accepted" | "rejected", expectedRevision: string): ReturnType<MemoryManager["decideProposal"]>;
   importMemoryHistory(ns: string, data: unknown, options: { dryRun?: boolean }): ReturnType<typeof importMemoryHistory>;
+}
+/** 展示侧只读接口，由 AgentReadView 提供。 */
+export interface MemoryReadRpc {
+  memoryCandidates(ns:string):ReturnType<MemoryManager["candidates"]>;
+  memoryList(ns: string, query: MemoryListQuery): ReturnType<MemoryManager["list"]>;
+  memoryDetail(ns: string, id: number): ReturnType<MemoryManager["detail"]>;
+  memoryJobs(ns: string): ReturnType<MemoryManager["jobs"]>;
+  memoryProposals(ns: string, status: ProfileProposal["status"] | "all"): ReturnType<MemoryManager["proposals"]>;
 }
 const strict = { additionalProperties: false } as const;
 const ID = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
@@ -66,7 +69,7 @@ function query(url: URL): MemoryListQuery {
 }
 
 /** 放在旧 memory 路由之前；所有路由由现有 handleAdmin 统一执行 Bearer 鉴权。 */
-export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string) => MemoryAdminRpc, read: (ctx: AdminContext, ns: string) => Pick<MemoryAdminRpc, "memoryList" | "memoryDetail" | "memoryJobs" | "memoryProposals" | "memoryCandidates"> = resolve): AdminRoute[] {
+export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string) => MemoryAdminRpc, read: (ctx: AdminContext, ns: string) => MemoryReadRpc): AdminRoute[] {
   const guarded = (handle: AdminRoute["handle"]): AdminRoute["handle"] => async ctx => {
     try { return await handle(ctx); }
     catch (error) {

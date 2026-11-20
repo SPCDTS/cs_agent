@@ -81,8 +81,6 @@ export class SandboxDO extends DurableObject<Env> {
   }
   list(path: string): Promise<DirEntry[]> { return this.workspace.list(path); }
   files(revision?: string): Promise<WorkspaceManifest> { return this.workspace.files(revision); }
-  snapshot(): Promise<WorkspaceManifest> { return this.files(); }
-  listAssets(revision?: string): Promise<WorkspaceManifest> { return this.files(revision); }
   readBlob(path: string, revision?: string): Promise<{ bytes: Uint8Array; mime: string; name: string }> { return this.workspace.readBlob(path, revision); }
   async exportAsset(path: string, scope: string, name?: string): Promise<AssetRef> {
     const file = await this.readBlob(path);
@@ -96,7 +94,7 @@ export class SandboxDO extends DurableObject<Env> {
     let prepared = await this.ctx.storage.get<Preparation>(key);
     if (!prepared) {
       const candidate: Preparation = input.sourceName
-        ? { sourceName: input.sourceName, sourceRevision: (await this.env.SANDBOX.getByName(input.sourceName).snapshot()).revision } : {};
+        ? { sourceName: input.sourceName, sourceRevision: (await this.env.SANDBOX.getByName(input.sourceName).files()).revision } : {};
       prepared = await this.ctx.storage.transaction(async tx => {
         const prior = await tx.get<Preparation>(key); if (prior) return prior;
         await tx.put(key, candidate); return candidate;
@@ -142,5 +140,4 @@ export class SandboxDO extends DurableObject<Env> {
     return report;
   }
   resetRuntime(): Promise<{ reset: boolean }> { return this.workspace.resetRuntime(); }
-  reset(): Promise<{ reset: boolean }> { return this.resetRuntime(); }
 }

@@ -1,4 +1,4 @@
-import { adminHealth } from "./helpers";
+import { adminHealth, syncedView } from "./helpers";
 import { env, reset, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import worker from "../src/index";
@@ -21,7 +21,7 @@ describe("admin memory import", () => {
     const query = new Request("https://test/admin/memory/import?access_token=test-admin-only", { method: "POST", body: JSON.stringify(imported) });
     expect((await worker.fetch(query, adminEnv())).status).toBe(401);
     expect((await worker.fetch(new Request("https://test/admin/memory/import"), adminEnv())).status).toBe(404);
-    expect((await env.THREAD.getByName("owner").stats()).memory.active).toBe(0);
+    expect((await (await syncedView("owner")).stats()).memory.active).toBe(0);
   });
 
   it("preserves IDs and sources, skips collisions, hashes profiles and exposes UTF-8 health counts", async () => {
@@ -46,15 +46,15 @@ describe("admin memory import", () => {
   it("routes each namespace to its own DO and rejects malformed or cross-namespace batches atomically", async () => {
     const group = { ns: "group:200000001", memories: [{ ...imported.memories[0], ns: "group:200000001" }] };
     expect(await (await worker.fetch(request(group), adminEnv())).json()).toEqual({ inserted: 1, skipped: 0 });
-    expect((await env.THREAD.getByName("owner").stats()).memory.active).toBe(0);
-    expect((await env.THREAD.getByName(group.ns).stats()).memory.active).toBe(1);
+    expect((await (await syncedView("owner")).stats()).memory.active).toBe(0);
+    expect((await (await syncedView(group.ns)).stats()).memory.active).toBe(1);
     for (const bad of [{ ...imported, ns: "../../escape" }, { ...imported, memories: [...imported.memories, { ...imported.memories[0], id: 1235, ns: group.ns }] },
       { ...imported, profile: { text: "中".repeat(2000) } }, { ...imported, memories: [{ ...imported.memories[0], text: "token=synthetic-only" }] },
       { ...imported, memories: [{ ...imported.memories[0], id: -1 }] }]) {
       expect((await worker.fetch(request(bad), adminEnv())).status).toBe(400);
     }
     expect((await worker.fetch(new Request("https://test/admin/memory/import", { method: "POST", headers: { Authorization: "Bearer test-admin-only" }, body: "{" }), adminEnv())).status).toBe(400);
-    expect((await env.THREAD.getByName("owner").stats()).memory.active).toBe(0);
+    expect((await (await syncedView("owner")).stats()).memory.active).toBe(0);
     const error = await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       try { await new ThreadDO(state, env).importMemory(group); }
       catch (error) { return error instanceof Error ? error.message : "unknown"; }

@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { MODEL_PROVIDERS } from "../src/models";
 import { ThreadDO } from "../src/thread";
+import { threadView } from "../src/admin/read-views";
 import { MemoryExtractor, MEMORY_EXTRACT_PROMPT } from "../src/memory/extractor";
 import { input } from "./helpers";
 
@@ -30,7 +31,8 @@ it("persists input before execution, keeps history passive, and runs tool contin
   await expect.poll(() => delivery.mock.calls.length).toBeGreaterThan(0);
   expect(await runInDurableObject(thread, (_instance, state) =>
     state.storage.sql.exec("SELECT status,when_busy FROM inbound").toArray())).toEqual([{ status: "queued", when_busy: null }]);
-  await thread.sessionHistory("owner");
+  await thread.syncAdminView("owner");
+  await threadView(env, "owner").sessionHistory("owner");
   expect(starts).toEqual([]);
   delivery.mockImplementation(function (this: ThreadDO) { return origin.run("alarm", () => alarm.call(this)); });
   await runInDurableObject(thread, (_instance, state) => state.storage.setAlarm(Date.now() + 60_000));

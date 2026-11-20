@@ -2,14 +2,14 @@ import { GrantInput } from "../mcp/policy";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import type { AdminContext, AdminRoute } from "./routes";
-import type { McpAdminRpc } from "../mcp/contracts";
+import type { McpAdminRpc, McpReadRpc } from "../mcp/contracts";
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
 function scope(ctx: AdminContext) {
  const value = ctx.url.searchParams.get("scope");
  if (value !== "owner" && !/^group:[1-9][0-9]{0,19}$/.test(value ?? "")) throw new Error("mcp_policy:invalid");
  return value!;
 }
-export function createMcpAdminRoutes(resolve: (ctx: AdminContext, scope: string) => McpAdminRpc, read: (ctx: AdminContext, scope: string) => Pick<McpAdminRpc, "mcpAccess" | "mcpApprovals"> = resolve): AdminRoute[] {
+export function createMcpAdminRoutes(resolve: (ctx: AdminContext, scope: string) => McpAdminRpc, read: (ctx: AdminContext, scope: string) => McpReadRpc): AdminRoute[] {
  const guarded = (handler: AdminRoute["handle"]): AdminRoute["handle"] => async ctx => {
   try { return await handler(ctx); }
   catch (error) {

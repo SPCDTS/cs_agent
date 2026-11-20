@@ -10,7 +10,7 @@ import { runConsolidate } from "../src/maintenance/consolidate";
 import { searchMemory } from "../src/memory/tools";
 afterEach(()=>reset());
 async function use(fn:(store:MemoryStore,state:DurableObjectState)=>Promise<void>){
- const stub=env.THREAD.getByName("owner");await stub.stats();
+ const stub=env.THREAD.getByName("owner");await stub.syncAdminView("owner");
  return runInDurableObject(stub,(_instance,state)=>fn(new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner",()=>2000000000),state));
 }
 const source:ExtractInput={text:"主人明确喜欢新咖啡，不再用旧咖啡。",nickname:"合成用户",user_id:"10000001",received_at:1900000000,platform_message_id:"s1",chat_kind:"private",chat_id:"10000001"};

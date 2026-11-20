@@ -56,18 +56,18 @@ export async function loadMemory() {
   $("mem-meta").textContent="正在载入…";$("memories").replaceChildren();
   $("mem-prev").disabled=true;$("mem-next").disabled=true;$("profile-toggle").disabled=true;
   try {
-    const [base,list]=await Promise.all([readApi(C.MemoryView,"GET","/admin/memory"+query(ns)),readApi(C.MemoryList,"GET","/admin/memory/list?"+p)]);
+    const list=await readApi(C.MemoryList,"GET","/admin/memory/list?"+p);
     if(version!==mm.loadVersion||ns!==state.memoryNs)return;
-    mm.loadedNs=ns;mm.total=list.total;state.memoryView={...base,memories:list.items};state.profile=base.profile;
+    mm.loadedNs=ns;mm.total=list.total;state.memoryView={profile:list.profile,memories:list.items};state.profile=list.profile;
     $("mem-meta").textContent="共 "+list.total+" 条";
     $("mem-page").textContent="第 "+page+" 页 · 共 "+list.total+" 条";
     $("mem-prev").disabled=page<=1;$("mem-next").disabled=page*ADMIN_PAGE_SIZE>=list.total;
     $("profile-toggle").disabled=false;
-    $("profile-meta").textContent=base.profile.review?"待复核 · 暂停使用":base.profile.text?"每轮使用 · "+new TextEncoder().encode(base.profile.text).byteLength+" / 4096 字节":"未创建";
-    $("profile-review").hidden=!base.profile.review;$("profile-review").textContent=base.profile.review??"";
-    $("profile-text").textContent=base.profile.text||"保存长期偏好与要求，或在“待确认与整理”中生成画像建议。";
-    $("profile-sources").replaceChildren(...(base.profile.sources??[]).slice(0,12).map(id=>el("button",{className:"btn compact",text:"依据 #"+id,onclick:()=>memoryDetail(id,ns)})));
-    if((base.profile.sources?.length??0)>12)$("profile-sources").append(el("span",{text:"共 "+base.profile.sources!.length+" 条依据"}));
+    $("profile-meta").textContent=list.profile.review?"待复核 · 暂停使用":list.profile.text?"每轮使用 · "+new TextEncoder().encode(list.profile.text).byteLength+" / 4096 字节":"未创建";
+    $("profile-review").hidden=!list.profile.review;$("profile-review").textContent=list.profile.review??"";
+    $("profile-text").textContent=list.profile.text||"保存长期偏好与要求，或在“待确认与整理”中生成画像建议。";
+    $("profile-sources").replaceChildren(...(list.profile.sources??[]).slice(0,12).map(id=>el("button",{className:"btn compact",text:"依据 #"+id,onclick:()=>memoryDetail(id,ns)})));
+    if((list.profile.sources?.length??0)>12)$("profile-sources").append(el("span",{text:"共 "+list.profile.sources!.length+" 条依据"}));
     if(!list.items.length){$("memories").append(el("tr",{},[el("td",{colspan:5,text:"没有匹配的记忆。可调整筛选，或新增一条记忆。",className:"muted"})]));return;}
     $("memories").replaceChildren(...list.items.map(row=>el("tr",{},[
       el("td",{text:"#"+row.id}),el("td",{},[pill(kinds[row.kind]||row.kind,"neutral")]),
@@ -163,7 +163,8 @@ const Report=Type.Object({dedup:Type.Optional(Type.Number()),orphaned:Type.Optio
 export async function memoryJobs(ns=state.memoryNs) {
   const version=++mm.version;
   try {
-    const [jobs,proposals,candidates,base]=await Promise.all([readApi(MemoryJobsSchema,"GET","/admin/memory/jobs"+query(ns)),readApi(MemoryProposalsSchema,"GET","/admin/memory/proposals"+query(ns)),readApi(MemoryCandidatesSchema,"GET","/admin/memory/candidates"+query(ns)),readApi(C.MemoryView,"GET","/admin/memory"+query(ns))]);
+    const profilePromise = state.profile && mm.loadedNs === ns ? Promise.resolve(state.profile) : readApi(C.MemoryList,"GET","/admin/memory/list"+query(ns)+"&limit=1").then(r=>r.profile);
+    const [jobs,proposals,candidates,profile]=await Promise.all([readApi(MemoryJobsSchema,"GET","/admin/memory/jobs"+query(ns)),readApi(MemoryProposalsSchema,"GET","/admin/memory/proposals"+query(ns)),readApi(MemoryCandidatesSchema,"GET","/admin/memory/candidates"+query(ns)),profilePromise]);
     if(version!==mm.version||ns!==state.memoryNs)return;
     const progress=el("p",{className:"muted small",role:"status",text:"整理与生成建议会调用模型；冲突和画像均需确认后应用。"});
     const action=async(path:string,data:unknown={})=>{
@@ -178,8 +179,8 @@ export async function memoryJobs(ns=state.memoryNs) {
         el("button",{className:"btn",text:"确认更正",onclick:()=>action("/admin/memory/candidates/"+c.id+"/accept")}),el("button",{className:"btn",text:"保留原记忆",onclick:()=>action("/admin/memory/candidates/"+c.id+"/reject")})])]);
     });
     const suggestions=proposals.proposals.map(p=>el("section",{className:"context-part"},[
-      el("div",{className:"memory-diff"},[el("div",{},[el("strong",{text:"当前画像"}),el("pre",{text:base.profile.text||"尚未创建"})]),el("div",{},[el("strong",{text:"建议画像"}),el("pre",{text:p.text})])]),
-      el("div",{className:"row"},[el("button",{className:"btn",text:"采纳画像",disabled:p.based_on_revision!==base.profile.revision,onclick:()=>action("/admin/memory/proposals/"+p.id+"/accept",{expectedRevision:p.based_on_revision})}),el("button",{className:"btn",text:"拒绝建议",onclick:()=>action("/admin/memory/proposals/"+p.id+"/reject",{expectedRevision:base.profile.revision})})])
+      el("div",{className:"memory-diff"},[el("div",{},[el("strong",{text:"当前画像"}),el("pre",{text:profile.text||"尚未创建"})]),el("div",{},[el("strong",{text:"建议画像"}),el("pre",{text:p.text})])]),
+      el("div",{className:"row"},[el("button",{className:"btn",text:"采纳画像",disabled:p.based_on_revision!==profile.revision,onclick:()=>action("/admin/memory/proposals/"+p.id+"/accept",{expectedRevision:p.based_on_revision})}),el("button",{className:"btn",text:"拒绝建议",onclick:()=>action("/admin/memory/proposals/"+p.id+"/reject",{expectedRevision:profile.revision})})])
     ]));
     const history=jobs.jobs.map(j=>{const report=parsed(j.report_json??"null");return el("section",{className:"context-part"},[
       el("p",{text:time(j.started_at)+" · "+({running:"正在整理",ok:"完成",failed:"部分失败",interrupted:"已中断"}[j.status]??j.status)}),

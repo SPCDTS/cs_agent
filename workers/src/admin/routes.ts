@@ -20,7 +20,7 @@ import { ModelSelectionSchema, QQ_ID, SettingsSchema, type Settings } from "../s
 import { modelLoginErrorCode, TokenResponseSchema } from "../codex-login";
 import { catalogFailure } from "../codex-catalog-error";
 import { refreshFailure } from "../codex-refresh-error";
-import type { EventQuery } from "../thread";
+import type { EventQuery } from "../requests/view";
 import { SkillError, parseSkill } from "../skills";
 import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from "../message-import";
 import { ownerIds } from "../policy";
@@ -429,7 +429,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     return json(result);
   } },
   { method: "POST", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/sandbox/reset$`), handle: async ({ env, params }) => {
-    try { return json(await env.SANDBOX.getByName(params.key!).reset()); }
+    try { return json(await env.SANDBOX.getByName(params.key!).resetRuntime()); }
     catch { throw new HttpError(503, "sandbox_unavailable"); }
   } },
 
@@ -437,11 +437,6 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     const ns = memoryNs(url), q = url.searchParams.get("q") ?? "";
     if (q.length > 200) throw new HttpError(400, "invalid_query");
     return json(await threadView(env, ns).memoryView(ns, q));
-  } },
-  { method: "DELETE", path: /^\/admin\/memory\/(?<id>[1-9]\d{0,14})$/, handle: async ({ env, url, params }) => {
-    const ns = memoryNs(url), result = await env.THREAD.getByName(ns).forgetMemory(ns, Number(params.id));
-    if (result.status === "not_found") throw new HttpError(404, "not_found");
-    return json(result);
   } },
   { method: "PUT", path: "/admin/memory/profile", handle: async ({ env, request }) => {
     const { ns, text, expected } = await body(request, Type.Object({ ns: Type.String({ pattern: MEMORY_NS.source }),

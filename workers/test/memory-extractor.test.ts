@@ -13,7 +13,7 @@ const sockets: WebSocket[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const socket of sockets.splice(0)) socket.close(); await reset(); });
 async function useStore<T>(fn: (store: MemoryStore) => Promise<T>) {
   const thread = env.THREAD.getByName("owner");
-  await thread.stats();
+  await thread.syncAdminView("owner");
   return runInDurableObject(thread, (_instance, state) => fn(new MemoryStore(new DurableObjectSqliteDatabase(state.storage), "owner")));
 }
 async function material(store: MemoryStore, turn: string, text = "稳定的偏好：喜欢咖啡，长期关注烟雾弹训练。".repeat(6)) {
@@ -176,13 +176,17 @@ describe("memory extraction", () => {
       const db = new DurableObjectSqliteDatabase(state.storage);
       await expect.poll(async () => (await db.get<{ when_busy: string }>("SELECT when_busy FROM inbound WHERE platform_message_id='2'"))?.when_busy).toBe("steer");
       expect(await Promise.all([first, second])).toEqual([{ status: "done" }, { status: "done" }]);
-      const queued = await instance.stats();
+      const memCounts = async () => ({
+        active: (await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM memories WHERE status='active'"))?.n ?? 0,
+        extractQueue: (await db.get<{ n: number }>("SELECT COUNT(*) AS n FROM extract_queue"))?.n ?? 0,
+      });
+      const queued = { memory: await memCounts() };
       const rows = await db.all<{ turn_id: string }>("SELECT turn_id FROM inbound");
       const sent = await db.all<{ turn_id: string }>("SELECT turn_id FROM outbox");
       const alarm = await state.storage.getAlarm();
       await instance.alarm();
       await expect.poll(async () => (await events(new MemoryStore(db, "owner"))).length).toBe(1);
-      return { queued, rows, sent, alarm, stats: await instance.stats(), events: await events(new MemoryStore(db, "owner")) };
+      return { queued, rows, sent, alarm, stats: { memory: await memCounts() }, events: await events(new MemoryStore(db, "owner")) };
     });
     const frame = await action(frames, 0, "send_private_msg");
     await expect.poll(() => runInDurableObject(thread, (_instance, state) => state.storage.sql.exec<{ when_busy: string }>("SELECT when_busy FROM inbound WHERE platform_message_id='2'").toArray()[0]?.when_busy)).toBe("steer");
@@ -211,10 +215,11 @@ describe("memory extraction", () => {
       await state.storage.setAlarm(Date.now() + 60000);
     });
     await evictDurableObject(thread);
+    const queueCount = () => runInDurableObject(thread, (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM extract_queue").one().n);
     expect(await runDurableObjectAlarm(thread)).toBe(true);
-    await expect.poll(async () => (await thread.stats()).memory.extractQueue).toBe(2);
+    await expect.poll(queueCount).toBe(2);
     expect(await runDurableObjectAlarm(thread)).toBe(true);
-    await expect.poll(async () => (await thread.stats()).memory.extractQueue).toBe(0);
+    await expect.poll(queueCount).toBe(0);
     await expect.poll(() => runInDurableObject(thread, (_instance, state) => state.storage.getAlarm())).toBeNull();
     expect(await runDurableObjectAlarm(thread)).toBe(false);
   });
@@ -224,7 +229,8 @@ describe("memory extraction", () => {
       const instance = threadWithBindings(_instance, state, { ...env, MODEL_PROVIDER: "unsupported" });
       const result = await instance.submit(input(1, "失败回合".repeat(30), 10000001));
       await expect.poll(() => state.storage.getAlarm()).toBeNull();
-      return { result, stats: await instance.stats(), alarm: await state.storage.getAlarm() };
+      const extractQueue = state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM extract_queue").one().n;
+      return { result, stats: { memory: { extractQueue } }, alarm: await state.storage.getAlarm() };
     });
     expect(failed.result).toEqual({ status: "failed" });
     expect(failed.stats.memory.extractQueue).toBe(0);
@@ -239,7 +245,7 @@ describe("memory extraction", () => {
       const stats = await runInDurableObject(env.THREAD.getByName(`group:${id}`), async (_instance, state) => {
         const instance = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: setting });
         await instance.submit(input(1, "本群偏好".repeat(30), 10000004, id, true));
-        return instance.stats();
+        return { memory: { extractQueue: state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM extract_queue").one().n } };
       });
       expect(stats.memory.extractQueue).toBe(expected);
     }

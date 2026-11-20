@@ -4,6 +4,7 @@ import { expect } from "vitest";
 import { Type } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { normalizeMessage, type InboundInput } from "../src/policy";
+import { threadView } from "../src/admin/read-views";
 
 const Action = Type.Object({ action: Type.String(), echo: Type.String(), params: Type.Object({
   user_id: Type.Optional(Type.String()), group_id: Type.Optional(Type.String()),
@@ -53,4 +54,8 @@ export async function sendPrivate(text: string, userId = "10000003") {
 
 export function adminHealth() {
   return worker.fetch(new Request("https://test/admin/health", { headers: { Authorization: "Bearer test-health" } }), { ...env, ADMIN_TOKEN: "test-health" });
+}
+export async function syncedView(thread: string) {
+  await env.THREAD.getByName(thread).syncAdminView(thread);
+  return threadView(env, thread);
 }

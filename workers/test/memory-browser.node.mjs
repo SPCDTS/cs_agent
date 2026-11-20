@@ -26,8 +26,7 @@ const row=(text="主人偏好",id=1)=>({id,text,kind:"preference",status:"active
 const profile={text:"画像旧内容",revision:"rev1"};
 const detail=r=>({row:r,revision:7,versions:[{id:7,at:100,by:"dashboard",reason:"更正",before_json:JSON.stringify({...r,text:"原正文"}),after_json:JSON.stringify(r)}],links:[],inProfile:true,evidence:[{scope:"private:100",message_id:"123",speaker:"100",quote:"这是来源原话"}]});
 function defaults(url,init){
- if(url.pathname==="/admin/memory/list")return Response.json({items:[row(url.searchParams.get("ns")==="owner"?"主人偏好":"群聊偏好")],total:1});
- if(url.pathname==="/admin/memory")return Response.json({profile,memories:[]});
+ if(url.pathname==="/admin/memory/list")return Response.json({items:[row(url.searchParams.get("ns")==="owner"?"主人偏好":"群聊偏好")],total:1,profile});
  if(url.pathname==="/admin/memory/jobs")return Response.json({jobs:[]});
  if(url.pathname==="/admin/memory/proposals")return Response.json(init.method==="POST"?{result:"timeout"}:{proposals:[]});
  if(url.pathname==="/admin/memory/candidates")return Response.json({candidates:[]});

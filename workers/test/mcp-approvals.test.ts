@@ -18,7 +18,7 @@ describe("scoped MCP exact-call approval", () => {
     const remote = fakeRemote(); await login();
     remote.state.tools = [{ name: "notion-create-pages", description: "创建页面",
       inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"], additionalProperties: false } }];
-    await env.THREAD.getByName(group).stats();
+    await env.THREAD.getByName(group).syncAdminView(group);
     await runInDurableObject(env.THREAD.getByName(group), async (_instance, state) => {
       const db = new DurableObjectSqliteDatabase(state.storage); await db.exec(MCP_CATALOG_SCHEMA);
       const registry = createRegistry(), mcp = new ThreadMcp(db, env, registry, async () => actor, MCP_CONFIG, { scope: group });
@@ -58,7 +58,7 @@ describe("scoped MCP exact-call approval", () => {
     });
   });
   it("does not replay an executing write after the runtime restarts", async () => {
-    await env.THREAD.getByName("owner").stats();
+    await env.THREAD.getByName("owner").syncAdminView("owner");
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       const db = new DurableObjectSqliteDatabase(state.storage), policy = new McpPolicyStore(db);
       const call = { authority: reviewer, server: "notion", name: "synthetic-write", contract: "contract", args: { title: "固定参数" }, operationId: "once" };

@@ -16,7 +16,8 @@ import { OAuthRefreshError } from "../src/codex-refresh-error";
 import { sha256 } from "../src/mcp/crypto";
 import { MediaRepository } from "../src/media/repository";
 import { generateImage } from "../src/tools/imagegen";
-import { input } from "./helpers";
+import { input, syncedView } from "./helpers";
+import { threadView } from "../src/admin/read-views";
 
 const TOKEN = "test-admin-only";
 const registry = () => env.REGISTRY.getByName("main");
@@ -451,8 +452,8 @@ describe("原生授权迁移与共享生图", () => {
     } });
     const thread = env.THREAD.getByName("owner");
     await thread.submitWeb("owner", crypto.randomUUID(), "生成一张猫的图片");
-    await expect.poll(async () => (await thread.chatView("owner")).messages.filter(message => message.role === "assistant").length).toBe(1);
-    const page = await thread.chatView("owner");
+    await expect.poll(async () => (await (await syncedView("owner")).chatView("owner")).messages.filter(message => message.role === "assistant").length).toBe(1);
+    const page = await (await syncedView("owner")).chatView("owner");
     expect(JSON.stringify(page)).toContain(assetId);
     expect(assetId).toMatch(/^[a-f0-9]{64}$/);
     expect((await new MediaRepository({ bucket: env.ASSETS, scope: "owner" }).get(assetId)).ref.kind).toBe("image");
@@ -485,11 +486,16 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
     const query = childRequest && step === 1 ? "后续文档" : "官方文档";
     const search = { type: "web_search_call", id: "ws_0", status: "completed", action: { type: "search", query } };
     if (step > 0) expect(payload.input).toContainEqual({ ...search, action: { type: "search", query: "官方文档" } });
+    const display = threadView(env, "owner");
     if (childRequest) {
-      const [child] = await owner.subagentList();
+      await owner.syncAdminView("owner");
+      const [child] = await display.subagentList();
       expect(child).toBeDefined();
-      expect(await owner.subagentTranscript(child!.id, 5)).toBeDefined();
-    } else expect(await owner.chatView("owner")).toBeDefined();
+      expect(await display.subagentTranscript(child!.id, 5)).toBeDefined();
+    } else {
+      await owner.syncAdminView("owner");
+      expect(await display.chatView("owner")).toBeDefined();
+    }
     const item = step === 0
       ? { type: "function_call", id: "fc_" + (childRequest ? "child" : "parent"), call_id: "call_" + (childRequest ? "child" : "parent"),
           name: childRequest ? "qq_context" : "subagent", arguments: JSON.stringify(childRequest ? { limit: 1 } : { action: "spawn", task: "执行隔离验证" }) }
@@ -502,13 +508,14 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
     ].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""), { headers: { "Content-Type": "text/event-stream" } });
   } });
   expect(await owner.submit(input(55, "派子 agent 执行隔离验证", 10000001))).toEqual({ status: "done" });
+  const display = threadView(env, "owner");
   await vi.waitFor(async () => {
-    const [child] = await owner.subagentList();
+    await owner.syncAdminView("owner");
+    const [child] = await display.subagentList();
     expect(child?.status).toBe("done");
   });
   await owner.syncAdminView("owner");
-  const [child] = await owner.subagentList();
-  const display = env.REQUESTS.getByName("view:thread:owner");
+  const [child] = await display.subagentList();
   expect((await display.subagentTranscript(child.id, 10))?.entries.some(entry => entry.text === "完成")).toBe(true);
   const requests = env.REQUESTS.getByName("main");
   const page = await requests.list({ since: 0, until: Date.now() + 1000, limit: 20 });

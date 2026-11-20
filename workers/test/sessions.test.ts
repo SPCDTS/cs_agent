@@ -4,7 +4,7 @@ import { fauxProvider, fauxAssistantMessage, type FauxResponseFactory } from "@e
 import { MODEL_PROVIDERS } from "../src/models";
 import worker from "../src/index";
 import { threadView } from "../src/admin/read-views";
-import { input } from "./helpers";
+import { input, syncedView } from "./helpers";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 const owner = () => env.THREAD.getByName("owner");
@@ -25,7 +25,7 @@ describe("session lifecycle", () => {
     const contexts: string[] = [];
     fake(ctx => { contexts.push(JSON.stringify(ctx.messages)); return fauxAssistantMessage("已收到"); });
     await owner().submit(input(1, "重置前的海风代号", 10000001));
-    const profile = (await owner().memoryView("owner", "")).profile;
+    const profile = (await (await syncedView("owner")).memoryView("owner", "")).profile;
     await owner().writeProfile("owner", "长期画像仍保留", profile.revision);
     const id = crypto.randomUUID();
     const first = await owner().resetSession("owner", id, "第一段对话");
@@ -34,10 +34,10 @@ describe("session lifecycle", () => {
     expect(await owner().resetSession("owner", id, "另一个名称")).toEqual({ error: "request_conflict" });
     await owner().submit(input(2, "新话题", 10000001));
     expect(contexts.at(-1)).not.toContain("重置前的海风代号");
-    const history = await owner().sessionHistory("owner");
+    const history = await (await syncedView("owner")).sessionHistory("owner");
     expect(history.entries.filter(e => e.reset)).toHaveLength(1);
     expect(JSON.stringify(history.entries)).toContain("重置前的海风代号");
-    expect((await owner().memoryView("owner", "")).profile.text).toBe("长期画像仍保留");
+    expect((await (await syncedView("owner")).memoryView("owner", "")).profile.text).toBe("长期画像仍保留");
     await runInDurableObject(owner(), (_instance, state) => {
       expect(state.storage.sql.exec<{ n: number }>("SELECT count(*) n FROM messages").one().n).toBe(2);
     });
@@ -65,13 +65,13 @@ describe("session lifecycle", () => {
     await owner().submit(input(1, "测试压缩", 10000001));
     const response = await request("compact", "POST", {});
     expect(response.status).toBe(202);
-    await expect.poll(async () => (await owner().sessionHistory("owner")).compacting).toBe(false);
+    await expect.poll(async () => (await (await syncedView("owner")).sessionHistory("owner")).compacting).toBe(false);
     const id = crypto.randomUUID();
     await owner().resetSession("owner", id, "恢复演练");
     await runInDurableObject(owner(), (_instance, state) => {
       state.storage.sql.exec("UPDATE session_resets SET status='pending' WHERE request_id=?", id);
     });
     await owner().resetSession("owner", id, "恢复演练");
-    expect((await owner().sessionHistory("owner")).entries.filter(e => e.reset)).toHaveLength(1);
+    expect((await (await syncedView("owner")).sessionHistory("owner")).entries.filter(e => e.reset)).toHaveLength(1);
   });
 });

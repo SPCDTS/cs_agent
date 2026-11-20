@@ -1,6 +1,6 @@
 import { env, SELF, reset, runInDurableObject, evictDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
-import { action, adminHealth, connect, event, input, reply } from "./helpers";
+import { action, adminHealth, connect, event, input, reply, syncedView } from "./helpers";
 
 const sockets: WebSocket[] = [];
 const group = () => env.THREAD.getByName("group:200000001");
@@ -11,10 +11,10 @@ describe("group conversations", () => {
     const { socket, frames } = await connect(sockets);
     socket.send(JSON.stringify(event(1, "普通聊天", 10000004, 200000001)));
     await expect.poll(() => env.BRIDGE.getByName("napcat").status()).toMatchObject({ threads: ["group:200000001"] });
-    await group().stats();
+    await group().syncAdminView("group:200000001");
     await expect.poll(() => runInDurableObject(group(), (_instance, state) => state.storage.sql.exec("SELECT text FROM messages").toArray()))
       .toEqual([{ text: "普通聊天" }]);
-    expect(await group().stats()).toMatchObject({ inbound: { queued: 0, done: 0, failed: 0 }, outbox: 0 });
+    expect(await (await syncedView("group:200000001")).stats()).toMatchObject({ inbound: { queued: 0, done: 0, failed: 0 }, outbox: 0 });
     expect(await runInDurableObject(group(), (_instance, state) => state.storage.sql.exec("SELECT scope, name FROM scope_names").toArray()))
       .toEqual([{ scope: "group:200000001", name: "测试群" }]);
     expect(frames).toHaveLength(1);
@@ -30,7 +30,7 @@ describe("group conversations", () => {
       { type: "at", data: { qq: "10000004" } }, { type: "text", data: { text: "echo: [@你]帮忙" } },
     ] });
     reply(socket, frame.echo);
-    await expect.poll(() => group().stats()).toMatchObject({ inbound: { done: 1 }, outbox: 1 });
+    await expect.poll(async () => (await syncedView("group:200000001")).stats()).toMatchObject({ inbound: { done: 1 }, outbox: 1 });
     const rows = await runInDurableObject(group(), (_instance, state) => ({
       messages: state.storage.sql.exec("SELECT scope, message_id, is_self, reply_to_id FROM messages ORDER BY id").toArray(),
       entries: state.storage.sql.exec("SELECT * FROM pi_entries").toArray(),
@@ -58,7 +58,7 @@ describe("group conversations", () => {
     const frame = await action(frames, 0, "send_private_msg");
     expect(frame.params.user_id).toBe("10000003");
     reply(socket, frame.echo);
-    await expect.poll(() => env.THREAD.getByName("private:10000003").stats()).toMatchObject({ inbound: { done: 1 } });
+    await expect.poll(async () => (await syncedView("private:10000003")).stats()).toMatchObject({ inbound: { done: 1 } });
     expect(await env.BRIDGE.getByName("napcat").status()).toMatchObject({ ignored: 1, threads: ["private:10000003"] });
     expect(frames).toHaveLength(1);
   });
@@ -70,7 +70,7 @@ describe("group conversations", () => {
     const one = await action(frames);
     const second = thread.submit(input(11, "二", 10000005, 200000001, true));
     const third = thread.submit(input(12, "三", 10000006, 200000001, true));
-    await expect.poll(() => thread.stats()).toMatchObject({ inbound: { queued: 3 } });
+    await expect.poll(async () => (await syncedView("group:200000001")).stats()).toMatchObject({ inbound: { queued: 3 } });
     reply(socket, one.echo, 90000010);
     const two = await action(frames, 1);
     expect(two.params.message?.[0]?.data.qq).toBe("10000005");
@@ -106,7 +106,7 @@ describe("group conversations", () => {
   it("refreshes group names only after the six-hour cache expires", async () => {
     const { socket, frames } = await connect(sockets);
     socket.send(JSON.stringify(event(30, "第一条", 10000004, 200000001)));
-    await group().stats();
+    await group().syncAdminView("group:200000001");
     await expect.poll(() => runInDurableObject(group(), (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM messages").one().n)).toBe(1);
     const bridge = env.BRIDGE.getByName("napcat");
     const cache = await runInDurableObject(bridge, (_instance, state) => state.storage.get<{ name: string; expires: number }>("group:200000001"));
@@ -153,7 +153,7 @@ describe("group conversations", () => {
       count: state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM seen").one().n,
       oldest: state.storage.sql.exec<{ key: string }>("SELECT key FROM seen ORDER BY id LIMIT 1").one().key,
     }))).toEqual({ count: 5000, oldest: "old:1" });
-    await group().stats();
+    await group().syncAdminView("group:200000001");
     await expect.poll(() => runInDurableObject(group(), (_instance, state) => state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM messages").one().n)).toBe(1);
   });
 });

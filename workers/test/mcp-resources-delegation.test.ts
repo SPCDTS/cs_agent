@@ -54,7 +54,7 @@ describe("MCP resources and delegated capabilities", () => {
   });
   it("reads listed/template resources with configured prefixes through the shared connection", async () => {
     const remote = fakeRemote(); await login();
-    await env.THREAD.getByName("owner").stats();
+    await env.THREAD.getByName("owner").syncAdminView("owner");
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       const db = new DurableObjectSqliteDatabase(state.storage);
       await db.exec(MCP_CATALOG_SCHEMA);
@@ -73,7 +73,7 @@ describe("MCP resources and delegated capabilities", () => {
     });
   });
   it("delegates only snapshot tools, skills and explicitly granted independent coding, preserving web origin", async () => {
-    fakeRemote(); await login(); await env.THREAD.getByName("owner").stats();
+    fakeRemote(); await login(); await env.THREAD.getByName("owner").syncAdminView("owner");
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {
       const db = new DurableObjectSqliteDatabase(state.storage); await db.exec(MCP_CATALOG_SCHEMA);
       const mcp = new ThreadMcp(db, env, createRegistry(), async () => authority); await mcp.refreshAll();
@@ -96,7 +96,7 @@ describe("MCP resources and delegated capabilities", () => {
   });
 
   it("narrows delegated tool contracts and sends trusted caller scope separately from arguments", async () => {
-    const remote = fakeRemote(); await login(); await env.THREAD.getByName("owner").stats();
+    const remote = fakeRemote(); await login(); await env.THREAD.getByName("owner").syncAdminView("owner");
     remote.state.tools = [
       ...remote.state.tools.slice(0, 2),
       { name: "notion-create-pages", inputSchema: { type: "object" },

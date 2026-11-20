@@ -142,7 +142,8 @@ describe("ScheduleDO alarm", () => {
     await runDurableObjectAlarm(directory());
     expect(await find(created.id)).toMatchObject({ status: "active", runs: [{ status: "skipped", reason: "stale", skipped_count: 3, fire_at: fireAt }] });
     expect((await find(created.id)).next_fire_at).toBeGreaterThan(Date.now());
-    expect((await env.THREAD.getByName("owner").stats()).inbound).toEqual({ queued: 0, done: 0, failed: 0 });
+    await env.THREAD.getByName("owner").syncAdminView("owner");
+    expect((await env.REQUESTS.getByName("view:thread:owner").stats()).inbound).toEqual({ queued: 0, done: 0, failed: 0 });
   });
 
   it("skips run-now as overlap while the previous run is still in its turn, then runs again once it ends", async () => {

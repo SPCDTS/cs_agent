@@ -43,7 +43,7 @@ function fauxModel() {
 async function withThread<T>(name: string, vars: Record<string, string>, fn: (thread: ThreadDO, db: DurableObjectSqliteDatabase) => Promise<T>) {
   return runInDurableObject(env.THREAD.getByName(name), async (_instance, state) => {
     const thread = new ThreadDO(state, { ...env, ...vars });
-    await thread.memoryView(name, "");
+    await thread.syncAdminView(name);
     return fn(thread, new DurableObjectSqliteDatabase(state.storage));
   });
 }
@@ -96,7 +96,8 @@ describe("chat history aging", () => {
       expect(await run(thread, "aging", monday)).toMatchObject({ day: 0, week: 1 });
       expect(prompts).toHaveLength(3);
       expect(await db.all("SELECT kind, period_start, msg_count FROM summaries")).toEqual([{ kind: "week", period_start: bj("2026-10-19", "00:00") / 1000, msg_count: 11 }]);
-      expect((await thread.stats()).maintenance).toEqual({ agingLastRun: monday, consolidateLastRun: null, summaries: { day: 0, week: 1 } });
+      await thread.syncAdminView(GROUP);
+      expect((await env.REQUESTS.getByName("view:thread:" + GROUP).stats()).maintenance).toEqual({ agingLastRun: monday, consolidateLastRun: null, summaries: { day: 0, week: 1 } });
 
       expect(await recall(db, GROUP, { query: "烟雾弹训练" })).toBe("[周摘要 10-19~10-25] 本周围绕烟雾弹训练做了安排。");
       expect(await recall(db, GROUP, { query: "训练" })).toContain("[周摘要 10-19~10-25]");
@@ -170,7 +171,8 @@ describe("memory consolidation", () => {
       expect(events).toHaveLength(2);
       expect(JSON.parse(events[0]!.detail)).toMatchObject({ batchId: versions[0]!.by.slice(12), dedup: 1, retired: 1, tokens: expect.any(Object), ms: expect.any(Number) });
       expect(events.map(e => e.detail).join()).not.toMatch(/咖啡|比赛|撤回/);
-      expect((await thread.stats()).maintenance.consolidateLastRun).toBe(now);
+      await thread.syncAdminView("owner");
+      expect((await env.REQUESTS.getByName("view:thread:owner").stats()).maintenance.consolidateLastRun).toBe(now);
     });
   });
 
@@ -209,7 +211,9 @@ describe("scheduled maintenance", () => {
     await worker.scheduled(createScheduledController({ cron: MAINTENANCE_CRON, scheduledTime: now }), env, ctx);
     await waitOnExecutionContext(ctx);
     expect(maintain.mock.calls.map(([job]) => job)).toEqual(["aging", "consolidate", "retention", "aging", "consolidate", "retention"].map(kind => ({ kind, now })));
-    expect((await env.THREAD.getByName(GROUP).stats()).maintenance.agingLastRun).toBeNull();
-    expect((await env.THREAD.getByName("group:200000002").stats()).maintenance.agingLastRun).toBe(now);
+    await env.THREAD.getByName(GROUP).syncAdminView(GROUP);
+    await env.THREAD.getByName("group:200000002").syncAdminView("group:200000002");
+    expect((await env.REQUESTS.getByName("view:thread:" + GROUP).stats()).maintenance.agingLastRun).toBeNull();
+    expect((await env.REQUESTS.getByName("view:thread:group:200000002").stats()).maintenance.agingLastRun).toBe(now);
   });
 });
