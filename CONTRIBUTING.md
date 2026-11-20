@@ -28,7 +28,7 @@ npm run check
 
 ## 提交与 PR
 
-1. 从最新 main 创建功能分支；agent 使用 `codex/` 前缀。Windows 可用 `scripts/wt.ps1 new <名称>` 创建 worktree。
+1. 从最新 main 创建功能分支，按变更性质使用语义前缀（`feat/`、`fix/`、`docs/`、`refactor/`、`test/`、`chore/`、`ci/`）。Windows 可用 `scripts/wt.ps1 new <前缀/名称>` 创建 worktree。
 2. 完成一个逻辑变更，运行相关检查，核对暂存区不含凭据、私有数据或无关文件。
 3. 推送功能分支，使用已获授权的 GitHub 身份创建 PR，说明问题、修改后的行为和验证结果。
 4. 等待 GitHub Actions 的 `workers check` 成功，再由获授权的人通过 GitHub 合并。main 禁止直接推送、强推和删除。
