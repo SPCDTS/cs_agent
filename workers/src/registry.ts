@@ -159,7 +159,6 @@ export class RegistryDO extends DurableObject<Env> {
   grantPut(input: unknown, actor: string) { this.requireGrantOwner(actor); return this.grantStore.put(input,actor); }
   grantRevoke(input: unknown, actor: string) { this.requireGrantOwner(actor); return this.grantStore.revoke(input); }
   canAccess(input: GrantAccess): boolean { return this.grantStore.canAccess(input); }
-  importGrants(input: unknown) { return this.grantStore.import(input); }
   private requireGrantOwner(actor: string): void { if (!actor.startsWith("qq:") || !ownerIds(this.env).includes(actor.slice(3))) throw new Error("owner_required"); }
 
   opsSettings(): OpsSettingsSnapshot {

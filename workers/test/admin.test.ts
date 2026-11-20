@@ -139,8 +139,7 @@ describe("admin data views", () => {
     expect(eventTail.events.map(e => e.detail.tool)).toEqual(["tool0"]);
     expect(eventTail.next).toBeUndefined();
 
-    const memories = Array.from({ length: 11 }, (_, i) => ({ id: i + 1, ns: "owner", kind: "fact", text: "分页记录" + i, author: "dashboard", updated_at: 1_700_000_000 + i }));
-    await adminJson("POST", "/admin/memory/import", { ns: "owner", memories });
+    for (let i = 0; i < 11; i++) await owner.saveMemory("owner", null, { kind: "fact", text: "分页记录" + i });
     type MemoryPage = { items: { id: number }[]; page: number; limit: number; total: number };
     await owner.syncAdminView("owner");
     const memoryPage = await adminJson<MemoryPage>("GET", "/admin/memory/list?ns=owner");
@@ -211,23 +210,22 @@ describe("admin data views", () => {
   });
 
   it("lists, forgets and CAS-edits memory of one namespace", async () => {
-    const memories = [
-      { id: 11, ns: "owner", kind: "fact", text: "喜欢烟雾弹", author: "dashboard", updated_at: 1_700_000_100 },
-      { id: 12, ns: "owner", kind: "preference", text: "群里只在被 @ 时回复", author: "owner", updated_at: 1_700_000_300 },
-      { id: 13, ns: "owner", kind: "fact", text: "常用闪光弹", author: "extractor", updated_at: 1_700_000_200 },
-    ];
-    await adminJson("POST", "/admin/memory/import", { ns: "owner", profile: { text: "初始画像" }, memories });
+    const owner = env.THREAD.getByName("owner");
+    const first = await adminJson<{ id: number }>("POST", "/admin/memory/entries?ns=owner", { kind: "fact", text: "喜欢烟雾弹" });
+    const third = await adminJson<{ id: number }>("POST", "/admin/memory/entries?ns=owner", { kind: "fact", text: "常用闪光弹" });
+    const second = await adminJson<{ id: number }>("POST", "/admin/memory/entries?ns=owner", { kind: "preference", text: "群里只在被 @ 时回复" });
+    await owner.writeProfile("owner", "初始画像", "none");
     type View = { profile: { text: string; revision: string }; memories: { id: number; status: string }[] };
-    await env.THREAD.getByName("owner").syncAdminView("owner");
+    await owner.syncAdminView("owner");
     const view = await adminJson<View>("GET", "/admin/memory?ns=owner");
-    expect(view.memories.map(row => row.id)).toEqual([12, 13, 11]);
+    expect(view.memories.map(row => row.id)).toEqual([second.id, third.id, first.id]);
     expect(view.profile.text).toBe("初始画像");
-    expect((await adminJson<View>("GET", "/admin/memory?ns=owner&q=" + encodeURIComponent("烟雾弹"))).memories.map(row => row.id)).toEqual([11]);
-    expect((await adminJson<View>("GET", "/admin/memory?ns=owner&q=%2313")).memories.map(row => row.id)).toEqual([13]);
+    expect((await adminJson<View>("GET", "/admin/memory?ns=owner&q=" + encodeURIComponent("烟雾弹"))).memories.map(row => row.id)).toEqual([first.id]);
+    expect((await adminJson<View>("GET", `/admin/memory?ns=owner&q=%23${third.id}`)).memories.map(row => row.id)).toEqual([third.id]);
 
-    expect(await adminJson("DELETE", "/admin/memory/12?ns=owner")).toEqual({ status: "forgotten" });
-    await env.THREAD.getByName("owner").syncAdminView("owner");
-    expect((await adminJson<View>("GET", "/admin/memory?ns=owner")).memories.map(row => row.id)).toEqual([13, 11]);
+    expect(await adminJson("DELETE", `/admin/memory/${second.id}?ns=owner`)).toEqual({ status: "forgotten" });
+    await owner.syncAdminView("owner");
+    expect((await adminJson<View>("GET", "/admin/memory?ns=owner")).memories.map(row => row.id)).toEqual([third.id, first.id]);
     expect((await threadView(env, "owner").stats()).memory.active).toBe(2);
     expect((await admin("DELETE", "/admin/memory/999?ns=owner")).status).toBe(404);
     await env.THREAD.getByName("private:10000003").syncAdminView("private:10000003");

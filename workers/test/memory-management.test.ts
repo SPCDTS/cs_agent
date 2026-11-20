@@ -1,12 +1,10 @@
 import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
-import { MemoryStore, memoryHash } from "../src/memory/store";
+import { MemoryStore } from "../src/memory/store";
 import { MemoryManager } from "../src/memory/management";
-import { importMemoryHistory, parseMemoryHistory } from "../src/memory/history-import";
 import { generateProfileProposal } from "../src/maintenance/profile-proposal";
 import { runConsolidate } from "../src/maintenance/consolidate";
-import type { MemoryRow } from "../src/memory/types";
 
 afterEach(async () => { await reset(); });
 async function use<T>(fn: (store: MemoryStore, manager: MemoryManager, state: DurableObjectState) => Promise<T>) {
@@ -108,45 +106,6 @@ describe("namespace memory administration", () => {
       await expect(runConsolidate(context)).rejects.toMatchObject({ code: "conflict" });
       await manager.recoverInterruptedJobs();
       expect((await manager.jobs()).find(j => j.id === "blocked")?.status).toBe("interrupted");
-    });
-  });
-});
-
-describe("incremental legacy memory history", () => {
-  it("imports 61 versions and four links once, remaps collisions, supports dry run and retains cloud edits and CAS", async () => {
-    await use(async (store, manager) => {
-      const original = (await store.remember({ kind: "fact", text: "旧正文", author: "dashboard", source_message_id: "synthetic-1" })).row;
-      await store.update(original.id, { text: "云端后来编辑" }, "dashboard");
-      const current = await manager.detail(original.id);
-      const other = new MemoryStore(store.db, "private:10000003");
-      await remember(other, "必须保留的其他命名空间");
-      const memories: MemoryRow[] = Array.from({ length: 4 }, (_, i) => ({ ...original, id: i + 1, text: `旧正文${i}`,
-        hash: memoryHash("owner", "fact", `旧正文${i}`), source_message_id: `synthetic-${i + 1}` }));
-      memories[0] = original;
-      const bundle = { format: "cs-agent-memory-history-v1", source: "legacy-test", ns: "owner", memories,
-        versions: Array.from({ length: 61 }, (_, i) => {
-          const row = memories[i % 4]!;
-          return { id: i + 1, memory_id: row.id, at: i, by: "dashboard", before_json: null, after_json: JSON.stringify(row), reason: "remember" };
-        }), links: Array.from({ length: 4 }, (_, i) => ({ from_id: i + 1, to_id: (i + 1) % 4 + 1, rel: "related", created_at: 1 })), proposals: [] };
-      const preview = await importMemoryHistory(store, bundle, { dryRun: true });
-      expect(preview).toMatchObject({ dryRun: true, memories: 3, versions: 61, links: 4, proposals: 0 });
-      expect(await store.db.all("SELECT * FROM memory_history_receipts")).toEqual([]);
-      const imported = await importMemoryHistory(store, bundle);
-      expect(imported).toMatchObject({ memories: 3, versions: 61, links: 4, proposals: 0 });
-      expect(imported.idMap).toEqual(preview.idMap);
-      expect(imported.idMap[1]?.memoryId).not.toBe(2);
-      expect(await store.get(original.id)).toMatchObject({ text: "云端后来编辑" });
-      expect((await manager.detail(original.id)).revision).toBe(current.revision);
-      expect(await importMemoryHistory(store, bundle)).toMatchObject({ memories: 0, versions: 0, links: 0, proposals: 0 });
-      expect(await other.get(2)).toMatchObject({ text: "必须保留的其他命名空间" });
-      const next = { ...bundle, versions: [...bundle.versions, { ...bundle.versions[0]!, id: 62 }] };
-      expect(await importMemoryHistory(store, next)).toMatchObject({ versions: 1 });
-      const invalid = structuredClone(next);
-      invalid.versions[0]!.after_json = JSON.stringify({ ...original, ns: "private:10000003" });
-      expect(() => parseMemoryHistory(invalid)).toThrow("snapshot");
-      await expect(importMemoryHistory(store, { ...next, versions: [{ ...next.versions[0]!, reason: "改变既有版本" }] })).rejects.toThrow("receipt_conflict");
-      expect((await manager.detail(original.id)).revision).toBe(current.revision);
-      expect(await store.db.all("SELECT * FROM memory_imported_versions")).toHaveLength(62);
     });
   });
 });

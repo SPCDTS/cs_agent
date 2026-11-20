@@ -12,11 +12,3 @@ export function workspaceView(env: Env, thread: string) {
     return { sourceName, sandbox: env.SANDBOX.getByName(sourceName) };
   } });
 }
-/** 复用已有五分钟维护入口，只在升级后回填一次；新对象会主动建立展示数据。 */
-export async function backfillViews(env: Env): Promise<void> {
-  const registry = env.REQUESTS.getByName("main");
-  if (!await registry.projectionBackfillNeeded()) return;
-  const keys = new Set(["owner", ...await env.BRIDGE.getByName("napcat").threadKeys()]);
-  for (const key of keys) await env.THREAD.getByName(key).syncAdminView(key);
-  await registry.projectionBackfillDone();
-}

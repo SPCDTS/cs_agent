@@ -19,10 +19,6 @@ export const GrantSchema = Type.Object({ user: UserSchema, caps: Type.Array(Gran
   expires_at: Type.Optional(Type.Integer({ minimum: 0 })), granted_by: UserSchema,
   created_at: Type.Integer({ minimum: 0 }), updated_at: Type.Integer({ minimum: 0 }),
 }, strict);
-export const GrantImportSchema = Type.Object({ datasetId: Type.String({ minLength: 1, maxLength: 128 }), sourceHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
-  schemaVersion: Type.Literal(1), dryRun: Type.Boolean(), grants: Type.Array(GrantSchema, { maxItems: 1000 }) }, strict);
-export const GrantImportReceiptSchema = Type.Object({datasetId:Type.String(),sourceHash:Type.String(),dryRun:Type.Boolean(),items:Type.Array(Type.Object({user:Type.String(),action:Type.Union([Type.Literal("created"),Type.Literal("preserved")])},strict))},strict);
-export type GrantImportResult = Static<typeof GrantImportReceiptSchema> & { replayed:boolean };
 export type GrantInput = Static<typeof GrantInputSchema>;
 export type Grant = Static<typeof GrantSchema>;
 export type GrantAccess = { user: string; cap: Static<typeof GrantCapSchema>; scope: string; target?: string };
@@ -69,21 +65,6 @@ export class GrantStore {
     const grant = this.list(now).find(grant => grant.user === input.user && !grant.expired);
     return !!grant && grant.caps.includes(input.cap) && (grant.scopes === undefined || grant.scopes.includes(input.scope))
       && (input.cap !== "send" || input.target !== undefined && grant.targets.includes(input.target));
-  }
-  import(input: unknown):GrantImportResult {
-    if (!Check(GrantImportSchema, input)) throw new Error("invalid_grant_import");
-    if (new Set(input.grants.map(grant => grant.user)).size !== input.grants.length) throw new Error("duplicate_import_user");
-    return this.storage.transactionSync(() => {
-      const receipt = this.storage.sql.exec<{ receipt: string }>("SELECT receipt FROM grant_imports WHERE dataset=? AND source_hash=?", input.datasetId, input.sourceHash).toArray()[0];
-      if (receipt) { const value:unknown=JSON.parse(receipt.receipt);if(!Check(GrantImportReceiptSchema,value))throw new Error("invalid_grant_receipt");return { replayed:true,...value }; }
-      const items:GrantImportResult["items"] = input.grants.map(grant => ({ user: grant.user, action: this.storage.sql.exec("SELECT user FROM grants WHERE user=?", grant.user).toArray().length ? "preserved" : "created" }));
-      const result = { datasetId: input.datasetId, sourceHash: input.sourceHash, dryRun: input.dryRun, items };
-      if (!input.dryRun) {
-        for (const grant of input.grants) if (items.find(item => item.user === grant.user)?.action === "created") this.save(grant);
-        this.storage.sql.exec("INSERT INTO grant_imports(dataset,source_hash,receipt) VALUES (?,?,?)", input.datasetId, input.sourceHash, JSON.stringify(result));
-      }
-      return { replayed: false, ...result };
-    });
   }
   private save(grant: Grant): void {
     this.storage.sql.exec(`INSERT INTO grants(user,value,revision) VALUES (?,?,1)

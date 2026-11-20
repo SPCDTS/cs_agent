@@ -13,7 +13,7 @@ const admin = (path: string, method = "GET", body?: unknown) => worker.fetch(new
 
 it("浏览器 schema 接受真实管理路由响应，包括空列表和已保存内容", async () => {
   const owner = env.THREAD.getByName("owner"), requests = env.REQUESTS.getByName("main"), now = Date.now();
-  await owner.importMemory({ ns: "owner", memories: [{ id: 1, kind: "fact", text: "浏览器契约检查", author: "test" }] });
+  await owner.saveMemory("owner", null, { kind: "fact", text: "浏览器契约检查" });
   await owner.syncAdminView("owner");
   await env.SCHEDULE.getByName("main").create({ name: "契约检查", prompt: "检查", conversation: "owner", rule: { kind: "at", at: now + 3600_000 } }, "qq:10000001");
   expect((await admin("/admin/skills/browser-check", "PUT", { markdown: "---\nname: browser-check\ndescription: 浏览器契约检查\n---\n检查正文" })).status).toBe(200);

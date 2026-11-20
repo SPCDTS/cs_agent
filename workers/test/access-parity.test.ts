@@ -123,16 +123,6 @@ describe("registry access and configuration",()=>{
     expect(await r.canAccess({user,cap:"schedule",scope:"group:200000001"})).toBe(true);
     await expect(async()=>await r.grantPut({user,caps:["send"]},user)).rejects.toThrow("owner_required");
   });
-  it("imports grants incrementally without extending timestamps or resurrecting revoked users",async()=>{
-    const r=registry(),grant={user:"qq:10000003",caps:["send"],targets:[],expires_at:100,granted_by:"qq:10000001",created_at:10,updated_at:20};
-    const input={datasetId:"legacy",sourceHash:"a".repeat(64),schemaVersion:1,dryRun:true,grants:[grant]};
-    expect(await r.importGrants(input)).toMatchObject({items:[{action:"created"}]});expect(await r.grantsList()).toEqual([]);
-    expect(await r.importGrants({...input,dryRun:false})).toMatchObject({items:[{action:"created"}]});
-    expect(await r.grantsList()).toMatchObject([{created_at:10,expires_at:100,expired:true}]);
-    await r.grantRevoke({user:grant.user},"qq:10000001");
-    expect(await r.importGrants({...input,dryRun:false,sourceHash:"b".repeat(64)})).toMatchObject({items:[{action:"preserved"}]});expect(await r.grantsList()).toEqual([]);
-    expect(await r.importGrants({...input,dryRun:false})).toMatchObject({replayed:true});
-  });
   it("separates persona and ops CAS from runtime settings and detects skill ABA updates",async()=>{
     const r=registry(),initial=await r.persona();expect(initial).toEqual({text:"",revision:"0"});
     const saved=await r.setPersona("中文人格",initial.revision);expect(saved.ok).toBe(true);

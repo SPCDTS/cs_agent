@@ -1,11 +1,32 @@
+import { Type } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { CandidateInputSchema, type MemoryCandidate, type MemoryEditor } from "./editor";
 import type { SqliteExecutor, SqliteValue } from "@earendil-works/chord/sqlite";
 import { MemoryStore, MemoryStoreError, memoryHash, nowSec, sha256 } from "./store";
-import type { MemoryKind, MemoryLinkRow, MemoryRow, MemoryStatus, MemoryVersionRow } from "./types";
-import { parseSnapshot } from "./history-import";
+import { MEMORY_KINDS, MEMORY_STATUSES, type MemoryKind, type MemoryLinkRow, type MemoryRow, type MemoryStatus, type MemoryVersionRow } from "./types";
 import { effectiveMemory } from "./lifecycle";
 import { containsSecret } from "./secrets";
+
+const snapshotId = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
+const snapshotSec = Type.Integer({ minimum: -Number.MAX_SAFE_INTEGER, maximum: Number.MAX_SAFE_INTEGER });
+const nullable = <T extends ReturnType<typeof Type.String> | typeof snapshotSec>(schema: T) => Type.Union([schema, Type.Null()]);
+const MemorySnapshotSchema = Type.Object({
+  id: snapshotId, ns: Type.String(), kind: Type.Union(MEMORY_KINDS.map(k => Type.Literal(k))),
+  subject: nullable(Type.String({ maxLength: 40 })), text: Type.String({ minLength: 1, maxLength: 500 }),
+  since: nullable(snapshotSec), until: nullable(snapshotSec), due_at: nullable(snapshotSec), done_at: nullable(snapshotSec),
+  status: Type.Union(MEMORY_STATUSES.map(s => Type.Literal(s))), author: Type.String({ minLength: 1, maxLength: 100 }),
+  source_scope: nullable(Type.String({ maxLength: 200 })), source_message_id: nullable(Type.String({ maxLength: 200 })), source_turn_id: nullable(Type.String({ maxLength: 200 })),
+  confidence: Type.Number({ minimum: 0, maximum: 1 }), created_at: snapshotSec, updated_at: snapshotSec, last_recalled_at: nullable(snapshotSec),
+  recall_count: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }), hash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+}, { additionalProperties: false });
+
+function parseSnapshot(raw: string, ns: string, memoryId: number): MemoryRow {
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new MemoryAdminError("invalid"); }
+  if (!Check(MemorySnapshotSchema, value) || value.ns !== ns || value.id !== memoryId || !value.text.trim()
+    || Object.values(value).some(v => typeof v === "string" && containsSecret(v))) throw new MemoryAdminError("invalid");
+  return value;
+}
 
 export class MemoryAdminError extends Error {
   constructor(readonly code: "not_found" | "conflict" | "invalid", _message: string = code) { super(`memory_admin:${code}`); }

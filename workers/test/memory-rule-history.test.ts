@@ -3,7 +3,6 @@ import { afterEach, expect, it } from "vitest";
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { MemoryStore, memoryHash, sha256 } from "../src/memory/store";
 import { RuleService, compileRules } from "../src/memory/rules";
-import { importMemoryHistory } from "../src/memory/history-import";
 import { MEMORY_SUPPORT_SCHEMA, MEMORY_LIFECYCLE_TRIGGERS } from "../src/memory/lifecycle";
 import { LEGACY_MEMORY_SCHEMA, LEGACY_MEMORY_RULE_SCHEMA } from "./fixtures/memory-schema-14a9465";
 import type { MemoryRow } from "../src/memory/types";
@@ -11,8 +10,10 @@ import type { MemoryRow } from "../src/memory/types";
 afterEach(()=>reset());
 const tables=["memories","memory_versions","memory_imported_versions","memory_history_map","memory_history_receipts","memory_rule_bindings","memory_rule_sets","memory_rule_binding_versions","memory_rule_operations","memory_rule_proposals"];
 async function snapshot(store:MemoryStore){return Object.fromEntries(await Promise.all(tables.map(async t=>[t,await store.db.all("SELECT * FROM "+t+" ORDER BY rowid")])));}
-const version=(row:MemoryRow,id:number,reason="archive")=>({id,memory_id:row.id,at:1,by:"import-history",before_json:null,after_json:JSON.stringify({...row,text:"合成历史正文",hash:memoryHash("owner",row.kind,"合成历史正文")}),reason});
-const bundle=(rows:MemoryRow[],versions=rows.map((r,i)=>version(r,200+i)))=>({format:"cs-agent-memory-history-v1",source:"upgrade-history",ns:"owner",memories:rows,versions,links:[],proposals:[]});
+const historyJson=(row:MemoryRow)=>JSON.stringify({...row,text:"合成历史正文",hash:memoryHash("owner",row.kind,"合成历史正文")});
+async function appendHistory(store:MemoryStore,row:MemoryRow,reason="archive"){
+ await store.db.run("INSERT INTO memory_history_append(memory_id,at,by,before_json,after_json,reason) VALUES (?,1,'import-history',NULL,?,?)",row.id,historyJson(row),reason);
+}
 async function approve(store:MemoryStore,rules:RuleService,id:number){
  const p=await rules.propose({id,expectedVersion:await store.revision(id),expectedBindingRevision:0,requestId:crypto.randomUUID()});
  await rules.confirm({proposalId:p.id,payloadHash:p.payload_hash,requestId:crypto.randomUUID()});
@@ -20,7 +21,7 @@ async function approve(store:MemoryStore,rules:RuleService,id:number){
 async function stable(store:MemoryStore,rules:RuleService,rows:MemoryRow[]){
  return {rows:await Promise.all(rows.map(r=>store.get(r.id))),revisions:await Promise.all(rows.map(r=>store.revision(r.id))),bindings:await rules.list(),rules:await rules.read(),render:compileRules(await rules.read())};
 }
-it("real initialize upgrades populated 14a9465 tables, preserving approved rules while historical append remains incremental",async()=>{
+it("real initialize upgrades populated 14a9465 tables, preserving approved rules while historical append remains protected",async()=>{
  const stub=env.THREAD.getByName("owner");
  let frozen:unknown;
  await runInDurableObject(stub,async(instance,state)=>{
@@ -31,12 +32,11 @@ it("real initialize upgrades populated 14a9465 tables, preserving approved rules
   for(const author of ["dashboard","qq:10000001"]){
    const row=(await store.remember({kind:"rule",text:"批准的合成规则 "+author,author})).row;
    // Exact old insert-then-label protocol, before approval; populate existing import mappings/receipts.
-   const v=version(row,100+row.id);
-   const inserted=await db.get<{id:number}>("INSERT INTO memory_versions(memory_id,at,by,after_json,reason) VALUES (?,1,'archive',?,'archive') RETURNING id",row.id,v.after_json);
+   const afterJson=historyJson(row);
+   const inserted=await db.get<{id:number}>("INSERT INTO memory_versions(memory_id,at,by,after_json,reason) VALUES (?,1,'archive',?,'archive') RETURNING id",row.id,afterJson);
    await db.run("INSERT INTO memory_imported_versions VALUES (?)",inserted!.id);
    await db.run("INSERT INTO memory_history_map VALUES ('upgrade-history','owner',?,?)",row.id,row.id);
-   for(const [kind,id,value] of [["memory",row.id,row],["version",v.id,v]] as const)
-    await db.run("INSERT INTO memory_history_receipts VALUES ('upgrade-history','owner',?,?,?,1)",kind,String(id),sha256(JSON.stringify(value)));
+   await db.run("INSERT INTO memory_history_receipts VALUES ('upgrade-history','owner','memory',?,?,1)",String(row.id),sha256(JSON.stringify(row)));
    await approve(store,rules,row.id);rows.push((await store.get(row.id))!);
   }
   expect(await db.get("SELECT name FROM sqlite_master WHERE name='memory_history_append'")).toBeUndefined();
@@ -44,15 +44,8 @@ it("real initialize upgrades populated 14a9465 tables, preserving approved rules
   await instance.syncAdminView("owner"); // actual ThreadDO.initialize, not merely executing the new schema in the test
   expect(await db.get("SELECT name FROM sqlite_master WHERE name='memory_history_append'")).toBeTruthy();
   expect(await stable(store,rules,rows)).toEqual(before);
-  const input=bundle(rows),all=await snapshot(store);
-  const preview=await importMemoryHistory(store,input,{dryRun:true});
-  expect(await snapshot(store)).toEqual(all);
-  expect(await importMemoryHistory(store,input)).toEqual({...preview,dryRun:false});
+  await appendHistory(store,rows[0]!,"rule_approved");
   expect(await stable(store,rules,rows)).toEqual(before);
-  expect(await importMemoryHistory(store,input)).toMatchObject({memories:0,versions:0});
-  const next=bundle(rows,[version(rows[0]!,999,"rule_approved")]);
-  expect((await importMemoryHistory(store,next,{dryRun:true})).versions).toBe(1);
-  expect((await importMemoryHistory(store,next)).versions).toBe(1);
   for(const row of rows){
    await expect(store.update(row.id,{due_at:null},"qq:10000001")).rejects.toThrow("memory_rule:protected");
    await expect(store.update(row.id,{done_at:null},"dashboard")).rejects.toThrow("memory_rule:protected");
@@ -63,29 +56,20 @@ it("real initialize upgrades populated 14a9465 tables, preserving approved rules
  await evictDurableObject(stub);await stub.syncAdminView("owner");
  await runInDurableObject(stub,async(_instance,state)=>expect(await snapshot(new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner"))).toEqual(frozen));
 });
-it("mixed historical batches roll back maps, receipts, labels and versions together, and retry idempotently",async()=>{
+it("memory_history_append rolls back labels and versions atomically on failure",async()=>{
  const stub=env.THREAD.getByName("owner");await stub.syncAdminView("owner");
  await runInDurableObject(stub,async(_instance,state)=>{
   const store=new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner"),rules=new RuleService(store,"private:10000001");
   const row=(await store.remember({kind:"rule",text:"混合批次已批准规则",author:"dashboard"})).row;await approve(store,rules,row.id);
-  const fresh={...row,id:1000,kind:"fact" as const,text:"混合批次新事实",hash:memoryHash("owner","fact","混合批次新事实")};
-  const input=bundle([row,fresh],[version(row,100),version(fresh,200,"fault")]),before=await snapshot(store),approved=await stable(store,rules,[row]);
+  const before=await snapshot(store),approved=await stable(store,rules,[row]);
   await store.db.exec("CREATE TRIGGER test_history_failure BEFORE INSERT ON memory_versions WHEN new.reason='fault' BEGIN SELECT RAISE(ABORT,'synthetic_history_failure'); END;");
-  expect(await importMemoryHistory(store,input,{dryRun:true})).toMatchObject({memories:1,versions:2});
-  await expect(importMemoryHistory(store,input)).rejects.toThrow("synthetic_history_failure");
-  expect(await snapshot(store)).toEqual(before);
-  // A single view statement also cannot leave an orphan label if insertion fails.
-  await expect(store.db.run("INSERT INTO memory_history_append(memory_id,at,by,after_json,reason) VALUES (?,1,'archive',?,'fault')",row.id,JSON.stringify(row))).rejects.toThrow("synthetic_history_failure");
+  // A single view statement cannot leave an orphan label if insertion fails.
+  await expect(appendHistory(store,row,"fault")).rejects.toThrow("synthetic_history_failure");
   expect(await snapshot(store)).toEqual(before);
   await store.db.exec("DROP TRIGGER test_history_failure");
-  const preview=await importMemoryHistory(store,input,{dryRun:true});
-  expect(await importMemoryHistory(store,input)).toEqual({...preview,dryRun:false});
+  await appendHistory(store,row,"archive");
   expect(await stable(store,rules,[row])).toEqual(approved);
-  expect(await importMemoryHistory(store,input)).toMatchObject({memories:0,versions:0});
-  const committed=await snapshot(store),conflict=bundle([row,fresh],[version(row,50),version(fresh,200,"changed-existing-receipt")]);
-  await expect(importMemoryHistory(store,conflict,{dryRun:true})).rejects.toThrow("history_receipt_conflict");
-  await expect(importMemoryHistory(store,conflict)).rejects.toThrow("history_receipt_conflict");
-  expect(await snapshot(store)).toEqual(committed);
+  expect(await store.db.all("SELECT * FROM memory_imported_versions")).toHaveLength(1);
  });
 });
 it("historical labels cannot hide current versions, promote historical content or resurrect revoked approval",async()=>{
@@ -93,7 +77,7 @@ it("historical labels cannot hide current versions, promote historical content o
  await runInDurableObject(stub,async(_instance,state)=>{
   const store=new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner"),rules=new RuleService(store,"private:10000001"),db=store.db;
   const row=(await store.remember({kind:"rule",text:"标签攻击合成规则",author:"dashboard"})).row;await approve(store,rules,row.id);
-  await importMemoryHistory(store,bundle([row]));
+  await appendHistory(store,row);
   const current=await store.revision(row.id),historical=(await db.get<{version_id:number}>("SELECT version_id FROM memory_imported_versions"))!.version_id;
   const before=await snapshot(store);
   for(const sql of [
@@ -112,7 +96,7 @@ it("historical labels cannot hide current versions, promote historical content o
   expect(await snapshot(store)).toEqual(before);
   await rules.revoke({id:row.id,expectedVersion:current,expectedBindingRevision:1,requestId:"revoke"});
   const revoked=await stable(store,rules,[row]);
-  await importMemoryHistory(store,bundle([row],[version(row,201,"approved")]));
+  await appendHistory(store,row,"approved");
   expect(await stable(store,rules,[row])).toEqual(revoked);
   await store.update(row.id,{text:"撤销后允许普通更新"},"dashboard");
   expect((await store.get(row.id))!.text).toBe("撤销后允许普通更新");

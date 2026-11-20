@@ -11,25 +11,20 @@ import { accessRoutes } from "./access-routes";
 import { createMemoryAdminRoutes } from "./memory-routes";
 import { createRuleAdminRoutes } from "./rule-routes";
 import { Type } from "typebox";
-import { Check } from "typebox/value";
 import { authenticated } from "../auth";
 import type { Env } from "../env";
-import { parseImport } from "../memory/import";
 import { oauthErrorCode } from "../mcp/oauth-fetch";
 import { ModelSelectionSchema, QQ_ID, SettingsSchema, type Settings } from "../settings";
 import { modelLoginErrorCode, TokenResponseSchema } from "../codex-login";
 import { catalogFailure, refreshFailure } from "../codex-refresh-error";
 import type { EventQuery } from "../requests/view";
 import { SkillError, parseSkill } from "../skills";
-import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from "../message-import";
-import { ownerIds } from "../policy";
 import { SUBAGENT_ID } from "../subagent/model";
 import { ADMIN_PAGE_HTML } from "./page";
 import { ADMIN_APP_JS } from "./app.generated";
 import { CHATGPT_HELPER } from "./chatgpt-helper";
-import { SCHEDULE_IMPORT_MAX_BYTES } from "../schedule/import";
 import type { RequestQuery } from "../requests/types";
-import { API_HEADERS, HttpError, adminJson as json, adminPlain as plain, readAdminBody, readAdminJson } from "./http";
+import { API_HEADERS, HttpError, adminJson as json, adminPlain as plain, readAdminBody } from "./http";
 
 export type AdminContext = { env: Env; request: Request; url: URL; params: Record<string, string> };
 export type AdminRoute = {
@@ -246,12 +241,6 @@ export const ADMIN_ROUTES: AdminRoute[] = [
       configured: Object.fromEntries(SECRET_NAMES.map(name => [name, !!env[name]])) });
   } },
 
-  { method: "POST", path: "/admin/schedules/import", handle: async ({ env, request }) => {
-    const input = await readAdminJson(request, { maxBytes: SCHEDULE_IMPORT_MAX_BYTES, tooLargeCode: "too_large" });
-    const result = await env.SCHEDULE.getByName("main").importSchedules(input);
-    if (result.error) throw new HttpError(result.error === "schedule_conflict" ? 409 : 400, result.error);
-    return json(result);
-  } },
   { method: "GET", path: "/admin/schedules", handle: async ({ env }) => json(await env.SCHEDULE.getByName("main").list()) },
   { method: "POST", path: /^\/admin\/schedules\/(?<id>[0-9a-f-]{36})\/(?<action>pause|resume|delete|run-now)$/, handle: async ({ env, params }) => {
     const schedules = env.SCHEDULE.getByName("main"), id = params.id!, action = params.action!;
@@ -407,21 +396,6 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     if (result.status === "conflict") throw new HttpError(409, "conflict", { current: result.current });
     return json({ profile: result.current });
   } },
-  { method: "POST", path: "/admin/memory/import", handle: async ({ env, request }) => {
-    let data;
-    try { data = parseImport(await request.json()); }
-    catch { return json({ error: "invalid memory import" }, 400); }
-    return json(await env.THREAD.getByName(data.ns).importMemory(data));
-  } },
-  { method: "POST", path: "/admin/messages/import", handle: async ({ env, request }) => {
-    let raw: unknown;
-    try { raw = await readAdminJson(request, { maxBytes: MESSAGE_IMPORT_MAX_BYTES, tooLargeCode: "too_large" }); }
-    catch (error) { if (error instanceof HttpError && error.status === 413) throw error; throw new HttpError(400, "invalid_import"); }
-    let data;
-    try { data = parseMessageImport(raw); }
-    catch { throw new HttpError(400, "invalid_import"); }
-    return json(await env.THREAD.getByName(importThreadKey(data.scope, ownerIds(env))).importMessages(data));
-  } },
 
   // 技能目录：Registry 是唯一来源，Thread 按 digest 缓存目录；名字不合法也要匹配到路由，才能回 400 而不是 404。
   { method: "GET", path: "/admin/skills", handle: async ({ env }) => json({ skills: await env.REGISTRY.getByName("main").skillsList() }) },
@@ -446,14 +420,6 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     return json({ name: params.name, enabled: params.action === "enable" });
   } },
 
-  // 旧路径保留纯文本错误分类，已有脚本与文档按它解析。
-  { method: "POST", path: "/admin/mcp/oauth/login-link", handle: async ({ env, request }) => {
-    try {
-      const value: unknown = await request.json();
-      if (!Check(Type.Object({ server: Type.String({ pattern: `^${SERVER}$` }) }, strict), value)) throw new Error("invalid_request");
-      return json(await env.REGISTRY.getByName("main").loginLink(value.server));
-    } catch (error) { return plain(oauthErrorCode(error), 400); }
-  } },
   { method: "POST", path: new RegExp(`^/admin/mcp/(?<server>${SERVER})/login-link$`),
     handle: ({ env, params }) => oauth(() => env.REGISTRY.getByName("main").loginLink(params.server)) },
   { method: "POST", path: new RegExp(`^/admin/mcp/(?<server>${SERVER})/logout$`),
