@@ -46,7 +46,6 @@ import { isWeb, isWebAdmin, targetOf, type InboundRow, type ToolProfile } from '
 
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-const QQ_CITATION_RULE = "QQ 收件人看到的是纯文本。引用网页时写已知的真实网址；只有内部搜索编号时，保留正文，省略引用，不要猜网址。";
 const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只能展示网页。需要回复时调用 send_message，它只把文字和图片资产写入网页，不向 QQ 发送；工作区文件可用 send_file，附件也只展示在网页。不得使用其他工具绕过此回复入口限制。";
 const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_page", "read_skill",
   "codemode"]);
@@ -165,17 +164,19 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       name: "send_message", description: "向用户发送消息。用户只能看到 text 中的纯文本。禁止写入内部引用编号或其他需要客户端解析的标记。",
       parameters: Type.Object({
         text: Type.String({ maxLength: 4000 }),
-        images: Type.Optional(Type.Array(Type.String({ pattern: "^[a-f0-9]{64}$" }), { maxItems: 5 })),
-        target: Type.Optional(Type.String({ pattern: "^qq:(group|private):[1-9][0-9]{0,19}$" })),
+        images: Type.Optional(Type.Array(Type.String({ pattern: "^[a-f0-9]{64}$" }), {
+          maxItems: 5, description: "当前会话已有的私有图片资产 ID，最多 5 个。",
+        })),
+        target: Type.Optional(Type.String({
+          pattern: "^qq:(group|private):[1-9][0-9]{0,19}$",
+          description: "默认回复当前会话。指定 QQ 目标用 qq:group:ID 或 qq:private:ID，跨会话须授权。网页回合请省略，只回复网页。",
+        })),
       }, { additionalProperties: false }),
       // 发 QQ 是外部副作用，中断后禁止自动重放，避免重复发送。
       replay: "unsafe",
       execute: async ({ text, images, target }, api, toolContext) => {
         const input = await host.currentInput(harness, api, api.conversationId, toolContext);
         if (!input) throw new Error("current input missing");
-        if (!isWeb(input) && text.includes("\uE200cite\uE202")) {
-          return { isError: true, output: [{ type: "text", text: `QQ 消息尚未发送：text 含内部搜索引用标记。${QQ_CITATION_RULE} 请改写 text 后重新调用 send_message。` }] };
-        }
         const repository = new MediaRepository({ bucket: host.env.ASSETS, scope: memory.ns });
         const attachments = await Promise.all((images ?? []).map(async id => { const { ref } = await repository.get(id); if(ref.kind!=="image")throw new Error("unsupported_image"); return ref; }));
         const to: Target | undefined = target ? target.startsWith("qq:group:") ? { kind: "group", groupId: target.slice(9) } : { kind: "private", userId: target.slice(11) } : undefined;
