@@ -24,7 +24,7 @@ function replaySearch(context: TranscriptContext, model: Model<Api>): Transcript
   return normalizeContext({ messages: context.messages.map(message => {
     if (message.role === "system") return withoutLegacySearch(message);
     if (message.role !== "assistant" || message.provider !== model.provider || message.api !== model.api || message.model !== model.id) return message;
-    const steps = hostedSearchSteps(message);
+    const steps = hostedSearchSteps(message).filter(step => step.item.status === "completed");
     if (!steps.length) return message;
     const content = [...message.content];
     // Responses 适配器会把签名块原样序列化为 input item。仅在传输副本里借用此入口，
@@ -47,7 +47,8 @@ export function withHostedSearch(regular: ProviderStreams, responses = regular):
     const flash = deepseek && model.id === "deepseek-flash";
     const type = flash ? "deepseek_web_search" : "web_search";
     const wireModel = deepseek ? { ...model, api: "openai-responses" } : model;
-    const blocks = new Set<number>(), steps = new Map<number, SearchStep>(), starts = new Map<number, number>();
+    const blocks = new Set<number>();
+    const steps = new Map<number, { item: SearchItem; startedAt: number; endedAt?: number }>();
     const observe = (index: number, item: unknown, done: boolean) => {
       if (!object(item)) return;
       if (item.type !== "web_search_call") {
@@ -55,8 +56,12 @@ export function withHostedSearch(regular: ProviderStreams, responses = regular):
         return;
       }
       if (typeof item.id !== "string") return;
-      if (!starts.has(index)) starts.set(index, Date.now());
-      if (done && !steps.has(index)) steps.set(index, { item: item as SearchItem, position: 0, startedAt: starts.get(index)!, endedAt: Date.now() });
+      const previous = steps.get(index), now = Date.now();
+      const search = item as SearchItem;
+      // 终态响应有时才补齐来源；同一调用的完成时间仍取首次 done。
+      const merged = { ...previous?.item, ...search,
+        ...(search.action && { action: { ...previous?.item.action, ...search.action } }) };
+      steps.set(index, { item: merged, startedAt: previous?.startedAt ?? now, endedAt: previous?.endedAt ?? (done ? now : undefined) });
     };
     const stream = responses[method](wireModel, replaySearch(context, wireModel), { ...options,
       onPayload: async (original, m) => {
@@ -83,7 +88,7 @@ export function withHostedSearch(regular: ProviderStreams, responses = regular):
         if ((event.type === "done" || event.type === "error") && steps.size) {
           const message: SearchMessage = event.type === "done" ? event.message : event.error;
           message.hostedSearch = [...steps].sort(([a], [b]) => a - b)
-            .map(([index, step]) => ({ ...step, position: [...blocks].filter(block => block < index).length }));
+            .map(([index, step]) => ({ ...step, endedAt: step.endedAt ?? Date.now(), position: [...blocks].filter(block => block < index).length }));
         }
         yield event;
       }
