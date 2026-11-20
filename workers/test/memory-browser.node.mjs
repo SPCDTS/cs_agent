@@ -1,40 +1,34 @@
-import {test} from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import {build} from "esbuild";
-import {parseHTML} from "linkedom";
-import {resolve} from "node:path";
-import {ADMIN_PAGE_HTML} from "../src/admin/app.generated.ts";
-const {window}=parseHTML(ADMIN_PAGE_HTML);
-for(const key of ["document","HTMLElement","HTMLInputElement","HTMLSelectElement","HTMLTextAreaElement","HTMLTableCellElement","SVGSVGElement","Event"])globalThis[key]=window[key];
-globalThis.MouseEvent=window.Event;globalThis.CSS={escape:x=>x};globalThis.confirm=()=>true;
-Object.defineProperty(window.HTMLSelectElement.prototype,"value",{configurable:true,get(){return [...this.options].find(o=>o.hasAttribute("selected"))?.value??this.options[0]?.value??"";},set(v){for(const o of this.options){if(o.value===v)o.setAttribute("selected","");else o.removeAttribute("selected");}}});
-const dialog=document.querySelector("#memory-detail");dialog.showModal=function(){this.open=true;};dialog.close=function(){this.open=false;};
-const storage=new Map([["cs-agent-admin-token","synthetic"]]);globalThis.sessionStorage={getItem:k=>storage.get(k)??null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)};
-let notices=[],errors=[],calls=[],handler;
-const state=globalThis.__memoryState={memoryNs:"owner",memoryQuery:"",profile:null,memoryView:null,overview:{threads:[{key:"owner",name:"主人"},{key:"group:200",name:"测试群"}]}};
-globalThis.__memoryNotice=s=>notices.push(s);globalThis.__memoryFail=e=>errors.push(e);
-const code=await build({entryPoints:["browser/memory.ts"],bundle:true,write:false,format:"esm",platform:"node",plugins:[{name:"app-boundary",setup(b){
- b.onResolve({filter:/^\.\/app$/},()=>({path:"app",namespace:"fixture"}));
- b.onLoad({filter:/.*/,namespace:"fixture"},()=>({contents:`export {$,el} from ${JSON.stringify(resolve("browser/dom.ts"))};export const state=globalThis.__memoryState,notice=s=>globalThis.__memoryNotice(s),fail=e=>globalThis.__memoryFail(e),time=x=>String(x),showLogin=()=>{};`,resolveDir:process.cwd()}));
-}}]});
-const ui=await import("data:text/javascript;base64,"+Buffer.from(code.outputFiles[0].text).toString("base64"));
-const $=id=>document.querySelector("#"+id);
-$("mem-ns").innerHTML='<option value="owner">主人</option><option value="group:200">测试群</option>';
+import { ADMIN_PAGE_HTML } from "../src/admin/app.generated.ts";
+import { bundleModule, mountDom } from "./browser-harness.mjs";
+
+const { window, document, settle, click: dispatchClick } = mountDom(ADMIN_PAGE_HTML, { token: "synthetic" });
+globalThis.confirm = () => true;
+window.confirm = () => true;
+let notices = [], errors = [], calls = [], handler;
+const state = globalThis.__memoryState = { memoryNs: "owner", memoryQuery: "", profile: null, memoryView: null, overview: { threads: [{ key: "owner", name: "主人" }, { key: "group:200", name: "测试群" }] } };
+globalThis.__memoryNotice = s => notices.push(s);
+globalThis.__memoryFail = e => errors.push(e);
+const ui = await bundleModule("browser/memory.ts", {
+  "./app": 'export { $, el } from "./browser/dom.ts"; export const state = globalThis.__memoryState, notice = s => globalThis.__memoryNotice(s), fail = e => globalThis.__memoryFail(e), time = x => String(x), showLogin = () => {};',
+});
+const $ = id => document.querySelector("#" + id);
+$("mem-ns").innerHTML = '<option value="owner">主人</option><option value="group:200">测试群</option>';
 ui.initMemory();
-const row=(text="主人偏好",id=1)=>({id,text,kind:"preference",status:"active",subject:"self",since:null,until:null,due_at:null,done_at:null,source_scope:"private:100",source_message_id:"123",author:"dashboard",updated_at:100,recall_count:0});
-const profile={text:"画像旧内容",revision:"rev1"};
-const detail=r=>({row:r,revision:7,versions:[{id:7,at:100,by:"dashboard",reason:"更正",before_json:JSON.stringify({...r,text:"原正文"}),after_json:JSON.stringify(r)}],links:[],inProfile:true,evidence:[{scope:"private:100",message_id:"123",speaker:"100",quote:"这是来源原话"}]});
-function defaults(url,init){
- if(url.pathname==="/admin/memory/list")return Response.json({items:[row(url.searchParams.get("ns")==="owner"?"主人偏好":"群聊偏好")],total:1,profile});
- if(url.pathname==="/admin/memory/jobs")return Response.json({jobs:[]});
- if(url.pathname==="/admin/memory/proposals")return Response.json(init.method==="POST"?{result:"timeout"}:{proposals:[]});
- if(url.pathname==="/admin/memory/candidates")return Response.json({candidates:[]});
- if(url.pathname==="/admin/memory/1")return Response.json(init.method==="DELETE"?{status:"forgotten"}:detail(row(url.searchParams.get("ns")==="owner"?"主人偏好":"群聊偏好")));
- throw new Error("unexpected "+url);
+const row = (text = "主人偏好", id = 1) => ({ id, text, kind: "preference", status: "active", subject: "self", since: null, until: null, due_at: null, done_at: null, source_scope: "private:100", source_message_id: "123", author: "dashboard", updated_at: 100, recall_count: 0 });
+const profile = { text: "画像旧内容", revision: "rev1" };
+const detail = r => ({ row: r, revision: 7, versions: [{ id: 7, at: 100, by: "dashboard", reason: "更正", before_json: JSON.stringify({ ...r, text: "原正文" }), after_json: JSON.stringify(r) }], links: [], inProfile: true, evidence: [{ scope: "private:100", message_id: "123", speaker: "100", quote: "这是来源原话" }] });
+function defaults(url, init) {
+  if (url.pathname === "/admin/memory/list") return Response.json({ items: [row(url.searchParams.get("ns") === "owner" ? "主人偏好" : "群聊偏好")], total: 1, profile });
+  if (url.pathname === "/admin/memory/jobs") return Response.json({ jobs: [] });
+  if (url.pathname === "/admin/memory/proposals") return Response.json(init.method === "POST" ? { result: "timeout" } : { proposals: [] });
+  if (url.pathname === "/admin/memory/candidates") return Response.json({ candidates: [] });
+  if (url.pathname === "/admin/memory/1") return Response.json(init.method === "DELETE" ? { status: "forgotten" } : detail(row(url.searchParams.get("ns") === "owner" ? "主人偏好" : "群聊偏好")));
+  throw new Error("unexpected " + url);
 }
-globalThis.fetch=async(path,init)=>{const url=new URL(path,"http://test");calls.push({path,method:init.method,body:init.body?JSON.parse(init.body):null});return handler?handler(url,init):defaults(url,init);};
-async function settle(){for(let i=0;i<12;i++)await new Promise(r=>setImmediate(r));}
-async function click(node){assert.ok(node);node.dispatchEvent(new window.Event("click"));await settle();}
+globalThis.fetch = async (path, init) => { const url = new URL(path, "http://test"); calls.push({ path, method: init.method, body: init.body ? JSON.parse(init.body) : null }); return handler ? handler(url, init) : defaults(url, init); };
+const click = async node => { assert.ok(node); await dispatchClick(node, 12); };
 const button=text=>[...document.querySelectorAll("button")].find(b=>b.textContent===text);
 function reset(){ui.resetMemory();state.memoryNs="owner";state.memoryQuery="";notices=[];errors=[];calls=[];handler=null;$("mem-status").value="active";$("mem-ns").value="owner";}
 test("乱序响应不能把旧会话内容写入新会话，遗忘绑定会话与版本",async()=>{
