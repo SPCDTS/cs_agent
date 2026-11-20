@@ -160,8 +160,17 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     }),
     host.skills.tool(),
     defineTool({
-      name: "send_message", description: "向本轮回复入口发送文字或私有图片资产。target可填qq:group:ID或qq:private:ID，跨会话须授权；网页回合只显示网页。",
-      parameters: Type.Object({ text: Type.String({ maxLength: 4000 }), images: Type.Optional(Type.Array(Type.String({ pattern: "^[a-f0-9]{64}$" }), { maxItems: 5 })), target: Type.Optional(Type.String({ pattern: "^qq:(group|private):[1-9][0-9]{0,19}$" })) }, { additionalProperties: false }),
+      name: "send_message", description: "向用户发送消息。用户只能看到 text 中的纯文本。禁止写入内部引用编号或其他需要客户端解析的标记。",
+      parameters: Type.Object({
+        text: Type.String({ maxLength: 4000 }),
+        images: Type.Optional(Type.Array(Type.String({ pattern: "^[a-f0-9]{64}$" }), {
+          maxItems: 5, description: "当前会话已有的私有图片资产 ID，最多 5 个。",
+        })),
+        target: Type.Optional(Type.String({
+          pattern: "^qq:(group|private):[1-9][0-9]{0,19}$",
+          description: "默认回复当前会话。指定 QQ 目标用 qq:group:ID 或 qq:private:ID，跨会话须授权。网页回合请省略，只回复网页。",
+        })),
+      }, { additionalProperties: false }),
       // 发 QQ 是外部副作用，中断后禁止自动重放，避免重复发送。
       replay: "unsafe",
       execute: async ({ text, images, target }, api, toolContext) => {
