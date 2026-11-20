@@ -1,4 +1,6 @@
 import { Type, type Static } from "typebox";
+import { MaintenanceOverrideSchema, OpsSettingsSchema, SendLimitsSchema, type MaintenanceOverride } from "../src/settings-schema";
+export { MaintenanceOverrideSchema, SendLimitsSchema, type MaintenanceOverride };
 
 const strings = () => Type.Array(Type.String());
 const nullableString = () => Type.Union([Type.String(), Type.Null()]);
@@ -10,14 +12,7 @@ export const GrantsSchema = Type.Object({ grants: Type.Array(Type.Object({
   user: Type.String(), caps: strings(), targets: strings(), scopes: Type.Optional(strings()),
   expired: Type.Boolean(), expires_at: Type.Optional(Type.Number()),
 })) });
-const MaintenanceSchema = Type.Object({ rawDays: Type.Number(), rawHardMaxDays: Type.Number(), summaryDays: Type.Number(), eventsDays: Type.Number(), consolidate: Type.Boolean() });
-export const MaintenanceOverrideSchema = Type.Partial(MaintenanceSchema);
-export type MaintenanceOverride = Static<typeof MaintenanceOverrideSchema>;
-export const OpsSchema = Type.Object({ value: Type.Object({
-  sendLimits: Type.Object({ perChatMinute: Type.Number(), perChatHour: Type.Number(), chatBreakerMinutes: Type.Number(), globalMinute: Type.Number(), globalBreakerMinutes: Type.Number() }),
-  defaults: MaintenanceSchema, threads: Type.Record(Type.String(), MaintenanceOverrideSchema), alertOwner: Type.Boolean(),
-  alertThrottleMinutes: Type.Number(), ownerAlertThrottleMinutes: Type.Number(),
-}), revision: Type.String() });
+export const OpsSchema = Type.Object({ value: OpsSettingsSchema, revision: Type.String() });
 export type OpsSnapshot = Static<typeof OpsSchema>;
 export const OpsSavedSchema = Type.Object({ current: OpsSchema });
 export const AlertsSchema = Type.Object({ alerts: Type.Array(Type.Object({

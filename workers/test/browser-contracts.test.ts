@@ -2,7 +2,7 @@ import { env, reset } from "cloudflare:test";
 import { afterEach, expect, it } from "vitest";
 import { Errors } from "typebox/value";
 import worker from "../src/index";
-import { ADMIN_BROWSER_CONTRACTS as C } from "../src/admin/app.generated";
+import * as C from "../browser/contracts";
 import { snapshot } from "../src/requests/snapshot";
 import type { RequestDetail } from "../src/requests/types";
 

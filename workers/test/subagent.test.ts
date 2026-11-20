@@ -7,7 +7,7 @@ import type { JsonObject } from "@earendil-works/pi-durable";
 import worker from "../src/index";
 import { Errors } from "typebox/value";
 import type { RequestsDO } from "../src/requests/do";
-import { ADMIN_BROWSER_CONTRACTS as C } from "../src/admin/app.generated";
+import * as C from "../browser/contracts";
 type HistoryPage = Awaited<ReturnType<RequestsDO["subagentConversation"]>>;
 import * as models from "../src/models";
 import { RegistryDO } from "../src/registry";

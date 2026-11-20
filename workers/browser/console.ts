@@ -14,7 +14,16 @@ import { sh } from "./sessions";
 import { expandChatThread, renderChatNavigation, resetChatNavigation } from "./chat-navigation";
 import { loadSubagentChat } from "./subagent-chat";
 import { ADMIN_PAGE_SIZE } from "../src/admin/pagination";
-export const cs: C.ConsoleState = { view:"usage", until:Date.now(), before:undefined, next:undefined, pages:[], requestVersion:0, detailVersion:0,
+import type { Static } from "typebox";
+export interface ConsoleState {
+  view: string; until: number; before: number | undefined; next: number | undefined; pages: (number | undefined)[]; requestVersion: number; detailVersion: number;
+  chat: C.ChatTarget; chatVersion: number; fingerprint: string; timer: number | undefined; resizeTimer?: number; sending: boolean; epoch: number;
+  pending: Static<typeof C.PendingChat> | null; chatActive: boolean; requestActive: boolean; chatLoading: boolean;
+  messages: Map<string, C.ChatMessage>; requests: Map<string, C.RequestRecord>; tools: Map<string, C.ToolSummary>;
+  traceTurns: string; traceCursor: number; chatAfter: number | null; turn: string | null; detailId: string | null;
+  chart?: { u: C.Usage; since: number; until: number }; awaitingInput?: string | null; locateTurn?: string | null;
+}
+export const cs: ConsoleState = { view:"usage", until:Date.now(), before:undefined, next:undefined, pages:[], requestVersion:0, detailVersion:0,
   chat:{kind:"thread",thread:"owner"}, chatVersion:0, fingerprint:"", timer:undefined, sending:false, epoch:0, pending:null,
   chatActive:false,requestActive:false,chatLoading:false,messages:new Map(),requests:new Map(),tools:new Map(),traceTurns:"",traceCursor:0,chatAfter:null,turn:null,detailId:null };
 export const nf = (n: unknown) => typeof n === "number" ? n.toLocaleString("zh-CN") : "—";
@@ -37,7 +46,7 @@ export function renderChatHeader(){
   const target=cs.chat,child=target.kind==="subagent",name=state.overview?.threads.find(t=>t.key===target.thread)?.name||(target.thread==="owner"?"主人会话":target.thread);
   $("chat-title").textContent=child?(target.summary||"子 agent "+target.id.slice(0,6)):name;
   $("chat-subtitle").textContent=child?name+" / 子 agent "+target.id.slice(0,6)+" · 只读会话":"共享上下文 · 网页发言只回复网页";
-  for(const id of ["chat-history","chat-compact","chat-reset","chat-form"])$(id).hidden=child;
+  for(const id of ["chat-history","chat-compact","chat-reset","chat-form"] as const)$(id).hidden=child;
   $("chat-older").hidden=!child;$("chat-parent").hidden=!child;
 }
 function selectChat(target:C.ChatTarget){

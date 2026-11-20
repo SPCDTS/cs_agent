@@ -1,14 +1,10 @@
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { showLogin } from "./app";
+import { Diagnostic, type RefreshDiagnostic } from "./app-contracts";
+export { Diagnostic, type RefreshDiagnostic };
 
 export const TOKEN_KEY = "cs-agent-admin-token";
-export const Diagnostic = Type.Object({
-  kind: Type.String(), status: Type.Optional(Type.Number()), oauthCode: Type.Optional(Type.String()),
-  challenge: Type.Optional(Type.Boolean()), format: Type.Optional(Type.String()),
-  requestId: Type.Optional(Type.String()), cfRay: Type.Optional(Type.String()),
-});
-export type RefreshDiagnostic = Static<typeof Diagnostic>;
 const ErrorBody = Type.Object({
   error: Type.Optional(Type.String()), reason: Type.Optional(Type.String()), current: Type.Optional(Type.Unknown()),
   diagnostic: Type.Optional(Diagnostic),

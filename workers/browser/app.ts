@@ -61,7 +61,16 @@ export function refreshDiagnostic(failure: RefreshDiagnostic | null | undefined)
 }
 export const MODEL_REASONS: Record<string, string> = { missing_key: "缺 DEEPSEEK_API_KEY", login_required: "未登录 ChatGPT", unconfigured: "未配置 OAUTH_STORE_KEY",
   unknown_provider: "provider 未注册", unknown_model: "目录里没有这个模型", unavailable: "不可用" };
-export const state: C.AppState = { overview: null, settings: null, model: null, eventKind: "", eventThread: "owner", before: undefined, history: [], next: undefined,
+export type SourceFields = Record<"intervalS" | "mergeWindowS" | "budgetPerHour" | "requireLabels" | "excludeLabels" | "excludeSenders" | "quietStart" | "quietEnd", HTMLInputElement>;
+export interface AppState {
+  overview: C.Overview | null; settings: C.Settings | null; model: C.ModelView | null;
+  eventKind: string; eventThread: string; before: number | undefined; history: (number | undefined)[]; next: number | undefined;
+  memoryNs: string; memoryQuery: string; memoryView: C.MemoryView | null; profile: C.Profile | null;
+  armedDelete: number | null; skills: C.Skills; armedSkill: string | null; timer: number | undefined; noticeTimer: number | undefined;
+  subagents: Record<string, { list: C.Subagents | null }>; schedules: C.Schedule[]; armedSchedule: string | null;
+  sources: C.Sources | null; editingSource: string | null; sourceForms: Record<string, HTMLDetailsElement>;
+}
+export const state: AppState = { overview: null, settings: null, model: null, eventKind: "", eventThread: "owner", before: undefined, history: [], next: undefined,
   memoryNs: "owner", memoryQuery: "", memoryView: null, profile: null, armedDelete: null, skills: [], armedSkill: null, timer: undefined, noticeTimer: undefined,
   subagents: {}, schedules: [], armedSchedule: null, sources: null, editingSource: null, sourceForms: {} };
 
@@ -428,7 +437,7 @@ export function sourceForm(source: C.Sources["sources"][number]) {
   return details;
 }
 export const commaList = (value: string) => Array.from(new Set(value.split(/[,，]/).map(item => item.trim()).filter(Boolean)));
-export async function saveSource(id: string, fields: C.SourceFields) {
+export async function saveSource(id: string, fields: SourceFields) {
   const settings: Static<typeof C.SourceSettings> = { intervalS: Number(fields.intervalS.value), mergeWindowS: Number(fields.mergeWindowS.value), budgetPerHour: Number(fields.budgetPerHour.value),
     filters: { requireLabels: commaList(fields.requireLabels.value), excludeLabels: commaList(fields.excludeLabels.value), excludeSenders: commaList(fields.excludeSenders.value) } };
   const start = fields.quietStart.value.trim(), end = fields.quietEnd.value.trim();
@@ -553,7 +562,7 @@ export async function saveModel() {
   if (!state.model) return;
   const value = $("m-model").value, slash = value.indexOf("/"), effort = $("m-effort").value;
   const model: Static<typeof C.ModelSelection> = { provider: value.slice(0, slash), id: value.slice(slash + 1) };
-  if (effort) model.reasoningEffort = effort;
+  if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh") model.reasoningEffort = effort;
   try {
     renderModel(await readApi(C.ModelView, "PUT", "/admin/model", { model, expectedRevision: state.model.revision }));
     notice("模型已切换，各会话下一回合生效");

@@ -55,12 +55,12 @@ export async function loadAccessOps(){
 }
 export async function accessPage<T extends {next?:string}>(kind: "alerts"|"deliveries",load: (path:string)=>Promise<T>,render: (data:T)=>void,reset=false){
   const state=accessState[kind],version=++state.version,epoch=cs.epoch;
-  for(const button of listPager($("access-"+kind)).querySelectorAll("button"))button.disabled=true;
+  for(const button of listPager($(`access-${kind}`)).querySelectorAll("button"))button.disabled=true;
   if(reset){state.cursor=undefined;state.history=[];}
   const data=await load("/admin/"+kind+(state.cursor?"?cursor="+encodeURIComponent(state.cursor):""));
   if(version!==state.version||epoch!==cs.epoch)return;
   render(data);
-  renderListPager($("access-"+kind),state.history.length+1,!!data.next,
+  renderListPager($(`access-${kind}`),state.history.length+1,!!data.next,
     ()=>{state.cursor=state.history.pop();accessPage(kind,load,render).catch(fail);},
     ()=>{state.history.push(state.cursor);state.cursor=data.next;accessPage(kind,load,render).catch(fail);});
 }
