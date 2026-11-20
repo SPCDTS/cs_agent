@@ -5,7 +5,7 @@ import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
 import { CatalogFailureSchema, catalogFailure, refreshNeedsReauth, type CatalogFailure, type RefreshFailure } from "./codex-refresh-error";
 import { SqlCredentialStore, type CredentialMeta, type CredentialLease } from "./model-credentials";
 import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, PendingSchema, acceptTokens, callbackClient,
-  codexOAuth, fetchCatalog, isChatGPTCredential, isNativeCodexCredential, revokeSession, startChatGPTLogin } from "./codex-login";
+  codexOAuth, fetchCatalog, isChatGPTCredential, revokeSession, startChatGPTLogin } from "./codex-login";
 
 export const CHATGPT_SCHEMA = `
   CREATE TABLE IF NOT EXISTS chatgpt_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -64,13 +64,13 @@ export class ChatGPTAccounts {
   }
   view(): ChatGPTView {
     const activeId = this.activeId(), meta = activeId ? this.credentials.meta(accountKey(activeId)) : undefined;
-    const status = !meta && this.credentials.meta(CODEX_PROVIDER) ? "reauth_required" : loginStatus(meta);
+    const status = loginStatus(meta);
     return { status, loggedIn: status === "ready", hasCredential: !!meta, needsReauth: status === "reauth_required",
-      activeId, catalogFailure: activeId ? this.catalogFailure(activeId) : undefined, flow: meta?.flow, imageGeneration: !!meta && meta.flow === "codex-native" && (!meta.refreshFailure || !refreshNeedsReauth(meta.refreshFailure)), email: meta?.email, expiresAt: meta?.expiresAt, refreshFailure: meta?.refreshFailure,
+      activeId, catalogFailure: activeId ? this.catalogFailure(activeId) : undefined, flow: meta?.flow, imageGeneration: !!meta && (!meta.refreshFailure || !refreshNeedsReauth(meta.refreshFailure)), email: meta?.email, expiresAt: meta?.expiresAt, refreshFailure: meta?.refreshFailure,
       accounts: this.sql.exec<Account>("SELECT * FROM chatgpt_accounts ORDER BY created_at, id").toArray().map(account => {
         const meta = this.credentials.meta(accountKey(account.id)), failure = this.catalogFailure(account.id);
         const status = loginStatus(meta), displayStatus = status === "ready" && account.id !== activeId && failure ? "catalog_pending" : status;
-        return { id: account.id, label: (meta?.flow === "codex-native" ? "Codex · " : "旧授权 · ") + (account.email ?? "ChatGPT 账号") + " · " + account.id.slice(0, 8),
+        return { id: account.id, label: "Codex · " + (account.email ?? "ChatGPT 账号") + " · " + account.id.slice(0, 8),
           loggedIn: displayStatus === "ready", status: displayStatus, catalogFailure: failure };
       }) };
   }
@@ -110,8 +110,7 @@ export class ChatGPTAccounts {
     const credential = account ? await this.credentials.read(accountKey(account.id)) : undefined;
     const { pending, url } = await startChatGPTLogin(this.hostId(), port, account ? {
       id: account.id, clientId: account.client_id, subject: account.subject, email: account.email ?? undefined,
-      ...(isChatGPTCredential(credential) ? { idToken: credential.idToken } : {}),
-      ...(isNativeCodexCredential(credential) ? { workspaceId: credential.accountId } : {}),
+      ...(isChatGPTCredential(credential) ? { idToken: credential.idToken, workspaceId: credential.accountId } : {}),
     } : undefined);
     const encrypted = await this.vault.encrypt(JSON.stringify(pending), hash);
     this.sql.exec("INSERT INTO chatgpt_logins VALUES (?, ?, ?)", hash, encrypted, expiresAt);
@@ -127,7 +126,7 @@ export class ChatGPTAccounts {
     const id = value.accountId ?? existing?.id ?? crypto.randomUUID();
     // 身份验证通过即加密保存；目录请求失败不能丢弃一次性授权结果。
     await this.credentials.modify(accountKey(id), async current => ({ ...credential,
-      catalog: isNativeCodexCredential(current) && isNativeCodexCredential(credential) && current.accountId === credential.accountId ? current.catalog : [] }));
+      catalog: isChatGPTCredential(current) && current.accountId === credential.accountId ? current.catalog : [] }));
     this.sql.exec("INSERT INTO chatgpt_accounts VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET email = excluded.email",
       id, clientId, credential.subject, credential.email ?? null, Date.now());
     try { await this.refreshCatalog(id); } catch (error) {
@@ -136,7 +135,6 @@ export class ChatGPTAccounts {
       return { accountId: id, email: credential.email, status: "catalog_pending" as const, diagnostic };
     }
     this.setState("active", id);
-    await this.credentials.delete(CODEX_PROVIDER);
     return { accountId: id, email: credential.email, status: "ready" as const };
   }
   async select(id: string) {
@@ -167,7 +165,7 @@ export class ChatGPTAccounts {
     const id = this.activeId();
     this.setState("active", "");
     this.sql.exec("DELETE FROM chatgpt_logins");
-    if (!id) { await this.credentials.delete(CODEX_PROVIDER); return { revoked: true }; }
+    if (!id) return { revoked: true };
     let revoked = false;
     await this.credentials.modify(accountKey(id), async current => {
       revoked = isChatGPTCredential(current) ? await revokeSession(current) : true;

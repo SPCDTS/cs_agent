@@ -2,6 +2,7 @@ import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { DEFAULT_SETTINGS, normalizeEvent, parseSettings, type ExternalEvent, type SourceSettings } from "../events/model";
 import { BodyLimitError, readBoundedBytes } from "../shared/http-body";
+import { sha256Hex } from "../shared/hash";
 
 export const MAX_BODY = 256 * 1024;
 // Covers the legal legacy maximum (1000 safe-integer ID pairs plus Unicode filters).
@@ -75,7 +76,7 @@ export async function readWebhook(request: Request, secret: string | undefined):
   const subjects={installationId:positive(installationId)?installationId:undefined,lifecycleUserId:positive(subjectUserId)?subjectUserId:undefined};
   if (event === "ping") {
     if (!positive(p?.hook_id)) throw new WebhookError(400,"invalid_ping");
-    return {deliveryId,bodyHash:Buffer.from(await crypto.subtle.digest("SHA-256",bytes)).toString("hex"),
+    return {deliveryId,bodyHash:sha256Hex(bytes),
       repository:"",repositoryId:0,event,action:"",receivedAt:Date.now(),normalized:null,...subjects};
   }
   const lifecycle = ["installation","installation_repositories","repository","github_app_authorization"].includes(event);
@@ -84,7 +85,7 @@ export async function readWebhook(request: Request, secret: string | undefined):
     const action = str(p?.action,40), userId = object(p?.sender)?.id;
     if (!action || !/^[a-z_]+$/.test(action) || event === "github_app_authorization" && (action !== "revoked" || !positive(userId)))
       throw new WebhookError(400,"invalid_lifecycle");
-    return {deliveryId,bodyHash:Buffer.from(await crypto.subtle.digest("SHA-256",bytes)).toString("hex"), repository:"",repositoryId:0,
+    return {deliveryId,bodyHash:sha256Hex(bytes), repository:"",repositoryId:0,
       installationId:positive(installationId)?installationId:undefined,lifecycleUserId:positive(userId)?userId:undefined,lifecycle:true,event,action,receivedAt:Date.now(),normalized:null};
   }
 
@@ -93,7 +94,7 @@ export async function readWebhook(request: Request, secret: string | undefined):
     || repository.split("/").some(part => part === "." || part === "..")) throw new WebhookError(400, "invalid_repository");
   const action = p.action === undefined ? "" : str(p.action, 40);
   if (action === undefined || p.action !== undefined && !/^[a-z_]+$/.test(action)) throw new WebhookError(400, "invalid_action");
-  const bodyHash = Buffer.from(await crypto.subtle.digest("SHA-256", bytes)).toString("hex"), receivedAt = Date.now();
+  const bodyHash = sha256Hex(bytes), receivedAt = Date.now();
   if (reservedEvent(event)) throw new WebhookError(400, "reserved_control_event");
   let title = "", summary = "", path = "", valid = false;
   let commentSubject: string | undefined, authorId: number | undefined, authorType: string | undefined, generic = false;

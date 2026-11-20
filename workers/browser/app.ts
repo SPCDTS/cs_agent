@@ -38,7 +38,6 @@ export const ERRORS: Record<string, string> = {
   invalid_callback: "回调地址格式不正确",
   token_exchange: "刷新或换取凭据失败，请查看诊断信息",
   invalid_identity: "账号身份校验失败，请重新授权所选账号",
-  plan_permission_required: "尚未允许使用 ChatGPT 订阅额度，请重新授权并开启该权限",
   catalog_failed: "读取账号模型列表失败，授权已保留，请查看诊断后重试",
   invalid_name: "技能名只能用小写字母、数字和连字符，以字母或数字开头，最长 64 位",
   missing_frontmatter: "SKILL.md 开头缺少以 --- 包围的 frontmatter",
@@ -545,7 +544,7 @@ export function renderModel(view: C.ModelView) {
   status.textContent = CODEX_STATUS[codex.status] || "状态未知";
   status.className = "pill " + (codex.loggedIn ? "ok" : codex.status === "refresh_failed" || codex.needsReauth ? "bad" : "neutral");
   $("codex-account").textContent = [codex.email,
-    codex.imageGeneration ? "Codex 订阅生图已接入" : codex.hasCredential && codex.flow !== "codex-native" ? "当前为旧授权，重新授权后可使用订阅生图" : "", codex.expiresAt ? "凭据到期 " + time(codex.expiresAt) : "",
+    codex.imageGeneration ? "Codex 订阅生图已接入" : "", codex.expiresAt ? "凭据到期 " + time(codex.expiresAt) : "",
     codex.status === "refresh_due" ? "下次请求将尝试刷新；也可点击刷新模型列表验证" : "",
     codex.refreshFailure ? time(codex.refreshFailure.at) + " · " + refreshDiagnostic(codex.refreshFailure) : "",
     codex.catalogFailure ? "模型目录：" + refreshDiagnostic(codex.catalogFailure) : "",

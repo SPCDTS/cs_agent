@@ -1,7 +1,8 @@
 import { OAuthFailure } from "./oauth-fetch";
+import { sha256Bytes } from "../shared/hash";
 
 export const randomSecret = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
-export const sha256 = async (value: string) => Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+export const sha256 = async (value: string) => sha256Bytes(value);
 
 export class TokenVault {
   readonly configured: boolean;

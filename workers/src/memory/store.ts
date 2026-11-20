@@ -1,11 +1,11 @@
-import { createHash } from "node:crypto";
 import type { SqliteDatabase, SqliteExecutor, SqliteValue } from "@earendil-works/chord/sqlite";
 import type { MemoryInput, MemoryKind, MemoryPatch, MemoryRow, MemoryStatus } from "./types";
 import { effectiveMemory } from "./lifecycle";
 import { containsSecret } from "./secrets";
+import { sha256Hex } from "../shared/hash";
 
 export const nowSec = () => Math.floor(Date.now() / 1000);
-export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+export const sha256 = (text: string) => sha256Hex(text);
 export const normalizeMemoryText = (text: string) => text.normalize("NFKC").replace(/\s+/g, " ").trim()
   .replace(/[A-Z]/g, c => c.toLowerCase()).replace(/[。．.!！?？;；,，\s]+$/u, "");
 export const memoryHash = (ns: string, kind: MemoryKind, text: string) => sha256(`${ns}\n${kind}\n${normalizeMemoryText(text)}`);

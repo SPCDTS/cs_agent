@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import { idList } from "./policy";
 import { DEFAULT_SEND_LIMITS, type OpsSettings, type Settings } from "./settings-schema";
+import { sha256Hex } from "./shared/hash";
 
 export * from "./settings-schema";
 export type SettingsSnapshot = { value: Settings; revision: string; defaults: Settings; overrides: Settings | null; updatedAt: number | null };
@@ -19,8 +19,8 @@ export function defaultSettings(env: SettingsEnv): Settings {
 export const effectiveSettings = (env: SettingsEnv, overrides: Settings | null): Settings => overrides ?? defaultSettings(env);
 export function settingsRevision(value: Settings): string {
   const { groupTrigger, allowGroups, allowUsers, extractNamespaces, model } = value;
-  return createHash("sha256").update(JSON.stringify({ groupTrigger, allowGroups, allowUsers, extractNamespaces,
-    model: { provider: model.provider, id: model.id, reasoningEffort: model.reasoningEffort ?? null } })).digest("hex").slice(0, 16);
+  return sha256Hex(JSON.stringify({ groupTrigger, allowGroups, allowUsers, extractNamespaces,
+    model: { provider: model.provider, id: model.id, reasoningEffort: model.reasoningEffort ?? null } })).slice(0, 16);
 }
 
 export type OpsSettingsSnapshot = { value: OpsSettings; revision: string; updatedAt: number | null };
@@ -31,5 +31,5 @@ export function defaultOpsSettings(env: { HISTORY_RAW_DAYS?: string; HISTORY_RAW
 }
 export function threadOpsSettings(value: OpsSettings, thread: string): OpsSettings["defaults"] { return { ...value.defaults, ...value.threads[thread] }; }
 export function opsSettingsRevision(value: OpsSettings): string {
-  return createHash("sha256").update(JSON.stringify({ ...value, threads: Object.fromEntries(Object.entries(value.threads).sort(([a],[b])=>a.localeCompare(b))) })).digest("hex").slice(0,16);
+  return sha256Hex(JSON.stringify({ ...value, threads: Object.fromEntries(Object.entries(value.threads).sort(([a],[b])=>a.localeCompare(b))) })).slice(0,16);
 }

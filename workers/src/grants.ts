@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ownerIds } from "./policy";
+import { sha256Hex } from "./shared/hash";
 
 const strict = { additionalProperties: false };
 export const GrantCapSchema = Type.Union([Type.Literal("send"), Type.Literal("schedule")]);
@@ -22,7 +22,7 @@ export const GrantSchema = Type.Object({ user: UserSchema, caps: Type.Array(Gran
 export type GrantInput = Static<typeof GrantInputSchema>;
 export type Grant = Static<typeof GrantSchema>;
 export type GrantAccess = { user: string; cap: Static<typeof GrantCapSchema>; scope: string; target?: string };
-export const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+export const digest = (value: unknown) => sha256Hex(JSON.stringify(value));
 
 /** 授权撤销保留用户修订墓碑；旧导入不能在撤权后再次创建同一授权。 */
 export class GrantStore {

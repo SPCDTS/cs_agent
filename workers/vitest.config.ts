@@ -3,8 +3,11 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 export default defineConfig({
-  // 测试显式使用合成服务目录，生产默认目录为空；覆盖 Notion 与 Workshop 两种接入。
-  resolve: { alias: [{ find: "../../mcp.json", replacement: fileURLToPath(new URL("./test/fixtures/mcp.json", import.meta.url).href) }] },
+  // 测试显式使用合成服务目录与 faux 测试模型，生产默认目录为空且不打包 faux。
+  resolve: { alias: [
+    { find: "../../mcp.json", replacement: fileURLToPath(new URL("./test/fixtures/mcp.json", import.meta.url).href) },
+    { find: "./models-faux", replacement: fileURLToPath(new URL("./test/fixtures/models-faux.ts", import.meta.url).href) },
+  ] },
   plugins: [cloudflareTest({
     wrangler: { configPath: "./wrangler.test.jsonc" },
     miniflare: {

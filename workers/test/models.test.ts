@@ -11,11 +11,10 @@ import worker from "../src/index";
 import * as models from "../src/models";
 import { remoteCredentials } from "../src/model-credentials";
 import { RegistryDO, type ModelView } from "../src/registry";
-import { isChatGPTCredential, CODEX_CLIENT_ID, CODEX_MODELS_URL, CODEX_BASE_URL, RESOURCE, TOKEN_URL } from "../src/codex-login";
+import { isChatGPTCredential, CODEX_CLIENT_ID, CODEX_MODELS_URL, CODEX_BASE_URL, TOKEN_URL } from "../src/codex-login";
 import { OAuthRefreshError } from "../src/codex-refresh-error";
 import { sha256 } from "../src/mcp/crypto";
 import { MediaRepository } from "../src/media/repository";
-import { generateImage } from "../src/tools/imagegen";
 import { input, syncedView } from "./helpers";
 import { threadView } from "../src/admin/read-views";
 
@@ -254,12 +253,9 @@ describe("Codex native authorization", () => {
     expect((await adminJson<ModelView>("GET", "/admin/model")).codex.status).toBe("ready");
   });
 
-  it("requires fresh authorization for legacy credentials and reports a missing vault cleanly", async () => {
-    await runInDurableObject(registry(), async (_instance, state) => {
-      state.storage.sql.exec("INSERT INTO model_credentials VALUES (?, ?, ?, ?)", "openai-codex", "old-encrypted", 1, '{"type":"oauth"}');
-    });
+  it("rejects model selection when logged out and reports a missing vault cleanly", async () => {
     const view = await adminJson<ModelView>("GET", "/admin/model");
-    expect(view.codex).toMatchObject({ loggedIn: false, needsReauth: true });
+    expect(view.codex).toMatchObject({ loggedIn: false, status: "logged_out" });
     expect((await selectModel({ provider: "openai-codex", id: "gpt-6-astra" })).status).toBe(400);
     await runInDurableObject(registry(), async (_instance, state) => {
       const instance = new RegistryDO(state, { ...env, OAUTH_STORE_KEY: undefined });
@@ -376,36 +372,27 @@ describe("model selection and Codex Responses", () => {
 });
 
 
-describe("原生授权迁移与共享生图", () => {
-  it("目录被拒绝时加密保存新授权并保留旧账号，无需重新登录即可恢复", async () => {
+describe("多账号目录恢复与共享生图", () => {
+  it("目录被拒绝时加密保存新授权并保留当前账号，无需重新登录即可恢复", async () => {
     network(); await login();
     const first = (await registry().modelView()).codex.activeId!;
-    await runInDurableObject(registry(), (_instance, state) => {
-      state.storage.sql.exec("UPDATE chatgpt_accounts SET client_id = ? WHERE id = ?", "oaiapp_legacy", first);
-    });
-    await store().modify("openai-codex", async current => ({ ...current!, flow: "chatgpt-plan", clientId: "oaiapp_legacy",
-      scope: scopes + " resource.invoke chatgpt.tokens.use.direct", access: "legacy-access" }));
-    const legacyModels = models.openModels(env, store());
-    expect((await legacyModels.getAuth("openai-codex"))?.auth).toMatchObject({ apiKey: "legacy-access", baseUrl: RESOURCE });
-    await expect(generateImage({ prompt: "画猫" }, { models: legacyModels,
-      repository: new MediaRepository({ bucket: env.ASSETS, scope: "owner" }), operationId: "migration" })).rejects.toMatchObject({ code: "login_required" });
-    const failed = await begin(first);
+    const failed = await begin();
     network({ [CODEX_MODELS_URL]: async () => Response.json({ error: { code: "unsupported_country_region_territory", message: "never-expose-catalog-body" } },
       { status: 403, headers: { "x-request-id": "req-catalog-test" } }) });
-    const saved = await complete(failed);
+    const saved = await complete(failed, CODEX_CLIENT_ID, "subject-b");
     expect(saved.status).toBe(200);
     const result = await saved.json<{ accountId: string; status: string }>();
     expect(result).toMatchObject({ status: "catalog_pending", diagnostic: { kind: "http", status: 403, oauthCode: "unsupported_country_region_territory", requestId: "req-catalog-test" } });
     const pending = await registry().modelView();
     expect(pending.codex.accounts.find(account => account.id === result.accountId)).toMatchObject({ status: "catalog_pending", loggedIn: false, catalogFailure: { status: 403 } });
-    expect(JSON.stringify([result, pending])).not.toMatch(/never-expose|refresh-subject-a/);
+    expect(JSON.stringify([result, pending])).not.toMatch(/never-expose|refresh-subject-b/);
     await runInDurableObject(registry(), async (_instance, state) => {
       const restored = await new RegistryDO(state, env).modelView();
       expect(restored.codex.accounts.find(account => account.id === result.accountId)?.status).toBe("catalog_pending");
       expect(state.storage.sql.exec("SELECT * FROM model_credentials").toArray()).toHaveLength(2);
     });
     expect((await registry().modelView()).codex.activeId).toBe(first);
-    expect((await legacyModels.getAuth("openai-codex"))?.auth.apiKey).toBe("legacy-access");
+    expect((await models.openModels(env, store()).getAuth("openai-codex"))?.auth.apiKey).toBe(accessToken("subject-a"));
     network();
     await registry().codexSelect(result.accountId);
     expect(sent.map(call => call.url)).toEqual([CODEX_MODELS_URL]);
@@ -414,10 +401,9 @@ describe("原生授权迁移与共享生图", () => {
     expect(view.codex.accounts).toHaveLength(2);
     expect(view.codex.activeId).toBe(result.accountId);
     expect(view.codex.catalogFailure).toBeUndefined();
-    expect(await store().read("openai-codex")).toMatchObject({ refresh: "refresh-subject-a" });
-    network({ [RESOURCE + "/models"]: async () => Response.json({ models: catalog }) });
+    expect(await store().read("openai-codex")).toMatchObject({ refresh: "refresh-subject-b" });
     await registry().codexSelect(first);
-    expect((await models.openModels(env, store()).getAuth("openai-codex"))?.auth.apiKey).toBe("legacy-access");
+    expect((await models.openModels(env, store()).getAuth("openai-codex"))?.auth.apiKey).toBe(accessToken("subject-a"));
   });
 
   it.each(["deepseek", "openai-codex"])("%s 回合用相同的 Codex 授权生图，网页只展示资产、不发送 QQ", async provider => {
