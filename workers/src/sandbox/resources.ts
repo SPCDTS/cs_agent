@@ -1,8 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
-import { createHash } from "node:crypto";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import type { Env } from "../env";
+import { sha256Hex } from "../shared/hash";
 
 const NameSchema = Type.String({ pattern: "^[a-zA-Z0-9:_-]{1,160}$" });
 export const ResourceIdSchema = Type.String({ pattern: "^sbx:[a-f0-9-]{36,64}$" });
@@ -19,7 +19,7 @@ type ResourceRecord = { kind: "ready"; resource: SandboxResource; fingerprint?: 
   | { kind: "preparing"; resource: SandboxResource; fingerprint: string; sourceName?: string; clone?: { sourceName: string; sourceRevision: string; expectedRevision: string; operationId: string } };
 const prefix = "resource:";
 const key = (id: string) => prefix + id;
-const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const hash = sha256Hex;
 
 function isCloudflareRecord(record: { resource: unknown }): record is ResourceRecord {
   return Check(SandboxResourceSchema, record.resource);

@@ -9,20 +9,18 @@ export const CODEX_PROVIDER = "openai-codex";
 export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback";
 export const TOKEN_URL = "https://auth.openai.com/oauth/token";
-const LEGACY_TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token";
 export const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
 // Codex 兼容协议版本；不是本机 CLI 的安装版本。
 const CODEX_VERSION = "0.162.0";
 export const CODEX_MODELS_URL = CODEX_BASE_URL + "/models?client_version=" + CODEX_VERSION;
 export const CODEX_HEADERS = { originator: "codex_cli_rs", version: CODEX_VERSION,
   "User-Agent": "codex_cli_rs/" + CODEX_VERSION + " (cs-agent; Cloudflare Workers)" };
-export const RESOURCE = "https://api.openai.com/v1";
 export const LOGIN_TTL_MS = 10 * 60_000;
 const ISSUER = "https://auth.openai.com";
 const SCOPE = "openid profile email offline_access";
 const JWKS = createRemoteJWKSet(new URL(ISSUER + "/.well-known/jwks.json"));
 const LOGIN_CODES = ["invalid_callback", "authorization_denied", "invalid_state", "token_exchange", "invalid_identity",
-  "plan_permission_required", "login_required", "catalog_failed", "unconfigured"] as const;
+  "login_required", "catalog_failed", "unconfigured"] as const;
 export type ModelLoginCode = typeof LOGIN_CODES[number];
 export class ModelLoginError extends Error {
   constructor(readonly code: ModelLoginCode) { super(code); }
@@ -39,15 +37,12 @@ export const TokenResponseSchema = Type.Object({
 export type TokenResponse = Static<typeof TokenResponseSchema>;
 export const CatalogSchema = Type.Array(Type.Object({ slug: Text, display_name: Text, visibility: Text }));
 export type ChatGPTModel = Static<typeof CatalogSchema>[number];
-const CredentialFields = {
-  type: Type.Literal("oauth"), access: Text, refresh: Text, expires: Type.Number(),
+const CredentialSchema = Type.Object({
+  type: Type.Literal("oauth"), flow: Type.Literal("codex-native"), accountId: Text, access: Text, refresh: Text, expires: Type.Number(),
   clientId: Text, subject: Text, idToken: Text, scope: Text, email: Type.Optional(Text), hostId: Text, catalog: CatalogSchema,
-};
-const NativeCredentialSchema = Type.Object({ ...CredentialFields, flow: Type.Literal("codex-native"), accountId: Text });
-const CredentialSchema = Type.Union([NativeCredentialSchema, Type.Object({ ...CredentialFields, flow: Type.Literal("chatgpt-plan") })]);
+});
 export type ChatGPTCredential = Static<typeof CredentialSchema>;
 export const isChatGPTCredential = (value: unknown): value is ChatGPTCredential => Check(CredentialSchema, value);
-export const isNativeCodexCredential = (value: unknown): value is Static<typeof NativeCredentialSchema> => Check(NativeCredentialSchema, value);
 export const PendingSchema = Type.Object({
   flow: Type.Literal("codex-native"), workspaceId: Type.Optional(Text),
   state: Text, nonce: Text, verifier: Text, redirectUri: Text, hostId: Text,
@@ -59,7 +54,6 @@ export async function startChatGPTLogin(hostId: string, port: number, account?: 
   id: string; clientId: string; subject: string; email?: string; idToken?: string; workspaceId?: string;
 }): Promise<{ pending: PendingLogin; url: string }> {
   if (port !== 1455) throw new ModelLoginError("invalid_callback");
-  // 旧 SIWC 账号不被覆盖；新授权成功前仍可继续使用或重新选回。
   const returning = account?.clientId === CODEX_CLIENT_ID ? account : undefined;
   const pending: PendingLogin = { flow: "codex-native", hostId, state: randomSecret(), nonce: randomSecret(), verifier: randomSecret(),
     redirectUri: CODEX_REDIRECT_URI, clientId: CODEX_CLIENT_ID,
@@ -100,11 +94,6 @@ async function verifyIdentity(idToken: string, clientId: string, expected: { non
     return { subject: payload.sub, ...(typeof payload.email === "string" ? { email: payload.email } : {}) };
   } catch { throw new ModelLoginError("invalid_identity"); }
 }
-function checkScope(scope: string | undefined): string {
-  if (!scope?.split(" ").includes("chatgpt.tokens.use.direct") || !scope.split(" ").includes("resource.invoke"))
-    throw new ModelLoginError("plan_permission_required");
-  return scope;
-}
 export async function acceptTokens(raw: unknown, clientId: string, pending: PendingLogin): Promise<ChatGPTCredential> {
   if (!Check(TokenResponseSchema, raw) || !raw.id_token) throw new ModelLoginError("token_exchange");
   if (clientId !== CODEX_CLIENT_ID) throw new ModelLoginError("invalid_identity");
@@ -118,8 +107,8 @@ export async function acceptTokens(raw: unknown, clientId: string, pending: Pend
 export async function fetchCatalog(credential: ChatGPTCredential): Promise<ChatGPTModel[]> {
   let response: Response;
   try {
-    response = await fetch(credential.flow === "codex-native" ? CODEX_MODELS_URL : RESOURCE + "/models", {
-      headers: { Authorization: "Bearer " + credential.access, ...(credential.flow === "codex-native" ? { ...CODEX_HEADERS, "chatgpt-account-id": credential.accountId } : {}) },
+    response = await fetch(CODEX_MODELS_URL, {
+      headers: { Authorization: "Bearer " + credential.access, ...CODEX_HEADERS, "chatgpt-account-id": credential.accountId },
       redirect: "manual", signal: AbortSignal.timeout(15_000) });
   } catch (error) {
     throw new CatalogError({ at: Date.now(), kind: error instanceof Error && error.name === "TimeoutError" ? "timeout"
@@ -141,8 +130,8 @@ export const codexOAuth: OAuthAuth = {
     if (!isChatGPTCredential(credential)) throw new ModelLoginError("login_required");
     let response: Response;
     try {
-      response = await fetch(credential.flow === "codex-native" ? TOKEN_URL : LEGACY_TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ grant_type: "refresh_token", client_id: credential.clientId, refresh_token: credential.refresh, ...(credential.flow === "chatgpt-plan" ? { resource: RESOURCE } : {}) }),
+      response = await fetch(TOKEN_URL, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "refresh_token", client_id: credential.clientId, refresh_token: credential.refresh }),
         redirect: "manual", signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });
     } catch (error) {
       throw new OAuthRefreshError({ at: Date.now(), kind: error instanceof Error && error.name === "TimeoutError" ? "timeout"
@@ -153,21 +142,18 @@ export const codexOAuth: OAuthAuth = {
     let tokens: unknown;
     try { tokens = await response.json(); } catch { throw new OAuthRefreshError({ at: Date.now(), kind: "invalid_json", ...diagnostic }); }
     if (!Check(TokenResponseSchema, tokens)) throw new OAuthRefreshError({ at: Date.now(), kind: "invalid_token_response", ...diagnostic });
-    let scope: string, identity: Awaited<ReturnType<typeof verifyIdentity>> | {};
+    let identity: Awaited<ReturnType<typeof verifyIdentity>> | {};
     try {
-      scope = credential.flow === "chatgpt-plan" ? checkScope(tokens.scope ?? credential.scope) : tokens.scope ?? credential.scope;
-      if (credential.flow === "codex-native" && tokenAccountId(tokens.access_token) !== credential.accountId) throw new ModelLoginError("invalid_identity");
+      if (tokenAccountId(tokens.access_token) !== credential.accountId) throw new ModelLoginError("invalid_identity");
       identity = tokens.id_token ? await verifyIdentity(tokens.id_token, credential.clientId, { subject: credential.subject }) : {};
-    } catch (error) {
-      throw new OAuthRefreshError({ at: Date.now(), kind: error instanceof ModelLoginError && error.code === "plan_permission_required"
-        ? "plan_permission_required" : "invalid_identity", ...diagnostic });
+    } catch {
+      throw new OAuthRefreshError({ at: Date.now(), kind: "invalid_identity", ...diagnostic });
     }
     return { ...credential, ...identity, access: tokens.access_token, refresh: tokens.refresh_token,
-      expires: Date.now() + tokens.expires_in * 1000, idToken: tokens.id_token ?? credential.idToken, scope };
+      expires: Date.now() + tokens.expires_in * 1000, idToken: tokens.id_token ?? credential.idToken, scope: tokens.scope ?? credential.scope };
   },
   toAuth: async credential => {
     if (!isChatGPTCredential(credential)) throw new ModelLoginError("login_required");
-    if (credential.flow === "chatgpt-plan") { checkScope(credential.scope); return { apiKey: credential.access, baseUrl: RESOURCE }; }
     return { apiKey: credential.access, baseUrl: CODEX_BASE_URL, headers: { ...CODEX_HEADERS, "chatgpt-account-id": credential.accountId } };
   },
 };

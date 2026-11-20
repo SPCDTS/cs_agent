@@ -73,8 +73,8 @@ export function fakeRemote(endpoint = "https://mcp.notion.com/mcp") {
   return { state, requests, spy };
 }
 export const adminEnv = () => ({ ...env, ADMIN_TOKEN: "synthetic-admin" });
-export function adminRequest(token = "synthetic-admin", body: unknown = { server: "notion" }) {
-  return new Request(`${env.PUBLIC_ORIGIN}/admin/mcp/oauth/login-link`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+export function adminRequest(token = "synthetic-admin", server = "notion") {
+  return new Request(`${env.PUBLIC_ORIGIN}/admin/mcp/${server}/login-link`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
 }
 export async function beginLogin() {
   const response = await worker.fetch(adminRequest(), adminEnv());

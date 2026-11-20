@@ -26,8 +26,10 @@ describe("Registry OAuth CIMD", () => {
   it("requires an admin Bearer, rejects query/NapCat auth and reports unconfigured without a key", async () => {
     for (const token of ["", "t", "wrong"]) expect((await worker.fetch(adminRequest(token), adminEnv())).status).toBe(401);
     expect((await worker.fetch(adminRequest(), { ...env, ADMIN_TOKEN: undefined })).status).toBe(401);
-    expect((await worker.fetch(new Request(`${env.PUBLIC_ORIGIN}/admin/mcp/oauth/login-link?access_token=synthetic-admin`, { method: "POST" }), adminEnv())).status).toBe(401);
-    expect((await worker.fetch(adminRequest("synthetic-admin", { server: "notion", extra: true }), adminEnv())).status).toBe(400);
+    expect((await worker.fetch(new Request(`${env.PUBLIC_ORIGIN}/admin/mcp/notion/login-link?access_token=synthetic-admin`, { method: "POST" }), adminEnv())).status).toBe(401);
+    const badServer = await worker.fetch(adminRequest("synthetic-admin", "unknown"), adminEnv());
+    expect(badServer.status).toBe(400);
+    expect(await badServer.json()).toEqual({ error: "server_unavailable" });
     const status = await runInDurableObject(registry(), async (_instance, state) => {
       const instance = new RegistryDO(state, { ...env, OAUTH_STORE_KEY: undefined });
       expect(await instance.accessToken("notion")).toBeUndefined();

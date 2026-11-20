@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import { copyJson, type JsonValue } from "@earendil-works/chord";
+import { sha256Hex } from "../shared/hash";
 import type { McpServerConfig } from "./config";
 import type { CatalogTool } from "./catalog";
 export type CatalogIdentity = { serverId: string; configDigest: string; scopeDigest: string; digest: string };
@@ -13,7 +13,7 @@ function canonical(value: JsonValue): string {
   return JSON.stringify(value);
 }
 export const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
-export const digest = (value: unknown): string => createHash("sha256").update(canonical(copyJson(value))).digest("hex");
+export const digest = (value: unknown): string => sha256Hex(canonical(copyJson(value)));
 export const serverDigest = (server: McpServerConfig): string => digest(server);
 export const connectionDigest = (server: McpServerConfig): string => digest([server.id, server.transport, server.credential]);
 

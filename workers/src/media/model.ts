@@ -1,5 +1,6 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { sha256Hex } from "../shared/hash";
 
 export const FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const WORKSPACE_MAX_BYTES = 50 * 1024 * 1024;
@@ -21,8 +22,7 @@ export function validScope(scope: string): string {
   return scope;
 }
 export async function sha256(bytes: Uint8Array | string): Promise<string> {
-  const data = typeof bytes === "string" ? new TextEncoder().encode(bytes) : bytes;
-  return [...new Uint8Array(await crypto.subtle.digest("SHA-256", data))].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(bytes);
 }
 export function cleanFileName(name: string): string {
   return name.replace(/[\\/\p{Cc}]/gu, "_").slice(0, 255) || "attachment";

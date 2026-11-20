@@ -2,7 +2,7 @@ import { ADMIN_PAGE_SIZE, readAdminCursor, nextAdminCursor } from "./pagination"
 import { Type } from "typebox";
 import type { AdminRoute } from "./routes";
 import { adminJson as json, readAdminBody } from "./http";
-import { GrantInputSchema, GrantRevokeSchema, GrantImportSchema } from "../grants";
+import { GrantInputSchema, GrantRevokeSchema } from "../grants";
 import { OpsSettingsSchema } from "../settings";
 import { ownerIds } from "../policy";
 import { parseSkill } from "../skills";
@@ -30,7 +30,6 @@ export function accessRoutes():AdminRoute[]{const routes:AdminRoute[]=[
     const owner=ownerIds(env)[0];if(!owner)return json({error:"owner_required"},403);
     return json(await env.REGISTRY.getByName("main").grantRevoke(await read(request,GrantRevokeSchema),`qq:${owner}`));
   }},
-  {method:"POST",path:"/admin/grants/import",handle:async({env,request})=>json(await env.REGISTRY.getByName("main").importGrants(await read(request,GrantImportSchema)))},
   {method:"GET",path:"/admin/ops-settings",handle:async({env})=>json(await env.REGISTRY.getByName("main").opsSettings())},
   {method:"PUT",path:"/admin/ops-settings",handle:async({env,request})=>{
     const input=await read(request,Type.Object({value:OpsSettingsSchema,expected:Type.String({minLength:1,maxLength:100})},strict));

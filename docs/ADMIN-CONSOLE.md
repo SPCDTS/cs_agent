@@ -1,112 +1,54 @@
-# 管理台：请求统计与网页续聊
+# 管理台：请求统计、网页续聊与运维面板
 
-## 使用
+## 1. 入口与日常视图
 
-打开 `/admin/`，使用原有 ADMIN_TOKEN 登录。请求记录直接放在用量总览下，不再单独占一个导航入口。日常使用“用量总览”和“会话对话”，管理功能拆成“模型与接入”“会话与记忆”“任务与事件”“权限与运维”“工作区”。
+打开 `/admin/`，使用 `ADMIN_TOKEN` 登录（口令仅存于当前标签页 `sessionStorage`，通过 `Authorization: Bearer` 发送，401 自动清除）。导航分为「用量总览」「会话对话」与管理分区「模型与接入」「会话与记忆」「任务与事件」「权限与运维」「工作区」。数据列表统一按每页 10 条分页。
 
-- 总览可选最近 24 小时、7 天、30 天，并按会话、模型、用途、状态筛选；趋势按北京时间分桶。
-- 每条请求显示缓存命中率。点击请求时间，查看上下文字符组成、系统提示、消息、工具定义、模型输出和工具执行结果；支持原始快照与同回合请求切换。
-- 会话对话选择已有 QQ 会话，继续同一个 Harness root；最近 100 条 QQ/网页消息合并展示并标明来源。输入框支持 Ctrl/⌘ + Enter。
-- 网页发言只回复网页。QQ 消息仍按原规则回复 QQ。网页请求使用稳定 UUID，断网重试同一编号不会重复入队。
-- 对话中的执行时间线展示每次模型调用及工具状态，展开工具才读取参数和结果。“本轮请求”进入用量总览并筛选该回合。
-- “会话对话”顶部显示最近 24 小时的 agent 拓扑。球体代表会话 agent 或子 agent，箭头从父球指向子球；点击主、子 agent 均会在下方展开对应会话，也可用键盘 Enter/空格打开。当前会话有外圈标记。子球下方显示任务简介或最新进度，完成后显示简短结果，状态单独标注。拓扑不分页，全局最多展示最近活跃的 5 个子 agent（包括运行中的任务），保留对应父会话和自身近期活跃的主 agent；每个父会话只出现一次。超出时显示已展示数量与总数，其余子会话仍可从下方列表查看。组内与各组均按最近活动时间倒序排列；节点多时向下扩展，窄屏自动改为单列，连线沿各组左侧标明父子关系。
-- 左侧会话列表按父会话嵌套显示子 agent，可折叠；同一父会话内按最近活动倒序排列。默认展示最近 24 小时内最新的 5 个已结束子任务，运行中与当前选中的子会话始终可见。其余任务通过“展开显示（数量）”查看，点击“收起”恢复限制；旧任务有新进展后会重新进入近期列表。
-- 点击嵌套列表、拓扑中的子 agent，或在管理页的子任务列表点击“查看会话”，均在下方同一对话区显示子会话，不再打开弹窗。消息和模型回答直接展开，工具参数与返回内容可折叠；运行中自动刷新，每次加载 10 条，支持更早记录和手动刷新。子会话只读，可返回父会话，切换时保留父会话未发送的草稿。
-- 正文与工具参数各保留最多 16,000 字符，已结束子任务保留 14 天。历史接口同时返回子任务状态、摘要、同步时间及分离的工具调用字段，管理台只读展示副本，不唤醒执行 DO。
-- 审计事件在“任务与事件”，每页 10 条；筛选与前后翻页保持原行为。
+- **用量总览与请求记录**：支持最近 24 小时 / 7 天 / 30 天及会话、模型、用途、状态筛选，按北京时间分桶；每条请求展示缓存命中率，点击查看上下文字符组成、系统提示、消息、工具定义、输出、CodeMode 执行组与原始快照（按需展开加载）。
+- **会话对话与拓扑**：
+  - 顶部显示最近 24 小时 Agent 拓扑（全局最多 5 个最近活跃子 agent + 对应父会话与近期活跃主 agent，窄屏单列，点击或键盘 Enter/空格切换对话）。
+  - 左侧按父会话嵌套展示子 agent（默认最近 24 小时内最多 5 个已结束任务，运行中与当前选中始终可见）。
+  - 选择已有 QQ 会话继续同一 Harness root，合并展示最近 100 条 QQ / 网页消息并标明来源；网页发言使用稳定 UUID（断网重试不重复入队），回复留在网页。点击子 agent 在下方同一对话区只读查看，保留父会话草稿。
+  - 上下文监控趋势可折叠展开，按当前 agent 隔离展示（详见 [架构与运行设计](ARCHITECTURE.md#5-上下文监控与-codemode-执行组)）。
+- **管理分区**（进入对应视图才按需加载，不增加后台轮询）：
+  - **模型与接入**：模型切换（CAS）、Codex 原生多账号授权/目录刷新/登出、动态 MCP 服务与设备接入。
+  - **会话与记忆**：会话状态与停止/压缩/归档重置、长期记忆筛选/编辑/冲突确认/画像复核/整理回滚与主人私聊回复规则管理（详见 [记忆系统](MEMORY-SYSTEM.md)）、技能编辑。
+  - **任务与事件**：定时任务管理、GitHub App 与 Gmail 事件来源配置、审计事件（每页 10 条）。
+  - **权限与运维**：人设 CAS、跨目标发送/定时授权、运维设置 CAS、告警与 QQ 发送账本/核对、群 MCP 授权与逐次审批。
+  - **工作区**：持久文件列表与鉴权下载、停止容器（保留 R2 快照）、检查与选择合并子任务工作区。
 
-请求采集从本版本上线后开始，不补造历史请求。网页对话无需 NapCat 在线，但 QQ 的实际收发仍依赖 NapCat。
+聊天与管理只读视图来自执行对象主动推送到 `RequestsDO` 的最终一致展示副本；首次同步前返回 `503 view_pending`，不会因查询唤醒执行 DO。管理写命令仍直接进入业务 DO 并尽力同步展示结果。
 
-聊天与管理数据使用执行对象主动同步的展示副本。首次同步前返回 `503 view_pending`，页面提示“待同步”，不会通过查询唤醒执行对象补数据。升级后的旧会话由已有五分钟维护入口回填；聊天显示最近同步时间。普通增量同步合并 150 毫秒内的变化，同步失败保留本地变更并安排重试。管理写命令返回前尽力同步结果；展示服务故障不会撤销已经提交的修改。
+## 2. 管理 HTTP 接口
 
-## 调用方式与数据边界
+所有数据与写接口均要求 `Authorization: Bearer <ADMIN_TOKEN>`（静态壳 `/admin/`、`/admin/app.js`、下载助手与公开回调页除外）：
 
-```ts
-// 同一基础 Models 的凭据仍由 Registry 管理，观察视图只绑定固定来源。
-const models = captureModels(base, env, ctx, {
-  thread: "owner", actor: "thread", purpose: "conversation"
-});
-await Harness.open(storage, { models, registry }, context);
+| 分组 | 接口 | 用途 |
+| --- | --- | --- |
+| 总览与健康 | `GET /admin/health`、`GET /admin/overview`、`POST /admin/diagnostics/model-egress` | 组件健康、全局总览、手动出口诊断 |
+| 用量与上下文 | `GET /admin/usage`、`GET /admin/requests`、`GET /admin/requests/:id`、`GET /admin/requests/:id/context[/:part]`、`GET /admin/context-timeline`、`GET /admin/tools/:id[/execution]`、`GET /admin/agent-topology` | 用量趋势、请求分页、上下文分析、工具执行组与拓扑 |
+| 会话与续聊 | `GET/POST /admin/threads/:key/chat`、`GET /admin/threads/:key/history`、`GET /admin/threads/:key/trace`、`POST /admin/threads/:key/{stop,compact,reset}`、`GET /admin/threads/:key/subagents`、`GET /admin/subagents/:id/{history,transcript}`、`POST /admin/subagents/:id/cancel` | 网页续聊（202 入队）、历史分页、执行时间线与子任务控制 |
+| 模型与设置 | `GET/PUT /admin/settings`、`GET/PUT /admin/model`、`POST /admin/model/oauth/codex/{start,select,catalog,logout}`、`POST /admin/send-rules/release` | 运行设置 CAS、模型选择、Codex 多账号管理与解封发送规则 |
+| 记忆与规则 | `GET /admin/memory[/list\|/:id\|/candidates\|/jobs\|/proposals]`、`POST /admin/memory/{entries,consolidate,proposals}`、`PUT/DELETE /admin/memory/:id`、`PUT /admin/memory/profile`、`/admin/memory/rules/*` | 记忆增删改查、冲突/画像/整理/回滚与主人私聊回复规则 |
+| 技能、权限与运维 | `GET/PUT/DELETE /admin/skills[/:name]`、`POST /admin/skills/:name/{enable,disable,publish}`、`GET/PUT /admin/persona`、`GET/POST /admin/grants[/revoke]`、`GET/PUT /admin/ops-settings`、`GET /admin/alerts`、`GET /admin/deliveries[/:id]`、`POST /admin/deliveries/:id/reconcile` | 技能、人设、授权、运维设置、告警与发送账本核对 |
+| 定时与事件 | `GET /admin/schedules`、`POST /admin/schedules/:id/{pause,resume,delete,run-now}`、`GET /admin/event-sources`、`POST /admin/event-sources/:source/{pause,resume}`、`PUT /admin/event-sources/:source/settings`、`/admin/github/*` | 定时任务与 GitHub / Gmail 事件来源管理 |
+| MCP 与设备 | `/admin/mcp/servers*`、`POST /admin/mcp/manage`、`POST /admin/mcp/:server/{login-link,logout,refresh}`、`GET/PUT /admin/mcp/access`、`GET /admin/mcp/approvals`、`POST /admin/mcp/approvals/:id/{approve,reject}`、`/admin/devices*` | 动态 MCP 服务、群授权、逐次审批与设备接入 |
+| 工作区与媒体 | `GET /admin/threads/:thread/workspace[/file\|/children/:childId]`、`POST /admin/threads/:thread/workspace/{reset-runtime,merge}`、`POST /admin/threads/:key/sandbox/reset`、`POST/GET /media/assets/:scope[/:id]` | 持久工作区只读/下载/合并、容器停止与私有媒体 |
 
-// 网页提交只接收文字与幂等编号，不接收 QQ 身份、目标或权限字段。
-await thread.submitWeb("owner", requestId, text);
-const history = await env.REQUESTS.getByName("view:thread:owner").chatView("owner");
-
-// 查询集中在 RequestsDO，读取不会唤醒每个会话。
-const page = await env.REQUESTS.getByName("main").list(query);
-```
-
-新增数据接口均要求 Bearer ADMIN_TOKEN：
-
-| 接口 | 用途 |
-| --- | --- |
-| GET /admin/usage | 合计、趋势、模型分布 |
-| GET /admin/agent-topology | 最近 24 小时的 agent 身份、父子关系与活动概览 |
-| GET /admin/threads/:key/subagents | 按最近活动排序的子任务列表 |
-| GET /admin/subagents/:id/history?thread=…&cursor=… | 指定父会话下的子 agent 历史，游标可省略 |
-| GET /admin/requests | 请求游标分页 |
-| GET /admin/requests/:id | 单次上下文详情 |
-| GET /admin/threads/:key/chat | 最近消息与网页排队数 |
-| GET /admin/threads/:key/chat?after=…&pending=… | 新消息及之前未完成输入的状态更新 |
-| GET /admin/threads/:key/trace?turn=…&after=… | 指定回合在游标之后变化的请求、工具元数据 |
-| GET /admin/tools/:id | 单次工具的参数与结果，展开时读取 |
-| POST /admin/threads/:key/chat | 网页输入，接纳后返回 202 |
-
-列表使用递增序号游标，前页之后的新请求不会让后页重复。时间、会话、模型、用途和状态条件同时作用于列表与统计。状态和用量可能随进行中的请求完成而更新；不是冻结的历史数据库快照。
-
-## 架构与综合决策
-
-比较了集中 RequestsDO 与按 Thread/Subagent 分散保存、查询时合并两种方案。五项评估为请求覆盖、渠道隔离、查询完整性、存储上限、维护复杂度；独立评审同样推荐集中式方案。选用集中式：一个查询所有者隐藏跨会话索引、分页与保留策略，不增加目录版本、租约或多游标归并，也不把统计流量混进 Registry 的凭据刷新。
-
-采用分散式候选对渠道归属的约束：QQ/网页不混入同一运行回合；子任务继承派出来源。同一子任务拒绝跨回复入口追加指令，需在当前入口另建，避免一次任务的后续汇报改道。使用流的终态 Promise 采集，不增加第二个事件消费者，不抢占 Harness 的流事件。
+## 3. 代码结构与构建
 
 | 模块 | 职责 |
 | --- | --- |
-| workers/src/requests/capture.ts | 装饰 stream/streamSimple/complete/completeSimple，记录一次模型调用的开始与结束 |
-| workers/src/requests/snapshot.ts | 白名单上下文投影、凭据隐藏与大小限制 |
-| workers/src/requests/trace.ts | Harness 请求与工具钩子，绑定宿主回合并采集执行状态 |
-| workers/src/requests/do.ts | 全局 SQLite 索引、用量聚合、分页、详情与清理 |
-| workers/src/thread.ts | 网页接纳、原会话调度、权限与输出入口 |
-| workers/src/subagent/ | 子任务采集与回复来源继承 |
-| workers/src/admin/console.ts | 总览、对话页面与导航 |
-| workers/src/admin/request-detail.ts | 请求详情可视化、消息与工具配对、按展开渲染 |
-| workers/src/admin/trace-ui.ts | 对话执行时间线、增量读取与工具详情缓存 |
-| workers/src/admin/management.ts | 管理功能分组及按页加载 |
-| workers/src/admin/topology.ts | 球体拓扑、父子箭头、单页节点限制和按需动效 |
-| workers/src/admin/page.ts | 登录、静态壳、原有管理功能 |
-| workers/src/admin/routes.ts | 鉴权、参数验证与 RPC 路由 |
+| `workers/browser/index.html`、`admin.css` | 静态页面壳与样式（构建时由 esbuild 压缩 CSS 并内联生成 `ADMIN_PAGE_HTML`） |
+| `workers/browser/*.ts` | 浏览器交互、状态管理与 TypeBox 响应契约校验（经 `tsconfig.browser.json` 严格检查，由 `scripts/build-admin.mjs` 打包为 `ADMIN_APP_JS`） |
+| `workers/src/admin/routes.ts` 及子路由 | 统一 Bearer 鉴权、参数校验与 DO RPC 转发 |
+| `workers/src/requests/` | `capture.ts`（模型请求采集）、`snapshot.ts`（白名单投影与脱敏）、`trace.ts`（Harness 回合与工具钩子）、`do.ts`（SQLite 索引、聚合、保留清理与展示副本） |
 
-模型请求采用异步 RPC 上报；采集失败不打断正常回复，目前没有持久补送队列，因此这里是运行观测，不是保证无丢失的计费账本。一小时未收到结束记录标为“采集未完成”。主会话的 GenerationTask 与 ToolTask 钩子使用宿主 turnId、输入 ID、会话代次及 toolCallId 关联；工具身份保存在 task memo，执行状态独立于模型请求状态。工具元数据与正文复用 RequestsDO 的 SQLite，不增加服务或容器。旧记录没有回合或结构化消息信息时仍可读取保留正文，但不按时间猜测工具归属。子任务、记忆/维护及压缩仍记录模型调用；SDK 内部 HTTP 重试不拆分。
+## 4. 统计口径、保留与轮询边界
 
-## 用量与保留
-
-输入 token = pi-ai input + cacheRead + cacheWrite；输出包含 reasoning，不能再叠加。单请求命中率 = cacheRead / 输入 token；总览只对已上报缓存读取的请求按输入量加权，不把缺失缓存指标当零。通过提供方 usage 事件区分上报的零值与未上报；没有提供方事件但规范化 usage 非零时保留该用量。未知用量显示“—”；统计同时显示已返回用量的请求数。系统、消息、工具组成使用字符数，不能理解为精确 token 拆分，也不能推断某条消息命中了缓存。
-
-请求元数据最多 30 天、20,000 条；工具元数据随关联回合或 30 天期限清理。请求快照和工具正文共同使用最多 7 天、全局 32 MiB 的详情预算，不各占一份额度。单次输入快照最多 96,000 字符，输出最多 24,000 字符，工具参数和结果各最多 12,000 字符。页面明确提示截断；含凭据模式的内容整块隐藏，图片二进制、推理正文与认证选项不进入新快照。
-
-列表和时间线只查询元数据；点击单次请求才读取快照，展开单次工具才读取工具正文。长正文、历史消息、工具定义与原始 JSON 展开后才构建内容节点。同一页面已结束的详情可复用内存缓存；认证重置和页面切换清理缓存，进行中的结果不缓存。对话活跃时每 2.5 秒增量读取，当前用量页有进行中请求时每 5 秒更新；完成、离页或窗口隐藏后停止轮询。空闲期间 QQ 新消息通过刷新按钮或重新进入会话获取。配置数据进入对应页面才加载，不再登录后一次读取所有功能。
-
-拓扑从 RequestsDO 的请求、工具与子 agent 活动元数据批量读取，不逐个唤醒 ThreadDO 或 SubagentDO，不读取上下文快照。父子关系来自采集时的 thread / actor；压缩请求仍归属原 agent。父会话本身近期没有调用但子 agent 活跃时，保留一个标明“父 agent”的连接节点。新子任务使用完整生命周期状态，工具等待期间仍显示执行中；旧子任务与父会话继续依据请求和工具采集判断，超过一小时未结束的采集不标为活跃。活动记录仅保存最新版本，迟到进度不能覆盖完成或取消状态，保留 30 天，面板展示最近 24 小时。
-
-父 agent 在正常的 subagent spawn 参数中填写 summary，建议 15–30 字，完整 task 仍用于实际执行。子 agent 阶段变化时在原有工具调用前写一行 `【进度】简短动作`，最终回答以 `【结果】简短结果` 开头；GenerationTask 的 afterResponse 钩子只提取完整响应的显式首行，跳过失败响应与 thinking，不增加模型请求或进度工具。未提供进度时沿用任务简介；旧任务缺 summary 时截取任务第一句，旧采集没有任何任务信息时显示“暂无任务简介”，不编造当前动作。展示短句限制 60 个字符，复用凭据脱敏；向父线程汇报的完整结果移除 `【结果】` 前缀。
-
-服务端复用 10 秒缓存；仅在拓扑可见且有执行活动时定时刷新，空闲后停止，手动刷新或再次进入页面可查看新活动。最近活动时间变化时重新排序，其余情况下保持球体与文字位置，仅执行中的状态环持续转动；新增子球和简介切换使用 200–250ms 的 transform/opacity 过渡。已有节点原位更新，普通刷新不重建球体，不重复播放入场。离屏、离页停止动效，减少动态效果时保留轻微淡入，键盘操作直接更新。
-
-网页输入存入原线程 inbound，来源为 web、身份为 admin:web，不进入 QQ messages；输出写 web_outputs，不进入 QQ outbox。管理员在 owner 会话使用该会话的管理工具，群和其他私聊仍受会话范围限制。网页输入不进入 QQ 自动记忆抽取；显式记忆工具仍按当前会话权限执行。默认已有行的 reply_channel 为 qq，保持旧会话恢复兼容。
-
-## 界面设计
-
-背景 #F6F7F9、表面 #FFFFFF、正文 #13272B、次要文字 #64767B、强调 #087F73、分隔线 #E7EDF0。采用系统中文无衬线字体，标题 28px、正文 14px、辅助信息 12px，数字使用 tabular-nums。桌面为 204px 侧栏与数据工作区；指标放在连续行，图表和模型分布居中，请求表支持进入详情。手机使用顶部导航，图表按实际宽度绘制，表格在容器内横向滚动。
-
-设计复核保持数据密度与空态说明，配置功能独立于日常请求查看。已按桌面与 390px 手机尺寸检查登录、总览、详情和对话；动态内容只通过 textContent 展示。
-
-## 验证
-
-- Workers 类型检查，以及 requests、web-chat、admin 三组回归覆盖采集、真实零用量、失败未知用量、脱敏、分页和详情保留。
-- 真实 Harness 配合 faux 模型检查共享 QQ 上下文、幂等提交、QQ 插话隔离、网页子任务汇报，以及请求和工具的回合关联；测试不会向真实 QQ 发消息。
-- 本机隔离的无界面渲染检查实际生成的页面，用模拟接口核对展开前后的请求次数、详情复用、空闲和离页停止刷新、管理分组、事件每页 10 条以及 390px 手机布局；这些展示数据不是生产用量。
-- 本次复用已有 RequestsDO，在现有 SQLite 中增列和建表，无需新绑定或密钥。上线仍由获准通过 PR 合并到 main 后的 CI 执行。
-
-## 长期记忆管理
-
-记忆页支持新增和编辑、按状态与有效期筛选、查看来源和版本差异、处理抽取冲突以及复核画像。遗忘保留版本，相关画像在复核前暂停使用；操作均绑定具体会话。规则与验证说明见 [记忆系统](MEMORY-SYSTEM.md)。
+- **Token 口径**：输入 token = `input + cacheRead + cacheWrite`；输出已含 reasoning 不重复叠加。缓存命中率仅对已上报 `cacheRead` 的请求按输入加权；未上报显示 `—`。字符数仅反映归一化快照文本，不伪造逐段 token。
+- **保留与脱敏**：请求元数据保留 30 天 / 最多 20,000 条；请求快照与工具正文共用 7 天 / 32 MiB 预算（单次输入 ≤ 96,000 字，输出 ≤ 24,000 字，工具参数/结果各 ≤ 12,000 字）。含凭据模式整块脱敏，图片二进制、隐藏推理与认证选项不进入快照。已结束子任务保留 14 天。
+- **拓扑简介**：父 agent 在 `spawn` 填写 `summary`（建议 15–30 字）；子 agent 在工具调用前写首行 `【进度】...`，最终回答以 `【结果】...` 开头（向父线程汇报时自动剥离前缀），展示限 60 字并脱敏。
+- **按需刷新**：对话活跃时每 2.5 秒增量读取，用量页有运行中请求每 5 秒刷新，拓扑有活动时服务端 10 秒缓存刷新，上下文趋势展开后最多每 10 秒随活跃会话刷新；空闲、离页或标签页隐藏时全部停止轮询。
+- **网页通道隔离**：网页输入写入 `inbound`（`reply_channel = "web"`、`user_id = "admin:web"`），不进入 QQ `messages`、`outbox` 或自动记忆抽取；同一子任务不允许跨回复入口追加指令。
+- **视觉规范**：系统中文无衬线字体、`tabular-nums` 数字、动态内容一律走 `textContent`；桌面 204px 侧栏，窄屏（390px）顶部导航 + 表格横向滚动。

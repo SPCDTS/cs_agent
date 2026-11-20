@@ -19,7 +19,7 @@ export const responseFields = {
 export const RefreshFailureSchema = Type.Union([
   Type.Object({ at: Type.Number(), kind: Type.Union([Type.Literal("network"), Type.Literal("timeout"), Type.Literal("aborted")]) }, { additionalProperties: false }),
   Type.Object({ at: Type.Number(), kind: Type.Union([Type.Literal("http"), Type.Literal("invalid_json"), Type.Literal("invalid_token_response"),
-    Type.Literal("invalid_identity"), Type.Literal("plan_permission_required")]), ...responseFields }, { additionalProperties: false }),
+    Type.Literal("invalid_identity")]), ...responseFields }, { additionalProperties: false }),
 ]);
 export type RefreshFailure = Static<typeof RefreshFailureSchema>;
 export class OAuthRefreshError extends Error {
@@ -36,7 +36,7 @@ export function refreshFailure(error: unknown): RefreshFailure | undefined {
   return undefined;
 }
 export function refreshNeedsReauth(failure: RefreshFailure): boolean {
-  return failure.kind === "plan_permission_required" || "oauthCode" in failure &&
+  return "oauthCode" in failure &&
     ["invalid_grant", "invalid_client", "unauthorized_client", "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated"].includes(failure.oauthCode ?? "");
 }
 export function responseDiagnostic(response: Response) {

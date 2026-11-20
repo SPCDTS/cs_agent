@@ -6,6 +6,8 @@ import { fauxProvider, fauxAssistantMessage, type FauxResponseFactory } from "@e
 import worker from "../src/index";
 import { recall } from "../src/context";
 import { MAINTENANCE_CRON, type MaintenanceJob } from "../src/maintenance";
+import { memoryHash } from "../src/memory/store";
+import type { MemoryKind } from "../src/memory/types";
 import * as models from "../src/models";
 import { ThreadDO } from "../src/thread";
 import { SandboxDO } from "../src/sandbox/do";
@@ -142,19 +144,26 @@ describe("memory consolidation", () => {
     const owner = env.THREAD.getByName("owner");
     await owner.ingest(input(1, "还在的来源消息", 10000001));
     const now = Date.now(), sec = Math.floor(now / 1000);
-    const row = (id: number, fields: object) => ({ id, kind: "fact" as const, author: "extractor", created_at: sec - 10 * DAY, updated_at: sec - 10 * DAY, ...fields });
-    await owner.importMemory({ ns: "owner", memories: [
-      row(1, { text: "早上喝咖啡" }), row(2, { text: "早上喝咖啡。", created_at: sec - 5 * DAY }),
-      row(3, { kind: "preference", subject: "咖啡", text: "每天早上喜欢喝美式咖啡", author: "qq:10000001" }),
-      row(4, { kind: "preference", subject: "咖啡", text: "每天早上喜欢喝拿铁咖啡" }),
-      row(5, { kind: "rule", subject: "训练", text: "每周三晚上练习烟雾弹投掷" }),
-      row(6, { kind: "rule", subject: "训练", text: "每周三晚上练习闪光弹投掷", author: "qq:10000001" }),
-      row(7, { text: "来源已撤回", source_scope: "private:10000001", source_message_id: "404", created_at: sec - DAY }),
-      row(8, { text: "来源还在", source_scope: "private:10000001", source_message_id: "1", created_at: sec - DAY }),
-      row(9, { kind: "episode", text: "很久以前的比赛", created_at: sec - 200 * DAY }),
-      row(10, { kind: "episode", text: "最近还被想起的比赛", created_at: sec - 200 * DAY, last_recalled_at: sec - 10 * DAY }),
-    ] });
+    type Seed = { id: number; kind?: MemoryKind; subject?: string; text: string; author?: string; source_scope?: string; source_message_id?: string; created_at?: number; updated_at?: number; last_recalled_at?: number };
+    const seeds: Seed[] = [
+      { id: 1, text: "早上喝咖啡" }, { id: 2, text: "早上喝咖啡。", created_at: sec - 5 * DAY },
+      { id: 3, kind: "preference", subject: "咖啡", text: "每天早上喜欢喝美式咖啡", author: "qq:10000001" },
+      { id: 4, kind: "preference", subject: "咖啡", text: "每天早上喜欢喝拿铁咖啡" },
+      { id: 5, kind: "rule", subject: "训练", text: "每周三晚上练习烟雾弹投掷" },
+      { id: 6, kind: "rule", subject: "训练", text: "每周三晚上练习闪光弹投掷", author: "qq:10000001" },
+      { id: 7, text: "来源已撤回", source_scope: "private:10000001", source_message_id: "404", created_at: sec - DAY },
+      { id: 8, text: "来源还在", source_scope: "private:10000001", source_message_id: "1", created_at: sec - DAY },
+      { id: 9, kind: "episode", text: "很久以前的比赛", created_at: sec - 200 * DAY },
+      { id: 10, kind: "episode", text: "最近还被想起的比赛", created_at: sec - 200 * DAY, last_recalled_at: sec - 10 * DAY },
+    ];
+    await owner.syncAdminView("owner");
     await withThread("owner", {}, async (thread, db) => {
+      for (const s of seeds) {
+        const kind = s.kind ?? "fact", created = s.created_at ?? sec - 10 * DAY, updated = s.updated_at ?? sec - 10 * DAY;
+        await db.run(`INSERT INTO memories(id,ns,kind,subject,text,status,author,source_scope,source_message_id,confidence,created_at,updated_at,last_recalled_at,recall_count,hash)
+          VALUES (?,'owner',?,?,?,'active',?,?,?,1,?,?,?,0,?)`,
+          s.id, kind, s.subject ?? null, s.text, s.author ?? "extractor", s.source_scope ?? null, s.source_message_id ?? null, created, updated, s.last_recalled_at ?? null, memoryHash("owner", kind, s.text));
+      }
       expect(await run(thread, "consolidate", now)).toMatchObject({ status: "ok", dedup: 1, orphaned: 1, retired: 1,
         conflicts: { pairs: 2, superseded: 1, protected: 1 } });
       expect(prompts).toHaveLength(1);

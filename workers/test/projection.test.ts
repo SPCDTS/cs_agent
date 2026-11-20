@@ -31,7 +31,7 @@ it("聊天与记忆增量同步，管理查询不回调执行对象",async()=>{
     try{return(await view.chatView("owner")).messages.some(m=>m.role==="assistant"&&m.text==="合成延迟同步");}
     catch(error){if(error instanceof Error&&error.message.includes("view_pending"))return false;throw error;}
   },{timeout:10_000}).toBe(true);
-  await owner.importMemory({ns:"owner",memories:[{id:1,kind:"fact",text:"这是展示同步测试",author:"test"}]});
+  await owner.saveMemory("owner",null,{kind:"fact",text:"这是展示同步测试"});
   await owner.syncAdminView("owner");
   const sync=vi.spyOn(ThreadDO.prototype,"syncAdminView").mockRejectedValue(new Error("execution_read_forbidden"));
   const alarm=vi.spyOn(ThreadDO.prototype,"alarm").mockRejectedValue(new Error("execution_read_forbidden"));
@@ -59,7 +59,7 @@ it("alarm 出站保留字节与流，取消已排队请求不会发到上游",as
 it("同步失败保留变更，执行对象重启后补齐且更新删除不会留下旧记忆",async()=>{
   const owner=env.THREAD.getByName("owner"),view=threadView(env,"owner");
   const fail=vi.spyOn(RequestsDO.prototype,"applyProjection").mockRejectedValue(new Error("display_offline"));
-  await owner.importMemory({ns:"owner",memories:[{id:1,kind:"fact",text:"需要同步的记忆",author:"test"}]});
+  await owner.saveMemory("owner",null,{kind:"fact",text:"需要同步的记忆"});
   const error = await owner.syncAdminView("owner").then(() => "", error => error.message);
   expect(error).toContain("view_sync_failed");
   expect(await runInDurableObject(owner,(_instance,state)=>state.storage.sql.exec("SELECT 1 FROM admin_projection_changes").toArray().length)).toBeGreaterThan(0);

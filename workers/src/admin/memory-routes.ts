@@ -7,7 +7,6 @@ import type { AdminContext, AdminRoute } from "./routes";
 import { adminJson as json, HttpError, readAdminBody } from "./http";
 import { MemoryAdminError, type MemoryListQuery, type MemoryManager, type ProfileProposal } from "../memory/management";
 import { MEMORY_KINDS, MEMORY_STATUSES, isMemoryNs } from "../memory/types";
-import { MEMORY_HISTORY_MAX_BYTES, parseMemoryHistory, type importMemoryHistory } from "../memory/history-import";
 import type { generateProfileProposal } from "../maintenance/profile-proposal";
 import type { runConsolidate } from "../maintenance/consolidate";
 
@@ -21,7 +20,6 @@ export interface MemoryAdminRpc {
   rollbackMemory(ns: string, batchId: string): ReturnType<MemoryManager["rollback"]>;
   generateMemoryProposal(ns: string): ReturnType<typeof generateProfileProposal>;
   decideMemoryProposal(ns: string, id: number, decision: "accepted" | "rejected", expectedRevision: string): ReturnType<MemoryManager["decideProposal"]>;
-  importMemoryHistory(ns: string, data: unknown, options: { dryRun?: boolean }): ReturnType<typeof importMemoryHistory>;
 }
 /** 展示侧只读接口，由 AgentReadView 提供。 */
 export interface MemoryReadRpc {
@@ -77,9 +75,6 @@ export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string)
         const code = error.message.slice("memory_admin:".length);
         return json({ error: code }, code === "not_found" ? 404 : code === "conflict" ? 409 : 400);
       }
-      if (error instanceof Error && ["invalid_memory_history", "invalid_history_snapshot", "invalid_history_reference", "invalid_history_proposal", "duplicate_history_id", "history_receipt_conflict", "namespace_mismatch"].includes(error.message)) {
-        return json({ error: error.message }, error.message === "history_receipt_conflict" ? 409 : 400);
-      }
       throw error;
     }
   };
@@ -131,12 +126,6 @@ export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string)
     { method: "POST", path: /^\/admin\/memory\/proposals\/(?<id>[1-9]\d{0,14})\/(?<decision>accept|reject)$/, handle: guarded(async ctx => {
       const ns = nsFrom(ctx), input = await body(ctx.request, DECISION);
       return json(await resolve(ctx, ns).decideMemoryProposal(ns, Number(ctx.params.id), ctx.params.decision === "accept" ? "accepted" : "rejected", input.expectedRevision));
-    }) },
-    { method: "POST", path: "/admin/memory/history/import", handle: guarded(async ctx => {
-      const envelope = Type.Object({ data: Type.Unknown(), dryRun: Type.Optional(Type.Boolean()) }, strict);
-      const value = await body(ctx.request, envelope, { maxBytes: MEMORY_HISTORY_MAX_BYTES, fatal: true, tooLargeCode: "too_large" });
-      const data = parseMemoryHistory(value.data);
-      return json(await resolve(ctx, data.ns).importMemoryHistory(data.ns, data, { dryRun: value.dryRun }));
     }) },
   ];
 }

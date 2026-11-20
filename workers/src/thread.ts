@@ -40,7 +40,6 @@ import type { ScheduleAccess } from "./schedule/tools";
 import { parseScheduleInputKey } from "./schedule/run";
 import type { EventRunStatus } from "./events/model";
 import { SkillCatalog } from "./skills";
-import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
 import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin } from "./subagent/parent";
 import { subagentName, RETENTION_MS, type SubagentIdentity, type ParentSubagentStatus, type SubagentReport } from "./subagent/model";
 import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject } from "./sandbox/task-access";
@@ -899,19 +898,6 @@ export class ThreadDO extends DurableObject<Env> {
       complete: this.complete, config, now: job.now });
   }
 
-  importMemory(...args: Parameters<MemoryAdmin['importMemory']>): ReturnType<MemoryAdmin['importMemory']> { return this.memoryAdmin.importMemory(...args); }
-
-  /** 历史聊天记录导入：路由按 importThreadKey 选线程，这里再经 idFromName 复核，不能把别的会话塞进本 DO。 */
-  async importMessages(value: unknown): Promise<MessageImportResult> {
-    const data = parseMessageImport(value);
-    await this.initialize();
-    await this.bindNamespace(importThreadKey(data.scope, ownerIds(this.env)));
-    const result = await this.database.transaction(tx => importHistory(tx, data));
-    await this.audit("history_import", result);
-    await this.projection.flush();
-    return result;
-  }
-
   private async sessionGeneration(): Promise<number> {
     return (await this.database.get<{ generation: number }>("SELECT generation FROM session_state WHERE id=1"))?.generation ?? 0;
   }
@@ -1054,7 +1040,6 @@ export class ThreadDO extends DurableObject<Env> {
   rollbackMemory(...args: Parameters<MemoryAdmin['rollbackMemory']>): ReturnType<MemoryAdmin['rollbackMemory']> { return this.memoryAdmin.rollbackMemory(...args); }
   generateMemoryProposal(...args: Parameters<MemoryAdmin['generateMemoryProposal']>): ReturnType<MemoryAdmin['generateMemoryProposal']> { return this.memoryAdmin.generateMemoryProposal(...args); }
   decideMemoryProposal(...args: Parameters<MemoryAdmin['decideMemoryProposal']>): ReturnType<MemoryAdmin['decideMemoryProposal']> { return this.memoryAdmin.decideMemoryProposal(...args); }
-  importMemoryHistory(...args: Parameters<MemoryAdmin['importMemoryHistory']>): ReturnType<MemoryAdmin['importMemoryHistory']> { return this.memoryAdmin.importMemoryHistory(...args); }
   forgetMemory(...args: Parameters<MemoryAdmin['forgetMemory']>): ReturnType<MemoryAdmin['forgetMemory']> { return this.memoryAdmin.forgetMemory(...args); }
   writeProfile(...args: Parameters<MemoryAdmin['writeProfile']>): ReturnType<MemoryAdmin['writeProfile']> { return this.memoryAdmin.writeProfile(...args); }
 

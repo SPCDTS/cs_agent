@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord/context";
+import { sha256Hex } from "../shared/hash";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, section, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { Static, TSchema } from "typebox";
@@ -207,7 +207,7 @@ export function createCodingExtension(deps: CodingDeps) {
       execute: async (args, api, context) => {
         if (!await resources.allowed(api, context)) return text(NOT_ALLOWED, true);
         try {
-          const operationId = "task:" + createHash("sha256").update(String(api.taskId)).digest("hex");
+          const operationId = "task:" + sha256Hex(String(api.taskId));
           return resourceResult(SandboxResourceSchema, await resources.create(operationId, args));
         } catch (error) {
           const code = error instanceof Error && /^[a-z_]{1,100}$/.test(error.message) ? error.message : "sandbox_error";

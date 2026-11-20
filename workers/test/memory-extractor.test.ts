@@ -205,7 +205,7 @@ describe("memory extraction", () => {
 
   it("keeps queued work across DO eviction and rearms alarms after batches of three", async () => {
     const thread = env.THREAD.getByName("owner");
-    await thread.importMemory({ ns: "owner", memories: [] });
+    await thread.syncAdminView("owner");
     await runInDurableObject(thread, async (_instance, state) => {
       const store = new MemoryStore(new DurableObjectSqliteDatabase(state.storage), "owner");
       for (let i = 0; i < 5; i++) {

@@ -84,7 +84,7 @@ describe("memory tools in the real Harness", () => {
     { ns: "private:10000003", user: 10000003, group: undefined },
   ])("offers local memory writes in $ns and cannot read owner memories", async ({ ns, user, group }) => {
     const seen = script([{ name: "mem_search", args: { query: "专属" } }, { name: "mem_remember", args: { text: "越权写入", kind: "fact" } }]);
-    await env.THREAD.getByName("owner").importMemory({ ns: "owner", memories: [{ id: 1, kind: "fact", text: "owner专属信息", author: "dashboard" }] });
+    await env.THREAD.getByName("owner").saveMemory("owner", null, { kind: "fact", text: "owner专属信息" });
     const result = await runInDurableObject(env.THREAD.getByName(ns), async (_instance, state) => {
       const instance = threadWithBindings(_instance, state, { ...env, MEMORY_EXTRACT_NAMESPACES: "" });
       await instance.submit(input(1, "查询专属", user, group, true));
@@ -124,7 +124,7 @@ describe("approved rule version-producing writes",()=>{
     ]);
     await runInDurableObject(env.THREAD.getByName("owner"),async(_instance,state)=>{
       const instance=threadWithBindings(_instance,state,{...env,MEMORY_EXTRACT_NAMESPACES:""});
-      await instance.importMemory({ns:"owner",memories:[]});
+      await instance.syncAdminView("owner");
       const store=new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner"),rules=new RuleService(store,"private:10000001");
       for(const text of ["受保护甲","受保护乙"]){
         const row=(await store.remember({kind:"rule",text,author})).row;

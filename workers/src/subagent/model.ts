@@ -2,6 +2,7 @@ import type { McpCapabilitySnapshot } from "../mcp/access";
 import type { ModelSelection } from "../settings";
 import type { TurnKind } from "../policy";
 import type { AgentDescription } from "./activity";
+import { sha256Hex } from "../shared/hash";
 
 /** 派出者：QQ 身份或可信网页管理员、显示昵称与会话权限快照。 */
 export type SubagentPerson = { userId: string; nickname: string; owner: boolean; admin?: true };
@@ -52,6 +53,6 @@ export function reportText(kind: keyof typeof LABEL, id: string, task: string, t
 
 /** 由父线程键与派出工具调用的任务 id 求出子 agent id：工具重放得到同一个 id，不会重复派出。 */
 export async function stableId(seed: string): Promise<string> {
-  const hex = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(seed)))].map(b => b.toString(16).padStart(2, "0")).join("");
+  const hex = sha256Hex(seed);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }

@@ -1,18 +1,17 @@
 import { createModels, createProvider, type Models, type MutableModels, type Provider } from "@earendil-works/pi-ai/models";
 import type { CredentialStore, ProviderStreams } from "@earendil-works/pi-ai";
-import { fauxProvider, fauxToolCall, fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
 import { openAICodexResponsesApi } from "@earendil-works/pi-ai/api/openai-codex-responses.lazy";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
-import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type { Env } from "./env";
 import { withHostedSearch } from "./tools/web-search";
 import { codexFetch } from "./codex-fetch";
 import { CODEX_BASE_URL, CODEX_PROVIDER, codexOAuth, isChatGPTCredential } from "./codex-login";
+import { FAUX_PROVIDER } from "./models-faux";
 import type { ModelSelection } from "./settings";
 
-type ProviderSpec = {
+export type ProviderSpec = {
   /** 面板显示名 */
   name: string;
   /** 不列出的 provider 也不能被选中；faux 只在测试配置里出现。 */
@@ -22,18 +21,15 @@ type ProviderSpec = {
   unavailable: string;
 };
 
-// 保留 provider id 和会话模型选择；旧 SIWC 授权仅作为迁移期间的回退。
 function codexProvider({ fetch }: { fetch?: typeof globalThis.fetch } = {}): Provider {
-  const native = withHostedSearch(openAICodexResponsesApi()), legacy = withHostedSearch(openAIResponsesApi());
+  const native = withHostedSearch(openAICodexResponsesApi());
   const transport: ProviderStreams = {
-    stream: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.stream({ ...model, api: "openai-codex-responses" }, context, { ...options, fetch: codexFetch(fetch ?? options?.fetch ?? globalThis.fetch) }) : legacy.stream({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
-    streamSimple: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.streamSimple({ ...model, api: "openai-codex-responses" }, context, { ...options, fetch: codexFetch(fetch ?? options?.fetch ?? globalThis.fetch) }) : legacy.streamSimple({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
+    stream: (model, context, options) => native.stream({ ...model, api: "openai-codex-responses" }, context, { ...options, fetch: codexFetch(fetch ?? options?.fetch ?? globalThis.fetch) }),
+    streamSimple: (model, context, options) => native.streamSimple({ ...model, api: "openai-codex-responses" }, context, { ...options, fetch: codexFetch(fetch ?? options?.fetch ?? globalThis.fetch) }),
   };
-  const catalog = new Map([...Object.values(OPENAI_MODELS).filter(model => model.api === "openai-responses"), ...Object.values(OPENAI_CODEX_MODELS)].map(model => [model.id, model]));
   const provider = createProvider({ id: CODEX_PROVIDER, name: "ChatGPT 订阅", baseUrl: CODEX_BASE_URL,
-    auth: { oauth: codexOAuth }, models: [...catalog.values()]
+    auth: { oauth: codexOAuth }, models: Object.values(OPENAI_CODEX_MODELS)
       .map(model => ({ ...model, provider: CODEX_PROVIDER, compat: { ...model.compat,
-        // pi-ai 只在 provider=openai 时自动套用 SIWC 参数限制；历史别名需明确关闭这些 API key 专用能力。
         supportsMidConvoEffort: false, supportsLongCacheRetention: false,
         supportsExplicitPromptCacheMode: false, supportsMaxOutputTokens: false,
       } })), api: transport });
@@ -46,25 +42,10 @@ function codexProvider({ fetch }: { fetch?: typeof globalThis.fetch } = {}): Pro
   } };
 }
 
-function echoProvider(): Provider {
-  const faux = fauxProvider({ models: [{ id: "test" }, { id: "test-alt" }], tokensPerSecond: Infinity });
-  const respond: FauxResponseFactory = transcript => {
-    // 工厂也是一次性队列项，补回自身才能覆盖后续回合及驱逐后的工具续轮。
-    faux.setResponses([respond]);
-    if (transcript.messages.at(-1)?.role === "toolResult") return fauxAssistantMessage("done");
-    const user = transcript.messages.findLast(message => message.role === "user");
-    const text = typeof user?.content === "string" ? user.content
-      : user?.content.filter(block => block.type === "text").map(block => block.text).join("") ?? "";
-    return fauxAssistantMessage(fauxToolCall("send_message", { text: `echo: ${text}` }), { stopReason: "toolUse" });
-  };
-  faux.setResponses([respond]);
-  return faux.provider;
-}
-
 export const MODEL_PROVIDERS: Record<string, ProviderSpec> = {
   deepseek: { name: "DeepSeek", listed: () => true, create: () => { const provider = deepseekProvider(); return { ...provider, ...withHostedSearch(provider, openAIResponsesApi()) }; }, unavailable: "missing_key" },
   [CODEX_PROVIDER]: { name: "ChatGPT 订阅", listed: () => true, create: codexProvider, unavailable: "login_required" },
-  faux: { name: "faux（测试）", listed: env => env.MODEL_PROVIDER === "faux", create: echoProvider, unavailable: "unavailable" },
+  ...(FAUX_PROVIDER ? { faux: FAUX_PROVIDER } : {}),
 };
 
 /**

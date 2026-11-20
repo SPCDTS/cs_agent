@@ -1,5 +1,6 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { sha256Hex } from "../shared/hash";
 
 export type EventRunStatus = "queued" | "sent" | "silent" | "failed";
 export type HeldReason = "merge" | "quiet" | "budget";
@@ -30,8 +31,7 @@ export function normalizeEvent(value: unknown): ExternalEvent | undefined {
 }
 
 export async function eventKey(source: string, externalId: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(externalId));
-  return `evt_${source}_${Buffer.from(digest).toString("hex").slice(0, 40)}`;
+  return `evt_${source}_${sha256Hex(externalId).slice(0, 40)}`;
 }
 
 const strict = { additionalProperties: false };

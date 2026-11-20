@@ -31,8 +31,6 @@ export class RequestsDO extends DurableObject<Env> {
       else await this.ctx.storage.deleteAlarm();
     }
   }
-  async projectionBackfillNeeded() { return await this.ctx.storage.get("admin-projection-v1") !== true; }
-  async projectionBackfillDone() { await this.ctx.storage.put("admin-projection-v1", true); }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);

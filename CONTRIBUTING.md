@@ -4,7 +4,7 @@
 
 ## 环境
 
-通用检查需要 Node.js 24+、npm 和 Python 3.12+。Windows runner 的原生检查需要 Windows；真实 Hyper-V/WSB 验证按对应环境说明单独进行。Cloudflare 容器镜像发布需要 Docker，日常 Worker 打包检查不构建镜像。
+通用检查需要 Node.js 24+ 和 npm。Windows runner 的原生检查需要 Windows；真实 Hyper-V/WSB 验证按对应环境说明单独进行。Cloudflare 容器镜像发布需要 Docker，日常 Worker 打包检查不构建镜像。
 
 ```sh
 npm run install:workers

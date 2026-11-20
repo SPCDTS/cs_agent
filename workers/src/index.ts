@@ -1,4 +1,3 @@
-import { backfillViews } from "./admin/read-views";
 import { handleMediaRequest } from "./media/routes";
 import { authenticated } from "./auth";
 import { handleAdmin } from "./admin/routes";
@@ -22,7 +21,7 @@ export { CloudflareWorkspaceResourcesDO } from "./sandbox/resources";
 
 // 按 wrangler.jsonc 的 crons 字符串分派，各后台任务各占一行。
 const CRONS: Record<string, (env: Env, scheduledTime: number) => Promise<void>> = {
-  "*/5 * * * *": async env => { await Promise.all([env.EVENTS.getByName("main").tick(),env.BRIDGE.getByName("napcat").tick(),env.REGISTRY.getByName("main").opsTick(),backfillViews(env)]); },
+  "*/5 * * * *": async env => { await Promise.all([env.EVENTS.getByName("main").tick(),env.BRIDGE.getByName("napcat").tick(),env.REGISTRY.getByName("main").opsTick()]); },
   [MAINTENANCE_CRON]: runMaintenance,
 };
 

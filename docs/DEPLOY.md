@@ -4,7 +4,7 @@
 
 ## 本地准备
 
-安装 Node.js 24+ 和 Python 3.12+，在仓库根运行：
+安装 Node.js 24+，在仓库根运行：
 
 ```sh
 npm run install:workers
@@ -26,13 +26,13 @@ npm run check
 私有配置不进入 Git。`.env.example` 只列上传脚本使用的配置名；真实 `.env`、`secrets/` 继续由 Git 忽略。
 
 - 必需：`NAPCAT_TOKEN`、`QQ_OWNER`、`ADMIN_TOKEN`、`OAUTH_STORE_KEY`。
-- 模型：DeepSeek 使用 `DEEPSEEK_API_KEY`；ChatGPT 订阅在管理页用一次性本机助手完成 Codex 原生授权；已有 SIWC 授权可继续对话，订阅生图需要重新授权。流程与回退见 [模型与登录](../workers/README.md#模型与-chatgpt-登录)。
+- 模型：DeepSeek 使用 `DEEPSEEK_API_KEY`；ChatGPT 订阅在管理页用一次性本机助手完成 Codex 原生授权。流程与诊断见 [模型与登录](../workers/README.md#模型与-chatgpt-登录)。
 - Gmail：按需提供 `GMAIL_CLIENT_ID`、`GMAIL_CLIENT_SECRET`、`GMAIL_REFRESH_TOKEN`，推送来源配置在 Wrangler vars。
 - MCP：`workers/mcp.json` 是首次初始化模板，默认空目录。已有 Registry 中保存的服务和 secret 引用不会被新部署覆盖；新实例通过 agent 或管理页接入，Token 加密保存在 Registry，无需逐个上传 Cloudflare Secret。见 [动态 MCP 接入](MCP-SETUP.md)；Workshop 本机连接见 [本机说明](WORKSHOP-LOCAL.md)。
 
 在具备 Bash、Python 和 Wrangler 登录的环境中，可从仓库根运行 `bash workers/scripts/put-secrets.sh deployments/my.local.json`。先准备私有 `secrets/` 目录；脚本读取 `.env`，仅在缺失时生成管理员口令和 OAuth 加密密钥，并通过 stdin 上传。不要覆盖既有 `OAUTH_STORE_KEY`，否则已有凭据无法解密。也可先生成部署配置，再逐项使用 `npx wrangler secret put <名称> --config wrangler.deploy.json`；所有凭据操作必须显式指向同一档案。
 
-NapCat 独立运行，在其反向 WebSocket 客户端中配置 `wss://<Worker 域名>/onebot` 和相同的 `NAPCAT_TOKEN`。图片回传设置见 [资产协议](CLOUD-ASSETS-CONTRACT.md)。仓库不再负责启动或重建 NapCat 容器。
+NapCat 独立运行，在其反向 WebSocket 客户端中配置 `wss://<Worker 域名>/onebot` 和相同的 `NAPCAT_TOKEN`。图片回传设置见 [云端功能与契约](CLOUD-PARITY.md#31-私有媒体与-napcat-图片回传)。仓库不再负责启动或重建 NapCat 容器。
 
 ## 发布
 
@@ -44,7 +44,7 @@ NapCat 独立运行，在其反向 WebSocket 客户端中配置 `wss://<Worker �
 
 ## 上线核对
 
-本次 DO 查询隔离沿用现有绑定和 DO 类，无需新建 Queue。首次部署后，已有五分钟维护入口回填历史展示副本；期间会话显示“待同步”。详见 [DO 隔离](DO-ISOLATION.md)。
+管理只读视图从 `RequestsDO` 展示副本读取，首次同步前显示“待同步”；详见 [架构与运行设计](ARCHITECTURE.md#42-读写分离与增量投影)。
 
 公开 `/healthz` 只返回 `{ "ok": true }`，不读取 DO，也不代表 QQ 或模型可用。携带 `Authorization: Bearer <ADMIN_TOKEN>` 读取 `/admin/health`，核对提交号、`overall` 和 `components` 中独立的 Worker / Bridge / 模型状态；详情查询成功返回 HTTP 200，依赖异常由各组件状态表达。登录 `/admin/` 检查请求统计、会话、MCP 与工作区，顶栏分别显示 Worker、QQ 和模型状态。部署成功不能代替模型实际可用性验证。真实 QQ 发送、邮件发送与 Workshop 制作动作需要相应授权；常规自动测试使用模拟服务。
 

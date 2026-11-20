@@ -1,12 +1,11 @@
-import { createHash } from "node:crypto";
 import type { SqliteDatabase, SqliteExecutor, SqliteValue } from "@earendil-works/chord/sqlite";
 import type { MemoryInput, MemoryKind, MemoryPatch, MemoryRow, MemoryStatus } from "./types";
-import type { MemoryImport } from "./import";
 import { effectiveMemory } from "./lifecycle";
 import { containsSecret } from "./secrets";
+import { sha256Hex } from "../shared/hash";
 
 export const nowSec = () => Math.floor(Date.now() / 1000);
-export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+export const sha256 = (text: string) => sha256Hex(text);
 export const normalizeMemoryText = (text: string) => text.normalize("NFKC").replace(/\s+/g, " ").trim()
   .replace(/[A-Z]/g, c => c.toLowerCase()).replace(/[。．.!！?？;；,，\s]+$/u, "");
 export const memoryHash = (ns: string, kind: MemoryKind, text: string) => sha256(`${ns}\n${kind}\n${normalizeMemoryText(text)}`);
@@ -227,35 +226,5 @@ export class MemoryStore {
     const row = await this.db.get(`INSERT INTO memory_tool_writes(turn_id, writes) VALUES (?, 1)
       ON CONFLICT(turn_id) DO UPDATE SET writes=writes+1 WHERE writes < 20 RETURNING turn_id`, turnId);
     if (!row) throw new MemoryStoreError("本轮写入记忆已达上限（20 次）；本轮请勿重试，下一轮再写入。");
-  }
-  async import(data: MemoryImport) {
-    if (data.ns !== this.ns) throw new MemoryStoreError("导入命名空间不匹配");
-    return this.db.transaction(async tx => {
-      let inserted = 0, skipped = 0;
-      for (const input of data.memories) {
-        // 重算 hash 防止导入文件中的旧算法或伪造哈希破坏后续精确去重；保留原 id 与来源。
-        const row: MemoryRow = { id: input.id, ns: this.ns, kind: input.kind, text: input.text, subject: input.subject ?? null,
-          since: input.since ?? null, until: input.until ?? null, due_at: input.due_at ?? null, done_at: input.done_at ?? null,
-          status: input.status ?? "active", author: input.author, source_scope: input.source_scope ?? null,
-          source_message_id: input.source_message_id ?? null, source_turn_id: input.source_turn_id ?? null, confidence: input.confidence ?? 1,
-          created_at: input.created_at ?? this.now(), updated_at: input.updated_at ?? this.now(), last_recalled_at: input.last_recalled_at ?? null,
-          recall_count: input.recall_count ?? 0, hash: memoryHash(this.ns, input.kind, input.text) };
-        const keys = Object.keys(row);
-        const added = await tx.get(`INSERT INTO memories (${keys.join(",")}) VALUES (${keys.map(() => "?").join(",")}) ON CONFLICT(id) DO NOTHING RETURNING id`, ...Object.values(row));
-        if (added) { inserted++; await this.version(tx, undefined, row, "import", "import"); } else skipped++;
-      }
-      if (data.profile) {
-        const text = data.profile.text.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
-        await tx.run(`INSERT INTO profile(ns,text,revision,updated_at) VALUES (?,?,?,?)
-          ON CONFLICT(ns) DO UPDATE SET text=excluded.text,revision=excluded.revision,updated_at=excluded.updated_at`, this.ns, text, sha256(text).slice(0, 16), this.now());
-        await this.approveProfileSources(tx);
-        // 导入的画像不是对受控规则的重新批准；存在管理历史时必须重新人工复核。
-        await tx.run(`INSERT INTO profile_review(ns,reason)
-          SELECT ns,'导入画像可能包含旧规则副本，请复核后保存。' FROM profile WHERE ns=?
-          AND EXISTS(SELECT 1 FROM memory_rule_bindings WHERE ns=?) ON CONFLICT(ns) DO UPDATE SET reason=excluded.reason`,this.ns,this.ns);
-        await tx.run("UPDATE profile SET revision=lower(hex(randomblob(8))) WHERE ns=? AND EXISTS(SELECT 1 FROM profile_review WHERE ns=?)",this.ns,this.ns);
-      }
-      return { inserted, skipped };
-    });
   }
 }
