@@ -15,7 +15,8 @@
     "build:admin": "node scripts/build-admin.mjs",
     "types": "wrangler types",
     "build": "wrangler deploy --dry-run --containers-rollout=none",
-    "test:node": "node --test test/*.node.mjs"
+    "test:node": "node --test test/*.node.mjs",
+    "pretest:node": "npm run build:admin"
   },
   "dependencies": {
     "@cloudflare/sandbox": "1.0.3",
