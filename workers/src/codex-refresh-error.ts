@@ -1,5 +1,6 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { readBoundedJson } from "./shared/http-body";
 
 // 只记录协议错误码和请求标识；错误描述、响应正文、Cookie、令牌不进入日志或 RPC。
 const OAuthCode = Type.Union([
@@ -47,19 +48,27 @@ export function responseDiagnostic(response: Response) {
 const ErrorBody = Type.Object({ error: Type.Union([Type.String(), Type.Object({ code: Type.Optional(Type.String()), type: Type.Optional(Type.String()) })]) });
 export async function responseOAuthCode(response: Response): Promise<Static<typeof OAuthCode> | undefined> {
   if (!response.headers.get("content-type")?.includes("json")) { await response.body?.cancel(); return undefined; }
-  const reader = response.body?.getReader();
-  if (!reader) return undefined;
   try {
-    let body = "", size = 0;
-    const decoder = new TextDecoder();
-    for (;;) {
-      const part = await reader.read(); if (part.done) break;
-      size += part.value.byteLength; if (size > 16_384) return undefined;
-      body += decoder.decode(part.value, { stream: true });
-    }
-    const value: unknown = JSON.parse(body + decoder.decode());
+    const value = await readBoundedJson(response, { maxBytes: 16_384, checkContentLength: false, requireBody: true });
     if (!Check(ErrorBody, value)) return undefined;
     const code = typeof value.error === "string" ? value.error : value.error.code ?? value.error.type;
     return code === undefined ? undefined : Check(OAuthCode, code) ? code : "unrecognized";
-  } catch { return undefined; } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+  } catch { return undefined; }
+}
+
+export const CatalogFailureSchema = Type.Union([
+  Type.Object({ at: Type.Number(), kind: Type.Union([Type.Literal("network"), Type.Literal("timeout"), Type.Literal("aborted")]) }, { additionalProperties: false }),
+  Type.Object({ at: Type.Number(), kind: Type.Union([Type.Literal("http"), Type.Literal("invalid_json"), Type.Literal("invalid_catalog")]), ...responseFields }, { additionalProperties: false }),
+]);
+export type CatalogFailure = Static<typeof CatalogFailureSchema>;
+export class CatalogError extends Error {
+  constructor(readonly diagnostic: CatalogFailure) { super("catalog_failed: " + JSON.stringify(diagnostic)); }
+}
+// 跨 DO 只传递白名单诊断字段，不传递上游正文或令牌。
+export function catalogFailure(error: unknown): CatalogFailure | undefined {
+  if (error instanceof CatalogError) return error.diagnostic;
+  if (error instanceof Error && error.message.startsWith("catalog_failed: ")) {
+    try { const value: unknown = JSON.parse(error.message.slice("catalog_failed: ".length)); if (Check(CatalogFailureSchema, value)) return value; } catch {}
+  }
+  return undefined;
 }

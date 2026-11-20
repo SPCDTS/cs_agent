@@ -5,8 +5,7 @@ import { MemoryStore } from "../src/memory/store";
 import { parseImport } from "../src/memory/import";
 import { applyExtraction } from "../src/memory/extractor";
 import { MemoryManager } from "../src/memory/management";
-import { RuleService, compileRules, renderRules, RULE_UNAVAILABLE } from "../src/memory/rules";
-import { ruleScopeForInput } from "../src/memory/rule-context";
+import { RuleService, compileRules, renderRules, RULE_UNAVAILABLE, ruleScopeForInput } from "../src/memory/rules";
 import type { InboundRow } from "../src/thread/model";
 import { renderMemorySection } from "../src/memory/render";
 

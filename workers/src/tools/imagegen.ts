@@ -8,6 +8,7 @@ import { CODEX_BASE_URL, CODEX_PROVIDER } from "../codex-login";
 import { responseDiagnostic } from "../codex-refresh-error";
 import { FILE_MAX_BYTES } from "../media/model";
 import type { MediaRepository } from "../media/repository";
+import { BodyLimitError, readBoundedJson } from "../shared/http-body";
 
 export const ImageParameters = Type.Object({
   prompt: Type.String({ minLength: 1, description: "完整的绘图或修改要求。不要包含登录凭据。" }),
@@ -43,20 +44,12 @@ export class ImageGenerationError extends Error {
 async function imageResponse(response: Response): Promise<Static<typeof ImageResponse>> {
   if (!response.body) throw new ImageGenerationError("response");
   const limit = Math.ceil(FILE_MAX_BYTES / 3) * 4 + 64 * 1024;
-  const reader = response.body.getReader(), decoder = new TextDecoder();
-  let size = 0, json = "";
-  try {
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      size += chunk.value.byteLength;
-      if (size > limit) { await reader.cancel(); throw new ImageGenerationError("too_large"); }
-      json += decoder.decode(chunk.value, { stream: true });
-    }
-    json += decoder.decode();
-  } finally { reader.releaseLock(); }
   let value: unknown;
-  try { value = JSON.parse(json); } catch { throw new ImageGenerationError("response"); }
+  try { value = await readBoundedJson(response, { maxBytes: limit, checkContentLength: false, requireBody: true }); }
+  catch (error) {
+    if (error instanceof BodyLimitError) throw new ImageGenerationError(error.kind === "too_large" ? "too_large" : "response");
+    throw error;
+  }
   if (!Check(ImageResponse, value)) throw new ImageGenerationError("response");
   return value;
 }

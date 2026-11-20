@@ -6,7 +6,7 @@ import { publicOrigin } from "./mcp/config";
 import { oauthErrorCode } from "./mcp/oauth-fetch";
 import type { Env } from "./env";
 import { MAINTENANCE_CRON, runMaintenance } from "./maintenance";
-import { githubAppConfigured } from "./github/configuration";
+import { githubAppConfigured } from "./github/app";
 import { readWebhook, WebhookError } from "./github/model";
 import { readPush, verifyPushToken } from "./gmail/pubsub";
 

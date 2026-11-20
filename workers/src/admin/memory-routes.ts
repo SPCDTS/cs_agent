@@ -1,9 +1,10 @@
 import { MemoryStoreError } from "../memory/store";
 import { MemoryEditorSchema, type MemoryEditor } from "../memory/editor";
 import { ADMIN_PAGE_SIZE } from "./pagination";
-import { Type, type Static, type TSchema } from "typebox";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
 import type { AdminContext, AdminRoute } from "./routes";
+import { adminJson as json, HttpError, readAdminBody } from "./http";
 import { MemoryAdminError, type MemoryListQuery, type MemoryManager, type ProfileProposal } from "../memory/management";
 import { MEMORY_KINDS, MEMORY_STATUSES, isMemoryNs } from "../memory/types";
 import { MEMORY_HISTORY_MAX_BYTES, parseMemoryHistory, type importMemoryHistory } from "../memory/history-import";
@@ -35,18 +36,12 @@ const ID = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
 const REVISION = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 const RESTORE = Type.Object({ expectedVersion: REVISION, versionId: Type.Optional(ID) }, strict);
 const DECISION = Type.Object({ expectedRevision: Type.String({ minLength: 1, maxLength: 64 }) }, strict);
-const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
 function nsFrom(ctx: AdminContext) {
   const ns = ctx.url.searchParams.get("ns");
   if (!isMemoryNs(ns)) throw new MemoryAdminError("invalid");
   return ns;
 }
-async function body<T extends TSchema>(request: Request, schema: T): Promise<Static<T>> {
-  let value: unknown;
-  try { value = await request.json(); } catch { throw new MemoryAdminError("invalid"); }
-  if (!Check(schema, value)) throw new MemoryAdminError("invalid");
-  return value;
-}
+const body = readAdminBody;
 function query(url: URL): MemoryListQuery {
   const params = url.searchParams, value = (key: string) => params.get(key) ?? undefined;
   const readInt = (key: string, minimum: number, maximum: number) => {
@@ -73,6 +68,7 @@ export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string)
   const guarded = (handle: AdminRoute["handle"]): AdminRoute["handle"] => async ctx => {
     try { return await handle(ctx); }
     catch (error) {
+      if (error instanceof HttpError) return json({ error: error.status === 413 ? "too_large" : "invalid" }, error.status);
       if (error instanceof Error && error.message.includes("memory_rule:protected")) return json({error:"rule_management_required"},409);
       // RPC 跨 isolate 时自定义 Error 的原型可能被擦除，Thread 应保留可识别的短错误分类。
       if (error instanceof MemoryStoreError && error.message !== "memory_admin:conflict") return json({error:"invalid"},400);
@@ -137,13 +133,8 @@ export function createMemoryAdminRoutes(resolve: (ctx: AdminContext, ns: string)
       return json(await resolve(ctx, ns).decideMemoryProposal(ns, Number(ctx.params.id), ctx.params.decision === "accept" ? "accepted" : "rejected", input.expectedRevision));
     }) },
     { method: "POST", path: "/admin/memory/history/import", handle: guarded(async ctx => {
-      if (Number(ctx.request.headers.get("Content-Length") ?? 0) > MEMORY_HISTORY_MAX_BYTES) return json({ error: "too_large" }, 413);
-      const raw = await ctx.request.arrayBuffer();
-      if (raw.byteLength > MEMORY_HISTORY_MAX_BYTES) return json({ error: "too_large" }, 413);
-      let value: unknown;
-      try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw)); } catch { throw new MemoryAdminError("invalid"); }
       const envelope = Type.Object({ data: Type.Unknown(), dryRun: Type.Optional(Type.Boolean()) }, strict);
-      if (!Check(envelope, value)) throw new MemoryAdminError("invalid");
+      const value = await body(ctx.request, envelope, { maxBytes: MEMORY_HISTORY_MAX_BYTES, fatal: true, tooLargeCode: "too_large" });
       const data = parseMemoryHistory(value.data);
       return json(await resolve(ctx, data.ns).importMemoryHistory(data.ns, data, { dryRun: value.dryRun }));
     }) },

@@ -1,4 +1,5 @@
 import { FILE_MAX_BYTES, safeMime } from "./model";
+import { BodyLimitError, readBoundedBytes } from "../shared/http-body";
 
 export class MediaDownloadError extends Error {
   constructor(readonly status: number, readonly hostname: string) {
@@ -74,20 +75,12 @@ export async function downloadMedia(raw: string, deps: DownloadDeps = {}): Promi
       throw new MediaDownloadError(response.status, url.hostname);
     }
     const mime = safeMime(response.headers.get("Content-Type") ?? undefined);
-    const length = Number(response.headers.get("Content-Length"));
-    if (Number.isFinite(length) && length > FILE_MAX_BYTES) { await response.body.cancel(); throw new Error("too_large"); }
-    const reader = response.body.getReader(), chunks: Uint8Array[] = [];
-    let size = 0;
-    for (;;) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      size += chunk.value.byteLength;
-      if (size > FILE_MAX_BYTES) { await reader.cancel(); throw new Error("too_large"); }
-      chunks.push(chunk.value);
+    let bytes: Uint8Array;
+    try { bytes = await readBoundedBytes(response, { maxBytes: FILE_MAX_BYTES }); }
+    catch (error) {
+      if (error instanceof BodyLimitError && error.kind === "too_large") throw new Error("too_large");
+      throw error;
     }
-    const bytes = new Uint8Array(size);
-    let offset = 0;
-    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
     return { bytes, mime, url: url.href };
   }
   throw new Error("media_redirect_denied");

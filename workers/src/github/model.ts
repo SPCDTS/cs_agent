@@ -1,12 +1,13 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { DEFAULT_SETTINGS, normalizeEvent, parseSettings, type ExternalEvent, type SourceSettings } from "../events/model";
+import { BodyLimitError, readBoundedBytes } from "../shared/http-body";
 
 export const MAX_BODY = 256 * 1024;
 // Covers the legal legacy maximum (1000 safe-integer ID pairs plus Unicode filters).
 export const MAX_CONFIG_BYTES = 256 * 1024;
-import { RuleSchema, CommentFiltersSchema, DEFAULT_COMMENT_FILTERS, reservedEvent } from "./rules";
-export { CHOICES } from "./choices";
+import { CHOICES, RuleSchema, CommentFiltersSchema, DEFAULT_COMMENT_FILTERS, reservedEvent } from "./rules";
+export { CHOICES };
 const Repo = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$" });
 const ConfigSchema = Type.Object({
   repositoryIds: Type.Array(Type.Object({ installationId: Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}), repositoryId: Type.Integer({minimum:1,maximum:Number.MAX_SAFE_INTEGER}) }, {additionalProperties:false}), {maxItems:1000,uniqueItems:true}),
@@ -31,26 +32,16 @@ export class WebhookError extends Error {
   constructor(readonly status: number, readonly code: string) { super(code); }
 }
 export async function readBounded(request: Request, max = MAX_BODY): Promise<Uint8Array> {
-  const length = request.headers.get("content-length");
-  if (length !== null && (!/^\d{1,10}$/.test(length) || Number(length) > max)) throw new WebhookError(413, "body_too_large");
-  if (!request.body) throw new WebhookError(400, "missing_body");
-  const reader = request.body.getReader(), chunks: Uint8Array[] = [];
-  let size = 0, timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => {
-    void reader.cancel().catch(() => {}); reject(new WebhookError(408, "body_timeout"));
-  }, 5000); });
   try {
-    while (true) {
-      const part = await Promise.race([reader.read(), timeout]);
-      if (part.done) break;
-      size += part.value.byteLength;
-      if (size > max) { void reader.cancel().catch(() => {}); throw new WebhookError(413, "body_too_large"); }
-      chunks.push(part.value);
+    return await readBoundedBytes(request, { maxBytes: max, checkContentLength: "strict", requireBody: true, timeoutMs: 5000 });
+  } catch (error) {
+    if (error instanceof BodyLimitError) {
+      if (error.kind === "too_large") throw new WebhookError(413, "body_too_large");
+      if (error.kind === "missing_body") throw new WebhookError(400, "missing_body");
+      if (error.kind === "timeout") throw new WebhookError(408, "body_timeout");
     }
-  } finally { clearTimeout(timer); reader.releaseLock(); }
-  const bytes = new Uint8Array(size); let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return bytes;
+    throw error;
+  }
 }
 export async function verifySignature(bytes: Uint8Array, signature: string, secret: string): Promise<boolean> {
   if (!secret || !/^sha256=[0-9a-f]{64}$/.test(signature)) return false;

@@ -1,18 +1,14 @@
 import { ADMIN_PAGE_SIZE, readAdminCursor, nextAdminCursor } from "./pagination";
-import { Type, type TSchema, type Static } from "typebox";
-import { Check } from "typebox/value";
+import { Type } from "typebox";
 import type { AdminRoute } from "./routes";
+import { adminJson as json, readAdminBody } from "./http";
 import { GrantInputSchema, GrantRevokeSchema, GrantImportSchema } from "../grants";
 import { OpsSettingsSchema } from "../settings";
 import { ownerIds } from "../policy";
 import { parseSkill } from "../skills";
 
 const strict={additionalProperties:false};
-const json=(value:unknown,status=200)=>Response.json(value,{status,headers:{"Cache-Control":"no-store"}});
-async function read<T extends TSchema>(request:Request,schema:T):Promise<Static<T>>{
-  const bytes=await request.arrayBuffer();if(bytes.byteLength>1048576)throw new Error("request_too_large");
-  const value:unknown=JSON.parse(new TextDecoder().decode(bytes));if(!Check(schema,value))throw new Error("invalid_request");return value;
-}
+const read = <T extends Parameters<typeof readAdminBody>[1]>(request: Request, schema: T) => readAdminBody(request, schema, { maxBytes: 1048576 });
 function protectedRoute(route:AdminRoute):AdminRoute{
   return {...route,handle:async context=>{
     try{return await route.handle(context);}catch(error){return json({error:error instanceof Error?error.message:"invalid_request"},400);}

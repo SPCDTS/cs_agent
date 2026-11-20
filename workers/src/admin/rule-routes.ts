@@ -1,6 +1,6 @@
-import { Type, type TSchema } from "typebox";
-import { Check } from "typebox/value";
+import { Type } from "typebox";
 import type { AdminRoute, AdminContext } from "./routes";
+import { adminJson as json, HttpError, readAdminBody } from "./http";
 import { ownerIds } from "../policy";
 import { MemoryEditorSchema } from "../memory/editor";
 import { RuleError, type RuleProposeInput, type RuleConfirmInput, type RuleRevokeInput } from "../memory/rules";
@@ -11,14 +11,7 @@ const requestId=Type.String({pattern:"^[a-zA-Z0-9_-]{1,80}$"});
 const propose=Type.Object({id,expectedVersion:revision,expectedBindingRevision:revision,entry:Type.Optional(MemoryEditorSchema),requestId},strict);
 const confirm=Type.Object({proposalId:Type.String({pattern:"^[a-f0-9-]{36}$"}),payloadHash:Type.String({pattern:"^[a-f0-9]{64}$"}),requestId},strict);
 const revoke=Type.Object({id,expectedVersion:revision,expectedBindingRevision:revision,requestId},strict);
-const json=(value:unknown,status=200)=>Response.json(value,{status,headers:{"Cache-Control":"no-store"}});
-async function body(ctx:AdminContext,schema:TSchema) {
-  const raw=await ctx.request.text();
-  if(new TextEncoder().encode(raw).byteLength>8192)throw new RuleError("invalid");
-  let value:unknown;try{value=JSON.parse(raw);}catch{throw new RuleError("invalid");}
-  if(!Check(schema,value))throw new RuleError("invalid");
-  return value;
-}
+const body = <T extends Parameters<typeof readAdminBody>[1]>(ctx: AdminContext, schema: T) => readAdminBody(ctx.request, schema, { maxBytes: 8192 });
 function scope(ctx:AdminContext) {
   const value=ctx.url.searchParams.get("scope");
   if(ctx.url.searchParams.get("ns")!=="owner" || !value || !value.startsWith("private:") || !ownerIds(ctx.env).includes(value.slice(8)))throw new RuleError("scope");
@@ -28,6 +21,7 @@ function scope(ctx:AdminContext) {
 export function createRuleAdminRoutes():AdminRoute[] {
   const guard=(handle:AdminRoute["handle"]):AdminRoute["handle"]=>async ctx=>{
     try{return await handle(ctx);}catch(e){
+      if(e instanceof HttpError)return json({error:"memory_rule:invalid"},400);
       const code=e instanceof Error ? /^memory_rule:(invalid|conflict|scope|budget|integrity)$/.exec(e.message)?.[1] : undefined;
       if(code)return json({error:"memory_rule:"+code},code==="scope"?403:code==="conflict"?409:400);
       throw e;

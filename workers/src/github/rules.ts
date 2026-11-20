@@ -1,5 +1,7 @@
 import { Type, type Static } from "typebox";
 
+export const CHOICES = ["issues.opened", "issues.reopened", "issues.closed", "pull_request.opened", "pull_request.reopened",
+  "pull_request.closed", "pull_request.ready_for_review", "release.published", "workflow_run.completed", "push"] as const;
 export const EVENT_NAME = "^[a-z_]{1,40}$";
 // Reserved because these describe account/installation authority or non-repository control,
 // not ordinary repository notifications. No blanket prefix ban for future event names.

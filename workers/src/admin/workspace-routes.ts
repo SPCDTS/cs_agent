@@ -1,13 +1,8 @@
-import { Type,type Static,type TSchema } from "typebox";
-import { Check } from "typebox/value";
+import { Type } from "typebox";
 import type { AdminRoute,AdminContext } from "./routes";
+import { API_HEADERS as headers, adminJson as json, readAdminBody } from "./http";
 import type { WorkspaceAdminApi } from "../sandbox/admin";
-const headers={"Cache-Control":"no-store","Referrer-Policy":"no-referrer","X-Content-Type-Options":"nosniff"};
-const json=(value:unknown,status=200)=>Response.json(value,{status,headers});
-async function body<T extends TSchema>(request:Request,schema:T):Promise<Static<T>>{
-  const bytes=await request.arrayBuffer();if(bytes.byteLength>65536)throw new Error("request_too_large");
-  const value:unknown=JSON.parse(new TextDecoder().decode(bytes));if(!Check(schema,value))throw new Error("invalid_request");return value;
-}
+const body = <T extends Parameters<typeof readAdminBody>[1]>(request: Request, schema: T) => readAdminBody(request, schema, { maxBytes: 65536 });
 /** 在现有handleAdmin鉴权后挂载；forThread仍需绑定经过核验的owner网页访问者。 */
 export function workspaceRoutes(deps:{forThread(thread:string,context:AdminContext):Promise<WorkspaceAdminApi>}):AdminRoute[]{
   const base="/admin/threads/(?<thread>owner|group:[1-9][0-9]{0,15}|private:[1-9][0-9]{0,15})/workspace";

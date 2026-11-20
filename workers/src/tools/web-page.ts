@@ -1,5 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
+import { BodyLimitError, readBoundedBytes } from "../shared/http-body";
 
 export const PAGE_TIMEOUT_MS = 20_000;
 export const PAGE_MAX_BYTES = 4 * 1024 * 1024;
@@ -61,19 +62,11 @@ export function htmlToText(html: string): { title: string; text: string } {
 }
 
 async function readCapped(response: Response): Promise<Uint8Array> {
-  if (Number(response.headers.get("Content-Length") ?? 0) > PAGE_MAX_BYTES) { await response.body?.cancel(); throw new PageError("too_large"); }
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  const reader = response.body?.getReader();
-  for (let chunk = await reader?.read(); chunk && !chunk.done; chunk = await reader?.read()) {
-    size += chunk.value.byteLength;
-    if (size > PAGE_MAX_BYTES) { await reader?.cancel(); throw new PageError("too_large"); }
-    chunks.push(chunk.value);
+  try { return await readBoundedBytes(response, { maxBytes: PAGE_MAX_BYTES }); }
+  catch (error) {
+    if (error instanceof BodyLimitError && error.kind === "too_large") throw new PageError("too_large");
+    throw error;
   }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return bytes;
 }
 
 function decode(bytes: Uint8Array, contentType: string): string {

@@ -1,6 +1,7 @@
 import { importPKCS8, SignJWT } from "jose";
 import type { ConnectMark } from "./connect-diagnostics";
 import { capabilityData, type CapabilityData } from "./capability-model";
+import { BodyLimitError, readBoundedBytes } from "../shared/http-body";
 
 /** Separate operator-owned App; never reuse the development bot credentials. */
 export type GitHubAppSecrets = { GITHUB_APP_ID?: string; GITHUB_APP_SLUG?: string; GITHUB_APP_PRIVATE_KEY?: string; GITHUB_APP_WEBHOOK_SECRET?: string; GITHUB_APP_CLIENT_ID?: string; GITHUB_APP_CLIENT_SECRET?: string; GITHUB_APP_CALLBACK_URL?: string };
@@ -158,12 +159,13 @@ export class GitHubAppClient {
           : [401, 403, 404].includes(response.status) ? "unauthorized" : "unavailable", "http_error", upstreamStatus, /^\d{1,6}$/.test(response.headers.get("retry-after")??"") ? Math.min(86400,Number(response.headers.get("retry-after")))*1000 : undefined);
       }
       if (!response.body) throw new GitHubAppError("unavailable", "empty_body", upstreamStatus);
-      const reader = response.body.getReader(); let size = 0; const parts: Uint8Array[] = [];
-      try { while (true) { const part = await reader.read(); if (part.done) break; size += part.value.length;
-        if (size > MAX_BYTES) { await reader.cancel(); throw new GitHubAppError("capacity", "body_too_large", upstreamStatus); } parts.push(part.value); }
-      } finally { reader.releaseLock(); }
-      const bytes = new Uint8Array(size); let at = 0; for (const part of parts) { bytes.set(part, at); at += part.length; }
-      if (!size) throw new GitHubAppError("unavailable", "empty_body", upstreamStatus);
+      let bytes: Uint8Array;
+      try { bytes = await readBoundedBytes(response, { maxBytes: MAX_BYTES, checkContentLength: false, requireBody: true }); }
+      catch (error) {
+        if (error instanceof BodyLimitError && error.kind === "too_large") throw new GitHubAppError("capacity", "body_too_large", upstreamStatus);
+        throw error;
+      }
+      if (!bytes.byteLength) throw new GitHubAppError("unavailable", "empty_body", upstreamStatus);
       let decoded: string, parsed: unknown;
       try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes); }
       catch { throw new GitHubAppError("unavailable", "invalid_encoding", upstreamStatus); }
@@ -217,4 +219,10 @@ export class GitHubAppClient {
     }
     throw new GitHubAppError("capacity");
   }
+}
+
+export function githubAppConfigured(settings: GitHubAppSecrets & { GITHUB_APP_STORE_KEY?: string }): boolean {
+  if (!/^[a-f0-9]{64}$/i.test(settings.GITHUB_APP_STORE_KEY ?? "")) return false;
+  try { new GitHubAppClient(settings).authorizationUrl("configuration-check", "x".repeat(43)); return true; }
+  catch { return false; }
 }

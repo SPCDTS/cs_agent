@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { topologyFamilies } from "../browser/topology-layout";
+import { topologyFamilies } from "../browser/topology";
 import type { AgentNode } from "../browser/topology-contracts";
 
 const parent=(thread:string):AgentNode=>({id:"thread:"+thread,thread,kind:"thread",parentId:null,activity:"context",lastActiveAt:null});

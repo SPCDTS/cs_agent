@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { chatChildren } from "../browser/chat-navigation-layout";
+import { chatChildren } from "../browser/chat-navigation";
 
 const day=24*60*60*1000,now=10*day;
 const child=(id:string,lastActiveAt:number,status="done")=>({id,lastActiveAt,status});
