@@ -1,6 +1,6 @@
 # 云端功能与资源预算
 
-项目已统一运行在 Cloudflare Workers；CS2 Workshop 通过鉴权 Tunnel 接入本机，详见 [本机接入说明](WORKSHOP-LOCAL.md)。此前删除的 Codex 后端及借用订阅的联网、生图工具保持删除，现有 Codex 模型提供方保留。`web_search` 已补齐为直接调用 DeepSeek Search API，复用现有 API key，不依赖 Codex 订阅或容器。
+项目已统一运行在 Cloudflare Workers；CS2 Workshop 通过鉴权 Tunnel 接入本机，详见 [本机接入说明](WORKSHOP-LOCAL.md)。主、子 agent 随当前模型使用 DeepSeek 或 OpenAI 的服务端搜索；订阅生图使用已授权的 Codex 账号。详见 [联网与外部工具](../workers/README.md#联网与外部工具)。
 
 ## 管理入口
 

@@ -446,6 +446,11 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
     const owner = env.THREAD.getByName("owner");
     const childRequest = text.includes("你是主 agent 派出的子 agent");
     const step = childRequest ? childCalls++ : parentCalls++;
+    const payload = JSON.parse(text);
+    expect(payload.tools.filter((tool: { type: string; name?: string }) => tool.type === "web_search" || tool.name === "web_search"))
+      .toEqual([{ type: "web_search", external_web_access: true }]);
+    const search = { type: "web_search_call", id: childRequest ? "ws_child" : "ws_parent", status: "completed", action: { type: "search", query: "官方文档" } };
+    if (step > 0) expect(payload.input).toContainEqual(search);
     if (childRequest) {
       const [child] = await owner.subagentList();
       expect(child).toBeDefined();
@@ -456,8 +461,9 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
           name: childRequest ? "qq_context" : "subagent", arguments: JSON.stringify(childRequest ? { limit: 1 } : { action: "spawn", task: "执行隔离验证" }) }
       : { type: "message", id: "msg_" + (childRequest ? "child" : "parent") + step, role: "assistant", status: "completed", content: [{ type: "output_text", text: "完成" }] };
     return new Response([
-      { type: "response.output_item.added", output_index: 0, item },
-      { type: "response.output_item.done", output_index: 0, item },
+      ...(step === 0 ? [{ type: "response.output_item.done", output_index: 0, item: search }] : []),
+      { type: "response.output_item.added", output_index: 1, item },
+      { type: "response.output_item.done", output_index: 1, item },
       { type: "response.completed", response: { status: "completed", usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 } } },
     ].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""), { headers: { "Content-Type": "text/event-stream" } });
   } });
@@ -470,6 +476,13 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
   const [child] = await owner.subagentList();
   const display = env.REQUESTS.getByName("view:thread:owner");
   expect((await display.subagentTranscript(child.id, 10))?.entries.some(entry => entry.text === "完成")).toBe(true);
+  const requests = env.REQUESTS.getByName("main");
+  const page = await requests.list({ since: 0, until: Date.now() + 1000, limit: 20 });
+  for (const id of ["ws_parent", "ws_child"]) {
+    const request = page.requests.find(r => r.toolCalls?.some(call => call.id === id));
+    expect(request).toBeDefined();
+    expect((await requests.detail(request!.id))?.tools.some(tool => tool.callId === id && tool.status === "done")).toBe(true);
+  }
   expect(parentCalls).toBeGreaterThanOrEqual(2);
   expect(childCalls).toBe(2);
   expect(alarms.mock.calls.length).toBeGreaterThanOrEqual(parentCalls + childCalls);

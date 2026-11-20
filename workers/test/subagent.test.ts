@@ -176,7 +176,7 @@ describe("subagents as child Durable Objects", () => {
     expect(extract).toContain(spawnTurn!.turn_id);
 
     const tools = seen.child[0]!.tools;
-    expect(tools).toEqual(expect.arrayContaining(["web_search", "web_page", "qq_context", "mem_search"]));
+    expect(tools).toEqual(expect.arrayContaining(["web_page", "qq_context", "mem_search"]));
     for (const name of ["send_message", "subagent", "generate_image", "mem_remember", "schedule", "gmail_send", "skill_inspect", "skill_publish"]) expect(tools).not.toContain(name);
     expect(seen.parent[0]!.tools).toContain("subagent");
 
