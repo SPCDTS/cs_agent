@@ -4,11 +4,11 @@
 
 ## 开发与合并
 
-- 每个任务使用自己的 worktree：`scripts/wt.ps1 new <名称>`，创建 `<主工作区>-wt-<名称>` 和 `codex/<名称>` 分支。主工作区只做集成。
+- 每个任务使用自己的 worktree：`scripts/wt.ps1 new <前缀/名称>`（前缀为 `feat/`、`fix/`、`docs/`、`refactor/`、`test/`、`chore/`、`ci/`，省略前缀默认 `feat/`），创建 `<主工作区>-wt-<名称>`。主工作区只做集成。
 - 新 worktree 在自己的 `workers/` 和 `runner/` 安装依赖：`npm run install:workers`。不共享 node_modules，不在其他任务的依赖目录里安装或裁剪包。
 - 老 worktree 可能仍有指向主工作区的 node_modules 链接。删除前先检查并断开链接；不要对链接指向的依赖目录做递归删除。
 - 单模块改动在功能分支运行相关测试和类型检查后推送并创建 PR；共享入口、DO 生命周期、构建/测试配置或跨模块改动运行 `npm run check`。GitHub 的 `workers check` 必须成功才可合并；`scripts/wt.ps1 land` 已停用。通过 GitHub 合并后，主工作区只运行 `git pull --ff-only` 更新。
-- `scripts/wt.ps1 rm <名称>` 清理 worktree；脚本会先断开已知的依赖目录链接。
+- `scripts/wt.ps1 rm <名称>`（或 `<前缀/名称>`）清理 worktree；脚本会先断开已知的依赖目录链接。
 - 提交前检查暂存区差异，排除私有数据、凭据和无关改动。`scripts/hooks/pre-commit` 仍禁止在主工作区直接提交；不得绕过钩子或分支保护直推 main。
 
 ## 验证与部署

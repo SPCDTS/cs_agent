@@ -1,7 +1,7 @@
-# 每个任务一个 worktree；新任务使用 codex/ 分支和独立 Workers 依赖。
+# 每个任务一个 worktree；新任务使用语义前缀分支（如 feat/xxx）和独立 Workers 依赖。
 param(
   [Parameter(Mandatory, Position = 0)][ValidateSet("new", "rm", "list")][string]$Action,
-  [Parameter(Position = 1)][ValidatePattern('^[a-z0-9][a-z0-9-]*$')][string]$Name
+  [Parameter(Position = 1)][ValidatePattern('^((feat|fix|docs|refactor|test|chore|ci|codex)/)?[a-z0-9][a-z0-9-]*$')][string]$Name
 )
 $ErrorActionPreference = "Stop"
 function Invoke-Git {
@@ -12,9 +12,10 @@ function Invoke-Git {
 $main = Split-Path (Invoke-Git -C $PSScriptRoot rev-parse --path-format=absolute --git-common-dir) -Parent
 Invoke-Git -C $main config core.hooksPath scripts/hooks | Out-Null
 if ($Action -eq "list") { Invoke-Git -C $main worktree list; return }
-if (!$Name) { throw "缺少名称：scripts/wt.ps1 $Action <名称>" }
-$path = [System.IO.Path]::GetFullPath("$main-wt-$Name")
-$branch = "codex/$Name"
+if (!$Name) { throw "缺少名称：scripts/wt.ps1 $Action <前缀/名称>" }
+$suffix = ($Name -split '/')[-1]
+$path = [System.IO.Path]::GetFullPath("$main-wt-$suffix")
+$branch = if ($Name.Contains('/')) { $Name } else { "feat/$Name" }
 if ($Action -eq "rm") {
   $branch = Invoke-Git -C $path symbolic-ref --short HEAD
 }
