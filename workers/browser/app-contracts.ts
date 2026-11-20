@@ -30,6 +30,7 @@ export const EventDetail = Type.Object({ server: Type.Optional(Type.String()), a
   tool: Type.Optional(Type.String()), ms: Type.Optional(Type.Number()), inputBytes: Type.Optional(Type.Number()), outputBytes: Type.Optional(Type.Number()),
   result: Type.Optional(Type.String()), tools: Type.Optional(Type.Number()), rejected: Type.Optional(Type.Number()), digest: Type.Optional(Type.String()),
   code: Type.Optional(Type.Union([Type.Number(), Type.String(), Type.Null()])), status: Type.Optional(Type.String()), results: Type.Optional(Type.Number()),
+  provider: optionalText, calls: optionalNumber,
   commandLength: Type.Optional(Type.Number()), candidates: Type.Optional(Type.Number()), written: Type.Optional(Type.Number()), reason: Type.Optional(Type.String()),
   usage: Type.Optional(Type.Object({ totalTokens: Type.Optional(Type.Number()) })),
 });

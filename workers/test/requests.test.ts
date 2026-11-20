@@ -101,7 +101,13 @@ describe("request observability", () => {
     const faux = fauxProvider({ models: [{ id: "test" }] }), base = createModels();
     const message = { ...fauxAssistantMessage("ok"), usage: { input: 7, output: 3, cacheRead: 5, cacheWrite: 2, reasoning: 2, totalTokens: 17,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
-    const make = () => { const stream = createAssistantMessageEventStream(); stream.push({ type: "start", partial: message }); stream.push({ type: "done", reason: "stop", message }); return stream; };
+    const searchFlags: boolean[] = [];
+    const make = (_model: unknown, _context: unknown, options?: StreamOptions & { agentWebSearch?: boolean }) => {
+      searchFlags.push(!!options?.agentWebSearch);
+      const stream = createAssistantMessageEventStream();
+      stream.push({ type: "start", partial: message }); stream.push({ type: "done", reason: "stop", message });
+      return stream;
+    };
     base.setProvider({ ...faux.provider, stream: make, streamSimple: make });
     const pending: Promise<unknown>[] = [];
     const models = captureModels(base, env, { waitUntil: p => { pending.push(p); } }, { thread: "owner", actor: "thread", purpose: "conversation" });
@@ -114,6 +120,7 @@ describe("request observability", () => {
     await models.stream(faux.models[0], input).result();
     await Promise.all(pending);
     const store = env.REQUESTS.getByName("main"), page = await store.list(query());
+    expect(searchFlags).toEqual([true, true, false, true]); // completeSimple 是压缩请求
     expect(page.requests).toHaveLength(4);
     for (const r of page.requests) expect(r).toMatchObject({ inputTokens: 14, outputTokens: 3, cacheRead: 5, cacheWrite: 2, reasoningTokens: 2, status: "done" });
     expect(page.requests.filter(r => r.purpose === "compaction")).toHaveLength(1);
@@ -125,7 +132,9 @@ describe("request observability", () => {
   it("distinguishes provider-reported zero from missing usage on failure", async () => {
     const faux = fauxProvider({ models: [{ id: "test" }] }), base = createModels();
     let reported = false;
-    const make = (_m: unknown, _c: unknown, options?: StreamOptions) => {
+    const searchFlags: boolean[] = [];
+    const make = (_m: unknown, _c: unknown, options?: StreamOptions & { agentWebSearch?: boolean }) => {
+      searchFlags.push(!!options?.agentWebSearch);
       const stream = createAssistantMessageEventStream();
       const message: AssistantMessage = fauxAssistantMessage("", { stopReason: "error",
         errorMessage: "<html><head><style>" + ".hidden{display:none}".repeat(100) + "</style></head><body><h1>Request blocked</h1><p>Contact support.</p></body></html>" });
@@ -148,6 +157,7 @@ describe("request observability", () => {
     expect(rows.every(r => r.status === "error")).toBe(true);
     expect(rows.map(r => r.error)).toEqual(["HTTP 403 · Request blocked\nContact support.", "HTTP 403 · Request blocked\nContact support."]);
     expect(statuses).toEqual([403]);
+    expect(searchFlags).toEqual([false, false]);
     expect(JSON.stringify(rows)).not.toContain("never-store-cookie");
   });
   it("keeps ordinary errors readable and redacts credentials before formatting", () => {

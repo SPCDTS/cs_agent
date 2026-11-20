@@ -1,6 +1,6 @@
 import { BACKGROUND_CONTEXT, type Context } from '@earendil-works/chord/context';
 import { Type } from '@earendil-works/pi-ai';
-import { createRegistry, defineExtension, defineTool, Harness, section, type Conversation, type Registry, type ToolExecutionApi } from '@earendil-works/pi-durable';
+import { createRegistry, defineExtension, defineTool, GenerationTask, hook, Harness, section, type Conversation, type Registry, type ToolExecutionApi } from '@earendil-works/pi-durable';
 import { openDurableObjectSqliteStorage, type DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/cloudflare';
 import type { MutableModels } from '@earendil-works/pi-ai/models';
 import type { Env } from '../env';
@@ -27,9 +27,9 @@ import { createScheduleExtension, type ScheduleAccess } from '../schedule/tools'
 import type { ScheduleConversation } from '../schedule/types';
 import { createGmailTools } from '../gmail/tools';
 import { cleanOutgoing } from '../send-clean';
+import { hostedSearchSteps } from '../tools/web-search';
 import { createWebPageTool } from '../tools/web-page';
 import { createImageTool } from '../tools/imagegen';
-import { createWebSearchTool } from '../tools/web-search';
 import { createAccessExtension } from '../tools/access';
 import { createWorkspaceAdminExtension } from '../tools/workspace-admin';
 import { createMediaExtension } from '../tools/media';
@@ -47,7 +47,7 @@ import { isWeb, isWebAdmin, targetOf, type InboundRow, type ToolProfile } from '
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只能展示网页。需要回复时调用 send_message，它只把文字和图片资产写入网页，不向 QQ 发送；工作区文件可用 send_file，附件也只展示在网页。不得使用其他工具绕过此回复入口限制。";
-const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_search", "web_page", "read_skill",
+const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_page", "read_skill",
   "codemode"]);
 
 export type Runtime = { harness: Harness; root: Conversation; registry: Registry; selection: ModelSelection; profile: ToolProfile; mcp?: ThreadMcp; recovered: boolean };
@@ -103,6 +103,13 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
   registry.install(monitor.extension);
   registry.install(defineExtension({
     name: "cs-workers",
+    hooks: [hook(GenerationTask, { afterResponse: async message => {
+      const searches = hostedSearchSteps(message);
+      if (!searches.length) return;
+      host.ctx.waitUntil(host.audit("web_search", { result: searches.some(s => s.item.status !== "completed") ? "error" : "ok",
+        provider: message.provider, calls: searches.length, ms: Math.max(...searches.map(s => s.endedAt)) - Math.min(...searches.map(s => s.startedAt)) })
+        .catch(() => console.error({ event: "web_search_audit_failed" })));
+    } })],
     sections: [
       section("qq", async (api, callContext) => {
         const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
@@ -147,7 +154,6 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       const input = await host.currentInput(harness, api, api.conversationId, callContext);
       return input ? host.ownerTurnKind(input) : undefined;
     }, () => host.env.EVENTS.getByName("main")) : []),
-    createWebSearchTool(host.env.DEEPSEEK_API_KEY, detail => host.audit("web_search", detail)),
     createWebPageTool(),
     createImageTool({ models: host.models(), repository: new MediaRepository({ bucket: host.env.ASSETS, scope: memory.ns }),
       allowed: async (api, c) => { const input = await host.currentInput(harness, api, api.conversationId, c); return !!input && input.kind === "message" && input.session_generation === await host.sessionGeneration(); },

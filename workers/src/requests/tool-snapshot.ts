@@ -1,7 +1,7 @@
-import type { ToolHookCall, ToolExecutionResult } from "@earendil-works/pi-durable";
+import type { ToolExecutionResult } from "@earendil-works/pi-durable";
 import { boundedText, safeText } from "./snapshot";
 
-export function argumentPreview(args: ToolHookCall["arguments"]): string | undefined {
+export function argumentPreview(args: Record<string, unknown>): string | undefined {
   const raw = JSON.stringify(args);
   if (safeText(raw) !== raw) return "含凭据的参数已隐藏";
   const values = ["path", "command", "query", "url", "envId", "repository", "owner", "repo"]

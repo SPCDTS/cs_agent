@@ -7,6 +7,7 @@ import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-code
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type { Env } from "./env";
+import { withHostedSearch } from "./tools/web-search";
 import { codexFetch } from "./codex-fetch";
 import { CODEX_BASE_URL, CODEX_PROVIDER, codexOAuth, isChatGPTCredential } from "./codex-login";
 import type { ModelSelection } from "./settings";
@@ -23,7 +24,7 @@ type ProviderSpec = {
 
 // 保留 provider id 和会话模型选择；旧 SIWC 授权仅作为迁移期间的回退。
 function codexProvider({ fetch }: { fetch?: typeof globalThis.fetch } = {}): Provider {
-  const native = openAICodexResponsesApi(), legacy = openAIResponsesApi();
+  const native = withHostedSearch(openAICodexResponsesApi()), legacy = withHostedSearch(openAIResponsesApi());
   const transport: ProviderStreams = {
     stream: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.stream({ ...model, api: "openai-codex-responses" }, context, { ...options, fetch: codexFetch(fetch ?? options?.fetch ?? globalThis.fetch) }) : legacy.stream({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
     streamSimple: (model, context, options) => model.baseUrl === CODEX_BASE_URL ? native.streamSimple({ ...model, api: "openai-codex-responses" }, context, { ...options, fetch: codexFetch(fetch ?? options?.fetch ?? globalThis.fetch) }) : legacy.streamSimple({ ...model, api: "openai-responses" }, context, { ...options, ...(fetch ? { fetch } : {}) }),
@@ -61,7 +62,7 @@ function echoProvider(): Provider {
 }
 
 export const MODEL_PROVIDERS: Record<string, ProviderSpec> = {
-  deepseek: { name: "DeepSeek", listed: () => true, create: () => deepseekProvider(), unavailable: "missing_key" },
+  deepseek: { name: "DeepSeek", listed: () => true, create: () => { const provider = deepseekProvider(); return { ...provider, ...withHostedSearch(provider, openAIResponsesApi()) }; }, unavailable: "missing_key" },
   [CODEX_PROVIDER]: { name: "ChatGPT 订阅", listed: () => true, create: codexProvider, unavailable: "login_required" },
   faux: { name: "faux（测试）", listed: env => env.MODEL_PROVIDER === "faux", create: echoProvider, unavailable: "unavailable" },
 };

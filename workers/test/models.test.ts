@@ -1,3 +1,5 @@
+import type { Context, Tool } from "@earendil-works/pi-ai";
+import { agentSearchOption } from "../src/tools/web-search";
 import { ModelAlarm } from "../src/model-alarm";
 import { zstdDecompressSync } from "node:zlib";
 import { env, reset, runInDurableObject } from "cloudflare:test";
@@ -315,6 +317,37 @@ describe("model selection and Codex Responses", () => {
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 
+  it("旧会话只声明原生搜索，保留历史函数调用、结果和其他工具的撤销提示", async () => {
+    network(); await login();
+    const base = models.openModels(env, store()), model = base.getModel("openai-codex", "gpt-6-astra")!;
+    const tool = (name: string): Tool => ({ name, description: name, parameters: { type: "object", properties: {} } });
+    const context: Context = { messages: [
+      { role: "system", content: "开始", timestamp: 0, toolsAdded: ["web_search", "old_tool", "send_message"].map(tool) },
+      { role: "user", content: "查文档", timestamp: 1 },
+      { ...fauxAssistantMessage(fauxToolCall("web_search", { query: "文档" }, { id: "call_old|fc_old" }), { stopReason: "toolUse" }),
+        provider: model.provider, api: "openai-codex-responses", model: model.id },
+      { role: "toolResult", toolCallId: "call_old|fc_old", toolName: "web_search", content: [{ type: "text", text: "旧搜索结果" }], isError: false, timestamp: 2 },
+      { role: "system", content: "", timestamp: 3, toolsRemoved: [{ name: "web_search" }, { name: "old_tool" }] },
+      { role: "user", content: "继续", timestamp: 4 },
+    ] };
+    let payload: { tools: { type: string }[]; input: { type?: string; name?: string; content?: unknown; output?: unknown; tools?: { name?: string }[] }[] } | undefined;
+    network({ [CODEX_BASE_URL + "/responses"]: async request => {
+      payload = await request.json();
+      return new Response('data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n', { headers: { "Content-Type": "text/event-stream" } });
+    } });
+    const original = structuredClone(context);
+    expect((await base.streamSimple(model, context, { ...agentSearchOption, transport: "sse" }).result()).stopReason).toBe("stop");
+    expect(context).toEqual(original);
+    expect(payload!.tools).toEqual([{ type: "web_search", external_web_access: true }]);
+    expect(payload!.input.filter(i => i.type === "additional_tools").flatMap(i => i.tools?.map(t => t.name) ?? [])).toEqual(["old_tool", "send_message"]);
+    const instructions = payload!.input.flatMap(i => typeof i.content === "string" ? [i.content] : []).join("\n");
+    expect(instructions).toContain("- old_tool");
+    expect(instructions).not.toContain("web_search");
+    const call = payload!.input.findIndex(i => i.type === "function_call" && i.name === "web_search");
+    expect(call).toBeGreaterThanOrEqual(0);
+    expect(payload!.input[call + 1]).toMatchObject({ type: "function_call_output", output: "旧搜索结果" });
+  });
+
   it("uses the native Codex endpoint over SSE with store false and the selected effort", async () => {
     network(); await login();
     expect((await selectModel({ provider: "openai-codex", id: "gpt-6-astra", reasoningEffort: "high" })).status).toBe(200);
@@ -446,6 +479,12 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
     const owner = env.THREAD.getByName("owner");
     const childRequest = text.includes("你是主 agent 派出的子 agent");
     const step = childRequest ? childCalls++ : parentCalls++;
+    const payload = JSON.parse(text);
+    expect(payload.tools.filter((tool: { type: string; name?: string }) => tool.type === "web_search" || tool.name === "web_search"))
+      .toEqual([{ type: "web_search", external_web_access: true }]);
+    const query = childRequest && step === 1 ? "后续文档" : "官方文档";
+    const search = { type: "web_search_call", id: "ws_0", status: "completed", action: { type: "search", query } };
+    if (step > 0) expect(payload.input).toContainEqual({ ...search, action: { type: "search", query: "官方文档" } });
     if (childRequest) {
       const [child] = await owner.subagentList();
       expect(child).toBeDefined();
@@ -456,8 +495,9 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
           name: childRequest ? "qq_context" : "subagent", arguments: JSON.stringify(childRequest ? { limit: 1 } : { action: "spawn", task: "执行隔离验证" }) }
       : { type: "message", id: "msg_" + (childRequest ? "child" : "parent") + step, role: "assistant", status: "completed", content: [{ type: "output_text", text: "完成" }] };
     return new Response([
-      { type: "response.output_item.added", output_index: 0, item },
-      { type: "response.output_item.done", output_index: 0, item },
+      ...(step === 0 || childRequest ? [{ type: "response.output_item.done", output_index: 0, item: search }] : []),
+      { type: "response.output_item.added", output_index: 1, item },
+      { type: "response.output_item.done", output_index: 1, item },
       { type: "response.completed", response: { status: "completed", usage: { input_tokens: 3, output_tokens: 1, total_tokens: 4 } } },
     ].map(event => "data: " + JSON.stringify(event) + "\n\n").join(""), { headers: { "Content-Type": "text/event-stream" } });
   } });
@@ -470,6 +510,24 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
   const [child] = await owner.subagentList();
   const display = env.REQUESTS.getByName("view:thread:owner");
   expect((await display.subagentTranscript(child.id, 10))?.entries.some(entry => entry.text === "完成")).toBe(true);
+  const requests = env.REQUESTS.getByName("main");
+  const page = await requests.list({ since: 0, until: Date.now() + 1000, limit: 20 });
+  const withSearch = page.requests.filter(r => r.toolCalls?.some(call => call.name === "web_search"));
+  expect(withSearch).toHaveLength(3);
+  const childRequests = withSearch.filter(r => r.actor === child.id);
+  expect(childRequests).toHaveLength(2);
+  expect(childRequests[0]!.binding!.turnId).toBe(childRequests[1]!.binding!.turnId);
+  const previews = [];
+  for (const request of withSearch) {
+    const tools = (await requests.detail(request.id))!.tools.filter(t => t.name === "web_search");
+    expect(tools).toHaveLength(1);
+    expect(tools[0]).toMatchObject({ callId: request.id + ":ws_0", status: "done" });
+    if (request.actor === child.id) previews.push(tools[0]?.argumentPreview);
+  }
+  expect(previews.sort()).toEqual(["query: 后续文档", "query: 官方文档"].sort());
+  const audit = await adminJson<{ events: { detail: unknown }[] }>("GET", "/admin/events?thread=owner&kind=web_search");
+  expect(audit.events.map(e => e.detail))
+    .toEqual([expect.objectContaining({ result: "ok", provider: "openai-codex", calls: 1 })]);
   expect(parentCalls).toBeGreaterThanOrEqual(2);
   expect(childCalls).toBe(2);
   expect(alarms.mock.calls.length).toBeGreaterThanOrEqual(parentCalls + childCalls);

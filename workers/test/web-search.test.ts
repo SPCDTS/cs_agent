@@ -1,35 +1,66 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { searchWeb } from "../src/tools/web-search";
+import { describe, expect, it } from "vitest";
+import { deepseekProvider } from "@earendil-works/pi-ai/providers/deepseek";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import { agentSearchOption, hostedSearchSteps, withHostedSearch } from "../src/tools/web-search";
 
-afterEach(() => { vi.restoreAllMocks(); });
+describe("DeepSeek 服务端搜索", () => {
+  const provider = deepseekProvider(), transport = withHostedSearch(provider, openAIResponsesApi());
+  const context = normalizeContext({ messages: [{ role: "user", content: "查官方文档", timestamp: 1 }],
+    tools: [{ name: "send_message", description: "发送消息", parameters: { type: "object", properties: {} } }] });
 
-describe("DeepSeek 原生 web_search", () => {
-  it("直连搜索接口，不读取全文，按相关性返回来源与摘要", async () => {
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-      const request = new Request(url, init);
-      expect(request.url).toBe("https://api.deepseek.com/v1/tools/search");
-      expect(request.method).toBe("POST");
-      expect(request.redirect).toBe("manual");
-      expect(request.headers.get("Authorization")).toBe("Bearer synthetic-deepseek");
-      expect(await request.json()).toEqual({ query: "DeepSeek 文档", count: 8, need_content: false });
-      return Response.json({ results: [
-        { title: "新闻", url: "https://example.test/news", date: null, summary: "", snippet: "摘要片段", rerank_score: 0.5, content: "不传给模型的全文" },
-        { title: "官方文档", url: "https://api-docs.deepseek.com/guides/search/", date: "2026-10-30", summary: "接口说明", snippet: "", rerank_score: 0.9 },
-      ] });
-    });
-    expect(await searchWeb({ apiKey: "synthetic-deepseek", query: " DeepSeek 文档 " })).toEqual([
-      { title: "官方文档", url: "https://api-docs.deepseek.com/guides/search/", date: "2026-10-30", summary: "接口说明" },
-      { title: "新闻", url: "https://example.test/news", date: null, summary: "摘要片段" },
-    ]);
-    expect(fetch).toHaveBeenCalledTimes(1);
+  it.each(provider.getModels())("$id 在同一次模型请求中声明联网和普通工具", async model => {
+    let request: Request | undefined;
+    const result = await transport.streamSimple(model, context, { ...agentSearchOption, apiKey: "test",
+      fetch: async (url, init) => {
+        request = new Request(url, init);
+        const event = { type: "response.completed", response: { status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 1 } } };
+        return new Response("data: " + JSON.stringify(event) + "\n\n", { headers: { "content-type": "text/event-stream" } });
+      } }).result();
+    expect(result.stopReason).toBe("stop");
+    expect(request?.url).toBe("https://api.deepseek.com/responses");
+    const body = await request!.json<{ tools: { type: string; name?: string }[]; reasoning?: { effort: string } }>();
+    const flash = model.id === "deepseek-flash";
+    expect(body.tools.map(t => t.name ?? t.type)).toEqual(["send_message", flash ? "deepseek_web_search" : "web_search"]);
+    if (flash) expect(body.reasoning?.effort).toBe("low");
   });
 
-  it("缺少 key 时不发请求，余额错误只返回可操作的原因", async () => {
-    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("private-upstream-detail", { status: 402 }));
-    await expect(searchWeb({ apiKey: undefined, query: "公开资料" })).rejects.toMatchObject({ code: "configuration" });
-    expect(fetch).not.toHaveBeenCalled();
-    await expect(searchWeb({ apiKey: "synthetic-deepseek", query: "公开资料" })).rejects.toMatchObject({
-      code: "balance", message: "DeepSeek 余额不足，无法搜索。",
-    });
+  it("截断后保留诊断，续轮按原顺序回传已完成的搜索及最终补齐的来源", async () => {
+    const model = provider.getModels()[0]!;
+    const first = { type: "web_search_call", id: "ws_1", status: "completed", action: { type: "search", query: "文档" } };
+    const sources = [{ url: "https://example.org/doc" }];
+    const text = { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "查到第一份" }] };
+    const second = { ...first, id: "ws_2" };
+    const partial = { ...first, id: "ws_3", status: "searching" };
+    const events = [
+      ...[first, text, second].map((item, output_index) => ({ type: "response.output_item.done", output_index, item })),
+      { type: "response.output_item.added", output_index: 3, item: partial },
+      { type: "response.incomplete", response: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" },
+        output: [{ ...first, action: { sources } }, text, second, partial] } },
+    ];
+    const sse = (data: unknown[]) => new Response(data.map(event => "data: " + JSON.stringify(event) + "\n\n").join(""),
+      { headers: { "Content-Type": "text/event-stream" } });
+    const options = { ...agentSearchOption, apiKey: "test" };
+    const answer = await transport.streamSimple(model, context, { ...options, fetch: async () => sse(events) }).result();
+    expect(answer.stopReason).toBe("length");
+    expect(hostedSearchSteps(answer).map(step => step.item.id)).toEqual(["ws_1", "ws_2", "ws_3"]);
+    const next = normalizeContext({ messages: [...context.messages, answer, { role: "user", content: "继续", timestamp: 2 }] });
+    let input: { type?: string; id?: string }[] = [];
+    await transport.streamSimple(model, next, { ...options, fetch: async (url, init) => {
+      input = (await new Request(url, init).json<{ input: typeof input }>()).input;
+      return sse([{ type: "response.completed", response: { status: "completed", output: [] } }]);
+    } }).result();
+    expect(input.filter(i => i.id).map(i => i.id)).toEqual(["ws_1", "msg_1", "ws_2"]);
+    expect(input.find(i => i.id === "ws_1")).toEqual({ ...first, action: { ...first.action, sources } });
+  });
+
+  it("普通模型请求沿用 Chat Completions，未声明服务端搜索", async () => {
+    let request: Request | undefined;
+    await transport.streamSimple(provider.getModels()[0]!, context, { apiKey: "test", fetch: async (url, init) => {
+      request = new Request(url, init);
+      return Response.json({ error: { message: "stop" } }, { status: 400 });
+    } }).result();
+    expect(request?.url).toBe("https://api.deepseek.com/chat/completions");
+    expect((await request!.json<{ tools: { type: string }[] }>()).tools.map(t => t.type)).toEqual(["function"]);
   });
 });

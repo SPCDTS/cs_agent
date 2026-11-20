@@ -14,7 +14,6 @@ import { requestTrace } from "../requests/trace";
 import { contextSource } from "../requests/context-source";
 import { remoteCredentials } from "../model-credentials";
 import { createWebPageTool } from "../tools/web-page";
-import { createWebSearchTool } from "../tools/web-search";
 import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
 import { memoryDescriptions, memoryParameters } from "../memory/contracts";
 import { formatBeijingTime } from "../memory/time";
@@ -329,7 +328,6 @@ export class SubagentDO extends DurableObject<Env> {
         } catch { console.error({ event: "subagent_progress_failed", id: meta.id }); }
       } })],
       tools: [
-        createWebSearchTool(this.env.DEEPSEEK_API_KEY),
         createWebPageTool(),
         defineTool({ name: "qq_context", description: QQ_CONTEXT_DESCRIPTION, parameters: QQ_CONTEXT_PARAMETERS, replay: "safe",
           execute: async options => ({ output: [{ type: "text", text: await parent().subagentContext(meta.id, options) }] }) }),
