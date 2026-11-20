@@ -1,4 +1,3 @@
-import type { DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/cloudflare';
 import type { Env } from '../env';
 import type { ThreadMcp } from './index';
 import type { McpAuthority } from './access';
@@ -8,7 +7,6 @@ import type { McpChange } from './manage';
 
 export interface McpAdminHost {
   env: Pick<Env, 'REGISTRY'>;
-  database: DurableObjectSqliteDatabase;
   initialize(): Promise<void>;
   prepare(scope: string): Promise<void>;
   open(): Promise<ThreadMcp | undefined>;
@@ -31,15 +29,9 @@ export class McpAdmin implements McpAdminRpc {
   private async reviewer(scope: string): Promise<McpAuthority> {
     return { scope, actor: 'admin:web', owner: true, kind: 'message', generation: await this.host.generation(), replyChannel: 'web' };
   }
-  async mcpAccess(scope: string, server: string): ReturnType<McpAdminRpc['mcpAccess']> {
-    return (await (await this.open(scope)).policy.grant(scope, server)) ?? null;
-  }
   async mcpSetAccess(scope: string, server: string, input: McpGrantInput, expected: string): ReturnType<McpAdminRpc['mcpSetAccess']> {
     const mcp = await this.open(scope), grant = await mcp.setAccess(scope, server, input, expected, await this.reviewer(scope));
     await mcp.refreshAll(); await this.host.publish(); return grant;
-  }
-  async mcpApprovals(scope: string): ReturnType<McpAdminRpc['mcpApprovals']> {
-    return (await this.open(scope)).policy.list(scope);
   }
   async mcpReviewApproval(scope: string, id: string, decision: 'approve' | 'reject'): ReturnType<McpAdminRpc['mcpReviewApproval']> {
     const mcp = await this.open(scope);
@@ -59,10 +51,5 @@ export class McpAdmin implements McpAdminRpc {
   async recordMcpChange(change: McpChange): Promise<void> {
     await this.host.initialize();
     await this.host.audit('mcp_management', { action: change.action, server: change.server, source: 'admin' });
-  }
-  async mcpToolCounts(): Promise<Record<string, number>> {
-    await this.host.initialize();
-    const rows = await this.host.database.all<{ server_id: string; n: number }>('SELECT server_id, COUNT(*) AS n FROM mcp_catalog GROUP BY server_id');
-    return Object.fromEntries(rows.map(row => [row.server_id, row.n]));
   }
 }

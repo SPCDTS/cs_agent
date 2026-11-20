@@ -1,7 +1,7 @@
 import { checkLabel, rulesEditor } from "./github-rules";
 import { connectionPanel } from "./github-connect";
 import { paginatedBlock } from "./pagination";
-import { CHOICES } from "../src/github/choices";
+import { CHOICES } from "../src/github/rules";
 import type { GitHubView } from "./app-contracts";
 import { el } from "./dom";
 import { state, bjTime, notice, fail, loadSources } from "./app";

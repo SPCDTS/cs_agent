@@ -69,7 +69,7 @@ export class MemoryManager {
     const rows = await this.db.all<MemoryRow>(`SELECT * FROM memories WHERE ${parts.join(" AND ")} ORDER BY id DESC LIMIT ? OFFSET ?`,
       ...args, limit + 1, (page - 1) * limit);
     const items = rows.slice(0, limit);
-    return { items, total, page, limit, nextCursor: rows.length > limit ? items.at(-1)?.id ?? null : null };
+    return { items, total, page, limit, nextCursor: rows.length > limit ? items.at(-1)?.id ?? null : null, profile: await this.store.profile() };
   }
   async detail(id: number) {
     return this.db.transaction(async tx=>{

@@ -12,5 +12,5 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["browser/**/*.ts"]
+  "include": ["browser/**/*.ts", "test/chat-navigation-layout.test.ts", "test/topology-layout.test.ts"]
 }

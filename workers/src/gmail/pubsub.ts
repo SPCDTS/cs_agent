@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { Check } from "typebox/value";
+import { readBoundedJson } from "../shared/http-body";
 
 const JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
 const ISSUERS = new Set(["accounts.google.com", "https://accounts.google.com"]);
@@ -54,23 +55,10 @@ export async function verifyPushToken(authorization: string | null, audience: st
 
 /** 请求体只是"有新邮件"的信号；形状不对或超过 64 KiB 返回 undefined。 */
 export async function readPush(request: Request): Promise<{ historyId: string } | undefined> {
-  if (Number(request.headers.get("content-length")) > BODY_LIMIT) return;
-  const reader = request.body?.getReader();
-  if (!reader) return;
-  const chunks: Uint8Array[] = [];
-  let size = 0;
   try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > BODY_LIMIT) return;
-      chunks.push(value);
-    }
-    const body: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(Buffer.concat(chunks)));
+    const body = await readBoundedJson(request, { maxBytes: BODY_LIMIT, requireBody: true, fatal: true });
     if (!Check(Push, body)) return;
     const data: unknown = JSON.parse(Buffer.from(body.message.data, "base64").toString("utf8"));
     return Check(Notification, data) ? { historyId: String(data.historyId) } : undefined;
   } catch { return; }
-  finally { await reader.cancel().catch(() => {}); }
 }

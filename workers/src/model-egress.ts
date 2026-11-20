@@ -1,3 +1,5 @@
+import { BodyLimitError, readBoundedText } from "./shared/http-body";
+
 // 仅供管理员手动诊断：从实际 owner DO 发起固定的公开 GET，不读取模型凭据。
 const TARGETS = [
   { id: "openai-api", url: "https://api.openai.com/cdn-cgi/trace", format: "trace" },
@@ -9,19 +11,11 @@ const MAX_BYTES = 8192;
 const clean = (value: unknown) => typeof value === "string" && /^[A-Za-z0-9.:_-]{1,100}$/.test(value) ? value : undefined;
 
 async function boundedText(response: Response): Promise<string> {
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const decoder = new TextDecoder();
-  let text = "", size = 0;
-  try {
-    for (;;) {
-      const part = await reader.read();
-      if (part.done) return text + decoder.decode();
-      size += part.value.byteLength;
-      if (size > MAX_BYTES) throw new Error("body_limit");
-      text += decoder.decode(part.value, { stream: true });
-    }
-  } finally { await reader.cancel().catch(() => {}); }
+  try { return await readBoundedText(response, { maxBytes: MAX_BYTES, checkContentLength: false }); }
+  catch (error) {
+    if (error instanceof BodyLimitError && error.kind === "too_large") throw new Error("body_limit");
+    throw error;
+  }
 }
 
 export async function modelEgressDiagnostics(fetcher: typeof fetch = fetch) {

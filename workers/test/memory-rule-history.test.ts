@@ -41,7 +41,7 @@ it("real initialize upgrades populated 14a9465 tables, preserving approved rules
   }
   expect(await db.get("SELECT name FROM sqlite_master WHERE name='memory_history_append'")).toBeUndefined();
   const before=await stable(store,rules,rows);
-  await instance.stats(); // actual ThreadDO.initialize, not merely executing the new schema in the test
+  await instance.syncAdminView("owner"); // actual ThreadDO.initialize, not merely executing the new schema in the test
   expect(await db.get("SELECT name FROM sqlite_master WHERE name='memory_history_append'")).toBeTruthy();
   expect(await stable(store,rules,rows)).toEqual(before);
   const input=bundle(rows),all=await snapshot(store);
@@ -60,11 +60,11 @@ it("real initialize upgrades populated 14a9465 tables, preserving approved rules
   }
   expect(await stable(store,rules,rows)).toEqual(before);frozen=await snapshot(store);
  });
- await evictDurableObject(stub);await stub.stats();
+ await evictDurableObject(stub);await stub.syncAdminView("owner");
  await runInDurableObject(stub,async(_instance,state)=>expect(await snapshot(new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner"))).toEqual(frozen));
 });
 it("mixed historical batches roll back maps, receipts, labels and versions together, and retry idempotently",async()=>{
- const stub=env.THREAD.getByName("owner");await stub.stats();
+ const stub=env.THREAD.getByName("owner");await stub.syncAdminView("owner");
  await runInDurableObject(stub,async(_instance,state)=>{
   const store=new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner"),rules=new RuleService(store,"private:10000001");
   const row=(await store.remember({kind:"rule",text:"混合批次已批准规则",author:"dashboard"})).row;await approve(store,rules,row.id);
@@ -89,7 +89,7 @@ it("mixed historical batches roll back maps, receipts, labels and versions toget
  });
 });
 it("historical labels cannot hide current versions, promote historical content or resurrect revoked approval",async()=>{
- const stub=env.THREAD.getByName("owner");await stub.stats();
+ const stub=env.THREAD.getByName("owner");await stub.syncAdminView("owner");
  await runInDurableObject(stub,async(_instance,state)=>{
   const store=new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner"),rules=new RuleService(store,"private:10000001"),db=store.db;
   const row=(await store.remember({kind:"rule",text:"标签攻击合成规则",author:"dashboard"})).row;await approve(store,rules,row.id);
@@ -128,13 +128,13 @@ it("failed real initialization rolls back the forward trigger replacement and su
   before=await snapshot(store);
   const trigger=await db.get("SELECT sql FROM sqlite_master WHERE name='memory_rule_protect_version_insert'");
   await db.exec("CREATE TABLE inbound(message_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,text TEXT NOT NULL,received_at INTEGER NOT NULL,status TEXT NOT NULL); INSERT INTO inbound VALUES ('old','10000001','synthetic',0,'done'); CREATE TRIGGER test_initialize_failure BEFORE UPDATE ON inbound BEGIN SELECT RAISE(ABORT,'synthetic_initialize_failure'); END;");
-  await expect(instance.stats()).rejects.toThrow("synthetic_initialize_failure");
+  await expect(instance.syncAdminView("owner")).rejects.toThrow("synthetic_initialize_failure");
   expect(await snapshot(store)).toEqual(before);
   expect(await db.get("SELECT sql FROM sqlite_master WHERE name='memory_rule_protect_version_insert'")).toEqual(trigger);
   expect(await db.get("SELECT name FROM sqlite_master WHERE name='memory_history_append'")).toBeUndefined();
   await db.exec("DROP TRIGGER test_initialize_failure");
  });
- await evictDurableObject(stub);await stub.stats();
+ await evictDurableObject(stub);await stub.syncAdminView("owner");
  await runInDurableObject(stub,async(_instance,state)=>{
   const db=new DurableObjectSqliteDatabase(state.storage);
   expect(await snapshot(new MemoryStore(db,"owner"))).toEqual(before);

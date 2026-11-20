@@ -1,7 +1,6 @@
 import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import { ROOT_CONVERSATION_ID, type EntryRecord } from "@earendil-works/pi-durable";
 import type { AssetRef } from "../media/repository";
-import type { AuditEvent, EventQuery } from "../thread";
 import { MemoryManager, type MemoryListQuery, type ProfileProposal } from "../memory/management";
 import { MemoryStore, type Profile } from "../memory/store";
 import type { MemoryRow } from "../memory/types";
@@ -12,6 +11,8 @@ import { shortSummary } from "../subagent/activity";
 import { historyEntry, historyCursor, readHistoryCursor } from "../sessions";
 import { ADMIN_PAGE_SIZE } from "../admin/pagination";
 import type { ProjectionStore, ViewInfo } from "./projection";
+export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
+export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
 const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_catalog: "$.status", web_search: "$.result", generate_image: "$.result",
   web_fetch: "$.result", web_import_image: "$.result",
   coding_exec: "$.result", coding_read: "$.result", coding_write: "$.result", coding_edit: "$.result" };

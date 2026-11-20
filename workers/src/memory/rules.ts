@@ -4,6 +4,7 @@ import { MemoryEditorSchema, type MemoryEditor } from "./editor";
 import { MemoryStore, nowSec, sha256 } from "./store";
 import type { MemoryRow } from "./types";
 import { containsSecret } from "./secrets";
+import { isWeb, isWebAdmin, type InboundRow } from "../thread/model";
 
 export const RULE_LIMIT = 24, RULE_BYTES = 8192;
 export const RULE_UNAVAILABLE = '<user-agreements status="unavailable">当前规则状态暂不可用，没有已核验的有效快照；历史规则不得视为当前已确认约定。此降级不是权限 fail-closed，工具与隐私权限仍由宿主独立校验。</user-agreements>';
@@ -146,4 +147,13 @@ export async function renderRules(read:()=>Promise<RuleSnapshot|undefined>, reco
     record({status:"unavailable",reason:error instanceof RuleError?error.code:"read_failed"});
     return RULE_UNAVAILABLE;
   }
+}
+
+/** 宿主已存储的真实入站与当前代际；绝不从正文、subject 或模型参数推导。 */
+export function ruleScopeForInput(ns:string,input:InboundRow|undefined,owners:readonly string[],generation:number):string|undefined {
+  if(ns!=="owner" || !input || input.session_generation!==generation || input.chat_kind!=="private" || !owners.includes(input.chat_id))return;
+  if(isWeb(input)) { if(!isWebAdmin(input))return; }
+  else if(input.kind==="message") {if(input.user_id!==input.chat_id || input.user_id===input.self_id)return;}
+  else if(!["schedule","event","subagent"].includes(input.kind))return;
+  return "private:"+input.chat_id;
 }

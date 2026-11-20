@@ -1,5 +1,6 @@
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { httpsUrl } from "./config";
+import { readBoundedBytes } from "../shared/http-body";
 
 const OAUTH_CODES = ["invalid_state", "unconfigured", "auth_required", "oauth_metadata", "oauth_network", "oauth_token", "server_unavailable"] as const;
 type OAuthCode = typeof OAUTH_CODES[number];
@@ -26,19 +27,7 @@ export function createOAuthFetch(allowedOrigins: () => readonly string[]): Fetch
         // Workers 没有浏览器 cookie jar，也不支持 credentials 字段；上面显式去掉 Cookie。
         const response = await fetch(url.href, { ...init, headers, signal, redirect: "manual" });
         if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); throw new OAuthFailure("oauth_network"); }
-        const chunks: Uint8Array[] = []; let size = 0;
-        const reader = response.body?.getReader();
-        try {
-          if (reader) for (;;) {
-            const part = await reader.read();
-            if (part.done) break;
-            size += part.value.byteLength;
-            if (size > 262_144) throw new OAuthFailure("oauth_network");
-            chunks.push(part.value);
-          }
-        } finally { if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); } }
-        const bytes = new Uint8Array(size); let offset = 0;
-        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+        const bytes = await readBoundedBytes(response, { maxBytes: 262_144, checkContentLength: false });
         return new Response([204, 205, 304].includes(response.status) ? null : bytes, { status: response.status, headers: response.headers });
       };
       return await Promise.race([work(), new Promise<never>((_, reject) => {

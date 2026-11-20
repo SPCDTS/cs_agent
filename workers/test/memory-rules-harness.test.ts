@@ -11,7 +11,7 @@ import {RuleService,renderRules,RULE_UNAVAILABLE} from "../src/memory/rules";
 
 afterEach(()=>reset());
 it("real Workerd Harness refreshes after tool commit, compaction/reopen and explicit read degradation",async()=>{
- const stub=env.THREAD.getByName("owner");await stub.stats();
+ const stub=env.THREAD.getByName("owner");await stub.syncAdminView("owner");
  await runInDurableObject(stub,async(_instance,state)=>{
   const context=BACKGROUND_CONTEXT,store=new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner");
   const rules=new RuleService(store,"private:10000001");
@@ -66,7 +66,7 @@ it("real Workerd Harness refreshes after tool commit, compaction/reopen and expl
 });
 
 it("request checkpoint reopen preserves prepared cutoff; next prepare reads the newly approved version",async()=>{
- const stub=env.THREAD.getByName("owner");await stub.stats();
+ const stub=env.THREAD.getByName("owner");await stub.syncAdminView("owner");
  await runInDurableObject(stub,async(_instance,state)=>{
   const context=BACKGROUND_CONTEXT,store=new MemoryStore(new DurableObjectSqliteDatabase(state.storage),"owner"),rules=new RuleService(store,"private:10000001");
   const row=(await store.remember({kind:"rule",text:"CUTOFF-OLD",author:"dashboard"})).row;

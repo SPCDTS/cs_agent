@@ -13,14 +13,11 @@ import { gcMediaTickets, type AssetRef } from "./media/repository";
 import type { McpAuthority, McpToolSelection } from "./mcp/access";
 import type { SubagentCodingOperation, SubagentCapabilityHost } from "./mcp/delegated";
 import { DurableObject } from "cloudflare:workers";
-import { historyCursor, historyEntry, readHistoryCursor } from "./sessions";
-import { ADMIN_PAGE_SIZE } from "./admin/pagination";
 import { MemoryManager } from "./memory/management";
 import { BACKGROUND_CONTEXT, type Context } from "@earendil-works/chord/context";
 import type { Static } from "@earendil-works/pi-ai";
 import { InboxDoc, LiveDoc, type Harness, type Conversation, type SettledSubmissionRecord, type Submission } from "@earendil-works/pi-durable";
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
-import type { SqliteValue } from "@earendil-works/chord/sqlite";
 import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
 import { threadOpsSettings, effectiveSettings, type Settings, type SettingsSnapshot } from "./settings";
@@ -37,15 +34,15 @@ import type { MemoryInput } from "./memory/types";
 import { searchMemory, type MemoryBinding } from "./memory/tools";
 import type { memoryParameters } from "./memory/contracts";
 import { MemoryExtractor, directComplete, EXTRACT_ALARM_DELAY_MS, type ExtractComplete } from "./memory/extractor";
-import { maintenanceStatus, runMaintenanceJob, type MaintenanceJob, type MaintenanceReport } from "./maintenance";
+import { runMaintenanceJob, type MaintenanceJob, type MaintenanceReport } from "./maintenance";
 import { MCP_CATALOG_SCHEMA } from "./mcp/catalog";
 import type { ScheduleAccess } from "./schedule/tools";
 import { parseScheduleInputKey } from "./schedule/run";
 import type { EventRunStatus } from "./events/model";
 import { SkillCatalog } from "./skills";
 import { importHistory, importThreadKey, parseMessageImport, type MessageImportResult } from "./message-import";
-import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin, type SubagentView } from "./subagent/parent";
-import { subagentName, RETENTION_MS, type SubagentIdentity, type ParentSubagentStatus, type SubagentEntry, type SubagentMeta, type SubagentReport } from "./subagent/model";
+import { ParentSubagents, SUBAGENT_SCHEMA, type SubagentCaller, type SubagentOrigin } from "./subagent/parent";
+import { subagentName, RETENTION_MS, type SubagentIdentity, type ParentSubagentStatus, type SubagentReport } from "./subagent/model";
 import { SandboxTasks, SANDBOX_TASK_SCHEMA, type SandboxTask, type SandboxSubject } from "./sandbox/task-access";
 
 const context = BACKGROUND_CONTEXT;
@@ -54,12 +51,6 @@ type Admission = { completion: Promise<TurnResult> };
 const AGENT_WAKE = "agent_wake";
 const RUNTIME_WAKE = "runtime_wake";
 const RECOVERY_MS = 65_000;
-export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
-export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
-// 结果过滤按事件类型取各自的 JSON 字段；表外的类型不参与结果过滤。
-const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_catalog: "$.status", web_search: "$.result", generate_image: "$.result",
-  web_fetch: "$.result", web_import_image: "$.result",
-  coding_exec: "$.result", coding_read: "$.result", coding_write: "$.result", coding_edit: "$.result" };
 const SETTINGS_TTL_MS = 60_000;
 
 export class ThreadDO extends DurableObject<Env> {
@@ -88,7 +79,7 @@ export class ThreadDO extends DurableObject<Env> {
     prepare: async ns => { await this.initialize(); await this.bindNamespace(ns); }, publish: () => this.projection.flush(),
   });
   private readonly mcpAdmin = new McpAdmin({
-    env: this.env, database: this.database, initialize: () => this.initialize(),
+    env: this.env, initialize: () => this.initialize(),
     prepare: async scope => { await this.initialize(); await this.bindNamespace(scope); }, open: async () => (await this.open()).mcp,
     generation: () => this.sessionGeneration(), currentAuthority: original => this.currentMcpAuthority(original),
     publish: () => this.projection.flush(), audit: (kind, detail) => this.audit(kind, detail),
@@ -546,20 +537,9 @@ export class ThreadDO extends DurableObject<Env> {
     catch (error) { return { text: error instanceof Error ? error.message : "记忆操作失败", error: true }; }
   }
 
-  async subagentList(): Promise<SubagentView[]> {
-    await this.initialize();
-    return this.subagents.list();
-  }
-
   async cancelSubagent(id: string): Promise<ParentSubagentStatus | undefined> {
     await this.initialize();
     return this.subagents.cancel(id);
-  }
-
-  async subagentTranscript(id: string, limit: number): Promise<{ meta: SubagentMeta; entries: SubagentEntry[] } | undefined> {
-    await this.initialize();
-    if (!await this.subagents.exists(id)) return;
-    return this.env.SUBAGENT.getByName(subagentName(await this.namespace(), id)).transcriptSummary(limit);
   }
 
   private async sandboxTaskForInput(input: InboundRow | undefined): Promise<SandboxTask | undefined> {
@@ -795,45 +775,7 @@ export class ThreadDO extends DurableObject<Env> {
     return result;
   }
 
-  /** 只读已提交消息；轮询还会恢复已落库但尚未接纳的网页输入。 */
-  async chatView(thread: string, delta?: { after: number; pending: string[] }) {
-    await this.initialize();
-    await this.bindNamespace(thread);
-    type ChatRow = { id: string; role: "user" | "assistant"; source: "qq" | "web"; name: string; text: string; at: number; status: string | null; turnId: string | null; assets_json: string };
-    const rows = await this.database.all<ChatRow>(`
-      SELECT * FROM (
-        SELECT 'qq:' || m.id AS id, CASE WHEN m.is_self=1 THEN 'assistant' ELSE 'user' END AS role,
-          'qq' AS source,m.nickname AS name,m.text,m.time * 1000 AS at,i.status,'[]' AS assets_json,
-          COALESCE(i.turn_id,(SELECT turn_id FROM outbox WHERE message_id=m.message_id ORDER BY id DESC LIMIT 1)) AS turnId
-          FROM messages m LEFT JOIN inbound i ON i.message_id=(SELECT message_id FROM inbound WHERE platform_message_id=m.message_id AND user_id=m.user_id AND chat_kind || ':' || chat_id=m.scope ORDER BY rowid DESC LIMIT 1)
-        UNION ALL
-        SELECT message_id AS id,'user' AS role,'web' AS source,nickname AS name,text,received_at * 1000 AS at,status,'[]' AS assets_json,turn_id AS turnId
-          FROM inbound WHERE reply_channel='web' AND kind='message'
-        UNION ALL
-        SELECT 'web-out:' || w.id AS id,'assistant' AS role,'web' AS source,'助手' AS name,w.text,w.at,NULL AS status,w.assets_json,i.turn_id AS turnId FROM web_outputs w LEFT JOIN inbound i ON i.message_id=w.input_id
-      ) ${delta ? `WHERE at>=?${delta.pending.length ? ` OR id IN (${delta.pending.map(() => "?").join(",")})` : ""}` : ""} ORDER BY at DESC,id DESC LIMIT 100
-    `, ...(delta ? [delta.after, ...delta.pending] : []));
-    const queued = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued' AND reply_channel='web'"))?.n ?? 0;
-    if (queued && !this.runtimeStarted) await this.requestPump();
-    const active = (await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM inbound WHERE status='queued'"))?.n ?? 0;
-    return { messages: rows.reverse().map(({assets_json,...row})=>({...row,assets:JSON.parse(assets_json) as AssetRef[]})), queued, active, limit: 100, delta: !!delta };
-  }
-
   modelEgressDiagnostics() { return modelEgressDiagnostics(); }
-
-  async stats() {
-    await this.initialize();
-    const rows = await this.database.all<{ status: "queued" | "done" | "failed"; n: number }>("SELECT status, COUNT(*) AS n FROM inbound GROUP BY status");
-    const inbound = { queued: 0, done: 0, failed: 0 };
-    for (const row of rows) inbound[row.status] = row.n;
-    const out = await this.database.get<{ n: number; last: number | null }>("SELECT COUNT(*) AS n, MAX(sent_at) AS last FROM outbox");
-    const active = await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM memories WHERE status = 'active'");
-    const profile = await this.database.get<{ n: number }>("SELECT COALESCE(SUM(length(CAST(text AS BLOB))), 0) AS n FROM profile");
-    const queue = await this.database.get<{ n: number }>("SELECT COUNT(*) AS n FROM extract_queue");
-    return { inbound, outbox: out?.n ?? 0, ...(out?.last ? { lastSentAt: out.last } : {}), subagents: { running: await this.subagents.running() },
-      memory: { active: active?.n ?? 0, profileBytes: profile?.n ?? 0, extractQueue: queue?.n ?? 0 },
-      maintenance: await maintenanceStatus(this.database, this.ctx.storage) };
-  }
 
   private async bindNamespace(ns: string): Promise<void> {
     // RPC 的 ns 不能把不同会话的数据塞进同一个 DO；名称经绑定的 idFromName 复核。
@@ -970,33 +912,6 @@ export class ThreadDO extends DurableObject<Env> {
     return result;
   }
 
-  async events(q: EventQuery): Promise<{ events: AuditEvent[]; next?: number }> {
-    await this.initialize();
-    const where: string[] = [], args: SqliteValue[] = [];
-    if (q.kind) { where.push("kind = ?"); args.push(q.kind); }
-    if (q.result) {
-      where.push(`CASE kind ${Object.keys(EVENT_RESULT_PATH).map(() => "WHEN ? THEN json_extract(detail, ?) = ?").join(" ")} ELSE 1 END`);
-      for (const [kind, path] of Object.entries(EVENT_RESULT_PATH)) args.push(kind, path, q.result);
-    }
-    if (q.before !== undefined) { where.push("rowid < ?"); args.push(q.before); }
-    const limit = Math.min(200, Math.max(1, Math.trunc(q.limit)));
-    const rows = await this.database.all<{ id: number; at: number; kind: string; detail: string }>(
-      `SELECT rowid AS id, at, kind, detail FROM events ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY rowid DESC LIMIT ?`, ...args, limit + 1);
-    const events = rows.slice(0, limit).map((row): AuditEvent => ({ id: row.id, at: row.at, kind: row.kind, detail: JSON.parse(row.detail) }));
-    return rows.length > limit ? { events, next: events[events.length - 1].id } : { events };
-  }
-
-  /** 原始不可变记录仍在 Harness 中；pi.reset 只是新的上下文起点，旧会话可分页浏览。 */
-  async sessionHistory(thread: string, cursor?: string): Promise<{ entries: ReturnType<typeof historyEntry>[]; next?: string; busy: boolean; compacting: boolean }> {
-    await this.initialize();
-    await this.bindNamespace(thread);
-    const { root, harness } = await this.open();
-    const page = await root.entries({}, ADMIN_PAGE_SIZE, readHistoryCursor(cursor), context);
-    const live = await harness.snapshot(LiveDoc, root.id, context);
-    return { entries: page.items.map(entry => historyEntry(entry)), next: historyCursor(page.next),
-      busy: !!live?.run, compacting: (live?.compactions?.length ?? 0) > 0 };
-  }
-
   private async sessionGeneration(): Promise<number> {
     return (await this.database.get<{ generation: number }>("SELECT generation FROM session_state WHERE id=1"))?.generation ?? 0;
   }
@@ -1090,10 +1005,7 @@ export class ThreadDO extends DurableObject<Env> {
       },
     });
   }
-  async workspaceFiles(thread:string){return (await this.workspaceAdmin(thread)).list();}
-  async workspaceReadBlob(thread:string,input:{path:string;revision:string}){return (await this.workspaceAdmin(thread)).download(input);}
   async workspaceResetRuntime(thread:string){return (await this.workspaceAdmin(thread)).resetRuntime();}
-  async workspaceInspectChild(thread:string,input:{childId:string}){return (await this.workspaceAdmin(thread)).inspectChild(input);}
   async workspaceMergeChild(thread:string,input:WorkspaceMergeInput){return (await this.workspaceAdmin(thread)).mergeChild(input);}
 
   private async collectAssets():Promise<void>{
@@ -1125,13 +1037,10 @@ export class ThreadDO extends DurableObject<Env> {
     return this.mcpAuthority(input);
   }
 
-  mcpAccess(...args: Parameters<McpAdmin['mcpAccess']>): ReturnType<McpAdmin['mcpAccess']> { return this.mcpAdmin.mcpAccess(...args); }
   mcpSetAccess(...args: Parameters<McpAdmin['mcpSetAccess']>): ReturnType<McpAdmin['mcpSetAccess']> { return this.mcpAdmin.mcpSetAccess(...args); }
-  mcpApprovals(...args: Parameters<McpAdmin['mcpApprovals']>): ReturnType<McpAdmin['mcpApprovals']> { return this.mcpAdmin.mcpApprovals(...args); }
   mcpReviewApproval(...args: Parameters<McpAdmin['mcpReviewApproval']>): ReturnType<McpAdmin['mcpReviewApproval']> { return this.mcpAdmin.mcpReviewApproval(...args); }
   refreshMcp(...args: Parameters<McpAdmin['refreshMcp']>): ReturnType<McpAdmin['refreshMcp']> { return this.mcpAdmin.refreshMcp(...args); }
   recordMcpChange(...args: Parameters<McpAdmin['recordMcpChange']>): ReturnType<McpAdmin['recordMcpChange']> { return this.mcpAdmin.recordMcpChange(...args); }
-  mcpToolCounts(...args: Parameters<McpAdmin['mcpToolCounts']>): ReturnType<McpAdmin['mcpToolCounts']> { return this.mcpAdmin.mcpToolCounts(...args); }
 
   rulePropose(...args: Parameters<MemoryAdmin['rulePropose']>) { return this.memoryAdmin.rulePropose(...args); }
   ruleConfirm(...args: Parameters<MemoryAdmin['ruleConfirm']>) { return this.memoryAdmin.ruleConfirm(...args); }
@@ -1139,19 +1048,13 @@ export class ThreadDO extends DurableObject<Env> {
   ruleList(...args: Parameters<MemoryAdmin['ruleList']>) { return this.memoryAdmin.ruleList(...args); }
   ruleReceipt(...args: Parameters<MemoryAdmin['ruleReceipt']>) { return this.memoryAdmin.ruleReceipt(...args); }
   saveMemory(...args: Parameters<MemoryAdmin['saveMemory']>) { return this.memoryAdmin.saveMemory(...args); }
-  memoryCandidates(...args: Parameters<MemoryAdmin['memoryCandidates']>) { return this.memoryAdmin.memoryCandidates(...args); }
   decideMemoryCandidate(...args: Parameters<MemoryAdmin['decideMemoryCandidate']>) { return this.memoryAdmin.decideMemoryCandidate(...args); }
-  memoryList(...args: Parameters<MemoryAdmin['memoryList']>): ReturnType<MemoryAdmin['memoryList']> { return this.memoryAdmin.memoryList(...args); }
-  memoryDetail(...args: Parameters<MemoryAdmin['memoryDetail']>): ReturnType<MemoryAdmin['memoryDetail']> { return this.memoryAdmin.memoryDetail(...args); }
   restoreMemory(...args: Parameters<MemoryAdmin['restoreMemory']>): ReturnType<MemoryAdmin['restoreMemory']> { return this.memoryAdmin.restoreMemory(...args); }
-  memoryJobs(...args: Parameters<MemoryAdmin['memoryJobs']>): ReturnType<MemoryAdmin['memoryJobs']> { return this.memoryAdmin.memoryJobs(...args); }
   consolidateMemory(...args: Parameters<MemoryAdmin['consolidateMemory']>): ReturnType<MemoryAdmin['consolidateMemory']> { return this.memoryAdmin.consolidateMemory(...args); }
   rollbackMemory(...args: Parameters<MemoryAdmin['rollbackMemory']>): ReturnType<MemoryAdmin['rollbackMemory']> { return this.memoryAdmin.rollbackMemory(...args); }
-  memoryProposals(...args: Parameters<MemoryAdmin['memoryProposals']>): ReturnType<MemoryAdmin['memoryProposals']> { return this.memoryAdmin.memoryProposals(...args); }
   generateMemoryProposal(...args: Parameters<MemoryAdmin['generateMemoryProposal']>): ReturnType<MemoryAdmin['generateMemoryProposal']> { return this.memoryAdmin.generateMemoryProposal(...args); }
   decideMemoryProposal(...args: Parameters<MemoryAdmin['decideMemoryProposal']>): ReturnType<MemoryAdmin['decideMemoryProposal']> { return this.memoryAdmin.decideMemoryProposal(...args); }
   importMemoryHistory(...args: Parameters<MemoryAdmin['importMemoryHistory']>): ReturnType<MemoryAdmin['importMemoryHistory']> { return this.memoryAdmin.importMemoryHistory(...args); }
-  memoryView(...args: Parameters<MemoryAdmin['memoryView']>): ReturnType<MemoryAdmin['memoryView']> { return this.memoryAdmin.memoryView(...args); }
   forgetMemory(...args: Parameters<MemoryAdmin['forgetMemory']>): ReturnType<MemoryAdmin['forgetMemory']> { return this.memoryAdmin.forgetMemory(...args); }
   writeProfile(...args: Parameters<MemoryAdmin['writeProfile']>): ReturnType<MemoryAdmin['writeProfile']> { return this.memoryAdmin.writeProfile(...args); }
 

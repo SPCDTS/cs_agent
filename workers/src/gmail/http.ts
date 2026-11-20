@@ -1,3 +1,5 @@
+import { BodyLimitError, readBoundedBytes } from "../shared/http-body";
+
 export type GmailErrorKind = "auth" | "permission" | "quota" | "network" | "response" | "timeout" | "upstream" | "not_found" | "input";
 
 /** 只携带固定分类；远端正文、URL 与凭据都不穿过这个边界。 */
@@ -26,23 +28,14 @@ export async function requestJson(url: URL, init: RequestInit = {}, signal?: Abo
   try {
     const response = await fetch(url, { ...init, redirect: "manual", signal: budget });
     if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); throw new GmailError("upstream"); }
-    if (Number(response.headers.get("content-length")) > LIMIT) { await response.body?.cancel(); throw new GmailError("response"); }
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    const reader = response.body?.getReader();
-    if (reader) {
-      try {
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          size += value.byteLength;
-          if (size > LIMIT) throw new GmailError("response");
-          chunks.push(value);
-        }
-      } finally { await reader.cancel().catch(() => {}); }
+    let bytes: Uint8Array;
+    try { bytes = await readBoundedBytes(response, { maxBytes: LIMIT }); }
+    catch (error) {
+      if (error instanceof BodyLimitError) throw new GmailError("response");
+      throw error;
     }
     let body: unknown;
-    try { body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(Buffer.concat(chunks))); }
+    try { body = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes)); }
     catch { if (response.ok) throw new GmailError("response"); }
     return { status: response.status, body };
   } catch (error) {

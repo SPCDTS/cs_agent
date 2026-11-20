@@ -5,7 +5,7 @@ import { getCurrentTools, getCurrentSystemPrompt } from "@earendil-works/pi-ai/u
 import { MODEL_PROVIDERS } from "../src/models";
 import worker from "../src/index";
 import type { AgentReadView } from "../src/requests/view";
-import { input, connect, action, reply } from "./helpers";
+import { input, connect, action, reply, syncedView } from "./helpers";
 const sockets: WebSocket[] = [];
 afterEach(async () => { vi.restoreAllMocks(); sockets.splice(0).forEach(s=>s.close()); await reset(); });
 const owner = () => env.THREAD.getByName("owner");
@@ -35,8 +35,8 @@ describe("web chat continues QQ",()=>{
     expect((await admin("POST",command)).status).toBe(202);
     expect((await admin("POST",command)).status).toBe(202);
     expect((await admin("POST",{...command,text:"不同内容"})).status).toBe(409);
-    await expect.poll(async()=> (await owner().chatView("owner")).messages.filter(m=>m.role==="assistant"&&m.source==="web").length).toBe(1);
-    const page=await owner().chatView("owner");
+    await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).messages.filter(m=>m.role==="assistant"&&m.source==="web").length).toBe(1);
+    const page=await (await syncedView("owner")).chatView("owner");
     expect(page.messages.filter(m=>m.source==="web"&&m.role==="user")).toHaveLength(1);
     const web = page.messages.find(m=>m.id==="web:"+command.requestId)!;
     expect(web.turnId).toMatch(/^turn:/);
@@ -54,7 +54,7 @@ describe("web chat continues QQ",()=>{
     expect((await store.toolDetail(trace.tools[0].id))?.result?.text).toContain('"status":"sent"');
     expect(detail?.related).toHaveLength(2);
     expect((await store.turnTrace("owner",[web.turnId!],trace.cursor)).requests).toEqual([]);
-    const delta=await owner().chatView("owner",{after:Date.now()+1,pending:[web.id]});
+    const delta=await (await syncedView("owner")).chatView("owner",{after:Date.now()+1,pending:[web.id]});
     expect(delta.messages.map(m=>m.id)).toEqual([web.id]);
     expect(delta.messages[0].status).toBe("done");
     expect(contexts.some(t=>t.includes("海风")&&t.includes("网页里继续"))).toBe(true);
@@ -82,8 +82,8 @@ describe("web chat continues QQ",()=>{
     const sent=await action(frames,0,"send_private_msg");
     expect(JSON.stringify(sent.params)).toContain("QQ回复");expect(JSON.stringify(sent.params)).not.toContain("网页回复");
     reply(socket,sent.echo);await qq;
-    await expect.poll(async()=> (await owner().chatView("owner")).queued).toBe(0);
-    expect((await owner().chatView("owner")).messages.filter(m=>m.source==="web"&&m.role==="assistant").map(m=>m.text)).toEqual(["网页回复"]);
+    await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).queued).toBe(0);
+    expect((await (await syncedView("owner")).chatView("owner")).messages.filter(m=>m.source==="web"&&m.role==="assistant").map(m=>m.text)).toEqual(["网页回复"]);
     expect(seen[0]).toContain("不向 QQ 发送");expect(seen[1]).not.toContain("本轮来自已通过管理口令认证的网页管理员");
   });
   it("keeps a web-spawned subagent report on the web channel",async()=>{
@@ -95,7 +95,7 @@ describe("web chat continues QQ",()=>{
       return fauxAssistantMessage(fauxToolCall("subagent",{action:"spawn",task:"测试网页子任务"}),{stopReason:"toolUse"});
     });
     await owner().submitWeb("owner",crypto.randomUUID(),"请在网页派出子任务");
-    await expect.poll(async()=> (await owner().chatView("owner")).messages.some(m=>m.source==="web"&&m.text==="网页子任务已完成"),{timeout:10000}).toBe(true);
+    await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).messages.some(m=>m.source==="web"&&m.text==="网页子任务已完成"),{timeout:10000}).toBe(true);
     await runInDurableObject(owner(),(_instance,state)=>{
       expect(state.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM outbox").one().n).toBe(0);
       expect(state.storage.sql.exec<{reply_channel:string}>("SELECT reply_channel FROM inbound WHERE kind='subagent'").one().reply_channel).toBe("web");
@@ -120,8 +120,8 @@ it("QQ 排队消息经展示副本读取后可原样用于增量查询，并沿�
     const queued=first.messages.filter(message=>message.status==="queued");
     expect(queued).toHaveLength(1);
     expect(queued[0].id).toMatch(/^qq:\d+$/);
-    const source=await sourceThread.chatView(key);
-    expect(queued[0].id).toBe(source.messages.find(message=>message.status==="queued")?.id);
+    const sourceId=await runInDurableObject(sourceThread,(_instance,state)=>state.storage.sql.exec<{id:number}>("SELECT id FROM messages").one().id);
+    expect(queued[0].id).toBe("qq:"+sourceId);
     const params=new URLSearchParams({after:String(Math.max(...first.messages.map(message=>message.at))+1)});
     queued.forEach(message=>params.append("pending",message.id));
     const deltaResponse=await get("?"+params);expect(deltaResponse.status).toBe(200);

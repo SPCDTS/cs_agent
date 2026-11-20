@@ -1,7 +1,7 @@
 import type { GitHubDelivery } from "./model";
 import type { ConnectMark } from "./connect-diagnostics";
 import { GitHubAppClient, GitHubAppError, type GitHubAppSecrets, type GitHubUser, type UserTokens, type AuthorizedRepository } from "./app";
-import { githubAppConfigured } from "./configuration";
+import { githubAppConfigured } from "./app";
 import { TokenVault, randomSecret, sha256 } from "../mcp/crypto";
 
 type Identity = { id: number; login: string; generation: number; cipher: string };

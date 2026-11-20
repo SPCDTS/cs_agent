@@ -1,12 +1,11 @@
 import type { DurableObjectSqliteDatabase } from '@earendil-works/pi-durable/storage/sqlite/cloudflare';
 import type { Env } from '../env';
 import { threadOpsSettings } from '../settings';
-import { MemoryManager, type MemoryListQuery, type ProfileProposal } from './management';
+import { MemoryManager } from './management';
 import { MemoryStore, MemoryStoreError, type Profile } from './store';
 import type { MemoryEditor } from './editor';
 import { ownerIds } from '../policy';
 import { RuleService, RuleError, type RuleProposeInput, type RuleConfirmInput, type RuleRevokeInput } from './rules';
-import type { MemoryRow } from './types';
 import type { ExtractComplete } from './extractor';
 import { parseImport } from './import';
 import { importMemoryHistory } from './history-import';
@@ -50,21 +49,11 @@ export class MemoryAdmin {
   async saveMemory(ns: string, id: number | null, input: MemoryEditor, expectedVersion?: number) {
     return this.publish(new MemoryManager(await this.store(ns)).save(id,input,expectedVersion));
   }
-  async memoryCandidates(ns: string) { return new MemoryManager(await this.store(ns)).candidates(); }
   async decideMemoryCandidate(ns: string,id: number,accept: boolean) {
     return this.publish(new MemoryManager(await this.store(ns)).decideCandidate(id,accept));
   }
-  async memoryList(ns: string, query: MemoryListQuery): ReturnType<MemoryManager["list"]> {
-    return new MemoryManager(await this.store(ns)).list(query);
-  }
-  async memoryDetail(ns: string, id: number): ReturnType<MemoryManager["detail"]> {
-    return new MemoryManager(await this.store(ns)).detail(id);
-  }
   async restoreMemory(ns: string, id: number, options: { expectedVersion: number; versionId?: number }): ReturnType<MemoryManager["restore"]> {
     return this.publish(new MemoryManager(await this.store(ns)).restore(id, options));
-  }
-  async memoryJobs(ns: string): ReturnType<MemoryManager["jobs"]> {
-    return new MemoryManager(await this.store(ns)).jobs();
   }
   async consolidateMemory(ns: string): ReturnType<typeof runConsolidate> {
     const store = await this.store(ns);
@@ -75,9 +64,6 @@ export class MemoryAdmin {
   async rollbackMemory(ns: string, batchId: string): ReturnType<MemoryManager["rollback"]> {
     return this.publish(new MemoryManager(await this.store(ns)).rollback(batchId));
   }
-  async memoryProposals(ns: string, status: ProfileProposal["status"] | "all"): ReturnType<MemoryManager["proposals"]> {
-    return new MemoryManager(await this.store(ns)).proposals(status);
-  }
   async generateMemoryProposal(ns: string): ReturnType<typeof generateProfileProposal> {
     return this.publish(generateProfileProposal(await this.store(ns), this.host.complete, crypto.randomUUID(), true));
   }
@@ -86,13 +72,6 @@ export class MemoryAdmin {
   }
   async importMemoryHistory(ns: string, data: unknown, options: { dryRun?: boolean }): ReturnType<typeof importMemoryHistory> {
     return this.publish(importMemoryHistory(await this.store(ns), data, options));
-  }
-
-  async memoryView(ns: string, query: string): Promise<{ profile: Profile; memories: MemoryRow[] }> {
-    const store = await this.store(ns), q = query.trim(), id = /^#(\d{1,15})$/.exec(q);
-    const memories = id ? [await store.get(Number(id[1]))].filter(row => row !== undefined)
-      : q ? await store.search({ query: q, limit: 20 }) : await store.recent(50);
-    return { profile: await store.profile(), memories };
   }
 
   async forgetMemory(ns: string, id: number, expectedVersion?: number): Promise<{ status: "forgotten" | "not_found" }> {

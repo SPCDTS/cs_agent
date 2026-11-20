@@ -2,8 +2,7 @@ import type { Credential, CredentialStore } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { TokenVault, randomSecret, sha256 } from "./mcp/crypto";
-import { refreshNeedsReauth, type RefreshFailure } from "./codex-refresh-error";
-import { CatalogFailureSchema, catalogFailure, type CatalogFailure } from "./codex-catalog-error";
+import { CatalogFailureSchema, catalogFailure, refreshNeedsReauth, type CatalogFailure, type RefreshFailure } from "./codex-refresh-error";
 import { SqlCredentialStore, type CredentialMeta, type CredentialLease } from "./model-credentials";
 import { CODEX_PROVIDER, LOGIN_TTL_MS, ModelLoginError, PendingSchema, acceptTokens, callbackClient,
   codexOAuth, fetchCatalog, isChatGPTCredential, isNativeCodexCredential, revokeSession, startChatGPTLogin } from "./codex-login";

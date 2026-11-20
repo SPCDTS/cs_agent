@@ -45,7 +45,7 @@ it('环境授权在审批前校验；查询、写操作和子 agent 都不能越
     const tool = catalog.tools.find(t => t.name === raw); if (!tool) throw new Error('missing_tool');
     return toolNames(catalog, tool).nativeName;
   };
-  await env.THREAD.getByName(group).stats();
+  await env.THREAD.getByName(group).syncAdminView(group);
   await runInDurableObject(env.THREAD.getByName(group), async (_instance, state) => {
     const db = new DurableObjectSqliteDatabase(state.storage); await db.exec(MCP_CATALOG_SCHEMA);
     const mcp = new ThreadMcp(db, env, createRegistry(), async () => actor, config, { scope: group });

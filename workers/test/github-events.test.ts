@@ -1,5 +1,5 @@
 import { Errors } from "typebox/value";
-import { ADMIN_BROWSER_CONTRACTS as C } from "../src/admin/app.generated";
+import * as C from "../browser/contracts";
 import { env, reset, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { appInbox, installAppFixture, chosenRepository } from "./github-fixture";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";

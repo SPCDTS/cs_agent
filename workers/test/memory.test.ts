@@ -8,7 +8,7 @@ import { parseMemoryTime } from "../src/memory/time";
 afterEach(async () => { await reset(); });
 const owner = () => env.THREAD.getByName("owner");
 async function useStore<T>(fn: (store: MemoryStore) => Promise<T>) {
-  await owner().stats();
+  await owner().syncAdminView("owner");
   return runInDurableObject(owner(), (_instance, state) => fn(new MemoryStore(new DurableObjectSqliteDatabase(state.storage), "owner")));
 }
 

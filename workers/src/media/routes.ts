@@ -1,5 +1,6 @@
 import { FILE_MAX_BYTES, type AssetKind } from "./model";
 import { MediaRepository, readMediaToken } from "./repository";
+import { readBoundedBytes } from "../shared/http-body";
 
 export type MediaRouteDeps = { bucket: R2Bucket; authenticateAdmin(request: Request): boolean | Promise<boolean> };
 const headers = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox" };
@@ -21,19 +22,7 @@ export async function handleMediaRequest(request: Request, deps: MediaRouteDeps)
       return new Response(bytes, { headers: { ...headers, "Content-Type": ref.mime, "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(ref.name)}` } });
     }
     if (request.method === "POST" && !match[2]) {
-      if (Number(request.headers.get("Content-Length")) > FILE_MAX_BYTES) throw new Error("too_large");
-      const reader = request.body?.getReader(), chunks: Uint8Array[] = [];
-      let size = 0;
-      if (reader) for (;;) {
-        const part = await reader.read();
-        if (part.done) break;
-        size += part.value.byteLength;
-        if (size > FILE_MAX_BYTES) { await reader.cancel(); throw new Error("too_large"); }
-        chunks.push(part.value);
-      }
-      const bytes = new Uint8Array(size);
-      let at = 0;
-      for (const part of chunks) { bytes.set(part, at); at += part.byteLength; }
+      const bytes = await readBoundedBytes(request, { maxBytes: FILE_MAX_BYTES });
       const kind = url.searchParams.get("kind") ?? "file";
       const isKind = (value: string): value is AssetKind => ["image", "file", "audio", "video"].includes(value);
       if (!isKind(kind)) throw new Error("invalid_media_kind");

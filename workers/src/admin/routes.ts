@@ -10,7 +10,7 @@ import { MCP_SERVER_ROUTES } from "./mcp-servers-routes";
 import { accessRoutes } from "./access-routes";
 import { createMemoryAdminRoutes } from "./memory-routes";
 import { createRuleAdminRoutes } from "./rule-routes";
-import { Type, type Static, type TSchema } from "typebox";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { authenticated } from "../auth";
 import type { Env } from "../env";
@@ -18,9 +18,8 @@ import { parseImport } from "../memory/import";
 import { oauthErrorCode } from "../mcp/oauth-fetch";
 import { ModelSelectionSchema, QQ_ID, SettingsSchema, type Settings } from "../settings";
 import { modelLoginErrorCode, TokenResponseSchema } from "../codex-login";
-import { catalogFailure } from "../codex-catalog-error";
-import { refreshFailure } from "../codex-refresh-error";
-import type { EventQuery } from "../thread";
+import { catalogFailure, refreshFailure } from "../codex-refresh-error";
+import type { EventQuery } from "../requests/view";
 import { SkillError, parseSkill } from "../skills";
 import { MESSAGE_IMPORT_MAX_BYTES, importThreadKey, parseMessageImport } from "../message-import";
 import { ownerIds } from "../policy";
@@ -30,6 +29,7 @@ import { ADMIN_APP_JS } from "./app.generated";
 import { CHATGPT_HELPER } from "./chatgpt-helper";
 import { SCHEDULE_IMPORT_MAX_BYTES } from "../schedule/import";
 import type { RequestQuery } from "../requests/types";
+import { API_HEADERS, HttpError, adminJson as json, adminPlain as plain, readAdminBody, readAdminJson } from "./http";
 
 export type AdminContext = { env: Env; request: Request; url: URL; params: Record<string, string> };
 export type AdminRoute = {
@@ -40,7 +40,6 @@ export type AdminRoute = {
   handle(ctx: AdminContext): Promise<Response>;
 };
 
-const API_HEADERS = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" };
 const CSP = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const THREAD_KEY = `owner|group:${QQ_ID}|private:${QQ_ID}`;
 const MEMORY_NS = new RegExp(`^(owner|(?:group|private):${QQ_ID})$`);
@@ -48,12 +47,6 @@ const SERVER = "[A-Za-z][A-Za-z0-9_-]{0,63}";
 const SOURCE = "[A-Za-z][A-Za-z0-9_:-]{0,63}";
 const SKILL = "[^/]{1,128}";
 const strict = { additionalProperties: false } as const;
-
-class HttpError extends Error {
-  constructor(readonly status: number, readonly code: string, readonly extra: object = {}) { super(code); }
-}
-const json = (body: unknown, status = 200) => Response.json(body, { status, headers: API_HEADERS });
-const plain = (body: string, status: number) => new Response(body, { status, headers: { ...API_HEADERS, "Content-Type": "text/plain; charset=utf-8" } });
 
 // Plain result envelopes preserve classification across DO RPC serialization.
 async function githubConnectResponse<T>(operation: "start" | "complete",
@@ -73,33 +66,8 @@ async function githubConnectResponse<T>(operation: "start" | "complete",
 }
 
 const PAIRING_BODY_MAX_BYTES = 64 * 1024;
-async function limitedJson(request: Request, maxBytes: number): Promise<unknown> {
-  if (Number(request.headers.get("content-length")) > maxBytes) {
-    await request.body?.cancel();
-    throw new HttpError(413, "request_too_large");
-  }
-  const reader = request.body?.getReader();
-  if (!reader) throw new HttpError(400, "invalid_json");
-  const decoder = new TextDecoder();
-  let bytes = 0, text = "";
-  try {
-    for (;;) {
-      const part = await reader.read();
-      if (part.done) break;
-      bytes += part.value.byteLength;
-      if (bytes > maxBytes) throw new HttpError(413, "request_too_large");
-      text += decoder.decode(part.value, { stream: true });
-    }
-    return JSON.parse(text + decoder.decode());
-  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
-}
-async function body<T extends TSchema>(request: Request, schema: T, maxBytes?: number): Promise<Static<T>> {
-  let value: unknown;
-  try { value = await (maxBytes === undefined ? request.json() : limitedJson(request, maxBytes)); }
-  catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, "invalid_json"); }
-  if (!Check(schema, value)) throw new HttpError(400, "invalid_request");
-  return value;
-}
+const body = <T extends Parameters<typeof readAdminBody>[1]>(request: Request, schema: T, maxBytes?: number) =>
+  readAdminBody(request, schema, maxBytes === undefined ? undefined : { maxBytes });
 function memoryNs(url: URL): string {
   const ns = url.searchParams.get("ns") ?? "";
   if (!MEMORY_NS.test(ns)) throw new HttpError(400, "invalid_namespace");
@@ -246,12 +214,9 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     return json(detail);
   } },
   { method: "POST", path: new RegExp("^/admin/threads/(?<key>" + THREAD_KEY + ")/chat$"), handle: async ({ env, request, params }) => {
-    const raw = await request.arrayBuffer();
-    if (raw.byteLength > 68000) throw new HttpError(413, "too_large");
-    let value: unknown;
-    try { value = JSON.parse(new TextDecoder().decode(raw)); } catch { throw new HttpError(400, "invalid_json"); }
     const schema = Type.Object({ requestId: Type.String({ pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }), text: Type.String({ minLength: 1, maxLength: 16000 }) }, strict);
-    if (!Check(schema, value) || !value.text.trim()) throw new HttpError(400, "invalid_request");
+    const value = await readAdminBody(request, schema, { maxBytes: 68000, tooLargeCode: "too_large" });
+    if (!value.text.trim()) throw new HttpError(400, "invalid_request");
     const result = await (await knownThread(env, params.key!)).submitWeb(params.key!, value.requestId, value.text.trim());
     if ("error" in result) throw new HttpError(409, result.error!);
     return json(result, 202);
@@ -282,11 +247,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   } },
 
   { method: "POST", path: "/admin/schedules/import", handle: async ({ env, request }) => {
-    if (Number(request.headers.get("Content-Length") ?? 0) > SCHEDULE_IMPORT_MAX_BYTES) throw new HttpError(413, "too_large");
-    const raw = await request.arrayBuffer();
-    if (raw.byteLength > SCHEDULE_IMPORT_MAX_BYTES) throw new HttpError(413, "too_large");
-    let input: unknown;
-    try { input = JSON.parse(new TextDecoder().decode(raw)); } catch { throw new HttpError(400, "invalid_json"); }
+    const input = await readAdminJson(request, { maxBytes: SCHEDULE_IMPORT_MAX_BYTES, tooLargeCode: "too_large" });
     const result = await env.SCHEDULE.getByName("main").importSchedules(input);
     if (result.error) throw new HttpError(result.error === "schedule_conflict" ? 409 : 400, result.error);
     return json(result);
@@ -429,7 +390,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     return json(result);
   } },
   { method: "POST", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/sandbox/reset$`), handle: async ({ env, params }) => {
-    try { return json(await env.SANDBOX.getByName(params.key!).reset()); }
+    try { return json(await env.SANDBOX.getByName(params.key!).resetRuntime()); }
     catch { throw new HttpError(503, "sandbox_unavailable"); }
   } },
 
@@ -437,11 +398,6 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     const ns = memoryNs(url), q = url.searchParams.get("q") ?? "";
     if (q.length > 200) throw new HttpError(400, "invalid_query");
     return json(await threadView(env, ns).memoryView(ns, q));
-  } },
-  { method: "DELETE", path: /^\/admin\/memory\/(?<id>[1-9]\d{0,14})$/, handle: async ({ env, url, params }) => {
-    const ns = memoryNs(url), result = await env.THREAD.getByName(ns).forgetMemory(ns, Number(params.id));
-    if (result.status === "not_found") throw new HttpError(404, "not_found");
-    return json(result);
   } },
   { method: "PUT", path: "/admin/memory/profile", handle: async ({ env, request }) => {
     const { ns, text, expected } = await body(request, Type.Object({ ns: Type.String({ pattern: MEMORY_NS.source }),
@@ -458,11 +414,11 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     return json(await env.THREAD.getByName(data.ns).importMemory(data));
   } },
   { method: "POST", path: "/admin/messages/import", handle: async ({ env, request }) => {
-    if (Number(request.headers.get("Content-Length") ?? 0) > MESSAGE_IMPORT_MAX_BYTES) throw new HttpError(413, "too_large");
-    const raw = await request.arrayBuffer();
-    if (raw.byteLength > MESSAGE_IMPORT_MAX_BYTES) throw new HttpError(413, "too_large");
+    let raw: unknown;
+    try { raw = await readAdminJson(request, { maxBytes: MESSAGE_IMPORT_MAX_BYTES, tooLargeCode: "too_large" }); }
+    catch (error) { if (error instanceof HttpError && error.status === 413) throw error; throw new HttpError(400, "invalid_import"); }
     let data;
-    try { data = parseMessageImport(JSON.parse(new TextDecoder().decode(raw))); }
+    try { data = parseMessageImport(raw); }
     catch { throw new HttpError(400, "invalid_import"); }
     return json(await env.THREAD.getByName(importThreadKey(data.scope, ownerIds(env))).importMessages(data));
   } },

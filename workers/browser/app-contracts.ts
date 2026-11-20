@@ -1,10 +1,17 @@
 import { Type, type Static, type TSchema } from "typebox";
-import { Diagnostic } from "./api";
+import { ModelSelectionSchema, SettingsSchema } from "../src/settings-schema";
+
+export const Diagnostic = Type.Object({
+  kind: Type.String(), status: Type.Optional(Type.Number()), oauthCode: Type.Optional(Type.String()),
+  challenge: Type.Optional(Type.Boolean()), format: Type.Optional(Type.String()),
+  requestId: Type.Optional(Type.String()), cfRay: Type.Optional(Type.String()),
+});
+export type RefreshDiagnostic = Static<typeof Diagnostic>;
 
 const nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null()]);
 const optionalText = Type.Optional(nullable(Type.String()));
 const optionalNumber = Type.Optional(nullable(Type.Number()));
-export const ModelSelection = Type.Object({ provider: Type.String(), id: Type.String(), reasoningEffort: Type.Optional(Type.String()) });
+export const ModelSelection = ModelSelectionSchema;
 export const ThreadStats = Type.Union([
   Type.Object({ error: Type.String() }),
   Type.Object({ inbound: Type.Object({ queued: Type.Number(), done: Type.Number(), failed: Type.Number() }), outbox: Type.Number(),
@@ -13,7 +20,7 @@ export const ThreadStats = Type.Union([
 ]);
 export const Overview = Type.Object({
   commit: Type.String(), bridge: Type.Object({ connected: Type.Boolean(), selfId: optionalText, ignored: Type.Number() }),
-  model: Type.Union([ModelSelection, Type.Object({ unavailable: Type.String() })]),
+  model: Type.Union([Type.Object({ ...ModelSelectionSchema.properties, codexLoggedIn: Type.Optional(Type.Boolean()) }), Type.Object({ unavailable: Type.String() })]),
   threads: Type.Array(Type.Object({ key: Type.String(), name: Type.Optional(Type.String()), kind: Type.String(), stats: ThreadStats,
     sandbox: Type.Optional(Type.String()) })),
   sendRules: Type.Array(Type.Object({ scope: Type.String(), until: Type.Number() })),
@@ -74,9 +81,7 @@ export const Sources = Type.Object({ sources: Type.Array(Type.Object({ id: Type.
   runs: Type.Array(Type.Object({ source: Type.String(), status: Type.String(), deliveredAt: Type.Number(), events: Type.Number(), endedAt: optionalNumber })),
 });
 export type Sources = Static<typeof Sources>;
-const SettingsValue = Type.Object({ groupTrigger: Type.String(), allowGroups: Type.Array(Type.String()), allowUsers: Type.Array(Type.String()),
-  extractNamespaces: Type.Array(Type.String()), model: ModelSelection });
-export const Settings = Type.Object({ value: SettingsValue, defaults: SettingsValue, overrides: nullable(SettingsValue), revision: Type.String(), updatedAt: optionalNumber,
+export const Settings = Type.Object({ value: SettingsSchema, defaults: SettingsSchema, overrides: nullable(SettingsSchema), revision: Type.String(), updatedAt: optionalNumber,
   applied: Type.Optional(Type.Boolean()) });
 export type Settings = Static<typeof Settings>;
 const Account = Type.Object({ id: Type.String(), label: Type.String(), status: Type.String(), catalogFailure: Type.Optional(Diagnostic) });
@@ -95,7 +100,7 @@ export const MemoryRow = Type.Object({ id: Type.Number(), text: Type.String(), k
   since: optionalNumber, until: optionalNumber, due_at: optionalNumber, done_at: optionalNumber, source_scope: optionalText, source_message_id: optionalText, confidence: Type.Optional(Type.Number()), recall_count: Type.Optional(Type.Number()), author: Type.String(), updated_at: Type.Number() });
 export const MemoryView = Type.Object({ profile: Profile, memories: Type.Array(MemoryRow) });
 export type MemoryView = Static<typeof MemoryView>;
-export const MemoryList = Type.Object({ items: Type.Array(MemoryRow), total: Type.Number() });
+export const MemoryList = Type.Object({ items: Type.Array(MemoryRow), total: Type.Number(), profile: Profile });
 export const Skills = Type.Object({ skills: Type.Array(Type.Object({ name: Type.String(), description: Type.String(), files: Type.Array(Type.Unknown()), enabled: Type.Boolean() })) });
 export type Skills = Static<typeof Skills>["skills"];
 export const Skill = Type.Object({ name: Type.String(), body: Type.String(), files: Type.Record(Type.String(), Type.String()) });
@@ -105,16 +110,6 @@ export const UrlResult = Type.Object({ url: Type.String() });
 export const TicketResult = Type.Object({ ticket: Type.String() });
 export const RevokedResult = Type.Object({ revoked: Type.Boolean() });
 export const RefreshResult = Type.Object({ results: Type.Array(Type.Object({ server: Type.String(), status: Type.String(), tools: Type.Number() })) });
-
-export type SourceFields = Record<"intervalS" | "mergeWindowS" | "budgetPerHour" | "requireLabels" | "excludeLabels" | "excludeSenders" | "quietStart" | "quietEnd", HTMLInputElement>;
-export interface AppState {
-  overview: Overview | null; settings: Settings | null; model: ModelView | null;
-  eventKind: string; eventThread: string; before: number | undefined; history: (number | undefined)[]; next: number | undefined;
-  memoryNs: string; memoryQuery: string; memoryView: MemoryView | null; profile: Profile | null;
-  armedDelete: number | null; skills: Skills; armedSkill: string | null; timer: number | undefined; noticeTimer: number | undefined;
-  subagents: Record<string, { list: Subagents | null }>; schedules: Schedule[]; armedSchedule: string | null;
-  sources: Sources | null; editingSource: string | null; sourceForms: Record<string, HTMLDetailsElement>;
-}
 
 export const StopResult = Type.Object({ stopped: Type.Boolean() });
 export const ResetResult = Type.Object({ reset: Type.Boolean() });

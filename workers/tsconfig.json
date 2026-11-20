@@ -13,5 +13,6 @@
     "verbatimModuleSyntax": true,
     "types": ["@cloudflare/vitest-plugin/types"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "worker-configuration.d.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "browser/contracts.ts", "browser/*-contracts.ts", "vitest.config.ts", "worker-configuration.d.ts"],
+  "exclude": ["test/chat-navigation-layout.test.ts", "test/topology-layout.test.ts"]
 }

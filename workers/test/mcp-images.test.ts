@@ -82,7 +82,7 @@ describe("MCP images reach the model through Code Mode", () => {
   });
 
   it("preserves images through parent MCP, child RPC adapter and child QuickJS", async () => {
-    const remote = fakeRemote(); await login(); await env.THREAD.getByName("owner").stats();
+    const remote = fakeRemote(); await login(); await env.THREAD.getByName("owner").syncAdminView("owner");
     remote.state.tools[1] = { name: "notion-fetch", inputSchema: { type: "object" }, outputSchema: schema };
     remote.state.toolResult = { content: [image], structuredContent: metadata };
     await runInDurableObject(env.THREAD.getByName("owner"), async (_instance, state) => {

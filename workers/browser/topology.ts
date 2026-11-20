@@ -1,9 +1,19 @@
 import { $, ApiError, el, fail, readToken, state } from "./app";
 import { cs, sv, chooseChat, chooseSubagent } from "./console";
 import { readApi } from "./api";
-import { AgentTopologySchema, type AgentNode, type AgentTopology } from "./topology-contracts";
-import { topologyFamilies } from "./topology-layout";
+import { AgentTopologySchema, type AgentFamily, type AgentNode, type AgentTopology } from "./topology-contracts";
 import { refreshChatChildren } from "./chat-navigation";
+
+const latest=(family:AgentFamily)=>Math.max(family.parent.lastActiveAt??0,...family.children.map(node=>node.lastActiveAt??0));
+/** 全局只展示最近活动的 5 个子 agent，保留对应父会话与独立活跃的主 agent。 */
+export function topologyFamilies(nodes:readonly AgentNode[]):AgentFamily[]{
+  const children=nodes.filter(node=>node.kind==="subagent")
+    .sort((a,b)=>(b.lastActiveAt??0)-(a.lastActiveAt??0)||a.id.localeCompare(b.id)).slice(0,5);
+  return nodes.filter(node=>node.kind==="thread").map(parent=>({
+    parent,children:children.filter(node=>node.parentId===parent.id),
+  })).filter(family=>family.parent.activity!=="context"||family.children.length>0)
+    .sort((a,b)=>latest(b)-latest(a)||a.parent.id.localeCompare(b.parent.id));
+}
 export const topology:{data:AgentTopology|null;timer:ReturnType<typeof setTimeout>|undefined;version:number;pending:boolean;structure:string;inViewport:boolean}={data:null,timer:undefined,version:0,pending:false,structure:"",inViewport:true};
 export const topologyStatus={active:"执行中",recent:"近期活动",error:"最近异常",context:"父 agent"};
 export const topologyLifecycle={running:"执行中",done:"已完成",failed:"失败",cancelled:"已取消"};

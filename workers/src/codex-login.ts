@@ -3,9 +3,7 @@ import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { randomSecret, sha256 } from "./mcp/crypto";
-import { OAuthRefreshError, refreshFailure, responseDiagnostic, responseOAuthCode } from "./codex-refresh-error";
-
-import { CatalogError, catalogFailure } from "./codex-catalog-error";
+import { CatalogError, catalogFailure, OAuthRefreshError, refreshFailure, responseDiagnostic, responseOAuthCode } from "./codex-refresh-error";
 
 export const CODEX_PROVIDER = "openai-codex";
 export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";

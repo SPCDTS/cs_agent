@@ -7,7 +7,7 @@ import type { JsonObject } from "@earendil-works/pi-durable";
 import worker from "../src/index";
 import { Errors } from "typebox/value";
 import type { RequestsDO } from "../src/requests/do";
-import { ADMIN_BROWSER_CONTRACTS as C } from "../src/admin/app.generated";
+import * as C from "../browser/contracts";
 type HistoryPage = Awaited<ReturnType<RequestsDO["subagentConversation"]>>;
 import * as models from "../src/models";
 import { RegistryDO } from "../src/registry";
@@ -19,7 +19,8 @@ import { MCP_CONFIG } from "../src/mcp/config";
 import { fakeRemote, login } from "./mcp-helpers";
 import type { SubagentView } from "../src/subagent/parent";
 import { responseDescription, shortSummary } from "../src/subagent/activity";
-import { action, connect, input, reply } from "./helpers";
+import { action, connect, input, reply, syncedView } from "./helpers";
+import { workspaceView } from "../src/admin/read-views";
 const TOKEN = "test-admin-only";
 const sockets: WebSocket[] = [];
 afterEach(async () => {
@@ -88,7 +89,7 @@ const rows = <T>(key: string, query: string, ...args: (string | number)[]) => ru
 const spawn = (task: string, extra: JsonObject = {}): Step => ({ tool: "subagent", args: { action: "spawn", task, ...extra } });
 const idOf = (output: string | undefined) => /子 agent ([0-9a-f-]{36})/.exec(output ?? "")?.[1] ?? "";
 async function onlySubagent(key: string): Promise<SubagentView> {
-  const list = await thread(key).subagentList();
+  const list = await (await syncedView(key)).subagentList();
   expect(list).toHaveLength(1);
   return list[0]!;
 }
@@ -236,7 +237,7 @@ describe("subagents as child Durable Objects", () => {
     const sub = await onlySubagent(group);
     await vi.waitFor(async () => {
       await runDurableObjectAlarm(thread(group));
-      expect((await thread(group).subagentList())[0]?.status).toBe("timeout");
+      expect((await (await syncedView(group)).subagentList())[0]?.status).toBe("timeout");
     }, { timeout: 10_000, interval: 300 });
     expect((await child(group, sub.id).status())?.meta.status).toBe("cancelled");
     const [report] = await reports(group, 1);
@@ -249,12 +250,12 @@ describe("subagents as child Durable Objects", () => {
     expect(await thread("owner").submit(input(1, "派四个", 10000001))).toEqual({ status: "done" });
     expect(outputs.parent).toHaveLength(4);
     expect(outputs.parent.every(output => output.startsWith("已派出子 agent"))).toBe(true);
-    const list = await thread("owner").subagentList();
+    const list = await (await syncedView("owner")).subagentList();
     expect(list.filter(sub => sub.deadline === null)).toHaveLength(3);
     const limited = list.find(sub => sub.task === "长任务")!;
     expect(limited.deadline! - limited.createdAt).toBe(7 * 3600_000);
     await runDurableObjectAlarm(thread("owner"));
-    expect((await thread("owner").stats()).subagents).toEqual({ running: 4 });
+    expect((await (await syncedView("owner")).stats()).subagents).toEqual({ running: 4 });
     for (const sub of list) await thread("owner").cancelSubagent(sub.id);
   });
 
@@ -487,7 +488,7 @@ it("子 agent 按资源 ID 路由；省略时继承默认资源，多个子任�
   await reports("owner", 2);
   await thread("owner").submit(input(3, "分配第三个子任务", 10000001));
   await reports("owner", 3);
-  const list = await thread("owner").subagentList();
+  const list = await (await syncedView("owner")).subagentList();
   const ids = await Promise.all(list.map(async sub => (await child("owner", sub.id).status())?.meta.capabilities?.sandboxId));
   expect(ids.sort()).toEqual([current.id, created.id, created.id].sort());
   expect(clone).not.toHaveBeenCalled();
@@ -507,7 +508,10 @@ it.each(["remote", "missing"])("旧子任务绑定的 %s ID 禁止回落到 Clou
   twoModels([spawn("历史任务"), { text: "已派出" }], ["hang"]);
   await thread("owner").submit(input(1, "分配任务", 10000001));
   const sub = await onlySubagent("owner");
-  await rows("owner", "UPDATE subagents SET origin_json=json_set(origin_json, '$.capabilities.sandboxId', ?) WHERE id=?", oldId, sub.id);
+  const [{ origin_json }] = await rows<{ origin_json: string }>("owner", "SELECT origin_json FROM subagents WHERE id=?", sub.id);
+  const patched = JSON.parse(origin_json);
+  patched.capabilities = { ...patched.capabilities, sandboxId: oldId };
+  await rows("owner", "UPDATE subagents SET origin_json=? WHERE id=?", JSON.stringify(patched), sub.id);
   const run = vi.spyOn(SandboxDO.prototype, "run");
   expect(await thread("owner").validateSubagentAccess(sub.id)).toMatchObject({ capabilities: { sandboxId: oldId, coding: false } });
   const result = await runInDurableObject(thread("owner"), async instance => {
@@ -516,7 +520,8 @@ it.each(["remote", "missing"])("旧子任务绑定的 %s ID 禁止回落到 Clou
   });
   expect(result).toBe(true);
   expect(run).not.toHaveBeenCalled();
-  await expect((async () => await thread("owner").workspaceInspectChild("owner", { childId: sub.id }))()).rejects.toThrow("workspace_denied");
+  await thread("owner").syncAdminView("owner");
+  await expect(workspaceView(env, "owner").inspectChild({ childId: sub.id })).rejects.toThrow("workspace_denied");
   await thread("owner").cancelSubagent(sub.id);
 });
 
@@ -559,7 +564,7 @@ it("管理台可分页查看子会话正文与工具记录，且读取不唤醒�
   await thread("owner").syncAdminView("owner");
   await child("owner",sub.id).syncAdminView();
   await thread("group:200000001").syncAdminView("group:200000001");
-  const execution=vi.spyOn(ThreadDO.prototype,"subagentTranscript").mockRejectedValue(new Error("execution_read_forbidden"));
+  const execution=vi.spyOn(ThreadDO.prototype,"syncAdminView").mockRejectedValue(new Error("execution_read_forbidden"));
   const path="/admin/subagents/"+sub.id+"/history?thread=owner";
   expect((await admin("GET",path,null)).status).toBe(401);
   expect((await admin("GET",path+"&cursor=!!!")).status).toBe(400);
@@ -587,6 +592,7 @@ it("管理台可分页查看子会话正文与工具记录，且读取不唤醒�
   expect(calls.every(call=>call.name==="qq_context"&&JSON.parse(call.arguments))).toBe(true);
   expect(messages.filter(message=>message.toolCalls?.length).every(message=>!message.text.includes("qq_context"))).toBe(true);
   expect(execution).not.toHaveBeenCalled();
+  execution.mockRestore();
   await rows("owner","UPDATE subagents SET ended_at=? WHERE id=?",Date.now()-15*86400_000,sub.id);
   await thread("owner").syncAdminView("owner");
   expect((await admin("GET",path)).status).toBe(404);
