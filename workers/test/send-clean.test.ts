@@ -1,11 +1,13 @@
-import { env, reset } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import { env, reset, runInDurableObject } from "cloudflare:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanOutgoing } from "../src/send-clean";
+import { scriptedModel } from "./events-helpers";
 import { action, connect, input, reply } from "./helpers";
 
 const sockets: WebSocket[] = [];
 afterEach(async () => {
   for (const socket of sockets.splice(0)) socket.close();
+  vi.restoreAllMocks();
   await reset();
 });
 
@@ -24,13 +26,26 @@ describe("cleanOutgoing", () => {
     expect(cleanOutgoing(plain)).toBe(plain);
   });
 
-  it("is applied to send_message before the text reaches NapCat", async () => {
+  it("returns citation errors to the model and sends only its corrected QQ reply", async () => {
     const { socket, frames } = await connect(sockets);
-    // 测试配置的 faux 模型把输入原样回显成 send_message。
-    const running = env.THREAD.getByName("owner").submit(input(1, "看[这里](https://a.example/d?utm_source=openai)", 10000001));
+    const seen = scriptedModel([
+      { name: "send_message", args: { text: "见资料。\uE200cite\uE202turn1search0\uE201" } },
+      { name: "send_message", args: { text: "见资料。\uE200cite\uE202turn1search2\uE202turn1search7\uE201" } },
+      { name: "send_message", args: { text: "看[这里](https://a.example/d?utm_source=openai)" } },
+    ]);
+    const thread = env.THREAD.getByName("owner");
+    const running = thread.submit(input(1, "请给出来源", 10000001));
     const frame = await action(frames, 0, "send_private_msg");
-    expect(frame.params.message?.[0]?.data.text).toBe("echo: 看这里（https://a.example/d）");
     reply(socket, frame.echo);
+    expect(frame.params.message?.[0]?.data.text).toBe("看这里（https://a.example/d）");
     expect(await running).toEqual({ status: "done" });
+    expect(seen.outputs).toEqual([
+      expect.stringContaining("请改写 text 后重新调用 send_message"),
+      expect.stringContaining("请改写 text 后重新调用 send_message"),
+      expect.stringContaining('"status":"sent"'),
+    ]);
+    const intents = await runInDurableObject(thread, (_instance, state) =>
+      state.storage.sql.exec("SELECT text FROM outgoing_intents").toArray());
+    expect(intents).toEqual([{ text: "看这里（https://a.example/d）" }]);
   });
 });
