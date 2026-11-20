@@ -1,7 +1,4 @@
-import { createServer, type IncomingMessage } from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { Type, type Static, type TSchema } from 'typebox';
 import { Check } from 'typebox/value';
@@ -9,6 +6,7 @@ import type { ServerConfig } from './domain.ts';
 import { EnvIdSchema, environmentCaller, allowsEnvironment, type EnvironmentCaller } from './environment-access.ts';
 import { EnvironmentStatusSchema } from './environment-status.ts';
 import { Jobs } from './jobs.ts';
+import { createLocalMcpHttpServer, multiBearerAuth } from './mcp-http.ts';
 const uuid = Type.String({ pattern: '^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$' });
 const timeout = Type.Optional(Type.Integer({ minimum: 1000, maximum: 1200000, description: '含排队在内的任务期限，毫秒。默认 120000。' }));
 const shell = { requestId: uuid, script: Type.String({ minLength: 1, maxLength: 65536 }), cwd: Type.Optional(Type.String({ minLength: 1, maxLength: 2048, description: '来宾中的目录，相对路径基于该环境工作目录。' })), timeoutMs: timeout };
@@ -50,41 +48,27 @@ export function toolCatalog(config: ServerConfig, jobs: Jobs): Registered[] {
     });
   return registered;
 }
-async function body(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = []; let size = 0;
-  for await (const data of req) { const bytes = Buffer.from(data); size += bytes.length; if (size > 512 * 1024) throw new Error('body_too_large'); chunks.push(bytes); }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
-}
 export function createMcpHttpServer(config: ServerConfig, jobs: Jobs, env: NodeJS.ProcessEnv = process.env) {
-  const digest = (value: string) => createHash('sha256').update(value).digest();
-  const principals = config.principals.map(p => {
+  const authenticate = multiBearerAuth(config.principals.map(p => {
     const token = env[p.tokenEnv]; if (!token || token.length < 32) throw new Error('missing_or_short_bearer_token');
-    return { id: p.id, digest: digest('Bearer ' + token) };
-  });
-  if (new Set(principals.map(p => p.digest.toString('hex'))).size !== principals.length) throw new Error('duplicate_bearer_token');
+    return { principal: p.id, token };
+  }));
   const catalog = toolCatalog(config, jobs);
-  return createServer(async (req, res) => {
-    const expected = digest(req.headers.authorization ?? '');
-    const principal = principals.find(p => timingSafeEqual(p.digest, expected));
-    if (!principal) { res.writeHead(401, { 'WWW-Authenticate': 'Bearer', 'Cache-Control': 'no-store' }).end(); return; }
-    if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(req.headers.host ?? '') || req.headers.origin !== undefined) { res.writeHead(403).end(); return; }
-    if (req.url !== '/mcp') { res.writeHead(404).end(); return; }
-    if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
-    if (!req.headers['content-type']?.startsWith('application/json')) { res.writeHead(415).end(); return; }
-    const server = new Server({ name: 'cs-agent-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: 'Hyper-V 提供持久工作区，WSB 提供临时隔离环境。按工具说明选择，命令均在来宾执行。先 env_list 选择当前可用环境；长操作通过 env_submit / env_job_get / env_job_cancel 管理。不要把 HTTP 断线视为执行失败。桌面操作请连接 VM 内独立的桌面 MCP 服务。' });
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: catalog.map(t => t.tool) }));
-    server.setRequestHandler(CallToolRequestSchema, async request => {
-      try {
-        const tool = catalog.find(t => t.tool.name === request.params.name); if (!tool) throw new Error('tool_not_found');
-        return await tool.call(request.params.arguments ?? {}, environmentCaller(principal.id, request.params._meta));
-      } catch (error) {
-        const message = error instanceof Error && /^[a-z][a-z0-9_]{0,95}$/.test(error.message) ? error.message : 'operation_failed';
-        return { isError: true, content: [{ type: 'text', text: message }] };
-      }
-    });
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    res.on('close', () => { void transport.close().catch(() => undefined); void server.close().catch(() => undefined); });
-    try { const parsed = await body(req); await server.connect(transport); await transport.handleRequest(req, res, parsed); }
-    catch { if (!res.headersSent) res.writeHead(400).end(); }
+  return createLocalMcpHttpServer({
+    authenticate,
+    createSession(principalId) {
+      const server = new Server({ name: 'cs-agent-windows', version: '1.0.0' }, { capabilities: { tools: {} }, instructions: 'Hyper-V 提供持久工作区，WSB 提供临时隔离环境。按工具说明选择，命令均在来宾执行。先 env_list 选择当前可用环境；长操作通过 env_submit / env_job_get / env_job_cancel 管理。不要把 HTTP 断线视为执行失败。桌面操作请连接 VM 内独立的桌面 MCP 服务。' });
+      server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: catalog.map(t => t.tool) }));
+      server.setRequestHandler(CallToolRequestSchema, async request => {
+        try {
+          const tool = catalog.find(t => t.tool.name === request.params.name); if (!tool) throw new Error('tool_not_found');
+          return await tool.call(request.params.arguments ?? {}, environmentCaller(principalId, request.params._meta));
+        } catch (error) {
+          const message = error instanceof Error && /^[a-z][a-z0-9_]{0,95}$/.test(error.message) ? error.message : 'operation_failed';
+          return { isError: true, content: [{ type: 'text', text: message }] };
+        }
+      });
+      return { server };
+    },
   });
 }

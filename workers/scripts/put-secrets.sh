@@ -19,7 +19,7 @@ read_var() { # read_var <file> <NAME>：取第一处赋值，去掉引号与行�
   printf '%s' "$(printf '%s' "$line" | sed -E 's/[[:space:]]+$//')"
 }
 
-json_escape() { python -c 'import json,sys; print(json.dumps(sys.stdin.read()))' ; }
+json_escape() { node -e 'console.log(JSON.stringify(require("node:fs").readFileSync(0,"utf8")))' ; }
 
 NAPCAT_TOKEN=$(read_var "$env_file" NAPCAT_TOKEN)
 QQ_OWNER=$(read_var "$env_file" QQ_OWNER)
@@ -33,24 +33,21 @@ DEEPSEEK_API_KEY=$(read_var "$env_file" DEEPSEEK_APIKEY || true)
 admin_file="$root/secrets/admin-token.env"
 if [ ! -f "$admin_file" ]; then
   printf 'ADMIN_TOKEN=%s
-' "$(python -c 'import secrets; print(secrets.token_hex(24))')" > "$admin_file"
+' "$(node -e 'console.log(require("node:crypto").randomBytes(24).toString("hex"))')" > "$admin_file"
 fi
 ADMIN_TOKEN=$(read_var "$admin_file" ADMIN_TOKEN)
 
 # 密钥只在本地私有目录生成一次；每次部署重建会导致已有 OAuth 密文无法解密。
 oauth_file="$root/secrets/oauth-store-key.env"
 if [ ! -f "$oauth_file" ]; then
-  (umask 077; python -c 'import secrets,sys; from pathlib import Path; Path(sys.argv[1]).write_text("OAUTH_STORE_KEY=" + secrets.token_hex(32) + "\n", encoding="utf-8")' "$oauth_file")
+  (umask 077; node -e 'require("node:fs").writeFileSync(process.argv[1],"OAUTH_STORE_KEY="+require("node:crypto").randomBytes(32).toString("hex")+"\n","utf8")' "$oauth_file")
 fi
 OAUTH_STORE_KEY=$(read_var "$oauth_file" OAUTH_STORE_KEY)
 [[ "$OAUTH_STORE_KEY" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "OAUTH_STORE_KEY 必须为 32 字节 hex" >&2; exit 1; }
 
 
 # Gmail：桌面客户端 JSON 与 owner 授权后的 token.json（client.json 使用 installed/client_id/client_secret，token.json 使用 refresh_token）。可选，任一缺失就跳过三项
-json_field() { python -c 'import json,sys
-value = json.load(open(sys.argv[1], encoding="utf-8"))
-for key in sys.argv[2:]: value = value[key]
-print(value if isinstance(value, str) else "", end="")' "$@" 2>/dev/null || true; }
+json_field() { node -e 'let v=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); for(const k of process.argv.slice(2)) v=v?.[k]; if(typeof v==="string") process.stdout.write(v);' "$@" 2>/dev/null || true; }
 gmail_dir="$root/secrets/gmail"
 GMAIL_CLIENT_ID=$(json_field "$gmail_dir/client.json" installed client_id)
 GMAIL_CLIENT_SECRET=$(json_field "$gmail_dir/client.json" installed client_secret)
@@ -64,7 +61,7 @@ fi
 CS2_WORKSHOP_AUTHORIZATION=""
 workshop_token_file="$root/secrets/workshop/mcp-token.txt"
 if [ -f "$workshop_token_file" ]; then
-  workshop_token=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text(encoding="utf-8").strip(), end="")' "$workshop_token_file")
+  workshop_token=$(node -e 'process.stdout.write(require("node:fs").readFileSync(process.argv[1],"utf8").trim())' "$workshop_token_file")
   [ -z "$workshop_token" ] || CS2_WORKSHOP_AUTHORIZATION="Bearer $workshop_token"
 fi
 

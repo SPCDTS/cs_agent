@@ -1,6 +1,6 @@
 # 每个任务一个 worktree；新任务使用 codex/ 分支和独立 Workers 依赖。
 param(
-  [Parameter(Mandatory, Position = 0)][ValidateSet("new", "land", "rm", "list")][string]$Action,
+  [Parameter(Mandatory, Position = 0)][ValidateSet("new", "rm", "list")][string]$Action,
   [Parameter(Position = 1)][ValidatePattern('^[a-z0-9][a-z0-9-]*$')][string]$Name
 )
 $ErrorActionPreference = "Stop"
@@ -23,9 +23,6 @@ switch ($Action) {
     if (Test-Path -LiteralPath $path) { throw "已存在：$path" }
     Invoke-Git -C $main worktree add -q -b $branch $path main | Out-Null
     "worktree：$path（分支 $branch）。进入后运行 npm run install:workers，依赖只安装在该 worktree。"
-  }
-  "land" {
-    throw "main 必须通过 GitHub PR 合并。请在功能分支运行 npm run check，推送分支并使用获授权的 GitHub 身份创建 PR；合并后在主工作区 git pull --ff-only。"
   }
   "rm" {
     if (!(Test-Path -LiteralPath $path)) { throw "不存在：$path" }
