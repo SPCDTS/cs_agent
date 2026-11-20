@@ -525,7 +525,8 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
     if (request.actor === child.id) previews.push(tools[0]?.argumentPreview);
   }
   expect(previews.sort()).toEqual(["query: 后续文档", "query: 官方文档"].sort());
-  expect((await display.events({ kind: "web_search", limit: 10 })).events.map(e => e.detail))
+  const audit = await adminJson<{ events: { detail: unknown }[] }>("GET", "/admin/events?thread=owner&kind=web_search");
+  expect(audit.events.map(e => e.detail))
     .toEqual([expect.objectContaining({ result: "ok", provider: "openai-codex", calls: 1 })]);
   expect(parentCalls).toBeGreaterThanOrEqual(2);
   expect(childCalls).toBe(2);
