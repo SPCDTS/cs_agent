@@ -25,10 +25,10 @@ text(await tools.skill_publish({
 
 ## 采集脚本
 
-`workers/scripts/collect_feed.py` 是无第三方依赖的 Python 采集器，可作为 `collect_feed.py` 附件放入早报技能。固定窗口为 `(start, cutoff]`，只有确实翻过起点才标记该订阅源窗口扫描完成，不代表互联网新闻全量覆盖。HLTV RSS 没有在本脚本中假定存在分页接口，订阅源覆盖不到起点时明确返回缺口。
+`workers/scripts/collect_feed.mjs` 是零第三方依赖的 Node 24 采集器，可作为 `collect_feed.mjs` 附件放入早报技能。固定窗口为 `(start, cutoff]`，只有确实翻过起点才标记该订阅源窗口扫描完成，不代表互联网新闻全量覆盖。HLTV RSS 没有在本脚本中假定存在分页接口，订阅源覆盖不到起点时明确返回缺口。
 
 ```sh
-python3 collect_feed.py reddit \
+node collect_feed.mjs reddit \
   --start '2026-11-09T09:00:00+08:00' \
   --cutoff '2026-11-10T09:00:00+08:00' \
   --out /work/out/news-runs/2026-11-10-reddit.json
@@ -50,6 +50,6 @@ python3 collect_feed.py reddit \
 
 ## 验证
 
-`npm run check` 包括真实 Registry RPC 发布、QQ/网页父会话续轮、撤销授权、HTTP/RSS 以及三个 Python 采集器行为回归。Python 只用标准库；Windows 可用 `CS_AGENT_TEST_PYTHON` 指向现有 Python 3.9+。
+`npm run check` 包括真实 Registry RPC 发布、QQ/网页父会话续轮、撤销授权、HTTP/RSS 以及 Node 采集器行为回归（`workers/test/feed-collector.node.mjs`）。
 
 这些测试验证发布与恢复机制，不证明真实站点永久可访问或新闻召回率已改善。发布前还应对同一截止时间的新旧早报做证据对照。

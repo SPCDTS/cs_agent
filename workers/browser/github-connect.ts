@@ -11,7 +11,7 @@ export function connectionPanel(view: GitHubView) {
   const c=view.connections;
   const action=(text:string,run:()=>Promise<unknown>)=>el("button",{type:"button",className:"btn",text,onclick:async()=>{try{await run();await loadSources();}catch(e){fail(e);}}});
   const nodes:HTMLElement[]=[el("p",{text:"独立 GitHub App：先安装并授权仓库，再明确连接当前 GitHub 身份。可以添加多个账号和组织安装；仅向本 owner 私聊投递。"}),
-    el("p",{text:c.configured?"App 已配置；授权自动安全续期，权限交集定期复验。":"App 未完整配置：拒收。请运营方按 docs/GITHUB-APP-DESIGN.md 配置。"}),
+    el("p",{text:c.configured?"App 已配置；授权自动安全续期，权限交集定期复验。":"App 未完整配置：拒收。请运营方按 docs/GITHUB-EVENTS.md 配置。"}),
     el("a",{text:"安装 / 调整 App 仓库授权",href:"https://github.com/apps/"+encodeURIComponent(c.slug)+"/installations/new",rel:"noreferrer"}),
     action("连接 / 添加 GitHub 身份",async()=>{
       const browser=Array.from(crypto.getRandomValues(new Uint8Array(32)),n=>n.toString(16).padStart(2,"0")).join("");

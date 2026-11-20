@@ -1,23 +1,24 @@
-# Windows MCP：持久 VM 与临时 WSB
+# Windows MCP：持久 Hyper-V VM、临时 WSB 与独立桌面服务
 
-`runner/` 运行独立的官方 MCP Streamable HTTP 服务。它将已配置的 Hyper-V Windows VM 作为持久工作区，将 Windows Sandbox（WSB）作为临时隔离环境。服务自身只监听 `127.0.0.1`，通过 HTTPS Tunnel 接入 cs-agent 的通用 MCP 管理页。Cloudflare Container 继续走原生 coding 工具。
+Cloudflare Container 保留原生 `cs.coding` 工具与 R2 工作区；其他远程环境一律通过标准 MCP 接入，不走 R2 同步。`runner/` 提供：
 
-## 两种环境
+1. **宿主机 Windows MCP 服务**：基于官方 MCP Streamable HTTP，将已配置的 **Hyper-V Windows VM** 作为持久工作区，将 **Windows Sandbox（WSB）** 作为临时隔离环境；监听 `127.0.0.1:7791`，经 HTTPS Tunnel 接入管理页。
+2. **VM 内独立桌面 MCP 服务**：运行在 VM 登录用户交互会话内，将原生 `agent-desktop mcp` 的 stdio 转为 Streamable HTTP（监听来宾 `127.0.0.1:7792/mcp`），经 VM 内独立 HTTPS Tunnel 接入，与宿主机后台任务完全解耦。
+
+## 1. 环境与安全边界
 
 | 环境 | 文件与系统状态 | 生命周期 | 工具 |
 | --- | --- | --- | --- |
-| Hyper-V VM | 保存在 VM 磁盘；`.git`、`node_modules`、安装的软件可长期保留 | 管理员预先创建并启动；取消任务只终止任务进程树，不关机、删除或回滚 VM | PowerShell、任务查询/取消；桌面操作使用 VM 内独立 MCP |
-| WSB | 同一 session 中可复用；`C:\AgentWork` 与其他来宾目录全部易失 | 首次提交创建，显式关闭、活跃任务取消、空闲或硬期限销毁 | PowerShell、任务查询/取消、关闭 session |
+| Hyper-V VM（宿主机 MCP） | 持久保存在 VM 磁盘（`.git`、`node_modules`、已安装软件长期保留） | 管理员预建并启动；取消任务仅终止任务进程树，不关机/删除/回滚 VM | `env_list` / `env_status` / `env_submit` / `env_job_get` / `env_job_cancel` |
+| WSB（宿主机 MCP） | 同一 session 内可复用；`C:\AgentWork` 及来宾目录全部易失 | 首次提交创建，显式关闭、活跃任务取消、空闲或硬期限销毁 | 同上 + `env_close` |
+| 独立桌面 MCP（VM 内） | 与同 VM 共享磁盘、应用、焦点与剪贴板 | 随目标用户交互登录启动，注销后不可用 | 原生 `desktop_*` 工具 |
 
-WSB 不映射宿主项目、源码或依赖缓存。仅映射执行所需的只读 Node/guest 程序、当前命令只读输入及窄范围结果输出。旧连接器的 `dataDir`、`D:\sandbox-data` 等已有用户目录不迁移、不读取、不删除。
+- **隔离约定**：WSB 不映射宿主项目、源码或依赖缓存，仅映射只读执行程序、当前命令输入与窄范围输出。Hyper-V 是受信任开发工作区，同 VM 的 shell 与桌面共享账户域；运行不可信代码必须选择 WSB。
+- **调用归属**：模型不能通过参数指定宿主路径、任意 VM GUID 或调用者身份。每条任务幂等键为 `(principal, scope, target, requestId)`，由宿主注入不可伪造的 `params._meta["cs-agent/caller"]`（含 `scope` 与环境授权 `environments`）。
 
-Hyper-V 是受信任的开发工作区，同一 VM 的 shell 和桌面不是相互隔离的安全域。Job Object 管理正常子进程树与超时，不能阻止有权限的脚本另建计划任务或主动篡改同账户数据。运行不可信代码应选择 WSB。
+## 2. 宿主机 Windows MCP 安装与运行
 
-## 准备本机服务
-
-需要 Windows、Node.js 24+。WSB 需要启用 Windows Sandbox 并安装包含 `wsb.exe` 的版本；Hyper-V 需要启用完整 Hyper-V、完成系统要求的重启，并预先准备支持 PowerShell Direct 的 Windows VM。以下步骤不会自动创建或重启 VM。
-
-在仓库根目录运行：
+需要 Windows、Node.js 24+；WSB 需启用 Windows Sandbox（含 `wsb.exe`），Hyper-V 需启用完整 Hyper-V 并预先准备支持 PowerShell Direct 的 Windows VM。
 
 ```powershell
 npm run install:workers
@@ -25,9 +26,7 @@ npm --prefix runner run build
 npm --prefix runner start -- init --state D:\windows-mcp-state
 ```
 
-`init` 只接受新的专用目录，写入带版本标记的状态目录及 `config.json`。不要使用旧连接器的状态或项目目录。状态目录必须位于本机 NTFS（不用网络盘或 FAT），因为 WSB 使用原子硬链接发布启动与终结证据。状态包含命令、输出及执行证据，应放在只有服务账户和管理员可访问的位置。init 会收紧新目录的 Windows ACL 至服务账户和 SYSTEM；管理员仍可取得本机管理权限。不要放宽权限或共享给来宾、其他本机用户。
-
-配置示例：
+`init` 只接受专用新目录（本机 NTFS，WSB 需原子硬链接）并收紧 Windows ACL 至服务账户与 SYSTEM。配置示例（`config.json`）：
 
 ```json
 {
@@ -56,9 +55,8 @@ npm --prefix runner start -- init --state D:\windows-mcp-state
 }
 ```
 
-将示例 VM ID 换成 `Get-VM | Select-Object Name,VMId` 中选定 VM 的 ID。未准备 VM 时可仅保留 WSB 条目。每个 VM 的 `id` 固定对应同一 VM，不能把旧 ID 改绑到另一台 VM；新增 VM 使用新 ID。最多配置一个 WSB 提供方，当前只允许一个活动 WSB session。配置的 `instructions` 会加入该环境工具说明，供 agent 选择。
-
-MCP Token 从进程环境变量读取，至少 32 字符。可在启动窗口生成，随后通过管理页安全填写；不要放入聊天或 Git：
+- 每个 Hyper-V target 的 `id` 永久绑定同一 VM，不得改绑到另一台 VM；最多配置一个 WSB 提供方且同时最多一个活动 session。
+- Token（≥ 32 字符）从环境变量提供，不要写入聊天或 Git：
 
 ```powershell
 $env:WINDOWS_MCP_TOKEN = node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))"
@@ -66,121 +64,70 @@ npm --prefix runner start -- inspect --config D:\windows-mcp-state\config.json
 npm --prefix runner start -- run --config D:\windows-mcp-state\config.json
 ```
 
-重启服务时应提供同一个安全保存的 Token，或在服务和管理页同步轮换。服务账户需要访问 Hyper-V 和自己的凭据文件。MCP HTTP 只接受 Bearer 认证，不接受浏览器 Origin；Token 持有人属于可信客户端，可调用该端点已配置的环境。需要不同信任边界时运行不同配置、端口及 Token 的服务实例。
+### 一次性准备 Hyper-V 来宾
 
-## 一次性准备 Hyper-V 来宾
-
-先在 VM 中创建工作目录，准备来宾管理员账户。由运行本服务的同一 Windows 身份保存凭据；`Export-Clixml` 在 Windows 使用 DPAPI，文件不能换到其他用户或设备直接使用：
+由运行服务的同一 Windows 身份经 DPAPI 保存来宾凭据，再安装受限 S4U 计划任务与 `ProgramData\CsAgentHyperv` 助手（每条命令以挂起创建 → 加入 Job Object → 恢复执行，确保进程树受控）：
 
 ```powershell
 $credential = Get-Credential
 $credential | Export-Clixml -LiteralPath D:\private\vm-credential.xml -Encoding UTF8
 .\runner\scripts\prepare-hyperv.ps1 `
-  -VmId 真实VM的GUID `
+  -VmId <VM GUID> `
   -CredentialPath D:\private\vm-credential.xml `
   -GuestWorkdir C:\AgentWork
 ```
 
-准备脚本在选定来宾的 `ProgramData\CsAgentHyperv` 安装固定 helper，并注册按需启动的 shell 计划任务；不创建新账户或常驻服务。PowerShell Direct 只传递结构化数据，模型脚本由来宾解释，不进入宿主 PowerShell 求值。
+### Cloudflare Tunnel 与管理页接入
 
-shell 使用现有来宾账户的 S4U 限权任务：该账户须允许批处理登录；依赖 Windows 用户凭据的网络访问及加密文件不可用。普通 HTTPS 下载可用，Git/包管理器仍需在来宾内配置各自凭据。每条命令由 Job Object 约束，先暂停创建进程、加入任务对象再恢复，避免子进程提前逃离监督。
+配置 Tunnel 将专用 HTTPS 域名转发到 `http://127.0.0.1:7791`（`httpHostHeader: localhost:7791`），其余路径返回 404。在管理页「模型与接入 → MCP 服务」登记 `https://<域名>/mcp`、选择 Token 认证填写 `WINDOWS_MCP_TOKEN`，检测后勾选全部 6 个 `env_*` 工具并启用（仅 `env_list`、`env_status`、`env_job_get` 标记为只读）。
 
-## 独立桌面服务与迁移
+## 3. Agent 调用流程、群环境授权与账本
 
-桌面操作由 VM 内的独立 HTTP MCP 提供，安装、认证、Tunnel 和会话边界见 [桌面 MCP](DESKTOP-MCP.md)。宿主服务只提供后台任务，不再发现或转发原生桌面工具，也不再提供 screen/input。
+无论配置多少台 VM，工具固定为 6 项（新增 VM 仅改本机 `config.json` 并重启，无需改工具目录或重部署 Worker）：
 
-从旧部署迁移时：先安装并验证独立服务，再在管理页新增桌面 MCP、选择原生工具并启用；确认旧桌面调用已结束后，停止并注销来宾的 `CsAgentHypervMcpV1` 和 `CsAgentHypervDesktopV1`，清理旧桌面进程。删除旧目录 `CsAgentHyperv` 中的 `desktop-mcp-*.ps1`、`desktop-mcp-cli.cjs`、`desktop-mcp.json`、`desktop-mcp-node.txt`、`Desktop.cs` 和 `DesktopContext.exe`，保留后台 jobs 和执行收据。
+| 工具 | 作用 |
+| --- | --- |
+| `env_list` | 列出当前调用方已授权环境的 `envId`、类型、工作目录与说明（不启动或探测实例） |
+| `env_status` | 独立只读探测环境就绪状态、助手构建 SHA-256、队列与账本容量（不等待排队、不启动/关闭实例） |
+| `env_submit` | 指定 `envId`、UUID `requestId`、`script`（可选 `cwd`、`timeoutMs` 默认 120s 上限 20m、`sessionId`），立即返回收据 |
+| `env_job_get` | 按 `envId` + `requestId` 查询当前作用域任务与输出 |
+| `env_job_cancel` | 取消当前作用域任务（活跃 WSB 取消销毁整台实例；Hyper-V 仅终止进程树） |
+| `env_close` | 仅关闭临时 WSB session（持久环境拒绝） |
 
-从宿主 config.json 的 Hyper-V target 移除 `desktopMcp`、`desktopUser`，重新运行 `prepare-hyperv.ps1` 更新后台助手，再重启宿主服务并重新检测、启用剩余后台工具。旧字段会被配置校验拒绝；不保留悄悄失效的兼容开关。新旧 MCP 的工具名与控件引用不同，迁移后重新发现工具并获取窗口快照。
+- **幂等与恢复**：同 `requestId` + 同参数返回原收据，异参拒绝；`unknown` 表示远端可能已执行，必须继续查询或取消，绝不换 ID 重跑。HTTP 断开不取消任务；WSB 具备独立硬期限 guardian。
+- **子 agent 与群环境授权**：owner 私聊可访问全部已配置环境；群默认禁止所有 `env_*`，需在「权限与运维 → MCP 群授权」显式配置允许的 `envId` 列表、工具与成员，并可单独选择是否对授权范围内的环境写操作免逐次审批。子 agent 派出时通过 `mcpTools` 收窄工具并冻结当前环境范围快照。
+- **本机 SQLite 账本**：任务身份、参数指纹、终态与退出摘要长期保留（无硬上限停服）；命令与输出正文存独立 payload 表，完成 7 天后每小时在线清理（已清理返回 `details: "archived"` 并保留 `resultSummary`）。调度器在每次派发前先结算所有已过期排队项，避免前序任务阻塞后续超时回执。
 
-## 接入 Cloudflare
+## 4. VM 内独立桌面 MCP
 
-配置 Cloudflare Tunnel，将一个专用 HTTPS 域名转发到 `http://127.0.0.1:7791`，并设置转发 Host 为 `localhost:7791`。例如 tunnel ingress：
+在 VM 内安装 Node.js 24+ 与 `agent-desktop` 并登录目标用户，准备独立 32 字节十六进制 Token 文件，从宿主机安装：
 
-```yaml
-ingress:
-  - hostname: windows-mcp.example.com
-    service: http://127.0.0.1:7791
-    originRequest:
-      httpHostHeader: localhost:7791
-  - service: http_status:404
+```powershell
+npm --prefix runner run build
+.\runner\scripts\prepare-desktop.ps1 `
+  -VmId '<VM GUID>' `
+  -CredentialPath 'D:\windows-mcp-state\vm-credential.xml' `
+  -GuestWorkdir 'C:\AgentWork' `
+  -DesktopUser 'VMNAME\agent' `
+  -NodePath 'C:\Tools\node.exe' `
+  -Command 'C:\Tools\agent-desktop-win32-x64.exe' `
+  -TokenPath 'D:\windows-mcp-state\desktop-token.txt' `
+  -McpArguments @('mcp', '--headed')
 ```
 
-在 cs-agent 管理页“模型与接入 → MCP 服务”保存 `https://windows-mcp.example.com/mcp`，认证方式选 Token，通过安全输入框填写 `WINDOWS_MCP_TOKEN` 对应值，检测后选择工具并启用。可读工具选择 `env_list`、`env_status` 和 `env_job_get`；submit、cancel、close 都会改变状态，不能列为只读。不再使用 Sandbox 标签、配对码、设备审批或 `REMOTE_SANDBOX_ENABLED`。
+- 安装至来宾 `C:\ProgramData\CsAgentDesktop`（受 ACL 保护），注册登录后以普通权限隐藏运行的 `CsAgentDesktopMcp` 任务，仅监听 `127.0.0.1:7792/mcp`（Bearer Token 鉴权）。
+- 在 VM 内配置 Cloudflare Tunnel，仅转发 `/mcp`（`httpHostHeader: localhost`），其余返回 404；在管理页作为独立 MCP 服务接入，保留原生 `desktop_*` 工具。
+- **运行边界**：每次调用前校验用户 SID、登录会话、默认桌面与显示拓扑（锁屏/安全桌面/断线直接拒绝）；串行执行，最多 16 排队、8 原生客户端（空闲 10 分钟回收），请求上限 512 KiB，结果上限 12 MiB，含排队默认 45 秒超时；已开始后的超时或断线返回 `desktop_mcp_outcome_unknown` 不自动重放。首次读取 `desktop_skills_get`，截图经 `image(block)` 交给模型。
 
-通用 MCP 权限、群授权与逐次审批继续生效。Worker 在调用元数据中附带可信的 `cs-agent/caller`：包括原有 scope，以及 environments（`{kind:"all"}` 或 `{kind:"selected",envIds:[...]}`）。权限来自宿主，不能由模型通过工具参数填写。服务继续将任务及临时会话绑定到认证 principal、scope 和环境 ID；更换工具名不改变任务归属或去重记录。
-
-持有 Bearer Token 的客户端是可信宿主。其他标准 MCP 客户端不传此扩展时，使用 principal 的默认 scope 并可访问该服务配置的全部环境；不要把服务 Token 发给群成员。传了 scope 却缺少环境授权的旧扩展请求会被拒绝，不能默认解释为全部环境。Worker 和 runner 都校验 envId；env_list 只返回当前授权的环境，不泄露其他环境配置。
-
-## Agent 的调用流程
-
-无论配置多少台 VM，工具固定为以下六项，通过 MCP/Code Mode 命名空间暴露。target 的 id 就是 envId；新增 VM 只需增加 target 配置并重启本机服务，无需修改工具目录或重新部署 Worker。
-
-| 工具 | 参数与作用 |
-| --- | --- |
-| env_list | 无参数，列出可用环境的 envId、persistent/sandbox 类型、工作目录与用途；不启动或探测实例 |
-| env_status | envId，查询环境就绪状态、助手版本、队列与账本容量 |
-| env_submit | envId、requestId、script，以及可选 cwd、timeoutMs、sessionId；立即返回任务收据 |
-| env_job_get | envId、requestId，查询当前身份的任务 |
-| env_job_cancel | envId、requestId，取消当前身份的任务 |
-| env_close | envId、sessionId，仅关闭临时 sandbox；持久环境拒绝此操作 |
-
-先调用 `env_list` 选择环境。遇到排队或环境故障时调用 `env_status({envId})`。它直接读取本机任务账本并走独立只读探测，不提交普通命令、不等待排队、不启动或关闭 VM/WSB。返回 `readiness`、助手协议/构建版本、当前作用域的当前任务、排队数、最早入队时间和最近任务错误。`queue.busy` 也涵盖其他作用域的执行或未关闭的 WSB session；其他作用域的 ID、命令和错误不返回。`lastError` 是最近失败或未知任务的历史摘要，可能在环境恢复后仍存在，须结合 `readiness` 和当前任务判断。
-
-Hyper-V 探测通过 PowerShell Direct 检查来宾配置、助手文件和计划任务是否启用，返回 `Helper.exe` 的 SHA-256 作为实际构建版本；旧助手没有版本字段时返回 `hyperv_helper_version_unavailable`，在任务结束后重新运行 `prepare-hyperv.ps1` 更新。WSB 只检查本机 helper 构建和 `wsb list`，返回 guest/启动助手构建的组合 SHA-256。`ready` 表示这些前置检查通过，不承诺下一条命令、凭据的远端权限或 GUI 交互一定成功。
-
-1. 用 `env_submit` 指定 `envId`，生成一个 UUID 作为 `requestId`，提交 `script`，可带来宾 `cwd` 和 `timeoutMs`。默认期限 120 秒，最多 20 分钟，包含排队时间。
-2. 立即得到任务收据，再用同一个 `requestId` 查询。任务完成后读取 stdout、stderr、exitCode。
-3. 首次 WSB 提交不带 `sessionId`，后续命令使用收据里的 ID，文件在该临时会话内共享。丢失首次响应时先查询原 requestId，可找回原 session。
-4. 不需要 WSB 时调用 close，直到确认 `closed`。活跃 WSB 命令取消会关闭整台临时实例；仅取消未派发的排队命令不会影响其他命令。Hyper-V 取消不会关闭 VM。
-
-同一 requestId 搭配相同参数返回原收据；改变参数返回冲突。`unknown` 表示远端可能已执行，应继续查询或取消，不能换 requestId 重跑。HTTP 关闭不会取消任务。服务重启也只检查已有执行证据，不重放未确认命令。WSB 有独立硬期限 guardian，即使 MCP 服务退出仍会销毁到期实例；空闲清理由在线调度器处理。
-
-Hyper-V 的目录共享取决于选中了哪台 VM，与会话/subagent ID 无关。派出子 agent 时，可用通用 `mcpTools: [{"server":"windows","tools":["env_list","env_submit","env_status","env_job_get","env_job_cancel"]}]` 收窄操作；环境范围同时冻结到派出快照，实际调用再与当前授权取交集。选择同一 envId 对应同一磁盘，不自动创建、复制或克隆仓库。子 agent 的任务收据作用域独立，结果通过子报告交回。停止子 agent 或停用 MCP 不等于撤回已发送的远端操作；必要时先在该作用域调用取消，远端期限提供最终收尾。
-
-## 群使用独立环境
-
-为群创建独立 VM、账户和磁盘，在 targets 增加唯一 id（例如 group852），用原 prepare-hyperv.ps1 安装助手，再重启 runner。不要将已有 dev 的 id 改绑到新 VM，也不要清理现有任务账本。
-
-在管理页“权限与运维 → MCP 群授权”选择群和该 MCP 服务，分别配置允许的工具、允许的环境 ID、允许成员和到期时间。owner 私聊可访问该服务全部已配置环境；群没有显式环境范围时，所有 env_* 操作都禁止。群成员和来自群的 owner 本人都必须通过群环境范围检查。
-
-成员环境写操作默认逐次审批；管理员可单独选择“授权范围内直接执行”，它仅影响本群已授权环境的已勾选操作，不改变其他 MCP 写操作的审批。只读工具仍是 env_list、env_status、env_job_get。子 agent 不会因父群后续增加环境而自动扩大权限，撤销授权会阻止后续调用，已经派发的任务仍须按原身份查询或取消。
-
-### 从按 VM 命名的工具迁移
-
-1. 先发布支持环境授权的 Worker。旧 runner 和原工具在此阶段仍可用。
-2. 等待本机任务结束，备份状态目录，更新并重启 runner。targets、凭据、scope 计算和任务账本保持原样；不重新 init。
-3. 在原 MCP 服务执行 probe，重新选择六个 env_* 工具并 activate。连接地址、Token 和 Tunnel 沿用；不要重新 put 或轮换凭据。
-4. 为需要的群显式保存环境 ID 和工具范围。旧 vm_* / wsb_* 工具不再提供，不把旧群工具授权自动扩大为全部环境。旧子 agent 需重新派出以取得新目录和权限快照。
-5. 查询 env_list、env_status，并用一个新 requestId 验证实际执行。旧 requestId 可通过相同 envId、调用身份和原参数查询/去重；结果不确定的旧命令不得换 ID 重发。
-
-更新 runner 后到目录刷新完成前，旧工具调用会失败；部署时将这两步连续完成。本次不需要 VM 内执行助手变更，也不新增 Cloudflare DO、容器、轮询或基础设施。
-
-## 运行与验证
+## 5. 验证与参考
 
 ```powershell
 npm --prefix runner test
 npm --prefix runner run test:wsb
 npm run check
-```
-
-Windows CI 可额外执行以下非交互原生测试，只在临时目录编译并运行本机助手，使用模拟调度器；不会连接真实 VM、启动 WSB、安装服务或操作桌面：
-
-```powershell
+# Windows 本机可选非交互原生助手测试（不连接真实 VM / WSB / 桌面）：
 $env:CS_AGENT_TEST_HYPERV_NATIVE = '1'
 node --test --test-name-pattern="Hyper-V 来宾原生助手|独立桌面身份检查器" runner/test/hyperv.test.ts runner/test/desktop-server.test.ts
 ```
 
-普通测试包含官方 MCP SDK 的真实 HTTP 调用、任务去重/重启/权限隔离和原生后端模拟。`test:wsb` 只操作专用测试状态和自己创建的原生实例，验证多命令、重连、临时文件、取消与销毁；不使用旧持久目录。Hyper-V helper 的语法、编译和模拟测试不能代替真实 VM 验证，部署前应在准备好的 VM 验证持久文件、长命令取消；桌面验证在独立服务进行。
-
-任务主账本是本机 SQLite；来宾只提供有界执行证据。任务身份、参数指纹、终态和退出摘要长期保留；命令与输出正文存入独立的 payload 表，完成七天后在线清理，调度器每小时检查一次。已完成正文清理的回执返回 `details: "archived"`；成功任务保留 `resultSummary`（退出码和是否截断），不把已清理的输出伪装成空字符串。相同 requestId 与参数仍返回原任务，参数改变仍拒绝，清理不会允许旧命令重新执行。没有累计 4096 条或 128 MiB 后停服的硬限制。SQLite 释放页供后续正文复用，轻量去重账本仍随任务数增长。
-
-`env_status` 的 ledger 返回容量观测：jobs 和 retainedPayloads 仅统计当前 principal / scope / target 的任务及仍保留正文数；databaseBytes 和 walBytes 分别是整个 runner 的 SQLite 主文件与 WAL 实际大小；allocatedBytes 是包含 WAL 最新页在内的逻辑分配容量，reusableBytes 是其中可复用空间。数据库/WAL 指标是匿名的全局容量，不含其他作用域的任务信息、凭据或文件路径；databaseBytes + walBytes 可观察文件占用，不能再叠加 allocatedBytes，也不能把文件占用与有效正文大小等同。仅在状态查询时统计，不增加后台轮询或因累计容量停止接单。按需备份整个状态目录，不能通过删除身份账本来回收正文。
-
-旧账本首次启动时事务迁移，并从迁移时间起保留已有终态正文七天；运行中及 unknown 任务不清理。此保留期针对宿主 SQLite，来宾原生执行证据不被后台远程删除。
-
-任务 deadline 包含排队时间。调度器先结算所有未派发且已过期的队列项，再按每台 VM／每个 WSB session 串行派发，因此前一任务运行或结果未知不会挡住后续排队项的超时回执。已派发命令的取消仍必须确认原生进程停止，不能把超时当作无副作用或允许重放的证明。
-
-## 依据
-
-实现沿用 [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) 与官方 TypeScript SDK 1.32.1 的普通工具接口，不依赖 MCP Tasks。Windows 原生机制见 [PowerShell Direct](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/powershell-direct)、[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[Windows Sandbox CLI](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-cli)。
+参考：[MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)、[PowerShell Direct](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/powershell-direct)、[Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、[Windows Sandbox CLI](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-cli)。

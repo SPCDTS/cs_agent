@@ -1,42 +1,90 @@
-# 云端功能与资源预算
+# 云端功能、契约与资源预算
 
-项目已统一运行在 Cloudflare Workers；CS2 Workshop 通过鉴权 Tunnel 接入本机，详见 [本机接入说明](WORKSHOP-LOCAL.md)。主、子 agent 随当前模型使用 DeepSeek 或 OpenAI 的服务端搜索；订阅生图使用已授权的 Codex 账号。详见 [联网与外部工具](../workers/README.md#联网与外部工具)。
+项目统一运行在 Cloudflare Workers；CS2 Workshop 通过鉴权 Tunnel 接入本机（见 [本机接入说明](WORKSHOP-LOCAL.md)）。主、子 agent 随当前模型使用 DeepSeek 或 OpenAI 的服务端搜索；订阅生图使用已授权的 Codex 账号（见 [Workers 开发与管理](../workers/README.md#联网与外部工具)）。管理台界面与接口见 [管理台](ADMIN-CONSOLE.md)。
 
-## 管理入口
-
-登录 /admin/ 后使用以下入口。网页会话继续共享 QQ 上下文，网页输入产生的回复和子任务后续只展示在网页。
-
-| 入口 | 可用能力 |
-| --- | --- |
-| 请求统计 | 输入输出 token、趋势、单次请求消息、工具和上下文明细 |
-| 会话对话 | QQ 会话续聊、附件下载、原始历史分页、压缩、归档重置 |
-| 记忆 | 按状态分页、版本与关联、恢复、整理记录及批次回滚、画像建议采纳或拒绝 |
-| 人设与技能 | 人设修改后新回合生效；从固定工作区版本检查并发布技能 |
-| 授权与发送 | 聊天目录、跨目标发送授权及撤销、发送账本与状态核对 |
-| MCP | 资源读取、按会话授权、工具调用审批 |
-| 工作区 | 持久文件列表与下载、停止容器、查看子任务文件、选择文件合并 |
-| 运维 | 告警、发送限速、维护保留天数和记忆整理开关 |
-
-QQ 的实际发送统一经过 Bridge。离线发送先排队，结果不确定的发送保持 unknown，不能自动盲目重发。跨目标发送授权不会同时授予私聊读取权限。子任务继承派出时允许的 MCP 和技能权限，执行时再次检查当前授权；编码工作区彼此隔离，归档后旧子任务不能继续操作新会话。
-
-媒体和工作区位于私有 R2 的 cs-agent/v1/ 前缀，不修改已有 Magpie 对象。网页下载需要管理员鉴权。文件发送、图片回忆和图片发送均使用已登记的资产引用。
-
-## Cloudflare 预算
+## 1. 资源预算与默认限制
 
 | 项目 | 默认限制 |
 | --- | --- |
-| 容器 | lite；按需启动，空闲 3 分钟后停止，不设置每日时长、单次寿命或全项目并发配额 |
-| 持久工作区 | 每个 50 MiB，单文件 10 MiB；保留当前及最近 2 个版本，分批清理 |
-| 子任务 | 不设固定并发、默认期限或模型调用次数；可显式设置任务截止时间 |
-| Worker CPU | 每次调用 30 秒活跃 CPU；网络等待不计入 |
-| 发送账本 | 最多 5000 条；正文保留 30 天，紧凑回执 90 天 |
-| 请求明细 | 7 天、32 MiB；请求元数据 30 天、最多 20000 条 |
-| 后台任务 | 复用既有 5 分钟和每日维护计划；新增面板按需加载，不增加后台轮询 |
+| 容器 | `lite`；按需启动，空闲 3 分钟后停止，不设每日时长、单次寿命或全局并发配额 |
+| 持久工作区 | 每工作区 50 MiB，单文件 10 MiB，文件/目录各最多 20,000；保留当前 head 及最近 2 个版本，分批 GC |
+| 子任务 | 不设固定并发、默认期限或模型调用次数；显式设置 `timeoutMs` 才按截止时间取消 |
+| Worker CPU | 每次调用 30 秒活跃 CPU（网络等待不计入） |
+| 发送账本 | 最多 5,000 条（离线 queued 上限 200）；正文保留 30 天（单条 4,000 字、10 附件），紧凑回执 90 天 |
+| 通用告警 | 最多 500 条（单条 1,000 字）；列表最多 200，Cron 待通知最多 10 |
+| 请求明细 | 7 天 / 32 MiB；请求元数据 30 天 / 最多 20,000 条 |
+| 后台任务 | 复用既有 5 分钟与每日 UTC 19:30 维护计划；管理面板按需加载，不增加后台轮询 |
 
-工作区只读操作和内容不变的命令不重复写入 R2。账本、告警、工作区垃圾回收均按限额分批执行，不扫描整个存储桶。
+工作区只读操作和未改动文件的命令不重复写 R2；账本、告警、工作区 GC 均按有界批次执行，不扫描整个 R2 桶。价格与规格参考 [Cloudflare Containers](https://developers.cloudflare.com/containers/platform/limits/)、[R2](https://developers.cloudflare.com/r2/pricing/) 与 [Workers](https://developers.cloudflare.com/workers/platform/pricing/)。
 
-容器按实际运行计费，通过按需启动和空闲停止减少闲置消耗。当前规格与价格见 [容器规格](https://developers.cloudflare.com/containers/platform/limits/) 和 [容器价格](https://developers.cloudflare.com/containers/platform/pricing/)；取消运行硬配额后，不再使用固定每日运行时长推算月度用量上限。R2 与 Worker 计费分别见 [R2 价格](https://developers.cloudflare.com/r2/pricing/) 和 [Workers 价格](https://developers.cloudflare.com/workers/platform/pricing/)。
+## 2. 权限、发送账本与运维契约
 
-## 验证
+BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技能 CAS 与运维设置。以下均为内部 RPC，模型只能调用 Thread 安装的工具。
 
-在仓库根运行 `npm run install:workers` 和 `npm run check`。检查覆盖 Workers 类型、workerd 中的业务测试、独立 Node 工具测试与不发布的 Worker 打包。Cloudflare coding 沙箱仍按需构建部署；旧 Node 主服务、旧观测面板及其 Docker Compose 部署已移除。
+### 2.1 发送账本与恢复
+
+- `Bridge.deliver({ id, operationAt, runId, target, text, atUserId?, attachments?, source })`：
+  - `id` 必须稳定（如 `thread/generation/taskId`），同 ID 不同载荷抛 `delivery_payload_conflict`，同 ID 重放直接返回原回执。
+  - `operationAt` 为宿主持久记录的操作创建时间（毫秒），重试不得改成当前时间；新操作只接纳最近 30 天且大于 `minimumOperationAt` 拒绝水位的记录。
+  - `source = { thread, inputId, generation, scope }`；每次 `queued` 实际发帧前调用 `Thread.validateDeliverySource(source, target)` 核验 QQ 回复入口、当前 generation 与跨目标授权。
+  - 状态机：`queued / sending / sent / unknown / failed / rejected`。发帧前同步持久化 `sending`、`echo` 与连接 ID；DO 重建将 `sending` 标为 `unknown`，`unknown` 永不自动重发，迟到回执按 `echo` 结算。
+  - 同一 `runId + group` 串行发送，仅首条携带群 `@`（`unknown` 保留占位，明确失败释放占位）。
+  - `reconcile(id)` 只读查询历史消息，仅当本人、目标、时间窗口、完整消息段、平台消息 ID 与唯一匹配全部成立时才认定 `sent`（附件与含糊匹配维持 `unknown`）。
+  - `cancelQueued({ thread, generation })` 将旧代次 `queued` 置为 `rejected` 并保留墓碑；容量回收前原子推进 `minimumOperationAt` 水位。
+- `chats(refresh?)`（5 分钟缓存）、`getMessage`、`getHistory`（最多 100）、`getForward`、`getFileUrl` / `getImage` / `getRecord` / `getFile` 为只读查询接口；跨目标发送授权**不授予**历史读取权限。
+
+### 2.2 授权、人设、技能与运维配置
+
+- **授权**：Registry 提供 `grantsList`、`grantPut(input, actor)`、`grantRevoke(input, actor)`、`canAccess({ user, cap, scope, target? })`，写授权再次与 `QQ_OWNER` 校验。`caps` 为 `send` / `schedule`；`scopes` 省略表示所有来源，空数组表示无来源；`send` 必须命中 `targets`。撤权立即生效。`createAccessExtension` 仅在 owner 私聊或鉴权 owner 网页开放 `qq_chats` / `auth_*` 工具，子 agent 不继承。
+- **定时撤权**：`ScheduleDO` 的列表与管理写入均核验有效 `schedule` grant（普通授权用户只能管理自己创建的同会话任务）；后台触发前复验 `created_by`，失效即暂停并标 `authorization_revoked`。
+- **人设与技能 CAS**：`persona` / `setPersona` 与 memory profile 独立；`skillRevision` / `skillPublish(input, expected | "absent")` 原子 CAS，所有变更递增独立修订防 ABA。
+- **运维配置与告警**：`opsSettings` / `putOpsSettings` 独立 CAS，管理发送限速（默认每会话 6/分、60/时、全局 30/分、熔断 60/10 分）、告警节流（同类 10 分钟、owner 私聊 30 分钟）及各线程保留期/整理开关。`Thread` 回合结算调用 `recordTurn`；网页来源告警仅在面板展示。5 分钟 Cron 驱动 `Bridge.tick()` 与 `Registry.opsTick()`。
+
+## 3. 私有媒体、持久工作区与 Code Mode 文件环境
+
+所有对象位于私有 R2 绑定 `ASSETS` 的 `cs-agent/v1/` 前缀，作用域完全由宿主授权层决定，模型不能指定任意 R2 key 或 namespace。
+
+### 3.1 私有媒体与 NapCat 图片回传
+
+- `MediaRepository`（`workers/src/media/repository.ts`）固定作用域，单资产上限 10 MiB，`AssetRef = { id, scope, sha256, bytes, mime, name, kind }`（`image | file | audio | video`）。`issueUrl` 签发 5 分钟（最长 600 秒）单对象随机票据 `/media/object?token=...`，不含管理口令或原始 scope；`/admin` 媒体上传下载要求 Bearer 鉴权。
+- 图片、音频、视频可与文字同条发送；普通文件走独立 `upload_group_file / upload_private_file` intent（成功 ACK 允许无 `messageId`）。
+- **NapCat 图片回传**：本机 OneBot 启用 `enableLocalFile2Url: true`，`get_image` 经反向 WebSocket 返回 base64（10 MiB 图片约 13.34 MiB，低于 DO 32 MiB 帧上限）；Bridge 校验大小与格式后写入私有 R2 并返回 `AssetRef`，不把 base64 写入 DO SQL 或日志，也不退回云端抓取 QQ 图片 URL。缺少 base64 时返回 `napcat_image_content_missing`。
+- `createMediaExtension` 注册 `qq_image`、`qq_attachment`、`send_file`，由宿主 `lookupHostMedia` 校验当前 scope 与目标，每次最多解析 5 个附件。
+
+### 3.2 持久工作区与群聊脚本执行
+
+- `SandboxDO` 的 Cloudflare 容器通过原生 `Files` 与 `Container.exec` 操作 `/work`，R2 保存不可变 `WorkspaceManifest` 与按 SHA-256 去重的 blob，DO 保存 `head`、`epoch` 与操作账本。
+- 新产生的 `.git`、`node_modules`、`.wrangler` 留在容器内不计入 R2 源码快照配额（旧 manifest 已追踪的保留兼容）。
+- `run({ operationId, operation })` 串行执行 `exec / read / write / edit`，返回 `committed | failed | unknown`；同 ID 异参拒绝，已执行中断的 `bash` 返回 `unknown` 绝不重跑。成功变更必须完成 checkpoint；`epoch` 递增阻止旧容器提交快照。`resetRuntime()` 仅销毁容器，保留持久工作区。
+- **分页 GC**：`gc` 默认 dry-run，保留 `head`、1 小时传输租约及最近 2 份历史，每批扫描最多 500 对象，由 `SandboxDO` alarm 每 30 秒续跑一批（失败 5 分钟重试），不阻塞批间读写；维护涵盖默认会话工作区、旧子任务工作区与登记表中的显式 Cloudflare 资源。
+- **群聊脚本执行**：主人私聊与群聊的普通消息回合（含所属会话网页续聊）可通过 Code Mode 调用本会话绑定的 Linux 沙箱写脚本、执行、查看 `/work/out/` 产物并用 `send_file` 发出；按会话隔离且不注入 Worker 凭据。事件、定时、其他私聊与未授 coding 的子任务不获此权限。
+- **owner 跨群只读**：Code Mode 的 `read` 支持可选 `workspace: "group:群号"`，仅在 owner 原始任务授权有效时直读目标 `SandboxDO.readBlob`（不启动容器、不写快照）。
+- **工作区技能发布**：`skill_inspect` 与 `skill_publish` 仅作为 Code Mode 嵌套工具在 owner 私聊/网页开放（子 agent 不继承），先固定一次 `workspaceRevision` 与 Registry `expectedRevision` 再双版本 CAS 发布，不向模型暴露 `ADMIN_TOKEN`。
+
+### 3.3 Code Mode 输出文件环境
+
+主会话与有编码权限的子 agent 通过 `Harness.open({ env })` 获得基于 `/work` 持久工作区的 `ExecutionEnv`：
+
+1. 远程 MCP 返回图片且脚本调用 `image(block)`，或输出超长文本时，`pi-durable` 将原始字节写入 `/work/.codemode/<时间戳>-<UUID>-pi-codemode-/...`，经容器快照与 R2 提交后返回保存路径（图片同时直接给模型查看）。
+2. 主 agent 可直接 `send_file({ path })`；子 agent 汇报 `sandboxId` 与路径，由父 agent 通过 `send_file({ sandboxId, path })` 导出（仅限主人拥有的 Cloudflare 资源）。
+3. 受管临时目录在下次创建时最多清理 10 个超过 7 天的目录；长期文件应复制到 `/work/out/`。二进制 RPC 保持 `Uint8Array`；高级句柄与环境 shell 明确返回 `not_supported` / `shell_unavailable`，命令执行仍走 `bash` 工具。
+
+## 4. MCP、子 agent 能力委派与群审批契约
+
+### 4.1 主/子 agent 委派与能力边界
+
+- 主线程复用 `ThreadMcp` 连接、目录缓存与队列；子 agent 只保存派出时的有界目录快照（`catalogJson`），所有 MCP 调用经父线程 `SubagentCapabilityHost`（`workers/src/mcp/delegated.ts`）代理并重核父 scope、当前 `generation`、取消状态与当前授权。目录快照只能缩小权限，不能扩大。
+- 派出参数支持可选 `mcpTools: [{ server, tools }]` 收窄原始工具名，可选 `sandboxId`（来自 `sandbox_list` / `sandbox_create`，省略继承父默认工作区；同一 ID 共享 `/work`）。子 agent 没有发送、鉴权、技能发布、记忆写入或继续派出子 agent 的工具。
+- 宿主在 `tools/call` 的 `params._meta["cs-agent/caller"]` 注入不可伪造的调用 scope（以及 Windows MCP 的授权环境范围 `environments`），模型工具参数不能覆盖。
+- Cloudflare 之外的环境（Windows Hyper-V/WSB、设备命令行、独立桌面）均通过标准 MCP 接入，不走 R2 同步。停止子任务不撤回已提交远端命令，须在有效期间显式取消并等待确认。
+
+### 4.2 资源、图片与统一返回契约
+
+- MCP 资源目录与读取（如 Notion 仅允许 `notion://docs/` 且在远端目录/模板内）复用同一授权与连接队列。图片 blob（PNG/JPEG/WebP/GIF，单张 ≤ 4 MiB、最多 4 张）转原生 image content；其他二进制资源写入当前 scope 私有 R2 并返回 `AssetRef`。
+- Code Mode 中的远端工具与 `mcp_resources_*` 统一返回 `{ content, structuredContent?, isError? }`：程序从 `structuredContent` 读字段，文本块用 `text(block.text)`，图片块用 `image(block)`，禁止将含 Base64 的整对象传给 `text()`。文本输出上限 8,000 字。
+
+### 4.3 群 MCP 授权与逐次审批
+
+- 群默认无任何 MCP 工具。管理员通过 `PUT /admin/mcp/access` 为群配置允许工具（静态 `allow` 子集）、允许资源前缀、允许成员、有效期及（Windows runner 的）环境 ID 列表与环境审批策略。
+- 宿主维护静态 `tools.readOnly` 清单（不信任远端声明）；群成员使用 owner 账号调用非只读工具时产生独立审批（绑定 `actor`、`scope`、`generation`、`replyChannel`、工具契约、参数摘要、`operationId` 与 10 分钟有效期）。
+- 批准接口只接受请求 ID 与动作，严格执行已保存参数；执行中若 DO 中断，下次 `restore` 经 `recoverInterrupted` 将 `executing` 标为 `outcome_unknown` 绝不重放。事件回合不借群授权调用 MCP；网页来源 `replyChannel` 保持 `web`。
