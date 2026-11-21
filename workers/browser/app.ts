@@ -208,7 +208,7 @@ export function renderThreads(threads: C.Overview["threads"]) {
       ]),
       el("td", { className: "mono", text: broken ? "-" : time(s.lastSentAt) }),
       el("td", {}, [
-        el("button", { className: "btn compact", type: "button", text: "事件", onclick: () => { state.eventThread=thread.key;$("ev-thread").value=thread.key;state.before=undefined;state.history=[];consoleView("operations");$("events-section").scrollIntoView(); } }),
+        el("button", { className: "btn compact", type: "button", text: "事件", onclick: () => { state.eventThread=thread.key;$("ev-thread").value=thread.key;state.before=undefined;state.history=[];consoleView("operations","ops-events");$("events-section").scrollIntoView(); } }),
         busy ? el("button", { className: "btn compact danger", type: "button", text: "停止", onclick: () => stop(thread.key) }) : null,
         thread.sandbox === "running" ? el("button", { className: "btn compact danger", type: "button", text: "重置沙箱", onclick: () => resetSandbox(thread.key) }) : null,
       ]),
@@ -649,6 +649,7 @@ export async function editSkill(name: string) {
     const skill = await readApi(C.Skill, "GET", "/admin/skills/" + encodeURIComponent(name));
     $("skill-md").value = skill.body;
     $("skill-meta").textContent = "正在编辑 " + name + (Object.keys(skill.files).length ? " · 附件保留不变" : "");
+    $("skill-editor").open = true;
     $("skill-md").focus();
   } catch (error) { fail(error); }
 }
@@ -738,7 +739,7 @@ export function initApp() {
   $("codex-logout").addEventListener("click", codexLogout);
   $("codex-copy").addEventListener("click", () => { navigator.clipboard.writeText($("codex-ticket").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
   $("skill-save").addEventListener("click", saveSkill);
-  $("skill-new").addEventListener("click", () => { $("skill-md").value = ""; $("skill-meta").textContent = ""; });
+  $("skill-new").addEventListener("click", () => { $("skill-md").value = ""; $("skill-meta").textContent = ""; $("skill-editor").open = true; $("skill-md").focus(); });
   $("mcp-link-copy").addEventListener("click", () => { navigator.clipboard.writeText($("mcp-link-url").value).then(() => notice("已复制"), () => show("复制失败，请手动选择链接", "error")); });
   renderKinds();
   if (readToken()) start(); else showLogin("");
