@@ -45,7 +45,7 @@ import { isWeb, isWebAdmin, targetOf, type InboundRow, type ToolProfile } from '
 
 const context = BACKGROUND_CONTEXT;
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-const WEB_SEND_RULE = "本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只能展示网页。需要回复时调用 send_message，它只把文字和图片资产写入网页，不向 QQ 发送；工作区文件可用 send_file，附件也只展示在网页。不得使用其他工具绕过此回复入口限制。";
+const WEB_SEND_RULE = "回复通道：本轮来自已通过管理口令认证的网页管理员，不是 QQ 消息。与原 QQ 会话共享上下文，但本轮回复只展示在网页，不向 QQ 发送。用户只能看到 send_message 写入的文字/图片和 send_file 发送的工作区附件，不得用其他工具绕过此入口。网页消息同样按纯文本原样显示，不渲染 Markdown 链接，严禁写入内置联网搜索的内部引用标记（如 turn…search、turn…view、cite）。";
 const EVENT_MODEL_TOOLS = new Set(["send_message", "qq_context", "mem_search", "gmail_search", "gmail_read", "web_page", "read_skill",
   "codemode"]);
 
@@ -110,37 +110,23 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
         .catch(() => console.error({ event: "web_search_audit_failed" })));
     } })],
     sections: [
-      section("qq", async (api, callContext) => {
+      // 稳定段靠前以保持前缀缓存命中；动态回合上下文统一放在 codemode 段之后。
+      section("rules", async (api, callContext) => {
         const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
         return (input && isWeb(input) ? WEB_SEND_RULE : SEND_RULE) + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE + "\n" + MEMORY_RULE;
-      }, { tag: false }),
+      }),
       section("delegation", async (api, callContext) => {
         const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
         return input?.kind === "message" ? DELEGATION_RULE : undefined;
-      }, { tag: false }),
+      }),
+      section("persona", async (api, c) => (await host.currentInput(harness, api.read, api.conversationId, c))?.persona_text || undefined),
+      section("skills", () => host.skills.section(), { tag: false }),
       section("memory", () => renderMemorySection(memory), { tag: false }),
       section("memory-rules", (api, callContext) => renderRules(async () => {
         const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
         const scope = ruleScopeForInput(memory.ns, input, ownerIds(host.env), await host.sessionGeneration());
         return scope ? new RuleService(memory, scope).read() : undefined;
       }, detail => console.log({event:"memory_rules_render", ...detail})), { tag:false }),
-      section("turn-identity", async (api, callContext) => {
-        const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
-        if (input && isWeb(input)) return WEB_SEND_RULE + "\n当前会话：" + memory.ns + "；管理员权限只作用于本会话范围。";
-        if (input?.kind === "event") return EVENT_TURN_IDENTITY;
-        if (input?.kind === "subagent") return subagentTurnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name },
-          ownerIds(host.env).includes(input.user_id));
-        return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, ownerIds(host.env).includes(input.user_id)) : undefined;
-      }, { tag: false }),
-      // 模型没有时钟；按本轮输入的到达时刻给时间，同一回合内文本不变，不打散提示缓存。
-      section("time", async (api, callContext) => {
-        const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
-        if (!input) return undefined;
-        const ms = input.received_at < 1e12 ? input.received_at * 1000 : input.received_at;
-        return `现在是北京时间 ${formatBeijingTime(ms)}（${WEEKDAYS[new Date(ms + 8 * 3600_000).getUTCDay()]}）；今天、明天、下周这类相对时间都按北京时间理解。`;
-      }, { tag: false }),
-      section("skills", () => host.skills.section(), { tag: false }),
-      section("persona", async (api,c) => (await host.currentInput(harness,api.read,api.conversationId,c))?.persona_text || undefined, { tag: false }),
     ],
     tools: [...createMemoryTools(memory, async (api, callContext) => {
       const input = await host.currentInput(harness, api, api.conversationId, callContext);
@@ -160,11 +146,14 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     }),
     host.skills.tool(),
     defineTool({
-      name: "send_message", description: "向用户发送消息。用户只能看到 text 中的纯文本。禁止写入内部引用编号或其他需要客户端解析的标记。",
+      name: "send_message", description: "向用户发送消息。用户只能看到 text 中的纯文本与 images 中的图片，禁止写入任何需要客户端解析的内部标记。",
       parameters: Type.Object({
-        text: Type.String({ maxLength: 4000 }),
+        text: Type.String({
+          maxLength: 4000,
+          description: "直接展示给用户的纯文本正文（配 images 时可留空）。不用 Markdown 链接；严禁写入内置联网搜索的内部引用标记（如 turn…search、turn…view、cite 等）；确需给出处时只写简短域名或纯文本 URL。",
+        }),
         images: Type.Optional(Type.Array(Type.String({ pattern: "^[a-f0-9]{64}$" }), {
-          maxItems: 5, description: "当前会话已有的私有图片资产 ID，最多 5 个。",
+          maxItems: 5, description: "当前会话已有的私有图片资产 ID，最多 5 个；不能传 URL 或文件路径。",
         })),
         target: Type.Optional(Type.String({
           pattern: "^qq:(group|private):[1-9][0-9]{0,19}$",
@@ -267,10 +256,6 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     deliver: async (ref, api, c) => { const input = await host.currentInput(harness, api, api.conversationId, c); if(!input)throw new Error("media_scope_denied"); return host.deliver(input,"",String(api.taskId),{attachments:[ref]}); },
     record: (kind, detail) => host.audit(kind, detail),
   }));
-  if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
-    registry.install(createScheduleExtension(host.env, memory.ns as ScheduleConversation, async (api, callContext) =>
-      host.scheduleAccess(await host.currentInput(harness, api, api.conversationId, callContext))));
-  }
   const mcp = new ThreadMcp(host.database, host.env, registry, async (api, callContext) => {
     const input = await host.currentInput(harness, api, api.conversationId, callContext);
     return host.mcpAuthority(input);
@@ -286,6 +271,30 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     allowed: async (api, callContext) => await codingAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
     namespaces: () => mcp.namespaces(),
   });
+  if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
+    registry.install(createScheduleExtension(host.env, memory.ns as ScheduleConversation, async (api, callContext) =>
+      host.scheduleAccess(await host.currentInput(harness, api, api.conversationId, callContext))));
+  }
+  // 每回合变化的身份与时间置于系统提示末尾：既避免打散前序大段规则和 codemode 的前缀缓存，又靠近当前消息。
+  registry.install(defineExtension({
+    name: "cs-turn-context",
+    sections: [
+      section("turn-identity", async (api, callContext) => {
+        const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
+        if (input && isWeb(input)) return "本回合来自管理台网页入口，当前会话：" + memory.ns + "；管理员权限只作用于本会话范围。";
+        if (input?.kind === "event") return EVENT_TURN_IDENTITY;
+        if (input?.kind === "subagent") return subagentTurnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name },
+          ownerIds(host.env).includes(input.user_id));
+        return input ? turnIdentity({ userId: input.user_id, nickname: input.nickname, target: targetOf(input), scopeName: input.scope_name }, ownerIds(host.env).includes(input.user_id)) : undefined;
+      }),
+      section("time", async (api, callContext) => {
+        const input = await host.currentInput(harness, api.read, api.conversationId, callContext);
+        if (!input) return undefined;
+        const ms = input.received_at < 1e12 ? input.received_at * 1000 : input.received_at;
+        return `现在是北京时间 ${formatBeijingTime(ms)}（${WEEKDAYS[new Date(ms + 8 * 3600_000).getUTCDay()]}）；今天、明天、下周等相对时间按北京时间理解。`;
+      }),
+    ],
+  }));
   // Codex 默认先走 WebSocket 并按会话缓存连接；DO 里的连接跨不了请求，固定用 SSE。其他 provider 忽略这一项。
   const harness = await Harness.open(storage, { models, registry, settings: { stream: { transport: "sse" } },
     env: target => workspaceExecutionEnv({ id: "cloudflare:" + host.env.SANDBOX.idFromName(memory.ns), cwd: target.cwd,

@@ -17,6 +17,7 @@ import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
 import { memoryDescriptions, memoryParameters } from "../memory/contracts";
 import { formatBeijingTime } from "../memory/time";
 import { PI_SAFETY_RULE, WEB_RULE } from "../prompt";
+import { stripProviderMarkup } from "../send-clean";
 import { createSubagentCapabilityHost, installDelegatedCapabilities } from "../mcp/delegated";
 import { RETENTION_MS, subagentName, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
 import { responseDescription, shortSummary, subagentActivity, SUBAGENT_PROGRESS_RULE } from "./activity";
@@ -256,8 +257,8 @@ export class SubagentDO extends DurableObject<Env> {
 
   private async answerText(harness: Harness, answer: EntryId): Promise<string> {
     const entry = await harness.commit(tx => tx.entry(answer), context);
-    return (entry?.model ?? []).flatMap(message => message.role === "assistant"
-      ? message.content.flatMap(block => block.type === "text" ? [block.text] : []) : []).join("").trim().replace(/^【结果】\s*/u, "");
+    return stripProviderMarkup((entry?.model ?? []).flatMap(message => message.role === "assistant"
+      ? message.content.flatMap(block => block.type === "text" ? [block.text] : []) : []).join("")).trim().replace(/^【结果】\s*/u, "");
   }
 
   private async report(meta: SubagentMeta, row: InboxRow): Promise<void> {
@@ -296,11 +297,7 @@ export class SubagentDO extends DurableObject<Env> {
     registry.install(defineExtension({
       name: "cs-subagent",
       sections: [
-        section("subagent", () => SUBAGENT_RULE + "\n" + SUBAGENT_PROGRESS_RULE + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE, { tag: false }),
-        section("time", async () => {
-          const row = await this.database.get<{ received_at: number }>("SELECT received_at FROM inbox WHERE status = 'running' ORDER BY received_at DESC LIMIT 1");
-          return row ? `现在是北京时间 ${formatBeijingTime(row.received_at)}。` : undefined;
-        }, { tag: false }),
+        section("subagent", () => SUBAGENT_RULE + "\n" + SUBAGENT_PROGRESS_RULE + "\n" + WEB_RULE + "\n" + PI_SAFETY_RULE),
       ],
       hooks: [hook(GenerationTask, { afterResponse: async message => {
         const progress = responseDescription(message, Date.now());
@@ -327,6 +324,13 @@ export class SubagentDO extends DurableObject<Env> {
     const host = createSubagentCapabilityHost(parent());
     // 运行时也可能为已完成任务的历史查看而打开。实际权限由父线程逐次复核。
     const delegated = installDelegatedCapabilities(registry, host, meta.id, meta.capabilities ?? {});
+    registry.install(defineExtension({
+      name: "cs-subagent-turn",
+      sections: [section("time", async () => {
+        const row = await this.database.get<{ received_at: number }>("SELECT received_at FROM inbox WHERE status = 'running' ORDER BY received_at DESC LIMIT 1");
+        return row ? `现在是北京时间 ${formatBeijingTime(row.received_at)}。` : undefined;
+      })],
+    }));
     // 与 ThreadDO 相同：DO 里的连接跨不了请求，Codex 固定走 SSE。
     const storage = await openDurableObjectSqliteStorage(this.observedStorage, { prefix: "pi_" });
     this.projection.install();

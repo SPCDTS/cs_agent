@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { containsSecret } from "../memory/secrets";
+import { stripProviderMarkup } from "../send-clean";
 import type { SubagentMeta, SubagentStatus } from "./model";
 
 export type AgentDescription = { kind: "task" | "progress" | "result"; text: string; updatedAt: number };
@@ -10,8 +11,9 @@ export type SubagentActivity = {
 
 /** 摘要只来自显式短句；旧任务退回第一句，不为展示额外请求模型。 */
 export function shortSummary(text: string): string {
-  if (containsSecret(text)) return "任务简介含敏感信息，已隐藏";
-  const first = text.trim().split(/[\r\n。！？]/u, 1)[0]?.replace(/\s+/gu, " ").trim() ?? "";
+  const clean = stripProviderMarkup(text);
+  if (containsSecret(clean)) return "任务简介含敏感信息，已隐藏";
+  const first = clean.trim().split(/[\r\n。！？]/u, 1)[0]?.replace(/\s+/gu, " ").trim() ?? "";
   const chars = Array.from(first);
   return chars.length > 60 ? chars.slice(0, 59).join("") + "…" : first || "暂无任务简介";
 }

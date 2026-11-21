@@ -25,7 +25,7 @@ const ACTION_FIELDS: Record<Action, { required: Field[]; optional: Field[] }> = 
   run_now: { required: ["id"], optional: [] },
 };
 
-const time = Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$", description: "Beijing time, strictly in YYYY-MM-DD HH:mm format" });
+const time = Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$", description: "北京时间 YYYY-MM-DD HH:mm" });
 const ruleInput = Type.Union([
   Type.Object({ rrule: Type.String({ minLength: 1, maxLength: 2000 }), start: Type.Optional(time) }, { additionalProperties: false }),
   Type.Object({ at: time }, { additionalProperties: false }),
@@ -41,8 +41,8 @@ const controlParameters = Type.Object({
 }, { additionalProperties: false });
 
 const DESCRIPTIONS = {
-  schedule: "Manage scheduled tasks of the current chat; the owner or a user with an active schedule grant may use it. Granted users can manage only tasks they created in this chat. create requires name, prompt, rule; list takes no other fields; update requires id plus optional name, prompt, rule; pause/resume/delete/run_now require id. rule: Beijing time YYYY-MM-DD HH:mm; rrule (RRULE body without DTSTART) with optional start (default now), or a future at. At each trigger the prompt runs as a turn in this chat and send_message there replies to this chat, so write in the prompt what to do and what to send; specify 'silent if nothing new' when requested. resume skips missed triggers; run_now preserves the next trigger; pause leaves running turns intact.",
-  schedule_control: "Available only during scheduled runs: pause or complete the task for this run and provide a reason. Completion stops future triggers without interrupting the current turn. Other tasks cannot be targeted.",
+  schedule: "管理当前会话的定时任务（主人或有定时授权者可用，被授权者仅能管理自己创建的任务）。create 需 name/prompt/rule；list 不带其他字段；update 需 id 及待改字段；pause/resume/delete/run_now 需 id。rule 传单次未来时间 at 或循环 rrule（不含 DTSTART，可选 start 默认当前）。触发时 prompt 在本会话执行，须写明要做什么及何时调 send_message（无新内容需静默时写明）。resume 跳过已错过的触发，run_now 不影响下次触发。",
+  schedule_control: "仅限定时触发回合内使用：暂停（pause）或完成（complete，不再后续触发但保留本轮）当前定时任务并说明原因。",
 };
 const STATUS_TEXT = { active: "启用", paused: "暂停", completed: "已完成" } as const;
 const summary = (schedule: Schedule) =>
