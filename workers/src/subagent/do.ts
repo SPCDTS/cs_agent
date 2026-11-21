@@ -17,6 +17,7 @@ import { QQ_CONTEXT_DESCRIPTION, QQ_CONTEXT_PARAMETERS } from "../context";
 import { memoryDescriptions, memoryParameters } from "../memory/contracts";
 import { formatBeijingTime } from "../memory/time";
 import { PI_SAFETY_RULE, WEB_RULE } from "../prompt";
+import { stripProviderMarkup } from "../send-clean";
 import { createSubagentCapabilityHost, installDelegatedCapabilities } from "../mcp/delegated";
 import { RETENTION_MS, subagentName, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
 import { responseDescription, shortSummary, subagentActivity, SUBAGENT_PROGRESS_RULE } from "./activity";
@@ -256,8 +257,8 @@ export class SubagentDO extends DurableObject<Env> {
 
   private async answerText(harness: Harness, answer: EntryId): Promise<string> {
     const entry = await harness.commit(tx => tx.entry(answer), context);
-    return (entry?.model ?? []).flatMap(message => message.role === "assistant"
-      ? message.content.flatMap(block => block.type === "text" ? [block.text] : []) : []).join("").trim().replace(/^【结果】\s*/u, "");
+    return stripProviderMarkup((entry?.model ?? []).flatMap(message => message.role === "assistant"
+      ? message.content.flatMap(block => block.type === "text" ? [block.text] : []) : []).join("")).trim().replace(/^【结果】\s*/u, "");
   }
 
   private async report(meta: SubagentMeta, row: InboxRow): Promise<void> {
