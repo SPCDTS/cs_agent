@@ -6,7 +6,7 @@ export const get=$;
 export const make=<K extends keyof HTMLElementTagNameMap>(tag: K,text?: string)=>el(tag,text===undefined?{}:{text});
 export const state: {child: WorkspaceChild | null;selected: Set<string>}={child:null,selected:new Set()};
 export const thread=()=>get("workspace-thread").value.trim(),base=(t:string)=>"/admin/threads/"+encodeURIComponent(t)+"/workspace";
-export const status=(message:string,bad=false)=>{get("workspace-state").textContent=message;get("workspace-state").style.color=bad?"#8C1D1D":"#13622F";};
+export const status=(message:string,bad=false)=>{get("workspace-state").textContent=message;get("workspace-state").style.color=bad?"#B91C1C":"#047857";};
 export const fail=(error:unknown)=>status(error instanceof ApiError&&error.status===409?"文件版本已改变，请重新检查后选择合并。":typeof describe==="function"?describe(error):"工作区操作失败。",true);
 export async function action(button:HTMLButtonElement,work:()=>Promise<unknown>){button.disabled=true;try{await work();}catch(error){fail(error);}finally{button.disabled=false;if(button.id==="workspace-merge")button.disabled=!state.selected.size;}}
 export async function download(t:string,revision:string,file:WorkspaceFile){

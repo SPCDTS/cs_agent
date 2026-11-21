@@ -4,6 +4,7 @@ import { readApi } from "./api";
 import { McpServersSchema, McpManageResultSchema, McpRejectedToolsSchema, type McpServerRecord } from "./integration-contracts";
 import { listInputs, paginateChildren } from "./pagination";
 import { cs } from "./console";
+import { selectManagementSubtab } from "./management";
 import { mcpUiLines } from "./mcp";
 type ServerAction="put"|"login"|"probe"|"activate"|"disable"|"remove";
 export const mcpServers: {rows:McpServerRecord[];selected:string;revision:string;loading:number}={rows:[],selected:"",revision:"absent",loading:0};
@@ -71,5 +72,5 @@ export function initMcpServers() {
   $("mcp-server-select").addEventListener("change",()=>mcpServerRender($("mcp-server-select").value));
   $("mcp-server-reload").addEventListener("click",()=>loadMcpServers().catch(fail));
   for(const [button,action]of [["save","put"],["login","login"],["probe","probe"],["enable","activate"],["disable","disable"],["remove","remove"]] satisfies Array<[string,ServerAction]>)$("mcp-server-"+button).addEventListener("click",()=>mcpServerAction(action));
-  if(/^#mcp-server=[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(location.hash)){mcpServers.selected=location.hash.slice(12);cs.view="models";$("mcp-server-editor").open=true;}
+  if(/^#mcp-server=[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(location.hash)){mcpServers.selected=location.hash.slice(12);cs.view="models";selectManagementSubtab("models","models-mcp");$("mcp-server-editor").open=true;}
 }

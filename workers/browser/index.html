@@ -10,48 +10,74 @@
 <body>
 <div id="login" class="login" hidden>
   <form id="login-form" class="card login-card" autocomplete="off">
-    <h1>cs-agent 管理台</h1>
-    <label for="login-token">管理口令（ADMIN_TOKEN）</label>
-    <input id="login-token" type="password" autocomplete="current-password" required>
-    <button class="btn primary" type="submit">进入</button>
+    <div class="login-brand">
+      <div class="wordmark"><span class="mark" aria-hidden="true"></span>cs<span> / </span>agent</div>
+      <span class="env-badge">ADMIN</span>
+    </div>
+    <div class="login-title">
+      <h1>进入管理台</h1>
+      <p class="muted small">口令仅存于当前标签页会话，不会写入本地磁盘。</p>
+    </div>
+    <div class="field">
+      <label for="login-token">管理口令（ADMIN_TOKEN）</label>
+      <input id="login-token" type="password" autocomplete="current-password" required>
+    </div>
+    <button class="btn primary" type="submit">进入工作台</button>
     <div id="login-message" class="muted small"></div>
   </form>
 </div>
 
 <div id="app" hidden>
 <aside class="sidebar">
-  <div class="wordmark">cs<span> / </span>agent</div>
-  <nav aria-label="管理台导航">
-    <button type="button" class="nav-btn" data-view="usage" aria-current="page">用量总览</button>
-    <button type="button" class="nav-btn" data-view="chat">会话对话</button>
-    <div class="manage-nav-label">管理</div>
-    <button type="button" class="nav-btn" data-view="models">模型与接入</button>
-    <button type="button" class="nav-btn" data-view="memory">会话与记忆</button>
-    <button type="button" class="nav-btn" data-view="operations">任务与事件</button>
-    <button type="button" class="nav-btn" data-view="access">权限与运维</button>
-    <button type="button" class="nav-btn" data-view="workspace">工作区</button>
-  </nav>
-  <div class="sidebar-foot">会话、请求与上下文<br>在一个地方查看</div>
-</aside>
-<header class="topbar">
-  <div class="topbar-inner">
-    <div class="brand">cs-agent 管理台</div>
-    <div id="commit" class="mono muted"></div>
-    <span id="health" class="pill neutral">加载中</span>
-    <span id="health-qq" class="pill neutral">QQ 待检测</span>
-    <span id="health-model" class="pill neutral">模型待检测</span>
-    <div class="grow"></div>
-    <div id="refreshed" class="muted small"></div>
-    <button id="logout" class="btn" type="button">登出</button>
+  <div class="brand-row">
+    <div class="wordmark"><span class="mark" aria-hidden="true"></span>cs<span> / </span>agent</div>
+    <span class="env-badge">ADMIN</span>
   </div>
-</header>
-<div id="status" class="status-line" role="status" hidden></div>
+  <nav aria-label="管理台导航">
+    <button type="button" class="nav-btn" data-view="usage" aria-current="page">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 3 5-6"/></svg>用量总览
+    </button>
+    <button type="button" class="nav-btn" data-view="chat">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8Z"/></svg>会话对话
+    </button>
+    <div class="manage-nav-label">管理</div>
+    <button type="button" class="nav-btn" data-view="models">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/><circle cx="12" cy="12" r="3"/></svg>模型与接入
+    </button>
+    <button type="button" class="nav-btn" data-view="memory">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></svg>会话与记忆
+    </button>
+    <button type="button" class="nav-btn" data-view="operations">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>任务与事件
+    </button>
+    <button type="button" class="nav-btn" data-view="access">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>权限与运维
+    </button>
+    <button type="button" class="nav-btn" data-view="workspace">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>工作区
+    </button>
+  </nav>
+  <div class="health-dock">
+    <div class="health-pills">
+      <span id="health" class="pill neutral">加载中</span>
+      <span id="health-qq" class="pill neutral">QQ 待检测</span>
+      <span id="health-model" class="pill neutral">模型待检测</span>
+    </div>
+    <div id="commit" class="mono muted small"></div>
+    <div class="health-foot">
+      <div id="refreshed" class="muted small"></div>
+      <button id="logout" class="btn compact" type="button">登出</button>
+    </div>
+  </div>
+</aside>
 
 <main>
+<div id="status" class="status-line" role="status" hidden></div>
 
 <section id="view-requests">
-  <div class="console-head"><div><h1 id="requests-heading">请求与用量</h1><p id="requests-subtitle">从整体趋势，追踪到每一次模型调用。</p></div>
-    <div class="row"><label class="field">时间范围<select id="req-range"><option value="24">最近 24 小时</option><option value="168">最近 7 天</option><option value="720">最近 30 天</option></select></label><button id="req-refresh" class="btn" type="button">刷新数据</button></div>
+  <div class="console-head">
+    <div class="head-title"><h1 id="requests-heading">用量总览</h1><p id="requests-subtitle" class="muted small">追踪每次模型调用与缓存效率</p></div>
+    <div class="row"><label class="field"><select id="req-range" aria-label="时间范围"><option value="24">最近 24 小时</option><option value="168">最近 7 天</option><option value="720">最近 30 天</option></select></label><button id="req-refresh" class="btn" type="button">刷新数据</button></div>
   </div>
   <div class="filters">
     <label>会话<select id="req-thread"><option value="">全部会话</option></select></label>
@@ -63,8 +89,8 @@
   <div id="usage-summary">
     <div class="metrics">
       <div><div class="metric-label">模型请求</div><div id="metric-requests" class="metric-value">—</div><div id="metric-failures" class="metric-note">等待数据</div></div>
-      <div><div class="metric-label">输入 token</div><div id="metric-input" class="metric-value">—</div><div class="metric-note">包含缓存读取与写入</div></div>
-      <div><div class="metric-label">输出 token</div><div id="metric-output" class="metric-value">—</div><div class="metric-note">包含模型推理用量</div></div>
+      <div><div class="metric-label">输入 token</div><div id="metric-input" class="metric-value">—</div><div id="metric-input-note" class="metric-note">包含缓存读取与写入</div></div>
+      <div><div class="metric-label">输出 token</div><div id="metric-output" class="metric-value">—</div><div id="metric-output-note" class="metric-note">包含模型推理用量</div></div>
       <div><div class="metric-label">缓存命中率</div><div id="metric-cache" class="metric-value">—</div><div id="metric-cache-note" class="metric-note">缓存读取 / 总输入</div></div>
       <div><div class="metric-label">平均请求耗时</div><div id="metric-duration" class="metric-value">—</div><div id="metric-measured" class="metric-note">仅统计已完成采集</div></div>
     </div>
@@ -80,102 +106,79 @@
   </section>
   <p id="request-retention" class="retention-note">请求元数据最多保留 30 天，上下文详情最多 7 天；达到容量上限会提前清理。</p>
 </section>
-<section id="view-chat" hidden>
-  <div class="console-head"><div><h1>会话对话</h1><p>继续 QQ 会话的上下文，在网页里接着聊。</p></div></div>
-  
-  <section id="agent-topology" class="agent-topology" aria-labelledby="topology-title">
-    <div class="topology-head"><div><h2 id="topology-title">Agent 拓扑</h2><p>最近 24 小时 · 父 agent → 子 agent</p></div>
-      <div class="topology-actions"><span id="topology-count" class="small muted" role="status">进入页面后加载</span><button id="topology-refresh" type="button" class="btn compact">刷新拓扑</button></div></div>
-    <div id="topology-graph" class="topology-graph"><p class="topology-empty">正在读取近期活动…</p></div>
-    <div class="topology-foot"><span class="small muted">最多显示最近活跃的 5 个子 agent · 其余可在下方会话列表查看</span></div>
-  </section>
 
-  
-  <section id="context-monitor" class="context-monitor" aria-label="当前 agent 上下文">
-    <div class="context-monitor-header"><div><strong>上下文</strong><span id="context-monitor-note" class="small muted">查看当前 agent 的逐次请求变化</span></div><button id="context-monitor-toggle" type="button" class="btn compact" aria-expanded="false" aria-controls="context-monitor-body">展开趋势</button></div>
-    <div id="context-monitor-body" hidden>
-      <div id="context-monitor-chart" class="context-monitor-chart"></div>
-      <div id="context-monitor-selection" class="context-monitor-selection" aria-live="polite"></div>
-      <div class="context-monitor-footer"><span class="small muted">按请求顺序 · 虚线为模型窗口 · 空心点表示用量未返回</span><div class="row"><button id="context-monitor-newer" class="btn compact" type="button" disabled>较新请求</button><button id="context-monitor-older" class="btn compact" type="button" disabled>更早请求</button><button id="context-monitor-refresh" class="btn compact" type="button">刷新</button></div></div>
-    </div>
-  </section>
-  <div class="chat-layout"><aside class="chat-threads"><h2>已有会话</h2><div id="chat-thread-list"></div></aside>
+<section id="view-chat" hidden>
+  <div class="chat-layout">
+    <aside class="chat-threads"><h2>已有会话</h2><div id="chat-thread-list"></div></aside>
     <section class="chat-main" aria-label="对话">
-      <header class="chat-top"><div><strong id="chat-title">选择会话</strong><small id="chat-subtitle">共享上下文 · 网页发言只回复网页</small></div><div class="row"><button id="chat-history" class="btn compact" type="button">历史</button><button id="chat-compact" class="btn compact" type="button">压缩</button><button id="chat-reset" class="btn compact" type="button">归档重置</button><button id="chat-older" class="btn compact" type="button" hidden>更早记录</button><button id="chat-parent" class="btn compact" type="button" hidden>返回父会话</button><button id="chat-reload" class="btn compact" type="button">刷新</button></div></header>
+      <header class="chat-top">
+        <div><strong id="chat-title">选择会话</strong><small id="chat-subtitle">共享上下文 · 网页发言只回复网页</small></div>
+        <div class="row">
+          <button id="chat-inspector-topo" class="btn compact" type="button" aria-pressed="false">拓扑</button>
+          <button id="chat-inspector-ctx" class="btn compact" type="button" aria-pressed="false">上下文</button>
+          <span class="v-sep" aria-hidden="true"></span>
+          <button id="chat-history" class="btn compact" type="button">历史</button>
+          <button id="chat-compact" class="btn compact" type="button">压缩</button>
+          <button id="chat-reset" class="btn compact" type="button">归档重置</button>
+          <button id="chat-older" class="btn compact" type="button" hidden>更早记录</button>
+          <button id="chat-parent" class="btn compact" type="button" hidden>返回父会话</button>
+          <button id="chat-reload" class="btn compact" type="button">刷新</button>
+        </div>
+      </header>
       <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-relevant="additions"></div>
       <div id="chat-state" role="status"></div>
-      <form id="chat-form" class="chat-composer"><label for="chat-input" class="small">发给当前会话</label><textarea id="chat-input" maxlength="16000" placeholder="输入消息，继续这段对话…" required></textarea>
-        <div class="composer-footer"><small>Ctrl / ⌘ + Enter 发送 · 最近 100 条消息</small><button id="chat-send" class="btn primary" type="submit">发送消息</button></div>
+      <form id="chat-form" class="chat-composer">
+        <div class="composer-box">
+          <label for="chat-input" class="sr-only">发给当前会话</label>
+          <textarea id="chat-input" maxlength="16000" placeholder="输入消息，继续这段对话…" required></textarea>
+          <div class="composer-footer"><small>Ctrl / ⌘ + Enter 发送 · 最近 100 条消息</small><button id="chat-send" class="btn primary" type="submit">发送消息</button></div>
+        </div>
       </form>
     </section>
+    <aside id="chat-inspector" class="chat-inspector" hidden aria-label="会话观测面板">
+      <div class="inspector-head">
+        <strong id="chat-inspector-title">Agent 拓扑</strong>
+        <button id="chat-inspector-close" class="btn compact" type="button">收起</button>
+      </div>
+      <div class="inspector-body">
+        <section id="agent-topology" class="agent-topology" aria-labelledby="topology-title" hidden>
+          <div class="topology-head"><div><h2 id="topology-title">24h Agent 拓扑</h2><p>父 agent → 子 agent</p></div>
+            <div class="topology-actions"><span id="topology-count" class="small muted" role="status">进入页面后加载</span><button id="topology-refresh" type="button" class="btn compact">刷新</button></div></div>
+          <div id="topology-graph" class="topology-graph"><p class="topology-empty">正在读取近期活动…</p></div>
+          <div class="topology-foot"><span class="small muted">最多显示最近活跃的 5 个子 agent · 点击切换</span></div>
+        </section>
+        <section id="context-monitor" class="context-monitor" aria-label="当前 agent 上下文" hidden>
+          <div class="context-monitor-header"><div><strong>上下文趋势</strong><span id="context-monitor-note" class="small muted">查看当前 agent 的逐次请求变化</span></div><button id="context-monitor-toggle" type="button" class="btn compact" aria-expanded="false" aria-controls="context-monitor-body">展开趋势</button></div>
+          <div id="context-monitor-body" hidden>
+            <div id="context-monitor-chart" class="context-monitor-chart"></div>
+            <div id="context-monitor-selection" class="context-monitor-selection" aria-live="polite"></div>
+            <div class="context-monitor-footer"><span class="small muted">按请求顺序 · 虚线为窗口</span><div class="row"><button id="context-monitor-newer" class="btn compact" type="button" disabled>较新</button><button id="context-monitor-older" class="btn compact" type="button" disabled>更早</button><button id="context-monitor-refresh" class="btn compact" type="button">刷新</button></div></div>
+          </div>
+        </section>
+      </div>
+    </aside>
   </div>
 </section>
-<dialog id="request-detail" class="detail-dialog" aria-labelledby="detail-title">
-  <header class="detail-head"><div><h2 id="detail-title">请求详情</h2><div id="detail-id" class="detail-id"></div></div><button id="detail-close" class="btn" type="button">关闭</button></header><div id="detail-body" class="detail-body"></div>
-</dialog>
 
 <div id="view-manage" hidden>
-<div class="console-head"><div><h1>配置与管理</h1><p>管理模型、连接、记忆与自动任务。</p></div></div>
-  <section class="cards">
-    <div class="card"><div class="muted small">NapCat</div><div id="card-napcat" class="big">-</div><div id="card-napcat-sub" class="muted small"></div></div>
-    <div class="card"><div class="muted small">模型</div><div id="card-model" class="big">-</div><div id="card-model-sub" class="muted small"></div></div>
-    <div class="card"><div class="muted small">会话</div><div id="card-threads" class="big">-</div><div id="card-threads-sub" class="muted small"></div><div id="card-threads-extra" class="muted small"></div></div>
-    <div class="card"><div class="muted small">发送规则</div><div id="card-rules" class="big">-</div><div id="card-rules-list" class="small"></div></div>
-  </section>
+  <div class="console-head manage-head">
+    <div class="head-title"><h1>配置与管理</h1><p class="muted small">管理模型、连接、记忆与自动任务。</p></div>
+    <div id="manage-subtabs" class="subtabs" role="tablist"></div>
+  </div>
 
-  <section class="card">
-    <div class="section-head"><h2 class="h2">会话</h2><span class="muted">每个会话键一个 Thread DO</span></div>
-    <div class="scroll">
-      <table class="wide">
-        <thead><tr><th>线程</th><th>状态</th><th>入站 排队 / 完成 / 失败</th><th>出站</th><th>记忆</th><th>子 agent</th><th>最近发送</th><th></th></tr></thead>
-        <tbody id="threads"></tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class="card" id="events-section">
-    <div class="section-head">
-      <h2 class="h2">审计事件</h2>
-      <span class="muted">只记元数据，不含正文</span>
-      <div class="grow"></div>
-      <div id="event-kinds" class="row"></div>
-      <label for="ev-thread">线程</label>
-      <select id="ev-thread"></select>
-    </div>
-    <div class="scroll">
-      <table class="wide">
-        <thead><tr><th>时间</th><th>线程</th><th>类型</th><th>详情</th><th>结果</th></tr></thead>
-        <tbody id="events"></tbody>
-      </table>
-    </div>
-    <div class="pager">
-      <span id="events-meta" class="muted small"></span>
-      <div class="row"><button id="ev-prev" class="btn" type="button">上一页</button><button id="ev-next" class="btn" type="button">下一页</button></div>
-    </div>
-  </section>
-
+  <!-- 模型与接入 -->
   <section class="card" id="model-section">
-    <div class="section-head"><h2 class="h2">模型</h2><span class="muted">存在 Registry 设置里，切换后各会话下一回合生效，不用重新部署</span></div>
-    <div class="pair" style="gap:0">
-      <div class="stack" style="flex:1 1 420px;min-width:0">
-        <div class="row"><span class="muted small">当前</span><span id="m-current" class="mono">-</span></div>
-        <div class="field">
-          <label for="m-model">模型</label>
-          <select id="m-model"></select>
-        </div>
-        <div class="field">
-          <label for="m-effort">推理强度</label>
-          <select id="m-effort">
-            <option value="">模型默认</option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-            <option value="xhigh">xhigh</option>
-          </select>
+    <div class="section-head"><h2 class="h2">模型与账号</h2><span class="muted small">存在 Registry 设置里，切换后各会话下一回合生效，不用重新部署</span></div>
+    <div class="pair split-pair">
+      <div class="stack">
+        <div class="row kv-inline"><span class="muted small">当前生效</span><span id="m-current" class="mono">-</span></div>
+        <div class="field"><label for="m-model">模型</label><select id="m-model"></select></div>
+        <div class="field"><label for="m-effort">推理强度</label>
+          <select id="m-effort"><option value="">模型默认</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select>
         </div>
         <div class="row"><button id="m-save" class="btn primary" type="button">切换</button><span id="m-meta" class="muted small"></span></div>
       </div>
-      <div class="stack" style="flex:1 1 420px;min-width:0">
+      <div class="stack">
         <div class="row"><strong>Codex 原生登录</strong><span id="codex-status" class="pill neutral">-</span></div>
         <div id="codex-account" class="muted small"></div>
         <select id="codex-accounts" aria-label="ChatGPT 账号"></select>
@@ -186,261 +189,304 @@
           <button id="codex-refresh" class="btn" type="button">刷新状态</button>
           <button id="codex-catalog" class="btn" type="button">刷新模型列表</button>
         </div>
-        <div id="codex-pending" class="stack" style="padding:0" hidden>
-          <div class="muted small">1. 下载授权助手，在下载目录打开终端并运行下方命令（需要 Node.js 24 或更新版本）。</div>
+        <div id="codex-pending" class="stack pending-box" hidden>
+          <div class="muted small">1. 下载授权助手，在下载目录打开终端并运行下方命令（需要 Node.js 24+，端口 1455 空闲）。</div>
           <a class="btn" href="/admin/model/oauth/codex/helper.mjs" download="chatgpt-login.mjs">下载授权助手</a>
           <input id="codex-command" type="text" readonly aria-label="运行命令">
-          <div class="muted small">2. 向助手粘贴配对码，在自动打开的 ChatGPT 页面授权。配对码 10 分钟内有效，仅用于这一次授权。</div>
-          <div class="link-box">
-            <input id="codex-ticket" type="text" readonly aria-label="配对码">
-            <button id="codex-copy" class="btn" type="button">复制配对码</button>
-          </div>
+          <div class="muted small">2. 向助手粘贴配对码，在自动打开的 ChatGPT 页面授权（10 分钟内有效）。</div>
+          <div class="link-box"><input id="codex-ticket" type="text" readonly aria-label="配对码"><button id="codex-copy" class="btn" type="button">复制配对码</button></div>
           <div class="muted small">3. 助手完成后自动退出，点击“刷新状态”。</div>
         </div>
-        <div class="note">凭据加密保存在云端，到期自动续期；DeepSeek 和 GPT 共用此账号的生图能力。本机助手仅授权时运行，需要端口 1455 空闲。旧授权会保留，完成新登录后切换。<a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">查看 ChatGPT 用量与授权额度</a></div>
+        <div class="note">凭据加密保存在云端，到期自动续期；DeepSeek 和 GPT 共用此账号的生图能力。<a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">查看 ChatGPT 用量与授权额度</a></div>
       </div>
     </div>
   </section>
 
-  <section class="pair">
-    <div class="card">
-      <div class="section-head"><h2 class="h2">MCP 服务</h2><span class="muted">运行时接入，无需重新部署</span></div>
-      <div class="stack">
-        <div id="mcp-list" class="stack" style="padding:0"></div>
-        
-<details id="device-editor" class="source">
-  <summary>添加设备与 Cloudflare 管理</summary>
-  <p class="muted small">设备默认提供本机命令行，代码与依赖保留在设备上。桌面能力按需安装。首次接入仅主人可用，共享请到 MCP 群授权设置。</p>
-  <div class="row"><button id="device-cloudflare" type="button" class="btn" hidden>授权 Cloudflare</button><span id="device-cloudflare-state" class="muted small" role="status"></span></div>
-  <div id="device-cf-changes" class="stack" hidden></div>
-  <div class="row"><label for="device-name">设备名称</label><input id="device-name" type="text" maxlength="80" placeholder="我的 Mac" autocomplete="off">
-    <label class="row"><input id="device-desktop" type="checkbox">安装 agent-desktop，允许操作登录用户的桌面</label></div>
-  <div class="row"><button id="device-create" class="btn primary" type="button">生成配对链接</button><button id="device-reload" class="btn" type="button">刷新设备</button></div>
-  <p id="device-state" class="muted small" role="status">展开后加载设备。</p>
-  <div id="device-pairing" hidden>
-    <p>1. 在待接入设备安装 Node.js 24 或以上版本，<a href="/admin/device-client.cjs" download="cs-agent-device.cjs">下载设备客户端</a>。</p>
-    <p>2. 在终端运行 <code>node cs-agent-device.cjs pair</code>，按提示粘贴下方链接。</p>
-    <label for="device-link">一次性配对链接（30 分钟有效，仅供这台设备使用）</label><input id="device-link" type="password" readonly autocomplete="off">
-    <button id="device-copy" type="button" class="btn">复制配对链接</button>
-    <p class="muted small">客户端自动安装 Tunnel 并设置当前用户登录自启动；命令按该用户权限执行。默认目录为用户主目录下 AgentWork。无需复制长期 Token，也不需要设备上的 Cloudflare 管理凭据。</p>
-  </div>
-  <div id="device-list" class="stack" style="padding:0"></div>
-</details>
-<details id="mcp-server-editor" class="source">
-  <summary>接入或管理 MCP 服务</summary>
-  <p class="muted small">保存连接 → 填写凭据或登录 → 检测工具 → 启用。修改即时保存，无需部署。</p>
-  <div class="row"><select id="mcp-server-select" aria-label="选择 MCP 服务"><option value="">新增服务</option></select><button id="mcp-server-reload" type="button" class="btn">刷新服务</button></div>
-  <div class="pair"><div class="field"><label for="mcp-server-id">服务名称</label><input id="mcp-server-id" type="text" placeholder="github" autocomplete="off"></div>
-  <div class="field"><label for="mcp-server-url">HTTPS MCP 地址</label><input id="mcp-server-url" type="url" placeholder="https://api.githubcopilot.com/mcp/" autocomplete="off"></div></div>
-  <div class="row"><label for="mcp-server-auth">认证</label><select id="mcp-server-auth"><option value="none">无认证</option><option value="token">Token / 认证头</option><option value="oauth">OAuth 登录</option></select>
-    <label for="mcp-server-scope">OAuth scope</label><input id="mcp-server-scope" type="text" placeholder="由服务提供方指定，可留空"></div>
-  <div class="row"><button id="mcp-server-save" type="button" class="btn">保存连接</button><button id="mcp-server-login" type="button" class="btn">获取登录链接</button></div>
-  <p class="muted small">重新保存已有连接会清除其旧凭据和工具选择。仅更新凭据时使用下方按钮。</p>
-  <div id="mcp-server-credential" hidden><div class="pair"><div class="field"><label for="mcp-secret-header">认证头名称</label><input id="mcp-secret-header" type="text" value="Authorization" autocomplete="off"></div>
-    <div class="field"><label for="mcp-secret-value">Token 或认证头值</label><input id="mcp-secret-value" type="password" autocomplete="new-password" placeholder="Authorization 可直接填写 Token"></div></div>
-    <button id="mcp-secret-save" type="button" class="btn">保存凭据并检测</button><p class="muted small">凭据加密保存，不回显、不进入 agent 上下文。</p></div>
-  <div class="row"><button id="mcp-server-probe" type="button" class="btn">检测连接与工具</button><button id="mcp-server-enable" type="button" class="btn primary">启用选中工具</button>
-    <button id="mcp-server-disable" type="button" class="btn">停用</button><button id="mcp-server-remove" type="button" class="btn danger">移除服务</button></div>
-  <p id="mcp-server-state" class="muted small" role="status">进入本页后加载服务。</p>
-  <div id="mcp-server-tools" class="stack" style="padding:0"></div>
-  <div class="field"><label for="mcp-server-resources">允许读取的资源 URI 前缀，每行一个；留空不开放资源</label><textarea id="mcp-server-resources" rows="2" style="min-height:65px"></textarea></div>
-</details>
-        <div id="mcp-link" class="link-box" hidden>
-          <input id="mcp-link-url" type="text" readonly aria-label="一次性登录链接">
-          <button id="mcp-link-copy" class="btn" type="button">复制</button>
+  <section class="card" id="mcp-section">
+    <div class="section-head"><h2 class="h2">MCP 服务与个人设备</h2><span class="muted small">运行时接入，无需重新部署</span></div>
+    <div class="stack">
+      <div id="mcp-list" class="stack flat-stack"></div>
+      <details id="device-editor" class="source form-disclosure">
+        <summary>+ 添加设备与 Cloudflare 管理 · 默认命令行，可选桌面</summary>
+        <p class="muted small">设备默认提供本机命令行，代码与依赖保留在设备上。桌面能力按需安装。首次接入仅主人可用，共享请到权限与运维的 MCP 群授权设置。</p>
+        <div class="row"><button id="device-cloudflare" type="button" class="btn" hidden>授权 Cloudflare</button><span id="device-cloudflare-state" class="muted small" role="status"></span></div>
+        <div id="device-cf-changes" class="stack flat-stack" hidden></div>
+        <div class="row"><label for="device-name">设备名称</label><input id="device-name" type="text" maxlength="80" placeholder="我的 Mac" autocomplete="off">
+          <label class="row"><input id="device-desktop" type="checkbox">安装 agent-desktop，允许操作登录用户的桌面</label></div>
+        <div class="row"><button id="device-create" class="btn primary" type="button">生成配对链接</button><button id="device-reload" class="btn" type="button">刷新设备</button></div>
+        <p id="device-state" class="muted small" role="status">展开后加载设备。</p>
+        <div id="device-pairing" hidden>
+          <p>1. 在待接入设备安装 Node.js 24 或以上版本，<a href="/admin/device-client.cjs" download="cs-agent-device.cjs">下载设备客户端</a>。</p>
+          <p>2. 在终端运行 <code>node cs-agent-device.cjs pair</code>，按提示粘贴下方链接。</p>
+          <label for="device-link">一次性配对链接（30 分钟有效，仅供这台设备使用）</label><input id="device-link" type="password" readonly autocomplete="off">
+          <button id="device-copy" type="button" class="btn">复制配对链接</button>
+          <p class="muted small">客户端自动安装 Tunnel 并设置当前用户登录自启动；命令按该用户权限执行。默认目录为用户主目录下 AgentWork。无需复制长期 Token，也不需要设备上的 Cloudflare 管理凭据。</p>
         </div>
-        <div class="note">登录链接 10 分钟内有效、只能打开一次，请私下交给 owner；页面只显示结果分类，不回显 token。</div>
-      </div>
+        <div id="device-list" class="stack flat-stack"></div>
+      </details>
+      <details id="mcp-server-editor" class="source form-disclosure">
+        <summary>+ 接入或管理远程 MCP 服务</summary>
+        <p class="muted small">保存连接 → 填写凭据或登录 → 检测工具 → 启用。修改即时保存，无需部署。</p>
+        <div class="row"><select id="mcp-server-select" aria-label="选择 MCP 服务"><option value="">新增服务</option></select><button id="mcp-server-reload" type="button" class="btn">刷新服务</button></div>
+        <div class="pair"><div class="field"><label for="mcp-server-id">服务名称</label><input id="mcp-server-id" type="text" placeholder="github" autocomplete="off"></div>
+          <div class="field"><label for="mcp-server-url">HTTPS MCP 地址</label><input id="mcp-server-url" type="url" placeholder="https://api.githubcopilot.com/mcp/" autocomplete="off"></div></div>
+        <div class="row"><label for="mcp-server-auth">认证</label><select id="mcp-server-auth"><option value="none">无认证</option><option value="token">Token / 认证头</option><option value="oauth">OAuth 登录</option></select>
+          <label for="mcp-server-scope">OAuth scope</label><input id="mcp-server-scope" type="text" placeholder="由服务提供方指定，可留空"></div>
+        <div class="row"><button id="mcp-server-save" type="button" class="btn">保存连接</button><button id="mcp-server-login" type="button" class="btn">获取登录链接</button></div>
+        <p class="muted small">重新保存已有连接会清除其旧凭据和工具选择。仅更新凭据时使用下方按钮。</p>
+        <div id="mcp-server-credential" hidden><div class="pair"><div class="field"><label for="mcp-secret-header">认证头名称</label><input id="mcp-secret-header" type="text" value="Authorization" autocomplete="off"></div>
+          <div class="field"><label for="mcp-secret-value">Token 或认证头值</label><input id="mcp-secret-value" type="password" autocomplete="new-password" placeholder="Authorization 可直接填写 Token"></div></div>
+          <button id="mcp-secret-save" type="button" class="btn">保存凭据并检测</button><p class="muted small">凭据加密保存，不回显、不进入 agent 上下文。</p></div>
+        <div class="row"><button id="mcp-server-probe" type="button" class="btn">检测连接与工具</button><button id="mcp-server-enable" type="button" class="btn primary">启用选中工具</button>
+          <button id="mcp-server-disable" type="button" class="btn">停用</button><button id="mcp-server-remove" type="button" class="btn danger">移除服务</button></div>
+        <p id="mcp-server-state" class="muted small" role="status">进入本页后加载服务。</p>
+        <div id="mcp-server-tools" class="stack flat-stack"></div>
+        <div class="field"><label for="mcp-server-resources">允许读取的资源 URI 前缀，每行一个；留空不开放资源</label><textarea id="mcp-server-resources" rows="2" class="short-area"></textarea></div>
+      </details>
+      <div id="mcp-link" class="link-box" hidden><input id="mcp-link-url" type="text" readonly aria-label="一次性登录链接"><button id="mcp-link-copy" class="btn" type="button">复制</button></div>
+      <div class="note">登录链接 10 分钟内有效、只能打开一次，请私下交给 owner；页面只显示结果分类，不回显 token。</div>
     </div>
+  </section>
 
-    <div class="card">
-      <div class="section-head"><h2 class="h2">设置</h2><span class="muted">存在 Registry DO，保存后立即推送到 Bridge</span></div>
-      <div class="stack">
-        <div class="field">
-          <label for="s-trigger">群里触发方式</label>
-          <select id="s-trigger">
-            <option value="mention_or_reply">@机器人 或 回复它</option>
-            <option value="mention_only">只 @机器人</option>
-            <option value="off">群里不响应</option>
-          </select>
+  <section class="card" id="settings-section">
+    <div class="section-head"><h2 class="h2">QQ 响应与抽取设置</h2><span class="muted small">存在 Registry DO，保存后立即推送到 Bridge</span></div>
+    <div class="stack">
+      <div class="grid-fields">
+        <div class="field"><label for="s-trigger">群里触发方式</label>
+          <select id="s-trigger"><option value="mention_or_reply">@机器人 或 回复它</option><option value="mention_only">只 @机器人</option><option value="off">群里不响应</option></select>
         </div>
         <div class="field"><label for="s-groups">允许的群（逗号分隔）</label><input id="s-groups" type="text" inputmode="numeric"></div>
         <div class="field"><label for="s-users">允许私聊的用户（逗号分隔）</label><input id="s-users" type="text" inputmode="numeric"></div>
         <div class="field"><label for="s-extract">开启回合后记忆抽取的命名空间</label><input id="s-extract" type="text"></div>
-        <div id="s-defaults" class="muted small"></div>
-        <div class="row"><button id="s-save" class="btn primary" type="button">保存</button><span id="s-meta" class="muted small"></span></div>
-        <div id="s-secrets" class="note"></div>
       </div>
+      <div id="s-defaults" class="muted small"></div>
+      <div class="row"><button id="s-save" class="btn primary" type="button">保存</button><span id="s-meta" class="muted small"></span></div>
+      <div id="s-secrets" class="note"></div>
     </div>
   </section>
 
-  <section class="card">
-    <div class="section-head"><h2 class="h2">定时任务</h2><span class="muted">存在 ScheduleDO，时间均为北京时间；连续失败 3 次自动暂停</span></div>
-    <div class="scroll">
-      <table class="wide">
-        <thead><tr><th>名称</th><th>会话</th><th>规则</th><th>状态</th><th>下次触发</th><th>连续失败</th><th>最近运行</th><th></th></tr></thead>
-        <tbody id="schedules"></tbody>
-      </table>
+  <section class="cards" id="overview-cards">
+    <div class="card"><div class="muted small">NapCat</div><div id="card-napcat" class="big">-</div><div id="card-napcat-sub" class="muted small"></div></div>
+    <div class="card"><div class="muted small">模型</div><div id="card-model" class="big">-</div><div id="card-model-sub" class="muted small"></div></div>
+    <div class="card"><div class="muted small">会话与日程</div><div id="card-threads" class="big">-</div><div id="card-threads-sub" class="muted small"></div><div id="card-threads-extra" class="muted small"></div></div>
+    <div class="card"><div class="muted small">发送规则</div><div id="card-rules" class="big">-</div><div id="card-rules-list" class="small"></div></div>
+  </section>
+
+  <!-- 会话与记忆 -->
+  <section class="card" id="memory-section">
+    <div class="section-head">
+      <h2 id="mem-title" class="h2">长期记忆</h2>
+      <span id="mem-meta" class="muted small"></span>
+      <div class="grow"></div>
+      <label for="mem-ns">会话范围</label><select id="mem-ns"></select>
+      <label for="mem-q">搜索</label><input id="mem-q" type="search" placeholder="关键词或 #id" class="search-sm">
+    </div>
+    <div class="memory-toolbar" aria-label="记忆筛选">
+      <label>状态 <select id="mem-status"><option value="active">活跃</option><option value="all">全部状态</option><option value="superseded">已替代</option><option value="retired">已归档</option><option value="orphaned">来源已撤回</option><option value="forgotten">已遗忘</option></select></label>
+      <label>类型 <select id="mem-kind"><option value="">全部类型</option><option value="fact">事实</option><option value="preference">偏好</option><option value="rule">要求</option><option value="commitment">承诺 / 待办</option><option value="episode">经历</option></select></label>
+      <label>有效状态 <select id="mem-validity"><option value="">全部时间</option><option value="current">当前有效</option><option value="expired">已过期</option><option value="future">尚未生效</option><option value="open">未完成承诺</option><option value="done">已完成承诺</option></select></label>
+      <label>来源 <select id="mem-source"><option value="">全部来源</option><option value="explicit">显式记录</option><option value="extractor">自动抽取</option></select></label>
+      <div class="grow"></div>
+      <button id="mem-jobs" class="btn" type="button">待确认与整理</button>
+      <button id="mem-refresh" class="btn" type="button">刷新</button>
+      <button id="mem-add" class="btn primary" type="button">新增记忆</button>
+    </div>
+    <div class="memory-profile">
+      <div class="row"><strong>会话画像</strong><span id="profile-meta" class="muted small"></span><div class="grow"></div><button id="profile-toggle" class="btn compact" type="button">编辑画像</button><button id="profile-save" class="btn primary compact" type="button" hidden>保存画像</button></div>
+      <p id="profile-review" class="memory-review" hidden></p>
+      <div id="profile-text" class="profile-text muted"></div>
+      <div id="profile-sources" class="row small"></div>
+      <textarea id="profile-edit" hidden aria-label="编辑画像"></textarea>
+    </div>
+    <div class="memory-entries" aria-live="polite">
+      <table><thead><tr><th>#</th><th>类型</th><th>内容</th><th>来源 / 状态</th><th></th></tr></thead><tbody id="memories"></tbody></table>
+    </div>
+    <div class="memory-pagination pager"><span id="mem-page" class="muted small" aria-live="polite"></span><div class="row"><button id="mem-prev" class="btn" type="button">上一页</button><button id="mem-next" class="btn" type="button">下一页</button></div></div>
+  </section>
+
+  <section class="card" id="threads-section">
+    <div class="section-head"><h2 class="h2">活跃会话</h2><span class="muted small">每个会话键一个 Thread DO</span></div>
+    <div class="scroll"><table class="wide"><thead><tr><th>线程</th><th>状态</th><th>入站 排队 / 完成 / 失败</th><th>出站</th><th>记忆</th><th>子 agent</th><th>最近发送</th><th></th></tr></thead><tbody id="threads"></tbody></table></div>
+  </section>
+
+  <section class="card" id="skills-section">
+    <div class="section-head"><h2 class="h2">技能目录</h2><span class="muted small">启用的技能只以名称与描述进入各会话提示，正文按 read_skill 加载</span></div>
+    <div class="scroll"><table class="wide"><thead><tr><th>名称</th><th>描述</th><th>附件</th><th>状态</th><th></th></tr></thead><tbody id="skills"></tbody></table></div>
+    <div class="stack">
+      <details id="skill-editor" class="source form-disclosure">
+        <summary>+ 新建 / 编辑 SKILL.md</summary>
+        <div class="stack flat-stack">
+          <div class="field"><label for="skill-md">SKILL.md（开头的 frontmatter 需要 name 与 description）</label><textarea id="skill-md" class="mono" spellcheck="false"></textarea></div>
+          <div class="row"><button id="skill-save" class="btn primary" type="button">保存技能</button><button id="skill-new" class="btn" type="button">清空</button><span id="skill-meta" class="muted small"></span></div>
+          <div class="note">保存按 frontmatter 的 name 新建或覆盖；覆盖时保留启用状态与已有附件。附件经 PUT /admin/skills/:name 的 files 上传。</div>
+        </div>
+      </details>
     </div>
   </section>
 
-  <section class="card">
-    <div class="section-head"><h2 class="h2">事件来源</h2><span class="muted">新事件经过滤、合并窗口、安静时段与每小时预算后投给 owner 线程；时间均为北京时间</span></div>
+  <section class="card" id="persona-section">
+    <div class="section-head"><h2 class="h2">全局人格设定</h2><span class="muted small">下一回合生效</span><div class="grow"></div><span id="access-persona-revision" class="muted small"></span></div>
+    <form id="access-persona-form" class="stack">
+      <label for="access-persona">全局人格与工作方式</label><textarea id="access-persona" maxlength="65536" placeholder="填写机器人的人格与工作方式"></textarea>
+      <div class="row"><button id="access-persona-save" class="btn primary" type="submit" disabled>保存人格</button><span class="muted small">独立于长期记忆画像；保存会检查 revision CAS。</span></div>
+    </form>
+  </section>
+
+  <!-- 任务与事件 -->
+  <section class="card" id="schedules-section">
+    <div class="section-head"><h2 class="h2">定时任务</h2><span class="muted small">存在 ScheduleDO，时间均为北京时间；连续失败 3 次自动暂停</span></div>
+    <div class="scroll"><table class="wide"><thead><tr><th>名称</th><th>会话</th><th>规则</th><th>状态</th><th>下次触发</th><th>连续失败</th><th>最近运行</th><th></th></tr></thead><tbody id="schedules"></tbody></table></div>
+  </section>
+
+  <section class="card" id="sources-section">
+    <div class="section-head"><h2 class="h2">事件来源</h2><span class="muted small">新事件经过滤、合并窗口、安静时段与每小时预算后投给 owner 线程；时间均为北京时间</span></div>
     <div id="sources" class="stack"></div>
   </section>
 
-  <section class="card">
-    <div class="section-head">
-      <h2 id="mem-title" class="h2">记忆</h2>
-      <span id="mem-meta" class="muted"></span>
-      <div class="grow"></div>
-      <label for="mem-ns">会话范围</label>
-      <select id="mem-ns"></select>
-      <label for="mem-q">搜索</label>
-      <input id="mem-q" type="search" placeholder="关键词或 #id" style="width:220px">
+  <section class="card" id="events-section">
+    <div class="section-head"><h2 class="h2">审计事件</h2><span class="muted small">只记元数据，不含正文</span><div class="grow"></div><div id="event-kinds" class="row"></div><label for="ev-thread">线程</label><select id="ev-thread"></select></div>
+    <div class="scroll"><table class="wide"><thead><tr><th>时间</th><th>线程</th><th>类型</th><th>详情</th><th>结果</th></tr></thead><tbody id="events"></tbody></table></div>
+    <div class="pager"><span id="events-meta" class="muted small"></span><div class="row"><button id="ev-prev" class="btn" type="button">上一页</button><button id="ev-next" class="btn" type="button">下一页</button></div></div>
+  </section>
+
+  <!-- 权限与运维 -->
+  <section id="access-panel" class="card access-toolbar-card">
+    <div class="section-head"><h2 class="h2">权限与运维</h2><span id="access-loaded" class="muted small">按需加载，不自动刷新</span><span class="muted small">· 沙箱空闲 3 分钟停，发送账本最多 5000 条</span><div class="grow"></div><button id="access-refresh" class="btn" type="button">加载 / 刷新</button></div>
+  </section>
+
+  <section class="card" id="grants-section">
+    <div class="section-head"><h2 class="h2">主动发送与定时授权</h2><span class="muted small">owner 来自服务端配置；此处不能升级 owner。</span></div>
+    <div class="scroll"><table class="wide"><thead><tr><th>用户</th><th>能力</th><th>目标 / 来源</th><th>期限</th><th></th></tr></thead><tbody id="access-grants"><tr><td colspan="5" class="muted">尚未加载</td></tr></tbody></table></div>
+    <div class="stack">
+      <details id="grant-editor" class="source form-disclosure">
+        <summary>+ 新增 / 修改用户授权</summary>
+        <form id="access-grant-form" class="stack flat-stack">
+          <div class="row"><div class="field"><label for="access-grant-user">用户 QQ 号</label><input id="access-grant-user" type="text" placeholder="QQ 号或 qq:QQ号" required></div><label><input id="access-grant-send" type="checkbox" checked> 主动发送</label><label><input id="access-grant-schedule" type="checkbox"> 定时任务</label><div class="field"><label for="access-grant-hours">有效小时数（留空为长期）</label><input id="access-grant-hours" type="number" min="0.01" max="876000" step="any"></div></div>
+          <div class="pair"><div class="field grow"><label for="access-grant-targets">可主动发送的目标（每行一个，空表示不允许跨会话发送）</label><textarea id="access-grant-targets" class="mid-area" placeholder="qq:group:群号&#10;qq:private:QQ号"></textarea></div><div class="field grow"><label><input id="access-grant-restrict" type="checkbox"> 限制授权来源会话</label><textarea id="access-grant-scopes" class="mid-area" placeholder="group:群号&#10;private:QQ号" disabled></textarea><span class="muted small">不勾选时允许任意来源；勾选但留空时不允许任何来源。</span></div></div>
+          <div class="row"><button class="btn primary" type="submit">保存该用户授权</button><span class="muted small">保存会替换该用户现有授权；撤销立即生效。</span></div>
+        </form>
+      </details>
     </div>
-    
-<div class="memory-toolbar" aria-label="记忆筛选">
-  <label>状态 <select id="mem-status"><option value="active">活跃</option><option value="all">全部状态</option><option value="superseded">已替代</option><option value="retired">已归档</option><option value="orphaned">来源已撤回</option><option value="forgotten">已遗忘</option></select></label>
-  <label>类型 <select id="mem-kind"><option value="">全部类型</option><option value="fact">事实</option><option value="preference">偏好</option><option value="rule">要求</option><option value="commitment">承诺 / 待办</option><option value="episode">经历</option></select></label>
-  <label>有效状态 <select id="mem-validity"><option value="">全部时间</option><option value="current">当前有效</option><option value="expired">已过期</option><option value="future">尚未生效</option><option value="open">未完成承诺</option><option value="done">已完成承诺</option></select></label>
-  <label>来源 <select id="mem-source"><option value="">全部来源</option><option value="explicit">显式记录</option><option value="extractor">自动抽取</option></select></label>
-  <button id="mem-add" class="btn" type="button">新增记忆</button>
-  <button id="mem-jobs" class="btn" type="button">待确认与整理</button>
-  <button id="mem-refresh" class="btn" type="button">刷新</button>
-</div>
-    <div class="memory-body">
-      <div class="memory-profile">
-        <div class="row"><strong>画像</strong><span id="profile-meta" class="muted small"></span></div>
-        <p id="profile-review" class="memory-review" hidden></p>
-        <div id="profile-text" class="profile-text muted"></div>
-        <div id="profile-sources" class="row small"></div>
-        <textarea id="profile-edit" hidden aria-label="编辑画像"></textarea>
+  </section>
+
+  <section class="card" id="mcp-access-section">
+    <div class="section-head"><h2 class="h2">MCP 群授权与逐次审批</h2><span class="muted small">默认仅 owner 私聊可用；群必须明确授权</span></div>
+    <div class="stack">
+      <div class="row">
+        <label for="mcp-access-thread">线程</label><select id="mcp-access-thread"><option value="owner">owner</option></select>
+        <label for="mcp-access-server">服务</label><select id="mcp-access-server"></select>
+        <button type="button" class="btn" id="mcp-access-threads">加载线程</button>
+        <button type="button" class="btn" id="mcp-access-refresh">刷新授权与审批</button>
+      </div>
+      <div class="approval-panel">
+        <div class="row"><h3 class="sub-h3">调用审批</h3><label><input type="checkbox" id="mcp-approvals-pending" checked>只看待审批</label><span class="muted small">批准仅执行固定参数一次；结果显示在本面板</span></div>
+        <div id="mcp-approvals-list" class="stack flat-stack"><div class="muted">点击刷新加载审批。</div></div>
+        <div id="mcp-approval-result" class="source" hidden></div>
+      </div>
+      <div id="mcp-access-note" class="muted small">选择群线程后加载授权。所有刷新均由按钮触发。</div>
+      <div id="mcp-access-editor" class="stack flat-stack" hidden>
+        <div class="field"><label>明确允许的工具（未勾选即禁止）</label><div id="mcp-access-tools" class="row"></div></div>
+        <div class="pair">
+          <div class="field grow"><label for="mcp-access-actors">允许成员，每行一个 QQ；* 表示全部成员</label><textarea id="mcp-access-actors" rows="3" class="mid-area" placeholder="10000003"></textarea></div>
+          <div class="field grow"><label for="mcp-access-resources">允许资源前缀，每行一个；留空即不开放资源</label><textarea id="mcp-access-resources" rows="3" class="mid-area" placeholder="notion://docs/"></textarea></div>
+        </div>
+        <div id="mcp-access-environment-fields" hidden>
+          <div class="field"><label for="mcp-access-environments">允许的环境 ID，每行一个；留空禁止环境工具</label><textarea id="mcp-access-environments" rows="3" class="mid-area" placeholder="group852"></textarea></div>
+          <label for="mcp-access-environment-approval">成员执行环境操作</label><select id="mcp-access-environment-approval"><option value="required">每次审批（默认）</option><option value="none">授权范围内直接执行</option></select>
+          <p class="note">环境 ID 由 runner 配置；只开放上方勾选的操作。直接执行仅适用于所列环境，其他 MCP 写操作仍需审批。</p>
+        </div>
         <div class="row">
-          <button id="profile-toggle" class="btn" type="button">编辑画像</button>
-          <button id="profile-save" class="btn primary" type="button" hidden>保存画像</button>
+          <label for="mcp-access-expires">授权到期（留空长期有效）</label><input id="mcp-access-expires" type="datetime-local">
+          <span id="mcp-access-revision" class="mono muted small">revision=none</span>
+          <button type="button" id="mcp-access-save" class="btn primary">保存明确授权</button>
+          <button type="button" id="mcp-access-revoke" class="btn danger">撤销本服务授权</button>
+        </div>
+        <p class="note">普通 MCP 写操作仍须每次批准；环境操作遵循上方独立审批设置。更改授权会使该服务未执行的旧审批失效。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="ops-section">
+    <div class="section-head"><h2 class="h2">发送额度、告警与保留期</h2><span id="access-ops-revision" class="muted small"></span></div>
+    <form id="access-ops-form" class="stack">
+      <strong>发送额度</strong>
+      <div class="grid-fields">
+        <div class="field"><label for="access-limit-perChatMinute">每会话每分钟</label><input id="access-limit-perChatMinute" type="number" min="1" max="600" step="1" required></div>
+        <div class="field"><label for="access-limit-perChatHour">每会话每小时</label><input id="access-limit-perChatHour" type="number" min="1" max="36000" step="1" required></div>
+        <div class="field"><label for="access-limit-chatBreakerMinutes">会话熔断（分钟）</label><input id="access-limit-chatBreakerMinutes" type="number" min="1" max="1440" step="1" required></div>
+        <div class="field"><label for="access-limit-globalMinute">全局每分钟</label><input id="access-limit-globalMinute" type="number" min="1" max="6000" step="1" required></div>
+        <div class="field"><label for="access-limit-globalBreakerMinutes">全局熔断（分钟）</label><input id="access-limit-globalBreakerMinutes" type="number" min="1" max="1440" step="1" required></div>
+      </div>
+      <strong>owner 告警</strong>
+      <div class="row">
+        <label><input id="access-alert-owner" type="checkbox"> 向 owner 私聊通知</label>
+        <div class="field"><label for="access-alert-throttle">同类会话间隔（分钟）</label><input id="access-alert-throttle" type="number" min="10" max="1440" required></div>
+        <div class="field"><label for="access-owner-throttle">owner 通知间隔（分钟）</label><input id="access-owner-throttle" type="number" min="30" max="1440" required></div>
+      </div>
+      <div class="muted small">鉴权失败、连续三次失败、QQ 断线超过五分钟产生告警。网页回合的告警只显示在面板。</div>
+      <strong>全局默认保留期</strong>
+      <div class="grid-fields">
+        <div class="field"><label for="access-default-rawDays">聊天原文（天）</label><input id="access-default-rawDays" type="number" min="0" max="3650" step="1" required></div>
+        <div class="field"><label for="access-default-rawHardMaxDays">原文最长保留（天）</label><input id="access-default-rawHardMaxDays" type="number" min="0" max="3650" step="1" required></div>
+        <div class="field"><label for="access-default-summaryDays">摘要（天）</label><input id="access-default-summaryDays" type="number" min="0" max="3650" step="1" required></div>
+        <div class="field"><label for="access-default-eventsDays">审计事件（天）</label><input id="access-default-eventsDays" type="number" min="0" max="3650" step="1" required></div>
+        <label class="row"><input id="access-default-consolidate" type="checkbox"> 定期整理长期记忆</label>
+      </div>
+      <div class="muted small">天数 0 表示不清理；发送安全账本使用单独的 30 天正文期限。</div>
+      <details class="source"><summary>按会话覆盖保留期与整理开关</summary>
+        <div class="field"><label for="access-override-thread">会话</label><input id="access-override-thread" type="text" placeholder="owner、group:群号、private:QQ号"></div>
+        <div class="grid-fields">
+          <div class="field"><label for="access-override-rawDays">聊天原文（天）</label><input id="access-override-rawDays" type="number" min="0" max="3650" step="1" placeholder="沿用默认"></div>
+          <div class="field"><label for="access-override-rawHardMaxDays">原文最长保留（天）</label><input id="access-override-rawHardMaxDays" type="number" min="0" max="3650" step="1" placeholder="沿用默认"></div>
+          <div class="field"><label for="access-override-summaryDays">摘要（天）</label><input id="access-override-summaryDays" type="number" min="0" max="3650" step="1" placeholder="沿用默认"></div>
+          <div class="field"><label for="access-override-eventsDays">审计事件（天）</label><input id="access-override-eventsDays" type="number" min="0" max="3650" step="1" placeholder="沿用默认"></div>
+          <div class="field"><label for="access-override-consolidate">长期记忆整理</label><select id="access-override-consolidate"><option value="">沿用默认</option><option value="true">开启</option><option value="false">关闭</option></select></div>
+        </div>
+        <div class="row"><button id="access-override-add" class="btn" type="button">加入覆盖列表</button><span class="muted small">空白项沿用默认；加入后点击下方保存。</span></div>
+        <div class="scroll"><table><thead><tr><th>会话</th><th>覆盖内容</th><th></th></tr></thead><tbody id="access-overrides"></tbody></table></div>
+      </details>
+      <div class="row"><button id="access-ops-save" class="btn primary" type="submit" disabled>保存运维设置</button></div>
+    </form>
+  </section>
+
+  <div class="pair" id="logs-section">
+    <section class="card">
+      <div class="section-head"><h2 class="h2">运行告警</h2><div class="grow"></div><button id="access-alerts-refresh" class="btn compact" type="button">刷新告警</button></div>
+      <div class="scroll"><table class="wide"><thead><tr><th>时间 / 会话</th><th>来源</th><th>内容</th><th>状态</th></tr></thead><tbody id="access-alerts"><tr><td colspan="4" class="muted">尚未加载</td></tr></tbody></table></div>
+    </section>
+    <section class="card">
+      <div class="section-head"><h2 class="h2">发送记录</h2><span class="muted small">查证只读取 QQ 历史，不会重新发送</span><div class="grow"></div><button id="access-deliveries-refresh" class="btn compact" type="button">刷新发送记录</button></div>
+      <div class="scroll"><table class="wide"><thead><tr><th>时间 / 操作 ID</th><th>状态</th><th>消息 ID / 说明</th><th></th></tr></thead><tbody id="access-deliveries"><tr><td colspan="4" class="muted">尚未加载</td></tr></tbody></table></div>
+    </section>
+  </div>
+
+  <!-- 工作区 -->
+  <section id="workspace-panel" class="card">
+    <div class="section-head"><h2 class="h2">工作区文件</h2><span class="muted small">查看已保存文件，或选择子任务的改动合并到当前工作区。文件总量最多 50MiB，单文件最多 10MiB。</span></div>
+    <div class="stack">
+      <div class="workspace-controls"><label>会话<input id="workspace-thread" type="text" value="owner" autocomplete="off"></label><button id="workspace-load" class="btn" type="button">加载文件</button><button id="workspace-stop" class="btn danger" type="button">停止容器，保留文件</button></div>
+      <div class="pair">
+        <div class="stack flat-stack">
+          <p id="workspace-current" class="workspace-version">尚未加载工作区。</p>
+          <div id="workspace-files" class="workspace-files"><div class="workspace-empty">点击“加载文件”查看。</div></div>
+        </div>
+        <div class="stack flat-stack">
+          <div class="workspace-controls"><label>子任务 ID<input id="workspace-child" type="text" autocomplete="off"></label><button id="workspace-inspect" class="btn" type="button">检查子任务文件</button><button id="workspace-merge" class="btn primary" type="button" disabled>合并选中文件</button></div>
+          <p id="workspace-versions" class="workspace-version"></p>
+          <div id="workspace-child-files" class="workspace-files" hidden></div>
+          <p id="workspace-state" class="small" role="status"></p>
         </div>
       </div>
-      <div class="memory-entries" aria-live="polite">
-        <table>
-          <thead><tr><th>#</th><th>类型</th><th>内容</th><th>来源 / 状态</th><th></th></tr></thead>
-          <tbody id="memories"></tbody>
-        </table>
-      </div>
     </div>
   </section>
-
-  
-  <div class="memory-pagination"><button id="mem-prev" class="btn" type="button">上一页</button><span id="mem-page" class="muted small" aria-live="polite"></span><button id="mem-next" class="btn" type="button">下一页</button></div>
-<dialog id="memory-detail" class="detail-dialog memory-dialog"><header class="detail-head"><h2 id="memory-detail-title">记忆详情</h2><button id="memory-detail-close" class="btn" type="button">关闭</button></header><div id="memory-detail-body" class="detail-body"></div></dialog>
-  <section class="card" id="skills-section">
-    <div class="section-head"><h2 class="h2">技能</h2><span class="muted">存在 Registry；启用的技能只以名称与描述进入各会话提示，模型用 read_skill 读正文，改动最迟 60 秒后生效</span></div>
-    <div class="scroll">
-      <table class="wide">
-        <thead><tr><th>名称</th><th>描述</th><th>附件</th><th>状态</th><th></th></tr></thead>
-        <tbody id="skills"></tbody>
-      </table>
-    </div>
-    <div class="stack">
-      <div class="field">
-        <label for="skill-md">SKILL.md（开头的 frontmatter 需要 name 与 description）</label>
-        <textarea id="skill-md" class="mono" spellcheck="false"></textarea>
-      </div>
-      <div class="row">
-        <button id="skill-save" class="btn primary" type="button">保存技能</button>
-        <button id="skill-new" class="btn" type="button">清空</button>
-        <span id="skill-meta" class="muted small"></span>
-      </div>
-      <div class="note">保存按 frontmatter 的 name 新建或覆盖；覆盖时保留启用状态与已有附件。附件暂无页面入口，经 PUT /admin/skills/:name 的 files 上传。</div>
-    </div>
-  </section>
-
-<section id="access-panel" class="card">
-  <div class="section-head"><h2 class="h2">权限与运维</h2><span id="access-loaded" class="muted small">按需加载，不自动刷新</span><div class="grow"></div><button id="access-refresh" class="btn" type="button">加载 / 刷新</button></div>
-  <div class="stack"><p class="muted small" style="margin:0">沙箱按需启动，空闲 3 分钟自动停止。发送账本最多 5000 条，正文保留 30 天。</p></div>
-</section>
-<section class="card">
-  <div class="section-head"><h2 class="h2">人格设定</h2><span class="muted small">下一回合生效</span><div class="grow"></div><span id="access-persona-revision" class="muted small"></span></div>
-  <form id="access-persona-form" class="stack">
-    <label for="access-persona">全局人格与工作方式</label><textarea id="access-persona" maxlength="65536" placeholder="填写机器人的人格与工作方式"></textarea>
-    <div class="row"><button id="access-persona-save" class="btn primary" type="submit" disabled>保存人格</button><span class="muted small">独立于长期记忆画像；保存会检查是否已有其他修改。</span></div>
-  </form>
-</section>
-<section class="card">
-  <div class="section-head"><h2 class="h2">主动发送与定时授权</h2><span class="muted small">owner 来自服务端配置；此处不能升级 owner。</span></div>
-  <div class="scroll"><table class="wide"><thead><tr><th>用户</th><th>能力</th><th>目标 / 来源</th><th>期限</th><th></th></tr></thead><tbody id="access-grants"><tr><td colspan="5" class="muted">尚未加载</td></tr></tbody></table></div>
-  <form id="access-grant-form" class="stack">
-    <div class="row"><div class="field"><label for="access-grant-user">用户 QQ 号</label><input id="access-grant-user" type="text" placeholder="QQ 号或 qq:QQ号" required></div><label><input id="access-grant-send" type="checkbox" checked> 主动发送</label><label><input id="access-grant-schedule" type="checkbox"> 定时任务</label><div class="field"><label for="access-grant-hours">有效小时数（留空为长期）</label><input id="access-grant-hours" type="number" min="0.01" max="876000" step="any"></div></div>
-    <div class="pair"><div class="field grow"><label for="access-grant-targets">可主动发送的目标（每行一个，空表示不允许跨会话发送）</label><textarea id="access-grant-targets" style="min-height:80px" placeholder="qq:group:群号&#10;qq:private:QQ号"></textarea></div><div class="field grow"><label><input id="access-grant-restrict" type="checkbox"> 限制授权来源会话</label><textarea id="access-grant-scopes" style="min-height:80px" placeholder="group:群号&#10;private:QQ号" disabled></textarea><span class="muted small">不勾选时允许任意来源；勾选但留空时不允许任何来源。</span></div></div>
-    <div class="row"><button class="btn primary" type="submit">保存该用户授权</button><span class="muted small">保存会替换该用户现有授权；撤销立即生效。</span></div>
-  </form>
-</section>
-<section class="card">
-  <div class="section-head"><h2 class="h2">发送额度、告警与保留期</h2><span id="access-ops-revision" class="muted small"></span></div>
-  <form id="access-ops-form" class="stack">
-    <strong>发送额度</strong><div class="row"><div class="field"><label for="access-limit-perChatMinute">每会话每分钟</label><input id="access-limit-perChatMinute" type="number" min="1" max="600" step="1" required></div><div class="field"><label for="access-limit-perChatHour">每会话每小时</label><input id="access-limit-perChatHour" type="number" min="1" max="36000" step="1" required></div><div class="field"><label for="access-limit-chatBreakerMinutes">会话熔断（分钟）</label><input id="access-limit-chatBreakerMinutes" type="number" min="1" max="1440" step="1" required></div><div class="field"><label for="access-limit-globalMinute">全局每分钟</label><input id="access-limit-globalMinute" type="number" min="1" max="6000" step="1" required></div><div class="field"><label for="access-limit-globalBreakerMinutes">全局熔断（分钟）</label><input id="access-limit-globalBreakerMinutes" type="number" min="1" max="1440" step="1" required></div></div>
-    <strong>owner 告警</strong><div class="row"><label><input id="access-alert-owner" type="checkbox"> 向 owner 私聊通知</label><div class="field"><label for="access-alert-throttle">同类会话间隔（分钟）</label><input id="access-alert-throttle" type="number" min="10" max="1440" required></div><div class="field"><label for="access-owner-throttle">owner 通知间隔（分钟）</label><input id="access-owner-throttle" type="number" min="30" max="1440" required></div></div>
-    <div class="muted small">鉴权失败、连续三次失败、QQ 断线超过五分钟产生告警。网页回合的告警只显示在面板。</div>
-    <strong>全局默认保留期</strong><div class="row"><div class="field"><label for="access-default-rawDays">聊天原文（天）</label><input id="access-default-rawDays" type="number" min="0" max="3650" step="1" required></div><div class="field"><label for="access-default-rawHardMaxDays">原文最长保留（天）</label><input id="access-default-rawHardMaxDays" type="number" min="0" max="3650" step="1" required></div><div class="field"><label for="access-default-summaryDays">摘要（天）</label><input id="access-default-summaryDays" type="number" min="0" max="3650" step="1" required></div><div class="field"><label for="access-default-eventsDays">审计事件（天）</label><input id="access-default-eventsDays" type="number" min="0" max="3650" step="1" required></div><label><input id="access-default-consolidate" type="checkbox"> 定期整理长期记忆</label></div><div class="muted small">天数 0 表示不清理；发送安全账本使用单独的 30 天正文期限。</div>
-    <details class="source"><summary>按会话覆盖保留期与整理开关</summary><div class="field"><label for="access-override-thread">会话</label><input id="access-override-thread" type="text" placeholder="owner、group:群号、private:QQ号"></div><div class="row"><div class="field"><label for="access-override-rawDays">聊天原文（天）</label><input id="access-override-rawDays" type="number" min="0" max="3650" step="1" placeholder="沿用默认"></div><div class="field"><label for="access-override-rawHardMaxDays">原文最长保留（天）</label><input id="access-override-rawHardMaxDays" type="number" min="0" max="3650" step="1" placeholder="沿用默认"></div><div class="field"><label for="access-override-summaryDays">摘要（天）</label><input id="access-override-summaryDays" type="number" min="0" max="3650" step="1" placeholder="沿用默认"></div><div class="field"><label for="access-override-eventsDays">审计事件（天）</label><input id="access-override-eventsDays" type="number" min="0" max="3650" step="1" placeholder="沿用默认"></div><div class="field"><label for="access-override-consolidate">长期记忆整理</label><select id="access-override-consolidate"><option value="">沿用默认</option><option value="true">开启</option><option value="false">关闭</option></select></div></div><div class="row"><button id="access-override-add" class="btn" type="button">加入覆盖列表</button><span class="muted small">空白项沿用默认；加入后点击下方保存。</span></div><div class="scroll"><table><thead><tr><th>会话</th><th>覆盖内容</th><th></th></tr></thead><tbody id="access-overrides"></tbody></table></div></details>
-    <div class="row"><button id="access-ops-save" class="btn primary" type="submit" disabled>保存运维设置</button></div>
-  </form>
-</section>
-<section class="card">
-  <div class="section-head"><h2 class="h2">运行告警</h2><div class="grow"></div><button id="access-alerts-refresh" class="btn compact" type="button">刷新告警</button></div>
-  <div class="scroll"><table class="wide"><thead><tr><th>时间 / 会话</th><th>来源</th><th>内容</th><th>状态</th></tr></thead><tbody id="access-alerts"><tr><td colspan="4" class="muted">尚未加载</td></tr></tbody></table></div>
-</section>
-<section class="card">
-  <div class="section-head"><h2 class="h2">发送记录</h2><span class="muted small">查证只读取 QQ 历史，不会重新发送</span><div class="grow"></div><button id="access-deliveries-refresh" class="btn compact" type="button">刷新发送记录</button></div>
-  <div class="scroll"><table class="wide"><thead><tr><th>时间 / 操作 ID</th><th>状态</th><th>消息 ID / 说明</th><th></th></tr></thead><tbody id="access-deliveries"><tr><td colspan="4" class="muted">尚未加载</td></tr></tbody></table></div>
-</section>
-
-<section id="workspace-panel" class="card">
-<h2>工作区文件</h2><p class="muted small">查看已保存文件，或选择子任务的改动合并到当前工作区。文件总量最多50MiB，单文件最多10MiB。</p>
-<div class="workspace-controls"><label>会话<input id="workspace-thread" type="text" value="owner" autocomplete="off"></label><button id="workspace-load" class="btn">加载文件</button><button id="workspace-stop" class="btn">停止容器，保留文件</button></div>
-<p id="workspace-current" class="workspace-version">尚未加载工作区。</p><div id="workspace-files" class="workspace-files"><div class="workspace-empty">点击“加载文件”查看。</div></div>
-<div class="workspace-controls"><label>子任务ID<input id="workspace-child" type="text" autocomplete="off"></label><button id="workspace-inspect" class="btn">检查子任务文件</button><button id="workspace-merge" class="btn primary" disabled>合并选中文件</button></div>
-<p id="workspace-versions" class="workspace-version"></p><div id="workspace-child-files" class="workspace-files" hidden></div><p id="workspace-state" class="small" role="status"></p>
-</section>
-
-
-<section class="card" id="mcp-access-section">
-  <div class="section-head"><h2 class="h2">MCP 群授权与逐次审批</h2><span class="muted small">默认仅 owner 私聊可用；群必须明确授权</span></div>
-  <div class="stack">
-    <div class="row">
-      <label for="mcp-access-thread">线程</label><select id="mcp-access-thread"><option value="owner">owner</option></select>
-      <label for="mcp-access-server">服务</label><select id="mcp-access-server"></select>
-      <button type="button" class="btn" id="mcp-access-threads">加载线程</button>
-      <button type="button" class="btn" id="mcp-access-refresh">刷新授权与审批</button>
-    </div>
-    <div id="mcp-access-note" class="muted small">选择群线程后加载授权。所有刷新均由按钮触发。</div>
-    <div id="mcp-access-editor" hidden>
-      <div class="field"><label>明确允许的工具（未勾选即禁止）</label><div id="mcp-access-tools" class="row"></div></div>
-      <div class="pair">
-        <div class="field" style="flex:1"><label for="mcp-access-actors">允许成员，每行一个 QQ；* 表示全部成员</label><textarea id="mcp-access-actors" rows="3" style="min-height:90px" placeholder="10000003"></textarea></div>
-        <div class="field" style="flex:1"><label for="mcp-access-resources">允许资源前缀，每行一个；留空即不开放资源</label><textarea id="mcp-access-resources" rows="3" style="min-height:90px" placeholder="notion://docs/"></textarea></div>
-      </div>
-      <div id="mcp-access-environment-fields" hidden>
-        <div class="field"><label for="mcp-access-environments">允许的环境 ID，每行一个；留空禁止环境工具</label><textarea id="mcp-access-environments" rows="3" style="min-height:90px" placeholder="group852"></textarea></div>
-        <label for="mcp-access-environment-approval">成员执行环境操作</label><select id="mcp-access-environment-approval"><option value="required">每次审批（默认）</option><option value="none">授权范围内直接执行</option></select>
-        <p class="note">环境 ID 由 runner 配置；只开放上方勾选的操作。直接执行仅适用于所列环境，其他 MCP 写操作仍需审批。</p>
-      </div>
-      <div class="row">
-        <label for="mcp-access-expires">授权到期（留空长期有效）</label><input id="mcp-access-expires" type="datetime-local">
-        <span id="mcp-access-revision" class="mono muted small">revision=none</span>
-        <button type="button" id="mcp-access-save" class="btn primary">保存明确授权</button>
-        <button type="button" id="mcp-access-revoke" class="btn danger">撤销本服务授权</button>
-      </div>
-      <p class="note">普通 MCP 写操作仍须每次批准；环境操作遵循上方独立审批设置。更改授权会使该服务未执行的旧审批失效。</p>
-    </div>
-    <div class="row"><h3 style="margin:0">调用审批</h3><label><input type="checkbox" id="mcp-approvals-pending" checked>只看待审批</label><span class="muted small">批准仅执行下方固定参数一次；默认在本面板显示结果</span></div>
-    <div id="mcp-approvals-list" class="stack" style="padding:0"><div class="muted">点击刷新加载审批。</div></div>
-    <div id="mcp-approval-result" class="source" hidden></div>
-  </div>
-</section>
-
 </div>
 
+<dialog id="request-detail" class="detail-dialog" aria-labelledby="detail-title">
+  <header class="detail-head"><div><h2 id="detail-title">请求详情</h2><div id="detail-id" class="detail-id"></div></div><button id="detail-close" class="btn" type="button">关闭</button></header><div id="detail-body" class="detail-body"></div>
+</dialog>
+<dialog id="memory-detail" class="detail-dialog memory-dialog" aria-labelledby="memory-detail-title">
+  <header class="detail-head"><h2 id="memory-detail-title">记忆详情</h2><button id="memory-detail-close" class="btn" type="button">关闭</button></header><div id="memory-detail-body" class="detail-body"></div>
+</dialog>
 <dialog id="session-history" class="detail-dialog" aria-labelledby="session-history-title">
   <header class="detail-head"><div><h2 id="session-history-title">会话历史与归档</h2><small id="session-history-scope"></small></div><button id="session-history-refresh" class="btn" type="button">刷新</button><button id="session-history-close" class="btn" type="button">关闭</button></header>
   <div id="session-history-body" class="detail-body"></div>
