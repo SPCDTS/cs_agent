@@ -69,8 +69,11 @@ describe("web chat continues QQ",()=>{
     let started=false,release!:()=>void;
     const gate=new Promise<void>(r=>{release=r;});
     const seen:string[]=[];
+    let textFieldDescription="";
     fake(async ctx=>{
       if(ctx.messages.at(-1)?.role==="toolResult")return fauxAssistantMessage("done");
+      const sendTool=getCurrentTools(ctx.messages).find(t=>t.name==="send_message");
+      textFieldDescription=String((sendTool?.parameters as {properties?:{text?:{description?:string}}})?.properties?.text?.description??"");
       const text=latest(ctx.messages);seen.push(getCurrentSystemPrompt(ctx.messages));
       if(text==="网页等待"){started=true;await gate;}
       return fauxAssistantMessage(fauxToolCall("send_message",{text:text==="网页等待"?"网页回复":"QQ回复"}),{stopReason:"toolUse"});
@@ -84,7 +87,12 @@ describe("web chat continues QQ",()=>{
     reply(socket,sent.echo);await qq;
     await expect.poll(async()=> (await (await syncedView("owner")).chatView("owner")).queued).toBe(0);
     expect((await (await syncedView("owner")).chatView("owner")).messages.filter(m=>m.source==="web"&&m.role==="assistant").map(m=>m.text)).toEqual(["网页回复"]);
-    expect(seen[0]).toContain("不向 QQ 发送");expect(seen[1]).not.toContain("本轮来自已通过管理口令认证的网页管理员");
+    expect(seen[0]?.split("不向 QQ 发送")).toHaveLength(2);
+    expect(seen[1]).not.toContain("本轮来自已通过管理口令认证的网页管理员");
+    expect(seen[1]?.indexOf("<rules>")).toBe(0);
+    expect(seen[1]!.indexOf("<codemode>")).toBeLessThan(seen[1]!.indexOf("<turn-identity>"));
+    expect(seen[1]!.indexOf("<turn-identity>")).toBeLessThan(seen[1]!.indexOf("<time>"));
+    expect(textFieldDescription).toContain("turn…search");
   });
   it("keeps a web-spawned subagent report on the web channel",async()=>{
     fake(ctx=>{

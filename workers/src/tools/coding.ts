@@ -217,7 +217,7 @@ export function createCodingExtension(deps: CodingDeps) {
   ] : [];
   return defineExtension({
     name: "cs.coding",
-    sections: [section("sandbox", async (api, context) => api.agent.callable.some(tool => tool.name === "bash") && await deps.allowed({ ...api.read, conversationId: api.conversationId }, context) ? CLOUDFLARE_INSTRUCTIONS + (resources ? CLOUDFLARE_RESOURCE_INSTRUCTIONS : "") : undefined, { tag: false })],
+    sections: [section("sandbox", async (api, context) => api.agent.callable.some(tool => tool.name === "bash") && await deps.allowed({ ...api.read, conversationId: api.conversationId }, context) ? CLOUDFLARE_INSTRUCTIONS + (resources ? CLOUDFLARE_RESOURCE_INSTRUCTIONS : "") : undefined)],
     tools: [...tools.map(tool => ({ ...tool, callers: ["tools"] as const })), ...resourceTools],
   });
 }

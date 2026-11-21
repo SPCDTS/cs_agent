@@ -75,10 +75,10 @@ describe("coding tools", () => {
     const seen = scriptedModel([{ name: "", args: {} }, { name: "", args: {} }]);
     expect(await env.THREAD.getByName("owner").submit(input(1, "写个脚本", 10000001))).toEqual({ status: "done" });
     expect(seen.requests[0]!.tools).toContain("codemode");
-    expect(Object.values(seen.requests[0]!.sections)).toContain(CLOUDFLARE_INSTRUCTIONS + CLOUDFLARE_RESOURCE_INSTRUCTIONS);
+    expect(Object.values(seen.requests[0]!.sections)).toContain(`<sandbox>\n${CLOUDFLARE_INSTRUCTIONS}${CLOUDFLARE_RESOURCE_INSTRUCTIONS}\n</sandbox>`);
     for (const name of [...CODING_TOOLS, "skill_inspect", "skill_publish"]) expect(seen.requests[0]!.tools).not.toContain(name);
     expect(await env.THREAD.getByName("group:200000001").submit(input(2, "跑个脚本", 10000004, 200000001, true))).toEqual({ status: "done" });
-    expect(Object.values(seen.requests[1]!.sections)).toContain(CLOUDFLARE_INSTRUCTIONS);
+    expect(Object.values(seen.requests[1]!.sections)).toContain(`<sandbox>\n${CLOUDFLARE_INSTRUCTIONS}\n</sandbox>`);
     for (const name of CODING_TOOLS) expect(seen.requests[1]!.tools).not.toContain(name);
     for (const request of seen.requests) expect(request.tools).toEqual(expect.arrayContaining(["codemode", "web_page", "generate_image"]));
   });
