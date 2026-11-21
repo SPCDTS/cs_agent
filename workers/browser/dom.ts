@@ -264,6 +264,14 @@ const tags = {
   "session-history-close": "button",
   "session-history-body": "div",
   "session-history-older": "button",
+  "manage-subtabs": "div",
+  "chat-inspector": "aside",
+  "chat-inspector-title": "strong",
+  "chat-inspector-close": "button",
+  "chat-inspector-topo": "button",
+  "chat-inspector-ctx": "button",
+  "skill-editor": "details",
+  "grant-editor": "details",
 } as const;
 type ElementByTag<T extends string> = T extends keyof HTMLElementTagNameMap ? HTMLElementTagNameMap[T] : T extends "svg" ? SVGSVGElement : HTMLElement;
 export function $<K extends keyof typeof tags>(id: K): ElementByTag<(typeof tags)[K]>;
