@@ -18,7 +18,8 @@ const hashed = async (value: string) => (await sha256(value)).toString('hex');
 export const deviceServerId = (id: string) => 'device-' + id;
 
 export class DeviceStore {
-  constructor(private readonly sql: SqlStorage, private readonly vault: TokenVault, private readonly mcp: McpServerStore, private readonly env: Env) {}
+  constructor(private readonly sql: SqlStorage, private readonly vault: TokenVault, private readonly mcp: McpServerStore, private readonly env: Env,
+    private readonly settings = async () => tunnelSettings(env)) {}
   initialize() { this.sql.exec(`CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,name TEXT NOT NULL,desktop INTEGER NOT NULL,state TEXT NOT NULL,created INTEGER NOT NULL,expires INTEGER NOT NULL,pairing_hash TEXT NOT NULL,claim_hash TEXT,secret TEXT NOT NULL,tunnel_id TEXT,dns_id TEXT)`); }
   private row(id: string) { const row = this.sql.exec<Row>('SELECT * FROM devices WHERE id=?', id).toArray()[0]; if (!row) throw new Error('device_not_found'); return row; }
   private view(row: Row): Static<typeof DeviceView> { return { id: row.id, name: row.name, desktop: !!row.desktop, state: row.state, createdAt: row.created, expiresAt: row.expires,
@@ -29,7 +30,7 @@ export class DeviceStore {
   private port(id: string) { return 20000 + (parseInt(id.slice(0, 4), 16) % 10000) * 2; }
   async create(input: Static<typeof DeviceCreate>) {
     if (!Check(DeviceCreate, input)) throw new Error('device_invalid');
-    const tunnel = new DeviceTunnel(tunnelSettings(this.env));
+    const tunnel = new DeviceTunnel(await this.settings());
     const old = this.sql.exec<Row>('SELECT * FROM devices WHERE id=?', input.id).toArray()[0];
     if (old && (old.name !== input.name || !!old.desktop !== input.desktop)) throw new Error('device_conflict');
     if (!old) {
@@ -117,7 +118,7 @@ export class DeviceStore {
       const record = this.mcp.list().find(record => record.server.id === serverId);
       if (record) this.mcp.disable(serverId, record.revision);
     }
-    if (row.tunnel_id) await new DeviceTunnel(tunnelSettings(this.env)).revoke(row.tunnel_id);
+    if (row.tunnel_id) await new DeviceTunnel(await this.settings()).revoke(row.tunnel_id);
     return this.view(this.row(id));
   }
 }

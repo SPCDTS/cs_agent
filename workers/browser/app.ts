@@ -18,6 +18,16 @@ export const MORE_KINDS = ["web_search", "generate_image", "coding_exec", "codin
 export const LOGIN: Record<string, [string, string]> = { ok: ["已登录", "ok"], needed: ["需要登录", "warn"], error: ["凭据错误", "bad"], unconfigured: ["未配置", "neutral"] };
 export const CREDENTIAL: Record<string, string> = { oauth: "OAuth（CIMD）", static: "静态凭据", none: "无凭据" };
 export const ERRORS: Record<string, string> = {
+  device_oauth_state: "授权请求已过期，请从当前标签页重新授权。",
+  device_oauth_zone: "没有找到匹配的活动域名。请核对授权账户、部署域名或 DEVICE_TUNNEL_DOMAIN。",
+  device_oauth_refresh_missing: "Cloudflare 未授予离线续期权限，请重新授权。",
+  device_oauth_scope: "设备所需权限不完整，请重新授权。",
+  device_oauth_exchange: "Cloudflare 换取令牌失败，请重新授权。",
+  device_oauth_reauthorize: "Cloudflare 授权已失效，请重新授权。",
+  device_cloudflare_denied: "Cloudflare 未授权此操作，请核对本次同意的可选权限。",
+  device_cloudflare_rejected: "Cloudflare 拒绝了这组参数，请核对资源和当前状态。",
+  device_cloudflare_review_expired: "申请已处理或已过期，请刷新。",
+  device_cloudflare_unknown: "操作结果暂时无法确认，请先查询 Cloudflare 的实际状态。",
   view_pending: "展示数据尚未同步，请稍后刷新。升级后的历史数据将在维护任务中补齐。",
   busy: "会话正在运行或压缩，请先停止或等待完成后重试",
   invalid_cursor: "历史分页标记已失效，请重新打开历史",

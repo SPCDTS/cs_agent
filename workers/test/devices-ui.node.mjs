@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import { ADMIN_PAGE_HTML } from "../src/admin/app.generated.ts";
 import { bundleModule, mountDom } from "./browser-harness.mjs";
 
-const { window, document, click } = mountDom(ADMIN_PAGE_HTML);
+const { window, document, click, settle } = mountDom(ADMIN_PAGE_HTML);
 globalThis.__deviceCs = { epoch: 0 };
 globalThis.__deviceErrors = [];
 let requests = [], devices = [], firstFailure = true;
 globalThis.__deviceRead = async (_schema, method, path, body) => {
   requests.push({ method, path, body });
+  if (path === '/admin/devices/cloudflare/complete') return { domain: 'example.test' };
   if (method === "GET") return { configured: true, devices };
   if (path === "/admin/devices") {
     if (firstFailure) { firstFailure = false; throw new Error("synthetic-network"); }
@@ -19,12 +20,11 @@ globalThis.__deviceRead = async (_schema, method, path, body) => {
 };
 const { initDevices, loadDevices } = await bundleModule("browser/devices.ts", {
   "./app": 'export { $, el } from "./browser/dom.ts"; export const fail = e => globalThis.__deviceErrors.push(e), show = () => {}, readToken = () => true;',
-  "./api": "export const readApi = (...args) => globalThis.__deviceRead(...args);",
+  "./api": "export const readApi = (...args) => globalThis.__deviceRead(...args); export const api = (...args) => globalThis.__deviceRead(null,...args);",
   "./console": "export const cs = globalThis.__deviceCs;",
   "./mcp-servers": "export const loadMcpServers = async () => {};",
 });
 const node = id => document.getElementById(id);
-
 test("真实设备表单默认只选命令行，失败重试复用设备 ID，关闭后清除配对链接", async () => {
   initDevices(); await loadDevices();
   assert.equal(node("device-desktop").hasAttribute("checked"), false);
@@ -40,4 +40,18 @@ test("真实设备表单默认只选命令行，失败重试复用设备 ID，�
   assert.equal(node("device-link").value, ""); assert.equal(node("device-pairing").hidden, true);
   const revoke = [...node("device-list").querySelectorAll("button")].find(button => button.textContent === "撤销接入");
   await click(revoke); assert.match(node("device-list").textContent, /已撤销/);
+});
+
+test('回调移除地址栏中的授权码，仅提交本标签页发起的 state', async () => {
+  mountDom(ADMIN_PAGE_HTML);
+  const rewrites = [];
+  globalThis.history = {replaceState: (_a,_b,path) => rewrites.push(path)};
+  globalThis.location = {pathname:'/admin/',hash:'#cloudflare?state=other&code=sample'};
+  sessionStorage.setItem('cs-agent-cloudflare-state','expected'); initDevices(); await settle();
+  assert.deepEqual(rewrites,['/admin/']); assert.equal(requests.some(r => r.path.endsWith('/complete')),false);
+  globalThis.location.hash = '#cloudflare?state=expected&code=sample';
+  sessionStorage.setItem('cs-agent-cloudflare-state','expected'); initDevices(); await settle();
+  assert.deepEqual(requests.find(r => r.path.endsWith('/complete')).body,{state:'expected',code:'sample'});
+  assert.equal(sessionStorage.getItem('cs-agent-cloudflare-state'),null);
+  delete globalThis.history; delete globalThis.location;
 });

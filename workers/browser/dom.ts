@@ -114,6 +114,8 @@ const tags = {
   "codex-copy": "button",
   "mcp-list": "div",
   "device-editor": "details", "device-name": "input", "device-desktop": "input",
+  "device-cf-changes": "div",
+  "device-cloudflare": "button", "device-cloudflare-state": "span",
   "device-create": "button", "device-reload": "button", "device-copy": "button",
   "device-state": "p", "device-pairing": "div", "device-link": "input", "device-list": "div",
   "mcp-server-editor": "details",

@@ -1,6 +1,6 @@
 import { $, el, fail, show, readToken } from './app';
-import { readApi } from './api';
-import { DeviceList, DeviceSetup, DeviceView } from '../src/devices/contracts';
+import { api, readApi } from './api';
+import { CloudflareChangeList, CloudflareLink, CloudflareStatus, DeviceList, DeviceSetup, DeviceView } from '../src/devices/contracts';
 import { cs } from './console';
 import { loadMcpServers } from './mcp-servers';
 
@@ -13,7 +13,13 @@ export async function loadDevices() {
   const result = await readApi(DeviceList, 'GET', '/admin/devices');
   if (epoch !== cs.epoch || version !== loading) return;
   $('device-create').disabled = !result.configured;
-  $('device-state').textContent = result.configured ? '默认启用命令行；桌面选项默认关闭。' : '实例尚未配置设备 Tunnel。管理员需设置 DEVICE_TUNNEL_ACCOUNT_ID、ZONE_ID、DOMAIN 和 API_TOKEN；设备使用者无需配置这些参数。';
+  const grant = result.cloudflare;
+  $('device-cloudflare').hidden = !grant?.available;
+  $('device-cloudflare').textContent = grant?.domain ? '重新授权 Cloudflare' : '授权 Cloudflare';
+  const scopeLabels: Record<string,string> = { 'cache.purge':'清缓存', 'workers-r2.write':'管理 R2 桶', 'workers-scripts.metadata_read':'查看 Workers' };
+  const optional = grant?.scopes.filter(scope => scopeLabels[scope]).map(scope => scopeLabels[scope]) ?? [];
+  $('device-cloudflare-state').textContent = grant?.reauth ? '授权已失效，请重新授权。' : grant?.domain ? '已授权 ' + [grant.domain, ...optional].join(' · ') : '';
+  $('device-state').textContent = result.configured ? '默认启用命令行；桌面选项默认关闭。' : grant?.available ? '授权后，服务端会识别域名并为每台设备创建 Tunnel 和 DNS 记录。' : '部署时登记 Cloudflare OAuth 客户端，或配置设备 Tunnel 凭据。';
   const list = $('device-list'); list.replaceChildren();
   for (const device of result.devices) {
     const revoke = el('button', { type: 'button', className: 'btn', text: device.state === 'revoked' ? '重试关闭入口' : '撤销接入' });
@@ -29,6 +35,30 @@ export async function loadDevices() {
     }
     list.append(item);
   }
+  const changes = $('device-cf-changes'); changes.replaceChildren(); changes.hidden = true;
+  if (!grant?.domain) return;
+  const rows = await readApi(CloudflareChangeList, 'GET', '/admin/devices/cloudflare/changes');
+  if (epoch !== cs.epoch || version !== loading) return;
+  const status: Record<string,string> = { pending:'等待批准', executing:'已提交执行，请核对实际状态', succeeded:'已执行', rejected:'已拒绝', expired:'已过期', failed:'失败', unknown:'结果待核实' };
+  for (const row of rows) {
+    const c = row.change;
+    const description = c.action === 'dns_create' ? '新增 DNS ' + c.type + ' 记录 ' + c.name + ' → ' + c.content + (c.proxied ? '（启用代理）' : '（仅 DNS）')
+      : c.action === 'bucket_create' ? '创建 R2 桶 ' + c.name : '清除以下 URL 的缓存：' + c.urls.join('，');
+    const item = el('div', {className:'source'}, [el('strong',{text:description}),
+      el('p',{className:'muted small',text:row.domain + ' · 账户 ' + row.account + ' · ' + (status[row.status] ?? row.status)})]);
+    if (row.status === 'pending') {
+      for (const [decision, text] of [['approve','批准并执行'],['reject','拒绝']] as const) {
+        const button = el('button',{type:'button',className:'btn',text});
+        button.addEventListener('click',async () => {
+          button.disabled = true;
+          try { await api('POST', '/admin/devices/cloudflare/changes/' + row.id + '/' + decision); }
+          catch (error) { fail(error); } finally { await loadDevices().catch(fail); }
+        }); item.append(button);
+      }
+    }
+    changes.append(item);
+  }
+  changes.hidden = rows.length === 0;
 }
 async function prepare() {
   const epoch = cs.epoch;
@@ -43,7 +73,29 @@ async function prepare() {
   } catch (error) { fail(error); $('device-state').textContent = '准备失败。再次点击可重试同一设备；已创建的连接会复用。'; }
   finally { $('device-create').disabled = false; }
 }
+const loginKey = 'cs-agent-cloudflare-state';
 export function initDevices() {
+  $('device-cloudflare').addEventListener('click', async () => {
+    const button = $('device-cloudflare'); button.disabled = true;
+    try {
+      const link = await readApi(CloudflareLink, 'POST', '/admin/devices/cloudflare/start');
+      const url = new URL(link.url), state = url.searchParams.get('state');
+      if (url.origin !== 'https://dash.cloudflare.com' || url.pathname !== '/oauth2/auth' || !state) throw new Error('device_oauth_state');
+      sessionStorage.setItem(loginKey, state);
+      location.assign(url.href);
+    } catch (error) { fail(error); } finally { button.disabled = false; }
+  });
+  if (typeof location !== 'undefined' && location.hash.startsWith('#cloudflare?')) {
+    const query = new URLSearchParams(location.hash.slice('#cloudflare?'.length));
+    history.replaceState(null, '', location.pathname);
+    cs.view = 'models'; $('device-editor').open = true;
+    const expected = sessionStorage.getItem(loginKey); sessionStorage.removeItem(loginKey);
+    const state = query.get('state'), code = query.get('code');
+    if (code && expected && state === expected && readToken()) {
+      void readApi(CloudflareStatus, 'POST', '/admin/devices/cloudflare/complete', { state, code })
+        .then(async grant => { await loadDevices(); show('Cloudflare 已授权，设备域名为 ' + grant.domain, 'success'); }).catch(fail);
+    } else show('授权未完成，请从本页重新发起。', 'error');
+  }
   $('device-editor').addEventListener('toggle', () => { if ($('device-editor').open) void loadDevices().catch(fail); else { $('device-link').value = ''; $('device-pairing').hidden = true; } });
   $('device-reload').addEventListener('click', () => { void loadDevices().catch(fail); });
   $('device-create').addEventListener('click', () => {

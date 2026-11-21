@@ -7,7 +7,7 @@ import { httpsUrl, type OAuthServer } from "./config";
 
 export const DiscoverySchema = Type.Object({ issuer: Type.String(), authorization: Type.String(), token: Type.String(), resource: Type.String() }, { additionalProperties: false });
 export type Discovery = Static<typeof DiscoverySchema>;
-const Tokens = Type.Object({ access_token: Type.String({ minLength: 1, maxLength: 65536, pattern: "^[^\\s\\u0000-\\u001f\\u007f]+$" }),
+export const Tokens = Type.Object({ access_token: Type.String({ minLength: 1, maxLength: 65536, pattern: "^[^\\s\\u0000-\\u001f\\u007f]+$" }),
   refresh_token: Type.Optional(Type.String({ minLength: 1, maxLength: 65536 })), token_type: Type.String(),
   expires_in: Type.Optional(Type.Number({ minimum: 0, maximum: 315360000 })), scope: Type.Optional(Type.String({ maxLength: 4096 })) });
 export type OAuthTokens = Static<typeof Tokens>;
