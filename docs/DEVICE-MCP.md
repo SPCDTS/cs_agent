@@ -4,7 +4,13 @@
 
 ## 管理员首次配置
 
-在 Cloudflare 托管一个域名，为本实例设置以下 Worker secrets。域名使用该 Zone 的根域，例如 `example.com`；自动创建的设备地址为 `device-<随机 ID>.example.com`，避免多级域名证书问题。
+部署后，在管理台的“模型与接入 → 添加设备与 Cloudflare 管理”点击“授权 Cloudflare”，选中设备域名所在的账户并同意。服务端使用 PKCE 交换授权码，沿部署域名向上查找活动 Zone，并用实例的 `OAUTH_STORE_KEY` 加密保存和续期令牌。授权被撤销或过期时，在同一处重新授权。若部署在 workers.dev，请先用 `DEVICE_TUNNEL_DOMAIN` 指定自有活动域名。已有设备的账户与域名在重新授权时保持绑定。
+
+主人私聊和主人网页可以查询 DNS 记录摘要、Tunnel 状态、Worker 和 R2 桶名称，也可以申请新增 A、AAAA、CNAME 记录、创建 R2 桶、按 URL 清缓存。后面三类变更会列出账户、域名和具体参数，在同一管理面板中批准后执行一次，申请十分钟有效。缓存、R2 和 Workers 元数据权限在 Cloudflare 同意页可选。模型只会收到资源摘要和申请编号。可在 Cloudflare 的已授权应用中撤销授权。
+
+部署脚本在正式部署时按回调 URL 查找并复用私有客户端，首次登记使用部署账户的 `CLOUDFLARE_ACCOUNT_ID` 和具有 OAuth Clients Write 权限的 `CLOUDFLARE_API_TOKEN`。可把首次登记的公开 `DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID` 固定在部署档案的 vars 中，或设为同名 CI 变量，后续部署直接复用。离线生成配置及 dry-run 跳过登记。每个实例各自使用自己的回调域名。
+
+已有手工配置的实例也可继续使用以下 Worker secrets。域名使用该 Zone 的根域，例如 `example.com`；自动创建的设备地址为 `device-<随机 ID>.example.com`，避免多级域名证书问题。
 
 | Secret | 内容 |
 |---|---|
@@ -20,7 +26,7 @@
 
 ## 接入设备
 
-1. 在 cs-agent 管理页进入“模型与接入”，展开“添加设备”。填写名称，桌面选项默认不勾选，点击“生成配对链接”。
+1. 在 cs-agent 管理页进入“模型与接入”，展开“添加设备与 Cloudflare 管理”。填写名称，桌面选项默认不勾选，点击“生成配对链接”。
 2. 在待接入设备安装 Node.js 24 或以上版本，从同一页面下载 `cs-agent-device.cjs`。
 3. 在终端执行 `node cs-agent-device.cjs pair`，将配对链接粘贴到程序提示中。链接包含短期配对凭据，不要发到聊天、日志或仓库。
 4. 客户端自动准备 cloudflared、当前用户的登录自启动、MCP 服务并验证云端连接。默认目录是用户主目录下的 `AgentWork`，可以在配对时加 `--workdir <目录>`。

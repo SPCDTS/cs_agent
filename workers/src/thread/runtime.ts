@@ -29,7 +29,8 @@ import { cleanOutgoing } from '../send-clean';
 import { hostedSearchSteps } from '../tools/web-search';
 import { createWebPageTool } from '../tools/web-page';
 import { createImageTool } from '../tools/imagegen';
-import { createAccessExtension } from '../tools/access';
+import { createAccessExtension, type AccessDeps } from '../tools/access';
+import { createCloudflareExtension } from '../tools/cloudflare';
 import { createWorkspaceAdminExtension } from '../tools/workspace-admin';
 import { createMediaExtension } from '../tools/media';
 import { lookupHostMedia } from '../tools/media-host';
@@ -236,14 +237,15 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     },
     record: (kind, detail) => host.audit(kind, detail),
   }));
+  const allowManage: AccessDeps['allowManage'] = async (api,c) => {
+    const input = await host.currentInput(harness, api, api.conversationId, c);
+    if (!input || host.ownerTurnKind(input) !== "message" || input.session_generation !== await host.sessionGeneration()) return;
+    const id = isWebAdmin(input) ? ownerIds(host.env)[0] : input.user_id;
+    return id ? "qq:" + id : undefined;
+  };
+  if (memory.ns === 'owner') registry.install(createCloudflareExtension(allowManage, () => host.env.REGISTRY.getByName('main')));
   registry.install(createAccessExtension({
-    allowManage:async(api,c)=>{
-      const input=await host.currentInput(harness,api,api.conversationId,c);
-      if(!input||host.ownerTurnKind(input)!=="message"||input.session_generation!==await host.sessionGeneration())return;
-      const id=isWebAdmin(input)?ownerIds(host.env)[0]:input.user_id;
-      return id?"qq:"+id:undefined;
-    },
-    registry:()=>host.env.REGISTRY.getByName("main"),bridge:()=>host.env.BRIDGE.getByName("napcat"),
+    allowManage, registry:()=>host.env.REGISTRY.getByName("main"),bridge:()=>host.env.BRIDGE.getByName("napcat"),
   }));
   registry.install(createWorkspaceAdminExtension({
     allowed: ownerTaskAllowed,

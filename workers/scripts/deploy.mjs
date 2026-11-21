@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { ensureCloudflareClient } from './cloudflare-client.mjs';
 import { parse } from 'jsonc-parser';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -22,13 +23,14 @@ export function deploymentConfig(base, profile) {
   return { ...base, ...profile, vars: { ...base.vars, ...profile.vars } };
 }
 
-export async function prepareDeployment(profilePath) {
+export async function prepareDeployment(profilePath, registerClient = false) {
   const source = await readFile(resolve(root, 'wrangler.jsonc'), 'utf8');
   const errors = [];
   const base = parse(source, errors, { allowTrailingComma: true });
   if (errors.length) throw new Error('wrangler.jsonc 无效');
   const profile = JSON.parse(await readFile(resolve(root, profilePath), 'utf8'));
   const config = deploymentConfig(base, profile);
+  if (registerClient) config.vars.DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID = await ensureCloudflareClient(config.vars);
   const path = resolve(root, 'wrangler.deploy.json');
   await writeFile(path, JSON.stringify(config, null, 2) + '\n', 'utf8');
   return path;
@@ -38,9 +40,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const [profile, ...args] = process.argv.slice(2);
     if (!profile || profile.startsWith('-')) throw new Error('用法：npm run deploy -- deployments/<档案>.json；不会自动选择生产环境');
-    const path = await prepareDeployment(profile);
-    if (args.includes('--prepare-only')) {
-      if (args.length !== 1) throw new Error('--prepare-only 不能与部署参数混用');
+    const prepareOnly = args.includes('--prepare-only') || args.includes('--prepare-for-deploy');
+    if (prepareOnly && args.length !== 1) throw new Error('准备配置选项不能与部署参数混用');
+    const offline = args.some(arg => ['--prepare-only','--dry-run','--dry-run=true','--dryRun','--help','-h'].includes(arg));
+    const path = await prepareDeployment(profile, !offline);
+    if (prepareOnly) {
       console.log('已生成部署配置：' + path);
     } else {
       const result = spawnSync(process.execPath, [resolve(root, 'node_modules/wrangler/bin/wrangler.js'), 'deploy', '--config', path, ...args], { cwd: root, stdio: 'inherit' });

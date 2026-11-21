@@ -209,8 +209,10 @@
         <div id="mcp-list" class="stack" style="padding:0"></div>
         
 <details id="device-editor" class="source">
-  <summary>添加设备 · 默认命令行，可选桌面</summary>
+  <summary>添加设备与 Cloudflare 管理</summary>
   <p class="muted small">设备默认提供本机命令行，代码与依赖保留在设备上。桌面能力按需安装。首次接入仅主人可用，共享请到 MCP 群授权设置。</p>
+  <div class="row"><button id="device-cloudflare" type="button" class="btn" hidden>授权 Cloudflare</button><span id="device-cloudflare-state" class="muted small" role="status"></span></div>
+  <div id="device-cf-changes" class="stack" hidden></div>
   <div class="row"><label for="device-name">设备名称</label><input id="device-name" type="text" maxlength="80" placeholder="我的 Mac" autocomplete="off">
     <label class="row"><input id="device-desktop" type="checkbox">安装 agent-desktop，允许操作登录用户的桌面</label></div>
   <div class="row"><button id="device-create" class="btn primary" type="button">生成配对链接</button><button id="device-reload" class="btn" type="button">刷新设备</button></div>

@@ -139,8 +139,12 @@ jobs:
             runner/package-lock.json
       # 设备客户端下载包与 Worker 一起构建，使用 runner 的锁定依赖。
       - run: npm run install:workers
-      - run: node scripts/deploy.mjs deployments/production.json --prepare-only
+      - run: node scripts/deploy.mjs deployments/production.json --prepare-for-deploy
         working-directory: workers
+        env:
+          DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID: ${{ vars.DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       # coding 沙箱仍由 Wrangler 构建并推送到 Cloudflare；不再部署旧的常驻 Node 容器。
       - uses: cloudflare/wrangler-action@v3
         with:
