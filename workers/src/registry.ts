@@ -10,7 +10,7 @@ import { OAuthFailure } from "./mcp/oauth-fetch";
 import { defaultSettings, effectiveSettings, settingsRevision, type ModelSelection, type Settings, type SettingsSnapshot, defaultOpsSettings, opsSettingsRevision, OpsSettingsSchema, type OpsSettings, type OpsSettingsSnapshot } from "./settings";
 import { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, type CredentialLease } from "./model-credentials";
 import { openModels, providerStatuses, selectionProblem, type ProviderStatus } from "./models";
-import { CODEX_PROVIDER, fetchCatalog } from "./codex-login";
+import { CODEX_PROVIDER, accountCodexCatalog, fetchCatalog } from "./codex-login";
 import type { RefreshFailure } from "./codex-refresh-error";
 import { CHATGPT_SCHEMA, ChatGPTAccounts, type ChatGPTView } from "./chatgpt-accounts";
 import { GrantStore, digest, type GrantAccess } from "./grants";
@@ -225,6 +225,17 @@ export class RegistryDO extends DurableObject<Env> {
   private async providers(): Promise<ProviderStatus[]> {
     const statuses = await providerStatuses(this.models);
     return statuses.map(status => status.id === CODEX_PROVIDER && !this.vault.configured ? { ...status, reason: "unconfigured" } : status);
+  }
+
+  // 供执行 DO 在接纳输入时取得活动账号目录。只读已保存的元数据，不刷新 OAuth 或访问上游。
+  async codexCatalog() {
+    return accountCodexCatalog(await this.chatgpt.store.read(CODEX_PROVIDER));
+  }
+  async executionSettings() {
+    const { overrides, value } = this.settings();
+    const catalog = this.codexCatalog();
+    // Codex 凭据故障时，独立的其他 provider 仍能运行。
+    return { overrides, catalog: await (value.model.provider === CODEX_PROVIDER ? catalog : catalog.catch(() => [])) };
   }
 
   async modelView(): Promise<ModelView> {

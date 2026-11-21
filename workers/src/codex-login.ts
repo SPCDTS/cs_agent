@@ -1,3 +1,4 @@
+import protocol from "../codex-protocol/package.json";
 import type { OAuthAuth } from "@earendil-works/pi-ai";
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 import { Type, type Static } from "typebox";
@@ -11,7 +12,7 @@ export const CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback";
 export const TOKEN_URL = "https://auth.openai.com/oauth/token";
 export const CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
 // Codex 兼容协议版本；不是本机 CLI 的安装版本。
-const CODEX_VERSION = "0.162.0";
+const CODEX_VERSION = protocol.devDependencies["@openai/codex"];
 export const CODEX_MODELS_URL = CODEX_BASE_URL + "/models?client_version=" + CODEX_VERSION;
 export const CODEX_HEADERS = { originator: "codex_cli_rs", version: CODEX_VERSION,
   "User-Agent": "codex_cli_rs/" + CODEX_VERSION + " (cs-agent; Cloudflare Workers)" };
@@ -37,12 +38,29 @@ export const TokenResponseSchema = Type.Object({
 export type TokenResponse = Static<typeof TokenResponseSchema>;
 export const CatalogSchema = Type.Array(Type.Object({ slug: Text, display_name: Text, visibility: Text }));
 export type ChatGPTModel = Static<typeof CatalogSchema>[number];
+// 只持久化执行所用的目录字段。旧凭据和上游的可选字段可以缺省。
+function compactCodexEntry(entry: ChatGPTModel) {
+  const raw: Record<string, unknown> = entry;
+  const number = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  return { slug: entry.slug, display_name: entry.display_name, visibility: entry.visibility,
+    context_window: number(raw.context_window), max_output_tokens: number(raw.max_output_tokens),
+    input_modalities: Array.isArray(raw.input_modalities) ? raw.input_modalities.filter((v): v is "text" | "image" => v === "text" || v === "image") : undefined,
+    supported_reasoning_levels: Array.isArray(raw.supported_reasoning_levels) ? raw.supported_reasoning_levels
+      .filter(v => typeof v?.effort === "string").map(v => ({ effort: v.effort as string })) : undefined };
+}
+export type CodexCatalogEntry = ReturnType<typeof compactCodexEntry>;
 const CredentialSchema = Type.Object({
   type: Type.Literal("oauth"), flow: Type.Literal("codex-native"), accountId: Text, access: Text, refresh: Text, expires: Type.Number(),
   clientId: Text, subject: Text, idToken: Text, scope: Text, email: Type.Optional(Text), hostId: Text, catalog: CatalogSchema,
 });
 export type ChatGPTCredential = Static<typeof CredentialSchema>;
 export const isChatGPTCredential = (value: unknown): value is ChatGPTCredential => Check(CredentialSchema, value);
+function visibleCodexEntries(entries: ChatGPTModel[]) {
+  return entries.filter(entry => entry.visibility === "list").map(compactCodexEntry);
+}
+export function accountCodexCatalog(credential: unknown): CodexCatalogEntry[] {
+  return isChatGPTCredential(credential) ? visibleCodexEntries(credential.catalog) : [];
+}
 export const PendingSchema = Type.Object({
   flow: Type.Literal("codex-native"), workspaceId: Type.Optional(Text),
   state: Text, nonce: Text, verifier: Text, redirectUri: Text, hostId: Text,
@@ -119,7 +137,7 @@ export async function fetchCatalog(credential: ChatGPTCredential): Promise<ChatG
   let value: unknown;
   try { value = await response.json(); } catch { throw new CatalogError({ at: Date.now(), kind: "invalid_json", ...diagnostic }); }
   if (!Check(Type.Object({ models: CatalogSchema }), value)) throw new CatalogError({ at: Date.now(), kind: "invalid_catalog", ...diagnostic });
-  const models = value.models.filter(model => model.visibility === "list");
+  const models = visibleCodexEntries(value.models);
   if (!models.length) throw new CatalogError({ at: Date.now(), kind: "invalid_catalog", ...diagnostic });
   return models;
 }

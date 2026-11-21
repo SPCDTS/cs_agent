@@ -306,7 +306,7 @@ describe("model selection and Codex Responses", () => {
         { headers: { "Content-Type": "text/event-stream" } });
     });
     const available = models.openModels(env, store(), upstream);
-    const model = available.getModels("openai-codex").find(model => model.id === "gpt-6-astra");
+    const model = (await available.getAvailable("openai-codex")).find(model => model.id === "gpt-6-astra");
     if (!model) throw new Error("test model missing");
     const result = await available[method](model, { messages: [{ role: "user", content, timestamp: 0 }] }, { transport: "sse" });
     expect(result.errorMessage).toBeUndefined();
@@ -316,7 +316,7 @@ describe("model selection and Codex Responses", () => {
 
   it("旧会话只声明原生搜索，保留历史函数调用、结果和其他工具的撤销提示", async () => {
     network(); await login();
-    const base = models.openModels(env, store()), model = base.getModel("openai-codex", "gpt-6-astra")!;
+    const base = models.openModels(env, store()), [model] = await base.getAvailable("openai-codex");
     const tool = (name: string): Tool => ({ name, description: name, parameters: { type: "object", properties: {} } });
     const context: Context = { messages: [
       { role: "system", content: "开始", timestamp: 0, toolsAdded: ["web_search", "old_tool", "send_message"].map(tool) },
@@ -427,7 +427,7 @@ describe("多账号目录恢复与共享生图", () => {
       return fauxAssistantMessage("done");
     };
     faux.setResponses([respond]);
-    vi.spyOn(spec, "create").mockImplementation(() => ({ ...original(), stream: faux.provider.stream, streamSimple: faux.provider.streamSimple }));
+    vi.spyOn(spec, "create").mockImplementation(options => ({ ...original(options), stream: faux.provider.stream, streamSimple: faux.provider.streamSimple }));
     const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/mQAAAAASUVORK5CYII=";
     network({ [CODEX_BASE_URL + "/images/generations"]: async request => {
       expect(request.headers.get("authorization")).toBe("Bearer " + accessToken());
@@ -455,7 +455,13 @@ describe("多账号目录恢复与共享生图", () => {
 
 it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，管理读取不阻塞执行", async () => {
   network(); await login();
-  await selectModel({ provider: "openai-codex", id: "gpt-6-astra" });
+  const future = { slug: "future-codex-test", display_name: "Future", visibility: "list", context_window: 144_000,
+    input_modalities: ["text", "image"], supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] };
+  network({ [CODEX_MODELS_URL]: async () => Response.json({ models: [future, catalog[1]] }) });
+  await adminJson("POST", "/admin/model/oauth/codex/catalog", {});
+  const view = await adminJson<ModelView>("GET", "/admin/model");
+  expect(view.providers.find(p => p.id === "openai-codex")?.models).toEqual([{ id: future.slug, name: future.display_name }]);
+  expect((await selectModel({ provider: "openai-codex", id: future.slug, reasoningEffort: "high" })).status).toBe(200);
   const alarms = vi.spyOn(ModelAlarm.prototype, "dispatch");
   let parentCalls = 0, childCalls = 0;
   const owner = env.THREAD.getByName("owner");
@@ -467,6 +473,7 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
     const childRequest = text.includes("你是主 agent 派出的子 agent");
     const step = childRequest ? childCalls++ : parentCalls++;
     const payload = JSON.parse(text);
+    expect(payload).toMatchObject({ model: future.slug, reasoning: { effort: "high" } });
     expect(payload.tools.filter((tool: { type: string; name?: string }) => tool.type === "web_search" || tool.name === "web_search"))
       .toEqual([{ type: "web_search", external_web_access: true }]);
     const query = childRequest && step === 1 ? "后续文档" : "官方文档";
@@ -507,6 +514,7 @@ it("主 agent 与子 agent 工具续轮均由原 DO alarm 发出模型请求，�
   const page = await requests.list({ since: 0, until: Date.now() + 1000, limit: 20 });
   const withSearch = page.requests.filter(r => r.toolCalls?.some(call => call.name === "web_search"));
   expect(withSearch).toHaveLength(3);
+  expect(withSearch.every(request => request.contextWindow === future.context_window && request.model === future.slug)).toBe(true);
   const childRequests = withSearch.filter(r => r.actor === child.id);
   expect(childRequests).toHaveLength(2);
   expect(childRequests[0]!.binding!.turnId).toBe(childRequests[1]!.binding!.turnId);

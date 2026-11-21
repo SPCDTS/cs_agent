@@ -20,10 +20,10 @@ import { InboxDoc, LiveDoc, type Harness, type Conversation, type SettledSubmiss
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { Env } from "./env";
 import { inboundKey, ownerIds, scopeOf, type InboundInput, type Target, type TurnKind } from "./policy";
-import { threadOpsSettings, effectiveSettings, type Settings, type SettingsSnapshot } from "./settings";
+import { threadOpsSettings, effectiveSettings, type Settings } from "./settings";
 import { MESSAGE_SCHEMA, markMessageRecalled, recordMessage, recall, withReplyContext, type RecallOptions } from "./context";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
-import { modelChange, openModels, sameSelection } from "./models";
+import { modelChange, codexModel, openModels, sameSelection, type CodexModels } from "./models";
 import { captureModels } from "./requests/capture";
 import { remoteCredentials } from "./model-credentials";
 import { MEMORY_SUPPORT_SCHEMA, MEMORY_LIFECYCLE_TRIGGERS } from "./memory/lifecycle";
@@ -59,10 +59,11 @@ export class ThreadDO extends DurableObject<Env> {
   private readonly database = new DurableObjectSqliteDatabase(this.observedStorage);
   private readonly sandboxTasks = new SandboxTasks(this.database);
   private initialized?: Promise<void>;
+  private codexModels: CodexModels = [];
   private modelsCache?: MutableModels;
   private runtime?: Promise<Runtime>;
   private admissions: Promise<void> = Promise.resolve();
-  private settingsCache?: { at: number; load: Promise<SettingsSnapshot> };
+  private settingsCache?: { at: number; load: Promise<Settings> };
   private readonly waiters = new Map<string, (admission: Admission | undefined) => void>();
   private readonly settling = new Map<string, Admission>();
   private readonly alarmCommands: (() => Promise<void>)[] = [];
@@ -188,7 +189,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   // 回合与记忆抽取共用一个 Models；OAuth 凭据经 Registry 读写，刷新也在 Registry 的锁里串行。
   private models(): MutableModels {
-    return this.modelsCache ??= openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch);
+    return this.modelsCache ??= openModels(this.env, remoteCredentials(() => this.env.REGISTRY.getByName("main")), this.modelAlarm.fetch, () => this.codexModels);
   }
 
   private async openRuntime(): Promise<Runtime> {
@@ -835,11 +836,16 @@ export class ThreadDO extends DurableObject<Env> {
   private async loadSettings(fresh = false): Promise<Settings> {
     let cache = this.settingsCache;
     if (fresh || !cache || Date.now() - cache.at >= SETTINGS_TTL_MS) {
-      const load = this.env.REGISTRY.getByName("main").settings();
+      const load: Promise<Settings> = this.env.REGISTRY.getByName("main").executionSettings().then(snapshot => {
+        const current = this.settingsCache;
+        if (current && current.load !== load) return current.load;
+        this.codexModels = snapshot.catalog.map(codexModel);
+        return effectiveSettings(this.env, snapshot.overrides);
+      });
       cache = this.settingsCache = { at: Date.now(), load };
       load.catch(() => { if (this.settingsCache?.load === load) this.settingsCache = undefined; });
     }
-    return effectiveSettings(this.env, (await cache.load).overrides);
+    return cache.load;
   }
 
   private async extractEnabled(ns: string): Promise<boolean> {
