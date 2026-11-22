@@ -30,6 +30,7 @@ import { createWebPageTool } from '../tools/web-page';
 import { createImageTool } from '../tools/imagegen';
 import { createAccessExtension } from '../tools/access';
 import { createCloudflareExtension } from '../tools/cloudflare';
+import { createOpsExtension } from '../tools/ops';
 import { createWorkspaceAdminExtension } from '../tools/workspace-admin';
 import { createMediaExtension } from '../tools/media';
 import { lookupHostMedia } from '../tools/media-host';
@@ -230,8 +231,16 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     if (input && host.ownerTurnKind(input) === 'message' && input.session_generation === await host.sessionGeneration()) return input;
   };
   const ownerMayManage = async (api: ToolExecutionApi, c: Context) => !!await ownerManagementInput(api, c);
-  if (memory.ns === 'owner') registry.install(createCloudflareExtension(ownerMayManage, () => host.env.REGISTRY.getByName('main'),
-    detail => host.audit('cloudflare_management', detail)));
+  if (memory.ns === 'owner') {
+    registry.install(createCloudflareExtension(ownerMayManage, () => host.env.REGISTRY.getByName('main'),
+      detail => host.audit('cloudflare_management', detail)));
+    registry.install(createOpsExtension({
+      env: host.env,
+      allowed: ownerMayManage,
+      currentTurnId: async (api, c) => (await host.currentInput(harness, api, api.conversationId, c))?.turn_id ?? undefined,
+      audit: detail => host.audit('runtime_ops', detail),
+    }));
+  }
   registry.install(createAccessExtension({
     allowManage: async (api, c) => {
       const input = await ownerManagementInput(api, c);
@@ -273,8 +282,12 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     async refresh => { await mcp.syncConfig(await host.env.REGISTRY.getByName("main").mcpConfig()); if (refresh) await mcp.refreshAll(); },
     change => host.audit("mcp_management", { ...change, source: "agent" })));
   const codemode = installCodemode(registry, {
-    allowed: async (api, callContext) => await codingAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext),
-    namespaces: () => mcp.namespaces(),
+    allowed: async (api, callContext) => await codingAllowed(api, callContext) || await mcp.canUseCodemode(api, callContext)
+      || (memory.ns === "owner" && await ownerMayManage(api, callContext)),
+    namespaces: () => [
+      ...(memory.ns === "owner" ? [{ name: "runtime-ops", prefix: "ops_", description: "实例运行状态、用量费用、请求轨迹与诊断日志只读查询（仅主人会话）" }] : []),
+      ...mcp.namespaces(),
+    ],
   });
   if (memory.ns === "owner" || memory.ns.startsWith("group:")) {
     registry.install(createScheduleExtension(host.env, memory.ns as ScheduleConversation, async (api, callContext) =>
