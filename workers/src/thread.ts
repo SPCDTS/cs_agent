@@ -64,7 +64,6 @@ export class ThreadDO extends DurableObject<Env> {
   private settingsCache?: { at: number; load: Promise<Settings> };
   private readonly waiters = new Map<string, (admission: Admission | undefined) => void>();
   private readonly settling = new Map<string, Admission>();
-  private readonly turnAdmittedAt = new Map<string, number>();
   private readonly alarmCommands: (() => Promise<void>)[] = [];
   private runtimeStarted = false;
   private extracting?: Promise<void>;
@@ -114,6 +113,7 @@ export class ThreadDO extends DurableObject<Env> {
         nickname: "TEXT NOT NULL DEFAULT ''", self_id: "TEXT NOT NULL DEFAULT ''",
         scope_name: "TEXT NOT NULL DEFAULT ''", platform_message_id: "TEXT NOT NULL DEFAULT ''", when_busy: "TEXT", turn_id: "TEXT",
         persona_text: "TEXT", session_generation: "INTEGER NOT NULL DEFAULT 0", kind: "TEXT NOT NULL DEFAULT 'message'", reply_channel: "TEXT NOT NULL DEFAULT 'qq'",
+        admitted_at: "INTEGER",
       })) if (!columns.some(column => column.name === name)) await tx.exec(`ALTER TABLE inbound ADD COLUMN ${name} ${definition}`);
       const outboxColumns = await tx.all<{ name: string }>("PRAGMA table_info(outbox)");
       if (!(await tx.all<{ name: string }>("PRAGMA table_info(subagents)")).some(c => c.name === "summary")) await tx.exec("ALTER TABLE subagents ADD COLUMN summary TEXT");
@@ -294,7 +294,7 @@ export class ThreadDO extends DurableObject<Env> {
     const content = row.kind === "message" && !isWeb(row)
       ? await withReplyContext(this.database, scopeOf(targetOf(row)), row.platform_message_id, row.text) : row.text;
     const submitted = await root.submit({ type: "input", content, requestId: row.message_id, whenBusy }, context);
-    if (!this.turnAdmittedAt.has(row.message_id)) this.turnAdmittedAt.set(row.message_id, Date.now());
+    await this.database.run("UPDATE inbound SET admitted_at = COALESCE(admitted_at, ?) WHERE message_id = ?", Date.now(), row.message_id);
     return submitted;
   }
 
@@ -456,8 +456,6 @@ export class ThreadDO extends DurableObject<Env> {
         return row;
       });
       const ns = await this.namespace();
-      const admittedAt = this.turnAdmittedAt.get(messageId);
-      this.turnAdmittedAt.delete(messageId);
       if (row) {
         await this.env.REGISTRY.getByName("main").recordTurn({scope:ns,origin:isWeb(row)?"web":"qq",outcome:status==="done"?"ok":"failed"}).catch(err => {
           logDiag(this.env, this.ctx, { event: "turn_outcome_report_failed", thread: ns, turnId: row.turn_id ?? undefined, error: err });
@@ -465,7 +463,7 @@ export class ThreadDO extends DurableObject<Env> {
         if (row.turn_id) {
           const settledAt = Date.now();
           const receivedAt = Math.round(row.received_at < 1e12 ? row.received_at * 1000 : row.received_at);
-          const effectiveAdmittedAt = admittedAt ?? receivedAt;
+          const effectiveAdmittedAt = row.admitted_at ?? receivedAt;
           const out = isWeb(row)
             ? await this.database.get<{ first_sent: number | null; delivery_wait: number | null }>("SELECT MIN(at) AS first_sent, 0 AS delivery_wait FROM web_outputs WHERE input_id = ?", messageId)
             : await this.database.get<{ first_sent: number | null; delivery_wait: number | null }>(

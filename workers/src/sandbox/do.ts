@@ -46,27 +46,34 @@ export class SandboxDO extends DurableObject<Env> {
       logDiag(this.env, this.ctx, { event: "workspace_gc_failed", error });
     }
   }
-  private async updateTelemetry(mutate: (current: SandboxTelemetry) => SandboxTelemetry): Promise<SandboxTelemetry> {
-    const current = (await this.ctx.storage.get<SandboxTelemetry>(TELEMETRY_KEY)) ?? EMPTY_TELEMETRY;
-    const next = mutate({ ...EMPTY_TELEMETRY, ...current });
-    await this.ctx.storage.put(TELEMETRY_KEY, next);
-    return next;
+  private alertScope(): string {
+    return "sandbox:" + this.ctx.id.toString();
+  }
+  private updateTelemetry(mutate: (current: SandboxTelemetry) => SandboxTelemetry): Promise<SandboxTelemetry> {
+    return this.ctx.storage.transaction(async tx => {
+      const current = (await tx.get<SandboxTelemetry>(TELEMETRY_KEY)) ?? EMPTY_TELEMETRY;
+      const next = mutate({ ...EMPTY_TELEMETRY, ...current });
+      await tx.put(TELEMETRY_KEY, next);
+      return next;
+    });
   }
   private async startRuntime(): Promise<Container> {
     const container = this.container();
     const booting = !container.running;
     const bootStarted = booting ? Date.now() : 0;
+    const scope = this.alertScope();
     if (booting) {
       this.ready = false;
       const generation = ++this.runtimeGeneration;
       container.start({ image: container.images.sandbox, enableInternet: true, instance: "lite" });
       this.ctx.waitUntil(container.monitor().catch(async error => {
+        if (this.runtimeGeneration !== generation) return;
         const info = classifyError(error);
         const exitCode = info.code ?? info.errorName ?? "exit";
         logDiag(this.env, this.ctx, { event: "sandbox_container_exit", code: exitCode, error });
         await this.updateTelemetry(t => ({ ...t, exitCount: t.exitCount + 1, lastExitAt: Date.now(), lastExitCode: exitCode })).catch(() => {});
         await this.env.REGISTRY.getByName("main").recordAlert({
-          kind: "sandbox_error", scope: "sandbox", origin: "web", episode: `${this.ctx.id.toString()}:${generation}`,
+          kind: "sandbox_error", scope, origin: "web", episode: `${this.ctx.id.toString()}:${generation}`,
           message: `沙箱容器异常退出（${exitCode}），后续调用将自动重建。`,
         }).catch(() => {});
       }).finally(() => { if (this.runtimeGeneration === generation) this.ready = false; }));
@@ -77,7 +84,7 @@ export class SandboxDO extends DurableObject<Env> {
       const now = Date.now(), bootMs = Math.max(0, now - bootStarted);
       this.ctx.waitUntil(Promise.all([
         this.updateTelemetry(t => ({ ...t, bootCount: t.bootCount + 1, lastBootMs: bootMs, lastBootAt: now })),
-        this.env.REGISTRY.getByName("main").resolveAlert("sandbox_error", "sandbox", "web"),
+        this.env.REGISTRY.getByName("main").resolveAlert("sandbox_error", scope, "web"),
       ]).catch(() => {}));
     }
     return container;

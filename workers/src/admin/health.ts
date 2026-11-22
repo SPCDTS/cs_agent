@@ -15,7 +15,7 @@ export async function healthReport(env: Env) {
     env.SCHEDULE.getByName("main").status().catch(unavailable),
     env.EVENTS.getByName("main").health().catch(unavailable),
     env.SANDBOX.getByName("owner").telemetry().catch(() => ({ status: "unavailable" as const })),
-    registry.alerts(50).catch(() => null),
+    registry.activeAlertCount().catch(() => null),
   ]);
   const components = {
     worker: "ready",
@@ -32,6 +32,6 @@ export async function healthReport(env: Env) {
       ...(mcpHealth?.[account.server] ? { health: mcpHealth[account.server] } : {}),
     })) ?? null,
     schedule, events, sandbox,
-    alerts: alerts ? { active: alerts.filter(a => a.closedAt === null).length } : null,
+    alerts: alerts !== null ? { active: alerts } : null,
   };
 }

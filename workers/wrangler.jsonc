@@ -12,7 +12,7 @@
     "enabled": true,
     "redact_query_string": true,
     "issues": { "enabled": true },
-    "traces": { "enabled": true, "head_sampling_rate": 1 }
+    "traces": { "enabled": true, "head_sampling_rate": 0.2 }
   },
   // */5：外部事件轮询兜底（Gmail 推送优先）；UTC 19:30 = 北京 03:30：聊天摘要与清理、记忆整理、审计保留（src/maintenance）。
   // index.ts 的 scheduled 按 cron 字符串分派

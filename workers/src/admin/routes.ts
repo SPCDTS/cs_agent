@@ -26,7 +26,7 @@ import type { RequestQuery } from "../requests/types";
 import { classifyError, logDiag, type DiagQuery } from "../shared/diagnostics";
 import { API_HEADERS, HttpError, adminJson as json, adminPlain as plain, readAdminBody } from "./http";
 
-export type AdminContext = { env: Env; request: Request; url: URL; params: Record<string, string> };
+export type AdminContext = { env: Env; ctx?: ExecutionContext; request: Request; url: URL; params: Record<string, string> };
 export type AdminRoute = {
   method: "GET" | "POST" | "PUT" | "DELETE";
   path: string | RegExp;
@@ -324,12 +324,12 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   } },
 
   { method: "GET", path: "/admin/settings", handle: async ({ env }) => json(await env.REGISTRY.getByName("main").settings()) },
-  { method: "PUT", path: "/admin/settings", handle: async ({ env, request }) => {
+  { method: "PUT", path: "/admin/settings", handle: async ({ env, ctx, request }) => {
     const { value, expectedRevision } = await body(request, Type.Object({ value: SettingsSchema, expectedRevision: Type.String({ pattern: "^[0-9a-f]{16}$" }) }, strict));
     const current = await putSettings(env, value, expectedRevision);
     let applied = false;
     try { applied = await env.BRIDGE.getByName("napcat").reloadSettings() === current.revision; }
-    catch (error) { logDiag(env, undefined, { event: "settings_reload_failed", error }); }
+    catch (error) { logDiag(env, ctx, { event: "settings_reload_failed", error }); }
     return json({ ...current, applied });
   } },
 
@@ -395,11 +395,11 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     if (!result) throw new HttpError(404, "not_found");
     return json(result);
   } },
-  { method: "POST", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/sandbox/reset$`), handle: async ({ env, params }) => {
+  { method: "POST", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/sandbox/reset$`), handle: async ({ env, ctx, params }) => {
     try { return json(await env.SANDBOX.getByName(params.key!).resetRuntime()); }
     catch (error) {
       const info = classifyError(error);
-      logDiag(env, undefined, { event: "sandbox_reset_failed", thread: params.key!, error });
+      logDiag(env, ctx, { event: "sandbox_reset_failed", thread: params.key!, error });
       throw new HttpError(503, "sandbox_unavailable", info.code && info.code !== "sandbox_unavailable" ? { reason: info.code } : undefined);
     }
   } },
@@ -445,11 +445,11 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     handle: ({ env, params }) => oauth(() => env.REGISTRY.getByName("main").loginLink(params.server)) },
   { method: "POST", path: new RegExp(`^/admin/mcp/(?<server>${SERVER})/logout$`),
     handle: ({ env, params }) => oauth(async () => { await env.REGISTRY.getByName("main").logout(params.server); return { ok: true }; }) },
-  { method: "POST", path: new RegExp(`^/admin/mcp/(?<server>${SERVER})/refresh$`), handle: async ({ env, params }) => {
+  { method: "POST", path: new RegExp(`^/admin/mcp/(?<server>${SERVER})/refresh$`), handle: async ({ env, ctx, params }) => {
     try { return json({ results: await env.THREAD.getByName("owner").refreshMcp() }); }
     catch (error) {
       const info = classifyError(error);
-      logDiag(env, undefined, { event: "mcp_refresh_failed", thread: "owner", error, detail: { server: params.server! } });
+      logDiag(env, ctx, { event: "mcp_refresh_failed", thread: "owner", error, detail: { server: params.server! } });
       throw new HttpError(503, "unavailable", info.code ? { reason: info.code } : undefined);
     }
   } },
@@ -466,7 +466,7 @@ function match(path: string | RegExp, actual: string): Record<string, string> | 
   return found ? { ...found.groups } : undefined;
 }
 
-export async function handleAdmin(request: Request, env: Env): Promise<Response> {
+export async function handleAdmin(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   let path: string;
   try { path = decodeURIComponent(url.pathname); } catch { return plain("not found", 404); }
@@ -474,12 +474,12 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     const params = route.method === request.method ? match(route.path, path) : undefined;
     if (!params) continue;
     if (!route.public && !await authenticated(request, env.ADMIN_TOKEN)) return plain("unauthorized", 401);
-    try { return await route.handle({ env, request, url, params }); }
+    try { return await route.handle({ env, ctx, request, url, params }); }
     catch (error) {
       if (error instanceof Error && error.message.includes("view_pending")) return json({error:"view_pending"}, 503);
       if (error instanceof HttpError) return json({ error: error.code, ...error.extra }, error.status);
       // 原始异常可能带存储或远端内容，只记录路由与安全错误分类。
-      logDiag(env, undefined, { event: "admin_failed", error, detail: { method: route.method, path: String(route.path) } });
+      logDiag(env, ctx, { event: "admin_failed", error, detail: { method: route.method, path: String(route.path) } });
       return json({ error: "internal" }, 500);
     }
   }

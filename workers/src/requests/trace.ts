@@ -7,7 +7,13 @@ import type { RequestBinding, ToolTrace } from "./types";
 import { classifyError, logDiag } from "../shared/diagnostics";
 
 /** 宿主回合身份在每次请求前捕获；工具身份随 task memo 持久化，重启后仍可配对。 */
-export function requestTrace(env: Env, thread: string, resolve: (api: HookApi, context: Context) => Promise<RequestBinding | undefined>, actor = "thread") {
+export function requestTrace(
+  env: Env,
+  ctx: Pick<DurableObjectState, "waitUntil"> | undefined,
+  thread: string,
+  resolve: (api: HookApi, context: Context) => Promise<RequestBinding | undefined>,
+  actor = "thread",
+) {
   let binding: RequestBinding | undefined;
   const save = (trace: ToolTrace) => env.REQUESTS.getByName("main").recordTool(trace).catch(error => {
     console.error({ event: "tool_trace_failed", id: trace.id, thread, actor, turnId: trace.binding.turnId, tool: trace.name, ...classifyError(error) });
@@ -16,7 +22,7 @@ export function requestTrace(env: Env, thread: string, resolve: (api: HookApi, c
     hook(GenerationTask, { beforeRequest: async (_request, api, context) => {
       binding = undefined;
       try { binding = await resolve(api, context); }
-      catch (error) { logDiag(env, undefined, { event: "request_binding_failed", thread, actor, error }); }
+      catch (error) { logDiag(env, ctx, { event: "request_binding_failed", thread, actor, error }); }
     } }),
     hook(ToolTask, {
       beforeTool: async (call, api, context) => {
@@ -26,7 +32,7 @@ export function requestTrace(env: Env, thread: string, resolve: (api: HookApi, c
           const memo = await api.memo("cs.trace", { binding: current, id: crypto.randomUUID(), at: Date.now() }, context);
           await save({ id: memo.id, thread, actor, binding: memo.binding, callId: call.id, ...(call.parent ? { parentCallId: call.parent.callId } : {}),
             name: call.name, ...(call.name !== "codemode" ? { argumentPreview: argumentPreview(call.arguments) } : {}), startedAt: memo.at, endedAt: null, status: "running", arguments: boundedText(JSON.stringify(call.arguments, null, 2)) });
-        } catch (error) { logDiag(env, undefined, { event: "tool_trace_start_failed", thread, actor, turnId: binding?.turnId, error, detail: { tool: call.name } }); }
+        } catch (error) { logDiag(env, ctx, { event: "tool_trace_start_failed", thread, actor, turnId: binding?.turnId, error, detail: { tool: call.name } }); }
       },
       afterTool: async (call, result, api, context) => {
         try {
@@ -35,7 +41,7 @@ export function requestTrace(env: Env, thread: string, resolve: (api: HookApi, c
           await save({ id: memo.id, thread, actor, binding: memo.binding, callId: call.id, ...(call.parent ? { parentCallId: call.parent.callId } : {}),
             name: call.name, ...(call.name !== "codemode" ? { argumentPreview: argumentPreview(call.arguments) } : {}), startedAt: memo.at, endedAt: Date.now(), status: result.isError ? "error" : "done",
             arguments: boundedText(JSON.stringify(call.arguments, null, 2)), ...toolResultSnapshot(result) });
-        } catch (error) { logDiag(env, undefined, { event: "tool_trace_end_failed", thread, actor, turnId: binding?.turnId, error, detail: { tool: call.name } }); }
+        } catch (error) { logDiag(env, ctx, { event: "tool_trace_end_failed", thread, actor, turnId: binding?.turnId, error, detail: { tool: call.name } }); }
       },
     }),
   ] });

@@ -157,8 +157,8 @@ export class ScheduleDO extends DurableObject<Env> {
       catch (error) {
         // 规则在保存时已校验，到这里仍抛错只能暂停，否则过去的 next_fire_at 会让 alarm 立刻重入。
         logDiag(this.env, this.ctx, { event: "schedule_fire_failed", thread: row.conversation, error, detail: { id: row.id } });
-        this.sql.exec("UPDATE schedules SET status = 'paused', pause_reason = 'error', next_fire_at = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?", Date.now(), row.id, row.revision);
-        this.ctx.waitUntil(this.env.REGISTRY.getByName("main").recordAlert({
+        const paused = this.sql.exec("UPDATE schedules SET status = 'paused', pause_reason = 'error', next_fire_at = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?", Date.now(), row.id, row.revision).rowsWritten > 0;
+        if (paused) this.ctx.waitUntil(this.env.REGISTRY.getByName("main").recordAlert({
           kind: "schedule_paused", scope: row.id, origin: "web", episode: String(row.revision + 1),
           message: `定时任务「${cleanName(row.name)}」触发异常已自动暂停，请在管理面板检查。`,
         }).catch(() => {}));

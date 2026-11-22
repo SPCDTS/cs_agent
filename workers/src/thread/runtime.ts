@@ -89,7 +89,7 @@ export async function applyToolProfile(runtime: Runtime, profile: ToolProfile, s
 
 /** 只装配暂停中的 Harness；不得在只读打开时触发模型执行。 */
 export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtime> {
-  const trace = requestTrace(host.env, await host.namespace(), async (api, c) => {
+  const trace = requestTrace(host.env, host.ctx, await host.namespace(), async (api, c) => {
     const input = await host.currentInput(harness, api, api.conversationId, c);
     return input?.turn_id ? { turnId: input.turn_id, inputId: input.message_id, generation: input.session_generation } : undefined;
   });

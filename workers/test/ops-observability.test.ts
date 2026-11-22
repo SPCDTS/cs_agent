@@ -2,10 +2,12 @@ import { env, reset, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
-import type { JsonObject } from "@earendil-works/pi-durable";
+import type { Context } from "@earendil-works/chord/context";
+import type { JsonObject, ToolExecutionApi } from "@earendil-works/pi-durable";
 import { threadWithBindings } from "./thread-fixture";
 import * as models from "../src/models";
 import { snapshot } from "../src/requests/snapshot";
+import { createOpsExtension } from "../src/tools/ops";
 import { input } from "./helpers";
 
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
@@ -198,5 +200,75 @@ describe("cs-agent 自观测能力（ops_health 与 runtime-ops Code Mode 命名
     });
     expect(eventSeen.offers).not.toContain("ops_health");
     expect(eventSeen.outputs[0]).toContain("denied");
+  });
+
+  it("验证内层 ops_denied、SQL 层 excludeTurnId 分页不跳页、跨会话 summaryOnly 隔离与未知会话保护", async () => {
+    const audits: { tool: string; result: string }[] = [];
+    const deniedExt = createOpsExtension({
+      env,
+      allowed: async () => false,
+      currentTurnId: async () => undefined,
+      audit: async detail => { audits.push(detail); },
+    });
+    const deniedHealth = await deniedExt.tools!.find(t => t.name === "ops_health")!.execute({} as never, {} as ToolExecutionApi, {} as Context);
+    expect(deniedHealth.isError).toBe(true);
+    expect(JSON.stringify(deniedHealth.output)).toContain("ops_denied");
+    expect(audits).toEqual([{ tool: "ops_health", result: "denied" }]);
+
+    const now = Date.now();
+    const store = env.REQUESTS.getByName("main");
+    // 插入 5 条请求，其中第 4 条属于当前回合 turn:self，验证 limit=2 两页遍历不丢记录。
+    for (let i = 1; i <= 5; i++) {
+      const isSelf = i === 4;
+      const isGroup = i === 1;
+      await store.record({
+        request: {
+          id: `00000000-0000-4000-8000-00000000000${i}`,
+          startedAt: now - (10 - i) * 1000,
+          endedAt: now - (10 - i) * 1000 + 200,
+          durationMs: 200,
+          thread: isGroup ? "group:200000001" : "owner",
+          binding: { turnId: isSelf ? "turn:self" : `turn:t${i}`, inputId: `msg:${i}`, generation: 0 },
+          actor: "thread",
+          purpose: "conversation",
+          provider: "faux",
+          model: "test",
+          status: "done",
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheRead: null,
+          cacheWrite: null,
+          reasoningTokens: null,
+          contextWindow: 32000,
+        },
+        context: snapshot({ messages: [{ role: "user", content: isGroup ? "群内未受信全文内容" : "主人消息", timestamp: now }] }),
+      });
+    }
+
+    const allowedExt = createOpsExtension({
+      env,
+      allowed: async () => true,
+      currentTurnId: async () => "turn:self",
+      audit: async () => {},
+    });
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const res = await allowedExt.tools!.find(t => t.name === name)!.execute(args as never, {} as ToolExecutionApi, {} as Context);
+      return res.structuredOutput as Record<string, unknown>;
+    };
+
+    const p1 = await call("ops_requests", { hours: 1, limit: 2 });
+    const p2 = await call("ops_requests", { hours: 1, limit: 2, before: p1.next });
+    const seenIds = [...(p1.requests as { id: string }[]), ...(p2.requests as { id: string }[])].map(r => r.id.at(-1));
+    expect(seenIds).toEqual(["5", "3", "2", "1"]);
+    expect(p2.next).toBeUndefined();
+
+    // 跨会话请求即使指定 summaryOnly: false 也必须强制仅返回摘要，不泄露群消息正文。
+    const crossInspect = await call("ops_inspect", { kind: "request", id: "00000000-0000-4000-8000-000000000001", summaryOnly: false });
+    expect(crossInspect).toMatchObject({ found: true, bodyDeferred: true, crossThreadRedacted: true });
+    expect(JSON.stringify(crossInspect)).not.toContain("群内未受信全文内容");
+
+    // 未知非 owner 会话不实例化空视图，直接返回 found: false。
+    const unknownAudit = await call("ops_logs", { source: "audit", thread: "group:999999999" });
+    expect(unknownAudit).toEqual({ source: "audit", thread: "group:999999999", found: false, events: [] });
   });
 });

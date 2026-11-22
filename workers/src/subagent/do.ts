@@ -287,7 +287,7 @@ export class SubagentDO extends DurableObject<Env> {
   private async openRuntime(): Promise<Runtime> {
     const meta = await this.meta();
     if (!meta) throw new Error("subagent_missing");
-    const trace = requestTrace(this.env, meta.parent, async (api, callContext) => {
+    const trace = requestTrace(this.env, this.ctx, meta.parent, async (api, callContext) => {
       const live = await api.snapshot(LiveDoc, api.conversationId, callContext), first = live?.run?.inputs[0], last = live?.run?.inputs.at(-1);
       if (!first || !last) return;
       const submission = await (await harness.submission(last, callContext))?.status(callContext);

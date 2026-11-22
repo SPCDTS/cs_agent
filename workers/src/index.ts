@@ -87,7 +87,7 @@ export default {
       if (!(await authenticated(request, env.NAPCAT_TOKEN, true))) return new Response("unauthorized", { status: 401 });
       return env.BRIDGE.getByName("napcat").fetch(request);
     }
-    if (path === "/admin" || path.startsWith("/admin/")) return handleAdmin(request, env);
+    if (path === "/admin" || path.startsWith("/admin/")) return handleAdmin(request, env, ctx);
     return new Response("not found", { status: 404 });
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
@@ -95,19 +95,21 @@ export default {
     if (job) ctx.waitUntil(job(env, controller.scheduledTime));
   },
   async tail(events: TraceItem[], env: Env, ctx: ExecutionContext): Promise<void> {
-    const store = env.REQUESTS.getByName("main");
+    const batch: import("./shared/diagnostics").DiagRecord[] = [];
     for (const item of events) {
-      if (!item.outcome || item.outcome === "ok" || "tailEvents" in (item.event ?? {})) continue;
+      if (!item.outcome || item.outcome === "ok" || "consumedEvents" in (item.event ?? {})) continue;
       const firstException = item.exceptions[0];
       const errorName = firstException && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(firstException.name) ? firstException.name : undefined;
-      ctx.waitUntil(store.recordDiag({
+      batch.push({
         at: item.eventTimestamp ?? Date.now(),
         level: "error",
         event: "platform_invocation_failed",
         code: item.outcome,
         ...(errorName ? { errorName } : {}),
         ...(item.scriptVersion?.id ? { detail: { scriptVersion: item.scriptVersion.id.slice(0, 64) } } : {}),
-      }).catch(() => {}));
+      });
+      if (batch.length >= 20) break;
     }
+    if (batch.length) ctx.waitUntil(env.REQUESTS.getByName("main").recordDiagBatch(batch).catch(() => {}));
   },
 } satisfies ExportedHandler<Env>;

@@ -65,10 +65,10 @@ export function classifyError(error: unknown): DiagErrorInfo {
   let code = safeToken(raw.code) ?? safeToken(raw.kind) ?? safeToken(raw.reason);
   if (code === "-32001" || !code && errorName === "TimeoutError") code = "timeout";
   else if (!code && errorName === "AbortError") code = "aborted";
-  if (!code && typeof raw.message === "string") {
+  if (!code && typeof raw.message === "string" && !raw.message.includes("://")) {
     const head = raw.message.split(":")[0]?.trim() ?? "";
-    if (SAFE_MACHINE_MESSAGE.test(raw.message) && !containsSecret(raw.message)) code = raw.message;
-    else if (raw.message.includes(":") && SAFE_MACHINE_MESSAGE.test(head) && !containsSecret(head)) code = head;
+    if (SAFE_MACHINE_MESSAGE.test(raw.message) && raw.message !== "http" && raw.message !== "https" && !containsSecret(raw.message)) code = raw.message;
+    else if (raw.message.includes(":") && SAFE_MACHINE_MESSAGE.test(head) && head !== "http" && head !== "https" && !containsSecret(head)) code = head;
   }
   return {
     ...(errorName ? { errorName } : {}),
@@ -85,10 +85,10 @@ function cleanDetail(detail?: Record<string, unknown>): Record<string, DiagDetai
     if (value === null || typeof value === "boolean") entries.push([key, value]);
     else if (typeof value === "number" && Number.isFinite(value)) entries.push([key, value]);
     else if (typeof value === "string") {
-      const clipped = value.slice(0, 160);
-      entries.push([key, containsSecret(clipped) ? "[redacted]" : clipped]);
+      entries.push([key, containsSecret(value) ? "[redacted]" : value.slice(0, 160)]);
     } else if (object(value)) {
-      const nested = safeToken(value.code) ?? safeToken(value.kind) ?? safeToken(value.status);
+      const nestedStatus = typeof value.status === "number" && Number.isInteger(value.status) && value.status >= 100 && value.status <= 599 ? value.status : undefined;
+      const nested = safeToken(value.code) ?? safeToken(value.kind) ?? nestedStatus ?? safeToken(value.status);
       if (nested !== undefined) entries.push([key, nested]);
     }
   }

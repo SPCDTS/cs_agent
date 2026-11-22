@@ -1,7 +1,7 @@
 import type { Api, Context, Model, AssistantMessageEventStream, StreamOptions } from "@earendil-works/pi-ai";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import type { Env } from "../env";
-import { agentSearchOption, hostedSearchSteps, responseAlarmWaitMs } from "../models";
+import { agentSearchOption, hostedSearchSteps, withAlarmWaitObserver } from "../models";
 import { argumentPreview } from "./tool-snapshot";
 import { snapshot, responseSnapshot, errorSummary, boundedText } from "./snapshot";
 import type { RequestBinding, RequestDetail, RequestScope } from "./types";
@@ -22,7 +22,8 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
     let firstEventAt: number | undefined, alarmWaitMs: number | undefined;
     const requestBinding = purpose === "conversation" || purpose === "subagent" ? binding?.() : undefined;
     let httpStatus: number | undefined;
-    const stream = start(event => {
+    const onAlarmWait = (ms: number) => { alarmWaitMs = ms; };
+    const stream = withAlarmWaitObserver(onAlarmWait, () => start(event => {
       if (!event || typeof event !== "object") return;
       firstEventAt ??= Date.now();
       const value = event as { usage?: unknown; response?: { usage?: unknown } };
@@ -32,9 +33,8 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
       cacheWriteReported ||= hasCacheMetric(usage, ["cache_creation_input_tokens", "cacheWriteInputTokens", "cacheWrite"]);
     }, res => {
       httpStatus = res.status;
-      if (res instanceof Response) alarmWaitMs = responseAlarmWaitMs(res);
-    });
-    const terminal = stream.result().then(result => ({ result, endedAt: Date.now() }));
+    }));
+    const terminal = withAlarmWaitObserver(onAlarmWait, () => stream.result()).then(result => ({ result, endedAt: Date.now() }));
     let detail: RequestDetail;
     try {
       const captured = snapshot(context, purpose === "conversation" || purpose === "subagent" ? origin?.(context) : undefined);
@@ -63,8 +63,9 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
             .catch(error => console.error({ event: "tool_trace_failed", id: detail.request.id, thread: scope.thread, turnId: requestBinding.turnId, ...classifyError(error) }));
         }
       }
+      const hasPricing = Boolean(model.cost && (model.cost.input > 0 || model.cost.output > 0 || model.cost.cacheRead > 0 || model.cost.cacheWrite > 0));
       const costTotal = u.cost?.total;
-      const costUsd = typeof costTotal === "number" && Number.isFinite(costTotal) && costTotal >= 0 ? costTotal : null;
+      const costUsd = hasPricing && typeof costTotal === "number" && Number.isFinite(costTotal) && costTotal >= 0 ? costTotal : null;
       await save({ ...detail, response: responseSnapshot(result), request: { ...detail.request, endedAt, durationMs: endedAt - startedAt,
         ttftMs: firstEventAt !== undefined ? Math.max(0, firstEventAt - startedAt) : null,
         ...(alarmWaitMs !== undefined ? { alarmWaitMs } : {}),

@@ -14,6 +14,7 @@ export type OpsExtensionDeps = {
   audit(detail: { tool: string; result: string }): Promise<unknown>;
 };
 
+const MAX_OUTPUT_BYTES = 48_000;
 const structuredSchema = Type.Record(Type.String(), Type.Unknown());
 const THREAD_PATTERN = "^(owner|(group|private):[1-9][0-9]{4,15})$";
 const PURPOSE_SCHEMA = Type.Union([
@@ -30,25 +31,36 @@ const STATUS_SCHEMA = Type.Union([
   Type.Literal("interrupted"),
 ]);
 
-function clipDeep(value: unknown, maxChars = 6000, depth = 0): unknown {
+function clipDeep(value: unknown, maxChars = 6000, maxItems = 100, depth = 0): unknown {
   if (value === null || value === undefined) return value;
   if (typeof value === "string") {
     return value.length <= maxChars ? value : value.slice(0, maxChars) + `\n[已截断，原长 ${value.length} 字符]`;
   }
   if (typeof value !== "object") return value;
   if (depth >= 8) return "[depth_truncated]";
-  if (Array.isArray(value)) return value.slice(0, 100).map(item => clipDeep(item, maxChars, depth + 1));
+  if (Array.isArray(value)) return value.slice(0, maxItems).map(item => clipDeep(item, maxChars, maxItems, depth + 1));
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = clipDeep(v, maxChars, depth + 1);
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = clipDeep(v, maxChars, maxItems, depth + 1);
   return out;
 }
 
 function okResult(value: Record<string, unknown>): ToolExecutionResult {
-  const plain = copyJson(JSON.parse(JSON.stringify(clipDeep(value))));
-  return {
-    structuredOutput: plain,
-    output: [{ type: "text", text: JSON.stringify(plain) }],
+  const encoder = new TextEncoder();
+  for (const [maxChars, maxItems] of [[6000, 100], [1200, 40], [300, 15]] as const) {
+    const candidate = clipDeep(value, maxChars, maxItems);
+    const serialized = JSON.stringify(candidate);
+    if (encoder.encode(serialized).byteLength <= MAX_OUTPUT_BYTES) {
+      const plain = copyJson(JSON.parse(serialized));
+      return { structuredOutput: plain, output: [{ type: "text", text: serialized }] };
+    }
+  }
+  const fallback = {
+    truncated: true,
+    note: `输出超过 ${MAX_OUTPUT_BYTES} 字节上限，已缩减为顶层字段摘要；请缩小 limit/时间范围或保持 summaryOnly=true。`,
+    keys: Object.keys(value),
   };
+  const serialized = JSON.stringify(fallback);
+  return { structuredOutput: copyJson(fallback), output: [{ type: "text", text: serialized }] };
 }
 
 function errResult(message: string): ToolExecutionResult {
@@ -89,13 +101,13 @@ export function createOpsExtension(deps: OpsExtensionDeps) {
       structuredOutputSchema: structuredSchema,
       replay: "safe",
       execute: (_args, api, context) => guard("ops_health", api, context, async () => {
-        const [report, alerts] = await Promise.all([
+        const [report, activeAlerts] = await Promise.all([
           healthReport(deps.env),
-          deps.env.REGISTRY.getByName("main").alerts(20).catch(() => []),
+          deps.env.REGISTRY.getByName("main").activeAlerts(10).catch(() => []),
         ]);
         return {
           ...report,
-          activeAlerts: alerts.filter(a => a.closedAt === null).slice(0, 10),
+          activeAlerts,
         };
       }),
     }),
@@ -129,7 +141,7 @@ export function createOpsExtension(deps: OpsExtensionDeps) {
     }),
     defineTool({
       name: "ops_requests",
-      description: "列出近期模型请求记录（默认排除当前回合自身请求以避免自观测递归），可选附带回合端到端耗时（queueWaitMs、deliveryWaitMs、totalMs）与子任务拓扑。",
+      description: "列出近期模型请求记录（默认在 SQL 层排除当前回合自身请求以避免自观测递归），可选附带回合端到端耗时（queueWaitMs、deliveryWaitMs、totalMs）与子任务拓扑。",
       parameters: Type.Object({
         hours: Type.Optional(Type.Integer({ minimum: 1, maximum: 720 })),
         thread: Type.Optional(Type.String({ pattern: THREAD_PATTERN })),
@@ -157,17 +169,16 @@ export function createOpsExtension(deps: OpsExtensionDeps) {
           status: args.status,
           purpose: args.purpose,
           turnId: args.turnId,
+          excludeTurnId: selfTurnId,
           before: args.before,
-          limit: Math.min(55, limit + (selfTurnId ? 5 : 0)),
+          limit,
         });
-        const filtered = selfTurnId ? page.requests.filter(r => r.binding?.turnId !== selfTurnId) : page.requests;
-        const requests = filtered.slice(0, limit);
         const timings = args.includeTimings
-          ? (await store.recentTurns(args.thread, limit + (selfTurnId ? 2 : 0))).filter(t => !selfTurnId || t.turnId !== selfTurnId).slice(0, limit)
+          ? await store.recentTurns(args.thread, limit, selfTurnId)
           : undefined;
         const topology = args.includeTopology ? await store.agentTopology() : undefined;
         return {
-          requests,
+          requests: page.requests,
           ...(page.next !== undefined ? { next: page.next } : {}),
           ...(selfTurnId ? { excludedTurnId: selfTurnId } : {}),
           ...(timings ? { timings } : {}),
@@ -177,27 +188,46 @@ export function createOpsExtension(deps: OpsExtensionDeps) {
     }),
     defineTool({
       name: "ops_inspect",
-      description: "按 ID 查看单次模型请求（kind='request'，默认 summaryOnly=true 仅返回上下文统计与关联工具摘要）或单次工具调用轨迹（kind='tool'）详情。",
+      description: "按 ID 查看单次模型请求（kind='request'）或单次工具调用轨迹（kind='tool'）。默认 summaryOnly=true 仅返回结构统计与摘要；非 owner 会话记录强制仅返回摘要。",
       parameters: Type.Object({
         kind: Type.Union([Type.Literal("request"), Type.Literal("tool")]),
         id: Type.String({ minLength: 1, maxLength: 80 }),
-        summaryOnly: Type.Optional(Type.Boolean({ description: "仅对 request 生效；默认 true 不展开完整提示词与消息正文。" })),
+        summaryOnly: Type.Optional(Type.Boolean({ description: "默认 true 不展开完整提示词、消息或工具参数/结果正文；非 owner 会话强制为 true。" })),
       }, { additionalProperties: false }),
       structuredOutputSchema: structuredSchema,
       replay: "safe",
       execute: (args, api, context) => guard("ops_inspect", api, context, async () => {
         const store = deps.env.REQUESTS.getByName("main");
+        const requestedSummary = args.summaryOnly ?? true;
         if (args.kind === "tool") {
-          const tool = await store.toolDetail(args.id);
-          return tool ? { found: true, kind: "tool", tool } : { found: false, kind: "tool", id: args.id };
+          const head = await store.toolDetail(args.id, true);
+          if (!head) return { found: false, kind: "tool", id: args.id };
+          const crossThread = head.thread !== "owner";
+          const metadataOnly = requestedSummary || crossThread;
+          const tool = metadataOnly ? head : await store.toolDetail(args.id, false);
+          return {
+            found: true,
+            kind: "tool",
+            tool,
+            ...(crossThread && !requestedSummary ? { crossThreadRedacted: true } : {}),
+          };
         }
-        const detail = await store.detail(args.id, args.summaryOnly ?? true);
-        return detail ? { found: true, kind: "request", ...detail } : { found: false, kind: "request", id: args.id };
+        const head = await store.detail(args.id, true);
+        if (!head) return { found: false, kind: "request", id: args.id };
+        const crossThread = head.request.thread !== "owner";
+        const metadataOnly = requestedSummary || crossThread;
+        const detail = metadataOnly ? head : (await store.detail(args.id, false)) ?? head;
+        return {
+          found: true,
+          kind: "request",
+          ...detail,
+          ...(crossThread && !requestedSummary ? { crossThreadRedacted: true } : {}),
+        };
       }),
     }),
     defineTool({
       name: "ops_logs",
-      description: "查询实例环形异常/告警诊断日志（source='diag'，默认）或指定会话的审计事件日志（source='audit'，如 mcp_call、coding_exec、web_search、memory_*）。",
+      description: "查询实例环形异常/告警诊断日志（source='diag'，默认）或指定已知会话的审计事件日志（source='audit'，如 mcp_call、coding_exec、web_search、media_recall、runtime_ops）。",
       parameters: Type.Object({
         source: Type.Optional(Type.Union([Type.Literal("diag"), Type.Literal("audit")])),
         hours: Type.Optional(Type.Integer({ minimum: 1, maximum: 720 })),
@@ -215,7 +245,12 @@ export function createOpsExtension(deps: OpsExtensionDeps) {
         const now = Date.now(), since = now - (args.hours ?? 24) * 3600_000, limit = args.limit ?? 20;
         if (args.source === "audit") {
           const target = args.thread ?? "owner";
+          if (target !== "owner") {
+            const known = (await deps.env.BRIDGE.getByName("napcat").threadList()).some(t => t.key === target);
+            if (!known) return { source: "audit", thread: target, found: false, events: [] };
+          }
           const page = await threadView(deps.env, target).events({
+            since,
             kind: args.event,
             result: args.result,
             before: args.before,
@@ -224,7 +259,8 @@ export function createOpsExtension(deps: OpsExtensionDeps) {
           return {
             source: "audit",
             thread: target,
-            events: page.events.filter(e => e.at >= since),
+            found: true,
+            events: page.events,
             ...(page.next !== undefined ? { next: page.next } : {}),
           };
         }

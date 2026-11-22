@@ -26,6 +26,7 @@ export class AlertStore {
       created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,closed_at INTEGER,notified_at INTEGER,delivery_id TEXT,status TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS ops_alert_recent ON ops_alerts(updated_at DESC,id);
       CREATE INDEX IF NOT EXISTS ops_alert_active ON ops_alerts(origin,closed_at,created_at);
+      CREATE INDEX IF NOT EXISTS ops_alert_open ON ops_alerts(closed_at,updated_at DESC,id);
       CREATE INDEX IF NOT EXISTS ops_alert_close ON ops_alerts(kind,scope,origin,closed_at);
       CREATE TABLE IF NOT EXISTS ops_turn_failures(scope TEXT NOT NULL,origin TEXT NOT NULL,failures INTEGER NOT NULL,episode TEXT NOT NULL,PRIMARY KEY(scope,origin));
       CREATE TABLE IF NOT EXISTS ops_alert_throttle(key TEXT PRIMARY KEY,at INTEGER NOT NULL);`);
@@ -35,6 +36,12 @@ export class AlertStore {
   list(limit=100,before?:AdminCursor):AlertView[]{
     const args=before?[before.at,before.at,before.id]:[];
     return this.storage.sql.exec<AlertRow>("SELECT * FROM ops_alerts"+(before?" WHERE updated_at<? OR (updated_at=? AND id>?)":"")+" ORDER BY updated_at DESC,id LIMIT ?",...args,Math.min(200,Math.max(1,limit))).toArray().map(row=>this.view(row));
+  }
+  active(limit=50):AlertView[]{
+    return this.storage.sql.exec<AlertRow>("SELECT * FROM ops_alerts WHERE closed_at IS NULL ORDER BY updated_at DESC,id LIMIT ?",Math.min(200,Math.max(1,limit))).toArray().map(row=>this.view(row));
+  }
+  activeCount():number{
+    return this.storage.sql.exec<{n:number}>("SELECT COUNT(*) AS n FROM ops_alerts WHERE closed_at IS NULL").one().n;
   }
   record(input:AlertInput,now=Date.now()):AlertView{
     if(!Check(AlertInputSchema,input))throw new Error("invalid_alert");

@@ -177,7 +177,7 @@ export class ProjectionStore {
       // 保留列表和关联读取的索引，避免管理查询随历史增长退化成全表扫描。
       const indexes: Partial<Record<ViewTable, string[][]>> = {
         pi_entries: [["conversation_id", "id"]], inbound: [["message_id"], ["platform_message_id", "user_id", "chat_kind", "chat_id"], ["status", "reply_channel"]],
-        outbox: [["message_id", "id"]], messages: [["time", "id"]], subagents: [["created_at"]],
+        outbox: [["message_id", "id"]], messages: [["time", "id"]], subagents: [["created_at"]], events: [["kind", "at"]],
         memories: [["ns", "status", "updated_at"]], memory_versions: [["memory_id", "id"]],
         mcp_access: [["scope", "server_id"]], mcp_approvals: [["scope", "created_at"]],
       };
