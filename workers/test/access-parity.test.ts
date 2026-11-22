@@ -34,7 +34,8 @@ describe("durable delivery parity",()=>{
   });
   it("resolves file IDs through read-only NapCat APIs and requires image content even when a URL exists",async()=>{
     const {socket,frames}=await connect(sockets),bridge=env.BRIDGE.getByName("napcat");
-    const file=bridge.getFileUrl(target,"file-id");const frame=await action(frames,0,"get_private_file_url");
+    const file=bridge.getFileAttachment("file-id","owner");const frame=await action(frames,0,"get_file");
+    expect(frame.params).toEqual({file:"file-id"});
     socket.send(JSON.stringify({status:"ok",retcode:0,echo:frame.echo,data:{url:"https://files.example.test/a"}}));
     expect(await file).toBe("https://files.example.test/a");
     const image=bridge.getImage("image-id","owner"),rejected=expect(async()=>await image).rejects.toThrow("napcat_image_content_missing");const imageFrame=await action(frames,0,"get_image");

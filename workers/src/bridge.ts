@@ -9,9 +9,19 @@ import { MediaRepository, type AssetRef } from "./media/repository";
 import { FILE_MAX_BYTES, validScope } from "./media/model";
 
 type Attachment = { id: string; active: boolean };
-const MEDIA_READ_ACTIONS = new Set(["get_msg", "get_private_file_url", "get_group_file_url", "get_file", "get_image", "get_record"]);
+const MEDIA_READ_ACTIONS = new Set(["get_msg", "get_file", "get_image", "get_record"]);
 type Pending = { socket: WebSocket; mediaRead: boolean; resolve: (data: unknown) => void; reject: (error: Error) => void };
 type GroupName = { name: string; expires: number };
+
+function decodeMediaContent(encoded: string, invalidCode: string): Uint8Array {
+  if (encoded.length > Math.ceil(FILE_MAX_BYTES / 3) * 4) throw new Error("too_large");
+  let binary: string;
+  try { binary = atob(encoded); } catch { throw new Error(invalidCode); }
+  if (binary.length > FILE_MAX_BYTES) throw new Error("too_large");
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
 
 export class BridgeDO extends DurableObject<Env> {
   // echo 与发送事实持久化；内存 Promise 仅用于等待本次连接的响应。
@@ -299,10 +309,20 @@ export class BridgeDO extends DurableObject<Env> {
   }
   getMessage(messageId:string):Promise<unknown>{if(!/^-?\d{1,20}$/.test(messageId))throw new Error("invalid_message_id");return this.call("get_msg",{message_id:messageId});}
   getHistory(target:Target,count=20):Promise<unknown>{if(!Number.isInteger(count)||count<1||count>100)throw new Error("invalid_history_limit");return this.call(target.kind==="group"?"get_group_msg_history":"get_friend_msg_history",target.kind==="group"?{group_id:target.groupId,count}:{user_id:target.userId,count});}
-  async getFileUrl(target:Target,fileId:string,busid=102):Promise<string>{
-    if(!fileId||fileId.length>512||!Number.isInteger(busid)||busid<0)throw new Error("invalid_file_reference");
-    const result=await this.call(target.kind==="group"?"get_group_file_url":"get_private_file_url",target.kind==="group"?{group_id:target.groupId,file_id:fileId,busid}:{user_id:target.userId,file_id:fileId});
-    return this.mediaUrl(result);
+  /** 普通文件由 NapCat 按消息中的文件引用读取。只有返回公网链接时才交给宿主下载。 */
+  async getFileAttachment(file: string, scope: string, name?: string): Promise<AssetRef | string> {
+    this.validMediaFile(file);
+    validScope(scope);
+    const result = await this.call("get_file", { file });
+    if (!isRecord(result) || typeof result.base64 !== "string") return this.mediaUrl(result, "napcat_file_content_missing");
+    const bytes = decodeMediaContent(result.base64, "invalid_file_content");
+    const size = result.file_size;
+    if ((typeof size === "number" || typeof size === "string" && /^\d+$/.test(size)) && Number(size) !== bytes.byteLength) {
+      throw new Error("invalid_file_content");
+    }
+    return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({
+      bytes, kind: "file", name: name || (typeof result.file_name === "string" && result.file_name) || "file",
+    });
   }
   /** QQ 图片由本机下载，经 OneBot 回传内容；不使用返回的 QQ URL。 */
   async getImage(file: string, scope: string): Promise<AssetRef> {
@@ -310,10 +330,7 @@ export class BridgeDO extends DurableObject<Env> {
     validScope(scope);
     const result = await this.call("get_image", { file });
     if (!isRecord(result) || typeof result.base64 !== "string" || !result.base64) throw new Error("napcat_image_content_missing");
-    if (result.base64.length > Math.ceil(FILE_MAX_BYTES / 3) * 4) throw new Error("too_large");
-    let binary: string;
-    try { binary = atob(result.base64); } catch { throw new Error("invalid_image_content"); }
-    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    const bytes = decodeMediaContent(result.base64, "invalid_image_content");
     return new MediaRepository({ bucket: this.env.ASSETS, scope }).put({
       bytes, kind: "image", name: typeof result.file_name === "string" ? result.file_name : "image",
     });
@@ -321,11 +338,11 @@ export class BridgeDO extends DurableObject<Env> {
   async getRecord(file:string):Promise<string>{this.validMediaFile(file);return this.mediaUrl(await this.call("get_record",{file,out_format:"mp3"}));}
   async getFile(file:string):Promise<string>{this.validMediaFile(file);return this.mediaUrl(await this.call("get_file",{file}));}
   private validMediaFile(file:string):void{if(!file||file.length>8192||/[\x00-\x1f\x7f]/.test(file))throw new Error("invalid_media_reference");}
-  private mediaUrl(result:unknown):string{
+  private mediaUrl(result:unknown,missing="media_url_unavailable"):string{
     if(isRecord(result)&&typeof result.url==="string"){
       try{const url=new URL(result.url);if((url.protocol==="https:"||url.protocol==="http:")&&!url.username&&!url.password)return url.href;}catch{}
     }
-    throw new Error("media_url_unavailable");
+    throw new Error(missing);
   }
   getForward(id:string):Promise<unknown>{if(!id||id.length>200)throw new Error("invalid_forward_id");return this.call("get_forward_msg",{id});}
 

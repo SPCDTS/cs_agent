@@ -45,6 +45,7 @@ export function createMediaExtension(deps: MediaDeps) {
       await audit(kind, trace, { result: detail.code, ...detail });
       const message = detail.code === "napcat_image_content_missing"
         ? "NapCat 未返回图片内容，请检查本机媒体回传设置。"
+        : detail.code === "napcat_file_content_missing" ? "请在 NapCat 启用 enableLocalFile2Url，让 get_file 回传文件内容。"
         : detail.code === "media_access_denied" ? "本回合无权访问媒体或发送附件。"
         : detail.code === "media_not_found" ? "本会话这条消息没有可访问的附件。"
         : "附件访问失败；请按错误码与诊断编号排查。";

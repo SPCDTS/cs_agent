@@ -7,8 +7,8 @@
 
 - `authorize/repository/recall/lookup/metadata`：回合授权、资产仓库、调用、媒体元数据查找。
 - `get_msg`：仅在本会话已持有消息且本地媒体记录为空时回退查 OneBot。
-- `resolve_url` 与 `get_private_file_url/get_group_file_url/get_file/get_image/get_record`：选择后才解析引用；OneBot action 即阶段名。
-- `download/store/asset_get`：公网下载、私有资产写入、已有资产读取。图片由 Bridge 导入时，`get_image` 覆盖该 RPC 全过程，不伪造本地下载/存储阶段。
+- `resolve_url` 在选定附件后解析引用。私聊和群聊的普通文件都用 `get_file`，图片用 `get_image`，语音用 `get_record`。
+- NapCat 回传 base64 时，`get_file` 或 `get_image` 阶段覆盖 Bridge 接收内容和写入私有资产的全过程。宿主读取资产记为 `asset_get`。通过公网链接导入时分别记录 `download` 和 `store`。
 - `audit`：最终审计写入。成功结果不会因审计失败变成附件失败；失败审计也不会覆盖原业务错误，且不自动重试。
 - 发送复用安全边界并记录 `export/deliver`，不改变发送幂等或授权政策。
 
@@ -27,7 +27,7 @@ HTTP下载失败只记录100–599状态码；原生异常仅分类为超时、�
 日志及审计不含 token、cookie、URL（包括hostname/query）、文件名、文件内容、消息正文、原始请求响应、stack/cause。
 消息ID只接受最多20位的有符号数字；合成上传ID可能含URL，统一记为redacted。scope只接受owner或数字QQ会话。
 所有字符串来自固定枚举或有界校验，耗时限制在0–86400000毫秒。日志sink失败不影响业务。
-已有下载地址、公网地址检查、大小限制、来源检查保持原样；本次没有增加刷新URL或重复导入策略。
+普通文件只有本机路径时会返回 `napcat_file_content_missing`。在 NapCat 的 OneBot 配置中启用 `enableLocalFile2Url`，可让 `get_file` 回传内容。
 
 ## 排障与局限
 
