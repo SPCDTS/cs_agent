@@ -256,6 +256,12 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
     sandbox:()=>host.env.SANDBOX.getByName(memory.ns),registry:()=>host.env.REGISTRY.getByName("main"),
   }));
   registry.install(createMediaExtension({
+    bridge: host.env.BRIDGE.getByName("napcat"),
+    canWriteWorkspace: codingAllowed,
+    saveAttachment: async (path, bytes, api, c) => {
+      if (!await codingAllowed(api, c)) throw new Error("permission_denied");
+      await host.env.SANDBOX.getByName(memory.ns).saveAttachment(path, bytes);
+    },
     allowed: async (api, c, kind) => {
       const input = await host.currentInput(harness, api, api.conversationId, c);
       if (!input || input.session_generation !== await host.sessionGeneration()) return false;

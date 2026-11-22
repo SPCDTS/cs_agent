@@ -123,6 +123,9 @@ export class SandboxDO extends DurableObject<Env> {
       remove: async path => { await this.result({ kind: "remove", path }); },
     }, prefix);
   }
+  async saveAttachment(path: string, bytes: Uint8Array): Promise<void> {
+    await this.result({ kind: "writeBytes", path, data: bytes, createOnly: true });
+  }
   async editFile(path: string, edits: FileEdit[], operationId?: string): Promise<{ replaced: number }> {
     const result = await this.result({ kind: "edit", path, edits }, operationId);
     if (!("replaced" in result)) throw new Error("sandbox_error");

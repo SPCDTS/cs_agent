@@ -48,8 +48,9 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 
 - `MediaRepository`（`workers/src/media/repository.ts`）固定作用域，单资产上限 10 MiB，`AssetRef = { id, scope, sha256, bytes, mime, name, kind }`（`image | file | audio | video`）。`issueUrl` 签发 5 分钟（最长 600 秒）单对象随机票据 `/media/object?token=...`，不含管理口令或原始 scope；`/admin` 媒体上传下载要求 Bearer 鉴权。
 - 图片、音频、视频可与文字同条发送；普通文件走独立 `upload_group_file / upload_private_file` intent（成功 ACK 允许无 `messageId`）。
-- **NapCat 图片回传**：本机 OneBot 启用 `enableLocalFile2Url: true`，`get_image` 经反向 WebSocket 返回 base64（10 MiB 图片约 13.34 MiB，低于 DO 32 MiB 帧上限）；Bridge 校验大小与格式后写入私有 R2 并返回 `AssetRef`，不把 base64 写入 DO SQL 或日志，也不退回云端抓取 QQ 图片 URL。缺少 base64 时返回 `napcat_image_content_missing`。
-- 私聊和群聊的普通文件优先按 `file_id` 调用 `get_file`。启用同一回传设置后，Bridge 将文件内容写入当前会话的私有 R2，单文件上限为 10 MiB。仅有 HTTP(S) 链接时沿用受限的公网下载流程。
+- 本机 NapCat 启用 `enableLocalFile2Url: true` 后，Bridge 从 `get_file` 和 `get_image` 接收并校验文件字节，普通文件优先使用消息中的 `file_id`。单附件上限为 10 MiB。下载 HTTP(S) 链接时逐跳检查公网地址。
+- 有工作区写权限时，`qq_attachment` 将字节直接写入当前工作区，返回已提交的 `path`、文件名、类型和字节数。模型可以传 `path: "downloads/package.zip"` 或绝对路径 `/work/downloads/package.zip`；一条消息有多个附件时，用 `ordinal` 为其中一个指定路径。省略路径时按内容哈希和文件名保存到 `/work/attachments/`。目标存在相同内容时复用，内容冲突时返回 `workspace_conflict`。工作区统一持久化到 R2。
+- `qq_image` 返回图片内容和会话私有资产引用。仅有媒体读取权限的回合仍可通过 `qq_attachment` 获取私有引用。历史消息中已有的私有资产按原会话读取。
 - `createMediaExtension` 注册 `qq_image`、`qq_attachment`、`send_file`，由宿主 `lookupHostMedia` 校验当前 scope 与目标，每次最多解析 5 个附件。
 
 ### 3.2 持久工作区与群聊脚本执行

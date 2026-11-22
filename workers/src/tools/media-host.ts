@@ -1,7 +1,9 @@
 import type { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { recallMedia } from "../context";
 import { id, isRecord, normalizeMedia, scopeOf, type InboundMedia, type Target } from "../policy";
-import { FILE_MAX_BYTES, validScope, type AssetRef } from "../media/model";
+import { FILE_MAX_BYTES, cleanFileName, imageMime, validScope } from "../media/model";
+import { downloadMedia } from "../media/download";
+import type { MediaRepository } from "../media/repository";
 import type { MediaSelection } from "./media";
 import { mediaStage, type MediaTrace } from "../media/diagnostics";
 
@@ -9,8 +11,8 @@ import { mediaStage, type MediaTrace } from "../media/diagnostics";
 export type VerifiedMediaSource = { scope: string; namespace: string; target: Target };
 export type MediaLookupBridge = {
   getMessage(messageId: string): Promise<unknown>;
-  getFileAttachment(file: string, scope: string, name?: string): Promise<AssetRef | string>;
-  getImage(file: string, scope: string): Promise<AssetRef>;
+  getFileAttachment(file: string): Promise<{ bytes: Uint8Array; name: string } | string>;
+  getImage(file: string): Promise<{ bytes: Uint8Array; name: string }>;
   getRecord(file: string): Promise<string>;
   getFile(file: string): Promise<string>;
 };
@@ -49,35 +51,32 @@ export async function lookupHostMedia(input: {
     if (!existing) return [];
     media = await mediaStage(trace, "get_msg", async () => remoteMedia(await input.bridge.getMessage(input.messageId), target, input.messageId));
   }
-  const selected = media.filter(item => (input.selection?.kind === undefined || item.kind === input.selection.kind) &&
-    (input.selection?.ordinal === undefined || item.ordinal === input.selection.ordinal)).slice(0,5);
-  return Promise.all(selected.map(async item => {
-    const itemTrace = trace?.forOrdinal(item.ordinal);
-    return mediaStage(itemTrace, "resolve_url", async () => {
-      if (item.assetId) return item;
-      if (item.kind === "image") {
-        const file = item.file ?? item.fileId;
-        if (!file || /^https?:\/\//i.test(file)) throw new Error("media_reference_missing");
-        const asset = await mediaStage(itemTrace, "get_image", () => input.bridge.getImage(file, input.source.namespace));
-        return { ...item, assetId: asset.id };
-      }
-      const file = item.kind === "file" ? item.fileId ?? item.file : item.file ?? item.fileId;
-      if (item.url && !(item.kind === "file" && item.fileId)) return item;
-      if (!file) throw new Error("media_reference_missing");
-      if (/^https?:\/\//i.test(file)) return { ...item, url: file };
-      let url: string;
-      switch(item.kind) {
-        case "audio": url = await mediaStage(itemTrace, "get_record", () => input.bridge.getRecord(file)); break;
-        case "video": url = await mediaStage(itemTrace, "get_file", () => input.bridge.getFile(file)); break;
-        case "file": {
-          if (item.size !== undefined && item.size > FILE_MAX_BYTES) throw new Error("too_large");
-          const result = await mediaStage(itemTrace, "get_file", () => input.bridge.getFileAttachment(file, input.source.namespace, item.name));
-          return typeof result === "string" ? { ...item, url: result } : { ...item, assetId: result.id };
-        }
-        default: { const exhaustive: never = item.kind; throw new Error(`invalid_media_kind:${exhaustive}`); }
-      }
-      // 其他附件仍由 MediaRepository.importRemote 检查公网地址、重定向与大小。
-      return { ...item, url };
-    });
-  }));
+  return media.filter(item => (input.selection?.kind === undefined || item.kind === input.selection.kind) &&
+    (input.selection?.ordinal === undefined || item.ordinal === input.selection.ordinal)).slice(0, 5);
+}
+
+/** 逐件取字节，文件在内存中只保留到其工作区写入或私有资产写入完成。 */
+export async function readHostMedia(item: InboundMedia, bridge: MediaLookupBridge, repository: MediaRepository, trace: MediaTrace) {
+  if (item.assetId) {
+    const { ref, bytes } = await trace.run("asset_get", () => repository.get(item.assetId!));
+    return { ref, bytes, name: ref.name, mime: ref.mime };
+  }
+  const source = await trace.run("resolve_url", async () => {
+    const file = item.kind === "file" ? item.fileId ?? item.file : item.file ?? item.fileId;
+    if (item.kind === "image") {
+      if (!file || /^https?:\/\//i.test(file)) throw new Error("media_reference_missing");
+      return trace.run("get_image", () => bridge.getImage(file));
+    }
+    if (item.url && !(item.kind === "file" && item.fileId)) return item.url;
+    if (!file) throw new Error("media_reference_missing");
+    if (/^https?:\/\//i.test(file)) return file;
+    if (item.kind === "audio") return trace.run("get_record", () => bridge.getRecord(file));
+    if (item.kind === "video") return trace.run("get_file", () => bridge.getFile(file));
+    if (item.size !== undefined && item.size > FILE_MAX_BYTES) throw new Error("too_large");
+    return trace.run("get_file", () => bridge.getFileAttachment(file));
+  });
+  const content = typeof source === "string" ? await downloadMedia(source, { trace }) : source;
+  const name = cleanFileName(item.name || ("name" in content && content.name) || item.kind);
+  return { ref: undefined, bytes: content.bytes, name,
+    mime: imageMime(content.bytes) ?? ("mime" in content ? content.mime : "application/octet-stream") };
 }
