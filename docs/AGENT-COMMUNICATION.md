@@ -24,13 +24,15 @@
 
 Thread 使用既有 inbound，Subagent 使用既有 inbox，执行仍经 root.submit，忙时固定 followUp；不创建第二套收件箱。旧 subagent.message 与自动结果汇报使用相同通信服务，spawn/cancel/list 生命周期入口保留。
 
-通信入站使用独立 kind=agent、空 user_id 及可追踪来源，不伪装成 owner 输入。接收方 coding/MCP 继续解析接收方当前已绑定的本地授权上下文，并复核原任务权限；不继承发送方权限、不写入新 grant。子代理不会因追加消息的发言人变化而改变既有派出权限。
+通信入站使用独立 kind=agent、空 user_id 及可追踪来源，不伪装成 owner 输入。接收方 coding 继续复核已有任务权限；MCP 使用接收会话主体 agent:<会话地址> 和 kind=agent，不使用最近群发言人的身份。群 Agent 必须在既有 MCP grant 的 actors 中显式加入 agent:group:<群号>，工具、资源、环境及审批策略仍取该 grant；旧数字用户或 * 不自动授予 Agent。owner 会话仅使用自身能力，群会话始终不是 owner。代次重置与 grant 撤销即时生效；不继承发送方权限、不写入新 grant。子代理不会因追加消息的发言人变化而改变既有派出权限。
 
 需要用户本人输入的管理、写记忆等操作仍受原入口限制；Agent 回合只能只读本会话记忆。普通 send_message/send_file 不能把 Agent 回合输出发往 QQ/网页。自动子任务结果仍通过原报告格式交回父任务，不会直接通知 QQ。
 
 ## 文件
 
 files 是发送方自己已授权工作区的路径列表，最多 5 个，单次总量不超过 10 MiB。宿主读取字节并冻结为来源 R2 资产；接收端验证来源证明和完整资产引用、哈希、大小，复制到接收 scope，然后经既有 saveAttachment 的 createOnly、manifest/CAS 路径持久化到 /work/agent-files/<消息哈希>/。只在持久提交成功后入箱，目标可用既有 read 读取。不能用裸跨 scope asset ID 或发送方路径代替副本。
+
+子会话验证来源与边授权后先查询既有 inbox：相同 ID/信封返回原 duplicate 回执，不重建或覆盖已编辑、已删除的附件；不同信封拒绝冲突。父状态同步失败仍可重试，但不重新导入文件。已回答报告遇到明确会话撤销/结束时沿用 cancelled 状态退休，不增加 reported 计数；投递未知或临时错误保留 answered 和心跳重试。
 
 登录凭据禁止转发。已知凭据文件名和凭据文本模式在完整内容上检查，不先截断；模式检查不是对任意编码/加密文件内容的万能识别，模型仍须遵守不传凭据的约束。
 

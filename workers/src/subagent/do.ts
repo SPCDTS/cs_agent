@@ -30,7 +30,7 @@ const context = BACKGROUND_CONTEXT;
 const HEARTBEAT_MS = 60_000;
 const SUBAGENT_RULE = "你是主 agent 派出的子 agent，只负责完成交给你的任务。你不能联系用户、写记忆或安排定时；可用 agent_send 与已授权 Agent 通信；把最终结果完整写在回答里，它会原样交回主 agent。qq_context 与 mem_search 只读派出你的会话。获授权时可通过 Code Mode 使用分配的 Cloudflare 工作区和 MCP 工具。结束前整理需要保留的产物和内容。";
 
-/** queued → running → answered（回答已落库）→ reported（父线程已收下）；cancelled 是取消时还没回答的项。 */
+/** queued → running → answered（回答已落库）→ reported（父线程已收下）；cancelled 是取消或父关系永久撤销后退休的项。 */
 type InboxStatus = "queued" | "running" | "answered" | "reported" | "cancelled";
 type InboxRow = { request_id: string; text: string; received_at: number; status: InboxStatus; answer: string | null; outcome: "done" | "failed" | null };
 type Runtime = { harness: Harness; root: Conversation };
@@ -47,6 +47,7 @@ export class SubagentDO extends DurableObject<Env> {
   private runtime?: Promise<Runtime>;
   private draining?: Promise<void>;
   private dirty = false;
+  private receiving: Promise<unknown> = Promise.resolve();
 
   private initialize(): Promise<void> {
     return this.initialized ??= this.database.exec(`
@@ -151,12 +152,25 @@ export class SubagentDO extends DurableObject<Env> {
     const meta = await this.meta();
     return !!meta && meta.status !== "cancelled" && await this.env.THREAD.getByName(meta.parent).agentChildAllowed(meta.id) && proves(this.ctx.storage, id, hash, meta.createdAt);
   }
-  async agentReceive(message: AgentMessage): Promise<AgentReceipt> {
+  agentReceive(message: AgentMessage): Promise<AgentReceipt> {
+    // 串行查重/导入/入箱；同一对象内并发重放也不能重复导入附件。
+    const receipt = this.receiving.then(() => this.receiveAgent(message));
+    this.receiving = receipt.catch(() => {});
+    return receipt;
+  }
+  private async receiveAgent(message: AgentMessage): Promise<AgentReceipt> {
     const meta = await this.meta();
     if (!meta || meta.status === "cancelled") throw new Error("agent_session_ended");
     if (message.report) throw new Error("agent_invalid_message");
     await verifyMessage(this.env, subagentName(meta.parent, meta.id), message);
     const parent = this.env.THREAD.getByName(meta.parent);
+    const previous = await this.database.get<{ agent_hash: string | null; agent_files: string | null }>("SELECT agent_hash,agent_files FROM inbox WHERE request_id=?", message.id);
+    if (previous) {
+      if (previous.agent_hash !== fingerprint(message)) throw new Error("agent_message_conflict");
+      // 回执丢失后仍补同步父状态，但不触碰接收方已编辑/删除的副本。
+      await parent.agentChildWake(meta.id);
+      return { messageId: message.id, status: "duplicate", files: JSON.parse(previous.agent_files ?? "[]") as string[] };
+    }
     const paths = await importFiles(this.env, message, (path, bytes) => parent.subagentSaveAttachment(meta.id, path, bytes));
     const result = await this.message(message.id, incomingText(message, paths), { hash: fingerprint(message), files: paths });
     if (result.result === "ended") throw new Error("agent_session_ended");
@@ -306,8 +320,19 @@ export class SubagentDO extends DurableObject<Env> {
     try { assertNoCredentials(text); }
     catch { text = "[agent_credentials_forbidden] 结果含凭据，已阻止原文回传。"; outcome = "failed"; }
     text = text.slice(0, 8000);
-    await this.sendAgentMessage({ to: meta.parent, text: text || "（没有文字回答）" }, "report:" + row.request_id,
-      { subagentId: meta.id, requestId: row.request_id, text, identity: meta.identity, outcome, state: state(meta) });
+    try {
+      await this.sendAgentMessage({ to: meta.parent, text: text || "（没有文字回答）" }, "report:" + row.request_id,
+        { subagentId: meta.id, requestId: row.request_id, text, identity: meta.identity, outcome, state: state(meta) });
+    } catch (error) {
+      // 只有确证永久结束的关系退休；网络未知、临时失败保留 answered 重试。
+      if (!(error instanceof Error) || !["agent_session_denied", "agent_session_revoked", "agent_session_ended"].includes(error.message)) throw error;
+      await this.update(async (_meta, tx) => {
+        await tx.run("UPDATE inbox SET status='cancelled' WHERE request_id=? AND status='answered'", row.request_id);
+        return false;
+      });
+      logDiag(this.env, this.ctx, { event: "subagent_report_retired", thread: meta.parent, actor: meta.id, error: new Error(error.message) });
+      return;
+    }
     await this.update(async (meta, tx) => {
       await tx.run("UPDATE inbox SET status = 'reported' WHERE request_id = ? AND status = 'answered'", row.request_id);
       meta.reportCount++;

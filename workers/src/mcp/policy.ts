@@ -34,10 +34,15 @@ export class McpPolicyError extends Error {
 }
 export const GrantInput = Type.Object({ environments: Type.Optional(EnvIdsSchema), environmentApproval: Type.Optional(Type.Union([Type.Literal("required"), Type.Literal("none")])), tools: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: 200, uniqueItems: true }),
  resourceAllow: Type.Array(Type.String({ minLength: 1, maxLength: 2048 }), { maxItems: 100, uniqueItems: true }),
- actors: Type.Array(Type.String({ pattern: "^(?:[1-9][0-9]{0,19}|admin:web|\\*)$" }), { minItems: 1, maxItems: 100, uniqueItems: true }),
+ actors: Type.Array(Type.String({ pattern: "^(?:[1-9][0-9]{0,19}|admin:web|agent:group:[1-9][0-9]{0,19}|\\*)$" }), { minItems: 1, maxItems: 100, uniqueItems: true }),
  expiresAt: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]) }, { additionalProperties: false });
 const Result = Type.Object({ isError: Type.Optional(Type.Boolean()), structuredOutput: Type.Optional(Type.Unknown()),
  output: Type.Optional(Type.Array(Type.Object({ type: Type.Literal("text"), text: Type.String() }))) }, { additionalProperties: false });
+
+// 旧的人类通配符不自动授予 Agent；会话主体必须显式列入当前 grant。
+function actorAllowed(grant: McpGrant, authority: McpAuthority): boolean {
+ return grant.actors.includes(authority.actor) || authority.kind !== "agent" && grant.actors.includes("*");
+}
 
 function receiptOutput(value: unknown, limits: McpLimits) {
  if (value === undefined) return {};
@@ -106,14 +111,14 @@ export class McpPolicyStore {
   if (authority.scope === "owner") return authority.owner && (authority.kind !== "event" || tool !== undefined && server.tools.eventAllow.includes(tool));
   if (authority.kind === "event" || !authority.scope.startsWith("group:")) return false;
   const grant = await this.grant(authority.scope, server.id);
-  return !!grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && (grant.actors.includes("*") || grant.actors.includes(authority.actor))
+  return !!grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && actorAllowed(grant, authority)
    && (tool !== undefined ? grant.tools.includes(tool) : uri !== undefined ? grant.resourceAllow.some(prefix => uri.startsWith(prefix)) : grant.resourceAllow.length > 0);
  }
  async environments(authority: McpAuthority, server: McpServerConfig): Promise<EnvironmentAccess> {
   if (authority.scope === 'owner') return authority.owner ? { kind: 'all' } : noEnvironments();
   const grant = await this.grant(authority.scope, server.id);
   return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now())
-    && (grant.actors.includes('*') || grant.actors.includes(authority.actor))
+    && actorAllowed(grant, authority)
     ? { kind: 'selected', envIds: grant.environments ?? [] } : noEnvironments();
  }
  async requiresApproval(authority: McpAuthority, server: McpServerConfig, tool: string): Promise<boolean> {
@@ -125,7 +130,7 @@ export class McpPolicyStore {
   if (authority.scope === "owner") return authority.owner && authority.kind !== "event" ? server.resourceAllow : [];
   if (authority.kind === "event" || !authority.scope.startsWith("group:")) return [];
   const grant = await this.grant(authority.scope, server.id);
-  return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && (grant.actors.includes("*") || grant.actors.includes(authority.actor))
+  return grant && this.matches(server, grant) && (grant.expiresAt === null || grant.expiresAt > this.now()) && actorAllowed(grant, authority)
     ? grant.resourceAllow.filter(prefix => server.resourceAllow.some(global => prefix.startsWith(global))) : [];
  }
  async list(scope: string) {

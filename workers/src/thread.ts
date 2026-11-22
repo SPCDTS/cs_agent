@@ -674,7 +674,13 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async mcpAuthority(input: InboundRow | undefined): Promise<McpAuthority | undefined> {
-    input = await this.agentAuthority(input);
+    if (input?.kind === "agent") {
+      // 本地记录只证明会话已就绪，不把最近发言人的身份/权限借给 Agent。
+      if (!await this.agentAuthority(input)) return;
+      const scope = await this.namespace();
+      return { kind: "agent", scope, actor: "agent:" + scope, owner: scope === "owner",
+        generation: input.session_generation, replyChannel: "qq" };
+    }
     if (!input?.turn_id || input.session_generation !== await this.sessionGeneration()) return;
     return { kind: input.kind, scope: await this.namespace(), actor: input.user_id, owner: isWebAdmin(input) || ownerIds(this.env).includes(input.user_id),
       generation: input.session_generation, replyChannel: input.reply_channel };
@@ -1128,6 +1134,13 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async currentMcpAuthority(original: McpAuthority): Promise<McpAuthority | undefined> {
+    if (original.kind === "agent") {
+      const scope = await this.namespace();
+      if (original.scope !== scope || original.actor !== "agent:" + scope || original.replyChannel !== "qq"
+        || original.generation !== await this.sessionGeneration()) return;
+      const input = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE kind='agent' AND session_generation=? ORDER BY rowid DESC LIMIT 1", original.generation);
+      return this.mcpAuthority(input);
+    }
     if (original.subagentId) {
       const access = await this.subagentAccess(original.subagentId, true), snapshot = access?.capabilities.mcp;
       return access && snapshot && snapshot.scope === original.scope && snapshot.actor === original.actor && snapshot.generation === original.generation
