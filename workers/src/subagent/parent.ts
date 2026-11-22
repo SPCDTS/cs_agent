@@ -41,6 +41,7 @@ type Host = {
   db: DurableObjectSqliteDatabase; env: Env;
   /** 父线程键，也是子 DO 名字的一段。 */
   thread(): Promise<string>;
+  communicate(to: string, text: string, seed: string): Promise<import("../communication/model").AgentReceipt>;
   /** 把汇报作为 kind=subagent 的输入入队，入站键幂等。 */
   wake(input: InboundInput): Promise<"accepted" | "duplicate">;
   /** 让父 DO 的 alarm 不晚于 at 触发。 */
@@ -63,7 +64,7 @@ const PARAMETERS = Type.Object({
   text: Type.Optional(Type.String({ minLength: 1, maxLength: 20000, description: "message 必填：追加给该子 agent 的说明" })),
   timeoutMs: Type.Optional(Type.Integer({ minimum: MIN_TIMEOUT_MS, description: "spawn 可选：明确截止时长（毫秒）；无硬期限请省略" })),
 }, { additionalProperties: false });
-const DESCRIPTION = "管理后台独立上下文子 agent（spawn 派出 / message 追问 / list 查看 / cancel 取消）。spawn 立即返回，结果以“[子 agent 完成]”自动唤醒父回合；勿轮询 list。默认继承当前会话已批准的技能与 MCP；传 mcpTools 可按服务与原始工具名收敛权限（空数组为不授 MCP，且不含 MCP 资源读取）。传 sandboxId 绑定 sandbox_list 中的工作区（同 ID 共享文件与运行时；需隔离请先调 sandbox_create 再传入返回 ID；省略则继承父默认工作区）。子 agent 不能直接发消息、改权限或发布技能。";
+const DESCRIPTION = "管理后台独立上下文子 agent（spawn 派出 / message 追问 / list 查看 / cancel 取消）。spawn 立即返回，结果以“[子 agent 完成]”自动唤醒父回合；勿轮询 list。默认继承当前会话已批准的技能与 MCP；传 mcpTools 可按服务与原始工具名收敛权限（空数组为不授 MCP，且不含 MCP 资源读取）。传 sandboxId 绑定 sandbox_list 中的工作区（同 ID 共享文件与运行时；需隔离请先调 sandbox_create 再传入返回 ID；省略则继承父默认工作区）。子 agent 不能直接发 QQ、改权限或发布技能；可用 agent_send 与授权会话通信。";
 
 /** 父线程的子 agent 登记：派出、交代、取消、汇报入队与超时，都经这张表。 */
 export class ParentSubagents {
@@ -119,12 +120,11 @@ export class ParentSubagents {
     if (row.status === "cancelled" || row.status === "timeout") return { text: `子 agent ${id} ${STATUS_TEXT[row.status]}，不能再发消息；需要的话重新 spawn。`, error: true };
     if ((JSON.parse(row.origin_json) as SubagentOrigin).generation !== caller.origin.generation) return {text:"该子任务属于已归档会话，请重新 spawn。",error:true};
     if ((JSON.parse(row.origin_json) as SubagentOrigin).replyChannel !== caller.origin.replyChannel) return { text: "这个子任务属于另一个回复入口，请在当前入口新建子任务。", error: true };
-    // 这一轮交代的内容会进入子 agent 的上下文：登记的身份与本轮合并，不是同一人就降为基础权限，之后的汇报都按合并后的身份。
-    const identity = narrowIdentity(JSON.parse(row.identity_json) as SubagentIdentity, caller.identity);
-    await this.host.db.run("UPDATE subagents SET identity_json = ? WHERE id = ?", JSON.stringify(identity), id);
-    const { result, state } = await this.child(await this.host.thread(), id).message(`m-${(await stableId(seed)).slice(0, 23)}`, text);
-    await this.apply(id, state);
-    if (result === "ended") return { text: `子 agent ${id} 已取消，不能再发消息。`, error: true };
+    // 通信按会话授权，不根据这次发言人改写子任务已授权限。
+    const thread = await this.host.thread();
+    await this.host.communicate(subagentName(thread, id), text, seed);
+    const current = await this.child(thread, id).status();
+    if (current) await this.apply(id, { status: current.meta.status, version: current.meta.version });
     const deadline = row.timeout_ms ? Date.now() + row.timeout_ms : 0;
     await this.host.db.run("UPDATE subagents SET deadline = ? WHERE id = ? AND status = 'running'", deadline, id);
     if (deadline) await this.host.wakeBy(deadline);
@@ -194,6 +194,11 @@ export class ParentSubagents {
     const origin = JSON.parse(row.origin_json) as SubagentOrigin;
     return { scope: scopeOf(origin.target), origin,
       identity: confirmedIdentity(JSON.parse(row.identity_json) as SubagentIdentity, ownerIds(this.host.env)) };
+  }
+
+  async refresh(id: string): Promise<void> {
+    const current = await this.child(await this.host.thread(), id).status();
+    if (current) await this.apply(id, { status: current.meta.status, version: current.meta.version });
   }
 
   async exists(id: string): Promise<boolean> {

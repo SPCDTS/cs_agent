@@ -4,7 +4,9 @@ import { WorkspaceManager } from "../src/sandbox/workspace";
 import type { GcOptions } from "../src/sandbox/workspace-gc";
 import { type SandboxClient } from "../src/sandbox/client";
 import { sha256 } from "../src/media/model";
-import { scopePrefix } from "../src/media/repository";
+import { scopePrefix, MediaRepository } from "../src/media/repository";
+import { importFiles } from "../src/communication/service";
+import { messageId } from "../src/communication/model";
 afterEach(async () => { vi.restoreAllMocks(); await reset(); });
 function runtime() {
   let files = new Map<string,Uint8Array>(), directories = new Set<string>(), ready = false, executions = 0, failExec = false;
@@ -24,6 +26,30 @@ function runtime() {
   return { client, ready:()=>ready, reset:async()=>{ready=false;files=new Map();return true;}, executions:()=>executions, fail:()=>{failExec=true;} };
 }
 describe("持久工作区", () => {
+  it("Agent 附件经过真实 manifest/CAS 提交后可重建并通过 read 消费（容器客户端为本地夹具）", async () => {
+    await runInDurableObject(env.SANDBOX.getByName("agent-import"), async (_instance, state) => {
+      const host = runtime(), workspace = "workspace:agent-import";
+      const deps = { workspace, bucket: env.ASSETS, storage: state.storage, runtime: host.client, resetRuntime: host.reset, runtimeReady: host.ready };
+      const manager = new WorkspaceManager(deps);
+      const bytes = new TextEncoder().encode("持久附件正文");
+      const ref = await new MediaRepository({bucket:env.ASSETS,scope:"owner"}).put({bytes,name:"note.txt",mime:"text/plain"});
+      const message = { id: messageId("owner","persist"), from:"owner", to:"group:200000001", text:"附件", files:[ref] };
+      const save = async (path: string, data: Uint8Array) => {
+        const result = await manager.run({operationId:"agent-copy:"+path,operation:{kind:"writeBytes",path,data,createOnly:true}});
+        expect(result.status).toBe("committed");
+      };
+      const paths = await importFiles(env,message,save);
+      expect(await importFiles(env,message,save)).toEqual(paths);
+      // 改变源会话后，目标副本仍读取接收时的快照。
+      await new MediaRepository({bucket:env.ASSETS,scope:"owner"}).put({bytes:new TextEncoder().encode("源已变化"),name:"note.txt",mime:"text/plain"});
+      const rebuiltHost = runtime();
+      const rebuilt = new WorkspaceManager({...deps,runtime:rebuiltHost.client,resetRuntime:rebuiltHost.reset,runtimeReady:rebuiltHost.ready});
+      expect(new TextDecoder().decode((await rebuilt.readBlob(paths[0]!)).bytes)).toBe("持久附件正文");
+      expect((await rebuilt.run({operationId:"agent-read",operation:{kind:"read",path:paths[0]!}}))).toMatchObject({status:"committed",result:{text:"持久附件正文"}});
+      expect((await rebuilt.files()).files).toHaveLength(1);
+    });
+  });
+
   it("分批GC跨重建续跑，保护两批间的新提交与新租约，完成后释放标记", async () => {
     await runInDurableObject(env.SANDBOX.getByName("gc-pages"), async (_instance, state) => {
       const host = runtime(), workspace = "workspace:gc-pages";

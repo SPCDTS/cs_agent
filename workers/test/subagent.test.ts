@@ -188,6 +188,38 @@ describe("subagents as child Durable Objects", () => {
     expect(JSON.stringify(audit)).not.toMatch(/A 与 B|调研结果/);
   });
 
+  it("agent_send uses the child inbox while busy and child replies use the same communication path", async () => {
+    const first = gate();
+    const { seen, outputs } = twoModels(
+      [spawn("先处理第一项"), { text: "已派出" },
+        out => ({tool:"agent_send",args:{to:"sub:owner:" + idOf(out[0]),text:"第二项"}}), {text:"已入箱"},
+        {text:"收到第一项"}, {text:"收到子会话通信"}, {text:"收到第二项"}],
+      [{text:"第一项完成",after:first.promise},
+        {tool:"agent_send",args:{to:"owner",text:"子会话主动回复"}}, {text:"第二项完成"}]);
+    await thread("owner").submit(input(1,"开始",10000001));
+    const sub = await onlySubagent("owner");
+    await vi.waitFor(async () => expect((await child("owner",sub.id).status())?.inbox.running).toBe(1));
+    await thread("owner").submit(input(2,"给子会话追加",10000001));
+    expect((await child("owner",sub.id).status())?.inbox).toMatchObject({running:1,queued:1});
+    expect(outputs.parent.some(value=>value.includes('"status":"accepted"'))).toBe(true);
+    first.open();
+    await reports("owner",2);
+    await vi.waitFor(async () => expect(await rows("owner","SELECT 1 FROM inbound WHERE kind='agent' AND status='done'")).toHaveLength(1));
+    const peer = await rows<{user_id:string;agent_from:string}>("owner","SELECT user_id,agent_from FROM inbound WHERE kind='agent'");
+    expect(peer[0]).toMatchObject({user_id:"",agent_from:"sub:owner:"+sub.id});
+    expect(seen.child[0]?.tools).toContain("agent_send");
+    expect(await rows("owner","SELECT 1 FROM outgoing_intents")).toHaveLength(0);
+  });
+
+  it("blocks credentials in automatic results without losing the completion notification", async () => {
+    twoModels([spawn("检查"), {text:"已派出"}, {text:"已收到拒传提示"}],
+      [{text:"Authorization: Bearer synthetic-credential-for-test-only"}]);
+    await thread("owner").submit(input(1,"检查",10000001));
+    const [report] = await reports("owner",1);
+    expect(report?.text).toContain("agent_credentials_forbidden");
+    expect(report?.text).not.toContain("synthetic-credential-for-test-only");
+  });
+
   it("delivers follow-up messages and processes each child request id once", async () => {
     twoModels(
       [spawn("先查 A"), { text: "已派出" }, { text: "收到第一轮" },

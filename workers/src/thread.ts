@@ -1,3 +1,5 @@
+import { fingerprint, type AgentMessage, type AgentReceipt, type AgentSend } from "./communication/model";
+import { importFiles, incomingText, proves, sendAgent, verifyMessage } from "./communication/service";
 import { MemoryAdmin } from "./memory/admin";
 import { McpAdmin } from "./mcp/admin";
 import { openThreadRuntime, applyToolProfile, type Runtime } from "./thread/runtime";
@@ -70,6 +72,7 @@ export class ThreadDO extends DurableObject<Env> {
   private idleWait?: Promise<void>;
   private readonly skills = new SkillCatalog(() => this.env.REGISTRY.getByName("main"));
   private readonly subagents = new ParentSubagents({ db: this.database, env: this.env, thread: () => this.namespace(),
+    communicate: (to, text, seed) => this.sendAgentMessage({ to, text }, seed),
     wake: input => this.queueInput(input), wakeBy: at => this.wakeBy(at), audit: (kind, detail) => this.audit(kind, detail) });
 
   private readonly memoryAdmin = new MemoryAdmin({
@@ -113,7 +116,7 @@ export class ThreadDO extends DurableObject<Env> {
         nickname: "TEXT NOT NULL DEFAULT ''", self_id: "TEXT NOT NULL DEFAULT ''",
         scope_name: "TEXT NOT NULL DEFAULT ''", platform_message_id: "TEXT NOT NULL DEFAULT ''", when_busy: "TEXT", turn_id: "TEXT",
         persona_text: "TEXT", session_generation: "INTEGER NOT NULL DEFAULT 0", kind: "TEXT NOT NULL DEFAULT 'message'", reply_channel: "TEXT NOT NULL DEFAULT 'qq'",
-        admitted_at: "INTEGER",
+        admitted_at: "INTEGER", agent_from: "TEXT", agent_hash: "TEXT", agent_files: "TEXT", agent_authority: "TEXT",
       })) if (!columns.some(column => column.name === name)) await tx.exec(`ALTER TABLE inbound ADD COLUMN ${name} ${definition}`);
       const outboxColumns = await tx.all<{ name: string }>("PRAGMA table_info(outbox)");
       if (!(await tx.all<{ name: string }>("PRAGMA table_info(subagents)")).some(c => c.name === "summary")) await tx.exec("ALTER TABLE subagents ADD COLUMN summary TEXT");
@@ -198,6 +201,7 @@ export class ThreadDO extends DurableObject<Env> {
       namespace: () => this.namespace(), models: () => this.models(), loadSettings: fresh => this.loadSettings(fresh),
       installProjection: () => this.projection.install(), currentInput: (harness, read, id, context) => this.currentInput(harness, read, id, context),
       memoryBinding: (input, ns) => this.memoryBinding(input, ns), sessionGeneration: () => this.sessionGeneration(),
+      agentSend: (input, args, seed) => this.sendAgentMessage(args, seed, input),
       ownerTurnKind: input => this.ownerTurnKind(input), sandboxTaskForInput: input => this.sandboxTaskForInput(input),
       subagentCaller: (input, selection) => this.subagentCaller(input, selection), scheduleAccess: input => this.scheduleAccess(input),
       mcpAuthority: input => this.mcpAuthority(input), deliver: (input, text, outputId, options) => this.deliver(input, text, outputId, options),
@@ -208,6 +212,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   /** 网页输出只入本线程；QQ 副作用由 Bridge 的稳定意图负责恢复与防重。 */
   private async deliver(input: InboundRow, text: string, outputId: string, options: { target?: Target; attachments?: AssetRef[] } = {}): Promise<{ status: string; message_id?: string; reason?: string }> {
+    if (input.kind === "agent") return { status: "rejected", reason: "agent_reply_requires_agent_send" };
     if (input.session_generation !== await this.sessionGeneration()) return { status: "rejected", reason: "session_generation_revoked" };
     if (isWeb(input)) {
       if (options.target) return { status: "rejected", reason: "web_reply_only" };
@@ -239,7 +244,7 @@ export class ThreadDO extends DurableObject<Env> {
     await this.initialize();
     if (source.thread !== await this.namespace() || source.generation !== await this.sessionGeneration()) return false;
     const input = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", source.inputId);
-    if (!input || isWeb(input) || input.session_generation !== source.generation || source.scope !== scopeOf(targetOf(input)) || input.user_id === input.self_id) return false;
+    if (!input || input.kind === "agent" || isWeb(input) || input.session_generation !== source.generation || source.scope !== scopeOf(targetOf(input)) || input.user_id === input.self_id) return false;
     if (scopeOf(target) === source.scope) return true;
     return input.kind === "message" && this.env.REGISTRY.getByName("main").canAccess({ user: "qq:" + input.user_id, cap: "send", scope: source.scope, target: "qq:" + scopeOf(target) });
   }
@@ -555,6 +560,71 @@ export class ThreadDO extends DurableObject<Env> {
     return this.subagents.report(report);
   }
 
+
+  /** 通信身份不是 QQ 用户；工具上下文只取接收方既有记录。 */
+  private async agentAuthority(input: InboundRow | undefined): Promise<InboundRow | undefined> {
+    if (input?.kind !== "agent") return input;
+    if (!input.agent_authority || input.session_generation !== await this.sessionGeneration()) return;
+    return this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=? AND kind='message' AND session_generation=?", input.agent_authority, input.session_generation);
+  }
+  async agentChildAllowed(id: string): Promise<boolean> {
+    await this.initialize();
+    const access = await this.subagents.access(id, true);
+    return !!access && (access.origin.generation ?? 0) === await this.sessionGeneration();
+  }
+  async agentChildWake(id: string): Promise<void> {
+    if (!await this.agentChildAllowed(id)) throw new Error("agent_session_revoked");
+    await this.subagents.refresh(id);
+  }
+
+  async agentProof(id: string, hash: string): Promise<boolean> {
+    await this.initialize();
+    return proves(this.ctx.storage, id, hash, await this.sessionGeneration());
+  }
+  private async sendAgentMessage(args: AgentSend, seed: string, input?: InboundRow): Promise<AgentReceipt> {
+    await this.initialize();
+    if (input && input.session_generation !== await this.sessionGeneration()) throw new Error("agent_session_revoked");
+    return sendAgent({ env: this.env, storage: this.ctx.storage, agentSessionId: await this.namespace(), generation: await this.sessionGeneration(),
+      readFile: async path => {
+        if (!input || !(await this.sandboxTaskForInput(input))?.permissions.coding) throw new Error("agent_file_access_denied");
+        return this.env.SANDBOX.getByName(await this.namespace()).readBlob(path);
+      },
+    }, args, seed);
+  }
+  async agentReceive(message: AgentMessage): Promise<AgentReceipt> {
+    await this.initialize();
+    const ns = await this.namespace();
+    if (!ns || !this.ctx.id.equals(this.env.THREAD.idFromName(message.to))) throw new Error("agent_recipient_not_ready");
+    await verifyMessage(this.env, ns, message);
+    if (message.report) {
+      const source = /^sub:(.+):([0-9a-f-]{36})$/.exec(message.from);
+      if (!source || source[1] !== ns || source[2] !== message.report.subagentId) throw new Error("agent_source_unverified");
+      const result = await this.subagentReport(message.report);
+      if (result === "ignored") throw new Error("agent_session_revoked");
+      return { messageId: message.id, status: result, files: [] };
+    }
+    return this.serial(async () => {
+      const hash = fingerprint(message);
+      const existing = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE message_id=?", message.id);
+      if (existing) {
+        if (existing.agent_hash !== hash) throw new Error("agent_message_conflict");
+        return { messageId: message.id, status: "duplicate" as const, files: JSON.parse(existing.agent_files ?? "[]") as string[] };
+      }
+      const generation = await this.sessionGeneration();
+      const authority = await this.database.get<InboundRow>("SELECT * FROM inbound WHERE kind='message' AND session_generation=? AND turn_id IS NOT NULL AND user_id<>self_id ORDER BY rowid DESC LIMIT 1", generation);
+      if (!authority) throw new Error("agent_recipient_not_ready");
+      if (message.files.length && !(await this.sandboxTaskForInput(authority))?.permissions.coding) throw new Error("agent_file_access_denied");
+      const paths = await importFiles(this.env, message, (path, bytes) => this.env.SANDBOX.getByName(ns).saveAttachment(path, bytes));
+      await this.database.transaction(async tx => {
+        await tx.run("INSERT INTO inbound(message_id,platform_message_id,user_id,self_id,text,received_at,status,chat_kind,chat_id,nickname,scope_name,kind,reply_channel,session_generation,when_busy,agent_from,agent_hash,agent_files,agent_authority) VALUES(?,?,'','agent',?,?,'queued',?,?,?,?,'agent','qq',?,NULL,?,?,?,?)",
+          message.id, message.id, incomingText(message, paths), Date.now(), authority.chat_kind, authority.chat_id, "", authority.scope_name,
+          generation, message.from, hash, JSON.stringify(paths), authority.message_id);
+        await this.armPump();
+      });
+      return { messageId: message.id, status: "accepted" as const, files: paths };
+    });
+  }
+
   /** 子 agent 的 qq_context：只读派出它的会话。 */
   async subagentContext(id: string, options: RecallOptions): Promise<string> {
     await this.initialize();
@@ -578,6 +648,7 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async sandboxTaskForInput(input: InboundRow | undefined): Promise<SandboxTask | undefined> {
+    input = await this.agentAuthority(input);
     if (!input || !input.turn_id || input.user_id === input.self_id || input.session_generation !== await this.sessionGeneration()) return;
     const scope = await this.namespace(), subject = { scope, actor: input.user_id, generation: input.session_generation,
       replyChannel: input.reply_channel, owner: isWebAdmin(input) ? scope === "owner" : ownerIds(this.env).includes(input.user_id) };
@@ -603,6 +674,7 @@ export class ThreadDO extends DurableObject<Env> {
   }
 
   private async mcpAuthority(input: InboundRow | undefined): Promise<McpAuthority | undefined> {
+    input = await this.agentAuthority(input);
     if (!input?.turn_id || input.session_generation !== await this.sessionGeneration()) return;
     return { kind: input.kind, scope: await this.namespace(), actor: input.user_id, owner: isWebAdmin(input) || ownerIds(this.env).includes(input.user_id),
       generation: input.session_generation, replyChannel: input.reply_channel };
@@ -658,11 +730,12 @@ export class ThreadDO extends DurableObject<Env> {
       ...(operation.kind === "read" && result.status === "committed" ? { structuredOutput: { kind: "text", text: value } } : {}) };
   }
 
-  private async subagentWorkspaceFiles(id: string) {
-    const access = await this.validateSubagentAccess(id);
+  private async subagentWorkspaceFiles(id: string, completed = false) {
+    const access = await this.subagentAccess(id, completed);
     if (!access?.capabilities.coding || !access.authority.owner) throw new Error("delegation_denied");
     return this.env.SANDBOX.getByName(access.sandbox?.name ?? subagentName(await this.namespace(), id));
   }
+  async subagentSaveAttachment(id: string, path: string, bytes: Uint8Array) { return (await this.subagentWorkspaceFiles(id, true)).saveAttachment(workPath(path), bytes); }
   async subagentReadBlob(id: string, path: string) { return (await this.subagentWorkspaceFiles(id)).readBlob(workPath(path)); }
   async subagentWriteFile(id: string, path: string, content: string | Uint8Array) { return (await this.subagentWorkspaceFiles(id)).writeFile(workPath(path), content); }
   async subagentCreateTempDir(id: string, prefix?: string) { return (await this.subagentWorkspaceFiles(id)).createTempDir(prefix); }
@@ -853,6 +926,7 @@ export class ThreadDO extends DurableObject<Env> {
 
   private memoryBinding(input: InboundRow, ns: string): MemoryBinding | undefined {
     if (!input.turn_id) return;
+    if (input.kind === "agent") return { ns, origin: "agent", owner: false, userId: "", turnId: input.turn_id, scope: ns, messageId: input.message_id };
     const owner = isWebAdmin(input) ? ns === "owner" : ownerIds(this.env).includes(input.user_id);
     const expected = isWebAdmin(input) ? ns : owner && input.chat_kind === "private" ? "owner" : scopeOf(targetOf(input));
     if (expected !== ns || input.user_id === input.self_id) return;
