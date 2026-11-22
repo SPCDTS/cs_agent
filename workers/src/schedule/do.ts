@@ -3,6 +3,7 @@ import type { Env } from "../env";
 import { cleanName, ownerIds, type InboundInput, type Target } from "../policy";
 import { DEFAULT_SCHEDULE_OPTIONS, missedFires, nextFireAt, parseCreate, parseUpdate, validateRule } from "./model";
 import { scheduleInputKey, scheduledInput } from "./run";
+import { logDiag } from "../shared/diagnostics";
 import type { Schedule, ScheduleConversation, ScheduleRule, ScheduleRun, ScheduleRunStatus, ScheduleStatus } from "./types";
 
 type ScheduleRow = {
@@ -104,6 +105,7 @@ export class ScheduleDO extends DurableObject<Env> {
       // 恢复从现在往后算，停机或暂停期间错过的不补跑。
       const next = validateRule(this.rule(row), now);
       this.sql.exec("UPDATE schedules SET status = 'active', pause_reason = NULL, failures = 0, next_fire_at = ?, revision = revision + 1, updated_at = ? WHERE id = ?", next, now, id);
+      this.ctx.waitUntil(this.env.REGISTRY.getByName("main").resolveAlert("schedule_paused", id, "web").catch(() => {}));
     } else if (row.status !== status && !(status === "paused" && row.status === "completed")) {
       this.sql.exec("UPDATE schedules SET status = ?, pause_reason = ?, next_fire_at = NULL, revision = revision + 1, updated_at = ? WHERE id = ?",
         status, status === "paused" ? reason?.slice(0, 200) || "manual" : null, now, id);
@@ -118,6 +120,7 @@ export class ScheduleDO extends DurableObject<Env> {
       this.sql.exec("DELETE FROM schedule_runs WHERE schedule_id = ?", id);
       this.sql.exec("DELETE FROM schedules WHERE id = ?", id);
     });
+    this.ctx.waitUntil(this.env.REGISTRY.getByName("main").resolveAlert("schedule_paused", id, "web").catch(() => {}));
     await this.changed("delete", id, by);
   }
 
@@ -153,8 +156,12 @@ export class ScheduleDO extends DurableObject<Env> {
       try { await this.fireDue(row, now); }
       catch (error) {
         // 规则在保存时已校验，到这里仍抛错只能暂停，否则过去的 next_fire_at 会让 alarm 立刻重入。
-        console.error({ event: "schedule_fire_failed", id: row.id, error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
-        this.sql.exec("UPDATE schedules SET status = 'paused', pause_reason = 'error', next_fire_at = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?", Date.now(), row.id, row.revision);
+        logDiag(this.env, this.ctx, { event: "schedule_fire_failed", thread: row.conversation, error, detail: { id: row.id } });
+        const paused = this.sql.exec("UPDATE schedules SET status = 'paused', pause_reason = 'error', next_fire_at = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?", Date.now(), row.id, row.revision).rowsWritten > 0;
+        if (paused) this.ctx.waitUntil(this.env.REGISTRY.getByName("main").recordAlert({
+          kind: "schedule_paused", scope: row.id, origin: "web", episode: String(row.revision + 1),
+          message: `定时任务「${cleanName(row.name)}」触发异常已自动暂停，请在管理面板检查。`,
+        }).catch(() => {}));
       }
     }
     await this.arm();
@@ -210,7 +217,7 @@ export class ScheduleDO extends DurableObject<Env> {
       const result = await this.env.THREAD.getByName(current.conversation).submit(await this.input(current, fireAt, inputKey));
       if ("status" in result && result.status === "failed") throw new Error("admission_failed");
     } catch (error) {
-      console.error({ event: "schedule_deliver_failed", id: row.id, error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
+      logDiag(this.env, this.ctx, { event: "schedule_deliver_failed", thread: current.conversation, error, detail: { id: row.id, key: inputKey } });
       const paused = this.apply(row.id, { fire_key: fireKey, fire_at: fireAt, status: "failed", reason: "backend_failed", ended_at: Date.now(), note: "投递失败", input_key: inputKey });
       if (paused) await this.alert(paused);
     } finally {
@@ -279,13 +286,17 @@ export class ScheduleDO extends DurableObject<Env> {
 
   private async alert(schedule: Schedule): Promise<void> {
     const owner = ownerIds(this.env)[0];
-    console.error({ event: "schedule_paused", id: schedule.id, reason: "failures", failures: schedule.failures });
+    const message = `定时任务「${cleanName(schedule.name)}」连续 ${FAILURE_LIMIT} 次运行失败，已自动暂停。确认问题后可在聊天或管理端点恢复。`;
+    logDiag(this.env, this.ctx, { event: "schedule_paused", thread: schedule.conversation, code: "failures", detail: { id: schedule.id, failures: schedule.failures } });
+    this.ctx.waitUntil(this.env.REGISTRY.getByName("main").recordAlert({
+      kind: "schedule_paused", scope: schedule.id, origin: "web", episode: String(schedule.revision), message,
+    }).catch(() => {}));
     if (!owner) return;
     try {
       const id=`schedule-alert:${schedule.id}:${schedule.revision}`;
-      await this.env.BRIDGE.getByName("napcat").systemDeliver({id,operationAt:schedule.updated_at,runId:id,target:{kind:"private",userId:owner},purpose:"owner_alert",text: `定时任务「${cleanName(schedule.name)}」连续 ${FAILURE_LIMIT} 次运行失败，已自动暂停。确认问题后可在聊天或管理端点恢复。`});
+      await this.env.BRIDGE.getByName("napcat").systemDeliver({id,operationAt:schedule.updated_at,runId:id,target:{kind:"private",userId:owner},purpose:"owner_alert",text: message});
     } catch (error) {
-      console.error({ event: "schedule_alert_failed", id: schedule.id, error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
+      logDiag(this.env, this.ctx, { event: "schedule_alert_failed", thread: schedule.conversation, error, detail: { id: schedule.id } });
     }
   }
 

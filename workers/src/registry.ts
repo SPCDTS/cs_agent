@@ -192,6 +192,8 @@ export class RegistryDO extends DurableObject<Env> {
     return {ok:true,current:this.opsSettings()};
   }
   alerts(limit=100,before?:Parameters<AlertStore["list"]>[1]) { return this.alertStore.list(limit,before); }
+  activeAlerts(limit=50) { return this.alertStore.active(limit); }
+  activeAlertCount() { return this.alertStore.activeCount(); }
   recordAlert(input: AlertInput) { return this.alertStore.record(input); }
   resolveAlert(kind: AlertInput["kind"], scope: string, origin: AlertInput["origin"]) { this.alertStore.close(kind,scope,origin); }
   recordTurn(input: TurnReport): void { this.alertStore.recordTurn(input); }

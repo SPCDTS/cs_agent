@@ -246,19 +246,30 @@ export class MemoryExtractor {
         return entries;
       });
       const known=snapshots.map(entry=>entry.row);
-      const prompt = buildExtractPrompt({ ns: this.store.ns, at: material.last ? material.last.received_at * 1000 : start, known, material: material.text });
-      const versions = snapshots.map(entry=>({id:entry.row.id,version:entry.version}));
-      const result = await completeWithin(this.complete, prompt, this.timeoutMs);
-      // 只拣数值用量，不把模型响应、错误文本或对话写进事件表。
-      const usage = result.usage ? { input: result.usage.input, output: result.usage.output, cacheRead: result.usage.cacheRead,
-        cacheWrite: result.usage.cacheWrite, totalTokens: result.usage.totalTokens } : undefined;
-      const items = parseExtraction(result.text);
-      if (!items) { await finish({ status: "skipped", reason: "invalid_json", usage }); return false; }
-      await finish({ status: "ok", ...await applyExtraction(this.store, turnId, items, inputs, versions), usage, chars: material.chars, truncated: material.truncated, known: known.length });
-      return false;
+      let stage: "store" | "model" = "store";
+      try {
+        const prompt = buildExtractPrompt({ ns: this.store.ns, at: material.last ? material.last.received_at * 1000 : start, known, material: material.text });
+        const versions = snapshots.map(entry=>({id:entry.row.id,version:entry.version}));
+        stage = "model";
+        const result = await completeWithin(this.complete, prompt, this.timeoutMs);
+        stage = "store";
+        // 只拣数值用量，不把模型响应、错误文本或对话写进事件表。
+        const usage = result.usage ? { input: result.usage.input, output: result.usage.output, cacheRead: result.usage.cacheRead,
+          cacheWrite: result.usage.cacheWrite, totalTokens: result.usage.totalTokens } : undefined;
+        const items = parseExtraction(result.text);
+        if (!items) { await finish({ status: "skipped", reason: "invalid_json", usage }); return false; }
+        await finish({ status: "ok", ...await applyExtraction(this.store, turnId, items, inputs, versions), usage, chars: material.chars, truncated: material.truncated, known: known.length });
+        return false;
+      } catch (error) {
+        if (error instanceof ExtractTimeout) throw error;
+        const reason = "model_or_store_error";
+        await finish({ status: "failed", reason, stage });
+        await this.store.db.run("UPDATE extract_attempts SET reason=? WHERE turn_id=?", reason, turnId);
+        return true;
+      }
     } catch (error) {
       const reason=error instanceof ExtractTimeout?"timeout":"model_or_store_error";
-      await finish({ status:"failed",reason });
+      await finish({ status:"failed",reason,...(reason==="timeout"?{}:{stage:"store"}) });
       await this.store.db.run("UPDATE extract_attempts SET reason=? WHERE turn_id=?",reason,turnId);
       return true;
     }

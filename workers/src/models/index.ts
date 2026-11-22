@@ -10,7 +10,7 @@ import { FAUX_PROVIDER } from "./providers/faux";
 import type { ProviderCatalogs, ProviderOptions, ProviderSpec } from "./types";
 
 export type { ProviderCatalogs, ProviderOptions, ProviderSpec } from "./types";
-export { ModelAlarm } from "./alarm";
+export { ModelAlarm, withAlarmWaitObserver } from "./alarm";
 export { MODEL_CREDENTIALS_SCHEMA, SqlCredentialStore, remoteCredentials, type CredentialLease, type CredentialMeta } from "./credentials";
 export { modelEgressDiagnostics } from "./egress";
 export { agentSearchOption, hostedSearchSteps, withResponsesSearch, type SearchItem, type SearchOptions, type SearchStep } from "./hosted-search";

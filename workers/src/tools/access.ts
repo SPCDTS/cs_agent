@@ -18,7 +18,10 @@ export function createAccessExtension(host:AccessDeps){
       const actor=await host.allowManage(api,context);
       if(!actor||!/^qq:[1-9][0-9]{0,19}$/.test(actor))return output("此工具仅限 owner 私聊交互回合或鉴权的 owner 网页；本轮请勿重试。",true);
       return output(await work(actor));
-    }catch{return output("授权或聊天目录操作失败；请在管理面板核对权限与 QQ 连接。",true);}
+    }catch(error){
+      const code=error instanceof Error&&/^[a-z_]{1,64}$/.test(error.message)?error.message:undefined;
+      return output((code?code+"：":"")+"授权或聊天目录操作失败；请在管理面板核对权限与 QQ 连接。",true);
+    }
   }
   return defineExtension({name:"cs.access",tools:[
     defineTool({name:"qq_chats",description:"Owner only. List friends and groups the bot can message. Optional query filters names/IDs; limit defaults to 50 (max 100). This directory grants no send or read permission.",replay:"safe",

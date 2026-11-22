@@ -20,8 +20,13 @@ export class DeviceTunnel {
     let response: Response;
     try { response = await fetch('https://api.cloudflare.com/client/v4/' + path, { method, redirect: 'manual',
       headers: { Authorization: 'Bearer ' + this.config.token, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000) }); }
-    catch { throw new Error('device_tunnel_network'); }
-    if (!response.ok) throw new Error(response.status === 403 || response.status === 401 ? 'device_tunnel_forbidden' : 'device_tunnel_api_failed');
+    catch (error) {
+      throw new Error(error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError') ? 'device_tunnel_timeout' : 'device_tunnel_network');
+    }
+    if (!response.ok) {
+      throw new Error(response.status === 403 || response.status === 401 ? 'device_tunnel_forbidden'
+        : response.status === 429 ? 'device_tunnel_rate_limited' : 'device_tunnel_api_failed');
+    }
     const value: unknown = await response.json();
     const envelope = Type.Object({ success: Type.Literal(true), result: Type.Unknown() });
     if (!Check(envelope, value) || !Check(schema, value.result)) throw new Error('device_tunnel_response_invalid');

@@ -11,10 +11,10 @@ import { shortSummary } from "../subagent/activity";
 import { historyEntry, historyCursor, readHistoryCursor } from "../sessions";
 import { ADMIN_PAGE_SIZE } from "../admin/pagination";
 import type { ProjectionStore, ViewInfo } from "./projection";
-export type EventQuery = { kind?: string; result?: string; before?: number; limit: number };
+export type EventQuery = { kind?: string; result?: string; since?: number; before?: number; limit: number };
 export type AuditEvent = { id: number; at: number; kind: string; detail: unknown };
 const EVENT_RESULT_PATH: Record<string, string> = { mcp_call: "$.result", mcp_catalog: "$.status", web_search: "$.result", generate_image: "$.result",
-  web_fetch: "$.result", web_import_image: "$.result",
+  web_fetch: "$.result", web_import_image: "$.result", runtime_ops: "$.result", media_recall: "$.result", media_send: "$.result",
   coding_exec: "$.result", coding_read: "$.result", coding_write: "$.result", coding_edit: "$.result" };
 
 /** 只使用展示数据库；这里没有执行 DO 的绑定或 Harness。 */
@@ -71,6 +71,7 @@ export class AgentReadView {
   async events(q: EventQuery): Promise<{ events: AuditEvent[]; next?: number }> {
     await this.initialize();
     const where: string[] = [], args: SqliteValue[] = [];
+    if (q.since !== undefined) { where.push("at >= ?"); args.push(q.since); }
     if (q.kind) { where.push("kind = ?"); args.push(q.kind); }
     if (q.result) {
       where.push(`CASE kind ${Object.keys(EVENT_RESULT_PATH).map(() => "WHEN ? THEN json_extract(detail, ?) = ?").join(" ")} ELSE 1 END`);
@@ -112,6 +113,49 @@ export class AgentReadView {
     await this.initialize();
     const rows = await this.database.all<{ server_id: string; n: number }>("SELECT server_id, COUNT(*) AS n FROM mcp_catalog GROUP BY server_id");
     return Object.fromEntries(rows.map(row => [row.server_id, row.n]));
+  }
+
+  async mcpHealth(windowMs = 86_400_000): Promise<Record<string, {
+    calls: number; failed: number; avgMs: number | null; maxMs: number | null; lastCallAt: number | null;
+    lastError?: string; catalogStatus?: string; catalogCode?: string;
+  }>> {
+    await this.initialize();
+    const rows = await this.database.all<{ at: number; kind: string; detail: string }>(
+      "SELECT at, kind, detail FROM events WHERE kind IN ('mcp_call', 'mcp_catalog') AND at >= ? ORDER BY rowid DESC LIMIT 500",
+      Date.now() - Math.max(60_000, windowMs),
+    );
+    const stats: Record<string, { calls: number; measuredCalls: number; failed: number; totalMs: number; maxMs: number | null; lastCallAt: number | null; lastError?: string; catalogStatus?: string; catalogCode?: string }> = {};
+    for (const row of rows) {
+      let detail: Record<string, unknown>;
+      try { detail = JSON.parse(row.detail) as Record<string, unknown>; } catch { continue; }
+      const server = typeof detail.server === "string" ? detail.server : undefined;
+      if (!server) continue;
+      const item = stats[server] ??= { calls: 0, measuredCalls: 0, failed: 0, totalMs: 0, maxMs: null, lastCallAt: null };
+      if (row.kind === "mcp_catalog") {
+        if (item.catalogStatus === undefined && typeof detail.status === "string") {
+          item.catalogStatus = detail.status;
+          if (typeof detail.code === "string") item.catalogCode = detail.code;
+        }
+        continue;
+      }
+      item.calls++;
+      if (item.lastCallAt === null || row.at > item.lastCallAt) item.lastCallAt = row.at;
+      const ms = typeof detail.ms === "number" && Number.isFinite(detail.ms) ? detail.ms : undefined;
+      if (ms !== undefined) {
+        item.measuredCalls++;
+        item.totalMs += ms;
+        item.maxMs = item.maxMs === null ? ms : Math.max(item.maxMs, ms);
+      }
+      const result = typeof detail.result === "string" ? detail.result : "unknown";
+      if (result !== "ok" && result !== "receipt" && result !== "approval_pending") {
+        item.failed++;
+        item.lastError ??= typeof detail.code === "string" ? `${result}:${detail.code}` : result;
+      }
+    }
+    return Object.fromEntries(Object.entries(stats).map(([server, s]) => [server, {
+      calls: s.calls, failed: s.failed, avgMs: s.measuredCalls > 0 ? Math.round(s.totalMs / s.measuredCalls) : null, maxMs: s.maxMs, lastCallAt: s.lastCallAt,
+      ...(s.lastError ? { lastError: s.lastError } : {}), ...(s.catalogStatus ? { catalogStatus: s.catalogStatus } : {}), ...(s.catalogCode ? { catalogCode: s.catalogCode } : {}),
+    }]));
   }
 
   async mcpAccess(scope: string, server: string): Promise<McpGrant | null> {

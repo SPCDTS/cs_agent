@@ -1,7 +1,7 @@
 import type { Target, TurnKind } from '../policy';
 
 export type InboundRow = {
-  message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number;
+  message_id: string; platform_message_id: string; user_id: string; self_id: string; text: string; received_at: number; admitted_at?: number | null;
   status: "queued" | "done" | "failed"; chat_kind: "private" | "group"; chat_id: string; nickname: string;
   persona_text: string | null; session_generation: number; reply_channel: "qq" | "web"; scope_name: string; turn_id: string | null; when_busy: "steer" | "followUp" | null; kind: TurnKind;
 };

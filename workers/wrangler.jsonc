@@ -8,7 +8,12 @@
   "compatibility_flags": ["nodejs_compat"],
   // 限制每次调用的活跃 CPU；网络等待不计入 CPU，避免异常计算消耗套餐额度
   "limits": { "cpu_ms": 30000 },
-  "observability": { "enabled": true },
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "issues": { "enabled": true },
+    "traces": { "enabled": true, "head_sampling_rate": 0.2 }
+  },
   // */5：外部事件轮询兜底（Gmail 推送优先）；UTC 19:30 = 北京 03:30：聊天摘要与清理、记忆整理、审计保留（src/maintenance）。
   // index.ts 的 scheduled 按 cron 字符串分派
   "triggers": { "crons": ["*/5 * * * *", "30 19 * * *"] },
