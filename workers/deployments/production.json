@@ -13,6 +13,7 @@
     }
   ],
   "vars": {
+    "DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID": "b7a94790463e7451da55b71022712f4e",
     "PUBLIC_ORIGIN": "https://agent.spcdts.dev",
     "GITHUB_APP_ID": "5729532",
     "GITHUB_APP_SLUG": "cs-agent-event",

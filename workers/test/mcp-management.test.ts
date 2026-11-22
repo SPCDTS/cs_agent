@@ -138,6 +138,20 @@ describe("runtime MCP onboarding", () => {
     expect((await registry().mcpServerGet(id)).server.enabled).toBe(false);
   });
 
+  it("允许未配置 QQ_OWNER 的主人网页使用 Cloudflare 工具", async () => {
+    const seen = scriptedModel([() => ({ name:'cloudflare_inventory', args:{ resource:'dns' } })]);
+    await runInDurableObject(env.THREAD.getByName('owner'), async (host,state) => {
+      const thread = threadWithBindings(host, state, { ...env, QQ_OWNER:'', MEMORY_EXTRACT_NAMESPACES:'' });
+      await thread.submitWeb('owner',crypto.randomUUID(),'查看 DNS 清单');
+    });
+    // 未连接 Cloudflare 的实例应返回资源授权错误，说明网页主人已通过会话鉴权。
+    await expect.poll(() => seen.outputs, {timeout:10000}).toContain(JSON.stringify('device_cloudflare_denied'));
+    await runInDurableObject(env.THREAD.getByName('owner'), (_host,state) => {
+      const event = state.storage.sql.exec<{detail:string}>("SELECT detail FROM events WHERE kind='cloudflare_management'").one();
+      expect(JSON.parse(event.detail)).toEqual({tool:'cloudflare_inventory',action:'dns',result:'error'});
+    });
+  });
+
   it("returns tool rejection details through the admin API and preserves the active selection", async () => {
     const remote = remoteFixture();
     remote.state.tools.push({ name: "unsupported", inputSchema: { type: "object", properties: { value: { type: "string", unknownKeyword: true } } } });

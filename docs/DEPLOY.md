@@ -17,6 +17,8 @@ npm run check
 
 部署必须显式选择档案。复制 `workers/deployments/example.json` 为被 Git 忽略的 `my.local.json`，填写自己的 Worker 名称、PUBLIC_ORIGIN、routes 和 R2 桶；可在 vars 中补 Gmail 推送配置。`production.json` 只描述本仓库既有生产实例，CI 显式选择它，既有 Worker、R2 和 DO 数据身份保持不变。新部署不能直接沿用该档案。
 
+正式部署会为档案中的 PUBLIC_ORIGIN 登记或复用 Cloudflare 私有 OAuth 客户端。首次登记需提供部署账户的 `CLOUDFLARE_ACCOUNT_ID` 和含 OAuth Clients Write 权限的 `CLOUDFLARE_API_TOKEN`。已登记的实例可以把公开的 `DEVICE_CLOUDFLARE_OAUTH_CLIENT_ID` 固定在档案 vars 中，后续发布可使用日常部署权限。生成的 `workers/wrangler.deploy.json` 含本次使用的 client ID。实例主人上线后在管理台同意资源权限。[设备接入与 Cloudflare 授权](DEVICE-MCP.md)
+
 `npm run deploy -- deployments/my.local.json` 会合并基础配置生成被 Git 忽略的 `workers/wrangler.deploy.json`，然后调用 Wrangler。漏填档案或保留示例域名会在联网前失败。不要手改生成文件或删迁移。
 
 实际部署编码沙箱需要可用的 Docker；这是构建 Cloudflare coding 镜像的依赖，不是恢复旧 Docker Compose 服务。

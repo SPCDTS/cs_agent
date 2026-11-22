@@ -18,6 +18,9 @@ import { AlertStore, type AlertInput, type TurnReport } from "./alerts";
 import { ownerIds } from "./policy";
 import { SKILLS_SCHEMA, parseSkill, type Skill, type SkillInput, type SkillSummary } from "./skills";
 import { McpServerStore, type ServerSetupInput, type ServerSelectionInput } from "./mcp/servers";
+import { CloudflareManagement } from './devices/cloudflare-management';
+import type { Change, CloudflareInventory } from './devices/contracts';
+import { CloudflareGrant } from './devices/cloudflare';
 import { DeviceStore, type DeviceCreate } from './devices/store';
 import type { Static } from 'typebox';
 import { connectionDigest } from "./mcp/names";
@@ -37,7 +40,14 @@ export class RegistryDO extends DurableObject<Env> {
   private alertDrain?: Promise<void>;
   private readonly vault = new TokenVault(this.env.OAUTH_STORE_KEY);
   private readonly mcpServers = new McpServerStore(this.ctx.storage.sql, this.vault, this.env.PUBLIC_ORIGIN);
-  private readonly devices = new DeviceStore(this.ctx.storage.sql, this.vault, this.mcpServers, this.env);
+  private readonly cloudflare = new CloudflareGrant(this.ctx.storage.sql, this.vault, this.env);
+  private readonly cloudManager = new CloudflareManagement(this.ctx.storage.sql, scope => this.lock('cf:grant', async () => {
+    if (!this.cloudflare.status().domain) throw new Error('device_cloudflare_denied');
+    const settings = await this.cloudflare.settings();
+    if (!this.cloudflare.status().scopes.includes(scope)) throw new Error('device_cloudflare_denied');
+    return settings;
+  }));
+  private readonly devices = new DeviceStore(this.ctx.storage.sql, this.vault, this.mcpServers, this.env, () => this.lock('cf:grant', () => this.cloudflare.settings()));
   private readonly locks = new Map<string, Promise<unknown>>();
   private readonly access = new Map<string, Promise<string | undefined>>();
   private readonly credentials = new SqlCredentialStore(this.ctx.storage.sql, this.vault);
@@ -62,10 +72,21 @@ export class RegistryDO extends DurableObject<Env> {
       ${CHATGPT_SCHEMA}
       ${SKILLS_SCHEMA};
     `);
-    ctx.storage.transactionSync(() => { this.mcpServers.initialize(); this.devices.initialize(); });
+    ctx.storage.transactionSync(() => { this.mcpServers.initialize(); this.devices.initialize(); this.cloudflare.initialize(); this.cloudManager.initialize(); });
   }
 
-  devicesList() { return this.devices.list(); }
+  cloudflareStart() { return this.cloudflare.start(); }
+  cloudflareComplete(state: string, code: string) { return this.lock('cf:grant', async () => {
+    const status = await this.cloudflare.complete(state, code); this.cloudManager.invalidate(); return status;
+  }); }
+  cloudflareInventory(kind: Static<typeof CloudflareInventory>['resource'], page?: number) { return this.cloudManager.inventory(kind, page); }
+  cloudflarePropose(input: Change) { return this.cloudManager.propose(input); }
+  cloudflareChanges() { return this.cloudManager.list(); }
+  cloudflareReview(id: string, approve: boolean) { return this.cloudManager.review(id, approve); }
+  devicesList() {
+    const list = this.devices.list(), cloudflare = this.cloudflare.status();
+    return { ...list, cloudflare, configured: cloudflare.domain ? !cloudflare.reauth : list.configured };
+  }
   deviceCreate(input: Static<typeof DeviceCreate>) { return this.lock('device:' + input.id, () => this.devices.create(input)); }
   deviceClaim(id: string, token: string, claim: string) { return this.lock('device:' + id, () => this.devices.claim(id, token, claim)); }
   deviceReady(id: string, token: string, claim: string) { return this.lock('device:' + id, () => this.devices.ready(id, token, claim)); }
