@@ -25,10 +25,13 @@ const NODE_TESTS = [
   "test/web-search.test.ts",
 ];
 
+// Vitest 4 的内联 projects 不会继承顶层 testTimeout，各子项目需显式复用同一上限。
+const TEST_TIMEOUT = 20_000;
+
 export default defineConfig({
   // 保留每个测试文件的隔离；本机并发 2 个，CI 在同一台 runner 内并发 4 个。
   test: {
-    testTimeout: 20_000,
+    testTimeout: TEST_TIMEOUT,
     maxWorkers: process.env.CI ? 4 : 2,
     projects: [
       {
@@ -37,6 +40,7 @@ export default defineConfig({
           name: "node",
           environment: "node",
           include: NODE_TESTS,
+          testTimeout: TEST_TIMEOUT,
         },
       },
       {
@@ -59,6 +63,7 @@ export default defineConfig({
           include: ["test/**/*.test.ts"],
           exclude: NODE_TESTS,
           isolate: true,
+          testTimeout: TEST_TIMEOUT,
         },
       },
     ],
