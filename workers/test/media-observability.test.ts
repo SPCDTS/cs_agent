@@ -6,7 +6,7 @@ import { MediaTrace, mediaErrorDetail, type MediaDiagnostic } from "../src/media
 import { MediaDownloadError, downloadMedia } from "../src/media/download";
 import { MediaRepository } from "../src/media/repository";
 import { createMediaExtension, type MediaDeps } from "../src/tools/media";
-import { lookupHostMedia, type MediaLookupBridge } from "../src/tools/media-host";
+import { lookupHostMedia, type MediaLookupBridge, type VerifiedMediaSource } from "../src/tools/media-host";
 import { SANDBOX_FAILURES } from "../src/sandbox/client";
 import { parseFrame } from "../src/onebot";
 import type { InboundMedia } from "../src/policy";
@@ -16,8 +16,8 @@ const sockets: WebSocket[] = [];
 afterEach(async () => { for (const socket of sockets.splice(0)) socket.close(); vi.restoreAllMocks(); await reset(); });
 const secret = "synthetic_private_cookie_and_token";
 const url = "https://1.1.1.1/private?token=" + secret;
-const source = { scope: "private:10000003", namespace: "private:10000003", target: { kind: "private" as const, userId: "10000003" } };
-function fixture() {
+const privateSource = { scope: "private:10000003", namespace: "private:10000003", target: { kind: "private" as const, userId: "10000003" } };
+function fixture(source: VerifiedMediaSource = privateSource, bridge?: MediaLookupBridge) {
   const logs: MediaDiagnostic[] = [];
   const repo = new MediaRepository({ bucket: env.ASSETS, scope: source.namespace });
   let items: InboundMedia[] = [{ kind: "file", ordinal: 1, fileId: "private-file-reference", name: "private-name.txt" }];
@@ -25,14 +25,14 @@ function fixture() {
     ? (items.length ? { media_json: JSON.stringify(items), recalled: 0 } : undefined) : { message_id: "1" }) } as unknown as Parameters<typeof lookupHostMedia>[0]["database"];
   const rpc = {
     getMessage: vi.fn(async () => ({ message_id: "1", user_id: "10000003", message_type: "private", message: [{ type: "file", data: { url } }] })),
-    getFileUrl: vi.fn<MediaLookupBridge["getFileUrl"]>(async () => url), getFile: vi.fn(async () => url), getRecord: vi.fn(async () => url),
+    getFileAttachment: vi.fn<MediaLookupBridge["getFileAttachment"]>(async () => url), getFile: vi.fn(async () => url), getRecord: vi.fn(async () => url),
     getImage: vi.fn<MediaLookupBridge["getImage"]>(),
   };
   const record = vi.fn(async (_kind: string, _detail: object) => {});
   const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([1, 2, 3])));
   const deps: MediaDeps = {
     allowed: async () => true, scope: async () => source.scope, repository: async () => repo,
-    lookup: (messageId, _api, _context, selection, trace) => lookupHostMedia({ database, bridge: rpc, source, messageId, selection, trace }),
+    lookup: (messageId, _api, _context, selection, trace) => lookupHostMedia({ database, bridge: bridge ?? rpc, source, messageId, selection, trace }),
     sandbox: async () => { throw new Error("unused"); }, deliver: async () => {}, record, log: event => logs.push(event),
   };
   const run = async (args: { message_id: string; ordinal?: number } = { message_id: "1", ordinal: 1 }) => {
@@ -51,14 +51,14 @@ describe("附件阶段诊断", () => {
     expect(put).toHaveBeenCalledTimes(1);
     expect(f.record).toHaveBeenCalledTimes(1);
     const identity = f.logs.find(row => row.stage === "store")!;
-    expect(identity).toMatchObject({ message_id: "1", ordinal: 1, scope: source.scope });
+    expect(identity).toMatchObject({ message_id: "1", ordinal: 1, scope: privateSource.scope });
     expect(identity.traceId).toMatch(/^[a-f0-9-]{36}$/);
     expect(new Set(f.logs.map(row => row.traceId)).size).toBe(1);
-    for (const stage of ["lookup", "metadata", "resolve_url", "get_private_file_url", "download", "store"]) {
+    for (const stage of ["lookup", "metadata", "resolve_url", "get_file", "download", "store"]) {
       expect(f.logs.filter(row => row.stage === stage).map(row => row.state)).toEqual(["start", "success"]);
     }
     expect(f.logs.filter(row => row.stage === "audit").map(row => row.state)).toEqual(["start", "failure"]);
-    expect(f.record.mock.calls[0]?.[1]).toMatchObject({ traceId: identity.traceId, message_id: "1", scope: source.scope, result: "ok" });
+    expect(f.record.mock.calls[0]?.[1]).toMatchObject({ traceId: identity.traceId, message_id: "1", scope: privateSource.scope, result: "ok" });
     const serialized = JSON.stringify(f.logs);
     for (const value of [secret, url, "private-file-reference", "private-name.txt"]) expect(serialized).not.toContain(value);
     expect(f.logs.every(row => Number.isInteger(row.ms) && row.ms >= 0 && row.ms <= 86_400_000)).toBe(true);
@@ -70,7 +70,7 @@ describe("附件阶段诊断", () => {
 
   it.each([
     ["lookup", "media_unexpected_error"], ["metadata", "media_unexpected_error"], ["get_msg", "onebot_failed"],
-    ["resolve_url", "media_reference_missing"], ["get_private_file_url", "onebot_failed"],
+    ["resolve_url", "media_reference_missing"],
     ["get_file", "onebot_timeout"], ["download", "media_type_error"], ["store", "media_unexpected_error"],
   ])("故障注入定位%s，保留错误码且审计失败不覆盖业务失败", async (stage, code) => {
     const f = fixture();
@@ -79,8 +79,7 @@ describe("附件阶段诊断", () => {
     if (stage === "metadata") vi.spyOn(f.database, "get").mockRejectedValue(native);
     if (stage === "get_msg") { f.setItems([]); f.rpc.getMessage.mockRejectedValue(new Error("onebot_failed: " + secret)); }
     if (stage === "resolve_url") f.setItems([{ kind: "file", ordinal: 1 }]);
-    if (stage === "get_private_file_url") f.rpc.getFileUrl.mockRejectedValue(new Error("onebot_failed:retcode=1200"));
-    if (stage === "get_file") { f.setItems([{ kind: "file", ordinal: 1, file: "opaque-file" }]); f.rpc.getFile.mockRejectedValue(new Error("onebot_timeout: " + secret)); }
+    if (stage === "get_file") f.rpc.getFileAttachment.mockRejectedValue(new Error("onebot_timeout: " + secret));
     if (stage === "download") f.fetcher.mockRejectedValue(new TypeError(url));
     if (stage === "store") vi.spyOn(f.repo, "put").mockRejectedValue(native);
     f.record.mockRejectedValue(new Error("secondary " + secret));
@@ -105,10 +104,10 @@ describe("附件阶段诊断", () => {
     const first = f.logs[0]!.traceId;
     f.logs.length = 0;
     f.setItems([{ kind: "file", ordinal: 1, fileId: "do-not-read" }, { kind: "file", ordinal: 2, file: "second" }]);
-    f.rpc.getFile.mockRejectedValue(new Error("onebot_disconnected"));
+    f.rpc.getFileAttachment.mockRejectedValue(new Error("onebot_disconnected"));
     await f.run({ message_id: "1", ordinal: 2 });
     expect(f.logs[0]!.traceId).not.toBe(first);
-    expect(f.rpc.getFileUrl).not.toHaveBeenCalled();
+    expect(f.rpc.getFileAttachment.mock.calls.map(([file]) => file)).toEqual(["second"]);
     expect(f.logs.find(row => row.stage === "get_file" && row.state === "failure")).toMatchObject({ ordinal: 2, code: "onebot_disconnected" });
   });
 
@@ -160,15 +159,49 @@ describe("错误结构与原始异常", () => {
   });
 });
 
-it("真实OneBot拒绝仅传递有界retcode，宿主trace不依赖RPC自定义异常字段", async () => {
-  const f = fixture(), { socket, frames } = await connect(sockets);
-  f.deps.lookup = (messageId, _api, _context, selection, trace) => lookupHostMedia({ database: f.database, bridge: env.BRIDGE.getByName("napcat"), source, messageId, selection, trace });
+it.each<VerifiedMediaSource>([
+  { ...privateSource, namespace: "owner" },
+  { scope: "group:200000001", namespace: "group:200000001", target: { kind: "group", groupId: "200000001" } },
+])("qq_attachment 在 $scope 按 file_id 取回原始字节并存入对应命名空间", async source => {
+  const f = fixture(source, env.BRIDGE.getByName("napcat")), { socket, frames } = await connect(sockets);
+  f.setItems([{ kind: "file", ordinal: 1, fileId: "platform-id", file: "报告.bin", url, name: "报告.bin" }]);
   const pending = f.run();
-  const request = await action(frames, 0, "get_private_file_url");
+  const frame = await action(frames, 0, "get_file");
+  expect(frame.params).toEqual({ file: "platform-id" });
+  const data = { file: "/qq/cache/blob", url: "/qq/cache/blob", base64: "AP+A", file_size: "3", file_name: "blob" };
+  socket.send(JSON.stringify({ status: "ok", retcode: 0, echo: frame.echo, data }));
+  const result = await pending, output = result.output?.[0];
+  expect(result.isError).not.toBe(true);
+  if (output?.type !== "text") throw new Error("missing_ref");
+  const stored = await f.repo.get(JSON.parse(output.text).id);
+  expect(stored.ref).toMatchObject({ kind: "file", name: "报告.bin", scope: source.namespace });
+  expect(stored.bytes).toEqual(new Uint8Array([0, 255, 128]));
+  expect(frames).toHaveLength(1);
+  expect(f.fetcher).not.toHaveBeenCalled();
+  expect(JSON.stringify([f.logs, f.record.mock.calls, result.output])).not.toContain(data.base64);
+});
+
+it.each([
+  [{ file: "/qq/cache/blob", url: "/qq/cache/blob" }, "napcat_file_content_missing"],
+  [{ base64: "%%%invalid%%%", url }, "invalid_file_content"],
+  [{ base64: "AA==", file_size: "2" }, "invalid_file_content"],
+])("get_file 拒绝无法读取或不完整的内容（%j → %s）", async (data, code) => {
+  const f = fixture(privateSource, env.BRIDGE.getByName("napcat")), { socket, frames } = await connect(sockets);
+  const pending = f.run(), frame = await action(frames, 0, "get_file");
+  socket.send(JSON.stringify({ status: "ok", retcode: 0, echo: frame.echo, data }));
+  expect((await pending).isError).toBe(true);
+  expect(f.logs.find(row => row.stage === "get_file" && row.state === "failure")).toMatchObject({ code });
+  expect(f.fetcher).not.toHaveBeenCalled();
+});
+
+it("真实OneBot拒绝仅传递有界retcode，宿主trace不依赖RPC自定义异常字段", async () => {
+  const f = fixture(privateSource, env.BRIDGE.getByName("napcat")), { socket, frames } = await connect(sockets);
+  const pending = f.run();
+  const request = await action(frames, 0, "get_file");
   socket.send(JSON.stringify({ status: "failed", retcode: 1200, echo: request.echo, wording: secret, data: { url } }));
   const result = await pending;
   expect(result.isError).toBe(true);
-  expect(f.logs.find(row => row.stage === "get_private_file_url" && row.state === "failure")).toMatchObject({ code: "onebot_failed", retcode: 1200 });
+  expect(f.logs.find(row => row.stage === "get_file" && row.state === "failure")).toMatchObject({ code: "onebot_failed", retcode: 1200 });
   expect(JSON.stringify([f.logs, result.output])).not.toContain(secret);
   expect(parseFrame(JSON.stringify({ echo: "x", status: "failed", retcode: secret }))).not.toHaveProperty("retcode");
 });
@@ -188,11 +221,11 @@ it("已有资产读取可追踪且不重新下载，损坏资产保留稳定错�
 it("未指定ordinal时并行解析的失败仍关联正确附件", async () => {
   const f = fixture();
   f.setItems([{ kind: "file", ordinal: 1, fileId: "first" }, { kind: "file", ordinal: 2, fileId: "second" }]);
-  f.rpc.getFileUrl.mockImplementation(async (_target, fileId) => { if (fileId === "second") throw new Error("onebot_failed"); return url; });
+  f.rpc.getFileAttachment.mockImplementation(async file => { if (file === "second") throw new Error("onebot_failed"); return url; });
   const result = await f.run({ message_id: "1" });
   expect(result.isError).toBe(true);
-  expect(f.record.mock.calls[0]?.[1]).toMatchObject({ ordinal: 2, failedStage: "get_private_file_url" });
-  expect(f.logs.filter(row => row.stage === "get_private_file_url" && row.state === "start").map(row => row.ordinal)).toEqual([1, 2]);
+  expect(f.record.mock.calls[0]?.[1]).toMatchObject({ ordinal: 2, failedStage: "get_file" });
+  expect(f.logs.filter(row => row.stage === "get_file" && row.state === "start").map(row => row.ordinal)).toEqual([1, 2]);
 });
 
 it("明确大小限制错误不被通用提示反向否认", async () => {
@@ -202,4 +235,9 @@ it("明确大小限制错误不被通用提示反向否认", async () => {
   expect(result.isError).toBe(true);
   expect(JSON.stringify(result.output)).toContain("too_large");
   expect(JSON.stringify(result.output)).not.toContain("不能据此认定");
+  f.setItems([{ kind: "file", ordinal: 1, fileId: "too-large", size: 11_000_000 }]);
+  f.rpc.getFileAttachment.mockClear();
+  expect((await f.run()).isError).toBe(true);
+  expect(f.rpc.getFileAttachment).not.toHaveBeenCalled();
+  expect(f.record.mock.calls.at(-1)?.[1]).toMatchObject({ result: "too_large", failedStage: "resolve_url" });
 });

@@ -1,7 +1,7 @@
 import type { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { recallMedia } from "../context";
 import { id, isRecord, normalizeMedia, scopeOf, type InboundMedia, type Target } from "../policy";
-import { validScope, type AssetRef } from "../media/model";
+import { FILE_MAX_BYTES, validScope, type AssetRef } from "../media/model";
 import type { MediaSelection } from "./media";
 import { mediaStage, type MediaTrace } from "../media/diagnostics";
 
@@ -9,7 +9,7 @@ import { mediaStage, type MediaTrace } from "../media/diagnostics";
 export type VerifiedMediaSource = { scope: string; namespace: string; target: Target };
 export type MediaLookupBridge = {
   getMessage(messageId: string): Promise<unknown>;
-  getFileUrl(target: Target, fileId: string, busid?: number): Promise<string>;
+  getFileAttachment(file: string, scope: string, name?: string): Promise<AssetRef | string>;
   getImage(file: string, scope: string): Promise<AssetRef>;
   getRecord(file: string): Promise<string>;
   getFile(file: string): Promise<string>;
@@ -61,17 +61,19 @@ export async function lookupHostMedia(input: {
         const asset = await mediaStage(itemTrace, "get_image", () => input.bridge.getImage(file, input.source.namespace));
         return { ...item, assetId: asset.id };
       }
-      if (item.url) return item;
-      if (item.file && /^https?:\/\//i.test(item.file)) return { ...item, url: item.file };
-      const file = item.file ?? item.fileId;
+      const file = item.kind === "file" ? item.fileId ?? item.file : item.file ?? item.fileId;
+      if (item.url && !(item.kind === "file" && item.fileId)) return item;
       if (!file) throw new Error("media_reference_missing");
+      if (/^https?:\/\//i.test(file)) return { ...item, url: file };
       let url: string;
       switch(item.kind) {
         case "audio": url = await mediaStage(itemTrace, "get_record", () => input.bridge.getRecord(file)); break;
         case "video": url = await mediaStage(itemTrace, "get_file", () => input.bridge.getFile(file)); break;
-        case "file": url = item.fileId
-          ? await mediaStage(itemTrace, target.kind === "private" ? "get_private_file_url" : "get_group_file_url", () => input.bridge.getFileUrl(target, item.fileId!))
-          : await mediaStage(itemTrace, "get_file", () => input.bridge.getFile(file)); break;
+        case "file": {
+          if (item.size !== undefined && item.size > FILE_MAX_BYTES) throw new Error("too_large");
+          const result = await mediaStage(itemTrace, "get_file", () => input.bridge.getFileAttachment(file, input.source.namespace, item.name));
+          return typeof result === "string" ? { ...item, url: result } : { ...item, assetId: result.id };
+        }
         default: { const exhaustive: never = item.kind; throw new Error(`invalid_media_kind:${exhaustive}`); }
       }
       // 其他附件仍由 MediaRepository.importRemote 检查公网地址、重定向与大小。

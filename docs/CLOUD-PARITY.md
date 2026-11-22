@@ -31,7 +31,7 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
   - 同一 `runId + group` 串行发送，仅首条携带群 `@`（`unknown` 保留占位，明确失败释放占位）。
   - `reconcile(id)` 只读查询历史消息，仅当本人、目标、时间窗口、完整消息段、平台消息 ID 与唯一匹配全部成立时才认定 `sent`（附件与含糊匹配维持 `unknown`）。
   - `cancelQueued({ thread, generation })` 将旧代次 `queued` 置为 `rejected` 并保留墓碑；容量回收前原子推进 `minimumOperationAt` 水位。
-- `chats(refresh?)`（5 分钟缓存）、`getMessage`、`getHistory`（最多 100）、`getForward`、`getFileUrl` / `getImage` / `getRecord` / `getFile` 为只读查询接口；跨目标发送授权**不授予**历史读取权限。
+- `chats(refresh?)`（5 分钟缓存）、`getMessage`、`getHistory`（最多 100）、`getForward`、`getFileAttachment` / `getImage` / `getRecord` / `getFile` 为只读查询接口；跨目标发送授权**不授予**历史读取权限。
 
 ### 2.2 授权、人设、技能与运维配置
 
@@ -44,11 +44,12 @@ BridgeDO 是 QQ 唯一发送事实源，RegistryDO 保存授权、人设、技�
 
 所有对象位于私有 R2 绑定 `ASSETS` 的 `cs-agent/v1/` 前缀，作用域完全由宿主授权层决定，模型不能指定任意 R2 key 或 namespace。
 
-### 3.1 私有媒体与 NapCat 图片回传
+### 3.1 私有媒体与 NapCat 附件回传
 
 - `MediaRepository`（`workers/src/media/repository.ts`）固定作用域，单资产上限 10 MiB，`AssetRef = { id, scope, sha256, bytes, mime, name, kind }`（`image | file | audio | video`）。`issueUrl` 签发 5 分钟（最长 600 秒）单对象随机票据 `/media/object?token=...`，不含管理口令或原始 scope；`/admin` 媒体上传下载要求 Bearer 鉴权。
 - 图片、音频、视频可与文字同条发送；普通文件走独立 `upload_group_file / upload_private_file` intent（成功 ACK 允许无 `messageId`）。
 - **NapCat 图片回传**：本机 OneBot 启用 `enableLocalFile2Url: true`，`get_image` 经反向 WebSocket 返回 base64（10 MiB 图片约 13.34 MiB，低于 DO 32 MiB 帧上限）；Bridge 校验大小与格式后写入私有 R2 并返回 `AssetRef`，不把 base64 写入 DO SQL 或日志，也不退回云端抓取 QQ 图片 URL。缺少 base64 时返回 `napcat_image_content_missing`。
+- 私聊和群聊的普通文件优先按 `file_id` 调用 `get_file`。启用同一回传设置后，Bridge 将文件内容写入当前会话的私有 R2，单文件上限为 10 MiB。仅有 HTTP(S) 链接时沿用受限的公网下载流程。
 - `createMediaExtension` 注册 `qq_image`、`qq_attachment`、`send_file`，由宿主 `lookupHostMedia` 校验当前 scope 与目标，每次最多解析 5 个附件。
 
 ### 3.2 持久工作区与群聊脚本执行
