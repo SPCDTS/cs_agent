@@ -184,8 +184,13 @@ export class McpPolicyStore {
   const state = unknown ? "unknown" : "succeeded", json = unknown ? null : receipt(result, this.config.limits);
   await this.db.transaction(async tx => {
    await tx.run("UPDATE mcp_invocations SET status=?,result_json=? WHERE id=?", state, json, id);
-   await tx.run("UPDATE mcp_approvals SET status=?,result_json=? WHERE id=?", state, json, id);
+   await tx.run("UPDATE mcp_approvals SET status=?,result_json=? WHERE id=?", unknown ? "unknown" : result.isError ? "rejected" : "succeeded", json, id);
   });
+ }
+ async rejectUnclaimedApproval(scope: string, id: string, result: ToolExecutionResult) {
+  await this.initialize();
+  await this.db.run("UPDATE mcp_approvals SET status='rejected',result_json=? WHERE id=? AND scope=? AND status='approved'",
+   receipt(result, this.config.limits), id, scope);
  }
  async decide(scope: string, id: string, decision: "approve" | "reject", reviewer: McpAuthority) {
   if (!reviewer.owner || reviewer.kind === "event" || reviewer.kind === "subagent" || reviewer.subagentId) throw new McpPolicyError("denied");

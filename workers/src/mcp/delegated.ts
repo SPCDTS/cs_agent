@@ -10,7 +10,7 @@ import { SandboxReadOutput } from "../tools/coding";
 import { boundedJson, compileMcpSchema } from "./schema";
 import { MCP_CONFIG } from "./config";
 import { slug, toolNames } from "./names";
-import { snapshotCatalogs, type McpAuthority } from "./access";
+import { McpAuthoritySchema, snapshotCatalogs, type McpAuthority } from "./access";
 import { SandboxResourceSchema, type SandboxResource } from "../sandbox/resources";
 import type { SandboxTask } from "../sandbox/task-access";
 import type { SubagentCapabilities } from "../subagent/model";
@@ -114,9 +114,7 @@ export function createSubagentCapabilityHost(stub: object): SubagentCapabilityHo
         replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), catalogJson: Type.String(), tools: Type.Array(Type.String()), environments: Type.Optional(EnvironmentSnapshotsSchema),
         resourceAllow: Type.Optional(Type.Array(Type.Object({ server: Type.String(), prefixes: Type.Array(Type.String()) }))) });
       const schema = Type.Object({
-        authority: Type.Object({ kind: Type.Union(["message", "schedule", "event", "subagent"].map(v => Type.Literal(v))),
-          scope: Type.String(), actor: Type.String(), owner: Type.Boolean(), generation: Type.Integer({ minimum: 0 }),
-          replyChannel: Type.Union([Type.Literal("web"), Type.Literal("qq")]), subagentId: Type.Optional(Type.String()) }),
+        authority: McpAuthoritySchema,
         sandbox: Type.Optional(SandboxResourceSchema),
         capabilities: Type.Object({ sandboxId: Type.Optional(Type.String()), coding: Type.Optional(Type.Boolean()), mcp: Type.Optional(snapshot) }),
       });
