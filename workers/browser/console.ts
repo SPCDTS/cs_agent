@@ -1,11 +1,11 @@
-import { refreshContextMonitor, resetContextMonitor } from "./context-monitor";
+import { refreshContextMonitor, resetContextMonitor, setContextMonitorExpanded } from "./context-monitor";
 import { resetMemory } from "./memory";
 import * as C from "./request-contracts";
 import { Check } from "typebox/value";
 import { readApi } from "./api";
 import { input } from "./dom";
 import { $, ApiError, api, bjTime, duration, el, fail, pill, readToken, state, time } from "./app";
-import { loadTopology, renderTopology, resetTopology, stopTopology } from "./topology";
+import { drawTopologyLinks, loadTopology, renderTopology, resetTopology, stopTopology } from "./topology";
 import { listPages } from "./pagination";
 import { loadChat, resetChatTrace, scheduleConsolePoll } from "./trace";
 import { cacheCell, detailCache, openRequest, percent, toolCache } from "./request-detail";
@@ -63,19 +63,42 @@ export function chooseSubagent(thread:string,id:string,summary:string){
   if(cs.view!=="chat")consoleView("chat");
   $("chat-title").scrollIntoView({block:"nearest"});
 }
-export function consoleView(view: string){
+let inspectorMode: "topo" | "ctx" | null = null;
+function setInspector(mode: "topo" | "ctx" | null) {
+  inspectorMode = mode;
+  $("chat-inspector-topo").setAttribute("aria-pressed", String(mode === "topo"));
+  $("chat-inspector-ctx").setAttribute("aria-pressed", String(mode === "ctx"));
+  $("chat-inspector").hidden = mode === null;
+  $("agent-topology").hidden = mode !== "topo";
+  $("context-monitor").hidden = mode !== "ctx";
+  setContextMonitorExpanded(mode === "ctx");
+  if (mode === "topo") {
+    $("chat-inspector-title").textContent = "Agent 拓扑";
+    renderTopology(true);
+    void loadTopology(true);
+    requestAnimationFrame(() => drawTopologyLinks());
+  } else if (mode === "ctx") {
+    $("chat-inspector-title").textContent = "上下文趋势";
+  }
+}
+export function consoleView(view: string, subtab?: string){
   if(cs.view!==view){clearTimeout(cs.timer);stopTopology();detailCache.clear();toolCache.clear();cs.requestVersion++;if(cs.view==="chat"){cs.chatVersion++;cs.chatLoading=false;}}
   if(cs.view!=="usage"&&view==="usage"){cs.until=Date.now();cs.before=undefined;cs.pages=[];}
   cs.view=view;
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(b=>{if(b.dataset.view===view)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current");});
   $("view-requests").hidden=view!=="usage";$("usage-summary").hidden=view!=="usage";$("view-chat").hidden=view!=="chat";
-  showManagement(view);$("requests-heading").textContent="用量总览";
-  if(view==="chat"){void refreshContextMonitor(true);loadChat().catch(fail);renderTopology();loadTopology(true);}
+  showManagement(view, subtab);$("requests-heading").textContent="用量总览";
+  if(view==="chat"){
+    loadChat().catch(fail);
+    if(inspectorMode==="topo"){renderTopology(true);loadTopology(true);requestAnimationFrame(()=>drawTopologyLinks());}
+    else if(inspectorMode==="ctx")void refreshContextMonitor(true);
+  }
   if(view==="usage")loadRequests().catch(fail);
   if(managementPages[view])loadManagement(view).catch(fail);
 }
 export function resetConsole(){
   resetMemory();
+  setInspector(null);
   resetContextMonitor(true);listPages.clear();resetTopology();resetChatNavigation();chatDrafts.clear();
   clearTimeout(cs.timer);cs.timer=undefined;detailCache.clear();toolCache.clear();resetChatTrace();cs.epoch++;cs.requestVersion++;cs.chatVersion++;cs.detailVersion++;
   $("session-history").close();sh.version++;
@@ -133,11 +156,11 @@ export function drawTokens(u: C.Usage, since: number, until: number){
   for(let at=Math.floor((since+28800000)/step)*step-28800000;at<=until;at+=step)bins.push(map.get(at)||{at,inputTokens:0,outputTokens:0});
   const max=Math.max(3,...bins.map(x=>x.inputTokens+x.outputTokens)),left=48,top=12,width=Math.max(230,svg.clientWidth-64),height=160;
   svg.setAttribute("viewBox","0 0 "+(width+64)+" 210");
-  for(let i=0;i<4;i++){const y=top+height-height*i/3;svg.append(sv("line",{x1:left,x2:left+width,y1:y,y2:y,stroke:"#E7EDF0"}),sv("text",{x:left-9,y:y+4,"text-anchor":"end"},compact(Math.round(max*i/3))));}
+  for(let i=0;i<4;i++){const y=top+height-height*i/3;svg.append(sv("line",{x1:left,x2:left+width,y1:y,y2:y,stroke:"#E4E4E7"}),sv("text",{x:left-9,y:y+4,"text-anchor":"end"},compact(Math.round(max*i/3))));}
   const cell=width/bins.length,bw=Math.max(2,Math.min(23,cell*.65));
   bins.forEach((b,i)=>{
     const x=left+i*cell+(cell-bw)/2,ih=b.inputTokens/max*height,oh=b.outputTokens/max*height,g=sv("g",{});
-    g.append(sv("title",{},bjTime(b.at)+" 输入 "+nf(b.inputTokens)+" / 输出 "+nf(b.outputTokens)),sv("rect",{x,y:top+height-ih,width:bw,height:ih,fill:"#A9D7CF",rx:1}),sv("rect",{x,y:top+height-ih-oh,width:bw,height:oh,fill:"#087F73",rx:1}));svg.append(g);
+    g.append(sv("title",{},bjTime(b.at)+" 输入 "+nf(b.inputTokens)+" / 输出 "+nf(b.outputTokens)),sv("rect",{x,y:top+height-ih,width:bw,height:ih,fill:"#99F6E4",rx:2}),sv("rect",{x,y:top+height-ih-oh,width:bw,height:oh,fill:"#0F766E",rx:2}));svg.append(g);
     if(i%Math.max(1,Math.ceil(bins.length/(width<400?3:6)))===0)svg.append(sv("text",{x:x+bw/2,y:199,"text-anchor":"middle"},step===3600000?bjTime(b.at).slice(-5):bjTime(b.at).slice(0,5)));
   });
   if(!u.summary.measured)svg.append(sv("text",{x:left+width/2,y:85,"text-anchor":"middle"},"暂无已返回的 token 用量"));
@@ -193,4 +216,7 @@ export function initConsole() {
   $("chat-form").addEventListener("submit",sendChat);
   $("chat-input").addEventListener("keydown",e=>{if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)){e.preventDefault();$("chat-form").requestSubmit();}});
   $("chat-reload").addEventListener("click",()=>{cs.chatAfter=null;void refreshContextMonitor(true);loadChat().catch(fail);});
+  $("chat-inspector-topo").addEventListener("click",()=>setInspector(inspectorMode==="topo"?null:"topo"));
+  $("chat-inspector-ctx").addEventListener("click",()=>setInspector(inspectorMode==="ctx"?null:"ctx"));
+  $("chat-inspector-close").addEventListener("click",()=>setInspector(null));
 }

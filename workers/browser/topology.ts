@@ -29,7 +29,7 @@ export function refreshTopologyAfterTurn(){
 }
 export async function loadTopology(force=false,instant=false){
   if(cs.view!=="chat"||document.hidden||!readToken()||topology.pending)return;
-  if(!force&&!topology.inViewport&&topology.data)return;
+  if(!force&&(!topology.inViewport||$("agent-topology").hidden))return;
   if(!force&&topology.data&&Date.now()-topology.data.sampledAt<10000)return;
   const version=++topology.version,epoch=cs.epoch;topology.pending=true;
   try{
@@ -109,5 +109,5 @@ export function initTopology() {
   $("topology-refresh").addEventListener("click",e=>loadTopology(true,e.detail===0));
   new ResizeObserver(()=>renderTopology(true)).observe($("topology-graph"));
   new IntersectionObserver(entries=>{topology.inViewport=entries[0].isIntersecting;$("agent-topology").classList.toggle("topology-paused",!topology.inViewport||document.hidden);if(topology.inViewport)loadTopology();scheduleTopology();}).observe($("agent-topology"));
-  document.addEventListener("visibilitychange",()=>{$("agent-topology").classList.toggle("topology-paused",document.hidden||!topology.inViewport);if(document.hidden)stopTopology();else if(cs.view==="chat")loadTopology(true);});
+  document.addEventListener("visibilitychange",()=>{$("agent-topology").classList.toggle("topology-paused",document.hidden||!topology.inViewport);if(document.hidden)stopTopology();else if(cs.view==="chat"&&topology.inViewport&&!$("agent-topology").hidden)loadTopology(true);});
 }
