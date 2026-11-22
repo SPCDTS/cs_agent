@@ -10,7 +10,8 @@ import { FILE_MAX_BYTES, validScope } from "./media/model";
 import { logDiag } from "./shared/diagnostics";
 
 type Attachment = { id: string; active: boolean };
-type Pending = { socket: WebSocket; resolve: (data: unknown) => void; reject: (error: Error) => void };
+const MEDIA_READ_ACTIONS = new Set(["get_msg", "get_private_file_url", "get_group_file_url", "get_file", "get_image", "get_record"]);
+type Pending = { socket: WebSocket; mediaRead: boolean; resolve: (data: unknown) => void; reject: (error: Error) => void };
 type GroupName = { name: string; expires: number };
 
 export class BridgeDO extends DurableObject<Env> {
@@ -69,7 +70,7 @@ export class BridgeDO extends DurableObject<Env> {
       const pending = this.pending.get(frame.echo);
       if (pending?.socket === socket) {
         if (frame.ok) pending.resolve(frame.data);
-        else pending.reject(new Error("onebot_failed: API 未成功，请先核实，不要重试"));
+        else pending.reject(new Error(pending.mediaRead ? `onebot_failed${frame.retcode === undefined ? "" : ":retcode=" + frame.retcode}` : "onebot_failed: API 未成功，请先核实，不要重试"));
       }
       return;
     }
@@ -354,8 +355,9 @@ export class BridgeDO extends DurableObject<Env> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await new Promise<unknown>((resolve, reject) => {
-        this.pending.set(echo, { socket, resolve, reject });
-        timer = setTimeout(() => reject(new Error("onebot_timeout: API 结果不确定，请先核实，不要重试")), 15_000);
+        const mediaRead = MEDIA_READ_ACTIONS.has(action);
+        this.pending.set(echo, { socket, resolve, reject, mediaRead });
+        timer = setTimeout(() => reject(new Error(mediaRead ? "onebot_timeout" : "onebot_timeout: API 结果不确定，请先核实，不要重试")), 15_000);
         socket.send(JSON.stringify({ action, params, echo }));
       });
     } finally {
@@ -382,7 +384,7 @@ export class BridgeDO extends DurableObject<Env> {
     if (attachment) socket.serializeAttachment({ ...attachment, active: false });
     if(attachment?.active)this.ctx.waitUntil(this.ctx.storage.put("disconnectedAt",Date.now()));
     for (const pending of this.pending.values()) {
-      if (pending.socket === socket) pending.reject(new Error("onebot_disconnected: API 结果不确定，请先核实，不要重试"));
+      if (pending.socket === socket) pending.reject(new Error(pending.mediaRead ? "onebot_disconnected" : "onebot_disconnected: API 结果不确定，请先核实，不要重试"));
     }
   }
   override webSocketClose(socket: WebSocket, code: number): void {

@@ -2,18 +2,20 @@ import type { Context } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type ToolExecutionApi, type ToolExecutionResult } from "@earendil-works/pi-durable";
 import type { InboundMedia } from "../policy";
-import { MediaDownloadError } from "../media/download";
+import { MediaTrace, mediaErrorDetail, type MediaLog } from "../media/diagnostics";
 import { MediaRepository, type AssetRef } from "../media/repository";
 import { ResourceIdSchema } from "../sandbox/resources";
 
 export type MediaSelection = { ordinal?: number; kind?: InboundMedia["kind"] };
 export type MediaDeps = {
   allowed(api: ToolExecutionApi, context: Context, kind: "media_recall" | "media_send"): Promise<boolean>;
+  scope?(api: ToolExecutionApi, context: Context): Promise<string>;
   repository(api: ToolExecutionApi, context: Context): Promise<MediaRepository>;
-  lookup(messageId: string, api: ToolExecutionApi, context: Context, selection?: MediaSelection): Promise<InboundMedia[]>;
+  lookup(messageId: string, api: ToolExecutionApi, context: Context, selection?: MediaSelection, trace?: MediaTrace): Promise<InboundMedia[]>;
   sandbox(api: ToolExecutionApi, context: Context, sandboxId?: string): Promise<{ exportAsset(path: string, scope: string, name?: string): Promise<AssetRef> }>;
   deliver(ref: AssetRef, api: ToolExecutionApi, context: Context): Promise<unknown>;
   record?(kind: "media_recall" | "media_send", detail: object): Promise<unknown>;
+  log?: MediaLog;
 };
 const text = (value: string, isError = false): ToolExecutionResult => ({ ...(isError ? { isError } : {}), output: [{ type: "text", text: value }] });
 function base64(bytes: Uint8Array): string {
@@ -23,32 +25,52 @@ function base64(bytes: Uint8Array): string {
 }
 const RecallParams = Type.Object({ message_id: Type.String({ minLength: 1, maxLength: 512 }), ordinal: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false });
 export function createMediaExtension(deps: MediaDeps) {
-  async function boundary(kind: "media_recall" | "media_send", api: ToolExecutionApi, context: Context, work: () => Promise<ToolExecutionResult>) {
-    if (!await deps.allowed(api, context, kind)) return text("本回合无权访问媒体或发送附件。", true);
-    try { const result = await work(); await deps.record?.(kind, { result: "ok" }); return result; }
-    catch (error) {
-      const code = error instanceof Error && /^[a-z_]{1,80}$/.test(error.message) ? error.message : "media_error";
-      await deps.record?.(kind, { result: code, ...(error instanceof MediaDownloadError ? { status: error.status, hostname: error.hostname } : {}) });
-      return text(code === "napcat_image_content_missing"
-        ? "napcat_image_content_missing：NapCat 未返回图片内容，请检查本机媒体回传设置。"
-        : `${code}：附件访问失败；请确认消息仍可用、来源范围正确且文件不超过10MiB。`, true);
+  async function audit(kind: "media_recall" | "media_send", trace: MediaTrace, detail: object) {
+    if (!deps.record) return;
+    try { await trace.run("audit", () => deps.record!(kind, { ...trace.summary(), ...detail })); }
+    catch { /* run已经输出脱敏失败事件；不重试，不覆盖原始业务结果。 */ }
+  }
+  async function boundary(kind: "media_recall" | "media_send", api: ToolExecutionApi, context: Context,
+    input: { messageId?: string; ordinal?: number }, work: (trace: MediaTrace) => Promise<ToolExecutionResult>) {
+    const trace = new MediaTrace(input, deps.log);
+    let result: ToolExecutionResult;
+    try {
+      await trace.run("authorize", async () => {
+        if (!await deps.allowed(api, context, kind)) throw new Error("media_access_denied");
+        if (deps.scope) trace.setScope(await deps.scope(api, context));
+      });
+      result = await trace.run(kind === "media_recall" ? "recall" : "send", () => work(trace));
+    } catch (error) {
+      const detail = mediaErrorDetail(error);
+      await audit(kind, trace, { result: detail.code, ...detail });
+      const message = detail.code === "napcat_image_content_missing"
+        ? "NapCat 未返回图片内容，请检查本机媒体回传设置。"
+        : detail.code === "media_access_denied" ? "本回合无权访问媒体或发送附件。"
+        : detail.code === "media_not_found" ? "本会话这条消息没有可访问的附件。"
+        : "附件访问失败；请按错误码与诊断编号排查。";
+      return text(`${detail.code}：${message}（traceId: ${trace.id}）`, true);
     }
+    // 已取得资产的成功结果不会因为审计失败而丢失，避免诱发重复导入/发送。
+    await audit(kind, trace, { result: "ok" });
+    return result;
   }
   const recall = (imageOnly: boolean) => defineTool({
     name: imageOnly ? "qq_image" : "qq_attachment", replay: "safe",
     description: imageOnly ? "Recall images by message_id in the current authorized chat. Returns image content directly; ordinal selects one attachment." : "Recall an attachment by message_id in the current authorized chat; returns its private asset reference and metadata, without claiming its contents were parsed.",
     parameters: RecallParams,
-    execute: (args, api, context) => boundary("media_recall", api, context, async () => {
-      const repository = await deps.repository(api, context), media = await deps.lookup(args.message_id, api, context, { ordinal: args.ordinal, ...(imageOnly ? { kind: "image" } : {}) });
+    execute: (args, api, context) => boundary("media_recall", api, context, { messageId: args.message_id, ordinal: args.ordinal }, async trace => {
+      const repository = await trace.run("repository", () => deps.repository(api, context));
+      const media = await trace.run("lookup", () => deps.lookup(args.message_id, api, context, { ordinal: args.ordinal, ...(imageOnly ? { kind: "image" } : {}) }, trace));
       const selected = media.filter(item => (!imageOnly || item.kind === "image") && (args.ordinal === undefined || item.ordinal === args.ordinal)).slice(0,5);
-      if (!selected.length) return text("本会话这条消息没有可访问的附件。", true);
+      if (!selected.length) throw new Error("media_not_found");
       const output: ToolExecutionResult["output"] = [];
       for (const item of selected) {
-        const ref = item.assetId ? (await repository.get(item.assetId)).ref : await repository.importRemote({
+        const itemTrace = trace.forOrdinal(item.ordinal);
+        const ref = item.assetId ? (await itemTrace.run("asset_get", () => repository.get(item.assetId!))).ref : await repository.importRemote({
           url: item.url ?? (item.file && /^https?:\/\//.test(item.file) ? item.file : undefined), name: item.name, kind: item.kind,
-        });
+        }, { trace: itemTrace });
         output.push({ type: "text", text: JSON.stringify(ref) });
-        if (ref.kind === "image") output.push({ type: "image", data: base64((await repository.get(ref.id)).bytes), mimeType: ref.mime });
+        if (ref.kind === "image") output.push({ type: "image", data: base64((await itemTrace.run("asset_get", () => repository.get(ref.id))).bytes), mimeType: ref.mime });
       }
       return { output };
     }),
@@ -56,10 +78,10 @@ export function createMediaExtension(deps: MediaDeps) {
   return defineExtension({ name: "cs.media", tools: [recall(true), recall(false), defineTool({
     name: "send_file", replay: "unsafe", description: "Send a committed file from this conversation's /work workspace through the current authorized reply route. The file must be at most 10MiB. Owner turns may specify sandboxId to send from an owned Cloudflare resource, including a subagent's assigned workspace. Omit it for the current workspace.",
     parameters: Type.Object({ path: Type.String({ minLength: 1, maxLength: 1024 }), name: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })), sandboxId: Type.Optional(ResourceIdSchema) }, { additionalProperties: false }),
-    execute: (args, api, context) => boundary("media_send", api, context, async () => {
-      const repository = await deps.repository(api, context), sandbox = await deps.sandbox(api, context, args.sandboxId);
-      const ref = await sandbox.exportAsset(args.path, repository.scope, args.name);
-      return text(JSON.stringify(await deps.deliver(ref, api, context)));
+    execute: (args, api, context) => boundary("media_send", api, context, {}, async trace => {
+      const repository = await trace.run("repository", () => deps.repository(api, context)), sandbox = await deps.sandbox(api, context, args.sandboxId);
+      const ref = await trace.run("export", () => sandbox.exportAsset(args.path, repository.scope, args.name));
+      return text(JSON.stringify(await trace.run("deliver", () => deps.deliver(ref, api, context))));
     }),
   })].map(tool => ({ ...tool, callers: ["model"] as const })) });
 }

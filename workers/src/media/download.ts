@@ -1,4 +1,5 @@
 import { FILE_MAX_BYTES, safeMime } from "./model";
+import { mediaStage, type MediaTrace } from "./diagnostics";
 import { BodyLimitError, readBoundedBytes } from "../shared/http-body";
 
 export class MediaDownloadError extends Error {
@@ -9,6 +10,7 @@ export class MediaDownloadError extends Error {
 }
 
 export type DownloadDeps = {
+  trace?: MediaTrace;
   fetch?: typeof fetch;
   signal?: AbortSignal;
   resolve?: (hostname: string) => Promise<string[]>;
@@ -54,6 +56,9 @@ async function checkedUrl(raw: string, resolve: NonNullable<DownloadDeps["resolv
 }
 /** 每一跳重做地址检查，流式计量，不信任 Content-Length，不携带宿主或管理员凭据。 */
 export async function downloadMedia(raw: string, deps: DownloadDeps = {}): Promise<{ bytes: Uint8Array; mime: string; url: string }> {
+  return mediaStage(deps.trace, "download", () => downloadMediaContent(raw, deps));
+}
+async function downloadMediaContent(raw: string, deps: DownloadDeps): Promise<{ bytes: Uint8Array; mime: string; url: string }> {
   const deadline = AbortSignal.timeout(20_000);
   const signal = deps.signal ? AbortSignal.any([deps.signal, deadline]) : deadline;
   const request = deps.fetch ?? fetch, resolve = deps.resolve ?? ((host: string) => dns(host, signal));

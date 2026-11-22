@@ -260,10 +260,15 @@ export async function openThreadRuntime(host: ThreadRuntimeHost): Promise<Runtim
       if (!input || input.session_generation !== await host.sessionGeneration()) return false;
       return input.kind === "message" || kind === "media_send" && input.kind === "subagent" && await ownerTaskAllowed(api, c);
     },
+    scope: async (api, c) => {
+      const input = await host.currentInput(harness, api, api.conversationId, c);
+      if (!input) throw new Error("media_scope_denied");
+      return scopeOf(targetOf(input));
+    },
     repository: async () => new MediaRepository({ bucket: host.env.ASSETS, scope: memory.ns }),
-    lookup: async (messageId, api, c, selection) => {
+    lookup: async (messageId, api, c, selection, trace) => {
       const input = await host.currentInput(harness, api, api.conversationId, c); if (!input) throw new Error("media_scope_denied");
-      return lookupHostMedia({ database: host.database, bridge: host.env.BRIDGE.getByName("napcat"), source: { namespace: memory.ns, scope: scopeOf(targetOf(input)), target: targetOf(input) }, messageId, selection });
+      return lookupHostMedia({ database: host.database, bridge: host.env.BRIDGE.getByName("napcat"), source: { namespace: memory.ns, scope: scopeOf(targetOf(input)), target: targetOf(input) }, messageId, selection, trace });
     },
     sandbox: async (api, callContext, sandboxId) => {
       if (sandboxId !== undefined && !await ownerTaskAllowed(api, callContext)) throw new Error("permission_denied");
