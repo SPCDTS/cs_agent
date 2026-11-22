@@ -39,6 +39,7 @@ export class ProjectionPublisher {
   private scoped = false;
   private timer?: ReturnType<typeof setTimeout>;
   private flushing?: Promise<void>;
+  private rerun = false;
   private lastInfo?: string;
   retryAt?: number;
   constructor(private readonly ctx: DurableObjectState, private readonly env: Env,
@@ -67,7 +68,7 @@ export class ProjectionPublisher {
     this.changed();
   }
 
-  reset(): void { this.installed = false; this.scoped = false; this.lastInfo = undefined; this.retryAt = undefined; }
+  reset(): void { this.installed = false; this.scoped = false; this.rerun = false; this.lastInfo = undefined; this.retryAt = undefined; }
 
   changed(): void {
     if (!this.installed || this.timer !== undefined) return;
@@ -77,19 +78,41 @@ export class ProjectionPublisher {
     this.ctx.waitUntil(pending);
   }
 
+  private hasPendingChanges(): boolean {
+    return this.ctx.storage.sql.exec("SELECT 1 FROM admin_projection_changes LIMIT 1").toArray().length > 0;
+  }
+
+  private async readInfo(): Promise<ViewInfo> {
+    const sql = this.ctx.storage.sql;
+    const maintenance = await this.ctx.storage.get<number>(["maint:aging_last_run", "maint:consolidate_last_run"]);
+    const hasTasks = sql.exec("SELECT 1 FROM sqlite_master WHERE name='pi_tasks'").toArray().length;
+    return {
+      agingLastRun: maintenance.get("maint:aging_last_run") ?? null,
+      consolidateLastRun: maintenance.get("maint:consolidate_last_run") ?? null,
+      compacting: !!hasTasks && !!sql.exec("SELECT 1 FROM pi_tasks WHERE kind='pi.compaction' AND status!='terminal' LIMIT 1").toArray().length,
+    };
+  }
+
   flush(): Promise<void> {
-    const pending = this.flushing ??= this.publish().catch(async () => {
+    if (this.flushing) this.rerun = true;
+    return this.flushing ??= this.drain().catch(async () => {
       if (!this.installed) return;
       console.error({ event: "admin_projection_failed" });
       this.retryAt = Date.now() + 5000;
       await this.wake(this.retryAt);
     }).finally(() => {
       this.flushing = undefined;
-    });
-    return pending.then(() => {
-      if (this.installed && this.scoped && this.retryAt === undefined && this.ctx.storage.sql.exec("SELECT 1 FROM admin_projection_changes LIMIT 1").toArray().length) return this.flush();
+      this.rerun = false;
     });
   }
+
+  private async drain(): Promise<void> {
+    do {
+      this.rerun = false;
+      await this.publish();
+    } while (this.installed && this.scoped && this.retryAt === undefined && (this.rerun || this.hasPendingChanges()));
+  }
+
   private async publish(): Promise<void> {
     if (!this.installed) return;
     const scope = await this.scope();
@@ -98,10 +121,7 @@ export class ProjectionPublisher {
     const sql = this.ctx.storage.sql;
     const readSchemas = () => sql.exec<{ name: ViewTable; columns_json: string }>("SELECT * FROM admin_projection_tables").toArray()
       .map(row => ({ table: row.name, columns: JSON.parse(row.columns_json) as string[] }));
-    const maintenance = await this.ctx.storage.get<number>(["maint:aging_last_run", "maint:consolidate_last_run"]);
-    const hasTasks = sql.exec("SELECT 1 FROM sqlite_master WHERE name='pi_tasks'").toArray().length;
-    const info = { agingLastRun: maintenance.get("maint:aging_last_run") ?? null, consolidateLastRun: maintenance.get("maint:consolidate_last_run") ?? null,
-      compacting: !!hasTasks && !!sql.exec("SELECT 1 FROM pi_tasks WHERE kind='pi.compaction' AND status!='terminal' LIMIT 1").toArray().length };
+    const initialInfo = await this.readInfo();
     let changed = false;
     for (;;) {
       const rows = sql.exec<Change>("SELECT * FROM admin_projection_changes ORDER BY seq LIMIT 100").toArray();
@@ -110,9 +130,11 @@ export class ProjectionPublisher {
       const changes = rows.filter(row => { if (bytes >= 512_000) return false; bytes += row.value?.length ?? 0; return true; });
       const last = changes.at(-1)!;
       changed = true;
-      await this.env.REQUESTS.getByName(viewName(scope)).applyProjection({ scope, schemas: readSchemas(), changes, at: Date.now(), complete: false, info });
+      await this.env.REQUESTS.getByName(viewName(scope)).applyProjection({ scope, schemas: readSchemas(), changes, at: Date.now(), complete: false, info: initialInfo });
       sql.exec("DELETE FROM admin_projection_changes WHERE seq<=?", last.seq);
     }
+    // 中间批次 RPC 期间 KV（如 maint:*）或压缩任务可能已更新，落盘 complete 前重新读取最新 info。
+    const info = await this.readInfo();
     if (changed || this.lastInfo !== JSON.stringify(info)) {
       await this.env.REQUESTS.getByName(viewName(scope)).applyProjection({ scope, schemas: readSchemas(), changes: [], at: Date.now(), complete: true, info });
       this.lastInfo = JSON.stringify(info);
