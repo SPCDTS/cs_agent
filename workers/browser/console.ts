@@ -1,4 +1,4 @@
-import { refreshContextMonitor, resetContextMonitor } from "./context-monitor";
+import { refreshContextMonitor, resetContextMonitor, setContextMonitorExpanded } from "./context-monitor";
 import { resetMemory } from "./memory";
 import * as C from "./request-contracts";
 import { Check } from "typebox/value";
@@ -71,7 +71,7 @@ function setInspector(mode: "topo" | "ctx" | null) {
   $("chat-inspector").hidden = mode === null;
   $("agent-topology").hidden = mode !== "topo";
   $("context-monitor").hidden = mode !== "ctx";
-  if (mode !== "ctx" && !$("context-monitor-body").hidden) $("context-monitor-toggle").click();
+  setContextMonitorExpanded(mode === "ctx");
   if (mode === "topo") {
     $("chat-inspector-title").textContent = "Agent 拓扑";
     renderTopology(true);
@@ -79,8 +79,6 @@ function setInspector(mode: "topo" | "ctx" | null) {
     requestAnimationFrame(() => drawTopologyLinks());
   } else if (mode === "ctx") {
     $("chat-inspector-title").textContent = "上下文趋势";
-    if ($("context-monitor-body").hidden) $("context-monitor-toggle").click();
-    else void refreshContextMonitor(true);
   }
 }
 export function consoleView(view: string, subtab?: string){

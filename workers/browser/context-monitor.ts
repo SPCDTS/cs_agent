@@ -89,13 +89,17 @@ export function drawContextTrend() {
   selection(last);
 }
 
+export function setContextMonitorExpanded(open: boolean) {
+  if (expanded === open) return;
+  expanded = open;
+  $("context-monitor-body").hidden = !expanded;
+  $("context-monitor-toggle").setAttribute("aria-expanded", String(expanded));
+  $("context-monitor-toggle").textContent = expanded ? "收起趋势" : "展开趋势";
+  if (expanded) { drawContextTrend(); void refreshContextMonitor(true); }
+}
+
 export function initContextMonitor() {
-  $("context-monitor-toggle").addEventListener("click", () => {
-    expanded = !expanded; $("context-monitor-body").hidden = !expanded;
-    $("context-monitor-toggle").setAttribute("aria-expanded", String(expanded));
-    $("context-monitor-toggle").textContent = expanded ? "收起趋势" : "展开趋势";
-    if (expanded) { drawContextTrend(); void refreshContextMonitor(true); }
-  });
+  $("context-monitor-toggle").addEventListener("click", () => setContextMonitorExpanded(!expanded));
   $("context-monitor-refresh").addEventListener("click", () => { cursor = next = undefined; pages = []; void refreshContextMonitor(true); });
   $("context-monitor-older").addEventListener("click", () => { if (next && !loading) { pages.push(cursor); cursor = next; void refreshContextMonitor(true); } });
   $("context-monitor-newer").addEventListener("click", () => { if (pages.length && !loading) { cursor = pages.pop(); void refreshContextMonitor(true); } });

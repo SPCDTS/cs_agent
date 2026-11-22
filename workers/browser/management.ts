@@ -49,17 +49,25 @@ function applySubtab(view: string) {
   const active = activeSubtabs[view] || tabs[0]?.[0] || "*";
   const bar = $("manage-subtabs");
   bar.hidden = !tabs.length;
-  bar.replaceChildren(...tabs.map(([id, label]) => el("button", {
-    type: "button",
-    className: "subtab",
-    role: "tab",
-    "aria-selected": String(id === active),
-    text: label,
-    onclick: () => {
-      activeSubtabs[view] = id;
-      applySubtab(view);
-    },
-  })));
+  if (bar.dataset.view !== view) {
+    bar.dataset.view = view;
+    bar.replaceChildren(...tabs.map(([id, label]) => el("button", {
+      type: "button",
+      className: "subtab",
+      role: "tab",
+      "data-subtab": id,
+      "aria-selected": String(id === active),
+      text: label,
+      onclick: () => {
+        activeSubtabs[view] = id;
+        applySubtab(view);
+      },
+    })));
+  } else {
+    for (const btn of bar.querySelectorAll<HTMLButtonElement>("button[data-subtab]")) {
+      btn.setAttribute("aria-selected", String(btn.dataset.subtab === active));
+    }
+  }
   const page = document.querySelector<HTMLElement>(`.manage-page[data-management="${view}"]`);
   if (!page) return;
   for (const child of page.children) {
