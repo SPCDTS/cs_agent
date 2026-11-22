@@ -6,6 +6,7 @@ import { imageMime } from "../media/model";
 import type { DirEntry, ExecResult, FileEdit, ReadResult } from "./client";
 import { nativeSandboxClient } from "./native";
 import { createOutputDirectory } from "./output-directory";
+import { logDiag } from "../shared/diagnostics";
 import { WorkspaceManager, type WorkspaceManifest, type WorkspaceOperation, type WorkspaceRunResult, type WorkspaceCompareResult } from "./workspace";
 export type { WorkspaceManifest, WorkspaceOperation, WorkspaceRunResult, WorkspaceCompareResult } from "./workspace";
 export type SandboxStatus = "running" | "stopped" | "unavailable";
@@ -30,7 +31,7 @@ export class SandboxDO extends DurableObject<Env> {
     catch (error) {
       // 接住本轮失败再安排下一次，避免平台因未捕获异常立即退避重试。
       await this.ctx.storage.setAlarm(Date.now() + 300_000);
-      console.error({ event: "workspace_gc_failed", message: error instanceof Error ? error.message : String(error) });
+      logDiag(this.env, this.ctx, { event: "workspace_gc_failed", error });
     }
   }
   private async startRuntime(): Promise<Container> {
@@ -40,7 +41,7 @@ export class SandboxDO extends DurableObject<Env> {
       const generation = ++this.runtimeGeneration;
       container.start({ image: container.images.sandbox, enableInternet: true, instance: "lite" });
       this.ctx.waitUntil(container.monitor().catch(error => {
-        console.error({ event: "sandbox_container_exit", message: error instanceof Error ? error.message : String(error) });
+        logDiag(this.env, this.ctx, { event: "sandbox_container_exit", error });
       }).finally(() => { if (this.runtimeGeneration === generation) this.ready = false; }));
     }
     await container.setInactivityTimeout(SandboxDO.IDLE_MS);

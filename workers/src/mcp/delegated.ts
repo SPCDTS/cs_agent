@@ -1,6 +1,7 @@
 import { EnvironmentSnapshotsSchema } from "./environments";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
+import { classifyError } from "../shared/diagnostics";
 import { mcpFailure } from "./result";
 import { mcpCodemodeResult, mcpCodemodeSchema, MCP_RESULT_INSTRUCTIONS } from "./codemode-result";
 import { defineExtension, defineTool, section, type Registry, type ToolExecutionResult } from "@earendil-works/pi-durable";
@@ -99,7 +100,11 @@ export function createSubagentCapabilityHost(stub: object): SubagentCapabilityHo
       const value = await invoke(method, args);
       return Check(output, value) ? { ...(value.isError ? { isError: true } : {}), output: value.output,
         ...(value.structuredOutput === undefined ? {} : { structuredOutput: boundedJson(value.structuredOutput, MCP_CONFIG.limits.messageBytes, 32) }) } : mcpFailure("result_rejected");
-    } catch { return mcpFailure("denied"); }
+    } catch (error) {
+      const { code } = classifyError(error);
+      if (code === "denied" || code === "delegation_denied" || code === "permission_denied") return mcpFailure("denied");
+      return mcpFailure(code === "timeout" ? "timeout" : "rpc_failed", code);
+    }
   };
   return {
     async validateSubagentAccess(id) {

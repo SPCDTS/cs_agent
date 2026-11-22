@@ -1,9 +1,9 @@
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 
-type FailureCode = "missing_secret" | "auth_required" | "auth_failed" | "remote_state_lost" | "transport_error" | "protocol_error" | "catalog_limit" | "message_limit" | "timeout" | "closed";
+type FailureCode = "missing_secret" | "auth_required" | "auth_failed" | "rate_limited" | "remote_state_lost" | "transport_error" | "protocol_error" | "catalog_limit" | "message_limit" | "timeout" | "closed";
 
 export class McpConnectionError extends Error {
-  constructor(readonly code: FailureCode, message: string) {
+  constructor(readonly code: FailureCode, message: string, readonly status?: number) {
     super(message);
     this.name = "McpConnectionError";
   }
@@ -21,7 +21,10 @@ export function boundedFetch(endpoint: URL, messageBytes: number, fail: (error: 
       headers.delete("cookie");
       if (token) headers.set("authorization", `Bearer ${token}`);
       try { return await fetch(url, { ...init, headers, redirect: "manual" }); }
-      catch { throw new McpConnectionError("transport_error", "MCP HTTP 连接失败"); }
+      catch (error) {
+        const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+        throw new McpConnectionError(timedOut ? "timeout" : "transport_error", timedOut ? "MCP HTTP 请求超时" : "MCP HTTP 连接失败");
+      }
     };
     const used = await bearer?.accessToken();
     let response = await send(used);
@@ -41,8 +44,10 @@ export function boundedFetch(endpoint: URL, messageBytes: number, fail: (error: 
       // GET 405 是 Streamable HTTP 的正常可选行为。
       if (init?.method === "GET" && response.status === 405) return response;
       if (init?.method === "DELETE" && response.status === 405) return response;
-      const code = response.status === 401 || response.status === 403 ? "auth_failed" : response.status === 404 ? "remote_state_lost" : "transport_error";
-      throw new McpConnectionError(code, `MCP HTTP 请求失败（${response.status}）`);
+      const code = response.status === 401 || response.status === 403 ? "auth_failed"
+        : response.status === 404 ? "remote_state_lost"
+        : response.status === 429 ? "rate_limited" : "transport_error";
+      throw new McpConnectionError(code, `MCP HTTP 请求失败（${response.status}）`, response.status);
     }
     if (!response.body || response.status === 202 || init?.method === "DELETE") return response;
     const isSse = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() === "text/event-stream";

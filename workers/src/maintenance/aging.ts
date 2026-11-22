@@ -2,6 +2,7 @@ import type { SqliteDatabase } from "@earendil-works/chord/sqlite";
 import { summaryLabel, type SummaryRow } from "../context";
 import { completeWithin, type ExtractComplete } from "../memory/extractor";
 import { formatBeijingTime } from "../memory/time";
+import { classifyError } from "../shared/diagnostics";
 import { cleanName } from "../policy";
 import type { MaintenanceContext } from "./index";
 
@@ -96,7 +97,13 @@ export async function runAging({ db, kv, complete, config, now }: MaintenanceCon
   // Cron 偶有重复投递；同一个北京日只跑一次，避免重复花模型额度。
   if (last !== undefined && formatBeijingTime(last).slice(0, 10) === formatBeijingTime(now).slice(0, 10)) return { kind: "aging" as const, status: "skipped" as const };
   const started = Date.now(), nowSec = Math.floor(now / 1000), tokens = { input: 0, output: 0 };
-  const report = { kind: "aging" as const, status: "ok" as const, day: 0, week: 0, failed: 0, purgedMessages: 0, purgedSummaries: 0, tokens, ms: 0 };
+  const report = { kind: "aging" as const, status: "ok" as const, day: 0, week: 0, failed: 0, failureReasons: {} as Record<string, number>, purgedMessages: 0, purgedSummaries: 0, tokens, ms: 0 };
+  const recordFailure = (error: unknown) => {
+    report.failed++;
+    const info = classifyError(error);
+    const key = info.code ?? info.errorName ?? "unknown";
+    report.failureReasons[key] = (report.failureReasons[key] ?? 0) + 1;
+  };
 
   for (const day of await pendingDays(db, nowSec)) {
     try {
@@ -105,7 +112,7 @@ export async function runAging({ db, kv, complete, config, now }: MaintenanceCon
       const text = await summarize(complete, DAY_SUMMARY_PROMPT, `会话：${day.scope}\n日期：${date}\n\n${tail(rows.map(messageLine))}`, tokens);
       await db.run(UPSERT_SUMMARY, day.scope, "day", day.start, day.end, text, rows.length, nowSec);
       report.day++;
-    } catch { report.failed++; }
+    } catch (error) { recordFailure(error); }
   }
 
   // 仍有日子没摘要成功的周先不折叠，否则缺的那天以后再也进不了周摘要。
@@ -120,7 +127,7 @@ export async function runAging({ db, kv, complete, config, now }: MaintenanceCon
         for (const day of week.days) await tx.run("DELETE FROM summaries WHERE id = ? AND kind = 'day'", day.id);
       });
       report.week++;
-    } catch { report.failed++; }
+    } catch (error) { recordFailure(error); }
   }
 
   await db.transaction(async tx => {

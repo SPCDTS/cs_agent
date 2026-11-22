@@ -23,6 +23,7 @@ import { SUBAGENT_ID } from "../subagent/model";
 import { ADMIN_APP_JS, ADMIN_PAGE_HTML } from "./app.generated";
 import { CHATGPT_HELPER } from "./chatgpt-helper";
 import type { RequestQuery } from "../requests/types";
+import { classifyError, logDiag, type DiagQuery } from "../shared/diagnostics";
 import { API_HEADERS, HttpError, adminJson as json, adminPlain as plain, readAdminBody } from "./http";
 
 export type AdminContext = { env: Env; request: Request; url: URL; params: Record<string, string> };
@@ -115,6 +116,22 @@ function requestQuery(url: URL): RequestQuery {
     purpose && !["conversation", "background", "subagent", "compaction"].includes(purpose) || turnId && (!thread || !/^turn:[A-Za-z0-9:_-]{1,180}$/.test(turnId))) throw new HttpError(400, "invalid_query");
   return { since, until, limit, ...(before ? { before } : {}), thread, model, status: status as RequestQuery["status"], purpose, turnId };
 }
+function diagQuery(url: URL): DiagQuery {
+  const p = url.searchParams;
+  const int = (key: string) => {
+    const raw = p.get(key);
+    if (raw === null) return undefined;
+    if (!/^\d{1,16}$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new HttpError(400, "invalid_query");
+    return Number(raw);
+  };
+  const level = p.get("level") || undefined, event = p.get("event") || undefined, thread = p.get("thread") || undefined, turnId = p.get("turn") || undefined;
+  const limit = int("limit") ?? ADMIN_PAGE_SIZE, since = int("since"), until = int("until"), before = int("before");
+  if (limit < 1 || limit > 200 || level && level !== "warn" && level !== "error"
+    || event && !/^[A-Za-z0-9_.:-]{1,80}$/.test(event)
+    || thread && !new RegExp("^(" + THREAD_KEY + ")$").test(thread)
+    || turnId && !/^turn:[A-Za-z0-9:_-]{1,180}$/.test(turnId)) throw new HttpError(400, "invalid_query");
+  return { since, until, level: level as DiagQuery["level"], event, thread, turnId, before, limit };
+}
 async function knownThread(env: Env, key: string) {
   if (key !== "owner" && !(await env.BRIDGE.getByName("napcat").threadList()).some(t => t.key === key)) throw new HttpError(404, "not_found");
   return env.THREAD.getByName(key);
@@ -163,6 +180,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     handle: async () => new Response(ADMIN_APP_JS, { headers: { ...API_HEADERS, "Content-Security-Policy": CSP, "Content-Type": "text/javascript; charset=utf-8" } }) },
 
   { method: "POST", path: "/admin/diagnostics/model-egress", handle: async ({ env }) => json(await env.THREAD.getByName("owner").modelEgressDiagnostics()) },
+  { method: "GET", path: "/admin/logs", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").queryLogs(diagQuery(url))) },
   { method: "GET", path: "/admin/requests", handle: async ({ env, url }) => json(await env.REQUESTS.getByName("main").list(requestQuery(url))) },
   { method: "GET", path: "/admin/context-timeline", handle: async ({ env, url }) => {
     const thread = threadParam(url), actor = url.searchParams.get("actor") ?? "thread";
@@ -311,7 +329,7 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     const current = await putSettings(env, value, expectedRevision);
     let applied = false;
     try { applied = await env.BRIDGE.getByName("napcat").reloadSettings() === current.revision; }
-    catch { console.error({ event: "settings_reload_failed" }); }
+    catch (error) { logDiag(env, undefined, { event: "settings_reload_failed", error }); }
     return json({ ...current, applied });
   } },
 
@@ -379,7 +397,11 @@ export const ADMIN_ROUTES: AdminRoute[] = [
   } },
   { method: "POST", path: new RegExp(`^/admin/threads/(?<key>${THREAD_KEY})/sandbox/reset$`), handle: async ({ env, params }) => {
     try { return json(await env.SANDBOX.getByName(params.key!).resetRuntime()); }
-    catch { throw new HttpError(503, "sandbox_unavailable"); }
+    catch (error) {
+      const info = classifyError(error);
+      logDiag(env, undefined, { event: "sandbox_reset_failed", thread: params.key!, error });
+      throw new HttpError(503, "sandbox_unavailable", info.code && info.code !== "sandbox_unavailable" ? { reason: info.code } : undefined);
+    }
   } },
 
   { method: "GET", path: "/admin/memory", handle: async ({ env, url }) => {
@@ -423,9 +445,13 @@ export const ADMIN_ROUTES: AdminRoute[] = [
     handle: ({ env, params }) => oauth(() => env.REGISTRY.getByName("main").loginLink(params.server)) },
   { method: "POST", path: new RegExp(`^/admin/mcp/(?<server>${SERVER})/logout$`),
     handle: ({ env, params }) => oauth(async () => { await env.REGISTRY.getByName("main").logout(params.server); return { ok: true }; }) },
-  { method: "POST", path: new RegExp(`^/admin/mcp/(?<server>${SERVER})/refresh$`), handle: async ({ env }) => {
+  { method: "POST", path: new RegExp(`^/admin/mcp/(?<server>${SERVER})/refresh$`), handle: async ({ env, params }) => {
     try { return json({ results: await env.THREAD.getByName("owner").refreshMcp() }); }
-    catch { throw new HttpError(503, "unavailable"); }
+    catch (error) {
+      const info = classifyError(error);
+      logDiag(env, undefined, { event: "mcp_refresh_failed", thread: "owner", error, detail: { server: params.server! } });
+      throw new HttpError(503, "unavailable", info.code ? { reason: info.code } : undefined);
+    }
   } },
 
   { method: "POST", path: "/admin/send-rules/release", handle: async ({ env, request }) => {
@@ -452,8 +478,8 @@ export async function handleAdmin(request: Request, env: Env): Promise<Response>
     catch (error) {
       if (error instanceof Error && error.message.includes("view_pending")) return json({error:"view_pending"}, 503);
       if (error instanceof HttpError) return json({ error: error.code, ...error.extra }, error.status);
-      // 原始异常可能带存储或远端内容，只记录路由。
-      console.error({ event: "admin_failed", method: route.method, path: String(route.path), error: error instanceof Error ? `${error.name}: ${error.message.slice(0, 200)}` : typeof error });
+      // 原始异常可能带存储或远端内容，只记录路由与安全错误分类。
+      logDiag(env, undefined, { event: "admin_failed", error, detail: { method: route.method, path: String(route.path) } });
       return json({ error: "internal" }, 500);
     }
   }

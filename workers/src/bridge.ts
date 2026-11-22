@@ -7,6 +7,7 @@ import { effectiveSettings, type SettingsSnapshot } from "./settings";
 import { DeliveryStore, type AuthorizedQqIntent, type SystemQqIntent, type DeliveryState, type Delivery, type DeliverySource } from "./delivery";
 import { MediaRepository, type AssetRef } from "./media/repository";
 import { FILE_MAX_BYTES, validScope } from "./media/model";
+import { logDiag } from "./shared/diagnostics";
 
 type Attachment = { id: string; active: boolean };
 type Pending = { socket: WebSocket; resolve: (data: unknown) => void; reject: (error: Error) => void };
@@ -48,7 +49,7 @@ export class BridgeDO extends DurableObject<Env> {
     const { 0: client, 1: server } = new WebSocketPair();
     server.serializeAttachment({ id: crypto.randomUUID(), active: true } satisfies Attachment);
     this.ctx.acceptWebSocket(server);
-    this.ctx.waitUntil(this.connected().catch(()=>{ console.error({event:"bridge_connected_tick_failed"}); }));
+    this.ctx.waitUntil(this.connected().catch(error=>{ logDiag(this.env, this.ctx, { event: "bridge_connected_tick_failed", error }); }));
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -89,7 +90,7 @@ export class BridgeDO extends DurableObject<Env> {
         const thread=threadKey(policy,input),target=this.env.THREAD.getByName(thread);
         this.enqueue(thread,async()=>{
           if("markRecalled"in target&&typeof target.markRecalled==="function")await target.markRecalled(scopeOf(notice.target),notice.messageId);
-        },()=>console.error({event:"recall_failed",messageId:notice.messageId}));
+        },error=>logDiag(this.env,this.ctx,{event:"recall_failed",thread,error,detail:{messageId:notice.messageId}}));
         return;
       }
     }
@@ -112,14 +113,14 @@ export class BridgeDO extends DurableObject<Env> {
       if(input.target.kind==="group")input.scopeName=await this.groupName(input.target.groupId);
       const target=this.env.THREAD.getByName(thread),{repliedToSelf}=await target.ingest(input);
       if(allowTrigger&&(input.text.trim()||input.media?.length)&&isTriggered(policy,input,repliedToSelf)){
-        this.ctx.waitUntil(target.submit(input).catch(()=>console.error({event:"submit_failed",messageId:input.messageId,length:input.text.length})));
+        this.ctx.waitUntil(target.submit(input).catch(error=>logDiag(this.env,this.ctx,{event:"submit_failed",thread,error,detail:{messageId:input.messageId,length:input.text.length}})));
       }
-    },()=>{
+    },error=>{
       this.ctx.storage.sql.exec("DELETE FROM seen WHERE key=?",key);
-      console.error({event:"ingest_failed",messageId:input.messageId,length:input.text.length});
+      logDiag(this.env,this.ctx,{event:"ingest_failed",thread,error,detail:{messageId:input.messageId,length:input.text.length}});
     });
   }
-  private enqueue(thread:string,operation:()=>Promise<void>,failed:()=>void):void{
+  private enqueue(thread:string,operation:()=>Promise<void>,failed:(error:unknown)=>void):void{
     // 回执不等待入库；同线程的上传、聊天与撤回按到达顺序串行处理。
     const delivery=(this.deliveries.get(thread)??Promise.resolve()).then(operation).catch(failed);
     this.deliveries.set(thread,delivery);

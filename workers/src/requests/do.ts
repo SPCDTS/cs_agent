@@ -9,7 +9,9 @@ import type { RequestDetail, RequestQuery, RequestRecord, ToolTrace, ToolSummary
 import { readAgentTopology, type AgentTopology } from "./topology";
 import type { SubagentActivity } from "../subagent/activity";
 import { RequestRetention, REQUEST_RETENTION } from "./retention";
+import type { DiagQuery, DiagRecord } from "../shared/diagnostics";
 const DAY = 86_400_000;
+const MAX_DIAG_LOGS = 1000;
 type Row = { seq: number; record: string; available: number };
 export class RequestsDO extends DurableObject<Env> {
   contextTimeline(...args: Parameters<ContextStore["timeline"]>) { return new ContextStore(this.ctx.storage.sql).timeline(...args); }
@@ -52,6 +54,9 @@ export class RequestsDO extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS agent_activity (thread TEXT NOT NULL, actor TEXT NOT NULL, updated INTEGER NOT NULL,
         version INTEGER NOT NULL, record TEXT NOT NULL, PRIMARY KEY(thread,actor));
       CREATE INDEX IF NOT EXISTS agent_activity_updated ON agent_activity(updated);
+      CREATE TABLE IF NOT EXISTS ops_logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, level TEXT NOT NULL,
+        event TEXT NOT NULL, thread TEXT, turn_id TEXT, code TEXT, record TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS ops_logs_at ON ops_logs(at DESC, seq DESC);
     `);
     const columns = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(requests)").toArray();
     if (!columns.some(c => c.name === "turn_id")) ctx.storage.sql.exec("ALTER TABLE requests ADD COLUMN turn_id TEXT");
@@ -104,6 +109,34 @@ export class RequestsDO extends DurableObject<Env> {
       WHERE excluded.version>agent_activity.version`, activity.thread, activity.actor, activity.updatedAt, activity.version, JSON.stringify(activity));
     if (await this.ctx.storage.getAlarm() === null) await this.ctx.storage.setAlarm(Date.now() + 3600_000);
   }
+  async recordDiag(entry: DiagRecord): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const seq = sql.exec<{ seq: number }>(
+      "INSERT INTO ops_logs(at,level,event,thread,turn_id,code,record) VALUES(?,?,?,?,?,?,?) RETURNING seq",
+      entry.at, entry.level, entry.event, entry.thread ?? null, entry.turnId ?? null, entry.code ?? null, JSON.stringify(entry),
+    ).one().seq;
+    if (seq > MAX_DIAG_LOGS) sql.exec("DELETE FROM ops_logs WHERE seq <= ?", seq - MAX_DIAG_LOGS);
+  }
+  queryLogs(q: DiagQuery = {}): { logs: DiagRecord[]; next?: number } {
+    const where: string[] = [], args: (string | number)[] = [];
+    if (q.since !== undefined) { where.push("at >= ?"); args.push(q.since); }
+    if (q.until !== undefined) { where.push("at <= ?"); args.push(q.until); }
+    if (q.level) { where.push("level = ?"); args.push(q.level); }
+    if (q.event) { where.push("event = ?"); args.push(q.event); }
+    if (q.thread) { where.push("thread = ?"); args.push(q.thread); }
+    if (q.turnId) { where.push("turn_id = ?"); args.push(q.turnId); }
+    if (q.before !== undefined) { where.push("seq < ?"); args.push(q.before); }
+    const limit = Math.min(200, Math.max(1, Math.trunc(q.limit ?? 50)));
+    const rows = this.ctx.storage.sql.exec<{ seq: number; record: string }>(
+      `SELECT seq, record FROM ops_logs${where.length ? " WHERE " + where.join(" AND ") : ""} ORDER BY seq DESC LIMIT ?`,
+      ...args, limit + 1,
+    ).toArray();
+    const page = rows.slice(0, limit);
+    return {
+      logs: page.map(row => ({ ...JSON.parse(row.record) as DiagRecord, seq: row.seq })),
+      ...(rows.length > limit ? { next: page.at(-1)!.seq } : {}),
+    };
+  }
   async record(detail: RequestDetail): Promise<void> {
     const r = detail.request, sql = this.ctx.storage.sql;
     if (r.startedAt < Date.now() - REQUEST_RETENTION.metadataMs) return;
@@ -141,6 +174,7 @@ export class RequestsDO extends DurableObject<Env> {
     const sql = this.ctx.storage.sql, now = Date.now();
     const retention = this.retention();
     sql.exec("DELETE FROM agent_activity WHERE updated < ?", now - 30 * DAY);
+    sql.exec("DELETE FROM ops_logs WHERE at < ?", now - 30 * DAY);
     sql.exec("DELETE FROM requests WHERE started < ?", now - 30 * DAY);
     sql.exec("DELETE FROM request_details WHERE started < ? OR id NOT IN (SELECT id FROM requests)", now - 7 * DAY);
     sql.exec("DELETE FROM tool_traces WHERE started < ? OR (started < ? AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.thread=tool_traces.thread AND r.turn_id=tool_traces.turn_id))", now - 30 * DAY, now - 3600_000);

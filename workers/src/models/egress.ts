@@ -37,8 +37,9 @@ export async function modelEgressDiagnostics(fetcher: typeof fetch = fetch) {
         ray: clean(response.headers.get("cf-ray")), ip: clean(fields.ip), country: clean(fields.loc), colo: clean(fields.colo),
         sharedWorkerAddress: fields.ip === "2a06:98c0:3600::103" };
     } catch (error) {
+      const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
       return { target: target.id, url: target.url, durationMs: Date.now() - startedAt,
-        error: error instanceof Error && error.message === "body_limit" ? "body_limit" : "request_failed" };
+        error: error instanceof Error && error.message === "body_limit" ? "body_limit" : timedOut ? "timeout" : "request_failed" };
     }
   }));
   return { checkedAt, executionContext: "ThreadDO/owner", authenticatedOpenAIRequest: false, probes };

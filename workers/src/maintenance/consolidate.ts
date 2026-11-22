@@ -7,6 +7,7 @@ import { formatBeijingTime } from "../memory/time";
 import type { MemoryRow } from "../memory/types";
 import type { MaintenanceContext } from "./index";
 import { MemoryAdminError } from "../memory/management";
+import { classifyError } from "../shared/diagnostics";
 import { generateProfileProposal } from "./profile-proposal";
 
 export const CONSOLIDATE_LAST_RUN_KEY = "maint:consolidate_last_run";
@@ -140,9 +141,14 @@ async function consolidate({ store, kv, complete, config, now }: MaintenanceCont
   const started = Date.now(), by = `consolidate:${batchId}`, nowSec = Math.floor(now / 1000);
   const report = { kind: "consolidate" as const, status: "ok" as "ok" | "failed", batchId, dedup: 0,
     conflicts: { pairs: 0, superseded: 0, coexist: 0, keep: 0, protected: 0 } as ConflictCounts, orphaned: 0, retired: 0,
-    proposal: null as string | null, tokens: { input: 0, output: 0 }, failed: [] as string[], ms: 0 };
+    proposal: null as string | null, tokens: { input: 0, output: 0 }, failed: [] as string[], failureReasons: {} as Record<string, string>, ms: 0 };
   const step = async (name: string, run: () => Promise<void>) => {
-    try { await run(); } catch { report.status = "failed"; report.failed.push(name); }
+    try { await run(); } catch (error) {
+      report.status = "failed";
+      report.failed.push(name);
+      const info = classifyError(error);
+      report.failureReasons[name] = info.code ?? info.errorName ?? "unknown";
+    }
   };
 
   await step("prune", () => store.db.run(`DELETE FROM memory_pair_checks WHERE NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = a_id AND m.status = 'active')
@@ -205,8 +211,9 @@ export async function runConsolidate(context: MaintenanceContext) {
       report.status === "failed" ? "failed" : "ok", Date.now(), JSON.stringify(report), batchId, store.ns);
     return report;
   } catch (error) {
+    const info = classifyError(error);
     await store.db.run("UPDATE memory_jobs SET status = 'failed', finished_at = ?, report_json = ? WHERE id = ? AND ns = ?",
-      Date.now(), JSON.stringify({ error: "consolidation_failed" }), batchId, store.ns);
+      Date.now(), JSON.stringify({ error: "consolidation_failed", ...(info.code ? { code: info.code } : {}), ...(info.errorName ? { errorName: info.errorName } : {}) }), batchId, store.ns);
     throw error;
   }
 }

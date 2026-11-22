@@ -117,5 +117,12 @@ export class McpConnection {
   }
 }
 export function safeError(error: unknown): McpConnectionError {
-  return error instanceof McpConnectionError ? error : new McpConnectionError("protocol_error", "protocol_error");
+  if (error instanceof McpConnectionError) return error;
+  if (error && typeof error === "object") {
+    const raw = error as { name?: unknown; code?: unknown; message?: unknown };
+    if (raw.name === "TimeoutError" || raw.name === "AbortError" || raw.code === -32001 || raw.message === "timeout") {
+      return new McpConnectionError("timeout", "timeout");
+    }
+  }
+  return new McpConnectionError("protocol_error", "protocol_error");
 }

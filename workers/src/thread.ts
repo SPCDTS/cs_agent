@@ -23,6 +23,7 @@ import { MESSAGE_SCHEMA, markMessageRecalled, recordMessage, recall, withReplyCo
 import type { MutableModels } from "@earendil-works/pi-ai/models";
 import { ModelAlarm, hydrateCatalogs, modelChange, modelEgressDiagnostics, openModels, remoteCredentials, sameSelection, type ProviderCatalogs } from "./models";
 import { captureModels } from "./requests/capture";
+import { logDiag } from "./shared/diagnostics";
 import { MEMORY_SUPPORT_SCHEMA, MEMORY_LIFECYCLE_TRIGGERS } from "./memory/lifecycle";
 import { MEMORY_SCHEMA } from "./memory/schema";
 import { MEMORY_RULE_SCHEMA } from "./memory/rule-schema";
@@ -335,12 +336,16 @@ export class ThreadDO extends DurableObject<Env> {
       let runtime: Runtime;
       try { runtime = await this.open(); }
       catch(error) {
+        const ns = await this.namespace();
+        logDiag(this.env, this.ctx, { event: "thread_runtime_open_failed", thread: ns, error });
         const rows=await this.database.all<InboundRow>("SELECT * FROM inbound WHERE status='queued' ORDER BY rowid LIMIT 20");
         for (const row of rows) {
           await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ? AND status = 'queued'", row.message_id);
           this.track(row.message_id, undefined);
-          await this.env.REGISTRY.getByName("main").recordTurn({scope:await this.namespace(),origin:isWeb(row)?"web":"qq",
-            outcome:error instanceof Error&&/auth|unauthorized|credential/i.test(error.message)?"auth_failed":"failed"}).catch(() => { console.error({ event: "turn_outcome_report_failed" }); });
+          await this.env.REGISTRY.getByName("main").recordTurn({scope:ns,origin:isWeb(row)?"web":"qq",
+            outcome:error instanceof Error&&/auth|unauthorized|credential/i.test(error.message)?"auth_failed":"failed"}).catch(err => {
+            logDiag(this.env, this.ctx, { event: "turn_outcome_report_failed", thread: ns, error: err });
+          });
         }
         return;
       }
@@ -399,7 +404,10 @@ export class ThreadDO extends DurableObject<Env> {
           }
           let submission: Submission | undefined;
           try { submission = await this.admit(runtime, row); }
-          catch { await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ?", row.message_id); }
+          catch (error) {
+            logDiag(this.env, this.ctx, { event: "thread_admit_failed", thread: await this.namespace(), turnId: row.turn_id ?? undefined, error, detail: { messageId: row.message_id, kind: row.kind } });
+            await this.database.run("UPDATE inbound SET status = 'failed' WHERE message_id = ?", row.message_id);
+          }
           this.track(row.message_id, submission);
         }
         const next = rows.find(row => profileOf(row) !== runtime.profile);
@@ -411,8 +419,8 @@ export class ThreadDO extends DurableObject<Env> {
         }
         await this.applyProfile(runtime, profileOf(next));
       }
-    }).catch(error => {
-      console.error({ event: "thread_pump_failed" });
+    }).catch(async error => {
+      logDiag(this.env, this.ctx, { event: "thread_pump_failed", thread: await this.namespace().catch(() => undefined), error });
       throw error;
     });
   }
@@ -444,12 +452,15 @@ export class ThreadDO extends DurableObject<Env> {
         if (await tx.get("SELECT 1 FROM extract_queue LIMIT 1")) await this.wakeBy(Date.now() + EXTRACT_ALARM_DELAY_MS);
         return row;
       });
-      if (row) await this.env.REGISTRY.getByName("main").recordTurn({scope:await this.namespace(),origin:isWeb(row)?"web":"qq",outcome:status==="done"?"ok":"failed"}).catch(() => { console.error({ event: "turn_outcome_report_failed" }); });
+      const ns = await this.namespace();
+      if (row) await this.env.REGISTRY.getByName("main").recordTurn({scope:ns,origin:isWeb(row)?"web":"qq",outcome:status==="done"?"ok":"failed"}).catch(err => {
+        logDiag(this.env, this.ctx, { event: "turn_outcome_report_failed", thread: ns, turnId: row.turn_id ?? undefined, error: err });
+      });
       if (row?.kind === "schedule") await this.reportScheduleRun(row, status, answer);
       if (row?.kind === "event") {
         const outcome = await this.eventStatus(row);
-        this.ctx.waitUntil(this.env.EVENTS.getByName("main").finishRun(messageId, outcome).catch(() => {
-          console.error({ event: "event_finish_report_failed", status: outcome });
+        this.ctx.waitUntil(this.env.EVENTS.getByName("main").finishRun(messageId, outcome).catch(err => {
+          logDiag(this.env, this.ctx, { event: "event_finish_report_failed", thread: ns, turnId: row.turn_id ?? undefined, error: err, detail: { status: outcome } });
         }));
       }
       if (await this.database.get("SELECT 1 FROM inbound WHERE status='queued' AND when_busy IS NULL LIMIT 1")) await this.requestPump();
@@ -736,9 +747,9 @@ export class ThreadDO extends DurableObject<Env> {
       await this.env.SCHEDULE.getByName("main").recordRun(key.scheduleId, { fire_key: key.fireKey, fire_at: key.fireAt, input_key: row.message_id,
         status: status === "failed" ? "failed" : sent ? "sent" : "silent", ...(status === "failed" ? { reason: "backend_failed" as const } : {}),
         sent, note, ended_at: Date.now() });
-    } catch {
+    } catch (error) {
       // ScheduleDO 下次触发前会经 scheduleRunOutcome 补查，这里只记日志。
-      console.error({ event: "schedule_record_failed", key: row.message_id });
+      logDiag(this.env, this.ctx, { event: "schedule_record_failed", thread: await this.namespace(), turnId: row.turn_id ?? undefined, error, detail: { key: row.message_id } });
     }
   }
 
@@ -871,8 +882,8 @@ export class ThreadDO extends DurableObject<Env> {
     });
     try {
       for (const command of this.alarmCommands.splice(0)) await command();
-      await this.subagents.expire(Date.now()).catch(error => {
-        console.error({ event: "subagent_expire_failed", error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
+      await this.subagents.expire(Date.now()).catch(async error => {
+        logDiag(this.env, this.ctx, { event: "subagent_expire_failed", thread: await this.namespace().catch(() => undefined), error });
       });
       if (requested !== undefined || await this.ctx.storage.get(RUNTIME_WAKE) !== undefined ||
           await this.database.get("SELECT 1 FROM inbound WHERE status='queued' LIMIT 1")) {

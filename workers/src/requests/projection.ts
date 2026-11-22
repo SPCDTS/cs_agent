@@ -1,6 +1,7 @@
 import { DurableObjectSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { MEMORY_SUPPORT_SCHEMA } from "../memory/lifecycle";
 import type { Env } from "../env";
+import { logDiag } from "../shared/diagnostics";
 
 // 只投影管理展示需要的表；不复制凭据、运行任务、工具恢复状态和完整请求快照。
 export const VIEW_TABLES = ["messages", "inbound", "outbox", "web_outputs", "session_state", "session_resets", "events", "subagents",
@@ -95,9 +96,10 @@ export class ProjectionPublisher {
 
   flush(): Promise<void> {
     if (this.flushing) this.rerun = true;
-    return this.flushing ??= this.drain().catch(async () => {
+    return this.flushing ??= this.drain().catch(async error => {
       if (!this.installed) return;
-      console.error({ event: "admin_projection_failed" });
+      const scope = await this.scope().catch(() => undefined);
+      logDiag(this.env, this.ctx, { event: "admin_projection_failed", thread: scope, error });
       this.retryAt = Date.now() + 5000;
       await this.wake(this.retryAt);
     }).finally(() => {

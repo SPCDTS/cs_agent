@@ -94,4 +94,20 @@ export default {
     const job = CRONS[controller.cron];
     if (job) ctx.waitUntil(job(env, controller.scheduledTime));
   },
+  async tail(events: TraceItem[], env: Env, ctx: ExecutionContext): Promise<void> {
+    const store = env.REQUESTS.getByName("main");
+    for (const item of events) {
+      if (!item.outcome || item.outcome === "ok" || "tailEvents" in (item.event ?? {})) continue;
+      const firstException = item.exceptions[0];
+      const errorName = firstException && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(firstException.name) ? firstException.name : undefined;
+      ctx.waitUntil(store.recordDiag({
+        at: item.eventTimestamp ?? Date.now(),
+        level: "error",
+        event: "platform_invocation_failed",
+        code: item.outcome,
+        ...(errorName ? { errorName } : {}),
+        ...(item.scriptVersion?.id ? { detail: { scriptVersion: item.scriptVersion.id.slice(0, 64) } } : {}),
+      }).catch(() => {}));
+    }
+  },
 } satisfies ExportedHandler<Env>;

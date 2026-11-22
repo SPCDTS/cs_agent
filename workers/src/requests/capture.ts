@@ -5,6 +5,7 @@ import { agentSearchOption, hostedSearchSteps } from "../models";
 import { argumentPreview } from "./tool-snapshot";
 import { snapshot, responseSnapshot, errorSummary, boundedText } from "./snapshot";
 import type { RequestBinding, RequestDetail, RequestScope } from "./types";
+import { classifyError } from "../shared/diagnostics";
 
 function hasCacheMetric(value: unknown, keys: string[]): boolean {
   if (!value || typeof value !== "object") return false;
@@ -35,9 +36,11 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
       detail = { request: { ...scope, purpose, ...(requestBinding ? { binding: requestBinding } : {}), id: crypto.randomUUID(), startedAt, endedAt: null, provider: model.provider, model: model.id,
         status: "running", contextWindow: model.contextWindow, inputTokens: null, outputTokens: null, cacheRead: null, cacheWrite: null,
         reasoningTokens: null, durationMs: null, contextMetrics: captured.analysis?.metrics }, context: captured };
-    } catch { console.error({ event: "request_capture_failed" }); return stream; }
+    } catch (error) { console.error({ event: "request_capture_failed", thread: scope.thread, actor: scope.actor, turnId: requestBinding?.turnId, ...classifyError(error) }); return stream; }
     const store = env.REQUESTS.getByName("main");
-    const save = (value: RequestDetail) => store.record(value).catch(() => { console.error({ event: "request_record_failed", id: value.request.id }); });
+    const save = (value: RequestDetail) => store.record(value).catch(error => {
+      console.error({ event: "request_record_failed", id: value.request.id, thread: scope.thread, turnId: requestBinding?.turnId, ...classifyError(error) });
+    });
     ctx.waitUntil((async () => {
       await save(detail);
       const { result, endedAt } = await terminal, u = result.usage;
@@ -52,7 +55,7 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
             callId, name: "web_search", startedAt, endedAt, argumentPreview: argumentPreview(action),
             status: item.status === "completed" ? "done" : item.status === "failed" ? "error" : "interrupted",
             arguments: boundedText(JSON.stringify(action, null, 2)), result: boundedText(JSON.stringify(result, null, 2)) })
-            .catch(() => console.error({ event: "tool_trace_failed", id: detail.request.id }));
+            .catch(error => console.error({ event: "tool_trace_failed", id: detail.request.id, thread: scope.thread, turnId: requestBinding.turnId, ...classifyError(error) }));
         }
       }
       await save({ ...detail, response: responseSnapshot(result), request: { ...detail.request, endedAt, durationMs: endedAt - startedAt,
@@ -63,7 +66,7 @@ export function captureModels(base: MutableModels, env: Env, ctx: Pick<DurableOb
         ...(measured ? { inputTokens: u.input + u.cacheRead + u.cacheWrite, outputTokens: u.output,
           cacheRead: cacheReported || u.cacheRead > 0 ? u.cacheRead : null, cacheWrite: cacheWriteReported || u.cacheWrite > 0 ? u.cacheWrite : null,
           reasoningTokens: u.reasoning ?? null } : {}) } });
-    })().catch(() => { console.error({ event: "request_capture_failed", id: detail.request.id }); }));
+    })().catch(error => { console.error({ event: "request_capture_failed", id: detail.request.id, thread: scope.thread, turnId: requestBinding?.turnId, ...classifyError(error) }); }));
     return stream;
   };
   const events = (notice: (event: unknown) => void, response: (status: number) => void, options?: StreamOptions) => ({

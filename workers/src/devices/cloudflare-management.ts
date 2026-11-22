@@ -19,7 +19,9 @@ async function cloudApi<T extends TSchema>(target: Target, path: string, schema:
   const res = await request(origin + '/client/v4/' + path, { method, headers: { Authorization: 'Bearer ' + target.token,
     'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
   if (res.status === 401 || res.status === 403) throw new Error('device_cloudflare_denied');
+  if (res.status === 429) throw new Error('device_cloudflare_rate_limited');
   if ([400, 404, 409, 422].includes(res.status)) throw new Error('device_cloudflare_rejected');
+  if (res.status >= 500) throw new Error('device_cloudflare_unavailable');
   const data: unknown = await res.json();
   if (!res.ok || !Check(Type.Object({ success: Type.Literal(true), result: Type.Unknown() }), data) || !Check(schema, data.result)) throw new Error('device_cloudflare_api');
   return data.result;

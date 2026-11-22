@@ -9,6 +9,7 @@ import { ownerIds, type InboundInput } from "../policy";
 import { GmailClient, type SendRequest } from "../gmail/client";
 import { errorKind, type GmailErrorKind } from "../gmail/http";
 import { GmailAuth } from "../gmail/oauth";
+import { logDiag } from "../shared/diagnostics";
 import { DEFAULT_SETTINGS, eventKey, normalizeEvent, parseSettings, quietRemaining, renderEventInput, suppressed,
   type EventRunStatus, type EventSource, type ExternalEvent, type HeldReason, type SourceSettings } from "./model";
 
@@ -113,8 +114,8 @@ export class EventsDO extends DurableObject<Env> {
       await this.ctx.storage.setAlarm(Date.now() + 1000);
       // An input paused after Thread enqueue has no held row. Wake its durable pump on edits/resume.
       const keys = this.sql.exec<{ input_key: string }>("SELECT DISTINCT input_key FROM github_receipt WHERE input_key IS NOT NULL AND state IN ('enqueued','suppressed') AND EXISTS (SELECT 1 FROM event_run r WHERE r.input_key=github_receipt.input_key AND r.status='queued') LIMIT 200").toArray();
-      this.ctx.waitUntil(Promise.all(keys.map(row => this.env.THREAD.getByName("owner").eventOutcome(row.input_key))).catch(() => {
-        console.error({ event: "github_resume_wake_failed" });
+      this.ctx.waitUntil(Promise.all(keys.map(row => this.env.THREAD.getByName("owner").eventOutcome(row.input_key))).catch(error => {
+        logDiag(this.env, this.ctx, { event: "github_resume_wake_failed", thread: "owner", error });
       }));
     }
     return result;
@@ -285,8 +286,8 @@ export class EventsDO extends DurableObject<Env> {
       text, routeText: "", time: Math.floor(run.delivered_at / 1000), mentionedSelf: false, replyToId: null, imageCount: 0 };
     if (id === "github" && rows.some(item => !this.github.ready(item.key))) return;
     try { await this.env.THREAD.getByName("owner").deliverEvent(input); }
-    catch {
-      console.error({ event: "event_delivery_failed", source: id, key: inputKey });
+    catch (error) {
+      logDiag(this.env, this.ctx, { event: "event_delivery_failed", thread: "owner", error, detail: { source: id, key: inputKey } });
       return;
     }
     this.sql.exec("DELETE FROM event_held WHERE input_key = ?", inputKey);
@@ -379,7 +380,7 @@ export class EventsDO extends DurableObject<Env> {
       const result = await this.gmail.watch(topic);
       this.sql.exec("INSERT OR REPLACE INTO gmail_watch (id, history_id, expiration) VALUES ('owner', ?, ?)", result.historyId, Number(result.expiration));
     } catch (error) {
-      console.error({ event: "gmail_watch_failed", code: errorKind(error) });
+      logDiag(this.env, this.ctx, { event: "gmail_watch_failed", thread: "owner", code: errorKind(error), error });
     }
   }
 
@@ -390,8 +391,8 @@ export class EventsDO extends DurableObject<Env> {
     if (last !== undefined && Date.now() - last < HOUR) return;
     await this.ctx.storage.put(key, Date.now());
     // 发送可能等 OneBot 回执十几秒，告警不能阻塞拉取与投递。
-    this.ctx.waitUntil(this.env.BRIDGE.getByName("napcat").sendPrivate(owner, text).then(() => {}, () => {
-      console.error({ event: "event_alert_failed", reason });
+    this.ctx.waitUntil(this.env.BRIDGE.getByName("napcat").sendPrivate(owner, text).then(() => {}, error => {
+      logDiag(this.env, this.ctx, { event: "event_alert_failed", thread: "owner", error, detail: { reason } });
     }));
   }
 

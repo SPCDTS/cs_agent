@@ -3,6 +3,7 @@ import type { Context, Message } from "@earendil-works/pi-ai";
 import { Check } from "typebox/value";
 import { CompactionPlan, type ContextHead } from "./context-types";
 import { messageKey, textOf } from "./snapshot";
+import { classifyError } from "../shared/diagnostics";
 
 export type ContextOrigin = { head?: ContextHead; tags: ReadonlyMap<string, { summary: boolean; phase?: "retained" | "added" }> };
 const size = (messages: readonly Message[]) => messages.reduce((n, message) => n + (message.role === "system" ? 0 : textOf(message).length), 0);
@@ -25,7 +26,7 @@ export function contextSource(storage: DurableObjectStorage, harness: () => Harn
         const plan: CompactionPlan = { firstKept: Number(selected.firstKept), selectedThrough: Math.max(...view.entries.map(entry => Number(entry.id))),
           startedAt: Date.now(), summarizedChars: size(selected.messages), summarizedMessages: count(selected.messages), retainedChars: size(retained), retainedMessages: count(retained) };
         await storage.put(PLAN_KEY, plan);
-      } catch { console.error({ event: "context_compaction_capture_failed" }); }
+      } catch (error) { console.error({ event: "context_compaction_capture_failed", ...classifyError(error) }); }
     } }),
     hook(GenerationTask, { beforeRequest: async (request, api, context) => {
       origin = undefined;
@@ -35,7 +36,7 @@ export function contextSource(storage: DurableObjectStorage, harness: () => Harn
         if (!view) return;
         const saved = await storage.get(PLAN_KEY);
         origin = contextOrigin(view, request.messages, Check(CompactionPlan, saved) ? saved : undefined);
-      } catch { console.error({ event: "context_origin_capture_failed" }); }
+      } catch (error) { console.error({ event: "context_origin_capture_failed", ...classifyError(error) }); }
     } }),
   ] });
   return { extension, origin: (_input: Context) => origin };

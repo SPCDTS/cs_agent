@@ -16,6 +16,7 @@ import { memoryDescriptions, memoryParameters } from "../memory/contracts";
 import { formatBeijingTime } from "../memory/time";
 import { PI_SAFETY_RULE, WEB_RULE } from "../prompt";
 import { stripProviderMarkup } from "../send-clean";
+import { classifyError, logDiag } from "../shared/diagnostics";
 import { createSubagentCapabilityHost, installDelegatedCapabilities } from "../mcp/delegated";
 import { RETENTION_MS, subagentName, type SubagentMeta, type SubagentStart, type SubagentState } from "./model";
 import { responseDescription, shortSummary, subagentActivity, SUBAGENT_PROGRESS_RULE } from "./activity";
@@ -90,8 +91,8 @@ export class SubagentDO extends DurableObject<Env> {
   }
 
   private publishActivity(meta: SubagentMeta): void {
-    this.ctx.waitUntil(this.env.REQUESTS.getByName("main").recordAgent(subagentActivity(meta)).catch(() => {
-      console.error({ event: "subagent_activity_failed", id: meta.id });
+    this.ctx.waitUntil(this.env.REQUESTS.getByName("main").recordAgent(subagentActivity(meta)).catch(error => {
+      console.error({ event: "subagent_activity_failed", thread: meta.parent, actor: meta.id, ...classifyError(error) });
     }));
   }
 
@@ -205,7 +206,8 @@ export class SubagentDO extends DurableObject<Env> {
       try { while (await this.step()) { /* 逐项处理到没有可做的 */ } }
       catch (error) {
         // 汇报送不到或模型调用出错时停在原地，由心跳 alarm 重试。
-        console.error({ event: "subagent_step_failed", error: error instanceof Error ? error.message.slice(0, 160) : "unknown" });
+        const meta = await this.meta().catch(() => undefined);
+        logDiag(this.env, this.ctx, { event: "subagent_step_failed", thread: meta?.parent, actor: meta?.id, error });
         return;
       }
     }

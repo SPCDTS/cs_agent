@@ -4,8 +4,9 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { McpLimits } from "./config";
 import { boundedJson, type compileMcpSchema } from "./schema";
 
-export function mcpFailure(code: string): ToolExecutionResult {
-  return { isError: true, output: [{ type: "text", text: `${code}：MCP 调用未成功。${["outcome_unknown", "result_rejected", "remote_error"].includes(code) ? "远端可能已执行，请先查询实际状态，不要自动重复。" : "请检查权限、登录或目录后再操作。"}` }] };
+export function mcpFailure(code: string, reason?: string): ToolExecutionResult {
+  const label = reason && reason !== code ? `${code}（${reason}）` : code;
+  return { isError: true, output: [{ type: "text", text: `${label}：MCP 调用未成功。${["outcome_unknown", "result_rejected", "remote_error"].includes(code) ? "远端可能已执行，请先查询实际状态，不要自动重复。" : "请检查权限、登录或目录后再操作。"}` }] };
 }
 export function boundedMcpText(value: string): string {
   return value.length <= 8000 ? value : value.slice(0, 7970).replace(/[\uD800-\uDBFF]$/, "") + "\n[MCP 文本已截断至 8000 字以内]";
